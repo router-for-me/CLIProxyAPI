@@ -20,7 +20,6 @@ import (
 const (
 	defaultResponsesAuthAffinityTTL        = 6 * time.Hour
 	defaultResponsesAuthAffinityMaxEntries = 8192
-	defaultResponsesAuthAffinityStoreFile  = "cliproxy_responses_auth_affinity.json"
 )
 
 type responsesAuthAffinityEntry struct {
@@ -72,14 +71,14 @@ func newResponsesAuthAffinityStoreWithPersistence(ttl time.Duration, maxEntries 
 }
 
 func resolveResponsesAffinityPersistPath() string {
-	if strings.EqualFold(strings.TrimSpace(os.Getenv("CLIPROXY_RESPONSES_AFFINITY_PERSIST")), "false") ||
-		strings.EqualFold(strings.TrimSpace(os.Getenv("CLIPROXY_RESPONSES_AFFINITY_PERSIST")), "0") {
+	persistSetting := strings.TrimSpace(os.Getenv("CLIPROXY_RESPONSES_AFFINITY_PERSIST"))
+	if strings.EqualFold(persistSetting, "false") || strings.EqualFold(persistSetting, "0") {
 		return ""
 	}
 	if explicit := strings.TrimSpace(os.Getenv("CLIPROXY_RESPONSES_AFFINITY_PATH")); explicit != "" {
 		return explicit
 	}
-	return filepath.Join(os.TempDir(), defaultResponsesAuthAffinityStoreFile)
+	return ""
 }
 
 var responsesAuthAffinity = newResponsesAuthAffinityStore(defaultResponsesAuthAffinityTTL, defaultResponsesAuthAffinityMaxEntries)

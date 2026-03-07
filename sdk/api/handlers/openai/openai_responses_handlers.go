@@ -211,6 +211,9 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 
 	cliCancel, dataChan, upstreamHeaders, errChan, selectedAuthIDPtr, pinnedAuthID := startStream(rawJSON, false)
 	recoveryAttempted := false
+	pendingChunks := make([][]byte, 0, 4)
+	streamFlushed := false
+	assistantContentStarted := false
 
 	setSSEHeaders := func() {
 		c.Header("Content-Type", "text/event-stream")
@@ -219,7 +222,100 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 		c.Header("Access-Control-Allow-Origin", "*")
 	}
 
-	// Peek at the first chunk
+	writeSSEChunk := func(chunk []byte) {
+		if bytes.HasPrefix(chunk, []byte("event:")) {
+			_, _ = c.Writer.Write([]byte("\n"))
+		}
+		_, _ = c.Writer.Write(chunk)
+		_, _ = c.Writer.Write([]byte("\n"))
+	}
+
+	flushPendingChunks := func() {
+		if streamFlushed {
+			return
+		}
+		setSSEHeaders()
+		handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+		for _, chunk := range pendingChunks {
+			writeSSEChunk(chunk)
+		}
+		flusher.Flush()
+		pendingChunks = pendingChunks[:0]
+		streamFlushed = true
+	}
+
+	bufferOrWriteChunk := func(chunk []byte) {
+		rememberResponsesAuthAffinityFromSSE(strings.TrimSpace(*selectedAuthIDPtr), chunk)
+		if responsesStreamChunkHasVisibleAssistantContent(chunk) {
+			assistantContentStarted = true
+		}
+
+		if streamFlushed {
+			writeSSEChunk(chunk)
+			flusher.Flush()
+			return
+		}
+
+		pendingChunks = append(pendingChunks, append([]byte(nil), chunk...))
+		if assistantContentStarted || responsesStreamChunkCompletesResponse(chunk) {
+			flushPendingChunks()
+		}
+	}
+
+	resetBufferedStreamState := func() {
+		pendingChunks = pendingChunks[:0]
+		streamFlushed = false
+		assistantContentStarted = false
+	}
+
+	tryRecover := func(errMsg *interfaces.ErrorMessage) bool {
+		if recoveryAttempted || streamFlushed || !hasEncryptedContentContext(rawJSON) {
+			return false
+		}
+
+		shouldRecover := false
+		forceUnpinned := false
+		if pinnedAuthID != "" {
+			shouldRecover = true
+			forceUnpinned = true
+		} else if isInvalidEncryptedContentError(errMsg) {
+			shouldRecover = true
+			forceUnpinned = true
+		}
+		if !shouldRecover {
+			return false
+		}
+
+		sanitized, changed := stripEncryptedReasoningInput(rawJSON)
+		if !changed {
+			return false
+		}
+
+		recoveryAttempted = true
+		rawJSON = sanitized
+		resetBufferedStreamState()
+		if errMsg != nil {
+			cliCancel(errMsg.Error)
+		} else {
+			cliCancel(nil)
+		}
+		cliCancel, dataChan, upstreamHeaders, errChan, selectedAuthIDPtr, pinnedAuthID = startStream(rawJSON, forceUnpinned)
+		return true
+	}
+
+	finishStream := func() {
+		if !streamFlushed {
+			setSSEHeaders()
+			handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+			if len(pendingChunks) > 0 {
+				flushPendingChunks()
+			}
+		}
+		_, _ = c.Writer.Write([]byte("\n"))
+		flusher.Flush()
+		cliCancel(nil)
+	}
+
 	for {
 		select {
 		case <-c.Request.Context().Done():
@@ -227,34 +323,26 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 			return
 		case errMsg, ok := <-errChan:
 			if !ok {
-				// Err channel closed cleanly; wait for data channel.
 				errChan = nil
 				continue
 			}
-			if !recoveryAttempted && hasEncryptedContentContext(rawJSON) {
-				shouldRecover := false
-				forceUnpinned := false
-				if pinnedAuthID != "" {
-					// Pinned turn failed (rate limit, unavailable, etc.); recover by unpinning.
-					shouldRecover = true
-					forceUnpinned = true
-				} else if isInvalidEncryptedContentError(errMsg) {
-					// Unpinned turn still hit encrypted-content mismatch; recover by stripping once.
-					shouldRecover = true
-					forceUnpinned = true
-				}
-				if shouldRecover {
-					if sanitized, changed := stripEncryptedReasoningInput(rawJSON); changed {
-						recoveryAttempted = true
-						rawJSON = sanitized
-						cliCancel(errMsg.Error)
-						cliCancel, dataChan, upstreamHeaders, errChan, selectedAuthIDPtr, pinnedAuthID = startStream(rawJSON, forceUnpinned)
-						continue
-					}
-				}
+			if tryRecover(errMsg) {
+				continue
 			}
-			// Upstream failed immediately. Return proper error status and JSON.
-			h.WriteErrorResponse(c, errMsg)
+
+			if !streamFlushed {
+				h.WriteErrorResponse(c, errMsg)
+				if errMsg != nil {
+					cliCancel(errMsg.Error)
+				} else {
+					cliCancel(nil)
+				}
+				return
+			}
+
+			recoverableHint := !assistantContentStarted && hasEncryptedContentContext(rawJSON) && isInvalidEncryptedContentError(errMsg)
+			h.writeResponsesStreamTerminalError(c, errMsg, recoverableHint)
+			flusher.Flush()
 			if errMsg != nil {
 				cliCancel(errMsg.Error)
 			} else {
@@ -263,130 +351,40 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 			return
 		case chunk, ok := <-dataChan:
 			if !ok {
-				// Stream closed without data? Send headers and done.
-				setSSEHeaders()
-				handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
-				_, _ = c.Writer.Write([]byte("\n"))
-				flusher.Flush()
-				cliCancel(nil)
+				if errChan != nil {
+					select {
+					case terminal, okErr := <-errChan:
+						if okErr && terminal != nil {
+							if tryRecover(terminal) {
+								continue
+							}
+							if !streamFlushed {
+								h.WriteErrorResponse(c, terminal)
+								cliCancel(terminal.Error)
+								return
+							}
+							recoverableHint := !assistantContentStarted && hasEncryptedContentContext(rawJSON) && isInvalidEncryptedContentError(terminal)
+							h.writeResponsesStreamTerminalError(c, terminal, recoverableHint)
+							flusher.Flush()
+							cliCancel(terminal.Error)
+							return
+						}
+						if !okErr {
+							errChan = nil
+						}
+					default:
+					}
+				}
+				finishStream()
 				return
 			}
 
-			// Success! Set headers.
-			setSSEHeaders()
-			handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
-
-			// Write first chunk logic (matching forwardResponsesStream)
-			rememberResponsesAuthAffinityFromSSE(strings.TrimSpace(*selectedAuthIDPtr), chunk)
-			if bytes.HasPrefix(chunk, []byte("event:")) {
-				_, _ = c.Writer.Write([]byte("\n"))
-			}
-			_, _ = c.Writer.Write(chunk)
-			_, _ = c.Writer.Write([]byte("\n"))
-			flusher.Flush()
-
-			// Continue streaming with guarded one-shot recovery for encrypted context
-			// if the stream fails before any assistant output has been emitted.
-			contentStarted := responsesStreamChunkHasAssistantContent(chunk)
-			for {
-				select {
-				case <-c.Request.Context().Done():
-					cliCancel(c.Request.Context().Err())
-					return
-				case errMsg, ok := <-errChan:
-					if !ok {
-						errChan = nil
-						continue
-					}
-					shouldRecover := false
-					forceUnpinned := false
-					if !recoveryAttempted && !contentStarted && hasEncryptedContentContext(rawJSON) {
-						if pinnedAuthID != "" {
-							// Pinned stream failed after bootstrap but before content output.
-							shouldRecover = true
-							forceUnpinned = true
-						} else if isInvalidEncryptedContentError(errMsg) {
-							// Unpinned stream still hit encrypted-content mismatch.
-							shouldRecover = true
-							forceUnpinned = true
-						}
-					}
-					if shouldRecover {
-						if sanitized, changed := stripEncryptedReasoningInput(rawJSON); changed {
-							recoveryAttempted = true
-							rawJSON = sanitized
-							cliCancel(errMsg.Error)
-							cliCancel, dataChan, _, errChan, selectedAuthIDPtr, pinnedAuthID = startStream(rawJSON, forceUnpinned)
-							continue
-						}
-					}
-
-					recoverableHint := !contentStarted && hasEncryptedContentContext(rawJSON) && isInvalidEncryptedContentError(errMsg)
-					h.writeResponsesStreamTerminalError(c, errMsg, recoverableHint)
-					flusher.Flush()
-					if errMsg != nil {
-						cliCancel(errMsg.Error)
-					} else {
-						cliCancel(nil)
-					}
-					return
-				case next, ok := <-dataChan:
-					if !ok {
-						if errChan != nil {
-							select {
-							case terminal, okErr := <-errChan:
-								if okErr && terminal != nil {
-									shouldRecover := false
-									forceUnpinned := false
-									if !recoveryAttempted && !contentStarted && hasEncryptedContentContext(rawJSON) {
-										if pinnedAuthID != "" {
-											shouldRecover = true
-											forceUnpinned = true
-										} else if isInvalidEncryptedContentError(terminal) {
-											shouldRecover = true
-											forceUnpinned = true
-										}
-									}
-									if shouldRecover {
-										if sanitized, changed := stripEncryptedReasoningInput(rawJSON); changed {
-											recoveryAttempted = true
-											rawJSON = sanitized
-											cliCancel(terminal.Error)
-											cliCancel, dataChan, _, errChan, selectedAuthIDPtr, pinnedAuthID = startStream(rawJSON, forceUnpinned)
-											continue
-										}
-									}
-									recoverableHint := !contentStarted && hasEncryptedContentContext(rawJSON) && isInvalidEncryptedContentError(terminal)
-									h.writeResponsesStreamTerminalError(c, terminal, recoverableHint)
-									flusher.Flush()
-									cliCancel(terminal.Error)
-									return
-								}
-							default:
-							}
-						}
-						_, _ = c.Writer.Write([]byte("\n"))
-						flusher.Flush()
-						cliCancel(nil)
-						return
-					}
-					rememberResponsesAuthAffinityFromSSE(strings.TrimSpace(*selectedAuthIDPtr), next)
-					if responsesStreamChunkHasAssistantContent(next) {
-						contentStarted = true
-					}
-					if bytes.HasPrefix(next, []byte("event:")) {
-						_, _ = c.Writer.Write([]byte("\n"))
-					}
-					_, _ = c.Writer.Write(next)
-					_, _ = c.Writer.Write([]byte("\n"))
-					flusher.Flush()
-				}
-			}
+			bufferOrWriteChunk(chunk)
 		}
 	}
 }
 
-func responsesStreamChunkHasAssistantContent(chunk []byte) bool {
+func responsesStreamChunkHasVisibleAssistantContent(chunk []byte) bool {
 	for _, line := range bytes.Split(chunk, []byte("\n")) {
 		line = bytes.TrimSpace(line)
 		if len(line) == 0 || !bytes.HasPrefix(line, []byte("data:")) {
@@ -399,19 +397,30 @@ func responsesStreamChunkHasAssistantContent(chunk []byte) bool {
 		eventType := strings.TrimSpace(gjson.GetBytes(payload, "type").String())
 		switch {
 		case strings.HasPrefix(eventType, "response.output_text."):
-			return true
+			if strings.TrimSpace(gjson.GetBytes(payload, "delta").String()) != "" || strings.TrimSpace(gjson.GetBytes(payload, "text").String()) != "" {
+				return true
+			}
 		case strings.HasPrefix(eventType, "response.refusal."):
 			return true
 		case strings.HasPrefix(eventType, "response.audio."):
 			return true
-		case eventType == "response.output_item.added":
-			if strings.EqualFold(strings.TrimSpace(gjson.GetBytes(payload, "item.type").String()), "message") {
-				return true
-			}
-		case eventType == "response.completed":
-			if out := gjson.GetBytes(payload, "response.output"); out.Exists() && out.IsArray() && len(out.Array()) > 0 {
-				return true
-			}
+		}
+	}
+	return false
+}
+
+func responsesStreamChunkCompletesResponse(chunk []byte) bool {
+	for _, line := range bytes.Split(chunk, []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if len(line) == 0 || !bytes.HasPrefix(line, []byte("data:")) {
+			continue
+		}
+		payload := bytes.TrimSpace(line[5:])
+		if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) || !gjson.ValidBytes(payload) {
+			continue
+		}
+		if strings.TrimSpace(gjson.GetBytes(payload, "type").String()) == "response.completed" {
+			return true
 		}
 	}
 	return false

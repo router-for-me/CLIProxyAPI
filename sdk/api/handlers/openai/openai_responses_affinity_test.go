@@ -50,6 +50,7 @@ type responsesAffinityExecutor struct {
 	failOriginAfterFirst            bool
 	streamFailOriginAfterFirst      bool
 	streamFailOriginAfterFirstChunk bool
+	streamFailOriginAfterMessageAdd bool
 	failWhenPreviousResponseID      bool
 }
 
@@ -121,6 +122,7 @@ func (e *responsesAffinityExecutor) ExecuteStream(_ context.Context, auth *corea
 	originAuth := e.originAuthID
 	failOrigin := e.streamFailOriginAfterFirst
 	failOriginAfterFirstChunk := e.streamFailOriginAfterFirstChunk
+	failOriginAfterMessageAdd := e.streamFailOriginAfterMessageAdd
 	respEncrypted := e.responseEncryptedContent
 	e.mu.Unlock()
 
@@ -134,6 +136,20 @@ func (e *responsesAffinityExecutor) ExecuteStream(_ context.Context, auth *corea
 		ch := make(chan coreexecutor.StreamChunk, 2)
 		ch <- coreexecutor.StreamChunk{
 			Payload: []byte(fmt.Sprintf("data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-stream-%s\"}}\n\n", authID)),
+		}
+		ch <- coreexecutor.StreamChunk{
+			Err: invalidEncryptedErr{
+				msg: `{"error":{"message":"The encrypted content could not be verified. Reason: Encrypted content could not be decrypted or parsed.","type":"invalid_request_error","code":"invalid_encrypted_content"}}`,
+			},
+		}
+		close(ch)
+		return &coreexecutor.StreamResult{Chunks: ch}, nil
+	}
+
+	if failOriginAfterMessageAdd && originAuth != "" && authID == originAuth && strings.Contains(payload, `"previous_response_id"`) {
+		ch := make(chan coreexecutor.StreamChunk, 2)
+		ch <- coreexecutor.StreamChunk{
+			Payload: []byte(fmt.Sprintf("data: {\"type\":\"response.output_item.added\",\"item\":{\"id\":\"msg-stream-%s\",\"type\":\"message\",\"status\":\"in_progress\",\"content\":[],\"role\":\"assistant\"}}\n\n", authID)),
 		}
 		ch <- coreexecutor.StreamChunk{
 			Err: invalidEncryptedErr{
@@ -509,7 +525,7 @@ func TestResponsesStreamingPostFirstChunkInvalidEncryptedFallsBackWhenNoContentY
 
 	executor := &responsesAffinityExecutor{
 		responseEncryptedContent:        "enc-stream-post-first",
-		streamFailOriginAfterFirstChunk: true,
+		streamFailOriginAfterMessageAdd: true,
 	}
 	router := setupResponsesAffinityRouter(t, executor, "auth1", "auth2")
 
@@ -534,6 +550,9 @@ func TestResponsesStreamingPostFirstChunkInvalidEncryptedFallsBackWhenNoContentY
 	}
 	if strings.Contains(streamResp.Body.String(), `"type":"error"`) {
 		t.Fatalf("did not expect terminal error chunk after successful post-first recovery, body=%s", streamResp.Body.String())
+	}
+	if strings.Contains(streamResp.Body.String(), `msg-stream-auth1`) {
+		t.Fatalf("did not expect buffered first-attempt lifecycle event to leak into retried stream, body=%s", streamResp.Body.String())
 	}
 
 	calls := executor.StreamCalls()
@@ -567,5 +586,24 @@ func TestResponsesAffinityStorePersistsAcrossRestart(t *testing.T) {
 	}
 	if got, ok := reloaded.lookupEncrypted("enc-persist"); !ok || got != "auth-persist" {
 		t.Fatalf("lookupEncrypted after restart = (%q,%v), want (%q,true)", got, ok, "auth-persist")
+	}
+}
+
+func TestResolveResponsesAffinityPersistPathDefaultsDisabled(t *testing.T) {
+	t.Setenv("CLIPROXY_RESPONSES_AFFINITY_PERSIST", "")
+	t.Setenv("CLIPROXY_RESPONSES_AFFINITY_PATH", "")
+
+	if got := resolveResponsesAffinityPersistPath(); got != "" {
+		t.Fatalf("resolveResponsesAffinityPersistPath() = %q, want empty default", got)
+	}
+}
+
+func TestResolveResponsesAffinityPersistPathUsesExplicitPath(t *testing.T) {
+	expected := filepath.Join(t.TempDir(), "responses_affinity.json")
+	t.Setenv("CLIPROXY_RESPONSES_AFFINITY_PERSIST", "true")
+	t.Setenv("CLIPROXY_RESPONSES_AFFINITY_PATH", expected)
+
+	if got := resolveResponsesAffinityPersistPath(); got != expected {
+		t.Fatalf("resolveResponsesAffinityPersistPath() = %q, want %q", got, expected)
 	}
 }
