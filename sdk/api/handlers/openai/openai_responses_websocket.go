@@ -26,7 +26,6 @@ const (
 	wsRequestTypeAppend  = "response.append"
 	wsEventTypeError     = "error"
 	wsEventTypeCompleted = "response.completed"
-	wsEventTypeDone      = "response.done"
 	wsDoneMarker         = "[DONE]"
 	wsTurnStateHeader    = "x-codex-turn-state"
 	wsRequestBodyKey     = "REQUEST_BODY_OVERRIDE"
@@ -469,9 +468,6 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 			for i := range payloads {
 				eventType := gjson.GetBytes(payloads[i], "type").String()
 				if eventType == wsEventTypeCompleted {
-					// log.Infof("replace %s with %s", wsEventTypeCompleted, wsEventTypeDone)
-					payloads[i], _ = sjson.SetBytes(payloads[i], "type", wsEventTypeDone)
-
 					completed = true
 					completedOutput = responseCompletedOutputFromPayload(payloads[i])
 				}
