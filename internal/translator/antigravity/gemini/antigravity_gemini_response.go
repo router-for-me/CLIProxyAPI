@@ -41,6 +41,7 @@ func ConvertAntigravityResponseToGemini(ctx context.Context, _ string, originalR
 			responseResult := gjson.GetBytes(rawJSON, "response")
 			if responseResult.Exists() {
 				chunk = []byte(responseResult.Raw)
+				chunk = restoreUsageMetadata(chunk)
 			}
 		} else {
 			chunkTemplate := "[]"
@@ -76,11 +77,24 @@ func ConvertAntigravityResponseToGemini(ctx context.Context, _ string, originalR
 func ConvertAntigravityResponseToGeminiNonStream(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) string {
 	responseResult := gjson.GetBytes(rawJSON, "response")
 	if responseResult.Exists() {
-		return responseResult.Raw
+		chunk := restoreUsageMetadata([]byte(responseResult.Raw))
+		return string(chunk)
 	}
 	return string(rawJSON)
 }
 
 func GeminiTokenCount(ctx context.Context, count int64) string {
 	return fmt.Sprintf(`{"totalTokens":%d,"promptTokensDetails":[{"modality":"TEXT","tokenCount":%d}]}`, count, count)
+}
+
+// restoreUsageMetadata renames cpaUsageMetadata back to usageMetadata.
+// The executor renames usageMetadata to cpaUsageMetadata in non-terminal chunks
+// to preserve usage data while hiding it from clients that don't expect it.
+// When returning standard Gemini API format, we must restore the original name.
+func restoreUsageMetadata(chunk []byte) []byte {
+	if cpaUsage := gjson.GetBytes(chunk, "cpaUsageMetadata"); cpaUsage.Exists() {
+		chunk, _ = sjson.SetRawBytes(chunk, "usageMetadata", []byte(cpaUsage.Raw))
+		chunk, _ = sjson.DeleteBytes(chunk, "cpaUsageMetadata")
+	}
+	return chunk
 }

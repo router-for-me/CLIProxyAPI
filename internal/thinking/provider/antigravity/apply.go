@@ -94,8 +94,10 @@ func (a *Applier) applyCompatible(body []byte, config thinking.ThinkingConfig, m
 }
 
 func (a *Applier) applyLevelFormat(body []byte, config thinking.ThinkingConfig) ([]byte, error) {
-	// Remove conflicting field to avoid both thinkingLevel and thinkingBudget in output
+	// Remove conflicting fields to avoid both thinkingLevel and thinkingBudget in output
 	result, _ := sjson.DeleteBytes(body, "request.generationConfig.thinkingConfig.thinkingBudget")
+	result, _ = sjson.DeleteBytes(result, "request.generationConfig.thinkingConfig.thinking_budget")
+	result, _ = sjson.DeleteBytes(result, "request.generationConfig.thinkingConfig.thinking_level")
 	// Normalize includeThoughts field name to avoid oneof conflicts in upstream JSON parsing.
 	result, _ = sjson.DeleteBytes(result, "request.generationConfig.thinkingConfig.include_thoughts")
 
@@ -114,33 +116,66 @@ func (a *Applier) applyLevelFormat(body []byte, config thinking.ThinkingConfig) 
 
 	level := string(config.Level)
 	result, _ = sjson.SetBytes(result, "request.generationConfig.thinkingConfig.thinkingLevel", level)
-	result, _ = sjson.SetBytes(result, "request.generationConfig.thinkingConfig.includeThoughts", true)
+
+	// Respect user's explicit includeThoughts setting from original body; default to true if not set
+	// Support both camelCase and snake_case variants
+	includeThoughts := true
+	if inc := gjson.GetBytes(body, "request.generationConfig.thinkingConfig.includeThoughts"); inc.Exists() {
+		includeThoughts = inc.Bool()
+	} else if inc := gjson.GetBytes(body, "request.generationConfig.thinkingConfig.include_thoughts"); inc.Exists() {
+		includeThoughts = inc.Bool()
+	}
+	result, _ = sjson.SetBytes(result, "request.generationConfig.thinkingConfig.includeThoughts", includeThoughts)
 	return result, nil
 }
 
 func (a *Applier) applyBudgetFormat(body []byte, config thinking.ThinkingConfig, modelInfo *registry.ModelInfo, isClaude bool) ([]byte, error) {
-	// Remove conflicting field to avoid both thinkingLevel and thinkingBudget in output
+	// Remove conflicting fields to avoid both thinkingLevel and thinkingBudget in output
 	result, _ := sjson.DeleteBytes(body, "request.generationConfig.thinkingConfig.thinkingLevel")
+	result, _ = sjson.DeleteBytes(result, "request.generationConfig.thinkingConfig.thinking_level")
+	result, _ = sjson.DeleteBytes(result, "request.generationConfig.thinkingConfig.thinking_budget")
 	// Normalize includeThoughts field name to avoid oneof conflicts in upstream JSON parsing.
 	result, _ = sjson.DeleteBytes(result, "request.generationConfig.thinkingConfig.include_thoughts")
 
 	budget := config.Budget
-	includeThoughts := false
-	switch config.Mode {
-	case thinking.ModeNone:
-		includeThoughts = false
-	case thinking.ModeAuto:
-		includeThoughts = true
-	default:
-		includeThoughts = budget > 0
-	}
 
-	// Apply Claude-specific constraints
+	// Apply Claude-specific constraints first to get the final budget value
 	if isClaude && modelInfo != nil {
 		budget, result = a.normalizeClaudeBudget(budget, result, modelInfo)
 		// Check if budget was removed entirely
 		if budget == -2 {
 			return result, nil
+		}
+	}
+
+	// For ModeNone, always set includeThoughts to false regardless of user setting.
+	// This ensures that when user requests budget=0 (disable thinking output),
+	// the includeThoughts is correctly set to false even if budget is clamped to min.
+	if config.Mode == thinking.ModeNone {
+		result, _ = sjson.SetBytes(result, "request.generationConfig.thinkingConfig.thinkingBudget", budget)
+		result, _ = sjson.SetBytes(result, "request.generationConfig.thinkingConfig.includeThoughts", false)
+		return result, nil
+	}
+
+	// Determine includeThoughts: respect user's explicit setting from original body if provided
+	// Support both camelCase and snake_case variants
+	var includeThoughts bool
+	var userSetIncludeThoughts bool
+	if inc := gjson.GetBytes(body, "request.generationConfig.thinkingConfig.includeThoughts"); inc.Exists() {
+		includeThoughts = inc.Bool()
+		userSetIncludeThoughts = true
+	} else if inc := gjson.GetBytes(body, "request.generationConfig.thinkingConfig.include_thoughts"); inc.Exists() {
+		includeThoughts = inc.Bool()
+		userSetIncludeThoughts = true
+	}
+
+	if !userSetIncludeThoughts {
+		// No explicit setting, use default logic based on mode
+		switch config.Mode {
+		case thinking.ModeAuto:
+			includeThoughts = true
+		default:
+			includeThoughts = budget > 0
 		}
 	}
 

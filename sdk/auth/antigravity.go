@@ -28,8 +28,7 @@ func (AntigravityAuthenticator) Provider() string { return "antigravity" }
 
 // RefreshLead instructs the manager to refresh five minutes before expiry.
 func (AntigravityAuthenticator) RefreshLead() *time.Duration {
-	lead := 5 * time.Minute
-	return &lead
+	return new(5 * time.Minute)
 }
 
 // Login launches a local OAuth flow to obtain antigravity tokens and persists them.

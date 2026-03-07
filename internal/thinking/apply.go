@@ -18,6 +18,7 @@ var providerAppliers = map[string]ProviderApplier{
 	"codex":       nil,
 	"iflow":       nil,
 	"antigravity": nil,
+	"kimi":        nil,
 }
 
 // GetProviderApplier returns the ProviderApplier for the given provider name.
@@ -292,7 +293,7 @@ func normalizeUserDefinedConfig(config ThinkingConfig, fromFormat, toFormat stri
 	if config.Mode != ModeLevel {
 		return config
 	}
-	if !isBudgetBasedProvider(toFormat) || !isLevelBasedProvider(fromFormat) {
+	if !isBudgetCapableProvider(toFormat) {
 		return config
 	}
 	budget, ok := ConvertLevelToBudget(string(config.Level))
@@ -326,6 +327,9 @@ func extractThinkingConfig(body []byte, provider string) ThinkingConfig {
 			return config
 		}
 		return extractOpenAIConfig(body)
+	case "kimi":
+		// Kimi uses OpenAI-compatible reasoning_effort format
+		return extractOpenAIConfig(body)
 	default:
 		return ThinkingConfig{}
 	}
@@ -348,6 +352,26 @@ func extractClaudeConfig(body []byte) ThinkingConfig {
 	thinkingType := gjson.GetBytes(body, "thinking.type").String()
 	if thinkingType == "disabled" {
 		return ThinkingConfig{Mode: ModeNone, Budget: 0}
+	}
+	if thinkingType == "adaptive" || thinkingType == "auto" {
+		// Claude adaptive thinking uses output_config.effort (low/medium/high/max).
+		// We only treat it as a thinking config when effort is explicitly present;
+		// otherwise we passthrough and let upstream defaults apply.
+		if effort := gjson.GetBytes(body, "output_config.effort"); effort.Exists() && effort.Type == gjson.String {
+			value := strings.ToLower(strings.TrimSpace(effort.String()))
+			if value == "" {
+				return ThinkingConfig{}
+			}
+			switch value {
+			case "none":
+				return ThinkingConfig{Mode: ModeNone, Budget: 0}
+			case "auto":
+				return ThinkingConfig{Mode: ModeAuto, Budget: -1}
+			default:
+				return ThinkingConfig{Mode: ModeLevel, Level: ThinkingLevel(value)}
+			}
+		}
+		return ThinkingConfig{}
 	}
 
 	// Check budget_tokens
@@ -388,7 +412,12 @@ func extractGeminiConfig(body []byte, provider string) ThinkingConfig {
 	}
 
 	// Check thinkingLevel first (Gemini 3 format takes precedence)
-	if level := gjson.GetBytes(body, prefix+".thinkingLevel"); level.Exists() {
+	level := gjson.GetBytes(body, prefix+".thinkingLevel")
+	if !level.Exists() {
+		// Google official Gemini Python SDK sends snake_case field names
+		level = gjson.GetBytes(body, prefix+".thinking_level")
+	}
+	if level.Exists() {
 		value := level.String()
 		switch value {
 		case "none":
@@ -401,7 +430,12 @@ func extractGeminiConfig(body []byte, provider string) ThinkingConfig {
 	}
 
 	// Check thinkingBudget (Gemini 2.5 format)
-	if budget := gjson.GetBytes(body, prefix+".thinkingBudget"); budget.Exists() {
+	budget := gjson.GetBytes(body, prefix+".thinkingBudget")
+	if !budget.Exists() {
+		// Google official Gemini Python SDK sends snake_case field names
+		budget = gjson.GetBytes(body, prefix+".thinking_budget")
+	}
+	if budget.Exists() {
 		value := int(budget.Int())
 		switch value {
 		case 0:

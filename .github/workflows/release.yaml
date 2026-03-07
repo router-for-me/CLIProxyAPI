@@ -19,7 +19,7 @@ jobs:
       - run: git fetch --force --tags
       - uses: actions/setup-go@v4
         with:
-          go-version: '>=1.24.0'
+          go-version: '>=1.26.0'
           cache: true
       - name: Generate Build Metadata
         run: |

@@ -2,8 +2,6 @@ package auth
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"net/http"
 	"strings"
@@ -34,8 +32,7 @@ func (a *CodexAuthenticator) Provider() string {
 }
 
 func (a *CodexAuthenticator) RefreshLead() *time.Duration {
-	d := 5 * 24 * time.Hour
-	return &d
+	return new(5 * 24 * time.Hour)
 }
 
 func (a *CodexAuthenticator) Login(ctx context.Context, cfg *config.Config, opts *LoginOptions) (*coreauth.Auth, error) {
@@ -47,6 +44,10 @@ func (a *CodexAuthenticator) Login(ctx context.Context, cfg *config.Config, opts
 	}
 	if opts == nil {
 		opts = &LoginOptions{}
+	}
+
+	if shouldUseCodexDeviceFlow(opts) {
+		return a.loginWithDeviceFlow(ctx, cfg, opts)
 	}
 
 	callbackPort := a.CallbackPort
@@ -187,39 +188,5 @@ waitForCallback:
 		return nil, codex.NewAuthenticationError(codex.ErrCodeExchangeFailed, err)
 	}
 
-	tokenStorage := authSvc.CreateTokenStorage(authBundle)
-
-	if tokenStorage == nil || tokenStorage.Email == "" {
-		return nil, fmt.Errorf("codex token storage missing account information")
-	}
-
-	planType := ""
-	hashAccountID := ""
-	if tokenStorage.IDToken != "" {
-		if claims, errParse := codex.ParseJWTToken(tokenStorage.IDToken); errParse == nil && claims != nil {
-			planType = strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType)
-			accountID := strings.TrimSpace(claims.CodexAuthInfo.ChatgptAccountID)
-			if accountID != "" {
-				digest := sha256.Sum256([]byte(accountID))
-				hashAccountID = hex.EncodeToString(digest[:])[:8]
-			}
-		}
-	}
-	fileName := codex.CredentialFileName(tokenStorage.Email, planType, hashAccountID, true)
-	metadata := map[string]any{
-		"email": tokenStorage.Email,
-	}
-
-	fmt.Println("Codex authentication successful")
-	if authBundle.APIKey != "" {
-		fmt.Println("Codex API key obtained and stored")
-	}
-
-	return &coreauth.Auth{
-		ID:       fileName,
-		Provider: a.Provider(),
-		FileName: fileName,
-		Storage:  tokenStorage,
-		Metadata: metadata,
-	}, nil
+	return a.buildAuthRecord(authSvc, authBundle)
 }

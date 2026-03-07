@@ -11,6 +11,7 @@ func TestIsClaudeThinkingModel(t *testing.T) {
 		// Claude thinking models - should return true
 		{"claude-sonnet-4-5-thinking", "claude-sonnet-4-5-thinking", true},
 		{"claude-opus-4-5-thinking", "claude-opus-4-5-thinking", true},
+		{"claude-opus-4-6-thinking", "claude-opus-4-6-thinking", true},
 		{"Claude-Sonnet-Thinking uppercase", "Claude-Sonnet-4-5-Thinking", true},
 		{"claude thinking mixed case", "Claude-THINKING-Model", true},
 

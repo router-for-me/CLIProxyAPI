@@ -4,6 +4,7 @@ package util
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/tidwall/gjson"
@@ -60,13 +61,19 @@ func cleanJSONSchema(jsonStr string, addPlaceholder bool) string {
 
 // removeKeywords removes all occurrences of specified keywords from the JSON schema.
 func removeKeywords(jsonStr string, keywords []string) string {
+	deletePaths := make([]string, 0)
+	pathsByField := findPathsByFields(jsonStr, keywords)
 	for _, key := range keywords {
-		for _, p := range findPaths(jsonStr, key) {
+		for _, p := range pathsByField[key] {
 			if isPropertyDefinition(trimSuffix(p, "."+key)) {
 				continue
 			}
-			jsonStr, _ = sjson.Delete(jsonStr, p)
+			deletePaths = append(deletePaths, p)
 		}
+	}
+	sortByDepth(deletePaths)
+	for _, p := range deletePaths {
+		jsonStr, _ = sjson.Delete(jsonStr, p)
 	}
 	return jsonStr
 }
@@ -234,8 +241,9 @@ var unsupportedConstraints = []string{
 }
 
 func moveConstraintsToDescription(jsonStr string) string {
+	pathsByField := findPathsByFields(jsonStr, unsupportedConstraints)
 	for _, key := range unsupportedConstraints {
-		for _, p := range findPaths(jsonStr, key) {
+		for _, p := range pathsByField[key] {
 			val := gjson.Get(jsonStr, p)
 			if !val.Exists() || val.IsObject() || val.IsArray() {
 				continue
@@ -420,18 +428,71 @@ func flattenTypeArrays(jsonStr string) string {
 
 func removeUnsupportedKeywords(jsonStr string) string {
 	keywords := append(unsupportedConstraints,
-		"$schema", "$defs", "definitions", "const", "$ref", "additionalProperties",
-		"propertyNames", // Gemini doesn't support property name validation
+		"$schema", "$defs", "definitions", "const", "$ref", "$id", "additionalProperties",
+		"propertyNames", "patternProperties", // Gemini doesn't support these schema keywords
+		"enumTitles", "prefill", "deprecated", // Schema metadata fields unsupported by Gemini
 	)
+
+	deletePaths := make([]string, 0)
+	pathsByField := findPathsByFields(jsonStr, keywords)
 	for _, key := range keywords {
-		for _, p := range findPaths(jsonStr, key) {
+		for _, p := range pathsByField[key] {
 			if isPropertyDefinition(trimSuffix(p, "."+key)) {
 				continue
 			}
-			jsonStr, _ = sjson.Delete(jsonStr, p)
+			deletePaths = append(deletePaths, p)
 		}
 	}
+	sortByDepth(deletePaths)
+	for _, p := range deletePaths {
+		jsonStr, _ = sjson.Delete(jsonStr, p)
+	}
+	// Remove x-* extension fields (e.g., x-google-enum-descriptions) that are not supported by Gemini API
+	jsonStr = removeExtensionFields(jsonStr)
 	return jsonStr
+}
+
+// removeExtensionFields removes all x-* extension fields from the JSON schema.
+// These are OpenAPI/JSON Schema extension fields that Google APIs don't recognize.
+func removeExtensionFields(jsonStr string) string {
+	var paths []string
+	walkForExtensions(gjson.Parse(jsonStr), "", &paths)
+	// walkForExtensions returns paths in a way that deeper paths are added before their ancestors
+	// when they are not deleted wholesale, but since we skip children of deleted x-* nodes,
+	// any collected path is safe to delete. We still use DeleteBytes for efficiency.
+
+	b := []byte(jsonStr)
+	for _, p := range paths {
+		b, _ = sjson.DeleteBytes(b, p)
+	}
+	return string(b)
+}
+
+func walkForExtensions(value gjson.Result, path string, paths *[]string) {
+	if value.IsArray() {
+		arr := value.Array()
+		for i := len(arr) - 1; i >= 0; i-- {
+			walkForExtensions(arr[i], joinPath(path, strconv.Itoa(i)), paths)
+		}
+		return
+	}
+
+	if value.IsObject() {
+		value.ForEach(func(key, val gjson.Result) bool {
+			keyStr := key.String()
+			safeKey := escapeGJSONPathKey(keyStr)
+			childPath := joinPath(path, safeKey)
+
+			// If it's an extension field, we delete it and don't need to look at its children.
+			if strings.HasPrefix(keyStr, "x-") && !isPropertyDefinition(path) {
+				*paths = append(*paths, childPath)
+				return true
+			}
+
+			walkForExtensions(val, childPath, paths)
+			return true
+		})
+	}
 }
 
 func cleanupRequiredFields(jsonStr string) string {
@@ -535,6 +596,42 @@ func findPaths(jsonStr, field string) []string {
 	return paths
 }
 
+func findPathsByFields(jsonStr string, fields []string) map[string][]string {
+	set := make(map[string]struct{}, len(fields))
+	for _, field := range fields {
+		set[field] = struct{}{}
+	}
+	paths := make(map[string][]string, len(set))
+	walkForFields(gjson.Parse(jsonStr), "", set, paths)
+	return paths
+}
+
+func walkForFields(value gjson.Result, path string, fields map[string]struct{}, paths map[string][]string) {
+	switch value.Type {
+	case gjson.JSON:
+		value.ForEach(func(key, val gjson.Result) bool {
+			keyStr := key.String()
+			safeKey := escapeGJSONPathKey(keyStr)
+
+			var childPath string
+			if path == "" {
+				childPath = safeKey
+			} else {
+				childPath = path + "." + safeKey
+			}
+
+			if _, ok := fields[keyStr]; ok {
+				paths[keyStr] = append(paths[keyStr], childPath)
+			}
+
+			walkForFields(val, childPath, fields, paths)
+			return true
+		})
+	case gjson.String, gjson.Number, gjson.True, gjson.False, gjson.Null:
+		// Terminal types - no further traversal needed
+	}
+}
+
 func sortByDepth(paths []string) {
 	sort.Slice(paths, func(i, j int) bool { return len(paths[i]) > len(paths[j]) })
 }
@@ -621,6 +718,9 @@ func orDefault(val, def string) string {
 }
 
 func escapeGJSONPathKey(key string) string {
+	if strings.IndexAny(key, ".*?") == -1 {
+		return key
+	}
 	return gjsonPathKeyReplacer.Replace(key)
 }
 

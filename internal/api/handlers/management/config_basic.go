@@ -28,8 +28,7 @@ func (h *Handler) GetConfig(c *gin.Context) {
 		c.JSON(200, gin.H{})
 		return
 	}
-	cfgCopy := *h.cfg
-	c.JSON(200, &cfgCopy)
+	c.JSON(200, new(*h.cfg))
 }
 
 type releaseInfo struct {
@@ -219,6 +218,26 @@ func (h *Handler) PutLogsMaxTotalSizeMB(c *gin.Context) {
 		value = 0
 	}
 	h.cfg.LogsMaxTotalSizeMB = value
+	h.persist(c)
+}
+
+// ErrorLogsMaxFiles
+func (h *Handler) GetErrorLogsMaxFiles(c *gin.Context) {
+	c.JSON(200, gin.H{"error-logs-max-files": h.cfg.ErrorLogsMaxFiles})
+}
+func (h *Handler) PutErrorLogsMaxFiles(c *gin.Context) {
+	var body struct {
+		Value *int `json:"value"`
+	}
+	if errBindJSON := c.ShouldBindJSON(&body); errBindJSON != nil || body.Value == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
+		return
+	}
+	value := *body.Value
+	if value < 0 {
+		value = 10
+	}
+	h.cfg.ErrorLogsMaxFiles = value
 	h.persist(c)
 }
 

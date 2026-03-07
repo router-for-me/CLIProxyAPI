@@ -1,9 +1,12 @@
 package auth
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -11,6 +14,33 @@ import (
 
 	baseauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth"
 )
+
+// PostAuthHook defines a function that is called after an Auth record is created
+// but before it is persisted to storage. This allows for modification of the
+// Auth record (e.g., injecting metadata) based on external context.
+type PostAuthHook func(context.Context, *Auth) error
+
+// RequestInfo holds information extracted from the HTTP request.
+// It is injected into the context passed to PostAuthHook.
+type RequestInfo struct {
+	Query   url.Values
+	Headers http.Header
+}
+
+type requestInfoKey struct{}
+
+// WithRequestInfo returns a new context with the given RequestInfo attached.
+func WithRequestInfo(ctx context.Context, info *RequestInfo) context.Context {
+	return context.WithValue(ctx, requestInfoKey{}, info)
+}
+
+// GetRequestInfo retrieves the RequestInfo from the context, if present.
+func GetRequestInfo(ctx context.Context) *RequestInfo {
+	if val, ok := ctx.Value(requestInfoKey{}).(*RequestInfo); ok {
+		return val
+	}
+	return nil
+}
 
 // Auth encapsulates the runtime state and metadata associated with a single credential.
 type Auth struct {
@@ -211,6 +241,23 @@ func (a *Auth) DisableCoolingOverride() (bool, bool) {
 		}
 	}
 	return false, false
+}
+
+// ToolPrefixDisabled returns whether the proxy_ tool name prefix should be
+// skipped for this auth. When true, tool names are sent to Anthropic unchanged.
+// The value is read from metadata key "tool_prefix_disabled" (or "tool-prefix-disabled").
+func (a *Auth) ToolPrefixDisabled() bool {
+	if a == nil || a.Metadata == nil {
+		return false
+	}
+	for _, key := range []string{"tool_prefix_disabled", "tool-prefix-disabled"} {
+		if val, ok := a.Metadata[key]; ok {
+			if parsed, okParse := parseBoolAny(val); okParse {
+				return parsed
+			}
+		}
+	}
+	return false
 }
 
 // RequestRetryOverride returns the auth-file scoped request_retry override when present.

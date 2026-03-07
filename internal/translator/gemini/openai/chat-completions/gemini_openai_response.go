@@ -100,9 +100,9 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 		if totalTokenCountResult := usageResult.Get("totalTokenCount"); totalTokenCountResult.Exists() {
 			baseTemplate, _ = sjson.Set(baseTemplate, "usage.total_tokens", totalTokenCountResult.Int())
 		}
-		promptTokenCount := usageResult.Get("promptTokenCount").Int() - cachedTokenCount
+		promptTokenCount := usageResult.Get("promptTokenCount").Int()
 		thoughtsTokenCount := usageResult.Get("thoughtsTokenCount").Int()
-		baseTemplate, _ = sjson.Set(baseTemplate, "usage.prompt_tokens", promptTokenCount+thoughtsTokenCount)
+		baseTemplate, _ = sjson.Set(baseTemplate, "usage.prompt_tokens", promptTokenCount)
 		if thoughtsTokenCount > 0 {
 			baseTemplate, _ = sjson.Set(baseTemplate, "usage.completion_tokens_details.reasoning_tokens", thoughtsTokenCount)
 		}
@@ -129,11 +129,16 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 			candidateIndex := int(candidate.Get("index").Int())
 			template, _ = sjson.Set(template, "choices.0.index", candidateIndex)
 
-			// Extract and set the finish reason.
-			if finishReasonResult := candidate.Get("finishReason"); finishReasonResult.Exists() {
-				template, _ = sjson.Set(template, "choices.0.finish_reason", strings.ToLower(finishReasonResult.String()))
-				template, _ = sjson.Set(template, "choices.0.native_finish_reason", strings.ToLower(finishReasonResult.String()))
+			finishReason := ""
+			if stopReasonResult := gjson.GetBytes(rawJSON, "stop_reason"); stopReasonResult.Exists() {
+				finishReason = stopReasonResult.String()
 			}
+			if finishReason == "" {
+				if finishReasonResult := gjson.GetBytes(rawJSON, "candidates.0.finishReason"); finishReasonResult.Exists() {
+					finishReason = finishReasonResult.String()
+				}
+			}
+			finishReason = strings.ToLower(finishReason)
 
 			partsResult := candidate.Get("content.parts")
 			hasFunctionCall := false
@@ -225,6 +230,12 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 			if hasFunctionCall {
 				template, _ = sjson.Set(template, "choices.0.finish_reason", "tool_calls")
 				template, _ = sjson.Set(template, "choices.0.native_finish_reason", "tool_calls")
+			} else if finishReason != "" {
+				// Only pass through specific finish reasons
+				if finishReason == "max_tokens" || finishReason == "stop" {
+					template, _ = sjson.Set(template, "choices.0.finish_reason", finishReason)
+					template, _ = sjson.Set(template, "choices.0.native_finish_reason", finishReason)
+				}
 			}
 
 			responseStrings = append(responseStrings, template)
@@ -286,7 +297,7 @@ func ConvertGeminiResponseToOpenAINonStream(_ context.Context, _ string, origina
 		promptTokenCount := usageResult.Get("promptTokenCount").Int()
 		thoughtsTokenCount := usageResult.Get("thoughtsTokenCount").Int()
 		cachedTokenCount := usageResult.Get("cachedContentTokenCount").Int()
-		template, _ = sjson.Set(template, "usage.prompt_tokens", promptTokenCount+thoughtsTokenCount)
+		template, _ = sjson.Set(template, "usage.prompt_tokens", promptTokenCount)
 		if thoughtsTokenCount > 0 {
 			template, _ = sjson.Set(template, "usage.completion_tokens_details.reasoning_tokens", thoughtsTokenCount)
 		}

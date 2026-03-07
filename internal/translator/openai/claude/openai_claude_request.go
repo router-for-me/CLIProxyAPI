@@ -6,7 +6,6 @@
 package claude
 
 import (
-	"bytes"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
@@ -18,7 +17,7 @@ import (
 // It extracts the model name, system instruction, message contents, and tool declarations
 // from the raw JSON request and returns them in the format expected by the OpenAI API.
 func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream bool) []byte {
-	rawJSON := bytes.Clone(inputRawJSON)
+	rawJSON := inputRawJSON
 	// Base OpenAI Chat Completions API template
 	out := `{"model":"","messages":[]}`
 
@@ -75,6 +74,18 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 					if effort, ok := thinking.ConvertBudgetToLevel(-1); ok && effort != "" {
 						out, _ = sjson.Set(out, "reasoning_effort", effort)
 					}
+				}
+			case "adaptive", "auto":
+				// Adaptive thinking can carry an explicit effort in output_config.effort (Claude 4.6).
+				// Pass through directly; ApplyThinking handles clamping to target model's levels.
+				effort := ""
+				if v := root.Get("output_config.effort"); v.Exists() && v.Type == gjson.String {
+					effort = strings.ToLower(strings.TrimSpace(v.String()))
+				}
+				if effort != "" {
+					out, _ = sjson.Set(out, "reasoning_effort", effort)
+				} else {
+					out, _ = sjson.Set(out, "reasoning_effort", string(thinking.LevelXHigh))
 				}
 			case "disabled":
 				if effort, ok := thinking.ConvertBudgetToLevel(0); ok && effort != "" {

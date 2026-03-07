@@ -7,11 +7,14 @@ import (
 	"bytes"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 )
+
+const requestBodyOverrideContextKey = "REQUEST_BODY_OVERRIDE"
 
 // RequestInfo holds essential details of an incoming HTTP request for logging purposes.
 type RequestInfo struct {
@@ -20,22 +23,24 @@ type RequestInfo struct {
 	Headers   map[string][]string // Headers contains the request headers.
 	Body      []byte              // Body is the raw request body.
 	RequestID string              // RequestID is the unique identifier for the request.
+	Timestamp time.Time           // Timestamp is when the request was received.
 }
 
 // ResponseWriterWrapper wraps the standard gin.ResponseWriter to intercept and log response data.
 // It is designed to handle both standard and streaming responses, ensuring that logging operations do not block the client response.
 type ResponseWriterWrapper struct {
 	gin.ResponseWriter
-	body           *bytes.Buffer              // body is a buffer to store the response body for non-streaming responses.
-	isStreaming    bool                       // isStreaming indicates whether the response is a streaming type (e.g., text/event-stream).
-	streamWriter   logging.StreamingLogWriter // streamWriter is a writer for handling streaming log entries.
-	chunkChannel   chan []byte                // chunkChannel is a channel for asynchronously passing response chunks to the logger.
-	streamDone     chan struct{}              // streamDone signals when the streaming goroutine completes.
-	logger         logging.RequestLogger      // logger is the instance of the request logger service.
-	requestInfo    *RequestInfo               // requestInfo holds the details of the original request.
-	statusCode     int                        // statusCode stores the HTTP status code of the response.
-	headers        map[string][]string        // headers stores the response headers.
-	logOnErrorOnly bool                       // logOnErrorOnly enables logging only when an error response is detected.
+	body                *bytes.Buffer              // body is a buffer to store the response body for non-streaming responses.
+	isStreaming         bool                       // isStreaming indicates whether the response is a streaming type (e.g., text/event-stream).
+	streamWriter        logging.StreamingLogWriter // streamWriter is a writer for handling streaming log entries.
+	chunkChannel        chan []byte                // chunkChannel is a channel for asynchronously passing response chunks to the logger.
+	streamDone          chan struct{}              // streamDone signals when the streaming goroutine completes.
+	logger              logging.RequestLogger      // logger is the instance of the request logger service.
+	requestInfo         *RequestInfo               // requestInfo holds the details of the original request.
+	statusCode          int                        // statusCode stores the HTTP status code of the response.
+	headers             map[string][]string        // headers stores the response headers.
+	logOnErrorOnly      bool                       // logOnErrorOnly enables logging only when an error response is detected.
+	firstChunkTimestamp time.Time                  // firstChunkTimestamp captures TTFB for streaming responses.
 }
 
 // NewResponseWriterWrapper creates and initializes a new ResponseWriterWrapper.
@@ -73,6 +78,10 @@ func (w *ResponseWriterWrapper) Write(data []byte) (int, error) {
 
 	// THEN: Handle logging based on response type
 	if w.isStreaming && w.chunkChannel != nil {
+		// Capture TTFB on first chunk (synchronous, before async channel send)
+		if w.firstChunkTimestamp.IsZero() {
+			w.firstChunkTimestamp = time.Now()
+		}
 		// For streaming responses: Send to async logging channel (non-blocking)
 		select {
 		case w.chunkChannel <- append([]byte(nil), data...): // Non-blocking send with copy
@@ -117,6 +126,10 @@ func (w *ResponseWriterWrapper) WriteString(data string) (int, error) {
 
 	// THEN: Capture for logging
 	if w.isStreaming && w.chunkChannel != nil {
+		// Capture TTFB on first chunk (synchronous, before async channel send)
+		if w.firstChunkTimestamp.IsZero() {
+			w.firstChunkTimestamp = time.Now()
+		}
 		select {
 		case w.chunkChannel <- []byte(data):
 		default:
@@ -212,8 +225,8 @@ func (w *ResponseWriterWrapper) detectStreaming(contentType string) bool {
 
 	// Only fall back to request payload hints when Content-Type is not set yet.
 	if w.requestInfo != nil && len(w.requestInfo.Body) > 0 {
-		bodyStr := string(w.requestInfo.Body)
-		return strings.Contains(bodyStr, `"stream": true`) || strings.Contains(bodyStr, `"stream":true`)
+		return bytes.Contains(w.requestInfo.Body, []byte(`"stream": true`)) ||
+			bytes.Contains(w.requestInfo.Body, []byte(`"stream":true`))
 	}
 
 	return false
@@ -280,6 +293,8 @@ func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
 			w.streamDone = nil
 		}
 
+		w.streamWriter.SetFirstChunkTimestamp(w.firstChunkTimestamp)
+
 		// Write API Request and Response to the streaming log before closing
 		apiRequest := w.extractAPIRequest(c)
 		if len(apiRequest) > 0 {
@@ -297,7 +312,7 @@ func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
 		return nil
 	}
 
-	return w.logRequest(finalStatusCode, w.cloneHeaders(), w.body.Bytes(), w.extractAPIRequest(c), w.extractAPIResponse(c), slicesAPIResponseError, forceLog)
+	return w.logRequest(w.extractRequestBody(c), finalStatusCode, w.cloneHeaders(), w.body.Bytes(), w.extractAPIRequest(c), w.extractAPIResponse(c), w.extractAPIResponseTimestamp(c), slicesAPIResponseError, forceLog)
 }
 
 func (w *ResponseWriterWrapper) cloneHeaders() map[string][]string {
@@ -337,18 +352,45 @@ func (w *ResponseWriterWrapper) extractAPIResponse(c *gin.Context) []byte {
 	return data
 }
 
-func (w *ResponseWriterWrapper) logRequest(statusCode int, headers map[string][]string, body []byte, apiRequestBody, apiResponseBody []byte, apiResponseErrors []*interfaces.ErrorMessage, forceLog bool) error {
+func (w *ResponseWriterWrapper) extractAPIResponseTimestamp(c *gin.Context) time.Time {
+	ts, isExist := c.Get("API_RESPONSE_TIMESTAMP")
+	if !isExist {
+		return time.Time{}
+	}
+	if t, ok := ts.(time.Time); ok {
+		return t
+	}
+	return time.Time{}
+}
+
+func (w *ResponseWriterWrapper) extractRequestBody(c *gin.Context) []byte {
+	if c != nil {
+		if bodyOverride, isExist := c.Get(requestBodyOverrideContextKey); isExist {
+			switch value := bodyOverride.(type) {
+			case []byte:
+				if len(value) > 0 {
+					return bytes.Clone(value)
+				}
+			case string:
+				if strings.TrimSpace(value) != "" {
+					return []byte(value)
+				}
+			}
+		}
+	}
+	if w.requestInfo != nil && len(w.requestInfo.Body) > 0 {
+		return w.requestInfo.Body
+	}
+	return nil
+}
+
+func (w *ResponseWriterWrapper) logRequest(requestBody []byte, statusCode int, headers map[string][]string, body []byte, apiRequestBody, apiResponseBody []byte, apiResponseTimestamp time.Time, apiResponseErrors []*interfaces.ErrorMessage, forceLog bool) error {
 	if w.requestInfo == nil {
 		return nil
 	}
 
-	var requestBody []byte
-	if len(w.requestInfo.Body) > 0 {
-		requestBody = w.requestInfo.Body
-	}
-
 	if loggerWithOptions, ok := w.logger.(interface {
-		LogRequestWithOptions(string, string, map[string][]string, []byte, int, map[string][]string, []byte, []byte, []byte, []*interfaces.ErrorMessage, bool, string) error
+		LogRequestWithOptions(string, string, map[string][]string, []byte, int, map[string][]string, []byte, []byte, []byte, []*interfaces.ErrorMessage, bool, string, time.Time, time.Time) error
 	}); ok {
 		return loggerWithOptions.LogRequestWithOptions(
 			w.requestInfo.URL,
@@ -363,6 +405,8 @@ func (w *ResponseWriterWrapper) logRequest(statusCode int, headers map[string][]
 			apiResponseErrors,
 			forceLog,
 			w.requestInfo.RequestID,
+			w.requestInfo.Timestamp,
+			apiResponseTimestamp,
 		)
 	}
 
@@ -378,5 +422,7 @@ func (w *ResponseWriterWrapper) logRequest(statusCode int, headers map[string][]
 		apiResponseBody,
 		apiResponseErrors,
 		w.requestInfo.RequestID,
+		w.requestInfo.Timestamp,
+		apiResponseTimestamp,
 	)
 }

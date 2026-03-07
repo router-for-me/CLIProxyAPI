@@ -441,6 +441,46 @@ func TestRemoveClientRemovesHash(t *testing.T) {
 	}
 }
 
+func TestTriggerServerUpdateCancelsPendingTimerOnImmediate(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := &config.Config{AuthDir: tmpDir}
+
+	var reloads int32
+	w := &Watcher{
+		reloadCallback: func(*config.Config) {
+			atomic.AddInt32(&reloads, 1)
+		},
+	}
+	w.SetConfig(cfg)
+
+	w.serverUpdateMu.Lock()
+	w.serverUpdateLast = time.Now().Add(-(serverUpdateDebounce - 100*time.Millisecond))
+	w.serverUpdateMu.Unlock()
+	w.triggerServerUpdate(cfg)
+
+	if got := atomic.LoadInt32(&reloads); got != 0 {
+		t.Fatalf("expected no immediate reload, got %d", got)
+	}
+
+	w.serverUpdateMu.Lock()
+	if !w.serverUpdatePend || w.serverUpdateTimer == nil {
+		w.serverUpdateMu.Unlock()
+		t.Fatal("expected a pending server update timer")
+	}
+	w.serverUpdateLast = time.Now().Add(-(serverUpdateDebounce + 10*time.Millisecond))
+	w.serverUpdateMu.Unlock()
+
+	w.triggerServerUpdate(cfg)
+	if got := atomic.LoadInt32(&reloads); got != 1 {
+		t.Fatalf("expected immediate reload once, got %d", got)
+	}
+
+	time.Sleep(250 * time.Millisecond)
+	if got := atomic.LoadInt32(&reloads); got != 1 {
+		t.Fatalf("expected pending timer to be cancelled, got %d reloads", got)
+	}
+}
+
 func TestShouldDebounceRemove(t *testing.T) {
 	w := &Watcher{}
 	path := filepath.Clean("test.json")
@@ -1236,6 +1276,67 @@ func TestReloadConfigFiltersAffectedOAuthProviders(t *testing.T) {
 	}
 	if !foundB {
 		t.Fatal("expected unaffected provider auth to remain")
+	}
+}
+
+func TestReloadConfigTriggersCallbackForMaxRetryCredentialsChange(t *testing.T) {
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if err := os.MkdirAll(authDir, 0o755); err != nil {
+		t.Fatalf("failed to create auth dir: %v", err)
+	}
+	configPath := filepath.Join(tmpDir, "config.yaml")
+
+	oldCfg := &config.Config{
+		AuthDir:             authDir,
+		MaxRetryCredentials: 0,
+		RequestRetry:        1,
+		MaxRetryInterval:    5,
+	}
+	newCfg := &config.Config{
+		AuthDir:             authDir,
+		MaxRetryCredentials: 2,
+		RequestRetry:        1,
+		MaxRetryInterval:    5,
+	}
+	data, errMarshal := yaml.Marshal(newCfg)
+	if errMarshal != nil {
+		t.Fatalf("failed to marshal config: %v", errMarshal)
+	}
+	if errWrite := os.WriteFile(configPath, data, 0o644); errWrite != nil {
+		t.Fatalf("failed to write config: %v", errWrite)
+	}
+
+	callbackCalls := 0
+	callbackMaxRetryCredentials := -1
+	w := &Watcher{
+		configPath:     configPath,
+		authDir:        authDir,
+		lastAuthHashes: make(map[string]string),
+		reloadCallback: func(cfg *config.Config) {
+			callbackCalls++
+			if cfg != nil {
+				callbackMaxRetryCredentials = cfg.MaxRetryCredentials
+			}
+		},
+	}
+	w.SetConfig(oldCfg)
+
+	if ok := w.reloadConfig(); !ok {
+		t.Fatal("expected reloadConfig to succeed")
+	}
+
+	if callbackCalls != 1 {
+		t.Fatalf("expected reload callback to be called once, got %d", callbackCalls)
+	}
+	if callbackMaxRetryCredentials != 2 {
+		t.Fatalf("expected callback MaxRetryCredentials=2, got %d", callbackMaxRetryCredentials)
+	}
+
+	w.clientsMutex.RLock()
+	defer w.clientsMutex.RUnlock()
+	if w.config == nil || w.config.MaxRetryCredentials != 2 {
+		t.Fatalf("expected watcher config MaxRetryCredentials=2, got %+v", w.config)
 	}
 }
 

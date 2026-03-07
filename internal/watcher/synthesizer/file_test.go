@@ -297,6 +297,117 @@ func TestFileSynthesizer_Synthesize_PrefixValidation(t *testing.T) {
 	}
 }
 
+func TestFileSynthesizer_Synthesize_PriorityParsing(t *testing.T) {
+	tests := []struct {
+		name     string
+		priority any
+		want     string
+		hasValue bool
+	}{
+		{
+			name:     "string with spaces",
+			priority: " 10 ",
+			want:     "10",
+			hasValue: true,
+		},
+		{
+			name:     "number",
+			priority: 8,
+			want:     "8",
+			hasValue: true,
+		},
+		{
+			name:     "invalid string",
+			priority: "1x",
+			hasValue: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tempDir := t.TempDir()
+			authData := map[string]any{
+				"type":     "claude",
+				"priority": tt.priority,
+			}
+			data, _ := json.Marshal(authData)
+			errWriteFile := os.WriteFile(filepath.Join(tempDir, "auth.json"), data, 0644)
+			if errWriteFile != nil {
+				t.Fatalf("failed to write auth file: %v", errWriteFile)
+			}
+
+			synth := NewFileSynthesizer()
+			ctx := &SynthesisContext{
+				Config:      &config.Config{},
+				AuthDir:     tempDir,
+				Now:         time.Now(),
+				IDGenerator: NewStableIDGenerator(),
+			}
+
+			auths, errSynthesize := synth.Synthesize(ctx)
+			if errSynthesize != nil {
+				t.Fatalf("unexpected error: %v", errSynthesize)
+			}
+			if len(auths) != 1 {
+				t.Fatalf("expected 1 auth, got %d", len(auths))
+			}
+
+			value, ok := auths[0].Attributes["priority"]
+			if tt.hasValue {
+				if !ok {
+					t.Fatal("expected priority attribute to be set")
+				}
+				if value != tt.want {
+					t.Fatalf("expected priority %q, got %q", tt.want, value)
+				}
+				return
+			}
+			if ok {
+				t.Fatalf("expected priority attribute to be absent, got %q", value)
+			}
+		})
+	}
+}
+
+func TestFileSynthesizer_Synthesize_OAuthExcludedModelsMerged(t *testing.T) {
+	tempDir := t.TempDir()
+	authData := map[string]any{
+		"type":            "claude",
+		"excluded_models": []string{"custom-model", "MODEL-B"},
+	}
+	data, _ := json.Marshal(authData)
+	errWriteFile := os.WriteFile(filepath.Join(tempDir, "auth.json"), data, 0644)
+	if errWriteFile != nil {
+		t.Fatalf("failed to write auth file: %v", errWriteFile)
+	}
+
+	synth := NewFileSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			OAuthExcludedModels: map[string][]string{
+				"claude": {"shared", "model-b"},
+			},
+		},
+		AuthDir:     tempDir,
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, errSynthesize := synth.Synthesize(ctx)
+	if errSynthesize != nil {
+		t.Fatalf("unexpected error: %v", errSynthesize)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("expected 1 auth, got %d", len(auths))
+	}
+
+	got := auths[0].Attributes["excluded_models"]
+	want := "custom-model,model-b,shared"
+	if got != want {
+		t.Fatalf("expected excluded_models %q, got %q", want, got)
+	}
+}
+
 func TestSynthesizeGeminiVirtualAuths_NilInputs(t *testing.T) {
 	now := time.Now()
 
@@ -533,6 +644,7 @@ func TestFileSynthesizer_Synthesize_MultiProjectGemini(t *testing.T) {
 		"type":       "gemini",
 		"email":      "multi@example.com",
 		"project_id": "project-a, project-b, project-c",
+		"priority":   " 10 ",
 	}
 	data, _ := json.Marshal(authData)
 	err := os.WriteFile(filepath.Join(tempDir, "gemini-multi.json"), data, 0644)
@@ -565,6 +677,9 @@ func TestFileSynthesizer_Synthesize_MultiProjectGemini(t *testing.T) {
 	if primary.Status != coreauth.StatusDisabled {
 		t.Errorf("expected primary status disabled, got %s", primary.Status)
 	}
+	if gotPriority := primary.Attributes["priority"]; gotPriority != "10" {
+		t.Errorf("expected primary priority 10, got %q", gotPriority)
+	}
 
 	// Remaining auths should be virtuals
 	for i := 1; i < 4; i++ {
@@ -574,6 +689,9 @@ func TestFileSynthesizer_Synthesize_MultiProjectGemini(t *testing.T) {
 		}
 		if v.Attributes["gemini_virtual_parent"] != primary.ID {
 			t.Errorf("expected virtual %d parent to be %s, got %s", i, primary.ID, v.Attributes["gemini_virtual_parent"])
+		}
+		if gotPriority := v.Attributes["priority"]; gotPriority != "10" {
+			t.Errorf("expected virtual %d priority 10, got %q", i, gotPriority)
 		}
 	}
 }

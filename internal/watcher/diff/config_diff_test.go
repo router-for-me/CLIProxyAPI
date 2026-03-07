@@ -223,6 +223,7 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 		UsageStatisticsEnabled: false,
 		DisableCooling:         false,
 		RequestRetry:           1,
+		MaxRetryCredentials:    1,
 		MaxRetryInterval:       1,
 		WebsocketAuth:          false,
 		QuotaExceeded:          config.QuotaExceeded{SwitchProject: false, SwitchPreviewModel: false},
@@ -246,6 +247,7 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 		UsageStatisticsEnabled: true,
 		DisableCooling:         true,
 		RequestRetry:           2,
+		MaxRetryCredentials:    3,
 		MaxRetryInterval:       3,
 		WebsocketAuth:          true,
 		QuotaExceeded:          config.QuotaExceeded{SwitchProject: true, SwitchPreviewModel: true},
@@ -283,6 +285,7 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 	expectContains(t, details, "disable-cooling: false -> true")
 	expectContains(t, details, "request-log: false -> true")
 	expectContains(t, details, "request-retry: 1 -> 2")
+	expectContains(t, details, "max-retry-credentials: 1 -> 3")
 	expectContains(t, details, "max-retry-interval: 1 -> 3")
 	expectContains(t, details, "proxy-url: http://old-proxy -> http://new-proxy")
 	expectContains(t, details, "ws-auth: false -> true")
@@ -309,6 +312,7 @@ func TestBuildConfigChangeDetails_AllBranches(t *testing.T) {
 		UsageStatisticsEnabled: false,
 		DisableCooling:         false,
 		RequestRetry:           1,
+		MaxRetryCredentials:    1,
 		MaxRetryInterval:       1,
 		WebsocketAuth:          false,
 		QuotaExceeded:          config.QuotaExceeded{SwitchProject: false, SwitchPreviewModel: false},
@@ -361,6 +365,7 @@ func TestBuildConfigChangeDetails_AllBranches(t *testing.T) {
 		UsageStatisticsEnabled: true,
 		DisableCooling:         true,
 		RequestRetry:           2,
+		MaxRetryCredentials:    3,
 		MaxRetryInterval:       3,
 		WebsocketAuth:          true,
 		QuotaExceeded:          config.QuotaExceeded{SwitchProject: true, SwitchPreviewModel: true},
@@ -419,6 +424,7 @@ func TestBuildConfigChangeDetails_AllBranches(t *testing.T) {
 	expectContains(t, changes, "usage-statistics-enabled: false -> true")
 	expectContains(t, changes, "disable-cooling: false -> true")
 	expectContains(t, changes, "request-retry: 1 -> 2")
+	expectContains(t, changes, "max-retry-credentials: 1 -> 3")
 	expectContains(t, changes, "max-retry-interval: 1 -> 3")
 	expectContains(t, changes, "proxy-url: http://old-proxy -> http://new-proxy")
 	expectContains(t, changes, "ws-auth: false -> true")

@@ -1,7 +1,6 @@
 package responses
 
 import (
-	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -10,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -32,7 +32,7 @@ var (
 // - max_output_tokens -> max_tokens
 // - stream passthrough via parameter
 func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte, stream bool) []byte {
-	rawJSON := bytes.Clone(inputRawJSON)
+	rawJSON := inputRawJSON
 
 	if account == "" {
 		u, _ := uuid.NewRandom()
@@ -57,17 +57,45 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 	if v := root.Get("reasoning.effort"); v.Exists() {
 		effort := strings.ToLower(strings.TrimSpace(v.String()))
 		if effort != "" {
-			budget, ok := thinking.ConvertLevelToBudget(effort)
-			if ok {
-				switch budget {
-				case 0:
+			mi := registry.LookupModelInfo(modelName, "claude")
+			supportsAdaptive := mi != nil && mi.Thinking != nil && len(mi.Thinking.Levels) > 0
+			supportsMax := supportsAdaptive && thinking.HasLevel(mi.Thinking.Levels, string(thinking.LevelMax))
+
+			// Claude 4.6 supports adaptive thinking with output_config.effort.
+			// MapToClaudeEffort normalizes levels (e.g. minimal→low, xhigh→high) to avoid
+			// validation errors since validate treats same-provider unsupported levels as errors.
+			if supportsAdaptive {
+				switch effort {
+				case "none":
 					out, _ = sjson.Set(out, "thinking.type", "disabled")
-				case -1:
-					out, _ = sjson.Set(out, "thinking.type", "enabled")
+					out, _ = sjson.Delete(out, "thinking.budget_tokens")
+					out, _ = sjson.Delete(out, "output_config.effort")
+				case "auto":
+					out, _ = sjson.Set(out, "thinking.type", "adaptive")
+					out, _ = sjson.Delete(out, "thinking.budget_tokens")
+					out, _ = sjson.Delete(out, "output_config.effort")
 				default:
-					if budget > 0 {
+					if mapped, ok := thinking.MapToClaudeEffort(effort, supportsMax); ok {
+						effort = mapped
+					}
+					out, _ = sjson.Set(out, "thinking.type", "adaptive")
+					out, _ = sjson.Delete(out, "thinking.budget_tokens")
+					out, _ = sjson.Set(out, "output_config.effort", effort)
+				}
+			} else {
+				// Legacy/manual thinking (budget_tokens).
+				budget, ok := thinking.ConvertLevelToBudget(effort)
+				if ok {
+					switch budget {
+					case 0:
+						out, _ = sjson.Set(out, "thinking.type", "disabled")
+					case -1:
 						out, _ = sjson.Set(out, "thinking.type", "enabled")
-						out, _ = sjson.Set(out, "thinking.budget_tokens", budget)
+					default:
+						if budget > 0 {
+							out, _ = sjson.Set(out, "thinking.type", "enabled")
+							out, _ = sjson.Set(out, "thinking.budget_tokens", budget)
+						}
 					}
 				}
 			}
@@ -156,6 +184,7 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 				var textAggregate strings.Builder
 				var partsJSON []string
 				hasImage := false
+				hasFile := false
 				if parts := item.Get("content"); parts.Exists() && parts.IsArray() {
 					parts.ForEach(func(_, part gjson.Result) bool {
 						ptype := part.Get("type").String()
@@ -208,6 +237,30 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 									hasImage = true
 								}
 							}
+						case "input_file":
+							fileData := part.Get("file_data").String()
+							if fileData != "" {
+								mediaType := "application/octet-stream"
+								data := fileData
+								if strings.HasPrefix(fileData, "data:") {
+									trimmed := strings.TrimPrefix(fileData, "data:")
+									mediaAndData := strings.SplitN(trimmed, ";base64,", 2)
+									if len(mediaAndData) == 2 {
+										if mediaAndData[0] != "" {
+											mediaType = mediaAndData[0]
+										}
+										data = mediaAndData[1]
+									}
+								}
+								contentPart := `{"type":"document","source":{"type":"base64","media_type":"","data":""}}`
+								contentPart, _ = sjson.Set(contentPart, "source.media_type", mediaType)
+								contentPart, _ = sjson.Set(contentPart, "source.data", data)
+								partsJSON = append(partsJSON, contentPart)
+								if role == "" {
+									role = "user"
+								}
+								hasFile = true
+							}
 						}
 						return true
 					})
@@ -229,7 +282,7 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 				if len(partsJSON) > 0 {
 					msg := `{"role":"","content":[]}`
 					msg, _ = sjson.Set(msg, "role", role)
-					if len(partsJSON) == 1 && !hasImage {
+					if len(partsJSON) == 1 && !hasImage && !hasFile {
 						// Preserve legacy behavior for single text content
 						msg, _ = sjson.Delete(msg, "content")
 						textPart := gjson.Parse(partsJSON[0])

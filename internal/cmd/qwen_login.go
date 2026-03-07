@@ -44,8 +44,7 @@ func DoQwenLogin(cfg *config.Config, options *LoginOptions) {
 
 	_, savedPath, err := manager.Login(context.Background(), "qwen", cfg, authOpts)
 	if err != nil {
-		var emailErr *sdkAuth.EmailRequiredError
-		if errors.As(err, &emailErr) {
+		if emailErr, ok := errors.AsType[*sdkAuth.EmailRequiredError](err); ok {
 			log.Error(emailErr.Error())
 			return
 		}
