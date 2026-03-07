@@ -484,20 +484,24 @@ func buildAuthDirFileInfoIndex(authDir string) map[string]os.FileInfo {
 	if authDir == "" {
 		return nil
 	}
-	entries, err := os.ReadDir(authDir)
+	cleanAuthDir := filepath.Clean(authDir)
+	index := make(map[string]os.FileInfo)
+	err := filepath.Walk(cleanAuthDir, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return nil
+		}
+		if info == nil || info.IsDir() {
+			return nil
+		}
+		rel, errRel := filepath.Rel(cleanAuthDir, path)
+		if errRel != nil || rel == "" || rel == "." {
+			return nil
+		}
+		index[sdkAuth.NormalizeFileAuthID(path, cleanAuthDir)] = info
+		return nil
+	})
 	if err != nil {
 		return nil
-	}
-	index := make(map[string]os.FileInfo, len(entries))
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		info, errInfo := entry.Info()
-		if errInfo != nil {
-			continue
-		}
-		index[strings.ToLower(entry.Name())] = info
 	}
 	return index
 }
@@ -510,7 +514,7 @@ func resolveAuthFileInfo(authDir string, fileInfoIndex map[string]os.FileInfo, p
 	cleanAuthDir := filepath.Clean(strings.TrimSpace(authDir))
 	if cleanAuthDir != "" && cleanAuthDir != "." {
 		if rel, err := filepath.Rel(cleanAuthDir, cleanPath); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
-			if info, ok := fileInfoIndex[strings.ToLower(filepath.Base(cleanPath))]; ok {
+			if info, ok := fileInfoIndex[sdkAuth.NormalizeFileAuthID(cleanPath, cleanAuthDir)]; ok {
 				return info, true, nil
 			}
 		}
