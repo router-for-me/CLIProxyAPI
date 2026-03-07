@@ -504,6 +504,9 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: false, Error: rerr}
 			result.RetryAfter = retryAfterFromError(errStream)
 			m.MarkResult(ctx, result)
+			if isRequestInvalidError(errStream) {
+				return nil, errStream
+			}
 			lastErr = errStream
 			continue
 		}
@@ -513,6 +516,17 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			if errCtx := ctx.Err(); errCtx != nil {
 				discardStreamChunks(streamResult.Chunks)
 				return nil, errCtx
+			}
+			if isRequestInvalidError(bootstrapErr) {
+				rerr := &Error{Message: bootstrapErr.Error()}
+				if se, ok := errors.AsType[cliproxyexecutor.StatusError](bootstrapErr); ok && se != nil {
+					rerr.HTTPStatus = se.StatusCode()
+				}
+				result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: false, Error: rerr}
+				result.RetryAfter = retryAfterFromError(bootstrapErr)
+				m.MarkResult(ctx, result)
+				discardStreamChunks(streamResult.Chunks)
+				return nil, bootstrapErr
 			}
 			if idx < len(execModels)-1 {
 				rerr := &Error{Message: bootstrapErr.Error()}
@@ -937,6 +951,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 					result.RetryAfter = ra
 				}
 				m.MarkResult(execCtx, result)
+				if isRequestInvalidError(errExec) {
+					return cliproxyexecutor.Response{}, errExec
+				}
 				authErr = errExec
 				continue
 			}
@@ -1006,6 +1023,9 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 					result.RetryAfter = ra
 				}
 				m.hook.OnResult(execCtx, result)
+				if isRequestInvalidError(errExec) {
+					return cliproxyexecutor.Response{}, errExec
+				}
 				authErr = errExec
 				continue
 			}
@@ -1785,18 +1805,22 @@ func statusCodeFromResult(err *Error) int {
 }
 
 // isRequestInvalidError returns true if the error represents a client request
-// error that should not be retried. Specifically, it checks for 400 Bad Request
-// with "invalid_request_error" in the message, indicating the request itself is
-// malformed and switching to a different auth will not help.
+// error that should not be retried. Specifically, it treats 400 responses with
+// "invalid_request_error" and all 422 responses as request-shape failures,
+// where switching auths or pooled upstream models will not help.
 func isRequestInvalidError(err error) bool {
 	if err == nil {
 		return false
 	}
 	status := statusCodeFromError(err)
-	if status != http.StatusBadRequest {
+	switch status {
+	case http.StatusBadRequest:
+		return strings.Contains(err.Error(), "invalid_request_error")
+	case http.StatusUnprocessableEntity:
+		return true
+	default:
 		return false
 	}
-	return strings.Contains(err.Error(), "invalid_request_error")
 }
 
 func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time) {

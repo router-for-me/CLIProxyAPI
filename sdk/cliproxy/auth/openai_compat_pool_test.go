@@ -144,6 +144,27 @@ func newOpenAICompatPoolTestManager(t *testing.T, alias string, models []interna
 	return m
 }
 
+func TestManagerExecuteCount_OpenAICompatAliasPoolStopsOnInvalidRequest(t *testing.T) {
+	alias := "claude-opus-4.66"
+	invalidErr := &Error{HTTPStatus: http.StatusUnprocessableEntity, Message: "unprocessable entity"}
+	executor := &openAICompatPoolExecutor{
+		id:          "pool",
+		countErrors: map[string]error{"qwen3.5-plus": invalidErr},
+	}
+	m := newOpenAICompatPoolTestManager(t, alias, []internalconfig.OpenAICompatibilityModel{
+		{Name: "qwen3.5-plus", Alias: alias},
+		{Name: "glm-5", Alias: alias},
+	}, executor)
+
+	_, err := m.ExecuteCount(context.Background(), []string{"pool"}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{})
+	if err == nil || err.Error() != invalidErr.Error() {
+		t.Fatalf("execute count error = %v, want %v", err, invalidErr)
+	}
+	got := executor.CountModels()
+	if len(got) != 1 || got[0] != "qwen3.5-plus" {
+		t.Fatalf("count calls = %v, want only first invalid model", got)
+	}
+}
 func TestResolveModelAliasPoolFromConfigModels(t *testing.T) {
 	models := []modelAliasEntry{
 		internalconfig.OpenAICompatibilityModel{Name: "qwen3.5-plus", Alias: "claude-opus-4.66"},
@@ -192,6 +213,27 @@ func TestManagerExecute_OpenAICompatAliasPoolRotatesWithinAuth(t *testing.T) {
 	}
 }
 
+func TestManagerExecute_OpenAICompatAliasPoolStopsOnBadRequest(t *testing.T) {
+	alias := "claude-opus-4.66"
+	invalidErr := &Error{HTTPStatus: http.StatusBadRequest, Message: "invalid_request_error: malformed payload"}
+	executor := &openAICompatPoolExecutor{
+		id:            "pool",
+		executeErrors: map[string]error{"qwen3.5-plus": invalidErr},
+	}
+	m := newOpenAICompatPoolTestManager(t, alias, []internalconfig.OpenAICompatibilityModel{
+		{Name: "qwen3.5-plus", Alias: alias},
+		{Name: "glm-5", Alias: alias},
+	}, executor)
+
+	_, err := m.Execute(context.Background(), []string{"pool"}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{})
+	if err == nil || err.Error() != invalidErr.Error() {
+		t.Fatalf("execute error = %v, want %v", err, invalidErr)
+	}
+	got := executor.ExecuteModels()
+	if len(got) != 1 || got[0] != "qwen3.5-plus" {
+		t.Fatalf("execute calls = %v, want only first invalid model", got)
+	}
+}
 func TestManagerExecute_OpenAICompatAliasPoolFallsBackWithinSameAuth(t *testing.T) {
 	alias := "claude-opus-4.66"
 	executor := &openAICompatPoolExecutor{
@@ -216,6 +258,30 @@ func TestManagerExecute_OpenAICompatAliasPoolFallsBackWithinSameAuth(t *testing.
 		if got[i] != want[i] {
 			t.Fatalf("execute call %d model = %q, want %q", i, got[i], want[i])
 		}
+	}
+}
+
+func TestManagerExecute_OpenAICompatAliasPoolStopsOnInvalidRequest(t *testing.T) {
+	alias := "claude-opus-4.66"
+	invalidErr := &Error{HTTPStatus: http.StatusBadRequest, Message: "invalid_request_error: malformed payload"}
+	executor := &openAICompatPoolExecutor{
+		id:            "pool",
+		executeErrors: map[string]error{"qwen3.5-plus": invalidErr},
+	}
+	m := newOpenAICompatPoolTestManager(t, alias, []internalconfig.OpenAICompatibilityModel{
+		{Name: "qwen3.5-plus", Alias: alias},
+		{Name: "glm-5", Alias: alias},
+	}, executor)
+
+	_, err := m.Execute(context.Background(), []string{"pool"}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{})
+	if err == nil {
+		t.Fatal("expected invalid request error")
+	}
+	if err != invalidErr {
+		t.Fatalf("error = %v, want %v", err, invalidErr)
+	}
+	if got := executor.ExecuteModels(); len(got) != 1 || got[0] != "qwen3.5-plus" {
+		t.Fatalf("execute calls = %v, want only first upstream model", got)
 	}
 }
 
@@ -256,6 +322,27 @@ func TestManagerExecuteStream_OpenAICompatAliasPoolFallsBackBeforeFirstByte(t *t
 	}
 }
 
+func TestManagerExecuteStream_OpenAICompatAliasPoolStopsOnInvalidRequest(t *testing.T) {
+	alias := "claude-opus-4.66"
+	invalidErr := &Error{HTTPStatus: http.StatusUnprocessableEntity, Message: "unprocessable entity"}
+	executor := &openAICompatPoolExecutor{
+		id:                "pool",
+		streamFirstErrors: map[string]error{"qwen3.5-plus": invalidErr},
+	}
+	m := newOpenAICompatPoolTestManager(t, alias, []internalconfig.OpenAICompatibilityModel{
+		{Name: "qwen3.5-plus", Alias: alias},
+		{Name: "glm-5", Alias: alias},
+	}, executor)
+
+	_, err := m.ExecuteStream(context.Background(), []string{"pool"}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{})
+	if err == nil || err.Error() != invalidErr.Error() {
+		t.Fatalf("execute stream error = %v, want %v", err, invalidErr)
+	}
+	got := executor.StreamModels()
+	if len(got) != 1 || got[0] != "qwen3.5-plus" {
+		t.Fatalf("stream calls = %v, want only first invalid model", got)
+	}
+}
 func TestManagerExecuteCount_OpenAICompatAliasPoolRotatesWithinAuth(t *testing.T) {
 	alias := "claude-opus-4.66"
 	executor := &openAICompatPoolExecutor{id: "pool"}
@@ -280,5 +367,32 @@ func TestManagerExecuteCount_OpenAICompatAliasPoolRotatesWithinAuth(t *testing.T
 		if got[i] != want[i] {
 			t.Fatalf("count call %d model = %q, want %q", i, got[i], want[i])
 		}
+	}
+}
+
+func TestManagerExecuteStream_OpenAICompatAliasPoolStopsOnInvalidBootstrap(t *testing.T) {
+	alias := "claude-opus-4.66"
+	invalidErr := &Error{HTTPStatus: http.StatusBadRequest, Message: "invalid_request_error: malformed payload"}
+	executor := &openAICompatPoolExecutor{
+		id:                "pool",
+		streamFirstErrors: map[string]error{"qwen3.5-plus": invalidErr},
+	}
+	m := newOpenAICompatPoolTestManager(t, alias, []internalconfig.OpenAICompatibilityModel{
+		{Name: "qwen3.5-plus", Alias: alias},
+		{Name: "glm-5", Alias: alias},
+	}, executor)
+
+	streamResult, err := m.ExecuteStream(context.Background(), []string{"pool"}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{})
+	if err == nil {
+		t.Fatal("expected invalid request error")
+	}
+	if err != invalidErr {
+		t.Fatalf("error = %v, want %v", err, invalidErr)
+	}
+	if streamResult != nil {
+		t.Fatalf("streamResult = %#v, want nil on invalid bootstrap", streamResult)
+	}
+	if got := executor.StreamModels(); len(got) != 1 || got[0] != "qwen3.5-plus" {
+		t.Fatalf("stream calls = %v, want only first upstream model", got)
 	}
 }
