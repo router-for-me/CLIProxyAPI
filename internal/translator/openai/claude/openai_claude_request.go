@@ -38,21 +38,17 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 		out, _ = sjson.Set(out, "top_p", topP.Float())
 	}
 
-	// Stop sequences -> stop
-	if stopSequences := root.Get("stop_sequences"); stopSequences.Exists() {
-		if stopSequences.IsArray() {
-			var stops []string
-			stopSequences.ForEach(func(_, value gjson.Result) bool {
-				stops = append(stops, value.String())
-				return true
-			})
-			if len(stops) > 0 {
-				if len(stops) == 1 {
-					out, _ = sjson.Set(out, "stop", stops[0])
-				} else {
-					out, _ = sjson.Set(out, "stop", stops)
-				}
-			}
+	// Stop sequences -> stop（兼容 stop_sequences 与 stop）
+	stops := make([]string, 0)
+	appendClaudeStopValues(&stops, root.Get("stop_sequences"))
+	if len(stops) == 0 {
+		appendClaudeStopValues(&stops, root.Get("stop"))
+	}
+	if len(stops) > 0 {
+		if len(stops) == 1 {
+			out, _ = sjson.Set(out, "stop", stops[0])
+		} else {
+			out, _ = sjson.Set(out, "stop", stops)
 		}
 	}
 
@@ -371,6 +367,28 @@ func convertClaudeContentPart(part gjson.Result) (string, bool) {
 
 	default:
 		return "", false
+	}
+}
+
+func appendClaudeStopValues(dst *[]string, value gjson.Result) {
+	if !value.Exists() {
+		return
+	}
+	if value.Type == gjson.String {
+		v := strings.TrimSpace(value.String())
+		if v != "" {
+			*dst = append(*dst, v)
+		}
+		return
+	}
+	if value.IsArray() {
+		value.ForEach(func(_, item gjson.Result) bool {
+			v := strings.TrimSpace(item.String())
+			if v != "" {
+				*dst = append(*dst, v)
+			}
+			return true
+		})
 	}
 }
 

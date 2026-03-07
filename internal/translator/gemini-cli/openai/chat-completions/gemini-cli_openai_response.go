@@ -114,100 +114,34 @@ func ConvertCliResponseToOpenAI(_ context.Context, _ string, originalRequestRawJ
 		}
 	}
 
-	// Process the main content part of the response.
-	partsResult := gjson.GetBytes(rawJSON, "response.candidates.0.content.parts")
-	hasFunctionCall := false
-	if partsResult.IsArray() {
-		partResults := partsResult.Array()
-		for i := 0; i < len(partResults); i++ {
-			partResult := partResults[i]
-			partTextResult := partResult.Get("text")
-			functionCallResult := partResult.Get("functionCall")
-			thoughtSignatureResult := partResult.Get("thoughtSignature")
-			if !thoughtSignatureResult.Exists() {
-				thoughtSignatureResult = partResult.Get("thought_signature")
+	if candidates := gjson.GetBytes(rawJSON, "response.candidates"); candidates.Exists() && candidates.IsArray() {
+		candidateArray := candidates.Array()
+		if len(candidateArray) > 0 {
+			chunks := make([]string, 0, len(candidateArray))
+			for idx := range candidateArray {
+				chunk := convertGeminiCandidateToOpenAIChunk(
+					template,
+					candidateArray[idx],
+					idx,
+					(*param).(*convertCliResponseToOpenAIChatParams),
+					finishReason,
+				)
+				chunks = append(chunks, chunk)
 			}
-			inlineDataResult := partResult.Get("inlineData")
-			if !inlineDataResult.Exists() {
-				inlineDataResult = partResult.Get("inline_data")
-			}
-
-			hasThoughtSignature := thoughtSignatureResult.Exists() && thoughtSignatureResult.String() != ""
-			hasContentPayload := partTextResult.Exists() || functionCallResult.Exists() || inlineDataResult.Exists()
-
-			// Ignore encrypted thoughtSignature but keep any actual content in the same part.
-			if hasThoughtSignature && !hasContentPayload {
-				continue
-			}
-
-			if partTextResult.Exists() {
-				textContent := partTextResult.String()
-
-				// Handle text content, distinguishing between regular content and reasoning/thoughts.
-				if partResult.Get("thought").Bool() {
-					template, _ = sjson.Set(template, "choices.0.delta.reasoning_content", textContent)
-				} else {
-					template, _ = sjson.Set(template, "choices.0.delta.content", textContent)
-				}
-				template, _ = sjson.Set(template, "choices.0.delta.role", "assistant")
-			} else if functionCallResult.Exists() {
-				// Handle function call content.
-				hasFunctionCall = true
-				toolCallsResult := gjson.Get(template, "choices.0.delta.tool_calls")
-				functionCallIndex := (*param).(*convertCliResponseToOpenAIChatParams).FunctionIndex
-				(*param).(*convertCliResponseToOpenAIChatParams).FunctionIndex++
-				if toolCallsResult.Exists() && toolCallsResult.IsArray() {
-					functionCallIndex = len(toolCallsResult.Array())
-				} else {
-					template, _ = sjson.SetRaw(template, "choices.0.delta.tool_calls", `[]`)
-				}
-
-				functionCallTemplate := `{"id": "","index": 0,"type": "function","function": {"name": "","arguments": ""}}`
-				fcName := functionCallResult.Get("name").String()
-				functionCallTemplate, _ = sjson.Set(functionCallTemplate, "id", fmt.Sprintf("%s-%d-%d", fcName, time.Now().UnixNano(), atomic.AddUint64(&functionCallIDCounter, 1)))
-				functionCallTemplate, _ = sjson.Set(functionCallTemplate, "index", functionCallIndex)
-				functionCallTemplate, _ = sjson.Set(functionCallTemplate, "function.name", fcName)
-				if fcArgsResult := functionCallResult.Get("args"); fcArgsResult.Exists() {
-					functionCallTemplate, _ = sjson.Set(functionCallTemplate, "function.arguments", fcArgsResult.Raw)
-				}
-				template, _ = sjson.Set(template, "choices.0.delta.role", "assistant")
-				template, _ = sjson.SetRaw(template, "choices.0.delta.tool_calls.-1", functionCallTemplate)
-			} else if inlineDataResult.Exists() {
-				data := inlineDataResult.Get("data").String()
-				if data == "" {
-					continue
-				}
-				mimeType := inlineDataResult.Get("mimeType").String()
-				if mimeType == "" {
-					mimeType = inlineDataResult.Get("mime_type").String()
-				}
-				if mimeType == "" {
-					mimeType = "image/png"
-				}
-				imageURL := fmt.Sprintf("data:%s;base64,%s", mimeType, data)
-				imagesResult := gjson.Get(template, "choices.0.delta.images")
-				if !imagesResult.Exists() || !imagesResult.IsArray() {
-					template, _ = sjson.SetRaw(template, "choices.0.delta.images", `[]`)
-				}
-				imageIndex := len(gjson.Get(template, "choices.0.delta.images").Array())
-				imagePayload := `{"type":"image_url","image_url":{"url":""}}`
-				imagePayload, _ = sjson.Set(imagePayload, "index", imageIndex)
-				imagePayload, _ = sjson.Set(imagePayload, "image_url.url", imageURL)
-				template, _ = sjson.Set(template, "choices.0.delta.role", "assistant")
-				template, _ = sjson.SetRaw(template, "choices.0.delta.images.-1", imagePayload)
-			}
+			return chunks
 		}
 	}
 
-	if hasFunctionCall {
-		template, _ = sjson.Set(template, "choices.0.finish_reason", "tool_calls")
-		template, _ = sjson.Set(template, "choices.0.native_finish_reason", "tool_calls")
-	} else if finishReason != "" && (*param).(*convertCliResponseToOpenAIChatParams).FunctionIndex == 0 {
-		// Only pass through specific finish reasons
-		if finishReason == "max_tokens" || finishReason == "stop" {
-			template, _ = sjson.Set(template, "choices.0.finish_reason", finishReason)
-			template, _ = sjson.Set(template, "choices.0.native_finish_reason", finishReason)
-		}
+	candidate := gjson.GetBytes(rawJSON, "response.candidates.0")
+	if candidate.Exists() {
+		chunk := convertGeminiCandidateToOpenAIChunk(
+			template,
+			candidate,
+			0,
+			(*param).(*convertCliResponseToOpenAIChatParams),
+			finishReason,
+		)
+		return []string{chunk}
 	}
 
 	return []string{template}
@@ -232,4 +166,132 @@ func ConvertCliResponseToOpenAINonStream(ctx context.Context, modelName string, 
 		return ConvertGeminiResponseToOpenAINonStream(ctx, modelName, originalRequestRawJSON, requestRawJSON, []byte(responseResult.Raw), param)
 	}
 	return ""
+}
+
+func convertGeminiCandidateToOpenAIChunk(baseTemplate string, candidate gjson.Result, choiceIndex int, params *convertCliResponseToOpenAIChatParams, fallbackFinishReason string) string {
+	template := baseTemplate
+	template, _ = sjson.Set(template, "choices.0.index", choiceIndex)
+
+	hasFunctionCall := false
+	partsResult := candidate.Get("content.parts")
+	if partsResult.IsArray() {
+		partResults := partsResult.Array()
+		for i := 0; i < len(partResults); i++ {
+			partResult := partResults[i]
+			partTextResult := partResult.Get("text")
+			functionCallResult := partResult.Get("functionCall")
+			thoughtSignatureResult := partResult.Get("thoughtSignature")
+			if !thoughtSignatureResult.Exists() {
+				thoughtSignatureResult = partResult.Get("thought_signature")
+			}
+			inlineDataResult := partResult.Get("inlineData")
+			if !inlineDataResult.Exists() {
+				inlineDataResult = partResult.Get("inline_data")
+			}
+
+			hasThoughtSignature := thoughtSignatureResult.Exists() && thoughtSignatureResult.String() != ""
+			hasContentPayload := partTextResult.Exists() || functionCallResult.Exists() || inlineDataResult.Exists()
+			if hasThoughtSignature && !hasContentPayload {
+				continue
+			}
+
+			if partTextResult.Exists() {
+				textContent := partTextResult.String()
+				if partResult.Get("thought").Bool() {
+					template, _ = sjson.Set(template, "choices.0.delta.reasoning_content", textContent)
+				} else {
+					template, _ = sjson.Set(template, "choices.0.delta.content", textContent)
+				}
+				template, _ = sjson.Set(template, "choices.0.delta.role", "assistant")
+				continue
+			}
+
+			if functionCallResult.Exists() {
+				hasFunctionCall = true
+				toolCallsResult := gjson.Get(template, "choices.0.delta.tool_calls")
+				functionCallIndex := params.FunctionIndex
+				params.FunctionIndex++
+				if toolCallsResult.Exists() && toolCallsResult.IsArray() {
+					functionCallIndex = len(toolCallsResult.Array())
+				} else {
+					template, _ = sjson.SetRaw(template, "choices.0.delta.tool_calls", `[]`)
+				}
+
+				functionCallTemplate := `{"id": "","index": 0,"type": "function","function": {"name": "","arguments": ""}}`
+				fcName := functionCallResult.Get("name").String()
+				functionCallTemplate, _ = sjson.Set(functionCallTemplate, "id", fmt.Sprintf("%s-%d-%d", fcName, time.Now().UnixNano(), atomic.AddUint64(&functionCallIDCounter, 1)))
+				functionCallTemplate, _ = sjson.Set(functionCallTemplate, "index", functionCallIndex)
+				functionCallTemplate, _ = sjson.Set(functionCallTemplate, "function.name", fcName)
+				if fcArgsResult := functionCallResult.Get("args"); fcArgsResult.Exists() {
+					functionCallTemplate, _ = sjson.Set(functionCallTemplate, "function.arguments", fcArgsResult.Raw)
+				}
+				template, _ = sjson.Set(template, "choices.0.delta.role", "assistant")
+				template, _ = sjson.SetRaw(template, "choices.0.delta.tool_calls.-1", functionCallTemplate)
+				continue
+			}
+
+			if !inlineDataResult.Exists() {
+				continue
+			}
+			data := inlineDataResult.Get("data").String()
+			if data == "" {
+				continue
+			}
+			mimeType := inlineDataResult.Get("mimeType").String()
+			if mimeType == "" {
+				mimeType = inlineDataResult.Get("mime_type").String()
+			}
+			if mimeType == "" {
+				mimeType = "image/png"
+			}
+			imageURL := fmt.Sprintf("data:%s;base64,%s", mimeType, data)
+			imagesResult := gjson.Get(template, "choices.0.delta.images")
+			if !imagesResult.Exists() || !imagesResult.IsArray() {
+				template, _ = sjson.SetRaw(template, "choices.0.delta.images", `[]`)
+			}
+			imageIndex := len(gjson.Get(template, "choices.0.delta.images").Array())
+			imagePayload := `{"type":"image_url","image_url":{"url":""}}`
+			imagePayload, _ = sjson.Set(imagePayload, "index", imageIndex)
+			imagePayload, _ = sjson.Set(imagePayload, "image_url.url", imageURL)
+			template, _ = sjson.Set(template, "choices.0.delta.role", "assistant")
+			template, _ = sjson.SetRaw(template, "choices.0.delta.images.-1", imagePayload)
+		}
+	}
+
+	if hasFunctionCall {
+		template, _ = sjson.Set(template, "choices.0.finish_reason", "tool_calls")
+		template, _ = sjson.Set(template, "choices.0.native_finish_reason", "tool_calls")
+		return template
+	}
+
+	nativeFinishReason := strings.ToLower(strings.TrimSpace(candidate.Get("finishReason").String()))
+	if nativeFinishReason == "" {
+		nativeFinishReason = strings.ToLower(strings.TrimSpace(fallbackFinishReason))
+	}
+	mappedFinishReason, nativeReasonToSet := mapGeminiFinishReasonToOpenAI(nativeFinishReason)
+	if mappedFinishReason != "" {
+		template, _ = sjson.Set(template, "choices.0.finish_reason", mappedFinishReason)
+	}
+	if nativeReasonToSet != "" {
+		template, _ = sjson.Set(template, "choices.0.native_finish_reason", nativeReasonToSet)
+	}
+	return template
+}
+
+func mapGeminiFinishReasonToOpenAI(nativeFinishReason string) (string, string) {
+	native := strings.ToLower(strings.TrimSpace(nativeFinishReason))
+	if native == "" {
+		return "", ""
+	}
+
+	switch native {
+	case "max_tokens", "max_output_tokens", "length":
+		return "length", native
+	case "stop", "stop_sequence", "stopsequence", "end_turn":
+		return "stop", native
+	case "safety", "blocklist", "prohibited_content", "content_filter":
+		return "content_filter", native
+	default:
+		return "", native
+	}
 }

@@ -74,6 +74,23 @@ func ConvertOpenAIRequestToGeminiCLI(modelName string, inputRawJSON []byte, _ bo
 		}
 	}
 
+	// Max tokens (prefer max_completion_tokens, fallback to max_tokens)
+	if mct := gjson.GetBytes(rawJSON, "max_completion_tokens"); mct.Exists() && mct.Type == gjson.Number {
+		out, _ = sjson.SetBytes(out, "request.generationConfig.maxOutputTokens", mct.Int())
+	} else if mt := gjson.GetBytes(rawJSON, "max_tokens"); mt.Exists() && mt.Type == gjson.Number {
+		out, _ = sjson.SetBytes(out, "request.generationConfig.maxOutputTokens", mt.Int())
+	}
+
+	// Stop sequences: support both stop_sequences and stop
+	stopSequences := make([]string, 0)
+	appendStopSequences(&stopSequences, gjson.GetBytes(rawJSON, "stop_sequences"))
+	if len(stopSequences) == 0 {
+		appendStopSequences(&stopSequences, gjson.GetBytes(rawJSON, "stop"))
+	}
+	if len(stopSequences) > 0 {
+		out, _ = sjson.SetBytes(out, "request.generationConfig.stopSequences", stopSequences)
+	}
+
 	// Map OpenAI modalities -> Gemini CLI request.generationConfig.responseModalities
 	// e.g. "modalities": ["image", "text"] -> ["IMAGE", "TEXT"]
 	if mods := gjson.GetBytes(rawJSON, "modalities"); mods.Exists() && mods.IsArray() {
@@ -181,16 +198,13 @@ func ConvertOpenAIRequestToGeminiCLI(modelName string, inputRawJSON []byte, _ bo
 							p++
 						case "image_url":
 							imageURL := item.Get("image_url.url").String()
-							if len(imageURL) > 5 {
-								pieces := strings.SplitN(imageURL[5:], ";", 2)
-								if len(pieces) == 2 && len(pieces[1]) > 7 {
-									mime := pieces[0]
-									data := pieces[1][7:]
-									node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".inlineData.mime_type", mime)
-									node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".inlineData.data", data)
+							nextNode, ok := setImageURLPart(node, "parts."+itoa(p), imageURL)
+							if ok {
+								node = nextNode
+								if strings.HasPrefix(imageURL, "data:") {
 									node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".thoughtSignature", geminiCLIFunctionThoughtSignature)
-									p++
 								}
+								p++
 							}
 						case "file":
 							filename := item.Get("file.filename").String()
@@ -227,16 +241,13 @@ func ConvertOpenAIRequestToGeminiCLI(modelName string, inputRawJSON []byte, _ bo
 						case "image_url":
 							// If the assistant returned an inline data URL, preserve it for history fidelity.
 							imageURL := item.Get("image_url.url").String()
-							if len(imageURL) > 5 { // expect data:...
-								pieces := strings.SplitN(imageURL[5:], ";", 2)
-								if len(pieces) == 2 && len(pieces[1]) > 7 {
-									mime := pieces[0]
-									data := pieces[1][7:]
-									node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".inlineData.mime_type", mime)
-									node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".inlineData.data", data)
+							nextNode, ok := setImageURLPart(node, "parts."+itoa(p), imageURL)
+							if ok {
+								node = nextNode
+								if strings.HasPrefix(imageURL, "data:") {
 									node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".thoughtSignature", geminiCLIFunctionThoughtSignature)
-									p++
 								}
+								p++
 							}
 						}
 					}
@@ -273,7 +284,14 @@ func ConvertOpenAIRequestToGeminiCLI(modelName string, inputRawJSON []byte, _ bo
 							if resp == "" {
 								resp = "{}"
 							}
-							toolNode, _ = sjson.SetBytes(toolNode, "parts."+itoa(pp)+".functionResponse.response.result", []byte(resp))
+							respResult := gjson.Parse(resp)
+							if respResult.Type == gjson.JSON {
+								toolNode, _ = sjson.SetRawBytes(toolNode, "parts."+itoa(pp)+".functionResponse.response.result", []byte(respResult.Raw))
+							} else if parsedRaw, ok := parseRawJSONObjectString(respResult); ok {
+								toolNode, _ = sjson.SetRawBytes(toolNode, "parts."+itoa(pp)+".functionResponse.response.result", []byte(parsedRaw))
+							} else {
+								toolNode, _ = sjson.SetBytes(toolNode, "parts."+itoa(pp)+".functionResponse.response.result", respResult.Value())
+							}
 							pp++
 						}
 					}
@@ -393,8 +411,117 @@ func ConvertOpenAIRequestToGeminiCLI(modelName string, inputRawJSON []byte, _ bo
 		}
 	}
 
+	// tool_choice -> Gemini functionCallingConfig
+	if toolChoice := gjson.GetBytes(rawJSON, "tool_choice"); toolChoice.Exists() {
+		out = applyToolChoiceToGeminiCLI(out, toolChoice)
+	}
+
 	return common.AttachDefaultSafetySettings(out, "request.safetySettings")
 }
 
 // itoa converts int to string without strconv import for few usages.
 func itoa(i int) string { return fmt.Sprintf("%d", i) }
+
+func appendStopSequences(dst *[]string, value gjson.Result) {
+	if !value.Exists() {
+		return
+	}
+	if value.Type == gjson.String {
+		trimmed := strings.TrimSpace(value.String())
+		if trimmed != "" {
+			*dst = append(*dst, trimmed)
+		}
+		return
+	}
+	if value.IsArray() {
+		value.ForEach(func(_, item gjson.Result) bool {
+			trimmed := strings.TrimSpace(item.String())
+			if trimmed != "" {
+				*dst = append(*dst, trimmed)
+			}
+			return true
+		})
+	}
+}
+
+func setImageURLPart(node []byte, basePath string, imageURL string) ([]byte, bool) {
+	if imageURL == "" {
+		return node, false
+	}
+	if strings.HasPrefix(imageURL, "data:") {
+		payload := strings.TrimPrefix(imageURL, "data:")
+		pieces := strings.SplitN(payload, ";base64,", 2)
+		if len(pieces) != 2 || pieces[0] == "" || pieces[1] == "" {
+			return node, false
+		}
+		node, _ = sjson.SetBytes(node, basePath+".inlineData.mime_type", pieces[0])
+		node, _ = sjson.SetBytes(node, basePath+".inlineData.data", pieces[1])
+		return node, true
+	}
+	if strings.HasPrefix(imageURL, "http://") || strings.HasPrefix(imageURL, "https://") {
+		node, _ = sjson.SetBytes(node, basePath+".fileData.fileUri", imageURL)
+		return node, true
+	}
+	return node, false
+}
+
+func parseRawJSONObjectString(respResult gjson.Result) (string, bool) {
+	if respResult.Type != gjson.String {
+		return "", false
+	}
+	trimmed := strings.TrimSpace(respResult.String())
+	if len(trimmed) < 2 {
+		return "", false
+	}
+	if !((strings.HasPrefix(trimmed, "{") && strings.HasSuffix(trimmed, "}")) ||
+		(strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]"))) {
+		return "", false
+	}
+	if !gjson.Valid(trimmed) {
+		return "", false
+	}
+	return trimmed, true
+}
+
+func applyToolChoiceToGeminiCLI(out []byte, toolChoice gjson.Result) []byte {
+	mode := ""
+	allowedFunctionNames := make([]string, 0)
+
+	if toolChoice.Type == gjson.String {
+		switch strings.ToLower(strings.TrimSpace(toolChoice.String())) {
+		case "none":
+			mode = "NONE"
+		case "required":
+			mode = "ANY"
+		case "auto":
+			mode = "AUTO"
+		}
+	} else if toolChoice.IsObject() {
+		choiceType := strings.ToLower(strings.TrimSpace(toolChoice.Get("type").String()))
+		switch choiceType {
+		case "none":
+			mode = "NONE"
+		case "required", "any":
+			mode = "ANY"
+		case "auto":
+			mode = "AUTO"
+		case "function":
+			mode = "ANY"
+		}
+		if name := strings.TrimSpace(toolChoice.Get("function.name").String()); name != "" {
+			allowedFunctionNames = append(allowedFunctionNames, name)
+			if mode == "" {
+				mode = "ANY"
+			}
+		}
+	}
+
+	if mode == "" {
+		return out
+	}
+	out, _ = sjson.SetBytes(out, "request.toolConfig.functionCallingConfig.mode", mode)
+	if len(allowedFunctionNames) > 0 {
+		out, _ = sjson.SetBytes(out, "request.toolConfig.functionCallingConfig.allowedFunctionNames", allowedFunctionNames)
+	}
+	return out
+}

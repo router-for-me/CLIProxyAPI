@@ -66,6 +66,29 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 	if tkr := gjson.GetBytes(rawJSON, "top_k"); tkr.Exists() && tkr.Type == gjson.Number {
 		out, _ = sjson.SetBytes(out, "generationConfig.topK", tkr.Num)
 	}
+	if mct := gjson.GetBytes(rawJSON, "max_completion_tokens"); mct.Exists() && mct.Type == gjson.Number {
+		out, _ = sjson.SetBytes(out, "generationConfig.maxOutputTokens", mct.Int())
+	} else if mt := gjson.GetBytes(rawJSON, "max_tokens"); mt.Exists() && mt.Type == gjson.Number {
+		out, _ = sjson.SetBytes(out, "generationConfig.maxOutputTokens", mt.Int())
+	}
+
+	stop := gjson.GetBytes(rawJSON, "stop")
+	if !stop.Exists() {
+		stop = gjson.GetBytes(rawJSON, "stop_sequences")
+	}
+	if stop.Exists() {
+		stopSequences := make([]string, 0, 2)
+		if stop.IsArray() {
+			for _, one := range stop.Array() {
+				stopSequences = append(stopSequences, one.String())
+			}
+		} else {
+			stopSequences = append(stopSequences, stop.String())
+		}
+		if len(stopSequences) > 0 {
+			out, _ = sjson.SetBytes(out, "generationConfig.stopSequences", stopSequences)
+		}
+	}
 
 	// Candidate count (OpenAI 'n' parameter)
 	if n := gjson.GetBytes(rawJSON, "n"); n.Exists() && n.Type == gjson.Number {
@@ -184,16 +207,20 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 							p++
 						case "image_url":
 							imageURL := item.Get("image_url.url").String()
-							if len(imageURL) > 5 {
-								pieces := strings.SplitN(imageURL[5:], ";", 2)
-								if len(pieces) == 2 && len(pieces[1]) > 7 {
-									mime := pieces[0]
-									data := pieces[1][7:]
-									node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".inlineData.mime_type", mime)
-									node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".inlineData.data", data)
-									node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".thoughtSignature", geminiFunctionThoughtSignature)
-									p++
+							if imageURL == "" {
+								break
+							}
+							if mime, data, ok := parseDataURI(imageURL); ok {
+								node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".inlineData.mime_type", mime)
+								node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".inlineData.data", data)
+								node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".thoughtSignature", geminiFunctionThoughtSignature)
+								p++
+							} else {
+								node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".fileData.fileUri", imageURL)
+								if guessedMime := guessMimeTypeFromURL(imageURL); guessedMime != "" {
+									node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".fileData.mimeType", guessedMime)
 								}
+								p++
 							}
 						case "file":
 							filename := item.Get("file.filename").String()
@@ -202,7 +229,11 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 							if sp := strings.Split(filename, "."); len(sp) > 1 {
 								ext = sp[len(sp)-1]
 							}
-							if mimeType, ok := misc.MimeTypes[ext]; ok {
+							if mime, data, ok := parseDataURI(fileData); ok {
+								node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".inlineData.mime_type", mime)
+								node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".inlineData.data", data)
+								p++
+							} else if mimeType, ok := misc.MimeTypes[ext]; ok {
 								node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".inlineData.mime_type", mimeType)
 								node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".inlineData.data", fileData)
 								p++
@@ -233,16 +264,20 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 						case "image_url":
 							// If the assistant returned an inline data URL, preserve it for history fidelity.
 							imageURL := item.Get("image_url.url").String()
-							if len(imageURL) > 5 { // expect data:...
-								pieces := strings.SplitN(imageURL[5:], ";", 2)
-								if len(pieces) == 2 && len(pieces[1]) > 7 {
-									mime := pieces[0]
-									data := pieces[1][7:]
-									node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".inlineData.mime_type", mime)
-									node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".inlineData.data", data)
-									node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".thoughtSignature", geminiFunctionThoughtSignature)
-									p++
+							if imageURL == "" {
+								break
+							}
+							if mime, data, ok := parseDataURI(imageURL); ok {
+								node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".inlineData.mime_type", mime)
+								node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".inlineData.data", data)
+								node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".thoughtSignature", geminiFunctionThoughtSignature)
+								p++
+							} else {
+								node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".fileData.fileUri", imageURL)
+								if guessedMime := guessMimeTypeFromURL(imageURL); guessedMime != "" {
+									node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".fileData.mimeType", guessedMime)
 								}
+								p++
 							}
 						}
 					}
@@ -279,7 +314,12 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 							if resp == "" {
 								resp = "{}"
 							}
-							toolNode, _ = sjson.SetBytes(toolNode, "parts."+itoa(pp)+".functionResponse.response.result", []byte(resp))
+							respResult := gjson.Parse(resp)
+							if respResult.Type == gjson.JSON {
+								toolNode, _ = sjson.SetRawBytes(toolNode, "parts."+itoa(pp)+".functionResponse.response.result", []byte(respResult.Raw))
+							} else {
+								toolNode, _ = sjson.SetBytes(toolNode, "parts."+itoa(pp)+".functionResponse.response.result", respResult.Value())
+							}
 							pp++
 						}
 					}
@@ -399,6 +439,28 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 		}
 	}
 
+	if toolChoice := gjson.GetBytes(rawJSON, "tool_choice"); toolChoice.Exists() {
+		switch toolChoice.Type {
+		case gjson.String:
+			switch strings.ToLower(strings.TrimSpace(toolChoice.String())) {
+			case "auto":
+				out, _ = sjson.SetBytes(out, "toolConfig.functionCallingConfig.mode", "AUTO")
+			case "none":
+				out, _ = sjson.SetBytes(out, "toolConfig.functionCallingConfig.mode", "NONE")
+			case "required":
+				out, _ = sjson.SetBytes(out, "toolConfig.functionCallingConfig.mode", "ANY")
+			}
+		case gjson.JSON:
+			if strings.EqualFold(toolChoice.Get("type").String(), "function") {
+				out, _ = sjson.SetBytes(out, "toolConfig.functionCallingConfig.mode", "ANY")
+				if name := strings.TrimSpace(toolChoice.Get("function.name").String()); name != "" {
+					out, _ = sjson.SetBytes(out, "toolConfig.functionCallingConfig.allowedFunctionNames", []string{name})
+				}
+			}
+		default:
+		}
+	}
+
 	out = common.AttachDefaultSafetySettings(out, "safetySettings")
 
 	return out
@@ -406,3 +468,57 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 
 // itoa converts int to string without strconv import for few usages.
 func itoa(i int) string { return fmt.Sprintf("%d", i) }
+
+func parseDataURI(raw string) (mimeType string, data string, ok bool) {
+	if !strings.HasPrefix(raw, "data:") {
+		return "", "", false
+	}
+	trimmed := strings.TrimPrefix(raw, "data:")
+	parts := strings.SplitN(trimmed, ",", 2)
+	if len(parts) != 2 {
+		return "", "", false
+	}
+	meta := parts[0]
+	data = parts[1]
+	mimeType = "application/octet-stream"
+	if meta == "" {
+		return mimeType, data, true
+	}
+	segments := strings.Split(meta, ";")
+	if len(segments) > 0 && segments[0] != "" {
+		mimeType = segments[0]
+	}
+	for i := 1; i < len(segments); i++ {
+		if strings.EqualFold(strings.TrimSpace(segments[i]), "base64") {
+			return mimeType, data, true
+		}
+	}
+	if len(segments) == 1 {
+		return mimeType, data, true
+	}
+	return "", "", false
+}
+
+func guessMimeTypeFromURL(raw string) string {
+	cleaned := raw
+	if i := strings.Index(cleaned, "?"); i >= 0 {
+		cleaned = cleaned[:i]
+	}
+	if i := strings.Index(cleaned, "#"); i >= 0 {
+		cleaned = cleaned[:i]
+	}
+	lastSlash := strings.LastIndex(cleaned, "/")
+	name := cleaned
+	if lastSlash >= 0 && lastSlash+1 < len(cleaned) {
+		name = cleaned[lastSlash+1:]
+	}
+	lastDot := strings.LastIndex(name, ".")
+	if lastDot < 0 || lastDot+1 >= len(name) {
+		return ""
+	}
+	ext := strings.ToLower(name[lastDot+1:])
+	if mimeType, ok := misc.MimeTypes[ext]; ok {
+		return mimeType
+	}
+	return ""
+}

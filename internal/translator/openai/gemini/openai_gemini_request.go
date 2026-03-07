@@ -64,16 +64,14 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 			out, _ = sjson.Set(out, "top_k", topK.Int())
 		}
 
-		// Stop sequences
-		if stopSequences := genConfig.Get("stopSequences"); stopSequences.Exists() && stopSequences.IsArray() {
-			var stops []string
-			stopSequences.ForEach(func(_, value gjson.Result) bool {
-				stops = append(stops, value.String())
-				return true
-			})
-			if len(stops) > 0 {
-				out, _ = sjson.Set(out, "stop", stops)
-			}
+		// Stop sequences（兼容数组与字符串）
+		var stops []string
+		appendGeminiStopValues(&stops, genConfig.Get("stopSequences"))
+		if len(stops) == 0 {
+			appendGeminiStopValues(&stops, genConfig.Get("stop"))
+		}
+		if len(stops) > 0 {
+			out, _ = sjson.Set(out, "stop", stops)
 		}
 
 		// Candidate count (OpenAI 'n' parameter)
@@ -113,6 +111,7 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 
 	// Process contents (Gemini messages) -> OpenAI messages
 	var toolCallIDs []string // Track tool call IDs for matching with tool results
+	toolCallIDsByName := map[string][]string{}
 
 	// System instruction -> OpenAI system message
 	// Gemini may provide `systemInstruction` or `system_instruction`; support both keys.
@@ -211,10 +210,14 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 					if functionCall := part.Get("functionCall"); functionCall.Exists() {
 						toolCallID := genToolCallID()
 						toolCallIDs = append(toolCallIDs, toolCallID)
+						functionName := functionCall.Get("name").String()
+						if functionName != "" {
+							toolCallIDsByName[functionName] = append(toolCallIDsByName[functionName], toolCallID)
+						}
 
 						toolCall := `{"id":"","type":"function","function":{"name":"","arguments":""}}`
 						toolCall, _ = sjson.Set(toolCall, "id", toolCallID)
-						toolCall, _ = sjson.Set(toolCall, "function.name", functionCall.Get("name").String())
+						toolCall, _ = sjson.Set(toolCall, "function.name", functionName)
 
 						// Convert args to arguments JSON string
 						if args := functionCall.Get("args"); args.Exists() {
@@ -242,10 +245,11 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 						}
 
 						// Try to match with previous tool call ID
-						_ = functionResponse.Get("name").String() // functionName not used for now
-						if len(toolCallIDs) > 0 {
+						functionName := functionResponse.Get("name").String()
+						if matchedID, ok := popToolCallIDByName(toolCallIDsByName, functionName); ok {
+							toolMsg, _ = sjson.Set(toolMsg, "tool_call_id", matchedID)
+						} else if len(toolCallIDs) > 0 {
 							// Use the last tool call ID (simple matching by function name)
-							// In a real implementation, you might want more sophisticated matching
 							toolMsg, _ = sjson.Set(toolMsg, "tool_call_id", toolCallIDs[len(toolCallIDs)-1])
 						} else {
 							// Generate a tool call ID if none available
@@ -312,10 +316,59 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 			case "AUTO":
 				out, _ = sjson.Set(out, "tool_choice", "auto")
 			case "ANY":
+				allowed := functionCallingConfig.Get("allowedFunctionNames")
+				if allowed.Exists() && allowed.IsArray() && len(allowed.Array()) == 1 {
+					name := strings.TrimSpace(allowed.Array()[0].String())
+					if name != "" {
+						toolChoiceJSON := `{"type":"function","function":{"name":""}}`
+						toolChoiceJSON, _ = sjson.Set(toolChoiceJSON, "function.name", name)
+						out, _ = sjson.SetRaw(out, "tool_choice", toolChoiceJSON)
+						break
+					}
+				}
 				out, _ = sjson.Set(out, "tool_choice", "required")
 			}
 		}
 	}
 
 	return []byte(out)
+}
+
+func appendGeminiStopValues(dst *[]string, value gjson.Result) {
+	if !value.Exists() {
+		return
+	}
+	if value.Type == gjson.String {
+		v := strings.TrimSpace(value.String())
+		if v != "" {
+			*dst = append(*dst, v)
+		}
+		return
+	}
+	if value.IsArray() {
+		value.ForEach(func(_, item gjson.Result) bool {
+			v := strings.TrimSpace(item.String())
+			if v != "" {
+				*dst = append(*dst, v)
+			}
+			return true
+		})
+	}
+}
+
+func popToolCallIDByName(toolCallIDsByName map[string][]string, functionName string) (string, bool) {
+	if functionName == "" {
+		return "", false
+	}
+	ids, ok := toolCallIDsByName[functionName]
+	if !ok || len(ids) == 0 {
+		return "", false
+	}
+	matched := ids[0]
+	if len(ids) == 1 {
+		delete(toolCallIDsByName, functionName)
+	} else {
+		toolCallIDsByName[functionName] = ids[1:]
+	}
+	return matched, true
 }

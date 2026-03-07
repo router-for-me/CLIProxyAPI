@@ -62,6 +62,11 @@ func (r *Registry) HasResponseTransformer(from, to Format) bool {
 			return true
 		}
 	}
+	if byTarget, ok := r.responses[to]; ok {
+		if _, isOk := byTarget[from]; isOk {
+			return true
+		}
+	}
 	return false
 }
 

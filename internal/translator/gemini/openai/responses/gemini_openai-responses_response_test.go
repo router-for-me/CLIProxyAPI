@@ -351,3 +351,70 @@ func TestConvertGeminiResponseToOpenAIResponses_ResponseOutputOrdering(t *testin
 		t.Fatalf("expected response.completed after message added: msgAdded=%d completed=%d", posMsgAdded, posCompleted)
 	}
 }
+
+func TestConvertGeminiResponseToOpenAIResponsesNonStream_MultiCandidateMessages(t *testing.T) {
+	in := []byte(`{
+		"responseId":"req_multi_1",
+		"modelVersion":"test-model",
+		"candidates":[
+			{"content":{"role":"model","parts":[{"text":"first"}]}},
+			{"content":{"role":"model","parts":[{"text":"second"}]}}
+		]
+	}`)
+
+	out := ConvertGeminiResponseToOpenAIResponsesNonStream(context.Background(), "test-model", nil, nil, in, nil)
+	root := gjson.Parse(out)
+
+	output := root.Get("output")
+	if !output.Exists() || !output.IsArray() {
+		t.Fatalf("output should be array, got=%s", out)
+	}
+	if got := len(output.Array()); got != 2 {
+		t.Fatalf("output length mismatch, got=%d output=%s", got, out)
+	}
+	if got := output.Get("0.content.0.text").String(); got != "first" {
+		t.Fatalf("first candidate text mismatch, got=%q output=%s", got, out)
+	}
+	if got := output.Get("1.content.0.text").String(); got != "second" {
+		t.Fatalf("second candidate text mismatch, got=%q output=%s", got, out)
+	}
+}
+
+func TestConvertGeminiResponseToOpenAIResponses_StreamMultiCandidateMessages(t *testing.T) {
+	in := []string{
+		`data: {"response":{"candidates":[{"index":0,"content":{"role":"model","parts":[{"text":"first"}]}},{"index":1,"content":{"role":"model","parts":[{"text":"second"}]}}],"modelVersion":"test-model","responseId":"req_stream_multi"},"traceId":"t3"}`,
+		`data: {"response":{"candidates":[{"index":0,"content":{"role":"model","parts":[{"text":""}]},"finishReason":"STOP"},{"index":1,"content":{"role":"model","parts":[{"text":""}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":2,"candidatesTokenCount":2,"totalTokenCount":4,"cachedContentTokenCount":0},"modelVersion":"test-model","responseId":"req_stream_multi"},"traceId":"t3"}`,
+	}
+
+	var param any
+	var out []string
+	for _, line := range in {
+		out = append(out, ConvertGeminiResponseToOpenAIResponses(context.Background(), "test-model", nil, nil, []byte(line), &param)...)
+	}
+
+	var completed gjson.Result
+	for _, chunk := range out {
+		ev, data := parseSSEEvent(t, chunk)
+		if ev == "response.completed" {
+			completed = data
+			break
+		}
+	}
+	if !completed.Exists() {
+		t.Fatalf("missing response.completed event")
+	}
+
+	output := completed.Get("response.output")
+	if !output.Exists() || !output.IsArray() {
+		t.Fatalf("response.output should be array, got=%s", completed.Raw)
+	}
+	if got := len(output.Array()); got != 2 {
+		t.Fatalf("response.output length mismatch, got=%d output=%s", got, completed.Raw)
+	}
+	if got := output.Get("0.content.0.text").String(); got != "first" {
+		t.Fatalf("first streamed candidate text mismatch, got=%q output=%s", got, completed.Raw)
+	}
+	if got := output.Get("1.content.0.text").String(); got != "second" {
+		t.Fatalf("second streamed candidate text mismatch, got=%q output=%s", got, completed.Raw)
+	}
+}

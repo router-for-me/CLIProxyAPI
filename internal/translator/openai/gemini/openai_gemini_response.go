@@ -98,14 +98,20 @@ func ConvertOpenAIResponseToGemini(_ context.Context, _ string, originalRequestR
 
 		choices.ForEach(func(choiceIndex, choice gjson.Result) bool {
 			// Base Gemini response template without finishReason; set when known
-			template := `{"candidates":[{"content":{"parts":[],"role":"model"},"index":0}]}`
+			template := `{"candidates":[]}`
 
 			// Set model if available
 			if model := root.Get("model"); model.Exists() {
 				template, _ = sjson.Set(template, "model", model.String())
 			}
 
-			_ = int(choice.Get("index").Int()) // choiceIdx not used in streaming
+			choiceIdx := int(choice.Get("index").Int())
+			if choiceIdx < 0 {
+				choiceIdx = int(choiceIndex.Int())
+			}
+			candidatePath := fmt.Sprintf("candidates.%d", choiceIdx)
+			template, _ = sjson.Set(template, candidatePath+".index", choiceIdx)
+			template, _ = sjson.Set(template, candidatePath+".content.role", "model")
 			delta := choice.Get("delta")
 			baseTemplate := template
 
@@ -113,7 +119,7 @@ func ConvertOpenAIResponseToGemini(_ context.Context, _ string, originalRequestR
 			if role := delta.Get("role"); role.Exists() && (*param).(*ConvertOpenAIResponseToGeminiParams).IsFirstChunk {
 				// OpenAI assistant -> Gemini model
 				if role.String() == "assistant" {
-					template, _ = sjson.Set(template, "candidates.0.content.role", "model")
+					template, _ = sjson.Set(template, candidatePath+".content.role", "model")
 				}
 				(*param).(*ConvertOpenAIResponseToGeminiParams).IsFirstChunk = false
 				results = append(results, template)
@@ -129,8 +135,8 @@ func ConvertOpenAIResponseToGemini(_ context.Context, _ string, originalRequestR
 						continue
 					}
 					reasoningTemplate := baseTemplate
-					reasoningTemplate, _ = sjson.Set(reasoningTemplate, "candidates.0.content.parts.0.thought", true)
-					reasoningTemplate, _ = sjson.Set(reasoningTemplate, "candidates.0.content.parts.0.text", reasoningText)
+					reasoningTemplate, _ = sjson.Set(reasoningTemplate, candidatePath+".content.parts.0.thought", true)
+					reasoningTemplate, _ = sjson.Set(reasoningTemplate, candidatePath+".content.parts.0.text", reasoningText)
 					chunkOutputs = append(chunkOutputs, reasoningTemplate)
 				}
 			}
@@ -142,7 +148,7 @@ func ConvertOpenAIResponseToGemini(_ context.Context, _ string, originalRequestR
 
 				// Create text part for this delta
 				contentTemplate := baseTemplate
-				contentTemplate, _ = sjson.Set(contentTemplate, "candidates.0.content.parts.0.text", contentText)
+				contentTemplate, _ = sjson.Set(contentTemplate, candidatePath+".content.parts.0.text", contentText)
 				chunkOutputs = append(chunkOutputs, contentTemplate)
 			}
 
@@ -207,14 +213,14 @@ func ConvertOpenAIResponseToGemini(_ context.Context, _ string, originalRequestR
 			// Handle finish reason
 			if finishReason := choice.Get("finish_reason"); finishReason.Exists() {
 				geminiFinishReason := mapOpenAIFinishReasonToGemini(finishReason.String())
-				template, _ = sjson.Set(template, "candidates.0.finishReason", geminiFinishReason)
+				template, _ = sjson.Set(template, candidatePath+".finishReason", geminiFinishReason)
 
 				// If we have accumulated tool calls, output them now
 				if len((*param).(*ConvertOpenAIResponseToGeminiParams).ToolCallsAccumulator) > 0 {
 					partIndex := 0
 					for _, accumulator := range (*param).(*ConvertOpenAIResponseToGeminiParams).ToolCallsAccumulator {
-						namePath := fmt.Sprintf("candidates.0.content.parts.%d.functionCall.name", partIndex)
-						argsPath := fmt.Sprintf("candidates.0.content.parts.%d.functionCall.args", partIndex)
+						namePath := fmt.Sprintf("%s.content.parts.%d.functionCall.name", candidatePath, partIndex)
+						argsPath := fmt.Sprintf("%s.content.parts.%d.functionCall.args", candidatePath, partIndex)
 						template, _ = sjson.Set(template, namePath, accumulator.Name)
 						template, _ = sjson.SetRaw(template, argsPath, parseArgsToObjectRaw(accumulator.Arguments.String()))
 						partIndex++
@@ -536,7 +542,7 @@ func ConvertOpenAIResponseToGeminiNonStream(_ context.Context, _ string, origina
 	root := gjson.ParseBytes(rawJSON)
 
 	// Base Gemini response template without finishReason; set when known
-	out := `{"candidates":[{"content":{"parts":[],"role":"model"},"index":0}]}`
+	out := `{"candidates":[]}`
 
 	// Set model if available
 	if model := root.Get("model"); model.Exists() {
@@ -547,12 +553,16 @@ func ConvertOpenAIResponseToGeminiNonStream(_ context.Context, _ string, origina
 	if choices := root.Get("choices"); choices.Exists() && choices.IsArray() {
 		choices.ForEach(func(choiceIndex, choice gjson.Result) bool {
 			choiceIdx := int(choice.Get("index").Int())
+			if choiceIdx < 0 {
+				choiceIdx = int(choiceIndex.Int())
+			}
+			candidatePath := fmt.Sprintf("candidates.%d", choiceIdx)
 			message := choice.Get("message")
 
 			// Set role
 			if role := message.Get("role"); role.Exists() {
 				if role.String() == "assistant" {
-					out, _ = sjson.Set(out, "candidates.0.content.role", "model")
+					out, _ = sjson.Set(out, candidatePath+".content.role", "model")
 				}
 			}
 
@@ -564,15 +574,15 @@ func ConvertOpenAIResponseToGeminiNonStream(_ context.Context, _ string, origina
 					if reasoningText == "" {
 						continue
 					}
-					out, _ = sjson.Set(out, fmt.Sprintf("candidates.0.content.parts.%d.thought", partIndex), true)
-					out, _ = sjson.Set(out, fmt.Sprintf("candidates.0.content.parts.%d.text", partIndex), reasoningText)
+					out, _ = sjson.Set(out, fmt.Sprintf("%s.content.parts.%d.thought", candidatePath, partIndex), true)
+					out, _ = sjson.Set(out, fmt.Sprintf("%s.content.parts.%d.text", candidatePath, partIndex), reasoningText)
 					partIndex++
 				}
 			}
 
 			// Handle content first
 			if content := message.Get("content"); content.Exists() && content.String() != "" {
-				out, _ = sjson.Set(out, fmt.Sprintf("candidates.0.content.parts.%d.text", partIndex), content.String())
+				out, _ = sjson.Set(out, fmt.Sprintf("%s.content.parts.%d.text", candidatePath, partIndex), content.String())
 				partIndex++
 			}
 
@@ -584,8 +594,8 @@ func ConvertOpenAIResponseToGeminiNonStream(_ context.Context, _ string, origina
 						functionName := function.Get("name").String()
 						functionArgs := function.Get("arguments").String()
 
-						namePath := fmt.Sprintf("candidates.0.content.parts.%d.functionCall.name", partIndex)
-						argsPath := fmt.Sprintf("candidates.0.content.parts.%d.functionCall.args", partIndex)
+						namePath := fmt.Sprintf("%s.content.parts.%d.functionCall.name", candidatePath, partIndex)
+						argsPath := fmt.Sprintf("%s.content.parts.%d.functionCall.args", candidatePath, partIndex)
 						out, _ = sjson.Set(out, namePath, functionName)
 						out, _ = sjson.SetRaw(out, argsPath, parseArgsToObjectRaw(functionArgs))
 						partIndex++
@@ -597,11 +607,11 @@ func ConvertOpenAIResponseToGeminiNonStream(_ context.Context, _ string, origina
 			// Handle finish reason
 			if finishReason := choice.Get("finish_reason"); finishReason.Exists() {
 				geminiFinishReason := mapOpenAIFinishReasonToGemini(finishReason.String())
-				out, _ = sjson.Set(out, "candidates.0.finishReason", geminiFinishReason)
+				out, _ = sjson.Set(out, candidatePath+".finishReason", geminiFinishReason)
 			}
 
 			// Set index
-			out, _ = sjson.Set(out, "candidates.0.index", choiceIdx)
+			out, _ = sjson.Set(out, candidatePath+".index", choiceIdx)
 
 			return true
 		})

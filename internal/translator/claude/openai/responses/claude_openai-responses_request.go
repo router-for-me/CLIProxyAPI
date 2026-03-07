@@ -120,6 +120,29 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 	if mot := root.Get("max_output_tokens"); mot.Exists() {
 		out, _ = sjson.Set(out, "max_tokens", mot.Int())
 	}
+	if temp := root.Get("temperature"); temp.Exists() {
+		out, _ = sjson.Set(out, "temperature", temp.Float())
+	} else if topP := root.Get("top_p"); topP.Exists() {
+		out, _ = sjson.Set(out, "top_p", topP.Float())
+	}
+	stop := root.Get("stop")
+	if !stop.Exists() {
+		stop = root.Get("stop_sequences")
+	}
+	if stop.Exists() {
+		if stop.IsArray() {
+			var stopSequences []string
+			stop.ForEach(func(_, value gjson.Result) bool {
+				stopSequences = append(stopSequences, value.String())
+				return true
+			})
+			if len(stopSequences) > 0 {
+				out, _ = sjson.Set(out, "stop_sequences", stopSequences)
+			}
+		} else {
+			out, _ = sjson.Set(out, "stop_sequences", []string{stop.String()})
+		}
+	}
 
 	// Stream
 	out, _ = sjson.Set(out, "stream", stream)
@@ -337,6 +360,10 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 			}
 			return true
 		})
+	} else if input.Exists() && input.Type == gjson.String {
+		msg := `{"role":"user","content":""}`
+		msg, _ = sjson.Set(msg, "content", input.String())
+		out, _ = sjson.SetRaw(out, "messages.-1", msg)
 	}
 
 	// tools mapping: parameters -> input_schema
