@@ -313,10 +313,19 @@ func (qa *QwenAuth) PollForToken(ctx context.Context, deviceCode, codeVerifier s
 	return nil, fmt.Errorf("authentication timeout. Please restart the authentication process")
 }
 
+func waitForNextPoll(ctx context.Context, pollInterval time.Duration) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(pollInterval):
+		return nil
+	}
+}
+
 func (qa *QwenAuth) postForm(ctx context.Context, endpoint string, data url.Values) (*http.Response, error) {
 	client := qa.httpClient
 	if client == nil {
-		client = http.DefaultClient
+		client = &http.Client{Timeout: 60 * time.Second}
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(data.Encode()))
 	if err != nil {
