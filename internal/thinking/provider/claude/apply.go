@@ -194,7 +194,9 @@ func (a *Applier) normalizeClaudeBudget(body []byte, budgetTokens int, modelInfo
 	}
 	if minBudget > 0 && adjustedBudget > 0 && adjustedBudget < minBudget {
 		// If enforcing the max_tokens constraint would push the budget below the model minimum,
-		// leave the request unchanged.
+		// increase max_tokens to accommodate the original budget instead of leaving the
+		// request unchanged (which would cause a 400 error from the API).
+		body, _ = sjson.SetBytes(body, "max_tokens", budgetTokens+1)
 		return body
 	}
 
