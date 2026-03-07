@@ -17,8 +17,11 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
+
+const openAICompatRetryErrorBodyLimit = 1 << 20
 
 // OpenAICompatExecutor implements a stateless executor for OpenAI-compatible providers.
 // It performs request/response translation and executes against the provider base URL
@@ -199,10 +202,18 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
 	requestedModel := payloadRequestedModel(opts, req.Model)
 	translated = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", translated, originalTranslated, requestedModel)
+	autoInjectedStreamUsage := !gjson.GetBytes(translated, "stream_options.include_usage").Exists()
 
 	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
 		return nil, err
+	}
+
+	if autoInjectedStreamUsage {
+		translated, err = sjson.SetBytes(translated, "stream_options.include_usage", true)
+		if err != nil {
+			return nil, fmt.Errorf("openai compat executor: failed to set stream_options in payload: %w", err)
+		}
 	}
 
 	url := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
@@ -245,6 +256,13 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	if err != nil {
 		recordAPIResponseError(ctx, e.cfg, err)
 		return nil, err
+	}
+	if retryResp, retryErr := e.retryStreamWithoutInjectedUsage(ctx, auth, httpClient, httpReq, translated, httpResp, autoInjectedStreamUsage); retryResp != nil || retryErr != nil {
+		httpResp = retryResp
+		if retryErr != nil {
+			recordAPIResponseError(ctx, e.cfg, retryErr)
+			return nil, retryErr
+		}
 	}
 	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
@@ -298,6 +316,67 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		reporter.ensurePublished(ctx)
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
+}
+
+func (e *OpenAICompatExecutor) retryStreamWithoutInjectedUsage(ctx context.Context, auth *cliproxyauth.Auth, httpClient *http.Client, httpReq *http.Request, translated []byte, httpResp *http.Response, autoInjected bool) (*http.Response, error) {
+	if !autoInjected || httpResp == nil {
+		return nil, nil
+	}
+	if httpResp.StatusCode != http.StatusBadRequest && httpResp.StatusCode != http.StatusUnprocessableEntity {
+		return nil, nil
+	}
+	body, err := io.ReadAll(io.LimitReader(httpResp.Body, openAICompatRetryErrorBodyLimit+1))
+	if err != nil {
+		if errClose := httpResp.Body.Close(); errClose != nil {
+			log.Warnf("openai compat executor: failed to close body after read error: %v", errClose)
+		}
+		return nil, err
+	}
+	if errClose := httpResp.Body.Close(); errClose != nil {
+		log.Errorf("openai compat executor: close fallback response body error: %v", errClose)
+	}
+	if len(body) > openAICompatRetryErrorBodyLimit {
+		log.Warnf("openai compat executor: fallback response body exceeded %d bytes; skip retry without include_usage", openAICompatRetryErrorBodyLimit)
+		httpResp.Body = io.NopCloser(bytes.NewReader(body[:openAICompatRetryErrorBodyLimit]))
+		return httpResp, nil
+	}
+	if !strings.Contains(strings.ToLower(string(body)), "stream_options") && !strings.Contains(strings.ToLower(string(body)), "include_usage") {
+		httpResp.Body = io.NopCloser(bytes.NewReader(body))
+		return httpResp, nil
+	}
+	trimmed, err := sjson.DeleteBytes(translated, "stream_options.include_usage")
+	if err != nil {
+		return nil, fmt.Errorf("openai compat executor: failed to remove unsupported stream_options in payload: %w", err)
+	}
+	if streamOptions := gjson.GetBytes(trimmed, "stream_options"); streamOptions.Exists() && len(streamOptions.Map()) == 0 {
+		trimmed, err = sjson.DeleteBytes(trimmed, "stream_options")
+		if err != nil {
+			return nil, fmt.Errorf("openai compat executor: failed to remove empty stream_options in payload: %w", err)
+		}
+	}
+	retryReq, err := http.NewRequestWithContext(ctx, httpReq.Method, httpReq.URL.String(), bytes.NewReader(trimmed))
+	if err != nil {
+		return nil, err
+	}
+	retryReq.Header = httpReq.Header.Clone()
+	var authID, authLabel, authType, authValue string
+	if auth != nil {
+		authID = auth.ID
+		authLabel = auth.Label
+		authType, authValue = auth.AccountInfo()
+	}
+	recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
+		URL:       retryReq.URL.String(),
+		Method:    retryReq.Method,
+		Headers:   retryReq.Header.Clone(),
+		Body:      trimmed,
+		Provider:  e.Identifier(),
+		AuthID:    authID,
+		AuthLabel: authLabel,
+		AuthType:  authType,
+		AuthValue: authValue,
+	})
+	return httpClient.Do(retryReq)
 }
 
 func (e *OpenAICompatExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
