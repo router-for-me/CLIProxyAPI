@@ -22,8 +22,11 @@ var (
 
 // ConvertCodexResponseToClaudeParams holds parameters for response conversion.
 type ConvertCodexResponseToClaudeParams struct {
-	HasToolCall bool
-	BlockIndex  int
+	HasToolCall         bool
+	BlockIndex          int
+	ThinkingBlockOpen   bool
+	ThinkingStopPending bool
+	ThinkingSignature   string
 }
 
 // ConvertCodexResponseToClaude performs sophisticated streaming response format conversion.
@@ -42,7 +45,7 @@ type ConvertCodexResponseToClaudeParams struct {
 //
 // Returns:
 //   - []string: A slice of strings, each containing a Claude Code-compatible JSON response
-func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) []string {
+func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRawJSON, _ []byte, rawJSON []byte, param *any) []string {
 	if *param == nil {
 		*param = &ConvertCodexResponseToClaudeParams{
 			HasToolCall: false,
@@ -58,6 +61,13 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 
 	output := ""
 	rootResult := gjson.ParseBytes(rawJSON)
+	params := (*param).(*ConvertCodexResponseToClaudeParams)
+	if params.ThinkingBlockOpen {
+		switch rootResult.Get("type").String() {
+		case "response.content_part.added", "response.completed":
+			output += finalizeCodexThinkingBlock(params)
+		}
+	}
 	typeResult := rootResult.Get("type")
 	typeStr := typeResult.String()
 	template := ""
@@ -69,49 +79,50 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 		output = "event: message_start\n"
 		output += fmt.Sprintf("data: %s\n\n", template)
 	} else if typeStr == "response.reasoning_summary_part.added" {
-		template = `{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}`
-		template, _ = sjson.Set(template, "index", (*param).(*ConvertCodexResponseToClaudeParams).BlockIndex)
+		template = `{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}`
+		template, _ = sjson.Set(template, "index", params.BlockIndex)
+		params.ThinkingBlockOpen = true
+		params.ThinkingStopPending = false
+		params.ThinkingSignature = ""
 
 		output = "event: content_block_start\n"
 		output += fmt.Sprintf("data: %s\n\n", template)
 	} else if typeStr == "response.reasoning_summary_text.delta" {
 		template = `{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":""}}`
-		template, _ = sjson.Set(template, "index", (*param).(*ConvertCodexResponseToClaudeParams).BlockIndex)
+		template, _ = sjson.Set(template, "index", params.BlockIndex)
 		template, _ = sjson.Set(template, "delta.thinking", rootResult.Get("delta").String())
 
 		output = "event: content_block_delta\n"
 		output += fmt.Sprintf("data: %s\n\n", template)
 	} else if typeStr == "response.reasoning_summary_part.done" {
-		template = `{"type":"content_block_stop","index":0}`
-		template, _ = sjson.Set(template, "index", (*param).(*ConvertCodexResponseToClaudeParams).BlockIndex)
-		(*param).(*ConvertCodexResponseToClaudeParams).BlockIndex++
-
-		output = "event: content_block_stop\n"
-		output += fmt.Sprintf("data: %s\n\n", template)
+		params.ThinkingStopPending = true
+		if params.ThinkingSignature != "" {
+			output += finalizeCodexThinkingBlock(params)
+		}
 
 	} else if typeStr == "response.content_part.added" {
 		template = `{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`
-		template, _ = sjson.Set(template, "index", (*param).(*ConvertCodexResponseToClaudeParams).BlockIndex)
+		template, _ = sjson.Set(template, "index", params.BlockIndex)
 
-		output = "event: content_block_start\n"
+		output += "event: content_block_start\n"
 		output += fmt.Sprintf("data: %s\n\n", template)
 	} else if typeStr == "response.output_text.delta" {
 		template = `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":""}}`
-		template, _ = sjson.Set(template, "index", (*param).(*ConvertCodexResponseToClaudeParams).BlockIndex)
+		template, _ = sjson.Set(template, "index", params.BlockIndex)
 		template, _ = sjson.Set(template, "delta.text", rootResult.Get("delta").String())
 
 		output = "event: content_block_delta\n"
 		output += fmt.Sprintf("data: %s\n\n", template)
 	} else if typeStr == "response.content_part.done" {
 		template = `{"type":"content_block_stop","index":0}`
-		template, _ = sjson.Set(template, "index", (*param).(*ConvertCodexResponseToClaudeParams).BlockIndex)
-		(*param).(*ConvertCodexResponseToClaudeParams).BlockIndex++
+		template, _ = sjson.Set(template, "index", params.BlockIndex)
+		params.BlockIndex++
 
 		output = "event: content_block_stop\n"
 		output += fmt.Sprintf("data: %s\n\n", template)
 	} else if typeStr == "response.completed" {
 		template = `{"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`
-		p := (*param).(*ConvertCodexResponseToClaudeParams).HasToolCall
+		p := params.HasToolCall
 		if p {
 			template, _ = sjson.Set(template, "delta.stop_reason", "tool_use")
 		} else {
@@ -124,7 +135,7 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 			template, _ = sjson.Set(template, "usage.cache_read_input_tokens", cachedTokens)
 		}
 
-		output = "event: message_delta\n"
+		output += "event: message_delta\n"
 		output += fmt.Sprintf("data: %s\n\n", template)
 		output += "event: message_stop\n"
 		output += `data: {"type":"message_stop"}`
@@ -133,12 +144,12 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 		itemResult := rootResult.Get("item")
 		itemType := itemResult.Get("type").String()
 		if itemType == "function_call" {
-			(*param).(*ConvertCodexResponseToClaudeParams).HasToolCall = true
+			output += finalizeCodexThinkingBlock(params)
+			params.HasToolCall = true
 			template = `{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"","name":"","input":{}}}`
-			template, _ = sjson.Set(template, "index", (*param).(*ConvertCodexResponseToClaudeParams).BlockIndex)
+			template, _ = sjson.Set(template, "index", params.BlockIndex)
 			template, _ = sjson.Set(template, "content_block.id", itemResult.Get("call_id").String())
 			{
-				// Restore original tool name if shortened
 				name := itemResult.Get("name").String()
 				rev := buildReverseMapFromClaudeOriginalShortToOriginal(originalRequestRawJSON)
 				if orig, ok := rev[name]; ok {
@@ -147,29 +158,37 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 				template, _ = sjson.Set(template, "content_block.name", name)
 			}
 
-			output = "event: content_block_start\n"
+			output += "event: content_block_start\n"
 			output += fmt.Sprintf("data: %s\n\n", template)
 
 			template = `{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":""}}`
-			template, _ = sjson.Set(template, "index", (*param).(*ConvertCodexResponseToClaudeParams).BlockIndex)
+			template, _ = sjson.Set(template, "index", params.BlockIndex)
 
 			output += "event: content_block_delta\n"
 			output += fmt.Sprintf("data: %s\n\n", template)
+		} else if itemType == "reasoning" {
+			params.ThinkingSignature = itemResult.Get("encrypted_content").String()
+			if params.ThinkingStopPending {
+				output += finalizeCodexThinkingBlock(params)
+			}
 		}
 	} else if typeStr == "response.output_item.done" {
 		itemResult := rootResult.Get("item")
 		itemType := itemResult.Get("type").String()
 		if itemType == "function_call" {
 			template = `{"type":"content_block_stop","index":0}`
-			template, _ = sjson.Set(template, "index", (*param).(*ConvertCodexResponseToClaudeParams).BlockIndex)
-			(*param).(*ConvertCodexResponseToClaudeParams).BlockIndex++
+			template, _ = sjson.Set(template, "index", params.BlockIndex)
+			params.BlockIndex++
 
 			output = "event: content_block_stop\n"
 			output += fmt.Sprintf("data: %s\n\n", template)
+		} else if itemType == "reasoning" {
+			params.ThinkingSignature = itemResult.Get("encrypted_content").String()
+			output += finalizeCodexThinkingBlock(params)
 		}
 	} else if typeStr == "response.function_call_arguments.delta" {
 		template = `{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":""}}`
-		template, _ = sjson.Set(template, "index", (*param).(*ConvertCodexResponseToClaudeParams).BlockIndex)
+		template, _ = sjson.Set(template, "index", params.BlockIndex)
 		template, _ = sjson.Set(template, "delta.partial_json", rootResult.Get("delta").String())
 
 		output += "event: content_block_delta\n"
@@ -222,6 +241,7 @@ func ConvertCodexResponseToClaudeNonStream(_ context.Context, _ string, original
 			switch item.Get("type").String() {
 			case "reasoning":
 				thinkingBuilder := strings.Builder{}
+				signature := item.Get("encrypted_content").String()
 				if summary := item.Get("summary"); summary.Exists() {
 					if summary.IsArray() {
 						summary.ForEach(func(_, part gjson.Result) bool {
@@ -252,9 +272,10 @@ func ConvertCodexResponseToClaudeNonStream(_ context.Context, _ string, original
 						}
 					}
 				}
-				if thinkingBuilder.Len() > 0 {
-					block := `{"type":"thinking","thinking":""}`
+				if thinkingBuilder.Len() > 0 || signature != "" {
+					block := `{"type":"thinking","thinking":"","signature":""}`
 					block, _ = sjson.Set(block, "thinking", thinkingBuilder.String())
+					block, _ = sjson.Set(block, "signature", signature)
 					out, _ = sjson.SetRaw(out, "content.-1", block)
 				}
 			case "message":
@@ -363,6 +384,31 @@ func buildReverseMapFromClaudeOriginalShortToOriginal(original []byte) map[strin
 	return rev
 }
 
-func ClaudeTokenCount(ctx context.Context, count int64) string {
+func ClaudeTokenCount(_ context.Context, count int64) string {
 	return fmt.Sprintf(`{"input_tokens":%d}`, count)
+}
+
+func finalizeCodexThinkingBlock(params *ConvertCodexResponseToClaudeParams) string {
+	if !params.ThinkingBlockOpen {
+		return ""
+	}
+
+	output := ""
+	signatureDelta := `{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":""}}`
+	signatureDelta, _ = sjson.Set(signatureDelta, "index", params.BlockIndex)
+	signatureDelta, _ = sjson.Set(signatureDelta, "delta.signature", params.ThinkingSignature)
+	output += "event: content_block_delta\n"
+	output += fmt.Sprintf("data: %s\n\n", signatureDelta)
+
+	contentBlockStop := `{"type":"content_block_stop","index":0}`
+	contentBlockStop, _ = sjson.Set(contentBlockStop, "index", params.BlockIndex)
+	output += "event: content_block_stop\n"
+	output += fmt.Sprintf("data: %s\n\n", contentBlockStop)
+
+	params.BlockIndex++
+	params.ThinkingBlockOpen = false
+	params.ThinkingStopPending = false
+	params.ThinkingSignature = ""
+
+	return output
 }
