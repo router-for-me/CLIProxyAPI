@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -456,22 +457,16 @@ func TestFileSynthesizer_Synthesize_CloakAttributes(t *testing.T) {
 				t.Fatalf("expected 1 auth, got %d", len(auths))
 			}
 
-			cloakKeys := []string{
-				"cloak_mode", "cloak_strict_mode",
-				"cloak_sensitive_words", "cloak_cache_user_id",
-			}
+			cloakKeys := cloakAuthKeys
+			gotCloakAttrs := make(map[string]string)
 			for _, key := range cloakKeys {
-				got, gotOK := auths[0].Attributes[key]
-				want, wantOK := tt.wantAttrs[key]
-				if wantOK {
-					if !gotOK {
-						t.Errorf("expected attribute %q=%q, but not set", key, want)
-					} else if got != want {
-						t.Errorf("attribute %q: expected %q, got %q", key, want, got)
-					}
-				} else if gotOK {
-					t.Errorf("attribute %q should not be set, got %q", key, got)
+				if val, ok := auths[0].Attributes[key]; ok {
+					gotCloakAttrs[key] = val
 				}
+			}
+
+			if !reflect.DeepEqual(tt.wantAttrs, gotCloakAttrs) {
+				t.Errorf("cloak attributes mismatch:\n  got:  %v\n  want: %v", gotCloakAttrs, tt.wantAttrs)
 			}
 		})
 	}
