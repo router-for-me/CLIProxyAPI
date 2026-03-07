@@ -1,8 +1,10 @@
 package executor
 
 import (
+	"encoding/json"
 	"net/http"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -56,6 +58,77 @@ func TestParseCodexRetryAfter(t *testing.T) {
 		body := []byte(`{"error":{"type":"server_error","resets_in_seconds":30}}`)
 		if got := parseCodexRetryAfter(http.StatusTooManyRequests, body, now); got != nil {
 			t.Fatalf("expected nil for non-usage_limit_reached, got %v", *got)
+		}
+	})
+}
+
+func TestParseCodexSSEError(t *testing.T) {
+	t.Run("context_length_exceeded maps to invalid_request_error bad_request", func(t *testing.T) {
+		line := []byte(`{"type":"error","error":{"type":"invalid_request_error","code":"context_length_exceeded","message":"Your input exceeds the context window of this model. Please adjust your input and try again.","param":"input"},"sequence_number":2}`)
+		got, ok := parseCodexSSEError(line)
+		if !ok {
+			t.Fatalf("expected parser to handle codex SSE error")
+		}
+		if got.code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d", got.code, http.StatusBadRequest)
+		}
+		var payload map[string]any
+		if err := json.Unmarshal([]byte(got.msg), &payload); err != nil {
+			t.Fatalf("unmarshal wrapped message: %v", err)
+		}
+		errObj, ok := payload["error"].(map[string]any)
+		if !ok {
+			t.Fatalf("payload['error'] is not of type map[string]any")
+		}
+		if errObj["type"] != "invalid_request_error" {
+			t.Fatalf("error.type = %v, want invalid_request_error", errObj["type"])
+		}
+		if errObj["code"] != "context_length_exceeded" {
+			t.Fatalf("error.code = %v, want context_length_exceeded", errObj["code"])
+		}
+		msg, _ := errObj["message"].(string)
+		if !strings.Contains(strings.ToLower(msg), "context window") {
+			t.Fatalf("error.message = %q, want context window wording", msg)
+		}
+	})
+
+	t.Run("rate_limit keeps 429", func(t *testing.T) {
+		line := []byte(`{"type":"error","error":{"type":"rate_limit_error","code":"rate_limit_exceeded","message":"rate limited"}}`)
+		got, ok := parseCodexSSEError(line)
+		if !ok {
+			t.Fatalf("expected parser to handle codex SSE rate limit error")
+		}
+		if got.code != http.StatusTooManyRequests {
+			t.Fatalf("status = %d, want %d", got.code, http.StatusTooManyRequests)
+		}
+	})
+
+	t.Run("response.failed with nested response.error is parsed", func(t *testing.T) {
+		line := []byte(`{"type":"response.failed","response":{"error":{"code":"context_length_exceeded","message":"Your input exceeds the context window of this model. Please adjust your input and try again."}}}`)
+		got, ok := parseCodexSSEError(line)
+		if !ok {
+			t.Fatalf("expected parser to handle response.failed event")
+		}
+		if got.code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d", got.code, http.StatusBadRequest)
+		}
+		var payload map[string]any
+		if err := json.Unmarshal([]byte(got.msg), &payload); err != nil {
+			t.Fatalf("unmarshal wrapped message: %v", err)
+		}
+		errObj, ok := payload["error"].(map[string]any)
+		if !ok {
+			t.Fatalf("payload['error'] is not of type map[string]any")
+		}
+		if errObj["code"] != "context_length_exceeded" {
+			t.Fatalf("error.code = %v, want context_length_exceeded", errObj["code"])
+		}
+	})
+
+	t.Run("non-error event ignored", func(t *testing.T) {
+		line := []byte(`{"type":"response.completed"}`)
+		if _, ok := parseCodexSSEError(line); ok {
+			t.Fatalf("expected non-error event to be ignored")
 		}
 	})
 }
