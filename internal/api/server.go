@@ -24,6 +24,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api/middleware"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api/modules"
 	ampmodule "github.com/router-for-me/CLIProxyAPI/v6/internal/api/modules/amp"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/autoupdate"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/managementasset"
@@ -260,6 +261,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		authManager.SetRetryConfig(cfg.RequestRetry, time.Duration(cfg.MaxRetryInterval)*time.Second, cfg.MaxRetryCredentials)
 	}
 	managementasset.SetCurrentConfig(cfg)
+	autoupdate.SetConfig(cfg)
 	auth.SetQuotaCooldownDisabled(cfg.DisableCooling)
 	// Initialize management handler
 	s.mgmt = managementHandlers.NewHandler(cfg, configFilePath, authManager)
@@ -962,6 +964,7 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 		s.wsAuthChanged(oldCfg.WebsocketAuth, cfg.WebsocketAuth)
 	}
 	managementasset.SetCurrentConfig(cfg)
+	autoupdate.SetConfig(cfg)
 	// Save YAML snapshot for next comparison
 	s.oldConfigYaml, _ = yaml.Marshal(cfg)
 

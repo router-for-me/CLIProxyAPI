@@ -18,6 +18,7 @@ import (
 
 	"github.com/joho/godotenv"
 	configaccess "github.com/router-for-me/CLIProxyAPI/v6/internal/access/config_access"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/autoupdate"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/cmd"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
@@ -434,6 +435,7 @@ func main() {
 		cfg.AuthDir = resolvedAuthDir
 	}
 	managementasset.SetCurrentConfig(cfg)
+	autoupdate.SetConfig(cfg)
 
 	// Create login options to be used in authentication flows.
 	options := &cmd.LoginOptions{
@@ -566,6 +568,8 @@ func main() {
 		} else {
 			// Start the main proxy service
 			managementasset.StartAutoUpdater(context.Background(), configFilePath)
+			autoupdate.SetConfig(cfg)
+			autoupdate.Start(context.Background())
 			cmd.StartService(cfg, configFilePath, password)
 		}
 	}

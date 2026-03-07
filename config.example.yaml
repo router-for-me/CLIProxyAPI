@@ -62,6 +62,12 @@ error-logs-max-files: 10
 # When false, disable in-memory usage statistics aggregation
 usage-statistics-enabled: false
 
+# Enable automatic binary self-update from GitHub releases.
+# When true, periodically checks for newer versions, downloads the matching platform
+# binary, verifies SHA256 checksum, backs up usage statistics, and restarts.
+# Default: false (opt-in)
+auto-update: false
+
 # Proxy URL. Supports socks5/http/https protocols. Example: socks5://user:pass@192.168.1.1:1080/
 proxy-url: ""
 
