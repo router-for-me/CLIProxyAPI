@@ -2,7 +2,9 @@ package openai
 
 import (
 	"bytes"
+	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,8 +13,45 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	"github.com/tidwall/gjson"
 )
+
+type websocketCaptureExecutor struct {
+	streamCalls int
+	payloads    [][]byte
+}
+
+func (e *websocketCaptureExecutor) Identifier() string { return "test-provider" }
+
+func (e *websocketCaptureExecutor) Execute(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, errors.New("not implemented")
+}
+
+func (e *websocketCaptureExecutor) ExecuteStream(_ context.Context, _ *coreauth.Auth, req coreexecutor.Request, _ coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+	e.streamCalls++
+	e.payloads = append(e.payloads, bytes.Clone(req.Payload))
+	chunks := make(chan coreexecutor.StreamChunk, 1)
+	chunks <- coreexecutor.StreamChunk{Payload: []byte(`{"type":"response.completed","response":{"id":"resp-upstream","output":[{"type":"message","id":"out-1"}]}}`)}
+	close(chunks)
+	return &coreexecutor.StreamResult{Chunks: chunks}, nil
+}
+
+func (e *websocketCaptureExecutor) Refresh(_ context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+	return auth, nil
+}
+
+func (e *websocketCaptureExecutor) CountTokens(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, errors.New("not implemented")
+}
+
+func (e *websocketCaptureExecutor) HttpRequest(context.Context, *coreauth.Auth, *http.Request) (*http.Response, error) {
+	return nil, errors.New("not implemented")
+}
 
 func TestNormalizeResponsesWebsocketRequestCreate(t *testing.T) {
 	raw := []byte(`{"type":"response.create","model":"test-model","stream":false,"input":[{"type":"message","id":"msg-1"}]}`)
@@ -324,5 +363,132 @@ func TestForwardResponsesWebsocketPreservesCompletedEvent(t *testing.T) {
 
 	if errServer := <-serverErrCh; errServer != nil {
 		t.Fatalf("server error: %v", errServer)
+	}
+}
+
+func TestWebsocketUpstreamSupportsIncrementalInputForModel(t *testing.T) {
+	manager := coreauth.NewManager(nil, nil, nil)
+	auth := &coreauth.Auth{
+		ID:         "auth-ws",
+		Provider:   "test-provider",
+		Status:     coreauth.StatusActive,
+		Attributes: map[string]string{"websockets": "true"},
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "test-model"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	h := NewOpenAIResponsesAPIHandler(base)
+	if !h.websocketUpstreamSupportsIncrementalInputForModel("test-model") {
+		t.Fatalf("expected websocket-capable upstream for test-model")
+	}
+}
+
+func TestResponsesWebsocketPrewarmHandledLocallyForSSEUpstream(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	executor := &websocketCaptureExecutor{}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	auth := &coreauth.Auth{ID: "auth-sse", Provider: executor.Identifier(), Status: coreauth.StatusActive}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "test-model"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	h := NewOpenAIResponsesAPIHandler(base)
+	router := gin.New()
+	router.GET("/v1/responses/ws", h.ResponsesWebsocket)
+
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/responses/ws"
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer func() {
+		errClose := conn.Close()
+		if errClose != nil {
+			t.Fatalf("close websocket: %v", errClose)
+		}
+	}()
+
+	errWrite := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"test-model","generate":false}`))
+	if errWrite != nil {
+		t.Fatalf("write prewarm websocket message: %v", errWrite)
+	}
+
+	_, createdPayload, errReadMessage := conn.ReadMessage()
+	if errReadMessage != nil {
+		t.Fatalf("read prewarm created message: %v", errReadMessage)
+	}
+	if gjson.GetBytes(createdPayload, "type").String() != "response.created" {
+		t.Fatalf("created payload type = %s, want response.created", gjson.GetBytes(createdPayload, "type").String())
+	}
+	prewarmResponseID := gjson.GetBytes(createdPayload, "response.id").String()
+	if prewarmResponseID == "" {
+		t.Fatalf("prewarm response id is empty")
+	}
+	if executor.streamCalls != 0 {
+		t.Fatalf("stream calls after prewarm = %d, want 0", executor.streamCalls)
+	}
+
+	_, completedPayload, errReadMessage := conn.ReadMessage()
+	if errReadMessage != nil {
+		t.Fatalf("read prewarm completed message: %v", errReadMessage)
+	}
+	if gjson.GetBytes(completedPayload, "type").String() != wsEventTypeCompleted {
+		t.Fatalf("completed payload type = %s, want %s", gjson.GetBytes(completedPayload, "type").String(), wsEventTypeCompleted)
+	}
+	if gjson.GetBytes(completedPayload, "response.id").String() != prewarmResponseID {
+		t.Fatalf("completed response id = %s, want %s", gjson.GetBytes(completedPayload, "response.id").String(), prewarmResponseID)
+	}
+	if gjson.GetBytes(completedPayload, "response.usage.total_tokens").Int() != 0 {
+		t.Fatalf("prewarm total tokens = %d, want 0", gjson.GetBytes(completedPayload, "response.usage.total_tokens").Int())
+	}
+
+	secondRequest := fmt.Sprintf(`{"type":"response.create","previous_response_id":%q,"input":[{"type":"message","id":"msg-1"}]}`, prewarmResponseID)
+	errWrite = conn.WriteMessage(websocket.TextMessage, []byte(secondRequest))
+	if errWrite != nil {
+		t.Fatalf("write follow-up websocket message: %v", errWrite)
+	}
+
+	_, upstreamPayload, errReadMessage := conn.ReadMessage()
+	if errReadMessage != nil {
+		t.Fatalf("read upstream completed message: %v", errReadMessage)
+	}
+	if gjson.GetBytes(upstreamPayload, "type").String() != wsEventTypeCompleted {
+		t.Fatalf("upstream payload type = %s, want %s", gjson.GetBytes(upstreamPayload, "type").String(), wsEventTypeCompleted)
+	}
+	if executor.streamCalls != 1 {
+		t.Fatalf("stream calls after follow-up = %d, want 1", executor.streamCalls)
+	}
+	if len(executor.payloads) != 1 {
+		t.Fatalf("captured upstream payloads = %d, want 1", len(executor.payloads))
+	}
+	forwarded := executor.payloads[0]
+	if gjson.GetBytes(forwarded, "previous_response_id").Exists() {
+		t.Fatalf("previous_response_id leaked upstream: %s", forwarded)
+	}
+	if gjson.GetBytes(forwarded, "generate").Exists() {
+		t.Fatalf("generate leaked upstream: %s", forwarded)
+	}
+	if gjson.GetBytes(forwarded, "model").String() != "test-model" {
+		t.Fatalf("forwarded model = %s, want test-model", gjson.GetBytes(forwarded, "model").String())
+	}
+	input := gjson.GetBytes(forwarded, "input").Array()
+	if len(input) != 1 || input[0].Get("id").String() != "msg-1" {
+		t.Fatalf("unexpected forwarded input: %s", forwarded)
 	}
 }
