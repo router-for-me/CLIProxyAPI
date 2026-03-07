@@ -33,11 +33,12 @@ func (w *Watcher) start(ctx context.Context) error {
 	}
 	log.Debugf("watching config file: %s", w.configPath)
 
-	if errAddAuthDir := w.watcher.Add(w.authDir); errAddAuthDir != nil {
-		log.Errorf("failed to watch auth directory %s: %v", w.authDir, errAddAuthDir)
+	authDir := w.effectiveAuthDir()
+	if errAddAuthDir := w.watcher.Add(authDir); errAddAuthDir != nil {
+		log.Errorf("failed to watch auth directory %s: %v", authDir, errAddAuthDir)
 		return errAddAuthDir
 	}
-	log.Debugf("watching auth directory: %s", w.authDir)
+	log.Debugf("watching auth directory: %s", authDir)
 
 	go w.processEvents(ctx)
 
@@ -69,10 +70,9 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 	configOps := fsnotify.Write | fsnotify.Create | fsnotify.Rename
 	normalizedName := w.normalizeAuthPath(event.Name)
 	normalizedConfigPath := w.normalizeAuthPath(w.configPath)
-	normalizedAuthDir := w.normalizeAuthPath(w.authDir)
 	isConfigEvent := normalizedName == normalizedConfigPath && event.Op&configOps != 0
 	authOps := fsnotify.Create | fsnotify.Write | fsnotify.Remove | fsnotify.Rename
-	isAuthJSON := strings.HasPrefix(normalizedName, normalizedAuthDir) && strings.HasSuffix(normalizedName, ".json") && event.Op&authOps != 0
+	isAuthJSON := strings.HasSuffix(normalizedName, ".json") && pathBelongsToDir(event.Name, w.effectiveAuthDir()) && event.Op&authOps != 0
 	if !isConfigEvent && !isAuthJSON {
 		// Ignore unrelated files (e.g., cookie snapshots *.cookie) and other noise.
 		return
@@ -192,3 +192,6 @@ func (w *Watcher) shouldDebounceRemove(normalizedPath string, now time.Time) boo
 	w.clientsMutex.Unlock()
 	return false
 }
+
+
+
