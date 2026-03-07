@@ -11,6 +11,25 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
+type captureStorage struct {
+	metadata map[string]any
+}
+
+func (s *captureStorage) SetMetadata(meta map[string]any) {
+	s.metadata = meta
+}
+
+func (s *captureStorage) SaveTokenToFile(authFilePath string) error {
+	if s.metadata == nil {
+		s.metadata = map[string]any{}
+	}
+	raw, err := json.Marshal(s.metadata)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(authFilePath, raw, 0o600)
+}
+
 func TestFileTokenStore_PersistsAndRestoresRuntimeState(t *testing.T) {
 	t.Parallel()
 
@@ -125,5 +144,45 @@ func TestFileTokenStore_PersistsAndRestoresRuntimeState(t *testing.T) {
 	}
 	if state.Quota.Reason != "quota" || !state.Quota.Exceeded {
 		t.Fatalf("model state quota=%+v, want exceeded quota", state.Quota)
+	}
+}
+
+func TestFileTokenStore_StorageBackedSaveIncludesRuntimeMetadata(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "storage.json")
+	store := NewFileTokenStore()
+	nextRetry := time.Now().UTC().Add(10 * time.Minute).Round(time.Second)
+	storage := &captureStorage{}
+
+	auth := &cliproxyauth.Auth{
+		ID:             "storage.json",
+		Provider:       "codex",
+		Status:         cliproxyauth.StatusError,
+		Unavailable:    true,
+		NextRetryAfter: nextRetry,
+		Metadata: map[string]any{
+			"type":  "codex",
+			"email": "storage@example.com",
+		},
+		Attributes: map[string]string{"path": path},
+		Storage:    storage,
+	}
+
+	if _, err := store.Save(context.Background(), auth); err != nil {
+		t.Fatalf("Save() error: %v", err)
+	}
+	if got, ok := storage.metadata["runtime_status"].(string); !ok || got != string(cliproxyauth.StatusError) {
+		t.Fatalf("runtime_status=%v, want %q", storage.metadata["runtime_status"], cliproxyauth.StatusError)
+	}
+	if got, ok := storage.metadata["runtime_unavailable"].(bool); !ok || !got {
+		t.Fatalf("runtime_unavailable=%v, want true", storage.metadata["runtime_unavailable"])
+	}
+	if _, ok := storage.metadata["runtime_next_retry_after"]; !ok {
+		t.Fatalf("runtime_next_retry_after missing in storage metadata")
+	}
+	if _, ok := auth.Metadata["runtime_status"]; ok {
+		t.Fatalf("auth.Metadata mutated with runtime keys")
 	}
 }
