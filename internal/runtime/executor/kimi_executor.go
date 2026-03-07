@@ -478,13 +478,30 @@ func isKimiAssistantContentEmpty(content gjson.Result) bool {
 	if !content.Exists() || content.Type == gjson.Null {
 		return true
 	}
-	if content.Type == gjson.String {
-		return strings.TrimSpace(content.String()) == ""
-	}
-	if content.IsArray() {
-		return len(content.Array()) == 0
+	if content.Type == gjson.String || content.IsArray() {
+		return strings.TrimSpace(kimiAssistantContentText(content)) == ""
 	}
 	return false
+}
+
+func kimiAssistantContentText(content gjson.Result) string {
+	if content.Type == gjson.String {
+		return strings.TrimSpace(content.String())
+	}
+	if !content.IsArray() {
+		return ""
+	}
+
+	parts := make([]string, 0, len(content.Array()))
+	for _, item := range content.Array() {
+		text := strings.TrimSpace(item.Get("text").String())
+		if text == "" {
+			continue
+		}
+		parts = append(parts, text)
+	}
+
+	return strings.Join(parts, "\n")
 }
 
 func fallbackAssistantReasoning(msg gjson.Result, hasLatest bool, latest string) string {
@@ -492,24 +509,8 @@ func fallbackAssistantReasoning(msg gjson.Result, hasLatest bool, latest string)
 		return latest
 	}
 
-	content := msg.Get("content")
-	if content.Type == gjson.String {
-		if text := strings.TrimSpace(content.String()); text != "" {
-			return text
-		}
-	}
-	if content.IsArray() {
-		parts := make([]string, 0, len(content.Array()))
-		for _, item := range content.Array() {
-			text := strings.TrimSpace(item.Get("text").String())
-			if text == "" {
-				continue
-			}
-			parts = append(parts, text)
-		}
-		if len(parts) > 0 {
-			return strings.Join(parts, "\n")
-		}
+	if text := kimiAssistantContentText(msg.Get("content")); text != "" {
+		return text
 	}
 
 	return "[reasoning unavailable]"
