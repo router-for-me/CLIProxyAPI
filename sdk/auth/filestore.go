@@ -83,18 +83,19 @@ func (s *FileTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (str
 		SetMetadata(map[string]any)
 	}
 
+	metadata := cliproxyauth.CloneMetadata(auth.Metadata)
+	metadata["disabled"] = auth.Disabled
+	cliproxyauth.ApplyRuntimeStateToMetadata(metadata, auth)
+
 	switch {
 	case auth.Storage != nil:
 		if setter, ok := auth.Storage.(metadataSetter); ok {
-			setter.SetMetadata(auth.Metadata)
+			setter.SetMetadata(metadata)
 		}
 		if err = auth.Storage.SaveTokenToFile(path); err != nil {
 			return "", err
 		}
 	case auth.Metadata != nil:
-		metadata := cloneMetadata(auth.Metadata)
-		metadata["disabled"] = auth.Disabled
-		applyRuntimeStateToMetadata(metadata, auth)
 		raw, errMarshal := json.Marshal(metadata)
 		if errMarshal != nil {
 			return "", fmt.Errorf("auth filestore: marshal metadata failed: %w", errMarshal)
@@ -269,7 +270,7 @@ func (s *FileTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth,
 	if email, ok := metadata["email"].(string); ok && email != "" {
 		auth.Attributes["email"] = email
 	}
-	restoreRuntimeStateFromMetadata(auth, metadata)
+	cliproxyauth.RestoreRuntimeStateFromMetadata(auth, metadata)
 	return auth, nil
 }
 
