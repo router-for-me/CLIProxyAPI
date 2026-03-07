@@ -899,7 +899,7 @@ func GetOpenAIModels() []*ModelInfo {
 			ContextLength:       1_050_000,
 			MaxCompletionTokens: 128000,
 			SupportedParameters: []string{"tools"},
-			Thinking:            &ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh"}},
+			Thinking:            &ThinkingSupport{Levels: []string{"none", "low", "medium", "high", "xhigh"}},
 		},
 	}
 }
