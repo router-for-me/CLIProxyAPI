@@ -110,4 +110,7 @@ func TestOpenAICompatExecutorExecuteStreamRetriesWithoutInjectedIncludeUsage(t *
 	if gjson.GetBytes(gotBodies[1], "stream_options.include_usage").Exists() {
 		t.Fatalf("expected retry request to remove include_usage, got body: %s", string(gotBodies[1]))
 	}
+	if gjson.GetBytes(gotBodies[1], "stream_options").Exists() {
+		t.Fatalf("expected retry request to remove empty stream_options, got body: %s", string(gotBodies[1]))
+	}
 }

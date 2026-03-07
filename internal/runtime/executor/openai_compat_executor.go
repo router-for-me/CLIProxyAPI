@@ -348,6 +348,12 @@ func (e *OpenAICompatExecutor) retryStreamWithoutInjectedUsage(ctx context.Conte
 	if err != nil {
 		return nil, fmt.Errorf("openai compat executor: failed to remove unsupported stream_options in payload: %w", err)
 	}
+	if streamOptions := gjson.GetBytes(trimmed, "stream_options"); streamOptions.Exists() && len(streamOptions.Map()) == 0 {
+		trimmed, err = sjson.DeleteBytes(trimmed, "stream_options")
+		if err != nil {
+			return nil, fmt.Errorf("openai compat executor: failed to remove empty stream_options in payload: %w", err)
+		}
+	}
 	retryReq, err := http.NewRequestWithContext(ctx, httpReq.Method, httpReq.URL.String(), bytes.NewReader(trimmed))
 	if err != nil {
 		return nil, err
