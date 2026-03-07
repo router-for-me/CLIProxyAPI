@@ -541,6 +541,7 @@ attemptLoop:
 				}()
 				scanner := bufio.NewScanner(resp.Body)
 				scanner.Buffer(nil, streamScannerBuffer)
+				thinkingParser := NewThinkingTagParser(baseModel)
 				for scanner.Scan() {
 					line := scanner.Bytes()
 					appendAPIResponseChunk(ctx, e.cfg, line)
@@ -553,6 +554,8 @@ attemptLoop:
 					if payload == nil {
 						continue
 					}
+
+					payload = thinkingParser.Process(payload)
 
 					if detail, ok := parseAntigravityStreamUsage(payload); ok {
 						reporter.publish(ctx, detail)
@@ -932,6 +935,7 @@ attemptLoop:
 				}()
 				scanner := bufio.NewScanner(resp.Body)
 				scanner.Buffer(nil, streamScannerBuffer)
+				thinkingParser := NewThinkingTagParser(baseModel)
 				var param any
 				for scanner.Scan() {
 					line := scanner.Bytes()
@@ -945,6 +949,8 @@ attemptLoop:
 					if payload == nil {
 						continue
 					}
+
+					payload = thinkingParser.Process(payload)
 
 					if detail, ok := parseAntigravityStreamUsage(payload); ok {
 						reporter.publish(ctx, detail)
