@@ -21,7 +21,7 @@ import (
 const (
 	DefaultPanelGitHubRepository = "https://github.com/router-for-me/Cli-Proxy-API-Management-Center"
 	DefaultPprofAddr             = "127.0.0.1:8316"
-	MaxLogsMaxTotalSizeMB        = 1024 * 1024
+	MaxLogsMaxTotalSizeMB        = 1024
 )
 
 // Config represents the application's configuration, loaded from a YAML file.
@@ -1830,5 +1830,3 @@ func removeLegacyAuthBlock(root *yaml.Node) {
 	}
 	removeMapKey(root, "auth")
 }
-
-

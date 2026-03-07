@@ -184,6 +184,8 @@ func (h *Handler) effectiveAuthDir() string {
 	if h == nil {
 		return ""
 	}
+	h.stateMu.RLock()
+	defer h.stateMu.RUnlock()
 	store := h.tokenStoreWithBaseDir()
 	if h.cfg == nil {
 		return ResolveEffectiveAuthDir("", store)
@@ -205,7 +207,12 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 
 		clientIP := c.ClientIP()
 		localClient := clientIP == "127.0.0.1" || clientIP == "::1"
+		h.stateMu.RLock()
 		cfg := h.cfg
+		localPassword := h.localPassword
+		allowRemoteOverride := h.allowRemoteOverride
+		envSecret := h.envSecret
+		h.stateMu.RUnlock()
 		var (
 			allowRemote bool
 			secretHash  string
@@ -214,10 +221,9 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 			allowRemote = cfg.RemoteManagement.AllowRemote
 			secretHash = cfg.RemoteManagement.SecretKey
 		}
-		if h.allowRemoteOverride {
+		if allowRemoteOverride {
 			allowRemote = true
 		}
-		envSecret := h.envSecret
 
 		fail := func() {}
 		if !localClient {
@@ -287,8 +293,8 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 		}
 
 		if localClient {
-			if lp := h.localPassword; lp != "" {
-				if subtle.ConstantTimeCompare([]byte(provided), []byte(lp)) == 1 {
+			if localPassword != "" {
+				if subtle.ConstantTimeCompare([]byte(provided), []byte(localPassword)) == 1 {
 					c.Next()
 					return
 				}
