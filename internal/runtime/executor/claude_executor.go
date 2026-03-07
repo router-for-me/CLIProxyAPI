@@ -128,6 +128,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 
 	requestedModel := payloadRequestedModel(opts, req.Model)
 	body = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
+	body = applyClaudeSystemPromptCountPolicy(e.cfg, auth, body)
 
 	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
 	body = disableThinkingIfToolChoiceForced(body)
@@ -294,6 +295,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 
 	requestedModel := payloadRequestedModel(opts, req.Model)
 	body = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
+	body = applyClaudeSystemPromptCountPolicy(e.cfg, auth, body)
 
 	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
 	body = disableThinkingIfToolChoiceForced(body)
@@ -473,6 +475,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	if !strings.HasPrefix(baseModel, "claude-3-5-haiku") {
 		body = checkSystemInstructions(body)
 	}
+	body = applyClaudeSystemPromptCountPolicy(e.cfg, auth, body)
 
 	// Keep count_tokens requests compatible with Anthropic cache-control constraints too.
 	body = enforceCacheControlLimit(body, 4)
@@ -1151,8 +1154,7 @@ func getCloakConfigFromAuth(auth *cliproxyauth.Auth) (string, bool, []string, bo
 	return cloakMode, strictMode, sensitiveWords, cacheUserID
 }
 
-// resolveClaudeKeyCloakConfig finds the matching ClaudeKey config and returns its CloakConfig.
-func resolveClaudeKeyCloakConfig(cfg *config.Config, auth *cliproxyauth.Auth) *config.CloakConfig {
+func resolveClaudeKeyConfig(cfg *config.Config, auth *cliproxyauth.Auth) *config.ClaudeKey {
 	if cfg == nil || auth == nil {
 		return nil
 	}
@@ -1166,18 +1168,132 @@ func resolveClaudeKeyCloakConfig(cfg *config.Config, auth *cliproxyauth.Auth) *c
 		entry := &cfg.ClaudeKey[i]
 		cfgKey := strings.TrimSpace(entry.APIKey)
 		cfgBase := strings.TrimSpace(entry.BaseURL)
-
-		// Match by API key
-		if strings.EqualFold(cfgKey, apiKey) {
-			// If baseURL is specified, also check it
-			if baseURL != "" && cfgBase != "" && !strings.EqualFold(cfgBase, baseURL) {
-				continue
-			}
-			return entry.Cloak
+		if !strings.EqualFold(cfgKey, apiKey) {
+			continue
 		}
+		if baseURL != "" && cfgBase != "" && !strings.EqualFold(cfgBase, baseURL) {
+			continue
+		}
+		return entry
 	}
 
 	return nil
+}
+
+// resolveClaudeKeyCloakConfig finds the matching ClaudeKey config and returns its CloakConfig.
+func resolveClaudeKeyCloakConfig(cfg *config.Config, auth *cliproxyauth.Auth) *config.CloakConfig {
+	entry := resolveClaudeKeyConfig(cfg, auth)
+	if entry == nil {
+		return nil
+	}
+	return entry.Cloak
+}
+
+func applyClaudeSystemPromptCountPolicy(cfg *config.Config, auth *cliproxyauth.Auth, payload []byte) []byte {
+	entry := resolveClaudeKeyConfig(cfg, auth)
+	if entry == nil || entry.SystemPromptCount <= 0 {
+		return payload
+	}
+	return enforceSystemPromptCount(payload, entry.SystemPromptCount)
+}
+
+func enforceSystemPromptCount(payload []byte, targetCount int) []byte {
+	if targetCount <= 0 {
+		return payload
+	}
+	if targetCount > config.MaxClaudeSystemPromptCount {
+		targetCount = config.MaxClaudeSystemPromptCount
+	}
+
+	root, ok := parsePayloadObject(payload)
+	if !ok {
+		return payload
+	}
+
+	systemBlocks := make([]any, 0, targetCount)
+	if system, exists := root["system"]; exists {
+		if arr, ok := asArray(system); ok {
+			systemBlocks = append(systemBlocks, arr...)
+		} else {
+			systemBlocks = append(systemBlocks, system)
+		}
+	}
+
+	textValues := make([]string, 0, len(systemBlocks))
+	for _, block := range systemBlocks {
+		if text, ok := extractSystemText(block); ok {
+			textValues = append(textValues, text)
+		}
+	}
+
+	// Reduce text block count by merging overflow text into the last retained text block.
+	if len(textValues) >= targetCount {
+		mergedText := strings.Join(textValues[targetCount-1:], "\n\n")
+		merged := make([]any, 0, len(systemBlocks)-(len(textValues)-targetCount))
+		textIndex := 0
+		for _, block := range systemBlocks {
+			if _, ok := extractSystemText(block); !ok {
+				merged = append(merged, block)
+				continue
+			}
+			if textIndex < targetCount-1 {
+				merged = append(merged, block)
+			} else if textIndex == targetCount-1 {
+				merged = append(merged, setSystemText(block, mergedText))
+			}
+			textIndex++
+		}
+		root["system"] = merged
+		return marshalPayloadObject(payload, root)
+	}
+
+	// Increase text block count by appending empty text blocks.
+	for len(textValues) < targetCount {
+		systemBlocks = append(systemBlocks, map[string]any{
+			"type": "text",
+			"text": "",
+		})
+		textValues = append(textValues, "")
+	}
+	root["system"] = systemBlocks
+	return marshalPayloadObject(payload, root)
+}
+
+func extractSystemText(block any) (string, bool) {
+	switch v := block.(type) {
+	case string:
+		return v, true
+	case map[string]any:
+		if blockType, ok := v["type"].(string); ok && blockType != "" && !strings.EqualFold(blockType, "text") {
+			return "", false
+		}
+		text, ok := v["text"].(string)
+		if !ok {
+			return "", false
+		}
+		return text, true
+	default:
+		return "", false
+	}
+}
+
+func setSystemText(block any, text string) any {
+	switch v := block.(type) {
+	case string:
+		return text
+	case map[string]any:
+		updated := make(map[string]any, len(v))
+		for key, value := range v {
+			updated[key] = value
+		}
+		updated["text"] = text
+		return updated
+	default:
+		return map[string]any{
+			"type": "text",
+			"text": text,
+		}
+	}
 }
 
 // injectFakeUserID generates and injects a fake user ID into the request metadata.
