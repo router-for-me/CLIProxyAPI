@@ -1,6 +1,7 @@
 package qwen
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"net/url"
@@ -50,7 +51,7 @@ func TestPollForTokenUsesConfiguredHTTPClient(t *testing.T) {
 		})},
 	}
 
-	token, err := qa.PollForToken("device-code", "code-verifier")
+	token, err := qa.PollForToken(context.Background(), "device-code", "code-verifier")
 	if err != nil {
 		t.Fatalf("PollForToken returned error: %v", err)
 	}
@@ -61,4 +62,3 @@ func TestPollForTokenUsesConfiguredHTTPClient(t *testing.T) {
 		t.Fatalf("unexpected token response: %+v", token)
 	}
 }
-

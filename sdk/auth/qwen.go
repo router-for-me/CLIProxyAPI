@@ -66,7 +66,7 @@ func (a *QwenAuthenticator) Login(ctx context.Context, cfg *config.Config, opts 
 
 	fmt.Println("Waiting for Qwen authentication...")
 
-	tokenData, err := authSvc.PollForToken(deviceFlow.DeviceCode, deviceFlow.CodeVerifier)
+	tokenData, err := authSvc.PollForToken(ctx, deviceFlow.DeviceCode, deviceFlow.CodeVerifier)
 	if err != nil {
 		return nil, fmt.Errorf("qwen authentication failed: %w", err)
 	}
@@ -112,5 +112,3 @@ func (a *QwenAuthenticator) Login(ctx context.Context, cfg *config.Config, opts 
 		Metadata: metadata,
 	}, nil
 }
-
-
