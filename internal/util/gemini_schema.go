@@ -42,6 +42,7 @@ func cleanJSONSchema(jsonStr string, addPlaceholder bool) string {
 	jsonStr = mergeAllOf(jsonStr)
 	jsonStr = flattenAnyOfOneOf(jsonStr)
 	jsonStr = flattenTypeArrays(jsonStr)
+	jsonStr = inferMissingObjectType(jsonStr)
 
 	// Phase 3: Cleanup
 	jsonStr = removeUnsupportedKeywords(jsonStr)
@@ -493,6 +494,26 @@ func walkForExtensions(value gjson.Result, path string, paths *[]string) {
 			return true
 		})
 	}
+}
+
+// inferMissingObjectType adds "type":"object" to any schema node that has
+// "properties" but no "type" field. Gemini API rejects schemas where
+// "properties" appears on a non-OBJECT type.
+func inferMissingObjectType(jsonStr string) string {
+	paths := findPaths(jsonStr, "properties")
+	sortByDepth(paths)
+
+	for _, p := range paths {
+		parentPath := trimSuffix(p, ".properties")
+		if isPropertyDefinition(parentPath) {
+			continue
+		}
+		typePath := joinPath(parentPath, "type")
+		if !gjson.Get(jsonStr, typePath).Exists() {
+			jsonStr, _ = sjson.Set(jsonStr, typePath, "object")
+		}
+	}
+	return jsonStr
 }
 
 func cleanupRequiredFields(jsonStr string) string {
