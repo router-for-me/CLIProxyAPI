@@ -23,6 +23,8 @@ func TestIsNewer(t *testing.T) {
 		{"longer same prefix", "6.8.47.0", "6.8.47", false},
 		{"ten vs nine", "6.8.10", "6.8.9", true},
 		{"v prefix stripped", "6.8.48", "6.8.47", true},
+		{"pre-release tag skipped", "6.8.48-beta", "6.8.47", false},
+		{"current pre-release skipped", "6.8.48", "6.8.47-rc1", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

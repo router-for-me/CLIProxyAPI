@@ -568,7 +568,6 @@ func main() {
 		} else {
 			// Start the main proxy service
 			managementasset.StartAutoUpdater(context.Background(), configFilePath)
-			autoupdate.SetConfig(cfg)
 			autoupdate.Start(context.Background())
 			cmd.StartService(cfg, configFilePath, password)
 		}

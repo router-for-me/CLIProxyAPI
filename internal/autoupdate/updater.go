@@ -145,11 +145,10 @@ func checkAndUpdate(ctx context.Context, cfg *config.Config) error {
 		return err
 	}
 
-	// 3. Download checksums.txt for verification.
+	// 3. Download checksums.txt for verification (mandatory — abort if unavailable).
 	checksums, err := downloadChecksums(ctx, client, release.Assets)
 	if err != nil {
-		log.WithError(err).Warn("auto-update: checksums not available, proceeding without verification")
-		checksums = nil
+		return fmt.Errorf("checksums not available, aborting for safety: %w", err)
 	}
 
 	// 4. Download the archive.
@@ -159,12 +158,10 @@ func checkAndUpdate(ctx context.Context, cfg *config.Config) error {
 	}
 
 	// 5. Verify checksum.
-	if checksums != nil {
-		if err := verifyChecksum(archiveData, assetName, checksums); err != nil {
-			return fmt.Errorf("checksum verification: %w", err)
-		}
-		log.Info("auto-update: checksum verified")
+	if err := verifyChecksum(archiveData, assetName, checksums); err != nil {
+		return fmt.Errorf("checksum verification: %w", err)
 	}
+	log.Info("auto-update: checksum verified")
 
 	// 6. Extract binary from archive.
 	binaryData, err := extractBinaryFromTarGz(archiveData)
@@ -173,7 +170,7 @@ func checkAndUpdate(ctx context.Context, cfg *config.Config) error {
 	}
 
 	// 7. Back up usage statistics before restart.
-	backupUsageStatistics(cfg)
+	backupUsageStatistics(ctx, cfg)
 
 	// 8. Replace the running binary.
 	if err := replaceBinary(binaryData); err != nil {
@@ -224,6 +221,8 @@ func fetchLatestRelease(ctx context.Context, client *http.Client) (*releaseInfo,
 }
 
 // isNewer returns true when latest is a higher semantic version than current.
+// Both versions should be numeric dotted strings (e.g. "6.8.47").
+// Returns false (conservative) if either version contains non-numeric parts.
 func isNewer(latest, current string) bool {
 	lp := strings.Split(latest, ".")
 	cp := strings.Split(current, ".")
@@ -235,11 +234,15 @@ func isNewer(latest, current string) bool {
 
 	for i := 0; i < maxLen; i++ {
 		var l, c int
+		var lErr, cErr error
 		if i < len(lp) {
-			l, _ = strconv.Atoi(lp[i])
+			l, lErr = strconv.Atoi(lp[i])
 		}
 		if i < len(cp) {
-			c, _ = strconv.Atoi(cp[i])
+			c, cErr = strconv.Atoi(cp[i])
+		}
+		if lErr != nil || cErr != nil {
+			return false // Non-numeric component: skip update to be safe.
 		}
 		if l > c {
 			return true
@@ -386,14 +389,14 @@ func replaceBinary(data []byte) error {
 
 // backupUsageStatistics saves current usage statistics to a file so they can
 // be restored after restart. Uses the management API via localhost.
-func backupUsageStatistics(cfg *config.Config) {
+func backupUsageStatistics(ctx context.Context, cfg *config.Config) {
 	port := cfg.Port
 	if port == 0 {
 		port = 8317
 	}
 
 	url := fmt.Sprintf("http://127.0.0.1:%d/v0/management/usage/export", port)
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		log.WithError(err).Warn("auto-update: failed to create usage backup request")
 		return
