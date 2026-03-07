@@ -1,7 +1,8 @@
 services:
+  # 8317: iFlow dedicated (frozen). Do not auto-update.
   cli-proxy-api:
-    image: ${CLI_PROXY_IMAGE:-eceasy/cli-proxy-api:latest}
-    pull_policy: always
+    image: eceasy/cli-proxy-api:v6.8.37
+    pull_policy: if_not_present
     build:
       context: .
       dockerfile: Dockerfile
@@ -10,10 +11,12 @@ services:
         COMMIT: ${COMMIT:-none}
         BUILD_DATE: ${BUILD_DATE:-unknown}
     container_name: cli-proxy-api
+    env_file:
+      - .management.env
     # env_file:
     #   - .env
     environment:
-      DEPLOY: ${DEPLOY:-}
+      DEPLOY: iflow-dedicated-frozen
     ports:
       - "8317:8317"
       - "8085:8085"
@@ -25,4 +28,35 @@ services:
       - ${CLI_PROXY_CONFIG_PATH:-./config.yaml}:/CLIProxyAPI/config.yaml
       - ${CLI_PROXY_AUTH_PATH:-./auths}:/root/.cli-proxy-api
       - ${CLI_PROXY_LOG_PATH:-./logs}:/CLIProxyAPI/logs
+    restart: unless-stopped
+
+  # Dedicated iFlow instance.
+  # Runs alongside the main service and uses isolated config/auth/logs.
+  # Built from local source so Qwen refresh fallback can be patched independently.
+  cli-proxy-api-iflow:
+    image: cpa-qwen:local
+    pull_policy: if_not_present
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        VERSION: ${VERSION:-dev}
+        COMMIT: ${COMMIT:-none}
+        BUILD_DATE: ${BUILD_DATE:-unknown}
+    container_name: cpa-qwen
+    env_file:
+      - .management.env
+    environment:
+      DEPLOY: iflow-dedicated
+      QWEN_AUTH_PROXY_URL: "http://ep:ep123@152.53.54.119:18233"
+    ports:
+      - "9317:8317"   # OpenAI-compatible API (iflow dedicated)
+      - "24555:1455"  # Optional callback/aux port
+      - "54546:54545" # Optional callback/aux port
+      - "51122:51121" # Optional callback/aux port
+      - "11452:11451" # OAuth callback (iflow dedicated)
+    volumes:
+      - ./config.iflow.yaml:/CLIProxyAPI/config.yaml
+      - ./auths_iflow:/root/.cli-proxy-api
+      - ./logs_iflow:/CLIProxyAPI/logs
     restart: unless-stopped

@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -23,6 +24,10 @@ const (
 	QwenOAuthDeviceCodeEndpoint = "https://chat.qwen.ai/api/v1/oauth2/device/code"
 	// QwenOAuthTokenEndpoint is the URL for exchanging device codes or refresh tokens for access tokens.
 	QwenOAuthTokenEndpoint = "https://chat.qwen.ai/api/v1/oauth2/token"
+	// QwenSignInEndpoint is the endpoint for email/password authentication.
+	QwenSignInEndpoint = "https://chat.qwen.ai/api/v1/auths/signin"
+	// QwenAuthorizeEndpoint approves device flow by user code using chat token.
+	QwenAuthorizeEndpoint = "https://chat.qwen.ai/api/v2/oauth2/authorize"
 	// QwenOAuthClientID is the client identifier for the Qwen OAuth 2.0 application.
 	QwenOAuthClientID = "f0304373b74a44d2b584a3fb70ca9e56"
 	// QwenOAuthScope defines the permissions requested by the application.
@@ -77,15 +82,60 @@ type QwenTokenResponse struct {
 	ExpiresIn int `json:"expires_in"`
 }
 
+type qwenSignInResponse struct {
+	Token string `json:"token"`
+}
+
 // QwenAuth manages authentication and token handling for the Qwen API.
 type QwenAuth struct {
 	httpClient *http.Client
 }
 
+func qwenRetryBackoff(attempt int) time.Duration {
+	if attempt <= 0 {
+		return 0
+	}
+	wait := time.Duration(attempt) * time.Second
+	if wait > 10*time.Second {
+		wait = 10 * time.Second
+	}
+	return wait
+}
+
+func isNonRetryableQwenRefreshErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	raw := strings.ToLower(err.Error())
+	return strings.Contains(raw, "invalid_grant") ||
+		strings.Contains(raw, "invalid refresh token") ||
+		strings.Contains(raw, "refresh token is invalid") ||
+		strings.Contains(raw, "refresh_token_reused")
+}
+
+func isNonRetryableQwenPasswordExchangeErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	raw := strings.ToLower(err.Error())
+	return strings.Contains(raw, "email or password is empty") ||
+		strings.Contains(raw, "status=401") ||
+		strings.Contains(raw, "status=400")
+}
+
 // NewQwenAuth creates a new QwenAuth instance with a proxy-configured HTTP client.
 func NewQwenAuth(cfg *config.Config) *QwenAuth {
+	proxyURL := strings.TrimSpace(os.Getenv("QWEN_AUTH_PROXY_URL"))
+	if proxyURL == "" && cfg != nil {
+		proxyURL = strings.TrimSpace(cfg.ProxyURL)
+	}
+	sdkCfg := &config.SDKConfig{ProxyURL: proxyURL}
+	httpClient := util.SetProxy(sdkCfg, &http.Client{})
+	if httpClient.Timeout == 0 {
+		httpClient.Timeout = 25 * time.Second
+	}
 	return &QwenAuth{
-		httpClient: util.SetProxy(&cfg.SDKConfig, &http.Client{}),
+		httpClient: httpClient,
 	}
 }
 
@@ -235,7 +285,13 @@ func (qa *QwenAuth) PollForToken(deviceCode, codeVerifier string) (*QwenTokenDat
 		data.Set("device_code", deviceCode)
 		data.Set("code_verifier", codeVerifier)
 
-		resp, err := http.PostForm(QwenOAuthTokenEndpoint, data)
+		req, err := http.NewRequest(http.MethodPost, QwenOAuthTokenEndpoint, strings.NewReader(data.Encode()))
+		if err != nil {
+			return nil, fmt.Errorf("failed to create token poll request: %w", err)
+		}
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.Header.Set("Accept", "application/json")
+		resp, err := qa.httpClient.Do(req)
 		if err != nil {
 			fmt.Printf("Polling attempt %d/%d failed: %v\n", attempt+1, maxAttempts, err)
 			time.Sleep(pollInterval)
@@ -310,23 +366,164 @@ func (qa *QwenAuth) PollForToken(deviceCode, codeVerifier string) (*QwenTokenDat
 	return nil, fmt.Errorf("authentication timeout. Please restart the authentication process")
 }
 
-// RefreshTokensWithRetry attempts to refresh tokens with a specified number of retries upon failure.
-func (o *QwenAuth) RefreshTokensWithRetry(ctx context.Context, refreshToken string, maxRetries int) (*QwenTokenData, error) {
+// SignInWithPassword authenticates with email/password and returns a chat token.
+func (qa *QwenAuth) SignInWithPassword(ctx context.Context, email, password string) (string, error) {
+	email = strings.TrimSpace(email)
+	password = strings.TrimSpace(password)
+	if email == "" || password == "" {
+		return "", fmt.Errorf("qwen signin failed: email or password is empty")
+	}
+
+	passwordHash := sha256.Sum256([]byte(password))
+	body, err := json.Marshal(map[string]string{
+		"email":    email,
+		"password": fmt.Sprintf("%x", passwordHash),
+	})
+	if err != nil {
+		return "", fmt.Errorf("qwen signin failed: marshal body failed: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, QwenSignInEndpoint, strings.NewReader(string(body)))
+	if err != nil {
+		return "", fmt.Errorf("qwen signin failed: create request failed: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "Mozilla/5.0")
+
+	resp, err := qa.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("qwen signin failed: request failed: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("qwen signin failed: read response failed: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("qwen signin failed: status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+	}
+
+	var result qwenSignInResponse
+	if err = json.Unmarshal(respBody, &result); err != nil {
+		return "", fmt.Errorf("qwen signin failed: decode response failed: %w", err)
+	}
+	if strings.TrimSpace(result.Token) == "" {
+		return "", fmt.Errorf("qwen signin failed: empty token in response")
+	}
+	return result.Token, nil
+}
+
+// ExchangePasswordForTokens performs password login and exchanges it for OAuth tokens.
+func (qa *QwenAuth) ExchangePasswordForTokens(ctx context.Context, email, password string) (*QwenTokenData, error) {
+	chatToken, err := qa.SignInWithPassword(ctx, email, password)
+	if err != nil {
+		return nil, err
+	}
+
+	flow, err := qa.InitiateDeviceFlow(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("qwen password exchange failed: initiate device flow failed: %w", err)
+	}
+
+	approveBody, err := json.Marshal(map[string]any{
+		"approved":  true,
+		"user_code": flow.UserCode,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("qwen password exchange failed: marshal approve body failed: %w", err)
+	}
+
+	approveReq, err := http.NewRequestWithContext(ctx, http.MethodPost, QwenAuthorizeEndpoint, strings.NewReader(string(approveBody)))
+	if err != nil {
+		return nil, fmt.Errorf("qwen password exchange failed: create approve request failed: %w", err)
+	}
+	approveReq.Header.Set("Content-Type", "application/json")
+	approveReq.Header.Set("Authorization", "Bearer "+chatToken)
+
+	approveResp, err := qa.httpClient.Do(approveReq)
+	if err != nil {
+		return nil, fmt.Errorf("qwen password exchange failed: approve request failed: %w", err)
+	}
+	defer func() { _ = approveResp.Body.Close() }()
+	approveRespBody, _ := io.ReadAll(approveResp.Body)
+	if approveResp.StatusCode < http.StatusOK || approveResp.StatusCode >= http.StatusMultipleChoices {
+		return nil, fmt.Errorf("qwen password exchange failed: approve status=%d body=%s", approveResp.StatusCode, strings.TrimSpace(string(approveRespBody)))
+	}
+
+	td, err := qa.PollForToken(flow.DeviceCode, flow.CodeVerifier)
+	if err != nil {
+		return nil, fmt.Errorf("qwen password exchange failed: poll token failed: %w", err)
+	}
+	if strings.TrimSpace(td.ResourceURL) == "" {
+		td.ResourceURL = "portal.qwen.ai"
+	}
+	return td, nil
+}
+
+// ExchangePasswordForTokensWithRetry performs password login/token exchange with retries for transient failures.
+func (o *QwenAuth) ExchangePasswordForTokensWithRetry(ctx context.Context, email, password string, maxRetries int) (*QwenTokenData, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if maxRetries <= 0 {
+		maxRetries = 1
+	}
 	var lastErr error
 
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		if attempt > 0 {
-			// Wait before retry
+			wait := qwenRetryBackoff(attempt)
 			select {
 			case <-ctx.Done():
 				return nil, ctx.Err()
-			case <-time.After(time.Duration(attempt) * time.Second):
+			case <-time.After(wait):
+			}
+		}
+
+		tokenData, err := o.ExchangePasswordForTokens(ctx, email, password)
+		if err == nil {
+			return tokenData, nil
+		}
+		if isNonRetryableQwenPasswordExchangeErr(err) {
+			log.Warnf("Qwen password exchange attempt %d failed with non-retryable error: %v", attempt+1, err)
+			return nil, err
+		}
+		lastErr = err
+		log.Warnf("Qwen password exchange attempt %d failed: %v", attempt+1, err)
+	}
+
+	return nil, fmt.Errorf("qwen password exchange failed after %d attempts: %w", maxRetries, lastErr)
+}
+
+// RefreshTokensWithRetry attempts to refresh tokens with a specified number of retries upon failure.
+func (o *QwenAuth) RefreshTokensWithRetry(ctx context.Context, refreshToken string, maxRetries int) (*QwenTokenData, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if maxRetries <= 0 {
+		maxRetries = 1
+	}
+	var lastErr error
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		if attempt > 0 {
+			wait := qwenRetryBackoff(attempt)
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(wait):
 			}
 		}
 
 		tokenData, err := o.RefreshTokens(ctx, refreshToken)
 		if err == nil {
 			return tokenData, nil
+		}
+		if isNonRetryableQwenRefreshErr(err) {
+			log.Warnf("Token refresh attempt %d failed with non-retryable error: %v", attempt+1, err)
+			return nil, err
 		}
 
 		lastErr = err

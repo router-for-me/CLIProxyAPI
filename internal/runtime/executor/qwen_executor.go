@@ -28,6 +28,8 @@ const (
 	qwenUserAgent       = "QwenCode/0.14.2 (darwin; arm64)"
 	qwenRateLimitPerMin = 60          // 60 requests per minute per credential
 	qwenRateLimitWindow = time.Minute // sliding window duration
+	qwenRefreshRetries  = 10
+	qwenReloginRetries  = 10
 )
 
 var qwenDefaultSystemMessage = []byte(`{"role":"system","content":[{"type":"text","text":"","cache_control":{"type":"ephemeral"}}]}`)
@@ -635,25 +637,71 @@ func (e *QwenExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth,
 
 func (e *QwenExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
 	log.Debugf("qwen executor: refresh called")
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if auth == nil {
 		return nil, fmt.Errorf("qwen executor: auth is nil")
 	}
-	// Expect refresh_token in metadata for OAuth-based accounts
-	var refreshToken string
-	if auth.Metadata != nil {
-		if v, ok := auth.Metadata["refresh_token"].(string); ok && strings.TrimSpace(v) != "" {
-			refreshToken = v
+	metaString := func(key string) string {
+		if auth.Metadata == nil {
+			return ""
 		}
+		v, ok := auth.Metadata[key].(string)
+		if !ok {
+			return ""
+		}
+		return strings.TrimSpace(v)
 	}
-	if strings.TrimSpace(refreshToken) == "" {
-		// Nothing to refresh
+
+	// Expect refresh_token in metadata for OAuth-based accounts.
+	refreshToken := metaString("refresh_token")
+	email := metaString("email")
+	password := metaString("password")
+
+	svc := qwenauth.NewQwenAuth(e.cfg)
+	tryPasswordFallback := func(refreshErr error) (*cliproxyauth.Auth, error) {
+		if email == "" || password == "" {
+			return nil, refreshErr
+		}
+		log.Warnf("qwen refresh failed for %s, falling back to password re-login: %v", email, refreshErr)
+		fallbackCtx, cancel := context.WithTimeout(ctx, 180*time.Second)
+		defer cancel()
+		td, err := svc.ExchangePasswordForTokensWithRetry(fallbackCtx, email, password, qwenReloginRetries)
+		if err != nil {
+			log.Errorf("qwen password re-login failed for %s: %v", email, err)
+			return nil, fmt.Errorf("qwen refresh failed and password fallback failed: refresh=%v fallback=%w", refreshErr, err)
+		}
+		if auth.Metadata == nil {
+			auth.Metadata = make(map[string]any)
+		}
+		auth.Metadata["access_token"] = td.AccessToken
+		if td.RefreshToken != "" {
+			auth.Metadata["refresh_token"] = td.RefreshToken
+		}
+		if td.ResourceURL != "" {
+			auth.Metadata["resource_url"] = td.ResourceURL
+		}
+		auth.Metadata["expired"] = td.Expire
+		auth.Metadata["type"] = "qwen"
+		auth.Metadata["last_refresh"] = time.Now().Format(time.RFC3339)
+		log.Infof("qwen refresh success for %s via password re-login", email)
 		return auth, nil
 	}
 
-	svc := qwenauth.NewQwenAuth(e.cfg)
-	td, err := svc.RefreshTokens(ctx, refreshToken)
+	if strings.TrimSpace(refreshToken) == "" {
+		// No refresh token, but password fallback can still recover.
+		if email != "" && password != "" {
+			return tryPasswordFallback(fmt.Errorf("missing refresh_token"))
+		}
+		return auth, nil
+	}
+
+	refreshCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
+	defer cancel()
+	td, err := svc.RefreshTokensWithRetry(refreshCtx, refreshToken, qwenRefreshRetries)
 	if err != nil {
-		return nil, err
+		return tryPasswordFallback(err)
 	}
 	if auth.Metadata == nil {
 		auth.Metadata = make(map[string]any)
@@ -670,6 +718,11 @@ func (e *QwenExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*c
 	auth.Metadata["type"] = "qwen"
 	now := time.Now().Format(time.RFC3339)
 	auth.Metadata["last_refresh"] = now
+	if email != "" {
+		log.Infof("qwen refresh success for %s via refresh_token", email)
+	} else {
+		log.Infof("qwen refresh success via refresh_token")
+	}
 	return auth, nil
 }
 
