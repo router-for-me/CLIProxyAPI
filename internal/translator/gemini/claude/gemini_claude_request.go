@@ -11,6 +11,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator/gemini/common"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -35,6 +36,7 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 	// Build output Gemini CLI request JSON
 	out := `{"contents":[]}`
 	out, _ = sjson.Set(out, "model", modelName)
+	toolUseNameMap := util.ToolUseNameMapFromClaudeRequest(rawJSON)
 
 	// system instruction
 	if systemResult := gjson.GetBytes(rawJSON, "system"); systemResult.IsArray() {
@@ -85,7 +87,7 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 
 					case "tool_use":
 						functionName := contentResult.Get("name").String()
-						if toolUseID := contentResult.Get("id").String(); toolUseID != "" {
+						if toolUseID := contentResult.Get("id").String(); functionName == "" && toolUseID != "" {
 							if derived := toolNameFromClaudeToolUseID(toolUseID); derived != "" {
 								functionName = derived
 							}
@@ -105,7 +107,10 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 						if toolCallID == "" {
 							return true
 						}
-						funcName := toolNameFromClaudeToolUseID(toolCallID)
+						funcName := util.MapToolName(toolUseNameMap, toolUseNameMap[toolCallID])
+						if funcName == "" {
+							funcName = toolNameFromClaudeToolUseID(toolCallID)
+						}
 						if funcName == "" {
 							funcName = toolCallID
 						}

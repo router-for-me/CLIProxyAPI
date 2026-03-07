@@ -1296,3 +1296,33 @@ func TestConvertClaudeRequestToAntigravity_AdaptiveThinking_NoEffort(t *testing.
 		t.Error("includeThoughts should be true")
 	}
 }
+
+func TestConvertClaudeRequestToAntigravity_ToolResultUsesOriginalToolNameFromMessage(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "claude-sonnet-4-5",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "fs_readFile-123-1", "name": "fs.readFile", "input": {"path": "a.txt"}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type": "tool_result", "tool_use_id": "fs_readFile-123-1", "content": "ok"}
+				]
+			}
+		]
+	}`)
+
+	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5", inputJSON, false)
+	outputStr := string(output)
+
+	if got := gjson.Get(outputStr, "request.contents.0.parts.0.functionCall.name").String(); got != "fs.readFile" {
+		t.Fatalf("Expected tool_use function name %q, got %q", "fs.readFile", got)
+	}
+	if got := gjson.Get(outputStr, "request.contents.1.parts.0.functionResponse.name").String(); got != "fs.readFile" {
+		t.Fatalf("Expected tool_result function name %q, got %q", "fs.readFile", got)
+	}
+}

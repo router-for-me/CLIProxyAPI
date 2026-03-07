@@ -2,10 +2,12 @@ package claude
 
 import (
 	"context"
+	"regexp"
 	"strings"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/cache"
+	"github.com/tidwall/gjson"
 )
 
 // ============================================================================
@@ -242,5 +244,48 @@ func TestConvertAntigravityResponseToClaude_MultipleThinkingBlocks(t *testing.T)
 	// Verify second signature cached
 	if cache.GetCachedSignature("claude-sonnet-4-5-thinking", secondThinkingText) != validSig2 {
 		t.Error("Second thinking block signature should be cached")
+	}
+}
+
+func TestConvertAntigravityResponseToClaude_SanitizesStreamingToolUseID(t *testing.T) {
+	requestJSON := []byte(`{"tools":[{"name":"fs.readFile"}]}`)
+	responseJSON := []byte(`{
+		"response": {
+			"candidates": [{
+				"content": {
+					"parts": [{"functionCall": {"name": "fs.readFile", "args": {"path": "a.txt"}}}]
+				}
+			}]
+		}
+	}`)
+
+	var param any
+	out := ConvertAntigravityResponseToClaude(context.Background(), "claude-sonnet-4-5", requestJSON, requestJSON, responseJSON, &param)
+	if len(out) != 1 {
+		t.Fatalf("expected 1 output chunk, got %d", len(out))
+	}
+
+	toolUseID := ""
+	for _, line := range strings.Split(out[0], "\n") {
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		payload := strings.TrimPrefix(line, "data: ")
+		if gjson.Get(payload, "content_block.type").String() == "tool_use" {
+			toolUseID = gjson.Get(payload, "content_block.id").String()
+			break
+		}
+	}
+	if toolUseID == "" {
+		t.Fatal("tool_use content block not found")
+	}
+	if strings.Contains(toolUseID, ".") {
+		t.Fatalf("expected sanitized id without dot, got %q", toolUseID)
+	}
+	if !regexp.MustCompile(`^[a-zA-Z0-9_-]+$`).MatchString(toolUseID) {
+		t.Fatalf("sanitized id %q does not match Claude regex", toolUseID)
+	}
+	if !strings.Contains(out[0], `"name":"fs.readFile"`) {
+		t.Fatal("expected tool_use name to preserve original tool name")
 	}
 }
