@@ -489,6 +489,7 @@ func buildAuthDirFileInfoIndex(authDir string) map[string]os.FileInfo {
 	index := make(map[string]os.FileInfo)
 	err := filepath.Walk(cleanAuthDir, func(path string, info os.FileInfo, walkErr error) error {
 		if walkErr != nil {
+			log.WithError(walkErr).Warnf("management: walk auth directory entry failed: %s", path)
 			return nil
 		}
 		if info == nil || info.IsDir() {
@@ -502,9 +503,21 @@ func buildAuthDirFileInfoIndex(authDir string) map[string]os.FileInfo {
 		return nil
 	})
 	if err != nil {
+		log.WithError(err).Warn("management: failed to walk auth directory for file index")
 		return nil
 	}
 	return index
+}
+
+func isSimpleAuthFileName(name string) bool {
+	trimmed := strings.TrimSpace(name)
+	if trimmed == "" || filepath.VolumeName(trimmed) != "" {
+		return false
+	}
+	if strings.ContainsAny(trimmed, `/\\`) {
+		return false
+	}
+	return filepath.Base(trimmed) == trimmed
 }
 
 func resolveAuthFileInfo(authDir string, fileInfoIndex map[string]os.FileInfo, path string) (os.FileInfo, bool, error) {
@@ -547,7 +560,7 @@ func isRuntimeOnlyAuth(auth *coreauth.Auth) bool {
 // Download single auth file by name
 func (h *Handler) DownloadAuthFile(c *gin.Context) {
 	name := c.Query("name")
-	if name == "" || strings.Contains(name, string(os.PathSeparator)) {
+	if !isSimpleAuthFileName(name) {
 		c.JSON(400, gin.H{"error": "invalid name"})
 		return
 	}
@@ -605,7 +618,7 @@ func (h *Handler) UploadAuthFile(c *gin.Context) {
 		return
 	}
 	name := c.Query("name")
-	if name == "" || strings.Contains(name, string(os.PathSeparator)) {
+	if !isSimpleAuthFileName(name) {
 		c.JSON(400, gin.H{"error": "invalid name"})
 		return
 	}
@@ -676,7 +689,7 @@ func (h *Handler) DeleteAuthFile(c *gin.Context) {
 		return
 	}
 	name := c.Query("name")
-	if name == "" || strings.Contains(name, string(os.PathSeparator)) {
+	if !isSimpleAuthFileName(name) {
 		c.JSON(400, gin.H{"error": "invalid name"})
 		return
 	}
