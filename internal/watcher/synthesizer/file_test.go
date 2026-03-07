@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	sdkauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
@@ -121,6 +122,25 @@ func TestFileSynthesizer_Synthesize_ValidAuthFile(t *testing.T) {
 	}
 }
 
+func TestSynthesizeAuthFile_UsesNormalizedWindowsAuthID(t *testing.T) {
+	ctx := &SynthesisContext{
+		Config:      &config.Config{},
+		AuthDir:     `C:\Auths`,
+		Now:         time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC),
+		IDGenerator: NewStableIDGenerator(),
+	}
+	data := []byte(`{"type":"claude","email":"test@example.com"}`)
+	fullPath := filepath.Join(ctx.AuthDir, `Nested`, `Foo.json`)
+
+	auths := SynthesizeAuthFile(ctx, fullPath, data)
+	if len(auths) != 1 {
+		t.Fatalf("expected 1 auth, got %d", len(auths))
+	}
+	want := sdkauth.NormalizeFileAuthID(fullPath, ctx.AuthDir)
+	if got := auths[0].ID; got != want {
+		t.Fatalf("auth ID = %q, want %q", got, want)
+	}
+}
 func TestFileSynthesizer_Synthesize_GeminiProviderMapping(t *testing.T) {
 	tempDir := t.TempDir()
 
