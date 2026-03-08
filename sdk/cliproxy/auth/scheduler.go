@@ -48,12 +48,11 @@ type providerScheduler struct {
 
 // scheduledAuthMeta stores the immutable scheduling fields derived from an auth snapshot.
 type scheduledAuthMeta struct {
-	auth              *Auth
-	providerKey       string
-	priority          int
-	virtualParent     string
-	websocketEnabled  bool
-	supportedModelSet map[string]struct{}
+	auth             *Auth
+	providerKey      string
+	priority         int
+	virtualParent    string
+	websocketEnabled bool
 }
 
 // modelScheduler tracks ready and blocked auths for one provider/model combination.
@@ -430,37 +429,24 @@ func buildScheduledAuthMeta(auth *Auth) *scheduledAuthMeta {
 		virtualParent = strings.TrimSpace(auth.Attributes["gemini_virtual_parent"])
 	}
 	return &scheduledAuthMeta{
-		auth:              auth,
-		providerKey:       providerKey,
-		priority:          authPriority(auth),
-		virtualParent:     virtualParent,
-		websocketEnabled:  authWebsocketsEnabled(auth),
-		supportedModelSet: supportedModelSetForAuth(auth.ID),
+		auth:             auth,
+		providerKey:      providerKey,
+		priority:         authPriority(auth),
+		virtualParent:    virtualParent,
+		websocketEnabled: authWebsocketsEnabled(auth),
 	}
 }
 
-// supportedModelSetForAuth snapshots the registry models currently registered for an auth.
-func supportedModelSetForAuth(authID string) map[string]struct{} {
+func authSupportsModelNow(authID string, modelKey string) bool {
+	modelKey = canonicalModelKey(modelKey)
+	if modelKey == "" {
+		return true
+	}
 	authID = strings.TrimSpace(authID)
 	if authID == "" {
-		return nil
+		return false
 	}
-	models := registry.GetGlobalRegistry().GetModelsForClient(authID)
-	if len(models) == 0 {
-		return nil
-	}
-	set := make(map[string]struct{}, len(models))
-	for _, model := range models {
-		if model == nil {
-			continue
-		}
-		modelKey := canonicalModelKey(model.ID)
-		if modelKey == "" {
-			continue
-		}
-		set[modelKey] = struct{}{}
-	}
-	return set
+	return registry.GetGlobalRegistry().ClientSupportsModel(authID, modelKey)
 }
 
 // upsertAuthLocked updates every existing model shard that can reference the auth metadata.
@@ -473,7 +459,7 @@ func (p *providerScheduler) upsertAuthLocked(meta *scheduledAuthMeta, now time.T
 		if shard == nil {
 			continue
 		}
-		if !meta.supportsModel(modelKey) {
+		if !authSupportsModelNow(meta.auth.ID, modelKey) {
 			shard.removeEntryLocked(meta.auth.ID)
 			continue
 		}
@@ -501,6 +487,11 @@ func (p *providerScheduler) ensureModelLocked(modelKey string, now time.Time) *m
 	}
 	modelKey = canonicalModelKey(modelKey)
 	if shard, ok := p.modelShards[modelKey]; ok && shard != nil {
+		p.syncModelShardLocked(shard, modelKey, now)
+		if len(shard.entries) == 0 {
+			delete(p.modelShards, modelKey)
+			return nil
+		}
 		shard.promoteExpiredLocked(now)
 		return shard
 	}
@@ -510,26 +501,37 @@ func (p *providerScheduler) ensureModelLocked(modelKey string, now time.Time) *m
 		readyByPriority: make(map[int]*readyBucket),
 	}
 	for _, meta := range p.auths {
-		if meta == nil || !meta.supportsModel(modelKey) {
+		if meta == nil || meta.auth == nil || !authSupportsModelNow(meta.auth.ID, modelKey) {
 			continue
 		}
 		shard.upsertEntryLocked(meta, now)
+	}
+	if len(shard.entries) == 0 {
+		return nil
 	}
 	p.modelShards[modelKey] = shard
 	return shard
 }
 
-// supportsModel reports whether the auth metadata currently supports modelKey.
-func (m *scheduledAuthMeta) supportsModel(modelKey string) bool {
-	modelKey = canonicalModelKey(modelKey)
-	if modelKey == "" {
-		return true
+func (p *providerScheduler) syncModelShardLocked(shard *modelScheduler, modelKey string, now time.Time) {
+	if p == nil || shard == nil {
+		return
 	}
-	if len(m.supportedModelSet) == 0 {
-		return false
+	for authID := range shard.entries {
+		if _, ok := p.auths[authID]; !ok {
+			shard.removeEntryLocked(authID)
+		}
 	}
-	_, ok := m.supportedModelSet[modelKey]
-	return ok
+	for _, meta := range p.auths {
+		if meta == nil || meta.auth == nil {
+			continue
+		}
+		if !authSupportsModelNow(meta.auth.ID, modelKey) {
+			shard.removeEntryLocked(meta.auth.ID)
+			continue
+		}
+		shard.upsertEntryLocked(meta, now)
+	}
 }
 
 // upsertEntryLocked updates or inserts one auth entry and rebuilds indexes when ordering changes.

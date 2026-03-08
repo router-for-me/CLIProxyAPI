@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -366,7 +365,7 @@ func TestForwardResponsesWebsocketPreservesCompletedEvent(t *testing.T) {
 	}
 }
 
-func TestWebsocketUpstreamSupportsIncrementalInputForModel(t *testing.T) {
+func TestResponsesWebsocketIncrementalInputStateForAuth(t *testing.T) {
 	manager := coreauth.NewManager(nil, nil, nil)
 	auth := &coreauth.Auth{
 		ID:         "auth-ws",
@@ -382,14 +381,30 @@ func TestWebsocketUpstreamSupportsIncrementalInputForModel(t *testing.T) {
 		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
 	})
 
-	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
-	h := NewOpenAIResponsesAPIHandler(base)
-	if !h.websocketUpstreamSupportsIncrementalInputForModel("test-model") {
-		t.Fatalf("expected websocket-capable upstream for test-model")
+	known, supported := responsesWebsocketIncrementalInputStateForAuth(manager, auth.ID)
+	if !known {
+		t.Fatalf("expected auth state to be known")
+	}
+	if !supported {
+		t.Fatalf("expected websocket-capable auth to support incremental input")
 	}
 }
 
-func TestResponsesWebsocketPrewarmHandledLocallyForSSEUpstream(t *testing.T) {
+func TestShouldHandleResponsesWebsocketPrewarmLocallyRequiresKnownNonIncrementalSession(t *testing.T) {
+	raw := []byte(`{"type":"response.create","model":"test-model","generate":false}`)
+
+	if shouldHandleResponsesWebsocketPrewarmLocally(raw, nil, false, false) {
+		t.Fatalf("unknown session must not use local prewarm")
+	}
+	if shouldHandleResponsesWebsocketPrewarmLocally(raw, nil, true, true) {
+		t.Fatalf("incremental-capable session must not use local prewarm")
+	}
+	if !shouldHandleResponsesWebsocketPrewarmLocally(raw, nil, true, false) {
+		t.Fatalf("known non-incremental session should use local prewarm")
+	}
+}
+
+func TestResponsesWebsocketPrewarmUnknownSessionFallsThroughUpstream(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	executor := &websocketCaptureExecutor{}
@@ -429,66 +444,161 @@ func TestResponsesWebsocketPrewarmHandledLocallyForSSEUpstream(t *testing.T) {
 		t.Fatalf("write prewarm websocket message: %v", errWrite)
 	}
 
-	_, createdPayload, errReadMessage := conn.ReadMessage()
-	if errReadMessage != nil {
-		t.Fatalf("read prewarm created message: %v", errReadMessage)
-	}
-	if gjson.GetBytes(createdPayload, "type").String() != "response.created" {
-		t.Fatalf("created payload type = %s, want response.created", gjson.GetBytes(createdPayload, "type").String())
-	}
-	prewarmResponseID := gjson.GetBytes(createdPayload, "response.id").String()
-	if prewarmResponseID == "" {
-		t.Fatalf("prewarm response id is empty")
-	}
-	if executor.streamCalls != 0 {
-		t.Fatalf("stream calls after prewarm = %d, want 0", executor.streamCalls)
-	}
-
 	_, completedPayload, errReadMessage := conn.ReadMessage()
-	if errReadMessage != nil {
-		t.Fatalf("read prewarm completed message: %v", errReadMessage)
-	}
-	if gjson.GetBytes(completedPayload, "type").String() != wsEventTypeCompleted {
-		t.Fatalf("completed payload type = %s, want %s", gjson.GetBytes(completedPayload, "type").String(), wsEventTypeCompleted)
-	}
-	if gjson.GetBytes(completedPayload, "response.id").String() != prewarmResponseID {
-		t.Fatalf("completed response id = %s, want %s", gjson.GetBytes(completedPayload, "response.id").String(), prewarmResponseID)
-	}
-	if gjson.GetBytes(completedPayload, "response.usage.total_tokens").Int() != 0 {
-		t.Fatalf("prewarm total tokens = %d, want 0", gjson.GetBytes(completedPayload, "response.usage.total_tokens").Int())
-	}
-
-	secondRequest := fmt.Sprintf(`{"type":"response.create","previous_response_id":%q,"input":[{"type":"message","id":"msg-1"}]}`, prewarmResponseID)
-	errWrite = conn.WriteMessage(websocket.TextMessage, []byte(secondRequest))
-	if errWrite != nil {
-		t.Fatalf("write follow-up websocket message: %v", errWrite)
-	}
-
-	_, upstreamPayload, errReadMessage := conn.ReadMessage()
 	if errReadMessage != nil {
 		t.Fatalf("read upstream completed message: %v", errReadMessage)
 	}
-	if gjson.GetBytes(upstreamPayload, "type").String() != wsEventTypeCompleted {
-		t.Fatalf("upstream payload type = %s, want %s", gjson.GetBytes(upstreamPayload, "type").String(), wsEventTypeCompleted)
+	if gjson.GetBytes(completedPayload, "type").String() != wsEventTypeCompleted {
+		t.Fatalf("payload type = %s, want %s", gjson.GetBytes(completedPayload, "type").String(), wsEventTypeCompleted)
 	}
 	if executor.streamCalls != 1 {
-		t.Fatalf("stream calls after follow-up = %d, want 1", executor.streamCalls)
+		t.Fatalf("stream calls after prewarm request = %d, want 1", executor.streamCalls)
 	}
 	if len(executor.payloads) != 1 {
 		t.Fatalf("captured upstream payloads = %d, want 1", len(executor.payloads))
 	}
-	forwarded := executor.payloads[0]
-	if gjson.GetBytes(forwarded, "previous_response_id").Exists() {
-		t.Fatalf("previous_response_id leaked upstream: %s", forwarded)
+	if !gjson.GetBytes(executor.payloads[0], "generate").Exists() {
+		t.Fatalf("unknown session should keep generate flag on upstream request")
 	}
-	if gjson.GetBytes(forwarded, "generate").Exists() {
-		t.Fatalf("generate leaked upstream: %s", forwarded)
+}
+
+func TestResponsesWebsocketBindsNonIncrementalSessionToSelectedAuth(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	executor := &websocketCaptureExecutor{}
+	manager := coreauth.NewManager(nil, &coreauth.RoundRobinSelector{}, nil)
+	manager.RegisterExecutor(executor)
+	authA := &coreauth.Auth{ID: "auth-a", Provider: executor.Identifier(), Status: coreauth.StatusActive}
+	authB := &coreauth.Auth{ID: "auth-b", Provider: executor.Identifier(), Status: coreauth.StatusActive, Attributes: map[string]string{"websockets": "true"}}
+	if _, err := manager.Register(context.Background(), authA); err != nil {
+		t.Fatalf("Register auth-a: %v", err)
 	}
-	if gjson.GetBytes(forwarded, "model").String() != "test-model" {
-		t.Fatalf("forwarded model = %s, want test-model", gjson.GetBytes(forwarded, "model").String())
+	if _, err := manager.Register(context.Background(), authB); err != nil {
+		t.Fatalf("Register auth-b: %v", err)
 	}
-	input := gjson.GetBytes(forwarded, "input").Array()
-	if len(input) != 1 || input[0].Get("id").String() != "msg-1" {
-		t.Fatalf("unexpected forwarded input: %s", forwarded)
+	registry.GetGlobalRegistry().RegisterClient(authA.ID, authA.Provider, []*registry.ModelInfo{{ID: "test-model"}})
+	registry.GetGlobalRegistry().RegisterClient(authB.ID, authB.Provider, []*registry.ModelInfo{{ID: "test-model"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(authA.ID)
+		registry.GetGlobalRegistry().UnregisterClient(authB.ID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	h := NewOpenAIResponsesAPIHandler(base)
+	router := gin.New()
+	router.GET("/v1/responses/ws", h.ResponsesWebsocket)
+
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/responses/ws"
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer func() {
+		errClose := conn.Close()
+		if errClose != nil {
+			t.Fatalf("close websocket: %v", errClose)
+		}
+	}()
+
+	if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"test-model","input":[{"type":"message","id":"msg-1"}]}`)); errWrite != nil {
+		t.Fatalf("write first websocket message: %v", errWrite)
+	}
+	if _, _, errReadMessage := conn.ReadMessage(); errReadMessage != nil {
+		t.Fatalf("read first websocket response: %v", errReadMessage)
+	}
+
+	secondRequest := `{"type":"response.create","previous_response_id":"resp-1","input":[{"type":"message","id":"msg-2"}]}`
+	if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(secondRequest)); errWrite != nil {
+		t.Fatalf("write second websocket message: %v", errWrite)
+	}
+	if _, _, errReadMessage := conn.ReadMessage(); errReadMessage != nil {
+		t.Fatalf("read second websocket response: %v", errReadMessage)
+	}
+
+	if executor.streamCalls != 2 {
+		t.Fatalf("stream calls = %d, want 2", executor.streamCalls)
+	}
+	secondPayload := executor.payloads[1]
+	if gjson.GetBytes(secondPayload, "previous_response_id").Exists() {
+		t.Fatalf("non-incremental session leaked previous_response_id upstream: %s", secondPayload)
+	}
+	input := gjson.GetBytes(secondPayload, "input").Array()
+	if len(input) != 3 {
+		t.Fatalf("merged input len = %d, want 3, payload=%s", len(input), secondPayload)
+	}
+	if input[0].Get("id").String() != "msg-1" || input[1].Get("id").String() != "out-1" || input[2].Get("id").String() != "msg-2" {
+		t.Fatalf("unexpected merged input order: %s", secondPayload)
+	}
+}
+
+func TestResponsesWebsocketBindsIncrementalSessionToSelectedAuth(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	executor := &websocketCaptureExecutor{}
+	manager := coreauth.NewManager(nil, &coreauth.RoundRobinSelector{}, nil)
+	manager.RegisterExecutor(executor)
+	authA := &coreauth.Auth{ID: "auth-a", Provider: executor.Identifier(), Status: coreauth.StatusActive, Attributes: map[string]string{"websockets": "true"}}
+	authB := &coreauth.Auth{ID: "auth-b", Provider: executor.Identifier(), Status: coreauth.StatusActive}
+	if _, err := manager.Register(context.Background(), authA); err != nil {
+		t.Fatalf("Register auth-a: %v", err)
+	}
+	if _, err := manager.Register(context.Background(), authB); err != nil {
+		t.Fatalf("Register auth-b: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(authA.ID, authA.Provider, []*registry.ModelInfo{{ID: "test-model"}})
+	registry.GetGlobalRegistry().RegisterClient(authB.ID, authB.Provider, []*registry.ModelInfo{{ID: "test-model"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(authA.ID)
+		registry.GetGlobalRegistry().UnregisterClient(authB.ID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	h := NewOpenAIResponsesAPIHandler(base)
+	router := gin.New()
+	router.GET("/v1/responses/ws", h.ResponsesWebsocket)
+
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/responses/ws"
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer func() {
+		errClose := conn.Close()
+		if errClose != nil {
+			t.Fatalf("close websocket: %v", errClose)
+		}
+	}()
+
+	if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"test-model","input":[{"type":"message","id":"msg-1"}]}`)); errWrite != nil {
+		t.Fatalf("write first websocket message: %v", errWrite)
+	}
+	if _, _, errReadMessage := conn.ReadMessage(); errReadMessage != nil {
+		t.Fatalf("read first websocket response: %v", errReadMessage)
+	}
+
+	secondRequest := `{"type":"response.create","previous_response_id":"resp-1","input":[{"type":"message","id":"msg-2"}]}`
+	if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(secondRequest)); errWrite != nil {
+		t.Fatalf("write second websocket message: %v", errWrite)
+	}
+	if _, _, errReadMessage := conn.ReadMessage(); errReadMessage != nil {
+		t.Fatalf("read second websocket response: %v", errReadMessage)
+	}
+
+	if executor.streamCalls != 2 {
+		t.Fatalf("stream calls = %d, want 2", executor.streamCalls)
+	}
+	secondPayload := executor.payloads[1]
+	if gjson.GetBytes(secondPayload, "previous_response_id").String() != "resp-1" {
+		t.Fatalf("incremental session must preserve previous_response_id, payload=%s", secondPayload)
+	}
+	input := gjson.GetBytes(secondPayload, "input").Array()
+	if len(input) != 1 || input[0].Get("id").String() != "msg-2" {
+		t.Fatalf("incremental session should forward only new input, payload=%s", secondPayload)
 	}
 }

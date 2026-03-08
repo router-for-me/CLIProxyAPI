@@ -2223,55 +2223,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 }
 
 func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
-	if !m.useSchedulerFastPath() {
-		return m.pickNextMixedLegacy(ctx, providers, model, opts, tried)
-	}
-
-	eligibleProviders := make([]string, 0, len(providers))
-	seenProviders := make(map[string]struct{}, len(providers))
-	for _, provider := range providers {
-		providerKey := strings.TrimSpace(strings.ToLower(provider))
-		if providerKey == "" {
-			continue
-		}
-		if _, seen := seenProviders[providerKey]; seen {
-			continue
-		}
-		if _, okExecutor := m.Executor(providerKey); !okExecutor {
-			continue
-		}
-		seenProviders[providerKey] = struct{}{}
-		eligibleProviders = append(eligibleProviders, providerKey)
-	}
-	if len(eligibleProviders) == 0 {
-		return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
-	}
-
-	selected, providerKey, errPick := m.scheduler.pickMixed(ctx, eligibleProviders, model, opts, tried)
-	if errPick != nil && model != "" && shouldRetrySchedulerPick(errPick) {
-		m.syncScheduler()
-		selected, providerKey, errPick = m.scheduler.pickMixed(ctx, eligibleProviders, model, opts, tried)
-	}
-	if errPick != nil {
-		return nil, nil, "", errPick
-	}
-	if selected == nil {
-		return nil, nil, "", &Error{Code: "auth_not_found", Message: "selector returned no auth"}
-	}
-	executor, okExecutor := m.Executor(providerKey)
-	if !okExecutor {
-		return nil, nil, "", &Error{Code: "executor_not_found", Message: "executor not registered"}
-	}
-	authCopy := selected.Clone()
-	if !selected.indexAssigned {
-		m.mu.Lock()
-		if current := m.auths[authCopy.ID]; current != nil && !current.indexAssigned {
-			current.EnsureIndex()
-			authCopy = current.Clone()
-		}
-		m.mu.Unlock()
-	}
-	return authCopy, executor, providerKey, nil
+	return m.pickNextMixedLegacy(ctx, providers, model, opts, tried)
 }
 
 func (m *Manager) persist(ctx context.Context, auth *Auth) error {

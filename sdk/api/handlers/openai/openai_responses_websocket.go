@@ -14,9 +14,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
@@ -79,6 +76,8 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 	var lastRequest []byte
 	lastResponseOutput := []byte("[]")
 	pinnedAuthID := ""
+	sessionIncrementalInputKnown := false
+	sessionIncrementalInputSupported := false
 
 	for {
 		msgType, payload, errReadMessage := conn.ReadMessage()
@@ -104,18 +103,17 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		// )
 		appendWebsocketEvent(&wsBodyLog, "request", payload)
 
-		allowIncrementalInputWithPreviousResponseID := false
 		if pinnedAuthID != "" && h != nil && h.AuthManager != nil {
-			if pinnedAuth, ok := h.AuthManager.GetByID(pinnedAuthID); ok && pinnedAuth != nil {
-				allowIncrementalInputWithPreviousResponseID = websocketUpstreamSupportsIncrementalInput(pinnedAuth.Attributes, pinnedAuth.Metadata)
+			if known, supported := responsesWebsocketIncrementalInputStateForAuth(h.AuthManager, pinnedAuthID); known {
+				sessionIncrementalInputKnown = true
+				sessionIncrementalInputSupported = supported
+			} else {
+				pinnedAuthID = ""
+				sessionIncrementalInputKnown = false
+				sessionIncrementalInputSupported = false
 			}
-		} else {
-			requestModelName := strings.TrimSpace(gjson.GetBytes(payload, "model").String())
-			if requestModelName == "" {
-				requestModelName = strings.TrimSpace(gjson.GetBytes(lastRequest, "model").String())
-			}
-			allowIncrementalInputWithPreviousResponseID = h.websocketUpstreamSupportsIncrementalInputForModel(requestModelName)
 		}
+		allowIncrementalInputWithPreviousResponseID := sessionIncrementalInputKnown && sessionIncrementalInputSupported
 
 		var requestJSON []byte
 		var updatedLastRequest []byte
@@ -149,7 +147,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			}
 			continue
 		}
-		if shouldHandleResponsesWebsocketPrewarmLocally(payload, lastRequest, allowIncrementalInputWithPreviousResponseID) {
+		if shouldHandleResponsesWebsocketPrewarmLocally(payload, lastRequest, sessionIncrementalInputKnown, sessionIncrementalInputSupported) {
 			if updated, errDelete := sjson.DeleteBytes(requestJSON, "generate"); errDelete == nil {
 				requestJSON = updated
 			}
@@ -176,6 +174,13 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		} else {
 			cliCtx = handlers.WithSelectedAuthIDCallback(cliCtx, func(authID string) {
 				pinnedAuthID = strings.TrimSpace(authID)
+				if known, supported := responsesWebsocketIncrementalInputStateForAuth(h.AuthManager, pinnedAuthID); known {
+					sessionIncrementalInputKnown = true
+					sessionIncrementalInputSupported = supported
+				} else {
+					sessionIncrementalInputKnown = false
+					sessionIncrementalInputSupported = false
+				}
 			})
 		}
 		dataChan, _, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, requestJSON, "")
@@ -365,108 +370,23 @@ func websocketUpstreamSupportsIncrementalInput(attributes map[string]string, met
 	return false
 }
 
-func (h *OpenAIResponsesAPIHandler) websocketUpstreamSupportsIncrementalInputForModel(modelName string) bool {
-	if h == nil || h.AuthManager == nil {
-		return false
+func responsesWebsocketIncrementalInputStateForAuth(manager *coreauth.Manager, authID string) (bool, bool) {
+	if manager == nil {
+		return false, false
 	}
-
-	resolvedModelName := modelName
-	initialSuffix := thinking.ParseSuffix(modelName)
-	if initialSuffix.ModelName == "auto" {
-		resolvedBase := util.ResolveAutoModel(initialSuffix.ModelName)
-		if initialSuffix.HasSuffix {
-			resolvedModelName = fmt.Sprintf("%s(%s)", resolvedBase, initialSuffix.RawSuffix)
-		} else {
-			resolvedModelName = resolvedBase
-		}
-	} else {
-		resolvedModelName = util.ResolveAutoModel(modelName)
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return false, false
 	}
-
-	parsed := thinking.ParseSuffix(resolvedModelName)
-	baseModel := strings.TrimSpace(parsed.ModelName)
-	providers := util.GetProviderName(baseModel)
-	if len(providers) == 0 && baseModel != resolvedModelName {
-		providers = util.GetProviderName(resolvedModelName)
+	auth, ok := manager.GetByID(authID)
+	if !ok || auth == nil {
+		return false, false
 	}
-	if len(providers) == 0 {
-		return false
-	}
-
-	providerSet := make(map[string]struct{}, len(providers))
-	for i := 0; i < len(providers); i++ {
-		providerKey := strings.TrimSpace(strings.ToLower(providers[i]))
-		if providerKey == "" {
-			continue
-		}
-		providerSet[providerKey] = struct{}{}
-	}
-	if len(providerSet) == 0 {
-		return false
-	}
-
-	modelKey := baseModel
-	if modelKey == "" {
-		modelKey = strings.TrimSpace(resolvedModelName)
-	}
-	registryRef := registry.GetGlobalRegistry()
-	now := time.Now()
-	auths := h.AuthManager.List()
-	for i := 0; i < len(auths); i++ {
-		auth := auths[i]
-		if auth == nil {
-			continue
-		}
-		providerKey := strings.TrimSpace(strings.ToLower(auth.Provider))
-		if _, ok := providerSet[providerKey]; !ok {
-			continue
-		}
-		if modelKey != "" && registryRef != nil && !registryRef.ClientSupportsModel(auth.ID, modelKey) {
-			continue
-		}
-		if !responsesWebsocketAuthAvailableForModel(auth, modelKey, now) {
-			continue
-		}
-		if websocketUpstreamSupportsIncrementalInput(auth.Attributes, auth.Metadata) {
-			return true
-		}
-	}
-	return false
+	return true, websocketUpstreamSupportsIncrementalInput(auth.Attributes, auth.Metadata)
 }
 
-func responsesWebsocketAuthAvailableForModel(auth *coreauth.Auth, modelName string, now time.Time) bool {
-	if auth == nil {
-		return false
-	}
-	if auth.Disabled || auth.Status == coreauth.StatusDisabled {
-		return false
-	}
-	if modelName != "" && len(auth.ModelStates) > 0 {
-		state, ok := auth.ModelStates[modelName]
-		if (!ok || state == nil) && modelName != "" {
-			baseModel := strings.TrimSpace(thinking.ParseSuffix(modelName).ModelName)
-			if baseModel != "" && baseModel != modelName {
-				state, ok = auth.ModelStates[baseModel]
-			}
-		}
-		if ok && state != nil {
-			if state.Status == coreauth.StatusDisabled {
-				return false
-			}
-			if state.Unavailable && !state.NextRetryAfter.IsZero() && state.NextRetryAfter.After(now) {
-				return false
-			}
-			return true
-		}
-	}
-	if auth.Unavailable && !auth.NextRetryAfter.IsZero() && auth.NextRetryAfter.After(now) {
-		return false
-	}
-	return true
-}
-
-func shouldHandleResponsesWebsocketPrewarmLocally(rawJSON []byte, lastRequest []byte, allowIncrementalInputWithPreviousResponseID bool) bool {
-	if allowIncrementalInputWithPreviousResponseID || len(lastRequest) != 0 {
+func shouldHandleResponsesWebsocketPrewarmLocally(rawJSON []byte, lastRequest []byte, sessionIncrementalInputKnown bool, sessionIncrementalInputSupported bool) bool {
+	if len(lastRequest) != 0 || !sessionIncrementalInputKnown || sessionIncrementalInputSupported {
 		return false
 	}
 	if strings.TrimSpace(gjson.GetBytes(rawJSON, "type").String()) != wsRequestTypeCreate {

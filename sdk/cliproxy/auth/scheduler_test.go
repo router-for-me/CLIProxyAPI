@@ -208,66 +208,89 @@ func TestSchedulerPick_CodexWebsocketPrefersWebsocketEnabledSubset(t *testing.T)
 	}
 }
 
-func TestSchedulerPick_MixedProvidersUsesProviderRotationOverReadyCandidates(t *testing.T) {
+func TestSchedulerPickSingle_ReflectsRegistryRemovalWithoutAuthUpdate(t *testing.T) {
 	t.Parallel()
 
+	model := "gemini-2.5-pro"
+	registerSchedulerModels(t, "gemini", model, "auth-a")
 	scheduler := newSchedulerForTest(
 		&RoundRobinSelector{},
-		&Auth{ID: "gemini-a", Provider: "gemini"},
-		&Auth{ID: "gemini-b", Provider: "gemini"},
-		&Auth{ID: "claude-a", Provider: "claude"},
+		&Auth{ID: "auth-a", Provider: "gemini"},
 	)
 
-	wantProviders := []string{"gemini", "claude", "gemini", "claude"}
-	wantIDs := []string{"gemini-a", "claude-a", "gemini-b", "claude-a"}
-	for index := range wantProviders {
-		got, provider, errPick := scheduler.pickMixed(context.Background(), []string{"gemini", "claude"}, "", cliproxyexecutor.Options{}, nil)
-		if errPick != nil {
-			t.Fatalf("pickMixed() #%d error = %v", index, errPick)
-		}
-		if got == nil {
-			t.Fatalf("pickMixed() #%d auth = nil", index)
-		}
-		if provider != wantProviders[index] {
-			t.Fatalf("pickMixed() #%d provider = %q, want %q", index, provider, wantProviders[index])
-		}
-		if got.ID != wantIDs[index] {
-			t.Fatalf("pickMixed() #%d auth.ID = %q, want %q", index, got.ID, wantIDs[index])
+	got, errPick := scheduler.pickSingle(context.Background(), "gemini", model, cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickSingle() initial error = %v", errPick)
+	}
+	if got == nil || got.ID != "auth-a" {
+		t.Fatalf("pickSingle() initial auth = %v, want auth-a", got)
+	}
+
+	registry.GetGlobalRegistry().UnregisterClient("auth-a")
+
+	got, errPick = scheduler.pickSingle(context.Background(), "gemini", model, cliproxyexecutor.Options{}, nil)
+	if errPick == nil {
+		t.Fatalf("pickSingle() after registry removal error = nil, want auth_not_found")
+	}
+	if got != nil {
+		t.Fatalf("pickSingle() after registry removal auth = %v, want nil", got)
+	}
+	if providerState := scheduler.providers["gemini"]; providerState != nil {
+		if _, exists := providerState.modelShards[canonicalModelKey(model)]; exists {
+			t.Fatalf("model shard %q should be evicted after registry removal", canonicalModelKey(model))
 		}
 	}
 }
 
-func TestManager_PickNextMixed_UsesProviderRotationBeforeCredentialRotation(t *testing.T) {
+func TestSchedulerPickSingle_ReflectsRegistryAdditionWithoutAuthUpdate(t *testing.T) {
 	t.Parallel()
 
-	manager := NewManager(nil, &RoundRobinSelector{}, nil)
-	manager.executors["gemini"] = schedulerTestExecutor{}
-	manager.executors["claude"] = schedulerTestExecutor{}
-	if _, errRegister := manager.Register(context.Background(), &Auth{ID: "gemini-a", Provider: "gemini"}); errRegister != nil {
-		t.Fatalf("Register(gemini-a) error = %v", errRegister)
+	model := "gemini-2.5-flash"
+	scheduler := newSchedulerForTest(
+		&RoundRobinSelector{},
+		&Auth{ID: "auth-a", Provider: "gemini"},
+	)
+
+	got, errPick := scheduler.pickSingle(context.Background(), "gemini", model, cliproxyexecutor.Options{}, nil)
+	if errPick == nil {
+		t.Fatalf("pickSingle() before registry add error = nil, want auth_not_found")
 	}
-	if _, errRegister := manager.Register(context.Background(), &Auth{ID: "gemini-b", Provider: "gemini"}); errRegister != nil {
-		t.Fatalf("Register(gemini-b) error = %v", errRegister)
-	}
-	if _, errRegister := manager.Register(context.Background(), &Auth{ID: "claude-a", Provider: "claude"}); errRegister != nil {
-		t.Fatalf("Register(claude-a) error = %v", errRegister)
+	if got != nil {
+		t.Fatalf("pickSingle() before registry add auth = %v, want nil", got)
 	}
 
-	wantProviders := []string{"gemini", "claude", "gemini", "claude"}
-	wantIDs := []string{"gemini-a", "claude-a", "gemini-b", "claude-a"}
-	for index := range wantProviders {
-		got, _, provider, errPick := manager.pickNextMixed(context.Background(), []string{"gemini", "claude"}, "", cliproxyexecutor.Options{}, map[string]struct{}{})
-		if errPick != nil {
-			t.Fatalf("pickNextMixed() #%d error = %v", index, errPick)
-		}
-		if got == nil {
-			t.Fatalf("pickNextMixed() #%d auth = nil", index)
-		}
-		if provider != wantProviders[index] {
-			t.Fatalf("pickNextMixed() #%d provider = %q, want %q", index, provider, wantProviders[index])
-		}
-		if got.ID != wantIDs[index] {
-			t.Fatalf("pickNextMixed() #%d auth.ID = %q, want %q", index, got.ID, wantIDs[index])
+	registry.GetGlobalRegistry().RegisterClient("auth-a", "gemini", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient("auth-a")
+	})
+
+	got, errPick = scheduler.pickSingle(context.Background(), "gemini", model, cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickSingle() after registry add error = %v", errPick)
+	}
+	if got == nil || got.ID != "auth-a" {
+		t.Fatalf("pickSingle() after registry add auth = %v, want auth-a", got)
+	}
+}
+
+func TestSchedulerPickSingle_DoesNotCacheUnsupportedModelShard(t *testing.T) {
+	t.Parallel()
+
+	scheduler := newSchedulerForTest(
+		&RoundRobinSelector{},
+		&Auth{ID: "auth-a", Provider: "gemini"},
+	)
+
+	got, errPick := scheduler.pickSingle(context.Background(), "gemini", "random-model", cliproxyexecutor.Options{}, nil)
+	if errPick == nil {
+		t.Fatalf("pickSingle() unsupported model error = nil, want auth_not_found")
+	}
+	if got != nil {
+		t.Fatalf("pickSingle() unsupported model auth = %v, want nil", got)
+	}
+	if providerState := scheduler.providers["gemini"]; providerState != nil {
+		if _, exists := providerState.modelShards[canonicalModelKey("random-model")]; exists {
+			t.Fatalf("unsupported model shard %q should not be cached", canonicalModelKey("random-model"))
 		}
 	}
 }
@@ -348,24 +371,52 @@ func TestManager_SchedulerTracksRegisterAndUpdate(t *testing.T) {
 	}
 }
 
-func TestManager_PickNextMixed_UsesSchedulerRotation(t *testing.T) {
+func TestManager_PickNextMixed_FillFirstPreservesLegacyPriorityAcrossProviders(t *testing.T) {
+	t.Parallel()
+
+	manager := NewManager(nil, &FillFirstSelector{}, nil)
+	manager.executors["gemini"] = schedulerTestExecutor{}
+	manager.executors["claude"] = schedulerTestExecutor{}
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: "claude-low", Provider: "claude", Attributes: map[string]string{"priority": "0"}}); errRegister != nil {
+		t.Fatalf("Register(claude-low) error = %v", errRegister)
+	}
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: "gemini-high", Provider: "gemini", Attributes: map[string]string{"priority": "10"}}); errRegister != nil {
+		t.Fatalf("Register(gemini-high) error = %v", errRegister)
+	}
+
+	got, _, provider, errPick := manager.pickNextMixed(context.Background(), []string{"claude", "gemini"}, "", cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickNextMixed() error = %v", errPick)
+	}
+	if got == nil {
+		t.Fatalf("pickNextMixed() auth = nil")
+	}
+	if provider != "gemini" {
+		t.Fatalf("pickNextMixed() provider = %q, want %q", provider, "gemini")
+	}
+	if got.ID != "gemini-high" {
+		t.Fatalf("pickNextMixed() auth.ID = %q, want %q", got.ID, "gemini-high")
+	}
+}
+
+func TestManager_PickNextMixed_RoundRobinUsesAuthLevelRotation(t *testing.T) {
 	t.Parallel()
 
 	manager := NewManager(nil, &RoundRobinSelector{}, nil)
 	manager.executors["gemini"] = schedulerTestExecutor{}
 	manager.executors["claude"] = schedulerTestExecutor{}
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: "claude-a", Provider: "claude"}); errRegister != nil {
+		t.Fatalf("Register(claude-a) error = %v", errRegister)
+	}
 	if _, errRegister := manager.Register(context.Background(), &Auth{ID: "gemini-a", Provider: "gemini"}); errRegister != nil {
 		t.Fatalf("Register(gemini-a) error = %v", errRegister)
 	}
 	if _, errRegister := manager.Register(context.Background(), &Auth{ID: "gemini-b", Provider: "gemini"}); errRegister != nil {
 		t.Fatalf("Register(gemini-b) error = %v", errRegister)
 	}
-	if _, errRegister := manager.Register(context.Background(), &Auth{ID: "claude-a", Provider: "claude"}); errRegister != nil {
-		t.Fatalf("Register(claude-a) error = %v", errRegister)
-	}
 
-	wantProviders := []string{"gemini", "claude", "gemini", "claude"}
-	wantIDs := []string{"gemini-a", "claude-a", "gemini-b", "claude-a"}
+	wantProviders := []string{"claude", "gemini", "gemini", "claude"}
+	wantIDs := []string{"claude-a", "gemini-a", "gemini-b", "claude-a"}
 	for index := range wantProviders {
 		got, _, provider, errPick := manager.pickNextMixed(context.Background(), []string{"gemini", "claude"}, "", cliproxyexecutor.Options{}, nil)
 		if errPick != nil {
