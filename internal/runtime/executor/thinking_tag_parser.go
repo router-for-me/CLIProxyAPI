@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"encoding/json"
 	"strings"
 
 	log "github.com/sirupsen/logrus"
@@ -54,26 +55,36 @@ func extractThoughtSignature(part gjson.Result) string {
 }
 
 func rewriteThinkingSegmentPart(original string, segment thinkingTextSegment) (string, error) {
-	updated, err := sjson.Set(original, "text", segment.text)
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(original), &fields); err != nil {
+		return "", err
+	}
+
+	textJSON, err := json.Marshal(segment.text)
 	if err != nil {
 		return "", err
 	}
+	fields["text"] = textJSON
+
 	if segment.thought {
-		updated, err = sjson.Set(updated, "thought", true)
-		if err != nil {
-			return "", err
-		}
+		fields["thought"] = json.RawMessage("true")
 	} else {
-		updated, err = sjson.Delete(updated, "thought")
-		if err != nil {
-			return "", err
-		}
+		delete(fields, "thought")
 	}
-	updated, err = sjson.Delete(updated, "thoughtSignature")
+	delete(fields, "thoughtSignature")
+	delete(fields, "thought_signature")
+
+	updated, err := json.Marshal(fields)
 	if err != nil {
 		return "", err
 	}
-	return sjson.Delete(updated, "thought_signature")
+	return string(updated), nil
+}
+
+type thoughtSignaturePart struct {
+	Text             string `json:"text"`
+	Thought          bool   `json:"thought"`
+	ThoughtSignature string `json:"thoughtSignature"`
 }
 
 func buildThoughtSignaturePart(signature string) (string, error) {
@@ -81,15 +92,15 @@ func buildThoughtSignaturePart(signature string) (string, error) {
 	// the text-bearing thought segment. Downstream Claude translation treats a
 	// signature-bearing thought part as the delimiter that closes and caches the
 	// accumulated thinking text.
-	partJSON, err := sjson.Set("{}", "text", "")
+	partJSON, err := json.Marshal(thoughtSignaturePart{
+		Text:             "",
+		Thought:          true,
+		ThoughtSignature: signature,
+	})
 	if err != nil {
 		return "", err
 	}
-	partJSON, err = sjson.Set(partJSON, "thought", true)
-	if err != nil {
-		return "", err
-	}
-	return sjson.Set(partJSON, "thoughtSignature", signature)
+	return string(partJSON), nil
 }
 
 func (p *ThinkingTagParser) Process(payload []byte) []byte {

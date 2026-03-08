@@ -232,6 +232,44 @@ func TestThinkingTagParser_SplitTaggedPartPreservesThoughtSignature(t *testing.T
 	}
 }
 
+func TestThinkingTagParser_SplitTaggedPartPreservesRawMetadata(t *testing.T) {
+	parser := NewThinkingTagParser("claude-opus-4-6-thinking")
+	signature := "sig_1234567890123456789012345678901234567899"
+	rawObject := `{"nested":[1,{"flag":true}],"label":"stable"}`
+	rawInteger := "9007199254740993"
+	input := makePayloadWithParts(
+		fmt.Sprintf(
+			`{"text":%s,"thoughtSignature":"%s","custom":%s,"sequence":%s}`,
+			strconv.Quote("<thinking>thought</thinking>visible"),
+			signature,
+			rawObject,
+			rawInteger,
+		),
+	)
+
+	result := parser.Process(input)
+	parts := gjson.GetBytes(result, "response.candidates.0.content.parts").Array()
+	if len(parts) != 3 {
+		t.Fatalf("Expected 3 parts, got %d", len(parts))
+	}
+
+	thoughtPart := parts[0]
+	if thoughtPart.Get("custom").Raw != rawObject {
+		t.Fatalf("Expected thought segment to preserve raw object metadata, got %s", thoughtPart.Get("custom").Raw)
+	}
+	if thoughtPart.Get("sequence").Raw != rawInteger {
+		t.Fatalf("Expected thought segment to preserve raw integer metadata, got %s", thoughtPart.Get("sequence").Raw)
+	}
+
+	visiblePart := parts[2]
+	if visiblePart.Get("custom").Raw != rawObject {
+		t.Fatalf("Expected visible segment to preserve raw object metadata, got %s", visiblePart.Get("custom").Raw)
+	}
+	if visiblePart.Get("sequence").Raw != rawInteger {
+		t.Fatalf("Expected visible segment to preserve raw integer metadata, got %s", visiblePart.Get("sequence").Raw)
+	}
+}
+
 func TestThinkingTagParser_SingleThoughtSegmentPreservesThoughtSignature(t *testing.T) {
 	parser := NewThinkingTagParser("claude-opus-4-6-thinking")
 	signature := "sig_1234567890123456789012345678901234567891"
