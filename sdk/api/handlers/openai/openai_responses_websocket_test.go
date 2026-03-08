@@ -317,7 +317,7 @@ func TestForwardResponsesWebsocketPreservesCompletedEvent(t *testing.T) {
 		close(errCh)
 
 		var bodyLog strings.Builder
-		completedOutput, err := (*OpenAIResponsesAPIHandler)(nil).forwardResponsesWebsocket(
+		completedOutput, err, _ := (*OpenAIResponsesAPIHandler)(nil).forwardResponsesWebsocket(
 			ctx,
 			conn,
 			func(...interface{}) {},
@@ -490,5 +490,57 @@ func TestResponsesWebsocketPrewarmHandledLocallyForSSEUpstream(t *testing.T) {
 	input := gjson.GetBytes(forwarded, "input").Array()
 	if len(input) != 1 || input[0].Get("id").String() != "msg-1" {
 		t.Fatalf("unexpected forwarded input: %s", forwarded)
+	}
+}
+
+func TestShouldResetPinnedAuthForWebsocketError(t *testing.T) {
+	cases := []struct {
+		name   string
+		errMsg *interfaces.ErrorMessage
+		want   bool
+	}{
+		{
+			name:   "nil error message",
+			errMsg: nil,
+			want:   false,
+		},
+		{
+			name: "status too many requests",
+			errMsg: &interfaces.ErrorMessage{
+				StatusCode: http.StatusTooManyRequests,
+				Error:      errors.New(`{"error":{"type":"usage_limit_reached"}}`),
+			},
+			want: true,
+		},
+		{
+			name: "status forbidden",
+			errMsg: &interfaces.ErrorMessage{
+				StatusCode: http.StatusForbidden,
+				Error:      errors.New(`{"error":{"code":"token_invalidated"}}`),
+			},
+			want: true,
+		},
+		{
+			name: "textual quota signal",
+			errMsg: &interfaces.ErrorMessage{
+				StatusCode: http.StatusBadRequest,
+				Error:      errors.New("insufficient_quota"),
+			},
+			want: true,
+		},
+		{
+			name: "non credential error",
+			errMsg: &interfaces.ErrorMessage{
+				StatusCode: http.StatusBadRequest,
+				Error:      errors.New("invalid_request_error"),
+			},
+			want: false,
+		},
+	}
+
+	for _, tc := range cases {
+		if got := shouldResetPinnedAuthForWebsocketError(tc.errMsg); got != tc.want {
+			t.Fatalf("%s: got %v want %v", tc.name, got, tc.want)
+		}
 	}
 }
