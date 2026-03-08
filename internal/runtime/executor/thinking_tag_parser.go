@@ -186,9 +186,7 @@ partLoop:
 				// the thinking text that just ended, before any visible text.
 				insertAt = lastThoughtIdx + 1
 			}
-			rewrittenParts = append(rewrittenParts, "")
-			copy(rewrittenParts[insertAt+1:], rewrittenParts[insertAt:])
-			rewrittenParts[insertAt] = signaturePart
+			rewrittenParts = append(rewrittenParts[:insertAt], append([]string{signaturePart}, rewrittenParts[insertAt:]...)...)
 		}
 		if len(rewrittenParts) == 0 {
 			continue
