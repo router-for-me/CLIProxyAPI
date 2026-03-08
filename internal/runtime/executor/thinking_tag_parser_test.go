@@ -4,13 +4,18 @@ import (
 	"bytes"
 	"fmt"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/tidwall/gjson"
 )
 
 func makePayload(text string) []byte {
-	return []byte(fmt.Sprintf(`{"response":{"candidates":[{"content":{"role":"model","parts":[{"text":%s}]}}],"modelVersion":"claude-opus-4-6-thinking"}}`, strconv.Quote(text)))
+	return makePayloadWithParts(fmt.Sprintf(`{"text":%s}`, strconv.Quote(text)))
+}
+
+func makePayloadWithParts(parts ...string) []byte {
+	return []byte(fmt.Sprintf(`{"response":{"candidates":[{"content":{"role":"model","parts":[%s]}}],"modelVersion":"claude-opus-4-6-thinking"}}`, strings.Join(parts, ",")))
 }
 
 func makeFunctionCallPayload(name string, args string) []byte {
@@ -174,6 +179,86 @@ func TestThinkingTagParser_ThinkingThenRegularText(t *testing.T) {
 	}
 	if part2.Get("thought").Exists() && part2.Get("thought").Bool() {
 		t.Errorf("Expected second part thought to be absent or false")
+	}
+}
+
+func TestThinkingTagParser_SplitTaggedPartPreservesThoughtSignature(t *testing.T) {
+	parser := NewThinkingTagParser("claude-opus-4-6-thinking")
+	signature := "sig_1234567890123456789012345678901234567890"
+	input := makePayloadWithParts(
+		fmt.Sprintf(`{"text":%s,"thoughtSignature":"%s","custom":"value"}`, strconv.Quote("<thinking>thought</thinking>visible"), signature),
+	)
+	result := parser.Process(input)
+
+	parts := gjson.GetBytes(result, "response.candidates.0.content.parts").Array()
+	if len(parts) != 3 {
+		t.Fatalf("Expected 3 parts, got %d", len(parts))
+	}
+
+	thoughtPart := parts[0]
+	if thoughtPart.Get("text").String() != "thought" || !thoughtPart.Get("thought").Bool() {
+		t.Fatalf("Expected first part to be thought text, got text=%q thought=%v", thoughtPart.Get("text").String(), thoughtPart.Get("thought").Bool())
+	}
+	if thoughtPart.Get("custom").String() != "value" {
+		t.Fatalf("Expected first part to preserve custom metadata")
+	}
+	if thoughtPart.Get("thoughtSignature").Exists() || thoughtPart.Get("thought_signature").Exists() {
+		t.Fatalf("Expected first part to move signature off the text-bearing thought segment")
+	}
+
+	signaturePart := parts[1]
+	if signaturePart.Get("text").String() != "" || !signaturePart.Get("thought").Bool() {
+		t.Fatalf("Expected second part to be an empty thought signature part")
+	}
+	if signaturePart.Get("thoughtSignature").String() != signature {
+		t.Fatalf("Expected signature %q, got %q", signature, signaturePart.Get("thoughtSignature").String())
+	}
+
+	visiblePart := parts[2]
+	if visiblePart.Get("text").String() != "visible" {
+		t.Fatalf("Expected trailing visible text, got %q", visiblePart.Get("text").String())
+	}
+	if visiblePart.Get("thought").Exists() {
+		t.Fatalf("Expected visible segment to drop thought flag")
+	}
+	if visiblePart.Get("thoughtSignature").Exists() || visiblePart.Get("thought_signature").Exists() {
+		t.Fatalf("Expected visible segment to drop signature metadata")
+	}
+	if visiblePart.Get("custom").String() != "value" {
+		t.Fatalf("Expected visible segment to preserve custom metadata")
+	}
+}
+
+func TestThinkingTagParser_SingleThoughtSegmentPreservesThoughtSignature(t *testing.T) {
+	parser := NewThinkingTagParser("claude-opus-4-6-thinking")
+	signature := "sig_1234567890123456789012345678901234567891"
+	input := makePayloadWithParts(
+		fmt.Sprintf(`{"text":%s,"thoughtSignature":"%s","custom":"value"}`, strconv.Quote("<thinking>thought</thinking>"), signature),
+	)
+	result := parser.Process(input)
+
+	parts := gjson.GetBytes(result, "response.candidates.0.content.parts").Array()
+	if len(parts) != 2 {
+		t.Fatalf("Expected 2 parts, got %d", len(parts))
+	}
+
+	thoughtPart := parts[0]
+	if thoughtPart.Get("text").String() != "thought" || !thoughtPart.Get("thought").Bool() {
+		t.Fatalf("Expected first part to be thought text, got text=%q thought=%v", thoughtPart.Get("text").String(), thoughtPart.Get("thought").Bool())
+	}
+	if thoughtPart.Get("custom").String() != "value" {
+		t.Fatalf("Expected first part to preserve custom metadata")
+	}
+	if thoughtPart.Get("thoughtSignature").Exists() || thoughtPart.Get("thought_signature").Exists() {
+		t.Fatalf("Expected first part to move signature off the text-bearing thought segment")
+	}
+
+	signaturePart := parts[1]
+	if signaturePart.Get("text").String() != "" || !signaturePart.Get("thought").Bool() {
+		t.Fatalf("Expected second part to be an empty thought signature part")
+	}
+	if signaturePart.Get("thoughtSignature").String() != signature {
+		t.Fatalf("Expected signature %q, got %q", signature, signaturePart.Get("thoughtSignature").String())
 	}
 }
 
@@ -354,6 +439,44 @@ func TestThinkingTagParser_RealisticLogReplay(t *testing.T) {
 
 	if !bytes.Equal(resultFunc, chunkFunc) {
 		t.Errorf("Expected function call to remain unchanged after thinking")
+	}
+}
+
+func TestThinkingTagParser_CloseTagChunkPreservesThoughtSignature(t *testing.T) {
+	parser := NewThinkingTagParser("claude-opus-4-6-thinking")
+	signature := "sig_1234567890123456789012345678901234567892"
+
+	parser.Process(makePayload("<thinking>thought"))
+
+	result := parser.Process(makePayloadWithParts(
+		fmt.Sprintf(`{"text":%s,"thoughtSignature":"%s","custom":"value"}`, strconv.Quote("</thinking>visible"), signature),
+	))
+
+	parts := gjson.GetBytes(result, "response.candidates.0.content.parts").Array()
+	if len(parts) != 2 {
+		t.Fatalf("Expected 2 parts, got %d", len(parts))
+	}
+
+	signaturePart := parts[0]
+	if signaturePart.Get("text").String() != "" || !signaturePart.Get("thought").Bool() {
+		t.Fatalf("Expected first part to be an empty thought signature part")
+	}
+	if signaturePart.Get("thoughtSignature").String() != signature {
+		t.Fatalf("Expected signature %q, got %q", signature, signaturePart.Get("thoughtSignature").String())
+	}
+
+	visiblePart := parts[1]
+	if visiblePart.Get("text").String() != "visible" {
+		t.Fatalf("Expected trailing visible text, got %q", visiblePart.Get("text").String())
+	}
+	if visiblePart.Get("thought").Exists() {
+		t.Fatalf("Expected visible segment to drop thought flag")
+	}
+	if visiblePart.Get("thoughtSignature").Exists() || visiblePart.Get("thought_signature").Exists() {
+		t.Fatalf("Expected visible segment to drop signature metadata")
+	}
+	if visiblePart.Get("custom").String() != "value" {
+		t.Fatalf("Expected visible segment to preserve custom metadata")
 	}
 }
 

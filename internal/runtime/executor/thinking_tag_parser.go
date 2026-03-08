@@ -46,6 +46,61 @@ type thinkingTextSegment struct {
 	thought bool
 }
 
+func extractThoughtSignature(part gjson.Result) string {
+	sig := part.Get("thoughtSignature").String()
+	if sig == "" {
+		sig = part.Get("thought_signature").String()
+	}
+	return sig
+}
+
+func rewriteThinkingSegmentPart(original string, segment thinkingTextSegment) (string, error) {
+	updated, err := sjson.Set(original, "text", segment.text)
+	if err != nil {
+		return "", err
+	}
+	if segment.thought {
+		updated, err = sjson.Set(updated, "thought", true)
+		if err != nil {
+			return "", err
+		}
+	} else {
+		updated, err = sjson.Delete(updated, "thought")
+		if err != nil {
+			return "", err
+		}
+	}
+	updated, err = sjson.Delete(updated, "thoughtSignature")
+	if err != nil {
+		return "", err
+	}
+	updated, err = sjson.Delete(updated, "thought_signature")
+	if err != nil {
+		return "", err
+	}
+	return updated, nil
+}
+
+func buildThoughtSignaturePart(signature string) (string, error) {
+	// Keep signatures on their own thought part instead of attaching them to
+	// the text-bearing thought segment. Downstream Claude translation treats a
+	// signature-bearing thought part as the delimiter that closes and caches the
+	// accumulated thinking text.
+	partJSON, err := sjson.Set("{}", "text", "")
+	if err != nil {
+		return "", err
+	}
+	partJSON, err = sjson.Set(partJSON, "thought", true)
+	if err != nil {
+		return "", err
+	}
+	partJSON, err = sjson.Set(partJSON, "thoughtSignature", signature)
+	if err != nil {
+		return "", err
+	}
+	return partJSON, nil
+}
+
 func (p *ThinkingTagParser) Process(payload []byte) []byte {
 	if !p.active {
 		return payload
@@ -71,6 +126,7 @@ func (p *ThinkingTagParser) Process(payload []byte) []byte {
 	updatedParts := make([]string, 0, len(parts))
 	changed := false
 
+partLoop:
 	for _, part := range parts {
 		if !part.Get("text").Exists() {
 			updatedParts = append(updatedParts, part.Raw)
@@ -82,6 +138,14 @@ func (p *ThinkingTagParser) Process(payload []byte) []byte {
 		}
 
 		originalText := part.Get("text").String()
+		if p.tagBuffer == "" && !p.inThinking && !strings.Contains(originalText, "<") {
+			updatedParts = append(updatedParts, part.Raw)
+			continue
+		}
+
+		originalThought := part.Get("thought").Bool()
+		signature := extractThoughtSignature(part)
+		wasInThinking := p.inThinking
 		text := originalText
 		if p.tagBuffer != "" {
 			log.Debugf("antigravity executor: thinking tag parser prepending buffered tag: %q", p.tagBuffer)
@@ -90,46 +154,70 @@ func (p *ThinkingTagParser) Process(payload []byte) []byte {
 		}
 
 		segments := p.splitThinkingText(text)
-		if len(segments) == 0 {
-			changed = true
-			continue
+		hasThoughtSegments := false
+		for _, segment := range segments {
+			if segment.thought && segment.text != "" {
+				hasThoughtSegments = true
+				break
+			}
 		}
-
-		if len(segments) == 1 {
-			updated := part.Raw
-			if segments[0].text != originalText {
-				updated, _ = sjson.Set(updated, "text", segments[0].text)
-			}
-			if segments[0].thought && !part.Get("thought").Bool() {
-				updated, _ = sjson.Set(updated, "thought", true)
-			}
-			if updated != part.Raw {
-				changed = true
-			}
-			updatedParts = append(updatedParts, updated)
+		// Preserve a signature when this source part finishes a thinking run,
+		// even if the current chunk only contains a closing tag and visible text.
+		shouldEmitSignature := signature != "" && !p.inThinking && (hasThoughtSegments || wasInThinking)
+		thoughtStateChanged := len(segments) == 1 &&
+			segments[0].thought != originalThought &&
+			(wasInThinking || p.inThinking)
+		changedByParsing := len(segments) != 1 ||
+			(len(segments) == 1 && (segments[0].text != originalText || thoughtStateChanged)) ||
+			wasInThinking != p.inThinking
+		if !changedByParsing && !shouldEmitSignature {
+			updatedParts = append(updatedParts, part.Raw)
 			continue
 		}
 
 		changed = true
-		log.Debugf("antigravity executor: thinking tag parser split chunk into %d segments", len(segments))
+		rewrittenParts := make([]string, 0, len(segments)+1)
+		lastThoughtIdx := -1
 		for _, segment := range segments {
 			if segment.text == "" {
 				continue
 			}
-			partJSON, err := sjson.Set("{}", "text", segment.text)
+			partJSON, err := rewriteThinkingSegmentPart(part.Raw, segment)
 			if err != nil {
-				log.Errorf("antigravity executor: thinking tag parser failed to set text on part: %v", err)
+				log.Errorf("antigravity executor: thinking tag parser failed to rewrite split part: %v", err)
+				updatedParts = append(updatedParts, part.Raw)
+				continue partLoop
+			}
+			rewrittenParts = append(rewrittenParts, partJSON)
+			if segment.thought {
+				lastThoughtIdx = len(rewrittenParts) - 1
+			}
+		}
+		if shouldEmitSignature {
+			signaturePart, err := buildThoughtSignaturePart(signature)
+			if err != nil {
+				log.Errorf("antigravity executor: thinking tag parser failed to build signature part: %v", err)
+				updatedParts = append(updatedParts, part.Raw)
 				continue
 			}
-			if segment.thought {
-				partJSON, err = sjson.Set(partJSON, "thought", true)
-				if err != nil {
-					log.Errorf("antigravity executor: thinking tag parser failed to set thought on part: %v", err)
-					continue
-				}
+			insertAt := 0
+			if lastThoughtIdx >= 0 {
+				// The signature must come immediately after the final derived
+				// thought segment so downstream consumers can associate it with
+				// the thinking text that just ended, before any visible text.
+				insertAt = lastThoughtIdx + 1
 			}
-			updatedParts = append(updatedParts, partJSON)
+			rewrittenParts = append(rewrittenParts, "")
+			copy(rewrittenParts[insertAt+1:], rewrittenParts[insertAt:])
+			rewrittenParts[insertAt] = signaturePart
 		}
+		if len(rewrittenParts) == 0 {
+			continue
+		}
+		if len(rewrittenParts) > 1 {
+			log.Debugf("antigravity executor: thinking tag parser split chunk into %d segments", len(rewrittenParts))
+		}
+		updatedParts = append(updatedParts, rewrittenParts...)
 	}
 
 	if !changed {
