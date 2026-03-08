@@ -11,7 +11,6 @@ import (
 const (
 	thinkingStartTag = "<thinking>"
 	thinkingEndTag   = "</thinking>"
-	maxTagBufferLen  = 12
 )
 
 var thinkingStartPartials = generatePartials(thinkingStartTag)
@@ -74,11 +73,7 @@ func rewriteThinkingSegmentPart(original string, segment thinkingTextSegment) (s
 	if err != nil {
 		return "", err
 	}
-	updated, err = sjson.Delete(updated, "thought_signature")
-	if err != nil {
-		return "", err
-	}
-	return updated, nil
+	return sjson.Delete(updated, "thought_signature")
 }
 
 func buildThoughtSignaturePart(signature string) (string, error) {
@@ -94,11 +89,7 @@ func buildThoughtSignaturePart(signature string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	partJSON, err = sjson.Set(partJSON, "thoughtSignature", signature)
-	if err != nil {
-		return "", err
-	}
-	return partJSON, nil
+	return sjson.Set(partJSON, "thoughtSignature", signature)
 }
 
 func (p *ThinkingTagParser) Process(payload []byte) []byte {
@@ -295,9 +286,6 @@ func (p *ThinkingTagParser) splitThinkingText(text string) []thinkingTextSegment
 func splitTrailingPartialTag(text string, partials []string) (string, string) {
 	for _, partial := range partials {
 		if strings.HasSuffix(text, partial) {
-			if len(partial) > maxTagBufferLen {
-				return text, ""
-			}
 			return text[:len(text)-len(partial)], partial
 		}
 	}
