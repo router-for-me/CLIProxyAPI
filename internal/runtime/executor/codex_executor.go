@@ -767,7 +767,26 @@ func parseCodexSSEError(line []byte) (statusErr, bool) {
 	if err != nil {
 		return statusErr{}, false
 	}
-	return statusErr{code: status, msg: string(encoded)}, true
+	var retryAfter *time.Duration
+	if status == http.StatusTooManyRequests {
+		retryAfter = parseSSERetryAfter(errorPayload, time.Now())
+	}
+	return statusErr{code: status, msg: string(encoded), retryAfter: retryAfter}, true
+}
+
+func parseSSERetryAfter(errorPayload gjson.Result, now time.Time) *time.Duration {
+	if resetsAt := errorPayload.Get("resets_at").Int(); resetsAt > 0 {
+		resetTime := time.Unix(resetsAt, 0)
+		if resetTime.After(now) {
+			d := resetTime.Sub(now)
+			return &d
+		}
+	}
+	if resetsInSeconds := errorPayload.Get("resets_in_seconds").Int(); resetsInSeconds > 0 {
+		d := time.Duration(resetsInSeconds) * time.Second
+		return &d
+	}
+	return nil
 }
 
 func codexCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {

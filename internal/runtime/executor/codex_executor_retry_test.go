@@ -131,6 +131,74 @@ func TestParseCodexSSEError(t *testing.T) {
 			t.Fatalf("expected non-error event to be ignored")
 		}
 	})
+
+	t.Run("usage_limit_reached with resets_at preserves retryAfter", func(t *testing.T) {
+		resetAt := time.Now().Add(5 * time.Minute).Unix()
+		line := []byte(`{"type":"error","error":{"type":"usage_limit_reached","code":"usage_limit_reached","message":"usage limit reached","resets_at":` + itoa(resetAt) + `,"resets_in_seconds":60}}`)
+		got, ok := parseCodexSSEError(line)
+		if !ok {
+			t.Fatalf("expected parser to handle usage_limit_reached SSE error")
+		}
+		if got.code != http.StatusTooManyRequests {
+			t.Fatalf("status = %d, want %d", got.code, http.StatusTooManyRequests)
+		}
+		ra := got.RetryAfter()
+		if ra == nil {
+			t.Fatalf("expected retryAfter to be set, got nil")
+		}
+		if *ra < 4*time.Minute || *ra > 6*time.Minute {
+			t.Fatalf("retryAfter = %v, want ~5m", *ra)
+		}
+	})
+
+	t.Run("usage_limit_reached with resets_in_seconds only", func(t *testing.T) {
+		line := []byte(`{"type":"error","error":{"type":"usage_limit_reached","code":"usage_limit_reached","message":"usage limit reached","resets_in_seconds":120}}`)
+		got, ok := parseCodexSSEError(line)
+		if !ok {
+			t.Fatalf("expected parser to handle usage_limit_reached SSE error")
+		}
+		ra := got.RetryAfter()
+		if ra == nil {
+			t.Fatalf("expected retryAfter to be set, got nil")
+		}
+		if *ra != 120*time.Second {
+			t.Fatalf("retryAfter = %v, want %v", *ra, 120*time.Second)
+		}
+	})
+
+	t.Run("response.failed usage_limit_reached preserves retryAfter", func(t *testing.T) {
+		line := []byte(`{"type":"response.failed","response":{"error":{"type":"usage_limit_reached","code":"usage_limit_reached","message":"usage limit reached","resets_in_seconds":90}}}`)
+		got, ok := parseCodexSSEError(line)
+		if !ok {
+			t.Fatalf("expected parser to handle response.failed usage_limit_reached")
+		}
+		if got.code != http.StatusTooManyRequests {
+			t.Fatalf("status = %d, want %d", got.code, http.StatusTooManyRequests)
+		}
+		ra := got.RetryAfter()
+		if ra == nil {
+			t.Fatalf("expected retryAfter to be set, got nil")
+		}
+		if *ra != 90*time.Second {
+			t.Fatalf("retryAfter = %v, want %v", *ra, 90*time.Second)
+		}
+	})
+
+	t.Run("usage_limit_reached with past resets_at falls back to resets_in_seconds", func(t *testing.T) {
+		resetAt := time.Now().Add(-1 * time.Minute).Unix()
+		line := []byte(`{"type":"error","error":{"type":"usage_limit_reached","code":"usage_limit_reached","message":"usage limit reached","resets_at":` + itoa(resetAt) + `,"resets_in_seconds":45}}`)
+		got, ok := parseCodexSSEError(line)
+		if !ok {
+			t.Fatalf("expected parser to handle usage_limit_reached SSE error")
+		}
+		ra := got.RetryAfter()
+		if ra == nil {
+			t.Fatalf("expected retryAfter to be set, got nil")
+		}
+		if *ra != 45*time.Second {
+			t.Fatalf("retryAfter = %v, want %v", *ra, 45*time.Second)
+		}
+	})
 }
 
 func itoa(v int64) string {
