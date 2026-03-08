@@ -2,11 +2,14 @@ package executor
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/cache"
+	antigravityclaude "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/antigravity/claude"
 	"github.com/tidwall/gjson"
 )
 
@@ -477,6 +480,42 @@ func TestThinkingTagParser_CloseTagChunkPreservesThoughtSignature(t *testing.T) 
 	}
 	if visiblePart.Get("custom").String() != "value" {
 		t.Fatalf("Expected visible segment to preserve custom metadata")
+	}
+}
+
+func TestThinkingTagParser_NormalizedSignedThinkingShapeCachesSignature(t *testing.T) {
+	cache.ClearSignatureCache("")
+
+	parser := NewThinkingTagParser("claude-opus-4-6-thinking")
+	validSignature := "splitSig_1234567890123456789012345678901234567890123456"
+	parsed := parser.Process(makePayloadWithParts(
+		fmt.Sprintf(`{"text":%s,"thoughtSignature":"%s"}`, strconv.Quote("<thinking>My tagged thinking</thinking>Visible text"), validSignature),
+	))
+
+	requestJSON := []byte(`{
+		"model": "claude-sonnet-4-5-thinking",
+		"messages": [{"role": "user", "content": [{"type": "text", "text": "Cache split test"}]}]
+	}`)
+
+	var param any
+	output := antigravityclaude.ConvertAntigravityResponseToClaude(context.Background(), "claude-sonnet-4-5-thinking", requestJSON, requestJSON, parsed, &param)
+	outputText := strings.Join(output, "")
+
+	if !strings.Contains(outputText, `"type":"signature_delta"`) {
+		t.Fatal("Expected output to contain a signature delta")
+	}
+	if !strings.Contains(outputText, "Visible text") {
+		t.Fatal("Expected output to include the visible text segment")
+	}
+
+	cachedSig := cache.GetCachedSignature("claude-sonnet-4-5-thinking", "My tagged thinking")
+	if cachedSig != validSignature {
+		t.Fatalf("Expected cached signature %q, got %q", validSignature, cachedSig)
+	}
+
+	params := param.(*antigravityclaude.Params)
+	if params.CurrentThinkingText.Len() != 0 {
+		t.Fatal("Expected thinking text to be reset after caching the signature")
 	}
 }
 

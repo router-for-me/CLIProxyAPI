@@ -153,52 +153,6 @@ func TestConvertAntigravityResponseToClaude_SignatureCached(t *testing.T) {
 	}
 }
 
-func TestConvertAntigravityResponseToClaude_SplitThinkingShapeCachesSignature(t *testing.T) {
-	cache.ClearSignatureCache("")
-
-	requestJSON := []byte(`{
-		"model": "claude-sonnet-4-5-thinking",
-		"messages": [{"role": "user", "content": [{"type": "text", "text": "Cache split test"}]}]
-	}`)
-
-	validSignature := "splitSig_1234567890123456789012345678901234567890123456"
-	responseJSON := []byte(`{
-		"response": {
-			"candidates": [{
-				"content": {
-					"parts": [
-						{"text": "My tagged thinking", "thought": true},
-						{"text": "", "thought": true, "thoughtSignature": "` + validSignature + `"},
-						{"text": "Visible text"}
-					]
-				}
-			}]
-		}
-	}`)
-
-	var param any
-	ctx := context.Background()
-	output := ConvertAntigravityResponseToClaude(ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, responseJSON, &param)
-	outputText := strings.Join(output, "")
-
-	if !strings.Contains(outputText, `"type":"signature_delta"`) {
-		t.Fatal("Expected output to contain a signature delta")
-	}
-	if !strings.Contains(outputText, "Visible text") {
-		t.Fatal("Expected output to include the visible text segment")
-	}
-
-	cachedSig := cache.GetCachedSignature("claude-sonnet-4-5-thinking", "My tagged thinking")
-	if cachedSig != validSignature {
-		t.Fatalf("Expected cached signature %q, got %q", validSignature, cachedSig)
-	}
-
-	params := param.(*Params)
-	if params.CurrentThinkingText.Len() != 0 {
-		t.Fatal("Expected thinking text to be reset after caching the signature")
-	}
-}
-
 func TestConvertAntigravityResponseToClaude_MultipleThinkingBlocks(t *testing.T) {
 	cache.ClearSignatureCache("")
 
