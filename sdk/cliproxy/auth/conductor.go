@@ -2178,8 +2178,12 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 		log.Debugf("refresh canceled for %s, %s", auth.Provider, auth.ID)
 		return
 	}
-	log.Debugf("refreshed %s, %s, %v", auth.Provider, auth.ID, err)
 	now := time.Now()
+	if err != nil {
+		log.Warnf("auth refresh failed for %s/%s: %v", auth.Provider, auth.ID, err)
+	} else {
+		log.Debugf("auth refresh ok for %s/%s", auth.Provider, auth.ID)
+	}
 	if err != nil {
 		m.mu.Lock()
 		if current := m.auths[id]; current != nil {
