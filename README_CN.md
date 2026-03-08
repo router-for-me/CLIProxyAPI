@@ -1,182 +1,123 @@
-# CLI 代理 API
+# 冰糖雪梨
 
 [English](README.md) | 中文
 
-一个为 CLI 提供 OpenAI/Gemini/Claude/Codex 兼容 API 接口的代理服务器。
+基于 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) 二创的开源公益站 — 通过额度分发系统为社区提供免费 AI 模型访问。
 
-现已支持通过 OAuth 登录接入 OpenAI Codex（GPT 系列）和 Claude Code。
+## 冰糖雪梨是什么？
 
-您可以使用本地或多账户的CLI方式，通过任何与 OpenAI（包括Responses）/Gemini/Claude 兼容的客户端和SDK进行访问。
-
-## 赞助商
-
-[![bigmodel.cn](https://assets.router-for.me/chinese-5-0.jpg)](https://www.bigmodel.cn/claude-code?ic=RRVJPB5SII)
-
-本项目由 Z智谱 提供赞助, 他们通过 GLM CODING PLAN 对本项目提供技术支持。
-
-GLM CODING PLAN 是专为AI编码打造的订阅套餐，每月最低仅需20元，即可在十余款主流AI编码工具如 Claude Code、Cline、Roo Code 中畅享智谱旗舰模型GLM-4.7（受限于算力，目前仅限Pro用户开放），为开发者提供顶尖的编码体验。
-
-智谱AI为本产品提供了特别优惠，使用以下链接购买可以享受九折优惠：https://www.bigmodel.cn/claude-code?ic=RRVJPB5SII
-
----
-
-<table>
-<tbody>
-<tr>
-<td width="180"><a href="https://www.packyapi.com/register?aff=cliproxyapi"><img src="./assets/packycode.png" alt="PackyCode" width="150"></a></td>
-<td>感谢 PackyCode 对本项目的赞助！PackyCode 是一家可靠高效的 API 中转服务商，提供 Claude Code、Codex、Gemini 等多种服务的中转。PackyCode 为本软件用户提供了特别优惠：使用<a href="https://www.packyapi.com/register?aff=cliproxyapi">此链接</a>注册，并在充值时输入 "cliproxyapi" 优惠码即可享受九折优惠。</td>
-</tr>
-<tr>
-<td width="180"><a href="https://www.aicodemirror.com/register?invitecode=TJNAIF"><img src="./assets/aicodemirror.png" alt="AICodeMirror" width="150"></a></td>
-<td>感谢 AICodeMirror 赞助了本项目！AICodeMirror 提供 Claude Code / Codex / Gemini CLI 官方高稳定中转服务，支持企业级高并发、极速开票、7×24 专属技术支持。 Claude Code / Codex / Gemini 官方渠道低至 3.8 / 0.2 / 0.9 折，充值更有折上折！AICodeMirror 为 CLIProxyAPI 的用户提供了特别福利，通过<a href="https://www.aicodemirror.com/register?invitecode=TJNAIF">此链接</a>注册的用户，可享受首充8折，企业客户最高可享 7.5 折！</td>
-</tr>
-</tbody>
-</table>
-
+冰糖雪梨将 CLIProxyAPI 从个人 CLI 代理工具扩展为**多用户公益额度分发平台**。用户注册账号后，通过兑换码领取额度，即可使用共享凭证池访问 AI 模型（Claude、Gemini、OpenAI 等），所有功能均通过现代化 Web 面板管理。
 
 ## 功能特性
 
-- 为 CLI 模型提供 OpenAI/Gemini/Claude/Codex 兼容的 API 端点
-- 新增 OpenAI Codex（GPT 系列）支持（OAuth 登录）
-- 新增 Claude Code 支持（OAuth 登录）
-- 新增 Qwen Code 支持（OAuth 登录）
-- 新增 iFlow 支持（OAuth 登录）
-- 支持流式与非流式响应
-- 函数调用/工具支持
-- 多模态输入（文本、图片）
-- 多账户支持与轮询负载均衡（Gemini、OpenAI、Claude、Qwen 与 iFlow）
-- 简单的 CLI 身份验证流程（Gemini、OpenAI、Claude、Qwen 与 iFlow）
-- 支持 Gemini AIStudio API 密钥
-- 支持 AI Studio Build 多账户轮询
-- 支持 Gemini CLI 多账户轮询
-- 支持 Claude Code 多账户轮询
-- 支持 Qwen Code 多账户轮询
-- 支持 iFlow 多账户轮询
-- 支持 OpenAI Codex 多账户轮询
-- 通过配置接入上游 OpenAI 兼容提供商（例如 OpenRouter）
-- 可复用的 Go SDK（见 `docs/sdk-usage_CN.md`）
+### 用户体系
+- 账号注册 + 邮箱验证码（SMTP）
+- JWT 认证体系（Access Token + Refresh Token）
+- 邀请码 & 推荐系统，双向额度奖励
+- 每用户独立 API Key，直接对接代理 API
 
-## 新手入门
+### 额度与凭证管理
+- 模型级别额度分配（请求次数 / Token 上限）
+- 兑换码模板，用户自助领取
+- 共享凭证池 + 加权负载均衡
+- 贡献者池 / 公共池 / 独立池三种模式
 
-CLIProxyAPI 用户手册： [https://help.router-for.me/](https://help.router-for.me/cn/)
+### 管理后台
+- 实时仪表盘：请求趋势、模型分布图表
+- 用户管理：封禁/解封、角色分配
+- 凭证池健康监控
+- 兑换码批量生成 & 模板管理
+- 按模型配置额度规则
+- 路由引擎调优（策略、权重、健康检查）
+- 系统设置（SMTP、OAuth、通用配置）
 
-## 管理 API 文档
+### 安全防护
+- IP 黑白名单（CIDR 格式）
+- 全局 & 单 IP 速率限制
+- 异常行为检测（高频访问、模型扫描、错误激增）
+- 风险标记 + 自动过期
+- 完整审计日志
+- 验证码恒定时间比对
+- 全链路加密安全随机数
 
-请参见 [MANAGEMENT_API_CN.md](https://help.router-for.me/cn/management/api)
+### 前端面板
+- React 19 + Tailwind CSS + Vite 单页应用
+- 响应式设计，移动端侧边栏抽屉
+- 中英双语 UI（Zustand i18n 状态管理）
+- 挂载于 `/panel` 路径，与代理 API 并行服务
 
-## Amp CLI 支持
+## 技术栈
 
-CLIProxyAPI 已内置对 [Amp CLI](https://ampcode.com) 和 Amp IDE 扩展的支持，可让你使用自己的 Google/ChatGPT/Claude OAuth 订阅来配合 Amp 编码工具：
+| 层级 | 技术 |
+|------|------|
+| 后端 | Go 1.26、Gin、modernc.org/sqlite（无 CGO） |
+| 前端 | React 19、TypeScript、Tailwind CSS、Vite、Zustand、Recharts |
+| 认证 | JWT HS256（密钥最低 32 字节） |
+| 数据库 | SQLite（WAL 模式） |
+| 容器 | Docker 多架构（amd64 + arm64） |
+| CI/CD | GitHub Actions + GHCR |
 
-- 提供商路由别名，兼容 Amp 的 API 路径模式（`/api/provider/{provider}/v1...`）
-- 管理代理，处理 OAuth 认证和账号功能
-- 智能模型回退与自动路由
-- 以安全为先的设计，管理端点仅限 localhost
+## 快速开始
 
-**→ [Amp CLI 完整集成指南](https://help.router-for.me/cn/agent-client/amp-cli.html)**
+### Docker Compose（推荐）
 
-## SDK 文档
+```bash
+# 1. 克隆仓库
+git clone https://github.com/hajimilvdou/BTXL.git
+cd BTXL
 
-- 使用文档：[docs/sdk-usage_CN.md](docs/sdk-usage_CN.md)
-- 高级（执行器与翻译器）：[docs/sdk-advanced_CN.md](docs/sdk-advanced_CN.md)
-- 认证: [docs/sdk-access_CN.md](docs/sdk-access_CN.md)
-- 凭据加载/更新: [docs/sdk-watcher_CN.md](docs/sdk-watcher_CN.md)
-- 自定义 Provider 示例：`examples/custom-provider`
+# 2. 复制并编辑配置
+cp config.example.yaml config.yaml
+# 编辑 config.yaml 填入你的配置
 
-## 贡献
+# 3. 启动服务
+docker compose up -d
+```
 
-欢迎贡献！请随时提交 Pull Request。
+服务暴露端口：
+- **8317** — API 代理 + 管理面板 (`/panel`)
 
-1. Fork 仓库
-2. 创建您的功能分支（`git checkout -b feature/amazing-feature`）
-3. 提交您的更改（`git commit -m 'Add some amazing feature'`）
-4. 推送到分支（`git push origin feature/amazing-feature`）
-5. 打开 Pull Request
+### 环境变量
 
-## 谁与我们在一起？
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `CLI_PROXY_IMAGE` | `ghcr.io/hajimilvdou/btxl:latest` | Docker 镜像地址 |
+| `CLI_PROXY_CONFIG_PATH` | `./config.yaml` | 配置文件路径 |
+| `CLI_PROXY_AUTH_PATH` | `./auths` | OAuth 凭证目录 |
+| `CLI_PROXY_LOG_PATH` | `./logs` | 日志目录 |
 
-这些项目基于 CLIProxyAPI:
+### 源码构建
 
-### [vibeproxy](https://github.com/automazeio/vibeproxy)
+```bash
+# 需要 Go 1.26+
+go build -o bingtang-xueli ./cmd/server/
+./bingtang-xueli
+```
 
-一个原生 macOS 菜单栏应用，让您可以使用 Claude Code & ChatGPT 订阅服务和 AI 编程工具，无需 API 密钥。
+## 项目结构
 
-### [Subtitle Translator](https://github.com/VjayC/SRT-Subtitle-Translator-Validator)
+```
+internal/
+  community/           # 公益站扩展层
+    user/              # 认证、JWT、邮箱验证
+    quota/             # 额度引擎、风控
+    credential/        # 兑换、推荐、模板
+    security/          # IP 控制、限流、异常检测、审计
+    stats/             # 请求统计
+    community.go       # 统一初始化入口
+  panel/web/           # React SPA 前端
+    src/pages/         # 认证 / 用户 / 管理页面
+    src/api/           # TypeScript API 客户端
+    src/stores/        # Zustand 状态管理
+    src/i18n/          # 中英双语翻译
+  db/                  # SQLite 存储 + 迁移脚本
+  translator/          # 上游 API 格式翻译（核心层）
+```
 
-一款基于浏览器的 SRT 字幕翻译工具，可通过 CLI 代理 API 使用您的 Gemini 订阅。内置自动验证与错误修正功能，无需 API 密钥。
+## 致谢
 
-### [CCS (Claude Code Switch)](https://github.com/kaitranntt/ccs)
-
-CLI 封装器，用于通过 CLIProxyAPI OAuth 即时切换多个 Claude 账户和替代模型（Gemini, Codex, Antigravity），无需 API 密钥。
-
-### [ProxyPal](https://github.com/heyhuynhgiabuu/proxypal)
-
-基于 macOS 平台的原生 CLIProxyAPI GUI：配置供应商、模型映射以及OAuth端点，无需 API 密钥。
-
-### [Quotio](https://github.com/nguyenphutrong/quotio)
-
-原生 macOS 菜单栏应用，统一管理 Claude、Gemini、OpenAI、Qwen 和 Antigravity 订阅，提供实时配额追踪和智能自动故障转移，支持 Claude Code、OpenCode 和 Droid 等 AI 编程工具，无需 API 密钥。
-
-### [CodMate](https://github.com/loocor/CodMate)
-
-原生 macOS SwiftUI 应用，用于管理 CLI AI 会话（Claude Code、Codex、Gemini CLI），提供统一的提供商管理、Git 审查、项目组织、全局搜索和终端集成。集成 CLIProxyAPI 为 Codex、Claude、Gemini、Antigravity 和 Qwen Code 提供统一的 OAuth 认证，支持内置和第三方提供商通过单一代理端点重路由 - OAuth 提供商无需 API 密钥。
-
-### [ProxyPilot](https://github.com/Finesssee/ProxyPilot)
-
-原生 Windows CLIProxyAPI 分支，集成 TUI、系统托盘及多服务商 OAuth 认证，专为 AI 编程工具打造，无需 API 密钥。
-
-### [Claude Proxy VSCode](https://github.com/uzhao/claude-proxy-vscode)
-
-一款 VSCode 扩展，提供了在 VSCode 中快速切换 Claude Code 模型的功能，内置 CLIProxyAPI 作为其后端，支持后台自动启动和关闭。
-
-### [ZeroLimit](https://github.com/0xtbug/zero-limit)
-
-Windows 桌面应用，基于 Tauri + React 构建，用于通过 CLIProxyAPI 监控 AI 编程助手配额。支持跨 Gemini、Claude、OpenAI Codex 和 Antigravity 账户的使用量追踪，提供实时仪表盘、系统托盘集成和一键代理控制，无需 API 密钥。
-
-### [CPA-XXX Panel](https://github.com/ferretgeek/CPA-X)
-
-面向 CLIProxyAPI 的 Web 管理面板，提供健康检查、资源监控、日志查看、自动更新、请求统计与定价展示，支持一键安装与 systemd 服务。
-
-### [CLIProxyAPI Tray](https://github.com/kitephp/CLIProxyAPI_Tray)
-
-Windows 托盘应用，基于 PowerShell 脚本实现，不依赖任何第三方库。主要功能包括：自动创建快捷方式、静默运行、密码管理、通道切换（Main / Plus）以及自动下载与更新。
-
-### [霖君](https://github.com/wangdabaoqq/LinJun)
-
-霖君是一款用于管理AI编程助手的跨平台桌面应用，支持macOS、Windows、Linux系统。统一管理Claude Code、Gemini CLI、OpenAI Codex、Qwen Code等AI编程工具，本地代理实现多账户配额跟踪和一键配置。
-
-### [CLIProxyAPI Dashboard](https://github.com/itsmylife44/cliproxyapi-dashboard)
-
-一个面向 CLIProxyAPI 的现代化 Web 管理仪表盘，基于 Next.js、React 和 PostgreSQL 构建。支持实时日志流、结构化配置编辑、API Key 管理、Claude/Gemini/Codex 的 OAuth 提供方集成、使用量分析、容器管理，并可通过配套插件与 OpenCode 同步配置，无需手动编辑 YAML。
-
-> [!NOTE]  
-> 如果你开发了基于 CLIProxyAPI 的项目，请提交一个 PR（拉取请求）将其添加到此列表中。
-
-## 更多选择
-
-以下项目是 CLIProxyAPI 的移植版或受其启发：
-
-### [9Router](https://github.com/decolua/9router)
-
-基于 Next.js 的实现，灵感来自 CLIProxyAPI，易于安装使用；自研格式转换（OpenAI/Claude/Gemini/Ollama）、组合系统与自动回退、多账户管理（指数退避）、Next.js Web 控制台，并支持 Cursor、Claude Code、Cline、RooCode 等 CLI 工具，无需 API 密钥。
-
-### [OmniRoute](https://github.com/diegosouzapw/OmniRoute)
-
-代码不止，创新不停。智能路由至免费及低成本 AI 模型，并支持自动故障转移。
-
-OmniRoute 是一个面向多供应商大语言模型的 AI 网关：它提供兼容 OpenAI 的端点，具备智能路由、负载均衡、重试及回退机制。通过添加策略、速率限制、缓存和可观测性，确保推理过程既可靠又具备成本意识。
-
-> [!NOTE]  
-> 如果你开发了 CLIProxyAPI 的移植或衍生项目，请提交 PR 将其添加到此列表中。
+本项目基于 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)（Router-For.ME）二次开发。
 
 ## 许可证
 
-此项目根据 MIT 许可证授权 - 有关详细信息，请参阅 [LICENSE](LICENSE) 文件。
-
-## 写给所有中国网友的
-
-QQ 群：188637136
-
-或
-
-Telegram 群：https://t.me/CLIProxyAPI
+本项目基于 MIT 许可证授权 — 详见 [LICENSE](LICENSE) 文件。

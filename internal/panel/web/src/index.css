@@ -1,0 +1,68 @@
+@import 'tailwindcss';
+
+/* ============================================================
+ * 设计令牌 — 全局 CSS 变量
+ * 统一管理主题色值，方便后续扩展暗色模式
+ * ============================================================ */
+
+:root {
+  --color-bg: #F8FAFC;
+  --color-card: #FFFFFF;
+  --color-accent: #3B82F6;
+  --color-accent-hover: #2563EB;
+  --color-success: #10B981;
+  --color-warning: #F59E0B;
+  --color-error: #EF4444;
+  --color-text-primary: #0F172A;
+  --color-text-secondary: #64748B;
+  --color-text-muted: #94A3B8;
+  --color-border: #E2E8F0;
+  --color-sidebar: #FFFFFF;
+  --sidebar-width: 240px;
+}
+
+/* ============================================================
+ * 基础样式重置
+ * ============================================================ */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  background-color: var(--color-bg);
+  color: var(--color-text-primary);
+  line-height: 1.6;
+}
+
+/* ============================================================
+ * 滚动条美化（Webkit 内核）
+ * ============================================================ */
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #CBD5E1;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #94A3B8;
+}

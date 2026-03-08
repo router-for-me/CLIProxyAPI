@@ -10,8 +10,12 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/community"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/panel"
+	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy"
 	log "github.com/sirupsen/logrus"
 )
@@ -43,6 +47,27 @@ func StartService(cfg *config.Config, configPath string, localPassword string) {
 		}))
 	}
 
+	// -- 社区平台集成 --
+	if cfg.Community.Enabled {
+		comm, err := community.New(context.Background(), cfg.Community)
+		if err != nil {
+			log.Errorf("failed to initialize community platform: %v", err)
+			return
+		}
+		defer comm.Close()
+
+		builder = builder.WithServerOptions(
+			api.WithRouterConfigurator(func(engine *gin.Engine, _ *handlers.BaseAPIHandler, appCfg *config.Config) {
+				comm.RegisterRoutes(engine)
+				// 面板嵌入
+				if appCfg.Community.Panel.Enabled {
+					panel.RegisterRoutes(engine, appCfg.Community.Panel.BasePath)
+				}
+			}),
+		)
+		log.Info("社区平台模块已注入服务器")
+	}
+
 	service, err := builder.Build()
 	if err != nil {
 		log.Errorf("failed to build proxy service: %v", err)
@@ -66,15 +91,45 @@ func StartServiceBackground(cfg *config.Config, configPath string, localPassword
 	ctx, cancelFn := context.WithCancel(context.Background())
 	doneCh := make(chan struct{})
 
+	// -- 社区平台集成 --
+	var comm *community.Community
+	if cfg.Community.Enabled {
+		var err error
+		comm, err = community.New(context.Background(), cfg.Community)
+		if err != nil {
+			log.Errorf("failed to initialize community platform: %v", err)
+			close(doneCh)
+			return cancelFn, doneCh
+		}
+
+		builder = builder.WithServerOptions(
+			api.WithRouterConfigurator(func(engine *gin.Engine, _ *handlers.BaseAPIHandler, appCfg *config.Config) {
+				comm.RegisterRoutes(engine)
+				if appCfg.Community.Panel.Enabled {
+					panel.RegisterRoutes(engine, appCfg.Community.Panel.BasePath)
+				}
+			}),
+		)
+		log.Info("社区平台模块已注入后台服务器")
+	}
+
 	service, err := builder.Build()
 	if err != nil {
 		log.Errorf("failed to build proxy service: %v", err)
+		if comm != nil {
+			comm.Close()
+		}
 		close(doneCh)
 		return cancelFn, doneCh
 	}
 
 	go func() {
 		defer close(doneCh)
+		defer func() {
+			if comm != nil {
+				comm.Close()
+			}
+		}()
 		if err := service.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			log.Errorf("proxy service exited with error: %v", err)
 		}

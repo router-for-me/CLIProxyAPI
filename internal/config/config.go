@@ -121,6 +121,9 @@ type Config struct {
 	// Payload defines default and override rules for provider payload parameters.
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
 
+	// Community 公益站平台配置
+	Community CommunityConfig `yaml:"community,omitempty" json:"community,omitempty"`
+
 	legacyMigrationPending bool `yaml:"-" json:"-"`
 }
 

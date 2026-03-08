@@ -331,3 +331,54 @@ nonstream-keepalive-interval: 0
 #       params: # JSON paths (gjson/sjson syntax) to remove from the payload
 #         - "generationConfig.thinkingConfig.thinkingBudget"
 #         - "generationConfig.responseJsonSchema"
+
+# ============================================================
+# Community platform settings (公益站平台)
+# ============================================================
+# community:
+#   enabled: true
+#   database:
+#     driver: "sqlite"       # sqlite / postgres
+#     dsn: "./community.db"
+#   auth:
+#     jwt-secret: "your-jwt-secret-change-me"
+#     access-token-ttl: 7200      # 秒，默认 2 小时
+#     refresh-token-ttl: 604800   # 秒，默认 7 天
+#     email-register: true
+#     invite-required: false
+#     referral-enabled: true
+#   quota:
+#     default-pool-mode: "public"  # public / private / contributor
+#     rpm:
+#       enabled: true
+#       contributor-rpm: 30
+#       non-contributor-rpm: 10
+#     probability-limit:
+#       enabled: false
+#       contributor-weight: 1.0
+#       non-contributor-weight: 0.8
+#     risk-rule:
+#       enabled: true
+#       rpm-exceed-threshold: 5
+#       rpm-exceed-window-sec: 300
+#       penalty-duration-sec: 600
+#       penalty-probability: 0.1
+#   security:
+#     ip-control:
+#       enabled: false
+#     rate-limit:
+#       enabled: true
+#       global-qps: 100
+#       per-ip-rpm: 60
+#     anomaly-detect:
+#       enabled: true
+#   smtp:
+#     host: "smtp.qq.com"
+#     port: 587
+#     username: "your-email@qq.com"
+#     password: "your-smtp-password"
+#     from: "your-email@qq.com"
+#     use-tls: true
+#   panel:
+#     enabled: true
+#     base-path: "/panel"
