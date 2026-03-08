@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
@@ -125,5 +126,74 @@ func TestDeleteAuthFile_FallbackToAuthDirPath(t *testing.T) {
 	}
 	if _, errStat := os.Stat(filePath); !os.IsNotExist(errStat) {
 		t.Fatalf("expected auth file to be removed from auth dir, stat err: %v", errStat)
+	}
+}
+
+func TestDeleteAuthFile_AllowsReaddingSameNameWithoutStaleState(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	authDir := t.TempDir()
+	fileName := "codex-readd.json"
+	filePath := filepath.Join(authDir, fileName)
+	fileData := []byte(`{"type":"codex","email":"readd@example.com"}`)
+	if errWrite := os.WriteFile(filePath, fileData, 0o600); errWrite != nil {
+		t.Fatalf("failed to write auth file: %v", errWrite)
+	}
+
+	store := &memoryAuthStore{}
+	manager := coreauth.NewManager(store, nil, nil)
+	authID := fileName
+	if _, errRegister := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       authID,
+		FileName: fileName,
+		Provider: "codex",
+		Metadata: map[string]any{"type": "codex", "email": "old@example.com"},
+		Attributes: map[string]string{
+			"path": filePath,
+		},
+		ModelStates: map[string]*coreauth.ModelState{
+			"gpt-5.3-codex": {
+				Status:         coreauth.StatusError,
+				Unavailable:    true,
+				NextRetryAfter: time.Now().Add(30 * time.Minute),
+			},
+		},
+	}); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
+	h.tokenStore = store
+
+	deleteRec := httptest.NewRecorder()
+	deleteCtx, _ := gin.CreateTestContext(deleteRec)
+	deleteReq := httptest.NewRequest(http.MethodDelete, "/v0/management/auth-files?name="+url.QueryEscape(fileName), nil)
+	deleteCtx.Request = deleteReq
+	h.DeleteAuthFile(deleteCtx)
+
+	if deleteRec.Code != http.StatusOK {
+		t.Fatalf("expected delete status %d, got %d with body %s", http.StatusOK, deleteRec.Code, deleteRec.Body.String())
+	}
+	if _, ok := manager.GetByID(authID); ok {
+		t.Fatal("expected auth to be fully removed from manager")
+	}
+
+	if errWrite := os.WriteFile(filePath, fileData, 0o600); errWrite != nil {
+		t.Fatalf("failed to recreate auth file: %v", errWrite)
+	}
+	if errRegister := h.registerAuthFromFile(context.Background(), filePath, fileData); errRegister != nil {
+		t.Fatalf("re-register auth from file: %v", errRegister)
+	}
+
+	updated, ok := manager.GetByID(authID)
+	if !ok || updated == nil {
+		t.Fatal("expected re-added auth to exist")
+	}
+	if updated.Disabled || updated.Status == coreauth.StatusDisabled {
+		t.Fatalf("expected re-added auth to be active, got disabled=%v status=%s", updated.Disabled, updated.Status)
+	}
+	if len(updated.ModelStates) != 0 {
+		t.Fatalf("expected stale model state to be cleared, got %#v", updated.ModelStates)
 	}
 }

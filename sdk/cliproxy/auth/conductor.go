@@ -481,6 +481,40 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	return auth.Clone(), nil
 }
 
+// Remove deletes an auth entry from runtime state and persistence.
+func (m *Manager) Remove(ctx context.Context, id string) error {
+	id = strings.TrimSpace(id)
+	if m == nil || id == "" {
+		return nil
+	}
+
+	var removed *Auth
+	m.mu.Lock()
+	if existing, ok := m.auths[id]; ok && existing != nil {
+		removed = existing.Clone()
+	}
+	delete(m.auths, id)
+	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+	if cfg == nil {
+		cfg = &internalconfig.Config{}
+	}
+	m.rebuildAPIKeyModelAliasLocked(cfg)
+	m.mu.Unlock()
+
+	if m.store == nil || shouldSkipPersist(ctx) {
+		return nil
+	}
+	if removed != nil && removed.Attributes != nil {
+		if v := strings.ToLower(strings.TrimSpace(removed.Attributes["runtime_only"])); v == "true" {
+			return nil
+		}
+	}
+	if err := m.store.Delete(ctx, id); err != nil {
+		return err
+	}
+	return nil
+}
+
 // Load resets manager state from the backing store.
 func (m *Manager) Load(ctx context.Context) error {
 	m.mu.Lock()
