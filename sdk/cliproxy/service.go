@@ -630,7 +630,7 @@ func (s *Service) Run(ctx context.Context) error {
 
 	// Prefer core auth manager auto refresh if available.
 	if s.coreManager != nil {
-		interval := 15 * time.Minute
+		interval := 30 * time.Second
 		s.coreManager.StartAutoRefresh(context.Background(), interval)
 		log.Infof("core auth auto-refresh started (interval=%s)", interval)
 	}
