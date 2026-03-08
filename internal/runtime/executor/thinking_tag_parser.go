@@ -81,26 +81,13 @@ func rewriteThinkingSegmentPart(original string, segment thinkingTextSegment) (s
 	return string(updated), nil
 }
 
-type thoughtSignaturePart struct {
-	Text             string `json:"text"`
-	Thought          bool   `json:"thought"`
-	ThoughtSignature string `json:"thoughtSignature"`
-}
-
 func buildThoughtSignaturePart(signature string) (string, error) {
 	// Keep signatures on their own thought part instead of attaching them to
 	// the text-bearing thought segment. Downstream Claude translation treats a
 	// signature-bearing thought part as the delimiter that closes and caches the
 	// accumulated thinking text.
-	partJSON, err := json.Marshal(thoughtSignaturePart{
-		Text:             "",
-		Thought:          true,
-		ThoughtSignature: signature,
-	})
-	if err != nil {
-		return "", err
-	}
-	return string(partJSON), nil
+	partJSON := "{\"text\":\"\",\"thought\":true}"
+	return sjson.Set(partJSON, "thoughtSignature", signature)
 }
 
 func (p *ThinkingTagParser) Process(payload []byte) []byte {
