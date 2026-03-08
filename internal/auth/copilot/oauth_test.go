@@ -3,10 +3,13 @@ package copilot
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 )
 
 // roundTripFunc lets us inject a custom transport for testing.
@@ -209,5 +212,62 @@ func TestGitHubUserInfo_Struct(t *testing.T) {
 	}
 	if info.Login == "" || info.Email == "" || info.Name == "" {
 		t.Error("GitHubUserInfo fields should not be empty")
+	}
+}
+
+func TestMakeAuthenticatedRequest_AppliesConfiguredHeaders(t *testing.T) {
+	t.Parallel()
+	auth := NewCopilotAuth(&config.Config{
+		GitHubCopilot: config.GitHubCopilotConfig{
+			Headers: map[string]string{
+				"X-Test":        "value",
+				"Openai-Intent": "custom-intent",
+			},
+		},
+	})
+
+	req, err := auth.MakeAuthenticatedRequest(context.Background(), http.MethodGet, "https://api.githubcopilot.com/models", nil, &CopilotAPIToken{Token: "copilot-token"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := req.Header.Get("X-Test"); got != "value" {
+		t.Fatalf("X-Test = %q, want value", got)
+	}
+	if got := req.Header.Get("Openai-Intent"); got != "custom-intent" {
+		t.Fatalf("Openai-Intent = %q, want custom-intent", got)
+	}
+}
+
+func TestGetCopilotAPIToken_AppliesConfiguredHeaders(t *testing.T) {
+	t.Parallel()
+	auth := NewCopilotAuth(&config.Config{
+		GitHubCopilot: config.GitHubCopilotConfig{
+			Headers: map[string]string{
+				"X-Test":     "value",
+				"User-Agent": "custom-agent",
+			},
+		},
+	})
+	auth.httpClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if got := req.Header.Get("X-Test"); got != "value" {
+			t.Fatalf("X-Test = %q, want value", got)
+		}
+		if got := req.Header.Get("User-Agent"); got != "custom-agent" {
+			t.Fatalf("User-Agent = %q, want custom-agent", got)
+		}
+		resp := &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"token":"copilot-token","expires_at":123}`)),
+		}
+		return resp, nil
+	})}
+
+	apiToken, err := auth.GetCopilotAPIToken(context.Background(), "github-token")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if apiToken.Token != "copilot-token" {
+		t.Fatalf("token = %q, want copilot-token", apiToken.Token)
 	}
 }

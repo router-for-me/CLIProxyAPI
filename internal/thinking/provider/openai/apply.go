@@ -43,7 +43,7 @@ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *
 		return applyCompatibleOpenAI(body, config)
 	}
 	if modelInfo.Thinking == nil {
-		return body, nil
+		return applyCompatibleOpenAI(body, config)
 	}
 
 	// Only handle ModeLevel and ModeNone; other modes pass through unchanged.

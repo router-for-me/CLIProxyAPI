@@ -408,6 +408,48 @@ func TestFileSynthesizer_Synthesize_OAuthExcludedModelsMerged(t *testing.T) {
 	}
 }
 
+func TestFileSynthesizer_Synthesize_GitHubCopilotConfigHeaders(t *testing.T) {
+	tempDir := t.TempDir()
+	authData := map[string]any{
+		"type":  "github-copilot",
+		"email": "octocat@github.com",
+	}
+	data, _ := json.Marshal(authData)
+	errWriteFile := os.WriteFile(filepath.Join(tempDir, "github-copilot.json"), data, 0644)
+	if errWriteFile != nil {
+		t.Fatalf("failed to write auth file: %v", errWriteFile)
+	}
+
+	synth := NewFileSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			GitHubCopilot: config.GitHubCopilotConfig{
+				Headers: map[string]string{
+					"X-Test":        "value",
+					"Openai-Intent": "custom-intent",
+				},
+			},
+		},
+		AuthDir:     tempDir,
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, errSynthesize := synth.Synthesize(ctx)
+	if errSynthesize != nil {
+		t.Fatalf("unexpected error: %v", errSynthesize)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("expected 1 auth, got %d", len(auths))
+	}
+	if got := auths[0].Attributes["header:X-Test"]; got != "value" {
+		t.Fatalf("expected header:X-Test=value, got %q", got)
+	}
+	if got := auths[0].Attributes["header:Openai-Intent"]; got != "custom-intent" {
+		t.Fatalf("expected header:Openai-Intent=custom-intent, got %q", got)
+	}
+}
+
 func TestSynthesizeGeminiVirtualAuths_NilInputs(t *testing.T) {
 	now := time.Now()
 

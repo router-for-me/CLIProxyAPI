@@ -16,6 +16,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
@@ -82,7 +83,7 @@ func (e *GitHubCopilotExecutor) PrepareRequest(req *http.Request, auth *cliproxy
 	if errToken != nil {
 		return errToken
 	}
-	e.applyHeaders(req, apiToken, nil)
+	e.applyHeaders(req, apiToken, nil, auth)
 	return nil
 }
 
@@ -158,7 +159,7 @@ func (e *GitHubCopilotExecutor) Execute(ctx context.Context, auth *cliproxyauth.
 	if err != nil {
 		return resp, err
 	}
-	e.applyHeaders(httpReq, apiToken, body)
+	e.applyHeaders(httpReq, apiToken, body, auth)
 
 	// Add Copilot-Vision-Request header if the request contains vision content
 	if hasVision {
@@ -292,7 +293,7 @@ func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 	if err != nil {
 		return nil, err
 	}
-	e.applyHeaders(httpReq, apiToken, body)
+	e.applyHeaders(httpReq, apiToken, body, auth)
 
 	// Add Copilot-Vision-Request header if the request contains vision content
 	if hasVision {
@@ -478,7 +479,7 @@ func (e *GitHubCopilotExecutor) ensureAPIToken(ctx context.Context, auth *clipro
 }
 
 // applyHeaders sets the required headers for GitHub Copilot API requests.
-func (e *GitHubCopilotExecutor) applyHeaders(r *http.Request, apiToken string, body []byte) {
+func (e *GitHubCopilotExecutor) applyHeaders(r *http.Request, apiToken string, body []byte, auth *cliproxyauth.Auth) {
 	r.Header.Set("Content-Type", "application/json")
 	r.Header.Set("Authorization", "Bearer "+apiToken)
 	r.Header.Set("Accept", "application/json")
@@ -495,6 +496,12 @@ func (e *GitHubCopilotExecutor) applyHeaders(r *http.Request, apiToken string, b
 		initiator = "agent"
 	}
 	r.Header.Set("X-Initiator", initiator)
+	if e != nil && e.cfg != nil {
+		util.ApplyCustomHeaders(r, e.cfg.GitHubCopilot.Headers)
+	}
+	if auth != nil {
+		util.ApplyCustomHeadersFromAttrs(r, auth.Attributes)
+	}
 }
 
 func detectLastConversationRole(body []byte) string {
@@ -1353,6 +1360,12 @@ func FetchGitHubCopilotModels(ctx context.Context, auth *cliproxyauth.Auth, cfg 
 			m.Description = entry.ID + " via GitHub Copilot"
 			m.ContextLength = defaultCopilotContextLength
 			m.MaxCompletionTokens = defaultCopilotMaxCompletionTokens
+			// Inherit Thinking support from global static model definitions
+			if staticInfo := registry.LookupStaticModelInfo(entry.ID); staticInfo != nil {
+				if staticInfo.Thinking != nil {
+					m.Thinking = staticInfo.Thinking
+				}
+			}
 		}
 
 		models = append(models, m)

@@ -24,11 +24,11 @@ const (
 	copilotAPIEndpoint = "https://api.githubcopilot.com"
 
 	// Common HTTP header values for Copilot API requests.
-	copilotUserAgent       = "GithubCopilot/1.0"
-	copilotEditorVersion   = "vscode/1.100.0"
-	copilotPluginVersion   = "copilot/1.300.0"
-	copilotIntegrationID   = "vscode-chat"
-	copilotOpenAIIntent    = "conversation-panel"
+	copilotUserAgent     = "GithubCopilot/1.0"
+	copilotEditorVersion = "vscode/1.100.0"
+	copilotPluginVersion = "copilot/1.300.0"
+	copilotIntegrationID = "vscode-chat"
+	copilotOpenAIIntent  = "conversation-panel"
 )
 
 // CopilotAPIToken represents the Copilot API token response.
@@ -63,6 +63,9 @@ type CopilotAuth struct {
 // NewCopilotAuth creates a new CopilotAuth service instance.
 // It initializes an HTTP client with proxy settings from the provided configuration.
 func NewCopilotAuth(cfg *config.Config) *CopilotAuth {
+	if cfg == nil {
+		cfg = &config.Config{}
+	}
 	return &CopilotAuth{
 		httpClient:   util.SetProxy(&cfg.SDKConfig, &http.Client{Timeout: 30 * time.Second}),
 		deviceClient: NewDeviceFlowClient(cfg),
@@ -119,6 +122,7 @@ func (c *CopilotAuth) GetCopilotAPIToken(ctx context.Context, githubAccessToken 
 	req.Header.Set("User-Agent", copilotUserAgent)
 	req.Header.Set("Editor-Version", copilotEditorVersion)
 	req.Header.Set("Editor-Plugin-Version", copilotPluginVersion)
+	util.ApplyCustomHeaders(req, c.githubCopilotHeaders())
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -220,8 +224,16 @@ func (c *CopilotAuth) MakeAuthenticatedRequest(ctx context.Context, method, url 
 	req.Header.Set("Editor-Plugin-Version", copilotPluginVersion)
 	req.Header.Set("Openai-Intent", copilotOpenAIIntent)
 	req.Header.Set("Copilot-Integration-Id", copilotIntegrationID)
+	util.ApplyCustomHeaders(req, c.githubCopilotHeaders())
 
 	return req, nil
+}
+
+func (c *CopilotAuth) githubCopilotHeaders() map[string]string {
+	if c == nil || c.cfg == nil {
+		return nil
+	}
+	return c.cfg.GitHubCopilot.Headers
 }
 
 // CopilotModelEntry represents a single model entry returned by the Copilot /models API.
@@ -246,9 +258,9 @@ const maxModelsResponseSize = 2 * 1024 * 1024
 
 // allowedCopilotAPIHosts is the set of hosts that are considered safe for Copilot API requests.
 var allowedCopilotAPIHosts = map[string]bool{
-	"api.githubcopilot.com":          true,
-	"api.individual.githubcopilot.com": true,
-	"api.business.githubcopilot.com":   true,
+	"api.githubcopilot.com":               true,
+	"api.individual.githubcopilot.com":    true,
+	"api.business.githubcopilot.com":      true,
 	"copilot-proxy.githubusercontent.com": true,
 }
 

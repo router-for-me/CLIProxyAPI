@@ -68,7 +68,7 @@ To get a token from Kiro IDE:
 Access the Kiro OAuth web interface at:
 
 ```
-http://your-server:8080/v0/oauth/kiro
+http://your-server:8317/v0/oauth/kiro
 ```
 
 This provides a browser-based OAuth flow for Kiro (AWS CodeWhisperer) authentication with:
@@ -81,39 +81,24 @@ This provides a browser-based OAuth flow for Kiro (AWS CodeWhisperer) authentica
 ### One-Command Deployment
 
 ```bash
-# Create deployment directory
-mkdir -p ~/cli-proxy && cd ~/cli-proxy
+# Clone and enter the repository
+git clone https://github.com/router-for-me/CLIProxyAPIPlus.git
+cd CLIProxyAPIPlus
 
-# Create docker-compose.yml
-cat > docker-compose.yml << 'EOF'
-services:
-  cli-proxy-api:
-    image: eceasy/cli-proxy-api-plus:latest
-    container_name: cli-proxy-api-plus
-    ports:
-      - "8317:8317"
-    volumes:
-      - ./config.yaml:/CLIProxyAPI/config.yaml
-      - ./auths:/root/.cli-proxy-api
-      - ./logs:/CLIProxyAPI/logs
-    restart: unless-stopped
-EOF
+# Prepare persistent directories
+mkdir -p config auths logs
 
-# Download example config
-curl -o config.yaml https://raw.githubusercontent.com/router-for-me/CLIProxyAPIPlus/main/config.example.yaml
-
-# Pull and start
-docker compose pull && docker compose up -d
+# Build and start
+docker compose up -d --build
 ```
 
 ### Configuration
 
-Edit `config.yaml` before starting:
+After the first start, edit `config/config.yaml`:
 
 ```yaml
 # Basic configuration example
-server:
-  port: 8317
+port: 8317
 
 # Add your provider configurations here
 ```
@@ -121,9 +106,11 @@ server:
 ### Update to Latest Version
 
 ```bash
-cd ~/cli-proxy
-docker compose pull && docker compose up -d
+git pull
+docker compose up -d --build
 ```
+
+The container entrypoint automatically creates `config/config.yaml` from `config.example.yaml` on first start.
 
 ## Contributing
 

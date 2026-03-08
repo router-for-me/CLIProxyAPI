@@ -14,6 +14,13 @@ func ApplyCustomHeadersFromAttrs(r *http.Request, attrs map[string]string) {
 	applyCustomHeaders(r, extractCustomHeaders(attrs))
 }
 
+func ApplyCustomHeaders(r *http.Request, headers map[string]string) {
+	if r == nil {
+		return
+	}
+	applyCustomHeaders(r, headers)
+}
+
 func extractCustomHeaders(attrs map[string]string) map[string]string {
 	if len(attrs) == 0 {
 		return nil

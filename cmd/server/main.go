@@ -36,7 +36,7 @@ import (
 )
 
 var (
-	Version           = "dev"
+	Version           = "1.0.0-cyan-plus2"
 	Commit            = "none"
 	BuildDate         = "unknown"
 	DefaultConfigPath = ""

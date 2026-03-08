@@ -178,6 +178,11 @@ nonstream-keepalive-interval: 0
 #   runtime-version: "v24.3.0"
 #   timeout: "600"
 
+# GitHub Copilot configuration (applies to OAuth/file-backed github-copilot auths)
+# github-copilot:
+#   headers:
+#     X-Custom-Header: "custom-value"
+
 # Kiro (AWS CodeWhisperer) configuration
 # Note: Kiro API currently only operates in us-east-1 region
 #kiro:

@@ -108,6 +108,9 @@ type Config struct {
 	// These are used as fallbacks when the client does not send its own headers.
 	ClaudeHeaderDefaults ClaudeHeaderDefaults `yaml:"claude-header-defaults" json:"claude-header-defaults"`
 
+	// GitHubCopilot configures provider-level behavior for GitHub Copilot OAuth/file-backed auths.
+	GitHubCopilot GitHubCopilotConfig `yaml:"github-copilot" json:"github-copilot"`
+
 	// OpenAICompatibility defines OpenAI API compatibility configurations for external providers.
 	OpenAICompatibility []OpenAICompatibility `yaml:"openai-compatibility" json:"openai-compatibility"`
 
@@ -148,6 +151,12 @@ type ClaudeHeaderDefaults struct {
 	PackageVersion string `yaml:"package-version" json:"package-version"`
 	RuntimeVersion string `yaml:"runtime-version" json:"runtime-version"`
 	Timeout        string `yaml:"timeout" json:"timeout"`
+}
+
+// GitHubCopilotConfig configures outbound requests sent to GitHub Copilot.
+type GitHubCopilotConfig struct {
+	// Headers optionally adds extra HTTP headers for requests sent to GitHub Copilot.
+	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
 }
 
 // TLSConfig holds HTTPS server settings.
@@ -693,6 +702,8 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	// Normalize global OAuth model name aliases.
 	cfg.SanitizeOAuthModelAlias()
+
+	cfg.GitHubCopilot.Headers = NormalizeHeaders(cfg.GitHubCopilot.Headers)
 
 	// Validate raw payload rules and drop invalid entries.
 	cfg.SanitizePayloadRules()

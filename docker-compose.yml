@@ -1,7 +1,7 @@
 services:
   cli-proxy-api:
-    image: ${CLI_PROXY_IMAGE:-eceasy/cli-proxy-api-plus:latest}
-    pull_policy: always
+    image: ${CLI_PROXY_IMAGE:-cli-proxy-api-plus:local}
+    pull_policy: never
     build:
       context: .
       dockerfile: Dockerfile
@@ -14,6 +14,10 @@ services:
     #   - .env
     environment:
       DEPLOY: ${DEPLOY:-}
+      CLI_PROXY_CONFIG_DIR: /CLIProxyAPI/config
+      CLI_PROXY_CONFIG_FILE: /CLIProxyAPI/config/config.yaml
+      CLI_PROXY_AUTH_DIR: /root/.cli-proxy-api
+      CLI_PROXY_LOG_DIR: /CLIProxyAPI/logs
     ports:
       - "8317:8317"
       - "8085:8085"
@@ -22,7 +26,13 @@ services:
       - "51121:51121"
       - "11451:11451"
     volumes:
-      - ${CLI_PROXY_CONFIG_PATH:-./config.yaml}:/CLIProxyAPI/config.yaml
+      - ${CLI_PROXY_CONFIG_PATH:-./config}:/CLIProxyAPI/config
       - ${CLI_PROXY_AUTH_PATH:-./auths}:/root/.cli-proxy-api
       - ${CLI_PROXY_LOG_PATH:-./logs}:/CLIProxyAPI/logs
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8317/ >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
     restart: unless-stopped

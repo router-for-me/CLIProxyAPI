@@ -68,7 +68,7 @@ GLM CODING PLAN 是专为AI编码打造的订阅套餐，每月最低仅需20元
 访问 Kiro OAuth 网页认证界面：
 
 ```
-http://your-server:8080/v0/oauth/kiro
+http://your-server:8317/v0/oauth/kiro
 ```
 
 提供基于浏览器的 Kiro (AWS CodeWhisperer) OAuth 认证流程，支持：
@@ -81,39 +81,24 @@ http://your-server:8080/v0/oauth/kiro
 ### 一键部署
 
 ```bash
-# 创建部署目录
-mkdir -p ~/cli-proxy && cd ~/cli-proxy
+# 克隆仓库并进入目录
+git clone https://github.com/router-for-me/CLIProxyAPIPlus.git
+cd CLIProxyAPIPlus
 
-# 创建 docker-compose.yml
-cat > docker-compose.yml << 'EOF'
-services:
-  cli-proxy-api:
-    image: eceasy/cli-proxy-api-plus:latest
-    container_name: cli-proxy-api-plus
-    ports:
-      - "8317:8317"
-    volumes:
-      - ./config.yaml:/CLIProxyAPI/config.yaml
-      - ./auths:/root/.cli-proxy-api
-      - ./logs:/CLIProxyAPI/logs
-    restart: unless-stopped
-EOF
+# 准备持久化目录
+mkdir -p config auths logs
 
-# 下载示例配置
-curl -o config.yaml https://raw.githubusercontent.com/router-for-me/CLIProxyAPIPlus/main/config.example.yaml
-
-# 拉取并启动
-docker compose pull && docker compose up -d
+# 构建并启动
+docker compose up -d --build
 ```
 
 ### 配置说明
 
-启动前请编辑 `config.yaml`：
+首次启动后请编辑 `config/config.yaml`：
 
 ```yaml
 # 基本配置示例
-server:
-  port: 8317
+port: 8317
 
 # 在此添加你的供应商配置
 ```
@@ -121,9 +106,11 @@ server:
 ### 更新到最新版本
 
 ```bash
-cd ~/cli-proxy
-docker compose pull && docker compose up -d
+git pull
+docker compose up -d --build
 ```
+
+容器入口会在首次启动时自动用 `config.example.yaml` 初始化 `config/config.yaml`。
 
 ## 贡献
 

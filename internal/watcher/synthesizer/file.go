@@ -129,6 +129,9 @@ func (s *FileSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth, e
 				}
 			}
 		}
+		if provider == "github-copilot" && cfg != nil {
+			addConfigHeadersToAttrs(cfg.GitHubCopilot.Headers, a.Attributes)
+		}
 		ApplyAuthExcludedModelsMeta(a, cfg, perAccountExcluded, "oauth")
 		if provider == "gemini-cli" {
 			if virtuals := SynthesizeGeminiVirtualAuths(a, metadata, now); len(virtuals) > 0 {

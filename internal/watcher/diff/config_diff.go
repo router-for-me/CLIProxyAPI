@@ -248,6 +248,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if entries, _ := DiffOAuthModelAliasChanges(oldCfg.OAuthModelAlias, newCfg.OAuthModelAlias); len(entries) > 0 {
 		changes = append(changes, entries...)
 	}
+	if !equalStringMap(oldCfg.GitHubCopilot.Headers, newCfg.GitHubCopilot.Headers) {
+		changes = append(changes, "github-copilot.headers: updated")
+	}
 
 	// Remote management (never print the key)
 	if oldCfg.RemoteManagement.AllowRemote != newCfg.RemoteManagement.AllowRemote {

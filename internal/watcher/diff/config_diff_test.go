@@ -269,6 +269,7 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 			PanelGitHubRepository: "new/repo",
 			SecretKey:             "",
 		},
+		GitHubCopilot: config.GitHubCopilotConfig{Headers: map[string]string{"X-Test": "1"}},
 		SDKConfig: sdkconfig.SDKConfig{
 			RequestLog:                 true,
 			ProxyURL:                   "http://new-proxy",
@@ -298,6 +299,7 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 	expectContains(t, details, "codex-api-key count: 1 -> 2")
 	expectContains(t, details, "ampcode.restrict-management-to-localhost: false -> true")
 	expectContains(t, details, "ampcode.upstream-api-key: removed")
+	expectContains(t, details, "github-copilot.headers: updated")
 	expectContains(t, details, "remote-management.disable-control-panel: false -> true")
 	expectContains(t, details, "remote-management.panel-github-repository: old/repo -> new/repo")
 	expectContains(t, details, "remote-management.secret-key: deleted")
@@ -341,6 +343,7 @@ func TestBuildConfigChangeDetails_AllBranches(t *testing.T) {
 			PanelGitHubRepository: "old/repo",
 			SecretKey:             "old",
 		},
+		GitHubCopilot: config.GitHubCopilotConfig{Headers: map[string]string{"X-Test": "old"}},
 		SDKConfig: sdkconfig.SDKConfig{
 			RequestLog: false,
 			ProxyURL:   "http://old-proxy",
@@ -394,6 +397,7 @@ func TestBuildConfigChangeDetails_AllBranches(t *testing.T) {
 			PanelGitHubRepository: "new/repo",
 			SecretKey:             "",
 		},
+		GitHubCopilot: config.GitHubCopilotConfig{Headers: map[string]string{"X-Test": "new"}},
 		SDKConfig: sdkconfig.SDKConfig{
 			RequestLog: true,
 			ProxyURL:   "http://new-proxy",
@@ -428,6 +432,7 @@ func TestBuildConfigChangeDetails_AllBranches(t *testing.T) {
 	expectContains(t, changes, "max-retry-interval: 1 -> 3")
 	expectContains(t, changes, "proxy-url: http://old-proxy -> http://new-proxy")
 	expectContains(t, changes, "ws-auth: false -> true")
+	expectContains(t, changes, "github-copilot.headers: updated")
 	expectContains(t, changes, "quota-exceeded.switch-project: false -> true")
 	expectContains(t, changes, "quota-exceeded.switch-preview-model: false -> true")
 	expectContains(t, changes, "api-keys: values updated (count unchanged, redacted)")
