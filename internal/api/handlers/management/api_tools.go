@@ -189,7 +189,7 @@ func (h *Handler) APICall(c *gin.Context) {
 	httpClient := &http.Client{
 		Timeout: defaultAPICallTimeout,
 	}
-	httpClient.Transport = h.apiCallTransport(auth)
+	httpClient.Transport = h.apiCallTransport(auth, parsedURL.Host)
 
 	resp, errDo := httpClient.Do(req)
 	if errDo != nil {
@@ -318,7 +318,7 @@ func (h *Handler) refreshGeminiOAuthAccessToken(ctx context.Context, auth *corea
 	ctxToken := ctx
 	httpClient := &http.Client{
 		Timeout:   defaultAPICallTimeout,
-		Transport: h.apiCallTransport(auth),
+		Transport: h.apiCallTransport(auth, ""),
 	}
 	ctxToken = context.WithValue(ctxToken, oauth2.HTTPClient, httpClient)
 
@@ -377,7 +377,7 @@ func (h *Handler) refreshAntigravityOAuthAccessToken(ctx context.Context, auth *
 
 	httpClient := &http.Client{
 		Timeout:   defaultAPICallTimeout,
-		Transport: h.apiCallTransport(auth),
+		Transport: h.apiCallTransport(auth, ""),
 	}
 	resp, errDo := httpClient.Do(req)
 	if errDo != nil {
@@ -631,16 +631,56 @@ func (h *Handler) authByIndex(authIndex string) *coreauth.Auth {
 	return nil
 }
 
-func (h *Handler) apiCallTransport(auth *coreauth.Auth) http.RoundTripper {
-	var proxyCandidates []string
-	if auth != nil {
-		if proxyStr := strings.TrimSpace(auth.ProxyURL); proxyStr != "" {
-			proxyCandidates = append(proxyCandidates, proxyStr)
+// defaultNoProxyCIDRs are RFC 1918/4193 private ranges, loopback, and link-local.
+// Requests to hosts within these ranges bypass the configured proxy in the
+// management api-call handler, because proxies typically cannot reach LAN targets.
+var defaultNoProxyCIDRs = []string{
+	"127.0.0.0/8",
+	"10.0.0.0/8",
+	"172.16.0.0/12",
+	"192.168.0.0/16",
+	"169.254.0.0/16",
+	"::1/128",
+	"fc00::/7",
+	"fe80::/10",
+}
+
+// isNoProxyHost returns true when targetHost should bypass the proxy.
+func isNoProxyHost(targetHost string) bool {
+	host := targetHost
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	for _, cidr := range defaultNoProxyCIDRs {
+		_, network, err := net.ParseCIDR(cidr)
+		if err != nil {
+			continue
+		}
+		if network.Contains(ip) {
+			return true
 		}
 	}
-	if h != nil && h.cfg != nil {
-		if proxyStr := strings.TrimSpace(h.cfg.ProxyURL); proxyStr != "" {
-			proxyCandidates = append(proxyCandidates, proxyStr)
+	return false
+}
+
+func (h *Handler) apiCallTransport(auth *coreauth.Auth, targetHost string) http.RoundTripper {
+	noProxy := isNoProxyHost(targetHost)
+
+	var proxyCandidates []string
+	if !noProxy {
+		if auth != nil {
+			if proxyStr := strings.TrimSpace(auth.ProxyURL); proxyStr != "" {
+				proxyCandidates = append(proxyCandidates, proxyStr)
+			}
+		}
+		if h != nil && h.cfg != nil {
+			if proxyStr := strings.TrimSpace(h.cfg.ProxyURL); proxyStr != "" {
+				proxyCandidates = append(proxyCandidates, proxyStr)
+			}
 		}
 	}
 
