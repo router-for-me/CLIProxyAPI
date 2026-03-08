@@ -304,9 +304,11 @@ func (s *RequestStatistics) RestoreSnapshot(snapshot StatisticsSnapshot) {
 
 	s.requestsByHour = make(map[int]int64)
 	for k, v := range snapshot.RequestsByHour {
-		// handle string to int conversion for the hour map key
 		var hour int
-		hour, _ = strconv.Atoi(k)
+		hour, err := strconv.Atoi(k)
+		if err != nil {
+			continue // skip malformed hour keys rather than defaulting to hour 0
+		}
 		s.requestsByHour[hour] = v
 	}
 
@@ -318,7 +320,10 @@ func (s *RequestStatistics) RestoreSnapshot(snapshot StatisticsSnapshot) {
 	s.tokensByHour = make(map[int]int64)
 	for k, v := range snapshot.TokensByHour {
 		var hour int
-		hour, _ = strconv.Atoi(k)
+		hour, err := strconv.Atoi(k)
+		if err != nil {
+			continue // skip malformed hour keys rather than defaulting to hour 0
+		}
 		s.tokensByHour[hour] = v
 	}
 }
