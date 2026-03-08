@@ -193,6 +193,12 @@ func (h *Handler) effectiveAuthDir() string {
 	return ResolveEffectiveAuthDir(h.cfg.AuthDir, store)
 }
 
+func (h *Handler) registerOAuthSession(state, provider string) string {
+	authDir := h.effectiveAuthDir()
+	RegisterOAuthSession(state, provider, authDir)
+	return authDir
+}
+
 // Middleware enforces access control for management endpoints.
 // All requests (local and remote) require a valid management key.
 // Additionally, remote access requires allow-remote-management=true.
