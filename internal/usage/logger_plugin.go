@@ -250,10 +250,15 @@ func (s *RequestStatistics) updateAPIStats(stats *apiStats, model string, detail
 	modelStatsValue.Details = append(modelStatsValue.Details, detail)
 	const maxDetails = 1000
 	if len(modelStatsValue.Details) > maxDetails {
-		cutoff := len(modelStatsValue.Details) - maxDetails + (maxDetails / 10)
-		// Use copy to shift elements to the front, preserving the backing array's capacity
-		copy(modelStatsValue.Details, modelStatsValue.Details[cutoff:])
-		modelStatsValue.Details = modelStatsValue.Details[:len(modelStatsValue.Details)-cutoff]
+		// When the slice exceeds its limit, shrink it back to 90% of maxDetails to avoid
+		// trimming on every single new record, which would be inefficient.
+		const shrinkToSize = maxDetails - (maxDetails / 10) // 900
+		numToRemove := len(modelStatsValue.Details) - shrinkToSize
+
+		// Use copy to shift elements to the front, preserving the backing array's capacity.
+		// This is more efficient than re-slicing with `modelStatsValue.Details[numToRemove:]`.
+		copy(modelStatsValue.Details, modelStatsValue.Details[numToRemove:])
+		modelStatsValue.Details = modelStatsValue.Details[:shrinkToSize]
 	}
 }
 
