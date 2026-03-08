@@ -55,8 +55,12 @@ func SaveToFile(filePath string) {
 	}
 
 	if err := os.Rename(tempFile, filePath); err != nil {
-		log.Errorf("Failed to rename temp usage file: %v", err)
-		return
+		log.Warnf("Failed to rename temp usage file: %v, falling back to direct write", err)
+		if err := os.WriteFile(filePath, buf.Bytes(), 0644); err != nil {
+			log.Errorf("Failed to write usage file: %v", err)
+			return
+		}
+		_ = os.Remove(tempFile)
 	}
 
 	lastSavedTotal = currentTotal
