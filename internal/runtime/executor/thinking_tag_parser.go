@@ -1,7 +1,6 @@
 package executor
 
 import (
-	"encoding/json"
 	"strings"
 
 	log "github.com/sirupsen/logrus"
@@ -55,30 +54,21 @@ func extractThoughtSignature(part gjson.Result) string {
 }
 
 func rewriteThinkingSegmentPart(original string, segment thinkingTextSegment) (string, error) {
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(original), &fields); err != nil {
-		return "", err
-	}
-
-	textJSON, err := json.Marshal(segment.text)
+	updated, err := sjson.Set(original, "text", segment.text)
 	if err != nil {
 		return "", err
 	}
-	fields["text"] = textJSON
-
 	if segment.thought {
-		fields["thought"] = json.RawMessage("true")
+		updated, err = sjson.Set(updated, "thought", true)
+		if err != nil {
+			return "", err
+		}
 	} else {
-		delete(fields, "thought")
+		updated, _ = sjson.Delete(updated, "thought")
 	}
-	delete(fields, "thoughtSignature")
-	delete(fields, "thought_signature")
-
-	updated, err := json.Marshal(fields)
-	if err != nil {
-		return "", err
-	}
-	return string(updated), nil
+	updated, _ = sjson.Delete(updated, "thoughtSignature")
+	updated, _ = sjson.Delete(updated, "thought_signature")
+	return updated, nil
 }
 
 func buildThoughtSignaturePart(signature string) (string, error) {
