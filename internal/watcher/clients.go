@@ -369,4 +369,3 @@ func (w *Watcher) persistAuthAsync(message string, paths ...string) {
 		}
 	}()
 }
-

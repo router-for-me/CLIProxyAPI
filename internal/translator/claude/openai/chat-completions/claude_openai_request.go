@@ -203,46 +203,9 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 					msg, _ = sjson.SetRaw(msg, "content.-1", part)
 				} else if contentResult.Exists() && contentResult.IsArray() {
 					contentResult.ForEach(func(_, part gjson.Result) bool {
-						partType := part.Get("type").String()
-
-						switch partType {
-						case "text":
-							textPart := `{"type":"text","text":""}`
-							textPart, _ = sjson.Set(textPart, "text", part.Get("text").String())
-							msg, _ = sjson.SetRaw(msg, "content.-1", textPart)
-
-						case "image_url":
-							// Convert OpenAI image format to Claude Code format
-							imageURL := part.Get("image_url.url").String()
-							if strings.HasPrefix(imageURL, "data:") {
-								// Extract base64 data and media type from data URL
-								parts := strings.Split(imageURL, ",")
-								if len(parts) == 2 {
-									mediaTypePart := strings.Split(parts[0], ";")[0]
-									mediaType := strings.TrimPrefix(mediaTypePart, "data:")
-									data := parts[1]
-
-									imagePart := `{"type":"image","source":{"type":"base64","media_type":"","data":""}}`
-									imagePart, _ = sjson.Set(imagePart, "source.media_type", mediaType)
-									imagePart, _ = sjson.Set(imagePart, "source.data", data)
-									msg, _ = sjson.SetRaw(msg, "content.-1", imagePart)
-								}
-							}
-
-						case "file":
-							fileData := part.Get("file.file_data").String()
-							if strings.HasPrefix(fileData, "data:") {
-								semicolonIdx := strings.Index(fileData, ";")
-								commaIdx := strings.Index(fileData, ",")
-								if semicolonIdx != -1 && commaIdx != -1 && commaIdx > semicolonIdx {
-									mediaType := strings.TrimPrefix(fileData[:semicolonIdx], "data:")
-									data := fileData[commaIdx+1:]
-									docPart := `{"type":"document","source":{"type":"base64","media_type":"","data":""}}`
-									docPart, _ = sjson.Set(docPart, "source.media_type", mediaType)
-									docPart, _ = sjson.Set(docPart, "source.data", data)
-									msg, _ = sjson.SetRaw(msg, "content.-1", docPart)
-								}
-							}
+						claudePart := convertOpenAIContentPartToClaudePart(part)
+						if claudePart != "" {
+							msg, _ = sjson.SetRaw(msg, "content.-1", claudePart)
 						}
 						return true
 					})
@@ -291,11 +254,16 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 			case "tool":
 				// Handle tool result messages conversion
 				toolCallID := message.Get("tool_call_id").String()
-				content := message.Get("content").String()
+				toolContentResult := message.Get("content")
 
 				msg := `{"role":"user","content":[{"type":"tool_result","tool_use_id":"","content":""}]}`
 				msg, _ = sjson.Set(msg, "content.0.tool_use_id", toolCallID)
-				msg, _ = sjson.Set(msg, "content.0.content", content)
+				toolResultContent, toolResultContentRaw := convertOpenAIToolResultContent(toolContentResult)
+				if toolResultContentRaw {
+					msg, _ = sjson.SetRaw(msg, "content.0.content", toolResultContent)
+				} else {
+					msg, _ = sjson.Set(msg, "content.0.content", toolResultContent)
+				}
 				out, _ = sjson.SetRaw(out, "messages.-1", msg)
 				messageIndex++
 			}
@@ -357,4 +325,111 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 	}
 
 	return []byte(out)
+}
+
+func convertOpenAIContentPartToClaudePart(part gjson.Result) string {
+	switch part.Get("type").String() {
+	case "text":
+		textPart := `{"type":"text","text":""}`
+		textPart, _ = sjson.Set(textPart, "text", part.Get("text").String())
+		return textPart
+
+	case "image_url":
+		return convertOpenAIImageURLToClaudePart(part.Get("image_url.url").String())
+
+	case "file":
+		fileData := part.Get("file.file_data").String()
+		if strings.HasPrefix(fileData, "data:") {
+			semicolonIdx := strings.Index(fileData, ";")
+			commaIdx := strings.Index(fileData, ",")
+			if semicolonIdx != -1 && commaIdx != -1 && commaIdx > semicolonIdx {
+				mediaType := strings.TrimPrefix(fileData[:semicolonIdx], "data:")
+				data := fileData[commaIdx+1:]
+				docPart := `{"type":"document","source":{"type":"base64","media_type":"","data":""}}`
+				docPart, _ = sjson.Set(docPart, "source.media_type", mediaType)
+				docPart, _ = sjson.Set(docPart, "source.data", data)
+				return docPart
+			}
+		}
+	}
+
+	return ""
+}
+
+func convertOpenAIImageURLToClaudePart(imageURL string) string {
+	if imageURL == "" {
+		return ""
+	}
+
+	if strings.HasPrefix(imageURL, "data:") {
+		parts := strings.SplitN(imageURL, ",", 2)
+		if len(parts) != 2 {
+			return ""
+		}
+
+		mediaTypePart := strings.SplitN(parts[0], ";", 2)[0]
+		mediaType := strings.TrimPrefix(mediaTypePart, "data:")
+		if mediaType == "" {
+			mediaType = "application/octet-stream"
+		}
+
+		imagePart := `{"type":"image","source":{"type":"base64","media_type":"","data":""}}`
+		imagePart, _ = sjson.Set(imagePart, "source.media_type", mediaType)
+		imagePart, _ = sjson.Set(imagePart, "source.data", parts[1])
+		return imagePart
+	}
+
+	imagePart := `{"type":"image","source":{"type":"url","url":""}}`
+	imagePart, _ = sjson.Set(imagePart, "source.url", imageURL)
+	return imagePart
+}
+
+func convertOpenAIToolResultContent(content gjson.Result) (string, bool) {
+	if !content.Exists() {
+		return "", false
+	}
+
+	if content.Type == gjson.String {
+		return content.String(), false
+	}
+
+	if content.IsArray() {
+		claudeContent := "[]"
+		partCount := 0
+
+		content.ForEach(func(_, part gjson.Result) bool {
+			if part.Type == gjson.String {
+				textPart := `{"type":"text","text":""}`
+				textPart, _ = sjson.Set(textPart, "text", part.String())
+				claudeContent, _ = sjson.SetRaw(claudeContent, "-1", textPart)
+				partCount++
+				return true
+			}
+
+			claudePart := convertOpenAIContentPartToClaudePart(part)
+			if claudePart != "" {
+				claudeContent, _ = sjson.SetRaw(claudeContent, "-1", claudePart)
+				partCount++
+			}
+			return true
+		})
+
+		if partCount > 0 || len(content.Array()) == 0 {
+			return claudeContent, true
+		}
+
+		return content.Raw, false
+	}
+
+	if content.IsObject() {
+		claudePart := convertOpenAIContentPartToClaudePart(content)
+		if claudePart != "" {
+			claudeContent := "[]"
+			claudeContent, _ = sjson.SetRaw(claudeContent, "-1", claudePart)
+			return claudeContent, true
+		}
+		return content.Raw, false
+	}
+
+	return content.Raw, false
 }

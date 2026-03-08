@@ -134,6 +134,7 @@ type Manager struct {
 	hook      Hook
 	mu        sync.RWMutex
 	auths     map[string]*Auth
+	scheduler *authScheduler
 	// providerOffsets tracks per-model provider rotation state for multi-provider routing.
 	providerOffsets map[string]int
 
@@ -185,7 +186,31 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 	// atomic.Value requires non-nil initial value.
 	manager.runtimeConfig.Store(&internalconfig.Config{})
 	manager.apiKeyModelAlias.Store(apiKeyModelAliasTable(nil))
+	manager.scheduler = newAuthScheduler(selector)
 	return manager
+}
+
+func isBuiltInSelector(selector Selector) bool {
+	switch selector.(type) {
+	case *RoundRobinSelector, *FillFirstSelector:
+		return true
+	default:
+		return false
+	}
+}
+
+func (m *Manager) syncSchedulerFromSnapshot(auths []*Auth) {
+	if m == nil || m.scheduler == nil {
+		return
+	}
+	m.scheduler.rebuild(auths)
+}
+
+func (m *Manager) syncScheduler() {
+	if m == nil || m.scheduler == nil {
+		return
+	}
+	m.syncSchedulerFromSnapshot(m.snapshotAuths())
 }
 
 func (m *Manager) SetSelector(selector Selector) {
@@ -198,6 +223,10 @@ func (m *Manager) SetSelector(selector Selector) {
 	m.mu.Lock()
 	m.selector = selector
 	m.mu.Unlock()
+	if m.scheduler != nil {
+		m.scheduler.setSelector(selector)
+		m.syncScheduler()
+	}
 }
 
 // SetStore swaps the underlying persistence store.
@@ -474,7 +503,10 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, ro
 			}
 		}
 		for chunk := range remaining {
-			_ = emit(chunk)
+			if ok := emit(chunk); !ok {
+				discardStreamChunks(remaining)
+				return
+			}
 		}
 		if !failed {
 			m.MarkResult(ctx, Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: true})
@@ -542,6 +574,20 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			}
 			errCh := make(chan cliproxyexecutor.StreamChunk, 1)
 			errCh <- cliproxyexecutor.StreamChunk{Err: bootstrapErr}
+			close(errCh)
+			return m.wrapStreamResult(ctx, auth.Clone(), provider, routeModel, streamResult.Headers, nil, errCh), nil
+		}
+
+		if closed && len(buffered) == 0 {
+			emptyErr := &Error{Code: "empty_stream", Message: "upstream stream closed before first payload", Retryable: true}
+			result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: false, Error: emptyErr}
+			m.MarkResult(ctx, result)
+			if idx < len(execModels)-1 {
+				lastErr = emptyErr
+				continue
+			}
+			errCh := make(chan cliproxyexecutor.StreamChunk, 1)
+			errCh <- cliproxyexecutor.StreamChunk{Err: emptyErr}
 			close(errCh)
 			return m.wrapStreamResult(ctx, auth.Clone(), provider, routeModel, streamResult.Headers, nil, errCh), nil
 		}
@@ -745,10 +791,14 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 		auth.ID = uuid.NewString()
 	}
 	auth.EnsureIndex()
+	authClone := auth.Clone()
 	m.mu.Lock()
-	m.auths[auth.ID] = auth.Clone()
+	m.auths[auth.ID] = authClone
 	m.mu.Unlock()
 	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
+	if m.scheduler != nil {
+		m.scheduler.upsertAuth(authClone)
+	}
 	_ = m.persist(ctx, auth)
 	m.hook.OnAuthRegistered(ctx, auth.Clone())
 	return auth.Clone(), nil
@@ -770,9 +820,13 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 		}
 	}
 	auth.EnsureIndex()
-	m.auths[auth.ID] = auth.Clone()
+	authClone := auth.Clone()
+	m.auths[auth.ID] = authClone
 	m.mu.Unlock()
 	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
+	if m.scheduler != nil {
+		m.scheduler.upsertAuth(authClone)
+	}
 	_ = m.persist(ctx, auth)
 	m.hook.OnAuthUpdated(ctx, auth.Clone())
 	return auth.Clone(), nil
@@ -781,12 +835,13 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 // Load resets manager state from the backing store.
 func (m *Manager) Load(ctx context.Context) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if m.store == nil {
+		m.mu.Unlock()
 		return nil
 	}
 	items, err := m.store.List(ctx)
 	if err != nil {
+		m.mu.Unlock()
 		return err
 	}
 	m.auths = make(map[string]*Auth, len(items))
@@ -802,6 +857,8 @@ func (m *Manager) Load(ctx context.Context) error {
 		cfg = &internalconfig.Config{}
 	}
 	m.rebuildAPIKeyModelAliasLocked(cfg)
+	m.mu.Unlock()
+	m.syncScheduler()
 	return nil
 }
 
@@ -1517,6 +1574,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	suspendReason := ""
 	clearModelQuota := false
 	setModelQuota := false
+	var authSnapshot *Auth
 
 	m.mu.Lock()
 	if auth, ok := m.auths[result.AuthID]; ok && auth != nil {
@@ -1610,8 +1668,12 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		}
 
 		_ = m.persist(ctx, auth)
+		authSnapshot = auth.Clone()
 	}
 	m.mu.Unlock()
+	if m.scheduler != nil && authSnapshot != nil {
+		m.scheduler.upsertAuth(authSnapshot)
+	}
 
 	if clearModelQuota && result.Model != "" {
 		registry.GetGlobalRegistry().ClearModelQuotaExceeded(result.AuthID, result.Model)
@@ -1968,7 +2030,25 @@ func (m *Manager) CloseExecutionSession(sessionID string) {
 	}
 }
 
-func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, error) {
+func (m *Manager) useSchedulerFastPath() bool {
+	if m == nil || m.scheduler == nil {
+		return false
+	}
+	return isBuiltInSelector(m.selector)
+}
+
+func shouldRetrySchedulerPick(err error) bool {
+	if err == nil {
+		return false
+	}
+	var authErr *Error
+	if !errors.As(err, &authErr) || authErr == nil {
+		return false
+	}
+	return authErr.Code == "auth_not_found" || authErr.Code == "auth_unavailable"
+}
+
+func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, error) {
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
 
 	m.mu.RLock()
@@ -2028,7 +2108,38 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 	return authCopy, executor, nil
 }
 
-func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
+func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, error) {
+	if !m.useSchedulerFastPath() {
+		return m.pickNextLegacy(ctx, provider, model, opts, tried)
+	}
+	executor, okExecutor := m.Executor(provider)
+	if !okExecutor {
+		return nil, nil, &Error{Code: "executor_not_found", Message: "executor not registered"}
+	}
+	selected, errPick := m.scheduler.pickSingle(ctx, provider, model, opts, tried)
+	if errPick != nil && model != "" && shouldRetrySchedulerPick(errPick) {
+		m.syncScheduler()
+		selected, errPick = m.scheduler.pickSingle(ctx, provider, model, opts, tried)
+	}
+	if errPick != nil {
+		return nil, nil, errPick
+	}
+	if selected == nil {
+		return nil, nil, &Error{Code: "auth_not_found", Message: "selector returned no auth"}
+	}
+	authCopy := selected.Clone()
+	if !selected.indexAssigned {
+		m.mu.Lock()
+		if current := m.auths[authCopy.ID]; current != nil && !current.indexAssigned {
+			current.EnsureIndex()
+			authCopy = current.Clone()
+		}
+		m.mu.Unlock()
+	}
+	return authCopy, executor, nil
+}
+
+func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
 
 	providerSet := make(map[string]struct{}, len(providers))
@@ -2100,6 +2211,58 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 	}
 	authCopy := selected.Clone()
 	m.mu.RUnlock()
+	if !selected.indexAssigned {
+		m.mu.Lock()
+		if current := m.auths[authCopy.ID]; current != nil && !current.indexAssigned {
+			current.EnsureIndex()
+			authCopy = current.Clone()
+		}
+		m.mu.Unlock()
+	}
+	return authCopy, executor, providerKey, nil
+}
+
+func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
+	if !m.useSchedulerFastPath() {
+		return m.pickNextMixedLegacy(ctx, providers, model, opts, tried)
+	}
+
+	eligibleProviders := make([]string, 0, len(providers))
+	seenProviders := make(map[string]struct{}, len(providers))
+	for _, provider := range providers {
+		providerKey := strings.TrimSpace(strings.ToLower(provider))
+		if providerKey == "" {
+			continue
+		}
+		if _, seen := seenProviders[providerKey]; seen {
+			continue
+		}
+		if _, okExecutor := m.Executor(providerKey); !okExecutor {
+			continue
+		}
+		seenProviders[providerKey] = struct{}{}
+		eligibleProviders = append(eligibleProviders, providerKey)
+	}
+	if len(eligibleProviders) == 0 {
+		return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
+	}
+
+	selected, providerKey, errPick := m.scheduler.pickMixed(ctx, eligibleProviders, model, opts, tried)
+	if errPick != nil && model != "" && shouldRetrySchedulerPick(errPick) {
+		m.syncScheduler()
+		selected, providerKey, errPick = m.scheduler.pickMixed(ctx, eligibleProviders, model, opts, tried)
+	}
+	if errPick != nil {
+		return nil, nil, "", errPick
+	}
+	if selected == nil {
+		return nil, nil, "", &Error{Code: "auth_not_found", Message: "selector returned no auth"}
+	}
+	executor, okExecutor := m.Executor(providerKey)
+	if !okExecutor {
+		return nil, nil, "", &Error{Code: "executor_not_found", Message: "executor not registered"}
+	}
+	authCopy := selected.Clone()
 	if !selected.indexAssigned {
 		m.mu.Lock()
 		if current := m.auths[authCopy.ID]; current != nil && !current.indexAssigned {
@@ -2462,6 +2625,9 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 			current.NextRefreshAfter = now.Add(refreshFailureBackoff)
 			current.LastError = &Error{Message: err.Error()}
 			m.auths[id] = current
+			if m.scheduler != nil {
+				m.scheduler.upsertAuth(current.Clone())
+			}
 		}
 		m.mu.Unlock()
 		return

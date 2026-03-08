@@ -173,7 +173,7 @@ func LookupModelInfo(modelID string, provider ...string) *ModelInfo {
 	if info := GetGlobalRegistry().GetModelInfo(modelID, p); info != nil {
 		return cloneModelInfo(info)
 	}
-	return LookupStaticModelInfo(modelID)
+	return cloneModelInfo(LookupStaticModelInfo(modelID))
 }
 
 // SetHook sets an optional hook for observing model registration changes.
@@ -842,11 +842,32 @@ func cloneModelMaps(models []map[string]any) []map[string]any {
 		}
 		copyModel := make(map[string]any, len(model))
 		for key, value := range model {
-			copyModel[key] = value
+			copyModel[key] = cloneModelMapValue(value)
 		}
 		cloned = append(cloned, copyModel)
 	}
 	return cloned
+}
+
+func cloneModelMapValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		copyMap := make(map[string]any, len(typed))
+		for key, entry := range typed {
+			copyMap[key] = cloneModelMapValue(entry)
+		}
+		return copyMap
+	case []any:
+		copySlice := make([]any, len(typed))
+		for i, entry := range typed {
+			copySlice[i] = cloneModelMapValue(entry)
+		}
+		return copySlice
+	case []string:
+		return append([]string(nil), typed...)
+	default:
+		return value
+	}
 }
 
 // GetAvailableModelsByProvider returns models available for the given provider identifier.
@@ -1121,7 +1142,7 @@ func (r *ModelRegistry) convertModelToMap(model *ModelInfo, handlerType string) 
 			result["max_completion_tokens"] = model.MaxCompletionTokens
 		}
 		if len(model.SupportedParameters) > 0 {
-			result["supported_parameters"] = model.SupportedParameters
+			result["supported_parameters"] = append([]string(nil), model.SupportedParameters...)
 		}
 		return result
 
@@ -1165,13 +1186,13 @@ func (r *ModelRegistry) convertModelToMap(model *ModelInfo, handlerType string) 
 			result["outputTokenLimit"] = model.OutputTokenLimit
 		}
 		if len(model.SupportedGenerationMethods) > 0 {
-			result["supportedGenerationMethods"] = model.SupportedGenerationMethods
+			result["supportedGenerationMethods"] = append([]string(nil), model.SupportedGenerationMethods...)
 		}
 		if len(model.SupportedInputModalities) > 0 {
-			result["supportedInputModalities"] = model.SupportedInputModalities
+			result["supportedInputModalities"] = append([]string(nil), model.SupportedInputModalities...)
 		}
 		if len(model.SupportedOutputModalities) > 0 {
-			result["supportedOutputModalities"] = model.SupportedOutputModalities
+			result["supportedOutputModalities"] = append([]string(nil), model.SupportedOutputModalities...)
 		}
 		return result
 

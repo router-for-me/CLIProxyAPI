@@ -109,3 +109,41 @@ func TestCleanupExpiredQuotasInvalidatesAvailableModelsCache(t *testing.T) {
 		t.Fatalf("expected model id m1, got %v", got)
 	}
 }
+
+func TestGetAvailableModelsReturnsClonedSupportedParameters(t *testing.T) {
+	r := newTestModelRegistry()
+	r.RegisterClient("client-1", "openai", []*ModelInfo{{
+		ID:                  "m1",
+		DisplayName:         "Model One",
+		SupportedParameters: []string{"temperature", "top_p"},
+	}})
+
+	first := r.GetAvailableModels("openai")
+	if len(first) != 1 {
+		t.Fatalf("expected one model, got %d", len(first))
+	}
+	params, ok := first[0]["supported_parameters"].([]string)
+	if !ok || len(params) != 2 {
+		t.Fatalf("expected supported_parameters slice, got %#v", first[0]["supported_parameters"])
+	}
+	params[0] = "mutated"
+
+	second := r.GetAvailableModels("openai")
+	params, ok = second[0]["supported_parameters"].([]string)
+	if !ok || len(params) != 2 || params[0] != "temperature" {
+		t.Fatalf("expected cloned supported_parameters, got %#v", second[0]["supported_parameters"])
+	}
+}
+
+func TestLookupModelInfoReturnsCloneForStaticDefinitions(t *testing.T) {
+	first := LookupModelInfo("glm-4.6")
+	if first == nil || first.Thinking == nil || len(first.Thinking.Levels) == 0 {
+		t.Fatalf("expected static model with thinking levels, got %+v", first)
+	}
+	first.Thinking.Levels[0] = "mutated"
+
+	second := LookupModelInfo("glm-4.6")
+	if second == nil || second.Thinking == nil || len(second.Thinking.Levels) == 0 || second.Thinking.Levels[0] == "mutated" {
+		t.Fatalf("expected static lookup clone, got %+v", second)
+	}
+}

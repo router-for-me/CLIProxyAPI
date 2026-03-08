@@ -1485,7 +1485,7 @@ func TestNewWatcherDetectsPersisterAndAuthDir(t *testing.T) {
 		t.Fatalf("expected mirroredAuthDir %s, got %s", tmp, w.mirroredAuthDir)
 	}
 	if w.authDir != tmp {
-        t.Fatalf("expected runtime authDir to switch to mirrored path %s, got %s", tmp, w.authDir)
+		t.Fatalf("expected runtime authDir to switch to mirrored path %s, got %s", tmp, w.authDir)
 	}
 }
 
@@ -1654,5 +1654,3 @@ func TestScheduleProcessEventsStopsOnContextDone(t *testing.T) {
 func hexString(data []byte) string {
 	return strings.ToLower(fmt.Sprintf("%x", data))
 }
-
-

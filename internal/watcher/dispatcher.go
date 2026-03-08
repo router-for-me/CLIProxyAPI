@@ -277,4 +277,3 @@ func snapshotCoreAuths(cfg *config.Config, authDir string) []*coreauth.Auth {
 
 	return out
 }
-
