@@ -1528,6 +1528,40 @@ func (m *Manager) GetByID(id string) (*Auth, bool) {
 	return auth.Clone(), true
 }
 
+// SelectAuthForModel resolves the next available auth for the supplied model and provider set
+// using the manager's normal selection logic without executing a translated request.
+func (m *Manager) SelectAuthForModel(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options) (*Auth, error) {
+	if m == nil {
+		return nil, &Error{Code: "provider_not_found", Message: "manager is nil"}
+	}
+
+	normalized := make([]string, 0, len(providers))
+	seen := make(map[string]struct{}, len(providers))
+	for _, provider := range providers {
+		key := strings.ToLower(strings.TrimSpace(provider))
+		if key == "" {
+			continue
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		normalized = append(normalized, key)
+	}
+	if len(normalized) == 0 {
+		return nil, &Error{Code: "provider_not_found", Message: "no provider supplied"}
+	}
+
+	tried := make(map[string]struct{})
+	if len(normalized) == 1 {
+		auth, _, err := m.pickNext(ctx, normalized[0], model, opts, tried)
+		return auth, err
+	}
+
+	auth, _, _, err := m.pickNextMixed(ctx, normalized, model, opts, tried)
+	return auth, err
+}
+
 func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, error) {
 	m.mu.RLock()
 	executor, okExecutor := m.executors[provider]

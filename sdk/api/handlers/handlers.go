@@ -659,6 +659,11 @@ func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string
 	return providers, resolvedModelName, nil
 }
 
+// GetRequestDetails resolves the provider set and normalized model name for an incoming request.
+func (h *BaseAPIHandler) GetRequestDetails(modelName string) (providers []string, normalizedModel string, err *interfaces.ErrorMessage) {
+	return h.getRequestDetails(modelName)
+}
+
 func cloneBytes(src []byte) []byte {
 	if len(src) == 0 {
 		return nil

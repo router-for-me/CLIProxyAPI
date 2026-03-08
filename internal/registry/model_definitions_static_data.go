@@ -147,6 +147,18 @@ func GetGeminiModels() []*ModelInfo {
 			Thinking:                   &ThinkingSupport{Min: 0, Max: 24576, ZeroAllowed: true, DynamicAllowed: true},
 		},
 		{
+			ID:                         "gemini-embedding-001",
+			Object:                     "model",
+			Created:                    1740787200,
+			OwnedBy:                    "google",
+			Type:                       "gemini",
+			Name:                       "models/gemini-embedding-001",
+			Version:                    "001",
+			DisplayName:                "Gemini Embedding 001",
+			Description:                "Google Gemini text embedding model.",
+			SupportedGenerationMethods: []string{"embedContent", "batchEmbedContents"},
+		},
+		{
 			ID:                         "gemini-3-pro-preview",
 			Object:                     "model",
 			Created:                    1737158400,

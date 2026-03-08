@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 
 	"github.com/gin-gonic/gin"
@@ -52,7 +53,53 @@ func (h *OpenAIAPIHandler) HandlerType() string {
 func (h *OpenAIAPIHandler) Models() []map[string]any {
 	// Get dynamic models from the global registry
 	modelRegistry := registry.GetGlobalRegistry()
-	return modelRegistry.GetAvailableModels("openai")
+	models := modelRegistry.GetAvailableModels("openai")
+	if h.hasProviderAuth("gemini", "gemini-cli") && !containsModelID(models, "gemini-embedding-001") {
+		if info := registry.LookupStaticModelInfo("gemini-embedding-001"); info != nil {
+			models = append(models, map[string]any{
+				"id":       info.ID,
+				"object":   info.Object,
+				"created":  info.Created,
+				"owned_by": info.OwnedBy,
+			})
+		}
+	}
+	return models
+}
+
+func (h *OpenAIAPIHandler) hasProviderAuth(providers ...string) bool {
+	if h == nil || h.AuthManager == nil {
+		return false
+	}
+	allowed := make(map[string]struct{}, len(providers))
+	for _, provider := range providers {
+		key := strings.ToLower(strings.TrimSpace(provider))
+		if key == "" {
+			continue
+		}
+		allowed[key] = struct{}{}
+	}
+	if len(allowed) == 0 {
+		return false
+	}
+	for _, auth := range h.AuthManager.List() {
+		if auth == nil || auth.Disabled {
+			continue
+		}
+		if _, ok := allowed[strings.ToLower(strings.TrimSpace(auth.Provider))]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func containsModelID(models []map[string]any, modelID string) bool {
+	for _, model := range models {
+		if id, _ := model["id"].(string); id == modelID {
+			return true
+		}
+	}
+	return false
 }
 
 // OpenAIModels handles the /v1/models endpoint.
