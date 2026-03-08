@@ -187,6 +187,17 @@ nonstream-keepalive-interval: 0
 #     models: # The models supported by the provider.
 #       - name: "moonshotai/kimi-k2:free" # The actual model name.
 #         alias: "kimi-k2" # The alias used in the API.
+#       # You may repeat the same alias to build an internal model pool.
+#       # The client still sees only one alias in the model list.
+#       # Requests to that alias will round-robin across the upstream names below,
+#       # and if the chosen upstream fails before producing output, the request will
+#       # continue with the next upstream model in the same alias pool.
+#       - name: "qwen3.5-plus"
+#         alias: "claude-opus-4.66"
+#       - name: "glm-5"
+#         alias: "claude-opus-4.66"
+#       - name: "kimi-k2.5"
+#         alias: "claude-opus-4.66"
 
 # Vertex API keys (Vertex-compatible endpoints, use API key + base URL)
 # vertex-api-key:

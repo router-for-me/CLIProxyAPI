@@ -492,9 +492,6 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 				effort = strings.ToLower(strings.TrimSpace(v.String()))
 			}
 			if effort != "" {
-				if effort == "max" {
-					effort = "high"
-				}
 				out, _ = sjson.Set(out, "request.generationConfig.thinkingConfig.thinkingLevel", effort)
 			} else {
 				out, _ = sjson.Set(out, "request.generationConfig.thinkingConfig.thinkingLevel", "high")
