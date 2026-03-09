@@ -2,6 +2,7 @@ package claude
 
 import (
 	"context"
+	"fmt"
 	"regexp"
 	"strings"
 	"testing"
@@ -101,5 +102,68 @@ func TestConvertOpenAIResponseToClaude_SanitizesNonStreamingToolUseID(t *testing
 	}
 	if got := gjson.Get(chunks[0], "content.0.name").String(); got != "fs.readFile" {
 		t.Fatalf("Expected tool name %q, got %q", "fs.readFile", got)
+	}
+}
+
+func TestOpenAIToolCallIDRoundTripsThroughClaude(t *testing.T) {
+	originalID := "call.fs:read"
+	requestJSON := []byte(`{"stream": false}`)
+	responseJSON := []byte(`data: {
+		"id": "chatcmpl_1",
+		"model": "gpt-4.1",
+		"choices": [{
+			"message": {
+				"tool_calls": [{
+					"id": "call.fs:read",
+					"type": "function",
+					"function": {"name": "fs.readFile", "arguments": "{\"path\":\"a.txt\"}"}
+				}]
+			},
+			"finish_reason": "tool_calls"
+		}]
+	}`)
+
+	var param any
+	chunks := ConvertOpenAIResponseToClaude(context.Background(), "gpt-4.1", requestJSON, requestJSON, responseJSON, &param)
+	if len(chunks) != 1 {
+		t.Fatalf("Expected 1 chunk, got %d", len(chunks))
+	}
+
+	claudeToolUseID := gjson.Get(chunks[0], "content.0.id").String()
+	if claudeToolUseID == "" {
+		t.Fatal("Expected Claude tool_use id")
+	}
+	if claudeToolUseID == originalID {
+		t.Fatal("Expected invalid OpenAI id to be transformed for Claude")
+	}
+
+	roundTripRequest := fmt.Sprintf(`{
+		"model": "claude-3-opus",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": %q, "name": "fs.readFile", "input": {"path": "a.txt"}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type": "tool_result", "tool_use_id": %q, "content": "ok"}
+				]
+			}
+		]
+	}`, claudeToolUseID, claudeToolUseID)
+
+	translated := ConvertClaudeRequestToOpenAI("test-model", []byte(roundTripRequest), false)
+	messages := gjson.ParseBytes(translated).Get("messages").Array()
+	if len(messages) != 2 {
+		t.Fatalf("Expected 2 messages after round-trip, got %d", len(messages))
+	}
+	if got := messages[0].Get("tool_calls.0.id").String(); got != originalID {
+		t.Fatalf("Expected assistant tool_call id %q after round-trip, got %q", originalID, got)
+	}
+	if got := messages[1].Get("tool_call_id").String(); got != originalID {
+		t.Fatalf("Expected tool result id %q after round-trip, got %q", originalID, got)
 	}
 }

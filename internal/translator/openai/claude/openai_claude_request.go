@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -166,7 +167,7 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 						// Only allow tool_use -> tool_calls for assistant messages (security: prevent injection).
 						if role == "assistant" {
 							toolCallJSON := `{"id":"","type":"function","function":{"name":"","arguments":""}}`
-							toolCallJSON, _ = sjson.Set(toolCallJSON, "id", part.Get("id").String())
+							toolCallJSON, _ = sjson.Set(toolCallJSON, "id", util.DecodeClaudeToolID(part.Get("id").String()))
 							toolCallJSON, _ = sjson.Set(toolCallJSON, "function.name", part.Get("name").String())
 
 							// Convert input to arguments JSON string
@@ -182,7 +183,7 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 					case "tool_result":
 						// Collect tool_result to emit after the main message (ensures tool results follow tool_calls)
 						toolResultJSON := `{"role":"tool","tool_call_id":"","content":""}`
-						toolResultJSON, _ = sjson.Set(toolResultJSON, "tool_call_id", part.Get("tool_use_id").String())
+						toolResultJSON, _ = sjson.Set(toolResultJSON, "tool_call_id", util.DecodeClaudeToolID(part.Get("tool_use_id").String()))
 						toolResultContent, toolResultContentRaw := convertClaudeToolResultContent(part.Get("content"))
 						if toolResultContentRaw {
 							toolResultJSON, _ = sjson.SetRaw(toolResultJSON, "content", toolResultContent)

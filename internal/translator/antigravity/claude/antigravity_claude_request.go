@@ -481,6 +481,10 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 				effort = strings.ToLower(strings.TrimSpace(v.String()))
 			}
 			if effort != "" {
+				// Claude "max" effort maps to "high" for Antigravity/Gemini
+				if effort == "max" {
+					effort = "high"
+				}
 				out, _ = sjson.Set(out, "request.generationConfig.thinkingConfig.thinkingLevel", effort)
 			} else {
 				out, _ = sjson.Set(out, "request.generationConfig.thinkingConfig.thinkingLevel", "high")

@@ -2,6 +2,7 @@ package claude
 
 import (
 	"context"
+	"fmt"
 	"regexp"
 	"strings"
 	"testing"
@@ -90,5 +91,64 @@ func TestConvertCodexResponseToClaudeNonStream_SanitizesToolUseID(t *testing.T) 
 	}
 	if got := gjson.Get(output, "content.0.name").String(); got != "fs.readFile" {
 		t.Fatalf("Expected tool name %q, got %q", "fs.readFile", got)
+	}
+}
+
+func TestCodexToolCallIDRoundTripsThroughClaude(t *testing.T) {
+	originalID := "call.fs:read"
+	requestJSON := []byte(`{"tools": [{"name": "fs.readFile"}]}`)
+	responseJSON := []byte(`{
+		"type": "response.completed",
+		"response": {
+			"id": "resp_1",
+			"model": "gpt-5-codex",
+			"output": [{
+				"type": "function_call",
+				"call_id": "call.fs:read",
+				"name": "fs.readFile",
+				"arguments": "{\"path\":\"a.txt\"}"
+			}],
+			"usage": {"input_tokens": 1, "output_tokens": 1},
+			"stop_reason": "tool_use"
+		}
+	}`)
+
+	output := ConvertCodexResponseToClaudeNonStream(context.Background(), "gpt-5-codex", requestJSON, nil, responseJSON, nil)
+	claudeToolUseID := gjson.Get(output, "content.0.id").String()
+	if claudeToolUseID == "" {
+		t.Fatal("Expected Claude tool_use id")
+	}
+	if claudeToolUseID == originalID {
+		t.Fatal("Expected invalid Codex id to be transformed for Claude")
+	}
+
+	roundTripRequest := fmt.Sprintf(`{
+		"model": "claude-3-opus",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": %q, "name": "fs.readFile", "input": {"path": "a.txt"}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type": "tool_result", "tool_use_id": %q, "content": "ok"}
+				]
+			}
+		]
+	}`, claudeToolUseID, claudeToolUseID)
+
+	translated := ConvertClaudeRequestToCodex("gpt-5-codex", []byte(roundTripRequest), false)
+	input := gjson.ParseBytes(translated).Get("input").Array()
+	if len(input) != 2 {
+		t.Fatalf("Expected 2 input items after round-trip, got %d", len(input))
+	}
+	if got := input[0].Get("call_id").String(); got != originalID {
+		t.Fatalf("Expected function_call id %q after round-trip, got %q", originalID, got)
+	}
+	if got := input[1].Get("call_id").String(); got != originalID {
+		t.Fatalf("Expected function_call_output id %q after round-trip, got %q", originalID, got)
 	}
 }

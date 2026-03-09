@@ -243,7 +243,7 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 						// Send content_block_start for tool_use
 						contentBlockStartJSON := `{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"","name":"","input":{}}}`
 						contentBlockStartJSON, _ = sjson.Set(contentBlockStartJSON, "index", blockIndex)
-						contentBlockStartJSON, _ = sjson.Set(contentBlockStartJSON, "content_block.id", util.SanitizeClaudeToolID(accumulator.ID))
+						contentBlockStartJSON, _ = sjson.Set(contentBlockStartJSON, "content_block.id", util.EncodeClaudeToolID(accumulator.ID))
 						contentBlockStartJSON, _ = sjson.Set(contentBlockStartJSON, "content_block.name", accumulator.Name)
 						results = append(results, "event: content_block_start\ndata: "+contentBlockStartJSON+"\n\n")
 					}
@@ -414,7 +414,7 @@ func convertOpenAINonStreamingToAnthropic(rawJSON []byte) []string {
 		if toolCalls := choice.Get("message.tool_calls"); toolCalls.Exists() && toolCalls.IsArray() {
 			toolCalls.ForEach(func(_, toolCall gjson.Result) bool {
 				toolUseBlock := `{"type":"tool_use","id":"","name":"","input":{}}`
-				toolUseBlock, _ = sjson.Set(toolUseBlock, "id", util.SanitizeClaudeToolID(toolCall.Get("id").String()))
+				toolUseBlock, _ = sjson.Set(toolUseBlock, "id", util.EncodeClaudeToolID(toolCall.Get("id").String()))
 				toolUseBlock, _ = sjson.Set(toolUseBlock, "name", toolCall.Get("function.name").String())
 
 				argsStr := util.FixJSON(toolCall.Get("function.arguments").String())
@@ -612,7 +612,7 @@ func ConvertOpenAIResponseToClaudeNonStream(_ context.Context, _ string, origina
 								toolCalls.ForEach(func(_, tc gjson.Result) bool {
 									hasToolCall = true
 									toolUse := `{"type":"tool_use","id":"","name":"","input":{}}`
-									toolUse, _ = sjson.Set(toolUse, "id", util.SanitizeClaudeToolID(tc.Get("id").String()))
+									toolUse, _ = sjson.Set(toolUse, "id", util.EncodeClaudeToolID(tc.Get("id").String()))
 									toolUse, _ = sjson.Set(toolUse, "name", util.MapToolName(toolNameMap, tc.Get("function.name").String()))
 
 									argsStr := util.FixJSON(tc.Get("function.arguments").String())
@@ -669,7 +669,7 @@ func ConvertOpenAIResponseToClaudeNonStream(_ context.Context, _ string, origina
 				toolCalls.ForEach(func(_, toolCall gjson.Result) bool {
 					hasToolCall = true
 					toolUseBlock := `{"type":"tool_use","id":"","name":"","input":{}}`
-					toolUseBlock, _ = sjson.Set(toolUseBlock, "id", util.SanitizeClaudeToolID(toolCall.Get("id").String()))
+					toolUseBlock, _ = sjson.Set(toolUseBlock, "id", util.EncodeClaudeToolID(toolCall.Get("id").String()))
 					toolUseBlock, _ = sjson.Set(toolUseBlock, "name", util.MapToolName(toolNameMap, toolCall.Get("function.name").String()))
 
 					argsStr := util.FixJSON(toolCall.Get("function.arguments").String())

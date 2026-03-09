@@ -111,3 +111,43 @@ func TestOpenAICompatExecutorExecuteStreamRetriesWithoutInjectedIncludeUsage(t *
 		t.Fatalf("expected retry request to remove include_usage, got body: %s", string(gotBodies[1]))
 	}
 }
+
+func TestOpenAICompatExecutorExecuteStreamDoesNotRetryUnrelatedValidationErrors(t *testing.T) {
+	var gotBodies [][]byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		gotBodies = append(gotBodies, body)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = w.Write([]byte(`{"error":{"message":"validation failed for messages[0].content; request trace mentions stream_options.include_usage but the actual issue is content shape"}}`))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL + "/v1",
+		"api_key":  "test",
+	}}
+	_, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-4o-mini",
+		Payload: []byte(`{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}]}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+		Stream:       true,
+	})
+	if err == nil {
+		t.Fatal("expected ExecuteStream to return validation error")
+	}
+	if len(gotBodies) != 1 {
+		t.Fatalf("expected 1 upstream request for unrelated validation error, got %d", len(gotBodies))
+	}
+	if !gjson.GetBytes(gotBodies[0], "stream_options.include_usage").Bool() {
+		t.Fatalf("expected original request to include injected usage flag, got body: %s", string(gotBodies[0]))
+	}
+	if statusProvider, ok := err.(interface{ StatusCode() int }); !ok || statusProvider.StatusCode() != http.StatusUnprocessableEntity {
+		t.Fatalf("expected status code 422, got: %v", err)
+	}
+}
