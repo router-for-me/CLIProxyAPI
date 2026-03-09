@@ -213,6 +213,26 @@ func (m *Manager) syncScheduler() {
 	m.syncSchedulerFromSnapshot(m.snapshotAuths())
 }
 
+// RefreshSchedulerEntry re-upserts a single auth into the scheduler so that its
+// supportedModelSet is rebuilt from the current global model registry state.
+// This must be called after models have been registered for a newly added auth,
+// because the initial scheduler.upsertAuth during Register/Update runs before
+// registerModelsForAuth and therefore snapshots an empty model set.
+func (m *Manager) RefreshSchedulerEntry(authID string) {
+	if m == nil || m.scheduler == nil || authID == "" {
+		return
+	}
+	m.mu.RLock()
+	auth, ok := m.auths[authID]
+	if !ok || auth == nil {
+		m.mu.RUnlock()
+		return
+	}
+	snapshot := auth.Clone()
+	m.mu.RUnlock()
+	m.scheduler.upsertAuth(snapshot)
+}
+
 func (m *Manager) SetSelector(selector Selector) {
 	if m == nil {
 		return
@@ -2037,6 +2057,10 @@ func (m *Manager) useSchedulerFastPath() bool {
 func shouldRetrySchedulerPick(err error) bool {
 	if err == nil {
 		return false
+	}
+	var cooldownErr *modelCooldownError
+	if errors.As(err, &cooldownErr) {
+		return true
 	}
 	var authErr *Error
 	if !errors.As(err, &authErr) || authErr == nil {
