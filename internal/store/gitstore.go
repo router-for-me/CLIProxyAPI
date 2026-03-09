@@ -600,7 +600,7 @@ func (s *GitTokenStore) commitAndPushLocked(message string, relPaths ...string) 
 		Email: "cliproxy@local",
 		When:  time.Now(),
 	}
-	commitHash, err := worktree.Commit(message, &git.CommitOptions{
+	_, err = worktree.Commit(message, &git.CommitOptions{
 		Author: signature,
 	})
 	if err != nil {
@@ -609,50 +609,12 @@ func (s *GitTokenStore) commitAndPushLocked(message string, relPaths ...string) 
 		}
 		return fmt.Errorf("git token store: commit: %w", err)
 	}
-	headRef, errHead := repo.Head()
-	if errHead != nil {
-		if !errors.Is(errHead, plumbing.ErrReferenceNotFound) {
-			return fmt.Errorf("git token store: get head: %w", errHead)
-		}
-	} else if errRewrite := s.rewriteHeadAsSingleCommit(repo, headRef.Name(), commitHash, message, signature); errRewrite != nil {
-		return errRewrite
-	}
 	s.maybeRunGC(repo)
-	if err = repo.Push(&git.PushOptions{Auth: s.gitAuth(), Force: true}); err != nil {
+	if err = repo.Push(&git.PushOptions{Auth: s.gitAuth()}); err != nil {
 		if errors.Is(err, git.NoErrAlreadyUpToDate) {
 			return nil
 		}
 		return fmt.Errorf("git token store: push: %w", err)
-	}
-	return nil
-}
-
-// rewriteHeadAsSingleCommit rewrites the current branch tip to a single-parentless commit and leaves history squashed.
-func (s *GitTokenStore) rewriteHeadAsSingleCommit(repo *git.Repository, branch plumbing.ReferenceName, commitHash plumbing.Hash, message string, signature *object.Signature) error {
-	commitObj, err := repo.CommitObject(commitHash)
-	if err != nil {
-		return fmt.Errorf("git token store: inspect head commit: %w", err)
-	}
-	squashed := &object.Commit{
-		Author:       *signature,
-		Committer:    *signature,
-		Message:      message,
-		TreeHash:     commitObj.TreeHash,
-		ParentHashes: nil,
-		Encoding:     commitObj.Encoding,
-		ExtraHeaders: commitObj.ExtraHeaders,
-	}
-	mem := &plumbing.MemoryObject{}
-	mem.SetType(plumbing.CommitObject)
-	if err := squashed.Encode(mem); err != nil {
-		return fmt.Errorf("git token store: encode squashed commit: %w", err)
-	}
-	newHash, err := repo.Storer.SetEncodedObject(mem)
-	if err != nil {
-		return fmt.Errorf("git token store: write squashed commit: %w", err)
-	}
-	if err := repo.Storer.SetReference(plumbing.NewHashReference(branch, newHash)); err != nil {
-		return fmt.Errorf("git token store: update branch reference: %w", err)
 	}
 	return nil
 }
