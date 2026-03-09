@@ -333,14 +333,14 @@ func (e *OpenAICompatExecutor) retryStreamWithoutInjectedUsage(ctx context.Conte
 		return nil, err
 	}
 	if errClose := httpResp.Body.Close(); errClose != nil {
-		log.Errorf("openai compat executor: close fallback response body error: %v", errClose)
+		log.Warnf("openai compat executor: close fallback response body error: %v", errClose)
 	}
 	if len(body) > openAICompatRetryErrorBodyLimit {
 		log.Warnf("openai compat executor: fallback response body exceeded %d bytes; skip retry without include_usage", openAICompatRetryErrorBodyLimit)
 		httpResp.Body = io.NopCloser(bytes.NewReader(body[:openAICompatRetryErrorBodyLimit]))
 		return httpResp, nil
 	}
-	if !strings.Contains(strings.ToLower(string(body)), "stream_options") && !strings.Contains(strings.ToLower(string(body)), "include_usage") {
+	if !isUnsupportedInjectedUsageError(body) {
 		httpResp.Body = io.NopCloser(bytes.NewReader(body))
 		return httpResp, nil
 	}
@@ -377,6 +377,34 @@ func (e *OpenAICompatExecutor) retryStreamWithoutInjectedUsage(ctx context.Conte
 		AuthValue: authValue,
 	})
 	return httpClient.Do(retryReq)
+}
+
+func isUnsupportedInjectedUsageError(body []byte) bool {
+	if len(body) == 0 {
+		return false
+	}
+	lower := strings.ToLower(string(body))
+	if !strings.Contains(lower, "stream_options") && !strings.Contains(lower, "include_usage") {
+		return false
+	}
+	unsupportedMarkers := []string{
+		"unknown field",
+		"unknown parameter",
+		"unknown argument",
+		"unrecognized field",
+		"unrecognized parameter",
+		"unsupported field",
+		"unsupported parameter",
+		"not allowed",
+		"not permitted",
+		"extra inputs are not permitted",
+	}
+	for _, marker := range unsupportedMarkers {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func (e *OpenAICompatExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
