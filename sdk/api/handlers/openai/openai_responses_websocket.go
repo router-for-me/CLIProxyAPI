@@ -79,6 +79,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 	var lastRequest []byte
 	lastResponseOutput := []byte("[]")
 	pinnedAuthID := ""
+	resetPinnedAuthDisablesIncrementalInput := false
 
 	for {
 		msgType, payload, errReadMessage := conn.ReadMessage()
@@ -104,6 +105,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		// )
 		appendWebsocketEvent(&wsBodyLog, "request", payload)
 
+		disableIncrementalForThisTurn := resetPinnedAuthDisablesIncrementalInput
 		allowIncrementalInputWithPreviousResponseID := false
 		if pinnedAuthID != "" && h != nil && h.AuthManager != nil {
 			if pinnedAuth, ok := h.AuthManager.GetByID(pinnedAuthID); ok && pinnedAuth != nil {
@@ -115,6 +117,9 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 				requestModelName = strings.TrimSpace(gjson.GetBytes(lastRequest, "model").String())
 			}
 			allowIncrementalInputWithPreviousResponseID = h.websocketUpstreamSupportsIncrementalInputForModel(requestModelName)
+		}
+		if disableIncrementalForThisTurn {
+			allowIncrementalInputWithPreviousResponseID = false
 		}
 
 		var requestJSON []byte
@@ -186,6 +191,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 				log.Infof("responses websocket: reset pinned auth id=%s auth=%s", passthroughSessionID, strings.TrimSpace(pinnedAuthID))
 			}
 			pinnedAuthID = ""
+			resetPinnedAuthDisablesIncrementalInput = true
 			if h != nil && h.AuthManager != nil {
 				h.AuthManager.CloseExecutionSession(passthroughSessionID)
 				log.Infof("responses websocket: upstream execution session reset id=%s", passthroughSessionID)
@@ -198,6 +204,9 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			return
 		}
 		lastResponseOutput = completedOutput
+		if disableIncrementalForThisTurn && !resetPinnedAuth {
+			resetPinnedAuthDisablesIncrementalInput = false
+		}
 	}
 }
 
