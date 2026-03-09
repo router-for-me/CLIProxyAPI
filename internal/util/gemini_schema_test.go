@@ -1046,3 +1046,138 @@ func TestRemoveExtensionFields(t *testing.T) {
 		})
 	}
 }
+
+func TestInferMissingObjectType(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name: "adds type:object when properties present but no type",
+			input: `{
+				"properties": {
+					"name": { "type": "string" }
+				}
+			}`,
+			expected: `{
+				"type": "object",
+				"properties": {
+					"name": { "type": "string" }
+				}
+			}`,
+		},
+		{
+			name: "does not overwrite existing type",
+			input: `{
+				"type": "object",
+				"properties": {
+					"name": { "type": "string" }
+				}
+			}`,
+			expected: `{
+				"type": "object",
+				"properties": {
+					"name": { "type": "string" }
+				}
+			}`,
+		},
+		{
+			name: "adds type:object to nested schema missing type",
+			input: `{
+				"type": "object",
+				"properties": {
+					"address": {
+						"properties": {
+							"street": { "type": "string" }
+						}
+					}
+				}
+			}`,
+			expected: `{
+				"type": "object",
+				"properties": {
+					"address": {
+						"type": "object",
+						"properties": {
+							"street": { "type": "string" }
+						}
+					}
+				}
+			}`,
+		},
+		{
+			name: "does not modify field literally named properties",
+			input: `{
+				"type": "object",
+				"properties": {
+					"properties": {
+						"type": "string",
+						"description": "a field named properties"
+					}
+				}
+			}`,
+			expected: `{
+				"type": "object",
+				"properties": {
+					"properties": {
+						"type": "string",
+						"description": "a field named properties"
+					}
+				}
+			}`,
+		},
+		{
+			name: "handles field named properties that itself has properties",
+			input: `{
+				"type": "object",
+				"properties": {
+					"properties": {
+						"properties": {
+							"inner": { "type": "number" }
+						}
+					}
+				}
+			}`,
+			expected: `{
+				"type": "object",
+				"properties": {
+					"properties": {
+						"type": "object",
+						"properties": {
+							"inner": { "type": "number" }
+						}
+					}
+				}
+			}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			actual := inferMissingObjectType(tt.input)
+			compareJSON(t, tt.expected, actual)
+		})
+	}
+}
+
+func TestCleanJSONSchemaForGemini_InferMissingObjectType(t *testing.T) {
+	input := `{
+		"properties": {
+			"user": {
+				"properties": {
+					"name": { "type": "string" }
+				}
+			}
+		}
+	}`
+
+	result := CleanJSONSchemaForGemini(input)
+
+	if !gjson.Get(result, "type").Exists() || gjson.Get(result, "type").String() != "object" {
+		t.Errorf("root should have type:object, got: %s", result)
+	}
+	if !gjson.Get(result, "properties.user.type").Exists() || gjson.Get(result, "properties.user.type").String() != "object" {
+		t.Errorf("nested user should have type:object, got: %s", result)
+	}
+}

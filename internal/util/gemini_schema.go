@@ -505,7 +505,7 @@ func inferMissingObjectType(jsonStr string) string {
 
 	for _, p := range paths {
 		parentPath := trimSuffix(p, ".properties")
-		if isPropertyDefinition(parentPath) {
+		if isSchemaPropertiesKeyword(parentPath) {
 			continue
 		}
 		typePath := joinPath(parentPath, "type")
@@ -514,6 +514,28 @@ func inferMissingObjectType(jsonStr string) string {
 		}
 	}
 	return jsonStr
+}
+
+// isSchemaPropertiesKeyword determines whether path points to a JSON Schema
+// "properties" keyword (a map of field definitions) rather than a field that
+// happens to be named "properties". It walks the path segments and tracks
+// whether we are at schema level or inside a properties map (field-name level).
+func isSchemaPropertiesKeyword(path string) bool {
+	if path == "" {
+		return false
+	}
+	parts := splitGJSONPath(path)
+	schemaLevel := true
+	for _, part := range parts {
+		if schemaLevel {
+			if part == "properties" {
+				schemaLevel = false
+			}
+		} else {
+			schemaLevel = true
+		}
+	}
+	return !schemaLevel
 }
 
 func cleanupRequiredFields(jsonStr string) string {
