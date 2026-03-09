@@ -68,7 +68,7 @@ Because this repository is not named `homebrew-cliproxyapi`, use a custom tap co
 
 ```bash
 brew tap router-for-me/cliproxyapi https://github.com/router-for-me/CLIProxyAPI
-brew install router-for-me/cliproxyapi/cliproxyapi
+brew install router-for-me/cliproxyapi/cli-proxy-api
 ```
 
 After installation, you can start with:

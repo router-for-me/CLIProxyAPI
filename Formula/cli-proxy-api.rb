@@ -1,4 +1,4 @@
-class Cliproxyapi < Formula
+class CliProxyApi < Formula
   desc "CLI API proxy service for OpenAI, Gemini, Claude, and Codex-compatible clients"
   homepage "https://github.com/router-for-me/CLIProxyAPI"
   version "6.8.49"
