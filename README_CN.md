@@ -60,6 +60,21 @@ GLM CODING PLAN 是专为AI编码打造的订阅套餐，每月最低仅需20元
 
 CLIProxyAPI 用户手册： [https://help.router-for.me/](https://help.router-for.me/cn/)
 
+## Homebrew 安装
+
+可以直接通过本仓库使用 Homebrew 安装：
+
+```bash
+brew tap router-for-me/cliproxyapi https://github.com/router-for-me/CLIProxyAPI
+brew install router-for-me/cliproxyapi/cliproxyapi
+```
+
+安装完成后，可以先运行：
+
+```bash
+cli-proxy-api --help
+```
+
 ## 管理 API 文档
 
 请参见 [MANAGEMENT_API_CN.md](https://help.router-for.me/cn/management/api)

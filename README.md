@@ -60,6 +60,21 @@ Get 10% OFF GLM CODING PLAN：https://z.ai/subscribe?ic=8JVLJQFSKB
 
 CLIProxyAPI Guides: [https://help.router-for.me/](https://help.router-for.me/)
 
+## Homebrew
+
+Install from this repository with Homebrew:
+
+```bash
+brew tap router-for-me/cliproxyapi https://github.com/router-for-me/CLIProxyAPI
+brew install router-for-me/cliproxyapi/cliproxyapi
+```
+
+After installation, you can start with:
+
+```bash
+cli-proxy-api --help
+```
+
 ## Management API
 
 see [MANAGEMENT_API.md](https://help.router-for.me/management/api)
