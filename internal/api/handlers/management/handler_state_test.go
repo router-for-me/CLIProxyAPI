@@ -15,7 +15,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-func TestStateMiddleware_BlocksConcurrentSetConfig(t *testing.T) {
+func TestStateMiddleware_DoesNotBlockConcurrentSetConfigForGetRequests(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	hash, err := bcrypt.GenerateFromPassword([]byte("secret"), bcrypt.DefaultCost)
@@ -53,7 +53,53 @@ func TestStateMiddleware_BlocksConcurrentSetConfig(t *testing.T) {
 
 	select {
 	case <-updated:
-		t.Fatal("SetConfig should wait for in-flight management request")
+	case <-time.After(150 * time.Millisecond):
+		t.Fatal("SetConfig should not wait for in-flight GET management request")
+	}
+
+	close(release)
+
+}
+
+func TestStateMiddleware_BlocksConcurrentSetConfigForMutatingRequests(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	hash, err := bcrypt.GenerateFromPassword([]byte("secret"), bcrypt.DefaultCost)
+	if err != nil {
+		t.Fatalf("generate hash: %v", err)
+	}
+
+	h := NewHandler(&config.Config{RemoteManagement: config.RemoteManagement{SecretKey: string(hash)}}, filepath.Join(t.TempDir(), "config.yaml"), nil)
+	r := gin.New()
+	release := make(chan struct{})
+	reached := make(chan struct{})
+	r.PUT("/guarded", h.StateMiddleware(), func(c *gin.Context) {
+		close(reached)
+		<-release
+		c.Status(http.StatusNoContent)
+	})
+
+	go func() {
+		req := httptest.NewRequest(http.MethodPut, "/guarded", nil)
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+	}()
+
+	select {
+	case <-reached:
+	case <-time.After(2 * time.Second):
+		t.Fatal("request did not enter guarded handler")
+	}
+
+	updated := make(chan struct{})
+	go func() {
+		h.SetConfig(&config.Config{})
+		close(updated)
+	}()
+
+	select {
+	case <-updated:
+		t.Fatal("SetConfig should wait for in-flight mutating management request")
 	case <-time.After(150 * time.Millisecond):
 	}
 

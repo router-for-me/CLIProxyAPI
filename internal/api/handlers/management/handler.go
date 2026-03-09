@@ -120,12 +120,16 @@ func NewHandlerWithoutConfigFilePath(cfg *config.Config, manager *coreauth.Manag
 	return NewHandler(cfg, "", manager)
 }
 
-// StateMiddleware serializes management runtime state access so request handlers,
-// hot-reload updates and persistence do not observe partially-updated in-memory state.
+// StateMiddleware serializes only mutating management requests so hot-reload
+// updates do not interleave with in-place state changes, while long-running
+// read flows such as OAuth login URLs remain concurrent.
 func (h *Handler) StateMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		h.stateMu.Lock()
-		defer h.stateMu.Unlock()
+		switch c.Request.Method {
+		case http.MethodPut, http.MethodPatch, http.MethodDelete:
+			h.stateMu.Lock()
+			defer h.stateMu.Unlock()
+		}
 		c.Next()
 	}
 }
