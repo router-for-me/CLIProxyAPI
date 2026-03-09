@@ -78,6 +78,23 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 	pinnedAuthID := ""
 	sessionIncrementalInputKnown := false
 	sessionIncrementalInputSupported := false
+	updateSessionAuthState := func(authID string) {
+		pinnedAuthID = strings.TrimSpace(authID)
+		if pinnedAuthID == "" || h == nil || h.AuthManager == nil {
+			pinnedAuthID = ""
+			sessionIncrementalInputKnown = false
+			sessionIncrementalInputSupported = false
+			return
+		}
+		if known, supported := responsesWebsocketIncrementalInputStateForAuth(h.AuthManager, pinnedAuthID); known {
+			sessionIncrementalInputKnown = true
+			sessionIncrementalInputSupported = supported
+			return
+		}
+		pinnedAuthID = ""
+		sessionIncrementalInputKnown = false
+		sessionIncrementalInputSupported = false
+	}
 
 	for {
 		msgType, payload, errReadMessage := conn.ReadMessage()
@@ -103,15 +120,8 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		// )
 		appendWebsocketEvent(&wsBodyLog, "request", payload)
 
-		if pinnedAuthID != "" && h != nil && h.AuthManager != nil {
-			if known, supported := responsesWebsocketIncrementalInputStateForAuth(h.AuthManager, pinnedAuthID); known {
-				sessionIncrementalInputKnown = true
-				sessionIncrementalInputSupported = supported
-			} else {
-				pinnedAuthID = ""
-				sessionIncrementalInputKnown = false
-				sessionIncrementalInputSupported = false
-			}
+		if pinnedAuthID != "" {
+			updateSessionAuthState(pinnedAuthID)
 		}
 		allowIncrementalInputWithPreviousResponseID := sessionIncrementalInputKnown && sessionIncrementalInputSupported
 
@@ -147,6 +157,18 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			}
 			continue
 		}
+		modelName := gjson.GetBytes(requestJSON, "model").String()
+		if !sessionIncrementalInputKnown && shouldResolveResponsesWebsocketPrewarmAuth(payload, lastRequest) {
+			prewarmCtx, prewarmCancel := h.GetContextWithCancel(h, c, context.Background())
+			prewarmCtx = cliproxyexecutor.WithDownstreamWebsocket(prewarmCtx)
+			prewarmCtx = handlers.WithExecutionSessionID(prewarmCtx, passthroughSessionID)
+			prewarmCtx = handlers.WithSelectedAuthIDCallback(prewarmCtx, updateSessionAuthState)
+			selectedAuth, _, selectErrMsg := h.SelectStreamAuthWithAuthManager(prewarmCtx, h.HandlerType(), modelName, requestJSON, "")
+			prewarmCancel()
+			if selectErrMsg == nil && selectedAuth != nil {
+				updateSessionAuthState(selectedAuth.ID)
+			}
+		}
 		if shouldHandleResponsesWebsocketPrewarmLocally(payload, lastRequest, sessionIncrementalInputKnown, sessionIncrementalInputSupported) {
 			if updated, errDelete := sjson.DeleteBytes(requestJSON, "generate"); errDelete == nil {
 				requestJSON = updated
@@ -165,23 +187,13 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		}
 		lastRequest = updatedLastRequest
 
-		modelName := gjson.GetBytes(requestJSON, "model").String()
 		cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 		cliCtx = cliproxyexecutor.WithDownstreamWebsocket(cliCtx)
 		cliCtx = handlers.WithExecutionSessionID(cliCtx, passthroughSessionID)
 		if pinnedAuthID != "" {
 			cliCtx = handlers.WithPinnedAuthID(cliCtx, pinnedAuthID)
 		} else {
-			cliCtx = handlers.WithSelectedAuthIDCallback(cliCtx, func(authID string) {
-				pinnedAuthID = strings.TrimSpace(authID)
-				if known, supported := responsesWebsocketIncrementalInputStateForAuth(h.AuthManager, pinnedAuthID); known {
-					sessionIncrementalInputKnown = true
-					sessionIncrementalInputSupported = supported
-				} else {
-					sessionIncrementalInputKnown = false
-					sessionIncrementalInputSupported = false
-				}
-			})
+			cliCtx = handlers.WithSelectedAuthIDCallback(cliCtx, updateSessionAuthState)
 		}
 		dataChan, _, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, requestJSON, "")
 
@@ -385,8 +397,19 @@ func responsesWebsocketIncrementalInputStateForAuth(manager *coreauth.Manager, a
 	return true, websocketUpstreamSupportsIncrementalInput(auth.Attributes, auth.Metadata)
 }
 
+func shouldResolveResponsesWebsocketPrewarmAuth(rawJSON []byte, lastRequest []byte) bool {
+	if len(lastRequest) != 0 {
+		return false
+	}
+	if strings.TrimSpace(gjson.GetBytes(rawJSON, "type").String()) != wsRequestTypeCreate {
+		return false
+	}
+	generateResult := gjson.GetBytes(rawJSON, "generate")
+	return generateResult.Exists() && !generateResult.Bool()
+}
+
 func shouldHandleResponsesWebsocketPrewarmLocally(rawJSON []byte, lastRequest []byte, sessionIncrementalInputKnown bool, sessionIncrementalInputSupported bool) bool {
-	if len(lastRequest) != 0 || !sessionIncrementalInputKnown || sessionIncrementalInputSupported {
+	if !sessionIncrementalInputKnown || sessionIncrementalInputSupported {
 		return false
 	}
 	if strings.TrimSpace(gjson.GetBytes(rawJSON, "type").String()) != wsRequestTypeCreate {

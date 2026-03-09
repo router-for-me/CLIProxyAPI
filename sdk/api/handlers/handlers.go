@@ -733,6 +733,41 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 	return dataChan, upstreamHeaders, errChan
 }
 
+// SelectStreamAuthWithAuthManager resolves the auth that ExecuteStreamWithAuthManager
+// would select for the supplied request without invoking the upstream executor.
+func (h *BaseAPIHandler) SelectStreamAuthWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) (*coreauth.Auth, string, *interfaces.ErrorMessage) {
+	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
+	if errMsg != nil {
+		return nil, "", errMsg
+	}
+	reqMeta := requestExecutionMetadata(ctx)
+	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
+	opts := coreexecutor.Options{
+		Stream:          true,
+		Alt:             alt,
+		OriginalRequest: rawJSON,
+		SourceFormat:    sdktranslator.FromString(handlerType),
+		Metadata:        reqMeta,
+	}
+	auth, provider, err := h.AuthManager.SelectExecutionAuth(ctx, providers, normalizedModel, opts)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
+			if code := se.StatusCode(); code > 0 {
+				status = code
+			}
+		}
+		var addon http.Header
+		if he, ok := err.(interface{ Headers() http.Header }); ok && he != nil {
+			if hdr := he.Headers(); hdr != nil {
+				addon = hdr.Clone()
+			}
+		}
+		return nil, "", &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
+	}
+	return auth, provider, nil
+}
+
 func validateSSEDataJSON(chunk []byte) error {
 	for _, line := range bytes.Split(chunk, []byte("\n")) {
 		line = bytes.TrimSpace(line)
