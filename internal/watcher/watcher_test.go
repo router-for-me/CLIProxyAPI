@@ -1217,7 +1217,7 @@ func TestLoadFileClientsWalkError(t *testing.T) {
 	w := &Watcher{}
 	w.SetConfig(cfg)
 
-	count := w.loadFileClients(cfg)
+	count := w.loadFileClients(cfg.AuthDir)
 	if count != 0 {
 		t.Fatalf("expected count 0 due to walk error, got %d", count)
 	}

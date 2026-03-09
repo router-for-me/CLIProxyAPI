@@ -116,4 +116,103 @@ func TestSnapshotCoreAuthsUsesMirroredAuthDir(t *testing.T) {
 	}
 }
 
+func TestReloadClientsUsesMirroredAuthDirForFileAuthCache(t *testing.T) {
+	originalAuthDir := filepath.Join(t.TempDir(), "original-auth")
+	if err := os.MkdirAll(originalAuthDir, 0o755); err != nil {
+		t.Fatalf("failed to create original auth dir: %v", err)
+	}
+	mirroredAuthDir := t.TempDir()
+	authFile := filepath.Join(mirroredAuthDir, "demo.json")
+	if err := os.WriteFile(authFile, []byte(`{"type":"demo","email":"mirror@example.com"}`), 0o644); err != nil {
+		t.Fatalf("failed to write mirrored auth file: %v", err)
+	}
 
+	w := &Watcher{
+		authDir:          originalAuthDir,
+		mirroredAuthDir:  mirroredAuthDir,
+		lastAuthHashes:   make(map[string]string),
+		lastAuthContents: make(map[string]*coreauth.Auth),
+		fileAuthsByPath:  make(map[string]map[string]*coreauth.Auth),
+	}
+	w.SetConfig(&config.Config{AuthDir: originalAuthDir})
+
+	w.reloadClients(true, nil, false)
+
+	normalized := w.normalizeAuthPath(authFile)
+	w.clientsMutex.RLock()
+	if len(w.fileAuthsByPath[normalized]) == 0 {
+		w.clientsMutex.RUnlock()
+		t.Fatalf("expected mirrored auth file %s to populate fileAuthsByPath", authFile)
+	}
+	if len(w.currentAuths) == 0 {
+		w.clientsMutex.RUnlock()
+		t.Fatal("expected mirrored auth file to populate currentAuths")
+	}
+	w.clientsMutex.RUnlock()
+
+	w.removeClient(authFile)
+
+	w.clientsMutex.RLock()
+	defer w.clientsMutex.RUnlock()
+	if _, ok := w.fileAuthsByPath[normalized]; ok {
+		t.Fatalf("expected mirrored auth file %s to be removed from fileAuthsByPath", authFile)
+	}
+	if len(w.currentAuths) != 0 {
+		t.Fatalf("expected currentAuths to be cleared after mirrored auth removal, got %d entries", len(w.currentAuths))
+	}
+}
+
+func TestCanonicalizeMirroredSynthesizedAuths_PreservesMirrorStoreIDFormat(t *testing.T) {
+	w := &Watcher{
+		authDir:         filepath.Join(t.TempDir(), "configured-auth"),
+		mirroredAuthDir: t.TempDir(),
+	}
+
+	authPath := filepath.Join(w.mirroredAuthDir, "Team", "Auth.json")
+	if err := os.MkdirAll(filepath.Dir(authPath), 0o755); err != nil {
+		t.Fatalf("failed to create mirrored auth path: %v", err)
+	}
+
+	auths := []*coreauth.Auth{
+		{
+			ID:       `team\auth.json`,
+			Provider: "gemini-cli",
+			Attributes: map[string]string{
+				"path":                   authPath,
+				"gemini_virtual_parent":  `team\auth.json`,
+				"gemini_virtual_project": "proj-a",
+			},
+			Metadata: map[string]any{
+				"virtual_parent_id": `team\auth.json`,
+			},
+		},
+		{
+			ID:       `team\auth.json::proj-a`,
+			Provider: "gemini-cli",
+			Attributes: map[string]string{
+				"path":                   authPath,
+				"gemini_virtual_parent":  `team\auth.json`,
+				"gemini_virtual_project": "proj-a",
+			},
+			Metadata: map[string]any{
+				"virtual_parent_id": `team\auth.json`,
+			},
+		},
+	}
+
+	w.canonicalizeMirroredSynthesizedAuths(auths)
+
+	wantPrimary := "Team/Auth.json"
+	if got := auths[0].ID; got != wantPrimary {
+		t.Fatalf("primary auth ID = %q, want %q", got, wantPrimary)
+	}
+	if got := auths[1].ID; got != wantPrimary+"::proj-a" {
+		t.Fatalf("virtual auth ID = %q, want %q", got, wantPrimary+"::proj-a")
+	}
+	if got := auths[1].Attributes["gemini_virtual_parent"]; got != wantPrimary {
+		t.Fatalf("virtual parent attribute = %q, want %q", got, wantPrimary)
+	}
+	if got, _ := auths[1].Metadata["virtual_parent_id"].(string); got != wantPrimary {
+		t.Fatalf("virtual parent metadata = %q, want %q", got, wantPrimary)
+	}
+}

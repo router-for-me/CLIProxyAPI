@@ -61,8 +61,9 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 	log.Debugf("loaded %d API key clients", totalAPIKeyClients)
 
 	var authFileCount int
+	effectiveAuthDir := w.effectiveAuthDir()
 	if rescanAuth {
-		authFileCount = w.loadFileClients(cfg)
+		authFileCount = w.loadFileClients(effectiveAuthDir)
 		log.Debugf("loaded %d file-based clients", authFileCount)
 	} else {
 		w.clientsMutex.RLock()
@@ -77,7 +78,7 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 		w.lastAuthHashes = make(map[string]string)
 		w.lastAuthContents = make(map[string]*coreauth.Auth)
 		w.fileAuthsByPath = make(map[string]map[string]*coreauth.Auth)
-		if resolvedAuthDir, errResolveAuthDir := util.ResolveAuthDir(cfg.AuthDir); errResolveAuthDir != nil {
+		if resolvedAuthDir, errResolveAuthDir := util.ResolveAuthDir(effectiveAuthDir); errResolveAuthDir != nil {
 			log.Errorf("failed to resolve auth directory for hash cache: %v", errResolveAuthDir)
 		} else if resolvedAuthDir != "" {
 			_ = filepath.Walk(resolvedAuthDir, func(path string, info fs.FileInfo, err error) error {
@@ -101,6 +102,7 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 							IDGenerator: synthesizer.NewStableIDGenerator(),
 						}
 						if generated := synthesizer.SynthesizeAuthFile(ctx, path, data); len(generated) > 0 {
+							w.canonicalizeMirroredSynthesizedAuths(generated)
 							if pathAuths := authSliceToMap(generated); len(pathAuths) > 0 {
 								w.fileAuthsByPath[normalizedPath] = pathAuths
 							}
@@ -204,6 +206,7 @@ func (w *Watcher) addOrUpdateClient(path string) {
 		IDGenerator: synthesizer.NewStableIDGenerator(),
 	}
 	generated := synthesizer.SynthesizeAuthFile(sctx, path, data)
+	w.canonicalizeMirroredSynthesizedAuths(generated)
 	newByID := authSliceToMap(generated)
 	if len(newByID) > 0 {
 		w.fileAuthsByPath[normalized] = newByID
@@ -262,6 +265,70 @@ func (w *Watcher) computePerPathUpdatesLocked(oldByID, newByID map[string]*corea
 	return updates
 }
 
+func (w *Watcher) canonicalizeMirroredSynthesizedAuths(auths []*coreauth.Auth) {
+	if w == nil || len(auths) == 0 || strings.TrimSpace(w.mirroredAuthDir) == "" {
+		return
+	}
+	for _, auth := range auths {
+		if auth == nil {
+			continue
+		}
+		path := ""
+		if auth.Attributes != nil {
+			path = strings.TrimSpace(auth.Attributes["path"])
+		}
+		canonicalBaseID := w.mirroredAuthIDForPath(path)
+		if canonicalBaseID == "" {
+			continue
+		}
+		oldID := strings.TrimSpace(auth.ID)
+		if oldID == "" {
+			continue
+		}
+		baseID := oldID
+		suffix := ""
+		if sep := strings.Index(oldID, "::"); sep >= 0 {
+			baseID = oldID[:sep]
+			suffix = oldID[sep:]
+		}
+		if baseID == canonicalBaseID {
+			continue
+		}
+		auth.ID = canonicalBaseID + suffix
+		if auth.Attributes != nil && strings.TrimSpace(auth.Attributes["gemini_virtual_parent"]) == baseID {
+			auth.Attributes["gemini_virtual_parent"] = canonicalBaseID
+		}
+		if auth.Metadata != nil {
+			if parentID, ok := auth.Metadata["virtual_parent_id"].(string); ok && strings.TrimSpace(parentID) == baseID {
+				auth.Metadata["virtual_parent_id"] = canonicalBaseID
+			}
+		}
+	}
+}
+
+func (w *Watcher) mirroredAuthIDForPath(path string) string {
+	if w == nil {
+		return ""
+	}
+	baseDir := strings.TrimSpace(w.effectiveAuthDir())
+	path = strings.TrimSpace(path)
+	if path == "" || baseDir == "" {
+		return ""
+	}
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(baseDir, path)
+	}
+	cleanPath := filepath.Clean(path)
+	rel, err := filepath.Rel(baseDir, cleanPath)
+	if err != nil {
+		return ""
+	}
+	if strings.HasPrefix(rel, "..") {
+		return ""
+	}
+	return filepath.ToSlash(filepath.Clean(rel))
+}
+
 func authSliceToMap(auths []*coreauth.Auth) map[string]*coreauth.Auth {
 	byID := make(map[string]*coreauth.Auth, len(auths))
 	for _, a := range auths {
@@ -273,11 +340,11 @@ func authSliceToMap(auths []*coreauth.Auth) map[string]*coreauth.Auth {
 	return byID
 }
 
-func (w *Watcher) loadFileClients(cfg *config.Config) int {
+func (w *Watcher) loadFileClients(authDir string) int {
 	authFileCount := 0
 	successfulAuthCount := 0
 
-	authDir, errResolveAuthDir := util.ResolveAuthDir(cfg.AuthDir)
+	authDir, errResolveAuthDir := util.ResolveAuthDir(authDir)
 	if errResolveAuthDir != nil {
 		log.Errorf("failed to resolve auth directory: %v", errResolveAuthDir)
 		return 0
