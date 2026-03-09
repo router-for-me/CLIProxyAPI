@@ -967,3 +967,80 @@ func TestClaudeExecutor_ExecuteStream_GzipErrorBodyNoContentEncodingHeader(t *te
 		t.Errorf("error message should contain decompressed JSON, got: %q", err.Error())
 	}
 }
+
+func TestCheckSystemInstructions_StringSystemPrompt(t *testing.T) {
+	payload := []byte(`{"model":"claude-opus-4-6","messages":[{"role":"user","content":"hi"}],"system":"You are a helpful assistant"}`)
+
+	out := checkSystemInstructions(payload)
+
+	system := gjson.GetBytes(out, "system")
+	if !system.IsArray() {
+		t.Fatal("system should be converted to array")
+	}
+	items := system.Array()
+	if len(items) != 3 {
+		t.Fatalf("system array length = %d, want 3 (billing + agent + user prompt)", len(items))
+	}
+	// system[0]: billing header
+	if !strings.HasPrefix(items[0].Get("text").String(), "x-anthropic-billing-header:") {
+		t.Fatalf("system[0] should be billing header, got: %s", items[0].Get("text").String())
+	}
+	// system[2]: user's original system prompt preserved
+	if items[2].Get("text").String() != "You are a helpful assistant" {
+		t.Fatalf("system[2] should be user prompt, got: %s", items[2].Get("text").String())
+	}
+	if items[2].Get("cache_control.type").String() != "ephemeral" {
+		t.Fatal("system[2] should have cache_control.type=ephemeral")
+	}
+}
+
+func TestCheckSystemInstructions_StringSystemPromptWithSpecialChars(t *testing.T) {
+	payload := []byte(`{"model":"claude-opus-4-6","messages":[{"role":"user","content":"hi"}],"system":"line1\nline2\t\"quoted\""}`)
+
+	out := checkSystemInstructions(payload)
+
+	items := gjson.GetBytes(out, "system").Array()
+	if len(items) != 3 {
+		t.Fatalf("system array length = %d, want 3", len(items))
+	}
+	got := items[2].Get("text").String()
+	if !strings.Contains(got, "line1") || !strings.Contains(got, "line2") {
+		t.Fatalf("system[2] should preserve multiline content, got: %s", got)
+	}
+}
+
+func TestCheckSystemInstructions_EmptyStringSystemPrompt(t *testing.T) {
+	payload := []byte(`{"model":"claude-opus-4-6","messages":[{"role":"user","content":"hi"}],"system":""}`)
+
+	out := checkSystemInstructions(payload)
+
+	items := gjson.GetBytes(out, "system").Array()
+	if len(items) != 2 {
+		t.Fatalf("system array length = %d, want 2 (empty string should not produce a third block)", len(items))
+	}
+}
+
+func TestCheckSystemInstructions_ArraySystemPrompt(t *testing.T) {
+	payload := []byte(`{"model":"claude-opus-4-6","messages":[{"role":"user","content":"hi"}],"system":[{"type":"text","text":"user prompt"}]}`)
+
+	out := checkSystemInstructions(payload)
+
+	items := gjson.GetBytes(out, "system").Array()
+	if len(items) != 3 {
+		t.Fatalf("system array length = %d, want 3", len(items))
+	}
+	if items[2].Get("text").String() != "user prompt" {
+		t.Fatalf("system[2] should be user prompt, got: %s", items[2].Get("text").String())
+	}
+}
+
+func TestCheckSystemInstructions_NoSystemField(t *testing.T) {
+	payload := []byte(`{"model":"claude-opus-4-6","messages":[{"role":"user","content":"hi"}]}`)
+
+	out := checkSystemInstructions(payload)
+
+	items := gjson.GetBytes(out, "system").Array()
+	if len(items) != 2 {
+		t.Fatalf("system array length = %d, want 2 (billing + agent only)", len(items))
+	}
+}
