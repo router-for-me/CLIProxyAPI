@@ -831,8 +831,11 @@ func (r *ModelRegistry) buildAvailableModelsLocked(handlerType string, now time.
 }
 
 func cloneModelMaps(models []map[string]any) []map[string]any {
-	if len(models) == 0 {
+	if models == nil {
 		return nil
+	}
+	if len(models) == 0 {
+		return []map[string]any{}
 	}
 	cloned := make([]map[string]any, 0, len(models))
 	for _, model := range models {
@@ -1319,10 +1322,3 @@ func (r *ModelRegistry) GetModelsForClient(clientID string) []*ModelInfo {
 	}
 	return result
 }
-
-
-
-
-
-
-

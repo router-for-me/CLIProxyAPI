@@ -52,3 +52,23 @@ func TestGetAvailableModelsInvalidatesCacheOnRegistryChanges(t *testing.T) {
 		t.Fatalf("expected model to reappear after resume, got %d", len(models))
 	}
 }
+
+func TestGetAvailableModelsPreservesEmptySliceOnCacheHit(t *testing.T) {
+	r := newTestModelRegistry()
+
+	first := r.GetAvailableModels("openai")
+	if first == nil {
+		t.Fatal("expected empty model list, got nil")
+	}
+	if len(first) != 0 {
+		t.Fatalf("expected empty model list, got %d entries", len(first))
+	}
+
+	second := r.GetAvailableModels("openai")
+	if second == nil {
+		t.Fatal("expected cached empty model list, got nil")
+	}
+	if len(second) != 0 {
+		t.Fatalf("expected cached empty model list, got %d entries", len(second))
+	}
+}
