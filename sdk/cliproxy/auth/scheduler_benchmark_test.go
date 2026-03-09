@@ -176,6 +176,25 @@ func BenchmarkManagerPickNextMixed500(b *testing.B) {
 	}
 }
 
+func BenchmarkManagerPickNextMixedPriority500(b *testing.B) {
+	manager, providers, model := benchmarkManagerSetup(b, 500, true, true)
+	ctx := context.Background()
+	opts := cliproxyexecutor.Options{}
+	tried := map[string]struct{}{}
+	if _, _, _, errWarm := manager.pickNextMixed(ctx, providers, model, opts, tried); errWarm != nil {
+		b.Fatalf("warmup pickNextMixed error = %v", errWarm)
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		auth, exec, provider, errPick := manager.pickNextMixed(ctx, providers, model, opts, tried)
+		if errPick != nil || auth == nil || exec == nil || provider == "" {
+			b.Fatalf("pickNextMixed failed: auth=%v exec=%v provider=%q err=%v", auth, exec, provider, errPick)
+		}
+	}
+}
+
 func BenchmarkManagerPickNextAndMarkResult1000(b *testing.B) {
 	manager, _, model := benchmarkManagerSetup(b, 1000, false, false)
 	ctx := context.Background()
