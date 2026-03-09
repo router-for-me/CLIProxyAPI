@@ -1156,7 +1156,7 @@ func FetchAntigravityModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 	token, updatedAuth, errToken := exec.ensureAccessToken(ctx, auth)
 	if errToken != nil || token == "" {
 		return fallbackAntigravityPrimaryModels()
-	}
+  }
 	if updatedAuth != nil {
 		auth = updatedAuth
 	}
