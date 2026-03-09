@@ -34,6 +34,36 @@ func (schedulerTestExecutor) HttpRequest(ctx context.Context, auth *Auth, req *h
 	return nil, nil
 }
 
+type schedulerStreamTrackingExecutor struct {
+	authIDs []string
+}
+
+func (e *schedulerStreamTrackingExecutor) Identifier() string { return "codex" }
+
+func (e *schedulerStreamTrackingExecutor) Execute(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, nil
+}
+
+func (e *schedulerStreamTrackingExecutor) ExecuteStream(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	e.authIDs = append(e.authIDs, auth.ID)
+	chunks := make(chan cliproxyexecutor.StreamChunk, 1)
+	chunks <- cliproxyexecutor.StreamChunk{Payload: []byte(`{"type":"response.completed"}`)}
+	close(chunks)
+	return &cliproxyexecutor.StreamResult{Chunks: chunks}, nil
+}
+
+func (e *schedulerStreamTrackingExecutor) Refresh(ctx context.Context, auth *Auth) (*Auth, error) {
+	return auth, nil
+}
+
+func (e *schedulerStreamTrackingExecutor) CountTokens(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, nil
+}
+
+func (e *schedulerStreamTrackingExecutor) HttpRequest(ctx context.Context, auth *Auth, req *http.Request) (*http.Response, error) {
+	return nil, nil
+}
+
 type trackingSelector struct {
 	calls      int
 	lastAuthID []string
@@ -458,6 +488,46 @@ func TestManager_PickNextMixed_SkipsProvidersWithoutExecutors(t *testing.T) {
 	}
 	if got.ID != "claude-a" {
 		t.Fatalf("pickNextMixed() auth.ID = %q, want %q", got.ID, "claude-a")
+	}
+}
+
+func TestManager_ExecuteStream_SingleProviderUsesSchedulerFastPath(t *testing.T) {
+	t.Parallel()
+
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	executor := &schedulerStreamTrackingExecutor{}
+	manager.RegisterExecutor(executor)
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: "codex-http", Provider: "codex"}); errRegister != nil {
+		t.Fatalf("Register(codex-http) error = %v", errRegister)
+	}
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: "codex-ws-a", Provider: "codex", Attributes: map[string]string{"websockets": "true"}}); errRegister != nil {
+		t.Fatalf("Register(codex-ws-a) error = %v", errRegister)
+	}
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: "codex-ws-b", Provider: "codex", Attributes: map[string]string{"websockets": "true"}}); errRegister != nil {
+		t.Fatalf("Register(codex-ws-b) error = %v", errRegister)
+	}
+
+	ctx := cliproxyexecutor.WithDownstreamWebsocket(context.Background())
+	want := []string{"codex-ws-a", "codex-ws-b", "codex-ws-a"}
+	for index := range want {
+		streamResult, errStream := manager.ExecuteStream(ctx, []string{"codex"}, cliproxyexecutor.Request{}, cliproxyexecutor.Options{})
+		if errStream != nil {
+			t.Fatalf("ExecuteStream() #%d error = %v", index, errStream)
+		}
+		if streamResult == nil {
+			t.Fatalf("ExecuteStream() #%d result = nil", index)
+		}
+		for range streamResult.Chunks {
+		}
+	}
+
+	if len(executor.authIDs) != len(want) {
+		t.Fatalf("ExecuteStream() selected %d auths, want %d", len(executor.authIDs), len(want))
+	}
+	for index, wantID := range want {
+		if executor.authIDs[index] != wantID {
+			t.Fatalf("ExecuteStream() #%d auth.ID = %q, want %q", index, executor.authIDs[index], wantID)
+		}
 	}
 }
 

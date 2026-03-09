@@ -1147,6 +1147,22 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	}
 }
 
+// SelectExecutionAuth resolves the auth that the Execute* paths would use for the
+// supplied providers and model without invoking any executor.
+func (m *Manager) SelectExecutionAuth(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options) (*Auth, string, error) {
+	if len(providers) == 0 {
+		return nil, "", &Error{Code: "provider_not_found", Message: "no provider supplied"}
+	}
+	routeModel := strings.TrimSpace(model)
+	opts = ensureRequestedModelMetadata(opts, routeModel)
+	auth, _, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, opts, nil)
+	if errPick != nil {
+		return nil, "", errPick
+	}
+	publishSelectedAuthMetadata(opts.Metadata, auth.ID)
+	return auth, provider, nil
+}
+
 func ensureRequestedModelMetadata(opts cliproxyexecutor.Options, requestedModel string) cliproxyexecutor.Options {
 	requestedModel = strings.TrimSpace(requestedModel)
 	if requestedModel == "" {
@@ -2223,7 +2239,33 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 }
 
 func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
-	return m.pickNextMixedLegacy(ctx, providers, model, opts, tried)
+	if !m.useSchedulerFastPath() {
+		return m.pickNextMixedLegacy(ctx, providers, model, opts, tried)
+	}
+
+	normalized := normalizeProviderKeys(providers)
+	if len(normalized) == 0 {
+		return nil, nil, "", &Error{Code: "provider_not_found", Message: "no provider supplied"}
+	}
+
+	executableProviders := make([]string, 0, len(normalized))
+	for _, providerKey := range normalized {
+		if _, okExecutor := m.Executor(providerKey); okExecutor {
+			executableProviders = append(executableProviders, providerKey)
+		}
+	}
+	if len(executableProviders) == 0 {
+		return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
+	}
+	if len(executableProviders) == 1 {
+		providerKey := executableProviders[0]
+		auth, executor, errPick := m.pickNext(ctx, providerKey, model, opts, tried)
+		if errPick != nil {
+			return nil, nil, "", errPick
+		}
+		return auth, executor, providerKey, nil
+	}
+	return m.pickNextMixedLegacy(ctx, executableProviders, model, opts, tried)
 }
 
 func (m *Manager) persist(ctx context.Context, auth *Auth) error {
