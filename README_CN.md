@@ -62,7 +62,9 @@ CLIProxyAPI 用户手册： [https://help.router-for.me/](https://help.router-fo
 
 ## Homebrew 安装
 
-可以直接通过本仓库使用 Homebrew 安装：
+可以直接通过本仓库使用 Homebrew 安装。
+
+由于当前仓库名不是 `homebrew-cliproxyapi`，所以这里需要使用指向本仓库 URL 的自定义 tap 命令：
 
 ```bash
 brew tap router-for-me/cliproxyapi https://github.com/router-for-me/CLIProxyAPI
