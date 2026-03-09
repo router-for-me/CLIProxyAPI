@@ -1485,25 +1485,27 @@ func countCacheControlsMap(root map[string]any) int {
 	return count
 }
 
-func normalizeTTLForBlock(obj map[string]any, seen5m *bool) {
+func normalizeTTLForBlock(obj map[string]any, seen5m *bool) bool {
 	ccRaw, exists := obj["cache_control"]
 	if !exists {
-		return
+		return false
 	}
 	cc, ok := asObject(ccRaw)
 	if !ok {
 		*seen5m = true
-		return
+		return false
 	}
 	ttlRaw, ttlExists := cc["ttl"]
 	ttl, ttlIsString := ttlRaw.(string)
 	if !ttlExists || !ttlIsString || ttl != "1h" {
 		*seen5m = true
-		return
+		return false
 	}
 	if *seen5m {
 		delete(cc, "ttl")
+		return true
 	}
+	return false
 }
 
 func findLastCacheControlIndex(arr []any) int {
@@ -1599,11 +1601,14 @@ func normalizeCacheControlTTL(payload []byte) []byte {
 	}
 
 	seen5m := false
+	modified := false
 
 	if tools, ok := asArray(root["tools"]); ok {
 		for _, tool := range tools {
 			if obj, ok := asObject(tool); ok {
-				normalizeTTLForBlock(obj, &seen5m)
+				if normalizeTTLForBlock(obj, &seen5m) {
+					modified = true
+				}
 			}
 		}
 	}
@@ -1611,7 +1616,9 @@ func normalizeCacheControlTTL(payload []byte) []byte {
 	if system, ok := asArray(root["system"]); ok {
 		for _, item := range system {
 			if obj, ok := asObject(item); ok {
-				normalizeTTLForBlock(obj, &seen5m)
+				if normalizeTTLForBlock(obj, &seen5m) {
+					modified = true
+				}
 			}
 		}
 	}
@@ -1628,12 +1635,17 @@ func normalizeCacheControlTTL(payload []byte) []byte {
 			}
 			for _, item := range content {
 				if obj, ok := asObject(item); ok {
-					normalizeTTLForBlock(obj, &seen5m)
+					if normalizeTTLForBlock(obj, &seen5m) {
+						modified = true
+					}
 				}
 			}
 		}
 	}
 
+	if !modified {
+		return payload
+	}
 	return marshalPayloadObject(payload, root)
 }
 
