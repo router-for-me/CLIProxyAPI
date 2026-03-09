@@ -250,17 +250,41 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 		return nil, "", shard.unavailableErrorLocked("mixed", model, predicate)
 	}
 
+	predicate := triedPredicate(tried)
+	candidateShards := make([]*modelScheduler, len(normalized))
+	bestPriority := 0
+	hasCandidate := false
+	now := time.Now()
+	for providerIndex, providerKey := range normalized {
+		providerState := s.providers[providerKey]
+		if providerState == nil {
+			continue
+		}
+		shard := providerState.ensureModelLocked(modelKey, now)
+		candidateShards[providerIndex] = shard
+		if shard == nil {
+			continue
+		}
+		priorityReady, okPriority := shard.highestReadyPriorityLocked(false, predicate)
+		if !okPriority {
+			continue
+		}
+		if !hasCandidate || priorityReady > bestPriority {
+			bestPriority = priorityReady
+			hasCandidate = true
+		}
+	}
+	if !hasCandidate {
+		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, tried)
+	}
+
 	if s.strategy == schedulerStrategyFillFirst {
-		for _, providerKey := range normalized {
-			providerState := s.providers[providerKey]
-			if providerState == nil {
-				continue
-			}
-			shard := providerState.ensureModelLocked(modelKey, time.Now())
+		for providerIndex, providerKey := range normalized {
+			shard := candidateShards[providerIndex]
 			if shard == nil {
 				continue
 			}
-			picked := shard.pickReadyLocked(false, s.strategy, triedPredicate(tried))
+			picked := shard.pickReadyAtPriorityLocked(false, bestPriority, s.strategy, predicate)
 			if picked != nil {
 				return picked, providerKey, nil
 			}
@@ -276,15 +300,11 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 	for offset := 0; offset < len(normalized); offset++ {
 		providerIndex := (start + offset) % len(normalized)
 		providerKey := normalized[providerIndex]
-		providerState := s.providers[providerKey]
-		if providerState == nil {
-			continue
-		}
-		shard := providerState.ensureModelLocked(modelKey, time.Now())
+		shard := candidateShards[providerIndex]
 		if shard == nil {
 			continue
 		}
-		picked := shard.pickReadyLocked(false, schedulerStrategyRoundRobin, triedPredicate(tried))
+		picked := shard.pickReadyAtPriorityLocked(false, bestPriority, schedulerStrategyRoundRobin, predicate)
 		if picked == nil {
 			continue
 		}
@@ -629,6 +649,19 @@ func (m *modelScheduler) pickReadyLocked(preferWebsocket bool, strategy schedule
 		return nil
 	}
 	m.promoteExpiredLocked(time.Now())
+	priorityReady, okPriority := m.highestReadyPriorityLocked(preferWebsocket, predicate)
+	if !okPriority {
+		return nil
+	}
+	return m.pickReadyAtPriorityLocked(preferWebsocket, priorityReady, strategy, predicate)
+}
+
+// highestReadyPriorityLocked returns the highest priority bucket that still has a matching ready auth.
+// The caller must ensure expired entries are already promoted when needed.
+func (m *modelScheduler) highestReadyPriorityLocked(preferWebsocket bool, predicate func(*scheduledAuth) bool) (int, bool) {
+	if m == nil {
+		return 0, false
+	}
 	for _, priority := range m.priorityOrder {
 		bucket := m.readyByPriority[priority]
 		if bucket == nil {
@@ -638,17 +671,37 @@ func (m *modelScheduler) pickReadyLocked(preferWebsocket bool, strategy schedule
 		if preferWebsocket && len(bucket.ws.flat) > 0 {
 			view = &bucket.ws
 		}
-		var picked *scheduledAuth
-		if strategy == schedulerStrategyFillFirst {
-			picked = view.pickFirst(predicate)
-		} else {
-			picked = view.pickRoundRobin(predicate)
-		}
-		if picked != nil && picked.auth != nil {
-			return picked.auth
+		if view.pickFirst(predicate) != nil {
+			return priority, true
 		}
 	}
-	return nil
+	return 0, false
+}
+
+// pickReadyAtPriorityLocked selects the next ready auth from a specific priority bucket.
+// The caller must ensure expired entries are already promoted when needed.
+func (m *modelScheduler) pickReadyAtPriorityLocked(preferWebsocket bool, priority int, strategy schedulerStrategy, predicate func(*scheduledAuth) bool) *Auth {
+	if m == nil {
+		return nil
+	}
+	bucket := m.readyByPriority[priority]
+	if bucket == nil {
+		return nil
+	}
+	view := &bucket.all
+	if preferWebsocket && len(bucket.ws.flat) > 0 {
+		view = &bucket.ws
+	}
+	var picked *scheduledAuth
+	if strategy == schedulerStrategyFillFirst {
+		picked = view.pickFirst(predicate)
+	} else {
+		picked = view.pickRoundRobin(predicate)
+	}
+	if picked == nil || picked.auth == nil {
+		return nil
+	}
+	return picked.auth
 }
 
 // unavailableErrorLocked returns the correct unavailable or cooldown error for the shard.
