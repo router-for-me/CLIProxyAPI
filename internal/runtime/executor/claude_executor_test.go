@@ -1004,8 +1004,9 @@ func TestCheckSystemInstructions_StringSystemPromptWithSpecialChars(t *testing.T
 		t.Fatalf("system array length = %d, want 3", len(items))
 	}
 	got := items[2].Get("text").String()
-	if !strings.Contains(got, "line1") || !strings.Contains(got, "line2") {
-		t.Fatalf("system[2] should preserve multiline content, got: %s", got)
+	const want = "line1\nline2\t\"quoted\""
+	if got != want {
+		t.Fatalf("system[2] text = %q, want %q", got, want)
 	}
 }
 

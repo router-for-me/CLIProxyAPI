@@ -1269,12 +1269,8 @@ func checkSystemInstructionsWithMode(payload []byte, strictMode bool) []byte {
 	} else if system.Type == gjson.String && system.String() != "" {
 		// Handle string-format system prompt: "system": "text"
 		// Convert to array element with cache_control.
-		escaped := strings.ReplaceAll(system.String(), `\`, `\\`)
-		escaped = strings.ReplaceAll(escaped, `"`, `\"`)
-		escaped = strings.ReplaceAll(escaped, "\n", `\n`)
-		escaped = strings.ReplaceAll(escaped, "\r", `\r`)
-		escaped = strings.ReplaceAll(escaped, "\t", `\t`)
-		result += `,{"type":"text","text":"` + escaped + `","cache_control":{"type":"ephemeral"}}`
+		escapedBytes, _ := json.Marshal(system.String())
+		result += `,{"type":"text","text":` + string(escapedBytes) + `,"cache_control":{"type":"ephemeral"}}`
 	}
 	result += "]"
 
