@@ -213,6 +213,26 @@ func (m *Manager) syncScheduler() {
 	m.syncSchedulerFromSnapshot(m.snapshotAuths())
 }
 
+// RefreshSchedulerEntry re-upserts a single auth into the scheduler so that its
+// supportedModelSet is rebuilt from the current global model registry state.
+// This must be called after models have been registered for a newly added auth,
+// because the initial scheduler.upsertAuth during Register/Update runs before
+// registerModelsForAuth and therefore snapshots an empty model set.
+func (m *Manager) RefreshSchedulerEntry(authID string) {
+	if m == nil || m.scheduler == nil || authID == "" {
+		return
+	}
+	m.mu.RLock()
+	auth, ok := m.auths[authID]
+	if !ok || auth == nil {
+		m.mu.RUnlock()
+		return
+	}
+	snapshot := auth.Clone()
+	m.mu.RUnlock()
+	m.scheduler.upsertAuth(snapshot)
+}
+
 func (m *Manager) SetSelector(selector Selector) {
 	if m == nil {
 		return
@@ -2057,6 +2077,10 @@ func shouldRetrySchedulerPick(err error) bool {
 	if err == nil {
 		return false
 	}
+	var cooldownErr *modelCooldownError
+	if errors.As(err, &cooldownErr) {
+		return true
+	}
 	var authErr *Error
 	if !errors.As(err, &authErr) || authErr == nil {
 		return false
@@ -2243,29 +2267,59 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 		return m.pickNextMixedLegacy(ctx, providers, model, opts, tried)
 	}
 
-	normalized := normalizeProviderKeys(providers)
-	if len(normalized) == 0 {
-		return nil, nil, "", &Error{Code: "provider_not_found", Message: "no provider supplied"}
-	}
-
-	executableProviders := make([]string, 0, len(normalized))
-	for _, providerKey := range normalized {
-		if _, okExecutor := m.Executor(providerKey); okExecutor {
-			executableProviders = append(executableProviders, providerKey)
+	eligibleProviders := make([]string, 0, len(providers))
+	seenProviders := make(map[string]struct{}, len(providers))
+	for _, provider := range providers {
+		providerKey := strings.TrimSpace(strings.ToLower(provider))
+		if providerKey == "" {
+			continue
 		}
+		if _, seen := seenProviders[providerKey]; seen {
+			continue
+		}
+		if _, okExecutor := m.Executor(providerKey); !okExecutor {
+			continue
+		}
+		seenProviders[providerKey] = struct{}{}
+		eligibleProviders = append(eligibleProviders, providerKey)
 	}
-	if len(executableProviders) == 0 {
+	if len(eligibleProviders) == 0 {
 		return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
-	if len(executableProviders) == 1 {
-		providerKey := executableProviders[0]
+	if len(eligibleProviders) == 1 {
+		providerKey := eligibleProviders[0]
 		auth, executor, errPick := m.pickNext(ctx, providerKey, model, opts, tried)
 		if errPick != nil {
 			return nil, nil, "", errPick
 		}
 		return auth, executor, providerKey, nil
 	}
-	return m.pickNextMixedLegacy(ctx, executableProviders, model, opts, tried)
+
+	selected, providerKey, errPick := m.scheduler.pickMixed(ctx, eligibleProviders, model, opts, tried)
+	if errPick != nil && model != "" && shouldRetrySchedulerPick(errPick) {
+		m.syncScheduler()
+		selected, providerKey, errPick = m.scheduler.pickMixed(ctx, eligibleProviders, model, opts, tried)
+	}
+	if errPick != nil {
+		return nil, nil, "", errPick
+	}
+	if selected == nil {
+		return nil, nil, "", &Error{Code: "auth_not_found", Message: "selector returned no auth"}
+	}
+	executor, okExecutor := m.Executor(providerKey)
+	if !okExecutor {
+		return nil, nil, "", &Error{Code: "executor_not_found", Message: "executor not registered"}
+	}
+	authCopy := selected.Clone()
+	if !selected.indexAssigned {
+		m.mu.Lock()
+		if current := m.auths[authCopy.ID]; current != nil && !current.indexAssigned {
+			current.EnsureIndex()
+			authCopy = current.Clone()
+		}
+		m.mu.Unlock()
+	}
+	return authCopy, executor, providerKey, nil
 }
 
 func (m *Manager) persist(ctx context.Context, auth *Auth) error {

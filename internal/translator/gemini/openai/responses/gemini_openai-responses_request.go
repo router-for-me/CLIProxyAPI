@@ -26,7 +26,7 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 	if instructions := root.Get("instructions"); instructions.Exists() {
 		systemInstr := `{"parts":[{"text":""}]}`
 		systemInstr, _ = sjson.Set(systemInstr, "parts.0.text", instructions.String())
-		out, _ = sjson.SetRaw(out, "system_instruction", systemInstr)
+		out, _ = sjson.SetRaw(out, "systemInstruction", systemInstr)
 	}
 
 	// Convert input messages to Gemini contents format
@@ -119,7 +119,7 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 				if strings.EqualFold(itemRole, "system") {
 					if contentArray := item.Get("content"); contentArray.Exists() {
 						systemInstr := ""
-						if systemInstructionResult := gjson.Get(out, "system_instruction"); systemInstructionResult.Exists() {
+						if systemInstructionResult := gjson.Get(out, "systemInstruction"); systemInstructionResult.Exists() {
 							systemInstr = systemInstructionResult.Raw
 						} else {
 							systemInstr = `{"parts":[]}`
@@ -140,7 +140,7 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 						}
 
 						if systemInstr != `{"parts":[]}` {
-							out, _ = sjson.SetRaw(out, "system_instruction", systemInstr)
+							out, _ = sjson.SetRaw(out, "systemInstruction", systemInstr)
 						}
 					}
 					continue

@@ -1268,6 +1268,10 @@ func checkSystemInstructionsWithMode(payload []byte, strictMode bool) []byte {
 			}
 			return true
 		})
+	} else if system.Type == gjson.String && system.String() != "" {
+		partJSON := `{"type":"text","cache_control":{"type":"ephemeral"}}`
+		partJSON, _ = sjson.Set(partJSON, "text", system.String())
+		result += "," + partJSON
 	}
 	result += "]"
 
