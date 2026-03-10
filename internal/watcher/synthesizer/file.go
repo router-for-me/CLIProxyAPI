@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/geminicli"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
@@ -135,6 +136,11 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 		Metadata:  metadata,
 		CreatedAt: now,
 		UpdatedAt: now,
+	}
+	if provider == "codex" {
+		if plan, _ := registry.EnsureCodexPlanTypeMetadata(metadata); plan != "" {
+			a.Attributes["plan_type"] = plan
+		}
 	}
 	// Read priority from auth file.
 	if rawPriority, ok := metadata["priority"]; ok {

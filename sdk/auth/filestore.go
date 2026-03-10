@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
@@ -197,6 +198,16 @@ func (s *FileTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth,
 	if provider == "" {
 		provider = "unknown"
 	}
+	if provider == "codex" {
+		if _, changed := registry.EnsureCodexPlanTypeMetadata(metadata); changed {
+			if raw, errMarshal := json.Marshal(metadata); errMarshal == nil {
+				if file, errOpen := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0o600); errOpen == nil {
+					_, _ = file.Write(raw)
+					_ = file.Close()
+				}
+			}
+		}
+	}
 	if provider == "antigravity" || provider == "gemini" {
 		projectID := ""
 		if pid, ok := metadata["project_id"].(string); ok {
@@ -253,6 +264,11 @@ func (s *FileTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth,
 	}
 	if email, ok := metadata["email"].(string); ok && email != "" {
 		auth.Attributes["email"] = email
+	}
+	if provider == "codex" {
+		if plan := registry.ResolveCodexPlanType(auth.Attributes, metadata); plan != "" {
+			auth.Attributes["plan_type"] = plan
+		}
 	}
 	return auth, nil
 }

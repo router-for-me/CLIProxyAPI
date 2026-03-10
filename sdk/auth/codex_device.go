@@ -275,6 +275,9 @@ func (a *CodexAuthenticator) buildAuthRecord(authSvc *codex.CodexAuth, authBundl
 	metadata := map[string]any{
 		"email": tokenStorage.Email,
 	}
+	if planType != "" {
+		metadata["plan_type"] = planType
+	}
 
 	fmt.Println("Codex authentication successful")
 	if authBundle.APIKey != "" {

@@ -454,6 +454,19 @@ func (s *Service) rebindExecutors() {
 	}
 }
 
+func (s *Service) rebindCodexModels() {
+	if s == nil || s.coreManager == nil {
+		return
+	}
+	for _, auth := range s.coreManager.List() {
+		if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+			continue
+		}
+		s.registerModelsForAuth(auth)
+		s.coreManager.RefreshSchedulerEntry(auth.ID)
+	}
+}
+
 // Run starts the service and blocks until the context is cancelled or the server stops.
 // It initializes all components including authentication, file watching, HTTP server,
 // and starts processing requests. The method blocks until the context is cancelled.
@@ -633,6 +646,11 @@ func (s *Service) Run(ctx context.Context) error {
 		return fmt.Errorf("cliproxy: failed to start watcher: %w", err)
 	}
 	log.Info("file watcher started for config and auth directory changes")
+	if s.cfg != nil {
+		registry.StartCodexModelsUpdater(ctx, &s.cfg.SDKConfig, func() {
+			s.rebindCodexModels()
+		})
+	}
 
 	// Prefer core auth manager auto refresh if available.
 	if s.coreManager != nil {
@@ -829,13 +847,26 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		}
 		models = applyExcludedModels(models, excluded)
 	case "codex":
-		models = registry.GetOpenAIModels()
 		if entry := s.resolveConfigCodexKey(a); entry != nil {
 			if len(entry.Models) > 0 {
 				models = buildCodexConfigModels(entry)
+			} else {
+				models = registry.GetCodexModelsUnion()
 			}
 			if authKind == "apikey" {
 				excluded = entry.ExcludedModels
+			}
+		} else {
+			codexPlanType := registry.ResolveCodexPlanType(a.Attributes, a.Metadata)
+			if a.Attributes == nil {
+				a.Attributes = make(map[string]string)
+			}
+			if codexPlanType != "" {
+				a.Attributes["plan_type"] = codexPlanType
+				models = registry.GetCodexModelsForPlan(codexPlanType)
+			} else {
+				delete(a.Attributes, "plan_type")
+				models = registry.GetCodexModelsUnion()
 			}
 		}
 		models = applyExcludedModels(models, excluded)
