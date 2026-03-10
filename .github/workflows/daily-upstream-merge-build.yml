@@ -1,0 +1,75 @@
+name: daily-upstream-merge-build
+
+on:
+  schedule:
+    # GitHub Actions cron uses UTC. 23:00 Asia/Shanghai = 15:00 UTC.
+    - cron: "0 15 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: daily-upstream-merge-build
+  cancel-in-progress: false
+
+jobs:
+  sync_merge_build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream remote & fetch
+        run: |
+          git remote add upstream https://github.com/router-for-me/CLIProxyAPI.git || true
+          git fetch --prune upstream main --tags
+
+      - name: Merge upstream/main into main
+        run: |
+          git checkout main
+          git pull --ff-only origin main
+          git merge --no-edit upstream/main
+
+      - name: Push merged main
+        run: git push origin main
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build Windows exe (amd64)
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          VERSION=$(git describe --tags --always --dirty)
+          COMMIT=$(git rev-parse --short HEAD)
+          BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 \
+            go build -trimpath \
+              -ldflags "-s -w -X 'main.Version=${VERSION}' -X 'main.Commit=${COMMIT}' -X 'main.BuildDate=${BUILD_DATE}'" \
+              -o dist/cli-proxy-api_windows_amd64.exe ./cmd/server
+
+          # pack a zip like releases (exe + docs + example config)
+          (cd dist && zip -9 -q cli-proxy-api_windows_amd64.zip \
+            cli-proxy-api_windows_amd64.exe \
+            ../LICENSE ../README.md ../README_CN.md ../config.example.yaml)
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-proxy-api_windows_amd64
+          path: |
+            dist/cli-proxy-api_windows_amd64.exe
+            dist/cli-proxy-api_windows_amd64.zip
+          if-no-files-found: error
