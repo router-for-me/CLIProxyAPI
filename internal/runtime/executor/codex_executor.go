@@ -582,14 +582,15 @@ func (e *CodexExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*
 	}
 	svc := codexauth.NewCodexAuth(e.cfg)
 	td, err := svc.RefreshTokensWithRetry(ctx, refreshToken, 3)
-	if err != nil {
-		if codexauth.IsNonRetryableRefreshErr(err) {
-			log.Warnf("codex executor: marking %s as failed due to non-retryable error: %v", auth.ID, err)
-			if auth.Metadata == nil {
-				auth.Metadata = make(map[string]any)
-			}
-			auth.Metadata["refresh_status"] = "failed"
-			auth.Metadata["refresh_msg"] = err.Error()
+		if err != nil {
+			if codexauth.IsNonRetryableRefreshErr(err) {
+				log.Warnf("codex executor: marking %s as failed due to non-retryable error: %v", auth.ID, err)
+				if auth.Metadata == nil {
+					auth.Metadata = make(map[string]any)
+				}
+				auth.Metadata["refresh_status"] = "failed"
+				auth.Metadata["refresh_message"] = err.Error()
+				delete(auth.Metadata, "refresh_msg")
 
 			// Persist the failure state to the auth file
 			if path := auth.Attributes["path"]; path != "" {

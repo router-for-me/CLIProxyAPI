@@ -419,8 +419,8 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 		if v, ok := auth.Metadata["refresh_status"].(string); ok && v != "" {
 			entry["refresh_status"] = v
 		}
-		if v, ok := auth.Metadata["refresh_msg"].(string); ok && v != "" {
-			entry["refresh_msg"] = v
+		if v, ok := auth.Metadata["refresh_message"].(string); ok && v != "" {
+			entry["refresh_message"] = v
 		}
 	}
 	return entry

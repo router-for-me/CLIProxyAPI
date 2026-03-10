@@ -34,8 +34,8 @@ type CodexTokenStorage struct {
 	Expire string `json:"expired"`
 	// RefreshStatus indicates the status of the last token refresh attempt.
 	RefreshStatus string `json:"refresh_status,omitempty"`
-	// RefreshMsg provides details about the last token refresh failure.
-	RefreshMsg string `json:"refresh_msg,omitempty"`
+	// RefreshMessage provides details about the last token refresh failure.
+	RefreshMessage string `json:"refresh_message,omitempty"`
 
 	// Metadata holds arbitrary key-value pairs injected via hooks.
 	// It is not exported to JSON directly to allow flattening during serialization.
