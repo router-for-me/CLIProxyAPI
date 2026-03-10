@@ -6,6 +6,7 @@ package usage
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -221,6 +222,77 @@ func (s *RequestStatistics) updateAPIStats(stats *apiStats, model string, detail
 	modelStatsValue.TotalRequests++
 	modelStatsValue.TotalTokens += detail.Tokens.TotalTokens
 	modelStatsValue.Details = append(modelStatsValue.Details, detail)
+}
+
+type detailRef struct {
+	apiKey   string
+	modelKey string
+	index    int
+	ts       time.Time
+}
+
+// TrimDetails keeps only the most recent maxTotal request details globally
+// across all APIs and models. Aggregated counters are not affected.
+func (s *RequestStatistics) TrimDetails(maxTotal int) {
+	if s == nil || maxTotal <= 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var total int
+	for _, api := range s.apis {
+		for _, model := range api.Models {
+			total += len(model.Details)
+		}
+	}
+	if total <= maxTotal {
+		return
+	}
+
+	refs := make([]detailRef, 0, total)
+	for apiKey, api := range s.apis {
+		for modelKey, model := range api.Models {
+			for i, d := range model.Details {
+				refs = append(refs, detailRef{
+					apiKey:   apiKey,
+					modelKey: modelKey,
+					index:    i,
+					ts:       d.Timestamp,
+				})
+			}
+		}
+	}
+
+	sort.Slice(refs, func(i, j int) bool {
+		return refs[i].ts.Before(refs[j].ts)
+	})
+
+	removeCount := total - maxTotal
+	toRemove := make(map[string]map[string]map[int]bool)
+	for i := 0; i < removeCount; i++ {
+		r := refs[i]
+		if toRemove[r.apiKey] == nil {
+			toRemove[r.apiKey] = make(map[string]map[int]bool)
+		}
+		if toRemove[r.apiKey][r.modelKey] == nil {
+			toRemove[r.apiKey][r.modelKey] = make(map[int]bool)
+		}
+		toRemove[r.apiKey][r.modelKey][r.index] = true
+	}
+
+	for apiKey, models := range toRemove {
+		for modelKey, indices := range models {
+			model := s.apis[apiKey].Models[modelKey]
+			kept := make([]RequestDetail, 0, len(model.Details)-len(indices))
+			for i, d := range model.Details {
+				if !indices[i] {
+					kept = append(kept, d)
+				}
+			}
+			model.Details = kept
+		}
+	}
 }
 
 // Snapshot returns a copy of the aggregated metrics for external consumption.
