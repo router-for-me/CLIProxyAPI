@@ -24,6 +24,23 @@ func TestEnsureCodexPlanTypeMetadataExtractsFromJWT(t *testing.T) {
 	}
 }
 
+func TestEnsureCodexPlanTypeMetadataNormalizesAliases(t *testing.T) {
+	metadata := map[string]any{
+		"type":      "codex",
+		"plan_type": "business",
+	}
+	plan, changed := EnsureCodexPlanTypeMetadata(metadata)
+	if !changed {
+		t.Fatal("expected alias plan_type to be normalized")
+	}
+	if plan != "team" {
+		t.Fatalf("expected normalized team plan, got %q", plan)
+	}
+	if got, _ := metadata["plan_type"].(string); got != "team" {
+		t.Fatalf("expected metadata plan_type team, got %#v", metadata["plan_type"])
+	}
+}
+
 func TestGetCodexModelsForPlanUsesSafeFallback(t *testing.T) {
 	models := GetCodexModelsForPlan("unknown")
 	if len(models) == 0 {

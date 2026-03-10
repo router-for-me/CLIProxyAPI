@@ -16,6 +16,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/browser"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
@@ -262,7 +263,7 @@ func (a *CodexAuthenticator) buildAuthRecord(authSvc *codex.CodexAuth, authBundl
 	hashAccountID := ""
 	if tokenStorage.IDToken != "" {
 		if claims, errParse := codex.ParseJWTToken(tokenStorage.IDToken); errParse == nil && claims != nil {
-			planType = strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType)
+			planType = registry.NormalizeCodexPlanType(claims.CodexAuthInfo.ChatgptPlanType)
 			accountID := strings.TrimSpace(claims.CodexAuthInfo.ChatgptAccountID)
 			if accountID != "" {
 				digest := sha256.Sum256([]byte(accountID))
@@ -290,5 +291,8 @@ func (a *CodexAuthenticator) buildAuthRecord(authSvc *codex.CodexAuth, authBundl
 		FileName: fileName,
 		Storage:  tokenStorage,
 		Metadata: metadata,
+		Attributes: map[string]string{
+			"plan_type": planType,
+		},
 	}, nil
 }

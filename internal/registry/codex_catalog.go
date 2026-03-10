@@ -1,84 +1,11 @@
 package registry
 
 import (
-	"context"
-	_ "embed"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net"
-	"net/http"
-	"net/url"
 	"strings"
-	"sync"
-	"time"
-
-	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
-	log "github.com/sirupsen/logrus"
-	"golang.org/x/net/proxy"
 )
-
-const codexModelsFetchTimeout = 15 * time.Second
-
-var codexModelsURLs = []string{
-	"https://raw.githubusercontent.com/router-for-me/models/refs/heads/main/models.json",
-	"https://models.router-for.me/models.json",
-}
-
-//go:embed models/codex_models.json
-var embeddedCodexModelsJSON []byte
-
-type codexModelsJSON struct {
-	CodexFree []*ModelInfo `json:"codex-free"`
-	CodexTeam []*ModelInfo `json:"codex-team"`
-	CodexPlus []*ModelInfo `json:"codex-plus"`
-	CodexPro  []*ModelInfo `json:"codex-pro"`
-}
-
-type codexCatalogStore struct {
-	mu   sync.RWMutex
-	data *codexModelsJSON
-}
-
-var globalCodexCatalog = &codexCatalogStore{}
-var codexUpdaterOnce sync.Once
-
-func init() {
-	if err := loadCodexModelsCatalogFromBytes(embeddedCodexModelsJSON, "embed"); err != nil {
-		panic(fmt.Sprintf("registry: failed to parse embedded codex catalog: %v", err))
-	}
-}
-
-func StartCodexModelsUpdater(ctx context.Context, cfg *sdkconfig.SDKConfig, onUpdated func()) {
-	codexUpdaterOnce.Do(func() {
-		go func() {
-			if err := refreshCodexModelsCatalog(ctx, cfg); err != nil {
-				log.Warnf("codex models refresh failed, using embedded catalog: %v", err)
-				return
-			}
-			if onUpdated != nil {
-				onUpdated()
-			}
-		}()
-	})
-}
-
-func GetCodexFreeModels() []*ModelInfo {
-	return cloneCodexModelInfos(getCodexCatalog().CodexFree)
-}
-
-func GetCodexTeamModels() []*ModelInfo {
-	return cloneCodexModelInfos(getCodexCatalog().CodexTeam)
-}
-
-func GetCodexPlusModels() []*ModelInfo {
-	return cloneCodexModelInfos(getCodexCatalog().CodexPlus)
-}
-
-func GetCodexProModels() []*ModelInfo {
-	return cloneCodexModelInfos(getCodexCatalog().CodexPro)
-}
 
 func GetCodexModelsForPlan(planType string) []*ModelInfo {
 	switch NormalizeCodexPlanType(planType) {
@@ -96,8 +23,13 @@ func GetCodexModelsForPlan(planType string) []*ModelInfo {
 }
 
 func GetCodexModelsUnion() []*ModelInfo {
-	catalog := getCodexCatalog()
-	sections := [][]*ModelInfo{catalog.CodexFree, catalog.CodexTeam, catalog.CodexPlus, catalog.CodexPro}
+	data := getModels()
+	sections := [][]*ModelInfo{
+		data.CodexFree,
+		data.CodexTeam,
+		data.CodexPlus,
+		data.CodexPro,
+	}
 	seen := make(map[string]struct{})
 	out := make([]*ModelInfo, 0)
 	for _, models := range sections {
@@ -149,7 +81,8 @@ func EnsureCodexPlanTypeMetadata(metadata map[string]any) (string, bool) {
 	for _, key := range []string{"plan_type", "chatgpt_plan_type"} {
 		if raw, ok := metadata[key].(string); ok {
 			if plan := NormalizeCodexPlanType(raw); plan != "" {
-				if current, _ := metadata["plan_type"].(string); NormalizeCodexPlanType(current) != plan {
+				current, _ := metadata["plan_type"].(string)
+				if strings.TrimSpace(current) != plan {
 					metadata["plan_type"] = plan
 					return plan, true
 				}
@@ -176,116 +109,6 @@ func EnsureCodexPlanTypeMetadata(metadata map[string]any) (string, bool) {
 	}
 	metadata["plan_type"] = plan
 	return plan, true
-}
-
-func getCodexCatalog() *codexModelsJSON {
-	globalCodexCatalog.mu.RLock()
-	data := globalCodexCatalog.data
-	globalCodexCatalog.mu.RUnlock()
-	if data != nil {
-		return data
-	}
-	return &codexModelsJSON{}
-}
-
-func refreshCodexModelsCatalog(ctx context.Context, cfg *sdkconfig.SDKConfig) error {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if cfg == nil {
-		cfg = &sdkconfig.SDKConfig{}
-	}
-	client := newCodexCatalogHTTPClient(cfg)
-	var errs []string
-	for _, rawURL := range codexModelsURLs {
-		url := strings.TrimSpace(rawURL)
-		if url == "" {
-			continue
-		}
-		requestCtx, cancel := context.WithTimeout(ctx, codexModelsFetchTimeout)
-		req, err := http.NewRequestWithContext(requestCtx, http.MethodGet, url, nil)
-		if err != nil {
-			cancel()
-			errs = append(errs, fmt.Sprintf("%s: create request: %v", url, err))
-			continue
-		}
-		resp, err := client.Do(req)
-		if err != nil {
-			cancel()
-			errs = append(errs, fmt.Sprintf("%s: %v", url, err))
-			continue
-		}
-		body, readErr := io.ReadAll(resp.Body)
-		_ = resp.Body.Close()
-		cancel()
-		if readErr != nil {
-			errs = append(errs, fmt.Sprintf("%s: read body: %v", url, readErr))
-			continue
-		}
-		if resp.StatusCode != http.StatusOK {
-			errs = append(errs, fmt.Sprintf("%s: status %d", url, resp.StatusCode))
-			continue
-		}
-		if err := loadCodexModelsCatalogFromBytes(body, url); err != nil {
-			errs = append(errs, err.Error())
-			continue
-		}
-		log.Infof("codex models catalog refreshed from %s", url)
-		return nil
-	}
-	if len(errs) == 0 {
-		return fmt.Errorf("no codex catalog source URLs configured")
-	}
-	return fmt.Errorf("%s", strings.Join(errs, "; "))
-}
-
-func loadCodexModelsCatalogFromBytes(data []byte, source string) error {
-	var parsed codexModelsJSON
-	if err := json.Unmarshal(data, &parsed); err != nil {
-		return fmt.Errorf("%s: decode codex catalog: %w", source, err)
-	}
-	if err := validateCodexModelsCatalog(&parsed); err != nil {
-		return fmt.Errorf("%s: validate codex catalog: %w", source, err)
-	}
-	globalCodexCatalog.mu.Lock()
-	globalCodexCatalog.data = &parsed
-	globalCodexCatalog.mu.Unlock()
-	return nil
-}
-
-func validateCodexModelsCatalog(data *codexModelsJSON) error {
-	if data == nil {
-		return fmt.Errorf("catalog is nil")
-	}
-	sections := []struct {
-		name   string
-		models []*ModelInfo
-	}{
-		{name: "codex-free", models: data.CodexFree},
-		{name: "codex-team", models: data.CodexTeam},
-		{name: "codex-plus", models: data.CodexPlus},
-		{name: "codex-pro", models: data.CodexPro},
-	}
-	for _, section := range sections {
-		if len(section.models) == 0 {
-			return fmt.Errorf("%s section is empty", section.name)
-		}
-		seen := make(map[string]struct{}, len(section.models))
-		for i, model := range section.models {
-			if model == nil {
-				return fmt.Errorf("%s[%d] is null", section.name, i)
-			}
-			id := strings.TrimSpace(model.ID)
-			if id == "" {
-				return fmt.Errorf("%s[%d] has empty id", section.name, i)
-			}
-			if _, ok := seen[id]; ok {
-				return fmt.Errorf("%s contains duplicate model id %q", section.name, id)
-			}
-			seen[id] = struct{}{}
-		}
-	}
-	return nil
 }
 
 func firstString(metadata map[string]any, key string) string {
@@ -332,46 +155,4 @@ func extractCodexPlanTypeFromJWT(token string) (string, error) {
 		return "", err
 	}
 	return NormalizeCodexPlanType(claims.Auth.PlanType), nil
-}
-
-func newCodexCatalogHTTPClient(cfg *sdkconfig.SDKConfig) *http.Client {
-	client := &http.Client{Timeout: codexModelsFetchTimeout}
-	if cfg == nil || strings.TrimSpace(cfg.ProxyURL) == "" {
-		return client
-	}
-	proxyURL, err := url.Parse(strings.TrimSpace(cfg.ProxyURL))
-	if err != nil {
-		return client
-	}
-	switch proxyURL.Scheme {
-	case "http", "https":
-		client.Transport = &http.Transport{Proxy: http.ProxyURL(proxyURL)}
-	case "socks5":
-		var auth *proxy.Auth
-		if proxyURL.User != nil {
-			password, _ := proxyURL.User.Password()
-			auth = &proxy.Auth{User: proxyURL.User.Username(), Password: password}
-		}
-		dialer, err := proxy.SOCKS5("tcp", proxyURL.Host, auth, proxy.Direct)
-		if err != nil {
-			return client
-		}
-		client.Transport = &http.Transport{
-			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-				return dialer.Dial(network, addr)
-			},
-		}
-	}
-	return client
-}
-
-func cloneCodexModelInfos(models []*ModelInfo) []*ModelInfo {
-	if len(models) == 0 {
-		return nil
-	}
-	out := make([]*ModelInfo, len(models))
-	for i, model := range models {
-		out[i] = cloneModelInfo(model)
-	}
-	return out
 }

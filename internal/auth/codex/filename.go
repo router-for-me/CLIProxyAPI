@@ -42,5 +42,11 @@ func normalizePlanTypeForFilename(planType string) string {
 	for i, part := range parts {
 		parts[i] = strings.ToLower(strings.TrimSpace(part))
 	}
-	return strings.Join(parts, "-")
+	normalized := strings.Join(parts, "-")
+	switch normalized {
+	case "business", "enterprise", "edu", "education":
+		return "team"
+	default:
+		return normalized
+	}
 }

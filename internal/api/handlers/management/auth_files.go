@@ -1505,7 +1505,7 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 		planType := ""
 		hashAccountID := ""
 		if claims != nil {
-			planType = strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType)
+			planType = registry.NormalizeCodexPlanType(claims.CodexAuthInfo.ChatgptPlanType)
 			if accountID := claims.GetAccountID(); accountID != "" {
 				digest := sha256.Sum256([]byte(accountID))
 				hashAccountID = hex.EncodeToString(digest[:])[:8]
@@ -1523,6 +1523,10 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 			Metadata: map[string]any{
 				"email":      tokenStorage.Email,
 				"account_id": tokenStorage.AccountID,
+				"plan_type":  planType,
+			},
+			Attributes: map[string]string{
+				"plan_type": planType,
 			},
 		}
 		savedPath, errSave := h.saveTokenRecord(ctx, record)

@@ -454,12 +454,12 @@ func (s *Service) rebindExecutors() {
 	}
 }
 
-func (s *Service) rebindCodexModels() {
+func (s *Service) rebindRegisteredModels() {
 	if s == nil || s.coreManager == nil {
 		return
 	}
 	for _, auth := range s.coreManager.List() {
-		if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		if auth == nil {
 			continue
 		}
 		s.registerModelsForAuth(auth)
@@ -647,8 +647,8 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 	log.Info("file watcher started for config and auth directory changes")
 	if s.cfg != nil {
-		registry.StartCodexModelsUpdater(ctx, &s.cfg.SDKConfig, func() {
-			s.rebindCodexModels()
+		registry.StartModelsUpdater(ctx, func() {
+			s.rebindRegisteredModels()
 		})
 	}
 

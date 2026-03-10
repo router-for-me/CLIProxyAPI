@@ -48,6 +48,46 @@ func TestReadAuthFile_CodexRecoversPlanTypeFromIDToken(t *testing.T) {
 	}
 }
 
+func TestReadAuthFile_CodexNormalizesAliasPlanTypeFromIDToken(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "codex-user.json")
+	raw := map[string]any{
+		"type":     "codex",
+		"email":    "tester@example.com",
+		"id_token": testCodexJWT(t, "business"),
+	}
+	payload, err := json.Marshal(raw)
+	if err != nil {
+		t.Fatalf("marshal auth file: %v", err)
+	}
+	if err := os.WriteFile(path, payload, 0o600); err != nil {
+		t.Fatalf("write auth file: %v", err)
+	}
+
+	store := NewFileTokenStore()
+	auth, err := store.readAuthFile(path, dir)
+	if err != nil {
+		t.Fatalf("read auth file: %v", err)
+	}
+	if auth == nil {
+		t.Fatal("expected auth")
+	}
+	if got := auth.Attributes["plan_type"]; got != "team" {
+		t.Fatalf("expected normalized plan_type team, got %q", got)
+	}
+	updated, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read updated auth file: %v", err)
+	}
+	var metadata map[string]any
+	if err := json.Unmarshal(updated, &metadata); err != nil {
+		t.Fatalf("unmarshal updated auth file: %v", err)
+	}
+	if got, _ := metadata["plan_type"].(string); got != "team" {
+		t.Fatalf("expected persisted normalized plan_type team, got %#v", metadata["plan_type"])
+	}
+}
+
 func testCodexJWT(t *testing.T, planType string) string {
 	t.Helper()
 	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none","typ":"JWT"}`))
