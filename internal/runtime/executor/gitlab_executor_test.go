@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/translator"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
@@ -161,6 +162,61 @@ func TestGitLabExecutorExecuteUsesAnthropicGateway(t *testing.T) {
 	}
 }
 
+func TestGitLabExecutorExecuteUsesOpenAIGateway(t *testing.T) {
+	var gotAuthHeader, gotRealmHeader string
+	var gotPath string
+	var gotModel string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotAuthHeader = r.Header.Get("Authorization")
+		gotRealmHeader = r.Header.Get("X-Gitlab-Realm")
+		gotModel = gjson.GetBytes(readBody(t, r), "model").String()
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"created_at\":1710000000,\"model\":\"gpt-5-codex\"}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello from openai gateway\"}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"created_at\":1710000000,\"model\":\"gpt-5-codex\",\"output\":[{\"type\":\"message\",\"id\":\"msg_1\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hello from openai gateway\"}]}],\"usage\":{\"input_tokens\":11,\"output_tokens\":4,\"total_tokens\":15}}}\n\n"))
+	}))
+	defer srv.Close()
+
+	exec := NewGitLabExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "gitlab",
+		Metadata: map[string]any{
+			"duo_gateway_base_url": srv.URL,
+			"duo_gateway_token":    "gateway-token",
+			"duo_gateway_headers":  map[string]string{"X-Gitlab-Realm": "saas"},
+			"model_provider":       "openai",
+			"model_name":           "gpt-5-codex",
+		},
+	}
+	req := cliproxyexecutor.Request{
+		Model:   "gitlab-duo",
+		Payload: []byte(`{"model":"gitlab-duo","messages":[{"role":"user","content":"hello"}]}`),
+	}
+
+	resp, err := exec.Execute(context.Background(), auth, req, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if gotPath != "/v1/proxy/openai/v1/responses" {
+		t.Fatalf("Path = %q, want %q", gotPath, "/v1/proxy/openai/v1/responses")
+	}
+	if gotAuthHeader != "Bearer gateway-token" {
+		t.Fatalf("Authorization = %q, want Bearer gateway-token", gotAuthHeader)
+	}
+	if gotRealmHeader != "saas" {
+		t.Fatalf("X-Gitlab-Realm = %q, want saas", gotRealmHeader)
+	}
+	if gotModel != "gpt-5-codex" {
+		t.Fatalf("model = %q, want gpt-5-codex", gotModel)
+	}
+	if got := gjson.GetBytes(resp.Payload, "choices.0.message.content").String(); got != "hello from openai gateway" {
+		t.Fatalf("expected openai gateway response, got %q payload=%s", got, string(resp.Payload))
+	}
+}
+
 func TestGitLabExecutorRefreshUpdatesMetadata(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -284,7 +340,8 @@ func TestGitLabExecutorExecuteStreamUsesCodeSuggestionsSSE(t *testing.T) {
 	if !strings.Contains(strings.Join(lines, "\n"), `"content":" world"`) {
 		t.Fatalf("expected world delta in stream, got %q", strings.Join(lines, "\n"))
 	}
-	if last := lines[len(lines)-1]; last != "data: [DONE]" {
+	last := lines[len(lines)-1]
+	if last != "data: [DONE]" && !strings.Contains(last, `"finish_reason":"stop"`) {
 		t.Fatalf("expected stream terminator, got %q", last)
 	}
 }

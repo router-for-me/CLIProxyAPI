@@ -60,7 +60,7 @@ func NewGitLabExecutor(cfg *config.Config) *GitLabExecutor {
 func (e *GitLabExecutor) Identifier() string { return gitLabProviderKey }
 
 func (e *GitLabExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
-	if nativeExec, nativeAuth, nativeReq, ok := e.nativeAnthropicGateway(auth, req); ok {
+	if nativeExec, nativeAuth, nativeReq, ok := e.nativeGateway(auth, req); ok {
 		return nativeExec.Execute(ctx, nativeAuth, nativeReq, opts)
 	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
@@ -103,7 +103,7 @@ func (e *GitLabExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 }
 
 func (e *GitLabExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
-	if nativeExec, nativeAuth, nativeReq, ok := e.nativeAnthropicGateway(auth, req); ok {
+	if nativeExec, nativeAuth, nativeReq, ok := e.nativeGateway(auth, req); ok {
 		return nativeExec.ExecuteStream(ctx, nativeAuth, nativeReq, opts)
 	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
@@ -207,7 +207,7 @@ func (e *GitLabExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (
 }
 
 func (e *GitLabExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
-	if nativeExec, nativeAuth, nativeReq, ok := e.nativeAnthropicGateway(auth, req); ok {
+	if nativeExec, nativeAuth, nativeReq, ok := e.nativeGateway(auth, req); ok {
 		return nativeExec.CountTokens(ctx, nativeAuth, nativeReq, opts)
 	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
@@ -227,7 +227,7 @@ func (e *GitLabExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Aut
 	if req == nil {
 		return nil, fmt.Errorf("gitlab duo executor: request is nil")
 	}
-	if nativeExec, nativeAuth := e.nativeAnthropicGatewayHTTP(auth); nativeExec != nil {
+	if nativeExec, nativeAuth := e.nativeGatewayHTTP(auth); nativeExec != nil {
 		return nativeExec.HttpRequest(ctx, nativeAuth, req)
 	}
 	if ctx == nil {
@@ -245,25 +245,31 @@ func (e *GitLabExecutor) translateToOpenAI(req cliproxyexecutor.Request, opts cl
 	return sdktranslator.TranslateRequest(opts.SourceFormat, sdktranslator.FromString("openai"), baseModel, req.Payload, opts.Stream), nil
 }
 
-func (e *GitLabExecutor) nativeAnthropicGateway(
+func (e *GitLabExecutor) nativeGateway(
 	auth *cliproxyauth.Auth,
 	req cliproxyexecutor.Request,
-) (*ClaudeExecutor, *cliproxyauth.Auth, cliproxyexecutor.Request, bool) {
-	nativeAuth, ok := buildGitLabAnthropicGatewayAuth(auth)
-	if !ok {
-		return nil, nil, req, false
+) (cliproxyauth.ProviderExecutor, *cliproxyauth.Auth, cliproxyexecutor.Request, bool) {
+	if nativeAuth, ok := buildGitLabAnthropicGatewayAuth(auth); ok {
+		nativeReq := req
+		nativeReq.Model = gitLabResolvedModel(auth, req.Model)
+		return NewClaudeExecutor(e.cfg), nativeAuth, nativeReq, true
 	}
-	nativeReq := req
-	nativeReq.Model = gitLabResolvedModel(auth, req.Model)
-	return NewClaudeExecutor(e.cfg), nativeAuth, nativeReq, true
+	if nativeAuth, ok := buildGitLabOpenAIGatewayAuth(auth); ok {
+		nativeReq := req
+		nativeReq.Model = gitLabResolvedModel(auth, req.Model)
+		return NewCodexExecutor(e.cfg), nativeAuth, nativeReq, true
+	}
+	return nil, nil, req, false
 }
 
-func (e *GitLabExecutor) nativeAnthropicGatewayHTTP(auth *cliproxyauth.Auth) (*ClaudeExecutor, *cliproxyauth.Auth) {
-	nativeAuth, ok := buildGitLabAnthropicGatewayAuth(auth)
-	if !ok {
-		return nil, nil
+func (e *GitLabExecutor) nativeGatewayHTTP(auth *cliproxyauth.Auth) (cliproxyauth.ProviderExecutor, *cliproxyauth.Auth) {
+	if nativeAuth, ok := buildGitLabAnthropicGatewayAuth(auth); ok {
+		return NewClaudeExecutor(e.cfg), nativeAuth
 	}
-	return NewClaudeExecutor(e.cfg), nativeAuth
+	if nativeAuth, ok := buildGitLabOpenAIGatewayAuth(auth); ok {
+		return NewCodexExecutor(e.cfg), nativeAuth
+	}
+	return nil, nil
 }
 
 func (e *GitLabExecutor) invokeText(ctx context.Context, auth *cliproxyauth.Auth, prompt gitLabPrompt) (string, error) {
@@ -1009,6 +1015,32 @@ func buildGitLabAnthropicGatewayAuth(auth *cliproxyauth.Auth) (*cliproxyauth.Aut
 	return nativeAuth, true
 }
 
+func buildGitLabOpenAIGatewayAuth(auth *cliproxyauth.Auth) (*cliproxyauth.Auth, bool) {
+	if !gitLabUsesOpenAIGateway(auth) {
+		return nil, false
+	}
+	baseURL := gitLabOpenAIGatewayBaseURL(auth)
+	token := gitLabMetadataString(auth.Metadata, "duo_gateway_token")
+	if baseURL == "" || token == "" {
+		return nil, false
+	}
+
+	nativeAuth := auth.Clone()
+	nativeAuth.Provider = "codex"
+	if nativeAuth.Attributes == nil {
+		nativeAuth.Attributes = make(map[string]string)
+	}
+	nativeAuth.Attributes["api_key"] = token
+	nativeAuth.Attributes["base_url"] = baseURL
+	for key, value := range gitLabGatewayHeaders(auth) {
+		if key == "" || value == "" {
+			continue
+		}
+		nativeAuth.Attributes["header:"+key] = value
+	}
+	return nativeAuth, true
+}
+
 func gitLabUsesAnthropicGateway(auth *cliproxyauth.Auth) bool {
 	if auth == nil || auth.Metadata == nil {
 		return false
@@ -1019,6 +1051,20 @@ func gitLabUsesAnthropicGateway(auth *cliproxyauth.Auth) bool {
 		provider = inferGitLabProviderFromModel(modelName)
 	}
 	return provider == "anthropic" &&
+		gitLabMetadataString(auth.Metadata, "duo_gateway_base_url") != "" &&
+		gitLabMetadataString(auth.Metadata, "duo_gateway_token") != ""
+}
+
+func gitLabUsesOpenAIGateway(auth *cliproxyauth.Auth) bool {
+	if auth == nil || auth.Metadata == nil {
+		return false
+	}
+	provider := strings.ToLower(gitLabMetadataString(auth.Metadata, "model_provider"))
+	if provider == "" {
+		modelName := strings.ToLower(gitLabMetadataString(auth.Metadata, "model_name"))
+		provider = inferGitLabProviderFromModel(modelName)
+	}
+	return provider == "openai" &&
 		gitLabMetadataString(auth.Metadata, "duo_gateway_base_url") != "" &&
 		gitLabMetadataString(auth.Metadata, "duo_gateway_token") != ""
 }
@@ -1056,6 +1102,31 @@ func gitLabAnthropicGatewayBaseURL(auth *cliproxyauth.Auth) string {
 		base.Path = "/ai/v1/proxy/anthropic"
 	default:
 		base.Path = "/v1/proxy/anthropic"
+	}
+	return strings.TrimRight(base.String(), "/")
+}
+
+func gitLabOpenAIGatewayBaseURL(auth *cliproxyauth.Auth) string {
+	raw := strings.TrimSpace(gitLabMetadataString(auth.Metadata, "duo_gateway_base_url"))
+	if raw == "" {
+		return ""
+	}
+	base, err := url.Parse(raw)
+	if err != nil {
+		return strings.TrimRight(raw, "/")
+	}
+	path := strings.TrimRight(base.EscapedPath(), "/")
+	switch {
+	case strings.HasSuffix(path, "/ai/v1/proxy/openai/v1"), strings.HasSuffix(path, "/v1/proxy/openai/v1"):
+		return strings.TrimRight(base.String(), "/")
+	case path == "/ai":
+		base.Path = "/ai/v1/proxy/openai/v1"
+	case path != "":
+		base.Path = strings.TrimRight(path, "/") + "/v1/proxy/openai/v1"
+	case strings.Contains(strings.ToLower(base.Host), "gitlab.com"):
+		base.Path = "/ai/v1/proxy/openai/v1"
+	default:
+		base.Path = "/v1/proxy/openai/v1"
 	}
 	return strings.TrimRight(base.String(), "/")
 }
