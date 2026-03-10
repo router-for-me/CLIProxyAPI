@@ -3,8 +3,10 @@ package executor
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
@@ -152,4 +154,148 @@ func TestGitLabExecutorRefreshUpdatesMetadata(t *testing.T) {
 	if got := updated.Metadata["model_name"]; got != "claude-sonnet-4-5" {
 		t.Fatalf("expected refreshed model metadata, got %#v", got)
 	}
+}
+
+func TestGitLabExecutorExecuteStreamUsesCodeSuggestionsSSE(t *testing.T) {
+	var gotAccept, gotStreamingHeader, gotEncoding string
+	var gotStreamFlag bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != gitLabCodeSuggestionsEndpoint {
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+		gotAccept = r.Header.Get("Accept")
+		gotStreamingHeader = r.Header.Get(gitLabSSEStreamingHeader)
+		gotEncoding = r.Header.Get("Accept-Encoding")
+		gotStreamFlag = gjson.GetBytes(readBody(t, r), "stream").Bool()
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("event: stream_start\n"))
+		_, _ = w.Write([]byte("data: {\"model\":{\"name\":\"claude-sonnet-4-5\"}}\n\n"))
+		_, _ = w.Write([]byte("event: content_chunk\n"))
+		_, _ = w.Write([]byte("data: {\"content\":\"hello\"}\n\n"))
+		_, _ = w.Write([]byte("event: content_chunk\n"))
+		_, _ = w.Write([]byte("data: {\"content\":\" world\"}\n\n"))
+		_, _ = w.Write([]byte("event: stream_end\n"))
+		_, _ = w.Write([]byte("data: {}\n\n"))
+	}))
+	defer srv.Close()
+
+	exec := NewGitLabExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "gitlab",
+		Metadata: map[string]any{
+			"base_url":     srv.URL,
+			"access_token": "oauth-access",
+			"model_name":   "claude-sonnet-4-5",
+		},
+	}
+	req := cliproxyexecutor.Request{
+		Model:   "gitlab-duo",
+		Payload: []byte(`{"model":"gitlab-duo","stream":true,"messages":[{"role":"user","content":"hello"}]}`),
+	}
+
+	result, err := exec.ExecuteStream(context.Background(), auth, req, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+
+	lines := collectStreamLines(t, result)
+	if gotAccept != "text/event-stream" {
+		t.Fatalf("Accept = %q, want text/event-stream", gotAccept)
+	}
+	if gotStreamingHeader != "true" {
+		t.Fatalf("%s = %q, want true", gitLabSSEStreamingHeader, gotStreamingHeader)
+	}
+	if gotEncoding != "identity" {
+		t.Fatalf("Accept-Encoding = %q, want identity", gotEncoding)
+	}
+	if !gotStreamFlag {
+		t.Fatalf("expected upstream request to set stream=true")
+	}
+	if len(lines) < 4 {
+		t.Fatalf("expected translated stream chunks, got %d", len(lines))
+	}
+	if !strings.Contains(strings.Join(lines, "\n"), `"content":"hello"`) {
+		t.Fatalf("expected hello delta in stream, got %q", strings.Join(lines, "\n"))
+	}
+	if !strings.Contains(strings.Join(lines, "\n"), `"content":" world"`) {
+		t.Fatalf("expected world delta in stream, got %q", strings.Join(lines, "\n"))
+	}
+	if last := lines[len(lines)-1]; last != "data: [DONE]" {
+		t.Fatalf("expected stream terminator, got %q", last)
+	}
+}
+
+func TestGitLabExecutorExecuteStreamFallsBackToSyntheticChat(t *testing.T) {
+	chatCalls := 0
+	streamCalls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case gitLabCodeSuggestionsEndpoint:
+			streamCalls++
+			http.Error(w, "feature unavailable", http.StatusForbidden)
+		case gitLabChatEndpoint:
+			chatCalls++
+			_, _ = w.Write([]byte(`"chat fallback response"`))
+		default:
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	exec := NewGitLabExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "gitlab",
+		Metadata: map[string]any{
+			"base_url":     srv.URL,
+			"access_token": "oauth-access",
+			"model_name":   "claude-sonnet-4-5",
+		},
+	}
+	req := cliproxyexecutor.Request{
+		Model:   "gitlab-duo",
+		Payload: []byte(`{"model":"gitlab-duo","stream":true,"messages":[{"role":"user","content":"hello"}]}`),
+	}
+
+	result, err := exec.ExecuteStream(context.Background(), auth, req, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+
+	lines := collectStreamLines(t, result)
+	if streamCalls != 1 {
+		t.Fatalf("expected streaming endpoint once, got %d", streamCalls)
+	}
+	if chatCalls != 1 {
+		t.Fatalf("expected chat fallback once, got %d", chatCalls)
+	}
+	if !strings.Contains(strings.Join(lines, "\n"), `"content":"chat fallback response"`) {
+		t.Fatalf("expected fallback content in stream, got %q", strings.Join(lines, "\n"))
+	}
+}
+
+func collectStreamLines(t *testing.T, result *cliproxyexecutor.StreamResult) []string {
+	t.Helper()
+	lines := make([]string, 0, 8)
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("unexpected stream error: %v", chunk.Err)
+		}
+		lines = append(lines, string(chunk.Payload))
+	}
+	return lines
+}
+
+func readBody(t *testing.T, r *http.Request) []byte {
+	t.Helper()
+	defer func() { _ = r.Body.Close() }()
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		t.Fatalf("ReadAll() error = %v", err)
+	}
+	return body
 }
