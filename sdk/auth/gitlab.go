@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -360,6 +361,13 @@ func (a *GitLabAuthenticator) resolveString(opts *LoginOptions, key, fallback st
 			return value
 		}
 	}
+	for _, envKey := range gitLabEnvKeys(key) {
+		if raw, ok := os.LookupEnv(envKey); ok {
+			if trimmed := strings.TrimSpace(raw); trimmed != "" {
+				return trimmed
+			}
+		}
+	}
 	if strings.TrimSpace(fallback) != "" {
 		return fallback
 	}
@@ -459,4 +467,19 @@ func maskGitLabToken(token string) string {
 		return trimmed
 	}
 	return trimmed[:4] + "..." + trimmed[len(trimmed)-4:]
+}
+
+func gitLabEnvKeys(key string) []string {
+	switch strings.TrimSpace(key) {
+	case gitLabBaseURLMetadataKey:
+		return []string{"GITLAB_BASE_URL"}
+	case gitLabOAuthClientIDMetadataKey:
+		return []string{"GITLAB_OAUTH_CLIENT_ID"}
+	case gitLabOAuthClientSecretMetadataKey:
+		return []string{"GITLAB_OAUTH_CLIENT_SECRET"}
+	case gitLabPersonalAccessTokenMetadataKey:
+		return []string{"GITLAB_PERSONAL_ACCESS_TOKEN"}
+	default:
+		return nil
+	}
 }
