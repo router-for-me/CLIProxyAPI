@@ -9,10 +9,9 @@ on:
 permissions:
   contents: write
 
-actions:
-  concurrency:
-    group: daily-upstream-merge-build
-    cancel-in-progress: false
+concurrency:
+  group: daily-upstream-merge-build
+  cancel-in-progress: false
 
 jobs:
   sync_merge_build:
