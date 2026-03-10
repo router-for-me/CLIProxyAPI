@@ -2,7 +2,7 @@
 
 ## 版本信息
 
-- **当前版本**: `1.0.0-cyan-plus2`（Dockerfile 自动追加 `-plus` 后缀，实际运行时显示为 `1.0.0-cyan-plus2-plus`）
+- **当前版本**: `1.1.0-cyan`
 - **镜像名称**: `cyan-proxy:latest`
 - **平台**: `linux/amd64`
 - **上游仓库**: `https://github.com/router-for-me/CLIProxyAPIPlus`
@@ -14,7 +14,7 @@
 
 ```bash
 docker build --platform linux/amd64 \
-  --build-arg VERSION="1.0.0-cyan-plus2" \
+  --build-arg VERSION="1.1.0-cyan" \
   --build-arg COMMIT="$(git rev-parse --short HEAD)" \
   --build-arg BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   -t cyan-proxy:latest .
@@ -23,13 +23,13 @@ docker build --platform linux/amd64 \
 ### 导出镜像为 tar.gz
 
 ```bash
-docker save cyan-proxy:latest | gzip > dist/cli-proxy-api-plus-copilot-headers-amd64.tar.gz
+docker save cyan-proxy:latest | gzip > dist/cyan-proxy-1.1.0-cyan-amd64.tar.gz
 ```
 
 ### 在服务器上加载镜像
 
 ```bash
-docker load < cli-proxy-api-plus-copilot-headers-amd64.tar.gz
+docker load < cyan-proxy-1.1.0-cyan-amd64.tar.gz
 ```
 
 ## 本次 Fork 的修改内容
