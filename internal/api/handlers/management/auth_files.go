@@ -415,6 +415,14 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 	if claims := extractCodexIDTokenClaims(auth); claims != nil {
 		entry["id_token"] = claims
 	}
+	if auth.Metadata != nil {
+		if v, ok := auth.Metadata["refresh_status"].(string); ok && v != "" {
+			entry["refresh_status"] = v
+		}
+		if v, ok := auth.Metadata["refresh_msg"].(string); ok && v != "" {
+			entry["refresh_msg"] = v
+		}
+	}
 	return entry
 }
 

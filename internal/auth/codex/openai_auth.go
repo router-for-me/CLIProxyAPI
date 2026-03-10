@@ -276,7 +276,7 @@ func (o *CodexAuth) RefreshTokensWithRetry(ctx context.Context, refreshToken str
 		if err == nil {
 			return tokenData, nil
 		}
-		if isNonRetryableRefreshErr(err) {
+		if IsNonRetryableRefreshErr(err) {
 			log.Warnf("Token refresh attempt %d failed with non-retryable error: %v", attempt+1, err)
 			return nil, err
 		}
@@ -288,12 +288,12 @@ func (o *CodexAuth) RefreshTokensWithRetry(ctx context.Context, refreshToken str
 	return nil, fmt.Errorf("token refresh failed after %d attempts: %w", maxRetries, lastErr)
 }
 
-func isNonRetryableRefreshErr(err error) bool {
+func IsNonRetryableRefreshErr(err error) bool {
 	if err == nil {
 		return false
 	}
 	raw := strings.ToLower(err.Error())
-	return strings.Contains(raw, "refresh_token_reused")
+	return strings.Contains(raw, "refresh_token_reused") || strings.Contains(raw, "status 401")
 }
 
 // UpdateTokenStorage updates an existing CodexTokenStorage with new token data.

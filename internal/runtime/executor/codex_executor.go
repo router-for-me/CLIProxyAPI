@@ -4,9 +4,11 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -562,6 +564,13 @@ func (e *CodexExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*
 	if auth == nil {
 		return nil, statusErr{code: 500, msg: "codex executor: auth is nil"}
 	}
+	// Check if already failed to avoid redundant refreshes
+	if auth.Metadata != nil {
+		if status, _ := auth.Metadata["refresh_status"].(string); status == "failed" {
+			log.Debugf("codex executor: skipping refresh for %s as it previously failed", auth.ID)
+			return auth, nil
+		}
+	}
 	var refreshToken string
 	if auth.Metadata != nil {
 		if v, ok := auth.Metadata["refresh_token"].(string); ok && v != "" {
@@ -574,6 +583,25 @@ func (e *CodexExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*
 	svc := codexauth.NewCodexAuth(e.cfg)
 	td, err := svc.RefreshTokensWithRetry(ctx, refreshToken, 3)
 	if err != nil {
+		if codexauth.IsNonRetryableRefreshErr(err) {
+			log.Warnf("codex executor: marking %s as failed due to non-retryable error: %v", auth.ID, err)
+			if auth.Metadata == nil {
+				auth.Metadata = make(map[string]any)
+			}
+			auth.Metadata["refresh_status"] = "failed"
+			auth.Metadata["refresh_msg"] = err.Error()
+
+			// Persist the failure state to the auth file
+			if path := auth.Attributes["path"]; path != "" {
+				if data, marshalErr := json.Marshal(auth.Metadata); marshalErr == nil {
+					_ = os.WriteFile(path, data, 0600)
+				}
+			}
+			// Mark status for the UI/API
+			auth.Status = cliproxyauth.StatusError
+			auth.StatusMessage = "Permanent refresh failure: " + err.Error()
+			return auth, nil
+		}
 		return nil, err
 	}
 	if auth.Metadata == nil {

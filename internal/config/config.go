@@ -121,6 +121,14 @@ type Config struct {
 	// Payload defines default and override rules for provider payload parameters.
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
 
+	// RefreshConcurrency defines the maximum number of concurrent token refresh operations.
+	// Default is 16.
+	RefreshConcurrency int `yaml:"refresh-concurrency" json:"refresh-concurrency"`
+
+	// RefreshBurstDelay defines the delay in milliseconds between starting individual
+	// refresh tasks within a single check cycle. Set to 0 to disable.
+	RefreshBurstDelay int `yaml:"refresh-burst-delay" json:"refresh-burst-delay"`
+
 	legacyMigrationPending bool `yaml:"-" json:"-"`
 }
 
@@ -546,6 +554,8 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.Pprof.Addr = DefaultPprofAddr
 	cfg.AmpCode.RestrictManagementToLocalhost = false // Default to false: API key auth is sufficient
 	cfg.RemoteManagement.PanelGitHubRepository = DefaultPanelGitHubRepository
+	cfg.RefreshConcurrency = 16
+	cfg.RefreshBurstDelay = 0
 	if err = yaml.Unmarshal(data, &cfg); err != nil {
 		if optional {
 			// In cloud deploy mode, if YAML parsing fails, return empty config instead of error.

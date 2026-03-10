@@ -181,8 +181,8 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 		auths:            make(map[string]*Auth),
 		providerOffsets:  make(map[string]int),
 		modelPoolOffsets: make(map[string]int),
-		refreshSemaphore: make(chan struct{}, refreshMaxConcurrency),
 	}
+	manager.refreshSemaphore = make(chan struct{}, manager.getRefreshConcurrency())
 	// atomic.Value requires non-nil initial value.
 	manager.runtimeConfig.Store(&internalconfig.Config{})
 	manager.apiKeyModelAlias.Store(apiKeyModelAliasTable(nil))
@@ -2369,19 +2369,65 @@ func (m *Manager) checkRefreshes(ctx context.Context) {
 			if !m.markRefreshPending(a.ID, now) {
 				continue
 			}
+
+			// Apply burst delay if configured
+			if delay := m.getRefreshBurstDelay(); delay > 0 {
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(delay):
+				}
+			}
+
 			go m.refreshAuthWithLimit(ctx, a.ID)
 		}
 	}
 }
 
+func (m *Manager) getRefreshConcurrency() int {
+	if m == nil {
+		return refreshMaxConcurrency
+	}
+	cfg, ok := m.runtimeConfig.Load().(*internalconfig.Config)
+	if !ok || cfg == nil || cfg.RefreshConcurrency <= 0 {
+		return refreshMaxConcurrency
+	}
+	return cfg.RefreshConcurrency
+}
+
+func (m *Manager) getRefreshBurstDelay() time.Duration {
+	if m == nil {
+		return 0
+	}
+	cfg, ok := m.runtimeConfig.Load().(*internalconfig.Config)
+	if !ok || cfg == nil || cfg.RefreshBurstDelay <= 0 {
+		return 0
+	}
+	return time.Duration(cfg.RefreshBurstDelay) * time.Millisecond
+}
+
 func (m *Manager) refreshAuthWithLimit(ctx context.Context, id string) {
-	if m.refreshSemaphore == nil {
+	sem := m.refreshSemaphore
+	if sem == nil {
 		m.refreshAuth(ctx, id)
 		return
 	}
+
+	// Dynamic capacity adjustment if needed
+	target := m.getRefreshConcurrency()
+	if cap(sem) != target {
+		m.mu.Lock()
+		// Re-check and re-create if still different
+		if m.refreshSemaphore == nil || cap(m.refreshSemaphore) != target {
+			m.refreshSemaphore = make(chan struct{}, target)
+		}
+		sem = m.refreshSemaphore
+		m.mu.Unlock()
+	}
+
 	select {
-	case m.refreshSemaphore <- struct{}{}:
-		defer func() { <-m.refreshSemaphore }()
+	case sem <- struct{}{}:
+		defer func() { <-sem }()
 	case <-ctx.Done():
 		return
 	}
