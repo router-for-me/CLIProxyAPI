@@ -17,6 +17,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	log "github.com/sirupsen/logrus"
 )
 
 // FileTokenStore persists token records and auth metadata using the filesystem as backing storage.
@@ -201,10 +202,11 @@ func (s *FileTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth,
 	if provider == "codex" {
 		if _, changed := registry.EnsureCodexPlanTypeMetadata(metadata); changed {
 			if raw, errMarshal := json.Marshal(metadata); errMarshal == nil {
-				if file, errOpen := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0o600); errOpen == nil {
-					_, _ = file.Write(raw)
-					_ = file.Close()
+				if errPersist := persistNormalizedMetadata(path, raw); errPersist != nil {
+					log.Warnf("auth filestore: failed to persist normalized codex plan_type for %s: %v", path, errPersist)
 				}
+			} else {
+				log.Warnf("auth filestore: failed to marshal normalized codex metadata for %s: %v", path, errMarshal)
 			}
 		}
 	}
@@ -271,6 +273,18 @@ func (s *FileTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth,
 		}
 	}
 	return auth, nil
+}
+
+func persistNormalizedMetadata(path string, raw []byte) error {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, errWrite := file.Write(raw); errWrite != nil {
+		_ = file.Close()
+		return errWrite
+	}
+	return file.Close()
 }
 
 func (s *FileTokenStore) idFor(path, baseDir string) string {

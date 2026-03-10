@@ -34,6 +34,7 @@ type modelStore struct {
 var modelsCatalogStore = &modelStore{}
 
 var updaterOnce sync.Once
+var updaterDone = make(chan struct{})
 
 func init() {
 	// Load embedded data as fallback on startup.
@@ -44,22 +45,29 @@ func init() {
 
 // StartModelsUpdater runs a one-time models refresh on startup.
 // It returns immediately and performs the network refresh in the background.
-// onUpdated is invoked once after the startup attempt finishes, even when the
-// refresh falls back to the embedded catalog.
+// Every invocation registers an onUpdated callback for the same one-time startup
+// attempt, so callers added after initialization still observe completion.
+// Callbacks also run when the refresh falls back to the embedded catalog.
 // Safe to call multiple times; only one refresh will run.
 func StartModelsUpdater(ctx context.Context, onUpdated func()) {
 	updaterOnce.Do(func() {
-		go runModelsUpdater(ctx, onUpdated)
+		go func() {
+			defer close(updaterDone)
+			runModelsUpdater(ctx)
+		}()
 	})
+	if onUpdated != nil {
+		go func() {
+			<-updaterDone
+			onUpdated()
+		}()
+	}
 }
 
-func runModelsUpdater(ctx context.Context, onUpdated func()) {
+func runModelsUpdater(ctx context.Context) {
 	// Try network fetch once on startup, then stop.
 	// Periodic refresh is disabled - models are only refreshed at startup.
 	tryRefreshModels(ctx)
-	if onUpdated != nil {
-		onUpdated()
-	}
 }
 
 func tryRefreshModels(ctx context.Context) {

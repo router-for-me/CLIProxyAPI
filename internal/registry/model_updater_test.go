@@ -18,11 +18,14 @@ func TestStartModelsUpdaterReturnsImmediatelyAndInvokesCallback(t *testing.T) {
 
 	oldURLs := modelsURLs
 	oldOnce := updaterOnce
+	oldDone := updaterDone
 	modelsURLs = []string{server.URL}
 	updaterOnce = sync.Once{}
+	updaterDone = make(chan struct{})
 	t.Cleanup(func() {
 		modelsURLs = oldURLs
 		updaterOnce = oldOnce
+		updaterDone = oldDone
 	})
 
 	updated := make(chan struct{}, 1)
@@ -52,11 +55,14 @@ func TestStartModelsUpdaterInvokesCallbackOnRefreshFailure(t *testing.T) {
 
 	oldURLs := modelsURLs
 	oldOnce := updaterOnce
+	oldDone := updaterDone
 	modelsURLs = []string{server.URL}
 	updaterOnce = sync.Once{}
+	updaterDone = make(chan struct{})
 	t.Cleanup(func() {
 		modelsURLs = oldURLs
 		updaterOnce = oldOnce
+		updaterDone = oldDone
 	})
 
 	updated := make(chan struct{}, 1)
@@ -71,5 +77,50 @@ func TestStartModelsUpdaterInvokesCallbackOnRefreshFailure(t *testing.T) {
 	case <-updated:
 	case <-time.After(2 * time.Second):
 		t.Fatal("expected callback even when startup refresh falls back to embedded models")
+	}
+}
+
+func TestStartModelsUpdaterNotifiesCallbacksRegisteredAfterStart(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(150 * time.Millisecond)
+		_, _ = w.Write(embeddedModelsJSON)
+	}))
+	defer server.Close()
+
+	oldURLs := modelsURLs
+	oldOnce := updaterOnce
+	oldDone := updaterDone
+	modelsURLs = []string{server.URL}
+	updaterOnce = sync.Once{}
+	updaterDone = make(chan struct{})
+	t.Cleanup(func() {
+		modelsURLs = oldURLs
+		updaterOnce = oldOnce
+		updaterDone = oldDone
+	})
+
+	first := make(chan struct{}, 1)
+	second := make(chan struct{}, 1)
+
+	StartModelsUpdater(context.Background(), func() {
+		select {
+		case first <- struct{}{}:
+		default:
+		}
+	})
+	time.Sleep(25 * time.Millisecond)
+	StartModelsUpdater(context.Background(), func() {
+		select {
+		case second <- struct{}{}:
+		default:
+		}
+	})
+
+	for name, ch := range map[string]chan struct{}{"first": first, "second": second} {
+		select {
+		case <-ch:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("expected %s callback to fire", name)
+		}
 	}
 }
