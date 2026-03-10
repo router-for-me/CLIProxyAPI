@@ -38,7 +38,15 @@ git merge upstream/main
 git push origin feat/refactor-auth-logic
 ```
 
-## 3. 脚本自动化建议 (可选)
+## 3. VS Code 编译与调试
+
+已为您配置好 VS Code 快捷操作：
+
+- **一键编译**: 按下 `Ctrl + Shift + B`，选择 `go: build (server)`。这将在根目录生成 `server.exe`。
+- **本地调试**: 按下 `F5`，将直接启动 `cmd/server` 进行调试。
+- **任务面板**: 您也可以通过 `终端 (Terminal) -> 运行任务 (Run Task)` 找到配置好的编译选项。
+
+## 4. 脚本自动化建议 (可选)
 
 建议将以下内容保存为 `sync_upstream.ps1` 以便快速执行：
 ```powershell
