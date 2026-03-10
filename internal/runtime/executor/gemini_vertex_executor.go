@@ -460,7 +460,7 @@ func (e *GeminiVertexExecutor) executeWithAPIKey(ctx context.Context, auth *clip
 
 	// For API key auth, use simpler URL format without project/location
 	if baseURL == "" {
-		baseURL = "https://generativelanguage.googleapis.com"
+		baseURL = "https://aiplatform.googleapis.com"
 	}
 	url := fmt.Sprintf("%s/%s/publishers/google/models/%s:%s", baseURL, vertexAPIVersion, baseModel, action)
 	if opts.Alt != "" && action != "countTokens" {
@@ -683,7 +683,7 @@ func (e *GeminiVertexExecutor) executeStreamWithAPIKey(ctx context.Context, auth
 	action := getVertexAction(baseModel, true)
 	// For API key auth, use simpler URL format without project/location
 	if baseURL == "" {
-		baseURL = "https://generativelanguage.googleapis.com"
+		baseURL = "https://aiplatform.googleapis.com"
 	}
 	url := fmt.Sprintf("%s/%s/publishers/google/models/%s:%s", baseURL, vertexAPIVersion, baseModel, action)
 	// Imagen models don't support streaming, skip SSE params
@@ -883,7 +883,7 @@ func (e *GeminiVertexExecutor) countTokensWithAPIKey(ctx context.Context, auth *
 
 	// For API key auth, use simpler URL format without project/location
 	if baseURL == "" {
-		baseURL = "https://generativelanguage.googleapis.com"
+		baseURL = "https://aiplatform.googleapis.com"
 	}
 	url := fmt.Sprintf("%s/%s/publishers/google/models/%s:%s", baseURL, vertexAPIVersion, baseModel, "countTokens")
 

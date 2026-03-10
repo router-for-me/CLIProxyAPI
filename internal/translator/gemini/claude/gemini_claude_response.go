@@ -12,8 +12,8 @@ import (
 	"fmt"
 	"strings"
 	"sync/atomic"
-	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -25,6 +25,8 @@ type Params struct {
 	ResponseType     int
 	ResponseIndex    int
 	HasContent       bool // Tracks whether any content (text, thinking, or tool use) has been output
+	ToolNameMap      map[string]string
+	SawToolCall      bool
 }
 
 // toolUseIDCounter provides a process-wide unique counter for tool use identifiers.
@@ -53,6 +55,8 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 			HasFirstResponse: false,
 			ResponseType:     0,
 			ResponseIndex:    0,
+			ToolNameMap:      util.ToolNameMapFromClaudeRequest(originalRequestRawJSON),
+			SawToolCall:      false,
 		}
 	}
 
@@ -66,8 +70,6 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 		return []string{}
 	}
 
-	// Track whether tools are being used in this response chunk
-	usedTool := false
 	output := ""
 
 	// Initialize the streaming session with a message_start event
@@ -175,12 +177,13 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 			} else if functionCallResult.Exists() {
 				// Handle function/tool calls from the AI model
 				// This processes tool usage requests and formats them for Claude API compatibility
-				usedTool = true
-				fcName := functionCallResult.Get("name").String()
+				(*param).(*Params).SawToolCall = true
+				upstreamToolName := functionCallResult.Get("name").String()
+				clientToolName := util.MapToolName((*param).(*Params).ToolNameMap, upstreamToolName)
 
 				// FIX: Handle streaming split/delta where name might be empty in subsequent chunks.
 				// If we are already in tool use mode and name is empty, treat as continuation (delta).
-				if (*param).(*Params).ResponseType == 3 && fcName == "" {
+				if (*param).(*Params).ResponseType == 3 && upstreamToolName == "" {
 					if fcArgsResult := functionCallResult.Get("args"); fcArgsResult.Exists() {
 						output = output + "event: content_block_delta\n"
 						data, _ := sjson.Set(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"input_json_delta","partial_json":""}}`, (*param).(*Params).ResponseIndex), "delta.partial_json", fcArgsResult.Raw)
@@ -221,8 +224,8 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 
 				// Create the tool use block with unique ID and function details
 				data := fmt.Sprintf(`{"type":"content_block_start","index":%d,"content_block":{"type":"tool_use","id":"","name":"","input":{}}}`, (*param).(*Params).ResponseIndex)
-				data, _ = sjson.Set(data, "content_block.id", fmt.Sprintf("%s-%d-%d", fcName, time.Now().UnixNano(), atomic.AddUint64(&toolUseIDCounter, 1)))
-				data, _ = sjson.Set(data, "content_block.name", fcName)
+				data, _ = sjson.Set(data, "content_block.id", util.SanitizeClaudeToolID(fmt.Sprintf("%s-%d", upstreamToolName, atomic.AddUint64(&toolUseIDCounter, 1))))
+				data, _ = sjson.Set(data, "content_block.name", clientToolName)
 				output = output + fmt.Sprintf("data: %s\n\n\n", data)
 
 				if fcArgsResult := functionCallResult.Get("args"); fcArgsResult.Exists() {
@@ -249,7 +252,7 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 				output = output + `data: `
 
 				template := `{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`
-				if usedTool {
+				if (*param).(*Params).SawToolCall {
 					template = `{"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`
 				} else if finish := gjson.GetBytes(rawJSON, "candidates.0.finishReason"); finish.Exists() && finish.String() == "MAX_TOKENS" {
 					template = `{"type":"message_delta","delta":{"stop_reason":"max_tokens","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`
@@ -278,10 +281,10 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 // Returns:
 //   - string: A Claude-compatible JSON response.
 func ConvertGeminiResponseToClaudeNonStream(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) string {
-	_ = originalRequestRawJSON
 	_ = requestRawJSON
 
 	root := gjson.ParseBytes(rawJSON)
+	toolNameMap := util.ToolNameMapFromClaudeRequest(originalRequestRawJSON)
 
 	out := `{"id":"","type":"message","role":"assistant","model":"","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}`
 	out, _ = sjson.Set(out, "id", root.Get("responseId").String())
@@ -336,11 +339,12 @@ func ConvertGeminiResponseToClaudeNonStream(_ context.Context, _ string, origina
 				flushText()
 				hasToolCall = true
 
-				name := functionCall.Get("name").String()
+				upstreamToolName := functionCall.Get("name").String()
+				clientToolName := util.MapToolName(toolNameMap, upstreamToolName)
 				toolIDCounter++
 				toolBlock := `{"type":"tool_use","id":"","name":"","input":{}}`
-				toolBlock, _ = sjson.Set(toolBlock, "id", fmt.Sprintf("tool_%d", toolIDCounter))
-				toolBlock, _ = sjson.Set(toolBlock, "name", name)
+				toolBlock, _ = sjson.Set(toolBlock, "id", util.SanitizeClaudeToolID(fmt.Sprintf("%s-%d", upstreamToolName, toolIDCounter)))
+				toolBlock, _ = sjson.Set(toolBlock, "name", clientToolName)
 				inputRaw := "{}"
 				if args := functionCall.Get("args"); args.Exists() && gjson.Valid(args.Raw) && args.IsObject() {
 					inputRaw = args.Raw

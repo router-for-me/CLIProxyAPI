@@ -76,9 +76,17 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 					}
 				}
 			case "adaptive", "auto":
-				// Claude adaptive/auto means "enable with max capacity"; keep it as highest level
-				// and let ApplyThinking normalize per target model capability.
-				out, _ = sjson.Set(out, "reasoning_effort", string(thinking.LevelXHigh))
+				// Adaptive thinking can carry an explicit effort in output_config.effort (Claude 4.6).
+				// Pass through directly; ApplyThinking handles clamping to target model's levels.
+				effort := ""
+				if v := root.Get("output_config.effort"); v.Exists() && v.Type == gjson.String {
+					effort = strings.ToLower(strings.TrimSpace(v.String()))
+				}
+				if effort != "" {
+					out, _ = sjson.Set(out, "reasoning_effort", effort)
+				} else {
+					out, _ = sjson.Set(out, "reasoning_effort", string(thinking.LevelXHigh))
+				}
 			case "disabled":
 				if effort, ok := thinking.ConvertBudgetToLevel(0); ok && effort != "" {
 					out, _ = sjson.Set(out, "reasoning_effort", effort)
@@ -175,7 +183,12 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 						// Collect tool_result to emit after the main message (ensures tool results follow tool_calls)
 						toolResultJSON := `{"role":"tool","tool_call_id":"","content":""}`
 						toolResultJSON, _ = sjson.Set(toolResultJSON, "tool_call_id", part.Get("tool_use_id").String())
-						toolResultJSON, _ = sjson.Set(toolResultJSON, "content", convertClaudeToolResultContentToString(part.Get("content")))
+						toolResultContent, toolResultContentRaw := convertClaudeToolResultContent(part.Get("content"))
+						if toolResultContentRaw {
+							toolResultJSON, _ = sjson.SetRaw(toolResultJSON, "content", toolResultContent)
+						} else {
+							toolResultJSON, _ = sjson.Set(toolResultJSON, "content", toolResultContent)
+						}
 						toolResults = append(toolResults, toolResultJSON)
 					}
 					return true
@@ -366,21 +379,41 @@ func convertClaudeContentPart(part gjson.Result) (string, bool) {
 	}
 }
 
-func convertClaudeToolResultContentToString(content gjson.Result) string {
+func convertClaudeToolResultContent(content gjson.Result) (string, bool) {
 	if !content.Exists() {
-		return ""
+		return "", false
 	}
 
 	if content.Type == gjson.String {
-		return content.String()
+		return content.String(), false
 	}
 
 	if content.IsArray() {
 		var parts []string
+		contentJSON := "[]"
+		hasImagePart := false
 		content.ForEach(func(_, item gjson.Result) bool {
 			switch {
 			case item.Type == gjson.String:
-				parts = append(parts, item.String())
+				text := item.String()
+				parts = append(parts, text)
+				textContent := `{"type":"text","text":""}`
+				textContent, _ = sjson.Set(textContent, "text", text)
+				contentJSON, _ = sjson.SetRaw(contentJSON, "-1", textContent)
+			case item.IsObject() && item.Get("type").String() == "text":
+				text := item.Get("text").String()
+				parts = append(parts, text)
+				textContent := `{"type":"text","text":""}`
+				textContent, _ = sjson.Set(textContent, "text", text)
+				contentJSON, _ = sjson.SetRaw(contentJSON, "-1", textContent)
+			case item.IsObject() && item.Get("type").String() == "image":
+				contentItem, ok := convertClaudeContentPart(item)
+				if ok {
+					contentJSON, _ = sjson.SetRaw(contentJSON, "-1", contentItem)
+					hasImagePart = true
+				} else {
+					parts = append(parts, item.Raw)
+				}
 			case item.IsObject() && item.Get("text").Exists() && item.Get("text").Type == gjson.String:
 				parts = append(parts, item.Get("text").String())
 			default:
@@ -389,19 +422,31 @@ func convertClaudeToolResultContentToString(content gjson.Result) string {
 			return true
 		})
 
+		if hasImagePart {
+			return contentJSON, true
+		}
+
 		joined := strings.Join(parts, "\n\n")
 		if strings.TrimSpace(joined) != "" {
-			return joined
+			return joined, false
 		}
-		return content.Raw
+		return content.Raw, false
 	}
 
 	if content.IsObject() {
-		if text := content.Get("text"); text.Exists() && text.Type == gjson.String {
-			return text.String()
+		if content.Get("type").String() == "image" {
+			contentItem, ok := convertClaudeContentPart(content)
+			if ok {
+				contentJSON := "[]"
+				contentJSON, _ = sjson.SetRaw(contentJSON, "-1", contentItem)
+				return contentJSON, true
+			}
 		}
-		return content.Raw
+		if text := content.Get("text"); text.Exists() && text.Type == gjson.String {
+			return text.String(), false
+		}
+		return content.Raw, false
 	}
 
-	return content.Raw
+	return content.Raw, false
 }

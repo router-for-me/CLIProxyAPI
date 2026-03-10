@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -56,17 +57,45 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 	if v := root.Get("reasoning.effort"); v.Exists() {
 		effort := strings.ToLower(strings.TrimSpace(v.String()))
 		if effort != "" {
-			budget, ok := thinking.ConvertLevelToBudget(effort)
-			if ok {
-				switch budget {
-				case 0:
+			mi := registry.LookupModelInfo(modelName, "claude")
+			supportsAdaptive := mi != nil && mi.Thinking != nil && len(mi.Thinking.Levels) > 0
+			supportsMax := supportsAdaptive && thinking.HasLevel(mi.Thinking.Levels, string(thinking.LevelMax))
+
+			// Claude 4.6 supports adaptive thinking with output_config.effort.
+			// MapToClaudeEffort normalizes levels (e.g. minimal→low, xhigh→high) to avoid
+			// validation errors since validate treats same-provider unsupported levels as errors.
+			if supportsAdaptive {
+				switch effort {
+				case "none":
 					out, _ = sjson.Set(out, "thinking.type", "disabled")
-				case -1:
-					out, _ = sjson.Set(out, "thinking.type", "enabled")
+					out, _ = sjson.Delete(out, "thinking.budget_tokens")
+					out, _ = sjson.Delete(out, "output_config.effort")
+				case "auto":
+					out, _ = sjson.Set(out, "thinking.type", "adaptive")
+					out, _ = sjson.Delete(out, "thinking.budget_tokens")
+					out, _ = sjson.Delete(out, "output_config.effort")
 				default:
-					if budget > 0 {
+					if mapped, ok := thinking.MapToClaudeEffort(effort, supportsMax); ok {
+						effort = mapped
+					}
+					out, _ = sjson.Set(out, "thinking.type", "adaptive")
+					out, _ = sjson.Delete(out, "thinking.budget_tokens")
+					out, _ = sjson.Set(out, "output_config.effort", effort)
+				}
+			} else {
+				// Legacy/manual thinking (budget_tokens).
+				budget, ok := thinking.ConvertLevelToBudget(effort)
+				if ok {
+					switch budget {
+					case 0:
+						out, _ = sjson.Set(out, "thinking.type", "disabled")
+					case -1:
 						out, _ = sjson.Set(out, "thinking.type", "enabled")
-						out, _ = sjson.Set(out, "thinking.budget_tokens", budget)
+					default:
+						if budget > 0 {
+							out, _ = sjson.Set(out, "thinking.type", "enabled")
+							out, _ = sjson.Set(out, "thinking.budget_tokens", budget)
+						}
 					}
 				}
 			}

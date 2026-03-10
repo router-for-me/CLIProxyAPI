@@ -488,6 +488,114 @@ func TestConvertClaudeRequestToOpenAI_ToolResultObjectContent(t *testing.T) {
 	}
 }
 
+func TestConvertClaudeRequestToOpenAI_ToolResultTextAndImageContent(t *testing.T) {
+	inputJSON := `{
+		"model": "claude-3-opus",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "call_1", "name": "do_work", "input": {"a": 1}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{
+						"type": "tool_result",
+						"tool_use_id": "call_1",
+						"content": [
+							{"type": "text", "text": "tool ok"},
+							{
+								"type": "image",
+								"source": {
+									"type": "base64",
+									"media_type": "image/png",
+									"data": "iVBORw0KGgoAAAANSUhEUg=="
+								}
+							}
+						]
+					}
+				]
+			}
+		]
+	}`
+
+	result := ConvertClaudeRequestToOpenAI("test-model", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+	messages := resultJSON.Get("messages").Array()
+
+	if len(messages) != 2 {
+		t.Fatalf("Expected 2 messages, got %d. Messages: %s", len(messages), resultJSON.Get("messages").Raw)
+	}
+
+	toolContent := messages[1].Get("content")
+	if !toolContent.IsArray() {
+		t.Fatalf("Expected tool content array, got %s", toolContent.Raw)
+	}
+	if got := toolContent.Get("0.type").String(); got != "text" {
+		t.Fatalf("Expected first tool content type %q, got %q", "text", got)
+	}
+	if got := toolContent.Get("0.text").String(); got != "tool ok" {
+		t.Fatalf("Expected first tool content text %q, got %q", "tool ok", got)
+	}
+	if got := toolContent.Get("1.type").String(); got != "image_url" {
+		t.Fatalf("Expected second tool content type %q, got %q", "image_url", got)
+	}
+	if got := toolContent.Get("1.image_url.url").String(); got != "data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==" {
+		t.Fatalf("Unexpected image_url: %q", got)
+	}
+}
+
+func TestConvertClaudeRequestToOpenAI_ToolResultURLImageOnly(t *testing.T) {
+	inputJSON := `{
+		"model": "claude-3-opus",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "call_1", "name": "do_work", "input": {"a": 1}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{
+						"type": "tool_result",
+						"tool_use_id": "call_1",
+						"content": {
+							"type": "image",
+							"source": {
+								"type": "url",
+								"url": "https://example.com/tool.png"
+							}
+						}
+					}
+				]
+			}
+		]
+	}`
+
+	result := ConvertClaudeRequestToOpenAI("test-model", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+	messages := resultJSON.Get("messages").Array()
+
+	if len(messages) != 2 {
+		t.Fatalf("Expected 2 messages, got %d. Messages: %s", len(messages), resultJSON.Get("messages").Raw)
+	}
+
+	toolContent := messages[1].Get("content")
+	if !toolContent.IsArray() {
+		t.Fatalf("Expected tool content array, got %s", toolContent.Raw)
+	}
+	if got := toolContent.Get("0.type").String(); got != "image_url" {
+		t.Fatalf("Expected tool content type %q, got %q", "image_url", got)
+	}
+	if got := toolContent.Get("0.image_url.url").String(); got != "https://example.com/tool.png" {
+		t.Fatalf("Unexpected image_url: %q", got)
+	}
+}
+
 func TestConvertClaudeRequestToOpenAI_AssistantTextToolUseTextOrder(t *testing.T) {
 	inputJSON := `{
 		"model": "claude-3-opus",

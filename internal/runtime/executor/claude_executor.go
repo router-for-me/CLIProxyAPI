@@ -187,17 +187,15 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	}
 	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		// Decompress error responses (e.g. gzip-compressed 400 errors from Anthropic API).
-		errBody := httpResp.Body
-		if ce := httpResp.Header.Get("Content-Encoding"); ce != "" {
-			var decErr error
-			errBody, decErr = decodeResponseBody(httpResp.Body, ce)
-			if decErr != nil {
-				recordAPIResponseError(ctx, e.cfg, decErr)
-				msg := fmt.Sprintf("failed to decode error response body (encoding=%s): %v", ce, decErr)
-				logWithRequestID(ctx).Warn(msg)
-				return resp, statusErr{code: httpResp.StatusCode, msg: msg}
-			}
+		// Decompress error responses — pass the Content-Encoding value (may be empty)
+		// and let decodeResponseBody handle both header-declared and magic-byte-detected
+		// compression.  This keeps error-path behaviour consistent with the success path.
+		errBody, decErr := decodeResponseBody(httpResp.Body, httpResp.Header.Get("Content-Encoding"))
+		if decErr != nil {
+			recordAPIResponseError(ctx, e.cfg, decErr)
+			msg := fmt.Sprintf("failed to decode error response body: %v", decErr)
+			logWithRequestID(ctx).Warn(msg)
+			return resp, statusErr{code: httpResp.StatusCode, msg: msg}
 		}
 		b, readErr := io.ReadAll(errBody)
 		if readErr != nil {
@@ -352,17 +350,15 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	}
 	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		// Decompress error responses (e.g. gzip-compressed 400 errors from Anthropic API).
-		errBody := httpResp.Body
-		if ce := httpResp.Header.Get("Content-Encoding"); ce != "" {
-			var decErr error
-			errBody, decErr = decodeResponseBody(httpResp.Body, ce)
-			if decErr != nil {
-				recordAPIResponseError(ctx, e.cfg, decErr)
-				msg := fmt.Sprintf("failed to decode error response body (encoding=%s): %v", ce, decErr)
-				logWithRequestID(ctx).Warn(msg)
-				return nil, statusErr{code: httpResp.StatusCode, msg: msg}
-			}
+		// Decompress error responses — pass the Content-Encoding value (may be empty)
+		// and let decodeResponseBody handle both header-declared and magic-byte-detected
+		// compression.  This keeps error-path behaviour consistent with the success path.
+		errBody, decErr := decodeResponseBody(httpResp.Body, httpResp.Header.Get("Content-Encoding"))
+		if decErr != nil {
+			recordAPIResponseError(ctx, e.cfg, decErr)
+			msg := fmt.Sprintf("failed to decode error response body: %v", decErr)
+			logWithRequestID(ctx).Warn(msg)
+			return nil, statusErr{code: httpResp.StatusCode, msg: msg}
 		}
 		b, readErr := io.ReadAll(errBody)
 		if readErr != nil {
@@ -521,17 +517,15 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	}
 	recordAPIResponseMetadata(ctx, e.cfg, resp.StatusCode, resp.Header.Clone())
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		// Decompress error responses (e.g. gzip-compressed 400 errors from Anthropic API).
-		errBody := resp.Body
-		if ce := resp.Header.Get("Content-Encoding"); ce != "" {
-			var decErr error
-			errBody, decErr = decodeResponseBody(resp.Body, ce)
-			if decErr != nil {
-				recordAPIResponseError(ctx, e.cfg, decErr)
-				msg := fmt.Sprintf("failed to decode error response body (encoding=%s): %v", ce, decErr)
-				logWithRequestID(ctx).Warn(msg)
-				return cliproxyexecutor.Response{}, statusErr{code: resp.StatusCode, msg: msg}
-			}
+		// Decompress error responses — pass the Content-Encoding value (may be empty)
+		// and let decodeResponseBody handle both header-declared and magic-byte-detected
+		// compression.  This keeps error-path behaviour consistent with the success path.
+		errBody, decErr := decodeResponseBody(resp.Body, resp.Header.Get("Content-Encoding"))
+		if decErr != nil {
+			recordAPIResponseError(ctx, e.cfg, decErr)
+			msg := fmt.Sprintf("failed to decode error response body: %v", decErr)
+			logWithRequestID(ctx).Warn(msg)
+			return cliproxyexecutor.Response{}, statusErr{code: resp.StatusCode, msg: msg}
 		}
 		b, readErr := io.ReadAll(errBody)
 		if readErr != nil {
@@ -634,6 +628,12 @@ func disableThinkingIfToolChoiceForced(body []byte) []byte {
 	if toolChoiceType == "any" || toolChoiceType == "tool" {
 		// Remove thinking configuration entirely to avoid API error
 		body, _ = sjson.DeleteBytes(body, "thinking")
+		// Adaptive thinking may also set output_config.effort; remove it to avoid
+		// leaking thinking controls when tool_choice forces tool use.
+		body, _ = sjson.DeleteBytes(body, "output_config.effort")
+		if oc := gjson.GetBytes(body, "output_config"); oc.Exists() && oc.IsObject() && len(oc.Map()) == 0 {
+			body, _ = sjson.DeleteBytes(body, "output_config")
+		}
 	}
 	return body
 }
@@ -656,12 +656,61 @@ func (c *compositeReadCloser) Close() error {
 	return firstErr
 }
 
+// peekableBody wraps a bufio.Reader around the original ReadCloser so that
+// magic bytes can be inspected without consuming them from the stream.
+type peekableBody struct {
+	*bufio.Reader
+	closer io.Closer
+}
+
+func (p *peekableBody) Close() error {
+	return p.closer.Close()
+}
+
 func decodeResponseBody(body io.ReadCloser, contentEncoding string) (io.ReadCloser, error) {
 	if body == nil {
 		return nil, fmt.Errorf("response body is nil")
 	}
 	if contentEncoding == "" {
-		return body, nil
+		// No Content-Encoding header.  Attempt best-effort magic-byte detection to
+		// handle misbehaving upstreams that compress without setting the header.
+		// Only gzip (1f 8b) and zstd (28 b5 2f fd) have reliable magic sequences;
+		// br and deflate have none and are left as-is.
+		// The bufio wrapper preserves unread bytes so callers always see the full
+		// stream regardless of whether decompression was applied.
+		pb := &peekableBody{Reader: bufio.NewReader(body), closer: body}
+		magic, peekErr := pb.Peek(4)
+		if peekErr == nil || (peekErr == io.EOF && len(magic) >= 2) {
+			switch {
+			case len(magic) >= 2 && magic[0] == 0x1f && magic[1] == 0x8b:
+				gzipReader, gzErr := gzip.NewReader(pb)
+				if gzErr != nil {
+					_ = pb.Close()
+					return nil, fmt.Errorf("magic-byte gzip: failed to create reader: %w", gzErr)
+				}
+				return &compositeReadCloser{
+					Reader: gzipReader,
+					closers: []func() error{
+						gzipReader.Close,
+						pb.Close,
+					},
+				}, nil
+			case len(magic) >= 4 && magic[0] == 0x28 && magic[1] == 0xb5 && magic[2] == 0x2f && magic[3] == 0xfd:
+				decoder, zdErr := zstd.NewReader(pb)
+				if zdErr != nil {
+					_ = pb.Close()
+					return nil, fmt.Errorf("magic-byte zstd: failed to create reader: %w", zdErr)
+				}
+				return &compositeReadCloser{
+					Reader: decoder,
+					closers: []func() error{
+						func() error { decoder.Close(); return nil },
+						pb.Close,
+					},
+				}, nil
+			}
+		}
+		return pb, nil
 	}
 	encodings := strings.Split(contentEncoding, ",")
 	for _, raw := range encodings {
@@ -838,11 +887,15 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 		r.Header.Set("User-Agent", hdrDefault(hd.UserAgent, "claude-cli/2.1.63 (external, cli)"))
 	}
 	r.Header.Set("Connection", "keep-alive")
-	r.Header.Set("Accept-Encoding", "gzip, deflate, br, zstd")
 	if stream {
 		r.Header.Set("Accept", "text/event-stream")
+		// SSE streams must not be compressed: the downstream scanner reads
+		// line-delimited text and cannot parse compressed bytes.  Using
+		// "identity" tells the upstream to send an uncompressed stream.
+		r.Header.Set("Accept-Encoding", "identity")
 	} else {
 		r.Header.Set("Accept", "application/json")
+		r.Header.Set("Accept-Encoding", "gzip, deflate, br, zstd")
 	}
 	// Keep OS/Arch mapping dynamic (not configurable).
 	// They intentionally continue to derive from runtime.GOOS/runtime.GOARCH.
@@ -851,6 +904,12 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(r, attrs)
+	// Re-enforce Accept-Encoding: identity after ApplyCustomHeadersFromAttrs, which
+	// may override it with a user-configured value.  Compressed SSE breaks the line
+	// scanner regardless of user preference, so this is non-negotiable for streams.
+	if stream {
+		r.Header.Set("Accept-Encoding", "identity")
+	}
 }
 
 func claudeCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
@@ -1207,6 +1266,10 @@ func checkSystemInstructionsWithMode(payload []byte, strictMode bool) []byte {
 			}
 			return true
 		})
+	} else if system.Type == gjson.String && system.String() != "" {
+		partJSON := `{"type":"text","cache_control":{"type":"ephemeral"}}`
+		partJSON, _ = sjson.Set(partJSON, "text", system.String())
+		result += "," + partJSON
 	}
 	result += "]"
 
@@ -1426,25 +1489,27 @@ func countCacheControlsMap(root map[string]any) int {
 	return count
 }
 
-func normalizeTTLForBlock(obj map[string]any, seen5m *bool) {
+func normalizeTTLForBlock(obj map[string]any, seen5m *bool) bool {
 	ccRaw, exists := obj["cache_control"]
 	if !exists {
-		return
+		return false
 	}
 	cc, ok := asObject(ccRaw)
 	if !ok {
 		*seen5m = true
-		return
+		return false
 	}
 	ttlRaw, ttlExists := cc["ttl"]
 	ttl, ttlIsString := ttlRaw.(string)
 	if !ttlExists || !ttlIsString || ttl != "1h" {
 		*seen5m = true
-		return
+		return false
 	}
 	if *seen5m {
 		delete(cc, "ttl")
+		return true
 	}
+	return false
 }
 
 func findLastCacheControlIndex(arr []any) int {
@@ -1540,11 +1605,14 @@ func normalizeCacheControlTTL(payload []byte) []byte {
 	}
 
 	seen5m := false
+	modified := false
 
 	if tools, ok := asArray(root["tools"]); ok {
 		for _, tool := range tools {
 			if obj, ok := asObject(tool); ok {
-				normalizeTTLForBlock(obj, &seen5m)
+				if normalizeTTLForBlock(obj, &seen5m) {
+					modified = true
+				}
 			}
 		}
 	}
@@ -1552,7 +1620,9 @@ func normalizeCacheControlTTL(payload []byte) []byte {
 	if system, ok := asArray(root["system"]); ok {
 		for _, item := range system {
 			if obj, ok := asObject(item); ok {
-				normalizeTTLForBlock(obj, &seen5m)
+				if normalizeTTLForBlock(obj, &seen5m) {
+					modified = true
+				}
 			}
 		}
 	}
@@ -1569,12 +1639,17 @@ func normalizeCacheControlTTL(payload []byte) []byte {
 			}
 			for _, item := range content {
 				if obj, ok := asObject(item); ok {
-					normalizeTTLForBlock(obj, &seen5m)
+					if normalizeTTLForBlock(obj, &seen5m) {
+						modified = true
+					}
 				}
 			}
 		}
 	}
 
+	if !modified {
+		return payload
+	}
 	return marshalPayloadObject(payload, root)
 }
 

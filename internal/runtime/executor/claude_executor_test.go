@@ -2,6 +2,7 @@ package executor
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"io"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/klauspost/compress/zstd"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
@@ -367,6 +369,19 @@ func TestNormalizeCacheControlTTL_DowngradesLaterOneHourBlocks(t *testing.T) {
 	}
 }
 
+func TestNormalizeCacheControlTTL_PreservesOriginalBytesWhenNoChange(t *testing.T) {
+	// Payload where no TTL normalization is needed (all blocks use 1h with no
+	// preceding 5m block). The text intentionally contains HTML chars (<, >, &)
+	// that json.Marshal would escape to \u003c etc., altering byte identity.
+	payload := []byte(`{"tools":[{"name":"t1","cache_control":{"type":"ephemeral","ttl":"1h"}}],"system":[{"type":"text","text":"<system-reminder>foo & bar</system-reminder>","cache_control":{"type":"ephemeral","ttl":"1h"}}],"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]}`)
+
+	out := normalizeCacheControlTTL(payload)
+
+	if !bytes.Equal(out, payload) {
+		t.Fatalf("normalizeCacheControlTTL altered bytes when no change was needed.\noriginal: %s\ngot:      %s", payload, out)
+	}
+}
+
 func TestEnforceCacheControlLimit_StripsNonLastToolBeforeMessages(t *testing.T) {
 	payload := []byte(`{
 		"tools": [
@@ -581,5 +596,471 @@ func testClaudeExecutorInvalidCompressedErrorBody(
 	}
 	if statusProvider, ok := err.(interface{ StatusCode() int }); !ok || statusProvider.StatusCode() != http.StatusBadRequest {
 		t.Fatalf("expected status code 400, got: %v", err)
+	}
+}
+
+// TestClaudeExecutor_ExecuteStream_SetsIdentityAcceptEncoding verifies that streaming
+// requests use Accept-Encoding: identity so the upstream cannot respond with a
+// compressed SSE body that would silently break the line scanner.
+func TestClaudeExecutor_ExecuteStream_SetsIdentityAcceptEncoding(t *testing.T) {
+	var gotEncoding, gotAccept string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotEncoding = r.Header.Get("Accept-Encoding")
+		gotAccept = r.Header.Get("Accept")
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"message_stop\"}\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": server.URL,
+	}}
+	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+
+	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet-20241022",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("unexpected chunk error: %v", chunk.Err)
+		}
+	}
+
+	if gotEncoding != "identity" {
+		t.Errorf("Accept-Encoding = %q, want %q", gotEncoding, "identity")
+	}
+	if gotAccept != "text/event-stream" {
+		t.Errorf("Accept = %q, want %q", gotAccept, "text/event-stream")
+	}
+}
+
+// TestClaudeExecutor_Execute_SetsCompressedAcceptEncoding verifies that non-streaming
+// requests keep the full accept-encoding to allow response compression (which
+// decodeResponseBody handles correctly).
+func TestClaudeExecutor_Execute_SetsCompressedAcceptEncoding(t *testing.T) {
+	var gotEncoding, gotAccept string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotEncoding = r.Header.Get("Accept-Encoding")
+		gotAccept = r.Header.Get("Accept")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","model":"claude-3-5-sonnet-20241022","role":"assistant","content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": server.URL,
+	}}
+	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet-20241022",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+
+	if gotEncoding != "gzip, deflate, br, zstd" {
+		t.Errorf("Accept-Encoding = %q, want %q", gotEncoding, "gzip, deflate, br, zstd")
+	}
+	if gotAccept != "application/json" {
+		t.Errorf("Accept = %q, want %q", gotAccept, "application/json")
+	}
+}
+
+// TestClaudeExecutor_ExecuteStream_GzipSuccessBodyDecoded verifies that a streaming
+// HTTP 200 response with Content-Encoding: gzip is correctly decompressed before
+// the line scanner runs, so SSE chunks are not silently dropped.
+func TestClaudeExecutor_ExecuteStream_GzipSuccessBodyDecoded(t *testing.T) {
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	_, _ = gz.Write([]byte("data: {\"type\":\"message_stop\"}\n"))
+	_ = gz.Close()
+	compressedBody := buf.Bytes()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Content-Encoding", "gzip")
+		_, _ = w.Write(compressedBody)
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": server.URL,
+	}}
+	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+
+	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet-20241022",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+
+	var combined strings.Builder
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("chunk error: %v", chunk.Err)
+		}
+		combined.Write(chunk.Payload)
+	}
+
+	if combined.Len() == 0 {
+		t.Fatal("expected at least one chunk from gzip-encoded SSE body, got none (body was not decompressed)")
+	}
+	if !strings.Contains(combined.String(), "message_stop") {
+		t.Errorf("expected SSE content in chunks, got: %q", combined.String())
+	}
+}
+
+// TestDecodeResponseBody_MagicByteGzipNoHeader verifies that decodeResponseBody
+// detects gzip-compressed content via magic bytes even when Content-Encoding is absent.
+func TestDecodeResponseBody_MagicByteGzipNoHeader(t *testing.T) {
+	const plaintext = "data: {\"type\":\"message_stop\"}\n"
+
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	_, _ = gz.Write([]byte(plaintext))
+	_ = gz.Close()
+
+	rc := io.NopCloser(&buf)
+	decoded, err := decodeResponseBody(rc, "")
+	if err != nil {
+		t.Fatalf("decodeResponseBody error: %v", err)
+	}
+	defer decoded.Close()
+
+	got, err := io.ReadAll(decoded)
+	if err != nil {
+		t.Fatalf("ReadAll error: %v", err)
+	}
+	if string(got) != plaintext {
+		t.Errorf("decoded = %q, want %q", got, plaintext)
+	}
+}
+
+// TestDecodeResponseBody_PlainTextNoHeader verifies that decodeResponseBody returns
+// plain text untouched when Content-Encoding is absent and no magic bytes match.
+func TestDecodeResponseBody_PlainTextNoHeader(t *testing.T) {
+	const plaintext = "data: {\"type\":\"message_stop\"}\n"
+	rc := io.NopCloser(strings.NewReader(plaintext))
+	decoded, err := decodeResponseBody(rc, "")
+	if err != nil {
+		t.Fatalf("decodeResponseBody error: %v", err)
+	}
+	defer decoded.Close()
+
+	got, err := io.ReadAll(decoded)
+	if err != nil {
+		t.Fatalf("ReadAll error: %v", err)
+	}
+	if string(got) != plaintext {
+		t.Errorf("decoded = %q, want %q", got, plaintext)
+	}
+}
+
+// TestClaudeExecutor_ExecuteStream_GzipNoContentEncodingHeader verifies the full
+// pipeline: when the upstream returns a gzip-compressed SSE body WITHOUT setting
+// Content-Encoding (a misbehaving upstream), the magic-byte sniff in
+// decodeResponseBody still decompresses it, so chunks reach the caller.
+func TestClaudeExecutor_ExecuteStream_GzipNoContentEncodingHeader(t *testing.T) {
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	_, _ = gz.Write([]byte("data: {\"type\":\"message_stop\"}\n"))
+	_ = gz.Close()
+	compressedBody := buf.Bytes()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		// Intentionally omit Content-Encoding to simulate misbehaving upstream.
+		_, _ = w.Write(compressedBody)
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": server.URL,
+	}}
+	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+
+	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet-20241022",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+
+	var combined strings.Builder
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("chunk error: %v", chunk.Err)
+		}
+		combined.Write(chunk.Payload)
+	}
+
+	if combined.Len() == 0 {
+		t.Fatal("expected chunks from gzip body without Content-Encoding header, got none (magic-byte sniff failed)")
+	}
+	if !strings.Contains(combined.String(), "message_stop") {
+		t.Errorf("unexpected chunk content: %q", combined.String())
+	}
+}
+
+// TestClaudeExecutor_ExecuteStream_AcceptEncodingOverrideCannotBypassIdentity verifies
+// that injecting Accept-Encoding via auth.Attributes cannot override the stream
+// path's enforced identity encoding.
+func TestClaudeExecutor_ExecuteStream_AcceptEncodingOverrideCannotBypassIdentity(t *testing.T) {
+	var gotEncoding string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotEncoding = r.Header.Get("Accept-Encoding")
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"message_stop\"}\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	// Inject Accept-Encoding via the custom header attribute mechanism.
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":             "key-123",
+		"base_url":            server.URL,
+		"header:Accept-Encoding": "gzip, deflate, br, zstd",
+	}}
+	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+
+	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet-20241022",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("unexpected chunk error: %v", chunk.Err)
+		}
+	}
+
+	if gotEncoding != "identity" {
+		t.Errorf("Accept-Encoding = %q; stream path must enforce identity regardless of auth.Attributes override", gotEncoding)
+	}
+}
+
+// TestDecodeResponseBody_MagicByteZstdNoHeader verifies that decodeResponseBody
+// detects zstd-compressed content via magic bytes (28 b5 2f fd) even when
+// Content-Encoding is absent.
+func TestDecodeResponseBody_MagicByteZstdNoHeader(t *testing.T) {
+	const plaintext = "data: {\"type\":\"message_stop\"}\n"
+
+	var buf bytes.Buffer
+	enc, err := zstd.NewWriter(&buf)
+	if err != nil {
+		t.Fatalf("zstd.NewWriter: %v", err)
+	}
+	_, _ = enc.Write([]byte(plaintext))
+	_ = enc.Close()
+
+	rc := io.NopCloser(&buf)
+	decoded, err := decodeResponseBody(rc, "")
+	if err != nil {
+		t.Fatalf("decodeResponseBody error: %v", err)
+	}
+	defer decoded.Close()
+
+	got, err := io.ReadAll(decoded)
+	if err != nil {
+		t.Fatalf("ReadAll error: %v", err)
+	}
+	if string(got) != plaintext {
+		t.Errorf("decoded = %q, want %q", got, plaintext)
+	}
+}
+
+// TestClaudeExecutor_Execute_GzipErrorBodyNoContentEncodingHeader verifies that the
+// error path (4xx) correctly decompresses a gzip body even when the upstream omits
+// the Content-Encoding header.  This closes the gap left by PR #1771, which only
+// fixed header-declared compression on the error path.
+func TestClaudeExecutor_Execute_GzipErrorBodyNoContentEncodingHeader(t *testing.T) {
+	const errJSON = `{"type":"error","error":{"type":"invalid_request_error","message":"test error"}}`
+
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	_, _ = gz.Write([]byte(errJSON))
+	_ = gz.Close()
+	compressedBody := buf.Bytes()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// Intentionally omit Content-Encoding to simulate misbehaving upstream.
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write(compressedBody)
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": server.URL,
+	}}
+	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet-20241022",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+	})
+	if err == nil {
+		t.Fatal("expected an error for 400 response, got nil")
+	}
+	if !strings.Contains(err.Error(), "test error") {
+		t.Errorf("error message should contain decompressed JSON, got: %q", err.Error())
+	}
+}
+
+// TestClaudeExecutor_ExecuteStream_GzipErrorBodyNoContentEncodingHeader verifies
+// the same for the streaming executor: 4xx gzip body without Content-Encoding is
+// decoded and the error message is readable.
+func TestClaudeExecutor_ExecuteStream_GzipErrorBodyNoContentEncodingHeader(t *testing.T) {
+	const errJSON = `{"type":"error","error":{"type":"invalid_request_error","message":"stream test error"}}`
+
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	_, _ = gz.Write([]byte(errJSON))
+	_ = gz.Close()
+	compressedBody := buf.Bytes()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// Intentionally omit Content-Encoding to simulate misbehaving upstream.
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write(compressedBody)
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": server.URL,
+	}}
+	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+
+	_, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet-20241022",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+	})
+	if err == nil {
+		t.Fatal("expected an error for 400 response, got nil")
+	}
+	if !strings.Contains(err.Error(), "stream test error") {
+		t.Errorf("error message should contain decompressed JSON, got: %q", err.Error())
+	}
+}
+
+// Test case 1: String system prompt is preserved and converted to a content block
+func TestCheckSystemInstructionsWithMode_StringSystemPreserved(t *testing.T) {
+	payload := []byte(`{"system":"You are a helpful assistant.","messages":[{"role":"user","content":"hi"}]}`)
+
+	out := checkSystemInstructionsWithMode(payload, false)
+
+	system := gjson.GetBytes(out, "system")
+	if !system.IsArray() {
+		t.Fatalf("system should be an array, got %s", system.Type)
+	}
+
+	blocks := system.Array()
+	if len(blocks) != 3 {
+		t.Fatalf("expected 3 system blocks, got %d", len(blocks))
+	}
+
+	if !strings.HasPrefix(blocks[0].Get("text").String(), "x-anthropic-billing-header:") {
+		t.Fatalf("blocks[0] should be billing header, got %q", blocks[0].Get("text").String())
+	}
+	if blocks[1].Get("text").String() != "You are a Claude agent, built on Anthropic's Claude Agent SDK." {
+		t.Fatalf("blocks[1] should be agent block, got %q", blocks[1].Get("text").String())
+	}
+	if blocks[2].Get("text").String() != "You are a helpful assistant." {
+		t.Fatalf("blocks[2] should be user system prompt, got %q", blocks[2].Get("text").String())
+	}
+	if blocks[2].Get("cache_control.type").String() != "ephemeral" {
+		t.Fatalf("blocks[2] should have cache_control.type=ephemeral")
+	}
+}
+
+// Test case 2: Strict mode drops the string system prompt
+func TestCheckSystemInstructionsWithMode_StringSystemStrict(t *testing.T) {
+	payload := []byte(`{"system":"You are a helpful assistant.","messages":[{"role":"user","content":"hi"}]}`)
+
+	out := checkSystemInstructionsWithMode(payload, true)
+
+	blocks := gjson.GetBytes(out, "system").Array()
+	if len(blocks) != 2 {
+		t.Fatalf("strict mode should produce 2 blocks, got %d", len(blocks))
+	}
+}
+
+// Test case 3: Empty string system prompt does not produce a spurious block
+func TestCheckSystemInstructionsWithMode_EmptyStringSystemIgnored(t *testing.T) {
+	payload := []byte(`{"system":"","messages":[{"role":"user","content":"hi"}]}`)
+
+	out := checkSystemInstructionsWithMode(payload, false)
+
+	blocks := gjson.GetBytes(out, "system").Array()
+	if len(blocks) != 2 {
+		t.Fatalf("empty string system should produce 2 blocks, got %d", len(blocks))
+	}
+}
+
+// Test case 4: Array system prompt is unaffected by the string handling
+func TestCheckSystemInstructionsWithMode_ArraySystemStillWorks(t *testing.T) {
+	payload := []byte(`{"system":[{"type":"text","text":"Be concise."}],"messages":[{"role":"user","content":"hi"}]}`)
+
+	out := checkSystemInstructionsWithMode(payload, false)
+
+	blocks := gjson.GetBytes(out, "system").Array()
+	if len(blocks) != 3 {
+		t.Fatalf("expected 3 system blocks, got %d", len(blocks))
+	}
+	if blocks[2].Get("text").String() != "Be concise." {
+		t.Fatalf("blocks[2] should be user system prompt, got %q", blocks[2].Get("text").String())
+	}
+}
+
+// Test case 5: Special characters in string system prompt survive conversion
+func TestCheckSystemInstructionsWithMode_StringWithSpecialChars(t *testing.T) {
+	payload := []byte(`{"system":"Use <xml> tags & \"quotes\" in output.","messages":[{"role":"user","content":"hi"}]}`)
+
+	out := checkSystemInstructionsWithMode(payload, false)
+
+	blocks := gjson.GetBytes(out, "system").Array()
+	if len(blocks) != 3 {
+		t.Fatalf("expected 3 system blocks, got %d", len(blocks))
+	}
+	if blocks[2].Get("text").String() != `Use <xml> tags & "quotes" in output.` {
+		t.Fatalf("blocks[2] text mangled, got %q", blocks[2].Get("text").String())
 	}
 }
