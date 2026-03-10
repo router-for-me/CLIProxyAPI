@@ -133,6 +133,10 @@ type Config struct {
 	// gemini-api-key, codex-api-key, claude-api-key, openai-compatibility, vertex-api-key, and ampcode.
 	OAuthModelAlias map[string][]OAuthModelAlias `yaml:"oauth-model-alias,omitempty" json:"oauth-model-alias,omitempty"`
 
+	// ModelPrices stores per-model pricing information (USD per million tokens)
+	// for cost estimation in the management UI. Persisted in the YAML config file.
+	ModelPrices map[string]ModelPrice `yaml:"model-prices,omitempty" json:"model-prices,omitempty"`
+
 	// Payload defines default and override rules for provider payload parameters.
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
 
@@ -205,6 +209,14 @@ type RoutingConfig struct {
 	// Strategy selects the credential selection strategy.
 	// Supported values: "round-robin" (default), "fill-first".
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
+}
+
+// ModelPrice stores per-model pricing information in USD per million tokens.
+// Used by the management UI to calculate usage cost estimates.
+type ModelPrice struct {
+	Prompt     float64 `yaml:"prompt" json:"prompt"`
+	Completion float64 `yaml:"completion" json:"completion"`
+	Cache      float64 `yaml:"cache" json:"cache"`
 }
 
 // OAuthModelAlias defines a model ID alias for a specific channel.
