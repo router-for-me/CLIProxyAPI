@@ -266,6 +266,34 @@ func TestAppendWebsocketEvent(t *testing.T) {
 	}
 }
 
+
+func TestAppendWebsocketEventTruncatesAtLimit(t *testing.T) {
+	var builder strings.Builder
+	payload := bytes.Repeat([]byte("x"), wsBodyLogMaxSize)
+
+	appendWebsocketEvent(&builder, "request", payload)
+
+	got := builder.String()
+	if len(got) > wsBodyLogMaxSize {
+		t.Fatalf("body log len = %d, want <= %d", len(got), wsBodyLogMaxSize)
+	}
+	if !strings.Contains(got, wsBodyLogTruncated) {
+		t.Fatalf("expected truncation marker in body log")
+	}
+}
+
+func TestAppendWebsocketEventNoGrowthAfterLimit(t *testing.T) {
+	var builder strings.Builder
+	appendWebsocketEvent(&builder, "request", bytes.Repeat([]byte("x"), wsBodyLogMaxSize))
+	initial := builder.String()
+
+	appendWebsocketEvent(&builder, "response", []byte(`{"type":"response.completed"}`))
+
+	if builder.String() != initial {
+		t.Fatalf("builder grew after reaching limit")
+	}
+}
+
 func TestSetWebsocketRequestBody(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()

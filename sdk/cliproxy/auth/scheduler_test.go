@@ -237,6 +237,41 @@ func TestSchedulerPick_MixedProvidersUsesProviderRotationOverReadyCandidates(t *
 	}
 }
 
+func TestSchedulerPick_MixedProvidersPrefersHighestPriorityTier(t *testing.T) {
+	t.Parallel()
+
+	model := "gpt-default"
+	registerSchedulerModels(t, "provider-low", model, "low")
+	registerSchedulerModels(t, "provider-high-a", model, "high-a")
+	registerSchedulerModels(t, "provider-high-b", model, "high-b")
+
+	scheduler := newSchedulerForTest(
+		&RoundRobinSelector{},
+		&Auth{ID: "low", Provider: "provider-low", Attributes: map[string]string{"priority": "4"}},
+		&Auth{ID: "high-a", Provider: "provider-high-a", Attributes: map[string]string{"priority": "7"}},
+		&Auth{ID: "high-b", Provider: "provider-high-b", Attributes: map[string]string{"priority": "7"}},
+	)
+
+	providers := []string{"provider-low", "provider-high-a", "provider-high-b"}
+	wantProviders := []string{"provider-high-a", "provider-high-b", "provider-high-a", "provider-high-b"}
+	wantIDs := []string{"high-a", "high-b", "high-a", "high-b"}
+	for index := range wantProviders {
+		got, provider, errPick := scheduler.pickMixed(context.Background(), providers, model, cliproxyexecutor.Options{}, nil)
+		if errPick != nil {
+			t.Fatalf("pickMixed() #%d error = %v", index, errPick)
+		}
+		if got == nil {
+			t.Fatalf("pickMixed() #%d auth = nil", index)
+		}
+		if provider != wantProviders[index] {
+			t.Fatalf("pickMixed() #%d provider = %q, want %q", index, provider, wantProviders[index])
+		}
+		if got.ID != wantIDs[index] {
+			t.Fatalf("pickMixed() #%d auth.ID = %q, want %q", index, got.ID, wantIDs[index])
+		}
+	}
+}
+
 func TestManager_PickNextMixed_UsesProviderRotationBeforeCredentialRotation(t *testing.T) {
 	t.Parallel()
 
