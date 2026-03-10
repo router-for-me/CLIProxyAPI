@@ -842,8 +842,8 @@ func TestClaudeExecutor_ExecuteStream_AcceptEncodingOverrideCannotBypassIdentity
 	executor := NewClaudeExecutor(&config.Config{})
 	// Inject Accept-Encoding via the custom header attribute mechanism.
 	auth := &cliproxyauth.Auth{Attributes: map[string]string{
-		"api_key":             "key-123",
-		"base_url":            server.URL,
+		"api_key":                "key-123",
+		"base_url":               server.URL,
 		"header:Accept-Encoding": "gzip, deflate, br, zstd",
 	}}
 	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
