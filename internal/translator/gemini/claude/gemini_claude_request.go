@@ -78,10 +78,10 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 			if contentsResult.IsArray() {
 				contentsResult.ForEach(func(_, contentResult gjson.Result) bool {
 					switch contentResult.Get("type").String() {
-					case "text":
-						part := `{"text":""}`
-						part, _ = sjson.Set(part, "text", contentResult.Get("text").String())
-						contentJSON, _ = sjson.SetRaw(contentJSON, "parts.-1", part)
+					case "text", "image":
+						if part, ok := convertClaudeContentPartToGeminiPart(contentResult); ok {
+							contentJSON, _ = sjson.SetRaw(contentJSON, "parts.-1", part)
+						}
 
 					case "tool_use":
 						functionName := contentResult.Get("name").String()
@@ -241,4 +241,46 @@ func toolNameFromClaudeToolUseID(toolUseID string) string {
 		return ""
 	}
 	return strings.Join(parts[0:len(parts)-1], "-")
+}
+
+func convertClaudeContentPartToGeminiPart(contentResult gjson.Result) (string, bool) {
+	switch contentResult.Get("type").String() {
+	case "text":
+		part := `{"text":""}`
+		part, _ = sjson.Set(part, "text", contentResult.Get("text").String())
+		return part, true
+
+	case "image":
+		source := contentResult.Get("source")
+		if !source.Exists() {
+			return "", false
+		}
+		sourceType := source.Get("type").String()
+		if sourceType != "" && sourceType != "base64" {
+			return "", false
+		}
+
+		data := source.Get("data").String()
+		if data == "" {
+			data = source.Get("base64").String()
+		}
+		if data == "" {
+			return "", false
+		}
+
+		mimeType := source.Get("media_type").String()
+		if mimeType == "" {
+			mimeType = source.Get("mime_type").String()
+		}
+		if mimeType == "" {
+			mimeType = "application/octet-stream"
+		}
+
+		part := `{"inline_data":{"mime_type":"","data":""}}`
+		part, _ = sjson.Set(part, "inline_data.mime_type", mimeType)
+		part, _ = sjson.Set(part, "inline_data.data", data)
+		return part, true
+	}
+
+	return "", false
 }
