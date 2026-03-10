@@ -590,7 +590,6 @@ func (e *CodexExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*
 				}
 				auth.Metadata["refresh_status"] = "failed"
 				auth.Metadata["refresh_message"] = err.Error()
-				delete(auth.Metadata, "refresh_msg")
 
 			// Persist the failure state to the auth file
 			if path := auth.Attributes["path"]; path != "" {
