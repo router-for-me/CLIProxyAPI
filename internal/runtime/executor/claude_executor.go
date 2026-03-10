@@ -578,7 +578,15 @@ func (e *ClaudeExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (
 	if refreshToken == "" {
 		return auth, nil
 	}
-	svc := claudeauth.NewClaudeAuth(e.cfg)
+	// Use per-account proxy_url for token refresh when global proxy-url is not set.
+	// Without this, refresh requests go direct when only the auth file has proxy_url.
+	cfg := e.cfg
+	if auth.ProxyURL != "" && cfg.SDKConfig.ProxyURL == "" {
+		cfgCopy := *cfg
+		cfgCopy.SDKConfig.ProxyURL = auth.ProxyURL
+		cfg = &cfgCopy
+	}
+	svc := claudeauth.NewClaudeAuth(cfg)
 	td, err := svc.RefreshTokens(ctx, refreshToken)
 	if err != nil {
 		return nil, err

@@ -1,0 +1,42 @@
+name: build-custom
+
+on:
+  push:
+    branches:
+      - 'fix/*'
+      - 'feat/*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build linux/amd64
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: amd64
+        run: |
+          VERSION=$(git describe --tags --always --dirty)-custom
+          COMMIT=$(git rev-parse --short HEAD)
+          BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          go build -o cli-proxy-api \
+            -ldflags "-s -w -X 'main.Version=${VERSION}' -X 'main.Commit=${COMMIT}' -X 'main.BuildDate=${BUILD_DATE}'" \
+            ./cmd/server/
+          echo "Built: ${VERSION} (${COMMIT})"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli-proxy-api-linux-amd64
+          path: cli-proxy-api
+          retention-days: 30

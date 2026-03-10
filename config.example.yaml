@@ -62,7 +62,18 @@ error-logs-max-files: 10
 # When false, disable in-memory usage statistics aggregation
 usage-statistics-enabled: false
 
-# Proxy URL. Supports socks5/http/https protocols. Example: socks5://user:pass@192.168.1.1:1080/
+# Global proxy URL for all outgoing connections (API requests + OAuth token refresh).
+# Supports socks5/http/https protocols. Example: socks5://user:pass@192.168.1.1:1080
+#
+# Proxy resolution priority (highest to lowest):
+#   1. Per-account proxy_url in auth credential JSON file (e.g. claude-user@example.com.json)
+#   2. This global proxy-url
+#   3. HTTPS_PROXY / HTTP_PROXY environment variables (standard http.Transport only)
+#
+# IMPORTANT: OAuth token refresh uses a custom TLS transport that does NOT read
+# HTTPS_PROXY environment variables. If you rely on env vars for proxy routing,
+# you must ALSO set this field or add "proxy_url" to your credential JSON files,
+# otherwise token refresh requests will attempt direct connections.
 proxy-url: ""
 
 # When true, unprefixed model requests only use credentials without a prefix (except when prefix == model name).
