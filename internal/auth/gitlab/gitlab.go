@@ -426,7 +426,7 @@ func ExtractDiscoveredModels(metadata map[string]any) []DiscoveredModel {
 		if name == "" {
 			return
 		}
-		key := strings.ToLower(provider + "\x00" + name)
+		key := strings.ToLower(name)
 		if _, ok := seen[key]; ok {
 			return
 		}

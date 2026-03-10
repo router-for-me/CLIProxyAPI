@@ -1,7 +1,6 @@
 package cliproxy
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
@@ -9,51 +8,41 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 )
 
-func TestRegisterModelsForAuth_GitLabUsesDiscoveredModelAndAlias(t *testing.T) {
+func TestRegisterModelsForAuth_GitLabUsesDiscoveredModels(t *testing.T) {
 	service := &Service{cfg: &config.Config{}}
 	auth := &coreauth.Auth{
-		ID:       "gitlab-auth",
+		ID:       "gitlab-auth.json",
 		Provider: "gitlab",
 		Status:   coreauth.StatusActive,
 		Metadata: map[string]any{
 			"model_details": map[string]any{
-				"model_provider": "mistral",
-				"model_name":     "codestral-2501",
+				"model_provider": "anthropic",
+				"model_name":     "claude-sonnet-4-5",
 			},
 		},
 	}
 
 	reg := registry.GetGlobalRegistry()
 	reg.UnregisterClient(auth.ID)
-	t.Cleanup(func() {
-		reg.UnregisterClient(auth.ID)
-	})
+	t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
 
 	service.registerModelsForAuth(auth)
-
 	models := reg.GetModelsForClient(auth.ID)
-	if len(models) == 0 {
-		t.Fatal("expected GitLab models to be registered")
+	if len(models) < 2 {
+		t.Fatalf("expected stable alias and discovered model, got %d entries", len(models))
 	}
 
-	seenActual := false
 	seenAlias := false
+	seenDiscovered := false
 	for _, model := range models {
-		if model == nil {
-			continue
-		}
-		switch strings.TrimSpace(model.ID) {
-		case "codestral-2501":
-			seenActual = true
+		switch model.ID {
 		case "gitlab-duo":
 			seenAlias = true
+		case "claude-sonnet-4-5":
+			seenDiscovered = true
 		}
 	}
-
-	if !seenActual {
-		t.Fatal("expected discovered GitLab model to be registered")
-	}
-	if !seenAlias {
-		t.Fatal("expected stable GitLab Duo alias to be registered")
+	if !seenAlias || !seenDiscovered {
+		t.Fatalf("expected gitlab-duo and discovered model, got %+v", models)
 	}
 }

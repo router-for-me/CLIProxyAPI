@@ -8,6 +8,8 @@ All third-party provider support is maintained by community contributors; CLIPro
 
 The Plus release stays in lockstep with the mainline features.
 
+GitLab Duo is supported here via OAuth or personal access token login, with model discovery and provider-native routing through the GitLab AI gateway when managed credentials are available.
+
 ## Contributing
 
 This project only accepts pull requests that relate to third-party provider support. Any pull requests unrelated to third-party provider support will be rejected.

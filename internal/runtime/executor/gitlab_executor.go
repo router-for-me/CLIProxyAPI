@@ -21,10 +21,10 @@ import (
 )
 
 const (
-	gitLabProviderKey            = "gitlab"
-	gitLabAuthMethodOAuth        = "oauth"
-	gitLabAuthMethodPAT          = "pat"
-	gitLabChatEndpoint           = "/api/v4/chat/completions"
+	gitLabProviderKey             = "gitlab"
+	gitLabAuthMethodOAuth         = "oauth"
+	gitLabAuthMethodPAT           = "pat"
+	gitLabChatEndpoint            = "/api/v4/chat/completions"
 	gitLabCodeSuggestionsEndpoint = "/api/v4/code_suggestions/completions"
 )
 
@@ -33,10 +33,10 @@ type GitLabExecutor struct {
 }
 
 type gitLabPrompt struct {
-	Instruction          string
-	FileName             string
-	ContentAboveCursor   string
-	ChatContext          []map[string]any
+	Instruction           string
+	FileName              string
+	ContentAboveCursor    string
+	ChatContext           []map[string]any
 	CodeSuggestionContext []map[string]any
 }
 
@@ -246,10 +246,10 @@ func (e *GitLabExecutor) requestCodeSuggestions(ctx context.Context, auth *clipr
 			"content_above_cursor": contentAbove,
 			"content_below_cursor": "",
 		},
-		"intent":          "generation",
-		"generation_type": "small_file",
+		"intent":           "generation",
+		"generation_type":  "small_file",
 		"user_instruction": prompt.Instruction,
-		"stream":          false,
+		"stream":           false,
 	}
 	if len(prompt.CodeSuggestionContext) > 0 {
 		body["context"] = prompt.CodeSuggestionContext

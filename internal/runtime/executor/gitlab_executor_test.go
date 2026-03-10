@@ -2,123 +2,154 @@ package executor
 
 import (
 	"context"
-	"io"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
+	"github.com/tidwall/gjson"
 )
 
-func TestGitLabExecutorRefresh_WithPATStoresGatewayMetadata(t *testing.T) {
-	var server *httptest.Server
-	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/v4/code_suggestions/direct_access" {
-			t.Fatalf("unexpected path %s", r.URL.Path)
+func TestGitLabExecutorExecuteUsesChatEndpoint(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != gitLabChatEndpoint {
+			t.Fatalf("unexpected path %q", r.URL.Path)
 		}
-		if got := r.Header.Get("Authorization"); got != "Bearer pat-123" {
-			t.Fatalf("unexpected Authorization header %q", got)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{
-			"base_url":"` + server.URL + `",
-			"token":"gateway-token",
-			"expires_at":2000000000,
-			"headers":{"X-Gitlab-Realm":"saas"},
-			"model_details":{"model_provider":"mistral","model_name":"codestral-2501"}
-		}`))
+		_, _ = w.Write([]byte(`"chat response"`))
 	}))
-	defer server.Close()
+	defer srv.Close()
 
-	exec := NewGitLabExecutor(nil)
+	exec := NewGitLabExecutor(&config.Config{})
 	auth := &cliproxyauth.Auth{
-		ID:       "gitlab-pat.json",
 		Provider: "gitlab",
 		Metadata: map[string]any{
-			"type":                  "gitlab",
+			"base_url":     srv.URL,
+			"access_token": "oauth-access",
+			"model_name":   "claude-sonnet-4-5",
+		},
+	}
+	req := cliproxyexecutor.Request{
+		Model:   "gitlab-duo",
+		Payload: []byte(`{"model":"gitlab-duo","messages":[{"role":"user","content":"hello"}]}`),
+	}
+
+	resp, err := exec.Execute(context.Background(), auth, req, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if got := gjson.GetBytes(resp.Payload, "choices.0.message.content").String(); got != "chat response" {
+		t.Fatalf("expected chat response, got %q", got)
+	}
+	if got := gjson.GetBytes(resp.Payload, "model").String(); got != "claude-sonnet-4-5" {
+		t.Fatalf("expected resolved model, got %q", got)
+	}
+}
+
+func TestGitLabExecutorExecuteFallsBackToCodeSuggestions(t *testing.T) {
+	chatCalls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case gitLabChatEndpoint:
+			chatCalls++
+			http.Error(w, "feature unavailable", http.StatusForbidden)
+		case gitLabCodeSuggestionsEndpoint:
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"choices": []map[string]any{{
+					"text": "fallback response",
+				}},
+			})
+		default:
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	exec := NewGitLabExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "gitlab",
+		Metadata: map[string]any{
+			"base_url":              srv.URL,
+			"personal_access_token": "glpat-token",
 			"auth_method":           "pat",
-			"base_url":              server.URL,
-			"personal_access_token": "pat-123",
+		},
+	}
+	req := cliproxyexecutor.Request{
+		Model:   "gitlab-duo",
+		Payload: []byte(`{"model":"gitlab-duo","messages":[{"role":"user","content":"write code"}]}`),
+	}
+
+	resp, err := exec.Execute(context.Background(), auth, req, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if chatCalls != 1 {
+		t.Fatalf("expected chat endpoint to be tried once, got %d", chatCalls)
+	}
+	if got := gjson.GetBytes(resp.Payload, "choices.0.message.content").String(); got != "fallback response" {
+		t.Fatalf("expected fallback response, got %q", got)
+	}
+}
+
+func TestGitLabExecutorRefreshUpdatesMetadata(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/oauth/token":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"access_token":  "oauth-refreshed",
+				"refresh_token": "oauth-refresh",
+				"token_type":    "Bearer",
+				"scope":         "api read_user",
+				"created_at":    1710000000,
+				"expires_in":    3600,
+			})
+		case "/api/v4/code_suggestions/direct_access":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"base_url":   "https://cloud.gitlab.example.com",
+				"token":      "gateway-token",
+				"expires_at": 1710003600,
+				"headers":    map[string]string{"X-Gitlab-Realm": "saas"},
+				"model_details": map[string]any{
+					"model_provider": "anthropic",
+					"model_name":     "claude-sonnet-4-5",
+				},
+			})
+		default:
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	exec := NewGitLabExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		ID:       "gitlab-auth.json",
+		Provider: "gitlab",
+		Metadata: map[string]any{
+			"base_url":            srv.URL,
+			"access_token":        "oauth-access",
+			"refresh_token":       "oauth-refresh",
+			"oauth_client_id":     "client-id",
+			"oauth_client_secret": "client-secret",
+			"auth_method":         "oauth",
+			"oauth_expires_at":    "2000-01-01T00:00:00Z",
 		},
 	}
 
 	updated, err := exec.Refresh(context.Background(), auth)
 	if err != nil {
-		t.Fatalf("Refresh returned error: %v", err)
+		t.Fatalf("Refresh() error = %v", err)
 	}
-	if got := metadataString(updated.Metadata, "duo_gateway_token"); got != "gateway-token" {
-		t.Fatalf("unexpected gateway token %q", got)
+	if got := updated.Metadata["access_token"]; got != "oauth-refreshed" {
+		t.Fatalf("expected refreshed access token, got %#v", got)
 	}
-	if got := gitLabModelName(updated); got != "codestral-2501" {
-		t.Fatalf("unexpected model name %q", got)
+	if got := updated.Metadata["model_name"]; got != "claude-sonnet-4-5" {
+		t.Fatalf("expected refreshed model metadata, got %#v", got)
 	}
-	headers := gitLabHeaders(updated)
-	if headers["X-Gitlab-Realm"] != "saas" {
-		t.Fatalf("unexpected gateway headers %+v", headers)
-	}
-}
-
-func TestGitLabExecutorExecute_UsesGatewayHeadersAndResolvedModel(t *testing.T) {
-	var receivedAuth string
-	var receivedRealm string
-	var receivedModel string
-
-	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		receivedAuth = r.Header.Get("Authorization")
-		receivedRealm = r.Header.Get("X-Gitlab-Realm")
-		receivedModel = findJSONField(string(body), `"model":"`, `"`)
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"id":"ok","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`))
-	}))
-	defer gateway.Close()
-
-	exec := NewGitLabExecutor(nil)
-	auth := &cliproxyauth.Auth{
-		ID:       "gitlab-oauth.json",
-		Provider: "gitlab",
-		Metadata: map[string]any{
-			"type":                 "gitlab",
-			"auth_method":          "oauth",
-			"duo_gateway_base_url": gateway.URL,
-			"duo_gateway_token":    "gateway-token",
-			"duo_gateway_headers":  map[string]any{"X-Gitlab-Realm": "saas"},
-			"model_details":        map[string]any{"model_name": "codestral-2501", "model_provider": "mistral"},
-		},
-	}
-
-	resp, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
-		Model:   "gitlab-duo",
-		Payload: []byte(`{"model":"gitlab-duo","messages":[{"role":"user","content":"hello"}]}`),
-	}, cliproxyexecutor.Options{})
-	if err != nil {
-		t.Fatalf("Execute returned error: %v", err)
-	}
-	if len(resp.Payload) == 0 {
-		t.Fatal("expected non-empty payload")
-	}
-	if receivedAuth != "Bearer gateway-token" {
-		t.Fatalf("unexpected Authorization header %q", receivedAuth)
-	}
-	if receivedRealm != "saas" {
-		t.Fatalf("unexpected X-Gitlab-Realm header %q", receivedRealm)
-	}
-	if receivedModel != "codestral-2501" {
-		t.Fatalf("unexpected resolved model %q", receivedModel)
-	}
-}
-
-func findJSONField(body, prefix, suffix string) string {
-	start := strings.Index(body, prefix)
-	if start < 0 {
-		return ""
-	}
-	start += len(prefix)
-	end := strings.Index(body[start:], suffix)
-	if end < 0 {
-		return ""
-	}
-	return body[start : start+end]
 }
