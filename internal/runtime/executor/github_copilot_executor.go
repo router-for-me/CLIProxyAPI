@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -43,27 +44,36 @@ const (
 	copilotIntegrationID = "vscode-chat"
 	copilotOpenAIIntent  = "conversation-panel"
 	copilotGitHubAPIVer  = "2025-04-01"
+
+	copilotQuotaCacheTTL = 1 * time.Minute
+	githubUserQuotaURL   = "https://api.github.com/copilot_internal/user"
 )
 
 // GitHubCopilotExecutor handles requests to the GitHub Copilot API.
 type GitHubCopilotExecutor struct {
-	cfg   *config.Config
-	mu    sync.RWMutex
-	cache map[string]*cachedAPIToken
+	cfg        *config.Config
+	mu         sync.RWMutex
+	cache      map[string]*cachedAPIToken
+	quotaCache map[string]*cachedQuota
 }
 
-// cachedAPIToken stores a cached Copilot API token with its expiry.
 type cachedAPIToken struct {
 	token       string
 	apiEndpoint string
 	expiresAt   time.Time
 }
 
+type cachedQuota struct {
+	premiumPercentRemaining float64
+	fetchedAt               time.Time
+}
+
 // NewGitHubCopilotExecutor constructs a new executor instance.
 func NewGitHubCopilotExecutor(cfg *config.Config) *GitHubCopilotExecutor {
 	return &GitHubCopilotExecutor{
-		cfg:   cfg,
-		cache: make(map[string]*cachedAPIToken),
+		cfg:        cfg,
+		cache:      make(map[string]*cachedAPIToken),
+		quotaCache: make(map[string]*cachedQuota),
 	}
 }
 
@@ -478,6 +488,72 @@ func (e *GitHubCopilotExecutor) ensureAPIToken(ctx context.Context, auth *clipro
 	return apiToken.Token, apiEndpoint, nil
 }
 
+type copilotQuotaResponse struct {
+	QuotaSnapshots struct {
+		PremiumInteractions struct {
+			PercentRemaining float64 `json:"percent_remaining"`
+			Unlimited        bool    `json:"unlimited"`
+		} `json:"premium_interactions"`
+	} `json:"quota_snapshots"`
+}
+
+func monthElapsedThreshold() float64 {
+	now := time.Now()
+	startOfMonth := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
+	hoursElapsed := now.Sub(startOfMonth).Hours()
+	return hoursElapsed / 24.0
+}
+
+func (e *GitHubCopilotExecutor) fetchPremiumPercentRemaining(auth *cliproxyauth.Auth) (float64, bool) {
+	accessToken := metaStringValue(auth.Metadata, "access_token")
+	if accessToken == "" {
+		return 0, false
+	}
+
+	e.mu.RLock()
+	cached := e.quotaCache[accessToken]
+	e.mu.RUnlock()
+	if cached != nil && time.Since(cached.fetchedAt) < copilotQuotaCacheTTL {
+		return cached.premiumPercentRemaining, true
+	}
+
+	req, err := http.NewRequest("GET", githubUserQuotaURL, nil)
+	if err != nil {
+		return 0, false
+	}
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, false
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return 0, false
+	}
+
+	var quota copilotQuotaResponse
+	if err := json.NewDecoder(resp.Body).Decode(&quota); err != nil {
+		return 0, false
+	}
+
+	pct := quota.QuotaSnapshots.PremiumInteractions.PercentRemaining
+	if quota.QuotaSnapshots.PremiumInteractions.Unlimited {
+		pct = 100
+	}
+
+	e.mu.Lock()
+	e.quotaCache[accessToken] = &cachedQuota{
+		premiumPercentRemaining: pct,
+		fetchedAt:               time.Now(),
+	}
+	e.mu.Unlock()
+
+	return pct, true
+}
+
 // applyHeaders sets the required headers for GitHub Copilot API requests.
 func (e *GitHubCopilotExecutor) applyHeaders(r *http.Request, apiToken string, body []byte, auth *cliproxyauth.Auth) {
 	r.Header.Set("Content-Type", "application/json")
@@ -492,7 +568,12 @@ func (e *GitHubCopilotExecutor) applyHeaders(r *http.Request, apiToken string, b
 	r.Header.Set("X-Request-Id", uuid.NewString())
 
 	initiator := "user"
-	if role := detectLastConversationRole(body); role == "assistant" || role == "tool" {
+	role := detectLastConversationRole(body)
+	quotaOK := false
+	if pct, ok := e.fetchPremiumPercentRemaining(auth); ok {
+		quotaOK = pct > monthElapsedThreshold()
+	}
+	if quotaOK || role != "user" {
 		initiator = "agent"
 	}
 	r.Header.Set("X-Initiator", initiator)
