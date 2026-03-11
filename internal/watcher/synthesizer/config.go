@@ -116,6 +116,9 @@ func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) []*corea
 		if hash := diff.ComputeClaudeModelsHash(ck.Models); hash != "" {
 			attrs["models_hash"] = hash
 		}
+		if ck.ResponseHeaderTimeout > 0 {
+			attrs["response_header_timeout"] = strconv.Itoa(ck.ResponseHeaderTimeout)
+		}
 		addConfigHeadersToAttrs(ck.Headers, attrs)
 		proxyURL := strings.TrimSpace(ck.ProxyURL)
 		a := &coreauth.Auth{

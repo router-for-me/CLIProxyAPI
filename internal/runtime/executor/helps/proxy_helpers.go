@@ -3,6 +3,7 @@ package helps
 import (
 	"context"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -31,6 +32,8 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 		httpClient.Timeout = timeout
 	}
 
+	respHeaderTimeout := responseHeaderTimeoutFromAuth(auth)
+
 	// Priority 1: Use auth.ProxyURL if configured
 	var proxyURL string
 	if auth != nil {
@@ -46,7 +49,7 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 	if proxyURL != "" {
 		transport := buildProxyTransport(proxyURL)
 		if transport != nil {
-			httpClient.Transport = transport
+			httpClient.Transport = applyResponseHeaderTimeout(transport, respHeaderTimeout)
 			return httpClient
 		}
 		// If proxy setup failed, log and fall through to context RoundTripper
@@ -58,7 +61,35 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 		httpClient.Transport = rt
 	}
 
+	httpClient.Transport = applyResponseHeaderTimeout(httpClient.Transport, respHeaderTimeout)
+
 	return httpClient
+}
+
+func responseHeaderTimeoutFromAuth(auth *cliproxyauth.Auth) time.Duration {
+	if auth == nil || auth.Attributes == nil {
+		return 0
+	}
+	secs, err := strconv.Atoi(auth.Attributes["response_header_timeout"])
+	if err != nil || secs <= 0 {
+		return 0
+	}
+	return time.Duration(secs) * time.Second
+}
+
+func applyResponseHeaderTimeout(rt http.RoundTripper, timeout time.Duration) http.RoundTripper {
+	if timeout <= 0 {
+		return rt
+	}
+	if transport, ok := rt.(*http.Transport); ok {
+		clonedTransport := transport.Clone()
+		clonedTransport.ResponseHeaderTimeout = timeout
+		return clonedTransport
+	}
+	if rt == nil {
+		return &http.Transport{ResponseHeaderTimeout: timeout}
+	}
+	return rt
 }
 
 // buildProxyTransport creates an HTTP transport configured for the given proxy URL.

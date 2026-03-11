@@ -174,6 +174,7 @@ func NewUtlsHTTPClient(cfg *config.Config, auth *cliproxyauth.Auth, timeout time
 			standardTransport = transport
 		}
 	}
+	standardTransport = applyResponseHeaderTimeout(standardTransport, responseHeaderTimeoutFromAuth(auth))
 
 	client := &http.Client{
 		Transport: &fallbackRoundTripper{
