@@ -101,7 +101,6 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if baseURL == "" {
 		baseURL = "https://api.anthropic.com"
 	}
-	baseURL = normalizeClaudeBaseURL(baseURL)
 
 	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
 	defer reporter.trackFailure(ctx, &err)
@@ -156,7 +155,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		bodyForUpstream = applyClaudeToolPrefix(body, claudeToolPrefix)
 	}
 
-	url := fmt.Sprintf("%s/v1/messages?beta=true", baseURL)
+	url := fmt.Sprintf("%s%s?beta=true", baseURL, claudeMessagesPath(auth))
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyForUpstream))
 	if err != nil {
 		return resp, err
@@ -270,7 +269,6 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	if baseURL == "" {
 		baseURL = "https://api.anthropic.com"
 	}
-	baseURL = normalizeClaudeBaseURL(baseURL)
 
 	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
 	defer reporter.trackFailure(ctx, &err)
@@ -320,7 +318,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		bodyForUpstream = applyClaudeToolPrefix(body, claudeToolPrefix)
 	}
 
-	url := fmt.Sprintf("%s/v1/messages?beta=true", baseURL)
+	url := fmt.Sprintf("%s%s?beta=true", baseURL, claudeMessagesPath(auth))
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyForUpstream))
 	if err != nil {
 		return nil, err
@@ -464,7 +462,6 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	if baseURL == "" {
 		baseURL = "https://api.anthropic.com"
 	}
-	baseURL = normalizeClaudeBaseURL(baseURL)
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("claude")
@@ -488,7 +485,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 		body = applyClaudeToolPrefix(body, claudeToolPrefix)
 	}
 
-	url := fmt.Sprintf("%s/v1/messages/count_tokens?beta=true", baseURL)
+	url := fmt.Sprintf("%s%s/count_tokens?beta=true", baseURL, claudeMessagesPath(auth))
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
@@ -931,14 +928,16 @@ func claudeCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
 	return
 }
 
-// normalizeClaudeBaseURL normalizes the base URL for Claude API requests by removing
-// trailing slashes and the /v1 path suffix if present. This allows users to configure
-// base URLs with or without the /v1 prefix (e.g., "https://example.com" or
-// "https://example.com/v1"), both of which are common when using relay services like new-api.
-func normalizeClaudeBaseURL(baseURL string) string {
-	baseURL = strings.TrimRight(baseURL, "/")
-	baseURL = strings.TrimSuffix(baseURL, "/v1")
-	return baseURL
+// claudeMessagesPath returns the configured messages API path for the given auth,
+// falling back to the default "/v1/messages". This allows users to configure relay
+// services (e.g., new-api) that expose Claude-compatible APIs at non-standard paths.
+func claudeMessagesPath(a *cliproxyauth.Auth) string {
+	if a != nil && a.Attributes != nil {
+		if mp := strings.TrimSpace(a.Attributes["messages_path"]); mp != "" {
+			return mp
+		}
+	}
+	return "/v1/messages"
 }
 
 func checkSystemInstructions(payload []byte) []byte {
