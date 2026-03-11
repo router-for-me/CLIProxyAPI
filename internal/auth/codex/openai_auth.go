@@ -7,6 +7,7 @@ package codex
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -117,7 +118,7 @@ func (o *CodexAuth) ExchangeCodeForTokensWithRedirect(ctx context.Context, code,
 	// log.Debugf("Token response: %s", string(body))
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("token exchange failed with status %d: %s", resp.StatusCode, string(body))
+		return nil, NewHTTPStatusError("token exchange", resp.StatusCode, body)
 	}
 
 	// Parse token response
@@ -202,7 +203,7 @@ func (o *CodexAuth) RefreshTokens(ctx context.Context, refreshToken string) (*Co
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("token refresh failed with status %d: %s", resp.StatusCode, string(body))
+		return nil, NewHTTPStatusError("token refresh", resp.StatusCode, body)
 	}
 
 	var tokenResp struct {
@@ -292,8 +293,21 @@ func IsNonRetryableRefreshErr(err error) bool {
 	if err == nil {
 		return false
 	}
-	raw := strings.ToLower(err.Error())
-	return strings.Contains(raw, "refresh_token_reused") || strings.Contains(raw, "status 401")
+	if strings.Contains(strings.ToLower(err.Error()), "refresh_token_reused") {
+		return true
+	}
+
+	var httpStatusErr *HTTPStatusError
+	if errors.As(err, &httpStatusErr) {
+		return httpStatusErr.StatusCode == http.StatusUnauthorized
+	}
+
+	var oauthErr *OAuthError
+	if errors.As(err, &oauthErr) {
+		return oauthErr.StatusCode == http.StatusUnauthorized
+	}
+
+	return false
 }
 
 // UpdateTokenStorage updates an existing CodexTokenStorage with new token data.
