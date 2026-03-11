@@ -175,8 +175,12 @@ func TestDeleteAuthFile_AllowsReaddingSameNameWithoutStaleState(t *testing.T) {
 	if deleteRec.Code != http.StatusOK {
 		t.Fatalf("expected delete status %d, got %d with body %s", http.StatusOK, deleteRec.Code, deleteRec.Body.String())
 	}
-	if _, ok := manager.GetByID(authID); ok {
-		t.Fatal("expected auth to be fully removed from manager")
+	disabled, ok := manager.GetByID(authID)
+	if !ok || disabled == nil {
+		t.Fatal("expected removed auth to stay in manager as disabled entry")
+	}
+	if !disabled.Disabled || disabled.Status != coreauth.StatusDisabled {
+		t.Fatalf("expected removed auth to be disabled, got disabled=%v status=%s", disabled.Disabled, disabled.Status)
 	}
 
 	if errWrite := os.WriteFile(filePath, fileData, 0o600); errWrite != nil {
