@@ -339,6 +339,11 @@ type ClaudeKey struct {
 	// ExcludedModels lists model IDs that should be excluded for this provider.
 	ExcludedModels []string `yaml:"excluded-models,omitempty" json:"excluded-models,omitempty"`
 
+	// ResponseHeaderTimeout limits how long to wait for the upstream to start
+	// responding (in seconds). Once the first response byte arrives, this timeout
+	// no longer applies — streaming responses are not affected. 0 means no timeout.
+	ResponseHeaderTimeout int `yaml:"response-header-timeout,omitempty" json:"response-header-timeout,omitempty"`
+
 	// Cloak configures request cloaking for non-Claude-Code clients.
 	Cloak *CloakConfig `yaml:"cloak,omitempty" json:"cloak,omitempty"`
 }

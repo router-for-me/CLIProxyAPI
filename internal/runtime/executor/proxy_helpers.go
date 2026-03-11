@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -33,6 +34,16 @@ func newProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 		httpClient.Timeout = timeout
 	}
 
+	// Read per-auth response header timeout from attributes.
+	var respHeaderTimeout time.Duration
+	if auth != nil && auth.Attributes != nil {
+		if v, ok := auth.Attributes["response_header_timeout"]; ok {
+			if secs, err := strconv.Atoi(v); err == nil && secs > 0 {
+				respHeaderTimeout = time.Duration(secs) * time.Second
+			}
+		}
+	}
+
 	// Priority 1: Use auth.ProxyURL if configured
 	var proxyURL string
 	if auth != nil {
@@ -48,6 +59,9 @@ func newProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 	if proxyURL != "" {
 		transport := buildProxyTransport(proxyURL)
 		if transport != nil {
+			if respHeaderTimeout > 0 {
+				transport.ResponseHeaderTimeout = respHeaderTimeout
+			}
 			httpClient.Transport = transport
 			return httpClient
 		}
@@ -58,6 +72,20 @@ func newProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 	// Priority 3: Use RoundTripper from context (typically from RoundTripperFor)
 	if rt, ok := ctx.Value("cliproxy.roundtripper").(http.RoundTripper); ok && rt != nil {
 		httpClient.Transport = rt
+	}
+
+	// Apply ResponseHeaderTimeout if set.
+	if respHeaderTimeout > 0 {
+		if transport, ok := httpClient.Transport.(*http.Transport); ok {
+			// Clone the transport to avoid modifying a shared instance.
+			clonedTransport := transport.Clone()
+			clonedTransport.ResponseHeaderTimeout = respHeaderTimeout
+			httpClient.Transport = clonedTransport
+		} else if httpClient.Transport == nil {
+			httpClient.Transport = &http.Transport{
+				ResponseHeaderTimeout: respHeaderTimeout,
+			}
+		}
 	}
 
 	return httpClient
