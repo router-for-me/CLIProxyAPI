@@ -214,6 +214,14 @@ func (s *PostgresStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (stri
 
 	switch {
 	case auth.Storage != nil:
+		// Inject runtime metadata into token storage so SaveTokenToFile can merge it.
+		// This keeps behavior consistent with FileTokenStore across backends.
+		type metadataSetter interface {
+			SetMetadata(map[string]any)
+		}
+		if setter, ok := auth.Storage.(metadataSetter); ok {
+			setter.SetMetadata(auth.Metadata)
+		}
 		if err = auth.Storage.SaveTokenToFile(path); err != nil {
 			return "", err
 		}

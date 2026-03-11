@@ -2686,6 +2686,18 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 	}
 	log.Debugf("refreshed %s, %s, %v", auth.Provider, auth.ID, err)
 	now := time.Now()
+	// Some providers report permanent refresh failures via updated metadata/status
+	// while returning a nil error. Treat those cases as refresh failures so we do
+	// not mark LastRefreshedAt as successful.
+	if err == nil && updated != nil && updated.Metadata != nil {
+		if status, _ := updated.Metadata["refresh_status"].(string); status == "failed" {
+			msg, _ := updated.Metadata["refresh_message"].(string)
+			if strings.TrimSpace(msg) == "" {
+				msg = "refresh failed"
+			}
+			err = &Error{Code: "refresh_failed", Message: msg, Retryable: false}
+		}
+	}
 	if err != nil {
 		m.mu.Lock()
 		if current := m.auths[id]; current != nil {
