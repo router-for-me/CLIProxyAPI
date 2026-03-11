@@ -1832,6 +1832,109 @@ func clearAuthStateOnSuccess(auth *Auth, now time.Time) {
 	auth.UpdatedAt = now
 }
 
+// ClearQuotaExhaustion clears runtime quota/cooldown state for an auth when an
+// external signal (for example a management usage refresh) confirms the
+// credential is available again. Non-quota errors are preserved.
+func (m *Manager) ClearQuotaExhaustion(ctx context.Context, authID string) (*Auth, bool) {
+	if m == nil || strings.TrimSpace(authID) == "" {
+		return nil, false
+	}
+
+	var (
+		authSnapshot  *Auth
+		clearedModels []string
+		cleared       bool
+	)
+
+	m.mu.Lock()
+	auth, ok := m.auths[authID]
+	if ok && auth != nil {
+		now := time.Now()
+		cleared = clearQuotaStateForAuth(auth, now, &clearedModels)
+		if cleared {
+			_ = m.persist(ctx, auth)
+		}
+		authSnapshot = auth.Clone()
+	}
+	m.mu.Unlock()
+
+	if !cleared || authSnapshot == nil {
+		return authSnapshot, false
+	}
+	if m.scheduler != nil {
+		m.scheduler.upsertAuth(authSnapshot)
+	}
+	for _, model := range clearedModels {
+		registry.GetGlobalRegistry().ClearModelQuotaExceeded(authID, model)
+		registry.GetGlobalRegistry().ResumeClientModel(authID, model)
+	}
+	return authSnapshot, true
+}
+
+func clearQuotaStateForAuth(auth *Auth, now time.Time, clearedModels *[]string) bool {
+	if auth == nil {
+		return false
+	}
+
+	clearedAny := false
+	for model, state := range auth.ModelStates {
+		if state == nil || !isQuotaRuntimeState(state.StatusMessage, state.LastError, state.Quota.Exceeded) {
+			continue
+		}
+		resetModelState(state, now)
+		clearedAny = true
+		if clearedModels != nil {
+			*clearedModels = append(*clearedModels, model)
+		}
+	}
+
+	authQuotaState := isQuotaRuntimeState(auth.StatusMessage, auth.LastError, auth.Quota.Exceeded)
+	if authQuotaState {
+		auth.Quota = QuotaState{}
+		auth.LastError = nil
+		auth.StatusMessage = ""
+		auth.NextRetryAfter = time.Time{}
+		auth.UpdatedAt = now
+		clearedAny = true
+	}
+
+	if !clearedAny {
+		return false
+	}
+
+	updateAggregatedAvailability(auth, now)
+	if authQuotaState && !hasModelError(auth, now) {
+		clearAuthStateOnSuccess(auth, now)
+	}
+	return true
+}
+
+func isQuotaRuntimeState(statusMessage string, lastError *Error, exceeded bool) bool {
+	if exceeded {
+		return true
+	}
+	if lastError != nil {
+		if lastError.HTTPStatus == http.StatusTooManyRequests {
+			return true
+		}
+		if quotaErrorSignal(lastError.Message) {
+			return true
+		}
+	}
+	return quotaErrorSignal(statusMessage)
+}
+
+func quotaErrorSignal(text string) bool {
+	signal := strings.ToLower(strings.TrimSpace(text))
+	if signal == "" {
+		return false
+	}
+	return strings.Contains(signal, "usage_limit_reached") ||
+		strings.Contains(signal, "quota exhausted") ||
+		strings.Contains(signal, "\"quota\"") ||
+		strings.Contains(signal, "\"rate_limit\"")
+}
+
 func cloneError(err *Error) *Error {
 	if err == nil {
 		return nil

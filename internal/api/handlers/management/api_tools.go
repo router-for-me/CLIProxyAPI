@@ -209,6 +209,8 @@ func (h *Handler) APICall(c *gin.Context) {
 		return
 	}
 
+	h.reviveAuthFromOfficialUsage(c.Request.Context(), auth, parsedURL, resp.StatusCode, respBody)
+
 	c.JSON(http.StatusOK, apiCallResponse{
 		StatusCode: resp.StatusCode,
 		Header:     resp.Header,
@@ -611,6 +613,94 @@ func tokenValueFromMetadata(metadata map[string]any) string {
 		return strings.TrimSpace(v)
 	}
 	return ""
+}
+
+func (h *Handler) reviveAuthFromOfficialUsage(ctx context.Context, auth *coreauth.Auth, target *url.URL, statusCode int, body []byte) {
+	if h == nil || h.authManager == nil || auth == nil || target == nil {
+		return
+	}
+	if statusCode < http.StatusOK || statusCode >= http.StatusMultipleChoices {
+		return
+	}
+
+	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
+	switch provider {
+	case "codex":
+		h.reviveCodexAuthFromUsage(ctx, auth, target, body)
+	}
+}
+
+func (h *Handler) reviveCodexAuthFromUsage(ctx context.Context, auth *coreauth.Auth, target *url.URL, body []byte) {
+	if auth == nil || target == nil {
+		return
+	}
+	if !strings.HasSuffix(strings.TrimSpace(target.Path), "/wham/usage") {
+		return
+	}
+
+	var payload codexOfficialUsagePayload
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return
+	}
+	if !codexUsagePayloadAllowsScheduling(time.Now().UTC(), &payload) {
+		return
+	}
+	_, _ = h.authManager.ClearQuotaExhaustion(ctx, auth.ID)
+}
+
+type codexOfficialUsagePayload struct {
+	RateLimit *codexOfficialRateLimit `json:"rate_limit"`
+}
+
+type codexOfficialRateLimit struct {
+	Allowed         bool                       `json:"allowed"`
+	LimitReached    bool                       `json:"limit_reached"`
+	PrimaryWindow   *codexOfficialUsageWindow  `json:"primary_window"`
+	SecondaryWindow *codexOfficialUsageWindow  `json:"secondary_window"`
+}
+
+type codexOfficialUsageWindow struct {
+	UsedPercent       float64 `json:"used_percent"`
+	ResetAt           int64   `json:"reset_at"`
+	ResetAfterSeconds int64   `json:"reset_after_seconds"`
+}
+
+func codexUsagePayloadAllowsScheduling(now time.Time, payload *codexOfficialUsagePayload) bool {
+	if payload == nil {
+		return false
+	}
+	rateLimit := payload.RateLimit
+	if rateLimit == nil {
+		return false
+	}
+
+	// Only revive when the official usage response clearly indicates that the
+	// credential is schedulable again. This keeps the management refresh path
+	// conservative and avoids clearing non-quota failures.
+	if rateLimit.Allowed && !rateLimit.LimitReached {
+		return true
+	}
+
+	// Fallback: if the weekly window is no longer exhausted because its reset
+	// timestamp is already in the past, allow revival even if the top-level flags
+	// have not been recomputed yet.
+	if rateLimit.SecondaryWindow != nil && codexOfficialWindowExhausted(now, rateLimit.SecondaryWindow) {
+		return false
+	}
+	return !rateLimit.LimitReached
+}
+
+func codexOfficialWindowExhausted(now time.Time, window *codexOfficialUsageWindow) bool {
+	if window == nil {
+		return false
+	}
+	if window.ResetAt > 0 && time.Unix(window.ResetAt, 0).UTC().After(now) {
+		return window.UsedPercent >= 100
+	}
+	if window.ResetAfterSeconds > 0 {
+		return window.UsedPercent >= 100
+	}
+	return false
 }
 
 func (h *Handler) authByIndex(authIndex string) *coreauth.Auth {
