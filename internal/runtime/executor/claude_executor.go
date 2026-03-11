@@ -101,6 +101,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if baseURL == "" {
 		baseURL = "https://api.anthropic.com"
 	}
+	baseURL = normalizeClaudeBaseURL(baseURL)
 
 	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
 	defer reporter.trackFailure(ctx, &err)
@@ -269,6 +270,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	if baseURL == "" {
 		baseURL = "https://api.anthropic.com"
 	}
+	baseURL = normalizeClaudeBaseURL(baseURL)
 
 	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
 	defer reporter.trackFailure(ctx, &err)
@@ -462,6 +464,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	if baseURL == "" {
 		baseURL = "https://api.anthropic.com"
 	}
+	baseURL = normalizeClaudeBaseURL(baseURL)
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("claude")
@@ -926,6 +929,16 @@ func claudeCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
 		}
 	}
 	return
+}
+
+// normalizeClaudeBaseURL normalizes the base URL for Claude API requests by removing
+// trailing slashes and the /v1 path suffix if present. This allows users to configure
+// base URLs with or without the /v1 prefix (e.g., "https://example.com" or
+// "https://example.com/v1"), both of which are common when using relay services like new-api.
+func normalizeClaudeBaseURL(baseURL string) string {
+	baseURL = strings.TrimRight(baseURL, "/")
+	baseURL = strings.TrimSuffix(baseURL, "/v1")
+	return baseURL
 }
 
 func checkSystemInstructions(payload []byte) []byte {
