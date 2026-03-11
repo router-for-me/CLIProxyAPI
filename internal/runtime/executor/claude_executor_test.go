@@ -1064,3 +1064,58 @@ func TestCheckSystemInstructionsWithMode_StringWithSpecialChars(t *testing.T) {
 		t.Fatalf("blocks[2] text mangled, got %q", blocks[2].Get("text").String())
 	}
 }
+
+// TestNormalizeClaudeBaseURL verifies that base URLs with or without the /v1 suffix
+// are normalized correctly, preventing double /v1 paths when relay services are used
+// as upstream (e.g., new-api). Fixes: https://github.com/router-for-me/CLIProxyAPI/issues/2055
+func TestNormalizeClaudeBaseURL(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "plain URL unchanged",
+			input:    "https://api.anthropic.com",
+			expected: "https://api.anthropic.com",
+		},
+		{
+			name:     "trailing slash removed",
+			input:    "https://api.anthropic.com/",
+			expected: "https://api.anthropic.com",
+		},
+		{
+			name:     "/v1 suffix stripped",
+			input:    "https://new-api.example.com/v1",
+			expected: "https://new-api.example.com",
+		},
+		{
+			name:     "/v1 with trailing slash stripped",
+			input:    "https://new-api.example.com/v1/",
+			expected: "https://new-api.example.com",
+		},
+		{
+			name:     "path longer than /v1 preserved",
+			input:    "https://example.com/api/v1",
+			expected: "https://example.com/api",
+		},
+		{
+			name:     "unrelated path preserved",
+			input:    "https://example.com/claude",
+			expected: "https://example.com/claude",
+		},
+		{
+			name:     "empty string unchanged",
+			input:    "",
+			expected: "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := normalizeClaudeBaseURL(tt.input)
+			if got != tt.expected {
+				t.Errorf("normalizeClaudeBaseURL(%q) = %q, want %q", tt.input, got, tt.expected)
+			}
+		})
+	}
+}
