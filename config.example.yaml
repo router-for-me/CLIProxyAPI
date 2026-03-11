@@ -37,6 +37,16 @@ api-keys:
   - "your-api-key-2"
   - "your-api-key-3"
 
+api-key-quotas:
+  enabled: false
+  # exclude-model-patterns:
+  #  - "*haiku*"
+  #  - "*flash*"
+  # monthly-token-limits:
+  #  - api-key: your-api-key-1
+  #    model: gpt-*
+  #    limit: 100000
+
 # Enable debug logging
 debug: false
 

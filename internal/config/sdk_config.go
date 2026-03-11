@@ -9,6 +9,9 @@ type SDKConfig struct {
 	// ProxyURL is the URL of an optional proxy server to use for outbound requests.
 	ProxyURL string `yaml:"proxy-url" json:"proxy-url"`
 
+	// APIKeyQuotas controls per-client API key token quota enforcement.
+	APIKeyQuotas APIKeyQuotaConfig `yaml:"api-key-quotas,omitempty" json:"api-key-quotas,omitempty"`
+
 	// ForceModelPrefix requires explicit model prefixes (e.g., "teamA/gemini-3-pro-preview")
 	// to target prefixed credentials. When false, unprefixed model requests may use prefixed
 	// credentials as well.
@@ -33,6 +36,29 @@ type SDKConfig struct {
 }
 
 // StreamingConfig holds server streaming behavior configuration.
+type APIKeyQuotaConfig struct {
+	// Enabled toggles API key quota enforcement.
+	Enabled bool `yaml:"enabled" json:"enabled"`
+
+	// ExcludeModelPatterns defines wildcard model patterns that bypass quota checks.
+	ExcludeModelPatterns []string `yaml:"exclude-model-patterns,omitempty" json:"exclude-model-patterns,omitempty"`
+
+	// MonthlyTokenLimits defines monthly token limits by API key and model wildcard.
+	MonthlyTokenLimits []APIKeyMonthlyModelTokenLimit `yaml:"monthly-token-limits,omitempty" json:"monthly-token-limits,omitempty"`
+}
+
+// APIKeyMonthlyModelTokenLimit binds an API key + model pattern pair to a monthly token cap.
+type APIKeyMonthlyModelTokenLimit struct {
+	// APIKey is an exact or wildcard API key pattern (supports '*').
+	APIKey string `yaml:"api-key" json:"api-key"`
+
+	// Model is an exact or wildcard model pattern (supports '*').
+	Model string `yaml:"model" json:"model"`
+
+	// Limit is the maximum total tokens allowed per API key in a UTC calendar month.
+	Limit int64 `yaml:"limit" json:"limit"`
+}
+
 type StreamingConfig struct {
 	// KeepAliveSeconds controls how often the server emits SSE heartbeats (": keep-alive\n\n").
 	// <= 0 disables keep-alives. Default is 0.

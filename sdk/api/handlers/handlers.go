@@ -17,6 +17,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
@@ -177,6 +178,39 @@ func StreamingBootstrapRetries(cfg *config.SDKConfig) int {
 		retries = 0
 	}
 	return retries
+}
+
+func (h *BaseAPIHandler) enforceAPIKeyMonthlyQuota(ctx context.Context, model string) *interfaces.ErrorMessage {
+	if h == nil || h.Cfg == nil || !h.Cfg.APIKeyQuotas.Enabled {
+		return nil
+	}
+	apiKey := apiKeyFromGinContext(ctx)
+	if apiKey == "" {
+		return nil
+	}
+	snapshot := usage.GetRequestStatistics().Snapshot()
+	evaluation := evaluateAPIKeyQuota(h.Cfg, snapshot, apiKey, model, time.Now())
+	if !evaluation.Blocked {
+		return nil
+	}
+	err := buildAPIKeyQuotaError(model, evaluation, time.Now())
+	return &interfaces.ErrorMessage{StatusCode: http.StatusForbidden, Error: err}
+}
+
+func apiKeyFromGinContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	ginCtx, ok := ctx.Value("gin").(*gin.Context)
+	if !ok || ginCtx == nil {
+		return ""
+	}
+	if value, exists := ginCtx.Get("apiKey"); exists {
+		if key, ok := value.(string); ok {
+			return strings.TrimSpace(key)
+		}
+	}
+	return ""
 }
 
 // PassthroughHeadersEnabled returns whether upstream response headers should be forwarded to clients.
@@ -474,6 +508,9 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 	}
 	reqMeta := requestExecutionMetadata(ctx)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
+	if errMsg := h.enforceAPIKeyMonthlyQuota(ctx, normalizedModel); errMsg != nil {
+		return nil, nil, errMsg
+	}
 	payload := rawJSON
 	if len(payload) == 0 {
 		payload = nil
@@ -520,6 +557,9 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 	}
 	reqMeta := requestExecutionMetadata(ctx)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
+	if errMsg := h.enforceAPIKeyMonthlyQuota(ctx, normalizedModel); errMsg != nil {
+		return nil, nil, errMsg
+	}
 	payload := rawJSON
 	if len(payload) == 0 {
 		payload = nil
@@ -570,6 +610,12 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 	}
 	reqMeta := requestExecutionMetadata(ctx)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
+	if errMsg := h.enforceAPIKeyMonthlyQuota(ctx, normalizedModel); errMsg != nil {
+		errChan := make(chan *interfaces.ErrorMessage, 1)
+		errChan <- errMsg
+		close(errChan)
+		return nil, nil, errChan
+	}
 	payload := rawJSON
 	if len(payload) == 0 {
 		payload = nil
