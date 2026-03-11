@@ -8,6 +8,13 @@
 
 该 Plus 版本的主线功能与主线功能强制同步。
 
+GitLab Duo 已在这里接入，支持 OAuth 或 personal access token 登录，并在 GitLab 提供 managed credentials 时通过 GitLab AI gateway 做 provider-native 路由。
+
+## 文档
+
+- GitLab Duo 说明：[docs/gitlab-duo_CN.md](docs/gitlab-duo_CN.md)
+- English guide: [docs/gitlab-duo.md](docs/gitlab-duo.md)
+
 ## 贡献
 
 该项目仅接受第三方供应商支持的 Pull Request。任何非第三方供应商支持的 Pull Request 都将被拒绝。
