@@ -23,6 +23,7 @@ import (
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
+	log "github.com/sirupsen/logrus"
 	"golang.org/x/net/context"
 )
 
@@ -181,18 +182,24 @@ func StreamingBootstrapRetries(cfg *config.SDKConfig) int {
 }
 
 func (h *BaseAPIHandler) enforceAPIKeyMonthlyQuota(ctx context.Context, model string) *interfaces.ErrorMessage {
-	if h == nil || h.Cfg == nil || !h.Cfg.APIKeyQuotas.Enabled {
+	if h == nil || h.Cfg == nil {
 		return nil
 	}
 	apiKey := apiKeyFromGinContext(ctx)
 	if apiKey == "" {
 		return nil
 	}
-	snapshot := usage.GetRequestStatistics().Snapshot()
-	evaluation := evaluateAPIKeyQuota(h.Cfg, snapshot, apiKey, model, time.Now())
+	evaluation := evaluateAPIKeyQuota(h.Cfg, usage.GetRequestStatistics(), apiKey, model, time.Now())
 	if !evaluation.Blocked {
 		return nil
 	}
+	log.Debugf(
+		"API key monthly quota exceeded: apiKey=%s model=%s current=%d limit=%d",
+		redactAPIKey(apiKey),
+		model,
+		evaluation.Current,
+		evaluation.Limit,
+	)
 	err := buildAPIKeyQuotaError(model, evaluation, time.Now())
 	return &interfaces.ErrorMessage{StatusCode: http.StatusForbidden, Error: err}
 }
@@ -211,6 +218,17 @@ func apiKeyFromGinContext(ctx context.Context) string {
 		}
 	}
 	return ""
+}
+
+func redactAPIKey(apiKey string) string {
+	apiKey = strings.TrimSpace(apiKey)
+	if apiKey == "" {
+		return "<empty>"
+	}
+	if len(apiKey) <= 6 {
+		return strings.Repeat("*", len(apiKey))
+	}
+	return apiKey[:3] + strings.Repeat("*", len(apiKey)-6) + apiKey[len(apiKey)-3:]
 }
 
 // PassthroughHeadersEnabled returns whether upstream response headers should be forwarded to clients.

@@ -11,7 +11,6 @@ import (
 )
 
 func TestEnforceAPIKeyMonthlyQuota_BlocksWhenExceeded(t *testing.T) {
-	stats := usage.GetRequestStatistics()
 	apiKey := "quota-test-client-key-enforce"
 
 	h := NewBaseAPIHandlers(&sdkconfig.SDKConfig{
@@ -27,7 +26,16 @@ func TestEnforceAPIKeyMonthlyQuota_BlocksWhenExceeded(t *testing.T) {
 	ginCtx.Set("apiKey", apiKey)
 	ctx := context.WithValue(context.Background(), "gin", ginCtx)
 
-	stats.MergeSnapshot(usage.StatisticsSnapshot{
+	h.Cfg.APIKeyQuotas.Update(func(q *sdkconfig.APIKeyQuotaConfig) {
+		q.Enabled = true
+		q.MonthlyTokenLimits = []sdkconfig.APIKeyMonthlyModelTokenLimit{{
+			APIKey: apiKey,
+			Model:  "claude-*",
+			Limit:  1000,
+		}}
+	})
+
+	usage.GetRequestStatistics().MergeSnapshot(usage.StatisticsSnapshot{
 		APIs: map[string]usage.APISnapshot{
 			apiKey: {
 				Models: map[string]usage.ModelSnapshot{

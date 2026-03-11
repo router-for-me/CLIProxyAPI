@@ -4,6 +4,8 @@
 // debug settings, proxy configuration, and API keys.
 package config
 
+import "sync"
+
 // SDKConfig represents the application's configuration, loaded from a YAML file.
 type SDKConfig struct {
 	// ProxyURL is the URL of an optional proxy server to use for outbound requests.
@@ -45,6 +47,8 @@ type APIKeyQuotaConfig struct {
 
 	// MonthlyTokenLimits defines monthly token limits by API key and model wildcard.
 	MonthlyTokenLimits []APIKeyMonthlyModelTokenLimit `yaml:"monthly-token-limits,omitempty" json:"monthly-token-limits,omitempty"`
+
+	mu sync.RWMutex `yaml:"-" json:"-"`
 }
 
 // APIKeyMonthlyModelTokenLimit binds an API key + model pattern pair to a monthly token cap.
@@ -57,6 +61,32 @@ type APIKeyMonthlyModelTokenLimit struct {
 
 	// Limit is the maximum total tokens allowed per API key in a UTC calendar month.
 	Limit int64 `yaml:"limit" json:"limit"`
+}
+
+func (q *APIKeyQuotaConfig) Snapshot() APIKeyQuotaConfig {
+	if q == nil {
+		return APIKeyQuotaConfig{}
+	}
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+
+	out := APIKeyQuotaConfig{Enabled: q.Enabled}
+	if len(q.ExcludeModelPatterns) > 0 {
+		out.ExcludeModelPatterns = append([]string(nil), q.ExcludeModelPatterns...)
+	}
+	if len(q.MonthlyTokenLimits) > 0 {
+		out.MonthlyTokenLimits = append([]APIKeyMonthlyModelTokenLimit(nil), q.MonthlyTokenLimits...)
+	}
+	return out
+}
+
+func (q *APIKeyQuotaConfig) Update(fn func(*APIKeyQuotaConfig)) {
+	if q == nil || fn == nil {
+		return
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	fn(q)
 }
 
 type StreamingConfig struct {

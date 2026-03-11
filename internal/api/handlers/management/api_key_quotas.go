@@ -10,7 +10,7 @@ import (
 )
 
 func (h *Handler) GetAPIKeyQuotas(c *gin.Context) {
-	c.JSON(200, gin.H{"api-key-quotas": h.cfg.APIKeyQuotas})
+	c.JSON(200, gin.H{"api-key-quotas": h.cfg.APIKeyQuotas.Snapshot()})
 }
 
 func (h *Handler) PutAPIKeyQuotas(c *gin.Context) {
@@ -24,7 +24,11 @@ func (h *Handler) PutAPIKeyQuotas(c *gin.Context) {
 	next := *body.Value
 	next.ExcludeModelPatterns = normalizeStringList(next.ExcludeModelPatterns)
 	next.MonthlyTokenLimits = normalizeAPIKeyMonthlyTokenLimits(next.MonthlyTokenLimits)
-	h.cfg.APIKeyQuotas = next
+	h.cfg.APIKeyQuotas.Update(func(q *config.APIKeyQuotaConfig) {
+		q.Enabled = next.Enabled
+		q.ExcludeModelPatterns = next.ExcludeModelPatterns
+		q.MonthlyTokenLimits = next.MonthlyTokenLimits
+	})
 	h.persist(c)
 }
 
@@ -40,15 +44,17 @@ func (h *Handler) PatchAPIKeyQuotas(c *gin.Context) {
 	}
 	changed := false
 	if body.Enabled != nil {
-		h.cfg.APIKeyQuotas.Enabled = *body.Enabled
+		h.cfg.APIKeyQuotas.Update(func(q *config.APIKeyQuotaConfig) { q.Enabled = *body.Enabled })
 		changed = true
 	}
 	if body.ExcludeModelPatterns != nil {
-		h.cfg.APIKeyQuotas.ExcludeModelPatterns = normalizeStringList(*body.ExcludeModelPatterns)
+		normalized := normalizeStringList(*body.ExcludeModelPatterns)
+		h.cfg.APIKeyQuotas.Update(func(q *config.APIKeyQuotaConfig) { q.ExcludeModelPatterns = normalized })
 		changed = true
 	}
 	if body.MonthlyTokenLimits != nil {
-		h.cfg.APIKeyQuotas.MonthlyTokenLimits = normalizeAPIKeyMonthlyTokenLimits(*body.MonthlyTokenLimits)
+		normalized := normalizeAPIKeyMonthlyTokenLimits(*body.MonthlyTokenLimits)
+		h.cfg.APIKeyQuotas.Update(func(q *config.APIKeyQuotaConfig) { q.MonthlyTokenLimits = normalized })
 		changed = true
 	}
 	if !changed {
@@ -59,37 +65,45 @@ func (h *Handler) PatchAPIKeyQuotas(c *gin.Context) {
 }
 
 func (h *Handler) GetAPIKeyQuotasEnabled(c *gin.Context) {
-	c.JSON(200, gin.H{"enabled": h.cfg.APIKeyQuotas.Enabled})
+	snapshot := h.cfg.APIKeyQuotas.Snapshot()
+	c.JSON(200, gin.H{"enabled": snapshot.Enabled})
 }
 
 func (h *Handler) PutAPIKeyQuotasEnabled(c *gin.Context) {
-	h.updateBoolField(c, func(v bool) { h.cfg.APIKeyQuotas.Enabled = v })
+	h.updateBoolField(c, func(v bool) { h.cfg.APIKeyQuotas.Update(func(q *config.APIKeyQuotaConfig) { q.Enabled = v }) })
 }
 
 func (h *Handler) GetAPIKeyQuotaExcludeModelPatterns(c *gin.Context) {
-	c.JSON(200, gin.H{"exclude-model-patterns": h.cfg.APIKeyQuotas.ExcludeModelPatterns})
+	snapshot := h.cfg.APIKeyQuotas.Snapshot()
+	c.JSON(200, gin.H{"exclude-model-patterns": snapshot.ExcludeModelPatterns})
 }
 
 func (h *Handler) PutAPIKeyQuotaExcludeModelPatterns(c *gin.Context) {
 	h.putStringList(c, func(v []string) {
-		h.cfg.APIKeyQuotas.ExcludeModelPatterns = normalizeStringList(v)
+		normalized := normalizeStringList(v)
+		h.cfg.APIKeyQuotas.Update(func(q *config.APIKeyQuotaConfig) { q.ExcludeModelPatterns = normalized })
 	}, nil)
 }
 
 func (h *Handler) PatchAPIKeyQuotaExcludeModelPatterns(c *gin.Context) {
-	h.patchStringList(c, &h.cfg.APIKeyQuotas.ExcludeModelPatterns, func() {
-		h.cfg.APIKeyQuotas.ExcludeModelPatterns = normalizeStringList(h.cfg.APIKeyQuotas.ExcludeModelPatterns)
+	current := h.cfg.APIKeyQuotas.Snapshot().ExcludeModelPatterns
+	h.patchStringList(c, &current, func() {
+		normalized := normalizeStringList(current)
+		h.cfg.APIKeyQuotas.Update(func(q *config.APIKeyQuotaConfig) { q.ExcludeModelPatterns = normalized })
 	})
 }
 
 func (h *Handler) DeleteAPIKeyQuotaExcludeModelPatterns(c *gin.Context) {
-	h.deleteFromStringList(c, &h.cfg.APIKeyQuotas.ExcludeModelPatterns, func() {
-		h.cfg.APIKeyQuotas.ExcludeModelPatterns = normalizeStringList(h.cfg.APIKeyQuotas.ExcludeModelPatterns)
+	current := h.cfg.APIKeyQuotas.Snapshot().ExcludeModelPatterns
+	h.deleteFromStringList(c, &current, func() {
+		normalized := normalizeStringList(current)
+		h.cfg.APIKeyQuotas.Update(func(q *config.APIKeyQuotaConfig) { q.ExcludeModelPatterns = normalized })
 	})
 }
 
 func (h *Handler) GetAPIKeyQuotaMonthlyTokenLimits(c *gin.Context) {
-	c.JSON(200, gin.H{"monthly-token-limits": h.cfg.APIKeyQuotas.MonthlyTokenLimits})
+	snapshot := h.cfg.APIKeyQuotas.Snapshot()
+	c.JSON(200, gin.H{"monthly-token-limits": snapshot.MonthlyTokenLimits})
 }
 
 func (h *Handler) PutAPIKeyQuotaMonthlyTokenLimits(c *gin.Context) {
@@ -109,7 +123,8 @@ func (h *Handler) PutAPIKeyQuotaMonthlyTokenLimits(c *gin.Context) {
 		}
 		arr = obj.Items
 	}
-	h.cfg.APIKeyQuotas.MonthlyTokenLimits = normalizeAPIKeyMonthlyTokenLimits(arr)
+	normalized := normalizeAPIKeyMonthlyTokenLimits(arr)
+	h.cfg.APIKeyQuotas.Update(func(q *config.APIKeyQuotaConfig) { q.MonthlyTokenLimits = normalized })
 	h.persist(c)
 }
 
@@ -124,14 +139,15 @@ func (h *Handler) PatchAPIKeyQuotaMonthlyTokenLimits(c *gin.Context) {
 		return
 	}
 
+	monthlyTokenLimits := h.cfg.APIKeyQuotas.Snapshot().MonthlyTokenLimits
 	targetIndex := -1
-	if body.Index != nil && *body.Index >= 0 && *body.Index < len(h.cfg.APIKeyQuotas.MonthlyTokenLimits) {
+	if body.Index != nil && *body.Index >= 0 && *body.Index < len(monthlyTokenLimits) {
 		targetIndex = *body.Index
 	}
 	if targetIndex == -1 && body.Match != nil {
 		m := normalizeSingleAPIKeyMonthlyTokenLimit(*body.Match)
-		for i := range h.cfg.APIKeyQuotas.MonthlyTokenLimits {
-			entry := normalizeSingleAPIKeyMonthlyTokenLimit(h.cfg.APIKeyQuotas.MonthlyTokenLimits[i])
+		for i := range monthlyTokenLimits {
+			entry := normalizeSingleAPIKeyMonthlyTokenLimit(monthlyTokenLimits[i])
 			if entry.APIKey == m.APIKey && entry.Model == m.Model {
 				targetIndex = i
 				break
@@ -141,20 +157,23 @@ func (h *Handler) PatchAPIKeyQuotaMonthlyTokenLimits(c *gin.Context) {
 
 	normalized := normalizeSingleAPIKeyMonthlyTokenLimit(*body.Value)
 	if targetIndex == -1 {
-		h.cfg.APIKeyQuotas.MonthlyTokenLimits = append(h.cfg.APIKeyQuotas.MonthlyTokenLimits, normalized)
+		monthlyTokenLimits = append(monthlyTokenLimits, normalized)
 	} else {
-		h.cfg.APIKeyQuotas.MonthlyTokenLimits[targetIndex] = normalized
+		monthlyTokenLimits[targetIndex] = normalized
 	}
-	h.cfg.APIKeyQuotas.MonthlyTokenLimits = normalizeAPIKeyMonthlyTokenLimits(h.cfg.APIKeyQuotas.MonthlyTokenLimits)
+	monthlyTokenLimits = normalizeAPIKeyMonthlyTokenLimits(monthlyTokenLimits)
+	h.cfg.APIKeyQuotas.Update(func(q *config.APIKeyQuotaConfig) { q.MonthlyTokenLimits = monthlyTokenLimits })
 	h.persist(c)
 }
 
 func (h *Handler) DeleteAPIKeyQuotaMonthlyTokenLimits(c *gin.Context) {
+	monthlyTokenLimits := h.cfg.APIKeyQuotas.Snapshot().MonthlyTokenLimits
 	if idxStr := strings.TrimSpace(c.Query("index")); idxStr != "" {
 		var idx int
 		_, err := fmt.Sscanf(idxStr, "%d", &idx)
-		if err == nil && idx >= 0 && idx < len(h.cfg.APIKeyQuotas.MonthlyTokenLimits) {
-			h.cfg.APIKeyQuotas.MonthlyTokenLimits = append(h.cfg.APIKeyQuotas.MonthlyTokenLimits[:idx], h.cfg.APIKeyQuotas.MonthlyTokenLimits[idx+1:]...)
+		if err == nil && idx >= 0 && idx < len(monthlyTokenLimits) {
+			monthlyTokenLimits = append(monthlyTokenLimits[:idx], monthlyTokenLimits[idx+1:]...)
+			h.cfg.APIKeyQuotas.Update(func(q *config.APIKeyQuotaConfig) { q.MonthlyTokenLimits = monthlyTokenLimits })
 			h.persist(c)
 			return
 		}
@@ -167,15 +186,15 @@ func (h *Handler) DeleteAPIKeyQuotaMonthlyTokenLimits(c *gin.Context) {
 		return
 	}
 	needle := normalizeSingleAPIKeyMonthlyTokenLimit(*body.Value)
-	out := make([]config.APIKeyMonthlyModelTokenLimit, 0, len(h.cfg.APIKeyQuotas.MonthlyTokenLimits))
-	for _, entry := range h.cfg.APIKeyQuotas.MonthlyTokenLimits {
+	out := make([]config.APIKeyMonthlyModelTokenLimit, 0, len(monthlyTokenLimits))
+	for _, entry := range monthlyTokenLimits {
 		n := normalizeSingleAPIKeyMonthlyTokenLimit(entry)
 		if n.APIKey == needle.APIKey && n.Model == needle.Model {
 			continue
 		}
 		out = append(out, n)
 	}
-	h.cfg.APIKeyQuotas.MonthlyTokenLimits = out
+	h.cfg.APIKeyQuotas.Update(func(q *config.APIKeyQuotaConfig) { q.MonthlyTokenLimits = out })
 	h.persist(c)
 }
 

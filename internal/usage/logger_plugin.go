@@ -223,6 +223,59 @@ func (s *RequestStatistics) updateAPIStats(stats *apiStats, model string, detail
 	modelStatsValue.Details = append(modelStatsValue.Details, detail)
 }
 
+// MonthlyTokensForAPIModel returns the total tokens used by one API key for one model in the UTC month of now.
+func (s *RequestStatistics) MonthlyTokensForAPIModel(apiKey, model string, now time.Time) int64 {
+	if s == nil {
+		return 0
+	}
+	apiKey = strings.TrimSpace(apiKey)
+	model = trimModelVariant(strings.TrimSpace(model))
+	if apiKey == "" || model == "" {
+		return 0
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	month := now.UTC().Format("2006-01")
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	apiStatsValue, ok := s.apis[apiKey]
+	if !ok || apiStatsValue == nil {
+		return 0
+	}
+
+	var total int64
+	for modelName, modelStatsValue := range apiStatsValue.Models {
+		if trimModelVariant(modelName) != model {
+			continue
+		}
+		for _, detail := range modelStatsValue.Details {
+			if detail.Timestamp.UTC().Format("2006-01") != month {
+				continue
+			}
+			tokens := detail.Tokens.TotalTokens
+			if tokens <= 0 {
+				tokens = detail.Tokens.InputTokens + detail.Tokens.OutputTokens + detail.Tokens.ReasoningTokens + detail.Tokens.CachedTokens
+			}
+			if tokens > 0 {
+				total += tokens
+			}
+		}
+	}
+
+	return total
+}
+
+func trimModelVariant(name string) string {
+	trimmed := strings.TrimSpace(name)
+	if idx := strings.Index(trimmed, "("); idx > 0 {
+		trimmed = strings.TrimSpace(trimmed[:idx])
+	}
+	return trimmed
+}
+
 // Snapshot returns a copy of the aggregated metrics for external consumption.
 func (s *RequestStatistics) Snapshot() StatisticsSnapshot {
 	result := StatisticsSnapshot{}

@@ -15,11 +15,11 @@ type apiKeyQuotaEvaluation struct {
 	Current int64
 }
 
-func evaluateAPIKeyQuota(cfg *sdkconfig.SDKConfig, snapshot usage.StatisticsSnapshot, apiKey, model string, now time.Time) apiKeyQuotaEvaluation {
+func evaluateAPIKeyQuota(cfg *sdkconfig.SDKConfig, usageStats *usage.RequestStatistics, apiKey, model string, now time.Time) apiKeyQuotaEvaluation {
 	if cfg == nil {
 		return apiKeyQuotaEvaluation{}
 	}
-	quotas := cfg.APIKeyQuotas
+	quotas := cfg.APIKeyQuotas.Snapshot()
 	if !quotas.Enabled {
 		return apiKeyQuotaEvaluation{}
 	}
@@ -46,13 +46,11 @@ func evaluateAPIKeyQuota(cfg *sdkconfig.SDKConfig, snapshot usage.StatisticsSnap
 		return apiKeyQuotaEvaluation{}
 	}
 
-	apiSnapshot, ok := snapshot.APIs[apiKey]
-	if !ok {
+	if usageStats == nil {
 		return apiKeyQuotaEvaluation{Limit: limit, Current: 0}
 	}
 
-	month := monthBucket(now)
-	current := monthlyTokensForModel(apiSnapshot, baseModel, month)
+	current := usageStats.MonthlyTokensForAPIModel(apiKey, baseModel, now)
 	if current >= limit {
 		return apiKeyQuotaEvaluation{Blocked: true, Limit: limit, Current: current}
 	}
@@ -111,43 +109,6 @@ func monthBucket(t time.Time) string {
 		t = time.Now()
 	}
 	return t.UTC().Format("2006-01")
-}
-
-func monthlyTokensForModel(apiSnapshot usage.APISnapshot, model, month string) int64 {
-	var total int64
-	for modelName, modelSnapshot := range apiSnapshot.Models {
-		if !sameModelName(modelName, model) {
-			continue
-		}
-		for _, detail := range modelSnapshot.Details {
-			if monthBucket(detail.Timestamp) != month {
-				continue
-			}
-			tokens := detail.Tokens.TotalTokens
-			if tokens <= 0 {
-				tokens = detail.Tokens.InputTokens + detail.Tokens.OutputTokens + detail.Tokens.ReasoningTokens + detail.Tokens.CachedTokens
-			}
-			if tokens > 0 {
-				total += tokens
-			}
-		}
-	}
-	return total
-}
-
-func sameModelName(a, b string) bool {
-	a = strings.TrimSpace(a)
-	b = strings.TrimSpace(b)
-	if a == b {
-		return true
-	}
-	if idx := strings.Index(a, "("); idx > 0 {
-		a = strings.TrimSpace(a[:idx])
-	}
-	if idx := strings.Index(b, "("); idx > 0 {
-		b = strings.TrimSpace(b[:idx])
-	}
-	return a == b
 }
 
 // matchQuotaModelPattern performs simple wildcard matching where '*' matches zero or more characters.

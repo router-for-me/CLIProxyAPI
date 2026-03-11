@@ -10,10 +10,10 @@ import (
 
 func TestEvaluateAPIKeyQuota_Disabled(t *testing.T) {
 	cfg := &sdkconfig.SDKConfig{}
-	snapshot := usage.StatisticsSnapshot{}
+	stats := usage.NewRequestStatistics()
 	now := time.Date(2026, 3, 11, 10, 0, 0, 0, time.UTC)
 
-	result := evaluateAPIKeyQuota(cfg, snapshot, "client-key", "claude-sonnet-4-5", now)
+	result := evaluateAPIKeyQuota(cfg, stats, "client-key", "claude-sonnet-4-5", now)
 	if result.Blocked {
 		t.Fatalf("expected quota check to allow when disabled")
 	}
@@ -29,10 +29,10 @@ func TestEvaluateAPIKeyQuota_ExcludedModel(t *testing.T) {
 			},
 		},
 	}
-	snapshot := usage.StatisticsSnapshot{}
+	stats := usage.NewRequestStatistics()
 	now := time.Date(2026, 3, 11, 10, 0, 0, 0, time.UTC)
 
-	result := evaluateAPIKeyQuota(cfg, snapshot, "client-key", "claude-3-5-haiku", now)
+	result := evaluateAPIKeyQuota(cfg, stats, "client-key", "claude-3-5-haiku", now)
 	if result.Blocked {
 		t.Fatalf("expected excluded model to bypass quota")
 	}
@@ -47,7 +47,8 @@ func TestEvaluateAPIKeyQuota_BlocksWhenMonthlyLimitReached(t *testing.T) {
 			},
 		},
 	}
-	snapshot := usage.StatisticsSnapshot{
+	stats := usage.NewRequestStatistics()
+	stats.MergeSnapshot(usage.StatisticsSnapshot{
 		APIs: map[string]usage.APISnapshot{
 			"client-key": {
 				Models: map[string]usage.ModelSnapshot{
@@ -60,10 +61,10 @@ func TestEvaluateAPIKeyQuota_BlocksWhenMonthlyLimitReached(t *testing.T) {
 				},
 			},
 		},
-	}
+	})
 	now := time.Date(2026, 3, 11, 10, 0, 0, 0, time.UTC)
 
-	result := evaluateAPIKeyQuota(cfg, snapshot, "client-key", "claude-sonnet-4-5", now)
+	result := evaluateAPIKeyQuota(cfg, stats, "client-key", "claude-sonnet-4-5", now)
 	if !result.Blocked {
 		t.Fatalf("expected quota to block when monthly limit reached")
 	}
@@ -84,7 +85,8 @@ func TestEvaluateAPIKeyQuota_IgnoresOtherMonths(t *testing.T) {
 			},
 		},
 	}
-	snapshot := usage.StatisticsSnapshot{
+	stats := usage.NewRequestStatistics()
+	stats.MergeSnapshot(usage.StatisticsSnapshot{
 		APIs: map[string]usage.APISnapshot{
 			"client-key": {
 				Models: map[string]usage.ModelSnapshot{
@@ -96,10 +98,10 @@ func TestEvaluateAPIKeyQuota_IgnoresOtherMonths(t *testing.T) {
 				},
 			},
 		},
-	}
+	})
 	now := time.Date(2026, 3, 11, 10, 0, 0, 0, time.UTC)
 
-	result := evaluateAPIKeyQuota(cfg, snapshot, "client-key", "claude-sonnet-4-5", now)
+	result := evaluateAPIKeyQuota(cfg, stats, "client-key", "claude-sonnet-4-5", now)
 	if result.Blocked {
 		t.Fatalf("expected quota not to block from previous month usage")
 	}
