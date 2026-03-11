@@ -327,6 +327,12 @@ type ClaudeKey struct {
 	// If empty, the default Claude API URL will be used.
 	BaseURL string `yaml:"base-url" json:"base-url"`
 
+	// MessagesPath is the API path appended to BaseURL for the messages endpoint.
+	// If empty, defaults to "/v1/messages".
+	// Use this when connecting to relay services that expose Claude-compatible APIs
+	// at a non-standard path (e.g., set to "/messages" if the relay does not use /v1).
+	MessagesPath string `yaml:"messages-path,omitempty" json:"messages-path,omitempty"`
+
 	// ProxyURL overrides the global proxy setting for this API key if provided.
 	ProxyURL string `yaml:"proxy-url" json:"proxy-url"`
 
