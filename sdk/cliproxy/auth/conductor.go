@@ -1947,7 +1947,15 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		if quotaCooldownDisabledForAuth(auth) {
 			auth.NextRetryAfter = time.Time{}
 		} else {
-			auth.NextRetryAfter = now.Add(1 * time.Minute)
+			cooldown := 1 * time.Minute
+			if auth.Attributes != nil {
+				if v, ok := auth.Attributes["transient_error_cooldown"]; ok {
+					if secs, err := strconv.Atoi(v); err == nil && secs > 0 {
+						cooldown = time.Duration(secs) * time.Second
+					}
+				}
+			}
+			auth.NextRetryAfter = now.Add(cooldown)
 		}
 	default:
 		if auth.StatusMessage == "" {
