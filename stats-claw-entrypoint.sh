@@ -21,31 +21,34 @@ else
   echo "[stats] ⚠️ MANAGEMENT_PASSWORD 未设置，跳过持久化"
 fi
 
-# === 2. rclone 配置 ===
+# === 2. rclone 配置（ClawCloud/Sealos 专用）===
 setup_rclone() {
-  if [ -z "${OBJECTSTORE_ENDPOINT}" ] || [ -z "${OBJECTSTORE_BUCKET}" ]; then
-    echo "[stats] ⚠️ OBJECTSTORE 未配置，跳过"
+  if [ -z "${OBJECTSTORE_ENDPOINT}" ] || [ -z "${OBJECTSTORE_BUCKET}" ] || [ -z "${OBJECTSTORE_ACCESS_KEY}" ] || [ -z "${OBJECTSTORE_SECRET_KEY}" ]; then
+    echo "[stats] ?? OBJECTSTORE_* 环境变量未完整配置，跳过"
     return 1
   fi
+
   mkdir -p /root/.config/rclone
   cat > /root/.config/rclone/rclone.conf << EOF
 [$RCLONE_REMOTE]
 type = s3
-provider = AWS
+provider = Other
 access_key_id = ${OBJECTSTORE_ACCESS_KEY}
 secret_access_key = ${OBJECTSTORE_SECRET_KEY}
 endpoint = ${OBJECTSTORE_ENDPOINT}
 region = auto
+force_path_style = true
 no_check_bucket = true
 EOF
-  echo "[stats] ✅ rclone 配置完成"
 
-  # 快速测试连接（5秒超时）
+  echo "[stats] ? rclone 已切换为 ClawCloud 兼容模式 (provider=Other + force_path_style=true)"
+
+  # 测试连接（5秒超时）
   echo "[stats] 测试 rclone 连接..."
-  if rclone lsd "${RCLONE_REMOTE}:${OBJECTSTORE_BUCKET}/" --contimeout 5s --timeout 10s 2>/dev/null; then
-    echo "[stats] ✅ rclone 连接成功"
+  if rclone lsd "${RCLONE_REMOTE}:${OBJECTSTORE_BUCKET}" --contimeout 5s --timeout 10s 2>/dev/null; then
+    echo "[stats] ? rclone 连接成功"
   else
-    echo "[stats] ⚠️ rclone 连接测试失败（首次运行 bucket 为空是正常的）"
+    echo "[stats] ?? 首次连接测试失败（bucket 为空正常），继续执行"
   fi
 }
 
