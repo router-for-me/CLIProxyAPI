@@ -128,7 +128,7 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 	case "aistudio":
 		return GetAIStudioModels()
 	case "codex":
-		return GetCodexProModels()
+		return GetCodexModelsUnion()
 	case "qwen":
 		return GetQwenModels()
 	case "iflow":
@@ -156,7 +156,7 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		data.Vertex,
 		data.GeminiCLI,
 		data.AIStudio,
-		data.CodexPro,
+		GetCodexModelsUnion(),
 		data.Qwen,
 		data.IFlow,
 		data.Kimi,
