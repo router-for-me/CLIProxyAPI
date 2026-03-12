@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/observability"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 )
@@ -124,7 +125,7 @@ func (s *authScheduler) setSelector(selector Selector) {
 	if s == nil {
 		return
 	}
-	s.mu.Lock()
+	s.lock("set_selector")
 	defer s.mu.Unlock()
 	s.strategy = selectorStrategy(selector)
 	clear(s.mixedCursors)
@@ -135,7 +136,7 @@ func (s *authScheduler) rebuild(auths []*Auth) {
 	if s == nil {
 		return
 	}
-	s.mu.Lock()
+	s.lock("rebuild")
 	defer s.mu.Unlock()
 	s.providers = make(map[string]*providerScheduler)
 	s.authProviders = make(map[string]string)
@@ -151,7 +152,7 @@ func (s *authScheduler) upsertAuth(auth *Auth) {
 	if s == nil {
 		return
 	}
-	s.mu.Lock()
+	s.lock("upsert_auth")
 	defer s.mu.Unlock()
 	s.upsertAuthLocked(auth, time.Now())
 }
@@ -165,7 +166,7 @@ func (s *authScheduler) removeAuth(authID string) {
 	if authID == "" {
 		return
 	}
-	s.mu.Lock()
+	s.lock("remove_auth")
 	defer s.mu.Unlock()
 	s.removeAuthLocked(authID)
 }
@@ -180,7 +181,7 @@ func (s *authScheduler) pickSingle(ctx context.Context, provider, model string, 
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
 	preferWebsocket := cliproxyexecutor.DownstreamWebsocket(ctx) && providerKey == "codex" && pinnedAuthID == ""
 
-	s.mu.Lock()
+	s.lock("pick_single")
 	defer s.mu.Unlock()
 	providerState := s.providers[providerKey]
 	if providerState == nil {
@@ -222,7 +223,7 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
 	modelKey := canonicalModelKey(model)
 
-	s.mu.Lock()
+	s.lock("pick_mixed")
 	defer s.mu.Unlock()
 	if pinnedAuthID != "" {
 		providerKey := s.authProviders[pinnedAuthID]
@@ -312,6 +313,15 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 		return picked, providerKey, nil
 	}
 	return nil, "", s.mixedUnavailableErrorLocked(normalized, model, tried)
+}
+
+func (s *authScheduler) lock(path string) {
+	if s == nil {
+		return
+	}
+	start := time.Now()
+	s.mu.Lock()
+	observability.ObserveSchedulerLockWait(path, time.Since(start))
 }
 
 // mixedUnavailableErrorLocked synthesizes the mixed-provider cooldown or unavailable error.

@@ -150,6 +150,10 @@ type PprofConfig struct {
 	Enable bool `yaml:"enable" json:"enable"`
 	// Addr is the host:port address for the pprof HTTP server.
 	Addr string `yaml:"addr" json:"addr"`
+	// BlockProfileRate enables block profile sampling when > 0.
+	BlockProfileRate int `yaml:"block-profile-rate" json:"block-profile-rate"`
+	// MutexProfileFraction enables mutex profile sampling when > 0.
+	MutexProfileFraction int `yaml:"mutex-profile-fraction" json:"mutex-profile-fraction"`
 }
 
 // RemoteManagement holds management API configuration under 'remote-management'.
@@ -545,6 +549,8 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.DisableCooling = false
 	cfg.Pprof.Enable = false
 	cfg.Pprof.Addr = DefaultPprofAddr
+	cfg.Pprof.BlockProfileRate = 0
+	cfg.Pprof.MutexProfileFraction = 0
 	cfg.AmpCode.RestrictManagementToLocalhost = false // Default to false: API key auth is sufficient
 	cfg.RemoteManagement.PanelGitHubRepository = DefaultPanelGitHubRepository
 	if err = yaml.Unmarshal(data, &cfg); err != nil {
@@ -593,6 +599,12 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.Pprof.Addr = strings.TrimSpace(cfg.Pprof.Addr)
 	if cfg.Pprof.Addr == "" {
 		cfg.Pprof.Addr = DefaultPprofAddr
+	}
+	if cfg.Pprof.BlockProfileRate < 0 {
+		cfg.Pprof.BlockProfileRate = 0
+	}
+	if cfg.Pprof.MutexProfileFraction < 0 {
+		cfg.Pprof.MutexProfileFraction = 0
 	}
 
 	if cfg.LogsMaxTotalSizeMB < 0 {
@@ -1830,5 +1842,3 @@ func removeLegacyAuthBlock(root *yaml.Node) {
 	}
 	removeMapKey(root, "auth")
 }
-
-

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/observability"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher/synthesizer"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
@@ -156,6 +157,7 @@ func (w *Watcher) dispatchAuthUpdates(updates []AuthUpdate) {
 		}
 		w.pendingUpdates[key] = update
 	}
+	observability.SetWatcherBacklog(len(w.pendingOrder))
 	if w.dispatchCond != nil {
 		w.dispatchCond.Signal()
 	}
@@ -211,6 +213,7 @@ func (w *Watcher) nextPendingBatch(ctx context.Context) ([]AuthUpdate, bool) {
 		delete(w.pendingUpdates, key)
 	}
 	w.pendingOrder = w.pendingOrder[:0]
+	observability.SetWatcherBacklog(0)
 	return batch, true
 }
 
@@ -228,6 +231,7 @@ func (w *Watcher) stopDispatch() {
 	w.dispatchMu.Lock()
 	w.pendingOrder = nil
 	w.pendingUpdates = nil
+	observability.SetWatcherBacklog(0)
 	if w.dispatchCond != nil {
 		w.dispatchCond.Broadcast()
 	}

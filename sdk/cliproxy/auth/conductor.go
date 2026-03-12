@@ -17,6 +17,7 @@ import (
 	"github.com/google/uuid"
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/observability"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
@@ -2349,6 +2350,7 @@ func (m *Manager) StartAutoRefresh(parent context.Context, interval time.Duratio
 	if interval <= 0 {
 		interval = refreshCheckInterval
 	}
+	observability.SetRefreshConcurrency(refreshMaxConcurrency)
 	if m.refreshCancel != nil {
 		m.refreshCancel()
 		m.refreshCancel = nil
@@ -2379,26 +2381,31 @@ func (m *Manager) StopAutoRefresh() {
 }
 
 func (m *Manager) checkRefreshes(ctx context.Context) {
-	// log.Debugf("checking refreshes")
 	now := time.Now()
 	snapshot := m.snapshotAuths()
+	scheduledCount := 0
+	dueCount := 0
 	for _, a := range snapshot {
 		typ, _ := a.AccountInfo()
-		if typ != "api_key" {
-			if !m.shouldRefresh(a, now) {
-				continue
-			}
-			log.Debugf("checking refresh for %s, %s, %s", a.Provider, a.ID, typ)
-
-			if exec := m.executorFor(a.Provider); exec == nil {
-				continue
-			}
-			if !m.markRefreshPending(a.ID, now) {
-				continue
-			}
-			go m.refreshAuthWithLimit(ctx, a.ID)
+		if typ == "api_key" {
+			continue
 		}
+		if exec := m.executorFor(a.Provider); exec == nil {
+			continue
+		}
+		scheduledCount++
+		if !m.shouldRefresh(a, now) {
+			continue
+		}
+		dueCount++
+		log.Debugf("checking refresh for %s, %s, %s", a.Provider, a.ID, typ)
+		if !m.markRefreshPending(a.ID, now) {
+			continue
+		}
+		go m.refreshAuthWithLimit(ctx, a.ID)
 	}
+	observability.SetRefreshQueueSize(scheduledCount)
+	observability.SetRefreshDueSize(dueCount)
 }
 
 func (m *Manager) refreshAuthWithLimit(ctx context.Context, id string) {
@@ -2408,7 +2415,11 @@ func (m *Manager) refreshAuthWithLimit(ctx context.Context, id string) {
 	}
 	select {
 	case m.refreshSemaphore <- struct{}{}:
-		defer func() { <-m.refreshSemaphore }()
+		observability.SetRefreshInFlight(len(m.refreshSemaphore))
+		defer func() {
+			<-m.refreshSemaphore
+			observability.SetRefreshInFlight(len(m.refreshSemaphore))
+		}()
 	case <-ctx.Done():
 		return
 	}

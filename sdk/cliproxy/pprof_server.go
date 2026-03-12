@@ -3,8 +3,10 @@ package cliproxy
 import (
 	"context"
 	"errors"
+	"expvar"
 	"net/http"
 	"net/http/pprof"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -45,6 +47,8 @@ func (p *pprofServer) Apply(cfg *config.Config) {
 	if p == nil || cfg == nil {
 		return
 	}
+	runtime.SetBlockProfileRate(maxInt(cfg.Pprof.BlockProfileRate, 0))
+	runtime.SetMutexProfileFraction(maxInt(cfg.Pprof.MutexProfileFraction, 0))
 	addr := strings.TrimSpace(cfg.Pprof.Addr)
 	if addr == "" {
 		addr = config.DefaultPprofAddr
@@ -148,6 +152,7 @@ func (p *pprofServer) stopServerWithContext(ctx context.Context, server *http.Se
 
 func newPprofMux() *http.ServeMux {
 	mux := http.NewServeMux()
+	mux.Handle("/debug/vars", expvar.Handler())
 	mux.HandleFunc("/debug/pprof/", pprof.Index)
 	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
 	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
@@ -160,4 +165,11 @@ func newPprofMux() *http.ServeMux {
 	mux.Handle("/debug/pprof/mutex", pprof.Handler("mutex"))
 	mux.Handle("/debug/pprof/threadcreate", pprof.Handler("threadcreate"))
 	return mux
+}
+
+func maxInt(value, lowerBound int) int {
+	if value < lowerBound {
+		return lowerBound
+	}
+	return value
 }

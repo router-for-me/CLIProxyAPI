@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/observability"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -617,12 +618,29 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 	chunks := streamResult.Chunks
 	dataChan := make(chan []byte)
 	errChan := make(chan *interfaces.ErrorMessage, 1)
+	streamStartedAt := time.Now()
+	observability.IncActiveStreams()
 	go func() {
 		defer close(dataChan)
 		defer close(errChan)
+		defer observability.DecActiveStreams()
 		sentPayload := false
 		bootstrapRetries := 0
 		maxBootstrapRetries := StreamingBootstrapRetries(h.Cfg)
+		firstByteObserved := false
+		var cancelObservedAt time.Time
+
+		defer func() {
+			if !cancelObservedAt.IsZero() {
+				observability.ObserveStreamCancelToExit(time.Since(cancelObservedAt))
+			}
+		}()
+
+		markCancelObserved := func() {
+			if cancelObservedAt.IsZero() {
+				cancelObservedAt = time.Now()
+			}
+		}
 
 		sendErr := func(msg *interfaces.ErrorMessage) bool {
 			if ctx == nil {
@@ -631,6 +649,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 			}
 			select {
 			case <-ctx.Done():
+				markCancelObserved()
 				return false
 			case errChan <- msg:
 				return true
@@ -644,6 +663,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 			}
 			select {
 			case <-ctx.Done():
+				markCancelObserved()
 				return false
 			case dataChan <- chunk:
 				return true
@@ -672,6 +692,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 				if ctx != nil {
 					select {
 					case <-ctx.Done():
+						markCancelObserved()
 						return
 					case chunk, ok = <-chunks:
 					}
@@ -721,6 +742,10 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 							_ = sendErr(&interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: err})
 							return
 						}
+					}
+					if !firstByteObserved {
+						observability.ObserveStreamFirstByte(time.Since(streamStartedAt))
+						firstByteObserved = true
 					}
 					sentPayload = true
 					if okSendData := sendData(cloneBytes(chunk.Payload)); !okSendData {

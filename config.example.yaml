@@ -44,6 +44,9 @@ debug: false
 pprof:
   enable: false
   addr: "127.0.0.1:8316"
+  # Optional Go runtime profile sampling knobs. Keep disabled (0) unless profiling.
+  # block-profile-rate: 1
+  # mutex-profile-fraction: 1
 
 # When true, disable high-overhead HTTP middleware features to reduce per-request memory usage under high concurrency.
 commercial-mode: false

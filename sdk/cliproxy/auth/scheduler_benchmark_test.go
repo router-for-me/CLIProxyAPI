@@ -214,3 +214,41 @@ func BenchmarkManagerPickNextAndMarkResult1000(b *testing.B) {
 		manager.MarkResult(ctx, Result{AuthID: auth.ID, Provider: "gemini", Model: model, Success: true})
 	}
 }
+
+func BenchmarkManagerPickNextAndMarkResultParallel1000(b *testing.B) {
+	manager, _, model := benchmarkManagerSetup(b, 1000, false, false)
+	ctx := context.Background()
+	opts := cliproxyexecutor.Options{}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		tried := map[string]struct{}{}
+		for pb.Next() {
+			auth, _, errPick := manager.pickNext(ctx, "gemini", model, opts, tried)
+			if errPick != nil || auth == nil {
+				b.Fatalf("pickNext failed: auth=%v err=%v", auth, errPick)
+			}
+			manager.MarkResult(ctx, Result{AuthID: auth.ID, Provider: "gemini", Model: model, Success: true})
+		}
+	})
+}
+
+func BenchmarkManagerPickNextMixedAndMarkResultParallel1000(b *testing.B) {
+	manager, providers, model := benchmarkManagerSetup(b, 1000, true, false)
+	ctx := context.Background()
+	opts := cliproxyexecutor.Options{}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		tried := map[string]struct{}{}
+		for pb.Next() {
+			auth, _, provider, errPick := manager.pickNextMixed(ctx, providers, model, opts, tried)
+			if errPick != nil || auth == nil || provider == "" {
+				b.Fatalf("pickNextMixed failed: auth=%v provider=%q err=%v", auth, provider, errPick)
+			}
+			manager.MarkResult(ctx, Result{AuthID: auth.ID, Provider: provider, Model: model, Success: true})
+		}
+	})
+}
