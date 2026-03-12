@@ -2,8 +2,10 @@ package claude
 
 import (
 	"bufio"
+	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -191,22 +193,13 @@ func TestHTTPProxyConnectTunnelWithAuth(t *testing.T) {
 		}
 		defer func() { _ = conn.Close() }()
 		reader := bufio.NewReader(conn)
-		_, _ = reader.ReadString('\n')
-		var foundAuth string
-		for {
-			line, errLine := reader.ReadString('\n')
-			if errLine != nil {
-				proxyErr <- errLine
-				return
-			}
-			if strings.HasPrefix(line, "Proxy-Authorization:") {
-				foundAuth = strings.TrimSpace(strings.TrimPrefix(line, "Proxy-Authorization:"))
-			}
-			if line == "\r\n" {
-				break
-			}
+		req, errRequest := http.ReadRequest(reader)
+		if errRequest != nil {
+			proxyErr <- errRequest
+			return
 		}
-		authHeader <- foundAuth
+		_ = req.Body.Close()
+		authHeader <- req.Header.Get("Proxy-Authorization")
 		_, _ = io.WriteString(conn, "HTTP/1.1 200 OK\r\n\r\n")
 		proxyErr <- nil
 	}()
@@ -250,15 +243,11 @@ func TestHTTPProxyConnectRejectsNon200(t *testing.T) {
 		}
 		defer func() { _ = conn.Close() }()
 		reader := bufio.NewReader(conn)
-		for {
-			line, errLine := reader.ReadString('\n')
-			if errLine != nil {
-				return
-			}
-			if line == "\r\n" {
-				break
-			}
+		req, errRequest := http.ReadRequest(reader)
+		if errRequest != nil {
+			return
 		}
+		_ = req.Body.Close()
 		_, _ = io.WriteString(conn, "HTTP/1.1 407 Proxy Authentication Required\r\nContent-Length: 12\r\n\r\nUnauthorized")
 	}()
 
@@ -286,22 +275,18 @@ func serveConnectProxy(t *testing.T, proxyListener net.Listener, targetAddr stri
 	defer func() { _ = conn.Close() }()
 
 	reader := bufio.NewReader(conn)
-	line, err := reader.ReadString('\n')
-	if err != nil {
-		errCh <- err
+	req, errRequest := http.ReadRequest(reader)
+	if errRequest != nil {
+		errCh <- errRequest
 		return
 	}
-	connectLine <- strings.TrimSpace(line)
+	_ = req.Body.Close()
 
-	for {
-		hdr, errHdr := reader.ReadString('\n')
-		if errHdr != nil {
-			errCh <- errHdr
-			return
-		}
-		if hdr == "\r\n" {
-			break
-		}
+	connectLine <- req.Method + " " + req.RequestURI + " " + req.Proto
+
+	if req.Method != http.MethodConnect {
+		errCh <- fmt.Errorf("unexpected method %q", req.Method)
+		return
 	}
 
 	targetConn, err := net.Dial("tcp", targetAddr)
