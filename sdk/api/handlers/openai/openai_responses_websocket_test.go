@@ -269,7 +269,6 @@ func TestAppendWebsocketEvent(t *testing.T) {
 	}
 }
 
-
 func TestAppendWebsocketEventTruncatesAtLimit(t *testing.T) {
 	var builder strings.Builder
 	payload := bytes.Repeat([]byte("x"), wsBodyLogMaxSize)
