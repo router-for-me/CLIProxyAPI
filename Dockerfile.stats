@@ -1,0 +1,13 @@
+FROM docker.io/eceasy/cli-proxy-api:latest
+
+RUN apk add --no-cache curl unzip \
+    && curl -L https://downloads.rclone.org/rclone-current-linux-amd64.zip -o /tmp/rclone.zip \
+    && unzip -q /tmp/rclone.zip -d /tmp \
+    && mv /tmp/rclone-*/rclone /usr/local/bin/rclone \
+    && chmod +x /usr/local/bin/rclone \
+    && rm -rf /tmp/*
+
+COPY stats-claw-entrypoint.sh /CLIProxyAPI/stats-entrypoint.sh
+RUN chmod +x /CLIProxyAPI/stats-entrypoint.sh
+
+CMD ["/CLIProxyAPI/stats-entrypoint.sh"]
