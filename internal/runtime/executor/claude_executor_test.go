@@ -1100,12 +1100,77 @@ func TestClaudeMessagesPath(t *testing.T) {
 			auth:     &cliproxyauth.Auth{Attributes: map[string]string{"messages_path": "  "}},
 			expected: "/v1/messages",
 		},
+		{
+			name:     "path without leading slash gets slash prepended",
+			auth:     &cliproxyauth.Auth{Attributes: map[string]string{"messages_path": "v1/messages"}},
+			expected: "/v1/messages",
+		},
+		{
+			name:     "path with trailing slash gets slash trimmed",
+			auth:     &cliproxyauth.Auth{Attributes: map[string]string{"messages_path": "/v1/messages/"}},
+			expected: "/v1/messages",
+		},
+		{
+			name:     "path without leading slash and with trailing slash normalized",
+			auth:     &cliproxyauth.Auth{Attributes: map[string]string{"messages_path": "messages/"}},
+			expected: "/messages",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := claudeMessagesPath(tt.auth)
 			if got != tt.expected {
 				t.Errorf("claudeMessagesPath() = %q, want %q", got, tt.expected)
+			}
+		})
+	}
+}
+
+// TestNormalizeBaseURL verifies that normalizeBaseURL strips trailing "/v1" from
+// base URLs to prevent double-path issues when relay services include "/v1" in
+// their base URL configuration.
+func TestNormalizeBaseURL(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "strips trailing /v1",
+			input:    "https://relay.example.com/v1",
+			expected: "https://relay.example.com",
+		},
+		{
+			name:     "no change when no trailing /v1",
+			input:    "https://api.anthropic.com",
+			expected: "https://api.anthropic.com",
+		},
+		{
+			name:     "no change when path is deeper than /v1",
+			input:    "https://relay.example.com/v1/proxy",
+			expected: "https://relay.example.com/v1/proxy",
+		},
+		{
+			name:     "strips trailing slash after /v1",
+			input:    "https://relay.example.com/v1/",
+			expected: "https://relay.example.com",
+		},
+		{
+			name:     "no change for /v1api suffix (not a path segment)",
+			input:    "https://relay.example.com/v1api",
+			expected: "https://relay.example.com/v1api",
+		},
+		{
+			name:     "handles nested /v1 in path correctly",
+			input:    "https://relay.example.com/api/v1",
+			expected: "https://relay.example.com/api",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := normalizeBaseURL(tt.input)
+			if got != tt.expected {
+				t.Errorf("normalizeBaseURL(%q) = %q, want %q", tt.input, got, tt.expected)
 			}
 		})
 	}
