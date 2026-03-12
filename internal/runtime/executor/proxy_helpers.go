@@ -82,9 +82,9 @@ func newProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 			clonedTransport.ResponseHeaderTimeout = respHeaderTimeout
 			httpClient.Transport = clonedTransport
 		} else if httpClient.Transport == nil {
-			httpClient.Transport = &http.Transport{
-				ResponseHeaderTimeout: respHeaderTimeout,
-			}
+			transport := http.DefaultTransport.(*http.Transport).Clone()
+			transport.ResponseHeaderTimeout = respHeaderTimeout
+			httpClient.Transport = transport
 		}
 	}
 

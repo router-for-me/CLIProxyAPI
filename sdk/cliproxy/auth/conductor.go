@@ -1665,11 +1665,19 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					suspendReason = "quota"
 					shouldSuspendModel = true
 					setModelQuota = true
-				case 408, 500, 502, 503, 504:
+				case 408, 500, 502, 503, 504, 524:
 					if quotaCooldownDisabledForAuth(auth) {
 						state.NextRetryAfter = time.Time{}
 					} else {
-						next := now.Add(1 * time.Minute)
+						cooldown := 1 * time.Minute
+						if auth.Attributes != nil {
+							if v, ok := auth.Attributes["transient_error_cooldown"]; ok {
+								if secs, err := strconv.Atoi(v); err == nil && secs > 0 {
+									cooldown = time.Duration(secs) * time.Second
+								}
+							}
+						}
+						next := now.Add(cooldown)
 						state.NextRetryAfter = next
 					}
 				default:
