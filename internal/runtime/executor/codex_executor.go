@@ -566,7 +566,11 @@ func (e *CodexExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*
 	if auth.Metadata != nil {
 		if status, _ := auth.Metadata["refresh_status"].(string); status == "failed" {
 			log.Debugf("codex executor: skipping refresh for %s as it previously failed", auth.ID)
-			return auth, nil
+			msg, _ := auth.Metadata["refresh_message"].(string)
+			if strings.TrimSpace(msg) == "" {
+				msg = "permanent refresh failure"
+			}
+			return auth, &cliproxyauth.Error{Code: "refresh_failed", Message: msg, Retryable: false, HTTPStatus: http.StatusUnauthorized}
 		}
 	}
 	var refreshToken string
@@ -591,7 +595,7 @@ func (e *CodexExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*
 			// Mark status for the UI/API
 			auth.Status = cliproxyauth.StatusError
 			auth.StatusMessage = "Permanent refresh failure: " + err.Error()
-			return auth, nil
+			return auth, &cliproxyauth.Error{Code: "refresh_failed", Message: err.Error(), Retryable: false, HTTPStatus: http.StatusUnauthorized}
 		}
 		return nil, err
 	}

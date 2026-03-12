@@ -2448,6 +2448,13 @@ func (m *Manager) shouldRefresh(a *Auth, now time.Time) bool {
 	if a == nil || a.Disabled {
 		return false
 	}
+	// Providers may mark an auth as permanently failed to refresh.
+	// In that state we stop auto-refresh and require manual intervention.
+	if a.Metadata != nil {
+		if status, _ := a.Metadata["refresh_status"].(string); status == "failed" {
+			return false
+		}
+	}
 	if !a.NextRefreshAfter.IsZero() && now.Before(a.NextRefreshAfter) {
 		return false
 	}
