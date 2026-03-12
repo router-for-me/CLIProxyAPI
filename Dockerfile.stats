@@ -1,4 +1,4 @@
-FROM docker.io/eceasy/cli-proxy-api:latest
+FROM ghcr.io/router-for-me/cliproxyapi:latest
 
 RUN apk add --no-cache curl unzip \
     && curl -L https://downloads.rclone.org/rclone-current-linux-amd64.zip -o /tmp/rclone.zip \
