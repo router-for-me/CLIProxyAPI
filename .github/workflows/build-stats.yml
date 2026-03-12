@@ -15,6 +15,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       
+      - name: Lowercase GitHub owner name
+        id: lc-owner
+        run: |
+          echo "owner=${GITHUB_REPOSITORY_OWNER,,}" >> $GITHUB_OUTPUT
+      
       - name: Login to GitHub Container Registry
         uses: docker/login-action@v3
         with:
@@ -28,4 +33,4 @@ jobs:
           context: .
           file: Dockerfile.stats
           push: true
-          tags: ghcr.io/${{ github.repository_owner }}/cliproxyapi-stats:latest
+          tags: ghcr.io/${{ steps.lc-owner.outputs.owner }}/cliproxyapi-stats:latest
