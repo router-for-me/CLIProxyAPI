@@ -41,14 +41,14 @@ force_path_style = true
 no_check_bucket = true
 EOF
 
-  echo "[stats] ? rclone 已切换为 ClawCloud 兼容模式 (provider=Other + force_path_style=true)"
+  echo "[stats] √ rclone 已切换为 ClawCloud 兼容模式 (provider=Other + force_path_style=true)"
 
   # 测试连接（5秒超时）
   echo "[stats] 测试 rclone 连接..."
   if rclone lsd "${RCLONE_REMOTE}:${OBJECTSTORE_BUCKET}" --contimeout 5s --timeout 10s 2>/dev/null; then
-    echo "[stats] ? rclone 连接成功"
+    echo "[stats] √ rclone 连接成功"
   else
-    echo "[stats] ?? 首次连接测试失败（bucket 为空正常），继续执行"
+    echo "[stats] × 首次连接测试失败（bucket 为空正常），继续执行"
   fi
 }
 
