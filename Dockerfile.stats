@@ -9,5 +9,6 @@ RUN apk add --no-cache curl unzip \
 
 COPY stats-claw-entrypoint.sh /CLIProxyAPI/stats-entrypoint.sh
 RUN chmod +x /CLIProxyAPI/stats-entrypoint.sh
+WORKDIR /CLIProxyAPI
 
 CMD ["/CLIProxyAPI/stats-entrypoint.sh"]
