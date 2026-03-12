@@ -33,13 +33,23 @@ func (w *Watcher) start(ctx context.Context) error {
 	}
 	log.Debugf("watching config file: %s", w.configPath)
 
-	if errAddAuthDir := w.watcher.Add(w.authDir); errAddAuthDir != nil {
-		log.Errorf("failed to watch auth directory %s: %v", w.authDir, errAddAuthDir)
+	authDir := w.effectiveAuthDir()
+	if errAddAuthDir := w.watcher.Add(authDir); errAddAuthDir != nil {
+		log.Errorf("failed to watch auth directory %s: %v", authDir, errAddAuthDir)
 		return errAddAuthDir
 	}
-	log.Debugf("watching auth directory: %s", w.authDir)
+	log.Debugf("watching auth directory: %s", authDir)
 
-	go w.processEvents(ctx)
+	authCtx, cancel := context.WithCancel(ctx)
+	w.authEventMu.Lock()
+	if w.authEventCancel != nil {
+		w.authEventCancel()
+	}
+	w.authEventCtx = authCtx
+	w.authEventCancel = cancel
+	w.authEventMu.Unlock()
+
+	go w.processEvents(authCtx)
 
 	w.reloadClients(true, nil, false)
 	return nil
@@ -69,7 +79,7 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 	configOps := fsnotify.Write | fsnotify.Create | fsnotify.Rename
 	normalizedName := w.normalizeAuthPath(event.Name)
 	normalizedConfigPath := w.normalizeAuthPath(w.configPath)
-	normalizedAuthDir := w.normalizeAuthPath(w.authDir)
+	normalizedAuthDir := w.normalizeAuthPath(w.effectiveAuthDir())
 	isConfigEvent := normalizedName == normalizedConfigPath && event.Op&configOps != 0
 	authOps := fsnotify.Create | fsnotify.Write | fsnotify.Remove | fsnotify.Rename
 	isAuthJSON := strings.HasPrefix(normalizedName, normalizedAuthDir) && strings.HasSuffix(normalizedName, ".json") && event.Op&authOps != 0
@@ -88,40 +98,11 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 		return
 	}
 
-	// Handle auth directory changes incrementally (.json only)
-	if event.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
-		if w.shouldDebounceRemove(normalizedName, now) {
-			log.Debugf("debouncing remove event for %s", filepath.Base(event.Name))
-			return
-		}
-		// Atomic replace on some platforms may surface as Rename (or Remove) before the new file is ready.
-		// Wait briefly; if the path exists again, treat as an update instead of removal.
-		time.Sleep(replaceCheckDelay)
-		if _, statErr := os.Stat(event.Name); statErr == nil {
-			if unchanged, errSame := w.authFileUnchanged(event.Name); errSame == nil && unchanged {
-				log.Debugf("auth file unchanged (hash match), skipping reload: %s", filepath.Base(event.Name))
-				return
-			}
-			log.Infof("auth file changed (%s): %s, processing incrementally", event.Op.String(), filepath.Base(event.Name))
-			w.addOrUpdateClient(event.Name)
-			return
-		}
-		if !w.isKnownAuthFile(event.Name) {
-			log.Debugf("ignoring remove for unknown auth file: %s", filepath.Base(event.Name))
-			return
-		}
-		log.Infof("auth file changed (%s): %s, processing incrementally", event.Op.String(), filepath.Base(event.Name))
-		w.removeClient(event.Name)
-		return
-	}
-	if event.Op&(fsnotify.Create|fsnotify.Write) != 0 {
-		if unchanged, errSame := w.authFileUnchanged(event.Name); errSame == nil && unchanged {
-			log.Debugf("auth file unchanged (hash match), skipping reload: %s", filepath.Base(event.Name))
-			return
-		}
-		log.Infof("auth file changed (%s): %s, processing incrementally", event.Op.String(), filepath.Base(event.Name))
-		w.addOrUpdateClient(event.Name)
-	}
+	w.enqueueAuthEvent(authPathEvent{
+		path:       event.Name,
+		normalized: normalizedName,
+		op:         event.Op & authOps,
+	})
 }
 
 func (w *Watcher) authFileUnchanged(path string) (bool, error) {
@@ -191,4 +172,138 @@ func (w *Watcher) shouldDebounceRemove(normalizedPath string, now time.Time) boo
 	}
 	w.clientsMutex.Unlock()
 	return false
+}
+
+func (w *Watcher) enqueueAuthEvent(event authPathEvent) {
+	if w == nil || event.normalized == "" {
+		return
+	}
+	w.authEventMu.Lock()
+	ctx := w.authEventCtx
+	w.authEventMu.Unlock()
+	if ctx == nil {
+		w.processAuthEvent(event)
+		return
+	}
+	worker, _ := w.getOrCreateAuthWorker(event.normalized)
+	worker.mu.Lock()
+	if worker.hasPending {
+		worker.pending.op |= event.op
+		if strings.TrimSpace(event.path) != "" {
+			worker.pending.path = event.path
+		}
+	} else {
+		worker.pending = event
+		worker.hasPending = true
+	}
+	worker.mu.Unlock()
+
+	select {
+	case worker.signal <- struct{}{}:
+	default:
+	}
+}
+
+func (w *Watcher) getOrCreateAuthWorker(normalized string) (*authEventWorker, context.Context) {
+	w.authEventMu.Lock()
+	defer w.authEventMu.Unlock()
+	if w.authEventWorkers == nil {
+		w.authEventWorkers = make(map[string]*authEventWorker)
+	}
+	if worker, ok := w.authEventWorkers[normalized]; ok && worker != nil {
+		return worker, w.authEventCtx
+	}
+	worker := &authEventWorker{signal: make(chan struct{}, 1)}
+	ctx := w.authEventCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	w.authEventWorkers[normalized] = worker
+	go w.runAuthEventWorker(ctx, normalized, worker)
+	return worker, ctx
+}
+
+func (w *Watcher) runAuthEventWorker(ctx context.Context, normalized string, worker *authEventWorker) {
+	idle := time.NewTimer(authWorkerIdleTimeout)
+	defer idle.Stop()
+	defer w.removeAuthWorker(normalized, worker)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-idle.C:
+			return
+		case <-worker.signal:
+			if !idle.Stop() {
+				select {
+				case <-idle.C:
+				default:
+				}
+			}
+			for {
+				event, ok := worker.takePending()
+				if !ok {
+					break
+				}
+				w.processAuthEvent(event)
+			}
+			idle.Reset(authWorkerIdleTimeout)
+		}
+	}
+}
+
+func (w *Watcher) removeAuthWorker(normalized string, worker *authEventWorker) {
+	w.authEventMu.Lock()
+	defer w.authEventMu.Unlock()
+	if existing, ok := w.authEventWorkers[normalized]; ok && existing == worker {
+		delete(w.authEventWorkers, normalized)
+	}
+}
+
+func (w *Watcher) processAuthEvent(event authPathEvent) {
+	now := time.Now()
+	if event.op&(fsnotify.Remove|fsnotify.Rename) != 0 {
+		if w.shouldDebounceRemove(event.normalized, now) {
+			log.Debugf("debouncing remove event for %s", filepath.Base(event.path))
+			return
+		}
+		time.Sleep(replaceCheckDelay)
+		if _, statErr := os.Stat(event.path); statErr == nil {
+			if unchanged, errSame := w.authFileUnchanged(event.path); errSame == nil && unchanged {
+				log.Debugf("auth file unchanged (hash match), skipping reload: %s", filepath.Base(event.path))
+				return
+			}
+			log.Infof("auth file changed (%s): %s, processing incrementally", event.op.String(), filepath.Base(event.path))
+			w.addOrUpdateClient(event.path)
+			return
+		}
+		if !w.isKnownAuthFile(event.path) {
+			log.Debugf("ignoring remove for unknown auth file: %s", filepath.Base(event.path))
+			return
+		}
+		log.Infof("auth file changed (%s): %s, processing incrementally", event.op.String(), filepath.Base(event.path))
+		w.removeClient(event.path)
+		return
+	}
+	if event.op&(fsnotify.Create|fsnotify.Write) != 0 {
+		if unchanged, errSame := w.authFileUnchanged(event.path); errSame == nil && unchanged {
+			log.Debugf("auth file unchanged (hash match), skipping reload: %s", filepath.Base(event.path))
+			return
+		}
+		log.Infof("auth file changed (%s): %s, processing incrementally", event.op.String(), filepath.Base(event.path))
+		w.addOrUpdateClient(event.path)
+	}
+}
+
+func (w *authEventWorker) takePending() (authPathEvent, bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if !w.hasPending {
+		return authPathEvent{}, false
+	}
+	event := w.pending
+	w.pending = authPathEvent{}
+	w.hasPending = false
+	return event, true
 }

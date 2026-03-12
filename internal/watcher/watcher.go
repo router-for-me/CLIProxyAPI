@@ -56,9 +56,28 @@ type Watcher struct {
 	pendingUpdates    map[string]AuthUpdate
 	pendingOrder      []string
 	dispatchCancel    context.CancelFunc
+	dispatchBacklog   atomic.Int64
+	dispatchMerged    atomic.Int64
+	authEventMu       sync.Mutex
+	authEventWorkers  map[string]*authEventWorker
+	authEventCtx      context.Context
+	authEventCancel   context.CancelFunc
 	storePersister    storePersister
 	mirroredAuthDir   string
 	oldConfigYaml     []byte
+}
+
+type authPathEvent struct {
+	path       string
+	normalized string
+	op         fsnotify.Op
+}
+
+type authEventWorker struct {
+	signal     chan struct{}
+	mu         sync.Mutex
+	pending    authPathEvent
+	hasPending bool
 }
 
 // AuthUpdateAction represents the type of change detected in auth sources.
@@ -84,6 +103,7 @@ const (
 	configReloadDebounce     = 150 * time.Millisecond
 	authRemoveDebounceWindow = 1 * time.Second
 	serverUpdateDebounce     = 1 * time.Second
+	authWorkerIdleTimeout    = 2 * time.Second
 )
 
 // NewWatcher creates a new file watcher instance
@@ -93,12 +113,13 @@ func NewWatcher(configPath, authDir string, reloadCallback func(*config.Config))
 		return nil, errNewWatcher
 	}
 	w := &Watcher{
-		configPath:      configPath,
-		authDir:         authDir,
-		reloadCallback:  reloadCallback,
-		watcher:         watcher,
-		lastAuthHashes:  make(map[string]string),
-		fileAuthsByPath: make(map[string]map[string]*coreauth.Auth),
+		configPath:       configPath,
+		authDir:          authDir,
+		reloadCallback:   reloadCallback,
+		watcher:          watcher,
+		lastAuthHashes:   make(map[string]string),
+		fileAuthsByPath:  make(map[string]map[string]*coreauth.Auth),
+		authEventWorkers: make(map[string]*authEventWorker),
 	}
 	w.dispatchCond = sync.NewCond(&w.dispatchMu)
 	if store := sdkAuth.GetTokenStore(); store != nil {
@@ -124,6 +145,7 @@ func (w *Watcher) Start(ctx context.Context) error {
 // Stop stops the file watcher
 func (w *Watcher) Stop() error {
 	w.stopped.Store(true)
+	w.stopAuthEventWorkers()
 	w.stopDispatch()
 	w.stopConfigReloadTimer()
 	w.stopServerUpdateTimer()
@@ -155,5 +177,27 @@ func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 	w.clientsMutex.RLock()
 	cfg := w.config
 	w.clientsMutex.RUnlock()
-	return snapshotCoreAuths(cfg, w.authDir)
+	return snapshotCoreAuths(cfg, w.effectiveAuthDir())
+}
+
+func (w *Watcher) effectiveAuthDir() string {
+	if w == nil {
+		return ""
+	}
+	if fixed := strings.TrimSpace(w.mirroredAuthDir); fixed != "" {
+		return fixed
+	}
+	return w.authDir
+}
+
+func (w *Watcher) stopAuthEventWorkers() {
+	w.authEventMu.Lock()
+	cancel := w.authEventCancel
+	w.authEventCtx = nil
+	w.authEventCancel = nil
+	w.authEventWorkers = make(map[string]*authEventWorker)
+	w.authEventMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 }

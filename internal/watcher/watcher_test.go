@@ -1155,6 +1155,145 @@ func TestHandleEventRemoveKnownFileDeletes(t *testing.T) {
 	}
 }
 
+func TestHandleEventAsyncWorkerCoalescesBurstAndPreservesFinalState(t *testing.T) {
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if err := os.MkdirAll(authDir, 0o755); err != nil {
+		t.Fatalf("failed to create auth dir: %v", err)
+	}
+	authFile := filepath.Join(authDir, "burst.json")
+
+	queue := make(chan AuthUpdate, 16)
+	w := &Watcher{
+		authDir:         authDir,
+		configPath:      filepath.Join(tmpDir, "config.yaml"),
+		lastAuthHashes:  make(map[string]string),
+		fileAuthsByPath: make(map[string]map[string]*coreauth.Auth),
+	}
+	w.SetConfig(&config.Config{AuthDir: authDir})
+	w.SetAuthUpdateQueue(queue)
+	defer w.stopDispatch()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w.authEventMu.Lock()
+	w.authEventCtx = ctx
+	w.authEventCancel = cancel
+	w.authEventMu.Unlock()
+
+	writeAuth := func(email string) {
+		payload := []byte(fmt.Sprintf(`{"type":"codex","email":"%s"}`, email))
+		if err := os.WriteFile(authFile, payload, 0o644); err != nil {
+			t.Fatalf("write auth file: %v", err)
+		}
+	}
+
+	writeAuth("one@example.com")
+	w.handleEvent(fsnotify.Event{Name: authFile, Op: fsnotify.Write})
+	first := waitForAuthUpdate(t, queue)
+	if first.Action != AuthUpdateActionAdd {
+		t.Fatalf("expected first update action %q, got %+v", AuthUpdateActionAdd, first)
+	}
+	if first.Auth == nil || first.Auth.Label != "one@example.com" {
+		t.Fatalf("expected first auth label one@example.com, got %+v", first.Auth)
+	}
+
+	writeAuth("two@example.com")
+	w.handleEvent(fsnotify.Event{Name: authFile, Op: fsnotify.Rename})
+	w.handleEvent(fsnotify.Event{Name: authFile, Op: fsnotify.Write})
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		w.clientsMutex.RLock()
+		auths := w.fileAuthsByPath[w.normalizeAuthPath(authFile)]
+		var gotLabel string
+		for _, auth := range auths {
+			if auth != nil {
+				gotLabel = auth.Label
+				break
+			}
+		}
+		w.clientsMutex.RUnlock()
+		if gotLabel == "two@example.com" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for final auth state, got label=%q", gotLabel)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	second := waitForAuthUpdate(t, queue)
+	if second.Action != AuthUpdateActionModify {
+		t.Fatalf("expected second update action %q, got %+v", AuthUpdateActionModify, second)
+	}
+	if second.Auth == nil || second.Auth.Label != "two@example.com" {
+		t.Fatalf("expected second auth label two@example.com, got %+v", second.Auth)
+	}
+
+	time.Sleep(authRemoveDebounceWindow + 50*time.Millisecond)
+	if err := os.Remove(authFile); err != nil {
+		t.Fatalf("remove auth file: %v", err)
+	}
+	w.handleEvent(fsnotify.Event{Name: authFile, Op: fsnotify.Remove})
+
+	deadline = time.Now().Add(2 * time.Second)
+	for {
+		w.clientsMutex.RLock()
+		_, exists := w.fileAuthsByPath[w.normalizeAuthPath(authFile)]
+		_, hashExists := w.lastAuthHashes[w.normalizeAuthPath(authFile)]
+		w.clientsMutex.RUnlock()
+		if !exists && !hashExists {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for auth removal, exists=%v hashExists=%v", exists, hashExists)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	third := waitForAuthUpdate(t, queue)
+	if third.Action != AuthUpdateActionDelete {
+		t.Fatalf("expected third update action %q, got %+v", AuthUpdateActionDelete, third)
+	}
+	if third.ID == "" {
+		t.Fatalf("expected delete update to include auth ID, got %+v", third)
+	}
+	select {
+	case extra := <-queue:
+		t.Fatalf("unexpected extra update after delete: %+v", extra)
+	case <-time.After(150 * time.Millisecond):
+	}
+}
+
+func TestDispatchAuthUpdatesTracksBacklogAndMerge(t *testing.T) {
+	w := &Watcher{
+		authQueue: make(chan AuthUpdate, 1),
+	}
+
+	w.dispatchAuthUpdates([]AuthUpdate{{Action: AuthUpdateActionModify, ID: "same"}})
+	if got := w.dispatchBacklog.Load(); got != 1 {
+		t.Fatalf("dispatch backlog = %d, want 1", got)
+	}
+
+	w.dispatchAuthUpdates([]AuthUpdate{{Action: AuthUpdateActionModify, ID: "same"}})
+	if got := w.dispatchMerged.Load(); got != 1 {
+		t.Fatalf("dispatch merged = %d, want 1", got)
+	}
+	if got := len(w.pendingOrder); got != 1 {
+		t.Fatalf("pending order len = %d, want 1", got)
+	}
+}
+
+func waitForAuthUpdate(t *testing.T, queue <-chan AuthUpdate) AuthUpdate {
+	t.Helper()
+	select {
+	case update := <-queue:
+		return update
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for auth update")
+		return AuthUpdate{}
+	}
+}
+
 func TestNormalizeAuthPathAndDebounceCleanup(t *testing.T) {
 	w := &Watcher{}
 	if got := w.normalizeAuthPath("   "); got != "" {

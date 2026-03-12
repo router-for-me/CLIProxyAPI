@@ -1684,12 +1684,14 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			}
 		}
 
-		_ = m.persist(ctx, auth)
 		authSnapshot = auth.Clone()
 	}
 	m.mu.Unlock()
 	if m.scheduler != nil && authSnapshot != nil {
 		m.scheduler.upsertAuth(authSnapshot)
+	}
+	if authSnapshot != nil {
+		_ = m.persist(ctx, authSnapshot)
 	}
 
 	if clearModelQuota && result.Model != "" {

@@ -12,6 +12,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher/synthesizer"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	log "github.com/sirupsen/logrus"
 )
 
 var snapshotCoreAuthsFunc = snapshotCoreAuths
@@ -153,9 +154,12 @@ func (w *Watcher) dispatchAuthUpdates(updates []AuthUpdate) {
 		key := w.authUpdateKey(update, baseTS+int64(idx))
 		if _, exists := w.pendingUpdates[key]; !exists {
 			w.pendingOrder = append(w.pendingOrder, key)
+		} else {
+			w.dispatchMerged.Add(1)
 		}
 		w.pendingUpdates[key] = update
 	}
+	w.dispatchBacklog.Store(int64(len(w.pendingOrder)))
 	if w.dispatchCond != nil {
 		w.dispatchCond.Signal()
 	}
@@ -174,6 +178,9 @@ func (w *Watcher) dispatchLoop(ctx context.Context) {
 		batch, ok := w.nextPendingBatch(ctx)
 		if !ok {
 			return
+		}
+		if backlog := w.dispatchBacklog.Load(); backlog > 0 {
+			log.Debugf("watcher dispatch backlog=%d merged=%d", backlog, w.dispatchMerged.Load())
 		}
 		queue := w.getAuthQueue()
 		if queue == nil {
@@ -211,6 +218,7 @@ func (w *Watcher) nextPendingBatch(ctx context.Context) ([]AuthUpdate, bool) {
 		delete(w.pendingUpdates, key)
 	}
 	w.pendingOrder = w.pendingOrder[:0]
+	w.dispatchBacklog.Store(0)
 	return batch, true
 }
 
@@ -228,6 +236,7 @@ func (w *Watcher) stopDispatch() {
 	w.dispatchMu.Lock()
 	w.pendingOrder = nil
 	w.pendingUpdates = nil
+	w.dispatchBacklog.Store(0)
 	if w.dispatchCond != nil {
 		w.dispatchCond.Broadcast()
 	}
