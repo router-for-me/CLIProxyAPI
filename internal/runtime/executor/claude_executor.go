@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/textproto"
 	"runtime"
@@ -183,6 +184,9 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
 		recordAPIResponseError(ctx, e.cfg, err)
+		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+			return resp, statusErr{code: http.StatusGatewayTimeout, msg: fmt.Sprintf("upstream timeout: %v", err)}
+		}
 		return resp, err
 	}
 	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
@@ -346,6 +350,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
 		recordAPIResponseError(ctx, e.cfg, err)
+		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+			return nil, statusErr{code: http.StatusGatewayTimeout, msg: fmt.Sprintf("upstream timeout: %v", err)}
+		}
 		return nil, err
 	}
 	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
