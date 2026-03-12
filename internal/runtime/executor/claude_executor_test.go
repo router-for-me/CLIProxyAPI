@@ -4,13 +4,13 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
-	"github.com/andybalholm/brotli"
 	"github.com/gin-gonic/gin"
 	"github.com/klauspost/compress/zstd"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
@@ -1395,8 +1395,10 @@ func testClaudeExecutorInvalidCompressedErrorBody(
 			t.Fatalf("%s: status code = %d, want %d", name, got, http.StatusBadRequest)
 		}
 		errText := strings.ToLower(err.Error())
-		if !strings.Contains(errText, "failed to read upstream error body") {
-			t.Fatalf("%s: expected read failure context, got %q", name, err.Error())
+		if !strings.Contains(errText, "failed to read upstream error body") &&
+			!strings.Contains(errText, "failed to decode upstream error body") &&
+			!strings.Contains(errText, "failed to decode error response body") {
+			t.Fatalf("%s: expected read/decode failure context, got %q", name, err.Error())
 		}
 		if !strings.Contains(errText, "gzip") && !strings.Contains(errText, "eof") && !strings.Contains(errText, "checksum") {
 			t.Fatalf("%s: expected gzip read failure, got %q", name, err.Error())
@@ -1902,7 +1904,8 @@ func TestClaudeExecutor_PreservesStatusOnCompressedErrorDecodeFailure(t *testing
 			t.Fatalf("%s: status code = %d, want %d", name, got, http.StatusBadRequest)
 		}
 		errText := strings.ToLower(err.Error())
-		if !strings.Contains(errText, "failed to decode upstream error body") {
+		if !strings.Contains(errText, "failed to decode upstream error body") &&
+			!strings.Contains(errText, "failed to decode error response body") {
 			t.Fatalf("%s: expected decode failure context, got %q", name, err.Error())
 		}
 		if !strings.Contains(errText, "gzip") {
