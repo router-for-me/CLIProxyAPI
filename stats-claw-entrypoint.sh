@@ -9,7 +9,7 @@ RCLONE_REMOTE="clawstats"
 PORT=8317
 MGMT_KEY="${MANAGEMENT_PASSWORD:-}"
 
-# === 1. 生成 config.yaml（主程序启动前！）===
+# === 1. 生成 config.yaml（主程序启动前）===
 if [ -n "$MGMT_KEY" ]; then
   cat > /CLIProxyAPI/config.yaml << EOF
 remote-management:
@@ -52,7 +52,7 @@ EOF
   fi
 }
 
-# === 3. 下载（修复：目标是目录不是文件）===
+# === 3. 下载（目标是目录不是文件）===
 download_from_r2() {
   mkdir -p "$DATA_DIR"
   echo "[stats] 下载历史统计..."
@@ -111,10 +111,10 @@ if [ -n "$MGMT_KEY" ]; then
   fi
 
   # === 6. 后台循环 ===
-  echo "[stats] ✅ 启动后台循环（每60秒 export+upload）"
+  echo "[stats] ✅ 启动后台循环（每180秒 export+upload）"
   (
     while true; do
-      sleep 60
+      sleep 180
       echo "[stats] $(date '+%H:%M:%S') export..."
       
       RESPONSE=$(curl -s -w "\n%{http_code}" \
