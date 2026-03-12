@@ -107,6 +107,18 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 			i++
 		}
 
+		// Build call_id -> name map from function_call items for resolving function_call_output names
+		callID2Name := make(map[string]string)
+		for _, item := range normalized {
+			if item.Get("type").String() == "function_call" {
+				if cid := item.Get("call_id").String(); cid != "" {
+					if name := item.Get("name").String(); name != "" {
+						callID2Name[cid] = name
+					}
+				}
+			}
+		}
+
 		for _, item := range normalized {
 			itemType := item.Get("type").String()
 			itemRole := item.Get("role").String()
@@ -318,20 +330,10 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 				functionContent := `{"role":"function","parts":[]}`
 				functionResponse := `{"functionResponse":{"name":"","response":{}}}`
 
-				// We need to extract the function name from the previous function_call
-				// For now, we'll use a placeholder or extract from context if available
-				functionName := "unknown" // This should ideally be matched with the corresponding function_call
-
-				// Find the corresponding function call name by matching call_id
-				// We need to look back through the input array to find the matching call
-				if inputArray := root.Get("input"); inputArray.Exists() && inputArray.IsArray() {
-					inputArray.ForEach(func(_, prevItem gjson.Result) bool {
-						if prevItem.Get("type").String() == "function_call" && prevItem.Get("call_id").String() == callID {
-							functionName = prevItem.Get("name").String()
-							return false // Stop iteration
-						}
-						return true
-					})
+				// Resolve function name from the pre-built call_id -> name map
+				functionName := "unknown"
+				if name, ok := callID2Name[callID]; ok {
+					functionName = name
 				}
 
 				functionResponse, _ = sjson.Set(functionResponse, "functionResponse.name", functionName)

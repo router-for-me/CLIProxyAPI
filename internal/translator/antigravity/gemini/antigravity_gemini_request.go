@@ -138,20 +138,38 @@ func ConvertGeminiRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 // FunctionCallGroup represents a group of function calls and their responses
 type FunctionCallGroup struct {
 	ResponsesNeeded int
+	CallNames       []string // ordered function call names for backfilling
 }
 
 // parseFunctionResponseRaw attempts to normalize a function response part into a JSON object string.
 // Falls back to a minimal "functionResponse" object when parsing fails.
-func parseFunctionResponseRaw(response gjson.Result) string {
+// If a non-empty backfillName is provided and the functionResponse.name is empty, it will be set.
+func parseFunctionResponseRaw(response gjson.Result, backfillName string) string {
 	if response.IsObject() && gjson.Valid(response.Raw) {
+		fr := response.Get("functionResponse")
+		if fr.Exists() && fr.Get("name").String() == "" {
+			nameToSet := backfillName
+			if nameToSet == "" {
+				nameToSet = "unknown"
+			}
+			patched, _ := sjson.Set(response.Raw, "functionResponse.name", nameToSet)
+			return patched
+		}
 		return response.Raw
 	}
 
 	log.Debugf("parse function response failed, using fallback")
 	funcResp := response.Get("functionResponse")
 	if funcResp.Exists() {
+		name := funcResp.Get("name").String()
+		if name == "" {
+			name = backfillName
+		}
+		if name == "" {
+			name = "unknown"
+		}
 		fr := `{"functionResponse":{"name":"","response":{"result":""}}}`
-		fr, _ = sjson.Set(fr, "functionResponse.name", funcResp.Get("name").String())
+		fr, _ = sjson.Set(fr, "functionResponse.name", name)
 		fr, _ = sjson.Set(fr, "functionResponse.response.result", funcResp.Get("response").String())
 		if id := funcResp.Get("id").String(); id != "" {
 			fr, _ = sjson.Set(fr, "functionResponse.id", id)
@@ -221,8 +239,12 @@ func fixCLIToolResponse(input string) (string, error) {
 
 					// Create merged function response content
 					functionResponseContent := `{"parts":[],"role":"function"}`
-					for _, response := range groupResponses {
-						partRaw := parseFunctionResponseRaw(response)
+					for ri, response := range groupResponses {
+						backfillName := ""
+						if ri < len(group.CallNames) {
+							backfillName = group.CallNames[ri]
+						}
+						partRaw := parseFunctionResponseRaw(response, backfillName)
 						if partRaw != "" {
 							functionResponseContent, _ = sjson.SetRaw(functionResponseContent, "parts.-1", partRaw)
 						}
@@ -243,15 +265,15 @@ func fixCLIToolResponse(input string) (string, error) {
 
 		// If this is a model with function calls, create a new group
 		if role == "model" {
-			functionCallsCount := 0
+			var callNames []string
 			parts.ForEach(func(_, part gjson.Result) bool {
-				if part.Get("functionCall").Exists() {
-					functionCallsCount++
+				if fc := part.Get("functionCall"); fc.Exists() {
+					callNames = append(callNames, fc.Get("name").String())
 				}
 				return true
 			})
 
-			if functionCallsCount > 0 {
+			if len(callNames) > 0 {
 				// Add the model content
 				if !value.IsObject() {
 					log.Warnf("failed to parse model content")
@@ -261,7 +283,8 @@ func fixCLIToolResponse(input string) (string, error) {
 
 				// Create a new group for tracking responses
 				group := &FunctionCallGroup{
-					ResponsesNeeded: functionCallsCount,
+					ResponsesNeeded: len(callNames),
+					CallNames:       callNames,
 				}
 				pendingGroups = append(pendingGroups, group)
 			} else {
@@ -291,8 +314,12 @@ func fixCLIToolResponse(input string) (string, error) {
 			collectedResponses = collectedResponses[group.ResponsesNeeded:]
 
 			functionResponseContent := `{"parts":[],"role":"function"}`
-			for _, response := range groupResponses {
-				partRaw := parseFunctionResponseRaw(response)
+			for ri, response := range groupResponses {
+				backfillName := ""
+				if ri < len(group.CallNames) {
+					backfillName = group.CallNames[ri]
+				}
+				partRaw := parseFunctionResponseRaw(response, backfillName)
 				if partRaw != "" {
 					functionResponseContent, _ = sjson.SetRaw(functionResponseContent, "parts.-1", partRaw)
 				}
