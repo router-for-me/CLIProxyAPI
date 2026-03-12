@@ -979,7 +979,11 @@ func normalizeClaudeKey(entry *config.ClaudeKey) {
 	}
 	entry.APIKey = strings.TrimSpace(entry.APIKey)
 	entry.BaseURL = strings.TrimSpace(entry.BaseURL)
-	entry.MessagesPath = strings.TrimSpace(entry.MessagesPath)
+	mp := strings.TrimSpace(entry.MessagesPath)
+	if mp != "" && !strings.HasPrefix(mp, "/") {
+		mp = "/" + mp
+	}
+	entry.MessagesPath = strings.TrimRight(mp, "/")
 	entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
 	entry.Headers = config.NormalizeHeaders(entry.Headers)
 	entry.ExcludedModels = config.NormalizeExcludedModels(entry.ExcludedModels)
