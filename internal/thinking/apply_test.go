@@ -9,9 +9,9 @@ func TestExtractClaudeConfig_UsesOutputConfigEffort(t *testing.T) {
 		want ThinkingConfig
 	}{
 		{
-			name: "maps max to xhigh",
+			name: "preserves max effort",
 			body: `{"output_config":{"effort":"max"},"thinking":{"type":"adaptive"}}`,
-			want: ThinkingConfig{Mode: ModeLevel, Level: LevelXHigh},
+			want: ThinkingConfig{Mode: ModeLevel, Level: "max"},
 		},
 		{
 			name: "maps medium directly",
