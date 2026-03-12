@@ -145,7 +145,6 @@ func openAICompatSignature(entry config.OpenAICompatibility) string {
 	if v := strings.TrimSpace(entry.BaseURL); v != "" {
 		parts = append(parts, "base="+v)
 	}
-	parts = append(parts, fmt.Sprintf("force_stream=%t", entry.ForceUpstreamStream))
 
 	models := make([]string, 0, len(entry.Models))
 	for _, model := range entry.Models {
@@ -177,6 +176,10 @@ func openAICompatSignature(entry config.OpenAICompatibility) string {
 	// Intentionally exclude API key material; only count non-empty entries.
 	if count := countAPIKeys(entry); count > 0 {
 		parts = append(parts, fmt.Sprintf("api_keys=%d", count))
+	}
+
+	if entry.ForceUpstreamStream || len(parts) > 0 {
+		parts = append(parts, fmt.Sprintf("force_stream=%t", entry.ForceUpstreamStream))
 	}
 
 	if len(parts) == 0 {

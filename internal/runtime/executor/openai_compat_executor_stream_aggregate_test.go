@@ -39,7 +39,7 @@ func TestOpenAICompatExecutor_ForceUpstreamStreamAggregatesReasoningAndContent(t
 			Alias: "glm-5",
 		}},
 	}}}
-	
+
 	executor := NewOpenAICompatExecutor("openai-compatibility", cfg)
 	auth := &cliproxyauth.Auth{Attributes: map[string]string{
 		"base_url":    server.URL + "/v1",
@@ -84,7 +84,7 @@ func TestOpenAICompatExecutor_ForceUpstreamStreamAggregatesReasoningAndContent(t
 func TestOpenAICompatExecutor_ForceUpstreamStreamAggregatesToolCalls(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl-2\",\"object\":\"chat.completion.chunk\",\"created\":1710000001,\"model\":\"glm-5\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"read\",\"arguments\":\"{\\\"path\\\": \"}}]}}]}\n\n"))
+		_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl-2\",\"object\":\"chat.completion.chunk\",\"created\":1710000001,\"model\":\"glm-5\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"read\",\"arguments\":\"{\\\"path\\\": \\\"\"}}]}}]}\n\n"))
 		_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl-2\",\"object\":\"chat.completion.chunk\",\"created\":1710000001,\"model\":\"glm-5\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"/tmp/test\\\"}\"}}]}}]}\n\n"))
 		_, _ = w.Write([]byte("data: [DONE]\n\n"))
 	}))
@@ -99,7 +99,7 @@ func TestOpenAICompatExecutor_ForceUpstreamStreamAggregatesToolCalls(t *testing.
 			Alias: "glm-5",
 		}},
 	}}}
-	
+
 	executor := NewOpenAICompatExecutor("openai-compatibility", cfg)
 	auth := &cliproxyauth.Auth{Attributes: map[string]string{
 		"base_url":    server.URL + "/v1",
@@ -151,7 +151,7 @@ func TestOpenAICompatExecutor_DefaultBehaviorUnchanged(t *testing.T) {
 			Alias: "glm-5",
 		}},
 	}}}
-	
+
 	executor := NewOpenAICompatExecutor("openai-compatibility", cfg)
 	auth := &cliproxyauth.Auth{Attributes: map[string]string{
 		"base_url":    server.URL + "/v1",
