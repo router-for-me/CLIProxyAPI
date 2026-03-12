@@ -87,7 +87,9 @@ func applyResponseHeaderTimeout(rt http.RoundTripper, timeout time.Duration) htt
 		return clonedTransport
 	}
 	if rt == nil {
-		return &http.Transport{ResponseHeaderTimeout: timeout}
+		transport := http.DefaultTransport.(*http.Transport).Clone()
+		transport.ResponseHeaderTimeout = timeout
+		return transport
 	}
 	return rt
 }
