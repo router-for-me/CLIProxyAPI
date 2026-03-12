@@ -397,6 +397,7 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 		Name          *string                             `json:"name"`
 		Prefix        *string                             `json:"prefix"`
 		BaseURL       *string                             `json:"base-url"`
+		ForceUpstreamStream *bool                         `json:"force-upstream-stream"`
 		APIKeyEntries *[]config.OpenAICompatibilityAPIKey `json:"api-key-entries"`
 		Models        *[]config.OpenAICompatibilityModel  `json:"models"`
 		Headers       *map[string]string                  `json:"headers"`
@@ -444,6 +445,9 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 			return
 		}
 		entry.BaseURL = trimmed
+	}
+	if body.Value.ForceUpstreamStream != nil {
+		entry.ForceUpstreamStream = *body.Value.ForceUpstreamStream
 	}
 	if body.Value.APIKeyEntries != nil {
 		entry.APIKeyEntries = append([]config.OpenAICompatibilityAPIKey(nil), (*body.Value.APIKeyEntries)...)

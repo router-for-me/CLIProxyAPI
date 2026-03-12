@@ -75,6 +75,9 @@ func describeOpenAICompatibilityUpdate(oldEntry, newEntry config.OpenAICompatibi
 	if !equalStringMap(oldEntry.Headers, newEntry.Headers) {
 		details = append(details, "headers updated")
 	}
+	if oldEntry.ForceUpstreamStream != newEntry.ForceUpstreamStream {
+		details = append(details, fmt.Sprintf("force-upstream-stream %t -> %t", oldEntry.ForceUpstreamStream, newEntry.ForceUpstreamStream))
+	}
 	if len(details) == 0 {
 		return ""
 	}
@@ -142,6 +145,7 @@ func openAICompatSignature(entry config.OpenAICompatibility) string {
 	if v := strings.TrimSpace(entry.BaseURL); v != "" {
 		parts = append(parts, "base="+v)
 	}
+	parts = append(parts, fmt.Sprintf("force_stream=%t", entry.ForceUpstreamStream))
 
 	models := make([]string, 0, len(entry.Models))
 	for _, model := range entry.Models {
