@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
@@ -213,4 +214,82 @@ func BenchmarkManagerPickNextAndMarkResult1000(b *testing.B) {
 		}
 		manager.MarkResult(ctx, Result{AuthID: auth.ID, Provider: "gemini", Model: model, Success: true})
 	}
+}
+
+func BenchmarkManagerPickNextAndMarkResultParallel1000(b *testing.B) {
+	manager, _, model := benchmarkManagerSetup(b, 1000, false, false)
+	ctx := context.Background()
+	opts := cliproxyexecutor.Options{}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		tried := map[string]struct{}{}
+		for pb.Next() {
+			auth, _, errPick := manager.pickNext(ctx, "gemini", model, opts, tried)
+			if errPick != nil || auth == nil {
+				b.Fatalf("pickNext failed: auth=%v err=%v", auth, errPick)
+			}
+			manager.MarkResult(ctx, Result{AuthID: auth.ID, Provider: "gemini", Model: model, Success: true})
+		}
+	})
+}
+
+func BenchmarkManagerPickNextMixedAndMarkResultParallel1000(b *testing.B) {
+	manager, providers, model := benchmarkManagerSetup(b, 1000, true, false)
+	ctx := context.Background()
+	opts := cliproxyexecutor.Options{}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		tried := map[string]struct{}{}
+		for pb.Next() {
+			auth, _, provider, errPick := manager.pickNextMixed(ctx, providers, model, opts, tried)
+			if errPick != nil || auth == nil || provider == "" {
+				b.Fatalf("pickNextMixed failed: auth=%v provider=%q err=%v", auth, provider, errPick)
+			}
+			manager.MarkResult(ctx, Result{AuthID: auth.ID, Provider: provider, Model: model, Success: true})
+		}
+	})
+}
+
+func BenchmarkManagerDueRefreshAuthIDs1000(b *testing.B) {
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	executor := &schedulerBenchmarkExecutor{id: "claude"}
+	manager.executors["claude"] = executor
+	now := benchmarkNow()
+	for index := 0; index < 1000; index++ {
+		authID := fmt.Sprintf("refresh-bench-%04d", index)
+		auth := &Auth{
+			ID:       authID,
+			Provider: "claude",
+			Attributes: map[string]string{
+				"refresh_interval_seconds": "3600",
+			},
+			LastRefreshedAt: now.Add(-2 * benchmarkRefreshAge(index)),
+		}
+		if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+			b.Fatalf("register %s: %v", authID, errRegister)
+		}
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if got := len(manager.dueRefreshAuthIDs(now)); got == 0 {
+			b.Fatalf("dueRefreshAuthIDs returned 0, want > 0")
+		}
+	}
+}
+
+func benchmarkNow() time.Time {
+	return time.Now().UTC()
+}
+
+func benchmarkRefreshAge(index int) time.Duration {
+	if index%10 == 0 {
+		return time.Minute
+	}
+	return 30 * time.Minute
 }

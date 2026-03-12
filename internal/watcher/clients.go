@@ -38,6 +38,7 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 		w.clientsMutex.Lock()
 		if w.currentAuths != nil {
 			filtered := make(map[string]*coreauth.Auth, len(w.currentAuths))
+			filteredHashes := make(map[string]string, len(w.currentAuths))
 			for id, auth := range w.currentAuths {
 				if auth == nil {
 					continue
@@ -47,11 +48,14 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 					continue
 				}
 				filtered[id] = auth
+				filteredHashes[id] = w.currentAuthHashLocked(id, auth)
 			}
 			w.currentAuths = filtered
+			w.currentAuthHashes = filteredHashes
 			log.Debugf("applying oauth-excluded-models to providers %v", affectedOAuthProviders)
 		} else {
 			w.currentAuths = nil
+			w.currentAuthHashes = nil
 		}
 		w.clientsMutex.Unlock()
 	}
@@ -242,16 +246,22 @@ func (w *Watcher) computePerPathUpdatesLocked(oldByID, newByID map[string]*corea
 	if w.currentAuths == nil {
 		w.currentAuths = make(map[string]*coreauth.Auth)
 	}
+	if w.currentAuthHashes == nil {
+		w.currentAuthHashes = make(map[string]string)
+	}
 	updates := make([]AuthUpdate, 0, len(oldByID)+len(newByID))
 	for id, newAuth := range newByID {
 		existing, ok := w.currentAuths[id]
+		newHash := normalizeAuth(newAuth)
 		if !ok {
 			w.currentAuths[id] = newAuth.Clone()
+			w.currentAuthHashes[id] = newHash
 			updates = append(updates, AuthUpdate{Action: AuthUpdateActionAdd, ID: id, Auth: newAuth.Clone()})
 			continue
 		}
-		if !authEqual(existing, newAuth) {
+		if w.currentAuthHashLocked(id, existing) != newHash {
 			w.currentAuths[id] = newAuth.Clone()
+			w.currentAuthHashes[id] = newHash
 			updates = append(updates, AuthUpdate{Action: AuthUpdateActionModify, ID: id, Auth: newAuth.Clone()})
 		}
 	}
@@ -260,6 +270,7 @@ func (w *Watcher) computePerPathUpdatesLocked(oldByID, newByID map[string]*corea
 			continue
 		}
 		delete(w.currentAuths, id)
+		delete(w.currentAuthHashes, id)
 		updates = append(updates, AuthUpdate{Action: AuthUpdateActionDelete, ID: id})
 	}
 	return updates
