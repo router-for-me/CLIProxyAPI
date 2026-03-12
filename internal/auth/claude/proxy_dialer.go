@@ -137,8 +137,11 @@ func establishHTTPConnectTunnel(proxyConn net.Conn, proxyURL *url.URL, addr stri
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+		body, errBody := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
 		_ = resp.Body.Close()
+		if errBody != nil {
+			return nil, fmt.Errorf("proxy CONNECT to %q failed with status %s (failed to read error body: %v)", proxyURL.Host, resp.Status, errBody)
+		}
 		message := strings.TrimSpace(string(body))
 		if message != "" {
 			return nil, fmt.Errorf("proxy CONNECT to %q failed with status %s: %s", proxyURL.Host, resp.Status, message)
