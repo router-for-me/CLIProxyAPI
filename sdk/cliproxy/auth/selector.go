@@ -29,6 +29,17 @@ type RoundRobinSelector struct {
 // rolling-window subscription caps (e.g. chat message limits).
 type FillFirstSelector struct{}
 
+// StickyRoundRobinSelector assigns a session to a consistent auth credential.
+// When a request carries a session key (e.g. from an X-Session-Key header),
+// subsequent requests with the same key are routed to the same auth. If no
+// session key is present, it falls back to standard round-robin.
+type StickyRoundRobinSelector struct {
+	mu       sync.Mutex
+	sessions map[string]string // session key -> auth ID
+	cursors  map[string]int    // fallback round-robin cursors
+	maxKeys  int
+}
+
 type blockReason int
 
 const (
@@ -360,6 +371,86 @@ func (s *FillFirstSelector) Pick(ctx context.Context, provider, model string, op
 	}
 	available = preferCodexWebsocketAuths(ctx, provider, available)
 	return available[0], nil
+}
+
+const sessionKeyMetadataKey = cliproxyexecutor.SessionKeyMetadataKey
+
+// Pick routes requests with the same session key to the same auth credential.
+// When no session key is present, it falls back to fill-first selection.
+func (s *StickyRoundRobinSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
+	now := time.Now()
+	available, err := getAvailableAuths(auths, provider, model, now)
+	if err != nil {
+		return nil, err
+	}
+	available = preferCodexWebsocketAuths(ctx, provider, available)
+
+	// Extract session key from metadata.
+	sessionKey := ""
+	if opts.Metadata != nil {
+		if raw, ok := opts.Metadata[sessionKeyMetadataKey].(string); ok {
+			sessionKey = strings.TrimSpace(raw)
+		}
+	}
+
+	// No session key — fall back to fill-first (always pick the first available).
+	if sessionKey == "" {
+		return available[0], nil
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.sessions == nil {
+		s.sessions = make(map[string]string)
+	}
+
+	// Try to find the sticky auth for this session.
+	if authID, ok := s.sessions[sessionKey]; ok {
+		for _, candidate := range available {
+			if candidate.ID == authID {
+				return candidate, nil
+			}
+		}
+		// Sticky auth is no longer available; fall through to pick a new one.
+	}
+
+	// Round-robin to assign a new auth for this session.
+	if s.cursors == nil {
+		s.cursors = make(map[string]int)
+	}
+	rrKey := provider + ":" + canonicalModelKey(model)
+	limit := s.maxKeys
+	if limit <= 0 {
+		limit = 4096
+	}
+	if _, ok := s.cursors[rrKey]; !ok && len(s.cursors) >= limit {
+		s.cursors = make(map[string]int)
+	}
+	index := s.cursors[rrKey]
+	if index >= 2_147_483_640 {
+		index = 0
+	}
+	s.cursors[rrKey] = index + 1
+	selected := available[index%len(available)]
+
+	// Record the sticky mapping.
+	// Evict half the entries when the map is full to avoid losing all
+	// stickiness at once while still bounding memory usage.
+	if len(s.sessions) >= limit {
+		evictCount := 0
+		evictTarget := len(s.sessions) / 2
+		for k := range s.sessions {
+			delete(s.sessions, k)
+			evictCount++
+			if evictCount >= evictTarget {
+				break
+			}
+		}
+	}
+	s.sessions[sessionKey] = selected.ID
+
+	return selected, nil
 }
 
 func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, blockReason, time.Time) {
