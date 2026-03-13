@@ -20,7 +20,7 @@ import (
 // DoVertexImport imports a Google Cloud service account key JSON and persists
 // it as a "vertex" provider credential. The file content is embedded in the auth
 // file to allow portable deployment across stores.
-func DoVertexImport(cfg *config.Config, keyPath string) {
+func DoVertexImport(cfg *config.Config, keyPath string, prefix string) {
 	if cfg == nil {
 		cfg = &config.Config{}
 	}
@@ -69,6 +69,7 @@ func DoVertexImport(cfg *config.Config, keyPath string) {
 		ProjectID:      projectID,
 		Email:          email,
 		Location:       location,
+		Prefix:         strings.TrimSpace(prefix),
 	}
 	metadata := map[string]any{
 		"service_account": sa,
