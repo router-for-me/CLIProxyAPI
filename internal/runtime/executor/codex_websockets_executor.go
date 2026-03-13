@@ -23,6 +23,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v6/sdk/proxyutil"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
@@ -31,7 +32,7 @@ import (
 )
 
 const (
-	codexResponsesWebsocketBetaHeaderValue = "responses_websockets=2026-02-04"
+	codexResponsesWebsocketBetaHeaderValue = "responses_websockets=2026-02-06"
 	codexResponsesWebsocketIdleTimeout     = 5 * time.Minute
 	codexResponsesWebsocketHandshakeTO     = 30 * time.Second
 )
@@ -56,11 +57,6 @@ type codexWebsocketSession struct {
 	conn   *websocket.Conn
 	wsURL  string
 	authID string
-
-	// connCreateSent tracks whether a `response.create` message has been successfully sent
-	// on the current websocket connection. The upstream expects the first message on each
-	// connection to be `response.create`.
-	connCreateSent bool
 
 	writeMu sync.Mutex
 
@@ -195,7 +191,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	}
 
 	body, wsHeaders := applyCodexPromptCacheHeaders(from, req, body)
-	wsHeaders = applyCodexWebsocketHeaders(ctx, wsHeaders, auth, apiKey)
+	wsHeaders = applyCodexWebsocketHeaders(ctx, wsHeaders, auth, apiKey, e.cfg)
 
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
@@ -212,13 +208,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		defer sess.reqMu.Unlock()
 	}
 
-	allowAppend := true
-	if sess != nil {
-		sess.connMu.Lock()
-		allowAppend = sess.connCreateSent
-		sess.connMu.Unlock()
-	}
-	wsReqBody := buildCodexWebsocketRequestBody(body, allowAppend)
+	wsReqBody := buildCodexWebsocketRequestBody(body)
 	recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
 		URL:       wsURL,
 		Method:    "WEBSOCKET",
@@ -280,10 +270,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 			// execution session.
 			connRetry, _, errDialRetry := e.ensureUpstreamConn(ctx, auth, sess, authID, wsURL, wsHeaders)
 			if errDialRetry == nil && connRetry != nil {
-				sess.connMu.Lock()
-				allowAppend = sess.connCreateSent
-				sess.connMu.Unlock()
-				wsReqBodyRetry := buildCodexWebsocketRequestBody(body, allowAppend)
+				wsReqBodyRetry := buildCodexWebsocketRequestBody(body)
 				recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
 					URL:       wsURL,
 					Method:    "WEBSOCKET",
@@ -312,7 +299,6 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 			return resp, errSend
 		}
 	}
-	markCodexWebsocketCreateSent(sess, conn, wsReqBody)
 
 	for {
 		if ctx != nil && ctx.Err() != nil {
@@ -400,29 +386,23 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	}
 
 	body, wsHeaders := applyCodexPromptCacheHeaders(from, req, body)
-	wsHeaders = applyCodexWebsocketHeaders(ctx, wsHeaders, auth, apiKey)
+	wsHeaders = applyCodexWebsocketHeaders(ctx, wsHeaders, auth, apiKey, e.cfg)
 
 	var authID, authLabel, authType, authValue string
-	if auth != nil {
-		authID = auth.ID
-		authLabel = auth.Label
-		authType, authValue = auth.AccountInfo()
-	}
+	authID = auth.ID
+	authLabel = auth.Label
+	authType, authValue = auth.AccountInfo()
 
 	executionSessionID := executionSessionIDFromOptions(opts)
 	var sess *codexWebsocketSession
 	if executionSessionID != "" {
 		sess = e.getOrCreateSession(executionSessionID)
-		sess.reqMu.Lock()
+		if sess != nil {
+			sess.reqMu.Lock()
+		}
 	}
 
-	allowAppend := true
-	if sess != nil {
-		sess.connMu.Lock()
-		allowAppend = sess.connCreateSent
-		sess.connMu.Unlock()
-	}
-	wsReqBody := buildCodexWebsocketRequestBody(body, allowAppend)
+	wsReqBody := buildCodexWebsocketRequestBody(body)
 	recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
 		URL:       wsURL,
 		Method:    "WEBSOCKET",
@@ -483,10 +463,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				sess.reqMu.Unlock()
 				return nil, errDialRetry
 			}
-			sess.connMu.Lock()
-			allowAppend = sess.connCreateSent
-			sess.connMu.Unlock()
-			wsReqBodyRetry := buildCodexWebsocketRequestBody(body, allowAppend)
+			wsReqBodyRetry := buildCodexWebsocketRequestBody(body)
 			recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
 				URL:       wsURL,
 				Method:    "WEBSOCKET",
@@ -515,7 +492,6 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			return nil, errSend
 		}
 	}
-	markCodexWebsocketCreateSent(sess, conn, wsReqBody)
 
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
@@ -657,31 +633,14 @@ func writeCodexWebsocketMessage(sess *codexWebsocketSession, conn *websocket.Con
 	return conn.WriteMessage(websocket.TextMessage, payload)
 }
 
-func buildCodexWebsocketRequestBody(body []byte, allowAppend bool) []byte {
+func buildCodexWebsocketRequestBody(body []byte) []byte {
 	if len(body) == 0 {
 		return nil
 	}
 
-	// Codex CLI websocket v2 uses `response.create` with `previous_response_id` for incremental turns.
-	// The upstream ChatGPT Codex websocket currently rejects that with close 1008 (policy violation).
-	// Fall back to v1 `response.append` semantics on the same websocket connection to keep the session alive.
-	//
-	// NOTE: The upstream expects the first websocket event on each connection to be `response.create`,
-	// so we only use `response.append` after we have initialized the current connection.
-	if allowAppend {
-		if prev := strings.TrimSpace(gjson.GetBytes(body, "previous_response_id").String()); prev != "" {
-			inputNode := gjson.GetBytes(body, "input")
-			wsReqBody := []byte(`{}`)
-			wsReqBody, _ = sjson.SetBytes(wsReqBody, "type", "response.append")
-			if inputNode.Exists() && inputNode.IsArray() && strings.TrimSpace(inputNode.Raw) != "" {
-				wsReqBody, _ = sjson.SetRawBytes(wsReqBody, "input", []byte(inputNode.Raw))
-				return wsReqBody
-			}
-			wsReqBody, _ = sjson.SetRawBytes(wsReqBody, "input", []byte("[]"))
-			return wsReqBody
-		}
-	}
-
+	// Match codex-rs websocket v2 semantics: every request is `response.create`.
+	// Incremental follow-up turns continue on the same websocket using
+	// `previous_response_id` + incremental `input`, not `response.append`.
 	wsReqBody, errSet := sjson.SetBytes(bytes.Clone(body), "type", "response.create")
 	if errSet == nil && len(wsReqBody) > 0 {
 		return wsReqBody
@@ -725,21 +684,6 @@ func readCodexWebsocketMessage(ctx context.Context, sess *codexWebsocketSession,
 	}
 }
 
-func markCodexWebsocketCreateSent(sess *codexWebsocketSession, conn *websocket.Conn, payload []byte) {
-	if sess == nil || conn == nil || len(payload) == 0 {
-		return
-	}
-	if strings.TrimSpace(gjson.GetBytes(payload, "type").String()) != "response.create" {
-		return
-	}
-
-	sess.connMu.Lock()
-	if sess.conn == conn {
-		sess.connCreateSent = true
-	}
-	sess.connMu.Unlock()
-}
-
 func newProxyAwareWebsocketDialer(cfg *config.Config, auth *cliproxyauth.Auth) *websocket.Dialer {
 	dialer := &websocket.Dialer{
 		Proxy:             http.ProxyFromEnvironment,
@@ -762,21 +706,30 @@ func newProxyAwareWebsocketDialer(cfg *config.Config, auth *cliproxyauth.Auth) *
 		return dialer
 	}
 
-	parsedURL, errParse := url.Parse(proxyURL)
+	setting, errParse := proxyutil.Parse(proxyURL)
 	if errParse != nil {
-		log.Errorf("codex websockets executor: parse proxy URL failed: %v", errParse)
+		log.Errorf("codex websockets executor: %v", errParse)
 		return dialer
 	}
 
-	switch parsedURL.Scheme {
+	switch setting.Mode {
+	case proxyutil.ModeDirect:
+		dialer.Proxy = nil
+		return dialer
+	case proxyutil.ModeProxy:
+	default:
+		return dialer
+	}
+
+	switch setting.URL.Scheme {
 	case "socks5":
 		var proxyAuth *proxy.Auth
-		if parsedURL.User != nil {
-			username := parsedURL.User.Username()
-			password, _ := parsedURL.User.Password()
+		if setting.URL.User != nil {
+			username := setting.URL.User.Username()
+			password, _ := setting.URL.User.Password()
 			proxyAuth = &proxy.Auth{User: username, Password: password}
 		}
-		socksDialer, errSOCKS5 := proxy.SOCKS5("tcp", parsedURL.Host, proxyAuth, proxy.Direct)
+		socksDialer, errSOCKS5 := proxy.SOCKS5("tcp", setting.URL.Host, proxyAuth, proxy.Direct)
 		if errSOCKS5 != nil {
 			log.Errorf("codex websockets executor: create SOCKS5 dialer failed: %v", errSOCKS5)
 			return dialer
@@ -786,9 +739,9 @@ func newProxyAwareWebsocketDialer(cfg *config.Config, auth *cliproxyauth.Auth) *
 			return socksDialer.Dial(network, addr)
 		}
 	case "http", "https":
-		dialer.Proxy = http.ProxyURL(parsedURL)
+		dialer.Proxy = http.ProxyURL(setting.URL)
 	default:
-		log.Errorf("codex websockets executor: unsupported proxy scheme: %s", parsedURL.Scheme)
+		log.Errorf("codex websockets executor: unsupported proxy scheme: %s", setting.URL.Scheme)
 	}
 
 	return dialer
@@ -844,7 +797,7 @@ func applyCodexPromptCacheHeaders(from sdktranslator.Format, req cliproxyexecuto
 	return rawJSON, headers
 }
 
-func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *cliproxyauth.Auth, token string) http.Header {
+func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *cliproxyauth.Auth, token string, cfg *config.Config) http.Header {
 	if headers == nil {
 		headers = http.Header{}
 	}
@@ -857,7 +810,8 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 		ginHeaders = ginCtx.Request.Header
 	}
 
-	misc.EnsureHeader(headers, ginHeaders, "x-codex-beta-features", "")
+	cfgUserAgent, cfgBetaFeatures := codexHeaderDefaults(cfg, auth)
+	ensureHeaderWithPriority(headers, ginHeaders, "x-codex-beta-features", cfgBetaFeatures, "")
 	misc.EnsureHeader(headers, ginHeaders, "x-codex-turn-state", "")
 	misc.EnsureHeader(headers, ginHeaders, "x-codex-turn-metadata", "")
 	misc.EnsureHeader(headers, ginHeaders, "x-responsesapi-include-timing-metrics", "")
@@ -872,7 +826,7 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 	}
 	headers.Set("OpenAI-Beta", betaHeader)
 	misc.EnsureHeader(headers, ginHeaders, "Session_id", uuid.NewString())
-	misc.EnsureHeader(headers, ginHeaders, "User-Agent", codexUserAgent)
+	ensureHeaderWithConfigPrecedence(headers, ginHeaders, "User-Agent", cfgUserAgent, codexUserAgent)
 
 	isAPIKey := false
 	if auth != nil && auth.Attributes != nil {
@@ -898,6 +852,62 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 	util.ApplyCustomHeadersFromAttrs(&http.Request{Header: headers}, attrs)
 
 	return headers
+}
+
+func codexHeaderDefaults(cfg *config.Config, auth *cliproxyauth.Auth) (string, string) {
+	if cfg == nil || auth == nil {
+		return "", ""
+	}
+	if auth.Attributes != nil {
+		if v := strings.TrimSpace(auth.Attributes["api_key"]); v != "" {
+			return "", ""
+		}
+	}
+	return strings.TrimSpace(cfg.CodexHeaderDefaults.UserAgent), strings.TrimSpace(cfg.CodexHeaderDefaults.BetaFeatures)
+}
+
+func ensureHeaderWithPriority(target http.Header, source http.Header, key, configValue, fallbackValue string) {
+	if target == nil {
+		return
+	}
+	if strings.TrimSpace(target.Get(key)) != "" {
+		return
+	}
+	if source != nil {
+		if val := strings.TrimSpace(source.Get(key)); val != "" {
+			target.Set(key, val)
+			return
+		}
+	}
+	if val := strings.TrimSpace(configValue); val != "" {
+		target.Set(key, val)
+		return
+	}
+	if val := strings.TrimSpace(fallbackValue); val != "" {
+		target.Set(key, val)
+	}
+}
+
+func ensureHeaderWithConfigPrecedence(target http.Header, source http.Header, key, configValue, fallbackValue string) {
+	if target == nil {
+		return
+	}
+	if strings.TrimSpace(target.Get(key)) != "" {
+		return
+	}
+	if val := strings.TrimSpace(configValue); val != "" {
+		target.Set(key, val)
+		return
+	}
+	if source != nil {
+		if val := strings.TrimSpace(source.Get(key)); val != "" {
+			target.Set(key, val)
+			return
+		}
+	}
+	if val := strings.TrimSpace(fallbackValue); val != "" {
+		target.Set(key, val)
+	}
 }
 
 type statusErrWithHeaders struct {
@@ -1017,36 +1027,6 @@ func closeHTTPResponseBody(resp *http.Response, logPrefix string) {
 	}
 }
 
-func closeOnContextDone(ctx context.Context, conn *websocket.Conn) chan struct{} {
-	done := make(chan struct{})
-	if ctx == nil || conn == nil {
-		return done
-	}
-	go func() {
-		select {
-		case <-done:
-		case <-ctx.Done():
-			_ = conn.Close()
-		}
-	}()
-	return done
-}
-
-func cancelReadOnContextDone(ctx context.Context, conn *websocket.Conn) chan struct{} {
-	done := make(chan struct{})
-	if ctx == nil || conn == nil {
-		return done
-	}
-	go func() {
-		select {
-		case <-done:
-		case <-ctx.Done():
-			_ = conn.SetReadDeadline(time.Now())
-		}
-	}()
-	return done
-}
-
 func executionSessionIDFromOptions(opts cliproxyexecutor.Options) string {
 	if len(opts.Metadata) == 0 {
 		return ""
@@ -1120,7 +1100,6 @@ func (e *CodexWebsocketsExecutor) ensureUpstreamConn(ctx context.Context, auth *
 	sess.conn = conn
 	sess.wsURL = wsURL
 	sess.authID = authID
-	sess.connCreateSent = false
 	sess.readerConn = conn
 	sess.connMu.Unlock()
 
@@ -1206,7 +1185,6 @@ func (e *CodexWebsocketsExecutor) invalidateUpstreamConn(sess *codexWebsocketSes
 		return
 	}
 	sess.conn = nil
-	sess.connCreateSent = false
 	if sess.readerConn == conn {
 		sess.readerConn = nil
 	}
@@ -1273,7 +1251,6 @@ func (e *CodexWebsocketsExecutor) closeExecutionSession(sess *codexWebsocketSess
 	authID := sess.authID
 	wsURL := sess.wsURL
 	sess.conn = nil
-	sess.connCreateSent = false
 	if sess.readerConn == conn {
 		sess.readerConn = nil
 	}

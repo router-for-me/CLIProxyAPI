@@ -26,7 +26,7 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 	if instructions := root.Get("instructions"); instructions.Exists() {
 		systemInstr := `{"parts":[{"text":""}]}`
 		systemInstr, _ = sjson.Set(systemInstr, "parts.0.text", instructions.String())
-		out, _ = sjson.SetRaw(out, "system_instruction", systemInstr)
+		out, _ = sjson.SetRaw(out, "systemInstruction", systemInstr)
 	}
 
 	// Convert input messages to Gemini contents format
@@ -119,7 +119,7 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 				if strings.EqualFold(itemRole, "system") {
 					if contentArray := item.Get("content"); contentArray.Exists() {
 						systemInstr := ""
-						if systemInstructionResult := gjson.Get(out, "system_instruction"); systemInstructionResult.Exists() {
+						if systemInstructionResult := gjson.Get(out, "systemInstruction"); systemInstructionResult.Exists() {
 							systemInstr = systemInstructionResult.Raw
 						} else {
 							systemInstr = `{"parts":[]}`
@@ -140,7 +140,7 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 						}
 
 						if systemInstr != `{"parts":[]}` {
-							out, _ = sjson.SetRaw(out, "system_instruction", systemInstr)
+							out, _ = sjson.SetRaw(out, "systemInstruction", systemInstr)
 						}
 					}
 					continue
@@ -236,6 +236,33 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 									partJSON, _ = sjson.Set(partJSON, "inline_data.mime_type", mimeType)
 									partJSON, _ = sjson.Set(partJSON, "inline_data.data", data)
 								}
+							}
+						case "input_audio":
+							audioData := contentItem.Get("data").String()
+							audioFormat := contentItem.Get("format").String()
+							if audioData != "" {
+								audioMimeMap := map[string]string{
+									"mp3":       "audio/mpeg",
+									"wav":       "audio/wav",
+									"ogg":       "audio/ogg",
+									"flac":      "audio/flac",
+									"aac":       "audio/aac",
+									"webm":      "audio/webm",
+									"pcm16":     "audio/pcm",
+									"g711_ulaw": "audio/basic",
+									"g711_alaw": "audio/basic",
+								}
+								mimeType := "audio/wav"
+								if audioFormat != "" {
+									if mapped, ok := audioMimeMap[audioFormat]; ok {
+										mimeType = mapped
+									} else {
+										mimeType = "audio/" + audioFormat
+									}
+								}
+								partJSON = `{"inline_data":{"mime_type":"","data":""}}`
+								partJSON, _ = sjson.Set(partJSON, "inline_data.mime_type", mimeType)
+								partJSON, _ = sjson.Set(partJSON, "inline_data.data", audioData)
 							}
 						}
 
@@ -354,22 +381,7 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 					funcDecl, _ = sjson.Set(funcDecl, "description", desc.String())
 				}
 				if params := tool.Get("parameters"); params.Exists() {
-					// Convert parameter types from OpenAI format to Gemini format
-					cleaned := params.Raw
-					// Convert type values to uppercase for Gemini
-					paramsResult := gjson.Parse(cleaned)
-					if properties := paramsResult.Get("properties"); properties.Exists() {
-						properties.ForEach(func(key, value gjson.Result) bool {
-							if propType := value.Get("type"); propType.Exists() {
-								upperType := strings.ToUpper(propType.String())
-								cleaned, _ = sjson.Set(cleaned, "properties."+key.String()+".type", upperType)
-							}
-							return true
-						})
-					}
-					// Set the overall type to OBJECT
-					cleaned, _ = sjson.Set(cleaned, "type", "OBJECT")
-					funcDecl, _ = sjson.SetRaw(funcDecl, "parametersJsonSchema", cleaned)
+					funcDecl, _ = sjson.SetRaw(funcDecl, "parametersJsonSchema", params.Raw)
 				}
 
 				geminiTools, _ = sjson.SetRaw(geminiTools, "0.functionDeclarations.-1", funcDecl)

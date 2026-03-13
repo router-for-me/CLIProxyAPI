@@ -193,6 +193,42 @@ func TestConvertClaudeRequestToAntigravity_ToolDeclarations(t *testing.T) {
 	}
 }
 
+func TestConvertClaudeRequestToAntigravity_ToolChoice_SpecificTool(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gemini-3-flash-preview",
+		"messages": [
+			{
+				"role": "user",
+				"content": [
+					{"type": "text", "text": "hi"}
+				]
+			}
+		],
+		"tools": [
+			{
+				"name": "json",
+				"description": "A JSON tool",
+				"input_schema": {
+					"type": "object",
+					"properties": {}
+				}
+			}
+		],
+		"tool_choice": {"type": "tool", "name": "json"}
+	}`)
+
+	output := ConvertClaudeRequestToAntigravity("gemini-3-flash-preview", inputJSON, false)
+	outputStr := string(output)
+
+	if got := gjson.Get(outputStr, "request.toolConfig.functionCallingConfig.mode").String(); got != "ANY" {
+		t.Fatalf("Expected toolConfig.functionCallingConfig.mode 'ANY', got '%s'", got)
+	}
+	allowed := gjson.Get(outputStr, "request.toolConfig.functionCallingConfig.allowedFunctionNames").Array()
+	if len(allowed) != 1 || allowed[0].String() != "json" {
+		t.Fatalf("Expected allowedFunctionNames ['json'], got %s", gjson.Get(outputStr, "request.toolConfig.functionCallingConfig.allowedFunctionNames").Raw)
+	}
+}
+
 func TestConvertClaudeRequestToAntigravity_ToolUse(t *testing.T) {
 	inputJSON := []byte(`{
 		"model": "claude-3-5-sonnet-20240620",

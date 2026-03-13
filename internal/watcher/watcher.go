@@ -6,6 +6,7 @@ import (
 	"context"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -35,10 +36,16 @@ type Watcher struct {
 	clientsMutex      sync.RWMutex
 	configReloadMu    sync.Mutex
 	configReloadTimer *time.Timer
+	serverUpdateMu    sync.Mutex
+	serverUpdateTimer *time.Timer
+	serverUpdateLast  time.Time
+	serverUpdatePend  bool
+	stopped           atomic.Bool
 	reloadCallback    func(*config.Config)
 	watcher           *fsnotify.Watcher
 	lastAuthHashes    map[string]string
 	lastAuthContents  map[string]*coreauth.Auth
+	fileAuthsByPath   map[string]map[string]*coreauth.Auth
 	lastRemoveTimes   map[string]time.Time
 	lastConfigHash    string
 	authQueue         chan<- AuthUpdate
@@ -76,6 +83,7 @@ const (
 	replaceCheckDelay        = 50 * time.Millisecond
 	configReloadDebounce     = 150 * time.Millisecond
 	authRemoveDebounceWindow = 1 * time.Second
+	serverUpdateDebounce     = 1 * time.Second
 )
 
 // NewWatcher creates a new file watcher instance
@@ -85,11 +93,12 @@ func NewWatcher(configPath, authDir string, reloadCallback func(*config.Config))
 		return nil, errNewWatcher
 	}
 	w := &Watcher{
-		configPath:     configPath,
-		authDir:        authDir,
-		reloadCallback: reloadCallback,
-		watcher:        watcher,
-		lastAuthHashes: make(map[string]string),
+		configPath:      configPath,
+		authDir:         authDir,
+		reloadCallback:  reloadCallback,
+		watcher:         watcher,
+		lastAuthHashes:  make(map[string]string),
+		fileAuthsByPath: make(map[string]map[string]*coreauth.Auth),
 	}
 	w.dispatchCond = sync.NewCond(&w.dispatchMu)
 	if store := sdkAuth.GetTokenStore(); store != nil {
@@ -114,8 +123,10 @@ func (w *Watcher) Start(ctx context.Context) error {
 
 // Stop stops the file watcher
 func (w *Watcher) Stop() error {
+	w.stopped.Store(true)
 	w.stopDispatch()
 	w.stopConfigReloadTimer()
+	w.stopServerUpdateTimer()
 	return w.watcher.Close()
 }
 

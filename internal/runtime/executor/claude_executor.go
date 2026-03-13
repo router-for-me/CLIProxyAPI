@@ -9,9 +9,11 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"net/textproto"
 	"runtime"
 	"strings"
 	"time"
@@ -135,6 +137,15 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		body = ensureCacheControl(body)
 	}
 
+	// Enforce Anthropic's cache_control block limit (max 4 breakpoints per request).
+	// Cloaking and ensureCacheControl may push the total over 4 when the client
+	// (e.g. Amp CLI) already sends multiple cache_control blocks.
+	body = enforceCacheControlLimit(body, 4)
+
+	// Normalize TTL values to prevent ordering violations under prompt-caching-scope-2026-01-05.
+	// A 1h-TTL block must not appear after a 5m-TTL block in evaluation order (tools→system→messages).
+	body = normalizeCacheControlTTL(body)
+
 	// Extract betas from body and convert to header
 	var extraBetas []string
 	extraBetas, body = extractAndRemoveBetas(body)
@@ -176,11 +187,27 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	}
 	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b, _ := io.ReadAll(httpResp.Body)
+		// Decompress error responses — pass the Content-Encoding value (may be empty)
+		// and let decodeResponseBody handle both header-declared and magic-byte-detected
+		// compression.  This keeps error-path behaviour consistent with the success path.
+		errBody, decErr := decodeResponseBody(httpResp.Body, httpResp.Header.Get("Content-Encoding"))
+		if decErr != nil {
+			recordAPIResponseError(ctx, e.cfg, decErr)
+			msg := fmt.Sprintf("failed to decode error response body: %v", decErr)
+			logWithRequestID(ctx).Warn(msg)
+			return resp, statusErr{code: httpResp.StatusCode, msg: msg}
+		}
+		b, readErr := io.ReadAll(errBody)
+		if readErr != nil {
+			recordAPIResponseError(ctx, e.cfg, readErr)
+			msg := fmt.Sprintf("failed to read error response body: %v", readErr)
+			logWithRequestID(ctx).Warn(msg)
+			b = []byte(msg)
+		}
 		appendAPIResponseChunk(ctx, e.cfg, b)
 		logWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
 		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
-		if errClose := httpResp.Body.Close(); errClose != nil {
+		if errClose := errBody.Close(); errClose != nil {
 			log.Errorf("response body close error: %v", errClose)
 		}
 		return resp, err
@@ -276,6 +303,12 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		body = ensureCacheControl(body)
 	}
 
+	// Enforce Anthropic's cache_control block limit (max 4 breakpoints per request).
+	body = enforceCacheControlLimit(body, 4)
+
+	// Normalize TTL values to prevent ordering violations under prompt-caching-scope-2026-01-05.
+	body = normalizeCacheControlTTL(body)
+
 	// Extract betas from body and convert to header
 	var extraBetas []string
 	extraBetas, body = extractAndRemoveBetas(body)
@@ -317,10 +350,26 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	}
 	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b, _ := io.ReadAll(httpResp.Body)
+		// Decompress error responses — pass the Content-Encoding value (may be empty)
+		// and let decodeResponseBody handle both header-declared and magic-byte-detected
+		// compression.  This keeps error-path behaviour consistent with the success path.
+		errBody, decErr := decodeResponseBody(httpResp.Body, httpResp.Header.Get("Content-Encoding"))
+		if decErr != nil {
+			recordAPIResponseError(ctx, e.cfg, decErr)
+			msg := fmt.Sprintf("failed to decode error response body: %v", decErr)
+			logWithRequestID(ctx).Warn(msg)
+			return nil, statusErr{code: httpResp.StatusCode, msg: msg}
+		}
+		b, readErr := io.ReadAll(errBody)
+		if readErr != nil {
+			recordAPIResponseError(ctx, e.cfg, readErr)
+			msg := fmt.Sprintf("failed to read error response body: %v", readErr)
+			logWithRequestID(ctx).Warn(msg)
+			b = []byte(msg)
+		}
 		appendAPIResponseChunk(ctx, e.cfg, b)
 		logWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-		if errClose := httpResp.Body.Close(); errClose != nil {
+		if errClose := errBody.Close(); errClose != nil {
 			log.Errorf("response body close error: %v", errClose)
 		}
 		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
@@ -425,6 +474,10 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 		body = checkSystemInstructions(body)
 	}
 
+	// Keep count_tokens requests compatible with Anthropic cache-control constraints too.
+	body = enforceCacheControlLimit(body, 4)
+	body = normalizeCacheControlTTL(body)
+
 	// Extract betas from body and convert to header (for count_tokens too)
 	var extraBetas []string
 	extraBetas, body = extractAndRemoveBetas(body)
@@ -464,9 +517,25 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	}
 	recordAPIResponseMetadata(ctx, e.cfg, resp.StatusCode, resp.Header.Clone())
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		b, _ := io.ReadAll(resp.Body)
+		// Decompress error responses — pass the Content-Encoding value (may be empty)
+		// and let decodeResponseBody handle both header-declared and magic-byte-detected
+		// compression.  This keeps error-path behaviour consistent with the success path.
+		errBody, decErr := decodeResponseBody(resp.Body, resp.Header.Get("Content-Encoding"))
+		if decErr != nil {
+			recordAPIResponseError(ctx, e.cfg, decErr)
+			msg := fmt.Sprintf("failed to decode error response body: %v", decErr)
+			logWithRequestID(ctx).Warn(msg)
+			return cliproxyexecutor.Response{}, statusErr{code: resp.StatusCode, msg: msg}
+		}
+		b, readErr := io.ReadAll(errBody)
+		if readErr != nil {
+			recordAPIResponseError(ctx, e.cfg, readErr)
+			msg := fmt.Sprintf("failed to read error response body: %v", readErr)
+			logWithRequestID(ctx).Warn(msg)
+			b = []byte(msg)
+		}
 		appendAPIResponseChunk(ctx, e.cfg, b)
-		if errClose := resp.Body.Close(); errClose != nil {
+		if errClose := errBody.Close(); errClose != nil {
 			log.Errorf("response body close error: %v", errClose)
 		}
 		return cliproxyexecutor.Response{}, statusErr{code: resp.StatusCode, msg: string(b)}
@@ -559,6 +628,12 @@ func disableThinkingIfToolChoiceForced(body []byte) []byte {
 	if toolChoiceType == "any" || toolChoiceType == "tool" {
 		// Remove thinking configuration entirely to avoid API error
 		body, _ = sjson.DeleteBytes(body, "thinking")
+		// Adaptive thinking may also set output_config.effort; remove it to avoid
+		// leaking thinking controls when tool_choice forces tool use.
+		body, _ = sjson.DeleteBytes(body, "output_config.effort")
+		if oc := gjson.GetBytes(body, "output_config"); oc.Exists() && oc.IsObject() && len(oc.Map()) == 0 {
+			body, _ = sjson.DeleteBytes(body, "output_config")
+		}
 	}
 	return body
 }
@@ -581,12 +656,61 @@ func (c *compositeReadCloser) Close() error {
 	return firstErr
 }
 
+// peekableBody wraps a bufio.Reader around the original ReadCloser so that
+// magic bytes can be inspected without consuming them from the stream.
+type peekableBody struct {
+	*bufio.Reader
+	closer io.Closer
+}
+
+func (p *peekableBody) Close() error {
+	return p.closer.Close()
+}
+
 func decodeResponseBody(body io.ReadCloser, contentEncoding string) (io.ReadCloser, error) {
 	if body == nil {
 		return nil, fmt.Errorf("response body is nil")
 	}
 	if contentEncoding == "" {
-		return body, nil
+		// No Content-Encoding header.  Attempt best-effort magic-byte detection to
+		// handle misbehaving upstreams that compress without setting the header.
+		// Only gzip (1f 8b) and zstd (28 b5 2f fd) have reliable magic sequences;
+		// br and deflate have none and are left as-is.
+		// The bufio wrapper preserves unread bytes so callers always see the full
+		// stream regardless of whether decompression was applied.
+		pb := &peekableBody{Reader: bufio.NewReader(body), closer: body}
+		magic, peekErr := pb.Peek(4)
+		if peekErr == nil || (peekErr == io.EOF && len(magic) >= 2) {
+			switch {
+			case len(magic) >= 2 && magic[0] == 0x1f && magic[1] == 0x8b:
+				gzipReader, gzErr := gzip.NewReader(pb)
+				if gzErr != nil {
+					_ = pb.Close()
+					return nil, fmt.Errorf("magic-byte gzip: failed to create reader: %w", gzErr)
+				}
+				return &compositeReadCloser{
+					Reader: gzipReader,
+					closers: []func() error{
+						gzipReader.Close,
+						pb.Close,
+					},
+				}, nil
+			case len(magic) >= 4 && magic[0] == 0x28 && magic[1] == 0xb5 && magic[2] == 0x2f && magic[3] == 0xfd:
+				decoder, zdErr := zstd.NewReader(pb)
+				if zdErr != nil {
+					_ = pb.Close()
+					return nil, fmt.Errorf("magic-byte zstd: failed to create reader: %w", zdErr)
+				}
+				return &compositeReadCloser{
+					Reader: decoder,
+					closers: []func() error{
+						func() error { decoder.Close(); return nil },
+						pb.Close,
+					},
+				}, nil
+			}
+		}
+		return pb, nil
 	}
 	encodings := strings.Split(contentEncoding, ",")
 	for _, raw := range encodings {
@@ -709,11 +833,21 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 		}
 	}
 
-	// Merge extra betas from request body
-	if len(extraBetas) > 0 {
+	hasClaude1MHeader := false
+	if ginHeaders != nil {
+		if _, ok := ginHeaders[textproto.CanonicalMIMEHeaderKey("X-CPA-CLAUDE-1M")]; ok {
+			hasClaude1MHeader = true
+		}
+	}
+
+	// Merge extra betas from request body and request flags.
+	if len(extraBetas) > 0 || hasClaude1MHeader {
 		existingSet := make(map[string]bool)
 		for _, b := range strings.Split(baseBetas, ",") {
-			existingSet[strings.TrimSpace(b)] = true
+			betaName := strings.TrimSpace(b)
+			if betaName != "" {
+				existingSet[betaName] = true
+			}
 		}
 		for _, beta := range extraBetas {
 			beta = strings.TrimSpace(beta)
@@ -721,6 +855,9 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 				baseBetas += "," + beta
 				existingSet[beta] = true
 			}
+		}
+		if hasClaude1MHeader && !existingSet["context-1m-2025-08-07"] {
+			baseBetas += ",context-1m-2025-08-07"
 		}
 	}
 	r.Header.Set("Anthropic-Beta", baseBetas)
@@ -750,11 +887,15 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 		r.Header.Set("User-Agent", hdrDefault(hd.UserAgent, "claude-cli/2.1.63 (external, cli)"))
 	}
 	r.Header.Set("Connection", "keep-alive")
-	r.Header.Set("Accept-Encoding", "gzip, deflate, br, zstd")
 	if stream {
 		r.Header.Set("Accept", "text/event-stream")
+		// SSE streams must not be compressed: the downstream scanner reads
+		// line-delimited text and cannot parse compressed bytes.  Using
+		// "identity" tells the upstream to send an uncompressed stream.
+		r.Header.Set("Accept-Encoding", "identity")
 	} else {
 		r.Header.Set("Accept", "application/json")
+		r.Header.Set("Accept-Encoding", "gzip, deflate, br, zstd")
 	}
 	// Keep OS/Arch mapping dynamic (not configurable).
 	// They intentionally continue to derive from runtime.GOOS/runtime.GOARCH.
@@ -763,6 +904,12 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(r, attrs)
+	// Re-enforce Accept-Encoding: identity after ApplyCustomHeadersFromAttrs, which
+	// may override it with a user-configured value.  Compressed SSE breaks the line
+	// scanner regardless of user preference, so this is non-negotiable for streams.
+	if stream {
+		r.Header.Set("Accept-Encoding", "identity")
+	}
 }
 
 func claudeCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
@@ -1073,17 +1220,22 @@ func generateBillingHeader(payload []byte) string {
 	return fmt.Sprintf("x-anthropic-billing-header: cc_version=2.1.63.%s; cc_entrypoint=cli; cch=%s;", buildHash, cch)
 }
 
-// checkSystemInstructionsWithMode injects Claude Code system prompt to match
-// the real Claude Code request format:
-//   system[0]: billing header (no cache_control)
-//   system[1]: "You are a Claude agent, built on Anthropic's Claude Agent SDK." (with cache_control)
-//   system[2..]: user's system messages (with cache_control on last)
+// checkSystemInstructionsWithMode injects Claude Code-style system blocks:
+//
+//	system[0]: billing header (no cache_control)
+//	system[1]: agent identifier (no cache_control)
+//	system[2..]: user system messages (cache_control added when missing)
 func checkSystemInstructionsWithMode(payload []byte, strictMode bool) []byte {
 	system := gjson.GetBytes(payload, "system")
 
 	billingText := generateBillingHeader(payload)
 	billingBlock := fmt.Sprintf(`{"type":"text","text":"%s"}`, billingText)
-	agentBlock := `{"type":"text","text":"You are a Claude agent, built on Anthropic's Claude Agent SDK.","cache_control":{"type":"ephemeral","ttl":"1h"}}`
+	// No cache_control on the agent block. It is a cloaking artifact with zero cache
+	// value (the last system block is what actually triggers caching of all system content).
+	// Including any cache_control here creates an intra-system TTL ordering violation
+	// when the client's system blocks use ttl='1h' (prompt-caching-scope-2026-01-05 beta
+	// forbids 1h blocks after 5m blocks, and a no-TTL block defaults to 5m).
+	agentBlock := `{"type":"text","text":"You are a Claude agent, built on Anthropic's Claude Agent SDK."}`
 
 	if strictMode {
 		// Strict mode: billing header + agent identifier only
@@ -1103,16 +1255,21 @@ func checkSystemInstructionsWithMode(payload []byte, strictMode bool) []byte {
 	if system.IsArray() {
 		system.ForEach(func(_, part gjson.Result) bool {
 			if part.Get("type").String() == "text" {
-				// Add cache_control with ttl to user system messages if not present
+				// Add cache_control to user system messages if not present.
+				// Do NOT add ttl — let it inherit the default (5m) to avoid
+				// TTL ordering violations with the prompt-caching-scope-2026-01-05 beta.
 				partJSON := part.Raw
 				if !part.Get("cache_control").Exists() {
 					partJSON, _ = sjson.Set(partJSON, "cache_control.type", "ephemeral")
-					partJSON, _ = sjson.Set(partJSON, "cache_control.ttl", "1h")
 				}
 				result += "," + partJSON
 			}
 			return true
 		})
+	} else if system.Type == gjson.String && system.String() != "" {
+		partJSON := `{"type":"text","cache_control":{"type":"ephemeral"}}`
+		partJSON, _ = sjson.Set(partJSON, "text", system.String())
+		result += "," + partJSON
 	}
 	result += "]"
 
@@ -1252,6 +1409,325 @@ func countCacheControls(payload []byte) int {
 	}
 
 	return count
+}
+
+func parsePayloadObject(payload []byte) (map[string]any, bool) {
+	if len(payload) == 0 {
+		return nil, false
+	}
+	var root map[string]any
+	if err := json.Unmarshal(payload, &root); err != nil {
+		return nil, false
+	}
+	return root, true
+}
+
+func marshalPayloadObject(original []byte, root map[string]any) []byte {
+	if root == nil {
+		return original
+	}
+	out, err := json.Marshal(root)
+	if err != nil {
+		return original
+	}
+	return out
+}
+
+func asObject(v any) (map[string]any, bool) {
+	obj, ok := v.(map[string]any)
+	return obj, ok
+}
+
+func asArray(v any) ([]any, bool) {
+	arr, ok := v.([]any)
+	return arr, ok
+}
+
+func countCacheControlsMap(root map[string]any) int {
+	count := 0
+
+	if system, ok := asArray(root["system"]); ok {
+		for _, item := range system {
+			if obj, ok := asObject(item); ok {
+				if _, exists := obj["cache_control"]; exists {
+					count++
+				}
+			}
+		}
+	}
+
+	if tools, ok := asArray(root["tools"]); ok {
+		for _, item := range tools {
+			if obj, ok := asObject(item); ok {
+				if _, exists := obj["cache_control"]; exists {
+					count++
+				}
+			}
+		}
+	}
+
+	if messages, ok := asArray(root["messages"]); ok {
+		for _, msg := range messages {
+			msgObj, ok := asObject(msg)
+			if !ok {
+				continue
+			}
+			content, ok := asArray(msgObj["content"])
+			if !ok {
+				continue
+			}
+			for _, item := range content {
+				if obj, ok := asObject(item); ok {
+					if _, exists := obj["cache_control"]; exists {
+						count++
+					}
+				}
+			}
+		}
+	}
+
+	return count
+}
+
+func normalizeTTLForBlock(obj map[string]any, seen5m *bool) bool {
+	ccRaw, exists := obj["cache_control"]
+	if !exists {
+		return false
+	}
+	cc, ok := asObject(ccRaw)
+	if !ok {
+		*seen5m = true
+		return false
+	}
+	ttlRaw, ttlExists := cc["ttl"]
+	ttl, ttlIsString := ttlRaw.(string)
+	if !ttlExists || !ttlIsString || ttl != "1h" {
+		*seen5m = true
+		return false
+	}
+	if *seen5m {
+		delete(cc, "ttl")
+		return true
+	}
+	return false
+}
+
+func findLastCacheControlIndex(arr []any) int {
+	last := -1
+	for idx, item := range arr {
+		obj, ok := asObject(item)
+		if !ok {
+			continue
+		}
+		if _, exists := obj["cache_control"]; exists {
+			last = idx
+		}
+	}
+	return last
+}
+
+func stripCacheControlExceptIndex(arr []any, preserveIdx int, excess *int) {
+	for idx, item := range arr {
+		if *excess <= 0 {
+			return
+		}
+		obj, ok := asObject(item)
+		if !ok {
+			continue
+		}
+		if _, exists := obj["cache_control"]; exists && idx != preserveIdx {
+			delete(obj, "cache_control")
+			*excess--
+		}
+	}
+}
+
+func stripAllCacheControl(arr []any, excess *int) {
+	for _, item := range arr {
+		if *excess <= 0 {
+			return
+		}
+		obj, ok := asObject(item)
+		if !ok {
+			continue
+		}
+		if _, exists := obj["cache_control"]; exists {
+			delete(obj, "cache_control")
+			*excess--
+		}
+	}
+}
+
+func stripMessageCacheControl(messages []any, excess *int) {
+	for _, msg := range messages {
+		if *excess <= 0 {
+			return
+		}
+		msgObj, ok := asObject(msg)
+		if !ok {
+			continue
+		}
+		content, ok := asArray(msgObj["content"])
+		if !ok {
+			continue
+		}
+		for _, item := range content {
+			if *excess <= 0 {
+				return
+			}
+			obj, ok := asObject(item)
+			if !ok {
+				continue
+			}
+			if _, exists := obj["cache_control"]; exists {
+				delete(obj, "cache_control")
+				*excess--
+			}
+		}
+	}
+}
+
+// normalizeCacheControlTTL ensures cache_control TTL values don't violate the
+// prompt-caching-scope-2026-01-05 ordering constraint: a 1h-TTL block must not
+// appear after a 5m-TTL block anywhere in the evaluation order.
+//
+// Anthropic evaluates blocks in order: tools → system (index 0..N) → messages.
+// Within each section, blocks are evaluated in array order. A 5m (default) block
+// followed by a 1h block at ANY later position is an error — including within
+// the same section (e.g. system[1]=5m then system[3]=1h).
+//
+// Strategy: walk all cache_control blocks in evaluation order. Once a 5m block
+// is seen, strip ttl from ALL subsequent 1h blocks (downgrading them to 5m).
+func normalizeCacheControlTTL(payload []byte) []byte {
+	root, ok := parsePayloadObject(payload)
+	if !ok {
+		return payload
+	}
+
+	seen5m := false
+	modified := false
+
+	if tools, ok := asArray(root["tools"]); ok {
+		for _, tool := range tools {
+			if obj, ok := asObject(tool); ok {
+				if normalizeTTLForBlock(obj, &seen5m) {
+					modified = true
+				}
+			}
+		}
+	}
+
+	if system, ok := asArray(root["system"]); ok {
+		for _, item := range system {
+			if obj, ok := asObject(item); ok {
+				if normalizeTTLForBlock(obj, &seen5m) {
+					modified = true
+				}
+			}
+		}
+	}
+
+	if messages, ok := asArray(root["messages"]); ok {
+		for _, msg := range messages {
+			msgObj, ok := asObject(msg)
+			if !ok {
+				continue
+			}
+			content, ok := asArray(msgObj["content"])
+			if !ok {
+				continue
+			}
+			for _, item := range content {
+				if obj, ok := asObject(item); ok {
+					if normalizeTTLForBlock(obj, &seen5m) {
+						modified = true
+					}
+				}
+			}
+		}
+	}
+
+	if !modified {
+		return payload
+	}
+	return marshalPayloadObject(payload, root)
+}
+
+// enforceCacheControlLimit removes excess cache_control blocks from a payload
+// so the total does not exceed the Anthropic API limit (currently 4).
+//
+// Anthropic evaluates cache breakpoints in order: tools → system → messages.
+// The most valuable breakpoints are:
+//  1. Last tool         — caches ALL tool definitions
+//  2. Last system block — caches ALL system content
+//  3. Recent messages   — cache conversation context
+//
+// Removal priority (strip lowest-value first):
+//
+//	Phase 1: system blocks earliest-first, preserving the last one.
+//	Phase 2: tool blocks earliest-first, preserving the last one.
+//	Phase 3: message content blocks earliest-first.
+//	Phase 4: remaining system blocks (last system).
+//	Phase 5: remaining tool blocks (last tool).
+func enforceCacheControlLimit(payload []byte, maxBlocks int) []byte {
+	root, ok := parsePayloadObject(payload)
+	if !ok {
+		return payload
+	}
+
+	total := countCacheControlsMap(root)
+	if total <= maxBlocks {
+		return payload
+	}
+
+	excess := total - maxBlocks
+
+	var system []any
+	if arr, ok := asArray(root["system"]); ok {
+		system = arr
+	}
+	var tools []any
+	if arr, ok := asArray(root["tools"]); ok {
+		tools = arr
+	}
+	var messages []any
+	if arr, ok := asArray(root["messages"]); ok {
+		messages = arr
+	}
+
+	if len(system) > 0 {
+		stripCacheControlExceptIndex(system, findLastCacheControlIndex(system), &excess)
+	}
+	if excess <= 0 {
+		return marshalPayloadObject(payload, root)
+	}
+
+	if len(tools) > 0 {
+		stripCacheControlExceptIndex(tools, findLastCacheControlIndex(tools), &excess)
+	}
+	if excess <= 0 {
+		return marshalPayloadObject(payload, root)
+	}
+
+	if len(messages) > 0 {
+		stripMessageCacheControl(messages, &excess)
+	}
+	if excess <= 0 {
+		return marshalPayloadObject(payload, root)
+	}
+
+	if len(system) > 0 {
+		stripAllCacheControl(system, &excess)
+	}
+	if excess <= 0 {
+		return marshalPayloadObject(payload, root)
+	}
+
+	if len(tools) > 0 {
+		stripAllCacheControl(tools, &excess)
+	}
+
+	return marshalPayloadObject(payload, root)
 }
 
 // injectMessagesCacheControl adds cache_control to the second-to-last user turn for multi-turn caching.

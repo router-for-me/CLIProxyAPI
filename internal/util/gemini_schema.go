@@ -430,7 +430,7 @@ func removeUnsupportedKeywords(jsonStr string) string {
 	keywords := append(unsupportedConstraints,
 		"$schema", "$defs", "definitions", "const", "$ref", "$id", "additionalProperties",
 		"propertyNames", "patternProperties", // Gemini doesn't support these schema keywords
-		"enumTitles", "prefill", // Claude/OpenCode schema metadata fields unsupported by Gemini
+		"enumTitles", "prefill", "deprecated", // Schema metadata fields unsupported by Gemini
 	)
 
 	deletePaths := make([]string, 0)
