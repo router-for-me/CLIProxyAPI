@@ -391,6 +391,8 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				log.Errorf("response body close error: %v", errClose)
 			}
 		}()
+		// Ensure every stream path, including Claude passthrough, records at least one usage entry.
+		defer reporter.ensurePublished(ctx)
 
 		// If from == to (Claude → Claude), directly forward the SSE stream without translation
 		if from == to {
