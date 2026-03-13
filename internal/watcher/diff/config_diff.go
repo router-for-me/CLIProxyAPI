@@ -157,6 +157,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			if oldExcluded.hash != newExcluded.hash {
 				changes = append(changes, fmt.Sprintf("claude[%d].excluded-models: updated (%d -> %d entries)", i, oldExcluded.count, newExcluded.count))
 			}
+			if o.SystemPromptCount != n.SystemPromptCount {
+				changes = append(changes, fmt.Sprintf("claude[%d].system-prompt-count: %d -> %d", i, o.SystemPromptCount, n.SystemPromptCount))
+			}
 			if o.Cloak != nil && n.Cloak != nil {
 				if strings.TrimSpace(o.Cloak.Mode) != strings.TrimSpace(n.Cloak.Mode) {
 					changes = append(changes, fmt.Sprintf("claude[%d].cloak.mode: %s -> %s", i, o.Cloak.Mode, n.Cloak.Mode))

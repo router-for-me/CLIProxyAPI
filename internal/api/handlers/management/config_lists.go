@@ -271,13 +271,14 @@ func (h *Handler) PutClaudeKeys(c *gin.Context) {
 }
 func (h *Handler) PatchClaudeKey(c *gin.Context) {
 	type claudeKeyPatch struct {
-		APIKey         *string               `json:"api-key"`
-		Prefix         *string               `json:"prefix"`
-		BaseURL        *string               `json:"base-url"`
-		ProxyURL       *string               `json:"proxy-url"`
-		Models         *[]config.ClaudeModel `json:"models"`
-		Headers        *map[string]string    `json:"headers"`
-		ExcludedModels *[]string             `json:"excluded-models"`
+		APIKey            *string               `json:"api-key"`
+		Prefix            *string               `json:"prefix"`
+		BaseURL           *string               `json:"base-url"`
+		ProxyURL          *string               `json:"proxy-url"`
+		Models            *[]config.ClaudeModel `json:"models"`
+		Headers           *map[string]string    `json:"headers"`
+		ExcludedModels    *[]string             `json:"excluded-models"`
+		SystemPromptCount *int                  `json:"system-prompt-count"`
 	}
 	var body struct {
 		Index *int            `json:"index"`
@@ -327,6 +328,9 @@ func (h *Handler) PatchClaudeKey(c *gin.Context) {
 	}
 	if body.Value.ExcludedModels != nil {
 		entry.ExcludedModels = config.NormalizeExcludedModels(*body.Value.ExcludedModels)
+	}
+	if body.Value.SystemPromptCount != nil {
+		entry.SystemPromptCount = *body.Value.SystemPromptCount
 	}
 	normalizeClaudeKey(&entry)
 	h.cfg.ClaudeKey[targetIndex] = entry
