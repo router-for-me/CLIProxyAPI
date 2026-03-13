@@ -81,7 +81,7 @@ func TestOpenAICompatExecutor_ForceUpstreamStreamAggregatesReasoningAndContent(t
 	}
 }
 
-func TestOpenAICompatExecutor_ForceUpstreamStreamAggregatesToolCalls(t *testing.T) {
+func TestOpenAICompatExecutor_ForceUpstreamStream_ToolCallsOnlyFinishReasonIsToolCalls(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl-2\",\"object\":\"chat.completion.chunk\",\"created\":1710000001,\"model\":\"glm-5\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"read\",\"arguments\":\"{\\\"path\\\": \\\"\"}}]}}]}\n\n"))
@@ -130,6 +130,9 @@ func TestOpenAICompatExecutor_ForceUpstreamStreamAggregatesToolCalls(t *testing.
 	}
 	if gjson.GetBytes(resp.Payload, "choices.0.message.tool_calls.0.function.arguments").String() != `{"path": "/tmp/test"}` {
 		t.Fatalf("tool_call arguments mismatch: %s", gjson.GetBytes(resp.Payload, "choices.0.message.tool_calls.0.function.arguments").String())
+	}
+	if gjson.GetBytes(resp.Payload, "choices.0.finish_reason").String() != "tool_calls" {
+		t.Fatalf("expected finish_reason tool_calls, got: %s", gjson.GetBytes(resp.Payload, "choices.0.finish_reason").String())
 	}
 }
 

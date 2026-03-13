@@ -23,17 +23,17 @@ type toolCallAggregate struct {
 func aggregateOpenAIChatCompletionSSE(body []byte) ([]byte, usage.Detail, error) {
 	lines := bytes.Split(body, []byte("\n"))
 	var (
-		id                string
-		model             string
-		created           int64
-		content           strings.Builder
-		reasoning         strings.Builder
-		finishReason      string
-		nativeFinish      string
-		usageRaw          string
-		hasAny            bool
-		toolCallsByIndex  = map[int]*toolCallAggregate{}
-		orderedToolIdx    []int
+		id               string
+		model            string
+		created          int64
+		content          strings.Builder
+		reasoning        strings.Builder
+		finishReason     string
+		nativeFinish     string
+		usageRaw         string
+		hasAny           bool
+		toolCallsByIndex = map[int]*toolCallAggregate{}
+		orderedToolIdx   []int
 	)
 
 	for _, line := range lines {
@@ -114,7 +114,11 @@ func aggregateOpenAIChatCompletionSSE(body []byte) ([]byte, usage.Detail, error)
 	}
 
 	if finishReason == "" {
-		finishReason = "stop"
+		if len(toolCallsByIndex) > 0 {
+			finishReason = "tool_calls"
+		} else {
+			finishReason = "stop"
+		}
 	}
 
 	result := []byte(`{"id":"","object":"chat.completion","created":0,"model":"","choices":[{"index":0,"message":{"role":"assistant","content":null,"reasoning_content":null,"tool_calls":null},"finish_reason":null,"native_finish_reason":null}]}`)
