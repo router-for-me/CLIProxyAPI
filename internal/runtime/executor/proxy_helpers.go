@@ -2,16 +2,14 @@ package executor
 
 import (
 	"context"
-	"net"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v6/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
-	"golang.org/x/net/proxy"
 )
 
 // newProxyAwareHTTPClient creates an HTTP client with proper proxy configuration priority:
@@ -72,45 +70,10 @@ func newProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 // Returns:
 //   - *http.Transport: A configured transport, or nil if the proxy URL is invalid
 func buildProxyTransport(proxyURL string) *http.Transport {
-	if proxyURL == "" {
+	transport, _, errBuild := proxyutil.BuildHTTPTransport(proxyURL)
+	if errBuild != nil {
+		log.Errorf("%v", errBuild)
 		return nil
 	}
-
-	parsedURL, errParse := url.Parse(proxyURL)
-	if errParse != nil {
-		log.Errorf("parse proxy URL failed: %v", errParse)
-		return nil
-	}
-
-	var transport *http.Transport
-
-	// Handle different proxy schemes
-	if parsedURL.Scheme == "socks5" {
-		// Configure SOCKS5 proxy with optional authentication
-		var proxyAuth *proxy.Auth
-		if parsedURL.User != nil {
-			username := parsedURL.User.Username()
-			password, _ := parsedURL.User.Password()
-			proxyAuth = &proxy.Auth{User: username, Password: password}
-		}
-		dialer, errSOCKS5 := proxy.SOCKS5("tcp", parsedURL.Host, proxyAuth, proxy.Direct)
-		if errSOCKS5 != nil {
-			log.Errorf("create SOCKS5 dialer failed: %v", errSOCKS5)
-			return nil
-		}
-		// Set up a custom transport using the SOCKS5 dialer
-		transport = &http.Transport{
-			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-				return dialer.Dial(network, addr)
-			},
-		}
-	} else if parsedURL.Scheme == "http" || parsedURL.Scheme == "https" {
-		// Configure HTTP or HTTPS proxy
-		transport = &http.Transport{Proxy: http.ProxyURL(parsedURL)}
-	} else {
-		log.Errorf("unsupported proxy scheme: %s", parsedURL.Scheme)
-		return nil
-	}
-
 	return transport
 }

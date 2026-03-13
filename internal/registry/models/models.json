@@ -2481,40 +2481,83 @@
       }
     }
   ],
-  "antigravity": {
-    "claude-opus-4-6-thinking": {
+  "antigravity": [
+    {
+      "id": "claude-opus-4-6-thinking",
+      "object": "model",
+      "owned_by": "antigravity",
+      "type": "antigravity",
+      "display_name": "Claude Opus 4.6 (Thinking)",
+      "name": "claude-opus-4-6-thinking",
+      "description": "Claude Opus 4.6 (Thinking)",
+      "context_length": 200000,
+      "max_completion_tokens": 64000,
       "thinking": {
         "min": 1024,
         "max": 64000,
         "zero_allowed": true,
         "dynamic_allowed": true
-      },
-      "max_completion_tokens": 64000
+      }
     },
-    "claude-sonnet-4-6": {
+    {
+      "id": "claude-sonnet-4-6",
+      "object": "model",
+      "owned_by": "antigravity",
+      "type": "antigravity",
+      "display_name": "Claude Sonnet 4.6 (Thinking)",
+      "name": "claude-sonnet-4-6",
+      "description": "Claude Sonnet 4.6 (Thinking)",
+      "context_length": 200000,
+      "max_completion_tokens": 64000,
       "thinking": {
         "min": 1024,
         "max": 64000,
         "zero_allowed": true,
         "dynamic_allowed": true
-      },
-      "max_completion_tokens": 64000
+      }
     },
-    "gemini-2.5-flash": {
+    {
+      "id": "gemini-2.5-flash",
+      "object": "model",
+      "owned_by": "antigravity",
+      "type": "antigravity",
+      "display_name": "Gemini 2.5 Flash",
+      "name": "gemini-2.5-flash",
+      "description": "Gemini 2.5 Flash",
+      "context_length": 1048576,
+      "max_completion_tokens": 65535,
       "thinking": {
         "max": 24576,
         "zero_allowed": true,
         "dynamic_allowed": true
       }
     },
-    "gemini-2.5-flash-lite": {
+    {
+      "id": "gemini-2.5-flash-lite",
+      "object": "model",
+      "owned_by": "antigravity",
+      "type": "antigravity",
+      "display_name": "Gemini 2.5 Flash Lite",
+      "name": "gemini-2.5-flash-lite",
+      "description": "Gemini 2.5 Flash Lite",
+      "context_length": 1048576,
+      "max_completion_tokens": 65535,
       "thinking": {
         "max": 24576,
         "zero_allowed": true,
         "dynamic_allowed": true
       }
     },
-    "gemini-3-flash": {
+    {
+      "id": "gemini-3-flash",
+      "object": "model",
+      "owned_by": "antigravity",
+      "type": "antigravity",
+      "display_name": "Gemini 3 Flash",
+      "name": "gemini-3-flash",
+      "description": "Gemini 3 Flash",
+      "context_length": 1048576,
+      "max_completion_tokens": 65536,
       "thinking": {
         "min": 128,
         "max": 32768,
@@ -2527,7 +2570,16 @@
         ]
       }
     },
-    "gemini-3-pro-high": {
+    {
+      "id": "gemini-3-pro-high",
+      "object": "model",
+      "owned_by": "antigravity",
+      "type": "antigravity",
+      "display_name": "Gemini 3 Pro (High)",
+      "name": "gemini-3-pro-high",
+      "description": "Gemini 3 Pro (High)",
+      "context_length": 1048576,
+      "max_completion_tokens": 65535,
       "thinking": {
         "min": 128,
         "max": 32768,
@@ -2538,7 +2590,16 @@
         ]
       }
     },
-    "gemini-3-pro-low": {
+    {
+      "id": "gemini-3-pro-low",
+      "object": "model",
+      "owned_by": "antigravity",
+      "type": "antigravity",
+      "display_name": "Gemini 3 Pro (Low)",
+      "name": "gemini-3-pro-low",
+      "description": "Gemini 3 Pro (Low)",
+      "context_length": 1048576,
+      "max_completion_tokens": 65535,
       "thinking": {
         "min": 128,
         "max": 32768,
@@ -2549,7 +2610,14 @@
         ]
       }
     },
-    "gemini-3.1-flash-image": {
+    {
+      "id": "gemini-3.1-flash-image",
+      "object": "model",
+      "owned_by": "antigravity",
+      "type": "antigravity",
+      "display_name": "Gemini 3.1 Flash Image",
+      "name": "gemini-3.1-flash-image",
+      "description": "Gemini 3.1 Flash Image",
       "thinking": {
         "min": 128,
         "max": 32768,
@@ -2560,29 +2628,16 @@
         ]
       }
     },
-    "gemini-3.1-flash-lite-preview": {
-      "thinking": {
-        "min": 128,
-        "max": 32768,
-        "dynamic_allowed": true,
-        "levels": [
-          "minimal",
-          "high"
-        ]
-      }
-    },
-    "gemini-3.1-pro-high": {
-      "thinking": {
-        "min": 128,
-        "max": 32768,
-        "dynamic_allowed": true,
-        "levels": [
-          "low",
-          "high"
-        ]
-      }
-    },
-    "gemini-3.1-pro-low": {
+    {
+      "id": "gemini-3.1-pro-high",
+      "object": "model",
+      "owned_by": "antigravity",
+      "type": "antigravity",
+      "display_name": "Gemini 3.1 Pro (High)",
+      "name": "gemini-3.1-pro-high",
+      "description": "Gemini 3.1 Pro (High)",
+      "context_length": 1048576,
+      "max_completion_tokens": 65535,
       "thinking": {
         "min": 128,
         "max": 32768,
@@ -2593,6 +2648,36 @@
         ]
       }
     },
-    "gpt-oss-120b-medium": {}
-  }
+    {
+      "id": "gemini-3.1-pro-low",
+      "object": "model",
+      "owned_by": "antigravity",
+      "type": "antigravity",
+      "display_name": "Gemini 3.1 Pro (Low)",
+      "name": "gemini-3.1-pro-low",
+      "description": "Gemini 3.1 Pro (Low)",
+      "context_length": 1048576,
+      "max_completion_tokens": 65535,
+      "thinking": {
+        "min": 128,
+        "max": 32768,
+        "dynamic_allowed": true,
+        "levels": [
+          "low",
+          "high"
+        ]
+      }
+    },
+    {
+      "id": "gpt-oss-120b-medium",
+      "object": "model",
+      "owned_by": "antigravity",
+      "type": "antigravity",
+      "display_name": "GPT-OSS 120B (Medium)",
+      "name": "gpt-oss-120b-medium",
+      "description": "GPT-OSS 120B (Medium)",
+      "context_length": 114000,
+      "max_completion_tokens": 32768
+    }
+  ]
 }

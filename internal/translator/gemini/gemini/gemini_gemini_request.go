@@ -5,9 +5,11 @@ package gemini
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator/gemini/common"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
+	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -95,6 +97,71 @@ func ConvertGeminiRequestToGemini(_ string, inputRawJSON []byte, _ bool) []byte 
 		out = []byte(strJson)
 	}
 
+	// Backfill empty functionResponse.name from the preceding functionCall.name.
+	// Amp may send function responses with empty names; the Gemini API rejects these.
+	out = backfillEmptyFunctionResponseNames(out)
+
 	out = common.AttachDefaultSafetySettings(out, "safetySettings")
+	return out
+}
+
+// backfillEmptyFunctionResponseNames walks the contents array and for each
+// model turn containing functionCall parts, records the call names in order.
+// For the immediately following user/function turn containing functionResponse
+// parts, any empty name is replaced with the corresponding call name.
+func backfillEmptyFunctionResponseNames(data []byte) []byte {
+	contents := gjson.GetBytes(data, "contents")
+	if !contents.Exists() {
+		return data
+	}
+
+	out := data
+	var pendingCallNames []string
+
+	contents.ForEach(func(contentIdx, content gjson.Result) bool {
+		role := content.Get("role").String()
+
+		// Collect functionCall names from model turns
+		if role == "model" {
+			var names []string
+			content.Get("parts").ForEach(func(_, part gjson.Result) bool {
+				if part.Get("functionCall").Exists() {
+					names = append(names, part.Get("functionCall.name").String())
+				}
+				return true
+			})
+			if len(names) > 0 {
+				pendingCallNames = names
+			} else {
+				pendingCallNames = nil
+			}
+			return true
+		}
+
+		// Backfill empty functionResponse names from pending call names
+		if len(pendingCallNames) > 0 {
+			ri := 0
+			content.Get("parts").ForEach(func(partIdx, part gjson.Result) bool {
+				if part.Get("functionResponse").Exists() {
+					name := part.Get("functionResponse.name").String()
+					if strings.TrimSpace(name) == "" {
+						if ri < len(pendingCallNames) {
+							out, _ = sjson.SetBytes(out,
+								fmt.Sprintf("contents.%d.parts.%d.functionResponse.name", contentIdx.Int(), partIdx.Int()),
+								pendingCallNames[ri])
+						} else {
+							log.Debugf("more function responses than calls at contents[%d], skipping name backfill", contentIdx.Int())
+						}
+					}
+					ri++
+				}
+				return true
+			})
+			pendingCallNames = nil
+		}
+
+		return true
+	})
+
 	return out
 }

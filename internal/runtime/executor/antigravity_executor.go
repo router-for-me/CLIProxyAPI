@@ -24,7 +24,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
@@ -43,7 +42,6 @@ const (
 	antigravityCountTokensPath     = "/v1internal:countTokens"
 	antigravityStreamPath          = "/v1internal:streamGenerateContent"
 	antigravityGeneratePath        = "/v1internal:generateContent"
-	antigravityModelsPath          = "/v1internal:fetchAvailableModels"
 	antigravityClientID            = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
 	antigravityClientSecret        = "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"
 	defaultAntigravityAgent        = "antigravity/1.19.6 darwin/arm64"
@@ -55,77 +53,7 @@ const (
 var (
 	randSource      = rand.New(rand.NewSource(time.Now().UnixNano()))
 	randSourceMutex sync.Mutex
-	// antigravityPrimaryModelsCache keeps the latest non-empty model list fetched
-	// from any antigravity auth. Empty fetches never overwrite this cache.
-	antigravityPrimaryModelsCache struct {
-		mu     sync.RWMutex
-		models []*registry.ModelInfo
-	}
 )
-
-func cloneAntigravityModels(models []*registry.ModelInfo) []*registry.ModelInfo {
-	if len(models) == 0 {
-		return nil
-	}
-	out := make([]*registry.ModelInfo, 0, len(models))
-	for _, model := range models {
-		if model == nil || strings.TrimSpace(model.ID) == "" {
-			continue
-		}
-		out = append(out, cloneAntigravityModelInfo(model))
-	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
-}
-
-func cloneAntigravityModelInfo(model *registry.ModelInfo) *registry.ModelInfo {
-	if model == nil {
-		return nil
-	}
-	clone := *model
-	if len(model.SupportedGenerationMethods) > 0 {
-		clone.SupportedGenerationMethods = append([]string(nil), model.SupportedGenerationMethods...)
-	}
-	if len(model.SupportedParameters) > 0 {
-		clone.SupportedParameters = append([]string(nil), model.SupportedParameters...)
-	}
-	if model.Thinking != nil {
-		thinkingClone := *model.Thinking
-		if len(model.Thinking.Levels) > 0 {
-			thinkingClone.Levels = append([]string(nil), model.Thinking.Levels...)
-		}
-		clone.Thinking = &thinkingClone
-	}
-	return &clone
-}
-
-func storeAntigravityPrimaryModels(models []*registry.ModelInfo) bool {
-	cloned := cloneAntigravityModels(models)
-	if len(cloned) == 0 {
-		return false
-	}
-	antigravityPrimaryModelsCache.mu.Lock()
-	antigravityPrimaryModelsCache.models = cloned
-	antigravityPrimaryModelsCache.mu.Unlock()
-	return true
-}
-
-func loadAntigravityPrimaryModels() []*registry.ModelInfo {
-	antigravityPrimaryModelsCache.mu.RLock()
-	cloned := cloneAntigravityModels(antigravityPrimaryModelsCache.models)
-	antigravityPrimaryModelsCache.mu.RUnlock()
-	return cloned
-}
-
-func fallbackAntigravityPrimaryModels() []*registry.ModelInfo {
-	models := loadAntigravityPrimaryModels()
-	if len(models) > 0 {
-		log.Debugf("antigravity executor: using cached primary model list (%d models)", len(models))
-	}
-	return models
-}
 
 // AntigravityExecutor proxies requests to the antigravity upstream.
 type AntigravityExecutor struct {
@@ -1148,168 +1076,6 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 	default:
 		return cliproxyexecutor.Response{}, statusErr{code: http.StatusServiceUnavailable, msg: "antigravity executor: no base url available"}
 	}
-}
-
-// FetchAntigravityModels retrieves available models using the supplied auth.
-func FetchAntigravityModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *config.Config) []*registry.ModelInfo {
-	exec := &AntigravityExecutor{cfg: cfg}
-	token, updatedAuth, errToken := exec.ensureAccessToken(ctx, auth)
-	if errToken != nil || token == "" {
-		return fallbackAntigravityPrimaryModels()
-	}
-	if updatedAuth != nil {
-		auth = updatedAuth
-	}
-
-	baseURLs := antigravityBaseURLFallbackOrder(auth)
-	httpClient := newAntigravityHTTPClient(ctx, cfg, auth, 0)
-
-	for idx, baseURL := range baseURLs {
-		modelsURL := baseURL + antigravityModelsPath
-
-		var payload []byte
-		if auth != nil && auth.Metadata != nil {
-			if pid, ok := auth.Metadata["project_id"].(string); ok && strings.TrimSpace(pid) != "" {
-				payload = []byte(fmt.Sprintf(`{"project": "%s"}`, strings.TrimSpace(pid)))
-			}
-		}
-		if len(payload) == 0 {
-			payload = []byte(`{}`)
-		}
-
-		httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, modelsURL, bytes.NewReader(payload))
-		if errReq != nil {
-			return fallbackAntigravityPrimaryModels()
-		}
-		httpReq.Close = true
-		httpReq.Header.Set("Content-Type", "application/json")
-		httpReq.Header.Set("Authorization", "Bearer "+token)
-		httpReq.Header.Set("User-Agent", resolveUserAgent(auth))
-		if host := resolveHost(baseURL); host != "" {
-			httpReq.Host = host
-		}
-
-		httpResp, errDo := httpClient.Do(httpReq)
-		if errDo != nil {
-			if errors.Is(errDo, context.Canceled) || errors.Is(errDo, context.DeadlineExceeded) {
-				return fallbackAntigravityPrimaryModels()
-			}
-			if idx+1 < len(baseURLs) {
-				log.Debugf("antigravity executor: models request error on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
-				continue
-			}
-			return fallbackAntigravityPrimaryModels()
-		}
-
-		bodyBytes, errRead := io.ReadAll(httpResp.Body)
-		if errClose := httpResp.Body.Close(); errClose != nil {
-			log.Errorf("antigravity executor: close response body error: %v", errClose)
-		}
-		if errRead != nil {
-			if idx+1 < len(baseURLs) {
-				log.Debugf("antigravity executor: models read error on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
-				continue
-			}
-			return fallbackAntigravityPrimaryModels()
-		}
-		if httpResp.StatusCode < http.StatusOK || httpResp.StatusCode >= http.StatusMultipleChoices {
-			if httpResp.StatusCode == http.StatusTooManyRequests && idx+1 < len(baseURLs) {
-				log.Debugf("antigravity executor: models request rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
-				continue
-			}
-			if idx+1 < len(baseURLs) {
-				log.Debugf("antigravity executor: models request failed with status %d on base url %s, retrying with fallback base url: %s", httpResp.StatusCode, baseURL, baseURLs[idx+1])
-				continue
-			}
-			return fallbackAntigravityPrimaryModels()
-		}
-
-		result := gjson.GetBytes(bodyBytes, "models")
-		if !result.Exists() {
-			if idx+1 < len(baseURLs) {
-				log.Debugf("antigravity executor: models field missing on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
-				continue
-			}
-			return fallbackAntigravityPrimaryModels()
-		}
-
-		now := time.Now().Unix()
-		modelConfig := registry.GetAntigravityModelConfig()
-		models := make([]*registry.ModelInfo, 0, len(result.Map()))
-		for originalName, modelData := range result.Map() {
-			modelID := strings.TrimSpace(originalName)
-			if modelID == "" {
-				continue
-			}
-			switch modelID {
-			case "chat_20706", "chat_23310", "tab_flash_lite_preview", "tab_jump_flash_lite_preview", "gemini-2.5-flash-thinking", "gemini-2.5-pro":
-				continue
-			}
-			modelCfg := modelConfig[modelID]
-
-			// Extract displayName from upstream response, fallback to modelID
-			displayName := modelData.Get("displayName").String()
-			if displayName == "" {
-				displayName = modelID
-			}
-
-			modelInfo := &registry.ModelInfo{
-				ID:          modelID,
-				Name:        modelID,
-				Description: displayName,
-				DisplayName: displayName,
-				Version:     modelID,
-				Object:      "model",
-				Created:     now,
-				OwnedBy:     antigravityAuthType,
-				Type:        antigravityAuthType,
-			}
-
-			// Build input modalities from upstream capability flags.
-			inputModalities := []string{"TEXT"}
-			if modelData.Get("supportsImages").Bool() {
-				inputModalities = append(inputModalities, "IMAGE")
-			}
-			if modelData.Get("supportsVideo").Bool() {
-				inputModalities = append(inputModalities, "VIDEO")
-			}
-			modelInfo.SupportedInputModalities = inputModalities
-			modelInfo.SupportedOutputModalities = []string{"TEXT"}
-
-			// Token limits from upstream.
-			if maxTok := modelData.Get("maxTokens").Int(); maxTok > 0 {
-				modelInfo.InputTokenLimit = int(maxTok)
-			}
-			if maxOut := modelData.Get("maxOutputTokens").Int(); maxOut > 0 {
-				modelInfo.OutputTokenLimit = int(maxOut)
-			}
-
-			// Supported generation methods (Gemini v1beta convention).
-			modelInfo.SupportedGenerationMethods = []string{"generateContent", "countTokens"}
-
-			// Look up Thinking support from static config using upstream model name.
-			if modelCfg != nil {
-				if modelCfg.Thinking != nil {
-					modelInfo.Thinking = modelCfg.Thinking
-				}
-				if modelCfg.MaxCompletionTokens > 0 {
-					modelInfo.MaxCompletionTokens = modelCfg.MaxCompletionTokens
-				}
-			}
-			models = append(models, modelInfo)
-		}
-		if len(models) == 0 {
-			if idx+1 < len(baseURLs) {
-				log.Debugf("antigravity executor: empty models list on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
-				continue
-			}
-			log.Debug("antigravity executor: fetched empty model list; retaining cached primary model list")
-			return fallbackAntigravityPrimaryModels()
-		}
-		storeAntigravityPrimaryModels(models)
-		return models
-	}
-	return fallbackAntigravityPrimaryModels()
 }
 
 func (e *AntigravityExecutor) ensureAccessToken(ctx context.Context, auth *cliproxyauth.Auth) (string, *cliproxyauth.Auth, error) {
