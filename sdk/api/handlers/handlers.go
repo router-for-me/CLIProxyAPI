@@ -208,7 +208,7 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 	if executionSessionID := executionSessionIDFromContext(ctx); executionSessionID != "" {
 		meta[coreexecutor.ExecutionSessionMetadataKey] = executionSessionID
 	}
-	// Sticky session: forward X-Session-ID header so the conductor can pin
+	// Sticky session: forward X-CLIProxyAPI-Session-ID header so the conductor can pin
 	// subsequent requests from the same session to the same auth account.
 	if sessionID := stickySessionIDFromHeader(ctx); sessionID != "" {
 		meta[coreexecutor.StickySessionMetadataKey] = sessionID
@@ -265,7 +265,11 @@ func stickySessionIDFromHeader(ctx context.Context) string {
 	if !ok || ginCtx == nil || ginCtx.Request == nil {
 		return ""
 	}
-	return strings.TrimSpace(ginCtx.GetHeader("X-Session-ID"))
+	id := strings.TrimSpace(ginCtx.GetHeader("X-CLIProxyAPI-Session-ID"))
+	if len(id) > coreauth.StickyMaxSessionIDLen {
+		return ""
+	}
+	return id
 }
 
 // BaseAPIHandler contains the handlers for API endpoints.
