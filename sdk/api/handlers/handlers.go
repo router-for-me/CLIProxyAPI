@@ -801,6 +801,19 @@ func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string
 		providers = util.GetProviderName(resolvedModelName)
 	}
 
+	// Fallback: strip known model variant suffixes (e.g. "-customtools") for
+	// provider lookup. The suffix is also stripped from resolvedModelName
+	// because CPA routes gemini-cli through cloudcode-pa/v1internal (OAuth)
+	// which does not accept variant suffixes (returns 404).
+	// The behavioral difference is minor: -customtools only changes tool
+	// selection priority (prefers custom tools over bash), not model capabilities.
+	if len(providers) == 0 {
+		if stripped := stripModelVariantSuffix(baseModel); stripped != baseModel {
+			providers = util.GetProviderName(stripped)
+			resolvedModelName = stripModelVariantSuffix(resolvedModelName)
+		}
+	}
+
 	if len(providers) == 0 {
 		return nil, "", &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: fmt.Errorf("unknown provider for model %s", modelName)}
 	}
@@ -808,6 +821,20 @@ func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string
 	// The thinking suffix is preserved in the model name itself, so no
 	// metadata-based configuration passing is needed.
 	return providers, resolvedModelName, nil
+}
+
+// knownModelVariantSuffixes lists suffixes that Google appends to model names
+// for specialised fine-tune variants (e.g. "-customtools" for tool-calling).
+// These variants share the same provider/executor as the base model.
+var knownModelVariantSuffixes = []string{"-customtools"}
+
+func stripModelVariantSuffix(model string) string {
+	for _, suffix := range knownModelVariantSuffixes {
+		if strings.HasSuffix(model, suffix) {
+			return strings.TrimSuffix(model, suffix)
+		}
+	}
+	return model
 }
 
 func cloneBytes(src []byte) []byte {
