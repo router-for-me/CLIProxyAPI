@@ -2665,7 +2665,12 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 	updated.NextRefreshAfter = time.Time{}
 	updated.LastError = nil
 	updated.UpdatedAt = now
-	_, _ = m.Update(ctx, updated)
+	// Use WithSkipPersist to avoid writing the refreshed token back to disk.
+	// The in-memory state is already updated; persisting here would trigger
+	// the file watcher, which calls reloadCallback -> UpdateClients, creating
+	// a write-back feedback loop that spams the log with "configuration updated"
+	// messages every ~1 minute per token.
+	_, _ = m.Update(WithSkipPersist(ctx), updated)
 }
 
 func (m *Manager) executorFor(provider string) ProviderExecutor {
