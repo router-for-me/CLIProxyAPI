@@ -234,6 +234,81 @@ func (m *Manager) RefreshSchedulerEntry(authID string) {
 	m.scheduler.upsertAuth(snapshot)
 }
 
+// ReconcileRegistryModelStates clears stale per-model runtime failures for
+// models that are currently registered for the auth in the global model registry.
+//
+// This keeps the scheduler and the global registry aligned after model
+// re-registration. Without this reconciliation, a model can reappear in
+// /v1/models after registry refresh while the scheduler still blocks it because
+// auth.ModelStates retained an older failure such as not_found or quota.
+func (m *Manager) ReconcileRegistryModelStates(ctx context.Context, authID string) {
+	if m == nil || authID == "" {
+		return
+	}
+
+	supportedModels := registry.GetGlobalRegistry().GetModelsForClient(authID)
+	if len(supportedModels) == 0 {
+		return
+	}
+
+	supported := make(map[string]struct{}, len(supportedModels))
+	for _, model := range supportedModels {
+		if model == nil {
+			continue
+		}
+		modelKey := canonicalModelKey(model.ID)
+		if modelKey == "" {
+			continue
+		}
+		supported[modelKey] = struct{}{}
+	}
+	if len(supported) == 0 {
+		return
+	}
+
+	var snapshot *Auth
+	now := time.Now()
+
+	m.mu.Lock()
+	auth, ok := m.auths[authID]
+	if ok && auth != nil && len(auth.ModelStates) > 0 {
+		changed := false
+		for modelKey, state := range auth.ModelStates {
+			if state == nil {
+				continue
+			}
+			baseModel := canonicalModelKey(modelKey)
+			if baseModel == "" {
+				baseModel = strings.TrimSpace(modelKey)
+			}
+			if _, supportedModel := supported[baseModel]; !supportedModel {
+				continue
+			}
+			if modelStateIsClean(state) {
+				continue
+			}
+			resetModelState(state, now)
+			changed = true
+		}
+		if changed {
+			updateAggregatedAvailability(auth, now)
+			if !hasModelError(auth, now) {
+				auth.LastError = nil
+				auth.StatusMessage = ""
+				auth.Status = StatusActive
+			}
+			auth.UpdatedAt = now
+			_ = m.persist(ctx, auth)
+			snapshot = auth.Clone()
+		}
+	}
+	m.mu.Unlock()
+
+	if m.scheduler != nil && snapshot != nil {
+		m.scheduler.upsertAuth(snapshot)
+	}
+}
+
 func (m *Manager) SetSelector(selector Selector) {
 	if m == nil {
 		return
@@ -1964,6 +2039,22 @@ func resetModelState(state *ModelState, now time.Time) {
 	state.LastError = nil
 	state.Quota = QuotaState{}
 	state.UpdatedAt = now
+}
+
+func modelStateIsClean(state *ModelState) bool {
+	if state == nil {
+		return true
+	}
+	if state.Status != StatusActive {
+		return false
+	}
+	if state.Unavailable || state.StatusMessage != "" || !state.NextRetryAfter.IsZero() || state.LastError != nil {
+		return false
+	}
+	if state.Quota.Exceeded || state.Quota.Reason != "" || !state.Quota.NextRecoverAt.IsZero() || state.Quota.BackoffLevel != 0 {
+		return false
+	}
+	return true
 }
 
 func updateAggregatedAvailability(auth *Auth, now time.Time) {
