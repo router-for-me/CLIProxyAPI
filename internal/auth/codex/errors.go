@@ -6,6 +6,23 @@ import (
 	"net/http"
 )
 
+// HTTPStatusError represents a non-2xx HTTP response.
+// It retains the status code in a structured form while keeping the historical
+// error message format used across the codex auth flow.
+type HTTPStatusError struct {
+	Op         string
+	StatusCode int
+	Body       string
+}
+
+func (e *HTTPStatusError) Error() string {
+	return fmt.Sprintf("%s failed with status %d: %s", e.Op, e.StatusCode, e.Body)
+}
+
+func NewHTTPStatusError(op string, statusCode int, body []byte) *HTTPStatusError {
+	return &HTTPStatusError{Op: op, StatusCode: statusCode, Body: string(body)}
+}
+
 // OAuthError represents an OAuth-specific error.
 type OAuthError struct {
 	// Code is the OAuth error code.
