@@ -155,7 +155,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		bodyForUpstream = applyClaudeToolPrefix(body, claudeToolPrefix)
 	}
 
-	url := fmt.Sprintf("%s/v1/messages?beta=true", baseURL)
+	url := fmt.Sprintf("%s%s?beta=true", normalizeBaseURL(baseURL), claudeMessagesPath(auth))
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyForUpstream))
 	if err != nil {
 		return resp, err
@@ -318,7 +318,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		bodyForUpstream = applyClaudeToolPrefix(body, claudeToolPrefix)
 	}
 
-	url := fmt.Sprintf("%s/v1/messages?beta=true", baseURL)
+	url := fmt.Sprintf("%s%s?beta=true", normalizeBaseURL(baseURL), claudeMessagesPath(auth))
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyForUpstream))
 	if err != nil {
 		return nil, err
@@ -485,7 +485,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 		body = applyClaudeToolPrefix(body, claudeToolPrefix)
 	}
 
-	url := fmt.Sprintf("%s/v1/messages/count_tokens?beta=true", baseURL)
+	url := fmt.Sprintf("%s%s/count_tokens?beta=true", normalizeBaseURL(baseURL), claudeMessagesPath(auth))
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
@@ -926,6 +926,34 @@ func claudeCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
 		}
 	}
 	return
+}
+
+// claudeMessagesPath returns the configured messages API path for the given auth,
+// falling back to the default "/v1/messages". This allows users to configure relay
+// services (e.g., new-api) that expose Claude-compatible APIs at non-standard paths.
+// The returned path always starts with "/" and has no trailing "/".
+func claudeMessagesPath(a *cliproxyauth.Auth) string {
+	if a != nil && a.Attributes != nil {
+		if mp := strings.TrimSpace(a.Attributes["messages_path"]); mp != "" {
+			if !strings.HasPrefix(mp, "/") {
+				mp = "/" + mp
+			}
+			return strings.TrimRight(mp, "/")
+		}
+	}
+	return "/v1/messages"
+}
+
+// normalizeBaseURL strips a trailing "/v1" segment from the base URL to prevent
+// double-path issues when users configure relay services that already include "/v1"
+// in their base URL (e.g., "https://relay.example.com/v1"). The combined URL with
+// the default messages-path "/v1/messages" would otherwise produce ".../v1/v1/messages".
+func normalizeBaseURL(baseURL string) string {
+	u := strings.TrimRight(baseURL, "/")
+	if strings.HasSuffix(u, "/v1") {
+		return u[:len(u)-3]
+	}
+	return u
 }
 
 func checkSystemInstructions(payload []byte) []byte {

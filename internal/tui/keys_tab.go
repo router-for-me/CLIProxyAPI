@@ -385,12 +385,16 @@ func renderProviderKeys(sb *strings.Builder, title string, keys []map[string]any
 		apiKey := getString(key, "api-key")
 		prefix := getString(key, "prefix")
 		baseURL := getString(key, "base-url")
+		messagesPath := getString(key, "messages-path")
 		info := maskKey(apiKey)
 		if prefix != "" {
 			info += " (prefix: " + prefix + ")"
 		}
 		if baseURL != "" {
 			info += " → " + baseURL
+		}
+		if messagesPath != "" {
+			info += " [path: " + messagesPath + "]"
 		}
 		sb.WriteString(fmt.Sprintf("  %d. %s\n", i+1, info))
 	}
