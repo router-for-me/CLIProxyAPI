@@ -388,7 +388,7 @@ func extractClaudeConfig(body []byte) ThinkingConfig {
 		case "auto":
 			return ThinkingConfig{Mode: ModeAuto, Budget: -1}
 		case "max":
-			return ThinkingConfig{Mode: ModeLevel, Level: LevelXHigh}
+			return ThinkingConfig{Mode: ModeLevel, Level: LevelMax}
 		case "low":
 			return ThinkingConfig{Mode: ModeLevel, Level: LevelLow}
 		case "medium":
