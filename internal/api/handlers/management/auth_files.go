@@ -2445,9 +2445,12 @@ func (h *Handler) RequestGitHubToken(c *gin.Context) {
 			FileName: fileName,
 			Storage:  tokenStorage,
 			Metadata: map[string]any{
-				"email":    userInfo.Email,
-				"username": username,
-				"name":     userInfo.Name,
+				"email":        userInfo.Email,
+				"username":     username,
+				"name":         userInfo.Name,
+				"access_token": tokenData.AccessToken,
+				"token_type":   tokenData.TokenType,
+				"scope":        tokenData.Scope,
 			},
 		}
 
