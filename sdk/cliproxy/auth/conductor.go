@@ -832,7 +832,7 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 			auth.Index = existing.Index
 			auth.indexAssigned = existing.indexAssigned
 		}
-		if len(auth.ModelStates) == 0 && len(existing.ModelStates) > 0 {
+		if shouldPreserveModelStatesOnUpdate(existing) && len(auth.ModelStates) == 0 && len(existing.ModelStates) > 0 {
 			auth.ModelStates = existing.ModelStates
 		}
 	}
@@ -847,6 +847,16 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	_ = m.persist(ctx, auth)
 	m.hook.OnAuthUpdated(ctx, auth.Clone())
 	return auth.Clone(), nil
+}
+
+func shouldPreserveModelStatesOnUpdate(existing *Auth) bool {
+	if existing == nil {
+		return false
+	}
+	if existing.Disabled || existing.Status == StatusDisabled {
+		return false
+	}
+	return true
 }
 
 // Load resets manager state from the backing store.
