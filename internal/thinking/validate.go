@@ -60,6 +60,13 @@ func ValidateConfig(config ThinkingConfig, modelInfo *registry.ModelInfo, fromFo
 	toHasLevelSupport := toCapability == CapabilityLevelOnly || toCapability == CapabilityHybrid
 	allowClampUnsupported := toHasLevelSupport && !isSameProviderFamily(fromFormat, toFormat)
 
+	// Claude-native effort values must retain Claude semantics even when routed to another provider.
+	// "none"/"auto" are normalized to ModeNone/ModeAuto earlier, so this guard only sees discrete effort levels.
+	// Invalid effort strings like "minimal" or "xhigh" should be rejected rather than normalized.
+	if !fromSuffix && fromFormat == "claude" && toFormat == "antigravity" && config.Mode == ModeLevel && !isValidClaudeEffortLevel(config.Level) {
+		return nil, NewThinkingError(ErrLevelNotSupported, fmt.Sprintf("level %q not supported, valid levels: low, medium, high, max", strings.ToLower(string(config.Level))))
+	}
+
 	// strictBudget determines whether to enforce strict budget range validation.
 	// This applies when: (1) config comes from request body (not suffix), (2) source format is known,
 	// and (3) source and target are in the same provider family. Cross-family or suffix-based configs
@@ -138,6 +145,12 @@ func ValidateConfig(config ThinkingConfig, modelInfo *registry.ModelInfo, fromFo
 		}
 	}
 
+	// Claude adaptive models use ModeAuto to request upstream-default adaptive behavior,
+	// so preserve it instead of rewriting to a fixed mid-range budget.
+	if config.Mode == ModeAuto && shouldPreserveAutoMode(toFormat, support) {
+		return &config, nil
+	}
+
 	// Convert ModeAuto to mid-range if dynamic not allowed
 	if config.Mode == ModeAuto && !support.DynamicAllowed {
 		config = convertAutoToMidRange(config, support, toFormat, model)
@@ -162,6 +175,22 @@ func ValidateConfig(config ThinkingConfig, modelInfo *registry.ModelInfo, fromFo
 	}
 
 	return &config, nil
+}
+
+func isValidClaudeEffortLevel(level ThinkingLevel) bool {
+	switch strings.ToLower(strings.TrimSpace(string(level))) {
+	case "low", "medium", "high", "max":
+		return true
+	default:
+		return false
+	}
+}
+
+func shouldPreserveAutoMode(provider string, support *registry.ThinkingSupport) bool {
+	if support == nil {
+		return false
+	}
+	return provider == "claude" && len(support.Levels) > 0
 }
 
 // convertAutoToMidRange converts ModeAuto to a mid-range value when dynamic is not allowed.

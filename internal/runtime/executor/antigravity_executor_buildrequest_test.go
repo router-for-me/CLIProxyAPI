@@ -6,7 +6,12 @@ import (
 	"io"
 	"testing"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
+	antigravityclaude "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/antigravity/claude"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	"github.com/tidwall/gjson"
 )
 
@@ -96,6 +101,53 @@ func TestApplyAntigravityClaudeCompatTransforms_ClampsAndRemovesOutputConfig(t *
 	}
 }
 
+func TestApplyAntigravityClaudeCompatTransforms_RebalancesThinkingBudgetAfterTokenClamp(t *testing.T) {
+	input := []byte(`{
+		"output_config":{"effort":"max"},
+		"request":{
+			"generationConfig":{
+				"maxOutputTokens":128000,
+				"thinkingConfig":{"thinkingBudget":128000,"includeThoughts":true}
+			}
+		}
+	}`)
+
+	out := applyAntigravityClaudeCompatTransforms("claude-opus-4-6-thinking", input)
+
+	if got := gjson.GetBytes(out, "request.generationConfig.maxOutputTokens").Int(); got != 64000 {
+		t.Fatalf("expected maxOutputTokens=64000, got %d", got)
+	}
+	if got := gjson.GetBytes(out, "request.generationConfig.thinkingConfig.thinkingBudget").Int(); got != 63999 {
+		t.Fatalf("expected thinkingBudget=63999, got %d, body=%s", got, string(out))
+	}
+	if !gjson.GetBytes(out, "request.generationConfig.thinkingConfig.includeThoughts").Bool() {
+		t.Fatalf("includeThoughts should stay true, body=%s", string(out))
+	}
+	if gjson.GetBytes(out, "output_config").Exists() {
+		t.Fatalf("output_config should be stripped, body=%s", string(out))
+	}
+}
+
+func TestApplyAntigravityClaudeCompatTransforms_RemovesThinkingConfigWhenRebalancedBudgetFallsBelowMinimum(t *testing.T) {
+	input := []byte(`{
+		"request":{
+			"generationConfig":{
+				"maxOutputTokens":1024,
+				"thinkingConfig":{"thinkingBudget":2048,"includeThoughts":true}
+			}
+		}
+	}`)
+
+	out := applyAntigravityClaudeCompatTransforms("claude-opus-4-6-thinking", input)
+
+	if got := gjson.GetBytes(out, "request.generationConfig.maxOutputTokens").Int(); got != 1024 {
+		t.Fatalf("expected maxOutputTokens=1024, got %d", got)
+	}
+	if gjson.GetBytes(out, "request.generationConfig.thinkingConfig").Exists() {
+		t.Fatalf("thinkingConfig should be removed when adjusted budget falls below minimum, body=%s", string(out))
+	}
+}
+
 func TestClampAntigravityClaudeMaxOutputTokens_PreservesWithinLimit(t *testing.T) {
 	input := []byte(`{"request":{"generationConfig":{"maxOutputTokens":64000}}}`)
 	out := clampAntigravityClaudeMaxOutputTokens("claude-opus-4-6-thinking", input)
@@ -125,6 +177,286 @@ func TestClampAntigravityClaudeMaxOutputTokens_ClampsLargeInt64Value(t *testing.
 	out := clampAntigravityClaudeMaxOutputTokens("claude-opus-4-6-thinking", input)
 	if got := gjson.GetBytes(out, "request.generationConfig.maxOutputTokens").Int(); got != 64000 {
 		t.Fatalf("expected maxOutputTokens=64000, got %d", got)
+	}
+}
+
+func TestPreserveClaudeEffortForAntigravity_AddsThinkingLevel(t *testing.T) {
+	original := []byte(`{"output_config":{"effort":"max"}}`)
+	translated := []byte(`{"request":{}}`)
+
+	out := preserveClaudeEffortForAntigravity(sdktranslator.FromString("claude"), original, translated)
+
+	if got := gjson.GetBytes(out, "request.generationConfig.thinkingConfig.thinkingLevel").String(); got != "max" {
+		t.Fatalf("thinkingLevel = %q, want %q, body=%s", got, "max", string(out))
+	}
+	if !gjson.GetBytes(out, "request.generationConfig.thinkingConfig.includeThoughts").Bool() {
+		t.Fatalf("includeThoughts should be true, body=%s", string(out))
+	}
+}
+
+func TestPreserveClaudeEffortForAntigravity_AddsThinkingLevelAlongsideExistingBudget(t *testing.T) {
+	original := []byte(`{"output_config":{"effort":"max"}}`)
+	translated := []byte(`{"request":{"generationConfig":{"thinkingConfig":{"thinkingBudget":2048,"includeThoughts":false}}}}`)
+
+	out := preserveClaudeEffortForAntigravity(sdktranslator.FromString("claude"), original, translated)
+
+	if got := gjson.GetBytes(out, "request.generationConfig.thinkingConfig.thinkingBudget").Int(); got != 2048 {
+		t.Fatalf("thinkingBudget = %d, want 2048, body=%s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "request.generationConfig.thinkingConfig.thinkingLevel").String(); got != "max" {
+		t.Fatalf("thinkingLevel = %q, want %q, body=%s", got, "max", string(out))
+	}
+}
+
+func TestPreserveClaudeEffortForAntigravity_NoopForNonClaudeSource(t *testing.T) {
+	original := []byte(`{"output_config":{"effort":"max"}}`)
+	translated := []byte(`{"request":{}}`)
+
+	out := preserveClaudeEffortForAntigravity(sdktranslator.FromString("openai"), original, translated)
+
+	if got := string(out); got != string(translated) {
+		t.Fatalf("unexpected mutation for non-claude source: got=%s want=%s", got, string(translated))
+	}
+}
+
+func TestApplyAntigravityClaudeCompatTransforms_StripsBridgedOutputConfig(t *testing.T) {
+	original := []byte(`{"output_config":{"effort":"max"}}`)
+	translated := []byte(`{"request":{}}`)
+
+	bridged := preserveClaudeEffortForAntigravity(sdktranslator.FromString("claude"), original, translated)
+	withCompat := append([]byte(`{"output_config":{"effort":"max"},`), bridged[1:]...)
+	out := applyAntigravityClaudeCompatTransforms("claude-opus-4-6-thinking", withCompat)
+
+	if gjson.GetBytes(out, "output_config").Exists() {
+		t.Fatalf("output_config should be stripped, body=%s", string(out))
+	}
+	if got := gjson.GetBytes(out, "request.generationConfig.thinkingConfig.thinkingLevel").String(); got != "max" {
+		t.Fatalf("thinkingLevel = %q, want %q, body=%s", got, "max", string(out))
+	}
+}
+
+func TestPrepareAntigravityRequestPayloads_PreservesClaudeEffortAgainstDefaults(t *testing.T) {
+	cfg := &config.Config{
+		Payload: config.PayloadConfig{
+			Default: []config.PayloadRule{
+				{
+					Models: []config.PayloadModelRule{{Name: "claude-*", Protocol: "antigravity"}},
+					Params: map[string]any{
+						"generationConfig.thinkingConfig.includeThoughts": false,
+						"generationConfig.thinkingConfig.thinkingBudget":  1024,
+					},
+				},
+			},
+		},
+	}
+	executor := &AntigravityExecutor{cfg: cfg}
+	req := cliproxyexecutor.Request{
+		Model:   "claude-opus-4-6-thinking",
+		Payload: []byte(`{"output_config":{"effort":"max"}}`),
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FromString("claude"),
+		OriginalRequest: []byte(`{"output_config":{"effort":"max"}}`),
+	}
+
+	for _, stream := range []bool{false, true} {
+		t.Run(map[bool]string{false: "non-stream", true: "stream"}[stream], func(t *testing.T) {
+			translated, originalTranslated, err := executor.prepareAntigravityRequestPayloads(req, opts, stream)
+			if err != nil {
+				t.Fatalf("prepareAntigravityRequestPayloads error = %v", err)
+			}
+
+			got := applyPayloadConfigWithRoot(cfg, "claude-opus-4-6-thinking", "antigravity", "request", translated, originalTranslated, "")
+
+			if gotBudget := gjson.GetBytes(got, "request.generationConfig.thinkingConfig.thinkingBudget").Int(); gotBudget != 63999 {
+				t.Fatalf("thinkingBudget = %d, want %d, body=%s", gotBudget, 63999, string(got))
+			}
+			if gotLevel := gjson.GetBytes(got, "request.generationConfig.thinkingConfig.thinkingLevel"); gotLevel.Exists() {
+				t.Fatalf("thinkingLevel should be converted before defaults, body=%s", string(got))
+			}
+			if !gjson.GetBytes(got, "request.generationConfig.thinkingConfig.includeThoughts").Bool() {
+				t.Fatalf("includeThoughts should remain true from bridged effort, body=%s", string(got))
+			}
+			if gotBudget := gjson.GetBytes(originalTranslated, "request.generationConfig.thinkingConfig.thinkingBudget").Int(); gotBudget != 63999 {
+				t.Fatalf("originalTranslated thinkingBudget = %d, want %d, body=%s", gotBudget, 63999, string(originalTranslated))
+			}
+		})
+	}
+}
+
+func TestApplyAntigravityClaudeCompatTransforms_CherryAdaptiveMaxPayload(t *testing.T) {
+	original := []byte(`{
+		"model":"claude-opus-4-6-thinking",
+		"max_tokens":128000,
+		"thinking":{"type":"adaptive"},
+		"output_config":{"effort":"max"},
+		"messages":[{"role":"user","content":[{"type":"text","text":"Hello!"}]}],
+		"stream":true
+	}`)
+
+	baseModel := thinking.ParseSuffix("claude-opus-4-6-thinking").ModelName
+	translated := antigravityclaude.ConvertClaudeRequestToAntigravity(baseModel, original, true)
+	translated = preserveClaudeEffortForAntigravity(sdktranslator.FromString("claude"), original, translated)
+
+	out, err := thinking.ApplyThinking(translated, "claude-opus-4-6-thinking", "claude", "antigravity", "antigravity")
+	if err != nil {
+		t.Fatalf("ApplyThinking error = %v", err)
+	}
+
+	out = applyAntigravityClaudeCompatTransforms(baseModel, out)
+
+	if got := gjson.GetBytes(out, "request.generationConfig.maxOutputTokens").Int(); got != 64000 {
+		t.Fatalf("maxOutputTokens = %d, want 64000, body=%s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "request.generationConfig.thinkingConfig.thinkingBudget").Int(); got != 63999 {
+		t.Fatalf("thinkingBudget = %d, want 63999, body=%s", got, string(out))
+	}
+	if !gjson.GetBytes(out, "request.generationConfig.thinkingConfig.includeThoughts").Bool() {
+		t.Fatalf("includeThoughts should be true, body=%s", string(out))
+	}
+	if gjson.GetBytes(out, "output_config").Exists() {
+		t.Fatalf("output_config should be removed, body=%s", string(out))
+	}
+}
+
+func TestApplyAntigravityClaudeCompatTransforms_ClaudeEffortNoneDisablesThinking(t *testing.T) {
+	original := []byte(`{
+		"model":"claude-opus-4-6-thinking",
+		"max_tokens":128000,
+		"thinking":{"type":"adaptive"},
+		"output_config":{"effort":"none"},
+		"messages":[{"role":"user","content":[{"type":"text","text":"Hello!"}]}],
+		"stream":true
+	}`)
+
+	baseModel := thinking.ParseSuffix("claude-opus-4-6-thinking").ModelName
+	translated := antigravityclaude.ConvertClaudeRequestToAntigravity(baseModel, original, true)
+	translated = preserveClaudeEffortForAntigravity(sdktranslator.FromString("claude"), original, translated)
+
+	out, err := thinking.ApplyThinking(translated, "claude-opus-4-6-thinking", "claude", "antigravity", "antigravity")
+	if err != nil {
+		t.Fatalf("ApplyThinking error = %v", err)
+	}
+
+	out = applyAntigravityClaudeCompatTransforms(baseModel, out)
+
+	if got := gjson.GetBytes(out, "request.generationConfig.maxOutputTokens").Int(); got != 64000 {
+		t.Fatalf("maxOutputTokens = %d, want 64000, body=%s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "request.generationConfig.thinkingConfig.thinkingBudget").Int(); got != 0 {
+		t.Fatalf("thinkingBudget = %d, want 0, body=%s", got, string(out))
+	}
+	if gjson.GetBytes(out, "request.generationConfig.thinkingConfig.thinkingLevel").Exists() {
+		t.Fatalf("thinkingLevel should be cleared for disabled thinking, body=%s", string(out))
+	}
+	if gjson.GetBytes(out, "request.generationConfig.thinkingConfig.includeThoughts").Bool() {
+		t.Fatalf("includeThoughts should be false for disabled thinking, body=%s", string(out))
+	}
+	if gjson.GetBytes(out, "output_config").Exists() {
+		t.Fatalf("output_config should be removed, body=%s", string(out))
+	}
+	if gjson.GetBytes(out, "request.output_config").Exists() {
+		t.Fatalf("request.output_config should be removed, body=%s", string(out))
+	}
+}
+
+func TestApplyAntigravityClaudeCompatTransforms_ClaudeEffortAutoPreservesAdaptiveThinking(t *testing.T) {
+	original := []byte(`{
+		"model":"claude-opus-4-6-thinking",
+		"max_tokens":128000,
+		"thinking":{"type":"adaptive"},
+		"output_config":{"effort":"auto"},
+		"messages":[{"role":"user","content":[{"type":"text","text":"Hello!"}]}],
+		"stream":true
+	}`)
+
+	baseModel := thinking.ParseSuffix("claude-opus-4-6-thinking").ModelName
+	translated := antigravityclaude.ConvertClaudeRequestToAntigravity(baseModel, original, true)
+	translated = preserveClaudeEffortForAntigravity(sdktranslator.FromString("claude"), original, translated)
+
+	out, err := thinking.ApplyThinking(translated, "claude-opus-4-6-thinking", "claude", "antigravity", "antigravity")
+	if err != nil {
+		t.Fatalf("ApplyThinking error = %v", err)
+	}
+
+	out = applyAntigravityClaudeCompatTransforms(baseModel, out)
+
+	if got := gjson.GetBytes(out, "request.generationConfig.maxOutputTokens").Int(); got != 64000 {
+		t.Fatalf("maxOutputTokens = %d, want 64000, body=%s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "request.generationConfig.thinkingConfig.thinkingBudget").Int(); got != -1 {
+		t.Fatalf("thinkingBudget = %d, want -1, body=%s", got, string(out))
+	}
+	if gjson.GetBytes(out, "request.generationConfig.thinkingConfig.thinkingLevel").Exists() {
+		t.Fatalf("thinkingLevel should be cleared for adaptive auto thinking, body=%s", string(out))
+	}
+	if !gjson.GetBytes(out, "request.generationConfig.thinkingConfig.includeThoughts").Bool() {
+		t.Fatalf("includeThoughts should remain true for adaptive auto thinking, body=%s", string(out))
+	}
+	if gjson.GetBytes(out, "output_config").Exists() {
+		t.Fatalf("output_config should be removed, body=%s", string(out))
+	}
+	if gjson.GetBytes(out, "request.output_config").Exists() {
+		t.Fatalf("request.output_config should be removed, body=%s", string(out))
+	}
+}
+
+func TestApplyAntigravityClaudeCompatTransforms_ManualBudgetPayload(t *testing.T) {
+	original := []byte(`{
+		"model":"claude-opus-4-6-thinking",
+		"max_tokens":128000,
+		"thinking":{"type":"enabled","budget_tokens":64000},
+		"messages":[{"role":"user","content":[{"type":"text","text":"Hello!"}]}],
+		"stream":true
+	}`)
+
+	baseModel := thinking.ParseSuffix("claude-opus-4-6-thinking").ModelName
+	translated := antigravityclaude.ConvertClaudeRequestToAntigravity(baseModel, original, true)
+
+	out, err := thinking.ApplyThinking(translated, "claude-opus-4-6-thinking", "claude", "antigravity", "antigravity")
+	if err != nil {
+		t.Fatalf("ApplyThinking error = %v", err)
+	}
+
+	out = applyAntigravityClaudeCompatTransforms(baseModel, out)
+
+	if got := gjson.GetBytes(out, "request.generationConfig.maxOutputTokens").Int(); got != 64000 {
+		t.Fatalf("maxOutputTokens = %d, want 64000, body=%s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "request.generationConfig.thinkingConfig.thinkingBudget").Int(); got != 63999 {
+		t.Fatalf("thinkingBudget = %d, want 63999, body=%s", got, string(out))
+	}
+	if !gjson.GetBytes(out, "request.generationConfig.thinkingConfig.includeThoughts").Bool() {
+		t.Fatalf("includeThoughts should be true, body=%s", string(out))
+	}
+}
+
+func TestApplyAntigravityClaudeCompatTransforms_ClaudeEffortOverridesEnabledBudget(t *testing.T) {
+	original := []byte(`{
+		"model":"claude-opus-4-6-thinking",
+		"max_tokens":128000,
+		"thinking":{"type":"enabled","budget_tokens":64000},
+		"output_config":{"effort":"low"},
+		"messages":[{"role":"user","content":[{"type":"text","text":"Hello!"}]}],
+		"stream":true
+	}`)
+
+	baseModel := thinking.ParseSuffix("claude-opus-4-6-thinking").ModelName
+	translated := antigravityclaude.ConvertClaudeRequestToAntigravity(baseModel, original, true)
+	translated = preserveClaudeEffortForAntigravity(sdktranslator.FromString("claude"), original, translated)
+
+	out, err := thinking.ApplyThinking(translated, "claude-opus-4-6-thinking", "claude", "antigravity", "antigravity")
+	if err != nil {
+		t.Fatalf("ApplyThinking error = %v", err)
+	}
+
+	out = applyAntigravityClaudeCompatTransforms(baseModel, out)
+
+	if got := gjson.GetBytes(out, "request.generationConfig.thinkingConfig.thinkingBudget").Int(); got != 1024 {
+		t.Fatalf("thinkingBudget = %d, want 1024, body=%s", got, string(out))
+	}
+	if !gjson.GetBytes(out, "request.generationConfig.thinkingConfig.includeThoughts").Bool() {
+		t.Fatalf("includeThoughts should remain true, body=%s", string(out))
 	}
 }
 
