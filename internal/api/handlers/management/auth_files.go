@@ -2438,20 +2438,20 @@ func (h *Handler) RequestGitHubToken(c *gin.Context) {
 		if label == "" {
 			label = username
 		}
+		metadata, errMeta := copilotTokenMetadata(tokenStorage)
+		if errMeta != nil {
+			log.Errorf("Failed to build token metadata: %v", errMeta)
+			SetOAuthSessionError(state, "Failed to build token metadata")
+			return
+		}
+
 		record := &coreauth.Auth{
 			ID:       fileName,
 			Provider: "github-copilot",
 			Label:    label,
 			FileName: fileName,
 			Storage:  tokenStorage,
-			Metadata: map[string]any{
-				"email":        userInfo.Email,
-				"username":     username,
-				"name":         userInfo.Name,
-				"access_token": tokenData.AccessToken,
-				"token_type":   tokenData.TokenType,
-				"scope":        tokenData.Scope,
-			},
+			Metadata: metadata,
 		}
 
 		savedPath, errSave := h.saveTokenRecord(ctx, record)
@@ -2474,6 +2474,21 @@ func (h *Handler) RequestGitHubToken(c *gin.Context) {
 		"user_code":        userCode,
 		"verification_uri": authURL,
 	})
+}
+
+func copilotTokenMetadata(storage *copilot.CopilotTokenStorage) (map[string]any, error) {
+	if storage == nil {
+		return nil, fmt.Errorf("token storage is nil")
+	}
+	payload, errMarshal := json.Marshal(storage)
+	if errMarshal != nil {
+		return nil, fmt.Errorf("marshal token storage: %w", errMarshal)
+	}
+	metadata := make(map[string]any)
+	if errUnmarshal := json.Unmarshal(payload, &metadata); errUnmarshal != nil {
+		return nil, fmt.Errorf("unmarshal token storage: %w", errUnmarshal)
+	}
+	return metadata, nil
 }
 
 func (h *Handler) RequestIFlowCookieToken(c *gin.Context) {
