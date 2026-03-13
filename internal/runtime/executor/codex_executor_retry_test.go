@@ -1,8 +1,10 @@
 package executor
 
 import (
+	"encoding/json"
 	"net/http"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -56,6 +58,145 @@ func TestParseCodexRetryAfter(t *testing.T) {
 		body := []byte(`{"error":{"type":"server_error","resets_in_seconds":30}}`)
 		if got := parseCodexRetryAfter(http.StatusTooManyRequests, body, now); got != nil {
 			t.Fatalf("expected nil for non-usage_limit_reached, got %v", *got)
+		}
+	})
+}
+
+func TestParseCodexSSEError(t *testing.T) {
+	t.Run("context_length_exceeded maps to invalid_request_error bad_request", func(t *testing.T) {
+		line := []byte(`{"type":"error","error":{"type":"invalid_request_error","code":"context_length_exceeded","message":"Your input exceeds the context window of this model. Please adjust your input and try again.","param":"input"},"sequence_number":2}`)
+		got, ok := parseCodexSSEError(line)
+		if !ok {
+			t.Fatalf("expected parser to handle codex SSE error")
+		}
+		if got.code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d", got.code, http.StatusBadRequest)
+		}
+		var payload map[string]any
+		if err := json.Unmarshal([]byte(got.msg), &payload); err != nil {
+			t.Fatalf("unmarshal wrapped message: %v", err)
+		}
+		errObj, ok := payload["error"].(map[string]any)
+		if !ok {
+			t.Fatalf("payload['error'] is not of type map[string]any")
+		}
+		if errObj["type"] != "invalid_request_error" {
+			t.Fatalf("error.type = %v, want invalid_request_error", errObj["type"])
+		}
+		if errObj["code"] != "context_length_exceeded" {
+			t.Fatalf("error.code = %v, want context_length_exceeded", errObj["code"])
+		}
+		msg, _ := errObj["message"].(string)
+		if !strings.Contains(strings.ToLower(msg), "context window") {
+			t.Fatalf("error.message = %q, want context window wording", msg)
+		}
+	})
+
+	t.Run("rate_limit keeps 429", func(t *testing.T) {
+		line := []byte(`{"type":"error","error":{"type":"rate_limit_error","code":"rate_limit_exceeded","message":"rate limited"}}`)
+		got, ok := parseCodexSSEError(line)
+		if !ok {
+			t.Fatalf("expected parser to handle codex SSE rate limit error")
+		}
+		if got.code != http.StatusTooManyRequests {
+			t.Fatalf("status = %d, want %d", got.code, http.StatusTooManyRequests)
+		}
+	})
+
+	t.Run("response.failed with nested response.error is parsed", func(t *testing.T) {
+		line := []byte(`{"type":"response.failed","response":{"error":{"code":"context_length_exceeded","message":"Your input exceeds the context window of this model. Please adjust your input and try again."}}}`)
+		got, ok := parseCodexSSEError(line)
+		if !ok {
+			t.Fatalf("expected parser to handle response.failed event")
+		}
+		if got.code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d", got.code, http.StatusBadRequest)
+		}
+		var payload map[string]any
+		if err := json.Unmarshal([]byte(got.msg), &payload); err != nil {
+			t.Fatalf("unmarshal wrapped message: %v", err)
+		}
+		errObj, ok := payload["error"].(map[string]any)
+		if !ok {
+			t.Fatalf("payload['error'] is not of type map[string]any")
+		}
+		if errObj["code"] != "context_length_exceeded" {
+			t.Fatalf("error.code = %v, want context_length_exceeded", errObj["code"])
+		}
+	})
+
+	t.Run("non-error event ignored", func(t *testing.T) {
+		line := []byte(`{"type":"response.completed"}`)
+		if _, ok := parseCodexSSEError(line); ok {
+			t.Fatalf("expected non-error event to be ignored")
+		}
+	})
+
+	t.Run("usage_limit_reached with resets_at preserves retryAfter", func(t *testing.T) {
+		resetAt := time.Now().Add(5 * time.Minute).Unix()
+		line := []byte(`{"type":"error","error":{"type":"usage_limit_reached","code":"usage_limit_reached","message":"usage limit reached","resets_at":` + itoa(resetAt) + `,"resets_in_seconds":60}}`)
+		got, ok := parseCodexSSEError(line)
+		if !ok {
+			t.Fatalf("expected parser to handle usage_limit_reached SSE error")
+		}
+		if got.code != http.StatusTooManyRequests {
+			t.Fatalf("status = %d, want %d", got.code, http.StatusTooManyRequests)
+		}
+		ra := got.RetryAfter()
+		if ra == nil {
+			t.Fatalf("expected retryAfter to be set, got nil")
+		}
+		if *ra < 4*time.Minute || *ra > 6*time.Minute {
+			t.Fatalf("retryAfter = %v, want ~5m", *ra)
+		}
+	})
+
+	t.Run("usage_limit_reached with resets_in_seconds only", func(t *testing.T) {
+		line := []byte(`{"type":"error","error":{"type":"usage_limit_reached","code":"usage_limit_reached","message":"usage limit reached","resets_in_seconds":120}}`)
+		got, ok := parseCodexSSEError(line)
+		if !ok {
+			t.Fatalf("expected parser to handle usage_limit_reached SSE error")
+		}
+		ra := got.RetryAfter()
+		if ra == nil {
+			t.Fatalf("expected retryAfter to be set, got nil")
+		}
+		if *ra != 120*time.Second {
+			t.Fatalf("retryAfter = %v, want %v", *ra, 120*time.Second)
+		}
+	})
+
+	t.Run("response.failed usage_limit_reached preserves retryAfter", func(t *testing.T) {
+		line := []byte(`{"type":"response.failed","response":{"error":{"type":"usage_limit_reached","code":"usage_limit_reached","message":"usage limit reached","resets_in_seconds":90}}}`)
+		got, ok := parseCodexSSEError(line)
+		if !ok {
+			t.Fatalf("expected parser to handle response.failed usage_limit_reached")
+		}
+		if got.code != http.StatusTooManyRequests {
+			t.Fatalf("status = %d, want %d", got.code, http.StatusTooManyRequests)
+		}
+		ra := got.RetryAfter()
+		if ra == nil {
+			t.Fatalf("expected retryAfter to be set, got nil")
+		}
+		if *ra != 90*time.Second {
+			t.Fatalf("retryAfter = %v, want %v", *ra, 90*time.Second)
+		}
+	})
+
+	t.Run("usage_limit_reached with past resets_at falls back to resets_in_seconds", func(t *testing.T) {
+		resetAt := time.Now().Add(-1 * time.Minute).Unix()
+		line := []byte(`{"type":"error","error":{"type":"usage_limit_reached","code":"usage_limit_reached","message":"usage limit reached","resets_at":` + itoa(resetAt) + `,"resets_in_seconds":45}}`)
+		got, ok := parseCodexSSEError(line)
+		if !ok {
+			t.Fatalf("expected parser to handle usage_limit_reached SSE error")
+		}
+		ra := got.RetryAfter()
+		if ra == nil {
+			t.Fatalf("expected retryAfter to be set, got nil")
+		}
+		if *ra != 45*time.Second {
+			t.Fatalf("retryAfter = %v, want %v", *ra, 45*time.Second)
 		}
 	})
 }

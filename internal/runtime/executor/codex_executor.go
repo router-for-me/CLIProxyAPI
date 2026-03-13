@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -173,18 +174,23 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		}
 
 		line = bytes.TrimSpace(line[5:])
-		if gjson.GetBytes(line, "type").String() != "response.completed" {
-			continue
-		}
+		eventType := gjson.GetBytes(line, "type").String()
+		switch eventType {
+		case "response.completed":
+			if detail, ok := parseCodexUsage(line); ok {
+				reporter.publish(ctx, detail)
+			}
 
-		if detail, ok := parseCodexUsage(line); ok {
-			reporter.publish(ctx, detail)
+			var param any
+			out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, originalPayload, body, line, &param)
+			resp = cliproxyexecutor.Response{Payload: []byte(out), Headers: httpResp.Header.Clone()}
+			return resp, nil
+		case "error", "response.failed":
+			if serr, ok := parseCodexSSEError(line); ok {
+				err = serr
+				return resp, err
+			}
 		}
-
-		var param any
-		out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, originalPayload, body, line, &param)
-		resp = cliproxyexecutor.Response{Payload: []byte(out), Headers: httpResp.Header.Clone()}
-		return resp, nil
 	}
 	err = statusErr{code: 408, msg: "stream error: stream disconnected before completion: stream closed before response.completed"}
 	return resp, err
@@ -378,6 +384,11 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 
 			if bytes.HasPrefix(line, dataTag) {
 				data := bytes.TrimSpace(line[5:])
+				if serr, ok := parseCodexSSEError(data); ok {
+					reporter.publishFailure(ctx)
+					out <- cliproxyexecutor.StreamChunk{Err: serr}
+					return
+				}
 				if gjson.GetBytes(data, "type").String() == "response.completed" {
 					if detail, ok := parseCodexUsage(data); ok {
 						reporter.publish(ctx, detail)
@@ -703,6 +714,78 @@ func parseCodexRetryAfter(statusCode int, errorBody []byte, now time.Time) *time
 	if resetsInSeconds := gjson.GetBytes(errorBody, "error.resets_in_seconds").Int(); resetsInSeconds > 0 {
 		retryAfter := time.Duration(resetsInSeconds) * time.Second
 		return &retryAfter
+	}
+	return nil
+}
+
+func parseCodexSSEError(line []byte) (statusErr, bool) {
+	if len(bytes.TrimSpace(line)) == 0 {
+		return statusErr{}, false
+	}
+
+	typePayload := strings.TrimSpace(gjson.GetBytes(line, "type").String())
+	errorPayload := gjson.GetBytes(line, "error")
+	if typePayload == "response.failed" && !errorPayload.Exists() {
+		errorPayload = gjson.GetBytes(line, "response.error")
+	}
+	if typePayload != "error" && typePayload != "response.failed" {
+		return statusErr{}, false
+	}
+	if !errorPayload.Exists() {
+		return statusErr{}, false
+	}
+
+	code := strings.TrimSpace(errorPayload.Get("code").String())
+	message := strings.TrimSpace(errorPayload.Get("message").String())
+	if message == "" {
+		if code != "" {
+			message = code
+		} else {
+			message = "upstream stream error"
+		}
+	}
+	errType := strings.TrimSpace(errorPayload.Get("type").String())
+	if errType == "" {
+		errType = "invalid_request_error"
+	}
+
+	status := http.StatusBadRequest
+	if strings.EqualFold(code, "rate_limit_exceeded") || strings.EqualFold(code, "usage_limit_reached") {
+		status = http.StatusTooManyRequests
+	}
+
+	wrapped := map[string]any{
+		"error": map[string]any{
+			"message": message,
+			"type":    errType,
+			"code":    code,
+		},
+	}
+	if param := strings.TrimSpace(errorPayload.Get("param").String()); param != "" {
+		wrapped["error"].(map[string]any)["param"] = param
+	}
+	encoded, err := json.Marshal(wrapped)
+	if err != nil {
+		return statusErr{}, false
+	}
+	var retryAfter *time.Duration
+	if status == http.StatusTooManyRequests {
+		retryAfter = parseSSERetryAfter(errorPayload, time.Now())
+	}
+	return statusErr{code: status, msg: string(encoded), retryAfter: retryAfter}, true
+}
+
+func parseSSERetryAfter(errorPayload gjson.Result, now time.Time) *time.Duration {
+	if resetsAt := errorPayload.Get("resets_at").Int(); resetsAt > 0 {
+		resetTime := time.Unix(resetsAt, 0)
+		if resetTime.After(now) {
+			d := resetTime.Sub(now)
+			return &d
+		}
+	}
+	if resetsInSeconds := errorPayload.Get("resets_in_seconds").Int(); resetsInSeconds > 0 {
+		d := time.Duration(resetsInSeconds) * time.Second
+		return &d
 	}
 	return nil
 }
