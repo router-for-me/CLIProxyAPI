@@ -111,10 +111,10 @@ if [ -n "$MGMT_KEY" ]; then
   fi
 
   # === 6. 后台循环 ===
-  echo "[stats] ✅ 启动后台循环（每180秒 export+upload）"
+  echo "[stats] ✅ 启动后台循环（每300秒 export+upload）"
   (
     while true; do
-      sleep 180
+      sleep 300
       echo "[stats] $(date '+%H:%M:%S') export..."
       
       RESPONSE=$(curl -s -w "\n%{http_code}" \
