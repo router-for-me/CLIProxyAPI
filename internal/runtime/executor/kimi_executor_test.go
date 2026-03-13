@@ -203,3 +203,63 @@ func TestNormalizeKimiToolMessageLinks_RepairsIDsAndReasoningTogether(t *testing
 		t.Fatalf("messages.2.reasoning_content = %q, want %q", got, "r1")
 	}
 }
+
+func TestNormalizeKimiToolMessageLinks_DropsEffectivelyEmptyAssistantMessages(t *testing.T) {
+	body := []byte(`{
+		"messages":[
+			{"role":"user","content":"hello"},
+			{"role":"assistant","content":""},
+			{"role":"assistant","content":[{"type":"text","text":"   "}],"reasoning_content":"   "},
+			{"role":"assistant","tool_calls":null,"content":"   "},
+			{"role":"assistant","content":"kept"}
+		]
+	}`)
+
+	out, err := normalizeKimiToolMessageLinks(body)
+	if err != nil {
+		t.Fatalf("normalizeKimiToolMessageLinks() error = %v", err)
+	}
+
+	msgs := gjson.GetBytes(out, "messages").Array()
+	if len(msgs) != 2 {
+		t.Fatalf("len(messages) = %d, want 2; output=%s", len(msgs), string(out))
+	}
+	if got := msgs[0].Get("role").String(); got != "user" {
+		t.Fatalf("messages[0].role = %q, want %q", got, "user")
+	}
+	if got := msgs[1].Get("content").String(); got != "kept" {
+		t.Fatalf("messages[1].content = %q, want %q", got, "kept")
+	}
+}
+
+func TestNormalizeKimiToolMessageLinks_PreservesAssistantMessagesWithToolMetadata(t *testing.T) {
+	body := []byte(`{
+		"messages":[
+			{"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"list_directory","arguments":"{}"}}]},
+			{"role":"assistant","content":"   ","function_call":{"name":"legacy_call","arguments":"{}"}},
+			{"role":"assistant","content":[{"type":"text","text":"   "}],"reasoning_content":"keep me"}
+		]
+	}`)
+
+	out, err := normalizeKimiToolMessageLinks(body)
+	if err != nil {
+		t.Fatalf("normalizeKimiToolMessageLinks() error = %v", err)
+	}
+
+	msgs := gjson.GetBytes(out, "messages").Array()
+	if len(msgs) != 3 {
+		t.Fatalf("len(messages) = %d, want 3; output=%s", len(msgs), string(out))
+	}
+	if !msgs[0].Get("tool_calls").Exists() {
+		t.Fatalf("messages[0].tool_calls should exist")
+	}
+	if got := msgs[0].Get("reasoning_content").String(); got != "[reasoning unavailable]" {
+		t.Fatalf("messages[0].reasoning_content = %q, want %q", got, "[reasoning unavailable]")
+	}
+	if !msgs[1].Get("function_call").Exists() {
+		t.Fatalf("messages[1].function_call should exist")
+	}
+	if got := msgs[2].Get("reasoning_content").String(); got != "keep me" {
+		t.Fatalf("messages[2].reasoning_content = %q, want %q", got, "keep me")
+	}
+}
