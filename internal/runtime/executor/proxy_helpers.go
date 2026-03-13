@@ -14,6 +14,24 @@ import (
 	"golang.org/x/net/proxy"
 )
 
+// ResolveProxyURL returns the effective proxy URL following the standard priority:
+//  1. auth.ProxyURL (per-account override)
+//  2. cfg.ProxyURL  (global config)
+//  3. "" (empty — caller decides fallback behavior)
+func ResolveProxyURL(cfg *config.Config, auth *cliproxyauth.Auth) string {
+	if auth != nil {
+		if u := strings.TrimSpace(auth.ProxyURL); u != "" {
+			return u
+		}
+	}
+	if cfg != nil {
+		if u := strings.TrimSpace(cfg.ProxyURL); u != "" {
+			return u
+		}
+	}
+	return ""
+}
+
 // newProxyAwareHTTPClient creates an HTTP client with proper proxy configuration priority:
 // 1. Use auth.ProxyURL if configured (highest priority)
 // 2. Use cfg.ProxyURL if auth proxy is not configured
@@ -33,16 +51,7 @@ func newProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 		httpClient.Timeout = timeout
 	}
 
-	// Priority 1: Use auth.ProxyURL if configured
-	var proxyURL string
-	if auth != nil {
-		proxyURL = strings.TrimSpace(auth.ProxyURL)
-	}
-
-	// Priority 2: Use cfg.ProxyURL if auth proxy is not configured
-	if proxyURL == "" && cfg != nil {
-		proxyURL = strings.TrimSpace(cfg.ProxyURL)
-	}
+	proxyURL := ResolveProxyURL(cfg, auth)
 
 	// If we have a proxy URL configured, set up the transport
 	if proxyURL != "" {

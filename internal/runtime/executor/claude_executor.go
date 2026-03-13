@@ -580,13 +580,8 @@ func (e *ClaudeExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (
 	}
 	// Use per-account proxy_url for token refresh, matching the priority in
 	// proxy_helpers.go: auth.ProxyURL > cfg.ProxyURL > env vars.
-	cfg := e.cfg
-	if auth.ProxyURL != "" {
-		cfgCopy := *cfg
-		cfgCopy.SDKConfig.ProxyURL = auth.ProxyURL
-		cfg = &cfgCopy
-	}
-	svc := claudeauth.NewClaudeAuth(cfg)
+	proxyURL := ResolveProxyURL(e.cfg, auth)
+	svc := claudeauth.NewClaudeAuth(e.cfg, proxyURL)
 	td, err := svc.RefreshTokens(ctx, refreshToken)
 	if err != nil {
 		return nil, err
