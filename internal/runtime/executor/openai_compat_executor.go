@@ -93,12 +93,18 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := originalPayloadSource
-	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, opts.Stream)
-	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, opts.Stream)
+	forceUpstreamStream := e.shouldForceUpstreamStream(auth) && opts.Alt != "responses/compact"
+	upstreamStream := forceUpstreamStream
+	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, upstreamStream)
+	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, upstreamStream)
 	requestedModel := payloadRequestedModel(opts, req.Model)
 	translated = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", translated, originalTranslated, requestedModel)
 	if opts.Alt == "responses/compact" {
 		if updated, errDelete := sjson.DeleteBytes(translated, "stream"); errDelete == nil {
+			translated = updated
+		}
+	} else if forceUpstreamStream {
+		if updated, errSet := sjson.SetBytes(translated, "stream", true); errSet == nil {
 			translated = updated
 		}
 	}
@@ -118,6 +124,10 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
 	}
 	httpReq.Header.Set("User-Agent", "cli-proxy-openai-compat")
+	if forceUpstreamStream {
+		httpReq.Header.Set("Accept", "text/event-stream")
+		httpReq.Header.Set("Cache-Control", "no-cache")
+	}
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
@@ -166,12 +176,21 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		return resp, err
 	}
 	appendAPIResponseChunk(ctx, e.cfg, body)
-	reporter.publish(ctx, parseOpenAIUsage(body))
+	bodyForTranslation := body
+	usageDetail := parseOpenAIUsage(body)
+	if forceUpstreamStream {
+		bodyForTranslation, usageDetail, err = aggregateOpenAIChatCompletionSSE(body)
+		if err != nil {
+			recordAPIResponseError(ctx, e.cfg, err)
+			return resp, err
+		}
+	}
+	reporter.publish(ctx, usageDetail)
 	// Ensure we at least record the request even if upstream doesn't return usage
 	reporter.ensurePublished(ctx)
 	// Translate response back to source format when needed
 	var param any
-	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, body, &param)
+	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, bodyForTranslation, &param)
 	resp = cliproxyexecutor.Response{Payload: []byte(out), Headers: httpResp.Header.Clone()}
 	return resp, nil
 }
@@ -372,6 +391,11 @@ func (e *OpenAICompatExecutor) resolveCompatConfig(auth *cliproxyauth.Auth) *con
 		}
 	}
 	return nil
+}
+
+func (e *OpenAICompatExecutor) shouldForceUpstreamStream(auth *cliproxyauth.Auth) bool {
+	compat := e.resolveCompatConfig(auth)
+	return compat != nil && compat.ForceUpstreamStream
 }
 
 func (e *OpenAICompatExecutor) overrideModel(payload []byte, model string) []byte {

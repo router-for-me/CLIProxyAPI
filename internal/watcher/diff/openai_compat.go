@@ -75,6 +75,9 @@ func describeOpenAICompatibilityUpdate(oldEntry, newEntry config.OpenAICompatibi
 	if !equalStringMap(oldEntry.Headers, newEntry.Headers) {
 		details = append(details, "headers updated")
 	}
+	if oldEntry.ForceUpstreamStream != newEntry.ForceUpstreamStream {
+		details = append(details, fmt.Sprintf("force-upstream-stream %t -> %t", oldEntry.ForceUpstreamStream, newEntry.ForceUpstreamStream))
+	}
 	if len(details) == 0 {
 		return ""
 	}
@@ -173,6 +176,10 @@ func openAICompatSignature(entry config.OpenAICompatibility) string {
 	// Intentionally exclude API key material; only count non-empty entries.
 	if count := countAPIKeys(entry); count > 0 {
 		parts = append(parts, fmt.Sprintf("api_keys=%d", count))
+	}
+
+	if entry.ForceUpstreamStream || len(parts) > 0 {
+		parts = append(parts, fmt.Sprintf("force_stream=%t", entry.ForceUpstreamStream))
 	}
 
 	if len(parts) == 0 {

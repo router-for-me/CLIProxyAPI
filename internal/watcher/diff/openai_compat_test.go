@@ -30,7 +30,8 @@ func TestDiffOpenAICompatibility(t *testing.T) {
 				{Name: "m1"},
 				{Name: "m2"},
 			},
-			Headers: map[string]string{"X-Test": "1"},
+			Headers:             map[string]string{"X-Test": "1"},
+			ForceUpstreamStream: true,
 		},
 		{
 			Name:          "provider-b",
@@ -40,7 +41,7 @@ func TestDiffOpenAICompatibility(t *testing.T) {
 
 	changes := DiffOpenAICompatibility(oldList, newList)
 	expectContains(t, changes, "provider added: provider-b (api-keys=1, models=0)")
-	expectContains(t, changes, "provider updated: provider-a (api-keys 1 -> 2, models 1 -> 2, headers updated)")
+	expectContains(t, changes, "provider updated: provider-a (api-keys 1 -> 2, models 1 -> 2, headers updated, force-upstream-stream false -> true)")
 }
 
 func TestDiffOpenAICompatibility_RemovedAndUnchanged(t *testing.T) {
@@ -160,6 +161,12 @@ func TestOpenAICompatSignature_StableAndNormalized(t *testing.T) {
 	c.Models = append(c.Models, config.OpenAICompatibilityModel{Name: "m2"})
 	if sigC := openAICompatSignature(c); sigC == sigB {
 		t.Fatalf("expected signature to change when models change, got %s", sigC)
+	}
+
+	d := b
+	d.ForceUpstreamStream = true
+	if sigD := openAICompatSignature(d); sigD == sigB {
+		t.Fatalf("expected signature to change when force-upstream-stream changes, got %s", sigD)
 	}
 }
 
