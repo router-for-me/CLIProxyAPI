@@ -653,6 +653,7 @@ func normalizeGitHubCopilotChatTools(body []byte) []byte {
 }
 
 func normalizeGitHubCopilotResponsesInput(body []byte) []byte {
+	body = stripGitHubCopilotResponsesUnsupportedFields(body)
 	input := gjson.GetBytes(body, "input")
 	if input.Exists() {
 		// If input is already a string or array, keep it as-is.
@@ -822,6 +823,12 @@ func normalizeGitHubCopilotResponsesInput(body []byte) []byte {
 	// Remove messages/system since we've converted them to input
 	body, _ = sjson.DeleteBytes(body, "messages")
 	body, _ = sjson.DeleteBytes(body, "system")
+	return body
+}
+
+func stripGitHubCopilotResponsesUnsupportedFields(body []byte) []byte {
+	// GitHub Copilot /responses rejects service_tier, so always remove it.
+	body, _ = sjson.DeleteBytes(body, "service_tier")
 	return body
 }
 
