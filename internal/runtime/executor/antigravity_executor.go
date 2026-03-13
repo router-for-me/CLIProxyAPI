@@ -24,7 +24,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
@@ -43,7 +42,6 @@ const (
 	antigravityCountTokensPath     = "/v1internal:countTokens"
 	antigravityStreamPath          = "/v1internal:streamGenerateContent"
 	antigravityGeneratePath        = "/v1internal:generateContent"
-	antigravityModelsPath          = "/v1internal:fetchAvailableModels"
 	antigravityClientID            = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
 	antigravityClientSecret        = "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"
 	defaultAntigravityAgent        = "antigravity/1.19.6 darwin/arm64"
@@ -55,77 +53,7 @@ const (
 var (
 	randSource      = rand.New(rand.NewSource(time.Now().UnixNano()))
 	randSourceMutex sync.Mutex
-	// antigravityPrimaryModelsCache keeps the latest non-empty model list fetched
-	// from any antigravity auth. Empty fetches never overwrite this cache.
-	antigravityPrimaryModelsCache struct {
-		mu     sync.RWMutex
-		models []*registry.ModelInfo
-	}
 )
-
-func cloneAntigravityModels(models []*registry.ModelInfo) []*registry.ModelInfo {
-	if len(models) == 0 {
-		return nil
-	}
-	out := make([]*registry.ModelInfo, 0, len(models))
-	for _, model := range models {
-		if model == nil || strings.TrimSpace(model.ID) == "" {
-			continue
-		}
-		out = append(out, cloneAntigravityModelInfo(model))
-	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
-}
-
-func cloneAntigravityModelInfo(model *registry.ModelInfo) *registry.ModelInfo {
-	if model == nil {
-		return nil
-	}
-	clone := *model
-	if len(model.SupportedGenerationMethods) > 0 {
-		clone.SupportedGenerationMethods = append([]string(nil), model.SupportedGenerationMethods...)
-	}
-	if len(model.SupportedParameters) > 0 {
-		clone.SupportedParameters = append([]string(nil), model.SupportedParameters...)
-	}
-	if model.Thinking != nil {
-		thinkingClone := *model.Thinking
-		if len(model.Thinking.Levels) > 0 {
-			thinkingClone.Levels = append([]string(nil), model.Thinking.Levels...)
-		}
-		clone.Thinking = &thinkingClone
-	}
-	return &clone
-}
-
-func storeAntigravityPrimaryModels(models []*registry.ModelInfo) bool {
-	cloned := cloneAntigravityModels(models)
-	if len(cloned) == 0 {
-		return false
-	}
-	antigravityPrimaryModelsCache.mu.Lock()
-	antigravityPrimaryModelsCache.models = cloned
-	antigravityPrimaryModelsCache.mu.Unlock()
-	return true
-}
-
-func loadAntigravityPrimaryModels() []*registry.ModelInfo {
-	antigravityPrimaryModelsCache.mu.RLock()
-	cloned := cloneAntigravityModels(antigravityPrimaryModelsCache.models)
-	antigravityPrimaryModelsCache.mu.RUnlock()
-	return cloned
-}
-
-func fallbackAntigravityPrimaryModels() []*registry.ModelInfo {
-	models := loadAntigravityPrimaryModels()
-	if len(models) > 0 {
-		log.Debugf("antigravity executor: using cached primary model list (%d models)", len(models))
-	}
-	return models
-}
 
 // AntigravityExecutor proxies requests to the antigravity upstream.
 type AntigravityExecutor struct {

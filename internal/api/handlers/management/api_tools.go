@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -14,13 +13,12 @@ import (
 
 	"github.com/fxamacker/cbor/v2"
 	"github.com/gin-gonic/gin"
-	log "github.com/sirupsen/logrus"
-	"golang.org/x/net/proxy"
-	"golang.org/x/oauth2"
-	"golang.org/x/oauth2/google"
-
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/geminicli"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v6/sdk/proxyutil"
+	log "github.com/sirupsen/logrus"
+	"golang.org/x/oauth2"
+	"golang.org/x/oauth2/google"
 )
 
 const defaultAPICallTimeout = 60 * time.Second
@@ -725,47 +723,12 @@ func (h *Handler) apiCallTransport(auth *coreauth.Auth) http.RoundTripper {
 }
 
 func buildProxyTransport(proxyStr string) *http.Transport {
-	proxyStr = strings.TrimSpace(proxyStr)
-	if proxyStr == "" {
+	transport, _, errBuild := proxyutil.BuildHTTPTransport(proxyStr)
+	if errBuild != nil {
+		log.WithError(errBuild).Debug("build proxy transport failed")
 		return nil
 	}
-
-	proxyURL, errParse := url.Parse(proxyStr)
-	if errParse != nil {
-		log.WithError(errParse).Debug("parse proxy URL failed")
-		return nil
-	}
-	if proxyURL.Scheme == "" || proxyURL.Host == "" {
-		log.Debug("proxy URL missing scheme/host")
-		return nil
-	}
-
-	if proxyURL.Scheme == "socks5" {
-		var proxyAuth *proxy.Auth
-		if proxyURL.User != nil {
-			username := proxyURL.User.Username()
-			password, _ := proxyURL.User.Password()
-			proxyAuth = &proxy.Auth{User: username, Password: password}
-		}
-		dialer, errSOCKS5 := proxy.SOCKS5("tcp", proxyURL.Host, proxyAuth, proxy.Direct)
-		if errSOCKS5 != nil {
-			log.WithError(errSOCKS5).Debug("create SOCKS5 dialer failed")
-			return nil
-		}
-		return &http.Transport{
-			Proxy: nil,
-			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-				return dialer.Dial(network, addr)
-			},
-		}
-	}
-
-	if proxyURL.Scheme == "http" || proxyURL.Scheme == "https" {
-		return &http.Transport{Proxy: http.ProxyURL(proxyURL)}
-	}
-
-	log.Debugf("unsupported proxy scheme: %s", proxyURL.Scheme)
-	return nil
+	return transport
 }
 
 // headerContainsValue checks whether a header map contains a target value (case-insensitive key and value).
