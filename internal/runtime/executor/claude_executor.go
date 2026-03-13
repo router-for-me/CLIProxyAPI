@@ -44,6 +44,7 @@ type ClaudeExecutor struct {
 // claudeToolPrefix is empty to match real Claude Code behavior (no tool name prefix).
 // Previously "proxy_" was used but this is a detectable fingerprint difference.
 const claudeToolPrefix = ""
+const defaultClaudeCodeVersion = "2.1.63"
 
 func NewClaudeExecutor(cfg *config.Config) *ClaudeExecutor { return &ClaudeExecutor{cfg: cfg} }
 
@@ -865,7 +866,7 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	misc.EnsureHeader(r.Header, ginHeaders, "Anthropic-Version", "2023-06-01")
 	misc.EnsureHeader(r.Header, ginHeaders, "Anthropic-Dangerous-Direct-Browser-Access", "true")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-App", "cli")
-	// Values below match Claude Code 2.1.63 / @anthropic-ai/sdk 0.74.0 (updated 2026-02-28).
+	// Fallback values below match Claude Code 2.1.63 / @anthropic-ai/sdk 0.74.0 (updated 2026-02-28).
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Retry-Count", "0")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Runtime-Version", hdrDefault(hd.RuntimeVersion, "v24.3.0"))
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Package-Version", hdrDefault(hd.PackageVersion, "0.74.0"))
@@ -884,7 +885,7 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	if isClaudeCodeClient(clientUA) {
 		r.Header.Set("User-Agent", clientUA)
 	} else {
-		r.Header.Set("User-Agent", hdrDefault(hd.UserAgent, "claude-cli/2.1.63 (external, cli)"))
+		r.Header.Set("User-Agent", hdrDefault(hd.UserAgent, defaultClaudeUserAgent(hd)))
 	}
 	r.Header.Set("Connection", "keep-alive")
 	if stream {
@@ -929,7 +930,7 @@ func claudeCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
 }
 
 func checkSystemInstructions(payload []byte) []byte {
-	return checkSystemInstructionsWithMode(payload, false)
+	return checkSystemInstructionsWithMode(payload, false, nil)
 }
 
 func isClaudeOAuthToken(apiKey string) bool {
@@ -1203,10 +1204,21 @@ func injectFakeUserID(payload []byte, apiKey string, useCache bool) []byte {
 	return payload
 }
 
+func claudeCodeVersion(hd config.ClaudeHeaderDefaults) string {
+	if version := strings.TrimSpace(hd.Version); version != "" {
+		return version
+	}
+	return defaultClaudeCodeVersion
+}
+
+func defaultClaudeUserAgent(hd config.ClaudeHeaderDefaults) string {
+	return fmt.Sprintf("claude-cli/%s (external, cli)", claudeCodeVersion(hd))
+}
+
 // generateBillingHeader creates the x-anthropic-billing-header text block that
 // real Claude Code prepends to every system prompt array.
 // Format: x-anthropic-billing-header: cc_version=<ver>.<build>; cc_entrypoint=cli; cch=<hash>;
-func generateBillingHeader(payload []byte) string {
+func generateBillingHeader(payload []byte, hd config.ClaudeHeaderDefaults) string {
 	// Generate a deterministic cch hash from the payload content (system + messages + tools).
 	// Real Claude Code uses a 5-char hex hash that varies per request.
 	h := sha256.Sum256(payload)
@@ -1217,7 +1229,7 @@ func generateBillingHeader(payload []byte) string {
 	_, _ = rand.Read(buildBytes)
 	buildHash := hex.EncodeToString(buildBytes)[:3]
 
-	return fmt.Sprintf("x-anthropic-billing-header: cc_version=2.1.63.%s; cc_entrypoint=cli; cch=%s;", buildHash, cch)
+	return fmt.Sprintf("x-anthropic-billing-header: cc_version=%s.%s; cc_entrypoint=cli; cch=%s;", claudeCodeVersion(hd), buildHash, cch)
 }
 
 // checkSystemInstructionsWithMode injects Claude Code-style system blocks:
@@ -1225,10 +1237,14 @@ func generateBillingHeader(payload []byte) string {
 //	system[0]: billing header (no cache_control)
 //	system[1]: agent identifier (no cache_control)
 //	system[2..]: user system messages (cache_control added when missing)
-func checkSystemInstructionsWithMode(payload []byte, strictMode bool) []byte {
+func checkSystemInstructionsWithMode(payload []byte, strictMode bool, cfg *config.Config) []byte {
 	system := gjson.GetBytes(payload, "system")
 
-	billingText := generateBillingHeader(payload)
+	var hd config.ClaudeHeaderDefaults
+	if cfg != nil {
+		hd = cfg.ClaudeHeaderDefaults
+	}
+	billingText := generateBillingHeader(payload, hd)
 	billingBlock := fmt.Sprintf(`{"type":"text","text":"%s"}`, billingText)
 	// No cache_control on the agent block. It is a cloaking artifact with zero cache
 	// value (the last system block is what actually triggers caching of all system content).
@@ -1325,7 +1341,7 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 
 	// Skip system instructions for claude-3-5-haiku models
 	if !strings.HasPrefix(model, "claude-3-5-haiku") {
-		payload = checkSystemInstructionsWithMode(payload, strictMode)
+		payload = checkSystemInstructionsWithMode(payload, strictMode, cfg)
 	}
 
 	// Inject fake user ID
