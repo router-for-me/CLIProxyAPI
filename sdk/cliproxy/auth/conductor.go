@@ -160,6 +160,9 @@ type Manager struct {
 	// Optional HTTP RoundTripper provider injected by host.
 	rtProvider RoundTripperProvider
 
+	// sticky maintains session-to-auth bindings for sticky routing.
+	sticky *stickyStore
+
 	// Auto refresh state
 	refreshCancel    context.CancelFunc
 	refreshSemaphore chan struct{}
@@ -181,6 +184,7 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 		auths:            make(map[string]*Auth),
 		providerOffsets:  make(map[string]int),
 		modelPoolOffsets: make(map[string]int),
+		sticky:           newStickyStore(),
 		refreshSemaphore: make(chan struct{}, refreshMaxConcurrency),
 	}
 	// atomic.Value requires non-nil initial value.
@@ -483,7 +487,7 @@ func readStreamBootstrap(ctx context.Context, ch <-chan cliproxyexecutor.StreamC
 	}
 }
 
-func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, routeModel string, headers http.Header, buffered []cliproxyexecutor.StreamChunk, remaining <-chan cliproxyexecutor.StreamChunk) *cliproxyexecutor.StreamResult {
+func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, routeModel string, headers http.Header, buffered []cliproxyexecutor.StreamChunk, remaining <-chan cliproxyexecutor.StreamChunk, stickyKey string) *cliproxyexecutor.StreamResult {
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
 		defer close(out)
@@ -497,6 +501,12 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, ro
 					rerr.HTTPStatus = se.StatusCode()
 				}
 				m.MarkResult(ctx, Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: false, Error: rerr})
+				// Sticky session: clear binding on mid-stream error.
+				if stickyKey != "" {
+					if sc := statusCodeFromResult(rerr); sc == 429 || sc >= 500 {
+						m.sticky.Delete(stickyKey)
+					}
+				}
 			}
 			if !forward {
 				return false
@@ -532,9 +542,9 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, ro
 	return &cliproxyexecutor.StreamResult{Headers: headers, Chunks: out}
 }
 
-func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor ProviderExecutor, auth *Auth, provider string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, routeModel string) (*cliproxyexecutor.StreamResult, error) {
+func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor ProviderExecutor, auth *Auth, provider string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, routeModel string, stickyKey string) (*cliproxyexecutor.StreamResult, bool, error) {
 	if executor == nil {
-		return nil, &Error{Code: "executor_not_found", Message: "executor not registered"}
+		return nil, false, &Error{Code: "executor_not_found", Message: "executor not registered"}
 	}
 	execModels := m.prepareExecutionModels(auth, routeModel)
 	var lastErr error
@@ -544,7 +554,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		streamResult, errStream := executor.ExecuteStream(ctx, auth, execReq, opts)
 		if errStream != nil {
 			if errCtx := ctx.Err(); errCtx != nil {
-				return nil, errCtx
+				return nil, false, errCtx
 			}
 			rerr := &Error{Message: errStream.Error()}
 			if se, ok := errors.AsType[cliproxyexecutor.StatusError](errStream); ok && se != nil {
@@ -554,7 +564,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			result.RetryAfter = retryAfterFromError(errStream)
 			m.MarkResult(ctx, result)
 			if isRequestInvalidError(errStream) {
-				return nil, errStream
+				return nil, false, errStream
 			}
 			lastErr = errStream
 			continue
@@ -564,7 +574,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		if bootstrapErr != nil {
 			if errCtx := ctx.Err(); errCtx != nil {
 				discardStreamChunks(streamResult.Chunks)
-				return nil, errCtx
+				return nil, false, errCtx
 			}
 			if isRequestInvalidError(bootstrapErr) {
 				rerr := &Error{Message: bootstrapErr.Error()}
@@ -575,7 +585,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				result.RetryAfter = retryAfterFromError(bootstrapErr)
 				m.MarkResult(ctx, result)
 				discardStreamChunks(streamResult.Chunks)
-				return nil, bootstrapErr
+				return nil, false, bootstrapErr
 			}
 			if idx < len(execModels)-1 {
 				rerr := &Error{Message: bootstrapErr.Error()}
@@ -592,7 +602,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			errCh := make(chan cliproxyexecutor.StreamChunk, 1)
 			errCh <- cliproxyexecutor.StreamChunk{Err: bootstrapErr}
 			close(errCh)
-			return m.wrapStreamResult(ctx, auth.Clone(), provider, routeModel, streamResult.Headers, nil, errCh), nil
+			return m.wrapStreamResult(ctx, auth.Clone(), provider, routeModel, streamResult.Headers, nil, errCh, stickyKey), false, nil
 		}
 
 		if closed && len(buffered) == 0 {
@@ -606,7 +616,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			errCh := make(chan cliproxyexecutor.StreamChunk, 1)
 			errCh <- cliproxyexecutor.StreamChunk{Err: emptyErr}
 			close(errCh)
-			return m.wrapStreamResult(ctx, auth.Clone(), provider, routeModel, streamResult.Headers, nil, errCh), nil
+			return m.wrapStreamResult(ctx, auth.Clone(), provider, routeModel, streamResult.Headers, nil, errCh, stickyKey), false, nil
 		}
 
 		remaining := streamResult.Chunks
@@ -615,12 +625,12 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			close(closedCh)
 			remaining = closedCh
 		}
-		return m.wrapStreamResult(ctx, auth.Clone(), provider, routeModel, streamResult.Headers, buffered, remaining), nil
+		return m.wrapStreamResult(ctx, auth.Clone(), provider, routeModel, streamResult.Headers, buffered, remaining, stickyKey), true, nil
 	}
 	if lastErr == nil {
 		lastErr = &Error{Code: "auth_not_found", Message: "no upstream model available"}
 	}
-	return nil, lastErr
+	return nil, false, lastErr
 }
 
 func (m *Manager) rebuildAPIKeyModelAliasFromRuntimeConfig() {
@@ -978,6 +988,10 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 	}
 	routeModel := req.Model
 	opts = ensureRequestedModelMetadata(opts, routeModel)
+
+	stickySessionID := m.resolveStickySession(opts.Metadata, routeModel)
+	sk := stickyKey(stickySessionID, routeModel)
+
 	tried := make(map[string]struct{})
 	var lastErr error
 	for {
@@ -1025,11 +1039,23 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 					result.RetryAfter = ra
 				}
 				m.MarkResult(execCtx, result)
+				// Sticky session: clear binding on rate-limit or server error so next
+				// request falls back to normal auth selection.
+				if sk != "" {
+					if sc := statusCodeFromResult(result.Error); sc == 429 || sc >= 500 {
+						m.sticky.Delete(sk)
+						delete(opts.Metadata, cliproxyexecutor.PinnedAuthMetadataKey)
+					}
+				}
 				if isRequestInvalidError(errExec) {
 					return cliproxyexecutor.Response{}, errExec
 				}
 				authErr = errExec
 				continue
+			}
+			// Sticky session: bind session to the auth that succeeded.
+			if sk != "" {
+				m.sticky.Set(sk, auth.ID, stickySessionTTL)
 			}
 			m.MarkResult(execCtx, result)
 			return resp, nil
@@ -1122,6 +1148,10 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	}
 	routeModel := req.Model
 	opts = ensureRequestedModelMetadata(opts, routeModel)
+
+	stickySessionID := m.resolveStickySession(opts.Metadata, routeModel)
+	sk := stickyKey(stickySessionID, routeModel)
+
 	tried := make(map[string]struct{})
 	var lastErr error
 	for {
@@ -1149,16 +1179,27 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 		}
-		streamResult, errStream := m.executeStreamWithModelPool(execCtx, executor, auth, provider, req, opts, routeModel)
+		streamResult, streamOK, errStream := m.executeStreamWithModelPool(execCtx, executor, auth, provider, req, opts, routeModel, sk)
 		if errStream != nil {
 			if errCtx := execCtx.Err(); errCtx != nil {
 				return nil, errCtx
+			}
+			// Sticky session: clear binding on rate-limit or server error.
+			if sk != "" {
+				if sc := statusCodeFromError(errStream); sc == 429 || sc >= 500 {
+					m.sticky.Delete(sk)
+					delete(opts.Metadata, cliproxyexecutor.PinnedAuthMetadataKey)
+				}
 			}
 			if isRequestInvalidError(errStream) {
 				return nil, errStream
 			}
 			lastErr = errStream
 			continue
+		}
+		// Sticky session: only bind on genuine stream success.
+		if sk != "" && streamOK {
+			m.sticky.Set(sk, auth.ID, stickySessionTTL)
 		}
 		return streamResult, nil
 	}
@@ -1219,6 +1260,50 @@ func pinnedAuthIDFromMetadata(meta map[string]any) string {
 	default:
 		return ""
 	}
+}
+
+// stickySessionTTL is the duration a session-to-auth binding remains valid.
+const stickySessionTTL = time.Hour
+
+// stickyKey builds a composite store key from session ID and model so that
+// the same session ID used with different models gets independent bindings.
+func stickyKey(sessionID, model string) string {
+	return sessionID + "|" + model
+}
+
+func stickySessionIDFromMetadata(meta map[string]any) string {
+	if len(meta) == 0 {
+		return ""
+	}
+	raw, ok := meta[cliproxyexecutor.StickySessionMetadataKey]
+	if !ok || raw == nil {
+		return ""
+	}
+	switch val := raw.(type) {
+	case string:
+		return strings.TrimSpace(val)
+	case []byte:
+		return strings.TrimSpace(string(val))
+	default:
+		return ""
+	}
+}
+
+// resolveStickySession extracts the sticky session ID from metadata and, if a
+// valid binding exists, sets the pinned auth ID.  An explicit pinned_auth_id
+// in the metadata takes precedence over any sticky binding.
+// routeModel scopes the lookup so the same session ID with different models
+// gets independent auth bindings.
+func (m *Manager) resolveStickySession(meta map[string]any, routeModel string) string {
+	id := stickySessionIDFromMetadata(meta)
+	if id != "" {
+		if _, alreadyPinned := meta[cliproxyexecutor.PinnedAuthMetadataKey]; !alreadyPinned {
+			if boundAuth, found := m.sticky.Get(stickyKey(id, routeModel)); found {
+				meta[cliproxyexecutor.PinnedAuthMetadataKey] = boundAuth
+			}
+		}
+	}
+	return id
 }
 
 func publishSelectedAuthMetadata(meta map[string]any, authID string) {
@@ -2331,6 +2416,8 @@ func (m *Manager) StartAutoRefresh(parent context.Context, interval time.Duratio
 	go func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
+		lastStickyCleanup := time.Now()
+		const stickyCleanupInterval = 5 * time.Minute
 		m.checkRefreshes(ctx)
 		for {
 			select {
@@ -2338,6 +2425,10 @@ func (m *Manager) StartAutoRefresh(parent context.Context, interval time.Duratio
 				return
 			case <-ticker.C:
 				m.checkRefreshes(ctx)
+				if time.Since(lastStickyCleanup) >= stickyCleanupInterval {
+					m.sticky.Cleanup()
+					lastStickyCleanup = time.Now()
+				}
 			}
 		}
 	}()

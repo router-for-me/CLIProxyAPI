@@ -19,6 +19,8 @@ const (
 	SelectedAuthCallbackMetadataKey = "selected_auth_callback"
 	// ExecutionSessionMetadataKey identifies a long-lived downstream execution session.
 	ExecutionSessionMetadataKey = "execution_session_id"
+	// StickySessionMetadataKey carries the session ID for sticky auth routing.
+	StickySessionMetadataKey = "sticky_session_id"
 )
 
 // Request encapsulates the translated payload that will be sent to a provider executor.
