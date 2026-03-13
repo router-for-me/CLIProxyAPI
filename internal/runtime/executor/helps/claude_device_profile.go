@@ -112,8 +112,13 @@ func defaultClaudeDeviceProfile(cfg *config.Config) ClaudeDeviceProfile {
 		hd = cfg.ClaudeHeaderDefaults
 	}
 
+	defaultUserAgent := defaultClaudeFingerprintUserAgent
+	if version := strings.TrimSpace(hd.Version); version != "" && strings.TrimSpace(hd.UserAgent) == "" {
+		defaultUserAgent = "claude-cli/" + version + " (external, cli)"
+	}
+
 	profile := ClaudeDeviceProfile{
-		UserAgent:      hdrDefault(hd.UserAgent, defaultClaudeFingerprintUserAgent),
+		UserAgent:      hdrDefault(hd.UserAgent, defaultUserAgent),
 		PackageVersion: hdrDefault(hd.PackageVersion, defaultClaudeFingerprintPackageVersion),
 		RuntimeVersion: hdrDefault(hd.RuntimeVersion, defaultClaudeFingerprintRuntimeVersion),
 		OS:             hdrDefault(hd.OS, defaultClaudeFingerprintOS),

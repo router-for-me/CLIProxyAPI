@@ -107,6 +107,33 @@ func TestApplyClaudeHeaders_UsesConfiguredBaselineFingerprint(t *testing.T) {
 	}
 }
 
+func TestApplyClaudeHeaders_UsesConfiguredVersionForFallbackUserAgent(t *testing.T) {
+	resetClaudeDeviceProfileCache()
+
+	stabilize := false
+	cfg := &config.Config{
+		ClaudeHeaderDefaults: config.ClaudeHeaderDefaults{
+			Version:                "2.2.0",
+			PackageVersion:         "0.74.0",
+			RuntimeVersion:         "v24.3.0",
+			StabilizeDeviceProfile: &stabilize,
+		},
+	}
+	auth := &cliproxyauth.Auth{
+		ID: "auth-configured-version-fallback",
+		Attributes: map[string]string{
+			"api_key": "key-configured-version-fallback",
+		},
+	}
+
+	req := newClaudeHeaderTestRequest(t, http.Header{
+		"User-Agent": []string{"curl/8.7.1"},
+	})
+	applyClaudeHeaders(req, auth, "key-configured-version-fallback", false, nil, cfg)
+
+	assertClaudeFingerprint(t, req.Header, "claude-cli/2.2.0 (external, cli)", "0.74.0", "v24.3.0", helps.MapStainlessOS(), helps.MapStainlessArch())
+}
+
 func TestApplyClaudeHeaders_TracksHighestClaudeCLIFingerprint(t *testing.T) {
 	resetClaudeDeviceProfileCache()
 	stabilize := true
@@ -1144,6 +1171,85 @@ func TestClaudeExecutor_CountTokens_AppliesCacheControlGuards(t *testing.T) {
 	}
 }
 
+func TestClaudeExecutor_CountTokens_UsesConfiguredClaudeVersion(t *testing.T) {
+	var seenBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		seenBody = bytes.Clone(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"input_tokens":42}`))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{
+		ClaudeHeaderDefaults: config.ClaudeHeaderDefaults{
+			Version: "2.2.0",
+		},
+	})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": server.URL,
+	}}
+	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+
+	_, err := executor.CountTokens(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet-20241022",
+		Payload: payload,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+	if err != nil {
+		t.Fatalf("CountTokens error: %v", err)
+	}
+
+	if len(seenBody) == 0 {
+		t.Fatal("expected count_tokens request body to be captured")
+	}
+	if got := gjson.GetBytes(seenBody, "system.0.text").String(); !strings.Contains(got, "cc_version=2.2.0.") {
+		t.Fatalf("count_tokens billing header should use configured Claude version, got %q", got)
+	}
+}
+
+func TestClaudeExecutor_CountTokens_EscapesConfiguredClaudeVersionInBillingHeader(t *testing.T) {
+	var seenBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		seenBody = bytes.Clone(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"input_tokens":42}`))
+	}))
+	defer server.Close()
+
+	configuredVersion := `2.2.0\"beta\\build`
+	executor := NewClaudeExecutor(&config.Config{
+		ClaudeHeaderDefaults: config.ClaudeHeaderDefaults{
+			Version: configuredVersion,
+		},
+	})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": server.URL,
+	}}
+	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+
+	_, err := executor.CountTokens(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet-20241022",
+		Payload: payload,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+	if err != nil {
+		t.Fatalf("CountTokens error: %v", err)
+	}
+
+	if len(seenBody) == 0 {
+		t.Fatal("expected count_tokens request body to be captured")
+	}
+	if !gjson.ValidBytes(seenBody) {
+		t.Fatalf("count_tokens request body should remain valid JSON: %s", string(seenBody))
+	}
+	got := gjson.GetBytes(seenBody, "system.0.text").String()
+	if !strings.Contains(got, "cc_version="+configuredVersion+".") {
+		t.Fatalf("count_tokens billing header should preserve configured Claude version, got %q", got)
+	}
+}
+
 func hasTTLOrderingViolation(payload []byte) bool {
 	seen5m := false
 	violates := false
@@ -1718,7 +1824,7 @@ func TestClaudeExecutor_ExecuteStream_AcceptEncodingOverrideCannotBypassIdentity
 func TestCheckSystemInstructionsWithMode_StringSystemPreserved(t *testing.T) {
 	payload := []byte(`{"system":"You are a helpful assistant.","messages":[{"role":"user","content":"hi"}]}`)
 
-	out := checkSystemInstructionsWithMode(payload, false)
+	out := checkSystemInstructionsWithMode(payload, false, nil)
 
 	system := gjson.GetBytes(out, "system")
 	if !system.IsArray() {
@@ -1748,7 +1854,7 @@ func TestCheckSystemInstructionsWithMode_StringSystemPreserved(t *testing.T) {
 func TestCheckSystemInstructionsWithMode_StringSystemStrict(t *testing.T) {
 	payload := []byte(`{"system":"You are a helpful assistant.","messages":[{"role":"user","content":"hi"}]}`)
 
-	out := checkSystemInstructionsWithMode(payload, true)
+	out := checkSystemInstructionsWithMode(payload, true, nil)
 
 	blocks := gjson.GetBytes(out, "system").Array()
 	if len(blocks) != 2 {
@@ -1760,7 +1866,7 @@ func TestCheckSystemInstructionsWithMode_StringSystemStrict(t *testing.T) {
 func TestCheckSystemInstructionsWithMode_EmptyStringSystemIgnored(t *testing.T) {
 	payload := []byte(`{"system":"","messages":[{"role":"user","content":"hi"}]}`)
 
-	out := checkSystemInstructionsWithMode(payload, false)
+	out := checkSystemInstructionsWithMode(payload, false, nil)
 
 	blocks := gjson.GetBytes(out, "system").Array()
 	if len(blocks) != 2 {
@@ -1772,7 +1878,7 @@ func TestCheckSystemInstructionsWithMode_EmptyStringSystemIgnored(t *testing.T) 
 func TestCheckSystemInstructionsWithMode_ArraySystemStillWorks(t *testing.T) {
 	payload := []byte(`{"system":[{"type":"text","text":"Be concise."}],"messages":[{"role":"user","content":"hi"}]}`)
 
-	out := checkSystemInstructionsWithMode(payload, false)
+	out := checkSystemInstructionsWithMode(payload, false, nil)
 
 	blocks := gjson.GetBytes(out, "system").Array()
 	if len(blocks) != 3 {
@@ -1787,7 +1893,7 @@ func TestCheckSystemInstructionsWithMode_ArraySystemStillWorks(t *testing.T) {
 func TestCheckSystemInstructionsWithMode_StringWithSpecialChars(t *testing.T) {
 	payload := []byte(`{"system":"Use <xml> tags & \"quotes\" in output.","messages":[{"role":"user","content":"hi"}]}`)
 
-	out := checkSystemInstructionsWithMode(payload, false)
+	out := checkSystemInstructionsWithMode(payload, false, nil)
 
 	blocks := gjson.GetBytes(out, "system").Array()
 	if len(blocks) != 3 {
@@ -1795,6 +1901,52 @@ func TestCheckSystemInstructionsWithMode_StringWithSpecialChars(t *testing.T) {
 	}
 	if blocks[2].Get("text").String() != `Use <xml> tags & "quotes" in output.` {
 		t.Fatalf("blocks[2] text mangled, got %q", blocks[2].Get("text").String())
+	}
+}
+
+func TestCheckSystemInstructionsWithMode_UsesConfiguredClaudeVersion(t *testing.T) {
+	payload := []byte(`{"system":"You are a helpful assistant.","messages":[{"role":"user","content":"hi"}]}`)
+	cfg := &config.Config{
+		ClaudeHeaderDefaults: config.ClaudeHeaderDefaults{
+			Version: "2.2.0",
+		},
+	}
+
+	out := checkSystemInstructionsWithMode(payload, false, cfg)
+
+	billingHeader := gjson.GetBytes(out, "system.0.text").String()
+	if !strings.Contains(billingHeader, "cc_version=2.2.0.") {
+		t.Fatalf("billing header should use configured Claude version, got %q", billingHeader)
+	}
+}
+
+func TestCheckSystemInstructionsWithMode_EscapesConfiguredClaudeVersion(t *testing.T) {
+	configuredVersion := `2.2.0\"beta\\build`
+	payload := []byte(`{"system":"You are a helpful assistant.","messages":[{"role":"user","content":"hi"}]}`)
+	cfg := &config.Config{
+		ClaudeHeaderDefaults: config.ClaudeHeaderDefaults{
+			Version: configuredVersion,
+		},
+	}
+
+	out := checkSystemInstructionsWithMode(payload, false, cfg)
+
+	if !gjson.ValidBytes(out) {
+		t.Fatalf("payload should remain valid JSON: %s", string(out))
+	}
+	system := gjson.GetBytes(out, "system").Array()
+	if len(system) != 3 {
+		t.Fatalf("expected 3 system blocks, got %d", len(system))
+	}
+	billingHeader := system[0].Get("text").String()
+	if !strings.Contains(billingHeader, "cc_version="+configuredVersion+".") {
+		t.Fatalf("billing header should preserve configured Claude version, got %q", billingHeader)
+	}
+	if got := system[1].Get("text").String(); got != "You are a Claude agent, built on Anthropic's Claude Agent SDK." {
+		t.Fatalf("system[1] should remain the agent block, got %q", got)
+	}
+	if got := system[2].Get("text").String(); got != "You are a helpful assistant." {
+		t.Fatalf("system[2] should remain the user system prompt, got %q", got)
 	}
 }
 

@@ -135,6 +135,7 @@ type Config struct {
 // profiles are enabled, OS/Arch become the pinned platform baseline, while
 // UserAgent/PackageVersion/RuntimeVersion seed the upgradeable software fingerprint.
 type ClaudeHeaderDefaults struct {
+	Version                string `yaml:"version" json:"version"`
 	UserAgent              string `yaml:"user-agent" json:"user-agent"`
 	PackageVersion         string `yaml:"package-version" json:"package-version"`
 	RuntimeVersion         string `yaml:"runtime-version" json:"runtime-version"`

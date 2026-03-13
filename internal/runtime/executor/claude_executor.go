@@ -485,7 +485,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 
 	if !strings.HasPrefix(baseModel, "claude-3-5-haiku") {
-		body = checkSystemInstructions(body)
+		body = checkSystemInstructions(body, e.cfg)
 	}
 
 	// Keep count_tokens requests compatible with Anthropic cache-control constraints too.
@@ -938,8 +938,8 @@ func claudeCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
 	return
 }
 
-func checkSystemInstructions(payload []byte) []byte {
-	return checkSystemInstructionsWithSigningMode(payload, false, false, "2.1.63", "", "")
+func checkSystemInstructions(payload []byte, cfg *config.Config) []byte {
+	return checkSystemInstructionsWithSigningMode(payload, false, false, helps.DefaultClaudeVersion(cfg), "", "")
 }
 
 func isClaudeOAuthToken(apiKey string) bool {
@@ -1257,8 +1257,20 @@ func generateBillingHeader(payload []byte, experimentalCCHSigning bool, version,
 	return fmt.Sprintf("x-anthropic-billing-header: cc_version=%s.%s; cc_entrypoint=%s; cch=%s;%s", version, buildHash, entrypoint, cch, workloadPart)
 }
 
-func checkSystemInstructionsWithMode(payload []byte, strictMode bool) []byte {
-	return checkSystemInstructionsWithSigningMode(payload, strictMode, false, "2.1.63", "", "")
+func checkSystemInstructionsWithMode(payload []byte, strictMode bool, cfg *config.Config) []byte {
+	return checkSystemInstructionsWithSigningMode(payload, strictMode, false, helps.DefaultClaudeVersion(cfg), "", "")
+}
+
+func buildClaudeTextSystemBlock(text string) string {
+	block, err := json.Marshal(map[string]string{
+		"type": "text",
+		"text": text,
+	})
+	if err != nil {
+		quoted, _ := json.Marshal(text)
+		return fmt.Sprintf(`{"type":"text","text":%s}`, quoted)
+	}
+	return string(block)
 }
 
 // checkSystemInstructionsWithSigningMode injects Claude Code-style system blocks:
@@ -1285,13 +1297,13 @@ func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, exp
 	}
 
 	billingText := generateBillingHeader(payload, experimentalCCHSigning, version, messageText, entrypoint, workload)
-	billingBlock := fmt.Sprintf(`{"type":"text","text":"%s"}`, billingText)
+	billingBlock := buildClaudeTextSystemBlock(billingText)
 	// No cache_control on the agent block. It is a cloaking artifact with zero cache
 	// value (the last system block is what actually triggers caching of all system content).
 	// Including any cache_control here creates an intra-system TTL ordering violation
 	// when the client's system blocks use ttl='1h' (prompt-caching-scope-2026-01-05 beta
 	// forbids 1h blocks after 5m blocks, and a no-TTL block defaults to 5m).
-	agentBlock := `{"type":"text","text":"You are a Claude agent, built on Anthropic's Claude Agent SDK."}`
+	agentBlock := buildClaudeTextSystemBlock("You are a Claude agent, built on Anthropic's Claude Agent SDK.")
 
 	if strictMode {
 		// Strict mode: billing header + agent identifier only
