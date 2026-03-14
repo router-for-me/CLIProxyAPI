@@ -314,6 +314,13 @@ func (s *pgUsageStore) fullTableName(name string) string {
 	return quoteIdentifier(s.schema) + "." + quoteIdentifier(name)
 }
 
+func (s *pgUsageStore) fullIndexName(name string) string {
+	if s.schema == "" {
+		return quoteIdentifier(name)
+	}
+	return quoteIdentifier(s.schema) + "." + quoteIdentifier(name)
+}
+
 func (s *pgUsageStore) EnsureSchema(ctx context.Context) error {
 	if s.schema != "" {
 		query := fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS %s", quoteIdentifier(s.schema))
@@ -344,14 +351,27 @@ func (s *pgUsageStore) EnsureSchema(ctx context.Context) error {
 
 	// Create indexes for common query patterns
 	indexes := []string{
-		fmt.Sprintf("CREATE INDEX IF NOT EXISTS idx_usage_requested_at ON %s(requested_at DESC)", table),
-		fmt.Sprintf("CREATE INDEX IF NOT EXISTS idx_usage_api_key ON %s(api_key)", table),
+		fmt.Sprintf("CREATE INDEX IF NOT EXISTS idx_usage_requested_at_id ON %s(requested_at DESC, id DESC)", table),
 		fmt.Sprintf("CREATE INDEX IF NOT EXISTS idx_usage_api_model ON %s(api_key, model)", table),
 		fmt.Sprintf("CREATE INDEX IF NOT EXISTS idx_usage_failed ON %s(failed) WHERE failed = 1", table),
+		fmt.Sprintf("CREATE INDEX IF NOT EXISTS idx_usage_failed_requested_source ON %s(requested_at DESC, source) WHERE failed = 1", table),
+		fmt.Sprintf("CREATE INDEX IF NOT EXISTS idx_usage_source_requested_id ON %s(source, requested_at DESC, id DESC)", table),
+		fmt.Sprintf("CREATE INDEX IF NOT EXISTS idx_usage_source_model_requested_id ON %s(source, model, requested_at DESC, id DESC)", table),
+		fmt.Sprintf("CREATE INDEX IF NOT EXISTS idx_usage_source_norm_requested ON %s((COALESCE(NULLIF(source, ''), 'unknown')), requested_at DESC)", table),
+		fmt.Sprintf("CREATE INDEX IF NOT EXISTS idx_usage_source_norm_model_requested ON %s((COALESCE(NULLIF(source, ''), 'unknown')), model, requested_at DESC)", table),
 	}
 	for _, idx := range indexes {
 		if _, err := s.db.ExecContext(ctx, idx); err != nil {
 			return fmt.Errorf("usage store: create index: %w", err)
+		}
+	}
+	legacyIndexes := []string{
+		fmt.Sprintf("DROP INDEX IF EXISTS %s", s.fullIndexName("idx_usage_requested_at")),
+		fmt.Sprintf("DROP INDEX IF EXISTS %s", s.fullIndexName("idx_usage_api_key")),
+	}
+	for _, dropStmt := range legacyIndexes {
+		if _, err := s.db.ExecContext(ctx, dropStmt); err != nil {
+			return fmt.Errorf("usage store: drop legacy index: %w", err)
 		}
 	}
 
@@ -363,6 +383,15 @@ func (s *pgUsageStore) EnsureSchema(ctx context.Context) error {
 	for _, m := range pgMigrations {
 		if _, err := s.db.ExecContext(ctx, m); err != nil {
 			return fmt.Errorf("usage store: migration: %w", err)
+		}
+	}
+	postMigrationIndexes := []string{
+		fmt.Sprintf("CREATE INDEX IF NOT EXISTS idx_usage_method_requested_at ON %s(method, requested_at DESC)", table),
+		fmt.Sprintf("CREATE INDEX IF NOT EXISTS idx_usage_path_requested_at ON %s(path, requested_at DESC)", table),
+	}
+	for _, idx := range postMigrationIndexes {
+		if _, err := s.db.ExecContext(ctx, idx); err != nil {
+			return fmt.Errorf("usage store: create post migration index: %w", err)
 		}
 	}
 
@@ -776,16 +805,27 @@ func (s *sqliteUsageStore) EnsureSchema(ctx context.Context) error {
 
 	// Create indexes for common query patterns
 	indexes := []string{
-		"CREATE INDEX IF NOT EXISTS idx_usage_requested_at ON usage_records(requested_at DESC)",
-		"CREATE INDEX IF NOT EXISTS idx_usage_api_key ON usage_records(api_key)",
+		"CREATE INDEX IF NOT EXISTS idx_usage_requested_at_id ON usage_records(requested_at DESC, id DESC)",
 		"CREATE INDEX IF NOT EXISTS idx_usage_api_model ON usage_records(api_key, model)",
 		"CREATE INDEX IF NOT EXISTS idx_usage_failed ON usage_records(failed)",
+		"CREATE INDEX IF NOT EXISTS idx_usage_failed_requested_source ON usage_records(requested_at DESC, source) WHERE failed = 1",
 		"CREATE INDEX IF NOT EXISTS idx_usage_source_requested ON usage_records(source, requested_at DESC)",
 		"CREATE INDEX IF NOT EXISTS idx_usage_source_model_requested ON usage_records(source, model, requested_at DESC)",
+		"CREATE INDEX IF NOT EXISTS idx_usage_source_norm_requested ON usage_records((COALESCE(NULLIF(source, ''), 'unknown')), requested_at DESC)",
+		"CREATE INDEX IF NOT EXISTS idx_usage_source_norm_model_requested ON usage_records((COALESCE(NULLIF(source, ''), 'unknown')), model, requested_at DESC)",
 	}
 	for _, idx := range indexes {
 		if _, err := s.db.ExecContext(ctx, idx); err != nil {
 			return fmt.Errorf("usage store: create index: %w", err)
+		}
+	}
+	legacyIndexes := []string{
+		"DROP INDEX IF EXISTS idx_usage_requested_at",
+		"DROP INDEX IF EXISTS idx_usage_api_key",
+	}
+	for _, dropStmt := range legacyIndexes {
+		if _, err := s.db.ExecContext(ctx, dropStmt); err != nil {
+			return fmt.Errorf("usage store: drop legacy index: %w", err)
 		}
 	}
 
@@ -796,6 +836,15 @@ func (s *sqliteUsageStore) EnsureSchema(ctx context.Context) error {
 	}
 	for _, m := range migrations {
 		_, _ = s.db.ExecContext(ctx, m) // ignore "duplicate column" errors
+	}
+	postMigrationIndexes := []string{
+		"CREATE INDEX IF NOT EXISTS idx_usage_method_requested_at ON usage_records(method, requested_at DESC)",
+		"CREATE INDEX IF NOT EXISTS idx_usage_path_requested_at ON usage_records(path, requested_at DESC)",
+	}
+	for _, idx := range postMigrationIndexes {
+		if _, err := s.db.ExecContext(ctx, idx); err != nil {
+			return fmt.Errorf("usage store: create post migration index: %w", err)
+		}
 	}
 
 	return nil
