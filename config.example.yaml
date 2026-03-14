@@ -244,11 +244,11 @@ nonstream-keepalive-interval: 0
 #       - name: "kimi-k2.5"
 #         alias: "claude-opus-4.66"
 
-# Vertex API keys (Vertex-compatible endpoints, use API key + base URL)
+# Vertex API keys (Vertex-compatible endpoints, base-url is optional)
 # vertex-api-key:
 #   - api-key: "vk-123..."                        # x-goog-api-key header
 #     prefix: "test"                              # optional: require calls like "test/vertex-pro" to target this credential
-#     base-url: "https://example.com/api"         # e.g. https://zenmux.ai/api
+#     base-url: "https://example.com/api"         # optional, e.g. https://zenmux.ai/api; falls back to Google Vertex when omitted
 #     proxy-url: "socks5://proxy.example.com:1080" # optional per-key proxy override
 #     # proxy-url: "direct" # optional: explicit direct connect for this credential
 #     headers:
