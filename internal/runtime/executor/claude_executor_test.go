@@ -1392,6 +1392,81 @@ func TestClaudeExecutor_ExecuteStream_OpenAIResponsesWithoutOriginalRequest_Rest
 	}
 }
 
+func TestClaudeExecutor_ErrorPaths_RestoreOriginalToolNamesAfterNormalization(t *testing.T) {
+	var upstreamRequestName string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		upstreamRequestName = gjson.GetBytes(body, "tools.0.name").String()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(fmt.Sprintf(`{
+			"type":"error",
+			"error":{
+				"type":"invalid_request_error",
+				"message":"tool %s failed validation"
+			}
+		}`, upstreamRequestName)))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": server.URL,
+	}}
+	payload := []byte(`{
+		"tools":[{"type":"custom","name":"very bad tool","input_schema":{"type":"object"}}],
+		"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]
+	}`)
+
+	checkErr := func(t *testing.T, name string, err error) {
+		t.Helper()
+		if err == nil {
+			t.Fatalf("%s: expected error", name)
+		}
+		var status statusErr
+		if !errors.As(err, &status) {
+			t.Fatalf("%s: expected statusErr, got %T: %v", name, err, err)
+		}
+		if status.StatusCode() != http.StatusBadRequest {
+			t.Fatalf("%s: status code = %d, want %d", name, status.StatusCode(), http.StatusBadRequest)
+		}
+		if upstreamRequestName == "" || upstreamRequestName == "very bad tool" {
+			t.Fatalf("%s: upstream request tool name = %q, want normalized name", name, upstreamRequestName)
+		}
+		if !strings.Contains(err.Error(), "very bad tool") {
+			t.Fatalf("%s: expected restored original tool name in error, got %q", name, err.Error())
+		}
+		if strings.Contains(err.Error(), upstreamRequestName) {
+			t.Fatalf("%s: error should not expose normalized tool name %q, got %q", name, upstreamRequestName, err.Error())
+		}
+	}
+
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+	})
+	checkErr(t, "Execute", err)
+
+	_, err = executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+	})
+	checkErr(t, "ExecuteStream", err)
+
+	_, err = executor.CountTokens(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+	})
+	checkErr(t, "CountTokens", err)
+}
+
 func collectSSEDataPayloads(chunks []string) []gjson.Result {
 	var payloads []gjson.Result
 	for _, chunk := range chunks {

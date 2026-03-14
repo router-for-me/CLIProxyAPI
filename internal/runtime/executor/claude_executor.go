@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/textproto"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 
@@ -189,7 +190,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	}
 	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		return resp, e.buildUpstreamStatusErr(ctx, httpResp.StatusCode, httpResp.Header, httpResp.Body)
+		return resp, e.buildUpstreamStatusErr(ctx, httpResp.StatusCode, httpResp.Header, httpResp.Body, apiKey, auth, originalToolNames)
 	}
 	decodedBody, err := decodeResponseBody(httpResp.Body, httpResp.Header.Get("Content-Encoding"))
 	if err != nil {
@@ -317,7 +318,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	}
 	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		return nil, e.buildUpstreamStatusErr(ctx, httpResp.StatusCode, httpResp.Header, httpResp.Body)
+		return nil, e.buildUpstreamStatusErr(ctx, httpResp.StatusCode, httpResp.Header, httpResp.Body, apiKey, auth, originalToolNames)
 	}
 	decodedBody, err := decodeResponseBody(httpResp.Body, httpResp.Header.Get("Content-Encoding"))
 	if err != nil {
@@ -428,6 +429,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	}
 	body = preparedBody.bodyForUpstream
 	extraBetas := preparedBody.extraBetas
+	originalToolNames := preparedBody.originalToolNames
 
 	url := fmt.Sprintf("%s/v1/messages/count_tokens?beta=true", baseURL)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
@@ -461,7 +463,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	}
 	recordAPIResponseMetadata(ctx, e.cfg, resp.StatusCode, resp.Header.Clone())
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return cliproxyexecutor.Response{}, e.buildUpstreamStatusErr(ctx, resp.StatusCode, resp.Header, resp.Body)
+		return cliproxyexecutor.Response{}, e.buildUpstreamStatusErr(ctx, resp.StatusCode, resp.Header, resp.Body, apiKey, auth, originalToolNames)
 	}
 	decodedBody, err := decodeResponseBody(resp.Body, resp.Header.Get("Content-Encoding"))
 	if err != nil {
@@ -529,7 +531,7 @@ func (e *ClaudeExecutor) finalizeClaudeRequestBody(body []byte, reqModel string,
 	return prepared, nil
 }
 
-func (e *ClaudeExecutor) buildUpstreamStatusErr(ctx context.Context, statusCode int, headers http.Header, body io.ReadCloser) error {
+func (e *ClaudeExecutor) buildUpstreamStatusErr(ctx context.Context, statusCode int, headers http.Header, body io.ReadCloser, apiKey string, auth *cliproxyauth.Auth, originalToolNames map[string]string) error {
 	decodedErrBody, errDecode := decodeResponseBody(body, headers.Get("Content-Encoding"))
 	if errDecode != nil {
 		recordAPIResponseError(ctx, e.cfg, errDecode)
@@ -549,6 +551,7 @@ func (e *ClaudeExecutor) buildUpstreamStatusErr(ctx context.Context, statusCode 
 		b = []byte(msg)
 	}
 
+	b = normalizeClaudeResponseToolNames(b, apiKey, auth, originalToolNames)
 	appendAPIResponseChunk(ctx, e.cfg, b)
 	logWithRequestID(ctx).Debugf(
 		"request error, error status: %d, error message: %s",
@@ -556,6 +559,66 @@ func (e *ClaudeExecutor) buildUpstreamStatusErr(ctx context.Context, statusCode 
 		summarizeErrorBody(headers.Get("Content-Type"), b),
 	)
 	return statusErr{code: statusCode, msg: string(b)}
+}
+
+func normalizeClaudeResponseToolNames(body []byte, apiKey string, auth *cliproxyauth.Auth, originalToolNames map[string]string) []byte {
+	if isClaudeOAuthToken(apiKey) && auth != nil && !auth.ToolPrefixDisabled() {
+		body = stripClaudeToolPrefixFromResponse(body, claudeToolPrefix)
+	}
+	body = restoreClaudeNormalizedToolNamesInResponse(body, originalToolNames)
+	return restoreClaudeToolNamesInErrorBody(body, claudeToolPrefix, originalToolNames)
+}
+
+func restoreClaudeToolNamesInErrorBody(body []byte, prefix string, originalByNormalized map[string]string) []byte {
+	if len(originalByNormalized) == 0 {
+		return body
+	}
+	if !gjson.ValidBytes(body) {
+		return []byte(restoreClaudeToolNamesInErrorText(string(body), prefix, originalByNormalized))
+	}
+	for _, path := range []string{"error.message", "message"} {
+		value := gjson.GetBytes(body, path)
+		if !value.Exists() || value.Type != gjson.String {
+			continue
+		}
+		updated := restoreClaudeToolNamesInErrorText(value.String(), prefix, originalByNormalized)
+		if updated == value.String() {
+			continue
+		}
+		body, _ = sjson.SetBytes(body, path, updated)
+	}
+	return body
+}
+
+func restoreClaudeToolNamesInErrorText(text, prefix string, originalByNormalized map[string]string) string {
+	if text == "" || len(originalByNormalized) == 0 {
+		return text
+	}
+	type replacement struct {
+		from string
+		to   string
+	}
+	replacements := make([]replacement, 0, len(originalByNormalized)*2)
+	for normalized, original := range originalByNormalized {
+		if normalized == "" || original == "" {
+			continue
+		}
+		if prefix != "" {
+			replacements = append(replacements, replacement{from: prefix + normalized, to: original})
+		}
+		replacements = append(replacements, replacement{from: normalized, to: original})
+	}
+	sort.SliceStable(replacements, func(i, j int) bool {
+		return len(replacements[i].from) > len(replacements[j].from)
+	})
+	replacerArgs := make([]string, 0, len(replacements)*2)
+	for _, replacement := range replacements {
+		replacerArgs = append(replacerArgs, replacement.from, replacement.to)
+	}
+	if len(replacerArgs) == 0 {
+		return text
+	}
+	return strings.NewReplacer(replacerArgs...).Replace(text)
 }
 
 func isStatusCodeErr(err error) bool {
