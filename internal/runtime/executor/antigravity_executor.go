@@ -1504,7 +1504,11 @@ func preserveClaudeEffortForAntigravity(sourceFormat sdktranslator.Format, origi
 		return translatedBody
 	}
 
-	effort := strings.ToLower(strings.TrimSpace(gjson.GetBytes(originalBody, "output_config.effort").String()))
+	effortValue := gjson.GetBytes(originalBody, "output_config.effort")
+	if !effortValue.Exists() || effortValue.Type != gjson.String {
+		return translatedBody
+	}
+	effort := strings.ToLower(strings.TrimSpace(effortValue.String()))
 	if effort == "" {
 		return translatedBody
 	}
