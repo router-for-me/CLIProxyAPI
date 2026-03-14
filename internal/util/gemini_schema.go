@@ -236,7 +236,7 @@ func addAdditionalPropertiesHints(jsonStr string) string {
 
 var unsupportedConstraints = []string{
 	"minLength", "maxLength", "exclusiveMinimum", "exclusiveMaximum",
-	"pattern", "minItems", "maxItems", "format",
+	"pattern", "minItems", "maxItems", "uniqueItems", "format",
 	"default", "examples", // Claude rejects these in VALIDATED mode
 }
 
