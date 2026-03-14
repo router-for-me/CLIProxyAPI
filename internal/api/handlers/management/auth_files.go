@@ -1838,9 +1838,6 @@ func (h *Handler) RequestGitLabToken(c *gin.Context) {
 		metadata := buildGitLabAuthMetadata(baseURL, gitLabLoginModeOAuth, tokenResp, direct)
 		metadata["auth_kind"] = "oauth"
 		metadata["oauth_client_id"] = clientID
-		if clientSecret != "" {
-			metadata["oauth_client_secret"] = clientSecret
-		}
 		metadata["username"] = strings.TrimSpace(user.Username)
 		if email := primaryGitLabEmail(user); email != "" {
 			metadata["email"] = email

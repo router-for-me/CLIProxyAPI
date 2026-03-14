@@ -217,6 +217,69 @@ func TestGitLabExecutorExecuteUsesOpenAIGateway(t *testing.T) {
 	}
 }
 
+func TestGitLabExecutorExecuteUsesRequestedModelToSelectOpenAIGateway(t *testing.T) {
+	var gotAuthHeader, gotRealmHeader, gotBetaHeader, gotUserAgent string
+	var gotPath string
+	var gotModel string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotAuthHeader = r.Header.Get("Authorization")
+		gotRealmHeader = r.Header.Get("X-Gitlab-Realm")
+		gotBetaHeader = r.Header.Get("anthropic-beta")
+		gotUserAgent = r.Header.Get("User-Agent")
+		gotModel = gjson.GetBytes(readBody(t, r), "model").String()
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"created_at\":1710000000,\"model\":\"duo-chat-gpt-5-codex\"}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello from explicit openai model\"}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"created_at\":1710000000,\"model\":\"duo-chat-gpt-5-codex\",\"output\":[{\"type\":\"message\",\"id\":\"msg_1\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hello from explicit openai model\"}]}],\"usage\":{\"input_tokens\":11,\"output_tokens\":4,\"total_tokens\":15}}}\n\n"))
+	}))
+	defer srv.Close()
+
+	exec := NewGitLabExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "gitlab",
+		Metadata: map[string]any{
+			"duo_gateway_base_url": srv.URL,
+			"duo_gateway_token":    "gateway-token",
+			"duo_gateway_headers":  map[string]string{"X-Gitlab-Realm": "saas"},
+			"model_provider":       "anthropic",
+			"model_name":           "claude-sonnet-4-5",
+		},
+	}
+	req := cliproxyexecutor.Request{
+		Model:   "duo-chat-gpt-5-codex",
+		Payload: []byte(`{"model":"duo-chat-gpt-5-codex","messages":[{"role":"user","content":"hello"}]}`),
+	}
+
+	resp, err := exec.Execute(context.Background(), auth, req, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if gotPath != "/v1/proxy/openai/v1/responses" {
+		t.Fatalf("Path = %q, want %q", gotPath, "/v1/proxy/openai/v1/responses")
+	}
+	if gotAuthHeader != "Bearer gateway-token" {
+		t.Fatalf("Authorization = %q, want Bearer gateway-token", gotAuthHeader)
+	}
+	if gotRealmHeader != "saas" {
+		t.Fatalf("X-Gitlab-Realm = %q, want saas", gotRealmHeader)
+	}
+	if gotBetaHeader != gitLabContext1MBeta {
+		t.Fatalf("anthropic-beta = %q, want %q", gotBetaHeader, gitLabContext1MBeta)
+	}
+	if gotUserAgent != gitLabNativeUserAgent {
+		t.Fatalf("User-Agent = %q, want %q", gotUserAgent, gitLabNativeUserAgent)
+	}
+	if gotModel != "duo-chat-gpt-5-codex" {
+		t.Fatalf("model = %q, want duo-chat-gpt-5-codex", gotModel)
+	}
+	if got := gjson.GetBytes(resp.Payload, "choices.0.message.content").String(); got != "hello from explicit openai model" {
+		t.Fatalf("expected explicit openai model response, got %q payload=%s", got, string(resp.Payload))
+	}
+}
+
 func TestGitLabExecutorRefreshUpdatesMetadata(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -251,13 +314,12 @@ func TestGitLabExecutorRefreshUpdatesMetadata(t *testing.T) {
 		ID:       "gitlab-auth.json",
 		Provider: "gitlab",
 		Metadata: map[string]any{
-			"base_url":            srv.URL,
-			"access_token":        "oauth-access",
-			"refresh_token":       "oauth-refresh",
-			"oauth_client_id":     "client-id",
-			"oauth_client_secret": "client-secret",
-			"auth_method":         "oauth",
-			"oauth_expires_at":    "2000-01-01T00:00:00Z",
+			"base_url":         srv.URL,
+			"access_token":     "oauth-access",
+			"refresh_token":    "oauth-refresh",
+			"oauth_client_id":  "client-id",
+			"auth_method":      "oauth",
+			"oauth_expires_at": "2000-01-01T00:00:00Z",
 		},
 	}
 
@@ -397,9 +459,11 @@ func TestGitLabExecutorExecuteStreamFallsBackToSyntheticChat(t *testing.T) {
 }
 
 func TestGitLabExecutorExecuteStreamUsesAnthropicGateway(t *testing.T) {
-	var gotPath string
+	var gotPath, gotBetaHeader, gotUserAgent string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
+		gotBetaHeader = r.Header.Get("Anthropic-Beta")
+		gotUserAgent = r.Header.Get("User-Agent")
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte("event: message_start\n"))
 		_, _ = w.Write([]byte("data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-sonnet-4-5\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}}\n\n"))
@@ -440,6 +504,12 @@ func TestGitLabExecutorExecuteStreamUsesAnthropicGateway(t *testing.T) {
 	lines := collectStreamLines(t, result)
 	if gotPath != "/v1/proxy/anthropic/v1/messages" {
 		t.Fatalf("Path = %q, want %q", gotPath, "/v1/proxy/anthropic/v1/messages")
+	}
+	if !strings.Contains(gotBetaHeader, gitLabContext1MBeta) {
+		t.Fatalf("Anthropic-Beta = %q, want to contain %q", gotBetaHeader, gitLabContext1MBeta)
+	}
+	if gotUserAgent != gitLabNativeUserAgent {
+		t.Fatalf("User-Agent = %q, want %q", gotUserAgent, gitLabNativeUserAgent)
 	}
 	if !strings.Contains(strings.Join(lines, "\n"), "hello from gateway") {
 		t.Fatalf("expected anthropic gateway stream, got %q", strings.Join(lines, "\n"))
