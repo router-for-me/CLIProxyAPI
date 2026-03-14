@@ -106,3 +106,51 @@ func TestOpenAICompatExecutorReasoningEffortCompatibility(t *testing.T) {
 		})
 	}
 }
+
+func TestOpenAICompatExecutorReasoningEffortCompatibilityPrefersSelectedUpstreamModel(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		gotBody = body
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"ok","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"done"},"finish_reason":"stop"}]}`))
+	}))
+	defer server.Close()
+
+	const alias = "claude-opus-4.66"
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{
+		OpenAICompatibility: []config.OpenAICompatibility{{
+			Name:    "pool",
+			BaseURL: server.URL + "/v1",
+			Models: []config.OpenAICompatibilityModel{
+				{Name: "qwen3.5-plus", Alias: alias},
+				{Name: "glm-5", Alias: alias, ReasoningEffortCompatibility: true},
+			},
+		}},
+	})
+	auth := &cliproxyauth.Auth{
+		Provider: "openai-compatibility",
+		Attributes: map[string]string{
+			"base_url":    server.URL + "/v1",
+			"api_key":     "test",
+			"compat_name": "pool",
+		},
+	}
+
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "glm-5",
+		Payload: []byte(`{"model":"claude-opus-4.66","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"xhigh"}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+		Metadata: map[string]any{
+			cliproxyexecutor.RequestedModelMetadataKey: alias,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	if got := gjson.GetBytes(gotBody, "reasoning_effort").String(); got != "high" {
+		t.Fatalf("reasoning_effort = %q, want %q, body=%s", got, "high", string(gotBody))
+	}
+}

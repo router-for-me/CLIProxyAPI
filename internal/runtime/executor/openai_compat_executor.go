@@ -108,7 +108,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	if err != nil {
 		return resp, err
 	}
-	translated = e.applyReasoningEffortCompatibility(auth, requestedModel, translated)
+	translated = e.applyReasoningEffortCompatibility(auth, requestedModel, req.Model, translated)
 
 	url := strings.TrimSuffix(baseURL, "/") + endpoint
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
@@ -206,7 +206,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	if err != nil {
 		return nil, err
 	}
-	translated = e.applyReasoningEffortCompatibility(auth, requestedModel, translated)
+	translated = e.applyReasoningEffortCompatibility(auth, requestedModel, req.Model, translated)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
@@ -385,8 +385,8 @@ func (e *OpenAICompatExecutor) overrideModel(payload []byte, model string) []byt
 	return payload
 }
 
-func (e *OpenAICompatExecutor) applyReasoningEffortCompatibility(auth *cliproxyauth.Auth, requestedModel string, payload []byte) []byte {
-	model := e.resolveCompatModel(auth, requestedModel, payload)
+func (e *OpenAICompatExecutor) applyReasoningEffortCompatibility(auth *cliproxyauth.Auth, requestedModel, selectedModel string, payload []byte) []byte {
+	model := e.resolveCompatModel(auth, requestedModel, selectedModel, payload)
 	if model == nil || !model.ReasoningEffortCompatibility || len(payload) == 0 || !gjson.ValidBytes(payload) {
 		return payload
 	}
@@ -418,10 +418,18 @@ func (e *OpenAICompatExecutor) applyReasoningEffortCompatibility(auth *cliproxya
 	return updated
 }
 
-func (e *OpenAICompatExecutor) resolveCompatModel(auth *cliproxyauth.Auth, requestedModel string, payload []byte) *config.OpenAICompatibilityModel {
+func (e *OpenAICompatExecutor) resolveCompatModel(auth *cliproxyauth.Auth, requestedModel, selectedModel string, payload []byte) *config.OpenAICompatibilityModel {
 	compat := e.resolveCompatConfig(auth)
 	if compat == nil {
 		return nil
+	}
+	if selectedUpstream := strings.TrimSpace(thinking.ParseSuffix(selectedModel).ModelName); selectedUpstream != "" {
+		for i := range compat.Models {
+			model := &compat.Models[i]
+			if strings.EqualFold(strings.TrimSpace(model.Name), selectedUpstream) {
+				return model
+			}
+		}
 	}
 	candidates := compatModelCandidates(requestedModel, payload)
 	if len(candidates) == 0 {
