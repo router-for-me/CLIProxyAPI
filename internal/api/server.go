@@ -176,6 +176,8 @@ type Server struct {
 	keepAliveOnTimeout func()
 	keepAliveHeartbeat chan struct{}
 	keepAliveStop      chan struct{}
+
+	usagePersistence *usage.PersistenceManager
 }
 
 // NewServer creates and initializes a new API server instance.
@@ -251,6 +253,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		currentPath:         wd,
 		envManagementSecret: envManagementSecret,
 		wsRoutes:            make(map[string]struct{}),
+		usagePersistence:    usage.NewPersistenceManager(usage.GetRequestStatistics(), filepath.Dir(configFilePath)),
 	}
 	s.wsAuthEnabled.Store(cfg.WebsocketAuth)
 	// Save initial YAML snapshot
@@ -263,6 +266,10 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	auth.SetQuotaCooldownDisabled(cfg.DisableCooling)
 	// Initialize management handler
 	s.mgmt = managementHandlers.NewHandler(cfg, configFilePath, authManager)
+	if s.usagePersistence != nil {
+		s.usagePersistence.ApplyConfig(cfg.UsagePersistence)
+		s.mgmt.SetUsagePersistenceManager(s.usagePersistence)
+	}
 	if optionState.localPassword != "" {
 		s.mgmt.SetLocalPassword(optionState.localPassword)
 	}
@@ -489,6 +496,9 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/usage", s.mgmt.GetUsageStatistics)
 		mgmt.GET("/usage/export", s.mgmt.ExportUsageStatistics)
 		mgmt.POST("/usage/import", s.mgmt.ImportUsageStatistics)
+		mgmt.GET("/usage/persistence-status", s.mgmt.GetUsagePersistenceStatus)
+		mgmt.POST("/usage/save", s.mgmt.SaveUsageStatistics)
+		mgmt.POST("/usage/load", s.mgmt.LoadUsageStatistics)
 		mgmt.GET("/config", s.mgmt.GetConfig)
 		mgmt.GET("/config.yaml", s.mgmt.GetConfigYAML)
 		mgmt.PUT("/config.yaml", s.mgmt.PutConfigYAML)
@@ -513,6 +523,10 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/usage-statistics-enabled", s.mgmt.GetUsageStatisticsEnabled)
 		mgmt.PUT("/usage-statistics-enabled", s.mgmt.PutUsageStatisticsEnabled)
 		mgmt.PATCH("/usage-statistics-enabled", s.mgmt.PutUsageStatisticsEnabled)
+
+		mgmt.GET("/usage-persistence", s.mgmt.GetUsagePersistence)
+		mgmt.PUT("/usage-persistence", s.mgmt.PutUsagePersistence)
+		mgmt.PATCH("/usage-persistence", s.mgmt.PutUsagePersistence)
 
 		mgmt.GET("/proxy-url", s.mgmt.GetProxyURL)
 		mgmt.PUT("/proxy-url", s.mgmt.PutProxyURL)
@@ -830,6 +844,10 @@ func (s *Server) Stop(ctx context.Context) error {
 		}
 	}
 
+	if s.mgmt != nil {
+		s.mgmt.Stop()
+	}
+
 	// Shutdown the HTTP server.
 	if err := s.server.Shutdown(ctx); err != nil {
 		return fmt.Errorf("failed to shutdown HTTP server: %v", err)
@@ -904,6 +922,10 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 		usage.SetStatisticsEnabled(cfg.UsageStatisticsEnabled)
 	}
 
+	if s.usagePersistence != nil && (oldCfg == nil || !reflect.DeepEqual(oldCfg.UsagePersistence, cfg.UsagePersistence)) {
+		s.usagePersistence.ApplyConfig(cfg.UsagePersistence)
+	}
+
 	if s.requestLogger != nil && (oldCfg == nil || oldCfg.ErrorLogsMaxFiles != cfg.ErrorLogsMaxFiles) {
 		if setter, ok := s.requestLogger.(interface{ SetErrorLogsMaxFiles(int) }); ok {
 			setter.SetErrorLogsMaxFiles(cfg.ErrorLogsMaxFiles)
@@ -970,6 +992,7 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 	if s.mgmt != nil {
 		s.mgmt.SetConfig(cfg)
 		s.mgmt.SetAuthManager(s.handlers.AuthManager)
+		s.mgmt.SetUsagePersistenceManager(s.usagePersistence)
 	}
 
 	// Notify Amp module only when Amp config has changed.

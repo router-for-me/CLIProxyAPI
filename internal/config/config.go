@@ -64,6 +64,9 @@ type Config struct {
 	// UsageStatisticsEnabled toggles in-memory usage aggregation; when false, usage data is discarded.
 	UsageStatisticsEnabled bool `yaml:"usage-statistics-enabled" json:"usage-statistics-enabled"`
 
+	// UsagePersistence controls optional periodic persistence of usage statistics.
+	UsagePersistence UsagePersistenceConfig `yaml:"usage-persistence" json:"usage-persistence"`
+
 	// DisableCooling disables quota cooldown scheduling when true.
 	DisableCooling bool `yaml:"disable-cooling" json:"disable-cooling"`
 
@@ -126,6 +129,16 @@ type Config struct {
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
 
 	legacyMigrationPending bool `yaml:"-" json:"-"`
+}
+
+// UsagePersistenceConfig defines usage statistics persistence behavior.
+type UsagePersistenceConfig struct {
+	// Enabled toggles automatic usage persistence.
+	Enabled bool `yaml:"enabled" json:"enabled"`
+	// FilePath is the output file path for usage snapshots. Relative paths are resolved from config directory.
+	FilePath string `yaml:"file-path" json:"file-path"`
+	// IntervalSeconds controls periodic flush interval in seconds.
+	IntervalSeconds int `yaml:"interval-seconds" json:"interval-seconds"`
 }
 
 // ClaudeHeaderDefaults configures default header values injected into Claude API requests
@@ -553,6 +566,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.LogsMaxTotalSizeMB = 0
 	cfg.ErrorLogsMaxFiles = 10
 	cfg.UsageStatisticsEnabled = false
+	cfg.UsagePersistence.Enabled = false
+	cfg.UsagePersistence.FilePath = "usage-statistics.json"
+	cfg.UsagePersistence.IntervalSeconds = 30
 	cfg.DisableCooling = false
 	cfg.Pprof.Enable = false
 	cfg.Pprof.Addr = DefaultPprofAddr
@@ -616,6 +632,14 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	if cfg.MaxRetryCredentials < 0 {
 		cfg.MaxRetryCredentials = 0
+	}
+
+	cfg.UsagePersistence.FilePath = strings.TrimSpace(cfg.UsagePersistence.FilePath)
+	if cfg.UsagePersistence.FilePath == "" {
+		cfg.UsagePersistence.FilePath = "usage-statistics.json"
+	}
+	if cfg.UsagePersistence.IntervalSeconds <= 0 {
+		cfg.UsagePersistence.IntervalSeconds = 30
 	}
 
 	// Sanitize Gemini API key configuration and migrate legacy entries.

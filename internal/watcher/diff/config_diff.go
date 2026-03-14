@@ -39,6 +39,15 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if oldCfg.UsageStatisticsEnabled != newCfg.UsageStatisticsEnabled {
 		changes = append(changes, fmt.Sprintf("usage-statistics-enabled: %t -> %t", oldCfg.UsageStatisticsEnabled, newCfg.UsageStatisticsEnabled))
 	}
+	if oldCfg.UsagePersistence.Enabled != newCfg.UsagePersistence.Enabled {
+		changes = append(changes, fmt.Sprintf("usage-persistence.enabled: %t -> %t", oldCfg.UsagePersistence.Enabled, newCfg.UsagePersistence.Enabled))
+	}
+	if strings.TrimSpace(oldCfg.UsagePersistence.FilePath) != strings.TrimSpace(newCfg.UsagePersistence.FilePath) {
+		changes = append(changes, fmt.Sprintf("usage-persistence.file-path: %s -> %s", strings.TrimSpace(oldCfg.UsagePersistence.FilePath), strings.TrimSpace(newCfg.UsagePersistence.FilePath)))
+	}
+	if oldCfg.UsagePersistence.IntervalSeconds != newCfg.UsagePersistence.IntervalSeconds {
+		changes = append(changes, fmt.Sprintf("usage-persistence.interval-seconds: %d -> %d", oldCfg.UsagePersistence.IntervalSeconds, newCfg.UsagePersistence.IntervalSeconds))
+	}
 	if oldCfg.DisableCooling != newCfg.DisableCooling {
 		changes = append(changes, fmt.Sprintf("disable-cooling: %t -> %t", oldCfg.DisableCooling, newCfg.DisableCooling))
 	}

@@ -77,3 +77,45 @@ func (h *Handler) ImportUsageStatistics(c *gin.Context) {
 		"failed_requests": snapshot.FailureCount,
 	})
 }
+
+// GetUsagePersistenceStatus returns runtime usage persistence status.
+func (h *Handler) GetUsagePersistenceStatus(c *gin.Context) {
+	if h == nil || h.usagePersistence == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "usage persistence unavailable"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": h.usagePersistence.Status()})
+}
+
+// SaveUsageStatistics persists current usage snapshot immediately.
+func (h *Handler) SaveUsageStatistics(c *gin.Context) {
+	if h == nil || h.usagePersistence == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "usage persistence unavailable"})
+		return
+	}
+	status, err := h.usagePersistence.SaveNow()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error(), "status": status})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": status})
+}
+
+// LoadUsageStatistics loads usage snapshot from persistence and merges into memory.
+func (h *Handler) LoadUsageStatistics(c *gin.Context) {
+	if h == nil || h.usagePersistence == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "usage persistence unavailable"})
+		return
+	}
+	result, err := h.usagePersistence.LoadNow()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error(), "result": result})
+		return
+	}
+	snapshot := h.usageStats.Snapshot()
+	c.JSON(http.StatusOK, gin.H{
+		"result":          result,
+		"total_requests":  snapshot.TotalRequests,
+		"failed_requests": snapshot.FailureCount,
+	})
+}
