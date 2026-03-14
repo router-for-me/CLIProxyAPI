@@ -193,6 +193,59 @@ func (h *Handler) PutUsageStatisticsEnabled(c *gin.Context) {
 	h.updateBoolField(c, func(v bool) { h.cfg.UsageStatisticsEnabled = v })
 }
 
+// UsagePersistence
+func (h *Handler) GetUsagePersistence(c *gin.Context) {
+	if h == nil || h.cfg == nil {
+		c.JSON(200, gin.H{"usage-persistence": gin.H{}})
+		return
+	}
+	status := gin.H{}
+	if h.usagePersistence != nil {
+		persistStatus := h.usagePersistence.Status()
+		status["runtime"] = persistStatus
+	}
+	c.JSON(200, gin.H{
+		"usage-persistence": h.cfg.UsagePersistence,
+		"status":            status,
+	})
+}
+
+func (h *Handler) PutUsagePersistence(c *gin.Context) {
+	if h == nil || h.cfg == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid config state"})
+		return
+	}
+	var body struct {
+		Enabled         *bool   `json:"enabled"`
+		FilePath        *string `json:"file-path"`
+		IntervalSeconds *int    `json:"interval-seconds"`
+	}
+	if errBindJSON := c.ShouldBindJSON(&body); errBindJSON != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
+		return
+	}
+	if body.Enabled != nil {
+		h.cfg.UsagePersistence.Enabled = *body.Enabled
+	}
+	if body.FilePath != nil {
+		h.cfg.UsagePersistence.FilePath = strings.TrimSpace(*body.FilePath)
+		if h.cfg.UsagePersistence.FilePath == "" {
+			h.cfg.UsagePersistence.FilePath = "usage-statistics.json"
+		}
+	}
+	if body.IntervalSeconds != nil {
+		if *body.IntervalSeconds <= 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "interval-seconds must be greater than 0"})
+			return
+		}
+		h.cfg.UsagePersistence.IntervalSeconds = *body.IntervalSeconds
+	}
+	if h.usagePersistence != nil {
+		h.usagePersistence.ApplyConfig(h.cfg.UsagePersistence)
+	}
+	h.persist(c)
+}
+
 // UsageStatisticsEnabled
 func (h *Handler) GetLoggingToFile(c *gin.Context) {
 	c.JSON(200, gin.H{"logging-to-file": h.cfg.LoggingToFile})

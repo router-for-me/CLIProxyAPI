@@ -42,6 +42,7 @@ type Handler struct {
 	failedAttempts      map[string]*attemptInfo // keyed by client IP
 	authManager         *coreauth.Manager
 	usageStats          *usage.RequestStatistics
+	usagePersistence    *usage.PersistenceManager
 	tokenStore          coreauth.Store
 	localPassword       string
 	allowRemoteOverride bool
@@ -61,9 +62,13 @@ func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Man
 		failedAttempts:      make(map[string]*attemptInfo),
 		authManager:         manager,
 		usageStats:          usage.GetRequestStatistics(),
+		usagePersistence:    usage.NewPersistenceManager(usage.GetRequestStatistics(), filepath.Dir(configFilePath)),
 		tokenStore:          sdkAuth.GetTokenStore(),
 		allowRemoteOverride: envSecret != "",
 		envSecret:           envSecret,
+	}
+	if cfg != nil {
+		h.usagePersistence.ApplyConfig(cfg.UsagePersistence)
 	}
 	h.startAttemptCleanup()
 	return h
@@ -105,13 +110,21 @@ func NewHandlerWithoutConfigFilePath(cfg *config.Config, manager *coreauth.Manag
 }
 
 // SetConfig updates the in-memory config reference when the server hot-reloads.
-func (h *Handler) SetConfig(cfg *config.Config) { h.cfg = cfg }
+func (h *Handler) SetConfig(cfg *config.Config) {
+	h.cfg = cfg
+	if h != nil && h.usagePersistence != nil && cfg != nil {
+		h.usagePersistence.ApplyConfig(cfg.UsagePersistence)
+	}
+}
 
 // SetAuthManager updates the auth manager reference used by management endpoints.
 func (h *Handler) SetAuthManager(manager *coreauth.Manager) { h.authManager = manager }
 
 // SetUsageStatistics allows replacing the usage statistics reference.
 func (h *Handler) SetUsageStatistics(stats *usage.RequestStatistics) { h.usageStats = stats }
+
+// SetUsagePersistenceManager replaces the usage persistence manager.
+func (h *Handler) SetUsagePersistenceManager(manager *usage.PersistenceManager) { h.usagePersistence = manager }
 
 // SetLocalPassword configures the runtime-local password accepted for localhost requests.
 func (h *Handler) SetLocalPassword(password string) { h.localPassword = password }
@@ -132,6 +145,16 @@ func (h *Handler) SetLogDirectory(dir string) {
 // SetPostAuthHook registers a hook to be called after auth record creation but before persistence.
 func (h *Handler) SetPostAuthHook(hook coreauth.PostAuthHook) {
 	h.postAuthHook = hook
+}
+
+// Stop releases background resources owned by management handler.
+func (h *Handler) Stop() {
+	if h == nil {
+		return
+	}
+	if h.usagePersistence != nil {
+		h.usagePersistence.Stop(true)
+	}
 }
 
 // Middleware enforces access control for management endpoints.
