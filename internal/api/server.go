@@ -24,6 +24,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api/middleware"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api/modules"
 	ampmodule "github.com/router-for-me/CLIProxyAPI/v6/internal/api/modules/amp"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/cluster"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/managementasset"
@@ -52,6 +53,7 @@ type serverOptionConfig struct {
 	keepAliveTimeout     time.Duration
 	keepAliveOnTimeout   func()
 	postAuthHook         auth.PostAuthHook
+	clusterService       *cluster.Service
 }
 
 // ServerOption customises HTTP server construction.
@@ -114,6 +116,13 @@ func WithRequestLoggerFactory(factory func(*config.Config, string) logging.Reque
 func WithPostAuthHook(hook auth.PostAuthHook) ServerOption {
 	return func(cfg *serverOptionConfig) {
 		cfg.postAuthHook = hook
+	}
+}
+
+// WithClusterService injects the shared cluster service used by management handlers.
+func WithClusterService(service *cluster.Service) ServerOption {
+	return func(cfg *serverOptionConfig) {
+		cfg.clusterService = service
 	}
 }
 
@@ -270,6 +279,9 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	s.mgmt.SetLogDirectory(logDir)
 	if optionState.postAuthHook != nil {
 		s.mgmt.SetPostAuthHook(optionState.postAuthHook)
+	}
+	if optionState.clusterService != nil {
+		s.mgmt.SetClusterService(optionState.clusterService)
 	}
 	s.localPassword = optionState.localPassword
 
@@ -489,9 +501,10 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/usage", s.mgmt.GetUsageStatistics)
 		mgmt.GET("/usage/export", s.mgmt.ExportUsageStatistics)
 		mgmt.POST("/usage/import", s.mgmt.ImportUsageStatistics)
-		mgmt.GET("/config", s.mgmt.GetConfig)
-		mgmt.GET("/config.yaml", s.mgmt.GetConfigYAML)
-		mgmt.PUT("/config.yaml", s.mgmt.PutConfigYAML)
+		mgmt.GET("/cluster/state", s.mgmt.GetClusterState)
+		mgmt.GET("/config", s.mgmt.WithTargetProxy(s.mgmt.GetConfig))
+		mgmt.GET("/config.yaml", s.mgmt.WithTargetProxy(s.mgmt.GetConfigYAML))
+		mgmt.PUT("/config.yaml", s.mgmt.WithTargetProxy(s.mgmt.PutConfigYAML))
 		mgmt.GET("/latest-version", s.mgmt.GetLatestVersion)
 
 		mgmt.GET("/debug", s.mgmt.GetDebug)
@@ -529,10 +542,10 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PUT("/quota-exceeded/switch-preview-model", s.mgmt.PutSwitchPreviewModel)
 		mgmt.PATCH("/quota-exceeded/switch-preview-model", s.mgmt.PutSwitchPreviewModel)
 
-		mgmt.GET("/api-keys", s.mgmt.GetAPIKeys)
-		mgmt.PUT("/api-keys", s.mgmt.PutAPIKeys)
-		mgmt.PATCH("/api-keys", s.mgmt.PatchAPIKeys)
-		mgmt.DELETE("/api-keys", s.mgmt.DeleteAPIKeys)
+		mgmt.GET("/api-keys", s.mgmt.WithTargetProxy(s.mgmt.GetAPIKeys))
+		mgmt.PUT("/api-keys", s.mgmt.WithTargetProxy(s.mgmt.PutAPIKeys))
+		mgmt.PATCH("/api-keys", s.mgmt.WithTargetProxy(s.mgmt.PatchAPIKeys))
+		mgmt.DELETE("/api-keys", s.mgmt.WithTargetProxy(s.mgmt.DeleteAPIKeys))
 
 		mgmt.GET("/gemini-api-key", s.mgmt.GetGeminiKeys)
 		mgmt.PUT("/gemini-api-key", s.mgmt.PutGeminiKeys)
@@ -620,14 +633,14 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PATCH("/oauth-model-alias", s.mgmt.PatchOAuthModelAlias)
 		mgmt.DELETE("/oauth-model-alias", s.mgmt.DeleteOAuthModelAlias)
 
-		mgmt.GET("/auth-files", s.mgmt.ListAuthFiles)
-		mgmt.GET("/auth-files/models", s.mgmt.GetAuthFileModels)
+		mgmt.GET("/auth-files", s.mgmt.WithTargetProxy(s.mgmt.ListAuthFiles))
+		mgmt.GET("/auth-files/models", s.mgmt.WithTargetProxy(s.mgmt.GetAuthFileModels))
 		mgmt.GET("/model-definitions/:channel", s.mgmt.GetStaticModelDefinitions)
-		mgmt.GET("/auth-files/download", s.mgmt.DownloadAuthFile)
-		mgmt.POST("/auth-files", s.mgmt.UploadAuthFile)
-		mgmt.DELETE("/auth-files", s.mgmt.DeleteAuthFile)
-		mgmt.PATCH("/auth-files/status", s.mgmt.PatchAuthFileStatus)
-		mgmt.PATCH("/auth-files/fields", s.mgmt.PatchAuthFileFields)
+		mgmt.GET("/auth-files/download", s.mgmt.WithTargetProxy(s.mgmt.DownloadAuthFile))
+		mgmt.POST("/auth-files", s.mgmt.WithTargetProxy(s.mgmt.UploadAuthFile))
+		mgmt.DELETE("/auth-files", s.mgmt.WithTargetProxy(s.mgmt.DeleteAuthFile))
+		mgmt.PATCH("/auth-files/status", s.mgmt.WithTargetProxy(s.mgmt.PatchAuthFileStatus))
+		mgmt.PATCH("/auth-files/fields", s.mgmt.WithTargetProxy(s.mgmt.PatchAuthFileFields))
 		mgmt.POST("/vertex/import", s.mgmt.ImportVertexCredential)
 
 		mgmt.GET("/anthropic-auth-url", s.mgmt.RequestAnthropicToken)

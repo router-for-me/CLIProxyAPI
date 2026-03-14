@@ -314,6 +314,65 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 	return nil, "", s.mixedUnavailableErrorLocked(normalized, model, tried)
 }
 
+// hasReadyProvider reports whether any of the supplied providers has at least one ready auth.
+func (s *authScheduler) hasReadyProvider(providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) bool {
+	if s == nil {
+		return false
+	}
+	normalized := normalizeProviderKeys(providers)
+	if len(normalized) == 0 {
+		return false
+	}
+
+	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := time.Now()
+	if pinnedAuthID != "" {
+		providerKey := s.authProviders[pinnedAuthID]
+		if providerKey == "" || !containsProvider(normalized, providerKey) {
+			return false
+		}
+		providerState := s.providers[providerKey]
+		if providerState == nil {
+			return false
+		}
+		shard := providerState.ensureModelLocked(canonicalModelKey(model), now)
+		if shard == nil {
+			return false
+		}
+		_, ok := shard.highestReadyPriorityLocked(false, func(entry *scheduledAuth) bool {
+			if entry == nil || entry.auth == nil || entry.auth.ID != pinnedAuthID {
+				return false
+			}
+			if len(tried) == 0 {
+				return true
+			}
+			_, used := tried[pinnedAuthID]
+			return !used
+		})
+		return ok
+	}
+
+	predicate := triedPredicate(tried)
+	for _, providerKey := range normalized {
+		providerState := s.providers[providerKey]
+		if providerState == nil {
+			continue
+		}
+		shard := providerState.ensureModelLocked(canonicalModelKey(model), now)
+		if shard == nil {
+			continue
+		}
+		if _, ok := shard.highestReadyPriorityLocked(false, predicate); ok {
+			return true
+		}
+	}
+	return false
+}
+
 // mixedUnavailableErrorLocked synthesizes the mixed-provider cooldown or unavailable error.
 func (s *authScheduler) mixedUnavailableErrorLocked(providers []string, model string, tried map[string]struct{}) error {
 	now := time.Now()

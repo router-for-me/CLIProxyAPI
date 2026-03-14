@@ -7,6 +7,7 @@
 package openai
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -111,6 +112,8 @@ func (h *OpenAIAPIHandler) ChatCompletions(c *gin.Context) {
 	// Check if the client requested a streaming response.
 	streamResult := gjson.GetBytes(rawJSON, "stream")
 	stream := streamResult.Type == gjson.True
+	originalRawJSON := bytes.Clone(rawJSON)
+	bodyRewritten := false
 
 	// Some clients send OpenAI Responses-format payloads to /v1/chat/completions.
 	// Convert them to Chat Completions so downstream translators preserve tool metadata.
@@ -118,11 +121,18 @@ func (h *OpenAIAPIHandler) ChatCompletions(c *gin.Context) {
 		modelName := gjson.GetBytes(rawJSON, "model").String()
 		rawJSON = responsesconverter.ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName, rawJSON, stream)
 		stream = gjson.GetBytes(rawJSON, "stream").Bool()
+		bodyRewritten = true
 	}
 
 	if stream {
+		if bodyRewritten {
+			c.Set("cluster_original_request_body", originalRawJSON)
+		}
 		h.handleStreamingResponse(c, rawJSON)
 	} else {
+		if bodyRewritten {
+			c.Set("cluster_original_request_body", originalRawJSON)
+		}
 		h.handleNonStreamingResponse(c, rawJSON)
 	}
 
@@ -431,6 +441,11 @@ func (h *OpenAIAPIHandler) handleNonStreamingResponse(c *gin.Context, rawJSON []
 
 	modelName := gjson.GetBytes(rawJSON, "model").String()
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	if original, ok := c.Get("cluster_original_request_body"); ok {
+		if body, okBody := original.([]byte); okBody && len(body) > 0 {
+			cliCtx = handlers.WithRequestBodyOverride(cliCtx, body)
+		}
+	}
 	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, h.GetAlt(c))
 	if errMsg != nil {
 		h.WriteErrorResponse(c, errMsg)
@@ -464,6 +479,11 @@ func (h *OpenAIAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON []byt
 
 	modelName := gjson.GetBytes(rawJSON, "model").String()
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	if original, ok := c.Get("cluster_original_request_body"); ok {
+		if body, okBody := original.([]byte); okBody && len(body) > 0 {
+			cliCtx = handlers.WithRequestBodyOverride(cliCtx, body)
+		}
+	}
 	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, h.GetAlt(c))
 
 	setSSEHeaders := func() {
@@ -533,6 +553,7 @@ func (h *OpenAIAPIHandler) handleCompletionsNonStreamingResponse(c *gin.Context,
 
 	modelName := gjson.GetBytes(chatCompletionsJSON, "model").String()
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	cliCtx = handlers.WithRequestBodyOverride(cliCtx, rawJSON)
 	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
 	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, h.HandlerType(), modelName, chatCompletionsJSON, "")
 	stopKeepAlive()
@@ -572,6 +593,7 @@ func (h *OpenAIAPIHandler) handleCompletionsStreamingResponse(c *gin.Context, ra
 
 	modelName := gjson.GetBytes(chatCompletionsJSON, "model").String()
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	cliCtx = handlers.WithRequestBodyOverride(cliCtx, rawJSON)
 	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, chatCompletionsJSON, "")
 
 	setSSEHeaders := func() {

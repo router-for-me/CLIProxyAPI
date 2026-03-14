@@ -14,6 +14,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/cluster"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
@@ -55,6 +56,7 @@ const (
 type pinnedAuthContextKey struct{}
 type selectedAuthCallbackContextKey struct{}
 type executionSessionContextKey struct{}
+type requestBodyOverrideContextKey struct{}
 
 // WithPinnedAuthID returns a child context that requests execution on a specific auth ID.
 func WithPinnedAuthID(ctx context.Context, authID string) context.Context {
@@ -89,6 +91,17 @@ func WithExecutionSessionID(ctx context.Context, sessionID string) context.Conte
 		ctx = context.Background()
 	}
 	return context.WithValue(ctx, executionSessionContextKey{}, sessionID)
+}
+
+// WithRequestBodyOverride stores the original inbound request body when handlers rewrite it internally.
+func WithRequestBodyOverride(ctx context.Context, body []byte) context.Context {
+	if len(body) == 0 {
+		return ctx
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, requestBodyOverrideContextKey{}, bytes.Clone(body))
 }
 
 // BuildErrorResponseBody builds an OpenAI-compatible JSON error response body.
@@ -208,6 +221,26 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 	if executionSessionID := executionSessionIDFromContext(ctx); executionSessionID != "" {
 		meta[coreexecutor.ExecutionSessionMetadataKey] = executionSessionID
 	}
+	if bodyOverride := requestBodyOverrideFromContext(ctx); len(bodyOverride) > 0 {
+		meta[coreexecutor.RequestBodyOverrideMetadataKey] = bodyOverride
+	}
+	if ctx != nil {
+		if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
+			meta[coreexecutor.RequestPathMetadataKey] = ginCtx.Request.URL.Path
+			meta[coreexecutor.RequestMethodMetadataKey] = ginCtx.Request.Method
+			meta[coreexecutor.RequestRawQueryMetadataKey] = ginCtx.Request.URL.RawQuery
+			meta[coreexecutor.RequestHeadersMetadataKey] = ginCtx.Request.Header.Clone()
+			if hop := strings.TrimSpace(ginCtx.GetHeader(cluster.HeaderHop)); hop != "" {
+				meta[coreexecutor.ClusterForwardedMetadataKey] = true
+				meta[coreexecutor.ClusterLocalOnlyMetadataKey] = true
+			}
+			if forwardedBy := strings.TrimSpace(ginCtx.GetHeader(cluster.HeaderForwardedBy)); forwardedBy != "" {
+				meta[coreexecutor.ClusterForwardedMetadataKey] = true
+				meta[coreexecutor.ClusterLocalOnlyMetadataKey] = true
+				meta[coreexecutor.ClusterForwardedByMetadataKey] = forwardedBy
+			}
+		}
+	}
 	return meta
 }
 
@@ -249,6 +282,21 @@ func executionSessionIDFromContext(ctx context.Context) string {
 		return strings.TrimSpace(string(v))
 	default:
 		return ""
+	}
+}
+
+func requestBodyOverrideFromContext(ctx context.Context) []byte {
+	if ctx == nil {
+		return nil
+	}
+	raw := ctx.Value(requestBodyOverrideContextKey{})
+	switch typed := raw.(type) {
+	case []byte:
+		return bytes.Clone(typed)
+	case string:
+		return []byte(typed)
+	default:
+		return nil
 	}
 }
 

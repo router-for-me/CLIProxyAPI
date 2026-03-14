@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 	"syscall"
@@ -21,6 +22,11 @@ import (
 const (
 	DefaultPanelGitHubRepository = "https://github.com/router-for-me/Cli-Proxy-API-Management-Center"
 	DefaultPprofAddr             = "127.0.0.1:8316"
+	DefaultClusterPollSeconds    = 120
+	DefaultClusterTimeoutSeconds = 300
+
+	ClusterModelListModeBlack = "black"
+	ClusterModelListModeWhite = "white"
 )
 
 // Config represents the application's configuration, loaded from a YAML file.
@@ -37,6 +43,9 @@ type Config struct {
 
 	// RemoteManagement nests management-related options under 'remote-management'.
 	RemoteManagement RemoteManagement `yaml:"remote-management" json:"-"`
+
+	// Cluster configures optional multi-node cluster behavior.
+	Cluster ClusterConfig `yaml:"cluster" json:"cluster"`
 
 	// AuthDir is the directory where authentication token files are stored.
 	AuthDir string `yaml:"auth-dir" json:"-"`
@@ -174,6 +183,44 @@ type RemoteManagement struct {
 	// PanelGitHubRepository overrides the GitHub repository used to fetch the management panel asset.
 	// Accepts either a repository URL (https://github.com/org/repo) or an API releases endpoint.
 	PanelGitHubRepository string `yaml:"panel-github-repository"`
+}
+
+// ClusterConfig configures optional peer-to-peer cluster behavior.
+type ClusterConfig struct {
+	// Enabled turns cluster mode on or off.
+	Enabled bool `yaml:"enabled" json:"enabled"`
+	// NodeID is the stable identifier peers use to reference this node.
+	NodeID string `yaml:"node-id" json:"node-id"`
+	// AdvertiseURL is the public base URL peers should use for this node's public API.
+	AdvertiseURL string `yaml:"advertise-url" json:"advertise-url"`
+	// PollIntervalSeconds controls how often peer state and model catalogs are refreshed.
+	PollIntervalSeconds int `yaml:"poll-interval-seconds" json:"poll-interval-seconds"`
+	// ForwardTimeoutSeconds bounds peer HTTP requests for control-plane and discovery calls.
+	ForwardTimeoutSeconds int `yaml:"forward-timeout-seconds" json:"forward-timeout-seconds"`
+	// PreferLocal prefers local providers when later routing logic mixes local and remote models.
+	PreferLocal bool `yaml:"prefer-local" json:"prefer-local"`
+	// RegisterNodePrefixAlias enables explicit <node-id>/<model-id> aliases for remote models.
+	RegisterNodePrefixAlias bool `yaml:"register-node-prefix-alias" json:"register-node-prefix-alias"`
+	// Nodes is the static Phase 1 peer list.
+	Nodes []ClusterNode `yaml:"nodes" json:"nodes"`
+}
+
+// ClusterNode describes a single peer node in the static cluster list.
+type ClusterNode struct {
+	// ID is the stable peer node identifier.
+	ID string `yaml:"id" json:"id"`
+	// Enabled controls whether the peer participates in cluster operations.
+	Enabled bool `yaml:"enabled" json:"enabled"`
+	// ManagementURL is the peer management API base URL.
+	ManagementURL string `yaml:"management-url" json:"management-url"`
+	// ManagementKey is the management key used only for peer control-plane calls.
+	ManagementKey string `yaml:"management-key" json:"management-key"`
+	// APIKeys are the peer public API keys used for discovery and later forwarding.
+	APIKeys []string `yaml:"api-keys" json:"api-keys"`
+	// ModelListMode controls whitelist/blacklist filtering for discovered peer models.
+	ModelListMode string `yaml:"model-list-mode" json:"model-list-mode"`
+	// ModelList is the exact model ID allow/deny list used with ModelListMode.
+	ModelList []string `yaml:"model-list" json:"model-list"`
 }
 
 // QuotaExceeded defines the behavior when API quota limits are exceeded.
@@ -558,12 +605,21 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.Pprof.Addr = DefaultPprofAddr
 	cfg.AmpCode.RestrictManagementToLocalhost = false // Default to false: API key auth is sufficient
 	cfg.RemoteManagement.PanelGitHubRepository = DefaultPanelGitHubRepository
+	cfg.Cluster.PollIntervalSeconds = DefaultClusterPollSeconds
+	cfg.Cluster.ForwardTimeoutSeconds = DefaultClusterTimeoutSeconds
 	if err = yaml.Unmarshal(data, &cfg); err != nil {
 		if optional {
 			// In cloud deploy mode, if YAML parsing fails, return empty config instead of error.
 			return &Config{}, nil
 		}
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
+	}
+
+	if err = cfg.normalizeAndValidateClusterConfig(); err != nil {
+		if optional {
+			return &Config{}, nil
+		}
+		return nil, err
 	}
 
 	// NOTE: Startup legacy key migration is intentionally disabled.
@@ -862,6 +918,139 @@ func normalizeModelPrefix(prefix string) string {
 		return ""
 	}
 	return trimmed
+}
+
+func (cfg *Config) normalizeAndValidateClusterConfig() error {
+	if cfg == nil {
+		return nil
+	}
+
+	clusterCfg := &cfg.Cluster
+	clusterCfg.NodeID = strings.TrimSpace(clusterCfg.NodeID)
+	clusterCfg.AdvertiseURL = strings.TrimSpace(clusterCfg.AdvertiseURL)
+	if clusterCfg.PollIntervalSeconds <= 0 {
+		clusterCfg.PollIntervalSeconds = DefaultClusterPollSeconds
+	}
+	if clusterCfg.ForwardTimeoutSeconds <= 0 {
+		clusterCfg.ForwardTimeoutSeconds = DefaultClusterTimeoutSeconds
+	}
+
+	var err error
+	if clusterCfg.AdvertiseURL != "" {
+		clusterCfg.AdvertiseURL, err = normalizeClusterURL(clusterCfg.AdvertiseURL)
+		if err != nil {
+			return fmt.Errorf("cluster.advertise-url: %w", err)
+		}
+	}
+
+	if len(clusterCfg.Nodes) > 0 {
+		nodes := make([]ClusterNode, 0, len(clusterCfg.Nodes))
+		for i := range clusterCfg.Nodes {
+			node := clusterCfg.Nodes[i]
+			node.ID = strings.TrimSpace(node.ID)
+			node.ManagementURL = strings.TrimSpace(node.ManagementURL)
+			node.ManagementKey = strings.TrimSpace(node.ManagementKey)
+			node.APIKeys = normalizeExactStringList(node.APIKeys)
+			node.ModelList = normalizeExactStringList(node.ModelList)
+			mode := strings.ToLower(strings.TrimSpace(node.ModelListMode))
+			if mode == "" {
+				mode = ClusterModelListModeBlack
+			}
+			node.ModelListMode = mode
+
+			if node.ManagementURL != "" {
+				node.ManagementURL, err = normalizeClusterURL(node.ManagementURL)
+				if err != nil {
+					return fmt.Errorf("cluster.nodes[%d].management-url: %w", i, err)
+				}
+			}
+
+			nodes = append(nodes, node)
+		}
+		clusterCfg.Nodes = nodes
+	}
+
+	if clusterCfg.Enabled && clusterCfg.NodeID == "" {
+		return fmt.Errorf("cluster.node-id is required when cluster.enabled is true")
+	}
+	if clusterCfg.Enabled && clusterCfg.AdvertiseURL == "" {
+		return fmt.Errorf("cluster.advertise-url is required when cluster.enabled is true")
+	}
+
+	seenPeerIDs := make(map[string]struct{}, len(clusterCfg.Nodes))
+	for i := range clusterCfg.Nodes {
+		node := clusterCfg.Nodes[i]
+		if node.ID == "" {
+			return fmt.Errorf("cluster.nodes[%d].id is required", i)
+		}
+		peerKey := strings.ToLower(node.ID)
+		if _, exists := seenPeerIDs[peerKey]; exists {
+			return fmt.Errorf("cluster.nodes[%d].id duplicates peer %q", i, node.ID)
+		}
+		seenPeerIDs[peerKey] = struct{}{}
+		if clusterCfg.NodeID != "" && strings.EqualFold(clusterCfg.NodeID, node.ID) {
+			return fmt.Errorf("cluster.node-id %q collides with peer id", clusterCfg.NodeID)
+		}
+		switch node.ModelListMode {
+		case ClusterModelListModeBlack, ClusterModelListModeWhite:
+		default:
+			return fmt.Errorf("cluster.nodes[%d].model-list-mode must be %q or %q", i, ClusterModelListModeBlack, ClusterModelListModeWhite)
+		}
+		if !node.Enabled {
+			continue
+		}
+		if node.ManagementURL == "" {
+			return fmt.Errorf("cluster.nodes[%d].management-url is required when the peer is enabled", i)
+		}
+		if node.ManagementKey == "" {
+			return fmt.Errorf("cluster.nodes[%d].management-key is required when the peer is enabled", i)
+		}
+		if len(node.APIKeys) == 0 {
+			return fmt.Errorf("cluster.nodes[%d].api-keys requires at least one non-empty key when the peer is enabled", i)
+		}
+	}
+
+	return nil
+}
+
+func normalizeClusterURL(raw string) (string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return "", fmt.Errorf("invalid URL: %w", err)
+	}
+	scheme := strings.ToLower(strings.TrimSpace(parsed.Scheme))
+	if scheme != "http" && scheme != "https" {
+		return "", fmt.Errorf("unsupported URL scheme %q", parsed.Scheme)
+	}
+	if strings.TrimSpace(parsed.Host) == "" {
+		return "", fmt.Errorf("URL host is required")
+	}
+	parsed.Scheme = scheme
+	parsed.Path = strings.TrimRight(parsed.Path, "/")
+	return parsed.String(), nil
+}
+
+func normalizeExactStringList(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, raw := range values {
+		trimmed := strings.TrimSpace(raw)
+		if trimmed == "" {
+			continue
+		}
+		if _, exists := seen[trimmed]; exists {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		out = append(out, trimmed)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // looksLikeBcrypt returns true if the provided string appears to be a bcrypt hash.
@@ -1278,6 +1467,10 @@ func isKnownDefaultValue(path []string, node *yaml.Node) bool {
 		switch fullPath {
 		case "error-logs-max-files":
 			return node.Value == "10"
+		case "cluster.poll-interval-seconds":
+			return node.Value == fmt.Sprintf("%d", DefaultClusterPollSeconds)
+		case "cluster.forward-timeout-seconds":
+			return node.Value == fmt.Sprintf("%d", DefaultClusterTimeoutSeconds)
 		}
 	}
 

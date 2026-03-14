@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/cluster"
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
@@ -847,6 +848,35 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	_ = m.persist(ctx, auth)
 	m.hook.OnAuthUpdated(ctx, auth.Clone())
 	return auth.Clone(), nil
+}
+
+// Delete removes an auth entry from runtime state and optionally persistence.
+func (m *Manager) Delete(ctx context.Context, id string) error {
+	id = strings.TrimSpace(id)
+	if m == nil || id == "" {
+		return nil
+	}
+
+	var removed *Auth
+	m.mu.Lock()
+	if existing := m.auths[id]; existing != nil {
+		removed = existing.Clone()
+	}
+	delete(m.auths, id)
+	m.mu.Unlock()
+
+	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
+	if m.scheduler != nil {
+		m.scheduler.removeAuth(id)
+	}
+
+	if removed == nil || m.store == nil || shouldSkipPersist(ctx) {
+		return nil
+	}
+	if removed.Attributes != nil && strings.EqualFold(strings.TrimSpace(removed.Attributes["runtime_only"]), "true") {
+		return nil
+	}
+	return m.store.Delete(ctx, id)
 }
 
 // Load resets manager state from the backing store.
@@ -2161,6 +2191,12 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 }
 
 func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
+	filteredProviders, errFilter := m.filterMixedProviders(model, opts, tried, providers)
+	if errFilter != nil {
+		return nil, nil, "", errFilter
+	}
+	providers = filteredProviders
+
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
 
 	providerSet := make(map[string]struct{}, len(providers))
@@ -2267,11 +2303,18 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 	if len(eligibleProviders) == 0 {
 		return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
+	filteredProviders, errFilter := m.filterMixedProviders(model, opts, tried, eligibleProviders)
+	if errFilter != nil {
+		return nil, nil, "", errFilter
+	}
+	eligibleProviders = filteredProviders
+	selectionOpts := m.sanitizeMixedSelectionOptions(opts, eligibleProviders)
 
-	selected, providerKey, errPick := m.scheduler.pickMixed(ctx, eligibleProviders, model, opts, tried)
+	selected, providerKey, errPick := m.scheduler.pickMixed(ctx, eligibleProviders, model, selectionOpts, tried)
 	if errPick != nil && model != "" && shouldRetrySchedulerPick(errPick) {
 		m.syncScheduler()
-		selected, providerKey, errPick = m.scheduler.pickMixed(ctx, eligibleProviders, model, opts, tried)
+		selectionOpts = m.sanitizeMixedSelectionOptions(opts, eligibleProviders)
+		selected, providerKey, errPick = m.scheduler.pickMixed(ctx, eligibleProviders, model, selectionOpts, tried)
 	}
 	if errPick != nil {
 		return nil, nil, "", errPick
@@ -2293,6 +2336,127 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 		m.mu.Unlock()
 	}
 	return authCopy, executor, providerKey, nil
+}
+
+func (m *Manager) filterMixedProviders(model string, opts cliproxyexecutor.Options, tried map[string]struct{}, providers []string) ([]string, error) {
+	if len(providers) == 0 {
+		return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
+	}
+
+	localProviders, remoteProviders := splitMixedProviders(providers)
+	probeOpts := withoutPinnedAuthMetadata(opts)
+	localOnly := metadataBool(opts.Metadata, cliproxyexecutor.ClusterLocalOnlyMetadataKey) || metadataBool(opts.Metadata, cliproxyexecutor.ClusterForwardedMetadataKey)
+	if localOnly {
+		if len(localProviders) == 0 || !m.schedulerHasReadyProvider(localProviders, model, probeOpts, tried) {
+			return nil, clusterLocalOnlyError()
+		}
+		return localProviders, nil
+	}
+
+	if m.clusterPreferLocalEnabled() && len(localProviders) > 0 && len(remoteProviders) > 0 {
+		if m.schedulerHasReadyProvider(localProviders, model, probeOpts, tried) {
+			return localProviders, nil
+		}
+	}
+	return providers, nil
+}
+
+func splitMixedProviders(providers []string) (localProviders []string, remoteProviders []string) {
+	localProviders = make([]string, 0, len(providers))
+	remoteProviders = make([]string, 0, len(providers))
+	for _, provider := range providers {
+		if cluster.IsSyntheticProvider(provider) {
+			remoteProviders = append(remoteProviders, provider)
+			continue
+		}
+		localProviders = append(localProviders, provider)
+	}
+	return localProviders, remoteProviders
+}
+
+func metadataBool(metadata map[string]any, key string) bool {
+	if len(metadata) == 0 {
+		return false
+	}
+	value, ok := metadata[key]
+	if !ok {
+		return false
+	}
+	switch typed := value.(type) {
+	case bool:
+		return typed
+	case string:
+		return strings.EqualFold(strings.TrimSpace(typed), "true")
+	default:
+		return false
+	}
+}
+
+func withoutPinnedAuthMetadata(opts cliproxyexecutor.Options) cliproxyexecutor.Options {
+	if pinnedAuthIDFromMetadata(opts.Metadata) == "" {
+		return opts
+	}
+	if len(opts.Metadata) == 0 {
+		return opts
+	}
+	cloned := make(map[string]any, len(opts.Metadata)-1)
+	for key, value := range opts.Metadata {
+		if key == cliproxyexecutor.PinnedAuthMetadataKey {
+			continue
+		}
+		cloned[key] = value
+	}
+	opts.Metadata = cloned
+	return opts
+}
+
+func (m *Manager) sanitizeMixedSelectionOptions(opts cliproxyexecutor.Options, providers []string) cliproxyexecutor.Options {
+	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
+	if pinnedAuthID == "" {
+		return opts
+	}
+	provider := m.providerForAuthID(pinnedAuthID)
+	if provider != "" && containsProvider(providers, provider) {
+		return opts
+	}
+	return withoutPinnedAuthMetadata(opts)
+}
+
+func (m *Manager) providerForAuthID(authID string) string {
+	authID = strings.TrimSpace(authID)
+	if m == nil || authID == "" {
+		return ""
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if auth := m.auths[authID]; auth != nil {
+		return strings.ToLower(strings.TrimSpace(auth.Provider))
+	}
+	return ""
+}
+
+func (m *Manager) clusterPreferLocalEnabled() bool {
+	if m == nil {
+		return false
+	}
+	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+	return cfg != nil && cfg.Cluster.PreferLocal
+}
+
+func (m *Manager) schedulerHasReadyProvider(providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) bool {
+	if m == nil || m.scheduler == nil {
+		return false
+	}
+	return m.scheduler.hasReadyProvider(providers, model, opts, tried)
+}
+
+func clusterLocalOnlyError() error {
+	return &Error{
+		Code:       "cluster_local_only_unavailable",
+		Message:    "cluster-forwarded request cannot be forwarded again because no local provider is ready",
+		Retryable:  true,
+		HTTPStatus: http.StatusBadGateway,
+	}
 }
 
 func (m *Manager) persist(ctx context.Context, auth *Auth) error {

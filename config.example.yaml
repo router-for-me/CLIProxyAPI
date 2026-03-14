@@ -28,6 +28,28 @@ remote-management:
   # GitHub repository for the management control panel. Accepts a repository URL or releases API URL.
   panel-github-repository: "https://github.com/router-for-me/Cli-Proxy-API-Management-Center"
 
+# Optional distributed cluster settings (Phase 1).
+# Control-plane peer calls use `management-url` + `management-key`.
+# Public peer discovery and later data-plane forwarding use peer `api-keys`.
+# All participating nodes must run the exact same CLIProxyAPI version.
+# cluster:
+#   enabled: false
+#   node-id: "node-a"                       # stable local node identifier
+#   advertise-url: "http://node-a.example.com" # public base URL peers should use for this node
+#   poll-interval-seconds: 120             # peer state + /v1/models refresh interval
+#   forward-timeout-seconds: 300           # timeout for peer management/discovery requests
+#   prefer-local: false                    # later routing policy; no effect in single-node mode
+#   register-node-prefix-alias: false      # later remote-model alias registration toggle
+#   nodes:
+#     - id: "node-b"                       # stable peer identifier used with ?target=node-b
+#       enabled: true
+#       management-url: "http://node-b.example.com" # peer /v0/management base URL
+#       management-key: "replace-with-node-b-management-key"
+#       api-keys:                          # peer public API keys copied from node-b top-level api-keys
+#         - "replace-with-node-b-public-api-key"
+#       model-list-mode: "black"           # black: exclude listed models; white: allow only listed models
+#       model-list: []                     # exact model IDs only; no wildcard or regex matching
+
 # Authentication directory (supports ~ for home directory)
 auth-dir: "~/.cli-proxy-api"
 

@@ -19,6 +19,22 @@ const (
 	SelectedAuthCallbackMetadataKey = "selected_auth_callback"
 	// ExecutionSessionMetadataKey identifies a long-lived downstream execution session.
 	ExecutionSessionMetadataKey = "execution_session_id"
+	// RequestPathMetadataKey stores the original inbound HTTP request path.
+	RequestPathMetadataKey = "request_path"
+	// RequestMethodMetadataKey stores the original inbound HTTP method.
+	RequestMethodMetadataKey = "request_method"
+	// RequestRawQueryMetadataKey stores the original inbound raw query string.
+	RequestRawQueryMetadataKey = "request_raw_query"
+	// RequestHeadersMetadataKey stores a clone of the inbound HTTP headers.
+	RequestHeadersMetadataKey = "request_headers"
+	// RequestBodyOverrideMetadataKey stores the original request body when handlers rewrite payloads internally.
+	RequestBodyOverrideMetadataKey = "request_body_override"
+	// ClusterForwardedMetadataKey marks a request that already arrived from another cluster node.
+	ClusterForwardedMetadataKey = "cluster_forwarded"
+	// ClusterLocalOnlyMetadataKey forces provider selection to exclude synthetic remote providers.
+	ClusterLocalOnlyMetadataKey = "cluster_local_only"
+	// ClusterForwardedByMetadataKey carries the peer node ID that performed the forward.
+	ClusterForwardedByMetadataKey = "cluster_forwarded_by"
 )
 
 // Request encapsulates the translated payload that will be sent to a provider executor.

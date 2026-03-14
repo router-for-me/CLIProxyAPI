@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/cluster"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
@@ -89,6 +90,9 @@ type Service struct {
 
 	// wsGateway manages websocket Gemini providers.
 	wsGateway *wsrelay.Manager
+
+	// cluster manages peer control-plane helpers and discovery catalog state.
+	cluster *cluster.Service
 }
 
 // RegisterUsagePlugin registers a usage plugin on the global usage manager.
@@ -327,6 +331,12 @@ func (s *Service) applyCoreAuthRemoval(ctx context.Context, id string) {
 	}
 	GlobalModelRegistry().UnregisterClient(id)
 	if existing, ok := s.coreManager.GetByID(id); ok && existing != nil {
+		if isRuntimeOnlyAuth(existing) {
+			if err := s.coreManager.Delete(ctx, id); err != nil {
+				log.Errorf("failed to delete runtime auth %s: %v", id, err)
+			}
+			return
+		}
 		existing.Disabled = true
 		existing.Status = coreauth.StatusDisabled
 		if _, err := s.coreManager.Update(ctx, existing); err != nil {
@@ -366,12 +376,30 @@ func openAICompatInfoFromAuth(a *coreauth.Auth) (providerKey string, compatName 
 	return "", "", false
 }
 
+func isRuntimeOnlyAuth(auth *coreauth.Auth) bool {
+	if auth == nil || auth.Attributes == nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(auth.Attributes[cluster.AttributeRuntimeOnly]), "true")
+}
+
 func (s *Service) ensureExecutorsForAuth(a *coreauth.Auth) {
 	s.ensureExecutorsForAuthWithMode(a, false)
 }
 
 func (s *Service) ensureExecutorsForAuthWithMode(a *coreauth.Auth, forceReplace bool) {
 	if s == nil || s.coreManager == nil || a == nil {
+		return
+	}
+	if cluster.IsSyntheticProvider(a.Provider) {
+		if s.cluster == nil {
+			return
+		}
+		providerKey := strings.TrimSpace(a.Provider)
+		if providerKey == "" {
+			return
+		}
+		s.coreManager.RegisterExecutor(executor.NewClusterExecutor(providerKey, s.cfg, s.cluster))
 		return
 	}
 	if strings.EqualFold(strings.TrimSpace(a.Provider), "codex") {
@@ -603,7 +631,6 @@ func (s *Service) Run(ctx context.Context) error {
 	fmt.Printf("API server started successfully on: %s:%d\n", s.cfg.Host, s.cfg.Port)
 
 	s.applyPprofConfig(s.cfg)
-
 	if s.hooks.OnAfterStart != nil {
 		s.hooks.OnAfterStart(s)
 	}
@@ -653,6 +680,9 @@ func (s *Service) Run(ctx context.Context) error {
 		if s.server != nil {
 			s.server.UpdateClients(newCfg)
 		}
+		if s.cluster != nil {
+			s.cluster.UpdateConfig(newCfg)
+		}
 		s.cfgMu.Lock()
 		s.cfg = newCfg
 		s.cfgMu.Unlock()
@@ -680,6 +710,11 @@ func (s *Service) Run(ctx context.Context) error {
 		return fmt.Errorf("cliproxy: failed to start watcher: %w", err)
 	}
 	log.Info("file watcher started for config and auth directory changes")
+
+	if s.cluster != nil {
+		s.cluster.SetCatalogUpdateHandler(s.syncClusterCatalog)
+		s.cluster.Start(ctx)
+	}
 
 	// Prefer core auth manager auto refresh if available.
 	if s.coreManager != nil {
@@ -720,6 +755,11 @@ func (s *Service) Shutdown(ctx context.Context) error {
 
 		if s.watcherCancel != nil {
 			s.watcherCancel()
+		}
+		if s.cluster != nil {
+			if err := s.cluster.Stop(ctx); err != nil && shutdownErr == nil {
+				shutdownErr = err
+			}
 		}
 		if s.coreManager != nil {
 			s.coreManager.StopAutoRefresh()
@@ -816,6 +856,20 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		}
 	}
 	provider := strings.ToLower(strings.TrimSpace(a.Provider))
+	if cluster.IsSyntheticProvider(provider) {
+		binding, ok := cluster.BindingFromRuntime(a.Runtime)
+		if !ok || binding == nil {
+			GlobalModelRegistry().UnregisterClient(a.ID)
+			return
+		}
+		models := cluster.BuildModelInfos(*binding)
+		if len(models) == 0 {
+			GlobalModelRegistry().UnregisterClient(a.ID)
+			return
+		}
+		s.registerResolvedModelsForAuth(a, provider, models)
+		return
+	}
 	compatProviderKey, compatDisplayName, compatDetected := openAICompatInfoFromAuth(a)
 	if compatDetected {
 		provider = "openai-compatibility"
@@ -1048,6 +1102,112 @@ func (s *Service) latestAuthForModelRegistration(authID string) (*coreauth.Auth,
 		return nil, false
 	}
 	return auth, true
+}
+
+func (s *Service) syncClusterCatalog(snapshot cluster.CatalogSnapshot) {
+	if s == nil || s.cluster == nil {
+		return
+	}
+	_ = snapshot
+	ctx := coreauth.WithSkipPersist(context.Background())
+	s.reconcileClusterBindings(ctx, s.cluster.ActiveBindings())
+}
+
+func (s *Service) reconcileClusterBindings(ctx context.Context, bindings []cluster.PeerBinding) {
+	if s == nil || s.coreManager == nil {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	desired := make(map[string]cluster.PeerBinding, len(bindings))
+	for _, binding := range bindings {
+		if strings.TrimSpace(binding.AuthID) == "" || strings.TrimSpace(binding.Provider) == "" {
+			continue
+		}
+		desired[binding.AuthID] = cluster.PeerBinding{
+			ConfiguredID:            binding.ConfiguredID,
+			NodeID:                  binding.NodeID,
+			AuthID:                  binding.AuthID,
+			Provider:                binding.Provider,
+			AdvertiseURL:            binding.AdvertiseURL,
+			Models:                  append([]string(nil), binding.Models...),
+			RegisterNodePrefixAlias: binding.RegisterNodePrefixAlias,
+		}
+	}
+
+	existingAuths := s.coreManager.List()
+	for _, auth := range existingAuths {
+		if auth == nil || auth.ID == "" || !cluster.IsSyntheticProvider(auth.Provider) {
+			continue
+		}
+		want, keep := desired[auth.ID]
+		if !keep {
+			s.emitAuthUpdate(ctx, watcher.AuthUpdate{
+				Action: watcher.AuthUpdateActionDelete,
+				ID:     auth.ID,
+			})
+			s.coreManager.UnregisterExecutor(auth.Provider)
+			continue
+		}
+		currentBinding, ok := cluster.BindingFromRuntime(auth.Runtime)
+		if ok && currentBinding != nil && cluster.IsSyntheticProvider(auth.Provider) && bindingsEqualForService(*currentBinding, want) && !auth.Disabled {
+			delete(desired, auth.ID)
+			continue
+		}
+		delete(desired, auth.ID)
+		s.emitAuthUpdate(ctx, watcher.AuthUpdate{
+			Action: watcher.AuthUpdateActionModify,
+			ID:     want.AuthID,
+			Auth:   runtimeAuthFromBinding(want),
+		})
+	}
+
+	for _, binding := range desired {
+		s.emitAuthUpdate(ctx, watcher.AuthUpdate{
+			Action: watcher.AuthUpdateActionAdd,
+			ID:     binding.AuthID,
+			Auth:   runtimeAuthFromBinding(binding),
+		})
+	}
+
+}
+
+func bindingsEqualForService(left, right cluster.PeerBinding) bool {
+	return left.ConfiguredID == right.ConfiguredID &&
+		left.NodeID == right.NodeID &&
+		left.AuthID == right.AuthID &&
+		left.Provider == right.Provider &&
+		left.AdvertiseURL == right.AdvertiseURL &&
+		left.RegisterNodePrefixAlias == right.RegisterNodePrefixAlias &&
+		strings.Join(left.Models, "\x00") == strings.Join(right.Models, "\x00")
+}
+
+func runtimeAuthFromBinding(binding cluster.PeerBinding) *coreauth.Auth {
+	now := time.Now().UTC()
+	return &coreauth.Auth{
+		ID:        binding.AuthID,
+		Provider:  binding.Provider,
+		Label:     binding.NodeID,
+		Status:    coreauth.StatusActive,
+		CreatedAt: now,
+		UpdatedAt: now,
+		Attributes: map[string]string{
+			cluster.AttributeRuntimeOnly:  "true",
+			cluster.AttributePeerID:       binding.ConfiguredID,
+			cluster.AttributeAdvertiseURL: binding.AdvertiseURL,
+		},
+		Runtime: &cluster.PeerBinding{
+			ConfiguredID:            binding.ConfiguredID,
+			NodeID:                  binding.NodeID,
+			AuthID:                  binding.AuthID,
+			Provider:                binding.Provider,
+			AdvertiseURL:            binding.AdvertiseURL,
+			Models:                  append([]string(nil), binding.Models...),
+			RegisterNodePrefixAlias: binding.RegisterNodePrefixAlias,
+		},
+	}
 }
 
 func (s *Service) resolveConfigClaudeKey(auth *coreauth.Auth) *config.ClaudeKey {
