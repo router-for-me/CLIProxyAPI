@@ -265,7 +265,7 @@ func TestApplyAntigravityClaudeCompatTransforms_StripsBridgedOutputConfig(t *tes
 	}
 }
 
-func TestPrepareAntigravityRequestPayloads_PreservesClaudeEffortAgainstDefaults(t *testing.T) {
+func TestPrepareAntigravityRequestPayloads_LeavesDefaultSourceUnmodifiedByThinkingTransforms(t *testing.T) {
 	cfg := &config.Config{
 		Payload: config.PayloadConfig{
 			Default: []config.PayloadRule{
@@ -298,17 +298,17 @@ func TestPrepareAntigravityRequestPayloads_PreservesClaudeEffortAgainstDefaults(
 
 			got := applyPayloadConfigWithRoot(cfg, "claude-opus-4-6-thinking", "antigravity", "request", translated, originalTranslated, "")
 
-			if gotBudget := gjson.GetBytes(got, "request.generationConfig.thinkingConfig.thinkingBudget").Int(); gotBudget != 63999 {
-				t.Fatalf("thinkingBudget = %d, want %d, body=%s", gotBudget, 63999, string(got))
+			if gjson.GetBytes(originalTranslated, "request.generationConfig.thinkingConfig").Exists() {
+				t.Fatalf("originalTranslated should remain the raw translated source for defaults, body=%s", string(originalTranslated))
+			}
+			if gotBudget := gjson.GetBytes(got, "request.generationConfig.thinkingConfig.thinkingBudget").Int(); gotBudget != 1024 {
+				t.Fatalf("thinkingBudget = %d, want %d, body=%s", gotBudget, 1024, string(got))
 			}
 			if gotLevel := gjson.GetBytes(got, "request.generationConfig.thinkingConfig.thinkingLevel"); gotLevel.Exists() {
-				t.Fatalf("thinkingLevel should be converted before defaults, body=%s", string(got))
+				t.Fatalf("thinkingLevel should not suppress defaults when the client omitted target fields, body=%s", string(got))
 			}
-			if !gjson.GetBytes(got, "request.generationConfig.thinkingConfig.includeThoughts").Bool() {
-				t.Fatalf("includeThoughts should remain true from bridged effort, body=%s", string(got))
-			}
-			if gotBudget := gjson.GetBytes(originalTranslated, "request.generationConfig.thinkingConfig.thinkingBudget").Int(); gotBudget != 63999 {
-				t.Fatalf("originalTranslated thinkingBudget = %d, want %d, body=%s", gotBudget, 63999, string(originalTranslated))
+			if gjson.GetBytes(got, "request.generationConfig.thinkingConfig.includeThoughts").Bool() {
+				t.Fatalf("includeThoughts default should apply when the client omitted it, body=%s", string(got))
 			}
 		})
 	}

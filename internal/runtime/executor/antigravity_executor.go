@@ -720,13 +720,9 @@ func (e *AntigravityExecutor) prepareAntigravityRequestPayloads(req cliproxyexec
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, stream)
 	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, stream)
 
-	originalTranslated = preserveClaudeEffortForAntigravity(from, originalPayload, originalTranslated)
 	translated = preserveClaudeEffortForAntigravity(from, originalPayload, translated)
 
-	originalTranslated, err := thinking.ApplyThinking(originalTranslated, req.Model, from.String(), to.String(), e.Identifier())
-	if err != nil {
-		return nil, nil, err
-	}
+	var err error
 	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
 		return nil, nil, err
