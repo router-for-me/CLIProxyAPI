@@ -46,6 +46,21 @@ func TestComputeOpenAICompatModelsHash_NormalizesAndDedups(t *testing.T) {
 	}
 }
 
+func TestComputeOpenAICompatModelsHash_ReasoningCompatibilityChangesHash(t *testing.T) {
+	a := []config.OpenAICompatibilityModel{{
+		Name:  "gpt-4",
+		Alias: "gpt4",
+	}}
+	b := []config.OpenAICompatibilityModel{{
+		Name:                         "gpt-4",
+		Alias:                        "gpt4",
+		ReasoningEffortCompatibility: true,
+	}}
+	if h1, h2 := ComputeOpenAICompatModelsHash(a), ComputeOpenAICompatModelsHash(b); h1 == "" || h1 == h2 {
+		t.Fatalf("expected reasoning compatibility flag to affect hash, got %q / %q", h1, h2)
+	}
+}
+
 func TestComputeVertexCompatModelsHash_DifferentInputs(t *testing.T) {
 	models := []config.VertexCompatModel{{Name: "gemini-pro", Alias: "pro"}}
 	hash1 := ComputeVertexCompatModelsHash(models)

@@ -505,6 +505,10 @@ type OpenAICompatibilityModel struct {
 
 	// Alias is the model name alias that clients will use to reference this model.
 	Alias string `yaml:"alias" json:"alias"`
+
+	// ReasoningEffortCompatibility clamps reasoning_effort to the basic OpenAI-compatible
+	// set supported by stricter upstreams: none, low, medium, high.
+	ReasoningEffortCompatibility bool `yaml:"reasoning-effort-compatibility,omitempty" json:"reasoning-effort-compatibility,omitempty"`
 }
 
 func (m OpenAICompatibilityModel) GetName() string  { return m.Name }

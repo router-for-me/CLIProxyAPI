@@ -67,6 +67,23 @@ func TestDiffOpenAICompatibility_RemovedAndUnchanged(t *testing.T) {
 	expectContains(t, changes, "provider removed: provider-a (api-keys=1, models=1)")
 }
 
+func TestDiffOpenAICompatibility_ModelSettingsUpdated(t *testing.T) {
+	oldList := []config.OpenAICompatibility{{
+		Name:   "provider-a",
+		Models: []config.OpenAICompatibilityModel{{Name: "m1", Alias: "alias"}},
+	}}
+	newList := []config.OpenAICompatibility{{
+		Name: "provider-a",
+		Models: []config.OpenAICompatibilityModel{{
+			Name:                         "m1",
+			Alias:                        "alias",
+			ReasoningEffortCompatibility: true,
+		}},
+	}}
+	changes := DiffOpenAICompatibility(oldList, newList)
+	expectContains(t, changes, "provider updated: provider-a (models updated)")
+}
+
 func TestOpenAICompatKeyFallbacks(t *testing.T) {
 	entry := config.OpenAICompatibility{
 		BaseURL: "http://base",
@@ -160,6 +177,17 @@ func TestOpenAICompatSignature_StableAndNormalized(t *testing.T) {
 	c.Models = append(c.Models, config.OpenAICompatibilityModel{Name: "m2"})
 	if sigC := openAICompatSignature(c); sigC == sigB {
 		t.Fatalf("expected signature to change when models change, got %s", sigC)
+	}
+
+	d := b
+	d.Models = []config.OpenAICompatibilityModel{{
+		Name:                         "m1",
+		ReasoningEffortCompatibility: true,
+	}, {
+		Alias: "a1",
+	}}
+	if sigD := openAICompatSignature(d); sigD == sigB {
+		t.Fatalf("expected signature to change when reasoning compatibility changes, got %s", sigD)
 	}
 }
 

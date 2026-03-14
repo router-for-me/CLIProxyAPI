@@ -17,6 +17,7 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
@@ -107,6 +108,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	if err != nil {
 		return resp, err
 	}
+	translated = e.applyReasoningEffortCompatibility(auth, requestedModel, req.Model, translated)
 
 	url := strings.TrimSuffix(baseURL, "/") + endpoint
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
@@ -204,6 +206,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	if err != nil {
 		return nil, err
 	}
+	translated = e.applyReasoningEffortCompatibility(auth, requestedModel, req.Model, translated)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
@@ -380,6 +383,117 @@ func (e *OpenAICompatExecutor) overrideModel(payload []byte, model string) []byt
 	}
 	payload, _ = sjson.SetBytes(payload, "model", model)
 	return payload
+}
+
+func (e *OpenAICompatExecutor) applyReasoningEffortCompatibility(auth *cliproxyauth.Auth, requestedModel, selectedModel string, payload []byte) []byte {
+	model := e.resolveCompatModel(auth, requestedModel, selectedModel, payload)
+	if model == nil || !model.ReasoningEffortCompatibility || len(payload) == 0 || !gjson.ValidBytes(payload) {
+		return payload
+	}
+
+	updated := payload
+	changed := false
+	for _, path := range []string{"reasoning_effort", "reasoning.effort"} {
+		value := gjson.GetBytes(updated, path)
+		if !value.Exists() || value.Type != gjson.String {
+			continue
+		}
+		normalized, ok := normalizeCompatibilityReasoningEffort(value.String())
+		if !ok || normalized == value.String() {
+			continue
+		}
+		next, errSet := sjson.SetBytes(updated, path, normalized)
+		if errSet != nil {
+			continue
+		}
+		updated = next
+		changed = true
+	}
+	if changed {
+		log.WithFields(log.Fields{
+			"provider": e.Identifier(),
+			"model":    strings.TrimSpace(requestedModel),
+		}).Debug("openai compat executor: normalized reasoning_effort for upstream compatibility |")
+	}
+	return updated
+}
+
+func (e *OpenAICompatExecutor) resolveCompatModel(auth *cliproxyauth.Auth, requestedModel, selectedModel string, payload []byte) *config.OpenAICompatibilityModel {
+	compat := e.resolveCompatConfig(auth)
+	if compat == nil {
+		return nil
+	}
+	if selectedUpstream := strings.TrimSpace(thinking.ParseSuffix(selectedModel).ModelName); selectedUpstream != "" {
+		for i := range compat.Models {
+			model := &compat.Models[i]
+			if strings.EqualFold(strings.TrimSpace(model.Name), selectedUpstream) {
+				return model
+			}
+		}
+	}
+	candidates := compatModelCandidates(requestedModel, payload)
+	if len(candidates) == 0 {
+		return nil
+	}
+	for i := range compat.Models {
+		model := &compat.Models[i]
+		for _, candidate := range candidates {
+			if openAICompatModelMatches(model, candidate) {
+				return model
+			}
+		}
+	}
+	return nil
+}
+
+func compatModelCandidates(requestedModel string, payload []byte) []string {
+	candidates := make([]string, 0, 2)
+	seen := make(map[string]struct{}, 2)
+	add := func(value string) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return
+		}
+		key := strings.ToLower(value)
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		candidates = append(candidates, value)
+	}
+	add(thinking.ParseSuffix(requestedModel).ModelName)
+	if len(payload) > 0 && gjson.ValidBytes(payload) {
+		add(gjson.GetBytes(payload, "model").String())
+	}
+	return candidates
+}
+
+func openAICompatModelMatches(model *config.OpenAICompatibilityModel, candidate string) bool {
+	if model == nil {
+		return false
+	}
+	candidate = strings.TrimSpace(candidate)
+	if candidate == "" {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(model.Alias), candidate) || strings.EqualFold(strings.TrimSpace(model.Name), candidate)
+}
+
+func normalizeCompatibilityReasoningEffort(value string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "":
+		return "", false
+	case "none":
+		return "none", true
+	case "minimal", "low":
+		return "low", true
+	case "medium", "auto":
+		return "medium", true
+	case "high", "xhigh", "max":
+		return "high", true
+	default:
+		return "", false
+	}
 }
 
 type statusErr struct {
