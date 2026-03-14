@@ -381,8 +381,12 @@ func extractClaudeConfig(body []byte) ThinkingConfig {
 	}
 
 	// Check output_config.effort first for Opus 4.6+ style effort control.
-	if effort := gjson.GetBytes(body, "output_config.effort"); effort.Exists() {
-		switch strings.ToLower(strings.TrimSpace(effort.String())) {
+	// Ignore non-string or empty effort values so budget_tokens can still apply.
+	if effort := gjson.GetBytes(body, "output_config.effort"); effort.Exists() && effort.Type == gjson.String {
+		switch value := strings.ToLower(strings.TrimSpace(effort.String())); value {
+		case "":
+			// Treat blank effort as unset and fall back to budget_tokens handling below.
+			break
 		case "none":
 			return ThinkingConfig{Mode: ModeNone, Budget: 0}
 		case "auto":
@@ -396,7 +400,7 @@ func extractClaudeConfig(body []byte) ThinkingConfig {
 		case "high":
 			return ThinkingConfig{Mode: ModeLevel, Level: LevelHigh}
 		default:
-			return ThinkingConfig{Mode: ModeLevel, Level: ThinkingLevel(strings.ToLower(strings.TrimSpace(effort.String())))}
+			return ThinkingConfig{Mode: ModeLevel, Level: ThinkingLevel(value)}
 		}
 	}
 
