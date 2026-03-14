@@ -160,6 +160,11 @@ func (h *Handler) GetMonitorRequestLogs(c *gin.Context) {
 		return
 	}
 
+	dbPlugin := usage.GetDatabasePlugin()
+	if dbPlugin != nil && !isExplicitAllTimeRange(c) {
+		start, end = applyDefaultTimeRange(start, end, 1)
+	}
+
 	filter := monitorRecordFilter{
 		APIKey:      firstQuery(c, "api", "api_key"),
 		APIContains: firstQuery(c, "api_filter", "apiFilter", "api_like", "apiLike", "q"),
@@ -170,7 +175,7 @@ func (h *Handler) GetMonitorRequestLogs(c *gin.Context) {
 		End:         end,
 	}
 
-	if dbPlugin := usage.GetDatabasePlugin(); dbPlugin != nil {
+	if dbPlugin != nil {
 		queryResult, queryErr := dbPlugin.QueryMonitorRequestLogs(c.Request.Context(), toUsageMonitorFilter(filter), page, pageSize, monitorRecentLimit)
 		if queryErr == nil {
 			items := make([]monitorRequestLogItem, 0, len(queryResult.Items))
@@ -302,6 +307,11 @@ func (h *Handler) GetMonitorChannelStats(c *gin.Context) {
 		return
 	}
 
+	dbPlugin := usage.GetDatabasePlugin()
+	if dbPlugin != nil && !isExplicitAllTimeRange(c) {
+		start, end = applyDefaultTimeRange(start, end, 7)
+	}
+
 	filter := monitorRecordFilter{
 		APIKey:      firstQuery(c, "api", "api_key"),
 		APIContains: firstQuery(c, "api_filter", "apiFilter", "api_like", "apiLike", "q"),
@@ -311,7 +321,7 @@ func (h *Handler) GetMonitorChannelStats(c *gin.Context) {
 	}
 	modelFilter := firstQuery(c, "model")
 
-	if dbPlugin := usage.GetDatabasePlugin(); dbPlugin != nil {
+	if dbPlugin != nil {
 		usageFilter := toUsageMonitorFilter(filter)
 		usageFilter.Model = strings.TrimSpace(modelFilter)
 		usageFilter.Status = strings.TrimSpace(status)
@@ -490,6 +500,11 @@ func (h *Handler) GetMonitorFailureAnalysis(c *gin.Context) {
 		return
 	}
 
+	dbPlugin := usage.GetDatabasePlugin()
+	if dbPlugin != nil && !isExplicitAllTimeRange(c) {
+		start, end = applyDefaultTimeRange(start, end, 7)
+	}
+
 	filter := monitorRecordFilter{
 		APIKey:      firstQuery(c, "api", "api_key"),
 		APIContains: firstQuery(c, "api_filter", "apiFilter", "api_like", "apiLike", "q"),
@@ -499,7 +514,7 @@ func (h *Handler) GetMonitorFailureAnalysis(c *gin.Context) {
 	}
 	modelFilter := firstQuery(c, "model")
 
-	if dbPlugin := usage.GetDatabasePlugin(); dbPlugin != nil {
+	if dbPlugin != nil {
 		usageFilter := toUsageMonitorFilter(filter)
 		usageFilter.Model = strings.TrimSpace(modelFilter)
 
@@ -841,6 +856,20 @@ func parseMonitorTimeRange(c *gin.Context) (*time.Time, *time.Time, error) {
 	return start, end, nil
 }
 
+func applyDefaultTimeRange(start, end *time.Time, defaultDays int) (*time.Time, *time.Time) {
+	if defaultDays <= 0 || start != nil || end != nil {
+		return start, end
+	}
+	now := time.Now()
+	startAt := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location()).AddDate(0, 0, -(defaultDays - 1))
+	endAt := now
+	return &startAt, &endAt
+}
+
+func isExplicitAllTimeRange(c *gin.Context) bool {
+	return strings.EqualFold(strings.TrimSpace(firstQuery(c, "time_range", "timeRange", "range")), "all")
+}
+
 func parsePresetTimeRange(value string, now time.Time) (*time.Time, *time.Time, error) {
 	startOfDay := func(ts time.Time) time.Time {
 		return time.Date(ts.Year(), ts.Month(), ts.Day(), 0, 0, 0, 0, ts.Location())
@@ -1119,6 +1148,11 @@ func (h *Handler) GetMonitorKpi(c *gin.Context) {
 		return
 	}
 
+	dbPlugin := usage.GetDatabasePlugin()
+	if dbPlugin != nil && !isExplicitAllTimeRange(c) {
+		start, end = applyDefaultTimeRange(start, end, 7)
+	}
+
 	filter := monitorRecordFilter{
 		APIKey:      firstQuery(c, "api", "api_key"),
 		APIContains: firstQuery(c, "api_filter", "apiFilter", "api_like", "apiLike", "q"),
@@ -1129,7 +1163,7 @@ func (h *Handler) GetMonitorKpi(c *gin.Context) {
 		End:         end,
 	}
 
-	if dbPlugin := usage.GetDatabasePlugin(); dbPlugin != nil {
+	if dbPlugin != nil {
 		result, queryErr := dbPlugin.QueryMonitorKpi(c.Request.Context(), toUsageMonitorFilter(filter))
 		if queryErr == nil {
 			resp := monitorKpiResponse{
@@ -1221,6 +1255,11 @@ func (h *Handler) GetMonitorModelDistribution(c *gin.Context) {
 		return
 	}
 
+	dbPlugin := usage.GetDatabasePlugin()
+	if dbPlugin != nil && !isExplicitAllTimeRange(c) {
+		start, end = applyDefaultTimeRange(start, end, 7)
+	}
+
 	filter := monitorRecordFilter{
 		APIKey:      firstQuery(c, "api", "api_key"),
 		APIContains: firstQuery(c, "api_filter", "apiFilter", "api_like", "apiLike", "q"),
@@ -1230,7 +1269,7 @@ func (h *Handler) GetMonitorModelDistribution(c *gin.Context) {
 		End:         end,
 	}
 
-	if dbPlugin := usage.GetDatabasePlugin(); dbPlugin != nil {
+	if dbPlugin != nil {
 		sortByTokens := strings.ToLower(firstQuery(c, "sort")) == "tokens"
 		result, queryErr := dbPlugin.QueryMonitorModelDistribution(c.Request.Context(), toUsageMonitorFilter(filter), limit, sortByTokens)
 		if queryErr == nil {
@@ -1313,6 +1352,11 @@ func (h *Handler) GetMonitorDailyTrend(c *gin.Context) {
 		return
 	}
 
+	dbPlugin := usage.GetDatabasePlugin()
+	if dbPlugin != nil && !isExplicitAllTimeRange(c) {
+		start, end = applyDefaultTimeRange(start, end, 30)
+	}
+
 	filter := monitorRecordFilter{
 		APIKey:      firstQuery(c, "api", "api_key"),
 		APIContains: firstQuery(c, "api_filter", "apiFilter", "api_like", "apiLike", "q"),
@@ -1322,7 +1366,7 @@ func (h *Handler) GetMonitorDailyTrend(c *gin.Context) {
 		End:         end,
 	}
 
-	if dbPlugin := usage.GetDatabasePlugin(); dbPlugin != nil {
+	if dbPlugin != nil {
 		result, queryErr := dbPlugin.QueryMonitorDailyTrend(c.Request.Context(), toUsageMonitorFilter(filter))
 		if queryErr == nil {
 			items := make([]monitorDailyTrendItem, 0, len(result))
@@ -1910,7 +1954,8 @@ func (h *Handler) GetMonitorRequestDetails(c *gin.Context) {
 		center = &parsed
 	}
 
-	windowSec, err := parseBoundedInt(firstQuery(c, "window_seconds", "window"), 300, 1, 86400)
+	windowRaw := firstQuery(c, "window_seconds", "window")
+	windowSec, err := parseBoundedInt(windowRaw, 300, 1, 86400)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -1929,6 +1974,13 @@ func (h *Handler) GetMonitorRequestDetails(c *gin.Context) {
 	if dbPlugin == nil {
 		c.JSON(http.StatusOK, gin.H{"items": []any{}})
 		return
+	}
+	if center == nil {
+		now := time.Now()
+		center = &now
+		if strings.TrimSpace(windowRaw) == "" {
+			windowSec = 86400
+		}
 	}
 
 	results, queryErr := dbPlugin.QueryMonitorRequestDetails(c.Request.Context(), center, windowSec, method, path, limit)
