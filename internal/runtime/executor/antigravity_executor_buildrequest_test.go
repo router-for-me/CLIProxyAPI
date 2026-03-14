@@ -219,6 +219,36 @@ func TestPreserveClaudeEffortForAntigravity_NoopForNonClaudeSource(t *testing.T)
 	}
 }
 
+func TestPreserveClaudeEffortForAntigravity_IgnoresNonStringOrBlankEffort(t *testing.T) {
+	tests := []struct {
+		name     string
+		original string
+	}{
+		{name: "null", original: `{"output_config":{"effort":null}}`},
+		{name: "number", original: `{"output_config":{"effort":123}}`},
+		{name: "bool", original: `{"output_config":{"effort":false}}`},
+		{name: "blank", original: `{"output_config":{"effort":"   "}}`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			translated := []byte(`{"request":{"generationConfig":{"thinkingConfig":{"thinkingBudget":2048,"includeThoughts":false}}}}`)
+
+			out := preserveClaudeEffortForAntigravity(sdktranslator.FromString("claude"), []byte(tt.original), translated)
+
+			if got := gjson.GetBytes(out, "request.generationConfig.thinkingConfig.thinkingLevel"); got.Exists() {
+				t.Fatalf("thinkingLevel should not be set for %s effort, body=%s", tt.name, string(out))
+			}
+			if got := gjson.GetBytes(out, "request.generationConfig.thinkingConfig.thinkingBudget").Int(); got != 2048 {
+				t.Fatalf("thinkingBudget = %d, want 2048, body=%s", got, string(out))
+			}
+			if gjson.GetBytes(out, "request.generationConfig.thinkingConfig.includeThoughts").Bool() {
+				t.Fatalf("includeThoughts should remain unchanged for %s effort, body=%s", tt.name, string(out))
+			}
+		})
+	}
+}
+
 func TestApplyAntigravityClaudeCompatTransforms_StripsBridgedOutputConfig(t *testing.T) {
 	original := []byte(`{"output_config":{"effort":"max"}}`)
 	translated := []byte(`{"request":{}}`)
@@ -457,6 +487,51 @@ func TestApplyAntigravityClaudeCompatTransforms_ClaudeEffortOverridesEnabledBudg
 	}
 	if !gjson.GetBytes(out, "request.generationConfig.thinkingConfig.includeThoughts").Bool() {
 		t.Fatalf("includeThoughts should remain true, body=%s", string(out))
+	}
+}
+
+func TestApplyAntigravityClaudeCompatTransforms_NonStringEffortFallsBackToBudget(t *testing.T) {
+	tests := []struct {
+		name   string
+		effort string
+	}{
+		{name: "null", effort: "null"},
+		{name: "number", effort: "123"},
+		{name: "bool", effort: "false"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			original := []byte(`{
+				"model":"claude-opus-4-6-thinking",
+				"max_tokens":128000,
+				"thinking":{"type":"enabled","budget_tokens":64000},
+				"output_config":{"effort":` + tt.effort + `},
+				"messages":[{"role":"user","content":[{"type":"text","text":"Hello!"}]}],
+				"stream":true
+			}`)
+
+			baseModel := thinking.ParseSuffix("claude-opus-4-6-thinking").ModelName
+			translated := antigravityclaude.ConvertClaudeRequestToAntigravity(baseModel, original, true)
+			translated = preserveClaudeEffortForAntigravity(sdktranslator.FromString("claude"), original, translated)
+
+			out, err := thinking.ApplyThinking(translated, "claude-opus-4-6-thinking", "claude", "antigravity", "antigravity")
+			if err != nil {
+				t.Fatalf("ApplyThinking error = %v", err)
+			}
+
+			out = applyAntigravityClaudeCompatTransforms(baseModel, out)
+
+			if got := gjson.GetBytes(out, "request.generationConfig.thinkingConfig.thinkingBudget").Int(); got != 63999 {
+				t.Fatalf("thinkingBudget = %d, want 63999, body=%s", got, string(out))
+			}
+			if gjson.GetBytes(out, "request.generationConfig.thinkingConfig.thinkingLevel").Exists() {
+				t.Fatalf("thinkingLevel should be omitted when non-string effort falls back to budget, body=%s", string(out))
+			}
+			if !gjson.GetBytes(out, "request.generationConfig.thinkingConfig.includeThoughts").Bool() {
+				t.Fatalf("includeThoughts should remain true for budget fallback, body=%s", string(out))
+			}
+		})
 	}
 }
 
