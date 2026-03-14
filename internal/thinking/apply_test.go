@@ -28,6 +28,36 @@ func TestExtractClaudeConfig_UsesOutputConfigEffort(t *testing.T) {
 			body: `{"output_config":{"effort":"low"},"thinking":{"type":"enabled","budget_tokens":8192}}`,
 			want: ThinkingConfig{Mode: ModeLevel, Level: LevelLow},
 		},
+		{
+			name: "null effort falls back to budget tokens",
+			body: `{"output_config":{"effort":null},"thinking":{"type":"enabled","budget_tokens":8192}}`,
+			want: ThinkingConfig{Mode: ModeBudget, Budget: 8192},
+		},
+		{
+			name: "empty effort falls back to budget tokens",
+			body: `{"output_config":{"effort":""},"thinking":{"type":"enabled","budget_tokens":8192}}`,
+			want: ThinkingConfig{Mode: ModeBudget, Budget: 8192},
+		},
+		{
+			name: "whitespace effort falls back to budget tokens",
+			body: `{"output_config":{"effort":"   "},"thinking":{"type":"enabled","budget_tokens":8192}}`,
+			want: ThinkingConfig{Mode: ModeBudget, Budget: 8192},
+		},
+		{
+			name: "numeric effort falls back to budget tokens",
+			body: `{"output_config":{"effort":123},"thinking":{"type":"enabled","budget_tokens":8192}}`,
+			want: ThinkingConfig{Mode: ModeBudget, Budget: 8192},
+		},
+		{
+			name: "boolean effort falls back to budget tokens",
+			body: `{"output_config":{"effort":false},"thinking":{"type":"enabled","budget_tokens":8192}}`,
+			want: ThinkingConfig{Mode: ModeBudget, Budget: 8192},
+		},
+		{
+			name: "unknown non-empty string still overrides budget tokens",
+			body: `{"output_config":{"effort":"bogus"},"thinking":{"type":"enabled","budget_tokens":8192}}`,
+			want: ThinkingConfig{Mode: ModeLevel, Level: "bogus"},
+		},
 	}
 
 	for _, tt := range tests {

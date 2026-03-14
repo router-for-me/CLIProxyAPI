@@ -3111,6 +3111,16 @@ func TestThinkingE2EClaudeAdaptive_Body(t *testing.T) {
 			inputJSON: `{"model":"claude-sonnet-4-6-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"},"output_config":{"effort":"xhigh"}}`,
 			expectErr: true,
 		},
+		{
+			name:        "C28",
+			from:        "claude",
+			to:          "claude",
+			model:       "claude-budget-model",
+			inputJSON:   `{"model":"claude-budget-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"enabled","budget_tokens":8192},"output_config":{"effort":null}}`,
+			expectField: "thinking.budget_tokens",
+			expectValue: "8192",
+			expectErr:   false,
+		},
 	}
 
 	runThinkingTests(t, cases)
