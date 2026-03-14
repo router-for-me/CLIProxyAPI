@@ -149,6 +149,14 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 			}
 		}
 	}
+	// Read note from auth file.
+	if rawNote, ok := metadata["note"]; ok {
+		if note, isStr := rawNote.(string); isStr {
+			if trimmed := strings.TrimSpace(note); trimmed != "" {
+				a.Attributes["note"] = trimmed
+			}
+		}
+	}
 	ApplyAuthExcludedModelsMeta(a, cfg, perAccountExcluded, "oauth")
 	// For codex auth files, extract plan_type from the JWT id_token.
 	if provider == "codex" {

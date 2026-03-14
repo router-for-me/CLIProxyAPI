@@ -332,6 +332,12 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context) {
 				emailValue := gjson.GetBytes(data, "email").String()
 				fileData["type"] = typeValue
 				fileData["email"] = emailValue
+				if pv := gjson.GetBytes(data, "priority"); pv.Exists() {
+					fileData["priority"] = int(pv.Int())
+				}
+				if nv := gjson.GetBytes(data, "note"); nv.Exists() && strings.TrimSpace(nv.String()) != "" {
+					fileData["note"] = strings.TrimSpace(nv.String())
+				}
 			}
 
 			files = append(files, fileData)
@@ -414,6 +420,18 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 	}
 	if claims := extractCodexIDTokenClaims(auth); claims != nil {
 		entry["id_token"] = claims
+	}
+	// Expose priority from Attributes (set by synthesizer from JSON "priority" field).
+	if p := strings.TrimSpace(authAttribute(auth, "priority")); p != "" {
+		if parsed, err := strconv.Atoi(p); err == nil {
+			entry["priority"] = parsed
+		}
+	}
+	// Expose note from Metadata.
+	if note, ok := auth.Metadata["note"].(string); ok {
+		if trimmed := strings.TrimSpace(note); trimmed != "" {
+			entry["note"] = trimmed
+		}
 	}
 	return entry
 }
@@ -839,7 +857,7 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "disabled": *req.Disabled})
 }
 
-// PatchAuthFileFields updates editable fields (prefix, proxy_url, priority) of an auth file.
+// PatchAuthFileFields updates editable fields (prefix, proxy_url, priority, note) of an auth file.
 func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 	if h.authManager == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
@@ -851,6 +869,7 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 		Prefix   *string `json:"prefix"`
 		ProxyURL *string `json:"proxy_url"`
 		Priority *int    `json:"priority"`
+		Note     *string `json:"note"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
@@ -901,6 +920,18 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 			delete(targetAuth.Metadata, "priority")
 		} else {
 			targetAuth.Metadata["priority"] = *req.Priority
+		}
+		changed = true
+	}
+	if req.Note != nil {
+		if targetAuth.Metadata == nil {
+			targetAuth.Metadata = make(map[string]any)
+		}
+		trimmedNote := strings.TrimSpace(*req.Note)
+		if trimmedNote == "" {
+			delete(targetAuth.Metadata, "note")
+		} else {
+			targetAuth.Metadata["note"] = trimmedNote
 		}
 		changed = true
 	}
