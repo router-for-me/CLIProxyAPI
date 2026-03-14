@@ -111,6 +111,23 @@ func ConvertGeminiRequestToGeminiCLI(_ string, inputRawJSON []byte, _ bool) []by
 		return true
 	})
 
+	// Filter out contents with empty parts to avoid Gemini API error:
+	// "required oneof field 'data' must have one initialized field"
+	filteredContents := "[]"
+	hasFiltered := false
+	gjson.GetBytes(rawJSON, "request.contents").ForEach(func(_, content gjson.Result) bool {
+		parts := content.Get("parts")
+		if !parts.IsArray() || len(parts.Array()) == 0 {
+			hasFiltered = true
+			return true
+		}
+		filteredContents, _ = sjson.SetRaw(filteredContents, "-1", content.Raw)
+		return true
+	})
+	if hasFiltered {
+		rawJSON, _ = sjson.SetRawBytes(rawJSON, "request.contents", []byte(filteredContents))
+	}
+
 	return common.AttachDefaultSafetySettings(rawJSON, "request.safetySettings")
 }
 
