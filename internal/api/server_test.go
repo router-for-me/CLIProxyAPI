@@ -10,6 +10,7 @@ import (
 	"time"
 
 	gin "github.com/gin-gonic/gin"
+	managementHandlers "github.com/router-for-me/CLIProxyAPI/v6/internal/api/handlers/management"
 	proxyconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	internallogging "github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
@@ -46,6 +47,53 @@ func newTestServer(t *testing.T) *Server {
 	return NewServer(cfg, authManager, accessManager, configPath)
 }
 
+func TestAuthMiddleware_NilManagerRejectsRequest(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.Use(AuthMiddleware(nil))
+	r.GET("/protected", func(c *gin.Context) {
+		c.Status(http.StatusNoContent)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/protected", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("unexpected status: got %d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestNewServer_CreatesAccessManagerWhenNil(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if err := os.MkdirAll(authDir, 0o700); err != nil {
+		t.Fatalf("failed to create auth dir: %v", err)
+	}
+
+	cfg := &proxyconfig.Config{
+		SDKConfig: sdkconfig.SDKConfig{APIKeys: []string{"test-key"}},
+		Port:      0,
+		AuthDir:   authDir,
+	}
+
+	server := NewServer(cfg, auth.NewManager(nil, nil, nil), nil, filepath.Join(tmpDir, "config.yaml"))
+
+	unauthorized := httptest.NewRecorder()
+	server.engine.ServeHTTP(unauthorized, httptest.NewRequest(http.MethodGet, "/v1/models", nil))
+	if unauthorized.Code != http.StatusUnauthorized {
+		t.Fatalf("expected unauthorized without credentials, got %d body=%s", unauthorized.Code, unauthorized.Body.String())
+	}
+
+	authorizedReq := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	authorizedReq.Header.Set("Authorization", "Bearer test-key")
+	authorized := httptest.NewRecorder()
+	server.engine.ServeHTTP(authorized, authorizedReq)
+	if authorized.Code != http.StatusOK {
+		t.Fatalf("expected authorized request to succeed, got %d body=%s", authorized.Code, authorized.Body.String())
+	}
+}
 func TestAmpProviderModelRoutes(t *testing.T) {
 	testCases := []struct {
 		name         string
@@ -206,5 +254,34 @@ func TestDefaultRequestLoggerFactory_UsesResolvedLogDirectory(t *testing.T) {
 		if strings.HasPrefix(entry.Name(), "error-") && strings.HasSuffix(entry.Name(), ".log") {
 			t.Fatalf("unexpected forced error log in config dir %s", configLogsDir)
 		}
+	}
+}
+
+func TestOAuthCallbackRoute_UsesSessionAuthDir(t *testing.T) {
+	server := newTestServer(t)
+
+	sessionAuthDir := filepath.Join(t.TempDir(), "session-auth")
+	if err := os.MkdirAll(sessionAuthDir, 0o700); err != nil {
+		t.Fatalf("failed to create session auth dir: %v", err)
+	}
+
+	state := "codex-route-session-state"
+	managementHandlers.RegisterOAuthSession(state, "codex", sessionAuthDir)
+
+	req := httptest.NewRequest(http.MethodGet, "/codex/callback?state="+state+"&code=route-code", nil)
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d with body %s", http.StatusOK, rr.Code, rr.Body.String())
+	}
+
+	sessionPath := filepath.Join(sessionAuthDir, ".oauth-codex-"+state+".oauth")
+	configPath := filepath.Join(server.cfg.AuthDir, ".oauth-codex-"+state+".oauth")
+	if _, err := os.Stat(sessionPath); err != nil {
+		t.Fatalf("expected callback file in session auth dir, stat err: %v", err)
+	}
+	if _, err := os.Stat(configPath); !os.IsNotExist(err) {
+		t.Fatalf("expected no callback file in config auth dir, stat err: %v", err)
 	}
 }

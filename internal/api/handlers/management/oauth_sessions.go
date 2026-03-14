@@ -25,6 +25,7 @@ var (
 type oauthSession struct {
 	Provider  string
 	Status    string
+	AuthDir   string
 	CreatedAt time.Time
 	ExpiresAt time.Time
 }
@@ -53,9 +54,10 @@ func (s *oauthSessionStore) purgeExpiredLocked(now time.Time) {
 	}
 }
 
-func (s *oauthSessionStore) Register(state, provider string) {
+func (s *oauthSessionStore) Register(state, provider, authDir string) {
 	state = strings.TrimSpace(state)
 	provider = strings.ToLower(strings.TrimSpace(provider))
+	authDir = strings.TrimSpace(authDir)
 	if state == "" || provider == "" {
 		return
 	}
@@ -68,6 +70,7 @@ func (s *oauthSessionStore) Register(state, provider string) {
 	s.sessions[state] = oauthSession{
 		Provider:  provider,
 		Status:    "",
+		AuthDir:   authDir,
 		CreatedAt: now,
 		ExpiresAt: now.Add(s.ttl),
 	}
@@ -168,7 +171,9 @@ func (s *oauthSessionStore) IsPending(state, provider string) bool {
 
 var oauthSessions = newOAuthSessionStore(oauthSessionTTL)
 
-func RegisterOAuthSession(state, provider string) { oauthSessions.Register(state, provider) }
+func RegisterOAuthSession(state, provider, authDir string) {
+	oauthSessions.Register(state, provider, authDir)
+}
 
 func SetOAuthSessionError(state, message string) { oauthSessions.SetError(state, message) }
 
@@ -265,19 +270,26 @@ func WriteOAuthCallbackFile(authDir, provider, state, code, errorMessage string)
 	if err != nil {
 		return "", fmt.Errorf("marshal oauth callback payload: %w", err)
 	}
+	if err := os.MkdirAll(authDir, 0o700); err != nil {
+		return "", fmt.Errorf("create oauth callback dir: %w", err)
+	}
 	if err := os.WriteFile(filePath, data, 0o600); err != nil {
 		return "", fmt.Errorf("write oauth callback file: %w", err)
 	}
 	return filePath, nil
 }
 
-func WriteOAuthCallbackFileForPendingSession(authDir, provider, state, code, errorMessage string) (string, error) {
+func WriteOAuthCallbackFileForPendingSession(provider, state, code, errorMessage string) (string, error) {
 	canonicalProvider, err := NormalizeOAuthProvider(provider)
 	if err != nil {
 		return "", err
 	}
-	if !IsOAuthSessionPending(state, canonicalProvider) {
+	session, ok := oauthSessions.Get(state)
+	if !ok || session.Status != "" || !strings.EqualFold(session.Provider, canonicalProvider) {
 		return "", errOAuthSessionNotPending
 	}
-	return WriteOAuthCallbackFile(authDir, canonicalProvider, state, code, errorMessage)
+	if strings.TrimSpace(session.AuthDir) == "" {
+		return "", fmt.Errorf("oauth session auth dir is empty")
+	}
+	return WriteOAuthCallbackFile(session.AuthDir, canonicalProvider, state, code, errorMessage)
 }
