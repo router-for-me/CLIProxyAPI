@@ -17,6 +17,7 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
@@ -107,6 +108,9 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	if err != nil {
 		return resp, err
 	}
+
+	// newer OpenAI models require max_completion_tokens (#2101)
+	translated = promoteMaxTokens(translated)
 
 	url := strings.TrimSuffix(baseURL, "/") + endpoint
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
@@ -204,6 +208,9 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	if err != nil {
 		return nil, err
 	}
+
+	// newer OpenAI models require max_completion_tokens (#2101)
+	translated = promoteMaxTokens(translated)
 
 	// Request usage data in the final streaming chunk so that token statistics
 	// are captured even when the upstream is an OpenAI-compatible provider.
@@ -383,6 +390,24 @@ func (e *OpenAICompatExecutor) overrideModel(payload []byte, model string) []byt
 		return payload
 	}
 	payload, _ = sjson.SetBytes(payload, "model", model)
+	return payload
+}
+
+// promoteMaxTokens renames max_tokens → max_completion_tokens so that newer
+// OpenAI-compatible models don't reject the legacy field. If max_completion_tokens
+// is already present, max_tokens is simply removed.
+func promoteMaxTokens(payload []byte) []byte {
+	if len(payload) == 0 {
+		return payload
+	}
+	mt := gjson.GetBytes(payload, "max_tokens")
+	if !mt.Exists() {
+		return payload
+	}
+	if !gjson.GetBytes(payload, "max_completion_tokens").Exists() {
+		payload, _ = sjson.SetBytes(payload, "max_completion_tokens", mt.Value())
+	}
+	payload, _ = sjson.DeleteBytes(payload, "max_tokens")
 	return payload
 }
 
