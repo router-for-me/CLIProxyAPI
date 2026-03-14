@@ -29,6 +29,7 @@ func startCodexCacheCleanup() {
 	go func() {
 		ticker := time.NewTicker(codexCacheCleanupInterval)
 		defer ticker.Stop()
+
 		for range ticker.C {
 			purgeExpiredCodexCache()
 		}
@@ -38,8 +39,10 @@ func startCodexCacheCleanup() {
 // purgeExpiredCodexCache removes entries that have expired.
 func purgeExpiredCodexCache() {
 	now := time.Now()
+
 	codexCacheMu.Lock()
 	defer codexCacheMu.Unlock()
+
 	for key, cache := range codexCacheMap {
 		if cache.Expire.Before(now) {
 			delete(codexCacheMap, key)
@@ -64,5 +67,12 @@ func setCodexCache(key string, cache codexCache) {
 	codexCacheCleanupOnce.Do(startCodexCacheCleanup)
 	codexCacheMu.Lock()
 	codexCacheMap[key] = cache
+	codexCacheMu.Unlock()
+}
+
+// deleteCodexCache deletes a cache entry.
+func deleteCodexCache(key string) {
+	codexCacheMu.Lock()
+	delete(codexCacheMap, key)
 	codexCacheMu.Unlock()
 }
