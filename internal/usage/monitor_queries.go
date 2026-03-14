@@ -121,6 +121,13 @@ type monitorQueryableStore interface {
 	QueryMonitorChannelStats(ctx context.Context, filter MonitorQueryFilter, limit, recentLimit int) (MonitorChannelStatsResult, error)
 	QueryMonitorFailureStats(ctx context.Context, filter MonitorQueryFilter, limit, recentLimit int) (MonitorFailureStatsResult, error)
 	QueryMonitorRequestDetails(ctx context.Context, center *time.Time, windowSec int, method, path string, limit int) ([]MonitorRequestDetail, error)
+	QueryMonitorKpi(ctx context.Context, filter MonitorQueryFilter) (MonitorKpiResult, error)
+	QueryMonitorModelDistribution(ctx context.Context, filter MonitorQueryFilter, limit int, sortByTokens bool) ([]MonitorModelDistItem, error)
+	QueryMonitorDailyTrend(ctx context.Context, filter MonitorQueryFilter) ([]MonitorDailyTrendItem, error)
+	QueryMonitorHourlySlots(ctx context.Context, filter MonitorQueryFilter, cutoffUnix, nowUnix int64, slotSeconds int) ([]MonitorHourlySlot, error)
+	QueryMonitorHourlyTokenSlots(ctx context.Context, filter MonitorQueryFilter, cutoffUnix, nowUnix int64, slotSeconds int) ([]MonitorHourlyTokenSlot, error)
+	QueryMonitorHealthBlocks(ctx context.Context, windowStartUnix, windowEndUnix int64, blockSeconds int) ([]MonitorHealthBlock, error)
+	QueryMonitorKeyStatsBlocks(ctx context.Context, windowStartUnix, windowEndUnix int64, blockSeconds int) ([]MonitorKeyStatsRow, error)
 }
 
 // MonitorRequestDetail represents a single request detail row for the request-details endpoint.
@@ -132,6 +139,73 @@ type MonitorRequestDetail struct {
 	Source    string
 	AuthIndex string
 	Failed    bool
+}
+
+// MonitorKpiResult is the SQL-backed result for KPI endpoint.
+type MonitorKpiResult struct {
+	TotalRequests   int64
+	SuccessRequests int64
+	FailedRequests  int64
+	TotalTokens     int64
+	InputTokens     int64
+	OutputTokens    int64
+	ReasoningTokens int64
+	CachedTokens    int64
+	MinTimestamp     *time.Time
+	MaxTimestamp     *time.Time
+}
+
+// MonitorModelDistItem represents a single model in the distribution.
+type MonitorModelDistItem struct {
+	Model    string
+	Requests int64
+	Tokens   int64
+}
+
+// MonitorDailyTrendItem represents a single day in the daily trend.
+type MonitorDailyTrendItem struct {
+	Date            string
+	Requests        int64
+	SuccessRequests int64
+	FailedRequests  int64
+	InputTokens     int64
+	OutputTokens    int64
+	ReasoningTokens int64
+	CachedTokens    int64
+}
+
+// MonitorHourlySlot represents per-slot per-model counts for hourly-models.
+type MonitorHourlySlot struct {
+	SlotIndex int
+	Model     string
+	Total     int64
+	Success   int64
+}
+
+// MonitorHourlyTokenSlot represents per-slot token breakdowns for hourly-tokens.
+type MonitorHourlyTokenSlot struct {
+	SlotIndex       int
+	TotalTokens     int64
+	InputTokens     int64
+	OutputTokens    int64
+	ReasoningTokens int64
+	CachedTokens    int64
+}
+
+// MonitorHealthBlock represents a single time block for service health.
+type MonitorHealthBlock struct {
+	BlockIndex int
+	Success    int64
+	Failure    int64
+}
+
+// MonitorKeyStatsRow represents a time block + source/auth aggregation for key stats.
+type MonitorKeyStatsRow struct {
+	BlockIndex int
+	Source     string
+	AuthIndex  string
+	Success    int64
+	Failure    int64
 }
 
 // MonitorGroupKey returns the stable grouping key used by request log aggregates.
@@ -198,6 +272,90 @@ func (p *DatabasePlugin) monitorQueryableStore() (monitorQueryableStore, error) 
 	return queryable, nil
 }
 
+// QueryMonitorKpi queries KPI aggregates directly from persistence layer.
+func (p *DatabasePlugin) QueryMonitorKpi(ctx context.Context, filter MonitorQueryFilter) (MonitorKpiResult, error) {
+	queryable, err := p.monitorQueryableStore()
+	if err != nil {
+		return MonitorKpiResult{}, err
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return queryable.QueryMonitorKpi(ctx, normalizeMonitorFilter(filter))
+}
+
+// QueryMonitorModelDistribution queries per-model aggregates directly from persistence layer.
+func (p *DatabasePlugin) QueryMonitorModelDistribution(ctx context.Context, filter MonitorQueryFilter, limit int, sortByTokens bool) ([]MonitorModelDistItem, error) {
+	queryable, err := p.monitorQueryableStore()
+	if err != nil {
+		return nil, err
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return queryable.QueryMonitorModelDistribution(ctx, normalizeMonitorFilter(filter), limit, sortByTokens)
+}
+
+// QueryMonitorDailyTrend queries per-day aggregates directly from persistence layer.
+func (p *DatabasePlugin) QueryMonitorDailyTrend(ctx context.Context, filter MonitorQueryFilter) ([]MonitorDailyTrendItem, error) {
+	queryable, err := p.monitorQueryableStore()
+	if err != nil {
+		return nil, err
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return queryable.QueryMonitorDailyTrend(ctx, normalizeMonitorFilter(filter))
+}
+
+// QueryMonitorHourlySlots queries per-slot per-model counts directly from persistence layer.
+func (p *DatabasePlugin) QueryMonitorHourlySlots(ctx context.Context, filter MonitorQueryFilter, cutoffUnix, nowUnix int64, slotSeconds int) ([]MonitorHourlySlot, error) {
+	queryable, err := p.monitorQueryableStore()
+	if err != nil {
+		return nil, err
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return queryable.QueryMonitorHourlySlots(ctx, normalizeMonitorFilter(filter), cutoffUnix, nowUnix, slotSeconds)
+}
+
+// QueryMonitorHourlyTokenSlots queries per-slot token breakdowns directly from persistence layer.
+func (p *DatabasePlugin) QueryMonitorHourlyTokenSlots(ctx context.Context, filter MonitorQueryFilter, cutoffUnix, nowUnix int64, slotSeconds int) ([]MonitorHourlyTokenSlot, error) {
+	queryable, err := p.monitorQueryableStore()
+	if err != nil {
+		return nil, err
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return queryable.QueryMonitorHourlyTokenSlots(ctx, normalizeMonitorFilter(filter), cutoffUnix, nowUnix, slotSeconds)
+}
+
+// QueryMonitorHealthBlocks queries time-block health aggregates directly from persistence layer.
+func (p *DatabasePlugin) QueryMonitorHealthBlocks(ctx context.Context, windowStartUnix, windowEndUnix int64, blockSeconds int) ([]MonitorHealthBlock, error) {
+	queryable, err := p.monitorQueryableStore()
+	if err != nil {
+		return nil, err
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return queryable.QueryMonitorHealthBlocks(ctx, windowStartUnix, windowEndUnix, blockSeconds)
+}
+
+// QueryMonitorKeyStatsBlocks queries per-source/auth time-block aggregates directly from persistence layer.
+func (p *DatabasePlugin) QueryMonitorKeyStatsBlocks(ctx context.Context, windowStartUnix, windowEndUnix int64, blockSeconds int) ([]MonitorKeyStatsRow, error) {
+	queryable, err := p.monitorQueryableStore()
+	if err != nil {
+		return nil, err
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return queryable.QueryMonitorKeyStatsBlocks(ctx, windowStartUnix, windowEndUnix, blockSeconds)
+}
+
 func (s *mirrorUsageStore) QueryMonitorRequestLogs(ctx context.Context, filter MonitorQueryFilter, page, pageSize, recentLimit int) (MonitorRequestLogsResult, error) {
 	if s == nil || s.local == nil {
 		return MonitorRequestLogsResult{}, fmt.Errorf("usage store: mirror store not initialized")
@@ -224,6 +382,55 @@ func (s *mirrorUsageStore) QueryMonitorRequestDetails(ctx context.Context, cente
 		return nil, fmt.Errorf("usage store: mirror store not initialized")
 	}
 	return s.local.QueryMonitorRequestDetails(ctx, center, windowSec, method, path, limit)
+}
+
+func (s *mirrorUsageStore) QueryMonitorKpi(ctx context.Context, filter MonitorQueryFilter) (MonitorKpiResult, error) {
+	if s == nil || s.local == nil {
+		return MonitorKpiResult{}, fmt.Errorf("usage store: mirror store not initialized")
+	}
+	return s.local.QueryMonitorKpi(ctx, filter)
+}
+
+func (s *mirrorUsageStore) QueryMonitorModelDistribution(ctx context.Context, filter MonitorQueryFilter, limit int, sortByTokens bool) ([]MonitorModelDistItem, error) {
+	if s == nil || s.local == nil {
+		return nil, fmt.Errorf("usage store: mirror store not initialized")
+	}
+	return s.local.QueryMonitorModelDistribution(ctx, filter, limit, sortByTokens)
+}
+
+func (s *mirrorUsageStore) QueryMonitorDailyTrend(ctx context.Context, filter MonitorQueryFilter) ([]MonitorDailyTrendItem, error) {
+	if s == nil || s.local == nil {
+		return nil, fmt.Errorf("usage store: mirror store not initialized")
+	}
+	return s.local.QueryMonitorDailyTrend(ctx, filter)
+}
+
+func (s *mirrorUsageStore) QueryMonitorHourlySlots(ctx context.Context, filter MonitorQueryFilter, cutoffUnix, nowUnix int64, slotSeconds int) ([]MonitorHourlySlot, error) {
+	if s == nil || s.local == nil {
+		return nil, fmt.Errorf("usage store: mirror store not initialized")
+	}
+	return s.local.QueryMonitorHourlySlots(ctx, filter, cutoffUnix, nowUnix, slotSeconds)
+}
+
+func (s *mirrorUsageStore) QueryMonitorHourlyTokenSlots(ctx context.Context, filter MonitorQueryFilter, cutoffUnix, nowUnix int64, slotSeconds int) ([]MonitorHourlyTokenSlot, error) {
+	if s == nil || s.local == nil {
+		return nil, fmt.Errorf("usage store: mirror store not initialized")
+	}
+	return s.local.QueryMonitorHourlyTokenSlots(ctx, filter, cutoffUnix, nowUnix, slotSeconds)
+}
+
+func (s *mirrorUsageStore) QueryMonitorHealthBlocks(ctx context.Context, windowStartUnix, windowEndUnix int64, blockSeconds int) ([]MonitorHealthBlock, error) {
+	if s == nil || s.local == nil {
+		return nil, fmt.Errorf("usage store: mirror store not initialized")
+	}
+	return s.local.QueryMonitorHealthBlocks(ctx, windowStartUnix, windowEndUnix, blockSeconds)
+}
+
+func (s *mirrorUsageStore) QueryMonitorKeyStatsBlocks(ctx context.Context, windowStartUnix, windowEndUnix int64, blockSeconds int) ([]MonitorKeyStatsRow, error) {
+	if s == nil || s.local == nil {
+		return nil, fmt.Errorf("usage store: mirror store not initialized")
+	}
+	return s.local.QueryMonitorKeyStatsBlocks(ctx, windowStartUnix, windowEndUnix, blockSeconds)
 }
 
 func (s *sqliteUsageStore) QueryMonitorRequestLogs(ctx context.Context, filter MonitorQueryFilter, page, pageSize, recentLimit int) (MonitorRequestLogsResult, error) {
@@ -304,12 +511,75 @@ func (s *sqliteUsageStore) QueryMonitorRequestLogs(ctx context.Context, filter M
 	}
 
 	groupStats := make(map[string]MonitorRequestGroupStats, len(groups))
-	for key, group := range groups {
-		stats, queryErr := s.queryMonitorGroupStats(ctx, filter, group.Source, group.Model, recentLimit)
-		if queryErr != nil {
-			return MonitorRequestLogsResult{}, queryErr
+	if len(groups) > 0 {
+		// Batch query: aggregate counts per (source, model) group
+		batchCountQuery := fmt.Sprintf(`
+			SELECT COALESCE(NULLIF(source, ''), 'unknown'), model,
+				COUNT(*), COALESCE(SUM(CASE WHEN failed=0 THEN 1 ELSE 0 END), 0)
+			FROM usage_records
+			WHERE %s
+			GROUP BY COALESCE(NULLIF(source, ''), 'unknown'), model
+		`, whereClause)
+		countRows, countErr := s.db.QueryContext(ctx, batchCountQuery, args...)
+		if countErr != nil {
+			return MonitorRequestLogsResult{}, fmt.Errorf("usage store: batch group stats count: %w", countErr)
 		}
-		groupStats[key] = stats
+		defer countRows.Close()
+		for countRows.Next() {
+			var src, mdl string
+			var total2, success int64
+			if countErr = countRows.Scan(&src, &mdl, &total2, &success); countErr != nil {
+				return MonitorRequestLogsResult{}, fmt.Errorf("usage store: scan batch group stats: %w", countErr)
+			}
+			key := MonitorGroupKey(normalizeMonitorSource(src), mdl)
+			if _, exists := groups[key]; exists {
+				groupStats[key] = MonitorRequestGroupStats{Total: total2, Success: success}
+			}
+		}
+		if countErr = countRows.Err(); countErr != nil {
+			return MonitorRequestLogsResult{}, fmt.Errorf("usage store: iterate batch group stats: %w", countErr)
+		}
+
+		// Batch query: recent requests per (source, model) group using ROW_NUMBER
+		batchRecentQuery := fmt.Sprintf(`
+			SELECT source_key, model, failed, requested_at FROM (
+				SELECT COALESCE(NULLIF(source, ''), 'unknown') AS source_key, model, failed, requested_at,
+					ROW_NUMBER() OVER(PARTITION BY COALESCE(NULLIF(source, ''), 'unknown'), model ORDER BY requested_at DESC, id DESC) AS rn
+				FROM usage_records
+				WHERE %s
+			) WHERE rn <= ?
+		`, whereClause)
+		recentArgs := append(copyArgs(args), recentLimit)
+		recentRows, recentErr := s.db.QueryContext(ctx, batchRecentQuery, recentArgs...)
+		if recentErr != nil {
+			return MonitorRequestLogsResult{}, fmt.Errorf("usage store: batch group recent: %w", recentErr)
+		}
+		defer recentRows.Close()
+		recentMap := make(map[string][]MonitorRecentRequest, len(groups))
+		for recentRows.Next() {
+			var src, mdl string
+			var failed int
+			var ts int64
+			if recentErr = recentRows.Scan(&src, &mdl, &failed, &ts); recentErr != nil {
+				return MonitorRequestLogsResult{}, fmt.Errorf("usage store: scan batch group recent: %w", recentErr)
+			}
+			key := MonitorGroupKey(normalizeMonitorSource(src), mdl)
+			if _, exists := groups[key]; exists {
+				recentMap[key] = append(recentMap[key], MonitorRecentRequest{
+					Failed: failed != 0, Timestamp: time.Unix(ts, 0),
+				})
+			}
+		}
+		if recentErr = recentRows.Err(); recentErr != nil {
+			return MonitorRequestLogsResult{}, fmt.Errorf("usage store: iterate batch group recent: %w", recentErr)
+		}
+		for key, recent := range recentMap {
+			reverseRecentRequests(recent)
+			if gs, ok := groupStats[key]; ok {
+				gs.Recent = recent
+				groupStats[key] = gs
+			}
+		}
 	}
 
 	filters, err := s.queryMonitorFilterOptions(ctx, filter, true, true)
@@ -396,18 +666,85 @@ func (s *sqliteUsageStore) QueryMonitorChannelStats(ctx context.Context, filter 
 		items = items[:limit]
 	}
 
-	for i := range items {
-		recent, queryErr := s.queryChannelRecentRequests(ctx, baseFilter, items[i].Source, "", recentLimit)
-		if queryErr != nil {
-			return MonitorChannelStatsResult{}, queryErr
+	// Batch: channel-level recent requests using ROW_NUMBER
+	if len(items) > 0 {
+		channelRecentQuery := fmt.Sprintf(`
+			SELECT source_key, failed, requested_at FROM (
+				SELECT COALESCE(NULLIF(source, ''), 'unknown') AS source_key, failed, requested_at,
+					ROW_NUMBER() OVER(PARTITION BY COALESCE(NULLIF(source, ''), 'unknown') ORDER BY requested_at DESC, id DESC) AS rn
+				FROM usage_records
+				WHERE %s
+			) WHERE rn <= ?
+		`, whereClause)
+		channelRecentArgs := append(copyArgs(args), recentLimit)
+		crRows, crErr := s.db.QueryContext(ctx, channelRecentQuery, channelRecentArgs...)
+		if crErr != nil {
+			return MonitorChannelStatsResult{}, fmt.Errorf("usage store: batch channel recent: %w", crErr)
 		}
-		items[i].Recent = recent
-		for j := range items[i].Models {
-			modelRecent, recentErr := s.queryChannelRecentRequests(ctx, baseFilter, items[i].Source, items[i].Models[j].Model, recentLimit)
-			if recentErr != nil {
-				return MonitorChannelStatsResult{}, recentErr
+		defer crRows.Close()
+		channelRecentMap := make(map[string][]MonitorRecentRequest)
+		for crRows.Next() {
+			var src string
+			var failed int
+			var ts int64
+			if crErr = crRows.Scan(&src, &failed, &ts); crErr != nil {
+				return MonitorChannelStatsResult{}, fmt.Errorf("usage store: scan batch channel recent: %w", crErr)
 			}
-			items[i].Models[j].Recent = modelRecent
+			normalized := normalizeMonitorSource(src)
+			channelRecentMap[normalized] = append(channelRecentMap[normalized], MonitorRecentRequest{
+				Failed: failed != 0, Timestamp: time.Unix(ts, 0),
+			})
+		}
+		if crErr = crRows.Err(); crErr != nil {
+			return MonitorChannelStatsResult{}, fmt.Errorf("usage store: iterate batch channel recent: %w", crErr)
+		}
+		for i := range items {
+			if recent, ok := channelRecentMap[items[i].Source]; ok {
+				reverseRecentRequests(recent)
+				items[i].Recent = recent
+			}
+		}
+
+		// Batch: model-level recent requests using ROW_NUMBER
+		modelRecentQuery := fmt.Sprintf(`
+			SELECT source_key, model, failed, requested_at FROM (
+				SELECT COALESCE(NULLIF(source, ''), 'unknown') AS source_key, model, failed, requested_at,
+					ROW_NUMBER() OVER(PARTITION BY COALESCE(NULLIF(source, ''), 'unknown'), model ORDER BY requested_at DESC, id DESC) AS rn
+				FROM usage_records
+				WHERE %s
+			) WHERE rn <= ?
+		`, whereClause)
+		modelRecentArgs := append(copyArgs(args), recentLimit)
+		mrRows, mrErr := s.db.QueryContext(ctx, modelRecentQuery, modelRecentArgs...)
+		if mrErr != nil {
+			return MonitorChannelStatsResult{}, fmt.Errorf("usage store: batch model recent: %w", mrErr)
+		}
+		defer mrRows.Close()
+		type sourceModelKey struct{ source, model string }
+		modelRecentMap := make(map[sourceModelKey][]MonitorRecentRequest)
+		for mrRows.Next() {
+			var src, mdl string
+			var failed int
+			var ts int64
+			if mrErr = mrRows.Scan(&src, &mdl, &failed, &ts); mrErr != nil {
+				return MonitorChannelStatsResult{}, fmt.Errorf("usage store: scan batch model recent: %w", mrErr)
+			}
+			key := sourceModelKey{source: normalizeMonitorSource(src), model: mdl}
+			modelRecentMap[key] = append(modelRecentMap[key], MonitorRecentRequest{
+				Failed: failed != 0, Timestamp: time.Unix(ts, 0),
+			})
+		}
+		if mrErr = mrRows.Err(); mrErr != nil {
+			return MonitorChannelStatsResult{}, fmt.Errorf("usage store: iterate batch model recent: %w", mrErr)
+		}
+		for i := range items {
+			for j := range items[i].Models {
+				key := sourceModelKey{source: items[i].Source, model: items[i].Models[j].Model}
+				if recent, ok := modelRecentMap[key]; ok {
+					reverseRecentRequests(recent)
+					items[i].Models[j].Recent = recent
+				}
+			}
 		}
 	}
 
@@ -454,6 +791,46 @@ func (s *sqliteUsageStore) QueryMonitorFailureStats(ctx context.Context, filter 
 	modelSet := make(map[string]struct{})
 	sourceSet := make(map[string]struct{})
 
+	// Batch query: model-level recent requests for failed sources using ROW_NUMBER
+	type sourceModelKey struct{ source, model string }
+	failureRecentMap := make(map[sourceModelKey][]MonitorRecentRequest)
+	if len(itemsMap) > 0 {
+		failureRecentQuery := fmt.Sprintf(`
+			SELECT source_key, model, failed, requested_at FROM (
+				SELECT COALESCE(NULLIF(source, ''), 'unknown') AS source_key, model, failed, requested_at,
+					ROW_NUMBER() OVER(PARTITION BY COALESCE(NULLIF(source, ''), 'unknown'), model ORDER BY requested_at DESC, id DESC) AS rn
+				FROM usage_records
+				WHERE %s
+			) WHERE rn <= ?
+		`, failedWhere)
+		frArgs := append(copyArgs(failedArgs), recentLimit)
+		frRows, frErr := s.db.QueryContext(ctx, failureRecentQuery, frArgs...)
+		if frErr != nil {
+			return MonitorFailureStatsResult{}, fmt.Errorf("usage store: batch failure recent: %w", frErr)
+		}
+		defer frRows.Close()
+		for frRows.Next() {
+			var src, mdl string
+			var failed int
+			var ts int64
+			if frErr = frRows.Scan(&src, &mdl, &failed, &ts); frErr != nil {
+				return MonitorFailureStatsResult{}, fmt.Errorf("usage store: scan batch failure recent: %w", frErr)
+			}
+			key := sourceModelKey{source: normalizeMonitorSource(src), model: mdl}
+			failureRecentMap[key] = append(failureRecentMap[key], MonitorRecentRequest{
+				Failed: failed != 0, Timestamp: time.Unix(ts, 0),
+			})
+		}
+		if frErr = frRows.Err(); frErr != nil {
+			return MonitorFailureStatsResult{}, fmt.Errorf("usage store: iterate batch failure recent: %w", frErr)
+		}
+		// Reverse once
+		for key, recent := range failureRecentMap {
+			reverseRecentRequests(recent)
+			failureRecentMap[key] = recent
+		}
+	}
+
 	for _, item := range itemsMap {
 		sourceSet[item.Source] = struct{}{}
 		for _, model := range item.Models {
@@ -477,11 +854,10 @@ func (s *sqliteUsageStore) QueryMonitorFailureStats(ctx context.Context, filter 
 		})
 
 		for idx := range item.Models {
-			recent, queryErr := s.queryChannelRecentRequests(ctx, baseFilter, item.Source, item.Models[idx].Model, recentLimit)
-			if queryErr != nil {
-				return MonitorFailureStatsResult{}, queryErr
+			key := sourceModelKey{source: item.Source, model: item.Models[idx].Model}
+			if recent, ok := failureRecentMap[key]; ok {
+				item.Models[idx].Recent = recent
 			}
-			item.Models[idx].Recent = recent
 		}
 		items = append(items, *item)
 	}
@@ -511,56 +887,7 @@ type monitorGroupEntry struct {
 	Model  string
 }
 
-func (s *sqliteUsageStore) queryMonitorGroupStats(ctx context.Context, filter MonitorQueryFilter, source, model string, recentLimit int) (MonitorRequestGroupStats, error) {
-	groupFilter := filter
-	groupFilter.Source = source
-	groupFilter.Model = model
 
-	whereClause, args := buildSQLiteMonitorWhere(groupFilter, true)
-
-	countQuery := fmt.Sprintf(`
-		SELECT COUNT(*), COALESCE(SUM(CASE WHEN failed=0 THEN 1 ELSE 0 END), 0)
-		FROM usage_records
-		WHERE %s
-	`, whereClause)
-
-	stats := MonitorRequestGroupStats{}
-	if err := s.db.QueryRowContext(ctx, countQuery, args...).Scan(&stats.Total, &stats.Success); err != nil {
-		return MonitorRequestGroupStats{}, fmt.Errorf("usage store: query monitor group stats: %w", err)
-	}
-
-	recentQuery := fmt.Sprintf(`
-		SELECT failed, requested_at
-		FROM usage_records
-		WHERE %s
-		ORDER BY requested_at DESC, id DESC
-		LIMIT ?
-	`, whereClause)
-
-	recentArgs := append(copyArgs(args), recentLimit)
-	rows, err := s.db.QueryContext(ctx, recentQuery, recentArgs...)
-	if err != nil {
-		return MonitorRequestGroupStats{}, fmt.Errorf("usage store: query monitor group recent requests: %w", err)
-	}
-	defer rows.Close()
-
-	recent := make([]MonitorRecentRequest, 0, recentLimit)
-	for rows.Next() {
-		var failed int
-		var ts int64
-		if err = rows.Scan(&failed, &ts); err != nil {
-			return MonitorRequestGroupStats{}, fmt.Errorf("usage store: scan monitor group recent request: %w", err)
-		}
-		recent = append(recent, MonitorRecentRequest{Failed: failed != 0, Timestamp: time.Unix(ts, 0)})
-	}
-	if err = rows.Err(); err != nil {
-		return MonitorRequestGroupStats{}, fmt.Errorf("usage store: iterate monitor group recent request: %w", err)
-	}
-
-	reverseRecentRequests(recent)
-	stats.Recent = recent
-	return stats, nil
-}
 
 func (s *sqliteUsageStore) queryChannelAggregates(ctx context.Context, whereClause string, args []any) (map[string]*MonitorChannelStats, error) {
 	query := fmt.Sprintf(`
@@ -751,45 +1078,7 @@ func (s *sqliteUsageStore) attachFailureModels(ctx context.Context, failedWhere 
 	return nil
 }
 
-func (s *sqliteUsageStore) queryChannelRecentRequests(ctx context.Context, filter MonitorQueryFilter, source, model string, limit int) ([]MonitorRecentRequest, error) {
-	queryFilter := filter
-	queryFilter.Source = source
-	if model != "" {
-		queryFilter.Model = model
-	}
-	whereClause, args := buildSQLiteMonitorWhere(queryFilter, false)
 
-	query := fmt.Sprintf(`
-		SELECT failed, requested_at
-		FROM usage_records
-		WHERE %s
-		ORDER BY requested_at DESC, id DESC
-		LIMIT ?
-	`, whereClause)
-	queryArgs := append(copyArgs(args), limit)
-
-	rows, err := s.db.QueryContext(ctx, query, queryArgs...)
-	if err != nil {
-		return nil, fmt.Errorf("usage store: query channel recent requests: %w", err)
-	}
-	defer rows.Close()
-
-	recent := make([]MonitorRecentRequest, 0, limit)
-	for rows.Next() {
-		var failed int
-		var ts int64
-		if err = rows.Scan(&failed, &ts); err != nil {
-			return nil, fmt.Errorf("usage store: scan channel recent request: %w", err)
-		}
-		recent = append(recent, MonitorRecentRequest{Failed: failed != 0, Timestamp: time.Unix(ts, 0)})
-	}
-	if err = rows.Err(); err != nil {
-		return nil, fmt.Errorf("usage store: iterate channel recent request: %w", err)
-	}
-
-	reverseRecentRequests(recent)
-	return recent, nil
-}
 
 func (s *sqliteUsageStore) queryMonitorFilterOptions(ctx context.Context, filter MonitorQueryFilter, includeStatus bool, includeAPIs bool) (MonitorFilterOptions, error) {
 	whereClause, args := buildSQLiteMonitorWhere(filter, includeStatus)
@@ -868,8 +1157,13 @@ func buildSQLiteMonitorWhere(filter MonitorQueryFilter, includeStatus bool) (str
 		args = append(args, filter.Model)
 	}
 	if filter.Source != "" {
-		clauses = append(clauses, "COALESCE(NULLIF(source, ''), 'unknown') = ?")
-		args = append(args, normalizeMonitorSource(filter.Source))
+		normalized := normalizeMonitorSource(filter.Source)
+		if normalized == "unknown" {
+			clauses = append(clauses, "(source IS NULL OR source = '')")
+		} else {
+			clauses = append(clauses, "source = ?")
+			args = append(args, normalized)
+		}
 	}
 	if includeStatus {
 		switch filter.Status {
@@ -1065,4 +1359,305 @@ func containsModel(models []MonitorModelStats, target string) bool {
 		}
 	}
 	return false
+}
+
+func (s *sqliteUsageStore) QueryMonitorKpi(ctx context.Context, filter MonitorQueryFilter) (MonitorKpiResult, error) {
+	if s == nil || s.db == nil {
+		return MonitorKpiResult{}, fmt.Errorf("usage store: sqlite store not initialized")
+	}
+
+	whereClause, args := buildSQLiteMonitorWhere(filter, true)
+	query := fmt.Sprintf(`
+		SELECT
+			COUNT(*),
+			COALESCE(SUM(CASE WHEN failed=0 THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN failed=1 THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN failed=0 THEN total_tokens ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN failed=0 THEN input_tokens ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN failed=0 THEN output_tokens ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN failed=0 THEN reasoning_tokens ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN failed=0 THEN cached_tokens ELSE 0 END), 0),
+			MIN(requested_at),
+			MAX(requested_at)
+		FROM usage_records
+		WHERE %s
+	`, whereClause)
+
+	var result MonitorKpiResult
+	var minTs, maxTs sql.NullInt64
+	if err := s.db.QueryRowContext(ctx, query, args...).Scan(
+		&result.TotalRequests,
+		&result.SuccessRequests,
+		&result.FailedRequests,
+		&result.TotalTokens,
+		&result.InputTokens,
+		&result.OutputTokens,
+		&result.ReasoningTokens,
+		&result.CachedTokens,
+		&minTs,
+		&maxTs,
+	); err != nil {
+		return MonitorKpiResult{}, fmt.Errorf("usage store: query monitor kpi: %w", err)
+	}
+
+	result.MinTimestamp = nullUnixPointer(minTs)
+	result.MaxTimestamp = nullUnixPointer(maxTs)
+	return result, nil
+}
+
+func (s *sqliteUsageStore) QueryMonitorModelDistribution(ctx context.Context, filter MonitorQueryFilter, limit int, sortByTokens bool) ([]MonitorModelDistItem, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("usage store: sqlite store not initialized")
+	}
+	limit = clampInt(limit, 1, 100, 10)
+
+	whereClause, args := buildSQLiteMonitorWhere(filter, false)
+	orderBy := "cnt DESC, model ASC"
+	if sortByTokens {
+		orderBy = "tokens DESC, model ASC"
+	}
+	query := fmt.Sprintf(`
+		SELECT model, COUNT(*) AS cnt, COALESCE(SUM(total_tokens), 0) AS tokens
+		FROM usage_records
+		WHERE %s
+		GROUP BY model
+		ORDER BY %s
+		LIMIT ?
+	`, whereClause, orderBy)
+	queryArgs := append(copyArgs(args), limit)
+
+	rows, err := s.db.QueryContext(ctx, query, queryArgs...)
+	if err != nil {
+		return nil, fmt.Errorf("usage store: query monitor model distribution: %w", err)
+	}
+	defer rows.Close()
+
+	items := make([]MonitorModelDistItem, 0)
+	for rows.Next() {
+		var item MonitorModelDistItem
+		if err = rows.Scan(&item.Model, &item.Requests, &item.Tokens); err != nil {
+			return nil, fmt.Errorf("usage store: scan monitor model distribution: %w", err)
+		}
+		items = append(items, item)
+	}
+	if err = rows.Err(); err != nil {
+		return nil, fmt.Errorf("usage store: iterate monitor model distribution: %w", err)
+	}
+	return items, nil
+}
+
+func (s *sqliteUsageStore) QueryMonitorDailyTrend(ctx context.Context, filter MonitorQueryFilter) ([]MonitorDailyTrendItem, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("usage store: sqlite store not initialized")
+	}
+
+	whereClause, args := buildSQLiteMonitorWhere(filter, false)
+	query := fmt.Sprintf(`
+		SELECT DATE(requested_at, 'unixepoch', 'localtime') AS date_key,
+			COUNT(*),
+			COALESCE(SUM(CASE WHEN failed=0 THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN failed=1 THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN failed=0 THEN input_tokens ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN failed=0 THEN output_tokens ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN failed=0 THEN reasoning_tokens ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN failed=0 THEN cached_tokens ELSE 0 END), 0)
+		FROM usage_records
+		WHERE %s
+		GROUP BY date_key
+		ORDER BY date_key ASC
+	`, whereClause)
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("usage store: query monitor daily trend: %w", err)
+	}
+	defer rows.Close()
+
+	items := make([]MonitorDailyTrendItem, 0)
+	for rows.Next() {
+		var item MonitorDailyTrendItem
+		if err = rows.Scan(
+			&item.Date,
+			&item.Requests,
+			&item.SuccessRequests,
+			&item.FailedRequests,
+			&item.InputTokens,
+			&item.OutputTokens,
+			&item.ReasoningTokens,
+			&item.CachedTokens,
+		); err != nil {
+			return nil, fmt.Errorf("usage store: scan monitor daily trend: %w", err)
+		}
+		items = append(items, item)
+	}
+	if err = rows.Err(); err != nil {
+		return nil, fmt.Errorf("usage store: iterate monitor daily trend: %w", err)
+	}
+	return items, nil
+}
+
+func (s *sqliteUsageStore) QueryMonitorHourlySlots(ctx context.Context, filter MonitorQueryFilter, cutoffUnix, nowUnix int64, slotSeconds int) ([]MonitorHourlySlot, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("usage store: sqlite store not initialized")
+	}
+	if slotSeconds <= 0 {
+		slotSeconds = 3600
+	}
+
+	whereClause, args := buildSQLiteMonitorWhere(filter, false)
+	query := fmt.Sprintf(`
+		SELECT (requested_at - ?) / ? AS slot_idx,
+			model,
+			COUNT(*),
+			COALESCE(SUM(CASE WHEN failed=0 THEN 1 ELSE 0 END), 0)
+		FROM usage_records
+		WHERE %s AND requested_at >= ? AND requested_at <= ?
+		GROUP BY slot_idx, model
+	`, whereClause)
+
+	queryArgs := make([]any, 0, len(args)+4)
+	queryArgs = append(queryArgs, cutoffUnix, slotSeconds)
+	queryArgs = append(queryArgs, args...)
+	queryArgs = append(queryArgs, cutoffUnix, nowUnix)
+
+	rows, err := s.db.QueryContext(ctx, query, queryArgs...)
+	if err != nil {
+		return nil, fmt.Errorf("usage store: query monitor hourly slots: %w", err)
+	}
+	defer rows.Close()
+
+	items := make([]MonitorHourlySlot, 0)
+	for rows.Next() {
+		var item MonitorHourlySlot
+		if err = rows.Scan(&item.SlotIndex, &item.Model, &item.Total, &item.Success); err != nil {
+			return nil, fmt.Errorf("usage store: scan monitor hourly slot: %w", err)
+		}
+		items = append(items, item)
+	}
+	if err = rows.Err(); err != nil {
+		return nil, fmt.Errorf("usage store: iterate monitor hourly slots: %w", err)
+	}
+	return items, nil
+}
+
+func (s *sqliteUsageStore) QueryMonitorHourlyTokenSlots(ctx context.Context, filter MonitorQueryFilter, cutoffUnix, nowUnix int64, slotSeconds int) ([]MonitorHourlyTokenSlot, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("usage store: sqlite store not initialized")
+	}
+	if slotSeconds <= 0 {
+		slotSeconds = 3600
+	}
+
+	whereClause, args := buildSQLiteMonitorWhere(filter, false)
+	query := fmt.Sprintf(`
+		SELECT (requested_at - ?) / ? AS slot_idx,
+			COALESCE(SUM(total_tokens), 0),
+			COALESCE(SUM(input_tokens), 0),
+			COALESCE(SUM(output_tokens), 0),
+			COALESCE(SUM(reasoning_tokens), 0),
+			COALESCE(SUM(cached_tokens), 0)
+		FROM usage_records
+		WHERE %s AND requested_at >= ? AND requested_at <= ? AND failed = 0
+		GROUP BY slot_idx
+	`, whereClause)
+
+	queryArgs := make([]any, 0, len(args)+4)
+	queryArgs = append(queryArgs, cutoffUnix, slotSeconds)
+	queryArgs = append(queryArgs, args...)
+	queryArgs = append(queryArgs, cutoffUnix, nowUnix)
+
+	rows, err := s.db.QueryContext(ctx, query, queryArgs...)
+	if err != nil {
+		return nil, fmt.Errorf("usage store: query monitor hourly token slots: %w", err)
+	}
+	defer rows.Close()
+
+	items := make([]MonitorHourlyTokenSlot, 0)
+	for rows.Next() {
+		var item MonitorHourlyTokenSlot
+		if err = rows.Scan(&item.SlotIndex, &item.TotalTokens, &item.InputTokens, &item.OutputTokens, &item.ReasoningTokens, &item.CachedTokens); err != nil {
+			return nil, fmt.Errorf("usage store: scan monitor hourly token slot: %w", err)
+		}
+		items = append(items, item)
+	}
+	if err = rows.Err(); err != nil {
+		return nil, fmt.Errorf("usage store: iterate monitor hourly token slots: %w", err)
+	}
+	return items, nil
+}
+
+func (s *sqliteUsageStore) QueryMonitorHealthBlocks(ctx context.Context, windowStartUnix, windowEndUnix int64, blockSeconds int) ([]MonitorHealthBlock, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("usage store: sqlite store not initialized")
+	}
+	if blockSeconds <= 0 {
+		blockSeconds = 900
+	}
+
+	query := `
+		SELECT (requested_at - ?) / ? AS block_idx,
+			COALESCE(SUM(CASE WHEN failed=0 THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN failed=1 THEN 1 ELSE 0 END), 0)
+		FROM usage_records
+		WHERE requested_at >= ? AND requested_at <= ?
+		GROUP BY block_idx
+	`
+
+	rows, err := s.db.QueryContext(ctx, query, windowStartUnix, blockSeconds, windowStartUnix, windowEndUnix)
+	if err != nil {
+		return nil, fmt.Errorf("usage store: query monitor health blocks: %w", err)
+	}
+	defer rows.Close()
+
+	items := make([]MonitorHealthBlock, 0)
+	for rows.Next() {
+		var item MonitorHealthBlock
+		if err = rows.Scan(&item.BlockIndex, &item.Success, &item.Failure); err != nil {
+			return nil, fmt.Errorf("usage store: scan monitor health block: %w", err)
+		}
+		items = append(items, item)
+	}
+	if err = rows.Err(); err != nil {
+		return nil, fmt.Errorf("usage store: iterate monitor health blocks: %w", err)
+	}
+	return items, nil
+}
+
+func (s *sqliteUsageStore) QueryMonitorKeyStatsBlocks(ctx context.Context, windowStartUnix, windowEndUnix int64, blockSeconds int) ([]MonitorKeyStatsRow, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("usage store: sqlite store not initialized")
+	}
+	if blockSeconds <= 0 {
+		blockSeconds = 600
+	}
+
+	query := `
+		SELECT (requested_at - ?) / ? AS block_idx,
+			COALESCE(NULLIF(source, ''), 'unknown'),
+			COALESCE(NULLIF(auth_index, ''), 'unknown'),
+			COALESCE(SUM(CASE WHEN failed=0 THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN failed=1 THEN 1 ELSE 0 END), 0)
+		FROM usage_records
+		WHERE requested_at >= ? AND requested_at <= ?
+		GROUP BY block_idx, COALESCE(NULLIF(source, ''), 'unknown'), COALESCE(NULLIF(auth_index, ''), 'unknown')
+	`
+
+	rows, err := s.db.QueryContext(ctx, query, windowStartUnix, blockSeconds, windowStartUnix, windowEndUnix)
+	if err != nil {
+		return nil, fmt.Errorf("usage store: query monitor key stats blocks: %w", err)
+	}
+	defer rows.Close()
+
+	items := make([]MonitorKeyStatsRow, 0)
+	for rows.Next() {
+		var item MonitorKeyStatsRow
+		if err = rows.Scan(&item.BlockIndex, &item.Source, &item.AuthIndex, &item.Success, &item.Failure); err != nil {
+			return nil, fmt.Errorf("usage store: scan monitor key stats row: %w", err)
+		}
+		items = append(items, item)
+	}
+	if err = rows.Err(); err != nil {
+		return nil, fmt.Errorf("usage store: iterate monitor key stats blocks: %w", err)
+	}
+	return items, nil
 }

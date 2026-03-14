@@ -334,7 +334,7 @@ func mergeStats(db AggregatedStats, mem StatisticsSnapshot) StatisticsSnapshot {
 		TokensByHour:   make(map[string]int64),
 	}
 
-	// Merge APIs from database
+	// Merge APIs from database (aggregated counts only, no per-request details)
 	for key, as := range db.APIs {
 		apiSnap := APISnapshot{
 			TotalRequests: as.TotalRequests,
@@ -345,49 +345,10 @@ func mergeStats(db AggregatedStats, mem StatisticsSnapshot) StatisticsSnapshot {
 			apiSnap.Models[model] = ModelSnapshot{
 				TotalRequests: ms.TotalRequests,
 				TotalTokens:   ms.TotalTokens,
-				Details:       []RequestDetail{}, // Will be populated from db.Details below
-			}
-		}
-		result.APIs[key] = apiSnap
-	}
-
-	// Convert database details to model-level RequestDetail format
-	for _, dbDetail := range db.Details {
-		apiSnap, ok := result.APIs[dbDetail.APIKey]
-		if !ok {
-			apiSnap = APISnapshot{
-				TotalRequests: 0,
-				TotalTokens:   0,
-				Models:        make(map[string]ModelSnapshot),
-			}
-			result.APIs[dbDetail.APIKey] = apiSnap // Add new API to result
-		}
-
-		modelSnap, modelOK := apiSnap.Models[dbDetail.Model]
-		if !modelOK {
-			modelSnap = ModelSnapshot{
-				TotalRequests: 0,
-				TotalTokens:   0,
 				Details:       []RequestDetail{},
 			}
 		}
-
-		modelSnap.Details = append(modelSnap.Details, RequestDetail{
-			Timestamp: dbDetail.RequestedAt,
-			Source:    dbDetail.Source,
-			AuthIndex: dbDetail.AuthIndex,
-			Failed:    dbDetail.Failed,
-			Tokens: TokenStats{
-				InputTokens:     dbDetail.InputTokens,
-				OutputTokens:    dbDetail.OutputTokens,
-				ReasoningTokens: dbDetail.ReasoningTokens,
-				CachedTokens:    dbDetail.CachedTokens,
-				TotalTokens:     dbDetail.TotalTokens,
-			},
-		})
-
-		apiSnap.Models[dbDetail.Model] = modelSnap
-		result.APIs[dbDetail.APIKey] = apiSnap // Update result
+		result.APIs[key] = apiSnap
 	}
 
 	// Merge APIs from memory (adds current session details)

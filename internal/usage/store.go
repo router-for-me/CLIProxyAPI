@@ -631,33 +631,8 @@ func (s *pgUsageStore) GetAggregatedStats(ctx context.Context) (AggregatedStats,
 		stats.TokensByHour[hour] = tokens
 	}
 
-	// All request details
-	queryDetails := fmt.Sprintf(`
-		SELECT api_key, model, source, auth_index, failed, requested_at,
-			input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens
-		FROM %s ORDER BY requested_at DESC
-	`, table)
-	rows, err = s.db.QueryContext(ctx, queryDetails)
-	if err != nil {
-		return stats, fmt.Errorf("usage store: query details: %w", err)
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var detail DetailRecord
-		var failed int
-		if err = rows.Scan(
-			&detail.APIKey, &detail.Model, &detail.Source, &detail.AuthIndex,
-			&failed, &detail.RequestedAt,
-			&detail.InputTokens, &detail.OutputTokens, &detail.ReasoningTokens,
-			&detail.CachedTokens, &detail.TotalTokens,
-		); err != nil {
-			return stats, fmt.Errorf("usage store: scan detail: %w", err)
-		}
-		detail.Failed = (failed != 0)
-		stats.Details = append(stats.Details, detail)
-	}
-
-	stats.DetailCount = int64(len(stats.Details))
+	// DetailCount only — full Details are available via GetDetails (paginated).
+	stats.DetailCount = stats.TotalRequests
 
 	return stats, nil
 }
@@ -758,6 +733,17 @@ func newSQLiteUsageStoreAtPath(dbPath string) (*sqliteUsageStore, error) {
 	if _, err = db.Exec("PRAGMA journal_mode=WAL"); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("usage store: enable WAL: %w", err)
+	}
+	// Read performance PRAGMAs: 64MB cache, 256MB mmap, temp tables in memory
+	for _, pragma := range []string{
+		"PRAGMA cache_size=-64000",
+		"PRAGMA mmap_size=268435456",
+		"PRAGMA temp_store=MEMORY",
+	} {
+		if _, err = db.Exec(pragma); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("usage store: set pragma: %w", err)
+		}
 	}
 	store := &sqliteUsageStore{db: db, path: cleanPath}
 	if err = store.EnsureSchema(context.Background()); err != nil {
@@ -1030,35 +1016,8 @@ func (s *sqliteUsageStore) GetAggregatedStats(ctx context.Context) (AggregatedSt
 		stats.TokensByHour[hour] = tokens
 	}
 
-	// All request details
-	queryDetails := `
-		SELECT api_key, model, source, auth_index, failed, requested_at,
-			input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens
-		FROM usage_records ORDER BY requested_at DESC
-	`
-	rows, err = s.db.QueryContext(ctx, queryDetails)
-	if err != nil {
-		return stats, fmt.Errorf("usage store: query details: %w", err)
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var detail DetailRecord
-		var failed int
-		var unixTime int64
-		if err = rows.Scan(
-			&detail.APIKey, &detail.Model, &detail.Source, &detail.AuthIndex,
-			&failed, &unixTime,
-			&detail.InputTokens, &detail.OutputTokens, &detail.ReasoningTokens,
-			&detail.CachedTokens, &detail.TotalTokens,
-		); err != nil {
-			return stats, fmt.Errorf("usage store: scan detail: %w", err)
-		}
-		detail.Failed = (failed != 0)
-		detail.RequestedAt = time.Unix(unixTime, 0)
-		stats.Details = append(stats.Details, detail)
-	}
-
-	stats.DetailCount = int64(len(stats.Details))
+	// DetailCount only — full Details are available via GetDetails (paginated).
+	stats.DetailCount = stats.TotalRequests
 
 	return stats, nil
 }
