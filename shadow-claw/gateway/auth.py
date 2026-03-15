@@ -18,3 +18,19 @@ def update_context(update: Update | None) -> dict:
         "telegram_user_id": getattr(user, "id", None),
         "chat_id": getattr(chat, "id", None),
     }
+
+
+async def authorize(update: Update, config: dict, reply_on_denied: bool = False) -> bool:
+    """Check if the effective user is authorized. Logs denial events."""
+    import bot_state
+
+    user = update.effective_user
+    if not user or check_auth(user.id, config):
+        return True
+
+    bot_state.log_event("gateway.auth.denied", **update_context(update))
+    if reply_on_denied and update.message:
+        await update.message.reply_text(
+            "⛔ Acesso negado. Você não tem permissão para falar com este agente."
+        )
+    return False
