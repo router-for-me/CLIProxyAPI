@@ -1,17 +1,24 @@
 package api
 
 import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	gin "github.com/gin-gonic/gin"
 	proxyconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	internallogging "github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
@@ -207,4 +214,148 @@ func TestDefaultRequestLoggerFactory_UsesResolvedLogDirectory(t *testing.T) {
 			t.Fatalf("unexpected forced error log in config dir %s", configLogsDir)
 		}
 	}
+}
+
+func TestServerStop_GracefulShutdownFlushesAfterInFlightRequest(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if err := os.MkdirAll(authDir, 0o700); err != nil {
+		t.Fatalf("failed to create auth dir: %v", err)
+	}
+
+	port := getFreeTCPPort(t)
+	cfg := &proxyconfig.Config{
+		SDKConfig: sdkconfig.SDKConfig{
+			APIKeys: []string{"test-key"},
+		},
+		Host:                   "127.0.0.1",
+		Port:                   port,
+		AuthDir:                authDir,
+		UsageStatisticsEnabled: true,
+		UsagePersistence: proxyconfig.UsagePersistenceConfig{
+			Enabled:         true,
+			FilePath:        "usage-shutdown.json",
+			IntervalSeconds: 3600,
+		},
+	}
+
+	authManager := auth.NewManager(nil, nil, nil)
+	accessManager := sdkaccess.NewManager()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+
+	markerAPI := "shutdown-test-api"
+	server := NewServer(cfg, authManager, accessManager, configPath, WithEngineConfigurator(func(engine *gin.Engine) {
+		engine.POST("/slow-record", func(c *gin.Context) {
+			time.Sleep(120 * time.Millisecond)
+			stats := usage.GetRequestStatistics()
+			stats.MergeSnapshot(usage.StatisticsSnapshot{
+				APIs: map[string]usage.APISnapshot{
+					markerAPI: {
+						Models: map[string]usage.ModelSnapshot{
+							"gpt-test": {
+								Details: []usage.RequestDetail{{
+									Timestamp: time.Now().UTC(),
+									Source:    "integration",
+									Tokens:    usage.TokenStats{TotalTokens: 1},
+								}},
+							},
+						},
+					},
+				},
+			})
+			c.JSON(http.StatusOK, gin.H{"ok": true})
+		})
+	}))
+
+	startErrCh := make(chan error, 1)
+	go func() {
+		startErrCh <- server.Start()
+	}()
+
+	baseURL := "http://127.0.0.1:" + strconv.Itoa(port)
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if time.Now().After(deadline) {
+			t.Fatalf("server did not start before timeout")
+		}
+		resp, err := http.Get(baseURL + "/")
+		if err == nil {
+			_ = resp.Body.Close()
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	requestErrCh := make(chan error, 1)
+	go func() {
+		defer wg.Done()
+		req, err := http.NewRequest(http.MethodPost, baseURL+"/slow-record", nil)
+		if err != nil {
+			requestErrCh <- err
+			return
+		}
+		resp, err := (&http.Client{Timeout: 3 * time.Second}).Do(req)
+		if err != nil {
+			requestErrCh <- err
+			return
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			requestErrCh <- fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+			return
+		}
+		requestErrCh <- nil
+	}()
+
+	time.Sleep(30 * time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := server.Stop(ctx); err != nil {
+		t.Fatalf("server stop failed: %v", err)
+	}
+
+	wg.Wait()
+	if reqErr := <-requestErrCh; reqErr != nil {
+		t.Fatalf("in-flight request failed during shutdown: %v", reqErr)
+	}
+
+	if err := <-startErrCh; err != nil {
+		t.Fatalf("server start loop returned error: %v", err)
+	}
+
+	persistPath := filepath.Join(tmpDir, "usage-shutdown.json")
+	content, err := os.ReadFile(persistPath)
+	if err != nil {
+		t.Fatalf("failed to read persisted usage file: %v", err)
+	}
+
+	var payload struct {
+		Usage usage.StatisticsSnapshot `json:"usage"`
+	}
+	if err := json.Unmarshal(content, &payload); err != nil {
+		t.Fatalf("failed to decode persisted usage file: %v", err)
+	}
+
+	apiSnap, ok := payload.Usage.APIs[markerAPI]
+	if !ok {
+		t.Fatalf("expected persisted usage to contain marker api %q", markerAPI)
+	}
+	modelSnap, ok := apiSnap.Models["gpt-test"]
+	if !ok || len(modelSnap.Details) == 0 {
+		t.Fatalf("expected marker model details to be persisted")
+	}
+}
+
+func getFreeTCPPort(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to allocate free tcp port: %v", err)
+	}
+	defer ln.Close()
+	return ln.Addr().(*net.TCPAddr).Port
 }

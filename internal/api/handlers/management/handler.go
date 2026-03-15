@@ -35,39 +35,52 @@ const attemptMaxIdleTime = 2 * time.Hour
 
 // Handler aggregates config reference, persistence path and helpers.
 type Handler struct {
-	cfg                 *config.Config
-	configFilePath      string
-	mu                  sync.Mutex
-	attemptsMu          sync.Mutex
-	failedAttempts      map[string]*attemptInfo // keyed by client IP
-	authManager         *coreauth.Manager
-	usageStats          *usage.RequestStatistics
-	usagePersistence    *usage.PersistenceManager
-	tokenStore          coreauth.Store
-	localPassword       string
-	allowRemoteOverride bool
-	envSecret           string
-	logDir              string
-	postAuthHook        coreauth.PostAuthHook
+	cfg                  *config.Config
+	configFilePath       string
+	mu                   sync.Mutex
+	attemptsMu           sync.Mutex
+	failedAttempts       map[string]*attemptInfo // keyed by client IP
+	authManager          *coreauth.Manager
+	usageStats           *usage.RequestStatistics
+	usagePersistence     *usage.PersistenceManager
+	ownsUsagePersistence bool
+	tokenStore           coreauth.Store
+	localPassword        string
+	allowRemoteOverride  bool
+	envSecret            string
+	logDir               string
+	postAuthHook         coreauth.PostAuthHook
 }
 
 // NewHandler creates a new management handler instance.
 func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Manager) *Handler {
+	return NewHandlerWithUsagePersistence(cfg, configFilePath, manager, nil)
+}
+
+// NewHandlerWithUsagePersistence creates a new management handler and optionally
+// reuses an externally managed usage persistence manager.
+func NewHandlerWithUsagePersistence(cfg *config.Config, configFilePath string, manager *coreauth.Manager, usagePersistence *usage.PersistenceManager) *Handler {
 	envSecret, _ := os.LookupEnv("MANAGEMENT_PASSWORD")
 	envSecret = strings.TrimSpace(envSecret)
+	owned := false
+	if usagePersistence == nil {
+		usagePersistence = usage.NewPersistenceManager(usage.GetRequestStatistics(), filepath.Dir(configFilePath))
+		owned = true
+	}
 
 	h := &Handler{
-		cfg:                 cfg,
-		configFilePath:      configFilePath,
-		failedAttempts:      make(map[string]*attemptInfo),
-		authManager:         manager,
-		usageStats:          usage.GetRequestStatistics(),
-		usagePersistence:    usage.NewPersistenceManager(usage.GetRequestStatistics(), filepath.Dir(configFilePath)),
-		tokenStore:          sdkAuth.GetTokenStore(),
-		allowRemoteOverride: envSecret != "",
-		envSecret:           envSecret,
+		cfg:                  cfg,
+		configFilePath:       configFilePath,
+		failedAttempts:       make(map[string]*attemptInfo),
+		authManager:          manager,
+		usageStats:           usage.GetRequestStatistics(),
+		usagePersistence:     usagePersistence,
+		ownsUsagePersistence: owned,
+		tokenStore:           sdkAuth.GetTokenStore(),
+		allowRemoteOverride:  envSecret != "",
+		envSecret:            envSecret,
 	}
-	if cfg != nil {
+	if cfg != nil && h.ownsUsagePersistence {
 		h.usagePersistence.ApplyConfig(cfg.UsagePersistence)
 	}
 	h.startAttemptCleanup()
@@ -112,7 +125,7 @@ func NewHandlerWithoutConfigFilePath(cfg *config.Config, manager *coreauth.Manag
 // SetConfig updates the in-memory config reference when the server hot-reloads.
 func (h *Handler) SetConfig(cfg *config.Config) {
 	h.cfg = cfg
-	if h != nil && h.usagePersistence != nil && cfg != nil {
+	if h != nil && h.ownsUsagePersistence && h.usagePersistence != nil && cfg != nil {
 		h.usagePersistence.ApplyConfig(cfg.UsagePersistence)
 	}
 }
@@ -124,7 +137,10 @@ func (h *Handler) SetAuthManager(manager *coreauth.Manager) { h.authManager = ma
 func (h *Handler) SetUsageStatistics(stats *usage.RequestStatistics) { h.usageStats = stats }
 
 // SetUsagePersistenceManager replaces the usage persistence manager.
-func (h *Handler) SetUsagePersistenceManager(manager *usage.PersistenceManager) { h.usagePersistence = manager }
+func (h *Handler) SetUsagePersistenceManager(manager *usage.PersistenceManager) {
+	h.usagePersistence = manager
+	h.ownsUsagePersistence = false
+}
 
 // SetLocalPassword configures the runtime-local password accepted for localhost requests.
 func (h *Handler) SetLocalPassword(password string) { h.localPassword = password }

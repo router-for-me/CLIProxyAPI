@@ -73,7 +73,8 @@ func (m *PersistenceManager) ApplyConfig(cfg config.UsagePersistenceConfig) {
 
 	m.mu.Lock()
 	shouldRestart := m.running && (m.path != path || m.interval != interval)
-	if shouldRestart {
+	shouldStop := m.running && (!enabled || shouldRestart)
+	if shouldStop {
 		close(m.stopCh)
 		m.running = false
 		m.stopCh = nil
@@ -219,6 +220,8 @@ func (m *PersistenceManager) LoadNow() (PersistenceLoadResult, error) {
 		m.recordError(err)
 		return PersistenceLoadResult{}, err
 	}
+	// Accept legacy payloads without explicit version (treated as v0) and current v1 payloads.
+	// v0 compatibility keeps previously exported snapshots loadable after upgrades.
 	if payload.Version != 0 && payload.Version != 1 {
 		err = fmt.Errorf("unsupported usage persistence version: %d", payload.Version)
 		m.recordError(err)
@@ -260,6 +263,7 @@ func (m *PersistenceManager) Stop(flush bool) {
 		return
 	}
 	m.mu.Lock()
+	enabled := m.enabled
 	if m.running && m.stopCh != nil {
 		close(m.stopCh)
 	}
@@ -267,7 +271,7 @@ func (m *PersistenceManager) Stop(flush bool) {
 	m.stopCh = nil
 	m.mu.Unlock()
 
-	if flush {
+	if flush && enabled {
 		_, _ = m.SaveNow()
 	}
 }

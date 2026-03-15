@@ -264,12 +264,12 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	}
 	managementasset.SetCurrentConfig(cfg)
 	auth.SetQuotaCooldownDisabled(cfg.DisableCooling)
-	// Initialize management handler
-	s.mgmt = managementHandlers.NewHandler(cfg, configFilePath, authManager)
 	if s.usagePersistence != nil {
 		s.usagePersistence.ApplyConfig(cfg.UsagePersistence)
-		s.mgmt.SetUsagePersistenceManager(s.usagePersistence)
 	}
+
+	// Initialize management handler
+	s.mgmt = managementHandlers.NewHandlerWithUsagePersistence(cfg, configFilePath, authManager, s.usagePersistence)
 	if optionState.localPassword != "" {
 		s.mgmt.SetLocalPassword(optionState.localPassword)
 	}
@@ -844,12 +844,14 @@ func (s *Server) Stop(ctx context.Context) error {
 		}
 	}
 
+	// Shutdown the HTTP server.
+	err := s.server.Shutdown(ctx)
+
 	if s.mgmt != nil {
 		s.mgmt.Stop()
 	}
 
-	// Shutdown the HTTP server.
-	if err := s.server.Shutdown(ctx); err != nil {
+	if err != nil {
 		return fmt.Errorf("failed to shutdown HTTP server: %v", err)
 	}
 
