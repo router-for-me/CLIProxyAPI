@@ -24,4 +24,10 @@ const (
 
 	// Antigravity represents the Antigravity response format identifier.
 	Antigravity = "antigravity"
+
+	// Kiro represents the AWS CodeWhisperer (Kiro) provider identifier.
+	Kiro = "kiro"
+
+	// Kilo represents the Kilo AI provider identifier.
+	Kilo = "kilo"
 )
