@@ -1211,6 +1211,18 @@ func defaultClaudeUserAgent(hd config.ClaudeHeaderDefaults) string {
 	return fmt.Sprintf("claude-cli/%s (external, cli)", claudeCodeVersion(hd))
 }
 
+func buildClaudeTextSystemBlock(text string) string {
+	block, err := json.Marshal(map[string]string{
+		"type": "text",
+		"text": text,
+	})
+	if err != nil {
+		quoted, _ := json.Marshal(text)
+		return fmt.Sprintf(`{"type":"text","text":%s}`, quoted)
+	}
+	return string(block)
+}
+
 // generateBillingHeader creates the x-anthropic-billing-header text block that
 // real Claude Code prepends to every system prompt array.
 // Format: x-anthropic-billing-header: cc_version=<ver>.<build>; cc_entrypoint=cli; cch=<hash>;
@@ -1241,13 +1253,13 @@ func checkSystemInstructionsWithMode(payload []byte, strictMode bool, cfg *confi
 		hd = cfg.ClaudeHeaderDefaults
 	}
 	billingText := generateBillingHeader(payload, hd)
-	billingBlock := fmt.Sprintf(`{"type":"text","text":"%s"}`, billingText)
+	billingBlock := buildClaudeTextSystemBlock(billingText)
 	// No cache_control on the agent block. It is a cloaking artifact with zero cache
 	// value (the last system block is what actually triggers caching of all system content).
 	// Including any cache_control here creates an intra-system TTL ordering violation
 	// when the client's system blocks use ttl='1h' (prompt-caching-scope-2026-01-05 beta
 	// forbids 1h blocks after 5m blocks, and a no-TTL block defaults to 5m).
-	agentBlock := `{"type":"text","text":"You are a Claude agent, built on Anthropic's Claude Agent SDK."}`
+	agentBlock := buildClaudeTextSystemBlock("You are a Claude agent, built on Anthropic's Claude Agent SDK.")
 
 	if strictMode {
 		// Strict mode: billing header + agent identifier only
