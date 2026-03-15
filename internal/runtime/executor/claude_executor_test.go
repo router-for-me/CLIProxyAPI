@@ -485,6 +485,43 @@ func TestClaudeExecutor_CountTokens_AppliesCacheControlGuards(t *testing.T) {
 	}
 }
 
+func TestClaudeExecutor_CountTokens_UsesConfiguredClaudeVersion(t *testing.T) {
+	var seenBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		seenBody = bytes.Clone(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"input_tokens":42}`))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{
+		ClaudeHeaderDefaults: config.ClaudeHeaderDefaults{
+			Version: "2.2.0",
+		},
+	})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": server.URL,
+	}}
+	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+
+	_, err := executor.CountTokens(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet-20241022",
+		Payload: payload,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+	if err != nil {
+		t.Fatalf("CountTokens error: %v", err)
+	}
+
+	if len(seenBody) == 0 {
+		t.Fatal("expected count_tokens request body to be captured")
+	}
+	if got := gjson.GetBytes(seenBody, "system.0.text").String(); !strings.Contains(got, "cc_version=2.2.0.") {
+		t.Fatalf("count_tokens billing header should use configured Claude version, got %q", got)
+	}
+}
+
 func hasTTLOrderingViolation(payload []byte) bool {
 	seen5m := false
 	violates := false
@@ -1099,20 +1136,13 @@ func TestApplyClaudeHeaders_UsesConfiguredClaudeVersionForFallbackUserAgent(t *t
 	}
 }
 
-func TestConfiguredClaudeVersionDoesNotOverrideCustomUserAgent(t *testing.T) {
-	payload := []byte(`{"system":"You are a helpful assistant.","messages":[{"role":"user","content":"hi"}]}`)
+func TestApplyClaudeHeaders_UsesConfiguredUserAgent(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "https://example.com/v1/messages", nil)
 	cfg := &config.Config{
 		ClaudeHeaderDefaults: config.ClaudeHeaderDefaults{
 			Version:   "2.3.4",
 			UserAgent: "claude-cli/custom-build (external, cli)",
 		},
-	}
-
-	out := checkSystemInstructionsWithMode(payload, false, cfg)
-	billingHeader := gjson.GetBytes(out, "system.0.text").String()
-	if !strings.Contains(billingHeader, "cc_version=2.3.4.") {
-		t.Fatalf("billing header should use configured Claude version, got %q", billingHeader)
 	}
 
 	applyClaudeHeaders(req, nil, "key-123", false, nil, cfg)

@@ -472,7 +472,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 
 	if !strings.HasPrefix(baseModel, "claude-3-5-haiku") {
-		body = checkSystemInstructions(body)
+		body = checkSystemInstructionsWithMode(body, false, e.cfg)
 	}
 
 	// Keep count_tokens requests compatible with Anthropic cache-control constraints too.
@@ -927,10 +927,6 @@ func claudeCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
 		}
 	}
 	return
-}
-
-func checkSystemInstructions(payload []byte) []byte {
-	return checkSystemInstructionsWithMode(payload, false, nil)
 }
 
 func isClaudeOAuthToken(apiKey string) bool {
