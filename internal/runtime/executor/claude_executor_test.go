@@ -134,6 +134,24 @@ func TestApplyClaudeHeaders_UsesConfiguredVersionForFallbackUserAgent(t *testing
 	assertClaudeFingerprint(t, req.Header, "claude-cli/2.2.0 (external, cli)", "0.74.0", "v24.3.0", helps.MapStainlessOS(), helps.MapStainlessArch())
 }
 
+func TestApplyClaudeHeaders_UsesConfiguredUserAgent(t *testing.T) {
+	resetClaudeDeviceProfileCache()
+
+	req := httptest.NewRequest(http.MethodPost, "https://example.com/v1/messages", nil)
+	cfg := &config.Config{
+		ClaudeHeaderDefaults: config.ClaudeHeaderDefaults{
+			Version:   "2.3.4",
+			UserAgent: "claude-cli/custom-build (external, cli)",
+		},
+	}
+
+	applyClaudeHeaders(req, nil, "key-123", false, nil, cfg)
+
+	if got := req.Header.Get("User-Agent"); got != "claude-cli/custom-build (external, cli)" {
+		t.Fatalf("User-Agent = %q, want custom configured value", got)
+	}
+}
+
 func TestApplyClaudeHeaders_TracksHighestClaudeCLIFingerprint(t *testing.T) {
 	resetClaudeDeviceProfileCache()
 	stabilize := true
