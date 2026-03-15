@@ -1502,6 +1502,14 @@ func preserveClaudeEffortForAntigravity(sourceFormat sdktranslator.Format, origi
 		return translatedBody
 	}
 
+	if thinkingType := strings.ToLower(strings.TrimSpace(gjson.GetBytes(originalBody, "thinking.type").String())); thinkingType == "disabled" {
+		translatedBody, _ = sjson.DeleteBytes(translatedBody, "request.generationConfig.thinkingConfig.thinkingLevel")
+		translatedBody, _ = sjson.DeleteBytes(translatedBody, "request.generationConfig.thinkingConfig.thinking_level")
+		translatedBody, _ = sjson.SetBytes(translatedBody, "request.generationConfig.thinkingConfig.thinkingBudget", 0)
+		translatedBody, _ = sjson.SetBytes(translatedBody, "request.generationConfig.thinkingConfig.includeThoughts", false)
+		return translatedBody
+	}
+
 	effortValue := gjson.GetBytes(originalBody, "output_config.effort")
 	if !effortValue.Exists() || effortValue.Type != gjson.String {
 		return translatedBody
