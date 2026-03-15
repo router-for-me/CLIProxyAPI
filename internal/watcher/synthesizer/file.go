@@ -15,6 +15,14 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
+// cloakAuthKeys lists the cloak-related metadata keys that are propagated
+// from OAuth JSON files into auth.Attributes so that getCloakConfigFromAuth
+// can pick them up without a matching claude-api-key config entry.
+var cloakAuthKeys = []string{
+	"cloak_mode", "cloak_strict_mode",
+	"cloak_sensitive_words", "cloak_cache_user_id",
+}
+
 // FileSynthesizer generates Auth entries from OAuth JSON files.
 // It handles file-based authentication and Gemini virtual auth generation.
 type FileSynthesizer struct{}
@@ -146,6 +154,15 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 			priority := strings.TrimSpace(v)
 			if _, errAtoi := strconv.Atoi(priority); errAtoi == nil {
 				a.Attributes["priority"] = priority
+			}
+		}
+	}
+	// Read cloak settings from auth file so that OAuth accounts can
+	// configure cloaking without a matching claude-api-key entry.
+	for _, cloakKey := range cloakAuthKeys {
+		if v, ok := metadata[cloakKey].(string); ok {
+			if trimmed := strings.TrimSpace(v); trimmed != "" {
+				a.Attributes[cloakKey] = trimmed
 			}
 		}
 	}

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -364,6 +365,108 @@ func TestFileSynthesizer_Synthesize_PriorityParsing(t *testing.T) {
 			}
 			if ok {
 				t.Fatalf("expected priority attribute to be absent, got %q", value)
+			}
+		})
+	}
+}
+
+func TestFileSynthesizer_Synthesize_CloakAttributes(t *testing.T) {
+	tests := []struct {
+		name      string
+		authData  map[string]any
+		wantAttrs map[string]string // expected cloak attributes
+	}{
+		{
+			name: "all cloak fields set",
+			authData: map[string]any{
+				"type":                  "claude",
+				"cloak_mode":            "full",
+				"cloak_strict_mode":     "true",
+				"cloak_sensitive_words": "API,proxy,openai",
+				"cloak_cache_user_id":   "true",
+			},
+			wantAttrs: map[string]string{
+				"cloak_mode":            "full",
+				"cloak_strict_mode":     "true",
+				"cloak_sensitive_words": "API,proxy,openai",
+				"cloak_cache_user_id":   "true",
+			},
+		},
+		{
+			name: "only cache-user-id",
+			authData: map[string]any{
+				"type":                "claude",
+				"cloak_cache_user_id": "true",
+			},
+			wantAttrs: map[string]string{
+				"cloak_cache_user_id": "true",
+			},
+		},
+		{
+			name: "whitespace trimmed",
+			authData: map[string]any{
+				"type":                "claude",
+				"cloak_cache_user_id": "  true  ",
+				"cloak_mode":          "  auto  ",
+			},
+			wantAttrs: map[string]string{
+				"cloak_cache_user_id": "true",
+				"cloak_mode":          "auto",
+			},
+		},
+		{
+			name: "empty values ignored",
+			authData: map[string]any{
+				"type":                "claude",
+				"cloak_cache_user_id": "",
+				"cloak_mode":          "   ",
+			},
+			wantAttrs: map[string]string{},
+		},
+		{
+			name: "no cloak fields",
+			authData: map[string]any{
+				"type": "claude",
+			},
+			wantAttrs: map[string]string{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tempDir := t.TempDir()
+			data, _ := json.Marshal(tt.authData)
+			errWriteFile := os.WriteFile(filepath.Join(tempDir, "auth.json"), data, 0644)
+			if errWriteFile != nil {
+				t.Fatalf("failed to write auth file: %v", errWriteFile)
+			}
+
+			synth := NewFileSynthesizer()
+			ctx := &SynthesisContext{
+				Config:      &config.Config{},
+				AuthDir:     tempDir,
+				Now:         time.Now(),
+				IDGenerator: NewStableIDGenerator(),
+			}
+
+			auths, errSynthesize := synth.Synthesize(ctx)
+			if errSynthesize != nil {
+				t.Fatalf("unexpected error: %v", errSynthesize)
+			}
+			if len(auths) != 1 {
+				t.Fatalf("expected 1 auth, got %d", len(auths))
+			}
+
+			cloakKeys := cloakAuthKeys
+			gotCloakAttrs := make(map[string]string)
+			for _, key := range cloakKeys {
+				if val, ok := auths[0].Attributes[key]; ok {
+					gotCloakAttrs[key] = val
+				}
+			}
+
+			if !reflect.DeepEqual(tt.wantAttrs, gotCloakAttrs) {
+				t.Errorf("cloak attributes mismatch:\n  got:  %v\n  want: %v", gotCloakAttrs, tt.wantAttrs)
 			}
 		})
 	}
