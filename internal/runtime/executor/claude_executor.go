@@ -157,6 +157,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	bodyForUpstream := preparedBody.bodyForUpstream
 	extraBetas := preparedBody.extraBetas
 	originalToolNames := preparedBody.originalToolNames
+	originalRequestForTranslation := claudeOriginalRequestForTranslation(opts.OriginalRequest, req.Payload)
 
 	url := fmt.Sprintf("%s/v1/messages?beta=true", baseURL)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyForUpstream))
@@ -231,7 +232,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		to,
 		from,
 		req.Model,
-		opts.OriginalRequest,
+		originalRequestForTranslation,
 		bodyForTranslation,
 		data,
 		&param,
@@ -285,6 +286,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	bodyForUpstream := preparedBody.bodyForUpstream
 	extraBetas := preparedBody.extraBetas
 	originalToolNames := preparedBody.originalToolNames
+	originalRequestForTranslation := claudeOriginalRequestForTranslation(opts.OriginalRequest, req.Payload)
 
 	url := fmt.Sprintf("%s/v1/messages?beta=true", baseURL)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyForUpstream))
@@ -384,7 +386,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				to,
 				from,
 				req.Model,
-				opts.OriginalRequest,
+				originalRequestForTranslation,
 				bodyForTranslation,
 				bytes.Clone(line),
 				&param,
@@ -500,14 +502,6 @@ func (e *ClaudeExecutor) finalizeClaudeRequestBody(body []byte, reqModel string,
 	if opts.checkSystemInstructions && !strings.HasPrefix(baseModel, "claude-3-5-haiku") {
 		body = checkSystemInstructions(body)
 	}
-	normalizedBody, originalToolNames, errNormalize := normalizeClaudeToolsForAnthropicWithRestoreMap(body)
-	if errNormalize != nil {
-		if errors.Is(errNormalize, errAnthropicToolNameUnsanitizable) || errors.Is(errNormalize, errAnthropicDuplicateToolName) {
-			return claudePreparedBody{}, statusErr{code: http.StatusBadRequest, msg: errNormalize.Error()}
-		}
-		return claudePreparedBody{}, fmt.Errorf("normalize claude tools: %w", errNormalize)
-	}
-	body = normalizedBody
 	if opts.disableForcedToolChoice {
 		body = disableThinkingIfToolChoiceForced(body)
 	}
@@ -520,16 +514,22 @@ func (e *ClaudeExecutor) finalizeClaudeRequestBody(body []byte, reqModel string,
 	if opts.normalizeCacheControlTTL {
 		body = normalizeCacheControlTTL(body)
 	}
-	extraBetas, body := extractAndRemoveBetas(body)
-	translationBody := restoreClaudeNormalizedToolNamesInRequest(body, originalToolNames)
+	extraBetas, translationBody := extractAndRemoveBetas(body)
+	upstreamBody, originalToolNames, errNormalize := normalizeClaudeToolsForAnthropicWithRestoreMap(bytes.Clone(translationBody))
+	if errNormalize != nil {
+		if errors.Is(errNormalize, errAnthropicToolNameUnsanitizable) || errors.Is(errNormalize, errAnthropicDuplicateToolName) {
+			return claudePreparedBody{}, statusErr{code: http.StatusBadRequest, msg: errNormalize.Error()}
+		}
+		return claudePreparedBody{}, fmt.Errorf("normalize claude tools: %w", errNormalize)
+	}
 	prepared := claudePreparedBody{
 		bodyForTranslation: translationBody,
-		bodyForUpstream:    body,
+		bodyForUpstream:    upstreamBody,
 		extraBetas:         extraBetas,
 		originalToolNames:  originalToolNames,
 	}
 	if opts.applyToolPrefixForOAuth && isClaudeOAuthToken(apiKey) && auth != nil && !auth.ToolPrefixDisabled() {
-		prepared.bodyForUpstream = applyClaudeToolPrefix(body, claudeToolPrefix)
+		prepared.bodyForUpstream = applyClaudeToolPrefix(upstreamBody, claudeToolPrefix)
 	}
 	return prepared, nil
 }
@@ -577,7 +577,7 @@ func restoreClaudeToolNamesInErrorBody(body []byte, prefix string, originalByNor
 		return body
 	}
 	if !gjson.ValidBytes(body) {
-		return []byte(restoreClaudeToolNamesInErrorText(string(body), prefix, originalByNormalized))
+		return body
 	}
 	for _, path := range []string{"error.message", "message"} {
 		value := gjson.GetBytes(body, path)
@@ -591,6 +591,13 @@ func restoreClaudeToolNamesInErrorBody(body []byte, prefix string, originalByNor
 		body, _ = sjson.SetBytes(body, path, updated)
 	}
 	return body
+}
+
+func claudeOriginalRequestForTranslation(originalRequest, payload []byte) []byte {
+	if len(originalRequest) > 0 {
+		return originalRequest
+	}
+	return payload
 }
 
 func restoreClaudeToolNamesInErrorText(text, prefix string, originalByNormalized map[string]string) string {

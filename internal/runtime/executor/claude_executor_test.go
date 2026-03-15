@@ -841,6 +841,48 @@ func TestFinalizeClaudeRequestBody_RejectsUnsanitizableCustomToolName(t *testing
 	}
 }
 
+func TestFinalizeClaudeRequestBody_PreservesPreNormalizationTranslationBody(t *testing.T) {
+	executor := NewClaudeExecutor(&config.Config{})
+	input := []byte(`{
+		"tools":[
+			{
+				"type":"function",
+				"name":"very bad tool",
+				"description":"Search",
+				"parameters":{"type":"object","properties":{"q":{"type":"string"}}},
+				"x_vendor":{"mode":"strict"}
+			}
+		],
+		"tool_choice":{"type":"function","function":{"name":"very bad tool"}}
+	}`)
+	body := sdktranslator.TranslateRequest(sdktranslator.FromString("openai-response"), sdktranslator.FromString("claude"), "claude-opus-4-6", input, true)
+	prepared, err := executor.finalizeClaudeRequestBody(body, "claude-opus-4-6", sdktranslator.FromString("openai-response"), sdktranslator.FromString("claude"), "claude-opus-4-6", "", nil, claudeBodyFinalizeOptions{})
+	if err != nil {
+		t.Fatalf("finalizeClaudeRequestBody error: %v", err)
+	}
+
+	if got := gjson.GetBytes(prepared.bodyForTranslation, "tools.0.name").String(); got != "very bad tool" {
+		t.Fatalf("bodyForTranslation tools.0.name = %q, want %q", got, "very bad tool")
+	}
+	if got := gjson.GetBytes(prepared.bodyForTranslation, "tools.0.input_schema.properties.q.type").String(); got != "string" {
+		t.Fatalf("bodyForTranslation tools.0.input_schema.properties.q.type = %q, want %q", got, "string")
+	}
+	if got := gjson.GetBytes(prepared.bodyForTranslation, "tool_choice.name").String(); got != "very bad tool" {
+		t.Fatalf("bodyForTranslation tool_choice.name = %q, want %q", got, "very bad tool")
+	}
+
+	upstreamName := gjson.GetBytes(prepared.bodyForUpstream, "tools.0.name").String()
+	if upstreamName == "" || upstreamName == "very bad tool" {
+		t.Fatalf("bodyForUpstream tools.0.name = %q, want normalized name", upstreamName)
+	}
+	if got := gjson.GetBytes(prepared.bodyForUpstream, "tools.0.type"); got.Exists() {
+		t.Fatalf("bodyForUpstream tools.0.type should be removed, got %s", got.Raw)
+	}
+	if got := gjson.GetBytes(prepared.bodyForUpstream, "tool_choice.name").String(); got != upstreamName {
+		t.Fatalf("bodyForUpstream tool_choice.name = %q, want %q", got, upstreamName)
+	}
+}
+
 func TestNormalizeClaudeToolsForAnthropic_ReservesBuiltinNamesForCustomTools(t *testing.T) {
 	input := []byte(`{
 		"tool_choice":{"type":"tool","name":"web search"},
@@ -1490,6 +1532,62 @@ func TestClaudeExecutor_ExecuteStream_OpenAIResponsesWithoutOriginalRequest_Rest
 	}
 }
 
+func TestClaudeExecutor_Execute_OpenAIResponsesWithoutOriginalRequest_PreservesEchoedToolSchema(t *testing.T) {
+	var upstreamRequestName string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		upstreamRequestName = gjson.GetBytes(body, "tools.0.name").String()
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-3-5-sonnet\",\"content\":[]}}\n\n"))
+		_, _ = w.Write([]byte(fmt.Sprintf("data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":%q,\"input\":{\"q\":\"hi\"}}}\n\n", upstreamRequestName)))
+		_, _ = w.Write([]byte("data: {\"type\":\"content_block_stop\",\"index\":0}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\",\"stop_sequence\":null},\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"message_stop\"}\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": server.URL,
+	}}
+
+	payload := []byte(`{
+		"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],
+		"tools":[{"type":"function","name":"very bad tool","description":"Search","parameters":{"type":"object","properties":{"q":{"type":"string"}}},"x_vendor":{"mode":"strict"}}],
+		"tool_choice":{"type":"function","function":{"name":"very bad tool"}}
+	}`)
+
+	resp, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+
+	if upstreamRequestName == "" || upstreamRequestName == "very bad tool" {
+		t.Fatalf("upstream request tool name = %q, want normalized name", upstreamRequestName)
+	}
+	if got := gjson.GetBytes(resp.Payload, "tools.0.type").String(); got != "function" {
+		t.Fatalf("response tools.0.type = %q, want %q, payload=%s", got, "function", string(resp.Payload))
+	}
+	if got := gjson.GetBytes(resp.Payload, "tools.0.name").String(); got != "very bad tool" {
+		t.Fatalf("response tools.0.name = %q, want %q, payload=%s", got, "very bad tool", string(resp.Payload))
+	}
+	if got := gjson.GetBytes(resp.Payload, "tools.0.parameters.properties.q.type").String(); got != "string" {
+		t.Fatalf("response tools.0.parameters.properties.q.type = %q, want %q, payload=%s", got, "string", string(resp.Payload))
+	}
+	if got := gjson.GetBytes(resp.Payload, "tools.0.x_vendor.mode").String(); got != "strict" {
+		t.Fatalf("response tools.0.x_vendor.mode = %q, want %q, payload=%s", got, "strict", string(resp.Payload))
+	}
+	if got := openAIResponseToolChoiceName(gjson.ParseBytes(resp.Payload)); got != "very bad tool" {
+		t.Fatalf("response tool_choice name = %q, want %q, payload=%s", got, "very bad tool", string(resp.Payload))
+	}
+}
+
 func TestClaudeExecutor_ErrorPaths_RestoreOriginalToolNamesAfterNormalization(t *testing.T) {
 	var upstreamRequestName string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1537,6 +1635,72 @@ func TestClaudeExecutor_ErrorPaths_RestoreOriginalToolNamesAfterNormalization(t 
 		}
 		if strings.Contains(err.Error(), upstreamRequestName) {
 			t.Fatalf("%s: error should not expose normalized tool name %q, got %q", name, upstreamRequestName, err.Error())
+		}
+	}
+
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+	})
+	checkErr(t, "Execute", err)
+
+	_, err = executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+	})
+	checkErr(t, "ExecuteStream", err)
+
+	_, err = executor.CountTokens(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+	})
+	checkErr(t, "CountTokens", err)
+}
+
+func TestClaudeExecutor_ErrorPaths_LeavePlainTextErrorsVerbatim(t *testing.T) {
+	var upstreamRequestName string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		upstreamRequestName = gjson.GetBytes(body, "tools.0.name").String()
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte("read timeout while calling upstream"))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": server.URL,
+	}}
+	payload := []byte(`{
+		"tools":[{"type":"custom","name":"read!","input_schema":{"type":"object"}}],
+		"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]
+	}`)
+
+	checkErr := func(t *testing.T, name string, err error) {
+		t.Helper()
+		if err == nil {
+			t.Fatalf("%s: expected error", name)
+		}
+		var status statusErr
+		if !errors.As(err, &status) {
+			t.Fatalf("%s: expected statusErr, got %T: %v", name, err, err)
+		}
+		if status.StatusCode() != http.StatusBadRequest {
+			t.Fatalf("%s: status code = %d, want %d", name, status.StatusCode(), http.StatusBadRequest)
+		}
+		if upstreamRequestName != "read" {
+			t.Fatalf("%s: upstream request tool name = %q, want %q", name, upstreamRequestName, "read")
+		}
+		if got := err.Error(); got != "read timeout while calling upstream" {
+			t.Fatalf("%s: error text = %q, want %q", name, got, "read timeout while calling upstream")
 		}
 	}
 
@@ -1792,6 +1956,21 @@ func TestRestoreClaudeNormalizedToolNamesInRequest_RestoresToolsAndReferences(t 
 	}
 	if got := gjson.GetBytes(out, "messages.2.content.0.content.0.tool_name").String(); got != "search tool" {
 		t.Fatalf("messages.2.content.0.content.0.tool_name = %q, want %q", got, "search tool")
+	}
+}
+
+func TestRestoreClaudeToolNamesInErrorText_PrefersLongerNormalizedNames(t *testing.T) {
+	text := "tool read_more failed validation while read stayed valid"
+	out := restoreClaudeToolNamesInErrorText(text, "", map[string]string{
+		"read":      "read!",
+		"read_more": "read more!",
+	})
+
+	if strings.Contains(out, "read!_more") {
+		t.Fatalf("restored text = %q, should not partially replace overlapping normalized names", out)
+	}
+	if got := out; got != "tool read more! failed validation while read! stayed valid" {
+		t.Fatalf("restored text = %q, want %q", got, "tool read more! failed validation while read! stayed valid")
 	}
 }
 
