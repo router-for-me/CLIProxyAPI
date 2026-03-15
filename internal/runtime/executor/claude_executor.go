@@ -1234,6 +1234,18 @@ func computeFingerprint(messageText, version string) string {
 	return hex.EncodeToString(h[:])[:3]
 }
 
+func buildClaudeTextSystemBlock(text string) string {
+	block, err := json.Marshal(map[string]string{
+		"type": "text",
+		"text": text,
+	})
+	if err != nil {
+		quoted, _ := json.Marshal(text)
+		return fmt.Sprintf(`{"type":"text","text":%s}`, quoted)
+	}
+	return string(block)
+}
+
 // generateBillingHeader creates the x-anthropic-billing-header text block that
 // real Claude Code prepends to every system prompt array.
 // Format: x-anthropic-billing-header: cc_version=<ver>.<build>; cc_entrypoint=<ep>; cch=<hash>; [cc_workload=<wl>;]
@@ -1259,18 +1271,6 @@ func generateBillingHeader(payload []byte, experimentalCCHSigning bool, version,
 
 func checkSystemInstructionsWithMode(payload []byte, strictMode bool, cfg *config.Config) []byte {
 	return checkSystemInstructionsWithSigningMode(payload, strictMode, false, helps.DefaultClaudeVersion(cfg), "", "")
-}
-
-func buildClaudeTextSystemBlock(text string) string {
-	block, err := json.Marshal(map[string]string{
-		"type": "text",
-		"text": text,
-	})
-	if err != nil {
-		quoted, _ := json.Marshal(text)
-		return fmt.Sprintf(`{"type":"text","text":%s}`, quoted)
-	}
-	return string(block)
 }
 
 // checkSystemInstructionsWithSigningMode injects Claude Code-style system blocks:
