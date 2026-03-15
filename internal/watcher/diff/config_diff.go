@@ -48,6 +48,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if oldCfg.UsagePersistence.IntervalSeconds != newCfg.UsagePersistence.IntervalSeconds {
 		changes = append(changes, fmt.Sprintf("usage-persistence.interval-seconds: %d -> %d", oldCfg.UsagePersistence.IntervalSeconds, newCfg.UsagePersistence.IntervalSeconds))
 	}
+	if oldCfg.UsagePersistence.MaxDetailsPerModel != newCfg.UsagePersistence.MaxDetailsPerModel {
+		changes = append(changes, fmt.Sprintf("usage-persistence.max-details-per-model: %d -> %d", oldCfg.UsagePersistence.MaxDetailsPerModel, newCfg.UsagePersistence.MaxDetailsPerModel))
+	}
 	if oldCfg.DisableCooling != newCfg.DisableCooling {
 		changes = append(changes, fmt.Sprintf("disable-cooling: %t -> %t", oldCfg.DisableCooling, newCfg.DisableCooling))
 	}

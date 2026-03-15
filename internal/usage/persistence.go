@@ -70,6 +70,13 @@ func (m *PersistenceManager) ApplyConfig(cfg config.UsagePersistenceConfig) {
 		intervalSeconds = 30
 	}
 	interval := time.Duration(intervalSeconds) * time.Second
+	maxDetailsPerModel := cfg.MaxDetailsPerModel
+	if maxDetailsPerModel == 0 {
+		maxDetailsPerModel = 300
+	}
+	if m.stats != nil {
+		m.stats.SetMaxDetailsPerModel(maxDetailsPerModel)
+	}
 
 	m.mu.Lock()
 	shouldRestart := m.running && (m.path != path || m.interval != interval)
@@ -143,8 +150,8 @@ func (m *PersistenceManager) SaveNow() (PersistenceStatus, error) {
 	m.mu.Unlock()
 
 	snapshot := m.stats.Snapshot()
-	payload := persistencePayload{Version: 1, SavedAt: time.Now().UTC(), Usage: snapshot}
-	data, err := json.MarshalIndent(payload, "", "  ")
+	payload := persistencePayload{Version: 2, SavedAt: time.Now().UTC(), Usage: snapshot}
+	data, err := json.Marshal(payload)
 	if err != nil {
 		m.recordError(err)
 		return m.Status(), err
@@ -220,9 +227,9 @@ func (m *PersistenceManager) LoadNow() (PersistenceLoadResult, error) {
 		m.recordError(err)
 		return PersistenceLoadResult{}, err
 	}
-	// Accept legacy payloads without explicit version (treated as v0) and current v1 payloads.
+	// Accept legacy payloads without explicit version (treated as v0) and current v1/v2 payloads.
 	// v0 compatibility keeps previously exported snapshots loadable after upgrades.
-	if payload.Version != 0 && payload.Version != 1 {
+	if payload.Version != 0 && payload.Version != 1 && payload.Version != 2 {
 		err = fmt.Errorf("unsupported usage persistence version: %d", payload.Version)
 		m.recordError(err)
 		return PersistenceLoadResult{}, err

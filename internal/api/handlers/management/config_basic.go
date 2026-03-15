@@ -216,9 +216,10 @@ func (h *Handler) PutUsagePersistence(c *gin.Context) {
 		return
 	}
 	var body struct {
-		Enabled         *bool   `json:"enabled"`
-		FilePath        *string `json:"file-path"`
-		IntervalSeconds *int    `json:"interval-seconds"`
+		Enabled            *bool   `json:"enabled"`
+		FilePath           *string `json:"file-path"`
+		IntervalSeconds    *int    `json:"interval-seconds"`
+		MaxDetailsPerModel *int    `json:"max-details-per-model"`
 	}
 	if errBindJSON := c.ShouldBindJSON(&body); errBindJSON != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
@@ -239,6 +240,9 @@ func (h *Handler) PutUsagePersistence(c *gin.Context) {
 			return
 		}
 		h.cfg.UsagePersistence.IntervalSeconds = *body.IntervalSeconds
+	}
+	if body.MaxDetailsPerModel != nil {
+		h.cfg.UsagePersistence.MaxDetailsPerModel = *body.MaxDetailsPerModel
 	}
 	if h.usagePersistence != nil {
 		h.usagePersistence.ApplyConfig(h.cfg.UsagePersistence)

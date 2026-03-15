@@ -60,6 +60,8 @@ func StatisticsEnabled() bool { return statisticsEnabled.Load() }
 type RequestStatistics struct {
 	mu sync.RWMutex
 
+	maxDetailsPerModel int
+
 	totalRequests int64
 	successCount  int64
 	failureCount  int64
@@ -85,6 +87,11 @@ type modelStats struct {
 	TotalRequests int64
 	TotalTokens   int64
 	Details       []RequestDetail
+
+	RequestsByDay  map[string]int64
+	RequestsByHour map[string]int64
+	TokensByDay    map[string]int64
+	TokensByHour   map[string]int64
 }
 
 // RequestDetail stores the timestamp and token usage for a single request.
@@ -131,7 +138,12 @@ type APISnapshot struct {
 type ModelSnapshot struct {
 	TotalRequests int64           `json:"total_requests"`
 	TotalTokens   int64           `json:"total_tokens"`
-	Details       []RequestDetail `json:"details"`
+	Details       []RequestDetail `json:"details,omitempty"`
+
+	RequestsByDay  map[string]int64 `json:"requests_by_day,omitempty"`
+	RequestsByHour map[string]int64 `json:"requests_by_hour,omitempty"`
+	TokensByDay    map[string]int64 `json:"tokens_by_day,omitempty"`
+	TokensByHour   map[string]int64 `json:"tokens_by_hour,omitempty"`
 }
 
 var defaultRequestStatistics = NewRequestStatistics()
@@ -142,11 +154,26 @@ func GetRequestStatistics() *RequestStatistics { return defaultRequestStatistics
 // NewRequestStatistics constructs an empty statistics store.
 func NewRequestStatistics() *RequestStatistics {
 	return &RequestStatistics{
-		apis:           make(map[string]*apiStats),
-		requestsByDay:  make(map[string]int64),
-		requestsByHour: make(map[int]int64),
-		tokensByDay:    make(map[string]int64),
-		tokensByHour:   make(map[int]int64),
+		maxDetailsPerModel: 300,
+		apis:               make(map[string]*apiStats),
+		requestsByDay:      make(map[string]int64),
+		requestsByHour:     make(map[int]int64),
+		tokensByDay:        make(map[string]int64),
+		tokensByHour:       make(map[int]int64),
+	}
+}
+
+func (s *RequestStatistics) SetMaxDetailsPerModel(limit int) {
+	if s == nil {
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.maxDetailsPerModel = limit
+	if limit > 0 {
+		s.truncateAllModelDetailsLocked(limit)
 	}
 }
 
@@ -215,12 +242,41 @@ func (s *RequestStatistics) updateAPIStats(stats *apiStats, model string, detail
 	stats.TotalTokens += detail.Tokens.TotalTokens
 	modelStatsValue, ok := stats.Models[model]
 	if !ok {
-		modelStatsValue = &modelStats{}
+		modelStatsValue = &modelStats{
+			RequestsByDay:  make(map[string]int64),
+			RequestsByHour: make(map[string]int64),
+			TokensByDay:    make(map[string]int64),
+			TokensByHour:   make(map[string]int64),
+		}
 		stats.Models[model] = modelStatsValue
+	}
+	if modelStatsValue.RequestsByDay == nil {
+		modelStatsValue.RequestsByDay = make(map[string]int64)
+	}
+	if modelStatsValue.RequestsByHour == nil {
+		modelStatsValue.RequestsByHour = make(map[string]int64)
+	}
+	if modelStatsValue.TokensByDay == nil {
+		modelStatsValue.TokensByDay = make(map[string]int64)
+	}
+	if modelStatsValue.TokensByHour == nil {
+		modelStatsValue.TokensByHour = make(map[string]int64)
 	}
 	modelStatsValue.TotalRequests++
 	modelStatsValue.TotalTokens += detail.Tokens.TotalTokens
+
+	dayKey := formatDayBucket(detail.Timestamp)
+	hourKey := formatHourBucket(detail.Timestamp)
+	modelStatsValue.RequestsByDay[dayKey]++
+	modelStatsValue.RequestsByHour[hourKey]++
+	modelStatsValue.TokensByDay[dayKey] += detail.Tokens.TotalTokens
+	modelStatsValue.TokensByHour[hourKey] += detail.Tokens.TotalTokens
+
 	modelStatsValue.Details = append(modelStatsValue.Details, detail)
+	if s.maxDetailsPerModel > 0 && len(modelStatsValue.Details) > s.maxDetailsPerModel {
+		start := len(modelStatsValue.Details) - s.maxDetailsPerModel
+		modelStatsValue.Details = append([]RequestDetail(nil), modelStatsValue.Details[start:]...)
+	}
 }
 
 // Snapshot returns a copy of the aggregated metrics for external consumption.
@@ -248,10 +304,35 @@ func (s *RequestStatistics) Snapshot() StatisticsSnapshot {
 		for modelName, modelStatsValue := range stats.Models {
 			requestDetails := make([]RequestDetail, len(modelStatsValue.Details))
 			copy(requestDetails, modelStatsValue.Details)
+
+			requestsByDay := make(map[string]int64, len(modelStatsValue.RequestsByDay))
+			for k, v := range modelStatsValue.RequestsByDay {
+				requestsByDay[k] = v
+			}
+
+			requestsByHour := make(map[string]int64, len(modelStatsValue.RequestsByHour))
+			for k, v := range modelStatsValue.RequestsByHour {
+				requestsByHour[k] = v
+			}
+
+			tokensByDay := make(map[string]int64, len(modelStatsValue.TokensByDay))
+			for k, v := range modelStatsValue.TokensByDay {
+				tokensByDay[k] = v
+			}
+
+			tokensByHour := make(map[string]int64, len(modelStatsValue.TokensByHour))
+			for k, v := range modelStatsValue.TokensByHour {
+				tokensByHour[k] = v
+			}
+
 			apiSnapshot.Models[modelName] = ModelSnapshot{
-				TotalRequests: modelStatsValue.TotalRequests,
-				TotalTokens:   modelStatsValue.TotalTokens,
-				Details:       requestDetails,
+				TotalRequests:  modelStatsValue.TotalRequests,
+				TotalTokens:    modelStatsValue.TotalTokens,
+				Details:        requestDetails,
+				RequestsByDay:  requestsByDay,
+				RequestsByHour: requestsByHour,
+				TokensByDay:    tokensByDay,
+				TokensByHour:   tokensByHour,
 			}
 		}
 		result.APIs[apiName] = apiSnapshot
@@ -330,6 +411,30 @@ func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot) MergeResu
 			if modelName == "" {
 				modelName = "unknown"
 			}
+
+			modelStatsValue, ok := stats.Models[modelName]
+			if !ok || modelStatsValue == nil {
+				modelStatsValue = &modelStats{
+					RequestsByDay:  make(map[string]int64),
+					RequestsByHour: make(map[string]int64),
+					TokensByDay:    make(map[string]int64),
+					TokensByHour:   make(map[string]int64),
+				}
+				stats.Models[modelName] = modelStatsValue
+			}
+			for k, v := range modelSnapshot.RequestsByDay {
+				modelStatsValue.RequestsByDay[k] += v
+			}
+			for k, v := range modelSnapshot.RequestsByHour {
+				modelStatsValue.RequestsByHour[k] += v
+			}
+			for k, v := range modelSnapshot.TokensByDay {
+				modelStatsValue.TokensByDay[k] += v
+			}
+			for k, v := range modelSnapshot.TokensByHour {
+				modelStatsValue.TokensByHour[k] += v
+			}
+
 			for _, detail := range modelSnapshot.Details {
 				detail.Tokens = normaliseTokenStats(detail.Tokens)
 				if detail.Timestamp.IsZero() {
@@ -469,4 +574,35 @@ func formatHour(hour int) string {
 	}
 	hour = hour % 24
 	return fmt.Sprintf("%02d", hour)
+}
+
+func formatDayBucket(timestamp time.Time) string {
+	if timestamp.IsZero() {
+		timestamp = time.Now().UTC()
+	}
+	return timestamp.UTC().Format("2006-01-02")
+}
+
+func formatHourBucket(timestamp time.Time) string {
+	if timestamp.IsZero() {
+		timestamp = time.Now().UTC()
+	}
+	return timestamp.UTC().Truncate(time.Hour).Format(time.RFC3339)
+}
+
+func (s *RequestStatistics) truncateAllModelDetailsLocked(limit int) {
+	for _, stats := range s.apis {
+		if stats == nil {
+			continue
+		}
+		for _, modelStatsValue := range stats.Models {
+			if modelStatsValue == nil {
+				continue
+			}
+			if len(modelStatsValue.Details) > limit {
+				start := len(modelStatsValue.Details) - limit
+				modelStatsValue.Details = append([]RequestDetail(nil), modelStatsValue.Details[start:]...)
+			}
+		}
+	}
 }

@@ -139,6 +139,9 @@ type UsagePersistenceConfig struct {
 	FilePath string `yaml:"file-path" json:"file-path"`
 	// IntervalSeconds controls periodic flush interval in seconds.
 	IntervalSeconds int `yaml:"interval-seconds" json:"interval-seconds"`
+	// MaxDetailsPerModel caps persisted per-model request details to recent N entries.
+	// Set to 0 or a negative value to disable truncation.
+	MaxDetailsPerModel int `yaml:"max-details-per-model" json:"max-details-per-model"`
 }
 
 // ClaudeHeaderDefaults configures default header values injected into Claude API requests
@@ -569,6 +572,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.UsagePersistence.Enabled = false
 	cfg.UsagePersistence.FilePath = "usage-statistics.json"
 	cfg.UsagePersistence.IntervalSeconds = 30
+	cfg.UsagePersistence.MaxDetailsPerModel = 300
 	cfg.DisableCooling = false
 	cfg.Pprof.Enable = false
 	cfg.Pprof.Addr = DefaultPprofAddr
@@ -640,6 +644,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	}
 	if cfg.UsagePersistence.IntervalSeconds <= 0 {
 		cfg.UsagePersistence.IntervalSeconds = 30
+	}
+	if cfg.UsagePersistence.MaxDetailsPerModel == 0 {
+		cfg.UsagePersistence.MaxDetailsPerModel = 300
 	}
 
 	// Sanitize Gemini API key configuration and migrate legacy entries.
