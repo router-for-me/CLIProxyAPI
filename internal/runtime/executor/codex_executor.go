@@ -562,17 +562,29 @@ func (e *CodexExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*
 	if auth == nil {
 		return nil, statusErr{code: 500, msg: "codex executor: auth is nil"}
 	}
-	var refreshToken string
+	var refreshToken, clientID string
 	if auth.Metadata != nil {
 		if v, ok := auth.Metadata["refresh_token"].(string); ok && v != "" {
 			refreshToken = v
+		}
+		// Prefer explicit client_id stored in metadata
+		if v, ok := auth.Metadata["client_id"].(string); ok && v != "" {
+			clientID = v
 		}
 	}
 	if refreshToken == "" {
 		return auth, nil
 	}
+	// Fall back to parsing client_id from id_token.aud[0]
+	if clientID == "" {
+		if idTokenRaw, ok := auth.Metadata["id_token"].(string); ok && idTokenRaw != "" {
+			if claims, err := codexauth.ParseJWTToken(idTokenRaw); err == nil && claims != nil {
+				clientID = claims.GetClientID()
+			}
+		}
+	}
 	svc := codexauth.NewCodexAuth(e.cfg)
-	td, err := svc.RefreshTokensWithRetry(ctx, refreshToken, 3)
+	td, err := svc.RefreshTokensWithRetry(ctx, refreshToken, clientID, 3)
 	if err != nil {
 		return nil, err
 	}

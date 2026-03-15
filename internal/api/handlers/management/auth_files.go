@@ -425,31 +425,49 @@ func extractCodexIDTokenClaims(auth *coreauth.Auth) gin.H {
 	if !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
 		return nil
 	}
-	idTokenRaw, ok := auth.Metadata["id_token"].(string)
-	if !ok {
-		return nil
-	}
-	idToken := strings.TrimSpace(idTokenRaw)
-	if idToken == "" {
-		return nil
-	}
-	claims, err := codex.ParseJWTToken(idToken)
-	if err != nil || claims == nil {
-		return nil
-	}
 
 	result := gin.H{}
-	if v := strings.TrimSpace(claims.CodexAuthInfo.ChatgptAccountID); v != "" {
-		result["chatgpt_account_id"] = v
+
+	// Check Metadata/Attributes first before parsing id_token.
+	// account_id is stored under "account_id" in the JSON file (CodexTokenStorage.AccountID).
+	if v, ok := auth.Metadata["account_id"].(string); ok && strings.TrimSpace(v) != "" {
+		result["chatgpt_account_id"] = strings.TrimSpace(v)
 	}
-	if v := strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType); v != "" {
-		result["plan_type"] = v
+	// plan_type is synthesized into Attributes by the file watcher, not stored in Metadata.
+	if auth.Attributes != nil {
+		if v := strings.TrimSpace(auth.Attributes["plan_type"]); v != "" {
+			result["plan_type"] = v
+		}
 	}
-	if v := claims.CodexAuthInfo.ChatgptSubscriptionActiveStart; v != nil {
-		result["chatgpt_subscription_active_start"] = v
-	}
-	if v := claims.CodexAuthInfo.ChatgptSubscriptionActiveUntil; v != nil {
-		result["chatgpt_subscription_active_until"] = v
+
+	// Fall back to parsing id_token for any fields still missing
+	needsIDToken := result["chatgpt_account_id"] == nil || result["plan_type"] == nil
+	if needsIDToken {
+		idTokenRaw, ok := auth.Metadata["id_token"].(string)
+		if ok {
+			idToken := strings.TrimSpace(idTokenRaw)
+			if idToken != "" {
+				claims, err := codex.ParseJWTToken(idToken)
+				if err == nil && claims != nil {
+					if result["chatgpt_account_id"] == nil {
+						if v := strings.TrimSpace(claims.CodexAuthInfo.ChatgptAccountID); v != "" {
+							result["chatgpt_account_id"] = v
+						}
+					}
+					if result["plan_type"] == nil {
+						if v := strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType); v != "" {
+							result["plan_type"] = v
+						}
+					}
+					if v := claims.CodexAuthInfo.ChatgptSubscriptionActiveStart; v != nil {
+						result["chatgpt_subscription_active_start"] = v
+					}
+					if v := claims.CodexAuthInfo.ChatgptSubscriptionActiveUntil; v != nil {
+						result["chatgpt_subscription_active_until"] = v
+					}
+				}
+			}
+		}
 	}
 
 	if len(result) == 0 {
