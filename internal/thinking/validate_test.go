@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/thinking/provider/antigravity"
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/thinking/provider/claude"
@@ -64,5 +65,23 @@ func TestApplyThinking_ClaudeCompatAntigravityRejectsInvalidClaudeEffort(t *test
 				t.Fatalf("returned body should remain unchanged on validation failure\ngot:  %s\nwant: %s", string(out), string(body))
 			}
 		})
+	}
+}
+
+func TestValidateConfig_NonClaudeAutoToClaudeStillClampsToConcreteLevel(t *testing.T) {
+	modelInfo := &registry.ModelInfo{
+		ID: "claude-opus-4-6-model",
+		Thinking: &registry.ThinkingSupport{
+			Levels:         []string{"low", "medium", "high", "max"},
+			DynamicAllowed: false,
+		},
+	}
+
+	got, err := thinking.ValidateConfig(thinking.ThinkingConfig{Mode: thinking.ModeAuto, Budget: -1}, modelInfo, "gemini", "claude", false)
+	if err != nil {
+		t.Fatalf("ValidateConfig() error = %v", err)
+	}
+	if got.Mode != thinking.ModeLevel || got.Level != thinking.LevelMedium {
+		t.Fatalf("ValidateConfig() = %+v, want ModeLevel/LevelMedium", *got)
 	}
 }

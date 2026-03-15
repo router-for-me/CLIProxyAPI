@@ -502,6 +502,9 @@ func (e *ClaudeExecutor) finalizeClaudeRequestBody(body []byte, reqModel string,
 	}
 	normalizedBody, originalToolNames, errNormalize := normalizeClaudeToolsForAnthropicWithRestoreMap(body)
 	if errNormalize != nil {
+		if errors.Is(errNormalize, errAnthropicToolNameUnsanitizable) || errors.Is(errNormalize, errAnthropicDuplicateToolName) {
+			return claudePreparedBody{}, statusErr{code: http.StatusBadRequest, msg: errNormalize.Error()}
+		}
 		return claudePreparedBody{}, fmt.Errorf("normalize claude tools: %w", errNormalize)
 	}
 	body = normalizedBody
@@ -1023,7 +1026,7 @@ func isClaudeBuiltinTool(tool gjson.Result) bool {
 
 func isClaudeExplicitNonCustomTypedTool(tool gjson.Result) bool {
 	toolType := strings.TrimSpace(tool.Get("type").String())
-	return toolType != "" && toolType != "custom" && !isClaudeBuiltinToolType(toolType)
+	return toolType != "" && toolType != "custom" && toolType != "function" && !isClaudeBuiltinToolType(toolType)
 }
 
 func normalizeAnthropicToolSchema(raw string) string {
@@ -1161,20 +1164,11 @@ func normalizeClaudeToolsForAnthropicWithRestoreMap(body []byte) ([]byte, map[st
 
 		originalName := anthroToolOriginalName(tool)
 		if originalName != "" && originalNameCounts[originalName] > 1 {
-			// Duplicate original names cannot be remapped unambiguously; preserve raw entry.
-			normalizedTools = append(normalizedTools, json.RawMessage(tool.Raw))
-			reserveToolNameVariants(usedNames, originalName)
-			continue
+			return body, nil, fmt.Errorf("%w: custom tool name %q appears multiple times and cannot be remapped safely", errAnthropicDuplicateToolName, originalName)
 		}
 
 		normalizedTool, originalName, newName, errNormalize := normalizeAnthropicToolEntry(tool, usedNames)
 		if errNormalize != nil {
-			if errors.Is(errNormalize, errAnthropicToolNameUnsanitizable) {
-				// Keep original entry if we cannot produce a safe Anthropic-compliant name.
-				normalizedTools = append(normalizedTools, json.RawMessage(tool.Raw))
-				reserveToolNameVariants(usedNames, originalName)
-				continue
-			}
 			return body, nil, errNormalize
 		}
 		normalizedTools = append(normalizedTools, json.RawMessage(normalizedTool))
@@ -1220,6 +1214,7 @@ func anthroToolOriginalName(tool gjson.Result) string {
 }
 
 var errAnthropicToolNameUnsanitizable = errors.New("anthropic tool name unsanitizable")
+var errAnthropicDuplicateToolName = errors.New("anthropic duplicate tool name")
 
 func normalizeAnthropicToolEntry(tool gjson.Result, usedNames map[string]struct{}) (normalizedRaw string, originalName string, newName string, err error) {
 	originalName = anthroToolOriginalName(tool)
@@ -1391,28 +1386,82 @@ func applyClaudeRenameMap(body []byte, renameMap map[string]string) ([]byte, err
 
 	return body, nil
 }
+
+func claudeToolPrefixName(tool gjson.Result) string {
+	topLevelName := strings.TrimSpace(tool.Get("name").String())
+	if topLevelName != "" {
+		return topLevelName
+	}
+	return anthroToolOriginalName(tool)
+}
+
+type claudeToolPrefixState struct {
+	prefixable    bool
+	nonPrefixable bool
+}
+
+func isClaudeToolPrefixable(tool gjson.Result) bool {
+	if isClaudeBuiltinTool(tool) || isClaudeExplicitNonCustomTypedTool(tool) {
+		return false
+	}
+	return strings.TrimSpace(tool.Get("name").String()) != ""
+}
+
+func claudeToolPrefixStates(body []byte) map[string]claudeToolPrefixState {
+	states := map[string]claudeToolPrefixState{}
+	for _, name := range []string{"web_search", "code_execution", "text_editor", "computer"} {
+		states[name] = claudeToolPrefixState{nonPrefixable: true}
+	}
+
+	if tools := gjson.GetBytes(body, "tools"); tools.Exists() && tools.IsArray() {
+		tools.ForEach(func(_, tool gjson.Result) bool {
+			name := claudeToolPrefixName(tool)
+			if name == "" {
+				return true
+			}
+			state := states[name]
+			if isClaudeToolPrefixable(tool) {
+				state.prefixable = true
+			} else {
+				state.nonPrefixable = true
+			}
+			states[name] = state
+			return true
+		})
+	}
+
+	return states
+}
+
+func shouldPrefixClaudeToolName(name, prefix string, states map[string]claudeToolPrefixState) bool {
+	name = strings.TrimSpace(name)
+	if name == "" || strings.HasPrefix(name, prefix) {
+		return false
+	}
+	state, ok := states[name]
+	if !ok {
+		return true
+	}
+	if state.prefixable && !state.nonPrefixable {
+		return true
+	}
+	return false
+}
+
 func applyClaudeToolPrefix(body []byte, prefix string) []byte {
 	if prefix == "" {
 		return body
 	}
 
-	// Collect non-prefixable tool names so we can skip them consistently in both tools and
-	// message history.
-	nonPrefixableToolNames := map[string]bool{}
-	for _, name := range []string{"web_search", "code_execution", "text_editor", "computer"} {
-		nonPrefixableToolNames[name] = true
-	}
+	states := claudeToolPrefixStates(body)
 
 	if tools := gjson.GetBytes(body, "tools"); tools.Exists() && tools.IsArray() {
 		tools.ForEach(func(index, tool gjson.Result) bool {
-			name := tool.Get("name").String()
-			if isClaudeBuiltinTool(tool) || isClaudeExplicitNonCustomTypedTool(tool) {
-				if name != "" {
-					nonPrefixableToolNames[name] = true
-				}
+			name := claudeToolPrefixName(tool)
+			if !isClaudeToolPrefixable(tool) {
 				return true
 			}
-			if name == "" || strings.HasPrefix(name, prefix) {
+			if !shouldPrefixClaudeToolName(name, prefix, states) {
 				return true
 			}
 			path := fmt.Sprintf("tools.%d.name", index.Int())
@@ -1423,7 +1472,7 @@ func applyClaudeToolPrefix(body []byte, prefix string) []byte {
 
 	if gjson.GetBytes(body, "tool_choice.type").String() == "tool" {
 		name := gjson.GetBytes(body, "tool_choice.name").String()
-		if name != "" && !strings.HasPrefix(name, prefix) && !nonPrefixableToolNames[name] {
+		if shouldPrefixClaudeToolName(name, prefix, states) {
 			body, _ = sjson.SetBytes(body, "tool_choice.name", prefix+name)
 		}
 	}
@@ -1439,14 +1488,14 @@ func applyClaudeToolPrefix(body []byte, prefix string) []byte {
 				switch partType {
 				case "tool_use":
 					name := part.Get("name").String()
-					if name == "" || strings.HasPrefix(name, prefix) || nonPrefixableToolNames[name] {
+					if !shouldPrefixClaudeToolName(name, prefix, states) {
 						return true
 					}
 					path := fmt.Sprintf("messages.%d.content.%d.name", msgIndex.Int(), contentIndex.Int())
 					body, _ = sjson.SetBytes(body, path, prefix+name)
 				case "tool_reference":
 					toolName := part.Get("tool_name").String()
-					if toolName == "" || strings.HasPrefix(toolName, prefix) || nonPrefixableToolNames[toolName] {
+					if !shouldPrefixClaudeToolName(toolName, prefix, states) {
 						return true
 					}
 					path := fmt.Sprintf("messages.%d.content.%d.tool_name", msgIndex.Int(), contentIndex.Int())
@@ -1458,7 +1507,7 @@ func applyClaudeToolPrefix(body []byte, prefix string) []byte {
 						nestedContent.ForEach(func(nestedIndex, nestedPart gjson.Result) bool {
 							if nestedPart.Get("type").String() == "tool_reference" {
 								nestedToolName := nestedPart.Get("tool_name").String()
-								if nestedToolName != "" && !strings.HasPrefix(nestedToolName, prefix) && !nonPrefixableToolNames[nestedToolName] {
+								if shouldPrefixClaudeToolName(nestedToolName, prefix, states) {
 									nestedPath := fmt.Sprintf("messages.%d.content.%d.content.%d.tool_name", msgIndex.Int(), contentIndex.Int(), nestedIndex.Int())
 									body, _ = sjson.SetBytes(body, nestedPath, prefix+nestedToolName)
 								}
@@ -1526,7 +1575,8 @@ func restoreClaudeNormalizedToolNamesInRequest(body []byte, originalByNormalized
 	if len(originalByNormalized) == 0 {
 		return body
 	}
-	if tools := gjson.GetBytes(body, "tools"); tools.Exists() && tools.IsArray() {
+	restoredBody := body
+	if tools := gjson.GetBytes(restoredBody, "tools"); tools.Exists() && tools.IsArray() {
 		tools.ForEach(func(index, tool gjson.Result) bool {
 			name := tool.Get("name").String()
 			originalName, ok := renamedToolName(name, originalByNormalized)
@@ -1534,11 +1584,11 @@ func restoreClaudeNormalizedToolNamesInRequest(body []byte, originalByNormalized
 				return true
 			}
 			path := fmt.Sprintf("tools.%d.name", index.Int())
-			body, _ = sjson.SetBytes(body, path, originalName)
+			restoredBody, _ = sjson.SetBytes(restoredBody, path, originalName)
 			return true
 		})
 	}
-	restoredBody, err := applyClaudeRenameMap(body, originalByNormalized)
+	restoredBody, err := applyClaudeRenameMap(restoredBody, originalByNormalized)
 	if err != nil {
 		return body
 	}

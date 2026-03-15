@@ -134,6 +134,30 @@ func TestApplyPayloadConfigWithRoot_OverrideNestedQueryPath(t *testing.T) {
 	}
 }
 
+func TestApplyPayloadConfigWithRoot_OverrideNestedQueryExpressionPath(t *testing.T) {
+	cfg := &config.Config{
+		Payload: config.PayloadConfig{
+			Override: []config.PayloadRule{
+				{
+					Models: []config.PayloadModelRule{{Name: "claude-*", Protocol: "claude"}},
+					Params: map[string]any{
+						`messages.#(content.#(type=="tool_use")).tool_present`: true,
+					},
+				},
+			},
+		},
+	}
+	input := []byte(`{"messages":[{"role":"assistant","content":[{"type":"tool_use","name":"a"},{"type":"text","text":"ok"}]},{"role":"assistant","content":[{"type":"text","text":"plain"}]}]}`)
+	out := applyPayloadConfigWithRoot(cfg, "claude-opus-4-6", "claude", "", input, nil, "")
+
+	if !gjson.GetBytes(out, "messages.0.tool_present").Bool() {
+		t.Fatalf("messages.0.tool_present = false, want true")
+	}
+	if got := gjson.GetBytes(out, "messages.1.tool_present"); got.Exists() {
+		t.Fatalf("messages.1.tool_present should not exist, got %s", got.Raw)
+	}
+}
+
 func TestApplyPayloadConfigWithRoot_OverrideRawNestedQueryPath(t *testing.T) {
 	cfg := &config.Config{
 		Payload: config.PayloadConfig{

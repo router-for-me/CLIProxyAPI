@@ -147,7 +147,7 @@ func ValidateConfig(config ThinkingConfig, modelInfo *registry.ModelInfo, fromFo
 
 	// Claude adaptive models use ModeAuto to request upstream-default adaptive behavior,
 	// so preserve it instead of rewriting to a fixed mid-range budget.
-	if config.Mode == ModeAuto && shouldPreserveAutoMode(toFormat, support) {
+	if config.Mode == ModeAuto && shouldPreserveAutoMode(fromFormat, toFormat, support) {
 		return &config, nil
 	}
 
@@ -186,11 +186,11 @@ func isValidClaudeEffortLevel(level ThinkingLevel) bool {
 	}
 }
 
-func shouldPreserveAutoMode(provider string, support *registry.ThinkingSupport) bool {
+func shouldPreserveAutoMode(fromFormat, toFormat string, support *registry.ThinkingSupport) bool {
 	if support == nil {
 		return false
 	}
-	return provider == "claude" && len(support.Levels) > 0
+	return fromFormat == "claude" && toFormat == "claude" && len(support.Levels) > 0
 }
 
 // convertAutoToMidRange converts ModeAuto to a mid-range value when dynamic is not allowed.

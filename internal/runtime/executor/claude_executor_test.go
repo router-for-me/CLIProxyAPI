@@ -404,6 +404,95 @@ func TestApplyClaudeToolPrefix_SkipsExplicitNonCustomTypedToolAndReferences(t *t
 	}
 }
 
+func TestApplyClaudeToolPrefix_SkipsRawWrapperToolWithoutTopLevelNameAndReferences(t *testing.T) {
+	input := []byte(`{
+		"tools":[
+			{"type":"custom","function":{"name":"raw_wrapper","description":"wrapped","parameters":{"type":"object"}}},
+			{"type":"custom","name":"apply_patch","input_schema":{"type":"object"}}
+		],
+		"tool_choice":{"type":"tool","name":"raw_wrapper"},
+		"messages":[
+			{"role":"assistant","content":[{"type":"tool_use","name":"raw_wrapper","id":"t1","input":{}}]},
+			{"role":"user","content":[{"type":"tool_reference","tool_name":"raw_wrapper"}]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":[{"type":"tool_reference","tool_name":"raw_wrapper"}]}]},
+			{"role":"assistant","content":[{"type":"tool_use","name":"apply_patch","id":"t2","input":{}}]}
+		]
+	}`)
+
+	out := applyClaudeToolPrefix(input, "proxy_")
+
+	if got := gjson.GetBytes(out, "tools.0.function.name").String(); got != "raw_wrapper" {
+		t.Fatalf("tools.0.function.name = %q, want %q", got, "raw_wrapper")
+	}
+	if got := gjson.GetBytes(out, "tools.0.name"); got.Exists() {
+		t.Fatalf("tools.0.name should remain absent for raw wrapper tool, got %s", got.Raw)
+	}
+	if got := gjson.GetBytes(out, "tool_choice.name").String(); got != "raw_wrapper" {
+		t.Fatalf("tool_choice.name = %q, want %q", got, "raw_wrapper")
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.0.name").String(); got != "raw_wrapper" {
+		t.Fatalf("messages.0.content.0.name = %q, want %q", got, "raw_wrapper")
+	}
+	if got := gjson.GetBytes(out, "messages.1.content.0.tool_name").String(); got != "raw_wrapper" {
+		t.Fatalf("messages.1.content.0.tool_name = %q, want %q", got, "raw_wrapper")
+	}
+	if got := gjson.GetBytes(out, "messages.2.content.0.content.0.tool_name").String(); got != "raw_wrapper" {
+		t.Fatalf("messages.2.content.0.content.0.tool_name = %q, want %q", got, "raw_wrapper")
+	}
+	if got := gjson.GetBytes(out, "tools.1.name").String(); got != "proxy_apply_patch" {
+		t.Fatalf("tools.1.name = %q, want %q", got, "proxy_apply_patch")
+	}
+	if got := gjson.GetBytes(out, "messages.3.content.0.name").String(); got != "proxy_apply_patch" {
+		t.Fatalf("messages.3.content.0.name = %q, want %q", got, "proxy_apply_patch")
+	}
+}
+
+func TestApplyClaudeToolPrefix_PreservesAmbiguousSharedNameAcrossRawWrapperAndCustomTool(t *testing.T) {
+	input := []byte(`{
+		"tools":[
+			{"type":"custom","function":{"name":"shared_tool","description":"wrapped","parameters":{"type":"object"}}},
+			{"type":"custom","name":"shared_tool","input_schema":{"type":"object"}},
+			{"type":"custom","name":"apply_patch","input_schema":{"type":"object"}}
+		],
+		"tool_choice":{"type":"tool","name":"shared_tool"},
+		"messages":[
+			{"role":"assistant","content":[
+				{"type":"tool_use","name":"shared_tool","id":"t1","input":{}},
+				{"type":"tool_use","name":"apply_patch","id":"t2","input":{}}
+			]},
+			{"role":"user","content":[{"type":"tool_reference","tool_name":"shared_tool"}]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":[{"type":"tool_reference","tool_name":"shared_tool"}]}]}
+		]
+	}`)
+
+	out := applyClaudeToolPrefix(input, "proxy_")
+
+	if got := gjson.GetBytes(out, "tools.0.function.name").String(); got != "shared_tool" {
+		t.Fatalf("tools.0.function.name = %q, want %q", got, "shared_tool")
+	}
+	if got := gjson.GetBytes(out, "tools.1.name").String(); got != "shared_tool" {
+		t.Fatalf("tools.1.name = %q, want %q", got, "shared_tool")
+	}
+	if got := gjson.GetBytes(out, "tool_choice.name").String(); got != "shared_tool" {
+		t.Fatalf("tool_choice.name = %q, want %q", got, "shared_tool")
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.0.name").String(); got != "shared_tool" {
+		t.Fatalf("messages.0.content.0.name = %q, want %q", got, "shared_tool")
+	}
+	if got := gjson.GetBytes(out, "messages.1.content.0.tool_name").String(); got != "shared_tool" {
+		t.Fatalf("messages.1.content.0.tool_name = %q, want %q", got, "shared_tool")
+	}
+	if got := gjson.GetBytes(out, "messages.2.content.0.content.0.tool_name").String(); got != "shared_tool" {
+		t.Fatalf("messages.2.content.0.content.0.tool_name = %q, want %q", got, "shared_tool")
+	}
+	if got := gjson.GetBytes(out, "tools.2.name").String(); got != "proxy_apply_patch" {
+		t.Fatalf("tools.2.name = %q, want %q", got, "proxy_apply_patch")
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.1.name").String(); got != "proxy_apply_patch" {
+		t.Fatalf("messages.0.content.1.name = %q, want %q", got, "proxy_apply_patch")
+	}
+}
+
 func TestNormalizeClaudeToolsForAnthropic_CustomTool(t *testing.T) {
 	input := []byte(`{
 		"tools":[
@@ -492,6 +581,44 @@ func TestNormalizeClaudeToolsForAnthropic_FunctionFallbacks(t *testing.T) {
 	}
 	if strings.Contains(normalizedName, " ") {
 		t.Fatalf("normalized tool name should be sanitized, got %q", normalizedName)
+	}
+	if got := gjson.GetBytes(out, "tools.0.description").String(); got != "dangerous" {
+		t.Fatalf("tools.0.description = %q, want %q", got, "dangerous")
+	}
+	if got := gjson.GetBytes(out, "tools.0.input_schema.type").String(); got != "object" {
+		t.Fatalf("tools.0.input_schema.type = %q, want %q", got, "object")
+	}
+	if got := gjson.GetBytes(out, "tool_choice.name").String(); got != normalizedName {
+		t.Fatalf("tool_choice.name = %q, want %q", got, normalizedName)
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.0.name").String(); got != normalizedName {
+		t.Fatalf("messages.0.content.0.name = %q, want %q", got, normalizedName)
+	}
+}
+
+func TestNormalizeClaudeToolsForAnthropic_OpenAIFunctionToolNormalizesInsteadOfPassingThrough(t *testing.T) {
+	input := []byte(`{
+		"tool_choice":{"type":"tool","name":"very bad tool"},
+		"messages":[{"role":"assistant","content":[{"type":"tool_use","name":"very bad tool","id":"t1","input":{}}]}],
+		"tools":[
+			{"type":"function","function":{"name":"very bad tool","description":"dangerous","parameters":{"type":"object"}}}
+		]
+	}`)
+
+	out, err := normalizeClaudeToolsForAnthropic(input)
+	if err != nil {
+		t.Fatalf("normalizeClaudeToolsForAnthropic error: %v", err)
+	}
+
+	normalizedName := gjson.GetBytes(out, "tools.0.name").String()
+	if normalizedName == "" {
+		t.Fatal("normalized tool name should not be empty")
+	}
+	if strings.Contains(normalizedName, " ") {
+		t.Fatalf("normalized tool name should be sanitized, got %q", normalizedName)
+	}
+	if got := gjson.GetBytes(out, "tools.0.type"); got.Exists() {
+		t.Fatalf("tools.0.type should be removed after normalization, got %s", got.Raw)
 	}
 	if got := gjson.GetBytes(out, "tools.0.description").String(); got != "dangerous" {
 		t.Fatalf("tools.0.description = %q, want %q", got, "dangerous")
@@ -632,7 +759,7 @@ func TestNormalizeClaudeToolsForAnthropic_RenameMapPreservesLargeIntegers(t *tes
 	}
 }
 
-func TestNormalizeClaudeToolsForAnthropic_PreservesDuplicateOriginalCustomToolNames(t *testing.T) {
+func TestNormalizeClaudeToolsForAnthropic_RejectsDuplicateOriginalCustomToolNames(t *testing.T) {
 	input := []byte(`{
 		"tool_choice":{"type":"tool","name":"duplicate tool"},
 		"messages":[
@@ -645,28 +772,16 @@ func TestNormalizeClaudeToolsForAnthropic_PreservesDuplicateOriginalCustomToolNa
 		]
 	}`)
 
-	out, err := normalizeClaudeToolsForAnthropic(input)
-	if err != nil {
-		t.Fatalf("normalizeClaudeToolsForAnthropic error: %v", err)
+	_, err := normalizeClaudeToolsForAnthropic(input)
+	if err == nil {
+		t.Fatal("normalizeClaudeToolsForAnthropic error = nil, want duplicate-name rejection")
 	}
-	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "duplicate tool" {
-		t.Fatalf("tools.0.name = %q, want %q", got, "duplicate tool")
-	}
-	if got := gjson.GetBytes(out, "tools.1.name").String(); got != "duplicate tool" {
-		t.Fatalf("tools.1.name = %q, want %q", got, "duplicate tool")
-	}
-	if got := gjson.GetBytes(out, "tool_choice.name").String(); got != "duplicate tool" {
-		t.Fatalf("tool_choice.name = %q, want %q", got, "duplicate tool")
-	}
-	if got := gjson.GetBytes(out, "messages.0.content.0.name").String(); got != "duplicate tool" {
-		t.Fatalf("messages.0.content.0.name = %q, want %q", got, "duplicate tool")
-	}
-	if got := gjson.GetBytes(out, "messages.1.content.0.tool_name").String(); got != "duplicate tool" {
-		t.Fatalf("messages.1.content.0.tool_name = %q, want %q", got, "duplicate tool")
+	if !errors.Is(err, errAnthropicDuplicateToolName) {
+		t.Fatalf("normalizeClaudeToolsForAnthropic error = %v, want errAnthropicDuplicateToolName", err)
 	}
 }
 
-func TestNormalizeClaudeToolsForAnthropic_PreservesUnsanitizableCustomToolName(t *testing.T) {
+func TestNormalizeClaudeToolsForAnthropic_RejectsUnsanitizableCustomToolName(t *testing.T) {
 	input := []byte(`{
 		"tool_choice":{"type":"tool","name":"!!!"},
 		"messages":[
@@ -678,21 +793,51 @@ func TestNormalizeClaudeToolsForAnthropic_PreservesUnsanitizableCustomToolName(t
 		]
 	}`)
 
-	out, err := normalizeClaudeToolsForAnthropic(input)
-	if err != nil {
-		t.Fatalf("normalizeClaudeToolsForAnthropic error: %v", err)
+	_, err := normalizeClaudeToolsForAnthropic(input)
+	if err == nil {
+		t.Fatal("normalizeClaudeToolsForAnthropic error = nil, want invalid-name rejection")
 	}
-	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "!!!" {
-		t.Fatalf("tools.0.name = %q, want %q", got, "!!!")
+	if !errors.Is(err, errAnthropicToolNameUnsanitizable) {
+		t.Fatalf("normalizeClaudeToolsForAnthropic error = %v, want errAnthropicToolNameUnsanitizable", err)
 	}
-	if got := gjson.GetBytes(out, "tool_choice.name").String(); got != "!!!" {
-		t.Fatalf("tool_choice.name = %q, want %q", got, "!!!")
+}
+
+func TestFinalizeClaudeRequestBody_RejectsDuplicateOriginalCustomToolNames(t *testing.T) {
+	executor := NewClaudeExecutor(&config.Config{})
+	_, err := executor.finalizeClaudeRequestBody([]byte(`{
+		"tools":[
+			{"type":"custom","name":"duplicate tool","description":"first","input_schema":{"type":"object"}},
+			{"type":"custom","name":"duplicate tool","description":"second","input_schema":{"type":"object"}}
+		]
+	}`), "claude-opus-4-6", sdktranslator.FromString("claude"), sdktranslator.FromString("claude"), "claude-opus-4-6", "", nil, claudeBodyFinalizeOptions{})
+	if err == nil {
+		t.Fatal("finalizeClaudeRequestBody error = nil, want bad-request rejection")
 	}
-	if got := gjson.GetBytes(out, "messages.0.content.0.name").String(); got != "!!!" {
-		t.Fatalf("messages.0.content.0.name = %q, want %q", got, "!!!")
+	sErr, ok := err.(statusErr)
+	if !ok {
+		t.Fatalf("finalizeClaudeRequestBody error type = %T, want statusErr", err)
 	}
-	if got := gjson.GetBytes(out, "messages.1.content.0.tool_name").String(); got != "!!!" {
-		t.Fatalf("messages.1.content.0.tool_name = %q, want %q", got, "!!!")
+	if sErr.code != http.StatusBadRequest {
+		t.Fatalf("statusErr.code = %d, want %d", sErr.code, http.StatusBadRequest)
+	}
+}
+
+func TestFinalizeClaudeRequestBody_RejectsUnsanitizableCustomToolName(t *testing.T) {
+	executor := NewClaudeExecutor(&config.Config{})
+	_, err := executor.finalizeClaudeRequestBody([]byte(`{
+		"tools":[
+			{"type":"custom","name":"!!!","description":"bad","input_schema":{"type":"object"}}
+		]
+	}`), "claude-opus-4-6", sdktranslator.FromString("claude"), sdktranslator.FromString("claude"), "claude-opus-4-6", "", nil, claudeBodyFinalizeOptions{})
+	if err == nil {
+		t.Fatal("finalizeClaudeRequestBody error = nil, want bad-request rejection")
+	}
+	sErr, ok := err.(statusErr)
+	if !ok {
+		t.Fatalf("finalizeClaudeRequestBody error type = %T, want statusErr", err)
+	}
+	if sErr.code != http.StatusBadRequest {
+		t.Fatalf("statusErr.code = %d, want %d", sErr.code, http.StatusBadRequest)
 	}
 }
 
@@ -844,34 +989,12 @@ func TestNormalizeClaudeToolsForAnthropic_TreatsExplicitTypedAndCustomNameCollis
 		]
 	}`)
 
-	out, err := normalizeClaudeToolsForAnthropic(input)
-	if err != nil {
-		t.Fatalf("normalizeClaudeToolsForAnthropic error: %v", err)
+	_, err := normalizeClaudeToolsForAnthropic(input)
+	if err == nil {
+		t.Fatal("normalizeClaudeToolsForAnthropic error = nil, want ambiguous-name rejection")
 	}
-
-	if got := gjson.GetBytes(out, "tools.0.type").String(); got != "future_tool" {
-		t.Fatalf("tools.0.type = %q, want %q", got, "future_tool")
-	}
-	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "future_one" {
-		t.Fatalf("tools.0.name = %q, want %q", got, "future_one")
-	}
-	if got := gjson.GetBytes(out, "tools.1.name").String(); got != "future_one" {
-		t.Fatalf("tools.1.name = %q, want %q", got, "future_one")
-	}
-	if got := gjson.GetBytes(out, "tool_choice.name").String(); got != "future_one" {
-		t.Fatalf("tool_choice.name = %q, want %q", got, "future_one")
-	}
-	if got := gjson.GetBytes(out, "messages.0.content.0.name").String(); got != "future_one" {
-		t.Fatalf("messages.0.content.0.name = %q, want %q", got, "future_one")
-	}
-	if got := gjson.GetBytes(out, "messages.1.content.0.tool_name").String(); got != "future_one" {
-		t.Fatalf("messages.1.content.0.tool_name = %q, want %q", got, "future_one")
-	}
-	if got := gjson.GetBytes(out, "messages.2.content.0.content.0.tool_name").String(); got != "future_one" {
-		t.Fatalf("messages.2.content.0.content.0.tool_name = %q, want %q", got, "future_one")
-	}
-	if got := gjson.GetBytes(out, "messages.0.content.0.input.n").Raw; got != "9007199254740995" {
-		t.Fatalf("messages.0.content.0.input.n = %s, want %s", got, "9007199254740995")
+	if !errors.Is(err, errAnthropicDuplicateToolName) {
+		t.Fatalf("normalizeClaudeToolsForAnthropic error = %v, want errAnthropicDuplicateToolName", err)
 	}
 }
 
@@ -889,37 +1012,12 @@ func TestNormalizeClaudeToolsForAnthropic_TreatsBuiltinAndCustomNameCollisionAsA
 		]
 	}`)
 
-	out, err := normalizeClaudeToolsForAnthropic(input)
-	if err != nil {
-		t.Fatalf("normalizeClaudeToolsForAnthropic error: %v", err)
+	_, err := normalizeClaudeToolsForAnthropic(input)
+	if err == nil {
+		t.Fatal("normalizeClaudeToolsForAnthropic error = nil, want ambiguous-name rejection")
 	}
-
-	if got := gjson.GetBytes(out, "tools.0.type").String(); got != "web_search_20250305" {
-		t.Fatalf("tools.0.type = %q, want %q", got, "web_search_20250305")
-	}
-	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "web_search" {
-		t.Fatalf("tools.0.name = %q, want %q", got, "web_search")
-	}
-	if got := gjson.GetBytes(out, "tools.1.type").String(); got != "custom" {
-		t.Fatalf("tools.1.type = %q, want %q", got, "custom")
-	}
-	if got := gjson.GetBytes(out, "tools.1.name").String(); got != "web_search" {
-		t.Fatalf("tools.1.name = %q, want %q", got, "web_search")
-	}
-	if got := gjson.GetBytes(out, "tool_choice.name").String(); got != "web_search" {
-		t.Fatalf("tool_choice.name = %q, want %q", got, "web_search")
-	}
-	if got := gjson.GetBytes(out, "messages.0.content.0.name").String(); got != "web_search" {
-		t.Fatalf("messages.0.content.0.name = %q, want %q", got, "web_search")
-	}
-	if got := gjson.GetBytes(out, "messages.1.content.0.tool_name").String(); got != "web_search" {
-		t.Fatalf("messages.1.content.0.tool_name = %q, want %q", got, "web_search")
-	}
-	if got := gjson.GetBytes(out, "messages.2.content.0.content.0.tool_name").String(); got != "web_search" {
-		t.Fatalf("messages.2.content.0.content.0.tool_name = %q, want %q", got, "web_search")
-	}
-	if got := gjson.GetBytes(out, "messages.0.content.0.input.n").Raw; got != "9007199254740995" {
-		t.Fatalf("messages.0.content.0.input.n = %s, want %s", got, "9007199254740995")
+	if !errors.Is(err, errAnthropicDuplicateToolName) {
+		t.Fatalf("normalizeClaudeToolsForAnthropic error = %v, want errAnthropicDuplicateToolName", err)
 	}
 }
 
@@ -1569,6 +1667,131 @@ func TestNormalizeThenPrefix_PreservesUnknownExplicitTypedToolName(t *testing.T)
 	}
 	if got := gjson.GetBytes(prefixed, "messages.2.content.0.content.0.tool_name").String(); got != "future_one" {
 		t.Fatalf("messages.2.content.0.content.0.tool_name = %q, want %q", got, "future_one")
+	}
+}
+
+func TestNormalizeThenPrefix_RejectsAmbiguousExplicitTypedAndCustomSharedName(t *testing.T) {
+	input := []byte(`{
+		"tool_choice":{"type":"tool","name":"future_one"},
+		"messages":[
+			{"role":"assistant","content":[{"type":"tool_use","name":"future_one","id":"t1","input":{}}]},
+			{"role":"user","content":[{"type":"tool_reference","tool_name":"future_one"}]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":[{"type":"tool_reference","tool_name":"future_one"}]}]}
+		],
+		"tools":[
+			{"type":"future_tool","name":"future_one","extra":{"a":1}},
+			{"type":"custom","name":"future_one","input_schema":{"type":"object"}}
+		]
+	}`)
+
+	_, err := normalizeClaudeToolsForAnthropic(input)
+	if err == nil {
+		t.Fatal("normalizeClaudeToolsForAnthropic error = nil, want ambiguous-name rejection")
+	}
+	if !errors.Is(err, errAnthropicDuplicateToolName) {
+		t.Fatalf("normalizeClaudeToolsForAnthropic error = %v, want errAnthropicDuplicateToolName", err)
+	}
+}
+
+func TestNormalizeThenPrefix_RejectsAmbiguousBuiltinAndCustomSharedName(t *testing.T) {
+	input := []byte(`{
+		"tool_choice":{"type":"tool","name":"web_search"},
+		"messages":[
+			{"role":"assistant","content":[{"type":"tool_use","name":"web_search","id":"ws1","input":{}}]},
+			{"role":"user","content":[{"type":"tool_reference","tool_name":"web_search"}]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"ws1","content":[{"type":"tool_reference","tool_name":"web_search"}]}]}
+		],
+		"tools":[
+			{"type":"web_search_20250305","name":"web_search"},
+			{"type":"custom","name":"web_search","input_schema":{"type":"object"}}
+		]
+	}`)
+
+	_, err := normalizeClaudeToolsForAnthropic(input)
+	if err == nil {
+		t.Fatal("normalizeClaudeToolsForAnthropic error = nil, want ambiguous-name rejection")
+	}
+	if !errors.Is(err, errAnthropicDuplicateToolName) {
+		t.Fatalf("normalizeClaudeToolsForAnthropic error = %v, want errAnthropicDuplicateToolName", err)
+	}
+}
+
+func TestNormalizeThenPrefix_RejectsDuplicateOpenAIFunctionFallbackName(t *testing.T) {
+	input := []byte(`{
+		"tool_choice":{"type":"tool","name":"duplicate tool"},
+		"messages":[
+			{"role":"assistant","content":[{"type":"tool_use","name":"duplicate tool","id":"t1","input":{}}]},
+			{"role":"user","content":[{"type":"tool_reference","tool_name":"duplicate tool"}]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":[{"type":"tool_reference","tool_name":"duplicate tool"}]}]}
+		],
+		"tools":[
+			{"type":"function","function":{"name":"duplicate tool","description":"first","parameters":{"type":"object"}}},
+			{"type":"function","function":{"name":"duplicate tool","description":"second","parameters":{"type":"object"}}}
+		]
+	}`)
+
+	_, err := normalizeClaudeToolsForAnthropic(input)
+	if err == nil {
+		t.Fatal("normalizeClaudeToolsForAnthropic error = nil, want duplicate-name rejection")
+	}
+	if !errors.Is(err, errAnthropicDuplicateToolName) {
+		t.Fatalf("normalizeClaudeToolsForAnthropic error = %v, want errAnthropicDuplicateToolName", err)
+	}
+}
+
+func TestNormalizeThenPrefix_RejectsUnsanitizableOpenAIFunctionFallbackName(t *testing.T) {
+	input := []byte(`{
+		"tool_choice":{"type":"tool","name":"!!!"},
+		"messages":[
+			{"role":"assistant","content":[{"type":"tool_use","name":"!!!","id":"t1","input":{}}]},
+			{"role":"user","content":[{"type":"tool_reference","tool_name":"!!!"}]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":[{"type":"tool_reference","tool_name":"!!!"}]}]}
+		],
+		"tools":[
+			{"type":"function","function":{"name":"!!!","description":"bad","parameters":{"type":"object"}}}
+		]
+	}`)
+
+	_, err := normalizeClaudeToolsForAnthropic(input)
+	if err == nil {
+		t.Fatal("normalizeClaudeToolsForAnthropic error = nil, want invalid-name rejection")
+	}
+	if !errors.Is(err, errAnthropicToolNameUnsanitizable) {
+		t.Fatalf("normalizeClaudeToolsForAnthropic error = %v, want errAnthropicToolNameUnsanitizable", err)
+	}
+}
+
+func TestRestoreClaudeNormalizedToolNamesInRequest_RestoresToolsAndReferences(t *testing.T) {
+	input := []byte(`{
+		"tool_choice":{"type":"tool","name":"search_tool"},
+		"messages":[
+			{"role":"assistant","content":[{"type":"tool_use","name":"search_tool","id":"toolu_1","input":{}}]},
+			{"role":"user","content":[{"type":"tool_reference","tool_name":"search_tool"}]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":[{"type":"tool_reference","tool_name":"search_tool"}]}]}
+		],
+		"tools":[
+			{"name":"search_tool","type":"custom","input_schema":{"type":"object"}}
+		]
+	}`)
+
+	out := restoreClaudeNormalizedToolNamesInRequest(input, map[string]string{
+		"search_tool": "search tool",
+	})
+
+	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "search tool" {
+		t.Fatalf("tools.0.name = %q, want %q", got, "search tool")
+	}
+	if got := gjson.GetBytes(out, "tool_choice.name").String(); got != "search tool" {
+		t.Fatalf("tool_choice.name = %q, want %q", got, "search tool")
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.0.name").String(); got != "search tool" {
+		t.Fatalf("messages.0.content.0.name = %q, want %q", got, "search tool")
+	}
+	if got := gjson.GetBytes(out, "messages.1.content.0.tool_name").String(); got != "search tool" {
+		t.Fatalf("messages.1.content.0.tool_name = %q, want %q", got, "search tool")
+	}
+	if got := gjson.GetBytes(out, "messages.2.content.0.content.0.tool_name").String(); got != "search tool" {
+		t.Fatalf("messages.2.content.0.content.0.tool_name = %q, want %q", got, "search tool")
 	}
 }
 

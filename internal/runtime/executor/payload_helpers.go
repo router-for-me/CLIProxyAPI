@@ -249,6 +249,7 @@ func expandSinglePayloadQueryPath(doc []byte, path string, queryStart, queryEnd 
 func payloadQueryEnd(path string, start int) int {
 	inQuote := byte(0)
 	escaped := false
+	parenLevel := 0
 	for i := start; i < len(path); i++ {
 		ch := path[i]
 		if escaped {
@@ -269,8 +270,14 @@ func payloadQueryEnd(path string, start int) int {
 			inQuote = ch
 			continue
 		}
-		if ch == ')' {
-			return i
+		switch ch {
+		case '(':
+			parenLevel++
+		case ')':
+			if parenLevel == 0 {
+				return i
+			}
+			parenLevel--
 		}
 	}
 	return -1

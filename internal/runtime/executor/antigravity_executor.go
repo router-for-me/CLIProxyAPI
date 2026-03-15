@@ -26,6 +26,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
+	antigravitythinking "github.com/router-for-me/CLIProxyAPI/v6/internal/thinking/provider/antigravity"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -952,20 +953,15 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("antigravity")
 	respCtx := context.WithValue(ctx, "alt", opts.Alt)
-	originalPayload := req.Payload
-	if len(opts.OriginalRequest) > 0 {
-		originalPayload = opts.OriginalRequest
-	}
 
 	// Prepare payload once (doesn't depend on baseURL)
-	payload := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
-	payload = preserveClaudeEffortForAntigravity(from, originalPayload, payload)
-
-	payload, err := thinking.ApplyThinking(payload, req.Model, from.String(), to.String(), e.Identifier())
+	payload, originalTranslated, err := e.prepareAntigravityRequestPayloads(req, opts, false)
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
 
+	requestedModel := payloadRequestedModel(opts, req.Model)
+	payload = applyPayloadConfigWithRoot(e.cfg, baseModel, "antigravity", "request", payload, originalTranslated, requestedModel)
 	payload = applyAntigravityClaudeCompatTransforms(baseModel, payload)
 	payload = deleteJSONField(payload, "project")
 	payload = deleteJSONField(payload, "model")
@@ -1490,7 +1486,13 @@ func antigravityBaseURLFallbackOrder(auth *cliproxyauth.Auth) []string {
 
 func applyAntigravityClaudeCompatTransforms(baseModel string, body []byte) []byte {
 	body = clampAntigravityClaudeMaxOutputTokens(baseModel, body)
-	body = normalizeAntigravityClaudeThinkingBudget(baseModel, body)
+	if strings.Contains(strings.ToLower(strings.TrimSpace(baseModel)), "claude") {
+		if info := registry.LookupModelInfo(baseModel, antigravityAuthType); info != nil {
+			body = antigravitythinking.NormalizeClaudeBudgetPayload(body, info)
+		} else if info := registry.LookupStaticModelInfo(baseModel); info != nil {
+			body = antigravitythinking.NormalizeClaudeBudgetPayload(body, info)
+		}
+	}
 	body = sanitizeAntigravityClaudeCompatFields(body)
 	return body
 }
@@ -1549,51 +1551,6 @@ func clampAntigravityClaudeMaxOutputTokens(baseModel string, body []byte) []byte
 		return body
 	}
 	return clamped
-}
-
-func normalizeAntigravityClaudeThinkingBudget(baseModel string, body []byte) []byte {
-	if !strings.Contains(strings.ToLower(strings.TrimSpace(baseModel)), "claude") {
-		return body
-	}
-
-	info := registry.LookupModelInfo(baseModel, antigravityAuthType)
-	if info == nil {
-		info = registry.LookupStaticModelInfo(baseModel)
-	}
-	if info == nil {
-		return body
-	}
-
-	budgetValue := gjson.GetBytes(body, "request.generationConfig.thinkingConfig.thinkingBudget")
-	budget := budgetValue.Int()
-	if !budgetValue.Exists() || budget < 0 {
-		return body
-	}
-
-	maxValue := gjson.GetBytes(body, "request.generationConfig.maxOutputTokens")
-	maxTokens := maxValue.Int()
-	if !maxValue.Exists() || maxTokens <= 0 {
-		if info.MaxCompletionTokens <= 0 {
-			return body
-		}
-		maxTokens = int64(info.MaxCompletionTokens)
-		body, _ = sjson.SetBytes(body, "request.generationConfig.maxOutputTokens", info.MaxCompletionTokens)
-	}
-
-	if budget >= maxTokens {
-		adjustedBudget := maxTokens - 1
-		minBudget := 0
-		if info.Thinking != nil {
-			minBudget = info.Thinking.Min
-		}
-		if minBudget > 0 && adjustedBudget < int64(minBudget) {
-			body, _ = sjson.DeleteBytes(body, "request.generationConfig.thinkingConfig")
-			return body
-		}
-		body, _ = sjson.SetBytes(body, "request.generationConfig.thinkingConfig.thinkingBudget", adjustedBudget)
-	}
-
-	return body
 }
 
 func resolveCustomAntigravityBaseURL(auth *cliproxyauth.Auth) string {
