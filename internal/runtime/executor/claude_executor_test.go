@@ -108,6 +108,43 @@ func TestEnforceSystemPromptCount_PreservesNonTextBlocks(t *testing.T) {
 	}
 }
 
+func TestEnforceSystemPromptCount_MixedTextNonTextNoReorder(t *testing.T) {
+	input := []byte(`{
+		"system": [
+			{"type":"text","text":"alpha"},
+			{"type":"text","text":"beta"},
+			{"type":"custom_block","value":"marker"},
+			{"type":"text","text":"gamma"}
+		]
+	}`)
+
+	out := enforceSystemPromptCount(input, 2)
+
+	// alpha+beta merge before non-text; gamma stays after non-text.
+	if got := gjson.GetBytes(out, "system.#").Int(); got != 3 {
+		t.Fatalf("system count = %d, want 3", got)
+	}
+	if got := gjson.GetBytes(out, "system.0.text").String(); got != "alpha\n\nbeta" {
+		t.Fatalf("system.0.text = %q, want %q", got, "alpha\\n\\nbeta")
+	}
+	if got := gjson.GetBytes(out, "system.1.type").String(); got != "custom_block" {
+		t.Fatalf("system.1.type = %q, want %q", got, "custom_block")
+	}
+	if got := gjson.GetBytes(out, "system.2.text").String(); got != "gamma" {
+		t.Fatalf("system.2.text = %q, want %q", got, "gamma")
+	}
+}
+
+func TestEnforceSystemPromptCount_ExactCountNoOp(t *testing.T) {
+	input := []byte(`{"system":[{"type":"text","text":"one"},{"type":"text","text":"two"}]}`)
+
+	out := enforceSystemPromptCount(input, 2)
+
+	if !bytes.Equal(out, input) {
+		t.Fatalf("expected no change for exact count, got %s", out)
+	}
+}
+
 func TestApplyClaudeToolPrefix_WithToolReference(t *testing.T) {
 	input := []byte(`{"tools":[{"name":"alpha"}],"messages":[{"role":"user","content":[{"type":"tool_reference","tool_name":"beta"},{"type":"tool_reference","tool_name":"proxy_gamma"}]}]}`)
 	out := applyClaudeToolPrefix(input, "proxy_")

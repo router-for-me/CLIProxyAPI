@@ -122,13 +122,16 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		return resp, err
 	}
 
+	// Enforce system-prompt-count before cloaking so cloaking-injected blocks
+	// are not counted or rewritten by the count policy.
+	body = applyClaudeSystemPromptCountPolicy(e.cfg, auth, body)
+
 	// Apply cloaking (system prompt injection, fake user ID, sensitive word obfuscation)
 	// based on client type and configuration.
 	body = applyCloaking(ctx, e.cfg, auth, body, baseModel, apiKey)
 
 	requestedModel := payloadRequestedModel(opts, req.Model)
 	body = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
-	body = applyClaudeSystemPromptCountPolicy(e.cfg, auth, body)
 
 	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
 	body = disableThinkingIfToolChoiceForced(body)
@@ -289,13 +292,16 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		return nil, err
 	}
 
+	// Enforce system-prompt-count before cloaking so cloaking-injected blocks
+	// are not counted or rewritten by the count policy.
+	body = applyClaudeSystemPromptCountPolicy(e.cfg, auth, body)
+
 	// Apply cloaking (system prompt injection, fake user ID, sensitive word obfuscation)
 	// based on client type and configuration.
 	body = applyCloaking(ctx, e.cfg, auth, body, baseModel, apiKey)
 
 	requestedModel := payloadRequestedModel(opts, req.Model)
 	body = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
-	body = applyClaudeSystemPromptCountPolicy(e.cfg, auth, body)
 
 	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
 	body = disableThinkingIfToolChoiceForced(body)
@@ -1226,25 +1232,61 @@ func enforceSystemPromptCount(payload []byte, targetCount int) []byte {
 		}
 	}
 
-	// Reduce text block count by merging overflow text into the last retained text block.
-	if len(textValues) >= targetCount {
-		mergedText := strings.Join(textValues[targetCount-1:], "\n\n")
-		merged := make([]any, 0, len(systemBlocks)-(len(textValues)-targetCount))
-		textIndex := 0
-		for _, block := range systemBlocks {
-			if _, ok := extractSystemText(block); !ok {
-				merged = append(merged, block)
-				continue
+	// Reduce text block count to match targetCount.
+	// Prefer merging adjacent text blocks to avoid reordering text across non-text blocks.
+	if len(textValues) > targetCount {
+		result := make([]any, len(systemBlocks))
+		copy(result, systemBlocks)
+		textCount := len(textValues)
+
+		// Merge adjacent text blocks from the end first.
+		for textCount > targetCount {
+			merged := false
+			for i := len(result) - 1; i > 0; i-- {
+				currText, currOk := extractSystemText(result[i])
+				prevText, prevOk := extractSystemText(result[i-1])
+				if currOk && prevOk {
+					result[i-1] = setSystemText(result[i-1], prevText+"\n\n"+currText)
+					result = append(result[:i], result[i+1:]...)
+					textCount--
+					merged = true
+					break
+				}
 			}
-			if textIndex < targetCount-1 {
-				merged = append(merged, block)
-			} else if textIndex == targetCount-1 {
-				merged = append(merged, setSystemText(block, mergedText))
+			if !merged {
+				break
 			}
-			textIndex++
 		}
-		root["system"] = merged
+
+		// Fallback: merge across non-text boundaries when adjacent merge is exhausted.
+		for textCount > targetCount {
+			lastIdx, prevIdx := -1, -1
+			for i := len(result) - 1; i >= 0; i-- {
+				if _, ok := extractSystemText(result[i]); ok {
+					if lastIdx == -1 {
+						lastIdx = i
+					} else {
+						prevIdx = i
+						break
+					}
+				}
+			}
+			if prevIdx == -1 {
+				break
+			}
+			pText, _ := extractSystemText(result[prevIdx])
+			lText, _ := extractSystemText(result[lastIdx])
+			result[prevIdx] = setSystemText(result[prevIdx], pText+"\n\n"+lText)
+			result = append(result[:lastIdx], result[lastIdx+1:]...)
+			textCount--
+		}
+
+		root["system"] = result
 		return marshalPayloadObject(payload, root)
+	}
+
+	if len(textValues) == targetCount {
+		return payload
 	}
 
 	// Increase text block count by appending empty text blocks.
