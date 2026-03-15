@@ -2,6 +2,7 @@ package executor
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -10,6 +11,15 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
+)
+
+// Connection-setup timeouts. Safe for streaming — only affect dial/TLS/headers, not body reads.
+const (
+	defaultDialTimeout           = 10 * time.Second
+	defaultDialKeepAlive         = 30 * time.Second
+	defaultTLSHandshakeTimeout   = 10 * time.Second
+	defaultResponseHeaderTimeout = 30 * time.Second
+	defaultIdleConnTimeout       = 90 * time.Second
 )
 
 // newProxyAwareHTTPClient creates an HTTP client with proper proxy configuration priority:
@@ -56,24 +66,55 @@ func newProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 	// Priority 3: Use RoundTripper from context (typically from RoundTripperFor)
 	if rt, ok := ctx.Value("cliproxy.roundtripper").(http.RoundTripper); ok && rt != nil {
 		httpClient.Transport = rt
+		return httpClient
 	}
 
+	// No proxy, no context RT — use default transport with timeouts.
+	httpClient.Transport = newDefaultTransport()
 	return httpClient
 }
 
-// buildProxyTransport creates an HTTP transport configured for the given proxy URL.
-// It supports SOCKS5, HTTP, and HTTPS proxy protocols.
-//
-// Parameters:
-//   - proxyURL: The proxy URL string (e.g., "socks5://user:pass@host:port", "http://host:port")
-//
-// Returns:
-//   - *http.Transport: A configured transport, or nil if the proxy URL is invalid
+// buildProxyTransport creates a proxy-configured transport with timeouts.
+// Supports SOCKS5, HTTP, HTTPS proxies. Returns nil on invalid URL.
 func buildProxyTransport(proxyURL string) *http.Transport {
 	transport, _, errBuild := proxyutil.BuildHTTPTransport(proxyURL)
 	if errBuild != nil {
 		log.Errorf("%v", errBuild)
 		return nil
 	}
+	if transport != nil {
+		applyTransportTimeouts(transport)
+	}
 	return transport
+}
+
+// newDefaultTransport returns a transport with default timeouts.
+func newDefaultTransport() *http.Transport {
+	t := &http.Transport{
+		Proxy:               http.ProxyFromEnvironment,
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 10,
+		ForceAttemptHTTP2:   true,
+	}
+	applyTransportTimeouts(t)
+	return t
+}
+
+// applyTransportTimeouts sets dial/TLS/header timeouts. Skips already-set fields.
+func applyTransportTimeouts(t *http.Transport) {
+	if t.DialContext == nil {
+		t.DialContext = (&net.Dialer{
+			Timeout:   defaultDialTimeout,
+			KeepAlive: defaultDialKeepAlive,
+		}).DialContext
+	}
+	if t.TLSHandshakeTimeout == 0 {
+		t.TLSHandshakeTimeout = defaultTLSHandshakeTimeout
+	}
+	if t.ResponseHeaderTimeout == 0 {
+		t.ResponseHeaderTimeout = defaultResponseHeaderTimeout
+	}
+	if t.IdleConnTimeout == 0 {
+		t.IdleConnTimeout = defaultIdleConnTimeout
+	}
 }
