@@ -405,7 +405,12 @@ func promoteMaxTokens(payload []byte) []byte {
 		return payload
 	}
 	if !gjson.GetBytes(payload, "max_completion_tokens").Exists() {
-		payload, _ = sjson.SetBytes(payload, "max_completion_tokens", mt.Value())
+		var err error
+		payload, err = sjson.SetBytes(payload, "max_completion_tokens", mt.Value())
+		if err != nil {
+			log.Warnf("promoteMaxTokens: failed to set max_completion_tokens: %v", err)
+			return payload
+		}
 	}
 	payload, _ = sjson.DeleteBytes(payload, "max_tokens")
 	return payload

@@ -457,6 +457,10 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 					}
 					if v := req.Get("max_output_tokens"); v.Exists() {
 						completed, _ = sjson.Set(completed, "response.max_output_tokens", v.Int())
+					} else if v := req.Get("max_completion_tokens"); v.Exists() {
+						completed, _ = sjson.Set(completed, "response.max_output_tokens", v.Int())
+					} else if v := req.Get("max_tokens"); v.Exists() {
+						completed, _ = sjson.Set(completed, "response.max_output_tokens", v.Int())
 					}
 					if v := req.Get("max_tool_calls"); v.Exists() {
 						completed, _ = sjson.Set(completed, "response.max_tool_calls", v.Int())
@@ -631,11 +635,10 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(_ context.Co
 		}
 		if v := req.Get("max_output_tokens"); v.Exists() {
 			resp, _ = sjson.Set(resp, "max_output_tokens", v.Int())
-		} else {
-			// Also support max_tokens from chat completion style
-			if v = req.Get("max_tokens"); v.Exists() {
-				resp, _ = sjson.Set(resp, "max_output_tokens", v.Int())
-			}
+		} else if v := req.Get("max_completion_tokens"); v.Exists() {
+			resp, _ = sjson.Set(resp, "max_output_tokens", v.Int())
+		} else if v := req.Get("max_tokens"); v.Exists() {
+			resp, _ = sjson.Set(resp, "max_output_tokens", v.Int())
 		}
 		if v := req.Get("max_tool_calls"); v.Exists() {
 			resp, _ = sjson.Set(resp, "max_tool_calls", v.Int())
