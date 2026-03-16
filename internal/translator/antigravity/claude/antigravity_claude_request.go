@@ -12,6 +12,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator/gemini/common"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
+	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -67,6 +68,10 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	// contents
 	contentsJSON := "[]"
 	hasContents := false
+
+	// tool_use_id → tool_name lookup, populated incrementally during the main loop.
+	// Claude's tool_result references tool_use by ID; Gemini requires functionResponse.name.
+	toolNameByID := make(map[string]string)
 
 	messagesResult := gjson.GetBytes(rawJSON, "messages")
 	if messagesResult.IsArray() {
@@ -170,6 +175,10 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 						argsResult := contentResult.Get("input")
 						functionID := contentResult.Get("id").String()
 
+						if functionID != "" && functionName != "" {
+							toolNameByID[functionID] = functionName
+						}
+
 						// Handle both object and string input formats
 						var argsRaw string
 						if argsResult.IsObject() {
@@ -206,10 +215,19 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 					} else if contentTypeResult.Type == gjson.String && contentTypeResult.String() == "tool_result" {
 						toolCallID := contentResult.Get("tool_use_id").String()
 						if toolCallID != "" {
-							funcName := toolCallID
-							toolCallIDs := strings.Split(toolCallID, "-")
-							if len(toolCallIDs) > 1 {
-								funcName = strings.Join(toolCallIDs[0:len(toolCallIDs)-2], "-")
+							funcName, ok := toolNameByID[toolCallID]
+							if !ok {
+								// Fallback: derive a semantic name from the ID by stripping
+								// the last two dash-separated segments (e.g. "get_weather-call-123" → "get_weather").
+								// Only use the raw ID as a last resort when the heuristic produces an empty string.
+								parts := strings.Split(toolCallID, "-")
+								if len(parts) > 2 {
+									funcName = strings.Join(parts[:len(parts)-2], "-")
+								}
+								if funcName == "" {
+									funcName = toolCallID
+								}
+								log.Warnf("antigravity claude request: tool_result references unknown tool_use_id=%s, derived function name=%s", toolCallID, funcName)
 							}
 							functionResponseResult := contentResult.Get("content")
 
