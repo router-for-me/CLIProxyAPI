@@ -68,18 +68,18 @@ async def analyze_meta_ads(account_id: str, period: str = "yesterday") -> str:
     except ImportError:
         return "requests library not available."
 
-    # Fetch campaign insights
+    # Fetch campaign insights — token via header to avoid log leakage
     url = f"{_GRAPH_API_URL}/{account_id}/insights"
     params = {
-        "access_token": token,
         "date_preset": date_preset,
         "fields": "campaign_name,spend,impressions,clicks,cpc,ctr,actions",
         "level": "campaign",
         "limit": 20,
     }
+    headers = {"Authorization": f"Bearer {token}"}
 
     try:
-        resp = requests.get(url, params=params, timeout=30)
+        resp = requests.get(url, params=params, headers=headers, timeout=30)
         if resp.status_code == 401:
             return "Meta Ads token expired or invalid. Generate a new one."
         resp.raise_for_status()
