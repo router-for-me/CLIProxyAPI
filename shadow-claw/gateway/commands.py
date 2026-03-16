@@ -97,7 +97,7 @@ async def jobs_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_text("Armazenamento de jobs não disponível.")
         return
 
-    from jobstore import format_jobs_list
+    from status_views import format_workflow_status
 
     args = context.args or []
     tool_filter = args[0] if len(args) >= 1 else None
@@ -109,7 +109,7 @@ async def jobs_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     except ValueError as e:
         await update.message.reply_text(f"Filtro inválido: {e}")
         return
-    await update.message.reply_text(format_jobs_list(jobs))
+    await update.message.reply_text(format_workflow_status(jobs))
 
 
 async def audit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

@@ -34,7 +34,9 @@ async def research_topic(query: str, depth: str = "quick") -> str:
         # Use existing autoresearch shell command
         try:
             import bot
-            config = bot._config
+            import bot_state
+
+            config = bot_state.config
             if config is None:
                 return "Configuration not available."
             result = await bot.run_autoresearch(query, config)

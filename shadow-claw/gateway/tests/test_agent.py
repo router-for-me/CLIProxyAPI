@@ -12,10 +12,18 @@ import json
 import os
 import sqlite3
 import tempfile
+import types
 import unittest
+from unittest.mock import AsyncMock, patch
+
+from errors import AuthExpiredError, ConnectorUnavailableError
 
 import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+
+def _run(coro):
+    return asyncio.run(coro)
 
 
 class TestToolRegistry(unittest.TestCase):
@@ -63,7 +71,7 @@ class TestToolRegistry(unittest.TestCase):
         async def add() -> str:
             return "42"
 
-        result = asyncio.get_event_loop().run_until_complete(
+        result = _run(
             ToolRegistry.invoke("add", {})
         )
         self.assertEqual(result, "42")
@@ -71,7 +79,7 @@ class TestToolRegistry(unittest.TestCase):
     def test_invoke_unknown_tool(self):
         from agent import ToolRegistry
 
-        result = asyncio.get_event_loop().run_until_complete(
+        result = _run(
             ToolRegistry.invoke("nonexistent", {})
         )
         self.assertIn("not found", result)
@@ -85,7 +93,7 @@ class TestToolRegistry(unittest.TestCase):
         async def fail() -> str:
             raise ValueError("boom")
 
-        result = asyncio.get_event_loop().run_until_complete(
+        result = _run(
             ToolRegistry.invoke("fail", {})
         )
         self.assertIn("failed", result)
@@ -111,7 +119,7 @@ class TestAgentLoop(unittest.TestCase):
             return {"content": "Hello!", "tool_calls": [], "finish_reason": "stop"}
 
         loop = AgentLoop(send_fn=mock_send)
-        result = asyncio.get_event_loop().run_until_complete(
+        result = _run(
             loop.run([{"role": "user", "content": "hi"}])
         )
         self.assertEqual(result, "Hello!")
@@ -150,7 +158,7 @@ class TestAgentLoop(unittest.TestCase):
             return {"content": "Alice says hi!", "tool_calls": [], "finish_reason": "stop"}
 
         loop = AgentLoop(send_fn=mock_send)
-        result = asyncio.get_event_loop().run_until_complete(
+        result = _run(
             loop.run([{"role": "user", "content": "greet Alice"}])
         )
         self.assertEqual(result, "Alice says hi!")
@@ -181,7 +189,7 @@ class TestAgentLoop(unittest.TestCase):
             }
 
         loop = AgentLoop(send_fn=mock_send, max_iterations=3)
-        result = asyncio.get_event_loop().run_until_complete(
+        result = _run(
             loop.run([{"role": "user", "content": "loop forever"}])
         )
         self.assertEqual(call_count, 3)
@@ -215,7 +223,7 @@ class TestAgentLoop(unittest.TestCase):
             return {"content": "Done", "tool_calls": [], "finish_reason": "stop"}
 
         loop = AgentLoop(send_fn=mock_send)
-        result = asyncio.get_event_loop().run_until_complete(
+        result = _run(
             loop.run([{"role": "user", "content": "test"}])
         )
         self.assertEqual(result, "Done")
@@ -297,6 +305,116 @@ class TestConversationManager(unittest.TestCase):
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]["key"], "a")
         cm.close()
+
+
+class TestSharedStateToolRegression(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        from agent import ToolRegistry
+        ToolRegistry.reset()
+        import tools  # noqa: F401
+        import bot_state
+
+        self.bot_state = bot_state
+        self.original_manager = bot_state.conversation_manager
+        self.original_config = bot_state.config
+        self.original_bot_module = sys.modules.get("bot")
+
+    def tearDown(self):
+        from agent import ToolRegistry
+        ToolRegistry.reset()
+        self.bot_state.conversation_manager = self.original_manager
+        self.bot_state.config = self.original_config
+        if self.original_bot_module is None:
+            sys.modules.pop("bot", None)
+        else:
+            sys.modules["bot"] = self.original_bot_module
+
+    async def test_memory_tools_use_bot_state_conversation_manager(self):
+        manager = AsyncMock()
+        manager.store_memory.return_value = "stored"
+        manager.recall.return_value = [{"key": "fav", "content": "blue", "tags": ["pref"]}]
+        manager.list_memories.return_value = [{"key": "fav", "content": "blue"}]
+        self.bot_state.conversation_manager = manager
+        sys.modules["bot"] = types.SimpleNamespace()
+
+        from tools.memory import memory_store, memory_recall, memory_list
+
+        self.assertEqual(await memory_store("fav", "blue", ["pref"]), "stored")
+        self.assertEqual(await memory_recall("favorite"), "- fav: blue [tags: ['pref']]")
+        self.assertEqual(await memory_list(), "Stored memories (1):\n- fav: blue")
+        manager.store_memory.assert_awaited_once_with("fav", "blue", ["pref"])
+        manager.recall.assert_awaited_once_with("favorite", limit=5)
+        manager.list_memories.assert_awaited_once_with(tag=None, limit=20)
+
+    async def test_research_topic_deep_uses_bot_state_config(self):
+        config = {"tools": {"autoresearch": {"command": "autoresearch"}}, "tool_output_limit": 1000}
+        self.bot_state.config = config
+        fake_bot = types.SimpleNamespace(run_autoresearch=AsyncMock(return_value={"ok": True, "output": "deep result"}))
+        sys.modules["bot"] = fake_bot
+
+        from tools.researcher import research_topic
+
+        result = await research_topic("vector dbs", depth="deep")
+
+        self.assertEqual(result, "Research results:\n\ndeep result")
+        fake_bot.run_autoresearch.assert_awaited_once_with("vector dbs", config)
+
+
+class TestPaymentToolRegression(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        from tools import payments
+
+        self.payments = payments
+        self.original_balance = payments._balance
+        self.original_pending = dict(payments._pending_payments)
+        self.original_history = list(payments._transaction_history)
+        self.original_counter = payments._payment_counter
+        payments._balance = 1000.0
+        payments._pending_payments.clear()
+        payments._transaction_history.clear()
+        payments._payment_counter = 0
+
+    def tearDown(self):
+        self.payments._balance = self.original_balance
+        self.payments._pending_payments.clear()
+        self.payments._pending_payments.update(self.original_pending)
+        self.payments._transaction_history[:] = self.original_history
+        self.payments._payment_counter = self.original_counter
+
+    async def test_payment_send_confirms_by_payment_id(self):
+        result = await self.payments.payment_send(amount=50.0, recipient="alice@example.com", confirmed=False)
+
+        self.assertIn("Payment ID: pay_1", result)
+        self.assertIn("pay_1", self.payments._pending_payments)
+
+        confirmed = await self.payments.payment_send(payment_id="pay_1", confirmed=True)
+
+        self.assertIn("Payment sent successfully!", confirmed)
+        self.assertNotIn("pay_1", self.payments._pending_payments)
+        self.assertEqual(self.payments._transaction_history[-1]["payment_id"], "pay_1")
+
+    async def test_payment_send_rejects_unknown_payment_id(self):
+        result = await self.payments.payment_send(payment_id="pay_missing", confirmed=True)
+
+        self.assertEqual(result, "Payment 'pay_missing' not found or already processed.")
+
+
+class TestConnectorStatus(unittest.IsolatedAsyncioTestCase):
+    async def test_gmail_connector_disabled_without_tokens(self):
+        from connectors.gmail_connector import GmailConnector, ConnectorState
+
+        connector = GmailConnector(access_token="", refresh_token="")
+        self.assertEqual(connector.status().state, ConnectorState.DISABLED)
+        with self.assertRaises(ConnectorUnavailableError):
+            await connector.list_unread()
+
+    async def test_calendar_connector_expired_with_only_refresh_token(self):
+        from connectors.calendar_connector import CalendarConnector, ConnectorState
+
+        connector = CalendarConnector(access_token="", refresh_token="refresh")
+        self.assertEqual(connector.status().state, ConnectorState.EXPIRED)
+        with self.assertRaises(AuthExpiredError):
+            await connector.list_events("2024-01-15", "2024-01-15")
 
 
 class TestSSRFBlocklist(unittest.TestCase):

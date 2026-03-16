@@ -6,6 +6,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 
 class _DummyFilter:
     def __and__(self, other):
@@ -24,7 +26,18 @@ if "telegram" not in sys.modules:
     class Update:
         ALL_TYPES = object()
 
+    class InlineKeyboardButton:
+        def __init__(self, text, callback_data=None):
+            self.text = text
+            self.callback_data = callback_data
+
+    class InlineKeyboardMarkup:
+        def __init__(self, inline_keyboard):
+            self.inline_keyboard = inline_keyboard
+
     telegram_module.Update = Update
+    telegram_module.InlineKeyboardButton = InlineKeyboardButton
+    telegram_module.InlineKeyboardMarkup = InlineKeyboardMarkup
     sys.modules["telegram"] = telegram_module
 
 if "telegram.ext" not in sys.modules:
@@ -36,6 +49,11 @@ if "telegram.ext" not in sys.modules:
             raise RuntimeError("Application builder stub should be mocked in tests")
 
     class CommandHandler:
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
+
+    class CallbackQueryHandler:
         def __init__(self, *args, **kwargs):
             self.args = args
             self.kwargs = kwargs
@@ -57,6 +75,7 @@ if "telegram.ext" not in sys.modules:
             return _DummyFilter()
 
     telegram_ext_module.Application = Application
+    telegram_ext_module.CallbackQueryHandler = CallbackQueryHandler
     telegram_ext_module.CommandHandler = CommandHandler
     telegram_ext_module.ContextTypes = ContextTypes
     telegram_ext_module.MessageHandler = MessageHandler
@@ -67,6 +86,15 @@ BOT_PATH = Path(__file__).resolve().parents[1] / "bot.py"
 SPEC = importlib.util.spec_from_file_location("shadow_claw_gateway_bot", BOT_PATH)
 bot = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(bot)
+sys.modules["bot"] = bot
+
+import bot_state
+import chat_client
+import commands
+import config as gateway_config
+import tools_panel
+from capability_router import route_user_intent
+from personal_agent import build_request_context
 
 
 class FakeResponse:
@@ -132,24 +160,24 @@ class FakeProcess:
 class TestRouteClassification(unittest.TestCase):
     def test_default_route_uses_default_profile(self):
         route = bot.classify_text_route("How are you?")
-        self.assertEqual(route, bot.CHAT_ROUTE_DEFAULT)
+        self.assertEqual(route, gateway_config.CHAT_ROUTE_DEFAULT)
 
     def test_coding_route_detects_keywords(self):
         route = bot.classify_text_route("Please debug this python function")
-        self.assertEqual(route, bot.CHAT_ROUTE_CODING)
+        self.assertEqual(route, gateway_config.CHAT_ROUTE_CODING)
 
     def test_coding_route_detects_code_fences(self):
         route = bot.classify_text_route("```python\nprint('hi')\n```")
-        self.assertEqual(route, bot.CHAT_ROUTE_CODING)
+        self.assertEqual(route, gateway_config.CHAT_ROUTE_CODING)
 
     def test_code_command_parses_prompt(self):
-        prompt = bot.extract_prompt_from_command("/code write a bash script", "code")
+        prompt = gateway_config.extract_prompt_from_command("/code write a bash script", "code")
         self.assertEqual(prompt, "write a bash script")
 
 
 class TestPayloadBuilding(unittest.TestCase):
     def test_default_payload_uses_medium_reasoning(self):
-        payload = bot.build_chat_payload(
+        payload = chat_client.build_chat_payload(
             "hello",
             {"model": "gpt-5.4", "reasoning_effort": "medium"},
         )
@@ -157,7 +185,7 @@ class TestPayloadBuilding(unittest.TestCase):
         self.assertEqual(payload["reasoning_effort"], "medium")
 
     def test_coding_payload_uses_high_reasoning(self):
-        payload = bot.build_chat_payload(
+        payload = chat_client.build_chat_payload(
             "fix bug",
             {"model": "gpt-5.4", "reasoning_effort": "high"},
         )
@@ -182,20 +210,20 @@ class TestFallbackBehavior(unittest.IsolatedAsyncioTestCase):
                 {"ok": True, "content": "fallback response", "status_code": 200},
             ],
         ):
-            reply = await bot.send_with_fallback("hello", bot.CHAT_ROUTE_DEFAULT, status_message, config)
+            reply = await bot.send_with_fallback("hello", gateway_config.CHAT_ROUTE_DEFAULT, status_message, config)
 
         status_message.edit_text.assert_awaited_once_with(bot.FALLBACK_STATUS_MESSAGE)
         self.assertIn("Fallback model kimi-k2.5 answered successfully.", reply)
         self.assertIn("fallback response", reply)
 
     async def test_fallback_on_retryable_status_codes(self):
-        self.assertTrue(bot.should_fallback(status_code=429))
-        self.assertTrue(bot.should_fallback(status_code=500))
-        self.assertTrue(bot.should_fallback(status_code=503))
+        self.assertTrue(chat_client.should_fallback(status_code=429))
+        self.assertTrue(chat_client.should_fallback(status_code=500))
+        self.assertTrue(chat_client.should_fallback(status_code=503))
 
     async def test_no_fallback_on_client_errors(self):
         for status_code in (400, 401, 403, 404):
-            self.assertFalse(bot.should_fallback(status_code=status_code))
+            self.assertFalse(chat_client.should_fallback(status_code=status_code))
 
     async def test_send_with_fallback_raises_for_non_retryable_error(self):
         status_message = AsyncMock()
@@ -211,7 +239,7 @@ class TestFallbackBehavior(unittest.IsolatedAsyncioTestCase):
             return_value={"ok": False, "retryable": False, "error": "Primary route failed with HTTP 400"},
         ):
             with self.assertRaisesRegex(RuntimeError, "HTTP 400"):
-                await bot.send_with_fallback("hello", bot.CHAT_ROUTE_DEFAULT, status_message, config)
+                await bot.send_with_fallback("hello", gateway_config.CHAT_ROUTE_DEFAULT, status_message, config)
 
         status_message.edit_text.assert_not_awaited()
 
@@ -510,7 +538,7 @@ class TestToolExecution(unittest.IsolatedAsyncioTestCase):
             },
         ), patch.object(bot.asyncio, "create_subprocess_exec", AsyncMock(return_value=process)), patch.object(
             bot, "MAX_TOOL_CAPTURE_BYTES", 8
-        ), patch.object(bot, "log_event") as log_event:
+        ), patch.object(bot_state, "log_event") as log_event:
             await bot.run_tool_command(
                 "autoresearch",
                 "hello",
@@ -522,6 +550,208 @@ class TestToolExecution(unittest.IsolatedAsyncioTestCase):
         self.assertIn("tool.exec.start", event_names)
         self.assertIn("tool.exec.truncated", event_names)
         self.assertIn("tool.exec.completed", event_names)
+
+
+class TestToolsPanelFlows(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        tools_panel._pending_tool_input.clear()
+
+    def tearDown(self):
+        tools_panel._pending_tool_input.clear()
+
+    async def test_plan_task_collects_objective_then_steps(self):
+        first_update = Mock()
+        first_update.message = Mock(chat_id=77)
+        first_update.message.reply_text = AsyncMock()
+
+        tools_panel._pending_tool_input[77] = {
+            "tool": "plan_task",
+            "prompt": "Descreva o objetivo do plano:",
+            "param": "objective",
+            "stage": "objective",
+        }
+
+        consumed = await tools_panel.intercept_pending_input(first_update, "Lançar gateway")
+
+        self.assertTrue(consumed)
+        self.assertEqual(
+            tools_panel._pending_tool_input[77],
+            {"tool": "plan_task", "stage": "steps", "objective": "Lançar gateway"},
+        )
+        first_update.message.reply_text.assert_awaited_once_with(
+            "📝 Criar Plano\n\nDigite os passos, um por linha ou separados por |."
+        )
+
+        second_update = Mock()
+        second_update.message = Mock(chat_id=77)
+        status_message = AsyncMock()
+        second_update.message.reply_text = AsyncMock(return_value=status_message)
+
+        with patch("agent.ToolRegistry.invoke", AsyncMock(return_value="plan created")) as invoke, patch.object(
+            tools_panel, "safe_edit_text", AsyncMock()
+        ) as safe_edit:
+            consumed = await tools_panel.intercept_pending_input(second_update, "Passo 1\nPasso 2")
+
+        self.assertTrue(consumed)
+        invoke.assert_awaited_once_with(
+            "plan_task",
+            {"objective": "Lançar gateway", "steps": ["Passo 1", "Passo 2"]},
+            log_event=bot_state.log_event,
+        )
+        safe_edit.assert_awaited_once_with(status_message, "plan created")
+        self.assertNotIn(77, tools_panel._pending_tool_input)
+
+    async def test_payment_send_requires_confirmation(self):
+        detail_update = Mock()
+        detail_update.message = Mock(chat_id=88)
+        detail_status = AsyncMock()
+        detail_update.message.reply_text = AsyncMock(return_value=detail_status)
+
+        tools_panel._pending_tool_input[88] = {
+            "tool": "payment_send",
+            "prompt": "Digite: valor | destinatário (ex: 50 | email@test.com):",
+            "param": "amount_recipient",
+            "stage": "details",
+        }
+
+        pending_result = (
+            "Payment pending confirmation:\n"
+            "  Amount: $50.00\n"
+            "  To: email@test.com\n"
+            "  Note: (none)\n"
+            "  Payment ID: pay_1\n\n"
+            "Ask the user to confirm this payment before proceeding."
+        )
+
+        with patch("agent.ToolRegistry.invoke", AsyncMock(return_value=pending_result)) as invoke, patch.object(
+            tools_panel, "safe_edit_text", AsyncMock()
+        ) as safe_edit:
+            consumed = await tools_panel.intercept_pending_input(detail_update, "50 | email@test.com")
+
+        self.assertTrue(consumed)
+        invoke.assert_awaited_once_with(
+            "payment_send",
+            {"amount": 50.0, "recipient": "email@test.com", "confirmed": False},
+            log_event=bot_state.log_event,
+        )
+        self.assertEqual(
+            tools_panel._pending_tool_input[88],
+            {
+                "tool": "payment_send",
+                "stage": "confirm",
+                "payment_id": "pay_1",
+            },
+        )
+        safe_edit.assert_awaited_once()
+        self.assertIn("Responda 'sim' para confirmar este pagamento.", safe_edit.await_args.args[1])
+
+        confirm_update = Mock()
+        confirm_update.message = Mock(chat_id=88)
+        confirm_status = AsyncMock()
+        confirm_update.message.reply_text = AsyncMock(return_value=confirm_status)
+
+        with patch("agent.ToolRegistry.invoke", AsyncMock(return_value="Payment sent successfully!")) as invoke, patch.object(
+            tools_panel, "safe_edit_text", AsyncMock()
+        ) as safe_edit:
+            consumed = await tools_panel.intercept_pending_input(confirm_update, "sim")
+
+        self.assertTrue(consumed)
+        invoke.assert_awaited_once_with(
+            "payment_send",
+            {"payment_id": "pay_1", "confirmed": True},
+            log_event=bot_state.log_event,
+        )
+        safe_edit.assert_awaited_once_with(confirm_status, "Payment sent successfully!")
+        self.assertNotIn(88, tools_panel._pending_tool_input)
+
+    async def test_payment_send_cancels_on_non_confirmation(self):
+        cancel_update = Mock()
+        cancel_update.message = Mock(chat_id=89)
+        cancel_update.message.reply_text = AsyncMock()
+
+        tools_panel._pending_tool_input[89] = {
+            "tool": "payment_send",
+            "stage": "confirm",
+            "payment_id": "pay_2",
+        }
+
+        with patch("agent.ToolRegistry.invoke", AsyncMock()) as invoke:
+            consumed = await tools_panel.intercept_pending_input(cancel_update, "não")
+
+        self.assertTrue(consumed)
+        invoke.assert_not_awaited()
+        cancel_update.message.reply_text.assert_awaited_once_with("Pagamento cancelado.")
+        self.assertNotIn(89, tools_panel._pending_tool_input)
+
+    async def test_plan_task_cancels_on_empty_steps(self):
+        update = Mock()
+        update.message = Mock(chat_id=90)
+        update.message.reply_text = AsyncMock()
+
+        tools_panel._pending_tool_input[90] = {
+            "tool": "plan_task",
+            "stage": "steps",
+            "objective": "Planejar release",
+        }
+
+        with patch("agent.ToolRegistry.invoke", AsyncMock()) as invoke:
+            consumed = await tools_panel.intercept_pending_input(update, "  \n  ")
+
+        self.assertTrue(consumed)
+        invoke.assert_not_awaited()
+        update.message.reply_text.assert_awaited_once_with("Nenhum passo válido informado. Operação cancelada.")
+        self.assertNotIn(90, tools_panel._pending_tool_input)
+
+    async def test_payment_send_invalid_first_leg_does_not_leave_confirm_state(self):
+        detail_update = Mock()
+        detail_update.message = Mock(chat_id=91)
+        detail_status = AsyncMock()
+        detail_update.message.reply_text = AsyncMock(return_value=detail_status)
+
+        tools_panel._pending_tool_input[91] = {
+            "tool": "payment_send",
+            "prompt": "Digite: valor | destinatário (ex: 50 | email@test.com):",
+            "param": "amount_recipient",
+            "stage": "details",
+        }
+
+        with patch("agent.ToolRegistry.invoke", AsyncMock(return_value="Invalid amount. Must be positive.")) as invoke, patch.object(
+            tools_panel, "safe_edit_text", AsyncMock()
+        ) as safe_edit:
+            consumed = await tools_panel.intercept_pending_input(detail_update, "abc | email@test.com")
+
+        self.assertTrue(consumed)
+        invoke.assert_awaited_once_with(
+            "payment_send",
+            {"amount": 0, "recipient": "email@test.com", "confirmed": False},
+            log_event=bot_state.log_event,
+        )
+        safe_edit.assert_awaited_once_with(detail_status, "Invalid amount. Must be positive.")
+        self.assertNotIn(91, tools_panel._pending_tool_input)
+
+
+class TestPersonalAgentRouting(unittest.IsolatedAsyncioTestCase):
+    async def test_route_user_intent_prefers_inbox_keywords(self):
+        intent = route_user_intent("check my inbox and email")
+        self.assertEqual(intent.name, "inbox")
+        self.assertEqual(intent.route_name, "inbox")
+
+    async def test_route_user_intent_prefers_calendar_keywords(self):
+        intent = route_user_intent("what is on my calendar today")
+        self.assertEqual(intent.name, "calendar")
+
+    async def test_build_request_context_returns_memory_context(self):
+        manager = AsyncMock()
+        manager.build_memory_context = AsyncMock(return_value="Relevant memories:\n- [pet] Rex")
+        old_manager = bot_state.conversation_manager
+        try:
+            bot_state.conversation_manager = manager
+            request = await build_request_context("77", "remember my dog")
+        finally:
+            bot_state.conversation_manager = old_manager
+        self.assertEqual(request.intent.name, "memory")
+        self.assertIn("Rex", request.memory_context)
+        manager.build_memory_context.assert_awaited_once_with("77", "remember my dog")
 
 
 class TestCommandHandlers(unittest.IsolatedAsyncioTestCase):
@@ -536,12 +766,12 @@ class TestCommandHandlers(unittest.IsolatedAsyncioTestCase):
             "telegram_token": "token",
         }
 
-        old_config = bot._config
+        old_config = bot_state.config
         try:
-            bot._config = config
-            await bot.code_command(update, context)
+            bot_state.config = config
+            await commands.code_command(update, context)
         finally:
-            bot._config = old_config
+            bot_state.config = old_config
 
         update.message.reply_text.assert_awaited_once_with("Usage: /code <prompt>")
 
@@ -559,7 +789,7 @@ class TestCommandHandlers(unittest.IsolatedAsyncioTestCase):
         }
 
         runner = AsyncMock()
-        with patch.object(bot, "log_event") as log_event:
+        with patch.object(bot_state, "log_event") as log_event:
             await bot.handle_tool_prompt(update, "hello", "ruflo", runner, config)
 
         update.message.reply_text.assert_awaited_once_with(
@@ -568,6 +798,54 @@ class TestCommandHandlers(unittest.IsolatedAsyncioTestCase):
         runner.assert_not_awaited()
         log_event.assert_called_once()
         self.assertEqual(log_event.call_args.args[0], "tool.route.disabled")
+
+
+class TestRateLimiterEnforcement(unittest.IsolatedAsyncioTestCase):
+    """Integration tests: rate-limiter guard actually blocks the downstream call."""
+
+    def setUp(self):
+        import bot_state
+        from ratelimit import RateLimiter
+
+        self._orig_rate_limiter = bot_state.rate_limiter
+        self._orig_config = bot_state.config
+        # max_requests=0 means every call is over-limit immediately
+        bot_state.rate_limiter = RateLimiter(max_requests=0, window_seconds=60)
+        bot_state.config = {"personal_agent_enabled": False}
+
+    def tearDown(self):
+        import bot_state
+
+        bot_state.rate_limiter = self._orig_rate_limiter
+        bot_state.config = self._orig_config
+
+    async def test_rate_limited_request_is_denied_and_chat_not_called(self):
+        import bot
+        import bot_state
+        from config import CHAT_ROUTE_DEFAULT
+
+        update = Mock()
+        update.message = Mock(chat_id=999)
+        update.message.reply_text = AsyncMock()
+        update.effective_user = Mock(id=42)
+
+        with patch.object(bot_state, "log_event", Mock()), patch(
+            "bot.attempt_chat_request", AsyncMock()
+        ) as chat_mock, patch(
+            "bot.attempt_agent_request", AsyncMock()
+        ) as agent_mock:
+            await bot.handle_chat_prompt(update, "hello", CHAT_ROUTE_DEFAULT, bot_state.config)
+
+        update.message.reply_text.assert_awaited()
+        denial_calls = [
+            c
+            for c in update.message.reply_text.await_args_list
+            if "atingido" in (c.args[0] if c.args else "")
+            or "Rate" in (c.args[0] if c.args else "")
+        ]
+        self.assertTrue(denial_calls, "Expected a rate-limit denial reply")
+        chat_mock.assert_not_awaited()
+        agent_mock.assert_not_awaited()
 
 
 if __name__ == "__main__":

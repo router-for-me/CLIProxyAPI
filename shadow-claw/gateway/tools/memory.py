@@ -11,8 +11,8 @@ from agent import tool
 
 def _get_manager():
     """Lazy import to avoid circular dependency at registration time."""
-    import bot
-    return bot._conversation_manager
+    import bot_state
+    return bot_state.conversation_manager
 
 
 @tool(
