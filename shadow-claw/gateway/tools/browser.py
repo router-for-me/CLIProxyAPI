@@ -1,7 +1,8 @@
 """Browser tools: browse URLs and search the web.
 
-Inspired by browser-use/browser-use. Uses requests + BeautifulSoup for
-lightweight page fetching. Includes SSRF blocklist for private IPs.
+Uses requests for HTTP (with SSRF blocklist) and Scrapling's Adaptor
+for HTML parsing (anti-bot-aware, adaptive selectors). Falls back to
+regex stripping when Scrapling is unavailable.
 """
 
 import ipaddress
@@ -61,17 +62,32 @@ def _is_private_url(url: str) -> bool:
 
 
 def _extract_text(html: str) -> str:
-    """Extract visible text from HTML, with BeautifulSoup if available."""
+    """Extract visible text from HTML using Scrapling, BS4, or regex fallback."""
+    try:
+        from scrapling import Adaptor
+        page = Adaptor(html, auto_match=False)
+        # Remove non-content elements
+        for sel in ("script", "style", "nav", "footer", "header"):
+            for el in page.css(sel):
+                el.remove()
+        text = page.get_all_text(separator="\n", strip=True)
+        if text:
+            return text
+    except (ImportError, Exception):
+        pass
     try:
         from bs4 import BeautifulSoup
         soup = BeautifulSoup(html, "html.parser")
         for tag in soup(["script", "style", "nav", "footer", "header"]):
             tag.decompose()
         text = soup.get_text(separator="\n", strip=True)
+        if text:
+            return text
     except ImportError:
-        # Fallback: strip HTML tags with regex
-        text = re.sub(r"<[^>]+>", " ", html)
-        text = re.sub(r"\s+", " ", text).strip()
+        pass
+    # Final fallback: strip HTML tags with regex
+    text = re.sub(r"<[^>]+>", " ", html)
+    text = re.sub(r"\s+", " ", text).strip()
     return text
 
 
@@ -154,19 +170,31 @@ async def browse_search(query: str) -> str:
     except requests.RequestException as e:
         return f"Search failed: {e}"
 
+    results = []
     try:
-        from bs4 import BeautifulSoup
-        soup = BeautifulSoup(resp.text, "html.parser")
-        results = []
-        for item in soup.select(".result__body")[:5]:
-            title_el = item.select_one(".result__a")
-            snippet_el = item.select_one(".result__snippet")
-            title = title_el.get_text(strip=True) if title_el else "No title"
-            link = title_el.get("href", "") if title_el else ""
-            snippet = snippet_el.get_text(strip=True) if snippet_el else ""
+        from scrapling import Adaptor
+        page = Adaptor(resp.text, auto_match=False)
+        for item in page.css(".result__body")[:5]:
+            title_el = item.css_first(".result__a")
+            snippet_el = item.css_first(".result__snippet")
+            title = title_el.text.strip() if title_el else "No title"
+            link = title_el.attrib.get("href", "") if title_el else ""
+            snippet = snippet_el.text.strip() if snippet_el else ""
             results.append(f"- {title}\n  {link}\n  {snippet}")
-        if results:
-            return f"Search results for '{query}':\n\n" + "\n\n".join(results)
-        return f"No search results found for '{query}'."
-    except ImportError:
-        return "beautifulsoup4 is required for web search. Install with: pip install beautifulsoup4"
+    except (ImportError, Exception):
+        try:
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(resp.text, "html.parser")
+            for item in soup.select(".result__body")[:5]:
+                title_el = item.select_one(".result__a")
+                snippet_el = item.select_one(".result__snippet")
+                title = title_el.get_text(strip=True) if title_el else "No title"
+                link = title_el.get("href", "") if title_el else ""
+                snippet = snippet_el.get_text(strip=True) if snippet_el else ""
+                results.append(f"- {title}\n  {link}\n  {snippet}")
+        except ImportError:
+            return "Install scrapling or beautifulsoup4 for web search: pip install scrapling"
+
+    if results:
+        return f"Search results for '{query}':\n\n" + "\n\n".join(results)
+    return f"No search results found for '{query}'."

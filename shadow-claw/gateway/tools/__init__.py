@@ -15,3 +15,6 @@ from tools import security  # noqa: F401
 from tools import desktop  # noqa: F401
 from tools import voice  # noqa: F401
 from tools import payments  # noqa: F401
+from tools import osint  # noqa: F401
+from tools import ocr  # noqa: F401
+from tools import marketing  # noqa: F401
