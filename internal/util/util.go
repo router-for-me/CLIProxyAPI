@@ -112,6 +112,33 @@ func CountAuthFiles[T any](ctx context.Context, store interface {
 	return len(entries)
 }
 
+// StripMarkdownCodeFences removes markdown code fences that LLMs sometimes wrap
+// around JSON or XML responses. If text starts with ```<optional-tag> and ends
+// with ```, the fence lines are removed and the inner content is returned.
+// Otherwise text is returned unchanged.
+func StripMarkdownCodeFences(text string) string {
+	trimmed := strings.TrimSpace(text)
+	if !strings.HasPrefix(trimmed, "```") {
+		return text
+	}
+
+	// Find the end of the opening fence line.
+	firstNewline := strings.Index(trimmed, "\n")
+	if firstNewline == -1 {
+		// Single line like "```something```" -- not a real fence block.
+		return text
+	}
+
+	// The closing fence must be the last non-blank line.
+	if !strings.HasSuffix(trimmed, "```") {
+		return text
+	}
+
+	// Strip the opening fence line and the closing "```".
+	inner := trimmed[firstNewline+1 : len(trimmed)-3]
+	return strings.TrimSpace(inner)
+}
+
 // WritablePath returns the cleaned WRITABLE_PATH environment variable when it is set.
 // It accepts both uppercase and lowercase variants for compatibility with existing conventions.
 func WritablePath() string {

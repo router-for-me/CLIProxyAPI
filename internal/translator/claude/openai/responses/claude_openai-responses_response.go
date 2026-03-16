@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -368,7 +369,7 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 		if st.TextBuf.Len() > 0 || st.InTextBlock || st.CurrentMsgID != "" {
 			item := `{"id":"","type":"message","status":"completed","content":[{"type":"output_text","annotations":[],"logprobs":[],"text":""}],"role":"assistant"}`
 			item, _ = sjson.Set(item, "id", st.CurrentMsgID)
-			item, _ = sjson.Set(item, "content.0.text", st.TextBuf.String())
+			item, _ = sjson.Set(item, "content.0.text", util.StripMarkdownCodeFences(st.TextBuf.String()))
 			outputsWrapper, _ = sjson.SetRaw(outputsWrapper, "arr.-1", item)
 		}
 		// function_call items (in ascending index order for determinism)
@@ -637,7 +638,7 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 	if currentMsgID != "" || textBuf.Len() > 0 {
 		item := `{"id":"","type":"message","status":"completed","content":[{"type":"output_text","annotations":[],"logprobs":[],"text":""}],"role":"assistant"}`
 		item, _ = sjson.Set(item, "id", currentMsgID)
-		item, _ = sjson.Set(item, "content.0.text", textBuf.String())
+		item, _ = sjson.Set(item, "content.0.text", util.StripMarkdownCodeFences(textBuf.String()))
 		outputsWrapper, _ = sjson.SetRaw(outputsWrapper, "arr.-1", item)
 	}
 	if len(toolCalls) > 0 {

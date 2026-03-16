@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -380,7 +381,7 @@ func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, origina
 	out, _ = sjson.Set(out, "model", model)
 
 	// Set message content by combining all text parts
-	messageContent := strings.Join(contentParts, "")
+	messageContent := util.StripMarkdownCodeFences(strings.Join(contentParts, ""))
 	out, _ = sjson.Set(out, "choices.0.message.content", messageContent)
 
 	// Add reasoning content if available (following OpenAI reasoning format)
