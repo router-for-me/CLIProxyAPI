@@ -7,6 +7,7 @@ lightweight page fetching. Includes SSRF blocklist for private IPs.
 import ipaddress
 import logging
 import re
+import socket
 from urllib.parse import urlparse
 
 import requests
@@ -33,17 +34,30 @@ _BLOCKED_NETWORKS = [
 
 
 def _is_private_url(url: str) -> bool:
-    """Check if a URL resolves to a private/internal IP address."""
+    """Return True if *url* resolves to a private/internal address."""
     try:
         parsed = urlparse(url)
         hostname = parsed.hostname or ""
         if hostname in ("localhost", ""):
             return True
-        addr = ipaddress.ip_address(hostname)
-        return any(addr in net for net in _BLOCKED_NETWORKS)
-    except (ValueError, TypeError):
-        # Not a raw IP — allow DNS names (resolved IPs checked later)
+        try:
+            # Try parsing as a raw IP first (fast path).
+            addr = ipaddress.ip_address(hostname)
+            return any(addr in net for net in _BLOCKED_NETWORKS)
+        except ValueError:
+            pass
+        # DNS name — resolve and check every returned address.
+        for _family, _type, _proto, _canon, sockaddr in socket.getaddrinfo(hostname, None):
+            try:
+                addr = ipaddress.ip_address(sockaddr[0])
+                if any(addr in net for net in _BLOCKED_NETWORKS):
+                    return True
+            except ValueError:
+                pass
         return False
+    except (OSError, TypeError):
+        # getaddrinfo failure (NXDOMAIN, etc.) — block to be safe.
+        return True
 
 
 def _extract_text(html: str) -> str:

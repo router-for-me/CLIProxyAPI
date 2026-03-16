@@ -397,13 +397,10 @@ def install_audit(original_log_event, audit_log: AuditLog):
 
         # Record to audit DB (non-blocking best-effort).
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                loop.run_in_executor(None, functools.partial(audit_log.record_sync, event, **fields))
-            else:
-                audit_log.record_sync(event, **fields)
+            loop = asyncio.get_running_loop()
+            loop.run_in_executor(None, functools.partial(audit_log.record_sync, event, **fields))
         except RuntimeError:
-            # No event loop at all (e.g. early startup)
+            # No running loop (sync context or early startup) — record inline.
             try:
                 audit_log.record_sync(event, **fields)
             except Exception:
