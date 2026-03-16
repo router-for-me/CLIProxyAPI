@@ -21,6 +21,7 @@ type staticModelsJSON struct {
 	IFlow       []*ModelInfo `json:"iflow"`
 	Kimi        []*ModelInfo `json:"kimi"`
 	Antigravity []*ModelInfo `json:"antigravity"`
+	MiniMax     []*ModelInfo `json:"minimax"`
 }
 
 // GetClaudeModels returns the standard Claude model definitions.
@@ -88,6 +89,11 @@ func GetAntigravityModels() []*ModelInfo {
 	return cloneModelInfos(getModels().Antigravity)
 }
 
+// GetMiniMaxModels returns the standard MiniMax model definitions.
+func GetMiniMaxModels() []*ModelInfo {
+	return cloneModelInfos(getModels().MiniMax)
+}
+
 // cloneModelInfos returns a shallow copy of the slice with each element deep-cloned.
 func cloneModelInfos(models []*ModelInfo) []*ModelInfo {
 	if len(models) == 0 {
@@ -114,6 +120,7 @@ func cloneModelInfos(models []*ModelInfo) []*ModelInfo {
 //   - iflow
 //   - kimi
 //   - antigravity
+//   - minimax
 func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 	key := strings.ToLower(strings.TrimSpace(channel))
 	switch key {
@@ -137,6 +144,8 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetKimiModels()
 	case "antigravity":
 		return GetAntigravityModels()
+	case "minimax":
+		return GetMiniMaxModels()
 	default:
 		return nil
 	}
@@ -161,6 +170,7 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		data.IFlow,
 		data.Kimi,
 		data.Antigravity,
+		data.MiniMax,
 	}
 	for _, models := range allModels {
 		for _, m := range models {

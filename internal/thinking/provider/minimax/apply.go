@@ -40,13 +40,9 @@ func init() {
 //	  "reasoning_split": true/false
 //	}
 func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *registry.ModelInfo) ([]byte, error) {
-	if thinking.IsUserDefinedModel(modelInfo) {
-		return applyMiniMax(body, config), nil
-	}
-	if modelInfo.Thinking == nil {
+	if !thinking.IsUserDefinedModel(modelInfo) && modelInfo.Thinking == nil {
 		return body, nil
 	}
-
 	return applyMiniMax(body, config), nil
 }
 
@@ -88,8 +84,8 @@ func applyMiniMax(body []byte, config thinking.ThinkingConfig) []byte {
 	}
 
 	// Remove any OpenAI-style reasoning_effort that may have been set
-	result, _ := sjson.DeleteBytes(body, "reasoning_effort")
-	result, _ = sjson.SetBytes(result, "reasoning_split", reasoningSplit)
+	body, _ = sjson.DeleteBytes(body, "reasoning_effort")
+	body, _ = sjson.SetBytes(body, "reasoning_split", reasoningSplit)
 
-	return result
+	return body
 }
