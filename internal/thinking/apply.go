@@ -361,8 +361,7 @@ func extractClaudeConfig(body []byte) ThinkingConfig {
 	}
 	if thinkingType == "adaptive" || thinkingType == "auto" {
 		// Claude adaptive thinking uses output_config.effort (low/medium/high/max).
-		// We only treat it as a thinking config when effort is explicitly present;
-		// otherwise we passthrough and let upstream defaults apply.
+		// Effort takes precedence when explicitly present.
 		if effort := gjson.GetBytes(body, "output_config.effort"); effort.Exists() && effort.Type == gjson.String {
 			value := strings.ToLower(strings.TrimSpace(effort.String()))
 			if value == "" {
@@ -377,6 +376,22 @@ func extractClaudeConfig(body []byte) ThinkingConfig {
 				return ThinkingConfig{Mode: ModeLevel, Level: ThinkingLevel(value)}
 			}
 		}
+		// Fallback: extract budget_tokens when effort is absent.
+		// Some clients send adaptive+budget_tokens which is invalid upstream;
+		// extracting the budget intent lets the thinking pipeline normalize the
+		// output format instead of passing through the malformed combination.
+		if budget := gjson.GetBytes(body, "thinking.budget_tokens"); budget.Exists() {
+			value := int(budget.Int())
+			switch value {
+			case 0:
+				return ThinkingConfig{Mode: ModeNone, Budget: 0}
+			case -1:
+				return ThinkingConfig{Mode: ModeAuto, Budget: -1}
+			default:
+				return ThinkingConfig{Mode: ModeBudget, Budget: value}
+			}
+		}
+		// No effort, no budget_tokens → passthrough (valid adaptive request).
 		return ThinkingConfig{}
 	}
 
