@@ -62,6 +62,7 @@ async def _run_selenium_query(url: str, processo: str) -> dict:
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
 
+    driver = None
     try:
         driver = webdriver.Chrome(options=options)
         driver.set_page_load_timeout(_PJE_TIMEOUT)
@@ -79,8 +80,6 @@ async def _run_selenium_query(url: str, processo: str) -> dict:
         body = driver.find_element(By.TAG_NAME, "body")
         text = body.text
 
-        driver.quit()
-
         if not text.strip() or "não encontrado" in text.lower():
             return {"ok": False, "error": f"Case not found: {processo}"}
 
@@ -88,6 +87,12 @@ async def _run_selenium_query(url: str, processo: str) -> dict:
 
     except Exception as e:
         return {"ok": False, "error": f"Selenium PJe query failed: {e}"}
+    finally:
+        if driver is not None:
+            try:
+                driver.quit()
+            except Exception:
+                pass
 
 
 @tool(
