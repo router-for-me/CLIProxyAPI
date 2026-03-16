@@ -428,46 +428,34 @@ func extractCodexIDTokenClaims(auth *coreauth.Auth) gin.H {
 
 	result := gin.H{}
 
-	// Check Metadata/Attributes first before parsing id_token.
-	// account_id is stored under "account_id" in the JSON file (CodexTokenStorage.AccountID).
-	if v, ok := auth.Metadata["account_id"].(string); ok && strings.TrimSpace(v) != "" {
-		result["chatgpt_account_id"] = strings.TrimSpace(v)
-	}
-	// plan_type is synthesized into Attributes by the file watcher, not stored in Metadata.
-	if auth.Attributes != nil {
-		if v := strings.TrimSpace(auth.Attributes["plan_type"]); v != "" {
-			result["plan_type"] = v
-		}
-	}
-
-	// Fall back to parsing id_token for any fields still missing
-	needsIDToken := result["chatgpt_account_id"] == nil || result["plan_type"] == nil
-	if needsIDToken {
-		idTokenRaw, ok := auth.Metadata["id_token"].(string)
-		if ok {
-			idToken := strings.TrimSpace(idTokenRaw)
-			if idToken != "" {
-				claims, err := codex.ParseJWTToken(idToken)
-				if err == nil && claims != nil {
-					if result["chatgpt_account_id"] == nil {
-						if v := strings.TrimSpace(claims.CodexAuthInfo.ChatgptAccountID); v != "" {
-							result["chatgpt_account_id"] = v
-						}
-					}
-					if result["plan_type"] == nil {
-						if v := strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType); v != "" {
-							result["plan_type"] = v
-						}
-					}
-					if v := claims.CodexAuthInfo.ChatgptSubscriptionActiveStart; v != nil {
-						result["chatgpt_subscription_active_start"] = v
-					}
-					if v := claims.CodexAuthInfo.ChatgptSubscriptionActiveUntil; v != nil {
-						result["chatgpt_subscription_active_until"] = v
-					}
+	// Step 1: unconditionally parse id_token as the baseline source.
+	// Subscription date fields only exist in id_token, so this must always run.
+	if idTokenRaw, ok := auth.Metadata["id_token"].(string); ok {
+		if idToken := strings.TrimSpace(idTokenRaw); idToken != "" {
+			if claims, err := codex.ParseJWTToken(idToken); err == nil && claims != nil {
+				if v := strings.TrimSpace(claims.CodexAuthInfo.ChatgptAccountID); v != "" {
+					result["chatgpt_account_id"] = v
+				}
+				if v := strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType); v != "" {
+					result["plan_type"] = v
+				}
+				if v := claims.CodexAuthInfo.ChatgptSubscriptionActiveStart; v != nil {
+					result["chatgpt_subscription_active_start"] = v
+				}
+				if v := claims.CodexAuthInfo.ChatgptSubscriptionActiveUntil; v != nil {
+					result["chatgpt_subscription_active_until"] = v
 				}
 			}
 		}
+	}
+
+	// Step 2: override with explicit values from the JSON file (Metadata) if present.
+	// These take priority because the user may have set them directly in the imported file.
+	if v, ok := auth.Metadata["account_id"].(string); ok && strings.TrimSpace(v) != "" {
+		result["chatgpt_account_id"] = strings.TrimSpace(v)
+	}
+	if v, ok := auth.Metadata["plan_type"].(string); ok && strings.TrimSpace(v) != "" {
+		result["plan_type"] = strings.TrimSpace(v)
 	}
 
 	if len(result) == 0 {
