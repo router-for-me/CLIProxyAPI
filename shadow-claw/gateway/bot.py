@@ -332,6 +332,27 @@ async def handle_chat_prompt(update: Update, prompt: str, route_name: str, confi
     bot_state.log_event("chat.request.start", **ctx, route=route_name, model=profile.get("model"))
     status_msg = await update.message.reply_text("🧠 Pensando...")
 
+    personal_request = None
+    if config.get("personal_agent_enabled") and bot_state.conversation_manager is not None:
+        try:
+            from personal_agent import build_request_context
+
+            session_id = str(ctx.get("chat_id", "default"))
+            personal_request = await build_request_context(session_id, prompt)
+            bot_state.log_event(
+                "personal_agent.request.built",
+                **ctx,
+                route=personal_request.intent.route_name,
+                capability=personal_request.intent.name,
+            )
+        except Exception as exc:
+            bot_state.log_event(
+                "personal_agent.request.degraded",
+                **ctx,
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
+
     # Agent mode: use tool-calling agent loop
     if config.get("agent_mode_enabled") and bot_state.conversation_manager is not None:
         try:
@@ -400,6 +421,20 @@ async def _run_agent_loop(prompt: str, profile: dict, config: dict, ctx: dict, s
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
     if memory_ctx:
         messages.append({"role": "system", "content": memory_ctx})
+    try:
+        if bot_state.config and bot_state.config.get("personal_agent_enabled"):
+            from personal_agent import build_request_context
+            personal_request = await build_request_context(session_id, prompt)
+            if personal_request.memory_context and personal_request.memory_context != memory_ctx:
+                messages.append({"role": "system", "content": personal_request.memory_context})
+    except Exception as exc:
+        bot_state.log_event(
+            "personal_agent.context.degraded",
+            chat_id=ctx.get("chat_id"),
+            telegram_user_id=ctx.get("telegram_user_id"),
+            error=str(exc),
+            error_type=type(exc).__name__,
+        )
     if len(history) > 1:
         messages.extend(history[:-1])
     messages.append({"role": "user", "content": prompt})
@@ -561,9 +596,41 @@ def _init_subsystems() -> None:
         try:
             import tools as _agent_tools  # noqa: F401
             from agent import ToolRegistry
+            from connectors.calendar_connector import CalendarConnector
+            from connectors.gmail_connector import GmailConnector
+            from capabilities.calendar_capability import register_calendar_tools
+            from capabilities.inbox_capability import register_inbox_tools
+            from capabilities.memory_capability import register_memory_tools
+            from knowledge_vault import KnowledgeVault
+            from approvals import ApprovalStore
+
+            gmail = GmailConnector(
+                access_token=config.get("gmail_access_token"),
+                refresh_token=config.get("gmail_refresh_token"),
+            )
+            calendar = CalendarConnector(
+                access_token=config.get("calendar_access_token"),
+                refresh_token=config.get("calendar_refresh_token"),
+            )
+            bot_state.connector_registry = {"gmail": gmail, "calendar": calendar}
+            bot_state.approval_store = ApprovalStore(bot_state.job_store)
+            register_inbox_tools(gmail)
+            register_calendar_tools(calendar)
+            register_memory_tools(
+                vault=KnowledgeVault(bot_state.conversation_manager),
+                manager=bot_state.conversation_manager,
+            )
+            bot_state.personal_agent_enabled = bool(config.get("personal_agent_enabled", True))
 
             tool_names = ToolRegistry.list_tools()
-            bot_state.log_event("agent.tools.registered", count=len(tool_names), tools=tool_names)
+            bot_state.log_event(
+                "agent.tools.registered",
+                count=len(tool_names),
+                tools=tool_names,
+                personal_agent_enabled=bot_state.personal_agent_enabled,
+                gmail_state=gmail.status().state.value,
+                calendar_state=calendar.status().state.value,
+            )
         except Exception as exc:
             bot_state.LOGGER.warning("Failed to register agent tools: %s", exc)
 

@@ -99,6 +99,12 @@ def load_config() -> dict:
         "max_tool_iterations": parse_int_env("MAX_TOOL_ITERATIONS", DEFAULT_MAX_TOOL_ITERATIONS),
         "agent_loop_timeout_seconds": parse_int_env("AGENT_LOOP_TIMEOUT_SECONDS", DEFAULT_AGENT_LOOP_TIMEOUT_SECONDS),
         "memory_db_path": os.getenv("MEMORY_DB_PATH", "").strip() or None,
+        # Personal Agent core milestone
+        "personal_agent_enabled": parse_bool_env("PERSONAL_AGENT_ENABLED", default=True),
+        "gmail_access_token": os.getenv("SHADOW_CLAW_GMAIL_ACCESS_TOKEN", "").strip(),
+        "gmail_refresh_token": os.getenv("SHADOW_CLAW_GMAIL_REFRESH_TOKEN", "").strip(),
+        "calendar_access_token": os.getenv("SHADOW_CLAW_CALENDAR_ACCESS_TOKEN", "").strip(),
+        "calendar_refresh_token": os.getenv("SHADOW_CLAW_CALENDAR_REFRESH_TOKEN", "").strip(),
     }
 
 

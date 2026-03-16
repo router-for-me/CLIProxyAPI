@@ -118,9 +118,12 @@ class ConversationManager:
     # Memory store/recall
     # ------------------------------------------------------------------
 
-    def store_memory_sync(self, key: str, content: str, tags: list[str] | None = None) -> str:
+    def store_memory_sync(self, key: str, content: str, tags: list[str] | None = None, source: str | None = None) -> str:
         now = time.time()
-        tags_str = ",".join(tags) if tags else ""
+        all_tags = list(tags or [])
+        if source:
+            all_tags.append(f"source:{source}")
+        tags_str = ",".join(all_tags)
         try:
             self._conn.execute(
                 "INSERT INTO memories (key, content, tags, created_at, last_accessed) "
@@ -136,16 +139,53 @@ class ConversationManager:
         self._conn.commit()
         return f"Stored memory '{key}'"
 
-    def recall_sync(self, query: str, limit: int = 3) -> list[dict]:
-        """Search memories by query using FTS5 or LIKE fallback."""
+    def get_memory_sync(self, key: str) -> dict | None:
+        """Exact-key retrieval; returns None when key is absent."""
+        row = self._conn.execute(
+            "SELECT key, content, tags FROM memories WHERE key = ?", (key,)
+        ).fetchone()
+        if row is None:
+            return None
+        self._update_access_times([row[0]])
+        return {"key": row[0], "content": row[1], "tags": row[2]}
+
+    def list_by_source_sync(self, source: str, limit: int = 20) -> list[dict]:
+        """List memories whose tags include 'source:<source>'."""
+        tag_frag = f"%source:{source}%"
+        rows = self._conn.execute(
+            "SELECT key, content, tags FROM memories "
+            "WHERE tags LIKE ? ORDER BY last_accessed DESC LIMIT ?",
+            (tag_frag, limit),
+        ).fetchall()
+        return [{"key": r[0], "content": r[1], "tags": r[2]} for r in rows]
+
+    def delete_memory_sync(self, key: str) -> bool:
+        """Delete a memory by key. Returns True when a row was deleted."""
+        cursor = self._conn.execute("DELETE FROM memories WHERE key = ?", (key,))
+        self._conn.commit()
+        return cursor.rowcount > 0
+
+    def recall_sync(self, query: str, limit: int = 3, source: str | None = None) -> list[dict]:
+        """Search memories by query using FTS5 or LIKE fallback.
+
+        ``source`` optionally scopes the search to memories tagged
+        ``source:<source>`` (e.g. ``source="gmail"``).
+        """
+        src_pattern = f"%source:{source}%" if source else None
         if self._fts_available:
             try:
-                rows = self._conn.execute(
+                sql = (
                     "SELECT m.key, m.content, m.tags FROM memories m "
                     "JOIN memories_fts f ON m.id = f.rowid "
-                    "WHERE memories_fts MATCH ? ORDER BY rank LIMIT ?",
-                    (query, limit),
-                ).fetchall()
+                    "WHERE memories_fts MATCH ?"
+                )
+                params: list = [query]
+                if src_pattern:
+                    sql += " AND m.tags LIKE ?"
+                    params.append(src_pattern)
+                sql += " ORDER BY rank LIMIT ?"
+                params.append(limit)
+                rows = self._conn.execute(sql, params).fetchall()
                 self._update_access_times([r[0] for r in rows])
                 return [{"key": r[0], "content": r[1], "tags": r[2]} for r in rows]
             except sqlite3.OperationalError:
@@ -153,12 +193,18 @@ class ConversationManager:
 
         # LIKE fallback
         pattern = f"%{query}%"
-        rows = self._conn.execute(
-            "SELECT key, content, tags FROM memories "
-            "WHERE content LIKE ? OR key LIKE ? OR tags LIKE ? "
-            "ORDER BY last_accessed DESC LIMIT ?",
-            (pattern, pattern, pattern, limit),
-        ).fetchall()
+        where = ["(content LIKE ? OR key LIKE ? OR tags LIKE ?)"]
+        params = [pattern, pattern, pattern]
+        if src_pattern:
+            where.append("tags LIKE ?")
+            params.append(src_pattern)
+        params.append(limit)
+        sql = (
+            "SELECT key, content, tags FROM memories WHERE "
+            + " AND ".join(where)
+            + " ORDER BY last_accessed DESC LIMIT ?"
+        )
+        rows = self._conn.execute(sql, params).fetchall()
         self._update_access_times([r[0] for r in rows])
         return [{"key": r[0], "content": r[1], "tags": r[2]} for r in rows]
 
@@ -219,14 +265,23 @@ class ConversationManager:
     async def get_history(self, session_id: str, limit: int | None = None) -> list[dict]:
         return await self._run(self.get_history_sync, session_id, limit)
 
-    async def store_memory(self, key: str, content: str, tags: list[str] | None = None) -> str:
-        return await self._run(self.store_memory_sync, key, content, tags)
+    async def store_memory(self, key: str, content: str, tags: list[str] | None = None, source: str | None = None) -> str:
+        return await self._run(self.store_memory_sync, key, content, tags, source)
 
-    async def recall(self, query: str, limit: int = 3) -> list[dict]:
-        return await self._run(self.recall_sync, query, limit)
+    async def recall(self, query: str, limit: int = 3, source: str | None = None) -> list[dict]:
+        return await self._run(self.recall_sync, query, limit, source)
 
     async def list_memories(self, tag: str | None = None, limit: int = 10) -> list[dict]:
         return await self._run(self.list_memories_sync, tag, limit)
+
+    async def get_memory(self, key: str) -> dict | None:
+        return await self._run(self.get_memory_sync, key)
+
+    async def list_by_source(self, source: str, limit: int = 20) -> list[dict]:
+        return await self._run(self.list_by_source_sync, source, limit)
+
+    async def delete_memory(self, key: str) -> bool:
+        return await self._run(self.delete_memory_sync, key)
 
     async def build_memory_context(self, session_id: str, user_message: str) -> str:
         return await self._run(self.build_memory_context_sync, session_id, user_message)

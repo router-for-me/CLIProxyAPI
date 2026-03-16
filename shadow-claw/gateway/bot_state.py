@@ -16,6 +16,9 @@ job_store = None
 audit_log = None
 rate_limiter = None
 conversation_manager = None
+approval_store = None
+connector_registry = {}
+personal_agent_enabled = False
 
 
 def log_event(event: str, **fields) -> None:
