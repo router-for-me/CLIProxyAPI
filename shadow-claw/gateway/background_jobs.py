@@ -26,8 +26,13 @@ from trust_zones import should_require_approval
 # Tools whose wall-clock execution time is long enough to warrant a job record.
 _BACKGROUND_TOOLS: frozenset[str] = frozenset(
     {
-        "research_topic",  # depth=deep drives autoresearch subprocess
-        "plan_execute",    # may iterate through multiple agent tool turns
+        "research_topic",      # depth=deep drives autoresearch subprocess
+        "plan_execute",        # may iterate through multiple agent tool turns
+        "check_pje",           # Selenium PJe scraper (30-60s per query)
+        "research_company",    # gpt-researcher deep company research
+        "transcribe_audio",    # Whisper transcription (can take minutes)
+        "osint_username",      # maigret scan (60-120s)
+        "osint_domain",        # theHarvester scan (30-60s)
     }
 )
 

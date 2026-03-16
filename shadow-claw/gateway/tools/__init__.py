@@ -18,3 +18,7 @@ from tools import payments  # noqa: F401
 from tools import osint  # noqa: F401
 from tools import ocr  # noqa: F401
 from tools import marketing  # noqa: F401
+from tools import legal  # noqa: F401
+from tools import pje_monitor  # noqa: F401
+from tools import company_research  # noqa: F401
+from tools import transcription  # noqa: F401
