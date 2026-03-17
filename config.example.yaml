@@ -62,6 +62,16 @@ error-logs-max-files: 10
 # When false, disable in-memory usage statistics aggregation
 usage-statistics-enabled: false
 
+# Usage statistics persistence settings (optional)
+usage-persistence:
+  enabled: false
+  path: "" # defaults to ${auth-dir}/usage/usage.json when empty
+  interval: 60 # seconds
+  detail-ring-size: 10000 # per-model detail history cap
+  detail-max-total: 50000 # global detail history cap
+  save-every-requests: 0 # trigger save after N requests (0 disables)
+  redact-source: false # remove source field in persisted usage details
+
 # Proxy URL. Supports socks5/http/https protocols. Example: socks5://user:pass@192.168.1.1:1080/
 # Per-entry proxy-url also supports "direct" or "none" to bypass both the global proxy-url and environment proxies explicitly.
 proxy-url: ""

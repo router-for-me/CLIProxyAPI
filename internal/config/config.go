@@ -19,8 +19,11 @@ import (
 )
 
 const (
-	DefaultPanelGitHubRepository = "https://github.com/router-for-me/Cli-Proxy-API-Management-Center"
-	DefaultPprofAddr             = "127.0.0.1:8316"
+	DefaultPanelGitHubRepository           = "https://github.com/router-for-me/Cli-Proxy-API-Management-Center"
+	DefaultPprofAddr                       = "127.0.0.1:8316"
+	DefaultUsagePersistenceIntervalSeconds = 60
+	DefaultUsageDetailRingSize             = 10000
+	DefaultUsageDetailMaxTotal             = 50000
 )
 
 // Config represents the application's configuration, loaded from a YAML file.
@@ -63,6 +66,9 @@ type Config struct {
 
 	// UsageStatisticsEnabled toggles in-memory usage aggregation; when false, usage data is discarded.
 	UsageStatisticsEnabled bool `yaml:"usage-statistics-enabled" json:"usage-statistics-enabled"`
+
+	// UsagePersistence configures usage statistics persistence to disk.
+	UsagePersistence UsagePersistenceConfig `yaml:"usage-persistence" json:"usage-persistence"`
 
 	// DisableCooling disables quota cooldown scheduling when true.
 	DisableCooling bool `yaml:"disable-cooling" json:"disable-cooling"`
@@ -126,6 +132,53 @@ type Config struct {
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
 
 	legacyMigrationPending bool `yaml:"-" json:"-"`
+}
+
+// UsagePersistenceConfig controls usage statistics persistence behavior.
+type UsagePersistenceConfig struct {
+	// Enabled toggles usage persistence to disk.
+	Enabled bool `yaml:"enabled" json:"enabled"`
+
+	// Path is the destination file for usage snapshot persistence.
+	// If empty, defaults to ${auth-dir}/usage/usage.json.
+	Path string `yaml:"path" json:"path"`
+
+	// IntervalSeconds defines how often to persist usage snapshots in seconds.
+	IntervalSeconds int `yaml:"interval" json:"interval"`
+
+	// DetailRingSize caps per-model request detail history.
+	DetailRingSize int `yaml:"detail-ring-size" json:"detail-ring-size"`
+
+	// DetailMaxTotal caps total request detail history across all models.
+	DetailMaxTotal int `yaml:"detail-max-total" json:"detail-max-total"`
+
+	// SaveEveryRequests triggers a save after N requests. Set to 0 to disable.
+	SaveEveryRequests int `yaml:"save-every-requests" json:"save-every-requests"`
+
+	// RedactSource removes request source fields from persisted usage details.
+	RedactSource bool `yaml:"redact-source" json:"redact-source"`
+}
+
+// Normalize applies defaults and ensures limits are consistent.
+func (c *UsagePersistenceConfig) Normalize() {
+	if c == nil {
+		return
+	}
+	if c.IntervalSeconds <= 0 {
+		c.IntervalSeconds = DefaultUsagePersistenceIntervalSeconds
+	}
+	if c.DetailRingSize <= 0 {
+		c.DetailRingSize = DefaultUsageDetailRingSize
+	}
+	if c.DetailMaxTotal <= 0 {
+		c.DetailMaxTotal = DefaultUsageDetailMaxTotal
+	}
+	if c.DetailMaxTotal < c.DetailRingSize {
+		c.DetailMaxTotal = c.DetailRingSize
+	}
+	if c.SaveEveryRequests < 0 {
+		c.SaveEveryRequests = 0
+	}
 }
 
 // ClaudeHeaderDefaults configures default header values injected into Claude API requests
@@ -553,6 +606,12 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.LogsMaxTotalSizeMB = 0
 	cfg.ErrorLogsMaxFiles = 10
 	cfg.UsageStatisticsEnabled = false
+	cfg.UsagePersistence.Enabled = false
+	cfg.UsagePersistence.IntervalSeconds = DefaultUsagePersistenceIntervalSeconds
+	cfg.UsagePersistence.DetailRingSize = DefaultUsageDetailRingSize
+	cfg.UsagePersistence.DetailMaxTotal = DefaultUsageDetailMaxTotal
+	cfg.UsagePersistence.SaveEveryRequests = 0
+	cfg.UsagePersistence.RedactSource = false
 	cfg.DisableCooling = false
 	cfg.Pprof.Enable = false
 	cfg.Pprof.Addr = DefaultPprofAddr
@@ -613,6 +672,8 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	if cfg.ErrorLogsMaxFiles < 0 {
 		cfg.ErrorLogsMaxFiles = 10
 	}
+
+	cfg.UsagePersistence.Normalize()
 
 	if cfg.MaxRetryCredentials < 0 {
 		cfg.MaxRetryCredentials = 0
@@ -1278,6 +1339,12 @@ func isKnownDefaultValue(path []string, node *yaml.Node) bool {
 		switch fullPath {
 		case "error-logs-max-files":
 			return node.Value == "10"
+		case "usage-persistence.interval":
+			return node.Value == fmt.Sprintf("%d", DefaultUsagePersistenceIntervalSeconds)
+		case "usage-persistence.detail-ring-size":
+			return node.Value == fmt.Sprintf("%d", DefaultUsageDetailRingSize)
+		case "usage-persistence.detail-max-total":
+			return node.Value == fmt.Sprintf("%d", DefaultUsageDetailMaxTotal)
 		}
 	}
 

@@ -2,6 +2,7 @@ package usage
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -45,6 +46,7 @@ type Manager struct {
 	once     sync.Once
 	stopOnce sync.Once
 	cancel   context.CancelFunc
+	done     chan struct{}
 
 	mu     sync.Mutex
 	cond   *sync.Cond
@@ -73,6 +75,7 @@ func (m *Manager) Start(ctx context.Context) {
 		}
 		var workerCtx context.Context
 		workerCtx, m.cancel = context.WithCancel(ctx)
+		m.done = make(chan struct{})
 		go m.run(workerCtx)
 	})
 }
@@ -91,6 +94,27 @@ func (m *Manager) Stop() {
 		m.mu.Unlock()
 		m.cond.Broadcast()
 	})
+}
+
+// StopAndDrain stops the dispatcher and waits for queued items to drain.
+func (m *Manager) StopAndDrain(timeout time.Duration) error {
+	if m == nil {
+		return nil
+	}
+	m.Stop()
+	if m.done == nil {
+		return nil
+	}
+	if timeout <= 0 {
+		<-m.done
+		return nil
+	}
+	select {
+	case <-m.done:
+		return nil
+	case <-time.After(timeout):
+		return fmt.Errorf("usage: stop timeout after %s", timeout)
+	}
 }
 
 // Register appends a plugin to the delivery list.
@@ -122,6 +146,11 @@ func (m *Manager) Publish(ctx context.Context, record Record) {
 }
 
 func (m *Manager) run(ctx context.Context) {
+	defer func() {
+		if m.done != nil {
+			close(m.done)
+		}
+	}()
 	for {
 		m.mu.Lock()
 		for !m.closed && len(m.queue) == 0 {
@@ -179,3 +208,6 @@ func StartDefault(ctx context.Context) { DefaultManager().Start(ctx) }
 
 // StopDefault stops the default manager's dispatcher.
 func StopDefault() { DefaultManager().Stop() }
+
+// StopDefaultAndDrain stops the default manager and waits for queued items to drain.
+func StopDefaultAndDrain(timeout time.Duration) error { return DefaultManager().StopAndDrain(timeout) }

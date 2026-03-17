@@ -70,6 +70,7 @@ func (h *Handler) ImportUsageStatistics(c *gin.Context) {
 
 	result := h.usageStats.MergeSnapshot(payload.Usage)
 	snapshot := h.usageStats.Snapshot()
+	usage.TriggerPersistHook()
 	c.JSON(http.StatusOK, gin.H{
 		"added":           result.Added,
 		"skipped":         result.Skipped,

@@ -8,6 +8,7 @@ config.yaml
 
 # Generated content
 bin/*
+dist/*
 logs/*
 conv/*
 temp/*
@@ -45,6 +46,11 @@ GEMINI.md
 .bmad/*
 _bmad/*
 _bmad-output/*
+
+# Local ops scripts (keep local only)
+deploy_cliproxy.sh
+patch_usage_config.sh
+check_usage_health.sh
 
 # macOS
 .DS_Store

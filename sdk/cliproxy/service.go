@@ -15,7 +15,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
-	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
+	internalusage "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/wsrelay"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
@@ -89,7 +89,12 @@ type Service struct {
 
 	// wsGateway manages websocket Gemini providers.
 	wsGateway *wsrelay.Manager
+
+	// usagePersistor persists usage statistics snapshots.
+	usagePersistor *internalusage.Persistor
 }
+
+const usageStopDrainTimeout = 5 * time.Second
 
 // RegisterUsagePlugin registers a usage plugin on the global usage manager.
 // This allows external code to monitor API usage and token consumption.
@@ -463,6 +468,54 @@ func (s *Service) rebindExecutors() {
 	}
 }
 
+func (s *Service) updateUsagePersistence(cfg *config.Config) {
+	if s == nil || cfg == nil {
+		return
+	}
+	internalusage.ApplyDetailLimits(
+		cfg.UsagePersistence.DetailRingSize,
+		cfg.UsagePersistence.DetailMaxTotal,
+	)
+	if cfg.UsagePersistence.Enabled {
+		internalusage.SetPersistEveryRequests(cfg.UsagePersistence.SaveEveryRequests)
+	} else {
+		internalusage.SetPersistEveryRequests(0)
+	}
+
+	if !cfg.UsageStatisticsEnabled || !cfg.UsagePersistence.Enabled {
+		if s.usagePersistor != nil {
+			s.usagePersistor.StopAndFlush()
+			s.usagePersistor = nil
+		}
+		return
+	}
+
+	newPersistor, err := internalusage.NewPersistor(cfg, internalusage.GetRequestStatistics())
+	if err != nil {
+		log.Warnf("usage persistence: reconfigure failed: %v", err)
+		return
+	}
+	if newPersistor == nil {
+		return
+	}
+
+	if s.usagePersistor == nil {
+		s.usagePersistor = newPersistor
+		s.usagePersistor.Start()
+		return
+	}
+
+	if s.usagePersistor.Path() == newPersistor.Path() &&
+		s.usagePersistor.Interval() == newPersistor.Interval() &&
+		s.usagePersistor.RedactSource() == newPersistor.RedactSource() {
+		return
+	}
+
+	s.usagePersistor.StopAndFlush()
+	s.usagePersistor = newPersistor
+	s.usagePersistor.Start()
+}
+
 // Run starts the service and blocks until the context is cancelled or the server stops.
 // It initializes all components including authentication, file watching, HTTP server,
 // and starts processing requests. The method blocks until the context is cancelled.
@@ -480,7 +533,34 @@ func (s *Service) Run(ctx context.Context) error {
 		ctx = context.Background()
 	}
 
+	if s.cfg != nil {
+		internalusage.ApplyDetailLimits(
+			s.cfg.UsagePersistence.DetailRingSize,
+			s.cfg.UsagePersistence.DetailMaxTotal,
+		)
+		if s.cfg.UsagePersistence.Enabled {
+			internalusage.SetPersistEveryRequests(s.cfg.UsagePersistence.SaveEveryRequests)
+		} else {
+			internalusage.SetPersistEveryRequests(0)
+		}
+	}
+
+	if s.cfg != nil && s.cfg.UsageStatisticsEnabled && s.cfg.UsagePersistence.Enabled {
+		persistor, err := internalusage.NewPersistor(s.cfg, internalusage.GetRequestStatistics())
+		if err != nil {
+			log.Warnf("usage persistence: init failed: %v", err)
+		} else if persistor != nil {
+			if snapshot, ok := persistor.Load(); ok {
+				internalusage.GetRequestStatistics().RestoreSnapshot(snapshot)
+			}
+			s.usagePersistor = persistor
+		}
+	}
+
 	usage.StartDefault(ctx)
+	if s.usagePersistor != nil {
+		s.usagePersistor.Start()
+	}
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer shutdownCancel()
@@ -661,6 +741,7 @@ func (s *Service) Run(ctx context.Context) error {
 			s.coreManager.SetOAuthModelAlias(newCfg.OAuthModelAlias)
 		}
 		s.rebindExecutors()
+		s.updateUsagePersistence(newCfg)
 	}
 
 	watcherWrapper, err = s.watcherFactory(s.configPath, s.cfg.AuthDir, reloadCallback)
@@ -716,6 +797,13 @@ func (s *Service) Shutdown(ctx context.Context) error {
 			ctx = context.Background()
 		}
 
+		if err := usage.StopDefaultAndDrain(usageStopDrainTimeout); err != nil {
+			log.Warnf("usage: stop drain timeout: %v", err)
+		}
+		if s.usagePersistor != nil {
+			s.usagePersistor.StopAndFlush()
+		}
+
 		// legacy refresh loop removed; only stopping core auth manager below
 
 		if s.watcherCancel != nil {
@@ -763,7 +851,6 @@ func (s *Service) Shutdown(ctx context.Context) error {
 			}
 		}
 
-		usage.StopDefault()
 	})
 	return shutdownErr
 }

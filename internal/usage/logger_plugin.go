@@ -6,6 +6,7 @@ package usage
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -56,14 +57,39 @@ func SetStatisticsEnabled(enabled bool) { statisticsEnabled.Store(enabled) }
 // StatisticsEnabled reports the current recording state.
 func StatisticsEnabled() bool { return statisticsEnabled.Load() }
 
+var persistHookMu sync.RWMutex
+var persistHook func()
+
+// SetPersistHook registers a hook for triggering persistence after usage updates.
+func SetPersistHook(hook func()) {
+	persistHookMu.Lock()
+	persistHook = hook
+	persistHookMu.Unlock()
+}
+
+// TriggerPersistHook invokes the registered persistence hook if present.
+func TriggerPersistHook() {
+	persistHookMu.RLock()
+	hook := persistHook
+	persistHookMu.RUnlock()
+	if hook != nil {
+		hook()
+	}
+}
+
 // RequestStatistics maintains aggregated request metrics in memory.
 type RequestStatistics struct {
 	mu sync.RWMutex
 
-	totalRequests int64
-	successCount  int64
-	failureCount  int64
-	totalTokens   int64
+	totalRequests        int64
+	successCount         int64
+	failureCount         int64
+	totalTokens          int64
+	detailTotal          int64
+	detailRingSize       int
+	detailMaxTotal       int
+	persistEveryRequests int64
+	persistCounter       int64
 
 	apis map[string]*apiStats
 
@@ -84,7 +110,7 @@ type apiStats struct {
 type modelStats struct {
 	TotalRequests int64
 	TotalTokens   int64
-	Details       []RequestDetail
+	Details       *RingBuffer
 }
 
 // RequestDetail stores the timestamp and token usage for a single request.
@@ -134,10 +160,39 @@ type ModelSnapshot struct {
 	Details       []RequestDetail `json:"details"`
 }
 
+const (
+	defaultDetailRingSize = 10000
+	defaultDetailMaxTotal = 50000
+)
+
 var defaultRequestStatistics = NewRequestStatistics()
 
 // GetRequestStatistics returns the shared statistics store.
 func GetRequestStatistics() *RequestStatistics { return defaultRequestStatistics }
+
+// GetSnapshot returns a snapshot from the shared statistics store.
+func GetSnapshot() StatisticsSnapshot {
+	if defaultRequestStatistics == nil {
+		return StatisticsSnapshot{}
+	}
+	return defaultRequestStatistics.Snapshot()
+}
+
+// ApplyDetailLimits updates the detail limits for the shared statistics store.
+func ApplyDetailLimits(ringSize, maxTotal int) {
+	if defaultRequestStatistics == nil {
+		return
+	}
+	defaultRequestStatistics.SetDetailLimits(ringSize, maxTotal)
+}
+
+// SetPersistEveryRequests configures how often to trigger persistence.
+func SetPersistEveryRequests(count int) {
+	if defaultRequestStatistics == nil {
+		return
+	}
+	defaultRequestStatistics.SetPersistEveryRequests(count)
+}
 
 // NewRequestStatistics constructs an empty statistics store.
 func NewRequestStatistics() *RequestStatistics {
@@ -147,6 +202,131 @@ func NewRequestStatistics() *RequestStatistics {
 		requestsByHour: make(map[int]int64),
 		tokensByDay:    make(map[string]int64),
 		tokensByHour:   make(map[int]int64),
+		detailRingSize: defaultDetailRingSize,
+		detailMaxTotal: defaultDetailMaxTotal,
+	}
+}
+
+// SetDetailLimits updates detail ring buffer limits and trims existing data as needed.
+func (s *RequestStatistics) SetDetailLimits(ringSize, maxTotal int) {
+	if s == nil {
+		return
+	}
+	if ringSize <= 0 {
+		ringSize = defaultDetailRingSize
+	}
+	if maxTotal <= 0 {
+		maxTotal = defaultDetailMaxTotal
+	}
+	if maxTotal < ringSize {
+		maxTotal = ringSize
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.detailRingSize = ringSize
+	s.detailMaxTotal = maxTotal
+
+	var total int64
+	for _, api := range s.apis {
+		if api == nil {
+			continue
+		}
+		if api.Models == nil {
+			api.Models = make(map[string]*modelStats)
+		}
+		for _, model := range api.Models {
+			if model == nil {
+				continue
+			}
+			if model.Details == nil {
+				model.Details = NewRingBuffer(ringSize)
+			} else {
+				model.Details.Resize(ringSize)
+			}
+			total += int64(model.Details.Len())
+		}
+	}
+	s.detailTotal = total
+	if s.detailMaxTotal > 0 && s.detailTotal > int64(s.detailMaxTotal) {
+		s.trimOldestDetails(int(s.detailTotal - int64(s.detailMaxTotal)))
+	}
+}
+
+// SetPersistEveryRequests sets how often persistence is triggered by request count.
+func (s *RequestStatistics) SetPersistEveryRequests(count int) {
+	if s == nil {
+		return
+	}
+	if count < 0 {
+		count = 0
+	}
+	s.mu.Lock()
+	s.persistEveryRequests = int64(count)
+	s.persistCounter = 0
+	s.mu.Unlock()
+}
+
+// RestoreSnapshot replaces the current statistics with the provided snapshot.
+// It restores totals directly rather than recalculating from request details.
+func (s *RequestStatistics) RestoreSnapshot(snapshot StatisticsSnapshot) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.totalRequests = snapshot.TotalRequests
+	s.successCount = snapshot.SuccessCount
+	s.failureCount = snapshot.FailureCount
+	s.totalTokens = snapshot.TotalTokens
+	s.persistCounter = 0
+
+	s.apis = make(map[string]*apiStats, len(snapshot.APIs))
+	s.detailTotal = 0
+	for apiName, apiSnapshot := range snapshot.APIs {
+		stats := &apiStats{
+			TotalRequests: apiSnapshot.TotalRequests,
+			TotalTokens:   apiSnapshot.TotalTokens,
+			Models:        make(map[string]*modelStats, len(apiSnapshot.Models)),
+		}
+		for modelName, modelSnapshot := range apiSnapshot.Models {
+			modelDetails := NewRingBuffer(s.detailRingSize)
+			modelDetails.Load(modelSnapshot.Details)
+			s.detailTotal += int64(modelDetails.Len())
+			stats.Models[modelName] = &modelStats{
+				TotalRequests: modelSnapshot.TotalRequests,
+				TotalTokens:   modelSnapshot.TotalTokens,
+				Details:       modelDetails,
+			}
+		}
+		s.apis[apiName] = stats
+	}
+
+	s.requestsByDay = make(map[string]int64, len(snapshot.RequestsByDay))
+	for k, v := range snapshot.RequestsByDay {
+		s.requestsByDay[k] = v
+	}
+	s.requestsByHour = make(map[int]int64, len(snapshot.RequestsByHour))
+	for k, v := range snapshot.RequestsByHour {
+		if parsed, ok := parseHourKey(k); ok {
+			s.requestsByHour[parsed] = v
+		}
+	}
+	s.tokensByDay = make(map[string]int64, len(snapshot.TokensByDay))
+	for k, v := range snapshot.TokensByDay {
+		s.tokensByDay[k] = v
+	}
+	s.tokensByHour = make(map[int]int64, len(snapshot.TokensByHour))
+	for k, v := range snapshot.TokensByHour {
+		if parsed, ok := parseHourKey(k); ok {
+			s.tokensByHour[parsed] = v
+		}
+	}
+
+	if s.detailMaxTotal > 0 && s.detailTotal > int64(s.detailMaxTotal) {
+		s.trimOldestDetails(int(s.detailTotal - int64(s.detailMaxTotal)))
 	}
 }
 
@@ -158,6 +338,7 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 	if !statisticsEnabled.Load() {
 		return
 	}
+	triggerPersist := false
 	timestamp := record.RequestedAt
 	if timestamp.IsZero() {
 		timestamp = time.Now()
@@ -181,7 +362,6 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 	hourKey := timestamp.Hour()
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	s.totalRequests++
 	if success {
@@ -208,6 +388,19 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 	s.requestsByHour[hourKey]++
 	s.tokensByDay[dayKey] += totalTokens
 	s.tokensByHour[hourKey] += totalTokens
+
+	if s.persistEveryRequests > 0 {
+		s.persistCounter++
+		if s.persistCounter >= s.persistEveryRequests {
+			s.persistCounter = 0
+			triggerPersist = true
+		}
+	}
+
+	s.mu.Unlock()
+	if triggerPersist {
+		TriggerPersistHook()
+	}
 }
 
 func (s *RequestStatistics) updateAPIStats(stats *apiStats, model string, detail RequestDetail) {
@@ -215,12 +408,23 @@ func (s *RequestStatistics) updateAPIStats(stats *apiStats, model string, detail
 	stats.TotalTokens += detail.Tokens.TotalTokens
 	modelStatsValue, ok := stats.Models[model]
 	if !ok {
-		modelStatsValue = &modelStats{}
+		modelStatsValue = &modelStats{Details: NewRingBuffer(s.detailRingSize)}
 		stats.Models[model] = modelStatsValue
+	}
+	if modelStatsValue.Details == nil {
+		modelStatsValue.Details = NewRingBuffer(s.detailRingSize)
 	}
 	modelStatsValue.TotalRequests++
 	modelStatsValue.TotalTokens += detail.Tokens.TotalTokens
-	modelStatsValue.Details = append(modelStatsValue.Details, detail)
+	before := modelStatsValue.Details.Len()
+	modelStatsValue.Details.Push(detail)
+	after := modelStatsValue.Details.Len()
+	if before != after {
+		s.detailTotal += int64(after - before)
+	}
+	if s.detailMaxTotal > 0 && s.detailTotal > int64(s.detailMaxTotal) {
+		s.trimOldestDetails(int(s.detailTotal - int64(s.detailMaxTotal)))
+	}
 }
 
 // Snapshot returns a copy of the aggregated metrics for external consumption.
@@ -246,8 +450,10 @@ func (s *RequestStatistics) Snapshot() StatisticsSnapshot {
 			Models:        make(map[string]ModelSnapshot, len(stats.Models)),
 		}
 		for modelName, modelStatsValue := range stats.Models {
-			requestDetails := make([]RequestDetail, len(modelStatsValue.Details))
-			copy(requestDetails, modelStatsValue.Details)
+			var requestDetails []RequestDetail
+			if modelStatsValue.Details != nil {
+				requestDetails = modelStatsValue.Details.Snapshot()
+			}
 			apiSnapshot.Models[modelName] = ModelSnapshot{
 				TotalRequests: modelStatsValue.TotalRequests,
 				TotalTokens:   modelStatsValue.TotalTokens,
@@ -307,7 +513,10 @@ func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot) MergeResu
 			if modelStatsValue == nil {
 				continue
 			}
-			for _, detail := range modelStatsValue.Details {
+			if modelStatsValue.Details == nil {
+				continue
+			}
+			for _, detail := range modelStatsValue.Details.Snapshot() {
 				seen[dedupKey(apiName, modelName, detail)] = struct{}{}
 			}
 		}
@@ -463,10 +672,66 @@ func normaliseTokenStats(tokens TokenStats) TokenStats {
 	return tokens
 }
 
+func (s *RequestStatistics) trimOldestDetails(count int) {
+	if s == nil || count <= 0 {
+		return
+	}
+	for count > 0 {
+		var (
+			oldestDetail RequestDetail
+			oldestModel  *modelStats
+			found        bool
+		)
+		for _, api := range s.apis {
+			if api == nil {
+				continue
+			}
+			for _, model := range api.Models {
+				if model == nil || model.Details == nil || model.Details.Len() == 0 {
+					continue
+				}
+				detail, ok := model.Details.Oldest()
+				if !ok {
+					continue
+				}
+				if !found || detail.Timestamp.Before(oldestDetail.Timestamp) {
+					oldestDetail = detail
+					oldestModel = model
+					found = true
+				}
+			}
+		}
+		if !found || oldestModel == nil || oldestModel.Details == nil {
+			return
+		}
+		if _, ok := oldestModel.Details.PopOldest(); ok {
+			s.detailTotal--
+			count--
+			continue
+		}
+		return
+	}
+}
+
 func formatHour(hour int) string {
 	if hour < 0 {
 		hour = 0
 	}
 	hour = hour % 24
 	return fmt.Sprintf("%02d", hour)
+}
+
+func parseHourKey(key string) (int, bool) {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return 0, false
+	}
+	value, err := strconv.Atoi(key)
+	if err != nil {
+		return 0, false
+	}
+	if value < 0 {
+		value = 0
+	}
+	return value % 24, true
 }
