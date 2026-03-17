@@ -621,7 +621,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Sanitize Gemini API key configuration and migrate legacy entries.
 	cfg.SanitizeGeminiKeys()
 
-	// Sanitize Vertex-compatible API keys: drop entries without base-url
+	// Sanitize Vertex-compatible API keys.
 	cfg.SanitizeVertexCompatKeys()
 
 	// Sanitize Codex keys: drop entries without base-url

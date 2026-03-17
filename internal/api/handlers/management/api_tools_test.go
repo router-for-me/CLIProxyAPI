@@ -1,6 +1,7 @@
 package management
 
 import (
+	"context"
 	"net/http"
 	"testing"
 
@@ -110,3 +111,58 @@ func TestAPICallTransport_InheritsEnvironmentProxyWhenNoExplicitProxyConfigured(
                 t.Fatalf("expected environment proxy http://127.0.0.1:18443, got %v", proxyURL)
         }
   }
+
+
+func TestAuthByIndexDistinguishesSharedAPIKeysAcrossProviders(t *testing.T) {
+	t.Parallel()
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	geminiAuth := &coreauth.Auth{
+		ID:       "gemini:apikey:123",
+		Provider: "gemini",
+		Attributes: map[string]string{
+			"api_key": "shared-key",
+		},
+	}
+	compatAuth := &coreauth.Auth{
+		ID:       "openai-compatibility:bohe:456",
+		Provider: "bohe",
+		Label:    "bohe",
+		Attributes: map[string]string{
+			"api_key":      "shared-key",
+			"compat_name":  "bohe",
+			"provider_key": "bohe",
+		},
+	}
+
+	if _, errRegister := manager.Register(context.Background(), geminiAuth); errRegister != nil {
+		t.Fatalf("register gemini auth: %v", errRegister)
+	}
+	if _, errRegister := manager.Register(context.Background(), compatAuth); errRegister != nil {
+		t.Fatalf("register compat auth: %v", errRegister)
+	}
+
+	geminiIndex := geminiAuth.EnsureIndex()
+	compatIndex := compatAuth.EnsureIndex()
+	if geminiIndex == compatIndex {
+		t.Fatalf("shared api key produced duplicate auth_index %q", geminiIndex)
+	}
+
+	h := &Handler{authManager: manager}
+
+	gotGemini := h.authByIndex(geminiIndex)
+	if gotGemini == nil {
+		t.Fatal("expected gemini auth by index")
+	}
+	if gotGemini.ID != geminiAuth.ID {
+		t.Fatalf("authByIndex(gemini) returned %q, want %q", gotGemini.ID, geminiAuth.ID)
+	}
+
+	gotCompat := h.authByIndex(compatIndex)
+	if gotCompat == nil {
+		t.Fatal("expected compat auth by index")
+	}
+	if gotCompat.ID != compatAuth.ID {
+		t.Fatalf("authByIndex(compat) returned %q, want %q", gotCompat.ID, compatAuth.ID)
+	}
+}
