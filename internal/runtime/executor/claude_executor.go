@@ -157,7 +157,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	bodyForUpstream := preparedBody.bodyForUpstream
 	extraBetas := preparedBody.extraBetas
 	originalToolNames := preparedBody.originalToolNames
-	originalRequestForTranslation := claudeOriginalRequestForTranslation(opts.OriginalRequest, bodyForTranslation)
+	originalRequestForTranslation := claudeOriginalRequestForTranslation(opts.OriginalRequest, req.Payload)
 
 	url := fmt.Sprintf("%s/v1/messages?beta=true", baseURL)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyForUpstream))
@@ -286,7 +286,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	bodyForUpstream := preparedBody.bodyForUpstream
 	extraBetas := preparedBody.extraBetas
 	originalToolNames := preparedBody.originalToolNames
-	originalRequestForTranslation := claudeOriginalRequestForTranslation(opts.OriginalRequest, bodyForTranslation)
+	originalRequestForTranslation := claudeOriginalRequestForTranslation(opts.OriginalRequest, req.Payload)
 
 	url := fmt.Sprintf("%s/v1/messages?beta=true", baseURL)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyForUpstream))
@@ -593,11 +593,11 @@ func restoreClaudeToolNamesInErrorBody(body []byte, prefix string, originalByNor
 	return body
 }
 
-func claudeOriginalRequestForTranslation(originalRequest, effectiveRequest []byte) []byte {
+func claudeOriginalRequestForTranslation(originalRequest, payload []byte) []byte {
 	if len(originalRequest) > 0 {
 		return originalRequest
 	}
-	return effectiveRequest
+	return payload
 }
 
 func restoreClaudeToolNamesInErrorText(text, prefix string, originalByNormalized map[string]string) string {

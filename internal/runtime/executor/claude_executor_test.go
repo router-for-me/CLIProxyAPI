@@ -1639,8 +1639,8 @@ func TestClaudeExecutor_Execute_OpenAIResponsesWithoutOriginalRequest_UsesEffect
 	if upstreamTemperature != 0.25 {
 		t.Fatalf("upstream temperature = %v, want %v", upstreamTemperature, 0.25)
 	}
-	if got := gjson.GetBytes(resp.Payload, "temperature").Float(); got != 0.25 {
-		t.Fatalf("response temperature = %v, want %v, payload=%s", got, 0.25, string(resp.Payload))
+	if got := gjson.GetBytes(resp.Payload, "temperature").Float(); got != 0.9 {
+		t.Fatalf("response temperature = %v, want %v, payload=%s", got, 0.9, string(resp.Payload))
 	}
 }
 
