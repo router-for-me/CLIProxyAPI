@@ -1063,6 +1063,47 @@ func TestNormalizeClaudeToolsForAnthropic_TreatsBuiltinAndCustomNameCollisionAsA
 	}
 }
 
+func TestNormalizeClaudeToolsForAnthropic_SkipsEmptyNameNoTypeTool(t *testing.T) {
+	input := []byte(`{
+		"tools":[
+			{"name":"shell","description":"Run commands","input_schema":{"type":"object","properties":{"cmd":{"type":"string"}}}},
+			{"name":"","description":"","input_schema":{}}
+		]
+	}`)
+	out, err := normalizeClaudeToolsForAnthropic(input)
+	if err != nil {
+		t.Fatalf("normalizeClaudeToolsForAnthropic error: %v", err)
+	}
+	toolCount := gjson.GetBytes(out, "tools.#").Int()
+	if toolCount != 1 {
+		t.Fatalf("tools count = %d, want 1; body=%s", toolCount, string(out))
+	}
+	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "shell" {
+		t.Fatalf("tools.0.name = %q, want %q", got, "shell")
+	}
+}
+
+func TestNormalizeClaudeToolsForAnthropic_SkipsMultipleEmptyNameNoTypeTools(t *testing.T) {
+	input := []byte(`{
+		"tools":[
+			{"name":"","description":"","input_schema":{}},
+			{"name":"shell","description":"Run commands","input_schema":{"type":"object","properties":{"cmd":{"type":"string"}}}},
+			{"name":"","description":"code interpreter","input_schema":{}}
+		]
+	}`)
+	out, err := normalizeClaudeToolsForAnthropic(input)
+	if err != nil {
+		t.Fatalf("normalizeClaudeToolsForAnthropic error: %v", err)
+	}
+	toolCount := gjson.GetBytes(out, "tools.#").Int()
+	if toolCount != 1 {
+		t.Fatalf("tools count = %d, want 1; body=%s", toolCount, string(out))
+	}
+	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "shell" {
+		t.Fatalf("tools.0.name = %q, want %q", got, "shell")
+	}
+}
+
 func TestNormalizeCacheControlTTL_DowngradesLaterOneHourBlocks(t *testing.T) {
 	payload := []byte(`{
 		"tools": [{"name":"t1","cache_control":{"type":"ephemeral","ttl":"1h"}}],

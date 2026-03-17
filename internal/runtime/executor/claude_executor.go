@@ -1156,6 +1156,15 @@ func normalizeClaudeToolsForAnthropicWithRestoreMap(body []byte) ([]byte, map[st
 	}
 
 	for _, tool := range tools.Array() {
+		// Tools with no name and no recognized type cannot be normalized for Claude.
+		// This occurs when translated OpenAI-hosted tool types (code_interpreter,
+		// container_exec, etc.) lose their type field during translation.
+		// The first-pass counting loop (above) already skips these; match that here.
+		if anthroToolOriginalName(tool) == "" && !isClaudeBuiltinTool(tool) && !isClaudeExplicitNonCustomTypedTool(tool) {
+			log.Warnf("claude tool normalization: skipping tool with no name or recognized type: %s", tool.Raw)
+			continue
+		}
+
 		if isClaudeBuiltinTool(tool) {
 			normalizedTools = append(normalizedTools, json.RawMessage(tool.Raw))
 			reserveToolNameVariants(usedNames, strings.TrimSpace(tool.Get("name").String()))
@@ -1182,6 +1191,11 @@ func normalizeClaudeToolsForAnthropicWithRestoreMap(body []byte) ([]byte, map[st
 		if originalName != "" && originalName != newName {
 			renameMap[originalName] = newName
 		}
+	}
+
+	skippedCount := len(tools.Array()) - len(normalizedTools)
+	if skippedCount > 0 {
+		log.Warnf("claude tool normalization: %d of %d tools skipped (no name or recognized type)", skippedCount, len(tools.Array()))
 	}
 
 	normalizedToolsJSON, errMarshal := json.Marshal(normalizedTools)
