@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -572,7 +573,7 @@ func (e *CodexExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*
 		return auth, nil
 	}
 	svc := codexauth.NewCodexAuth(e.cfg)
-	td, err := svc.RefreshTokensWithRetry(ctx, refreshToken, 3)
+	td, err := svc.RefreshTokensWithRetry(ctx, refreshToken, codexRefreshSourceLabel(auth), 3)
 	if err != nil {
 		return nil, err
 	}
@@ -594,6 +595,24 @@ func (e *CodexExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*
 	now := time.Now().Format(time.RFC3339)
 	auth.Metadata["last_refresh"] = now
 	return auth, nil
+}
+
+func codexRefreshSourceLabel(auth *cliproxyauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	if auth.Metadata != nil {
+		if email, ok := auth.Metadata["email"].(string); ok {
+			email = strings.TrimSpace(email)
+			if email != "" {
+				return email
+			}
+		}
+	}
+	if fileName := strings.TrimSpace(auth.FileName); fileName != "" {
+		return filepath.Base(fileName)
+	}
+	return strings.TrimSpace(auth.ID)
 }
 
 func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Format, url string, req cliproxyexecutor.Request, rawJSON []byte) (*http.Request, error) {

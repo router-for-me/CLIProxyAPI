@@ -259,8 +259,9 @@ func (o *CodexAuth) CreateTokenStorage(bundle *CodexAuthBundle) *CodexTokenStora
 // RefreshTokensWithRetry refreshes tokens with a built-in retry mechanism.
 // It attempts to refresh the tokens up to a specified maximum number of retries,
 // with an exponential backoff strategy to handle transient network errors.
-func (o *CodexAuth) RefreshTokensWithRetry(ctx context.Context, refreshToken string, maxRetries int) (*CodexTokenData, error) {
+func (o *CodexAuth) RefreshTokensWithRetry(ctx context.Context, refreshToken string, sourceLabel string, maxRetries int) (*CodexTokenData, error) {
 	var lastErr error
+	logLabel := refreshLogSourceLabel(sourceLabel)
 
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		if attempt > 0 {
@@ -277,15 +278,23 @@ func (o *CodexAuth) RefreshTokensWithRetry(ctx context.Context, refreshToken str
 			return tokenData, nil
 		}
 		if isNonRetryableRefreshErr(err) {
-			log.Warnf("Token refresh attempt %d failed with non-retryable error: %v", attempt+1, err)
+			log.Warnf("Token refresh attempt %d failed with non-retryable error%s: %v", attempt+1, logLabel, err)
 			return nil, err
 		}
 
 		lastErr = err
-		log.Warnf("Token refresh attempt %d failed: %v", attempt+1, err)
+		log.Warnf("Token refresh attempt %d failed%s: %v", attempt+1, logLabel, err)
 	}
 
 	return nil, fmt.Errorf("token refresh failed after %d attempts: %w", maxRetries, lastErr)
+}
+
+func refreshLogSourceLabel(sourceLabel string) string {
+	sourceLabel = strings.TrimSpace(sourceLabel)
+	if sourceLabel == "" {
+		return ""
+	}
+	return fmt.Sprintf(" for %s", sourceLabel)
 }
 
 func isNonRetryableRefreshErr(err error) bool {
