@@ -197,7 +197,12 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 					}
 				}
 
-				out, _ = sjson.SetRaw(out, "input.-1", msg)
+				// Don't emit empty assistant messages when only tool_calls
+				// are present — Responses API needs function_call items
+				// directly, otherwise call_id matching fails (#2132).
+				if role != "assistant" || len(gjson.Get(msg, "content").Array()) > 0 {
+					out, _ = sjson.SetRaw(out, "input.-1", msg)
+				}
 
 				// Handle tool calls for assistant messages as separate top-level objects
 				if role == "assistant" {

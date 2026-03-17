@@ -114,6 +114,21 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 						part, _ = sjson.Set(part, "functionResponse.name", funcName)
 						part, _ = sjson.Set(part, "functionResponse.response.result", responseData)
 						contentJSON, _ = sjson.SetRaw(contentJSON, "parts.-1", part)
+
+					case "image":
+						source := contentResult.Get("source")
+						if source.Get("type").String() != "base64" {
+							return true
+						}
+						mimeType := source.Get("media_type").String()
+						data := source.Get("data").String()
+						if mimeType == "" || data == "" {
+							return true
+						}
+						part := `{"inline_data":{"mime_type":"","data":""}}`
+						part, _ = sjson.Set(part, "inline_data.mime_type", mimeType)
+						part, _ = sjson.Set(part, "inline_data.data", data)
+						contentJSON, _ = sjson.SetRaw(contentJSON, "parts.-1", part)
 					}
 					return true
 				})
