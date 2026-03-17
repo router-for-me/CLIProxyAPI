@@ -23,6 +23,11 @@ type staticModelsJSON struct {
 	Antigravity []*ModelInfo `json:"antigravity"`
 }
 
+var codexFreeCompatibilityBackfillIDs = []string{
+	"gpt-5.3-codex",
+	"gpt-5.4",
+}
+
 // GetClaudeModels returns the standard Claude model definitions.
 func GetClaudeModels() []*ModelInfo {
 	return cloneModelInfos(getModels().Claude)
@@ -50,7 +55,12 @@ func GetAIStudioModels() []*ModelInfo {
 
 // GetCodexFreeModels returns model definitions for the Codex free plan tier.
 func GetCodexFreeModels() []*ModelInfo {
-	return cloneModelInfos(getModels().CodexFree)
+	data := getModels()
+	if data == nil {
+		return nil
+	}
+	models := cloneModelInfos(data.CodexFree)
+	return appendMissingModelsByID(models, codexFreeCompatibilityBackfillIDs, data.CodexPlus, data.CodexTeam, data.CodexPro)
 }
 
 // GetCodexTeamModels returns model definitions for the Codex team plan tier.
@@ -98,6 +108,53 @@ func cloneModelInfos(models []*ModelInfo) []*ModelInfo {
 		out[i] = cloneModelInfo(m)
 	}
 	return out
+}
+
+func appendMissingModelsByID(base []*ModelInfo, ids []string, sources ...[]*ModelInfo) []*ModelInfo {
+	seen := make(map[string]struct{}, len(base))
+	for _, model := range base {
+		if model == nil {
+			continue
+		}
+		id := strings.TrimSpace(model.ID)
+		if id == "" {
+			continue
+		}
+		seen[id] = struct{}{}
+	}
+
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		if model := findModelByID(id, sources...); model != nil {
+			base = append(base, cloneModelInfo(model))
+			seen[id] = struct{}{}
+		}
+	}
+
+	if len(base) == 0 {
+		return nil
+	}
+	return base
+}
+
+func findModelByID(id string, sources ...[]*ModelInfo) *ModelInfo {
+	for _, models := range sources {
+		for _, model := range models {
+			if model == nil {
+				continue
+			}
+			if strings.EqualFold(strings.TrimSpace(model.ID), id) {
+				return model
+			}
+		}
+	}
+	return nil
 }
 
 // GetStaticModelDefinitionsByChannel returns static model definitions for a given channel/provider.
