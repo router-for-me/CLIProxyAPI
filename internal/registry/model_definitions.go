@@ -116,15 +116,15 @@ func appendMissingModelsByID(base []*ModelInfo, ids []string, sources ...[]*Mode
 		if model == nil {
 			continue
 		}
-		id := strings.TrimSpace(model.ID)
+		id := normalizeModelID(model.ID)
 		if id == "" {
 			continue
 		}
 		seen[id] = struct{}{}
 	}
 
-	for _, id := range ids {
-		id = strings.TrimSpace(id)
+	for _, rawID := range ids {
+		id := normalizeModelID(rawID)
 		if id == "" {
 			continue
 		}
@@ -144,17 +144,26 @@ func appendMissingModelsByID(base []*ModelInfo, ids []string, sources ...[]*Mode
 }
 
 func findModelByID(id string, sources ...[]*ModelInfo) *ModelInfo {
+	needle := normalizeModelID(id)
+	if needle == "" {
+		return nil
+	}
+
 	for _, models := range sources {
 		for _, model := range models {
 			if model == nil {
 				continue
 			}
-			if strings.EqualFold(strings.TrimSpace(model.ID), id) {
+			if normalizeModelID(model.ID) == needle {
 				return model
 			}
 		}
 	}
 	return nil
+}
+
+func normalizeModelID(id string) string {
+	return strings.ToLower(strings.TrimSpace(id))
 }
 
 // GetStaticModelDefinitionsByChannel returns static model definitions for a given channel/provider.
