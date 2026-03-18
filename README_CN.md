@@ -131,23 +131,9 @@ Brew 会将配置文件存放在系统路径。要使用您刚刚创建的 `conf
    mv ./config.yaml ~/.cli-proxy-api/config.yaml
    ```
 
-2. 在 Homebrew 配置目录中创建软链接（两种架构二选一）：
+2. 在 Homebrew 配置目录中创建软链接：
 
-   - **Apple Silicon (M1/M2/M3 等，默认前缀 `/opt/homebrew`)**
-
-     ```bash
-     mkdir -p /opt/homebrew/etc/cli-proxy-api
-     ln -sf ~/.cli-proxy-api/config.yaml /opt/homebrew/etc/cli-proxy-api/config.yaml
-     ```
-
-   - **Intel Mac（默认前缀 `/usr/local`）**
-
-     ```bash
-     mkdir -p /usr/local/etc/cli-proxy-api
-     ln -sf ~/.cli-proxy-api/config.yaml /usr/local/etc/cli-proxy-api/config.yaml
-     ```
-
-   如果你不确定 Homebrew 安装前缀，可以运行 `brew --prefix` 并将上面命令中的前缀替换为输出值。
+   
 
 ### 3. 登录 AI 提供商（OAuth）
 

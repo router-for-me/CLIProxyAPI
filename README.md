@@ -133,7 +133,7 @@ mv ./config.yaml ~/.cli-proxy-api/config.yaml
 
 # Homebrew prefix is usually /opt/homebrew (Apple Silicon) or /usr/local (Intel),
 # so we use `brew --prefix` to handle both:
-ln -sf ~/.cli-proxy-api/config.yaml "$(brew --prefix)/etc/cli-proxy-api/config.yaml"
+ln -sf ~/.cli-proxy-api/config.yaml "$(brew --prefix)/etc/cliproxyapi.conf"
 ```
 
 ### 3. Log In to an AI Provider (OAuth)
