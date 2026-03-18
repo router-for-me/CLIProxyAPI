@@ -807,7 +807,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		return nil, &Error{Code: "executor_not_found", Message: "executor not registered"}
 	}
 	var lastErr error
-	for idx, execModel := range execModels {
+	for _, execModel := range execModels {
 		resultModel := m.stateModelForExecution(auth, routeModel, execModel, pooled)
 		execReq := req
 		execReq.Model = execModel
@@ -847,18 +847,6 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				discardStreamChunks(streamResult.Chunks)
 				return nil, bootstrapErr
 			}
-			if idx < len(execModels)-1 {
-				rerr := &Error{Message: bootstrapErr.Error()}
-				if se, ok := errors.AsType[cliproxyexecutor.StatusError](bootstrapErr); ok && se != nil {
-					rerr.HTTPStatus = se.StatusCode()
-				}
-				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
-				result.RetryAfter = retryAfterFromError(bootstrapErr)
-				m.MarkResult(ctx, result)
-				discardStreamChunks(streamResult.Chunks)
-				lastErr = bootstrapErr
-				continue
-			}
 			rerr := &Error{Message: bootstrapErr.Error()}
 			if se, ok := errors.AsType[cliproxyexecutor.StatusError](bootstrapErr); ok && se != nil {
 				rerr.HTTPStatus = se.StatusCode()
@@ -867,18 +855,16 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			result.RetryAfter = retryAfterFromError(bootstrapErr)
 			m.MarkResult(ctx, result)
 			discardStreamChunks(streamResult.Chunks)
-			return nil, newStreamBootstrapError(bootstrapErr, streamResult.Headers)
+			lastErr = bootstrapErr
+			continue
 		}
 
 		if closed && len(buffered) == 0 {
 			emptyErr := &Error{Code: "empty_stream", Message: "upstream stream closed before first payload", Retryable: true}
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: emptyErr}
 			m.MarkResult(ctx, result)
-			if idx < len(execModels)-1 {
-				lastErr = emptyErr
-				continue
-			}
-			return nil, newStreamBootstrapError(emptyErr, streamResult.Headers)
+			lastErr = emptyErr
+			continue
 		}
 
 		remaining := streamResult.Chunks
