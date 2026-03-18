@@ -2682,6 +2682,48 @@
   ],
   "minimax": [
     {
+      "id": "MiniMax-M2.7",
+      "object": "model",
+      "created": 1742000000,
+      "owned_by": "minimax",
+      "type": "minimax",
+      "display_name": "MiniMax M2.7",
+      "context_length": 1000000,
+      "max_completion_tokens": 8192,
+      "thinking": {
+        "levels": [
+          "none",
+          "auto",
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      }
+    },
+    {
+      "id": "MiniMax-M2.7-highspeed",
+      "object": "model",
+      "created": 1742000000,
+      "owned_by": "minimax",
+      "type": "minimax",
+      "display_name": "MiniMax M2.7 Highspeed",
+      "context_length": 1000000,
+      "max_completion_tokens": 8192,
+      "thinking": {
+        "levels": [
+          "none",
+          "auto",
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      }
+    },
+    {
       "id": "MiniMax-M2.5",
       "object": "model",
       "created": 1740000000,

@@ -218,6 +218,8 @@ nonstream-keepalive-interval: 0
 #     api-key-entries:
 #       - api-key: "your-minimax-api-key"
 #     models:
+#       - name: "MiniMax-M2.7"
+#       - name: "MiniMax-M2.7-highspeed"
 #       - name: "MiniMax-M2.5"
 #       - name: "MiniMax-M2.5-highspeed"
 
