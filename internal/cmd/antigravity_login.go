@@ -19,13 +19,14 @@ func DoAntigravityLogin(cfg *config.Config, options *LoginOptions) {
 	if promptFn == nil {
 		promptFn = defaultProjectPrompt()
 	}
+	callbackPrompt := selectOAuthCallbackPrompt(options, promptFn)
 
 	manager := newAuthManager()
 	authOpts := &sdkAuth.LoginOptions{
 		NoBrowser:    options.NoBrowser,
 		CallbackPort: options.CallbackPort,
 		Metadata:     map[string]string{},
-		Prompt:       promptFn,
+		Prompt:       callbackPrompt,
 	}
 
 	record, savedPath, err := manager.Login(context.Background(), "antigravity", cfg, authOpts)

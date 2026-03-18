@@ -59,10 +59,7 @@ func DoLogin(cfg *config.Config, projectID string, options *LoginOptions) {
 	}
 
 	trimmedProjectID := strings.TrimSpace(projectID)
-	callbackPrompt := promptFn
-	if trimmedProjectID == "" {
-		callbackPrompt = nil
-	}
+	callbackPrompt := selectOAuthCallbackPrompt(options, promptFn)
 
 	loginOpts := &sdkAuth.LoginOptions{
 		NoBrowser:    options.NoBrowser,
