@@ -538,7 +538,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 	}
 	execModels := m.prepareExecutionModels(auth, routeModel)
 	var lastErr error
-	for idx, execModel := range execModels {
+	for _, execModel := range execModels {
 		execReq := req
 		execReq.Model = execModel
 		streamResult, errStream := executor.ExecuteStream(ctx, auth, execReq, opts)
@@ -577,36 +577,24 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				discardStreamChunks(streamResult.Chunks)
 				return nil, bootstrapErr
 			}
-			if idx < len(execModels)-1 {
-				rerr := &Error{Message: bootstrapErr.Error()}
-				if se, ok := errors.AsType[cliproxyexecutor.StatusError](bootstrapErr); ok && se != nil {
-					rerr.HTTPStatus = se.StatusCode()
-				}
-				result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: false, Error: rerr}
-				result.RetryAfter = retryAfterFromError(bootstrapErr)
-				m.MarkResult(ctx, result)
-				discardStreamChunks(streamResult.Chunks)
-				lastErr = bootstrapErr
-				continue
+			rerr := &Error{Message: bootstrapErr.Error()}
+			if se, ok := errors.AsType[cliproxyexecutor.StatusError](bootstrapErr); ok && se != nil {
+				rerr.HTTPStatus = se.StatusCode()
 			}
-			errCh := make(chan cliproxyexecutor.StreamChunk, 1)
-			errCh <- cliproxyexecutor.StreamChunk{Err: bootstrapErr}
-			close(errCh)
-			return m.wrapStreamResult(ctx, auth.Clone(), provider, routeModel, streamResult.Headers, nil, errCh), nil
+			result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: false, Error: rerr}
+			result.RetryAfter = retryAfterFromError(bootstrapErr)
+			m.MarkResult(ctx, result)
+			discardStreamChunks(streamResult.Chunks)
+			lastErr = bootstrapErr
+			continue
 		}
 
 		if closed && len(buffered) == 0 {
 			emptyErr := &Error{Code: "empty_stream", Message: "upstream stream closed before first payload", Retryable: true}
 			result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: false, Error: emptyErr}
 			m.MarkResult(ctx, result)
-			if idx < len(execModels)-1 {
-				lastErr = emptyErr
-				continue
-			}
-			errCh := make(chan cliproxyexecutor.StreamChunk, 1)
-			errCh <- cliproxyexecutor.StreamChunk{Err: emptyErr}
-			close(errCh)
-			return m.wrapStreamResult(ctx, auth.Clone(), provider, routeModel, streamResult.Headers, nil, errCh), nil
+			lastErr = emptyErr
+			continue
 		}
 
 		remaining := streamResult.Chunks
