@@ -201,6 +201,8 @@ nonstream-keepalive-interval: 0
 #   user-agent: "claude-cli/2.1.44 (external, sdk-cli)"
 #   package-version: "0.74.0"
 #   runtime-version: "v24.3.0"
+#   os: "MacOS"
+#   arch: "arm64"
 #   timeout: "600"
 
 # Default headers for Codex OAuth model requests.

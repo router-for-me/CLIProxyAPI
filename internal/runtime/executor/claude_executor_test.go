@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gin-gonic/gin"
 	"github.com/klauspost/compress/zstd"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -18,6 +19,146 @@ import (
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
+
+func resetClaudeDeviceProfileCache() {
+	claudeDeviceProfileCacheMu.Lock()
+	claudeDeviceProfileCache = make(map[string]claudeDeviceProfileCacheEntry)
+	claudeDeviceProfileCacheMu.Unlock()
+}
+
+func newClaudeHeaderTestRequest(t *testing.T, incoming http.Header) *http.Request {
+	t.Helper()
+
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	ginReq := httptest.NewRequest(http.MethodPost, "http://localhost/v1/messages", nil)
+	ginReq.Header = incoming.Clone()
+	ginCtx.Request = ginReq
+
+	req := httptest.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages", nil)
+	return req.WithContext(context.WithValue(req.Context(), "gin", ginCtx))
+}
+
+func assertClaudeFingerprint(t *testing.T, headers http.Header, userAgent, pkgVersion, runtimeVersion, osName, arch string) {
+	t.Helper()
+
+	if got := headers.Get("User-Agent"); got != userAgent {
+		t.Fatalf("User-Agent = %q, want %q", got, userAgent)
+	}
+	if got := headers.Get("X-Stainless-Package-Version"); got != pkgVersion {
+		t.Fatalf("X-Stainless-Package-Version = %q, want %q", got, pkgVersion)
+	}
+	if got := headers.Get("X-Stainless-Runtime-Version"); got != runtimeVersion {
+		t.Fatalf("X-Stainless-Runtime-Version = %q, want %q", got, runtimeVersion)
+	}
+	if got := headers.Get("X-Stainless-Os"); got != osName {
+		t.Fatalf("X-Stainless-Os = %q, want %q", got, osName)
+	}
+	if got := headers.Get("X-Stainless-Arch"); got != arch {
+		t.Fatalf("X-Stainless-Arch = %q, want %q", got, arch)
+	}
+}
+
+func TestApplyClaudeHeaders_UsesConfiguredBaselineFingerprint(t *testing.T) {
+	resetClaudeDeviceProfileCache()
+
+	cfg := &config.Config{
+		ClaudeHeaderDefaults: config.ClaudeHeaderDefaults{
+			UserAgent:      "claude-cli/2.1.70 (external, cli)",
+			PackageVersion: "0.80.0",
+			RuntimeVersion: "v24.5.0",
+			OS:             "MacOS",
+			Arch:           "arm64",
+			Timeout:        "900",
+		},
+	}
+	auth := &cliproxyauth.Auth{
+		ID: "auth-baseline",
+		Attributes: map[string]string{
+			"api_key":                            "key-baseline",
+			"header:User-Agent":                  "evil-client/9.9",
+			"header:X-Stainless-Os":              "Linux",
+			"header:X-Stainless-Arch":            "x64",
+			"header:X-Stainless-Package-Version": "9.9.9",
+		},
+	}
+	incoming := http.Header{
+		"User-Agent":                  []string{"curl/8.7.1"},
+		"X-Stainless-Package-Version": []string{"0.10.0"},
+		"X-Stainless-Runtime-Version": []string{"v18.0.0"},
+		"X-Stainless-Os":              []string{"Linux"},
+		"X-Stainless-Arch":            []string{"x64"},
+	}
+
+	req := newClaudeHeaderTestRequest(t, incoming)
+	applyClaudeHeaders(req, auth, "key-baseline", false, nil, cfg)
+
+	assertClaudeFingerprint(t, req.Header, "claude-cli/2.1.70 (external, cli)", "0.80.0", "v24.5.0", "MacOS", "arm64")
+	if got := req.Header.Get("X-Stainless-Timeout"); got != "900" {
+		t.Fatalf("X-Stainless-Timeout = %q, want %q", got, "900")
+	}
+}
+
+func TestApplyClaudeHeaders_TracksHighestClaudeCLIFingerprint(t *testing.T) {
+	resetClaudeDeviceProfileCache()
+
+	cfg := &config.Config{
+		ClaudeHeaderDefaults: config.ClaudeHeaderDefaults{
+			UserAgent:      "claude-cli/2.1.60 (external, cli)",
+			PackageVersion: "0.70.0",
+			RuntimeVersion: "v22.0.0",
+			OS:             "MacOS",
+			Arch:           "arm64",
+		},
+	}
+	auth := &cliproxyauth.Auth{
+		ID: "auth-upgrade",
+		Attributes: map[string]string{
+			"api_key": "key-upgrade",
+		},
+	}
+
+	firstReq := newClaudeHeaderTestRequest(t, http.Header{
+		"User-Agent":                  []string{"claude-cli/2.1.62 (external, cli)"},
+		"X-Stainless-Package-Version": []string{"0.74.0"},
+		"X-Stainless-Runtime-Version": []string{"v24.3.0"},
+		"X-Stainless-Os":              []string{"Linux"},
+		"X-Stainless-Arch":            []string{"x64"},
+	})
+	applyClaudeHeaders(firstReq, auth, "key-upgrade", false, nil, cfg)
+	assertClaudeFingerprint(t, firstReq.Header, "claude-cli/2.1.62 (external, cli)", "0.74.0", "v24.3.0", "Linux", "x64")
+
+	thirdPartyReq := newClaudeHeaderTestRequest(t, http.Header{
+		"User-Agent":                  []string{"lobe-chat/1.0"},
+		"X-Stainless-Package-Version": []string{"0.10.0"},
+		"X-Stainless-Runtime-Version": []string{"v18.0.0"},
+		"X-Stainless-Os":              []string{"Windows"},
+		"X-Stainless-Arch":            []string{"x64"},
+	})
+	applyClaudeHeaders(thirdPartyReq, auth, "key-upgrade", false, nil, cfg)
+	assertClaudeFingerprint(t, thirdPartyReq.Header, "claude-cli/2.1.62 (external, cli)", "0.74.0", "v24.3.0", "Linux", "x64")
+
+	higherReq := newClaudeHeaderTestRequest(t, http.Header{
+		"User-Agent":                  []string{"claude-cli/2.1.63 (external, cli)"},
+		"X-Stainless-Package-Version": []string{"0.75.0"},
+		"X-Stainless-Runtime-Version": []string{"v24.4.0"},
+		"X-Stainless-Os":              []string{"MacOS"},
+		"X-Stainless-Arch":            []string{"arm64"},
+	})
+	applyClaudeHeaders(higherReq, auth, "key-upgrade", false, nil, cfg)
+	assertClaudeFingerprint(t, higherReq.Header, "claude-cli/2.1.63 (external, cli)", "0.75.0", "v24.4.0", "MacOS", "arm64")
+
+	lowerReq := newClaudeHeaderTestRequest(t, http.Header{
+		"User-Agent":                  []string{"claude-cli/2.1.61 (external, cli)"},
+		"X-Stainless-Package-Version": []string{"0.73.0"},
+		"X-Stainless-Runtime-Version": []string{"v24.2.0"},
+		"X-Stainless-Os":              []string{"Windows"},
+		"X-Stainless-Arch":            []string{"x64"},
+	})
+	applyClaudeHeaders(lowerReq, auth, "key-upgrade", false, nil, cfg)
+	assertClaudeFingerprint(t, lowerReq.Header, "claude-cli/2.1.63 (external, cli)", "0.75.0", "v24.4.0", "MacOS", "arm64")
+}
 
 func TestApplyClaudeToolPrefix(t *testing.T) {
 	input := []byte(`{"tools":[{"name":"alpha"},{"name":"proxy_bravo"}],"tool_choice":{"type":"tool","name":"charlie"},"messages":[{"role":"assistant","content":[{"type":"tool_use","name":"delta","id":"t1","input":{}}]}]}`)

@@ -1,0 +1,250 @@
+package executor
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"net/http"
+	"regexp"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+)
+
+const (
+	defaultClaudeFingerprintUserAgent      = "claude-cli/2.1.63 (external, cli)"
+	defaultClaudeFingerprintPackageVersion = "0.74.0"
+	defaultClaudeFingerprintRuntimeVersion = "v24.3.0"
+	defaultClaudeFingerprintOS             = "MacOS"
+	defaultClaudeFingerprintArch           = "arm64"
+	claudeDeviceProfileTTL                 = 7 * 24 * time.Hour
+	claudeDeviceProfileCleanupPeriod       = time.Hour
+)
+
+var (
+	claudeCLIVersionPattern = regexp.MustCompile(`^claude-cli/(\d+)\.(\d+)\.(\d+)`)
+
+	claudeDeviceProfileCache            = make(map[string]claudeDeviceProfileCacheEntry)
+	claudeDeviceProfileCacheMu          sync.RWMutex
+	claudeDeviceProfileCacheCleanupOnce sync.Once
+)
+
+type claudeCLIVersion struct {
+	major int
+	minor int
+	patch int
+}
+
+func (v claudeCLIVersion) Compare(other claudeCLIVersion) int {
+	switch {
+	case v.major != other.major:
+		if v.major > other.major {
+			return 1
+		}
+		return -1
+	case v.minor != other.minor:
+		if v.minor > other.minor {
+			return 1
+		}
+		return -1
+	case v.patch != other.patch:
+		if v.patch > other.patch {
+			return 1
+		}
+		return -1
+	default:
+		return 0
+	}
+}
+
+type claudeDeviceProfile struct {
+	UserAgent      string
+	PackageVersion string
+	RuntimeVersion string
+	OS             string
+	Arch           string
+	Version        claudeCLIVersion
+}
+
+type claudeDeviceProfileCacheEntry struct {
+	profile claudeDeviceProfile
+	expire  time.Time
+}
+
+func defaultClaudeDeviceProfile(cfg *config.Config) claudeDeviceProfile {
+	hdrDefault := func(cfgVal, fallback string) string {
+		if strings.TrimSpace(cfgVal) != "" {
+			return strings.TrimSpace(cfgVal)
+		}
+		return fallback
+	}
+
+	var hd config.ClaudeHeaderDefaults
+	if cfg != nil {
+		hd = cfg.ClaudeHeaderDefaults
+	}
+
+	profile := claudeDeviceProfile{
+		UserAgent:      hdrDefault(hd.UserAgent, defaultClaudeFingerprintUserAgent),
+		PackageVersion: hdrDefault(hd.PackageVersion, defaultClaudeFingerprintPackageVersion),
+		RuntimeVersion: hdrDefault(hd.RuntimeVersion, defaultClaudeFingerprintRuntimeVersion),
+		OS:             hdrDefault(hd.OS, defaultClaudeFingerprintOS),
+		Arch:           hdrDefault(hd.Arch, defaultClaudeFingerprintArch),
+	}
+	if version, ok := parseClaudeCLIVersion(profile.UserAgent); ok {
+		profile.Version = version
+	}
+	return profile
+}
+
+func parseClaudeCLIVersion(userAgent string) (claudeCLIVersion, bool) {
+	matches := claudeCLIVersionPattern.FindStringSubmatch(strings.TrimSpace(userAgent))
+	if len(matches) != 4 {
+		return claudeCLIVersion{}, false
+	}
+	major, err := strconv.Atoi(matches[1])
+	if err != nil {
+		return claudeCLIVersion{}, false
+	}
+	minor, err := strconv.Atoi(matches[2])
+	if err != nil {
+		return claudeCLIVersion{}, false
+	}
+	patch, err := strconv.Atoi(matches[3])
+	if err != nil {
+		return claudeCLIVersion{}, false
+	}
+	return claudeCLIVersion{major: major, minor: minor, patch: patch}, true
+}
+
+func extractClaudeDeviceProfile(headers http.Header, cfg *config.Config) (claudeDeviceProfile, bool) {
+	if headers == nil {
+		return claudeDeviceProfile{}, false
+	}
+
+	userAgent := strings.TrimSpace(headers.Get("User-Agent"))
+	version, ok := parseClaudeCLIVersion(userAgent)
+	if !ok {
+		return claudeDeviceProfile{}, false
+	}
+
+	baseline := defaultClaudeDeviceProfile(cfg)
+	profile := claudeDeviceProfile{
+		UserAgent:      userAgent,
+		PackageVersion: firstNonEmptyHeader(headers, "X-Stainless-Package-Version", baseline.PackageVersion),
+		RuntimeVersion: firstNonEmptyHeader(headers, "X-Stainless-Runtime-Version", baseline.RuntimeVersion),
+		OS:             firstNonEmptyHeader(headers, "X-Stainless-Os", baseline.OS),
+		Arch:           firstNonEmptyHeader(headers, "X-Stainless-Arch", baseline.Arch),
+		Version:        version,
+	}
+	return profile, true
+}
+
+func firstNonEmptyHeader(headers http.Header, name, fallback string) string {
+	if headers == nil {
+		return fallback
+	}
+	if value := strings.TrimSpace(headers.Get(name)); value != "" {
+		return value
+	}
+	return fallback
+}
+
+func claudeDeviceProfileScopeKey(auth *cliproxyauth.Auth, apiKey string) string {
+	switch {
+	case auth != nil && strings.TrimSpace(auth.ID) != "":
+		return "auth:" + strings.TrimSpace(auth.ID)
+	case strings.TrimSpace(apiKey) != "":
+		return "api_key:" + strings.TrimSpace(apiKey)
+	default:
+		return "global"
+	}
+}
+
+func claudeDeviceProfileCacheKey(auth *cliproxyauth.Auth, apiKey string) string {
+	sum := sha256.Sum256([]byte(claudeDeviceProfileScopeKey(auth, apiKey)))
+	return hex.EncodeToString(sum[:])
+}
+
+func startClaudeDeviceProfileCacheCleanup() {
+	go func() {
+		ticker := time.NewTicker(claudeDeviceProfileCleanupPeriod)
+		defer ticker.Stop()
+		for range ticker.C {
+			purgeExpiredClaudeDeviceProfiles()
+		}
+	}()
+}
+
+func purgeExpiredClaudeDeviceProfiles() {
+	now := time.Now()
+	claudeDeviceProfileCacheMu.Lock()
+	for key, entry := range claudeDeviceProfileCache {
+		if !entry.expire.After(now) {
+			delete(claudeDeviceProfileCache, key)
+		}
+	}
+	claudeDeviceProfileCacheMu.Unlock()
+}
+
+func resolveClaudeDeviceProfile(auth *cliproxyauth.Auth, apiKey string, headers http.Header, cfg *config.Config) claudeDeviceProfile {
+	claudeDeviceProfileCacheCleanupOnce.Do(startClaudeDeviceProfileCacheCleanup)
+
+	cacheKey := claudeDeviceProfileCacheKey(auth, apiKey)
+	now := time.Now()
+	baseline := defaultClaudeDeviceProfile(cfg)
+	candidate, hasCandidate := extractClaudeDeviceProfile(headers, cfg)
+
+	claudeDeviceProfileCacheMu.RLock()
+	entry, hasCached := claudeDeviceProfileCache[cacheKey]
+	cachedValid := hasCached && entry.expire.After(now) && entry.profile.UserAgent != ""
+	claudeDeviceProfileCacheMu.RUnlock()
+
+	if hasCandidate && (!cachedValid || candidate.Version.Compare(entry.profile.Version) > 0) {
+		newEntry := claudeDeviceProfileCacheEntry{
+			profile: candidate,
+			expire:  now.Add(claudeDeviceProfileTTL),
+		}
+		claudeDeviceProfileCacheMu.Lock()
+		claudeDeviceProfileCache[cacheKey] = newEntry
+		claudeDeviceProfileCacheMu.Unlock()
+		return candidate
+	}
+
+	if cachedValid {
+		claudeDeviceProfileCacheMu.Lock()
+		entry = claudeDeviceProfileCache[cacheKey]
+		if entry.expire.After(now) && entry.profile.UserAgent != "" {
+			entry.expire = now.Add(claudeDeviceProfileTTL)
+			claudeDeviceProfileCache[cacheKey] = entry
+			claudeDeviceProfileCacheMu.Unlock()
+			return entry.profile
+		}
+		claudeDeviceProfileCacheMu.Unlock()
+	}
+
+	return baseline
+}
+
+func applyClaudeDeviceProfileHeaders(r *http.Request, profile claudeDeviceProfile) {
+	if r == nil {
+		return
+	}
+	for _, headerName := range []string{
+		"User-Agent",
+		"X-Stainless-Package-Version",
+		"X-Stainless-Runtime-Version",
+		"X-Stainless-Os",
+		"X-Stainless-Arch",
+	} {
+		r.Header.Del(headerName)
+	}
+	r.Header.Set("User-Agent", profile.UserAgent)
+	r.Header.Set("X-Stainless-Package-Version", profile.PackageVersion)
+	r.Header.Set("X-Stainless-Runtime-Version", profile.RuntimeVersion)
+	r.Header.Set("X-Stainless-Os", profile.OS)
+	r.Header.Set("X-Stainless-Arch", profile.Arch)
+}
