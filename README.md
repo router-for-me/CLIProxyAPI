@@ -65,7 +65,7 @@ Get 10% OFF GLM CODING PLAN：https://z.ai/subscribe?ic=8JVLJQFSKB
 Extract the archive. The binary inside is named **`cli-proxy-api`**.
 
 ```bash
-# macOS/Linux example
+# macOS/Linux example. The filename will vary depending on your OS and architecture.
 tar -xzf CLIProxyAPI_*_darwin_arm64.tar.gz
 ./cli-proxy-api -help   # verify it works
 ```
@@ -122,16 +122,8 @@ api-keys:
 
 #### Homebrew users
 
-Brew places the config at a system path. Edit that file directly, or symlink your own
-`config.yaml` over it:
+Brew places the config at a system path. To use the `config.yaml` you just created, first move it to `~/.cli-proxy-api/` and then create a symlink:
 
-```bash
-# Apple Silicon
-ln -sf ~/.cli-proxy-api/config.yaml /opt/homebrew/etc/cliproxyapi.conf
-
-# Intel Mac
-ln -sf ~/.cli-proxy-api/config.yaml /usr/local/etc/cliproxyapi.conf
-```
 
 ### 3. Log In to an AI Provider (OAuth)
 

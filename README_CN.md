@@ -65,7 +65,7 @@ GLM CODING PLAN 是专为AI编码打造的订阅套餐，每月最低仅需20元
 解压缩后，压缩包内的二进制文件名为 **`cli-proxy-api`**。
 
 ```bash
-# macOS/Linux 示例
+# macOS/Linux 示例。文件名会因您的操作系统和架构而异。
 tar -xzf CLIProxyAPI_*_darwin_arm64.tar.gz
 ./cli-proxy-api -help   # 验证是否正常运行
 ```
@@ -120,15 +120,8 @@ api-keys:
 
 #### Homebrew 用户注意事项
 
-Brew 会将配置文件存放在系统路径。请直接编辑该路径下的文件，或将自己的 `config.yaml` 软链接到对应路径：
+Brew 会将配置文件存放在系统路径。要使用您刚刚创建的 `config.yaml`，请先将其移动到 `~/.cli-proxy-api/` 目录，然后创建软链接：
 
-```bash
-# Apple Silicon
-ln -sf ~/.cli-proxy-api/config.yaml /opt/homebrew/etc/cliproxyapi.conf
-
-# Intel Mac
-ln -sf ~/.cli-proxy-api/config.yaml /usr/local/etc/cliproxyapi.conf
-```
 
 ### 3. 登录 AI 提供商（OAuth）
 
