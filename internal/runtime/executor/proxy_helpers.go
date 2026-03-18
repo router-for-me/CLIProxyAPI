@@ -35,7 +35,7 @@ func ResolveProxyURL(cfg *config.Config, auth *cliproxyauth.Auth) string {
 // utls with Bun BoringSSL TLS fingerprint. This ensures API requests and OAuth
 // token refresh share the same TLS characteristics, matching real Claude Code CLI.
 //
-// Proxy priority: auth.ProxyURL > cfg.ProxyURL > "" (direct).
+// Proxy priority: auth.ProxyURL > cfg.ProxyURL > env (HTTPS_PROXY etc.) > direct.
 func newClaudeHTTPClient(cfg *config.Config, auth *cliproxyauth.Auth) *http.Client {
 	proxyURL := ResolveProxyURL(cfg, auth)
 	return claudeauth.NewAnthropicHttpClient(proxyURL)

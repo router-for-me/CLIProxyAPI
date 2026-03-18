@@ -11,8 +11,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
-	"strings"
 	"time"
 
 	tls "github.com/refraction-networking/utls"
@@ -30,7 +28,7 @@ import (
 // Proxy support: SOCKS5 proxies are handled at the TCP dial layer.
 // HTTP/HTTPS proxies use CONNECT tunneling before the TLS handshake.
 // When no explicit proxy is configured, HTTPS_PROXY/HTTP_PROXY/ALL_PROXY
-// environment variables are respected.
+// environment variables are respected (via http.ProxyFromEnvironment).
 type utlsRoundTripper struct {
 	transport *http.Transport
 	proxyURL  *url.URL       // explicit proxy URL (nil = check env per-request)
@@ -54,73 +52,32 @@ func newUtlsRoundTripper(proxyURL string) *utlsRoundTripper {
 	}
 
 	rt.transport = &http.Transport{
-		// Inject our custom TLS dial function so every connection uses
-		// the Bun BoringSSL fingerprint via utls.
-		DialTLSContext: rt.dialTLS,
-		// Force HTTP/1.1 — do not attempt h2 upgrade.
+		DialTLSContext:    rt.dialTLS,
 		ForceAttemptHTTP2: false,
 	}
 	return rt
 }
 
 // resolveProxy returns the effective proxy URL for a given target address.
-// It respects explicit configuration and falls back to environment variables.
-func (t *utlsRoundTripper) resolveProxy(targetAddr string) *url.URL {
+// For explicit proxy configuration, it returns the configured URL directly.
+// For inherit mode, it delegates to http.ProxyFromEnvironment which correctly
+// handles HTTPS_PROXY, HTTP_PROXY, NO_PROXY (including CIDR and wildcards).
+func (t *utlsRoundTripper) resolveProxy(targetHost string) *url.URL {
 	switch t.proxyMode {
 	case proxyutil.ModeDirect:
 		return nil
 	case proxyutil.ModeProxy:
 		return t.proxyURL
 	default:
-		// ModeInherit: check environment variables (HTTPS_PROXY, HTTP_PROXY, ALL_PROXY)
-		return proxyFromEnv(targetAddr)
+		// ModeInherit: delegate to Go's standard proxy resolution which
+		// reads HTTPS_PROXY, HTTP_PROXY, ALL_PROXY and respects NO_PROXY.
+		req := &http.Request{URL: &url.URL{Scheme: "https", Host: targetHost}}
+		proxyURL, _ := http.ProxyFromEnvironment(req)
+		return proxyURL
 	}
-}
-
-// proxyFromEnv reads proxy settings from standard environment variables.
-// It checks HTTPS_PROXY (and https_proxy), HTTP_PROXY (and http_proxy),
-// and ALL_PROXY (and all_proxy), matching http.Transport's default behavior.
-func proxyFromEnv(targetAddr string) *url.URL {
-	host, _, _ := net.SplitHostPort(targetAddr)
-	if host == "" {
-		host = targetAddr
-	}
-
-	// Respect NO_PROXY
-	noProxy := os.Getenv("NO_PROXY")
-	if noProxy == "" {
-		noProxy = os.Getenv("no_proxy")
-	}
-	if noProxy == "*" {
-		return nil
-	}
-	for _, pattern := range strings.Split(noProxy, ",") {
-		pattern = strings.TrimSpace(pattern)
-		if pattern == "" {
-			continue
-		}
-		if strings.HasPrefix(pattern, ".") {
-			if strings.HasSuffix(host, pattern) || host == pattern[1:] {
-				return nil
-			}
-		} else if host == pattern {
-			return nil
-		}
-	}
-
-	// All our targets are HTTPS, so prefer HTTPS_PROXY
-	for _, env := range []string{"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"} {
-		if v := os.Getenv(env); v != "" {
-			if u, err := url.Parse(v); err == nil && u.Host != "" {
-				return u
-			}
-		}
-	}
-	return nil
 }
 
 // dialTLS establishes a TLS connection using utls with the Bun BoringSSL spec.
-// This is called by http.Transport for every new TLS connection.
 // It handles proxy tunneling (SOCKS5 and HTTP CONNECT) before the TLS handshake,
 // and respects context cancellation/deadline throughout.
 func (t *utlsRoundTripper) dialTLS(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -129,7 +86,7 @@ func (t *utlsRoundTripper) dialTLS(ctx context.Context, network, addr string) (n
 		host = addr
 	}
 
-	proxyURL := t.resolveProxy(addr)
+	proxyURL := t.resolveProxy(host)
 
 	// Establish raw TCP connection — either direct, via SOCKS5, or via HTTP CONNECT.
 	var conn net.Conn
@@ -187,11 +144,22 @@ func dialViaSocks5(ctx context.Context, proxyURL *url.URL, targetAddr string) (n
 }
 
 // dialViaHTTPConnect establishes a TCP tunnel through an HTTP proxy using CONNECT.
+// The proxy connection itself is plain TCP (for http:// proxies) or TLS (for https://).
 func dialViaHTTPConnect(ctx context.Context, proxyURL *url.URL, targetAddr string) (net.Conn, error) {
-	// Connect to the proxy itself.
-	conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", proxyURL.Host)
+	proxyAddr := proxyURL.Host
+	// Ensure the proxy address has a port; default to 80/443 based on scheme.
+	if _, _, err := net.SplitHostPort(proxyAddr); err != nil {
+		if proxyURL.Scheme == "https" {
+			proxyAddr = net.JoinHostPort(proxyAddr, "443")
+		} else {
+			proxyAddr = net.JoinHostPort(proxyAddr, "80")
+		}
+	}
+
+	// Connect to the proxy.
+	conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", proxyAddr)
 	if err != nil {
-		return nil, fmt.Errorf("dial HTTP proxy %s: %w", proxyURL.Host, err)
+		return nil, fmt.Errorf("dial proxy %s: %w", proxyAddr, err)
 	}
 
 	// Send CONNECT request.
@@ -211,27 +179,46 @@ func dialViaHTTPConnect(ctx context.Context, proxyURL *url.URL, targetAddr strin
 	}
 	if err := connectReq.Write(conn); err != nil {
 		conn.Close()
-		return nil, fmt.Errorf("write CONNECT request: %w", err)
+		return nil, fmt.Errorf("write CONNECT: %w", err)
 	}
 
-	// Read CONNECT response.
+	// Read CONNECT response. Use a bufio.Reader, then check for buffered
+	// bytes to avoid data loss if the proxy sent anything beyond the header.
 	br := bufio.NewReader(conn)
 	resp, err := http.ReadResponse(br, connectReq)
 	if err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("read CONNECT response: %w", err)
 	}
+	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		conn.Close()
-		return nil, fmt.Errorf("proxy CONNECT to %s failed: %s", targetAddr, resp.Status)
+		return nil, fmt.Errorf("CONNECT to %s via %s: %s", targetAddr, proxyAddr, resp.Status)
 	}
 
-	// conn is now a raw TCP tunnel to targetAddr.
+	// If the bufio.Reader consumed extra bytes beyond the HTTP response,
+	// wrap the connection so those bytes are read first.
+	if br.Buffered() > 0 {
+		return &bufferedConn{Conn: conn, br: br}, nil
+	}
 	return conn, nil
 }
 
-// RoundTrip implements http.RoundTripper by delegating to the underlying
-// http.Transport which uses our custom TLS dial function.
+// bufferedConn wraps a net.Conn with a bufio.Reader to drain any bytes
+// that were buffered during the HTTP CONNECT handshake.
+type bufferedConn struct {
+	net.Conn
+	br *bufio.Reader
+}
+
+func (c *bufferedConn) Read(p []byte) (int, error) {
+	if c.br.Buffered() > 0 {
+		return c.br.Read(p)
+	}
+	return c.Conn.Read(p)
+}
+
+// RoundTrip implements http.RoundTripper.
 func (t *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	return t.transport.RoundTrip(req)
 }
