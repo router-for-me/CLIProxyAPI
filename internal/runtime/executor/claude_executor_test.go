@@ -62,15 +62,17 @@ func assertClaudeFingerprint(t *testing.T, headers http.Header, userAgent, pkgVe
 
 func TestApplyClaudeHeaders_UsesConfiguredBaselineFingerprint(t *testing.T) {
 	resetClaudeDeviceProfileCache()
+	stabilize := true
 
 	cfg := &config.Config{
 		ClaudeHeaderDefaults: config.ClaudeHeaderDefaults{
-			UserAgent:      "claude-cli/2.1.70 (external, cli)",
-			PackageVersion: "0.80.0",
-			RuntimeVersion: "v24.5.0",
-			OS:             "MacOS",
-			Arch:           "arm64",
-			Timeout:        "900",
+			UserAgent:              "claude-cli/2.1.70 (external, cli)",
+			PackageVersion:         "0.80.0",
+			RuntimeVersion:         "v24.5.0",
+			OS:                     "MacOS",
+			Arch:                   "arm64",
+			Timeout:                "900",
+			StabilizeDeviceProfile: &stabilize,
 		},
 	}
 	auth := &cliproxyauth.Auth{
@@ -102,14 +104,16 @@ func TestApplyClaudeHeaders_UsesConfiguredBaselineFingerprint(t *testing.T) {
 
 func TestApplyClaudeHeaders_TracksHighestClaudeCLIFingerprint(t *testing.T) {
 	resetClaudeDeviceProfileCache()
+	stabilize := true
 
 	cfg := &config.Config{
 		ClaudeHeaderDefaults: config.ClaudeHeaderDefaults{
-			UserAgent:      "claude-cli/2.1.60 (external, cli)",
-			PackageVersion: "0.70.0",
-			RuntimeVersion: "v22.0.0",
-			OS:             "MacOS",
-			Arch:           "arm64",
+			UserAgent:              "claude-cli/2.1.60 (external, cli)",
+			PackageVersion:         "0.70.0",
+			RuntimeVersion:         "v22.0.0",
+			OS:                     "MacOS",
+			Arch:                   "arm64",
+			StabilizeDeviceProfile: &stabilize,
 		},
 	}
 	auth := &cliproxyauth.Auth{
@@ -158,6 +162,67 @@ func TestApplyClaudeHeaders_TracksHighestClaudeCLIFingerprint(t *testing.T) {
 	})
 	applyClaudeHeaders(lowerReq, auth, "key-upgrade", false, nil, cfg)
 	assertClaudeFingerprint(t, lowerReq.Header, "claude-cli/2.1.63 (external, cli)", "0.75.0", "v24.4.0", "MacOS", "arm64")
+}
+
+func TestApplyClaudeHeaders_DisableDeviceProfileStabilization(t *testing.T) {
+	resetClaudeDeviceProfileCache()
+
+	stabilize := false
+	cfg := &config.Config{
+		ClaudeHeaderDefaults: config.ClaudeHeaderDefaults{
+			UserAgent:              "claude-cli/2.1.60 (external, cli)",
+			PackageVersion:         "0.70.0",
+			RuntimeVersion:         "v22.0.0",
+			OS:                     "MacOS",
+			Arch:                   "arm64",
+			StabilizeDeviceProfile: &stabilize,
+		},
+	}
+	auth := &cliproxyauth.Auth{
+		ID: "auth-disable-stability",
+		Attributes: map[string]string{
+			"api_key": "key-disable-stability",
+		},
+	}
+
+	firstReq := newClaudeHeaderTestRequest(t, http.Header{
+		"User-Agent":                  []string{"claude-cli/2.1.62 (external, cli)"},
+		"X-Stainless-Package-Version": []string{"0.74.0"},
+		"X-Stainless-Runtime-Version": []string{"v24.3.0"},
+		"X-Stainless-Os":              []string{"Linux"},
+		"X-Stainless-Arch":            []string{"x64"},
+	})
+	applyClaudeHeaders(firstReq, auth, "key-disable-stability", false, nil, cfg)
+	assertClaudeFingerprint(t, firstReq.Header, "claude-cli/2.1.62 (external, cli)", "0.74.0", "v24.3.0", "Linux", "x64")
+
+	thirdPartyReq := newClaudeHeaderTestRequest(t, http.Header{
+		"User-Agent":                  []string{"lobe-chat/1.0"},
+		"X-Stainless-Package-Version": []string{"0.10.0"},
+		"X-Stainless-Runtime-Version": []string{"v18.0.0"},
+		"X-Stainless-Os":              []string{"Windows"},
+		"X-Stainless-Arch":            []string{"x64"},
+	})
+	applyClaudeHeaders(thirdPartyReq, auth, "key-disable-stability", false, nil, cfg)
+	assertClaudeFingerprint(t, thirdPartyReq.Header, "claude-cli/2.1.60 (external, cli)", "0.10.0", "v18.0.0", "Windows", "x64")
+
+	lowerReq := newClaudeHeaderTestRequest(t, http.Header{
+		"User-Agent":                  []string{"claude-cli/2.1.61 (external, cli)"},
+		"X-Stainless-Package-Version": []string{"0.73.0"},
+		"X-Stainless-Runtime-Version": []string{"v24.2.0"},
+		"X-Stainless-Os":              []string{"Windows"},
+		"X-Stainless-Arch":            []string{"x64"},
+	})
+	applyClaudeHeaders(lowerReq, auth, "key-disable-stability", false, nil, cfg)
+	assertClaudeFingerprint(t, lowerReq.Header, "claude-cli/2.1.61 (external, cli)", "0.73.0", "v24.2.0", "Windows", "x64")
+}
+
+func TestClaudeDeviceProfileStabilizationEnabled_DefaultFalse(t *testing.T) {
+	if claudeDeviceProfileStabilizationEnabled(nil) {
+		t.Fatal("expected nil config to default to disabled stabilization")
+	}
+	if claudeDeviceProfileStabilizationEnabled(&config.Config{}) {
+		t.Fatal("expected unset stabilize-device-profile to default to disabled stabilization")
+	}
 }
 
 func TestApplyClaudeToolPrefix(t *testing.T) {

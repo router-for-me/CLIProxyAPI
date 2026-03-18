@@ -74,6 +74,13 @@ type claudeDeviceProfileCacheEntry struct {
 	expire  time.Time
 }
 
+func claudeDeviceProfileStabilizationEnabled(cfg *config.Config) bool {
+	if cfg == nil || cfg.ClaudeHeaderDefaults.StabilizeDeviceProfile == nil {
+		return false
+	}
+	return *cfg.ClaudeHeaderDefaults.StabilizeDeviceProfile
+}
+
 func defaultClaudeDeviceProfile(cfg *config.Config) claudeDeviceProfile {
 	hdrDefault := func(cfgVal, fallback string) string {
 		if strings.TrimSpace(cfgVal) != "" {
@@ -247,4 +254,38 @@ func applyClaudeDeviceProfileHeaders(r *http.Request, profile claudeDeviceProfil
 	r.Header.Set("X-Stainless-Runtime-Version", profile.RuntimeVersion)
 	r.Header.Set("X-Stainless-Os", profile.OS)
 	r.Header.Set("X-Stainless-Arch", profile.Arch)
+}
+
+func applyClaudeLegacyDeviceHeaders(r *http.Request, ginHeaders http.Header, cfg *config.Config) {
+	if r == nil {
+		return
+	}
+	profile := defaultClaudeDeviceProfile(cfg)
+	miscEnsure := func(name, fallback string) {
+		if strings.TrimSpace(r.Header.Get(name)) != "" {
+			return
+		}
+		if strings.TrimSpace(ginHeaders.Get(name)) != "" {
+			r.Header.Set(name, strings.TrimSpace(ginHeaders.Get(name)))
+			return
+		}
+		r.Header.Set(name, fallback)
+	}
+
+	miscEnsure("X-Stainless-Runtime-Version", profile.RuntimeVersion)
+	miscEnsure("X-Stainless-Package-Version", profile.PackageVersion)
+	miscEnsure("X-Stainless-Os", profile.OS)
+	miscEnsure("X-Stainless-Arch", profile.Arch)
+
+	clientUA := ""
+	if ginHeaders != nil {
+		clientUA = ginHeaders.Get("User-Agent")
+	}
+	if isClaudeCodeClient(clientUA) {
+		r.Header.Set("User-Agent", clientUA)
+		return
+	}
+	if strings.TrimSpace(r.Header.Get("User-Agent")) == "" {
+		r.Header.Set("User-Agent", profile.UserAgent)
+	}
 }

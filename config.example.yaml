@@ -204,6 +204,7 @@ nonstream-keepalive-interval: 0
 #   os: "MacOS"
 #   arch: "arm64"
 #   timeout: "600"
+#   stabilize-device-profile: false  # optional, default false; set true to enable per-auth/API-key fingerprint pinning
 
 # Default headers for Codex OAuth model requests.
 # These are used only for file-backed/OAuth Codex requests when the client

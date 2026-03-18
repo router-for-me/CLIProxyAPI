@@ -793,7 +793,11 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	if ginCtx, ok := r.Context().Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
 		ginHeaders = ginCtx.Request.Header
 	}
-	deviceProfile := resolveClaudeDeviceProfile(auth, apiKey, ginHeaders, cfg)
+	stabilizeDeviceProfile := claudeDeviceProfileStabilizationEnabled(cfg)
+	var deviceProfile claudeDeviceProfile
+	if stabilizeDeviceProfile {
+		deviceProfile = resolveClaudeDeviceProfile(auth, apiKey, ginHeaders, cfg)
+	}
 
 	baseBetas := "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05"
 	if val := strings.TrimSpace(ginHeaders.Get("Anthropic-Beta")); val != "" {
@@ -858,7 +862,11 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(r, attrs)
-	applyClaudeDeviceProfileHeaders(r, deviceProfile)
+	if stabilizeDeviceProfile {
+		applyClaudeDeviceProfileHeaders(r, deviceProfile)
+	} else {
+		applyClaudeLegacyDeviceHeaders(r, ginHeaders, cfg)
+	}
 	// Re-enforce Accept-Encoding: identity after ApplyCustomHeadersFromAttrs, which
 	// may override it with a user-configured value.  Compressed SSE breaks the line
 	// scanner regardless of user preference, so this is non-negotiable for streams.
