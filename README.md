@@ -56,9 +56,149 @@ Get 10% OFF GLM CODING PLAN：https://z.ai/subscribe?ic=8JVLJQFSKB
 - OpenAI-compatible upstream providers via config (e.g., OpenRouter)
 - Reusable Go SDK for embedding the proxy (see `docs/sdk-usage.md`)
 
-## Getting Started
+## Quick Start
 
-CLIProxyAPI Guides: [https://help.router-for.me/](https://help.router-for.me/)
+### 1. Install
+
+**Option A — Download a binary from the [Releases page](https://github.com/router-for-me/CLIProxyAPI/releases)**
+
+Extract the archive. The binary inside is named **`cli-proxy-api`**.
+
+```bash
+# macOS/Linux example
+tar -xzf CLIProxyAPI_*_darwin_arm64.tar.gz
+./cli-proxy-api -help   # verify it works
+```
+
+**Option B — Homebrew (macOS)**
+
+> The Homebrew formula renames the binary to **`cliproxyapi`** and places the default
+> config file at `/opt/homebrew/etc/cliproxyapi.conf` (Apple Silicon) or
+> `/usr/local/etc/cliproxyapi.conf` (Intel). All commands below use `cliproxyapi`
+> when referring to a Homebrew install.
+
+```bash
+brew install cliproxyapi          # install
+cliproxyapi -help                 # verify it works
+```
+
+**Option C — Docker**
+
+```bash
+docker compose up -d              # uses docker-compose.yml in this repo
+```
+
+### 2. Create a Configuration File
+
+Copy the example and edit it:
+
+```bash
+cp config.example.yaml config.yaml
+```
+
+Open `config.yaml` in a text editor and make these two changes:
+
+**a) Enable the Management UI** — set a non-empty `secret-key`. Without this the Management
+API is entirely disabled and the UI will show *"Server address invalid or management interface
+not enabled"* when you click Login.
+
+```yaml
+remote-management:
+  secret-key: "choose-a-strong-password"
+```
+
+You can also set this via environment variable instead of editing the file:
+
+```bash
+export MANAGEMENT_PASSWORD="choose-a-strong-password"
+```
+
+**b) Set proxy client API keys** (optional — remove the placeholder lines or set real values):
+
+```yaml
+api-keys:
+  - "your-api-key"
+```
+
+#### Homebrew users
+
+Brew places the config at a system path. Edit that file directly, or symlink your own
+`config.yaml` over it:
+
+```bash
+# Apple Silicon
+ln -sf ~/.cli-proxy-api/config.yaml /opt/homebrew/etc/cliproxyapi.conf
+
+# Intel Mac
+ln -sf ~/.cli-proxy-api/config.yaml /usr/local/etc/cliproxyapi.conf
+```
+
+### 3. Log In to an AI Provider (OAuth)
+
+Run the login command **once** for each provider you want to use. Tokens are saved to
+`~/.cli-proxy-api/` (configured via `auth-dir` in `config.yaml`) and are reused across restarts.
+
+```bash
+# Google Gemini CLI
+./cli-proxy-api -login
+
+# Claude Code
+./cli-proxy-api -claude-login
+
+# OpenAI Codex (browser-based OAuth)
+./cli-proxy-api -codex-login
+
+# OpenAI Codex (device code flow — no browser needed)
+./cli-proxy-api -codex-device-login
+
+# Qwen Code
+./cli-proxy-api -qwen-login
+
+# Antigravity / Kimi / iFlow
+./cli-proxy-api -antigravity-login
+./cli-proxy-api -kimi-login
+./cli-proxy-api -iflow-login
+```
+
+Pass `-config /path/to/config.yaml` if your config file is not in the current directory.
+
+> **Homebrew users:** replace `./cli-proxy-api` with `cliproxyapi` in the commands above,
+> and add `-config /opt/homebrew/etc/cliproxyapi.conf` (Apple Silicon) or
+> `-config /usr/local/etc/cliproxyapi.conf` (Intel) if needed.
+
+### 4. Start the Server
+
+```bash
+# Binary (config.yaml in the current directory is loaded automatically)
+./cli-proxy-api
+
+# Or specify a config path explicitly
+./cli-proxy-api -config /path/to/config.yaml
+```
+
+The server listens on port **8317** by default (set by `port:` in `config.yaml`).
+
+#### Homebrew — run as a background service
+
+```bash
+brew services start cliproxyapi   # start
+brew services stop cliproxyapi    # stop
+brew services restart cliproxyapi # restart
+```
+
+### 5. Open the Management UI
+
+With the server running, open **[http://localhost:8317/management.html](http://localhost:8317/management.html)**.
+
+- **Server address**: `http://localhost:8317`
+- **Password**: the value you set for `secret-key` (or `MANAGEMENT_PASSWORD`)
+
+> If you skipped step 2a and left `secret-key` empty, the Management API is disabled.
+> Set a non-empty `secret-key`, then restart the server.
+
+---
+
+For the full user guide, see: [https://help.router-for.me/](https://help.router-for.me/)
 
 ## Management API
 

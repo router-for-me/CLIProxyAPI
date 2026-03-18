@@ -19,7 +19,10 @@ remote-management:
 
   # Management key. If a plaintext value is provided here, it will be hashed on startup.
   # All management requests (even from localhost) require this key.
-  # Leave empty to disable the Management API entirely (404 for all /v0/management routes).
+  # IMPORTANT: Leave empty to disable the Management API entirely (404 for all /v0/management routes).
+  # If you leave this empty and visit management.html, clicking Login will show
+  # "Server address invalid or management interface not enabled".
+  # Alternatively, set the MANAGEMENT_PASSWORD environment variable instead of this field.
   secret-key: ""
 
   # Disable the bundled management control panel asset download and HTTP route when true.

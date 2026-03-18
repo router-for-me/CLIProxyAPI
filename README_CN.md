@@ -56,9 +56,145 @@ GLM CODING PLAN 是专为AI编码打造的订阅套餐，每月最低仅需20元
 - 通过配置接入上游 OpenAI 兼容提供商（例如 OpenRouter）
 - 可复用的 Go SDK（见 `docs/sdk-usage_CN.md`）
 
-## 新手入门
+## 快速开始
 
-CLIProxyAPI 用户手册： [https://help.router-for.me/](https://help.router-for.me/cn/)
+### 1. 安装
+
+**方式 A — 从 [Releases 页面](https://github.com/router-for-me/CLIProxyAPI/releases) 下载二进制文件**
+
+解压缩后，压缩包内的二进制文件名为 **`cli-proxy-api`**。
+
+```bash
+# macOS/Linux 示例
+tar -xzf CLIProxyAPI_*_darwin_arm64.tar.gz
+./cli-proxy-api -help   # 验证是否正常运行
+```
+
+**方式 B — Homebrew（仅 macOS）**
+
+> Homebrew 公式会将二进制文件重命名为 **`cliproxyapi`**，并将默认配置文件放置于
+> `/opt/homebrew/etc/cliproxyapi.conf`（Apple Silicon）或
+> `/usr/local/etc/cliproxyapi.conf`（Intel）。
+> 以下涉及 Homebrew 安装的命令均使用 `cliproxyapi`。
+
+```bash
+brew install cliproxyapi          # 安装
+cliproxyapi -help                 # 验证是否正常运行
+```
+
+**方式 C — Docker**
+
+```bash
+docker compose up -d              # 使用本仓库中的 docker-compose.yml
+```
+
+### 2. 创建配置文件
+
+复制示例文件并编辑：
+
+```bash
+cp config.example.yaml config.yaml
+```
+
+用文本编辑器打开 `config.yaml`，进行以下两处修改：
+
+**a) 启用管理界面** — 设置一个非空的 `secret-key`。如果不设置此项，管理 API 将被完全禁用，点击管理页面登录按钮时会提示"**服务器地址无效或管理接口未启用**"。
+
+```yaml
+remote-management:
+  secret-key: "设置一个强密码"
+```
+
+也可以通过环境变量来代替修改配置文件：
+
+```bash
+export MANAGEMENT_PASSWORD="设置一个强密码"
+```
+
+**b) 设置代理客户端 API 密钥**（可选 — 删除占位行或填入真实值）：
+
+```yaml
+api-keys:
+  - "你的API密钥"
+```
+
+#### Homebrew 用户注意事项
+
+Brew 会将配置文件存放在系统路径。请直接编辑该路径下的文件，或将自己的 `config.yaml` 软链接到对应路径：
+
+```bash
+# Apple Silicon
+ln -sf ~/.cli-proxy-api/config.yaml /opt/homebrew/etc/cliproxyapi.conf
+
+# Intel Mac
+ln -sf ~/.cli-proxy-api/config.yaml /usr/local/etc/cliproxyapi.conf
+```
+
+### 3. 登录 AI 提供商（OAuth）
+
+为每个要使用的提供商运行一次登录命令。Token 保存在 `~/.cli-proxy-api/`（由 `config.yaml` 中的 `auth-dir` 配置），服务重启后自动复用，无需重复登录。
+
+```bash
+# 谷歌 Gemini CLI
+./cli-proxy-api -login
+
+# Claude Code
+./cli-proxy-api -claude-login
+
+# OpenAI Codex（浏览器 OAuth 授权）
+./cli-proxy-api -codex-login
+
+# OpenAI Codex（设备码流程，无需浏览器）
+./cli-proxy-api -codex-device-login
+
+# Qwen Code
+./cli-proxy-api -qwen-login
+
+# Antigravity / Kimi / iFlow
+./cli-proxy-api -antigravity-login
+./cli-proxy-api -kimi-login
+./cli-proxy-api -iflow-login
+```
+
+如果配置文件不在当前目录，请加上 `-config /path/to/config.yaml`。
+
+> **Homebrew 用户：** 将上述命令中的 `./cli-proxy-api` 替换为 `cliproxyapi`，
+> 如有需要可加上 `-config /opt/homebrew/etc/cliproxyapi.conf`（Apple Silicon）或
+> `-config /usr/local/etc/cliproxyapi.conf`（Intel）。
+
+### 4. 启动服务器
+
+```bash
+# 直接运行（自动加载当前目录下的 config.yaml）
+./cli-proxy-api
+
+# 或显式指定配置文件路径
+./cli-proxy-api -config /path/to/config.yaml
+```
+
+服务器默认监听 **8317** 端口（由 `config.yaml` 中的 `port:` 配置）。
+
+#### Homebrew — 作为后台服务运行
+
+```bash
+brew services start cliproxyapi   # 启动
+brew services stop cliproxyapi    # 停止
+brew services restart cliproxyapi # 重启
+```
+
+### 5. 打开管理界面
+
+服务器运行后，在浏览器中打开 **[http://localhost:8317/management.html](http://localhost:8317/management.html)**。
+
+- **服务器地址**：`http://localhost:8317`
+- **密码**：您在第 2 步中设置的 `secret-key` 值（或 `MANAGEMENT_PASSWORD` 环境变量的值）
+
+> 如果您在第 2 步跳过了 a) 项，`secret-key` 为空，则管理 API 处于禁用状态。
+> 请设置非空的 `secret-key` 后重启服务器。
+
+---
+
+完整用户手册请参见：[https://help.router-for.me/cn/](https://help.router-for.me/cn/)
 
 ## 管理 API 文档
 
