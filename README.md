@@ -85,7 +85,8 @@ cliproxyapi -help                 # verify it works
 **Option C — Docker**
 
 First, ensure you are in a directory that contains this repository’s `docker-compose.yml`
-(for example, by cloning this repository and `cd`-ing into its directory). Then run:
+(for example, by cloning this repository and `cd`-ing into its directory). Complete
+**step 2** (configuration) before running:
 
 ```bash
 docker compose up -d              # uses docker-compose.yml in this repo
@@ -115,6 +116,10 @@ You can also set this via environment variable instead of editing the file:
 ```bash
 export MANAGEMENT_PASSWORD="choose-a-strong-password"
 ```
+
+> **Note:** `export` applies to the current shell session only. When running via
+> `brew services` or Docker, set `secret-key` in `config.yaml` instead (or configure
+> the variable in the service/container environment).
 
 **b) Set proxy client API keys** (optional — remove the placeholder lines or set real values):
 
@@ -180,6 +185,11 @@ Pass `-config /path/to/config.yaml` if your config file is not in the current di
 ```
 
 The server listens on port **8317** by default (set by `port:` in `config.yaml`).
+
+> **Homebrew users running directly** (not as a service):
+> ```bash
+> cliproxyapi -config "$(brew --prefix)/etc/cliproxyapi.conf"
+> ```
 
 #### Homebrew — run as a background service
 

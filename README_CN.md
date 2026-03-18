@@ -113,6 +113,8 @@ remote-management:
 export MANAGEMENT_PASSWORD="设置一个强密码"
 ```
 
+> **注意：** `export` 仅对当前 shell 会话生效。通过 `brew services` 或 Docker 运行时，请直接在 `config.yaml` 中设置 `secret-key`（或在服务/容器的环境变量中配置）。
+
 **b) 设置代理客户端 API 密钥**（可选 — 删除占位行或填入真实值）：
 
 ```yaml
@@ -133,7 +135,12 @@ Brew 会将配置文件存放在系统路径。要使用您刚刚创建的 `conf
 
 2. 在 Homebrew 配置目录中创建软链接：
 
-   
+   ```bash
+   # Homebrew 的安装前缀通常是 /opt/homebrew (Apple Silicon) 或 /usr/local (Intel)，
+   # 使用 `brew --prefix` 自动处理两种情况：
+   ln -sf ~/.cli-proxy-api/config.yaml "$(brew --prefix)/etc/cliproxyapi.conf"
+   ```
+
 
 ### 3. 登录 AI 提供商（OAuth）
 
@@ -178,6 +185,11 @@ Brew 会将配置文件存放在系统路径。要使用您刚刚创建的 `conf
 ```
 
 服务器默认监听 **8317** 端口（由 `config.yaml` 中的 `port:` 配置）。
+
+> **Homebrew 用户直接运行**（不作为后台服务）：
+> ```bash
+> cliproxyapi -config "$(brew --prefix)/etc/cliproxyapi.conf"
+> ```
 
 #### Homebrew — 作为后台服务运行
 
