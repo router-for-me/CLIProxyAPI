@@ -84,9 +84,9 @@ cliproxyapi -help                 # 验证是否正常运行
 
 **方式 C — Docker**
 
+确保当前目录下已存在本仓库提供的 `docker-compose.yml` 文件（例如，`git clone` 本仓库后在其根目录中）。完成**第 2 步**（配置）后，再运行：
+
 ```bash
-# 确保当前目录下已存在本仓库提供的 docker-compose.yml 文件，
-# 通常为先 git clone 本仓库后在其根目录中执行以下命令：
 docker compose up -d
 ```
 
