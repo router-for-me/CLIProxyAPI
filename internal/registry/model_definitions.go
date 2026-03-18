@@ -88,6 +88,87 @@ func GetAntigravityModels() []*ModelInfo {
 	return cloneModelInfos(getModels().Antigravity)
 }
 
+// GetCodeBuddyModels returns the available models for CodeBuddy (Tencent).
+// These models are served through the copilot.tencent.com API.
+func GetCodeBuddyModels() []*ModelInfo {
+	now := int64(1748044800) // 2025-05-24
+	return []*ModelInfo{
+		{
+			ID:                  "glm-5.0",
+			Object:              "model",
+			Created:             now,
+			OwnedBy:             "tencent",
+			Type:                "codebuddy",
+			DisplayName:         "GLM-5.0",
+			Description:         "GLM-5.0 via CodeBuddy",
+			ContextLength:       128000,
+			MaxCompletionTokens: 32768,
+			SupportedEndpoints:  []string{"/chat/completions"},
+		},
+		{
+			ID:                  "glm-4.7",
+			Object:              "model",
+			Created:             now,
+			OwnedBy:             "tencent",
+			Type:                "codebuddy",
+			DisplayName:         "GLM-4.7",
+			Description:         "GLM-4.7 via CodeBuddy",
+			ContextLength:       128000,
+			MaxCompletionTokens: 32768,
+			SupportedEndpoints:  []string{"/chat/completions"},
+		},
+		{
+			ID:                  "minimax-m2.5",
+			Object:              "model",
+			Created:             now,
+			OwnedBy:             "tencent",
+			Type:                "codebuddy",
+			DisplayName:         "MiniMax M2.5",
+			Description:         "MiniMax M2.5 via CodeBuddy",
+			ContextLength:       200000,
+			MaxCompletionTokens: 32768,
+			SupportedEndpoints:  []string{"/chat/completions"},
+		},
+		{
+			ID:                  "kimi-k2.5",
+			Object:              "model",
+			Created:             now,
+			OwnedBy:             "tencent",
+			Type:                "codebuddy",
+			DisplayName:         "Kimi K2.5",
+			Description:         "Kimi K2.5 via CodeBuddy",
+			ContextLength:       128000,
+			MaxCompletionTokens: 32768,
+			SupportedEndpoints:  []string{"/chat/completions"},
+		},
+		{
+			ID:                  "deepseek-v3-2-volc",
+			Object:              "model",
+			Created:             now,
+			OwnedBy:             "tencent",
+			Type:                "codebuddy",
+			DisplayName:         "DeepSeek V3.2 (Volc)",
+			Description:         "DeepSeek V3.2 via CodeBuddy (Volcano Engine)",
+			ContextLength:       128000,
+			MaxCompletionTokens: 32768,
+			SupportedEndpoints:  []string{"/chat/completions"},
+		},
+		{
+			ID:                  "hunyuan-2.0-thinking",
+			Object:              "model",
+			Created:             now,
+			OwnedBy:             "tencent",
+			Type:                "codebuddy",
+			DisplayName:         "Hunyuan 2.0 Thinking",
+			Description:         "Tencent Hunyuan 2.0 Thinking via CodeBuddy",
+			ContextLength:       128000,
+			MaxCompletionTokens: 32768,
+			Thinking:            &ThinkingSupport{ZeroAllowed: true},
+			SupportedEndpoints:  []string{"/chat/completions"},
+		},
+	}
+}
+
 // cloneModelInfos returns a shallow copy of the slice with each element deep-cloned.
 func cloneModelInfos(models []*ModelInfo) []*ModelInfo {
 	if len(models) == 0 {
@@ -148,6 +229,8 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetAmazonQModels()
 	case "antigravity":
 		return GetAntigravityModels()
+	case "codebuddy":
+		return GetCodeBuddyModels()
 	default:
 		return nil
 	}
@@ -176,6 +259,7 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		GetKiroModels(),
 		GetKiloModels(),
 		GetAmazonQModels(),
+		GetCodeBuddyModels(),
 	}
 	for _, models := range allModels {
 		for _, m := range models {

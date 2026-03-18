@@ -443,6 +443,8 @@ func (s *Service) ensureExecutorsForAuthWithMode(a *coreauth.Auth, forceReplace 
 		s.coreManager.RegisterExecutor(executor.NewKiloExecutor(s.cfg))
 	case "github-copilot":
 		s.coreManager.RegisterExecutor(executor.NewGitHubCopilotExecutor(s.cfg))
+	case "codebuddy":
+		s.coreManager.RegisterExecutor(executor.NewCodeBuddyExecutor(s.cfg))
 	case "gitlab":
 		s.coreManager.RegisterExecutor(executor.NewGitLabExecutor(s.cfg))
 	default:
@@ -953,6 +955,9 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		models = applyExcludedModels(models, excluded)
 	case "gitlab":
 		models = executor.GitLabModelsFromAuth(a)
+		models = applyExcludedModels(models, excluded)
+	case "codebuddy":
+		models = registry.GetCodeBuddyModels()
 		models = applyExcludedModels(models, excluded)
 	default:
 		// Handle OpenAI-compatibility providers by name using config
