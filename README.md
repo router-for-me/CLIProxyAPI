@@ -171,8 +171,7 @@ Run the login command **once** for each provider you want to use. Tokens are sav
 Pass `-config /path/to/config.yaml` if your config file is not in the current directory.
 
 > **Homebrew users:** replace `./cli-proxy-api` with `cliproxyapi` in the commands above,
-> and add `-config /opt/homebrew/etc/cliproxyapi.conf` (Apple Silicon) or
-> `-config /usr/local/etc/cliproxyapi.conf` (Intel) if needed.
+> and add `-config "$(brew --prefix)/etc/cliproxyapi.conf"` if needed.
 
 ### 4. Start the Server
 
