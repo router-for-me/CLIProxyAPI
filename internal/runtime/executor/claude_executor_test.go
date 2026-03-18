@@ -216,6 +216,38 @@ func TestApplyClaudeHeaders_DisableDeviceProfileStabilization(t *testing.T) {
 	assertClaudeFingerprint(t, lowerReq.Header, "claude-cli/2.1.61 (external, cli)", "0.73.0", "v24.2.0", "Windows", "x64")
 }
 
+func TestApplyClaudeHeaders_LegacyModePreservesConfiguredUserAgentOverrideForClaudeClients(t *testing.T) {
+	resetClaudeDeviceProfileCache()
+
+	stabilize := false
+	cfg := &config.Config{
+		ClaudeHeaderDefaults: config.ClaudeHeaderDefaults{
+			UserAgent:              "claude-cli/2.1.60 (external, cli)",
+			PackageVersion:         "0.70.0",
+			RuntimeVersion:         "v22.0.0",
+			StabilizeDeviceProfile: &stabilize,
+		},
+	}
+	auth := &cliproxyauth.Auth{
+		ID: "auth-legacy-ua-override",
+		Attributes: map[string]string{
+			"api_key":           "key-legacy-ua-override",
+			"header:User-Agent": "config-ua/1.0",
+		},
+	}
+
+	req := newClaudeHeaderTestRequest(t, http.Header{
+		"User-Agent":                  []string{"claude-cli/2.1.62 (external, cli)"},
+		"X-Stainless-Package-Version": []string{"0.74.0"},
+		"X-Stainless-Runtime-Version": []string{"v24.3.0"},
+		"X-Stainless-Os":              []string{"Linux"},
+		"X-Stainless-Arch":            []string{"x64"},
+	})
+	applyClaudeHeaders(req, auth, "key-legacy-ua-override", false, nil, cfg)
+
+	assertClaudeFingerprint(t, req.Header, "config-ua/1.0", "0.74.0", "v24.3.0", "Linux", "x64")
+}
+
 func TestApplyClaudeHeaders_LegacyModeFallsBackToRuntimeOSArchWhenMissing(t *testing.T) {
 	resetClaudeDeviceProfileCache()
 
