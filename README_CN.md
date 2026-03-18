@@ -85,7 +85,9 @@ cliproxyapi -help                 # 验证是否正常运行
 **方式 C — Docker**
 
 ```bash
-docker compose up -d              # 使用本仓库中的 docker-compose.yml
+# 确保当前目录下已存在本仓库提供的 docker-compose.yml 文件，
+# 通常为先 git clone 本仓库后在其根目录中执行以下命令：
+docker compose up -d
 ```
 
 ### 2. 创建配置文件
@@ -120,8 +122,32 @@ api-keys:
 
 #### Homebrew 用户注意事项
 
-Brew 会将配置文件存放在系统路径。要使用您刚刚创建的 `config.yaml`，请先将其移动到 `~/.cli-proxy-api/` 目录，然后创建软链接：
+Brew 会将配置文件存放在系统路径。要使用您刚刚创建的 `config.yaml`，请先将其移动到 `~/.cli-proxy-api/` 目录并命名为 `config.yaml`，然后根据架构在 Homebrew 的配置目录中创建软链接：
 
+1. 创建本地配置目录并移动配置文件：
+
+   ```bash
+   mkdir -p ~/.cli-proxy-api
+   mv ./config.yaml ~/.cli-proxy-api/config.yaml
+   ```
+
+2. 在 Homebrew 配置目录中创建软链接（两种架构二选一）：
+
+   - **Apple Silicon (M1/M2/M3 等，默认前缀 `/opt/homebrew`)**
+
+     ```bash
+     mkdir -p /opt/homebrew/etc/cli-proxy-api
+     ln -sf ~/.cli-proxy-api/config.yaml /opt/homebrew/etc/cli-proxy-api/config.yaml
+     ```
+
+   - **Intel Mac（默认前缀 `/usr/local`）**
+
+     ```bash
+     mkdir -p /usr/local/etc/cli-proxy-api
+     ln -sf ~/.cli-proxy-api/config.yaml /usr/local/etc/cli-proxy-api/config.yaml
+     ```
+
+   如果你不确定 Homebrew 安装前缀，可以运行 `brew --prefix` 并将上面命令中的前缀替换为输出值。
 
 ### 3. 登录 AI 提供商（OAuth）
 

@@ -84,6 +84,9 @@ cliproxyapi -help                 # verify it works
 
 **Option C — Docker**
 
+First, ensure you are in a directory that contains this repository’s `docker-compose.yml`
+(for example, by cloning this repository and `cd`-ing into its directory). Then run:
+
 ```bash
 docker compose up -d              # uses docker-compose.yml in this repo
 ```
@@ -124,6 +127,14 @@ api-keys:
 
 Brew places the config at a system path. To use the `config.yaml` you just created, first move it to `~/.cli-proxy-api/` and then create a symlink:
 
+```bash
+mkdir -p ~/.cli-proxy-api
+mv ./config.yaml ~/.cli-proxy-api/config.yaml
+
+# Homebrew prefix is usually /opt/homebrew (Apple Silicon) or /usr/local (Intel),
+# so we use `brew --prefix` to handle both:
+ln -sf ~/.cli-proxy-api/config.yaml "$(brew --prefix)/etc/cli-proxy-api/config.yaml"
+```
 
 ### 3. Log In to an AI Provider (OAuth)
 
