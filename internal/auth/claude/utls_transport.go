@@ -6,6 +6,7 @@ package claude
 import (
 	"bufio"
 	"context"
+	stdtls "crypto/tls"
 	"encoding/base64"
 	"fmt"
 	"net"
@@ -160,6 +161,27 @@ func dialViaHTTPConnect(ctx context.Context, proxyURL *url.URL, targetAddr strin
 	conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", proxyAddr)
 	if err != nil {
 		return nil, fmt.Errorf("dial proxy %s: %w", proxyAddr, err)
+	}
+
+	// HTTPS proxies require a TLS handshake with the proxy itself before
+	// sending the CONNECT request. We use standard crypto/tls here (not utls)
+	// because this is the proxy connection — fingerprint mimicry is only
+	// needed for the final connection to api.anthropic.com.
+	if proxyURL.Scheme == "https" {
+		proxyHost := proxyURL.Hostname()
+		tlsConn := stdtls.Client(conn, &stdtls.Config{ServerName: proxyHost})
+		if err := tlsConn.HandshakeContext(ctx); err != nil {
+			conn.Close()
+			return nil, fmt.Errorf("TLS to proxy %s: %w", proxyAddr, err)
+		}
+		conn = tlsConn
+	}
+
+	// Propagate context deadline to the CONNECT handshake so it cannot hang
+	// indefinitely if the proxy accepts TCP but never responds.
+	if deadline, ok := ctx.Deadline(); ok {
+		conn.SetDeadline(deadline)
+		defer conn.SetDeadline(time.Time{})
 	}
 
 	// Send CONNECT request.
