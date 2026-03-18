@@ -124,10 +124,16 @@ api-keys:
 
 #### Homebrew 用户注意事项
 
-Brew 会将配置文件存放在系统路径。要使用您刚刚创建的 `config.yaml`，请先将其移动到 `~/.cli-proxy-api/` 目录并命名为 `config.yaml`，然后根据架构在 Homebrew 的配置目录中创建软链接：
+Brew 会将配置文件存放在系统路径。要使用您刚刚创建的 `config.yaml`，请先将其移动到 `~/.cli-proxy-api/` 目录，然后创建软链接：
 
-   
+```bash
+mkdir -p ~/.cli-proxy-api
+mv ./config.yaml ~/.cli-proxy-api/config.yaml
 
+# Homebrew 的安装前缀通常是 /opt/homebrew (Apple Silicon) 或 /usr/local (Intel)，
+# 使用 `brew --prefix` 自动处理两种情况：
+ln -sf ~/.cli-proxy-api/config.yaml "$(brew --prefix)/etc/cliproxyapi.conf"
+```
 
 ### 3. 登录 AI 提供商（OAuth）
 
