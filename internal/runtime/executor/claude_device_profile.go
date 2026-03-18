@@ -31,6 +31,8 @@ var (
 	claudeDeviceProfileCache            = make(map[string]claudeDeviceProfileCacheEntry)
 	claudeDeviceProfileCacheMu          sync.RWMutex
 	claudeDeviceProfileCacheCleanupOnce sync.Once
+
+	claudeDeviceProfileBeforeCandidateStore func(claudeDeviceProfile)
 )
 
 type claudeCLIVersion struct {
@@ -257,13 +259,25 @@ func resolveClaudeDeviceProfile(auth *cliproxyauth.Auth, apiKey string, headers 
 	cachedValid := hasCached && entry.expire.After(now) && entry.profile.UserAgent != ""
 	claudeDeviceProfileCacheMu.RUnlock()
 
-	if hasCandidate && (!cachedValid || shouldUpgradeClaudeDeviceProfile(candidate, entry.profile)) {
-		newEntry := claudeDeviceProfileCacheEntry{
+	if hasCandidate {
+		if claudeDeviceProfileBeforeCandidateStore != nil {
+			claudeDeviceProfileBeforeCandidateStore(candidate)
+		}
+
+		claudeDeviceProfileCacheMu.Lock()
+		entry, hasCached = claudeDeviceProfileCache[cacheKey]
+		cachedValid = hasCached && entry.expire.After(now) && entry.profile.UserAgent != ""
+		if cachedValid && !shouldUpgradeClaudeDeviceProfile(candidate, entry.profile) {
+			entry.expire = now.Add(claudeDeviceProfileTTL)
+			claudeDeviceProfileCache[cacheKey] = entry
+			claudeDeviceProfileCacheMu.Unlock()
+			return entry.profile
+		}
+
+		claudeDeviceProfileCache[cacheKey] = claudeDeviceProfileCacheEntry{
 			profile: candidate,
 			expire:  now.Add(claudeDeviceProfileTTL),
 		}
-		claudeDeviceProfileCacheMu.Lock()
-		claudeDeviceProfileCache[cacheKey] = newEntry
 		claudeDeviceProfileCacheMu.Unlock()
 		return candidate
 	}
