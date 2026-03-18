@@ -104,7 +104,7 @@ cp config.example.yaml config.yaml
 
 ```yaml
 remote-management:
-  secret-key: "设置一个强密码"
+  secret-key: "设置一个强密码"  # 使用强密码且独一无二（建议由密码管理器生成）
 ```
 
 也可以通过环境变量来代替修改配置文件：
@@ -162,6 +162,9 @@ ln -sf ~/.cli-proxy-api/config.yaml "$(brew --prefix)/etc/cliproxyapi.conf"
 ```
 
 如果配置文件不在当前目录，请加上 `-config /path/to/config.yaml`。
+
+> **Docker 用户：** 以上登录命令在宿主机上运行（不在容器内）。Token 保存在 `~/.cli-proxy-api/`，
+> 由 `docker-compose.yml` 挂载到容器中。在启动容器前在宿主机运行这些命令，或在容器内使用 `docker compose exec cliproxyapi -login`。
 
 > **Homebrew 用户：** 将上述命令中的 `./cli-proxy-api` 替换为 `cliproxyapi`，
 > 如有需要可加上 `-config "$(brew --prefix)/etc/cliproxyapi.conf"`。
