@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"sync"
 	"time"
 
 	tls "github.com/refraction-networking/utls"
@@ -53,8 +54,12 @@ func newUtlsRoundTripper(proxyURL string) *utlsRoundTripper {
 	}
 
 	rt.transport = &http.Transport{
-		DialTLSContext:    rt.dialTLS,
-		ForceAttemptHTTP2: false,
+		DialTLSContext:        rt.dialTLS,
+		ForceAttemptHTTP2:     false,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   10,
+		IdleConnTimeout:       90 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
 	}
 	return rt
 }
@@ -245,13 +250,28 @@ func (t *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 	return t.transport.RoundTrip(req)
 }
 
-// NewAnthropicHttpClient creates an HTTP client that uses Bun BoringSSL TLS
+// anthropicClients caches *http.Client instances keyed by proxyURL string.
+// Each unique proxyURL gets a single shared client whose http.Transport maintains
+// its own idle connection pool — this avoids a full TLS handshake per request.
+// The number of unique proxy URLs is typically very small (1-3), so entries are
+// never evicted.
+var anthropicClients sync.Map // map[string]*http.Client
+
+// NewAnthropicHttpClient returns a cached HTTP client that uses Bun BoringSSL TLS
 // fingerprint for all connections, matching real Claude Code CLI behavior.
+//
+// Clients are cached per proxyURL so that the underlying http.Transport connection
+// pool is reused across requests with the same proxy configuration.
 //
 // The proxyURL parameter is the pre-resolved proxy URL (e.g. from ResolveProxyURL).
 // Pass an empty string to inherit proxy from environment variables.
 func NewAnthropicHttpClient(proxyURL string) *http.Client {
-	return &http.Client{
+	if cached, ok := anthropicClients.Load(proxyURL); ok {
+		return cached.(*http.Client)
+	}
+	client := &http.Client{
 		Transport: newUtlsRoundTripper(proxyURL),
 	}
+	actual, _ := anthropicClients.LoadOrStore(proxyURL, client)
+	return actual.(*http.Client)
 }

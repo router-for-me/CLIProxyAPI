@@ -31,11 +31,18 @@ func ResolveProxyURL(cfg *config.Config, auth *cliproxyauth.Auth) string {
 	return ""
 }
 
-// newClaudeHTTPClient creates an HTTP client for Anthropic API requests using
-// utls with Bun BoringSSL TLS fingerprint. This ensures API requests and OAuth
-// token refresh share the same TLS characteristics, matching real Claude Code CLI.
+// newClaudeHTTPClient returns an HTTP client for Anthropic API requests using
+// utls with Bun BoringSSL TLS fingerprint. The client is cached per proxy URL,
+// so the underlying http.Transport connection pool is reused across requests.
 //
 // Proxy priority: auth.ProxyURL > cfg.ProxyURL > env (HTTPS_PROXY etc.) > direct.
+//
+// NOTE: This function intentionally does NOT accept a context or honor the
+// "cliproxy.roundtripper" context value. An injected RoundTripper would replace
+// the entire TLS layer, breaking the Bun BoringSSL fingerprint that this PR
+// unifies. SDK embedders requiring custom transport for Claude should configure
+// proxy-url instead. For non-Claude providers, newProxyAwareHTTPClient continues
+// to honor context RoundTrippers.
 func newClaudeHTTPClient(cfg *config.Config, auth *cliproxyauth.Auth) *http.Client {
 	proxyURL := ResolveProxyURL(cfg, auth)
 	return claudeauth.NewAnthropicHttpClient(proxyURL)
