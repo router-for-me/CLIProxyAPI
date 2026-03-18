@@ -6,16 +6,48 @@ import (
 	"strings"
 	"time"
 
+	claudeauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/claude"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
 )
 
+// ResolveProxyURL returns the effective proxy URL following the standard priority:
+//  1. auth.ProxyURL (per-account override)
+//  2. cfg.ProxyURL  (global config)
+//  3. "" (empty — caller decides fallback behavior)
+func ResolveProxyURL(cfg *config.Config, auth *cliproxyauth.Auth) string {
+	if auth != nil {
+		if u := strings.TrimSpace(auth.ProxyURL); u != "" {
+			return u
+		}
+	}
+	if cfg != nil {
+		if u := strings.TrimSpace(cfg.ProxyURL); u != "" {
+			return u
+		}
+	}
+	return ""
+}
+
+// newClaudeHTTPClient creates an HTTP client for Anthropic API requests using
+// utls with Bun BoringSSL TLS fingerprint. This ensures API requests and OAuth
+// token refresh share the same TLS characteristics, matching real Claude Code CLI.
+//
+// Proxy priority: auth.ProxyURL > cfg.ProxyURL > "" (direct).
+func newClaudeHTTPClient(cfg *config.Config, auth *cliproxyauth.Auth) *http.Client {
+	proxyURL := ResolveProxyURL(cfg, auth)
+	return claudeauth.NewAnthropicHttpClient(proxyURL)
+}
+
 // newProxyAwareHTTPClient creates an HTTP client with proper proxy configuration priority:
 // 1. Use auth.ProxyURL if configured (highest priority)
 // 2. Use cfg.ProxyURL if auth proxy is not configured
 // 3. Use RoundTripper from context if neither are configured
+//
+// NOTE: This function uses standard Go TLS. For Anthropic/Claude API requests,
+// use newClaudeHTTPClient() instead, which uses Bun BoringSSL TLS fingerprint.
 //
 // Parameters:
 //   - ctx: The context containing optional RoundTripper
@@ -31,16 +63,7 @@ func newProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 		httpClient.Timeout = timeout
 	}
 
-	// Priority 1: Use auth.ProxyURL if configured
-	var proxyURL string
-	if auth != nil {
-		proxyURL = strings.TrimSpace(auth.ProxyURL)
-	}
-
-	// Priority 2: Use cfg.ProxyURL if auth proxy is not configured
-	if proxyURL == "" && cfg != nil {
-		proxyURL = strings.TrimSpace(cfg.ProxyURL)
-	}
+	proxyURL := ResolveProxyURL(cfg, auth)
 
 	// If we have a proxy URL configured, set up the transport
 	if proxyURL != "" {

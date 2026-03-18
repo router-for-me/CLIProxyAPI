@@ -1,162 +1,98 @@
 // Package claude provides authentication functionality for Anthropic's Claude API.
-// This file implements a custom HTTP transport using utls to bypass TLS fingerprinting.
+// This file implements a custom HTTP transport using utls to mimic Bun's BoringSSL
+// TLS fingerprint, matching the real Claude Code CLI.
 package claude
 
 import (
+	"context"
+	"fmt"
+	"net"
 	"net/http"
-	"strings"
-	"sync"
 
 	tls "github.com/refraction-networking/utls"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
-	"golang.org/x/net/http2"
 	"golang.org/x/net/proxy"
 )
 
-// utlsRoundTripper implements http.RoundTripper using utls with Chrome fingerprint
-// to bypass Cloudflare's TLS fingerprinting on Anthropic domains.
+// utlsRoundTripper implements http.RoundTripper using utls with Bun BoringSSL
+// fingerprint to match the real Claude Code CLI's TLS characteristics.
+//
+// It uses HTTP/1.1 (Bun's ALPN only offers http/1.1) and delegates connection
+// pooling to the standard http.Transport.
 type utlsRoundTripper struct {
-	// mu protects the connections map and pending map
-	mu sync.Mutex
-	// connections caches HTTP/2 client connections per host
-	connections map[string]*http2.ClientConn
-	// pending tracks hosts that are currently being connected to (prevents race condition)
-	pending map[string]*sync.Cond
-	// dialer is used to create network connections, supporting proxies
-	dialer proxy.Dialer
+	transport *http.Transport
+	dialer    proxy.Dialer
 }
 
-// newUtlsRoundTripper creates a new utls-based round tripper with optional proxy support
-func newUtlsRoundTripper(cfg *config.SDKConfig) *utlsRoundTripper {
+// newUtlsRoundTripper creates a new utls-based round tripper with optional proxy support.
+// The proxyURL parameter is the pre-resolved proxy URL string; an empty string means
+// no proxy (direct connection).
+func newUtlsRoundTripper(proxyURL string) *utlsRoundTripper {
 	var dialer proxy.Dialer = proxy.Direct
-	if cfg != nil {
-		proxyDialer, mode, errBuild := proxyutil.BuildDialer(cfg.ProxyURL)
+	if proxyURL != "" {
+		proxyDialer, mode, errBuild := proxyutil.BuildDialer(proxyURL)
 		if errBuild != nil {
-			log.Errorf("failed to configure proxy dialer for %q: %v", cfg.ProxyURL, errBuild)
+			log.Errorf("failed to configure proxy dialer for %q: %v", proxyURL, errBuild)
 		} else if mode != proxyutil.ModeInherit && proxyDialer != nil {
 			dialer = proxyDialer
 		}
 	}
 
-	return &utlsRoundTripper{
-		connections: make(map[string]*http2.ClientConn),
-		pending:     make(map[string]*sync.Cond),
-		dialer:      dialer,
+	rt := &utlsRoundTripper{dialer: dialer}
+	rt.transport = &http.Transport{
+		// Inject our custom TLS dial function so every connection uses
+		// the Bun BoringSSL fingerprint via utls.
+		DialTLSContext: rt.dialTLS,
+		// Force HTTP/1.1 — do not attempt h2 upgrade.
+		ForceAttemptHTTP2: false,
 	}
+	return rt
 }
 
-// getOrCreateConnection gets an existing connection or creates a new one.
-// It uses a per-host locking mechanism to prevent multiple goroutines from
-// creating connections to the same host simultaneously.
-func (t *utlsRoundTripper) getOrCreateConnection(host, addr string) (*http2.ClientConn, error) {
-	t.mu.Lock()
-
-	// Check if connection exists and is usable
-	if h2Conn, ok := t.connections[host]; ok && h2Conn.CanTakeNewRequest() {
-		t.mu.Unlock()
-		return h2Conn, nil
-	}
-
-	// Check if another goroutine is already creating a connection
-	if cond, ok := t.pending[host]; ok {
-		// Wait for the other goroutine to finish
-		cond.Wait()
-		// Check if connection is now available
-		if h2Conn, ok := t.connections[host]; ok && h2Conn.CanTakeNewRequest() {
-			t.mu.Unlock()
-			return h2Conn, nil
-		}
-		// Connection still not available, we'll create one
-	}
-
-	// Mark this host as pending
-	cond := sync.NewCond(&t.mu)
-	t.pending[host] = cond
-	t.mu.Unlock()
-
-	// Create connection outside the lock
-	h2Conn, err := t.createConnection(host, addr)
-
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	// Remove pending marker and wake up waiting goroutines
-	delete(t.pending, host)
-	cond.Broadcast()
-
+// dialTLS establishes a TLS connection using utls with the Bun BoringSSL spec.
+// This is called by http.Transport for every new TLS connection.
+func (t *utlsRoundTripper) dialTLS(ctx context.Context, network, addr string) (net.Conn, error) {
+	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
-		return nil, err
+		// addr might not have a port; use as-is for ServerName
+		host = addr
 	}
 
-	// Store the new connection
-	t.connections[host] = h2Conn
-	return h2Conn, nil
-}
-
-// createConnection creates a new HTTP/2 connection with Chrome TLS fingerprint.
-// Chrome's TLS fingerprint is closer to Node.js/OpenSSL (which real Claude Code uses)
-// than Firefox, reducing the mismatch between TLS layer and HTTP headers.
-func (t *utlsRoundTripper) createConnection(host, addr string) (*http2.ClientConn, error) {
 	conn, err := t.dialer.Dial("tcp", addr)
 	if err != nil {
 		return nil, err
 	}
 
 	tlsConfig := &tls.Config{ServerName: host}
-	tlsConn := tls.UClient(conn, tlsConfig, tls.HelloChrome_Auto)
+	tlsConn := tls.UClient(conn, tlsConfig, tls.HelloCustom)
+	if err := tlsConn.ApplyPreset(BunBoringSSLSpec()); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("apply Bun TLS spec: %w", err)
+	}
 
 	if err := tlsConn.Handshake(); err != nil {
 		conn.Close()
 		return nil, err
 	}
 
-	tr := &http2.Transport{}
-	h2Conn, err := tr.NewClientConn(tlsConn)
-	if err != nil {
-		tlsConn.Close()
-		return nil, err
-	}
-
-	return h2Conn, nil
+	return tlsConn, nil
 }
 
-// RoundTrip implements http.RoundTripper
+// RoundTrip implements http.RoundTripper by delegating to the underlying
+// http.Transport which uses our custom TLS dial function.
 func (t *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-	host := req.URL.Host
-	addr := host
-	if !strings.Contains(addr, ":") {
-		addr += ":443"
-	}
-
-	// Get hostname without port for TLS ServerName
-	hostname := req.URL.Hostname()
-
-	h2Conn, err := t.getOrCreateConnection(hostname, addr)
-	if err != nil {
-		return nil, err
-	}
-
-	resp, err := h2Conn.RoundTrip(req)
-	if err != nil {
-		// Connection failed, remove it from cache
-		t.mu.Lock()
-		if cached, ok := t.connections[hostname]; ok && cached == h2Conn {
-			delete(t.connections, hostname)
-		}
-		t.mu.Unlock()
-		return nil, err
-	}
-
-	return resp, nil
+	return t.transport.RoundTrip(req)
 }
 
-// NewAnthropicHttpClient creates an HTTP client that bypasses TLS fingerprinting
-// for Anthropic domains by using utls with Chrome fingerprint.
-// It accepts optional SDK configuration for proxy settings.
-func NewAnthropicHttpClient(cfg *config.SDKConfig) *http.Client {
+// NewAnthropicHttpClient creates an HTTP client that uses Bun BoringSSL TLS
+// fingerprint for all connections, matching real Claude Code CLI behavior.
+//
+// The proxyURL parameter is the pre-resolved proxy URL (e.g. from ResolveProxyURL).
+// Pass an empty string for direct connections.
+func NewAnthropicHttpClient(proxyURL string) *http.Client {
 	return &http.Client{
-		Transport: newUtlsRoundTripper(cfg),
+		Transport: newUtlsRoundTripper(proxyURL),
 	}
 }
+
