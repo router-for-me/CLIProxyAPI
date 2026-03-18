@@ -855,8 +855,8 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 		r.Header.Set("Accept", "application/json")
 		r.Header.Set("Accept-Encoding", "gzip, deflate, br, zstd")
 	}
-	// Keep OS/Arch mapping dynamic (not configurable).
-	// They intentionally continue to derive from runtime.GOOS/runtime.GOARCH.
+	// Legacy mode keeps OS/Arch runtime-derived; stabilized mode may pin
+	// the full device profile from the cached or configured baseline.
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes

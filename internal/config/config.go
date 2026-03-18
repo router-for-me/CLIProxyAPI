@@ -131,8 +131,10 @@ type Config struct {
 	legacyMigrationPending bool `yaml:"-" json:"-"`
 }
 
-// ClaudeHeaderDefaults configures default header values injected into Claude API requests
-// when the client does not send them. Update these when Claude Code releases a new version.
+// ClaudeHeaderDefaults configures default header values injected into Claude API requests.
+// In legacy mode, UserAgent/PackageVersion/RuntimeVersion/Timeout act as fallbacks when
+// the client omits them, while OS/Arch remain runtime-derived. When stabilized device
+// profiles are enabled, all of these values seed the baseline pinned fingerprint.
 type ClaudeHeaderDefaults struct {
 	UserAgent              string `yaml:"user-agent" json:"user-agent"`
 	PackageVersion         string `yaml:"package-version" json:"package-version"`

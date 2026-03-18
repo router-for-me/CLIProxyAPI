@@ -216,6 +216,62 @@ func TestApplyClaudeHeaders_DisableDeviceProfileStabilization(t *testing.T) {
 	assertClaudeFingerprint(t, lowerReq.Header, "claude-cli/2.1.61 (external, cli)", "0.73.0", "v24.2.0", "Windows", "x64")
 }
 
+func TestApplyClaudeHeaders_LegacyModeFallsBackToRuntimeOSArchWhenMissing(t *testing.T) {
+	resetClaudeDeviceProfileCache()
+
+	stabilize := false
+	cfg := &config.Config{
+		ClaudeHeaderDefaults: config.ClaudeHeaderDefaults{
+			UserAgent:              "claude-cli/2.1.60 (external, cli)",
+			PackageVersion:         "0.70.0",
+			RuntimeVersion:         "v22.0.0",
+			OS:                     "MacOS",
+			Arch:                   "arm64",
+			StabilizeDeviceProfile: &stabilize,
+		},
+	}
+	auth := &cliproxyauth.Auth{
+		ID: "auth-legacy-runtime-os-arch",
+		Attributes: map[string]string{
+			"api_key": "key-legacy-runtime-os-arch",
+		},
+	}
+
+	req := newClaudeHeaderTestRequest(t, http.Header{
+		"User-Agent": []string{"curl/8.7.1"},
+	})
+	applyClaudeHeaders(req, auth, "key-legacy-runtime-os-arch", false, nil, cfg)
+
+	assertClaudeFingerprint(t, req.Header, "claude-cli/2.1.60 (external, cli)", "0.70.0", "v22.0.0", mapStainlessOS(), mapStainlessArch())
+}
+
+func TestApplyClaudeHeaders_UnsetStabilizationAlsoUsesLegacyRuntimeOSArchFallback(t *testing.T) {
+	resetClaudeDeviceProfileCache()
+
+	cfg := &config.Config{
+		ClaudeHeaderDefaults: config.ClaudeHeaderDefaults{
+			UserAgent:      "claude-cli/2.1.60 (external, cli)",
+			PackageVersion: "0.70.0",
+			RuntimeVersion: "v22.0.0",
+			OS:             "MacOS",
+			Arch:           "arm64",
+		},
+	}
+	auth := &cliproxyauth.Auth{
+		ID: "auth-unset-runtime-os-arch",
+		Attributes: map[string]string{
+			"api_key": "key-unset-runtime-os-arch",
+		},
+	}
+
+	req := newClaudeHeaderTestRequest(t, http.Header{
+		"User-Agent": []string{"curl/8.7.1"},
+	})
+	applyClaudeHeaders(req, auth, "key-unset-runtime-os-arch", false, nil, cfg)
+
+	assertClaudeFingerprint(t, req.Header, "claude-cli/2.1.60 (external, cli)", "0.70.0", "v22.0.0", mapStainlessOS(), mapStainlessArch())
+}
+
 func TestClaudeDeviceProfileStabilizationEnabled_DefaultFalse(t *testing.T) {
 	if claudeDeviceProfileStabilizationEnabled(nil) {
 		t.Fatal("expected nil config to default to disabled stabilization")

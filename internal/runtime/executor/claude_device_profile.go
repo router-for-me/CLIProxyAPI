@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"net/http"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -105,6 +106,36 @@ func defaultClaudeDeviceProfile(cfg *config.Config) claudeDeviceProfile {
 		profile.Version = version
 	}
 	return profile
+}
+
+// mapStainlessOS maps runtime.GOOS to Stainless SDK OS names.
+func mapStainlessOS() string {
+	switch runtime.GOOS {
+	case "darwin":
+		return "MacOS"
+	case "windows":
+		return "Windows"
+	case "linux":
+		return "Linux"
+	case "freebsd":
+		return "FreeBSD"
+	default:
+		return "Other::" + runtime.GOOS
+	}
+}
+
+// mapStainlessArch maps runtime.GOARCH to Stainless SDK architecture names.
+func mapStainlessArch() string {
+	switch runtime.GOARCH {
+	case "amd64":
+		return "x64"
+	case "arm64":
+		return "arm64"
+	case "386":
+		return "x86"
+	default:
+		return "other::" + runtime.GOARCH
+	}
 }
 
 func parseClaudeCLIVersion(userAgent string) (claudeCLIVersion, bool) {
@@ -274,8 +305,8 @@ func applyClaudeLegacyDeviceHeaders(r *http.Request, ginHeaders http.Header, cfg
 
 	miscEnsure("X-Stainless-Runtime-Version", profile.RuntimeVersion)
 	miscEnsure("X-Stainless-Package-Version", profile.PackageVersion)
-	miscEnsure("X-Stainless-Os", profile.OS)
-	miscEnsure("X-Stainless-Arch", profile.Arch)
+	miscEnsure("X-Stainless-Os", mapStainlessOS())
+	miscEnsure("X-Stainless-Arch", mapStainlessArch())
 
 	clientUA := ""
 	if ginHeaders != nil {
