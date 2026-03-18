@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"time"
 
 	tls "github.com/refraction-networking/utls"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/proxyutil"
@@ -29,7 +30,9 @@ type utlsRoundTripper struct {
 // The proxyURL parameter is the pre-resolved proxy URL string; an empty string means
 // no proxy (direct connection).
 func newUtlsRoundTripper(proxyURL string) *utlsRoundTripper {
-	var dialer proxy.Dialer = proxy.Direct
+	// Default to environment proxy (HTTPS_PROXY, etc.) so deployments that
+	// rely on env vars without explicit proxy-url config continue to work.
+	var dialer proxy.Dialer = proxy.FromEnvironment()
 	if proxyURL != "" {
 		proxyDialer, mode, errBuild := proxyutil.BuildDialer(proxyURL)
 		if errBuild != nil {
@@ -52,6 +55,7 @@ func newUtlsRoundTripper(proxyURL string) *utlsRoundTripper {
 
 // dialTLS establishes a TLS connection using utls with the Bun BoringSSL spec.
 // This is called by http.Transport for every new TLS connection.
+// It respects context cancellation/deadline for both TCP dial and TLS handshake.
 func (t *utlsRoundTripper) dialTLS(ctx context.Context, network, addr string) (net.Conn, error) {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
@@ -59,9 +63,23 @@ func (t *utlsRoundTripper) dialTLS(ctx context.Context, network, addr string) (n
 		host = addr
 	}
 
-	conn, err := t.dialer.Dial("tcp", addr)
+	// Use ContextDialer if the dialer supports it (respects cancellation/timeout);
+	// otherwise fall back to plain Dial.
+	var conn net.Conn
+	if cd, ok := t.dialer.(proxy.ContextDialer); ok {
+		conn, err = cd.DialContext(ctx, "tcp", addr)
+	} else {
+		conn, err = t.dialer.Dial("tcp", addr)
+	}
 	if err != nil {
 		return nil, err
+	}
+
+	// Propagate context deadline to the TLS handshake so it doesn't hang
+	// indefinitely when the upstream is unreachable.
+	if deadline, ok := ctx.Deadline(); ok {
+		conn.SetDeadline(deadline)
+		defer conn.SetDeadline(time.Time{}) // clear after handshake
 	}
 
 	tlsConfig := &tls.Config{ServerName: host}
