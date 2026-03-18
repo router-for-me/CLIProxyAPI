@@ -98,6 +98,7 @@ func (a *ClaudeAuthenticator) Login(ctx context.Context, cfg *config.Config, opt
 	} else {
 		util.PrintSSHTunnelInstructions(callbackPort)
 		fmt.Printf("Visit the following URL to continue authentication:\n%s\n", authURL)
+		misc.PrintOAuthCallbackPromptHint()
 	}
 
 	fmt.Println("Waiting for Claude authentication callback...")

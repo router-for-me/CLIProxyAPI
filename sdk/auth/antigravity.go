@@ -82,6 +82,7 @@ func (AntigravityAuthenticator) Login(ctx context.Context, cfg *config.Config, o
 	} else {
 		util.PrintSSHTunnelInstructions(port)
 		fmt.Printf("Visit the following URL to continue authentication:\n%s\n", authURL)
+		misc.PrintOAuthCallbackPromptHint()
 	}
 
 	fmt.Println("Waiting for antigravity authentication callback...")

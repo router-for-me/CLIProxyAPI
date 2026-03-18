@@ -288,6 +288,7 @@ func (g *GeminiAuth) getTokenFromWeb(ctx context.Context, config *oauth2.Config,
 	} else {
 		util.PrintSSHTunnelInstructions(callbackPort)
 		fmt.Printf("Please open this URL in your browser:\n\n%s\n", authURL)
+		misc.PrintOAuthCallbackPromptHint()
 	}
 
 	fmt.Println("Waiting for authentication callback...")
