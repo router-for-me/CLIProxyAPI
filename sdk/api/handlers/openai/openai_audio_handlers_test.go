@@ -697,6 +697,87 @@ func TestAudioTranscriptionsResolveAutoToCompatibleAliasModel(t *testing.T) {
 	}
 }
 
+func TestAudioTranscriptionsResolveAutoSkipsUnavailableAuths(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	executor := &audioCaptureExecutor{id: "pool"}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.SetConfig(&internalconfig.Config{
+		OpenAICompatibility: []internalconfig.OpenAICompatibility{{
+			Name: "pool",
+			Models: []internalconfig.OpenAICompatibilityModel{
+				{Name: audioTestModel, Alias: "voice-new"},
+			},
+		}},
+	})
+	manager.RegisterExecutor(executor)
+
+	blockedAuth := &coreauth.Auth{
+		ID:       "blocked-auth",
+		Provider: "pool",
+		Status:   coreauth.StatusDisabled,
+		Attributes: map[string]string{
+			"api_key":      "test-key",
+			"base_url":     "https://api.example.com/v1",
+			"compat_name":  "pool",
+			"provider_key": "pool",
+		},
+	}
+	if _, err := manager.Register(context.Background(), blockedAuth); err != nil {
+		t.Fatalf("register blocked auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(blockedAuth.ID, "pool", []*registry.ModelInfo{{
+		ID:      "voice-new",
+		Created: time.Now().Unix() + 1000,
+	}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(blockedAuth.ID)
+	})
+
+	activeAuth := &coreauth.Auth{
+		ID:       "active-auth",
+		Provider: "pool",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"api_key":      "test-key",
+			"base_url":     "https://api.example.com/v1",
+			"compat_name":  "pool",
+			"provider_key": "pool",
+		},
+	}
+	if _, err := manager.Register(context.Background(), activeAuth); err != nil {
+		t.Fatalf("register active auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(activeAuth.ID, "pool", []*registry.ModelInfo{{
+		ID:      audioTestModel,
+		Created: time.Now().Unix(),
+	}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(activeAuth.ID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	h := NewOpenAIAPIHandler(base)
+	router := gin.New()
+	router.POST("/v1/audio/transcriptions", h.AudioTranscriptions)
+
+	req := newAudioMultipartRequest(t, "/v1/audio/transcriptions", map[string]string{
+		"model": "auto",
+	}, audioTranscriptionFileFieldName, "sample.webm", "", []byte("fake-audio"))
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", resp.Code, http.StatusOK, resp.Body.String())
+	}
+	if executor.lastAuthID != activeAuth.ID {
+		t.Fatalf("last auth id = %q, want %q", executor.lastAuthID, activeAuth.ID)
+	}
+	if got := executor.lastFields["model"]; len(got) != 1 || got[0] != audioTestModel {
+		t.Fatalf("model field = %v, want [%s]", got, audioTestModel)
+	}
+}
+
 func newAudioTestRouter(t *testing.T, executor coreauth.ProviderExecutor, auths ...*coreauth.Auth) *gin.Engine {
 	t.Helper()
 

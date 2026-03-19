@@ -420,3 +420,9 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 	}
 	return false, blockReasonNone, time.Time{}
 }
+
+// IsAuthSelectableForModel reports whether auth is currently eligible for selection for model.
+func IsAuthSelectableForModel(auth *Auth, model string, now time.Time) bool {
+	blocked, _, _ := isAuthBlockedForModel(auth, model, now)
+	return !blocked
+}

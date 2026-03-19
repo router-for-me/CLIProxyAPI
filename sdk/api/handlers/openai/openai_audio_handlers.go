@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
@@ -125,9 +126,11 @@ func (h *OpenAIAPIHandler) AudioTranscriptions(c *gin.Context) {
 	}
 
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
 	upstreamResp, _, errMsg := h.ExecuteHTTPRequestWithAuthManager(cliCtx, audioReq.Model, func(ctx context.Context, auth *coreauth.Auth, upstreamModel string) (*http.Request, error) {
 		return audioReq.BuildHTTPRequest(ctx, auth, upstreamModel)
 	})
+	stopKeepAlive()
 	if errMsg != nil {
 		h.WriteErrorResponse(c, errMsg)
 		cliCancel(errMsg.Error)
@@ -588,6 +591,7 @@ func resolveAutoAudioModelBase(manager *coreauth.Manager) (string, error) {
 
 	reg := registry.GetGlobalRegistry()
 	candidates := make(map[string]int64)
+	now := time.Now()
 
 	for _, auth := range manager.List() {
 		if auth == nil || strings.TrimSpace(auth.ID) == "" {
@@ -603,6 +607,9 @@ func resolveAutoAudioModelBase(manager *coreauth.Manager) (string, error) {
 			}
 			routeModel := strings.TrimSpace(modelInfo.ID)
 			if routeModel == "" {
+				continue
+			}
+			if !coreauth.IsAuthSelectableForModel(auth, routeModel, now) {
 				continue
 			}
 
