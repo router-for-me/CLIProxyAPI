@@ -20,6 +20,10 @@ import (
 )
 
 func newTestServer(t *testing.T) *Server {
+	return newTestServerWithConfig(t, nil)
+}
+
+func newTestServerWithConfig(t *testing.T, mutate func(*proxyconfig.Config)) *Server {
 	t.Helper()
 
 	gin.SetMode(gin.TestMode)
@@ -39,6 +43,9 @@ func newTestServer(t *testing.T) *Server {
 		Debug:                  true,
 		LoggingToFile:          false,
 		UsageStatisticsEnabled: false,
+	}
+	if mutate != nil {
+		mutate(cfg)
 	}
 
 	authManager := auth.NewManager(nil, nil, nil)
@@ -247,7 +254,7 @@ func TestCORSMiddleware_RestrictsOrigins(t *testing.T) {
 			name:            "remote origin is stripped",
 			method:          http.MethodGet,
 			origin:          "https://evil.example",
-			wantStatus:      http.StatusOK,
+			wantStatus:      http.StatusForbidden,
 			wantAllowOrigin: "",
 			wantAllowHeader: "",
 		},
@@ -267,9 +274,6 @@ func TestCORSMiddleware_RestrictsOrigins(t *testing.T) {
 			engine := gin.New()
 			engine.Use(corsMiddleware())
 			engine.Any("/resource", func(c *gin.Context) {
-				c.Header("Access-Control-Allow-Origin", "*")
-				c.Header("Access-Control-Allow-Headers", "*")
-				c.Header("Access-Control-Allow-Methods", "*")
 				c.Status(http.StatusOK)
 			})
 
@@ -459,6 +463,86 @@ func TestProtectedRoutesRateLimitAuthenticationFailures(t *testing.T) {
 
 	if badRespAfterSuccess.Code != http.StatusUnauthorized {
 		t.Fatalf("post-success bad status = %d, want %d; body=%s", badRespAfterSuccess.Code, http.StatusUnauthorized, badRespAfterSuccess.Body.String())
+	}
+}
+
+func TestProtectedRoutesRateLimitAuthenticationFailuresBehindLoopbackProxyWithoutTrust(t *testing.T) {
+	apiAuthFailureLimiter.ResetAll()
+	t.Cleanup(apiAuthFailureLimiter.ResetAll)
+
+	server := newTestServer(t)
+
+	for attempt := 1; attempt < authFailureLimit; attempt++ {
+		req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+		req.RemoteAddr = "127.0.0.1:1234"
+		req.Header.Set("Authorization", "Bearer wrong-key")
+		req.Header.Set("X-Forwarded-For", "198.51.100.30")
+
+		rr := httptest.NewRecorder()
+		server.engine.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d status = %d, want %d; body=%s", attempt, rr.Code, http.StatusUnauthorized, rr.Body.String())
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.RemoteAddr = "127.0.0.1:1234"
+	req.Header.Set("Authorization", "Bearer wrong-key")
+	req.Header.Set("X-Forwarded-For", "198.51.100.30")
+
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("rate limited status = %d, want %d; body=%s", rr.Code, http.StatusTooManyRequests, rr.Body.String())
+	}
+}
+
+func TestProtectedRoutesRateLimitAuthenticationFailuresRespectTrustedProxyClientIP(t *testing.T) {
+	apiAuthFailureLimiter.ResetAll()
+	t.Cleanup(apiAuthFailureLimiter.ResetAll)
+
+	server := newTestServerWithConfig(t, func(cfg *proxyconfig.Config) {
+		cfg.TrustedProxies = []string{"127.0.0.1/32"}
+	})
+
+	for attempt := 1; attempt < authFailureLimit; attempt++ {
+		req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+		req.RemoteAddr = "127.0.0.1:1234"
+		req.Header.Set("Authorization", "Bearer wrong-key")
+		req.Header.Set("X-Forwarded-For", "198.51.100.30")
+
+		rr := httptest.NewRecorder()
+		server.engine.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusUnauthorized {
+			t.Fatalf("client A attempt %d status = %d, want %d; body=%s", attempt, rr.Code, http.StatusUnauthorized, rr.Body.String())
+		}
+	}
+
+	clientBReq := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	clientBReq.RemoteAddr = "127.0.0.1:1234"
+	clientBReq.Header.Set("Authorization", "Bearer wrong-key")
+	clientBReq.Header.Set("X-Forwarded-For", "198.51.100.31")
+
+	clientBResp := httptest.NewRecorder()
+	server.engine.ServeHTTP(clientBResp, clientBReq)
+
+	if clientBResp.Code != http.StatusUnauthorized {
+		t.Fatalf("client B status = %d, want %d; body=%s", clientBResp.Code, http.StatusUnauthorized, clientBResp.Body.String())
+	}
+
+	clientAFinalReq := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	clientAFinalReq.RemoteAddr = "127.0.0.1:1234"
+	clientAFinalReq.Header.Set("Authorization", "Bearer wrong-key")
+	clientAFinalReq.Header.Set("X-Forwarded-For", "198.51.100.30")
+
+	clientAFinalResp := httptest.NewRecorder()
+	server.engine.ServeHTTP(clientAFinalResp, clientAFinalReq)
+
+	if clientAFinalResp.Code != http.StatusTooManyRequests {
+		t.Fatalf("client A rate limited status = %d, want %d; body=%s", clientAFinalResp.Code, http.StatusTooManyRequests, clientAFinalResp.Body.String())
 	}
 }
 

@@ -5,7 +5,6 @@ package management
 import (
 	"crypto/subtle"
 	"fmt"
-	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -17,6 +16,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"golang.org/x/crypto/bcrypt"
@@ -49,6 +49,7 @@ type Handler struct {
 	envSecret           string
 	logDir              string
 	postAuthHook        coreauth.PostAuthHook
+	clientAddrResolver  *util.ClientAddressResolver
 }
 
 // NewHandler creates a new management handler instance.
@@ -66,6 +67,11 @@ func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Man
 		allowRemoteOverride: envSecret != "",
 		envSecret:           envSecret,
 	}
+	if resolver, err := util.NewClientAddressResolver(cfg.TrustedProxies); err != nil {
+		panic(fmt.Errorf("invalid trusted-proxies configuration: %w", err))
+	} else {
+		h.clientAddrResolver = resolver
+	}
 	h.startAttemptCleanup()
 	return h
 }
@@ -80,30 +86,6 @@ func (h *Handler) startAttemptCleanup() {
 			h.purgeStaleAttempts()
 		}
 	}()
-}
-
-func remoteAddrHost(remoteAddr string) string {
-	trimmed := strings.TrimSpace(remoteAddr)
-	if trimmed == "" {
-		return ""
-	}
-	host, _, err := net.SplitHostPort(trimmed)
-	if err == nil {
-		return host
-	}
-	if ip := net.ParseIP(trimmed); ip != nil {
-		return ip.String()
-	}
-	return ""
-}
-
-func isLoopbackRemoteAddr(remoteAddr string) bool {
-	host := remoteAddrHost(remoteAddr)
-	if host == "" {
-		return false
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
 }
 
 // purgeStaleAttempts removes IP entries that have been idle beyond attemptMaxIdleTime
@@ -171,15 +153,15 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 		c.Header("X-CPA-COMMIT", buildinfo.Commit)
 		c.Header("X-CPA-BUILD-DATE", buildinfo.BuildDate)
 
-		peerHost := remoteAddrHost(c.Request.RemoteAddr)
-		clientIP := peerHost
+		clientInfo := h.clientAddrResolver.Resolve(c.Request)
+		clientIP := clientInfo.RateLimitKey()
 		if clientIP == "" {
-			clientIP = strings.TrimSpace(c.Request.RemoteAddr)
+			clientIP = util.RemoteAddrHost(c.Request.RemoteAddr)
 			if clientIP == "" {
 				clientIP = "unknown"
 			}
 		}
-		localClient := isLoopbackRemoteAddr(c.Request.RemoteAddr)
+		localClient := clientInfo.IsLoopbackClient()
 		cfg := h.cfg
 		var (
 			allowRemote bool

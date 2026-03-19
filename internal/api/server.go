@@ -215,6 +215,9 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 
 	// Create gin engine
 	engine := gin.New()
+	if err := engine.SetTrustedProxies(cfg.TrustedProxies); err != nil {
+		panic(fmt.Errorf("invalid trusted-proxies configuration: %w", err))
+	}
 	if optionState.engineConfigurator != nil {
 		optionState.engineConfigurator(engine)
 	}
@@ -290,12 +293,13 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	s.setupRoutes()
 
 	// Register Amp module using V2 interface with Context
-	s.ampModule = ampmodule.NewLegacy(accessManager, AuthMiddleware(accessManager))
+	authMiddleware := AuthMiddleware(accessManager, cfg.TrustedProxies)
+	s.ampModule = ampmodule.NewLegacy(accessManager, authMiddleware)
 	ctx := modules.Context{
 		Engine:         engine,
 		BaseHandler:    s.handlers,
 		Config:         cfg,
-		AuthMiddleware: AuthMiddleware(accessManager),
+		AuthMiddleware: authMiddleware,
 	}
 	if err := modules.RegisterModule(ctx, s.ampModule); err != nil {
 		log.Errorf("Failed to register Amp module: %v", err)
@@ -339,7 +343,7 @@ func (s *Server) setupRoutes() {
 
 	// OpenAI compatible API routes
 	v1 := s.engine.Group("/v1")
-	v1.Use(AuthMiddleware(s.accessManager))
+	v1.Use(AuthMiddleware(s.accessManager, s.cfg.TrustedProxies))
 	{
 		v1.GET("/models", s.unifiedModelsHandler(openaiHandlers, claudeCodeHandlers))
 		v1.POST("/chat/completions", openaiHandlers.ChatCompletions)
@@ -353,7 +357,7 @@ func (s *Server) setupRoutes() {
 
 	// Gemini compatible API routes
 	v1beta := s.engine.Group("/v1beta")
-	v1beta.Use(geminiAPIKeyCompatibilityMiddleware(), AuthMiddleware(s.accessManager))
+	v1beta.Use(geminiAPIKeyCompatibilityMiddleware(), AuthMiddleware(s.accessManager, s.cfg.TrustedProxies))
 	{
 		v1beta.GET("/models", geminiHandlers.GeminiModels)
 		v1beta.POST("/models/*action", geminiHandlers.GeminiHandler)
@@ -420,7 +424,7 @@ func (s *Server) AttachWebsocketRoute(path string, handler http.Handler) {
 	s.wsRoutes[trimmed] = struct{}{}
 	s.wsRouteMu.Unlock()
 
-	authMiddleware := AuthMiddleware(s.accessManager)
+	authMiddleware := AuthMiddleware(s.accessManager, s.cfg.TrustedProxies)
 	conditionalAuth := func(c *gin.Context) {
 		if !s.wsAuthEnabled.Load() {
 			c.Next()
@@ -811,16 +815,15 @@ func corsMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		origin := strings.TrimSpace(c.GetHeader("Origin"))
 		allowed := applyCORSHeaders(c.Writer.Header(), origin)
+		if origin != "" && !allowed {
+			c.AbortWithStatus(http.StatusForbidden)
+			return
+		}
 		if c.Request.Method == http.MethodOptions {
-			if !allowed {
-				c.AbortWithStatus(http.StatusForbidden)
-				return
-			}
 			c.AbortWithStatus(http.StatusNoContent)
 			return
 		}
 		c.Next()
-		applyCORSHeaders(c.Writer.Header(), origin)
 	}
 }
 
@@ -1092,19 +1095,10 @@ func newAuthFailureLimiter(limit int, window, blockWindow time.Duration) *authFa
 }
 
 func (l *authFailureLimiter) key(remoteAddr string) string {
-	host, _, err := net.SplitHostPort(strings.TrimSpace(remoteAddr))
-	if err == nil {
-		ip := net.ParseIP(host)
-		if ip != nil && ip.IsLoopback() {
-			return ""
-		}
+	if host := util.RemoteAddrHost(remoteAddr); host != "" {
 		return host
 	}
-	trimmed := strings.TrimSpace(remoteAddr)
-	if ip := net.ParseIP(trimmed); ip != nil && ip.IsLoopback() {
-		return ""
-	}
-	return trimmed
+	return strings.TrimSpace(remoteAddr)
 }
 
 func (l *authFailureLimiter) IsBlocked(remoteAddr string) (bool, time.Duration) {
@@ -1222,15 +1216,20 @@ func (l *authFailureLimiter) ResetAll() {
 // AuthMiddleware returns a Gin middleware handler that authenticates requests
 // using the configured authentication providers. When the auth service is unavailable,
 // the middleware fails closed.
-func AuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc {
+func AuthMiddleware(manager *sdkaccess.Manager, trustedProxies []string) gin.HandlerFunc {
+	clientAddrResolver, err := util.NewClientAddressResolver(trustedProxies)
+	if err != nil {
+		panic(fmt.Errorf("invalid trusted-proxies configuration: %w", err))
+	}
 	return func(c *gin.Context) {
 		if manager == nil || len(manager.Providers()) == 0 {
 			c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "authentication service unavailable"})
 			return
 		}
+		clientAddr := clientAddrResolver.Resolve(c.Request).RateLimitKey()
 		result, err := manager.Authenticate(c.Request.Context(), c.Request)
 		if err == nil {
-			apiAuthFailureLimiter.Reset(c.Request.RemoteAddr)
+			apiAuthFailureLimiter.Reset(clientAddr)
 			if result != nil {
 				c.Set("apiKey", result.Principal)
 				c.Set("accessProvider", result.Provider)
@@ -1243,14 +1242,14 @@ func AuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc {
 		}
 		statusCode := err.HTTPStatusCode()
 		if sdkaccess.IsAuthErrorCode(err, sdkaccess.AuthErrorCodeNoCredentials) || sdkaccess.IsAuthErrorCode(err, sdkaccess.AuthErrorCodeInvalidCredential) {
-			if blocked, retryAfter := apiAuthFailureLimiter.IsBlocked(c.Request.RemoteAddr); blocked {
+			if blocked, retryAfter := apiAuthFailureLimiter.IsBlocked(clientAddr); blocked {
 				if retryAfter > 0 {
 					c.Header("Retry-After", strconv.Itoa(int(retryAfter.Seconds())))
 				}
 				c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{"error": "too many authentication failures"})
 				return
 			}
-			if retryAfter, blocked := apiAuthFailureLimiter.RecordFailure(c.Request.RemoteAddr); blocked {
+			if retryAfter, blocked := apiAuthFailureLimiter.RecordFailure(clientAddr); blocked {
 				if retryAfter > 0 {
 					c.Header("Retry-After", strconv.Itoa(int(retryAfter.Seconds())))
 				}

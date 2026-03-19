@@ -10,7 +10,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-func TestMiddlewareUsesRemoteAddrForLocalhostDetection(t *testing.T) {
+func TestMiddlewareUsesTrustedProxyAwareLocalhostDetection(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	hash, err := bcrypt.GenerateFromPassword([]byte("secret"), bcrypt.DefaultCost)
@@ -19,20 +19,38 @@ func TestMiddlewareUsesRemoteAddrForLocalhostDetection(t *testing.T) {
 	}
 
 	tests := []struct {
-		name         string
-		remoteAddr   string
-		forwardedFor string
-		wantStatus   int
+		name           string
+		remoteAddr     string
+		forwardedFor   string
+		forwarded      string
+		trustedProxies []string
+		wantStatus     int
 	}{
 		{name: "localhost ipv4 allowed", remoteAddr: "127.0.0.1:12345", wantStatus: http.StatusOK},
 		{name: "localhost ipv6 allowed", remoteAddr: "[::1]:12345", wantStatus: http.StatusOK},
 		{name: "remote spoofed localhost denied", remoteAddr: "192.168.1.10:12345", forwardedFor: "127.0.0.1", wantStatus: http.StatusForbidden},
+		{name: "untrusted loopback proxy denied", remoteAddr: "127.0.0.1:12345", forwardedFor: "198.51.100.10", wantStatus: http.StatusForbidden},
+		{
+			name:           "trusted loopback proxy respects forwarded remote client",
+			remoteAddr:     "127.0.0.1:12345",
+			forwardedFor:   "198.51.100.10",
+			trustedProxies: []string{"127.0.0.1/32"},
+			wantStatus:     http.StatusForbidden,
+		},
+		{
+			name:           "trusted loopback proxy allows forwarded localhost client",
+			remoteAddr:     "127.0.0.1:12345",
+			forwarded:      "for=127.0.0.1",
+			trustedProxies: []string{"127.0.0.1/32"},
+			wantStatus:     http.StatusOK,
+		},
 		{name: "invalid remote addr denied", remoteAddr: "not-a-valid-remote-addr", wantStatus: http.StatusForbidden},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			h := NewHandlerWithoutConfigFilePath(&config.Config{
+				TrustedProxies: tt.trustedProxies,
 				RemoteManagement: config.RemoteManagement{
 					AllowRemote: false,
 					SecretKey:   string(hash),
@@ -50,6 +68,9 @@ func TestMiddlewareUsesRemoteAddrForLocalhostDetection(t *testing.T) {
 			req.Header.Set("X-Management-Key", "secret")
 			if tt.forwardedFor != "" {
 				req.Header.Set("X-Forwarded-For", tt.forwardedFor)
+			}
+			if tt.forwarded != "" {
+				req.Header.Set("Forwarded", tt.forwarded)
 			}
 
 			w := httptest.NewRecorder()
