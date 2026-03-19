@@ -497,12 +497,7 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 				status = code
 			}
 		}
-		var addon http.Header
-		if he, ok := err.(interface{ Headers() http.Header }); ok && he != nil {
-			if hdr := he.Headers(); hdr != nil {
-				addon = hdr.Clone()
-			}
-		}
+		addon := filteredErrorHeaders(err)
 		return nil, nil, &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
 	}
 	if !PassthroughHeadersEnabled(h.Cfg) {
@@ -529,12 +524,7 @@ func (h *BaseAPIHandler) ExecuteHTTPRequestWithAuthManager(ctx context.Context, 
 				status = code
 			}
 		}
-		var addon http.Header
-		if he, ok := err.(interface{ Headers() http.Header }); ok && he != nil {
-			if hdr := he.Headers(); hdr != nil {
-				addon = hdr.Clone()
-			}
-		}
+		addon := filteredErrorHeaders(err)
 		return nil, nil, &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
 	}
 	return resp, auth, nil
@@ -572,12 +562,7 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 				status = code
 			}
 		}
-		var addon http.Header
-		if he, ok := err.(interface{ Headers() http.Header }); ok && he != nil {
-			if hdr := he.Headers(); hdr != nil {
-				addon = hdr.Clone()
-			}
-		}
+		addon := filteredErrorHeaders(err)
 		return nil, nil, &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
 	}
 	if !PassthroughHeadersEnabled(h.Cfg) {
@@ -623,12 +608,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 				status = code
 			}
 		}
-		var addon http.Header
-		if he, ok := err.(interface{ Headers() http.Header }); ok && he != nil {
-			if hdr := he.Headers(); hdr != nil {
-				addon = hdr.Clone()
-			}
-		}
+		addon := filteredErrorHeaders(err)
 		errChan <- &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
 		close(errChan)
 		return nil, nil, errChan
@@ -866,6 +846,17 @@ func replaceHeader(dst http.Header, src http.Header) {
 	for key, values := range src {
 		dst[key] = append([]string(nil), values...)
 	}
+}
+
+func filteredErrorHeaders(err error) http.Header {
+	if err == nil {
+		return nil
+	}
+	he, ok := err.(interface{ Headers() http.Header })
+	if !ok || he == nil {
+		return nil
+	}
+	return FilterUpstreamHeaders(he.Headers())
 }
 
 // WriteErrorResponse writes an error message to the response writer using the HTTP status embedded in the message.

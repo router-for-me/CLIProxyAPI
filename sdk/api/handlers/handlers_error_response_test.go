@@ -12,6 +12,21 @@ import (
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 )
 
+type headerCarrierError struct {
+	headers http.Header
+}
+
+func (e *headerCarrierError) Error() string {
+	return "upstream failure"
+}
+
+func (e *headerCarrierError) Headers() http.Header {
+	if e == nil {
+		return nil
+	}
+	return e.headers.Clone()
+}
+
 func TestWriteErrorResponse_AddonHeadersDisabledByDefault(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()
@@ -64,5 +79,25 @@ func TestWriteErrorResponse_AddonHeadersEnabled(t *testing.T) {
 	}
 	if got := recorder.Header().Values("X-Request-Id"); !reflect.DeepEqual(got, []string{"new-1", "new-2"}) {
 		t.Fatalf("X-Request-Id = %#v, want %#v", got, []string{"new-1", "new-2"})
+	}
+}
+
+func TestFilteredErrorHeaders_RemovesBlockedHeaders(t *testing.T) {
+	filtered := filteredErrorHeaders(&headerCarrierError{
+		headers: http.Header{
+			"Retry-After": {"30"},
+			"Set-Cookie":  {"session=secret"},
+			"Connection":  {"keep-alive"},
+		},
+	})
+
+	if got := filtered.Get("Retry-After"); got != "30" {
+		t.Fatalf("Retry-After = %q, want %q", got, "30")
+	}
+	if got := filtered.Get("Set-Cookie"); got != "" {
+		t.Fatalf("Set-Cookie should be filtered, got %q", got)
+	}
+	if got := filtered.Get("Connection"); got != "" {
+		t.Fatalf("Connection should be filtered, got %q", got)
 	}
 }

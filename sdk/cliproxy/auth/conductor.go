@@ -2078,6 +2078,8 @@ func retryAfterFromHeaders(headers http.Header) *time.Duration {
 	return nil
 }
 
+const httpResponseErrorBodyLimitBytes int64 = 8 << 20
+
 func newHTTPResponseError(resp *http.Response) *HTTPResponseError {
 	if resp == nil {
 		return &HTTPResponseError{
@@ -2088,7 +2090,11 @@ func newHTTPResponseError(resp *http.Response) *HTTPResponseError {
 	defer func() {
 		_ = resp.Body.Close()
 	}()
-	body, _ := io.ReadAll(resp.Body)
+	limitedReader := &io.LimitedReader{R: resp.Body, N: httpResponseErrorBodyLimitBytes + 1}
+	body, _ := io.ReadAll(limitedReader)
+	if int64(len(body)) > httpResponseErrorBodyLimitBytes {
+		body = body[:httpResponseErrorBodyLimitBytes]
+	}
 	status := resp.StatusCode
 	if status <= 0 {
 		status = http.StatusBadGateway
