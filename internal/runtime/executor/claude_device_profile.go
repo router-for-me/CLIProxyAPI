@@ -70,6 +70,7 @@ type claudeDeviceProfile struct {
 	OS             string
 	Arch           string
 	Version        claudeCLIVersion
+	HasVersion     bool
 }
 
 type claudeDeviceProfileCacheEntry struct {
@@ -106,6 +107,7 @@ func defaultClaudeDeviceProfile(cfg *config.Config) claudeDeviceProfile {
 	}
 	if version, ok := parseClaudeCLIVersion(profile.UserAgent); ok {
 		profile.Version = version
+		profile.HasVersion = true
 	}
 	return profile
 }
@@ -161,14 +163,11 @@ func parseClaudeCLIVersion(userAgent string) (claudeCLIVersion, bool) {
 }
 
 func shouldUpgradeClaudeDeviceProfile(candidate, current claudeDeviceProfile) bool {
-	if candidate.UserAgent == "" {
+	if candidate.UserAgent == "" || !candidate.HasVersion {
 		return false
 	}
-	if current.UserAgent == "" {
+	if current.UserAgent == "" || !current.HasVersion {
 		return true
-	}
-	if current.Version == (claudeCLIVersion{}) {
-		return false
 	}
 	return candidate.Version.Compare(current.Version) > 0
 }
@@ -183,11 +182,12 @@ func pinClaudeDeviceProfilePlatform(profile, baseline claudeDeviceProfile) claud
 // baseline platform and enforces the baseline software fingerprint as a floor.
 func normalizeClaudeDeviceProfile(profile, baseline claudeDeviceProfile) claudeDeviceProfile {
 	profile = pinClaudeDeviceProfilePlatform(profile, baseline)
-	if profile.UserAgent == "" || profile.Version == (claudeCLIVersion{}) || shouldUpgradeClaudeDeviceProfile(baseline, profile) {
+	if profile.UserAgent == "" || !profile.HasVersion || shouldUpgradeClaudeDeviceProfile(baseline, profile) {
 		profile.UserAgent = baseline.UserAgent
 		profile.PackageVersion = baseline.PackageVersion
 		profile.RuntimeVersion = baseline.RuntimeVersion
 		profile.Version = baseline.Version
+		profile.HasVersion = baseline.HasVersion
 	}
 	return profile
 }
@@ -211,6 +211,7 @@ func extractClaudeDeviceProfile(headers http.Header, cfg *config.Config) (claude
 		OS:             firstNonEmptyHeader(headers, "X-Stainless-Os", baseline.OS),
 		Arch:           firstNonEmptyHeader(headers, "X-Stainless-Arch", baseline.Arch),
 		Version:        version,
+		HasVersion:     true,
 	}
 	return profile, true
 }
