@@ -605,8 +605,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 		return nil, nil, errChan
 	}
 	passthroughHeadersEnabled := PassthroughHeadersEnabled(h.Cfg)
-	// Capture upstream headers from the initial connection synchronously before the goroutine starts.
-	// Keep a mutable map so bootstrap retries can replace it before first payload is sent.
+	// Capture upstream headers from the selected upstream synchronously before the goroutine starts.
 	var upstreamHeaders http.Header
 	if passthroughHeadersEnabled {
 		upstreamHeaders = cloneHeader(FilterUpstreamHeaders(streamResult.Headers))
@@ -620,9 +619,6 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 	go func() {
 		defer close(dataChan)
 		defer close(errChan)
-		sentPayload := false
-		bootstrapRetries := 0
-		maxBootstrapRetries := StreamingBootstrapRetries(h.Cfg)
 
 		sendErr := func(msg *interfaces.ErrorMessage) bool {
 			if ctx == nil {
@@ -650,21 +646,6 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 			}
 		}
 
-		bootstrapEligible := func(err error) bool {
-			status := statusFromError(err)
-			if status == 0 {
-				return true
-			}
-			switch status {
-			case http.StatusUnauthorized, http.StatusForbidden, http.StatusPaymentRequired,
-				http.StatusRequestTimeout, http.StatusTooManyRequests:
-				return true
-			default:
-				return status >= http.StatusInternalServerError
-			}
-		}
-
-	outer:
 		for {
 			for {
 				var chunk coreexecutor.StreamChunk
@@ -683,23 +664,6 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 				}
 				if chunk.Err != nil {
 					streamErr := chunk.Err
-					// Safe bootstrap recovery: if the upstream fails before any payload bytes are sent,
-					// retry a few times (to allow auth rotation / transient recovery) and then attempt model fallback.
-					if !sentPayload {
-						if bootstrapRetries < maxBootstrapRetries && bootstrapEligible(streamErr) {
-							bootstrapRetries++
-							retryResult, retryErr := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
-							if retryErr == nil {
-								if passthroughHeadersEnabled {
-									replaceHeader(upstreamHeaders, FilterUpstreamHeaders(retryResult.Headers))
-								}
-								chunks = retryResult.Chunks
-								continue outer
-							}
-							streamErr = retryErr
-						}
-					}
-
 					status := http.StatusInternalServerError
 					if se, ok := streamErr.(interface{ StatusCode() int }); ok && se != nil {
 						if code := se.StatusCode(); code > 0 {
@@ -722,7 +686,6 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 							return
 						}
 					}
-					sentPayload = true
 					if okSendData := sendData(cloneBytes(chunk.Payload)); !okSendData {
 						return
 					}

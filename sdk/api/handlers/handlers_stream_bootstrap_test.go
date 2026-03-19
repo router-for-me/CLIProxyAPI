@@ -470,36 +470,34 @@ func TestExecuteStreamWithAuthManager_PinnedAuthKeepsSameUpstream(t *testing.T) 
 	}, manager)
 	ctx := WithPinnedAuthID(context.Background(), "auth1")
 	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(ctx, "openai", "test-model", []byte(`{"model":"test-model"}`), "")
-	if dataChan == nil || errChan == nil {
-		t.Fatalf("expected non-nil channels")
+	if dataChan != nil {
+		t.Fatalf("expected nil data channel for immediate pinned bootstrap failure")
 	}
-
-	var got []byte
-	for chunk := range dataChan {
-		got = append(got, chunk...)
+	if errChan == nil {
+		t.Fatalf("expected non-nil error channel")
 	}
 
 	var gotErr error
+	var gotStatus int
 	for msg := range errChan {
 		if msg != nil && msg.Error != nil {
 			gotErr = msg.Error
+			gotStatus = msg.StatusCode
 		}
 	}
 
-	if len(got) != 0 {
-		t.Fatalf("expected empty payload, got %q", string(got))
-	}
 	if gotErr == nil {
 		t.Fatalf("expected terminal error, got nil")
 	}
-	authIDs := executor.AuthIDs()
-	if len(authIDs) == 0 {
-		t.Fatalf("expected at least one upstream attempt")
+	if gotStatus != http.StatusUnauthorized {
+		t.Fatalf("expected status %d, got %d", http.StatusUnauthorized, gotStatus)
 	}
-	for _, authID := range authIDs {
-		if authID != "auth1" {
-			t.Fatalf("expected all attempts on auth1, got sequence %v", authIDs)
-		}
+	authIDs := executor.AuthIDs()
+	if len(authIDs) != 1 || authIDs[0] != "auth1" {
+		t.Fatalf("expected exactly one pinned upstream attempt on auth1, got %v", authIDs)
+	}
+	if executor.Calls() != 1 {
+		t.Fatalf("expected exactly one upstream call, got %d", executor.Calls())
 	}
 }
 

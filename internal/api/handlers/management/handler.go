@@ -5,6 +5,7 @@ package management
 import (
 	"crypto/subtle"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -81,6 +82,30 @@ func (h *Handler) startAttemptCleanup() {
 	}()
 }
 
+func remoteAddrHost(remoteAddr string) string {
+	trimmed := strings.TrimSpace(remoteAddr)
+	if trimmed == "" {
+		return ""
+	}
+	host, _, err := net.SplitHostPort(trimmed)
+	if err == nil {
+		return host
+	}
+	if ip := net.ParseIP(trimmed); ip != nil {
+		return ip.String()
+	}
+	return ""
+}
+
+func isLoopbackRemoteAddr(remoteAddr string) bool {
+	host := remoteAddrHost(remoteAddr)
+	if host == "" {
+		return false
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
 // purgeStaleAttempts removes IP entries that have been idle beyond attemptMaxIdleTime
 // and whose ban (if any) has expired.
 func (h *Handler) purgeStaleAttempts() {
@@ -146,8 +171,15 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 		c.Header("X-CPA-COMMIT", buildinfo.Commit)
 		c.Header("X-CPA-BUILD-DATE", buildinfo.BuildDate)
 
-		clientIP := c.ClientIP()
-		localClient := clientIP == "127.0.0.1" || clientIP == "::1"
+		peerHost := remoteAddrHost(c.Request.RemoteAddr)
+		clientIP := peerHost
+		if clientIP == "" {
+			clientIP = strings.TrimSpace(c.Request.RemoteAddr)
+			if clientIP == "" {
+				clientIP = "unknown"
+			}
+		}
+		localClient := isLoopbackRemoteAddr(c.Request.RemoteAddr)
 		cfg := h.cfg
 		var (
 			allowRemote bool

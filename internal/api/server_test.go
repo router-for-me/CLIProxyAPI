@@ -3,6 +3,7 @@ package api
 import (
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	gin "github.com/gin-gonic/gin"
+	managementHandlers "github.com/router-for-me/CLIProxyAPI/v6/internal/api/handlers/management"
 	proxyconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	internallogging "github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
@@ -164,10 +166,10 @@ func TestDefaultRequestLoggerFactory_UsesResolvedLogDirectory(t *testing.T) {
 	errLog := fileLogger.LogRequestWithOptions(
 		"/v1/chat/completions",
 		http.MethodPost,
-		map[string][]string{"Content-Type": []string{"application/json"}},
+		map[string][]string{"Content-Type": {"application/json"}},
 		[]byte(`{"input":"hello"}`),
 		http.StatusBadGateway,
-		map[string][]string{"Content-Type": []string{"application/json"}},
+		map[string][]string{"Content-Type": {"application/json"}},
 		[]byte(`{"error":"upstream failure"}`),
 		nil,
 		nil,
@@ -207,4 +209,282 @@ func TestDefaultRequestLoggerFactory_UsesResolvedLogDirectory(t *testing.T) {
 			t.Fatalf("unexpected forced error log in config dir %s", configLogsDir)
 		}
 	}
+}
+
+func TestCORSMiddleware_RestrictsOrigins(t *testing.T) {
+	testCases := []struct {
+		name            string
+		method          string
+		origin          string
+		wantStatus      int
+		wantAllowOrigin string
+		wantAllowHeader string
+	}{
+		{
+			name:            "no origin keeps headers empty",
+			method:          http.MethodGet,
+			wantStatus:      http.StatusOK,
+			wantAllowOrigin: "",
+			wantAllowHeader: "",
+		},
+		{
+			name:            "localhost origin is allowed",
+			method:          http.MethodGet,
+			origin:          "http://localhost:3000",
+			wantStatus:      http.StatusOK,
+			wantAllowOrigin: "http://localhost:3000",
+			wantAllowHeader: corsAllowedHeaders,
+		},
+		{
+			name:            "loopback preflight is allowed",
+			method:          http.MethodOptions,
+			origin:          "http://127.0.0.1:5173",
+			wantStatus:      http.StatusNoContent,
+			wantAllowOrigin: "http://127.0.0.1:5173",
+			wantAllowHeader: corsAllowedHeaders,
+		},
+		{
+			name:            "remote origin is stripped",
+			method:          http.MethodGet,
+			origin:          "https://evil.example",
+			wantStatus:      http.StatusOK,
+			wantAllowOrigin: "",
+			wantAllowHeader: "",
+		},
+		{
+			name:            "remote preflight is denied",
+			method:          http.MethodOptions,
+			origin:          "https://evil.example",
+			wantStatus:      http.StatusForbidden,
+			wantAllowOrigin: "",
+			wantAllowHeader: "",
+		},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			engine := gin.New()
+			engine.Use(corsMiddleware())
+			engine.Any("/resource", func(c *gin.Context) {
+				c.Header("Access-Control-Allow-Origin", "*")
+				c.Header("Access-Control-Allow-Headers", "*")
+				c.Header("Access-Control-Allow-Methods", "*")
+				c.Status(http.StatusOK)
+			})
+
+			req := httptest.NewRequest(tc.method, "/resource", nil)
+			if tc.origin != "" {
+				req.Header.Set("Origin", tc.origin)
+			}
+
+			rr := httptest.NewRecorder()
+			engine.ServeHTTP(rr, req)
+
+			if rr.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d; body=%s", rr.Code, tc.wantStatus, rr.Body.String())
+			}
+			if got := rr.Header().Get("Access-Control-Allow-Origin"); got != tc.wantAllowOrigin {
+				t.Fatalf("allow origin = %q, want %q", got, tc.wantAllowOrigin)
+			}
+			if got := rr.Header().Get("Access-Control-Allow-Headers"); got != tc.wantAllowHeader {
+				t.Fatalf("allow headers = %q, want %q", got, tc.wantAllowHeader)
+			}
+			if tc.wantAllowOrigin != "" {
+				if got := rr.Header().Get("Access-Control-Allow-Methods"); got != corsAllowedMethods {
+					t.Fatalf("allow methods = %q, want %q", got, corsAllowedMethods)
+				}
+			}
+		})
+	}
+}
+
+func TestOAuthCallbackWriteErrorsAreNotIgnored(t *testing.T) {
+	testCases := []struct {
+		name       string
+		authDir    string
+		state      string
+		wantStatus int
+		wantBody   string
+	}{
+		{
+			name:       "successful callback persists state",
+			authDir:    "use-server-auth-dir",
+			state:      "oauth-callback-success",
+			wantStatus: http.StatusOK,
+			wantBody:   "Authentication successful",
+		},
+		{
+			name:       "write failure returns server error",
+			authDir:    "",
+			state:      "oauth-callback-write-error",
+			wantStatus: http.StatusInternalServerError,
+			wantBody:   "Authentication callback failed",
+		},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			server := newTestServer(t)
+			if tc.authDir != "use-server-auth-dir" {
+				server.cfg.AuthDir = tc.authDir
+			}
+
+			managementHandlers.RegisterOAuthSession(tc.state, "anthropic")
+
+			req := httptest.NewRequest(
+				http.MethodGet,
+				"/anthropic/callback?state="+url.QueryEscape(tc.state)+"&code=test-code",
+				nil,
+			)
+			rr := httptest.NewRecorder()
+			server.engine.ServeHTTP(rr, req)
+
+			if rr.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d; body=%s", rr.Code, tc.wantStatus, rr.Body.String())
+			}
+			if body := rr.Body.String(); !strings.Contains(body, tc.wantBody) {
+				t.Fatalf("body = %q, want substring %q", body, tc.wantBody)
+			}
+			if tc.wantStatus == http.StatusOK {
+				callbackPath := filepath.Join(server.cfg.AuthDir, ".oauth-anthropic-"+tc.state+".oauth")
+				if _, err := os.Stat(callbackPath); err != nil {
+					t.Fatalf("expected callback file %s: %v", callbackPath, err)
+				}
+			}
+		})
+	}
+}
+
+func TestGeminiCompatibleRoutesAcceptQueryKeyCompatibility(t *testing.T) {
+	server := newTestServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1beta/models?key=test-key", nil)
+	req.RemoteAddr = "198.51.100.21:1234"
+
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	if body := rr.Body.String(); !strings.Contains(body, "\"models\"") {
+		t.Fatalf("body = %q, want models payload", body)
+	}
+}
+
+func TestOpenAIRoutesStillRejectQueryKeyOnly(t *testing.T) {
+	server := newTestServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/models?key=test-key", nil)
+	req.RemoteAddr = "198.51.100.22:1234"
+
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusUnauthorized, rr.Body.String())
+	}
+}
+
+func TestProtectedRoutesRejectNilAccessManager(t *testing.T) {
+	server := newTestServerWithAccessManager(t, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.RemoteAddr = "198.51.100.20:1234"
+
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusServiceUnavailable, rr.Body.String())
+	}
+	if body := rr.Body.String(); !strings.Contains(body, "authentication service unavailable") {
+		t.Fatalf("body = %q, want authentication service unavailable", body)
+	}
+}
+
+func TestProtectedRoutesRateLimitAuthenticationFailures(t *testing.T) {
+	apiAuthFailureLimiter.ResetAll()
+	t.Cleanup(apiAuthFailureLimiter.ResetAll)
+
+	server := newTestServer(t)
+	remoteAddr := "198.51.100.30:1234"
+
+	for attempt := 1; attempt < authFailureLimit; attempt++ {
+		req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+		req.RemoteAddr = remoteAddr
+		req.Header.Set("Authorization", "Bearer wrong-key")
+
+		rr := httptest.NewRecorder()
+		server.engine.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d status = %d, want %d; body=%s", attempt, rr.Code, http.StatusUnauthorized, rr.Body.String())
+		}
+	}
+
+	rateLimitedReq := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	rateLimitedReq.RemoteAddr = remoteAddr
+	rateLimitedReq.Header.Set("Authorization", "Bearer wrong-key")
+
+	rateLimitedResp := httptest.NewRecorder()
+	server.engine.ServeHTTP(rateLimitedResp, rateLimitedReq)
+
+	if rateLimitedResp.Code != http.StatusTooManyRequests {
+		t.Fatalf("rate limited status = %d, want %d; body=%s", rateLimitedResp.Code, http.StatusTooManyRequests, rateLimitedResp.Body.String())
+	}
+	if retryAfter := rateLimitedResp.Header().Get("Retry-After"); retryAfter == "" {
+		t.Fatal("expected Retry-After header on rate-limited response")
+	}
+
+	successReq := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	successReq.RemoteAddr = remoteAddr
+	successReq.Header.Set("Authorization", "Bearer test-key")
+
+	successResp := httptest.NewRecorder()
+	server.engine.ServeHTTP(successResp, successReq)
+
+	if successResp.Code != http.StatusOK {
+		t.Fatalf("success status = %d, want %d; body=%s", successResp.Code, http.StatusOK, successResp.Body.String())
+	}
+
+	badReqAfterSuccess := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	badReqAfterSuccess.RemoteAddr = remoteAddr
+	badReqAfterSuccess.Header.Set("Authorization", "Bearer wrong-key")
+
+	badRespAfterSuccess := httptest.NewRecorder()
+	server.engine.ServeHTTP(badRespAfterSuccess, badReqAfterSuccess)
+
+	if badRespAfterSuccess.Code != http.StatusUnauthorized {
+		t.Fatalf("post-success bad status = %d, want %d; body=%s", badRespAfterSuccess.Code, http.StatusUnauthorized, badRespAfterSuccess.Body.String())
+	}
+}
+
+func newTestServerWithAccessManager(t *testing.T, accessManager *sdkaccess.Manager) *Server {
+	t.Helper()
+
+	gin.SetMode(gin.TestMode)
+
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if err := os.MkdirAll(authDir, 0o700); err != nil {
+		t.Fatalf("failed to create auth dir: %v", err)
+	}
+
+	cfg := &proxyconfig.Config{
+		SDKConfig: sdkconfig.SDKConfig{
+			APIKeys: []string{"test-key"},
+		},
+		Port:                   0,
+		AuthDir:                authDir,
+		Debug:                  true,
+		LoggingToFile:          false,
+		UsageStatisticsEnabled: false,
+	}
+
+	authManager := auth.NewManager(nil, nil, nil)
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	return NewServer(cfg, authManager, accessManager, configPath)
 }
