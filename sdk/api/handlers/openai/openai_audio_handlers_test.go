@@ -257,6 +257,30 @@ func TestAudioTranscriptionsRejectsUnsupportedFileFormat(t *testing.T) {
 	}
 }
 
+func TestAudioTranscriptionsRejectUnsupportedResponseFormat(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	executor := &audioCaptureExecutor{}
+	router := newAudioTestRouter(t, executor)
+
+	req := newAudioMultipartRequest(t, "/v1/audio/transcriptions", map[string]string{
+		"model":           audioTestModel,
+		"response_format": "markdown",
+	}, audioTranscriptionFileFieldName, "sample.webm", "", []byte("fake-audio"))
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body=%s", resp.Code, http.StatusBadRequest, resp.Body.String())
+	}
+	if !strings.Contains(resp.Body.String(), "unsupported response_format") || !strings.Contains(resp.Body.String(), "markdown") {
+		t.Fatalf("body = %s", resp.Body.String())
+	}
+	if executor.Calls() != 0 {
+		t.Fatalf("executor calls = %d, want 0", executor.Calls())
+	}
+}
+
 func TestAudioTranscriptionsPreserveExplicitTextResponseFormat(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

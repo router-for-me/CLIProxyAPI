@@ -330,6 +330,7 @@ func (s *Server) setupRoutes() {
 	{
 		v1.GET("/models", s.unifiedModelsHandler(openaiHandlers, claudeCodeHandlers))
 		v1.POST("/chat/completions", openaiHandlers.ChatCompletions)
+		// Audio transcription uses a direct multipart passthrough path instead of the JSON translator stack.
 		v1.POST("/audio/transcriptions", openaiHandlers.AudioTranscriptions)
 		v1.POST("/completions", openaiHandlers.Completions)
 		v1.POST("/messages", claudeCodeHandlers.ClaudeMessages)

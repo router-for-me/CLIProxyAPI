@@ -71,6 +71,14 @@ var supportedAudioMediaTypes = map[string]struct{}{
 	"video/webm": {},
 }
 
+var supportedAudioResponseFormats = map[string]struct{}{
+	"json":         {},
+	"srt":          {},
+	"text":         {},
+	"verbose_json": {},
+	"vtt":          {},
+}
+
 type audioFormField struct {
 	Name  string
 	Value string
@@ -358,6 +366,9 @@ func parseAudioTranscriptionRequest(c *gin.Context) (*audioTranscriptionRequest,
 	if audioReq.Model == "" {
 		return nil, &audioRequestError{status: http.StatusBadRequest, msg: "missing required field: model"}
 	}
+	if err := validateAudioResponseFormat(audioReq.ResponseFormat); err != nil {
+		return nil, err
+	}
 	if !hasFile {
 		return nil, &audioRequestError{status: http.StatusBadRequest, msg: "missing required field: file"}
 	}
@@ -473,6 +484,20 @@ func validateAudioFile(fileName string, contentTypes ...string) error {
 	return &audioRequestError{
 		status: http.StatusBadRequest,
 		msg:    "unsupported audio format; supported formats are flac, m4a, mp3, mp4, mpeg, mpga, ogg, wav, and webm",
+	}
+}
+
+func validateAudioResponseFormat(responseFormat string) error {
+	responseFormat = strings.ToLower(strings.TrimSpace(responseFormat))
+	if responseFormat == "" {
+		return nil
+	}
+	if _, ok := supportedAudioResponseFormats[responseFormat]; ok {
+		return nil
+	}
+	return &audioRequestError{
+		status: http.StatusBadRequest,
+		msg:    fmt.Sprintf("unsupported response_format %q; supported values are json, text, srt, vtt, and verbose_json", responseFormat),
 	}
 }
 
