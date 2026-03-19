@@ -198,7 +198,9 @@ nonstream-keepalive-interval: 0
 # Default headers for Claude API requests. Update when Claude Code releases new versions.
 # In legacy mode, user-agent/package-version/runtime-version/timeout are used as fallbacks
 # when the client omits them, while OS/arch remain runtime-derived. When
-# stabilize-device-profile is enabled, all values below seed the pinned baseline fingerprint.
+# stabilize-device-profile is enabled, OS/arch stay pinned to the baseline values below,
+# while user-agent/package-version/runtime-version seed a software fingerprint that can
+# still upgrade to newer official Claude client versions.
 # claude-header-defaults:
 #   user-agent: "claude-cli/2.1.44 (external, sdk-cli)"
 #   package-version: "0.74.0"

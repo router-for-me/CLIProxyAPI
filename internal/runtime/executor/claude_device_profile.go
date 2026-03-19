@@ -173,6 +173,12 @@ func shouldUpgradeClaudeDeviceProfile(candidate, current claudeDeviceProfile) bo
 	return candidate.Version.Compare(current.Version) > 0
 }
 
+func pinClaudeDeviceProfilePlatform(profile, baseline claudeDeviceProfile) claudeDeviceProfile {
+	profile.OS = baseline.OS
+	profile.Arch = baseline.Arch
+	return profile
+}
+
 func extractClaudeDeviceProfile(headers http.Header, cfg *config.Config) (claudeDeviceProfile, bool) {
 	if headers == nil {
 		return claudeDeviceProfile{}, false
@@ -250,6 +256,9 @@ func resolveClaudeDeviceProfile(auth *cliproxyauth.Auth, apiKey string, headers 
 	now := time.Now()
 	baseline := defaultClaudeDeviceProfile(cfg)
 	candidate, hasCandidate := extractClaudeDeviceProfile(headers, cfg)
+	if hasCandidate {
+		candidate = pinClaudeDeviceProfilePlatform(candidate, baseline)
+	}
 	if hasCandidate && !shouldUpgradeClaudeDeviceProfile(candidate, baseline) {
 		hasCandidate = false
 	}
@@ -267,6 +276,9 @@ func resolveClaudeDeviceProfile(auth *cliproxyauth.Auth, apiKey string, headers 
 		claudeDeviceProfileCacheMu.Lock()
 		entry, hasCached = claudeDeviceProfileCache[cacheKey]
 		cachedValid = hasCached && entry.expire.After(now) && entry.profile.UserAgent != ""
+		if cachedValid {
+			entry.profile = pinClaudeDeviceProfilePlatform(entry.profile, baseline)
+		}
 		if cachedValid && !shouldUpgradeClaudeDeviceProfile(candidate, entry.profile) {
 			entry.expire = now.Add(claudeDeviceProfileTTL)
 			claudeDeviceProfileCache[cacheKey] = entry
@@ -286,6 +298,7 @@ func resolveClaudeDeviceProfile(auth *cliproxyauth.Auth, apiKey string, headers 
 		claudeDeviceProfileCacheMu.Lock()
 		entry = claudeDeviceProfileCache[cacheKey]
 		if entry.expire.After(now) && entry.profile.UserAgent != "" {
+			entry.profile = pinClaudeDeviceProfilePlatform(entry.profile, baseline)
 			entry.expire = now.Add(claudeDeviceProfileTTL)
 			claudeDeviceProfileCache[cacheKey] = entry
 			claudeDeviceProfileCacheMu.Unlock()

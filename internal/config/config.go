@@ -134,7 +134,8 @@ type Config struct {
 // ClaudeHeaderDefaults configures default header values injected into Claude API requests.
 // In legacy mode, UserAgent/PackageVersion/RuntimeVersion/Timeout act as fallbacks when
 // the client omits them, while OS/Arch remain runtime-derived. When stabilized device
-// profiles are enabled, all of these values seed the baseline pinned fingerprint.
+// profiles are enabled, OS/Arch become the pinned platform baseline, while
+// UserAgent/PackageVersion/RuntimeVersion seed the upgradeable software fingerprint.
 type ClaudeHeaderDefaults struct {
 	UserAgent              string `yaml:"user-agent" json:"user-agent"`
 	PackageVersion         string `yaml:"package-version" json:"package-version"`

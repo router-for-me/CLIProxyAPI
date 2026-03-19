@@ -855,8 +855,9 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 		r.Header.Set("Accept", "application/json")
 		r.Header.Set("Accept-Encoding", "gzip, deflate, br, zstd")
 	}
-	// Legacy mode keeps OS/Arch runtime-derived; stabilized mode may pin
-	// the full device profile from the cached or configured baseline.
+	// Legacy mode keeps OS/Arch runtime-derived; stabilized mode pins OS/Arch
+	// to the configured baseline while still allowing newer official
+	// User-Agent/package/runtime tuples to upgrade the software fingerprint.
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
