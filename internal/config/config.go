@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"strings"
 	"syscall"
@@ -31,6 +32,10 @@ type Config struct {
 	Host string `yaml:"host" json:"-"`
 	// Port is the network port on which the API server will listen.
 	Port int `yaml:"port" json:"-"`
+
+	// TrustedProxies lists proxy IPs/CIDRs whose forwarding headers may be trusted.
+	// When empty, forwarded client IP headers are ignored.
+	TrustedProxies []string `yaml:"trusted-proxies,omitempty" json:"trusted-proxies,omitempty"`
 
 	// TLS config controls HTTPS server settings.
 	TLS TLSConfig `yaml:"tls" json:"tls"`
@@ -606,6 +611,12 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		cfg.Pprof.Addr = DefaultPprofAddr
 	}
 
+	trustedProxies, err := sanitizeTrustedProxies(cfg.TrustedProxies)
+	if err != nil {
+		return nil, fmt.Errorf("invalid trusted-proxies configuration: %w", err)
+	}
+	cfg.TrustedProxies = trustedProxies
+
 	if cfg.LogsMaxTotalSizeMB < 0 {
 		cfg.LogsMaxTotalSizeMB = 0
 	}
@@ -717,6 +728,35 @@ func payloadRawString(value any) ([]byte, bool) {
 	default:
 		return nil, false
 	}
+}
+
+func sanitizeTrustedProxies(values []string) ([]string, error) {
+	if len(values) == 0 {
+		return nil, nil
+	}
+
+	sanitized := make([]string, 0, len(values))
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			continue
+		}
+
+		if strings.Contains(trimmed, "/") {
+			if _, _, err := net.ParseCIDR(trimmed); err != nil {
+				return nil, fmt.Errorf("invalid CIDR %q: %w", trimmed, err)
+			}
+		} else if ip := net.ParseIP(trimmed); ip == nil {
+			return nil, fmt.Errorf("invalid IP %q", trimmed)
+		}
+
+		sanitized = append(sanitized, trimmed)
+	}
+
+	if len(sanitized) == 0 {
+		return nil, nil
+	}
+	return sanitized, nil
 }
 
 // SanitizeCodexHeaderDefaults trims surrounding whitespace from the

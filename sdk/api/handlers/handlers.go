@@ -605,8 +605,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 		return nil, nil, errChan
 	}
 	passthroughHeadersEnabled := PassthroughHeadersEnabled(h.Cfg)
-	// Capture upstream headers from the initial connection synchronously before the goroutine starts.
-	// Keep a mutable map so bootstrap retries can replace it before first payload is sent.
+	// Capture upstream headers from the selected upstream synchronously before the goroutine starts.
 	var upstreamHeaders http.Header
 	if passthroughHeadersEnabled {
 		upstreamHeaders = cloneHeader(FilterUpstreamHeaders(streamResult.Headers))
@@ -664,68 +663,60 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 			}
 		}
 
-	outer:
 		for {
-			for {
-				var chunk coreexecutor.StreamChunk
-				var ok bool
-				if ctx != nil {
-					select {
-					case <-ctx.Done():
-						return
-					case chunk, ok = <-chunks:
-					}
-				} else {
-					chunk, ok = <-chunks
-				}
-				if !ok {
+			var chunk coreexecutor.StreamChunk
+			var ok bool
+			if ctx != nil {
+				select {
+				case <-ctx.Done():
 					return
+				case chunk, ok = <-chunks:
 				}
-				if chunk.Err != nil {
-					streamErr := chunk.Err
-					// Safe bootstrap recovery: if the upstream fails before any payload bytes are sent,
-					// retry a few times (to allow auth rotation / transient recovery) and then attempt model fallback.
-					if !sentPayload {
-						if bootstrapRetries < maxBootstrapRetries && bootstrapEligible(streamErr) {
-							bootstrapRetries++
-							retryResult, retryErr := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
-							if retryErr == nil {
-								if passthroughHeadersEnabled {
-									replaceHeader(upstreamHeaders, FilterUpstreamHeaders(retryResult.Headers))
-								}
-								chunks = retryResult.Chunks
-								continue outer
-							}
-							streamErr = retryErr
+			} else {
+				chunk, ok = <-chunks
+			}
+			if !ok {
+				return
+			}
+			if chunk.Err != nil {
+				streamErr := chunk.Err
+				if !sentPayload && bootstrapRetries < maxBootstrapRetries && bootstrapEligible(streamErr) {
+					bootstrapRetries++
+					retryResult, retryErr := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
+					if retryErr == nil {
+						if passthroughHeadersEnabled {
+							replaceHeader(upstreamHeaders, FilterUpstreamHeaders(retryResult.Headers))
 						}
+						chunks = retryResult.Chunks
+						continue
 					}
-
-					status := http.StatusInternalServerError
-					if se, ok := streamErr.(interface{ StatusCode() int }); ok && se != nil {
-						if code := se.StatusCode(); code > 0 {
-							status = code
-						}
-					}
-					var addon http.Header
-					if he, ok := streamErr.(interface{ Headers() http.Header }); ok && he != nil {
-						if hdr := he.Headers(); hdr != nil {
-							addon = hdr.Clone()
-						}
-					}
-					_ = sendErr(&interfaces.ErrorMessage{StatusCode: status, Error: streamErr, Addon: addon})
-					return
+					streamErr = retryErr
 				}
-				if len(chunk.Payload) > 0 {
-					if handlerType == "openai-response" {
-						if err := validateSSEDataJSON(chunk.Payload); err != nil {
-							_ = sendErr(&interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: err})
-							return
-						}
+				status := http.StatusInternalServerError
+				if se, ok := streamErr.(interface{ StatusCode() int }); ok && se != nil {
+					if code := se.StatusCode(); code > 0 {
+						status = code
 					}
-					sentPayload = true
-					if okSendData := sendData(cloneBytes(chunk.Payload)); !okSendData {
+				}
+				var addon http.Header
+				if he, ok := streamErr.(interface{ Headers() http.Header }); ok && he != nil {
+					if hdr := he.Headers(); hdr != nil {
+						addon = hdr.Clone()
+					}
+				}
+				_ = sendErr(&interfaces.ErrorMessage{StatusCode: status, Error: streamErr, Addon: addon})
+				return
+			}
+			if len(chunk.Payload) > 0 {
+				if handlerType == "openai-response" {
+					if err := validateSSEDataJSON(chunk.Payload); err != nil {
+						_ = sendErr(&interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: err})
 						return
 					}
+				}
+				sentPayload = true
+				if okSendData := sendData(cloneBytes(chunk.Payload)); !okSendData {
+					return
 				}
 			}
 		}

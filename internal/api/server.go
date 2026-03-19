@@ -9,10 +9,13 @@ import (
 	"crypto/subtle"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
+	neturl "net/url"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -41,6 +44,16 @@ import (
 )
 
 const oauthCallbackSuccessHTML = `<html><head><meta charset="utf-8"><title>Authentication successful</title><script>setTimeout(function(){window.close();},5000);</script></head><body><h1>Authentication successful!</h1><p>You can close this window.</p><p>This window will close automatically in 5 seconds.</p></body></html>`
+
+const (
+	corsAllowedMethods       = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+	corsAllowedHeaders       = "Authorization, Content-Type, X-Requested-With, X-Goog-Api-Key, X-Api-Key, X-Management-Key, X-Local-Password, Idempotency-Key, Anthropic-Beta, Anthropic-Version, Anthropic-Dangerous-Direct-Browser-Access, OpenAI-Beta"
+	authFailureLimit         = 5
+	authFailureWindow        = time.Minute
+	authFailureBlockDuration = 2 * time.Minute
+)
+
+var apiAuthFailureLimiter = newAuthFailureLimiter(authFailureLimit, authFailureWindow, authFailureBlockDuration)
 
 type serverOptionConfig struct {
 	extraMiddleware      []gin.HandlerFunc
@@ -202,6 +215,9 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 
 	// Create gin engine
 	engine := gin.New()
+	if err := engine.SetTrustedProxies(cfg.TrustedProxies); err != nil {
+		panic(fmt.Errorf("invalid trusted-proxies configuration: %w", err))
+	}
 	if optionState.engineConfigurator != nil {
 		optionState.engineConfigurator(engine)
 	}
@@ -277,12 +293,13 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	s.setupRoutes()
 
 	// Register Amp module using V2 interface with Context
-	s.ampModule = ampmodule.NewLegacy(accessManager, AuthMiddleware(accessManager))
+	authMiddleware := AuthMiddleware(accessManager, cfg.TrustedProxies)
+	s.ampModule = ampmodule.NewLegacy(accessManager, authMiddleware)
 	ctx := modules.Context{
 		Engine:         engine,
 		BaseHandler:    s.handlers,
 		Config:         cfg,
-		AuthMiddleware: AuthMiddleware(accessManager),
+		AuthMiddleware: authMiddleware,
 	}
 	if err := modules.RegisterModule(ctx, s.ampModule); err != nil {
 		log.Errorf("Failed to register Amp module: %v", err)
@@ -326,7 +343,7 @@ func (s *Server) setupRoutes() {
 
 	// OpenAI compatible API routes
 	v1 := s.engine.Group("/v1")
-	v1.Use(AuthMiddleware(s.accessManager))
+	v1.Use(AuthMiddleware(s.accessManager, s.cfg.TrustedProxies))
 	{
 		v1.GET("/models", s.unifiedModelsHandler(openaiHandlers, claudeCodeHandlers))
 		v1.POST("/chat/completions", openaiHandlers.ChatCompletions)
@@ -340,7 +357,7 @@ func (s *Server) setupRoutes() {
 
 	// Gemini compatible API routes
 	v1beta := s.engine.Group("/v1beta")
-	v1beta.Use(AuthMiddleware(s.accessManager))
+	v1beta.Use(AuthMiddleware(s.accessManager, s.cfg.TrustedProxies))
 	{
 		v1beta.GET("/models", geminiHandlers.GeminiModels)
 		v1beta.POST("/models/*action", geminiHandlers.GeminiHandler)
@@ -364,73 +381,23 @@ func (s *Server) setupRoutes() {
 	// These endpoints receive provider redirects and persist
 	// the short-lived code/state for the waiting goroutine.
 	s.engine.GET("/anthropic/callback", func(c *gin.Context) {
-		code := c.Query("code")
-		state := c.Query("state")
-		errStr := c.Query("error")
-		if errStr == "" {
-			errStr = c.Query("error_description")
-		}
-		if state != "" {
-			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "anthropic", state, code, errStr)
-		}
-		c.Header("Content-Type", "text/html; charset=utf-8")
-		c.String(http.StatusOK, oauthCallbackSuccessHTML)
+		s.handleOAuthCallback(c, "anthropic")
 	})
 
 	s.engine.GET("/codex/callback", func(c *gin.Context) {
-		code := c.Query("code")
-		state := c.Query("state")
-		errStr := c.Query("error")
-		if errStr == "" {
-			errStr = c.Query("error_description")
-		}
-		if state != "" {
-			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "codex", state, code, errStr)
-		}
-		c.Header("Content-Type", "text/html; charset=utf-8")
-		c.String(http.StatusOK, oauthCallbackSuccessHTML)
+		s.handleOAuthCallback(c, "codex")
 	})
 
 	s.engine.GET("/google/callback", func(c *gin.Context) {
-		code := c.Query("code")
-		state := c.Query("state")
-		errStr := c.Query("error")
-		if errStr == "" {
-			errStr = c.Query("error_description")
-		}
-		if state != "" {
-			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "gemini", state, code, errStr)
-		}
-		c.Header("Content-Type", "text/html; charset=utf-8")
-		c.String(http.StatusOK, oauthCallbackSuccessHTML)
+		s.handleOAuthCallback(c, "gemini")
 	})
 
 	s.engine.GET("/iflow/callback", func(c *gin.Context) {
-		code := c.Query("code")
-		state := c.Query("state")
-		errStr := c.Query("error")
-		if errStr == "" {
-			errStr = c.Query("error_description")
-		}
-		if state != "" {
-			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "iflow", state, code, errStr)
-		}
-		c.Header("Content-Type", "text/html; charset=utf-8")
-		c.String(http.StatusOK, oauthCallbackSuccessHTML)
+		s.handleOAuthCallback(c, "iflow")
 	})
 
 	s.engine.GET("/antigravity/callback", func(c *gin.Context) {
-		code := c.Query("code")
-		state := c.Query("state")
-		errStr := c.Query("error")
-		if errStr == "" {
-			errStr = c.Query("error_description")
-		}
-		if state != "" {
-			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "antigravity", state, code, errStr)
-		}
-		c.Header("Content-Type", "text/html; charset=utf-8")
-		c.String(http.StatusOK, oauthCallbackSuccessHTML)
+		s.handleOAuthCallback(c, "antigravity")
 	})
 
 	// Management routes are registered lazily by registerManagementRoutes when a secret is configured.
@@ -457,7 +424,7 @@ func (s *Server) AttachWebsocketRoute(path string, handler http.Handler) {
 	s.wsRoutes[trimmed] = struct{}{}
 	s.wsRouteMu.Unlock()
 
-	authMiddleware := AuthMiddleware(s.accessManager)
+	authMiddleware := AuthMiddleware(s.accessManager, s.cfg.TrustedProxies)
 	conditionalAuth := func(c *gin.Context) {
 		if !s.wsAuthEnabled.Load() {
 			c.Next()
@@ -846,15 +813,16 @@ func (s *Server) Stop(ctx context.Context) error {
 //   - gin.HandlerFunc: The CORS middleware handler
 func corsMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		c.Header("Access-Control-Allow-Origin", "*")
-		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-		c.Header("Access-Control-Allow-Headers", "*")
-
-		if c.Request.Method == "OPTIONS" {
+		origin := strings.TrimSpace(c.GetHeader("Origin"))
+		allowed := applyCORSHeaders(c.Writer.Header(), origin)
+		if origin != "" && !allowed {
+			c.AbortWithStatus(http.StatusForbidden)
+			return
+		}
+		if c.Request.Method == http.MethodOptions {
 			c.AbortWithStatus(http.StatusNoContent)
 			return
 		}
-
 		c.Next()
 	}
 }
@@ -1020,20 +988,294 @@ func (s *Server) SetWebsocketAuthChangeHandler(fn func(bool, bool)) {
 	s.wsAuthChanged = fn
 }
 
+func (s *Server) handleOAuthCallback(c *gin.Context, provider string) {
+	if s == nil || s.cfg == nil {
+		c.String(http.StatusInternalServerError, "Authentication callback failed")
+		return
+	}
+	state := strings.TrimSpace(c.Query("state"))
+	code := strings.TrimSpace(c.Query("code"))
+	errStr := strings.TrimSpace(c.Query("error"))
+	if errStr == "" {
+		errStr = strings.TrimSpace(c.Query("error_description"))
+	}
+	if state == "" {
+		c.String(http.StatusBadRequest, "Authentication callback failed")
+		return
+	}
+	if _, err := managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, provider, state, code, errStr); err != nil {
+		log.WithError(err).Warnf("failed to persist oauth callback for %s", provider)
+		c.String(http.StatusInternalServerError, "Authentication callback failed")
+		return
+	}
+	c.Header("Content-Type", "text/html; charset=utf-8")
+	c.String(http.StatusOK, oauthCallbackSuccessHTML)
+}
+
+func applyCORSHeaders(headers http.Header, origin string) bool {
+	headers.Del("Access-Control-Allow-Origin")
+	headers.Del("Access-Control-Allow-Methods")
+	headers.Del("Access-Control-Allow-Headers")
+	if !isAllowedCORSOrigin(origin) {
+		return false
+	}
+	headers.Set("Access-Control-Allow-Origin", origin)
+	headers.Set("Access-Control-Allow-Methods", corsAllowedMethods)
+	headers.Set("Access-Control-Allow-Headers", corsAllowedHeaders)
+	return true
+}
+
+func isAllowedCORSOrigin(rawOrigin string) bool {
+	origin := strings.TrimSpace(rawOrigin)
+	if origin == "" {
+		return false
+	}
+	parsed, err := neturl.Parse(origin)
+	if err != nil {
+		return false
+	}
+	hostname := strings.TrimSpace(parsed.Hostname())
+	if hostname == "" {
+		return false
+	}
+	if strings.EqualFold(hostname, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(hostname)
+	return ip != nil && ip.IsLoopback()
+}
+
+type authFailureEntry struct {
+	count        int
+	firstFailure time.Time
+	blockedUntil time.Time
+	lastSeen     time.Time
+}
+
+type authFailureLimiter struct {
+	mu          sync.Mutex
+	limit       int
+	window      time.Duration
+	blockWindow time.Duration
+	entries     map[string]*authFailureEntry
+	maxEntries  int
+}
+
+func newAuthFailureLimiter(limit int, window, blockWindow time.Duration) *authFailureLimiter {
+	return &authFailureLimiter{
+		limit:       limit,
+		window:      window,
+		blockWindow: blockWindow,
+		entries:     make(map[string]*authFailureEntry),
+		maxEntries:  1024,
+	}
+}
+
+func (l *authFailureLimiter) key(remoteAddr string) string {
+	if host := util.RemoteAddrHost(remoteAddr); host != "" {
+		return host
+	}
+	return strings.TrimSpace(remoteAddr)
+}
+
+func (l *authFailureLimiter) IsBlocked(remoteAddr string) (bool, time.Duration) {
+	if l == nil {
+		return false, 0
+	}
+	key := l.key(remoteAddr)
+	if key == "" {
+		return false, 0
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	entry := l.entries[key]
+	if entry == nil || entry.blockedUntil.IsZero() {
+		return false, 0
+	}
+	remaining := time.Until(entry.blockedUntil)
+	if remaining <= 0 {
+		delete(l.entries, key)
+		return false, 0
+	}
+	return true, remaining.Round(time.Second)
+}
+
+func (l *authFailureLimiter) RecordFailure(remoteAddr string) (time.Duration, bool) {
+	if l == nil {
+		return 0, false
+	}
+	key := l.key(remoteAddr)
+	if key == "" {
+		return 0, false
+	}
+	now := time.Now()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if len(l.entries) >= l.maxEntries {
+		l.evictStale(now)
+	}
+	entry := l.entries[key]
+	if entry == nil {
+		entry = &authFailureEntry{}
+		l.entries[key] = entry
+	}
+	entry.lastSeen = now
+	if !entry.blockedUntil.IsZero() && now.Before(entry.blockedUntil) {
+		return time.Until(entry.blockedUntil).Round(time.Second), true
+	}
+	if entry.firstFailure.IsZero() || now.Sub(entry.firstFailure) > l.window {
+		entry.firstFailure = now
+		entry.count = 0
+		entry.blockedUntil = time.Time{}
+	}
+	entry.count++
+	if entry.count >= l.limit {
+		entry.blockedUntil = now.Add(l.blockWindow)
+		return l.blockWindow.Round(time.Second), true
+	}
+	return 0, false
+}
+
+func (l *authFailureLimiter) evictStale(now time.Time) {
+	for key, entry := range l.entries {
+		if entry == nil {
+			delete(l.entries, key)
+			continue
+		}
+		if !entry.blockedUntil.IsZero() && now.Before(entry.blockedUntil) {
+			continue
+		}
+		if entry.lastSeen.IsZero() || now.Sub(entry.lastSeen) > l.blockWindow {
+			delete(l.entries, key)
+		}
+	}
+	if len(l.entries) < l.maxEntries {
+		return
+	}
+	var oldestKey string
+	var oldestTime time.Time
+	for key, entry := range l.entries {
+		seen := entry.lastSeen
+		if oldestKey == "" || seen.Before(oldestTime) {
+			oldestKey = key
+			oldestTime = seen
+		}
+	}
+	if oldestKey != "" {
+		delete(l.entries, oldestKey)
+	}
+}
+
+func (l *authFailureLimiter) Reset(remoteAddr string) {
+	if l == nil {
+		return
+	}
+	key := l.key(remoteAddr)
+	if key == "" {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	delete(l.entries, key)
+}
+
+func (l *authFailureLimiter) ResetAll() {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.entries = make(map[string]*authFailureEntry)
+}
+
+func applyQueryCredentialCompatibility(req *http.Request) {
+	if req == nil || req.URL == nil || hasCredentialHeaders(req.Header) {
+		return
+	}
+
+	query := req.URL.Query()
+	if len(query) == 0 {
+		return
+	}
+
+	switch {
+	case req.Method == http.MethodGet && routeMatchesPrefix(req.URL.Path, "/v1/responses"):
+		token := strings.TrimSpace(query.Get("auth_token"))
+		if token == "" {
+			token = strings.TrimSpace(query.Get("key"))
+		}
+		if token == "" {
+			return
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+		query.Del("auth_token")
+		query.Del("key")
+		req.URL.RawQuery = query.Encode()
+	case isGeminiQueryKeyCompatibilityPath(req.URL.Path):
+		key := strings.TrimSpace(query.Get("key"))
+		if key == "" {
+			return
+		}
+		req.Header.Set("X-Goog-Api-Key", key)
+		query.Del("key")
+		req.URL.RawQuery = query.Encode()
+	}
+}
+
+func hasCredentialHeaders(headers http.Header) bool {
+	if headers == nil {
+		return false
+	}
+	for _, name := range []string{"Authorization", "X-Goog-Api-Key", "X-Api-Key"} {
+		if strings.TrimSpace(headers.Get(name)) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func isGeminiQueryKeyCompatibilityPath(path string) bool {
+	for _, prefix := range []string{
+		"/v1beta",
+		"/api/provider/google/v1beta",
+		"/api/provider/google/v1beta1",
+	} {
+		if routeMatchesPrefix(path, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func routeMatchesPrefix(path, prefix string) bool {
+	path = strings.TrimSpace(path)
+	prefix = strings.TrimSpace(prefix)
+	if path == prefix {
+		return true
+	}
+	return strings.HasPrefix(path, prefix+"/")
+}
+
 // (management handlers moved to internal/api/handlers/management)
 
 // AuthMiddleware returns a Gin middleware handler that authenticates requests
-// using the configured authentication providers. When no providers are available,
-// it allows all requests (legacy behaviour).
-func AuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc {
+// using the configured authentication providers. When the auth service is unavailable,
+// the middleware fails closed.
+func AuthMiddleware(manager *sdkaccess.Manager, trustedProxies []string) gin.HandlerFunc {
+	clientAddrResolver, err := util.NewClientAddressResolver(trustedProxies)
+	if err != nil {
+		panic(fmt.Errorf("invalid trusted-proxies configuration: %w", err))
+	}
 	return func(c *gin.Context) {
-		if manager == nil {
-			c.Next()
+		if manager == nil || len(manager.Providers()) == 0 {
+			c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "authentication service unavailable"})
 			return
 		}
-
+		applyQueryCredentialCompatibility(c.Request)
+		clientAddr := clientAddrResolver.Resolve(c.Request).RateLimitKey()
 		result, err := manager.Authenticate(c.Request.Context(), c.Request)
 		if err == nil {
+			apiAuthFailureLimiter.Reset(clientAddr)
 			if result != nil {
 				c.Set("apiKey", result.Principal)
 				c.Set("accessProvider", result.Provider)
@@ -1044,8 +1286,23 @@ func AuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc {
 			c.Next()
 			return
 		}
-
 		statusCode := err.HTTPStatusCode()
+		if sdkaccess.IsAuthErrorCode(err, sdkaccess.AuthErrorCodeNoCredentials) || sdkaccess.IsAuthErrorCode(err, sdkaccess.AuthErrorCodeInvalidCredential) {
+			if blocked, retryAfter := apiAuthFailureLimiter.IsBlocked(clientAddr); blocked {
+				if retryAfter > 0 {
+					c.Header("Retry-After", strconv.Itoa(int(retryAfter.Seconds())))
+				}
+				c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{"error": "too many authentication failures"})
+				return
+			}
+			if retryAfter, blocked := apiAuthFailureLimiter.RecordFailure(clientAddr); blocked {
+				if retryAfter > 0 {
+					c.Header("Retry-After", strconv.Itoa(int(retryAfter.Seconds())))
+				}
+				c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{"error": "too many authentication failures"})
+				return
+			}
+		}
 		if statusCode >= http.StatusInternalServerError {
 			log.Errorf("authentication middleware error: %v", err)
 		}

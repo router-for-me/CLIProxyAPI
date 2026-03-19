@@ -119,10 +119,14 @@ func captureRequestInfo(c *gin.Context, captureBody bool) (*RequestInfo, error) 
 	// Capture method
 	method := c.Request.Method
 
-	// Capture headers
+	// Capture headers (mask sensitive values before persisting)
 	headers := make(map[string][]string)
 	for key, values := range c.Request.Header {
-		headers[key] = values
+		masked := make([]string, len(values))
+		for i := range values {
+			masked[i] = util.MaskSensitiveHeaderValue(key, values[i])
+		}
+		headers[key] = masked
 	}
 
 	// Capture request body
@@ -150,10 +154,22 @@ func captureRequestInfo(c *gin.Context, captureBody bool) (*RequestInfo, error) 
 }
 
 // shouldLogRequest determines whether the request should be logged.
-// It skips management endpoints to avoid leaking secrets but allows
-// all other routes, including module-provided ones, to honor request-log.
+// It skips management and sensitive auth/OAuth paths to avoid leaking secrets,
+// while allowing public provider APIs to be logged.
 func shouldLogRequest(path string) bool {
-	if strings.HasPrefix(path, "/v0/management") || strings.HasPrefix(path, "/management") {
+	sensitivePrefixes := []string{
+		"/v0/management",
+		"/management",
+		"/api/auth",
+		"/auth",
+	}
+	for i := range sensitivePrefixes {
+		if strings.HasPrefix(path, sensitivePrefixes[i]) {
+			return false
+		}
+	}
+
+	if strings.HasSuffix(path, "/callback") {
 		return false
 	}
 

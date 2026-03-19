@@ -1,8 +1,10 @@
 package api
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +12,8 @@ import (
 	"time"
 
 	gin "github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
+	managementHandlers "github.com/router-for-me/CLIProxyAPI/v6/internal/api/handlers/management"
 	proxyconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	internallogging "github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
@@ -18,6 +22,10 @@ import (
 )
 
 func newTestServer(t *testing.T) *Server {
+	return newTestServerWithConfig(t, nil)
+}
+
+func newTestServerWithConfig(t *testing.T, mutate func(*proxyconfig.Config)) *Server {
 	t.Helper()
 
 	gin.SetMode(gin.TestMode)
@@ -37,6 +45,9 @@ func newTestServer(t *testing.T) *Server {
 		Debug:                  true,
 		LoggingToFile:          false,
 		UsageStatisticsEnabled: false,
+	}
+	if mutate != nil {
+		mutate(cfg)
 	}
 
 	authManager := auth.NewManager(nil, nil, nil)
@@ -164,10 +175,10 @@ func TestDefaultRequestLoggerFactory_UsesResolvedLogDirectory(t *testing.T) {
 	errLog := fileLogger.LogRequestWithOptions(
 		"/v1/chat/completions",
 		http.MethodPost,
-		map[string][]string{"Content-Type": []string{"application/json"}},
+		map[string][]string{"Content-Type": {"application/json"}},
 		[]byte(`{"input":"hello"}`),
 		http.StatusBadGateway,
-		map[string][]string{"Content-Type": []string{"application/json"}},
+		map[string][]string{"Content-Type": {"application/json"}},
 		[]byte(`{"error":"upstream failure"}`),
 		nil,
 		nil,
@@ -207,4 +218,465 @@ func TestDefaultRequestLoggerFactory_UsesResolvedLogDirectory(t *testing.T) {
 			t.Fatalf("unexpected forced error log in config dir %s", configLogsDir)
 		}
 	}
+}
+
+func TestCORSMiddleware_RestrictsOrigins(t *testing.T) {
+	testCases := []struct {
+		name            string
+		method          string
+		origin          string
+		wantStatus      int
+		wantAllowOrigin string
+		wantAllowHeader string
+	}{
+		{
+			name:            "no origin keeps headers empty",
+			method:          http.MethodGet,
+			wantStatus:      http.StatusOK,
+			wantAllowOrigin: "",
+			wantAllowHeader: "",
+		},
+		{
+			name:            "localhost origin is allowed",
+			method:          http.MethodGet,
+			origin:          "http://localhost:3000",
+			wantStatus:      http.StatusOK,
+			wantAllowOrigin: "http://localhost:3000",
+			wantAllowHeader: corsAllowedHeaders,
+		},
+		{
+			name:            "loopback preflight is allowed",
+			method:          http.MethodOptions,
+			origin:          "http://127.0.0.1:5173",
+			wantStatus:      http.StatusNoContent,
+			wantAllowOrigin: "http://127.0.0.1:5173",
+			wantAllowHeader: corsAllowedHeaders,
+		},
+		{
+			name:            "remote origin is stripped",
+			method:          http.MethodGet,
+			origin:          "https://evil.example",
+			wantStatus:      http.StatusForbidden,
+			wantAllowOrigin: "",
+			wantAllowHeader: "",
+		},
+		{
+			name:            "remote preflight is denied",
+			method:          http.MethodOptions,
+			origin:          "https://evil.example",
+			wantStatus:      http.StatusForbidden,
+			wantAllowOrigin: "",
+			wantAllowHeader: "",
+		},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			engine := gin.New()
+			engine.Use(corsMiddleware())
+			engine.Any("/resource", func(c *gin.Context) {
+				c.Status(http.StatusOK)
+			})
+
+			req := httptest.NewRequest(tc.method, "/resource", nil)
+			if tc.origin != "" {
+				req.Header.Set("Origin", tc.origin)
+			}
+
+			rr := httptest.NewRecorder()
+			engine.ServeHTTP(rr, req)
+
+			if rr.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d; body=%s", rr.Code, tc.wantStatus, rr.Body.String())
+			}
+			if got := rr.Header().Get("Access-Control-Allow-Origin"); got != tc.wantAllowOrigin {
+				t.Fatalf("allow origin = %q, want %q", got, tc.wantAllowOrigin)
+			}
+			if got := rr.Header().Get("Access-Control-Allow-Headers"); got != tc.wantAllowHeader {
+				t.Fatalf("allow headers = %q, want %q", got, tc.wantAllowHeader)
+			}
+			if tc.wantAllowOrigin != "" {
+				if got := rr.Header().Get("Access-Control-Allow-Methods"); got != corsAllowedMethods {
+					t.Fatalf("allow methods = %q, want %q", got, corsAllowedMethods)
+				}
+			}
+		})
+	}
+}
+
+func TestOAuthCallbackWriteErrorsAreNotIgnored(t *testing.T) {
+	testCases := []struct {
+		name       string
+		authDir    string
+		state      string
+		wantStatus int
+		wantBody   string
+	}{
+		{
+			name:       "successful callback persists state",
+			authDir:    "use-server-auth-dir",
+			state:      "oauth-callback-success",
+			wantStatus: http.StatusOK,
+			wantBody:   "Authentication successful",
+		},
+		{
+			name:       "write failure returns server error",
+			authDir:    "",
+			state:      "oauth-callback-write-error",
+			wantStatus: http.StatusInternalServerError,
+			wantBody:   "Authentication callback failed",
+		},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			server := newTestServer(t)
+			if tc.authDir != "use-server-auth-dir" {
+				server.cfg.AuthDir = tc.authDir
+			}
+
+			managementHandlers.RegisterOAuthSession(tc.state, "anthropic")
+
+			req := httptest.NewRequest(
+				http.MethodGet,
+				"/anthropic/callback?state="+url.QueryEscape(tc.state)+"&code=test-code",
+				nil,
+			)
+			rr := httptest.NewRecorder()
+			server.engine.ServeHTTP(rr, req)
+
+			if rr.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d; body=%s", rr.Code, tc.wantStatus, rr.Body.String())
+			}
+			if body := rr.Body.String(); !strings.Contains(body, tc.wantBody) {
+				t.Fatalf("body = %q, want substring %q", body, tc.wantBody)
+			}
+			if tc.wantStatus == http.StatusOK {
+				callbackPath := filepath.Join(server.cfg.AuthDir, ".oauth-anthropic-"+tc.state+".oauth")
+				if _, err := os.Stat(callbackPath); err != nil {
+					t.Fatalf("expected callback file %s: %v", callbackPath, err)
+				}
+			}
+		})
+	}
+}
+
+func TestGeminiCompatibleRoutesAcceptQueryKeyCompatibility(t *testing.T) {
+	server := newTestServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1beta/models?key=test-key", nil)
+	req.RemoteAddr = "198.51.100.21:1234"
+
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	if body := rr.Body.String(); !strings.Contains(body, "\"models\"") {
+		t.Fatalf("body = %q, want models payload", body)
+	}
+}
+
+func TestGeminiProviderAliasRoutesAcceptQueryKeyCompatibility(t *testing.T) {
+	server := newTestServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/provider/google/v1beta/models?key=test-key", nil)
+	req.RemoteAddr = "198.51.100.22:1234"
+
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	if body := rr.Body.String(); !strings.Contains(body, "\"models\"") {
+		t.Fatalf("body = %q, want models payload", body)
+	}
+}
+
+func TestAmpGoogleV1Beta1RoutesAcceptQueryKeyCompatibility(t *testing.T) {
+	var upstreamQuery string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamQuery = r.URL.RawQuery
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("proxied"))
+	}))
+	defer upstream.Close()
+
+	server := newTestServerWithConfig(t, func(cfg *proxyconfig.Config) {
+		cfg.AmpCode.UpstreamURL = upstream.URL
+	})
+	httpServer := httptest.NewServer(server.engine)
+	defer httpServer.Close()
+
+	req, err := http.NewRequest(http.MethodGet, httpServer.URL+"/api/provider/google/v1beta1/models?key=test-key", nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	body := string(bodyBytes)
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", resp.StatusCode, http.StatusOK, body)
+	}
+	if !strings.Contains(body, "proxied") {
+		t.Fatalf("body = %q, want proxied response", body)
+	}
+	if strings.Contains(upstreamQuery, "key=") {
+		t.Fatalf("upstream query unexpectedly retained key: %q", upstreamQuery)
+	}
+}
+
+func TestOpenAIResponsesWebsocketRouteAcceptsQueryCredentialCompatibility(t *testing.T) {
+	testCases := []struct {
+		name  string
+		query string
+	}{
+		{name: "auth token", query: "auth_token=test-key"},
+		{name: "key", query: "key=test-key"},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			server := newTestServer(t)
+			httpServer := httptest.NewServer(server.engine)
+			defer httpServer.Close()
+
+			wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/v1/responses?" + tc.query
+			conn, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
+			if err != nil {
+				status := 0
+				if resp != nil {
+					status = resp.StatusCode
+				}
+				t.Fatalf("dial websocket: %v (status=%d)", err, status)
+			}
+			defer func() {
+				if errClose := conn.Close(); errClose != nil {
+					t.Fatalf("close websocket: %v", errClose)
+				}
+			}()
+		})
+	}
+}
+
+func TestOpenAIRoutesStillRejectQueryOnlyCredentials(t *testing.T) {
+	server := newTestServer(t)
+
+	testCases := []struct {
+		name string
+		path string
+	}{
+		{name: "query key", path: "/v1/models?key=test-key"},
+		{name: "query auth token", path: "/v1/models?auth_token=test-key"},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+			req.RemoteAddr = "198.51.100.24:1234"
+
+			rr := httptest.NewRecorder()
+			server.engine.ServeHTTP(rr, req)
+
+			if rr.Code != http.StatusUnauthorized {
+				t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusUnauthorized, rr.Body.String())
+			}
+		})
+	}
+}
+
+func TestProtectedRoutesRejectNilAccessManager(t *testing.T) {
+	server := newTestServerWithAccessManager(t, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.RemoteAddr = "198.51.100.20:1234"
+
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusServiceUnavailable, rr.Body.String())
+	}
+	if body := rr.Body.String(); !strings.Contains(body, "authentication service unavailable") {
+		t.Fatalf("body = %q, want authentication service unavailable", body)
+	}
+}
+
+func TestProtectedRoutesRateLimitAuthenticationFailures(t *testing.T) {
+	apiAuthFailureLimiter.ResetAll()
+	t.Cleanup(apiAuthFailureLimiter.ResetAll)
+
+	server := newTestServer(t)
+	remoteAddr := "198.51.100.30:1234"
+
+	for attempt := 1; attempt < authFailureLimit; attempt++ {
+		req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+		req.RemoteAddr = remoteAddr
+		req.Header.Set("Authorization", "Bearer wrong-key")
+
+		rr := httptest.NewRecorder()
+		server.engine.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d status = %d, want %d; body=%s", attempt, rr.Code, http.StatusUnauthorized, rr.Body.String())
+		}
+	}
+
+	rateLimitedReq := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	rateLimitedReq.RemoteAddr = remoteAddr
+	rateLimitedReq.Header.Set("Authorization", "Bearer wrong-key")
+
+	rateLimitedResp := httptest.NewRecorder()
+	server.engine.ServeHTTP(rateLimitedResp, rateLimitedReq)
+
+	if rateLimitedResp.Code != http.StatusTooManyRequests {
+		t.Fatalf("rate limited status = %d, want %d; body=%s", rateLimitedResp.Code, http.StatusTooManyRequests, rateLimitedResp.Body.String())
+	}
+	if retryAfter := rateLimitedResp.Header().Get("Retry-After"); retryAfter == "" {
+		t.Fatal("expected Retry-After header on rate-limited response")
+	}
+
+	successReq := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	successReq.RemoteAddr = remoteAddr
+	successReq.Header.Set("Authorization", "Bearer test-key")
+
+	successResp := httptest.NewRecorder()
+	server.engine.ServeHTTP(successResp, successReq)
+
+	if successResp.Code != http.StatusOK {
+		t.Fatalf("success status = %d, want %d; body=%s", successResp.Code, http.StatusOK, successResp.Body.String())
+	}
+
+	badReqAfterSuccess := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	badReqAfterSuccess.RemoteAddr = remoteAddr
+	badReqAfterSuccess.Header.Set("Authorization", "Bearer wrong-key")
+
+	badRespAfterSuccess := httptest.NewRecorder()
+	server.engine.ServeHTTP(badRespAfterSuccess, badReqAfterSuccess)
+
+	if badRespAfterSuccess.Code != http.StatusUnauthorized {
+		t.Fatalf("post-success bad status = %d, want %d; body=%s", badRespAfterSuccess.Code, http.StatusUnauthorized, badRespAfterSuccess.Body.String())
+	}
+}
+
+func TestProtectedRoutesRateLimitAuthenticationFailuresBehindLoopbackProxyWithoutTrust(t *testing.T) {
+	apiAuthFailureLimiter.ResetAll()
+	t.Cleanup(apiAuthFailureLimiter.ResetAll)
+
+	server := newTestServer(t)
+
+	for attempt := 1; attempt < authFailureLimit; attempt++ {
+		req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+		req.RemoteAddr = "127.0.0.1:1234"
+		req.Header.Set("Authorization", "Bearer wrong-key")
+		req.Header.Set("X-Forwarded-For", "198.51.100.30")
+
+		rr := httptest.NewRecorder()
+		server.engine.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d status = %d, want %d; body=%s", attempt, rr.Code, http.StatusUnauthorized, rr.Body.String())
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.RemoteAddr = "127.0.0.1:1234"
+	req.Header.Set("Authorization", "Bearer wrong-key")
+	req.Header.Set("X-Forwarded-For", "198.51.100.30")
+
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("rate limited status = %d, want %d; body=%s", rr.Code, http.StatusTooManyRequests, rr.Body.String())
+	}
+}
+
+func TestProtectedRoutesRateLimitAuthenticationFailuresRespectTrustedProxyClientIP(t *testing.T) {
+	apiAuthFailureLimiter.ResetAll()
+	t.Cleanup(apiAuthFailureLimiter.ResetAll)
+
+	server := newTestServerWithConfig(t, func(cfg *proxyconfig.Config) {
+		cfg.TrustedProxies = []string{"127.0.0.1/32"}
+	})
+
+	for attempt := 1; attempt < authFailureLimit; attempt++ {
+		req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+		req.RemoteAddr = "127.0.0.1:1234"
+		req.Header.Set("Authorization", "Bearer wrong-key")
+		req.Header.Set("X-Forwarded-For", "198.51.100.30")
+
+		rr := httptest.NewRecorder()
+		server.engine.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusUnauthorized {
+			t.Fatalf("client A attempt %d status = %d, want %d; body=%s", attempt, rr.Code, http.StatusUnauthorized, rr.Body.String())
+		}
+	}
+
+	clientBReq := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	clientBReq.RemoteAddr = "127.0.0.1:1234"
+	clientBReq.Header.Set("Authorization", "Bearer wrong-key")
+	clientBReq.Header.Set("X-Forwarded-For", "198.51.100.31")
+
+	clientBResp := httptest.NewRecorder()
+	server.engine.ServeHTTP(clientBResp, clientBReq)
+
+	if clientBResp.Code != http.StatusUnauthorized {
+		t.Fatalf("client B status = %d, want %d; body=%s", clientBResp.Code, http.StatusUnauthorized, clientBResp.Body.String())
+	}
+
+	clientAFinalReq := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	clientAFinalReq.RemoteAddr = "127.0.0.1:1234"
+	clientAFinalReq.Header.Set("Authorization", "Bearer wrong-key")
+	clientAFinalReq.Header.Set("X-Forwarded-For", "198.51.100.30")
+
+	clientAFinalResp := httptest.NewRecorder()
+	server.engine.ServeHTTP(clientAFinalResp, clientAFinalReq)
+
+	if clientAFinalResp.Code != http.StatusTooManyRequests {
+		t.Fatalf("client A rate limited status = %d, want %d; body=%s", clientAFinalResp.Code, http.StatusTooManyRequests, clientAFinalResp.Body.String())
+	}
+}
+
+func newTestServerWithAccessManager(t *testing.T, accessManager *sdkaccess.Manager) *Server {
+	t.Helper()
+
+	gin.SetMode(gin.TestMode)
+
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if err := os.MkdirAll(authDir, 0o700); err != nil {
+		t.Fatalf("failed to create auth dir: %v", err)
+	}
+
+	cfg := &proxyconfig.Config{
+		SDKConfig: sdkconfig.SDKConfig{
+			APIKeys: []string{"test-key"},
+		},
+		Port:                   0,
+		AuthDir:                authDir,
+		Debug:                  true,
+		LoggingToFile:          false,
+		UsageStatisticsEnabled: false,
+	}
+
+	authManager := auth.NewManager(nil, nil, nil)
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	return NewServer(cfg, authManager, accessManager, configPath)
 }
