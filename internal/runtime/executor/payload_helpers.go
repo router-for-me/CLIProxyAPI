@@ -16,7 +16,7 @@ import (
 // and restricts matches to the given protocol when supplied. Defaults are checked
 // against the original payload when provided. requestedModel carries the client-visible
 // model name before alias resolution so payload rules can target aliases precisely.
-func applyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string, payload, original []byte, requestedModel string) []byte {
+func applyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string, payload, original []byte, requestedModel string, extraRequestedModels ...string) []byte {
 	if cfg == nil || len(payload) == 0 {
 		return payload
 	}
@@ -26,10 +26,10 @@ func applyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string
 	}
 	model = strings.TrimSpace(model)
 	requestedModel = strings.TrimSpace(requestedModel)
-	if model == "" && requestedModel == "" {
+	if model == "" && requestedModel == "" && len(extraRequestedModels) == 0 {
 		return payload
 	}
-	candidates := payloadModelCandidates(model, requestedModel)
+	candidates := payloadModelCandidates(model, append([]string{requestedModel}, extraRequestedModels...)...)
 	out := payload
 	source := original
 	if len(source) == 0 {
@@ -172,14 +172,13 @@ func payloadModelRulesMatch(rules []config.PayloadModelRule, protocol string, mo
 	return false
 }
 
-func payloadModelCandidates(model, requestedModel string) []string {
+func payloadModelCandidates(model string, requestedModels ...string) []string {
 	model = strings.TrimSpace(model)
-	requestedModel = strings.TrimSpace(requestedModel)
-	if model == "" && requestedModel == "" {
+	if model == "" && len(requestedModels) == 0 {
 		return nil
 	}
-	candidates := make([]string, 0, 3)
-	seen := make(map[string]struct{}, 3)
+	candidates := make([]string, 0, 4)
+	seen := make(map[string]struct{}, 4)
 	addCandidate := func(value string) {
 		value = strings.TrimSpace(value)
 		if value == "" {
@@ -195,7 +194,11 @@ func payloadModelCandidates(model, requestedModel string) []string {
 	if model != "" {
 		addCandidate(model)
 	}
-	if requestedModel != "" {
+	for _, requestedModel := range requestedModels {
+		requestedModel = strings.TrimSpace(requestedModel)
+		if requestedModel == "" {
+			continue
+		}
 		parsed := thinking.ParseSuffix(requestedModel)
 		base := strings.TrimSpace(parsed.ModelName)
 		if base != "" {
@@ -270,6 +273,24 @@ func payloadRequestedModel(opts cliproxyexecutor.Options, fallback string) strin
 		return trimmed
 	default:
 		return fallback
+	}
+}
+
+func payloadOriginalRequestedModel(opts cliproxyexecutor.Options) string {
+	if len(opts.Metadata) == 0 {
+		return ""
+	}
+	raw, ok := opts.Metadata[cliproxyexecutor.OriginalRequestedModelMetadataKey]
+	if !ok || raw == nil {
+		return ""
+	}
+	switch v := raw.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	case []byte:
+		return strings.TrimSpace(string(v))
+	default:
+		return ""
 	}
 }
 
