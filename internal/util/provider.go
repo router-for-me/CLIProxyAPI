@@ -49,8 +49,21 @@ func GetProviderName(modelName string) []string {
 		providers = append(providers, name)
 	}
 
-	for _, provider := range registry.GetGlobalRegistry().GetModelProviders(modelName) {
-		appendProvider(provider)
+	candidates := []string{modelName}
+	compat := NormalizeOpenAIFastModeModel(modelName)
+	if compat.UsedCompatibility {
+		if compat.NormalizedModel != "" && compat.NormalizedModel != modelName {
+			candidates = append(candidates, compat.NormalizedModel)
+		}
+		if compat.BaseModel != "" && compat.BaseModel != modelName && compat.BaseModel != compat.NormalizedModel {
+			candidates = append(candidates, compat.BaseModel)
+		}
+	}
+
+	for _, candidate := range candidates {
+		for _, provider := range registry.GetGlobalRegistry().GetModelProviders(candidate) {
+			appendProvider(provider)
+		}
 	}
 
 	if len(providers) > 0 {

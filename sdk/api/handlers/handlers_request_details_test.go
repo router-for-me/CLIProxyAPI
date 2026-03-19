@@ -20,6 +20,7 @@ func TestGetRequestDetails_PreservesSuffix(t *testing.T) {
 	})
 	modelRegistry.RegisterClient("test-request-details-openai", "openai", []*registry.ModelInfo{
 		{ID: "gpt-5.2", Created: now + 20},
+		{ID: "gpt-5.4", Created: now + 15},
 	})
 	modelRegistry.RegisterClient("test-request-details-claude", "claude", []*registry.ModelInfo{
 		{ID: "claude-sonnet-4-5", Created: now + 5},
@@ -95,6 +96,27 @@ func TestGetRequestDetails_PreservesSuffix(t *testing.T) {
 			wantProviders: []string{"claude"},
 			wantModel:     "claude-sonnet-4-5(auto)",
 			wantErr:       false,
+		},
+		{
+			name:          "fast alias normalizes to canonical model",
+			inputModel:    "gpt-5.4-fast",
+			wantProviders: []string{"openai"},
+			wantModel:     "gpt-5.4",
+			wantErr:       false,
+		},
+		{
+			name:          "fast alias with level normalizes to thinking suffix",
+			inputModel:    "gpt-5.4-high-fast",
+			wantProviders: []string{"openai"},
+			wantModel:     "gpt-5.4(high)",
+			wantErr:       false,
+		},
+		{
+			name:          "non-fast hyphen suffix remains unsupported",
+			inputModel:    "gpt-5.4-high",
+			wantProviders: nil,
+			wantModel:     "",
+			wantErr:       true,
 		},
 	}
 

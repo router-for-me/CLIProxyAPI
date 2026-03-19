@@ -107,6 +107,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	if err != nil {
 		return resp, err
 	}
+	translated = applyPriorityServiceTierCompatibility(translated, opts.Metadata)
 
 	url := strings.TrimSuffix(baseURL, "/") + endpoint
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
@@ -204,6 +205,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	if err != nil {
 		return nil, err
 	}
+	translated = applyPriorityServiceTierCompatibility(translated, opts.Metadata)
 
 	// Request usage data in the final streaming chunk so that token statistics
 	// are captured even when the upstream is an OpenAI-compatible provider.

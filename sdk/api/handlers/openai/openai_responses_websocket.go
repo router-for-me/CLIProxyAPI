@@ -395,8 +395,12 @@ func (h *OpenAIResponsesAPIHandler) websocketUpstreamSupportsIncrementalInputFor
 		resolvedModelName = util.ResolveAutoModel(modelName)
 	}
 
-	parsed := thinking.ParseSuffix(resolvedModelName)
-	baseModel := strings.TrimSpace(parsed.ModelName)
+	compat := util.NormalizeOpenAIFastModeModel(resolvedModelName)
+	resolvedModelName = compat.NormalizedModel
+	baseModel := compat.BaseModel
+	if baseModel == "" {
+		baseModel = strings.TrimSpace(thinking.ParseSuffix(resolvedModelName).ModelName)
+	}
 	providers := util.GetProviderName(baseModel)
 	if len(providers) == 0 && baseModel != resolvedModelName {
 		providers = util.GetProviderName(resolvedModelName)
@@ -456,7 +460,10 @@ func responsesWebsocketAuthAvailableForModel(auth *coreauth.Auth, modelName stri
 	if modelName != "" && len(auth.ModelStates) > 0 {
 		state, ok := auth.ModelStates[modelName]
 		if (!ok || state == nil) && modelName != "" {
-			baseModel := strings.TrimSpace(thinking.ParseSuffix(modelName).ModelName)
+			baseModel := util.NormalizeOpenAIFastModeModel(modelName).BaseModel
+			if baseModel == "" {
+				baseModel = strings.TrimSpace(thinking.ParseSuffix(modelName).ModelName)
+			}
 			if baseModel != "" && baseModel != modelName {
 				state, ok = auth.ModelStates[baseModel]
 			}

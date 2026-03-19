@@ -204,6 +204,9 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 			out, _ = sjson.Set(out, "reasoning_effort", effort)
 		}
 	}
+	if serviceTier := strings.TrimSpace(root.Get("service_tier").String()); serviceTier != "" {
+		out, _ = sjson.Set(out, "service_tier", serviceTier)
+	}
 
 	// Convert tool_choice if present
 	if toolChoice := root.Get("tool_choice"); toolChoice.Exists() {

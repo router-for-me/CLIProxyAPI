@@ -211,6 +211,22 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 	return meta
 }
 
+func applyRequestModelMetadata(meta map[string]any, requestedModel, normalizedModel string) {
+	if len(meta) == 0 {
+		return
+	}
+	meta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
+
+	requestedModel = strings.TrimSpace(requestedModel)
+	if requestedModel == "" {
+		return
+	}
+	meta[coreexecutor.OriginalRequestedModelMetadataKey] = requestedModel
+	if util.HasOpenAIFastModeCompatibility(requestedModel) {
+		meta[coreexecutor.PriorityServiceTierRequestedMetadataKey] = true
+	}
+}
+
 func pinnedAuthIDFromContext(ctx context.Context) string {
 	if ctx == nil {
 		return ""
@@ -473,7 +489,7 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 		return nil, nil, errMsg
 	}
 	reqMeta := requestExecutionMetadata(ctx)
-	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
+	applyRequestModelMetadata(reqMeta, modelName, normalizedModel)
 	payload := rawJSON
 	if len(payload) == 0 {
 		payload = nil
@@ -519,7 +535,7 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 		return nil, nil, errMsg
 	}
 	reqMeta := requestExecutionMetadata(ctx)
-	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
+	applyRequestModelMetadata(reqMeta, modelName, normalizedModel)
 	payload := rawJSON
 	if len(payload) == 0 {
 		payload = nil
@@ -569,7 +585,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 		return nil, nil, errChan
 	}
 	reqMeta := requestExecutionMetadata(ctx)
-	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
+	applyRequestModelMetadata(reqMeta, modelName, normalizedModel)
 	payload := rawJSON
 	if len(payload) == 0 {
 		payload = nil
@@ -788,8 +804,12 @@ func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string
 		resolvedModelName = util.ResolveAutoModel(modelName)
 	}
 
-	parsed := thinking.ParseSuffix(resolvedModelName)
-	baseModel := strings.TrimSpace(parsed.ModelName)
+	compat := util.NormalizeOpenAIFastModeModel(resolvedModelName)
+	resolvedModelName = compat.NormalizedModel
+	baseModel := compat.BaseModel
+	if baseModel == "" {
+		baseModel = strings.TrimSpace(thinking.ParseSuffix(resolvedModelName).ModelName)
+	}
 
 	providers = util.GetProviderName(baseModel)
 	// Fallback: if baseModel has no provider but differs from resolvedModelName,

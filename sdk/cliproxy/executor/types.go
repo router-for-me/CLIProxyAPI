@@ -10,6 +10,12 @@ import (
 // RequestedModelMetadataKey stores the client-requested model name in Options.Metadata.
 const RequestedModelMetadataKey = "requested_model"
 
+// OriginalRequestedModelMetadataKey stores the exact client-requested model before normalization.
+const OriginalRequestedModelMetadataKey = "original_requested_model"
+
+// PriorityServiceTierRequestedMetadataKey marks requests that should be forced to service_tier=priority.
+const PriorityServiceTierRequestedMetadataKey = "priority_service_tier_requested"
+
 const (
 	// PinnedAuthMetadataKey locks execution to a specific auth ID.
 	PinnedAuthMetadataKey = "pinned_auth_id"
