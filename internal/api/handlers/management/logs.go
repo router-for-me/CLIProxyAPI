@@ -28,11 +28,16 @@ func (h *Handler) GetLogs(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler unavailable"})
 		return
 	}
-	if h.cfg == nil {
+	cfg, err := h.configSnapshot()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "configuration unavailable"})
+		return
+	}
+	if cfg == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "configuration unavailable"})
 		return
 	}
-	if !h.cfg.LoggingToFile {
+	if !cfg.LoggingToFile {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "logging to file disabled"})
 		return
 	}
@@ -90,11 +95,16 @@ func (h *Handler) DeleteLogs(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler unavailable"})
 		return
 	}
-	if h.cfg == nil {
+	cfg, err := h.configSnapshot()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "configuration unavailable"})
+		return
+	}
+	if cfg == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "configuration unavailable"})
 		return
 	}
-	if !h.cfg.LoggingToFile {
+	if !cfg.LoggingToFile {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "logging to file disabled"})
 		return
 	}
@@ -152,11 +162,16 @@ func (h *Handler) GetRequestErrorLogs(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler unavailable"})
 		return
 	}
-	if h.cfg == nil {
+	cfg, err := h.configSnapshot()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "configuration unavailable"})
+		return
+	}
+	if cfg == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "configuration unavailable"})
 		return
 	}
-	if h.cfg.RequestLog {
+	if cfg.RequestLog {
 		c.JSON(http.StatusOK, gin.H{"files": []any{}})
 		return
 	}
@@ -216,7 +231,12 @@ func (h *Handler) GetRequestLogByID(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler unavailable"})
 		return
 	}
-	if h.cfg == nil {
+	cfg, err := h.configSnapshot()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "configuration unavailable"})
+		return
+	}
+	if cfg == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "configuration unavailable"})
 		return
 	}
@@ -303,7 +323,12 @@ func (h *Handler) DownloadRequestErrorLog(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler unavailable"})
 		return
 	}
-	if h.cfg == nil {
+	cfg, err := h.configSnapshot()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "configuration unavailable"})
+		return
+	}
+	if cfg == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "configuration unavailable"})
 		return
 	}
@@ -357,10 +382,14 @@ func (h *Handler) logDirectory() string {
 	if h == nil {
 		return ""
 	}
-	if h.logDir != "" {
-		return h.logDir
+	snapshot, err := h.runtimeSnapshot()
+	if err == nil {
+		if strings.TrimSpace(snapshot.logDir) != "" {
+			return snapshot.logDir
+		}
+		return logging.ResolveLogDirectory(snapshot.cfg)
 	}
-	return logging.ResolveLogDirectory(h.cfg)
+	return ""
 }
 
 func (h *Handler) collectLogFiles(dir string) ([]string, error) {

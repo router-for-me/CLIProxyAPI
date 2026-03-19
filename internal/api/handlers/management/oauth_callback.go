@@ -18,7 +18,7 @@ type oauthCallbackRequest struct {
 }
 
 func (h *Handler) PostOAuthCallback(c *gin.Context) {
-	if h == nil || h.cfg == nil {
+	if h == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "error": "handler not initialized"})
 		return
 	}

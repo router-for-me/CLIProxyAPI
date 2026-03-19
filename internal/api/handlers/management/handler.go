@@ -19,6 +19,7 @@ import (
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"golang.org/x/crypto/bcrypt"
+	"gopkg.in/yaml.v3"
 )
 
 type attemptInfo struct {
@@ -41,6 +42,19 @@ type Handler struct {
 	stateMu             sync.RWMutex
 	attemptsMu          sync.Mutex
 	failedAttempts      map[string]*attemptInfo // keyed by client IP
+	authManager         *coreauth.Manager
+	usageStats          *usage.RequestStatistics
+	tokenStore          coreauth.Store
+	localPassword       string
+	allowRemoteOverride bool
+	envSecret           string
+	logDir              string
+	postAuthHook        coreauth.PostAuthHook
+}
+
+type runtimeStateSnapshot struct {
+	cfg                 *config.Config
+	configFilePath      string
 	authManager         *coreauth.Manager
 	usageStats          *usage.RequestStatistics
 	tokenStore          coreauth.Store
@@ -120,12 +134,10 @@ func NewHandlerWithoutConfigFilePath(cfg *config.Config, manager *coreauth.Manag
 	return NewHandler(cfg, "", manager)
 }
 
-// StateMiddleware serializes management runtime state access so request handlers,
-// hot-reload updates and persistence do not observe partially-updated in-memory state.
+// StateMiddleware is kept for compatibility but no longer serializes the entire
+// request lifecycle. Handlers should use short-lived snapshots and mutation helpers instead.
 func (h *Handler) StateMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		h.stateMu.Lock()
-		defer h.stateMu.Unlock()
 		c.Next()
 	}
 }
@@ -180,21 +192,78 @@ func (h *Handler) SetPostAuthHook(hook coreauth.PostAuthHook) {
 	h.stateMu.Unlock()
 }
 
-func (h *Handler) effectiveAuthDir() string {
+func cloneConfig(cfg *config.Config) (*config.Config, error) {
+	if cfg == nil {
+		return nil, nil
+	}
+	raw, err := yaml.Marshal(cfg)
+	if err != nil {
+		return nil, err
+	}
+	var cloned config.Config
+	if err := yaml.Unmarshal(raw, &cloned); err != nil {
+		return nil, err
+	}
+	return &cloned, nil
+}
+
+func (h *Handler) runtimeSnapshot() (*runtimeStateSnapshot, error) {
 	if h == nil {
-		return ""
+		return &runtimeStateSnapshot{}, nil
 	}
 	h.stateMu.RLock()
-	defer h.stateMu.RUnlock()
-	store := h.tokenStoreWithBaseDir()
-	if h.cfg == nil {
+	cfg, err := cloneConfig(h.cfg)
+	snapshot := &runtimeStateSnapshot{
+		cfg:                 cfg,
+		configFilePath:      h.configFilePath,
+		authManager:         h.authManager,
+		usageStats:          h.usageStats,
+		tokenStore:          h.tokenStore,
+		localPassword:       h.localPassword,
+		allowRemoteOverride: h.allowRemoteOverride,
+		envSecret:           h.envSecret,
+		logDir:              h.logDir,
+		postAuthHook:        h.postAuthHook,
+	}
+	h.stateMu.RUnlock()
+	if snapshot.tokenStore == nil {
+		snapshot.tokenStore = sdkAuth.GetTokenStore()
+	}
+	if err != nil {
+		return snapshot, err
+	}
+	return snapshot, nil
+}
+
+func (h *Handler) configSnapshot() (*config.Config, error) {
+	snapshot, err := h.runtimeSnapshot()
+	if err != nil {
+		return nil, err
+	}
+	return snapshot.cfg, nil
+}
+
+func effectiveAuthDirFromSnapshot(cfg *config.Config, store coreauth.Store) string {
+	if cfg == nil {
 		return ResolveEffectiveAuthDir("", store)
 	}
-	return ResolveEffectiveAuthDir(h.cfg.AuthDir, store)
+	return ResolveEffectiveAuthDir(cfg.AuthDir, store)
+}
+
+func (h *Handler) effectiveAuthDir() string {
+	snapshot, err := h.runtimeSnapshot()
+	if err != nil {
+		return ""
+	}
+	return effectiveAuthDirFromSnapshot(snapshot.cfg, snapshot.tokenStore)
 }
 
 func (h *Handler) registerOAuthSession(state, provider string) string {
-	authDir := h.effectiveAuthDir()
+	snapshot, err := h.runtimeSnapshot()
+	if err != nil {
+		return ""
+	}
+	authDir := effectiveAuthDirFromSnapshot(snapshot.cfg, snapshot.tokenStore)
 	RegisterOAuthSession(state, provider, authDir)
 	return authDir
 }
@@ -341,12 +410,18 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 	}
 }
 
-// persist saves the current in-memory config to disk.
-func (h *Handler) persist(c *gin.Context) bool {
-	h.mu.Lock()
-	defer h.mu.Unlock()
+func (h *Handler) persistConfig(c *gin.Context, cfg *config.Config) bool {
+	if cfg == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "configuration unavailable"})
+		return false
+	}
 	// Preserve comments when writing
-	if err := config.SaveConfigPreserveComments(h.configFilePath, h.cfg); err != nil {
+	snapshot, err := h.runtimeSnapshot()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to snapshot config: %v", err)})
+		return false
+	}
+	if err := config.SaveConfigPreserveComments(snapshot.configFilePath, cfg); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to save config: %v", err)})
 		return false
 	}
@@ -354,8 +429,50 @@ func (h *Handler) persist(c *gin.Context) bool {
 	return true
 }
 
+// persist saves the current in-memory config to disk.
+func (h *Handler) persist(c *gin.Context) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	cfg, err := h.configSnapshot()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to snapshot config: %v", err)})
+		return false
+	}
+	return h.persistConfig(c, cfg)
+}
+
+func (h *Handler) applyConfigMutation(c *gin.Context, mutate func(*config.Config) error) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	current, err := h.configSnapshot()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to snapshot config: %v", err)})
+		return false
+	}
+	if current == nil {
+		current = &config.Config{}
+	}
+	nextCfg, err := cloneConfig(current)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to clone config: %v", err)})
+		return false
+	}
+	if err := mutate(nextCfg); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return false
+	}
+	if !h.persistConfig(c, nextCfg) {
+		return false
+	}
+	h.stateMu.Lock()
+	h.cfg = nextCfg
+	h.stateMu.Unlock()
+	return true
+}
+
 // Helper methods for simple types
-func (h *Handler) updateBoolField(c *gin.Context, set func(bool)) {
+func (h *Handler) updateBoolField(c *gin.Context, set func(*config.Config, bool)) {
 	var body struct {
 		Value *bool `json:"value"`
 	}
@@ -363,11 +480,13 @@ func (h *Handler) updateBoolField(c *gin.Context, set func(bool)) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
 		return
 	}
-	set(*body.Value)
-	h.persist(c)
+	h.applyConfigMutation(c, func(cfg *config.Config) error {
+		set(cfg, *body.Value)
+		return nil
+	})
 }
 
-func (h *Handler) updateIntField(c *gin.Context, set func(int)) {
+func (h *Handler) updateIntField(c *gin.Context, set func(*config.Config, int) error) {
 	var body struct {
 		Value *int `json:"value"`
 	}
@@ -375,11 +494,12 @@ func (h *Handler) updateIntField(c *gin.Context, set func(int)) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
 		return
 	}
-	set(*body.Value)
-	h.persist(c)
+	h.applyConfigMutation(c, func(cfg *config.Config) error {
+		return set(cfg, *body.Value)
+	})
 }
 
-func (h *Handler) updateStringField(c *gin.Context, set func(string)) {
+func (h *Handler) updateStringField(c *gin.Context, set func(*config.Config, string)) {
 	var body struct {
 		Value *string `json:"value"`
 	}
@@ -387,6 +507,8 @@ func (h *Handler) updateStringField(c *gin.Context, set func(string)) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
 		return
 	}
-	set(*body.Value)
-	h.persist(c)
+	h.applyConfigMutation(c, func(cfg *config.Config) error {
+		set(cfg, *body.Value)
+		return nil
+	})
 }

@@ -23,8 +23,11 @@ type usageImportPayload struct {
 // GetUsageStatistics returns the in-memory request statistics snapshot.
 func (h *Handler) GetUsageStatistics(c *gin.Context) {
 	var snapshot usage.StatisticsSnapshot
-	if h != nil && h.usageStats != nil {
-		snapshot = h.usageStats.Snapshot()
+	if h != nil {
+		state, err := h.runtimeSnapshot()
+		if err == nil && state.usageStats != nil {
+			snapshot = state.usageStats.Snapshot()
+		}
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"usage":           snapshot,
@@ -35,8 +38,11 @@ func (h *Handler) GetUsageStatistics(c *gin.Context) {
 // ExportUsageStatistics returns a complete usage snapshot for backup/migration.
 func (h *Handler) ExportUsageStatistics(c *gin.Context) {
 	var snapshot usage.StatisticsSnapshot
-	if h != nil && h.usageStats != nil {
-		snapshot = h.usageStats.Snapshot()
+	if h != nil {
+		state, err := h.runtimeSnapshot()
+		if err == nil && state.usageStats != nil {
+			snapshot = state.usageStats.Snapshot()
+		}
 	}
 	c.JSON(http.StatusOK, usageExportPayload{
 		Version:    1,
@@ -47,7 +53,12 @@ func (h *Handler) ExportUsageStatistics(c *gin.Context) {
 
 // ImportUsageStatistics merges a previously exported usage snapshot into memory.
 func (h *Handler) ImportUsageStatistics(c *gin.Context) {
-	if h == nil || h.usageStats == nil {
+	if h == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "usage statistics unavailable"})
+		return
+	}
+	state, err := h.runtimeSnapshot()
+	if err != nil || state.usageStats == nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "usage statistics unavailable"})
 		return
 	}
@@ -68,8 +79,8 @@ func (h *Handler) ImportUsageStatistics(c *gin.Context) {
 		return
 	}
 
-	result := h.usageStats.MergeSnapshot(payload.Usage)
-	snapshot := h.usageStats.Snapshot()
+	result := state.usageStats.MergeSnapshot(payload.Usage)
+	snapshot := state.usageStats.Snapshot()
 	c.JSON(http.StatusOK, gin.H{
 		"added":           result.Added,
 		"skipped":         result.Skipped,
