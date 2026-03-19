@@ -598,6 +598,18 @@ func (e *ClaudeExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (
 	return auth, nil
 }
 
+// removeBetaFeature removes a specific beta feature from a comma-separated beta header value.
+func removeBetaFeature(header, featureToRemove string) string {
+	parts := strings.Split(header, ",")
+	filtered := parts[:0]
+	for _, p := range parts {
+		if strings.TrimSpace(p) != featureToRemove {
+			filtered = append(filtered, p)
+		}
+	}
+	return strings.Join(filtered, ",")
+}
+
 // extractAndRemoveBetas extracts the "betas" array from the body and removes it.
 // Returns the extracted betas as a string slice and the modified body.
 func extractAndRemoveBetas(body []byte) ([]string, []byte) {
@@ -833,6 +845,13 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 		}
 	}
 
+	// Remove claude-code-20250219 for non-Anthropic upstreams: third-party providers
+	// (e.g. api.xheai.cc) do not support this beta feature and will hang or return 400
+	// when it is present. The feature is only valid on api.anthropic.com.
+	if !isAnthropicBase {
+		baseBetas = removeBetaFeature(baseBetas, "claude-code-20250219")
+	}
+
 	hasClaude1MHeader := false
 	if ginHeaders != nil {
 		if _, ok := ginHeaders[textproto.CanonicalMIMEHeaderKey("X-CPA-CLAUDE-1M")]; ok {
@@ -863,8 +882,12 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	r.Header.Set("Anthropic-Beta", baseBetas)
 
 	misc.EnsureHeader(r.Header, ginHeaders, "Anthropic-Version", "2023-06-01")
-	misc.EnsureHeader(r.Header, ginHeaders, "Anthropic-Dangerous-Direct-Browser-Access", "true")
-	misc.EnsureHeader(r.Header, ginHeaders, "X-App", "cli")
+	// Only forward Anthropic-specific fingerprint headers to api.anthropic.com.
+	// Third-party upstreams (e.g. api.xheai.cc) reject these headers with 400 or hang.
+	if isAnthropicBase {
+		misc.EnsureHeader(r.Header, ginHeaders, "Anthropic-Dangerous-Direct-Browser-Access", "true")
+		misc.EnsureHeader(r.Header, ginHeaders, "X-App", "cli")
+	}
 	// Values below match Claude Code 2.1.63 / @anthropic-ai/sdk 0.74.0 (updated 2026-02-28).
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Retry-Count", "0")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Runtime-Version", hdrDefault(hd.RuntimeVersion, "v24.3.0"))
