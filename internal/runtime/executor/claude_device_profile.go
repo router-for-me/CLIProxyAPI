@@ -179,6 +179,19 @@ func pinClaudeDeviceProfilePlatform(profile, baseline claudeDeviceProfile) claud
 	return profile
 }
 
+// normalizeClaudeDeviceProfile keeps stabilized profiles pinned to the current
+// baseline platform and enforces the baseline software fingerprint as a floor.
+func normalizeClaudeDeviceProfile(profile, baseline claudeDeviceProfile) claudeDeviceProfile {
+	profile = pinClaudeDeviceProfilePlatform(profile, baseline)
+	if profile.UserAgent == "" || profile.Version == (claudeCLIVersion{}) || shouldUpgradeClaudeDeviceProfile(baseline, profile) {
+		profile.UserAgent = baseline.UserAgent
+		profile.PackageVersion = baseline.PackageVersion
+		profile.RuntimeVersion = baseline.RuntimeVersion
+		profile.Version = baseline.Version
+	}
+	return profile
+}
+
 func extractClaudeDeviceProfile(headers http.Header, cfg *config.Config) (claudeDeviceProfile, bool) {
 	if headers == nil {
 		return claudeDeviceProfile{}, false
@@ -277,7 +290,7 @@ func resolveClaudeDeviceProfile(auth *cliproxyauth.Auth, apiKey string, headers 
 		entry, hasCached = claudeDeviceProfileCache[cacheKey]
 		cachedValid = hasCached && entry.expire.After(now) && entry.profile.UserAgent != ""
 		if cachedValid {
-			entry.profile = pinClaudeDeviceProfilePlatform(entry.profile, baseline)
+			entry.profile = normalizeClaudeDeviceProfile(entry.profile, baseline)
 		}
 		if cachedValid && !shouldUpgradeClaudeDeviceProfile(candidate, entry.profile) {
 			entry.expire = now.Add(claudeDeviceProfileTTL)
@@ -298,7 +311,7 @@ func resolveClaudeDeviceProfile(auth *cliproxyauth.Auth, apiKey string, headers 
 		claudeDeviceProfileCacheMu.Lock()
 		entry = claudeDeviceProfileCache[cacheKey]
 		if entry.expire.After(now) && entry.profile.UserAgent != "" {
-			entry.profile = pinClaudeDeviceProfilePlatform(entry.profile, baseline)
+			entry.profile = normalizeClaudeDeviceProfile(entry.profile, baseline)
 			entry.expire = now.Add(claudeDeviceProfileTTL)
 			claudeDeviceProfileCache[cacheKey] = entry
 			claudeDeviceProfileCacheMu.Unlock()
