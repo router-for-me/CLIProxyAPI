@@ -1,6 +1,7 @@
 package openai
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,8 +14,11 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
@@ -27,17 +31,18 @@ import (
 )
 
 const (
-	audioTranscriptionUploadLimitBytes           int64 = 32 << 20
-	audioTranscriptionNonFileFieldsLimitBytes    int64 = 1 << 20
-	audioTranscriptionUpstreamResponseLimitBytes int64 = 8 << 20
-	audioTranscriptionContentSniffBytes                = 512
-	audioTranscriptionFileFieldName                    = "file"
-	audioTranscriptionModelFieldName                   = "model"
-	audioTranscriptionResponseFormatFieldName          = "response_format"
-	audioTranscriptionDefaultFilename                  = "audio.webm"
-	audioTranscriptionTempFilePattern                  = "cliproxy-audio-transcription-*"
-	openAIAudioTranscriptionsPath                      = "/audio/transcriptions"
-	defaultCodexAudioTranscriptionURL                  = "https://chatgpt.com/backend-api/transcribe"
+	audioTranscriptionUploadLimitBytes        int64 = 32 << 20
+	audioTranscriptionNonFileFieldsLimitBytes int64 = 1 << 20
+	audioTranscriptionContentSniffBytes             = 512
+	audioTranscriptionFileFieldName                 = "file"
+	audioTranscriptionModelFieldName                = "model"
+	audioTranscriptionResponseFormatFieldName       = "response_format"
+	audioTranscriptionStreamFieldName               = "stream"
+	audioTranscriptionDefaultFilename               = "audio.webm"
+	audioTranscriptionTempFilePattern               = "cliproxy-audio-transcription-*"
+	audioTranscriptionResponseTempFilePattern       = "cliproxy-audio-transcription-response-*"
+	openAIAudioTranscriptionsPath                   = "/audio/transcriptions"
+	defaultCodexAudioTranscriptionURL               = "https://chatgpt.com/backend-api/transcribe"
 )
 
 var supportedAudioFileExtensions = map[string]struct{}{
@@ -74,6 +79,7 @@ type audioFormField struct {
 type audioTranscriptionRequest struct {
 	Model           string
 	ResponseFormat  string
+	Stream          bool
 	Fields          []audioFormField
 	FileName        string
 	FileContentType string
@@ -114,7 +120,8 @@ func (h *OpenAIAPIHandler) AudioTranscriptions(c *gin.Context) {
 	defer func() {
 		_ = audioReq.Cleanup()
 	}()
-	audioReq.Model, err = resolveAudioAutoModel(h.AuthManager, audioReq.Model)
+	var pinnedAuthID string
+	audioReq.Model, pinnedAuthID, err = resolveAudioAutoSelection(h.AuthManager, audioReq.Model)
 	if err != nil {
 		c.JSON(statusCodeOrDefault(err, http.StatusBadRequest), handlers.ErrorResponse{
 			Error: handlers.ErrorDetail{
@@ -126,11 +133,12 @@ func (h *OpenAIAPIHandler) AudioTranscriptions(c *gin.Context) {
 	}
 
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
-	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
+	if pinnedAuthID != "" {
+		cliCtx = handlers.WithPinnedAuthID(cliCtx, pinnedAuthID)
+	}
 	upstreamResp, _, errMsg := h.ExecuteHTTPRequestWithAuthManager(cliCtx, audioReq.Model, func(ctx context.Context, auth *coreauth.Auth, upstreamModel string) (*http.Request, error) {
 		return audioReq.BuildHTTPRequest(ctx, auth, upstreamModel)
 	})
-	stopKeepAlive()
 	if errMsg != nil {
 		h.WriteErrorResponse(c, errMsg)
 		cliCancel(errMsg.Error)
@@ -140,7 +148,40 @@ func (h *OpenAIAPIHandler) AudioTranscriptions(c *gin.Context) {
 		_ = upstreamResp.Body.Close()
 	}()
 
-	body, err := readAudioTranscriptionUpstreamResponse(upstreamResp.Body)
+	filteredHeaders := handlers.FilterUpstreamHeaders(upstreamResp.Header)
+	if audioReq.ShouldStreamResponse(filteredHeaders, upstreamResp.Header) {
+		if err := h.writeAudioStreamingResponse(c, upstreamResp.Body, filteredHeaders, upstreamResp.Header); err != nil {
+			h.WriteErrorResponse(c, &interfaces.ErrorMessage{
+				StatusCode: statusCodeOrDefault(err, http.StatusBadGateway),
+				Error:      err,
+			})
+			cliCancel(err)
+			return
+		}
+		cliCancel(nil)
+		return
+	}
+
+	if audioReq.PreserveRawResponse() {
+		if err := h.writeAudioRawResponse(c, upstreamResp.Body, filteredHeaders, upstreamResp.Header); err != nil {
+			h.WriteErrorResponse(c, &interfaces.ErrorMessage{
+				StatusCode: statusCodeOrDefault(err, http.StatusBadGateway),
+				Error:      err,
+			})
+			cliCancel(err)
+			return
+		}
+		cliCancel(nil)
+		return
+	}
+
+	c.Header("Content-Type", "application/json")
+	if handlers.PassthroughHeadersEnabled(h.Cfg) {
+		handlers.WriteUpstreamHeaders(c.Writer.Header(), filteredHeaders)
+	}
+	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
+	normalizedPath, err := normalizeAudioTranscriptionResponseFromReader(upstreamResp.Body)
+	stopKeepAlive()
 	if err != nil {
 		h.WriteErrorResponse(c, &interfaces.ErrorMessage{
 			StatusCode: statusCodeOrDefault(err, http.StatusBadGateway),
@@ -149,27 +190,86 @@ func (h *OpenAIAPIHandler) AudioTranscriptions(c *gin.Context) {
 		cliCancel(err)
 		return
 	}
+	defer func() {
+		if normalizedPath != "" {
+			_ = os.Remove(normalizedPath)
+		}
+	}()
 
-	filteredHeaders := handlers.FilterUpstreamHeaders(upstreamResp.Header)
+	c.Status(http.StatusOK)
+	if err := writeStagedAudioTranscriptionResponse(c.Writer, normalizedPath); err != nil {
+		cliCancel(err)
+		return
+	}
+	cliCancel()
+}
+
+func (h *OpenAIAPIHandler) writeAudioStreamingResponse(c *gin.Context, body io.Reader, filteredHeaders, upstreamHeaders http.Header) error {
+	if c == nil {
+		return fmt.Errorf("missing response writer")
+	}
+	flusher, ok := c.Writer.(http.Flusher)
+	if !ok {
+		return &audioRequestError{status: http.StatusInternalServerError, msg: "streaming not supported"}
+	}
+	if contentType := audioTranscriptionContentType(filteredHeaders, upstreamHeaders); contentType != "" {
+		c.Header("Content-Type", contentType)
+	} else {
+		c.Header("Content-Type", "text/event-stream")
+	}
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
+	c.Header("Access-Control-Allow-Origin", "*")
 	if handlers.PassthroughHeadersEnabled(h.Cfg) {
 		handlers.WriteUpstreamHeaders(c.Writer.Header(), filteredHeaders)
 	}
-
-	if audioReq.PreserveRawResponse() {
-		if contentType := audioTranscriptionContentType(filteredHeaders, upstreamResp.Header); contentType != "" {
-			c.Header("Content-Type", contentType)
-		}
-		c.Status(http.StatusOK)
-		_, _ = c.Writer.Write(body)
-		cliCancel(body)
-		return
-	}
-
-	normalizedBody := normalizeAudioTranscriptionResponse(body)
-	c.Header("Content-Type", "application/json")
 	c.Status(http.StatusOK)
-	_, _ = c.Writer.Write(normalizedBody)
-	cliCancel(normalizedBody)
+	return copyAudioResponse(c, flusher, body)
+}
+
+func (h *OpenAIAPIHandler) writeAudioRawResponse(c *gin.Context, body io.Reader, filteredHeaders, upstreamHeaders http.Header) error {
+	if c == nil {
+		return fmt.Errorf("missing response writer")
+	}
+	if contentType := audioTranscriptionContentType(filteredHeaders, upstreamHeaders); contentType != "" {
+		c.Header("Content-Type", contentType)
+	}
+	if handlers.PassthroughHeadersEnabled(h.Cfg) {
+		handlers.WriteUpstreamHeaders(c.Writer.Header(), filteredHeaders)
+	}
+	c.Status(http.StatusOK)
+	_, err := io.Copy(c.Writer, body)
+	return err
+}
+
+func copyAudioResponse(c *gin.Context, flusher http.Flusher, body io.Reader) error {
+	if c == nil || flusher == nil {
+		return fmt.Errorf("streaming not supported")
+	}
+	if body == nil {
+		return nil
+	}
+	buf := make([]byte, 32<<10)
+	for {
+		n, err := body.Read(buf)
+		if n > 0 {
+			if _, errWrite := c.Writer.Write(buf[:n]); errWrite != nil {
+				return errWrite
+			}
+			flusher.Flush()
+		}
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		select {
+		case <-c.Request.Context().Done():
+			return c.Request.Context().Err()
+		default:
+		}
+	}
 }
 
 func parseAudioTranscriptionRequest(c *gin.Context) (*audioTranscriptionRequest, error) {
@@ -227,6 +327,11 @@ func parseAudioTranscriptionRequest(c *gin.Context) (*audioTranscriptionRequest,
 			}
 			if partName == audioTranscriptionResponseFormatFieldName && audioReq.ResponseFormat == "" {
 				audioReq.ResponseFormat = strings.TrimSpace(field.Value)
+			}
+			if partName == audioTranscriptionStreamFieldName && !audioReq.Stream {
+				if parsed, errParse := strconv.ParseBool(strings.TrimSpace(field.Value)); errParse == nil {
+					audioReq.Stream = parsed
+				}
 			}
 			continue
 		}
@@ -410,7 +515,9 @@ func (r *audioTranscriptionRequest) BuildHTTPRequest(ctx context.Context, auth *
 		return nil, err
 	}
 	req.Header.Set("Content-Type", multipartWriter.FormDataContentType())
-	req.Header.Set("Accept", "application/json")
+	if accept := audioTranscriptionAcceptHeader(r.Stream, r.ResponseFormat); accept != "" {
+		req.Header.Set("Accept", accept)
+	}
 	req.ContentLength = contentLength
 
 	go r.writeMultipartBody(bodyWriter, multipartWriter, upstreamModel)
@@ -430,10 +537,7 @@ func (r *audioTranscriptionRequest) writeMultipartBody(bodyWriter *io.PipeWriter
 }
 
 func (r *audioTranscriptionRequest) writeMultipartFields(multipartWriter *multipart.Writer, upstreamModel string) error {
-	modelValue := strings.TrimSpace(upstreamModel)
-	if modelValue == "" {
-		modelValue = strings.TrimSpace(r.Model)
-	}
+	modelValue := normalizeAudioUpstreamModel(upstreamModel, r.Model)
 	for _, field := range r.Fields {
 		fieldValue := field.Value
 		if field.Name == audioTranscriptionModelFieldName {
@@ -488,10 +592,7 @@ func (r *audioTranscriptionRequest) multipartContentLength(boundary, upstreamMod
 	if err := multipartWriter.SetBoundary(boundary); err != nil {
 		return 0, err
 	}
-	modelValue := strings.TrimSpace(upstreamModel)
-	if modelValue == "" {
-		modelValue = strings.TrimSpace(r.Model)
-	}
+	modelValue := normalizeAudioUpstreamModel(upstreamModel, r.Model)
 	for _, field := range r.Fields {
 		fieldValue := field.Value
 		if field.Name == audioTranscriptionModelFieldName {
@@ -522,6 +623,30 @@ func (r *audioTranscriptionRequest) multipartContentLength(boundary, upstreamMod
 		return 0, err
 	}
 	return counter.n, nil
+}
+
+func normalizeAudioUpstreamModel(upstreamModel, fallbackModel string) string {
+	modelValue := strings.TrimSpace(upstreamModel)
+	if modelValue == "" {
+		modelValue = strings.TrimSpace(fallbackModel)
+	}
+	baseModel := strings.TrimSpace(thinking.ParseSuffix(modelValue).ModelName)
+	if baseModel != "" {
+		return baseModel
+	}
+	return modelValue
+}
+
+func audioTranscriptionAcceptHeader(stream bool, responseFormat string) string {
+	if stream {
+		return "text/event-stream"
+	}
+	switch strings.ToLower(strings.TrimSpace(responseFormat)) {
+	case "", "json", "verbose_json":
+	default:
+		return ""
+	}
+	return "application/json"
 }
 
 func resolveAudioTranscriptionURL(auth *coreauth.Auth) (string, error) {
@@ -565,126 +690,113 @@ func isOpenAICompatibleAuth(auth *coreauth.Auth) bool {
 }
 
 func resolveAudioAutoModel(manager *coreauth.Manager, modelName string) (string, error) {
+	model, _, err := resolveAudioAutoSelection(manager, modelName)
+	return model, err
+}
+
+func resolveAudioAutoSelection(manager *coreauth.Manager, modelName string) (string, string, error) {
 	parsed := thinking.ParseSuffix(strings.TrimSpace(modelName))
 	if parsed.ModelName != "auto" {
-		return modelName, nil
+		return modelName, "", nil
 	}
-	resolvedBase, err := resolveAutoAudioModelBase(manager)
+	selection, err := resolveAutoAudioModelBase(manager)
 	if err != nil {
-		return "", &audioRequestError{status: http.StatusBadRequest, msg: err.Error()}
+		return "", "", &audioRequestError{status: http.StatusBadRequest, msg: err.Error()}
 	}
 	if parsed.HasSuffix {
-		return fmt.Sprintf("%s(%s)", resolvedBase, parsed.RawSuffix), nil
+		return fmt.Sprintf("%s(%s)", selection.RouteModel, parsed.RawSuffix), selection.AuthID, nil
 	}
-	return resolvedBase, nil
+	return selection.RouteModel, selection.AuthID, nil
 }
 
 type audioAutoModelCandidate struct {
 	RouteModel string
 	CreatedAt  int64
+	AuthID     string
 }
 
-func resolveAutoAudioModelBase(manager *coreauth.Manager) (string, error) {
+func resolveAutoAudioModelBase(manager *coreauth.Manager) (audioAutoModelCandidate, error) {
 	if manager == nil {
-		return "", fmt.Errorf("model auto is not supported for audio transcription because the auth manager is unavailable")
+		return audioAutoModelCandidate{}, fmt.Errorf("model auto is not supported for audio transcription because the auth manager is unavailable")
 	}
 
-	reg := registry.GetGlobalRegistry()
-	candidates := make(map[string]int64)
+	candidates := make([]audioAutoModelCandidate, 0)
 	now := time.Now()
 
-	for _, auth := range manager.List() {
-		if auth == nil || strings.TrimSpace(auth.ID) == "" {
+	for _, preview := range manager.PreviewSelectableRouteModels(now, supportsAudioTranscriptionAuth) {
+		if !audioPreviewSupportsTranscription(preview) {
 			continue
 		}
-		if _, err := resolveAudioTranscriptionURL(auth); err != nil {
-			continue
+		authID := ""
+		if preview.Auth != nil {
+			authID = strings.TrimSpace(preview.Auth.ID)
 		}
-
-		for _, modelInfo := range reg.GetModelsForClient(auth.ID) {
-			if modelInfo == nil {
-				continue
-			}
-			routeModel := strings.TrimSpace(modelInfo.ID)
-			if routeModel == "" {
-				continue
-			}
-			if !coreauth.IsAuthSelectableForModel(auth, routeModel, now) {
-				continue
-			}
-
-			createdAt, ok := resolveAudioRouteModelCreatedAt(manager, auth, routeModel, modelInfo.Created)
-			if !ok {
-				continue
-			}
-			if existing, exists := candidates[routeModel]; !exists || createdAt > existing {
-				candidates[routeModel] = createdAt
-			}
-		}
+		candidates = append(candidates, audioAutoModelCandidate{
+			RouteModel: preview.RouteModel,
+			CreatedAt:  preview.CreatedAt,
+			AuthID:     authID,
+		})
 	}
 
 	if len(candidates) == 0 {
-		return "", fmt.Errorf("model auto is not supported for audio transcription because no transcription-capable model is available")
+		return audioAutoModelCandidate{}, fmt.Errorf("model auto is not supported for audio transcription because no transcription-capable model is available")
 	}
 
-	ordered := make([]audioAutoModelCandidate, 0, len(candidates))
-	for routeModel, createdAt := range candidates {
-		ordered = append(ordered, audioAutoModelCandidate{RouteModel: routeModel, CreatedAt: createdAt})
-	}
-	sort.SliceStable(ordered, func(i, j int) bool {
-		if ordered[i].CreatedAt == ordered[j].CreatedAt {
-			return ordered[i].RouteModel < ordered[j].RouteModel
+	sort.SliceStable(candidates, func(i, j int) bool {
+		if candidates[i].CreatedAt == candidates[j].CreatedAt {
+			if candidates[i].RouteModel == candidates[j].RouteModel {
+				return candidates[i].AuthID < candidates[j].AuthID
+			}
+			return candidates[i].RouteModel < candidates[j].RouteModel
 		}
-		return ordered[i].CreatedAt > ordered[j].CreatedAt
+		return candidates[i].CreatedAt > candidates[j].CreatedAt
 	})
-	return ordered[0].RouteModel, nil
+	return candidates[0], nil
 }
 
-func resolveAudioRouteModelCreatedAt(manager *coreauth.Manager, auth *coreauth.Auth, routeModel string, fallbackCreatedAt int64) (int64, bool) {
-	if manager == nil || auth == nil {
-		return 0, false
-	}
-	upstreamModels := manager.ExecutionModelCandidates(auth, routeModel)
-	if len(upstreamModels) == 0 {
-		return 0, false
-	}
-
-	createdAt := fallbackCreatedAt
-	for _, upstreamModel := range upstreamModels {
-		upstreamCreatedAt, ok := resolveAudioUpstreamModelCreatedAt(upstreamModel)
-		if !ok {
-			return 0, false
-		}
-		if upstreamCreatedAt > createdAt {
-			createdAt = upstreamCreatedAt
-		}
-	}
-	return createdAt, true
+func supportsAudioTranscriptionAuth(auth *coreauth.Auth) bool {
+	_, err := resolveAudioTranscriptionURL(auth)
+	return err == nil
 }
 
-func resolveAudioUpstreamModelCreatedAt(modelName string) (int64, bool) {
+func audioPreviewSupportsTranscription(preview coreauth.RouteModelPreview) bool {
+	if len(preview.UpstreamModels) == 0 {
+		return false
+	}
+	for _, upstreamModel := range preview.UpstreamModels {
+		if !isAudioTranscriptionModel(preview.Auth, upstreamModel) {
+			return false
+		}
+	}
+	return true
+}
+
+func isAudioTranscriptionModel(auth *coreauth.Auth, modelName string) bool {
 	baseModel := strings.TrimSpace(thinking.ParseSuffix(modelName).ModelName)
 	if baseModel == "" {
-		return 0, false
+		return false
 	}
-
+	provider := ""
+	if auth != nil {
+		provider = strings.TrimSpace(auth.Provider)
+	}
+	if info := registry.LookupModelInfo(baseModel, provider); info != nil {
+		return isAudioTranscriptionModelInfo(info)
+	}
 	if info := registry.LookupModelInfo(baseModel); info != nil {
-		if !isAudioTranscriptionModelInfo(info) {
-			return 0, false
-		}
-		return info.Created, true
+		return isAudioTranscriptionModelInfo(info)
 	}
-	return 0, isAudioTranscriptionModelName(baseModel)
+	return isAudioTranscriptionModelName(baseModel)
 }
 
 func isAudioTranscriptionModelInfo(info *registry.ModelInfo) bool {
 	if info == nil {
 		return false
 	}
-	if len(info.SupportedInputModalities) > 0 && len(info.SupportedOutputModalities) > 0 {
-		if containsFolded(info.SupportedInputModalities, "audio") && containsFolded(info.SupportedOutputModalities, "text") {
-			return true
-		}
+	if len(info.SupportedInputModalities) > 0 || len(info.SupportedOutputModalities) > 0 {
+		supportsAudioInput := len(info.SupportedInputModalities) == 0 || containsFolded(info.SupportedInputModalities, "audio")
+		supportsTextOutput := len(info.SupportedOutputModalities) == 0 || containsFolded(info.SupportedOutputModalities, "text")
+		return supportsAudioInput && supportsTextOutput
 	}
 	return isAudioTranscriptionModelName(info.ID) ||
 		isAudioTranscriptionModelName(info.Version) ||
@@ -697,7 +809,10 @@ func isAudioTranscriptionModelName(value string) bool {
 	if value == "" {
 		return false
 	}
-	return strings.Contains(value, "transcribe") || strings.Contains(value, "transcription") || strings.Contains(value, "speech-to-text")
+	return strings.Contains(value, "transcribe") ||
+		strings.Contains(value, "transcription") ||
+		strings.Contains(value, "speech-to-text") ||
+		strings.Contains(value, "whisper")
 }
 
 func containsFolded(values []string, needle string) bool {
@@ -715,29 +830,13 @@ func containsFolded(values []string, needle string) bool {
 
 func resolveCodexAudioTranscriptionURL(baseURL string) string {
 	trimmedBaseURL := strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	// Configured Codex base URLs are expected to follow the same backend-api root
+	// convention as the existing Codex HTTP endpoints, where /codex and /transcribe
+	// are sibling paths under the same root.
 	if strings.HasSuffix(trimmedBaseURL, "/codex") {
 		return strings.TrimSuffix(trimmedBaseURL, "/codex") + "/transcribe"
 	}
 	return trimmedBaseURL + "/transcribe"
-}
-
-func readAudioTranscriptionUpstreamResponse(body io.Reader) ([]byte, error) {
-	if body == nil {
-		return nil, nil
-	}
-
-	limitedReader := &io.LimitedReader{R: body, N: audioTranscriptionUpstreamResponseLimitBytes + 1}
-	payload, err := io.ReadAll(limitedReader)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read upstream transcription response: %w", err)
-	}
-	if int64(len(payload)) > audioTranscriptionUpstreamResponseLimitBytes {
-		return nil, &audioRequestError{
-			status: http.StatusBadGateway,
-			msg:    fmt.Sprintf("upstream transcription response exceeded %d byte limit", audioTranscriptionUpstreamResponseLimitBytes),
-		}
-	}
-	return payload, nil
 }
 
 func (r *audioTranscriptionRequest) PreserveRawResponse() bool {
@@ -753,6 +852,13 @@ func (r *audioTranscriptionRequest) PreserveRawResponse() bool {
 	}
 }
 
+func (r *audioTranscriptionRequest) ShouldStreamResponse(headers ...http.Header) bool {
+	if r != nil && r.Stream {
+		return true
+	}
+	return audioTranscriptionIsEventStream(headers...)
+}
+
 func audioTranscriptionContentType(headers ...http.Header) string {
 	for _, hdr := range headers {
 		if hdr == nil {
@@ -763,6 +869,372 @@ func audioTranscriptionContentType(headers ...http.Header) string {
 		}
 	}
 	return ""
+}
+
+func audioTranscriptionIsEventStream(headers ...http.Header) bool {
+	mediaType := audioTranscriptionContentType(headers...)
+	if mediaType == "" {
+		return false
+	}
+	parsedMediaType, _, err := mime.ParseMediaType(mediaType)
+	if err == nil {
+		mediaType = parsedMediaType
+	}
+	return strings.EqualFold(strings.TrimSpace(mediaType), "text/event-stream")
+}
+
+func normalizeAudioTranscriptionResponseFromReader(body io.Reader) (string, error) {
+	stagedPath, err := stageAudioTranscriptionResponse(body)
+	if err != nil {
+		return "", err
+	}
+	if stagedPath != "" {
+		defer func() {
+			_ = os.Remove(stagedPath)
+		}()
+	}
+
+	normalizedFile, err := os.CreateTemp("", audioTranscriptionResponseTempFilePattern)
+	if err != nil {
+		return "", fmt.Errorf("failed to create normalized transcription response temp file: %w", err)
+	}
+	normalizedPath := normalizedFile.Name()
+	keepNormalizedFile := false
+	defer func() {
+		_ = normalizedFile.Close()
+		if !keepNormalizedFile {
+			_ = os.Remove(normalizedPath)
+		}
+	}()
+
+	switch kind, errKind := detectAudioTranscriptionResponseKind(stagedPath); {
+	case errKind != nil:
+		return "", errKind
+	case kind == audioTranscriptionResponseEmpty:
+		if _, err := normalizedFile.Write([]byte(`{"text":""}`)); err != nil {
+			return "", fmt.Errorf("failed to write normalized empty transcription response: %w", err)
+		}
+	case kind == audioTranscriptionResponseJSONObject:
+		hasText, err := audioTranscriptionObjectHasText(stagedPath)
+		if err != nil {
+			return "", err
+		}
+		sourceFile, err := os.Open(stagedPath)
+		if err != nil {
+			return "", fmt.Errorf("failed to open staged upstream transcription response: %w", err)
+		}
+		if err := writeNormalizedAudioTranscriptionObject(normalizedFile, sourceFile, !hasText); err != nil {
+			_ = sourceFile.Close()
+			return "", err
+		}
+		_ = sourceFile.Close()
+	case kind == audioTranscriptionResponseJSONString:
+		sourceFile, err := os.Open(stagedPath)
+		if err != nil {
+			return "", fmt.Errorf("failed to open staged upstream transcription response: %w", err)
+		}
+		text, err := readAudioTranscriptionJSONString(sourceFile)
+		_ = sourceFile.Close()
+		if err != nil {
+			return "", err
+		}
+		payload, err := json.Marshal(map[string]string{"text": text})
+		if err != nil {
+			return "", fmt.Errorf("failed to normalize upstream transcription string response: %w", err)
+		}
+		if _, err := normalizedFile.Write(payload); err != nil {
+			return "", fmt.Errorf("failed to write normalized transcription string response: %w", err)
+		}
+	default:
+		sourceFile, err := os.Open(stagedPath)
+		if err != nil {
+			return "", fmt.Errorf("failed to open staged upstream transcription response: %w", err)
+		}
+		if err := writeWrappedAudioTranscriptionText(normalizedFile, sourceFile); err != nil {
+			_ = sourceFile.Close()
+			return "", err
+		}
+		_ = sourceFile.Close()
+	}
+
+	if err := normalizedFile.Close(); err != nil {
+		return "", fmt.Errorf("failed to finalize normalized transcription response: %w", err)
+	}
+	keepNormalizedFile = true
+	return normalizedPath, nil
+}
+
+func stageAudioTranscriptionResponse(body io.Reader) (string, error) {
+	if body == nil {
+		return "", nil
+	}
+	tempFile, err := os.CreateTemp("", audioTranscriptionResponseTempFilePattern)
+	if err != nil {
+		return "", fmt.Errorf("failed to create temp file for transcription response: %w", err)
+	}
+	tempPath := tempFile.Name()
+	keepTempFile := false
+	defer func() {
+		_ = tempFile.Close()
+		if !keepTempFile {
+			_ = os.Remove(tempPath)
+		}
+	}()
+	if _, errCopy := io.Copy(tempFile, body); errCopy != nil {
+		return "", fmt.Errorf("failed to stage upstream transcription response: %w", errCopy)
+	}
+	if errClose := tempFile.Close(); errClose != nil {
+		return "", fmt.Errorf("failed to finalize staged transcription response: %w", errClose)
+	}
+	keepTempFile = true
+	return tempPath, nil
+}
+
+type audioTranscriptionResponseKind int
+
+const (
+	audioTranscriptionResponseEmpty audioTranscriptionResponseKind = iota
+	audioTranscriptionResponseJSONObject
+	audioTranscriptionResponseJSONString
+	audioTranscriptionResponseText
+)
+
+func detectAudioTranscriptionResponseKind(path string) (audioTranscriptionResponseKind, error) {
+	if strings.TrimSpace(path) == "" {
+		return audioTranscriptionResponseEmpty, nil
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return audioTranscriptionResponseEmpty, fmt.Errorf("failed to open staged upstream transcription response: %w", err)
+	}
+	defer func() {
+		_ = file.Close()
+	}()
+	reader := bufio.NewReader(file)
+	for {
+		r, _, err := reader.ReadRune()
+		if errors.Is(err, io.EOF) {
+			return audioTranscriptionResponseEmpty, nil
+		}
+		if err != nil {
+			return audioTranscriptionResponseEmpty, fmt.Errorf("failed to inspect staged upstream transcription response: %w", err)
+		}
+		if unicode.IsSpace(r) {
+			continue
+		}
+		switch r {
+		case '{':
+			return audioTranscriptionResponseJSONObject, nil
+		case '"':
+			return audioTranscriptionResponseJSONString, nil
+		default:
+			return audioTranscriptionResponseText, nil
+		}
+	}
+}
+
+func audioTranscriptionObjectHasText(path string) (bool, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return false, fmt.Errorf("failed to open staged upstream transcription response: %w", err)
+	}
+	defer func() {
+		_ = file.Close()
+	}()
+	decoder := json.NewDecoder(file)
+	tok, err := decoder.Token()
+	if err != nil {
+		return false, fmt.Errorf("failed to parse upstream transcription object: %w", err)
+	}
+	delim, ok := tok.(json.Delim)
+	if !ok || delim != '{' {
+		return false, fmt.Errorf("upstream transcription response is not a JSON object")
+	}
+	for decoder.More() {
+		keyToken, err := decoder.Token()
+		if err != nil {
+			return false, fmt.Errorf("failed to parse upstream transcription object key: %w", err)
+		}
+		key, ok := keyToken.(string)
+		if !ok {
+			return false, fmt.Errorf("upstream transcription object contains a non-string key")
+		}
+		var raw json.RawMessage
+		if err := decoder.Decode(&raw); err != nil {
+			return false, fmt.Errorf("failed to parse upstream transcription object field %q: %w", key, err)
+		}
+		if key == "text" {
+			return true, nil
+		}
+	}
+	if _, err := decoder.Token(); err != nil {
+		return false, fmt.Errorf("failed to parse upstream transcription object end: %w", err)
+	}
+	return false, nil
+}
+
+func writeNormalizedAudioTranscriptionObject(dst io.Writer, src io.Reader, injectText bool) error {
+	if dst == nil {
+		return fmt.Errorf("missing normalized transcription writer")
+	}
+	if src == nil {
+		_, err := io.WriteString(dst, `{"text":""}`)
+		return err
+	}
+	decoder := json.NewDecoder(src)
+	tok, err := decoder.Token()
+	if err != nil {
+		return fmt.Errorf("failed to parse upstream transcription object: %w", err)
+	}
+	delim, ok := tok.(json.Delim)
+	if !ok || delim != '{' {
+		return fmt.Errorf("upstream transcription response is not a JSON object")
+	}
+	if _, err := io.WriteString(dst, "{"); err != nil {
+		return err
+	}
+	wroteField := false
+	if injectText {
+		if _, err := io.WriteString(dst, `"text":""`); err != nil {
+			return err
+		}
+		wroteField = true
+	}
+	for decoder.More() {
+		keyToken, err := decoder.Token()
+		if err != nil {
+			return fmt.Errorf("failed to parse upstream transcription object key: %w", err)
+		}
+		key, ok := keyToken.(string)
+		if !ok {
+			return fmt.Errorf("upstream transcription object contains a non-string key")
+		}
+		var raw json.RawMessage
+		if err := decoder.Decode(&raw); err != nil {
+			return fmt.Errorf("failed to parse upstream transcription object field %q: %w", key, err)
+		}
+		if wroteField {
+			if _, err := io.WriteString(dst, ","); err != nil {
+				return err
+			}
+		}
+		keyJSON, err := json.Marshal(key)
+		if err != nil {
+			return fmt.Errorf("failed to encode transcription object key %q: %w", key, err)
+		}
+		if _, err := dst.Write(keyJSON); err != nil {
+			return err
+		}
+		if _, err := io.WriteString(dst, ":"); err != nil {
+			return err
+		}
+		if _, err := dst.Write(raw); err != nil {
+			return err
+		}
+		wroteField = true
+	}
+	if _, err := decoder.Token(); err != nil {
+		return fmt.Errorf("failed to parse upstream transcription object end: %w", err)
+	}
+	_, err = io.WriteString(dst, "}")
+	return err
+}
+
+func readAudioTranscriptionJSONString(src io.Reader) (string, error) {
+	if src == nil {
+		return "", nil
+	}
+	var text string
+	if err := json.NewDecoder(src).Decode(&text); err != nil {
+		return "", fmt.Errorf("failed to decode upstream transcription string response: %w", err)
+	}
+	return text, nil
+}
+
+func writeWrappedAudioTranscriptionText(dst io.Writer, src io.Reader) error {
+	if dst == nil {
+		return fmt.Errorf("missing normalized transcription writer")
+	}
+	if _, err := io.WriteString(dst, `{"text":"`); err != nil {
+		return err
+	}
+	if src != nil {
+		reader := bufio.NewReader(src)
+		for {
+			r, size, err := reader.ReadRune()
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			if err != nil {
+				return fmt.Errorf("failed to read staged transcription text response: %w", err)
+			}
+			if r == utf8.RuneError && size == 1 {
+				if _, err := io.WriteString(dst, `\ufffd`); err != nil {
+					return err
+				}
+				continue
+			}
+			switch r {
+			case '\\', '"':
+				if _, err := io.WriteString(dst, `\`+string(r)); err != nil {
+					return err
+				}
+			case '\b':
+				if _, err := io.WriteString(dst, `\b`); err != nil {
+					return err
+				}
+			case '\f':
+				if _, err := io.WriteString(dst, `\f`); err != nil {
+					return err
+				}
+			case '\n':
+				if _, err := io.WriteString(dst, `\n`); err != nil {
+					return err
+				}
+			case '\r':
+				if _, err := io.WriteString(dst, `\r`); err != nil {
+					return err
+				}
+			case '\t':
+				if _, err := io.WriteString(dst, `\t`); err != nil {
+					return err
+				}
+			default:
+				if r < 0x20 {
+					if _, err := fmt.Fprintf(dst, "\\u%04x", r); err != nil {
+						return err
+					}
+					continue
+				}
+				var encoded [utf8.UTFMax]byte
+				n := utf8.EncodeRune(encoded[:], r)
+				if _, err := dst.Write(encoded[:n]); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	_, err := io.WriteString(dst, `"}`)
+	return err
+}
+
+func writeStagedAudioTranscriptionResponse(dst io.Writer, path string) error {
+	if dst == nil {
+		return fmt.Errorf("missing transcription response writer")
+	}
+	if strings.TrimSpace(path) == "" {
+		_, err := io.WriteString(dst, `{"text":""}`)
+		return err
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("failed to open normalized transcription response: %w", err)
+	}
+	defer func() {
+		_ = file.Close()
+	}()
+	_, err = io.Copy(dst, file)
+	return err
 }
 
 func normalizeAudioTranscriptionResponse(body []byte) []byte {

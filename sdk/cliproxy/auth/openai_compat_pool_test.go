@@ -222,6 +222,47 @@ func TestManagerExecute_OpenAICompatAliasPoolRotatesWithinAuth(t *testing.T) {
 	}
 }
 
+func TestManagerExecutionModelCandidates_OpenAICompatAliasPoolDoesNotRotate(t *testing.T) {
+	alias := "claude-opus-4.66"
+	executor := &openAICompatPoolExecutor{id: "pool"}
+	m := newOpenAICompatPoolTestManager(t, alias, []internalconfig.OpenAICompatibilityModel{
+		{Name: "qwen3.5-plus", Alias: alias},
+		{Name: "glm-5", Alias: alias},
+	}, executor)
+
+	auth, ok := m.GetByID("pool-auth-" + t.Name())
+	if !ok {
+		t.Fatal("expected registered auth")
+	}
+
+	firstPreview := m.ExecutionModelCandidates(auth, alias)
+	secondPreview := m.ExecutionModelCandidates(auth, alias)
+	wantPreview := []string{"qwen3.5-plus", "glm-5"}
+	if len(firstPreview) != len(wantPreview) || len(secondPreview) != len(wantPreview) {
+		t.Fatalf("preview lengths = %v / %v, want %v", firstPreview, secondPreview, wantPreview)
+	}
+	for i := range wantPreview {
+		if firstPreview[i] != wantPreview[i] {
+			t.Fatalf("first preview[%d] = %q, want %q", i, firstPreview[i], wantPreview[i])
+		}
+		if secondPreview[i] != wantPreview[i] {
+			t.Fatalf("second preview[%d] = %q, want %q", i, secondPreview[i], wantPreview[i])
+		}
+	}
+
+	resp, err := m.Execute(context.Background(), []string{"pool"}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if string(resp.Payload) != "qwen3.5-plus" {
+		t.Fatalf("payload = %q, want %q", string(resp.Payload), "qwen3.5-plus")
+	}
+	got := executor.ExecuteModels()
+	if len(got) != 1 || got[0] != "qwen3.5-plus" {
+		t.Fatalf("execute calls = %v, want [qwen3.5-plus]", got)
+	}
+}
+
 func TestManagerExecute_OpenAICompatAliasPoolStopsOnBadRequest(t *testing.T) {
 	alias := "claude-opus-4.66"
 	invalidErr := &Error{HTTPStatus: http.StatusBadRequest, Message: "invalid_request_error: malformed payload"}

@@ -1385,6 +1385,20 @@
         "language",
         "prompt"
       ]
+    },
+    {
+      "id": "whisper-1",
+      "object": "model",
+      "created": 1679356800,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "Whisper",
+      "version": "whisper-1",
+      "description": "Speech-to-text model for audio transcription.",
+      "supported_parameters": [
+        "language",
+        "prompt"
+      ]
     }
   ],
   "codex-team": [
@@ -1647,6 +1661,20 @@
       "display_name": "GPT-4o Mini Transcribe",
       "version": "gpt-4o-mini-transcribe",
       "description": "Fast speech-to-text model for audio transcription.",
+      "supported_parameters": [
+        "language",
+        "prompt"
+      ]
+    },
+    {
+      "id": "whisper-1",
+      "object": "model",
+      "created": 1679356800,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "Whisper",
+      "version": "whisper-1",
+      "description": "Speech-to-text model for audio transcription.",
       "supported_parameters": [
         "language",
         "prompt"
@@ -1940,6 +1968,20 @@
         "language",
         "prompt"
       ]
+    },
+    {
+      "id": "whisper-1",
+      "object": "model",
+      "created": 1679356800,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "Whisper",
+      "version": "whisper-1",
+      "description": "Speech-to-text model for audio transcription.",
+      "supported_parameters": [
+        "language",
+        "prompt"
+      ]
     }
   ],
   "codex-pro": [
@@ -2225,6 +2267,20 @@
       "display_name": "GPT-4o Mini Transcribe",
       "version": "gpt-4o-mini-transcribe",
       "description": "Fast speech-to-text model for audio transcription.",
+      "supported_parameters": [
+        "language",
+        "prompt"
+      ]
+    },
+    {
+      "id": "whisper-1",
+      "object": "model",
+      "created": 1679356800,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "Whisper",
+      "version": "whisper-1",
+      "description": "Speech-to-text model for audio transcription.",
       "supported_parameters": [
         "language",
         "prompt"

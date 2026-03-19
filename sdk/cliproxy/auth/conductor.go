@@ -423,33 +423,8 @@ func preserveRequestedModelSuffix(requestedModel, resolved string) string {
 	return preserveResolvedModelSuffix(resolved, thinking.ParseSuffix(requestedModel))
 }
 
-func (m *Manager) executionModelCandidates(auth *Auth, routeModel string) []string {
-	return m.prepareExecutionModels(auth, routeModel)
-}
-
-// ExecutionModelCandidates resolves the upstream model candidates for a route model under a specific auth.
-func (m *Manager) ExecutionModelCandidates(auth *Auth, routeModel string) []string {
-	if m == nil {
-		return nil
-	}
-	return m.executionModelCandidates(auth, routeModel)
-}
-
 func (m *Manager) prepareExecutionModels(auth *Auth, routeModel string) []string {
-	requestedModel := rewriteModelForAuth(routeModel, auth)
-	requestedModel = m.applyOAuthModelAlias(auth, requestedModel)
-	if pool := m.resolveOpenAICompatUpstreamModelPool(auth, requestedModel); len(pool) > 0 {
-		if len(pool) == 1 {
-			return pool
-		}
-		offset := m.nextModelPoolOffset(openAICompatModelPoolKey(auth, requestedModel), len(pool))
-		return rotateStrings(pool, offset)
-	}
-	resolved := m.applyAPIKeyModelAlias(auth, requestedModel)
-	if strings.TrimSpace(resolved) == "" {
-		resolved = requestedModel
-	}
-	return []string{resolved}
+	return m.resolveExecutionModels(auth, routeModel, true)
 }
 
 func discardStreamChunks(ch <-chan cliproxyexecutor.StreamChunk) {

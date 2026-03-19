@@ -3,6 +3,7 @@ package openai
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"mime"
@@ -32,12 +33,14 @@ type audioExecutorResponse struct {
 	status      int
 	body        string
 	contentType string
+	headers     http.Header
 }
 
 type audioCaptureExecutor struct {
 	id           string
 	mu           sync.Mutex
 	calls        int
+	delay        time.Duration
 	authIDs      []string
 	lastURL      string
 	lastAuthID   string
@@ -45,6 +48,7 @@ type audioCaptureExecutor struct {
 	lastFileName string
 	lastFileBody []byte
 	lastLength   int64
+	lastAccept   string
 	responses    map[string]audioExecutorResponse
 }
 
@@ -83,6 +87,7 @@ func (e *audioCaptureExecutor) HttpRequest(_ context.Context, auth *coreauth.Aut
 	e.lastFileName = ""
 	e.lastFileBody = nil
 	e.lastLength = req.ContentLength
+	e.lastAccept = req.Header.Get("Accept")
 	e.mu.Unlock()
 
 	mediaType, params, err := mime.ParseMediaType(req.Header.Get("Content-Type"))
@@ -134,6 +139,9 @@ func (e *audioCaptureExecutor) HttpRequest(_ context.Context, auth *coreauth.Aut
 			respCfg = candidate
 		}
 	}
+	if e.delay > 0 {
+		time.Sleep(e.delay)
+	}
 	if respCfg.status == 0 {
 		respCfg.status = http.StatusOK
 	}
@@ -141,9 +149,17 @@ func (e *audioCaptureExecutor) HttpRequest(_ context.Context, auth *coreauth.Aut
 		respCfg.contentType = "text/plain; charset=utf-8"
 	}
 
+	respHeaders := make(http.Header)
+	if respCfg.headers != nil {
+		respHeaders = respCfg.headers.Clone()
+	}
+	if strings.TrimSpace(respCfg.contentType) != "" {
+		respHeaders.Set("Content-Type", respCfg.contentType)
+	}
+
 	return &http.Response{
 		StatusCode: respCfg.status,
-		Header:     http.Header{"Content-Type": []string{respCfg.contentType}},
+		Header:     respHeaders,
 		Body:       io.NopCloser(strings.NewReader(respCfg.body)),
 	}, nil
 }
@@ -278,6 +294,9 @@ func TestAudioTranscriptionsPreserveExplicitTextResponseFormat(t *testing.T) {
 	if got := resp.Header().Get("Content-Type"); got != "text/plain; charset=utf-8" {
 		t.Fatalf("content type = %q, want %q", got, "text/plain; charset=utf-8")
 	}
+	if got := executor.lastAccept; got != "" {
+		t.Fatalf("accept = %q, want empty for raw response format", got)
+	}
 }
 
 func TestAudioTranscriptionsPreserveExplicitVTTResponseFormat(t *testing.T) {
@@ -316,6 +335,48 @@ func TestAudioTranscriptionsPreserveExplicitVTTResponseFormat(t *testing.T) {
 	}
 	if !strings.Contains(resp.Body.String(), "WEBVTT") {
 		t.Fatalf("body = %s", resp.Body.String())
+	}
+}
+
+func TestAudioTranscriptionsRawResponseDoesNotEmitKeepAlive(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	executor := &audioCaptureExecutor{
+		delay: 2200 * time.Millisecond,
+		responses: map[string]audioExecutorResponse{
+			"audio-auth": {
+				status:      http.StatusOK,
+				body:        "raw transcript",
+				contentType: "text/plain; charset=utf-8",
+			},
+		},
+	}
+	router := newAudioTestRouterWithConfig(t, &sdkconfig.SDKConfig{
+		NonStreamKeepAliveInterval: 1,
+	}, executor, &coreauth.Auth{
+		ID:       "audio-auth",
+		Provider: "openai-compatibility",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"base_url": "https://api.example.com/v1",
+		},
+	})
+
+	req := newAudioMultipartRequest(t, "/v1/audio/transcriptions", map[string]string{
+		"model":           audioTestModel,
+		"response_format": "text",
+	}, audioTranscriptionFileFieldName, "sample.webm", "", []byte("fake-audio"))
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%q", resp.Code, http.StatusOK, resp.Body.String())
+	}
+	if resp.Body.String() != "raw transcript" {
+		t.Fatalf("body = %q, want %q", resp.Body.String(), "raw transcript")
+	}
+	if got := resp.Header().Get("Content-Type"); got != "text/plain; charset=utf-8" {
+		t.Fatalf("content type = %q, want %q", got, "text/plain; charset=utf-8")
 	}
 }
 
@@ -386,15 +447,15 @@ func TestResolveAudioTranscriptionURL_ConfiguredCodexBaseURL(t *testing.T) {
 	}
 }
 
-func TestAudioTranscriptionsRejectsOversizedUpstreamResponse(t *testing.T) {
+func TestAudioTranscriptionsStreamTruePassthroughSSE(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	executor := &audioCaptureExecutor{
 		responses: map[string]audioExecutorResponse{
 			"audio-auth": {
 				status:      http.StatusOK,
-				body:        strings.Repeat("x", int(audioTranscriptionUpstreamResponseLimitBytes+1)),
-				contentType: "text/plain; charset=utf-8",
+				body:        "event: transcript.text.delta\ndata: {\"delta\":\"hi\"}\n\n",
+				contentType: "text/event-stream",
 			},
 		},
 	}
@@ -408,16 +469,23 @@ func TestAudioTranscriptionsRejectsOversizedUpstreamResponse(t *testing.T) {
 	})
 
 	req := newAudioMultipartRequest(t, "/v1/audio/transcriptions", map[string]string{
-		"model": audioTestModel,
+		"model":  audioTestModel,
+		"stream": "true",
 	}, audioTranscriptionFileFieldName, "sample.webm", "", []byte("fake-audio"))
 	resp := httptest.NewRecorder()
 	router.ServeHTTP(resp, req)
 
-	if resp.Code != http.StatusBadGateway {
-		t.Fatalf("status = %d, want %d; body=%s", resp.Code, http.StatusBadGateway, resp.Body.String())
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", resp.Code, http.StatusOK, resp.Body.String())
 	}
-	if !strings.Contains(resp.Body.String(), "exceeded") {
+	if strings.TrimSpace(resp.Body.String()) != strings.TrimSpace("event: transcript.text.delta\ndata: {\"delta\":\"hi\"}") {
 		t.Fatalf("body = %s", resp.Body.String())
+	}
+	if got := resp.Header().Get("Content-Type"); got != "text/event-stream" {
+		t.Fatalf("content type = %q, want %q", got, "text/event-stream")
+	}
+	if got := executor.lastAccept; got != "text/event-stream" {
+		t.Fatalf("accept = %q, want %q", got, "text/event-stream")
 	}
 }
 
@@ -449,6 +517,85 @@ func TestAudioTranscriptionsRejectOversizedNonFileFields(t *testing.T) {
 	}
 	if executor.Calls() != 0 {
 		t.Fatalf("executor calls = %d, want 0", executor.Calls())
+	}
+}
+
+func TestAudioTranscriptionsTreatEventStreamAsStreamingResponse(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	executor := &audioCaptureExecutor{
+		responses: map[string]audioExecutorResponse{
+			"audio-auth": {
+				status:      http.StatusOK,
+				body:        "event: transcript.text.done\ndata: {\"text\":\"hello\"}\n\n",
+				contentType: "text/event-stream; charset=utf-8",
+			},
+		},
+	}
+	router := newAudioTestRouter(t, executor, &coreauth.Auth{
+		ID:       "audio-auth",
+		Provider: "openai-compatibility",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"base_url": "https://api.example.com/v1",
+		},
+	})
+
+	req := newAudioMultipartRequest(t, "/v1/audio/transcriptions", map[string]string{
+		"model":  audioTestModel,
+		"stream": "definitely",
+	}, audioTranscriptionFileFieldName, "sample.webm", "", []byte("fake-audio"))
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", resp.Code, http.StatusOK, resp.Body.String())
+	}
+	if got := resp.Header().Get("Content-Type"); got != "text/event-stream; charset=utf-8" {
+		t.Fatalf("content type = %q, want %q", got, "text/event-stream; charset=utf-8")
+	}
+	if !strings.Contains(resp.Body.String(), "event: transcript.text.done") {
+		t.Fatalf("body = %s", resp.Body.String())
+	}
+}
+
+func TestAudioTranscriptionsNormalizeLargeUpstreamResponse(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	largeTranscript := strings.Repeat("x", 8<<20+1)
+	executor := &audioCaptureExecutor{
+		responses: map[string]audioExecutorResponse{
+			"audio-auth": {
+				status:      http.StatusOK,
+				body:        largeTranscript,
+				contentType: "text/plain; charset=utf-8",
+			},
+		},
+	}
+	router := newAudioTestRouter(t, executor, &coreauth.Auth{
+		ID:       "audio-auth",
+		Provider: "openai-compatibility",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"base_url": "https://api.example.com/v1",
+		},
+	})
+
+	req := newAudioMultipartRequest(t, "/v1/audio/transcriptions", map[string]string{
+		"model": audioTestModel,
+	}, audioTranscriptionFileFieldName, "sample.webm", "", []byte("fake-audio"))
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body prefix=%s", resp.Code, http.StatusOK, resp.Body.String()[:min(len(resp.Body.String()), 64)])
+	}
+	var payload map[string]string
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("Unmarshal(response): %v", err)
+	}
+	if got := payload["text"]; len(got) != len(largeTranscript) {
+		t.Fatalf("text len = %d, want %d", len(got), len(largeTranscript))
 	}
 }
 
@@ -622,6 +769,69 @@ func TestAudioTranscriptionsResolveAutoToTranscriptionModel(t *testing.T) {
 	}
 }
 
+func TestAudioTranscriptionsStripThinkingSuffixFromMultipartModel(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	executor := &audioCaptureExecutor{}
+	router := newAudioTestRouter(t, executor, &coreauth.Auth{
+		ID:       "audio-auth",
+		Provider: "openai-compatibility",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"base_url": "https://api.example.com/v1",
+		},
+	})
+
+	req := newAudioMultipartRequest(t, "/v1/audio/transcriptions", map[string]string{
+		"model": audioTestModel + "(high)",
+	}, audioTranscriptionFileFieldName, "sample.webm", "", []byte("fake-audio"))
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", resp.Code, http.StatusOK, resp.Body.String())
+	}
+	if got := executor.lastFields["model"]; len(got) != 1 || got[0] != audioTestModel {
+		t.Fatalf("model field = %v, want [%s]", got, audioTestModel)
+	}
+}
+
+func TestAudioTranscriptionsPreserveExplicitWhisperModel(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	executor := &audioCaptureExecutor{}
+	auth := &coreauth.Auth{
+		ID:       "audio-auth",
+		Provider: "openai-compatibility",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"base_url": "https://api.example.com/v1",
+		},
+	}
+	router := newAudioTestRouter(t, executor, auth)
+
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{
+		{ID: audioTestModel},
+		{ID: "whisper-1"},
+	})
+
+	req := newAudioMultipartRequest(t, "/v1/audio/transcriptions", map[string]string{
+		"model": "whisper-1",
+	}, audioTranscriptionFileFieldName, "sample.webm", "", []byte("fake-audio"))
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", resp.Code, http.StatusOK, resp.Body.String())
+	}
+	if executor.lastAuthID != auth.ID {
+		t.Fatalf("last auth id = %q, want %q", executor.lastAuthID, auth.ID)
+	}
+	if got := executor.lastFields["model"]; len(got) != 1 || got[0] != "whisper-1" {
+		t.Fatalf("model field = %v, want [whisper-1]", got)
+	}
+}
+
 func TestAudioTranscriptionsResolveAutoToCompatibleAliasModel(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -694,6 +904,65 @@ func TestAudioTranscriptionsResolveAutoToCompatibleAliasModel(t *testing.T) {
 	}
 	if got := executor.lastFields["model"]; len(got) != 1 || got[0] != audioTestModel {
 		t.Fatalf("model field = %v, want [%s]", got, audioTestModel)
+	}
+}
+
+func TestAudioTranscriptionsResolveAutoToWhisperAliasModel(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	executor := &audioCaptureExecutor{id: "pool"}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.SetConfig(&internalconfig.Config{
+		OpenAICompatibility: []internalconfig.OpenAICompatibility{{
+			Name: "pool",
+			Models: []internalconfig.OpenAICompatibilityModel{
+				{Name: "whisper-1", Alias: "voice-whisper"},
+			},
+		}},
+	})
+	manager.RegisterExecutor(executor)
+
+	poolAuth := &coreauth.Auth{
+		ID:       "pool-auth",
+		Provider: "pool",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"api_key":      "test-key",
+			"base_url":     "https://api.example.com/v1",
+			"compat_name":  "pool",
+			"provider_key": "pool",
+		},
+	}
+	if _, err := manager.Register(context.Background(), poolAuth); err != nil {
+		t.Fatalf("register pool auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(poolAuth.ID, "pool", []*registry.ModelInfo{{
+		ID:      "voice-whisper",
+		Created: time.Now().Unix(),
+	}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(poolAuth.ID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	h := NewOpenAIAPIHandler(base)
+	router := gin.New()
+	router.POST("/v1/audio/transcriptions", h.AudioTranscriptions)
+
+	req := newAudioMultipartRequest(t, "/v1/audio/transcriptions", map[string]string{
+		"model": "auto",
+	}, audioTranscriptionFileFieldName, "sample.webm", "", []byte("fake-audio"))
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", resp.Code, http.StatusOK, resp.Body.String())
+	}
+	if executor.lastAuthID != poolAuth.ID {
+		t.Fatalf("last auth id = %q, want %q", executor.lastAuthID, poolAuth.ID)
+	}
+	if got := executor.lastFields["model"]; len(got) != 1 || got[0] != "whisper-1" {
+		t.Fatalf("model field = %v, want [whisper-1]", got)
 	}
 }
 
@@ -778,7 +1047,170 @@ func TestAudioTranscriptionsResolveAutoSkipsUnavailableAuths(t *testing.T) {
 	}
 }
 
+func TestResolveAudioAutoModelUsesProviderSpecificMetadata(t *testing.T) {
+	manager := coreauth.NewManager(nil, nil, nil)
+
+	audioAuth := &coreauth.Auth{
+		ID:       "provider-aware-audio-auth",
+		Provider: "compat-audio",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"api_key":      "test-key",
+			"base_url":     "https://api.example.com/v1",
+			"compat_name":  "compat-audio",
+			"provider_key": "compat-audio",
+		},
+	}
+	if _, err := manager.Register(context.Background(), audioAuth); err != nil {
+		t.Fatalf("register audio auth: %v", err)
+	}
+
+	nonAudioAuth := &coreauth.Auth{
+		ID:       "provider-aware-text-auth",
+		Provider: "compat-text",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"api_key":      "test-key",
+			"base_url":     "https://api.example.com/v1",
+			"compat_name":  "compat-text",
+			"provider_key": "compat-text",
+		},
+	}
+	if _, err := manager.Register(context.Background(), nonAudioAuth); err != nil {
+		t.Fatalf("register text auth: %v", err)
+	}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(audioAuth.ID, audioAuth.Provider, []*registry.ModelInfo{{
+		ID:                       "shared-transcription-model",
+		Created:                  time.Now().Unix(),
+		SupportedInputModalities: []string{"audio"},
+		SupportedOutputModalities: []string{
+			"text",
+		},
+	}})
+	reg.RegisterClient(nonAudioAuth.ID, nonAudioAuth.Provider, []*registry.ModelInfo{{
+		ID:                       "shared-transcription-model",
+		Created:                  time.Now().Unix() + 1,
+		SupportedInputModalities: []string{"text"},
+		SupportedOutputModalities: []string{
+			"text",
+		},
+	}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(audioAuth.ID)
+		reg.UnregisterClient(nonAudioAuth.ID)
+	})
+
+	got, err := resolveAudioAutoModel(manager, "auto")
+	if err != nil {
+		t.Fatalf("resolveAudioAutoModel(auto) error = %v", err)
+	}
+	if got != "shared-transcription-model" {
+		t.Fatalf("resolveAudioAutoModel(auto) = %q, want %q", got, "shared-transcription-model")
+	}
+}
+
+func TestAudioTranscriptionsResolveAutoPinsSelectedAuth(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	audioExecutor := &audioCaptureExecutor{id: "zz-audio"}
+	textExecutor := &audioCaptureExecutor{
+		id: "aa-text",
+		responses: map[string]audioExecutorResponse{
+			"text-auth": {
+				status:      http.StatusBadRequest,
+				body:        `{"error":"model not found"}`,
+				contentType: "application/json",
+			},
+		},
+	}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(textExecutor)
+	manager.RegisterExecutor(audioExecutor)
+
+	textAuth := &coreauth.Auth{
+		ID:       "text-auth",
+		Provider: "aa-text",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"api_key":      "test-key",
+			"base_url":     "https://text.example.com/v1",
+			"compat_name":  "aa-text",
+			"provider_key": "aa-text",
+		},
+	}
+	if _, err := manager.Register(context.Background(), textAuth); err != nil {
+		t.Fatalf("register text auth: %v", err)
+	}
+
+	audioAuth := &coreauth.Auth{
+		ID:       "audio-auth",
+		Provider: "zz-audio",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"api_key":      "test-key",
+			"base_url":     "https://audio.example.com/v1",
+			"compat_name":  "zz-audio",
+			"provider_key": "zz-audio",
+		},
+	}
+	if _, err := manager.Register(context.Background(), audioAuth); err != nil {
+		t.Fatalf("register audio auth: %v", err)
+	}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(textAuth.ID, textAuth.Provider, []*registry.ModelInfo{{
+		ID:                       "shared-transcription-model",
+		Created:                  time.Now().Unix() + 1,
+		SupportedInputModalities: []string{"text"},
+		SupportedOutputModalities: []string{
+			"text",
+		},
+	}})
+	reg.RegisterClient(audioAuth.ID, audioAuth.Provider, []*registry.ModelInfo{{
+		ID:                       "shared-transcription-model",
+		Created:                  time.Now().Unix(),
+		SupportedInputModalities: []string{"audio"},
+		SupportedOutputModalities: []string{
+			"text",
+		},
+	}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(textAuth.ID)
+		reg.UnregisterClient(audioAuth.ID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	h := NewOpenAIAPIHandler(base)
+	router := gin.New()
+	router.POST("/v1/audio/transcriptions", h.AudioTranscriptions)
+
+	req := newAudioMultipartRequest(t, "/v1/audio/transcriptions", map[string]string{
+		"model": "auto",
+	}, audioTranscriptionFileFieldName, "sample.webm", "", []byte("fake-audio"))
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", resp.Code, http.StatusOK, resp.Body.String())
+	}
+	if audioExecutor.lastAuthID != audioAuth.ID {
+		t.Fatalf("audio executor auth id = %q, want %q", audioExecutor.lastAuthID, audioAuth.ID)
+	}
+	if textExecutor.Calls() != 0 {
+		t.Fatalf("text executor calls = %d, want 0", textExecutor.Calls())
+	}
+	if got := audioExecutor.lastFields["model"]; len(got) != 1 || got[0] != "shared-transcription-model" {
+		t.Fatalf("model field = %v, want [shared-transcription-model]", got)
+	}
+}
+
 func newAudioTestRouter(t *testing.T, executor coreauth.ProviderExecutor, auths ...*coreauth.Auth) *gin.Engine {
+	return newAudioTestRouterWithConfig(t, &sdkconfig.SDKConfig{}, executor, auths...)
+}
+
+func newAudioTestRouterWithConfig(t *testing.T, cfg *sdkconfig.SDKConfig, executor coreauth.ProviderExecutor, auths ...*coreauth.Auth) *gin.Engine {
 	t.Helper()
 
 	manager := coreauth.NewManager(nil, nil, nil)
@@ -801,7 +1233,7 @@ func newAudioTestRouter(t *testing.T, executor coreauth.ProviderExecutor, auths 
 		})
 	}
 
-	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	base := handlers.NewBaseAPIHandlers(cfg, manager)
 	h := NewOpenAIAPIHandler(base)
 	router := gin.New()
 	router.POST("/v1/audio/transcriptions", h.AudioTranscriptions)
