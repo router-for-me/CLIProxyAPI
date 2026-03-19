@@ -369,6 +369,19 @@ func TestNormalizeCacheControlTTL_DowngradesLaterOneHourBlocks(t *testing.T) {
 	}
 }
 
+func TestNormalizeCacheControlTTL_PreservesOriginalBytesWhenNoChange(t *testing.T) {
+	// Payload where no TTL normalization is needed (all blocks use 1h with no
+	// preceding 5m block). The text intentionally contains HTML chars (<, >, &)
+	// that json.Marshal would escape to \u003c etc., altering byte identity.
+	payload := []byte(`{"tools":[{"name":"t1","cache_control":{"type":"ephemeral","ttl":"1h"}}],"system":[{"type":"text","text":"<system-reminder>foo & bar</system-reminder>","cache_control":{"type":"ephemeral","ttl":"1h"}}],"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]}`)
+
+	out := normalizeCacheControlTTL(payload)
+
+	if !bytes.Equal(out, payload) {
+		t.Fatalf("normalizeCacheControlTTL altered bytes when no change was needed.\noriginal: %s\ngot:      %s", payload, out)
+	}
+}
+
 func TestEnforceCacheControlLimit_StripsNonLastToolBeforeMessages(t *testing.T) {
 	payload := []byte(`{
 		"tools": [
@@ -829,8 +842,8 @@ func TestClaudeExecutor_ExecuteStream_AcceptEncodingOverrideCannotBypassIdentity
 	executor := NewClaudeExecutor(&config.Config{})
 	// Inject Accept-Encoding via the custom header attribute mechanism.
 	auth := &cliproxyauth.Auth{Attributes: map[string]string{
-		"api_key":             "key-123",
-		"base_url":            server.URL,
+		"api_key":                "key-123",
+		"base_url":               server.URL,
 		"header:Accept-Encoding": "gzip, deflate, br, zstd",
 	}}
 	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
@@ -965,5 +978,89 @@ func TestClaudeExecutor_ExecuteStream_GzipErrorBodyNoContentEncodingHeader(t *te
 	}
 	if !strings.Contains(err.Error(), "stream test error") {
 		t.Errorf("error message should contain decompressed JSON, got: %q", err.Error())
+	}
+}
+
+// Test case 1: String system prompt is preserved and converted to a content block
+func TestCheckSystemInstructionsWithMode_StringSystemPreserved(t *testing.T) {
+	payload := []byte(`{"system":"You are a helpful assistant.","messages":[{"role":"user","content":"hi"}]}`)
+
+	out := checkSystemInstructionsWithMode(payload, false)
+
+	system := gjson.GetBytes(out, "system")
+	if !system.IsArray() {
+		t.Fatalf("system should be an array, got %s", system.Type)
+	}
+
+	blocks := system.Array()
+	if len(blocks) != 3 {
+		t.Fatalf("expected 3 system blocks, got %d", len(blocks))
+	}
+
+	if !strings.HasPrefix(blocks[0].Get("text").String(), "x-anthropic-billing-header:") {
+		t.Fatalf("blocks[0] should be billing header, got %q", blocks[0].Get("text").String())
+	}
+	if blocks[1].Get("text").String() != "You are a Claude agent, built on Anthropic's Claude Agent SDK." {
+		t.Fatalf("blocks[1] should be agent block, got %q", blocks[1].Get("text").String())
+	}
+	if blocks[2].Get("text").String() != "You are a helpful assistant." {
+		t.Fatalf("blocks[2] should be user system prompt, got %q", blocks[2].Get("text").String())
+	}
+	if blocks[2].Get("cache_control.type").String() != "ephemeral" {
+		t.Fatalf("blocks[2] should have cache_control.type=ephemeral")
+	}
+}
+
+// Test case 2: Strict mode drops the string system prompt
+func TestCheckSystemInstructionsWithMode_StringSystemStrict(t *testing.T) {
+	payload := []byte(`{"system":"You are a helpful assistant.","messages":[{"role":"user","content":"hi"}]}`)
+
+	out := checkSystemInstructionsWithMode(payload, true)
+
+	blocks := gjson.GetBytes(out, "system").Array()
+	if len(blocks) != 2 {
+		t.Fatalf("strict mode should produce 2 blocks, got %d", len(blocks))
+	}
+}
+
+// Test case 3: Empty string system prompt does not produce a spurious block
+func TestCheckSystemInstructionsWithMode_EmptyStringSystemIgnored(t *testing.T) {
+	payload := []byte(`{"system":"","messages":[{"role":"user","content":"hi"}]}`)
+
+	out := checkSystemInstructionsWithMode(payload, false)
+
+	blocks := gjson.GetBytes(out, "system").Array()
+	if len(blocks) != 2 {
+		t.Fatalf("empty string system should produce 2 blocks, got %d", len(blocks))
+	}
+}
+
+// Test case 4: Array system prompt is unaffected by the string handling
+func TestCheckSystemInstructionsWithMode_ArraySystemStillWorks(t *testing.T) {
+	payload := []byte(`{"system":[{"type":"text","text":"Be concise."}],"messages":[{"role":"user","content":"hi"}]}`)
+
+	out := checkSystemInstructionsWithMode(payload, false)
+
+	blocks := gjson.GetBytes(out, "system").Array()
+	if len(blocks) != 3 {
+		t.Fatalf("expected 3 system blocks, got %d", len(blocks))
+	}
+	if blocks[2].Get("text").String() != "Be concise." {
+		t.Fatalf("blocks[2] should be user system prompt, got %q", blocks[2].Get("text").String())
+	}
+}
+
+// Test case 5: Special characters in string system prompt survive conversion
+func TestCheckSystemInstructionsWithMode_StringWithSpecialChars(t *testing.T) {
+	payload := []byte(`{"system":"Use <xml> tags & \"quotes\" in output.","messages":[{"role":"user","content":"hi"}]}`)
+
+	out := checkSystemInstructionsWithMode(payload, false)
+
+	blocks := gjson.GetBytes(out, "system").Array()
+	if len(blocks) != 3 {
+		t.Fatalf("expected 3 system blocks, got %d", len(blocks))
+	}
+	if blocks[2].Get("text").String() != `Use <xml> tags & "quotes" in output.` {
+		t.Fatalf("blocks[2] text mangled, got %q", blocks[2].Get("text").String())
 	}
 }
