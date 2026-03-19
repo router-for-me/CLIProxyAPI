@@ -49,7 +49,7 @@ func (r *ClientAddressResolver) Resolve(req *http.Request) ClientAddressInfo {
 		return info
 	}
 
-	if clientIP := firstTrustedForwardedClientIP(req.Header); clientIP != "" {
+	if clientIP := r.firstTrustedForwardedClientIP(req.Header); clientIP != "" {
 		info.ClientIP = clientIP
 		info.UsedTrustedForwarding = true
 	}
@@ -167,14 +167,14 @@ func hasForwardingHeaders(headers http.Header) bool {
 	return false
 }
 
-func firstTrustedForwardedClientIP(headers http.Header) string {
+func (r *ClientAddressResolver) firstTrustedForwardedClientIP(headers http.Header) string {
 	if headers == nil {
 		return ""
 	}
-	if ip := parseForwardedHeader(headers.Values("Forwarded")); ip != "" {
+	if ip := r.parseForwardedHeader(headers.Values("Forwarded")); ip != "" {
 		return ip
 	}
-	if ip := parseXForwardedFor(headers.Values("X-Forwarded-For")); ip != "" {
+	if ip := r.parseXForwardedFor(headers.Values("X-Forwarded-For")); ip != "" {
 		return ip
 	}
 	for _, value := range headers.Values("X-Real-IP") {
@@ -185,7 +185,8 @@ func firstTrustedForwardedClientIP(headers http.Header) string {
 	return ""
 }
 
-func parseForwardedHeader(values []string) string {
+func (r *ClientAddressResolver) parseForwardedHeader(values []string) string {
+	candidates := make([]string, 0, len(values))
 	for _, value := range values {
 		for _, element := range strings.Split(value, ",") {
 			for _, param := range strings.Split(element, ";") {
@@ -194,20 +195,30 @@ func parseForwardedHeader(values []string) string {
 					continue
 				}
 				if ip := normalizeIPCandidate(rawValue); ip != "" {
-					return ip
+					candidates = append(candidates, ip)
 				}
 			}
 		}
 	}
-	return ""
+	return r.lastUntrustedForwardedIP(candidates)
 }
 
-func parseXForwardedFor(values []string) string {
+func (r *ClientAddressResolver) parseXForwardedFor(values []string) string {
+	candidates := make([]string, 0, len(values))
 	for _, value := range values {
 		for _, part := range strings.Split(value, ",") {
 			if ip := normalizeIPCandidate(part); ip != "" {
-				return ip
+				candidates = append(candidates, ip)
 			}
+		}
+	}
+	return r.lastUntrustedForwardedIP(candidates)
+}
+
+func (r *ClientAddressResolver) lastUntrustedForwardedIP(candidates []string) string {
+	for i := len(candidates) - 1; i >= 0; i-- {
+		if i == 0 || !r.isTrustedProxy(candidates[i]) {
+			return candidates[i]
 		}
 	}
 	return ""

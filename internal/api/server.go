@@ -47,7 +47,7 @@ const oauthCallbackSuccessHTML = `<html><head><meta charset="utf-8"><title>Authe
 
 const (
 	corsAllowedMethods       = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
-	corsAllowedHeaders       = "Authorization, Content-Type, X-Requested-With, X-Goog-Api-Key, X-Api-Key, X-Management-Key, X-Local-Password, Idempotency-Key"
+	corsAllowedHeaders       = "Authorization, Content-Type, X-Requested-With, X-Goog-Api-Key, X-Api-Key, X-Management-Key, X-Local-Password, Idempotency-Key, Anthropic-Beta, Anthropic-Version, Anthropic-Dangerous-Direct-Browser-Access, OpenAI-Beta"
 	authFailureLimit         = 5
 	authFailureWindow        = time.Minute
 	authFailureBlockDuration = 2 * time.Minute

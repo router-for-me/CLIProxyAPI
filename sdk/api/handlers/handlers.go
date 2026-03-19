@@ -619,6 +619,9 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 	go func() {
 		defer close(dataChan)
 		defer close(errChan)
+		sentPayload := false
+		bootstrapRetries := 0
+		maxBootstrapRetries := StreamingBootstrapRetries(h.Cfg)
 
 		sendErr := func(msg *interfaces.ErrorMessage) bool {
 			if ctx == nil {
@@ -646,6 +649,20 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 			}
 		}
 
+		bootstrapEligible := func(err error) bool {
+			status := statusFromError(err)
+			if status == 0 {
+				return true
+			}
+			switch status {
+			case http.StatusUnauthorized, http.StatusForbidden, http.StatusPaymentRequired,
+				http.StatusRequestTimeout, http.StatusTooManyRequests:
+				return true
+			default:
+				return status >= http.StatusInternalServerError
+			}
+		}
+
 		for {
 			var chunk coreexecutor.StreamChunk
 			var ok bool
@@ -663,6 +680,18 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 			}
 			if chunk.Err != nil {
 				streamErr := chunk.Err
+				if !sentPayload && bootstrapRetries < maxBootstrapRetries && bootstrapEligible(streamErr) {
+					bootstrapRetries++
+					retryResult, retryErr := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
+					if retryErr == nil {
+						if passthroughHeadersEnabled {
+							replaceHeader(upstreamHeaders, FilterUpstreamHeaders(retryResult.Headers))
+						}
+						chunks = retryResult.Chunks
+						continue
+					}
+					streamErr = retryErr
+				}
 				status := http.StatusInternalServerError
 				if se, ok := streamErr.(interface{ StatusCode() int }); ok && se != nil {
 					if code := se.StatusCode(); code > 0 {
@@ -685,6 +714,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 						return
 					}
 				}
+				sentPayload = true
 				if okSendData := sendData(cloneBytes(chunk.Payload)); !okSendData {
 					return
 				}
