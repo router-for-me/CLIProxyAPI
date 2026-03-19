@@ -17,6 +17,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/tidwall/gjson"
@@ -111,6 +113,16 @@ func (h *OpenAIAPIHandler) AudioTranscriptions(c *gin.Context) {
 	defer func() {
 		_ = audioReq.Cleanup()
 	}()
+	audioReq.Model, err = resolveAudioAutoModel(h.AuthManager, audioReq.Model)
+	if err != nil {
+		c.JSON(statusCodeOrDefault(err, http.StatusBadRequest), handlers.ErrorResponse{
+			Error: handlers.ErrorDetail{
+				Message: err.Error(),
+				Type:    "invalid_request_error",
+			},
+		})
+		return
+	}
 
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 	upstreamResp, _, errMsg := h.ExecuteHTTPRequestWithAuthManager(cliCtx, audioReq.Model, func(ctx context.Context, auth *coreauth.Auth, upstreamModel string) (*http.Request, error) {
@@ -383,6 +395,11 @@ func (r *audioTranscriptionRequest) BuildHTTPRequest(ctx context.Context, auth *
 
 	bodyReader, bodyWriter := io.Pipe()
 	multipartWriter := multipart.NewWriter(bodyWriter)
+	contentLength, err := r.multipartContentLength(multipartWriter.Boundary(), upstreamModel)
+	if err != nil {
+		_ = bodyWriter.Close()
+		return nil, err
+	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bodyReader)
 	if err != nil {
@@ -391,6 +408,7 @@ func (r *audioTranscriptionRequest) BuildHTTPRequest(ctx context.Context, auth *
 	}
 	req.Header.Set("Content-Type", multipartWriter.FormDataContentType())
 	req.Header.Set("Accept", "application/json")
+	req.ContentLength = contentLength
 
 	go r.writeMultipartBody(bodyWriter, multipartWriter, upstreamModel)
 	return req, nil
@@ -454,6 +472,55 @@ func (r *audioTranscriptionRequest) writeMultipartFields(multipartWriter *multip
 	return err
 }
 
+func (r *audioTranscriptionRequest) multipartContentLength(boundary, upstreamModel string) (int64, error) {
+	if r == nil {
+		return 0, &audioRequestError{status: http.StatusBadRequest, msg: "audio transcription request is empty"}
+	}
+	fileInfo, err := os.Stat(r.StagedFilePath)
+	if err != nil {
+		return 0, fmt.Errorf("failed to stat staged audio file: %w", err)
+	}
+	counter := &countingWriter{}
+	multipartWriter := multipart.NewWriter(counter)
+	if err := multipartWriter.SetBoundary(boundary); err != nil {
+		return 0, err
+	}
+	modelValue := strings.TrimSpace(upstreamModel)
+	if modelValue == "" {
+		modelValue = strings.TrimSpace(r.Model)
+	}
+	for _, field := range r.Fields {
+		fieldValue := field.Value
+		if field.Name == audioTranscriptionModelFieldName {
+			fieldValue = modelValue
+		}
+		if err := multipartWriter.WriteField(field.Name, fieldValue); err != nil {
+			return 0, err
+		}
+	}
+
+	filename := strings.TrimSpace(r.FileName)
+	if filename == "" {
+		filename = audioTranscriptionDefaultFilename
+	}
+	filePartHeader := make(textproto.MIMEHeader)
+	filePartHeader.Set("Content-Disposition", mime.FormatMediaType("form-data", map[string]string{
+		"name":     audioTranscriptionFileFieldName,
+		"filename": filename,
+	}))
+	if contentType := strings.TrimSpace(r.FileContentType); contentType != "" {
+		filePartHeader.Set("Content-Type", contentType)
+	}
+	if _, err := multipartWriter.CreatePart(filePartHeader); err != nil {
+		return 0, err
+	}
+	counter.n += fileInfo.Size()
+	if err := multipartWriter.Close(); err != nil {
+		return 0, err
+	}
+	return counter.n, nil
+}
+
 func resolveAudioTranscriptionURL(auth *coreauth.Auth) (string, error) {
 	if auth == nil {
 		return "", &audioRequestError{status: http.StatusBadGateway, msg: "no auth selected for audio transcription"}
@@ -492,6 +559,151 @@ func isOpenAICompatibleAuth(auth *coreauth.Auth) bool {
 		}
 	}
 	return strings.EqualFold(strings.TrimSpace(auth.Provider), "openai-compatibility")
+}
+
+func resolveAudioAutoModel(manager *coreauth.Manager, modelName string) (string, error) {
+	parsed := thinking.ParseSuffix(strings.TrimSpace(modelName))
+	if parsed.ModelName != "auto" {
+		return modelName, nil
+	}
+	resolvedBase, err := resolveAutoAudioModelBase(manager)
+	if err != nil {
+		return "", &audioRequestError{status: http.StatusBadRequest, msg: err.Error()}
+	}
+	if parsed.HasSuffix {
+		return fmt.Sprintf("%s(%s)", resolvedBase, parsed.RawSuffix), nil
+	}
+	return resolvedBase, nil
+}
+
+type audioAutoModelCandidate struct {
+	RouteModel string
+	CreatedAt  int64
+}
+
+func resolveAutoAudioModelBase(manager *coreauth.Manager) (string, error) {
+	if manager == nil {
+		return "", fmt.Errorf("model auto is not supported for audio transcription because the auth manager is unavailable")
+	}
+
+	reg := registry.GetGlobalRegistry()
+	candidates := make(map[string]int64)
+
+	for _, auth := range manager.List() {
+		if auth == nil || strings.TrimSpace(auth.ID) == "" {
+			continue
+		}
+		if _, err := resolveAudioTranscriptionURL(auth); err != nil {
+			continue
+		}
+
+		for _, modelInfo := range reg.GetModelsForClient(auth.ID) {
+			if modelInfo == nil {
+				continue
+			}
+			routeModel := strings.TrimSpace(modelInfo.ID)
+			if routeModel == "" {
+				continue
+			}
+
+			createdAt, ok := resolveAudioRouteModelCreatedAt(manager, auth, routeModel, modelInfo.Created)
+			if !ok {
+				continue
+			}
+			if existing, exists := candidates[routeModel]; !exists || createdAt > existing {
+				candidates[routeModel] = createdAt
+			}
+		}
+	}
+
+	if len(candidates) == 0 {
+		return "", fmt.Errorf("model auto is not supported for audio transcription because no transcription-capable model is available")
+	}
+
+	ordered := make([]audioAutoModelCandidate, 0, len(candidates))
+	for routeModel, createdAt := range candidates {
+		ordered = append(ordered, audioAutoModelCandidate{RouteModel: routeModel, CreatedAt: createdAt})
+	}
+	sort.SliceStable(ordered, func(i, j int) bool {
+		if ordered[i].CreatedAt == ordered[j].CreatedAt {
+			return ordered[i].RouteModel < ordered[j].RouteModel
+		}
+		return ordered[i].CreatedAt > ordered[j].CreatedAt
+	})
+	return ordered[0].RouteModel, nil
+}
+
+func resolveAudioRouteModelCreatedAt(manager *coreauth.Manager, auth *coreauth.Auth, routeModel string, fallbackCreatedAt int64) (int64, bool) {
+	if manager == nil || auth == nil {
+		return 0, false
+	}
+	upstreamModels := manager.ExecutionModelCandidates(auth, routeModel)
+	if len(upstreamModels) == 0 {
+		return 0, false
+	}
+
+	createdAt := fallbackCreatedAt
+	for _, upstreamModel := range upstreamModels {
+		upstreamCreatedAt, ok := resolveAudioUpstreamModelCreatedAt(upstreamModel)
+		if !ok {
+			return 0, false
+		}
+		if upstreamCreatedAt > createdAt {
+			createdAt = upstreamCreatedAt
+		}
+	}
+	return createdAt, true
+}
+
+func resolveAudioUpstreamModelCreatedAt(modelName string) (int64, bool) {
+	baseModel := strings.TrimSpace(thinking.ParseSuffix(modelName).ModelName)
+	if baseModel == "" {
+		return 0, false
+	}
+
+	if info := registry.LookupModelInfo(baseModel); info != nil {
+		if !isAudioTranscriptionModelInfo(info) {
+			return 0, false
+		}
+		return info.Created, true
+	}
+	return 0, isAudioTranscriptionModelName(baseModel)
+}
+
+func isAudioTranscriptionModelInfo(info *registry.ModelInfo) bool {
+	if info == nil {
+		return false
+	}
+	if len(info.SupportedInputModalities) > 0 && len(info.SupportedOutputModalities) > 0 {
+		if containsFolded(info.SupportedInputModalities, "audio") && containsFolded(info.SupportedOutputModalities, "text") {
+			return true
+		}
+	}
+	return isAudioTranscriptionModelName(info.ID) ||
+		isAudioTranscriptionModelName(info.Version) ||
+		isAudioTranscriptionModelName(info.DisplayName) ||
+		isAudioTranscriptionModelName(info.Description)
+}
+
+func isAudioTranscriptionModelName(value string) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return false
+	}
+	return strings.Contains(value, "transcribe") || strings.Contains(value, "transcription") || strings.Contains(value, "speech-to-text")
+}
+
+func containsFolded(values []string, needle string) bool {
+	needle = strings.TrimSpace(needle)
+	if needle == "" {
+		return false
+	}
+	for _, value := range values {
+		if strings.EqualFold(strings.TrimSpace(value), needle) {
+			return true
+		}
+	}
+	return false
 }
 
 func resolveCodexAudioTranscriptionURL(baseURL string) string {
@@ -585,4 +797,13 @@ func statusCodeOrDefault(err error, fallback int) int {
 		}
 	}
 	return fallback
+}
+
+type countingWriter struct {
+	n int64
+}
+
+func (w *countingWriter) Write(p []byte) (int, error) {
+	w.n += int64(len(p))
+	return len(p), nil
 }

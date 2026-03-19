@@ -427,6 +427,14 @@ func (m *Manager) executionModelCandidates(auth *Auth, routeModel string) []stri
 	return m.prepareExecutionModels(auth, routeModel)
 }
 
+// ExecutionModelCandidates resolves the upstream model candidates for a route model under a specific auth.
+func (m *Manager) ExecutionModelCandidates(auth *Auth, routeModel string) []string {
+	if m == nil {
+		return nil
+	}
+	return m.executionModelCandidates(auth, routeModel)
+}
+
 func (m *Manager) prepareExecutionModels(auth *Auth, routeModel string) []string {
 	requestedModel := rewriteModelForAuth(routeModel, auth)
 	requestedModel = m.applyOAuthModelAlias(auth, requestedModel)

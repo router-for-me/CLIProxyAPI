@@ -15,8 +15,10 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -33,6 +35,7 @@ type audioExecutorResponse struct {
 }
 
 type audioCaptureExecutor struct {
+	id           string
 	mu           sync.Mutex
 	calls        int
 	authIDs      []string
@@ -41,10 +44,16 @@ type audioCaptureExecutor struct {
 	lastFields   map[string][]string
 	lastFileName string
 	lastFileBody []byte
+	lastLength   int64
 	responses    map[string]audioExecutorResponse
 }
 
-func (e *audioCaptureExecutor) Identifier() string { return "openai-compatibility" }
+func (e *audioCaptureExecutor) Identifier() string {
+	if strings.TrimSpace(e.id) != "" {
+		return e.id
+	}
+	return "openai-compatibility"
+}
 
 func (e *audioCaptureExecutor) Execute(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
 	return coreexecutor.Response{}, errors.New("not implemented")
@@ -73,6 +82,7 @@ func (e *audioCaptureExecutor) HttpRequest(_ context.Context, auth *coreauth.Aut
 	e.lastFields = make(map[string][]string)
 	e.lastFileName = ""
 	e.lastFileBody = nil
+	e.lastLength = req.ContentLength
 	e.mu.Unlock()
 
 	mediaType, params, err := mime.ParseMediaType(req.Header.Get("Content-Type"))
@@ -202,6 +212,9 @@ func TestAudioTranscriptionsWrapsPlainTextResponse(t *testing.T) {
 	}
 	if string(executor.lastFileBody) != "fake-audio" {
 		t.Fatalf("file body = %q, want %q", string(executor.lastFileBody), "fake-audio")
+	}
+	if executor.lastLength <= 0 {
+		t.Fatalf("content length = %d, want > 0", executor.lastLength)
 	}
 }
 
@@ -570,6 +583,117 @@ func TestAudioTranscriptionsCleansUpStagedTempFiles(t *testing.T) {
 			names = append(names, entry.Name())
 		}
 		t.Fatalf("expected temp dir to be empty, got %v", names)
+	}
+}
+
+func TestAudioTranscriptionsResolveAutoToTranscriptionModel(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	executor := &audioCaptureExecutor{}
+	router := newAudioTestRouter(t, executor, &coreauth.Auth{
+		ID:       "audio-auth",
+		Provider: "openai-compatibility",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"base_url": "https://api.example.com/v1",
+		},
+	})
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient("chat-auto-client", "openai", []*registry.ModelInfo{{
+		ID:      "gpt-5.2",
+		Created: time.Now().Unix() + 1000,
+	}})
+	t.Cleanup(func() {
+		reg.UnregisterClient("chat-auto-client")
+	})
+
+	req := newAudioMultipartRequest(t, "/v1/audio/transcriptions", map[string]string{
+		"model": "auto",
+	}, audioTranscriptionFileFieldName, "sample.webm", "", []byte("fake-audio"))
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", resp.Code, http.StatusOK, resp.Body.String())
+	}
+	if got := executor.lastFields["model"]; len(got) != 1 || got[0] != audioTestModel {
+		t.Fatalf("model field = %v, want [%s]", got, audioTestModel)
+	}
+}
+
+func TestAudioTranscriptionsResolveAutoToCompatibleAliasModel(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	executor := &audioCaptureExecutor{id: "pool"}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.SetConfig(&internalconfig.Config{
+		OpenAICompatibility: []internalconfig.OpenAICompatibility{{
+			Name: "pool",
+			Models: []internalconfig.OpenAICompatibilityModel{
+				{Name: audioTestModel, Alias: "voice-default"},
+			},
+		}},
+	})
+	manager.RegisterExecutor(executor)
+
+	poolAuth := &coreauth.Auth{
+		ID:       "pool-auth",
+		Provider: "pool",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"api_key":      "test-key",
+			"base_url":     "https://api.example.com/v1",
+			"compat_name":  "pool",
+			"provider_key": "pool",
+		},
+	}
+	if _, err := manager.Register(context.Background(), poolAuth); err != nil {
+		t.Fatalf("register pool auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(poolAuth.ID, "pool", []*registry.ModelInfo{{
+		ID:      "voice-default",
+		Created: time.Now().Unix(),
+	}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(poolAuth.ID)
+	})
+
+	geminiAuth := &coreauth.Auth{
+		ID:       "gemini-auth",
+		Provider: "gemini",
+		Status:   coreauth.StatusActive,
+	}
+	if _, err := manager.Register(context.Background(), geminiAuth); err != nil {
+		t.Fatalf("register gemini auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(geminiAuth.ID, "gemini", []*registry.ModelInfo{{
+		ID:      "gemini-speech-to-text",
+		Created: time.Now().Unix() + 1000,
+	}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(geminiAuth.ID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	h := NewOpenAIAPIHandler(base)
+	router := gin.New()
+	router.POST("/v1/audio/transcriptions", h.AudioTranscriptions)
+
+	req := newAudioMultipartRequest(t, "/v1/audio/transcriptions", map[string]string{
+		"model": "auto",
+	}, audioTranscriptionFileFieldName, "sample.webm", "", []byte("fake-audio"))
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", resp.Code, http.StatusOK, resp.Body.String())
+	}
+	if executor.lastAuthID != poolAuth.ID {
+		t.Fatalf("last auth id = %q, want %q", executor.lastAuthID, poolAuth.ID)
+	}
+	if got := executor.lastFields["model"]; len(got) != 1 || got[0] != audioTestModel {
+		t.Fatalf("model field = %v, want [%s]", got, audioTestModel)
 	}
 }
 
