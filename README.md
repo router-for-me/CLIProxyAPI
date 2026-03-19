@@ -170,9 +170,15 @@ Run the login command **once** for each provider you want to use. Tokens are sav
 
 Pass `-config /path/to/config.yaml` if your config file is not in the current directory.
 
-> **Docker users:** the login commands above run on your host machine (not in the container).
-> Tokens are saved to `~/.cli-proxy-api/` and mounted into the container by `docker-compose.yml`.
-> Run these commands on your host before starting the container, or use `docker compose exec cliproxyapi -login` inside the container.
+> **Docker users:** by default `docker-compose.yml` mounts `./auths/` (relative to the repo)
+> into the container as `/root/.cli-proxy-api`, not your home directory. Run login inside the
+> running container instead:
+> ```bash
+> docker compose exec cli-proxy-api ./CLIProxyAPI -login
+> docker compose exec cli-proxy-api ./CLIProxyAPI -claude-login
+> # etc.
+> ```
+> Alternatively, set `CLI_PROXY_AUTH_PATH=~/.cli-proxy-api` before `docker compose up` to use your home directory.
 
 > **Homebrew users:** replace `./cli-proxy-api` with `cliproxyapi` in the commands above,
 > and add `-config "$(brew --prefix)/etc/cliproxyapi.conf"` if needed.

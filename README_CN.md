@@ -163,8 +163,14 @@ ln -sf ~/.cli-proxy-api/config.yaml "$(brew --prefix)/etc/cliproxyapi.conf"
 
 如果配置文件不在当前目录，请加上 `-config /path/to/config.yaml`。
 
-> **Docker 用户：** 以上登录命令在宿主机上运行（不在容器内）。Token 保存在 `~/.cli-proxy-api/`，
-> 由 `docker-compose.yml` 挂载到容器中。在启动容器前在宿主机运行这些命令，或在容器内使用 `docker compose exec cliproxyapi -login`。
+> **Docker 用户：** 默认情况下，`docker-compose.yml` 将仓库目录下的 `./auths/` 挂载到容器中的
+> `/root/.cli-proxy-api`，而非宿主机的家目录。请在运行的容器内执行登录命令：
+> ```bash
+> docker compose exec cli-proxy-api ./CLIProxyAPI -login
+> docker compose exec cli-proxy-api ./CLIProxyAPI -claude-login
+> # 以此类推
+> ```
+> 或者，在 `docker compose up` 之前设置 `CLI_PROXY_AUTH_PATH=~/.cli-proxy-api` 使用宿主机家目录中的 Token。
 
 > **Homebrew 用户：** 将上述命令中的 `./cli-proxy-api` 替换为 `cliproxyapi`，
 > 如有需要可加上 `-config "$(brew --prefix)/etc/cliproxyapi.conf"`。
