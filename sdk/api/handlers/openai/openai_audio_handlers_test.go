@@ -228,6 +228,84 @@ func TestAudioTranscriptionsRejectsUnsupportedFileFormat(t *testing.T) {
 	}
 }
 
+func TestAudioTranscriptionsPreserveExplicitTextResponseFormat(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	executor := &audioCaptureExecutor{
+		responses: map[string]audioExecutorResponse{
+			"audio-auth": {
+				status:      http.StatusOK,
+				body:        "raw transcript",
+				contentType: "text/plain; charset=utf-8",
+			},
+		},
+	}
+	router := newAudioTestRouter(t, executor, &coreauth.Auth{
+		ID:       "audio-auth",
+		Provider: "openai-compatibility",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"base_url": "https://api.example.com/v1",
+		},
+	})
+
+	req := newAudioMultipartRequest(t, "/v1/audio/transcriptions", map[string]string{
+		"model":           audioTestModel,
+		"response_format": "text",
+	}, audioTranscriptionFileFieldName, "sample.webm", "", []byte("fake-audio"))
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", resp.Code, http.StatusOK, resp.Body.String())
+	}
+	if strings.TrimSpace(resp.Body.String()) != "raw transcript" {
+		t.Fatalf("body = %s", resp.Body.String())
+	}
+	if got := resp.Header().Get("Content-Type"); got != "text/plain; charset=utf-8" {
+		t.Fatalf("content type = %q, want %q", got, "text/plain; charset=utf-8")
+	}
+}
+
+func TestAudioTranscriptionsPreserveExplicitVTTResponseFormat(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	executor := &audioCaptureExecutor{
+		responses: map[string]audioExecutorResponse{
+			"audio-auth": {
+				status:      http.StatusOK,
+				body:        "WEBVTT\n\n00:00.000 --> 00:01.000\nHello",
+				contentType: "text/vtt; charset=utf-8",
+			},
+		},
+	}
+	router := newAudioTestRouter(t, executor, &coreauth.Auth{
+		ID:       "audio-auth",
+		Provider: "openai-compatibility",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"base_url": "https://api.example.com/v1",
+		},
+	})
+
+	req := newAudioMultipartRequest(t, "/v1/audio/transcriptions", map[string]string{
+		"model":           audioTestModel,
+		"response_format": "vtt",
+	}, audioTranscriptionFileFieldName, "sample.webm", "", []byte("fake-audio"))
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", resp.Code, http.StatusOK, resp.Body.String())
+	}
+	if got := resp.Header().Get("Content-Type"); got != "text/vtt; charset=utf-8" {
+		t.Fatalf("content type = %q, want %q", got, "text/vtt; charset=utf-8")
+	}
+	if !strings.Contains(resp.Body.String(), "WEBVTT") {
+		t.Fatalf("body = %s", resp.Body.String())
+	}
+}
+
 func TestNormalizeAudioTranscriptionResponse(t *testing.T) {
 	testCases := []struct {
 		name string
@@ -278,6 +356,23 @@ func TestResolveAudioTranscriptionURL_DefaultCodexOAuth(t *testing.T) {
 	}
 }
 
+func TestResolveAudioTranscriptionURL_ConfiguredCodexBaseURL(t *testing.T) {
+	url, err := resolveAudioTranscriptionURL(&coreauth.Auth{
+		ID:       "codex-auth",
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"base_url": "https://chatgpt.com/backend-api/codex",
+		},
+	})
+	if err != nil {
+		t.Fatalf("resolveAudioTranscriptionURL() error = %v", err)
+	}
+	if url != "https://chatgpt.com/backend-api/transcribe" {
+		t.Fatalf("resolveAudioTranscriptionURL() = %q, want %q", url, "https://chatgpt.com/backend-api/transcribe")
+	}
+}
+
 func TestAudioTranscriptionsRejectsOversizedUpstreamResponse(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -310,6 +405,37 @@ func TestAudioTranscriptionsRejectsOversizedUpstreamResponse(t *testing.T) {
 	}
 	if !strings.Contains(resp.Body.String(), "exceeded") {
 		t.Fatalf("body = %s", resp.Body.String())
+	}
+}
+
+func TestAudioTranscriptionsRejectOversizedNonFileFields(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	executor := &audioCaptureExecutor{}
+	router := newAudioTestRouter(t, executor, &coreauth.Auth{
+		ID:       "audio-auth",
+		Provider: "openai-compatibility",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"base_url": "https://api.example.com/v1",
+		},
+	})
+
+	req := newAudioMultipartRequest(t, "/v1/audio/transcriptions", map[string]string{
+		"model":  audioTestModel,
+		"prompt": strings.Repeat("a", int(audioTranscriptionNonFileFieldsLimitBytes+1)),
+	}, audioTranscriptionFileFieldName, "sample.webm", "", []byte("fake-audio"))
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body=%s", resp.Code, http.StatusBadRequest, resp.Body.String())
+	}
+	if !strings.Contains(resp.Body.String(), "non-file multipart fields exceed") {
+		t.Fatalf("body = %s", resp.Body.String())
+	}
+	if executor.Calls() != 0 {
+		t.Fatalf("executor calls = %d, want 0", executor.Calls())
 	}
 }
 
@@ -366,6 +492,43 @@ func TestAudioTranscriptionsRetriesAcrossAuthsOnRetriableHTTPFailure(t *testing.
 	}
 	if got := executor.AuthIDs(); len(got) != 2 || got[0] != "auth1" || got[1] != "auth2" {
 		t.Fatalf("auth IDs = %v, want [auth1 auth2]", got)
+	}
+}
+
+func TestAudioTranscriptionsRetriesAcrossAuthsOnRequestBuildFailure(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	executor := &audioCaptureExecutor{}
+	router := newAudioTestRouter(t, executor,
+		&coreauth.Auth{
+			ID:       "auth1",
+			Provider: "openai-compatibility",
+			Status:   coreauth.StatusActive,
+		},
+		&coreauth.Auth{
+			ID:       "auth2",
+			Provider: "openai-compatibility",
+			Status:   coreauth.StatusActive,
+			Attributes: map[string]string{
+				"base_url": "https://api.example.com/v1",
+			},
+		},
+	)
+
+	req := newAudioMultipartRequest(t, "/v1/audio/transcriptions", map[string]string{
+		"model": audioTestModel,
+	}, audioTranscriptionFileFieldName, "sample.webm", "", []byte("fake-audio"))
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", resp.Code, http.StatusOK, resp.Body.String())
+	}
+	if executor.Calls() != 1 {
+		t.Fatalf("executor calls = %d, want 1", executor.Calls())
+	}
+	if got := executor.AuthIDs(); len(got) != 1 || got[0] != "auth2" {
+		t.Fatalf("auth IDs = %v, want [auth2]", got)
 	}
 }
 

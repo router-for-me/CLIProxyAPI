@@ -42,8 +42,8 @@ type ProviderExecutor interface {
 	HttpRequest(ctx context.Context, auth *Auth, req *http.Request) (*http.Response, error)
 }
 
-// HTTPRequestBuilder builds a fresh HTTP request for the selected auth.
-type HTTPRequestBuilder func(context.Context, *Auth) (*http.Request, error)
+// HTTPRequestBuilder builds a fresh HTTP request for the selected auth and resolved upstream model.
+type HTTPRequestBuilder func(context.Context, *Auth, string) (*http.Request, error)
 
 // ExecutionSessionCloser allows executors to release per-session runtime resources.
 type ExecutionSessionCloser interface {
@@ -1245,67 +1245,103 @@ func (m *Manager) executeHTTPMixedOnce(ctx context.Context, providers []string, 
 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 		}
 
-		httpReq, errBuild := build(execCtx, auth)
-		if errBuild != nil {
-			return nil, auth, errBuild
-		}
-
-		httpResp, errHTTP := executor.HttpRequest(execCtx, auth, httpReq)
-		if errHTTP != nil {
-			if errCtx := execCtx.Err(); errCtx != nil {
-				return nil, auth, errCtx
+		models := m.prepareExecutionModels(auth, routeModel)
+		var authErr error
+		for _, upstreamModel := range models {
+			httpReq, errBuild := build(execCtx, auth, upstreamModel)
+			if errBuild != nil {
+				if errCtx := execCtx.Err(); errCtx != nil {
+					return nil, auth, errCtx
+				}
+				result := Result{
+					AuthID:   auth.ID,
+					Provider: provider,
+					Model:    recordModel,
+					Success:  false,
+					Error: &Error{
+						Message:    errBuild.Error(),
+						HTTPStatus: statusCodeFromError(errBuild),
+					},
+				}
+				m.MarkResult(execCtx, result)
+				if isImmediateHTTPBuildError(errBuild) {
+					return nil, auth, errBuild
+				}
+				authErr = errBuild
+				continue
 			}
+
+			httpResp, errHTTP := executor.HttpRequest(execCtx, auth, httpReq)
+			if errHTTP != nil {
+				if errCtx := execCtx.Err(); errCtx != nil {
+					return nil, auth, errCtx
+				}
+				result := Result{
+					AuthID:   auth.ID,
+					Provider: provider,
+					Model:    recordModel,
+					Success:  false,
+					Error:    &Error{Message: errHTTP.Error()},
+				}
+				if se, ok := errors.AsType[cliproxyexecutor.StatusError](errHTTP); ok && se != nil {
+					result.Error.HTTPStatus = se.StatusCode()
+				}
+				if ra := retryAfterFromError(errHTTP); ra != nil {
+					result.RetryAfter = ra
+				}
+				m.MarkResult(execCtx, result)
+				if isRequestInvalidError(errHTTP) {
+					return nil, auth, errHTTP
+				}
+				authErr = errHTTP
+				continue
+			}
+
+			if httpResp != nil && httpResp.StatusCode >= http.StatusOK && httpResp.StatusCode < http.StatusMultipleChoices {
+				m.MarkResult(execCtx, Result{
+					AuthID:   auth.ID,
+					Provider: provider,
+					Model:    recordModel,
+					Success:  true,
+				})
+				return httpResp, auth, nil
+			}
+
+			responseErr := newHTTPResponseError(httpResp)
 			result := Result{
 				AuthID:   auth.ID,
 				Provider: provider,
 				Model:    recordModel,
 				Success:  false,
-				Error:    &Error{Message: errHTTP.Error()},
+				Error: &Error{
+					Message:    responseErr.Error(),
+					HTTPStatus: responseErr.StatusCode(),
+				},
 			}
-			if se, ok := errors.AsType[cliproxyexecutor.StatusError](errHTTP); ok && se != nil {
-				result.Error.HTTPStatus = se.StatusCode()
-			}
-			if ra := retryAfterFromError(errHTTP); ra != nil {
+			if ra := retryAfterFromHeaders(responseErr.Headers()); ra != nil {
 				result.RetryAfter = ra
 			}
 			m.MarkResult(execCtx, result)
-			if isRequestInvalidError(errHTTP) {
-				return nil, auth, errHTTP
+			if isRequestInvalidError(responseErr) {
+				return nil, auth, responseErr
 			}
-			lastErr = errHTTP
+			authErr = responseErr
+		}
+		if authErr != nil {
+			lastErr = authErr
 			continue
 		}
-
-		if httpResp != nil && httpResp.StatusCode >= http.StatusOK && httpResp.StatusCode < http.StatusMultipleChoices {
-			m.MarkResult(execCtx, Result{
-				AuthID:   auth.ID,
-				Provider: provider,
-				Model:    recordModel,
-				Success:  true,
-			})
-			return httpResp, auth, nil
-		}
-
-		responseErr := newHTTPResponseError(httpResp)
-		result := Result{
-			AuthID:   auth.ID,
-			Provider: provider,
-			Model:    recordModel,
-			Success:  false,
-			Error: &Error{
-				Message:    responseErr.Error(),
-				HTTPStatus: responseErr.StatusCode(),
-			},
-		}
-		if ra := retryAfterFromHeaders(responseErr.Headers()); ra != nil {
-			result.RetryAfter = ra
-		}
-		m.MarkResult(execCtx, result)
-		if isRequestInvalidError(responseErr) {
-			return nil, auth, responseErr
-		}
-		lastErr = responseErr
 	}
+}
+
+func isImmediateHTTPBuildError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if status := statusCodeFromError(err); status == http.StatusBadRequest || status == http.StatusUnprocessableEntity {
+		return true
+	}
+	return isRequestInvalidError(err)
 }
 
 func ensureRequestedModelMetadata(opts cliproxyexecutor.Options, requestedModel string) cliproxyexecutor.Options {

@@ -25,10 +25,12 @@ import (
 
 const (
 	audioTranscriptionUploadLimitBytes           int64 = 32 << 20
+	audioTranscriptionNonFileFieldsLimitBytes    int64 = 1 << 20
 	audioTranscriptionUpstreamResponseLimitBytes int64 = 8 << 20
 	audioTranscriptionContentSniffBytes                = 512
 	audioTranscriptionFileFieldName                    = "file"
 	audioTranscriptionModelFieldName                   = "model"
+	audioTranscriptionResponseFormatFieldName          = "response_format"
 	audioTranscriptionDefaultFilename                  = "audio.webm"
 	audioTranscriptionTempFilePattern                  = "cliproxy-audio-transcription-*"
 	openAIAudioTranscriptionsPath                      = "/audio/transcriptions"
@@ -68,6 +70,7 @@ type audioFormField struct {
 
 type audioTranscriptionRequest struct {
 	Model           string
+	ResponseFormat  string
 	Fields          []audioFormField
 	FileName        string
 	FileContentType string
@@ -110,8 +113,8 @@ func (h *OpenAIAPIHandler) AudioTranscriptions(c *gin.Context) {
 	}()
 
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
-	upstreamResp, _, errMsg := h.ExecuteHTTPRequestWithAuthManager(cliCtx, audioReq.Model, func(ctx context.Context, auth *coreauth.Auth) (*http.Request, error) {
-		return audioReq.BuildHTTPRequest(ctx, auth)
+	upstreamResp, _, errMsg := h.ExecuteHTTPRequestWithAuthManager(cliCtx, audioReq.Model, func(ctx context.Context, auth *coreauth.Auth, upstreamModel string) (*http.Request, error) {
+		return audioReq.BuildHTTPRequest(ctx, auth, upstreamModel)
 	})
 	if errMsg != nil {
 		h.WriteErrorResponse(c, errMsg)
@@ -132,10 +135,22 @@ func (h *OpenAIAPIHandler) AudioTranscriptions(c *gin.Context) {
 		return
 	}
 
-	normalizedBody := normalizeAudioTranscriptionResponse(body)
+	filteredHeaders := handlers.FilterUpstreamHeaders(upstreamResp.Header)
 	if handlers.PassthroughHeadersEnabled(h.Cfg) {
-		handlers.WriteUpstreamHeaders(c.Writer.Header(), handlers.FilterUpstreamHeaders(upstreamResp.Header))
+		handlers.WriteUpstreamHeaders(c.Writer.Header(), filteredHeaders)
 	}
+
+	if audioReq.PreserveRawResponse() {
+		if contentType := audioTranscriptionContentType(filteredHeaders, upstreamResp.Header); contentType != "" {
+			c.Header("Content-Type", contentType)
+		}
+		c.Status(http.StatusOK)
+		_, _ = c.Writer.Write(body)
+		cliCancel(body)
+		return
+	}
+
+	normalizedBody := normalizeAudioTranscriptionResponse(body)
 	c.Header("Content-Type", "application/json")
 	c.Status(http.StatusOK)
 	_, _ = c.Writer.Write(normalizedBody)
@@ -154,6 +169,7 @@ func parseAudioTranscriptionRequest(c *gin.Context) (*audioTranscriptionRequest,
 
 	audioReq := &audioTranscriptionRequest{}
 	cleanupOnError := true
+	var nonFileBytesRead int64
 	defer func() {
 		if cleanupOnError {
 			_ = audioReq.Cleanup()
@@ -177,15 +193,25 @@ func parseAudioTranscriptionRequest(c *gin.Context) (*audioTranscriptionRequest,
 		fileName := part.FileName()
 
 		if fileName == "" {
-			fieldValue, errRead := io.ReadAll(part)
+			fieldValue, errRead := readAudioTranscriptionField(part, audioTranscriptionNonFileFieldsLimitBytes-nonFileBytesRead)
 			_ = part.Close()
 			if errRead != nil {
 				return nil, &audioRequestError{status: http.StatusBadRequest, msg: fmt.Sprintf("failed to read form field %q: %v", partName, errRead)}
+			}
+			nonFileBytesRead += int64(len(fieldValue))
+			if nonFileBytesRead > audioTranscriptionNonFileFieldsLimitBytes {
+				return nil, &audioRequestError{
+					status: http.StatusBadRequest,
+					msg:    fmt.Sprintf("non-file multipart fields exceed %d byte limit", audioTranscriptionNonFileFieldsLimitBytes),
+				}
 			}
 			field := audioFormField{Name: partName, Value: string(fieldValue)}
 			audioReq.Fields = append(audioReq.Fields, field)
 			if partName == audioTranscriptionModelFieldName && audioReq.Model == "" {
 				audioReq.Model = strings.TrimSpace(field.Value)
+			}
+			if partName == audioTranscriptionResponseFormatFieldName && audioReq.ResponseFormat == "" {
+				audioReq.ResponseFormat = strings.TrimSpace(field.Value)
 			}
 			continue
 		}
@@ -222,6 +248,21 @@ func parseAudioTranscriptionRequest(c *gin.Context) (*audioTranscriptionRequest,
 
 	cleanupOnError = false
 	return audioReq, nil
+}
+
+func readAudioTranscriptionField(part *multipart.Part, remainingBytes int64) ([]byte, error) {
+	if remainingBytes < 0 {
+		return nil, fmt.Errorf("non-file multipart fields exceed %d byte limit", audioTranscriptionNonFileFieldsLimitBytes)
+	}
+	limitedReader := &io.LimitedReader{R: part, N: remainingBytes + 1}
+	payload, err := io.ReadAll(limitedReader)
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(payload)) > remainingBytes {
+		return nil, fmt.Errorf("non-file multipart fields exceed %d byte limit", audioTranscriptionNonFileFieldsLimitBytes)
+	}
+	return payload, nil
 }
 
 func (r *audioTranscriptionRequest) stageFilePart(part *multipart.Part) error {
@@ -327,7 +368,7 @@ func (r *audioTranscriptionRequest) Cleanup() error {
 	return err
 }
 
-func (r *audioTranscriptionRequest) BuildHTTPRequest(ctx context.Context, auth *coreauth.Auth) (*http.Request, error) {
+func (r *audioTranscriptionRequest) BuildHTTPRequest(ctx context.Context, auth *coreauth.Auth, upstreamModel string) (*http.Request, error) {
 	if r == nil {
 		return nil, &audioRequestError{status: http.StatusBadRequest, msg: "audio transcription request is empty"}
 	}
@@ -351,12 +392,12 @@ func (r *audioTranscriptionRequest) BuildHTTPRequest(ctx context.Context, auth *
 	req.Header.Set("Content-Type", multipartWriter.FormDataContentType())
 	req.Header.Set("Accept", "application/json")
 
-	go r.writeMultipartBody(bodyWriter, multipartWriter)
+	go r.writeMultipartBody(bodyWriter, multipartWriter, upstreamModel)
 	return req, nil
 }
 
-func (r *audioTranscriptionRequest) writeMultipartBody(bodyWriter *io.PipeWriter, multipartWriter *multipart.Writer) {
-	if err := r.writeMultipartFields(multipartWriter); err != nil {
+func (r *audioTranscriptionRequest) writeMultipartBody(bodyWriter *io.PipeWriter, multipartWriter *multipart.Writer, upstreamModel string) {
+	if err := r.writeMultipartFields(multipartWriter, upstreamModel); err != nil {
 		_ = bodyWriter.CloseWithError(err)
 		return
 	}
@@ -367,9 +408,17 @@ func (r *audioTranscriptionRequest) writeMultipartBody(bodyWriter *io.PipeWriter
 	_ = bodyWriter.Close()
 }
 
-func (r *audioTranscriptionRequest) writeMultipartFields(multipartWriter *multipart.Writer) error {
+func (r *audioTranscriptionRequest) writeMultipartFields(multipartWriter *multipart.Writer, upstreamModel string) error {
+	modelValue := strings.TrimSpace(upstreamModel)
+	if modelValue == "" {
+		modelValue = strings.TrimSpace(r.Model)
+	}
 	for _, field := range r.Fields {
-		if err := multipartWriter.WriteField(field.Name, field.Value); err != nil {
+		fieldValue := field.Value
+		if field.Name == audioTranscriptionModelFieldName {
+			fieldValue = modelValue
+		}
+		if err := multipartWriter.WriteField(field.Name, fieldValue); err != nil {
 			return err
 		}
 	}
@@ -422,7 +471,7 @@ func resolveAudioTranscriptionURL(auth *coreauth.Auth) (string, error) {
 	if strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
 		if auth.Attributes != nil {
 			if baseURL := strings.TrimSpace(auth.Attributes["base_url"]); baseURL != "" {
-				return strings.TrimSuffix(baseURL, "/") + openAIAudioTranscriptionsPath, nil
+				return resolveCodexAudioTranscriptionURL(baseURL), nil
 			}
 		}
 		return defaultCodexAudioTranscriptionURL, nil
@@ -445,6 +494,14 @@ func isOpenAICompatibleAuth(auth *coreauth.Auth) bool {
 	return strings.EqualFold(strings.TrimSpace(auth.Provider), "openai-compatibility")
 }
 
+func resolveCodexAudioTranscriptionURL(baseURL string) string {
+	trimmedBaseURL := strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	if strings.HasSuffix(trimmedBaseURL, "/codex") {
+		return strings.TrimSuffix(trimmedBaseURL, "/codex") + "/transcribe"
+	}
+	return trimmedBaseURL + "/transcribe"
+}
+
 func readAudioTranscriptionUpstreamResponse(body io.Reader) ([]byte, error) {
 	if body == nil {
 		return nil, nil
@@ -462,6 +519,31 @@ func readAudioTranscriptionUpstreamResponse(body io.Reader) ([]byte, error) {
 		}
 	}
 	return payload, nil
+}
+
+func (r *audioTranscriptionRequest) PreserveRawResponse() bool {
+	if r == nil {
+		return false
+	}
+	responseFormat := strings.ToLower(strings.TrimSpace(r.ResponseFormat))
+	switch responseFormat {
+	case "", "json", "verbose_json":
+		return false
+	default:
+		return true
+	}
+}
+
+func audioTranscriptionContentType(headers ...http.Header) string {
+	for _, hdr := range headers {
+		if hdr == nil {
+			continue
+		}
+		if contentType := strings.TrimSpace(hdr.Get("Content-Type")); contentType != "" {
+			return contentType
+		}
+	}
+	return ""
 }
 
 func normalizeAudioTranscriptionResponse(body []byte) []byte {
