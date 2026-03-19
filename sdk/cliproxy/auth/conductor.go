@@ -42,6 +42,9 @@ type ProviderExecutor interface {
 	HttpRequest(ctx context.Context, auth *Auth, req *http.Request) (*http.Response, error)
 }
 
+// HTTPRequestBuilder builds a fresh HTTP request for the selected auth.
+type HTTPRequestBuilder func(context.Context, *Auth) (*http.Request, error)
+
 // ExecutionSessionCloser allows executors to release per-session runtime resources.
 type ExecutionSessionCloser interface {
 	CloseExecutionSession(sessionID string)
@@ -972,6 +975,40 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 	return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 }
 
+// ExecuteHTTPRequest selects an auth using the existing scheduler and executes a raw HTTP request.
+// selectionModel controls provider/model routing, while resultModel is recorded in auth state updates.
+func (m *Manager) ExecuteHTTPRequest(ctx context.Context, providers []string, selectionModel, resultModel string, opts cliproxyexecutor.Options, build HTTPRequestBuilder) (*http.Response, *Auth, error) {
+	normalized := m.normalizeProviders(providers)
+	if len(normalized) == 0 {
+		return nil, nil, &Error{Code: "provider_not_found", Message: "no provider supplied"}
+	}
+	if build == nil {
+		return nil, nil, &Error{Code: "invalid_request", Message: "http request builder is nil"}
+	}
+
+	_, maxRetryCredentials, maxWait := m.retrySettings()
+
+	var lastErr error
+	for attempt := 0; ; attempt++ {
+		resp, auth, errExec := m.executeHTTPMixedOnce(ctx, normalized, selectionModel, resultModel, opts, maxRetryCredentials, build)
+		if errExec == nil {
+			return resp, auth, nil
+		}
+		lastErr = errExec
+		wait, shouldRetry := m.shouldRetryAfterError(errExec, attempt, normalized, selectionModel, maxWait)
+		if !shouldRetry {
+			break
+		}
+		if errWait := waitForCooldown(ctx, wait); errWait != nil {
+			return nil, nil, errWait
+		}
+	}
+	if lastErr != nil {
+		return nil, nil, lastErr
+	}
+	return nil, nil, &Error{Code: "auth_not_found", Message: "no auth available"}
+}
+
 func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, maxRetryCredentials int) (cliproxyexecutor.Response, error) {
 	if len(providers) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
@@ -1161,6 +1198,113 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			continue
 		}
 		return streamResult, nil
+	}
+}
+
+func (m *Manager) executeHTTPMixedOnce(ctx context.Context, providers []string, selectionModel, resultModel string, opts cliproxyexecutor.Options, maxRetryCredentials int, build HTTPRequestBuilder) (*http.Response, *Auth, error) {
+	if len(providers) == 0 {
+		return nil, nil, &Error{Code: "provider_not_found", Message: "no provider supplied"}
+	}
+	if build == nil {
+		return nil, nil, &Error{Code: "invalid_request", Message: "http request builder is nil"}
+	}
+
+	routeModel := strings.TrimSpace(selectionModel)
+	recordModel := strings.TrimSpace(resultModel)
+	if recordModel == "" {
+		recordModel = routeModel
+	}
+	opts = ensureRequestedModelMetadata(opts, recordModel)
+
+	tried := make(map[string]struct{})
+	var lastErr error
+	for {
+		if maxRetryCredentials > 0 && len(tried) >= maxRetryCredentials {
+			if lastErr != nil {
+				return nil, nil, lastErr
+			}
+			return nil, nil, &Error{Code: "auth_not_found", Message: "no auth available"}
+		}
+
+		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, opts, tried)
+		if errPick != nil {
+			if lastErr != nil {
+				return nil, nil, lastErr
+			}
+			return nil, nil, errPick
+		}
+
+		entry := logEntryWithRequestID(ctx)
+		debugLogAuthSelection(entry, auth, provider, routeModel)
+		publishSelectedAuthMetadata(opts.Metadata, auth.ID)
+
+		tried[auth.ID] = struct{}{}
+		execCtx := ctx
+		if rt := m.roundTripperFor(auth); rt != nil {
+			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
+			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
+		}
+
+		httpReq, errBuild := build(execCtx, auth)
+		if errBuild != nil {
+			return nil, auth, errBuild
+		}
+
+		httpResp, errHTTP := executor.HttpRequest(execCtx, auth, httpReq)
+		if errHTTP != nil {
+			if errCtx := execCtx.Err(); errCtx != nil {
+				return nil, auth, errCtx
+			}
+			result := Result{
+				AuthID:   auth.ID,
+				Provider: provider,
+				Model:    recordModel,
+				Success:  false,
+				Error:    &Error{Message: errHTTP.Error()},
+			}
+			if se, ok := errors.AsType[cliproxyexecutor.StatusError](errHTTP); ok && se != nil {
+				result.Error.HTTPStatus = se.StatusCode()
+			}
+			if ra := retryAfterFromError(errHTTP); ra != nil {
+				result.RetryAfter = ra
+			}
+			m.MarkResult(execCtx, result)
+			if isRequestInvalidError(errHTTP) {
+				return nil, auth, errHTTP
+			}
+			lastErr = errHTTP
+			continue
+		}
+
+		if httpResp != nil && httpResp.StatusCode >= http.StatusOK && httpResp.StatusCode < http.StatusMultipleChoices {
+			m.MarkResult(execCtx, Result{
+				AuthID:   auth.ID,
+				Provider: provider,
+				Model:    recordModel,
+				Success:  true,
+			})
+			return httpResp, auth, nil
+		}
+
+		responseErr := newHTTPResponseError(httpResp)
+		result := Result{
+			AuthID:   auth.ID,
+			Provider: provider,
+			Model:    recordModel,
+			Success:  false,
+			Error: &Error{
+				Message:    responseErr.Error(),
+				HTTPStatus: responseErr.StatusCode(),
+			},
+		}
+		if ra := retryAfterFromHeaders(responseErr.Headers()); ra != nil {
+			result.RetryAfter = ra
+		}
+		m.MarkResult(execCtx, result)
+		if isRequestInvalidError(responseErr) {
+			return nil, auth, responseErr
+		}
+		lastErr = responseErr
 	}
 }
 
@@ -1874,6 +2018,50 @@ func retryAfterFromError(err error) *time.Duration {
 		return nil
 	}
 	return new(*retryAfter)
+}
+
+func retryAfterFromHeaders(headers http.Header) *time.Duration {
+	if headers == nil {
+		return nil
+	}
+	raw := strings.TrimSpace(headers.Get("Retry-After"))
+	if raw == "" {
+		return nil
+	}
+	if seconds, err := strconv.Atoi(raw); err == nil && seconds >= 0 {
+		retryAfter := time.Duration(seconds) * time.Second
+		return &retryAfter
+	}
+	if retryAt, err := http.ParseTime(raw); err == nil {
+		retryAfter := time.Until(retryAt)
+		if retryAfter < 0 {
+			retryAfter = 0
+		}
+		return &retryAfter
+	}
+	return nil
+}
+
+func newHTTPResponseError(resp *http.Response) *HTTPResponseError {
+	if resp == nil {
+		return &HTTPResponseError{
+			HTTPStatus: http.StatusBadGateway,
+			Body:       []byte("upstream request failed"),
+		}
+	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+	body, _ := io.ReadAll(resp.Body)
+	status := resp.StatusCode
+	if status <= 0 {
+		status = http.StatusBadGateway
+	}
+	return &HTTPResponseError{
+		HTTPStatus: status,
+		Body:       body,
+		HeaderMap:  resp.Header.Clone(),
+	}
 }
 
 func statusCodeFromResult(err *Error) int {

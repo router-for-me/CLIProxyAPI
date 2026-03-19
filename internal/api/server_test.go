@@ -208,3 +208,18 @@ func TestDefaultRequestLoggerFactory_UsesResolvedLogDirectory(t *testing.T) {
 		}
 	}
 }
+
+func TestRootEndpointIncludesAudioTranscriptions(t *testing.T) {
+	server := newTestServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	resp := httptest.NewRecorder()
+	server.engine.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", resp.Code, http.StatusOK, resp.Body.String())
+	}
+	if body := resp.Body.String(); !strings.Contains(body, "POST /v1/audio/transcriptions") {
+		t.Fatalf("response body missing audio transcription endpoint: %s", body)
+	}
+}

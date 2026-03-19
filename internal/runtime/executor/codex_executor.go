@@ -50,14 +50,7 @@ func (e *CodexExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Aut
 		return nil
 	}
 	apiKey, _ := codexCreds(auth)
-	if strings.TrimSpace(apiKey) != "" {
-		req.Header.Set("Authorization", "Bearer "+apiKey)
-	}
-	var attrs map[string]string
-	if auth != nil {
-		attrs = auth.Attributes
-	}
-	util.ApplyCustomHeadersFromAttrs(req, attrs)
+	applyCodexPreparedHeaders(req, auth, apiKey, e.cfg)
 	return nil
 }
 
@@ -637,8 +630,28 @@ func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Form
 }
 
 func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, stream bool, cfg *config.Config) {
+	applyCodexPreparedHeaders(r, auth, token, cfg)
+	if r == nil {
+		return
+	}
 	r.Header.Set("Content-Type", "application/json")
-	r.Header.Set("Authorization", "Bearer "+token)
+	if stream {
+		r.Header.Set("Accept", "text/event-stream")
+	} else {
+		r.Header.Set("Accept", "application/json")
+	}
+}
+
+func applyCodexPreparedHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, cfg *config.Config) {
+	if r == nil {
+		return
+	}
+	if r.Header == nil {
+		r.Header = make(http.Header)
+	}
+	if strings.TrimSpace(token) != "" {
+		r.Header.Set("Authorization", "Bearer "+token)
+	}
 
 	var ginHeaders http.Header
 	if ginCtx, ok := r.Context().Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
@@ -649,13 +662,12 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 	misc.EnsureHeader(r.Header, ginHeaders, "Session_id", uuid.NewString())
 	cfgUserAgent, _ := codexHeaderDefaults(cfg, auth)
 	ensureHeaderWithConfigPrecedence(r.Header, ginHeaders, "User-Agent", cfgUserAgent, codexUserAgent)
-
-	if stream {
-		r.Header.Set("Accept", "text/event-stream")
-	} else {
+	if strings.TrimSpace(r.Header.Get("Accept")) == "" {
 		r.Header.Set("Accept", "application/json")
 	}
-	r.Header.Set("Connection", "Keep-Alive")
+	if strings.TrimSpace(r.Header.Get("Connection")) == "" {
+		r.Header.Set("Connection", "Keep-Alive")
+	}
 
 	isAPIKey := false
 	if auth != nil && auth.Attributes != nil {

@@ -511,6 +511,35 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 	return resp.Payload, FilterUpstreamHeaders(resp.Headers), nil
 }
 
+// ExecuteHTTPRequestWithAuthManager executes a raw HTTP request builder via the core auth manager.
+// This path is intended for provider-native endpoints that do not go through the JSON translator stack.
+func (h *BaseAPIHandler) ExecuteHTTPRequestWithAuthManager(ctx context.Context, modelName string, build coreauth.HTTPRequestBuilder) (*http.Response, *coreauth.Auth, *interfaces.ErrorMessage) {
+	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
+	if errMsg != nil {
+		return nil, nil, errMsg
+	}
+	reqMeta := requestExecutionMetadata(ctx)
+	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
+	opts := coreexecutor.Options{Metadata: reqMeta}
+	resp, auth, err := h.AuthManager.ExecuteHTTPRequest(ctx, providers, normalizedModel, normalizedModel, opts, build)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
+			if code := se.StatusCode(); code > 0 {
+				status = code
+			}
+		}
+		var addon http.Header
+		if he, ok := err.(interface{ Headers() http.Header }); ok && he != nil {
+			if hdr := he.Headers(); hdr != nil {
+				addon = hdr.Clone()
+			}
+		}
+		return nil, nil, &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
+	}
+	return resp, auth, nil
+}
+
 // ExecuteCountWithAuthManager executes a non-streaming request via the core auth manager.
 // This path is the only supported execution route.
 func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) ([]byte, http.Header, *interfaces.ErrorMessage) {

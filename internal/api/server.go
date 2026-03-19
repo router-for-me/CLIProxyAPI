@@ -330,6 +330,7 @@ func (s *Server) setupRoutes() {
 	{
 		v1.GET("/models", s.unifiedModelsHandler(openaiHandlers, claudeCodeHandlers))
 		v1.POST("/chat/completions", openaiHandlers.ChatCompletions)
+		v1.POST("/audio/transcriptions", openaiHandlers.AudioTranscriptions)
 		v1.POST("/completions", openaiHandlers.Completions)
 		v1.POST("/messages", claudeCodeHandlers.ClaudeMessages)
 		v1.POST("/messages/count_tokens", claudeCodeHandlers.ClaudeCountTokens)
@@ -353,6 +354,7 @@ func (s *Server) setupRoutes() {
 			"message": "CLI Proxy API Server",
 			"endpoints": []string{
 				"POST /v1/chat/completions",
+				"POST /v1/audio/transcriptions",
 				"POST /v1/completions",
 				"GET /v1/models",
 			},

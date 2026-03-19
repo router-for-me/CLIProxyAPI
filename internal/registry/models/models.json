@@ -1371,6 +1371,20 @@
           "xhigh"
         ]
       }
+    },
+    {
+      "id": "gpt-4o-mini-transcribe",
+      "object": "model",
+      "created": 1729728000,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT-4o Mini Transcribe",
+      "version": "gpt-4o-mini-transcribe",
+      "description": "Fast speech-to-text model for audio transcription.",
+      "supported_parameters": [
+        "language",
+        "prompt"
+      ]
     }
   ],
   "codex-team": [
@@ -1623,6 +1637,20 @@
           "xhigh"
         ]
       }
+    },
+    {
+      "id": "gpt-4o-mini-transcribe",
+      "object": "model",
+      "created": 1729728000,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT-4o Mini Transcribe",
+      "version": "gpt-4o-mini-transcribe",
+      "description": "Fast speech-to-text model for audio transcription.",
+      "supported_parameters": [
+        "language",
+        "prompt"
+      ]
     }
   ],
   "codex-plus": [
@@ -1898,6 +1926,20 @@
           "xhigh"
         ]
       }
+    },
+    {
+      "id": "gpt-4o-mini-transcribe",
+      "object": "model",
+      "created": 1729728000,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT-4o Mini Transcribe",
+      "version": "gpt-4o-mini-transcribe",
+      "description": "Fast speech-to-text model for audio transcription.",
+      "supported_parameters": [
+        "language",
+        "prompt"
+      ]
     }
   ],
   "codex-pro": [
@@ -2173,6 +2215,20 @@
           "xhigh"
         ]
       }
+    },
+    {
+      "id": "gpt-4o-mini-transcribe",
+      "object": "model",
+      "created": 1729728000,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT-4o Mini Transcribe",
+      "version": "gpt-4o-mini-transcribe",
+      "description": "Fast speech-to-text model for audio transcription.",
+      "supported_parameters": [
+        "language",
+        "prompt"
+      ]
     }
   ],
   "qwen": [
