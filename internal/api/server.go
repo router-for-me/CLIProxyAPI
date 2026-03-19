@@ -357,7 +357,7 @@ func (s *Server) setupRoutes() {
 
 	// Gemini compatible API routes
 	v1beta := s.engine.Group("/v1beta")
-	v1beta.Use(geminiAPIKeyCompatibilityMiddleware(), AuthMiddleware(s.accessManager, s.cfg.TrustedProxies))
+	v1beta.Use(AuthMiddleware(s.accessManager, s.cfg.TrustedProxies))
 	{
 		v1beta.GET("/models", geminiHandlers.GeminiModels)
 		v1beta.POST("/models/*action", geminiHandlers.GeminiHandler)
@@ -827,29 +827,6 @@ func corsMiddleware() gin.HandlerFunc {
 	}
 }
 
-func geminiAPIKeyCompatibilityMiddleware() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		if c.Request == nil || c.Request.URL == nil {
-			c.Next()
-			return
-		}
-		if strings.TrimSpace(c.GetHeader("Authorization")) != "" || strings.TrimSpace(c.GetHeader("X-Goog-Api-Key")) != "" || strings.TrimSpace(c.GetHeader("X-Api-Key")) != "" {
-			c.Next()
-			return
-		}
-		query := c.Request.URL.Query()
-		key := strings.TrimSpace(query.Get("key"))
-		if key == "" {
-			c.Next()
-			return
-		}
-		c.Request.Header.Set("X-Goog-Api-Key", key)
-		query.Del("key")
-		c.Request.URL.RawQuery = query.Encode()
-		c.Next()
-	}
-}
-
 func (s *Server) applyAccessConfig(oldCfg, newCfg *config.Config) {
 	if s == nil || s.accessManager == nil || newCfg == nil {
 		return
@@ -1211,6 +1188,74 @@ func (l *authFailureLimiter) ResetAll() {
 	l.entries = make(map[string]*authFailureEntry)
 }
 
+func applyQueryCredentialCompatibility(req *http.Request) {
+	if req == nil || req.URL == nil || hasCredentialHeaders(req.Header) {
+		return
+	}
+
+	query := req.URL.Query()
+	if len(query) == 0 {
+		return
+	}
+
+	switch {
+	case req.Method == http.MethodGet && routeMatchesPrefix(req.URL.Path, "/v1/responses"):
+		token := strings.TrimSpace(query.Get("auth_token"))
+		if token == "" {
+			token = strings.TrimSpace(query.Get("key"))
+		}
+		if token == "" {
+			return
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+		query.Del("auth_token")
+		query.Del("key")
+		req.URL.RawQuery = query.Encode()
+	case isGeminiQueryKeyCompatibilityPath(req.URL.Path):
+		key := strings.TrimSpace(query.Get("key"))
+		if key == "" {
+			return
+		}
+		req.Header.Set("X-Goog-Api-Key", key)
+		query.Del("key")
+		req.URL.RawQuery = query.Encode()
+	}
+}
+
+func hasCredentialHeaders(headers http.Header) bool {
+	if headers == nil {
+		return false
+	}
+	for _, name := range []string{"Authorization", "X-Goog-Api-Key", "X-Api-Key"} {
+		if strings.TrimSpace(headers.Get(name)) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func isGeminiQueryKeyCompatibilityPath(path string) bool {
+	for _, prefix := range []string{
+		"/v1beta",
+		"/api/provider/google/v1beta",
+		"/api/provider/google/v1beta1",
+	} {
+		if routeMatchesPrefix(path, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func routeMatchesPrefix(path, prefix string) bool {
+	path = strings.TrimSpace(path)
+	prefix = strings.TrimSpace(prefix)
+	if path == prefix {
+		return true
+	}
+	return strings.HasPrefix(path, prefix+"/")
+}
+
 // (management handlers moved to internal/api/handlers/management)
 
 // AuthMiddleware returns a Gin middleware handler that authenticates requests
@@ -1226,6 +1271,7 @@ func AuthMiddleware(manager *sdkaccess.Manager, trustedProxies []string) gin.Han
 			c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "authentication service unavailable"})
 			return
 		}
+		applyQueryCredentialCompatibility(c.Request)
 		clientAddr := clientAddrResolver.Resolve(c.Request).RateLimitKey()
 		result, err := manager.Authenticate(c.Request.Context(), c.Request)
 		if err == nil {

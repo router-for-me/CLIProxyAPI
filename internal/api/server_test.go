@@ -1,6 +1,7 @@
 package api
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	gin "github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
 	managementHandlers "github.com/router-for-me/CLIProxyAPI/v6/internal/api/handlers/management"
 	proxyconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	internallogging "github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
@@ -378,17 +380,123 @@ func TestGeminiCompatibleRoutesAcceptQueryKeyCompatibility(t *testing.T) {
 	}
 }
 
-func TestOpenAIRoutesStillRejectQueryKeyOnly(t *testing.T) {
+func TestGeminiProviderAliasRoutesAcceptQueryKeyCompatibility(t *testing.T) {
 	server := newTestServer(t)
 
-	req := httptest.NewRequest(http.MethodGet, "/v1/models?key=test-key", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/provider/google/v1beta/models?key=test-key", nil)
 	req.RemoteAddr = "198.51.100.22:1234"
 
 	rr := httptest.NewRecorder()
 	server.engine.ServeHTTP(rr, req)
 
-	if rr.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusUnauthorized, rr.Body.String())
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	if body := rr.Body.String(); !strings.Contains(body, "\"models\"") {
+		t.Fatalf("body = %q, want models payload", body)
+	}
+}
+
+func TestAmpGoogleV1Beta1RoutesAcceptQueryKeyCompatibility(t *testing.T) {
+	var upstreamQuery string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamQuery = r.URL.RawQuery
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("proxied"))
+	}))
+	defer upstream.Close()
+
+	server := newTestServerWithConfig(t, func(cfg *proxyconfig.Config) {
+		cfg.AmpCode.UpstreamURL = upstream.URL
+	})
+	httpServer := httptest.NewServer(server.engine)
+	defer httpServer.Close()
+
+	req, err := http.NewRequest(http.MethodGet, httpServer.URL+"/api/provider/google/v1beta1/models?key=test-key", nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	body := string(bodyBytes)
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", resp.StatusCode, http.StatusOK, body)
+	}
+	if !strings.Contains(body, "proxied") {
+		t.Fatalf("body = %q, want proxied response", body)
+	}
+	if strings.Contains(upstreamQuery, "key=") {
+		t.Fatalf("upstream query unexpectedly retained key: %q", upstreamQuery)
+	}
+}
+
+func TestOpenAIResponsesWebsocketRouteAcceptsQueryCredentialCompatibility(t *testing.T) {
+	testCases := []struct {
+		name  string
+		query string
+	}{
+		{name: "auth token", query: "auth_token=test-key"},
+		{name: "key", query: "key=test-key"},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			server := newTestServer(t)
+			httpServer := httptest.NewServer(server.engine)
+			defer httpServer.Close()
+
+			wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/v1/responses?" + tc.query
+			conn, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
+			if err != nil {
+				status := 0
+				if resp != nil {
+					status = resp.StatusCode
+				}
+				t.Fatalf("dial websocket: %v (status=%d)", err, status)
+			}
+			defer func() {
+				if errClose := conn.Close(); errClose != nil {
+					t.Fatalf("close websocket: %v", errClose)
+				}
+			}()
+		})
+	}
+}
+
+func TestOpenAIRoutesStillRejectQueryOnlyCredentials(t *testing.T) {
+	server := newTestServer(t)
+
+	testCases := []struct {
+		name string
+		path string
+	}{
+		{name: "query key", path: "/v1/models?key=test-key"},
+		{name: "query auth token", path: "/v1/models?auth_token=test-key"},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+			req.RemoteAddr = "198.51.100.24:1234"
+
+			rr := httptest.NewRecorder()
+			server.engine.ServeHTTP(rr, req)
+
+			if rr.Code != http.StatusUnauthorized {
+				t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusUnauthorized, rr.Body.String())
+			}
+		})
 	}
 }
 
