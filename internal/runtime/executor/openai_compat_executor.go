@@ -202,7 +202,10 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
 	requestedModel := payloadRequestedModel(opts, req.Model)
 	translated = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", translated, originalTranslated, requestedModel)
-	autoInjectedStreamUsage := !gjson.GetBytes(translated, "stream_options.include_usage").Exists()
+	// Preserve historical behavior: if include_usage is omitted or explicitly
+	// sent as false/null, still force it on so upstreams can emit real usage
+	// chunks. Only an explicit true counts as caller-enabled.
+	autoInjectedStreamUsage := !gjson.GetBytes(translated, "stream_options.include_usage").Bool()
 
 	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {

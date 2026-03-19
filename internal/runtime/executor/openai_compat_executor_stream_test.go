@@ -154,3 +154,89 @@ func TestOpenAICompatExecutorExecuteStreamDoesNotRetryUnrelatedValidationErrors(
 		t.Fatalf("expected status code 422, got: %v", err)
 	}
 }
+
+func TestOpenAICompatExecutorExecuteStreamForcesIncludeUsageWhenCallerSendsFalse(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var err error
+		gotBody, err = io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(`data: {"id":"chatcmpl-1","choices":[{"index":0,"delta":{"content":"hi"}}]}
+
+`))
+		_, _ = w.Write([]byte(`data: [DONE]
+
+`))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL + "/v1",
+		"api_key":  "test",
+	}}
+	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-4o-mini",
+		Payload: []byte(`{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}],"stream_options":{"include_usage":false}}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+		Stream:       true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("unexpected stream chunk error: %v", chunk.Err)
+		}
+	}
+	if !gjson.GetBytes(gotBody, "stream_options.include_usage").Bool() {
+		t.Fatalf("expected include_usage to be forced to true, got body: %s", string(gotBody))
+	}
+}
+
+func TestOpenAICompatExecutorExecuteStreamForcesIncludeUsageWhenCallerSendsNull(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var err error
+		gotBody, err = io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(`data: {"id":"chatcmpl-1","choices":[{"index":0,"delta":{"content":"hi"}}]}
+
+`))
+		_, _ = w.Write([]byte(`data: [DONE]
+
+`))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL + "/v1",
+		"api_key":  "test",
+	}}
+	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-4o-mini",
+		Payload: []byte(`{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}],"stream_options":{"include_usage":null}}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+		Stream:       true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("unexpected stream chunk error: %v", chunk.Err)
+		}
+	}
+	if !gjson.GetBytes(gotBody, "stream_options.include_usage").Bool() {
+		t.Fatalf("expected include_usage to be forced to true, got body: %s", string(gotBody))
+	}
+}
