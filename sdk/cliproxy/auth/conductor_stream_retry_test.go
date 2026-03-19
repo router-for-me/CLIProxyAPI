@@ -102,19 +102,27 @@ func newMultiAuthTestManager(t *testing.T, model string, authIDs []string, execu
 	return m
 }
 
+func testAuthIDs(t *testing.T) (string, string) {
+	t.Helper()
+	baseID := t.Name()
+	return baseID + "-auth-1", baseID + "-auth-2"
+}
+
 func TestExecuteStream_RotatesAuthOnBootstrapError(t *testing.T) {
 	t.Parallel()
 	model := "test-model"
+	auth1ID, auth2ID := testAuthIDs(t)
+	expectedPayload := "ok-from-" + auth2ID
 	executor := &authAwareStreamExecutor{
 		id: "testprov",
 		streamErrors: map[string]error{
-			"auth-1": &Error{HTTPStatus: http.StatusTooManyRequests, Message: "rate limited"},
+			auth1ID: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "rate limited"},
 		},
 		streamPayloads: map[string][]byte{
-			"auth-2": []byte("ok-from-auth-2"),
+			auth2ID: []byte(expectedPayload),
 		},
 	}
-	m := newMultiAuthTestManager(t, model, []string{"auth-1", "auth-2"}, executor)
+	m := newMultiAuthTestManager(t, model, []string{auth1ID, auth2ID}, executor)
 
 	streamResult, err := m.ExecuteStream(context.Background(), []string{"testprov"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
 	if err != nil {
@@ -127,27 +135,28 @@ func TestExecuteStream_RotatesAuthOnBootstrapError(t *testing.T) {
 		}
 		payload = append(payload, chunk.Payload...)
 	}
-	if string(payload) != "ok-from-auth-2" {
-		t.Fatalf("payload = %q, want %q", string(payload), "ok-from-auth-2")
+	if string(payload) != expectedPayload {
+		t.Fatalf("payload = %q, want %q", string(payload), expectedPayload)
 	}
-	// Verify both auths were attempted (auth-1 failed, auth-2 succeeded).
 	got := executor.StreamAuthIDs()
-	if len(got) < 2 {
-		t.Fatalf("stream auth IDs = %v, want at least 2 attempts", got)
+	if len(got) != 2 || got[0] != auth1ID || got[1] != auth2ID {
+		t.Fatalf("stream auth IDs = %v, want [%s %s]", got, auth1ID, auth2ID)
 	}
 }
 
 func TestExecuteStream_RotatesAuthOnEmptyStream(t *testing.T) {
 	t.Parallel()
 	model := "test-model"
+	auth1ID, auth2ID := testAuthIDs(t)
+	expectedPayload := "ok-from-" + auth2ID
 	executor := &authAwareStreamExecutor{
 		id:              "testprov",
-		emptyStreamAuth: map[string]struct{}{"auth-1": {}},
+		emptyStreamAuth: map[string]struct{}{auth1ID: {}},
 		streamPayloads: map[string][]byte{
-			"auth-2": []byte("ok-from-auth-2"),
+			auth2ID: []byte(expectedPayload),
 		},
 	}
-	m := newMultiAuthTestManager(t, model, []string{"auth-1", "auth-2"}, executor)
+	m := newMultiAuthTestManager(t, model, []string{auth1ID, auth2ID}, executor)
 
 	streamResult, err := m.ExecuteStream(context.Background(), []string{"testprov"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
 	if err != nil {
@@ -160,33 +169,34 @@ func TestExecuteStream_RotatesAuthOnEmptyStream(t *testing.T) {
 		}
 		payload = append(payload, chunk.Payload...)
 	}
-	if string(payload) != "ok-from-auth-2" {
-		t.Fatalf("payload = %q, want %q", string(payload), "ok-from-auth-2")
+	if string(payload) != expectedPayload {
+		t.Fatalf("payload = %q, want %q", string(payload), expectedPayload)
 	}
 	got := executor.StreamAuthIDs()
-	if len(got) < 2 {
-		t.Fatalf("stream auth IDs = %v, want at least 2 attempts", got)
+	if len(got) != 2 || got[0] != auth1ID || got[1] != auth2ID {
+		t.Fatalf("stream auth IDs = %v, want [%s %s]", got, auth1ID, auth2ID)
 	}
 }
 
 func TestExecuteStream_AllAuthsFailReturnsError(t *testing.T) {
 	t.Parallel()
 	model := "test-model"
+	auth1ID, auth2ID := testAuthIDs(t)
 	executor := &authAwareStreamExecutor{
 		id: "testprov",
 		streamErrors: map[string]error{
-			"auth-1": &Error{HTTPStatus: http.StatusTooManyRequests, Message: "rate limited"},
-			"auth-2": &Error{HTTPStatus: http.StatusTooManyRequests, Message: "rate limited"},
+			auth1ID: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "rate limited"},
+			auth2ID: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "rate limited"},
 		},
 	}
-	m := newMultiAuthTestManager(t, model, []string{"auth-1", "auth-2"}, executor)
+	m := newMultiAuthTestManager(t, model, []string{auth1ID, auth2ID}, executor)
 
 	_, err := m.ExecuteStream(context.Background(), []string{"testprov"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
 	if err == nil {
 		t.Fatal("expected error when all auths fail, got nil")
 	}
 	got := executor.StreamAuthIDs()
-	if len(got) < 2 {
-		t.Fatalf("stream auth IDs = %v, want at least 2 attempts (both auths tried)", got)
+	if len(got) != 2 || got[0] != auth1ID || got[1] != auth2ID {
+		t.Fatalf("stream auth IDs = %v, want [%s %s]", got, auth1ID, auth2ID)
 	}
 }
