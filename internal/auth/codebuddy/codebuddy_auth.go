@@ -131,7 +131,7 @@ type pollResponse struct {
 	} `json:"data"`
 }
 
-// doPollRequest 执行单次轮询请求，安全读取并关闭响应体
+// doPollRequest performs a single polling request, safely reading and closing the response body
 func (a *CodeBuddyAuth) doPollRequest(ctx context.Context, pollURL string) ([]byte, int, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, pollURL, nil)
 	if err != nil {
