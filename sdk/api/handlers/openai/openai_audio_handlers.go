@@ -1,15 +1,16 @@
 package openai
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
 	"mime/multipart"
 	"net/http"
 	"net/textproto"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -22,7 +23,17 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-const audioTranscriptionFormMemory = 32 << 20
+const (
+	audioTranscriptionUploadLimitBytes           int64 = 32 << 20
+	audioTranscriptionUpstreamResponseLimitBytes int64 = 8 << 20
+	audioTranscriptionContentSniffBytes                = 512
+	audioTranscriptionFileFieldName                    = "file"
+	audioTranscriptionModelFieldName                   = "model"
+	audioTranscriptionDefaultFilename                  = "audio.webm"
+	audioTranscriptionTempFilePattern                  = "cliproxy-audio-transcription-*"
+	openAIAudioTranscriptionsPath                      = "/audio/transcriptions"
+	defaultCodexAudioTranscriptionURL                  = "https://chatgpt.com/backend-api/transcribe"
+)
 
 var supportedAudioFileExtensions = map[string]struct{}{
 	".flac": {},
@@ -60,7 +71,7 @@ type audioTranscriptionRequest struct {
 	Fields          []audioFormField
 	FileName        string
 	FileContentType string
-	FileData        []byte
+	StagedFilePath  string
 }
 
 type audioRequestError struct {
@@ -86,13 +97,7 @@ func (e *audioRequestError) StatusCode() int {
 func (h *OpenAIAPIHandler) AudioTranscriptions(c *gin.Context) {
 	audioReq, err := parseAudioTranscriptionRequest(c)
 	if err != nil {
-		status := http.StatusBadRequest
-		if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
-			if code := se.StatusCode(); code > 0 {
-				status = code
-			}
-		}
-		c.JSON(status, handlers.ErrorResponse{
+		c.JSON(statusCodeOrDefault(err, http.StatusBadRequest), handlers.ErrorResponse{
 			Error: handlers.ErrorDetail{
 				Message: err.Error(),
 				Type:    "invalid_request_error",
@@ -100,6 +105,9 @@ func (h *OpenAIAPIHandler) AudioTranscriptions(c *gin.Context) {
 		})
 		return
 	}
+	defer func() {
+		_ = audioReq.Cleanup()
+	}()
 
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 	upstreamResp, _, errMsg := h.ExecuteHTTPRequestWithAuthManager(cliCtx, audioReq.Model, func(ctx context.Context, auth *coreauth.Auth) (*http.Request, error) {
@@ -114,11 +122,11 @@ func (h *OpenAIAPIHandler) AudioTranscriptions(c *gin.Context) {
 		_ = upstreamResp.Body.Close()
 	}()
 
-	body, err := io.ReadAll(upstreamResp.Body)
+	body, err := readAudioTranscriptionUpstreamResponse(upstreamResp.Body)
 	if err != nil {
 		h.WriteErrorResponse(c, &interfaces.ErrorMessage{
-			StatusCode: http.StatusBadGateway,
-			Error:      fmt.Errorf("failed to read upstream transcription response: %w", err),
+			StatusCode: statusCodeOrDefault(err, http.StatusBadGateway),
+			Error:      err,
 		})
 		cliCancel(err)
 		return
@@ -138,84 +146,167 @@ func parseAudioTranscriptionRequest(c *gin.Context) (*audioTranscriptionRequest,
 	if c == nil || c.Request == nil {
 		return nil, &audioRequestError{status: http.StatusBadRequest, msg: "missing request"}
 	}
-	if err := c.Request.ParseMultipartForm(audioTranscriptionFormMemory); err != nil {
+
+	reader, err := c.Request.MultipartReader()
+	if err != nil {
 		return nil, &audioRequestError{status: http.StatusBadRequest, msg: fmt.Sprintf("invalid multipart form: %v", err)}
 	}
-	if c.Request.MultipartForm == nil {
-		return nil, &audioRequestError{status: http.StatusBadRequest, msg: "multipart form is empty"}
-	}
-	defer c.Request.MultipartForm.RemoveAll()
 
-	model := strings.TrimSpace(c.PostForm("model"))
-	if model == "" {
+	audioReq := &audioTranscriptionRequest{}
+	cleanupOnError := true
+	defer func() {
+		if cleanupOnError {
+			_ = audioReq.Cleanup()
+		}
+	}()
+
+	hasFile := false
+	for {
+		part, errNext := reader.NextPart()
+		if errors.Is(errNext, io.EOF) {
+			break
+		}
+		if errNext != nil {
+			return nil, &audioRequestError{status: http.StatusBadRequest, msg: fmt.Sprintf("invalid multipart form: %v", errNext)}
+		}
+		if part == nil {
+			continue
+		}
+
+		partName := part.FormName()
+		fileName := part.FileName()
+
+		if fileName == "" {
+			fieldValue, errRead := io.ReadAll(part)
+			_ = part.Close()
+			if errRead != nil {
+				return nil, &audioRequestError{status: http.StatusBadRequest, msg: fmt.Sprintf("failed to read form field %q: %v", partName, errRead)}
+			}
+			field := audioFormField{Name: partName, Value: string(fieldValue)}
+			audioReq.Fields = append(audioReq.Fields, field)
+			if partName == audioTranscriptionModelFieldName && audioReq.Model == "" {
+				audioReq.Model = strings.TrimSpace(field.Value)
+			}
+			continue
+		}
+
+		if partName != audioTranscriptionFileFieldName {
+			_ = part.Close()
+			continue
+		}
+		if hasFile {
+			_ = part.Close()
+			return nil, &audioRequestError{status: http.StatusBadRequest, msg: "only one file upload is supported"}
+		}
+
+		audioReq.FileName = fileName
+		audioReq.FileContentType = strings.TrimSpace(part.Header.Get("Content-Type"))
+		if errStage := audioReq.stageFilePart(part); errStage != nil {
+			_ = part.Close()
+			return nil, errStage
+		}
+		_ = part.Close()
+		hasFile = true
+	}
+
+	if audioReq.Model == "" {
 		return nil, &audioRequestError{status: http.StatusBadRequest, msg: "missing required field: model"}
 	}
-
-	files := c.Request.MultipartForm.File["file"]
-	if len(files) == 0 {
+	if !hasFile {
 		return nil, &audioRequestError{status: http.StatusBadRequest, msg: "missing required field: file"}
 	}
-	if len(files) > 1 {
-		return nil, &audioRequestError{status: http.StatusBadRequest, msg: "only one file upload is supported"}
+
+	sort.SliceStable(audioReq.Fields, func(i, j int) bool {
+		return audioReq.Fields[i].Name < audioReq.Fields[j].Name
+	})
+
+	cleanupOnError = false
+	return audioReq, nil
+}
+
+func (r *audioTranscriptionRequest) stageFilePart(part *multipart.Part) error {
+	if r == nil {
+		return &audioRequestError{status: http.StatusBadRequest, msg: "audio transcription request is empty"}
 	}
 
-	fileHeader := files[0]
-	file, err := fileHeader.Open()
+	tempFile, err := os.CreateTemp("", audioTranscriptionTempFilePattern)
 	if err != nil {
-		return nil, &audioRequestError{status: http.StatusBadRequest, msg: fmt.Sprintf("failed to open uploaded file: %v", err)}
-	}
-	defer file.Close()
-
-	fileData, err := io.ReadAll(file)
-	if err != nil {
-		return nil, &audioRequestError{status: http.StatusBadRequest, msg: fmt.Sprintf("failed to read uploaded file: %v", err)}
-	}
-	if len(fileData) == 0 {
-		return nil, &audioRequestError{status: http.StatusBadRequest, msg: "uploaded file is empty"}
+		return fmt.Errorf("failed to create temp file for audio upload: %w", err)
 	}
 
-	fileContentType := strings.TrimSpace(fileHeader.Header.Get("Content-Type"))
-	if fileContentType == "" {
-		fileContentType = http.DetectContentType(fileData)
-	}
-	if err := validateAudioFile(fileHeader.Filename, fileContentType); err != nil {
-		return nil, err
+	tempPath := tempFile.Name()
+	keepTempFile := false
+	defer func() {
+		_ = tempFile.Close()
+		if !keepTempFile {
+			_ = os.Remove(tempPath)
+		}
+	}()
+
+	limitedReader := &io.LimitedReader{R: part, N: audioTranscriptionUploadLimitBytes + 1}
+	sniffBuffer := make([]byte, audioTranscriptionContentSniffBytes)
+	sniffedBytes, readErr := io.ReadFull(limitedReader, sniffBuffer)
+	switch {
+	case errors.Is(readErr, io.EOF):
+		return &audioRequestError{status: http.StatusBadRequest, msg: "uploaded file is empty"}
+	case errors.Is(readErr, io.ErrUnexpectedEOF):
+	case readErr != nil:
+		return &audioRequestError{status: http.StatusBadRequest, msg: fmt.Sprintf("failed to read uploaded file: %v", readErr)}
 	}
 
-	fieldNames := make([]string, 0, len(c.Request.MultipartForm.Value))
-	for name := range c.Request.MultipartForm.Value {
-		fieldNames = append(fieldNames, name)
+	sniffedContent := sniffBuffer[:sniffedBytes]
+	detectedContentType := http.DetectContentType(sniffedContent)
+	resolvedContentType := strings.TrimSpace(r.FileContentType)
+	if resolvedContentType == "" {
+		resolvedContentType = detectedContentType
 	}
-	sort.Strings(fieldNames)
 
-	fields := make([]audioFormField, 0, len(fieldNames))
-	for _, name := range fieldNames {
-		values := c.Request.MultipartForm.Value[name]
-		for _, value := range values {
-			fields = append(fields, audioFormField{Name: name, Value: value})
+	if errValidate := validateAudioFile(r.FileName, resolvedContentType, detectedContentType); errValidate != nil {
+		return errValidate
+	}
+
+	if _, errWrite := tempFile.Write(sniffedContent); errWrite != nil {
+		return fmt.Errorf("failed to stage uploaded file: %w", errWrite)
+	}
+
+	copiedBytes, errCopy := io.Copy(tempFile, limitedReader)
+	if errCopy != nil {
+		return &audioRequestError{status: http.StatusBadRequest, msg: fmt.Sprintf("failed to read uploaded file: %v", errCopy)}
+	}
+
+	totalBytes := int64(sniffedBytes) + copiedBytes
+	if totalBytes > audioTranscriptionUploadLimitBytes || limitedReader.N == 0 {
+		return &audioRequestError{
+			status: http.StatusBadRequest,
+			msg:    fmt.Sprintf("uploaded file exceeds %d byte limit", audioTranscriptionUploadLimitBytes),
 		}
 	}
 
-	return &audioTranscriptionRequest{
-		Model:           model,
-		Fields:          fields,
-		FileName:        fileHeader.Filename,
-		FileContentType: fileContentType,
-		FileData:        append([]byte(nil), fileData...),
-	}, nil
+	if errClose := tempFile.Close(); errClose != nil {
+		return fmt.Errorf("failed to finalize staged audio upload: %w", errClose)
+	}
+
+	r.StagedFilePath = tempPath
+	r.FileContentType = resolvedContentType
+	keepTempFile = true
+	return nil
 }
 
-func validateAudioFile(fileName, contentType string) error {
+func validateAudioFile(fileName string, contentTypes ...string) error {
 	ext := strings.ToLower(filepath.Ext(strings.TrimSpace(fileName)))
 	if _, ok := supportedAudioFileExtensions[ext]; ok {
 		return nil
 	}
-	if contentType != "" {
-		mediaType, _, err := mime.ParseMediaType(contentType)
-		if err == nil {
-			if _, ok := supportedAudioMediaTypes[strings.ToLower(strings.TrimSpace(mediaType))]; ok {
-				return nil
-			}
+	for _, contentType := range contentTypes {
+		mediaType := strings.ToLower(strings.TrimSpace(contentType))
+		if mediaType == "" {
+			continue
+		}
+		if parsedMediaType, _, err := mime.ParseMediaType(mediaType); err == nil {
+			mediaType = strings.ToLower(strings.TrimSpace(parsedMediaType))
+		}
+		if _, ok := supportedAudioMediaTypes[mediaType]; ok {
+			return nil
 		}
 	}
 	return &audioRequestError{
@@ -224,57 +315,94 @@ func validateAudioFile(fileName, contentType string) error {
 	}
 }
 
+func (r *audioTranscriptionRequest) Cleanup() error {
+	if r == nil || r.StagedFilePath == "" {
+		return nil
+	}
+	err := os.Remove(r.StagedFilePath)
+	if err == nil || errors.Is(err, os.ErrNotExist) {
+		r.StagedFilePath = ""
+		return nil
+	}
+	return err
+}
+
 func (r *audioTranscriptionRequest) BuildHTTPRequest(ctx context.Context, auth *coreauth.Auth) (*http.Request, error) {
 	if r == nil {
 		return nil, &audioRequestError{status: http.StatusBadRequest, msg: "audio transcription request is empty"}
 	}
+	if strings.TrimSpace(r.StagedFilePath) == "" {
+		return nil, &audioRequestError{status: http.StatusBadRequest, msg: "audio transcription file is not staged"}
+	}
+
 	targetURL, err := resolveAudioTranscriptionURL(auth)
 	if err != nil {
 		return nil, err
 	}
 
-	var body bytes.Buffer
-	writer := multipart.NewWriter(&body)
+	bodyReader, bodyWriter := io.Pipe()
+	multipartWriter := multipart.NewWriter(bodyWriter)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bodyReader)
+	if err != nil {
+		_ = bodyWriter.Close()
+		return nil, err
+	}
+	req.Header.Set("Content-Type", multipartWriter.FormDataContentType())
+	req.Header.Set("Accept", "application/json")
+
+	go r.writeMultipartBody(bodyWriter, multipartWriter)
+	return req, nil
+}
+
+func (r *audioTranscriptionRequest) writeMultipartBody(bodyWriter *io.PipeWriter, multipartWriter *multipart.Writer) {
+	if err := r.writeMultipartFields(multipartWriter); err != nil {
+		_ = bodyWriter.CloseWithError(err)
+		return
+	}
+	if err := multipartWriter.Close(); err != nil {
+		_ = bodyWriter.CloseWithError(err)
+		return
+	}
+	_ = bodyWriter.Close()
+}
+
+func (r *audioTranscriptionRequest) writeMultipartFields(multipartWriter *multipart.Writer) error {
 	for _, field := range r.Fields {
-		if err := writer.WriteField(field.Name, field.Value); err != nil {
-			_ = writer.Close()
-			return nil, err
+		if err := multipartWriter.WriteField(field.Name, field.Value); err != nil {
+			return err
 		}
 	}
 
 	filename := strings.TrimSpace(r.FileName)
 	if filename == "" {
-		filename = "audio.webm"
-	}
-	partHeader := make(textproto.MIMEHeader)
-	contentDisposition := mime.FormatMediaType("form-data", map[string]string{
-		"name":     "file",
-		"filename": filename,
-	})
-	partHeader.Set("Content-Disposition", contentDisposition)
-	if contentType := strings.TrimSpace(r.FileContentType); contentType != "" {
-		partHeader.Set("Content-Type", contentType)
-	}
-	filePart, err := writer.CreatePart(partHeader)
-	if err != nil {
-		_ = writer.Close()
-		return nil, err
-	}
-	if _, err = filePart.Write(r.FileData); err != nil {
-		_ = writer.Close()
-		return nil, err
-	}
-	if err = writer.Close(); err != nil {
-		return nil, err
+		filename = audioTranscriptionDefaultFilename
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(body.Bytes()))
-	if err != nil {
-		return nil, err
+	filePartHeader := make(textproto.MIMEHeader)
+	filePartHeader.Set("Content-Disposition", mime.FormatMediaType("form-data", map[string]string{
+		"name":     audioTranscriptionFileFieldName,
+		"filename": filename,
+	}))
+	if contentType := strings.TrimSpace(r.FileContentType); contentType != "" {
+		filePartHeader.Set("Content-Type", contentType)
 	}
-	req.Header.Set("Content-Type", writer.FormDataContentType())
-	req.Header.Set("Accept", "application/json")
-	return req, nil
+
+	filePart, err := multipartWriter.CreatePart(filePartHeader)
+	if err != nil {
+		return err
+	}
+
+	stagedFile, err := os.Open(r.StagedFilePath)
+	if err != nil {
+		return fmt.Errorf("failed to open staged audio file: %w", err)
+	}
+	defer func() {
+		_ = stagedFile.Close()
+	}()
+
+	_, err = io.Copy(filePart, stagedFile)
+	return err
 }
 
 func resolveAudioTranscriptionURL(auth *coreauth.Auth) (string, error) {
@@ -289,15 +417,15 @@ func resolveAudioTranscriptionURL(auth *coreauth.Auth) (string, error) {
 		if baseURL == "" {
 			return "", &audioRequestError{status: http.StatusBadGateway, msg: "selected OpenAI-compatible auth is missing base_url"}
 		}
-		return strings.TrimSuffix(baseURL, "/") + "/audio/transcriptions", nil
+		return strings.TrimSuffix(baseURL, "/") + openAIAudioTranscriptionsPath, nil
 	}
 	if strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
 		if auth.Attributes != nil {
 			if baseURL := strings.TrimSpace(auth.Attributes["base_url"]); baseURL != "" {
-				return strings.TrimSuffix(baseURL, "/") + "/audio/transcriptions", nil
+				return strings.TrimSuffix(baseURL, "/") + openAIAudioTranscriptionsPath, nil
 			}
 		}
-		return "https://chatgpt.com/backend-api/transcribe", nil
+		return defaultCodexAudioTranscriptionURL, nil
 	}
 	return "", &audioRequestError{
 		status: http.StatusNotImplemented,
@@ -317,25 +445,45 @@ func isOpenAICompatibleAuth(auth *coreauth.Auth) bool {
 	return strings.EqualFold(strings.TrimSpace(auth.Provider), "openai-compatibility")
 }
 
+func readAudioTranscriptionUpstreamResponse(body io.Reader) ([]byte, error) {
+	if body == nil {
+		return nil, nil
+	}
+
+	limitedReader := &io.LimitedReader{R: body, N: audioTranscriptionUpstreamResponseLimitBytes + 1}
+	payload, err := io.ReadAll(limitedReader)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read upstream transcription response: %w", err)
+	}
+	if int64(len(payload)) > audioTranscriptionUpstreamResponseLimitBytes {
+		return nil, &audioRequestError{
+			status: http.StatusBadGateway,
+			msg:    fmt.Sprintf("upstream transcription response exceeded %d byte limit", audioTranscriptionUpstreamResponseLimitBytes),
+		}
+	}
+	return payload, nil
+}
+
 func normalizeAudioTranscriptionResponse(body []byte) []byte {
-	trimmed := bytes.TrimSpace(body)
-	if len(trimmed) == 0 {
+	trimmed := strings.TrimSpace(string(body))
+	if trimmed == "" {
 		return []byte(`{"text":""}`)
 	}
-	if json.Valid(trimmed) && len(trimmed) > 0 && trimmed[0] == '{' {
-		textValue := gjson.GetBytes(trimmed, "text")
+	trimmedBytes := []byte(trimmed)
+	if json.Valid(trimmedBytes) && trimmedBytes[0] == '{' {
+		textValue := gjson.GetBytes(trimmedBytes, "text")
 		if textValue.Exists() && textValue.Type != gjson.Null {
-			return trimmed
+			return trimmedBytes
 		}
-		updated, err := sjson.SetBytes(trimmed, "text", "")
+		updated, err := sjson.SetBytes(trimmedBytes, "text", "")
 		if err == nil {
 			return updated
 		}
 	}
 
-	text := string(trimmed)
+	text := trimmed
 	var decoded string
-	if err := json.Unmarshal(trimmed, &decoded); err == nil {
+	if err := json.Unmarshal(trimmedBytes, &decoded); err == nil {
 		text = decoded
 	}
 	payload, err := json.Marshal(map[string]string{"text": text})
@@ -343,4 +491,16 @@ func normalizeAudioTranscriptionResponse(body []byte) []byte {
 		return []byte(`{"text":""}`)
 	}
 	return payload
+}
+
+func statusCodeOrDefault(err error, fallback int) int {
+	if err == nil {
+		return fallback
+	}
+	if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
+		if code := se.StatusCode(); code > 0 {
+			return code
+		}
+	}
+	return fallback
 }

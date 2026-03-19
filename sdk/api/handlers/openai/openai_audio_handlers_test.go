@@ -10,7 +10,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/textproto"
+	"os"
+	"sort"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -21,15 +24,24 @@ import (
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 )
 
+const audioTestModel = "gpt-4o-mini-transcribe"
+
+type audioExecutorResponse struct {
+	status      int
+	body        string
+	contentType string
+}
+
 type audioCaptureExecutor struct {
+	mu           sync.Mutex
+	calls        int
+	authIDs      []string
 	lastURL      string
 	lastAuthID   string
 	lastFields   map[string][]string
 	lastFileName string
 	lastFileBody []byte
-	calls        int
-	responseBody string
-	contentType  string
+	responses    map[string]audioExecutorResponse
 }
 
 func (e *audioCaptureExecutor) Identifier() string { return "openai-compatibility" }
@@ -51,10 +63,17 @@ func (e *audioCaptureExecutor) CountTokens(context.Context, *coreauth.Auth, core
 }
 
 func (e *audioCaptureExecutor) HttpRequest(_ context.Context, auth *coreauth.Auth, req *http.Request) (*http.Response, error) {
+	e.mu.Lock()
 	e.calls++
-	e.lastAuthID = auth.ID
+	if auth != nil {
+		e.lastAuthID = auth.ID
+		e.authIDs = append(e.authIDs, auth.ID)
+	}
 	e.lastURL = req.URL.String()
 	e.lastFields = make(map[string][]string)
+	e.lastFileName = ""
+	e.lastFileBody = nil
+	e.mu.Unlock()
 
 	mediaType, params, err := mime.ParseMediaType(req.Header.Get("Content-Type"))
 	if err != nil {
@@ -63,94 +82,94 @@ func (e *audioCaptureExecutor) HttpRequest(_ context.Context, auth *coreauth.Aut
 	if mediaType != "multipart/form-data" {
 		return nil, errors.New("unexpected content type")
 	}
+
 	reader := multipart.NewReader(req.Body, params["boundary"])
 	for {
-		part, err := reader.NextPart()
-		if errors.Is(err, io.EOF) {
+		part, errNext := reader.NextPart()
+		if errors.Is(errNext, io.EOF) {
 			break
 		}
-		if err != nil {
-			return nil, err
+		if errNext != nil {
+			return nil, errNext
 		}
-		payload, err := io.ReadAll(part)
-		if err != nil {
-			return nil, err
+
+		payload, errRead := io.ReadAll(part)
+		_ = part.Close()
+		if errRead != nil {
+			return nil, errRead
 		}
-		if part.FormName() == "file" {
+
+		e.mu.Lock()
+		if part.FormName() == audioTranscriptionFileFieldName {
 			e.lastFileName = part.FileName()
 			e.lastFileBody = payload
-			continue
+		} else {
+			e.lastFields[part.FormName()] = append(e.lastFields[part.FormName()], string(payload))
 		}
-		e.lastFields[part.FormName()] = append(e.lastFields[part.FormName()], string(payload))
+		e.mu.Unlock()
 	}
 
-	contentType := e.contentType
-	if contentType == "" {
-		contentType = "text/plain; charset=utf-8"
+	authID := ""
+	if auth != nil {
+		authID = auth.ID
 	}
-	responseBody := e.responseBody
-	if responseBody == "" {
-		responseBody = "transcribed text"
+
+	respCfg := audioExecutorResponse{
+		status:      http.StatusOK,
+		body:        "transcribed text",
+		contentType: "text/plain; charset=utf-8",
 	}
+	if e.responses != nil {
+		if candidate, ok := e.responses[authID]; ok {
+			respCfg = candidate
+		}
+	}
+	if respCfg.status == 0 {
+		respCfg.status = http.StatusOK
+	}
+	if respCfg.contentType == "" {
+		respCfg.contentType = "text/plain; charset=utf-8"
+	}
+
 	return &http.Response{
-		StatusCode: http.StatusOK,
-		Header:     http.Header{"Content-Type": []string{contentType}},
-		Body:       io.NopCloser(strings.NewReader(responseBody)),
+		StatusCode: respCfg.status,
+		Header:     http.Header{"Content-Type": []string{respCfg.contentType}},
+		Body:       io.NopCloser(strings.NewReader(respCfg.body)),
 	}, nil
+}
+
+func (e *audioCaptureExecutor) Calls() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.calls
+}
+
+func (e *audioCaptureExecutor) AuthIDs() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	out := make([]string, len(e.authIDs))
+	copy(out, e.authIDs)
+	return out
 }
 
 func TestAudioTranscriptionsWrapsPlainTextResponse(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	executor := &audioCaptureExecutor{}
-	manager := coreauth.NewManager(nil, nil, nil)
-	manager.RegisterExecutor(executor)
-
-	auth := &coreauth.Auth{
+	router := newAudioTestRouter(t, executor, &coreauth.Auth{
 		ID:       "audio-auth",
 		Provider: "openai-compatibility",
 		Status:   coreauth.StatusActive,
 		Attributes: map[string]string{
 			"base_url": "https://api.example.com/v1",
 		},
-	}
-	if _, err := manager.Register(context.Background(), auth); err != nil {
-		t.Fatalf("Register auth: %v", err)
-	}
-	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "gpt-4o-mini-transcribe"}})
-	t.Cleanup(func() {
-		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
 	})
 
-	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
-	h := NewOpenAIAPIHandler(base)
-	router := gin.New()
-	router.POST("/v1/audio/transcriptions", h.AudioTranscriptions)
-
-	body := &bytes.Buffer{}
-	writer := multipart.NewWriter(body)
-	if err := writer.WriteField("model", "gpt-4o-mini-transcribe"); err != nil {
-		t.Fatalf("WriteField(model): %v", err)
-	}
-	if err := writer.WriteField("prompt", "caption this"); err != nil {
-		t.Fatalf("WriteField(prompt): %v", err)
-	}
-	if err := writer.WriteField("language", "en"); err != nil {
-		t.Fatalf("WriteField(language): %v", err)
-	}
-	filePart, err := writer.CreateFormFile("file", "sample.webm")
-	if err != nil {
-		t.Fatalf("CreateFormFile(): %v", err)
-	}
-	if _, err := filePart.Write([]byte("fake-audio")); err != nil {
-		t.Fatalf("Write(file): %v", err)
-	}
-	if err := writer.Close(); err != nil {
-		t.Fatalf("Close writer: %v", err)
-	}
-
-	req := httptest.NewRequest(http.MethodPost, "/v1/audio/transcriptions", body)
-	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req := newAudioMultipartRequest(t, "/v1/audio/transcriptions", map[string]string{
+		"model":    audioTestModel,
+		"prompt":   "caption this",
+		"language": "en",
+	}, audioTranscriptionFileFieldName, "sample.webm", "", []byte("fake-audio"))
 	resp := httptest.NewRecorder()
 	router.ServeHTTP(resp, req)
 
@@ -160,16 +179,16 @@ func TestAudioTranscriptionsWrapsPlainTextResponse(t *testing.T) {
 	if strings.TrimSpace(resp.Body.String()) != `{"text":"transcribed text"}` {
 		t.Fatalf("body = %s", resp.Body.String())
 	}
-	if executor.calls != 1 {
-		t.Fatalf("executor calls = %d, want 1", executor.calls)
+	if executor.Calls() != 1 {
+		t.Fatalf("executor calls = %d, want 1", executor.Calls())
 	}
-	if executor.lastAuthID != auth.ID {
-		t.Fatalf("last auth id = %q, want %q", executor.lastAuthID, auth.ID)
+	if executor.lastAuthID != "audio-auth" {
+		t.Fatalf("last auth id = %q, want %q", executor.lastAuthID, "audio-auth")
 	}
 	if executor.lastURL != "https://api.example.com/v1/audio/transcriptions" {
 		t.Fatalf("last URL = %q, want %q", executor.lastURL, "https://api.example.com/v1/audio/transcriptions")
 	}
-	if got := executor.lastFields["model"]; len(got) != 1 || got[0] != "gpt-4o-mini-transcribe" {
+	if got := executor.lastFields["model"]; len(got) != 1 || got[0] != audioTestModel {
 		t.Fatalf("model field = %v", got)
 	}
 	if got := executor.lastFields["prompt"]; len(got) != 1 || got[0] != "caption this" {
@@ -190,35 +209,11 @@ func TestAudioTranscriptionsRejectsUnsupportedFileFormat(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	executor := &audioCaptureExecutor{}
-	manager := coreauth.NewManager(nil, nil, nil)
-	manager.RegisterExecutor(executor)
+	router := newAudioTestRouter(t, executor)
 
-	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
-	h := NewOpenAIAPIHandler(base)
-	router := gin.New()
-	router.POST("/v1/audio/transcriptions", h.AudioTranscriptions)
-
-	body := &bytes.Buffer{}
-	writer := multipart.NewWriter(body)
-	if err := writer.WriteField("model", "gpt-4o-mini-transcribe"); err != nil {
-		t.Fatalf("WriteField(model): %v", err)
-	}
-	partHeader := make(textproto.MIMEHeader)
-	partHeader.Set("Content-Disposition", `form-data; name="file"; filename="notes.txt"`)
-	partHeader.Set("Content-Type", "text/plain")
-	filePart, err := writer.CreatePart(partHeader)
-	if err != nil {
-		t.Fatalf("CreatePart(): %v", err)
-	}
-	if _, err := filePart.Write([]byte("not audio")); err != nil {
-		t.Fatalf("Write(file): %v", err)
-	}
-	if err := writer.Close(); err != nil {
-		t.Fatalf("Close writer: %v", err)
-	}
-
-	req := httptest.NewRequest(http.MethodPost, "/v1/audio/transcriptions", body)
-	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req := newAudioMultipartRequest(t, "/v1/audio/transcriptions", map[string]string{
+		"model": audioTestModel,
+	}, audioTranscriptionFileFieldName, "notes.txt", "text/plain", []byte("not audio"))
 	resp := httptest.NewRecorder()
 	router.ServeHTTP(resp, req)
 
@@ -228,7 +223,284 @@ func TestAudioTranscriptionsRejectsUnsupportedFileFormat(t *testing.T) {
 	if !strings.Contains(resp.Body.String(), "unsupported audio format") {
 		t.Fatalf("body = %s", resp.Body.String())
 	}
-	if executor.calls != 0 {
-		t.Fatalf("executor calls = %d, want 0", executor.calls)
+	if executor.Calls() != 0 {
+		t.Fatalf("executor calls = %d, want 0", executor.Calls())
 	}
+}
+
+func TestNormalizeAudioTranscriptionResponse(t *testing.T) {
+	testCases := []struct {
+		name string
+		body []byte
+		want string
+	}{
+		{
+			name: "empty body",
+			body: nil,
+			want: `{"text":""}`,
+		},
+		{
+			name: "existing text field preserved",
+			body: []byte(`{"text":"hello","segments":[{"id":1}]}`),
+			want: `{"text":"hello","segments":[{"id":1}]}`,
+		},
+		{
+			name: "bare json string wrapped",
+			body: []byte(`"hello"`),
+			want: `{"text":"hello"}`,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := string(normalizeAudioTranscriptionResponse(tc.body))
+			if got != tc.want {
+				t.Fatalf("normalizeAudioTranscriptionResponse() = %s, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestResolveAudioTranscriptionURL_DefaultCodexOAuth(t *testing.T) {
+	url, err := resolveAudioTranscriptionURL(&coreauth.Auth{
+		ID:       "codex-auth",
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Metadata: map[string]any{
+			"email": "user@example.com",
+		},
+	})
+	if err != nil {
+		t.Fatalf("resolveAudioTranscriptionURL() error = %v", err)
+	}
+	if url != defaultCodexAudioTranscriptionURL {
+		t.Fatalf("resolveAudioTranscriptionURL() = %q, want %q", url, defaultCodexAudioTranscriptionURL)
+	}
+}
+
+func TestAudioTranscriptionsRejectsOversizedUpstreamResponse(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	executor := &audioCaptureExecutor{
+		responses: map[string]audioExecutorResponse{
+			"audio-auth": {
+				status:      http.StatusOK,
+				body:        strings.Repeat("x", int(audioTranscriptionUpstreamResponseLimitBytes+1)),
+				contentType: "text/plain; charset=utf-8",
+			},
+		},
+	}
+	router := newAudioTestRouter(t, executor, &coreauth.Auth{
+		ID:       "audio-auth",
+		Provider: "openai-compatibility",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"base_url": "https://api.example.com/v1",
+		},
+	})
+
+	req := newAudioMultipartRequest(t, "/v1/audio/transcriptions", map[string]string{
+		"model": audioTestModel,
+	}, audioTranscriptionFileFieldName, "sample.webm", "", []byte("fake-audio"))
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d; body=%s", resp.Code, http.StatusBadGateway, resp.Body.String())
+	}
+	if !strings.Contains(resp.Body.String(), "exceeded") {
+		t.Fatalf("body = %s", resp.Body.String())
+	}
+}
+
+func TestAudioTranscriptionsRetriesAcrossAuthsOnRetriableHTTPFailure(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	executor := &audioCaptureExecutor{
+		responses: map[string]audioExecutorResponse{
+			"auth1": {
+				status:      http.StatusInternalServerError,
+				body:        `{"error":"temporary failure"}`,
+				contentType: "application/json",
+			},
+			"auth2": {
+				status:      http.StatusOK,
+				body:        "retried transcription",
+				contentType: "text/plain; charset=utf-8",
+			},
+		},
+	}
+	router := newAudioTestRouter(t, executor,
+		&coreauth.Auth{
+			ID:       "auth1",
+			Provider: "openai-compatibility",
+			Status:   coreauth.StatusActive,
+			Attributes: map[string]string{
+				"base_url": "https://api.example.com/v1",
+			},
+		},
+		&coreauth.Auth{
+			ID:       "auth2",
+			Provider: "openai-compatibility",
+			Status:   coreauth.StatusActive,
+			Attributes: map[string]string{
+				"base_url": "https://api.example.com/v1",
+			},
+		},
+	)
+
+	req := newAudioMultipartRequest(t, "/v1/audio/transcriptions", map[string]string{
+		"model": audioTestModel,
+	}, audioTranscriptionFileFieldName, "sample.webm", "", []byte("fake-audio"))
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", resp.Code, http.StatusOK, resp.Body.String())
+	}
+	if strings.TrimSpace(resp.Body.String()) != `{"text":"retried transcription"}` {
+		t.Fatalf("body = %s", resp.Body.String())
+	}
+	if executor.Calls() != 2 {
+		t.Fatalf("executor calls = %d, want 2", executor.Calls())
+	}
+	if got := executor.AuthIDs(); len(got) != 2 || got[0] != "auth1" || got[1] != "auth2" {
+		t.Fatalf("auth IDs = %v, want [auth1 auth2]", got)
+	}
+}
+
+func TestAudioTranscriptionsCleansUpStagedTempFiles(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	tempDir := t.TempDir()
+	t.Setenv("TMPDIR", tempDir)
+	t.Setenv("TMP", tempDir)
+	t.Setenv("TEMP", tempDir)
+
+	executor := &audioCaptureExecutor{}
+	router := newAudioTestRouter(t, executor, &coreauth.Auth{
+		ID:       "audio-auth",
+		Provider: "openai-compatibility",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"base_url": "https://api.example.com/v1",
+		},
+	})
+
+	req := newAudioMultipartRequest(t, "/v1/audio/transcriptions", map[string]string{
+		"model": audioTestModel,
+	}, audioTranscriptionFileFieldName, "sample.webm", "", []byte("fake-audio"))
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", resp.Code, http.StatusOK, resp.Body.String())
+	}
+
+	entries, err := os.ReadDir(tempDir)
+	if err != nil {
+		t.Fatalf("ReadDir(%s): %v", tempDir, err)
+	}
+	if len(entries) != 0 {
+		names := make([]string, 0, len(entries))
+		for _, entry := range entries {
+			names = append(names, entry.Name())
+		}
+		t.Fatalf("expected temp dir to be empty, got %v", names)
+	}
+}
+
+func newAudioTestRouter(t *testing.T, executor coreauth.ProviderExecutor, auths ...*coreauth.Auth) *gin.Engine {
+	t.Helper()
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+
+	for _, auth := range auths {
+		current := cloneAudioAuth(auth)
+		if current.Status == "" {
+			current.Status = coreauth.StatusActive
+		}
+		if current.Provider == "" {
+			current.Provider = executor.Identifier()
+		}
+		if _, err := manager.Register(context.Background(), current); err != nil {
+			t.Fatalf("Register auth %s: %v", current.ID, err)
+		}
+		registry.GetGlobalRegistry().RegisterClient(current.ID, current.Provider, []*registry.ModelInfo{{ID: audioTestModel}})
+		t.Cleanup(func() {
+			registry.GetGlobalRegistry().UnregisterClient(current.ID)
+		})
+	}
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	h := NewOpenAIAPIHandler(base)
+	router := gin.New()
+	router.POST("/v1/audio/transcriptions", h.AudioTranscriptions)
+	return router
+}
+
+func newAudioMultipartRequest(t *testing.T, target string, fields map[string]string, fileField, fileName, fileContentType string, fileContent []byte) *http.Request {
+	t.Helper()
+
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+
+	fieldNames := make([]string, 0, len(fields))
+	for fieldName := range fields {
+		fieldNames = append(fieldNames, fieldName)
+	}
+	sort.Strings(fieldNames)
+	for _, fieldName := range fieldNames {
+		if err := writer.WriteField(fieldName, fields[fieldName]); err != nil {
+			t.Fatalf("WriteField(%s): %v", fieldName, err)
+		}
+	}
+
+	var filePart io.Writer
+	var err error
+	if fileContentType == "" {
+		filePart, err = writer.CreateFormFile(fileField, fileName)
+	} else {
+		partHeader := make(textproto.MIMEHeader)
+		partHeader.Set("Content-Disposition", mime.FormatMediaType("form-data", map[string]string{
+			"name":     fileField,
+			"filename": fileName,
+		}))
+		partHeader.Set("Content-Type", fileContentType)
+		filePart, err = writer.CreatePart(partHeader)
+	}
+	if err != nil {
+		t.Fatalf("Create file part: %v", err)
+	}
+	if _, err := filePart.Write(fileContent); err != nil {
+		t.Fatalf("Write(file): %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("Close writer: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, target, body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	return req
+}
+
+func cloneAudioAuth(auth *coreauth.Auth) *coreauth.Auth {
+	if auth == nil {
+		return nil
+	}
+	clone := *auth
+	if auth.Attributes != nil {
+		clone.Attributes = make(map[string]string, len(auth.Attributes))
+		for key, value := range auth.Attributes {
+			clone.Attributes[key] = value
+		}
+	}
+	if auth.Metadata != nil {
+		clone.Metadata = make(map[string]any, len(auth.Metadata))
+		for key, value := range auth.Metadata {
+			clone.Metadata[key] = value
+		}
+	}
+	return &clone
 }

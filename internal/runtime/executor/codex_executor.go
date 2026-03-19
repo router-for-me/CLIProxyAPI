@@ -630,6 +630,8 @@ func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Form
 }
 
 func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, stream bool, cfg *config.Config) {
+	// JSON request paths use this helper so the content type is normalized to application/json.
+	// The PrepareRequest path intentionally avoids overriding caller-provided content types such as multipart/form-data.
 	applyCodexPreparedHeaders(r, auth, token, cfg)
 	if r == nil {
 		return
