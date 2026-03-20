@@ -559,10 +559,7 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, ro
 		emit := func(chunk cliproxyexecutor.StreamChunk) bool {
 			if chunk.Err != nil && !failed {
 				failed = true
-				rerr := &Error{Message: chunk.Err.Error()}
-				if se, ok := errors.AsType[cliproxyexecutor.StatusError](chunk.Err); ok && se != nil {
-					rerr.HTTPStatus = se.StatusCode()
-				}
+				rerr := resultErrorFromExec(chunk.Err)
 				m.MarkResult(ctx, Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: false, Error: rerr})
 			}
 			if !forward {
@@ -616,10 +613,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			if errCtx := ctx.Err(); errCtx != nil {
 				return nil, errCtx
 			}
-			rerr := &Error{Message: errStream.Error()}
-			if se, ok := errors.AsType[cliproxyexecutor.StatusError](errStream); ok && se != nil {
-				rerr.HTTPStatus = se.StatusCode()
-			}
+			rerr := resultErrorFromExec(errStream)
 			result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: false, Error: rerr}
 			result.RetryAfter = retryAfterFromError(errStream)
 			m.MarkResult(ctx, result)
@@ -637,10 +631,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				return nil, errCtx
 			}
 			if isRequestInvalidError(bootstrapErr) {
-				rerr := &Error{Message: bootstrapErr.Error()}
-				if se, ok := errors.AsType[cliproxyexecutor.StatusError](bootstrapErr); ok && se != nil {
-					rerr.HTTPStatus = se.StatusCode()
-				}
+				rerr := resultErrorFromExec(bootstrapErr)
 				result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: false, Error: rerr}
 				result.RetryAfter = retryAfterFromError(bootstrapErr)
 				m.MarkResult(ctx, result)
@@ -648,10 +639,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				return nil, bootstrapErr
 			}
 			if idx < len(execModels)-1 {
-				rerr := &Error{Message: bootstrapErr.Error()}
-				if se, ok := errors.AsType[cliproxyexecutor.StatusError](bootstrapErr); ok && se != nil {
-					rerr.HTTPStatus = se.StatusCode()
-				}
+				rerr := resultErrorFromExec(bootstrapErr)
 				result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: false, Error: rerr}
 				result.RetryAfter = retryAfterFromError(bootstrapErr)
 				m.MarkResult(ctx, result)
@@ -1199,10 +1187,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				if errCtx := execCtx.Err(); errCtx != nil {
 					return cliproxyexecutor.Response{}, errCtx
 				}
-				result.Error = &Error{Message: errExec.Error()}
-				if se, ok := errors.AsType[cliproxyexecutor.StatusError](errExec); ok && se != nil {
-					result.Error.HTTPStatus = se.StatusCode()
-				}
+				result.Error = resultErrorFromExec(errExec)
 				if ra := retryAfterFromError(errExec); ra != nil {
 					result.RetryAfter = ra
 				}
@@ -1293,10 +1278,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				if errCtx := execCtx.Err(); errCtx != nil {
 					return cliproxyexecutor.Response{}, errCtx
 				}
-				result.Error = &Error{Message: errExec.Error()}
-				if se, ok := errors.AsType[cliproxyexecutor.StatusError](errExec); ok && se != nil {
-					result.Error.HTTPStatus = se.StatusCode()
-				}
+				result.Error = resultErrorFromExec(errExec)
 				if ra := retryAfterFromError(errExec); ra != nil {
 					result.RetryAfter = ra
 				}
@@ -2254,6 +2236,20 @@ func cloneError(err *Error) *Error {
 		Retryable:  err.Retryable,
 		HTTPStatus: err.HTTPStatus,
 	}
+}
+
+func resultErrorFromExec(err error) *Error {
+	if err == nil {
+		return nil
+	}
+	if authErr, ok := errors.AsType[*Error](err); ok && authErr != nil {
+		return authErr
+	}
+	resultErr := &Error{Message: err.Error()}
+	if se, ok := errors.AsType[cliproxyexecutor.StatusError](err); ok && se != nil {
+		resultErr.HTTPStatus = se.StatusCode()
+	}
+	return resultErr
 }
 
 func statusCodeFromError(err error) int {
