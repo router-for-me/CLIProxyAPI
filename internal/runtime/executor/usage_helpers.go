@@ -288,13 +288,10 @@ func parseClaudeStreamUsage(line []byte) (usage.Detail, bool) {
 	if len(payload) == 0 || !gjson.ValidBytes(payload) {
 		return usage.Detail{}, false
 	}
-	// Only emit usage from message_delta events (final usage with output_tokens).
-	// message_start also carries usage but only has input_tokens; publishing it
-	// would trigger the sync.Once reporter before thinking tokens are accumulated.
-	if gjson.GetBytes(payload, "type").String() != "message_delta" {
-		return usage.Detail{}, false
-	}
 	usageNode := gjson.GetBytes(payload, "usage")
+	if !usageNode.Exists() {
+		usageNode = gjson.GetBytes(payload, "message.usage")
+	}
 	if !usageNode.Exists() {
 		return usage.Detail{}, false
 	}
@@ -345,14 +342,53 @@ func claudeStreamThinkingLen(line []byte) int {
 	return len(delta.Get("thinking").String())
 }
 
-// accumulateClaudeStreamThinking accumulates thinking text length from a
-// streaming line and publishes usage when the final message_delta arrives.
-func accumulateClaudeStreamThinking(ctx context.Context, line []byte, thinkingLen *int64, reporter *usageReporter) {
-	*thinkingLen += int64(claudeStreamThinkingLen(line))
-	if detail, ok := parseClaudeStreamUsage(line); ok {
-		detail.ReasoningTokens = *thinkingLen / claudeThinkingTokenFactor
-		reporter.publish(ctx, detail)
+// claudeStreamUsageAccumulator merges usage fields across Claude SSE events
+// and accumulates thinking content block lengths for reasoning token estimation.
+// message_start carries input_tokens + cache_read_input_tokens (under message.usage),
+// message_delta carries output_tokens (under usage), and content_block_delta carries
+// thinking text. Publishing happens once at the end of the stream.
+type claudeStreamUsageAccumulator struct {
+	detail      usage.Detail
+	thinkingLen int64
+}
+
+// processLine extracts usage and thinking data from a single SSE line.
+func (a *claudeStreamUsageAccumulator) processLine(line []byte) {
+	a.thinkingLen += int64(claudeStreamThinkingLen(line))
+
+	payload := jsonPayload(line)
+	if len(payload) == 0 || !gjson.ValidBytes(payload) {
+		return
 	}
+	// message_start nests usage under "message.usage"; message_delta uses top-level "usage".
+	usageNode := gjson.GetBytes(payload, "usage")
+	if !usageNode.Exists() {
+		usageNode = gjson.GetBytes(payload, "message.usage")
+	}
+	if !usageNode.Exists() {
+		return
+	}
+	// Merge non-zero fields across events.
+	if v := usageNode.Get("input_tokens").Int(); v > 0 {
+		a.detail.InputTokens = v
+	}
+	if v := usageNode.Get("output_tokens").Int(); v > 0 {
+		a.detail.OutputTokens = v
+	}
+	if v := usageNode.Get("cache_read_input_tokens").Int(); v > 0 {
+		a.detail.CachedTokens = v
+	} else if a.detail.CachedTokens == 0 {
+		if v := usageNode.Get("cache_creation_input_tokens").Int(); v > 0 {
+			a.detail.CachedTokens = v
+		}
+	}
+}
+
+// publish emits the accumulated usage with estimated reasoning tokens.
+func (a *claudeStreamUsageAccumulator) publish(ctx context.Context, reporter *usageReporter) {
+	a.detail.ReasoningTokens = a.thinkingLen / claudeThinkingTokenFactor
+	a.detail.TotalTokens = a.detail.InputTokens + a.detail.OutputTokens
+	reporter.publish(ctx, a.detail)
 }
 
 func parseGeminiFamilyUsageDetail(node gjson.Result) usage.Detail {
