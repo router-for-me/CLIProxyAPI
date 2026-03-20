@@ -297,55 +297,52 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 						st.MsgItemDone[idx] = true
 					}
 
-					// Only emit item.added once per tool call and preserve call_id across chunks.
-					newCallID := tcs.Get("0.id").String()
-					nameChunk := tcs.Get("0.function.name").String()
-					if nameChunk != "" {
-						st.FuncNames[idx] = nameChunk
-					}
-					existingCallID := st.FuncCallIDs[idx]
-					effectiveCallID := existingCallID
-					shouldEmitItem := false
-					if existingCallID == "" && newCallID != "" {
-						// First time seeing a valid call_id for this index
-						effectiveCallID = newCallID
-						st.FuncCallIDs[idx] = newCallID
-						shouldEmitItem = true
-					}
-
-					if shouldEmitItem && effectiveCallID != "" {
-						o := `{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"id":"","type":"function_call","status":"in_progress","arguments":"","call_id":"","name":""}}`
-						o, _ = sjson.Set(o, "sequence_number", nextSeq())
-						o, _ = sjson.Set(o, "output_index", idx)
-						o, _ = sjson.Set(o, "item.id", fmt.Sprintf("fc_%s", effectiveCallID))
-						o, _ = sjson.Set(o, "item.call_id", effectiveCallID)
-						name := st.FuncNames[idx]
-						o, _ = sjson.Set(o, "item.name", name)
-						out = append(out, emitRespEvent("response.output_item.added", o))
-					}
-
-					// Ensure args buffer exists for this index
-					if st.FuncArgsBuf[idx] == nil {
-						st.FuncArgsBuf[idx] = &strings.Builder{}
-					}
-
-					// Append arguments delta if available and we have a valid call_id to reference
-					if args := tcs.Get("0.function.arguments"); args.Exists() && args.String() != "" {
-						// Prefer an already known call_id; fall back to newCallID if first time
-						refCallID := st.FuncCallIDs[idx]
-						if refCallID == "" {
-							refCallID = newCallID
+					tcs.ForEach(func(_, tc gjson.Result) bool {
+						toolIdx := idx
+						if tcIdx := tc.Get("index"); tcIdx.Exists() {
+							toolIdx = int(tcIdx.Int())
 						}
-						if refCallID != "" {
+
+						callID := tc.Get("id").String()
+						if callID == "" {
+							callID = st.FuncCallIDs[toolIdx]
+						}
+						if callID == "" {
+							callID = fmt.Sprintf("call_%s_%d", st.ResponseID, toolIdx)
+						}
+
+						if nameChunk := tc.Get("function.name").String(); nameChunk != "" {
+							st.FuncNames[toolIdx] = nameChunk
+						}
+
+						if st.FuncCallIDs[toolIdx] == "" {
+							st.FuncCallIDs[toolIdx] = callID
+							o := `{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"id":"","type":"function_call","status":"in_progress","arguments":"","call_id":"","name":""}}`
+							o, _ = sjson.Set(o, "sequence_number", nextSeq())
+							o, _ = sjson.Set(o, "output_index", toolIdx)
+							o, _ = sjson.Set(o, "item.id", fmt.Sprintf("fc_%s", callID))
+							o, _ = sjson.Set(o, "item.call_id", callID)
+							o, _ = sjson.Set(o, "item.name", st.FuncNames[toolIdx])
+							out = append(out, emitRespEvent("response.output_item.added", o))
+						}
+
+						if st.FuncArgsBuf[toolIdx] == nil {
+							st.FuncArgsBuf[toolIdx] = &strings.Builder{}
+						}
+
+						if args := tc.Get("function.arguments"); args.Exists() && args.String() != "" {
+							argsStr := args.String()
 							ad := `{"type":"response.function_call_arguments.delta","sequence_number":0,"item_id":"","output_index":0,"delta":""}`
 							ad, _ = sjson.Set(ad, "sequence_number", nextSeq())
-							ad, _ = sjson.Set(ad, "item_id", fmt.Sprintf("fc_%s", refCallID))
-							ad, _ = sjson.Set(ad, "output_index", idx)
-							ad, _ = sjson.Set(ad, "delta", args.String())
+							ad, _ = sjson.Set(ad, "item_id", fmt.Sprintf("fc_%s", st.FuncCallIDs[toolIdx]))
+							ad, _ = sjson.Set(ad, "output_index", toolIdx)
+							ad, _ = sjson.Set(ad, "delta", argsStr)
 							out = append(out, emitRespEvent("response.function_call_arguments.delta", ad))
+							st.FuncArgsBuf[toolIdx].WriteString(argsStr)
 						}
-						st.FuncArgsBuf[idx].WriteString(args.String())
-					}
+
+						return true
+					})
 				}
 			}
 
