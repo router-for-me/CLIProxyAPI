@@ -1153,7 +1153,18 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			}
 			return cliproxyexecutor.Response{}, &Error{Code: "auth_not_found", Message: "no auth available"}
 		}
-		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, opts, tried)
+		var (
+			auth     *Auth
+			executor ProviderExecutor
+			provider string
+			errPick  error
+		)
+		if len(providers) == 1 {
+			provider = providers[0]
+			auth, executor, errPick = m.pickNext(ctx, provider, routeModel, opts, tried)
+		} else {
+			auth, executor, provider, errPick = m.pickNextMixed(ctx, providers, routeModel, opts, tried)
+		}
 		if errPick != nil {
 			if lastErr != nil {
 				return cliproxyexecutor.Response{}, lastErr
@@ -1236,7 +1247,18 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			}
 			return cliproxyexecutor.Response{}, &Error{Code: "auth_not_found", Message: "no auth available"}
 		}
-		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, opts, tried)
+		var (
+			auth     *Auth
+			executor ProviderExecutor
+			provider string
+			errPick  error
+		)
+		if len(providers) == 1 {
+			provider = providers[0]
+			auth, executor, errPick = m.pickNext(ctx, provider, routeModel, opts, tried)
+		} else {
+			auth, executor, provider, errPick = m.pickNextMixed(ctx, providers, routeModel, opts, tried)
+		}
 		if errPick != nil {
 			if lastErr != nil {
 				return cliproxyexecutor.Response{}, lastErr
@@ -1319,7 +1341,18 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			}
 			return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 		}
-		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, opts, tried)
+		var (
+			auth     *Auth
+			executor ProviderExecutor
+			provider string
+			errPick  error
+		)
+		if len(providers) == 1 {
+			provider = providers[0]
+			auth, executor, errPick = m.pickNext(ctx, provider, routeModel, opts, tried)
+		} else {
+			auth, executor, provider, errPick = m.pickNextMixed(ctx, providers, routeModel, opts, tried)
+		}
 		if errPick != nil {
 			if lastErr != nil {
 				return nil, lastErr
