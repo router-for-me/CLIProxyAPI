@@ -16,30 +16,41 @@ import (
 )
 
 type usageReporter struct {
-	provider    string
-	model       string
-	authID      string
-	authIndex   string
-	apiKey      string
-	source      string
-	requestedAt time.Time
-	once        sync.Once
+	provider       string
+	model          string
+	requestedModel string
+	actualModel    string
+	authID         string
+	authIndex      string
+	apiKey         string
+	source         string
+	requestedAt    time.Time
+	once           sync.Once
 }
 
 func newUsageReporter(ctx context.Context, provider, model string, auth *cliproxyauth.Auth) *usageReporter {
 	apiKey := apiKeyFromContext(ctx)
 	reporter := &usageReporter{
-		provider:    provider,
-		model:       model,
-		requestedAt: time.Now(),
-		apiKey:      apiKey,
-		source:      resolveUsageSource(auth, apiKey),
+		provider:       provider,
+		model:          model,
+		requestedModel: model,
+		actualModel:    model,
+		requestedAt:    time.Now(),
+		apiKey:         apiKey,
+		source:         resolveUsageSource(auth, apiKey),
 	}
 	if auth != nil {
 		reporter.authID = auth.ID
 		reporter.authIndex = auth.EnsureIndex()
 	}
 	return reporter
+}
+
+func (r *usageReporter) setActualModel(model string) {
+	if r == nil {
+		return
+	}
+	r.actualModel = model
 }
 
 func (r *usageReporter) publish(ctx context.Context, detail usage.Detail) {
@@ -74,15 +85,17 @@ func (r *usageReporter) publishWithOutcome(ctx context.Context, detail usage.Det
 	}
 	r.once.Do(func() {
 		usage.PublishRecord(ctx, usage.Record{
-			Provider:    r.provider,
-			Model:       r.model,
-			Source:      r.source,
-			APIKey:      r.apiKey,
-			AuthID:      r.authID,
-			AuthIndex:   r.authIndex,
-			RequestedAt: r.requestedAt,
-			Failed:      failed,
-			Detail:      detail,
+			Provider:       r.provider,
+			Model:          r.model,
+			RequestedModel: r.requestedModel,
+			ActualModel:    r.actualModel,
+			Source:         r.source,
+			APIKey:         r.apiKey,
+			AuthID:         r.authID,
+			AuthIndex:      r.authIndex,
+			RequestedAt:    r.requestedAt,
+			Failed:         failed,
+			Detail:         detail,
 		})
 	})
 }
@@ -97,15 +110,17 @@ func (r *usageReporter) ensurePublished(ctx context.Context) {
 	}
 	r.once.Do(func() {
 		usage.PublishRecord(ctx, usage.Record{
-			Provider:    r.provider,
-			Model:       r.model,
-			Source:      r.source,
-			APIKey:      r.apiKey,
-			AuthID:      r.authID,
-			AuthIndex:   r.authIndex,
-			RequestedAt: r.requestedAt,
-			Failed:      false,
-			Detail:      usage.Detail{},
+			Provider:       r.provider,
+			Model:          r.model,
+			RequestedModel: r.requestedModel,
+			ActualModel:    r.actualModel,
+			Source:         r.source,
+			APIKey:         r.apiKey,
+			AuthID:         r.authID,
+			AuthIndex:      r.authIndex,
+			RequestedAt:    r.requestedAt,
+			Failed:         false,
+			Detail:         usage.Detail{},
 		})
 	})
 }

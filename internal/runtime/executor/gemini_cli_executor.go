@@ -380,6 +380,10 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 			return nil, err
 		}
 
+		if attemptModel != baseModel {
+			reporter.setActualModel(attemptModel)
+		}
+
 		out := make(chan cliproxyexecutor.StreamChunk)
 		go func(resp *http.Response, reqBody []byte, attemptModel string) {
 			defer close(out)
@@ -439,7 +443,11 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 			}
 		}(httpResp, append([]byte(nil), payload...), attemptModel)
 
-		return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
+		headers := httpResp.Header.Clone()
+		if attemptModel != baseModel {
+			headers.Set("x-cliproxy-model-fallback", fmt.Sprintf("requested=%s,actual=%s", baseModel, attemptModel))
+		}
+		return &cliproxyexecutor.StreamResult{Headers: headers, Chunks: out}, nil
 	}
 
 	if len(lastBody) > 0 {
@@ -747,19 +755,36 @@ func applyGeminiCLIHeaders(r *http.Request, model string) {
 // cliPreviewFallbackOrder returns preview model candidates for a base model.
 func cliPreviewFallbackOrder(model string) []string {
 	switch model {
+	case "gemini-2.0-pro-exp-02-05":
+		return []string{
+			"gemini-2.0-flash",
+			"gemini-1.5-pro",
+			"gemini-1.5-flash",
+		}
+	case "gemini-2.0-flash":
+		return []string{
+			"gemini-1.5-pro",
+			"gemini-1.5-flash",
+		}
+	case "gemini-1.5-pro":
+		return []string{
+			"gemini-1.5-flash",
+		}
 	case "gemini-2.5-pro":
 		return []string{
-			// "gemini-2.5-pro-preview-05-06",
-			// "gemini-2.5-pro-preview-06-05",
+			"gemini-2.0-pro-exp-02-05",
+			"gemini-2.0-flash",
+			"gemini-1.5-pro",
 		}
 	case "gemini-2.5-flash":
 		return []string{
-			// "gemini-2.5-flash-preview-04-17",
-			// "gemini-2.5-flash-preview-05-20",
+			"gemini-2.0-flash",
+			"gemini-1.5-pro",
+			"gemini-1.5-flash",
 		}
 	case "gemini-2.5-flash-lite":
 		return []string{
-			// "gemini-2.5-flash-lite-preview-06-17",
+			"gemini-1.5-flash",
 		}
 	default:
 		return nil

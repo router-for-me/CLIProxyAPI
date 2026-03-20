@@ -60,10 +60,11 @@ func StatisticsEnabled() bool { return statisticsEnabled.Load() }
 type RequestStatistics struct {
 	mu sync.RWMutex
 
-	totalRequests int64
-	successCount  int64
-	failureCount  int64
-	totalTokens   int64
+	totalRequests  int64
+	successCount   int64
+	failureCount   int64
+	totalTokens    int64
+	totalFailovers int64
 
 	apis map[string]*apiStats
 
@@ -75,9 +76,10 @@ type RequestStatistics struct {
 
 // apiStats holds aggregated metrics for a single API key.
 type apiStats struct {
-	TotalRequests int64
-	TotalTokens   int64
-	Models        map[string]*modelStats
+	TotalRequests  int64
+	TotalTokens    int64
+	TotalFailovers int64
+	Models         map[string]*modelStats
 }
 
 // modelStats holds aggregated metrics for a specific model within an API.
@@ -89,11 +91,13 @@ type modelStats struct {
 
 // RequestDetail stores the timestamp and token usage for a single request.
 type RequestDetail struct {
-	Timestamp time.Time  `json:"timestamp"`
-	Source    string     `json:"source"`
-	AuthIndex string     `json:"auth_index"`
-	Tokens    TokenStats `json:"tokens"`
-	Failed    bool       `json:"failed"`
+	Timestamp      time.Time  `json:"timestamp"`
+	RequestedModel string     `json:"requested_model,omitempty"`
+	ActualModel    string     `json:"actual_model,omitempty"`
+	Source         string     `json:"source"`
+	AuthIndex      string     `json:"auth_index"`
+	Tokens         TokenStats `json:"tokens"`
+	Failed         bool       `json:"failed"`
 }
 
 // TokenStats captures the token usage breakdown for a request.
@@ -107,10 +111,11 @@ type TokenStats struct {
 
 // StatisticsSnapshot represents an immutable view of the aggregated metrics.
 type StatisticsSnapshot struct {
-	TotalRequests int64 `json:"total_requests"`
-	SuccessCount  int64 `json:"success_count"`
-	FailureCount  int64 `json:"failure_count"`
-	TotalTokens   int64 `json:"total_tokens"`
+	TotalRequests  int64 `json:"total_requests"`
+	SuccessCount   int64 `json:"success_count"`
+	FailureCount   int64 `json:"failure_count"`
+	TotalTokens    int64 `json:"total_tokens"`
+	TotalFailovers int64 `json:"total_failovers"`
 
 	APIs map[string]APISnapshot `json:"apis"`
 
@@ -122,9 +127,10 @@ type StatisticsSnapshot struct {
 
 // APISnapshot summarises metrics for a single API key.
 type APISnapshot struct {
-	TotalRequests int64                    `json:"total_requests"`
-	TotalTokens   int64                    `json:"total_tokens"`
-	Models        map[string]ModelSnapshot `json:"models"`
+	TotalRequests  int64                    `json:"total_requests"`
+	TotalTokens    int64                    `json:"total_tokens"`
+	TotalFailovers int64                    `json:"total_failovers"`
+	Models         map[string]ModelSnapshot `json:"models"`
 }
 
 // ModelSnapshot summarises metrics for a specific model.
@@ -180,6 +186,8 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 	dayKey := timestamp.Format("2006-01-02")
 	hourKey := timestamp.Hour()
 
+	failover := record.ActualModel != "" && record.RequestedModel != "" && record.ActualModel != record.RequestedModel
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -190,6 +198,9 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 		s.failureCount++
 	}
 	s.totalTokens += totalTokens
+	if failover {
+		s.totalFailovers++
+	}
 
 	stats, ok := s.apis[statsKey]
 	if !ok {
@@ -197,12 +208,14 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 		s.apis[statsKey] = stats
 	}
 	s.updateAPIStats(stats, modelName, RequestDetail{
-		Timestamp: timestamp,
-		Source:    record.Source,
-		AuthIndex: record.AuthIndex,
-		Tokens:    detail,
-		Failed:    failed,
-	})
+		Timestamp:      timestamp,
+		RequestedModel: record.RequestedModel,
+		ActualModel:    record.ActualModel,
+		Source:         record.Source,
+		AuthIndex:      record.AuthIndex,
+		Tokens:         detail,
+		Failed:         failed,
+	}, failover)
 
 	s.requestsByDay[dayKey]++
 	s.requestsByHour[hourKey]++
@@ -210,9 +223,12 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 	s.tokensByHour[hourKey] += totalTokens
 }
 
-func (s *RequestStatistics) updateAPIStats(stats *apiStats, model string, detail RequestDetail) {
+func (s *RequestStatistics) updateAPIStats(stats *apiStats, model string, detail RequestDetail, failover bool) {
 	stats.TotalRequests++
 	stats.TotalTokens += detail.Tokens.TotalTokens
+	if failover {
+		stats.TotalFailovers++
+	}
 	modelStatsValue, ok := stats.Models[model]
 	if !ok {
 		modelStatsValue = &modelStats{}
@@ -237,13 +253,15 @@ func (s *RequestStatistics) Snapshot() StatisticsSnapshot {
 	result.SuccessCount = s.successCount
 	result.FailureCount = s.failureCount
 	result.TotalTokens = s.totalTokens
+	result.TotalFailovers = s.totalFailovers
 
 	result.APIs = make(map[string]APISnapshot, len(s.apis))
 	for apiName, stats := range s.apis {
 		apiSnapshot := APISnapshot{
-			TotalRequests: stats.TotalRequests,
-			TotalTokens:   stats.TotalTokens,
-			Models:        make(map[string]ModelSnapshot, len(stats.Models)),
+			TotalRequests:  stats.TotalRequests,
+			TotalTokens:    stats.TotalTokens,
+			TotalFailovers: stats.TotalFailovers,
+			Models:         make(map[string]ModelSnapshot, len(stats.Models)),
 		}
 		for modelName, modelStatsValue := range stats.Models {
 			requestDetails := make([]RequestDetail, len(modelStatsValue.Details))
@@ -356,6 +374,8 @@ func (s *RequestStatistics) recordImported(apiName, modelName string, stats *api
 		totalTokens = 0
 	}
 
+	failover := detail.ActualModel != "" && detail.RequestedModel != "" && detail.ActualModel != detail.RequestedModel
+
 	s.totalRequests++
 	if detail.Failed {
 		s.failureCount++
@@ -363,8 +383,11 @@ func (s *RequestStatistics) recordImported(apiName, modelName string, stats *api
 		s.successCount++
 	}
 	s.totalTokens += totalTokens
+	if failover {
+		s.totalFailovers++
+	}
 
-	s.updateAPIStats(stats, modelName, detail)
+	s.updateAPIStats(stats, modelName, detail, failover)
 
 	dayKey := detail.Timestamp.Format("2006-01-02")
 	hourKey := detail.Timestamp.Hour()
@@ -379,9 +402,11 @@ func dedupKey(apiName, modelName string, detail RequestDetail) string {
 	timestamp := detail.Timestamp.UTC().Format(time.RFC3339Nano)
 	tokens := normaliseTokenStats(detail.Tokens)
 	return fmt.Sprintf(
-		"%s|%s|%s|%s|%s|%t|%d|%d|%d|%d|%d",
+		"%s|%s|%s|%s|%s|%s|%s|%t|%d|%d|%d|%d|%d",
 		apiName,
 		modelName,
+		detail.RequestedModel,
+		detail.ActualModel,
 		timestamp,
 		detail.Source,
 		detail.AuthIndex,
