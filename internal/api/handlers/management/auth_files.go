@@ -466,19 +466,21 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 	}
 	// Expose enable_1m_context from Attributes (set by synthesizer or PatchAuthFileFields).
 	// Fall back to Metadata for auths registered via UploadAuthFile (no synthesizer).
-	if v := strings.TrimSpace(authAttribute(auth, "enable_1m_context")); strings.EqualFold(v, "true") {
-		entry["enable_1m_context"] = true
+	var is1MEnabled bool
+	if v := strings.TrimSpace(authAttribute(auth, "enable_1m_context")); v != "" {
+		is1MEnabled, _ = strconv.ParseBool(v)
 	} else if auth.Metadata != nil {
-		switch raw := auth.Metadata["enable_1m_context"].(type) {
-		case bool:
-			if raw {
-				entry["enable_1m_context"] = true
-			}
-		case string:
-			if strings.EqualFold(strings.TrimSpace(raw), "true") {
-				entry["enable_1m_context"] = true
+		if val, ok := auth.Metadata["enable_1m_context"]; ok {
+			switch v := val.(type) {
+			case bool:
+				is1MEnabled = v
+			case string:
+				is1MEnabled, _ = strconv.ParseBool(strings.TrimSpace(v))
 			}
 		}
+	}
+	if is1MEnabled {
+		entry["enable_1m_context"] = true
 	}
 	return entry
 }
