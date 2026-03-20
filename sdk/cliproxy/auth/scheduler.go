@@ -32,15 +32,17 @@ const (
 
 // authScheduler keeps the incremental provider/model scheduling state used by Manager.
 type authScheduler struct {
-	mu            sync.Mutex
+	mu            sync.RWMutex
 	strategy      schedulerStrategy
 	providers     map[string]*providerScheduler
 	authProviders map[string]string
+	mixedCursorMu sync.Mutex
 	mixedCursors  map[string]int
 }
 
 // providerScheduler stores auth metadata and model shards for a single provider.
 type providerScheduler struct {
+	mu          sync.Mutex
 	providerKey string
 	auths       map[string]*scheduledAuthMeta
 	modelShards map[string]*modelScheduler
@@ -125,9 +127,11 @@ func (s *authScheduler) setSelector(selector Selector) {
 		return
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.strategy = selectorStrategy(selector)
+	s.mu.Unlock()
+	s.mixedCursorMu.Lock()
 	clear(s.mixedCursors)
+	s.mixedCursorMu.Unlock()
 }
 
 // rebuild recreates the complete scheduler state from an auth snapshot.
@@ -155,10 +159,10 @@ func (s *authScheduler) upsertAuthState(delta *authSchedulingDelta) {
 	if s == nil || delta == nil {
 		return
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
 	authID := strings.TrimSpace(delta.ID)
 	if authID == "" {
+		s.mu.RUnlock()
 		return
 	}
 	providerKey := strings.ToLower(strings.TrimSpace(delta.Provider))
@@ -166,12 +170,16 @@ func (s *authScheduler) upsertAuthState(delta *authSchedulingDelta) {
 		providerKey = s.authProviders[authID]
 	}
 	if providerKey == "" {
+		s.mu.RUnlock()
 		return
 	}
 	providerState := s.providers[providerKey]
+	s.mu.RUnlock()
 	if providerState == nil {
 		return
 	}
+	providerState.mu.Lock()
+	defer providerState.mu.Unlock()
 	meta := providerState.auths[authID]
 	if meta == nil || meta.snapshot == nil {
 		return
@@ -232,12 +240,15 @@ func (s *authScheduler) pickSingle(ctx context.Context, provider, model string, 
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
 	preferWebsocket := cliproxyexecutor.DownstreamWebsocket(ctx) && providerKey == "codex" && pinnedAuthID == ""
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
 	providerState := s.providers[providerKey]
+	strategy := s.strategy
+	s.mu.RUnlock()
 	if providerState == nil {
 		return "", &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
+	providerState.mu.Lock()
+	defer providerState.mu.Unlock()
 	shard := providerState.ensureModelLocked(modelKey, time.Now())
 	if shard == nil {
 		return "", &Error{Code: "auth_not_found", Message: "no auth available"}
@@ -256,7 +267,7 @@ func (s *authScheduler) pickSingle(ctx context.Context, provider, model string, 
 		}
 		return true
 	}
-	if picked := shard.pickReadyLocked(preferWebsocket, s.strategy, predicate); picked != nil {
+	if picked := shard.pickReadyLocked(preferWebsocket, strategy, predicate); picked != nil {
 		return picked.authID, nil
 	}
 	return "", shard.unavailableErrorLocked(provider, model, predicate)
@@ -274,18 +285,24 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
 	modelKey := canonicalModelKey(model)
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
+	strategy := s.strategy
 	if pinnedAuthID != "" {
 		providerKey := s.authProviders[pinnedAuthID]
+		providerState := s.providers[providerKey]
+		s.mu.RUnlock()
 		if providerKey == "" || !containsProvider(normalized, providerKey) {
 			return "", "", &Error{Code: "auth_not_found", Message: "no auth available"}
 		}
-		providerState := s.providers[providerKey]
 		if providerState == nil {
 			return "", "", &Error{Code: "auth_not_found", Message: "no auth available"}
 		}
+		providerState.mu.Lock()
+		defer providerState.mu.Unlock()
 		shard := providerState.ensureModelLocked(modelKey, time.Now())
+		if shard == nil {
+			return "", "", &Error{Code: "auth_not_found", Message: "no auth available"}
+		}
 		predicate := func(entry *scheduledAuth) bool {
 			if entry == nil || entry.authID != pinnedAuthID {
 				return false
@@ -297,18 +314,28 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 			return !ok
 		}
 		if picked := shard.pickReadyLocked(false, s.strategy, predicate); picked != nil {
+			_ = strategy
 			return picked.authID, providerKey, nil
 		}
 		return "", "", shard.unavailableErrorLocked("mixed", model, predicate)
 	}
+	providerStates := make(map[string]*providerScheduler, len(normalized))
+	for _, providerKey := range normalized {
+		if providerState := s.providers[providerKey]; providerState != nil {
+			providerStates[providerKey] = providerState
+		}
+	}
+	s.mu.RUnlock()
 
 	predicate := triedPredicate(tried)
 	candidateShards := make([]*modelScheduler, len(normalized))
 	bestPriority := 0
 	hasCandidate := false
 	now := time.Now()
+	lockedProviders := lockProviderSchedulers(providerStates)
+	defer unlockProviderSchedulers(lockedProviders)
 	for providerIndex, providerKey := range normalized {
-		providerState := s.providers[providerKey]
+		providerState := providerStates[providerKey]
 		if providerState == nil {
 			continue
 		}
@@ -327,25 +354,26 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 		}
 	}
 	if !hasCandidate {
-		return "", "", s.mixedUnavailableErrorLocked(normalized, model, tried)
+		return "", "", mixedUnavailableErrorFromShards(normalized, candidateShards, model, tried)
 	}
 
-	if s.strategy == schedulerStrategyFillFirst {
+	if strategy == schedulerStrategyFillFirst {
 		for providerIndex, providerKey := range normalized {
 			shard := candidateShards[providerIndex]
 			if shard == nil {
 				continue
 			}
-			picked := shard.pickReadyAtPriorityLocked(false, bestPriority, s.strategy, predicate)
+			picked := shard.pickReadyAtPriorityLocked(false, bestPriority, strategy, predicate)
 			if picked != nil {
 				return picked.authID, providerKey, nil
 			}
 		}
-		return "", "", s.mixedUnavailableErrorLocked(normalized, model, tried)
+		return "", "", mixedUnavailableErrorFromShards(normalized, candidateShards, model, tried)
 	}
 
 	cursorKey := strings.Join(normalized, ",") + ":" + modelKey
 	start := 0
+	s.mixedCursorMu.Lock()
 	if len(normalized) > 0 {
 		start = s.mixedCursors[cursorKey] % len(normalized)
 	}
@@ -361,23 +389,24 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 			continue
 		}
 		s.mixedCursors[cursorKey] = providerIndex + 1
+		s.mixedCursorMu.Unlock()
 		return picked.authID, providerKey, nil
 	}
-	return "", "", s.mixedUnavailableErrorLocked(normalized, model, tried)
+	s.mixedCursorMu.Unlock()
+	return "", "", mixedUnavailableErrorFromShards(normalized, candidateShards, model, tried)
 }
 
-// mixedUnavailableErrorLocked synthesizes the mixed-provider cooldown or unavailable error.
-func (s *authScheduler) mixedUnavailableErrorLocked(providers []string, model string, tried map[string]struct{}) error {
+func mixedUnavailableErrorFromShards(providers []string, candidateShards []*modelScheduler, model string, tried map[string]struct{}) error {
 	now := time.Now()
 	total := 0
 	cooldownCount := 0
 	earliest := time.Time{}
-	for _, providerKey := range providers {
-		providerState := s.providers[providerKey]
-		if providerState == nil {
-			continue
+	for providerIndex, providerKey := range providers {
+		_ = providerKey
+		var shard *modelScheduler
+		if providerIndex < len(candidateShards) {
+			shard = candidateShards[providerIndex]
 		}
-		shard := providerState.ensureModelLocked(canonicalModelKey(model), now)
 		if shard == nil {
 			continue
 		}
@@ -501,6 +530,31 @@ func (s *authScheduler) ensureProviderLocked(providerKey string) *providerSchedu
 		s.providers[providerKey] = providerState
 	}
 	return providerState
+}
+
+func lockProviderSchedulers(providerStates map[string]*providerScheduler) []*providerScheduler {
+	if len(providerStates) == 0 {
+		return nil
+	}
+	ordered := make([]*providerScheduler, 0, len(providerStates))
+	for _, providerState := range providerStates {
+		if providerState != nil {
+			ordered = append(ordered, providerState)
+		}
+	}
+	sort.Slice(ordered, func(i, j int) bool {
+		return ordered[i].providerKey < ordered[j].providerKey
+	})
+	for _, providerState := range ordered {
+		providerState.mu.Lock()
+	}
+	return ordered
+}
+
+func unlockProviderSchedulers(providerStates []*providerScheduler) {
+	for index := len(providerStates) - 1; index >= 0; index-- {
+		providerStates[index].mu.Unlock()
+	}
 }
 
 // buildScheduledAuthMeta extracts the scheduling metadata needed for shard bookkeeping.
