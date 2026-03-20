@@ -16,26 +16,48 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 		rawJSON, _ = sjson.SetRawBytes(rawJSON, "input", []byte(input))
 	}
 
-	rawJSON, _ = sjson.SetBytes(rawJSON, "stream", true)
-	rawJSON, _ = sjson.SetBytes(rawJSON, "store", false)
-	rawJSON, _ = sjson.SetBytes(rawJSON, "parallel_tool_calls", true)
+	root := gjson.ParseBytes(rawJSON)
+
+	if !root.Get("stream").Exists() || !root.Get("stream").Bool() {
+		rawJSON, _ = sjson.SetBytes(rawJSON, "stream", true)
+	}
+	if !root.Get("store").Exists() || root.Get("store").Bool() {
+		rawJSON, _ = sjson.SetBytes(rawJSON, "store", false)
+	}
+	if !root.Get("parallel_tool_calls").Exists() || !root.Get("parallel_tool_calls").Bool() {
+		rawJSON, _ = sjson.SetBytes(rawJSON, "parallel_tool_calls", true)
+	}
 	rawJSON, _ = sjson.SetBytes(rawJSON, "include", []string{"reasoning.encrypted_content"})
 	// Codex Responses rejects token limit fields, so strip them out before forwarding.
-	rawJSON, _ = sjson.DeleteBytes(rawJSON, "max_output_tokens")
-	rawJSON, _ = sjson.DeleteBytes(rawJSON, "max_completion_tokens")
-	rawJSON, _ = sjson.DeleteBytes(rawJSON, "temperature")
-	rawJSON, _ = sjson.DeleteBytes(rawJSON, "top_p")
-	if v := gjson.GetBytes(rawJSON, "service_tier"); v.Exists() {
+	if root.Get("max_output_tokens").Exists() {
+		rawJSON, _ = sjson.DeleteBytes(rawJSON, "max_output_tokens")
+	}
+	if root.Get("max_completion_tokens").Exists() {
+		rawJSON, _ = sjson.DeleteBytes(rawJSON, "max_completion_tokens")
+	}
+	if root.Get("temperature").Exists() {
+		rawJSON, _ = sjson.DeleteBytes(rawJSON, "temperature")
+	}
+	if root.Get("top_p").Exists() {
+		rawJSON, _ = sjson.DeleteBytes(rawJSON, "top_p")
+	}
+	if v := root.Get("service_tier"); v.Exists() {
 		if v.String() != "priority" {
 			rawJSON, _ = sjson.DeleteBytes(rawJSON, "service_tier")
 		}
 	}
 
-	rawJSON, _ = sjson.DeleteBytes(rawJSON, "truncation")
-	rawJSON = applyResponsesCompactionCompatibility(rawJSON)
+	if root.Get("truncation").Exists() {
+		rawJSON, _ = sjson.DeleteBytes(rawJSON, "truncation")
+	}
+	if root.Get("context_management").Exists() {
+		rawJSON = applyResponsesCompactionCompatibility(rawJSON)
+	}
 
 	// Delete the user field as it is not supported by the Codex upstream.
-	rawJSON, _ = sjson.DeleteBytes(rawJSON, "user")
+	if root.Get("user").Exists() {
+		rawJSON, _ = sjson.DeleteBytes(rawJSON, "user")
+	}
 
 	// Convert role "system" to "developer" in input array to comply with Codex API requirements.
 	rawJSON = convertSystemRoleToDeveloper(rawJSON)
@@ -70,14 +92,20 @@ func convertSystemRoleToDeveloper(rawJSON []byte) []byte {
 	}
 
 	inputArray := inputResult.Array()
-	result := rawJSON
-
-	// Directly modify role values for items with "system" role
+	systemIndexes := make([]int, 0, len(inputArray))
 	for i := 0; i < len(inputArray); i++ {
-		rolePath := fmt.Sprintf("input.%d.role", i)
-		if gjson.GetBytes(result, rolePath).String() == "system" {
-			result, _ = sjson.SetBytes(result, rolePath, "developer")
+		if inputArray[i].Get("role").String() == "system" {
+			systemIndexes = append(systemIndexes, i)
 		}
+	}
+	if len(systemIndexes) == 0 {
+		return rawJSON
+	}
+
+	result := rawJSON
+	for _, i := range systemIndexes {
+		rolePath := fmt.Sprintf("input.%d.role", i)
+		result, _ = sjson.SetBytes(result, rolePath, "developer")
 	}
 
 	return result

@@ -318,3 +318,50 @@ func TestTruncationRemovedForCodexCompatibility(t *testing.T) {
 		t.Fatalf("truncation should be removed for Codex compatibility")
 	}
 }
+
+func TestConvertOpenAIResponsesRequestToCodex_StringInputNormalization(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gpt-5.2",
+		"input": "hello from root string"
+	}`)
+
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
+	outputStr := string(output)
+
+	if got := gjson.Get(outputStr, "input.0.role").String(); got != "user" {
+		t.Fatalf("expected normalized root string input to become user message, got %q", got)
+	}
+	if got := gjson.Get(outputStr, "input.0.content.0.text").String(); got != "hello from root string" {
+		t.Fatalf("expected normalized root string content to be preserved, got %q", got)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToCodex_PreservesPriorityServiceTier(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gpt-5.2",
+		"service_tier": "priority",
+		"input": [{"role":"user","content":"hello"}]
+	}`)
+
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
+	outputStr := string(output)
+
+	if got := gjson.Get(outputStr, "service_tier").String(); got != "priority" {
+		t.Fatalf("expected priority service_tier to be preserved, got %q", got)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToCodex_RemovesNonPriorityServiceTier(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gpt-5.2",
+		"service_tier": "standard",
+		"input": [{"role":"user","content":"hello"}]
+	}`)
+
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
+	outputStr := string(output)
+
+	if gjson.Get(outputStr, "service_tier").Exists() {
+		t.Fatalf("expected non-priority service_tier to be removed")
+	}
+}
