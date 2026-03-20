@@ -117,6 +117,16 @@ func (s *codexWebsocketSession) clearActive(ch chan codexWebsocketRead) {
 	s.activeMu.Unlock()
 }
 
+func (s *codexWebsocketSession) isCurrentConn(conn *websocket.Conn) bool {
+	if s == nil || conn == nil {
+		return false
+	}
+	s.connMu.Lock()
+	current := s.conn
+	s.connMu.Unlock()
+	return current == conn
+}
+
 func (s *codexWebsocketSession) writeMessage(conn *websocket.Conn, msgType int, payload []byte) error {
 	if s == nil {
 		return fmt.Errorf("codex websockets executor: session is nil")
@@ -1123,9 +1133,17 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 		return
 	}
 	for {
+		if !sess.isCurrentConn(conn) {
+			// 旧连接读循环直接退出避免误伤新请求通道
+			return
+		}
 		_ = conn.SetReadDeadline(time.Now().Add(codexResponsesWebsocketIdleTimeout))
 		msgType, payload, errRead := conn.ReadMessage()
 		if errRead != nil {
+			if !sess.isCurrentConn(conn) {
+				// 旧连接读错时不触碰当前活跃通道
+				return
+			}
 			sess.activeMu.Lock()
 			ch := sess.activeCh
 			done := sess.activeDone
@@ -1146,6 +1164,10 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 		if msgType != websocket.TextMessage {
 			if msgType == websocket.BinaryMessage {
 				errBinary := fmt.Errorf("codex websockets executor: unexpected binary message")
+				if !sess.isCurrentConn(conn) {
+					// 旧连接二进制异常时不触碰当前活跃通道
+					return
+				}
 				sess.activeMu.Lock()
 				ch := sess.activeCh
 				done := sess.activeDone
@@ -1163,6 +1185,10 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 				return
 			}
 			continue
+		}
+		if !sess.isCurrentConn(conn) {
+			// 旧连接消息不再分发给新连接请求
+			return
 		}
 
 		sess.activeMu.Lock()

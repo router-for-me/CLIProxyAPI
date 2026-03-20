@@ -81,6 +81,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 	var lastRequest []byte
 	lastResponseOutput := []byte("[]")
 	pinnedAuthID := ""
+	forceDisableIncrementalAfterAuthReset := false
 
 	for {
 		msgType, payload, errReadMessage := conn.ReadMessage()
@@ -107,16 +108,18 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		appendWebsocketEvent(&wsBodyLog, "request", payload)
 
 		allowIncrementalInputWithPreviousResponseID := false
-		if pinnedAuthID != "" && h != nil && h.AuthManager != nil {
-			if pinnedAuth, ok := h.AuthManager.GetByID(pinnedAuthID); ok && pinnedAuth != nil {
-				allowIncrementalInputWithPreviousResponseID = websocketUpstreamSupportsIncrementalInput(pinnedAuth.Attributes, pinnedAuth.Metadata)
+		if !forceDisableIncrementalAfterAuthReset {
+			if pinnedAuthID != "" && h != nil && h.AuthManager != nil {
+				if pinnedAuth, ok := h.AuthManager.GetByID(pinnedAuthID); ok && pinnedAuth != nil {
+					allowIncrementalInputWithPreviousResponseID = websocketUpstreamSupportsIncrementalInput(pinnedAuth.Attributes, pinnedAuth.Metadata)
+				}
+			} else {
+				requestModelName := strings.TrimSpace(gjson.GetBytes(payload, "model").String())
+				if requestModelName == "" {
+					requestModelName = strings.TrimSpace(gjson.GetBytes(lastRequest, "model").String())
+				}
+				allowIncrementalInputWithPreviousResponseID = h.websocketUpstreamSupportsIncrementalInputForModel(requestModelName)
 			}
-		} else {
-			requestModelName := strings.TrimSpace(gjson.GetBytes(payload, "model").String())
-			if requestModelName == "" {
-				requestModelName = strings.TrimSpace(gjson.GetBytes(lastRequest, "model").String())
-			}
-			allowIncrementalInputWithPreviousResponseID = h.websocketUpstreamSupportsIncrementalInputForModel(requestModelName)
 		}
 
 		var requestJSON []byte
@@ -202,10 +205,15 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		if shouldResetResponsesWebsocketAuthPin(terminalStatus) {
 			// 限额错误后解除 pin 让后续请求重新选可用账号
 			pinnedAuthID = ""
+			// 切号恢复阶段先禁用增量模式避免沿用旧账号 response id
+			forceDisableIncrementalAfterAuthReset = true
 			if h != nil && h.AuthManager != nil {
 				// 主动关闭旧上游会话避免继续复用旧账号连接
 				h.AuthManager.CloseExecutionSession(passthroughSessionID)
 			}
+		} else if forceDisableIncrementalAfterAuthReset && terminalStatus == 0 {
+			// 新账号完成一轮后恢复增量模式
+			forceDisableIncrementalAfterAuthReset = false
 		}
 		lastResponseOutput = completedOutput
 	}
