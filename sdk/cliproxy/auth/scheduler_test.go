@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"net/http"
+	"sync"
 	"testing"
 	"time"
 
@@ -549,4 +550,70 @@ func TestManager_MarkResult_ExtremeModeDeletesAuthFromScheduler(t *testing.T) {
 	if gotID != "delete-auth-b" {
 		t.Fatalf("scheduler.pickSingle() after delete authID = %q, want delete-auth-b", gotID)
 	}
+}
+
+func TestSchedulerConcurrentPickAndUpsertDoesNotRace(t *testing.T) {
+	model := "scheduler-concurrent-race-model"
+	registerSchedulerModels(t, "codex", model, "concurrent-a", "concurrent-b")
+
+	authA := &Auth{ID: "concurrent-a", Provider: "codex"}
+	authB := &Auth{ID: "concurrent-b", Provider: "codex"}
+	scheduler := newSchedulerForTest(&RoundRobinSelector{}, authA, authB)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+
+	var wg sync.WaitGroup
+	pickLoop := func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			_, _ = scheduler.pickSingle(context.Background(), "codex", model, cliproxyexecutor.Options{}, nil)
+		}
+	}
+
+	upsertLoop := func(auth *Auth) {
+		defer wg.Done()
+		for iteration := 0; ; iteration++ {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+
+			snapshot := auth.Clone().SchedulingSnapshot()
+			if iteration%2 == 0 {
+				snapshot.Unavailable = true
+				snapshot.NextRetryAfter = time.Now().Add(5 * time.Millisecond)
+				snapshot.ModelStates = map[string]*schedulingModelState{
+					model: {
+						Status:         StatusError,
+						Unavailable:    true,
+						NextRetryAfter: time.Now().Add(5 * time.Millisecond),
+					},
+				}
+			} else {
+				snapshot.Unavailable = false
+				snapshot.NextRetryAfter = time.Time{}
+				snapshot.ModelStates = map[string]*schedulingModelState{
+					model: {
+						Status:      StatusActive,
+						Unavailable: false,
+					},
+				}
+			}
+			scheduler.upsertAuthWithModelRefresh(snapshot, true)
+		}
+	}
+
+	wg.Add(4)
+	go pickLoop()
+	go pickLoop()
+	go upsertLoop(authA)
+	go upsertLoop(authB)
+	wg.Wait()
 }

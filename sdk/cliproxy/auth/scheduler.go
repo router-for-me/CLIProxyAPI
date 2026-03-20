@@ -485,12 +485,20 @@ func (s *authScheduler) upsertAuthLocked(snapshot *authSchedulingSnapshot, now t
 		s.removeAuthLocked(authID)
 		return
 	}
-	if previousProvider := s.authProviders[authID]; previousProvider != "" && previousProvider != providerKey {
-		if previousState := s.providers[previousProvider]; previousState != nil {
-			previousState.removeAuthLocked(authID)
-		}
+	previousProvider := s.authProviders[authID]
+	var previousState *providerScheduler
+	if previousProvider != "" && previousProvider != providerKey {
+		previousState = s.providers[previousProvider]
 	}
 	providerState := s.ensureProviderLocked(providerKey)
+	lockedProviders := lockProviderSchedulers(map[string]*providerScheduler{
+		previousProvider: previousState,
+		providerKey:      providerState,
+	})
+	defer unlockProviderSchedulers(lockedProviders)
+	if previousState != nil {
+		previousState.removeAuthLocked(authID)
+	}
 	var supportedModelSet map[string]struct{}
 	if refreshSupportedModels {
 		supportedModelSet = supportedModelSetForAuth(authID)
@@ -511,7 +519,9 @@ func (s *authScheduler) removeAuthLocked(authID string) {
 	}
 	if providerKey := s.authProviders[authID]; providerKey != "" {
 		if providerState := s.providers[providerKey]; providerState != nil {
+			providerState.mu.Lock()
 			providerState.removeAuthLocked(authID)
+			providerState.mu.Unlock()
 		}
 		delete(s.authProviders, authID)
 	}
