@@ -142,18 +142,26 @@ func (s *authScheduler) rebuild(auths []*Auth) {
 	s.mixedCursors = make(map[string]int)
 	now := time.Now()
 	for _, auth := range auths {
-		s.upsertAuthLocked(auth, now)
+		s.upsertAuthLocked(auth, now, true)
 	}
 }
 
 // upsertAuth incrementally synchronizes one auth into the scheduler.
 func (s *authScheduler) upsertAuth(auth *Auth) {
+	s.upsertAuthWithModelRefresh(auth, true)
+}
+
+func (s *authScheduler) upsertAuthState(auth *Auth) {
+	s.upsertAuthWithModelRefresh(auth, false)
+}
+
+func (s *authScheduler) upsertAuthWithModelRefresh(auth *Auth, refreshSupportedModels bool) {
 	if s == nil {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.upsertAuthLocked(auth, time.Now())
+	s.upsertAuthLocked(auth, time.Now(), refreshSupportedModels)
 }
 
 // removeAuth deletes one auth from every scheduler shard that references it.
@@ -392,7 +400,7 @@ func containsProvider(providers []string, provider string) bool {
 }
 
 // upsertAuthLocked updates one auth in-place while the scheduler mutex is held.
-func (s *authScheduler) upsertAuthLocked(auth *Auth, now time.Time) {
+func (s *authScheduler) upsertAuthLocked(auth *Auth, now time.Time, refreshSupportedModels bool) {
 	if auth == nil {
 		return
 	}
@@ -407,9 +415,18 @@ func (s *authScheduler) upsertAuthLocked(auth *Auth, now time.Time) {
 			previousState.removeAuthLocked(authID)
 		}
 	}
-	meta := buildScheduledAuthMeta(auth)
+	providerState := s.ensureProviderLocked(providerKey)
+	var supportedModelSet map[string]struct{}
+	if refreshSupportedModels {
+		supportedModelSet = supportedModelSetForAuth(authID)
+	} else if existing := providerState.auths[authID]; existing != nil {
+		supportedModelSet = existing.supportedModelSet
+	} else {
+		supportedModelSet = supportedModelSetForAuth(authID)
+	}
+	meta := buildScheduledAuthMeta(auth, supportedModelSet)
 	s.authProviders[authID] = providerKey
-	s.ensureProviderLocked(providerKey).upsertAuthLocked(meta, now)
+	providerState.upsertAuthLocked(meta, now)
 }
 
 // removeAuthLocked removes one auth from the scheduler while the scheduler mutex is held.
@@ -443,7 +460,7 @@ func (s *authScheduler) ensureProviderLocked(providerKey string) *providerSchedu
 }
 
 // buildScheduledAuthMeta extracts the scheduling metadata needed for shard bookkeeping.
-func buildScheduledAuthMeta(auth *Auth) *scheduledAuthMeta {
+func buildScheduledAuthMeta(auth *Auth, supportedModelSet map[string]struct{}) *scheduledAuthMeta {
 	providerKey := strings.ToLower(strings.TrimSpace(auth.Provider))
 	virtualParent := ""
 	if auth.Attributes != nil {
@@ -455,7 +472,7 @@ func buildScheduledAuthMeta(auth *Auth) *scheduledAuthMeta {
 		priority:          authPriority(auth),
 		virtualParent:     virtualParent,
 		websocketEnabled:  authWebsocketsEnabled(auth),
-		supportedModelSet: supportedModelSetForAuth(auth.ID),
+		supportedModelSet: supportedModelSet,
 	}
 }
 
