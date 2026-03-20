@@ -276,6 +276,17 @@ func (m *Manager) SetConfig(cfg *internalconfig.Config) {
 	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
 }
 
+func (m *Manager) currentConfig() *internalconfig.Config {
+	if m == nil {
+		return &internalconfig.Config{}
+	}
+	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+	if cfg == nil {
+		return &internalconfig.Config{}
+	}
+	return cfg
+}
+
 func (m *Manager) lookupAPIKeyUpstreamModel(authID, requestedModel string) string {
 	if m == nil {
 		return ""
@@ -847,6 +858,41 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	_ = m.persist(ctx, auth)
 	m.hook.OnAuthUpdated(ctx, auth.Clone())
 	return auth.Clone(), nil
+}
+
+func (m *Manager) Delete(ctx context.Context, id string) error {
+	if m == nil {
+		return nil
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return nil
+	}
+	var removed *Auth
+	cfg := m.currentConfig()
+	m.mu.Lock()
+	if auth, ok := m.auths[id]; ok && auth != nil {
+		removed = auth.Clone()
+		delete(m.auths, id)
+		m.rebuildAPIKeyModelAliasLocked(cfg)
+	}
+	m.mu.Unlock()
+	if removed == nil {
+		return nil
+	}
+	if m.scheduler != nil {
+		m.scheduler.removeAuth(id)
+	}
+	registry.GetGlobalRegistry().UnregisterClient(id)
+	if m.store == nil {
+		return nil
+	}
+	if removed.Attributes != nil {
+		if v := strings.ToLower(strings.TrimSpace(removed.Attributes["runtime_only"])); v == "true" {
+			return nil
+		}
+	}
+	return m.store.Delete(ctx, id)
 }
 
 // Load resets manager state from the backing store.
@@ -1585,17 +1631,20 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	if result.AuthID == "" {
 		return
 	}
+	if shouldDeleteAuthOnFailure(m.currentConfig(), result.Error) {
+		_ = m.Delete(ctx, result.AuthID)
+		m.hook.OnResult(ctx, result)
+		return
+	}
 
-	shouldResumeModel := false
-	shouldSuspendModel := false
-	suspendReason := ""
-	clearModelQuota := false
-	setModelQuota := false
 	var authSnapshot *Auth
+	var registryTransition modelRegistryTransition
 
 	m.mu.Lock()
 	if auth, ok := m.auths[result.AuthID]; ok && auth != nil {
 		now := time.Now()
+		beforeScheduling := captureAuthSchedulingState(auth, result.Model)
+		beforeRegistry := captureModelRegistryState(auth, result.Model)
 
 		if result.Success {
 			if result.Model != "" {
@@ -1608,8 +1657,6 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					auth.Status = StatusActive
 				}
 				auth.UpdatedAt = now
-				shouldResumeModel = true
-				clearModelQuota = true
 			} else {
 				clearAuthStateOnSuccess(auth, now)
 			}
@@ -1631,18 +1678,12 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				case 401:
 					next := now.Add(30 * time.Minute)
 					state.NextRetryAfter = next
-					suspendReason = "unauthorized"
-					shouldSuspendModel = true
 				case 402, 403:
 					next := now.Add(30 * time.Minute)
 					state.NextRetryAfter = next
-					suspendReason = "payment_required"
-					shouldSuspendModel = true
 				case 404:
 					next := now.Add(12 * time.Hour)
 					state.NextRetryAfter = next
-					suspendReason = "not_found"
-					shouldSuspendModel = true
 				case 429:
 					var next time.Time
 					backoffLevel := state.Quota.BackoffLevel
@@ -1662,9 +1703,6 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						NextRecoverAt: next,
 						BackoffLevel:  backoffLevel,
 					}
-					suspendReason = "quota"
-					shouldSuspendModel = true
-					setModelQuota = true
 				case 408, 500, 502, 503, 504:
 					if quotaCooldownDisabledForAuth(auth) {
 						state.NextRetryAfter = time.Time{}
@@ -1684,27 +1722,149 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			}
 		}
 
-		_ = m.persist(ctx, auth)
-		authSnapshot = auth.Clone()
+		afterScheduling := captureAuthSchedulingState(auth, result.Model)
+		if !beforeScheduling.equal(afterScheduling) {
+			authSnapshot = auth.Clone()
+		}
+		registryTransition = buildModelRegistryTransition(beforeRegistry, captureModelRegistryState(auth, result.Model))
 	}
 	m.mu.Unlock()
 	if m.scheduler != nil && authSnapshot != nil {
-		m.scheduler.upsertAuth(authSnapshot)
+		m.scheduler.upsertAuthState(authSnapshot)
 	}
 
-	if clearModelQuota && result.Model != "" {
+	if registryTransition.clearQuota && result.Model != "" {
 		registry.GetGlobalRegistry().ClearModelQuotaExceeded(result.AuthID, result.Model)
 	}
-	if setModelQuota && result.Model != "" {
+	if registryTransition.setQuota && result.Model != "" {
 		registry.GetGlobalRegistry().SetModelQuotaExceeded(result.AuthID, result.Model)
 	}
-	if shouldResumeModel {
+	if registryTransition.resumeModel && result.Model != "" {
 		registry.GetGlobalRegistry().ResumeClientModel(result.AuthID, result.Model)
-	} else if shouldSuspendModel {
-		registry.GetGlobalRegistry().SuspendClientModel(result.AuthID, result.Model, suspendReason)
+	}
+	if registryTransition.suspendModel && result.Model != "" {
+		registry.GetGlobalRegistry().SuspendClientModel(result.AuthID, result.Model, registryTransition.suspendReason)
 	}
 
 	m.hook.OnResult(ctx, result)
+}
+
+type authSchedulingState struct {
+	authDisabled         bool
+	authUnavailable      bool
+	authNextRetryAfter   time.Time
+	authQuotaExceeded    bool
+	authQuotaNextRecover time.Time
+	modelPresent         bool
+	modelDisabled        bool
+	modelUnavailable     bool
+	modelNextRetryAfter  time.Time
+	modelQuotaExceeded   bool
+	modelQuotaRecoverAt  time.Time
+}
+
+func captureAuthSchedulingState(auth *Auth, model string) authSchedulingState {
+	if auth == nil {
+		return authSchedulingState{}
+	}
+	state := authSchedulingState{
+		authDisabled:         auth.Disabled || auth.Status == StatusDisabled,
+		authUnavailable:      auth.Unavailable,
+		authNextRetryAfter:   auth.NextRetryAfter,
+		authQuotaExceeded:    auth.Quota.Exceeded,
+		authQuotaNextRecover: auth.Quota.NextRecoverAt,
+	}
+	modelState := lookupModelState(auth, model)
+	if modelState == nil {
+		return state
+	}
+	state.modelPresent = true
+	state.modelDisabled = modelState.Status == StatusDisabled
+	state.modelUnavailable = modelState.Unavailable
+	state.modelNextRetryAfter = modelState.NextRetryAfter
+	state.modelQuotaExceeded = modelState.Quota.Exceeded
+	state.modelQuotaRecoverAt = modelState.Quota.NextRecoverAt
+	return state
+}
+
+func (s authSchedulingState) equal(other authSchedulingState) bool {
+	return s == other
+}
+
+type modelRegistryState struct {
+	quotaExceeded bool
+	suspended     bool
+	suspendReason string
+}
+
+func captureModelRegistryState(auth *Auth, model string) modelRegistryState {
+	modelState := lookupModelState(auth, model)
+	if modelState == nil {
+		return modelRegistryState{}
+	}
+	state := modelRegistryState{quotaExceeded: modelState.Quota.Exceeded}
+	if !modelState.Unavailable || modelState.LastError == nil {
+		return state
+	}
+	switch modelState.LastError.HTTPStatus {
+	case 401:
+		state.suspended = true
+		state.suspendReason = "unauthorized"
+	case 402, 403:
+		state.suspended = true
+		state.suspendReason = "payment_required"
+	case 404:
+		state.suspended = true
+		state.suspendReason = "not_found"
+	case 429:
+		state.suspended = true
+		state.suspendReason = "quota"
+	}
+	return state
+}
+
+type modelRegistryTransition struct {
+	clearQuota    bool
+	setQuota      bool
+	resumeModel   bool
+	suspendModel  bool
+	suspendReason string
+}
+
+func buildModelRegistryTransition(before, after modelRegistryState) modelRegistryTransition {
+	transition := modelRegistryTransition{}
+	if before.quotaExceeded && !after.quotaExceeded {
+		transition.clearQuota = true
+	}
+	if !before.quotaExceeded && after.quotaExceeded {
+		transition.setQuota = true
+	}
+	if before.suspended && (!after.suspended || before.suspendReason != after.suspendReason) {
+		transition.resumeModel = true
+	}
+	if after.suspended && (!before.suspended || before.suspendReason != after.suspendReason) {
+		transition.suspendModel = true
+		transition.suspendReason = after.suspendReason
+	}
+	return transition
+}
+
+func lookupModelState(auth *Auth, model string) *ModelState {
+	if auth == nil || model == "" || len(auth.ModelStates) == 0 {
+		return nil
+	}
+	if state, ok := auth.ModelStates[model]; ok && state != nil {
+		return state
+	}
+	baseModel := canonicalModelKey(model)
+	if baseModel == "" || baseModel == model {
+		return nil
+	}
+	state, ok := auth.ModelStates[baseModel]
+	if !ok {
+		return nil
+	}
+	return state
 }
 
 func ensureModelState(auth *Auth, model string) *ModelState {
@@ -1873,7 +2033,8 @@ func retryAfterFromError(err error) *time.Duration {
 	if retryAfter == nil {
 		return nil
 	}
-	return new(*retryAfter)
+	retryAfterCopy := *retryAfter
+	return &retryAfterCopy
 }
 
 func statusCodeFromResult(err *Error) int {
@@ -1954,6 +2115,30 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 			auth.StatusMessage = "request failed"
 		}
 	}
+}
+
+func shouldDeleteAuthOnFailure(cfg *internalconfig.Config, resultErr *Error) bool {
+	if cfg == nil || !cfg.ExtremeMode || resultErr == nil {
+		return false
+	}
+	if statusCodeFromResult(resultErr) == http.StatusUnauthorized {
+		return true
+	}
+	return isUsageLimitReachedError(resultErr)
+}
+
+func isUsageLimitReachedError(resultErr *Error) bool {
+	if resultErr == nil {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(resultErr.Code), "usage_limit_reached") {
+		return true
+	}
+	message := strings.ToLower(strings.TrimSpace(resultErr.Message))
+	if message == "" {
+		return false
+	}
+	return strings.Contains(message, "usage_limit_reached") || strings.Contains(message, "usage limit reached")
 }
 
 // nextQuotaCooldown returns the next cooldown duration and updated backoff level for repeated quota errors.

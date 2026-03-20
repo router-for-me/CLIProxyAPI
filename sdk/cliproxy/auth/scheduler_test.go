@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 )
@@ -499,5 +500,84 @@ func TestManager_SchedulerTracksMarkResultCooldownAndRecovery(t *testing.T) {
 	}
 	if len(seen) != 2 {
 		t.Fatalf("len(seen) = %d, want %d", len(seen), 2)
+	}
+}
+
+func TestManager_MarkResult_PreservesSupportedModelSetOnStateUpdates(t *testing.T) {
+	t.Parallel()
+
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	reg := registry.GetGlobalRegistry()
+	authID := "preserve-auth-a"
+	reg.RegisterClient(authID, "gemini", []*registry.ModelInfo{{ID: "test-model"}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(authID)
+	})
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: authID, Provider: "gemini"}); errRegister != nil {
+		t.Fatalf("Register(%s) error = %v", authID, errRegister)
+	}
+
+	got, errPick := manager.scheduler.pickSingle(context.Background(), "gemini", "test-model", cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("scheduler.pickSingle() before registry removal error = %v", errPick)
+	}
+	if got == nil || got.ID != authID {
+		t.Fatalf("scheduler.pickSingle() before registry removal auth = %v, want %s", got, authID)
+	}
+
+	reg.UnregisterClient(authID)
+
+	manager.MarkResult(context.Background(), Result{
+		AuthID:   authID,
+		Provider: "gemini",
+		Model:    "test-model",
+		Success:  true,
+	})
+
+	got, errPick = manager.scheduler.pickSingle(context.Background(), "gemini", "test-model", cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("scheduler.pickSingle() after state update error = %v", errPick)
+	}
+	if got == nil || got.ID != authID {
+		t.Fatalf("scheduler.pickSingle() after state update auth = %v, want %s", got, authID)
+	}
+}
+
+func TestManager_MarkResult_ExtremeModeDeletesAuthFromScheduler(t *testing.T) {
+	t.Parallel()
+
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.SetConfig(&internalconfig.Config{ExtremeMode: true})
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient("delete-auth-a", "gemini", []*registry.ModelInfo{{ID: "test-model"}})
+	reg.RegisterClient("delete-auth-b", "gemini", []*registry.ModelInfo{{ID: "test-model"}})
+	t.Cleanup(func() {
+		reg.UnregisterClient("delete-auth-a")
+		reg.UnregisterClient("delete-auth-b")
+	})
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: "delete-auth-a", Provider: "gemini"}); errRegister != nil {
+		t.Fatalf("Register(delete-auth-a) error = %v", errRegister)
+	}
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: "delete-auth-b", Provider: "gemini"}); errRegister != nil {
+		t.Fatalf("Register(delete-auth-b) error = %v", errRegister)
+	}
+
+	manager.MarkResult(context.Background(), Result{
+		AuthID:   "delete-auth-a",
+		Provider: "gemini",
+		Model:    "test-model",
+		Success:  false,
+		Error:    &Error{HTTPStatus: 401, Message: "unauthorized"},
+	})
+
+	if _, ok := manager.GetByID("delete-auth-a"); ok {
+		t.Fatalf("GetByID(delete-auth-a) ok = true, want false")
+	}
+	got, errPick := manager.scheduler.pickSingle(context.Background(), "gemini", "test-model", cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("scheduler.pickSingle() after delete error = %v", errPick)
+	}
+	if got == nil || got.ID != "delete-auth-b" {
+		t.Fatalf("scheduler.pickSingle() after delete auth = %v, want delete-auth-b", got)
 	}
 }
