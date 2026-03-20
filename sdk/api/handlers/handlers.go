@@ -47,6 +47,11 @@ type ErrorDetail struct {
 
 const idempotencyKeyMetadataKey = "idempotency_key"
 
+var (
+	sseDataPrefix = []byte("data:")
+	sseDoneBytes  = []byte("[DONE]")
+)
+
 const (
 	defaultStreamingKeepAliveSeconds = 0
 	defaultStreamingBootstrapRetries = 0
@@ -732,7 +737,8 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 						}
 					}
 					sentPayload = true
-					if okSendData := sendData(cloneBytes(chunk.Payload)); !okSendData {
+					payload := streamPayloadForHandler(handlerType, chunk.Payload)
+					if okSendData := sendData(payload); !okSendData {
 						return
 					}
 				}
@@ -742,20 +748,27 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 	return dataChan, upstreamHeaders, errChan
 }
 
+func streamPayloadForHandler(handlerType string, payload []byte) []byte {
+	if handlerType == "openai-response" {
+		return payload
+	}
+	return cloneBytes(payload)
+}
+
 func validateSSEDataJSON(chunk []byte) error {
-	for _, line := range bytes.Split(chunk, []byte("\n")) {
+	for line := range iterSSELines(chunk) {
 		line = bytes.TrimSpace(line)
 		if len(line) == 0 {
 			continue
 		}
-		if !bytes.HasPrefix(line, []byte("data:")) {
+		if !bytes.HasPrefix(line, sseDataPrefix) {
 			continue
 		}
 		data := bytes.TrimSpace(line[5:])
 		if len(data) == 0 {
 			continue
 		}
-		if bytes.Equal(data, []byte("[DONE]")) {
+		if bytes.Equal(data, sseDoneBytes) {
 			continue
 		}
 		if json.Valid(data) {
@@ -769,6 +782,27 @@ func validateSSEDataJSON(chunk []byte) error {
 		return fmt.Errorf("invalid SSE data JSON (len=%d): %q", len(data), preview)
 	}
 	return nil
+}
+
+func iterSSELines(chunk []byte) func(func([]byte) bool) {
+	return func(yield func([]byte) bool) {
+		start := 0
+		for start <= len(chunk) {
+			end := bytes.IndexByte(chunk[start:], '\n')
+			if end < 0 {
+				if !yield(chunk[start:]) {
+					return
+				}
+				return
+			}
+
+			lineEnd := start + end
+			if !yield(chunk[start:lineEnd]) {
+				return
+			}
+			start = lineEnd + 1
+		}
+	}
 }
 
 func statusFromError(err error) int {
