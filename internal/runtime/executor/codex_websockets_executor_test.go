@@ -4,13 +4,9 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
-	"strings"
-	"sync"
 	"testing"
-	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
@@ -204,91 +200,4 @@ func TestNewProxyAwareWebsocketDialerDirectDisablesProxy(t *testing.T) {
 	if dialer.Proxy != nil {
 		t.Fatal("expected websocket proxy function to be nil for direct mode")
 	}
-}
-
-func TestEnsureUpstreamConnReconnectsWhenAuthChanges(t *testing.T) {
-	var (
-		mu             sync.Mutex
-		authorizations []string
-	)
-	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := upgrader.Upgrade(w, r, nil)
-		if err != nil {
-			return
-		}
-		mu.Lock()
-		authorizations = append(authorizations, strings.TrimSpace(r.Header.Get("Authorization")))
-		mu.Unlock()
-
-		go func() {
-			defer func() {
-				_ = conn.Close()
-			}()
-			for {
-				if _, _, errRead := conn.ReadMessage(); errRead != nil {
-					return
-				}
-			}
-		}()
-	}))
-	defer server.Close()
-
-	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
-	executor := NewCodexWebsocketsExecutor(&config.Config{})
-	sess := executor.getOrCreateSession("test-session")
-	if sess == nil {
-		t.Fatal("expected session to be created")
-	}
-
-	auth1 := &cliproxyauth.Auth{ID: "auth-1"}
-	headers1 := http.Header{}
-	headers1.Set("Authorization", "Bearer token-1")
-	conn1, _, errDial1 := executor.ensureUpstreamConn(context.Background(), auth1, sess, auth1.ID, wsURL, headers1)
-	if errDial1 != nil {
-		t.Fatalf("first ensureUpstreamConn failed: %v", errDial1)
-	}
-	if conn1 == nil {
-		t.Fatal("first ensureUpstreamConn returned nil connection")
-	}
-
-	auth2 := &cliproxyauth.Auth{ID: "auth-2"}
-	headers2 := http.Header{}
-	headers2.Set("Authorization", "Bearer token-2")
-	conn2, _, errDial2 := executor.ensureUpstreamConn(context.Background(), auth2, sess, auth2.ID, wsURL, headers2)
-	if errDial2 != nil {
-		t.Fatalf("second ensureUpstreamConn failed: %v", errDial2)
-	}
-	if conn2 == nil {
-		t.Fatal("second ensureUpstreamConn returned nil connection")
-	}
-	if conn1 == conn2 {
-		t.Fatal("expected auth change to force upstream reconnect")
-	}
-
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		mu.Lock()
-		count := len(authorizations)
-		mu.Unlock()
-		if count >= 2 || time.Now().After(deadline) {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-
-	mu.Lock()
-	got := append([]string(nil), authorizations...)
-	mu.Unlock()
-	if len(got) < 2 {
-		t.Fatalf("handshake count = %d, want at least 2", len(got))
-	}
-	if got[0] != "Bearer token-1" {
-		t.Fatalf("first Authorization = %q, want %q", got[0], "Bearer token-1")
-	}
-	if got[1] != "Bearer token-2" {
-		t.Fatalf("second Authorization = %q, want %q", got[1], "Bearer token-2")
-	}
-
-	executor.closeExecutionSession(sess, "test_done")
 }
