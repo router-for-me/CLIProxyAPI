@@ -234,11 +234,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		var thinkingLen int64
 		lines := bytes.Split(data, []byte("\n"))
 		for _, line := range lines {
-			thinkingLen += int64(claudeStreamThinkingLen(line))
-			if detail, ok := parseClaudeStreamUsage(line); ok {
-				detail.ReasoningTokens = thinkingLen / 4
-				reporter.publish(ctx, detail)
-			}
+			accumulateClaudeStreamThinking(ctx, line, &thinkingLen, reporter)
 		}
 	} else {
 		reporter.publish(ctx, parseClaudeUsage(data))
@@ -402,11 +398,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			for scanner.Scan() {
 				line := scanner.Bytes()
 				appendAPIResponseChunk(ctx, e.cfg, line)
-				thinkingLen += int64(claudeStreamThinkingLen(line))
-				if detail, ok := parseClaudeStreamUsage(line); ok {
-					detail.ReasoningTokens = thinkingLen / 4
-					reporter.publish(ctx, detail)
-				}
+				accumulateClaudeStreamThinking(ctx, line, &thinkingLen, reporter)
 				if isClaudeOAuthToken(apiKey) && !auth.ToolPrefixDisabled() {
 					line = stripClaudeToolPrefixFromStreamLine(line, claudeToolPrefix)
 				}
@@ -432,11 +424,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			appendAPIResponseChunk(ctx, e.cfg, line)
-			thinkingLen += int64(claudeStreamThinkingLen(line))
-			if detail, ok := parseClaudeStreamUsage(line); ok {
-				detail.ReasoningTokens = thinkingLen / 4
-				reporter.publish(ctx, detail)
-			}
+			accumulateClaudeStreamThinking(ctx, line, &thinkingLen, reporter)
 			if isClaudeOAuthToken(apiKey) && !auth.ToolPrefixDisabled() {
 				line = stripClaudeToolPrefixFromStreamLine(line, claudeToolPrefix)
 			}

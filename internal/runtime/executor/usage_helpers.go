@@ -288,6 +288,12 @@ func parseClaudeStreamUsage(line []byte) (usage.Detail, bool) {
 	if len(payload) == 0 || !gjson.ValidBytes(payload) {
 		return usage.Detail{}, false
 	}
+	// Only emit usage from message_delta events (final usage with output_tokens).
+	// message_start also carries usage but only has input_tokens; publishing it
+	// would trigger the sync.Once reporter before thinking tokens are accumulated.
+	if gjson.GetBytes(payload, "type").String() != "message_delta" {
+		return usage.Detail{}, false
+	}
 	usageNode := gjson.GetBytes(payload, "usage")
 	if !usageNode.Exists() {
 		return usage.Detail{}, false
@@ -304,6 +310,10 @@ func parseClaudeStreamUsage(line []byte) (usage.Detail, bool) {
 	return detail, true
 }
 
+// claudeThinkingTokenFactor is the approximate characters-per-token ratio
+// used to estimate thinking token counts from content block text length.
+const claudeThinkingTokenFactor = 4
+
 // estimateClaudeThinkingTokens scans Claude response content blocks for
 // type="thinking" entries and estimates token count from text length.
 func estimateClaudeThinkingTokens(data []byte) int64 {
@@ -314,7 +324,7 @@ func estimateClaudeThinkingTokens(data []byte) int64 {
 		}
 		return true
 	})
-	return total / 4
+	return total / claudeThinkingTokenFactor
 }
 
 // claudeStreamThinkingLen returns the byte length of thinking text in a
@@ -324,14 +334,25 @@ func claudeStreamThinkingLen(line []byte) int {
 	if len(payload) == 0 {
 		return 0
 	}
-	if gjson.GetBytes(payload, "type").String() != "content_block_delta" {
+	p := gjson.ParseBytes(payload)
+	if p.Get("type").String() != "content_block_delta" {
 		return 0
 	}
-	delta := gjson.GetBytes(payload, "delta")
+	delta := p.Get("delta")
 	if delta.Get("type").String() != "thinking_delta" {
 		return 0
 	}
 	return len(delta.Get("thinking").String())
+}
+
+// accumulateClaudeStreamThinking accumulates thinking text length from a
+// streaming line and publishes usage when the final message_delta arrives.
+func accumulateClaudeStreamThinking(ctx context.Context, line []byte, thinkingLen *int64, reporter *usageReporter) {
+	*thinkingLen += int64(claudeStreamThinkingLen(line))
+	if detail, ok := parseClaudeStreamUsage(line); ok {
+		detail.ReasoningTokens = *thinkingLen / claudeThinkingTokenFactor
+		reporter.publish(ctx, detail)
+	}
 }
 
 func parseGeminiFamilyUsageDetail(node gjson.Result) usage.Detail {
