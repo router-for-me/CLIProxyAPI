@@ -154,6 +154,28 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			}
 			continue
 		}
+		nextSessionRequestSnapshot := updatedLastRequest
+		if shouldBuildResponsesWebsocketFullSnapshot(requestJSON, allowIncrementalInputWithPreviousResponseID) {
+			_, shadowLastRequest, shadowErr := normalizeResponsesWebsocketRequestWithMode(
+				payload,
+				lastRequest,
+				lastResponseOutput,
+				false,
+			)
+			if shadowErr != nil {
+				// 影子快照失败时保留旧快照避免污染会话状态
+				nextSessionRequestSnapshot = lastRequest
+				log.Warnf(
+					"responses websocket: keep previous snapshot id=%s status=%d error=%v",
+					passthroughSessionID,
+					shadowErr.StatusCode,
+					shadowErr.Error,
+				)
+			} else {
+				// 增量模式只发 delta 同时维护完整快照供切号恢复
+				nextSessionRequestSnapshot = shadowLastRequest
+			}
+		}
 		if shouldHandleResponsesWebsocketPrewarmLocally(payload, lastRequest, allowIncrementalInputWithPreviousResponseID) {
 			if updated, errDelete := sjson.DeleteBytes(requestJSON, "generate"); errDelete == nil {
 				requestJSON = updated
@@ -170,7 +192,8 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			}
 			continue
 		}
-		lastRequest = updatedLastRequest
+		// lastRequest 始终保存完整 transcript 快照
+		lastRequest = nextSessionRequestSnapshot
 
 		modelName := gjson.GetBytes(requestJSON, "model").String()
 		cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
@@ -502,6 +525,14 @@ func shouldHandleResponsesWebsocketPrewarmLocally(rawJSON []byte, lastRequest []
 	}
 	generateResult := gjson.GetBytes(rawJSON, "generate")
 	return generateResult.Exists() && !generateResult.Bool()
+}
+
+func shouldBuildResponsesWebsocketFullSnapshot(normalizedRequestJSON []byte, allowIncrementalInputWithPreviousResponseID bool) bool {
+	if !allowIncrementalInputWithPreviousResponseID {
+		return false
+	}
+	prev := strings.TrimSpace(gjson.GetBytes(normalizedRequestJSON, "previous_response_id").String())
+	return prev != ""
 }
 
 func writeResponsesWebsocketSyntheticPrewarm(
