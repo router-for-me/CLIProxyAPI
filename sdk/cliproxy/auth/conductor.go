@@ -1637,7 +1637,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		return
 	}
 
-	var authSnapshot *Auth
+	var authDelta *authSchedulingDelta
 	var registryTransition modelRegistryTransition
 
 	m.mu.Lock()
@@ -1724,13 +1724,13 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 
 		afterScheduling := captureAuthSchedulingState(auth, result.Model)
 		if !beforeScheduling.equal(afterScheduling) {
-			authSnapshot = auth.Clone()
+			authDelta = auth.SchedulingDelta(result.Model)
 		}
 		registryTransition = buildModelRegistryTransition(beforeRegistry, captureModelRegistryState(auth, result.Model))
 	}
 	m.mu.Unlock()
-	if m.scheduler != nil && authSnapshot != nil {
-		m.scheduler.upsertAuthState(authSnapshot)
+	if m.scheduler != nil && authDelta != nil {
+		m.scheduler.upsertAuthState(authDelta)
 	}
 
 	if registryTransition.clearQuota && result.Model != "" {
@@ -2185,6 +2185,35 @@ func (m *Manager) GetByID(id string) (*Auth, bool) {
 	return auth.Clone(), true
 }
 
+func (m *Manager) currentAuthCopy(id string) (*Auth, bool) {
+	if id == "" {
+		return nil, false
+	}
+	m.mu.RLock()
+	auth := m.auths[id]
+	if auth == nil {
+		m.mu.RUnlock()
+		return nil, false
+	}
+	if auth.indexAssigned {
+		copyAuth := auth.Clone()
+		m.mu.RUnlock()
+		return copyAuth, true
+	}
+	m.mu.RUnlock()
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	auth = m.auths[id]
+	if auth == nil {
+		return nil, false
+	}
+	if !auth.indexAssigned {
+		auth.EnsureIndex()
+	}
+	return auth.Clone(), true
+}
+
 // Executor returns the registered provider executor for a provider key.
 func (m *Manager) Executor(provider string) (ProviderExecutor, bool) {
 	if m == nil {
@@ -2322,25 +2351,20 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 	if !okExecutor {
 		return nil, nil, &Error{Code: "executor_not_found", Message: "executor not registered"}
 	}
-	selected, errPick := m.scheduler.pickSingle(ctx, provider, model, opts, tried)
+	selectedAuthID, errPick := m.scheduler.pickSingle(ctx, provider, model, opts, tried)
 	if errPick != nil && model != "" && shouldRetrySchedulerPick(errPick) {
 		m.syncScheduler()
-		selected, errPick = m.scheduler.pickSingle(ctx, provider, model, opts, tried)
+		selectedAuthID, errPick = m.scheduler.pickSingle(ctx, provider, model, opts, tried)
 	}
 	if errPick != nil {
 		return nil, nil, errPick
 	}
-	if selected == nil {
+	if selectedAuthID == "" {
 		return nil, nil, &Error{Code: "auth_not_found", Message: "selector returned no auth"}
 	}
-	authCopy := selected.Clone()
-	if !selected.indexAssigned {
-		m.mu.Lock()
-		if current := m.auths[authCopy.ID]; current != nil && !current.indexAssigned {
-			current.EnsureIndex()
-			authCopy = current.Clone()
-		}
-		m.mu.Unlock()
+	authCopy, ok := m.currentAuthCopy(selectedAuthID)
+	if !ok {
+		return nil, nil, &Error{Code: "auth_not_found", Message: "selected auth disappeared"}
 	}
 	return authCopy, executor, nil
 }
@@ -2453,29 +2477,24 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 		return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
 
-	selected, providerKey, errPick := m.scheduler.pickMixed(ctx, eligibleProviders, model, opts, tried)
+	selectedAuthID, providerKey, errPick := m.scheduler.pickMixed(ctx, eligibleProviders, model, opts, tried)
 	if errPick != nil && model != "" && shouldRetrySchedulerPick(errPick) {
 		m.syncScheduler()
-		selected, providerKey, errPick = m.scheduler.pickMixed(ctx, eligibleProviders, model, opts, tried)
+		selectedAuthID, providerKey, errPick = m.scheduler.pickMixed(ctx, eligibleProviders, model, opts, tried)
 	}
 	if errPick != nil {
 		return nil, nil, "", errPick
 	}
-	if selected == nil {
+	if selectedAuthID == "" {
 		return nil, nil, "", &Error{Code: "auth_not_found", Message: "selector returned no auth"}
 	}
 	executor, okExecutor := m.Executor(providerKey)
 	if !okExecutor {
 		return nil, nil, "", &Error{Code: "executor_not_found", Message: "executor not registered"}
 	}
-	authCopy := selected.Clone()
-	if !selected.indexAssigned {
-		m.mu.Lock()
-		if current := m.auths[authCopy.ID]; current != nil && !current.indexAssigned {
-			current.EnsureIndex()
-			authCopy = current.Clone()
-		}
-		m.mu.Unlock()
+	authCopy, ok := m.currentAuthCopy(selectedAuthID)
+	if !ok {
+		return nil, nil, "", &Error{Code: "auth_not_found", Message: "selected auth disappeared"}
 	}
 	return authCopy, executor, providerKey, nil
 }

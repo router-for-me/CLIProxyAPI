@@ -71,6 +71,33 @@ func registerSchedulerModels(t *testing.T, provider string, model string, authID
 	})
 }
 
+func mustSchedulerPickSingleID(t *testing.T, scheduler *authScheduler, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) string {
+	t.Helper()
+	gotID, errPick := scheduler.pickSingle(context.Background(), provider, model, opts, tried)
+	if errPick != nil {
+		t.Fatalf("pickSingle() error = %v", errPick)
+	}
+	if gotID == "" {
+		t.Fatalf("pickSingle() authID = empty")
+	}
+	return gotID
+}
+
+func mustSchedulerPickMixed(t *testing.T, scheduler *authScheduler, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (string, string) {
+	t.Helper()
+	gotID, provider, errPick := scheduler.pickMixed(context.Background(), providers, model, opts, tried)
+	if errPick != nil {
+		t.Fatalf("pickMixed() error = %v", errPick)
+	}
+	if gotID == "" {
+		t.Fatalf("pickMixed() authID = empty")
+	}
+	if provider == "" {
+		t.Fatalf("pickMixed() provider = empty")
+	}
+	return gotID, provider
+}
+
 func TestSchedulerPick_RoundRobinHighestPriority(t *testing.T) {
 	t.Parallel()
 
@@ -83,15 +110,9 @@ func TestSchedulerPick_RoundRobinHighestPriority(t *testing.T) {
 
 	want := []string{"high-a", "high-b", "high-a"}
 	for index, wantID := range want {
-		got, errPick := scheduler.pickSingle(context.Background(), "gemini", "", cliproxyexecutor.Options{}, nil)
-		if errPick != nil {
-			t.Fatalf("pickSingle() #%d error = %v", index, errPick)
-		}
-		if got == nil {
-			t.Fatalf("pickSingle() #%d auth = nil", index)
-		}
-		if got.ID != wantID {
-			t.Fatalf("pickSingle() #%d auth.ID = %q, want %q", index, got.ID, wantID)
+		gotID := mustSchedulerPickSingleID(t, scheduler, "gemini", "", cliproxyexecutor.Options{}, nil)
+		if gotID != wantID {
+			t.Fatalf("pickSingle() #%d authID = %q, want %q", index, gotID, wantID)
 		}
 	}
 }
@@ -107,15 +128,9 @@ func TestSchedulerPick_FillFirstSticksToFirstReady(t *testing.T) {
 	)
 
 	for index := 0; index < 3; index++ {
-		got, errPick := scheduler.pickSingle(context.Background(), "gemini", "", cliproxyexecutor.Options{}, nil)
-		if errPick != nil {
-			t.Fatalf("pickSingle() #%d error = %v", index, errPick)
-		}
-		if got == nil {
-			t.Fatalf("pickSingle() #%d auth = nil", index)
-		}
-		if got.ID != "a" {
-			t.Fatalf("pickSingle() #%d auth.ID = %q, want %q", index, got.ID, "a")
+		gotID := mustSchedulerPickSingleID(t, scheduler, "gemini", "", cliproxyexecutor.Options{}, nil)
+		if gotID != "a" {
+			t.Fatalf("pickSingle() #%d authID = %q, want %q", index, gotID, "a")
 		}
 	}
 }
@@ -140,15 +155,9 @@ func TestSchedulerPick_PromotesExpiredCooldownBeforePick(t *testing.T) {
 		},
 	)
 
-	got, errPick := scheduler.pickSingle(context.Background(), "gemini", model, cliproxyexecutor.Options{}, nil)
-	if errPick != nil {
-		t.Fatalf("pickSingle() error = %v", errPick)
-	}
-	if got == nil {
-		t.Fatalf("pickSingle() auth = nil")
-	}
-	if got.ID != "cooldown-expired" {
-		t.Fatalf("pickSingle() auth.ID = %q, want %q", got.ID, "cooldown-expired")
+	gotID := mustSchedulerPickSingleID(t, scheduler, "gemini", model, cliproxyexecutor.Options{}, nil)
+	if gotID != "cooldown-expired" {
+		t.Fatalf("pickSingle() authID = %q, want %q", gotID, "cooldown-expired")
 	}
 }
 
@@ -167,18 +176,18 @@ func TestSchedulerPick_GeminiVirtualParentUsesTwoLevelRotation(t *testing.T) {
 	wantParents := []string{"cred-a", "cred-b", "cred-a", "cred-b"}
 	wantIDs := []string{"cred-a::proj-1", "cred-b::proj-1", "cred-a::proj-2", "cred-b::proj-2"}
 	for index := range wantIDs {
-		got, errPick := scheduler.pickSingle(context.Background(), "gemini-cli", "gemini-2.5-pro", cliproxyexecutor.Options{}, nil)
-		if errPick != nil {
-			t.Fatalf("pickSingle() #%d error = %v", index, errPick)
+		gotID := mustSchedulerPickSingleID(t, scheduler, "gemini-cli", "gemini-2.5-pro", cliproxyexecutor.Options{}, nil)
+		if gotID != wantIDs[index] {
+			t.Fatalf("pickSingle() #%d authID = %q, want %q", index, gotID, wantIDs[index])
 		}
-		if got == nil {
-			t.Fatalf("pickSingle() #%d auth = nil", index)
-		}
-		if got.ID != wantIDs[index] {
-			t.Fatalf("pickSingle() #%d auth.ID = %q, want %q", index, got.ID, wantIDs[index])
-		}
-		if got.Attributes["gemini_virtual_parent"] != wantParents[index] {
-			t.Fatalf("pickSingle() #%d parent = %q, want %q", index, got.Attributes["gemini_virtual_parent"], wantParents[index])
+		meta := scheduler.providers["gemini-cli"].auths[gotID]
+		if meta == nil || meta.virtualParent != wantParents[index] {
+			t.Fatalf("pickSingle() #%d parent = %q, want %q", index, func() string {
+				if meta == nil {
+					return ""
+				}
+				return meta.virtualParent
+			}(), wantParents[index])
 		}
 	}
 }
@@ -196,15 +205,12 @@ func TestSchedulerPick_CodexWebsocketPrefersWebsocketEnabledSubset(t *testing.T)
 	ctx := cliproxyexecutor.WithDownstreamWebsocket(context.Background())
 	want := []string{"codex-ws-a", "codex-ws-b", "codex-ws-a"}
 	for index, wantID := range want {
-		got, errPick := scheduler.pickSingle(ctx, "codex", "", cliproxyexecutor.Options{}, nil)
+		gotID, errPick := scheduler.pickSingle(ctx, "codex", "", cliproxyexecutor.Options{}, nil)
 		if errPick != nil {
 			t.Fatalf("pickSingle() #%d error = %v", index, errPick)
 		}
-		if got == nil {
-			t.Fatalf("pickSingle() #%d auth = nil", index)
-		}
-		if got.ID != wantID {
-			t.Fatalf("pickSingle() #%d auth.ID = %q, want %q", index, got.ID, wantID)
+		if gotID != wantID {
+			t.Fatalf("pickSingle() #%d authID = %q, want %q", index, gotID, wantID)
 		}
 	}
 }
@@ -222,18 +228,12 @@ func TestSchedulerPick_MixedProvidersUsesProviderRotationOverReadyCandidates(t *
 	wantProviders := []string{"gemini", "claude", "gemini", "claude"}
 	wantIDs := []string{"gemini-a", "claude-a", "gemini-b", "claude-a"}
 	for index := range wantProviders {
-		got, provider, errPick := scheduler.pickMixed(context.Background(), []string{"gemini", "claude"}, "", cliproxyexecutor.Options{}, nil)
-		if errPick != nil {
-			t.Fatalf("pickMixed() #%d error = %v", index, errPick)
-		}
-		if got == nil {
-			t.Fatalf("pickMixed() #%d auth = nil", index)
-		}
+		gotID, provider := mustSchedulerPickMixed(t, scheduler, []string{"gemini", "claude"}, "", cliproxyexecutor.Options{}, nil)
 		if provider != wantProviders[index] {
 			t.Fatalf("pickMixed() #%d provider = %q, want %q", index, provider, wantProviders[index])
 		}
-		if got.ID != wantIDs[index] {
-			t.Fatalf("pickMixed() #%d auth.ID = %q, want %q", index, got.ID, wantIDs[index])
+		if gotID != wantIDs[index] {
+			t.Fatalf("pickMixed() #%d authID = %q, want %q", index, gotID, wantIDs[index])
 		}
 	}
 }
@@ -257,18 +257,12 @@ func TestSchedulerPick_MixedProvidersPrefersHighestPriorityTier(t *testing.T) {
 	wantProviders := []string{"provider-high-a", "provider-high-b", "provider-high-a", "provider-high-b"}
 	wantIDs := []string{"high-a", "high-b", "high-a", "high-b"}
 	for index := range wantProviders {
-		got, provider, errPick := scheduler.pickMixed(context.Background(), providers, model, cliproxyexecutor.Options{}, nil)
-		if errPick != nil {
-			t.Fatalf("pickMixed() #%d error = %v", index, errPick)
-		}
-		if got == nil {
-			t.Fatalf("pickMixed() #%d auth = nil", index)
-		}
+		gotID, provider := mustSchedulerPickMixed(t, scheduler, providers, model, cliproxyexecutor.Options{}, nil)
 		if provider != wantProviders[index] {
 			t.Fatalf("pickMixed() #%d provider = %q, want %q", index, provider, wantProviders[index])
 		}
-		if got.ID != wantIDs[index] {
-			t.Fatalf("pickMixed() #%d auth.ID = %q, want %q", index, got.ID, wantIDs[index])
+		if gotID != wantIDs[index] {
+			t.Fatalf("pickMixed() #%d authID = %q, want %q", index, gotID, wantIDs[index])
 		}
 	}
 }
@@ -363,24 +357,18 @@ func TestManager_SchedulerTracksRegisterAndUpdate(t *testing.T) {
 		t.Fatalf("Register(auth-a) error = %v", errRegister)
 	}
 
-	got, errPick := manager.scheduler.pickSingle(context.Background(), "gemini", "", cliproxyexecutor.Options{}, nil)
-	if errPick != nil {
-		t.Fatalf("scheduler.pickSingle() error = %v", errPick)
-	}
-	if got == nil || got.ID != "auth-a" {
-		t.Fatalf("scheduler.pickSingle() auth = %v, want auth-a", got)
+	gotID := mustSchedulerPickSingleID(t, manager.scheduler, "gemini", "", cliproxyexecutor.Options{}, nil)
+	if gotID != "auth-a" {
+		t.Fatalf("scheduler.pickSingle() authID = %q, want auth-a", gotID)
 	}
 
 	if _, errUpdate := manager.Update(context.Background(), &Auth{ID: "auth-a", Provider: "gemini", Disabled: true}); errUpdate != nil {
 		t.Fatalf("Update(auth-a) error = %v", errUpdate)
 	}
 
-	got, errPick = manager.scheduler.pickSingle(context.Background(), "gemini", "", cliproxyexecutor.Options{}, nil)
-	if errPick != nil {
-		t.Fatalf("scheduler.pickSingle() after update error = %v", errPick)
-	}
-	if got == nil || got.ID != "auth-b" {
-		t.Fatalf("scheduler.pickSingle() after update auth = %v, want auth-b", got)
+	gotID = mustSchedulerPickSingleID(t, manager.scheduler, "gemini", "", cliproxyexecutor.Options{}, nil)
+	if gotID != "auth-b" {
+		t.Fatalf("scheduler.pickSingle() after update authID = %q, want auth-b", gotID)
 	}
 }
 
@@ -472,12 +460,9 @@ func TestManager_SchedulerTracksMarkResultCooldownAndRecovery(t *testing.T) {
 		Error:    &Error{HTTPStatus: 429, Message: "quota"},
 	})
 
-	got, errPick := manager.scheduler.pickSingle(context.Background(), "gemini", "test-model", cliproxyexecutor.Options{}, nil)
-	if errPick != nil {
-		t.Fatalf("scheduler.pickSingle() after cooldown error = %v", errPick)
-	}
-	if got == nil || got.ID != "auth-b" {
-		t.Fatalf("scheduler.pickSingle() after cooldown auth = %v, want auth-b", got)
+	gotID := mustSchedulerPickSingleID(t, manager.scheduler, "gemini", "test-model", cliproxyexecutor.Options{}, nil)
+	if gotID != "auth-b" {
+		t.Fatalf("scheduler.pickSingle() after cooldown authID = %q, want auth-b", gotID)
 	}
 
 	manager.MarkResult(context.Background(), Result{
@@ -489,14 +474,7 @@ func TestManager_SchedulerTracksMarkResultCooldownAndRecovery(t *testing.T) {
 
 	seen := make(map[string]struct{}, 2)
 	for index := 0; index < 2; index++ {
-		got, errPick = manager.scheduler.pickSingle(context.Background(), "gemini", "test-model", cliproxyexecutor.Options{}, nil)
-		if errPick != nil {
-			t.Fatalf("scheduler.pickSingle() after recovery #%d error = %v", index, errPick)
-		}
-		if got == nil {
-			t.Fatalf("scheduler.pickSingle() after recovery #%d auth = nil", index)
-		}
-		seen[got.ID] = struct{}{}
+		seen[mustSchedulerPickSingleID(t, manager.scheduler, "gemini", "test-model", cliproxyexecutor.Options{}, nil)] = struct{}{}
 	}
 	if len(seen) != 2 {
 		t.Fatalf("len(seen) = %d, want %d", len(seen), 2)
@@ -517,12 +495,9 @@ func TestManager_MarkResult_PreservesSupportedModelSetOnStateUpdates(t *testing.
 		t.Fatalf("Register(%s) error = %v", authID, errRegister)
 	}
 
-	got, errPick := manager.scheduler.pickSingle(context.Background(), "gemini", "test-model", cliproxyexecutor.Options{}, nil)
-	if errPick != nil {
-		t.Fatalf("scheduler.pickSingle() before registry removal error = %v", errPick)
-	}
-	if got == nil || got.ID != authID {
-		t.Fatalf("scheduler.pickSingle() before registry removal auth = %v, want %s", got, authID)
+	gotID := mustSchedulerPickSingleID(t, manager.scheduler, "gemini", "test-model", cliproxyexecutor.Options{}, nil)
+	if gotID != authID {
+		t.Fatalf("scheduler.pickSingle() before registry removal authID = %q, want %s", gotID, authID)
 	}
 
 	reg.UnregisterClient(authID)
@@ -534,12 +509,9 @@ func TestManager_MarkResult_PreservesSupportedModelSetOnStateUpdates(t *testing.
 		Success:  true,
 	})
 
-	got, errPick = manager.scheduler.pickSingle(context.Background(), "gemini", "test-model", cliproxyexecutor.Options{}, nil)
-	if errPick != nil {
-		t.Fatalf("scheduler.pickSingle() after state update error = %v", errPick)
-	}
-	if got == nil || got.ID != authID {
-		t.Fatalf("scheduler.pickSingle() after state update auth = %v, want %s", got, authID)
+	gotID = mustSchedulerPickSingleID(t, manager.scheduler, "gemini", "test-model", cliproxyexecutor.Options{}, nil)
+	if gotID != authID {
+		t.Fatalf("scheduler.pickSingle() after state update authID = %q, want %s", gotID, authID)
 	}
 }
 
@@ -573,11 +545,8 @@ func TestManager_MarkResult_ExtremeModeDeletesAuthFromScheduler(t *testing.T) {
 	if _, ok := manager.GetByID("delete-auth-a"); ok {
 		t.Fatalf("GetByID(delete-auth-a) ok = true, want false")
 	}
-	got, errPick := manager.scheduler.pickSingle(context.Background(), "gemini", "test-model", cliproxyexecutor.Options{}, nil)
-	if errPick != nil {
-		t.Fatalf("scheduler.pickSingle() after delete error = %v", errPick)
-	}
-	if got == nil || got.ID != "delete-auth-b" {
-		t.Fatalf("scheduler.pickSingle() after delete auth = %v, want delete-auth-b", got)
+	gotID := mustSchedulerPickSingleID(t, manager.scheduler, "gemini", "test-model", cliproxyexecutor.Options{}, nil)
+	if gotID != "delete-auth-b" {
+		t.Fatalf("scheduler.pickSingle() after delete authID = %q, want delete-auth-b", gotID)
 	}
 }

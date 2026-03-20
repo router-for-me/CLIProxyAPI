@@ -125,6 +125,40 @@ type ModelState struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
+type authSchedulingSnapshot struct {
+	ID               string
+	Provider         string
+	Priority         int
+	VirtualParent    string
+	WebsocketEnabled bool
+	Disabled         bool
+	Status           Status
+	Unavailable      bool
+	NextRetryAfter   time.Time
+	Quota            QuotaState
+	ModelStates      map[string]*schedulingModelState
+}
+
+type schedulingModelState struct {
+	Status         Status
+	Unavailable    bool
+	NextRetryAfter time.Time
+	Quota          QuotaState
+}
+
+type authSchedulingDelta struct {
+	ID             string
+	Provider       string
+	Disabled       bool
+	Status         Status
+	Unavailable    bool
+	NextRetryAfter time.Time
+	Quota          QuotaState
+	Model          string
+	HasModelState  bool
+	ModelState     schedulingModelState
+}
+
 // Clone shallow copies the Auth structure, duplicating maps to avoid accidental mutation.
 func (a *Auth) Clone() *Auth {
 	if a == nil {
@@ -151,6 +185,77 @@ func (a *Auth) Clone() *Auth {
 	}
 	copyAuth.Runtime = a.Runtime
 	return &copyAuth
+}
+
+func (a *Auth) SchedulingSnapshot() *authSchedulingSnapshot {
+	if a == nil {
+		return nil
+	}
+	snapshot := &authSchedulingSnapshot{
+		ID:               a.ID,
+		Provider:         a.Provider,
+		Priority:         authPriority(a),
+		WebsocketEnabled: authWebsocketsEnabled(a),
+		Disabled:         a.Disabled,
+		Status:           a.Status,
+		Unavailable:      a.Unavailable,
+		NextRetryAfter:   a.NextRetryAfter,
+		Quota:            a.Quota,
+	}
+	if len(a.Attributes) > 0 {
+		snapshot.VirtualParent = strings.TrimSpace(a.Attributes["gemini_virtual_parent"])
+	}
+	if len(a.ModelStates) > 0 {
+		snapshot.ModelStates = make(map[string]*schedulingModelState, len(a.ModelStates))
+		for key, state := range a.ModelStates {
+			if state == nil {
+				continue
+			}
+			snapshot.ModelStates[key] = &schedulingModelState{
+				Status:         state.Status,
+				Unavailable:    state.Unavailable,
+				NextRetryAfter: state.NextRetryAfter,
+				Quota:          state.Quota,
+			}
+		}
+	}
+	return snapshot
+}
+
+func (a *Auth) SchedulingDelta(model string) *authSchedulingDelta {
+	if a == nil {
+		return nil
+	}
+	delta := &authSchedulingDelta{
+		ID:             a.ID,
+		Provider:       a.Provider,
+		Disabled:       a.Disabled,
+		Status:         a.Status,
+		Unavailable:    a.Unavailable,
+		NextRetryAfter: a.NextRetryAfter,
+		Quota:          a.Quota,
+		Model:          model,
+	}
+	if model == "" || len(a.ModelStates) == 0 {
+		return delta
+	}
+	state := a.ModelStates[model]
+	if state == nil {
+		baseModel := canonicalModelKey(model)
+		if baseModel != "" && baseModel != model {
+			state = a.ModelStates[baseModel]
+		}
+	}
+	if state != nil {
+		delta.HasModelState = true
+		delta.ModelState = schedulingModelState{
+			Status:         state.Status,
+			Unavailable:    state.Unavailable,
+			NextRetryAfter: state.NextRetryAfter,
+			Quota:          state.Quota,
+		}
+	}
+	return delta
 }
 
 func stableAuthIndex(seed string) string {
