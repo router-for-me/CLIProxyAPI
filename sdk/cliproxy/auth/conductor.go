@@ -2885,8 +2885,8 @@ func (m *Manager) GetByIndex(index string) (*Auth, bool) {
     if index == "" {
         return nil, false
     }
-    m.mu.RLock()
-    defer m.mu.RUnlock()
+    m.mu.Lock()
+    defer m.mu.Unlock()
     for _, auth := range m.auths {
         if auth == nil {
             continue
