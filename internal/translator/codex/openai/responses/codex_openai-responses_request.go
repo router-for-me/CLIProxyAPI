@@ -1,84 +1,81 @@
 package responses
 
 import (
-	"fmt"
-
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
+	"bytes"
+	"encoding/json"
 )
 
-func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte, _ bool) []byte {
-	rawJSON := inputRawJSON
-
-	inputResult := gjson.GetBytes(rawJSON, "input")
-	if inputResult.Type == gjson.String {
-		input, _ := sjson.Set(`[{"type":"message","role":"user","content":[{"type":"input_text","text":""}]}]`, "0.content.0.text", inputResult.String())
-		rawJSON, _ = sjson.SetRawBytes(rawJSON, "input", []byte(input))
+func ConvertOpenAIResponsesRequestToCodex(_ string, inputRawJSON []byte, _ bool) []byte {
+	if len(inputRawJSON) == 0 {
+		return inputRawJSON
 	}
 
-	rawJSON, _ = sjson.SetBytes(rawJSON, "stream", true)
-	rawJSON, _ = sjson.SetBytes(rawJSON, "store", false)
-	rawJSON, _ = sjson.SetBytes(rawJSON, "parallel_tool_calls", true)
-	rawJSON, _ = sjson.SetBytes(rawJSON, "include", []string{"reasoning.encrypted_content"})
-	// Codex Responses rejects token limit fields, so strip them out before forwarding.
-	rawJSON, _ = sjson.DeleteBytes(rawJSON, "max_output_tokens")
-	rawJSON, _ = sjson.DeleteBytes(rawJSON, "max_completion_tokens")
-	rawJSON, _ = sjson.DeleteBytes(rawJSON, "temperature")
-	rawJSON, _ = sjson.DeleteBytes(rawJSON, "top_p")
-	if v := gjson.GetBytes(rawJSON, "service_tier"); v.Exists() {
-		if v.String() != "priority" {
-			rawJSON, _ = sjson.DeleteBytes(rawJSON, "service_tier")
-		}
+	decoder := json.NewDecoder(bytes.NewReader(inputRawJSON))
+	decoder.UseNumber()
+
+	payload := make(map[string]any)
+	if err := decoder.Decode(&payload); err != nil {
+		// Preserve legacy passthrough behavior for malformed payloads.
+		return inputRawJSON
 	}
 
-	rawJSON, _ = sjson.DeleteBytes(rawJSON, "truncation")
-	rawJSON = applyResponsesCompactionCompatibility(rawJSON)
+	normalizeOpenAIResponsesInputForCodex(payload)
 
-	// Delete the user field as it is not supported by the Codex upstream.
-	rawJSON, _ = sjson.DeleteBytes(rawJSON, "user")
+	payload["stream"] = true
+	payload["store"] = false
+	payload["parallel_tool_calls"] = true
+	payload["include"] = []string{"reasoning.encrypted_content"}
 
-	// Convert role "system" to "developer" in input array to comply with Codex API requirements.
-	rawJSON = convertSystemRoleToDeveloper(rawJSON)
+	// Codex Responses rejects these OpenAI Responses fields.
+	delete(payload, "max_output_tokens")
+	delete(payload, "max_completion_tokens")
+	delete(payload, "temperature")
+	delete(payload, "top_p")
+	delete(payload, "truncation")
+	delete(payload, "context_management")
+	delete(payload, "user")
 
-	return rawJSON
+	if tier, ok := payload["service_tier"].(string); !ok || tier != "priority" {
+		delete(payload, "service_tier")
+	}
+
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return inputRawJSON
+	}
+	return encoded
 }
 
-// applyResponsesCompactionCompatibility handles OpenAI Responses context_management.compaction
-// for Codex upstream compatibility.
-//
-// Codex /responses currently rejects context_management with:
-// {"detail":"Unsupported parameter: context_management"}.
-//
-// Compatibility strategy:
-// 1) Remove context_management before forwarding to Codex upstream.
-func applyResponsesCompactionCompatibility(rawJSON []byte) []byte {
-	if !gjson.GetBytes(rawJSON, "context_management").Exists() {
-		return rawJSON
+func normalizeOpenAIResponsesInputForCodex(payload map[string]any) {
+	if payload == nil {
+		return
 	}
 
-	rawJSON, _ = sjson.DeleteBytes(rawJSON, "context_management")
-	return rawJSON
-}
-
-// convertSystemRoleToDeveloper traverses the input array and converts any message items
-// with role "system" to role "developer". This is necessary because Codex API does not
-// accept "system" role in the input array.
-func convertSystemRoleToDeveloper(rawJSON []byte) []byte {
-	inputResult := gjson.GetBytes(rawJSON, "input")
-	if !inputResult.IsArray() {
-		return rawJSON
-	}
-
-	inputArray := inputResult.Array()
-	result := rawJSON
-
-	// Directly modify role values for items with "system" role
-	for i := 0; i < len(inputArray); i++ {
-		rolePath := fmt.Sprintf("input.%d.role", i)
-		if gjson.GetBytes(result, rolePath).String() == "system" {
-			result, _ = sjson.SetBytes(result, rolePath, "developer")
+	switch input := payload["input"].(type) {
+	case string:
+		payload["input"] = []map[string]any{
+			{
+				"type": "message",
+				"role": "user",
+				"content": []map[string]any{
+					{
+						"type": "input_text",
+						"text": input,
+					},
+				},
+			},
+		}
+	case []any:
+		for _, rawItem := range input {
+			item, ok := rawItem.(map[string]any)
+			if !ok {
+				continue
+			}
+			role, ok := item["role"].(string)
+			if !ok || role != "system" {
+				continue
+			}
+			item["role"] = "developer"
 		}
 	}
-
-	return result
 }
