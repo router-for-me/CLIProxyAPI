@@ -327,7 +327,9 @@ func (a *Auth) RequestRetryOverride() (int, bool) {
 	return 0, false
 }
 
-func parseBoolAny(val any) (bool, bool) {
+// ParseBoolAny parses a boolean value from various types (bool, string, float64, json.Number).
+// It returns the parsed boolean and a boolean indicating whether parsing was successful.
+func ParseBoolAny(val any) (bool, bool) {
 	switch typed := val.(type) {
 	case bool:
 		return typed, true
@@ -352,6 +354,11 @@ func parseBoolAny(val any) (bool, bool) {
 	default:
 		return false, false
 	}
+}
+
+// parseBoolAny is an alias for ParseBoolAny for backward compatibility with internal callers.
+func parseBoolAny(val any) (bool, bool) {
+	return ParseBoolAny(val)
 }
 
 func parseIntAny(val any) (int, bool) {

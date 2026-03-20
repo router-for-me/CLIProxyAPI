@@ -232,7 +232,7 @@ func (s *FileTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth,
 		return nil, fmt.Errorf("stat file: %w", err)
 	}
 	id := s.idFor(path, baseDir)
-	disabled, _ := metadata["disabled"].(bool)
+	disabled, _ := cliproxyauth.ParseBoolAny(metadata["disabled"])
 	status := cliproxyauth.StatusActive
 	if disabled {
 		status = cliproxyauth.StatusDisabled

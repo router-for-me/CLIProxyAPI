@@ -112,7 +112,7 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 		}
 	}
 
-	disabled, _ := metadata["disabled"].(bool)
+	disabled, _ := coreauth.ParseBoolAny(metadata["disabled"])
 	status := coreauth.StatusActive
 	if disabled {
 		status = coreauth.StatusDisabled

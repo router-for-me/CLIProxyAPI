@@ -15,7 +15,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v6/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -37,9 +37,33 @@ type CodexAuth struct {
 // NewCodexAuth creates a new CodexAuth service instance.
 // It initializes an HTTP client with proxy settings from the provided configuration.
 func NewCodexAuth(cfg *config.Config) *CodexAuth {
-	return &CodexAuth{
-		httpClient: util.SetProxy(&cfg.SDKConfig, &http.Client{}),
+	return NewCodexAuthWithProxy(cfg, "")
+}
+
+// NewCodexAuthWithProxy creates a new CodexAuth service instance using an
+// auth-scoped proxy override when provided. The override takes precedence over
+// the global SDK proxy setting.
+func NewCodexAuthWithProxy(cfg *config.Config, proxyURL string) *CodexAuth {
+	httpClient := &http.Client{}
+
+	pURL := ""
+	if trimmed := strings.TrimSpace(proxyURL); trimmed != "" {
+		pURL = trimmed
+	} else if cfg != nil {
+		pURL = cfg.SDKConfig.ProxyURL
 	}
+
+	if pURL != "" {
+		transport, _, err := proxyutil.BuildHTTPTransport(pURL)
+		if err != nil {
+			log.Errorf("failed to build transport with proxy: %v", err)
+		}
+		if transport != nil {
+			httpClient.Transport = transport
+		}
+	}
+
+	return &CodexAuth{httpClient: httpClient}
 }
 
 // GenerateAuthURL creates the OAuth authorization URL with PKCE (Proof Key for Code Exchange).

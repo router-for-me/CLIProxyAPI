@@ -1,6 +1,13 @@
 package auth
 
-import "testing"
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"testing"
+
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+)
 
 func TestExtractAccessToken(t *testing.T) {
 	t.Parallel()
@@ -76,5 +83,32 @@ func TestExtractAccessToken(t *testing.T) {
 				t.Errorf("extractAccessToken() = %q, want %q", got, tt.expected)
 			}
 		})
+	}
+}
+
+func TestFileTokenStoreList_ParsesStringDisabled(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "codex-auth.json")
+	if err := os.WriteFile(path, []byte(`{"type":"codex","email":"test@example.com","disabled":"true"}`), 0o600); err != nil {
+		t.Fatalf("write auth file: %v", err)
+	}
+
+	store := NewFileTokenStore()
+	store.SetBaseDir(dir)
+
+	auths, err := store.List(context.Background())
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("expected 1 auth, got %d", len(auths))
+	}
+	if !auths[0].Disabled {
+		t.Fatal("expected auth to be disabled")
+	}
+	if auths[0].Status != cliproxyauth.StatusDisabled {
+		t.Fatalf("status = %q, want %q", auths[0].Status, cliproxyauth.StatusDisabled)
 	}
 }
