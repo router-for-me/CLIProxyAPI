@@ -1539,11 +1539,16 @@ func (m *Manager) closestCooldownWait(providers []string, model string, attempt 
 	if m == nil || len(providers) == 0 {
 		return 0, false
 	}
-	now := time.Now()
 	defaultRetry := int(m.requestRetry.Load())
 	if defaultRetry < 0 {
 		defaultRetry = 0
 	}
+	if m.scheduler != nil {
+		if wait, found := m.scheduler.closestCooldownWait(providers, model, attempt, defaultRetry); found {
+			return wait, true
+		}
+	}
+	now := time.Now()
 	providerSet := make(map[string]struct{}, len(providers))
 	for i := range providers {
 		key := strings.TrimSpace(strings.ToLower(providers[i]))
