@@ -365,3 +365,24 @@ func TestConvertOpenAIResponsesRequestToCodex_RemovesNonPriorityServiceTier(t *t
 		t.Fatalf("expected non-priority service_tier to be removed")
 	}
 }
+
+func TestConvertOpenAIResponsesRequestToCodex_PreservesLargeUntouchedIntegers(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gpt-5.2",
+		"input": [{"role":"user","content":"hello"}],
+		"metadata": {
+			"snowflake": 9223372036854775806,
+			"nested": {"tool_call_id": 9007199254740993}
+		}
+	}`)
+
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
+	outputStr := string(output)
+
+	if got := gjson.Get(outputStr, "metadata.snowflake").Raw; got != "9223372036854775806" {
+		t.Fatalf("expected large integer snowflake to be preserved exactly, got %q", got)
+	}
+	if got := gjson.Get(outputStr, "metadata.nested.tool_call_id").Raw; got != "9007199254740993" {
+		t.Fatalf("expected nested large integer to be preserved exactly, got %q", got)
+	}
+}
