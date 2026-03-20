@@ -159,15 +159,15 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 	}
 	// Read enable_1m_context from auth file (Claude 1M context beta toggle).
 	if raw1M, ok := metadata["enable_1m_context"]; ok {
+		var isTrue bool
 		switch v := raw1M.(type) {
 		case bool:
-			if v {
-				a.Attributes["enable_1m_context"] = "true"
-			}
+			isTrue = v
 		case string:
-			if strings.EqualFold(strings.TrimSpace(v), "true") {
-				a.Attributes["enable_1m_context"] = "true"
-			}
+			isTrue, _ = strconv.ParseBool(strings.TrimSpace(v))
+		}
+		if isTrue {
+			a.Attributes["enable_1m_context"] = "true"
 		}
 	}
 	ApplyAuthExcludedModelsMeta(a, cfg, perAccountExcluded, "oauth")

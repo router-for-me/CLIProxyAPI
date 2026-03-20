@@ -928,12 +928,12 @@ func should1MContext(auth *cliproxyauth.Auth, cfg *config.Config, model string) 
 		return true
 	}
 	// Check if the request model is in the whitelist.
+	modelsMap := make(map[string]struct{}, len(cfg.Claude1MContext.Models))
 	for _, m := range cfg.Claude1MContext.Models {
-		if strings.EqualFold(strings.TrimSpace(m), model) {
-			return true
-		}
+		modelsMap[strings.ToLower(strings.TrimSpace(m))] = struct{}{}
 	}
-	return false
+	_, ok := modelsMap[strings.ToLower(model)]
+	return ok
 }
 
 func claudeCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
