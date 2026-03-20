@@ -17,6 +17,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/upstreamerrors"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
@@ -97,51 +98,18 @@ func WithExecutionSessionID(ctx context.Context, sessionID string) context.Conte
 }
 
 // BuildErrorResponseBody builds an OpenAI-compatible JSON error response body.
-// If errText is already valid JSON, it is returned as-is to preserve upstream error payloads.
 func BuildErrorResponseBody(status int, errText string) []byte {
-	if status <= 0 {
-		status = http.StatusInternalServerError
-	}
-	if strings.TrimSpace(errText) == "" {
-		errText = http.StatusText(status)
-	}
-
-	trimmed := strings.TrimSpace(errText)
-	if trimmed != "" && json.Valid([]byte(trimmed)) {
-		return []byte(trimmed)
-	}
-
-	errType := "invalid_request_error"
-	var code string
-	switch status {
-	case http.StatusUnauthorized:
-		errType = "authentication_error"
-		code = "invalid_api_key"
-	case http.StatusForbidden:
-		errType = "permission_error"
-		code = "insufficient_quota"
-	case http.StatusTooManyRequests:
-		errType = "rate_limit_error"
-		code = "rate_limit_exceeded"
-	case http.StatusNotFound:
-		errType = "invalid_request_error"
-		code = "model_not_found"
-	default:
-		if status >= http.StatusInternalServerError {
-			errType = "server_error"
-			code = "internal_server_error"
-		}
-	}
+	normalized := upstreamerrors.Normalize(status, errText)
 
 	payload, err := json.Marshal(ErrorResponse{
 		Error: ErrorDetail{
-			Message: errText,
-			Type:    errType,
-			Code:    code,
+			Message: normalized.Message,
+			Type:    normalized.Type,
+			Code:    normalized.Code,
 		},
 	})
 	if err != nil {
-		return []byte(fmt.Sprintf(`{"error":{"message":%q,"type":"server_error","code":"internal_server_error"}}`, errText))
+		return []byte(fmt.Sprintf(`{"error":{"message":%q,"type":"server_error","code":"internal_server_error"}}`, normalized.Message))
 	}
 	return payload
 }
@@ -906,6 +874,7 @@ func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.Erro
 			errText = v
 		}
 	}
+	status = upstreamerrors.Normalize(status, errText).Status
 
 	body := BuildErrorResponseBody(status, errText)
 	// Append first to preserve upstream response logs, then drop duplicate payloads if already recorded.
