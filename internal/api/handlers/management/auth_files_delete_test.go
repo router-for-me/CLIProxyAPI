@@ -127,3 +127,105 @@ func TestDeleteAuthFile_FallbackToAuthDirPath(t *testing.T) {
 		t.Fatalf("expected auth file to be removed from auth dir, stat err: %v", errStat)
 	}
 }
+
+func TestDeleteAuthFile_DisablesAllAuthsForSamePath(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	tempDir := t.TempDir()
+	authDir := filepath.Join(tempDir, "auth")
+	if errMkdirAuth := os.MkdirAll(authDir, 0o700); errMkdirAuth != nil {
+		t.Fatalf("failed to create auth dir: %v", errMkdirAuth)
+	}
+
+	fileName := "gemini-shared.json"
+	filePath := filepath.Join(authDir, fileName)
+	if errWrite := os.WriteFile(filePath, []byte(`{"type":"gemini-cli","project_id":"root"}`), 0o600); errWrite != nil {
+		t.Fatalf("failed to write shared auth file: %v", errWrite)
+	}
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	sharedPath := filePath
+	primary := &coreauth.Auth{
+		ID:       "gemini/primary",
+		FileName: fileName,
+		Provider: "gemini-cli",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"path": sharedPath,
+		},
+		Metadata: map[string]any{
+			"type":       "gemini-cli",
+			"project_id": "root",
+		},
+	}
+	secondary := &coreauth.Auth{
+		ID:       "gemini/project-2",
+		FileName: fileName,
+		Provider: "gemini-cli",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"path": sharedPath,
+		},
+		Metadata: map[string]any{
+			"type":       "gemini-cli",
+			"project_id": "project-2",
+		},
+	}
+	if _, errRegister := manager.Register(context.Background(), primary); errRegister != nil {
+		t.Fatalf("failed to register primary auth: %v", errRegister)
+	}
+	if _, errRegister := manager.Register(context.Background(), secondary); errRegister != nil {
+		t.Fatalf("failed to register secondary auth: %v", errRegister)
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
+	h.tokenStore = &memoryAuthStore{}
+
+	deleteRec := httptest.NewRecorder()
+	deleteCtx, _ := gin.CreateTestContext(deleteRec)
+	deleteReq := httptest.NewRequest(http.MethodDelete, "/v0/management/auth-files?name="+url.QueryEscape(fileName), nil)
+	deleteCtx.Request = deleteReq
+	h.DeleteAuthFile(deleteCtx)
+
+	if deleteRec.Code != http.StatusOK {
+		t.Fatalf("expected delete status %d, got %d with body %s", http.StatusOK, deleteRec.Code, deleteRec.Body.String())
+	}
+	if _, errStat := os.Stat(filePath); !os.IsNotExist(errStat) {
+		t.Fatalf("expected shared auth file to be removed, stat err: %v", errStat)
+	}
+
+	for _, authID := range []string{primary.ID, secondary.ID} {
+		auth, ok := manager.GetByID(authID)
+		if !ok {
+			t.Fatalf("expected auth %s to remain tombstoned in manager until watcher replay", authID)
+		}
+		if !auth.Disabled {
+			t.Fatalf("expected auth %s to be disabled after shared-path delete", authID)
+		}
+		if auth.Status != coreauth.StatusDisabled {
+			t.Fatalf("expected auth %s status to be disabled, got %q", authID, auth.Status)
+		}
+	}
+
+	listRec := httptest.NewRecorder()
+	listCtx, _ := gin.CreateTestContext(listRec)
+	listReq := httptest.NewRequest(http.MethodGet, "/v0/management/auth-files", nil)
+	listCtx.Request = listReq
+	h.ListAuthFiles(listCtx)
+
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("expected list status %d, got %d with body %s", http.StatusOK, listRec.Code, listRec.Body.String())
+	}
+	var listPayload map[string]any
+	if errUnmarshal := json.Unmarshal(listRec.Body.Bytes(), &listPayload); errUnmarshal != nil {
+		t.Fatalf("failed to decode list payload: %v", errUnmarshal)
+	}
+	filesRaw, ok := listPayload["files"].([]any)
+	if !ok {
+		t.Fatalf("expected files array, payload: %#v", listPayload)
+	}
+	if len(filesRaw) != 0 {
+		t.Fatalf("expected all shared-path auths to be hidden from list, got %d entries", len(filesRaw))
+	}
+}

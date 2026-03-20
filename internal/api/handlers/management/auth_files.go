@@ -663,7 +663,7 @@ func (h *Handler) DeleteAuthFile(c *gin.Context) {
 					return
 				}
 				deleted++
-				h.disableAuth(ctx, full)
+				h.disableAuthsForPath(ctx, full)
 			}
 		}
 		c.JSON(200, gin.H{"status": "ok", "deleted": deleted})
@@ -700,10 +700,9 @@ func (h *Handler) DeleteAuthFile(c *gin.Context) {
 		c.JSON(500, gin.H{"error": errDeleteRecord.Error()})
 		return
 	}
+	h.disableAuthsForPath(ctx, targetPath)
 	if targetID != "" {
 		h.disableAuth(ctx, targetID)
-	} else {
-		h.disableAuth(ctx, targetPath)
 	}
 	c.JSON(200, gin.H{"status": "ok"})
 }
@@ -998,7 +997,7 @@ func (h *Handler) disableAuth(ctx context.Context, id string) {
 		auth.Status = coreauth.StatusDisabled
 		auth.StatusMessage = "removed via management API"
 		auth.UpdatedAt = time.Now()
-		_, _ = h.authManager.Update(ctx, auth)
+		_, _ = h.authManager.Update(coreauth.WithSkipPersist(ctx), auth)
 		return
 	}
 	authID := h.authIDForPath(id)
@@ -1010,7 +1009,26 @@ func (h *Handler) disableAuth(ctx context.Context, id string) {
 		auth.Status = coreauth.StatusDisabled
 		auth.StatusMessage = "removed via management API"
 		auth.UpdatedAt = time.Now()
-		_, _ = h.authManager.Update(ctx, auth)
+		_, _ = h.authManager.Update(coreauth.WithSkipPersist(ctx), auth)
+	}
+}
+
+func (h *Handler) disableAuthsForPath(ctx context.Context, path string) {
+	if h == nil || h.authManager == nil {
+		return
+	}
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return
+	}
+	for _, auth := range h.authManager.List() {
+		if auth == nil {
+			continue
+		}
+		if strings.TrimSpace(authAttribute(auth, "path")) != path {
+			continue
+		}
+		h.disableAuth(ctx, auth.ID)
 	}
 }
 
