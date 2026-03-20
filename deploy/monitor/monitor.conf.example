@@ -1,0 +1,40 @@
+# 监控与告警配置（复制为 monitor.conf 并修改）
+
+# 基础
+DOMAIN="cpa.hasdg.fun"
+ORIGIN_IP="142.171.216.112"
+API_PATH="/v1/models"
+API_KEY=""
+
+# 阈值
+API_TIMEOUT=5
+API_SLOW_MS=2000
+API_FAIL_THRESHOLD=3
+CPU_WARN=90
+MEM_WARN=90
+DISK_WARN=85
+NET_ERR_INCR=1
+CERT_EXPIRE_DAYS=15
+
+# 组件
+CONTAINER_NAME="cliproxyapi"
+
+# 开关
+CHECK_API=1
+CHECK_DOCKER=1
+CHECK_RESOURCE=1
+CHECK_NETWORK=1
+CHECK_UFW=1
+CHECK_FAIL2BAN=1
+CHECK_CERT=1
+CHECK_ORIGIN=1
+
+# 告警
+ALERT_COOLDOWN=1800
+RECOVERY_ALERTS=1
+FEISHU_WEBHOOK="https://open.feishu.cn/open-apis/bot/v2/hook/REPLACE_ME"
+
+# 日志与状态
+LOG_FILE="/var/log/cliproxyapi-monitor.log"
+RUN_LOG_FILE="/var/log/cliproxyapi-monitor-run.log"
+STATE_DIR="/var/lib/cliproxyapi-monitor"
