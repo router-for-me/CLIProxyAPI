@@ -285,9 +285,12 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	}
 	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 	if stream {
+		var thinkingLen int64
 		lines := bytes.Split(data, []byte("\n"))
 		for _, line := range lines {
+			thinkingLen += int64(claudeStreamThinkingLen(line))
 			if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
+				detail.ReasoningTokens = thinkingLen / 4
 				reporter.Publish(ctx, detail)
 			}
 		}
@@ -465,12 +468,15 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 
 		// If from == to (Claude → Claude), directly forward the SSE stream without translation
 		if from == to {
+			var thinkingLen int64
 			scanner := bufio.NewScanner(decodedBody)
 			scanner.Buffer(nil, 52_428_800) // 50MB
 			for scanner.Scan() {
 				line := scanner.Bytes()
 				helps.AppendAPIResponseChunk(ctx, e.cfg, line)
+				thinkingLen += int64(claudeStreamThinkingLen(line))
 				if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
+					detail.ReasoningTokens = thinkingLen / 4
 					reporter.Publish(ctx, detail)
 				}
 				if isClaudeOAuthToken(apiKey) && !auth.ToolPrefixDisabled() {
@@ -494,13 +500,16 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		}
 
 		// For other formats, use translation
+		var thinkingLen int64
 		scanner := bufio.NewScanner(decodedBody)
 		scanner.Buffer(nil, 52_428_800) // 50MB
 		var param any
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
+			thinkingLen += int64(claudeStreamThinkingLen(line))
 			if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
+				detail.ReasoningTokens = thinkingLen / 4
 				reporter.Publish(ctx, detail)
 			}
 			if isClaudeOAuthToken(apiKey) && !auth.ToolPrefixDisabled() {
