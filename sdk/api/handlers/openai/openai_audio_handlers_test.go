@@ -52,6 +52,12 @@ type audioCaptureExecutor struct {
 	responses    map[string]audioExecutorResponse
 }
 
+type panicWriter struct{}
+
+func (panicWriter) Write([]byte) (int, error) {
+	panic("boom")
+}
+
 func (e *audioCaptureExecutor) Identifier() string {
 	if strings.TrimSpace(e.id) != "" {
 		return e.id
@@ -323,6 +329,56 @@ func TestAudioTranscriptionsPreserveExplicitTextResponseFormat(t *testing.T) {
 	}
 }
 
+func TestAudioTranscriptionsAcceptDiarizedJSONResponseFormat(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	executor := &audioCaptureExecutor{
+		responses: map[string]audioExecutorResponse{
+			"audio-auth": {
+				status:      http.StatusOK,
+				body:        `{"segments":[{"speaker":"A","text":"hello"}],"language":"en"}`,
+				contentType: "application/json",
+			},
+		},
+	}
+	router := newAudioTestRouter(t, executor, &coreauth.Auth{
+		ID:       "audio-auth",
+		Provider: "openai-compatibility",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"base_url": "https://api.example.com/v1",
+		},
+	})
+
+	req := newAudioMultipartRequest(t, "/v1/audio/transcriptions", map[string]string{
+		"model":           audioTestModel,
+		"response_format": "diarized_json",
+	}, audioTranscriptionFileFieldName, "sample.webm", "", []byte("fake-audio"))
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", resp.Code, http.StatusOK, resp.Body.String())
+	}
+	if got := executor.lastAccept; got != "application/json" {
+		t.Fatalf("accept = %q, want %q", got, "application/json")
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("Unmarshal(response): %v", err)
+	}
+	if got, ok := payload["text"].(string); !ok || got != "" {
+		t.Fatalf("text = %#v, want empty string", payload["text"])
+	}
+	if _, ok := payload["segments"]; !ok {
+		t.Fatalf("segments missing from payload: %v", payload)
+	}
+	if got, ok := payload["language"].(string); !ok || got != "en" {
+		t.Fatalf("language = %#v, want %q", payload["language"], "en")
+	}
+}
+
 func TestAudioTranscriptionsPreserveExplicitVTTResponseFormat(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -404,7 +460,7 @@ func TestAudioTranscriptionsRawResponseDoesNotEmitKeepAlive(t *testing.T) {
 	}
 }
 
-func TestNormalizeAudioTranscriptionResponse(t *testing.T) {
+func TestNormalizeAudioTranscriptionResponseFromReader(t *testing.T) {
 	testCases := []struct {
 		name string
 		body []byte
@@ -425,16 +481,82 @@ func TestNormalizeAudioTranscriptionResponse(t *testing.T) {
 			body: []byte(`"hello"`),
 			want: `{"text":"hello"}`,
 		},
+		{
+			name: "raw text wrapped",
+			body: []byte(`hello`),
+			want: `{"text":"hello"}`,
+		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := string(normalizeAudioTranscriptionResponse(tc.body))
+			got := normalizeAudioTranscriptionResponseForTest(t, tc.body)
 			if got != tc.want {
-				t.Fatalf("normalizeAudioTranscriptionResponse() = %s, want %s", got, tc.want)
+				t.Fatalf("normalizeAudioTranscriptionResponseFromReader() = %s, want %s", got, tc.want)
 			}
 		})
 	}
+}
+
+func TestWriteMultipartBodyRecoversPanic(t *testing.T) {
+	stagedFile, err := os.CreateTemp("", "audio-transcription-panic-*")
+	if err != nil {
+		t.Fatalf("CreateTemp(): %v", err)
+	}
+	defer func() {
+		_ = os.Remove(stagedFile.Name())
+	}()
+	if _, err := stagedFile.Write([]byte("fake-audio")); err != nil {
+		t.Fatalf("Write(stagedFile): %v", err)
+	}
+	if err := stagedFile.Close(); err != nil {
+		t.Fatalf("Close(stagedFile): %v", err)
+	}
+
+	req := &audioTranscriptionRequest{
+		Model:           audioTestModel,
+		Fields:          []audioFormField{{Name: audioTranscriptionModelFieldName, Value: audioTestModel}},
+		FileName:        "sample.webm",
+		FileContentType: "audio/webm",
+		StagedFilePath:  stagedFile.Name(),
+	}
+	bodyReader, bodyWriter := io.Pipe()
+	multipartWriter := multipart.NewWriter(panicWriter{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		req.writeMultipartBody(bodyWriter, multipartWriter, audioTestModel)
+	}()
+
+	_, err = io.ReadAll(bodyReader)
+	<-done
+	if err == nil || !strings.Contains(err.Error(), "panic while writing audio transcription multipart body") {
+		t.Fatalf("ReadAll(bodyReader) error = %v, want recovered panic error", err)
+	}
+}
+
+func normalizeAudioTranscriptionResponseForTest(t *testing.T, body []byte) string {
+	t.Helper()
+
+	var reader io.Reader
+	if body != nil {
+		reader = bytes.NewReader(body)
+	}
+	normalizedPath, err := normalizeAudioTranscriptionResponseFromReader(reader)
+	if err != nil {
+		t.Fatalf("normalizeAudioTranscriptionResponseFromReader(): %v", err)
+	}
+	defer func() {
+		if normalizedPath != "" {
+			_ = os.Remove(normalizedPath)
+		}
+	}()
+
+	payload, err := os.ReadFile(normalizedPath)
+	if err != nil {
+		t.Fatalf("ReadFile(normalizedPath): %v", err)
+	}
+	return string(payload)
 }
 
 func TestResolveAudioTranscriptionURL_DefaultCodexOAuth(t *testing.T) {
@@ -1009,6 +1131,93 @@ func TestAudioTranscriptionsResolveAutoSkipsUnavailableAuths(t *testing.T) {
 		ID:       "blocked-auth",
 		Provider: "pool",
 		Status:   coreauth.StatusDisabled,
+		Attributes: map[string]string{
+			"api_key":      "test-key",
+			"base_url":     "https://api.example.com/v1",
+			"compat_name":  "pool",
+			"provider_key": "pool",
+		},
+	}
+	if _, err := manager.Register(context.Background(), blockedAuth); err != nil {
+		t.Fatalf("register blocked auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(blockedAuth.ID, "pool", []*registry.ModelInfo{{
+		ID:      "voice-new",
+		Created: time.Now().Unix() + 1000,
+	}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(blockedAuth.ID)
+	})
+
+	activeAuth := &coreauth.Auth{
+		ID:       "active-auth",
+		Provider: "pool",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"api_key":      "test-key",
+			"base_url":     "https://api.example.com/v1",
+			"compat_name":  "pool",
+			"provider_key": "pool",
+		},
+	}
+	if _, err := manager.Register(context.Background(), activeAuth); err != nil {
+		t.Fatalf("register active auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(activeAuth.ID, "pool", []*registry.ModelInfo{{
+		ID:      audioTestModel,
+		Created: time.Now().Unix(),
+	}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(activeAuth.ID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	h := NewOpenAIAPIHandler(base)
+	router := gin.New()
+	router.POST("/v1/audio/transcriptions", h.AudioTranscriptions)
+
+	req := newAudioMultipartRequest(t, "/v1/audio/transcriptions", map[string]string{
+		"model": "auto",
+	}, audioTranscriptionFileFieldName, "sample.webm", "", []byte("fake-audio"))
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", resp.Code, http.StatusOK, resp.Body.String())
+	}
+	if executor.lastAuthID != activeAuth.ID {
+		t.Fatalf("last auth id = %q, want %q", executor.lastAuthID, activeAuth.ID)
+	}
+	if got := executor.lastFields["model"]; len(got) != 1 || got[0] != audioTestModel {
+		t.Fatalf("model field = %v, want [%s]", got, audioTestModel)
+	}
+}
+
+func TestAudioTranscriptionsResolveAutoSkipsGloballyCoolingDownAuths(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	executor := &audioCaptureExecutor{id: "pool"}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.SetConfig(&internalconfig.Config{
+		OpenAICompatibility: []internalconfig.OpenAICompatibility{{
+			Name: "pool",
+			Models: []internalconfig.OpenAICompatibilityModel{
+				{Name: audioTestModel, Alias: "voice-new"},
+			},
+		}},
+	})
+	manager.RegisterExecutor(executor)
+
+	blockedAuth := &coreauth.Auth{
+		ID:             "blocked-auth",
+		Provider:       "pool",
+		Status:         coreauth.StatusActive,
+		Unavailable:    true,
+		NextRetryAfter: time.Now().Add(30 * time.Minute),
+		Quota: coreauth.QuotaState{
+			Exceeded:      true,
+			NextRecoverAt: time.Now().Add(30 * time.Minute),
+		},
 		Attributes: map[string]string{
 			"api_key":      "test-key",
 			"base_url":     "https://api.example.com/v1",

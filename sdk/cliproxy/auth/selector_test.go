@@ -311,6 +311,38 @@ func TestIsAuthBlockedForModel_UnavailableWithoutNextRetryIsNotBlocked(t *testin
 	}
 }
 
+func TestIsAuthBlockedForModel_FallsBackToGlobalCooldownWhenModelStateMissing(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	nextRetry := now.Add(15 * time.Minute)
+	auth := &Auth{
+		ID:             "a",
+		Unavailable:    true,
+		NextRetryAfter: nextRetry,
+		Quota: QuotaState{
+			Exceeded:      true,
+			NextRecoverAt: nextRetry,
+		},
+		ModelStates: map[string]*ModelState{
+			"other-model": {
+				Status: StatusActive,
+			},
+		},
+	}
+
+	blocked, reason, next := isAuthBlockedForModel(auth, "missing-model", now)
+	if !blocked {
+		t.Fatalf("blocked = false, want true")
+	}
+	if reason != blockReasonCooldown {
+		t.Fatalf("reason = %v, want %v", reason, blockReasonCooldown)
+	}
+	if !next.Equal(nextRetry) {
+		t.Fatalf("next = %v, want %v", next, nextRetry)
+	}
+}
+
 func TestFillFirstSelectorPick_ThinkingSuffixFallsBackToBaseModelState(t *testing.T) {
 	t.Parallel()
 

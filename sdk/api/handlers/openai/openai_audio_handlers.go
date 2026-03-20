@@ -26,11 +26,11 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 const (
+	// Keep the upload cap fixed for this endpoint to preserve current behavior
+	// without introducing another configuration knob in the same PR.
 	audioTranscriptionUploadLimitBytes        int64 = 32 << 20
 	audioTranscriptionNonFileFieldsLimitBytes int64 = 1 << 20
 	audioTranscriptionContentSniffBytes             = 512
@@ -71,13 +71,18 @@ var supportedAudioMediaTypes = map[string]struct{}{
 	"video/webm": {},
 }
 
-var supportedAudioResponseFormats = map[string]struct{}{
-	"json":         {},
-	"srt":          {},
-	"text":         {},
-	"verbose_json": {},
-	"vtt":          {},
+var supportedAudioResponseFormats = []string{
+	"diarized_json",
+	"json",
+	"srt",
+	"text",
+	"verbose_json",
+	"vtt",
 }
+
+var supportedAudioResponseFormatSet = newAudioResponseFormatSet(supportedAudioResponseFormats...)
+var audioJSONResponseFormats = newAudioResponseFormatSet("", "diarized_json", "json", "verbose_json")
+var audioRawResponseFormats = newAudioResponseFormatSet("srt", "text", "vtt")
 
 type audioFormField struct {
 	Name  string
@@ -488,16 +493,16 @@ func validateAudioFile(fileName string, contentTypes ...string) error {
 }
 
 func validateAudioResponseFormat(responseFormat string) error {
-	responseFormat = strings.ToLower(strings.TrimSpace(responseFormat))
-	if responseFormat == "" {
+	responseFormat = normalizeAudioResponseFormat(responseFormat)
+	if isAudioJSONResponseFormat(responseFormat) {
 		return nil
 	}
-	if _, ok := supportedAudioResponseFormats[responseFormat]; ok {
+	if _, ok := supportedAudioResponseFormatSet[responseFormat]; ok {
 		return nil
 	}
 	return &audioRequestError{
 		status: http.StatusBadRequest,
-		msg:    fmt.Sprintf("unsupported response_format %q; supported values are json, text, srt, vtt, and verbose_json", responseFormat),
+		msg:    fmt.Sprintf("unsupported response_format %q; supported values are %s", responseFormat, describeAudioResponseFormats()),
 	}
 }
 
@@ -550,12 +555,17 @@ func (r *audioTranscriptionRequest) BuildHTTPRequest(ctx context.Context, auth *
 }
 
 func (r *audioTranscriptionRequest) writeMultipartBody(bodyWriter *io.PipeWriter, multipartWriter *multipart.Writer, upstreamModel string) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			closeAudioMultipartWriterWithError(bodyWriter, fmt.Errorf("panic while writing audio transcription multipart body: %v", recovered))
+		}
+	}()
 	if err := r.writeMultipartFields(multipartWriter, upstreamModel); err != nil {
-		_ = bodyWriter.CloseWithError(err)
+		closeAudioMultipartWriterWithError(bodyWriter, err)
 		return
 	}
 	if err := multipartWriter.Close(); err != nil {
-		_ = bodyWriter.CloseWithError(err)
+		closeAudioMultipartWriterWithError(bodyWriter, err)
 		return
 	}
 	_ = bodyWriter.Close()
@@ -666,12 +676,53 @@ func audioTranscriptionAcceptHeader(stream bool, responseFormat string) string {
 	if stream {
 		return "text/event-stream"
 	}
-	switch strings.ToLower(strings.TrimSpace(responseFormat)) {
-	case "", "json", "verbose_json":
-	default:
+	if !isAudioJSONResponseFormat(normalizeAudioResponseFormat(responseFormat)) {
 		return ""
 	}
 	return "application/json"
+}
+
+func closeAudioMultipartWriterWithError(bodyWriter *io.PipeWriter, err error) {
+	if bodyWriter == nil || err == nil {
+		return
+	}
+	_ = bodyWriter.CloseWithError(err)
+}
+
+func newAudioResponseFormatSet(values ...string) map[string]struct{} {
+	set := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		set[value] = struct{}{}
+	}
+	return set
+}
+
+func normalizeAudioResponseFormat(responseFormat string) string {
+	return strings.ToLower(strings.TrimSpace(responseFormat))
+}
+
+func isAudioJSONResponseFormat(responseFormat string) bool {
+	_, ok := audioJSONResponseFormats[normalizeAudioResponseFormat(responseFormat)]
+	return ok
+}
+
+func isAudioRawResponseFormat(responseFormat string) bool {
+	_, ok := audioRawResponseFormats[normalizeAudioResponseFormat(responseFormat)]
+	return ok
+}
+
+func describeAudioResponseFormats() string {
+	if len(supportedAudioResponseFormats) == 0 {
+		return ""
+	}
+	if len(supportedAudioResponseFormats) == 1 {
+		return supportedAudioResponseFormats[0]
+	}
+	if len(supportedAudioResponseFormats) == 2 {
+		return supportedAudioResponseFormats[0] + " and " + supportedAudioResponseFormats[1]
+	}
+	head := strings.Join(supportedAudioResponseFormats[:len(supportedAudioResponseFormats)-1], ", ")
+	return head + ", and " + supportedAudioResponseFormats[len(supportedAudioResponseFormats)-1]
 }
 
 func resolveAudioTranscriptionURL(auth *coreauth.Auth) (string, error) {
@@ -868,13 +919,7 @@ func (r *audioTranscriptionRequest) PreserveRawResponse() bool {
 	if r == nil {
 		return false
 	}
-	responseFormat := strings.ToLower(strings.TrimSpace(r.ResponseFormat))
-	switch responseFormat {
-	case "", "json", "verbose_json":
-		return false
-	default:
-		return true
-	}
+	return isAudioRawResponseFormat(r.ResponseFormat)
 }
 
 func (r *audioTranscriptionRequest) ShouldStreamResponse(headers ...http.Header) bool {
@@ -1260,35 +1305,6 @@ func writeStagedAudioTranscriptionResponse(dst io.Writer, path string) error {
 	}()
 	_, err = io.Copy(dst, file)
 	return err
-}
-
-func normalizeAudioTranscriptionResponse(body []byte) []byte {
-	trimmed := strings.TrimSpace(string(body))
-	if trimmed == "" {
-		return []byte(`{"text":""}`)
-	}
-	trimmedBytes := []byte(trimmed)
-	if json.Valid(trimmedBytes) && trimmedBytes[0] == '{' {
-		textValue := gjson.GetBytes(trimmedBytes, "text")
-		if textValue.Exists() && textValue.Type != gjson.Null {
-			return trimmedBytes
-		}
-		updated, err := sjson.SetBytes(trimmedBytes, "text", "")
-		if err == nil {
-			return updated
-		}
-	}
-
-	text := trimmed
-	var decoded string
-	if err := json.Unmarshal(trimmedBytes, &decoded); err == nil {
-		text = decoded
-	}
-	payload, err := json.Marshal(map[string]string{"text": text})
-	if err != nil {
-		return []byte(`{"text":""}`)
-	}
-	return payload
 }
 
 func statusCodeOrDefault(err error, fallback int) int {

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -209,10 +210,10 @@ func detectChangedProviders(oldData, newData *staticModelsJSON) []string {
 		{"vertex", oldData.Vertex, newData.Vertex},
 		{"gemini-cli", oldData.GeminiCLI, newData.GeminiCLI},
 		{"aistudio", oldData.AIStudio, newData.AIStudio},
-		{"codex", oldData.CodexFree, newData.CodexFree},
-		{"codex", oldData.CodexTeam, newData.CodexTeam},
-		{"codex", oldData.CodexPlus, newData.CodexPlus},
-		{"codex", oldData.CodexPro, newData.CodexPro},
+		{"codex", mergeStaticModelSections(oldData.CodexShared, oldData.CodexFree), mergeStaticModelSections(newData.CodexShared, newData.CodexFree)},
+		{"codex", mergeStaticModelSections(oldData.CodexShared, oldData.CodexTeam), mergeStaticModelSections(newData.CodexShared, newData.CodexTeam)},
+		{"codex", mergeStaticModelSections(oldData.CodexShared, oldData.CodexPlus), mergeStaticModelSections(newData.CodexShared, newData.CodexPlus)},
+		{"codex", mergeStaticModelSections(oldData.CodexShared, oldData.CodexPro), mergeStaticModelSections(newData.CodexShared, newData.CodexPro)},
 		{"qwen", oldData.Qwen, newData.Qwen},
 		{"iflow", oldData.IFlow, newData.IFlow},
 		{"kimi", oldData.Kimi, newData.Kimi},
@@ -225,7 +226,11 @@ func detectChangedProviders(oldData, newData *staticModelsJSON) []string {
 		if seen[s.provider] {
 			continue
 		}
-		if modelSectionChanged(s.oldList, s.newList) {
+		sectionChanged := modelSectionChanged(s.oldList, s.newList)
+		if s.provider == "codex" {
+			sectionChanged = modelSectionChangedIgnoringOrder(s.oldList, s.newList)
+		}
+		if sectionChanged {
 			changed = append(changed, s.provider)
 			seen[s.provider] = true
 		}
@@ -247,6 +252,21 @@ func modelSectionChanged(a, b []*ModelInfo) bool {
 		return true
 	}
 	return string(aj) != string(bj)
+}
+
+func modelSectionChangedIgnoringOrder(a, b []*ModelInfo) bool {
+	return modelSectionChanged(sortedModelSectionByID(a), sortedModelSectionByID(b))
+}
+
+func sortedModelSectionByID(models []*ModelInfo) []*ModelInfo {
+	if len(models) == 0 {
+		return nil
+	}
+	cloned := cloneModelInfos(models)
+	sort.SliceStable(cloned, func(i, j int) bool {
+		return strings.TrimSpace(cloned[i].ID) < strings.TrimSpace(cloned[j].ID)
+	})
+	return cloned
 }
 
 func notifyModelRefresh(changedProviders []string) {
@@ -346,6 +366,24 @@ func validateModelsCatalog(data *staticModelsJSON) error {
 			return err
 		}
 	}
+	if len(data.CodexShared) > 0 {
+		if err := validateModelSection("codex-shared", data.CodexShared); err != nil {
+			return err
+		}
+	}
+	for _, section := range []struct {
+		name   string
+		models []*ModelInfo
+	}{
+		{name: "codex-free", models: data.CodexFree},
+		{name: "codex-team", models: data.CodexTeam},
+		{name: "codex-plus", models: data.CodexPlus},
+		{name: "codex-pro", models: data.CodexPro},
+	} {
+		if err := validateDisjointModelSections("codex-shared", data.CodexShared, section.name, section.models); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -367,6 +405,36 @@ func validateModelSection(section string, models []*ModelInfo) error {
 			return fmt.Errorf("%s contains duplicate model id %q", section, modelID)
 		}
 		seen[modelID] = struct{}{}
+	}
+	return nil
+}
+
+func validateDisjointModelSections(leftName string, leftModels []*ModelInfo, rightName string, rightModels []*ModelInfo) error {
+	if len(leftModels) == 0 || len(rightModels) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(leftModels))
+	for _, model := range leftModels {
+		if model == nil {
+			continue
+		}
+		modelID := strings.TrimSpace(model.ID)
+		if modelID == "" {
+			continue
+		}
+		seen[modelID] = struct{}{}
+	}
+	for _, model := range rightModels {
+		if model == nil {
+			continue
+		}
+		modelID := strings.TrimSpace(model.ID)
+		if modelID == "" {
+			continue
+		}
+		if _, exists := seen[modelID]; exists {
+			return fmt.Errorf("%s overlaps %s on model id %q", leftName, rightName, modelID)
+		}
 	}
 	return nil
 }

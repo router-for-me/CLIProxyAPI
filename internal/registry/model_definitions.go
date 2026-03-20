@@ -13,6 +13,7 @@ type staticModelsJSON struct {
 	Vertex      []*ModelInfo `json:"vertex"`
 	GeminiCLI   []*ModelInfo `json:"gemini-cli"`
 	AIStudio    []*ModelInfo `json:"aistudio"`
+	CodexShared []*ModelInfo `json:"codex-shared,omitempty"`
 	CodexFree   []*ModelInfo `json:"codex-free"`
 	CodexTeam   []*ModelInfo `json:"codex-team"`
 	CodexPlus   []*ModelInfo `json:"codex-plus"`
@@ -50,22 +51,22 @@ func GetAIStudioModels() []*ModelInfo {
 
 // GetCodexFreeModels returns model definitions for the Codex free plan tier.
 func GetCodexFreeModels() []*ModelInfo {
-	return cloneModelInfos(getModels().CodexFree)
+	return cloneModelInfos(mergeStaticModelSections(getModels().CodexShared, getModels().CodexFree))
 }
 
 // GetCodexTeamModels returns model definitions for the Codex team plan tier.
 func GetCodexTeamModels() []*ModelInfo {
-	return cloneModelInfos(getModels().CodexTeam)
+	return cloneModelInfos(mergeStaticModelSections(getModels().CodexShared, getModels().CodexTeam))
 }
 
 // GetCodexPlusModels returns model definitions for the Codex plus plan tier.
 func GetCodexPlusModels() []*ModelInfo {
-	return cloneModelInfos(getModels().CodexPlus)
+	return cloneModelInfos(mergeStaticModelSections(getModels().CodexShared, getModels().CodexPlus))
 }
 
 // GetCodexProModels returns model definitions for the Codex pro plan tier.
 func GetCodexProModels() []*ModelInfo {
-	return cloneModelInfos(getModels().CodexPro)
+	return cloneModelInfos(mergeStaticModelSections(getModels().CodexShared, getModels().CodexPro))
 }
 
 // GetQwenModels returns the standard Qwen model definitions.
@@ -96,6 +97,31 @@ func cloneModelInfos(models []*ModelInfo) []*ModelInfo {
 	out := make([]*ModelInfo, len(models))
 	for i, m := range models {
 		out[i] = cloneModelInfo(m)
+	}
+	return out
+}
+
+func mergeStaticModelSections(sections ...[]*ModelInfo) []*ModelInfo {
+	var out []*ModelInfo
+	seen := make(map[string]struct{})
+	for _, section := range sections {
+		for _, model := range section {
+			if model == nil {
+				continue
+			}
+			modelID := strings.TrimSpace(model.ID)
+			if modelID == "" {
+				continue
+			}
+			if _, exists := seen[modelID]; exists {
+				continue
+			}
+			seen[modelID] = struct{}{}
+			out = append(out, model)
+		}
+	}
+	if len(out) == 0 {
+		return nil
 	}
 	return out
 }
@@ -156,7 +182,7 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		data.Vertex,
 		data.GeminiCLI,
 		data.AIStudio,
-		data.CodexPro,
+		mergeStaticModelSections(data.CodexShared, data.CodexPro),
 		data.Qwen,
 		data.IFlow,
 		data.Kimi,
