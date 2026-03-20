@@ -62,6 +62,27 @@ type websocketAuthCaptureExecutor struct {
 	authIDs []string
 }
 
+type websocketStatusError struct {
+	code int
+	msg  string
+}
+
+func (e websocketStatusError) Error() string {
+	if strings.TrimSpace(e.msg) != "" {
+		return e.msg
+	}
+	return fmt.Sprintf("status %d", e.code)
+}
+
+func (e websocketStatusError) StatusCode() int {
+	return e.code
+}
+
+type websocketQuotaSwitchExecutor struct {
+	mu      sync.Mutex
+	authIDs []string
+}
+
 func (e *websocketAuthCaptureExecutor) Identifier() string { return "test-provider" }
 
 func (e *websocketAuthCaptureExecutor) Execute(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
@@ -94,6 +115,47 @@ func (e *websocketAuthCaptureExecutor) HttpRequest(context.Context, *coreauth.Au
 }
 
 func (e *websocketAuthCaptureExecutor) AuthIDs() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]string(nil), e.authIDs...)
+}
+
+func (e *websocketQuotaSwitchExecutor) Identifier() string { return "test-provider" }
+
+func (e *websocketQuotaSwitchExecutor) Execute(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, errors.New("not implemented")
+}
+
+func (e *websocketQuotaSwitchExecutor) ExecuteStream(_ context.Context, auth *coreauth.Auth, _ coreexecutor.Request, _ coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+	e.mu.Lock()
+	if auth != nil {
+		e.authIDs = append(e.authIDs, auth.ID)
+	}
+	e.mu.Unlock()
+
+	if auth != nil && auth.ID == "auth-1" {
+		return nil, websocketStatusError{code: http.StatusTooManyRequests, msg: "quota exhausted"}
+	}
+
+	chunks := make(chan coreexecutor.StreamChunk, 1)
+	chunks <- coreexecutor.StreamChunk{Payload: []byte(`{"type":"response.completed","response":{"id":"resp-upstream","output":[{"type":"message","id":"out-1"}]}}`)}
+	close(chunks)
+	return &coreexecutor.StreamResult{Chunks: chunks}, nil
+}
+
+func (e *websocketQuotaSwitchExecutor) Refresh(_ context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+	return auth, nil
+}
+
+func (e *websocketQuotaSwitchExecutor) CountTokens(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, errors.New("not implemented")
+}
+
+func (e *websocketQuotaSwitchExecutor) HttpRequest(context.Context, *coreauth.Auth, *http.Request) (*http.Response, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (e *websocketQuotaSwitchExecutor) AuthIDs() []string {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return append([]string(nil), e.authIDs...)
@@ -417,7 +479,7 @@ func TestForwardResponsesWebsocketPreservesCompletedEvent(t *testing.T) {
 		close(errCh)
 
 		var bodyLog strings.Builder
-		completedOutput, err := (*OpenAIResponsesAPIHandler)(nil).forwardResponsesWebsocket(
+		completedOutput, statusCode, err := (*OpenAIResponsesAPIHandler)(nil).forwardResponsesWebsocket(
 			ctx,
 			conn,
 			func(...interface{}) {},
@@ -428,6 +490,10 @@ func TestForwardResponsesWebsocketPreservesCompletedEvent(t *testing.T) {
 		)
 		if err != nil {
 			serverErrCh <- err
+			return
+		}
+		if statusCode != 0 {
+			serverErrCh <- fmt.Errorf("status code = %d, want 0", statusCode)
 			return
 		}
 		if gjson.GetBytes(completedOutput, "0.id").String() != "out-1" {
@@ -660,5 +726,89 @@ func TestResponsesWebsocketPinsOnlyWebsocketCapableAuth(t *testing.T) {
 
 	if got := executor.AuthIDs(); len(got) != 2 || got[0] != "auth-sse" || got[1] != "auth-ws" {
 		t.Fatalf("selected auth IDs = %v, want [auth-sse auth-ws]", got)
+	}
+}
+
+func TestResponsesWebsocketClearsPinAndSwitchesAuthAfterQuotaError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	selector := &orderedWebsocketSelector{order: []string{"auth-1", "auth-2"}}
+	executor := &websocketQuotaSwitchExecutor{}
+	manager := coreauth.NewManager(nil, selector, nil)
+	manager.SetRetryConfig(0, 0, 1)
+	manager.RegisterExecutor(executor)
+
+	auth1 := &coreauth.Auth{
+		ID:         "auth-1",
+		Provider:   executor.Identifier(),
+		Status:     coreauth.StatusActive,
+		Attributes: map[string]string{"websockets": "true"},
+	}
+	if _, err := manager.Register(context.Background(), auth1); err != nil {
+		t.Fatalf("Register auth-1: %v", err)
+	}
+	auth2 := &coreauth.Auth{
+		ID:         "auth-2",
+		Provider:   executor.Identifier(),
+		Status:     coreauth.StatusActive,
+		Attributes: map[string]string{"websockets": "true"},
+	}
+	if _, err := manager.Register(context.Background(), auth2); err != nil {
+		t.Fatalf("Register auth-2: %v", err)
+	}
+
+	registry.GetGlobalRegistry().RegisterClient(auth1.ID, auth1.Provider, []*registry.ModelInfo{{ID: "test-model"}})
+	registry.GetGlobalRegistry().RegisterClient(auth2.ID, auth2.Provider, []*registry.ModelInfo{{ID: "test-model"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth1.ID)
+		registry.GetGlobalRegistry().UnregisterClient(auth2.ID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	h := NewOpenAIResponsesAPIHandler(base)
+	router := gin.New()
+	router.GET("/v1/responses/ws", h.ResponsesWebsocket)
+
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/responses/ws"
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer func() {
+		if errClose := conn.Close(); errClose != nil {
+			t.Fatalf("close websocket: %v", errClose)
+		}
+	}()
+
+	if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"test-model","input":[{"type":"message","id":"msg-1"}]}`)); errWrite != nil {
+		t.Fatalf("write first websocket message: %v", errWrite)
+	}
+	_, firstPayload, errReadFirst := conn.ReadMessage()
+	if errReadFirst != nil {
+		t.Fatalf("read first websocket message: %v", errReadFirst)
+	}
+	if got := gjson.GetBytes(firstPayload, "type").String(); got != wsEventTypeError {
+		t.Fatalf("first payload type = %s, want %s", got, wsEventTypeError)
+	}
+	if got := gjson.GetBytes(firstPayload, "error.code").String(); got != "rate_limit_exceeded" {
+		t.Fatalf("first payload code = %s, want rate_limit_exceeded", got)
+	}
+
+	if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"test-model","input":[{"type":"message","id":"msg-2"}]}`)); errWrite != nil {
+		t.Fatalf("write second websocket message: %v", errWrite)
+	}
+	_, secondPayload, errReadSecond := conn.ReadMessage()
+	if errReadSecond != nil {
+		t.Fatalf("read second websocket message: %v", errReadSecond)
+	}
+	if got := gjson.GetBytes(secondPayload, "type").String(); got != wsEventTypeCompleted {
+		t.Fatalf("second payload type = %s, want %s", got, wsEventTypeCompleted)
+	}
+
+	if got := executor.AuthIDs(); len(got) != 2 || got[0] != "auth-1" || got[1] != "auth-2" {
+		t.Fatalf("selected auth IDs = %v, want [auth-1 auth-2]", got)
 	}
 }

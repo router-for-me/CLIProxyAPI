@@ -192,12 +192,20 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		}
 		dataChan, _, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, requestJSON, "")
 
-		completedOutput, errForward := h.forwardResponsesWebsocket(c, conn, cliCancel, dataChan, errChan, &wsBodyLog, passthroughSessionID)
+		completedOutput, terminalStatus, errForward := h.forwardResponsesWebsocket(c, conn, cliCancel, dataChan, errChan, &wsBodyLog, passthroughSessionID)
 		if errForward != nil {
 			wsTerminateErr = errForward
 			appendWebsocketEvent(&wsBodyLog, "disconnect", []byte(errForward.Error()))
 			log.Warnf("responses websocket: forward failed id=%s error=%v", passthroughSessionID, errForward)
 			return
+		}
+		if shouldResetResponsesWebsocketAuthPin(terminalStatus) {
+			// 限额错误后解除 pin 让后续请求重新选可用账号
+			pinnedAuthID = ""
+			if h != nil && h.AuthManager != nil {
+				// 主动关闭旧上游会话避免继续复用旧账号连接
+				h.AuthManager.CloseExecutionSession(passthroughSessionID)
+			}
 		}
 		lastResponseOutput = completedOutput
 	}
@@ -610,21 +618,23 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 	errs <-chan *interfaces.ErrorMessage,
 	wsBodyLog *strings.Builder,
 	sessionID string,
-) ([]byte, error) {
+) ([]byte, int, error) {
 	completed := false
 	completedOutput := []byte("[]")
+	terminalStatusCode := 0
 
 	for {
 		select {
 		case <-c.Request.Context().Done():
 			cancel(c.Request.Context().Err())
-			return completedOutput, c.Request.Context().Err()
+			return completedOutput, terminalStatusCode, c.Request.Context().Err()
 		case errMsg, ok := <-errs:
 			if !ok {
 				errs = nil
 				continue
 			}
 			if errMsg != nil {
+				terminalStatusCode = errMsg.StatusCode
 				h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), errMsg)
 				markAPIResponseTimestamp(c)
 				errorPayload, errWrite := writeResponsesWebsocketError(conn, errMsg)
@@ -644,7 +654,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 					// 	errWrite,
 					// )
 					cancel(errMsg.Error)
-					return completedOutput, errWrite
+					return completedOutput, terminalStatusCode, errWrite
 				}
 			}
 			if errMsg != nil {
@@ -652,7 +662,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 			} else {
 				cancel(nil)
 			}
-			return completedOutput, nil
+			return completedOutput, terminalStatusCode, nil
 		case chunk, ok := <-data:
 			if !ok {
 				if !completed {
@@ -660,6 +670,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 						StatusCode: http.StatusRequestTimeout,
 						Error:      fmt.Errorf("stream closed before response.completed"),
 					}
+					terminalStatusCode = errMsg.StatusCode
 					h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), errMsg)
 					markAPIResponseTimestamp(c)
 					errorPayload, errWrite := writeResponsesWebsocketError(conn, errMsg)
@@ -679,13 +690,13 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 							errWrite,
 						)
 						cancel(errMsg.Error)
-						return completedOutput, errWrite
+						return completedOutput, terminalStatusCode, errWrite
 					}
 					cancel(errMsg.Error)
-					return completedOutput, nil
+					return completedOutput, terminalStatusCode, nil
 				}
 				cancel(nil)
-				return completedOutput, nil
+				return completedOutput, terminalStatusCode, nil
 			}
 
 			payloads := websocketJSONPayloadsFromChunk(chunk)
@@ -712,10 +723,19 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 						errWrite,
 					)
 					cancel(errWrite)
-					return completedOutput, errWrite
+					return completedOutput, terminalStatusCode, errWrite
 				}
 			}
 		}
+	}
+}
+
+func shouldResetResponsesWebsocketAuthPin(statusCode int) bool {
+	switch statusCode {
+	case http.StatusTooManyRequests, http.StatusForbidden, http.StatusPaymentRequired:
+		return true
+	default:
+		return false
 	}
 }
 

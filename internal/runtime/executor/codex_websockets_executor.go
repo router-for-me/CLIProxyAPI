@@ -1067,12 +1067,21 @@ func (e *CodexWebsocketsExecutor) ensureUpstreamConn(ctx context.Context, auth *
 	if sess == nil {
 		return e.dialCodexWebsocket(ctx, auth, wsURL, headers)
 	}
+	authID = strings.TrimSpace(authID)
 
 	sess.connMu.Lock()
 	conn := sess.conn
 	readerConn := sess.readerConn
+	currentAuthID := strings.TrimSpace(sess.authID)
 	sess.connMu.Unlock()
+	if conn != nil && currentAuthID != authID {
+		// 账号切换时先断开旧连接避免继续复用旧账号
+		e.invalidateUpstreamConn(sess, conn, "auth_switched", nil)
+		conn = nil
+		readerConn = nil
+	}
 	if conn != nil {
+		// 账号未变化时复用连接减少不必要重连
 		if readerConn != conn {
 			sess.connMu.Lock()
 			sess.readerConn = conn
