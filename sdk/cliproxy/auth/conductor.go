@@ -150,6 +150,8 @@ type Manager struct {
 	// Keyed by auth.ID, value is alias(lower) -> upstream model (including suffix).
 	apiKeyModelAlias atomic.Value
 
+	openAICompatModelPool atomic.Value
+
 	// modelPoolOffsets tracks per-auth alias pool rotation state.
 	modelPoolOffsets map[string]int
 
@@ -194,6 +196,7 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 	// atomic.Value requires non-nil initial value.
 	manager.runtimeConfig.Store(&internalconfig.Config{})
 	manager.apiKeyModelAlias.Store(apiKeyModelAliasTable(nil))
+	manager.openAICompatModelPool.Store(openAICompatModelPoolTable(nil))
 	manager.scheduler = newAuthScheduler(selector)
 	return manager
 }
@@ -418,6 +421,9 @@ func (m *Manager) resolveOpenAICompatUpstreamModelPool(auth *Auth, requestedMode
 	if requestedModel == "" {
 		return nil
 	}
+	if pool := m.lookupOpenAICompatModelPool(auth.ID, requestedModel); len(pool) > 0 {
+		return pool
+	}
 	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
 	if cfg == nil {
 		cfg = &internalconfig.Config{}
@@ -433,6 +439,48 @@ func (m *Manager) resolveOpenAICompatUpstreamModelPool(auth *Auth, requestedMode
 		return nil
 	}
 	return resolveModelAliasPoolFromConfigModels(requestedModel, asModelAliasEntries(entry.Models))
+}
+
+func (m *Manager) lookupOpenAICompatModelPool(authID, requestedModel string) []string {
+	if m == nil {
+		return nil
+	}
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return nil
+	}
+	requestedModel = strings.TrimSpace(requestedModel)
+	if requestedModel == "" {
+		return nil
+	}
+	table, _ := m.openAICompatModelPool.Load().(openAICompatModelPoolTable)
+	if table == nil {
+		return nil
+	}
+	byAlias := table[authID]
+	if len(byAlias) == 0 {
+		return nil
+	}
+	key := strings.ToLower(thinking.ParseSuffix(requestedModel).ModelName)
+	if key == "" {
+		key = strings.ToLower(requestedModel)
+	}
+	basePool := byAlias[key]
+	if len(basePool) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(basePool))
+	for _, baseModel := range basePool {
+		resolved := preserveRequestedModelSuffix(requestedModel, baseModel)
+		if strings.TrimSpace(resolved) == "" {
+			continue
+		}
+		out = append(out, resolved)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func preserveRequestedModelSuffix(requestedModel, resolved string) string {
@@ -666,7 +714,8 @@ func (m *Manager) rebuildAPIKeyModelAliasLocked(cfg *internalconfig.Config) {
 		cfg = &internalconfig.Config{}
 	}
 
-	out := make(apiKeyModelAliasTable)
+	aliasOut := make(apiKeyModelAliasTable)
+	poolOut := make(openAICompatModelPoolTable)
 	for _, auth := range m.auths {
 		if auth == nil {
 			continue
@@ -680,6 +729,7 @@ func (m *Manager) rebuildAPIKeyModelAliasLocked(cfg *internalconfig.Config) {
 		}
 
 		byAlias := make(map[string]string)
+		byPool := make(map[string][]string)
 		provider := strings.ToLower(strings.TrimSpace(auth.Provider))
 		switch provider {
 		case "gemini":
@@ -709,16 +759,21 @@ func (m *Manager) rebuildAPIKeyModelAliasLocked(cfg *internalconfig.Config) {
 			if compatName != "" || strings.EqualFold(strings.TrimSpace(auth.Provider), "openai-compatibility") {
 				if entry := resolveOpenAICompatConfig(cfg, providerKey, compatName, auth.Provider); entry != nil {
 					compileAPIKeyModelAliasForModels(byAlias, entry.Models)
+					compileOpenAICompatModelPoolForModels(byPool, entry.Models)
 				}
 			}
 		}
 
 		if len(byAlias) > 0 {
-			out[auth.ID] = byAlias
+			aliasOut[auth.ID] = byAlias
+		}
+		if len(byPool) > 0 {
+			poolOut[auth.ID] = byPool
 		}
 	}
 
-	m.apiKeyModelAlias.Store(out)
+	m.apiKeyModelAlias.Store(aliasOut)
+	m.openAICompatModelPool.Store(poolOut)
 }
 
 func compileAPIKeyModelAliasForModels[T interface {
@@ -764,6 +819,42 @@ func compileAPIKeyModelAliasForModels[T interface {
 				}
 			}
 		}
+	}
+}
+
+func compileOpenAICompatModelPoolForModels[T interface {
+	GetName() string
+	GetAlias() string
+}](out map[string][]string, models []T) {
+	if out == nil {
+		return
+	}
+	for i := range models {
+		alias := strings.TrimSpace(models[i].GetAlias())
+		name := strings.TrimSpace(models[i].GetName())
+		if alias == "" || name == "" {
+			continue
+		}
+		aliasKey := strings.ToLower(thinking.ParseSuffix(alias).ModelName)
+		if aliasKey == "" {
+			aliasKey = strings.ToLower(alias)
+		}
+		upstreamKey := strings.ToLower(thinking.ParseSuffix(name).ModelName)
+		if upstreamKey == "" {
+			upstreamKey = strings.ToLower(name)
+		}
+		existing := out[aliasKey]
+		duplicate := false
+		for _, current := range existing {
+			if strings.EqualFold(current, name) || strings.EqualFold(strings.TrimSpace(thinking.ParseSuffix(current).ModelName), upstreamKey) {
+				duplicate = true
+				break
+			}
+		}
+		if duplicate {
+			continue
+		}
+		out[aliasKey] = append(existing, name)
 	}
 }
 
@@ -1070,8 +1161,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			return cliproxyexecutor.Response{}, errPick
 		}
 
-		entry := logEntryWithRequestID(ctx)
-		debugLogAuthSelection(entry, auth, provider, req.Model)
+		debugLogAuthSelection(ctx, auth, provider, req.Model)
 		publishSelectedAuthMetadata(opts.Metadata, auth.ID)
 
 		tried[auth.ID] = struct{}{}
@@ -1154,8 +1244,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			return cliproxyexecutor.Response{}, errPick
 		}
 
-		entry := logEntryWithRequestID(ctx)
-		debugLogAuthSelection(entry, auth, provider, req.Model)
+		debugLogAuthSelection(ctx, auth, provider, req.Model)
 		publishSelectedAuthMetadata(opts.Metadata, auth.ID)
 
 		tried[auth.ID] = struct{}{}
@@ -1238,8 +1327,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			return nil, errPick
 		}
 
-		entry := logEntryWithRequestID(ctx)
-		debugLogAuthSelection(entry, auth, provider, req.Model)
+		debugLogAuthSelection(ctx, auth, provider, req.Model)
 		publishSelectedAuthMetadata(opts.Metadata, auth.ID)
 
 		tried[auth.ID] = struct{}{}
@@ -1521,6 +1609,8 @@ func resolveUpstreamModelForOpenAICompatAPIKey(cfg *internalconfig.Config, auth 
 }
 
 type apiKeyModelAliasTable map[string]map[string]string
+
+type openAICompatModelPoolTable map[string]map[string][]string
 
 func resolveOpenAICompatConfig(cfg *internalconfig.Config, providerKey, compatName, authProvider string) *internalconfig.OpenAICompatibility {
 	if cfg == nil {
@@ -3060,10 +3150,11 @@ func logEntryWithRequestID(ctx context.Context) *log.Entry {
 	return log.NewEntry(log.StandardLogger())
 }
 
-func debugLogAuthSelection(entry *log.Entry, auth *Auth, provider string, model string) {
+func debugLogAuthSelection(ctx context.Context, auth *Auth, provider string, model string) {
 	if !log.IsLevelEnabled(log.DebugLevel) {
 		return
 	}
+	entry := logEntryWithRequestID(ctx)
 	if entry == nil || auth == nil {
 		return
 	}

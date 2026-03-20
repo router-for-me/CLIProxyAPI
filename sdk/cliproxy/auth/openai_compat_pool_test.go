@@ -192,6 +192,53 @@ func TestResolveModelAliasPoolFromConfigModels(t *testing.T) {
 	}
 }
 
+func TestManagerLookupOpenAICompatModelPool_PreservesRequestedSuffix(t *testing.T) {
+	alias := "claude-opus-4.66"
+	m := newOpenAICompatPoolTestManager(t, alias, []internalconfig.OpenAICompatibilityModel{
+		{Name: "qwen3.5-plus", Alias: alias},
+		{Name: "glm-5", Alias: alias},
+	}, nil)
+
+	authID := "pool-auth-" + t.Name()
+	got := m.lookupOpenAICompatModelPool(authID, alias+"(8192)")
+	want := []string{"qwen3.5-plus(8192)", "glm-5(8192)"}
+	if len(got) != len(want) {
+		t.Fatalf("pool len = %d, want %d (%v)", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("pool[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestManagerExecute_OpenAICompatAliasPoolRefreshesAfterConfigChange(t *testing.T) {
+	alias := "claude-opus-4.66"
+	executor := &openAICompatPoolExecutor{id: "pool"}
+	m := newOpenAICompatPoolTestManager(t, alias, []internalconfig.OpenAICompatibilityModel{{Name: "qwen3.5-plus", Alias: alias}}, executor)
+
+	if _, err := m.Execute(context.Background(), []string{"pool"}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{}); err != nil {
+		t.Fatalf("execute before config change: %v", err)
+	}
+	m.SetConfig(&internalconfig.Config{OpenAICompatibility: []internalconfig.OpenAICompatibility{{
+		Name:   "pool",
+		Models: []internalconfig.OpenAICompatibilityModel{{Name: "glm-5", Alias: alias}},
+	}}})
+	if _, err := m.Execute(context.Background(), []string{"pool"}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{}); err != nil {
+		t.Fatalf("execute after config change: %v", err)
+	}
+	got := executor.ExecuteModels()
+	want := []string{"qwen3.5-plus", "glm-5"}
+	if len(got) != len(want) {
+		t.Fatalf("execute calls = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("execute call %d model = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
 func TestManagerExecute_OpenAICompatAliasPoolRotatesWithinAuth(t *testing.T) {
 	alias := "claude-opus-4.66"
 	executor := &openAICompatPoolExecutor{id: "pool"}
