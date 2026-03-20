@@ -19,6 +19,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/upstreamerrors"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	log "github.com/sirupsen/logrus"
@@ -2245,10 +2246,12 @@ func resultErrorFromExec(err error) *Error {
 	if authErr, ok := errors.AsType[*Error](err); ok && authErr != nil {
 		return authErr
 	}
-	resultErr := &Error{Message: err.Error()}
+	status := 0
 	if se, ok := errors.AsType[cliproxyexecutor.StatusError](err); ok && se != nil {
-		resultErr.HTTPStatus = se.StatusCode()
+		status = se.StatusCode()
 	}
+	normalized := upstreamerrors.Normalize(status, err.Error())
+	resultErr := &Error{Code: normalized.Code, Message: normalized.Message, HTTPStatus: normalized.Status}
 	return resultErr
 }
 
@@ -2300,15 +2303,7 @@ func isRequestInvalidError(err error) bool {
 	if err == nil {
 		return false
 	}
-	status := statusCodeFromError(err)
-	switch status {
-	case http.StatusBadRequest:
-		return strings.Contains(err.Error(), "invalid_request_error")
-	case http.StatusUnprocessableEntity:
-		return true
-	default:
-		return false
-	}
+	return upstreamerrors.IsRequestInvalid(statusCodeFromError(err), err.Error())
 }
 
 func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time) {
