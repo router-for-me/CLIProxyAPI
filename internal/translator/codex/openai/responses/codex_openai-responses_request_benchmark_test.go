@@ -7,7 +7,7 @@ import (
 )
 
 func BenchmarkConvertOpenAIResponsesRequestToCodex_LargeInput(b *testing.B) {
-	rawJSON := benchmarkResponsesRequestJSON(128)
+	rawJSON := benchmarkResponsesRequestJSON(128, 5)
 	b.ReportAllocs()
 
 	for i := 0; i < b.N; i++ {
@@ -18,11 +18,23 @@ func BenchmarkConvertOpenAIResponsesRequestToCodex_LargeInput(b *testing.B) {
 	}
 }
 
-func benchmarkResponsesRequestJSON(messageCount int) []byte {
+func BenchmarkConvertOpenAIResponsesRequestToCodex_LargeInput_NoSystemMessages(b *testing.B) {
+	rawJSON := benchmarkResponsesRequestJSON(128, 0)
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		output := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", rawJSON, false)
+		if len(output) == 0 {
+			b.Fatal("expected non-empty translated payload")
+		}
+	}
+}
+
+func benchmarkResponsesRequestJSON(messageCount int, systemEvery int) []byte {
 	input := make([]any, 0, messageCount)
 	for i := 0; i < messageCount; i++ {
 		role := "user"
-		if i%5 == 0 {
+		if systemEvery > 0 && i%systemEvery == 0 {
 			role = "system"
 		}
 		input = append(input, map[string]any{

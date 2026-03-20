@@ -3,15 +3,49 @@ package responses
 import (
 	"bytes"
 	"encoding/json"
+
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte, _ bool) []byte {
+	if output, ok := convertOpenAIResponsesRequestToCodexFast(inputRawJSON); ok {
+		return output
+	}
+
+	return convertOpenAIResponsesRequestToCodexSlow(inputRawJSON)
+}
+
+func convertOpenAIResponsesRequestToCodexFast(inputRawJSON []byte) ([]byte, bool) {
+	if len(inputRawJSON) == 0 || !gjson.ValidBytes(inputRawJSON) {
+		return nil, false
+	}
+
+	input := gjson.GetBytes(inputRawJSON, "input")
+	if input.Exists() && input.IsArray() && inputHasSystemRole(input) {
+		return nil, false
+	}
+
+	rawJSON, err := applyCodexTopLevelCompatibility(inputRawJSON)
+	if err != nil {
+		return nil, false
+	}
+
+	rawJSON, err = normalizeStringInput(rawJSON)
+	if err != nil {
+		return nil, false
+	}
+
+	return rawJSON, true
+}
+
+func convertOpenAIResponsesRequestToCodexSlow(inputRawJSON []byte) []byte {
 	payload, err := decodeResponsesRequest(inputRawJSON)
 	if err != nil {
 		return inputRawJSON
 	}
 
-	normalizeResponsesInput(payload)
+	normalizeResponsesInputSlow(payload)
 	payload["stream"] = true
 	payload["store"] = false
 	payload["parallel_tool_calls"] = true
@@ -33,13 +67,58 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 		delete(payload, "service_tier")
 	}
 
-	convertSystemRoleToDeveloper(payload)
+	convertSystemRoleToDeveloperSlow(payload)
 
 	rawJSON, err := json.Marshal(payload)
 	if err != nil {
 		return inputRawJSON
 	}
 	return rawJSON
+}
+
+func applyCodexTopLevelCompatibility(rawJSON []byte) ([]byte, error) {
+	var err error
+	rawJSON, err = sjson.SetBytes(rawJSON, "stream", true)
+	if err != nil {
+		return nil, err
+	}
+	rawJSON, err = sjson.SetBytes(rawJSON, "store", false)
+	if err != nil {
+		return nil, err
+	}
+	rawJSON, err = sjson.SetBytes(rawJSON, "parallel_tool_calls", true)
+	if err != nil {
+		return nil, err
+	}
+	rawJSON, err = sjson.SetBytes(rawJSON, "include", []string{"reasoning.encrypted_content"})
+	if err != nil {
+		return nil, err
+	}
+
+	for _, field := range []string{
+		"max_output_tokens",
+		"max_completion_tokens",
+		"temperature",
+		"top_p",
+		"truncation",
+		"user",
+		"context_management",
+	} {
+		rawJSON, err = sjson.DeleteBytes(rawJSON, field)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	tier := gjson.GetBytes(rawJSON, "service_tier")
+	if !tier.Exists() || tier.Type != gjson.String || tier.String() != "priority" {
+		rawJSON, err = sjson.DeleteBytes(rawJSON, "service_tier")
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return rawJSON, nil
 }
 
 func decodeResponsesRequest(inputRawJSON []byte) (map[string]any, error) {
@@ -53,7 +132,7 @@ func decodeResponsesRequest(inputRawJSON []byte) (map[string]any, error) {
 	return payload, nil
 }
 
-func normalizeResponsesInput(payload map[string]any) {
+func normalizeResponsesInputSlow(payload map[string]any) {
 	input, exists := payload["input"]
 	if !exists {
 		return
@@ -64,7 +143,20 @@ func normalizeResponsesInput(payload map[string]any) {
 		return
 	}
 
-	payload["input"] = []any{
+	payload["input"] = normalizedStringInput(inputText)
+}
+
+func normalizeStringInput(rawJSON []byte) ([]byte, error) {
+	input := gjson.GetBytes(rawJSON, "input")
+	if !input.Exists() || input.Type != gjson.String {
+		return rawJSON, nil
+	}
+
+	return sjson.SetBytes(rawJSON, "input", normalizedStringInput(input.String()))
+}
+
+func normalizedStringInput(inputText string) []any {
+	return []any{
 		map[string]any{
 			"type": "message",
 			"role": "user",
@@ -78,7 +170,7 @@ func normalizeResponsesInput(payload map[string]any) {
 	}
 }
 
-func convertSystemRoleToDeveloper(payload map[string]any) {
+func convertSystemRoleToDeveloperSlow(payload map[string]any) {
 	input, ok := payload["input"].([]any)
 	if !ok {
 		return
@@ -94,4 +186,18 @@ func convertSystemRoleToDeveloper(payload map[string]any) {
 			message["role"] = "developer"
 		}
 	}
+}
+
+func inputHasSystemRole(input gjson.Result) bool {
+	if !input.Exists() || !input.IsArray() {
+		return false
+	}
+
+	items := input.Array()
+	for i := range items {
+		if items[i].Get("role").String() == "system" {
+			return true
+		}
+	}
+	return false
 }
