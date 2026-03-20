@@ -327,12 +327,20 @@ func (s *Service) applyCoreAuthRemoval(ctx context.Context, id string) {
 	}
 	GlobalModelRegistry().UnregisterClient(id)
 	if existing, ok := s.coreManager.GetByID(id); ok && existing != nil {
+		alreadyDisabled := existing.Disabled && existing.Status == coreauth.StatusDisabled
+		provider := strings.TrimSpace(existing.Provider)
+		if alreadyDisabled {
+			if strings.EqualFold(provider, "codex") {
+				s.ensureExecutorsForAuth(existing)
+			}
+			return
+		}
 		existing.Disabled = true
 		existing.Status = coreauth.StatusDisabled
 		if _, err := s.coreManager.Update(ctx, existing); err != nil {
 			log.Errorf("failed to disable auth %s: %v", id, err)
 		}
-		if strings.EqualFold(strings.TrimSpace(existing.Provider), "codex") {
+		if strings.EqualFold(provider, "codex") {
 			s.ensureExecutorsForAuth(existing)
 		}
 	}
