@@ -156,6 +156,34 @@ func (s *authScheduler) upsertAuth(auth *Auth) {
 	s.upsertAuthLocked(auth, time.Now())
 }
 
+// applyModelStateUpdate updates one auth/model runtime state without rebuilding every shard.
+// It returns true when the update was applied incrementally, allowing callers to skip the
+// slower full-auth upsert path.
+func (s *authScheduler) applyModelStateUpdate(authID, provider, model string, state *ModelState) bool {
+	if s == nil {
+		return false
+	}
+	authID = strings.TrimSpace(authID)
+	providerKey := strings.ToLower(strings.TrimSpace(provider))
+	modelKey := canonicalModelKey(model)
+	if authID == "" || providerKey == "" || modelKey == "" {
+		return false
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	providerState := s.providers[providerKey]
+	if providerState == nil {
+		return false
+	}
+	shard := providerState.modelShards[modelKey]
+	if shard == nil {
+		return false
+	}
+	return shard.applyModelStateLocked(authID, modelKey, state, time.Now())
+}
+
 // removeAuth deletes one auth from every scheduler shard that references it.
 func (s *authScheduler) removeAuth(authID string) {
 	if s == nil {
@@ -596,6 +624,37 @@ func (m *modelScheduler) upsertEntryLocked(meta *scheduledAuthMeta, now time.Tim
 	m.rebuildIndexesLocked()
 }
 
+func (m *modelScheduler) applyModelStateLocked(authID, modelKey string, state *ModelState, now time.Time) bool {
+	if m == nil || authID == "" {
+		return false
+	}
+	entry := m.entries[authID]
+	if entry == nil || entry.meta == nil {
+		return false
+	}
+	if entry.auth == nil {
+		if entry.meta.auth == nil {
+			return false
+		}
+		entry.auth = entry.meta.auth.Clone()
+	}
+	applyModelStateSnapshot(entry.auth, modelKey, state)
+	if entry.meta.auth != nil {
+		applyModelStateSnapshot(entry.meta.auth, modelKey, state)
+	}
+
+	previousState := entry.state
+	previousNextRetryAt := entry.nextRetryAt
+	entry.state, entry.nextRetryAt = scheduledStateFromModelState(state, now)
+
+	if previousState == entry.state && previousNextRetryAt.Equal(entry.nextRetryAt) {
+		return true
+	}
+
+	m.transitionEntryLocked(entry, previousState, previousNextRetryAt)
+	return true
+}
+
 // removeEntryLocked deletes one auth entry and rebuilds the shard indexes if needed.
 func (m *modelScheduler) removeEntryLocked(authID string) {
 	if m == nil || authID == "" {
@@ -641,6 +700,273 @@ func (m *modelScheduler) promoteExpiredLocked(now time.Time) {
 	if changed {
 		m.rebuildIndexesLocked()
 	}
+}
+
+func applyModelStateSnapshot(auth *Auth, modelKey string, state *ModelState) {
+	if auth == nil || strings.TrimSpace(modelKey) == "" {
+		return
+	}
+	if state == nil {
+		if auth.ModelStates == nil {
+			return
+		}
+		delete(auth.ModelStates, modelKey)
+		if len(auth.ModelStates) == 0 {
+			auth.ModelStates = nil
+		}
+		return
+	}
+	if auth.ModelStates == nil {
+		auth.ModelStates = make(map[string]*ModelState)
+	}
+	auth.ModelStates[modelKey] = state.Clone()
+}
+
+func scheduledStateFromModelState(state *ModelState, now time.Time) (scheduledState, time.Time) {
+	if state == nil {
+		return scheduledStateReady, time.Time{}
+	}
+	if state.Status == StatusDisabled {
+		return scheduledStateDisabled, time.Time{}
+	}
+	if !state.Unavailable {
+		return scheduledStateReady, time.Time{}
+	}
+	if state.NextRetryAfter.IsZero() {
+		return scheduledStateReady, time.Time{}
+	}
+	if !state.NextRetryAfter.After(now) {
+		return scheduledStateReady, time.Time{}
+	}
+	next := state.NextRetryAfter
+	if !state.Quota.NextRecoverAt.IsZero() && state.Quota.NextRecoverAt.After(now) {
+		next = state.Quota.NextRecoverAt
+	}
+	if next.Before(now) {
+		next = now
+	}
+	if state.Quota.Exceeded {
+		return scheduledStateCooldown, next
+	}
+	return scheduledStateBlocked, next
+}
+
+func (m *modelScheduler) transitionEntryLocked(entry *scheduledAuth, previousState scheduledState, previousNextRetryAt time.Time) {
+	if m == nil || entry == nil || entry.meta == nil || entry.auth == nil {
+		return
+	}
+	priority := entry.meta.priority
+	if previousState == scheduledStateReady {
+		m.removeReadyEntryLocked(priority, entry)
+	} else if previousState == scheduledStateCooldown || previousState == scheduledStateBlocked {
+		m.removeBlockedEntryLocked(entry.auth.ID)
+	}
+
+	switch entry.state {
+	case scheduledStateReady:
+		m.addReadyEntryLocked(priority, entry)
+	case scheduledStateCooldown, scheduledStateBlocked:
+		if previousState == entry.state && previousState != scheduledStateReady && !previousNextRetryAt.Equal(entry.nextRetryAt) {
+			m.removeBlockedEntryLocked(entry.auth.ID)
+		}
+		m.addBlockedEntryLocked(entry)
+	}
+}
+
+func (m *modelScheduler) addReadyEntryLocked(priority int, entry *scheduledAuth) {
+	if m == nil || entry == nil || entry.auth == nil {
+		return
+	}
+	bucket := m.readyByPriority[priority]
+	if bucket == nil {
+		bucket = &readyBucket{}
+		m.readyByPriority[priority] = bucket
+		m.insertPriorityLocked(priority)
+	}
+	if bucketUsesGroupedView(bucket) || entryUsesGroupedReadyView(entry) {
+		entries := insertScheduledAuthSorted(bucket.all.flat, entry)
+		*bucket = *buildReadyBucket(entries)
+		return
+	}
+	insertReadyViewEntry(&bucket.all, entry)
+	if entry.meta.websocketEnabled {
+		insertReadyViewEntry(&bucket.ws, entry)
+	}
+}
+
+func (m *modelScheduler) removeReadyEntryLocked(priority int, entry *scheduledAuth) {
+	if m == nil || entry == nil || entry.auth == nil {
+		return
+	}
+	bucket := m.readyByPriority[priority]
+	if bucket == nil {
+		return
+	}
+	if bucketUsesGroupedView(bucket) || entryUsesGroupedReadyView(entry) {
+		entries := removeScheduledAuthByID(bucket.all.flat, entry.auth.ID)
+		if len(entries) == 0 {
+			delete(m.readyByPriority, priority)
+			m.removePriorityLocked(priority)
+			return
+		}
+		*bucket = *buildReadyBucket(entries)
+		return
+	}
+	removeReadyViewEntry(&bucket.all, entry.auth.ID)
+	if entry.meta.websocketEnabled {
+		removeReadyViewEntry(&bucket.ws, entry.auth.ID)
+	}
+	if len(bucket.all.flat) == 0 {
+		delete(m.readyByPriority, priority)
+		m.removePriorityLocked(priority)
+	}
+}
+
+func (m *modelScheduler) addBlockedEntryLocked(entry *scheduledAuth) {
+	if m == nil || entry == nil || entry.auth == nil {
+		return
+	}
+	insertAt := sort.Search(len(m.blocked), func(i int) bool {
+		return blockedEntryLess(entry, m.blocked[i])
+	})
+	m.blocked = append(m.blocked, nil)
+	copy(m.blocked[insertAt+1:], m.blocked[insertAt:])
+	m.blocked[insertAt] = entry
+}
+
+func (m *modelScheduler) removeBlockedEntryLocked(authID string) {
+	if m == nil || authID == "" || len(m.blocked) == 0 {
+		return
+	}
+	for index, entry := range m.blocked {
+		if entry == nil || entry.auth == nil || entry.auth.ID != authID {
+			continue
+		}
+		copy(m.blocked[index:], m.blocked[index+1:])
+		m.blocked[len(m.blocked)-1] = nil
+		m.blocked = m.blocked[:len(m.blocked)-1]
+		return
+	}
+}
+
+func (m *modelScheduler) insertPriorityLocked(priority int) {
+	for _, existing := range m.priorityOrder {
+		if existing == priority {
+			return
+		}
+	}
+	insertAt := sort.Search(len(m.priorityOrder), func(i int) bool {
+		return m.priorityOrder[i] <= priority
+	})
+	m.priorityOrder = append(m.priorityOrder, 0)
+	copy(m.priorityOrder[insertAt+1:], m.priorityOrder[insertAt:])
+	m.priorityOrder[insertAt] = priority
+}
+
+func (m *modelScheduler) removePriorityLocked(priority int) {
+	for index, existing := range m.priorityOrder {
+		if existing != priority {
+			continue
+		}
+		copy(m.priorityOrder[index:], m.priorityOrder[index+1:])
+		m.priorityOrder = m.priorityOrder[:len(m.priorityOrder)-1]
+		return
+	}
+}
+
+func bucketUsesGroupedView(bucket *readyBucket) bool {
+	if bucket == nil {
+		return false
+	}
+	return len(bucket.all.parentOrder) > 0 || len(bucket.ws.parentOrder) > 0
+}
+
+func entryUsesGroupedReadyView(entry *scheduledAuth) bool {
+	return entry != nil && entry.meta != nil && entry.meta.virtualParent != ""
+}
+
+func insertReadyViewEntry(view *readyView, entry *scheduledAuth) {
+	if view == nil || entry == nil || entry.auth == nil {
+		return
+	}
+	insertAt := sort.Search(len(view.flat), func(i int) bool {
+		return view.flat[i].auth.ID >= entry.auth.ID
+	})
+	view.flat = append(view.flat, nil)
+	copy(view.flat[insertAt+1:], view.flat[insertAt:])
+	view.flat[insertAt] = entry
+	if len(view.flat) == 1 {
+		view.cursor = 0
+		return
+	}
+	if insertAt <= view.cursor {
+		view.cursor++
+	}
+	view.cursor %= len(view.flat)
+}
+
+func removeReadyViewEntry(view *readyView, authID string) {
+	if view == nil || authID == "" || len(view.flat) == 0 {
+		return
+	}
+	index := sort.Search(len(view.flat), func(i int) bool {
+		return view.flat[i].auth.ID >= authID
+	})
+	if index >= len(view.flat) || view.flat[index] == nil || view.flat[index].auth == nil || view.flat[index].auth.ID != authID {
+		return
+	}
+	copy(view.flat[index:], view.flat[index+1:])
+	view.flat[len(view.flat)-1] = nil
+	view.flat = view.flat[:len(view.flat)-1]
+	if len(view.flat) == 0 {
+		view.cursor = 0
+		return
+	}
+	if index < view.cursor && view.cursor > 0 {
+		view.cursor--
+	}
+	view.cursor %= len(view.flat)
+}
+
+func insertScheduledAuthSorted(entries []*scheduledAuth, entry *scheduledAuth) []*scheduledAuth {
+	insertAt := sort.Search(len(entries), func(i int) bool {
+		return entries[i].auth.ID >= entry.auth.ID
+	})
+	entries = append(entries, nil)
+	copy(entries[insertAt+1:], entries[insertAt:])
+	entries[insertAt] = entry
+	return entries
+}
+
+func removeScheduledAuthByID(entries []*scheduledAuth, authID string) []*scheduledAuth {
+	index := sort.Search(len(entries), func(i int) bool {
+		return entries[i].auth.ID >= authID
+	})
+	if index >= len(entries) || entries[index] == nil || entries[index].auth == nil || entries[index].auth.ID != authID {
+		return entries
+	}
+	copy(entries[index:], entries[index+1:])
+	entries[len(entries)-1] = nil
+	return entries[:len(entries)-1]
+}
+
+func blockedEntryLess(left, right *scheduledAuth) bool {
+	if left == nil || left.auth == nil {
+		return false
+	}
+	if right == nil || right.auth == nil {
+		return true
+	}
+	if left.nextRetryAt.Equal(right.nextRetryAt) {
+		return left.auth.ID < right.auth.ID
+	}
+	if left.nextRetryAt.IsZero() {
+		return false
+	}
+	if right.nextRetryAt.IsZero() {
+		return true
+	}
+	return left.nextRetryAt.Before(right.nextRetryAt)
 }
 
 // pickReadyLocked selects the next ready auth from the highest available priority bucket.
