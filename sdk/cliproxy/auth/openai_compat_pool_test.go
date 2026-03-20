@@ -270,6 +270,51 @@ func TestManagerExecute_OpenAICompatAliasPoolFallsBackWithinSameAuth(t *testing.
 	}
 }
 
+func TestManagerExecute_OpenAICompatAliasPoolSharesBudgetAcrossAuthAndModelRetries(t *testing.T) {
+	alias := "claude-opus-4.66"
+	retryErr := &Error{HTTPStatus: http.StatusTooManyRequests, Message: "quota"}
+	executor := &openAICompatPoolExecutor{
+		id: "pool",
+		executeErrors: map[string]error{
+			"qwen3.5-plus": retryErr,
+			"glm-5":        retryErr,
+		},
+	}
+	m := newOpenAICompatPoolTestManager(t, alias, []internalconfig.OpenAICompatibilityModel{
+		{Name: "qwen3.5-plus", Alias: alias},
+		{Name: "glm-5", Alias: alias},
+	}, executor)
+	m.SetRetryConfig(0, 0, 2)
+
+	secondAuth := &Auth{
+		ID:       "pool-auth-second-" + t.Name(),
+		Provider: "pool",
+		Status:   StatusActive,
+		Attributes: map[string]string{
+			"api_key":      "test-key-2",
+			"compat_name":  "pool",
+			"provider_key": "pool",
+		},
+	}
+	if _, err := m.Register(context.Background(), secondAuth); err != nil {
+		t.Fatalf("register second auth: %v", err)
+	}
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(secondAuth.ID, "pool", []*registry.ModelInfo{{ID: alias}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(secondAuth.ID)
+	})
+
+	_, err := m.Execute(context.Background(), []string{"pool"}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{})
+	if err == nil {
+		t.Fatalf("expected execute error")
+	}
+	got := executor.ExecuteModels()
+	if len(got) != 3 {
+		t.Fatalf("execute calls = %v, want 3 total attempts under shared request budget", got)
+	}
+}
+
 func TestManagerExecuteStream_OpenAICompatAliasPoolRetriesOnEmptyBootstrap(t *testing.T) {
 	alias := "claude-opus-4.66"
 	executor := &openAICompatPoolExecutor{

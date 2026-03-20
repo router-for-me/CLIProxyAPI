@@ -165,6 +165,14 @@ type Manager struct {
 	refreshSemaphore chan struct{}
 }
 
+type requestRetryBudgetContextKey struct{}
+
+type requestRetryBudget struct {
+	remaining atomic.Int32
+}
+
+const defaultUnlimitedRequestRetryBudget = 4
+
 // NewManager constructs a manager with optional custom selector and hook.
 func NewManager(store Store, selector Selector, hook Hook) *Manager {
 	if selector == nil {
@@ -550,6 +558,9 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 	execModels := m.prepareExecutionModels(auth, routeModel)
 	var lastErr error
 	for idx, execModel := range execModels {
+		if idx > 0 && !ConsumeRequestRetryBudget(ctx) {
+			break
+		}
 		execReq := req
 		execReq.Model = execModel
 		streamResult, errStream := executor.ExecuteStream(ctx, auth, execReq, opts)
@@ -932,11 +943,15 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 	if len(normalized) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
+	ctx = m.withRequestRetryBudget(ctx, 0)
 
 	_, maxRetryCredentials, maxWait := m.retrySettings()
 
 	var lastErr error
 	for attempt := 0; ; attempt++ {
+		if attempt > 0 && !ConsumeRequestRetryBudget(ctx) {
+			break
+		}
 		resp, errExec := m.executeMixedOnce(ctx, normalized, req, opts, maxRetryCredentials)
 		if errExec == nil {
 			return resp, nil
@@ -963,11 +978,15 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 	if len(normalized) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
+	ctx = m.withRequestRetryBudget(ctx, 0)
 
 	_, maxRetryCredentials, maxWait := m.retrySettings()
 
 	var lastErr error
 	for attempt := 0; ; attempt++ {
+		if attempt > 0 && !ConsumeRequestRetryBudget(ctx) {
+			break
+		}
 		resp, errExec := m.executeCountMixedOnce(ctx, normalized, req, opts, maxRetryCredentials)
 		if errExec == nil {
 			return resp, nil
@@ -994,11 +1013,15 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 	if len(normalized) == 0 {
 		return nil, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
+	ctx = m.withRequestRetryBudget(ctx, 0)
 
 	_, maxRetryCredentials, maxWait := m.retrySettings()
 
 	var lastErr error
 	for attempt := 0; ; attempt++ {
+		if attempt > 0 && !ConsumeRequestRetryBudget(ctx) {
+			break
+		}
 		result, errStream := m.executeStreamMixedOnce(ctx, normalized, req, opts, maxRetryCredentials)
 		if errStream == nil {
 			return result, nil
@@ -1033,6 +1056,12 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			}
 			return cliproxyexecutor.Response{}, &Error{Code: "auth_not_found", Message: "no auth available"}
 		}
+		if len(tried) > 0 && !ConsumeRequestRetryBudget(ctx) {
+			if lastErr != nil {
+				return cliproxyexecutor.Response{}, lastErr
+			}
+			return cliproxyexecutor.Response{}, &Error{Code: "auth_not_found", Message: "no auth available"}
+		}
 		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, opts, tried)
 		if errPick != nil {
 			if lastErr != nil {
@@ -1054,7 +1083,13 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 
 		models := m.prepareExecutionModels(auth, routeModel)
 		var authErr error
-		for _, upstreamModel := range models {
+		for idx, upstreamModel := range models {
+			if idx > 0 && !ConsumeRequestRetryBudget(ctx) {
+				if authErr != nil {
+					return cliproxyexecutor.Response{}, authErr
+				}
+				return cliproxyexecutor.Response{}, &Error{Code: "auth_not_found", Message: "no upstream model available"}
+			}
 			execReq := req
 			execReq.Model = upstreamModel
 			resp, errExec := executor.Execute(execCtx, auth, execReq, opts)
@@ -1105,6 +1140,12 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			}
 			return cliproxyexecutor.Response{}, &Error{Code: "auth_not_found", Message: "no auth available"}
 		}
+		if len(tried) > 0 && !ConsumeRequestRetryBudget(ctx) {
+			if lastErr != nil {
+				return cliproxyexecutor.Response{}, lastErr
+			}
+			return cliproxyexecutor.Response{}, &Error{Code: "auth_not_found", Message: "no auth available"}
+		}
 		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, opts, tried)
 		if errPick != nil {
 			if lastErr != nil {
@@ -1126,7 +1167,13 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 
 		models := m.prepareExecutionModels(auth, routeModel)
 		var authErr error
-		for _, upstreamModel := range models {
+		for idx, upstreamModel := range models {
+			if idx > 0 && !ConsumeRequestRetryBudget(ctx) {
+				if authErr != nil {
+					return cliproxyexecutor.Response{}, authErr
+				}
+				return cliproxyexecutor.Response{}, &Error{Code: "auth_not_found", Message: "no upstream model available"}
+			}
 			execReq := req
 			execReq.Model = upstreamModel
 			resp, errExec := executor.CountTokens(execCtx, auth, execReq, opts)
@@ -1172,6 +1219,12 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	var lastErr error
 	for {
 		if maxRetryCredentials > 0 && len(tried) >= maxRetryCredentials {
+			if lastErr != nil {
+				return nil, lastErr
+			}
+			return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
+		}
+		if len(tried) > 0 && !ConsumeRequestRetryBudget(ctx) {
 			if lastErr != nil {
 				return nil, lastErr
 			}
@@ -1533,6 +1586,77 @@ func (m *Manager) retrySettings() (int, int, time.Duration) {
 		return 0, 0, 0
 	}
 	return int(m.requestRetry.Load()), int(m.maxRetryCredentials.Load()), time.Duration(m.maxRetryInterval.Load())
+}
+
+func (m *Manager) WithRequestRetryBudget(ctx context.Context, bootstrapRetries int) context.Context {
+	return m.withRequestRetryBudget(ctx, bootstrapRetries)
+}
+
+func ConsumeRequestRetryBudget(ctx context.Context) bool {
+	budget := requestRetryBudgetFromContext(ctx)
+	if budget == nil {
+		return true
+	}
+	return budget.consume()
+}
+
+func (m *Manager) withRequestRetryBudget(ctx context.Context, bootstrapRetries int) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if requestRetryBudgetFromContext(ctx) != nil {
+		return ctx
+	}
+	return context.WithValue(ctx, requestRetryBudgetContextKey{}, newRequestRetryBudget(m.initialRequestRetryBudget(bootstrapRetries)))
+}
+
+func (m *Manager) initialRequestRetryBudget(bootstrapRetries int) int {
+	requestRetry, maxRetryCredentials, _ := m.retrySettings()
+	if bootstrapRetries < 0 {
+		bootstrapRetries = 0
+	}
+	credentialBudget := maxRetryCredentials
+	if credentialBudget <= 0 {
+		credentialBudget = defaultUnlimitedRequestRetryBudget
+	}
+	total := requestRetry + bootstrapRetries + credentialBudget
+	if total < 1 {
+		return 1
+	}
+	return total
+}
+
+func requestRetryBudgetFromContext(ctx context.Context) *requestRetryBudget {
+	if ctx == nil {
+		return nil
+	}
+	raw := ctx.Value(requestRetryBudgetContextKey{})
+	budget, _ := raw.(*requestRetryBudget)
+	return budget
+}
+
+func newRequestRetryBudget(total int) *requestRetryBudget {
+	if total < 0 {
+		total = 0
+	}
+	budget := &requestRetryBudget{}
+	budget.remaining.Store(int32(total))
+	return budget
+}
+
+func (b *requestRetryBudget) consume() bool {
+	if b == nil {
+		return true
+	}
+	for {
+		remaining := b.remaining.Load()
+		if remaining <= 0 {
+			return false
+		}
+		if b.remaining.CompareAndSwap(remaining, remaining-1) {
+			return true
+		}
+	}
 }
 
 func (m *Manager) closestCooldownWait(providers []string, model string, attempt int) (time.Duration, bool) {
