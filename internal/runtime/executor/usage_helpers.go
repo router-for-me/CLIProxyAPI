@@ -275,6 +275,10 @@ func parseClaudeUsage(data []byte) usage.Detail {
 		// fall back to creation tokens when read tokens are absent
 		detail.CachedTokens = usageNode.Get("cache_creation_input_tokens").Int()
 	}
+	// Estimate reasoning tokens from thinking content blocks.
+	// Claude API does not expose thinking tokens in the usage object,
+	// so we approximate by summing thinking block text lengths / 4.
+	detail.ReasoningTokens = estimateClaudeThinkingTokens(data)
 	detail.TotalTokens = detail.InputTokens + detail.OutputTokens
 	return detail
 }
@@ -298,6 +302,36 @@ func parseClaudeStreamUsage(line []byte) (usage.Detail, bool) {
 	}
 	detail.TotalTokens = detail.InputTokens + detail.OutputTokens
 	return detail, true
+}
+
+// estimateClaudeThinkingTokens scans Claude response content blocks for
+// type="thinking" entries and estimates token count from text length.
+func estimateClaudeThinkingTokens(data []byte) int64 {
+	var total int64
+	gjson.ParseBytes(data).Get("content").ForEach(func(_, block gjson.Result) bool {
+		if block.Get("type").String() == "thinking" {
+			total += int64(len(block.Get("thinking").String()))
+		}
+		return true
+	})
+	return total / 4
+}
+
+// claudeStreamThinkingLen returns the byte length of thinking text in a
+// streaming content_block_delta line. Returns 0 for non-thinking lines.
+func claudeStreamThinkingLen(line []byte) int {
+	payload := jsonPayload(line)
+	if len(payload) == 0 {
+		return 0
+	}
+	if gjson.GetBytes(payload, "type").String() != "content_block_delta" {
+		return 0
+	}
+	delta := gjson.GetBytes(payload, "delta")
+	if delta.Get("type").String() != "thinking_delta" {
+		return 0
+	}
+	return len(delta.Get("thinking").String())
 }
 
 func parseGeminiFamilyUsageDetail(node gjson.Result) usage.Detail {
