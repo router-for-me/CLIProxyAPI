@@ -131,6 +131,8 @@ type authSchedulingSnapshot struct {
 	Priority         int
 	VirtualParent    string
 	WebsocketEnabled bool
+	HasRequestRetry  bool
+	RequestRetry     int
 	Disabled         bool
 	Status           Status
 	Unavailable      bool
@@ -201,6 +203,10 @@ func (a *Auth) SchedulingSnapshot() *authSchedulingSnapshot {
 		Unavailable:      a.Unavailable,
 		NextRetryAfter:   a.NextRetryAfter,
 		Quota:            a.Quota,
+	}
+	if requestRetry, ok := a.RequestRetryOverride(); ok {
+		snapshot.HasRequestRetry = true
+		snapshot.RequestRetry = requestRetry
 	}
 	if len(a.Attributes) > 0 {
 		snapshot.VirtualParent = strings.TrimSpace(a.Attributes["gemini_virtual_parent"])

@@ -55,6 +55,8 @@ type scheduledAuthMeta struct {
 	priority          int
 	virtualParent     string
 	websocketEnabled  bool
+	hasRequestRetry   bool
+	requestRetry      int
 	supportedModelSet map[string]struct{}
 }
 
@@ -566,8 +568,77 @@ func buildScheduledAuthMeta(snapshot *authSchedulingSnapshot, supportedModelSet 
 		priority:          snapshot.Priority,
 		virtualParent:     snapshot.VirtualParent,
 		websocketEnabled:  snapshot.WebsocketEnabled,
+		hasRequestRetry:   snapshot.HasRequestRetry,
+		requestRetry:      snapshot.RequestRetry,
 		supportedModelSet: supportedModelSet,
 	}
+}
+
+func (m *scheduledAuthMeta) effectiveRequestRetry(defaultRetry int) int {
+	if m == nil {
+		if defaultRetry < 0 {
+			return 0
+		}
+		return defaultRetry
+	}
+	if m.hasRequestRetry {
+		if m.requestRetry < 0 {
+			return 0
+		}
+		return m.requestRetry
+	}
+	if defaultRetry < 0 {
+		return 0
+	}
+	return defaultRetry
+}
+
+func (s *authScheduler) closestCooldownWait(providers []string, model string, attempt int, defaultRetry int) (time.Duration, bool) {
+	if s == nil || len(providers) == 0 {
+		return 0, false
+	}
+	normalized := normalizeProviderKeys(providers)
+	if len(normalized) == 0 {
+		return 0, false
+	}
+	s.mu.RLock()
+	providerStates := make(map[string]*providerScheduler, len(normalized))
+	for _, providerKey := range normalized {
+		if providerState := s.providers[providerKey]; providerState != nil {
+			providerStates[providerKey] = providerState
+		}
+	}
+	s.mu.RUnlock()
+	if len(providerStates) == 0 {
+		return 0, false
+	}
+	now := time.Now()
+	modelKey := canonicalModelKey(model)
+	lockedProviders := lockProviderSchedulers(providerStates)
+	defer unlockProviderSchedulers(lockedProviders)
+	var (
+		found   bool
+		minWait time.Duration
+	)
+	for _, providerKey := range normalized {
+		providerState := providerStates[providerKey]
+		if providerState == nil {
+			continue
+		}
+		shard := providerState.ensureModelLocked(modelKey, now)
+		if shard == nil {
+			continue
+		}
+		wait, ok := shard.closestCooldownWaitLocked(now, attempt, defaultRetry)
+		if !ok {
+			continue
+		}
+		if !found || wait < minWait {
+			minWait = wait
+			found = true
+		}
+	}
+	return minWait, found
 }
 
 // supportedModelSetForAuth snapshots the registry models currently registered for an auth.
@@ -917,6 +988,29 @@ func (m *modelScheduler) availabilitySummaryLocked(predicate func(*scheduledAuth
 		}
 	}
 	return total, cooldownCount, earliest
+}
+
+func (m *modelScheduler) closestCooldownWaitLocked(now time.Time, attempt int, defaultRetry int) (time.Duration, bool) {
+	if m == nil {
+		return 0, false
+	}
+	for _, entry := range m.blocked {
+		if entry == nil || entry.meta == nil || entry.authID == "" {
+			continue
+		}
+		if entry.state == scheduledStateDisabled || entry.nextRetryAt.IsZero() {
+			continue
+		}
+		if attempt >= entry.meta.effectiveRequestRetry(defaultRetry) {
+			continue
+		}
+		wait := entry.nextRetryAt.Sub(now)
+		if wait < 0 {
+			continue
+		}
+		return wait, true
+	}
+	return 0, false
 }
 
 // rebuildIndexesLocked reconstructs ready and blocked views from the current entry map.
