@@ -157,6 +157,19 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 			}
 		}
 	}
+	// Read enable_1m_context from auth file (Claude 1M context beta toggle).
+	if raw1M, ok := metadata["enable_1m_context"]; ok {
+		switch v := raw1M.(type) {
+		case bool:
+			if v {
+				a.Attributes["enable_1m_context"] = "true"
+			}
+		case string:
+			if strings.EqualFold(strings.TrimSpace(v), "true") {
+				a.Attributes["enable_1m_context"] = "true"
+			}
+		}
+	}
 	ApplyAuthExcludedModelsMeta(a, cfg, perAccountExcluded, "oauth")
 	// For codex auth files, extract plan_type from the JWT id_token.
 	if provider == "codex" {
