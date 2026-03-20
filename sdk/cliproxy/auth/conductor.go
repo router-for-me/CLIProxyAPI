@@ -2879,3 +2879,22 @@ func (m *Manager) HttpRequest(ctx context.Context, auth *Auth, req *http.Request
 	}
 	return exec.HttpRequest(ctx, auth, req)
 }
+
+func (m *Manager) GetByIndex(index string) (*Auth, bool) {
+    index = strings.TrimSpace(index)
+    if index == "" {
+        return nil, false
+    }
+    m.mu.RLock()
+    defer m.mu.RUnlock()
+    for _, auth := range m.auths {
+        if auth == nil {
+            continue
+        }
+        auth.EnsureIndex()
+        if auth.Index == index {
+            return auth.Clone(), true
+        }
+    }
+    return nil, false
+}
