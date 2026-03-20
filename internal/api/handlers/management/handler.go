@@ -202,8 +202,10 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 				h.attemptsMu.Unlock()
 			}
 		}
-		if secretHash == "" && envSecret == "" {
-			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "remote management key not set"})
+		// Require at least one management credential source overall.
+		// Local TUI mode provides h.localPassword for localhost-only access.
+		if secretHash == "" && envSecret == "" && h.localPassword == "" {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "management key not set"})
 			return
 		}
 
