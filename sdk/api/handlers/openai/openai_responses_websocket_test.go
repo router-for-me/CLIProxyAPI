@@ -401,7 +401,7 @@ func TestShouldResetResponsesWebsocketAuthPin(t *testing.T) {
 		{name: "too_many_requests", statusCode: http.StatusTooManyRequests, want: true},
 		{name: "forbidden", statusCode: http.StatusForbidden, want: true},
 		{name: "payment_required", statusCode: http.StatusPaymentRequired, want: true},
-		{name: "unauthorized", statusCode: http.StatusUnauthorized, want: false},
+		{name: "unauthorized", statusCode: http.StatusUnauthorized, want: true},
 		{name: "internal_error", statusCode: http.StatusInternalServerError, want: false},
 		{name: "zero", statusCode: 0, want: false},
 	}

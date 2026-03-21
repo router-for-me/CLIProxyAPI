@@ -165,7 +165,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			if shadowErr != nil {
 				// 影子快照失败时保留旧快照避免污染会话状态
 				nextSessionRequestSnapshot = lastRequest
-				log.Warnf(
+				log.Errorf(
 					"responses websocket: keep previous snapshot id=%s status=%d error=%v",
 					passthroughSessionID,
 					shadowErr.StatusCode,
@@ -224,6 +224,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		}
 		if shouldResetResponsesWebsocketAuthPin(terminalStatus) {
 			// 限额错误后解除 pin 让后续请求重新选可用账号
+			log.Infof("responses websocket: reset auth pin id=%s status=%d", passthroughSessionID, terminalStatus)
 			pinnedAuthID = ""
 			// 切号恢复阶段先禁用增量模式避免沿用旧账号 response id
 			forceDisableIncrementalAfterAuthReset = true
@@ -232,7 +233,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 				h.AuthManager.CloseExecutionSession(passthroughSessionID)
 			}
 		} else if forceDisableIncrementalAfterAuthReset && terminalStatus == 0 {
-			// 新账号完成一轮后恢复增量模式
+			// 仅在成功轮次恢复增量模式避免失败轮次继续透传旧 response id
 			forceDisableIncrementalAfterAuthReset = false
 		}
 		if terminalStatus == 0 {
@@ -773,7 +774,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 
 func shouldResetResponsesWebsocketAuthPin(statusCode int) bool {
 	switch statusCode {
-	case http.StatusTooManyRequests, http.StatusForbidden, http.StatusPaymentRequired:
+	case http.StatusTooManyRequests, http.StatusForbidden, http.StatusPaymentRequired, http.StatusUnauthorized:
 		return true
 	default:
 		return false

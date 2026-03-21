@@ -289,3 +289,76 @@ func TestCloseExecutionSessionUnblocksActiveRead(t *testing.T) {
 		t.Fatal("read did not fail fast after closeExecutionSession")
 	}
 }
+
+func TestEnsureUpstreamConnAuthSwitchRebuildsWebsocketConn(t *testing.T) {
+	t.Parallel()
+
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	authHeaderCh := make(chan string, 4)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+
+		authHeaderCh <- strings.TrimSpace(r.Header.Get("Authorization"))
+		for {
+			_, _, errRead := conn.ReadMessage()
+			if errRead != nil {
+				return
+			}
+		}
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	executor := NewCodexWebsocketsExecutor(&config.Config{})
+	sess := &codexWebsocketSession{sessionID: "session-auth-switch"}
+
+	headers1 := http.Header{}
+	headers1.Set("Authorization", "Bearer token-1")
+	conn1, _, errDial1 := executor.ensureUpstreamConn(context.Background(), nil, sess, "auth-1", wsURL, headers1)
+	if errDial1 != nil {
+		t.Fatalf("ensureUpstreamConn auth-1 error: %v", errDial1)
+	}
+	if conn1 == nil {
+		t.Fatal("ensureUpstreamConn auth-1 returned nil conn")
+	}
+
+	headers2 := http.Header{}
+	headers2.Set("Authorization", "Bearer token-2")
+	conn2, _, errDial2 := executor.ensureUpstreamConn(context.Background(), nil, sess, "auth-2", wsURL, headers2)
+	if errDial2 != nil {
+		t.Fatalf("ensureUpstreamConn auth-2 error: %v", errDial2)
+	}
+	if conn2 == nil {
+		t.Fatal("ensureUpstreamConn auth-2 returned nil conn")
+	}
+	if conn2 == conn1 {
+		t.Fatal("expected new websocket conn after auth switch")
+	}
+
+	defer executor.invalidateUpstreamConn(sess, conn2, "test_done", nil)
+
+	var got1, got2 string
+	select {
+	case got1 = <-authHeaderCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for first websocket handshake")
+	}
+	select {
+	case got2 = <-authHeaderCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for second websocket handshake")
+	}
+	if got1 != "Bearer token-1" {
+		t.Fatalf("first Authorization = %q, want %q", got1, "Bearer token-1")
+	}
+	if got2 != "Bearer token-2" {
+		t.Fatalf("second Authorization = %q, want %q", got2, "Bearer token-2")
+	}
+	if got1 == got2 {
+		t.Fatal("expected different Authorization headers after auth switch")
+	}
+}

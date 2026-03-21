@@ -86,7 +86,11 @@ func trySendCodexWebsocketRead(ch chan codexWebsocketRead, done <-chan struct{},
 	if ch == nil {
 		return
 	}
-	defer func() { _ = recover() }()
+	defer func() {
+		if r := recover(); r != nil {
+			log.Debugf("codex websockets executor: recover trySendCodexWebsocketRead panic=%v", r)
+		}
+	}()
 	select {
 	case ch <- ev:
 	case <-done:
@@ -98,7 +102,11 @@ func tryCloseCodexWebsocketRead(ch chan codexWebsocketRead) {
 	if ch == nil {
 		return
 	}
-	defer func() { _ = recover() }()
+	defer func() {
+		if r := recover(); r != nil {
+			log.Debugf("codex websockets executor: recover tryCloseCodexWebsocketRead panic=%v", r)
+		}
+	}()
 	close(ch)
 }
 
@@ -107,6 +115,7 @@ func (s *codexWebsocketSession) setActive(ch chan codexWebsocketRead) {
 		return
 	}
 	// 该方法仅持有 activeMu 调用避免与 connMu->activeMu 锁序冲突
+	// 不要在持有 connMu 时调用避免未来引入反向锁序
 	s.activeMu.Lock()
 	if s.activeCancel != nil {
 		s.activeCancel()
@@ -127,6 +136,7 @@ func (s *codexWebsocketSession) clearActive(ch chan codexWebsocketRead) {
 		return
 	}
 	// 该方法仅持有 activeMu 调用避免与 connMu->activeMu 锁序冲突
+	// 不要在持有 connMu 时调用避免未来引入反向锁序
 	s.activeMu.Lock()
 	if s.activeCh == ch {
 		s.activeCh = nil
@@ -192,30 +202,6 @@ func (s *codexWebsocketSession) clearActiveForCurrentConn(conn *websocket.Conn, 
 	s.activeMu.Unlock()
 	s.connMu.Unlock()
 	return true
-}
-
-func (s *codexWebsocketSession) failActiveForSessionClose(conn *websocket.Conn, err error) {
-	if s == nil {
-		return
-	}
-	if err == nil {
-		err = fmt.Errorf("codex websockets executor: execution session closed")
-	}
-	s.activeMu.Lock()
-	ch := s.activeCh
-	done := s.activeDone
-	if s.activeCancel != nil {
-		s.activeCancel()
-	}
-	s.activeCh = nil
-	s.activeCancel = nil
-	s.activeDone = nil
-	s.activeMu.Unlock()
-	if ch == nil {
-		return
-	}
-	trySendCodexWebsocketRead(ch, done, codexWebsocketRead{conn: conn, err: err})
-	tryCloseCodexWebsocketRead(ch)
 }
 
 func (s *codexWebsocketSession) writeMessage(conn *websocket.Conn, msgType int, payload []byte) error {
@@ -1359,19 +1345,33 @@ func (e *CodexWebsocketsExecutor) closeExecutionSession(sess *codexWebsocketSess
 		reason = "session_closed"
 	}
 
+	// 锁顺序固定为 connMu -> activeMu
 	sess.connMu.Lock()
 	conn := sess.conn
 	authID := sess.authID
 	wsURL := sess.wsURL
+	sessionID := sess.sessionID
 	sess.conn = nil
 	if sess.readerConn == conn {
 		sess.readerConn = nil
 	}
-	sessionID := sess.sessionID
+	sess.activeMu.Lock()
+	ch := sess.activeCh
+	done := sess.activeDone
+	if sess.activeCancel != nil {
+		sess.activeCancel()
+	}
+	sess.activeCh = nil
+	sess.activeCancel = nil
+	sess.activeDone = nil
+	sess.activeMu.Unlock()
 	sess.connMu.Unlock()
 
-	// 会话显式关闭时主动唤醒活跃请求避免 readCh 悬挂
-	sess.failActiveForSessionClose(conn, fmt.Errorf("codex websockets executor: execution session closed"))
+	if ch != nil {
+		// 会话关闭时允许主动 fail active 唤醒在途 readCodexWebsocketMessage
+		trySendCodexWebsocketRead(ch, done, codexWebsocketRead{conn: conn, err: fmt.Errorf("codex websockets executor: execution session closed")})
+		tryCloseCodexWebsocketRead(ch)
+	}
 
 	if conn == nil {
 		return
