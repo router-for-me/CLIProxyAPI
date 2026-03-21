@@ -390,6 +390,34 @@ func TestSetWebsocketRequestBody(t *testing.T) {
 	}
 }
 
+func TestShouldResetResponsesWebsocketAuthPin(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name       string
+		statusCode int
+		want       bool
+	}{
+		{name: "too_many_requests", statusCode: http.StatusTooManyRequests, want: true},
+		{name: "forbidden", statusCode: http.StatusForbidden, want: true},
+		{name: "payment_required", statusCode: http.StatusPaymentRequired, want: true},
+		{name: "unauthorized", statusCode: http.StatusUnauthorized, want: false},
+		{name: "internal_error", statusCode: http.StatusInternalServerError, want: false},
+		{name: "zero", statusCode: 0, want: false},
+	}
+
+	for i := range cases {
+		tc := cases[i]
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := shouldResetResponsesWebsocketAuthPin(tc.statusCode)
+			if got != tc.want {
+				t.Fatalf("shouldResetResponsesWebsocketAuthPin(%d) = %v, want %v", tc.statusCode, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestForwardResponsesWebsocketPreservesCompletedEvent(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
