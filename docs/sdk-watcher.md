@@ -1,5 +1,7 @@
 # SDK Watcher Integration
 
+> This document describes watcher integration in this independently maintained fork. The repository is derived from `router-for-me/CLIProxyAPI` but is not affiliated with the upstream project.
+
 The SDK service exposes a watcher integration that surfaces granular auth updates without forcing a full reload. This document explains the queue contract, how the service consumes updates, and how high-frequency change bursts are handled.
 
 ## Update Queue Contract

@@ -1,5 +1,7 @@
 # SDK 高级指南：执行器与翻译器
 
+> 本文档适用于当前独立维护分支中的 SDK。该仓库基于 `router-for-me/CLIProxyAPI` 修改而来，但与上游项目无关联。示例中继续使用 `github.com/router-for-me/CLIProxyAPI/v6` 模块路径，仅用于兼容现有代码结构。
+
 本文介绍如何使用 SDK 扩展内嵌代理：
 - 实现自定义 Provider 执行器以调用你的上游 API
 - 注册请求/响应翻译器进行协议转换
@@ -128,4 +130,3 @@ cliproxy.GlobalModelRegistry().RegisterClient(authID, "myprov", models)
 - 启用请求日志：管理 API GET/PUT `/v0/management/request-log`
 - 切换调试日志：管理 API GET/PUT `/v0/management/debug`
 - 热更新：`config.yaml` 与 `auths/` 变化会自动被侦测并应用
-

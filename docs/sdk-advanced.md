@@ -1,5 +1,7 @@
 # SDK Advanced: Executors & Translators
 
+> This guide applies to the SDK shipped in this independently maintained fork. The repository is derived from `router-for-me/CLIProxyAPI` but is not affiliated with the upstream project. The `github.com/router-for-me/CLIProxyAPI/v6` module path remains in examples for compatibility.
+
 This guide explains how to extend the embedded proxy with custom providers and schemas using the SDK. You will:
 - Implement a provider executor that talks to your upstream API
 - Register request/response translators for schema conversion
@@ -135,4 +137,3 @@ The embedded server calls this automatically for built‑in providers; for custo
 - Enable request logging: Management API GET/PUT `/v0/management/request-log`
 - Toggle debug logs: Management API GET/PUT `/v0/management/debug`
 - Hot reload changes in `config.yaml` and `auths/` are picked up automatically by the watcher
-

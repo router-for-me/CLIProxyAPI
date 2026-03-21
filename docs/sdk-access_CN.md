@@ -1,5 +1,7 @@
 # @sdk/access 开发指引
 
+> 本文档描述的是当前独立维护分支中的访问认证 SDK。该仓库基于 `router-for-me/CLIProxyAPI` 修改而来，但与上游项目无关联。出于兼容性考虑，当前导入路径仍使用 `github.com/router-for-me/CLIProxyAPI/v6`。
+
 `github.com/router-for-me/CLIProxyAPI/v6/sdk/access` 包负责代理的入站访问认证。它提供一个轻量的管理器，用于按顺序链接多种凭证校验实现，让服务器在 CLI 运行时内外都能复用相同的访问控制逻辑。
 
 ## 引用方式

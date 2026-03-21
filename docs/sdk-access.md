@@ -1,5 +1,7 @@
 # @sdk/access SDK Reference
 
+> This document covers the access SDK in this independently maintained fork. The repository is derived from `router-for-me/CLIProxyAPI` but has no affiliation with the upstream project. Import paths remain on `github.com/router-for-me/CLIProxyAPI/v6` for compatibility.
+
 The `github.com/router-for-me/CLIProxyAPI/v6/sdk/access` package centralizes inbound request authentication for the proxy. It offers a lightweight manager that chains credential providers, so servers can reuse the same access control logic inside or outside the CLI runtime.
 
 ## Importing

@@ -1,5 +1,7 @@
 # CLI Proxy SDK 使用指南
 
+> 本文档描述的是当前独立维护分支中的 SDK。该仓库基于 `router-for-me/CLIProxyAPI` 修改而来，但与上游项目无关联。出于兼容性考虑，当前 Go 模块路径仍为 `github.com/router-for-me/CLIProxyAPI/v6`。
+
 `sdk/cliproxy` 模块将代理能力以 Go 库的形式对外暴露，方便在其它服务中内嵌路由、鉴权、热更新与翻译层，而无需依赖可执行的 CLI 程序。
 
 ## 安装与导入
@@ -161,4 +163,3 @@ _ = svc.Shutdown(ctx)
 - 热更新：`config.yaml` 与 `auths/` 变化会被自动侦测并应用。
 - 请求日志可通过管理 API 在运行时开关。
 - `gemini-web.*` 相关配置在内嵌服务器中会被遵循。
-
