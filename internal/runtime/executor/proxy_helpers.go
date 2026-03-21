@@ -31,6 +31,11 @@ func newProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 		httpClient.Timeout = timeout
 	}
 
+	if rt, ok := ctx.Value("cliproxy.roundtripper").(http.RoundTripper); ok && rt != nil {
+		httpClient.Transport = rt
+		return httpClient
+	}
+
 	// Priority 1: Use auth.ProxyURL if configured
 	var proxyURL string
 	if auth != nil {
@@ -51,11 +56,6 @@ func newProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 		}
 		// If proxy setup failed, log and fall through to context RoundTripper
 		log.Debugf("failed to setup proxy from URL: %s, falling back to context transport", proxyURL)
-	}
-
-	// Priority 3: Use RoundTripper from context (typically from RoundTripperFor)
-	if rt, ok := ctx.Value("cliproxy.roundtripper").(http.RoundTripper); ok && rt != nil {
-		httpClient.Transport = rt
 	}
 
 	return httpClient

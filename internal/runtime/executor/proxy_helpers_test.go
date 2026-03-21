@@ -10,6 +10,12 @@ import (
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 )
 
+type stubRoundTripper struct{}
+
+func (*stubRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, nil
+}
+
 func TestNewProxyAwareHTTPClientDirectBypassesGlobalProxy(t *testing.T) {
 	t.Parallel()
 
@@ -26,5 +32,22 @@ func TestNewProxyAwareHTTPClientDirectBypassesGlobalProxy(t *testing.T) {
 	}
 	if transport.Proxy != nil {
 		t.Fatal("expected direct transport to disable proxy function")
+	}
+}
+
+func TestNewProxyAwareHTTPClientPrefersContextRoundTripperWhenProxyConfigured(t *testing.T) {
+	t.Parallel()
+
+	expected := &stubRoundTripper{}
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", http.RoundTripper(expected))
+	client := newProxyAwareHTTPClient(
+		ctx,
+		&config.Config{SDKConfig: sdkconfig.SDKConfig{ProxyURL: "http://global-proxy.example.com:8080"}},
+		&cliproxyauth.Auth{ProxyURL: "http://auth-proxy.example.com:8080"},
+		0,
+	)
+
+	if client.Transport != http.RoundTripper(expected) {
+		t.Fatalf("transport = %T, want context round tripper", client.Transport)
 	}
 }
