@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/joho/godotenv"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/autoupdate"
 	configaccess "github.com/router-for-me/CLIProxyAPI/v6/internal/access/config_access"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/cmd"
@@ -494,6 +495,12 @@ func main() {
 		if tuiMode {
 			if standalone {
 				// Standalone mode: start an embedded local server and connect TUI client to it.
+				if cfg.AutoUpdate {
+					if autoupdate.CheckAndUpdate(context.Background(), cfg.ProxyURL) {
+						autoupdate.Restart()
+						return
+					}
+				}
 				managementasset.StartAutoUpdater(context.Background(), configFilePath)
 				registry.StartModelsUpdater(context.Background())
 				hook := tui.NewLogHook(2000)
@@ -567,6 +574,12 @@ func main() {
 			}
 		} else {
 			// Start the main proxy service
+			if cfg.AutoUpdate {
+				if autoupdate.CheckAndUpdate(context.Background(), cfg.ProxyURL) {
+					autoupdate.Restart()
+					return
+				}
+			}
 			managementasset.StartAutoUpdater(context.Background(), configFilePath)
 			registry.StartModelsUpdater(context.Background())
 			cmd.StartService(cfg, configFilePath, password)
