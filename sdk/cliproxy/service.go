@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/localrouting"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
@@ -89,6 +90,9 @@ type Service struct {
 
 	// wsGateway manages websocket Gemini providers.
 	wsGateway *wsrelay.Manager
+
+	// localRouting controls optional named local routing lifecycle.
+	localRouting *localrouting.Runtime
 }
 
 // RegisterUsagePlugin registers a usage plugin on the global usage manager.
@@ -495,6 +499,9 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 
 	s.applyRetryConfig(s.cfg)
+	if errLocalRouting := s.applyLocalRouting(); errLocalRouting != nil {
+		return errLocalRouting
+	}
 
 	if s.coreManager != nil {
 		if errLoad := s.coreManager.Load(ctx); errLoad != nil {
@@ -522,6 +529,9 @@ func (s *Service) Run(ctx context.Context) error {
 
 	// handlers no longer depend on legacy clients; pass nil slice initially
 	s.server = api.NewServer(s.cfg, s.coreManager, s.accessManager, s.configPath, s.serverOptions...)
+	if s.server != nil {
+		s.server.SetLocalRoutingRuntime(s.localRouting)
+	}
 
 	if s.authManager == nil {
 		s.authManager = newDefaultAuthManager()
@@ -600,7 +610,13 @@ func (s *Service) Run(ctx context.Context) error {
 	}()
 
 	time.Sleep(100 * time.Millisecond)
-	fmt.Printf("API server started successfully on: %s:%d\n", s.cfg.Host, s.cfg.Port)
+	if s.localRouting != nil {
+		status := s.localRouting.Status()
+		fmt.Printf("API server started successfully on backend %s:%d\n", s.cfg.Host, s.cfg.Port)
+		fmt.Printf("Local routing URL: %s\n", status.URL)
+	} else {
+		fmt.Printf("API server started successfully on: %s:%d\n", s.cfg.Host, s.cfg.Port)
+	}
 
 	s.applyPprofConfig(s.cfg)
 
@@ -742,6 +758,15 @@ func (s *Service) Shutdown(ctx context.Context) error {
 			s.authQueueStop()
 			s.authQueueStop = nil
 		}
+		if s.localRouting != nil {
+			if errLocal := s.localRouting.Close(ctx); errLocal != nil {
+				log.Errorf("failed to stop local routing: %v", errLocal)
+				if shutdownErr == nil {
+					shutdownErr = errLocal
+				}
+			}
+			s.localRouting = nil
+		}
 
 		if errShutdownPprof := s.shutdownPprof(ctx); errShutdownPprof != nil {
 			log.Errorf("failed to stop pprof server: %v", errShutdownPprof)
@@ -766,6 +791,48 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		usage.StopDefault()
 	})
 	return shutdownErr
+}
+
+func (s *Service) applyLocalRouting() error {
+	if s == nil || s.cfg == nil {
+		return nil
+	}
+	s.cfg.SanitizeLocalRouting()
+	if !s.cfg.LocalRouting.Enabled {
+		return nil
+	}
+	backendPort := s.cfg.LocalRouting.AppPort
+	if backendPort <= 0 {
+		allocated, errFindPort := localrouting.FindFreePort(localrouting.MinAppPort, localrouting.MaxAppPort)
+		if errFindPort != nil {
+			return fmt.Errorf("cliproxy: local routing failed to allocate backend port: %w", errFindPort)
+		}
+		backendPort = allocated
+		s.cfg.LocalRouting.AppPort = backendPort
+	}
+	s.cfg.Host = "127.0.0.1"
+	s.cfg.Port = backendPort
+	runtimeCfg := localrouting.BuildConfig(
+		true,
+		s.cfg.LocalRouting.Name,
+		s.cfg.LocalRouting.TLD,
+		s.cfg.LocalRouting.EdgePort,
+		s.cfg.LocalRouting.HTTPS,
+		s.cfg.LocalRouting.AppPort,
+		s.cfg.LocalRouting.StateDir,
+		s.cfg.LocalRouting.Force,
+		s.cfg.LocalRouting.DisplayOAuthURL,
+	)
+	runtimeInst, errStart := localrouting.Start(runtimeCfg, s.cfg.Host, s.cfg.Port)
+	if errStart != nil {
+		return fmt.Errorf("cliproxy: local routing setup failed: %w", errStart)
+	}
+	s.localRouting = runtimeInst
+	if runtimeInst != nil {
+		status := runtimeInst.Status()
+		log.Infof("local routing enabled: %s -> %s:%d (edge:%d owner:%v)", status.URL, status.BackendHost, status.BackendPort, status.EdgePort, status.EdgeOwnerPID == os.Getpid())
+	}
+	return nil
 }
 
 func (s *Service) ensureAuthDir() error {

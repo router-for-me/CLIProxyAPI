@@ -5,6 +5,20 @@ host: ""
 # Server port
 port: 8317
 
+# Optional named local routing mode (portless-style).
+# When enabled, CLIProxyAPI binds to a local backend port and registers a stable
+# host like "<name>.localhost" on an edge proxy port.
+local-routing:
+  enabled: false
+  name: "" # optional explicit name; defaults to folder name (worktree branch prefix when detected)
+  tld: "localhost"
+  edge-port: 1355
+  https: false
+  app-port: 0 # 0 = auto-assign in 4000-4999 range
+  state-dir: "" # default: ~/.cliproxyapi/portless (or /tmp fallback)
+  force: false # overwrite routes registered by another running process
+  display-oauth-url: false # optional UX hint for OAuth flows
+
 # TLS settings for HTTPS. When enabled, the server listens with the provided certificate and key.
 tls:
   enable: false

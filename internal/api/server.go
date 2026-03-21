@@ -25,6 +25,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api/modules"
 	ampmodule "github.com/router-for-me/CLIProxyAPI/v6/internal/api/modules/amp"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/localrouting"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/managementasset"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
@@ -176,6 +177,8 @@ type Server struct {
 	keepAliveOnTimeout func()
 	keepAliveHeartbeat chan struct{}
 	keepAliveStop      chan struct{}
+
+	localRouting *localrouting.Runtime
 }
 
 // NewServer creates and initializes a new API server instance.
@@ -272,6 +275,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		s.mgmt.SetPostAuthHook(optionState.postAuthHook)
 	}
 	s.localPassword = optionState.localPassword
+	s.mgmt.SetLocalRoutingRuntime(nil)
 
 	// Setup routes
 	s.setupRoutes()
@@ -312,6 +316,17 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	}
 
 	return s
+}
+
+// SetLocalRoutingRuntime binds local routing runtime data for management endpoints.
+func (s *Server) SetLocalRoutingRuntime(runtime *localrouting.Runtime) {
+	if s == nil {
+		return
+	}
+	s.localRouting = runtime
+	if s.mgmt != nil {
+		s.mgmt.SetLocalRoutingRuntime(runtime)
+	}
 }
 
 // setupRoutes configures the API routes for the server.
@@ -550,6 +565,9 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/ws-auth", s.mgmt.GetWebsocketAuth)
 		mgmt.PUT("/ws-auth", s.mgmt.PutWebsocketAuth)
 		mgmt.PATCH("/ws-auth", s.mgmt.PutWebsocketAuth)
+		mgmt.GET("/local-routing/status", s.mgmt.GetLocalRoutingStatus)
+		mgmt.GET("/local-routing/routes", s.mgmt.GetLocalRoutingRoutes)
+		mgmt.POST("/local-routing/sync-hosts", s.mgmt.PostLocalRoutingSyncHosts)
 
 		mgmt.GET("/ampcode", s.mgmt.GetAmpCode)
 		mgmt.GET("/ampcode/upstream-url", s.mgmt.GetAmpUpstreamURL)

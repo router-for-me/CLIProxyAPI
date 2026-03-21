@@ -32,6 +32,9 @@ type Config struct {
 	// Port is the network port on which the API server will listen.
 	Port int `yaml:"port" json:"-"`
 
+	// LocalRouting controls optional named local routing mode.
+	LocalRouting LocalRoutingConfig `yaml:"local-routing" json:"local-routing"`
+
 	// TLS config controls HTTPS server settings.
 	TLS TLSConfig `yaml:"tls" json:"tls"`
 
@@ -153,6 +156,19 @@ type TLSConfig struct {
 	Cert string `yaml:"cert" json:"cert"`
 	// Key is the path to the TLS private key file.
 	Key string `yaml:"key" json:"key"`
+}
+
+// LocalRoutingConfig controls optional local named routing mode.
+type LocalRoutingConfig struct {
+	Enabled         bool   `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	Name            string `yaml:"name,omitempty" json:"name,omitempty"`
+	TLD             string `yaml:"tld,omitempty" json:"tld,omitempty"`
+	EdgePort        int    `yaml:"edge-port,omitempty" json:"edge-port,omitempty"`
+	HTTPS           bool   `yaml:"https,omitempty" json:"https,omitempty"`
+	AppPort         int    `yaml:"app-port,omitempty" json:"app-port,omitempty"`
+	StateDir        string `yaml:"state-dir,omitempty" json:"state-dir,omitempty"`
+	Force           bool   `yaml:"force,omitempty" json:"force,omitempty"`
+	DisplayOAuthURL bool   `yaml:"display-oauth-url,omitempty" json:"display-oauth-url,omitempty"`
 }
 
 // PprofConfig holds pprof HTTP server settings.
@@ -549,6 +565,8 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	var cfg Config
 	// Set defaults before unmarshal so that absent keys keep defaults.
 	cfg.Host = "" // Default empty: binds to all interfaces (IPv4 + IPv6)
+	cfg.LocalRouting.TLD = "localhost"
+	cfg.LocalRouting.EdgePort = 1355
 	cfg.LoggingToFile = false
 	cfg.LogsMaxTotalSizeMB = 0
 	cfg.ErrorLogsMaxFiles = 10
@@ -645,6 +663,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Validate raw payload rules and drop invalid entries.
 	cfg.SanitizePayloadRules()
 
+	// Normalize local routing settings.
+	cfg.SanitizeLocalRouting()
+
 	// NOTE: Legacy migration persistence is intentionally disabled together with
 	// startup legacy migration to keep startup read-only for config.yaml.
 	// Re-enable the block below if automatic startup migration is needed again.
@@ -662,6 +683,25 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	// Return the populated configuration struct.
 	return &cfg, nil
+}
+
+// SanitizeLocalRouting normalizes local routing config values.
+func (cfg *Config) SanitizeLocalRouting() {
+	if cfg == nil {
+		return
+	}
+	cfg.LocalRouting.Name = strings.TrimSpace(cfg.LocalRouting.Name)
+	cfg.LocalRouting.TLD = strings.TrimPrefix(strings.ToLower(strings.TrimSpace(cfg.LocalRouting.TLD)), ".")
+	if cfg.LocalRouting.TLD == "" {
+		cfg.LocalRouting.TLD = "localhost"
+	}
+	cfg.LocalRouting.StateDir = strings.TrimSpace(cfg.LocalRouting.StateDir)
+	if cfg.LocalRouting.EdgePort <= 0 {
+		cfg.LocalRouting.EdgePort = 1355
+	}
+	if cfg.LocalRouting.AppPort < 0 {
+		cfg.LocalRouting.AppPort = 0
+	}
 }
 
 // SanitizePayloadRules validates raw JSON payload rule params and drops invalid rules.

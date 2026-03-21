@@ -29,6 +29,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kimi"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/qwen"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/localrouting"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
@@ -231,7 +232,26 @@ func (h *Handler) managementCallbackURL(path string) (string, error) {
 	if h.cfg.TLS.Enable {
 		scheme = "https"
 	}
-	return fmt.Sprintf("%s://127.0.0.1:%d%s", scheme, h.cfg.Port, path), nil
+	target := fmt.Sprintf("%s://127.0.0.1:%d%s", scheme, h.cfg.Port, path)
+	if h.cfg.LocalRouting.Enabled && h.cfg.LocalRouting.DisplayOAuthURL {
+		lrCfg := localrouting.BuildConfig(
+			h.cfg.LocalRouting.Enabled,
+			h.cfg.LocalRouting.Name,
+			h.cfg.LocalRouting.TLD,
+			h.cfg.LocalRouting.EdgePort,
+			h.cfg.LocalRouting.HTTPS,
+			h.cfg.LocalRouting.AppPort,
+			h.cfg.LocalRouting.StateDir,
+			h.cfg.LocalRouting.Force,
+			h.cfg.LocalRouting.DisplayOAuthURL,
+		)
+		status := localrouting.LoadStatusFromConfig(lrCfg)
+		if status.Host != "" && status.EdgePort > 0 {
+			displayBase := localrouting.BuildURL(status.HTTPS, status.Host, status.EdgePort)
+			log.Infof("oauth callback named URL hint: %s%s", strings.TrimSuffix(displayBase, "/"), path)
+		}
+	}
+	return target, nil
 }
 
 func (h *Handler) ListAuthFiles(c *gin.Context) {

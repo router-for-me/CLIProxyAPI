@@ -74,6 +74,14 @@ func main() {
 	var password string
 	var tuiMode bool
 	var standalone bool
+	var localRouting bool
+	var localName string
+	var localTLD string
+	var localEdgePort int
+	var localHTTPS bool
+	var localAppPort int
+	var localStateDir string
+	var localForce bool
 
 	// Define command-line flags for different operation modes.
 	flag.BoolVar(&login, "login", false, "Login Google Account")
@@ -93,6 +101,14 @@ func main() {
 	flag.StringVar(&password, "password", "", "")
 	flag.BoolVar(&tuiMode, "tui", false, "Start with terminal management UI")
 	flag.BoolVar(&standalone, "standalone", false, "In TUI mode, start an embedded local server")
+	flag.BoolVar(&localRouting, "local-routing", false, "Enable named local routing mode")
+	flag.StringVar(&localName, "local-name", "", "Override local route name in named local routing mode")
+	flag.StringVar(&localTLD, "local-tld", "", "Override local route TLD in named local routing mode")
+	flag.IntVar(&localEdgePort, "local-edge-port", 0, "Override edge proxy port in named local routing mode")
+	flag.BoolVar(&localHTTPS, "local-https", false, "Enable HTTPS URL mode for named local routing")
+	flag.IntVar(&localAppPort, "local-app-port", 0, "Pin backend app port in named local routing mode")
+	flag.StringVar(&localStateDir, "local-state-dir", "", "Override local routing state directory")
+	flag.BoolVar(&localForce, "local-force", false, "Force takeover when a local route is already owned")
 
 	flag.CommandLine.Usage = func() {
 		out := flag.CommandLine.Output()
@@ -394,6 +410,32 @@ func main() {
 	if cfg == nil {
 		cfg = &config.Config{}
 	}
+	cfg.SanitizeLocalRouting()
+	if localRouting {
+		cfg.LocalRouting.Enabled = true
+	}
+	if trimmed := strings.TrimSpace(localName); trimmed != "" {
+		cfg.LocalRouting.Name = trimmed
+	}
+	if trimmed := strings.TrimSpace(localTLD); trimmed != "" {
+		cfg.LocalRouting.TLD = trimmed
+	}
+	if localEdgePort > 0 {
+		cfg.LocalRouting.EdgePort = localEdgePort
+	}
+	if localHTTPS {
+		cfg.LocalRouting.HTTPS = true
+	}
+	if localAppPort > 0 {
+		cfg.LocalRouting.AppPort = localAppPort
+	}
+	if trimmed := strings.TrimSpace(localStateDir); trimmed != "" {
+		cfg.LocalRouting.StateDir = trimmed
+	}
+	if localForce {
+		cfg.LocalRouting.Force = true
+	}
+	cfg.SanitizeLocalRouting()
 
 	// In cloud deploy mode, check if we have a valid configuration
 	var configFileExists bool
