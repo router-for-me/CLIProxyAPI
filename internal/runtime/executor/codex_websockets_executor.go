@@ -127,6 +127,49 @@ func (s *codexWebsocketSession) isCurrentConn(conn *websocket.Conn) bool {
 	return current == conn
 }
 
+func (s *codexWebsocketSession) activeSnapshotForCurrentConn(conn *websocket.Conn) (chan codexWebsocketRead, <-chan struct{}, bool) {
+	if s == nil || conn == nil {
+		return nil, nil, false
+	}
+	s.connMu.Lock()
+	if s.conn != conn {
+		s.connMu.Unlock()
+		return nil, nil, false
+	}
+	s.activeMu.Lock()
+	ch := s.activeCh
+	done := s.activeDone
+	s.activeMu.Unlock()
+	s.connMu.Unlock()
+	return ch, done, true
+}
+
+func (s *codexWebsocketSession) clearActiveForCurrentConn(conn *websocket.Conn, ch chan codexWebsocketRead) bool {
+	if s == nil || conn == nil || ch == nil {
+		return false
+	}
+	s.connMu.Lock()
+	if s.conn != conn {
+		s.connMu.Unlock()
+		return false
+	}
+	s.activeMu.Lock()
+	if s.activeCh != ch {
+		s.activeMu.Unlock()
+		s.connMu.Unlock()
+		return false
+	}
+	s.activeCh = nil
+	if s.activeCancel != nil {
+		s.activeCancel()
+	}
+	s.activeCancel = nil
+	s.activeDone = nil
+	s.activeMu.Unlock()
+	s.connMu.Unlock()
+	return true
+}
+
 func (s *codexWebsocketSession) writeMessage(conn *websocket.Conn, msgType int, payload []byte) error {
 	if s == nil {
 		return fmt.Errorf("codex websockets executor: session is nil")
@@ -1140,22 +1183,21 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 		_ = conn.SetReadDeadline(time.Now().Add(codexResponsesWebsocketIdleTimeout))
 		msgType, payload, errRead := conn.ReadMessage()
 		if errRead != nil {
-			if !sess.isCurrentConn(conn) {
+			// 在同一临界区做归属校验和通道快照避免检查后竞态
+			ch, done, current := sess.activeSnapshotForCurrentConn(conn)
+			if !current {
 				// 旧连接读错时不触碰当前活跃通道
 				return
 			}
-			sess.activeMu.Lock()
-			ch := sess.activeCh
-			done := sess.activeDone
-			sess.activeMu.Unlock()
 			if ch != nil {
 				select {
 				case ch <- codexWebsocketRead{conn: conn, err: errRead}:
 				case <-done:
 				default:
 				}
-				sess.clearActive(ch)
-				close(ch)
+				if sess.clearActiveForCurrentConn(conn, ch) {
+					close(ch)
+				}
 			}
 			e.invalidateUpstreamConn(sess, conn, "upstream_disconnected", errRead)
 			return
@@ -1164,37 +1206,33 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 		if msgType != websocket.TextMessage {
 			if msgType == websocket.BinaryMessage {
 				errBinary := fmt.Errorf("codex websockets executor: unexpected binary message")
-				if !sess.isCurrentConn(conn) {
+				// 在同一临界区做归属校验和通道快照避免检查后竞态
+				ch, done, current := sess.activeSnapshotForCurrentConn(conn)
+				if !current {
 					// 旧连接二进制异常时不触碰当前活跃通道
 					return
 				}
-				sess.activeMu.Lock()
-				ch := sess.activeCh
-				done := sess.activeDone
-				sess.activeMu.Unlock()
 				if ch != nil {
 					select {
 					case ch <- codexWebsocketRead{conn: conn, err: errBinary}:
 					case <-done:
 					default:
 					}
-					sess.clearActive(ch)
-					close(ch)
+					if sess.clearActiveForCurrentConn(conn, ch) {
+						close(ch)
+					}
 				}
 				e.invalidateUpstreamConn(sess, conn, "unexpected_binary", errBinary)
 				return
 			}
 			continue
 		}
-		if !sess.isCurrentConn(conn) {
+		// 在同一临界区做归属校验和通道快照避免检查后竞态
+		ch, done, current := sess.activeSnapshotForCurrentConn(conn)
+		if !current {
 			// 旧连接消息不再分发给新连接请求
 			return
 		}
-
-		sess.activeMu.Lock()
-		ch := sess.activeCh
-		done := sess.activeDone
-		sess.activeMu.Unlock()
 		if ch == nil {
 			continue
 		}
