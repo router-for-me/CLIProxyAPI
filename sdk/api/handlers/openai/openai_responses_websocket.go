@@ -192,9 +192,6 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			}
 			continue
 		}
-		// lastRequest 始终保存完整 transcript 快照
-		lastRequest = nextSessionRequestSnapshot
-
 		modelName := gjson.GetBytes(requestJSON, "model").String()
 		cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 		cliCtx = cliproxyexecutor.WithDownstreamWebsocket(cliCtx)
@@ -238,7 +235,12 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			// 新账号完成一轮后恢复增量模式
 			forceDisableIncrementalAfterAuthReset = false
 		}
-		lastResponseOutput = completedOutput
+		if terminalStatus == 0 {
+			// 仅在本轮成功后提交快照避免失败轮次污染会话历史
+			lastRequest = nextSessionRequestSnapshot
+			// 仅在本轮成功后提交输出避免失败把状态推进到空输出
+			lastResponseOutput = completedOutput
+		}
 	}
 }
 
