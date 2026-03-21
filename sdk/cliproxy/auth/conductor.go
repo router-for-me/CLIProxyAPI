@@ -59,12 +59,15 @@ type RefreshEvaluator interface {
 }
 
 const (
-	refreshCheckInterval  = 5 * time.Second
-	refreshMaxConcurrency = 16
-	refreshPendingBackoff = time.Minute
-	refreshFailureBackoff = 5 * time.Minute
-	quotaBackoffBase      = time.Second
-	quotaBackoffMax       = 30 * time.Minute
+	refreshCheckInterval         = 5 * time.Second
+	refreshMaxConcurrency        = 16
+	refreshPendingBackoff        = time.Minute
+	refreshFailureBackoff        = 5 * time.Minute
+	quotaBackoffBase             = time.Second
+	quotaBackoffMax              = 30 * time.Minute
+	responseHeaderRequestedModel = "X-CLIProxy-Requested-Model"
+	responseHeaderBackendModel   = "X-CLIProxy-Backend-Model"
+	responseHeaderProvider       = "X-CLIProxy-Provider"
 )
 
 var quotaCooldownDisabled atomic.Bool
@@ -483,7 +486,29 @@ func readStreamBootstrap(ctx context.Context, ch <-chan cliproxyexecutor.StreamC
 	}
 }
 
-func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, routeModel string, headers http.Header, buffered []cliproxyexecutor.StreamChunk, remaining <-chan cliproxyexecutor.StreamChunk) *cliproxyexecutor.StreamResult {
+func annotateExecutionHeaders(headers http.Header, provider, requestedModel, backendModel string) http.Header {
+	var out http.Header
+	if headers == nil {
+		out = make(http.Header)
+	} else {
+		out = headers.Clone()
+	}
+	if requestedModel = strings.TrimSpace(requestedModel); requestedModel != "" {
+		out.Set(responseHeaderRequestedModel, requestedModel)
+	}
+	if backendModel = strings.TrimSpace(backendModel); backendModel != "" {
+		out.Set(responseHeaderBackendModel, backendModel)
+	}
+	if provider = strings.TrimSpace(provider); provider != "" {
+		out.Set(responseHeaderProvider, provider)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, routeModel, backendModel string, headers http.Header, buffered []cliproxyexecutor.StreamChunk, remaining <-chan cliproxyexecutor.StreamChunk) *cliproxyexecutor.StreamResult {
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
 		defer close(out)
@@ -529,7 +554,10 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, ro
 			m.MarkResult(ctx, Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: true})
 		}
 	}()
-	return &cliproxyexecutor.StreamResult{Headers: headers, Chunks: out}
+	return &cliproxyexecutor.StreamResult{
+		Headers: annotateExecutionHeaders(headers, provider, routeModel, backendModel),
+		Chunks:  out,
+	}
 }
 
 func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor ProviderExecutor, auth *Auth, provider string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, routeModel string) (*cliproxyexecutor.StreamResult, error) {
@@ -592,7 +620,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			errCh := make(chan cliproxyexecutor.StreamChunk, 1)
 			errCh <- cliproxyexecutor.StreamChunk{Err: bootstrapErr}
 			close(errCh)
-			return m.wrapStreamResult(ctx, auth.Clone(), provider, routeModel, streamResult.Headers, nil, errCh), nil
+			return m.wrapStreamResult(ctx, auth.Clone(), provider, routeModel, execModel, streamResult.Headers, nil, errCh), nil
 		}
 
 		if closed && len(buffered) == 0 {
@@ -606,7 +634,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			errCh := make(chan cliproxyexecutor.StreamChunk, 1)
 			errCh <- cliproxyexecutor.StreamChunk{Err: emptyErr}
 			close(errCh)
-			return m.wrapStreamResult(ctx, auth.Clone(), provider, routeModel, streamResult.Headers, nil, errCh), nil
+			return m.wrapStreamResult(ctx, auth.Clone(), provider, routeModel, execModel, streamResult.Headers, nil, errCh), nil
 		}
 
 		remaining := streamResult.Chunks
@@ -615,7 +643,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			close(closedCh)
 			remaining = closedCh
 		}
-		return m.wrapStreamResult(ctx, auth.Clone(), provider, routeModel, streamResult.Headers, buffered, remaining), nil
+		return m.wrapStreamResult(ctx, auth.Clone(), provider, routeModel, execModel, streamResult.Headers, buffered, remaining), nil
 	}
 	if lastErr == nil {
 		lastErr = &Error{Code: "auth_not_found", Message: "no upstream model available"}
@@ -1032,6 +1060,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				continue
 			}
 			m.MarkResult(execCtx, result)
+			resp.Headers = annotateExecutionHeaders(resp.Headers, provider, routeModel, upstreamModel)
 			return resp, nil
 		}
 		if authErr != nil {
@@ -1104,6 +1133,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				continue
 			}
 			m.hook.OnResult(execCtx, result)
+			resp.Headers = annotateExecutionHeaders(resp.Headers, provider, routeModel, upstreamModel)
 			return resp, nil
 		}
 		if authErr != nil {
