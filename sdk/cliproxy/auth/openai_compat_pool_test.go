@@ -208,6 +208,9 @@ func TestManagerExecute_OpenAICompatAliasPoolRotatesWithinAuth(t *testing.T) {
 		if len(resp.Payload) == 0 {
 			t.Fatalf("execute %d returned empty payload", i)
 		}
+		if got := resp.Headers.Get(responseHeaderRequestedModel); got != alias {
+			t.Fatalf("execute %d requested-model header = %q, want %q", i, got, alias)
+		}
 	}
 
 	got := executor.ExecuteModels()
@@ -260,6 +263,12 @@ func TestManagerExecute_OpenAICompatAliasPoolFallsBackWithinSameAuth(t *testing.
 	}
 	if string(resp.Payload) != "glm-5" {
 		t.Fatalf("payload = %q, want %q", string(resp.Payload), "glm-5")
+	}
+	if got := resp.Headers.Get(responseHeaderBackendModel); got != "glm-5" {
+		t.Fatalf("backend-model header = %q, want %q", got, "glm-5")
+	}
+	if got := resp.Headers.Get(responseHeaderRequestedModel); got != alias {
+		t.Fatalf("requested-model header = %q, want %q", got, alias)
 	}
 	got := executor.ExecuteModels()
 	want := []string{"qwen3.5-plus", "glm-5"}
@@ -341,6 +350,12 @@ func TestManagerExecuteStream_OpenAICompatAliasPoolFallsBackBeforeFirstByte(t *t
 	if gotHeader := streamResult.Headers.Get("X-Model"); gotHeader != "glm-5" {
 		t.Fatalf("header X-Model = %q, want %q", gotHeader, "glm-5")
 	}
+	if gotHeader := streamResult.Headers.Get(responseHeaderBackendModel); gotHeader != "glm-5" {
+		t.Fatalf("backend-model header = %q, want %q", gotHeader, "glm-5")
+	}
+	if gotHeader := streamResult.Headers.Get(responseHeaderRequestedModel); gotHeader != alias {
+		t.Fatalf("requested-model header = %q, want %q", gotHeader, alias)
+	}
 }
 
 func TestManagerExecuteStream_OpenAICompatAliasPoolStopsOnInvalidRequest(t *testing.T) {
@@ -379,6 +394,9 @@ func TestManagerExecuteCount_OpenAICompatAliasPoolRotatesWithinAuth(t *testing.T
 		}
 		if len(resp.Payload) == 0 {
 			t.Fatalf("execute count %d returned empty payload", i)
+		}
+		if got := resp.Headers.Get(responseHeaderRequestedModel); got != alias {
+			t.Fatalf("execute count %d requested-model header = %q, want %q", i, got, alias)
 		}
 	}
 
