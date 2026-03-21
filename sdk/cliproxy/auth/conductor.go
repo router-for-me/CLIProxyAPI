@@ -60,12 +60,14 @@ type RefreshEvaluator interface {
 }
 
 const (
-	refreshCheckInterval  = 5 * time.Second
-	refreshMaxConcurrency = 16
-	refreshPendingBackoff = time.Minute
-	refreshFailureBackoff = 5 * time.Minute
-	quotaBackoffBase      = time.Second
-	quotaBackoffMax       = 30 * time.Minute
+	refreshCheckInterval      = 5 * time.Second
+	refreshMaxConcurrency     = 16
+	refreshPendingBackoff     = time.Minute
+	refreshFailureBackoff     = 5 * time.Minute
+	quotaBackoffBase          = time.Second
+	quotaBackoffMax           = 30 * time.Minute
+	streamBootstrapHedge      = 2
+	streamBootstrapHedgeDelay = 20 * time.Millisecond
 )
 
 var quotaCooldownDisabled atomic.Bool
@@ -648,10 +650,12 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				lastErr = bootstrapErr
 				continue
 			}
-			errCh := make(chan cliproxyexecutor.StreamChunk, 1)
-			errCh <- cliproxyexecutor.StreamChunk{Err: bootstrapErr}
-			close(errCh)
-			return m.wrapStreamResult(ctx, auth.Clone(), provider, routeModel, streamResult.Headers, nil, errCh), nil
+			rerr := resultErrorFromExec(bootstrapErr)
+			result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: false, Error: rerr}
+			result.RetryAfter = retryAfterFromError(bootstrapErr)
+			m.MarkResult(ctx, result)
+			discardStreamChunks(streamResult.Chunks)
+			return nil, bootstrapErr
 		}
 
 		if closed && len(buffered) == 0 {
@@ -662,10 +666,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				lastErr = emptyErr
 				continue
 			}
-			errCh := make(chan cliproxyexecutor.StreamChunk, 1)
-			errCh <- cliproxyexecutor.StreamChunk{Err: emptyErr}
-			close(errCh)
-			return m.wrapStreamResult(ctx, auth.Clone(), provider, routeModel, streamResult.Headers, nil, errCh), nil
+			return nil, emptyErr
 		}
 
 		remaining := streamResult.Chunks
@@ -680,6 +681,133 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		lastErr = &Error{Code: "auth_not_found", Message: "no upstream model available"}
 	}
 	return nil, lastErr
+}
+
+type streamExecutionCandidate struct {
+	auth     *Auth
+	executor ProviderExecutor
+	provider string
+	execCtx  context.Context
+}
+
+type streamExecutionResult struct {
+	candidate streamExecutionCandidate
+	stream    *cliproxyexecutor.StreamResult
+	err       error
+}
+
+func (m *Manager) streamBootstrapParallelism(ctx context.Context, opts cliproxyexecutor.Options, maxRetryCredentials int) int {
+	if pinnedAuthIDFromMetadata(opts.Metadata) != "" {
+		return 1
+	}
+	if executionSessionIDFromMetadata(opts.Metadata) != "" {
+		return 1
+	}
+	if cliproxyexecutor.DownstreamWebsocket(ctx) {
+		return 1
+	}
+	if maxRetryCredentials == 1 {
+		return 1
+	}
+	return streamBootstrapHedge
+}
+
+func (m *Manager) executeStreamCandidates(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, routeModel string, candidates []streamExecutionCandidate) (*cliproxyexecutor.StreamResult, error) {
+	if len(candidates) == 0 {
+		return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
+	}
+	if len(candidates) == 1 {
+		candidate := candidates[0]
+		debugLogAuthSelection(ctx, candidate.auth, candidate.provider, req.Model)
+		streamResult, err := m.executeStreamWithModelPool(candidate.execCtx, candidate.executor, candidate.auth, candidate.provider, req, opts, routeModel)
+		if err == nil {
+			publishSelectedAuthMetadata(opts.Metadata, candidate.auth.ID)
+		}
+		return streamResult, err
+	}
+
+	results := make(chan streamExecutionResult, len(candidates))
+	cancels := make([]context.CancelFunc, len(candidates))
+	for idx, candidate := range candidates {
+		attemptCtx, cancel := context.WithCancel(candidate.execCtx)
+		cancels[idx] = cancel
+		candidate.execCtx = attemptCtx
+		go func(idx int, candidate streamExecutionCandidate) {
+			if idx > 0 {
+				timer := time.NewTimer(time.Duration(idx) * streamBootstrapHedgeDelay)
+				defer timer.Stop()
+				select {
+				case <-candidate.execCtx.Done():
+					results <- streamExecutionResult{candidate: candidate, err: candidate.execCtx.Err()}
+					return
+				case <-timer.C:
+				}
+			}
+			debugLogAuthSelection(ctx, candidate.auth, candidate.provider, req.Model)
+			streamResult, err := m.executeStreamWithModelPool(candidate.execCtx, candidate.executor, candidate.auth, candidate.provider, req, opts, routeModel)
+			if err == nil && candidate.execCtx.Err() != nil {
+				if streamResult != nil {
+					discardStreamChunks(streamResult.Chunks)
+				}
+				streamResult = nil
+				err = candidate.execCtx.Err()
+			}
+			results <- streamExecutionResult{candidate: candidate, stream: streamResult, err: err}
+		}(idx, candidate)
+	}
+
+	cancelOthers := func(winnerID string) {
+		for _, candidate := range candidates {
+			if candidate.auth == nil || candidate.auth.ID == winnerID {
+				continue
+			}
+			for idx, original := range candidates {
+				if original.auth != nil && original.auth.ID == candidate.auth.ID && cancels[idx] != nil {
+					cancels[idx]()
+				}
+			}
+		}
+	}
+
+	var (
+		lastErr    error
+		invalidErr error
+	)
+	pending := len(candidates)
+	for pending > 0 {
+		result := <-results
+		pending--
+		if result.err == nil && result.stream != nil {
+			publishSelectedAuthMetadata(opts.Metadata, result.candidate.auth.ID)
+			cancelOthers(result.candidate.auth.ID)
+			if pending > 0 {
+				go func(remaining int) {
+					for i := 0; i < remaining; i++ {
+						trailing := <-results
+						if trailing.stream != nil {
+							discardStreamChunks(trailing.stream.Chunks)
+						}
+					}
+				}(pending)
+			}
+			return result.stream, nil
+		}
+		if result.err != nil {
+			if isRequestInvalidError(result.err) && invalidErr == nil {
+				invalidErr = result.err
+			}
+			if !errors.Is(result.err, context.Canceled) {
+				lastErr = result.err
+			}
+		}
+	}
+	if invalidErr != nil {
+		return nil, invalidErr
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 }
 
 func (m *Manager) rebuildAPIKeyModelAliasFromRuntimeConfig() {
@@ -1311,6 +1439,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	opts = ensureRequestedModelMetadata(opts, routeModel)
 	tried := make(map[string]struct{})
 	var lastErr error
+	parallelism := m.streamBootstrapParallelism(ctx, opts, maxRetryCredentials)
 	for {
 		if maxRetryCredentials > 0 && len(tried) >= maxRetryCredentials {
 			if lastErr != nil {
@@ -1318,43 +1447,55 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			}
 			return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 		}
-		if len(tried) > 0 && !ConsumeRequestRetryBudget(ctx) {
+
+		candidates := make([]streamExecutionCandidate, 0, parallelism)
+		for len(candidates) < parallelism {
+			if maxRetryCredentials > 0 && len(tried) >= maxRetryCredentials {
+				break
+			}
+			if len(tried) > 0 && !ConsumeRequestRetryBudget(ctx) {
+				break
+			}
+			var (
+				auth     *Auth
+				executor ProviderExecutor
+				provider string
+				errPick  error
+			)
+			if len(providers) == 1 {
+				provider = providers[0]
+				auth, executor, errPick = m.pickNext(ctx, provider, routeModel, opts, tried)
+			} else {
+				auth, executor, provider, errPick = m.pickNextMixed(ctx, providers, routeModel, opts, tried)
+			}
+			if errPick != nil {
+				if len(candidates) == 0 {
+					if lastErr != nil {
+						return nil, lastErr
+					}
+					return nil, errPick
+				}
+				break
+			}
+
+			tried[auth.ID] = struct{}{}
+			candidates = append(candidates, streamExecutionCandidate{
+				auth:     auth,
+				executor: executor,
+				provider: provider,
+				execCtx:  m.executionContextForAuth(ctx, auth),
+			})
+		}
+		if len(candidates) == 0 {
 			if lastErr != nil {
 				return nil, lastErr
 			}
 			return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 		}
-		var (
-			auth     *Auth
-			executor ProviderExecutor
-			provider string
-			errPick  error
-		)
-		if len(providers) == 1 {
-			provider = providers[0]
-			auth, executor, errPick = m.pickNext(ctx, provider, routeModel, opts, tried)
-		} else {
-			auth, executor, provider, errPick = m.pickNextMixed(ctx, providers, routeModel, opts, tried)
-		}
-		if errPick != nil {
-			if lastErr != nil {
-				return nil, lastErr
-			}
-			return nil, errPick
-		}
 
-		debugLogAuthSelection(ctx, auth, provider, req.Model)
-		publishSelectedAuthMetadata(opts.Metadata, auth.ID)
-
-		tried[auth.ID] = struct{}{}
-		execCtx := ctx
-		if rt := m.roundTripperFor(auth); rt != nil {
-			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
-			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
-		}
-		streamResult, errStream := m.executeStreamWithModelPool(execCtx, executor, auth, provider, req, opts, routeModel)
+		streamResult, errStream := m.executeStreamCandidates(ctx, req, opts, routeModel, candidates)
 		if errStream != nil {
-			if errCtx := execCtx.Err(); errCtx != nil {
+			if errCtx := ctx.Err(); errCtx != nil {
 				return nil, errCtx
 			}
 			if isRequestInvalidError(errStream) {
@@ -1411,6 +1552,24 @@ func pinnedAuthIDFromMetadata(meta map[string]any) string {
 		return ""
 	}
 	raw, ok := meta[cliproxyexecutor.PinnedAuthMetadataKey]
+	if !ok || raw == nil {
+		return ""
+	}
+	switch val := raw.(type) {
+	case string:
+		return strings.TrimSpace(val)
+	case []byte:
+		return strings.TrimSpace(string(val))
+	default:
+		return ""
+	}
+}
+
+func executionSessionIDFromMetadata(meta map[string]any) string {
+	if len(meta) == 0 {
+		return ""
+	}
+	raw, ok := meta[cliproxyexecutor.ExecutionSessionMetadataKey]
 	if !ok || raw == nil {
 		return ""
 	}
@@ -3119,6 +3278,15 @@ func (m *Manager) executorFor(provider string) ProviderExecutor {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.executors[provider]
+}
+
+func (m *Manager) executionContextForAuth(ctx context.Context, auth *Auth) context.Context {
+	execCtx := ctx
+	if rt := m.roundTripperFor(auth); rt != nil {
+		execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
+		execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
+	}
+	return execCtx
 }
 
 // roundTripperContextKey is an unexported context key type to avoid collisions.
