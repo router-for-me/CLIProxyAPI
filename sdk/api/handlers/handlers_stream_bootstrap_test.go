@@ -303,6 +303,54 @@ func TestExecuteStreamWithAuthManager_RetriesBeforeFirstByte(t *testing.T) {
 	}
 }
 
+func TestExecuteStreamWithAuthManager_DoesNotReplayHandlerBootstrapAfterStartupFailure(t *testing.T) {
+	executor := &failOnceStreamExecutor{}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+
+	auth := &coreauth.Auth{
+		ID:       "auth1",
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Metadata: map[string]any{"email": "test1@example.com"},
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("manager.Register(auth): %v", err)
+	}
+
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "test-model"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{
+		Streaming: sdkconfig.StreamingConfig{BootstrapRetries: 1},
+	}, manager)
+	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(context.Background(), "openai", "test-model", []byte(`{"model":"test-model"}`), "")
+	if dataChan != nil {
+		t.Fatal("expected nil data channel when startup fails before first payload")
+	}
+	if errChan == nil {
+		t.Fatal("expected non-nil error channel")
+	}
+
+	var gotErr *interfaces.ErrorMessage
+	for msg := range errChan {
+		if msg != nil {
+			gotErr = msg
+		}
+	}
+	if gotErr == nil {
+		t.Fatal("expected startup error message")
+	}
+	if gotErr.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", gotErr.StatusCode, http.StatusUnauthorized)
+	}
+	if executor.Calls() != 1 {
+		t.Fatalf("expected handler to avoid replaying startup bootstrap, got %d calls", executor.Calls())
+	}
+}
+
 func TestExecuteStreamWithAuthManager_HeaderPassthroughDisabledByDefault(t *testing.T) {
 	executor := &failOnceStreamExecutor{}
 	manager := coreauth.NewManager(nil, nil, nil)
@@ -472,27 +520,27 @@ func TestExecuteStreamWithAuthManager_PinnedAuthKeepsSameUpstream(t *testing.T) 
 	}, manager)
 	ctx := WithPinnedAuthID(context.Background(), "auth1")
 	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(ctx, "openai", "test-model", []byte(`{"model":"test-model"}`), "")
-	if dataChan == nil || errChan == nil {
-		t.Fatalf("expected non-nil channels")
+	if dataChan != nil {
+		t.Fatalf("expected nil data channel for startup failure")
 	}
-
-	var got []byte
-	for chunk := range dataChan {
-		got = append(got, chunk...)
+	if errChan == nil {
+		t.Fatalf("expected non-nil error channel")
 	}
 
 	var gotErr error
+	var gotStatus int
 	for msg := range errChan {
 		if msg != nil && msg.Error != nil {
 			gotErr = msg.Error
+			gotStatus = msg.StatusCode
 		}
 	}
 
-	if len(got) != 0 {
-		t.Fatalf("expected empty payload, got %q", string(got))
-	}
 	if gotErr == nil {
 		t.Fatalf("expected terminal error, got nil")
+	}
+	if gotStatus != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", gotStatus, http.StatusUnauthorized)
 	}
 	authIDs := executor.AuthIDs()
 	if len(authIDs) == 0 {
@@ -649,12 +697,13 @@ func TestExecuteStreamWithAuthManager_SharesBudgetAcrossModelFallbackAndBootstra
 	}, manager)
 	ctx := manager.WithRequestRetryBudget(context.Background(), 0)
 	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(ctx, "openai", "test-model", []byte(`{"model":"test-model"}`), "")
-	if dataChan == nil || errChan == nil {
-		t.Fatalf("expected non-nil channels")
+	if dataChan != nil {
+		t.Fatalf("expected nil data channel on startup failure after budget exhaustion")
+	}
+	if errChan == nil {
+		t.Fatalf("expected non-nil error channel")
 	}
 
-	for range dataChan {
-	}
 	var gotErr *interfaces.ErrorMessage
 	for msg := range errChan {
 		if msg != nil {
