@@ -25,6 +25,9 @@ jobs:
         with:
           go-version: '>=1.26.0'
           cache: true
+      - name: Validate SemVer Tag
+        run: |
+          go run ./scripts/validate_tag.go "${GITHUB_REF_NAME}"
       - name: Generate Build Metadata
         run: |
           echo "VERSION=${GITHUB_REF_NAME}" >> $GITHUB_ENV
@@ -34,7 +37,7 @@ jobs:
         with:
           distribution: goreleaser
           version: latest
-          args: release --clean --skip=validate
+          args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ env.VERSION }}

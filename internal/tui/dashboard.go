@@ -138,9 +138,9 @@ func (m dashboardModel) renderDashboard(cfg, usage map[string]any, authFiles []m
 	// ━━━ Stats Cards ━━━
 	cardWidth := 25
 	if m.width > 0 {
-		cardWidth = (m.width - 6) / 4
-		if cardWidth < 18 {
-			cardWidth = 18
+		cardWidth = (m.width - 8) / 5
+		if cardWidth < 16 {
+			cardWidth = 16
 		}
 	}
 
@@ -177,12 +177,14 @@ func (m dashboardModel) renderDashboard(cfg, usage map[string]any, authFiles []m
 	totalReqs := int64(0)
 	successReqs := int64(0)
 	failedReqs := int64(0)
+	totalFailovers := int64(0)
 	totalTokens := int64(0)
 	if usage != nil {
 		if usageMap, ok := usage["usage"].(map[string]any); ok {
 			totalReqs = int64(getFloat(usageMap, "total_requests"))
 			successReqs = int64(getFloat(usageMap, "success_count"))
 			failedReqs = int64(getFloat(usageMap, "failure_count"))
+			totalFailovers = int64(getFloat(usageMap, "total_failovers"))
 			totalTokens = int64(getFloat(usageMap, "total_tokens"))
 		}
 	}
@@ -192,15 +194,22 @@ func (m dashboardModel) renderDashboard(cfg, usage map[string]any, authFiles []m
 		lipgloss.NewStyle().Foreground(colorMuted).Render(fmt.Sprintf("%s (✓%d ✗%d)", T("total_requests"), successReqs, failedReqs)),
 	))
 
-	// Card 4: Total Tokens
-	tokenStr := formatLargeNumber(totalTokens)
+	// Card 4: Total Failovers
 	card4 := cardStyle.Render(fmt.Sprintf(
+		"%s\n%s",
+		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("203")).Render(fmt.Sprintf("🔀 %d", totalFailovers)),
+		lipgloss.NewStyle().Foreground(colorMuted).Render(T("total_failovers")),
+	))
+
+	// Card 5: Total Tokens
+	tokenStr := formatLargeNumber(totalTokens)
+	card5 := cardStyle.Render(fmt.Sprintf(
 		"%s\n%s",
 		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("170")).Render(fmt.Sprintf("🔤 %s", tokenStr)),
 		lipgloss.NewStyle().Foreground(colorMuted).Render(T("total_tokens")),
 	))
 
-	sb.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, card1, " ", card2, " ", card3, " ", card4))
+	sb.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, card1, " ", card2, " ", card3, " ", card4, " ", card5))
 	sb.WriteString("\n\n")
 
 	// ━━━ Current Config ━━━

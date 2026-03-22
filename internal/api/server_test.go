@@ -46,6 +46,48 @@ func newTestServer(t *testing.T) *Server {
 	return NewServer(cfg, authManager, accessManager, configPath)
 }
 
+// TestUpdateClients_PreservesManagementRoutesWithLocalPassword verifies fix edf43d2e:
+// when a server is started with a localPassword (TUI standalone mode), calling
+// UpdateClients with a config that has no SecretKey must keep managementRoutesEnabled
+// true, not reset it to false.
+func TestUpdateClients_PreservesManagementRoutesWithLocalPassword(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if err := os.MkdirAll(authDir, 0o700); err != nil {
+		t.Fatalf("failed to create auth dir: %v", err)
+	}
+
+	cfg := &proxyconfig.Config{
+		Port:    0,
+		AuthDir: authDir,
+	}
+
+	authManager := auth.NewManager(nil, nil, nil)
+	accessManager := sdkaccess.NewManager()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+
+	server := NewServer(cfg, authManager, accessManager, configPath,
+		WithLocalManagementPassword("tui-test-password"))
+
+	// Routes should be enabled on startup because localPassword is set.
+	if !server.managementRoutesEnabled.Load() {
+		t.Fatal("managementRoutesEnabled should be true after NewServer with localPassword")
+	}
+
+	// Simulate a config reload with no SecretKey (typical TUI standalone scenario).
+	reloadedCfg := &proxyconfig.Config{
+		Port:    0,
+		AuthDir: authDir,
+	}
+	server.UpdateClients(reloadedCfg)
+
+	if !server.managementRoutesEnabled.Load() {
+		t.Fatal("managementRoutesEnabled must remain true after UpdateClients when localPassword is set")
+	}
+}
+
 func TestAmpProviderModelRoutes(t *testing.T) {
 	testCases := []struct {
 		name         string
