@@ -30,15 +30,16 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/tui"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/version"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
 
 var (
-	Version           = "6.9.0-alpha.1"
-	Commit            = "Failover-MVP"
-	BuildDate         = "2026-03-20T14:45:00Z"
+	Version           = "dev"
+	Commit            = "none"
+	BuildDate         = "unknown"
 	DefaultConfigPath = ""
 )
 
@@ -50,12 +51,26 @@ func init() {
 	buildinfo.BuildDate = BuildDate
 }
 
+func handleVersionFlags(out io.Writer, showVersion bool, showVersionJSON bool) (bool, error) {
+	if showVersion {
+		_, err := fmt.Fprintln(out, version.Short())
+		return true, err
+	}
+	if showVersionJSON {
+		payload, err := version.JSON()
+		if err != nil {
+			return true, err
+		}
+		_, err = fmt.Fprintln(out, string(payload))
+		return true, err
+	}
+	return false, nil
+}
+
 // main is the entry point of the application.
 // It parses command-line flags, loads configuration, and starts the appropriate
 // service based on the provided flags (login, codex-login, or server mode).
 func main() {
-	fmt.Printf("CLIProxyAPI Version: %s, Commit: %s, BuiltAt: %s\n", buildinfo.Version, buildinfo.Commit, buildinfo.BuildDate)
-
 	// Command-line flags to control the application's behavior.
 	var login bool
 	var codexLogin bool
@@ -74,6 +89,8 @@ func main() {
 	var password string
 	var tuiMode bool
 	var standalone bool
+	var showVersion bool
+	var showVersionJSON bool
 
 	// Define command-line flags for different operation modes.
 	flag.BoolVar(&login, "login", false, "Login Google Account")
@@ -93,6 +110,8 @@ func main() {
 	flag.StringVar(&password, "password", "", "")
 	flag.BoolVar(&tuiMode, "tui", false, "Start with terminal management UI")
 	flag.BoolVar(&standalone, "standalone", false, "In TUI mode, start an embedded local server")
+	flag.BoolVar(&showVersion, "version", false, "Print semantic version and exit")
+	flag.BoolVar(&showVersionJSON, "version-json", false, "Print version metadata as JSON and exit")
 
 	flag.CommandLine.Usage = func() {
 		out := flag.CommandLine.Output()
@@ -123,6 +142,16 @@ func main() {
 
 	// Parse the command-line flags.
 	flag.Parse()
+
+	if handled, errVersion := handleVersionFlags(flag.CommandLine.Output(), showVersion, showVersionJSON); handled {
+		if errVersion != nil {
+			_, _ = fmt.Fprintf(flag.CommandLine.Output(), "version error: %v\n", errVersion)
+			os.Exit(1)
+		}
+		return
+	}
+
+	fmt.Println(version.Long())
 
 	// Core application variables.
 	var err error
@@ -423,7 +452,7 @@ func main() {
 		return
 	}
 
-	log.Infof("CLIProxyAPI Version: %s, Commit: %s, BuiltAt: %s", buildinfo.Version, buildinfo.Commit, buildinfo.BuildDate)
+	log.Infof("CLIProxyAPI Version: %s, Commit: %s, BuiltAt: %s", version.Short(), buildinfo.Commit, buildinfo.BuildDate)
 
 	// Set the log level based on the configuration.
 	util.SetLogLevel(cfg)

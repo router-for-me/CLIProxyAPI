@@ -307,27 +307,33 @@ func (a *App) refreshTabs() {
 }
 
 func (a *App) initTabIfNeeded(_ int) tea.Cmd {
-	if a.initialized[a.activeTab] {
-		return nil
-	}
-	a.initialized[a.activeTab] = true
 	switch a.activeTab {
 	case tabDashboard:
+		a.initialized[a.activeTab] = true
 		return a.dashboard.Init()
 	case tabConfig:
+		a.initialized[a.activeTab] = true
 		return a.config.Init()
 	case tabAuthFiles:
+		a.initialized[a.activeTab] = true
 		return a.auth.Init()
 	case tabAPIKeys:
+		a.initialized[a.activeTab] = true
 		return a.keys.Init()
 	case tabOAuth:
+		a.initialized[a.activeTab] = true
 		return a.oauth.Init()
 	case tabUsage:
+		a.initialized[a.activeTab] = true
 		return a.usage.Init()
 	case tabLogs:
 		if !a.logsEnabled {
 			return nil
 		}
+		if a.initialized[a.activeTab] {
+			return nil
+		}
+		a.initialized[a.activeTab] = true
 		return a.logs.Init()
 	}
 	return nil

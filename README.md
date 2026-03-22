@@ -60,6 +60,20 @@ Get 10% OFF GLM CODING PLAN：https://z.ai/subscribe?ic=8JVLJQFSKB
 
 CLIProxyAPI Guides: [https://help.router-for.me/](https://help.router-for.me/)
 
+## Build
+
+For local build/install instructions (including SemVer versioning), see `docs/build.md`.
+
+## Response Headers
+
+CLIProxyAPI adds routing metadata headers on responses so clients can distinguish the requested model from the backend model that actually served the request:
+
+- `X-CLIProxy-Requested-Model`: the model name requested by the client
+- `X-CLIProxy-Backend-Model`: the model name ultimately used upstream after aliasing or fallback
+- `X-CLIProxy-Provider`: the provider that handled the request
+
+For Gemini CLI intra-account failover, the proxy may also emit `x-cliproxy-model-fallback` as a supplemental header with `requested=` and `actual=` values. Treat the `X-CLIProxy-*` headers above as the stable cross-provider interface.
+
 ## Management API
 
 see [MANAGEMENT_API.md](https://help.router-for.me/management/api)

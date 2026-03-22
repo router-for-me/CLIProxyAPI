@@ -120,12 +120,13 @@ func (m usageTabModel) renderContent() string {
 	totalReqs := int64(getFloat(usageMap, "total_requests"))
 	successCnt := int64(getFloat(usageMap, "success_count"))
 	failureCnt := int64(getFloat(usageMap, "failure_count"))
+	totalFailovers := int64(getFloat(usageMap, "total_failovers"))
 	totalTokens := int64(getFloat(usageMap, "total_tokens"))
 
 	// ━━━ Overview Cards ━━━
 	cardWidth := 20
 	if m.width > 0 {
-		cardWidth = (m.width - 6) / 4
+		cardWidth = (m.width - 8) / 5
 		if cardWidth < 16 {
 			cardWidth = 16
 		}
@@ -145,11 +146,19 @@ func (m usageTabModel) renderContent() string {
 		lipgloss.NewStyle().Foreground(colorMuted).Render(fmt.Sprintf("● %s: %d  ● %s: %d", T("usage_success"), successCnt, T("usage_failure"), failureCnt)),
 	))
 
-	// Total Tokens
+	// Total Failovers
 	card2 := cardStyle.Copy().BorderForeground(lipgloss.Color("214")).Render(fmt.Sprintf(
 		"%s\n%s\n%s",
+		lipgloss.NewStyle().Foreground(colorMuted).Render(T("usage_total_failovers")),
+		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("214")).Render(fmt.Sprintf("%d", totalFailovers)),
+		lipgloss.NewStyle().Foreground(colorMuted).Render(T("total_failovers")),
+	))
+
+	// Total Tokens
+	card3 := cardStyle.Copy().BorderForeground(lipgloss.Color("170")).Render(fmt.Sprintf(
+		"%s\n%s\n%s",
 		lipgloss.NewStyle().Foreground(colorMuted).Render(T("usage_total_tokens")),
-		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("214")).Render(formatLargeNumber(totalTokens)),
+		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("170")).Render(formatLargeNumber(totalTokens)),
 		lipgloss.NewStyle().Foreground(colorMuted).Render(fmt.Sprintf("%s: %s", T("usage_total_token_l"), formatLargeNumber(totalTokens))),
 	))
 
@@ -160,7 +169,7 @@ func (m usageTabModel) renderContent() string {
 			rpm = float64(totalReqs) / float64(len(rByH)) / 60.0
 		}
 	}
-	card3 := cardStyle.Copy().BorderForeground(lipgloss.Color("76")).Render(fmt.Sprintf(
+	card4 := cardStyle.Copy().BorderForeground(lipgloss.Color("76")).Render(fmt.Sprintf(
 		"%s\n%s\n%s",
 		lipgloss.NewStyle().Foreground(colorMuted).Render(T("usage_rpm")),
 		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("76")).Render(fmt.Sprintf("%.2f", rpm)),
@@ -174,14 +183,14 @@ func (m usageTabModel) renderContent() string {
 			tpm = float64(totalTokens) / float64(len(tByH)) / 60.0
 		}
 	}
-	card4 := cardStyle.Copy().BorderForeground(lipgloss.Color("170")).Render(fmt.Sprintf(
+	card5 := cardStyle.Copy().BorderForeground(lipgloss.Color("111")).Render(fmt.Sprintf(
 		"%s\n%s\n%s",
 		lipgloss.NewStyle().Foreground(colorMuted).Render(T("usage_tpm")),
-		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("170")).Render(fmt.Sprintf("%.2f", tpm)),
+		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("111")).Render(fmt.Sprintf("%.2f", tpm)),
 		lipgloss.NewStyle().Foreground(colorMuted).Render(fmt.Sprintf("%s: %s", T("usage_total_tokens"), formatLargeNumber(totalTokens))),
 	))
 
-	sb.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, card1, " ", card2, " ", card3, " ", card4))
+	sb.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, card1, " ", card2, " ", card3, " ", card4, " ", card5))
 	sb.WriteString("\n\n")
 
 	// ━━━ Requests by Hour (ASCII bar chart) ━━━
@@ -221,17 +230,18 @@ func (m usageTabModel) renderContent() string {
 		sb.WriteString(strings.Repeat("─", minInt(m.width, 80)))
 		sb.WriteString("\n")
 
-		header := fmt.Sprintf("  %-30s %10s %12s", "API", T("requests"), T("tokens"))
+		header := fmt.Sprintf("  %-30s %10s %10s %12s", "API", T("requests"), T("failovers"), T("tokens"))
 		sb.WriteString(tableHeaderStyle.Render(header))
 		sb.WriteString("\n")
 
 		for apiName, apiSnap := range apis {
 			if apiMap, ok := apiSnap.(map[string]any); ok {
 				apiReqs := int64(getFloat(apiMap, "total_requests"))
+				apiFailovers := int64(getFloat(apiMap, "total_failovers"))
 				apiToks := int64(getFloat(apiMap, "total_tokens"))
 
-				row := fmt.Sprintf("  %-30s %10d %12s",
-					truncate(maskKey(apiName), 30), apiReqs, formatLargeNumber(apiToks))
+				row := fmt.Sprintf("  %-30s %10d %10d %12s",
+					truncate(maskKey(apiName), 30), apiReqs, apiFailovers, formatLargeNumber(apiToks))
 				sb.WriteString(lipgloss.NewStyle().Bold(true).Render(row))
 				sb.WriteString("\n")
 
@@ -240,9 +250,10 @@ func (m usageTabModel) renderContent() string {
 					for model, v := range models {
 						if stats, ok := v.(map[string]any); ok {
 							mReqs := int64(getFloat(stats, "total_requests"))
+							mFailovers := countFailoversFromDetails(stats)
 							mToks := int64(getFloat(stats, "total_tokens"))
-							mRow := fmt.Sprintf("    ├─ %-28s %10d %12s",
-								truncate(model, 28), mReqs, formatLargeNumber(mToks))
+							mRow := fmt.Sprintf("    ├─ %-28s %10d %10d %12s",
+								truncate(model, 28), mReqs, mFailovers, formatLargeNumber(mToks))
 							sb.WriteString(tableCellStyle.Render(mRow))
 							sb.WriteString("\n")
 
@@ -306,6 +317,31 @@ func (m usageTabModel) renderTokenBreakdown(modelStats map[string]any) string {
 
 	return fmt.Sprintf("    │  %s\n",
 		lipgloss.NewStyle().Foreground(colorMuted).Render(strings.Join(parts, "  ")))
+}
+
+func countFailoversFromDetails(modelStats map[string]any) int64 {
+	details, ok := modelStats["details"]
+	if !ok {
+		return 0
+	}
+	detailList, ok := details.([]any)
+	if !ok || len(detailList) == 0 {
+		return 0
+	}
+
+	var count int64
+	for _, d := range detailList {
+		dm, ok := d.(map[string]any)
+		if !ok {
+			continue
+		}
+		requested := getString(dm, "requested_model")
+		actual := getString(dm, "actual_model")
+		if requested != "" && actual != "" && requested != actual {
+			count++
+		}
+	}
+	return count
 }
 
 // renderBarChart renders a simple ASCII horizontal bar chart.
