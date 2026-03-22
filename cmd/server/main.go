@@ -495,11 +495,8 @@ func main() {
 		if tuiMode {
 			if standalone {
 				// Standalone mode: start an embedded local server and connect TUI client to it.
-				if cfg.AutoUpdate {
-					if autoupdate.CheckAndUpdate(context.Background(), cfg.ProxyURL) {
-						autoupdate.Restart()
-						return
-					}
+				if handleAutoUpdate(cfg) {
+					return
 				}
 				managementasset.StartAutoUpdater(context.Background(), configFilePath)
 				registry.StartModelsUpdater(context.Background())
@@ -574,15 +571,24 @@ func main() {
 			}
 		} else {
 			// Start the main proxy service
-			if cfg.AutoUpdate {
-				if autoupdate.CheckAndUpdate(context.Background(), cfg.ProxyURL) {
-					autoupdate.Restart()
-					return
-				}
+			if handleAutoUpdate(cfg) {
+				return
 			}
 			managementasset.StartAutoUpdater(context.Background(), configFilePath)
 			registry.StartModelsUpdater(context.Background())
 			cmd.StartService(cfg, configFilePath, password)
 		}
 	}
+}
+
+// handleAutoUpdate checks for a binary update if auto-update is enabled.
+// Returns true if the process should exit for restart.
+func handleAutoUpdate(cfg *config.Config) bool {
+	if cfg.AutoUpdate {
+		if autoupdate.CheckAndUpdate(context.Background(), cfg.ProxyURL) {
+			autoupdate.Restart()
+			return true
+		}
+	}
+	return false
 }

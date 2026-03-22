@@ -27,10 +27,11 @@ import (
 )
 
 const (
-	releaseURL   = "https://api.github.com/repos/router-for-me/CLIProxyAPI/releases/latest"
-	httpUA       = "CLIProxyAPI-self-updater"
-	binaryName   = "cli-proxy-api"
-	projectName  = "CLIProxyAPI"
+	releaseURL      = "https://api.github.com/repos/router-for-me/CLIProxyAPI/releases/latest"
+	httpUA          = "CLIProxyAPI-self-updater"
+	binaryName      = "cli-proxy-api"
+	projectName     = "CLIProxyAPI"
+	maxDownloadSize = 256 << 20 // 256 MB limit for downloads
 )
 
 type releaseInfo struct {
@@ -86,9 +87,6 @@ func fetchLatestVersion(ctx context.Context, client *http.Client) (string, error
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("User-Agent", httpUA)
-	if tok := strings.TrimSpace(os.Getenv("GITSTORE_GIT_TOKEN")); tok != "" {
-		req.Header.Set("Authorization", "Bearer "+tok)
-	}
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -168,32 +166,37 @@ func downloadAndReplace(ctx context.Context, client *http.Client, version string
 	tag := "v" + version
 	archive := archiveName(version)
 
-	// Download checksums
+	// Download checksums (mandatory — abort if unavailable)
 	checksumsURL := fmt.Sprintf("https://github.com/router-for-me/CLIProxyAPI/releases/download/%s/checksums.txt", tag)
 	expectedHash, err := fetchChecksumFor(ctx, client, checksumsURL, archive)
 	if err != nil {
-		log.Warnf("auto-update: could not fetch checksums, proceeding without verification: %v", err)
-		expectedHash = ""
+		return fmt.Errorf("fetch checksums (aborting update for safety): %w", err)
 	}
 
-	// Download archive
+	// Download archive to temp file
 	archiveURL := fmt.Sprintf("https://github.com/router-for-me/CLIProxyAPI/releases/download/%s/%s", tag, archive)
-	data, err := downloadFile(ctx, client, archiveURL)
+	archivePath, err := downloadToTempFile(ctx, client, archiveURL)
 	if err != nil {
 		return fmt.Errorf("download archive: %w", err)
 	}
+	defer os.Remove(archivePath)
 
 	// Verify SHA256
-	if expectedHash != "" {
-		sum := sha256.Sum256(data)
-		actualHash := hex.EncodeToString(sum[:])
-		if !strings.EqualFold(expectedHash, actualHash) {
-			return fmt.Errorf("checksum mismatch: expected %s, got %s", expectedHash, actualHash)
-		}
-		log.Debug("auto-update: checksum verified")
+	actualHash, err := hashFile(archivePath)
+	if err != nil {
+		return fmt.Errorf("hash archive: %w", err)
+	}
+	if !strings.EqualFold(expectedHash, actualHash) {
+		return fmt.Errorf("checksum mismatch: expected %s, got %s", expectedHash, actualHash)
+	}
+	log.Debug("auto-update: checksum verified")
+
+	// Read archive and extract binary
+	data, err := os.ReadFile(archivePath)
+	if err != nil {
+		return fmt.Errorf("read archive: %w", err)
 	}
 
-	// Extract binary from archive
 	binaryData, err := extractBinary(data, runtime.GOOS == "windows")
 	if err != nil {
 		return fmt.Errorf("extract binary: %w", err)
@@ -213,7 +216,7 @@ func downloadAndReplace(ctx context.Context, client *http.Client, version string
 }
 
 func fetchChecksumFor(ctx context.Context, client *http.Client, url, filename string) (string, error) {
-	data, err := downloadFile(ctx, client, url)
+	data, err := downloadSmallFile(ctx, client, url)
 	if err != nil {
 		return "", err
 	}
@@ -236,7 +239,8 @@ func parseChecksums(content, filename string) (string, error) {
 	return "", fmt.Errorf("checksum for %s not found", filename)
 }
 
-func downloadFile(ctx context.Context, client *http.Client, url string) ([]byte, error) {
+// downloadSmallFile downloads a small file (like checksums.txt) into memory with a 1 MB limit.
+func downloadSmallFile(ctx context.Context, client *http.Client, url string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
@@ -254,7 +258,58 @@ func downloadFile(ctx context.Context, client *http.Client, url string) ([]byte,
 		return nil, fmt.Errorf("status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
-	return io.ReadAll(resp.Body)
+	return io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1 MB limit
+}
+
+// downloadToTempFile streams a download to a temporary file on disk, respecting maxDownloadSize.
+func downloadToTempFile(ctx context.Context, client *http.Client, url string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("User-Agent", httpUA)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return "", fmt.Errorf("status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	tmpFile, err := os.CreateTemp("", "cli-proxy-api-dl-*")
+	if err != nil {
+		return "", fmt.Errorf("create temp file: %w", err)
+	}
+
+	_, err = io.Copy(tmpFile, io.LimitReader(resp.Body, maxDownloadSize))
+	if closeErr := tmpFile.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		os.Remove(tmpFile.Name())
+		return "", fmt.Errorf("write temp file: %w", err)
+	}
+
+	return tmpFile.Name(), nil
+}
+
+// hashFile computes the SHA256 hex digest of the file at path.
+func hashFile(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // extractBinary extracts the cli-proxy-api binary from the downloaded archive.
@@ -323,16 +378,14 @@ func replaceBinary(execPath string, newData []byte) error {
 	tmpPath := tmpFile.Name()
 	defer os.Remove(tmpPath) // cleanup on failure
 
-	if _, err := tmpFile.Write(newData); err != nil {
-		tmpFile.Close()
-		return fmt.Errorf("write temp file: %w", err)
+	if _, err = tmpFile.Write(newData); err == nil {
+		err = tmpFile.Chmod(0o755)
 	}
-	if err := tmpFile.Chmod(0o755); err != nil {
-		tmpFile.Close()
-		return fmt.Errorf("chmod temp file: %w", err)
+	if closeErr := tmpFile.Close(); err == nil {
+		err = closeErr
 	}
-	if err := tmpFile.Close(); err != nil {
-		return fmt.Errorf("close temp file: %w", err)
+	if err != nil {
+		return fmt.Errorf("prepare temp file: %w", err)
 	}
 
 	if runtime.GOOS == "windows" {
@@ -343,9 +396,11 @@ func replaceBinary(execPath string, newData []byte) error {
 			return fmt.Errorf("rename current binary to .old: %w", err)
 		}
 		if err := os.Rename(tmpPath, execPath); err != nil {
-			// Try to restore
-			os.Rename(oldPath, execPath)
-			return fmt.Errorf("rename new binary into place: %w", err)
+			// Try to restore original binary
+			if restoreErr := os.Rename(oldPath, execPath); restoreErr != nil {
+				return fmt.Errorf("rename new binary into place: %v; failed to restore original: %w", err, restoreErr)
+			}
+			return fmt.Errorf("rename new binary into place (original restored): %w", err)
 		}
 		// .old will be cleaned up on next update or manually
 	} else {
@@ -358,34 +413,10 @@ func replaceBinary(execPath string, newData []byte) error {
 	return nil
 }
 
-// Restart re-launches the current binary with the same arguments and exits.
+// Restart exits the current process so that a supervisor (systemd, Docker, etc.)
+// can restart it with the updated binary. This is the safest approach because
+// spawning a child process breaks PID-tracking supervisors and Docker containers.
 func Restart() {
-	execPath, err := os.Executable()
-	if err != nil {
-		log.Errorf("auto-update: cannot determine executable path for restart: %v", err)
-		os.Exit(1)
-	}
-
-	args := os.Args
-	log.Infof("auto-update: restarting %s %v", execPath, args[1:])
-
-	// Start the new process
-	attr := &os.ProcAttr{
-		Dir:   "",
-		Env:   os.Environ(),
-		Files: []*os.File{os.Stdin, os.Stdout, os.Stderr},
-	}
-
-	proc, err := os.StartProcess(execPath, args, attr)
-	if err != nil {
-		log.Errorf("auto-update: failed to start new process: %v", err)
-		os.Exit(1)
-	}
-
-	// Release the new process so it's not a child
-	if err := proc.Release(); err != nil {
-		log.Warnf("auto-update: failed to release new process: %v", err)
-	}
-
+	log.Info("auto-update: exiting for restart — the process supervisor should bring the service back up")
 	os.Exit(0)
 }

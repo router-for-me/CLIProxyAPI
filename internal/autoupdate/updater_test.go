@@ -1,6 +1,7 @@
 package autoupdate
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -84,24 +85,10 @@ fedcba987654  CLIProxyAPI_6.8.55_darwin_arm64.tar.gz
 
 func TestArchiveName(t *testing.T) {
 	name := archiveName("6.8.55")
-	// Just check it contains the version and project name
 	if name == "" {
 		t.Error("archiveName returned empty string")
 	}
-	if !contains(name, "6.8.55") || !contains(name, projectName) {
+	if !strings.Contains(name, "6.8.55") || !strings.Contains(name, projectName) {
 		t.Errorf("archiveName(%q) = %q, expected to contain version and project name", "6.8.55", name)
 	}
-}
-
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && searchString(s, substr)
-}
-
-func searchString(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }
