@@ -1000,6 +1000,49 @@ func TestHandleEventAuthWriteTriggersUpdate(t *testing.T) {
 	}
 }
 
+func TestHandleEventAuthWriteDebounceCoalescesBurst(t *testing.T) {
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if err := os.MkdirAll(authDir, 0o755); err != nil {
+		t.Fatalf("failed to create auth dir: %v", err)
+	}
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("auth_dir: "+authDir+"\n"), 0o644); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+	authFile := filepath.Join(authDir, "debounce.json")
+	if err := os.WriteFile(authFile, []byte(`{"type":"demo"}`), 0o644); err != nil {
+		t.Fatalf("failed to write auth file: %v", err)
+	}
+
+	w := &Watcher{
+		authDir:        authDir,
+		configPath:     configPath,
+		lastAuthHashes: make(map[string]string),
+	}
+	w.SetConfig(&config.Config{AuthDir: authDir})
+	defer w.stopPendingAuthWrites()
+
+	w.handleEvent(fsnotify.Event{Name: authFile, Op: fsnotify.Write})
+	w.handleEvent(fsnotify.Event{Name: authFile, Op: fsnotify.Write})
+
+	w.eventMu.Lock()
+	pending := len(w.pendingAuthWrites)
+	w.eventMu.Unlock()
+	if pending != 1 {
+		t.Fatalf("expected a single pending debounced write, got %d", pending)
+	}
+
+	time.Sleep(authWriteDebounceWindow + 100*time.Millisecond)
+
+	w.eventMu.Lock()
+	pending = len(w.pendingAuthWrites)
+	w.eventMu.Unlock()
+	if pending != 0 {
+		t.Fatalf("expected debounced writes to flush, got %d pending", pending)
+	}
+}
+
 func TestHandleEventRemoveDebounceSkips(t *testing.T) {
 	tmpDir := t.TempDir()
 	authDir := filepath.Join(tmpDir, "auth")
@@ -1152,6 +1195,33 @@ func TestHandleEventRemoveKnownFileDeletes(t *testing.T) {
 	}
 	if _, ok := w.lastAuthHashes[w.normalizeAuthPath(authFile)]; ok {
 		t.Fatal("expected known auth hash to be deleted")
+	}
+}
+
+func TestHandleEventSuppressedAuthPathSkipsKnownRemove(t *testing.T) {
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if err := os.MkdirAll(authDir, 0o755); err != nil {
+		t.Fatalf("failed to create auth dir: %v", err)
+	}
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("auth_dir: "+authDir+"\n"), 0o644); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+	authFile := filepath.Join(authDir, "suppressed.json")
+
+	w := &Watcher{
+		authDir:        authDir,
+		configPath:     configPath,
+		lastAuthHashes: make(map[string]string),
+	}
+	w.SetConfig(&config.Config{AuthDir: authDir})
+	w.lastAuthHashes[w.normalizeAuthPath(authFile)] = "hash"
+	w.SuppressAuthPath(authFile, time.Second)
+
+	w.handleEvent(fsnotify.Event{Name: authFile, Op: fsnotify.Remove})
+	if _, ok := w.lastAuthHashes[w.normalizeAuthPath(authFile)]; !ok {
+		t.Fatal("expected suppressed remove to leave watcher auth cache untouched")
 	}
 }
 
@@ -1483,6 +1553,7 @@ func TestNormalizeAuthNil(t *testing.T) {
 
 // stubStore implements coreauth.Store plus watcher-specific persistence helpers.
 type stubStore struct {
+	mu              sync.Mutex
 	authDir         string
 	cfgPersisted    int32
 	authPersisted   int32
@@ -1501,11 +1572,19 @@ func (s *stubStore) PersistConfig(context.Context) error {
 }
 func (s *stubStore) PersistAuthFiles(_ context.Context, message string, paths ...string) error {
 	atomic.AddInt32(&s.authPersisted, 1)
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.lastAuthMessage = message
-	s.lastAuthPaths = paths
+	s.lastAuthPaths = append([]string(nil), paths...)
 	return nil
 }
 func (s *stubStore) AuthDir() string { return s.authDir }
+
+func (s *stubStore) snapshotAuthPersist() (string, []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lastAuthMessage, append([]string(nil), s.lastAuthPaths...)
+}
 
 func TestNewWatcherDetectsPersisterAndAuthDir(t *testing.T) {
 	tmp := t.TempDir()
@@ -1542,11 +1621,12 @@ func TestPersistConfigAndAuthAsyncInvokePersister(t *testing.T) {
 	if atomic.LoadInt32(&store.authPersisted) != 1 {
 		t.Fatalf("expected PersistAuthFiles to be called once, got %d", store.authPersisted)
 	}
-	if store.lastAuthMessage != "msg" {
-		t.Fatalf("unexpected auth message: %s", store.lastAuthMessage)
+	message, paths := store.snapshotAuthPersist()
+	if message != "msg" {
+		t.Fatalf("unexpected auth message: %s", message)
 	}
-	if len(store.lastAuthPaths) != 2 || store.lastAuthPaths[0] != "a" || store.lastAuthPaths[1] != "b" {
-		t.Fatalf("unexpected filtered paths: %#v", store.lastAuthPaths)
+	if len(paths) != 2 || paths[0] != "a" || paths[1] != "b" {
+		t.Fatalf("unexpected filtered paths: %#v", paths)
 	}
 }
 
@@ -1574,7 +1654,10 @@ func TestScheduleConfigReloadDebounces(t *testing.T) {
 	if atomic.LoadInt32(&reloads) != 1 {
 		t.Fatalf("expected single debounced reload, got %d", reloads)
 	}
-	if w.lastConfigHash == "" {
+	w.clientsMutex.RLock()
+	lastConfigHash := w.lastConfigHash
+	w.clientsMutex.RUnlock()
+	if lastConfigHash == "" {
 		t.Fatal("expected lastConfigHash to be set after reload")
 	}
 }

@@ -2,6 +2,7 @@ package cliproxy
 
 import (
 	"context"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -30,6 +31,9 @@ func defaultWatcherFactory(configPath, authDir string, reload func(*config.Confi
 		},
 		dispatchRuntimeUpdate: func(update watcher.AuthUpdate) bool {
 			return w.DispatchRuntimeAuthUpdate(update)
+		},
+		suppressAuthPath: func(path string, window time.Duration) {
+			w.SuppressAuthPath(path, window)
 		},
 	}, nil
 }

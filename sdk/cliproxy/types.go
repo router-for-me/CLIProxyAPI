@@ -5,6 +5,7 @@ package cliproxy
 
 import (
 	"context"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -89,6 +90,7 @@ type WatcherWrapper struct {
 	snapshotAuths         func() []*coreauth.Auth
 	setUpdateQueue        func(queue chan<- watcher.AuthUpdate)
 	dispatchRuntimeUpdate func(update watcher.AuthUpdate) bool
+	suppressAuthPath      func(path string, window time.Duration)
 }
 
 // Start proxies to the underlying watcher Start implementation.
@@ -123,6 +125,15 @@ func (w *WatcherWrapper) DispatchRuntimeAuthUpdate(update watcher.AuthUpdate) bo
 		return false
 	}
 	return w.dispatchRuntimeUpdate(update)
+}
+
+// SuppressAuthPath temporarily ignores watcher auth events for a path that was
+// mutated internally, avoiding duplicate delete/write processing.
+func (w *WatcherWrapper) SuppressAuthPath(path string, window time.Duration) {
+	if w == nil || w.suppressAuthPath == nil {
+		return
+	}
+	w.suppressAuthPath(path, window)
 }
 
 // SetClients updates the watcher file-backed clients registry.

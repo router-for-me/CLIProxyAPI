@@ -51,6 +51,9 @@ type Watcher struct {
 	authQueue         chan<- AuthUpdate
 	currentAuths      map[string]*coreauth.Auth
 	runtimeAuths      map[string]*coreauth.Auth
+	eventMu           sync.Mutex
+	pendingAuthWrites map[string]*pendingAuthWrite
+	suppressedAuth    map[string]time.Time
 	dispatchMu        sync.Mutex
 	dispatchCond      *sync.Cond
 	pendingUpdates    map[string]AuthUpdate
@@ -77,11 +80,17 @@ type AuthUpdate struct {
 	Auth   *coreauth.Auth
 }
 
+type pendingAuthWrite struct {
+	path  string
+	timer *time.Timer
+}
+
 const (
 	// replaceCheckDelay is a short delay to allow atomic replace (rename) to settle
 	// before deciding whether a Remove event indicates a real deletion.
 	replaceCheckDelay        = 50 * time.Millisecond
 	configReloadDebounce     = 150 * time.Millisecond
+	authWriteDebounceWindow  = 150 * time.Millisecond
 	authRemoveDebounceWindow = 1 * time.Second
 	serverUpdateDebounce     = 1 * time.Second
 )
@@ -127,6 +136,7 @@ func (w *Watcher) Stop() error {
 	w.stopDispatch()
 	w.stopConfigReloadTimer()
 	w.stopServerUpdateTimer()
+	w.stopPendingAuthWrites()
 	return w.watcher.Close()
 }
 
@@ -148,6 +158,33 @@ func (w *Watcher) SetAuthUpdateQueue(queue chan<- AuthUpdate) {
 // Returns true if the update was enqueued; false if no queue is configured.
 func (w *Watcher) DispatchRuntimeAuthUpdate(update AuthUpdate) bool {
 	return w.dispatchRuntimeAuthUpdate(update)
+}
+
+// SuppressAuthPath ignores watcher auth events for a short window after an
+// internal mutation so file deletes and rewrites are not processed twice.
+func (w *Watcher) SuppressAuthPath(path string, window time.Duration) {
+	if w == nil || window <= 0 {
+		return
+	}
+	normalized := w.normalizeAuthPath(path)
+	if normalized == "" {
+		return
+	}
+	w.eventMu.Lock()
+	if w.suppressedAuth == nil {
+		w.suppressedAuth = make(map[string]time.Time)
+	}
+	expiresAt := time.Now().Add(window)
+	w.suppressedAuth[normalized] = expiresAt
+	if len(w.suppressedAuth) > 256 {
+		now := time.Now()
+		for key, until := range w.suppressedAuth {
+			if !until.After(now) {
+				delete(w.suppressedAuth, key)
+			}
+		}
+	}
+	w.eventMu.Unlock()
 }
 
 // SnapshotCoreAuths converts current clients snapshot into core auth entries.

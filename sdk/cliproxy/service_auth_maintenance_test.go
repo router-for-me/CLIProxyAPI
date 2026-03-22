@@ -270,6 +270,45 @@ func TestScanAuthMaintenanceCandidates_GroupsByPath(t *testing.T) {
 	}
 }
 
+func TestAuthMaintenanceDeleteSpacing_AcceleratesLargeBacklog(t *testing.T) {
+	cfg := config.AuthMaintenanceConfig{DeleteIntervalSeconds: 1}
+
+	if got := authMaintenanceDeleteSpacing(cfg, 1); got != time.Second {
+		t.Fatalf("spacing for small backlog = %s, want %s", got, time.Second)
+	}
+	if got := authMaintenanceDeleteSpacing(cfg, 16); got != 500*time.Millisecond {
+		t.Fatalf("spacing for medium backlog = %s, want %s", got, 500*time.Millisecond)
+	}
+	if got := authMaintenanceDeleteSpacing(cfg, 64); got != 250*time.Millisecond {
+		t.Fatalf("spacing for large backlog = %s, want %s", got, 250*time.Millisecond)
+	}
+}
+
+func TestEnqueueAuthMaintenanceCandidate_RejectsInFlightDuplicate(t *testing.T) {
+	service := &Service{}
+	candidate := authMaintenanceCandidate{
+		Key:    "/tmp/test.json",
+		Path:   "/tmp/test.json",
+		IDs:    []string{"auth-1"},
+		Reason: "http_401",
+	}
+
+	if !service.enqueueAuthMaintenanceCandidate(candidate) {
+		t.Fatal("expected initial enqueue to succeed")
+	}
+	popped, _, ok := service.popAuthMaintenanceCandidate()
+	if !ok {
+		t.Fatal("expected candidate to move into in-flight state")
+	}
+	if service.enqueueAuthMaintenanceCandidate(candidate) {
+		t.Fatal("expected duplicate enqueue to be rejected while in flight")
+	}
+	service.finishAuthMaintenanceCandidate(popped)
+	if !service.enqueueAuthMaintenanceCandidate(candidate) {
+		t.Fatal("expected enqueue to succeed again after in-flight candidate finished")
+	}
+}
+
 func TestScanAuthMaintenanceCandidates_429StatusCodeQueuesImmediateDelete(t *testing.T) {
 	authDir := t.TempDir()
 	service := &Service{
