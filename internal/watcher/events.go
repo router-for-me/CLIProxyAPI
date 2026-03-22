@@ -105,7 +105,9 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 				log.Warnf("failed to watch auth directory subtree %s: %v", event.Name, errWatch)
 				return
 			}
-			w.syncAuthSubtree(event.Name)
+			if errSync := w.syncAuthSubtree(event.Name); errSync != nil {
+				log.Warnf("failed to sync auth directory subtree %s: %v", event.Name, errSync)
+			}
 		}
 		return
 	}

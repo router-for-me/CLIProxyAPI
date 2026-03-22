@@ -14,7 +14,10 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/geminicli"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	log "github.com/sirupsen/logrus"
 )
+
+var walkAuthFileTree = filepath.WalkDir
 
 // FileSynthesizer generates Auth entries from OAuth JSON files.
 // It handles file-based authentication and Gemini virtual auth generation.
@@ -31,19 +34,31 @@ func (s *FileSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth, e
 	if ctx == nil || ctx.AuthDir == "" {
 		return out, nil
 	}
+	root := filepath.Clean(ctx.AuthDir)
 
-	if err := filepath.WalkDir(ctx.AuthDir, func(path string, d fs.DirEntry, err error) error {
+	if err := walkAuthFileTree(ctx.AuthDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
-			return err
+			if filepath.Clean(path) == root {
+				return err
+			}
+			log.Warnf("skipping unreadable auth subtree path %s: %v", path, err)
+			return filepath.SkipDir
 		}
-		if d == nil || d.IsDir() {
+		if d == nil {
+			return nil
+		}
+		if d.IsDir() {
 			return nil
 		}
 		if !strings.HasSuffix(strings.ToLower(d.Name()), ".json") {
 			return nil
 		}
 		data, errRead := os.ReadFile(path)
-		if errRead != nil || len(data) == 0 {
+		if errRead != nil {
+			log.Warnf("failed to read auth file %s: %v", path, errRead)
+			return nil
+		}
+		if len(data) == 0 {
 			return nil
 		}
 		auths := synthesizeFileAuths(ctx, path, data)
@@ -53,8 +68,10 @@ func (s *FileSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth, e
 		out = append(out, auths...)
 		return nil
 	}); err != nil {
-		// Not an error if directory doesn't exist
-		return out, nil
+		if os.IsNotExist(err) {
+			return out, nil
+		}
+		return out, err
 	}
 	return out, nil
 }

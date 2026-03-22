@@ -9,24 +9,38 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+var walkAuthDirTree = filepath.WalkDir
+
 func (w *Watcher) watchAuthTree(root string) error {
 	root = strings.TrimSpace(root)
 	if root == "" {
 		return nil
 	}
+	normalizedRoot := w.normalizeAuthPath(root)
 
-	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+	return walkAuthDirTree(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
-			return err
+			if w.normalizeAuthPath(path) == normalizedRoot {
+				return err
+			}
+			log.Warnf("skipping unreadable auth subdirectory %s: %v", path, err)
+			return filepath.SkipDir
 		}
-		if d == nil || !d.IsDir() {
+		if d == nil {
+			return nil
+		}
+		if !d.IsDir() {
 			return nil
 		}
 		if w.isWatchedAuthDir(path) {
 			return nil
 		}
 		if errAdd := w.watcher.Add(path); errAdd != nil {
-			return errAdd
+			if w.normalizeAuthPath(path) == normalizedRoot {
+				return errAdd
+			}
+			log.Warnf("skipping auth subdirectory %s after watcher add failed: %v", path, errAdd)
+			return filepath.SkipDir
 		}
 		w.trackWatchedAuthDir(path)
 		log.Debugf("watching auth directory: %s", path)
@@ -34,14 +48,22 @@ func (w *Watcher) watchAuthTree(root string) error {
 	})
 }
 
-func (w *Watcher) syncAuthSubtree(root string) {
+func (w *Watcher) syncAuthSubtree(root string) error {
 	root = strings.TrimSpace(root)
 	if root == "" {
-		return
+		return nil
 	}
+	normalizedRoot := w.normalizeAuthPath(root)
 
-	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d == nil || d.IsDir() {
+	return walkAuthDirTree(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			if w.normalizeAuthPath(path) == normalizedRoot {
+				return err
+			}
+			log.Warnf("skipping unreadable auth subtree path %s: %v", path, err)
+			return filepath.SkipDir
+		}
+		if d == nil || d.IsDir() {
 			return nil
 		}
 		if strings.HasSuffix(strings.ToLower(d.Name()), ".json") {

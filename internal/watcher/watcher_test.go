@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -398,6 +400,112 @@ func TestWatcherTracksNestedAuthFileAddAndRemove(t *testing.T) {
 		t.Fatalf("failed to remove nested auth file: %v", err)
 	}
 	waitForAuthPresence(t, w, watcherAuthID(authDir, authFile), false)
+}
+
+func TestWatchAuthTreeSkipsUnreadableNestedDir(t *testing.T) {
+	authDir := t.TempDir()
+
+	w, err := NewWatcher("config.yaml", authDir, nil)
+	if err != nil {
+		t.Fatalf("failed to create watcher: %v", err)
+	}
+	defer w.Stop()
+
+	origWalk := walkAuthDirTree
+	walkAuthDirTree = func(root string, fn fs.WalkDirFunc) error {
+		if errCall := fn(root, stubDirEntry{name: filepath.Base(root), dir: true}, nil); errCall != nil {
+			return errCall
+		}
+		if errCall := fn(filepath.Join(root, "bad"), nil, fs.ErrPermission); errCall != nil && !errors.Is(errCall, filepath.SkipDir) {
+			return errCall
+		}
+		return nil
+	}
+	defer func() { walkAuthDirTree = origWalk }()
+
+	if errWatch := w.watchAuthTree(authDir); errWatch != nil {
+		t.Fatalf("expected nested subtree error to be skipped, got %v", errWatch)
+	}
+	if !w.isWatchedAuthDir(authDir) {
+		t.Fatal("expected root auth dir to remain watched")
+	}
+}
+
+func TestWatchAuthTreeReturnsRootError(t *testing.T) {
+	authDir := t.TempDir()
+
+	w, err := NewWatcher("config.yaml", authDir, nil)
+	if err != nil {
+		t.Fatalf("failed to create watcher: %v", err)
+	}
+	defer w.Stop()
+
+	origWalk := walkAuthDirTree
+	walkAuthDirTree = func(root string, fn fs.WalkDirFunc) error {
+		return fn(root, nil, fs.ErrPermission)
+	}
+	defer func() { walkAuthDirTree = origWalk }()
+
+	if errWatch := w.watchAuthTree(authDir); !errors.Is(errWatch, fs.ErrPermission) {
+		t.Fatalf("expected root walk error %v, got %v", fs.ErrPermission, errWatch)
+	}
+}
+
+func TestSyncAuthSubtreeSkipsUnreadableNestedDir(t *testing.T) {
+	authDir := t.TempDir()
+	authFile := filepath.Join(authDir, "root.json")
+	if err := os.WriteFile(authFile, []byte(`{"type":"codex","email":"root@example.com"}`), 0o644); err != nil {
+		t.Fatalf("failed to write auth file: %v", err)
+	}
+
+	w, err := NewWatcher("config.yaml", authDir, nil)
+	if err != nil {
+		t.Fatalf("failed to create watcher: %v", err)
+	}
+	defer w.Stop()
+	w.SetConfig(&config.Config{AuthDir: authDir})
+
+	origWalk := walkAuthDirTree
+	walkAuthDirTree = func(root string, fn fs.WalkDirFunc) error {
+		if errCall := fn(root, stubDirEntry{name: filepath.Base(root), dir: true}, nil); errCall != nil {
+			return errCall
+		}
+		if errCall := fn(authFile, stubDirEntry{name: filepath.Base(authFile)}, nil); errCall != nil {
+			return errCall
+		}
+		if errCall := fn(filepath.Join(root, "bad"), nil, fs.ErrPermission); errCall != nil && !errors.Is(errCall, filepath.SkipDir) {
+			return errCall
+		}
+		return nil
+	}
+	defer func() { walkAuthDirTree = origWalk }()
+
+	if errSync := w.syncAuthSubtree(authDir); errSync != nil {
+		t.Fatalf("expected nested subtree error to be skipped, got %v", errSync)
+	}
+	if !authExists(w, watcherAuthID(authDir, authFile)) {
+		t.Fatal("expected readable auth file to be synced despite nested subtree error")
+	}
+}
+
+func TestSyncAuthSubtreeReturnsRootError(t *testing.T) {
+	authDir := t.TempDir()
+
+	w, err := NewWatcher("config.yaml", authDir, nil)
+	if err != nil {
+		t.Fatalf("failed to create watcher: %v", err)
+	}
+	defer w.Stop()
+
+	origWalk := walkAuthDirTree
+	walkAuthDirTree = func(root string, fn fs.WalkDirFunc) error {
+		return fn(root, nil, fs.ErrPermission)
+	}
+	defer func() { walkAuthDirTree = origWalk }()
+
+	if errSync := w.syncAuthSubtree(authDir); !errors.Is(errSync, fs.ErrPermission) {
+		t.Fatalf("expected root sync error %v, got %v", fs.ErrPermission, errSync)
+	}
 }
 
 func TestDispatchRuntimeAuthUpdateEnqueuesAndUpdatesState(t *testing.T) {
@@ -1808,3 +1916,13 @@ func watcherAuthID(authDir, authFile string) string {
 	}
 	return id
 }
+
+type stubDirEntry struct {
+	name string
+	dir  bool
+}
+
+func (s stubDirEntry) Name() string               { return s.name }
+func (s stubDirEntry) IsDir() bool                { return s.dir }
+func (s stubDirEntry) Type() fs.FileMode          { return 0 }
+func (s stubDirEntry) Info() (fs.FileInfo, error) { return nil, nil }

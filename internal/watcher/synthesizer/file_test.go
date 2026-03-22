@@ -2,6 +2,8 @@ package synthesizer
 
 import (
 	"encoding/json"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -272,6 +274,74 @@ func TestFileSynthesizer_Synthesize_RecursesIntoSubdirectories(t *testing.T) {
 	}
 }
 
+func TestFileSynthesizer_Synthesize_SkipsUnreadableNestedDir(t *testing.T) {
+	tempDir := t.TempDir()
+	validPath := filepath.Join(tempDir, "valid.json")
+	validData, _ := json.Marshal(map[string]any{
+		"type":  "claude",
+		"email": "valid@example.com",
+	})
+	if err := os.WriteFile(validPath, validData, 0o644); err != nil {
+		t.Fatalf("failed to write auth file: %v", err)
+	}
+
+	origWalk := walkAuthFileTree
+	walkAuthFileTree = func(root string, fn fs.WalkDirFunc) error {
+		if errCall := fn(root, synthDirEntry{name: filepath.Base(root), dir: true}, nil); errCall != nil {
+			return errCall
+		}
+		if errCall := fn(validPath, synthDirEntry{name: filepath.Base(validPath)}, nil); errCall != nil {
+			return errCall
+		}
+		if errCall := fn(filepath.Join(root, "bad"), nil, fs.ErrPermission); errCall != nil && !errors.Is(errCall, filepath.SkipDir) {
+			return errCall
+		}
+		return nil
+	}
+	defer func() { walkAuthFileTree = origWalk }()
+
+	synth := NewFileSynthesizer()
+	ctx := &SynthesisContext{
+		Config:      &config.Config{},
+		AuthDir:     tempDir,
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("expected nested subtree error to be skipped, got %v", err)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("expected 1 auth, got %d", len(auths))
+	}
+	if auths[0].Label != "valid@example.com" {
+		t.Fatalf("expected valid auth to be synthesized, got %#v", auths[0])
+	}
+}
+
+func TestFileSynthesizer_Synthesize_PropagatesRootWalkError(t *testing.T) {
+	tempDir := t.TempDir()
+
+	origWalk := walkAuthFileTree
+	walkAuthFileTree = func(root string, fn fs.WalkDirFunc) error {
+		return fn(root, nil, fs.ErrPermission)
+	}
+	defer func() { walkAuthFileTree = origWalk }()
+
+	synth := NewFileSynthesizer()
+	ctx := &SynthesisContext{
+		Config:      &config.Config{},
+		AuthDir:     tempDir,
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	if _, err := synth.Synthesize(ctx); !errors.Is(err, fs.ErrPermission) {
+		t.Fatalf("expected root walk error %v, got %v", fs.ErrPermission, err)
+	}
+}
+
 func TestFileSynthesizer_Synthesize_RelativeID(t *testing.T) {
 	tempDir := t.TempDir()
 
@@ -303,6 +373,16 @@ func TestFileSynthesizer_Synthesize_RelativeID(t *testing.T) {
 		t.Errorf("expected ID my-auth.json, got %s", auths[0].ID)
 	}
 }
+
+type synthDirEntry struct {
+	name string
+	dir  bool
+}
+
+func (s synthDirEntry) Name() string               { return s.name }
+func (s synthDirEntry) IsDir() bool                { return s.dir }
+func (s synthDirEntry) Type() fs.FileMode          { return 0 }
+func (s synthDirEntry) Info() (fs.FileInfo, error) { return nil, nil }
 
 func TestFileSynthesizer_Synthesize_PrefixValidation(t *testing.T) {
 	tests := []struct {

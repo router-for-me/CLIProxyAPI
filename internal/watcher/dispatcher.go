@@ -12,6 +12,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher/synthesizer"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	log "github.com/sirupsen/logrus"
 )
 
 var snapshotCoreAuthsFunc = snapshotCoreAuths
@@ -268,11 +269,15 @@ func snapshotCoreAuths(cfg *config.Config, authDir string) []*coreauth.Auth {
 	configSynth := synthesizer.NewConfigSynthesizer()
 	if auths, err := configSynth.Synthesize(ctx); err == nil {
 		out = append(out, auths...)
+	} else {
+		log.Warnf("failed to synthesize config auths: %v", err)
 	}
 
 	fileSynth := synthesizer.NewFileSynthesizer()
 	if auths, err := fileSynth.Synthesize(ctx); err == nil {
 		out = append(out, auths...)
+	} else {
+		log.Warnf("failed to synthesize file auths from %s: %v", authDir, err)
 	}
 
 	return out
