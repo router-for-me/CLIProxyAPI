@@ -1043,6 +1043,46 @@ func TestHandleEventAuthWriteDebounceCoalescesBurst(t *testing.T) {
 	}
 }
 
+func TestHandleEventSuppressedAuthWriteClearsSuppression(t *testing.T) {
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if err := os.MkdirAll(authDir, 0o755); err != nil {
+		t.Fatalf("failed to create auth dir: %v", err)
+	}
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("auth_dir: "+authDir+"\n"), 0o644); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+	authFile := filepath.Join(authDir, "restored.json")
+	if err := os.WriteFile(authFile, []byte(`{"type":"demo"}`), 0o644); err != nil {
+		t.Fatalf("failed to write auth file: %v", err)
+	}
+
+	w := &Watcher{
+		authDir:        authDir,
+		configPath:     configPath,
+		lastAuthHashes: make(map[string]string),
+	}
+	w.SetConfig(&config.Config{AuthDir: authDir})
+	defer w.stopPendingAuthWrites()
+
+	normalized := w.normalizeAuthPath(authFile)
+	w.SuppressAuthPath(authFile, time.Second)
+
+	w.handleEvent(fsnotify.Event{Name: authFile, Op: fsnotify.Write})
+
+	w.eventMu.Lock()
+	_, suppressed := w.suppressedAuth[normalized]
+	pending := len(w.pendingAuthWrites)
+	w.eventMu.Unlock()
+	if suppressed {
+		t.Fatal("expected write event to clear stale suppression")
+	}
+	if pending != 1 {
+		t.Fatalf("expected restored write to schedule processing, got %d pending writes", pending)
+	}
+}
+
 func TestHandleEventRemoveDebounceSkips(t *testing.T) {
 	tmpDir := t.TempDir()
 	authDir := filepath.Join(tmpDir, "auth")
@@ -1222,6 +1262,51 @@ func TestHandleEventSuppressedAuthPathSkipsKnownRemove(t *testing.T) {
 	w.handleEvent(fsnotify.Event{Name: authFile, Op: fsnotify.Remove})
 	if _, ok := w.lastAuthHashes[w.normalizeAuthPath(authFile)]; !ok {
 		t.Fatal("expected suppressed remove to leave watcher auth cache untouched")
+	}
+}
+
+func TestFlushPendingAuthWrite_IgnoresStaleGeneration(t *testing.T) {
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if err := os.MkdirAll(authDir, 0o755); err != nil {
+		t.Fatalf("failed to create auth dir: %v", err)
+	}
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("auth_dir: "+authDir+"\n"), 0o644); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+	authFile := filepath.Join(authDir, "generation.json")
+	if err := os.WriteFile(authFile, []byte(`{"type":"demo"}`), 0o644); err != nil {
+		t.Fatalf("failed to write auth file: %v", err)
+	}
+
+	w := &Watcher{
+		authDir:        authDir,
+		configPath:     configPath,
+		lastAuthHashes: make(map[string]string),
+	}
+	w.SetConfig(&config.Config{AuthDir: authDir})
+	defer w.stopPendingAuthWrites()
+
+	normalized := w.normalizeAuthPath(authFile)
+	w.scheduleAuthWrite(normalized, authFile)
+
+	w.eventMu.Lock()
+	initial := w.pendingAuthWrites[normalized]
+	initialGeneration := initial.generation
+	w.eventMu.Unlock()
+
+	w.scheduleAuthWrite(normalized, authFile)
+	w.flushPendingAuthWrite(normalized, initialGeneration)
+
+	w.eventMu.Lock()
+	entry, ok := w.pendingAuthWrites[normalized]
+	w.eventMu.Unlock()
+	if !ok || entry == nil {
+		t.Fatal("expected stale flush to leave the latest debounced write pending")
+	}
+	if entry.generation == initialGeneration {
+		t.Fatalf("expected generation to advance after reschedule, still %d", entry.generation)
 	}
 }
 

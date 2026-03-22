@@ -127,8 +127,8 @@ func (w *WatcherWrapper) DispatchRuntimeAuthUpdate(update watcher.AuthUpdate) bo
 	return w.dispatchRuntimeUpdate(update)
 }
 
-// SuppressAuthPath temporarily ignores watcher auth events for a path that was
-// mutated internally, avoiding duplicate delete/write processing.
+// SuppressAuthPath temporarily ignores watcher auth remove/rename events for a
+// path that was mutated internally, avoiding duplicate delete processing.
 func (w *WatcherWrapper) SuppressAuthPath(path string, window time.Duration) {
 	if w == nil || w.suppressAuthPath == nil {
 		return

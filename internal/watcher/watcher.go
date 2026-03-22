@@ -81,8 +81,9 @@ type AuthUpdate struct {
 }
 
 type pendingAuthWrite struct {
-	path  string
-	timer *time.Timer
+	path       string
+	timer      *time.Timer
+	generation uint64
 }
 
 const (
@@ -160,8 +161,8 @@ func (w *Watcher) DispatchRuntimeAuthUpdate(update AuthUpdate) bool {
 	return w.dispatchRuntimeAuthUpdate(update)
 }
 
-// SuppressAuthPath ignores watcher auth events for a short window after an
-// internal mutation so file deletes and rewrites are not processed twice.
+// SuppressAuthPath ignores watcher auth remove/rename events for a short window
+// after an internal mutation so self-observed deletes are not processed twice.
 func (w *Watcher) SuppressAuthPath(path string, window time.Duration) {
 	if w == nil || window <= 0 {
 		return

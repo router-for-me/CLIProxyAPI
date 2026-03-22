@@ -87,13 +87,13 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 		w.scheduleConfigReload()
 		return
 	}
-	if w.isAuthPathSuppressed(normalizedName, now) {
-		log.Debugf("suppressing auth event for %s", filepath.Base(event.Name))
-		return
-	}
 
 	// Handle auth directory changes incrementally (.json only)
 	if event.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
+		if w.isAuthPathSuppressed(normalizedName, now) {
+			log.Debugf("suppressing auth event for %s", filepath.Base(event.Name))
+			return
+		}
 		w.cancelPendingAuthWrite(normalizedName)
 		if w.shouldDebounceRemove(normalizedName, now) {
 			log.Debugf("debouncing remove event for %s", filepath.Base(event.Name))
@@ -120,6 +120,7 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 		return
 	}
 	if event.Op&(fsnotify.Create|fsnotify.Write) != 0 {
+		w.clearAuthPathSuppression(normalizedName)
 		w.scheduleAuthWrite(normalizedName, event.Name)
 	}
 }
@@ -215,6 +216,17 @@ func (w *Watcher) isAuthPathSuppressed(normalizedPath string, now time.Time) boo
 	return ok && until.After(now)
 }
 
+func (w *Watcher) clearAuthPathSuppression(normalizedPath string) {
+	if w == nil || normalizedPath == "" {
+		return
+	}
+	w.eventMu.Lock()
+	if len(w.suppressedAuth) > 0 {
+		delete(w.suppressedAuth, normalizedPath)
+	}
+	w.eventMu.Unlock()
+}
+
 func (w *Watcher) scheduleAuthWrite(normalizedPath, path string) {
 	if w == nil || normalizedPath == "" {
 		return
@@ -225,25 +237,31 @@ func (w *Watcher) scheduleAuthWrite(normalizedPath, path string) {
 	}
 	if existing, ok := w.pendingAuthWrites[normalizedPath]; ok {
 		existing.path = path
+		existing.generation++
+		generation := existing.generation
 		if existing.timer != nil {
 			existing.timer.Stop()
 		}
 		existing.timer = time.AfterFunc(authWriteDebounceWindow, func() {
-			w.flushPendingAuthWrite(normalizedPath)
+			w.flushPendingAuthWrite(normalizedPath, generation)
 		})
 		w.pendingAuthWrites[normalizedPath] = existing
 		w.eventMu.Unlock()
 		return
 	}
-	entry := &pendingAuthWrite{path: path}
+	entry := &pendingAuthWrite{
+		path:       path,
+		generation: 1,
+	}
+	generation := entry.generation
 	entry.timer = time.AfterFunc(authWriteDebounceWindow, func() {
-		w.flushPendingAuthWrite(normalizedPath)
+		w.flushPendingAuthWrite(normalizedPath, generation)
 	})
 	w.pendingAuthWrites[normalizedPath] = entry
 	w.eventMu.Unlock()
 }
 
-func (w *Watcher) flushPendingAuthWrite(normalizedPath string) {
+func (w *Watcher) flushPendingAuthWrite(normalizedPath string, generation uint64) {
 	if w == nil || normalizedPath == "" || w.stopped.Load() {
 		return
 	}
@@ -253,15 +271,14 @@ func (w *Watcher) flushPendingAuthWrite(normalizedPath string) {
 		w.eventMu.Unlock()
 		return
 	}
+	if generation > 0 && entry.generation != generation {
+		w.eventMu.Unlock()
+		return
+	}
 	path := entry.path
 	delete(w.pendingAuthWrites, normalizedPath)
 	w.eventMu.Unlock()
 
-	now := time.Now()
-	if w.isAuthPathSuppressed(normalizedPath, now) {
-		log.Debugf("suppressing auth write for %s", filepath.Base(path))
-		return
-	}
 	if unchanged, errSame := w.authFileUnchanged(path); errSame == nil && unchanged {
 		log.Debugf("auth file unchanged (hash match), skipping reload: %s", filepath.Base(path))
 		return
