@@ -199,11 +199,15 @@ type AuthMaintenanceConfig struct {
 	// DeleteIntervalSeconds defines the stagger interval between queued deletions.
 	DeleteIntervalSeconds int `yaml:"delete-interval-seconds" json:"delete-interval-seconds"`
 	// DeleteStatusCodes defines HTTP status codes that should trigger deletion.
-	// When 429 is included, a single quota response is enough to enqueue deletion.
+	// Any listed status is treated as an immediate delete signal.
+	// When 429 is included, a single quota response is enough to enqueue deletion,
+	// so QuotaStrikeThreshold does not delay that path.
 	DeleteStatusCodes []int `yaml:"delete-status-codes" json:"delete-status-codes"`
-	// DeleteQuotaExceeded enables deletion for auths that repeatedly hit quota limits.
+	// DeleteQuotaExceeded enables a second delete path for auths that repeatedly hit quota limits.
+	// This is most useful when 429 is not included in DeleteStatusCodes.
 	DeleteQuotaExceeded bool `yaml:"delete-quota-exceeded" json:"delete-quota-exceeded"`
-	// QuotaStrikeThreshold is the minimum number of 429 hits required before an auth is queued for deletion.
+	// QuotaStrikeThreshold is the minimum number of 429 hits required before an auth is queued
+	// through the quota-exceeded path above.
 	QuotaStrikeThreshold int `yaml:"quota-strike-threshold" json:"quota-strike-threshold"`
 }
 

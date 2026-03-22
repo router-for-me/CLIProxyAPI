@@ -45,6 +45,32 @@ pprof:
   enable: false
   addr: "127.0.0.1:8316"
 
+# Optional background cleanup for auth files that should be removed after terminal failures.
+# auth-maintenance:
+#   enable: true
+#   scan-interval-seconds: 30
+#   delete-interval-seconds: 5
+#   # Any status code listed here is treated as an immediate delete signal.
+#   # Example: if 429 is included, one 429 response is enough to disable the auth immediately
+#   # and enqueue file deletion. quota-strike-threshold does not delay that path.
+#   delete-status-codes: [401, 429]
+#   # Enables a second path for repeated quota failures. This is mainly useful when 429 is NOT in
+#   # delete-status-codes and you want 429 to delete only after multiple strikes instead of immediately.
+#   delete-quota-exceeded: true
+#   # Minimum 429 strike count required for the quota-exceeded path above.
+#   quota-strike-threshold: 6
+#   #
+#   # Common patterns:
+#   # 1) Delete 401 immediately, but delete 429 only after 6 strikes:
+#   # delete-status-codes: [401]
+#   # delete-quota-exceeded: true
+#   # quota-strike-threshold: 6
+#   #
+#   # 2) Delete both 401 and 429 immediately:
+#   # delete-status-codes: [401, 429]
+#   # delete-quota-exceeded: true
+#   # quota-strike-threshold: 6
+
 # When true, disable high-overhead HTTP middleware features to reduce per-request memory usage under high concurrency.
 commercial-mode: false
 
