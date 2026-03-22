@@ -599,12 +599,13 @@ func (s *Service) deleteAuthMaintenanceCandidate(ctx context.Context, candidate 
 	}
 	ctx = coreauth.WithSkipPersist(ctx)
 	path := strings.TrimSpace(candidate.Path)
+	var cleanupErr error
 	if path != "" {
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("remove auth file: %w", err)
 		}
 		if err := s.deleteAuthTokenRecord(ctx, path); err != nil {
-			return err
+			cleanupErr = fmt.Errorf("delete auth token record: %w", err)
 		}
 	}
 	for _, id := range candidate.IDs {
@@ -612,7 +613,7 @@ func (s *Service) deleteAuthMaintenanceCandidate(ctx context.Context, candidate 
 			s.emitAuthUpdate(ctx, watcher.AuthUpdate{Action: watcher.AuthUpdateActionDelete, ID: trimmed})
 		}
 	}
-	return nil
+	return cleanupErr
 }
 
 func (s *Service) deleteAuthTokenRecord(ctx context.Context, path string) error {

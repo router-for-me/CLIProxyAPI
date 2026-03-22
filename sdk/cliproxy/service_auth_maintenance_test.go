@@ -2,6 +2,7 @@ package cliproxy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -24,6 +25,10 @@ type trackingTokenStore struct {
 	deleted []string
 }
 
+type failingTokenStore struct {
+	err error
+}
+
 func (s *trackingTokenStore) List(context.Context) ([]*coreauth.Auth, error) {
 	return nil, nil
 }
@@ -43,6 +48,26 @@ func (s *trackingTokenStore) Delete(_ context.Context, id string) error {
 }
 
 func (s *trackingTokenStore) SetBaseDir(string) {}
+
+func (s *failingTokenStore) List(context.Context) ([]*coreauth.Auth, error) {
+	return nil, nil
+}
+
+func (s *failingTokenStore) Save(_ context.Context, auth *coreauth.Auth) (string, error) {
+	if auth == nil {
+		return "", nil
+	}
+	return auth.ID, nil
+}
+
+func (s *failingTokenStore) Delete(_ context.Context, id string) error {
+	if s == nil || s.err == nil {
+		return nil
+	}
+	return s.err
+}
+
+func (s *failingTokenStore) SetBaseDir(string) {}
 
 type timedTrackingTokenStore struct {
 	mu      sync.Mutex
@@ -353,6 +378,83 @@ func TestDeleteAuthMaintenanceCandidate_RemovesFileAndDisablesAllAuths(t *testin
 		if !auth.Disabled || auth.Status != coreauth.StatusDisabled {
 			t.Fatalf("expected auth %s to be disabled after maintenance delete, got disabled=%v status=%q", id, auth.Disabled, auth.Status)
 		}
+	}
+}
+
+func TestDeleteAuthMaintenanceCandidate_TokenStoreFailureStillDisablesAuths(t *testing.T) {
+	authDir := t.TempDir()
+	filePath := filepath.Join(authDir, "shared.json")
+	if err := os.WriteFile(filePath, []byte(`{"type":"codex"}`), 0o600); err != nil {
+		t.Fatalf("failed to write auth file: %v", err)
+	}
+
+	storeErr := errors.New("token store down")
+	previousStore := sdkAuth.GetTokenStore()
+	sdkAuth.RegisterTokenStore(&failingTokenStore{err: storeErr})
+	t.Cleanup(func() { sdkAuth.RegisterTokenStore(previousStore) })
+
+	service := &Service{
+		cfg:         &config.Config{AuthDir: authDir},
+		coreManager: coreauth.NewManager(nil, nil, nil),
+	}
+	service.ensureAuthUpdateQueue(context.Background())
+	t.Cleanup(func() {
+		if service.authQueueStop != nil {
+			service.authQueueStop()
+		}
+	})
+	for _, auth := range []*coreauth.Auth{
+		{
+			ID:         "shared-primary",
+			FileName:   "shared.json",
+			Provider:   "codex",
+			Status:     coreauth.StatusError,
+			Attributes: map[string]string{"path": filePath},
+		},
+		{
+			ID:         "shared-project-1",
+			FileName:   "shared.json",
+			Provider:   "codex",
+			Status:     coreauth.StatusActive,
+			Attributes: map[string]string{"path": filePath},
+		},
+	} {
+		if _, err := service.coreManager.Register(context.Background(), auth); err != nil {
+			t.Fatalf("failed to register auth %s: %v", auth.ID, err)
+		}
+	}
+
+	err := service.deleteAuthMaintenanceCandidate(context.Background(), authMaintenanceCandidate{
+		Key:    filePath,
+		Path:   filePath,
+		IDs:    []string{"shared-primary", "shared-project-1"},
+		Reason: "http_401",
+	})
+	if !errors.Is(err, storeErr) {
+		t.Fatalf("deleteAuthMaintenanceCandidate() error = %v, want token store error", err)
+	}
+
+	deadline := time.Now().Add(1 * time.Second)
+	for {
+		allDisabled := true
+		for _, id := range []string{"shared-primary", "shared-project-1"} {
+			auth, ok := service.coreManager.GetByID(id)
+			if !ok || auth == nil || !auth.Disabled || auth.Status != coreauth.StatusDisabled {
+				allDisabled = false
+				break
+			}
+		}
+		if allDisabled {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for auths to be disabled after token store failure")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if _, errStat := os.Stat(filePath); !os.IsNotExist(errStat) {
+		t.Fatalf("expected auth file to be removed, stat err: %v", errStat)
 	}
 }
 
