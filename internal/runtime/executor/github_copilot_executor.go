@@ -577,7 +577,30 @@ func useGitHubCopilotResponsesEndpoint(sourceFormat sdktranslator.Format, model 
 		return true
 	}
 	baseModel := strings.ToLower(thinking.ParseSuffix(model).ModelName)
+	if info := registry.GetGlobalRegistry().GetModelInfo(baseModel, ""); info != nil {
+		if len(info.SupportedEndpoints) > 0 && !containsEndpoint(info.SupportedEndpoints, githubCopilotChatPath) && containsEndpoint(info.SupportedEndpoints, githubCopilotResponsesPath) {
+			return true
+		}
+	}
+	for _, info := range registry.GetGitHubCopilotModels() {
+		if info == nil || !strings.EqualFold(info.ID, baseModel) {
+			continue
+		}
+		if len(info.SupportedEndpoints) > 0 && !containsEndpoint(info.SupportedEndpoints, githubCopilotChatPath) && containsEndpoint(info.SupportedEndpoints, githubCopilotResponsesPath) {
+			return true
+		}
+		break
+	}
 	return strings.Contains(baseModel, "codex")
+}
+
+func containsEndpoint(endpoints []string, endpoint string) bool {
+	for _, item := range endpoints {
+		if item == endpoint {
+			return true
+		}
+	}
+	return false
 }
 
 // flattenAssistantContent converts assistant message content from array format

@@ -70,6 +70,13 @@ func TestUseGitHubCopilotResponsesEndpoint_CodexModel(t *testing.T) {
 	}
 }
 
+func TestUseGitHubCopilotResponsesEndpoint_RegistryResponsesOnlyModel(t *testing.T) {
+	t.Parallel()
+	if !useGitHubCopilotResponsesEndpoint(sdktranslator.FromString("openai"), "gpt-5.4") {
+		t.Fatal("expected responses-only registry model to use /responses")
+	}
+}
+
 func TestUseGitHubCopilotResponsesEndpoint_DefaultChat(t *testing.T) {
 	t.Parallel()
 	if useGitHubCopilotResponsesEndpoint(sdktranslator.FromString("openai"), "claude-3-5-sonnet") {
