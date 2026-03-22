@@ -314,6 +314,80 @@ func TestScanAuthMaintenanceCandidates_429StatusCodeQueuesImmediateDelete(t *tes
 	}
 }
 
+func TestScanAuthMaintenanceCandidates_StatusMessageJSON401QueuesDelete(t *testing.T) {
+	authDir := t.TempDir()
+	service := &Service{
+		cfg: &config.Config{
+			AuthDir: authDir,
+			AuthMaintenance: config.AuthMaintenanceConfig{
+				Enable:            true,
+				DeleteStatusCodes: []int{401},
+			},
+		},
+		coreManager: coreauth.NewManager(nil, nil, nil),
+	}
+
+	filePath := filepath.Join(authDir, "status-json-401.json")
+	auth := &coreauth.Auth{
+		ID:            "status-json-401",
+		FileName:      filepath.Base(filePath),
+		Provider:      "codex",
+		Status:        coreauth.StatusError,
+		StatusMessage: "{\n  \"error\": {\n    \"message\": \"Your authentication token has been invalidated. Please try signing in again.\",\n    \"type\": \"invalid_request_error\",\n    \"code\": \"token_invalidated\",\n    \"param\": null\n  },\n  \"status\": 401\n}",
+		Attributes:    map[string]string{"path": filePath},
+		UpdatedAt:     timeNowForTest(),
+		Unavailable:   true,
+	}
+	if _, err := service.coreManager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("failed to register auth: %v", err)
+	}
+
+	candidates := service.scanAuthMaintenanceCandidates(timeNowForTest(), service.cfg.AuthMaintenance, authDir)
+	if len(candidates) != 1 {
+		t.Fatalf("expected 1 maintenance candidate, got %d", len(candidates))
+	}
+	if got := candidates[0].Reason; got != "http_401" {
+		t.Fatalf("expected JSON 401 status_message to queue delete, got %q", got)
+	}
+}
+
+func TestScanAuthMaintenanceCandidates_StatusMessageUsageLimitJSONQueuesDelete(t *testing.T) {
+	authDir := t.TempDir()
+	service := &Service{
+		cfg: &config.Config{
+			AuthDir: authDir,
+			AuthMaintenance: config.AuthMaintenanceConfig{
+				Enable:            true,
+				DeleteStatusCodes: []int{429},
+			},
+		},
+		coreManager: coreauth.NewManager(nil, nil, nil),
+	}
+
+	filePath := filepath.Join(authDir, "status-json-429.json")
+	auth := &coreauth.Auth{
+		ID:            "status-json-429",
+		FileName:      filepath.Base(filePath),
+		Provider:      "codex",
+		Status:        coreauth.StatusError,
+		StatusMessage: "{\"error\":{\"type\":\"usage_limit_reached\",\"message\":\"The usage limit has been reached\",\"plan_type\":\"free\",\"resets_at\":1774767151,\"resets_in_seconds\":596320}}",
+		Attributes:    map[string]string{"path": filePath},
+		UpdatedAt:     timeNowForTest(),
+		Unavailable:   true,
+	}
+	if _, err := service.coreManager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("failed to register auth: %v", err)
+	}
+
+	candidates := service.scanAuthMaintenanceCandidates(timeNowForTest(), service.cfg.AuthMaintenance, authDir)
+	if len(candidates) != 1 {
+		t.Fatalf("expected 1 maintenance candidate, got %d", len(candidates))
+	}
+	if got := candidates[0].Reason; got != "http_429" {
+		t.Fatalf("expected usage_limit_reached status_message to queue delete, got %q", got)
+	}
+}
+
 func TestDeleteAuthMaintenanceCandidate_RemovesFileAndDisablesAllAuths(t *testing.T) {
 	authDir := t.TempDir()
 	filePath := filepath.Join(authDir, "shared.json")
@@ -455,6 +529,344 @@ func TestDeleteAuthMaintenanceCandidate_TokenStoreFailureStillDisablesAuths(t *t
 
 	if _, errStat := os.Stat(filePath); !os.IsNotExist(errStat) {
 		t.Fatalf("expected auth file to be removed, stat err: %v", errStat)
+	}
+}
+
+func TestScanAuthMaintenanceCandidates_DisabledPendingDeleteStillQueues(t *testing.T) {
+	authDir := t.TempDir()
+	filePath := filepath.Join(authDir, "pending-delete.json")
+	if err := os.WriteFile(filePath, []byte(`{"type":"codex","disabled":true}`), 0o600); err != nil {
+		t.Fatalf("failed to write auth file: %v", err)
+	}
+
+	service := &Service{
+		cfg: &config.Config{
+			AuthDir: authDir,
+			AuthMaintenance: config.AuthMaintenanceConfig{
+				Enable:            true,
+				DeleteStatusCodes: []int{401, 429},
+			},
+		},
+		coreManager: coreauth.NewManager(nil, nil, nil),
+	}
+
+	auth := &coreauth.Auth{
+		ID:       "pending-delete",
+		FileName: filepath.Base(filePath),
+		Provider: "codex",
+		Status:   coreauth.StatusDisabled,
+		Disabled: true,
+		Attributes: map[string]string{
+			"path": filePath,
+		},
+		Metadata: map[string]any{
+			"disabled":                               true,
+			authMaintenancePendingDeleteMetadataKey:  true,
+			authMaintenanceDeleteReasonMetadataKey:   "http_429",
+			authMaintenanceDeleteQueuedAtMetadataKey: timeNowForTest().Format(time.RFC3339Nano),
+		},
+		UpdatedAt: timeNowForTest(),
+	}
+	if _, err := service.coreManager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("failed to register auth: %v", err)
+	}
+
+	candidates := service.scanAuthMaintenanceCandidates(timeNowForTest(), service.cfg.AuthMaintenance, authDir)
+	if len(candidates) != 1 {
+		t.Fatalf("expected 1 maintenance candidate, got %d", len(candidates))
+	}
+	if got := candidates[0].Reason; got != "http_429" {
+		t.Fatalf("expected pending delete reason to survive scan fallback, got %q", got)
+	}
+}
+
+func TestDeleteAuthMaintenanceCandidate_ClearsPendingDeleteMarkerOnSuccess(t *testing.T) {
+	authDir := t.TempDir()
+	filePath := filepath.Join(authDir, "pending-delete.json")
+	if err := os.WriteFile(filePath, []byte(`{"type":"codex"}`), 0o600); err != nil {
+		t.Fatalf("failed to write auth file: %v", err)
+	}
+
+	store := &trackingTokenStore{}
+	previousStore := sdkAuth.GetTokenStore()
+	sdkAuth.RegisterTokenStore(store)
+	t.Cleanup(func() { sdkAuth.RegisterTokenStore(previousStore) })
+
+	service := &Service{
+		cfg:         &config.Config{AuthDir: authDir},
+		coreManager: coreauth.NewManager(nil, nil, nil),
+	}
+	auth := &coreauth.Auth{
+		ID:       "pending-delete",
+		FileName: filepath.Base(filePath),
+		Provider: "codex",
+		Status:   coreauth.StatusDisabled,
+		Disabled: true,
+		Attributes: map[string]string{
+			"path": filePath,
+		},
+		Metadata: map[string]any{
+			"disabled":                               true,
+			authMaintenancePendingDeleteMetadataKey:  true,
+			authMaintenanceDeleteReasonMetadataKey:   "http_401",
+			authMaintenanceDeleteQueuedAtMetadataKey: timeNowForTest().Format(time.RFC3339Nano),
+		},
+		UpdatedAt: timeNowForTest(),
+	}
+	if _, err := service.coreManager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("failed to register auth: %v", err)
+	}
+
+	err := service.deleteAuthMaintenanceCandidate(context.Background(), authMaintenanceCandidate{
+		Key:    filePath,
+		Path:   filePath,
+		IDs:    []string{"pending-delete"},
+		Reason: "http_401",
+	})
+	if err != nil {
+		t.Fatalf("deleteAuthMaintenanceCandidate() error = %v", err)
+	}
+
+	updated, ok := service.coreManager.GetByID("pending-delete")
+	if !ok || updated == nil {
+		t.Fatal("expected auth to remain in manager after delete")
+	}
+	if authMaintenancePendingDelete(updated) {
+		t.Fatal("expected pending delete marker to be cleared after successful delete")
+	}
+	candidates := service.scanAuthMaintenanceCandidates(timeNowForTest(), config.AuthMaintenanceConfig{
+		Enable:            true,
+		DeleteStatusCodes: []int{401, 429},
+	}, authDir)
+	if len(candidates) != 0 {
+		t.Fatalf("expected no follow-up candidates after successful delete, got %#v", candidates)
+	}
+}
+
+func TestAuthMaintenanceResult_DisablesImmediatelyWhileDeleteBacklogIsThrottled(t *testing.T) {
+	authDir := t.TempDir()
+
+	store := &timedTrackingTokenStore{}
+	previousStore := sdkAuth.GetTokenStore()
+	sdkAuth.RegisterTokenStore(store)
+	t.Cleanup(func() { sdkAuth.RegisterTokenStore(previousStore) })
+
+	service := &Service{
+		cfg: &config.Config{
+			AuthDir: authDir,
+			AuthMaintenance: config.AuthMaintenanceConfig{
+				Enable:                true,
+				ScanIntervalSeconds:   30,
+				DeleteIntervalSeconds: 2,
+				DeleteStatusCodes:     []int{401, 429},
+				DeleteQuotaExceeded:   true,
+				QuotaStrikeThreshold:  2,
+			},
+		},
+		coreManager: coreauth.NewManager(nil, nil, nil),
+	}
+	service.ensureAuthUpdateQueue(context.Background())
+	t.Cleanup(func() {
+		if service.authQueueStop != nil {
+			service.authQueueStop()
+		}
+		if service.maintenanceCancel != nil {
+			service.maintenanceCancel()
+		}
+	})
+
+	executor := &authMaintenanceStressExecutor{
+		delay: 2 * time.Millisecond,
+		failStatus: map[string]int{
+			"new-bad": 429,
+		},
+	}
+	service.coreManager.RegisterExecutor(executor)
+
+	const model = "stress-model"
+	reg := registry.GetGlobalRegistry()
+	allIDs := []string{"backlog-bad", "new-bad", "good"}
+	for _, id := range allIDs {
+		filePath := filepath.Join(authDir, id+".json")
+		if err := os.WriteFile(filePath, []byte(`{"type":"stress"}`), 0o600); err != nil {
+			t.Fatalf("write auth file %s: %v", id, err)
+		}
+		auth := &coreauth.Auth{
+			ID:         id,
+			FileName:   filepath.Base(filePath),
+			Provider:   "stress",
+			Status:     coreauth.StatusActive,
+			Attributes: map[string]string{"path": filePath},
+			UpdatedAt:  time.Now(),
+			Metadata:   map[string]any{"label": id},
+		}
+		if _, err := service.coreManager.Register(context.Background(), auth); err != nil {
+			t.Fatalf("register auth %s: %v", id, err)
+		}
+		reg.RegisterClient(id, "stress", []*registry.ModelInfo{{ID: model}})
+		service.coreManager.RefreshSchedulerEntry(id)
+	}
+	t.Cleanup(func() {
+		for _, id := range allIDs {
+			reg.UnregisterClient(id)
+		}
+	})
+
+	maintenanceCtx, maintenanceCancel := context.WithCancel(context.Background())
+	defer maintenanceCancel()
+	service.startAuthMaintenance(maintenanceCtx)
+
+	backlogPath := filepath.Join(authDir, "backlog-bad.json")
+	backlogCandidate := authMaintenanceCandidate{
+		Key:    backlogPath,
+		Path:   backlogPath,
+		IDs:    []string{"backlog-bad"},
+		Reason: "http_401",
+	}
+	service.disableAuthMaintenanceCandidate(context.Background(), backlogCandidate, "backlog-bad")
+	if !service.enqueueAuthMaintenanceCandidate(backlogCandidate) {
+		t.Fatal("expected backlog candidate to be queued")
+	}
+
+	deadline := time.Now().Add(1 * time.Second)
+	for {
+		if _, err := os.Stat(backlogPath); os.IsNotExist(err) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for backlog delete")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	newBadPath := filepath.Join(authDir, "new-bad.json")
+	req := coreexecutor.Request{Model: model, Payload: []byte(fmt.Sprintf(`{"model":"%s","input":"ping"}`, model))}
+	_, err := service.coreManager.Execute(context.Background(), []string{"stress"}, req, coreexecutor.Options{
+		Metadata: map[string]any{coreexecutor.PinnedAuthMetadataKey: "new-bad"},
+	})
+	if err == nil {
+		t.Fatal("expected pinned bad auth to fail")
+	}
+
+	deadline = time.Now().Add(300 * time.Millisecond)
+	for {
+		auth, ok := service.coreManager.GetByID("new-bad")
+		if ok && auth != nil && auth.Disabled && auth.Status == coreauth.StatusDisabled {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for new-bad to be disabled")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if _, errStat := os.Stat(newBadPath); errStat != nil {
+		if os.IsNotExist(errStat) {
+			t.Fatal("expected new-bad file to remain until delete interval elapsed")
+		}
+		t.Fatalf("stat new-bad file: %v", errStat)
+	}
+
+	callsBefore := executor.snapshotCalls()
+	for i := 0; i < 24; i++ {
+		if _, errExec := service.coreManager.Execute(context.Background(), []string{"stress"}, req, coreexecutor.Options{}); errExec != nil {
+			t.Fatalf("execute #%d error: %v", i, errExec)
+		}
+	}
+	callsAfter := executor.snapshotCalls()
+	if callsAfter["new-bad"] != callsBefore["new-bad"] {
+		t.Fatalf("expected disabled auth to stop receiving traffic before physical delete: before=%d after=%d", callsBefore["new-bad"], callsAfter["new-bad"])
+	}
+
+	deadline = time.Now().Add(3 * time.Second)
+	for {
+		if _, errStat := os.Stat(newBadPath); os.IsNotExist(errStat) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for throttled delete")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func TestHandleAuthMaintenanceResult_SharedPathDisablesAllAuthsAndQueuesSingleCandidate(t *testing.T) {
+	authDir := t.TempDir()
+	filePath := filepath.Join(authDir, "shared.json")
+	if err := os.WriteFile(filePath, []byte(`{"type":"codex"}`), 0o600); err != nil {
+		t.Fatalf("failed to write auth file: %v", err)
+	}
+
+	service := &Service{
+		cfg: &config.Config{
+			AuthDir: authDir,
+			AuthMaintenance: config.AuthMaintenanceConfig{
+				Enable:            true,
+				DeleteStatusCodes: []int{429},
+			},
+		},
+		coreManager: coreauth.NewManager(nil, nil, nil),
+	}
+
+	for _, auth := range []*coreauth.Auth{
+		{
+			ID:         "shared-primary",
+			FileName:   filepath.Base(filePath),
+			Provider:   "codex",
+			Status:     coreauth.StatusActive,
+			Attributes: map[string]string{"path": filePath},
+			Metadata:   map[string]any{"email": "primary@example.com"},
+		},
+		{
+			ID:         "shared-project",
+			FileName:   filepath.Base(filePath),
+			Provider:   "codex",
+			Status:     coreauth.StatusActive,
+			Attributes: map[string]string{"path": filePath},
+			Metadata:   map[string]any{"email": "project@example.com"},
+		},
+	} {
+		if _, err := service.coreManager.Register(context.Background(), auth); err != nil {
+			t.Fatalf("failed to register auth %s: %v", auth.ID, err)
+		}
+	}
+
+	service.handleAuthMaintenanceResult(context.Background(), coreauth.Result{
+		AuthID:  "shared-primary",
+		Success: false,
+		Error: &coreauth.Error{
+			Message: `{"error":{"type":"usage_limit_reached","message":"The usage limit has been reached"}}`,
+		},
+	})
+
+	for _, id := range []string{"shared-primary", "shared-project"} {
+		auth, ok := service.coreManager.GetByID(id)
+		if !ok || auth == nil {
+			t.Fatalf("expected auth %s to remain in manager", id)
+		}
+		if !auth.Disabled || auth.Status != coreauth.StatusDisabled {
+			t.Fatalf("expected auth %s to be disabled immediately, got disabled=%v status=%q", id, auth.Disabled, auth.Status)
+		}
+		if !authMaintenancePendingDelete(auth) {
+			t.Fatalf("expected auth %s to be marked pending delete", id)
+		}
+	}
+
+	if got := service.authMaintenanceQueueLen(); got != 1 {
+		t.Fatalf("expected a single queued candidate for the shared path, got %d", got)
+	}
+	candidate, _, ok := service.popAuthMaintenanceCandidate()
+	if !ok {
+		t.Fatal("expected queued candidate to be available")
+	}
+	if candidate.Path != filePath {
+		t.Fatalf("expected shared candidate path %s, got %s", filePath, candidate.Path)
+	}
+	if len(candidate.IDs) != 2 {
+		t.Fatalf("expected shared candidate to contain both ids, got %#v", candidate.IDs)
+	}
+	if candidate.Reason != "http_429" {
+		t.Fatalf("expected shared candidate reason http_429, got %q", candidate.Reason)
 	}
 }
 
