@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -89,6 +90,23 @@ type Service struct {
 
 	// wsGateway manages websocket Gemini providers.
 	wsGateway *wsrelay.Manager
+
+	// maintenanceCancel stops the optional auth maintenance worker.
+	maintenanceCancel context.CancelFunc
+}
+
+const (
+	authMaintenanceLoopResolution           = time.Second
+	defaultMaintenanceScanIntervalSeconds   = 30
+	defaultMaintenanceDeleteIntervalSeconds = 5
+	defaultMaintenanceQuotaStrikeThreshold  = 6
+)
+
+type authMaintenanceCandidate struct {
+	Key    string
+	Path   string
+	IDs    []string
+	Reason string
 }
 
 // RegisterUsagePlugin registers a usage plugin on the global usage manager.
@@ -344,6 +362,277 @@ func (s *Service) applyRetryConfig(cfg *config.Config) {
 	}
 	maxInterval := time.Duration(cfg.MaxRetryInterval) * time.Second
 	s.coreManager.SetRetryConfig(cfg.RequestRetry, maxInterval, cfg.MaxRetryCredentials)
+}
+
+func (s *Service) startAuthMaintenance(parent context.Context) {
+	if s == nil || s.maintenanceCancel != nil {
+		return
+	}
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithCancel(parent)
+	s.maintenanceCancel = cancel
+	go s.runAuthMaintenance(ctx)
+}
+
+func (s *Service) runAuthMaintenance(ctx context.Context) {
+	ticker := time.NewTicker(authMaintenanceLoopResolution)
+	defer ticker.Stop()
+
+	queue := make([]authMaintenanceCandidate, 0)
+	pending := make(map[string]struct{})
+	nextScan := time.Time{}
+	nextDelete := time.Time{}
+
+	clearQueue := func() {
+		queue = queue[:0]
+		clear(pending)
+		nextDelete = time.Time{}
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+
+		cfg, authDir := s.snapshotAuthMaintenanceConfig()
+		now := time.Now()
+		if !cfg.Enable {
+			clearQueue()
+			nextScan = now.Add(time.Duration(cfg.ScanIntervalSeconds) * time.Second)
+			continue
+		}
+
+		if nextScan.IsZero() || !now.Before(nextScan) {
+			candidates := s.scanAuthMaintenanceCandidates(now, cfg, authDir)
+			enqueued := 0
+			for _, candidate := range candidates {
+				if candidate.Key == "" {
+					continue
+				}
+				if _, ok := pending[candidate.Key]; ok {
+					continue
+				}
+				pending[candidate.Key] = struct{}{}
+				queue = append(queue, candidate)
+				enqueued++
+			}
+			if enqueued > 0 {
+				log.Infof("auth maintenance queued %d auth file(s)", enqueued)
+			}
+			nextScan = now.Add(time.Duration(cfg.ScanIntervalSeconds) * time.Second)
+			if len(queue) > 0 && nextDelete.IsZero() {
+				nextDelete = now
+			}
+		}
+
+		if nextDelete.IsZero() || now.Before(nextDelete) || len(queue) == 0 {
+			continue
+		}
+
+		candidate := queue[0]
+		queue = queue[1:]
+		delete(pending, candidate.Key)
+		if err := s.deleteAuthMaintenanceCandidate(ctx, candidate); err != nil {
+			log.WithError(err).Warnf("auth maintenance delete failed for %s", candidate.Path)
+		} else {
+			log.Infof("auth maintenance deleted %s (%s)", candidate.Path, candidate.Reason)
+		}
+		if len(queue) > 0 {
+			nextDelete = now.Add(time.Duration(cfg.DeleteIntervalSeconds) * time.Second)
+		} else {
+			nextDelete = time.Time{}
+		}
+	}
+}
+
+func (s *Service) snapshotAuthMaintenanceConfig() (config.AuthMaintenanceConfig, string) {
+	if s == nil {
+		return config.AuthMaintenanceConfig{
+			ScanIntervalSeconds:   defaultMaintenanceScanIntervalSeconds,
+			DeleteIntervalSeconds: defaultMaintenanceDeleteIntervalSeconds,
+			QuotaStrikeThreshold:  defaultMaintenanceQuotaStrikeThreshold,
+		}, ""
+	}
+	s.cfgMu.RLock()
+	cfg := s.cfg
+	s.cfgMu.RUnlock()
+	if cfg == nil {
+		return config.AuthMaintenanceConfig{
+			ScanIntervalSeconds:   defaultMaintenanceScanIntervalSeconds,
+			DeleteIntervalSeconds: defaultMaintenanceDeleteIntervalSeconds,
+			QuotaStrikeThreshold:  defaultMaintenanceQuotaStrikeThreshold,
+		}, ""
+	}
+	maintenance := cfg.AuthMaintenance
+	if maintenance.ScanIntervalSeconds <= 0 {
+		maintenance.ScanIntervalSeconds = defaultMaintenanceScanIntervalSeconds
+	}
+	if maintenance.DeleteIntervalSeconds <= 0 {
+		maintenance.DeleteIntervalSeconds = defaultMaintenanceDeleteIntervalSeconds
+	}
+	if maintenance.QuotaStrikeThreshold <= 0 {
+		maintenance.QuotaStrikeThreshold = defaultMaintenanceQuotaStrikeThreshold
+	}
+	return maintenance, strings.TrimSpace(cfg.AuthDir)
+}
+
+func (s *Service) scanAuthMaintenanceCandidates(now time.Time, cfg config.AuthMaintenanceConfig, authDir string) []authMaintenanceCandidate {
+	if s == nil || s.coreManager == nil || !cfg.Enable {
+		return nil
+	}
+	grouped := make(map[string]authMaintenanceCandidate)
+	for _, auth := range s.coreManager.List() {
+		path := resolveAuthFilePath(auth, authDir)
+		if path == "" {
+			continue
+		}
+		group := grouped[path]
+		if group.Key == "" {
+			group = authMaintenanceCandidate{
+				Key:  path,
+				Path: path,
+			}
+		}
+		if auth != nil && strings.TrimSpace(auth.ID) != "" {
+			group.IDs = append(group.IDs, strings.TrimSpace(auth.ID))
+		}
+		if group.Reason == "" {
+			if reason, ok := authEligibleForMaintenanceDelete(auth, cfg, now); ok {
+				group.Reason = reason
+			}
+		}
+		grouped[path] = group
+	}
+
+	candidates := make([]authMaintenanceCandidate, 0, len(grouped))
+	for _, candidate := range grouped {
+		if candidate.Reason == "" || len(candidate.IDs) == 0 {
+			continue
+		}
+		candidates = append(candidates, candidate)
+	}
+	return candidates
+}
+
+func authEligibleForMaintenanceDelete(auth *coreauth.Auth, cfg config.AuthMaintenanceConfig, _ time.Time) (string, bool) {
+	if auth == nil || auth.Disabled || auth.Status == coreauth.StatusDisabled {
+		return "", false
+	}
+	if statusCode := authMaintenanceStatusCode(auth); containsStatusCode(cfg.DeleteStatusCodes, statusCode) {
+		return fmt.Sprintf("http_%d", statusCode), true
+	}
+	if cfg.DeleteQuotaExceeded && auth.Quota.Exceeded && auth.Quota.StrikeCount >= cfg.QuotaStrikeThreshold {
+		return fmt.Sprintf("quota_strikes_%d", auth.Quota.StrikeCount), true
+	}
+	return "", false
+}
+
+func authMaintenanceStatusCode(auth *coreauth.Auth) int {
+	if auth == nil {
+		return 0
+	}
+	if auth.LastError != nil && auth.LastError.HTTPStatus > 0 {
+		return auth.LastError.HTTPStatus
+	}
+	switch strings.ToLower(strings.TrimSpace(auth.StatusMessage)) {
+	case "unauthorized":
+		return 401
+	case "payment_required":
+		return 402
+	case "not_found":
+		return 404
+	case "quota exhausted":
+		return 429
+	default:
+		return 0
+	}
+}
+
+func containsStatusCode(codes []int, want int) bool {
+	if want == 0 {
+		return false
+	}
+	for _, code := range codes {
+		if code == want {
+			return true
+		}
+	}
+	return false
+}
+
+func resolveAuthFilePath(auth *coreauth.Auth, authDir string) string {
+	if auth == nil || auth.Disabled || auth.Status == coreauth.StatusDisabled {
+		return ""
+	}
+	if auth.Attributes != nil && strings.EqualFold(strings.TrimSpace(auth.Attributes["runtime_only"]), "true") {
+		return ""
+	}
+	path := ""
+	if auth.Attributes != nil {
+		path = strings.TrimSpace(auth.Attributes["path"])
+	}
+	if path == "" {
+		path = strings.TrimSpace(auth.FileName)
+	}
+	if path == "" {
+		return ""
+	}
+	if !filepath.IsAbs(path) {
+		if authDir == "" {
+			return ""
+		}
+		path = filepath.Join(authDir, filepath.Base(path))
+	}
+	if abs, err := filepath.Abs(path); err == nil {
+		path = abs
+	}
+	return path
+}
+
+func (s *Service) deleteAuthMaintenanceCandidate(ctx context.Context, candidate authMaintenanceCandidate) error {
+	if s == nil {
+		return nil
+	}
+	ctx = coreauth.WithSkipPersist(ctx)
+	path := strings.TrimSpace(candidate.Path)
+	if path != "" {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove auth file: %w", err)
+		}
+		if err := s.deleteAuthTokenRecord(ctx, path); err != nil {
+			return err
+		}
+	}
+	for _, id := range candidate.IDs {
+		if trimmed := strings.TrimSpace(id); trimmed != "" {
+			s.emitAuthUpdate(ctx, watcher.AuthUpdate{Action: watcher.AuthUpdateActionDelete, ID: trimmed})
+		}
+	}
+	return nil
+}
+
+func (s *Service) deleteAuthTokenRecord(ctx context.Context, path string) error {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil
+	}
+	store := sdkAuth.GetTokenStore()
+	if store == nil {
+		return fmt.Errorf("token store unavailable")
+	}
+	s.cfgMu.RLock()
+	cfg := s.cfg
+	s.cfgMu.RUnlock()
+	if cfg != nil {
+		if dirSetter, ok := store.(interface{ SetBaseDir(string) }); ok {
+			dirSetter.SetBaseDir(cfg.AuthDir)
+		}
+	}
+	return store.Delete(ctx, path)
 }
 
 func openAICompatInfoFromAuth(a *coreauth.Auth) (providerKey string, compatName string, ok bool) {
@@ -687,6 +976,7 @@ func (s *Service) Run(ctx context.Context) error {
 		s.coreManager.StartAutoRefresh(context.Background(), interval)
 		log.Infof("core auth auto-refresh started (interval=%s)", interval)
 	}
+	s.startAuthMaintenance(context.Background())
 
 	select {
 	case <-ctx.Done():
@@ -723,6 +1013,9 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		}
 		if s.coreManager != nil {
 			s.coreManager.StopAutoRefresh()
+		}
+		if s.maintenanceCancel != nil {
+			s.maintenanceCancel()
 		}
 		if s.watcher != nil {
 			if err := s.watcher.Stop(); err != nil {

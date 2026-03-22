@@ -108,8 +108,11 @@ func (e *credentialRetryLimitExecutor) Calls() int {
 	return e.calls
 }
 
-func newCredentialRetryLimitTestManager(t *testing.T, maxRetryCredentials int) (*Manager, *credentialRetryLimitExecutor) {
+func newCredentialRetryLimitTestManager(t *testing.T, maxRetryCredentials int, authCount int) (*Manager, *credentialRetryLimitExecutor) {
 	t.Helper()
+	if authCount <= 0 {
+		authCount = 1
+	}
 
 	m := NewManager(nil, nil, nil)
 	m.SetRetryConfig(0, 0, maxRetryCredentials)
@@ -117,25 +120,22 @@ func newCredentialRetryLimitTestManager(t *testing.T, maxRetryCredentials int) (
 	executor := &credentialRetryLimitExecutor{id: "claude"}
 	m.RegisterExecutor(executor)
 
-	baseID := uuid.NewString()
-	auth1 := &Auth{ID: baseID + "-auth-1", Provider: "claude"}
-	auth2 := &Auth{ID: baseID + "-auth-2", Provider: "claude"}
-
 	// Auth selection requires that the global model registry knows each credential supports the model.
 	reg := registry.GetGlobalRegistry()
-	reg.RegisterClient(auth1.ID, "claude", []*registry.ModelInfo{{ID: "test-model"}})
-	reg.RegisterClient(auth2.ID, "claude", []*registry.ModelInfo{{ID: "test-model"}})
+	authIDs := make([]string, 0, authCount)
+	for i := 0; i < authCount; i++ {
+		authID := uuid.NewString()
+		authIDs = append(authIDs, authID)
+		reg.RegisterClient(authID, "claude", []*registry.ModelInfo{{ID: "test-model"}})
+		if _, errRegister := m.Register(context.Background(), &Auth{ID: authID, Provider: "claude"}); errRegister != nil {
+			t.Fatalf("register auth %d: %v", i+1, errRegister)
+		}
+	}
 	t.Cleanup(func() {
-		reg.UnregisterClient(auth1.ID)
-		reg.UnregisterClient(auth2.ID)
+		for i := range authIDs {
+			reg.UnregisterClient(authIDs[i])
+		}
 	})
-
-	if _, errRegister := m.Register(context.Background(), auth1); errRegister != nil {
-		t.Fatalf("register auth1: %v", errRegister)
-	}
-	if _, errRegister := m.Register(context.Background(), auth2); errRegister != nil {
-		t.Fatalf("register auth2: %v", errRegister)
-	}
 
 	return m, executor
 }
@@ -172,7 +172,7 @@ func TestManager_MaxRetryCredentials_LimitsCrossCredentialRetries(t *testing.T) 
 	for _, tc := range testCases {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			limitedManager, limitedExecutor := newCredentialRetryLimitTestManager(t, 1)
+			limitedManager, limitedExecutor := newCredentialRetryLimitTestManager(t, 1, 2)
 			if errInvoke := tc.invoke(limitedManager); errInvoke == nil {
 				t.Fatalf("expected error for limited retry execution")
 			}
@@ -180,7 +180,7 @@ func TestManager_MaxRetryCredentials_LimitsCrossCredentialRetries(t *testing.T) 
 				t.Fatalf("expected 1 call with max-retry-credentials=1, got %d", calls)
 			}
 
-			unlimitedManager, unlimitedExecutor := newCredentialRetryLimitTestManager(t, 0)
+			unlimitedManager, unlimitedExecutor := newCredentialRetryLimitTestManager(t, 0, 2)
 			if errInvoke := tc.invoke(unlimitedManager); errInvoke == nil {
 				t.Fatalf("expected error for unlimited retry execution")
 			}
@@ -188,6 +188,17 @@ func TestManager_MaxRetryCredentials_LimitsCrossCredentialRetries(t *testing.T) 
 				t.Fatalf("expected 2 calls with max-retry-credentials=0, got %d", calls)
 			}
 		})
+	}
+}
+
+func TestManager_MaxRetryCredentials_ZeroUsesSafetyCap(t *testing.T) {
+	m, executor := newCredentialRetryLimitTestManager(t, 0, unlimitedRetrySafetyCap+8)
+
+	if _, errExecute := m.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: "test-model"}, cliproxyexecutor.Options{}); errExecute == nil {
+		t.Fatalf("expected error for capped retry execution")
+	}
+	if calls := executor.Calls(); calls != unlimitedRetrySafetyCap {
+		t.Fatalf("expected %d calls with safety cap, got %d", unlimitedRetrySafetyCap, calls)
 	}
 }
 

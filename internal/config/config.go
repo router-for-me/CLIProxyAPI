@@ -78,6 +78,9 @@ type Config struct {
 	// QuotaExceeded defines the behavior when a quota is exceeded.
 	QuotaExceeded QuotaExceeded `yaml:"quota-exceeded" json:"quota-exceeded"`
 
+	// AuthMaintenance controls optional background cleanup of invalid or exhausted auth files.
+	AuthMaintenance AuthMaintenanceConfig `yaml:"auth-maintenance" json:"auth-maintenance"`
+
 	// Routing controls credential selection behavior.
 	Routing RoutingConfig `yaml:"routing" json:"routing"`
 
@@ -184,6 +187,24 @@ type QuotaExceeded struct {
 
 	// SwitchPreviewModel indicates whether to automatically switch to a preview model when a quota is exceeded.
 	SwitchPreviewModel bool `yaml:"switch-preview-model" json:"switch-preview-model"`
+}
+
+// AuthMaintenanceConfig controls optional background cleanup of auth files that
+// repeatedly fail with terminal or quota-related errors.
+type AuthMaintenanceConfig struct {
+	// Enable starts the background maintenance queue when true.
+	Enable bool `yaml:"enable" json:"enable"`
+	// ScanIntervalSeconds defines how often the runtime auth set is scanned for delete candidates.
+	ScanIntervalSeconds int `yaml:"scan-interval-seconds" json:"scan-interval-seconds"`
+	// DeleteIntervalSeconds defines the stagger interval between queued deletions.
+	DeleteIntervalSeconds int `yaml:"delete-interval-seconds" json:"delete-interval-seconds"`
+	// DeleteStatusCodes defines HTTP status codes that should trigger deletion.
+	// When 429 is included, a single quota response is enough to enqueue deletion.
+	DeleteStatusCodes []int `yaml:"delete-status-codes" json:"delete-status-codes"`
+	// DeleteQuotaExceeded enables deletion for auths that repeatedly hit quota limits.
+	DeleteQuotaExceeded bool `yaml:"delete-quota-exceeded" json:"delete-quota-exceeded"`
+	// QuotaStrikeThreshold is the minimum number of 429 hits required before an auth is queued for deletion.
+	QuotaStrikeThreshold int `yaml:"quota-strike-threshold" json:"quota-strike-threshold"`
 }
 
 // RoutingConfig configures how credentials are selected for requests.
@@ -554,6 +575,11 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.ErrorLogsMaxFiles = 10
 	cfg.UsageStatisticsEnabled = false
 	cfg.DisableCooling = false
+	cfg.AuthMaintenance.ScanIntervalSeconds = 30
+	cfg.AuthMaintenance.DeleteIntervalSeconds = 5
+	cfg.AuthMaintenance.DeleteStatusCodes = []int{401, 402, 403, 404, 429}
+	cfg.AuthMaintenance.DeleteQuotaExceeded = true
+	cfg.AuthMaintenance.QuotaStrikeThreshold = 6
 	cfg.Pprof.Enable = false
 	cfg.Pprof.Addr = DefaultPprofAddr
 	cfg.AmpCode.RestrictManagementToLocalhost = false // Default to false: API key auth is sufficient
@@ -617,6 +643,16 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	if cfg.MaxRetryCredentials < 0 {
 		cfg.MaxRetryCredentials = 0
 	}
+	if cfg.AuthMaintenance.ScanIntervalSeconds <= 0 {
+		cfg.AuthMaintenance.ScanIntervalSeconds = 30
+	}
+	if cfg.AuthMaintenance.DeleteIntervalSeconds <= 0 {
+		cfg.AuthMaintenance.DeleteIntervalSeconds = 5
+	}
+	cfg.AuthMaintenance.DeleteStatusCodes = normalizeAuthMaintenanceStatusCodes(cfg.AuthMaintenance.DeleteStatusCodes)
+	if cfg.AuthMaintenance.QuotaStrikeThreshold <= 0 {
+		cfg.AuthMaintenance.QuotaStrikeThreshold = 6
+	}
 
 	// Sanitize Gemini API key configuration and migrate legacy entries.
 	cfg.SanitizeGeminiKeys()
@@ -662,6 +698,25 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	// Return the populated configuration struct.
 	return &cfg, nil
+}
+
+func normalizeAuthMaintenanceStatusCodes(codes []int) []int {
+	if len(codes) == 0 {
+		return nil
+	}
+	seen := make(map[int]struct{}, len(codes))
+	out := make([]int, 0, len(codes))
+	for _, code := range codes {
+		if code < 100 || code > 599 {
+			continue
+		}
+		if _, ok := seen[code]; ok {
+			continue
+		}
+		seen[code] = struct{}{}
+		out = append(out, code)
+	}
+	return out
 }
 
 // SanitizePayloadRules validates raw JSON payload rule params and drops invalid rules.

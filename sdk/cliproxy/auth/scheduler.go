@@ -233,7 +233,7 @@ func (s *authScheduler) pickSingle(ctx context.Context, provider, model string, 
 		return true
 	}
 	if picked := shard.pickReadyLocked(preferWebsocket, s.strategy, predicate); picked != nil {
-		return picked, nil
+		return picked.Clone(), nil
 	}
 	return nil, shard.unavailableErrorLocked(provider, model, predicate)
 }
@@ -273,7 +273,7 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 			return !ok
 		}
 		if picked := shard.pickReadyLocked(false, s.strategy, predicate); picked != nil {
-			return picked, providerKey, nil
+			return picked.Clone(), providerKey, nil
 		}
 		return nil, "", shard.unavailableErrorLocked("mixed", model, predicate)
 	}
@@ -314,7 +314,7 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 			}
 			picked := shard.pickReadyAtPriorityLocked(false, bestPriority, s.strategy, predicate)
 			if picked != nil {
-				return picked, providerKey, nil
+				return picked.Clone(), providerKey, nil
 			}
 		}
 		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, tried)
@@ -337,7 +337,7 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 			continue
 		}
 		s.mixedCursors[cursorKey] = providerIndex + 1
-		return picked, providerKey, nil
+		return picked.Clone(), providerKey, nil
 	}
 	return nil, "", s.mixedUnavailableErrorLocked(normalized, model, tried)
 }

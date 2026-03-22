@@ -269,12 +269,10 @@ func (h *Handler) GetAuthFileModels(c *gin.Context) {
 	// Try to find auth ID via authManager
 	var authID string
 	if h.authManager != nil {
-		auths := h.authManager.List()
-		for _, auth := range auths {
-			if auth.FileName == name || auth.ID == name {
-				authID = auth.ID
-				break
-			}
+		if auth, ok := h.authManager.GetByID(name); ok && auth != nil {
+			authID = auth.ID
+		} else if auth, ok := h.authManager.FindByFileName(name); ok && auth != nil {
+			authID = auth.ID
 		}
 	}
 
@@ -677,7 +675,9 @@ func (h *Handler) DeleteAuthFile(c *gin.Context) {
 
 	targetPath := filepath.Join(h.cfg.AuthDir, filepath.Base(name))
 	targetID := ""
+	targetAuthFound := false
 	if targetAuth := h.findAuthForDelete(name); targetAuth != nil {
+		targetAuthFound = true
 		targetID = strings.TrimSpace(targetAuth.ID)
 		if path := strings.TrimSpace(authAttribute(targetAuth, "path")); path != "" {
 			targetPath = path
@@ -688,13 +688,18 @@ func (h *Handler) DeleteAuthFile(c *gin.Context) {
 			targetPath = abs
 		}
 	}
+	alreadyMissing := false
 	if errRemove := os.Remove(targetPath); errRemove != nil {
 		if os.IsNotExist(errRemove) {
-			c.JSON(404, gin.H{"error": "file not found"})
+			if !targetAuthFound {
+				c.JSON(404, gin.H{"error": "file not found"})
+				return
+			}
+			alreadyMissing = true
 		} else {
 			c.JSON(500, gin.H{"error": fmt.Sprintf("failed to remove file: %v", errRemove)})
+			return
 		}
-		return
 	}
 	if errDeleteRecord := h.deleteTokenRecord(ctx, targetPath); errDeleteRecord != nil {
 		c.JSON(500, gin.H{"error": errDeleteRecord.Error()})
@@ -705,7 +710,11 @@ func (h *Handler) DeleteAuthFile(c *gin.Context) {
 	} else {
 		h.disableAuth(ctx, targetPath)
 	}
-	c.JSON(200, gin.H{"status": "ok"})
+	response := gin.H{"status": "ok"}
+	if alreadyMissing {
+		response["already_missing"] = true
+	}
+	c.JSON(200, response)
 }
 
 func (h *Handler) findAuthForDelete(name string) *coreauth.Auth {
@@ -719,17 +728,8 @@ func (h *Handler) findAuthForDelete(name string) *coreauth.Auth {
 	if auth, ok := h.authManager.GetByID(name); ok {
 		return auth
 	}
-	auths := h.authManager.List()
-	for _, auth := range auths {
-		if auth == nil {
-			continue
-		}
-		if strings.TrimSpace(auth.FileName) == name {
-			return auth
-		}
-		if filepath.Base(strings.TrimSpace(authAttribute(auth, "path"))) == name {
-			return auth
-		}
+	if auth, ok := h.authManager.FindByFileName(name); ok {
+		return auth
 	}
 	return nil
 }
@@ -851,14 +851,8 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 	var targetAuth *coreauth.Auth
 	if auth, ok := h.authManager.GetByID(name); ok {
 		targetAuth = auth
-	} else {
-		auths := h.authManager.List()
-		for _, auth := range auths {
-			if auth.FileName == name {
-				targetAuth = auth
-				break
-			}
-		}
+	} else if auth, ok := h.authManager.FindByFileName(name); ok {
+		targetAuth = auth
 	}
 
 	if targetAuth == nil {
@@ -916,14 +910,8 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 	var targetAuth *coreauth.Auth
 	if auth, ok := h.authManager.GetByID(name); ok {
 		targetAuth = auth
-	} else {
-		auths := h.authManager.List()
-		for _, auth := range auths {
-			if auth.FileName == name {
-				targetAuth = auth
-				break
-			}
-		}
+	} else if auth, ok := h.authManager.FindByFileName(name); ok {
+		targetAuth = auth
 	}
 
 	if targetAuth == nil {

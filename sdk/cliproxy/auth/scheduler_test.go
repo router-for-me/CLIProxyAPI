@@ -208,6 +208,116 @@ func TestSchedulerPick_CodexWebsocketPrefersWebsocketEnabledSubset(t *testing.T)
 	}
 }
 
+func TestSchedulerPick_ReturnsDetachedClone(t *testing.T) {
+	t.Parallel()
+
+	model := "gemini-2.5-pro"
+	registerSchedulerModels(t, "gemini", model, "detached")
+	scheduler := newSchedulerForTest(
+		&RoundRobinSelector{},
+		&Auth{
+			ID:       "detached",
+			Provider: "gemini",
+			Attributes: map[string]string{
+				"tag": "original",
+			},
+			ModelStates: map[string]*ModelState{
+				model: &ModelState{Status: StatusActive},
+			},
+		},
+	)
+
+	got, errPick := scheduler.pickSingle(context.Background(), "gemini", model, cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickSingle() error = %v", errPick)
+	}
+	if got == nil {
+		t.Fatal("pickSingle() auth = nil")
+	}
+
+	got.Attributes["tag"] = "mutated"
+	got.ModelStates[model].Status = StatusError
+	got.ModelStates[model].Unavailable = true
+	got.ModelStates["other"] = &ModelState{Status: StatusDisabled}
+
+	gotAgain, errPick := scheduler.pickSingle(context.Background(), "gemini", model, cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickSingle() second error = %v", errPick)
+	}
+	if gotAgain == nil {
+		t.Fatal("pickSingle() second auth = nil")
+	}
+	if gotAgain.Attributes["tag"] != "original" {
+		t.Fatalf("pickSingle() returned shared Attributes map, got %q", gotAgain.Attributes["tag"])
+	}
+	state := gotAgain.ModelStates[model]
+	if state == nil {
+		t.Fatalf("pickSingle() missing model state for %q", model)
+	}
+	if state.Status != StatusActive || state.Unavailable {
+		t.Fatalf("pickSingle() returned shared model state: %+v", state)
+	}
+	if _, ok := gotAgain.ModelStates["other"]; ok {
+		t.Fatal("pickSingle() returned shared ModelStates map")
+	}
+}
+
+func TestManager_Register_SchedulerSnapshotDetachedFromManagerState(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	model := "scheduler-detached-model"
+	registerSchedulerModels(t, "gemini", model, "manager-detached")
+
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	_, errRegister := manager.Register(ctx, &Auth{
+		ID:       "manager-detached",
+		Provider: "gemini",
+		Attributes: map[string]string{
+			"tag": "original",
+		},
+		ModelStates: map[string]*ModelState{
+			model: &ModelState{Status: StatusActive},
+		},
+	})
+	if errRegister != nil {
+		t.Fatalf("Register() error = %v", errRegister)
+	}
+
+	manager.mu.Lock()
+	current := manager.auths["manager-detached"]
+	if current == nil {
+		manager.mu.Unlock()
+		t.Fatal("manager auth missing after register")
+	}
+	current.Attributes["tag"] = "manager-mutated"
+	current.ModelStates[model] = &ModelState{
+		Status:         StatusError,
+		Unavailable:    true,
+		NextRetryAfter: time.Now().Add(1 * time.Minute),
+	}
+	manager.auths["manager-detached"] = current
+	manager.mu.Unlock()
+
+	got, errPick := manager.scheduler.pickSingle(ctx, "gemini", model, cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("scheduler.pickSingle() error = %v", errPick)
+	}
+	if got == nil {
+		t.Fatal("scheduler.pickSingle() auth = nil")
+	}
+	if got.Attributes["tag"] != "original" {
+		t.Fatalf("scheduler snapshot mutated with manager state, got %q", got.Attributes["tag"])
+	}
+	state := got.ModelStates[model]
+	if state == nil {
+		t.Fatalf("scheduler.pickSingle() missing model state for %q", model)
+	}
+	if state.Status != StatusActive || state.Unavailable {
+		t.Fatalf("scheduler snapshot unexpectedly changed: %+v", state)
+	}
+}
+
 func TestSchedulerPick_MixedProvidersUsesProviderRotationOverReadyCandidates(t *testing.T) {
 	t.Parallel()
 

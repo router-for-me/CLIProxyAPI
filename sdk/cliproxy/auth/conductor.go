@@ -65,6 +65,9 @@ const (
 	refreshFailureBackoff = 5 * time.Minute
 	quotaBackoffBase      = time.Second
 	quotaBackoffMax       = 30 * time.Minute
+	// unlimitedRetrySafetyCap bounds legacy "retry all credentials" mode so a
+	// single unhealthy request cannot fan out across thousands of auth files.
+	unlimitedRetrySafetyCap = 32
 )
 
 var quotaCooldownDisabled atomic.Bool
@@ -815,12 +818,13 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	}
 	auth.EnsureIndex()
 	authClone := auth.Clone()
+	schedulerSnapshot := authClone.Clone()
 	m.mu.Lock()
 	m.auths[auth.ID] = authClone
 	m.mu.Unlock()
 	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
 	if m.scheduler != nil {
-		m.scheduler.upsertAuth(authClone)
+		m.scheduler.upsertAuth(schedulerSnapshot)
 	}
 	_ = m.persist(ctx, auth)
 	m.hook.OnAuthRegistered(ctx, auth.Clone())
@@ -844,11 +848,12 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	}
 	auth.EnsureIndex()
 	authClone := auth.Clone()
+	schedulerSnapshot := authClone.Clone()
 	m.auths[auth.ID] = authClone
 	m.mu.Unlock()
 	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
 	if m.scheduler != nil {
-		m.scheduler.upsertAuth(authClone)
+		m.scheduler.upsertAuth(schedulerSnapshot)
 	}
 	_ = m.persist(ctx, auth)
 	m.hook.OnAuthUpdated(ctx, auth.Clone())
@@ -985,9 +990,10 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 	routeModel := req.Model
 	opts = ensureRequestedModelMetadata(opts, routeModel)
 	tried := make(map[string]struct{})
+	credentialRetryLimit := effectiveCredentialRetryLimit(maxRetryCredentials)
 	var lastErr error
 	for {
-		if maxRetryCredentials > 0 && len(tried) >= maxRetryCredentials {
+		if credentialRetryLimit > 0 && len(tried) >= credentialRetryLimit {
 			if lastErr != nil {
 				return cliproxyexecutor.Response{}, lastErr
 			}
@@ -1057,9 +1063,10 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 	routeModel := req.Model
 	opts = ensureRequestedModelMetadata(opts, routeModel)
 	tried := make(map[string]struct{})
+	credentialRetryLimit := effectiveCredentialRetryLimit(maxRetryCredentials)
 	var lastErr error
 	for {
-		if maxRetryCredentials > 0 && len(tried) >= maxRetryCredentials {
+		if credentialRetryLimit > 0 && len(tried) >= credentialRetryLimit {
 			if lastErr != nil {
 				return cliproxyexecutor.Response{}, lastErr
 			}
@@ -1129,9 +1136,10 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	routeModel := req.Model
 	opts = ensureRequestedModelMetadata(opts, routeModel)
 	tried := make(map[string]struct{})
+	credentialRetryLimit := effectiveCredentialRetryLimit(maxRetryCredentials)
 	var lastErr error
 	for {
-		if maxRetryCredentials > 0 && len(tried) >= maxRetryCredentials {
+		if credentialRetryLimit > 0 && len(tried) >= credentialRetryLimit {
 			if lastErr != nil {
 				return nil, lastErr
 			}
@@ -1495,6 +1503,13 @@ func (m *Manager) retrySettings() (int, int, time.Duration) {
 	return int(m.requestRetry.Load()), int(m.maxRetryCredentials.Load()), time.Duration(m.maxRetryInterval.Load())
 }
 
+func effectiveCredentialRetryLimit(maxRetryCredentials int) int {
+	if maxRetryCredentials > 0 {
+		return maxRetryCredentials
+	}
+	return unlimitedRetrySafetyCap
+}
+
 func (m *Manager) closestCooldownWait(providers []string, model string, attempt int) (time.Duration, bool) {
 	if m == nil || len(providers) == 0 {
 		return 0, false
@@ -1654,6 +1669,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				case 429:
 					var next time.Time
 					backoffLevel := state.Quota.BackoffLevel
+					strikeCount := state.Quota.StrikeCount + 1
 					if result.RetryAfter != nil {
 						next = now.Add(*result.RetryAfter)
 					} else {
@@ -1669,6 +1685,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						Reason:        "quota",
 						NextRecoverAt: next,
 						BackoffLevel:  backoffLevel,
+						StrikeCount:   strikeCount,
 					}
 					suspendReason = "quota"
 					shouldSuspendModel = true
@@ -1692,18 +1709,17 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			}
 		}
 
-			if m.store != nil && !shouldSkipPersist(ctx) {
-				persistSnapshot = auth.Clone()
+		if m.store != nil && !shouldSkipPersist(ctx) {
+			persistSnapshot = auth.Clone()
+		}
+		if result.Model != "" && m.useSchedulerFastPath() {
+			if state := auth.ModelStates[result.Model]; state != nil {
+				modelStateSnapshot = state.Clone()
 			}
-			if result.Model != "" && m.useSchedulerFastPath() {
-				if state := auth.ModelStates[result.Model]; state != nil {
-					modelStateSnapshot = state.Clone()
-				} else {
-					authSnapshot = auth.Clone()
-				}
-			} else {
-				authSnapshot = auth.Clone()
-			}
+			authSnapshot = auth.Clone()
+		} else {
+			authSnapshot = auth.Clone()
+		}
 	}
 	m.mu.Unlock()
 	if m.scheduler != nil {
@@ -1771,6 +1787,7 @@ func updateAggregatedAvailability(auth *Auth, now time.Time) {
 	quotaExceeded := false
 	quotaRecover := time.Time{}
 	maxBackoffLevel := 0
+	maxStrikeCount := 0
 	for _, state := range auth.ModelStates {
 		if state == nil {
 			continue
@@ -1802,6 +1819,9 @@ func updateAggregatedAvailability(auth *Auth, now time.Time) {
 			if state.Quota.BackoffLevel > maxBackoffLevel {
 				maxBackoffLevel = state.Quota.BackoffLevel
 			}
+			if state.Quota.StrikeCount > maxStrikeCount {
+				maxStrikeCount = state.Quota.StrikeCount
+			}
 		}
 	}
 	auth.Unavailable = allUnavailable
@@ -1815,11 +1835,13 @@ func updateAggregatedAvailability(auth *Auth, now time.Time) {
 		auth.Quota.Reason = "quota"
 		auth.Quota.NextRecoverAt = quotaRecover
 		auth.Quota.BackoffLevel = maxBackoffLevel
+		auth.Quota.StrikeCount = maxStrikeCount
 	} else {
 		auth.Quota.Exceeded = false
 		auth.Quota.Reason = ""
 		auth.Quota.NextRecoverAt = time.Time{}
 		auth.Quota.BackoffLevel = 0
+		auth.Quota.StrikeCount = 0
 	}
 }
 
@@ -1854,6 +1876,7 @@ func clearAuthStateOnSuccess(auth *Auth, now time.Time) {
 	auth.Quota.Reason = ""
 	auth.Quota.NextRecoverAt = time.Time{}
 	auth.Quota.BackoffLevel = 0
+	auth.Quota.StrikeCount = 0
 	auth.LastError = nil
 	auth.NextRetryAfter = time.Time{}
 	auth.UpdatedAt = now
@@ -1957,6 +1980,7 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		auth.StatusMessage = "quota exhausted"
 		auth.Quota.Exceeded = true
 		auth.Quota.Reason = "quota"
+		auth.Quota.StrikeCount++
 		var next time.Time
 		if retryAfter != nil {
 			next = now.Add(*retryAfter)
@@ -1970,6 +1994,9 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		auth.Quota.NextRecoverAt = next
 		auth.NextRetryAfter = next
 	case 408, 500, 502, 503, 504:
+		auth.Quota.Exceeded = false
+		auth.Quota.Reason = ""
+		auth.Quota.NextRecoverAt = time.Time{}
 		auth.StatusMessage = "transient upstream error"
 		if quotaCooldownDisabledForAuth(auth) {
 			auth.NextRetryAfter = time.Time{}
@@ -1977,6 +2004,9 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 			auth.NextRetryAfter = now.Add(1 * time.Minute)
 		}
 	default:
+		auth.Quota.Exceeded = false
+		auth.Quota.Reason = ""
+		auth.Quota.NextRecoverAt = time.Time{}
 		if auth.StatusMessage == "" {
 			auth.StatusMessage = "request failed"
 		}
@@ -2025,6 +2055,31 @@ func (m *Manager) GetByID(id string) (*Auth, bool) {
 		return nil, false
 	}
 	return auth.Clone(), true
+}
+
+// FindByFileName retrieves an auth entry by persisted filename or backing path basename
+// without cloning the entire auth set.
+func (m *Manager) FindByFileName(name string) (*Auth, bool) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, false
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, auth := range m.auths {
+		if auth == nil {
+			continue
+		}
+		if strings.TrimSpace(auth.FileName) == name {
+			return auth.Clone(), true
+		}
+		if auth.Attributes != nil {
+			if filepath.Base(strings.TrimSpace(auth.Attributes["path"])) == name {
+				return auth.Clone(), true
+			}
+		}
+	}
+	return nil, false
 }
 
 // Executor returns the registered provider executor for a provider key.

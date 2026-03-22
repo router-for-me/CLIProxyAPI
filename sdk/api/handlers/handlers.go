@@ -338,17 +338,18 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 			parentCtx = logging.WithRequestID(parentCtx, requestID)
 		}
 	}
-	newCtx, cancel := context.WithCancel(parentCtx)
+	baseCtx, cancel := context.WithCancel(parentCtx)
 	if requestCtx != nil && requestCtx != parentCtx {
+		cancelCtx := baseCtx
 		go func() {
 			select {
 			case <-requestCtx.Done():
 				cancel()
-			case <-newCtx.Done():
+			case <-cancelCtx.Done():
 			}
 		}()
 	}
-	newCtx = context.WithValue(newCtx, "gin", c)
+	newCtx := context.WithValue(baseCtx, "gin", c)
 	newCtx = context.WithValue(newCtx, "handler", handler)
 	return newCtx, func(params ...interface{}) {
 		if h.Cfg.RequestLog && len(params) == 1 {

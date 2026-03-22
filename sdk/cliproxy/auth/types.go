@@ -105,6 +105,8 @@ type QuotaState struct {
 	NextRecoverAt time.Time `json:"next_recover_at"`
 	// BackoffLevel stores the progressive cooldown exponent used for rate limits.
 	BackoffLevel int `json:"backoff_level,omitempty"`
+	// StrikeCount stores the number of observed 429 responses since the last success.
+	StrikeCount int `json:"strike_count,omitempty"`
 }
 
 // ModelState captures the execution state for a specific model under an auth entry.
