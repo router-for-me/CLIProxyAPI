@@ -354,31 +354,35 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 						if errRename != nil {
 							log.Warnf("Failed to rename parameters for tool '%s': %v", fn.Get("name").String(), errRename)
 							var errSet error
-							fnRaw, errSet = sjson.Set(fnRaw, "parametersJsonSchema.type", "object")
+							fnRawBytes, errSet := sjson.SetBytes([]byte(fnRaw), "parametersJsonSchema.type", "object")
 							if errSet != nil {
 								log.Warnf("Failed to set default schema type for tool '%s': %v", fn.Get("name").String(), errSet)
 								continue
 							}
-							fnRaw, errSet = sjson.SetRaw(fnRaw, "parametersJsonSchema.properties", `{}`)
+							fnRaw = string(fnRawBytes)
+							fnRawBytes, errSet = sjson.SetRawBytes([]byte(fnRaw), "parametersJsonSchema.properties", []byte(`{}`))
 							if errSet != nil {
 								log.Warnf("Failed to set default schema properties for tool '%s': %v", fn.Get("name").String(), errSet)
 								continue
 							}
+							fnRaw = string(fnRawBytes)
 						} else {
 							fnRaw = renamed
 						}
 					} else {
 						var errSet error
-						fnRaw, errSet = sjson.Set(fnRaw, "parametersJsonSchema.type", "object")
+						fnRawBytes, errSet := sjson.SetBytes([]byte(fnRaw), "parametersJsonSchema.type", "object")
 						if errSet != nil {
 							log.Warnf("Failed to set default schema type for tool '%s': %v", fn.Get("name").String(), errSet)
 							continue
 						}
-						fnRaw, errSet = sjson.SetRaw(fnRaw, "parametersJsonSchema.properties", `{}`)
+						fnRaw = string(fnRawBytes)
+						fnRawBytes, errSet = sjson.SetRawBytes([]byte(fnRaw), "parametersJsonSchema.properties", []byte(`{}`))
 						if errSet != nil {
 							log.Warnf("Failed to set default schema properties for tool '%s': %v", fn.Get("name").String(), errSet)
 							continue
 						}
+						fnRaw = string(fnRawBytes)
 					}
 					fnRaw, _ = sjson.Delete(fnRaw, "strict")
 					if !hasFunction {

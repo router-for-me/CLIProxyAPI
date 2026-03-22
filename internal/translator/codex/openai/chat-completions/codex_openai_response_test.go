@@ -23,7 +23,7 @@ func TestConvertCodexResponseToOpenAI_StreamSetsModelFromResponseCreated(t *test
 		t.Fatalf("expected 1 chunk, got %d", len(out))
 	}
 
-	gotModel := gjson.Get(out[0], "model").String()
+	gotModel := gjson.GetBytes(out[0], "model").String()
 	if gotModel != modelName {
 		t.Fatalf("expected model %q, got %q", modelName, gotModel)
 	}
@@ -40,7 +40,7 @@ func TestConvertCodexResponseToOpenAI_FirstChunkUsesRequestModelName(t *testing.
 		t.Fatalf("expected 1 chunk, got %d", len(out))
 	}
 
-	gotModel := gjson.Get(out[0], "model").String()
+	gotModel := gjson.GetBytes(out[0], "model").String()
 	if gotModel != modelName {
 		t.Fatalf("expected model %q, got %q", modelName, gotModel)
 	}

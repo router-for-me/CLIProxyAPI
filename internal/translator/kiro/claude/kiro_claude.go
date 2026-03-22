@@ -10,12 +10,12 @@ import (
 // ConvertKiroStreamToClaude converts Kiro streaming response to Claude format.
 // Kiro executor already generates complete SSE format with "event:" prefix,
 // so this is a simple pass-through.
-func ConvertKiroStreamToClaude(ctx context.Context, model string, originalRequest, request, rawResponse []byte, param *any) []string {
-	return []string{string(rawResponse)}
+func ConvertKiroStreamToClaude(ctx context.Context, model string, originalRequest, request, rawResponse []byte, param *any) [][]byte {
+	return [][]byte{rawResponse}
 }
 
 // ConvertKiroNonStreamToClaude converts Kiro non-streaming response to Claude format.
 // The response is already in Claude format, so this is a pass-through.
-func ConvertKiroNonStreamToClaude(ctx context.Context, model string, originalRequest, request, rawResponse []byte, param *any) string {
-	return string(rawResponse)
+func ConvertKiroNonStreamToClaude(ctx context.Context, model string, originalRequest, request, rawResponse []byte, param *any) []byte {
+	return rawResponse
 }
