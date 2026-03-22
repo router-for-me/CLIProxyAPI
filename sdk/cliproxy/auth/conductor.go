@@ -129,12 +129,16 @@ func (NoopHook) OnAuthUpdated(context.Context, *Auth) {}
 // OnResult implements Hook.
 func (NoopHook) OnResult(context.Context, Result) {}
 
+type hookState struct {
+	hook Hook
+}
+
 // Manager orchestrates auth lifecycle, selection, execution, and persistence.
 type Manager struct {
 	store     Store
 	executors map[string]ProviderExecutor
 	selector  Selector
-	hook      Hook
+	hookValue atomic.Value
 	mu        sync.RWMutex
 	auths     map[string]*Auth
 	scheduler *authScheduler
@@ -186,12 +190,12 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 		store:            store,
 		executors:        make(map[string]ProviderExecutor),
 		selector:         selector,
-		hook:             hook,
 		auths:            make(map[string]*Auth),
 		providerOffsets:  make(map[string]int),
 		modelPoolOffsets: make(map[string]int),
 		refreshSemaphore: make(chan struct{}, refreshMaxConcurrency),
 	}
+	manager.hookValue.Store(hookState{hook: hook})
 	// atomic.Value requires non-nil initial value.
 	manager.runtimeConfig.Store(&internalconfig.Config{})
 	manager.apiKeyModelAlias.Store(apiKeyModelAliasTable(nil))
@@ -260,10 +264,14 @@ func (m *Manager) SetSelector(selector Selector) {
 
 // Hook returns the currently configured lifecycle hook.
 func (m *Manager) Hook() Hook {
-	if m == nil || m.hook == nil {
+	if m == nil {
 		return NoopHook{}
 	}
-	return m.hook
+	state, _ := m.hookValue.Load().(hookState)
+	if state.hook == nil {
+		return NoopHook{}
+	}
+	return state.hook
 }
 
 // SetHook replaces the lifecycle hook used for auth callbacks.
@@ -274,7 +282,7 @@ func (m *Manager) SetHook(hook Hook) {
 	if hook == nil {
 		hook = NoopHook{}
 	}
-	m.hook = hook
+	m.hookValue.Store(hookState{hook: hook})
 }
 
 // SetStore swaps the underlying persistence store.
@@ -846,7 +854,8 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 		m.scheduler.upsertAuth(schedulerSnapshot)
 	}
 	_ = m.persist(ctx, auth)
-	m.hook.OnAuthRegistered(ctx, auth.Clone())
+	hook := m.Hook()
+	hook.OnAuthRegistered(ctx, auth.Clone())
 	return auth.Clone(), nil
 }
 
@@ -875,7 +884,8 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 		m.scheduler.upsertAuth(schedulerSnapshot)
 	}
 	_ = m.persist(ctx, auth)
-	m.hook.OnAuthUpdated(ctx, auth.Clone())
+	hook := m.Hook()
+	hook.OnAuthUpdated(ctx, auth.Clone())
 	return auth.Clone(), nil
 }
 
@@ -1128,14 +1138,16 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				if ra := retryAfterFromError(errExec); ra != nil {
 					result.RetryAfter = ra
 				}
-				m.hook.OnResult(execCtx, result)
+				hook := m.Hook()
+				hook.OnResult(execCtx, result)
 				if isRequestInvalidError(errExec) {
 					return cliproxyexecutor.Response{}, errExec
 				}
 				authErr = errExec
 				continue
 			}
-			m.hook.OnResult(execCtx, result)
+			hook := m.Hook()
+			hook.OnResult(execCtx, result)
 			return resp, nil
 		}
 		if authErr != nil {
@@ -1766,7 +1778,8 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		registry.GetGlobalRegistry().SuspendClientModel(result.AuthID, result.Model, suspendReason)
 	}
 
-	m.hook.OnResult(ctx, result)
+	hook := m.Hook()
+	hook.OnResult(ctx, result)
 }
 
 func ensureModelState(auth *Auth, model string) *ModelState {
