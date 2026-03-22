@@ -4,14 +4,18 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/gin-gonic/gin"
 	"github.com/klauspost/compress/zstd"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/translator"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
@@ -352,6 +356,754 @@ func TestApplyClaudeToolPrefix_SkipsBuiltinToolReference(t *testing.T) {
 	}
 }
 
+func TestApplyClaudeToolPrefix_PrefixesCustomToolType(t *testing.T) {
+	input := []byte(`{"tools":[{"type":"custom","name":"apply_patch"}]}`)
+	out := applyClaudeToolPrefix(input, "proxy_")
+	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "proxy_apply_patch" {
+		t.Fatalf("tools.0.name = %q, want %q", got, "proxy_apply_patch")
+	}
+}
+
+func TestApplyClaudeToolPrefix_SkipsExplicitNonCustomTypedToolAndReferences(t *testing.T) {
+	input := []byte(`{
+		"tools":[
+			{"type":"future_tool","name":"future_one","extra":{"a":1}},
+			{"type":"custom","name":"apply_patch","input_schema":{"type":"object"}}
+		],
+		"tool_choice":{"type":"tool","name":"future_one"},
+		"messages":[
+			{"role":"assistant","content":[{"type":"tool_use","name":"future_one","id":"t1","input":{}}]},
+			{"role":"user","content":[{"type":"tool_reference","tool_name":"future_one"}]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":[{"type":"tool_reference","tool_name":"future_one"}]}]},
+			{"role":"assistant","content":[{"type":"tool_use","name":"apply_patch","id":"t2","input":{}}]}
+		]
+	}`)
+
+	out := applyClaudeToolPrefix(input, "proxy_")
+
+	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "future_one" {
+		t.Fatalf("tools.0.name = %q, want %q", got, "future_one")
+	}
+	if got := gjson.GetBytes(out, "tool_choice.name").String(); got != "future_one" {
+		t.Fatalf("tool_choice.name = %q, want %q", got, "future_one")
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.0.name").String(); got != "future_one" {
+		t.Fatalf("messages.0.content.0.name = %q, want %q", got, "future_one")
+	}
+	if got := gjson.GetBytes(out, "messages.1.content.0.tool_name").String(); got != "future_one" {
+		t.Fatalf("messages.1.content.0.tool_name = %q, want %q", got, "future_one")
+	}
+	if got := gjson.GetBytes(out, "messages.2.content.0.content.0.tool_name").String(); got != "future_one" {
+		t.Fatalf("messages.2.content.0.content.0.tool_name = %q, want %q", got, "future_one")
+	}
+	if got := gjson.GetBytes(out, "tools.1.name").String(); got != "proxy_apply_patch" {
+		t.Fatalf("tools.1.name = %q, want %q", got, "proxy_apply_patch")
+	}
+	if got := gjson.GetBytes(out, "messages.3.content.0.name").String(); got != "proxy_apply_patch" {
+		t.Fatalf("messages.3.content.0.name = %q, want %q", got, "proxy_apply_patch")
+	}
+}
+
+func TestApplyClaudeToolPrefix_SkipsRawWrapperToolWithoutTopLevelNameAndReferences(t *testing.T) {
+	input := []byte(`{
+		"tools":[
+			{"type":"custom","function":{"name":"raw_wrapper","description":"wrapped","parameters":{"type":"object"}}},
+			{"type":"custom","name":"apply_patch","input_schema":{"type":"object"}}
+		],
+		"tool_choice":{"type":"tool","name":"raw_wrapper"},
+		"messages":[
+			{"role":"assistant","content":[{"type":"tool_use","name":"raw_wrapper","id":"t1","input":{}}]},
+			{"role":"user","content":[{"type":"tool_reference","tool_name":"raw_wrapper"}]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":[{"type":"tool_reference","tool_name":"raw_wrapper"}]}]},
+			{"role":"assistant","content":[{"type":"tool_use","name":"apply_patch","id":"t2","input":{}}]}
+		]
+	}`)
+
+	out := applyClaudeToolPrefix(input, "proxy_")
+
+	if got := gjson.GetBytes(out, "tools.0.function.name").String(); got != "raw_wrapper" {
+		t.Fatalf("tools.0.function.name = %q, want %q", got, "raw_wrapper")
+	}
+	if got := gjson.GetBytes(out, "tools.0.name"); got.Exists() {
+		t.Fatalf("tools.0.name should remain absent for raw wrapper tool, got %s", got.Raw)
+	}
+	if got := gjson.GetBytes(out, "tool_choice.name").String(); got != "raw_wrapper" {
+		t.Fatalf("tool_choice.name = %q, want %q", got, "raw_wrapper")
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.0.name").String(); got != "raw_wrapper" {
+		t.Fatalf("messages.0.content.0.name = %q, want %q", got, "raw_wrapper")
+	}
+	if got := gjson.GetBytes(out, "messages.1.content.0.tool_name").String(); got != "raw_wrapper" {
+		t.Fatalf("messages.1.content.0.tool_name = %q, want %q", got, "raw_wrapper")
+	}
+	if got := gjson.GetBytes(out, "messages.2.content.0.content.0.tool_name").String(); got != "raw_wrapper" {
+		t.Fatalf("messages.2.content.0.content.0.tool_name = %q, want %q", got, "raw_wrapper")
+	}
+	if got := gjson.GetBytes(out, "tools.1.name").String(); got != "proxy_apply_patch" {
+		t.Fatalf("tools.1.name = %q, want %q", got, "proxy_apply_patch")
+	}
+	if got := gjson.GetBytes(out, "messages.3.content.0.name").String(); got != "proxy_apply_patch" {
+		t.Fatalf("messages.3.content.0.name = %q, want %q", got, "proxy_apply_patch")
+	}
+}
+
+func TestApplyClaudeToolPrefix_PreservesAmbiguousSharedNameAcrossRawWrapperAndCustomTool(t *testing.T) {
+	input := []byte(`{
+		"tools":[
+			{"type":"custom","function":{"name":"shared_tool","description":"wrapped","parameters":{"type":"object"}}},
+			{"type":"custom","name":"shared_tool","input_schema":{"type":"object"}},
+			{"type":"custom","name":"apply_patch","input_schema":{"type":"object"}}
+		],
+		"tool_choice":{"type":"tool","name":"shared_tool"},
+		"messages":[
+			{"role":"assistant","content":[
+				{"type":"tool_use","name":"shared_tool","id":"t1","input":{}},
+				{"type":"tool_use","name":"apply_patch","id":"t2","input":{}}
+			]},
+			{"role":"user","content":[{"type":"tool_reference","tool_name":"shared_tool"}]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":[{"type":"tool_reference","tool_name":"shared_tool"}]}]}
+		]
+	}`)
+
+	out := applyClaudeToolPrefix(input, "proxy_")
+
+	if got := gjson.GetBytes(out, "tools.0.function.name").String(); got != "shared_tool" {
+		t.Fatalf("tools.0.function.name = %q, want %q", got, "shared_tool")
+	}
+	if got := gjson.GetBytes(out, "tools.1.name").String(); got != "shared_tool" {
+		t.Fatalf("tools.1.name = %q, want %q", got, "shared_tool")
+	}
+	if got := gjson.GetBytes(out, "tool_choice.name").String(); got != "shared_tool" {
+		t.Fatalf("tool_choice.name = %q, want %q", got, "shared_tool")
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.0.name").String(); got != "shared_tool" {
+		t.Fatalf("messages.0.content.0.name = %q, want %q", got, "shared_tool")
+	}
+	if got := gjson.GetBytes(out, "messages.1.content.0.tool_name").String(); got != "shared_tool" {
+		t.Fatalf("messages.1.content.0.tool_name = %q, want %q", got, "shared_tool")
+	}
+	if got := gjson.GetBytes(out, "messages.2.content.0.content.0.tool_name").String(); got != "shared_tool" {
+		t.Fatalf("messages.2.content.0.content.0.tool_name = %q, want %q", got, "shared_tool")
+	}
+	if got := gjson.GetBytes(out, "tools.2.name").String(); got != "proxy_apply_patch" {
+		t.Fatalf("tools.2.name = %q, want %q", got, "proxy_apply_patch")
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.1.name").String(); got != "proxy_apply_patch" {
+		t.Fatalf("messages.0.content.1.name = %q, want %q", got, "proxy_apply_patch")
+	}
+}
+
+func TestNormalizeClaudeToolsForAnthropic_CustomTool(t *testing.T) {
+	input := []byte(`{
+		"tools":[
+			{"type":"web_search_20250305","name":"web_search"},
+			{"type":"custom","name":"apply_patch","format":{"type":"grammar","syntax":"lark"}}
+		]
+	}`)
+	out, err := normalizeClaudeToolsForAnthropic(input)
+	if err != nil {
+		t.Fatalf("normalizeClaudeToolsForAnthropic error: %v", err)
+	}
+
+	if got := gjson.GetBytes(out, "tools.0.type").String(); got != "web_search_20250305" {
+		t.Fatalf("tools.0.type = %q, want %q", got, "web_search_20250305")
+	}
+	if got := gjson.GetBytes(out, "tools.1.name").String(); got != "apply_patch" {
+		t.Fatalf("tools.1.name = %q, want %q", got, "apply_patch")
+	}
+	if got := gjson.GetBytes(out, "tools.1.description").String(); got != "Custom tool" {
+		t.Fatalf("tools.1.description = %q, want %q", got, "Custom tool")
+	}
+	if got := gjson.GetBytes(out, "tools.1.input_schema.type").String(); got != "object" {
+		t.Fatalf("tools.1.input_schema.type = %q, want %q", got, "object")
+	}
+	if got := gjson.GetBytes(out, "tools.1.type"); got.Exists() {
+		t.Fatalf("tools.1.type should be removed, got %s", got.Raw)
+	}
+	if got := gjson.GetBytes(out, "tools.1.format"); got.Exists() {
+		t.Fatalf("tools.1.format should be removed, got %s", got.Raw)
+	}
+}
+
+func TestNormalizeClaudeToolsForAnthropic_PreservesDocumentedCustomMetadata(t *testing.T) {
+	input := []byte(`{
+		"tools":[
+			{
+				"type":"custom",
+				"name":"apply_patch",
+				"cache_control":{"type":"ephemeral","ttl":"1h"},
+				"input_examples":[{"input":{"path":"README.md"}}],
+				"strict":true,
+				"format":{"type":"grammar","syntax":"lark"}
+			}
+		]
+	}`)
+	out, err := normalizeClaudeToolsForAnthropic(input)
+	if err != nil {
+		t.Fatalf("normalizeClaudeToolsForAnthropic error: %v", err)
+	}
+
+	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "apply_patch" {
+		t.Fatalf("tools.0.name = %q, want %q", got, "apply_patch")
+	}
+	if got := gjson.GetBytes(out, "tools.0.cache_control.ttl").String(); got != "1h" {
+		t.Fatalf("tools.0.cache_control.ttl = %q, want %q", got, "1h")
+	}
+	if got := gjson.GetBytes(out, "tools.0.input_examples.#").Int(); got != 1 {
+		t.Fatalf("tools.0.input_examples length = %d, want 1", got)
+	}
+	if !gjson.GetBytes(out, "tools.0.strict").Bool() {
+		t.Fatalf("tools.0.strict should be true, body=%s", string(out))
+	}
+	if got := gjson.GetBytes(out, "tools.0.type"); got.Exists() {
+		t.Fatalf("tools.0.type should be removed, got %s", got.Raw)
+	}
+	if got := gjson.GetBytes(out, "tools.0.format"); got.Exists() {
+		t.Fatalf("tools.0.format should be removed, got %s", got.Raw)
+	}
+}
+
+func TestNormalizeClaudeToolsForAnthropic_FunctionFallbacks(t *testing.T) {
+	input := []byte(`{
+		"tool_choice":{"type":"tool","name":"very bad tool"},
+		"messages":[{"role":"assistant","content":[{"type":"tool_use","name":"very bad tool","id":"t1","input":{}}]}],
+		"tools":[
+			{"type":"custom","function":{"name":"very bad tool","description":"dangerous","parameters":{"type":"object"}}}
+		]
+	}`)
+	out, err := normalizeClaudeToolsForAnthropic(input)
+	if err != nil {
+		t.Fatalf("normalizeClaudeToolsForAnthropic error: %v", err)
+	}
+	normalizedName := gjson.GetBytes(out, "tools.0.name").String()
+	if normalizedName == "" {
+		t.Fatal("normalized tool name should not be empty")
+	}
+	if strings.Contains(normalizedName, " ") {
+		t.Fatalf("normalized tool name should be sanitized, got %q", normalizedName)
+	}
+	if got := gjson.GetBytes(out, "tools.0.description").String(); got != "dangerous" {
+		t.Fatalf("tools.0.description = %q, want %q", got, "dangerous")
+	}
+	if got := gjson.GetBytes(out, "tools.0.input_schema.type").String(); got != "object" {
+		t.Fatalf("tools.0.input_schema.type = %q, want %q", got, "object")
+	}
+	if got := gjson.GetBytes(out, "tool_choice.name").String(); got != normalizedName {
+		t.Fatalf("tool_choice.name = %q, want %q", got, normalizedName)
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.0.name").String(); got != normalizedName {
+		t.Fatalf("messages.0.content.0.name = %q, want %q", got, normalizedName)
+	}
+}
+
+func TestNormalizeClaudeToolsForAnthropic_OpenAIFunctionToolNormalizesInsteadOfPassingThrough(t *testing.T) {
+	input := []byte(`{
+		"tool_choice":{"type":"tool","name":"very bad tool"},
+		"messages":[{"role":"assistant","content":[{"type":"tool_use","name":"very bad tool","id":"t1","input":{}}]}],
+		"tools":[
+			{"type":"function","function":{"name":"very bad tool","description":"dangerous","parameters":{"type":"object"}}}
+		]
+	}`)
+
+	out, err := normalizeClaudeToolsForAnthropic(input)
+	if err != nil {
+		t.Fatalf("normalizeClaudeToolsForAnthropic error: %v", err)
+	}
+
+	normalizedName := gjson.GetBytes(out, "tools.0.name").String()
+	if normalizedName == "" {
+		t.Fatal("normalized tool name should not be empty")
+	}
+	if strings.Contains(normalizedName, " ") {
+		t.Fatalf("normalized tool name should be sanitized, got %q", normalizedName)
+	}
+	if got := gjson.GetBytes(out, "tools.0.type"); got.Exists() {
+		t.Fatalf("tools.0.type should be removed after normalization, got %s", got.Raw)
+	}
+	if got := gjson.GetBytes(out, "tools.0.description").String(); got != "dangerous" {
+		t.Fatalf("tools.0.description = %q, want %q", got, "dangerous")
+	}
+	if got := gjson.GetBytes(out, "tools.0.input_schema.type").String(); got != "object" {
+		t.Fatalf("tools.0.input_schema.type = %q, want %q", got, "object")
+	}
+	if got := gjson.GetBytes(out, "tool_choice.name").String(); got != normalizedName {
+		t.Fatalf("tool_choice.name = %q, want %q", got, normalizedName)
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.0.name").String(); got != normalizedName {
+		t.Fatalf("messages.0.content.0.name = %q, want %q", got, normalizedName)
+	}
+}
+
+func TestNormalizeClaudeToolsForAnthropic_FunctionFallbacksPreserveTopLevelMetadata(t *testing.T) {
+	input := []byte(`{
+		"tools":[
+			{
+				"type":"custom",
+				"cache_control":{"type":"ephemeral"},
+				"input_examples":[{"input":{"command":"run"}}],
+				"strict":true,
+				"function":{"name":"very bad tool","description":"dangerous","parameters":{"type":"object"}}
+			}
+		]
+	}`)
+	out, err := normalizeClaudeToolsForAnthropic(input)
+	if err != nil {
+		t.Fatalf("normalizeClaudeToolsForAnthropic error: %v", err)
+	}
+
+	if got := gjson.GetBytes(out, "tools.0.description").String(); got != "dangerous" {
+		t.Fatalf("tools.0.description = %q, want %q", got, "dangerous")
+	}
+	if got := gjson.GetBytes(out, "tools.0.cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("tools.0.cache_control.type = %q, want %q", got, "ephemeral")
+	}
+	if got := gjson.GetBytes(out, "tools.0.input_examples.#").Int(); got != 1 {
+		t.Fatalf("tools.0.input_examples length = %d, want 1", got)
+	}
+	if !gjson.GetBytes(out, "tools.0.strict").Bool() {
+		t.Fatalf("tools.0.strict should be true, body=%s", string(out))
+	}
+}
+
+func TestNormalizeClaudeToolsForAnthropic_RenameMapUpdatesAllReferenceSites(t *testing.T) {
+	input := []byte(`{
+		"tool_choice":{"type":"tool","name":"very bad tool"},
+		"messages":[
+			{"role":"assistant","content":[{"type":"tool_use","name":"very bad tool","id":"t1","input":{}}]},
+			{"role":"user","content":[{"type":"tool_reference","tool_name":"very bad tool"}]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":[{"type":"tool_reference","tool_name":"very bad tool"}]}]}
+		],
+		"tools":[
+			{"type":"custom","function":{"name":"very bad tool","description":"dangerous","parameters":{"type":"object"}}}
+		]
+	}`)
+
+	out, err := normalizeClaudeToolsForAnthropic(input)
+	if err != nil {
+		t.Fatalf("normalizeClaudeToolsForAnthropic error: %v", err)
+	}
+
+	normalizedName := gjson.GetBytes(out, "tools.0.name").String()
+	if normalizedName == "" {
+		t.Fatal("normalized tool name should not be empty")
+	}
+	if got := gjson.GetBytes(out, "tool_choice.name").String(); got != normalizedName {
+		t.Fatalf("tool_choice.name = %q, want %q", got, normalizedName)
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.0.name").String(); got != normalizedName {
+		t.Fatalf("messages.0.content.0.name = %q, want %q", got, normalizedName)
+	}
+	if got := gjson.GetBytes(out, "messages.1.content.0.tool_name").String(); got != normalizedName {
+		t.Fatalf("messages.1.content.0.tool_name = %q, want %q", got, normalizedName)
+	}
+	if got := gjson.GetBytes(out, "messages.2.content.0.content.0.tool_name").String(); got != normalizedName {
+		t.Fatalf("messages.2.content.0.content.0.tool_name = %q, want %q", got, normalizedName)
+	}
+}
+
+func TestNormalizeClaudeToolsForAnthropic_RenameMapPreservesLargeIntegers(t *testing.T) {
+	input := []byte(`{
+		"request_id": 9007199254740993,
+		"tool_choice":{"type":"tool","name":"very bad tool"},
+		"messages":[
+			{
+				"role":"assistant",
+				"content":[
+					{"type":"tool_use","name":"very bad tool","id":"t1","input":{"large_id":9007199254740995}},
+					{"type":"text","text":"unchanged"}
+				]
+			},
+			{
+				"role":"user",
+				"content":[
+					{"type":"tool_result","tool_use_id":"t1","content":[
+						{"type":"tool_reference","tool_name":"very bad tool"},
+						{"type":"text","text":"meta","data":{"ticket":9223372036854775806}}
+					]}
+				]
+			}
+		],
+		"tools":[
+			{"type":"custom","function":{"name":"very bad tool","description":"dangerous","parameters":{"type":"object"}}}
+		]
+	}`)
+
+	out, err := normalizeClaudeToolsForAnthropic(input)
+	if err != nil {
+		t.Fatalf("normalizeClaudeToolsForAnthropic error: %v", err)
+	}
+
+	normalizedName := gjson.GetBytes(out, "tools.0.name").String()
+	if normalizedName == "" {
+		t.Fatal("normalized tool name should not be empty")
+	}
+	if got := gjson.GetBytes(out, "tool_choice.name").String(); got != normalizedName {
+		t.Fatalf("tool_choice.name = %q, want %q", got, normalizedName)
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.0.name").String(); got != normalizedName {
+		t.Fatalf("messages.0.content.0.name = %q, want %q", got, normalizedName)
+	}
+	if got := gjson.GetBytes(out, "messages.1.content.0.content.0.tool_name").String(); got != normalizedName {
+		t.Fatalf("messages.1.content.0.content.0.tool_name = %q, want %q", got, normalizedName)
+	}
+
+	// Ensure unrelated large integer values are preserved exactly (no float64 coercion).
+	if got := gjson.GetBytes(out, "request_id").Raw; got != "9007199254740993" {
+		t.Fatalf("request_id raw = %q, want %q", got, "9007199254740993")
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.0.input.large_id").Raw; got != "9007199254740995" {
+		t.Fatalf("messages.0.content.0.input.large_id raw = %q, want %q", got, "9007199254740995")
+	}
+	if got := gjson.GetBytes(out, "messages.1.content.0.content.1.data.ticket").Raw; got != "9223372036854775806" {
+		t.Fatalf("messages.1.content.0.content.1.data.ticket raw = %q, want %q", got, "9223372036854775806")
+	}
+}
+
+func TestNormalizeClaudeToolsForAnthropic_RejectsDuplicateOriginalCustomToolNames(t *testing.T) {
+	input := []byte(`{
+		"tool_choice":{"type":"tool","name":"duplicate tool"},
+		"messages":[
+			{"role":"assistant","content":[{"type":"tool_use","name":"duplicate tool","id":"t1","input":{}}]},
+			{"role":"user","content":[{"type":"tool_reference","tool_name":"duplicate tool"}]}
+		],
+		"tools":[
+			{"type":"custom","name":"duplicate tool","description":"first","input_schema":{"type":"object"}},
+			{"type":"custom","name":"duplicate tool","description":"second","input_schema":{"type":"object"}}
+		]
+	}`)
+
+	_, err := normalizeClaudeToolsForAnthropic(input)
+	if err == nil {
+		t.Fatal("normalizeClaudeToolsForAnthropic error = nil, want duplicate-name rejection")
+	}
+	if !errors.Is(err, errAnthropicDuplicateToolName) {
+		t.Fatalf("normalizeClaudeToolsForAnthropic error = %v, want errAnthropicDuplicateToolName", err)
+	}
+}
+
+func TestNormalizeClaudeToolsForAnthropic_RejectsUnsanitizableCustomToolName(t *testing.T) {
+	input := []byte(`{
+		"tool_choice":{"type":"tool","name":"!!!"},
+		"messages":[
+			{"role":"assistant","content":[{"type":"tool_use","name":"!!!","id":"t1","input":{}}]},
+			{"role":"user","content":[{"type":"tool_reference","tool_name":"!!!"}]}
+		],
+		"tools":[
+			{"type":"custom","name":"!!!","description":"bad","input_schema":{"type":"object"}}
+		]
+	}`)
+
+	_, err := normalizeClaudeToolsForAnthropic(input)
+	if err == nil {
+		t.Fatal("normalizeClaudeToolsForAnthropic error = nil, want invalid-name rejection")
+	}
+	if !errors.Is(err, errAnthropicToolNameUnsanitizable) {
+		t.Fatalf("normalizeClaudeToolsForAnthropic error = %v, want errAnthropicToolNameUnsanitizable", err)
+	}
+}
+
+func TestFinalizeClaudeRequestBody_RejectsDuplicateOriginalCustomToolNames(t *testing.T) {
+	executor := NewClaudeExecutor(&config.Config{})
+	_, err := executor.finalizeClaudeRequestBody([]byte(`{
+		"tools":[
+			{"type":"custom","name":"duplicate tool","description":"first","input_schema":{"type":"object"}},
+			{"type":"custom","name":"duplicate tool","description":"second","input_schema":{"type":"object"}}
+		]
+	}`), "claude-opus-4-6", sdktranslator.FromString("claude"), sdktranslator.FromString("claude"), "claude-opus-4-6", "", nil, claudeBodyFinalizeOptions{})
+	if err == nil {
+		t.Fatal("finalizeClaudeRequestBody error = nil, want bad-request rejection")
+	}
+	sErr, ok := err.(statusErr)
+	if !ok {
+		t.Fatalf("finalizeClaudeRequestBody error type = %T, want statusErr", err)
+	}
+	if sErr.code != http.StatusBadRequest {
+		t.Fatalf("statusErr.code = %d, want %d", sErr.code, http.StatusBadRequest)
+	}
+}
+
+func TestFinalizeClaudeRequestBody_RejectsUnsanitizableCustomToolName(t *testing.T) {
+	executor := NewClaudeExecutor(&config.Config{})
+	_, err := executor.finalizeClaudeRequestBody([]byte(`{
+		"tools":[
+			{"type":"custom","name":"!!!","description":"bad","input_schema":{"type":"object"}}
+		]
+	}`), "claude-opus-4-6", sdktranslator.FromString("claude"), sdktranslator.FromString("claude"), "claude-opus-4-6", "", nil, claudeBodyFinalizeOptions{})
+	if err == nil {
+		t.Fatal("finalizeClaudeRequestBody error = nil, want bad-request rejection")
+	}
+	sErr, ok := err.(statusErr)
+	if !ok {
+		t.Fatalf("finalizeClaudeRequestBody error type = %T, want statusErr", err)
+	}
+	if sErr.code != http.StatusBadRequest {
+		t.Fatalf("statusErr.code = %d, want %d", sErr.code, http.StatusBadRequest)
+	}
+}
+
+func TestFinalizeClaudeRequestBody_PreservesPreNormalizationTranslationBody(t *testing.T) {
+	executor := NewClaudeExecutor(&config.Config{})
+	input := []byte(`{
+		"tools":[
+			{
+				"type":"function",
+				"name":"very bad tool",
+				"description":"Search",
+				"parameters":{"type":"object","properties":{"q":{"type":"string"}}},
+				"x_vendor":{"mode":"strict"}
+			}
+		],
+		"tool_choice":{"type":"function","function":{"name":"very bad tool"}}
+	}`)
+	body := sdktranslator.TranslateRequest(sdktranslator.FromString("openai-response"), sdktranslator.FromString("claude"), "claude-opus-4-6", input, true)
+	prepared, err := executor.finalizeClaudeRequestBody(body, "claude-opus-4-6", sdktranslator.FromString("openai-response"), sdktranslator.FromString("claude"), "claude-opus-4-6", "", nil, claudeBodyFinalizeOptions{})
+	if err != nil {
+		t.Fatalf("finalizeClaudeRequestBody error: %v", err)
+	}
+
+	if got := gjson.GetBytes(prepared.bodyForTranslation, "tools.0.name").String(); got != "very bad tool" {
+		t.Fatalf("bodyForTranslation tools.0.name = %q, want %q", got, "very bad tool")
+	}
+	if got := gjson.GetBytes(prepared.bodyForTranslation, "tools.0.input_schema.properties.q.type").String(); got != "string" {
+		t.Fatalf("bodyForTranslation tools.0.input_schema.properties.q.type = %q, want %q", got, "string")
+	}
+	if got := gjson.GetBytes(prepared.bodyForTranslation, "tool_choice.name").String(); got != "very bad tool" {
+		t.Fatalf("bodyForTranslation tool_choice.name = %q, want %q", got, "very bad tool")
+	}
+
+	upstreamName := gjson.GetBytes(prepared.bodyForUpstream, "tools.0.name").String()
+	if upstreamName == "" || upstreamName == "very bad tool" {
+		t.Fatalf("bodyForUpstream tools.0.name = %q, want normalized name", upstreamName)
+	}
+	if got := gjson.GetBytes(prepared.bodyForUpstream, "tools.0.type"); got.Exists() {
+		t.Fatalf("bodyForUpstream tools.0.type should be removed, got %s", got.Raw)
+	}
+	if got := gjson.GetBytes(prepared.bodyForUpstream, "tool_choice.name").String(); got != upstreamName {
+		t.Fatalf("bodyForUpstream tool_choice.name = %q, want %q", got, upstreamName)
+	}
+}
+
+func TestNormalizeClaudeToolsForAnthropic_ReservesBuiltinNamesForCustomTools(t *testing.T) {
+	input := []byte(`{
+		"tool_choice":{"type":"tool","name":"web search"},
+		"messages":[
+			{"role":"assistant","content":[{"type":"tool_use","name":"web search","id":"t1","input":{}}]},
+			{"role":"user","content":[{"type":"tool_reference","tool_name":"web search"}]}
+		],
+		"tools":[
+			{"type":"custom","name":"web search","input_schema":{"type":"object"}}
+		]
+	}`)
+
+	out, err := normalizeClaudeToolsForAnthropic(input)
+	if err != nil {
+		t.Fatalf("normalizeClaudeToolsForAnthropic error: %v", err)
+	}
+
+	normalizedName := gjson.GetBytes(out, "tools.0.name").String()
+	if normalizedName == "" {
+		t.Fatal("normalized tool name should not be empty")
+	}
+	if normalizedName == "web_search" {
+		t.Fatalf("custom tool should not normalize to reserved built-in name, got %q", normalizedName)
+	}
+	if !strings.HasPrefix(normalizedName, "web_search_") {
+		t.Fatalf("custom tool should be suffixed off reserved name, got %q", normalizedName)
+	}
+	if got := gjson.GetBytes(out, "tool_choice.name").String(); got != normalizedName {
+		t.Fatalf("tool_choice.name = %q, want %q", got, normalizedName)
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.0.name").String(); got != normalizedName {
+		t.Fatalf("messages.0.content.0.name = %q, want %q", got, normalizedName)
+	}
+	if got := gjson.GetBytes(out, "messages.1.content.0.tool_name").String(); got != normalizedName {
+		t.Fatalf("messages.1.content.0.tool_name = %q, want %q", got, normalizedName)
+	}
+}
+
+func TestNormalizeClaudeToolsForAnthropic_AllowsDistinctOriginalNamesThatSanitizeToSameBase(t *testing.T) {
+	input := []byte(`{
+		"tool_choice":{"type":"tool","name":"very bad tool"},
+		"messages":[
+			{"role":"assistant","content":[{"type":"tool_use","name":"very bad tool","id":"t1","input":{}}]},
+			{"role":"user","content":[{"type":"tool_reference","tool_name":"very@bad tool"}]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"t2","content":[{"type":"tool_reference","tool_name":"very@bad tool"}]}]}
+		],
+		"tools":[
+			{"type":"custom","name":"very bad tool","description":"first","input_schema":{"type":"object"}},
+			{"type":"custom","name":"very@bad tool","description":"second","input_schema":{"type":"object"}}
+		]
+	}`)
+
+	out, err := normalizeClaudeToolsForAnthropic(input)
+	if err != nil {
+		t.Fatalf("normalizeClaudeToolsForAnthropic error: %v", err)
+	}
+	firstName := gjson.GetBytes(out, "tools.0.name").String()
+	secondName := gjson.GetBytes(out, "tools.1.name").String()
+	if firstName == "" || secondName == "" {
+		t.Fatalf("normalized names should not be empty, got first=%q second=%q", firstName, secondName)
+	}
+	if firstName == secondName {
+		t.Fatalf("normalized names should be unique, got %q", firstName)
+	}
+	if got := gjson.GetBytes(out, "tool_choice.name").String(); got != firstName {
+		t.Fatalf("tool_choice.name = %q, want %q", got, firstName)
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.0.name").String(); got != firstName {
+		t.Fatalf("messages.0.content.0.name = %q, want %q", got, firstName)
+	}
+	if got := gjson.GetBytes(out, "messages.1.content.0.tool_name").String(); got != secondName {
+		t.Fatalf("messages.1.content.0.tool_name = %q, want %q", got, secondName)
+	}
+	if got := gjson.GetBytes(out, "messages.2.content.0.content.0.tool_name").String(); got != secondName {
+		t.Fatalf("messages.2.content.0.content.0.tool_name = %q, want %q", got, secondName)
+	}
+}
+
+func TestNormalizeClaudeToolsForAnthropic_RejectsNonObjectSchemas(t *testing.T) {
+	input := []byte(`{
+		"tools":[
+			{"type":"custom","name":"array_schema","input_schema":{"type":"array","items":{"type":"string"}}},
+			{"type":"custom","name":"bad_properties","input_schema":{"type":"object","properties":[]}}
+		]
+	}`)
+	out, err := normalizeClaudeToolsForAnthropic(input)
+	if err != nil {
+		t.Fatalf("normalizeClaudeToolsForAnthropic error: %v", err)
+	}
+
+	if got := gjson.GetBytes(out, "tools.0.input_schema.type").String(); got != "object" {
+		t.Fatalf("tools.0.input_schema.type = %q, want %q", got, "object")
+	}
+	if got := gjson.GetBytes(out, "tools.0.input_schema.properties"); !got.Exists() || !got.IsObject() {
+		t.Fatalf("tools.0.input_schema.properties should be object, got %s", got.Raw)
+	}
+	if got := gjson.GetBytes(out, "tools.0.input_schema.items"); got.Exists() {
+		t.Fatalf("tools.0.input_schema.items should be removed, got %s", got.Raw)
+	}
+	if got := gjson.GetBytes(out, "tools.1.input_schema.type").String(); got != "object" {
+		t.Fatalf("tools.1.input_schema.type = %q, want %q", got, "object")
+	}
+	if got := gjson.GetBytes(out, "tools.1.input_schema.properties"); !got.Exists() || !got.IsObject() {
+		t.Fatalf("tools.1.input_schema.properties should be object, got %s", got.Raw)
+	}
+}
+
+func TestNormalizeClaudeToolsForAnthropic_PreservesUnknownExplicitTypedTool(t *testing.T) {
+	input := []byte(`{
+		"tools":[
+			{"type":"future_tool","name":"future_one","extra":{"a":1}},
+			{"type":"custom","name":"apply patch","input_schema":{"type":"object"}}
+		]
+	}`)
+
+	out, err := normalizeClaudeToolsForAnthropic(input)
+	if err != nil {
+		t.Fatalf("normalizeClaudeToolsForAnthropic error: %v", err)
+	}
+
+	if got := gjson.GetBytes(out, "tools.0.type").String(); got != "future_tool" {
+		t.Fatalf("tools.0.type = %q, want %q", got, "future_tool")
+	}
+	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "future_one" {
+		t.Fatalf("tools.0.name = %q, want %q", got, "future_one")
+	}
+	if got := gjson.GetBytes(out, "tools.0.extra.a").Int(); got != 1 {
+		t.Fatalf("tools.0.extra.a = %d, want 1", got)
+	}
+	if got := gjson.GetBytes(out, "tools.1.name").String(); got == "apply patch" || got == "" {
+		t.Fatalf("tools.1.name = %q, want sanitized non-empty custom name", got)
+	}
+}
+
+func TestNormalizeClaudeToolsForAnthropic_TreatsExplicitTypedAndCustomNameCollisionAsAmbiguous(t *testing.T) {
+	input := []byte(`{
+		"tool_choice":{"type":"tool","name":"future_one"},
+		"messages":[
+			{"role":"assistant","content":[{"type":"tool_use","name":"future_one","id":"t1","input":{"n":9007199254740995}}]},
+			{"role":"user","content":[{"type":"tool_reference","tool_name":"future_one"}]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":[{"type":"tool_reference","tool_name":"future_one"}]}]}
+		],
+		"tools":[
+			{"type":"future_tool","name":"future_one","extra":{"a":1}},
+			{"type":"custom","name":"future_one","description":"custom duplicate","input_schema":{"type":"object"}}
+		]
+	}`)
+
+	_, err := normalizeClaudeToolsForAnthropic(input)
+	if err == nil {
+		t.Fatal("normalizeClaudeToolsForAnthropic error = nil, want ambiguous-name rejection")
+	}
+	if !errors.Is(err, errAnthropicDuplicateToolName) {
+		t.Fatalf("normalizeClaudeToolsForAnthropic error = %v, want errAnthropicDuplicateToolName", err)
+	}
+}
+
+func TestNormalizeClaudeToolsForAnthropic_TreatsBuiltinAndCustomNameCollisionAsAmbiguous(t *testing.T) {
+	input := []byte(`{
+		"tool_choice":{"type":"tool","name":"web_search"},
+		"messages":[
+			{"role":"assistant","content":[{"type":"tool_use","name":"web_search","id":"ws1","input":{"n":9007199254740995}}]},
+			{"role":"user","content":[{"type":"tool_reference","tool_name":"web_search"}]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"ws1","content":[{"type":"tool_reference","tool_name":"web_search"}]}]}
+		],
+		"tools":[
+			{"type":"web_search_20250305","name":"web_search","max_uses":5},
+			{"type":"custom","name":"web_search","description":"custom duplicate","input_schema":{"type":"object"}}
+		]
+	}`)
+
+	_, err := normalizeClaudeToolsForAnthropic(input)
+	if err == nil {
+		t.Fatal("normalizeClaudeToolsForAnthropic error = nil, want ambiguous-name rejection")
+	}
+	if !errors.Is(err, errAnthropicDuplicateToolName) {
+		t.Fatalf("normalizeClaudeToolsForAnthropic error = %v, want errAnthropicDuplicateToolName", err)
+	}
+}
+
+func TestNormalizeClaudeToolsForAnthropic_SkipsEmptyNameNoTypeTool(t *testing.T) {
+	input := []byte(`{
+		"tools":[
+			{"name":"shell","description":"Run commands","input_schema":{"type":"object","properties":{"cmd":{"type":"string"}}}},
+			{"name":"","description":"","input_schema":{}}
+		]
+	}`)
+	out, err := normalizeClaudeToolsForAnthropic(input)
+	if err != nil {
+		t.Fatalf("normalizeClaudeToolsForAnthropic error: %v", err)
+	}
+	toolCount := gjson.GetBytes(out, "tools.#").Int()
+	if toolCount != 1 {
+		t.Fatalf("tools count = %d, want 1; body=%s", toolCount, string(out))
+	}
+	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "shell" {
+		t.Fatalf("tools.0.name = %q, want %q", got, "shell")
+	}
+}
+
+func TestNormalizeClaudeToolsForAnthropic_SkipsMultipleEmptyNameNoTypeTools(t *testing.T) {
+	input := []byte(`{
+		"tools":[
+			{"name":"","description":"","input_schema":{}},
+			{"name":"shell","description":"Run commands","input_schema":{"type":"object","properties":{"cmd":{"type":"string"}}}},
+			{"name":"","description":"code interpreter","input_schema":{}}
+		]
+	}`)
+	out, err := normalizeClaudeToolsForAnthropic(input)
+	if err != nil {
+		t.Fatalf("normalizeClaudeToolsForAnthropic error: %v", err)
+	}
+	toolCount := gjson.GetBytes(out, "tools.#").Int()
+	if toolCount != 1 {
+		t.Fatalf("tools count = %d, want 1; body=%s", toolCount, string(out))
+	}
+	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "shell" {
+		t.Fatalf("tools.0.name = %q, want %q", got, "shell")
+	}
+}
+
 func TestNormalizeCacheControlTTL_DowngradesLaterOneHourBlocks(t *testing.T) {
 	payload := []byte(`{
 		"tools": [{"name":"t1","cache_control":{"type":"ephemeral","ttl":"1h"}}],
@@ -485,6 +1237,840 @@ func TestClaudeExecutor_CountTokens_AppliesCacheControlGuards(t *testing.T) {
 	}
 }
 
+func TestClaudeExecutor_CountTokens_AppliesThinkingFromModelSuffix(t *testing.T) {
+	var seenBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		seenBody = bytes.Clone(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"input_tokens":42}`))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": server.URL,
+	}}
+
+	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+	_, err := executor.CountTokens(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet(2048)",
+		Payload: payload,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+	if err != nil {
+		t.Fatalf("CountTokens error: %v", err)
+	}
+
+	if got := gjson.GetBytes(seenBody, "thinking.type").String(); got != "enabled" {
+		t.Fatalf("thinking.type = %q, want %q, body=%s", got, "enabled", string(seenBody))
+	}
+	if got := gjson.GetBytes(seenBody, "thinking.budget_tokens").Int(); got <= 0 {
+		t.Fatalf("thinking.budget_tokens = %d, want > 0, body=%s", got, string(seenBody))
+	}
+}
+
+func TestClaudeExecutor_CountTokens_DisablesThinkingWhenForcedToolChoice(t *testing.T) {
+	var seenBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		seenBody = bytes.Clone(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"input_tokens":42}`))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": server.URL,
+	}}
+
+	payload := []byte(`{
+		"tool_choice":{"type":"tool","name":"apply_patch"},
+		"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]
+	}`)
+	_, err := executor.CountTokens(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet(2048)",
+		Payload: payload,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+	if err != nil {
+		t.Fatalf("CountTokens error: %v", err)
+	}
+
+	if gjson.GetBytes(seenBody, "thinking").Exists() {
+		t.Fatalf("thinking should be removed for forced tool choice, body=%s", string(seenBody))
+	}
+}
+
+func TestApplyClaudeHeaders_MergesBetasWithDefaultsAndClaude1M(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(rec)
+	ginReq := httptest.NewRequest(http.MethodPost, "http://localhost/v1/messages", nil)
+	ginReq.Header.Set("Anthropic-Beta", "custom-beta-1,oauth-2025-04-20")
+	ginReq.Header.Set("X-CPA-CLAUDE-1M", "1")
+	ginCtx.Request = ginReq
+
+	req := httptest.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages", nil)
+	req = req.WithContext(context.WithValue(req.Context(), "gin", ginCtx))
+
+	applyClaudeHeaders(req, &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-123"}}, "key-123", false, []string{"beta-from-body", "custom-beta-1"}, &config.Config{})
+
+	got := req.Header.Get("Anthropic-Beta")
+	for _, want := range []string{
+		"custom-beta-1",
+		"oauth-2025-04-20",
+		"beta-from-body",
+		"context-1m-2025-08-07",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("Anthropic-Beta = %q, missing %q", got, want)
+		}
+	}
+	if strings.Count(got, "custom-beta-1") != 1 {
+		t.Fatalf("Anthropic-Beta should de-duplicate custom-beta-1, got %q", got)
+	}
+}
+
+func TestClaudeExecutor_Execute_PreservesCustomToolCacheControl(t *testing.T) {
+	var seenBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		seenBody = bytes.Clone(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","model":"claude-3-5-sonnet","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": server.URL,
+	}}
+
+	payload := []byte(`{
+		"tools": [
+			{
+				"type":"custom",
+				"name":"tool_one",
+				"cache_control":{"type":"ephemeral","ttl":"1h"},
+				"input_schema":{"type":"object"}
+			},
+			{
+				"type":"custom",
+				"name":"tool_two",
+				"input_schema":{"type":"object"}
+			}
+		],
+		"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]
+	}`)
+
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+
+	if len(seenBody) == 0 {
+		t.Fatal("expected request body to be captured")
+	}
+	if got := gjson.GetBytes(seenBody, "tools.0.cache_control.ttl").String(); got != "1h" {
+		t.Fatalf("tools.0.cache_control.ttl = %q, want %q, body=%s", got, "1h", string(seenBody))
+	}
+	if gjson.GetBytes(seenBody, "tools.1.cache_control").Exists() {
+		t.Fatalf("tools.1.cache_control should not be injected when caller already provided tool cache_control, body=%s", string(seenBody))
+	}
+	if got := countCacheControls(seenBody); got != 1 {
+		t.Fatalf("cache_control count = %d, want 1, body=%s", got, string(seenBody))
+	}
+}
+
+func TestClaudeExecutor_Execute_RestoresOriginalToolNamesAfterNormalization(t *testing.T) {
+	var upstreamRequestName string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		upstreamRequestName = gjson.GetBytes(body, "tools.0.name").String()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(fmt.Sprintf(`{
+			"id":"msg_1",
+			"type":"message",
+			"model":"claude-3-5-sonnet",
+			"role":"assistant",
+			"content":[{"type":"tool_use","id":"toolu_1","name":%q,"input":{"q":"hi"}}],
+			"usage":{"input_tokens":1,"output_tokens":1}
+		}`, upstreamRequestName)))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": server.URL,
+	}}
+
+	payload := []byte(`{
+		"tools":[{"type":"custom","name":"very bad tool","input_schema":{"type":"object"}}],
+		"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]
+	}`)
+
+	resp, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+
+	if upstreamRequestName == "" || upstreamRequestName == "very bad tool" {
+		t.Fatalf("upstream request tool name = %q, want normalized name", upstreamRequestName)
+	}
+	if got := gjson.GetBytes(resp.Payload, "content.0.name").String(); got != "very bad tool" {
+		t.Fatalf("content.0.name = %q, want %q, payload=%s", got, "very bad tool", string(resp.Payload))
+	}
+}
+
+func TestClaudeExecutor_ExecuteStream_RestoresOriginalToolNamesAfterNormalization(t *testing.T) {
+	var upstreamRequestName string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		upstreamRequestName = gjson.GetBytes(body, "tools.0.name").String()
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-3-5-sonnet\",\"content\":[]}}\n\n"))
+		_, _ = w.Write([]byte(fmt.Sprintf("data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":%q,\"input\":{}}}\n\n", upstreamRequestName)))
+		_, _ = w.Write([]byte("data: {\"type\":\"content_block_stop\",\"index\":0}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\",\"stop_sequence\":null},\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"message_stop\"}\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": server.URL,
+	}}
+
+	payload := []byte(`{
+		"tools":[{"type":"custom","name":"very bad tool","input_schema":{"type":"object"}}],
+		"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]
+	}`)
+
+	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+
+	var lines []string
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("unexpected chunk error: %v", chunk.Err)
+		}
+		lines = append(lines, string(chunk.Payload))
+	}
+
+	if upstreamRequestName == "" || upstreamRequestName == "very bad tool" {
+		t.Fatalf("upstream request tool name = %q, want normalized name", upstreamRequestName)
+	}
+	streamBody := strings.Join(lines, "")
+	if !strings.Contains(streamBody, `"name":"very bad tool"`) {
+		t.Fatalf("stream output should restore original tool name, got %s", streamBody)
+	}
+	if strings.Contains(streamBody, fmt.Sprintf(`"name":"%s"`, upstreamRequestName)) {
+		t.Fatalf("stream output should not expose normalized tool name %q, got %s", upstreamRequestName, streamBody)
+	}
+}
+
+func TestClaudeExecutor_ExecuteStream_OpenAIResponsesWithoutOriginalRequest_RestoresEchoedToolNames(t *testing.T) {
+	var upstreamRequestName string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		upstreamRequestName = gjson.GetBytes(body, "tools.0.name").String()
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-3-5-sonnet\",\"content\":[]}}\n\n"))
+		_, _ = w.Write([]byte(fmt.Sprintf("data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":%q,\"input\":{\"q\":\"hi\"}}}\n\n", upstreamRequestName)))
+		_, _ = w.Write([]byte("data: {\"type\":\"content_block_stop\",\"index\":0}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\",\"stop_sequence\":null},\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"message_stop\"}\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": server.URL,
+	}}
+
+	payload := []byte(`{
+		"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],
+		"tools":[{"type":"function","name":"very bad tool","description":"Search","parameters":{"type":"object"}}],
+		"tool_choice":{"type":"function","function":{"name":"very bad tool"}}
+	}`)
+
+	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+
+	var chunks []string
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("unexpected chunk error: %v", chunk.Err)
+		}
+		chunks = append(chunks, string(chunk.Payload))
+	}
+
+	if upstreamRequestName == "" || upstreamRequestName == "very bad tool" {
+		t.Fatalf("upstream request tool name = %q, want normalized name", upstreamRequestName)
+	}
+
+	var (
+		sawOutputName     bool
+		sawEchoedToolName bool
+		sawToolChoiceName bool
+	)
+	for _, payload := range collectSSEDataPayloads(chunks) {
+		if got := payload.Get("item.name").String(); got == "very bad tool" {
+			sawOutputName = true
+		} else if got == upstreamRequestName {
+			t.Fatalf("stream output item exposed normalized tool name %q in payload=%s", got, payload.Raw)
+		}
+		if got := payload.Get("response.tools.0.name").String(); got == "very bad tool" {
+			sawEchoedToolName = true
+		} else if got == upstreamRequestName {
+			t.Fatalf("stream response.tools exposed normalized tool name %q in payload=%s", got, payload.Raw)
+		}
+		if got := openAIResponseToolChoiceName(payload); got == "very bad tool" {
+			sawToolChoiceName = true
+		} else if got == upstreamRequestName {
+			t.Fatalf("stream tool_choice exposed normalized tool name %q in payload=%s", got, payload.Raw)
+		}
+	}
+
+	if !sawOutputName {
+		t.Fatalf("expected streamed output item to restore original tool name, got %v", chunks)
+	}
+	if !sawEchoedToolName {
+		t.Fatalf("expected streamed response.tools to restore original tool name, got %v", chunks)
+	}
+	if !sawToolChoiceName {
+		t.Fatalf("expected streamed tool_choice to restore original tool name, got %v", chunks)
+	}
+}
+
+func TestClaudeExecutor_Execute_OpenAIResponsesWithoutOriginalRequest_PreservesEchoedToolSchema(t *testing.T) {
+	var upstreamRequestName string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		upstreamRequestName = gjson.GetBytes(body, "tools.0.name").String()
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-3-5-sonnet\",\"content\":[]}}\n\n"))
+		_, _ = w.Write([]byte(fmt.Sprintf("data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":%q,\"input\":{\"q\":\"hi\"}}}\n\n", upstreamRequestName)))
+		_, _ = w.Write([]byte("data: {\"type\":\"content_block_stop\",\"index\":0}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\",\"stop_sequence\":null},\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"message_stop\"}\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": server.URL,
+	}}
+
+	payload := []byte(`{
+		"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],
+		"tools":[{"type":"function","name":"very bad tool","description":"Search","parameters":{"type":"object","properties":{"q":{"type":"string"}}},"x_vendor":{"mode":"strict"}}],
+		"tool_choice":{"type":"function","function":{"name":"very bad tool"}}
+	}`)
+
+	resp, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+
+	if upstreamRequestName == "" || upstreamRequestName == "very bad tool" {
+		t.Fatalf("upstream request tool name = %q, want normalized name", upstreamRequestName)
+	}
+	if got := gjson.GetBytes(resp.Payload, "tools.0.type").String(); got != "function" {
+		t.Fatalf("response tools.0.type = %q, want %q, payload=%s", got, "function", string(resp.Payload))
+	}
+	if got := gjson.GetBytes(resp.Payload, "tools.0.name").String(); got != "very bad tool" {
+		t.Fatalf("response tools.0.name = %q, want %q, payload=%s", got, "very bad tool", string(resp.Payload))
+	}
+	if got := gjson.GetBytes(resp.Payload, "tools.0.parameters.properties.q.type").String(); got != "string" {
+		t.Fatalf("response tools.0.parameters.properties.q.type = %q, want %q, payload=%s", got, "string", string(resp.Payload))
+	}
+	if got := gjson.GetBytes(resp.Payload, "tools.0.x_vendor.mode").String(); got != "strict" {
+		t.Fatalf("response tools.0.x_vendor.mode = %q, want %q, payload=%s", got, "strict", string(resp.Payload))
+	}
+	if got := openAIResponseToolChoiceName(gjson.ParseBytes(resp.Payload)); got != "very bad tool" {
+		t.Fatalf("response tool_choice name = %q, want %q, payload=%s", got, "very bad tool", string(resp.Payload))
+	}
+}
+
+func TestClaudeExecutor_Execute_OpenAIResponsesWithoutOriginalRequest_UsesEffectiveRequestEcho(t *testing.T) {
+	var upstreamTemperature float64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		upstreamTemperature = gjson.GetBytes(body, "temperature").Float()
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-3-5-sonnet\",\"content\":[]}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"hi\"}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"content_block_stop\",\"index\":0}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"message_stop\"}\n\n"))
+	}))
+	defer server.Close()
+
+	cfg := &config.Config{
+		Payload: config.PayloadConfig{
+			Override: []config.PayloadRule{
+				{
+					Models: []config.PayloadModelRule{{Name: "claude-*", Protocol: "claude"}},
+					Params: map[string]any{
+						"temperature": 0.25,
+					},
+				},
+			},
+		},
+	}
+	executor := NewClaudeExecutor(cfg)
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": server.URL,
+	}}
+
+	payload := []byte(`{
+		"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],
+		"temperature":0.9
+	}`)
+
+	resp, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+
+	if upstreamTemperature != 0.25 {
+		t.Fatalf("upstream temperature = %v, want %v", upstreamTemperature, 0.25)
+	}
+	if got := gjson.GetBytes(resp.Payload, "temperature").Float(); got != 0.9 {
+		t.Fatalf("response temperature = %v, want %v, payload=%s", got, 0.9, string(resp.Payload))
+	}
+}
+
+func TestClaudeExecutor_ErrorPaths_RestoreOriginalToolNamesAfterNormalization(t *testing.T) {
+	var upstreamRequestName string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		upstreamRequestName = gjson.GetBytes(body, "tools.0.name").String()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(fmt.Sprintf(`{
+			"type":"error",
+			"error":{
+				"type":"invalid_request_error",
+				"message":"tool %s failed validation"
+			}
+		}`, upstreamRequestName)))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": server.URL,
+	}}
+	payload := []byte(`{
+		"tools":[{"type":"custom","name":"very bad tool","input_schema":{"type":"object"}}],
+		"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]
+	}`)
+
+	checkErr := func(t *testing.T, name string, err error) {
+		t.Helper()
+		if err == nil {
+			t.Fatalf("%s: expected error", name)
+		}
+		var status statusErr
+		if !errors.As(err, &status) {
+			t.Fatalf("%s: expected statusErr, got %T: %v", name, err, err)
+		}
+		if status.StatusCode() != http.StatusBadRequest {
+			t.Fatalf("%s: status code = %d, want %d", name, status.StatusCode(), http.StatusBadRequest)
+		}
+		if upstreamRequestName == "" || upstreamRequestName == "very bad tool" {
+			t.Fatalf("%s: upstream request tool name = %q, want normalized name", name, upstreamRequestName)
+		}
+		if !strings.Contains(err.Error(), "very bad tool") {
+			t.Fatalf("%s: expected restored original tool name in error, got %q", name, err.Error())
+		}
+		if strings.Contains(err.Error(), upstreamRequestName) {
+			t.Fatalf("%s: error should not expose normalized tool name %q, got %q", name, upstreamRequestName, err.Error())
+		}
+	}
+
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+	})
+	checkErr(t, "Execute", err)
+
+	_, err = executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+	})
+	checkErr(t, "ExecuteStream", err)
+
+	_, err = executor.CountTokens(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+	})
+	checkErr(t, "CountTokens", err)
+}
+
+func TestClaudeExecutor_ErrorPaths_LeavePlainTextErrorsVerbatim(t *testing.T) {
+	var upstreamRequestName string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		upstreamRequestName = gjson.GetBytes(body, "tools.0.name").String()
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte("read timeout while calling upstream"))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": server.URL,
+	}}
+	payload := []byte(`{
+		"tools":[{"type":"custom","name":"read!","input_schema":{"type":"object"}}],
+		"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]
+	}`)
+
+	checkErr := func(t *testing.T, name string, err error) {
+		t.Helper()
+		if err == nil {
+			t.Fatalf("%s: expected error", name)
+		}
+		var status statusErr
+		if !errors.As(err, &status) {
+			t.Fatalf("%s: expected statusErr, got %T: %v", name, err, err)
+		}
+		if status.StatusCode() != http.StatusBadRequest {
+			t.Fatalf("%s: status code = %d, want %d", name, status.StatusCode(), http.StatusBadRequest)
+		}
+		if upstreamRequestName != "read" {
+			t.Fatalf("%s: upstream request tool name = %q, want %q", name, upstreamRequestName, "read")
+		}
+		if got := err.Error(); got != "read timeout while calling upstream" {
+			t.Fatalf("%s: error text = %q, want %q", name, got, "read timeout while calling upstream")
+		}
+	}
+
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+	})
+	checkErr(t, "Execute", err)
+
+	_, err = executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+	})
+	checkErr(t, "ExecuteStream", err)
+
+	_, err = executor.CountTokens(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+	})
+	checkErr(t, "CountTokens", err)
+}
+
+func collectSSEDataPayloads(chunks []string) []gjson.Result {
+	var payloads []gjson.Result
+	for _, chunk := range chunks {
+		for _, line := range strings.Split(chunk, "\n") {
+			line = strings.TrimSpace(line)
+			if !strings.HasPrefix(line, "data:") {
+				continue
+			}
+			raw := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+			if raw == "" || !gjson.Valid(raw) {
+				continue
+			}
+			payloads = append(payloads, gjson.Parse(raw))
+		}
+	}
+	return payloads
+}
+
+func openAIResponseToolChoiceName(payload gjson.Result) string {
+	for _, path := range []string{
+		"tool_choice.function.name",
+		"tool_choice.name",
+		"response.tool_choice.function.name",
+		"response.tool_choice.name",
+	} {
+		if value := payload.Get(path); value.Exists() {
+			return value.String()
+		}
+	}
+	return ""
+}
+
+func TestNormalizeThenPrefix_KeepsCustomNameConsistentWhenSanitizedNameMatchesBuiltin(t *testing.T) {
+	input := []byte(`{
+		"tool_choice":{"type":"tool","name":"web search"},
+		"messages":[
+			{"role":"assistant","content":[{"type":"tool_use","name":"web search","id":"t1","input":{}}]},
+			{"role":"user","content":[{"type":"tool_reference","tool_name":"web search"}]}
+		],
+		"tools":[
+			{"type":"custom","name":"web search","input_schema":{"type":"object"}}
+		]
+	}`)
+
+	normalized, err := normalizeClaudeToolsForAnthropic(input)
+	if err != nil {
+		t.Fatalf("normalizeClaudeToolsForAnthropic error: %v", err)
+	}
+	prefixed := applyClaudeToolPrefix(normalized, "proxy_")
+
+	normalizedName := gjson.GetBytes(normalized, "tools.0.name").String()
+	if normalizedName == "" {
+		t.Fatal("normalized tool name should not be empty")
+	}
+	expectedPrefixedName := "proxy_" + normalizedName
+	if got := gjson.GetBytes(prefixed, "tools.0.name").String(); got != expectedPrefixedName {
+		t.Fatalf("tools.0.name = %q, want %q", got, expectedPrefixedName)
+	}
+	if got := gjson.GetBytes(prefixed, "tool_choice.name").String(); got != expectedPrefixedName {
+		t.Fatalf("tool_choice.name = %q, want %q", got, expectedPrefixedName)
+	}
+	if got := gjson.GetBytes(prefixed, "messages.0.content.0.name").String(); got != expectedPrefixedName {
+		t.Fatalf("messages.0.content.0.name = %q, want %q", got, expectedPrefixedName)
+	}
+	if got := gjson.GetBytes(prefixed, "messages.1.content.0.tool_name").String(); got != expectedPrefixedName {
+		t.Fatalf("messages.1.content.0.tool_name = %q, want %q", got, expectedPrefixedName)
+	}
+}
+
+func TestNormalizeThenPrefix_PreservesUnknownExplicitTypedToolName(t *testing.T) {
+	input := []byte(`{
+		"tool_choice":{"type":"tool","name":"future_one"},
+		"messages":[
+			{"role":"assistant","content":[{"type":"tool_use","name":"future_one","id":"t1","input":{}}]},
+			{"role":"user","content":[{"type":"tool_reference","tool_name":"future_one"}]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":[{"type":"tool_reference","tool_name":"future_one"}]}]}
+		],
+		"tools":[
+			{"type":"future_tool","name":"future_one","extra":{"a":1}}
+		]
+	}`)
+
+	normalized, err := normalizeClaudeToolsForAnthropic(input)
+	if err != nil {
+		t.Fatalf("normalizeClaudeToolsForAnthropic error: %v", err)
+	}
+	prefixed := applyClaudeToolPrefix(normalized, "proxy_")
+
+	if got := gjson.GetBytes(prefixed, "tools.0.name").String(); got != "future_one" {
+		t.Fatalf("tools.0.name = %q, want %q", got, "future_one")
+	}
+	if got := gjson.GetBytes(prefixed, "tool_choice.name").String(); got != "future_one" {
+		t.Fatalf("tool_choice.name = %q, want %q", got, "future_one")
+	}
+	if got := gjson.GetBytes(prefixed, "messages.0.content.0.name").String(); got != "future_one" {
+		t.Fatalf("messages.0.content.0.name = %q, want %q", got, "future_one")
+	}
+	if got := gjson.GetBytes(prefixed, "messages.1.content.0.tool_name").String(); got != "future_one" {
+		t.Fatalf("messages.1.content.0.tool_name = %q, want %q", got, "future_one")
+	}
+	if got := gjson.GetBytes(prefixed, "messages.2.content.0.content.0.tool_name").String(); got != "future_one" {
+		t.Fatalf("messages.2.content.0.content.0.tool_name = %q, want %q", got, "future_one")
+	}
+}
+
+func TestNormalizeThenPrefix_RejectsAmbiguousExplicitTypedAndCustomSharedName(t *testing.T) {
+	input := []byte(`{
+		"tool_choice":{"type":"tool","name":"future_one"},
+		"messages":[
+			{"role":"assistant","content":[{"type":"tool_use","name":"future_one","id":"t1","input":{}}]},
+			{"role":"user","content":[{"type":"tool_reference","tool_name":"future_one"}]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":[{"type":"tool_reference","tool_name":"future_one"}]}]}
+		],
+		"tools":[
+			{"type":"future_tool","name":"future_one","extra":{"a":1}},
+			{"type":"custom","name":"future_one","input_schema":{"type":"object"}}
+		]
+	}`)
+
+	_, err := normalizeClaudeToolsForAnthropic(input)
+	if err == nil {
+		t.Fatal("normalizeClaudeToolsForAnthropic error = nil, want ambiguous-name rejection")
+	}
+	if !errors.Is(err, errAnthropicDuplicateToolName) {
+		t.Fatalf("normalizeClaudeToolsForAnthropic error = %v, want errAnthropicDuplicateToolName", err)
+	}
+}
+
+func TestNormalizeThenPrefix_RejectsAmbiguousBuiltinAndCustomSharedName(t *testing.T) {
+	input := []byte(`{
+		"tool_choice":{"type":"tool","name":"web_search"},
+		"messages":[
+			{"role":"assistant","content":[{"type":"tool_use","name":"web_search","id":"ws1","input":{}}]},
+			{"role":"user","content":[{"type":"tool_reference","tool_name":"web_search"}]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"ws1","content":[{"type":"tool_reference","tool_name":"web_search"}]}]}
+		],
+		"tools":[
+			{"type":"web_search_20250305","name":"web_search"},
+			{"type":"custom","name":"web_search","input_schema":{"type":"object"}}
+		]
+	}`)
+
+	_, err := normalizeClaudeToolsForAnthropic(input)
+	if err == nil {
+		t.Fatal("normalizeClaudeToolsForAnthropic error = nil, want ambiguous-name rejection")
+	}
+	if !errors.Is(err, errAnthropicDuplicateToolName) {
+		t.Fatalf("normalizeClaudeToolsForAnthropic error = %v, want errAnthropicDuplicateToolName", err)
+	}
+}
+
+func TestNormalizeThenPrefix_RejectsDuplicateOpenAIFunctionFallbackName(t *testing.T) {
+	input := []byte(`{
+		"tool_choice":{"type":"tool","name":"duplicate tool"},
+		"messages":[
+			{"role":"assistant","content":[{"type":"tool_use","name":"duplicate tool","id":"t1","input":{}}]},
+			{"role":"user","content":[{"type":"tool_reference","tool_name":"duplicate tool"}]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":[{"type":"tool_reference","tool_name":"duplicate tool"}]}]}
+		],
+		"tools":[
+			{"type":"function","function":{"name":"duplicate tool","description":"first","parameters":{"type":"object"}}},
+			{"type":"function","function":{"name":"duplicate tool","description":"second","parameters":{"type":"object"}}}
+		]
+	}`)
+
+	_, err := normalizeClaudeToolsForAnthropic(input)
+	if err == nil {
+		t.Fatal("normalizeClaudeToolsForAnthropic error = nil, want duplicate-name rejection")
+	}
+	if !errors.Is(err, errAnthropicDuplicateToolName) {
+		t.Fatalf("normalizeClaudeToolsForAnthropic error = %v, want errAnthropicDuplicateToolName", err)
+	}
+}
+
+func TestNormalizeThenPrefix_RejectsUnsanitizableOpenAIFunctionFallbackName(t *testing.T) {
+	input := []byte(`{
+		"tool_choice":{"type":"tool","name":"!!!"},
+		"messages":[
+			{"role":"assistant","content":[{"type":"tool_use","name":"!!!","id":"t1","input":{}}]},
+			{"role":"user","content":[{"type":"tool_reference","tool_name":"!!!"}]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":[{"type":"tool_reference","tool_name":"!!!"}]}]}
+		],
+		"tools":[
+			{"type":"function","function":{"name":"!!!","description":"bad","parameters":{"type":"object"}}}
+		]
+	}`)
+
+	_, err := normalizeClaudeToolsForAnthropic(input)
+	if err == nil {
+		t.Fatal("normalizeClaudeToolsForAnthropic error = nil, want invalid-name rejection")
+	}
+	if !errors.Is(err, errAnthropicToolNameUnsanitizable) {
+		t.Fatalf("normalizeClaudeToolsForAnthropic error = %v, want errAnthropicToolNameUnsanitizable", err)
+	}
+}
+
+func TestRestoreClaudeNormalizedToolNamesInRequest_RestoresToolsAndReferences(t *testing.T) {
+	input := []byte(`{
+		"tool_choice":{"type":"tool","name":"search_tool"},
+		"messages":[
+			{"role":"assistant","content":[{"type":"tool_use","name":"search_tool","id":"toolu_1","input":{}}]},
+			{"role":"user","content":[{"type":"tool_reference","tool_name":"search_tool"}]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":[{"type":"tool_reference","tool_name":"search_tool"}]}]}
+		],
+		"tools":[
+			{"name":"search_tool","type":"custom","input_schema":{"type":"object"}}
+		]
+	}`)
+
+	out := restoreClaudeNormalizedToolNamesInRequest(input, map[string]string{
+		"search_tool": "search tool",
+	})
+
+	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "search tool" {
+		t.Fatalf("tools.0.name = %q, want %q", got, "search tool")
+	}
+	if got := gjson.GetBytes(out, "tool_choice.name").String(); got != "search tool" {
+		t.Fatalf("tool_choice.name = %q, want %q", got, "search tool")
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.0.name").String(); got != "search tool" {
+		t.Fatalf("messages.0.content.0.name = %q, want %q", got, "search tool")
+	}
+	if got := gjson.GetBytes(out, "messages.1.content.0.tool_name").String(); got != "search tool" {
+		t.Fatalf("messages.1.content.0.tool_name = %q, want %q", got, "search tool")
+	}
+	if got := gjson.GetBytes(out, "messages.2.content.0.content.0.tool_name").String(); got != "search tool" {
+		t.Fatalf("messages.2.content.0.content.0.tool_name = %q, want %q", got, "search tool")
+	}
+}
+
+func TestRestoreClaudeToolNamesInErrorText_PrefersLongerNormalizedNames(t *testing.T) {
+	text := "tool read_more failed validation while read stayed valid"
+	out := restoreClaudeToolNamesInErrorText(text, "", map[string]string{
+		"read":      "read!",
+		"read_more": "read more!",
+	})
+
+	if strings.Contains(out, "read!_more") {
+		t.Fatalf("restored text = %q, should not partially replace overlapping normalized names", out)
+	}
+	if got := out; got != "tool read more! failed validation while read! stayed valid" {
+		t.Fatalf("restored text = %q, want %q", got, "tool read more! failed validation while read! stayed valid")
+	}
+}
+
 func hasTTLOrderingViolation(payload []byte) bool {
 	seen5m := false
 	violates := false
@@ -587,16 +2173,31 @@ func testClaudeExecutorInvalidCompressedErrorBody(
 	}}
 	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
 
+	checkErr := func(t *testing.T, name string, err error) {
+		t.Helper()
+		if err == nil {
+			t.Fatalf("%s: expected error", name)
+		}
+		var status statusErr
+		if !errors.As(err, &status) {
+			t.Fatalf("%s: expected statusErr, got %T: %v", name, err, err)
+		}
+		if got := status.StatusCode(); got != http.StatusBadRequest {
+			t.Fatalf("%s: status code = %d, want %d", name, got, http.StatusBadRequest)
+		}
+		errText := strings.ToLower(err.Error())
+		if !strings.Contains(errText, "failed to read upstream error body") &&
+			!strings.Contains(errText, "failed to decode upstream error body") &&
+			!strings.Contains(errText, "failed to decode error response body") {
+			t.Fatalf("%s: expected read/decode failure context, got %q", name, err.Error())
+		}
+		if !strings.Contains(errText, "gzip") && !strings.Contains(errText, "eof") && !strings.Contains(errText, "checksum") {
+			t.Fatalf("%s: expected gzip read failure, got %q", name, err.Error())
+		}
+	}
+
 	err := invoke(executor, auth, payload)
-	if err == nil {
-		t.Fatal("expected error, got nil")
-	}
-	if !strings.Contains(err.Error(), "failed to decode error response body") {
-		t.Fatalf("expected decode failure message, got: %v", err)
-	}
-	if statusProvider, ok := err.(interface{ StatusCode() int }); !ok || statusProvider.StatusCode() != http.StatusBadRequest {
-		t.Fatalf("expected status code 400, got: %v", err)
-	}
+	checkErr(t, "invoke", err)
 }
 
 // TestClaudeExecutor_ExecuteStream_SetsIdentityAcceptEncoding verifies that streaming
@@ -1063,4 +2664,67 @@ func TestCheckSystemInstructionsWithMode_StringWithSpecialChars(t *testing.T) {
 	if blocks[2].Get("text").String() != `Use <xml> tags & "quotes" in output.` {
 		t.Fatalf("blocks[2] text mangled, got %q", blocks[2].Get("text").String())
 	}
+}
+
+func TestClaudeExecutor_PreservesStatusOnCompressedErrorDecodeFailure(t *testing.T) {
+	invalidGzip := []byte("not-a-gzip-stream")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Encoding", "gzip")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write(invalidGzip)
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": server.URL,
+	}}
+	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+
+	checkErr := func(t *testing.T, name string, err error) {
+		t.Helper()
+		if err == nil {
+			t.Fatalf("%s: expected error", name)
+		}
+		var status statusErr
+		if !errors.As(err, &status) {
+			t.Fatalf("%s: expected statusErr, got %T: %v", name, err, err)
+		}
+		if got := status.StatusCode(); got != http.StatusBadRequest {
+			t.Fatalf("%s: status code = %d, want %d", name, got, http.StatusBadRequest)
+		}
+		errText := strings.ToLower(err.Error())
+		if !strings.Contains(errText, "failed to decode upstream error body") &&
+			!strings.Contains(errText, "failed to decode error response body") {
+			t.Fatalf("%s: expected decode failure context, got %q", name, err.Error())
+		}
+		if !strings.Contains(errText, "gzip") {
+			t.Fatalf("%s: expected gzip decode failure details, got %q", name, err.Error())
+		}
+	}
+
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+	})
+	checkErr(t, "Execute", err)
+
+	_, err = executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+	})
+	checkErr(t, "ExecuteStream", err)
+
+	_, err = executor.CountTokens(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+	})
+	checkErr(t, "CountTokens", err)
 }
