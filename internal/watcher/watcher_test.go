@@ -1258,10 +1258,17 @@ func TestHandleEventSuppressedAuthPathSkipsKnownRemove(t *testing.T) {
 	w.SetConfig(&config.Config{AuthDir: authDir})
 	w.lastAuthHashes[w.normalizeAuthPath(authFile)] = "hash"
 	w.SuppressAuthPath(authFile, time.Second)
+	w.scheduleAuthWrite(w.normalizeAuthPath(authFile), authFile)
 
 	w.handleEvent(fsnotify.Event{Name: authFile, Op: fsnotify.Remove})
 	if _, ok := w.lastAuthHashes[w.normalizeAuthPath(authFile)]; !ok {
 		t.Fatal("expected suppressed remove to leave watcher auth cache untouched")
+	}
+	w.eventMu.Lock()
+	pending := len(w.pendingAuthWrites)
+	w.eventMu.Unlock()
+	if pending != 0 {
+		t.Fatalf("expected suppressed remove to cancel pending writes, got %d", pending)
 	}
 }
 

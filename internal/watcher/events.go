@@ -90,11 +90,11 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 
 	// Handle auth directory changes incrementally (.json only)
 	if event.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
+		w.cancelPendingAuthWrite(normalizedName)
 		if w.isAuthPathSuppressed(normalizedName, now) {
 			log.Debugf("suppressing auth event for %s", filepath.Base(event.Name))
 			return
 		}
-		w.cancelPendingAuthWrite(normalizedName)
 		if w.shouldDebounceRemove(normalizedName, now) {
 			log.Debugf("debouncing remove event for %s", filepath.Base(event.Name))
 			return

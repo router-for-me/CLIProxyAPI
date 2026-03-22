@@ -798,11 +798,27 @@ func (s *Service) rebuildAuthMaintenanceIndex(snapshot []*coreauth.Auth, authDir
 }
 
 func (s *Service) rebuildAuthMaintenanceIndexLocked(snapshot []*coreauth.Auth, authDir string) {
-	s.maintenanceAuthIDsByPath = make(map[string]map[string]struct{})
-	s.maintenanceAuthPathByID = make(map[string]string)
+	idsByPath := make(map[string]map[string]struct{})
+	pathByID := make(map[string]string)
 	for _, auth := range snapshot {
-		s.indexAuthMaintenanceAuthLocked(auth, authDir)
+		if auth == nil {
+			continue
+		}
+		id := strings.TrimSpace(auth.ID)
+		if id == "" {
+			continue
+		}
+		path := resolveAuthFilePath(auth, authDir)
+		if path == "" {
+			continue
+		}
+		if idsByPath[path] == nil {
+			idsByPath[path] = make(map[string]struct{})
+		}
+		idsByPath[path][id] = struct{}{}
+		pathByID[id] = path
 	}
+	s.replaceAuthMaintenanceIndexLocked(idsByPath, pathByID)
 }
 
 func (s *Service) indexAuthMaintenanceAuth(auth *coreauth.Auth) {
@@ -910,6 +926,27 @@ func (s *Service) authMaintenanceIDsForPath(path, authDir string) []string {
 	return out
 }
 
+func (s *Service) replaceAuthMaintenanceIndex(idsByPath map[string]map[string]struct{}, pathByID map[string]string) {
+	if s == nil {
+		return
+	}
+	s.ensureAuthMaintenanceQueue()
+	s.maintenanceMu.Lock()
+	defer s.maintenanceMu.Unlock()
+	s.replaceAuthMaintenanceIndexLocked(idsByPath, pathByID)
+}
+
+func (s *Service) replaceAuthMaintenanceIndexLocked(idsByPath map[string]map[string]struct{}, pathByID map[string]string) {
+	if idsByPath == nil {
+		idsByPath = make(map[string]map[string]struct{})
+	}
+	if pathByID == nil {
+		pathByID = make(map[string]string)
+	}
+	s.maintenanceAuthIDsByPath = idsByPath
+	s.maintenanceAuthPathByID = pathByID
+}
+
 func (s *Service) snapshotAuthMaintenanceConfig() (config.AuthMaintenanceConfig, string) {
 	if s == nil {
 		return config.AuthMaintenanceConfig{
@@ -946,8 +983,9 @@ func (s *Service) scanAuthMaintenanceCandidates(now time.Time, cfg config.AuthMa
 		return nil
 	}
 	snapshot := s.coreManager.List()
-	s.rebuildAuthMaintenanceIndex(snapshot, authDir)
 	grouped := make(map[string]authMaintenanceCandidate)
+	idsByPath := make(map[string]map[string]struct{})
+	pathByID := make(map[string]string)
 	for _, auth := range snapshot {
 		path := resolveAuthFilePath(auth, authDir)
 		if path == "" {
@@ -961,7 +999,15 @@ func (s *Service) scanAuthMaintenanceCandidates(now time.Time, cfg config.AuthMa
 			}
 		}
 		if auth != nil && strings.TrimSpace(auth.ID) != "" {
-			group.IDs = append(group.IDs, strings.TrimSpace(auth.ID))
+			id := strings.TrimSpace(auth.ID)
+			if idsByPath[path] == nil {
+				idsByPath[path] = make(map[string]struct{})
+			}
+			if _, exists := idsByPath[path][id]; !exists {
+				idsByPath[path][id] = struct{}{}
+				group.IDs = append(group.IDs, id)
+			}
+			pathByID[id] = path
 		}
 		if group.Reason == "" {
 			if reason, ok := authEligibleForMaintenanceDelete(auth, nil, cfg, now); ok {
@@ -970,6 +1016,7 @@ func (s *Service) scanAuthMaintenanceCandidates(now time.Time, cfg config.AuthMa
 		}
 		grouped[path] = group
 	}
+	s.replaceAuthMaintenanceIndex(idsByPath, pathByID)
 
 	candidates := make([]authMaintenanceCandidate, 0, len(grouped))
 	for _, candidate := range grouped {
