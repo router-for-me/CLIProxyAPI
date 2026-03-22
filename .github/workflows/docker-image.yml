@@ -37,7 +37,17 @@ jobs:
           echo "commit=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
           echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
+      - name: Determine target platforms
+        id: platforms
+        run: |
+          platforms="linux/amd64"
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            platforms="${platforms},linux/arm64"
+          fi
+          echo "platforms=${platforms}" >> "$GITHUB_OUTPUT"
+
       - name: Set up QEMU
+        if: ${{ github.ref_type == 'tag' }}
         uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
@@ -63,11 +73,11 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=sha,prefix=sha-
 
-      - name: Build and push multi-arch image
+      - name: Build and push image
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ steps.platforms.outputs.platforms }}
           push: true
           cache-from: type=gha
           cache-to: type=gha,mode=max
