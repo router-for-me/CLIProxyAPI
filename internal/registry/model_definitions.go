@@ -376,7 +376,7 @@ func GetGitHubCopilotModels() []*ModelInfo {
 			ContextLength:       200000,
 			MaxCompletionTokens: 32768,
 			SupportedEndpoints:  []string{"/responses"},
-			Thinking:            &ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh"}},
+			Thinking:            &ThinkingSupport{Levels: []string{"none", "low", "medium", "high", "xhigh"}},
 		},
 		{
 			ID:                  "claude-haiku-4.5",

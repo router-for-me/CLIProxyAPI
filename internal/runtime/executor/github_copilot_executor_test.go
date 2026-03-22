@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	"github.com/tidwall/gjson"
 )
@@ -74,6 +75,22 @@ func TestUseGitHubCopilotResponsesEndpoint_RegistryResponsesOnlyModel(t *testing
 	t.Parallel()
 	if !useGitHubCopilotResponsesEndpoint(sdktranslator.FromString("openai"), "gpt-5.4") {
 		t.Fatal("expected responses-only registry model to use /responses")
+	}
+}
+
+func TestUseGitHubCopilotResponsesEndpoint_DynamicRegistryWinsOverStatic(t *testing.T) {
+	t.Parallel()
+
+	reg := registry.GetGlobalRegistry()
+	clientID := "github-copilot-test-client"
+	reg.RegisterClient(clientID, "github-copilot", []*registry.ModelInfo{{
+		ID:                 "gpt-5.4",
+		SupportedEndpoints: []string{"/chat/completions", "/responses"},
+	}})
+	defer reg.UnregisterClient(clientID)
+
+	if useGitHubCopilotResponsesEndpoint(sdktranslator.FromString("openai"), "gpt-5.4") {
+		t.Fatal("expected dynamic registry definition to take precedence over static fallback")
 	}
 }
 

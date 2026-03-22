@@ -577,21 +577,22 @@ func useGitHubCopilotResponsesEndpoint(sourceFormat sdktranslator.Format, model 
 		return true
 	}
 	baseModel := strings.ToLower(thinking.ParseSuffix(model).ModelName)
-	if info := registry.GetGlobalRegistry().GetModelInfo(baseModel, ""); info != nil {
-		if len(info.SupportedEndpoints) > 0 && !containsEndpoint(info.SupportedEndpoints, githubCopilotChatPath) && containsEndpoint(info.SupportedEndpoints, githubCopilotResponsesPath) {
-			return true
-		}
+	if info := registry.GetGlobalRegistry().GetModelInfo(baseModel, githubCopilotAuthType); info != nil {
+		return len(info.SupportedEndpoints) > 0 && !containsEndpoint(info.SupportedEndpoints, githubCopilotChatPath) && containsEndpoint(info.SupportedEndpoints, githubCopilotResponsesPath)
 	}
-	for _, info := range registry.GetGitHubCopilotModels() {
-		if info == nil || !strings.EqualFold(info.ID, baseModel) {
-			continue
-		}
-		if len(info.SupportedEndpoints) > 0 && !containsEndpoint(info.SupportedEndpoints, githubCopilotChatPath) && containsEndpoint(info.SupportedEndpoints, githubCopilotResponsesPath) {
-			return true
-		}
-		break
+	if info := lookupGitHubCopilotStaticModelInfo(baseModel); info != nil {
+		return len(info.SupportedEndpoints) > 0 && !containsEndpoint(info.SupportedEndpoints, githubCopilotChatPath) && containsEndpoint(info.SupportedEndpoints, githubCopilotResponsesPath)
 	}
 	return strings.Contains(baseModel, "codex")
+}
+
+func lookupGitHubCopilotStaticModelInfo(model string) *registry.ModelInfo {
+	for _, info := range registry.GetStaticModelDefinitionsByChannel(githubCopilotAuthType) {
+		if info != nil && strings.EqualFold(info.ID, model) {
+			return info
+		}
+	}
+	return nil
 }
 
 func containsEndpoint(endpoints []string, endpoint string) bool {
