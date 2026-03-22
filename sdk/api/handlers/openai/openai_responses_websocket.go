@@ -302,20 +302,32 @@ func normalizeResponseSubsequentRequest(rawJSON []byte, lastRequest []byte, last
 		}
 	}
 
-	existingInput := gjson.GetBytes(lastRequest, "input")
-	mergedInput, errMerge := mergeJSONArrayRaw(existingInput.Raw, normalizeJSONArrayRaw(lastResponseOutput))
-	if errMerge != nil {
-		return nil, lastRequest, &interfaces.ErrorMessage{
-			StatusCode: http.StatusBadRequest,
-			Error:      fmt.Errorf("invalid previous response output: %w", errMerge),
+	// When the client sends a full conversation transcript (e.g. after compact),
+	// the input already contains the complete history including assistant messages.
+	// In that case, skip merging with stale lastRequest/lastResponseOutput to avoid
+	// breaking function_call / function_call_output pairings.
+	// See: https://github.com/router-for-me/CLIProxyAPI/issues/2207
+	var mergedInput string
+	if inputContainsFullTranscript(nextInput) {
+		log.Infof("responses websocket: full transcript detected, skipping stale merge (input items=%d)", len(nextInput.Array()))
+		mergedInput = nextInput.Raw
+	} else {
+		existingInput := gjson.GetBytes(lastRequest, "input")
+		var errMerge error
+		mergedInput, errMerge = mergeJSONArrayRaw(existingInput.Raw, normalizeJSONArrayRaw(lastResponseOutput))
+		if errMerge != nil {
+			return nil, lastRequest, &interfaces.ErrorMessage{
+				StatusCode: http.StatusBadRequest,
+				Error:      fmt.Errorf("invalid previous response output: %w", errMerge),
+			}
 		}
-	}
 
-	mergedInput, errMerge = mergeJSONArrayRaw(mergedInput, nextInput.Raw)
-	if errMerge != nil {
-		return nil, lastRequest, &interfaces.ErrorMessage{
-			StatusCode: http.StatusBadRequest,
-			Error:      fmt.Errorf("invalid request input: %w", errMerge),
+		mergedInput, errMerge = mergeJSONArrayRaw(mergedInput, nextInput.Raw)
+		if errMerge != nil {
+			return nil, lastRequest, &interfaces.ErrorMessage{
+				StatusCode: http.StatusBadRequest,
+				Error:      fmt.Errorf("invalid request input: %w", errMerge),
+			}
 		}
 	}
 
@@ -588,6 +600,36 @@ func mergeJSONArrayRaw(existingRaw, appendRaw string) (string, error) {
 		return "", err
 	}
 	return string(out), nil
+}
+
+// inputContainsFullTranscript returns true when the input array looks like a
+// complete conversation history rather than an incremental append.  After a
+// client-side compact the input already carries the full (compacted) transcript
+// which may include assistant messages or compaction items.  Merging that with
+// the stale lastRequest / lastResponseOutput would duplicate or break
+// function_call / function_call_output pairings, so the caller should use the
+// input as-is.
+//
+// Heuristic: the array is a full transcript when it contains either
+//   - a message with role="assistant", or
+//   - a compaction item (type="compaction" or "compaction_summary").
+//
+// Normal incremental turns only contain user messages or function_call_output
+// items and never carry either of these signals.
+func inputContainsFullTranscript(input gjson.Result) bool {
+	if !input.IsArray() {
+		return false
+	}
+	for _, item := range input.Array() {
+		t := item.Get("type").String()
+		if t == "message" && item.Get("role").String() == "assistant" {
+			return true
+		}
+		if t == "compaction" || t == "compaction_summary" {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizeJSONArrayRaw(raw []byte) string {
