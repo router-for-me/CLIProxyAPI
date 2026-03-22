@@ -33,11 +33,10 @@ func (w *Watcher) start(ctx context.Context) error {
 	}
 	log.Debugf("watching config file: %s", w.configPath)
 
-	if errAddAuthDir := w.watcher.Add(w.authDir); errAddAuthDir != nil {
-		log.Errorf("failed to watch auth directory %s: %v", w.authDir, errAddAuthDir)
+	if errAddAuthDir := w.watchAuthTree(w.authDir); errAddAuthDir != nil {
+		log.Errorf("failed to watch auth directory tree %s: %v", w.authDir, errAddAuthDir)
 		return errAddAuthDir
 	}
-	log.Debugf("watching auth directory: %s", w.authDir)
 
 	go w.processEvents(ctx)
 
@@ -72,8 +71,17 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 	normalizedAuthDir := w.normalizeAuthPath(w.authDir)
 	isConfigEvent := normalizedName == normalizedConfigPath && event.Op&configOps != 0
 	authOps := fsnotify.Create | fsnotify.Write | fsnotify.Remove | fsnotify.Rename
-	isAuthJSON := strings.HasPrefix(normalizedName, normalizedAuthDir) && strings.HasSuffix(normalizedName, ".json") && event.Op&authOps != 0
-	if !isConfigEvent && !isAuthJSON {
+	isAuthPath := w.pathWithinBase(normalizedName, normalizedAuthDir)
+	isAuthJSON := isAuthPath && strings.HasSuffix(strings.ToLower(normalizedName), ".json") && event.Op&authOps != 0
+	isAuthDirEvent := false
+	if isAuthPath && event.Op&(fsnotify.Create|fsnotify.Remove|fsnotify.Rename) != 0 {
+		if info, errStat := os.Stat(event.Name); errStat == nil && info.IsDir() {
+			isAuthDirEvent = true
+		} else if event.Op&(fsnotify.Remove|fsnotify.Rename) != 0 && w.isWatchedAuthDir(event.Name) {
+			isAuthDirEvent = true
+		}
+	}
+	if !isConfigEvent && !isAuthJSON && !isAuthDirEvent {
 		// Ignore unrelated files (e.g., cookie snapshots *.cookie) and other noise.
 		return
 	}
@@ -85,6 +93,20 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 	if isConfigEvent {
 		log.Debugf("config file change details - operation: %s, timestamp: %s", event.Op.String(), now.Format("2006-01-02 15:04:05.000"))
 		w.scheduleConfigReload()
+		return
+	}
+
+	if isAuthDirEvent {
+		if event.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
+			w.removeAuthSubtree(event.Name)
+		}
+		if event.Op&(fsnotify.Create|fsnotify.Rename) != 0 {
+			if errWatch := w.watchAuthTree(event.Name); errWatch != nil {
+				log.Warnf("failed to watch auth directory subtree %s: %v", event.Name, errWatch)
+				return
+			}
+			w.syncAuthSubtree(event.Name)
+		}
 		return
 	}
 

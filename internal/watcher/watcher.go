@@ -46,6 +46,7 @@ type Watcher struct {
 	lastAuthHashes    map[string]string
 	lastAuthContents  map[string]*coreauth.Auth
 	fileAuthsByPath   map[string]map[string]*coreauth.Auth
+	watchedAuthDirs   map[string]string
 	lastRemoveTimes   map[string]time.Time
 	lastConfigHash    string
 	authQueue         chan<- AuthUpdate
@@ -99,6 +100,7 @@ func NewWatcher(configPath, authDir string, reloadCallback func(*config.Config))
 		watcher:         watcher,
 		lastAuthHashes:  make(map[string]string),
 		fileAuthsByPath: make(map[string]map[string]*coreauth.Auth),
+		watchedAuthDirs: make(map[string]string),
 	}
 	w.dispatchCond = sync.NewCond(&w.dispatchMu)
 	if store := sdkAuth.GetTokenStore(); store != nil {

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -319,6 +320,84 @@ func TestStartFailsWhenConfigMissing(t *testing.T) {
 	if err := w.Start(ctx); err == nil {
 		t.Fatal("expected Start to fail for missing config file")
 	}
+}
+
+func TestWatcherTracksRootAuthFileAddAndRemove(t *testing.T) {
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if err := os.MkdirAll(authDir, 0o755); err != nil {
+		t.Fatalf("failed to create auth dir: %v", err)
+	}
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("auth_dir: "+authDir+"\n"), 0o644); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+
+	w, err := NewWatcher(configPath, authDir, nil)
+	if err != nil {
+		t.Fatalf("failed to create watcher: %v", err)
+	}
+	w.SetConfig(&config.Config{AuthDir: authDir})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	defer w.Stop()
+
+	if err := w.Start(ctx); err != nil {
+		t.Fatalf("failed to start watcher: %v", err)
+	}
+
+	authFile := filepath.Join(authDir, "root.json")
+	if err := os.WriteFile(authFile, []byte(`{"type":"codex","email":"root@example.com"}`), 0o644); err != nil {
+		t.Fatalf("failed to write auth file: %v", err)
+	}
+	waitForAuthPresence(t, w, watcherAuthID(authDir, authFile), true)
+
+	if err := os.Remove(authFile); err != nil {
+		t.Fatalf("failed to remove auth file: %v", err)
+	}
+	waitForAuthPresence(t, w, watcherAuthID(authDir, authFile), false)
+}
+
+func TestWatcherTracksNestedAuthFileAddAndRemove(t *testing.T) {
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if err := os.MkdirAll(authDir, 0o755); err != nil {
+		t.Fatalf("failed to create auth dir: %v", err)
+	}
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("auth_dir: "+authDir+"\n"), 0o644); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+
+	w, err := NewWatcher(configPath, authDir, nil)
+	if err != nil {
+		t.Fatalf("failed to create watcher: %v", err)
+	}
+	w.SetConfig(&config.Config{AuthDir: authDir})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	defer w.Stop()
+
+	if err := w.Start(ctx); err != nil {
+		t.Fatalf("failed to start watcher: %v", err)
+	}
+
+	nestedDir := filepath.Join(authDir, "nested", "child")
+	if err := os.MkdirAll(nestedDir, 0o755); err != nil {
+		t.Fatalf("failed to create nested auth dir: %v", err)
+	}
+	authFile := filepath.Join(nestedDir, "sub.json")
+	if err := os.WriteFile(authFile, []byte(`{"type":"codex","email":"nested@example.com"}`), 0o644); err != nil {
+		t.Fatalf("failed to write nested auth file: %v", err)
+	}
+	waitForAuthPresence(t, w, watcherAuthID(authDir, authFile), true)
+
+	if err := os.Remove(authFile); err != nil {
+		t.Fatalf("failed to remove nested auth file: %v", err)
+	}
+	waitForAuthPresence(t, w, watcherAuthID(authDir, authFile), false)
 }
 
 func TestDispatchRuntimeAuthUpdateEnqueuesAndUpdatesState(t *testing.T) {
@@ -1690,4 +1769,42 @@ func TestScheduleProcessEventsStopsOnContextDone(t *testing.T) {
 
 func hexString(data []byte) string {
 	return strings.ToLower(fmt.Sprintf("%x", data))
+}
+
+func waitForAuthPresence(t *testing.T, w *Watcher, id string, want bool) {
+	t.Helper()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if authExists(w, id) == want {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	w.clientsMutex.RLock()
+	gotIDs := make([]string, 0, len(w.currentAuths))
+	for currentID := range w.currentAuths {
+		gotIDs = append(gotIDs, currentID)
+	}
+	w.clientsMutex.RUnlock()
+	t.Fatalf("timed out waiting for auth %q presence=%t, current auth IDs: %v", id, want, gotIDs)
+}
+
+func authExists(w *Watcher, id string) bool {
+	w.clientsMutex.RLock()
+	defer w.clientsMutex.RUnlock()
+	_, ok := w.currentAuths[id]
+	return ok
+}
+
+func watcherAuthID(authDir, authFile string) string {
+	id, err := filepath.Rel(authDir, authFile)
+	if err != nil {
+		return authFile
+	}
+	if runtime.GOOS == "windows" {
+		id = strings.ToLower(id)
+	}
+	return id
 }

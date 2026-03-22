@@ -3,6 +3,7 @@ package synthesizer
 import (
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -31,30 +32,29 @@ func (s *FileSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth, e
 		return out, nil
 	}
 
-	entries, err := os.ReadDir(ctx.AuthDir)
-	if err != nil {
-		// Not an error if directory doesn't exist
-		return out, nil
-	}
-
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
+	if err := filepath.WalkDir(ctx.AuthDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
 		}
-		name := e.Name()
-		if !strings.HasSuffix(strings.ToLower(name), ".json") {
-			continue
+		if d == nil || d.IsDir() {
+			return nil
 		}
-		full := filepath.Join(ctx.AuthDir, name)
-		data, errRead := os.ReadFile(full)
+		if !strings.HasSuffix(strings.ToLower(d.Name()), ".json") {
+			return nil
+		}
+		data, errRead := os.ReadFile(path)
 		if errRead != nil || len(data) == 0 {
-			continue
+			return nil
 		}
-		auths := synthesizeFileAuths(ctx, full, data)
+		auths := synthesizeFileAuths(ctx, path, data)
 		if len(auths) == 0 {
-			continue
+			return nil
 		}
 		out = append(out, auths...)
+		return nil
+	}); err != nil {
+		// Not an error if directory doesn't exist
+		return out, nil
 	}
 	return out, nil
 }

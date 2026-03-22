@@ -220,6 +220,58 @@ func TestFileSynthesizer_Synthesize_SkipsDirectories(t *testing.T) {
 	}
 }
 
+func TestFileSynthesizer_Synthesize_RecursesIntoSubdirectories(t *testing.T) {
+	tempDir := t.TempDir()
+	nestedDir := filepath.Join(tempDir, "nested", "child")
+	if err := os.MkdirAll(nestedDir, 0o755); err != nil {
+		t.Fatalf("failed to create nested dir: %v", err)
+	}
+
+	rootData, _ := json.Marshal(map[string]any{
+		"type":  "claude",
+		"email": "root@example.com",
+	})
+	nestedData, _ := json.Marshal(map[string]any{
+		"type":  "codex",
+		"email": "nested@example.com",
+	})
+	if err := os.WriteFile(filepath.Join(tempDir, "root.json"), rootData, 0o644); err != nil {
+		t.Fatalf("failed to write root auth file: %v", err)
+	}
+	nestedPath := filepath.Join(nestedDir, "nested.json")
+	if err := os.WriteFile(nestedPath, nestedData, 0o644); err != nil {
+		t.Fatalf("failed to write nested auth file: %v", err)
+	}
+
+	synth := NewFileSynthesizer()
+	ctx := &SynthesisContext{
+		Config:      &config.Config{},
+		AuthDir:     tempDir,
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 2 {
+		t.Fatalf("expected 2 auths, got %d", len(auths))
+	}
+
+	ids := make(map[string]struct{}, len(auths))
+	for _, auth := range auths {
+		ids[auth.ID] = struct{}{}
+	}
+	if _, ok := ids["root.json"]; !ok {
+		t.Fatalf("expected root auth ID root.json, got %#v", ids)
+	}
+	expectedNestedID := filepath.Join("nested", "child", "nested.json")
+	if _, ok := ids[expectedNestedID]; !ok {
+		t.Fatalf("expected nested auth ID %q, got %#v", expectedNestedID, ids)
+	}
+}
+
 func TestFileSynthesizer_Synthesize_RelativeID(t *testing.T) {
 	tempDir := t.TempDir()
 
