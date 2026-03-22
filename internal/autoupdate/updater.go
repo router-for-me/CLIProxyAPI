@@ -413,10 +413,35 @@ func replaceBinary(execPath string, newData []byte) error {
 	return nil
 }
 
-// Restart exits the current process so that a supervisor (systemd, Docker, etc.)
-// can restart it with the updated binary. This is the safest approach because
-// spawning a child process breaks PID-tracking supervisors and Docker containers.
+// Restart re-launches the updated binary.
+// It first attempts to spawn a replacement process (for unsupervised environments like
+// direct CLI invocation or Docker without a restart policy). If spawning fails, it falls
+// back to a simple exit, relying on a process supervisor (systemd, Docker restart policy, etc.)
+// to bring the service back up.
 func Restart() {
-	log.Info("auto-update: exiting for restart — the process supervisor should bring the service back up")
+	execPath, err := os.Executable()
+	if err != nil {
+		log.Warnf("auto-update: cannot determine executable path, falling back to exit: %v", err)
+		os.Exit(0)
+	}
+
+	args := os.Args
+	log.Infof("auto-update: restarting %s %v", execPath, args[1:])
+
+	proc, err := os.StartProcess(execPath, args, &os.ProcAttr{
+		Dir:   "",
+		Env:   os.Environ(),
+		Files: []*os.File{os.Stdin, os.Stdout, os.Stderr},
+	})
+	if err != nil {
+		log.Warnf("auto-update: could not spawn new process (%v), exiting for supervisor restart", err)
+		os.Exit(0)
+	}
+
+	// Release the new process so it outlives the current one
+	if err := proc.Release(); err != nil {
+		log.Warnf("auto-update: failed to release new process: %v", err)
+	}
+
 	os.Exit(0)
 }
