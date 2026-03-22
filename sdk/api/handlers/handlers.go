@@ -255,12 +255,26 @@ func executionSessionIDFromContext(ctx context.Context) string {
 // BaseAPIHandler contains the handlers for API endpoints.
 // It holds a pool of clients to interact with the backend service and manages
 // load balancing, client selection, and configuration.
+// ModelRouter is an interface for dynamic model routing evaluation.
+// The concrete implementation (*routing.Engine) is injected by the builder
+// to avoid import cycles between the handlers and routing packages.
+type ModelRouter interface {
+	Evaluate(rawJSON []byte, modelName string) string
+	IsEnabled() bool
+	IsDryRun() bool
+}
+
 type BaseAPIHandler struct {
 	// AuthManager manages auth lifecycle and execution in the new architecture.
 	AuthManager *coreauth.Manager
 
 	// Cfg holds the current application configuration.
 	Cfg *config.SDKConfig
+
+	// ModelRouter provides dynamic model routing evaluation.
+	// When non-nil and enabled, it can remap the requested model name
+	// before the request is dispatched to a provider.
+	ModelRouter ModelRouter
 }
 
 // NewBaseAPIHandlers creates a new API handlers instance.
@@ -468,6 +482,12 @@ func appendAPIResponse(c *gin.Context, data []byte) {
 // ExecuteWithAuthManager executes a non-streaming request via the core auth manager.
 // This path is the only supported execution route.
 func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) ([]byte, http.Header, *interfaces.ErrorMessage) {
+	// Dynamic model routing intercept: remap model name before provider resolution.
+	if h.ModelRouter != nil {
+		if target := h.ModelRouter.Evaluate(rawJSON, modelName); target != "" {
+			modelName = target
+		}
+	}
 	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
 	if errMsg != nil {
 		return nil, nil, errMsg
@@ -514,6 +534,12 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 // ExecuteCountWithAuthManager executes a non-streaming request via the core auth manager.
 // This path is the only supported execution route.
 func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) ([]byte, http.Header, *interfaces.ErrorMessage) {
+	// Dynamic model routing intercept: remap model name before provider resolution.
+	if h.ModelRouter != nil {
+		if target := h.ModelRouter.Evaluate(rawJSON, modelName); target != "" {
+			modelName = target
+		}
+	}
 	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
 	if errMsg != nil {
 		return nil, nil, errMsg
@@ -561,6 +587,12 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 // This path is the only supported execution route.
 // The returned http.Header carries upstream response headers captured before streaming begins.
 func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage) {
+	// Dynamic model routing intercept: remap model name before provider resolution.
+	if h.ModelRouter != nil {
+		if target := h.ModelRouter.Evaluate(rawJSON, modelName); target != "" {
+			modelName = target
+		}
+	}
 	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
 	if errMsg != nil {
 		errChan := make(chan *interfaces.ErrorMessage, 1)

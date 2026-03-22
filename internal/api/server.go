@@ -7,6 +7,7 @@ package api
 import (
 	"context"
 	"crypto/subtle"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -52,6 +53,7 @@ type serverOptionConfig struct {
 	keepAliveTimeout     time.Duration
 	keepAliveOnTimeout   func()
 	postAuthHook         auth.PostAuthHook
+	modelRouter          handlers.ModelRouter
 }
 
 // ServerOption customises HTTP server construction.
@@ -117,6 +119,13 @@ func WithPostAuthHook(hook auth.PostAuthHook) ServerOption {
 	}
 }
 
+// WithModelRouter injects a dynamic model routing engine into the server and its handlers.
+func WithModelRouter(router handlers.ModelRouter) ServerOption {
+	return func(cfg *serverOptionConfig) {
+		cfg.modelRouter = router
+	}
+}
+
 // Server represents the main API server.
 // It encapsulates the Gin engine, HTTP server, handlers, and configuration.
 type Server struct {
@@ -160,6 +169,9 @@ type Server struct {
 
 	// ampModule is the Amp routing module for model mapping hot-reload
 	ampModule *ampmodule.AmpModule
+
+	// modelRouter provides dynamic model routing evaluation for management endpoints.
+	modelRouter handlers.ModelRouter
 
 	// managementRoutesRegistered tracks whether the management routes have been attached to the engine.
 	managementRoutesRegistered atomic.Bool
@@ -240,9 +252,13 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	envManagementSecret := envAdminPasswordSet && envAdminPassword != ""
 
 	// Create server instance
+	apiHandlers := handlers.NewBaseAPIHandlers(&cfg.SDKConfig, authManager)
+	if optionState.modelRouter != nil {
+		apiHandlers.ModelRouter = optionState.modelRouter
+	}
 	s := &Server{
 		engine:              engine,
-		handlers:            handlers.NewBaseAPIHandlers(&cfg.SDKConfig, authManager),
+		handlers:            apiHandlers,
 		cfg:                 cfg,
 		accessManager:       accessManager,
 		requestLogger:       requestLogger,
@@ -251,6 +267,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		currentPath:         wd,
 		envManagementSecret: envManagementSecret,
 		wsRoutes:            make(map[string]struct{}),
+		modelRouter:         optionState.modelRouter,
 	}
 	s.wsAuthEnabled.Store(cfg.WebsocketAuth)
 	// Save initial YAML snapshot
@@ -589,6 +606,12 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/routing/strategy", s.mgmt.GetRoutingStrategy)
 		mgmt.PUT("/routing/strategy", s.mgmt.PutRoutingStrategy)
 		mgmt.PATCH("/routing/strategy", s.mgmt.PutRoutingStrategy)
+
+		// Model routing management
+		mgmt.GET("/model-routing/enabled", s.getModelRoutingEnabled)
+		mgmt.PUT("/model-routing/enabled", s.setModelRoutingEnabled)
+		mgmt.GET("/model-routing/rules", s.getModelRoutingRules)
+		mgmt.PUT("/model-routing/rules", s.setModelRoutingRules)
 
 		mgmt.GET("/claude-api-key", s.mgmt.GetClaudeKeys)
 		mgmt.PUT("/claude-api-key", s.mgmt.PutClaudeKeys)
@@ -1051,4 +1074,85 @@ func AuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc {
 		}
 		c.AbortWithStatusJSON(statusCode, gin.H{"error": err.Message})
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Model routing management handlers
+// ---------------------------------------------------------------------------
+
+// modelRoutingManager extends ModelRouter with mutation methods used by management endpoints.
+type modelRoutingManager interface {
+	handlers.ModelRouter
+	SetEnabled(bool)
+	SetDryRun(bool)
+	GetRules() json.RawMessage
+	SetRules(json.RawMessage) error
+}
+
+func (s *Server) getModelRoutingEnabled(c *gin.Context) {
+	if s.modelRouter == nil {
+		c.JSON(http.StatusOK, gin.H{"enabled": false, "dry_run": false})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"enabled": s.modelRouter.IsEnabled(),
+		"dry_run": s.modelRouter.IsDryRun(),
+	})
+}
+
+func (s *Server) setModelRoutingEnabled(c *gin.Context) {
+	mgr, ok := s.modelRouter.(modelRoutingManager)
+	if !ok || s.modelRouter == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "model routing engine not available"})
+		return
+	}
+	var body struct {
+		Enabled *bool `json:"enabled"`
+		DryRun  *bool `json:"dry_run"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if body.Enabled != nil {
+		mgr.SetEnabled(*body.Enabled)
+	}
+	if body.DryRun != nil {
+		mgr.SetDryRun(*body.DryRun)
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"enabled": mgr.IsEnabled(),
+		"dry_run": mgr.IsDryRun(),
+	})
+}
+
+func (s *Server) getModelRoutingRules(c *gin.Context) {
+	mgr, ok := s.modelRouter.(modelRoutingManager)
+	if !ok || s.modelRouter == nil {
+		c.JSON(http.StatusOK, json.RawMessage("[]"))
+		return
+	}
+	rules := mgr.GetRules()
+	if rules == nil {
+		rules = json.RawMessage("[]")
+	}
+	c.Data(http.StatusOK, "application/json", rules)
+}
+
+func (s *Server) setModelRoutingRules(c *gin.Context) {
+	mgr, ok := s.modelRouter.(modelRoutingManager)
+	if !ok || s.modelRouter == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "model routing engine not available"})
+		return
+	}
+	raw, err := c.GetRawData()
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if err := mgr.SetRules(json.RawMessage(raw)); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }

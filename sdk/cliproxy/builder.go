@@ -9,6 +9,7 @@ import (
 
 	configaccess "github.com/router-for-me/CLIProxyAPI/v6/internal/access/config_access"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/routing"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -221,6 +222,13 @@ func (b *Builder) Build() (*Service, error) {
 
 		coreManager = coreauth.NewManager(tokenStore, selector, nil)
 	}
+
+	// Initialize model routing engine
+	var modelRouter *routing.Engine
+	if b.cfg.ModelRouting.Enabled || len(b.cfg.ModelRouting.Rules) > 0 {
+		modelRouter = routing.NewEngine(b.cfg.ModelRouting)
+	}
+
 	// Attach a default RoundTripper provider so providers can opt-in per-auth transports.
 	coreManager.SetRoundTripperProvider(newDefaultRoundTripperProvider())
 	coreManager.SetConfig(b.cfg)
@@ -236,6 +244,7 @@ func (b *Builder) Build() (*Service, error) {
 		authManager:    authManager,
 		accessManager:  accessManager,
 		coreManager:    coreManager,
+		modelRouter:    modelRouter,
 		serverOptions:  append([]api.ServerOption(nil), b.serverOptions...),
 	}
 	return service, nil

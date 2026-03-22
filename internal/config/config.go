@@ -81,6 +81,9 @@ type Config struct {
 	// Routing controls credential selection behavior.
 	Routing RoutingConfig `yaml:"routing" json:"routing"`
 
+	// ModelRouting configures dynamic model routing based on request analysis.
+	ModelRouting ModelRoutingConfig `yaml:"model-routing" json:"model-routing"`
+
 	// WebsocketAuth enables or disables authentication for the WebSocket API.
 	WebsocketAuth bool `yaml:"ws-auth" json:"ws-auth"`
 
@@ -191,6 +194,32 @@ type RoutingConfig struct {
 	// Strategy selects the credential selection strategy.
 	// Supported values: "round-robin" (default), "fill-first".
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
+}
+
+// ModelRoutingConfig defines rules for dynamic model routing based on request analysis.
+type ModelRoutingConfig struct {
+	Enabled      bool               `yaml:"enabled" json:"enabled"`
+	DryRun       bool               `yaml:"dry-run" json:"dry-run"`
+	Rules        []ModelRoutingRule  `yaml:"rules" json:"rules"`
+	DefaultModel string             `yaml:"default-model,omitempty" json:"default-model,omitempty"`
+}
+
+type ModelRoutingRule struct {
+	Name        string                    `yaml:"name" json:"name"`
+	Conditions  []ModelRoutingCondition   `yaml:"conditions" json:"conditions"`
+	TargetModel string                    `yaml:"target-model" json:"target-model"`
+	Priority    int                       `yaml:"priority" json:"priority"`
+	Enabled     *bool                     `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+}
+
+func (r ModelRoutingRule) IsEnabled() bool {
+	return r.Enabled == nil || *r.Enabled
+}
+
+type ModelRoutingCondition struct {
+	Type     string `yaml:"type" json:"type"`
+	Operator string `yaml:"operator" json:"operator"`
+	Value    string `yaml:"value" json:"value"`
 }
 
 // OAuthModelAlias defines a model ID alias for a specific channel.
