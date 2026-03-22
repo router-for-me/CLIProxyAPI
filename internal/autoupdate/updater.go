@@ -40,11 +40,15 @@ type releaseInfo struct {
 
 // CheckAndUpdate checks GitHub for a newer release and replaces the running binary if one is found.
 // It returns true if an update was applied and the caller should restart.
+// The entire operation is capped at 30 seconds to avoid blocking startup.
 func CheckAndUpdate(ctx context.Context, proxyURL string) bool {
 	if buildinfo.Version == "dev" || buildinfo.Version == "" {
 		log.Debug("auto-update skipped: development build")
 		return false
 	}
+
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
 
 	client := newHTTPClient(proxyURL)
 
