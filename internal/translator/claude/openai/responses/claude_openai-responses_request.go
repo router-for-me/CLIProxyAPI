@@ -49,7 +49,7 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 	userID := fmt.Sprintf("user_%s_account_%s_session_%s", user, account, session)
 
 	// Base Claude message payload
-	out := fmt.Sprintf(`{"model":"","max_tokens":32000,"messages":[],"metadata":{"user_id":"%s"}}`, userID)
+	out := []byte(fmt.Sprintf(`{"model":"","max_tokens":32000,"messages":[],"metadata":{"user_id":"%s"}}`, userID))
 
 	root := gjson.ParseBytes(rawJSON)
 
@@ -67,20 +67,20 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 			if supportsAdaptive {
 				switch effort {
 				case "none":
-					out, _ = sjson.Set(out, "thinking.type", "disabled")
-					out, _ = sjson.Delete(out, "thinking.budget_tokens")
-					out, _ = sjson.Delete(out, "output_config.effort")
+					out, _ = sjson.SetBytes(out, "thinking.type", "disabled")
+					out, _ = sjson.DeleteBytes(out, "thinking.budget_tokens")
+					out, _ = sjson.DeleteBytes(out, "output_config.effort")
 				case "auto":
-					out, _ = sjson.Set(out, "thinking.type", "adaptive")
-					out, _ = sjson.Delete(out, "thinking.budget_tokens")
-					out, _ = sjson.Delete(out, "output_config.effort")
+					out, _ = sjson.SetBytes(out, "thinking.type", "adaptive")
+					out, _ = sjson.DeleteBytes(out, "thinking.budget_tokens")
+					out, _ = sjson.DeleteBytes(out, "output_config.effort")
 				default:
 					if mapped, ok := thinking.MapToClaudeEffort(effort, supportsMax); ok {
 						effort = mapped
 					}
-					out, _ = sjson.Set(out, "thinking.type", "adaptive")
-					out, _ = sjson.Delete(out, "thinking.budget_tokens")
-					out, _ = sjson.Set(out, "output_config.effort", effort)
+					out, _ = sjson.SetBytes(out, "thinking.type", "adaptive")
+					out, _ = sjson.DeleteBytes(out, "thinking.budget_tokens")
+					out, _ = sjson.SetBytes(out, "output_config.effort", effort)
 				}
 			} else {
 				// Legacy/manual thinking (budget_tokens).
@@ -88,13 +88,13 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 				if ok {
 					switch budget {
 					case 0:
-						out, _ = sjson.Set(out, "thinking.type", "disabled")
+						out, _ = sjson.SetBytes(out, "thinking.type", "disabled")
 					case -1:
-						out, _ = sjson.Set(out, "thinking.type", "enabled")
+						out, _ = sjson.SetBytes(out, "thinking.type", "enabled")
 					default:
 						if budget > 0 {
-							out, _ = sjson.Set(out, "thinking.type", "enabled")
-							out, _ = sjson.Set(out, "thinking.budget_tokens", budget)
+							out, _ = sjson.SetBytes(out, "thinking.type", "enabled")
+							out, _ = sjson.SetBytes(out, "thinking.budget_tokens", budget)
 						}
 					}
 				}
@@ -114,15 +114,15 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 	}
 
 	// Model
-	out, _ = sjson.Set(out, "model", modelName)
+	out, _ = sjson.SetBytes(out, "model", modelName)
 
 	// Max tokens
 	if mot := root.Get("max_output_tokens"); mot.Exists() {
-		out, _ = sjson.Set(out, "max_tokens", mot.Int())
+		out, _ = sjson.SetBytes(out, "max_tokens", mot.Int())
 	}
 
 	// Stream
-	out, _ = sjson.Set(out, "stream", stream)
+	out, _ = sjson.SetBytes(out, "stream", stream)
 
 	// instructions -> as a leading message (use role user for Claude API compatibility)
 	instructionsText := ""
@@ -130,9 +130,9 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 	if instr := root.Get("instructions"); instr.Exists() && instr.Type == gjson.String {
 		instructionsText = instr.String()
 		if instructionsText != "" {
-			sysMsg := `{"role":"user","content":""}`
-			sysMsg, _ = sjson.Set(sysMsg, "content", instructionsText)
-			out, _ = sjson.SetRaw(out, "messages.-1", sysMsg)
+			sysMsg := []byte(`{"role":"user","content":""}`)
+			sysMsg, _ = sjson.SetBytes(sysMsg, "content", instructionsText)
+			out, _ = sjson.SetRawBytes(out, "messages.-1", sysMsg)
 		}
 	}
 
@@ -156,9 +156,9 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 					}
 					instructionsText = builder.String()
 					if instructionsText != "" {
-						sysMsg := `{"role":"user","content":""}`
-						sysMsg, _ = sjson.Set(sysMsg, "content", instructionsText)
-						out, _ = sjson.SetRaw(out, "messages.-1", sysMsg)
+						sysMsg := []byte(`{"role":"user","content":""}`)
+						sysMsg, _ = sjson.SetBytes(sysMsg, "content", instructionsText)
+						out, _ = sjson.SetRawBytes(out, "messages.-1", sysMsg)
 						extractedFromSystem = true
 					}
 				}
@@ -193,9 +193,9 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 							if t := part.Get("text"); t.Exists() {
 								txt := t.String()
 								textAggregate.WriteString(txt)
-								contentPart := `{"type":"text","text":""}`
-								contentPart, _ = sjson.Set(contentPart, "text", txt)
-								partsJSON = append(partsJSON, contentPart)
+								contentPart := []byte(`{"type":"text","text":""}`)
+								contentPart, _ = sjson.SetBytes(contentPart, "text", txt)
+								partsJSON = append(partsJSON, string(contentPart))
 							}
 							if ptype == "input_text" {
 								role = "user"
@@ -208,7 +208,7 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 								url = part.Get("url").String()
 							}
 							if url != "" {
-								var contentPart string
+								var contentPart []byte
 								if strings.HasPrefix(url, "data:") {
 									trimmed := strings.TrimPrefix(url, "data:")
 									mediaAndData := strings.SplitN(trimmed, ";base64,", 2)
@@ -221,16 +221,16 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 										data = mediaAndData[1]
 									}
 									if data != "" {
-										contentPart = `{"type":"image","source":{"type":"base64","media_type":"","data":""}}`
-										contentPart, _ = sjson.Set(contentPart, "source.media_type", mediaType)
-										contentPart, _ = sjson.Set(contentPart, "source.data", data)
+										contentPart = []byte(`{"type":"image","source":{"type":"base64","media_type":"","data":""}}`)
+										contentPart, _ = sjson.SetBytes(contentPart, "source.media_type", mediaType)
+										contentPart, _ = sjson.SetBytes(contentPart, "source.data", data)
 									}
 								} else {
-									contentPart = `{"type":"image","source":{"type":"url","url":""}}`
-									contentPart, _ = sjson.Set(contentPart, "source.url", url)
+									contentPart = []byte(`{"type":"image","source":{"type":"url","url":""}}`)
+									contentPart, _ = sjson.SetBytes(contentPart, "source.url", url)
 								}
-								if contentPart != "" {
-									partsJSON = append(partsJSON, contentPart)
+								if len(contentPart) > 0 {
+									partsJSON = append(partsJSON, string(contentPart))
 									if role == "" {
 										role = "user"
 									}
@@ -252,10 +252,10 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 										data = mediaAndData[1]
 									}
 								}
-								contentPart := `{"type":"document","source":{"type":"base64","media_type":"","data":""}}`
-								contentPart, _ = sjson.Set(contentPart, "source.media_type", mediaType)
-								contentPart, _ = sjson.Set(contentPart, "source.data", data)
-								partsJSON = append(partsJSON, contentPart)
+								contentPart := []byte(`{"type":"document","source":{"type":"base64","media_type":"","data":""}}`)
+								contentPart, _ = sjson.SetBytes(contentPart, "source.media_type", mediaType)
+								contentPart, _ = sjson.SetBytes(contentPart, "source.data", data)
+								partsJSON = append(partsJSON, string(contentPart))
 								if role == "" {
 									role = "user"
 								}
@@ -280,24 +280,24 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 				}
 
 				if len(partsJSON) > 0 {
-					msg := `{"role":"","content":[]}`
-					msg, _ = sjson.Set(msg, "role", role)
+					msg := []byte(`{"role":"","content":[]}`)
+					msg, _ = sjson.SetBytes(msg, "role", role)
 					if len(partsJSON) == 1 && !hasImage && !hasFile {
 						// Preserve legacy behavior for single text content
-						msg, _ = sjson.Delete(msg, "content")
+						msg, _ = sjson.DeleteBytes(msg, "content")
 						textPart := gjson.Parse(partsJSON[0])
-						msg, _ = sjson.Set(msg, "content", textPart.Get("text").String())
+						msg, _ = sjson.SetBytes(msg, "content", textPart.Get("text").String())
 					} else {
 						for _, partJSON := range partsJSON {
-							msg, _ = sjson.SetRaw(msg, "content.-1", partJSON)
+							msg, _ = sjson.SetRawBytes(msg, "content.-1", []byte(partJSON))
 						}
 					}
-					out, _ = sjson.SetRaw(out, "messages.-1", msg)
+					out, _ = sjson.SetRawBytes(out, "messages.-1", msg)
 				} else if textAggregate.Len() > 0 || role == "system" {
-					msg := `{"role":"","content":""}`
-					msg, _ = sjson.Set(msg, "role", role)
-					msg, _ = sjson.Set(msg, "content", textAggregate.String())
-					out, _ = sjson.SetRaw(out, "messages.-1", msg)
+					msg := []byte(`{"role":"","content":""}`)
+					msg, _ = sjson.SetBytes(msg, "role", role)
+					msg, _ = sjson.SetBytes(msg, "content", textAggregate.String())
+					out, _ = sjson.SetRawBytes(out, "messages.-1", msg)
 				}
 
 			case "function_call":
@@ -309,31 +309,31 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 				name := item.Get("name").String()
 				argsStr := item.Get("arguments").String()
 
-				toolUse := `{"type":"tool_use","id":"","name":"","input":{}}`
-				toolUse, _ = sjson.Set(toolUse, "id", callID)
-				toolUse, _ = sjson.Set(toolUse, "name", name)
+				toolUse := []byte(`{"type":"tool_use","id":"","name":"","input":{}}`)
+				toolUse, _ = sjson.SetBytes(toolUse, "id", callID)
+				toolUse, _ = sjson.SetBytes(toolUse, "name", name)
 				if argsStr != "" && gjson.Valid(argsStr) {
 					argsJSON := gjson.Parse(argsStr)
 					if argsJSON.IsObject() {
-						toolUse, _ = sjson.SetRaw(toolUse, "input", argsJSON.Raw)
+						toolUse, _ = sjson.SetRawBytes(toolUse, "input", []byte(argsJSON.Raw))
 					}
 				}
 
-				asst := `{"role":"assistant","content":[]}`
-				asst, _ = sjson.SetRaw(asst, "content.-1", toolUse)
-				out, _ = sjson.SetRaw(out, "messages.-1", asst)
+				asst := []byte(`{"role":"assistant","content":[]}`)
+				asst, _ = sjson.SetRawBytes(asst, "content.-1", toolUse)
+				out, _ = sjson.SetRawBytes(out, "messages.-1", asst)
 
 			case "function_call_output":
 				// Map to user tool_result
 				callID := item.Get("call_id").String()
 				outputStr := item.Get("output").String()
-				toolResult := `{"type":"tool_result","tool_use_id":"","content":""}`
-				toolResult, _ = sjson.Set(toolResult, "tool_use_id", callID)
-				toolResult, _ = sjson.Set(toolResult, "content", outputStr)
+				toolResult := []byte(`{"type":"tool_result","tool_use_id":"","content":""}`)
+				toolResult, _ = sjson.SetBytes(toolResult, "tool_use_id", callID)
+				toolResult, _ = sjson.SetBytes(toolResult, "content", outputStr)
 
-				usr := `{"role":"user","content":[]}`
-				usr, _ = sjson.SetRaw(usr, "content.-1", toolResult)
-				out, _ = sjson.SetRaw(out, "messages.-1", usr)
+				usr := []byte(`{"role":"user","content":[]}`)
+				usr, _ = sjson.SetRawBytes(usr, "content.-1", toolResult)
+				out, _ = sjson.SetRawBytes(out, "messages.-1", usr)
 			}
 			return true
 		})
@@ -341,27 +341,27 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 
 	// tools mapping: parameters -> input_schema
 	if tools := root.Get("tools"); tools.Exists() && tools.IsArray() {
-		toolsJSON := "[]"
+		toolsJSON := []byte("[]")
 		tools.ForEach(func(_, tool gjson.Result) bool {
-			tJSON := `{"name":"","description":"","input_schema":{}}`
+			tJSON := []byte(`{"name":"","description":"","input_schema":{}}`)
 			if n := tool.Get("name"); n.Exists() {
-				tJSON, _ = sjson.Set(tJSON, "name", n.String())
+				tJSON, _ = sjson.SetBytes(tJSON, "name", n.String())
 			}
 			if d := tool.Get("description"); d.Exists() {
-				tJSON, _ = sjson.Set(tJSON, "description", d.String())
+				tJSON, _ = sjson.SetBytes(tJSON, "description", d.String())
 			}
 
 			if params := tool.Get("parameters"); params.Exists() {
-				tJSON, _ = sjson.SetRaw(tJSON, "input_schema", params.Raw)
+				tJSON, _ = sjson.SetRawBytes(tJSON, "input_schema", []byte(params.Raw))
 			} else if params = tool.Get("parametersJsonSchema"); params.Exists() {
-				tJSON, _ = sjson.SetRaw(tJSON, "input_schema", params.Raw)
+				tJSON, _ = sjson.SetRawBytes(tJSON, "input_schema", []byte(params.Raw))
 			}
 
-			toolsJSON, _ = sjson.SetRaw(toolsJSON, "-1", tJSON)
+			toolsJSON, _ = sjson.SetRawBytes(toolsJSON, "-1", tJSON)
 			return true
 		})
-		if gjson.Parse(toolsJSON).IsArray() && len(gjson.Parse(toolsJSON).Array()) > 0 {
-			out, _ = sjson.SetRaw(out, "tools", toolsJSON)
+		if parsedTools := gjson.ParseBytes(toolsJSON); parsedTools.IsArray() && len(parsedTools.Array()) > 0 {
+			out, _ = sjson.SetRawBytes(out, "tools", toolsJSON)
 		}
 	}
 
@@ -371,23 +371,23 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 		case gjson.String:
 			switch toolChoice.String() {
 			case "auto":
-				out, _ = sjson.SetRaw(out, "tool_choice", `{"type":"auto"}`)
+				out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(`{"type":"auto"}`))
 			case "none":
 				// Leave unset; implies no tools
 			case "required":
-				out, _ = sjson.SetRaw(out, "tool_choice", `{"type":"any"}`)
+				out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(`{"type":"any"}`))
 			}
 		case gjson.JSON:
 			if toolChoice.Get("type").String() == "function" {
 				fn := toolChoice.Get("function.name").String()
-				toolChoiceJSON := `{"name":"","type":"tool"}`
-				toolChoiceJSON, _ = sjson.Set(toolChoiceJSON, "name", fn)
-				out, _ = sjson.SetRaw(out, "tool_choice", toolChoiceJSON)
+				toolChoiceJSON := []byte(`{"name":"","type":"tool"}`)
+				toolChoiceJSON, _ = sjson.SetBytes(toolChoiceJSON, "name", fn)
+				out, _ = sjson.SetRawBytes(out, "tool_choice", toolChoiceJSON)
 			}
 		default:
 
 		}
 	}
 
-	return []byte(out)
+	return out
 }

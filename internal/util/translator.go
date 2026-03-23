@@ -74,17 +74,17 @@ func RenameKey(jsonStr, oldKeyPath, newKeyPath string) (string, error) {
 		return "", fmt.Errorf("old key '%s' does not exist", oldKeyPath)
 	}
 
-	interimJson, err := sjson.SetRaw(jsonStr, newKeyPath, value.Raw)
-	if err != nil {
-		return "", fmt.Errorf("failed to set new key '%s': %w", newKeyPath, err)
+	interimJSON, errSet := sjson.SetRawBytes([]byte(jsonStr), newKeyPath, []byte(value.Raw))
+	if errSet != nil {
+		return "", fmt.Errorf("failed to set new key '%s': %w", newKeyPath, errSet)
 	}
 
-	finalJson, err := sjson.Delete(interimJson, oldKeyPath)
-	if err != nil {
-		return "", fmt.Errorf("failed to delete old key '%s': %w", oldKeyPath, err)
+	finalJSON, errDelete := sjson.DeleteBytes(interimJSON, oldKeyPath)
+	if errDelete != nil {
+		return "", fmt.Errorf("failed to delete old key '%s': %w", oldKeyPath, errDelete)
 	}
 
-	return finalJson, nil
+	return string(finalJSON), nil
 }
 
 // FixJSON converts non-standard JSON that uses single quotes for strings into

@@ -101,7 +101,8 @@ func removePlaceholderFields(jsonStr string) string {
 			if len(filtered) == 0 {
 				jsonStr, _ = sjson.Delete(jsonStr, reqPath)
 			} else {
-				jsonStr, _ = sjson.Set(jsonStr, reqPath, filtered)
+				updated, _ := sjson.SetBytes([]byte(jsonStr), reqPath, filtered)
+				jsonStr = string(updated)
 			}
 		}
 	}
@@ -135,7 +136,8 @@ func removePlaceholderFields(jsonStr string) string {
 			if len(filtered) == 0 {
 				jsonStr, _ = sjson.Delete(jsonStr, reqPath)
 			} else {
-				jsonStr, _ = sjson.Set(jsonStr, reqPath, filtered)
+				updated, _ := sjson.SetBytes([]byte(jsonStr), reqPath, filtered)
+				jsonStr = string(updated)
 			}
 		}
 	}
@@ -162,7 +164,8 @@ func convertRefsToHints(jsonStr string) string {
 		}
 
 		replacement := `{"type":"object","description":""}`
-		replacement, _ = sjson.Set(replacement, "description", hint)
+		replacementBytes, _ := sjson.SetBytes([]byte(replacement), "description", hint)
+		replacement = string(replacementBytes)
 		jsonStr = setRawAt(jsonStr, parentPath, replacement)
 	}
 	return jsonStr
@@ -176,7 +179,8 @@ func convertConstToEnum(jsonStr string) string {
 		}
 		enumPath := trimSuffix(p, ".const") + ".enum"
 		if !gjson.Get(jsonStr, enumPath).Exists() {
-			jsonStr, _ = sjson.Set(jsonStr, enumPath, []interface{}{val.Value()})
+			updated, _ := sjson.SetBytes([]byte(jsonStr), enumPath, []interface{}{val.Value()})
+			jsonStr = string(updated)
 		}
 	}
 	return jsonStr
@@ -198,9 +202,11 @@ func convertEnumValuesToStrings(jsonStr string) string {
 
 		// Always update enum values to strings and set type to "string"
 		// This ensures compatibility with Antigravity Gemini which only allows enum for STRING type
-		jsonStr, _ = sjson.Set(jsonStr, p, stringVals)
+		updated, _ := sjson.SetBytes([]byte(jsonStr), p, stringVals)
+		jsonStr = string(updated)
 		parentPath := trimSuffix(p, ".enum")
-		jsonStr, _ = sjson.Set(jsonStr, joinPath(parentPath, "type"), "string")
+		updated, _ = sjson.SetBytes([]byte(jsonStr), joinPath(parentPath, "type"), "string")
+		jsonStr = string(updated)
 	}
 	return jsonStr
 }
@@ -236,7 +242,7 @@ func addAdditionalPropertiesHints(jsonStr string) string {
 
 var unsupportedConstraints = []string{
 	"minLength", "maxLength", "exclusiveMinimum", "exclusiveMaximum",
-	"pattern", "minItems", "maxItems", "format",
+	"pattern", "minItems", "maxItems", "uniqueItems", "format",
 	"default", "examples", // Claude rejects these in VALIDATED mode
 }
 
@@ -273,7 +279,8 @@ func mergeAllOf(jsonStr string) string {
 			if props := item.Get("properties"); props.IsObject() {
 				props.ForEach(func(key, value gjson.Result) bool {
 					destPath := joinPath(parentPath, "properties."+escapeGJSONPathKey(key.String()))
-					jsonStr, _ = sjson.SetRaw(jsonStr, destPath, value.Raw)
+					updated, _ := sjson.SetRawBytes([]byte(jsonStr), destPath, []byte(value.Raw))
+					jsonStr = string(updated)
 					return true
 				})
 			}
@@ -285,7 +292,8 @@ func mergeAllOf(jsonStr string) string {
 						current = append(current, s)
 					}
 				}
-				jsonStr, _ = sjson.Set(jsonStr, reqPath, current)
+				updated, _ := sjson.SetBytes([]byte(jsonStr), reqPath, current)
+				jsonStr = string(updated)
 			}
 		}
 		jsonStr, _ = sjson.Delete(jsonStr, p)
@@ -381,7 +389,8 @@ func flattenTypeArrays(jsonStr string) string {
 			firstType = nonNullTypes[0]
 		}
 
-		jsonStr, _ = sjson.Set(jsonStr, p, firstType)
+		updated, _ := sjson.SetBytes([]byte(jsonStr), p, firstType)
+		jsonStr = string(updated)
 
 		parentPath := trimSuffix(p, ".type")
 		if len(nonNullTypes) > 1 {
@@ -420,7 +429,8 @@ func flattenTypeArrays(jsonStr string) string {
 		if len(filtered) == 0 {
 			jsonStr, _ = sjson.Delete(jsonStr, reqPath)
 		} else {
-			jsonStr, _ = sjson.Set(jsonStr, reqPath, filtered)
+			updated, _ := sjson.SetBytes([]byte(jsonStr), reqPath, filtered)
+			jsonStr = string(updated)
 		}
 	}
 	return jsonStr
@@ -518,7 +528,8 @@ func cleanupRequiredFields(jsonStr string) string {
 			if len(valid) == 0 {
 				jsonStr, _ = sjson.Delete(jsonStr, p)
 			} else {
-				jsonStr, _ = sjson.Set(jsonStr, p, valid)
+				updated, _ := sjson.SetBytes([]byte(jsonStr), p, valid)
+				jsonStr = string(updated)
 			}
 		}
 	}
@@ -562,11 +573,14 @@ func addEmptySchemaPlaceholder(jsonStr string) string {
 		if needsPlaceholder {
 			// Add placeholder "reason" property
 			reasonPath := joinPath(propsPath, "reason")
-			jsonStr, _ = sjson.Set(jsonStr, reasonPath+".type", "string")
-			jsonStr, _ = sjson.Set(jsonStr, reasonPath+".description", placeholderReasonDescription)
+			updated, _ := sjson.SetBytes([]byte(jsonStr), reasonPath+".type", "string")
+			jsonStr = string(updated)
+			updated, _ = sjson.SetBytes([]byte(jsonStr), reasonPath+".description", placeholderReasonDescription)
+			jsonStr = string(updated)
 
 			// Add to required array
-			jsonStr, _ = sjson.Set(jsonStr, reqPath, []string{"reason"})
+			updated, _ = sjson.SetBytes([]byte(jsonStr), reqPath, []string{"reason"})
+			jsonStr = string(updated)
 			continue
 		}
 
@@ -579,9 +593,11 @@ func addEmptySchemaPlaceholder(jsonStr string) string {
 			}
 			placeholderPath := joinPath(propsPath, "_")
 			if !gjson.Get(jsonStr, placeholderPath).Exists() {
-				jsonStr, _ = sjson.Set(jsonStr, placeholderPath+".type", "boolean")
+				updated, _ := sjson.SetBytes([]byte(jsonStr), placeholderPath+".type", "boolean")
+				jsonStr = string(updated)
 			}
-			jsonStr, _ = sjson.Set(jsonStr, reqPath, []string{"_"})
+			updated, _ := sjson.SetBytes([]byte(jsonStr), reqPath, []string{"_"})
+			jsonStr = string(updated)
 		}
 	}
 
@@ -654,8 +670,8 @@ func setRawAt(jsonStr, path, value string) string {
 	if path == "" {
 		return value
 	}
-	result, _ := sjson.SetRaw(jsonStr, path, value)
-	return result
+	result, _ := sjson.SetRawBytes([]byte(jsonStr), path, []byte(value))
+	return string(result)
 }
 
 func isPropertyDefinition(path string) bool {
@@ -678,7 +694,8 @@ func appendHint(jsonStr, parentPath, hint string) string {
 	if existing != "" {
 		hint = fmt.Sprintf("%s (%s)", existing, hint)
 	}
-	jsonStr, _ = sjson.Set(jsonStr, descPath, hint)
+	updated, _ := sjson.SetBytes([]byte(jsonStr), descPath, hint)
+	jsonStr = string(updated)
 	return jsonStr
 }
 
@@ -687,7 +704,8 @@ func appendHintRaw(jsonRaw, hint string) string {
 	if existing != "" {
 		hint = fmt.Sprintf("%s (%s)", existing, hint)
 	}
-	jsonRaw, _ = sjson.Set(jsonRaw, "description", hint)
+	updated, _ := sjson.SetBytes([]byte(jsonRaw), "description", hint)
+	jsonRaw = string(updated)
 	return jsonRaw
 }
 
@@ -773,13 +791,13 @@ func mergeDescriptionRaw(schemaRaw, parentDesc string) string {
 	childDesc := gjson.Get(schemaRaw, "description").String()
 	switch {
 	case childDesc == "":
-		schemaRaw, _ = sjson.Set(schemaRaw, "description", parentDesc)
-		return schemaRaw
+		updated, _ := sjson.SetBytes([]byte(schemaRaw), "description", parentDesc)
+		return string(updated)
 	case childDesc == parentDesc:
 		return schemaRaw
 	default:
 		combined := fmt.Sprintf("%s (%s)", parentDesc, childDesc)
-		schemaRaw, _ = sjson.Set(schemaRaw, "description", combined)
-		return schemaRaw
+		updated, _ := sjson.SetBytes([]byte(schemaRaw), "description", combined)
+		return string(updated)
 	}
 }
