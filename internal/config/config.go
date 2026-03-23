@@ -131,6 +131,7 @@ type Config struct {
 // ClaudeHeaderDefaults configures default header values injected into Claude API requests
 // when the client does not send them. Update these when Claude Code releases a new version.
 type ClaudeHeaderDefaults struct {
+	Version        string `yaml:"version" json:"version"`
 	UserAgent      string `yaml:"user-agent" json:"user-agent"`
 	PackageVersion string `yaml:"package-version" json:"package-version"`
 	RuntimeVersion string `yaml:"runtime-version" json:"runtime-version"`
