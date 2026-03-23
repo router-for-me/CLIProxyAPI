@@ -12,12 +12,15 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
+	constant "github.com/router-for-me/CLIProxyAPI/v6/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
+	_ "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator/builtin"
 	"github.com/tidwall/gjson"
 )
 
@@ -517,5 +520,140 @@ func TestResponsesWebsocketPrewarmHandledLocallyForSSEUpstream(t *testing.T) {
 	input := gjson.GetBytes(forwarded, "input").Array()
 	if len(input) != 1 || input[0].Get("id").String() != "msg-1" {
 		t.Fatalf("unexpected forwarded input: %s", forwarded)
+	}
+}
+
+func parseOpenAIResponsesSSEChunk(t *testing.T, chunk string) (string, gjson.Result) {
+	t.Helper()
+	lines := strings.Split(chunk, "\n")
+	if len(lines) < 2 {
+		t.Fatalf("invalid SSE chunk: %q", chunk)
+	}
+	event := strings.TrimPrefix(lines[0], "event: ")
+	dataLine := strings.TrimPrefix(lines[1], "data: ")
+	if !gjson.Valid(dataLine) {
+		t.Fatalf("invalid SSE JSON: %q", dataLine)
+	}
+	return event, gjson.Parse(dataLine)
+}
+
+func TestBuiltinTranslatorOverrideHandlesMultipleChoicesWithSameToolIndex(t *testing.T) {
+	in := []string{
+		`data: {"id":"chatcmpl-test","object":"chat.completion.chunk","created":1773821253,"model":"gpt-5.3-codex","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_a","type":"function","function":{"name":"tool_a","arguments":"{\"a\":1}"}}]},"finish_reason":null},{"index":1,"delta":{"tool_calls":[{"index":0,"id":"call_b","type":"function","function":{"name":"tool_b","arguments":"{\"b\":2}"}}]},"finish_reason":null}]}`,
+		`data: {"id":"chatcmpl-test","object":"chat.completion.chunk","created":1773821253,"model":"gpt-5.3-codex","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"},{"index":1,"delta":{},"finish_reason":"tool_calls"}]}`,
+	}
+
+	var param any
+	var out []string
+	for _, line := range in {
+		out = append(out, sdktranslator.TranslateStream(
+			context.Background(),
+			sdktranslator.FromString(constant.OpenAI),
+			sdktranslator.FromString(constant.OpenaiResponse),
+			"gpt-5.3-codex",
+			nil,
+			nil,
+			[]byte(line),
+			&param,
+		)...)
+	}
+
+	addedByCallID := map[string]int{}
+	completedSeen := false
+	for _, chunk := range out {
+		event, data := parseOpenAIResponsesSSEChunk(t, chunk)
+		switch event {
+		case "response.output_item.added":
+			if data.Get("item.type").String() != "function_call" {
+				continue
+			}
+			addedByCallID[data.Get("item.call_id").String()] = int(data.Get("output_index").Int())
+		case "response.completed":
+			completedSeen = true
+			output := data.Get("response.output")
+			if len(output.Array()) != 2 {
+				t.Fatalf("response.output len = %d, want 2", len(output.Array()))
+			}
+			if output.Get("0.call_id").String() != "call_a" {
+				t.Fatalf("response.output[0] call_id = %s, want call_a", output.Get("0.call_id").String())
+			}
+			if output.Get("1.call_id").String() != "call_b" {
+				t.Fatalf("response.output[1] call_id = %s, want call_b", output.Get("1.call_id").String())
+			}
+		}
+	}
+
+	if !completedSeen {
+		t.Fatalf("missing response.completed event")
+	}
+	if len(addedByCallID) != 2 {
+		t.Fatalf("function call added events = %d, want 2", len(addedByCallID))
+	}
+	if addedByCallID["call_a"] == addedByCallID["call_b"] {
+		t.Fatalf("call_a and call_b shared output_index %d", addedByCallID["call_a"])
+	}
+}
+
+func TestBuiltinTranslatorOverrideUpgradesBufferedCallIDWhenRealIDArrives(t *testing.T) {
+	in := []string{
+		`data: {"id":"chatcmpl-test","object":"chat.completion.chunk","created":1773821253,"model":"gpt-5.3-codex","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"type":"function","function":{"name":"glob","arguments":"{\"path\":\"/tmp\""}}]},"finish_reason":null}]}`,
+		`data: {"id":"chatcmpl-test","object":"chat.completion.chunk","created":1773821253,"model":"gpt-5.3-codex","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"real_call","type":"function","function":{"arguments":",\"pattern\":\"**/*\"}"}}]},"finish_reason":null}]}`,
+		`data: {"id":"chatcmpl-test","object":"chat.completion.chunk","created":1773821253,"model":"gpt-5.3-codex","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+	}
+
+	var param any
+	var out []string
+	for _, line := range in {
+		out = append(out, sdktranslator.TranslateStream(
+			context.Background(),
+			sdktranslator.FromString(constant.OpenAI),
+			sdktranslator.FromString(constant.OpenaiResponse),
+			"gpt-5.3-codex",
+			nil,
+			nil,
+			[]byte(line),
+			&param,
+		)...)
+	}
+
+	addedCallID := ""
+	deltaItemID := ""
+	deltaValue := ""
+	completedArgs := ""
+	for _, chunk := range out {
+		event, data := parseOpenAIResponsesSSEChunk(t, chunk)
+		switch event {
+		case "response.output_item.added":
+			if data.Get("item.type").String() == "function_call" {
+				addedCallID = data.Get("item.call_id").String()
+			}
+		case "response.function_call_arguments.delta":
+			deltaItemID = data.Get("item_id").String()
+			deltaValue = data.Get("delta").String()
+		case "response.completed":
+			completedArgs = data.Get("response.output.0.arguments").String()
+			if data.Get("response.output.0.call_id").String() != "real_call" {
+				t.Fatalf("response.output[0].call_id = %s, want real_call", data.Get("response.output.0.call_id").String())
+			}
+		}
+	}
+
+	if addedCallID != "real_call" {
+		t.Fatalf("added call_id = %s, want real_call", addedCallID)
+	}
+	if deltaItemID != "fc_real_call" {
+		t.Fatalf("delta item_id = %s, want fc_real_call", deltaItemID)
+	}
+	if strings.Contains(deltaValue, "call_chatcmpl-test") {
+		t.Fatalf("delta used synthesized call id payload: %s", deltaValue)
+	}
+	if !gjson.Valid(completedArgs) {
+		t.Fatalf("completed args invalid JSON: %q", completedArgs)
+	}
+	if gjson.Get(completedArgs, "path").String() != "/tmp" {
+		t.Fatalf("completed args path = %s, want /tmp", gjson.Get(completedArgs, "path").String())
+	}
+	if gjson.Get(completedArgs, "pattern").String() != "**/*" {
+		t.Fatalf("completed args pattern = %s, want **/*", gjson.Get(completedArgs, "pattern").String())
 	}
 }
