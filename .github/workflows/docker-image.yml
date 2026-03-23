@@ -52,6 +52,7 @@ jobs:
               echo "${IMAGE_NAME}:${safe_ref}-${short_sha}"
               if [[ "${GITHUB_REF_NAME}" == "main" ]]; then
                 echo "${IMAGE_NAME}:edge"
+                echo "${IMAGE_NAME}:latest"
               fi
             fi
             echo "EOF"
