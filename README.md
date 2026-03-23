@@ -60,6 +60,26 @@ Get 10% OFF GLM CODING PLAN：https://z.ai/subscribe?ic=8JVLJQFSKB
 
 CLIProxyAPI Guides: [https://help.router-for.me/](https://help.router-for.me/)
 
+### GPT-5.4 Fast Mode
+
+To enable GPT-5.4 fast mode through Codex, send `service_tier: "priority"` in the request payload.
+
+- `/v1/chat/completions`: include `"service_tier": "priority"`
+- `/v1/responses`: include `"service_tier": "priority"`
+
+You can also enforce it in `config.yaml` with a payload override:
+
+```yaml
+payload:
+  override:
+    - models:
+        - name: "gpt-5.4"
+          protocol: "codex"
+      params:
+        "service_tier": "priority"
+        "reasoning.effort": "low"
+```
+
 ## Management API
 
 see [MANAGEMENT_API.md](https://help.router-for.me/management/api)

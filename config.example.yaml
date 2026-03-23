@@ -343,6 +343,12 @@ nonstream-keepalive-interval: 0
 #           protocol: "codex" # restricts the rule to a specific protocol, options: openai, gemini, claude, codex, antigravity
 #       params: # JSON path (gjson/sjson syntax) -> value
 #         "reasoning.effort": "high"
+#     - models:
+#         - name: "gpt-5.4"
+#           protocol: "codex"
+#       params:
+#         "service_tier": "priority" # OpenAI GPT-5.4 fast mode / priority processing
+#         "reasoning.effort": "low"
 #   override-raw: # Override raw rules always set parameters using raw JSON (must be valid JSON).
 #     - models:
 #         - name: "gpt-*" # Supports wildcards (e.g., "gpt-*")

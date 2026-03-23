@@ -60,6 +60,26 @@ GLM CODING PLAN 是专为AI编码打造的订阅套餐，每月最低仅需20元
 
 CLIProxyAPI 用户手册： [https://help.router-for.me/](https://help.router-for.me/cn/)
 
+### GPT-5.4 Fast Mode
+
+如需通过 Codex 启用 GPT-5.4 fast mode，请在请求体中传入 `service_tier: "priority"`。
+
+- `/v1/chat/completions`：加入 `"service_tier": "priority"`
+- `/v1/responses`：加入 `"service_tier": "priority"`
+
+也可以在 `config.yaml` 中通过 payload override 强制开启：
+
+```yaml
+payload:
+  override:
+    - models:
+        - name: "gpt-5.4"
+          protocol: "codex"
+      params:
+        "service_tier": "priority"
+        "reasoning.effort": "low"
+```
+
 ## 管理 API 文档
 
 请参见 [MANAGEMENT_API_CN.md](https://help.router-for.me/cn/management/api)

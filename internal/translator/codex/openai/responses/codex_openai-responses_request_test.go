@@ -264,6 +264,36 @@ func TestConvertSystemRoleToDeveloper_AssistantRole(t *testing.T) {
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToCodex_PreservesPriorityServiceTier(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gpt-5.4",
+		"service_tier": "priority",
+		"input": "ping"
+	}`)
+
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.4", inputJSON, false)
+	outputStr := string(output)
+
+	if got := gjson.Get(outputStr, "service_tier").String(); got != "priority" {
+		t.Fatalf("service_tier = %q, want %q, body=%s", got, "priority", outputStr)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToCodex_StripsNonPriorityServiceTier(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gpt-5.4",
+		"service_tier": "default",
+		"input": "ping"
+	}`)
+
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.4", inputJSON, false)
+	outputStr := string(output)
+
+	if gjson.Get(outputStr, "service_tier").Exists() {
+		t.Fatalf("service_tier should be omitted for non-priority values, body=%s", outputStr)
+	}
+}
+
 func TestUserFieldDeletion(t *testing.T) {
 	inputJSON := []byte(`{  
 		"model": "gpt-5.2",  
