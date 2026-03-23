@@ -409,11 +409,12 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				cloned[len(line)] = '\n'
 				out <- cliproxyexecutor.StreamChunk{Payload: cloned}
 			}
-			acc.publish(ctx, reporter)
 			if errScan := scanner.Err(); errScan != nil {
 				recordAPIResponseError(ctx, e.cfg, errScan)
 				reporter.publishFailure(ctx)
 				out <- cliproxyexecutor.StreamChunk{Err: errScan}
+			} else {
+				acc.publish(ctx, reporter)
 			}
 			return
 		}
@@ -444,11 +445,12 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}
 			}
 		}
-		acc.publish(ctx, reporter)
 		if errScan := scanner.Err(); errScan != nil {
 			recordAPIResponseError(ctx, e.cfg, errScan)
 			reporter.publishFailure(ctx)
 			out <- cliproxyexecutor.StreamChunk{Err: errScan}
+		} else {
+			acc.publish(ctx, reporter)
 		}
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
