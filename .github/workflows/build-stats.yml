@@ -5,6 +5,10 @@ on:
     - cron: '0 0 */3 * *'
   workflow_dispatch:
 
+# 增加全局环境变量，强制过渡期间的 Actions 使用 Node.js 24
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -28,7 +32,8 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       
       - name: Build and push
-        uses: docker/build-push-action@v5
+        # 将 v5 升级为原生支持新特性且维护活跃的 v6 版本
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: Dockerfile.stats
