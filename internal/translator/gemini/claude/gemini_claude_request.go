@@ -11,6 +11,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator/gemini/common"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -90,6 +91,7 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 								functionName = derived
 							}
 						}
+						functionName = util.SanitizeFunctionName(functionName)
 						functionArgs := contentResult.Get("input").String()
 						argsResult := gjson.Parse(functionArgs)
 						if argsResult.IsObject() && gjson.Valid(functionArgs) {
@@ -109,6 +111,7 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 						if funcName == "" {
 							funcName = toolCallID
 						}
+						funcName = util.SanitizeFunctionName(funcName)
 						responseData := contentResult.Get("content").Raw
 						part := []byte(`{"functionResponse":{"name":"","response":{"result":""}}}`)
 						part, _ = sjson.SetBytes(part, "functionResponse.name", funcName)
@@ -165,6 +168,7 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 				tool, _ = sjson.DeleteBytes(tool, "type")
 				tool, _ = sjson.DeleteBytes(tool, "cache_control")
 				tool, _ = sjson.DeleteBytes(tool, "defer_loading")
+				tool, _ = sjson.SetBytes(tool, "name", util.SanitizeFunctionName(gjson.GetBytes(tool, "name").String()))
 				if gjson.ValidBytes(tool) && gjson.ParseBytes(tool).IsObject() {
 					if !hasTools {
 						out, _ = sjson.SetRawBytes(out, "tools", []byte(`[{"functionDeclarations":[]}]`))
@@ -202,7 +206,7 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 		case "tool":
 			out, _ = sjson.SetBytes(out, "toolConfig.functionCallingConfig.mode", "ANY")
 			if toolChoiceName != "" {
-				out, _ = sjson.SetBytes(out, "toolConfig.functionCallingConfig.allowedFunctionNames", []string{toolChoiceName})
+				out, _ = sjson.SetBytes(out, "toolConfig.functionCallingConfig.allowedFunctionNames", []string{util.SanitizeFunctionName(toolChoiceName)})
 			}
 		}
 	}
