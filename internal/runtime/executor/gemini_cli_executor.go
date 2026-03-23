@@ -7,6 +7,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -153,7 +155,7 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 	authLabel = auth.Label
 	authType, authValue = auth.AccountInfo()
 	userPromptID := uuid.NewString()
-	sessionID := uuid.NewString()
+	sessionID := generateStableGeminiCLISessionID(basePayload)
 
 	var lastStatus int
 	var lastBody []byte
@@ -271,7 +273,7 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 	authLabel = auth.Label
 	authType, authValue = auth.AccountInfo()
 	userPromptID := uuid.NewString()
-	sessionID := uuid.NewString()
+	sessionID := generateStableGeminiCLISessionID(basePayload)
 
 	var lastStatus int
 	var lastBody []byte
@@ -676,6 +678,27 @@ func buildGeminiCLICountTokensPayload(body []byte, model string) []byte {
 		}
 	}
 	return setJSONField(payload, "request.model", "models/"+model)
+}
+
+func generateStableGeminiCLISessionID(payload []byte) string {
+	contents := gjson.GetBytes(payload, "request.contents")
+	if contents.IsArray() {
+		for _, content := range contents.Array() {
+			if content.Get("role").String() != "user" {
+				continue
+			}
+			for _, part := range content.Get("parts").Array() {
+				text := part.Get("text").String()
+				if text == "" {
+					continue
+				}
+				h := sha256.Sum256([]byte(text))
+				n := int64(binary.BigEndian.Uint64(h[:8])) & 0x7FFFFFFFFFFFFFFF
+				return "-" + strconv.FormatInt(n, 10)
+			}
+		}
+	}
+	return uuid.NewString()
 }
 
 func (e *GeminiCLIExecutor) executeGeminiCLIJSONRequest(

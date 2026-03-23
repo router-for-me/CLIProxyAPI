@@ -190,6 +190,50 @@ func TestGeminiCLIExecute_RetriesUsingConfiguredRequestRetry(t *testing.T) {
 	}
 }
 
+func TestGeminiCLIExecute_UsesStableSessionIDForSamePrompt(t *testing.T) {
+	rt := &scriptedRoundTripper{}
+	executor := NewGeminiCLIExecutor(&config.Config{})
+	auth := newGeminiCLIAuth()
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", http.RoundTripper(rt))
+
+	req := cliproxyexecutor.Request{
+		Model:   "gemini-3-flash-preview",
+		Payload: newOpenAIRequestPayload("gemini-3-flash-preview"),
+	}
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai")}
+
+	if _, err := executor.Execute(ctx, auth, req, opts); err != nil {
+		t.Fatalf("first Execute returned error: %v", err)
+	}
+	if _, err := executor.Execute(ctx, auth, req, opts); err != nil {
+		t.Fatalf("second Execute returned error: %v", err)
+	}
+
+	requests := rt.Requests()
+	if len(requests) != 2 {
+		t.Fatalf("request count = %d, want 2", len(requests))
+	}
+
+	sessionIDFor := func(body []byte) string {
+		var payload map[string]any
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatalf("unmarshal payload: %v", err)
+		}
+		requestNode, _ := payload["request"].(map[string]any)
+		sessionID, _ := requestNode["session_id"].(string)
+		return sessionID
+	}
+
+	first := sessionIDFor(requests[0].Body)
+	second := sessionIDFor(requests[1].Body)
+	if strings.TrimSpace(first) == "" || strings.TrimSpace(second) == "" {
+		t.Fatal("session_id should not be empty")
+	}
+	if first != second {
+		t.Fatalf("session_id mismatch: first=%q second=%q", first, second)
+	}
+}
+
 func TestGeminiCLIExecuteStream_UsesSSEPathWithoutLocalRetry(t *testing.T) {
 	rt := &scriptedRoundTripper{
 		responses: []scriptedHTTPResponse{
