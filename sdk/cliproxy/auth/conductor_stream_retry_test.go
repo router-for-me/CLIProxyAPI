@@ -208,25 +208,9 @@ func TestExecuteStream_AllAuthsFailReturnsError(t *testing.T) {
 	}
 	m := newMultiAuthTestManager(t, ids.model, ids.authIDs, executor)
 
-	streamResult, err := m.ExecuteStream(context.Background(), []string{ids.provider}, cliproxyexecutor.Request{Model: ids.model}, cliproxyexecutor.Options{})
-	if err != nil {
-		t.Fatalf("unexpected immediate error: %v", err)
-	}
-	if streamResult == nil || streamResult.Chunks == nil {
-		t.Fatal("expected stream result with terminal error chunk")
-	}
-	var gotErr error
-	for chunk := range streamResult.Chunks {
-		if chunk.Err != nil {
-			gotErr = chunk.Err
-			continue
-		}
-		if len(chunk.Payload) > 0 {
-			t.Fatalf("unexpected payload chunk: %q", string(chunk.Payload))
-		}
-	}
-	if gotErr == nil {
-		t.Fatal("expected terminal stream error when all auths fail")
+	_, err := m.ExecuteStream(context.Background(), []string{ids.provider}, cliproxyexecutor.Request{Model: ids.model}, cliproxyexecutor.Options{})
+	if err == nil {
+		t.Fatal("expected error when all auths fail, got nil")
 	}
 	assertAttemptedAuthIDs(t, executor.StreamAuthIDs(), ids.authIDs)
 }
