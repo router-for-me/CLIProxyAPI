@@ -1,81 +1,290 @@
 package responses
 
 import (
-	"bytes"
 	"encoding/json"
+	"strconv"
+
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
+
+const codexResponsesIncludeRaw = `["reasoning.encrypted_content"]`
 
 func ConvertOpenAIResponsesRequestToCodex(_ string, inputRawJSON []byte, _ bool) []byte {
 	if len(inputRawJSON) == 0 {
 		return inputRawJSON
 	}
-
-	decoder := json.NewDecoder(bytes.NewReader(inputRawJSON))
-	decoder.UseNumber()
-
-	payload := make(map[string]any)
-	if err := decoder.Decode(&payload); err != nil {
+	if !gjson.ValidBytes(inputRawJSON) {
 		// Preserve legacy passthrough behavior for malformed payloads.
 		return inputRawJSON
 	}
 
-	normalizeOpenAIResponsesInputForCodex(payload)
-
-	payload["stream"] = true
-	payload["store"] = false
-	payload["parallel_tool_calls"] = true
-	payload["include"] = []string{"reasoning.encrypted_content"}
-
-	// Codex Responses rejects these OpenAI Responses fields.
-	delete(payload, "max_output_tokens")
-	delete(payload, "max_completion_tokens")
-	delete(payload, "temperature")
-	delete(payload, "top_p")
-	delete(payload, "truncation")
-	delete(payload, "context_management")
-	delete(payload, "user")
-
-	if tier, ok := payload["service_tier"].(string); !ok || tier != "priority" {
-		delete(payload, "service_tier")
+	if output, ok := convertOpenAIResponsesRequestToCodexFastPath(inputRawJSON); ok {
+		return output
 	}
 
-	encoded, err := json.Marshal(payload)
-	if err != nil {
-		return inputRawJSON
-	}
-	return encoded
+	return convertOpenAIResponsesRequestToCodexFallback(inputRawJSON)
 }
 
-func normalizeOpenAIResponsesInputForCodex(payload map[string]any) {
-	if payload == nil {
-		return
+func convertOpenAIResponsesRequestToCodexFastPath(inputRawJSON []byte) ([]byte, bool) {
+	root := gjson.ParseBytes(inputRawJSON)
+	if !root.IsObject() {
+		return nil, false
 	}
 
-	switch input := payload["input"].(type) {
-	case string:
-		payload["input"] = []map[string]any{
-			{
-				"type": "message",
-				"role": "user",
-				"content": []map[string]any{
-					{
-						"type": "input_text",
-						"text": input,
-					},
-				},
-			},
-		}
-	case []any:
-		for _, rawItem := range input {
-			item, ok := rawItem.(map[string]any)
+	output := make([]byte, 0, len(inputRawJSON)+96)
+	output = append(output, '{')
+	wroteField := false
+	hasStream := false
+	hasStore := false
+	hasParallelToolCalls := false
+	hasInclude := false
+	supported := true
+
+	root.ForEach(func(key, value gjson.Result) bool {
+		field := key.String()
+		switch field {
+		case "max_output_tokens", "max_completion_tokens", "temperature", "top_p", "truncation", "context_management", "user":
+			return true
+		case "input":
+			output = appendJSONObjectFieldName(output, field, &wroteField)
+			var ok bool
+			output, ok = appendNormalizedOpenAIResponsesInput(output, value)
 			if !ok {
-				continue
+				supported = false
+				return false
 			}
-			role, ok := item["role"].(string)
-			if !ok || role != "system" {
-				continue
+			return true
+		case "stream":
+			hasStream = true
+			output = appendJSONObjectFieldName(output, field, &wroteField)
+			output = append(output, "true"...)
+			return true
+		case "store":
+			hasStore = true
+			output = appendJSONObjectFieldName(output, field, &wroteField)
+			output = append(output, "false"...)
+			return true
+		case "parallel_tool_calls":
+			hasParallelToolCalls = true
+			output = appendJSONObjectFieldName(output, field, &wroteField)
+			output = append(output, "true"...)
+			return true
+		case "include":
+			hasInclude = true
+			output = appendJSONObjectFieldName(output, field, &wroteField)
+			output = append(output, codexResponsesIncludeRaw...)
+			return true
+		case "service_tier":
+			if value.Type == gjson.String && value.String() == "priority" {
+				output = appendJSONObjectFieldName(output, field, &wroteField)
+				output = append(output, value.Raw...)
 			}
-			item["role"] = "developer"
+			return true
+		default:
+			output = appendJSONObjectFieldName(output, field, &wroteField)
+			output = append(output, value.Raw...)
+			return true
 		}
+	})
+
+	if !supported {
+		return nil, false
+	}
+
+	if !hasStream {
+		output = appendJSONObjectFieldName(output, "stream", &wroteField)
+		output = append(output, "true"...)
+	}
+	if !hasStore {
+		output = appendJSONObjectFieldName(output, "store", &wroteField)
+		output = append(output, "false"...)
+	}
+	if !hasParallelToolCalls {
+		output = appendJSONObjectFieldName(output, "parallel_tool_calls", &wroteField)
+		output = append(output, "true"...)
+	}
+	if !hasInclude {
+		output = appendJSONObjectFieldName(output, "include", &wroteField)
+		output = append(output, codexResponsesIncludeRaw...)
+	}
+
+	output = append(output, '}')
+	return output, true
+}
+
+func appendJSONObjectFieldName(dst []byte, field string, wroteField *bool) []byte {
+	if *wroteField {
+		dst = append(dst, ',')
+	} else {
+		*wroteField = true
+	}
+	dst = strconv.AppendQuote(dst, field)
+	dst = append(dst, ':')
+	return dst
+}
+
+func appendNormalizedOpenAIResponsesInput(dst []byte, input gjson.Result) ([]byte, bool) {
+	switch input.Type {
+	case gjson.String:
+		dst = append(dst, `[{"type":"message","role":"user","content":[{"type":"input_text","text":`...)
+		dst = append(dst, input.Raw...)
+		dst = append(dst, `}]}]`...)
+		return dst, true
+	case gjson.JSON:
+		if !input.IsArray() {
+			dst = append(dst, input.Raw...)
+			return dst, true
+		}
+
+		hasSystemRole := false
+		input.ForEach(func(_, item gjson.Result) bool {
+			if !item.IsObject() {
+				return true
+			}
+			role := item.Get("role")
+			if role.Type == gjson.String && role.String() == "system" {
+				hasSystemRole = true
+				return false
+			}
+			return true
+		})
+		if !hasSystemRole {
+			dst = append(dst, input.Raw...)
+			return dst, true
+		}
+
+		dst = append(dst, '[')
+		wroteItem := false
+		ok := true
+		input.ForEach(func(_, item gjson.Result) bool {
+			if wroteItem {
+				dst = append(dst, ',')
+			} else {
+				wroteItem = true
+			}
+			var itemOK bool
+			dst, itemOK = appendNormalizedOpenAIResponsesInputItem(dst, item)
+			if !itemOK {
+				ok = false
+				return false
+			}
+			return true
+		})
+		if !ok {
+			return nil, false
+		}
+		dst = append(dst, ']')
+		return dst, true
+	default:
+		dst = append(dst, input.Raw...)
+		return dst, true
+	}
+}
+
+func appendNormalizedOpenAIResponsesInputItem(dst []byte, item gjson.Result) ([]byte, bool) {
+	if !item.IsObject() {
+		dst = append(dst, item.Raw...)
+		return dst, true
+	}
+
+	role := item.Get("role")
+	if role.Type != gjson.String || role.String() != "system" {
+		dst = append(dst, item.Raw...)
+		return dst, true
+	}
+
+	dst = append(dst, '{')
+	wroteField := false
+	item.ForEach(func(key, value gjson.Result) bool {
+		dst = appendJSONObjectFieldName(dst, key.String(), &wroteField)
+		if key.String() == "role" {
+			dst = strconv.AppendQuote(dst, "developer")
+			return true
+		}
+		dst = append(dst, value.Raw...)
+		return true
+	})
+	dst = append(dst, '}')
+	return dst, true
+}
+
+func convertOpenAIResponsesRequestToCodexFallback(inputRawJSON []byte) []byte {
+	output := inputRawJSON
+	var err error
+	if output, err = normalizeOpenAIResponsesInputForCodexFallback(output); err != nil {
+		return inputRawJSON
+	}
+	if output, err = sjson.SetBytes(output, "stream", true); err != nil {
+		return inputRawJSON
+	}
+	if output, err = sjson.SetBytes(output, "store", false); err != nil {
+		return inputRawJSON
+	}
+	if output, err = sjson.SetBytes(output, "parallel_tool_calls", true); err != nil {
+		return inputRawJSON
+	}
+	if output, err = sjson.SetRawBytes(output, "include", []byte(codexResponsesIncludeRaw)); err != nil {
+		return inputRawJSON
+	}
+
+	// Codex Responses rejects these OpenAI Responses fields.
+	for _, path := range []string{
+		"max_output_tokens",
+		"max_completion_tokens",
+		"temperature",
+		"top_p",
+		"truncation",
+		"context_management",
+		"user",
+	} {
+		if output, err = sjson.DeleteBytes(output, path); err != nil {
+			return inputRawJSON
+		}
+	}
+
+	if tier := gjson.GetBytes(output, "service_tier"); tier.Exists() && (tier.Type != gjson.String || tier.String() != "priority") {
+		if output, err = sjson.DeleteBytes(output, "service_tier"); err != nil {
+			return inputRawJSON
+		}
+	}
+
+	return output
+}
+
+func normalizeOpenAIResponsesInputForCodexFallback(inputRawJSON []byte) ([]byte, error) {
+	input := gjson.GetBytes(inputRawJSON, "input")
+	switch input.Type {
+	case gjson.String:
+		encodedText, err := json.Marshal(input.String())
+		if err != nil {
+			return nil, err
+		}
+		replacement := []byte(`[{"type":"message","role":"user","content":[{"type":"input_text","text":`)
+		replacement = append(replacement, encodedText...)
+		replacement = append(replacement, []byte(`}]}]`)...)
+		return sjson.SetRawBytes(inputRawJSON, "input", replacement)
+	case gjson.JSON:
+		if !input.IsArray() {
+			return inputRawJSON, nil
+		}
+		output := inputRawJSON
+		for index, rawItem := range input.Array() {
+			if !rawItem.IsObject() {
+				continue
+			}
+			role := rawItem.Get("role")
+			if role.Type != gjson.String || role.String() != "system" {
+				continue
+			}
+			var err error
+			output, err = sjson.SetBytes(output, "input."+strconv.Itoa(index)+".role", "developer")
+			if err != nil {
+				return nil, err
+			}
+		}
+		return output, nil
+	default:
+		return inputRawJSON, nil
 	}
 }

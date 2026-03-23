@@ -1,6 +1,9 @@
 package responses
 
 import (
+	"encoding/json"
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/tidwall/gjson"
@@ -316,5 +319,174 @@ func TestTruncationRemovedForCodexCompatibility(t *testing.T) {
 
 	if gjson.Get(outputStr, "truncation").Exists() {
 		t.Fatalf("truncation should be removed for Codex compatibility")
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToCodex_FastPathParity(t *testing.T) {
+	testCases := []struct {
+		name  string
+		input []byte
+	}{
+		{
+			name: "string input with field rewrites",
+			input: []byte(`{
+				"model": "gpt-5.4",
+				"input": "hello",
+				"stream": false,
+				"store": true,
+				"parallel_tool_calls": false,
+				"include": ["legacy"],
+				"service_tier": "priority",
+				"user": "test-user"
+			}`),
+		},
+		{
+			name: "array input with multiple system messages",
+			input: []byte(`{
+				"model": "gpt-5.4",
+				"input": [
+					{"type": "message", "role": "system", "content": "developer prompt"},
+					{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hello"}]},
+					{"type": "function_call_output", "call_id": "call_1", "output": "ok"},
+					{"type": "message", "role": "system", "content": [{"type": "input_text", "text": "be concise"}]}
+				],
+				"temperature": 0.2,
+				"top_p": 0.95,
+				"context_management": [{"type": "compaction"}]
+			}`),
+		},
+		{
+			name: "non array input object is preserved",
+			input: []byte(`{
+				"model": "gpt-5.4",
+				"input": {"unexpected": true},
+				"service_tier": "standard",
+				"truncation": "disabled"
+			}`),
+		},
+		{
+			name: "missing input still injects codex fields",
+			input: []byte(`{
+				"model": "gpt-5.4",
+				"metadata": {"trace_id": "abc123"}
+			}`),
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ConvertOpenAIResponsesRequestToCodex("gpt-5.4", tc.input, false)
+			want := convertOpenAIResponsesRequestToCodexFallback(tc.input)
+			assertJSONEqual(t, got, want)
+		})
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToCodex_FastPathParity_LongRequest(t *testing.T) {
+	longPrompt := buildLongPrompt("translator-long")
+	payload := map[string]any{
+		"model": "gpt-5.4",
+		"input": []any{
+			map[string]any{
+				"type": "message",
+				"role": "system",
+				"content": []any{
+					map[string]any{
+						"type": "input_text",
+						"text": strings.Repeat("system-guidance-", 4096),
+					},
+				},
+			},
+			map[string]any{
+				"type": "message",
+				"role": "user",
+				"content": []any{
+					map[string]any{
+						"type": "input_text",
+						"text": longPrompt,
+					},
+				},
+			},
+		},
+		"tools": []any{
+			map[string]any{
+				"type":        "function",
+				"name":        "lookup_issue",
+				"description": strings.Repeat("lookup issue details ", 1024),
+				"parameters": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"id": map[string]any{
+							"type":        "string",
+							"description": strings.Repeat("issue identifier ", 1024),
+						},
+					},
+					"required": []string{"id"},
+				},
+			},
+		},
+		"text": map[string]any{
+			"format": map[string]any{
+				"name": "json_schema",
+				"schema": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"result": map[string]any{
+							"type":        "string",
+							"description": strings.Repeat("final result field ", 1024),
+						},
+					},
+					"required": []string{"result"},
+				},
+			},
+		},
+		"stream":              false,
+		"store":               true,
+		"parallel_tool_calls": false,
+		"temperature":         0.2,
+		"top_p":               0.95,
+		"context_management":  []any{map[string]any{"type": "compaction", "compact_threshold": 12000}},
+		"user":                "long-parity-user",
+	}
+
+	input, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+
+	got := ConvertOpenAIResponsesRequestToCodex("gpt-5.4", input, false)
+	want := convertOpenAIResponsesRequestToCodexFallback(input)
+	assertJSONEqual(t, got, want)
+
+	if gotRole := gjson.GetBytes(got, "input.0.role").String(); gotRole != "developer" {
+		t.Fatalf("input[0].role = %q, want developer", gotRole)
+	}
+	if gotPrompt := gjson.GetBytes(got, "input.1.content.0.text").String(); gotPrompt != longPrompt {
+		t.Fatalf("long prompt was not preserved: got length %d want %d", len(gotPrompt), len(longPrompt))
+	}
+	if gotLen := len(gjson.GetBytes(got, "input.1.content.0.text").String()); gotLen < 60_000 {
+		t.Fatalf("expected long prompt length >= 60000, got %d", gotLen)
+	}
+}
+
+func buildLongPrompt(marker string) string {
+	return "marker=" + marker + "\n" + strings.Repeat("long-request-segment-"+marker+";", 4096)
+}
+
+func assertJSONEqual(t *testing.T, got, want []byte) {
+	t.Helper()
+
+	var gotValue any
+	if err := json.Unmarshal(got, &gotValue); err != nil {
+		t.Fatalf("unmarshal got: %v\n%s", err, string(got))
+	}
+
+	var wantValue any
+	if err := json.Unmarshal(want, &wantValue); err != nil {
+		t.Fatalf("unmarshal want: %v\n%s", err, string(want))
+	}
+
+	if !reflect.DeepEqual(gotValue, wantValue) {
+		t.Fatalf("json mismatch\ngot:  %s\nwant: %s", string(got), string(want))
 	}
 }
