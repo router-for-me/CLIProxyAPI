@@ -283,29 +283,9 @@ func parseClaudeUsage(data []byte) usage.Detail {
 	return detail
 }
 
-func parseClaudeStreamUsage(line []byte) (usage.Detail, bool) {
-	payload := jsonPayload(line)
-	if len(payload) == 0 || !gjson.ValidBytes(payload) {
-		return usage.Detail{}, false
-	}
-	usageNode := gjson.GetBytes(payload, "usage")
-	if !usageNode.Exists() {
-		usageNode = gjson.GetBytes(payload, "message.usage")
-	}
-	if !usageNode.Exists() {
-		return usage.Detail{}, false
-	}
-	detail := usage.Detail{
-		InputTokens:  usageNode.Get("input_tokens").Int(),
-		OutputTokens: usageNode.Get("output_tokens").Int(),
-		CachedTokens: usageNode.Get("cache_read_input_tokens").Int(),
-	}
-	if detail.CachedTokens == 0 {
-		detail.CachedTokens = usageNode.Get("cache_creation_input_tokens").Int()
-	}
-	detail.TotalTokens = detail.InputTokens + detail.OutputTokens
-	return detail, true
-}
+// parseClaudeStreamUsage is intentionally removed.
+// Use claudeStreamUsageAccumulator.processLine instead, which merges
+// usage fields across all SSE events and publishes once at stream end.
 
 // claudeThinkingTokenFactor is the approximate characters-per-token ratio
 // used to estimate thinking token counts from content block text length.
@@ -350,6 +330,7 @@ func claudeStreamThinkingLen(line []byte) int {
 type claudeStreamUsageAccumulator struct {
 	detail      usage.Detail
 	thinkingLen int64
+	sawUsage    bool
 }
 
 // processLine extracts usage and thinking data from a single SSE line.
@@ -368,6 +349,7 @@ func (a *claudeStreamUsageAccumulator) processLine(line []byte) {
 	if !usageNode.Exists() {
 		return
 	}
+	a.sawUsage = true
 	// Merge non-zero fields across events.
 	if v := usageNode.Get("input_tokens").Int(); v > 0 {
 		a.detail.InputTokens = v
@@ -385,7 +367,11 @@ func (a *claudeStreamUsageAccumulator) processLine(line []byte) {
 }
 
 // publish emits the accumulated usage with estimated reasoning tokens.
+// Skips publishing if no usage event was observed during the stream.
 func (a *claudeStreamUsageAccumulator) publish(ctx context.Context, reporter *usageReporter) {
+	if !a.sawUsage {
+		return
+	}
 	a.detail.ReasoningTokens = a.thinkingLen / claudeThinkingTokenFactor
 	a.detail.TotalTokens = a.detail.InputTokens + a.detail.OutputTokens
 	reporter.publish(ctx, a.detail)
