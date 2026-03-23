@@ -955,9 +955,30 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		}
 	}
 	if lastErr != nil {
-		return nil, lastErr
+		if isRequestInvalidError(lastErr) || isAuthNotFoundError(lastErr) {
+			return nil, lastErr
+		}
+		return streamErrorResult(lastErr), nil
 	}
 	return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
+}
+
+func isAuthNotFoundError(err error) bool {
+	var authErr *Error
+	if !errors.As(err, &authErr) || authErr == nil {
+		return false
+	}
+	return authErr.Code == "auth_not_found"
+}
+
+func streamErrorResult(err error) *cliproxyexecutor.StreamResult {
+	if err == nil {
+		return nil
+	}
+	errCh := make(chan cliproxyexecutor.StreamChunk, 1)
+	errCh <- cliproxyexecutor.StreamChunk{Err: err}
+	close(errCh)
+	return &cliproxyexecutor.StreamResult{Chunks: errCh}
 }
 
 func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, maxRetryCredentials int) (cliproxyexecutor.Response, error) {

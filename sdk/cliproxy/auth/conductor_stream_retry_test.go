@@ -2,7 +2,9 @@ package auth
 
 import (
 	"context"
+	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
 
@@ -73,6 +75,38 @@ func (e *authAwareStreamExecutor) StreamAuthIDs() []string {
 	return out
 }
 
+type streamRetryTestIDs struct {
+	provider string
+	model    string
+	authIDs  []string
+}
+
+func newStreamRetryTestIDs(t *testing.T) streamRetryTestIDs {
+	t.Helper()
+	token := strings.ToLower(strings.NewReplacer("/", "-", " ", "-", ":", "-", "(", "-", ")", "-").Replace(t.Name()))
+	return streamRetryTestIDs{
+		provider: "testprov-" + token,
+		model:    "test-model-" + token,
+		authIDs:  []string{fmt.Sprintf("auth-1-%s", token), fmt.Sprintf("auth-2-%s", token)},
+	}
+}
+
+func assertAttemptedAuthIDs(t *testing.T, got []string, want []string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("stream auth IDs = %v, want exact attempts %v", got, want)
+	}
+	seen := make(map[string]int, len(got))
+	for _, id := range got {
+		seen[id]++
+	}
+	for _, id := range want {
+		if seen[id] != 1 {
+			t.Fatalf("stream auth IDs = %v, want exact attempts %v", got, want)
+		}
+	}
+}
+
 func newMultiAuthTestManager(t *testing.T, model string, authIDs []string, executor *authAwareStreamExecutor) *Manager {
 	t.Helper()
 	m := NewManager(nil, nil, nil)
@@ -104,19 +138,19 @@ func newMultiAuthTestManager(t *testing.T, model string, authIDs []string, execu
 
 func TestExecuteStream_RotatesAuthOnBootstrapError(t *testing.T) {
 	t.Parallel()
-	model := "test-model"
+	ids := newStreamRetryTestIDs(t)
 	executor := &authAwareStreamExecutor{
-		id: "testprov",
+		id: ids.provider,
 		streamErrors: map[string]error{
-			"auth-1": &Error{HTTPStatus: http.StatusTooManyRequests, Message: "rate limited"},
+			ids.authIDs[0]: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "rate limited"},
 		},
 		streamPayloads: map[string][]byte{
-			"auth-2": []byte("ok-from-auth-2"),
+			ids.authIDs[1]: []byte("ok-from-auth-2"),
 		},
 	}
-	m := newMultiAuthTestManager(t, model, []string{"auth-1", "auth-2"}, executor)
+	m := newMultiAuthTestManager(t, ids.model, ids.authIDs, executor)
 
-	streamResult, err := m.ExecuteStream(context.Background(), []string{"testprov"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	streamResult, err := m.ExecuteStream(context.Background(), []string{ids.provider}, cliproxyexecutor.Request{Model: ids.model}, cliproxyexecutor.Options{})
 	if err != nil {
 		t.Fatalf("ExecuteStream error: %v", err)
 	}
@@ -130,26 +164,22 @@ func TestExecuteStream_RotatesAuthOnBootstrapError(t *testing.T) {
 	if string(payload) != "ok-from-auth-2" {
 		t.Fatalf("payload = %q, want %q", string(payload), "ok-from-auth-2")
 	}
-	// Verify both auths were attempted (auth-1 failed, auth-2 succeeded).
-	got := executor.StreamAuthIDs()
-	if len(got) < 2 {
-		t.Fatalf("stream auth IDs = %v, want at least 2 attempts", got)
-	}
+	assertAttemptedAuthIDs(t, executor.StreamAuthIDs(), ids.authIDs)
 }
 
 func TestExecuteStream_RotatesAuthOnEmptyStream(t *testing.T) {
 	t.Parallel()
-	model := "test-model"
+	ids := newStreamRetryTestIDs(t)
 	executor := &authAwareStreamExecutor{
-		id:              "testprov",
-		emptyStreamAuth: map[string]struct{}{"auth-1": {}},
+		id:              ids.provider,
+		emptyStreamAuth: map[string]struct{}{ids.authIDs[0]: {}},
 		streamPayloads: map[string][]byte{
-			"auth-2": []byte("ok-from-auth-2"),
+			ids.authIDs[1]: []byte("ok-from-auth-2"),
 		},
 	}
-	m := newMultiAuthTestManager(t, model, []string{"auth-1", "auth-2"}, executor)
+	m := newMultiAuthTestManager(t, ids.model, ids.authIDs, executor)
 
-	streamResult, err := m.ExecuteStream(context.Background(), []string{"testprov"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	streamResult, err := m.ExecuteStream(context.Background(), []string{ids.provider}, cliproxyexecutor.Request{Model: ids.model}, cliproxyexecutor.Options{})
 	if err != nil {
 		t.Fatalf("ExecuteStream error: %v", err)
 	}
@@ -163,30 +193,40 @@ func TestExecuteStream_RotatesAuthOnEmptyStream(t *testing.T) {
 	if string(payload) != "ok-from-auth-2" {
 		t.Fatalf("payload = %q, want %q", string(payload), "ok-from-auth-2")
 	}
-	got := executor.StreamAuthIDs()
-	if len(got) < 2 {
-		t.Fatalf("stream auth IDs = %v, want at least 2 attempts", got)
-	}
+	assertAttemptedAuthIDs(t, executor.StreamAuthIDs(), ids.authIDs)
 }
 
 func TestExecuteStream_AllAuthsFailReturnsError(t *testing.T) {
 	t.Parallel()
-	model := "test-model"
+	ids := newStreamRetryTestIDs(t)
 	executor := &authAwareStreamExecutor{
-		id: "testprov",
+		id: ids.provider,
 		streamErrors: map[string]error{
-			"auth-1": &Error{HTTPStatus: http.StatusTooManyRequests, Message: "rate limited"},
-			"auth-2": &Error{HTTPStatus: http.StatusTooManyRequests, Message: "rate limited"},
+			ids.authIDs[0]: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "rate limited"},
+			ids.authIDs[1]: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "rate limited"},
 		},
 	}
-	m := newMultiAuthTestManager(t, model, []string{"auth-1", "auth-2"}, executor)
+	m := newMultiAuthTestManager(t, ids.model, ids.authIDs, executor)
 
-	_, err := m.ExecuteStream(context.Background(), []string{"testprov"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
-	if err == nil {
-		t.Fatal("expected error when all auths fail, got nil")
+	streamResult, err := m.ExecuteStream(context.Background(), []string{ids.provider}, cliproxyexecutor.Request{Model: ids.model}, cliproxyexecutor.Options{})
+	if err != nil {
+		t.Fatalf("unexpected immediate error: %v", err)
 	}
-	got := executor.StreamAuthIDs()
-	if len(got) < 2 {
-		t.Fatalf("stream auth IDs = %v, want at least 2 attempts (both auths tried)", got)
+	if streamResult == nil || streamResult.Chunks == nil {
+		t.Fatal("expected stream result with terminal error chunk")
 	}
+	var gotErr error
+	for chunk := range streamResult.Chunks {
+		if chunk.Err != nil {
+			gotErr = chunk.Err
+			continue
+		}
+		if len(chunk.Payload) > 0 {
+			t.Fatalf("unexpected payload chunk: %q", string(chunk.Payload))
+		}
+	}
+	if gotErr == nil {
+		t.Fatal("expected terminal stream error when all auths fail")
+	}
+	assertAttemptedAuthIDs(t, executor.StreamAuthIDs(), ids.authIDs)
 }
