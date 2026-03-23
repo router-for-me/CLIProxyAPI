@@ -633,3 +633,41 @@ func TestToolsDefinitionTranslated(t *testing.T) {
 		t.Errorf("tool 'search' not found in output tools: %s", gjson.Get(result, "tools").Raw)
 	}
 }
+
+func TestServiceTierPriorityTranslatedForGPT54FastMode(t *testing.T) {
+	input := []byte(`{
+		"model": "gpt-5.4",
+		"service_tier": "priority",
+		"reasoning_effort": "low",
+		"messages": [
+			{"role": "user", "content": "ping"}
+		]
+	}`)
+
+	out := ConvertOpenAIRequestToCodex("gpt-5.4", input, true)
+	result := string(out)
+
+	if got := gjson.Get(result, "service_tier").String(); got != "priority" {
+		t.Fatalf("service_tier = %q, want %q, body=%s", got, "priority", result)
+	}
+	if got := gjson.Get(result, "reasoning.effort").String(); got != "low" {
+		t.Fatalf("reasoning.effort = %q, want %q, body=%s", got, "low", result)
+	}
+}
+
+func TestServiceTierDefaultNotTranslatedToCodex(t *testing.T) {
+	input := []byte(`{
+		"model": "gpt-5.4",
+		"service_tier": "default",
+		"messages": [
+			{"role": "user", "content": "ping"}
+		]
+	}`)
+
+	out := ConvertOpenAIRequestToCodex("gpt-5.4", input, true)
+	result := string(out)
+
+	if gjson.Get(result, "service_tier").Exists() {
+		t.Fatalf("service_tier should be omitted for non-priority values, body=%s", result)
+	}
+}

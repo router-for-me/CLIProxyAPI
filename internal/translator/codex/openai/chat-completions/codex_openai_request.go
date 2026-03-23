@@ -59,6 +59,9 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 	} else {
 		out, _ = sjson.SetBytes(out, "reasoning.effort", "medium")
 	}
+	if v := gjson.GetBytes(rawJSON, "service_tier"); v.Exists() && v.String() == "priority" {
+		out, _ = sjson.SetBytes(out, "service_tier", "priority")
+	}
 	out, _ = sjson.SetBytes(out, "parallel_tool_calls", true)
 	out, _ = sjson.SetBytes(out, "reasoning.summary", "auto")
 	out, _ = sjson.SetBytes(out, "include", []string{"reasoning.encrypted_content"})
