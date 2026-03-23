@@ -59,8 +59,8 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 	}
 	rawJSON = bytes.TrimSpace(rawJSON[5:])
 
-	// Initialize the OpenAI SSE template.
-	template := `{"id":"","object":"chat.completion.chunk","created":12345,"model":"model","choices":[{"index":0,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":null},"finish_reason":null,"native_finish_reason":null}]}`
+	// Start with an empty delta so tool-call chunks don't emit null content fields.
+	template := `{"id":"","object":"chat.completion.chunk","created":12345,"model":"model","choices":[{"index":0,"delta":{},"finish_reason":null,"native_finish_reason":null}]}`
 
 	rootResult := gjson.ParseBytes(rawJSON)
 
