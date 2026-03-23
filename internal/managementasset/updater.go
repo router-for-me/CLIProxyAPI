@@ -288,6 +288,9 @@ func ensureFallbackManagementHTML(ctx context.Context, client *http.Client, loca
 		return false
 	}
 
+	log.Warnf("management asset downloaded from fallback URL without digest verification (hash=%s) — "+
+		"consider setting auto-update-panel: true to receive verified updates from GitHub", downloadedHash)
+
 	if err = atomicWriteFile(localPath, data); err != nil {
 		log.WithError(err).Warn("failed to persist fallback management control panel page")
 		return false
@@ -398,9 +401,12 @@ func downloadAsset(ctx context.Context, client *http.Client, downloadURL string)
 		return nil, "", fmt.Errorf("unexpected download status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
-	data, err := io.ReadAll(io.LimitReader(resp.Body, maxAssetDownloadSize))
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxAssetDownloadSize+1))
 	if err != nil {
 		return nil, "", fmt.Errorf("read download body: %w", err)
+	}
+	if int64(len(data)) > maxAssetDownloadSize {
+		return nil, "", fmt.Errorf("download exceeds maximum allowed size of %d bytes", maxAssetDownloadSize)
 	}
 
 	sum := sha256.Sum256(data)
