@@ -281,7 +281,7 @@ func ParseClaudeUsage(data []byte) usage.Detail {
 }
 
 // ParseClaudeStreamUsage is intentionally removed.
-// Use claudeStreamUsageAccumulator.processLine instead, which merges
+// Use ClaudeStreamUsageAccumulator.ProcessLine instead, which merges
 // usage fields across all SSE events and publishes once at stream end.
 
 // claudeThinkingTokenFactor is the approximate characters-per-token ratio
@@ -319,19 +319,19 @@ func claudeStreamThinkingLen(line []byte) int {
 	return len(delta.Get("thinking").String())
 }
 
-// claudeStreamUsageAccumulator merges usage fields across Claude SSE events
+// ClaudeStreamUsageAccumulator merges usage fields across Claude SSE events
 // and accumulates thinking content block lengths for reasoning token estimation.
 // message_start carries input_tokens + cache_read_input_tokens (under message.usage),
 // message_delta carries output_tokens (under usage), and content_block_delta carries
 // thinking text. Publishing happens once at the end of the stream.
-type claudeStreamUsageAccumulator struct {
+type ClaudeStreamUsageAccumulator struct {
 	detail      usage.Detail
 	thinkingLen int64
 	sawUsage    bool
 }
 
-// processLine extracts usage and thinking data from a single SSE line.
-func (a *claudeStreamUsageAccumulator) processLine(line []byte) {
+// ProcessLine extracts usage and thinking data from a single SSE line.
+func (a *ClaudeStreamUsageAccumulator) ProcessLine(line []byte) {
 	a.thinkingLen += int64(claudeStreamThinkingLen(line))
 
 	payload := jsonPayload(line)
@@ -365,13 +365,13 @@ func (a *claudeStreamUsageAccumulator) processLine(line []byte) {
 
 // publish emits the accumulated usage with estimated reasoning tokens.
 // Skips publishing if no usage event was observed during the stream.
-func (a *claudeStreamUsageAccumulator) publish(ctx context.Context, reporter *usageReporter) {
+func (a *ClaudeStreamUsageAccumulator) Publish(ctx context.Context, reporter *UsageReporter) {
 	if !a.sawUsage {
 		return
 	}
 	a.detail.ReasoningTokens = a.thinkingLen / claudeThinkingTokenFactor
 	a.detail.TotalTokens = a.detail.InputTokens + a.detail.OutputTokens
-	reporter.publish(ctx, a.detail)
+	reporter.Publish(ctx, a.detail)
 }
 
 func parseGeminiFamilyUsageDetail(node gjson.Result) usage.Detail {

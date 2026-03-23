@@ -65,10 +65,10 @@ func TestUsageReporterBuildRecordIncludesLatency(t *testing.T) {
 
 	func TestClaudeStreamAccumulator_FullSequence(t *testing.T) {
 	// Simulate: message_start (input+cache) → thinking_delta → message_delta (output)
-	var acc claudeStreamUsageAccumulator
-	acc.processLine([]byte(`data: {"type":"message_start","message":{"usage":{"input_tokens":10,"cache_read_input_tokens":50000}}}`))
-	acc.processLine([]byte(`data: {"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"Let me think about this carefully step by step"}}`))
-	acc.processLine([]byte(`data: {"type":"message_delta","usage":{"output_tokens":200}}`))
+	var acc ClaudeStreamUsageAccumulator
+	acc.ProcessLine([]byte(`data: {"type":"message_start","message":{"usage":{"input_tokens":10,"cache_read_input_tokens":50000}}}`))
+	acc.ProcessLine([]byte(`data: {"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"Let me think about this carefully step by step"}}`))
+	acc.ProcessLine([]byte(`data: {"type":"message_delta","usage":{"output_tokens":200}}`))
 
 	if !acc.sawUsage {
 		t.Fatal("sawUsage should be true after processing usage events")
@@ -89,8 +89,8 @@ func TestUsageReporterBuildRecordIncludesLatency(t *testing.T) {
 }
 
 	func TestClaudeStreamAccumulator_MessageStartOnly(t *testing.T) {
-	var acc claudeStreamUsageAccumulator
-	acc.processLine([]byte(`data: {"type":"message_start","message":{"usage":{"input_tokens":5,"cache_read_input_tokens":100000}}}`))
+	var acc ClaudeStreamUsageAccumulator
+	acc.ProcessLine([]byte(`data: {"type":"message_start","message":{"usage":{"input_tokens":5,"cache_read_input_tokens":100000}}}`))
 
 	if !acc.sawUsage {
 		t.Fatal("sawUsage should be true after message_start with usage")
@@ -107,8 +107,8 @@ func TestUsageReporterBuildRecordIncludesLatency(t *testing.T) {
 }
 
 	func TestClaudeStreamAccumulator_MessageDeltaOnly(t *testing.T) {
-	var acc claudeStreamUsageAccumulator
-	acc.processLine([]byte(`data: {"type":"message_delta","usage":{"output_tokens":150}}`))
+	var acc ClaudeStreamUsageAccumulator
+	acc.ProcessLine([]byte(`data: {"type":"message_delta","usage":{"output_tokens":150}}`))
 
 	if !acc.sawUsage {
 		t.Fatal("sawUsage should be true after message_delta with usage")
@@ -123,8 +123,8 @@ func TestUsageReporterBuildRecordIncludesLatency(t *testing.T) {
 
 	func TestClaudeStreamAccumulator_ThinkingDeltaOnly_NoUsage(t *testing.T) {
 	// Stream with only thinking deltas but no usage event — should not publish
-	var acc claudeStreamUsageAccumulator
-	acc.processLine([]byte(`data: {"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"some thinking text"}}`))
+	var acc ClaudeStreamUsageAccumulator
+	acc.ProcessLine([]byte(`data: {"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"some thinking text"}}`))
 
 	if acc.sawUsage {
 		t.Fatal("sawUsage should be false when no usage event was received")
@@ -136,15 +136,15 @@ func TestUsageReporterBuildRecordIncludesLatency(t *testing.T) {
 
 	func TestClaudeStreamAccumulator_NoEvents(t *testing.T) {
 	// Empty/interrupted stream — should not publish
-	var acc claudeStreamUsageAccumulator
+	var acc ClaudeStreamUsageAccumulator
 	if acc.sawUsage {
 		t.Fatal("sawUsage should be false for empty accumulator")
 	}
 }
 
 	func TestClaudeStreamAccumulator_CacheCreationFallback(t *testing.T) {
-	var acc claudeStreamUsageAccumulator
-	acc.processLine([]byte(`data: {"type":"message_start","message":{"usage":{"input_tokens":3,"cache_creation_input_tokens":80000}}}`))
+	var acc ClaudeStreamUsageAccumulator
+	acc.ProcessLine([]byte(`data: {"type":"message_start","message":{"usage":{"input_tokens":3,"cache_creation_input_tokens":80000}}}`))
 
 	if acc.detail.CachedTokens != 80000 {
 		t.Fatalf("cached tokens = %d, want 80000 (from cache_creation fallback)", acc.detail.CachedTokens)
