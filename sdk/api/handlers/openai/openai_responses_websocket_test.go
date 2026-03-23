@@ -663,13 +663,13 @@ func TestResponsesWebsocketPinsOnlyWebsocketCapableAuth(t *testing.T) {
 	}
 }
 
-func TestInputContainsFullTranscriptDetectsAssistantMessage(t *testing.T) {
+func TestInputContainsFullTranscriptFalseForAssistantMessageOnly(t *testing.T) {
 	input := gjson.Parse(`[
 		{"type":"message","role":"user","content":"hello"},
 		{"type":"message","role":"assistant","content":"hi there"}
 	]`)
-	if !inputContainsFullTranscript(input) {
-		t.Fatal("expected full transcript when assistant message is present")
+	if inputContainsFullTranscript(input) {
+		t.Fatal("assistant message alone must not be treated as full transcript")
 	}
 }
 
@@ -756,6 +756,36 @@ func TestNormalizeSubsequentRequestIncrementalInputStillMerges(t *testing.T) {
 		t.Fatalf("input len = %d, want 4 (merged)", len(input))
 	}
 	wantIDs := []string{"msg-1", "msg-2", "fc-1", "fco-1"}
+	for i, want := range wantIDs {
+		got := input[i].Get("id").String()
+		if got != want {
+			t.Fatalf("input[%d].id = %q, want %q", i, got, want)
+		}
+	}
+}
+
+func TestNormalizeSubsequentRequestAssistantIncrementalInputStillMerges(t *testing.T) {
+	lastRequest := []byte(`{"model":"gpt-5.4","stream":true,"input":[
+		{"type":"message","role":"user","id":"msg-1","content":"hello"}
+	]}`)
+	lastResponseOutput := []byte(`[
+		{"type":"message","role":"assistant","id":"msg-2","content":"prior assistant"},
+		{"type":"function_call","id":"fc-1","call_id":"call-1","name":"bash","arguments":"{}"}
+	]`)
+	raw := []byte(`{"type":"response.append","input":[
+		{"type":"message","role":"assistant","id":"msg-3","content":"patched assistant turn"}
+	]}`)
+
+	normalized, _, errMsg := normalizeResponsesWebsocketRequest(raw, lastRequest, lastResponseOutput)
+	if errMsg != nil {
+		t.Fatalf("unexpected error: %v", errMsg.Error)
+	}
+
+	input := gjson.GetBytes(normalized, "input").Array()
+	if len(input) != 4 {
+		t.Fatalf("input len = %d, want 4 (merged)", len(input))
+	}
+	wantIDs := []string{"msg-1", "msg-2", "fc-1", "msg-3"}
 	for i, want := range wantIDs {
 		got := input[i].Get("id").String()
 		if got != want {
