@@ -49,7 +49,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 	}
 
 	if serviceTier := root.Get("service_tier"); serviceTier.Exists() {
-		out, _ = sjson.SetBytes(out, "service_tier", serviceTier.String())
+		out, _ = sjson.SetBytes(out, "service_tier", serviceTier.Value())
 	}
 
 	// Convert instructions to system message

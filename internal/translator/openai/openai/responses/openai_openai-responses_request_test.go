@@ -32,3 +32,19 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_PreservesFastModeP
 		t.Fatalf("reasoning_effort = %q, want %q, body=%s", got, "low", result)
 	}
 }
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_PreservesServiceTierValueType(t *testing.T) {
+	input := []byte(`{
+		"model": "gpt-5.4",
+		"service_tier": 1,
+		"input": "ping"
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("gpt-5.4", input, false)
+	result := string(out)
+
+	got := gjson.Get(result, "service_tier")
+	if got.Type != gjson.Number || got.Num != 1 {
+		t.Fatalf("service_tier = %s (type=%s), want numeric 1, body=%s", got.Raw, got.Type.String(), result)
+	}
+}
