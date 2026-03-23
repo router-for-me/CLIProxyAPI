@@ -672,21 +672,174 @@ func (m *modelScheduler) applyModelStateLocked(authID, modelKey string, state *M
 	return true
 }
 
+type projectedAggregateState struct {
+	status         Status
+	disabled       bool
+	unavailable    bool
+	nextRetryAfter time.Time
+	quota          QuotaState
+}
+
 func authAggregateStateWouldChange(auth *Auth, modelKey string, state *ModelState, now time.Time) bool {
 	if auth == nil {
 		return false
 	}
-	candidate := auth.Clone()
-	if candidate == nil {
+	projected := projectAggregatedAuthState(auth, modelKey, state, now)
+	return projected.status != auth.Status ||
+		projected.disabled != auth.Disabled ||
+		projected.unavailable != auth.Unavailable ||
+		!projected.nextRetryAfter.Equal(auth.NextRetryAfter) ||
+		projected.quota != auth.Quota
+}
+
+func projectAggregatedAuthState(auth *Auth, modelKey string, override *ModelState, now time.Time) projectedAggregateState {
+	projected := projectedAggregateState{}
+	if auth == nil {
+		return projected
+	}
+	projected.status = auth.Status
+	projected.disabled = auth.Disabled
+	projected.unavailable = auth.Unavailable
+	projected.nextRetryAfter = auth.NextRetryAfter
+	projected.quota = auth.Quota
+	if auth.Disabled || auth.Status == StatusDisabled {
+		projected.status = StatusDisabled
+		projected.unavailable = true
+		projected.nextRetryAfter = time.Time{}
+		projected.quota = QuotaState{}
+		return projected
+	}
+
+	var (
+		hasState       bool
+		hasError       bool
+		allUnavailable = true
+		earliestRetry  time.Time
+		quotaExceeded  bool
+		quotaRecover   time.Time
+		maxBackoff     int
+		maxStrike      int
+		overrideSeen   bool
+	)
+
+	for currentModelKey, currentState := range auth.ModelStates {
+		effectiveState := currentState
+		if currentModelKey == modelKey {
+			effectiveState = override
+			overrideSeen = true
+		}
+		if !accumulateProjectedAggregateState(
+			effectiveState,
+			now,
+			&hasState,
+			&hasError,
+			&allUnavailable,
+			&earliestRetry,
+			&quotaExceeded,
+			&quotaRecover,
+			&maxBackoff,
+			&maxStrike,
+		) {
+			continue
+		}
+	}
+	if !overrideSeen {
+		accumulateProjectedAggregateState(
+			override,
+			now,
+			&hasState,
+			&hasError,
+			&allUnavailable,
+			&earliestRetry,
+			&quotaExceeded,
+			&quotaRecover,
+			&maxBackoff,
+			&maxStrike,
+		)
+	}
+	if !hasState {
+		return projected
+	}
+
+	projected.unavailable = allUnavailable
+	if allUnavailable {
+		projected.nextRetryAfter = earliestRetry
+	} else {
+		projected.nextRetryAfter = time.Time{}
+	}
+	if quotaExceeded {
+		projected.quota = QuotaState{
+			Exceeded:      true,
+			Reason:        "quota",
+			NextRecoverAt: quotaRecover,
+			BackoffLevel:  maxBackoff,
+			StrikeCount:   maxStrike,
+		}
+	} else {
+		projected.quota = QuotaState{}
+	}
+	if hasError {
+		projected.status = StatusError
+	} else {
+		projected.status = StatusActive
+	}
+	return projected
+}
+
+func accumulateProjectedAggregateState(
+	state *ModelState,
+	now time.Time,
+	hasState *bool,
+	hasError *bool,
+	allUnavailable *bool,
+	earliestRetry *time.Time,
+	quotaExceeded *bool,
+	quotaRecover *time.Time,
+	maxBackoff *int,
+	maxStrike *int,
+) bool {
+	if state == nil {
 		return false
 	}
-	applyModelStateSnapshot(candidate, modelKey, state)
-	syncAggregatedAuthStateFromModelStates(candidate, now)
-	return candidate.Status != auth.Status ||
-		candidate.Disabled != auth.Disabled ||
-		candidate.Unavailable != auth.Unavailable ||
-		!candidate.NextRetryAfter.Equal(auth.NextRetryAfter) ||
-		candidate.Quota != auth.Quota
+
+	*hasState = true
+
+	stateUnavailable := false
+	if state.Status == StatusDisabled {
+		stateUnavailable = true
+	} else if state.Unavailable {
+		if !state.NextRetryAfter.IsZero() && state.NextRetryAfter.After(now) {
+			stateUnavailable = true
+			if earliestRetry.IsZero() || state.NextRetryAfter.Before(*earliestRetry) {
+				*earliestRetry = state.NextRetryAfter
+			}
+		}
+	}
+	if !stateUnavailable {
+		*allUnavailable = false
+	}
+
+	if state.Quota.Exceeded {
+		*quotaExceeded = true
+		if quotaRecover.IsZero() || (!state.Quota.NextRecoverAt.IsZero() && state.Quota.NextRecoverAt.Before(*quotaRecover)) {
+			*quotaRecover = state.Quota.NextRecoverAt
+		}
+		if state.Quota.BackoffLevel > *maxBackoff {
+			*maxBackoff = state.Quota.BackoffLevel
+		}
+		if state.Quota.StrikeCount > *maxStrike {
+			*maxStrike = state.Quota.StrikeCount
+		}
+	}
+
+	if state.LastError != nil {
+		*hasError = true
+		return true
+	}
+	if state.Status == StatusError && state.Unavailable && (state.NextRetryAfter.IsZero() || state.NextRetryAfter.After(now)) {
+		*hasError = true
+	}
+	return true
 }
 
 func syncAggregatedAuthStateFromModelStates(auth *Auth, now time.Time) {
@@ -739,39 +892,54 @@ func (m *modelScheduler) promoteExpiredLocked(now time.Time) {
 	if m == nil || len(m.blocked) == 0 {
 		return
 	}
-	expired := make([]*scheduledAuth, 0, len(m.blocked))
-	for _, entry := range m.blocked {
+	expiredCount := 0
+	for expiredCount < len(m.blocked) {
+		entry := m.blocked[expiredCount]
 		if entry == nil || entry.auth == nil {
+			expiredCount++
 			continue
 		}
 		if entry.nextRetryAt.IsZero() || entry.nextRetryAt.After(now) {
-			continue
+			break
 		}
-		expired = append(expired, entry)
+		expiredCount++
 	}
+	if expiredCount == 0 {
+		return
+	}
+
+	expired := append([]*scheduledAuth(nil), m.blocked[:expiredCount]...)
+	copy(m.blocked, m.blocked[expiredCount:])
+	for index := len(m.blocked) - expiredCount; index < len(m.blocked); index++ {
+		m.blocked[index] = nil
+	}
+	m.blocked = m.blocked[:len(m.blocked)-expiredCount]
+
 	for _, entry := range expired {
-		if entry == nil || entry.auth == nil {
-			continue
-		}
-		previousState := entry.state
-		previousNextRetryAt := entry.nextRetryAt
-		blocked, reason, next := isAuthBlockedForModel(entry.auth, m.modelKey, now)
-		switch {
-		case !blocked:
-			entry.state = scheduledStateReady
-			entry.nextRetryAt = time.Time{}
-		case reason == blockReasonCooldown:
-			entry.state = scheduledStateCooldown
-			entry.nextRetryAt = next
-		case reason == blockReasonDisabled:
-			entry.state = scheduledStateDisabled
-			entry.nextRetryAt = time.Time{}
-		default:
-			entry.state = scheduledStateBlocked
-			entry.nextRetryAt = next
-		}
-		m.transitionEntryLocked(entry, previousState, previousNextRetryAt)
+		m.promoteExpiredBlockedEntryLocked(entry, now)
 	}
+}
+
+func (m *modelScheduler) promoteExpiredBlockedEntryLocked(entry *scheduledAuth, now time.Time) {
+	if m == nil || entry == nil || entry.meta == nil || entry.auth == nil {
+		return
+	}
+	blocked, reason, next := isAuthBlockedForModel(entry.auth, m.modelKey, now)
+	switch {
+	case !blocked:
+		entry.state = scheduledStateReady
+		entry.nextRetryAt = time.Time{}
+	case reason == blockReasonCooldown:
+		entry.state = scheduledStateCooldown
+		entry.nextRetryAt = next
+	case reason == blockReasonDisabled:
+		entry.state = scheduledStateDisabled
+		entry.nextRetryAt = time.Time{}
+	default:
+		entry.state = scheduledStateBlocked
+		entry.nextRetryAt = next
+	}
+	m.addEntryToIndexesLocked(entry)
 }
 
 func applyModelStateSnapshot(auth *Auth, modelKey string, state *ModelState) {

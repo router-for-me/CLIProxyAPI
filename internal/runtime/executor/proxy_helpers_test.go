@@ -121,3 +121,28 @@ func TestNewProxyAwareHTTPClientProxyDoesNotLeakAntigravityTransportMutation(t *
 		t.Fatalf("regular transport unexpectedly inherited antigravity HTTP/1.1-only ALPN override: %#v", regularTransport.TLSClientConfig.NextProtos)
 	}
 }
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func TestNewProxyAwareHTTPClientInvalidProxyFallsBackToContextTransport(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusNoContent, Request: req}, nil
+	}))
+
+	client := newProxyAwareHTTPClient(ctx, &config.Config{
+		SDKConfig: sdkconfig.SDKConfig{ProxyURL: "://bad-proxy"},
+	}, nil, 0)
+
+	if client.Transport == nil {
+		t.Fatal("expected context transport fallback when proxy build fails")
+	}
+	if _, ok := client.Transport.(roundTripperFunc); !ok {
+		t.Fatalf("transport type = %T, want context roundTripperFunc fallback", client.Transport)
+	}
+}
