@@ -182,6 +182,33 @@ func TestSchedulerPick_GeminiVirtualParentUsesTwoLevelRotation(t *testing.T) {
 	}
 }
 
+func TestSchedulerPick_GeminiVirtualParentRegroupsAfterPlainAuthRemoval(t *testing.T) {
+	t.Parallel()
+
+	scheduler := newSchedulerForTest(
+		&RoundRobinSelector{},
+		&Auth{ID: "plain", Provider: "gemini-cli", Attributes: map[string]string{"priority": "0"}},
+		&Auth{ID: "group-a", Provider: "gemini-cli", Attributes: map[string]string{"priority": "0", "gemini_virtual_parent": "parent-a"}},
+		&Auth{ID: "group-b", Provider: "gemini-cli", Attributes: map[string]string{"priority": "0", "gemini_virtual_parent": "parent-b"}},
+	)
+
+	scheduler.removeAuth("plain")
+
+	wantIDs := []string{"group-a", "group-b", "group-a", "group-b"}
+	for index, wantID := range wantIDs {
+		got, errPick := scheduler.pickSingle(context.Background(), "gemini-cli", "", cliproxyexecutor.Options{}, nil)
+		if errPick != nil {
+			t.Fatalf("pickSingle() #%d error = %v", index, errPick)
+		}
+		if got == nil {
+			t.Fatalf("pickSingle() #%d auth = nil", index)
+		}
+		if got.ID != wantID {
+			t.Fatalf("pickSingle() #%d auth.ID = %q, want %q", index, got.ID, wantID)
+		}
+	}
+}
+
 func TestSchedulerPick_CodexWebsocketPrefersWebsocketEnabledSubset(t *testing.T) {
 	t.Parallel()
 
@@ -205,6 +232,178 @@ func TestSchedulerPick_CodexWebsocketPrefersWebsocketEnabledSubset(t *testing.T)
 		if got.ID != wantID {
 			t.Fatalf("pickSingle() #%d auth.ID = %q, want %q", index, got.ID, wantID)
 		}
+	}
+}
+
+func TestSchedulerPick_MixedSingleCodexProviderWebsocketPrefersWebsocketEnabledSubset(t *testing.T) {
+	t.Parallel()
+
+	scheduler := newSchedulerForTest(
+		&RoundRobinSelector{},
+		&Auth{ID: "codex-http", Provider: "codex"},
+		&Auth{ID: "codex-ws-a", Provider: "codex", Attributes: map[string]string{"websockets": "true"}},
+		&Auth{ID: "codex-ws-b", Provider: "codex", Attributes: map[string]string{"websockets": "true"}},
+	)
+
+	ctx := cliproxyexecutor.WithDownstreamWebsocket(context.Background())
+	want := []string{"codex-ws-a", "codex-ws-b", "codex-ws-a"}
+	for index, wantID := range want {
+		got, provider, errPick := scheduler.pickMixed(ctx, []string{"codex"}, "", cliproxyexecutor.Options{}, nil)
+		if errPick != nil {
+			t.Fatalf("pickMixed() #%d error = %v", index, errPick)
+		}
+		if got == nil {
+			t.Fatalf("pickMixed() #%d auth = nil", index)
+		}
+		if provider != "codex" {
+			t.Fatalf("pickMixed() #%d provider = %q, want %q", index, provider, "codex")
+		}
+		if got.ID != wantID {
+			t.Fatalf("pickMixed() #%d auth.ID = %q, want %q", index, got.ID, wantID)
+		}
+	}
+}
+
+func TestSchedulerPick_CodexWebsocketRetryFallsBackToHTTPAuths(t *testing.T) {
+	t.Parallel()
+
+	scheduler := newSchedulerForTest(
+		&RoundRobinSelector{},
+		&Auth{ID: "codex-http", Provider: "codex"},
+		&Auth{ID: "codex-ws-a", Provider: "codex", Attributes: map[string]string{"websockets": "true"}},
+		&Auth{ID: "codex-ws-b", Provider: "codex", Attributes: map[string]string{"websockets": "true"}},
+	)
+
+	ctx := cliproxyexecutor.WithDownstreamWebsocket(context.Background())
+	tried := map[string]struct{}{
+		"codex-ws-a": {},
+		"codex-ws-b": {},
+	}
+	got, errPick := scheduler.pickSingle(ctx, "codex", "", cliproxyexecutor.Options{}, tried)
+	if errPick != nil {
+		t.Fatalf("pickSingle() error = %v", errPick)
+	}
+	if got == nil {
+		t.Fatal("pickSingle() auth = nil")
+	}
+	if got.ID != "codex-http" {
+		t.Fatalf("pickSingle() auth.ID = %q, want %q", got.ID, "codex-http")
+	}
+}
+
+func TestSchedulerPick_MixedSingleCodexProviderWebsocketRetryFallsBackToHTTPAuths(t *testing.T) {
+	t.Parallel()
+
+	scheduler := newSchedulerForTest(
+		&RoundRobinSelector{},
+		&Auth{ID: "codex-http", Provider: "codex"},
+		&Auth{ID: "codex-ws-a", Provider: "codex", Attributes: map[string]string{"websockets": "true"}},
+		&Auth{ID: "codex-ws-b", Provider: "codex", Attributes: map[string]string{"websockets": "true"}},
+	)
+
+	ctx := cliproxyexecutor.WithDownstreamWebsocket(context.Background())
+	tried := map[string]struct{}{
+		"codex-ws-a": {},
+		"codex-ws-b": {},
+	}
+	got, provider, errPick := scheduler.pickMixed(ctx, []string{"codex"}, "", cliproxyexecutor.Options{}, tried)
+	if errPick != nil {
+		t.Fatalf("pickMixed() error = %v", errPick)
+	}
+	if got == nil {
+		t.Fatal("pickMixed() auth = nil")
+	}
+	if provider != "codex" {
+		t.Fatalf("pickMixed() provider = %q, want %q", provider, "codex")
+	}
+	if got.ID != "codex-http" {
+		t.Fatalf("pickMixed() auth.ID = %q, want %q", got.ID, "codex-http")
+	}
+}
+
+func TestSchedulerPick_PromotesAllExpiredBlockedEntriesBeforeApplyingTriedFilter(t *testing.T) {
+	t.Parallel()
+
+	model := "gemini-2.5-pro"
+	registerSchedulerModels(t, "gemini", model, "expired-a", "expired-b")
+	scheduler := newSchedulerForTest(
+		&RoundRobinSelector{},
+		&Auth{
+			ID:       "expired-a",
+			Provider: "gemini",
+			ModelStates: map[string]*ModelState{
+				model: {Status: StatusError, Unavailable: true, NextRetryAfter: time.Now().Add(1 * time.Minute)},
+			},
+		},
+		&Auth{
+			ID:       "expired-b",
+			Provider: "gemini",
+			ModelStates: map[string]*ModelState{
+				model: {Status: StatusError, Unavailable: true, NextRetryAfter: time.Now().Add(1 * time.Minute)},
+			},
+		},
+	)
+
+	scheduler.mu.Lock()
+	providerState := scheduler.providers["gemini"]
+	if providerState == nil {
+		scheduler.mu.Unlock()
+		t.Fatal("provider state missing")
+	}
+	shard := providerState.ensureModelLocked(model, time.Now())
+	if shard == nil {
+		scheduler.mu.Unlock()
+		t.Fatal("model shard missing")
+	}
+	expiredAt := time.Now().Add(-1 * time.Second)
+	for _, authID := range []string{"expired-a", "expired-b"} {
+		entry := shard.entries[authID]
+		if entry == nil || entry.auth == nil || entry.auth.ModelStates[model] == nil {
+			scheduler.mu.Unlock()
+			t.Fatalf("entry %q missing model state", authID)
+		}
+		entry.auth.ModelStates[model].NextRetryAfter = expiredAt
+		entry.nextRetryAt = expiredAt
+	}
+	scheduler.mu.Unlock()
+
+	got, errPick := scheduler.pickSingle(context.Background(), "gemini", model, cliproxyexecutor.Options{}, map[string]struct{}{"expired-a": {}})
+	if errPick != nil {
+		t.Fatalf("pickSingle() error = %v", errPick)
+	}
+	if got == nil {
+		t.Fatal("pickSingle() auth = nil")
+	}
+	if got.ID != "expired-b" {
+		t.Fatalf("pickSingle() auth.ID = %q, want %q", got.ID, "expired-b")
+	}
+
+	scheduler.mu.Lock()
+	defer scheduler.mu.Unlock()
+	providerState = scheduler.providers["gemini"]
+	shard = providerState.ensureModelLocked(model, time.Now())
+	if len(shard.blocked) != 0 {
+		t.Fatalf("blocked entries after promotion = %d, want 0", len(shard.blocked))
+	}
+}
+
+func TestSchedulerApplyModelStateUpdate_FallsBackWhenAuthAggregateStateWouldChange(t *testing.T) {
+	t.Parallel()
+
+	model := "gpt-5.4"
+	registerSchedulerModels(t, "codex", model, "codex-fast-path")
+	scheduler := newSchedulerForTest(
+		&RoundRobinSelector{},
+		&Auth{ID: "codex-fast-path", Provider: "codex", Status: StatusActive},
+	)
+
+	applied := scheduler.applyModelStateUpdate("codex-fast-path", "codex", model, &ModelState{
+		Status:         StatusError,
+		Unavailable:    true,
+		NextRetryAfter: time.Now().Add(1 * time.Minute),
+	})
+	if applied {
+		t.Fatal("applyModelStateUpdate() = true, want false so caller can fall back to full auth upsert")
 	}
 }
 
