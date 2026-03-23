@@ -52,11 +52,11 @@ func init() {
 	sdktr.Register(fOpenAI, fMyProv,
 		func(model string, raw []byte, stream bool) []byte { return raw },
 		sdktr.ResponseTransform{
-			Stream: func(ctx context.Context, model string, originalReq, translatedReq, raw []byte, param *any) []string {
-				return []string{string(raw)}
+			Stream: func(ctx context.Context, model string, originalReq, translatedReq, raw []byte, param *any) [][]byte {
+				return [][]byte{raw}
 			},
-			NonStream: func(ctx context.Context, model string, originalReq, translatedReq, raw []byte, param *any) string {
-				return string(raw)
+			NonStream: func(ctx context.Context, model string, originalReq, translatedReq, raw []byte, param *any) []byte {
+				return raw
 			},
 		},
 	)

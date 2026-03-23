@@ -205,7 +205,7 @@ func (e *GeminiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	reporter.publish(ctx, parseGeminiUsage(data))
 	var param any
 	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, opts.OriginalRequest, body, data, &param)
-	resp = cliproxyexecutor.Response{Payload: []byte(out), Headers: httpResp.Header.Clone()}
+	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
 	return resp, nil
 }
 
@@ -321,12 +321,12 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			}
 			lines := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, body, bytes.Clone(payload), &param)
 			for i := range lines {
-				out <- cliproxyexecutor.StreamChunk{Payload: []byte(lines[i])}
+				out <- cliproxyexecutor.StreamChunk{Payload: lines[i]}
 			}
 		}
 		lines := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, body, []byte("[DONE]"), &param)
 		for i := range lines {
-			out <- cliproxyexecutor.StreamChunk{Payload: []byte(lines[i])}
+			out <- cliproxyexecutor.StreamChunk{Payload: lines[i]}
 		}
 		if errScan := scanner.Err(); errScan != nil {
 			recordAPIResponseError(ctx, e.cfg, errScan)
@@ -415,7 +415,7 @@ func (e *GeminiExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 
 	count := gjson.GetBytes(data, "totalTokens").Int()
 	translated := sdktranslator.TranslateTokenCount(respCtx, to, from, count, data)
-	return cliproxyexecutor.Response{Payload: []byte(translated), Headers: resp.Header.Clone()}, nil
+	return cliproxyexecutor.Response{Payload: translated, Headers: resp.Header.Clone()}, nil
 }
 
 // Refresh refreshes the authentication credentials (no-op for Gemini API key).
@@ -527,18 +527,18 @@ func fixGeminiImageAspectRatio(modelName string, rawJSON []byte) []byte {
 
 				if !hasInlineData {
 					emptyImageBase64ed, _ := util.CreateWhiteImageBase64(aspectRatioResult.String())
-					emptyImagePart := `{"inlineData":{"mime_type":"image/png","data":""}}`
-					emptyImagePart, _ = sjson.Set(emptyImagePart, "inlineData.data", emptyImageBase64ed)
-					newPartsJson := `[]`
-					newPartsJson, _ = sjson.SetRaw(newPartsJson, "-1", `{"text": "Based on the following requirements, create an image within the uploaded picture. The new content *MUST* completely cover the entire area of the original picture, maintaining its exact proportions, and *NO* blank areas should appear."}`)
-					newPartsJson, _ = sjson.SetRaw(newPartsJson, "-1", emptyImagePart)
+					emptyImagePart := []byte(`{"inlineData":{"mime_type":"image/png","data":""}}`)
+					emptyImagePart, _ = sjson.SetBytes(emptyImagePart, "inlineData.data", emptyImageBase64ed)
+					newPartsJson := []byte(`[]`)
+					newPartsJson, _ = sjson.SetRawBytes(newPartsJson, "-1", []byte(`{"text": "Based on the following requirements, create an image within the uploaded picture. The new content *MUST* completely cover the entire area of the original picture, maintaining its exact proportions, and *NO* blank areas should appear."}`))
+					newPartsJson, _ = sjson.SetRawBytes(newPartsJson, "-1", emptyImagePart)
 
 					parts := contentArray[0].Get("parts").Array()
 					for j := 0; j < len(parts); j++ {
-						newPartsJson, _ = sjson.SetRaw(newPartsJson, "-1", parts[j].Raw)
+						newPartsJson, _ = sjson.SetRawBytes(newPartsJson, "-1", []byte(parts[j].Raw))
 					}
 
-					rawJSON, _ = sjson.SetRawBytes(rawJSON, "contents.0.parts", []byte(newPartsJson))
+					rawJSON, _ = sjson.SetRawBytes(rawJSON, "contents.0.parts", newPartsJson)
 					rawJSON, _ = sjson.SetRawBytes(rawJSON, "generationConfig.responseModalities", []byte(`["IMAGE", "TEXT"]`))
 				}
 			}
