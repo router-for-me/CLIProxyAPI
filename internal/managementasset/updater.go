@@ -31,6 +31,7 @@ const (
 	httpUserAgent                = "CLIProxyAPI-management-updater"
 	managementSyncMinInterval    = 30 * time.Second
 	updateCheckInterval          = 3 * time.Hour
+	maxAssetDownloadSize         = 10 << 20 // 10 MB safety limit for management asset downloads
 )
 
 // ManagementFileName exposes the control panel asset filename.
@@ -86,6 +87,10 @@ func runAutoUpdater(ctx context.Context) {
 		}
 		if cfg.RemoteManagement.DisableControlPanel {
 			log.Debug("management asset auto-updater skipped: control panel disabled")
+			return
+		}
+		if !cfg.RemoteManagement.AutoUpdatePanel {
+			log.Debug("management asset auto-updater skipped: auto-update-panel is disabled")
 			return
 		}
 
@@ -259,7 +264,8 @@ func EnsureLatestManagementHTML(ctx context.Context, staticDir string, proxyURL 
 		}
 
 		if remoteHash != "" && !strings.EqualFold(remoteHash, downloadedHash) {
-			log.Warnf("remote digest mismatch for management asset: expected %s got %s", remoteHash, downloadedHash)
+			log.Errorf("management asset digest mismatch: expected %s got %s — aborting update for safety", remoteHash, downloadedHash)
+			return nil, nil
 		}
 
 		if err = atomicWriteFile(localPath, data); err != nil {
@@ -392,7 +398,7 @@ func downloadAsset(ctx context.Context, client *http.Client, downloadURL string)
 		return nil, "", fmt.Errorf("unexpected download status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
-	data, err := io.ReadAll(resp.Body)
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxAssetDownloadSize))
 	if err != nil {
 		return nil, "", fmt.Errorf("read download body: %w", err)
 	}
