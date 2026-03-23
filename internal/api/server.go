@@ -1116,9 +1116,15 @@ func (s *Server) setModelRoutingEnabled(c *gin.Context) {
 	}
 	if body.Enabled != nil {
 		mgr.SetEnabled(*body.Enabled)
+		s.cfg.ModelRouting.Enabled = *body.Enabled
 	}
 	if body.DryRun != nil {
 		mgr.SetDryRun(*body.DryRun)
+		s.cfg.ModelRouting.DryRun = *body.DryRun
+	}
+	if err := config.SaveConfigPreserveComments(s.configFilePath, s.cfg); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save config: " + err.Error()})
+		return
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"enabled": mgr.IsEnabled(),
@@ -1152,6 +1158,14 @@ func (s *Server) setModelRoutingRules(c *gin.Context) {
 	}
 	if err := mgr.SetRules(json.RawMessage(raw)); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	var rules []config.ModelRoutingRule
+	if err := json.Unmarshal(raw, &rules); err == nil {
+		s.cfg.ModelRouting.Rules = rules
+	}
+	if err := config.SaveConfigPreserveComments(s.configFilePath, s.cfg); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save config: " + err.Error()})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})

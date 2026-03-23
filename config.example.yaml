@@ -92,6 +92,36 @@ quota-exceeded:
 routing:
   strategy: "round-robin" # round-robin (default), fill-first
 
+# Dynamic model routing: rule-based engine to redirect requests to alternative models.
+# Rules are evaluated in priority order (lower number = higher priority).
+# When a rule's conditions all match, the request is routed to target-model.
+# model-routing:
+#   enabled: false             # Master switch for the routing engine
+#   dry-run: false             # When true, log matched rules but do not actually reroute
+#   default-model: ""          # Optional: fallback model if no rules match
+#   rules:
+#     - name: "Long context to flash"           # Human-readable rule name
+#       target-model: "gemini-2.5-flash"        # Model to route to when this rule matches
+#       priority: 10                            # Lower = evaluated first
+#       enabled: true                           # Per-rule on/off toggle (omit to default true)
+#       conditions:
+#         - type: total-message-length          # Condition types:
+#           operator: greater-than              #   message-count         (numeric: eq/ne/gt/lt/gte/lte)
+#           value: "50000"                      #   last-message-length   (numeric)
+#                                               #   total-message-length  (numeric)
+#     - name: "Code tasks to sonnet"            #   last-message-contains (string: contains/not-contains/matches)
+#       target-model: "claude-sonnet-4-6"       #   system-prompt-contains (string: contains/not-contains/matches)
+#       priority: 20                            #   has-tool-blocks       (boolean: equals true/false)
+#       conditions:                             #   has-code-blocks       (boolean: equals true/false)
+#         - type: has-code-blocks               #   requested-model-family (string: contains/matches)
+#           operator: equals                    #   always                (no operator/value needed)
+#           value: "true"
+#     - name: "Always use haiku for quick tasks"
+#       target-model: "claude-haiku-4-5"
+#       priority: 100
+#       conditions:
+#         - type: always
+
 # When true, enable authentication for the WebSocket API (/v1/ws).
 ws-auth: false
 
