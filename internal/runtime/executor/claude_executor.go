@@ -14,6 +14,8 @@ import (
 	"io"
 	"net/http"
 	"net/textproto"
+	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -917,10 +919,24 @@ func should1MContext(auth *cliproxyauth.Auth, cfg *config.Config, model string) 
 	if cfg == nil || !cfg.Claude1MContext.Enabled {
 		return false
 	}
-	if auth == nil || auth.Attributes == nil {
+	if auth == nil {
 		return false
 	}
-	if !strings.EqualFold(strings.TrimSpace(auth.Attributes["enable_1m_context"]), "true") {
+	// Check Attributes first (set by synthesizer / PatchAuthFileFields),
+	// then fall back to Metadata (set by UploadAuthFile / registerAuthFromFile).
+	enabled := false
+	if auth.Attributes != nil {
+		enabled, _ = strconv.ParseBool(strings.TrimSpace(auth.Attributes["enable_1m_context"]))
+	}
+	if !enabled && auth.Metadata != nil {
+		switch v := auth.Metadata["enable_1m_context"].(type) {
+		case bool:
+			enabled = v
+		case string:
+			enabled, _ = strconv.ParseBool(strings.TrimSpace(v))
+		}
+	}
+	if !enabled {
 		return false
 	}
 	// If models whitelist is empty, allow all models.
