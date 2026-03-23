@@ -14,7 +14,6 @@ import (
 	"io"
 	"net/http"
 	"net/textproto"
-	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -768,36 +767,6 @@ func decodeResponseBody(body io.ReadCloser, contentEncoding string) (io.ReadClos
 	return body, nil
 }
 
-// mapStainlessOS maps runtime.GOOS to Stainless SDK OS names.
-func mapStainlessOS() string {
-	switch runtime.GOOS {
-	case "darwin":
-		return "MacOS"
-	case "windows":
-		return "Windows"
-	case "linux":
-		return "Linux"
-	case "freebsd":
-		return "FreeBSD"
-	default:
-		return "Other::" + runtime.GOOS
-	}
-}
-
-// mapStainlessArch maps runtime.GOARCH to Stainless SDK architecture names.
-func mapStainlessArch() string {
-	switch runtime.GOARCH {
-	case "amd64":
-		return "x64"
-	case "arm64":
-		return "arm64"
-	case "386":
-		return "x86"
-	default:
-		return "other::" + runtime.GOARCH
-	}
-}
-
 func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string, stream bool, extraBetas []string, cfg *config.Config, model string) {
 	hdrDefault := func(cfgVal, fallback string) string {
 		if cfgVal != "" {
@@ -923,12 +892,22 @@ func should1MContext(auth *cliproxyauth.Auth, cfg *config.Config, model string) 
 		return false
 	}
 	// Check Attributes first (set by synthesizer / PatchAuthFileFields),
-	// then fall back to Metadata (set by UploadAuthFile / registerAuthFromFile).
+	// then fall back to Metadata only when the attribute key is absent
+	// (set by UploadAuthFile / registerAuthFromFile).
+	// An explicit Attributes value (including "false") is authoritative.
 	enabled := false
 	if auth.Attributes != nil {
-		enabled, _ = strconv.ParseBool(strings.TrimSpace(auth.Attributes["enable_1m_context"]))
-	}
-	if !enabled && auth.Metadata != nil {
+		if attrVal, hasAttr := auth.Attributes["enable_1m_context"]; hasAttr {
+			enabled, _ = strconv.ParseBool(strings.TrimSpace(attrVal))
+		} else if auth.Metadata != nil {
+			switch v := auth.Metadata["enable_1m_context"].(type) {
+			case bool:
+				enabled = v
+			case string:
+				enabled, _ = strconv.ParseBool(strings.TrimSpace(v))
+			}
+		}
+	} else if auth.Metadata != nil {
 		switch v := auth.Metadata["enable_1m_context"].(type) {
 		case bool:
 			enabled = v
