@@ -921,6 +921,39 @@ func TestCleanJSONSchemaForGemini_RemovesGeminiUnsupportedMetadataFields(t *test
 	compareJSON(t, expected, result)
 }
 
+func TestCleanJSONSchemaForGemini_StripsUniqueItems(t *testing.T) {
+	input := `{
+		"type": "object",
+		"properties": {
+			"tags": {
+				"type": "array",
+				"items": {
+					"type": "string"
+				},
+				"uniqueItems": true
+			}
+		},
+		"required": ["tags"]
+	}`
+
+	expected := `{
+		"type": "object",
+		"properties": {
+			"tags": {
+				"type": "array",
+				"items": {
+					"type": "string"
+				},
+				"description": "uniqueItems: true"
+			}
+		},
+		"required": ["tags"]
+	}`
+
+	result := CleanJSONSchemaForGemini(input)
+	compareJSON(t, expected, result)
+}
+
 func TestRemoveExtensionFields(t *testing.T) {
 	tests := []struct {
 		name     string

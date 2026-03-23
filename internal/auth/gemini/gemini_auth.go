@@ -305,6 +305,9 @@ func (g *GeminiAuth) getTokenFromWeb(ctx context.Context, config *oauth2.Config,
 		defer manualPromptTimer.Stop()
 	}
 
+	var manualInputCh <-chan string
+	var manualInputErrCh <-chan error
+
 waitForCallback:
 	for {
 		select {
@@ -326,13 +329,17 @@ waitForCallback:
 				return nil, err
 			default:
 			}
-			input, err := opts.Prompt("Paste the Gemini callback URL (or press Enter to keep waiting): ")
-			if err != nil {
-				return nil, err
-			}
-			parsed, err := misc.ParseOAuthCallback(input)
-			if err != nil {
-				return nil, err
+			manualInputCh, manualInputErrCh = misc.AsyncPrompt(
+				opts.Prompt,
+				"Paste the Gemini callback URL (or press Enter to keep waiting): ",
+			)
+			continue
+		case input := <-manualInputCh:
+			manualInputCh = nil
+			manualInputErrCh = nil
+			parsed, errParse := misc.ParseOAuthCallback(input)
+			if errParse != nil {
+				return nil, errParse
 			}
 			if parsed == nil {
 				continue
@@ -345,6 +352,8 @@ waitForCallback:
 			}
 			authCode = parsed.Code
 			break waitForCallback
+		case errManual := <-manualInputErrCh:
+			return nil, errManual
 		case <-timeoutTimer.C:
 			return nil, fmt.Errorf("oauth flow timed out")
 		}
