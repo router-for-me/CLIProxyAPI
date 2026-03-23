@@ -30,6 +30,23 @@ type OAuthCallback struct {
 	ErrorDescription string
 }
 
+// AsyncPrompt runs a prompt function in a goroutine and returns channels for
+// the result. The returned channels are buffered (size 1) so the goroutine can
+// complete even if the caller abandons the channels.
+func AsyncPrompt(promptFn func(string) (string, error), message string) (<-chan string, <-chan error) {
+	inputCh := make(chan string, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		input, err := promptFn(message)
+		if err != nil {
+			errCh <- err
+			return
+		}
+		inputCh <- input
+	}()
+	return inputCh, errCh
+}
+
 // ParseOAuthCallback extracts OAuth parameters from a callback URL.
 // It returns nil when the input is empty.
 func ParseOAuthCallback(input string) (*OAuthCallback, error) {

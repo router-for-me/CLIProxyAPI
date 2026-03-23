@@ -12,8 +12,8 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 
 	inputResult := gjson.GetBytes(rawJSON, "input")
 	if inputResult.Type == gjson.String {
-		input, _ := sjson.Set(`[{"type":"message","role":"user","content":[{"type":"input_text","text":""}]}]`, "0.content.0.text", inputResult.String())
-		rawJSON, _ = sjson.SetRawBytes(rawJSON, "input", []byte(input))
+		input, _ := sjson.SetBytes([]byte(`[{"type":"message","role":"user","content":[{"type":"input_text","text":""}]}]`), "0.content.0.text", inputResult.String())
+		rawJSON, _ = sjson.SetRawBytes(rawJSON, "input", input)
 	}
 
 	rawJSON, _ = sjson.SetBytes(rawJSON, "stream", true)
