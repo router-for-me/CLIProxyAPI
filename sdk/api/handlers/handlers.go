@@ -6,6 +6,7 @@ package handlers
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -585,24 +586,29 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 		SourceFormat:    sdktranslator.FromString(handlerType),
 	}
 	opts.Metadata = reqMeta
-	streamResult, err := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
+	maxBootstrapRetries := StreamingBootstrapRetries(h.Cfg)
+	streamResult, initialBootstrapRetries, err := h.executeStreamWithBootstrapRetry(ctx, providers, req, opts, maxBootstrapRetries)
 	if err != nil {
-		errChan := make(chan *interfaces.ErrorMessage, 1)
-		status := http.StatusInternalServerError
-		if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
-			if code := se.StatusCode(); code > 0 {
-				status = code
+		if shouldWrapImmediateStreamError(err) {
+			streamResult = streamResultFromError(err)
+		} else {
+			errChan := make(chan *interfaces.ErrorMessage, 1)
+			status := http.StatusInternalServerError
+			if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
+				if code := se.StatusCode(); code > 0 {
+					status = code
+				}
 			}
-		}
-		var addon http.Header
-		if he, ok := err.(interface{ Headers() http.Header }); ok && he != nil {
-			if hdr := he.Headers(); hdr != nil {
-				addon = hdr.Clone()
+			var addon http.Header
+			if he, ok := err.(interface{ Headers() http.Header }); ok && he != nil {
+				if hdr := he.Headers(); hdr != nil {
+					addon = hdr.Clone()
+				}
 			}
+			errChan <- &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
+			close(errChan)
+			return nil, nil, errChan
 		}
-		errChan <- &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
-		close(errChan)
-		return nil, nil, errChan
 	}
 	passthroughHeadersEnabled := PassthroughHeadersEnabled(h.Cfg)
 	// Capture upstream headers from the initial connection synchronously before the goroutine starts.
@@ -621,8 +627,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 		defer close(dataChan)
 		defer close(errChan)
 		sentPayload := false
-		bootstrapRetries := 0
-		maxBootstrapRetries := StreamingBootstrapRetries(h.Cfg)
+		bootstrapRetries := initialBootstrapRetries
 
 		sendErr := func(msg *interfaces.ErrorMessage) bool {
 			if ctx == nil {
@@ -647,20 +652,6 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 				return false
 			case dataChan <- chunk:
 				return true
-			}
-		}
-
-		bootstrapEligible := func(err error) bool {
-			status := statusFromError(err)
-			if status == 0 {
-				return true
-			}
-			switch status {
-			case http.StatusUnauthorized, http.StatusForbidden, http.StatusPaymentRequired,
-				http.StatusRequestTimeout, http.StatusTooManyRequests:
-				return true
-			default:
-				return status >= http.StatusInternalServerError
 			}
 		}
 
@@ -699,7 +690,6 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 							streamErr = retryErr
 						}
 					}
-
 					status := http.StatusInternalServerError
 					if se, ok := streamErr.(interface{ StatusCode() int }); ok && se != nil {
 						if code := se.StatusCode(); code > 0 {
@@ -731,6 +721,65 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 		}
 	}()
 	return dataChan, upstreamHeaders, errChan
+}
+
+func (h *BaseAPIHandler) executeStreamWithBootstrapRetry(ctx context.Context, providers []string, req coreexecutor.Request, opts coreexecutor.Options, maxBootstrapRetries int) (*coreexecutor.StreamResult, int, error) {
+	bootstrapRetries := 0
+	for {
+		streamResult, err := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
+		if err == nil {
+			return streamResult, bootstrapRetries, nil
+		}
+		if ctx != nil && ctx.Err() != nil {
+			return nil, bootstrapRetries, ctx.Err()
+		}
+		if bootstrapRetries >= maxBootstrapRetries || !bootstrapEligible(err) {
+			return nil, bootstrapRetries, err
+		}
+		bootstrapRetries++
+	}
+}
+
+func bootstrapEligible(err error) bool {
+	status := statusFromError(err)
+	if status == 0 {
+		return true
+	}
+	switch status {
+	case http.StatusUnauthorized, http.StatusForbidden, http.StatusPaymentRequired,
+		http.StatusRequestTimeout, http.StatusTooManyRequests:
+		return true
+	default:
+		return status >= http.StatusInternalServerError
+	}
+}
+
+func shouldWrapImmediateStreamError(err error) bool {
+	if err == nil {
+		return false
+	}
+	status := statusFromError(err)
+	switch status {
+	case http.StatusBadRequest:
+		return !strings.Contains(err.Error(), "invalid_request_error")
+	case http.StatusUnprocessableEntity:
+		return false
+	}
+	var authErr *coreauth.Error
+	if errors.As(err, &authErr) && authErr != nil {
+		switch authErr.Code {
+		case "auth_not_found", "provider_not_found":
+			return false
+		}
+	}
+	return bootstrapEligible(err)
+}
+
+func streamResultFromError(err error) *coreexecutor.StreamResult {
+	errCh := make(chan coreexecutor.StreamChunk, 1)
+	errCh <- coreexecutor.StreamChunk{Err: err}
+	close(errCh)
+	return &coreexecutor.StreamResult{Chunks: errCh}
 }
 
 func validateSSEDataJSON(chunk []byte) error {
