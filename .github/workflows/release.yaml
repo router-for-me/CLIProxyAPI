@@ -2,9 +2,9 @@ name: goreleaser
 
 on:
   push:
-    # run only against tags
+    # run only against stable release tags
     tags:
-      - '*'
+      - 'v*'
 
 permissions:
   contents: write
