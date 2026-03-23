@@ -14,6 +14,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/routing"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher"
@@ -83,6 +84,9 @@ type Service struct {
 
 	// coreManager handles core authentication and execution.
 	coreManager *coreauth.Manager
+
+	// modelRouter provides dynamic model routing evaluation.
+	modelRouter *routing.Engine
 
 	// shutdownOnce ensures shutdown is called only once.
 	shutdownOnce sync.Once
@@ -521,7 +525,11 @@ func (s *Service) Run(ctx context.Context) error {
 	// legacy clients removed; no caches to refresh
 
 	// handlers no longer depend on legacy clients; pass nil slice initially
-	s.server = api.NewServer(s.cfg, s.coreManager, s.accessManager, s.configPath, s.serverOptions...)
+	opts := append([]api.ServerOption(nil), s.serverOptions...)
+	if s.modelRouter != nil {
+		opts = append(opts, api.WithModelRouter(s.modelRouter))
+	}
+	s.server = api.NewServer(s.cfg, s.coreManager, s.accessManager, s.configPath, opts...)
 
 	if s.authManager == nil {
 		s.authManager = newDefaultAuthManager()
