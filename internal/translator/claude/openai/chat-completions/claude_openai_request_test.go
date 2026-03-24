@@ -202,4 +202,10 @@ func TestConvertOpenAIRequestToClaude_MultipleSystemMessagesMergedIntoTopLevelSy
 	if len(messages) != 1 {
 		t.Fatalf("Expected 1 non-system message, got %d. Messages: %s", len(messages), resultJSON.Get("messages").Raw)
 	}
+	if got := messages[0].Get("role").String(); got != "user" {
+		t.Fatalf("Expected remaining message role %q, got %q", "user", got)
+	}
+	if got := messages[0].Get("content.0.text").String(); got != "Hello" {
+		t.Fatalf("Expected user text %q, got %q", "Hello", got)
+	}
 }
