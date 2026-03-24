@@ -106,6 +106,11 @@ request-retry: 3
 # Set to 0 to keep legacy behavior (try all available credentials).
 max-retry-credentials: 0
 
+# Maximum number of extra credential attempts after a caller-side request error
+# (for example invalid_request_error, invalid_json_schema, unsupported parameter,
+# or invalid image data). Set to 0 to stop immediately on the first such error.
+max-invalid-request-retries: 0
+
 # Maximum wait time in seconds for a cooled-down credential before triggering a retry.
 max-retry-interval: 30
 

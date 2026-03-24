@@ -14,7 +14,7 @@ import (
 
 func TestManager_ShouldRetryAfterError_RespectsAuthRequestRetryOverride(t *testing.T) {
 	m := NewManager(nil, nil, nil)
-	m.SetRetryConfig(3, 30*time.Second, 0)
+	m.SetRetryConfig(3, 30*time.Second, 0, 0)
 
 	model := "test-model"
 	next := time.Now().Add(5 * time.Second)
@@ -37,7 +37,7 @@ func TestManager_ShouldRetryAfterError_RespectsAuthRequestRetryOverride(t *testi
 		t.Fatalf("register auth: %v", errRegister)
 	}
 
-	_, _, maxWait := m.retrySettings()
+	_, _, maxWait, _ := m.retrySettings()
 	wait, shouldRetry := m.shouldRetryAfterError(&Error{HTTPStatus: 500, Message: "boom"}, 0, []string{"claude"}, model, maxWait)
 	if shouldRetry {
 		t.Fatalf("expected shouldRetry=false for request_retry=0, got true (wait=%v)", wait)
@@ -162,7 +162,7 @@ func newCredentialRetryLimitTestManager(t *testing.T, maxRetryCredentials int, a
 	}
 
 	m := NewManager(nil, nil, nil)
-	m.SetRetryConfig(0, 0, maxRetryCredentials)
+	m.SetRetryConfig(0, 0, maxRetryCredentials, 0)
 
 	executor := &credentialRetryLimitExecutor{id: "claude"}
 	m.RegisterExecutor(executor)
@@ -246,6 +246,248 @@ func TestManager_MaxRetryCredentials_ZeroUsesSafetyCap(t *testing.T) {
 	}
 	if calls := executor.Calls(); calls != unlimitedRetrySafetyCap {
 		t.Fatalf("expected %d calls with safety cap, got %d", unlimitedRetrySafetyCap, calls)
+	}
+}
+
+type requestInvalidRetryExecutor struct {
+	id         string
+	invalidErr error
+
+	mu              sync.Mutex
+	executeAuths    []string
+	countAuths      []string
+	streamAuths     []string
+	executeFailures int
+	countFailures   int
+	streamFailures  int
+}
+
+func (e *requestInvalidRetryExecutor) Identifier() string { return e.id }
+
+func (e *requestInvalidRetryExecutor) Execute(_ context.Context, auth *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	authID := ""
+	if auth != nil {
+		authID = auth.ID
+	}
+	e.mu.Lock()
+	e.executeAuths = append(e.executeAuths, authID)
+	shouldFail := e.executeFailures > 0
+	if shouldFail {
+		e.executeFailures--
+	}
+	e.mu.Unlock()
+	if shouldFail {
+		return cliproxyexecutor.Response{}, e.invalidErr
+	}
+	return cliproxyexecutor.Response{Payload: []byte(authID)}, nil
+}
+
+func (e *requestInvalidRetryExecutor) ExecuteStream(_ context.Context, auth *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	authID := ""
+	if auth != nil {
+		authID = auth.ID
+	}
+	e.mu.Lock()
+	e.streamAuths = append(e.streamAuths, authID)
+	shouldFail := e.streamFailures > 0
+	if shouldFail {
+		e.streamFailures--
+	}
+	e.mu.Unlock()
+	if shouldFail {
+		return nil, e.invalidErr
+	}
+	ch := make(chan cliproxyexecutor.StreamChunk, 1)
+	ch <- cliproxyexecutor.StreamChunk{Payload: []byte(authID)}
+	close(ch)
+	return &cliproxyexecutor.StreamResult{Chunks: ch}, nil
+}
+
+func (e *requestInvalidRetryExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) {
+	return auth, nil
+}
+
+func (e *requestInvalidRetryExecutor) CountTokens(_ context.Context, auth *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	authID := ""
+	if auth != nil {
+		authID = auth.ID
+	}
+	e.mu.Lock()
+	e.countAuths = append(e.countAuths, authID)
+	shouldFail := e.countFailures > 0
+	if shouldFail {
+		e.countFailures--
+	}
+	e.mu.Unlock()
+	if shouldFail {
+		return cliproxyexecutor.Response{}, e.invalidErr
+	}
+	return cliproxyexecutor.Response{Payload: []byte(authID)}, nil
+}
+
+func (e *requestInvalidRetryExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
+	return nil, nil
+}
+
+func (e *requestInvalidRetryExecutor) executeCalls() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return len(e.executeAuths)
+}
+
+func (e *requestInvalidRetryExecutor) countCalls() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return len(e.countAuths)
+}
+
+func (e *requestInvalidRetryExecutor) streamCalls() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return len(e.streamAuths)
+}
+
+func newRequestInvalidRetryTestManager(t *testing.T, maxInvalidRequestRetries int, invalidErr error) (*Manager, *requestInvalidRetryExecutor, []string) {
+	t.Helper()
+
+	m := NewManager(nil, nil, nil)
+	m.SetRetryConfig(0, 0, 0, maxInvalidRequestRetries)
+
+	authIDs := []string{uuid.NewString(), uuid.NewString()}
+	executor := &requestInvalidRetryExecutor{
+		id:              "claude",
+		invalidErr:      invalidErr,
+		executeFailures: 1,
+		countFailures:   1,
+		streamFailures:  1,
+	}
+	m.RegisterExecutor(executor)
+
+	reg := registry.GetGlobalRegistry()
+	for _, authID := range authIDs {
+		reg.RegisterClient(authID, "claude", []*registry.ModelInfo{{ID: "test-model"}})
+		if _, errRegister := m.Register(context.Background(), &Auth{ID: authID, Provider: "claude", Status: StatusActive}); errRegister != nil {
+			t.Fatalf("register auth %s: %v", authID, errRegister)
+		}
+	}
+	t.Cleanup(func() {
+		for _, authID := range authIDs {
+			reg.UnregisterClient(authID)
+		}
+	})
+
+	return m, executor, authIDs
+}
+
+func TestManager_MaxInvalidRequestRetries_LimitsCrossCredentialRetries(t *testing.T) {
+	invalidErr := &Error{HTTPStatus: http.StatusBadRequest, Message: `{"detail":"Unsupported parameter: model_context_window"}`}
+	request := cliproxyexecutor.Request{Model: "test-model"}
+
+	testCases := []struct {
+		name        string
+		invoke      func(*Manager) error
+		callCounter func(*requestInvalidRetryExecutor) int
+	}{
+		{
+			name: "execute",
+			invoke: func(m *Manager) error {
+				_, err := m.Execute(context.Background(), []string{"claude"}, request, cliproxyexecutor.Options{})
+				return err
+			},
+			callCounter: func(e *requestInvalidRetryExecutor) int { return e.executeCalls() },
+		},
+		{
+			name: "execute_count",
+			invoke: func(m *Manager) error {
+				_, err := m.ExecuteCount(context.Background(), []string{"claude"}, request, cliproxyexecutor.Options{})
+				return err
+			},
+			callCounter: func(e *requestInvalidRetryExecutor) int { return e.countCalls() },
+		},
+		{
+			name: "execute_stream",
+			invoke: func(m *Manager) error {
+				streamResult, err := m.ExecuteStream(context.Background(), []string{"claude"}, request, cliproxyexecutor.Options{})
+				if err != nil {
+					return err
+				}
+				for chunk := range streamResult.Chunks {
+					if chunk.Err != nil {
+						return chunk.Err
+					}
+				}
+				return nil
+			},
+			callCounter: func(e *requestInvalidRetryExecutor) int { return e.streamCalls() },
+		},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			immediateManager, immediateExecutor, authIDs := newRequestInvalidRetryTestManager(t, 0, invalidErr)
+			if err := tc.invoke(immediateManager); err == nil || err.Error() != invalidErr.Error() {
+				t.Fatalf("invoke immediate error = %v, want %v", err, invalidErr)
+			}
+			if calls := tc.callCounter(immediateExecutor); calls != 1 {
+				t.Fatalf("expected 1 call with max-invalid-request-retries=0, got %d", calls)
+			}
+			for _, authID := range authIDs {
+				auth, ok := immediateManager.GetByID(authID)
+				if !ok || auth == nil {
+					t.Fatalf("expected auth %s to remain registered", authID)
+				}
+				if auth.Status != StatusActive || auth.Unavailable || auth.LastError != nil {
+					t.Fatalf("invalid request should not poison auth state, auth=%s status=%q unavailable=%v lastError=%v", authID, auth.Status, auth.Unavailable, auth.LastError)
+				}
+			}
+
+			retryManager, retryExecutor, _ := newRequestInvalidRetryTestManager(t, 1, invalidErr)
+			if err := tc.invoke(retryManager); err != nil {
+				t.Fatalf("invoke retry: %v", err)
+			}
+			if calls := tc.callCounter(retryExecutor); calls != 2 {
+				t.Fatalf("expected 2 calls with max-invalid-request-retries=1, got %d", calls)
+			}
+		})
+	}
+}
+
+func TestIsRequestInvalidError_DetectsRequestShapeBodies(t *testing.T) {
+	testCases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "detail_unsupported_parameter",
+			err:  &Error{HTTPStatus: http.StatusBadRequest, Message: `{"detail":"Unsupported parameter: model_context_window"}`},
+			want: true,
+		},
+		{
+			name: "invalid_json_schema_code",
+			err:  &Error{HTTPStatus: http.StatusBadRequest, Message: `{"error":{"code":"invalid_json_schema","message":"Invalid schema for response_format 'codex_output_schema'","param":"text.format.schema","type":"invalid_request_error"}}`},
+			want: true,
+		},
+		{
+			name: "invalid_value_code",
+			err:  &Error{HTTPStatus: http.StatusBadRequest, Message: `{"error":{"code":"invalid_value","message":"The image data you provided does not represent a valid image.","param":"input","type":"invalid_request_error"}}`},
+			want: true,
+		},
+		{
+			name: "generic_bad_request",
+			err:  &Error{HTTPStatus: http.StatusBadRequest, Message: `{"error":{"code":"model_not_found","message":"model does not exist"}}`},
+			want: false,
+		},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isRequestInvalidError(tc.err); got != tc.want {
+				t.Fatalf("isRequestInvalidError() = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 

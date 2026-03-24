@@ -656,7 +656,7 @@ func TestManagerExecute_OpenAICompatAliasPoolBlockedAuthDoesNotConsumeRetryBudge
 	}
 	m := NewManager(nil, nil, nil)
 	m.SetConfig(cfg)
-	m.SetRetryConfig(0, 0, 1)
+	m.SetRetryConfig(0, 0, 1, 0)
 
 	executor := &authScopedOpenAICompatPoolExecutor{id: "pool"}
 	m.RegisterExecutor(executor)

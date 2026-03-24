@@ -146,9 +146,10 @@ type Manager struct {
 	providerOffsets map[string]int
 
 	// Retry controls request retry behavior.
-	requestRetry        atomic.Int32
-	maxRetryCredentials atomic.Int32
-	maxRetryInterval    atomic.Int64
+	requestRetry             atomic.Int32
+	maxRetryCredentials      atomic.Int32
+	maxInvalidRequestRetries atomic.Int32
+	maxRetryInterval         atomic.Int64
 
 	// oauthModelAlias stores global OAuth model alias mappings (alias -> upstream name) keyed by channel.
 	oauthModelAlias atomic.Value
@@ -677,10 +678,11 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			}
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
 			result.RetryAfter = retryAfterFromError(errStream)
-			m.MarkResult(ctx, result)
 			if isRequestInvalidError(errStream) {
+				m.Hook().OnResult(ctx, result)
 				return nil, errStream
 			}
+			m.MarkResult(ctx, result)
 			lastErr = errStream
 			continue
 		}
@@ -698,7 +700,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				}
 				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
 				result.RetryAfter = retryAfterFromError(bootstrapErr)
-				m.MarkResult(ctx, result)
+				m.Hook().OnResult(ctx, result)
 				discardStreamChunks(streamResult.Chunks)
 				return nil, bootstrapErr
 			}
@@ -872,8 +874,9 @@ func compileAPIKeyModelAliasForModels[T interface {
 	}
 }
 
-// SetRetryConfig updates retry attempts, credential retry limit and cooldown wait interval.
-func (m *Manager) SetRetryConfig(retry int, maxRetryInterval time.Duration, maxRetryCredentials int) {
+// SetRetryConfig updates retry attempts, credential retry limit, caller-error retry
+// limit, and cooldown wait interval.
+func (m *Manager) SetRetryConfig(retry int, maxRetryInterval time.Duration, maxRetryCredentials int, maxInvalidRequestRetries int) {
 	if m == nil {
 		return
 	}
@@ -883,11 +886,15 @@ func (m *Manager) SetRetryConfig(retry int, maxRetryInterval time.Duration, maxR
 	if maxRetryCredentials < 0 {
 		maxRetryCredentials = 0
 	}
+	if maxInvalidRequestRetries < 0 {
+		maxInvalidRequestRetries = 0
+	}
 	if maxRetryInterval < 0 {
 		maxRetryInterval = 0
 	}
 	m.requestRetry.Store(int32(retry))
 	m.maxRetryCredentials.Store(int32(maxRetryCredentials))
+	m.maxInvalidRequestRetries.Store(int32(maxInvalidRequestRetries))
 	m.maxRetryInterval.Store(maxRetryInterval.Nanoseconds())
 }
 
@@ -1018,11 +1025,11 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
 
-	_, maxRetryCredentials, maxWait := m.retrySettings()
+	_, maxRetryCredentials, maxWait, maxInvalidRequestRetries := m.retrySettings()
 
 	var lastErr error
 	for attempt := 0; ; attempt++ {
-		resp, errExec := m.executeMixedOnce(ctx, normalized, req, opts, maxRetryCredentials)
+		resp, errExec := m.executeMixedOnce(ctx, normalized, req, opts, maxRetryCredentials, maxInvalidRequestRetries)
 		if errExec == nil {
 			return resp, nil
 		}
@@ -1049,11 +1056,11 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
 
-	_, maxRetryCredentials, maxWait := m.retrySettings()
+	_, maxRetryCredentials, maxWait, maxInvalidRequestRetries := m.retrySettings()
 
 	var lastErr error
 	for attempt := 0; ; attempt++ {
-		resp, errExec := m.executeCountMixedOnce(ctx, normalized, req, opts, maxRetryCredentials)
+		resp, errExec := m.executeCountMixedOnce(ctx, normalized, req, opts, maxRetryCredentials, maxInvalidRequestRetries)
 		if errExec == nil {
 			return resp, nil
 		}
@@ -1080,11 +1087,11 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		return nil, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
 
-	_, maxRetryCredentials, maxWait := m.retrySettings()
+	_, maxRetryCredentials, maxWait, maxInvalidRequestRetries := m.retrySettings()
 
 	var lastErr error
 	for attempt := 0; ; attempt++ {
-		result, errStream := m.executeStreamMixedOnce(ctx, normalized, req, opts, maxRetryCredentials)
+		result, errStream := m.executeStreamMixedOnce(ctx, normalized, req, opts, maxRetryCredentials, maxInvalidRequestRetries)
 		if errStream == nil {
 			return result, nil
 		}
@@ -1103,7 +1110,7 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 	return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 }
 
-func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, maxRetryCredentials int) (cliproxyexecutor.Response, error) {
+func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, maxRetryCredentials int, maxInvalidRequestRetries int) (cliproxyexecutor.Response, error) {
 	if len(providers) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
@@ -1113,8 +1120,16 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 	attempted := make(map[string]struct{})
 	credentialRetryLimit := effectiveCredentialRetryLimit(maxRetryCredentials)
 	var lastErr error
+	var requestInvalidErr error
+	invalidRetryAttempts := 0
 	for {
+		if requestInvalidErr != nil && invalidRetryAttempts >= maxInvalidRequestRetries {
+			return cliproxyexecutor.Response{}, requestInvalidErr
+		}
 		if credentialRetryLimit > 0 && len(attempted) >= credentialRetryLimit {
+			if requestInvalidErr != nil {
+				return cliproxyexecutor.Response{}, requestInvalidErr
+			}
 			if lastErr != nil {
 				return cliproxyexecutor.Response{}, lastErr
 			}
@@ -1122,10 +1137,16 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		}
 		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, opts, tried)
 		if errPick != nil {
+			if requestInvalidErr != nil {
+				return cliproxyexecutor.Response{}, requestInvalidErr
+			}
 			if lastErr != nil {
 				return cliproxyexecutor.Response{}, lastErr
 			}
 			return cliproxyexecutor.Response{}, errPick
+		}
+		if requestInvalidErr != nil {
+			invalidRetryAttempts++
 		}
 
 		entry := logEntryWithRequestID(ctx)
@@ -1162,10 +1183,12 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				if ra := retryAfterFromError(errExec); ra != nil {
 					result.RetryAfter = ra
 				}
-				m.MarkResult(execCtx, result)
 				if isRequestInvalidError(errExec) {
-					return cliproxyexecutor.Response{}, errExec
+					m.Hook().OnResult(execCtx, result)
+					authErr = errExec
+					break
 				}
+				m.MarkResult(execCtx, result)
 				authErr = errExec
 				continue
 			}
@@ -1174,7 +1197,11 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		}
 		if authErr != nil {
 			if isRequestInvalidError(authErr) {
-				return cliproxyexecutor.Response{}, authErr
+				requestInvalidErr = authErr
+				if maxInvalidRequestRetries == 0 || invalidRetryAttempts >= maxInvalidRequestRetries {
+					return cliproxyexecutor.Response{}, authErr
+				}
+				continue
 			}
 			lastErr = authErr
 			continue
@@ -1182,7 +1209,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 	}
 }
 
-func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, maxRetryCredentials int) (cliproxyexecutor.Response, error) {
+func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, maxRetryCredentials int, maxInvalidRequestRetries int) (cliproxyexecutor.Response, error) {
 	if len(providers) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
@@ -1192,8 +1219,16 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 	attempted := make(map[string]struct{})
 	credentialRetryLimit := effectiveCredentialRetryLimit(maxRetryCredentials)
 	var lastErr error
+	var requestInvalidErr error
+	invalidRetryAttempts := 0
 	for {
+		if requestInvalidErr != nil && invalidRetryAttempts >= maxInvalidRequestRetries {
+			return cliproxyexecutor.Response{}, requestInvalidErr
+		}
 		if credentialRetryLimit > 0 && len(attempted) >= credentialRetryLimit {
+			if requestInvalidErr != nil {
+				return cliproxyexecutor.Response{}, requestInvalidErr
+			}
 			if lastErr != nil {
 				return cliproxyexecutor.Response{}, lastErr
 			}
@@ -1201,10 +1236,16 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		}
 		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, opts, tried)
 		if errPick != nil {
+			if requestInvalidErr != nil {
+				return cliproxyexecutor.Response{}, requestInvalidErr
+			}
 			if lastErr != nil {
 				return cliproxyexecutor.Response{}, lastErr
 			}
 			return cliproxyexecutor.Response{}, errPick
+		}
+		if requestInvalidErr != nil {
+			invalidRetryAttempts++
 		}
 
 		entry := logEntryWithRequestID(ctx)
@@ -1241,10 +1282,12 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				if ra := retryAfterFromError(errExec); ra != nil {
 					result.RetryAfter = ra
 				}
-				m.MarkResult(execCtx, result)
 				if isRequestInvalidError(errExec) {
-					return cliproxyexecutor.Response{}, errExec
+					m.Hook().OnResult(execCtx, result)
+					authErr = errExec
+					break
 				}
+				m.MarkResult(execCtx, result)
 				authErr = errExec
 				continue
 			}
@@ -1253,7 +1296,11 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		}
 		if authErr != nil {
 			if isRequestInvalidError(authErr) {
-				return cliproxyexecutor.Response{}, authErr
+				requestInvalidErr = authErr
+				if maxInvalidRequestRetries == 0 || invalidRetryAttempts >= maxInvalidRequestRetries {
+					return cliproxyexecutor.Response{}, authErr
+				}
+				continue
 			}
 			lastErr = authErr
 			continue
@@ -1261,7 +1308,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 	}
 }
 
-func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, maxRetryCredentials int) (*cliproxyexecutor.StreamResult, error) {
+func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, maxRetryCredentials int, maxInvalidRequestRetries int) (*cliproxyexecutor.StreamResult, error) {
 	if len(providers) == 0 {
 		return nil, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
@@ -1271,8 +1318,16 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	attempted := make(map[string]struct{})
 	credentialRetryLimit := effectiveCredentialRetryLimit(maxRetryCredentials)
 	var lastErr error
+	var requestInvalidErr error
+	invalidRetryAttempts := 0
 	for {
+		if requestInvalidErr != nil && invalidRetryAttempts >= maxInvalidRequestRetries {
+			return nil, requestInvalidErr
+		}
 		if credentialRetryLimit > 0 && len(attempted) >= credentialRetryLimit {
+			if requestInvalidErr != nil {
+				return nil, requestInvalidErr
+			}
 			if lastErr != nil {
 				var bootstrapErr *streamBootstrapError
 				if errors.As(lastErr, &bootstrapErr) && bootstrapErr != nil {
@@ -1284,6 +1339,9 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		}
 		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, opts, tried)
 		if errPick != nil {
+			if requestInvalidErr != nil {
+				return nil, requestInvalidErr
+			}
 			if lastErr != nil {
 				var bootstrapErr *streamBootstrapError
 				if errors.As(lastErr, &bootstrapErr) && bootstrapErr != nil {
@@ -1292,6 +1350,9 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				return nil, lastErr
 			}
 			return nil, errPick
+		}
+		if requestInvalidErr != nil {
+			invalidRetryAttempts++
 		}
 
 		entry := logEntryWithRequestID(ctx)
@@ -1315,7 +1376,11 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				return nil, errCtx
 			}
 			if isRequestInvalidError(errStream) {
-				return nil, errStream
+				requestInvalidErr = errStream
+				if maxInvalidRequestRetries == 0 || invalidRetryAttempts >= maxInvalidRequestRetries {
+					return nil, errStream
+				}
+				continue
 			}
 			lastErr = errStream
 			continue
@@ -1642,11 +1707,11 @@ func (m *Manager) normalizeProviders(providers []string) []string {
 	return result
 }
 
-func (m *Manager) retrySettings() (int, int, time.Duration) {
+func (m *Manager) retrySettings() (int, int, time.Duration, int) {
 	if m == nil {
-		return 0, 0, 0
+		return 0, 0, 0, 0
 	}
-	return int(m.requestRetry.Load()), int(m.maxRetryCredentials.Load()), time.Duration(m.maxRetryInterval.Load())
+	return int(m.requestRetry.Load()), int(m.maxRetryCredentials.Load()), time.Duration(m.maxRetryInterval.Load()), int(m.maxInvalidRequestRetries.Load())
 }
 
 func effectiveCredentialRetryLimit(maxRetryCredentials int) int {
@@ -2149,11 +2214,11 @@ func isModelSupportResultError(err *Error) bool {
 	return isModelSupportErrorMessage(err.Message)
 }
 
-// isRequestInvalidError returns true if the error represents a client request
-// error that should not be retried. Specifically, it treats 400 responses with
-// "invalid_request_error" and all 422 responses as request-shape failures,
-// where switching auths or pooled upstream models will not help. Model-support
-// errors are excluded so routing can fall through to another auth or upstream.
+// isRequestInvalidError returns true if the error represents a caller-side
+// request-shape failure that should not keep poisoning auth state. Model-support
+// failures remain eligible for auth/upstream fallback, but 422 responses and
+// caller-side 400 validation signals such as invalid_request_error,
+// invalid_json_schema, or unsupported parameters are treated as request-invalid.
 func isRequestInvalidError(err error) bool {
 	if err == nil {
 		return false
@@ -2164,12 +2229,88 @@ func isRequestInvalidError(err error) bool {
 	status := statusCodeFromError(err)
 	switch status {
 	case http.StatusBadRequest:
-		return strings.Contains(err.Error(), "invalid_request_error")
+		return isRequestInvalidBody(err.Error())
 	case http.StatusUnprocessableEntity:
 		return true
 	default:
 		return false
 	}
+}
+
+type requestInvalidBody struct {
+	Detail  string `json:"detail"`
+	Message string `json:"message"`
+	Type    string `json:"type"`
+	Error   struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+		Param   string `json:"param"`
+		Type    string `json:"type"`
+	} `json:"error"`
+}
+
+func isRequestInvalidBody(raw string) bool {
+	text := strings.TrimSpace(raw)
+	if text == "" {
+		return false
+	}
+	if hasRequestInvalidSignal(text) {
+		return true
+	}
+
+	var payload requestInvalidBody
+	if err := json.Unmarshal([]byte(text), &payload); err != nil {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(payload.Type), "invalid_request_error") {
+		return true
+	}
+	if strings.EqualFold(strings.TrimSpace(payload.Error.Type), "invalid_request_error") {
+		return true
+	}
+	if hasRequestInvalidCode(payload.Error.Code) {
+		return true
+	}
+	if hasRequestInvalidSignal(payload.Detail) || hasRequestInvalidSignal(payload.Message) || hasRequestInvalidSignal(payload.Error.Message) {
+		return true
+	}
+	return strings.TrimSpace(payload.Error.Param) != "" && (hasRequestInvalidCode(payload.Error.Code) || hasRequestInvalidSignal(payload.Error.Message))
+}
+
+func hasRequestInvalidCode(code string) bool {
+	code = strings.TrimSpace(strings.ToLower(code))
+	if code == "" {
+		return false
+	}
+	return strings.HasPrefix(code, "invalid_") || strings.HasPrefix(code, "unsupported_")
+}
+
+func hasRequestInvalidSignal(text string) bool {
+	lower := strings.TrimSpace(strings.ToLower(text))
+	if lower == "" {
+		return false
+	}
+	signals := []string{
+		"invalid_request_error",
+		"invalid_json_schema",
+		"invalid schema",
+		"unsupported parameter",
+		"unsupported field",
+		"unknown parameter",
+		"unknown field",
+		"invalid value",
+		"invalid_value",
+		"does not represent a valid image",
+		"supported image formats",
+		"malformed payload",
+		"unrecognized request argument",
+	}
+	for _, signal := range signals {
+		if strings.Contains(lower, signal) {
+			return true
+		}
+	}
+	return false
 }
 
 func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time) {
