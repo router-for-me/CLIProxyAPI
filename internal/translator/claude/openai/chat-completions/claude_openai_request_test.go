@@ -209,3 +209,37 @@ func TestConvertOpenAIRequestToClaude_MultipleSystemMessagesMergedIntoTopLevelSy
 		t.Fatalf("Expected user text %q, got %q", "Hello", got)
 	}
 }
+
+func TestConvertOpenAIRequestToClaude_SystemOnlyInputKeepsFallbackUserMessage(t *testing.T) {
+	inputJSON := `{
+		"model": "gpt-4.1",
+		"messages": [
+			{"role": "system", "content": "You are a helpful assistant."}
+		]
+	}`
+
+	result := ConvertOpenAIRequestToClaude("claude-sonnet-4-5", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+
+	system := resultJSON.Get("system").Array()
+	if len(system) != 1 {
+		t.Fatalf("Expected 1 system block, got %d. System: %s", len(system), resultJSON.Get("system").Raw)
+	}
+	if got := system[0].Get("text").String(); got != "You are a helpful assistant." {
+		t.Fatalf("Expected system text %q, got %q", "You are a helpful assistant.", got)
+	}
+
+	messages := resultJSON.Get("messages").Array()
+	if len(messages) != 1 {
+		t.Fatalf("Expected 1 fallback message, got %d. Messages: %s", len(messages), resultJSON.Get("messages").Raw)
+	}
+	if got := messages[0].Get("role").String(); got != "user" {
+		t.Fatalf("Expected fallback message role %q, got %q", "user", got)
+	}
+	if got := messages[0].Get("content.0.type").String(); got != "text" {
+		t.Fatalf("Expected fallback content type %q, got %q", "text", got)
+	}
+	if got := messages[0].Get("content.0.text").String(); got != "" {
+		t.Fatalf("Expected fallback text %q, got %q", "", got)
+	}
+}
