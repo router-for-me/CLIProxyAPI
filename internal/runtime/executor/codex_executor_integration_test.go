@@ -6,8 +6,12 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
+	"runtime/debug"
+	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -130,6 +134,53 @@ func TestCodexExecutorExecute_LocalServer_SucceedsWithoutTerminalNewline(t *test
 	}
 	if gotText := gjson.GetBytes(resp.Payload, "output.0.content.0.text").String(); gotText != "ok-no-newline" {
 		t.Fatalf("response text = %q, want %q", gotText, "ok-no-newline")
+	}
+}
+
+func TestCodexExecutorExecute_LocalServer_ReturnsAfterCompletedBeforeUpstreamCloses(t *testing.T) {
+	t.Parallel()
+
+	clientClosed := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+		_, _ = io.WriteString(w, "data: {\"type\":\"response.created\"}\n")
+		_, _ = io.WriteString(w, "data: "+codexCompletedEventJSON("resp_early_return", "gpt-5.4", "ok-early-return")+"\n")
+		if flusher != nil {
+			flusher.Flush()
+		}
+
+		select {
+		case <-r.Context().Done():
+			clientClosed <- struct{}{}
+		case <-time.After(1500 * time.Millisecond):
+		}
+	}))
+	defer server.Close()
+
+	executor := NewCodexExecutor(&config.Config{})
+	started := time.Now()
+	resp, err := executor.Execute(
+		context.Background(),
+		newCodexTestAuth(server.URL, "early-return-key"),
+		newCodexResponsesRequest("return immediately after completed event"),
+		cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-response")},
+	)
+	elapsed := time.Since(started)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if gotText := gjson.GetBytes(resp.Payload, "output.0.content.0.text").String(); gotText != "ok-early-return" {
+		t.Fatalf("response text = %q, want %q", gotText, "ok-early-return")
+	}
+	if elapsed >= 1200*time.Millisecond {
+		t.Fatalf("Execute() elapsed = %s, want < 1.2s", elapsed)
+	}
+
+	select {
+	case <-clientClosed:
+	case <-time.After(800 * time.Millisecond):
+		t.Fatal("expected Execute() to close upstream body after response.completed")
 	}
 }
 
@@ -533,6 +584,279 @@ func TestCodexExecutorExecute_LocalServer_ConcurrentMixedAccountsRemainIsolated_
 	}
 }
 
+func TestCodexExecutorExecute_LocalServer_SustainsOver6KRPM_MixedLongRequests(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping 6k RPM stress test in short mode")
+	}
+
+	type stressScenario struct {
+		key            string
+		long           bool
+		wantStatusCode int
+		wantRetryAfter time.Duration
+	}
+
+	const (
+		totalRequests = 768
+		workerCount   = 160
+		successDelay  = 1800 * time.Millisecond
+		errorDelay    = 300 * time.Millisecond
+		targetRPM     = 6000.0
+	)
+
+	scenarios := []stressScenario{
+		{key: "success-a", long: true, wantStatusCode: http.StatusOK},
+		{key: "success-b", long: false, wantStatusCode: http.StatusOK},
+		{key: "success-a", long: true, wantStatusCode: http.StatusOK},
+		{key: "success-b", long: true, wantStatusCode: http.StatusOK},
+		{key: "success-a", long: false, wantStatusCode: http.StatusOK},
+		{key: "invalid-401", long: false, wantStatusCode: http.StatusUnauthorized},
+		{key: "quota-429", long: true, wantStatusCode: http.StatusTooManyRequests, wantRetryAfter: 9 * time.Second},
+		{key: "upstream-502", long: false, wantStatusCode: http.StatusBadGateway},
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if gotRole := gjson.GetBytes(body, "input.0.role").String(); gotRole != "developer" {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = io.WriteString(w, `{"error":{"type":"bad_request","message":"system role was not rewritten"}}`)
+			return
+		}
+
+		prompt := gjson.GetBytes(body, "input.1.content.0.text").String()
+		marker := prompt
+		if strings.HasPrefix(prompt, "marker=") {
+			if len(prompt) < 60_000 {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = io.WriteString(w, `{"error":{"type":"bad_request","message":"request was not long enough"}}`)
+				return
+			}
+			marker = extractLongPromptMarker(prompt)
+			if marker == "" {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = io.WriteString(w, `{"error":{"type":"bad_request","message":"marker missing from long request"}}`)
+				return
+			}
+		}
+
+		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		switch token {
+		case "success-a", "success-b":
+			time.Sleep(successDelay)
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = io.WriteString(w, "data: "+codexCompletedEventJSON("resp_"+token, "gpt-5.4", "ack:"+marker)+"\n")
+		case "invalid-401":
+			time.Sleep(errorDelay)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = io.WriteString(w, `{"error":{"type":"invalid_api_key","message":"unauthorized"}}`)
+		case "quota-429":
+			time.Sleep(errorDelay)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = io.WriteString(w, `{"error":{"type":"usage_limit_reached","resets_in_seconds":9}}`)
+		case "upstream-502":
+			time.Sleep(errorDelay)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = io.WriteString(w, `{"error":{"type":"upstream_error","message":"bad gateway"}}`)
+		default:
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = io.WriteString(w, `{"error":{"type":"unexpected_token"}}`)
+		}
+	}))
+	defer server.Close()
+
+	runtime.GC()
+	debug.FreeOSMemory()
+	var before runtime.MemStats
+	runtime.ReadMemStats(&before)
+
+	executor := NewCodexExecutor(&config.Config{})
+	jobs := make(chan int)
+	start := make(chan struct{})
+	errCh := make(chan error, totalRequests)
+
+	var (
+		wg           sync.WaitGroup
+		inflight     atomic.Int64
+		peakInflight atomic.Int64
+		successes    atomic.Int64
+		unauthorized atomic.Int64
+		quota        atomic.Int64
+		badGateway   atomic.Int64
+		latMu        sync.Mutex
+		latencies    = make([]time.Duration, 0, totalRequests)
+	)
+
+	samplerDone := make(chan struct{})
+	peakSampleCh := startCodexStressSampler(samplerDone, &inflight)
+
+	for worker := 0; worker < workerCount; worker++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			for index := range jobs {
+				scenario := scenarios[index%len(scenarios)]
+				marker := fmt.Sprintf("stress-%d", index)
+
+				var req cliproxyexecutor.Request
+				if scenario.long {
+					req = newLongCodexResponsesRequest(marker)
+				} else {
+					req = newCodexResponsesRequest(marker)
+				}
+
+				currentInflight := inflight.Add(1)
+				updateAtomicMaxInt64(&peakInflight, currentInflight)
+				started := time.Now()
+				resp, err := executor.Execute(
+					context.Background(),
+					newCodexTestAuth(server.URL, scenario.key),
+					req,
+					cliproxyexecutor.Options{
+						SourceFormat: sdktranslator.FromString("openai-response"),
+						Metadata: map[string]any{
+							cliproxyexecutor.RequestedModelMetadataKey: "gpt-5.4",
+						},
+					},
+				)
+				duration := time.Since(started)
+				inflight.Add(-1)
+
+				latMu.Lock()
+				latencies = append(latencies, duration)
+				latMu.Unlock()
+
+				if scenario.wantStatusCode == http.StatusOK {
+					if err != nil {
+						errCh <- fmt.Errorf("%s: Execute() unexpected error = %v", scenario.key, err)
+						continue
+					}
+					if gotText := gjson.GetBytes(resp.Payload, "output.0.content.0.text").String(); gotText != "ack:"+marker {
+						errCh <- fmt.Errorf("%s: response text = %q, want %q", scenario.key, gotText, "ack:"+marker)
+						continue
+					}
+					successes.Add(1)
+					continue
+				}
+
+				if err == nil {
+					errCh <- fmt.Errorf("%s: expected error with status %d, got nil", scenario.key, scenario.wantStatusCode)
+					continue
+				}
+				statusErr, ok := err.(codexStatusError)
+				if !ok {
+					errCh <- fmt.Errorf("%s: error type = %T, want status error", scenario.key, err)
+					continue
+				}
+				if statusErr.StatusCode() != scenario.wantStatusCode {
+					errCh <- fmt.Errorf("%s: status code = %d, want %d", scenario.key, statusErr.StatusCode(), scenario.wantStatusCode)
+					continue
+				}
+				if scenario.wantRetryAfter > 0 {
+					retryAfter := statusErr.RetryAfter()
+					if retryAfter == nil || *retryAfter != scenario.wantRetryAfter {
+						if retryAfter == nil {
+							errCh <- fmt.Errorf("%s: RetryAfter = nil, want %v", scenario.key, scenario.wantRetryAfter)
+							continue
+						}
+						errCh <- fmt.Errorf("%s: RetryAfter = %v, want %v", scenario.key, *retryAfter, scenario.wantRetryAfter)
+						continue
+					}
+				}
+
+				switch scenario.wantStatusCode {
+				case http.StatusUnauthorized:
+					unauthorized.Add(1)
+				case http.StatusTooManyRequests:
+					quota.Add(1)
+				case http.StatusBadGateway:
+					badGateway.Add(1)
+				}
+			}
+		}()
+	}
+
+	begin := time.Now()
+	close(start)
+	for i := 0; i < totalRequests; i++ {
+		jobs <- i
+	}
+	close(jobs)
+	wg.Wait()
+	elapsed := time.Since(begin)
+	close(samplerDone)
+	peakSample := <-peakSampleCh
+	close(errCh)
+
+	for err := range errCh {
+		t.Error(err)
+	}
+	if t.Failed() {
+		return
+	}
+
+	runtime.GC()
+	debug.FreeOSMemory()
+	var after runtime.MemStats
+	runtime.ReadMemStats(&after)
+
+	rpm := float64(totalRequests) / elapsed.Seconds() * 60
+	if rpm < targetRPM {
+		t.Fatalf("throughput = %.0f rpm, want >= %.0f rpm", rpm, targetRPM)
+	}
+
+	var expectedSuccesses, expected401, expected429, expected502 int
+	for i := 0; i < totalRequests; i++ {
+		switch scenarios[i%len(scenarios)].wantStatusCode {
+		case http.StatusOK:
+			expectedSuccesses++
+		case http.StatusUnauthorized:
+			expected401++
+		case http.StatusTooManyRequests:
+			expected429++
+		case http.StatusBadGateway:
+			expected502++
+		}
+	}
+	if got := successes.Load(); got != int64(expectedSuccesses) {
+		t.Fatalf("successes = %d, want %d", got, expectedSuccesses)
+	}
+	if got := unauthorized.Load(); got != int64(expected401) {
+		t.Fatalf("401 count = %d, want %d", got, expected401)
+	}
+	if got := quota.Load(); got != int64(expected429) {
+		t.Fatalf("429 count = %d, want %d", got, expected429)
+	}
+	if got := badGateway.Load(); got != int64(expected502) {
+		t.Fatalf("502 count = %d, want %d", got, expected502)
+	}
+
+	p50 := percentileDuration(latencies, 0.50)
+	p95 := percentileDuration(latencies, 0.95)
+	p99 := percentileDuration(latencies, 0.99)
+
+	t.Logf(
+		"6k rpm codex stress: requests=%d workers=%d elapsed=%s rpm=%.0f peak_inflight=%d sampler_peak_inflight=%d p50=%s p95=%s p99=%s heap_alloc_before=%d heap_alloc_after=%d peak_heap_alloc=%d peak_heap_inuse=%d peak_goroutines=%d",
+		totalRequests,
+		workerCount,
+		elapsed,
+		rpm,
+		peakInflight.Load(),
+		peakSample.Inflight,
+		p50,
+		p95,
+		p99,
+		before.HeapAlloc,
+		after.HeapAlloc,
+		peakSample.HeapAlloc,
+		peakSample.HeapInuse,
+		peakSample.Goroutines,
+	)
+}
+
 func BenchmarkCodexExecutorExecute_LocalServerParallel(b *testing.B) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -656,4 +980,72 @@ func extractLongPromptMarker(prompt string) string {
 
 func codexCompletedEventJSON(id, model, text string) string {
 	return fmt.Sprintf(`{"type":"response.completed","response":{"id":%q,"object":"response","model":%q,"status":"completed","output":[{"type":"message","id":"msg_%s","role":"assistant","content":[{"type":"output_text","text":%q}]}],"usage":{"input_tokens":3,"output_tokens":5,"total_tokens":8}}}`, id, model, id, text)
+}
+
+type codexStressHighWater struct {
+	HeapAlloc  uint64
+	HeapInuse  uint64
+	Goroutines int
+	Inflight   int64
+}
+
+func startCodexStressSampler(done <-chan struct{}, inflight *atomic.Int64) <-chan codexStressHighWater {
+	result := make(chan codexStressHighWater, 1)
+	go func() {
+		ticker := time.NewTicker(50 * time.Millisecond)
+		defer ticker.Stop()
+
+		var peak codexStressHighWater
+		sample := func() {
+			var ms runtime.MemStats
+			runtime.ReadMemStats(&ms)
+			if ms.HeapAlloc > peak.HeapAlloc {
+				peak.HeapAlloc = ms.HeapAlloc
+			}
+			if ms.HeapInuse > peak.HeapInuse {
+				peak.HeapInuse = ms.HeapInuse
+			}
+			if goroutines := runtime.NumGoroutine(); goroutines > peak.Goroutines {
+				peak.Goroutines = goroutines
+			}
+			if currentInflight := inflight.Load(); currentInflight > peak.Inflight {
+				peak.Inflight = currentInflight
+			}
+		}
+
+		sample()
+		for {
+			select {
+			case <-ticker.C:
+				sample()
+			case <-done:
+				sample()
+				result <- peak
+				return
+			}
+		}
+	}()
+	return result
+}
+
+func updateAtomicMaxInt64(dst *atomic.Int64, candidate int64) {
+	for {
+		current := dst.Load()
+		if candidate <= current {
+			return
+		}
+		if dst.CompareAndSwap(current, candidate) {
+			return
+		}
+	}
+}
+
+func percentileDuration(values []time.Duration, fraction float64) time.Duration {
+	if len(values) == 0 {
+		return 0
+	}
+	sorted := append([]time.Duration(nil), values...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+	index := int(float64(len(sorted)-1) * fraction)
+	return sorted[index]
 }

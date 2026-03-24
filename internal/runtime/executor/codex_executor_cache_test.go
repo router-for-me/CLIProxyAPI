@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"net/http/httptest"
@@ -60,5 +61,86 @@ func TestCodexExecutorCacheHelper_OpenAIChatCompletions_StablePromptCacheKeyFrom
 	gotKey2 := gjson.GetBytes(body2, "prompt_cache_key").String()
 	if gotKey2 != expectedKey {
 		t.Fatalf("prompt_cache_key (second call) = %q, want %q", gotKey2, expectedKey)
+	}
+}
+
+func TestCodexPrepareRequestPlan_ReusesBodyAcrossMetadataRetries(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	ginCtx.Set("apiKey", "retry-api-key")
+
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+	executor := &CodexExecutor{}
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5.4",
+		Payload: []byte(`{"model":"gpt-5.4","input":"` + string(bytes.Repeat([]byte("hello "), 2048)) + `","stream":true}`),
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+		Stream:       true,
+		Metadata: map[string]any{
+			cliproxyexecutor.RequestedModelMetadataKey: "gpt-5.4",
+		},
+	}
+
+	plan1, err := executor.prepareCodexRequestPlan(ctx, req, opts, codexPreparedRequestPlanExecuteStream)
+	if err != nil {
+		t.Fatalf("prepareCodexRequestPlan() error = %v", err)
+	}
+	plan2, err := executor.prepareCodexRequestPlan(ctx, req, opts, codexPreparedRequestPlanExecuteStream)
+	if err != nil {
+		t.Fatalf("prepareCodexRequestPlan() second error = %v", err)
+	}
+
+	if len(plan1.body) == 0 || len(plan2.body) == 0 {
+		t.Fatal("expected non-empty cached body")
+	}
+	if &plan1.body[0] != &plan2.body[0] {
+		t.Fatal("expected second plan to reuse cached body backing array")
+	}
+
+	expectedKey := uuid.NewSHA1(uuid.NameSpaceOID, []byte("cli-proxy-api:codex:prompt-cache:retry-api-key")).String()
+	if got := gjson.GetBytes(plan1.body, "prompt_cache_key").String(); got != expectedKey {
+		t.Fatalf("prompt_cache_key = %q, want %q", got, expectedKey)
+	}
+	if plan1.conversationID != expectedKey || plan2.conversationID != expectedKey {
+		t.Fatalf("conversationID = %q / %q, want %q", plan1.conversationID, plan2.conversationID, expectedKey)
+	}
+}
+
+func TestCodexPrepareRequestPlan_SkipsCacheForSmallPayloads(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	ginCtx.Set("apiKey", "small-payload-api-key")
+
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+	executor := &CodexExecutor{}
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5.4",
+		Payload: []byte(`{"model":"gpt-5.4","input":"hello","stream":true}`),
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+		Stream:       true,
+		Metadata: map[string]any{
+			cliproxyexecutor.RequestedModelMetadataKey: "gpt-5.4",
+		},
+	}
+
+	_, err := executor.prepareCodexRequestPlan(ctx, req, opts, codexPreparedRequestPlanExecuteStream)
+	if err != nil {
+		t.Fatalf("prepareCodexRequestPlan() error = %v", err)
+	}
+	if _, ok := opts.Metadata[codexPreparedRequestCacheMetadataKey]; ok {
+		t.Fatal("small payload should not allocate prepared request cache")
+	}
+}
+
+func TestCodexResponseTranslatorNeedsRequestPayloads(t *testing.T) {
+	if codexResponseTranslatorNeedsRequestPayloads(sdktranslator.FromString("openai-response")) {
+		t.Fatal("openai-response translator should not retain request payloads")
+	}
+	if !codexResponseTranslatorNeedsRequestPayloads(sdktranslator.FromString("openai")) {
+		t.Fatal("openai translator must retain request payloads for tool-name restoration")
 	}
 }

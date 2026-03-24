@@ -273,6 +273,30 @@ func payloadRequestedModel(opts cliproxyexecutor.Options, fallback string) strin
 	}
 }
 
+func payloadConfigNeedsOriginal(cfg *config.Config, model, protocol, requestedModel string) bool {
+	if cfg == nil {
+		return false
+	}
+	if len(cfg.Payload.Default) == 0 && len(cfg.Payload.DefaultRaw) == 0 {
+		return false
+	}
+	candidates := payloadModelCandidates(model, requestedModel)
+	if len(candidates) == 0 {
+		return false
+	}
+	for i := range cfg.Payload.Default {
+		if payloadModelRulesMatch(cfg.Payload.Default[i].Models, protocol, candidates) {
+			return true
+		}
+	}
+	for i := range cfg.Payload.DefaultRaw {
+		if payloadModelRulesMatch(cfg.Payload.DefaultRaw[i].Models, protocol, candidates) {
+			return true
+		}
+	}
+	return false
+}
+
 // matchModelPattern performs simple wildcard matching where '*' matches zero or more characters.
 // Examples:
 //

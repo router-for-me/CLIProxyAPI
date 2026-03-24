@@ -42,10 +42,11 @@ func convertOpenAIResponsesRequestToCodexFastPath(inputRawJSON []byte) ([]byte, 
 	hasStore := false
 	hasParallelToolCalls := false
 	hasInclude := false
+	hasInstructions := false
 	supported := true
 
 	root.ForEach(func(key, value gjson.Result) bool {
-		field := key.String()
+		field := key.Str
 		switch field {
 		case "max_output_tokens", "max_completion_tokens", "temperature", "top_p", "truncation", "context_management", "user":
 			return true
@@ -78,6 +79,11 @@ func convertOpenAIResponsesRequestToCodexFastPath(inputRawJSON []byte) ([]byte, 
 			output = appendJSONObjectFieldName(output, field, &wroteField)
 			output = append(output, codexResponsesIncludeRaw...)
 			return true
+		case "instructions":
+			hasInstructions = true
+			output = appendJSONObjectFieldName(output, field, &wroteField)
+			output = append(output, value.Raw...)
+			return true
 		case "tools":
 			output = appendJSONObjectFieldName(output, field, &wroteField)
 			output = appendNormalizedCodexFastPathTools(output, value.Raw)
@@ -87,7 +93,7 @@ func convertOpenAIResponsesRequestToCodexFastPath(inputRawJSON []byte) ([]byte, 
 			output = appendNormalizedCodexFastPathToolChoice(output, value.Raw)
 			return true
 		case "service_tier":
-			if value.Type == gjson.String && value.String() == "priority" {
+			if value.Type == gjson.String && value.Str == "priority" {
 				output = appendJSONObjectFieldName(output, field, &wroteField)
 				output = append(output, value.Raw...)
 			}
@@ -119,6 +125,10 @@ func convertOpenAIResponsesRequestToCodexFastPath(inputRawJSON []byte) ([]byte, 
 		output = appendJSONObjectFieldName(output, "include", &wroteField)
 		output = append(output, codexResponsesIncludeRaw...)
 	}
+	if !hasInstructions {
+		output = appendJSONObjectFieldName(output, "instructions", &wroteField)
+		output = append(output, `""`...)
+	}
 
 	output = append(output, '}')
 	return output, true
@@ -130,9 +140,55 @@ func appendJSONObjectFieldName(dst []byte, field string, wroteField *bool) []byt
 	} else {
 		*wroteField = true
 	}
+	if raw := fastJSONObjectFieldName(field); raw != "" {
+		return append(dst, raw...)
+	}
 	dst = strconv.AppendQuote(dst, field)
 	dst = append(dst, ':')
 	return dst
+}
+
+func fastJSONObjectFieldName(field string) string {
+	switch field {
+	case "model":
+		return `"model":`
+	case "input":
+		return `"input":`
+	case "stream":
+		return `"stream":`
+	case "store":
+		return `"store":`
+	case "parallel_tool_calls":
+		return `"parallel_tool_calls":`
+	case "include":
+		return `"include":`
+	case "instructions":
+		return `"instructions":`
+	case "tools":
+		return `"tools":`
+	case "tool_choice":
+		return `"tool_choice":`
+	case "service_tier":
+		return `"service_tier":`
+	case "type":
+		return `"type":`
+	case "role":
+		return `"role":`
+	case "content":
+		return `"content":`
+	case "call_id":
+		return `"call_id":`
+	case "output":
+		return `"output":`
+	case "name":
+		return `"name":`
+	case "arguments":
+		return `"arguments":`
+	case "status":
+		return `"status":`
+	default:
+		return ""
+	}
 }
 
 func appendNormalizedOpenAIResponsesInput(dst []byte, input gjson.Result) ([]byte, bool) {
@@ -154,7 +210,7 @@ func appendNormalizedOpenAIResponsesInput(dst []byte, input gjson.Result) ([]byt
 				return true
 			}
 			role := item.Get("role")
-			if role.Type == gjson.String && role.String() == "system" {
+			if role.Type == gjson.String && role.Str == "system" {
 				hasSystemRole = true
 				return false
 			}
@@ -200,7 +256,7 @@ func appendNormalizedOpenAIResponsesInputItem(dst []byte, item gjson.Result) ([]
 	}
 
 	role := item.Get("role")
-	if role.Type != gjson.String || role.String() != "system" {
+	if role.Type != gjson.String || role.Str != "system" {
 		dst = append(dst, item.Raw...)
 		return dst, true
 	}
@@ -208,9 +264,10 @@ func appendNormalizedOpenAIResponsesInputItem(dst []byte, item gjson.Result) ([]
 	dst = append(dst, '{')
 	wroteField := false
 	item.ForEach(func(key, value gjson.Result) bool {
-		dst = appendJSONObjectFieldName(dst, key.String(), &wroteField)
-		if key.String() == "role" {
-			dst = strconv.AppendQuote(dst, "developer")
+		field := key.Str
+		dst = appendJSONObjectFieldName(dst, field, &wroteField)
+		if field == "role" {
+			dst = append(dst, `"developer"`...)
 			return true
 		}
 		dst = append(dst, value.Raw...)
@@ -233,7 +290,7 @@ func appendNormalizedCodexFastPathTools(dst []byte, raw string) []byte {
 	toolArray := tools.Array()
 	for i := 0; i < len(toolArray); i++ {
 		typePath := fmt.Sprintf("%d.type", i)
-		if normalized := normalizeCodexBuiltinToolType(gjson.GetBytes(result, typePath).String()); normalized != "" {
+		if normalized := normalizeCodexBuiltinToolType(gjson.GetBytes(result, typePath).Str); normalized != "" {
 			if updated, err := sjson.SetBytes(result, typePath, normalized); err == nil {
 				result = updated
 			}
@@ -248,7 +305,7 @@ func appendNormalizedCodexFastPathToolChoice(dst []byte, raw string) []byte {
 	}
 
 	result := []byte(raw)
-	if normalized := normalizeCodexBuiltinToolType(gjson.GetBytes(result, "type").String()); normalized != "" {
+	if normalized := normalizeCodexBuiltinToolType(gjson.GetBytes(result, "type").Str); normalized != "" {
 		if updated, err := sjson.SetBytes(result, "type", normalized); err == nil {
 			result = updated
 		}
@@ -258,7 +315,7 @@ func appendNormalizedCodexFastPathToolChoice(dst []byte, raw string) []byte {
 		toolArray := toolChoiceTools.Array()
 		for i := 0; i < len(toolArray); i++ {
 			typePath := fmt.Sprintf("tools.%d.type", i)
-			if normalized := normalizeCodexBuiltinToolType(gjson.GetBytes(result, typePath).String()); normalized != "" {
+			if normalized := normalizeCodexBuiltinToolType(gjson.GetBytes(result, typePath).Str); normalized != "" {
 				if updated, err := sjson.SetBytes(result, typePath, normalized); err == nil {
 					result = updated
 				}
@@ -282,7 +339,7 @@ func normalizeCodexBuiltinTools(rawJSON []byte) []byte {
 		toolArray := tools.Array()
 		for i := 0; i < len(toolArray); i++ {
 			typePath := fmt.Sprintf("tools.%d.type", i)
-			if normalized := normalizeCodexBuiltinToolType(gjson.GetBytes(result, typePath).String()); normalized != "" {
+			if normalized := normalizeCodexBuiltinToolType(gjson.GetBytes(result, typePath).Str); normalized != "" {
 				if updated, err := sjson.SetBytes(result, typePath, normalized); err == nil {
 					result = updated
 				}
@@ -290,7 +347,7 @@ func normalizeCodexBuiltinTools(rawJSON []byte) []byte {
 		}
 	}
 
-	if normalized := normalizeCodexBuiltinToolType(gjson.GetBytes(result, "tool_choice.type").String()); normalized != "" {
+	if normalized := normalizeCodexBuiltinToolType(gjson.GetBytes(result, "tool_choice.type").Str); normalized != "" {
 		if updated, err := sjson.SetBytes(result, "tool_choice.type", normalized); err == nil {
 			result = updated
 		}
@@ -301,7 +358,7 @@ func normalizeCodexBuiltinTools(rawJSON []byte) []byte {
 		toolArray := toolChoiceTools.Array()
 		for i := 0; i < len(toolArray); i++ {
 			typePath := fmt.Sprintf("tool_choice.tools.%d.type", i)
-			if normalized := normalizeCodexBuiltinToolType(gjson.GetBytes(result, typePath).String()); normalized != "" {
+			if normalized := normalizeCodexBuiltinToolType(gjson.GetBytes(result, typePath).Str); normalized != "" {
 				if updated, err := sjson.SetBytes(result, typePath, normalized); err == nil {
 					result = updated
 				}
@@ -339,6 +396,11 @@ func convertOpenAIResponsesRequestToCodexFallback(inputRawJSON []byte) []byte {
 	if output, err = sjson.SetRawBytes(output, "include", []byte(codexResponsesIncludeRaw)); err != nil {
 		return inputRawJSON
 	}
+	if !gjson.GetBytes(output, "instructions").Exists() {
+		if output, err = sjson.SetBytes(output, "instructions", ""); err != nil {
+			return inputRawJSON
+		}
+	}
 
 	// Codex Responses rejects these OpenAI Responses fields.
 	for _, path := range []string{
@@ -355,7 +417,7 @@ func convertOpenAIResponsesRequestToCodexFallback(inputRawJSON []byte) []byte {
 		}
 	}
 
-	if tier := gjson.GetBytes(output, "service_tier"); tier.Exists() && (tier.Type != gjson.String || tier.String() != "priority") {
+	if tier := gjson.GetBytes(output, "service_tier"); tier.Exists() && (tier.Type != gjson.String || tier.Str != "priority") {
 		if output, err = sjson.DeleteBytes(output, "service_tier"); err != nil {
 			return inputRawJSON
 		}
@@ -386,7 +448,7 @@ func normalizeOpenAIResponsesInputForCodexFallback(inputRawJSON []byte) ([]byte,
 				continue
 			}
 			role := rawItem.Get("role")
-			if role.Type != gjson.String || role.String() != "system" {
+			if role.Type != gjson.String || role.Str != "system" {
 				continue
 			}
 			var err error
