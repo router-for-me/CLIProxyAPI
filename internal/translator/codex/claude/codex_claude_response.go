@@ -88,7 +88,6 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 		template, _ = sjson.SetBytes(template, "index", params.BlockIndex)
 		params.ThinkingBlockOpen = true
 		params.ThinkingStopPending = false
-		params.ThinkingSignature = ""
 
 		output = translatorcommon.AppendSSEEventBytes(output, "content_block_start", template, 2)
 	} else if typeStr == "response.reasoning_summary_text.delta" {
