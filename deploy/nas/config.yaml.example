@@ -1,0 +1,28 @@
+host: ""
+port: 8317
+
+auth-dir: "~/.cli-proxy-api"
+
+api-keys:
+  - "change-me"
+
+debug: false
+logging-to-file: true
+logs-max-total-size-mb: 200
+usage-statistics-enabled: true
+
+remote-management:
+  allow-remote: false
+  secret-key: ""
+  disable-control-panel: false
+
+# Paste the provider blocks you need from ../../config.example.yaml.
+# Example:
+# openai-compatibility:
+#   - name: "openrouter"
+#     base-url: "https://openrouter.ai/api/v1"
+#     api-key-entries:
+#       - api-key: "sk-or-v1-..."
+#     models:
+#       - name: "openai/gpt-4.1-mini"
+#         alias: "gpt-4.1-mini"

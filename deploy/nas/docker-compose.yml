@@ -1,0 +1,37 @@
+version: "3.8"
+
+services:
+  cli-proxy-api:
+    image: ${CLI_PROXY_IMAGE:-eceasy/cli-proxy-api:latest}
+    container_name: ${CONTAINER_NAME:-cli-proxy-api}
+    restart: unless-stopped
+    stop_grace_period: 30s
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      DEPLOY: ${DEPLOY:-}
+      MANAGEMENT_PASSWORD: ${MANAGEMENT_PASSWORD:-}
+      PGSTORE_DSN: ${PGSTORE_DSN:-}
+      PGSTORE_SCHEMA: ${PGSTORE_SCHEMA:-}
+      PGSTORE_LOCAL_PATH: ${PGSTORE_LOCAL_PATH:-}
+      GITSTORE_GIT_URL: ${GITSTORE_GIT_URL:-}
+      GITSTORE_GIT_USERNAME: ${GITSTORE_GIT_USERNAME:-}
+      GITSTORE_GIT_TOKEN: ${GITSTORE_GIT_TOKEN:-}
+      GITSTORE_LOCAL_PATH: ${GITSTORE_LOCAL_PATH:-}
+      OBJECTSTORE_ENDPOINT: ${OBJECTSTORE_ENDPOINT:-}
+      OBJECTSTORE_BUCKET: ${OBJECTSTORE_BUCKET:-}
+      OBJECTSTORE_ACCESS_KEY: ${OBJECTSTORE_ACCESS_KEY:-}
+      OBJECTSTORE_SECRET_KEY: ${OBJECTSTORE_SECRET_KEY:-}
+      OBJECTSTORE_LOCAL_PATH: ${OBJECTSTORE_LOCAL_PATH:-}
+    ports:
+      - "${API_PORT:-8317}:8317"
+      # Only publish callback ports when you really plan to complete OAuth inside the container.
+      # - "${GEMINI_CALLBACK_PORT:-8085}:8085"
+      # - "${CODEX_CALLBACK_PORT:-1455}:1455"
+      # - "${CLAUDE_CALLBACK_PORT:-54545}:54545"
+      # - "${ANTIGRAVITY_CALLBACK_PORT:-51121}:51121"
+      # - "${IFLOW_CALLBACK_PORT:-11451}:11451"
+    volumes:
+      - ${CONFIG_FILE:-./data/config.yaml}:/CLIProxyAPI/config.yaml
+      - ${AUTH_DIR:-./data/auths}:/root/.cli-proxy-api
+      - ${LOG_DIR:-./data/logs}:/CLIProxyAPI/logs
+      - ${STORE_DIR:-./data/store}:/data/cliproxy
