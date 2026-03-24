@@ -64,6 +64,9 @@ type Config struct {
 	// UsageStatisticsEnabled toggles in-memory usage aggregation; when false, usage data is discarded.
 	UsageStatisticsEnabled bool `yaml:"usage-statistics-enabled" json:"usage-statistics-enabled"`
 
+	// UsageStorage configures usage statistics persistence backend.
+	UsageStorage UsageStorageConfig `yaml:"usage-storage" json:"usage-storage"`
+
 	// DisableCooling disables quota cooldown scheduling when true.
 	DisableCooling bool `yaml:"disable-cooling" json:"disable-cooling"`
 
@@ -180,6 +183,14 @@ type RemoteManagement struct {
 	// PanelGitHubRepository overrides the GitHub repository used to fetch the management panel asset.
 	// Accepts either a repository URL (https://github.com/org/repo) or an API releases endpoint.
 	PanelGitHubRepository string `yaml:"panel-github-repository"`
+}
+
+// UsageStorageConfig controls where usage statistics are persisted.
+// Supported drivers: memory, postgres.
+type UsageStorageConfig struct {
+	Driver      string `yaml:"driver" json:"driver"`
+	DatabaseURL string `yaml:"database-url" json:"database-url"`
+	AutoMigrate bool   `yaml:"auto-migrate" json:"auto-migrate"`
 }
 
 // QuotaExceeded defines the behavior when API quota limits are exceeded.
@@ -559,6 +570,8 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.LogsMaxTotalSizeMB = 0
 	cfg.ErrorLogsMaxFiles = 10
 	cfg.UsageStatisticsEnabled = false
+	cfg.UsageStorage.Driver = "memory"
+	cfg.UsageStorage.AutoMigrate = true
 	cfg.DisableCooling = false
 	cfg.Pprof.Enable = false
 	cfg.Pprof.Addr = DefaultPprofAddr
@@ -624,6 +637,8 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		cfg.MaxRetryCredentials = 0
 	}
 
+	cfg.SanitizeUsageStorage()
+
 	// Sanitize Gemini API key configuration and migrate legacy entries.
 	cfg.SanitizeGeminiKeys()
 
@@ -671,6 +686,24 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	// Return the populated configuration struct.
 	return &cfg, nil
+}
+
+// SanitizeUsageStorage normalizes usage storage settings.
+func (cfg *Config) SanitizeUsageStorage() {
+	if cfg == nil {
+		return
+	}
+	cfg.UsageStorage.Driver = strings.ToLower(strings.TrimSpace(cfg.UsageStorage.Driver))
+	switch cfg.UsageStorage.Driver {
+	case "", "memory":
+		cfg.UsageStorage.Driver = "memory"
+	case "postgres":
+		// keep configured value
+	default:
+		log.WithField("driver", cfg.UsageStorage.Driver).Warn("unknown usage-storage.driver; falling back to memory")
+		cfg.UsageStorage.Driver = "memory"
+	}
+	cfg.UsageStorage.DatabaseURL = strings.TrimSpace(cfg.UsageStorage.DatabaseURL)
 }
 
 // SanitizePayloadRules validates raw JSON payload rule params and drops invalid rules.
@@ -1293,6 +1326,8 @@ func isKnownDefaultValue(path []string, node *yaml.Node) bool {
 			return node.Value == DefaultPanelGitHubRepository
 		case "routing.strategy":
 			return node.Value == "round-robin"
+		case "usage-storage.driver":
+			return node.Value == "memory"
 		}
 	}
 
@@ -1301,6 +1336,13 @@ func isKnownDefaultValue(path []string, node *yaml.Node) bool {
 		switch fullPath {
 		case "error-logs-max-files":
 			return node.Value == "10"
+		}
+	}
+
+	if node.Kind == yaml.ScalarNode && node.Tag == "!!bool" {
+		switch fullPath {
+		case "usage-storage.auto-migrate":
+			return strings.EqualFold(node.Value, "true")
 		}
 	}
 

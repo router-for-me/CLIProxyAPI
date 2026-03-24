@@ -263,6 +263,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	auth.SetQuotaCooldownDisabled(cfg.DisableCooling)
 	// Initialize management handler
 	s.mgmt = managementHandlers.NewHandler(cfg, configFilePath, authManager)
+	s.configureUsageStore(cfg)
 	if optionState.localPassword != "" {
 		s.mgmt.SetLocalPassword(optionState.localPassword)
 	}
@@ -868,6 +869,55 @@ func (s *Server) applyAccessConfig(oldCfg, newCfg *config.Config) {
 	}
 }
 
+func (s *Server) configureUsageStore(cfg *config.Config) {
+	if cfg == nil {
+		return
+	}
+	driver := normalizeUsageStorageDriver(cfg.UsageStorage.Driver)
+	databaseURL := strings.TrimSpace(cfg.UsageStorage.DatabaseURL)
+	autoMigrate := cfg.UsageStorage.AutoMigrate
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := usage.ConfigureStatisticsStore(ctx, driver, databaseURL, autoMigrate); err != nil {
+		log.WithError(err).Warn("failed to configure usage store; falling back to memory")
+		_ = usage.ConfigureStatisticsStore(ctx, "memory", "", true)
+	}
+
+	if s.mgmt != nil {
+		s.mgmt.SetUsageStore(usage.GetStatisticsStore())
+	}
+}
+
+func normalizeUsageStorageDriver(driver string) string {
+	normalized := strings.ToLower(strings.TrimSpace(driver))
+	switch normalized {
+	case "", "memory":
+		return "memory"
+	case "postgres":
+		return "postgres"
+	default:
+		return "memory"
+	}
+}
+
+func usageStorageConfigChanged(oldCfg, newCfg *config.Config) bool {
+	if oldCfg == nil || newCfg == nil {
+		return true
+	}
+	if normalizeUsageStorageDriver(oldCfg.UsageStorage.Driver) != normalizeUsageStorageDriver(newCfg.UsageStorage.Driver) {
+		return true
+	}
+	if strings.TrimSpace(oldCfg.UsageStorage.DatabaseURL) != strings.TrimSpace(newCfg.UsageStorage.DatabaseURL) {
+		return true
+	}
+	if oldCfg.UsageStorage.AutoMigrate != newCfg.UsageStorage.AutoMigrate {
+		return true
+	}
+	return false
+}
+
 // UpdateClients updates the server's client list and configuration.
 // This method is called when the configuration or authentication tokens change.
 //
@@ -902,6 +952,9 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 
 	if oldCfg == nil || oldCfg.UsageStatisticsEnabled != cfg.UsageStatisticsEnabled {
 		usage.SetStatisticsEnabled(cfg.UsageStatisticsEnabled)
+	}
+	if usageStorageConfigChanged(oldCfg, cfg) {
+		s.configureUsageStore(cfg)
 	}
 
 	if s.requestLogger != nil && (oldCfg == nil || oldCfg.ErrorLogsMaxFiles != cfg.ErrorLogsMaxFiles) {
@@ -970,6 +1023,7 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 	if s.mgmt != nil {
 		s.mgmt.SetConfig(cfg)
 		s.mgmt.SetAuthManager(s.handlers.AuthManager)
+		s.mgmt.SetUsageStore(usage.GetStatisticsStore())
 	}
 
 	// Notify Amp module only when Amp config has changed.

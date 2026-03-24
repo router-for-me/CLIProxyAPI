@@ -13,6 +13,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
+	log "github.com/sirupsen/logrus"
 )
 
 var statisticsEnabled atomic.Bool
@@ -22,17 +23,15 @@ func init() {
 	coreusage.RegisterPlugin(NewLoggerPlugin())
 }
 
-// LoggerPlugin collects in-memory request statistics for usage analysis.
+// LoggerPlugin records usage events through the active statistics store.
 // It implements coreusage.Plugin to receive usage records emitted by the runtime.
-type LoggerPlugin struct {
-	stats *RequestStatistics
-}
+type LoggerPlugin struct{}
 
 // NewLoggerPlugin constructs a new logger plugin instance.
 //
 // Returns:
 //   - *LoggerPlugin: A new logger plugin instance wired to the shared statistics store.
-func NewLoggerPlugin() *LoggerPlugin { return &LoggerPlugin{stats: defaultRequestStatistics} }
+func NewLoggerPlugin() *LoggerPlugin { return &LoggerPlugin{} }
 
 // HandleUsage implements coreusage.Plugin.
 // It updates the in-memory statistics store whenever a usage record is received.
@@ -44,10 +43,16 @@ func (p *LoggerPlugin) HandleUsage(ctx context.Context, record coreusage.Record)
 	if !statisticsEnabled.Load() {
 		return
 	}
-	if p == nil || p.stats == nil {
+	if p == nil {
 		return
 	}
-	p.stats.Record(ctx, record)
+	store := GetStatisticsStore()
+	if store == nil {
+		return
+	}
+	if err := store.Record(ctx, record); err != nil {
+		log.WithError(err).Warn("usage: failed to persist usage record")
+	}
 }
 
 // SetStatisticsEnabled toggles whether in-memory statistics are recorded.

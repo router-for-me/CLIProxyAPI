@@ -39,6 +39,24 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if oldCfg.UsageStatisticsEnabled != newCfg.UsageStatisticsEnabled {
 		changes = append(changes, fmt.Sprintf("usage-statistics-enabled: %t -> %t", oldCfg.UsageStatisticsEnabled, newCfg.UsageStatisticsEnabled))
 	}
+	if normalizeUsageStorageDriver(oldCfg.UsageStorage.Driver) != normalizeUsageStorageDriver(newCfg.UsageStorage.Driver) {
+		changes = append(changes, fmt.Sprintf("usage-storage.driver: %s -> %s", normalizeUsageStorageDriver(oldCfg.UsageStorage.Driver), normalizeUsageStorageDriver(newCfg.UsageStorage.Driver)))
+	}
+	oldUsageStorageDB := strings.TrimSpace(oldCfg.UsageStorage.DatabaseURL)
+	newUsageStorageDB := strings.TrimSpace(newCfg.UsageStorage.DatabaseURL)
+	if oldUsageStorageDB != newUsageStorageDB {
+		switch {
+		case oldUsageStorageDB == "" && newUsageStorageDB != "":
+			changes = append(changes, "usage-storage.database-url: added")
+		case oldUsageStorageDB != "" && newUsageStorageDB == "":
+			changes = append(changes, "usage-storage.database-url: removed")
+		default:
+			changes = append(changes, "usage-storage.database-url: updated")
+		}
+	}
+	if oldCfg.UsageStorage.AutoMigrate != newCfg.UsageStorage.AutoMigrate {
+		changes = append(changes, fmt.Sprintf("usage-storage.auto-migrate: %t -> %t", oldCfg.UsageStorage.AutoMigrate, newCfg.UsageStorage.AutoMigrate))
+	}
 	if oldCfg.DisableCooling != newCfg.DisableCooling {
 		changes = append(changes, fmt.Sprintf("disable-cooling: %t -> %t", oldCfg.DisableCooling, newCfg.DisableCooling))
 	}
@@ -324,6 +342,18 @@ func trimStrings(in []string) []string {
 		out[i] = strings.TrimSpace(in[i])
 	}
 	return out
+}
+
+func normalizeUsageStorageDriver(driver string) string {
+	normalized := strings.ToLower(strings.TrimSpace(driver))
+	switch normalized {
+	case "", "memory":
+		return "memory"
+	case "postgres":
+		return "postgres"
+	default:
+		return "memory"
+	}
 }
 
 func equalStringMap(a, b map[string]string) bool {

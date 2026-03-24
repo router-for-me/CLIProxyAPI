@@ -41,7 +41,7 @@ type Handler struct {
 	attemptsMu          sync.Mutex
 	failedAttempts      map[string]*attemptInfo // keyed by client IP
 	authManager         *coreauth.Manager
-	usageStats          *usage.RequestStatistics
+	usageStore          usage.StatisticsStore
 	tokenStore          coreauth.Store
 	localPassword       string
 	allowRemoteOverride bool
@@ -60,7 +60,7 @@ func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Man
 		configFilePath:      configFilePath,
 		failedAttempts:      make(map[string]*attemptInfo),
 		authManager:         manager,
-		usageStats:          usage.GetRequestStatistics(),
+		usageStore:          usage.GetStatisticsStore(),
 		tokenStore:          sdkAuth.GetTokenStore(),
 		allowRemoteOverride: envSecret != "",
 		envSecret:           envSecret,
@@ -111,7 +111,16 @@ func (h *Handler) SetConfig(cfg *config.Config) { h.cfg = cfg }
 func (h *Handler) SetAuthManager(manager *coreauth.Manager) { h.authManager = manager }
 
 // SetUsageStatistics allows replacing the usage statistics reference.
-func (h *Handler) SetUsageStatistics(stats *usage.RequestStatistics) { h.usageStats = stats }
+func (h *Handler) SetUsageStatistics(stats *usage.RequestStatistics) {
+	if stats == nil {
+		h.usageStore = nil
+		return
+	}
+	h.usageStore = usage.NewMemoryStatisticsStore(stats)
+}
+
+// SetUsageStore allows replacing the active usage store reference.
+func (h *Handler) SetUsageStore(store usage.StatisticsStore) { h.usageStore = store }
 
 // SetLocalPassword configures the runtime-local password accepted for localhost requests.
 func (h *Handler) SetLocalPassword(password string) { h.localPassword = password }

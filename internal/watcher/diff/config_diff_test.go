@@ -530,6 +530,28 @@ func TestBuildConfigChangeDetails_CountBranches(t *testing.T) {
 	expectContains(t, changes, "vertex-api-key count: 0 -> 1")
 }
 
+func TestBuildConfigChangeDetails_UsageStorageChanges(t *testing.T) {
+	oldCfg := &config.Config{
+		UsageStorage: config.UsageStorageConfig{
+			Driver:      "memory",
+			DatabaseURL: "",
+			AutoMigrate: true,
+		},
+	}
+	newCfg := &config.Config{
+		UsageStorage: config.UsageStorageConfig{
+			Driver:      "postgres",
+			DatabaseURL: "postgres://postgres:postgres@postgres:5432/cliproxyapi?sslmode=disable",
+			AutoMigrate: false,
+		},
+	}
+
+	changes := BuildConfigChangeDetails(oldCfg, newCfg)
+	expectContains(t, changes, "usage-storage.driver: memory -> postgres")
+	expectContains(t, changes, "usage-storage.database-url: added")
+	expectContains(t, changes, "usage-storage.auto-migrate: true -> false")
+}
+
 func TestTrimStrings(t *testing.T) {
 	out := trimStrings([]string{" a ", "b", "  c"})
 	if len(out) != 3 || out[0] != "a" || out[1] != "b" || out[2] != "c" {
