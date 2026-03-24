@@ -87,3 +87,49 @@ func TestConvertClaudeRequestToCodex_SystemMessageScenarios(t *testing.T) {
 		})
 	}
 }
+
+func TestConvertClaudeRequestToCodex_ParallelToolCalls(t *testing.T) {
+	tests := []struct {
+		name                  string
+		inputJSON             string
+		wantParallelToolCalls bool
+	}{
+		{
+			name: "Default to true when tool_choice.disable_parallel_tool_use is absent",
+			inputJSON: `{
+				"model": "claude-3-opus",
+				"messages": [{"role": "user", "content": "hello"}]
+			}`,
+			wantParallelToolCalls: true,
+		},
+		{
+			name: "Disable parallel tool calls when client opts out",
+			inputJSON: `{
+				"model": "claude-3-opus",
+				"tool_choice": {"disable_parallel_tool_use": true},
+				"messages": [{"role": "user", "content": "hello"}]
+			}`,
+			wantParallelToolCalls: false,
+		},
+		{
+			name: "Keep parallel tool calls enabled when client explicitly allows them",
+			inputJSON: `{
+				"model": "claude-3-opus",
+				"tool_choice": {"disable_parallel_tool_use": false},
+				"messages": [{"role": "user", "content": "hello"}]
+			}`,
+			wantParallelToolCalls: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := ConvertClaudeRequestToCodex("test-model", []byte(tt.inputJSON), false)
+			resultJSON := gjson.ParseBytes(result)
+
+			if got := resultJSON.Get("parallel_tool_calls").Bool(); got != tt.wantParallelToolCalls {
+				t.Fatalf("parallel_tool_calls = %v, want %v. Output: %s", got, tt.wantParallelToolCalls, string(result))
+			}
+		})
+	}
+}
