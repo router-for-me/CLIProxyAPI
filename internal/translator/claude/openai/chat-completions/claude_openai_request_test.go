@@ -135,3 +135,71 @@ func TestConvertOpenAIRequestToClaude_ToolResultURLImageOnly(t *testing.T) {
 		t.Fatalf("Unexpected image URL: %q", got)
 	}
 }
+
+func TestConvertOpenAIRequestToClaude_SystemRoleBecomesTopLevelSystem(t *testing.T) {
+	inputJSON := `{
+		"model": "gpt-4.1",
+		"messages": [
+			{"role": "system", "content": "You are a helpful assistant."},
+			{"role": "user", "content": "Hello"}
+		]
+	}`
+
+	result := ConvertOpenAIRequestToClaude("claude-sonnet-4-5", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+
+	system := resultJSON.Get("system")
+	if !system.IsArray() {
+		t.Fatalf("Expected top-level system array, got %s", system.Raw)
+	}
+	if len(system.Array()) != 1 {
+		t.Fatalf("Expected 1 system block, got %d. System: %s", len(system.Array()), system.Raw)
+	}
+	if got := system.Get("0.type").String(); got != "text" {
+		t.Fatalf("Expected system block type %q, got %q", "text", got)
+	}
+	if got := system.Get("0.text").String(); got != "You are a helpful assistant." {
+		t.Fatalf("Expected system text %q, got %q", "You are a helpful assistant.", got)
+	}
+
+	messages := resultJSON.Get("messages").Array()
+	if len(messages) != 1 {
+		t.Fatalf("Expected 1 non-system message, got %d. Messages: %s", len(messages), resultJSON.Get("messages").Raw)
+	}
+	if got := messages[0].Get("role").String(); got != "user" {
+		t.Fatalf("Expected remaining message role %q, got %q", "user", got)
+	}
+	if got := messages[0].Get("content.0.text").String(); got != "Hello" {
+		t.Fatalf("Expected user text %q, got %q", "Hello", got)
+	}
+}
+
+func TestConvertOpenAIRequestToClaude_MultipleSystemMessagesMergedIntoTopLevelSystem(t *testing.T) {
+	inputJSON := `{
+		"model": "gpt-4.1",
+		"messages": [
+			{"role": "system", "content": "Rule 1"},
+			{"role": "system", "content": [{"type": "text", "text": "Rule 2"}]},
+			{"role": "user", "content": "Hello"}
+		]
+	}`
+
+	result := ConvertOpenAIRequestToClaude("claude-sonnet-4-5", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+
+	system := resultJSON.Get("system").Array()
+	if len(system) != 2 {
+		t.Fatalf("Expected 2 system blocks, got %d. System: %s", len(system), resultJSON.Get("system").Raw)
+	}
+	if got := system[0].Get("text").String(); got != "Rule 1" {
+		t.Fatalf("Expected first system text %q, got %q", "Rule 1", got)
+	}
+	if got := system[1].Get("text").String(); got != "Rule 2" {
+		t.Fatalf("Expected second system text %q, got %q", "Rule 2", got)
+	}
+
+	messages := resultJSON.Get("messages").Array()
+	if len(messages) != 1 {
+		t.Fatalf("Expected 1 non-system message, got %d. Messages: %s", len(messages), resultJSON.Get("messages").Raw)
+	}
+}
