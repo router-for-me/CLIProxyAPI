@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"runtime"
 	"runtime/debug"
 	"sort"
@@ -585,8 +586,8 @@ func TestCodexExecutorExecute_LocalServer_ConcurrentMixedAccountsRemainIsolated_
 }
 
 func TestCodexExecutorExecute_LocalServer_SustainsOver6KRPM_MixedLongRequests(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping 6k RPM stress test in short mode")
+	if os.Getenv("CLI_PROXY_INTEGRATION_STRESS") != "1" {
+		t.Skip("set CLI_PROXY_INTEGRATION_STRESS=1 to run the 6k RPM mixed long-request stress test")
 	}
 
 	type stressScenario struct {

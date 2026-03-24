@@ -566,25 +566,27 @@ func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Form
 }
 
 func readCodexCompletedEvent(ctx context.Context, cfg *config.Config, body io.Reader, reporter *usageReporter) ([]byte, error) {
-	scanner := bufio.NewScanner(body)
-	scanner.Buffer(nil, 52_428_800) // 50MB
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		appendAPIResponseChunk(ctx, cfg, line)
-		if !bytes.HasPrefix(line, dataTag) {
+	reader := bufio.NewReader(body)
+	for {
+		line, err := reader.ReadBytes('\n')
+		if len(line) > 0 {
+			appendAPIResponseChunk(ctx, cfg, line)
+			if bytes.HasPrefix(line, dataTag) {
+				data := bytes.TrimSpace(line[len(dataTag):])
+				if gjson.GetBytes(data, "type").String() == "response.completed" {
+					if detail, ok := parseCodexUsage(data); ok {
+						reporter.publish(ctx, detail)
+					}
+					return bytes.Clone(data), nil
+				}
+			}
+		}
+		if err == nil {
 			continue
 		}
-
-		data := bytes.TrimSpace(line[len(dataTag):])
-		if gjson.GetBytes(data, "type").String() != "response.completed" {
-			continue
+		if err == io.EOF {
+			break
 		}
-		if detail, ok := parseCodexUsage(data); ok {
-			reporter.publish(ctx, detail)
-		}
-		return bytes.Clone(data), nil
-	}
-	if err := scanner.Err(); err != nil {
 		return nil, err
 	}
 	return nil, statusErr{code: 408, msg: "stream error: stream disconnected before completion: stream closed before response.completed"}
