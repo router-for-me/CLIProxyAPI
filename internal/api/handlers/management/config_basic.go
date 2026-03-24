@@ -268,7 +268,12 @@ func (h *Handler) GetMaxInvalidRequestRetries(c *gin.Context) {
 	c.JSON(200, gin.H{"max-invalid-request-retries": h.cfg.MaxInvalidRequestRetries})
 }
 func (h *Handler) PutMaxInvalidRequestRetries(c *gin.Context) {
-	h.updateIntField(c, func(v int) { h.cfg.MaxInvalidRequestRetries = v })
+	h.updateIntField(c, func(v int) {
+		if v < 0 {
+			v = 0
+		}
+		h.cfg.MaxInvalidRequestRetries = v
+	})
 }
 
 // Max retry interval
