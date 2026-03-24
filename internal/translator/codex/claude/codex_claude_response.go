@@ -81,6 +81,9 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 
 		output = translatorcommon.AppendSSEEventBytes(output, "message_start", template, 2)
 	} else if typeStr == "response.reasoning_summary_part.added" {
+		if params.ThinkingBlockOpen && params.ThinkingStopPending {
+			output = append(output, finalizeCodexThinkingBlock(params)...)
+		}
 		template = []byte(`{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}`)
 		template, _ = sjson.SetBytes(template, "index", params.BlockIndex)
 		params.ThinkingBlockOpen = true
