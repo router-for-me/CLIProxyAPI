@@ -576,7 +576,7 @@ func (p *providerScheduler) ensureModelLocked(modelKey string, now time.Time) *m
 		}
 		shard.upsertEntryLocked(meta, now)
 	}
-	shard.rebuildIndexesLocked()
+	shard.resetReadyCursorsLocked()
 	p.modelShards[modelKey] = shard
 	return shard
 }
@@ -1422,6 +1422,29 @@ func (m *modelScheduler) rebuildIndexesLocked() {
 		}
 		return left.nextRetryAt.Before(right.nextRetryAt)
 	})
+}
+
+func (m *modelScheduler) resetReadyCursorsLocked() {
+	if m == nil {
+		return
+	}
+	for _, bucket := range m.readyByPriority {
+		resetReadyViewCursors(&bucket.all)
+		resetReadyViewCursors(&bucket.ws)
+	}
+}
+
+func resetReadyViewCursors(view *readyView) {
+	if view == nil {
+		return
+	}
+	view.cursor = 0
+	view.parentCursor = 0
+	for _, child := range view.children {
+		if child != nil {
+			child.cursor = 0
+		}
+	}
 }
 
 // buildReadyBucket prepares the general and websocket-only ready views for one priority bucket.
