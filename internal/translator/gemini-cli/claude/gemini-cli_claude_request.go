@@ -89,7 +89,7 @@ func ConvertClaudeRequestToCLI(modelName string, inputRawJSON []byte, _ bool) []
 						contentJSON, _ = sjson.SetRaw(contentJSON, "parts.-1", part)
 
 					case "tool_use":
-						functionName := contentResult.Get("name").String()
+						functionName := util.SanitizeFunctionName(contentResult.Get("name").String())
 						functionArgs := contentResult.Get("input").String()
 						argsResult := gjson.Parse(functionArgs)
 						if argsResult.IsObject() && gjson.Valid(functionArgs) {
@@ -112,7 +112,7 @@ func ConvertClaudeRequestToCLI(modelName string, inputRawJSON []byte, _ bool) []
 						}
 						responseData := contentResult.Get("content").Raw
 						part := `{"functionResponse":{"name":"","response":{"result":""}}}`
-						part, _ = sjson.Set(part, "functionResponse.name", funcName)
+						part, _ = sjson.Set(part, "functionResponse.name", util.SanitizeFunctionName(funcName))
 						part, _ = sjson.Set(part, "functionResponse.response.result", responseData)
 						contentJSON, _ = sjson.SetRaw(contentJSON, "parts.-1", part)
 
@@ -151,6 +151,7 @@ func ConvertClaudeRequestToCLI(modelName string, inputRawJSON []byte, _ bool) []
 				inputSchema := util.CleanJSONSchemaForGemini(inputSchemaResult.Raw)
 				tool, _ := sjson.Delete(toolResult.Raw, "input_schema")
 				tool, _ = sjson.SetRaw(tool, "parametersJsonSchema", inputSchema)
+				tool, _ = sjson.Set(tool, "name", util.SanitizeFunctionName(gjson.Get(tool, "name").String()))
 				tool, _ = sjson.Delete(tool, "strict")
 				tool, _ = sjson.Delete(tool, "input_examples")
 				tool, _ = sjson.Delete(tool, "type")
@@ -194,7 +195,7 @@ func ConvertClaudeRequestToCLI(modelName string, inputRawJSON []byte, _ bool) []
 		case "tool":
 			out, _ = sjson.Set(out, "request.toolConfig.functionCallingConfig.mode", "ANY")
 			if toolChoiceName != "" {
-				out, _ = sjson.Set(out, "request.toolConfig.functionCallingConfig.allowedFunctionNames", []string{toolChoiceName})
+				out, _ = sjson.Set(out, "request.toolConfig.functionCallingConfig.allowedFunctionNames", []string{util.SanitizeFunctionName(toolChoiceName)})
 			}
 		}
 	}

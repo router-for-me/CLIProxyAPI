@@ -13,9 +13,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	log "github.com/sirupsen/logrus"
-
 	. "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/gemini/openai/chat-completions"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
+	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -26,6 +26,7 @@ type convertCliResponseToOpenAIChatParams struct {
 	FunctionIndex        int
 	SawToolCall          bool   // Tracks if any tool call was seen in the entire stream
 	UpstreamFinishReason string // Caches the upstream finish reason for final chunk
+	SanitizedNameMap     map[string]string
 }
 
 // functionCallIDCounter provides a process-wide unique counter for function call identifiers.
@@ -48,9 +49,13 @@ var functionCallIDCounter uint64
 func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) []string {
 	if *param == nil {
 		*param = &convertCliResponseToOpenAIChatParams{
-			UnixTimestamp: 0,
-			FunctionIndex: 0,
+			UnixTimestamp:    0,
+			FunctionIndex:    0,
+			SanitizedNameMap: util.SanitizedToolNameMap(originalRequestRawJSON),
 		}
+	}
+	if (*param).(*convertCliResponseToOpenAIChatParams).SanitizedNameMap == nil {
+		(*param).(*convertCliResponseToOpenAIChatParams).SanitizedNameMap = util.SanitizedToolNameMap(originalRequestRawJSON)
 	}
 
 	if bytes.Equal(rawJSON, []byte("[DONE]")) {
@@ -159,7 +164,7 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 				}
 
 				functionCallTemplate := `{"id": "","index": 0,"type": "function","function": {"name": "","arguments": ""}}`
-				fcName := functionCallResult.Get("name").String()
+				fcName := util.RestoreSanitizedToolName((*param).(*convertCliResponseToOpenAIChatParams).SanitizedNameMap, functionCallResult.Get("name").String())
 				functionCallTemplate, _ = sjson.Set(functionCallTemplate, "id", fmt.Sprintf("%s-%d-%d", fcName, time.Now().UnixNano(), atomic.AddUint64(&functionCallIDCounter, 1)))
 				functionCallTemplate, _ = sjson.Set(functionCallTemplate, "index", functionCallIndex)
 				functionCallTemplate, _ = sjson.Set(functionCallTemplate, "function.name", fcName)

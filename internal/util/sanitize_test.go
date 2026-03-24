@@ -54,3 +54,94 @@ func TestSanitizeFunctionName(t *testing.T) {
 		})
 	}
 }
+
+func TestSanitizedToolNameMap(t *testing.T) {
+	t.Run("returns map for tools needing sanitization", func(t *testing.T) {
+		raw := []byte(`{"tools":[
+			{"name":"valid_tool","input_schema":{}},
+			{"name":"mcp/server/read","input_schema":{}},
+			{"name":"tool@v2","input_schema":{}}
+		]}`)
+		m := SanitizedToolNameMap(raw)
+		if m == nil {
+			t.Fatal("expected non-nil map")
+		}
+		if m["mcp_server_read"] != "mcp/server/read" {
+			t.Errorf("expected mcp_server_read -> mcp/server/read, got %q", m["mcp_server_read"])
+		}
+		if m["tool_v2"] != "tool@v2" {
+			t.Errorf("expected tool_v2 -> tool@v2, got %q", m["tool_v2"])
+		}
+		if _, exists := m["valid_tool"]; exists {
+			t.Error("valid_tool should not be in the map")
+		}
+	})
+
+	t.Run("supports OpenAI tool format", func(t *testing.T) {
+		raw := []byte(`{"tools":[
+			{"type":"function","function":{"name":"mcp/server/read","parameters":{"type":"object"}}},
+			{"type":"function","function":{"name":"valid_tool","parameters":{"type":"object"}}}
+		]}`)
+		m := SanitizedToolNameMap(raw)
+		if m == nil {
+			t.Fatal("expected non-nil map")
+		}
+		if m["mcp_server_read"] != "mcp/server/read" {
+			t.Errorf("expected mcp_server_read -> mcp/server/read, got %q", m["mcp_server_read"])
+		}
+		if _, exists := m["valid_tool"]; exists {
+			t.Error("valid_tool should not be in the map")
+		}
+	})
+
+	t.Run("returns nil when no tools need sanitization", func(t *testing.T) {
+		raw := []byte(`{"tools":[{"name":"Read","input_schema":{}},{"name":"Write","input_schema":{}}]}`)
+		m := SanitizedToolNameMap(raw)
+		if m != nil {
+			t.Errorf("expected nil, got %v", m)
+		}
+	})
+
+	t.Run("returns nil for empty or missing tools", func(t *testing.T) {
+		if m := SanitizedToolNameMap([]byte(`{}`)); m != nil {
+			t.Error("expected nil for no tools")
+		}
+		if m := SanitizedToolNameMap(nil); m != nil {
+			t.Error("expected nil for nil input")
+		}
+	})
+
+	t.Run("collision keeps first mapping", func(t *testing.T) {
+		raw := []byte(`{"tools":[
+			{"name":"read/file","input_schema":{}},
+			{"name":"read@file","input_schema":{}}
+		]}`)
+		m := SanitizedToolNameMap(raw)
+		if m == nil {
+			t.Fatal("expected non-nil map")
+		}
+		if m["read_file"] != "read/file" {
+			t.Errorf("expected first mapping read/file, got %q", m["read_file"])
+		}
+	})
+}
+
+func TestRestoreSanitizedToolName(t *testing.T) {
+	m := map[string]string{
+		"mcp_server_read": "mcp/server/read",
+		"tool_v2":         "tool@v2",
+	}
+
+	if got := RestoreSanitizedToolName(m, "mcp_server_read"); got != "mcp/server/read" {
+		t.Errorf("expected mcp/server/read, got %q", got)
+	}
+	if got := RestoreSanitizedToolName(m, "unknown"); got != "unknown" {
+		t.Errorf("expected passthrough for unknown, got %q", got)
+	}
+	if got := RestoreSanitizedToolName(nil, "name"); got != "name" {
+		t.Errorf("expected passthrough for nil map, got %q", got)
+	}
+	if got := RestoreSanitizedToolName(m, ""); got != "" {
+		t.Errorf("expected empty for empty name, got %q", got)
+	}
+}

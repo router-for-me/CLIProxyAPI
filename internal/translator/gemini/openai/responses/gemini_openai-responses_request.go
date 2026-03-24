@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator/gemini/common"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -292,7 +293,7 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 				}
 			case "function_call":
 				// Handle function calls - convert to model message with functionCall
-				name := item.Get("name").String()
+				name := util.SanitizeFunctionName(item.Get("name").String())
 				arguments := item.Get("arguments").String()
 
 				modelContent := `{"role":"model","parts":[]}`
@@ -334,6 +335,7 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 						return true
 					})
 				}
+				functionName = util.SanitizeFunctionName(functionName)
 
 				functionResponse, _ = sjson.Set(functionResponse, "functionResponse.name", functionName)
 				functionResponse, _ = sjson.Set(functionResponse, "functionResponse.id", callID)
@@ -376,7 +378,7 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 				funcDecl := `{"name":"","description":"","parametersJsonSchema":{}}`
 
 				if name := tool.Get("name"); name.Exists() {
-					funcDecl, _ = sjson.Set(funcDecl, "name", name.String())
+					funcDecl, _ = sjson.Set(funcDecl, "name", util.SanitizeFunctionName(name.String()))
 				}
 				if desc := tool.Get("description"); desc.Exists() {
 					funcDecl, _ = sjson.Set(funcDecl, "description", desc.String())

@@ -251,7 +251,7 @@ func ConvertOpenAIRequestToGeminiCLI(modelName string, inputRawJSON []byte, _ bo
 							continue
 						}
 						fid := tc.Get("id").String()
-						fname := tc.Get("function.name").String()
+						fname := util.SanitizeFunctionName(tc.Get("function.name").String())
 						fargs := tc.Get("function.arguments").String()
 						node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".functionCall.name", fname)
 						node, _ = sjson.SetRawBytes(node, "parts."+itoa(p)+".functionCall.args", []byte(fargs))
@@ -268,7 +268,7 @@ func ConvertOpenAIRequestToGeminiCLI(modelName string, inputRawJSON []byte, _ bo
 					pp := 0
 					for _, fid := range fIDs {
 						if name, ok := tcID2Name[fid]; ok {
-							toolNode, _ = sjson.SetBytes(toolNode, "parts."+itoa(pp)+".functionResponse.name", name)
+							toolNode, _ = sjson.SetBytes(toolNode, "parts."+itoa(pp)+".functionResponse.name", util.SanitizeFunctionName(name))
 							resp := toolResponses[fid]
 							if resp == "" {
 								resp = "{}"
@@ -331,6 +331,7 @@ func ConvertOpenAIRequestToGeminiCLI(modelName string, inputRawJSON []byte, _ bo
 							continue
 						}
 					}
+					fnRaw, _ = sjson.Set(fnRaw, "name", util.SanitizeFunctionName(fn.Get("name").String()))
 					fnRaw, _ = sjson.Delete(fnRaw, "strict")
 					if !hasFunction {
 						functionToolNode, _ = sjson.SetRawBytes(functionToolNode, "functionDeclarations", []byte("[]"))

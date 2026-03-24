@@ -27,6 +27,7 @@ type Params struct {
 	ResponseType     int  // Current response type: 0=none, 1=content, 2=thinking, 3=function
 	ResponseIndex    int  // Index counter for content blocks in the streaming response
 	HasContent       bool // Tracks whether any content (text, thinking, or tool use) has been output
+	ToolNameMap      map[string]string
 }
 
 // toolUseIDCounter provides a process-wide unique counter for tool use identifiers.
@@ -54,6 +55,7 @@ func ConvertGeminiCLIResponseToClaude(_ context.Context, _ string, originalReque
 			HasFirstResponse: false,
 			ResponseType:     0,
 			ResponseIndex:    0,
+			ToolNameMap:      util.SanitizedToolNameMap(originalRequestRawJSON),
 		}
 	}
 
@@ -177,7 +179,7 @@ func ConvertGeminiCLIResponseToClaude(_ context.Context, _ string, originalReque
 				// Handle function/tool calls from the AI model
 				// This processes tool usage requests and formats them for Claude Code API compatibility
 				usedTool = true
-				fcName := functionCallResult.Get("name").String()
+				fcName := util.RestoreSanitizedToolName((*param).(*Params).ToolNameMap, functionCallResult.Get("name").String())
 
 				// Handle state transitions when switching to function calls
 				// Close any existing function call block first
@@ -273,7 +275,7 @@ func ConvertGeminiCLIResponseToClaude(_ context.Context, _ string, originalReque
 // Returns:
 //   - string: A Claude-compatible JSON response.
 func ConvertGeminiCLIResponseToClaudeNonStream(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) string {
-	_ = originalRequestRawJSON
+	toolNameMap := util.SanitizedToolNameMap(originalRequestRawJSON)
 	_ = requestRawJSON
 
 	root := gjson.ParseBytes(rawJSON)
@@ -331,7 +333,7 @@ func ConvertGeminiCLIResponseToClaudeNonStream(_ context.Context, _ string, orig
 				flushText()
 				hasToolCall = true
 
-				name := functionCall.Get("name").String()
+				name := util.RestoreSanitizedToolName(toolNameMap, functionCall.Get("name").String())
 				toolIDCounter++
 				toolBlock := `{"type":"tool_use","id":"","name":"","input":{}}`
 				toolBlock, _ = sjson.Set(toolBlock, "id", fmt.Sprintf("tool_%d", toolIDCounter))

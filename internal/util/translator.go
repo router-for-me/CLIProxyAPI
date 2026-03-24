@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strings"
 
+	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -270,4 +271,63 @@ func MapToolName(toolNameMap map[string]string, name string) string {
 		return mapped
 	}
 	return name
+}
+
+func toolDefinitionName(tool gjson.Result) string {
+	name := strings.TrimSpace(tool.Get("name").String())
+	if name != "" {
+		return name
+	}
+	return strings.TrimSpace(tool.Get("function.name").String())
+}
+
+// SanitizedToolNameMap builds a sanitized-name -> original-name map from request tools.
+// It supports both Claude format (tools[].name) and OpenAI format (tools[].function.name).
+// Only entries where sanitization changes the name are included.
+func SanitizedToolNameMap(rawJSON []byte) map[string]string {
+	if len(rawJSON) == 0 || !gjson.ValidBytes(rawJSON) {
+		return nil
+	}
+
+	tools := gjson.GetBytes(rawJSON, "tools")
+	if !tools.Exists() || !tools.IsArray() {
+		return nil
+	}
+
+	out := make(map[string]string)
+	tools.ForEach(func(_, tool gjson.Result) bool {
+		name := toolDefinitionName(tool)
+		if name == "" {
+			return true
+		}
+		sanitized := SanitizeFunctionName(name)
+		if sanitized == name {
+			return true
+		}
+		if existing, exists := out[sanitized]; exists {
+			if existing != name {
+				log.Warnf("tool name sanitization collision: %q and %q -> %q", existing, name, sanitized)
+			}
+			return true
+		}
+		out[sanitized] = name
+		return true
+	})
+
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// RestoreSanitizedToolName returns the original tool name for a sanitized Gemini-safe name.
+// If no mapping exists, the input name is returned unchanged.
+func RestoreSanitizedToolName(toolNameMap map[string]string, sanitizedName string) string {
+	if sanitizedName == "" || toolNameMap == nil {
+		return sanitizedName
+	}
+	if original, ok := toolNameMap[sanitizedName]; ok && original != "" {
+		return original
+	}
+	return sanitizedName
 }

@@ -36,6 +36,18 @@ type ToolCallAccumulator struct {
 	Arguments strings.Builder
 }
 
+func calculateClaudeUsageTokens(usage gjson.Result) (promptTokens, completionTokens, totalTokens, cachedTokens int64) {
+	inputTokens := usage.Get("input_tokens").Int()
+	completionTokens = usage.Get("output_tokens").Int()
+	cachedTokens = usage.Get("cache_read_input_tokens").Int()
+	cacheCreationInputTokens := usage.Get("cache_creation_input_tokens").Int()
+
+	promptTokens = inputTokens + cacheCreationInputTokens + cachedTokens
+	totalTokens = promptTokens + completionTokens
+
+	return promptTokens, completionTokens, totalTokens, cachedTokens
+}
+
 // ConvertClaudeResponseToOpenAI converts Claude Code streaming response format to OpenAI Chat Completions format.
 // This function processes various Claude Code event types and transforms them into OpenAI-compatible JSON responses.
 // It handles text content, tool calls, reasoning content, and usage metadata, outputting responses that match
@@ -203,14 +215,11 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
 
 		// Handle usage information for token counts
 		if usage := root.Get("usage"); usage.Exists() {
-			inputTokens := usage.Get("input_tokens").Int()
-			outputTokens := usage.Get("output_tokens").Int()
-			cacheReadInputTokens := usage.Get("cache_read_input_tokens").Int()
-			cacheCreationInputTokens := usage.Get("cache_creation_input_tokens").Int()
-			template, _ = sjson.Set(template, "usage.prompt_tokens", inputTokens+cacheCreationInputTokens)
-			template, _ = sjson.Set(template, "usage.completion_tokens", outputTokens)
-			template, _ = sjson.Set(template, "usage.total_tokens", inputTokens+outputTokens)
-			template, _ = sjson.Set(template, "usage.prompt_tokens_details.cached_tokens", cacheReadInputTokens)
+			promptTokens, completionTokens, totalTokens, cachedTokens := calculateClaudeUsageTokens(usage)
+			template, _ = sjson.Set(template, "usage.prompt_tokens", promptTokens)
+			template, _ = sjson.Set(template, "usage.completion_tokens", completionTokens)
+			template, _ = sjson.Set(template, "usage.total_tokens", totalTokens)
+			template, _ = sjson.Set(template, "usage.prompt_tokens_details.cached_tokens", cachedTokens)
 		}
 		return []string{template}
 
@@ -362,14 +371,11 @@ func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, origina
 				}
 			}
 			if usage := root.Get("usage"); usage.Exists() {
-				inputTokens := usage.Get("input_tokens").Int()
-				outputTokens := usage.Get("output_tokens").Int()
-				cacheReadInputTokens := usage.Get("cache_read_input_tokens").Int()
-				cacheCreationInputTokens := usage.Get("cache_creation_input_tokens").Int()
-				out, _ = sjson.Set(out, "usage.prompt_tokens", inputTokens+cacheCreationInputTokens)
-				out, _ = sjson.Set(out, "usage.completion_tokens", outputTokens)
-				out, _ = sjson.Set(out, "usage.total_tokens", inputTokens+outputTokens)
-				out, _ = sjson.Set(out, "usage.prompt_tokens_details.cached_tokens", cacheReadInputTokens)
+				promptTokens, completionTokens, totalTokens, cachedTokens := calculateClaudeUsageTokens(usage)
+				out, _ = sjson.Set(out, "usage.prompt_tokens", promptTokens)
+				out, _ = sjson.Set(out, "usage.completion_tokens", completionTokens)
+				out, _ = sjson.Set(out, "usage.total_tokens", totalTokens)
+				out, _ = sjson.Set(out, "usage.prompt_tokens_details.cached_tokens", cachedTokens)
 			}
 		}
 	}

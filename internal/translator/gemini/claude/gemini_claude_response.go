@@ -26,6 +26,7 @@ type Params struct {
 	ResponseIndex    int
 	HasContent       bool // Tracks whether any content (text, thinking, or tool use) has been output
 	ToolNameMap      map[string]string
+	SanitizedNameMap map[string]string
 	SawToolCall      bool
 }
 
@@ -56,6 +57,7 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 			ResponseType:     0,
 			ResponseIndex:    0,
 			ToolNameMap:      util.ToolNameMapFromClaudeRequest(originalRequestRawJSON),
+			SanitizedNameMap: util.SanitizedToolNameMap(originalRequestRawJSON),
 			SawToolCall:      false,
 		}
 	}
@@ -178,7 +180,7 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 				// Handle function/tool calls from the AI model
 				// This processes tool usage requests and formats them for Claude API compatibility
 				(*param).(*Params).SawToolCall = true
-				upstreamToolName := functionCallResult.Get("name").String()
+				upstreamToolName := util.RestoreSanitizedToolName((*param).(*Params).SanitizedNameMap, functionCallResult.Get("name").String())
 				clientToolName := util.MapToolName((*param).(*Params).ToolNameMap, upstreamToolName)
 
 				// FIX: Handle streaming split/delta where name might be empty in subsequent chunks.
@@ -285,6 +287,7 @@ func ConvertGeminiResponseToClaudeNonStream(_ context.Context, _ string, origina
 
 	root := gjson.ParseBytes(rawJSON)
 	toolNameMap := util.ToolNameMapFromClaudeRequest(originalRequestRawJSON)
+	sanitizedNameMap := util.SanitizedToolNameMap(originalRequestRawJSON)
 
 	out := `{"id":"","type":"message","role":"assistant","model":"","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}`
 	out, _ = sjson.Set(out, "id", root.Get("responseId").String())
@@ -339,7 +342,7 @@ func ConvertGeminiResponseToClaudeNonStream(_ context.Context, _ string, origina
 				flushText()
 				hasToolCall = true
 
-				upstreamToolName := functionCall.Get("name").String()
+				upstreamToolName := util.RestoreSanitizedToolName(sanitizedNameMap, functionCall.Get("name").String())
 				clientToolName := util.MapToolName(toolNameMap, upstreamToolName)
 				toolIDCounter++
 				toolBlock := `{"type":"tool_use","id":"","name":"","input":{}}`
