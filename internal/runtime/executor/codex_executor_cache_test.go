@@ -108,6 +108,56 @@ func TestCodexPrepareRequestPlan_ReusesBodyAcrossMetadataRetries(t *testing.T) {
 	}
 }
 
+func TestCodexPrepareRequestPlan_CacheSeparatesThinkingSuffixes(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	ginCtx.Set("apiKey", "thinking-retry-api-key")
+
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+	executor := &CodexExecutor{}
+	payload := []byte(`{"model":"gpt-5.4","input":"` + string(bytes.Repeat([]byte("hello "), 2048)) + `","stream":true}`)
+	opts := cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+		Stream:       true,
+		Metadata: map[string]any{
+			cliproxyexecutor.RequestedModelMetadataKey: "gpt-5.4",
+		},
+	}
+
+	highPlan, err := executor.prepareCodexRequestPlan(ctx, cliproxyexecutor.Request{
+		Model:   "gpt-5.4(high)",
+		Payload: payload,
+	}, opts, codexPreparedRequestPlanExecuteStream)
+	if err != nil {
+		t.Fatalf("prepareCodexRequestPlan() high error = %v", err)
+	}
+	lowPlan, err := executor.prepareCodexRequestPlan(ctx, cliproxyexecutor.Request{
+		Model:   "gpt-5.4(low)",
+		Payload: payload,
+	}, opts, codexPreparedRequestPlanExecuteStream)
+	if err != nil {
+		t.Fatalf("prepareCodexRequestPlan() low error = %v", err)
+	}
+
+	if got := gjson.GetBytes(highPlan.body, "reasoning.effort").String(); got != "high" {
+		t.Fatalf("high reasoning.effort = %q, want %q", got, "high")
+	}
+	if got := gjson.GetBytes(lowPlan.body, "reasoning.effort").String(); got != "low" {
+		t.Fatalf("low reasoning.effort = %q, want %q", got, "low")
+	}
+	if &highPlan.body[0] == &lowPlan.body[0] {
+		t.Fatal("expected distinct cached bodies for distinct thinking suffixes")
+	}
+
+	cache, ok := opts.Metadata[codexPreparedRequestCacheMetadataKey].(*codexPreparedRequestCache)
+	if !ok || cache == nil {
+		t.Fatal("expected prepared request cache to be allocated")
+	}
+	if got := len(cache.entries); got != 2 {
+		t.Fatalf("cache entries = %d, want 2", got)
+	}
+}
+
 func TestCodexPrepareRequestPlan_SkipsCacheForSmallPayloads(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	ginCtx, _ := gin.CreateTestContext(recorder)

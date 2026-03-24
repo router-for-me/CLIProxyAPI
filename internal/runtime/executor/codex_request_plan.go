@@ -87,7 +87,7 @@ func (e *CodexExecutor) prepareCodexRequestPlan(ctx context.Context, req cliprox
 	requestedModel := payloadRequestedModel(opts, req.Model)
 	key := codexPreparedRequestPlanKey{
 		mode:           mode,
-		model:          baseModel,
+		model:          strings.TrimSpace(req.Model),
 		requestedModel: requestedModel,
 		sourceFormat:   opts.SourceFormat.String(),
 	}

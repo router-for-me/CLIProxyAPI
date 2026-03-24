@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -184,6 +185,48 @@ func TestCodexExecutorExecute_LocalServer_ReturnsAfterCompletedBeforeUpstreamClo
 	case <-clientClosed:
 	case <-time.After(800 * time.Millisecond):
 		t.Fatal("expected Execute() to close upstream body after response.completed")
+	}
+}
+
+func TestCodexExecutorExecute_LocalServer_ReusesConnectionWhenCompletedEOFIsBrieflyDelayed(t *testing.T) {
+	var newConnections atomic.Int64
+
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+		_, _ = io.WriteString(w, "data: {\"type\":\"response.created\"}\n")
+		_, _ = io.WriteString(w, "data: "+codexCompletedEventJSON("resp_keepalive", "gpt-5.4", "ok-keepalive")+"\n")
+		if flusher != nil {
+			flusher.Flush()
+		}
+		time.Sleep(30 * time.Millisecond)
+	}))
+	server.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			newConnections.Add(1)
+		}
+	}
+	server.Start()
+	defer server.Close()
+
+	executor := NewCodexExecutor(&config.Config{})
+	for i := 0; i < 2; i++ {
+		resp, err := executor.Execute(
+			context.Background(),
+			newCodexTestAuth(server.URL, "keepalive-key"),
+			newCodexResponsesRequest(fmt.Sprintf("keepalive-%d", i)),
+			cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-response")},
+		)
+		if err != nil {
+			t.Fatalf("Execute() #%d error = %v", i+1, err)
+		}
+		if got := gjson.GetBytes(resp.Payload, "output.0.content.0.text").String(); got != "ok-keepalive" {
+			t.Fatalf("response text #%d = %q, want %q", i+1, got, "ok-keepalive")
+		}
+	}
+
+	if got := newConnections.Load(); got != 1 {
+		t.Fatalf("new TCP connections = %d, want 1", got)
 	}
 }
 

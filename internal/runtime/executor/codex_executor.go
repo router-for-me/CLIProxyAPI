@@ -30,6 +30,9 @@ import (
 const (
 	codexClientVersion = "0.101.0"
 	codexUserAgent     = "codex_cli_rs/0.101.0 (Mac OS 26.0.1; arm64) Apple_Terminal/464"
+	// Give non-stream /responses a short chance to reach EOF so keep-alive
+	// connections can be reused without reintroducing long tail latency.
+	codexCompletedDrainGracePeriod = 100 * time.Millisecond
 )
 
 var dataTag = []byte("data:")
@@ -565,7 +568,7 @@ func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Form
 	return newCodexHTTPRequest(ctx, url, rawJSON, conversationID)
 }
 
-func readCodexCompletedEvent(ctx context.Context, cfg *config.Config, body io.Reader, reporter *usageReporter) ([]byte, error) {
+func readCodexCompletedEvent(ctx context.Context, cfg *config.Config, body io.ReadCloser, reporter *usageReporter) ([]byte, error) {
 	reader := bufio.NewReader(body)
 	for {
 		line, err := reader.ReadBytes('\n')
@@ -578,6 +581,7 @@ func readCodexCompletedEvent(ctx context.Context, cfg *config.Config, body io.Re
 						reporter.publish(ctx, detail)
 					}
 					reporter.ensurePublished(ctx)
+					drainCodexCompletedBody(ctx, cfg, reader, body)
 					return bytes.Clone(data), nil
 				}
 			}
@@ -591,6 +595,38 @@ func readCodexCompletedEvent(ctx context.Context, cfg *config.Config, body io.Re
 		return nil, err
 	}
 	return nil, statusErr{code: 408, msg: "stream error: stream disconnected before completion: stream closed before response.completed"}
+}
+
+func drainCodexCompletedBody(ctx context.Context, cfg *config.Config, reader *bufio.Reader, body io.Closer) {
+	if reader == nil || body == nil {
+		return
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		buf := make([]byte, 4096)
+		for {
+			n, err := reader.Read(buf)
+			if n > 0 {
+				appendAPIResponseChunk(ctx, cfg, buf[:n])
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	timer := time.NewTimer(codexCompletedDrainGracePeriod)
+	defer timer.Stop()
+
+	select {
+	case <-done:
+		return
+	case <-timer.C:
+		_ = body.Close()
+		<-done
+	}
 }
 
 func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, stream bool, cfg *config.Config) {
