@@ -5,11 +5,15 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	"github.com/tidwall/gjson"
 )
 
@@ -174,6 +178,104 @@ func TestApplyCodexHeadersUsesConfigUserAgentForOAuth(t *testing.T) {
 	}
 	if got := req.Header.Get("x-codex-beta-features"); got != "" {
 		t.Fatalf("x-codex-beta-features = %q, want empty", got)
+	}
+}
+
+func TestCodexAutoExecutorExecuteStream_WebsocketStripsPrefixedModelFromOutboundRequest(t *testing.T) {
+	t.Parallel()
+
+	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+	reqPathCh := make(chan string, 1)
+	reqBodyCh := make(chan []byte, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("upgrade websocket: %v", err)
+			return
+		}
+		defer func() { _ = conn.Close() }()
+
+		msgType, payload, err := conn.ReadMessage()
+		if err != nil {
+			t.Errorf("read websocket request: %v", err)
+			return
+		}
+		if msgType != websocket.TextMessage {
+			t.Errorf("message type = %d, want %d", msgType, websocket.TextMessage)
+			return
+		}
+		reqPathCh <- r.URL.Path
+		reqBodyCh <- payload
+
+		if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.created","response":{"id":"resp_ws"}}`)); err != nil {
+			t.Errorf("write websocket created event: %v", err)
+			return
+		}
+		if err := conn.WriteMessage(websocket.TextMessage, []byte(codexCompletedEventJSON("resp_ws", "gpt-5.4", "ok-ws"))); err != nil {
+			t.Errorf("write websocket completed event: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	auth := newCodexTestAuth(server.URL, "ws-key")
+	auth.Prefix = "team"
+	auth.Attributes["websockets"] = "true"
+
+	executor := NewCodexAutoExecutor(&config.Config{})
+	ctx, cancel := context.WithTimeout(cliproxyexecutor.WithDownstreamWebsocket(context.Background()), 5*time.Second)
+	defer cancel()
+
+	result, err := executor.ExecuteStream(
+		ctx,
+		auth,
+		cliproxyexecutor.Request{
+			Model: "gpt-5.4",
+			Payload: []byte(`{
+				"model":"team/gpt-5.4",
+				"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],
+				"stream":true
+			}`),
+		},
+		cliproxyexecutor.Options{
+			Stream:       true,
+			SourceFormat: sdktranslator.FromString("openai-response"),
+			Metadata: map[string]any{
+				cliproxyexecutor.RequestedModelMetadataKey: "team/gpt-5.4",
+			},
+		},
+	)
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error = %v", chunk.Err)
+		}
+	}
+
+	select {
+	case path := <-reqPathCh:
+		if path != "/responses" {
+			t.Fatalf("websocket path = %q, want %q", path, "/responses")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for websocket request path")
+	}
+
+	select {
+	case payload := <-reqBodyCh:
+		if got := gjson.GetBytes(payload, "type").String(); got != "response.create" {
+			t.Fatalf("websocket request type = %q, want %q", got, "response.create")
+		}
+		if got := gjson.GetBytes(payload, "model").String(); got != "gpt-5.4" {
+			t.Fatalf("websocket request model = %q, want %q", got, "gpt-5.4")
+		}
+		if got := gjson.GetBytes(payload, "model").String(); got == "team/gpt-5.4" {
+			t.Fatalf("websocket request leaked prefixed model: %s", payload)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for websocket request body")
 	}
 }
 
