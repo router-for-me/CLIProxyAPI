@@ -75,7 +75,12 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 		w.clientsMutex.Lock()
 
 		w.lastAuthHashes = make(map[string]string)
-		w.lastAuthContents = make(map[string]*coreauth.Auth)
+		cacheAuthContents := log.IsLevelEnabled(log.DebugLevel)
+		if cacheAuthContents {
+			w.lastAuthContents = make(map[string]*coreauth.Auth)
+		} else {
+			w.lastAuthContents = nil
+		}
 		w.fileAuthsByPath = make(map[string]map[string]*coreauth.Auth)
 		if resolvedAuthDir, errResolveAuthDir := util.ResolveAuthDir(cfg.AuthDir); errResolveAuthDir != nil {
 			log.Errorf("failed to resolve auth directory for hash cache: %v", errResolveAuthDir)
@@ -89,10 +94,12 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 						sum := sha256.Sum256(data)
 						normalizedPath := w.normalizeAuthPath(path)
 						w.lastAuthHashes[normalizedPath] = hex.EncodeToString(sum[:])
-						// Parse and cache auth content for future diff comparisons
-						var auth coreauth.Auth
-						if errParse := json.Unmarshal(data, &auth); errParse == nil {
-							w.lastAuthContents[normalizedPath] = &auth
+						// Parse and cache auth content for future diff comparisons (debug only).
+						if cacheAuthContents {
+							var auth coreauth.Auth
+							if errParse := json.Unmarshal(data, &auth); errParse == nil {
+								w.lastAuthContents[normalizedPath] = &auth
+							}
 						}
 						ctx := &synthesizer.SynthesisContext{
 							Config:      cfg,
@@ -102,7 +109,7 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 						}
 						if generated := synthesizer.SynthesizeAuthFile(ctx, path, data); len(generated) > 0 {
 							if pathAuths := authSliceToMap(generated); len(pathAuths) > 0 {
-								w.fileAuthsByPath[normalizedPath] = pathAuths
+								w.fileAuthsByPath[normalizedPath] = authIDSet(pathAuths)
 							}
 						}
 					}
@@ -171,25 +178,30 @@ func (w *Watcher) addOrUpdateClient(path string) {
 	}
 
 	// Get old auth for diff comparison
+	cacheAuthContents := log.IsLevelEnabled(log.DebugLevel)
 	var oldAuth *coreauth.Auth
-	if w.lastAuthContents != nil {
+	if cacheAuthContents && w.lastAuthContents != nil {
 		oldAuth = w.lastAuthContents[normalized]
 	}
 
 	// Compute and log field changes
-	if changes := diff.BuildAuthChangeDetails(oldAuth, &newAuth); len(changes) > 0 {
-		log.Debugf("auth field changes for %s:", filepath.Base(path))
-		for _, c := range changes {
-			log.Debugf("  %s", c)
+	if cacheAuthContents {
+		if changes := diff.BuildAuthChangeDetails(oldAuth, &newAuth); len(changes) > 0 {
+			log.Debugf("auth field changes for %s:", filepath.Base(path))
+			for _, c := range changes {
+				log.Debugf("  %s", c)
+			}
 		}
 	}
 
 	// Update caches
 	w.lastAuthHashes[normalized] = curHash
-	if w.lastAuthContents == nil {
-		w.lastAuthContents = make(map[string]*coreauth.Auth)
+	if cacheAuthContents {
+		if w.lastAuthContents == nil {
+			w.lastAuthContents = make(map[string]*coreauth.Auth)
+		}
+		w.lastAuthContents[normalized] = &newAuth
 	}
-	w.lastAuthContents[normalized] = &newAuth
 
 	oldByID := make(map[string]*coreauth.Auth, len(w.fileAuthsByPath[normalized]))
 	for id, a := range w.fileAuthsByPath[normalized] {
@@ -206,7 +218,7 @@ func (w *Watcher) addOrUpdateClient(path string) {
 	generated := synthesizer.SynthesizeAuthFile(sctx, path, data)
 	newByID := authSliceToMap(generated)
 	if len(newByID) > 0 {
-		w.fileAuthsByPath[normalized] = newByID
+		w.fileAuthsByPath[normalized] = authIDSet(newByID)
 	} else {
 		delete(w.fileAuthsByPath, normalized)
 	}
@@ -271,6 +283,14 @@ func authSliceToMap(auths []*coreauth.Auth) map[string]*coreauth.Auth {
 		byID[a.ID] = a
 	}
 	return byID
+}
+
+func authIDSet(auths map[string]*coreauth.Auth) map[string]*coreauth.Auth {
+	set := make(map[string]*coreauth.Auth, len(auths))
+	for id := range auths {
+		set[id] = nil
+	}
+	return set
 }
 
 func (w *Watcher) loadFileClients(cfg *config.Config) int {

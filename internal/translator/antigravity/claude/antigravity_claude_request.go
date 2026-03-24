@@ -104,59 +104,59 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 
 						// Always try cached signature first (more reliable than client-provided)
 						// Client may send stale or invalid signatures from different sessions
-						signature := ""
-						if thinkingText != "" {
-							if cachedSig := cache.GetCachedSignature(modelName, thinkingText); cachedSig != "" {
-								signature = cachedSig
-								// log.Debugf("Using cached signature for thinking block")
-							}
+			signature := ""
+					if thinkingText != "" {
+						if cachedSig := cache.GetCachedSignature(modelName, thinkingText); cachedSig != "" {
+							signature = cachedSig
+							// log.Debugf("Using cached signature for thinking block")
 						}
+					}
 
-						// Fallback to client signature only if cache miss and client signature is valid
-						if signature == "" {
-							signatureResult := contentResult.Get("signature")
-							clientSignature := ""
-							if signatureResult.Exists() && signatureResult.String() != "" {
-								arrayClientSignatures := strings.SplitN(signatureResult.String(), "#", 2)
-								if len(arrayClientSignatures) == 2 {
-									if cache.GetModelGroup(modelName) == arrayClientSignatures[0] {
-										clientSignature = arrayClientSignatures[1]
-									}
+					// Fallback to client signature only if cache miss and client signature is valid
+					if signature == "" {
+						signatureResult := contentResult.Get("signature")
+						clientSignature := ""
+						if signatureResult.Exists() && signatureResult.String() != "" {
+							arrayClientSignatures := strings.SplitN(signatureResult.String(), "#", 2)
+							if len(arrayClientSignatures) == 2 {
+								if cache.GetModelGroup(modelName) == arrayClientSignatures[0] {
+									clientSignature = arrayClientSignatures[1]
 								}
 							}
-							if cache.HasValidSignature(modelName, clientSignature) {
-								signature = clientSignature
-							}
-							// log.Debugf("Using client-provided signature for thinking block")
 						}
+						if cache.HasValidSignature(modelName, clientSignature) {
+							signature = clientSignature
+						}
+						// log.Debugf("Using client-provided signature for thinking block")
+					}
 
-						// Store for subsequent tool_use in the same message
-						if cache.HasValidSignature(modelName, signature) {
-							currentMessageThinkingSignature = signature
-						}
+					// Store for subsequent tool_use in the same message
+					if cache.HasValidSignature(modelName, signature) {
+						currentMessageThinkingSignature = signature
+					}
 
-						// Skip trailing unsigned thinking blocks on last assistant message
-						isUnsigned := !cache.HasValidSignature(modelName, signature)
+					// Skip trailing unsigned thinking blocks on last assistant message
+					isUnsigned := !cache.HasValidSignature(modelName, signature)
 
-						// If unsigned, skip entirely (don't convert to text)
-						// Claude requires assistant messages to start with thinking blocks when thinking is enabled
-						// Converting to text would break this requirement
-						if isUnsigned {
-							// log.Debugf("Dropping unsigned thinking block (no valid signature)")
-							enableThoughtTranslate = false
-							continue
-						}
+					// If unsigned, skip entirely (don't convert to text)
+					// Claude requires assistant messages to start with thinking blocks when thinking is enabled
+					// Converting to text would break this requirement
+					if isUnsigned {
+						// log.Debugf("Dropping unsigned thinking block (no valid signature)")
+						enableThoughtTranslate = false
+						continue
+					}
 
-						// Valid signature, send as thought block
-						partJSON := []byte(`{}`)
-						partJSON, _ = sjson.SetBytes(partJSON, "thought", true)
-						if thinkingText != "" {
-							partJSON, _ = sjson.SetBytes(partJSON, "text", thinkingText)
-						}
-						if signature != "" {
-							partJSON, _ = sjson.SetBytes(partJSON, "thoughtSignature", signature)
-						}
-						clientContentJSON, _ = sjson.SetRawBytes(clientContentJSON, "parts.-1", partJSON)
+					// Valid signature, send as thought block
+					// Always include "text" field — Google Antigravity API requires it
+					// even for redacted thinking where the text is empty.
+					partJSON := []byte(`{}`)
+					partJSON, _ = sjson.SetBytes(partJSON, "thought", true)
+					partJSON, _ = sjson.SetBytes(partJSON, "text", thinkingText)
+					if signature != "" {
+						partJSON, _ = sjson.SetBytes(partJSON, "thoughtSignature", signature)
+					}
+					clientContentJSON, _ = sjson.SetRawBytes(clientContentJSON, "parts.-1", partJSON)
 					} else if contentTypeResult.Type == gjson.String && contentTypeResult.String() == "text" {
 						prompt := contentResult.Get("text").String()
 						// Skip empty text parts to avoid Gemini API error:
@@ -171,7 +171,7 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 						// NOTE: Do NOT inject dummy thinking blocks here.
 						// Antigravity API validates signatures, so dummy values are rejected.
 
-						functionName := contentResult.Get("name").String()
+						functionName := util.SanitizeFunctionName(contentResult.Get("name").String())
 						argsResult := contentResult.Get("input")
 						functionID := contentResult.Get("id").String()
 
@@ -233,7 +233,7 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 
 							functionResponseJSON := []byte(`{}`)
 							functionResponseJSON, _ = sjson.SetBytes(functionResponseJSON, "id", toolCallID)
-							functionResponseJSON, _ = sjson.SetBytes(functionResponseJSON, "name", funcName)
+							functionResponseJSON, _ = sjson.SetBytes(functionResponseJSON, "name", util.SanitizeFunctionName(funcName))
 
 							responseData := ""
 							if functionResponseResult.Type == gjson.String {
@@ -398,6 +398,7 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 				inputSchema := util.CleanJSONSchemaForAntigravity(inputSchemaResult.Raw)
 				tool, _ := sjson.DeleteBytes([]byte(toolResult.Raw), "input_schema")
 				tool, _ = sjson.SetRawBytes(tool, "parametersJsonSchema", []byte(inputSchema))
+				tool, _ = sjson.SetBytes(tool, "name", util.SanitizeFunctionName(gjson.GetBytes(tool, "name").String()))
 				for toolKey := range gjson.ParseBytes(tool).Map() {
 					if util.InArray(allowedToolKeys, toolKey) {
 						continue
@@ -471,7 +472,7 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 		case "tool":
 			out, _ = sjson.SetBytes(out, "request.toolConfig.functionCallingConfig.mode", "ANY")
 			if toolChoiceName != "" {
-				out, _ = sjson.SetBytes(out, "request.toolConfig.functionCallingConfig.allowedFunctionNames", []string{toolChoiceName})
+				out, _ = sjson.SetBytes(out, "request.toolConfig.functionCallingConfig.allowedFunctionNames", []string{util.SanitizeFunctionName(toolChoiceName)})
 			}
 		}
 	}

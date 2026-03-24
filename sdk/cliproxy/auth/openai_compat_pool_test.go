@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
 
@@ -116,6 +117,47 @@ func (e *openAICompatPoolExecutor) StreamModels() []string {
 	return out
 }
 
+type authScopedOpenAICompatPoolExecutor struct {
+	id string
+
+	mu           sync.Mutex
+	executeCalls []string
+}
+
+func (e *authScopedOpenAICompatPoolExecutor) Identifier() string { return e.id }
+
+func (e *authScopedOpenAICompatPoolExecutor) Execute(_ context.Context, auth *Auth, req cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	call := auth.ID + "|" + req.Model
+	e.mu.Lock()
+	e.executeCalls = append(e.executeCalls, call)
+	e.mu.Unlock()
+	return cliproxyexecutor.Response{Payload: []byte(call)}, nil
+}
+
+func (e *authScopedOpenAICompatPoolExecutor) ExecuteStream(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	return nil, &Error{HTTPStatus: http.StatusNotImplemented, Message: "ExecuteStream not implemented"}
+}
+
+func (e *authScopedOpenAICompatPoolExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) {
+	return auth, nil
+}
+
+func (e *authScopedOpenAICompatPoolExecutor) CountTokens(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, &Error{HTTPStatus: http.StatusNotImplemented, Message: "CountTokens not implemented"}
+}
+
+func (e *authScopedOpenAICompatPoolExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
+	return nil, &Error{HTTPStatus: http.StatusNotImplemented, Message: "HttpRequest not implemented"}
+}
+
+func (e *authScopedOpenAICompatPoolExecutor) ExecuteCalls() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	out := make([]string, len(e.executeCalls))
+	copy(out, e.executeCalls)
+	return out
+}
+
 func newOpenAICompatPoolTestManager(t *testing.T, alias string, models []internalconfig.OpenAICompatibilityModel, executor *openAICompatPoolExecutor) *Manager {
 	t.Helper()
 	cfg := &internalconfig.Config{
@@ -151,6 +193,21 @@ func newOpenAICompatPoolTestManager(t *testing.T, alias string, models []interna
 		reg.UnregisterClient(auth.ID)
 	})
 	return m
+}
+
+func readOpenAICompatStreamPayload(t *testing.T, streamResult *cliproxyexecutor.StreamResult) string {
+	t.Helper()
+	if streamResult == nil {
+		t.Fatal("expected stream result")
+	}
+	var payload []byte
+	for chunk := range streamResult.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("unexpected stream error: %v", chunk.Err)
+		}
+		payload = append(payload, chunk.Payload...)
+	}
+	return string(payload)
 }
 
 func TestManagerExecuteCount_OpenAICompatAliasPoolStopsOnInvalidRequest(t *testing.T) {
@@ -243,6 +300,87 @@ func TestManagerExecute_OpenAICompatAliasPoolStopsOnBadRequest(t *testing.T) {
 		t.Fatalf("execute calls = %v, want only first invalid model", got)
 	}
 }
+
+func TestManagerExecute_OpenAICompatAliasPoolFallsBackOnModelSupportBadRequest(t *testing.T) {
+	alias := "claude-opus-4.66"
+	modelSupportErr := &Error{
+		HTTPStatus: http.StatusBadRequest,
+		Message:    "invalid_request_error: The requested model is not supported.",
+	}
+	executor := &openAICompatPoolExecutor{
+		id:            "pool",
+		executeErrors: map[string]error{"qwen3.5-plus": modelSupportErr},
+	}
+	m := newOpenAICompatPoolTestManager(t, alias, []internalconfig.OpenAICompatibilityModel{
+		{Name: "qwen3.5-plus", Alias: alias},
+		{Name: "glm-5", Alias: alias},
+	}, executor)
+
+	resp, err := m.Execute(context.Background(), []string{"pool"}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{})
+	if err != nil {
+		t.Fatalf("execute error = %v, want fallback success", err)
+	}
+	if string(resp.Payload) != "glm-5" {
+		t.Fatalf("payload = %q, want %q", string(resp.Payload), "glm-5")
+	}
+	got := executor.ExecuteModels()
+	want := []string{"qwen3.5-plus", "glm-5"}
+	if len(got) != len(want) {
+		t.Fatalf("execute calls = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("execute call %d model = %q, want %q", i, got[i], want[i])
+		}
+	}
+
+	updated, ok := m.GetByID("pool-auth-" + t.Name())
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to remain registered")
+	}
+	state := updated.ModelStates["qwen3.5-plus"]
+	if state == nil {
+		t.Fatalf("expected suspended upstream model state")
+	}
+	if !state.Unavailable || state.NextRetryAfter.IsZero() {
+		t.Fatalf("expected upstream model suspension, got %+v", state)
+	}
+}
+
+func TestManagerExecute_OpenAICompatAliasPoolFallsBackOnModelSupportUnprocessableEntity(t *testing.T) {
+	alias := "claude-opus-4.66"
+	modelSupportErr := &Error{
+		HTTPStatus: http.StatusUnprocessableEntity,
+		Message:    "The requested model is not supported.",
+	}
+	executor := &openAICompatPoolExecutor{
+		id:            "pool",
+		executeErrors: map[string]error{"qwen3.5-plus": modelSupportErr},
+	}
+	m := newOpenAICompatPoolTestManager(t, alias, []internalconfig.OpenAICompatibilityModel{
+		{Name: "qwen3.5-plus", Alias: alias},
+		{Name: "glm-5", Alias: alias},
+	}, executor)
+
+	resp, err := m.Execute(context.Background(), []string{"pool"}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{})
+	if err != nil {
+		t.Fatalf("execute error = %v, want fallback success", err)
+	}
+	if string(resp.Payload) != "glm-5" {
+		t.Fatalf("payload = %q, want %q", string(resp.Payload), "glm-5")
+	}
+	got := executor.ExecuteModels()
+	want := []string{"qwen3.5-plus", "glm-5"}
+	if len(got) != len(want) {
+		t.Fatalf("execute calls = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("execute call %d model = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
 func TestManagerExecute_OpenAICompatAliasPoolFallsBackWithinSameAuth(t *testing.T) {
 	alias := "claude-opus-4.66"
 	executor := &openAICompatPoolExecutor{
@@ -364,6 +502,84 @@ func TestManagerExecuteStream_OpenAICompatAliasPoolStopsOnInvalidRequest(t *test
 		t.Fatalf("stream calls = %v, want only first invalid model", got)
 	}
 }
+
+func TestManagerExecute_OpenAICompatAliasPoolSkipsSuspendedUpstreamOnLaterRequests(t *testing.T) {
+	alias := "claude-opus-4.66"
+	modelSupportErr := &Error{
+		HTTPStatus: http.StatusBadRequest,
+		Message:    "invalid_request_error: The requested model is not supported.",
+	}
+	executor := &openAICompatPoolExecutor{
+		id:            "pool",
+		executeErrors: map[string]error{"qwen3.5-plus": modelSupportErr},
+	}
+	m := newOpenAICompatPoolTestManager(t, alias, []internalconfig.OpenAICompatibilityModel{
+		{Name: "qwen3.5-plus", Alias: alias},
+		{Name: "glm-5", Alias: alias},
+	}, executor)
+
+	for i := 0; i < 3; i++ {
+		resp, err := m.Execute(context.Background(), []string{"pool"}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{})
+		if err != nil {
+			t.Fatalf("execute %d: %v", i, err)
+		}
+		if string(resp.Payload) != "glm-5" {
+			t.Fatalf("execute %d payload = %q, want %q", i, string(resp.Payload), "glm-5")
+		}
+	}
+
+	got := executor.ExecuteModels()
+	want := []string{"qwen3.5-plus", "glm-5", "glm-5", "glm-5"}
+	if len(got) != len(want) {
+		t.Fatalf("execute calls = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("execute call %d model = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestManagerExecuteStream_OpenAICompatAliasPoolSkipsSuspendedUpstreamOnLaterRequests(t *testing.T) {
+	alias := "claude-opus-4.66"
+	modelSupportErr := &Error{
+		HTTPStatus: http.StatusUnprocessableEntity,
+		Message:    "The requested model is not supported.",
+	}
+	executor := &openAICompatPoolExecutor{
+		id:                "pool",
+		streamFirstErrors: map[string]error{"qwen3.5-plus": modelSupportErr},
+	}
+	m := newOpenAICompatPoolTestManager(t, alias, []internalconfig.OpenAICompatibilityModel{
+		{Name: "qwen3.5-plus", Alias: alias},
+		{Name: "glm-5", Alias: alias},
+	}, executor)
+
+	for i := 0; i < 3; i++ {
+		streamResult, err := m.ExecuteStream(context.Background(), []string{"pool"}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{})
+		if err != nil {
+			t.Fatalf("execute stream %d: %v", i, err)
+		}
+		if payload := readOpenAICompatStreamPayload(t, streamResult); payload != "glm-5" {
+			t.Fatalf("execute stream %d payload = %q, want %q", i, payload, "glm-5")
+		}
+		if gotHeader := streamResult.Headers.Get("X-Model"); gotHeader != "glm-5" {
+			t.Fatalf("execute stream %d header X-Model = %q, want %q", i, gotHeader, "glm-5")
+		}
+	}
+
+	got := executor.StreamModels()
+	want := []string{"qwen3.5-plus", "glm-5", "glm-5", "glm-5"}
+	if len(got) != len(want) {
+		t.Fatalf("stream calls = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("stream call %d model = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
 func TestManagerExecuteCount_OpenAICompatAliasPoolRotatesWithinAuth(t *testing.T) {
 	alias := "claude-opus-4.66"
 	executor := &openAICompatPoolExecutor{id: "pool"}
@@ -388,6 +604,127 @@ func TestManagerExecuteCount_OpenAICompatAliasPoolRotatesWithinAuth(t *testing.T
 		if got[i] != want[i] {
 			t.Fatalf("count call %d model = %q, want %q", i, got[i], want[i])
 		}
+	}
+}
+
+func TestManagerExecuteCount_OpenAICompatAliasPoolSkipsSuspendedUpstreamOnLaterRequests(t *testing.T) {
+	alias := "claude-opus-4.66"
+	modelSupportErr := &Error{
+		HTTPStatus: http.StatusBadRequest,
+		Message:    "invalid_request_error: The requested model is unsupported.",
+	}
+	executor := &openAICompatPoolExecutor{
+		id:          "pool",
+		countErrors: map[string]error{"qwen3.5-plus": modelSupportErr},
+	}
+	m := newOpenAICompatPoolTestManager(t, alias, []internalconfig.OpenAICompatibilityModel{
+		{Name: "qwen3.5-plus", Alias: alias},
+		{Name: "glm-5", Alias: alias},
+	}, executor)
+
+	for i := 0; i < 3; i++ {
+		resp, err := m.ExecuteCount(context.Background(), []string{"pool"}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{})
+		if err != nil {
+			t.Fatalf("execute count %d: %v", i, err)
+		}
+		if string(resp.Payload) != "glm-5" {
+			t.Fatalf("execute count %d payload = %q, want %q", i, string(resp.Payload), "glm-5")
+		}
+	}
+
+	got := executor.CountModels()
+	want := []string{"qwen3.5-plus", "glm-5", "glm-5", "glm-5"}
+	if len(got) != len(want) {
+		t.Fatalf("count calls = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("count call %d model = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestManagerExecute_OpenAICompatAliasPoolBlockedAuthDoesNotConsumeRetryBudget(t *testing.T) {
+	alias := "claude-opus-4.66"
+	cfg := &internalconfig.Config{
+		OpenAICompatibility: []internalconfig.OpenAICompatibility{{
+			Name: "pool",
+			Models: []internalconfig.OpenAICompatibilityModel{
+				{Name: "qwen3.5-plus", Alias: alias},
+				{Name: "glm-5", Alias: alias},
+			},
+		}},
+	}
+	m := NewManager(nil, nil, nil)
+	m.SetConfig(cfg)
+	m.SetRetryConfig(0, 0, 1)
+
+	executor := &authScopedOpenAICompatPoolExecutor{id: "pool"}
+	m.RegisterExecutor(executor)
+
+	badAuth := &Auth{
+		ID:       "aa-blocked-auth",
+		Provider: "pool",
+		Status:   StatusActive,
+		Attributes: map[string]string{
+			"api_key":      "bad-key",
+			"compat_name":  "pool",
+			"provider_key": "pool",
+		},
+	}
+	goodAuth := &Auth{
+		ID:       "bb-good-auth",
+		Provider: "pool",
+		Status:   StatusActive,
+		Attributes: map[string]string{
+			"api_key":      "good-key",
+			"compat_name":  "pool",
+			"provider_key": "pool",
+		},
+	}
+	if _, err := m.Register(context.Background(), badAuth); err != nil {
+		t.Fatalf("register bad auth: %v", err)
+	}
+	if _, err := m.Register(context.Background(), goodAuth); err != nil {
+		t.Fatalf("register good auth: %v", err)
+	}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(badAuth.ID, "pool", []*registry.ModelInfo{{ID: alias}})
+	reg.RegisterClient(goodAuth.ID, "pool", []*registry.ModelInfo{{ID: alias}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(badAuth.ID)
+		reg.UnregisterClient(goodAuth.ID)
+	})
+
+	modelSupportErr := &Error{
+		HTTPStatus: http.StatusBadRequest,
+		Message:    "invalid_request_error: The requested model is not supported.",
+	}
+	for _, upstreamModel := range []string{"qwen3.5-plus", "glm-5"} {
+		m.MarkResult(context.Background(), Result{
+			AuthID:   badAuth.ID,
+			Provider: "pool",
+			Model:    upstreamModel,
+			Success:  false,
+			Error:    modelSupportErr,
+		})
+	}
+
+	resp, err := m.Execute(context.Background(), []string{"pool"}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{})
+	if err != nil {
+		t.Fatalf("execute error = %v, want success via fallback auth", err)
+	}
+	if !strings.HasPrefix(string(resp.Payload), goodAuth.ID+"|") {
+		t.Fatalf("payload = %q, want auth %q", string(resp.Payload), goodAuth.ID)
+	}
+
+	got := executor.ExecuteCalls()
+	if len(got) != 1 {
+		t.Fatalf("execute calls = %v, want only one real execution on fallback auth", got)
+	}
+	if !strings.HasPrefix(got[0], goodAuth.ID+"|") {
+		t.Fatalf("execute call = %q, want fallback auth %q", got[0], goodAuth.ID)
 	}
 }
 
