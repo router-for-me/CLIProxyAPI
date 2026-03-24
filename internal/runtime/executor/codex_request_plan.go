@@ -177,6 +177,9 @@ func normalizeCodexPreparedBody(body []byte, mode codexPreparedRequestPlanMode, 
 		if !state.modelMatches {
 			body = setCodexJSONStringField(body, "model", baseModel)
 		}
+		if !state.streamTrue {
+			body = setCodexJSONBoolField(body, "stream", true)
+		}
 		if !state.hasInstructions {
 			body = setCodexJSONStringField(body, "instructions", "")
 		}
