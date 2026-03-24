@@ -333,11 +333,24 @@ func (w *ResponseWriterWrapper) extractAPIRequest(c *gin.Context) []byte {
 	if !isExist {
 		return nil
 	}
-	data, ok := apiRequest.([]byte)
-	if !ok || len(data) == 0 {
-		return nil
+	switch value := apiRequest.(type) {
+	case []byte:
+		if len(value) == 0 {
+			return nil
+		}
+		return value
+	case string:
+		if len(value) == 0 {
+			return nil
+		}
+		return []byte(value)
+	case *strings.Builder:
+		if value == nil || value.Len() == 0 {
+			return nil
+		}
+		return []byte(value.String())
 	}
-	return data
+	return nil
 }
 
 func (w *ResponseWriterWrapper) extractAPIResponse(c *gin.Context) []byte {
@@ -345,11 +358,24 @@ func (w *ResponseWriterWrapper) extractAPIResponse(c *gin.Context) []byte {
 	if !isExist {
 		return nil
 	}
-	data, ok := apiResponse.([]byte)
-	if !ok || len(data) == 0 {
-		return nil
+	switch value := apiResponse.(type) {
+	case []byte:
+		if len(value) == 0 {
+			return nil
+		}
+		return value
+	case string:
+		if len(value) == 0 {
+			return nil
+		}
+		return []byte(value)
+	case *strings.Builder:
+		if value == nil || value.Len() == 0 {
+			return nil
+		}
+		return []byte(value.String())
 	}
-	return data
+	return nil
 }
 
 func (w *ResponseWriterWrapper) extractAPIResponseTimestamp(c *gin.Context) time.Time {

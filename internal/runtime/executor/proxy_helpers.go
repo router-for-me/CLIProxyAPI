@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
@@ -11,6 +12,8 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
 )
+
+var proxyTransportCache sync.Map
 
 // newProxyAwareHTTPClient creates an HTTP client with proper proxy configuration priority:
 // 1. Use auth.ProxyURL if configured (highest priority)
@@ -31,6 +34,13 @@ func newProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 		httpClient.Timeout = timeout
 	}
 
+	if rt, ok := ctx.Value("cliproxy.roundtripper").(http.RoundTripper); ok && rt != nil {
+		if auth != nil && strings.TrimSpace(auth.ProxyURL) != "" {
+			httpClient.Transport = rt
+			return httpClient
+		}
+	}
+
 	// Priority 1: Use auth.ProxyURL if configured
 	var proxyURL string
 	if auth != nil {
@@ -44,7 +54,7 @@ func newProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 
 	// If we have a proxy URL configured, set up the transport
 	if proxyURL != "" {
-		transport := buildProxyTransport(proxyURL)
+		transport := cachedProxyTransport(proxyURL)
 		if transport != nil {
 			httpClient.Transport = transport
 			return httpClient
@@ -59,6 +69,29 @@ func newProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 	}
 
 	return httpClient
+}
+
+func cachedProxyTransport(proxyURL string) http.RoundTripper {
+	proxyURL = strings.TrimSpace(proxyURL)
+	if proxyURL == "" {
+		return nil
+	}
+	if cached, ok := proxyTransportCache.Load(proxyURL); ok {
+		if transport, okTransport := cached.(http.RoundTripper); okTransport {
+			return transport
+		}
+	}
+
+	transport := buildProxyTransport(proxyURL)
+	if transport == nil {
+		return nil
+	}
+
+	actual, _ := proxyTransportCache.LoadOrStore(proxyURL, transport)
+	if cached, ok := actual.(http.RoundTripper); ok {
+		return cached
+	}
+	return transport
 }
 
 // buildProxyTransport creates an HTTP transport configured for the given proxy URL.
