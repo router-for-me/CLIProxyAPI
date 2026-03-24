@@ -74,6 +74,7 @@ func main() {
 	var password string
 	var tuiMode bool
 	var standalone bool
+	var localModel bool
 
 	// Define command-line flags for different operation modes.
 	flag.BoolVar(&login, "login", false, "Login Google Account")
@@ -93,6 +94,7 @@ func main() {
 	flag.StringVar(&password, "password", "", "")
 	flag.BoolVar(&tuiMode, "tui", false, "Start with terminal management UI")
 	flag.BoolVar(&standalone, "standalone", false, "In TUI mode, start an embedded local server")
+	flag.BoolVar(&localModel, "local-model", false, "Use embedded model catalog only, skip remote model fetching")
 
 	flag.CommandLine.Usage = func() {
 		out := flag.CommandLine.Output()
@@ -491,11 +493,16 @@ func main() {
 			cmd.WaitForCloudDeploy()
 			return
 		}
+		if localModel && (!tuiMode || standalone) {
+			log.Info("Local model mode: using embedded model catalog, remote model updates disabled")
+		}
 		if tuiMode {
 			if standalone {
 				// Standalone mode: start an embedded local server and connect TUI client to it.
 				managementasset.StartAutoUpdater(context.Background(), configFilePath)
-				registry.StartModelsUpdater(context.Background())
+				if !localModel {
+					registry.StartModelsUpdater(context.Background())
+				}
 				hook := tui.NewLogHook(2000)
 				hook.SetFormatter(&logging.LogFormatter{})
 				log.AddHook(hook)
@@ -568,7 +575,9 @@ func main() {
 		} else {
 			// Start the main proxy service
 			managementasset.StartAutoUpdater(context.Background(), configFilePath)
-			registry.StartModelsUpdater(context.Background())
+			if !localModel {
+				registry.StartModelsUpdater(context.Background())
+			}
 			cmd.StartService(cfg, configFilePath, password)
 		}
 	}

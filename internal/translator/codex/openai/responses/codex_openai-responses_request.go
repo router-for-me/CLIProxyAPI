@@ -1,7 +1,9 @@
 package responses
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"strconv"
 
 	"github.com/tidwall/gjson"
@@ -20,10 +22,10 @@ func ConvertOpenAIResponsesRequestToCodex(_ string, inputRawJSON []byte, _ bool)
 	}
 
 	if output, ok := convertOpenAIResponsesRequestToCodexFastPath(inputRawJSON); ok {
-		return output
+		return normalizeCodexBuiltinTools(output)
 	}
 
-	return convertOpenAIResponsesRequestToCodexFallback(inputRawJSON)
+	return normalizeCodexBuiltinTools(convertOpenAIResponsesRequestToCodexFallback(inputRawJSON))
 }
 
 func convertOpenAIResponsesRequestToCodexFastPath(inputRawJSON []byte) ([]byte, bool) {
@@ -207,6 +209,59 @@ func appendNormalizedOpenAIResponsesInputItem(dst []byte, item gjson.Result) ([]
 	})
 	dst = append(dst, '}')
 	return dst, true
+}
+
+// normalizeCodexBuiltinTools rewrites preview built-in tool variants to the
+// stable names expected by the current Codex upstream.
+func normalizeCodexBuiltinTools(rawJSON []byte) []byte {
+	if !bytes.Contains(rawJSON, []byte("web_search_preview")) {
+		return rawJSON
+	}
+
+	result := rawJSON
+
+	tools := gjson.GetBytes(result, "tools")
+	if tools.IsArray() {
+		toolArray := tools.Array()
+		for i := 0; i < len(toolArray); i++ {
+			typePath := fmt.Sprintf("tools.%d.type", i)
+			if normalized := normalizeCodexBuiltinToolType(gjson.GetBytes(result, typePath).String()); normalized != "" {
+				if updated, err := sjson.SetBytes(result, typePath, normalized); err == nil {
+					result = updated
+				}
+			}
+		}
+	}
+
+	if normalized := normalizeCodexBuiltinToolType(gjson.GetBytes(result, "tool_choice.type").String()); normalized != "" {
+		if updated, err := sjson.SetBytes(result, "tool_choice.type", normalized); err == nil {
+			result = updated
+		}
+	}
+
+	toolChoiceTools := gjson.GetBytes(result, "tool_choice.tools")
+	if toolChoiceTools.IsArray() {
+		toolArray := toolChoiceTools.Array()
+		for i := 0; i < len(toolArray); i++ {
+			typePath := fmt.Sprintf("tool_choice.tools.%d.type", i)
+			if normalized := normalizeCodexBuiltinToolType(gjson.GetBytes(result, typePath).String()); normalized != "" {
+				if updated, err := sjson.SetBytes(result, typePath, normalized); err == nil {
+					result = updated
+				}
+			}
+		}
+	}
+
+	return result
+}
+
+func normalizeCodexBuiltinToolType(toolType string) string {
+	switch toolType {
+	case "web_search_preview", "web_search_preview_2025_03_11":
+		return "web_search"
+	default:
+		return ""
+	}
 }
 
 func convertOpenAIResponsesRequestToCodexFallback(inputRawJSON []byte) []byte {

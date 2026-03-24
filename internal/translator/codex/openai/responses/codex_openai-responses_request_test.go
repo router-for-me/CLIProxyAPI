@@ -267,6 +267,52 @@ func TestConvertSystemRoleToDeveloper_AssistantRole(t *testing.T) {
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToCodex_NormalizesWebSearchPreview(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gpt-5.4-mini",
+		"input": "find latest OpenAI model news",
+		"tools": [
+			{"type": "web_search_preview_2025_03_11"}
+		],
+		"tool_choice": {
+			"type": "allowed_tools",
+			"tools": [
+				{"type": "web_search_preview"},
+				{"type": "web_search_preview_2025_03_11"}
+			]
+		}
+	}`)
+
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.4-mini", inputJSON, false)
+
+	if got := gjson.GetBytes(output, "tools.0.type").String(); got != "web_search" {
+		t.Fatalf("tools.0.type = %q, want %q: %s", got, "web_search", string(output))
+	}
+	if got := gjson.GetBytes(output, "tool_choice.type").String(); got != "allowed_tools" {
+		t.Fatalf("tool_choice.type = %q, want %q: %s", got, "allowed_tools", string(output))
+	}
+	if got := gjson.GetBytes(output, "tool_choice.tools.0.type").String(); got != "web_search" {
+		t.Fatalf("tool_choice.tools.0.type = %q, want %q: %s", got, "web_search", string(output))
+	}
+	if got := gjson.GetBytes(output, "tool_choice.tools.1.type").String(); got != "web_search" {
+		t.Fatalf("tool_choice.tools.1.type = %q, want %q: %s", got, "web_search", string(output))
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToCodex_NormalizesTopLevelToolChoicePreviewAlias(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gpt-5.4-mini",
+		"input": "find latest OpenAI model news",
+		"tool_choice": {"type": "web_search_preview_2025_03_11"}
+	}`)
+
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.4-mini", inputJSON, false)
+
+	if got := gjson.GetBytes(output, "tool_choice.type").String(); got != "web_search" {
+		t.Fatalf("tool_choice.type = %q, want %q: %s", got, "web_search", string(output))
+	}
+}
+
 func TestUserFieldDeletion(t *testing.T) {
 	inputJSON := []byte(`{  
 		"model": "gpt-5.2",  
