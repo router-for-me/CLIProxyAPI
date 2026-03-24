@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -22,7 +23,7 @@ func ConvertOpenAIResponsesRequestToCodex(_ string, inputRawJSON []byte, _ bool)
 	}
 
 	if output, ok := convertOpenAIResponsesRequestToCodexFastPath(inputRawJSON); ok {
-		return normalizeCodexBuiltinTools(output)
+		return output
 	}
 
 	return normalizeCodexBuiltinTools(convertOpenAIResponsesRequestToCodexFallback(inputRawJSON))
@@ -76,6 +77,14 @@ func convertOpenAIResponsesRequestToCodexFastPath(inputRawJSON []byte) ([]byte, 
 			hasInclude = true
 			output = appendJSONObjectFieldName(output, field, &wroteField)
 			output = append(output, codexResponsesIncludeRaw...)
+			return true
+		case "tools":
+			output = appendJSONObjectFieldName(output, field, &wroteField)
+			output = appendNormalizedCodexFastPathTools(output, value.Raw)
+			return true
+		case "tool_choice":
+			output = appendJSONObjectFieldName(output, field, &wroteField)
+			output = appendNormalizedCodexFastPathToolChoice(output, value.Raw)
 			return true
 		case "service_tier":
 			if value.Type == gjson.String && value.String() == "priority" {
@@ -209,6 +218,54 @@ func appendNormalizedOpenAIResponsesInputItem(dst []byte, item gjson.Result) ([]
 	})
 	dst = append(dst, '}')
 	return dst, true
+}
+
+func appendNormalizedCodexFastPathTools(dst []byte, raw string) []byte {
+	if !strings.Contains(raw, "web_search_preview") {
+		return append(dst, raw...)
+	}
+
+	result := []byte(raw)
+	tools := gjson.Parse(raw)
+	if !tools.IsArray() {
+		return append(dst, raw...)
+	}
+	toolArray := tools.Array()
+	for i := 0; i < len(toolArray); i++ {
+		typePath := fmt.Sprintf("%d.type", i)
+		if normalized := normalizeCodexBuiltinToolType(gjson.GetBytes(result, typePath).String()); normalized != "" {
+			if updated, err := sjson.SetBytes(result, typePath, normalized); err == nil {
+				result = updated
+			}
+		}
+	}
+	return append(dst, result...)
+}
+
+func appendNormalizedCodexFastPathToolChoice(dst []byte, raw string) []byte {
+	if !strings.Contains(raw, "web_search_preview") {
+		return append(dst, raw...)
+	}
+
+	result := []byte(raw)
+	if normalized := normalizeCodexBuiltinToolType(gjson.GetBytes(result, "type").String()); normalized != "" {
+		if updated, err := sjson.SetBytes(result, "type", normalized); err == nil {
+			result = updated
+		}
+	}
+	toolChoiceTools := gjson.GetBytes(result, "tools")
+	if toolChoiceTools.IsArray() {
+		toolArray := toolChoiceTools.Array()
+		for i := 0; i < len(toolArray); i++ {
+			typePath := fmt.Sprintf("tools.%d.type", i)
+			if normalized := normalizeCodexBuiltinToolType(gjson.GetBytes(result, typePath).String()); normalized != "" {
+				if updated, err := sjson.SetBytes(result, typePath, normalized); err == nil {
+					result = updated
+				}
+			}
+		}
+	}
+	return append(dst, result...)
 }
 
 // normalizeCodexBuiltinTools rewrites preview built-in tool variants to the
