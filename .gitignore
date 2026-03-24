@@ -61,3 +61,4 @@ _bmad-output/*
 .cli-proxy-api/
 .venv/
 *.bak
+.gocache/
