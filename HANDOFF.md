@@ -46,11 +46,11 @@ These files are intended for UGREEN/other NAS environments.
 
 ## Key Files
 
-- [deploy/nas/docker-compose.yml](C:\Users\admin\Desktop\cli2api\deploy\nas\docker-compose.yml)
-- [deploy/nas/.env.example](C:\Users\admin\Desktop\cli2api\deploy\nas\.env.example)
-- [deploy/nas/config.yaml.example](C:\Users\admin\Desktop\cli2api\deploy\nas\config.yaml.example)
-- [deploy/nas/README_CN.md](C:\Users\admin\Desktop\cli2api\deploy\nas\README_CN.md)
-- [config.example.yaml](C:\Users\admin\Desktop\cli2api\config.example.yaml)
+- [deploy/nas/docker-compose.yml](deploy/nas/docker-compose.yml)
+- [deploy/nas/.env.example](deploy/nas/.env.example)
+- [deploy/nas/config.yaml.example](deploy/nas/config.yaml.example)
+- [deploy/nas/README_CN.md](deploy/nas/README_CN.md)
+- [config.example.yaml](config.example.yaml)
 
 ## UGREEN Notes
 
