@@ -28,6 +28,11 @@ import (
 
 var requestLogID atomic.Uint64
 
+var (
+	filenameUnsafeCharPattern = regexp.MustCompile(`[<>:"|?*\s]`)
+	filenameMultiDashPattern  = regexp.MustCompile(`-+`)
+)
+
 // RequestLogger defines the interface for logging HTTP requests and responses.
 // It provides methods for logging both regular and streaming HTTP request/response cycles.
 type RequestLogger interface {
@@ -128,13 +133,13 @@ type StreamingLogWriter interface {
 // It provides file-based logging functionality for HTTP requests and responses.
 type FileRequestLogger struct {
 	// enabled indicates whether request logging is currently enabled.
-	enabled bool
+	enabled atomic.Bool
 
 	// logsDir is the directory where log files are stored.
 	logsDir string
 
 	// errorLogsMaxFiles limits the number of error log files retained.
-	errorLogsMaxFiles int
+	errorLogsMaxFiles atomic.Int32
 }
 
 // NewFileRequestLogger creates a new file-based request logger.
@@ -156,11 +161,12 @@ func NewFileRequestLogger(enabled bool, logsDir string, configDir string, errorL
 			logsDir = filepath.Join(configDir, logsDir)
 		}
 	}
-	return &FileRequestLogger{
-		enabled:           enabled,
-		logsDir:           logsDir,
-		errorLogsMaxFiles: errorLogsMaxFiles,
+	logger := &FileRequestLogger{
+		logsDir: logsDir,
 	}
+	logger.enabled.Store(enabled)
+	logger.errorLogsMaxFiles.Store(int32(errorLogsMaxFiles))
+	return logger
 }
 
 // IsEnabled returns whether request logging is currently enabled.
@@ -168,7 +174,10 @@ func NewFileRequestLogger(enabled bool, logsDir string, configDir string, errorL
 // Returns:
 //   - bool: True if logging is enabled, false otherwise
 func (l *FileRequestLogger) IsEnabled() bool {
-	return l.enabled
+	if l == nil {
+		return false
+	}
+	return l.enabled.Load()
 }
 
 // SetEnabled updates the request logging enabled state.
@@ -177,12 +186,18 @@ func (l *FileRequestLogger) IsEnabled() bool {
 // Parameters:
 //   - enabled: Whether request logging should be enabled
 func (l *FileRequestLogger) SetEnabled(enabled bool) {
-	l.enabled = enabled
+	if l == nil {
+		return
+	}
+	l.enabled.Store(enabled)
 }
 
 // SetErrorLogsMaxFiles updates the maximum number of error log files to retain.
 func (l *FileRequestLogger) SetErrorLogsMaxFiles(maxFiles int) {
-	l.errorLogsMaxFiles = maxFiles
+	if l == nil {
+		return
+	}
+	l.errorLogsMaxFiles.Store(int32(maxFiles))
 }
 
 // LogRequest logs a complete non-streaming request/response cycle to a file.
@@ -214,7 +229,8 @@ func (l *FileRequestLogger) LogRequestWithOptions(url, method string, requestHea
 }
 
 func (l *FileRequestLogger) logRequest(url, method string, requestHeaders map[string][]string, body []byte, statusCode int, responseHeaders map[string][]string, response, apiRequest, apiResponse []byte, apiResponseErrors []*interfaces.ErrorMessage, force bool, requestID string, requestTimestamp, apiResponseTimestamp time.Time) error {
-	if !l.enabled && !force {
+	enabled := l.IsEnabled()
+	if !enabled && !force {
 		return nil
 	}
 
@@ -225,22 +241,10 @@ func (l *FileRequestLogger) logRequest(url, method string, requestHeaders map[st
 
 	// Generate filename with request ID
 	filename := l.generateFilename(url, requestID)
-	if force && !l.enabled {
+	if force && !enabled {
 		filename = l.generateErrorFilename(url, requestID)
 	}
 	filePath := filepath.Join(l.logsDir, filename)
-
-	requestBodyPath, errTemp := l.writeRequestBodyTempFile(body)
-	if errTemp != nil {
-		log.WithError(errTemp).Warn("failed to create request body temp file, falling back to direct write")
-	}
-	if requestBodyPath != "" {
-		defer func() {
-			if errRemove := os.Remove(requestBodyPath); errRemove != nil {
-				log.WithError(errRemove).Warn("failed to remove request body temp file")
-			}
-		}()
-	}
 
 	responseToWrite, decompressErr := l.decompressResponse(responseHeaders, response)
 	if decompressErr != nil {
@@ -259,7 +263,6 @@ func (l *FileRequestLogger) logRequest(url, method string, requestHeaders map[st
 		method,
 		requestHeaders,
 		body,
-		requestBodyPath,
 		apiRequest,
 		apiResponse,
 		apiResponseErrors,
@@ -280,7 +283,7 @@ func (l *FileRequestLogger) logRequest(url, method string, requestHeaders map[st
 		return fmt.Errorf("failed to write log file: %w", writeErr)
 	}
 
-	if force && !l.enabled {
+	if force && !enabled {
 		if errCleanup := l.cleanupOldErrorLogs(); errCleanup != nil {
 			log.WithError(errCleanup).Warn("failed to clean up old error logs")
 		}
@@ -302,7 +305,7 @@ func (l *FileRequestLogger) logRequest(url, method string, requestHeaders map[st
 //   - StreamingLogWriter: A writer for streaming response chunks
 //   - error: An error if logging initialization fails, nil otherwise
 func (l *FileRequestLogger) LogStreamingRequest(url, method string, headers map[string][]string, body []byte, requestID string) (StreamingLogWriter, error) {
-	if !l.enabled {
+	if !l.IsEnabled() {
 		return &NoOpStreamingLogWriter{}, nil
 	}
 
@@ -365,10 +368,10 @@ func (l *FileRequestLogger) generateErrorFilename(url string, requestID ...strin
 // Returns:
 //   - error: An error if directory creation fails, nil otherwise
 func (l *FileRequestLogger) ensureLogsDir() error {
-	if _, err := os.Stat(l.logsDir); os.IsNotExist(err) {
-		return os.MkdirAll(l.logsDir, 0755)
+	if strings.TrimSpace(l.logsDir) == "" {
+		return nil
 	}
-	return nil
+	return os.MkdirAll(l.logsDir, 0755)
 }
 
 // generateFilename creates a sanitized filename from the URL path and current timestamp.
@@ -383,8 +386,8 @@ func (l *FileRequestLogger) ensureLogsDir() error {
 func (l *FileRequestLogger) generateFilename(url string, requestID ...string) string {
 	// Extract path from URL
 	path := url
-	if strings.Contains(url, "?") {
-		path = strings.Split(url, "?")[0]
+	if idx := strings.IndexByte(url, '?'); idx >= 0 {
+		path = url[:idx]
 	}
 
 	// Remove leading slash
@@ -425,12 +428,10 @@ func (l *FileRequestLogger) sanitizeForFilename(path string) string {
 	sanitized = strings.ReplaceAll(sanitized, ":", "-")
 
 	// Replace other problematic characters with hyphens
-	reg := regexp.MustCompile(`[<>:"|?*\s]`)
-	sanitized = reg.ReplaceAllString(sanitized, "-")
+	sanitized = filenameUnsafeCharPattern.ReplaceAllString(sanitized, "-")
 
 	// Remove multiple consecutive hyphens
-	reg = regexp.MustCompile(`-+`)
-	sanitized = reg.ReplaceAllString(sanitized, "-")
+	sanitized = filenameMultiDashPattern.ReplaceAllString(sanitized, "-")
 
 	// Remove leading/trailing hyphens
 	sanitized = strings.Trim(sanitized, "-")
@@ -445,7 +446,8 @@ func (l *FileRequestLogger) sanitizeForFilename(path string) string {
 
 // cleanupOldErrorLogs keeps only the newest errorLogsMaxFiles forced error log files.
 func (l *FileRequestLogger) cleanupOldErrorLogs() error {
-	if l.errorLogsMaxFiles <= 0 {
+	maxFiles := int(l.errorLogsMaxFiles.Load())
+	if maxFiles <= 0 {
 		return nil
 	}
 
@@ -476,7 +478,7 @@ func (l *FileRequestLogger) cleanupOldErrorLogs() error {
 		files = append(files, logFile{name: name, modTime: info.ModTime()})
 	}
 
-	if len(files) <= l.errorLogsMaxFiles {
+	if len(files) <= maxFiles {
 		return nil
 	}
 
@@ -484,7 +486,7 @@ func (l *FileRequestLogger) cleanupOldErrorLogs() error {
 		return files[i].modTime.After(files[j].modTime)
 	})
 
-	for _, file := range files[l.errorLogsMaxFiles:] {
+	for _, file := range files[maxFiles:] {
 		if errRemove := os.Remove(filepath.Join(l.logsDir, file.name)); errRemove != nil {
 			log.WithError(errRemove).Warnf("failed to remove old error log: %s", file.name)
 		}
@@ -494,6 +496,9 @@ func (l *FileRequestLogger) cleanupOldErrorLogs() error {
 }
 
 func (l *FileRequestLogger) writeRequestBodyTempFile(body []byte) (string, error) {
+	if len(body) == 0 {
+		return "", nil
+	}
 	tmpFile, errCreate := os.CreateTemp(l.logsDir, "request-body-*.tmp")
 	if errCreate != nil {
 		return "", errCreate
@@ -517,7 +522,6 @@ func (l *FileRequestLogger) writeNonStreamingLog(
 	url, method string,
 	requestHeaders map[string][]string,
 	requestBody []byte,
-	requestBodyPath string,
 	apiRequest []byte,
 	apiResponse []byte,
 	apiResponseErrors []*interfaces.ErrorMessage,
@@ -531,7 +535,7 @@ func (l *FileRequestLogger) writeNonStreamingLog(
 	if requestTimestamp.IsZero() {
 		requestTimestamp = time.Now()
 	}
-	if errWrite := writeRequestInfoWithBody(w, url, method, requestHeaders, requestBody, requestBodyPath, requestTimestamp); errWrite != nil {
+	if errWrite := writeRequestInfoWithBody(w, url, method, requestHeaders, requestBody, "", requestTimestamp); errWrite != nil {
 		return errWrite
 	}
 	if errWrite := writeAPISection(w, "=== API REQUEST ===\n", "=== API REQUEST", apiRequest, time.Time{}); errWrite != nil {

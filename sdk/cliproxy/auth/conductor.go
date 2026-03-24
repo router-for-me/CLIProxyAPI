@@ -2244,6 +2244,63 @@ func shouldRetrySchedulerPick(err error) bool {
 	return authErr.Code == "auth_not_found" || authErr.Code == "auth_unavailable"
 }
 
+func (m *Manager) eligibleMixedProviders(providers []string) []string {
+	if m == nil || len(providers) == 0 {
+		return nil
+	}
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	normalized := true
+	for idx, provider := range providers {
+		providerKey := strings.ToLower(strings.TrimSpace(provider))
+		if providerKey == "" || providerKey != provider {
+			normalized = false
+			break
+		}
+		if _, ok := m.executors[providerKey]; !ok {
+			normalized = false
+			break
+		}
+		for prev := 0; prev < idx; prev++ {
+			if providers[prev] == providerKey {
+				normalized = false
+				break
+			}
+		}
+		if !normalized {
+			break
+		}
+	}
+	if normalized {
+		return providers
+	}
+
+	out := make([]string, 0, len(providers))
+	for _, provider := range providers {
+		providerKey := strings.ToLower(strings.TrimSpace(provider))
+		if providerKey == "" {
+			continue
+		}
+		if _, ok := m.executors[providerKey]; !ok {
+			continue
+		}
+		duplicate := false
+		for _, existing := range out {
+			if existing == providerKey {
+				duplicate = true
+				break
+			}
+		}
+		if duplicate {
+			continue
+		}
+		out = append(out, providerKey)
+	}
+	return out
+}
+
 func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, error) {
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
 
@@ -2423,22 +2480,7 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 		return m.pickNextMixedLegacy(ctx, providers, model, opts, tried)
 	}
 
-	eligibleProviders := make([]string, 0, len(providers))
-	seenProviders := make(map[string]struct{}, len(providers))
-	for _, provider := range providers {
-		providerKey := strings.TrimSpace(strings.ToLower(provider))
-		if providerKey == "" {
-			continue
-		}
-		if _, seen := seenProviders[providerKey]; seen {
-			continue
-		}
-		if _, okExecutor := m.Executor(providerKey); !okExecutor {
-			continue
-		}
-		seenProviders[providerKey] = struct{}{}
-		eligibleProviders = append(eligibleProviders, providerKey)
-	}
+	eligibleProviders := m.eligibleMixedProviders(providers)
 	if len(eligibleProviders) == 0 {
 		return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
