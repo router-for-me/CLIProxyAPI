@@ -249,6 +249,7 @@ func normalizeCodexPreparedBodyFallback(body []byte, mode codexPreparedRequestPl
 		body = deleteJSONFieldIfExists(body, "prompt_cache_retention")
 		body = deleteJSONFieldIfExists(body, "safety_identifier")
 		body = setJSONStringFieldIfNeeded(body, "model", baseModel)
+		body = setJSONBoolFieldIfNeeded(body, "stream", true)
 		body = ensureJSONStringField(body, "instructions", "")
 	case codexPreparedRequestPlanCompact:
 		body = setJSONStringFieldIfNeeded(body, "model", baseModel)
