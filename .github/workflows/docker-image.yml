@@ -5,6 +5,10 @@ on:
     tags:
       - v*
 
+permissions:
+  contents: read
+  packages: write
+
 env:
   APP_NAME: CLIProxyAPI
   DOCKERHUB_REPO: eceasy/cli-proxy-api
@@ -15,6 +19,18 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+      - name: Generate Build Metadata
+        id: vars
+        run: |
+          echo "version=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
+          echo "commit=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $GITHUB_OUTPUT
+          echo "ghcr_repo=ghcr.io/${GITHUB_REPOSITORY,,}" >> $GITHUB_OUTPUT
+          if [ -n "${{ secrets.DOCKERHUB_USERNAME }}" ] && [ -n "${{ secrets.DOCKERHUB_TOKEN }}" ]; then
+            echo "publish_dockerhub=true" >> $GITHUB_OUTPUT
+          else
+            echo "publish_dockerhub=false" >> $GITHUB_OUTPUT
+          fi
       - name: Refresh models catalog
         run: |
           git fetch --depth 1 https://github.com/router-for-me/models.git main
@@ -22,15 +38,30 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
       - name: Login to DockerHub
+        if: ${{ steps.vars.outputs.publish_dockerhub == 'true' }}
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-      - name: Generate Build Metadata
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Generate Image Tags
+        id: tags
         run: |
-          echo "VERSION=${GITHUB_REF_NAME}" >> $GITHUB_ENV
-          echo COMMIT=`git rev-parse --short HEAD` >> $GITHUB_ENV
-          echo BUILD_DATE=`date -u +%Y-%m-%dT%H:%M:%SZ` >> $GITHUB_ENV
+          {
+            echo "value<<EOF"
+            echo "${{ steps.vars.outputs.ghcr_repo }}:latest-amd64"
+            echo "${{ steps.vars.outputs.ghcr_repo }}:${{ steps.vars.outputs.version }}-amd64"
+            if [ "${{ steps.vars.outputs.publish_dockerhub }}" = "true" ]; then
+              echo "${DOCKERHUB_REPO}:latest-amd64"
+              echo "${DOCKERHUB_REPO}:${{ steps.vars.outputs.version }}-amd64"
+            fi
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
       - name: Build and push (amd64)
         uses: docker/build-push-action@v6
         with:
@@ -38,18 +69,28 @@ jobs:
           platforms: linux/amd64
           push: true
           build-args: |
-            VERSION=${{ env.VERSION }}
-            COMMIT=${{ env.COMMIT }}
-            BUILD_DATE=${{ env.BUILD_DATE }}
-          tags: |
-            ${{ env.DOCKERHUB_REPO }}:latest-amd64
-            ${{ env.DOCKERHUB_REPO }}:${{ env.VERSION }}-amd64
+            VERSION=${{ steps.vars.outputs.version }}
+            COMMIT=${{ steps.vars.outputs.commit }}
+            BUILD_DATE=${{ steps.vars.outputs.build_date }}
+          tags: ${{ steps.tags.outputs.value }}
 
   docker_arm64:
     runs-on: ubuntu-24.04-arm
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+      - name: Generate Build Metadata
+        id: vars
+        run: |
+          echo "version=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
+          echo "commit=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $GITHUB_OUTPUT
+          echo "ghcr_repo=ghcr.io/${GITHUB_REPOSITORY,,}" >> $GITHUB_OUTPUT
+          if [ -n "${{ secrets.DOCKERHUB_USERNAME }}" ] && [ -n "${{ secrets.DOCKERHUB_TOKEN }}" ]; then
+            echo "publish_dockerhub=true" >> $GITHUB_OUTPUT
+          else
+            echo "publish_dockerhub=false" >> $GITHUB_OUTPUT
+          fi
       - name: Refresh models catalog
         run: |
           git fetch --depth 1 https://github.com/router-for-me/models.git main
@@ -57,15 +98,30 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
       - name: Login to DockerHub
+        if: ${{ steps.vars.outputs.publish_dockerhub == 'true' }}
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-      - name: Generate Build Metadata
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Generate Image Tags
+        id: tags
         run: |
-          echo "VERSION=${GITHUB_REF_NAME}" >> $GITHUB_ENV
-          echo COMMIT=`git rev-parse --short HEAD` >> $GITHUB_ENV
-          echo BUILD_DATE=`date -u +%Y-%m-%dT%H:%M:%SZ` >> $GITHUB_ENV
+          {
+            echo "value<<EOF"
+            echo "${{ steps.vars.outputs.ghcr_repo }}:latest-arm64"
+            echo "${{ steps.vars.outputs.ghcr_repo }}:${{ steps.vars.outputs.version }}-arm64"
+            if [ "${{ steps.vars.outputs.publish_dockerhub }}" = "true" ]; then
+              echo "${DOCKERHUB_REPO}:latest-arm64"
+              echo "${DOCKERHUB_REPO}:${{ steps.vars.outputs.version }}-arm64"
+            fi
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
       - name: Build and push (arm64)
         uses: docker/build-push-action@v6
         with:
@@ -73,12 +129,10 @@ jobs:
           platforms: linux/arm64
           push: true
           build-args: |
-            VERSION=${{ env.VERSION }}
-            COMMIT=${{ env.COMMIT }}
-            BUILD_DATE=${{ env.BUILD_DATE }}
-          tags: |
-            ${{ env.DOCKERHUB_REPO }}:latest-arm64
-            ${{ env.DOCKERHUB_REPO }}:${{ env.VERSION }}-arm64
+            VERSION=${{ steps.vars.outputs.version }}
+            COMMIT=${{ steps.vars.outputs.commit }}
+            BUILD_DATE=${{ steps.vars.outputs.build_date }}
+          tags: ${{ steps.tags.outputs.value }}
 
   docker_manifest:
     runs-on: ubuntu-latest
@@ -88,29 +142,54 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+      - name: Generate Build Metadata
+        id: vars
+        run: |
+          echo "version=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
+          echo "commit=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $GITHUB_OUTPUT
+          echo "ghcr_repo=ghcr.io/${GITHUB_REPOSITORY,,}" >> $GITHUB_OUTPUT
+          if [ -n "${{ secrets.DOCKERHUB_USERNAME }}" ] && [ -n "${{ secrets.DOCKERHUB_TOKEN }}" ]; then
+            echo "publish_dockerhub=true" >> $GITHUB_OUTPUT
+          else
+            echo "publish_dockerhub=false" >> $GITHUB_OUTPUT
+          fi
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
       - name: Login to DockerHub
+        if: ${{ steps.vars.outputs.publish_dockerhub == 'true' }}
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-      - name: Generate Build Metadata
-        run: |
-          echo "VERSION=${GITHUB_REF_NAME}" >> $GITHUB_ENV
-          echo COMMIT=`git rev-parse --short HEAD` >> $GITHUB_ENV
-          echo BUILD_DATE=`date -u +%Y-%m-%dT%H:%M:%SZ` >> $GITHUB_ENV
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Create and push multi-arch manifests
         run: |
           docker buildx imagetools create \
-            --tag "${DOCKERHUB_REPO}:latest" \
-            "${DOCKERHUB_REPO}:latest-amd64" \
-            "${DOCKERHUB_REPO}:latest-arm64"
+            --tag "${{ steps.vars.outputs.ghcr_repo }}:latest" \
+            "${{ steps.vars.outputs.ghcr_repo }}:latest-amd64" \
+            "${{ steps.vars.outputs.ghcr_repo }}:latest-arm64"
           docker buildx imagetools create \
-            --tag "${DOCKERHUB_REPO}:${VERSION}" \
-            "${DOCKERHUB_REPO}:${VERSION}-amd64" \
-            "${DOCKERHUB_REPO}:${VERSION}-arm64"
+            --tag "${{ steps.vars.outputs.ghcr_repo }}:${{ steps.vars.outputs.version }}" \
+            "${{ steps.vars.outputs.ghcr_repo }}:${{ steps.vars.outputs.version }}-amd64" \
+            "${{ steps.vars.outputs.ghcr_repo }}:${{ steps.vars.outputs.version }}-arm64"
+          if [ "${{ steps.vars.outputs.publish_dockerhub }}" = "true" ]; then
+            docker buildx imagetools create \
+              --tag "${DOCKERHUB_REPO}:latest" \
+              "${DOCKERHUB_REPO}:latest-amd64" \
+              "${DOCKERHUB_REPO}:latest-arm64"
+            docker buildx imagetools create \
+              --tag "${DOCKERHUB_REPO}:${{ steps.vars.outputs.version }}" \
+              "${DOCKERHUB_REPO}:${{ steps.vars.outputs.version }}-amd64" \
+              "${DOCKERHUB_REPO}:${{ steps.vars.outputs.version }}-arm64"
+          fi
       - name: Cleanup temporary tags
+        if: ${{ steps.vars.outputs.publish_dockerhub == 'true' }}
         continue-on-error: true
         env:
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -143,5 +222,5 @@ jobs:
 
           delete_tag "latest-amd64"
           delete_tag "latest-arm64"
-          delete_tag "${VERSION}-amd64"
-          delete_tag "${VERSION}-arm64"
+          delete_tag "${{ steps.vars.outputs.version }}-amd64"
+          delete_tag "${{ steps.vars.outputs.version }}-arm64"
