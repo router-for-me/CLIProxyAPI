@@ -577,6 +577,7 @@ func readCodexCompletedEvent(ctx context.Context, cfg *config.Config, body io.Re
 					if detail, ok := parseCodexUsage(data); ok {
 						reporter.publish(ctx, detail)
 					}
+					reporter.ensurePublished(ctx)
 					return bytes.Clone(data), nil
 				}
 			}

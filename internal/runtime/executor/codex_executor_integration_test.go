@@ -16,7 +16,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	runtimeusage "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
@@ -183,6 +185,59 @@ func TestCodexExecutorExecute_LocalServer_ReturnsAfterCompletedBeforeUpstreamClo
 	case <-time.After(800 * time.Millisecond):
 		t.Fatal("expected Execute() to close upstream body after response.completed")
 	}
+}
+
+func TestCodexExecutorExecute_LocalServer_PublishesRequestStatsWithoutUsageFields(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: "+codexCompletedEventWithoutUsageJSON("resp_no_usage", "gpt-5.4", "ok-no-usage")+"\n")
+	}))
+	defer server.Close()
+
+	apiKey := fmt.Sprintf("stats-no-usage-%d", time.Now().UnixNano())
+	gin.SetMode(gin.TestMode)
+	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ginCtx.Set("apiKey", apiKey)
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+
+	executor := NewCodexExecutor(&config.Config{})
+	resp, err := executor.Execute(
+		ctx,
+		newCodexTestAuth(server.URL, "success-key"),
+		newCodexResponsesRequest("verify zero-token success stats"),
+		cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-response")},
+	)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if gotID := gjson.GetBytes(resp.Payload, "id").String(); gotID != "resp_no_usage" {
+		t.Fatalf("response id = %q, want %q", gotID, "resp_no_usage")
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		snapshot := runtimeusage.GetRequestStatistics().Snapshot()
+		apiStats, ok := snapshot.APIs[apiKey]
+		if !ok {
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+		modelStats, ok := apiStats.Models["gpt-5.4"]
+		if !ok || len(modelStats.Details) == 0 {
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+		detail := modelStats.Details[len(modelStats.Details)-1]
+		if detail.Failed {
+			t.Fatal("expected successful request statistics record")
+		}
+		if detail.Tokens.TotalTokens != 0 {
+			t.Fatalf("total tokens = %d, want 0 for usage-free completed event", detail.Tokens.TotalTokens)
+		}
+		return
+	}
+
+	t.Fatalf("timed out waiting for usage statistics record for API key %q", apiKey)
 }
 
 func TestCodexExecutorExecuteCompact_LocalServer_RequestShapeAndPayload(t *testing.T) {
@@ -981,6 +1036,10 @@ func extractLongPromptMarker(prompt string) string {
 
 func codexCompletedEventJSON(id, model, text string) string {
 	return fmt.Sprintf(`{"type":"response.completed","response":{"id":%q,"object":"response","model":%q,"status":"completed","output":[{"type":"message","id":"msg_%s","role":"assistant","content":[{"type":"output_text","text":%q}]}],"usage":{"input_tokens":3,"output_tokens":5,"total_tokens":8}}}`, id, model, id, text)
+}
+
+func codexCompletedEventWithoutUsageJSON(id, model, text string) string {
+	return fmt.Sprintf(`{"type":"response.completed","response":{"id":%q,"object":"response","model":%q,"status":"completed","output":[{"type":"message","id":"msg_%s","role":"assistant","content":[{"type":"output_text","text":%q}]}]}}`, id, model, id, text)
 }
 
 type codexStressHighWater struct {
