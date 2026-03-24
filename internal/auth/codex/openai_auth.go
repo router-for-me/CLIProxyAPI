@@ -7,6 +7,7 @@ package codex
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -32,6 +33,33 @@ const (
 // exchanging authorization codes for tokens, and refreshing access tokens.
 type CodexAuth struct {
 	httpClient *http.Client
+}
+
+type refreshFailureError struct {
+	statusCode int
+	terminal   bool
+	message    string
+}
+
+func (e *refreshFailureError) Error() string {
+	if e == nil {
+		return ""
+	}
+	return e.message
+}
+
+func (e *refreshFailureError) StatusCode() int {
+	if e == nil {
+		return 0
+	}
+	return e.statusCode
+}
+
+func (e *refreshFailureError) Terminal() bool {
+	if e == nil {
+		return false
+	}
+	return e.terminal
 }
 
 // NewCodexAuth creates a new CodexAuth service instance.
@@ -202,7 +230,7 @@ func (o *CodexAuth) RefreshTokens(ctx context.Context, refreshToken string) (*Co
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("token refresh failed with status %d: %s", resp.StatusCode, string(body))
+		return nil, newRefreshFailureError(resp.StatusCode, string(body))
 	}
 
 	var tokenResp struct {
@@ -292,8 +320,40 @@ func isNonRetryableRefreshErr(err error) bool {
 	if err == nil {
 		return false
 	}
+	var terminal interface {
+		Terminal() bool
+	}
+	if errors.As(err, &terminal) && terminal != nil && terminal.Terminal() {
+		return true
+	}
 	raw := strings.ToLower(err.Error())
-	return strings.Contains(raw, "refresh_token_reused")
+	return strings.Contains(raw, "refresh_token_reused") ||
+		strings.Contains(raw, "token_invalidated") ||
+		strings.Contains(raw, "token_revoked")
+}
+
+func newRefreshFailureError(statusCode int, body string) error {
+	message := fmt.Sprintf("token refresh failed with status %d: %s", statusCode, body)
+	classifiedStatus := statusCode
+	terminal := false
+	raw := strings.ToLower(body)
+
+	switch {
+	case statusCode == http.StatusUnauthorized:
+		classifiedStatus = http.StatusUnauthorized
+		terminal = true
+	case strings.Contains(raw, "refresh_token_reused"),
+		strings.Contains(raw, "token_invalidated"),
+		strings.Contains(raw, "token_revoked"):
+		classifiedStatus = http.StatusUnauthorized
+		terminal = true
+	}
+
+	return &refreshFailureError{
+		statusCode: classifiedStatus,
+		terminal:   terminal,
+		message:    message,
+	}
 }
 
 // UpdateTokenStorage updates an existing CodexTokenStorage with new token data.

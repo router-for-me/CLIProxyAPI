@@ -1940,6 +1940,21 @@ func statusCodeFromError(err error) int {
 	return 0
 }
 
+func terminalStatusCodeFromError(err error) int {
+	if err == nil {
+		return 0
+	}
+	type terminalStatusCoder interface {
+		StatusCode() int
+		Terminal() bool
+	}
+	var sc terminalStatusCoder
+	if errors.As(err, &sc) && sc != nil && sc.Terminal() {
+		return sc.StatusCode()
+	}
+	return 0
+}
+
 func retryAfterFromError(err error) *time.Duration {
 	if err == nil {
 		return nil
@@ -2755,10 +2770,15 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 	log.Debugf("refreshed %s, %s, %v", auth.Provider, auth.ID, err)
 	now := time.Now()
 	if err != nil {
+		refreshErr := &Error{Message: err.Error()}
+		if status := terminalStatusCodeFromError(err); status > 0 {
+			refreshErr.HTTPStatus = status
+		}
 		m.mu.Lock()
 		if current := m.auths[id]; current != nil {
 			current.NextRefreshAfter = now.Add(refreshFailureBackoff)
-			current.LastError = &Error{Message: err.Error()}
+			current.LastError = refreshErr
+			current.UpdatedAt = now
 			m.auths[id] = current
 			if m.scheduler != nil {
 				m.scheduler.upsertAuth(current.Clone())
