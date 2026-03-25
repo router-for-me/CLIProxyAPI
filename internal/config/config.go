@@ -562,6 +562,14 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		return &Config{}, nil
 	}
 
+	normalizedData, _, err := NormalizeTopLevelAPIKeysYAML(data)
+	if err != nil {
+		if optional {
+			return &Config{}, nil
+		}
+		return nil, fmt.Errorf("failed to normalize top-level api-keys: %w", err)
+	}
+
 	// Unmarshal the YAML data into the Config struct.
 	var cfg Config
 	// Set defaults before unmarshal so that absent keys keep defaults.
@@ -577,7 +585,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.Pprof.Addr = DefaultPprofAddr
 	cfg.AmpCode.RestrictManagementToLocalhost = false // Default to false: API key auth is sufficient
 	cfg.RemoteManagement.PanelGitHubRepository = DefaultPanelGitHubRepository
-	if err = yaml.Unmarshal(data, &cfg); err != nil {
+	if err = yaml.Unmarshal(normalizedData, &cfg); err != nil {
 		if optional {
 			// In cloud deploy mode, if YAML parsing fails, return empty config instead of error.
 			return &Config{}, nil

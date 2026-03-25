@@ -28,7 +28,44 @@ func (h *Handler) GetConfig(c *gin.Context) {
 		c.JSON(200, gin.H{})
 		return
 	}
-	c.JSON(200, new(*h.cfg))
+	payload, err := buildConfigResponsePayload(h.cfg, h.configFilePath)
+	if err != nil {
+		c.JSON(200, new(*h.cfg))
+		return
+	}
+	c.JSON(200, payload)
+}
+
+func buildConfigResponsePayload(cfg *config.Config, configFilePath string) (gin.H, error) {
+	rawJSON, err := json.Marshal(new(*cfg))
+	if err != nil {
+		return nil, err
+	}
+
+	var payload gin.H
+	if err := json.Unmarshal(rawJSON, &payload); err != nil {
+		return nil, err
+	}
+
+	if strings.TrimSpace(configFilePath) == "" {
+		return payload, nil
+	}
+
+	rawConfig, err := os.ReadFile(configFilePath)
+	if err != nil {
+		return payload, nil
+	}
+
+	entries, err := config.ParseTopLevelAPIKeysYAML(rawConfig)
+	if err != nil {
+		return payload, nil
+	}
+
+	if apiKeys := config.BuildTopLevelAPIKeysJSONValue(entries); len(apiKeys) > 0 {
+		payload["api-keys"] = apiKeys
+	}
+
+	return payload, nil
 }
 
 type releaseInfo struct {
@@ -114,8 +151,13 @@ func (h *Handler) PutConfigYAML(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_yaml", "message": "cannot read request body"})
 		return
 	}
+	normalizedBody, _, err := config.NormalizeTopLevelAPIKeysYAML(body)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_yaml", "message": err.Error()})
+		return
+	}
 	var cfg config.Config
-	if err = yaml.Unmarshal(body, &cfg); err != nil {
+	if err = yaml.Unmarshal(normalizedBody, &cfg); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_yaml", "message": err.Error()})
 		return
 	}
