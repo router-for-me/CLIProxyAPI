@@ -295,7 +295,7 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	log.Debugf("cursor: parsed request: model=%s userText=%d chars, turns=%d, tools=%d, toolResults=%d",
 		parsed.Model, len(parsed.UserText), len(parsed.Turns), len(parsed.Tools), len(parsed.ToolResults))
 
-	sessionKey := deriveSessionKey(parsed.Model, parsed.Messages)
+	sessionKey := deriveSessionKey(apiKeyFromContext(ctx), parsed.Model, parsed.Messages)
 	needsTranslate := from.String() != "" && from.String() != "openai"
 
 	// Check if we can resume an existing session with tool results
@@ -1089,7 +1089,7 @@ func newH2Client() *http.Client {
 	}
 }
 
-func deriveSessionKey(model string, messages []gjson.Result) string {
+func deriveSessionKey(clientKey string, model string, messages []gjson.Result) string {
 	var firstUserContent string
 	for _, msg := range messages {
 		if msg.Get("role").String() == "user" {
@@ -1097,9 +1097,10 @@ func deriveSessionKey(model string, messages []gjson.Result) string {
 			break
 		}
 	}
-	input := model + ":" + firstUserContent
-	if len(input) > 200 {
-		input = input[:200]
+	// Include client API key to prevent session collisions across users
+	input := clientKey + ":" + model + ":" + firstUserContent
+	if len(input) > 300 {
+		input = input[:300]
 	}
 	h := sha256.Sum256([]byte(input))
 	return hex.EncodeToString(h[:])[:16]
