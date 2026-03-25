@@ -321,6 +321,13 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	}
 	e.mu.Unlock()
 
+	// If tool results exist but no session to resume, bake them into turns
+	// so the model sees tool interaction context in the new conversation.
+	if len(parsed.ToolResults) > 0 {
+		log.Debugf("cursor: no session to resume, baking %d tool results into turns", len(parsed.ToolResults))
+		bakeToolResultsIntoTurns(parsed)
+	}
+
 	params := buildRunRequestParams(parsed)
 	requestBytes := cursorproto.EncodeRunRequest(params)
 	framedRequest := cursorproto.FrameConnectMessage(requestBytes, 0)
@@ -898,12 +905,22 @@ func parseOpenAIRequest(payload []byte) *parsedOpenAIRequest {
 			pendingUser = extractTextContent(msg.Get("content"))
 			p.Images = extractImages(msg.Get("content"))
 		case "assistant":
+			assistantText := extractTextContent(msg.Get("content"))
 			if pendingUser != "" {
 				p.Turns = append(p.Turns, cursorproto.TurnData{
 					UserText:      pendingUser,
-					AssistantText: extractTextContent(msg.Get("content")),
+					AssistantText: assistantText,
 				})
 				pendingUser = ""
+			} else if len(p.Turns) > 0 && assistantText != "" {
+				// Assistant message after tool results (no pending user) —
+				// append to the last turn's assistant text to preserve context.
+				last := &p.Turns[len(p.Turns)-1]
+				if last.AssistantText != "" {
+					last.AssistantText += "\n" + assistantText
+				} else {
+					last.AssistantText = assistantText
+				}
 			}
 		}
 	}
@@ -920,6 +937,27 @@ func parseOpenAIRequest(payload []byte) *parsedOpenAIRequest {
 	p.Tools = gjson.GetBytes(payload, "tools").Array()
 
 	return p
+}
+
+// bakeToolResultsIntoTurns merges tool results into the last turn's assistant text
+// when there's no active H2 session to resume. This ensures the model sees the
+// full tool interaction context in a new conversation.
+func bakeToolResultsIntoTurns(parsed *parsedOpenAIRequest) {
+	if len(parsed.ToolResults) == 0 || len(parsed.Turns) == 0 {
+		return
+	}
+	last := &parsed.Turns[len(parsed.Turns)-1]
+	var toolContext strings.Builder
+	for _, tr := range parsed.ToolResults {
+		toolContext.WriteString("\n\n[Tool Result]\n")
+		toolContext.WriteString(tr.Content)
+	}
+	if last.AssistantText != "" {
+		last.AssistantText += toolContext.String()
+	} else {
+		last.AssistantText = toolContext.String()
+	}
+	parsed.ToolResults = nil // consumed
 }
 
 func extractTextContent(content gjson.Result) string {
