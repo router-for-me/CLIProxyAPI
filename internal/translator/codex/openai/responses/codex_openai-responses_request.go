@@ -3,6 +3,7 @@ package responses
 import (
 	"fmt"
 
+	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -39,6 +40,7 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 
 	// Convert role "system" to "developer" in input array to comply with Codex API requirements.
 	rawJSON = convertSystemRoleToDeveloper(rawJSON)
+	rawJSON = normalizeCodexBuiltinTools(rawJSON)
 
 	return rawJSON
 }
@@ -81,4 +83,60 @@ func convertSystemRoleToDeveloper(rawJSON []byte) []byte {
 	}
 
 	return result
+}
+
+// normalizeCodexBuiltinTools rewrites legacy/preview built-in tool variants to the
+// stable names expected by the current Codex upstream.
+func normalizeCodexBuiltinTools(rawJSON []byte) []byte {
+	result := rawJSON
+
+	tools := gjson.GetBytes(result, "tools")
+	if tools.IsArray() {
+		toolArray := tools.Array()
+		for i := 0; i < len(toolArray); i++ {
+			typePath := fmt.Sprintf("tools.%d.type", i)
+			result = normalizeCodexBuiltinToolAtPath(result, typePath)
+		}
+	}
+
+	result = normalizeCodexBuiltinToolAtPath(result, "tool_choice.type")
+
+	toolChoiceTools := gjson.GetBytes(result, "tool_choice.tools")
+	if toolChoiceTools.IsArray() {
+		toolArray := toolChoiceTools.Array()
+		for i := 0; i < len(toolArray); i++ {
+			typePath := fmt.Sprintf("tool_choice.tools.%d.type", i)
+			result = normalizeCodexBuiltinToolAtPath(result, typePath)
+		}
+	}
+
+	return result
+}
+
+func normalizeCodexBuiltinToolAtPath(rawJSON []byte, path string) []byte {
+	currentType := gjson.GetBytes(rawJSON, path).String()
+	normalizedType := normalizeCodexBuiltinToolType(currentType)
+	if normalizedType == "" {
+		return rawJSON
+	}
+
+	updated, err := sjson.SetBytes(rawJSON, path, normalizedType)
+	if err != nil {
+		return rawJSON
+	}
+
+	log.Debugf("codex responses: normalized builtin tool type at %s from %q to %q", path, currentType, normalizedType)
+	return updated
+}
+
+// normalizeCodexBuiltinToolType centralizes the current known Codex Responses
+// built-in tool alias compatibility. If Codex introduces more legacy aliases,
+// extend this helper instead of adding path-specific rewrite logic elsewhere.
+func normalizeCodexBuiltinToolType(toolType string) string {
+	switch toolType {
+	case "web_search_preview", "web_search_preview_2025_03_11":
+		return "web_search"
+	default:
+		return ""
+	}
 }

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/common"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -36,11 +37,12 @@ type geminiToResponsesState struct {
 	ReasoningClosed bool
 
 	// function call aggregation (keyed by output_index)
-	NextIndex   int
-	FuncArgsBuf map[int]*strings.Builder
-	FuncNames   map[int]string
-	FuncCallIDs map[int]string
-	FuncDone    map[int]bool
+	NextIndex        int
+	FuncArgsBuf      map[int]*strings.Builder
+	FuncNames        map[int]string
+	FuncCallIDs      map[int]string
+	FuncDone         map[int]bool
+	SanitizedNameMap map[string]string
 }
 
 // responseIDCounter provides a process-wide unique counter for synthesized response identifiers.
@@ -90,10 +92,11 @@ func emitEvent(event string, payload []byte) []byte {
 func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) [][]byte {
 	if *param == nil {
 		*param = &geminiToResponsesState{
-			FuncArgsBuf: make(map[int]*strings.Builder),
-			FuncNames:   make(map[int]string),
-			FuncCallIDs: make(map[int]string),
-			FuncDone:    make(map[int]bool),
+			FuncArgsBuf:      make(map[int]*strings.Builder),
+			FuncNames:        make(map[int]string),
+			FuncCallIDs:      make(map[int]string),
+			FuncDone:         make(map[int]bool),
+			SanitizedNameMap: util.SanitizedToolNameMap(originalRequestRawJSON),
 		}
 	}
 	st := (*param).(*geminiToResponsesState)
@@ -108,6 +111,9 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 	}
 	if st.FuncDone == nil {
 		st.FuncDone = make(map[int]bool)
+	}
+	if st.SanitizedNameMap == nil {
+		st.SanitizedNameMap = util.SanitizedToolNameMap(originalRequestRawJSON)
 	}
 
 	if bytes.HasPrefix(rawJSON, []byte("data:")) {
@@ -306,7 +312,7 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 				// Responses streaming requires message done events before the next output_item.added.
 				finalizeReasoning()
 				finalizeMessage()
-				name := fc.Get("name").String()
+				name := util.RestoreSanitizedToolName(st.SanitizedNameMap, fc.Get("name").String())
 				idx := st.NextIndex
 				st.NextIndex++
 				// Ensure buffers
@@ -565,6 +571,7 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) []byte {
 	root := gjson.ParseBytes(rawJSON)
 	root = unwrapGeminiResponseRoot(root)
+	sanitizedNameMap := util.SanitizedToolNameMap(originalRequestRawJSON)
 
 	// Base response scaffold
 	resp := []byte(`{"id":"","object":"response","created_at":0,"status":"completed","background":false,"error":null,"incomplete_details":null}`)
@@ -694,7 +701,7 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 				return true
 			}
 			if fc := p.Get("functionCall"); fc.Exists() {
-				name := fc.Get("name").String()
+				name := util.RestoreSanitizedToolName(sanitizedNameMap, fc.Get("name").String())
 				args := fc.Get("args")
 				callID := fmt.Sprintf("call_%x_%d", time.Now().UnixNano(), atomic.AddUint64(&funcCallIDCounter, 1))
 				itemJSON := []byte(`{"id":"","type":"function_call","status":"completed","arguments":"","call_id":"","name":""}`)

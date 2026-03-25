@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -22,7 +23,8 @@ import (
 type convertGeminiResponseToOpenAIChatParams struct {
 	UnixTimestamp int64
 	// FunctionIndex tracks tool call indices per candidate index to support multiple candidates.
-	FunctionIndex map[int]int
+	FunctionIndex    map[int]int
+	SanitizedNameMap map[string]string
 }
 
 // functionCallIDCounter provides a process-wide unique counter for function call identifiers.
@@ -46,8 +48,9 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 	// Initialize parameters if nil.
 	if *param == nil {
 		*param = &convertGeminiResponseToOpenAIChatParams{
-			UnixTimestamp: 0,
-			FunctionIndex: make(map[int]int),
+			UnixTimestamp:    0,
+			FunctionIndex:    make(map[int]int),
+			SanitizedNameMap: util.SanitizedToolNameMap(originalRequestRawJSON),
 		}
 	}
 
@@ -55,6 +58,9 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 	p := (*param).(*convertGeminiResponseToOpenAIChatParams)
 	if p.FunctionIndex == nil {
 		p.FunctionIndex = make(map[int]int)
+	}
+	if p.SanitizedNameMap == nil {
+		p.SanitizedNameMap = util.SanitizedToolNameMap(originalRequestRawJSON)
 	}
 
 	if bytes.HasPrefix(rawJSON, []byte("data:")) {
@@ -191,7 +197,7 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 						}
 
 						functionCallTemplate := []byte(`{"id":"","index":0,"type":"function","function":{"name":"","arguments":""}}`)
-						fcName := functionCallResult.Get("name").String()
+						fcName := util.RestoreSanitizedToolName(p.SanitizedNameMap, functionCallResult.Get("name").String())
 						functionCallTemplate, _ = sjson.SetBytes(functionCallTemplate, "id", fmt.Sprintf("%s-%d-%d", fcName, time.Now().UnixNano(), atomic.AddUint64(&functionCallIDCounter, 1)))
 						functionCallTemplate, _ = sjson.SetBytes(functionCallTemplate, "index", functionCallIndex)
 						functionCallTemplate, _ = sjson.SetBytes(functionCallTemplate, "function.name", fcName)
@@ -265,6 +271,7 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 // Returns:
 //   - []byte: An OpenAI-compatible JSON response containing all message content and metadata
 func ConvertGeminiResponseToOpenAINonStream(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) []byte {
+	sanitizedNameMap := util.SanitizedToolNameMap(originalRequestRawJSON)
 	var unixTimestamp int64
 	// Initialize template with an empty choices array to support multiple candidates.
 	template := []byte(`{"id":"","object":"chat.completion","created":123456,"model":"model","choices":[]}`)
@@ -358,7 +365,7 @@ func ConvertGeminiResponseToOpenAINonStream(_ context.Context, _ string, origina
 							choiceTemplate, _ = sjson.SetRawBytes(choiceTemplate, "message.tool_calls", []byte(`[]`))
 						}
 						functionCallItemTemplate := []byte(`{"id":"","type":"function","function":{"name":"","arguments":""}}`)
-						fcName := functionCallResult.Get("name").String()
+						fcName := util.RestoreSanitizedToolName(sanitizedNameMap, functionCallResult.Get("name").String())
 						functionCallItemTemplate, _ = sjson.SetBytes(functionCallItemTemplate, "id", fmt.Sprintf("%s-%d-%d", fcName, time.Now().UnixNano(), atomic.AddUint64(&functionCallIDCounter, 1)))
 						functionCallItemTemplate, _ = sjson.SetBytes(functionCallItemTemplate, "function.name", fcName)
 						if fcArgsResult := functionCallResult.Get("args"); fcArgsResult.Exists() {

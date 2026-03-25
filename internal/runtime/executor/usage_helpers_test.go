@@ -1,6 +1,11 @@
 package executor
 
-import "testing"
+import (
+	"testing"
+	"time"
+
+	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
+)
 
 func TestParseOpenAIUsageChatCompletions(t *testing.T) {
 	data := []byte(`{"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3,"prompt_tokens_details":{"cached_tokens":4},"completion_tokens_details":{"reasoning_tokens":5}}}`)
@@ -39,5 +44,21 @@ func TestParseOpenAIUsageResponses(t *testing.T) {
 	}
 	if detail.ReasoningTokens != 9 {
 		t.Fatalf("reasoning tokens = %d, want %d", detail.ReasoningTokens, 9)
+	}
+}
+
+func TestUsageReporterBuildRecordIncludesLatency(t *testing.T) {
+	reporter := &usageReporter{
+		provider:    "openai",
+		model:       "gpt-5.4",
+		requestedAt: time.Now().Add(-1500 * time.Millisecond),
+	}
+
+	record := reporter.buildRecord(usage.Detail{TotalTokens: 3}, false)
+	if record.Latency < time.Second {
+		t.Fatalf("latency = %v, want >= 1s", record.Latency)
+	}
+	if record.Latency > 3*time.Second {
+		t.Fatalf("latency = %v, want <= 3s", record.Latency)
 	}
 }
