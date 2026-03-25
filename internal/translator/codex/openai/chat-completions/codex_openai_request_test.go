@@ -176,6 +176,78 @@ func TestToolCallWithContent(t *testing.T) {
 	}
 }
 
+func TestToolCallOutputWithImageContent(t *testing.T) {
+	input := []byte(`{
+		"model": "gpt-4o",
+		"messages": [
+			{"role": "user", "content": "Show me the generated image result."},
+			{
+				"role": "assistant",
+				"content": null,
+				"tool_calls": [
+					{
+						"id": "call_img_1",
+						"type": "function",
+						"function": {
+							"name": "render_image",
+							"arguments": "{}"
+						}
+					}
+				]
+			},
+			{
+				"role": "tool",
+				"tool_call_id": "call_img_1",
+				"content": [
+					{"type": "text", "text": "Rendered image attached."},
+					{"type": "image_url", "image_url": {"url": "https://example.com/generated.png"}}
+				]
+			}
+		],
+		"tools": [
+			{
+				"type": "function",
+				"function": {
+					"name": "render_image",
+					"description": "Render image",
+					"parameters": {"type": "object", "properties": {}}
+				}
+			}
+		]
+	}`)
+
+	out := ConvertOpenAIRequestToCodex("gpt-4o", input, true)
+	result := string(out)
+
+	items := gjson.Get(result, "input").Array()
+	if len(items) != 3 {
+		t.Fatalf("expected 3 input items, got %d: %s", len(items), gjson.Get(result, "input").Raw)
+	}
+
+	output := items[2].Get("output")
+	if !output.IsArray() {
+		t.Fatalf("expected tool output to be an array, got: %s", output.Raw)
+	}
+
+	parts := output.Array()
+	if len(parts) != 2 {
+		t.Fatalf("expected 2 output parts, got %d: %s", len(parts), output.Raw)
+	}
+
+	if parts[0].Get("type").String() != "input_text" {
+		t.Errorf("part 0: expected type 'input_text', got '%s'", parts[0].Get("type").String())
+	}
+	if parts[0].Get("text").String() != "Rendered image attached." {
+		t.Errorf("part 0: unexpected text '%s'", parts[0].Get("text").String())
+	}
+	if parts[1].Get("type").String() != "input_image" {
+		t.Errorf("part 1: expected type 'input_image', got '%s'", parts[1].Get("type").String())
+	}
+	if parts[1].Get("image_url").String() != "https://example.com/generated.png" {
+		t.Errorf("part 1: unexpected image_url '%s'", parts[1].Get("image_url").String())
+	}
+}
+
 // Parallel tool calls: assistant invokes 3 tools at once, all call_ids
 // and outputs must be translated and paired correctly.
 func TestMultipleToolCalls(t *testing.T) {

@@ -121,13 +121,42 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 			case "tool":
 				// Handle tool response messages as top-level function_call_output objects
 				toolCallID := m.Get("tool_call_id").String()
-				content := m.Get("content").String()
+				content := m.Get("content")
 
 				// Create function_call_output object
 				funcOutput := []byte(`{}`)
 				funcOutput, _ = sjson.SetBytes(funcOutput, "type", "function_call_output")
 				funcOutput, _ = sjson.SetBytes(funcOutput, "call_id", toolCallID)
-				funcOutput, _ = sjson.SetBytes(funcOutput, "output", content)
+
+				// Handle content: can be string or array (e.g., with image_url items)
+				if content.Type == gjson.String {
+					funcOutput, _ = sjson.SetBytes(funcOutput, "output", content.String())
+				} else if content.IsArray() {
+					// Build output array from content items
+					outputArr := []byte(`[]`)
+					items := content.Array()
+					for j := 0; j < len(items); j++ {
+						it := items[j]
+						t := it.Get("type").String()
+						switch t {
+						case "text":
+							outputPart := []byte(`{}`)
+							outputPart, _ = sjson.SetBytes(outputPart, "type", "input_text")
+							outputPart, _ = sjson.SetBytes(outputPart, "text", it.Get("text").String())
+							outputArr, _ = sjson.SetRawBytes(outputArr, "-1", outputPart)
+						case "image_url":
+							// Handle image_url content in tool message
+							if u := it.Get("image_url.url"); u.Exists() {
+								outputPart := []byte(`{}`)
+								outputPart, _ = sjson.SetBytes(outputPart, "type", "input_image")
+								outputPart, _ = sjson.SetBytes(outputPart, "image_url", u.String())
+								outputArr, _ = sjson.SetRawBytes(outputArr, "-1", outputPart)
+							}
+						}
+					}
+					funcOutput, _ = sjson.SetRawBytes(funcOutput, "output", outputArr)
+				}
+
 				out, _ = sjson.SetRawBytes(out, "input.-1", funcOutput)
 
 			default:
