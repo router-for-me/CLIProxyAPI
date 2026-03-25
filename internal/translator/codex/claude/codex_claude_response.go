@@ -84,7 +84,7 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 		if params.ThinkingBlockOpen && params.ThinkingStopPending {
 			output = append(output, finalizeCodexThinkingBlock(params)...)
 		}
-		template = []byte(`{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}`)
+		template = []byte(`{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}`)
 		template, _ = sjson.SetBytes(template, "index", params.BlockIndex)
 		params.ThinkingBlockOpen = true
 		params.ThinkingStopPending = false
@@ -270,9 +270,11 @@ func ConvertCodexResponseToClaudeNonStream(_ context.Context, _ string, original
 					}
 				}
 				if thinkingBuilder.Len() > 0 || signature != "" {
-					block := []byte(`{"type":"thinking","thinking":"","signature":""}`)
+					block := []byte(`{"type":"thinking","thinking":""}`)
 					block, _ = sjson.SetBytes(block, "thinking", thinkingBuilder.String())
-					block, _ = sjson.SetBytes(block, "signature", signature)
+					if signature != "" {
+						block, _ = sjson.SetBytes(block, "signature", signature)
+					}
 					out, _ = sjson.SetRawBytes(out, "content.-1", block)
 				}
 			case "message":

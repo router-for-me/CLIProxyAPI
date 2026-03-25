@@ -40,8 +40,8 @@ func TestConvertCodexResponseToClaude_StreamThinkingIncludesSignature(t *testing
 			case "content_block_start":
 				if data.Get("content_block.type").String() == "thinking" {
 					startFound = true
-					if !data.Get("content_block.signature").Exists() {
-						t.Fatalf("thinking start block missing signature field: %s", line)
+					if data.Get("content_block.signature").Exists() {
+						t.Fatalf("thinking start block should NOT have signature field when signature is unknown: %s", line)
 					}
 				}
 			case "content_block_delta":
@@ -97,8 +97,8 @@ func TestConvertCodexResponseToClaude_StreamThinkingWithoutReasoningItemStillInc
 			data := gjson.Parse(strings.TrimPrefix(line, "data: "))
 			if data.Get("type").String() == "content_block_start" && data.Get("content_block.type").String() == "thinking" {
 				thinkingStartFound = true
-				if !data.Get("content_block.signature").Exists() {
-					t.Fatalf("thinking start block missing signature field: %s", line)
+				if data.Get("content_block.signature").Exists() {
+					t.Fatalf("thinking start block should NOT have signature field without encrypted_content: %s", line)
 				}
 			}
 			if data.Get("type").String() == "content_block_stop" && data.Get("index").Int() == 0 {
