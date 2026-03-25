@@ -1091,16 +1091,27 @@ func newH2Client() *http.Client {
 
 func deriveSessionKey(clientKey string, model string, messages []gjson.Result) string {
 	var firstUserContent string
+	var systemContent string
 	for _, msg := range messages {
-		if msg.Get("role").String() == "user" {
+		role := msg.Get("role").String()
+		if role == "user" && firstUserContent == "" {
 			firstUserContent = extractTextContent(msg.Get("content"))
-			break
+		} else if role == "system" && systemContent == "" {
+			// System prompt differs per Claude Code session (contains cwd, session_id, etc.)
+			content := extractTextContent(msg.Get("content"))
+			if len(content) > 200 {
+				systemContent = content[:200]
+			} else {
+				systemContent = content
+			}
 		}
 	}
-	// Include client API key to prevent session collisions across users
-	input := clientKey + ":" + model + ":" + firstUserContent
-	if len(input) > 300 {
-		input = input[:300]
+	// Include client API key + system prompt hash to prevent session collisions:
+	// - Different users have different API keys
+	// - Different Claude Code sessions have different system prompts (cwd, tools, etc.)
+	input := clientKey + ":" + model + ":" + systemContent + ":" + firstUserContent
+	if len(input) > 500 {
+		input = input[:500]
 	}
 	h := sha256.Sum256([]byte(input))
 	return hex.EncodeToString(h[:])[:16]
