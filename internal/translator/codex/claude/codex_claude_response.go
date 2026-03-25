@@ -389,6 +389,7 @@ func ClaudeTokenCount(_ context.Context, count int64) []byte {
 
 func finalizeCodexThinkingBlock(params *ConvertCodexResponseToClaudeParams) []byte {
 	if !params.ThinkingBlockOpen {
+		params.ThinkingSignature = ""
 		return nil
 	}
 
