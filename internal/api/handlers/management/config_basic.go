@@ -13,6 +13,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	log "github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v3"
@@ -280,15 +281,7 @@ func (h *Handler) PutForceModelPrefix(c *gin.Context) {
 }
 
 func normalizeRoutingStrategy(strategy string) (string, bool) {
-	normalized := strings.ToLower(strings.TrimSpace(strategy))
-	switch normalized {
-	case "", "round-robin", "roundrobin", "rr":
-		return "round-robin", true
-	case "fill-first", "fillfirst", "ff":
-		return "fill-first", true
-	default:
-		return "", false
-	}
+	return coreauth.NormalizeRoutingStrategy(strategy)
 }
 
 // RoutingStrategy
