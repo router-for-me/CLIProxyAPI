@@ -32,6 +32,9 @@ const (
 	ServerMsgExecBgShellSpawn                    // Rejected: background shell
 	ServerMsgExecWriteShellStdin                 // Rejected: write shell stdin
 	ServerMsgExecOther                           // Other exec types (respond with empty)
+	ServerMsgTurnEnded                           // Turn has ended (no more output)
+	ServerMsgHeartbeat                           // Server heartbeat
+	ServerMsgTokenDelta                          // Token usage delta
 )
 
 // DecodedServerMessage holds parsed data from an AgentServerMessage.
@@ -63,6 +66,9 @@ type DecodedServerMessage struct {
 
 	// For other exec - the raw field number for building a response
 	ExecFieldNumber int
+
+	// For TokenDeltaUpdate
+	TokenDelta int64
 }
 
 // DecodeAgentServerMessage parses an AgentServerMessage and returns
@@ -160,6 +166,24 @@ func decodeInteractionUpdate(data []byte, msg *DecodedServerMessage) {
 			case 3:
 				// tool_call_completed - ignore but log
 				log.Debugf("decodeInteractionUpdate: ToolCallCompleted (ignored)")
+			case 8:
+				// token_delta - extract token count
+				msg.Type = ServerMsgTokenDelta
+				msg.TokenDelta = decodeVarintField(val, 1)
+				log.Debugf("decodeInteractionUpdate: TokenDeltaUpdate tokens=%d", msg.TokenDelta)
+			case 13:
+				// heartbeat from server
+				msg.Type = ServerMsgHeartbeat
+			case 14:
+				// turn_ended - critical: model finished generating
+				msg.Type = ServerMsgTurnEnded
+				log.Debugf("decodeInteractionUpdate: TurnEndedUpdate - stream should end")
+			case 16:
+				// step_started - ignore
+				log.Debugf("decodeInteractionUpdate: StepStartedUpdate (ignored)")
+			case 17:
+				// step_completed - ignore
+				log.Debugf("decodeInteractionUpdate: StepCompletedUpdate (ignored)")
 			default:
 				log.Debugf("decodeInteractionUpdate: unknown field %d", num)
 			}
@@ -498,6 +522,34 @@ func decodeBytesField(data []byte, targetField protowire.Number) []byte {
 		}
 	}
 	return nil
+}
+
+// decodeVarintField extracts an int64 from the first matching varint field in a submessage.
+func decodeVarintField(data []byte, targetField protowire.Number) int64 {
+	for len(data) > 0 {
+		num, typ, n := protowire.ConsumeTag(data)
+		if n < 0 {
+			return 0
+		}
+		data = data[n:]
+		if typ == protowire.VarintType {
+			val, n := protowire.ConsumeVarint(data)
+			if n < 0 {
+				return 0
+			}
+			data = data[n:]
+			if num == targetField {
+				return int64(val)
+			}
+		} else {
+			n := protowire.ConsumeFieldValue(num, typ, data)
+			if n < 0 {
+				return 0
+			}
+			data = data[n:]
+		}
+	}
+	return 0
 }
 
 // BlobIdHex returns the hex string of a blob ID for use as a map key.
