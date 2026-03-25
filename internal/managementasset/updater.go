@@ -31,7 +31,7 @@ const (
 	httpUserAgent                = "CLIProxyAPI-management-updater"
 	managementSyncMinInterval    = 30 * time.Second
 	updateCheckInterval          = 3 * time.Hour
-	maxAssetDownloadSize         = 10 << 20 // 10 MB safety limit for management asset downloads
+	maxAssetDownloadSize         = 50 << 20 // 10 MB safety limit for management asset downloads
 )
 
 // ManagementFileName exposes the control panel asset filename.
@@ -89,8 +89,8 @@ func runAutoUpdater(ctx context.Context) {
 			log.Debug("management asset auto-updater skipped: control panel disabled")
 			return
 		}
-		if !cfg.RemoteManagement.AutoUpdatePanel {
-			log.Debug("management asset auto-updater skipped: auto-update-panel is disabled")
+		if cfg.RemoteManagement.DisableAutoUpdatePanel {
+			log.Debug("management asset auto-updater skipped: disable-auto-update-panel is enabled")
 			return
 		}
 
@@ -289,7 +289,7 @@ func ensureFallbackManagementHTML(ctx context.Context, client *http.Client, loca
 	}
 
 	log.Warnf("management asset downloaded from fallback URL without digest verification (hash=%s) — "+
-		"consider setting auto-update-panel: true to receive verified updates from GitHub", downloadedHash)
+		"enable verified GitHub updates by keeping disable-auto-update-panel set to false", downloadedHash)
 
 	if err = atomicWriteFile(localPath, data); err != nil {
 		log.WithError(err).Warn("failed to persist fallback management control panel page")
