@@ -283,22 +283,23 @@ func (s *PostgresStatisticsStore) Import(ctx context.Context, snapshot Statistic
 				if timestamp.IsZero() {
 					timestamp = time.Now().UTC()
 				}
+				timestamp = timestamp.UTC()
 				latencyMs := detail.LatencyMs
 				if latencyMs < 0 {
 					latencyMs = 0
 				}
 
 				event := usageEvent{
-					RequestedAt:       timestamp,
-					Provider:          "",
-					Model:             model,
-					Source:            strings.TrimSpace(detail.Source),
-					APIKeyIdentifier:  apiIdentifier,
-					AuthID:            "",
-					AuthIndex:         strings.TrimSpace(detail.AuthIndex),
-					LatencyMs:         latencyMs,
-					Failed:            detail.Failed,
-					Tokens:            normalized,
+					RequestedAt:      timestamp,
+					Provider:         "",
+					Model:            model,
+					Source:           strings.TrimSpace(detail.Source),
+					APIKeyIdentifier: apiIdentifier,
+					AuthID:           "",
+					AuthIndex:        strings.TrimSpace(detail.AuthIndex),
+					LatencyMs:        latencyMs,
+					Failed:           detail.Failed,
+					Tokens:           normalized,
 				}
 				event.DedupKey = dedupKeyForEvent(event)
 
@@ -358,6 +359,7 @@ func usageEventFromRecord(ctx context.Context, record coreusage.Record) usageEve
 	if timestamp.IsZero() {
 		timestamp = time.Now().UTC()
 	}
+	timestamp = timestamp.UTC()
 	tokens := normaliseDetail(record.Detail)
 	failed := record.Failed
 	if !failed {
@@ -418,6 +420,7 @@ func mergeEventIntoSnapshot(snapshot *StatisticsSnapshot, event usageEvent) {
 	if timestamp.IsZero() {
 		timestamp = time.Now().UTC()
 	}
+	timestamp = timestamp.UTC()
 
 	snapshot.TotalRequests++
 	if event.Failed {

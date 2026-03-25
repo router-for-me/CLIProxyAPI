@@ -166,8 +166,9 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 	}
 	timestamp := record.RequestedAt
 	if timestamp.IsZero() {
-		timestamp = time.Now()
+		timestamp = time.Now().UTC()
 	}
+	timestamp = timestamp.UTC()
 	detail := normaliseDetail(record.Detail)
 	totalTokens := detail.TotalTokens
 	statsKey := record.APIKey
@@ -315,6 +316,7 @@ func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot) MergeResu
 				continue
 			}
 			for _, detail := range modelStatsValue.Details {
+				detail.Timestamp = detail.Timestamp.UTC()
 				seen[dedupKey(apiName, modelName, detail)] = struct{}{}
 			}
 		}
@@ -343,8 +345,9 @@ func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot) MergeResu
 					detail.LatencyMs = 0
 				}
 				if detail.Timestamp.IsZero() {
-					detail.Timestamp = time.Now()
+					detail.Timestamp = time.Now().UTC()
 				}
+				detail.Timestamp = detail.Timestamp.UTC()
 				key := dedupKey(apiName, modelName, detail)
 				if _, exists := seen[key]; exists {
 					result.Skipped++
@@ -376,8 +379,9 @@ func (s *RequestStatistics) recordImported(apiName, modelName string, stats *api
 
 	s.updateAPIStats(stats, modelName, detail)
 
-	dayKey := detail.Timestamp.Format("2006-01-02")
-	hourKey := detail.Timestamp.Hour()
+	timestamp := detail.Timestamp.UTC()
+	dayKey := timestamp.Format("2006-01-02")
+	hourKey := timestamp.Hour()
 
 	s.requestsByDay[dayKey]++
 	s.requestsByHour[hourKey]++

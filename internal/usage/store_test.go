@@ -98,6 +98,47 @@ func TestMemoryStatisticsStoreImportIdempotency(t *testing.T) {
 	}
 }
 
+func TestMemoryStatisticsStoreNormalizesRequestedAtToUTC(t *testing.T) {
+	store := NewMemoryStatisticsStore(NewRequestStatistics())
+	shanghai := time.FixedZone("Asia/Shanghai", 8*60*60)
+	requestedAt := time.Date(2026, 3, 24, 18, 30, 0, 0, shanghai)
+
+	err := store.Record(context.Background(), coreusage.Record{
+		Provider:    "openai",
+		APIKey:      "api-1",
+		Model:       "gpt-5",
+		RequestedAt: requestedAt,
+		Detail: coreusage.Detail{
+			InputTokens:  10,
+			OutputTokens: 20,
+			TotalTokens:  30,
+		},
+	})
+	if err != nil {
+		t.Fatalf("record failed: %v", err)
+	}
+
+	snapshot, err := store.Snapshot(context.Background())
+	if err != nil {
+		t.Fatalf("snapshot failed: %v", err)
+	}
+
+	if snapshot.RequestsByHour["10"] != 1 {
+		t.Fatalf("requests by hour missing expected UTC bucket: %+v", snapshot.RequestsByHour)
+	}
+	if snapshot.RequestsByHour["18"] != 0 {
+		t.Fatalf("requests by hour should not use source timezone bucket: %+v", snapshot.RequestsByHour)
+	}
+
+	detail := snapshot.APIs["api-1"].Models["gpt-5"].Details[0]
+	if !detail.Timestamp.Equal(requestedAt.UTC()) {
+		t.Fatalf("detail timestamp = %s, want %s", detail.Timestamp.Format(time.RFC3339Nano), requestedAt.UTC().Format(time.RFC3339Nano))
+	}
+	if detail.Timestamp.Location() != time.UTC {
+		t.Fatalf("detail timestamp location = %v, want UTC", detail.Timestamp.Location())
+	}
+}
+
 func TestPostgresStatisticsStorePersistenceAndImportIdempotency(t *testing.T) {
 	dsn := os.Getenv("USAGE_POSTGRES_TEST_DSN")
 	if dsn == "" {
@@ -176,7 +217,7 @@ func TestPostgresStatisticsStorePersistenceAndImportIdempotency(t *testing.T) {
 							Timestamp: time.Date(2026, 3, 24, 12, 0, 0, 0, time.UTC),
 							Source:    "imported",
 							AuthIndex: "2",
-							Tokens: TokenStats{InputTokens: 1, OutputTokens: 2, TotalTokens: 3},
+							Tokens:    TokenStats{InputTokens: 1, OutputTokens: 2, TotalTokens: 3},
 						}},
 					},
 				},

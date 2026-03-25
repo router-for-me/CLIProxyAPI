@@ -80,7 +80,7 @@ func (w *ResponseWriterWrapper) Write(data []byte) (int, error) {
 	if w.isStreaming && w.chunkChannel != nil {
 		// Capture TTFB on first chunk (synchronous, before async channel send)
 		if w.firstChunkTimestamp.IsZero() {
-			w.firstChunkTimestamp = time.Now()
+			w.firstChunkTimestamp = time.Now().UTC()
 		}
 		// For streaming responses: Send to async logging channel (non-blocking)
 		select {
@@ -128,7 +128,7 @@ func (w *ResponseWriterWrapper) WriteString(data string) (int, error) {
 	if w.isStreaming && w.chunkChannel != nil {
 		// Capture TTFB on first chunk (synchronous, before async channel send)
 		if w.firstChunkTimestamp.IsZero() {
-			w.firstChunkTimestamp = time.Now()
+			w.firstChunkTimestamp = time.Now().UTC()
 		}
 		select {
 		case w.chunkChannel <- []byte(data):
@@ -358,7 +358,7 @@ func (w *ResponseWriterWrapper) extractAPIResponseTimestamp(c *gin.Context) time
 		return time.Time{}
 	}
 	if t, ok := ts.(time.Time); ok {
-		return t
+		return t.UTC()
 	}
 	return time.Time{}
 }

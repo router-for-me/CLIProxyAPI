@@ -339,7 +339,7 @@ func (l *FileRequestLogger) LogStreamingRequest(url, method string, headers map[
 		logFilePath:      filePath,
 		url:              url,
 		method:           method,
-		timestamp:        time.Now(),
+		timestamp:        time.Now().UTC(),
 		requestHeaders:   requestHeaders,
 		requestBodyPath:  requestBodyPath,
 		responseBodyPath: responseBodyPath,
@@ -396,7 +396,7 @@ func (l *FileRequestLogger) generateFilename(url string, requestID ...string) st
 	sanitized := l.sanitizeForFilename(path)
 
 	// Add timestamp
-	timestamp := time.Now().Format("2006-01-02T150405")
+	timestamp := time.Now().UTC().Format("2006-01-02T150405")
 
 	// Use request ID if provided, otherwise use sequential ID
 	var idPart string
@@ -529,7 +529,7 @@ func (l *FileRequestLogger) writeNonStreamingLog(
 	apiResponseTimestamp time.Time,
 ) error {
 	if requestTimestamp.IsZero() {
-		requestTimestamp = time.Now()
+		requestTimestamp = time.Now().UTC()
 	}
 	if errWrite := writeRequestInfoWithBody(w, url, method, requestHeaders, requestBody, requestBodyPath, requestTimestamp); errWrite != nil {
 		return errWrite
@@ -566,7 +566,7 @@ func writeRequestInfoWithBody(
 	if _, errWrite := io.WriteString(w, fmt.Sprintf("Method: %s\n", method)); errWrite != nil {
 		return errWrite
 	}
-	if _, errWrite := io.WriteString(w, fmt.Sprintf("Timestamp: %s\n", timestamp.Format(time.RFC3339Nano))); errWrite != nil {
+	if _, errWrite := io.WriteString(w, fmt.Sprintf("Timestamp: %s\n", timestamp.UTC().Format(time.RFC3339Nano))); errWrite != nil {
 		return errWrite
 	}
 	if _, errWrite := io.WriteString(w, "\n"); errWrite != nil {
@@ -633,7 +633,7 @@ func writeAPISection(w io.Writer, sectionHeader string, sectionPrefix string, pa
 			return errWrite
 		}
 		if !timestamp.IsZero() {
-			if _, errWrite := io.WriteString(w, fmt.Sprintf("Timestamp: %s\n", timestamp.Format(time.RFC3339Nano))); errWrite != nil {
+			if _, errWrite := io.WriteString(w, fmt.Sprintf("Timestamp: %s\n", timestamp.UTC().Format(time.RFC3339Nano))); errWrite != nil {
 				return errWrite
 			}
 		}
@@ -940,7 +940,7 @@ func (l *FileRequestLogger) formatRequestInfo(url, method string, headers map[st
 	content.WriteString(fmt.Sprintf("Version: %s\n", buildinfo.Version))
 	content.WriteString(fmt.Sprintf("URL: %s\n", url))
 	content.WriteString(fmt.Sprintf("Method: %s\n", method))
-	content.WriteString(fmt.Sprintf("Timestamp: %s\n", time.Now().Format(time.RFC3339Nano)))
+	content.WriteString(fmt.Sprintf("Timestamp: %s\n", time.Now().UTC().Format(time.RFC3339Nano)))
 	content.WriteString("\n")
 
 	content.WriteString("=== HEADERS ===\n")

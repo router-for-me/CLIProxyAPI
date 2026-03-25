@@ -145,7 +145,7 @@ func captureRequestInfo(c *gin.Context, captureBody bool) (*RequestInfo, error) 
 		Headers:   headers,
 		Body:      body,
 		RequestID: logging.GetGinRequestID(c),
-		Timestamp: time.Now(),
+		Timestamp: time.Now().UTC(),
 	}, nil
 }
 

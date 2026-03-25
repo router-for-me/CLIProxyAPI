@@ -97,6 +97,16 @@ func TestUsageExportImportCompatibilityAndIdempotency(t *testing.T) {
 	if exportPayload.Version != 1 {
 		t.Fatalf("export version = %d, want 1", exportPayload.Version)
 	}
+	if exportPayload.ExportedAt.Location() != time.UTC {
+		t.Fatalf("exported_at location = %v, want UTC", exportPayload.ExportedAt.Location())
+	}
+	details := exportPayload.Usage.APIs["api-1"].Models["gpt-5"].Details
+	if len(details) != 1 {
+		t.Fatalf("exported details = %d, want 1", len(details))
+	}
+	if details[0].Timestamp.Location() != time.UTC {
+		t.Fatalf("exported usage timestamp location = %v, want UTC", details[0].Timestamp.Location())
+	}
 
 	targetStore := usage.NewMemoryStatisticsStore(usage.NewRequestStatistics())
 	target := &Handler{usageStore: targetStore}

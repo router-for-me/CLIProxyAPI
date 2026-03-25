@@ -64,7 +64,7 @@ func recordAPIRequest(ctx context.Context, cfg *config.Config, info upstreamRequ
 
 	builder := &strings.Builder{}
 	builder.WriteString(fmt.Sprintf("=== API REQUEST %d ===\n", index))
-	builder.WriteString(fmt.Sprintf("Timestamp: %s\n", time.Now().Format(time.RFC3339Nano)))
+	builder.WriteString(fmt.Sprintf("Timestamp: %s\n", time.Now().UTC().Format(time.RFC3339Nano)))
 	if info.URL != "" {
 		builder.WriteString(fmt.Sprintf("Upstream URL: %s\n", info.URL))
 	} else {
@@ -219,7 +219,7 @@ func ensureResponseIntro(attempt *upstreamAttempt) {
 		return
 	}
 	attempt.response.WriteString(fmt.Sprintf("=== API RESPONSE %d ===\n", attempt.index))
-	attempt.response.WriteString(fmt.Sprintf("Timestamp: %s\n", time.Now().Format(time.RFC3339Nano)))
+	attempt.response.WriteString(fmt.Sprintf("Timestamp: %s\n", time.Now().UTC().Format(time.RFC3339Nano)))
 	attempt.response.WriteString("\n")
 	attempt.responseIntroWritten = true
 }

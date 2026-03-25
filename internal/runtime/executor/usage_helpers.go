@@ -31,7 +31,7 @@ func newUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 	reporter := &usageReporter{
 		provider:    provider,
 		model:       model,
-		requestedAt: time.Now(),
+		requestedAt: time.Now().UTC(),
 		apiKey:      apiKey,
 		source:      resolveUsageSource(auth, apiKey),
 	}
