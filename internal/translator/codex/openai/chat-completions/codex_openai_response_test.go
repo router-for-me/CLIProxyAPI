@@ -83,3 +83,48 @@ func TestConvertCodexResponseToOpenAI_FirstChunkUsesRequestModelName(t *testing.
 		t.Fatalf("expected model %q, got %q", modelName, gotModel)
 	}
 }
+
+func TestConvertCodexResponseToOpenAI_ToolCallChunkOmitsNullContentFields(t *testing.T) {
+	ctx := context.Background()
+	var param any
+
+	out := ConvertCodexResponseToOpenAI(ctx, "gpt-5.4", nil, nil, []byte(`data: {"type":"response.output_item.added","item":{"type":"function_call","call_id":"call_123","name":"websearch"}}`), &param)
+	if len(out) != 1 {
+		t.Fatalf("expected 1 chunk, got %d", len(out))
+	}
+
+	if gjson.GetBytes(out[0], "choices.0.delta.content").Exists() {
+		t.Fatalf("expected content to be omitted, got %s", string(out[0]))
+	}
+	if gjson.GetBytes(out[0], "choices.0.delta.reasoning_content").Exists() {
+		t.Fatalf("expected reasoning_content to be omitted, got %s", string(out[0]))
+	}
+	if !gjson.GetBytes(out[0], "choices.0.delta.tool_calls").Exists() {
+		t.Fatalf("expected tool_calls to exist, got %s", string(out[0]))
+	}
+}
+
+func TestConvertCodexResponseToOpenAI_ToolCallArgumentsDeltaOmitsNullContentFields(t *testing.T) {
+	ctx := context.Background()
+	var param any
+
+	out := ConvertCodexResponseToOpenAI(ctx, "gpt-5.4", nil, nil, []byte(`data: {"type":"response.output_item.added","item":{"type":"function_call","call_id":"call_123","name":"websearch"}}`), &param)
+	if len(out) != 1 {
+		t.Fatalf("expected tool call announcement chunk, got %d", len(out))
+	}
+
+	out = ConvertCodexResponseToOpenAI(ctx, "gpt-5.4", nil, nil, []byte(`data: {"type":"response.function_call_arguments.delta","delta":"{\"query\":\"OpenAI\"}"}`), &param)
+	if len(out) != 1 {
+		t.Fatalf("expected 1 chunk, got %d", len(out))
+	}
+
+	if gjson.GetBytes(out[0], "choices.0.delta.content").Exists() {
+		t.Fatalf("expected content to be omitted, got %s", string(out[0]))
+	}
+	if gjson.GetBytes(out[0], "choices.0.delta.reasoning_content").Exists() {
+		t.Fatalf("expected reasoning_content to be omitted, got %s", string(out[0]))
+	}
+	if !gjson.GetBytes(out[0], "choices.0.delta.tool_calls.0.function.arguments").Exists() {
+		t.Fatalf("expected tool call arguments delta to exist, got %s", string(out[0]))
+	}
+}

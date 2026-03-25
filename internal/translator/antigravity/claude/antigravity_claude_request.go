@@ -105,59 +105,59 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 
 						// Always try cached signature first (more reliable than client-provided)
 						// Client may send stale or invalid signatures from different sessions
-			signature := ""
-					if thinkingText != "" {
-						if cachedSig := cache.GetCachedSignature(modelName, thinkingText); cachedSig != "" {
-							signature = cachedSig
-							// log.Debugf("Using cached signature for thinking block")
-						}
-					}
-
-					// Fallback to client signature only if cache miss and client signature is valid
-					if signature == "" {
-						signatureResult := contentResult.Get("signature")
-						clientSignature := ""
-						if signatureResult.Exists() && signatureResult.String() != "" {
-							arrayClientSignatures := strings.SplitN(signatureResult.String(), "#", 2)
-							if len(arrayClientSignatures) == 2 {
-								if cache.GetModelGroup(modelName) == arrayClientSignatures[0] {
-									clientSignature = arrayClientSignatures[1]
-								}
+						signature := ""
+						if thinkingText != "" {
+							if cachedSig := cache.GetCachedSignature(modelName, thinkingText); cachedSig != "" {
+								signature = cachedSig
+								// log.Debugf("Using cached signature for thinking block")
 							}
 						}
-						if cache.HasValidSignature(modelName, clientSignature) {
-							signature = clientSignature
+
+						// Fallback to client signature only if cache miss and client signature is valid
+						if signature == "" {
+							signatureResult := contentResult.Get("signature")
+							clientSignature := ""
+							if signatureResult.Exists() && signatureResult.String() != "" {
+								arrayClientSignatures := strings.SplitN(signatureResult.String(), "#", 2)
+								if len(arrayClientSignatures) == 2 {
+									if cache.GetModelGroup(modelName) == arrayClientSignatures[0] {
+										clientSignature = arrayClientSignatures[1]
+									}
+								}
+							}
+							if cache.HasValidSignature(modelName, clientSignature) {
+								signature = clientSignature
+							}
+							// log.Debugf("Using client-provided signature for thinking block")
 						}
-						// log.Debugf("Using client-provided signature for thinking block")
-					}
 
-					// Store for subsequent tool_use in the same message
-					if cache.HasValidSignature(modelName, signature) {
-						currentMessageThinkingSignature = signature
-					}
+						// Store for subsequent tool_use in the same message
+						if cache.HasValidSignature(modelName, signature) {
+							currentMessageThinkingSignature = signature
+						}
 
-					// Skip trailing unsigned thinking blocks on last assistant message
-					isUnsigned := !cache.HasValidSignature(modelName, signature)
+						// Skip trailing unsigned thinking blocks on last assistant message
+						isUnsigned := !cache.HasValidSignature(modelName, signature)
 
-					// If unsigned, skip entirely (don't convert to text)
-					// Claude requires assistant messages to start with thinking blocks when thinking is enabled
-					// Converting to text would break this requirement
-					if isUnsigned {
-						// log.Debugf("Dropping unsigned thinking block (no valid signature)")
-						enableThoughtTranslate = false
-						continue
-					}
+						// If unsigned, skip entirely (don't convert to text)
+						// Claude requires assistant messages to start with thinking blocks when thinking is enabled
+						// Converting to text would break this requirement
+						if isUnsigned {
+							// log.Debugf("Dropping unsigned thinking block (no valid signature)")
+							enableThoughtTranslate = false
+							continue
+						}
 
-					// Valid signature, send as thought block
-					// Always include "text" field — Google Antigravity API requires it
-					// even for redacted thinking where the text is empty.
-					partJSON := []byte(`{}`)
-					partJSON, _ = sjson.SetBytes(partJSON, "thought", true)
-					partJSON, _ = sjson.SetBytes(partJSON, "text", thinkingText)
-					if signature != "" {
-						partJSON, _ = sjson.SetBytes(partJSON, "thoughtSignature", signature)
-					}
-					clientContentJSON, _ = sjson.SetRawBytes(clientContentJSON, "parts.-1", partJSON)
+						// Valid signature, send as thought block
+						// Always include "text" field — Google Antigravity API requires it
+						// even for redacted thinking where the text is empty.
+						partJSON := []byte(`{}`)
+						partJSON, _ = sjson.SetBytes(partJSON, "thought", true)
+						partJSON, _ = sjson.SetBytes(partJSON, "text", thinkingText)
+						if signature != "" {
+							partJSON, _ = sjson.SetBytes(partJSON, "thoughtSignature", signature)
+						}
+						clientContentJSON, _ = sjson.SetRawBytes(clientContentJSON, "parts.-1", partJSON)
 					} else if contentTypeResult.Type == gjson.String && contentTypeResult.String() == "text" {
 						prompt := contentResult.Get("text").String()
 						// Skip empty text parts to avoid Gemini API error:

@@ -71,16 +71,16 @@ type availableModelsCacheEntry struct {
 // Values are interpreted in provider-native token units.
 type ThinkingSupport struct {
 	// Min is the minimum allowed thinking budget (inclusive).
-	Min int `json:"min,omitempty"`
+	Min int `json:"min,omitempty" yaml:"min,omitempty"`
 	// Max is the maximum allowed thinking budget (inclusive).
-	Max int `json:"max,omitempty"`
+	Max int `json:"max,omitempty" yaml:"max,omitempty"`
 	// ZeroAllowed indicates whether 0 is a valid value (to disable thinking).
-	ZeroAllowed bool `json:"zero_allowed,omitempty"`
+	ZeroAllowed bool `json:"zero_allowed,omitempty" yaml:"zero-allowed,omitempty"`
 	// DynamicAllowed indicates whether -1 is a valid value (dynamic thinking budget).
-	DynamicAllowed bool `json:"dynamic_allowed,omitempty"`
+	DynamicAllowed bool `json:"dynamic_allowed,omitempty" yaml:"dynamic-allowed,omitempty"`
 	// Levels defines discrete reasoning effort levels (e.g., "low", "medium", "high").
 	// When set, the model uses level-based reasoning instead of token budgets.
-	Levels []string `json:"levels,omitempty"`
+	Levels []string `json:"levels,omitempty" yaml:"levels,omitempty"`
 }
 
 // ModelRegistration tracks a model's availability
