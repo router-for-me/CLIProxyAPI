@@ -209,7 +209,9 @@ func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	}
 
 	parsed := parseOpenAIRequest(payload)
-	params := buildRunRequestParams(parsed)
+	cch := extractCCH(parsed.SystemPrompt)
+	conversationId := deriveConversationId(apiKeyFromContext(ctx), cch)
+	params := buildRunRequestParams(parsed, conversationId)
 
 	requestBytes := cursorproto.EncodeRunRequest(params)
 	framedRequest := cursorproto.FrameConnectMessage(requestBytes, 0)
@@ -295,6 +297,10 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	log.Debugf("cursor: parsed request: model=%s userText=%d chars, turns=%d, tools=%d, toolResults=%d",
 		parsed.Model, len(parsed.UserText), len(parsed.Turns), len(parsed.Tools), len(parsed.ToolResults))
 
+	cch := extractCCH(parsed.SystemPrompt)
+	conversationId := deriveConversationId(apiKeyFromContext(ctx), cch)
+	log.Debugf("cursor: cch=%s conversationId=%s", cch, conversationId)
+
 	sessionKey := deriveSessionKey(apiKeyFromContext(ctx), parsed.Model, parsed.Messages)
 	needsTranslate := from.String() != "" && from.String() != "openai"
 
@@ -328,7 +334,7 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		bakeToolResultsIntoTurns(parsed)
 	}
 
-	params := buildRunRequestParams(parsed)
+	params := buildRunRequestParams(parsed, conversationId)
 	requestBytes := cursorproto.EncodeRunRequest(params)
 	framedRequest := cursorproto.FrameConnectMessage(requestBytes, 0)
 
@@ -1023,13 +1029,13 @@ func parseDataURL(url string) *cursorproto.ImageData {
 	}
 }
 
-func buildRunRequestParams(parsed *parsedOpenAIRequest) *cursorproto.RunRequestParams {
+func buildRunRequestParams(parsed *parsedOpenAIRequest, conversationId string) *cursorproto.RunRequestParams {
 	params := &cursorproto.RunRequestParams{
 		ModelId:        parsed.Model,
 		SystemPrompt:   parsed.SystemPrompt,
 		UserText:       parsed.UserText,
 		MessageId:      uuid.New().String(),
-		ConversationId: uuid.New().String(),
+		ConversationId: conversationId,
 		Images:         parsed.Images,
 		Turns:          parsed.Turns,
 		BlobStore:      make(map[string][]byte),
@@ -1087,6 +1093,33 @@ func newH2Client() *http.Client {
 			TLSClientConfig: &tls.Config{},
 		},
 	}
+}
+
+// extractCCH extracts the cch value from the system prompt's billing header.
+// Format: x-anthropic-billing-header: cc_version=...; cc_entrypoint=cli; cch=XXXXX;
+// The cch is unique per Claude Code session and stable across requests in the same session.
+func extractCCH(systemPrompt string) string {
+	idx := strings.Index(systemPrompt, "cch=")
+	if idx < 0 {
+		return ""
+	}
+	rest := systemPrompt[idx+4:]
+	end := strings.IndexAny(rest, "; \n")
+	if end < 0 {
+		return rest
+	}
+	return rest[:end]
+}
+
+// deriveConversationId generates a deterministic conversation_id from the client API key and cch.
+// Same Claude Code session → same cch → same conversation_id → Cursor server can reuse context.
+func deriveConversationId(apiKey, cch string) string {
+	if cch == "" {
+		return uuid.New().String()
+	}
+	h := sha256.Sum256([]byte("cursor-conv:" + apiKey + ":" + cch))
+	s := hex.EncodeToString(h[:16])
+	return fmt.Sprintf("%s-%s-%s-%s-%s", s[:8], s[8:12], s[12:16], s[16:20], s[20:32])
 }
 
 func deriveSessionKey(clientKey string, model string, messages []gjson.Result) string {
