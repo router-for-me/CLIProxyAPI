@@ -238,7 +238,9 @@ nonstream-keepalive-interval: 0
 #       - api-key: "sk-or-v1-...b781" # without proxy-url
 #     models: # The models supported by the provider.
 #       - name: "moonshotai/kimi-k2:free" # The actual model name.
-#         alias: "kimi-k2" # The alias used in the API.
+#         alias: "kimi-k2"               # The alias used in the API.
+#         thinking:                      # optional: omit to default to levels ["low","medium","high"]
+#           levels: ["low", "medium", "high"]
 #       # You may repeat the same alias to build an internal model pool.
 #       # The client still sees only one alias in the model list.
 #       # Requests to that alias will round-robin across the upstream names below,
