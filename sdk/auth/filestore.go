@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"io/fs"
 	"net/http"
@@ -21,10 +22,9 @@ import (
 
 // FileTokenStore persists token records and auth metadata using the filesystem as backing storage.
 type FileTokenStore struct {
-	mu      sync.Mutex
 	dirLock sync.RWMutex
 	baseDir string
-	pathMu  map[string]*sync.Mutex
+	pathMu  [64]sync.Mutex
 }
 
 // NewFileTokenStore creates a token store that saves credentials to disk through the
@@ -299,21 +299,17 @@ func (s *FileTokenStore) baseDirSnapshot() string {
 }
 
 func (s *FileTokenStore) lockPath(path string) func() {
-	s.mu.Lock()
-	if s.pathMu == nil {
-		s.pathMu = make(map[string]*sync.Mutex)
-	}
-	lock := s.pathMu[path]
-	if lock == nil {
-		lock = &sync.Mutex{}
-		s.pathMu[path] = lock
-	}
-	s.mu.Unlock()
-
+	lock := &s.pathMu[fileTokenStorePathLockIndex(path)]
 	lock.Lock()
 	return func() {
 		lock.Unlock()
 	}
+}
+
+func fileTokenStorePathLockIndex(path string) uint32 {
+	hasher := fnv.New32a()
+	_, _ = hasher.Write([]byte(path))
+	return hasher.Sum32() % 64
 }
 
 func extractAccessToken(metadata map[string]any) string {

@@ -1040,7 +1040,7 @@ func TestCodexExecutorExecuteStreamTTFTHighConcurrency_LongConversationPreviousR
 						errCh <- fmt.Errorf("stream chunk error = %w", chunk.Err)
 						break
 					}
-					if bytes.Contains(chunk.Payload, []byte(`"type":"response.output_text.delta"`)) {
+					if !seenDelta && bytes.Contains(chunk.Payload, []byte(`"type":"response.output_text.delta"`)) {
 						elapsed := time.Since(started)
 						if elapsed <= 0 {
 							elapsed = time.Nanosecond

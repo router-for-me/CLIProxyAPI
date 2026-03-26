@@ -2799,9 +2799,26 @@ func (m *Manager) collectRefreshTargets(now time.Time) []string {
 		return nil
 	}
 	m.mu.RLock()
-	defer m.mu.RUnlock()
-	targets := make([]string, 0, len(m.auths))
+	candidates := make([]*Auth, 0, len(m.auths))
 	for _, auth := range m.auths {
+		if auth == nil {
+			continue
+		}
+		if m.executors[auth.Provider] == nil {
+			continue
+		}
+		if auth.Disabled {
+			continue
+		}
+		if !auth.NextRefreshAfter.IsZero() && now.Before(auth.NextRefreshAfter) {
+			continue
+		}
+		candidates = append(candidates, auth.Clone())
+	}
+	m.mu.RUnlock()
+
+	targets := make([]string, 0, len(candidates))
+	for _, auth := range candidates {
 		if auth == nil {
 			continue
 		}
@@ -2810,9 +2827,6 @@ func (m *Manager) collectRefreshTargets(now time.Time) []string {
 			continue
 		}
 		log.Debugf("checking refresh for %s, %s, %s", auth.Provider, auth.ID, typ)
-		if m.executors[auth.Provider] == nil {
-			continue
-		}
 		targets = append(targets, auth.ID)
 	}
 	return targets

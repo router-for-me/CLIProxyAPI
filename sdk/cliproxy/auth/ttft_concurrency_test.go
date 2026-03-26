@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -144,8 +145,9 @@ func setupTTFTConcurrencyManager(t *testing.T, totalAuths int, executor Provider
 
 	reg := registry.GetGlobalRegistry()
 	model := "ttft-bench-model"
+	authPrefix := sanitizeTTFTAuthPrefix(t.Name())
 	for index := 0; index < totalAuths; index++ {
-		authID := fmt.Sprintf("ttft-gemini-%04d", index)
+		authID := fmt.Sprintf("%s-%04d", authPrefix, index)
 		auth := &Auth{ID: authID, Provider: "gemini"}
 		if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
 			t.Fatalf("Register(%s) error = %v", authID, errRegister)
@@ -156,7 +158,7 @@ func setupTTFTConcurrencyManager(t *testing.T, totalAuths int, executor Provider
 
 	t.Cleanup(func() {
 		for index := 0; index < totalAuths; index++ {
-			reg.UnregisterClient(fmt.Sprintf("ttft-gemini-%04d", index))
+			reg.UnregisterClient(fmt.Sprintf("%s-%04d", authPrefix, index))
 		}
 	})
 
@@ -190,4 +192,13 @@ func percentileDurationAt(sorted []time.Duration, fraction float64) time.Duratio
 	}
 	index := int(float64(len(sorted)-1) * fraction)
 	return sorted[index]
+}
+
+func sanitizeTTFTAuthPrefix(name string) string {
+	replacer := strings.NewReplacer("/", "-", "\\", "-", " ", "-", ":", "-", "(", "-", ")", "-")
+	sanitized := replacer.Replace(strings.TrimSpace(name))
+	if sanitized == "" {
+		return "ttft-gemini"
+	}
+	return "ttft-" + sanitized
 }
