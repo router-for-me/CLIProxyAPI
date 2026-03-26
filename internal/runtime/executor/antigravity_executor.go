@@ -75,8 +75,11 @@ func NewAntigravityExecutor(cfg *config.Config) *AntigravityExecutor {
 // It is initialized once via antigravityTransportOnce to avoid leaking a new connection pool
 // (and the goroutines managing it) on every request.
 var (
-	antigravityTransport     *http.Transport
-	antigravityTransportOnce sync.Once
+	antigravityTransport                 *http.Transport
+	antigravityTransportOnce             sync.Once
+	antigravityEnvironmentProxyTransport = sync.OnceValue(func() *http.Transport {
+		return cloneTransportWithHTTP11(newEnvironmentProxyTransport())
+	})
 )
 
 func cloneTransportWithHTTP11(base *http.Transport) *http.Transport {
@@ -122,6 +125,10 @@ func newAntigravityHTTPClient(ctx context.Context, cfg *config.Config, auth *cli
 
 	// Preserve proxy settings from proxy-aware transports while forcing HTTP/1.1.
 	if transport, ok := client.Transport.(*http.Transport); ok {
+		if transport == newEnvironmentProxyTransport() {
+			client.Transport = antigravityEnvironmentProxyTransport()
+			return client
+		}
 		client.Transport = cloneTransportWithHTTP11(transport)
 	}
 	return client
