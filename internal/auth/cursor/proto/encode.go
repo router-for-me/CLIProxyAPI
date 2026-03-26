@@ -10,6 +10,7 @@ import (
 	"fmt"
 
 	log "github.com/sirupsen/logrus"
+	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/dynamicpb"
@@ -29,6 +30,7 @@ type RunRequestParams struct {
 	Turns          []TurnData
 	McpTools       []McpToolDef
 	BlobStore      map[string][]byte // hex(sha256) -> data, populated during encoding
+	RawCheckpoint  []byte            // if non-nil, use as conversation_state directly (from server checkpoint)
 }
 
 type ImageData struct {
@@ -102,7 +104,13 @@ func EncodeHeartbeat() []byte {
 
 // EncodeRunRequest builds a full AgentClientMessage wrapping an AgentRunRequest.
 // Mirrors buildCursorRequest() in cursor-fetch.ts.
+// If p.RawCheckpoint is set, it is used directly as the conversation_state bytes
+// (from a previous conversation_checkpoint_update), skipping manual turn construction.
 func EncodeRunRequest(p *RunRequestParams) []byte {
+	if p.RawCheckpoint != nil {
+		return encodeRunRequestWithCheckpoint(p)
+	}
+
 	if p.BlobStore == nil {
 		p.BlobStore = make(map[string][]byte)
 	}
@@ -153,11 +161,18 @@ func EncodeRunRequest(p *RunRequestParams) []byte {
 	rootField := field(css, "root_prompt_messages_json")
 	rootList := css.Mutable(rootField).List()
 	rootList.Append(protoreflect.ValueOfBytes(blobId))
-	// turns: repeated bytes
+	// turns: repeated bytes (field 8) + turns_old (field 2) for compatibility
 	turnsField := field(css, "turns")
 	turnsList := css.Mutable(turnsField).List()
 	for _, tb := range turnBytes {
 		turnsList.Append(protoreflect.ValueOfBytes(tb))
+	}
+	turnsOldField := field(css, "turns_old")
+	if turnsOldField != nil {
+		turnsOldList := css.Mutable(turnsOldField).List()
+		for _, tb := range turnBytes {
+			turnsOldList.Append(protoreflect.ValueOfBytes(tb))
+		}
 	}
 
 	// --- UserMessage (current) ---
@@ -224,6 +239,164 @@ func EncodeRunRequest(p *RunRequestParams) []byte {
 	acm := newMsg("AgentClientMessage")
 	setMsg(acm, "run_request", arr)
 
+	return marshal(acm)
+}
+
+// encodeRunRequestWithCheckpoint builds an AgentClientMessage using a raw checkpoint
+// as conversation_state. The checkpoint bytes are embedded directly without deserialization.
+func encodeRunRequestWithCheckpoint(p *RunRequestParams) []byte {
+	// Build UserMessage
+	userMessage := newMsg("UserMessage")
+	setStr(userMessage, "text", p.UserText)
+	setStr(userMessage, "message_id", p.MessageId)
+	if len(p.Images) > 0 {
+		sc := newMsg("SelectedContext")
+		imgsField := field(sc, "selected_images")
+		imgsList := sc.Mutable(imgsField).List()
+		for _, img := range p.Images {
+			si := newMsg("SelectedImage")
+			setStr(si, "uuid", generateId())
+			setStr(si, "mime_type", img.MimeType)
+			setBytes(si, "data", img.Data)
+			imgsList.Append(protoreflect.ValueOfMessage(si.ProtoReflect()))
+		}
+		setMsg(userMessage, "selected_context", sc)
+	}
+
+	// Build ConversationAction with UserMessageAction
+	uma := newMsg("UserMessageAction")
+	setMsg(uma, "user_message", userMessage)
+	ca := newMsg("ConversationAction")
+	setMsg(ca, "user_message_action", uma)
+	caBytes := marshal(ca)
+
+	// Build ModelDetails
+	md := newMsg("ModelDetails")
+	setStr(md, "model_id", p.ModelId)
+	setStr(md, "display_model_id", p.ModelId)
+	setStr(md, "display_name", p.ModelId)
+	mdBytes := marshal(md)
+
+	// Build McpTools
+	var mcpToolsBytes []byte
+	if len(p.McpTools) > 0 {
+		mcpTools := newMsg("McpTools")
+		toolsField := field(mcpTools, "mcp_tools")
+		toolsList := mcpTools.Mutable(toolsField).List()
+		for _, tool := range p.McpTools {
+			td := newMsg("McpToolDefinition")
+			setStr(td, "name", tool.Name)
+			setStr(td, "description", tool.Description)
+			if len(tool.InputSchema) > 0 {
+				setBytes(td, "input_schema", jsonToProtobufValueBytes(tool.InputSchema))
+			}
+			setStr(td, "provider_identifier", "proxy")
+			setStr(td, "tool_name", tool.Name)
+			toolsList.Append(protoreflect.ValueOfMessage(td.ProtoReflect()))
+		}
+		mcpToolsBytes = marshal(mcpTools)
+	}
+
+	// Manually assemble AgentRunRequest using protowire to embed raw checkpoint
+	var arrBuf []byte
+	// field 1: conversation_state = raw checkpoint bytes (length-delimited)
+	arrBuf = protowire.AppendTag(arrBuf, ARR_ConversationState, protowire.BytesType)
+	arrBuf = protowire.AppendBytes(arrBuf, p.RawCheckpoint)
+	// field 2: action = ConversationAction
+	arrBuf = protowire.AppendTag(arrBuf, ARR_Action, protowire.BytesType)
+	arrBuf = protowire.AppendBytes(arrBuf, caBytes)
+	// field 3: model_details = ModelDetails
+	arrBuf = protowire.AppendTag(arrBuf, ARR_ModelDetails, protowire.BytesType)
+	arrBuf = protowire.AppendBytes(arrBuf, mdBytes)
+	// field 4: mcp_tools = McpTools
+	if len(mcpToolsBytes) > 0 {
+		arrBuf = protowire.AppendTag(arrBuf, ARR_McpTools, protowire.BytesType)
+		arrBuf = protowire.AppendBytes(arrBuf, mcpToolsBytes)
+	}
+	// field 5: conversation_id = string
+	if p.ConversationId != "" {
+		arrBuf = protowire.AppendTag(arrBuf, ARR_ConversationId, protowire.BytesType)
+		arrBuf = protowire.AppendString(arrBuf, p.ConversationId)
+	}
+
+	// Wrap in AgentClientMessage field 1 (run_request)
+	var acmBuf []byte
+	acmBuf = protowire.AppendTag(acmBuf, ACM_RunRequest, protowire.BytesType)
+	acmBuf = protowire.AppendBytes(acmBuf, arrBuf)
+
+	log.Debugf("cursor encode: built RunRequest with checkpoint (%d bytes), total=%d bytes", len(p.RawCheckpoint), len(acmBuf))
+	return acmBuf
+}
+
+// ResumeRequestParams holds data for a ResumeAction request.
+type ResumeRequestParams struct {
+	ModelId        string
+	ConversationId string
+	McpTools       []McpToolDef
+}
+
+// EncodeResumeRequest builds an AgentClientMessage with ResumeAction.
+// Used to resume a conversation by conversation_id without re-sending full history.
+func EncodeResumeRequest(p *ResumeRequestParams) []byte {
+	// RequestContext with tools
+	rc := newMsg("RequestContext")
+	if len(p.McpTools) > 0 {
+		toolsField := field(rc, "tools")
+		toolsList := rc.Mutable(toolsField).List()
+		for _, tool := range p.McpTools {
+			td := newMsg("McpToolDefinition")
+			setStr(td, "name", tool.Name)
+			setStr(td, "description", tool.Description)
+			if len(tool.InputSchema) > 0 {
+				setBytes(td, "input_schema", jsonToProtobufValueBytes(tool.InputSchema))
+			}
+			setStr(td, "provider_identifier", "proxy")
+			setStr(td, "tool_name", tool.Name)
+			toolsList.Append(protoreflect.ValueOfMessage(td.ProtoReflect()))
+		}
+	}
+
+	// ResumeAction
+	ra := newMsg("ResumeAction")
+	setMsg(ra, "request_context", rc)
+
+	// ConversationAction with resume_action
+	ca := newMsg("ConversationAction")
+	setMsg(ca, "resume_action", ra)
+
+	// ModelDetails
+	md := newMsg("ModelDetails")
+	setStr(md, "model_id", p.ModelId)
+	setStr(md, "display_model_id", p.ModelId)
+	setStr(md, "display_name", p.ModelId)
+
+	// AgentRunRequest — no conversation_state needed for resume
+	arr := newMsg("AgentRunRequest")
+	setMsg(arr, "action", ca)
+	setMsg(arr, "model_details", md)
+	setStr(arr, "conversation_id", p.ConversationId)
+
+	// McpTools at top level
+	if len(p.McpTools) > 0 {
+		mcpTools := newMsg("McpTools")
+		toolsField := field(mcpTools, "mcp_tools")
+		toolsList := mcpTools.Mutable(toolsField).List()
+		for _, tool := range p.McpTools {
+			td := newMsg("McpToolDefinition")
+			setStr(td, "name", tool.Name)
+			setStr(td, "description", tool.Description)
+			if len(tool.InputSchema) > 0 {
+				setBytes(td, "input_schema", jsonToProtobufValueBytes(tool.InputSchema))
+			}
+			setStr(td, "provider_identifier", "proxy")
+			setStr(td, "tool_name", tool.Name)
+			toolsList.Append(protoreflect.ValueOfMessage(td.ProtoReflect()))
+		}
+		setMsg(arr, "mcp_tools", mcpTools)
+	}
+
+	acm := newMsg("AgentClientMessage")
+	setMsg(acm, "run_request", arr)
 	return marshal(acm)
 }
 

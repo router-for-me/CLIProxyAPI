@@ -35,6 +35,7 @@ const (
 	ServerMsgTurnEnded                           // Turn has ended (no more output)
 	ServerMsgHeartbeat                           // Server heartbeat
 	ServerMsgTokenDelta                          // Token usage delta
+	ServerMsgCheckpoint                          // Conversation checkpoint update
 )
 
 // DecodedServerMessage holds parsed data from an AgentServerMessage.
@@ -69,6 +70,9 @@ type DecodedServerMessage struct {
 
 	// For TokenDeltaUpdate
 	TokenDelta int64
+
+	// For conversation checkpoint update (raw bytes, not decoded)
+	CheckpointData []byte
 }
 
 // DecodeAgentServerMessage parses an AgentServerMessage and returns
@@ -104,8 +108,9 @@ func DecodeAgentServerMessage(data []byte) (*DecodedServerMessage, error) {
 			case ASM_KvServerMessage:
 				decodeKvServerMessage(val, msg)
 			case ASM_ConversationCheckpoint:
-				// Ignore checkpoint updates
-				log.Debugf("DecodeAgentServerMessage: ignoring ConversationCheckpoint")
+				msg.Type = ServerMsgCheckpoint
+				msg.CheckpointData = append([]byte(nil), val...) // copy raw bytes
+				log.Debugf("DecodeAgentServerMessage: captured checkpoint %d bytes", len(val))
 			}
 
 		case protowire.VarintType:
