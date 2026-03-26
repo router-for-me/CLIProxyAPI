@@ -57,6 +57,34 @@ func TestEnforceLogDirSizeLimitSkipsProtected(t *testing.T) {
 	}
 }
 
+func TestEnforceLogDirSizeLimitIgnoresUsageStatisticsFile(t *testing.T) {
+	dir := t.TempDir()
+
+	writeLogFile(t, filepath.Join(dir, "old.log"), 70, time.Unix(1, 0))
+	writeLogFile(t, filepath.Join(dir, "new.log"), 70, time.Unix(2, 0))
+	statsPath := filepath.Join(dir, "usage-statistics.json")
+	if err := os.WriteFile(statsPath, []byte(`{"version":1}`), 0o644); err != nil {
+		t.Fatalf("write stats file: %v", err)
+	}
+
+	deleted, err := enforceLogDirSizeLimit(dir, 70, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if deleted != 1 {
+		t.Fatalf("expected 1 deleted file, got %d", deleted)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "old.log")); !os.IsNotExist(err) {
+		t.Fatalf("expected old.log to be removed, stat error: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "new.log")); err != nil {
+		t.Fatalf("expected new.log to remain, stat error: %v", err)
+	}
+	if _, err := os.Stat(statsPath); err != nil {
+		t.Fatalf("expected usage-statistics.json to remain, stat error: %v", err)
+	}
+}
+
 func writeLogFile(t *testing.T, path string, size int, modTime time.Time) {
 	t.Helper()
 

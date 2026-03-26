@@ -48,3 +48,39 @@ func TestPutMaxInvalidRequestRetries_ClampsNegativeValue(t *testing.T) {
 		t.Fatalf("persisted config did not clamp value, got:\n%s", string(data))
 	}
 }
+
+func TestPutUsageStatisticsPersistIntervalSeconds_ClampsNegativeValue(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(configPath, []byte("usage-statistics-persist-interval-seconds: 30\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg := &config.Config{UsageStatisticsPersistIntervalSeconds: 30}
+	h := NewHandler(cfg, configPath, nil)
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	req := httptest.NewRequest(http.MethodPut, "/v0/management/config/usage-statistics-persist-interval-seconds", bytes.NewBufferString(`{"value":-9}`))
+	req.Header.Set("Content-Type", "application/json")
+	ctx.Request = req
+
+	h.PutUsageStatisticsPersistIntervalSeconds(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if cfg.UsageStatisticsPersistIntervalSeconds != 0 {
+		t.Fatalf("cfg.UsageStatisticsPersistIntervalSeconds = %d, want 0", cfg.UsageStatisticsPersistIntervalSeconds)
+	}
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if !strings.Contains(string(data), "usage-statistics-persist-interval-seconds: 0") {
+		t.Fatalf("persisted config did not clamp value, got:\n%s", string(data))
+	}
+}

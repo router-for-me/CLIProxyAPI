@@ -16,13 +16,13 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
-	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
+	internalusage "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/wsrelay"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
+	sdkusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
@@ -76,6 +76,15 @@ type Service struct {
 
 	// authQueueStop cancels the auth update queue processing.
 	authQueueStop context.CancelFunc
+
+	// usagePersistenceMu protects the periodic persistence loop lifecycle.
+	usagePersistenceMu sync.Mutex
+
+	// usagePersistenceCancel stops the periodic usage persistence loop.
+	usagePersistenceCancel context.CancelFunc
+
+	// usagePersistenceDone is closed when the periodic usage persistence loop exits.
+	usagePersistenceDone chan struct{}
 
 	// authManager handles legacy authentication operations.
 	authManager *sdkAuth.Manager
@@ -169,8 +178,8 @@ func (h authMaintenanceHook) OnResult(ctx context.Context, result coreauth.Resul
 //
 // Parameters:
 //   - plugin: The usage plugin to register
-func (s *Service) RegisterUsagePlugin(plugin usage.Plugin) {
-	usage.RegisterPlugin(plugin)
+func (s *Service) RegisterUsagePlugin(plugin sdkusage.Plugin) {
+	sdkusage.RegisterPlugin(plugin)
 }
 
 // newDefaultAuthManager creates a default authentication manager with all supported providers.
@@ -182,6 +191,151 @@ func newDefaultAuthManager() *sdkAuth.Manager {
 		sdkAuth.NewClaudeAuthenticator(),
 		sdkAuth.NewQwenAuthenticator(),
 	)
+}
+
+const usagePersistenceDisabledPollInterval = 5 * time.Second
+
+func (s *Service) currentConfig() *config.Config {
+	if s == nil {
+		return nil
+	}
+	s.cfgMu.RLock()
+	defer s.cfgMu.RUnlock()
+	return s.cfg
+}
+
+func (s *Service) usageStatisticsEnabled() bool {
+	cfg := s.currentConfig()
+	return cfg != nil && cfg.UsageStatisticsEnabled
+}
+
+func (s *Service) usagePersistenceInterval() time.Duration {
+	cfg := s.currentConfig()
+	if cfg == nil || cfg.UsageStatisticsPersistIntervalSeconds <= 0 {
+		return 0
+	}
+	return time.Duration(cfg.UsageStatisticsPersistIntervalSeconds) * time.Second
+}
+
+func (s *Service) usageStatisticsFilePath() string {
+	cfg := s.currentConfig()
+	if cfg == nil {
+		return ""
+	}
+	return internalusage.StatisticsFilePath(cfg)
+}
+
+func (s *Service) restoreUsageStatistics() {
+	if s == nil || !s.usageStatisticsEnabled() {
+		return
+	}
+	path := s.usageStatisticsFilePath()
+	if strings.TrimSpace(path) == "" {
+		return
+	}
+	loaded, result, err := internalusage.RestoreRequestStatistics(path, internalusage.GetRequestStatistics())
+	if err != nil {
+		log.WithError(err).Warnf("failed to restore usage statistics from %s", path)
+		return
+	}
+	if loaded {
+		log.Infof("usage statistics restored from %s (added=%d skipped=%d)", path, result.Added, result.Skipped)
+	}
+}
+
+func (s *Service) persistUsageStatistics(reason string) {
+	if s == nil || !s.usageStatisticsEnabled() {
+		return
+	}
+	path := s.usageStatisticsFilePath()
+	if strings.TrimSpace(path) == "" {
+		return
+	}
+	saved, err := internalusage.PersistRequestStatistics(path, internalusage.GetRequestStatistics())
+	if err != nil {
+		log.WithError(err).Warnf("failed to persist usage statistics during %s", reason)
+		return
+	}
+	if !saved {
+		return
+	}
+	switch reason {
+	case "shutdown":
+		log.Infof("usage statistics persisted to %s during shutdown", path)
+	default:
+		log.Debugf("usage statistics persisted to %s (%s)", path, reason)
+	}
+}
+
+func (s *Service) nextUsagePersistenceWait() time.Duration {
+	if !s.usageStatisticsEnabled() {
+		return usagePersistenceDisabledPollInterval
+	}
+	interval := s.usagePersistenceInterval()
+	if interval <= 0 {
+		return usagePersistenceDisabledPollInterval
+	}
+	return interval
+}
+
+func (s *Service) startUsagePersistenceLoop() {
+	if s == nil {
+		return
+	}
+
+	s.usagePersistenceMu.Lock()
+	defer s.usagePersistenceMu.Unlock()
+	if s.usagePersistenceCancel != nil {
+		return
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	s.usagePersistenceCancel = cancel
+	s.usagePersistenceDone = done
+
+	go func() {
+		defer close(done)
+		for {
+			wait := s.nextUsagePersistenceWait()
+			timer := time.NewTimer(wait)
+			select {
+			case <-ctx.Done():
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				return
+			case <-timer.C:
+			}
+
+			if s.usageStatisticsEnabled() && s.usagePersistenceInterval() > 0 {
+				s.persistUsageStatistics("periodic")
+			}
+		}
+	}()
+}
+
+func (s *Service) stopUsagePersistenceLoop() {
+	if s == nil {
+		return
+	}
+
+	s.usagePersistenceMu.Lock()
+	cancel := s.usagePersistenceCancel
+	done := s.usagePersistenceDone
+	s.usagePersistenceCancel = nil
+	s.usagePersistenceDone = nil
+	s.usagePersistenceMu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+	if done != nil {
+		<-done
+	}
 }
 
 func (s *Service) ensureAuthUpdateQueue(ctx context.Context) {
@@ -1448,7 +1602,7 @@ func (s *Service) Run(ctx context.Context) error {
 		ctx = context.Background()
 	}
 
-	usage.StartDefault(ctx)
+	sdkusage.StartDefault(ctx)
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer shutdownCancel()
@@ -1461,6 +1615,7 @@ func (s *Service) Run(ctx context.Context) error {
 	if err := s.ensureAuthDir(); err != nil {
 		return err
 	}
+	s.restoreUsageStatistics()
 
 	s.applyRetryConfig(s.cfg)
 
@@ -1579,9 +1734,11 @@ func (s *Service) Run(ctx context.Context) error {
 	var watcherWrapper *WatcherWrapper
 	reloadCallback := func(newCfg *config.Config) {
 		previousStrategy := ""
+		previousUsageEnabled := false
 		s.cfgMu.RLock()
 		if s.cfg != nil {
 			previousStrategy = strings.ToLower(strings.TrimSpace(s.cfg.Routing.Strategy))
+			previousUsageEnabled = s.cfg.UsageStatisticsEnabled
 		}
 		s.cfgMu.RUnlock()
 
@@ -1628,6 +1785,9 @@ func (s *Service) Run(ctx context.Context) error {
 			s.coreManager.SetConfig(newCfg)
 			s.coreManager.SetOAuthModelAlias(newCfg.OAuthModelAlias)
 		}
+		if !previousUsageEnabled && newCfg.UsageStatisticsEnabled {
+			s.restoreUsageStatistics()
+		}
 		s.rebindExecutors()
 	}
 
@@ -1656,6 +1816,7 @@ func (s *Service) Run(ctx context.Context) error {
 		log.Infof("core auth auto-refresh started (interval=%s)", interval)
 	}
 	s.startAuthMaintenance(context.Background())
+	s.startUsagePersistenceLoop()
 
 	select {
 	case <-ctx.Done():
@@ -1696,6 +1857,7 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		if s.maintenanceCancel != nil {
 			s.maintenanceCancel()
 		}
+		s.stopUsagePersistenceLoop()
 		if s.watcher != nil {
 			if err := s.watcher.Stop(); err != nil {
 				log.Errorf("failed to stop file watcher: %v", err)
@@ -1735,7 +1897,8 @@ func (s *Service) Shutdown(ctx context.Context) error {
 			}
 		}
 
-		usage.StopDefault()
+		s.persistUsageStatistics("shutdown")
+		sdkusage.StopDefault()
 	})
 	return shutdownErr
 }

@@ -216,21 +216,22 @@ func TestBuildConfigChangeDetails_SecretsAndCounts(t *testing.T) {
 
 func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 	oldCfg := &config.Config{
-		Port:                   1000,
-		AuthDir:                "/old",
-		Debug:                  false,
-		LoggingToFile:          false,
-		UsageStatisticsEnabled: false,
-		DisableCooling:         false,
-		RequestRetry:           1,
-		MaxRetryCredentials:    1,
-		MaxRetryInterval:       1,
-		WebsocketAuth:          false,
-		QuotaExceeded:          config.QuotaExceeded{SwitchProject: false, SwitchPreviewModel: false},
-		ClaudeKey:              []config.ClaudeKey{{APIKey: "c1"}},
-		CodexKey:               []config.CodexKey{{APIKey: "x1"}},
-		AmpCode:                config.AmpCode{UpstreamAPIKey: "keep", RestrictManagementToLocalhost: false},
-		RemoteManagement:       config.RemoteManagement{DisableControlPanel: false, PanelGitHubRepository: "old/repo", SecretKey: "keep"},
+		Port:                                  1000,
+		AuthDir:                               "/old",
+		Debug:                                 false,
+		LoggingToFile:                         false,
+		UsageStatisticsEnabled:                false,
+		UsageStatisticsPersistIntervalSeconds: 30,
+		DisableCooling:                        false,
+		RequestRetry:                          1,
+		MaxRetryCredentials:                   1,
+		MaxRetryInterval:                      1,
+		WebsocketAuth:                         false,
+		QuotaExceeded:                         config.QuotaExceeded{SwitchProject: false, SwitchPreviewModel: false},
+		ClaudeKey:                             []config.ClaudeKey{{APIKey: "c1"}},
+		CodexKey:                              []config.CodexKey{{APIKey: "x1"}},
+		AmpCode:                               config.AmpCode{UpstreamAPIKey: "keep", RestrictManagementToLocalhost: false},
+		RemoteManagement:                      config.RemoteManagement{DisableControlPanel: false, PanelGitHubRepository: "old/repo", SecretKey: "keep"},
 		SDKConfig: sdkconfig.SDKConfig{
 			RequestLog:                 false,
 			ProxyURL:                   "http://old-proxy",
@@ -240,17 +241,18 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 		},
 	}
 	newCfg := &config.Config{
-		Port:                   2000,
-		AuthDir:                "/new",
-		Debug:                  true,
-		LoggingToFile:          true,
-		UsageStatisticsEnabled: true,
-		DisableCooling:         true,
-		RequestRetry:           2,
-		MaxRetryCredentials:    3,
-		MaxRetryInterval:       3,
-		WebsocketAuth:          true,
-		QuotaExceeded:          config.QuotaExceeded{SwitchProject: true, SwitchPreviewModel: true},
+		Port:                                  2000,
+		AuthDir:                               "/new",
+		Debug:                                 true,
+		LoggingToFile:                         true,
+		UsageStatisticsEnabled:                true,
+		UsageStatisticsPersistIntervalSeconds: 10,
+		DisableCooling:                        true,
+		RequestRetry:                          2,
+		MaxRetryCredentials:                   3,
+		MaxRetryInterval:                      3,
+		WebsocketAuth:                         true,
+		QuotaExceeded:                         config.QuotaExceeded{SwitchProject: true, SwitchPreviewModel: true},
 		ClaudeKey: []config.ClaudeKey{
 			{APIKey: "c1", BaseURL: "http://new", ProxyURL: "http://p", Headers: map[string]string{"H": "1"}, ExcludedModels: []string{"a"}},
 			{APIKey: "c2"},
@@ -282,6 +284,7 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 	expectContains(t, details, "debug: false -> true")
 	expectContains(t, details, "logging-to-file: false -> true")
 	expectContains(t, details, "usage-statistics-enabled: false -> true")
+	expectContains(t, details, "usage-statistics-persist-interval-seconds: 30 -> 10")
 	expectContains(t, details, "disable-cooling: false -> true")
 	expectContains(t, details, "request-log: false -> true")
 	expectContains(t, details, "request-retry: 1 -> 2")

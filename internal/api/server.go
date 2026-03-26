@@ -514,6 +514,10 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PUT("/usage-statistics-enabled", s.mgmt.PutUsageStatisticsEnabled)
 		mgmt.PATCH("/usage-statistics-enabled", s.mgmt.PutUsageStatisticsEnabled)
 
+		mgmt.GET("/usage-statistics-persist-interval-seconds", s.mgmt.GetUsageStatisticsPersistIntervalSeconds)
+		mgmt.PUT("/usage-statistics-persist-interval-seconds", s.mgmt.PutUsageStatisticsPersistIntervalSeconds)
+		mgmt.PATCH("/usage-statistics-persist-interval-seconds", s.mgmt.PutUsageStatisticsPersistIntervalSeconds)
+
 		mgmt.GET("/proxy-url", s.mgmt.GetProxyURL)
 		mgmt.PUT("/proxy-url", s.mgmt.PutProxyURL)
 		mgmt.PATCH("/proxy-url", s.mgmt.PutProxyURL)
