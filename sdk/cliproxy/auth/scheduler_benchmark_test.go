@@ -40,10 +40,10 @@ func benchmarkManagerSetup(b *testing.B, total int, mixed bool, withPriority boo
 	b.Helper()
 	manager := NewManager(nil, &RoundRobinSelector{}, nil)
 	providers := []string{"gemini"}
-	manager.executors["gemini"] = schedulerBenchmarkExecutor{id: "gemini"}
+	manager.RegisterExecutor(schedulerBenchmarkExecutor{id: "gemini"})
 	if mixed {
 		providers = []string{"gemini", "claude"}
-		manager.executors["claude"] = schedulerBenchmarkExecutor{id: "claude"}
+		manager.RegisterExecutor(schedulerBenchmarkExecutor{id: "claude"})
 	}
 
 	reg := registry.GetGlobalRegistry()

@@ -958,6 +958,9 @@ func TestCodexExecutorExecute_LocalServer_SustainsOver6KRPM_MixedLongRequests(t 
 }
 
 func TestCodexExecutorExecuteStreamTTFTHighConcurrency_LongConversationPreviousResponseID(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping high-concurrency stream ttft coverage in short mode")
+	}
 	const (
 		totalRequests = 1024
 		concurrency   = 256

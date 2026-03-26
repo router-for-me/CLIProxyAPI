@@ -61,6 +61,14 @@ func TestCodexExecutorExtreme_2000Sessions_6KRPM_200MTPM(t *testing.T) {
 		requestInterval = time.Microsecond
 	}
 
+	requests := make([]cliproxyexecutor.Request, sessionCount)
+	markers := make([]string, sessionCount)
+	for i := 0; i < sessionCount; i++ {
+		marker := fmt.Sprintf("session-%04d", i)
+		markers[i] = marker
+		requests[i] = newExtremeCodexResponsesRequest(marker, approxTokensPerRequest)
+	}
+
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		if gotRole := gjson.GetBytes(body, "input.0.role").String(); gotRole != "developer" {
@@ -136,8 +144,8 @@ func TestCodexExecutorExtreme_2000Sessions_6KRPM_200MTPM(t *testing.T) {
 		<-ticker.C
 
 		sessionID := i % sessionCount
-		marker := fmt.Sprintf("session-%04d", sessionID)
-		req := newExtremeCodexResponsesRequest(marker, approxTokensPerRequest)
+		marker := markers[sessionID]
+		req := requests[sessionID]
 		wg.Add(1)
 		go func(marker string, req cliproxyexecutor.Request) {
 			defer wg.Done()

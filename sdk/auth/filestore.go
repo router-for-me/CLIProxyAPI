@@ -166,6 +166,8 @@ func (s *FileTokenStore) Delete(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
+	unlock := s.lockPath(path)
+	defer unlock()
 	if err = os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("auth filestore: delete failed: %w", err)
 	}

@@ -3,6 +3,7 @@ package auth
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -51,7 +52,7 @@ func (e ttftBenchmarkStreamExecutor) HttpRequest(context.Context, *Auth, *http.R
 
 func BenchmarkManagerExecuteStreamTTFT5000(b *testing.B) {
 	manager, _, model := benchmarkManagerSetup(b, 5000, false, false)
-	manager.executors["gemini"] = ttftBenchmarkStreamExecutor{id: "gemini"}
+	manager.RegisterExecutor(ttftBenchmarkStreamExecutor{id: "gemini"})
 
 	ctx := context.Background()
 	req := cliproxyexecutor.Request{Model: model}
@@ -96,11 +97,11 @@ func BenchmarkManagerExecuteStreamTTFT5000(b *testing.B) {
 
 func BenchmarkManagerExecuteStreamTTFT5000_LongConversationPreviousResponseID(b *testing.B) {
 	manager, _, model := benchmarkManagerSetup(b, 5000, false, false)
-	manager.executors["gemini"] = ttftBenchmarkStreamExecutor{
+	manager.RegisterExecutor(ttftBenchmarkStreamExecutor{
 		id:              "gemini",
 		expectedNeedle:  []byte(`"previous_response_id":"resp-long-context-bench"`),
 		minPayloadBytes: 64 << 10,
-	}
+	})
 
 	ctx := context.Background()
 	req := newTTFTLongConversationRequest(model, "resp-long-context-bench")
@@ -146,7 +147,15 @@ func BenchmarkManagerExecuteStreamTTFT5000_LongConversationPreviousResponseID(b 
 func newTTFTLongConversationRequest(model, previousResponseID string) cliproxyexecutor.Request {
 	longText := "marker=ttft-long-conversation\n" + strings.Repeat("long conversation segment;", 4096)
 	return cliproxyexecutor.Request{
-		Model:   model,
-		Payload: []byte(`{"model":"` + model + `","previous_response_id":"` + previousResponseID + `","input":[{"type":"message","role":"developer","content":[{"type":"input_text","text":"keep continuity"}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"` + longText + `"}]}],"stream":true}`),
+		Model: model,
+		Payload: []byte(fmt.Sprintf(`{
+			"model":%q,
+			"previous_response_id":%q,
+			"input":[
+				{"type":"message","role":"developer","content":[{"type":"input_text","text":"keep continuity"}]},
+				{"type":"message","role":"user","content":[{"type":"input_text","text":%q}]}
+			],
+			"stream":true
+		}`, model, previousResponseID, longText)),
 	}
 }

@@ -15,6 +15,9 @@ import (
 
 func TestManagerExecuteStreamTTFTHighConcurrency5000Auths(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("skipping high-concurrency ttft coverage in short mode")
+	}
 
 	const (
 		totalAuths    = 5000
@@ -28,6 +31,9 @@ func TestManagerExecuteStreamTTFTHighConcurrency5000Auths(t *testing.T) {
 
 func TestManagerExecuteStreamTTFTHighConcurrency5000Auths_LongConversationPreviousResponseID(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("skipping high-concurrency ttft coverage in short mode")
+	}
 
 	const (
 		totalAuths    = 5000
@@ -134,7 +140,7 @@ func setupTTFTConcurrencyManager(t *testing.T, totalAuths int, executor Provider
 	t.Helper()
 
 	manager := NewManager(nil, &RoundRobinSelector{}, nil)
-	manager.executors["gemini"] = executor
+	manager.RegisterExecutor(executor)
 
 	reg := registry.GetGlobalRegistry()
 	model := "ttft-bench-model"
