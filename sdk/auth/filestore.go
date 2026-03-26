@@ -27,6 +27,11 @@ type FileTokenStore struct {
 	pathMu  [64]sync.Mutex
 }
 
+var (
+	fileTokenStoreHTTPClient       = http.DefaultClient
+	fileTokenStoreFetchProjectIDFn = FetchAntigravityProjectID
+)
+
 // NewFileTokenStore creates a token store that saves credentials to disk through the
 // TokenStorage implementation embedded in the token record.
 func NewFileTokenStore() *FileTokenStore {
@@ -201,6 +206,7 @@ func (s *FileTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth,
 	if provider == "" {
 		provider = "unknown"
 	}
+	s.hydrateProjectID(path, provider, metadata)
 	info, err := os.Stat(path)
 	if err != nil {
 		return nil, fmt.Errorf("stat file: %w", err)
@@ -229,6 +235,54 @@ func (s *FileTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth,
 		auth.Attributes["email"] = email
 	}
 	return auth, nil
+}
+
+func (s *FileTokenStore) hydrateProjectID(path, provider string, metadata map[string]any) {
+	if provider != "antigravity" && provider != "gemini" {
+		return
+	}
+	if metadata == nil {
+		return
+	}
+	if projectID, _ := metadata["project_id"].(string); strings.TrimSpace(projectID) != "" {
+		return
+	}
+
+	accessToken := extractAccessToken(metadata)
+	if provider == "gemini" {
+		if tokenMap, ok := metadata["token"].(map[string]any); ok {
+			if refreshed, errRefresh := refreshGeminiAccessToken(tokenMap, fileTokenStoreHTTPClient); errRefresh == nil {
+				accessToken = refreshed
+			}
+		}
+	}
+	if accessToken == "" {
+		return
+	}
+
+	projectID, err := fileTokenStoreFetchProjectIDFn(context.Background(), accessToken, fileTokenStoreHTTPClient)
+	if err != nil {
+		return
+	}
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		return
+	}
+
+	metadata["project_id"] = projectID
+	raw, errMarshal := json.Marshal(metadata)
+	if errMarshal != nil {
+		return
+	}
+
+	unlock := s.lockPath(path)
+	defer unlock()
+	file, errOpen := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0o600)
+	if errOpen != nil {
+		return
+	}
+	_, _ = file.Write(raw)
+	_ = file.Close()
 }
 
 func (s *FileTokenStore) idFor(path, baseDir string) string {
