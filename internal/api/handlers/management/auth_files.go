@@ -3705,7 +3705,7 @@ func (h *Handler) RequestCursorToken(c *gin.Context) {
 	ctx = PopulateAuthContext(ctx, c)
 
 	label := strings.TrimSpace(c.Query("label"))
-	fmt.Printf("Initializing Cursor authentication (label=%q)...\n", label)
+	log.Infof("Initializing Cursor authentication (label=%q)...", label)
 
 	authParams, err := cursorauth.GenerateAuthParams()
 	if err != nil {
@@ -3718,13 +3718,13 @@ func (h *Handler) RequestCursorToken(c *gin.Context) {
 	RegisterOAuthSession(state, "cursor")
 
 	go func() {
-		fmt.Println("Waiting for Cursor authentication...")
-		fmt.Printf("Open this URL in your browser: %s\n", authParams.LoginURL)
+		log.Info("Waiting for Cursor authentication...")
+		log.Infof("Open this URL in your browser: %s", authParams.LoginURL)
 
 		tokens, errPoll := cursorauth.PollForAuth(ctx, authParams.UUID, authParams.Verifier)
 		if errPoll != nil {
 			SetOAuthSessionError(state, "Authentication failed: "+errPoll.Error())
-			fmt.Printf("Cursor authentication failed: %v\n", errPoll)
+			log.Errorf("Cursor authentication failed: %v", errPoll)
 			return
 		}
 
@@ -3761,7 +3761,7 @@ func (h *Handler) RequestCursorToken(c *gin.Context) {
 			return
 		}
 
-		fmt.Printf("Cursor authentication successful! Token saved to %s\n", savedPath)
+		log.Infof("Cursor authentication successful! Token saved to %s", savedPath)
 		CompleteOAuthSession(state)
 		CompleteOAuthSessionsByProvider("cursor")
 	}()

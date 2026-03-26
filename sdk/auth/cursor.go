@@ -47,8 +47,8 @@ func (a CursorAuthenticator) Login(ctx context.Context, cfg *config.Config, opts
 	}
 
 	// Display the login URL
-	fmt.Println("Starting Cursor authentication...")
-	fmt.Printf("\nPlease visit this URL to log in:\n%s\n\n", authParams.LoginURL)
+	log.Info("Starting Cursor authentication...")
+	log.Infof("Please visit this URL to log in: %s", authParams.LoginURL)
 
 	// Try to open the browser automatically
 	if !opts.NoBrowser {
@@ -59,7 +59,7 @@ func (a CursorAuthenticator) Login(ctx context.Context, cfg *config.Config, opts
 		}
 	}
 
-	fmt.Println("Waiting for Cursor authorization...")
+	log.Info("Waiting for Cursor authorization...")
 
 	// Poll for the auth result
 	tokens, err := cursorauth.PollForAuth(ctx, authParams.UUID, authParams.Verifier)
@@ -69,7 +69,7 @@ func (a CursorAuthenticator) Login(ctx context.Context, cfg *config.Config, opts
 
 	expiresAt := cursorauth.GetTokenExpiry(tokens.AccessToken)
 
-	fmt.Println("\nCursor authentication successful!")
+	log.Info("Cursor authentication successful!")
 
 	metadata := map[string]any{
 		"type":          "cursor",

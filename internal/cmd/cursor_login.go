@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
@@ -29,10 +28,10 @@ func DoCursorLogin(cfg *config.Config, options *LoginOptions) {
 	}
 
 	if savedPath != "" {
-		fmt.Printf("Authentication saved to %s\n", savedPath)
+		log.Infof("Authentication saved to %s", savedPath)
 	}
 	if record != nil && record.Label != "" {
-		fmt.Printf("Authenticated as %s\n", record.Label)
+		log.Infof("Authenticated as %s", record.Label)
 	}
-	fmt.Println("Cursor authentication successful!")
+	log.Info("Cursor authentication successful!")
 }
