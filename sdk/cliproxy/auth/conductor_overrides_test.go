@@ -446,6 +446,46 @@ func TestManager_ExecuteStream_UnauthorizedAuthEviction(t *testing.T) {
 	assertUnauthorizedAuthEvicted(t, manager, store, badAuthID)
 }
 
+func TestManager_ExecuteStream_PinnedUnauthorizedBootstrapReturnsStreamError(t *testing.T) {
+	manager, executor, store, model, badAuthID, _ := newUnauthorizedEvictionTestManager(t)
+
+	streamResult, errExecute := manager.ExecuteStream(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{
+		Metadata: map[string]any{
+			cliproxyexecutor.PinnedAuthMetadataKey: badAuthID,
+		},
+	})
+	if errExecute != nil {
+		t.Fatalf("execute stream error = %v, want nil stream setup error", errExecute)
+	}
+	if streamResult == nil || streamResult.Chunks == nil {
+		t.Fatalf("expected non-nil stream result and chunks")
+	}
+
+	var payload []byte
+	var gotErr error
+	for chunk := range streamResult.Chunks {
+		if chunk.Err != nil {
+			gotErr = chunk.Err
+			continue
+		}
+		payload = append(payload, chunk.Payload...)
+	}
+
+	if len(payload) != 0 {
+		t.Fatalf("execute stream payload = %q, want empty payload", string(payload))
+	}
+	if gotErr == nil {
+		t.Fatalf("expected terminal stream error, got nil")
+	}
+	if statusCodeFromError(gotErr) != http.StatusUnauthorized {
+		t.Fatalf("stream error status = %d, want %d", statusCodeFromError(gotErr), http.StatusUnauthorized)
+	}
+	if gotCalls := executor.StreamCalls(); len(gotCalls) != 1 || gotCalls[0] != badAuthID {
+		t.Fatalf("stream calls = %v, want [%s]", gotCalls, badAuthID)
+	}
+	assertUnauthorizedAuthEvicted(t, manager, store, badAuthID)
+}
+
 func TestManager_ModelSupportBadRequest_FallsBackAndSuspendsAuth(t *testing.T) {
 	m := NewManager(nil, nil, nil)
 	executor := &authFallbackExecutor{
