@@ -1,8 +1,10 @@
 package auth
 
 import (
+	"bytes"
 	"context"
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -10,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	log "github.com/sirupsen/logrus"
 )
 
 func TestManager_ShouldRetryAfterError_RespectsAuthRequestRetryOverride(t *testing.T) {
@@ -113,8 +116,10 @@ type authFallbackExecutor struct {
 
 	mu                sync.Mutex
 	executeCalls      []string
+	countCalls        []string
 	streamCalls       []string
 	executeErrors     map[string]error
+	countErrors       map[string]error
 	streamFirstErrors map[string]error
 }
 
@@ -154,8 +159,15 @@ func (e *authFallbackExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, er
 	return auth, nil
 }
 
-func (e *authFallbackExecutor) CountTokens(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
-	return cliproxyexecutor.Response{}, &Error{HTTPStatus: 500, Message: "not implemented"}
+func (e *authFallbackExecutor) CountTokens(_ context.Context, auth *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	e.mu.Lock()
+	e.countCalls = append(e.countCalls, auth.ID)
+	err := e.countErrors[auth.ID]
+	e.mu.Unlock()
+	if err != nil {
+		return cliproxyexecutor.Response{}, err
+	}
+	return cliproxyexecutor.Response{Payload: []byte(auth.ID)}, nil
 }
 
 func (e *authFallbackExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
@@ -176,6 +188,100 @@ func (e *authFallbackExecutor) StreamCalls() []string {
 	out := make([]string, len(e.streamCalls))
 	copy(out, e.streamCalls)
 	return out
+}
+
+func (e *authFallbackExecutor) CountCalls() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	out := make([]string, len(e.countCalls))
+	copy(out, e.countCalls)
+	return out
+}
+
+type deleteTrackingStore struct {
+	mu         sync.Mutex
+	deletedIDs []string
+}
+
+func (s *deleteTrackingStore) List(context.Context) ([]*Auth, error) { return nil, nil }
+
+func (s *deleteTrackingStore) Save(context.Context, *Auth) (string, error) { return "", nil }
+
+func (s *deleteTrackingStore) Delete(_ context.Context, id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.deletedIDs = append(s.deletedIDs, id)
+	return nil
+}
+
+func (s *deleteTrackingStore) DeletedIDs() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]string, len(s.deletedIDs))
+	copy(out, s.deletedIDs)
+	return out
+}
+
+func newUnauthorizedEvictionTestManager(t *testing.T) (*Manager, *authFallbackExecutor, *deleteTrackingStore, string, string, string) {
+	t.Helper()
+
+	const model = "test-model"
+	const badAuthID = "aa-bad-auth"
+	const goodAuthID = "bb-good-auth"
+
+	store := &deleteTrackingStore{}
+	selector := &SequentialFillSelector{
+		current: map[string]string{
+			"claude:" + model: badAuthID,
+		},
+	}
+	manager := NewManager(store, selector, nil)
+	manager.SetRetryConfig(0, 0, 1)
+
+	executor := &authFallbackExecutor{
+		id: "claude",
+		executeErrors: map[string]error{
+			badAuthID: &Error{HTTPStatus: http.StatusUnauthorized, Message: "unauthorized"},
+		},
+		countErrors: map[string]error{
+			badAuthID: &Error{HTTPStatus: http.StatusUnauthorized, Message: "unauthorized"},
+		},
+		streamFirstErrors: map[string]error{
+			badAuthID: &Error{HTTPStatus: http.StatusUnauthorized, Message: "unauthorized"},
+		},
+	}
+	manager.RegisterExecutor(executor)
+
+	badAuth := &Auth{ID: badAuthID, Provider: "claude", Metadata: map[string]any{"type": "claude"}}
+	goodAuth := &Auth{ID: goodAuthID, Provider: "claude", Metadata: map[string]any{"type": "claude"}}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(badAuth.ID, "claude", []*registry.ModelInfo{{ID: model}})
+	reg.RegisterClient(goodAuth.ID, "claude", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(badAuth.ID)
+		reg.UnregisterClient(goodAuth.ID)
+	})
+
+	if _, errRegister := manager.Register(context.Background(), badAuth); errRegister != nil {
+		t.Fatalf("register bad auth: %v", errRegister)
+	}
+	if _, errRegister := manager.Register(context.Background(), goodAuth); errRegister != nil {
+		t.Fatalf("register good auth: %v", errRegister)
+	}
+
+	return manager, executor, store, model, badAuthID, goodAuthID
+}
+
+func assertUnauthorizedAuthEvicted(t *testing.T, manager *Manager, store *deleteTrackingStore, badAuthID string) {
+	t.Helper()
+	if _, ok := manager.GetByID(badAuthID); ok {
+		t.Fatalf("expected unauthorized auth %q to be evicted", badAuthID)
+	}
+	gotDeleted := store.DeletedIDs()
+	if len(gotDeleted) != 1 || gotDeleted[0] != badAuthID {
+		t.Fatalf("deleted auth IDs = %v, want [%s]", gotDeleted, badAuthID)
+	}
 }
 
 func newCredentialRetryLimitTestManager(t *testing.T, maxRetryCredentials int) (*Manager, *credentialRetryLimitExecutor) {
@@ -259,6 +365,85 @@ func TestManager_MaxRetryCredentials_LimitsCrossCredentialRetries(t *testing.T) 
 			}
 		})
 	}
+}
+
+func TestManager_Execute_UnauthorizedAuthEviction(t *testing.T) {
+	manager, executor, store, model, badAuthID, goodAuthID := newUnauthorizedEvictionTestManager(t)
+
+	var buf bytes.Buffer
+	logger := log.StandardLogger()
+	oldOut := logger.Out
+	oldFormatter := logger.Formatter
+	oldLevel := logger.Level
+	log.SetOutput(&buf)
+	log.SetFormatter(&log.TextFormatter{DisableTimestamp: true, DisableColors: true})
+	log.SetLevel(log.InfoLevel)
+	defer func() {
+		log.SetOutput(oldOut)
+		log.SetFormatter(oldFormatter)
+		log.SetLevel(oldLevel)
+	}()
+
+	resp, errExecute := manager.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute != nil {
+		t.Fatalf("execute error = %v, want success", errExecute)
+	}
+	if string(resp.Payload) != goodAuthID {
+		t.Fatalf("execute payload = %q, want %q", string(resp.Payload), goodAuthID)
+	}
+	if gotCalls := executor.ExecuteCalls(); len(gotCalls) != 2 || gotCalls[0] != badAuthID || gotCalls[1] != goodAuthID {
+		t.Fatalf("execute calls = %v, want [%s %s]", gotCalls, badAuthID, goodAuthID)
+	}
+	assertUnauthorizedAuthEvicted(t, manager, store, badAuthID)
+	logOutput := buf.String()
+	if !strings.Contains(logOutput, "evicting unauthorized auth") {
+		t.Fatalf("expected info log for unauthorized auth eviction, got: %s", logOutput)
+	}
+	if !strings.Contains(logOutput, badAuthID) {
+		t.Fatalf("expected log to contain auth id %q, got: %s", badAuthID, logOutput)
+	}
+	if !strings.Contains(logOutput, model) {
+		t.Fatalf("expected log to contain model %q, got: %s", model, logOutput)
+	}
+}
+
+func TestManager_ExecuteCount_UnauthorizedAuthEviction(t *testing.T) {
+	manager, executor, store, model, badAuthID, goodAuthID := newUnauthorizedEvictionTestManager(t)
+
+	resp, errExecute := manager.ExecuteCount(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute != nil {
+		t.Fatalf("execute count error = %v, want success", errExecute)
+	}
+	if string(resp.Payload) != goodAuthID {
+		t.Fatalf("execute count payload = %q, want %q", string(resp.Payload), goodAuthID)
+	}
+	if gotCalls := executor.CountCalls(); len(gotCalls) != 2 || gotCalls[0] != badAuthID || gotCalls[1] != goodAuthID {
+		t.Fatalf("count calls = %v, want [%s %s]", gotCalls, badAuthID, goodAuthID)
+	}
+	assertUnauthorizedAuthEvicted(t, manager, store, badAuthID)
+}
+
+func TestManager_ExecuteStream_UnauthorizedAuthEviction(t *testing.T) {
+	manager, executor, store, model, badAuthID, goodAuthID := newUnauthorizedEvictionTestManager(t)
+
+	streamResult, errExecute := manager.ExecuteStream(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute != nil {
+		t.Fatalf("execute stream error = %v, want success", errExecute)
+	}
+	var payload []byte
+	for chunk := range streamResult.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("execute stream chunk error = %v, want success", chunk.Err)
+		}
+		payload = append(payload, chunk.Payload...)
+	}
+	if string(payload) != goodAuthID {
+		t.Fatalf("execute stream payload = %q, want %q", string(payload), goodAuthID)
+	}
+	if gotCalls := executor.StreamCalls(); len(gotCalls) != 2 || gotCalls[0] != badAuthID || gotCalls[1] != goodAuthID {
+		t.Fatalf("stream calls = %v, want [%s %s]", gotCalls, badAuthID, goodAuthID)
+	}
+	assertUnauthorizedAuthEvicted(t, manager, store, badAuthID)
 }
 
 func TestManager_ModelSupportBadRequest_FallsBackAndSuspendsAuth(t *testing.T) {

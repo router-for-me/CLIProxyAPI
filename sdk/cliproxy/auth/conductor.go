@@ -591,6 +591,11 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 					rerr.HTTPStatus = se.StatusCode()
 				}
 				m.MarkResult(ctx, Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr})
+				if isUnauthorizedResult(rerr) {
+					if errEvict := m.evictUnauthorizedAuth(ctx, auth, provider, resultModel); errEvict != nil {
+						logEntryWithRequestID(ctx).Warnf("evict unauthorized auth %s failed: %v", auth.ID, errEvict)
+					}
+				}
 			}
 			if !forward {
 				return false
@@ -647,6 +652,9 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
 			result.RetryAfter = retryAfterFromError(errStream)
 			m.MarkResult(ctx, result)
+			if isUnauthorizedError(errStream) {
+				return nil, errStream
+			}
 			if isRequestInvalidError(errStream) {
 				return nil, errStream
 			}
@@ -661,6 +669,17 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				return nil, errCtx
 			}
 			if isRequestInvalidError(bootstrapErr) {
+				rerr := &Error{Message: bootstrapErr.Error()}
+				if se, ok := errors.AsType[cliproxyexecutor.StatusError](bootstrapErr); ok && se != nil {
+					rerr.HTTPStatus = se.StatusCode()
+				}
+				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
+				result.RetryAfter = retryAfterFromError(bootstrapErr)
+				m.MarkResult(ctx, result)
+				discardStreamChunks(streamResult.Chunks)
+				return nil, bootstrapErr
+			}
+			if isUnauthorizedError(bootstrapErr) {
 				rerr := &Error{Message: bootstrapErr.Error()}
 				if se, ok := errors.AsType[cliproxyexecutor.StatusError](bootstrapErr); ok && se != nil {
 					rerr.HTTPStatus = se.StatusCode()
@@ -1107,8 +1126,8 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		if len(models) == 0 {
 			continue
 		}
-		attempted[auth.ID] = struct{}{}
 		var authErr error
+		countAttempt := false
 		for _, upstreamModel := range models {
 			resultModel := executionResultModel(routeModel, upstreamModel, pooled)
 			execReq := req
@@ -1127,10 +1146,19 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 					result.RetryAfter = ra
 				}
 				m.MarkResult(execCtx, result)
+				if isUnauthorizedError(errExec) {
+					if errEvict := m.evictUnauthorizedAuth(execCtx, auth, provider, resultModel); errEvict != nil {
+						logEntryWithRequestID(execCtx).Warnf("evict unauthorized auth %s failed: %v", auth.ID, errEvict)
+					}
+					authErr = errExec
+					countAttempt = false
+					break
+				}
 				if isRequestInvalidError(errExec) {
 					return cliproxyexecutor.Response{}, errExec
 				}
 				authErr = errExec
+				countAttempt = true
 				continue
 			}
 			m.MarkResult(execCtx, result)
@@ -1139,6 +1167,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		if authErr != nil {
 			if isRequestInvalidError(authErr) {
 				return cliproxyexecutor.Response{}, authErr
+			}
+			if countAttempt {
+				attempted[auth.ID] = struct{}{}
 			}
 			lastErr = authErr
 			continue
@@ -1185,8 +1216,8 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		if len(models) == 0 {
 			continue
 		}
-		attempted[auth.ID] = struct{}{}
 		var authErr error
+		countAttempt := false
 		for _, upstreamModel := range models {
 			resultModel := executionResultModel(routeModel, upstreamModel, pooled)
 			execReq := req
@@ -1205,10 +1236,19 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 					result.RetryAfter = ra
 				}
 				m.MarkResult(execCtx, result)
+				if isUnauthorizedError(errExec) {
+					if errEvict := m.evictUnauthorizedAuth(execCtx, auth, provider, resultModel); errEvict != nil {
+						logEntryWithRequestID(execCtx).Warnf("evict unauthorized auth %s failed: %v", auth.ID, errEvict)
+					}
+					authErr = errExec
+					countAttempt = false
+					break
+				}
 				if isRequestInvalidError(errExec) {
 					return cliproxyexecutor.Response{}, errExec
 				}
 				authErr = errExec
+				countAttempt = true
 				continue
 			}
 			m.MarkResult(execCtx, result)
@@ -1217,6 +1257,9 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		if authErr != nil {
 			if isRequestInvalidError(authErr) {
 				return cliproxyexecutor.Response{}, authErr
+			}
+			if countAttempt {
+				attempted[auth.ID] = struct{}{}
 			}
 			lastErr = authErr
 			continue
@@ -1270,15 +1313,22 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		if len(models) == 0 {
 			continue
 		}
-		attempted[auth.ID] = struct{}{}
 		streamResult, errStream := m.executeStreamWithModelPool(execCtx, executor, auth, provider, req, opts, routeModel, models, pooled)
 		if errStream != nil {
 			if errCtx := execCtx.Err(); errCtx != nil {
 				return nil, errCtx
 			}
+			if isUnauthorizedError(errStream) {
+				if errEvict := m.evictUnauthorizedAuth(execCtx, auth, provider, routeModel); errEvict != nil {
+					logEntryWithRequestID(execCtx).Warnf("evict unauthorized auth %s failed: %v", auth.ID, errEvict)
+				}
+				lastErr = errStream
+				continue
+			}
 			if isRequestInvalidError(errStream) {
 				return nil, errStream
 			}
+			attempted[auth.ID] = struct{}{}
 			lastErr = errStream
 			continue
 		}
@@ -2002,6 +2052,10 @@ func statusCodeFromError(err error) int {
 	return 0
 }
 
+func isUnauthorizedError(err error) bool {
+	return statusCodeFromError(err) == http.StatusUnauthorized
+}
+
 func retryAfterFromError(err error) *time.Duration {
 	if err == nil {
 		return nil
@@ -2025,6 +2079,10 @@ func statusCodeFromResult(err *Error) int {
 		return 0
 	}
 	return err.StatusCode()
+}
+
+func isUnauthorizedResult(err *Error) bool {
+	return statusCodeFromResult(err) == http.StatusUnauthorized
 }
 
 func isModelSupportErrorMessage(message string) bool {
@@ -2153,6 +2211,71 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 			auth.StatusMessage = "request failed"
 		}
 	}
+}
+
+func (m *Manager) evictAuth(ctx context.Context, authID string) error {
+	authID = strings.TrimSpace(authID)
+	if m == nil || authID == "" {
+		return nil
+	}
+
+	var authSnapshot *Auth
+	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+	if cfg == nil {
+		cfg = &internalconfig.Config{}
+	}
+
+	m.mu.Lock()
+	if existing := m.auths[authID]; existing != nil {
+		authSnapshot = existing.Clone()
+		delete(m.auths, authID)
+		m.rebuildAPIKeyModelAliasLocked(cfg)
+	}
+	m.mu.Unlock()
+
+	if authSnapshot == nil {
+		return nil
+	}
+	if m.scheduler != nil {
+		m.scheduler.removeAuth(authID)
+	}
+	registry.GetGlobalRegistry().UnregisterClient(authID)
+
+	if m.store == nil {
+		return nil
+	}
+	if authSnapshot.Attributes != nil {
+		if v := strings.ToLower(strings.TrimSpace(authSnapshot.Attributes["runtime_only"])); v == "true" {
+			return nil
+		}
+	}
+	if authSnapshot.Metadata == nil {
+		return nil
+	}
+	if err := m.store.Delete(ctx, authID); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (m *Manager) evictUnauthorizedAuth(ctx context.Context, auth *Auth, provider, model string) error {
+	if auth == nil {
+		return nil
+	}
+	provider = strings.TrimSpace(provider)
+	if provider == "" {
+		provider = strings.TrimSpace(auth.Provider)
+	}
+	model = strings.TrimSpace(model)
+
+	entry := logEntryWithRequestID(ctx)
+	if model != "" {
+		entry.Infof("evicting unauthorized auth provider=%s auth=%s model=%s due to 401", provider, auth.ID, model)
+	} else {
+		entry.Infof("evicting unauthorized auth provider=%s auth=%s due to 401", provider, auth.ID)
+	}
+
+	return m.evictAuth(ctx, auth.ID)
 }
 
 // nextQuotaCooldown returns the next cooldown duration and updated backoff level for repeated quota errors.
