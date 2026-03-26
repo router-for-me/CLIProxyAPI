@@ -146,12 +146,48 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 							outputArr, _ = sjson.SetRawBytes(outputArr, "-1", outputPart)
 						case "image_url":
 							// Handle image_url content in tool message
+							outputPart := []byte(`{}`)
+							outputPart, _ = sjson.SetBytes(outputPart, "type", "input_image")
 							if u := it.Get("image_url.url"); u.Exists() {
-								outputPart := []byte(`{}`)
-								outputPart, _ = sjson.SetBytes(outputPart, "type", "input_image")
 								outputPart, _ = sjson.SetBytes(outputPart, "image_url", u.String())
+							}
+							if fid := it.Get("image_url.file_id").String(); fid != "" {
+								outputPart, _ = sjson.SetBytes(outputPart, "file_id", fid)
+							}
+							if detail := it.Get("image_url.detail").String(); detail != "" {
+								outputPart, _ = sjson.SetBytes(outputPart, "detail", detail)
+							}
+							outputArr, _ = sjson.SetRawBytes(outputArr, "-1", outputPart)
+						case "file":
+							// Handle file content in tool message
+							fileID := it.Get("file.file_id").String()
+							fileData := it.Get("file.file_data").String()
+							filename := it.Get("file.filename").String()
+							fileUrl := it.Get("file.file_url").String()
+							if fileID != "" || fileData != "" || filename != "" || fileUrl != "" {
+								outputPart := []byte(`{}`)
+								outputPart, _ = sjson.SetBytes(outputPart, "type", "input_file")
+								if fileID != "" {
+									outputPart, _ = sjson.SetBytes(outputPart, "file_id", fileID)
+								}
+								if fileData != "" {
+									outputPart, _ = sjson.SetBytes(outputPart, "file_data", fileData)
+								}
+								if filename != "" {
+									outputPart, _ = sjson.SetBytes(outputPart, "filename", filename)
+								}
+								if fileUrl != "" {
+									outputPart, _ = sjson.SetBytes(outputPart, "file_url", fileUrl)
+								}
 								outputArr, _ = sjson.SetRawBytes(outputArr, "-1", outputPart)
 							}
+
+						default:
+							// Fallback: convert unknown types to string representation
+							outputPart := []byte(`{}`)
+							outputPart, _ = sjson.SetBytes(outputPart, "type", "input_text")
+							outputPart, _ = sjson.SetBytes(outputPart, "text", it.Raw)
+							outputArr, _ = sjson.SetRawBytes(outputArr, "-1", outputPart)
 						}
 					}
 					funcOutput, _ = sjson.SetRawBytes(funcOutput, "output", outputArr)
@@ -206,16 +242,33 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 								if u := it.Get("image_url.url"); u.Exists() {
 									part, _ = sjson.SetBytes(part, "image_url", u.String())
 								}
+								if fid := it.Get("image_url.file_id").String(); fid != "" {
+									part, _ = sjson.SetBytes(part, "file_id", fid)
+								}
+								if detail := it.Get("image_url.detail").String(); detail != "" {
+									part, _ = sjson.SetBytes(part, "detail", detail)
+								}
 								msg, _ = sjson.SetRawBytes(msg, "content.-1", part)
 							}
 						case "file":
 							if role == "user" {
+								fileID := it.Get("file.file_id").String()
 								fileData := it.Get("file.file_data").String()
+								fileURL := it.Get("file.file_url").String()
 								filename := it.Get("file.filename").String()
-								if fileData != "" {
+
+								if fileID != "" || fileData != "" || fileURL != "" || filename != "" {
 									part := []byte(`{}`)
 									part, _ = sjson.SetBytes(part, "type", "input_file")
-									part, _ = sjson.SetBytes(part, "file_data", fileData)
+									if fileID != "" {
+										part, _ = sjson.SetBytes(part, "file_id", fileID)
+									}
+									if fileData != "" {
+										part, _ = sjson.SetBytes(part, "file_data", fileData)
+									}
+									if fileURL != "" {
+										part, _ = sjson.SetBytes(part, "file_url", fileURL)
+									}
 									if filename != "" {
 										part, _ = sjson.SetBytes(part, "filename", filename)
 									}
