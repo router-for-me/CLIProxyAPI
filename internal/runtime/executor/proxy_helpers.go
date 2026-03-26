@@ -2,9 +2,10 @@ package executor
 
 import (
 	"context"
-	"os"
 	"net/http"
+	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
@@ -12,6 +13,17 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
 )
+
+var environmentProxyKeys = []string{"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"}
+
+var sharedEnvironmentProxyTransport = sync.OnceValue(func() *http.Transport {
+	if transport, ok := http.DefaultTransport.(*http.Transport); ok && transport != nil {
+		clone := transport.Clone()
+		clone.Proxy = http.ProxyFromEnvironment
+		return clone
+	}
+	return &http.Transport{Proxy: http.ProxyFromEnvironment}
+})
 
 // newProxyAwareHTTPClient creates an HTTP client with proper proxy configuration priority:
 // 1. Use auth.ProxyURL if configured (highest priority)
@@ -88,7 +100,7 @@ func buildProxyTransport(proxyURL string) *http.Transport {
 }
 
 func environmentProxyConfigured() bool {
-	for _, key := range []string{"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"} {
+	for _, key := range environmentProxyKeys {
 		if strings.TrimSpace(os.Getenv(key)) != "" {
 			return true
 		}
@@ -97,8 +109,5 @@ func environmentProxyConfigured() bool {
 }
 
 func newEnvironmentProxyTransport() *http.Transport {
-	if transport, ok := http.DefaultTransport.(*http.Transport); ok && transport != nil {
-		return transport.Clone()
-	}
-	return &http.Transport{Proxy: http.ProxyFromEnvironment}
+	return sharedEnvironmentProxyTransport()
 }

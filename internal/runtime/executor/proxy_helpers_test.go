@@ -11,6 +11,27 @@ import (
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 )
 
+func setEnvironmentProxy(t *testing.T, proxyURL string) {
+	t.Helper()
+
+	for _, key := range []string{"HTTP_PROXY", "HTTPS_PROXY"} {
+		oldValue, hadValue := os.LookupEnv(key)
+		if err := os.Setenv(key, proxyURL); err != nil {
+			t.Fatalf("Setenv(%s): %v", key, err)
+		}
+		cleanupKey := key
+		cleanupOldValue := oldValue
+		cleanupHadValue := hadValue
+		t.Cleanup(func() {
+			if cleanupHadValue {
+				_ = os.Setenv(cleanupKey, cleanupOldValue)
+				return
+			}
+			_ = os.Unsetenv(cleanupKey)
+		})
+	}
+}
+
 func TestNewProxyAwareHTTPClientDirectBypassesGlobalProxy(t *testing.T) {
 	t.Parallel()
 
@@ -31,29 +52,7 @@ func TestNewProxyAwareHTTPClientDirectBypassesGlobalProxy(t *testing.T) {
 }
 
 func TestNewProxyAwareHTTPClientFallsBackToEnvironmentProxy(t *testing.T) {
-	oldHTTPProxy, hadHTTPProxy := os.LookupEnv("HTTP_PROXY")
-	if err := os.Setenv("HTTP_PROXY", "http://env-proxy.example.com:8080"); err != nil {
-		t.Fatalf("Setenv(HTTP_PROXY): %v", err)
-	}
-	defer func() {
-		if hadHTTPProxy {
-			_ = os.Setenv("HTTP_PROXY", oldHTTPProxy)
-			return
-		}
-		_ = os.Unsetenv("HTTP_PROXY")
-	}()
-
-	oldHTTPSProxy, hadHTTPSProxy := os.LookupEnv("HTTPS_PROXY")
-	if err := os.Setenv("HTTPS_PROXY", "http://env-proxy.example.com:8080"); err != nil {
-		t.Fatalf("Setenv(HTTPS_PROXY): %v", err)
-	}
-	defer func() {
-		if hadHTTPSProxy {
-			_ = os.Setenv("HTTPS_PROXY", oldHTTPSProxy)
-			return
-		}
-		_ = os.Unsetenv("HTTPS_PROXY")
-	}()
+	setEnvironmentProxy(t, "http://env-proxy.example.com:8080")
 
 	client := newProxyAwareHTTPClient(context.Background(), &config.Config{}, &cliproxyauth.Auth{}, 0)
 
@@ -78,28 +77,7 @@ func TestNewProxyAwareHTTPClientFallsBackToEnvironmentProxy(t *testing.T) {
 }
 
 func TestNewProxyAwareHTTPClientExplicitProxyWinsOverEnvironmentProxy(t *testing.T) {
-	oldHTTPProxy, hadHTTPProxy := os.LookupEnv("HTTP_PROXY")
-	if err := os.Setenv("HTTP_PROXY", "http://env-proxy.example.com:8080"); err != nil {
-		t.Fatalf("Setenv(HTTP_PROXY): %v", err)
-	}
-	defer func() {
-		if hadHTTPProxy {
-			_ = os.Setenv("HTTP_PROXY", oldHTTPProxy)
-			return
-		}
-		_ = os.Unsetenv("HTTP_PROXY")
-	}()
-	oldHTTPSProxy, hadHTTPSProxy := os.LookupEnv("HTTPS_PROXY")
-	if err := os.Setenv("HTTPS_PROXY", "http://env-proxy.example.com:8080"); err != nil {
-		t.Fatalf("Setenv(HTTPS_PROXY): %v", err)
-	}
-	defer func() {
-		if hadHTTPSProxy {
-			_ = os.Setenv("HTTPS_PROXY", oldHTTPSProxy)
-			return
-		}
-		_ = os.Unsetenv("HTTPS_PROXY")
-	}()
+	setEnvironmentProxy(t, "http://env-proxy.example.com:8080")
 
 	client := newProxyAwareHTTPClient(
 		context.Background(),
@@ -122,5 +100,24 @@ func TestNewProxyAwareHTTPClientExplicitProxyWinsOverEnvironmentProxy(t *testing
 	}
 	if proxyURL == nil || proxyURL.String() != "http://config-proxy.example.com:8080" {
 		t.Fatalf("proxy URL = %v, want http://config-proxy.example.com:8080", proxyURL)
+	}
+}
+
+func TestNewProxyAwareHTTPClientReusesEnvironmentProxyTransport(t *testing.T) {
+	setEnvironmentProxy(t, "http://env-proxy.example.com:8080")
+
+	clientA := newProxyAwareHTTPClient(context.Background(), &config.Config{}, &cliproxyauth.Auth{}, 0)
+	clientB := newProxyAwareHTTPClient(context.Background(), &config.Config{}, &cliproxyauth.Auth{}, 0)
+
+	transportA, okA := clientA.Transport.(*http.Transport)
+	if !okA {
+		t.Fatalf("clientA transport type = %T, want *http.Transport", clientA.Transport)
+	}
+	transportB, okB := clientB.Transport.(*http.Transport)
+	if !okB {
+		t.Fatalf("clientB transport type = %T, want *http.Transport", clientB.Transport)
+	}
+	if transportA != transportB {
+		t.Fatal("expected environment proxy transport to be shared across clients")
 	}
 }
