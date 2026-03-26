@@ -609,7 +609,7 @@ func readStreamBootstrap(ctx context.Context, ch <-chan cliproxyexecutor.StreamC
 	}
 }
 
-func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, resultModel string, headers http.Header, buffered []cliproxyexecutor.StreamChunk, remaining <-chan cliproxyexecutor.StreamChunk) *cliproxyexecutor.StreamResult {
+func (m *Manager) wrapStreamResult(ctx context.Context, authID, provider, resultModel string, headers http.Header, buffered []cliproxyexecutor.StreamChunk, remaining <-chan cliproxyexecutor.StreamChunk) *cliproxyexecutor.StreamResult {
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
 		defer close(out)
@@ -622,7 +622,7 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 				if se, ok := errors.AsType[cliproxyexecutor.StatusError](chunk.Err); ok && se != nil {
 					rerr.HTTPStatus = se.StatusCode()
 				}
-				m.MarkResult(ctx, Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr})
+				m.MarkResult(ctx, Result{AuthID: authID, Provider: provider, Model: resultModel, Success: false, Error: rerr})
 			}
 			if !forward {
 				return false
@@ -652,7 +652,7 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 			}
 		}
 		if !failed {
-			m.MarkResult(ctx, Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: true})
+			m.MarkResult(ctx, Result{AuthID: authID, Provider: provider, Model: resultModel, Success: true})
 		}
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: headers, Chunks: out}
@@ -744,7 +744,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			close(closedCh)
 			remaining = closedCh
 		}
-		return m.wrapStreamResult(ctx, auth.Clone(), provider, resultModel, streamResult.Headers, buffered, remaining), nil
+		return m.wrapStreamResult(ctx, auth.ID, provider, resultModel, streamResult.Headers, buffered, remaining), nil
 	}
 	if lastErr == nil {
 		lastErr = &Error{Code: "auth_not_found", Message: "no upstream model available"}
@@ -1826,6 +1826,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	var authSnapshot *Auth
 	var modelStateSnapshot *ModelState
 	var persistSnapshot *Auth
+	useSchedulerFastPath := result.Model != "" && m.useSchedulerFastPath()
 
 	m.mu.Lock()
 	if auth, ok := m.auths[result.AuthID]; ok && auth != nil {
@@ -1930,20 +1931,26 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		if m.store != nil && !shouldSkipPersist(ctx) {
 			persistSnapshot = auth.Clone()
 		}
-		if result.Model != "" && m.useSchedulerFastPath() {
+		if useSchedulerFastPath {
 			if state := auth.ModelStates[result.Model]; state != nil {
 				modelStateSnapshot = state.Clone()
 			}
-			authSnapshot = auth.Clone()
 		} else {
-			authSnapshot = auth.Clone()
+			if persistSnapshot != nil {
+				authSnapshot = persistSnapshot.Clone()
+			} else {
+				authSnapshot = auth.Clone()
+			}
 		}
 	}
 	m.mu.Unlock()
 	if m.scheduler != nil {
 		appliedFast := false
-		if result.Model != "" && modelStateSnapshot != nil && m.useSchedulerFastPath() {
+		if useSchedulerFastPath && modelStateSnapshot != nil {
 			appliedFast = m.scheduler.applyModelStateUpdate(result.AuthID, result.Provider, result.Model, modelStateSnapshot)
+		}
+		if !appliedFast && authSnapshot == nil {
+			authSnapshot = m.cloneAuthByID(result.AuthID)
 		}
 		if !appliedFast && authSnapshot != nil {
 			m.scheduler.upsertAuth(authSnapshot)
@@ -2561,15 +2568,7 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 	}
 	authCopy := selected.Clone()
 	m.mu.RUnlock()
-	if !selected.indexAssigned {
-		m.mu.Lock()
-		if current := m.auths[authCopy.ID]; current != nil && !current.indexAssigned {
-			current.EnsureIndex()
-			authCopy = current.Clone()
-		}
-		m.mu.Unlock()
-	}
-	return authCopy, executor, nil
+	return m.finalizePickedAuth(authCopy), executor, nil
 }
 
 func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, error) {
@@ -2591,16 +2590,7 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 	if selected == nil {
 		return nil, nil, &Error{Code: "auth_not_found", Message: "selector returned no auth"}
 	}
-	authCopy := selected.Clone()
-	if !selected.indexAssigned {
-		m.mu.Lock()
-		if current := m.auths[authCopy.ID]; current != nil && !current.indexAssigned {
-			current.EnsureIndex()
-			authCopy = current.Clone()
-		}
-		m.mu.Unlock()
-	}
-	return authCopy, executor, nil
+	return m.finalizePickedAuth(selected), executor, nil
 }
 
 func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
@@ -2675,15 +2665,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 	}
 	authCopy := selected.Clone()
 	m.mu.RUnlock()
-	if !selected.indexAssigned {
-		m.mu.Lock()
-		if current := m.auths[authCopy.ID]; current != nil && !current.indexAssigned {
-			current.EnsureIndex()
-			authCopy = current.Clone()
-		}
-		m.mu.Unlock()
-	}
-	return authCopy, executor, providerKey, nil
+	return m.finalizePickedAuth(authCopy), executor, providerKey, nil
 }
 
 func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
@@ -2726,16 +2708,23 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 	if !okExecutor {
 		return nil, nil, "", &Error{Code: "executor_not_found", Message: "executor not registered"}
 	}
-	authCopy := selected.Clone()
-	if !selected.indexAssigned {
-		m.mu.Lock()
-		if current := m.auths[authCopy.ID]; current != nil && !current.indexAssigned {
-			current.EnsureIndex()
-			authCopy = current.Clone()
-		}
-		m.mu.Unlock()
+	return m.finalizePickedAuth(selected), executor, providerKey, nil
+}
+
+func (m *Manager) finalizePickedAuth(authCopy *Auth) *Auth {
+	if m == nil || authCopy == nil || authCopy.indexAssigned {
+		return authCopy
 	}
-	return authCopy, executor, providerKey, nil
+	m.mu.Lock()
+	if current := m.auths[authCopy.ID]; current != nil {
+		if !current.indexAssigned {
+			current.EnsureIndex()
+		}
+		authCopy.Index = current.Index
+		authCopy.indexAssigned = current.indexAssigned
+	}
+	m.mu.Unlock()
+	return authCopy
 }
 
 func (m *Manager) persist(ctx context.Context, auth *Auth) error {
@@ -2797,24 +2786,36 @@ func (m *Manager) StopAutoRefresh() {
 func (m *Manager) checkRefreshes(ctx context.Context) {
 	// log.Debugf("checking refreshes")
 	now := time.Now()
-	snapshot := m.snapshotAuths()
-	for _, a := range snapshot {
-		typ, _ := a.AccountInfo()
-		if typ != "api_key" {
-			if !m.shouldRefresh(a, now) {
-				continue
-			}
-			log.Debugf("checking refresh for %s, %s, %s", a.Provider, a.ID, typ)
-
-			if exec := m.executorFor(a.Provider); exec == nil {
-				continue
-			}
-			if !m.markRefreshPending(a.ID, now) {
-				continue
-			}
-			go m.refreshAuthWithLimit(ctx, a.ID)
+	for _, authID := range m.collectRefreshTargets(now) {
+		if !m.markRefreshPending(authID, now) {
+			continue
 		}
+		go m.refreshAuthWithLimit(ctx, authID)
 	}
+}
+
+func (m *Manager) collectRefreshTargets(now time.Time) []string {
+	if m == nil {
+		return nil
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	targets := make([]string, 0, len(m.auths))
+	for _, auth := range m.auths {
+		if auth == nil {
+			continue
+		}
+		typ, _ := auth.AccountInfo()
+		if typ == "api_key" || !m.shouldRefresh(auth, now) {
+			continue
+		}
+		log.Debugf("checking refresh for %s, %s, %s", auth.Provider, auth.ID, typ)
+		if m.executors[auth.Provider] == nil {
+			continue
+		}
+		targets = append(targets, auth.ID)
+	}
+	return targets
 }
 
 func (m *Manager) refreshAuthWithLimit(ctx context.Context, id string) {
@@ -3120,6 +3121,19 @@ func (m *Manager) executorFor(provider string) ProviderExecutor {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.executors[provider]
+}
+
+func (m *Manager) cloneAuthByID(id string) *Auth {
+	if m == nil || strings.TrimSpace(id) == "" {
+		return nil
+	}
+	m.mu.RLock()
+	auth := m.auths[id]
+	m.mu.RUnlock()
+	if auth == nil {
+		return nil
+	}
+	return auth.Clone()
 }
 
 // roundTripperContextKey is an unexported context key type to avoid collisions.

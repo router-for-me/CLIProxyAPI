@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -23,6 +24,7 @@ type FileTokenStore struct {
 	mu      sync.Mutex
 	dirLock sync.RWMutex
 	baseDir string
+	pathMu  map[string]*sync.Mutex
 }
 
 // NewFileTokenStore creates a token store that saves credentials to disk through the
@@ -58,8 +60,8 @@ func (s *FileTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (str
 		}
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	unlock := s.lockPath(path)
+	defer unlock()
 
 	if err = os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return "", fmt.Errorf("auth filestore: create dir failed: %w", err)
@@ -85,7 +87,7 @@ func (s *FileTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (str
 			return "", fmt.Errorf("auth filestore: marshal metadata failed: %w", errMarshal)
 		}
 		if existing, errRead := os.ReadFile(path); errRead == nil {
-			if jsonEqual(existing, raw) {
+			if bytes.Equal(existing, raw) {
 				return path, nil
 			}
 			file, errOpen := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0o600)
@@ -197,36 +199,6 @@ func (s *FileTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth,
 	if provider == "" {
 		provider = "unknown"
 	}
-	if provider == "antigravity" || provider == "gemini" {
-		projectID := ""
-		if pid, ok := metadata["project_id"].(string); ok {
-			projectID = strings.TrimSpace(pid)
-		}
-		if projectID == "" {
-			accessToken := extractAccessToken(metadata)
-			// For gemini type, the stored access_token is likely expired (~1h lifetime).
-			// Refresh it using the long-lived refresh_token before querying.
-			if provider == "gemini" {
-				if tokenMap, ok := metadata["token"].(map[string]any); ok {
-					if refreshed, errRefresh := refreshGeminiAccessToken(tokenMap, http.DefaultClient); errRefresh == nil {
-						accessToken = refreshed
-					}
-				}
-			}
-			if accessToken != "" {
-				fetchedProjectID, errFetch := FetchAntigravityProjectID(context.Background(), accessToken, http.DefaultClient)
-				if errFetch == nil && strings.TrimSpace(fetchedProjectID) != "" {
-					metadata["project_id"] = strings.TrimSpace(fetchedProjectID)
-					if raw, errMarshal := json.Marshal(metadata); errMarshal == nil {
-						if file, errOpen := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0o600); errOpen == nil {
-							_, _ = file.Write(raw)
-							_ = file.Close()
-						}
-					}
-				}
-			}
-		}
-	}
 	info, err := os.Stat(path)
 	if err != nil {
 		return nil, fmt.Errorf("stat file: %w", err)
@@ -322,6 +294,24 @@ func (s *FileTokenStore) baseDirSnapshot() string {
 	s.dirLock.RLock()
 	defer s.dirLock.RUnlock()
 	return s.baseDir
+}
+
+func (s *FileTokenStore) lockPath(path string) func() {
+	s.mu.Lock()
+	if s.pathMu == nil {
+		s.pathMu = make(map[string]*sync.Mutex)
+	}
+	lock := s.pathMu[path]
+	if lock == nil {
+		lock = &sync.Mutex{}
+		s.pathMu[path] = lock
+	}
+	s.mu.Unlock()
+
+	lock.Lock()
+	return func() {
+		lock.Unlock()
+	}
 }
 
 func extractAccessToken(metadata map[string]any) string {

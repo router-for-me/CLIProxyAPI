@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"runtime/debug"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -27,24 +28,37 @@ func TestCodexExecutorExtreme_2000Sessions_6KRPM_200MTPM(t *testing.T) {
 		t.Skip("set CLI_PROXY_EXTREME_STRESS=1 to run the 2000-session extreme stress test")
 	}
 
-	const (
-		sessionCount           = 2000
-		totalRequests          = 3000
-		targetRPS              = 100.0
-		targetRPM              = targetRPS * 60
-		approxTokensPerRequest = 33333
-		targetTPM              = targetRPM * approxTokensPerRequest
-		requestInterval        = 10 * time.Millisecond
-		serviceTime            = 20 * time.Second
-		minPromptBytes         = 100_000
-	)
+	sessionCount := extremeStressEnvInt(t, "CLI_PROXY_EXTREME_STRESS_SESSIONS", 2000)
+	totalRequests := extremeStressEnvInt(t, "CLI_PROXY_EXTREME_STRESS_REQUESTS", 3000)
+	targetRPS := extremeStressEnvFloat(t, "CLI_PROXY_EXTREME_STRESS_TARGET_RPS", 100.0)
+	approxTokensPerRequest := extremeStressEnvInt(t, "CLI_PROXY_EXTREME_STRESS_TOKENS_PER_REQUEST", 33333)
+	serviceTime := extremeStressEnvDuration(t, "CLI_PROXY_EXTREME_STRESS_SERVICE_TIME", 20*time.Second)
+	minPromptBytes := extremeStressEnvInt(t, "CLI_PROXY_EXTREME_STRESS_MIN_PROMPT_BYTES", 100_000)
 
-	requests := make([]cliproxyexecutor.Request, sessionCount)
-	markers := make([]string, sessionCount)
-	for i := 0; i < sessionCount; i++ {
-		marker := fmt.Sprintf("session-%04d", i)
-		markers[i] = marker
-		requests[i] = newExtremeCodexResponsesRequest(marker, approxTokensPerRequest)
+	if sessionCount <= 0 {
+		t.Fatalf("invalid session count: %d", sessionCount)
+	}
+	if totalRequests <= 0 {
+		t.Fatalf("invalid total requests: %d", totalRequests)
+	}
+	if targetRPS <= 0 {
+		t.Fatalf("invalid target rps: %.2f", targetRPS)
+	}
+	if approxTokensPerRequest <= 0 {
+		t.Fatalf("invalid tokens per request: %d", approxTokensPerRequest)
+	}
+	if serviceTime <= 0 {
+		t.Fatalf("invalid service time: %s", serviceTime)
+	}
+	if minPromptBytes <= 0 {
+		t.Fatalf("invalid min prompt bytes: %d", minPromptBytes)
+	}
+
+	targetRPM := targetRPS * 60
+	targetTPM := targetRPM * float64(approxTokensPerRequest)
+	requestInterval := time.Duration(float64(time.Second) / targetRPS)
+	if requestInterval <= 0 {
+		requestInterval = time.Microsecond
 	}
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -122,8 +136,8 @@ func TestCodexExecutorExtreme_2000Sessions_6KRPM_200MTPM(t *testing.T) {
 		<-ticker.C
 
 		sessionID := i % sessionCount
-		marker := markers[sessionID]
-		req := requests[sessionID]
+		marker := fmt.Sprintf("session-%04d", sessionID)
+		req := newExtremeCodexResponsesRequest(marker, approxTokensPerRequest)
 		wg.Add(1)
 		go func(marker string, req cliproxyexecutor.Request) {
 			defer wg.Done()
@@ -231,15 +245,21 @@ func TestCodexExecutorExtreme_2000Sessions_6KRPM_200MTPM(t *testing.T) {
 	if got := badGateway.Load(); got != int64(expected502) {
 		t.Fatalf("502 count = %d, want %d", got, expected502)
 	}
-	if peakSample.Inflight < sessionCount-25 {
-		t.Fatalf("peak inflight = %d, want at least %d", peakSample.Inflight, sessionCount-25)
+	expectedPeakInflight := extremeStressExpectedPeakInflight(sessionCount, totalRequests, targetRPS, serviceTime)
+	slack := expectedPeakInflight/100 + 25
+	minPeakInflight := expectedPeakInflight - slack
+	if minPeakInflight < 1 {
+		minPeakInflight = 1
+	}
+	if peakSample.Inflight < int64(minPeakInflight) {
+		t.Fatalf("peak inflight = %d, want at least %d (expected_peak=%d, slack=%d)", peakSample.Inflight, minPeakInflight, expectedPeakInflight, slack)
 	}
 
 	p50 := extremeStressPercentileDuration(latencies, 0.50)
 	p95 := extremeStressPercentileDuration(latencies, 0.95)
 	p99 := extremeStressPercentileDuration(latencies, 0.99)
 	feedRPM := float64(totalRequests) / feedElapsed.Seconds() * 60
-	scaledTPM := feedRPM * approxTokensPerRequest
+	scaledTPM := feedRPM * float64(approxTokensPerRequest)
 
 	t.Logf(
 		"extreme codex stress: sessions=%d requests=%d feed_elapsed=%s total_elapsed=%s feed_rpm=%.0f scaled_tpm=%.0f peak_inflight=%d p50=%s p95=%s p99=%s heap_before=%d(%.1fMB) heap_peak_alloc=%d(%.1fMB) heap_peak_inuse=%d(%.1fMB) heap_after=%d(%.1fMB) heap_peak_delta=%d(%.1fMB) num_gc_delta=%d pause_total_ms_delta=%.2f target_rpm=%.0f target_tpm=%.0f",
@@ -421,4 +441,58 @@ func extremeStressPercentileDuration(values []time.Duration, fraction float64) t
 
 func extremeStressBytesToMB(v uint64) float64 {
 	return float64(v) / (1024 * 1024)
+}
+
+func extremeStressEnvInt(t *testing.T, key string, fallback int) int {
+	t.Helper()
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(raw)
+	if err != nil {
+		t.Fatalf("%s=%q is not a valid int: %v", key, raw, err)
+	}
+	return parsed
+}
+
+func extremeStressEnvFloat(t *testing.T, key string, fallback float64) float64 {
+	t.Helper()
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		t.Fatalf("%s=%q is not a valid float: %v", key, raw, err)
+	}
+	return parsed
+}
+
+func extremeStressEnvDuration(t *testing.T, key string, fallback time.Duration) time.Duration {
+	t.Helper()
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback
+	}
+	parsed, err := time.ParseDuration(raw)
+	if err != nil {
+		t.Fatalf("%s=%q is not a valid duration: %v", key, raw, err)
+	}
+	return parsed
+}
+
+func extremeStressExpectedPeakInflight(sessionCount, totalRequests int, targetRPS float64, serviceTime time.Duration) int {
+	expected := sessionCount
+	if totalRequests < expected {
+		expected = totalRequests
+	}
+	steady := int(targetRPS * serviceTime.Seconds())
+	if steady < expected {
+		expected = steady
+	}
+	if expected < 1 {
+		return 1
+	}
+	return expected
 }

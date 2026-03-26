@@ -349,7 +349,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				}
 			}
 
-			chunks := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("codex"), from, req.Model, translateOriginalPayload, translateBody, bytes.Clone(line), &param)
+			chunks := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("codex"), from, req.Model, translateOriginalPayload, translateBody, line, &param)
 			for i := range chunks {
 				out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunks[i])}
 			}

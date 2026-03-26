@@ -122,7 +122,7 @@ func TestManagerExecute_CodexErrorStormConvergesToHealthyPool(t *testing.T) {
 	const model = "gpt-5.4"
 
 	manager := NewManager(nil, &RoundRobinSelector{}, nil)
-	manager.SetRetryConfig(0, 0, 32)
+	manager.SetRetryConfig(0, 0, 32, 0)
 
 	wsHealthy := []string{"codex-storm-ws-ok-0", "codex-storm-ws-ok-1", "codex-storm-ws-ok-2", "codex-storm-ws-ok-3"}
 	wsBad502 := []string{"codex-storm-ws-502-0", "codex-storm-ws-502-1", "codex-storm-ws-502-2", "codex-storm-ws-502-3"}

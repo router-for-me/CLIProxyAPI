@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -956,6 +957,138 @@ func TestCodexExecutorExecute_LocalServer_SustainsOver6KRPM_MixedLongRequests(t 
 	)
 }
 
+func TestCodexExecutorExecuteStreamTTFTHighConcurrency_LongConversationPreviousResponseID(t *testing.T) {
+	const (
+		totalRequests = 1024
+		concurrency   = 256
+	)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if gjson.GetBytes(body, "previous_response_id").Exists() {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = io.WriteString(w, `{"error":{"type":"bad_request","message":"previous_response_id should be stripped for HTTP streaming"}}`)
+			return
+		}
+		prompt := gjson.GetBytes(body, "input.1.content.0.text").String()
+		if len(prompt) < 60_000 {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = io.WriteString(w, `{"error":{"type":"bad_request","message":"request was not long enough"}}`)
+			return
+		}
+		if !strings.Contains(prompt, "marker=") {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = io.WriteString(w, `{"error":{"type":"bad_request","message":"marker missing from long request"}}`)
+			return
+		}
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+		for _, line := range []string{
+			`data: {"type":"response.created","response":{"id":"resp_stream_ttft"}}`,
+			`data: {"type":"response.output_text.delta","delta":"bench"}`,
+			"data: " + codexCompletedEventJSON("resp_stream_ttft", "gpt-5.4", "ok-stream-ttft"),
+		} {
+			_, _ = io.WriteString(w, line+"\n")
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+	}))
+	defer server.Close()
+
+	executor := NewCodexExecutor(&config.Config{})
+	auth := newCodexTestAuth(server.URL, "bench-stream-ttft-key")
+
+	jobs := make(chan int, totalRequests)
+	start := make(chan struct{})
+	errCh := make(chan error, totalRequests)
+	latencies := make([]time.Duration, totalRequests)
+
+	var wg sync.WaitGroup
+	for worker := 0; worker < concurrency; worker++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			for index := range jobs {
+				req := newLongCodexResponsesRequestWithPreviousResponseID(fmt.Sprintf("ttft-stream-%d", index), "resp-prev-http-stream")
+				started := time.Now()
+				result, err := executor.ExecuteStream(
+					context.Background(),
+					auth,
+					req,
+					cliproxyexecutor.Options{
+						SourceFormat: sdktranslator.FromString("openai-response"),
+						Stream:       true,
+						Metadata: map[string]any{
+							cliproxyexecutor.RequestedModelMetadataKey: "gpt-5.4",
+						},
+					},
+				)
+				if err != nil {
+					errCh <- fmt.Errorf("ExecuteStream() error = %w", err)
+					continue
+				}
+
+				seenDelta := false
+				for chunk := range result.Chunks {
+					if chunk.Err != nil {
+						errCh <- fmt.Errorf("stream chunk error = %w", chunk.Err)
+						break
+					}
+					if bytes.Contains(chunk.Payload, []byte(`"type":"response.output_text.delta"`)) {
+						elapsed := time.Since(started)
+						if elapsed <= 0 {
+							elapsed = time.Nanosecond
+						}
+						latencies[index] = elapsed
+						seenDelta = true
+					}
+				}
+				if !seenDelta {
+					errCh <- fmt.Errorf("no delta chunk observed")
+				}
+			}
+		}()
+	}
+
+	for i := 0; i < totalRequests; i++ {
+		jobs <- i
+	}
+	close(jobs)
+
+	begin := time.Now()
+	close(start)
+	wg.Wait()
+	close(errCh)
+	elapsed := time.Since(begin)
+
+	for err := range errCh {
+		t.Fatal(err)
+	}
+
+	p50 := percentileDuration(latencies, 0.50)
+	p95 := percentileDuration(latencies, 0.95)
+	p99 := percentileDuration(latencies, 0.99)
+	var total time.Duration
+	for _, latency := range latencies {
+		total += latency
+	}
+	avg := total / time.Duration(len(latencies))
+
+	t.Logf(
+		"codex http stream ttft long+previous_response_id: requests=%d concurrency=%d elapsed=%s avg=%s p50=%s p95=%s p99=%s",
+		totalRequests,
+		concurrency,
+		elapsed,
+		avg,
+		p50,
+		p95,
+		p99,
+	)
+}
+
 func BenchmarkCodexExecutorExecute_LocalServerParallel(b *testing.B) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -1065,6 +1198,23 @@ func newLongCodexResponsesRequest(marker string) cliproxyexecutor.Request {
 			"stream":false,
 			"user":"integration-test"
 		}`, strings.Repeat("be precise and preserve latency. ", 2048), longPrompt)),
+	}
+}
+
+func newLongCodexResponsesRequestWithPreviousResponseID(marker string, previousResponseID string) cliproxyexecutor.Request {
+	longPrompt := buildExecutorLongPrompt(marker)
+	return cliproxyexecutor.Request{
+		Model: "gpt-5.4",
+		Payload: []byte(fmt.Sprintf(`{
+			"model":"gpt-5.4",
+			"previous_response_id":%q,
+			"input":[
+				{"type":"message","role":"system","content":[{"type":"input_text","text":%q}]},
+				{"type":"message","role":"user","content":[{"type":"input_text","text":%q}]}
+			],
+			"stream":false,
+			"user":"integration-test"
+		}`, previousResponseID, strings.Repeat("be precise and preserve latency. ", 2048), longPrompt)),
 	}
 }
 
