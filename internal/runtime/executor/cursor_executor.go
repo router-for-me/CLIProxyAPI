@@ -61,6 +61,7 @@ type cursorSession struct {
 	pending      []pendingMcpExec
 	cancel       context.CancelFunc // cancels the session-scoped heartbeat (NOT tied to HTTP request)
 	createdAt    time.Time
+	authID       string // auth file ID that created this session (for multi-account isolation)
 	toolResultCh chan []toolResultInfo                // receives tool results from the next HTTP request
 	resumeOutCh  chan cliproxyexecutor.StreamChunk    // output channel for resumed response
 	switchOutput func(ch chan cliproxyexecutor.StreamChunk) // callback to switch output channel
@@ -320,10 +321,12 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		parsed.Model, len(parsed.UserText), len(parsed.Turns), len(parsed.Tools), len(parsed.ToolResults))
 
 	conversationId := deriveConversationId(apiKeyFromContext(ctx), ccSessionId, parsed.SystemPrompt)
-	log.Debugf("cursor: conversationId=%s ccSessionId=%s", conversationId, ccSessionId)
+	authID := auth.ID // e.g. "cursor.json" or "cursor-account2.json"
+	log.Debugf("cursor: conversationId=%s authID=%s", conversationId, authID)
 
-	// Use conversationId as session key — stable across requests in the same Claude Code session
-	sessionKey := conversationId
+	// Include authID in keys for multi-account isolation
+	sessionKey := authID + ":" + conversationId
+	checkpointKey := sessionKey // same isolation
 	needsTranslate := from.String() != "" && from.String() != "openai"
 
 	// Check if we can resume an existing session with tool results
@@ -335,9 +338,12 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		}
 		e.mu.Unlock()
 
-		if hasSession && session.stream != nil {
+		if hasSession && session.stream != nil && session.authID == authID {
 			log.Debugf("cursor: resuming session %s with %d tool results", sessionKey, len(parsed.ToolResults))
 			return e.resumeWithToolResults(ctx, session, parsed, from, to, req, originalPayload, payload, needsTranslate)
+		}
+		if hasSession && session.authID != authID {
+			log.Warnf("cursor: session %s belongs to auth %s, but request is from %s — skipping resume", sessionKey, session.authID, authID)
 		}
 	}
 
@@ -349,15 +355,15 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	}
 	e.mu.Unlock()
 
-	// Look up saved checkpoint for this conversation
+	// Look up saved checkpoint for this conversation + account
 	e.mu.Lock()
-	saved, hasCheckpoint := e.checkpoints[conversationId]
+	saved, hasCheckpoint := e.checkpoints[checkpointKey]
 	e.mu.Unlock()
 
 	params := buildRunRequestParams(parsed, conversationId)
 
 	if hasCheckpoint && saved.data != nil {
-		log.Debugf("cursor: using saved checkpoint (%d bytes) for conversationId=%s", len(saved.data), conversationId)
+		log.Debugf("cursor: using saved checkpoint (%d bytes) for key=%s", len(saved.data), checkpointKey)
 		params.RawCheckpoint = saved.data
 		// Merge saved blobStore into params
 		if params.BlobStore == nil {
@@ -507,6 +513,7 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 					pending:      []pendingMcpExec{exec},
 					cancel:       sessionCancel,
 					createdAt:    time.Now(),
+					authID:       authID,
 					toolResultCh: toolResultCh, // reuse same channel across rounds
 					resumeOutCh:  resumeOut,
 					switchOutput: func(ch chan cliproxyexecutor.StreamChunk) {
@@ -532,13 +539,13 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			func(cpData []byte) {
 				// Save checkpoint for this conversation
 				e.mu.Lock()
-				e.checkpoints[conversationId] = &savedCheckpoint{
+				e.checkpoints[checkpointKey] = &savedCheckpoint{
 					data:      cpData,
 					blobStore: params.BlobStore,
 					updatedAt: time.Now(),
 				}
 				e.mu.Unlock()
-				log.Debugf("cursor: saved checkpoint (%d bytes) for conversationId=%s", len(cpData), conversationId)
+				log.Debugf("cursor: saved checkpoint (%d bytes) for key=%s", len(cpData), checkpointKey)
 			},
 		)
 
