@@ -86,6 +86,9 @@ type Service struct {
 	// usagePersistenceDone is closed when the periodic usage persistence loop exits.
 	usagePersistenceDone chan struct{}
 
+	// usageStats optionally overrides the shared usage statistics store for tests.
+	usageStats *internalusage.RequestStatistics
+
 	// authManager handles legacy authentication operations.
 	authManager *sdkAuth.Manager
 
@@ -195,6 +198,13 @@ func newDefaultAuthManager() *sdkAuth.Manager {
 
 const usagePersistenceDisabledPollInterval = 5 * time.Second
 
+func usagePersistenceIntervalForConfig(cfg *config.Config) time.Duration {
+	if cfg == nil || cfg.UsageStatisticsPersistIntervalSeconds <= 0 {
+		return 0
+	}
+	return time.Duration(cfg.UsageStatisticsPersistIntervalSeconds) * time.Second
+}
+
 func (s *Service) currentConfig() *config.Config {
 	if s == nil {
 		return nil
@@ -210,11 +220,7 @@ func (s *Service) usageStatisticsEnabled() bool {
 }
 
 func (s *Service) usagePersistenceInterval() time.Duration {
-	cfg := s.currentConfig()
-	if cfg == nil || cfg.UsageStatisticsPersistIntervalSeconds <= 0 {
-		return 0
-	}
-	return time.Duration(cfg.UsageStatisticsPersistIntervalSeconds) * time.Second
+	return usagePersistenceIntervalForConfig(s.currentConfig())
 }
 
 func (s *Service) usageStatisticsFilePath() string {
@@ -225,6 +231,13 @@ func (s *Service) usageStatisticsFilePath() string {
 	return internalusage.StatisticsFilePath(cfg)
 }
 
+func (s *Service) usageStatisticsStore() *internalusage.RequestStatistics {
+	if s != nil && s.usageStats != nil {
+		return s.usageStats
+	}
+	return internalusage.GetRequestStatistics()
+}
+
 func (s *Service) restoreUsageStatistics() {
 	if s == nil || !s.usageStatisticsEnabled() {
 		return
@@ -233,7 +246,7 @@ func (s *Service) restoreUsageStatistics() {
 	if strings.TrimSpace(path) == "" {
 		return
 	}
-	loaded, result, err := internalusage.RestoreRequestStatistics(path, internalusage.GetRequestStatistics())
+	loaded, result, err := internalusage.RestoreRequestStatistics(path, s.usageStatisticsStore())
 	if err != nil {
 		log.WithError(err).Warnf("failed to restore usage statistics from %s", path)
 		return
@@ -244,14 +257,14 @@ func (s *Service) restoreUsageStatistics() {
 }
 
 func (s *Service) persistUsageStatistics(reason string) {
-	if s == nil || !s.usageStatisticsEnabled() {
+	if s == nil {
 		return
 	}
 	path := s.usageStatisticsFilePath()
 	if strings.TrimSpace(path) == "" {
 		return
 	}
-	saved, err := internalusage.PersistRequestStatistics(path, internalusage.GetRequestStatistics())
+	saved, err := internalusage.PersistRequestStatistics(path, s.usageStatisticsStore())
 	if err != nil {
 		log.WithError(err).Warnf("failed to persist usage statistics during %s", reason)
 		return
@@ -316,6 +329,33 @@ func (s *Service) startUsagePersistenceLoop() {
 			}
 		}
 	}()
+}
+
+func (s *Service) restartUsagePersistenceLoop() {
+	if s == nil {
+		return
+	}
+	s.stopUsagePersistenceLoop()
+	s.startUsagePersistenceLoop()
+}
+
+func (s *Service) applyUsagePersistenceConfigChange(previousEnabled bool, previousInterval time.Duration, newCfg *config.Config) {
+	if s == nil || newCfg == nil {
+		return
+	}
+
+	currentEnabled := newCfg.UsageStatisticsEnabled
+	currentInterval := usagePersistenceIntervalForConfig(newCfg)
+
+	if previousEnabled && !currentEnabled {
+		s.persistUsageStatistics("disable")
+	}
+	if !previousEnabled && currentEnabled {
+		s.restoreUsageStatistics()
+	}
+	if previousEnabled != currentEnabled || previousInterval != currentInterval {
+		s.restartUsagePersistenceLoop()
+	}
 }
 
 func (s *Service) stopUsagePersistenceLoop() {
@@ -1735,10 +1775,12 @@ func (s *Service) Run(ctx context.Context) error {
 	reloadCallback := func(newCfg *config.Config) {
 		previousStrategy := ""
 		previousUsageEnabled := false
+		previousUsagePersistenceInterval := time.Duration(0)
 		s.cfgMu.RLock()
 		if s.cfg != nil {
 			previousStrategy = strings.ToLower(strings.TrimSpace(s.cfg.Routing.Strategy))
 			previousUsageEnabled = s.cfg.UsageStatisticsEnabled
+			previousUsagePersistenceInterval = usagePersistenceIntervalForConfig(s.cfg)
 		}
 		s.cfgMu.RUnlock()
 
@@ -1785,9 +1827,7 @@ func (s *Service) Run(ctx context.Context) error {
 			s.coreManager.SetConfig(newCfg)
 			s.coreManager.SetOAuthModelAlias(newCfg.OAuthModelAlias)
 		}
-		if !previousUsageEnabled && newCfg.UsageStatisticsEnabled {
-			s.restoreUsageStatistics()
-		}
+		s.applyUsagePersistenceConfigChange(previousUsageEnabled, previousUsagePersistenceInterval, newCfg)
 		s.rebindExecutors()
 	}
 

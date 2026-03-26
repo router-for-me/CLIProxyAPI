@@ -85,11 +85,13 @@ logs-max-total-size-mb: 0
 # When exceeded, the oldest error log files are deleted. Default is 10. Set to 0 to disable cleanup.
 error-logs-max-files: 10
 
-# When false, disable in-memory usage statistics aggregation
+# Controls whether the service aggregates request counts, success/failure totals,
+# token usage, and per-model details in memory for the management usage endpoints.
+# Set to false to stop collecting new usage statistics.
 usage-statistics-enabled: false
 
-# When > 0, periodically persist usage statistics to logs/usage-statistics.json.
-# Set to 0 to disable periodic flushes while still keeping startup restore and shutdown save available when usage statistics are enabled.
+# Controls how often the in-memory usage snapshot is flushed to logs/usage-statistics.json.
+# Set to 0 to disable periodic flushes; startup restore and shutdown save still remain available.
 usage-statistics-persist-interval-seconds: 30
 
 # Proxy URL. Supports socks5/http/https protocols. Example: socks5://user:pass@192.168.1.1:1080/
