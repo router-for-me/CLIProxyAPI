@@ -483,7 +483,7 @@ func TestWebsocketUpstreamSupportsIncrementalInputForModel(t *testing.T) {
 	})
 
 	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
-	h := NewOpenAIResponsesAPIHandler(base)
+	h := NewOpenAIResponsesAPIHandler(base, nil)
 	if !h.websocketUpstreamSupportsIncrementalInputForModel("test-model") {
 		t.Fatalf("expected websocket-capable upstream for test-model")
 	}
@@ -505,7 +505,7 @@ func TestResponsesWebsocketPrewarmHandledLocallyForSSEUpstream(t *testing.T) {
 	})
 
 	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
-	h := NewOpenAIResponsesAPIHandler(base)
+	h := NewOpenAIResponsesAPIHandler(base, nil)
 	router := gin.New()
 	router.GET("/v1/responses/ws", h.ResponsesWebsocket)
 
@@ -623,7 +623,7 @@ func TestResponsesWebsocketPinsOnlyWebsocketCapableAuth(t *testing.T) {
 	})
 
 	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
-	h := NewOpenAIResponsesAPIHandler(base)
+	h := NewOpenAIResponsesAPIHandler(base, nil)
 	router := gin.New()
 	router.GET("/v1/responses/ws", h.ResponsesWebsocket)
 

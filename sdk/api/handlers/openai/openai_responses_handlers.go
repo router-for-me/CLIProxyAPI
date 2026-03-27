@@ -14,6 +14,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	. "github.com/router-for-me/CLIProxyAPI/v6/internal/constant"
+	cliproxyfiles "github.com/router-for-me/CLIProxyAPI/v6/internal/files"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
@@ -25,6 +26,7 @@ import (
 // It holds a pool of clients to interact with the backend service.
 type OpenAIResponsesAPIHandler struct {
 	*handlers.BaseAPIHandler
+	fileStore *cliproxyfiles.Store
 }
 
 // NewOpenAIResponsesAPIHandler creates a new OpenAIResponses API handlers instance.
@@ -35,9 +37,10 @@ type OpenAIResponsesAPIHandler struct {
 //
 // Returns:
 //   - *OpenAIResponsesAPIHandler: A new OpenAIResponses API handlers instance
-func NewOpenAIResponsesAPIHandler(apiHandlers *handlers.BaseAPIHandler) *OpenAIResponsesAPIHandler {
+func NewOpenAIResponsesAPIHandler(apiHandlers *handlers.BaseAPIHandler, store *cliproxyfiles.Store) *OpenAIResponsesAPIHandler {
 	return &OpenAIResponsesAPIHandler{
 		BaseAPIHandler: apiHandlers,
+		fileStore:      store,
 	}
 }
 
@@ -82,6 +85,12 @@ func (h *OpenAIResponsesAPIHandler) Responses(c *gin.Context) {
 		return
 	}
 
+	rawJSON, errMsg := preprocessResponsesInputFiles(rawJSON, h.fileStore)
+	if errMsg != nil {
+		h.WriteErrorResponse(c, errMsg)
+		return
+	}
+
 	// Check if the client requested a streaming response.
 	streamResult := gjson.GetBytes(rawJSON, "stream")
 	if streamResult.Type == gjson.True {
@@ -101,6 +110,12 @@ func (h *OpenAIResponsesAPIHandler) Compact(c *gin.Context) {
 				Type:    "invalid_request_error",
 			},
 		})
+		return
+	}
+
+	rawJSON, errMsg := preprocessResponsesInputFiles(rawJSON, h.fileStore)
+	if errMsg != nil {
+		h.WriteErrorResponse(c, errMsg)
 		return
 	}
 

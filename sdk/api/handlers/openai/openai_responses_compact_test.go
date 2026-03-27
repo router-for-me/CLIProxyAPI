@@ -63,7 +63,7 @@ func TestOpenAIResponsesCompactRejectsStream(t *testing.T) {
 	})
 
 	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
-	h := NewOpenAIResponsesAPIHandler(base)
+	h := NewOpenAIResponsesAPIHandler(base, nil)
 	router := gin.New()
 	router.POST("/v1/responses/compact", h.Compact)
 
@@ -96,7 +96,7 @@ func TestOpenAIResponsesCompactExecute(t *testing.T) {
 	})
 
 	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
-	h := NewOpenAIResponsesAPIHandler(base)
+	h := NewOpenAIResponsesAPIHandler(base, nil)
 	router := gin.New()
 	router.POST("/v1/responses/compact", h.Compact)
 

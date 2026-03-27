@@ -16,7 +16,7 @@ import (
 func TestForwardResponsesStreamTerminalErrorUsesResponsesErrorChunk(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil)
-	h := NewOpenAIResponsesAPIHandler(base)
+	h := NewOpenAIResponsesAPIHandler(base, nil)
 
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)

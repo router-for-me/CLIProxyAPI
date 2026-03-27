@@ -89,6 +89,12 @@ func TestAmpProviderModelRoutes(t *testing.T) {
 			wantStatus:   http.StatusOK,
 			wantContains: `"models"`,
 		},
+		{
+			name:         "files list",
+			path:         "/v1/files",
+			wantStatus:   http.StatusOK,
+			wantContains: `"object":"list"`,
+		},
 	}
 
 	for _, tc := range testCases {

@@ -24,6 +24,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if oldCfg.AuthDir != newCfg.AuthDir {
 		changes = append(changes, fmt.Sprintf("auth-dir: %s -> %s", oldCfg.AuthDir, newCfg.AuthDir))
 	}
+	if oldCfg.FilesDir != newCfg.FilesDir {
+		changes = append(changes, fmt.Sprintf("files-dir: %s -> %s", oldCfg.FilesDir, newCfg.FilesDir))
+	}
 	if oldCfg.Debug != newCfg.Debug {
 		changes = append(changes, fmt.Sprintf("debug: %t -> %t", oldCfg.Debug, newCfg.Debug))
 	}
