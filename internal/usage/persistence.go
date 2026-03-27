@@ -14,8 +14,9 @@ import (
 )
 
 const (
-	StatisticsFileVersion = 1
-	StatisticsFileName    = "usage-statistics.json"
+	StatisticsFileVersion    = 1
+	StatisticsFileName       = "usage-statistics.snapshot"
+	legacyStatisticsFileName = "usage-statistics.json"
 )
 
 // StatisticsFilePayload is the on-disk representation used for automatic
@@ -36,6 +37,18 @@ func StatisticsFilePath(cfg *config.Config) string {
 		return StatisticsFileName
 	}
 	return filepath.Join(filepath.Clean(logDir), StatisticsFileName)
+}
+
+func legacyStatisticsFilePath(path string) string {
+	target := strings.TrimSpace(path)
+	if target == "" {
+		return ""
+	}
+	target = filepath.Clean(target)
+	if !strings.EqualFold(filepath.Base(target), StatisticsFileName) {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(target), legacyStatisticsFileName)
 }
 
 // SaveSnapshotFile writes a complete statistics snapshot to disk atomically.
@@ -98,9 +111,16 @@ func RestoreRequestStatistics(path string, stats *RequestStatistics) (loaded boo
 	snapshot, errLoad := LoadSnapshotFile(path)
 	if errLoad != nil {
 		if os.IsNotExist(errLoad) {
-			return false, result, nil
+			if legacyPath := legacyStatisticsFilePath(path); legacyPath != "" {
+				snapshot, errLoad = LoadSnapshotFile(legacyPath)
+			}
+			if os.IsNotExist(errLoad) {
+				return false, result, nil
+			}
 		}
-		return false, result, errLoad
+		if errLoad != nil {
+			return false, result, errLoad
+		}
 	}
 	result = stats.MergeSnapshot(snapshot)
 	if versionBefore == persistedBefore {

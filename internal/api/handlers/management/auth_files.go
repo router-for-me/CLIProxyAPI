@@ -323,35 +323,45 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context) {
 		if !strings.HasSuffix(strings.ToLower(name), ".json") {
 			continue
 		}
-		if info, errInfo := e.Info(); errInfo == nil {
-			fileData := gin.H{"name": name, "size": info.Size(), "modtime": info.ModTime()}
+		info, errInfo := e.Info()
+		if errInfo != nil {
+			continue
+		}
 
-			// Read file to get type field
-			full := filepath.Join(h.cfg.AuthDir, name)
-			if data, errRead := os.ReadFile(full); errRead == nil {
-				typeValue := gjson.GetBytes(data, "type").String()
-				emailValue := gjson.GetBytes(data, "email").String()
-				fileData["type"] = typeValue
-				fileData["email"] = emailValue
-				if pv := gjson.GetBytes(data, "priority"); pv.Exists() {
-					switch pv.Type {
-					case gjson.Number:
-						fileData["priority"] = int(pv.Int())
-					case gjson.String:
-						if parsed, errAtoi := strconv.Atoi(strings.TrimSpace(pv.String())); errAtoi == nil {
-							fileData["priority"] = parsed
-						}
-					}
-				}
-				if nv := gjson.GetBytes(data, "note"); nv.Exists() && nv.Type == gjson.String {
-					if trimmed := strings.TrimSpace(nv.String()); trimmed != "" {
-						fileData["note"] = trimmed
-					}
+		full := filepath.Join(h.cfg.AuthDir, name)
+		data, errRead := os.ReadFile(full)
+		if errRead != nil {
+			continue
+		}
+		typeValue := strings.TrimSpace(gjson.GetBytes(data, "type").String())
+		if typeValue == "" {
+			continue
+		}
+
+		fileData := gin.H{
+			"name":    name,
+			"size":    info.Size(),
+			"modtime": info.ModTime(),
+			"type":    typeValue,
+			"email":   gjson.GetBytes(data, "email").String(),
+		}
+		if pv := gjson.GetBytes(data, "priority"); pv.Exists() {
+			switch pv.Type {
+			case gjson.Number:
+				fileData["priority"] = int(pv.Int())
+			case gjson.String:
+				if parsed, errAtoi := strconv.Atoi(strings.TrimSpace(pv.String())); errAtoi == nil {
+					fileData["priority"] = parsed
 				}
 			}
-
-			files = append(files, fileData)
 		}
+		if nv := gjson.GetBytes(data, "note"); nv.Exists() && nv.Type == gjson.String {
+			if trimmed := strings.TrimSpace(nv.String()); trimmed != "" {
+				fileData["note"] = trimmed
+			}
+		}
+
+		files = append(files, fileData)
 	}
 	c.JSON(200, gin.H{"files": files})
 }
@@ -984,9 +994,11 @@ func (h *Handler) buildAuthFromFileData(path string, data []byte) (*coreauth.Aut
 		return nil, fmt.Errorf("invalid auth file: %w", err)
 	}
 	provider, _ := metadata["type"].(string)
+	provider = strings.TrimSpace(provider)
 	if provider == "" {
-		provider = "unknown"
+		return nil, fmt.Errorf("invalid auth file: missing type")
 	}
+	metadata["type"] = provider
 	label := provider
 	if email, ok := metadata["email"].(string); ok && email != "" {
 		label = email

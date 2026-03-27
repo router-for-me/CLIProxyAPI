@@ -62,7 +62,8 @@ func TestEnforceLogDirSizeLimitIgnoresUsageStatisticsFile(t *testing.T) {
 
 	writeLogFile(t, filepath.Join(dir, "old.log"), 70, time.Unix(1, 0))
 	writeLogFile(t, filepath.Join(dir, "new.log"), 70, time.Unix(2, 0))
-	statsPath := filepath.Join(dir, "usage-statistics.json")
+	const statsFileName = "usage-statistics.snapshot"
+	statsPath := filepath.Join(dir, statsFileName)
 	if err := os.WriteFile(statsPath, []byte(`{"version":1}`), 0o644); err != nil {
 		t.Fatalf("write stats file: %v", err)
 	}
@@ -81,7 +82,7 @@ func TestEnforceLogDirSizeLimitIgnoresUsageStatisticsFile(t *testing.T) {
 		t.Fatalf("expected new.log to remain, stat error: %v", err)
 	}
 	if _, err := os.Stat(statsPath); err != nil {
-		t.Fatalf("expected usage-statistics.json to remain, stat error: %v", err)
+		t.Fatalf("expected %s to remain, stat error: %v", statsFileName, err)
 	}
 }
 

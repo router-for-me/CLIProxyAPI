@@ -94,7 +94,7 @@ error-logs-max-files: 10
 # Set to false to stop collecting new usage statistics.
 usage-statistics-enabled: false
 
-# Controls how often the in-memory usage snapshot is flushed to logs/usage-statistics.json.
+# Controls how often the in-memory usage snapshot is flushed to logs/usage-statistics.snapshot.
 # Set to 0 to disable periodic flushes; startup restore and shutdown save still remain available.
 usage-statistics-persist-interval-seconds: 30
 

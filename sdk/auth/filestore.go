@@ -203,8 +203,9 @@ func (s *FileTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth,
 		return nil, fmt.Errorf("unmarshal auth json: %w", err)
 	}
 	provider, _ := metadata["type"].(string)
+	provider = strings.TrimSpace(provider)
 	if provider == "" {
-		provider = "unknown"
+		return nil, nil
 	}
 	s.hydrateProjectID(path, provider, metadata)
 	info, err := os.Stat(path)

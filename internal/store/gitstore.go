@@ -422,8 +422,9 @@ func (s *GitTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth, 
 		return nil, fmt.Errorf("unmarshal auth json: %w", err)
 	}
 	provider, _ := metadata["type"].(string)
+	provider = strings.TrimSpace(provider)
 	if provider == "" {
-		provider = "unknown"
+		return nil, nil
 	}
 	info, err := os.Stat(path)
 	if err != nil {

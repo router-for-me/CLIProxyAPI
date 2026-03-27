@@ -567,7 +567,7 @@ func (s *ObjectTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Aut
 	}
 	provider := strings.TrimSpace(valueAsString(metadata["type"]))
 	if provider == "" {
-		provider = "unknown"
+		return nil, nil
 	}
 	info, err := os.Stat(path)
 	if err != nil {

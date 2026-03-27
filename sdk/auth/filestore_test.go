@@ -200,3 +200,36 @@ func TestFileTokenStoreReadAuthFile_HydratesGeminiProjectID(t *testing.T) {
 		t.Fatalf("persisted token.access_token = %v, want %q", got, "refreshed-token")
 	}
 }
+
+func TestFileTokenStoreListIgnoresNonAuthJSON(t *testing.T) {
+	tempDir := t.TempDir()
+	store := NewFileTokenStore()
+	store.SetBaseDir(tempDir)
+
+	if err := os.MkdirAll(filepath.Join(tempDir, "logs"), 0o700); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tempDir, "logs", "usage-statistics.json"), []byte(`{"version":1}`), 0o600); err != nil {
+		t.Fatalf("WriteFile(stats) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tempDir, "codex.json"), []byte(`{"type":"codex","email":"user@example.com"}`), 0o600); err != nil {
+		t.Fatalf("WriteFile(auth) error = %v", err)
+	}
+
+	auths, err := store.List(context.Background())
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("len(List()) = %d, want 1", len(auths))
+	}
+	if auths[0] == nil {
+		t.Fatal("List() returned nil auth")
+	}
+	if auths[0].ID != "codex.json" {
+		t.Fatalf("auth ID = %q, want %q", auths[0].ID, "codex.json")
+	}
+	if auths[0].Provider != "codex" {
+		t.Fatalf("auth provider = %q, want %q", auths[0].Provider, "codex")
+	}
+}

@@ -201,6 +201,44 @@ func TestRestoreRequestStatisticsDeduplicatesRepeatedLoads(t *testing.T) {
 	}
 }
 
+func TestRestoreRequestStatisticsFallsBackToLegacyJSONFile(t *testing.T) {
+	stats := NewRequestStatistics()
+	recordUsageForTest(stats, coreusage.Record{
+		APIKey:      "legacy-key",
+		Model:       "gpt-5.4",
+		RequestedAt: time.Date(2026, 3, 26, 10, 0, 0, 0, time.UTC),
+		Source:      "legacy@example.com",
+		AuthIndex:   "0",
+		Detail: coreusage.Detail{
+			InputTokens:  1,
+			OutputTokens: 2,
+			TotalTokens:  3,
+		},
+	})
+
+	dir := t.TempDir()
+	legacyPath := filepath.Join(dir, legacyStatisticsFileName)
+	if _, err := PersistRequestStatistics(legacyPath, stats); err != nil {
+		t.Fatalf("PersistRequestStatistics(legacyPath) error = %v", err)
+	}
+
+	restored := NewRequestStatistics()
+	currentPath := filepath.Join(dir, StatisticsFileName)
+	loaded, result, err := RestoreRequestStatistics(currentPath, restored)
+	if err != nil {
+		t.Fatalf("RestoreRequestStatistics() error = %v", err)
+	}
+	if !loaded {
+		t.Fatalf("RestoreRequestStatistics() loaded = false, want true")
+	}
+	if result.Added != 1 || result.Skipped != 0 {
+		t.Fatalf("RestoreRequestStatistics() result = %+v, want added=1 skipped=0", result)
+	}
+	if got := restored.Snapshot().TotalRequests; got != 1 {
+		t.Fatalf("restored snapshot.TotalRequests = %d, want 1", got)
+	}
+}
+
 func recordUsageForTest(stats *RequestStatistics, record coreusage.Record) {
 	stats.Record(context.Background(), record)
 }
