@@ -205,6 +205,10 @@ func (s *H2Stream) Data() <-chan []byte { return s.dataCh }
 // Done returns a channel closed when the stream ends.
 func (s *H2Stream) Done() <-chan struct{} { return s.doneCh }
 
+// Err returns the error (if any) that caused the stream to close.
+// Returns nil for a clean shutdown (EOF / StreamEnded).
+func (s *H2Stream) Err() error { return s.err }
+
 // Close tears down the connection.
 func (s *H2Stream) Close() {
 	s.conn.Close()
