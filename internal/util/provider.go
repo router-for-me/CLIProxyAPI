@@ -57,6 +57,12 @@ func GetProviderName(modelName string) []string {
 		return providers
 	}
 
+	// Fallback: if cursor provider has registered models, route unknown models to it.
+	// Cursor acts as a universal proxy supporting multiple model families (Claude, GPT, Gemini, etc.).
+	if models := registry.GetGlobalRegistry().GetAvailableModelsByProvider("cursor"); len(models) > 0 {
+		return []string{"cursor"}
+	}
+
 	return providers
 }
 
