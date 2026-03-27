@@ -41,8 +41,21 @@ func ParseConnectFrame(buf []byte) (flags byte, payload []byte, consumed int, ok
 	return flags, buf[5:total], total, true
 }
 
+// ConnectError is a structured error from the Connect protocol end-of-stream trailer.
+// The Code field contains the server-defined error code (e.g. gRPC standard codes
+// like "resource_exhausted", "unauthenticated", "permission_denied", "unavailable").
+type ConnectError struct {
+	Code    string // server-defined error code
+	Message string // human-readable error description
+}
+
+func (e *ConnectError) Error() string {
+	return fmt.Sprintf("Connect error %s: %s", e.Code, e.Message)
+}
+
 // ParseConnectEndStream parses a Connect end-of-stream frame payload (JSON).
 // Returns nil if there is no error in the trailer.
+// On error, returns a *ConnectError with the server's error code and message.
 func ParseConnectEndStream(data []byte) error {
 	if len(data) == 0 {
 		return nil
@@ -65,7 +78,7 @@ func ParseConnectEndStream(data []byte) error {
 		if msg == "" {
 			msg = "Unknown error"
 		}
-		return fmt.Errorf("Connect error %s: %s", code, msg)
+		return &ConnectError{Code: code, Message: msg}
 	}
 	return nil
 }
