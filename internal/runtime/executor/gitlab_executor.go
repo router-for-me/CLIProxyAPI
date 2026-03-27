@@ -30,10 +30,18 @@ const (
 	gitLabChatEndpoint            = "/api/v4/chat/completions"
 	gitLabCodeSuggestionsEndpoint = "/api/v4/code_suggestions/completions"
 	gitLabSSEStreamingHeader      = "X-Supports-Sse-Streaming"
+	gitLabContext1MBeta           = "context-1m-2025-08-07"
+	gitLabNativeUserAgent         = "CLIProxyAPIPlus/GitLab-Duo"
 )
 
 type GitLabExecutor struct {
 	cfg *config.Config
+}
+
+type gitLabCatalogModel struct {
+	ID          string
+	DisplayName string
+	Provider    string
 }
 
 type gitLabPrompt struct {
@@ -51,6 +59,23 @@ type gitLabOpenAIStreamState struct {
 	LastFullText string
 	Started      bool
 	Finished     bool
+}
+
+var gitLabAgenticCatalog = []gitLabCatalogModel{
+	{ID: "duo-chat-gpt-5-1", DisplayName: "GitLab Duo (GPT-5.1)", Provider: "openai"},
+	{ID: "duo-chat-opus-4-6", DisplayName: "GitLab Duo (Claude Opus 4.6)", Provider: "anthropic"},
+	{ID: "duo-chat-opus-4-5", DisplayName: "GitLab Duo (Claude Opus 4.5)", Provider: "anthropic"},
+	{ID: "duo-chat-sonnet-4-6", DisplayName: "GitLab Duo (Claude Sonnet 4.6)", Provider: "anthropic"},
+	{ID: "duo-chat-sonnet-4-5", DisplayName: "GitLab Duo (Claude Sonnet 4.5)", Provider: "anthropic"},
+	{ID: "duo-chat-gpt-5-mini", DisplayName: "GitLab Duo (GPT-5 Mini)", Provider: "openai"},
+	{ID: "duo-chat-gpt-5-2", DisplayName: "GitLab Duo (GPT-5.2)", Provider: "openai"},
+	{ID: "duo-chat-gpt-5-2-codex", DisplayName: "GitLab Duo (GPT-5.2 Codex)", Provider: "openai"},
+	{ID: "duo-chat-gpt-5-codex", DisplayName: "GitLab Duo (GPT-5 Codex)", Provider: "openai"},
+	{ID: "duo-chat-haiku-4-5", DisplayName: "GitLab Duo (Claude Haiku 4.5)", Provider: "anthropic"},
+}
+
+var gitLabModelAliases = map[string]string{
+	"duo-chat-haiku-4-6":  "duo-chat-haiku-4-5",
 }
 
 func NewGitLabExecutor(cfg *config.Config) *GitLabExecutor {
@@ -249,12 +274,12 @@ func (e *GitLabExecutor) nativeGateway(
 	auth *cliproxyauth.Auth,
 	req cliproxyexecutor.Request,
 ) (cliproxyauth.ProviderExecutor, *cliproxyauth.Auth, cliproxyexecutor.Request, bool) {
-	if nativeAuth, ok := buildGitLabAnthropicGatewayAuth(auth); ok {
+	if nativeAuth, ok := buildGitLabAnthropicGatewayAuth(auth, req.Model); ok {
 		nativeReq := req
 		nativeReq.Model = gitLabResolvedModel(auth, req.Model)
 		return NewClaudeExecutor(e.cfg), nativeAuth, nativeReq, true
 	}
-	if nativeAuth, ok := buildGitLabOpenAIGatewayAuth(auth); ok {
+	if nativeAuth, ok := buildGitLabOpenAIGatewayAuth(auth, req.Model); ok {
 		nativeReq := req
 		nativeReq.Model = gitLabResolvedModel(auth, req.Model)
 		return NewCodexExecutor(e.cfg), nativeAuth, nativeReq, true
@@ -263,10 +288,10 @@ func (e *GitLabExecutor) nativeGateway(
 }
 
 func (e *GitLabExecutor) nativeGatewayHTTP(auth *cliproxyauth.Auth) (cliproxyauth.ProviderExecutor, *cliproxyauth.Auth) {
-	if nativeAuth, ok := buildGitLabAnthropicGatewayAuth(auth); ok {
+	if nativeAuth, ok := buildGitLabAnthropicGatewayAuth(auth, ""); ok {
 		return NewClaudeExecutor(e.cfg), nativeAuth
 	}
-	if nativeAuth, ok := buildGitLabOpenAIGatewayAuth(auth); ok {
+	if nativeAuth, ok := buildGitLabOpenAIGatewayAuth(auth, ""); ok {
 		return NewCodexExecutor(e.cfg), nativeAuth
 	}
 	return nil, nil
@@ -664,7 +689,7 @@ func applyGitLabRequestHeaders(req *http.Request, auth *cliproxyauth.Auth) {
 	if auth != nil {
 		util.ApplyCustomHeadersFromAttrs(req, auth.Attributes)
 	}
-	for key, value := range gitLabGatewayHeaders(auth) {
+	for key, value := range gitLabGatewayHeaders(auth, "") {
 		if key == "" || value == "" {
 			continue
 		}
@@ -672,34 +697,40 @@ func applyGitLabRequestHeaders(req *http.Request, auth *cliproxyauth.Auth) {
 	}
 }
 
-func gitLabGatewayHeaders(auth *cliproxyauth.Auth) map[string]string {
-	if auth == nil || auth.Metadata == nil {
-		return nil
-	}
-	raw, ok := auth.Metadata["duo_gateway_headers"]
-	if !ok {
-		return nil
-	}
+func gitLabGatewayHeaders(auth *cliproxyauth.Auth, targetProvider string) map[string]string {
 	out := make(map[string]string)
-	switch typed := raw.(type) {
-	case map[string]string:
-		for key, value := range typed {
-			key = strings.TrimSpace(key)
-			value = strings.TrimSpace(value)
-			if key != "" && value != "" {
-				out[key] = value
+	if auth != nil && auth.Metadata != nil {
+		raw, ok := auth.Metadata["duo_gateway_headers"]
+		if ok {
+			switch typed := raw.(type) {
+			case map[string]string:
+				for key, value := range typed {
+					key = strings.TrimSpace(key)
+					value = strings.TrimSpace(value)
+					if key != "" && value != "" {
+						out[key] = value
+					}
+				}
+			case map[string]any:
+				for key, value := range typed {
+					key = strings.TrimSpace(key)
+					if key == "" {
+						continue
+					}
+					strValue := strings.TrimSpace(fmt.Sprint(value))
+					if strValue != "" {
+						out[key] = strValue
+					}
+				}
 			}
 		}
-	case map[string]any:
-		for key, value := range typed {
-			key = strings.TrimSpace(key)
-			if key == "" {
-				continue
-			}
-			strValue := strings.TrimSpace(fmt.Sprint(value))
-			if strValue != "" {
-				out[key] = strValue
-			}
+	}
+	if _, ok := out["User-Agent"]; !ok {
+		out["User-Agent"] = gitLabNativeUserAgent
+	}
+	if strings.EqualFold(strings.TrimSpace(targetProvider), "openai") {
+		if _, ok := out["anthropic-beta"]; !ok {
+			out["anthropic-beta"] = gitLabContext1MBeta
 		}
 	}
 	if len(out) == 0 {
@@ -989,8 +1020,8 @@ func gitLabUsage(model string, translatedReq []byte, text string) (int64, int64)
 	return promptTokens, int64(completionCount)
 }
 
-func buildGitLabAnthropicGatewayAuth(auth *cliproxyauth.Auth) (*cliproxyauth.Auth, bool) {
-	if !gitLabUsesAnthropicGateway(auth) {
+func buildGitLabAnthropicGatewayAuth(auth *cliproxyauth.Auth, requestedModel string) (*cliproxyauth.Auth, bool) {
+	if !gitLabUsesAnthropicGateway(auth, requestedModel) {
 		return nil, false
 	}
 	baseURL := gitLabAnthropicGatewayBaseURL(auth)
@@ -1006,7 +1037,8 @@ func buildGitLabAnthropicGatewayAuth(auth *cliproxyauth.Auth) (*cliproxyauth.Aut
 	}
 	nativeAuth.Attributes["api_key"] = token
 	nativeAuth.Attributes["base_url"] = baseURL
-	for key, value := range gitLabGatewayHeaders(auth) {
+	nativeAuth.Attributes["gitlab_duo_force_context_1m"] = "true"
+	for key, value := range gitLabGatewayHeaders(auth, "anthropic") {
 		if key == "" || value == "" {
 			continue
 		}
@@ -1015,8 +1047,8 @@ func buildGitLabAnthropicGatewayAuth(auth *cliproxyauth.Auth) (*cliproxyauth.Aut
 	return nativeAuth, true
 }
 
-func buildGitLabOpenAIGatewayAuth(auth *cliproxyauth.Auth) (*cliproxyauth.Auth, bool) {
-	if !gitLabUsesOpenAIGateway(auth) {
+func buildGitLabOpenAIGatewayAuth(auth *cliproxyauth.Auth, requestedModel string) (*cliproxyauth.Auth, bool) {
+	if !gitLabUsesOpenAIGateway(auth, requestedModel) {
 		return nil, false
 	}
 	baseURL := gitLabOpenAIGatewayBaseURL(auth)
@@ -1032,7 +1064,7 @@ func buildGitLabOpenAIGatewayAuth(auth *cliproxyauth.Auth) (*cliproxyauth.Auth, 
 	}
 	nativeAuth.Attributes["api_key"] = token
 	nativeAuth.Attributes["base_url"] = baseURL
-	for key, value := range gitLabGatewayHeaders(auth) {
+	for key, value := range gitLabGatewayHeaders(auth, "openai") {
 		if key == "" || value == "" {
 			continue
 		}
@@ -1041,32 +1073,39 @@ func buildGitLabOpenAIGatewayAuth(auth *cliproxyauth.Auth) (*cliproxyauth.Auth, 
 	return nativeAuth, true
 }
 
-func gitLabUsesAnthropicGateway(auth *cliproxyauth.Auth) bool {
+func gitLabUsesAnthropicGateway(auth *cliproxyauth.Auth, requestedModel string) bool {
 	if auth == nil || auth.Metadata == nil {
 		return false
 	}
-	provider := strings.ToLower(gitLabMetadataString(auth.Metadata, "model_provider"))
-	if provider == "" {
-		modelName := strings.ToLower(gitLabMetadataString(auth.Metadata, "model_name"))
-		provider = inferGitLabProviderFromModel(modelName)
-	}
+	provider := gitLabGatewayProvider(auth, requestedModel)
 	return provider == "anthropic" &&
 		gitLabMetadataString(auth.Metadata, "duo_gateway_base_url") != "" &&
 		gitLabMetadataString(auth.Metadata, "duo_gateway_token") != ""
 }
 
-func gitLabUsesOpenAIGateway(auth *cliproxyauth.Auth) bool {
+func gitLabUsesOpenAIGateway(auth *cliproxyauth.Auth, requestedModel string) bool {
 	if auth == nil || auth.Metadata == nil {
 		return false
 	}
-	provider := strings.ToLower(gitLabMetadataString(auth.Metadata, "model_provider"))
-	if provider == "" {
-		modelName := strings.ToLower(gitLabMetadataString(auth.Metadata, "model_name"))
-		provider = inferGitLabProviderFromModel(modelName)
-	}
+	provider := gitLabGatewayProvider(auth, requestedModel)
 	return provider == "openai" &&
 		gitLabMetadataString(auth.Metadata, "duo_gateway_base_url") != "" &&
 		gitLabMetadataString(auth.Metadata, "duo_gateway_token") != ""
+}
+
+func gitLabGatewayProvider(auth *cliproxyauth.Auth, requestedModel string) string {
+	modelName := strings.TrimSpace(gitLabResolvedModel(auth, requestedModel))
+	if provider := inferGitLabProviderFromModel(modelName); provider != "" {
+		return provider
+	}
+	if auth == nil || auth.Metadata == nil {
+		return ""
+	}
+	provider := strings.ToLower(gitLabMetadataString(auth.Metadata, "model_provider"))
+	if provider == "" {
+		provider = inferGitLabProviderFromModel(gitLabMetadataString(auth.Metadata, "model_name"))
+	}
+	return provider
 }
 
 func inferGitLabProviderFromModel(model string) string {
@@ -1151,6 +1190,9 @@ func gitLabBaseURL(auth *cliproxyauth.Auth) string {
 func gitLabResolvedModel(auth *cliproxyauth.Auth, requested string) string {
 	requested = strings.TrimSpace(thinking.ParseSuffix(requested).ModelName)
 	if requested != "" && !strings.EqualFold(requested, "gitlab-duo") {
+		if mapped, ok := gitLabModelAliases[strings.ToLower(requested)]; ok && strings.TrimSpace(mapped) != "" {
+			return mapped
+		}
 		return requested
 	}
 	if auth != nil && auth.Metadata != nil {
@@ -1277,8 +1319,8 @@ func gitLabAuthKind(method string) string {
 }
 
 func GitLabModelsFromAuth(auth *cliproxyauth.Auth) []*registry.ModelInfo {
-	models := make([]*registry.ModelInfo, 0, 4)
-	seen := make(map[string]struct{}, 4)
+	models := make([]*registry.ModelInfo, 0, len(gitLabAgenticCatalog)+4)
+	seen := make(map[string]struct{}, len(gitLabAgenticCatalog)+4)
 	addModel := func(id, displayName, provider string) {
 		id = strings.TrimSpace(id)
 		if id == "" {
@@ -1302,6 +1344,18 @@ func GitLabModelsFromAuth(auth *cliproxyauth.Auth) []*registry.ModelInfo {
 	}
 
 	addModel("gitlab-duo", "GitLab Duo", "gitlab")
+	for _, model := range gitLabAgenticCatalog {
+		addModel(model.ID, model.DisplayName, model.Provider)
+	}
+	for alias, upstream := range gitLabModelAliases {
+		target := strings.TrimSpace(upstream)
+		displayName := "GitLab Duo Alias"
+		provider := strings.TrimSpace(inferGitLabProviderFromModel(target))
+		if provider != "" {
+			displayName = fmt.Sprintf("GitLab Duo Alias (%s)", provider)
+		}
+		addModel(alias, displayName, provider)
+	}
 	if auth == nil {
 		return models
 	}

@@ -209,9 +209,6 @@ waitForCallback:
 	metadata := buildGitLabAuthMetadata(baseURL, gitLabLoginModeOAuth, tokenResp, direct)
 	metadata["auth_kind"] = "oauth"
 	metadata[gitLabOAuthClientIDMetadataKey] = clientID
-	if strings.TrimSpace(clientSecret) != "" {
-		metadata[gitLabOAuthClientSecretMetadataKey] = clientSecret
-	}
 	metadata["username"] = strings.TrimSpace(user.Username)
 	if email := strings.TrimSpace(primaryGitLabEmail(user)); email != "" {
 		metadata["email"] = email
