@@ -1648,3 +1648,63 @@ func TestCheckSystemInstructionsWithMode_StringWithSpecialChars(t *testing.T) {
 		t.Fatalf("blocks[2] text mangled, got %q", blocks[2].Get("text").String())
 	}
 }
+
+// TestApplyClaudeHeaders_NonAnthropicUpstream verifies that Anthropic-specific
+// fingerprint headers are NOT forwarded when the upstream is not api.anthropic.com.
+// These headers (Anthropic-Dangerous-Direct-Browser-Access, X-App, and the
+// claude-code-20250219 beta) cause third-party upstreams like api.xheai.cc to
+// hang or return 400. Regression test for the gateway compatibility bug.
+func TestApplyClaudeHeaders_NonAnthropicUpstream(t *testing.T) {
+	req, _ := http.NewRequest(http.MethodPost, "https://api.xheai.cc/v1/messages?beta=true", nil)
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{
+			"api_key":  "sk-test-key",
+			"base_url": "https://api.xheai.cc",
+		},
+	}
+	applyClaudeHeaders(req, auth, "sk-test-key", false, nil, nil)
+
+	// anthropic-dangerous-direct-browser-access must NOT be sent to non-Anthropic upstreams
+	if got := req.Header.Get("Anthropic-Dangerous-Direct-Browser-Access"); got != "" {
+		t.Errorf("Anthropic-Dangerous-Direct-Browser-Access = %q, want empty for non-Anthropic upstream", got)
+	}
+
+	// x-app must NOT be sent to non-Anthropic upstreams
+	if got := req.Header.Get("X-App"); got != "" {
+		t.Errorf("X-App = %q, want empty for non-Anthropic upstream", got)
+	}
+
+	// claude-code-20250219 must NOT appear in Anthropic-Beta for non-Anthropic upstreams
+	beta := req.Header.Get("Anthropic-Beta")
+	if strings.Contains(beta, "claude-code-20250219") {
+		t.Errorf("Anthropic-Beta contains claude-code-20250219 for non-Anthropic upstream: %q", beta)
+	}
+}
+
+// TestApplyClaudeHeaders_AnthropicUpstream verifies that all Anthropic-specific
+// headers ARE set when the upstream is api.anthropic.com (normal case).
+func TestApplyClaudeHeaders_AnthropicUpstream(t *testing.T) {
+	req, _ := http.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages?beta=true", nil)
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{
+			"api_key": "sk-ant-test",
+		},
+	}
+	applyClaudeHeaders(req, auth, "sk-ant-test", false, nil, nil)
+
+	// anthropic-dangerous-direct-browser-access MUST be sent to api.anthropic.com
+	if got := req.Header.Get("Anthropic-Dangerous-Direct-Browser-Access"); got != "true" {
+		t.Errorf("Anthropic-Dangerous-Direct-Browser-Access = %q, want %q for Anthropic upstream", got, "true")
+	}
+
+	// x-app MUST be sent to api.anthropic.com
+	if got := req.Header.Get("X-App"); got != "cli" {
+		t.Errorf("X-App = %q, want %q for Anthropic upstream", got, "cli")
+	}
+
+	// claude-code-20250219 MUST appear in Anthropic-Beta for api.anthropic.com
+	beta := req.Header.Get("Anthropic-Beta")
+	if !strings.Contains(beta, "claude-code-20250219") {
+		t.Errorf("Anthropic-Beta missing claude-code-20250219 for Anthropic upstream: %q", beta)
+	}
+}
