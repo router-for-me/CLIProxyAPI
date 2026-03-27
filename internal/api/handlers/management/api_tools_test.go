@@ -57,6 +57,61 @@ func TestAPICallTransportInvalidAuthFallsBackToGlobalProxy(t *testing.T) {
 		t.Fatalf("proxy URL = %v, want http://global-proxy.example.com:8080", proxyURL)
 	}
 }
+func TestAPICallTransport_InheritsEnvironmentProxyWhenNoExplicitProxyConfigured(t *testing.T) {
+        t.Setenv("HTTP_PROXY", "http://127.0.0.1:18080")
+        t.Setenv("HTTPS_PROXY", "http://127.0.0.1:18443")
+        t.Setenv("NO_PROXY", "")
+
+        h := &Handler{
+                cfg: &config.Config{
+                        SDKConfig: sdkconfig.SDKConfig{ProxyURL: ""},
+                },
+        }
+
+        rt := h.apiCallTransport(&coreauth.Auth{ProxyURL: ""})
+        transport, ok := rt.(*http.Transport)
+        if ok && transport.Proxy != nil {
+                tests := []struct {
+                        name string
+                        raw  string
+                        want string
+                }{
+                        {name: "http request uses HTTP_PROXY", raw: "http://example.com", want: "http://127.0.0.1:18080"},
+                        {name: "https request uses HTTPS_PROXY", raw: "https://example.com", want: "http://127.0.0.1:18443"},
+                }
+                for _, tt := range tests {
+                        t.Run(tt.name, func(t *testing.T) {
+                                req, err := http.NewRequest("GET", tt.raw, nil)
+                                if err != nil {
+                                        t.Fatalf("new request: %v", err)
+                                }
+                                proxyURL, err := transport.Proxy(req)
+                                if err != nil {
+                                        t.Fatalf("proxy func returned error: %v", err)
+                                }
+                                if proxyURL == nil {
+                                        t.Fatal("expected environment proxy to be inherited, got nil")
+                                }
+                                if got := proxyURL.String(); got != tt.want {
+                                        t.Fatalf("expected proxy %q, got %q", tt.want, got)
+                                }
+                        })
+                }
+                return
+        }
+        req, err := http.NewRequest("GET", "https://example.com", nil)
+        if err != nil {
+                t.Fatalf("new request: %v", err)
+        }
+        proxyURL, err := http.ProxyFromEnvironment(req)
+        if err != nil {
+                t.Fatalf("ProxyFromEnvironment error: %v", err)
+        }
+        if proxyURL == nil || proxyURL.String() != "http://127.0.0.1:18443" {
+                t.Fatalf("expected environment proxy http://127.0.0.1:18443, got %v", proxyURL)
+        }
+  }
+
 
 func TestAuthByIndexDistinguishesSharedAPIKeysAcrossProviders(t *testing.T) {
 	t.Parallel()
