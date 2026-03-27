@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	qoderauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/qoder"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
@@ -253,6 +254,17 @@ func (s *FileTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth,
 	}
 	if email, ok := metadata["email"].(string); ok && email != "" {
 		auth.Attributes["email"] = email
+	}
+	if provider == "qoder" {
+		var storage qoderauth.QoderTokenStorage
+		if raw, errMarshal := json.Marshal(metadata); errMarshal == nil {
+			if errUnmarshal := json.Unmarshal(raw, &storage); errUnmarshal == nil {
+				if strings.TrimSpace(storage.Type) == "" {
+					storage.Type = "qoder"
+				}
+				auth.Storage = &storage
+			}
+		}
 	}
 	return auth, nil
 }

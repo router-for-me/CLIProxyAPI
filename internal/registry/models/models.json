@@ -2679,5 +2679,37 @@
       "context_length": 114000,
       "max_completion_tokens": 32768
     }
+  ],
+  "qoder": [
+    {
+      "id": "qwen-coder-qoder-1.0",
+      "name": "Qwen Coder Qoder 1.0",
+      "owned_by": "qoder",
+      "description": "Qoder-tuned Qwen coder model"
+    },
+    {
+      "id": "qwen3.5-plus",
+      "name": "Qwen3.5 Plus",
+      "owned_by": "qoder",
+      "description": "Qwen 3.5 Plus via Qoder"
+    },
+    {
+      "id": "glm-5",
+      "name": "GLM-5",
+      "owned_by": "qoder",
+      "description": "GLM-5 via Qoder"
+    },
+    {
+      "id": "kimi-k2.5",
+      "name": "Kimi K2.5",
+      "owned_by": "qoder",
+      "description": "Kimi K2.5 via Qoder"
+    },
+    {
+      "id": "minimax-m2.7",
+      "name": "MiniMax M2.7",
+      "owned_by": "qoder",
+      "description": "MiniMax M2.7 via Qoder"
+    }
   ]
 }
