@@ -31,6 +31,7 @@ const (
 	httpUserAgent                = "CLIProxyAPI-management-updater"
 	managementSyncMinInterval    = 30 * time.Second
 	updateCheckInterval          = 3 * time.Hour
+	maxAssetDownloadSize         = 50 << 20 // 10 MB safety limit for management asset downloads
 )
 
 // ManagementFileName exposes the control panel asset filename.
@@ -86,6 +87,10 @@ func runAutoUpdater(ctx context.Context) {
 		}
 		if cfg.RemoteManagement.DisableControlPanel {
 			log.Debug("management asset auto-updater skipped: control panel disabled")
+			return
+		}
+		if cfg.RemoteManagement.DisableAutoUpdatePanel {
+			log.Debug("management asset auto-updater skipped: disable-auto-update-panel is enabled")
 			return
 		}
 
@@ -259,7 +264,8 @@ func EnsureLatestManagementHTML(ctx context.Context, staticDir string, proxyURL 
 		}
 
 		if remoteHash != "" && !strings.EqualFold(remoteHash, downloadedHash) {
-			log.Warnf("remote digest mismatch for management asset: expected %s got %s", remoteHash, downloadedHash)
+			log.Errorf("management asset digest mismatch: expected %s got %s — aborting update for safety", remoteHash, downloadedHash)
+			return nil, nil
 		}
 
 		if err = atomicWriteFile(localPath, data); err != nil {
@@ -281,6 +287,9 @@ func ensureFallbackManagementHTML(ctx context.Context, client *http.Client, loca
 		log.WithError(err).Warn("failed to download fallback management control panel page")
 		return false
 	}
+
+	log.Warnf("management asset downloaded from fallback URL without digest verification (hash=%s) — "+
+		"enable verified GitHub updates by keeping disable-auto-update-panel set to false", downloadedHash)
 
 	if err = atomicWriteFile(localPath, data); err != nil {
 		log.WithError(err).Warn("failed to persist fallback management control panel page")
@@ -392,9 +401,12 @@ func downloadAsset(ctx context.Context, client *http.Client, downloadURL string)
 		return nil, "", fmt.Errorf("unexpected download status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
-	data, err := io.ReadAll(resp.Body)
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxAssetDownloadSize+1))
 	if err != nil {
 		return nil, "", fmt.Errorf("read download body: %w", err)
+	}
+	if int64(len(data)) > maxAssetDownloadSize {
+		return nil, "", fmt.Errorf("download exceeds maximum allowed size of %d bytes", maxAssetDownloadSize)
 	}
 
 	sum := sha256.Sum256(data)
