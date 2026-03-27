@@ -69,6 +69,10 @@ func (a CursorAuthenticator) Login(ctx context.Context, cfg *config.Config, opts
 
 	expiresAt := cursorauth.GetTokenExpiry(tokens.AccessToken)
 
+	// Auto-identify account from JWT sub claim
+	sub := cursorauth.ParseJWTSub(tokens.AccessToken)
+	subHash := cursorauth.SubToShortHash(sub)
+
 	log.Info("Cursor authentication successful!")
 
 	metadata := map[string]any{
@@ -78,14 +82,17 @@ func (a CursorAuthenticator) Login(ctx context.Context, cfg *config.Config, opts
 		"expires_at":    expiresAt.Format(time.RFC3339),
 		"timestamp":     time.Now().UnixMilli(),
 	}
+	if sub != "" {
+		metadata["sub"] = sub
+	}
 
-	fileName := "cursor.json"
+	fileName := cursorauth.CredentialFileName("", subHash)
 
 	return &coreauth.Auth{
 		ID:       fileName,
 		Provider: a.Provider(),
 		FileName: fileName,
-		Label:    "cursor-user",
+		Label:    cursorauth.DisplayLabel("", subHash),
 		Metadata: metadata,
 	}, nil
 }

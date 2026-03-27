@@ -3736,17 +3736,21 @@ func (h *Handler) RequestCursorToken(c *gin.Context) {
 			"timestamp":     time.Now().UnixMilli(),
 		}
 
-		// Extract expiry from JWT
+		// Extract expiry and account identity from JWT
 		expiry := cursorauth.GetTokenExpiry(tokens.AccessToken)
 		if !expiry.IsZero() {
 			metadata["expires_at"] = expiry.Format(time.RFC3339)
 		}
 
-		fileName := cursorauth.CredentialFileName(label)
-		displayLabel := "Cursor User"
-		if label != "" {
-			displayLabel = "Cursor " + label
+		// Auto-identify account from JWT sub claim for multi-account support
+		sub := cursorauth.ParseJWTSub(tokens.AccessToken)
+		subHash := cursorauth.SubToShortHash(sub)
+		if sub != "" {
+			metadata["sub"] = sub
 		}
+
+		fileName := cursorauth.CredentialFileName(label, subHash)
+		displayLabel := cursorauth.DisplayLabel(label, subHash)
 		record := &coreauth.Auth{
 			ID:       fileName,
 			Provider: "cursor",

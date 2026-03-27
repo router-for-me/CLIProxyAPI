@@ -171,29 +171,60 @@ func RefreshToken(ctx context.Context, refreshToken string) (*TokenPair, error) 
 	return &tokens, nil
 }
 
-// GetTokenExpiry extracts the JWT expiry from an access token with a 5-minute safety margin.
-// Falls back to 1 hour from now if the token can't be parsed.
-func GetTokenExpiry(token string) time.Time {
+// ParseJWTSub extracts the "sub" claim from a Cursor JWT access token.
+// Cursor JWTs contain "sub" like "auth0|user_XXXX" which uniquely identifies
+// the account. Returns empty string if parsing fails.
+func ParseJWTSub(token string) string {
+	decoded := decodeJWTPayload(token)
+	if decoded == nil {
+		return ""
+	}
+	var claims struct {
+		Sub string `json:"sub"`
+	}
+	if err := json.Unmarshal(decoded, &claims); err != nil {
+		return ""
+	}
+	return claims.Sub
+}
+
+// SubToShortHash converts a JWT sub claim to a short hex hash for use in filenames.
+// e.g. "auth0|user_2x..." → "a3f8b2c1"
+func SubToShortHash(sub string) string {
+	if sub == "" {
+		return ""
+	}
+	h := sha256.Sum256([]byte(sub))
+	return fmt.Sprintf("%x", h[:4]) // 8 hex chars
+}
+
+// decodeJWTPayload decodes the payload (middle) part of a JWT.
+func decodeJWTPayload(token string) []byte {
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {
-		return time.Now().Add(1 * time.Hour)
+		return nil
 	}
-
-	// Decode the payload (middle part)
 	payload := parts[1]
-	// Add padding if needed
 	switch len(payload) % 4 {
 	case 2:
 		payload += "=="
 	case 3:
 		payload += "="
 	}
-	// Replace URL-safe characters
 	payload = strings.ReplaceAll(payload, "-", "+")
 	payload = strings.ReplaceAll(payload, "_", "/")
-
 	decoded, err := base64.StdEncoding.DecodeString(payload)
 	if err != nil {
+		return nil
+	}
+	return decoded
+}
+
+// GetTokenExpiry extracts the JWT expiry from an access token with a 5-minute safety margin.
+// Falls back to 1 hour from now if the token can't be parsed.
+func GetTokenExpiry(token string) time.Time {
+	decoded := decodeJWTPayload(token)
+	if decoded == nil {
 		return time.Now().Add(1 * time.Hour)
 	}
 
