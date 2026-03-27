@@ -266,10 +266,10 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 		// Preserve a minimal conversational turn for system-only inputs.
 		// Claude payloads with top-level system instructions but no messages are risky for downstream validation.
 		if messageIndex == 0 {
-			system := gjson.GetBytes(out, "system")
+			system := gjson.Get(out, "system")
 			if system.Exists() && system.IsArray() && len(system.Array()) > 0 {
-				fallbackMsg := []byte(`{"role":"user","content":[{"type":"text","text":""}]}`)
-				out, _ = sjson.SetRawBytes(out, "messages.-1", fallbackMsg)
+				fallbackMsg := `{"role":"user","content":[{"type":"text","text":""}]}`
+				out, _ = sjson.SetRaw(out, "messages.-1", fallbackMsg)
 			}
 		}
 	}

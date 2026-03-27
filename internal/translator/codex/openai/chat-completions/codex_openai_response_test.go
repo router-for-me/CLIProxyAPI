@@ -55,14 +55,14 @@ func TestConvertCodexResponseToOpenAI_ToolCallChunkOmitsNullContentFields(t *tes
 		t.Fatalf("expected 1 chunk, got %d", len(out))
 	}
 
-	if gjson.GetBytes(out[0], "choices.0.delta.content").Exists() {
-		t.Fatalf("expected content to be omitted, got %s", string(out[0]))
+	if gjson.Get(out[0], "choices.0.delta.content").Exists() {
+		t.Fatalf("expected content to be omitted, got %s", out[0])
 	}
-	if gjson.GetBytes(out[0], "choices.0.delta.reasoning_content").Exists() {
-		t.Fatalf("expected reasoning_content to be omitted, got %s", string(out[0]))
+	if gjson.Get(out[0], "choices.0.delta.reasoning_content").Exists() {
+		t.Fatalf("expected reasoning_content to be omitted, got %s", out[0])
 	}
-	if !gjson.GetBytes(out[0], "choices.0.delta.tool_calls").Exists() {
-		t.Fatalf("expected tool_calls to exist, got %s", string(out[0]))
+	if !gjson.Get(out[0], "choices.0.delta.tool_calls").Exists() {
+		t.Fatalf("expected tool_calls to exist, got %s", out[0])
 	}
 }
 
@@ -80,13 +80,13 @@ func TestConvertCodexResponseToOpenAI_ToolCallArgumentsDeltaOmitsNullContentFiel
 		t.Fatalf("expected 1 chunk, got %d", len(out))
 	}
 
-	if gjson.GetBytes(out[0], "choices.0.delta.content").Exists() {
-		t.Fatalf("expected content to be omitted, got %s", string(out[0]))
+	if gjson.Get(out[0], "choices.0.delta.content").Exists() {
+		t.Fatalf("expected content to be omitted, got %s", out[0])
 	}
-	if gjson.GetBytes(out[0], "choices.0.delta.reasoning_content").Exists() {
-		t.Fatalf("expected reasoning_content to be omitted, got %s", string(out[0]))
+	if gjson.Get(out[0], "choices.0.delta.reasoning_content").Exists() {
+		t.Fatalf("expected reasoning_content to be omitted, got %s", out[0])
 	}
-	if !gjson.GetBytes(out[0], "choices.0.delta.tool_calls.0.function.arguments").Exists() {
-		t.Fatalf("expected tool call arguments delta to exist, got %s", string(out[0]))
+	if !gjson.Get(out[0], "choices.0.delta.tool_calls.0.function.arguments").Exists() {
+		t.Fatalf("expected tool call arguments delta to exist, got %s", out[0])
 	}
 }

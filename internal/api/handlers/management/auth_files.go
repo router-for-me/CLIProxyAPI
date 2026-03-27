@@ -696,18 +696,23 @@ func (h *Handler) DeleteAuthFile(c *gin.Context) {
 		return
 	}
 	if len(names) == 1 {
-		if _, status, errDelete := h.deleteAuthFileByName(ctx, names[0]); errDelete != nil {
+		_, alreadyMissing, status, errDelete := h.deleteAuthFileByName(ctx, names[0])
+		if errDelete != nil {
 			c.JSON(status, gin.H{"error": errDelete.Error()})
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+		response := gin.H{"status": "ok"}
+		if alreadyMissing {
+			response["already_missing"] = true
+		}
+		c.JSON(http.StatusOK, response)
 		return
 	}
 
 	deletedFiles := make([]string, 0, len(names))
 	failed := make([]gin.H, 0)
 	for _, name := range names {
-		deletedName, _, errDelete := h.deleteAuthFileByName(ctx, name)
+		deletedName, _, _, errDelete := h.deleteAuthFileByName(ctx, name)
 		if errDelete != nil {
 			failed = append(failed, gin.H{"name": name, "error": errDelete.Error()})
 			continue
@@ -856,10 +861,10 @@ func uniqueAuthFileNames(names []string) []string {
 	return out
 }
 
-func (h *Handler) deleteAuthFileByName(ctx context.Context, name string) (string, int, error) {
+func (h *Handler) deleteAuthFileByName(ctx context.Context, name string) (string, bool, int, error) {
 	name = strings.TrimSpace(name)
 	if name == "" || strings.Contains(name, string(os.PathSeparator)) {
-		return "", http.StatusBadRequest, fmt.Errorf("invalid name")
+		return "", false, http.StatusBadRequest, fmt.Errorf("invalid name")
 	}
 
 	targetPath := filepath.Join(h.cfg.AuthDir, filepath.Base(name))
@@ -877,24 +882,26 @@ func (h *Handler) deleteAuthFileByName(ctx context.Context, name string) (string
 			targetPath = abs
 		}
 	}
+	alreadyMissing := false
 	if errRemove := os.Remove(targetPath); errRemove != nil {
 		if os.IsNotExist(errRemove) {
 			if !targetAuthFound {
-				return filepath.Base(name), http.StatusNotFound, errAuthFileNotFound
+				return filepath.Base(name), false, http.StatusNotFound, errAuthFileNotFound
 			}
+			alreadyMissing = true
 		} else {
-			return filepath.Base(name), http.StatusInternalServerError, fmt.Errorf("failed to remove file: %w", errRemove)
+			return filepath.Base(name), false, http.StatusInternalServerError, fmt.Errorf("failed to remove file: %w", errRemove)
 		}
 	}
 	if errDeleteRecord := h.deleteTokenRecord(ctx, targetPath); errDeleteRecord != nil {
-		return filepath.Base(name), http.StatusInternalServerError, errDeleteRecord
+		return filepath.Base(name), alreadyMissing, http.StatusInternalServerError, errDeleteRecord
 	}
 	if targetID != "" {
 		h.disableAuth(ctx, targetID)
 	} else {
 		h.disableAuth(ctx, targetPath)
 	}
-	return filepath.Base(name), http.StatusOK, nil
+	return filepath.Base(name), alreadyMissing, http.StatusOK, nil
 }
 
 func (h *Handler) findAuthForDelete(name string) *coreauth.Auth {

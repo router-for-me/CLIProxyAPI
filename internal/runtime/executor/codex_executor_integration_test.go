@@ -89,8 +89,8 @@ func TestCodexExecutorExecute_LocalServer_SuccessAndHeaders(t *testing.T) {
 	if captured.Authorization != "Bearer success-key" {
 		t.Fatalf("Authorization = %q, want %q", captured.Authorization, "Bearer success-key")
 	}
-	if captured.Version == "" {
-		t.Fatal("expected Version header to be populated")
+	if captured.Version != "" {
+		t.Fatalf("Version = %q, want empty by default", captured.Version)
 	}
 	if captured.SessionID == "" {
 		t.Fatal("expected Session_id header to be populated")

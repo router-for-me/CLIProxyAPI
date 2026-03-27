@@ -73,9 +73,3 @@ ghcr.io/arron196/cliproxyapi:latest
 ## 许可证
 
 MIT，见 [LICENSE](LICENSE)。
-
-## 社区交流
-
-QQ 群：188637136（满）、1081218164
-
-Telegram 群：https://t.me/CLIProxyAPI
