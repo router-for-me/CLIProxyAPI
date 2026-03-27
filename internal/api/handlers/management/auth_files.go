@@ -474,31 +474,37 @@ func extractCodexIDTokenClaims(auth *coreauth.Auth) gin.H {
 	if !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
 		return nil
 	}
-	idTokenRaw, ok := auth.Metadata["id_token"].(string)
-	if !ok {
-		return nil
-	}
-	idToken := strings.TrimSpace(idTokenRaw)
-	if idToken == "" {
-		return nil
-	}
-	claims, err := codex.ParseJWTToken(idToken)
-	if err != nil || claims == nil {
-		return nil
-	}
 
 	result := gin.H{}
-	if v := strings.TrimSpace(claims.CodexAuthInfo.ChatgptAccountID); v != "" {
-		result["chatgpt_account_id"] = v
+
+	// Step 1: unconditionally parse id_token as the baseline source.
+	// Subscription date fields only exist in id_token, so this must always run.
+	if idTokenRaw, ok := auth.Metadata["id_token"].(string); ok {
+		if idToken := strings.TrimSpace(idTokenRaw); idToken != "" {
+			if claims, err := codex.ParseJWTToken(idToken); err == nil && claims != nil {
+				if v := strings.TrimSpace(claims.CodexAuthInfo.ChatgptAccountID); v != "" {
+					result["chatgpt_account_id"] = v
+				}
+				if v := strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType); v != "" {
+					result["plan_type"] = v
+				}
+				if v := claims.CodexAuthInfo.ChatgptSubscriptionActiveStart; v != nil {
+					result["chatgpt_subscription_active_start"] = v
+				}
+				if v := claims.CodexAuthInfo.ChatgptSubscriptionActiveUntil; v != nil {
+					result["chatgpt_subscription_active_until"] = v
+				}
+			}
+		}
 	}
-	if v := strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType); v != "" {
-		result["plan_type"] = v
+
+	// Step 2: override with explicit values from the JSON file (Metadata) if present.
+	// These take priority because the user may have set them directly in the imported file.
+	if v, ok := auth.Metadata["account_id"].(string); ok && strings.TrimSpace(v) != "" {
+		result["chatgpt_account_id"] = strings.TrimSpace(v)
 	}
-	if v := claims.CodexAuthInfo.ChatgptSubscriptionActiveStart; v != nil {
-		result["chatgpt_subscription_active_start"] = v
-	}
-	if v := claims.CodexAuthInfo.ChatgptSubscriptionActiveUntil; v != nil {
-		result["chatgpt_subscription_active_until"] = v
+	if v, ok := auth.Metadata["plan_type"].(string); ok && strings.TrimSpace(v) != "" {
+		result["plan_type"] = strings.TrimSpace(v)
 	}
 
 	if len(result) == 0 {
