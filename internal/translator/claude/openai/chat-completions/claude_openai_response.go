@@ -62,6 +62,10 @@ func calculateClaudeUsageTokens(usage gjson.Result) (promptTokens, completionTok
 // Returns:
 //   - [][]byte: A slice of OpenAI-compatible JSON responses
 func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) [][]byte {
+	var localParam any
+	if param == nil {
+		param = &localParam
+	}
 	if *param == nil {
 		*param = &ConvertAnthropicResponseToOpenAIParams{
 			CreatedAt:    0,
