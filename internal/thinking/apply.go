@@ -19,6 +19,7 @@ var providerAppliers = map[string]ProviderApplier{
 	"iflow":       nil,
 	"antigravity": nil,
 	"kimi":        nil,
+	"minimax":     nil,
 }
 
 // GetProviderApplier returns the ProviderApplier for the given provider name.
@@ -96,7 +97,17 @@ func ApplyThinking(body []byte, model string, fromFormat string, toFormat string
 		fromFormat = providerFormat
 	}
 	// 1. Route check: Get provider applier
+	// When the provider key has its own registered thinking applier (e.g., "minimax"
+	// via openai-compatibility), prefer it over the generic format applier (e.g., "openai").
+	// This allows providers with custom thinking formats to work correctly when
+	// configured through openai-compatibility.
 	applier := GetProviderApplier(providerFormat)
+	if providerKey != providerFormat {
+		if keyApplier := GetProviderApplier(providerKey); keyApplier != nil {
+			applier = keyApplier
+			providerFormat = providerKey
+		}
+	}
 	if applier == nil {
 		log.WithFields(log.Fields{
 			"provider": providerFormat,
@@ -336,6 +347,12 @@ func extractThinkingConfig(body []byte, provider string) ThinkingConfig {
 	case "kimi":
 		// Kimi uses OpenAI-compatible reasoning_effort format
 		return extractOpenAIConfig(body)
+	case "minimax":
+		config := extractMiniMaxConfig(body)
+		if hasThinkingConfig(config) {
+			return config
+		}
+		return extractOpenAIConfig(body)
 	default:
 		return ThinkingConfig{}
 	}
@@ -492,6 +509,23 @@ func extractCodexConfig(body []byte) ThinkingConfig {
 		return ThinkingConfig{Mode: ModeLevel, Level: ThinkingLevel(value)}
 	}
 
+	return ThinkingConfig{}
+}
+
+// extractMiniMaxConfig extracts thinking configuration from MiniMax format request body.
+//
+// MiniMax API format:
+//   - reasoning_split: boolean (true to enable, false to disable)
+//
+// Returns ModeBudget with Budget=1 as a sentinel value indicating "enabled".
+// Budget=1 is used because MiniMax models don't use numeric budgets; they only support on/off.
+func extractMiniMaxConfig(body []byte) ThinkingConfig {
+	if split := gjson.GetBytes(body, "reasoning_split"); split.Exists() {
+		if split.Bool() {
+			return ThinkingConfig{Mode: ModeBudget, Budget: 1}
+		}
+		return ThinkingConfig{Mode: ModeNone, Budget: 0}
+	}
 	return ThinkingConfig{}
 }
 

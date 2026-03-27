@@ -2,7 +2,7 @@
 
 [English](README.md) | 中文 | [日本語](README_JA.md)
 
-一个为 CLI 提供 OpenAI/Gemini/Claude/Codex 兼容 API 接口的代理服务器。
+一个为 CLI 提供 OpenAI/Gemini/Claude/Codex/MiniMax 兼容 API 接口的代理服务器。
 
 现已支持通过 OAuth 登录接入 OpenAI Codex（GPT 系列）和 Claude Code。
 
@@ -57,7 +57,8 @@ GLM CODING PLAN 是专为AI编码打造的订阅套餐，每月最低仅需20元
 - 支持 Qwen Code 多账户轮询
 - 支持 iFlow 多账户轮询
 - 支持 OpenAI Codex 多账户轮询
-- 通过配置接入上游 OpenAI 兼容提供商（例如 OpenRouter）
+- 支持 MiniMax 接入（通过 OpenAI 兼容配置，原生支持 `reasoning_split` 思维模式）
+- 通过配置接入上游 OpenAI 兼容提供商（例如 OpenRouter、MiniMax）
 - 可复用的 Go SDK（见 `docs/sdk-usage_CN.md`）
 
 ## 新手入门

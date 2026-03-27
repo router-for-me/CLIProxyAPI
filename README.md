@@ -2,7 +2,7 @@
 
 English | [中文](README_CN.md) | [日本語](README_JA.md)
 
-A proxy server that provides OpenAI/Gemini/Claude/Codex compatible API interfaces for CLI.
+A proxy server that provides OpenAI/Gemini/Claude/Codex/MiniMax compatible API interfaces for CLI.
 
 It now also supports OpenAI Codex (GPT models) and Claude Code via OAuth.
 
@@ -57,7 +57,8 @@ Get 10% OFF GLM CODING PLAN：https://z.ai/subscribe?ic=8JVLJQFSKB
 - Qwen Code multi-account load balancing
 - iFlow multi-account load balancing
 - OpenAI Codex multi-account load balancing
-- OpenAI-compatible upstream providers via config (e.g., OpenRouter)
+- MiniMax support via OpenAI-compatible configuration (with native `reasoning_split` thinking)
+- OpenAI-compatible upstream providers via config (e.g., OpenRouter, MiniMax)
 - Reusable Go SDK for embedding the proxy (see `docs/sdk-usage.md`)
 
 ## Getting Started
