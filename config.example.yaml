@@ -150,6 +150,11 @@ nonstream-keepalive-interval: 0
 #   - api-key: "sk-atSM..."
 #     prefix: "test" # optional: require calls like "test/claude-sonnet-latest" to target this credential
 #     base-url: "https://www.example.com" # use the custom claude API endpoint
+#     messages-path: "/messages"           # optional: custom messages API path (default: "/v1/messages")
+#                                          # use this when your relay service (e.g., new-api) does not
+#                                          # use the /v1 prefix. Example: set to "/messages" if the relay
+#                                          # exposes the endpoint at {base-url}/messages instead of
+#                                          # the standard {base-url}/v1/messages
 #     headers:
 #       X-Custom-Header: "custom-value"
 #     proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override

@@ -1648,3 +1648,114 @@ func TestCheckSystemInstructionsWithMode_StringWithSpecialChars(t *testing.T) {
 		t.Fatalf("blocks[2] text mangled, got %q", blocks[2].Get("text").String())
 	}
 }
+
+// TestClaudeMessagesPath verifies that claudeMessagesPath returns the correct API path,
+// defaulting to /v1/messages when not configured and using the custom path when set.
+// This supports relay services (e.g., new-api) that expose Claude-compatible APIs at
+// non-standard paths. Fixes: https://github.com/router-for-me/CLIProxyAPI/issues/2055
+func TestClaudeMessagesPath(t *testing.T) {
+	tests := []struct {
+		name     string
+		auth     *cliproxyauth.Auth
+		expected string
+	}{
+		{
+			name:     "nil auth returns default",
+			auth:     nil,
+			expected: "/v1/messages",
+		},
+		{
+			name:     "empty attributes returns default",
+			auth:     &cliproxyauth.Auth{Attributes: map[string]string{}},
+			expected: "/v1/messages",
+		},
+		{
+			name:     "custom path without /v1",
+			auth:     &cliproxyauth.Auth{Attributes: map[string]string{"messages_path": "/messages"}},
+			expected: "/messages",
+		},
+		{
+			name:     "custom path with /v1",
+			auth:     &cliproxyauth.Auth{Attributes: map[string]string{"messages_path": "/v1/messages"}},
+			expected: "/v1/messages",
+		},
+		{
+			name:     "whitespace-only path returns default",
+			auth:     &cliproxyauth.Auth{Attributes: map[string]string{"messages_path": "  "}},
+			expected: "/v1/messages",
+		},
+		{
+			name:     "path without leading slash gets slash prepended",
+			auth:     &cliproxyauth.Auth{Attributes: map[string]string{"messages_path": "v1/messages"}},
+			expected: "/v1/messages",
+		},
+		{
+			name:     "path with trailing slash gets slash trimmed",
+			auth:     &cliproxyauth.Auth{Attributes: map[string]string{"messages_path": "/v1/messages/"}},
+			expected: "/v1/messages",
+		},
+		{
+			name:     "path without leading slash and with trailing slash normalized",
+			auth:     &cliproxyauth.Auth{Attributes: map[string]string{"messages_path": "messages/"}},
+			expected: "/messages",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := claudeMessagesPath(tt.auth)
+			if got != tt.expected {
+				t.Errorf("claudeMessagesPath() = %q, want %q", got, tt.expected)
+			}
+		})
+	}
+}
+
+// TestNormalizeBaseURL verifies that normalizeBaseURL strips trailing "/v1" from
+// base URLs to prevent double-path issues when relay services include "/v1" in
+// their base URL configuration.
+func TestNormalizeBaseURL(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "strips trailing /v1",
+			input:    "https://relay.example.com/v1",
+			expected: "https://relay.example.com",
+		},
+		{
+			name:     "no change when no trailing /v1",
+			input:    "https://api.anthropic.com",
+			expected: "https://api.anthropic.com",
+		},
+		{
+			name:     "no change when path is deeper than /v1",
+			input:    "https://relay.example.com/v1/proxy",
+			expected: "https://relay.example.com/v1/proxy",
+		},
+		{
+			name:     "strips trailing slash after /v1",
+			input:    "https://relay.example.com/v1/",
+			expected: "https://relay.example.com",
+		},
+		{
+			name:     "no change for /v1api suffix (not a path segment)",
+			input:    "https://relay.example.com/v1api",
+			expected: "https://relay.example.com/v1api",
+		},
+		{
+			name:     "handles nested /v1 in path correctly",
+			input:    "https://relay.example.com/api/v1",
+			expected: "https://relay.example.com/api",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := normalizeBaseURL(tt.input)
+			if got != tt.expected {
+				t.Errorf("normalizeBaseURL(%q) = %q, want %q", tt.input, got, tt.expected)
+			}
+		})
+	}
+}
