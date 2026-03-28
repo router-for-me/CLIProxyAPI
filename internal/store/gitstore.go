@@ -32,6 +32,7 @@ type GitTokenStore struct {
 	repoDir   string
 	configDir string
 	remote    string
+	branch    string
 	username  string
 	password  string
 	lastGC    time.Time
@@ -39,9 +40,11 @@ type GitTokenStore struct {
 
 // NewGitTokenStore creates a token store that saves credentials to disk through the
 // TokenStorage implementation embedded in the token record.
-func NewGitTokenStore(remote, username, password string) *GitTokenStore {
+// When branch is non-empty, clone/pull/push operations target that branch instead of the remote default.
+func NewGitTokenStore(remote, username, password, branch string) *GitTokenStore {
 	return &GitTokenStore{
 		remote:   remote,
+		branch:   strings.TrimSpace(branch),
 		username: username,
 		password: password,
 	}
@@ -120,7 +123,11 @@ func (s *GitTokenStore) EnsureRepository() error {
 			s.dirLock.Unlock()
 			return fmt.Errorf("git token store: create repo dir: %w", errMk)
 		}
-		if _, errClone := git.PlainClone(repoDir, &git.CloneOptions{Auth: authMethod, URL: s.remote}); errClone != nil {
+		cloneOpts := &git.CloneOptions{Auth: authMethod, URL: s.remote}
+		if s.branch != "" {
+			cloneOpts.ReferenceName = plumbing.NewBranchReferenceName(s.branch)
+		}
+		if _, errClone := git.PlainClone(repoDir, cloneOpts); errClone != nil {
 			if errors.Is(errClone, transport.ErrEmptyRemoteRepository) {
 				_ = os.RemoveAll(gitDir)
 				repo, errInit := git.PlainInit(repoDir, false)
@@ -176,7 +183,11 @@ func (s *GitTokenStore) EnsureRepository() error {
 			s.dirLock.Unlock()
 			return fmt.Errorf("git token store: worktree: %w", errWorktree)
 		}
-		if errPull := worktree.Pull(&git.PullOptions{Auth: authMethod, RemoteName: "origin"}); errPull != nil {
+		pullOpts := &git.PullOptions{Auth: authMethod, RemoteName: "origin"}
+		if s.branch != "" {
+			pullOpts.ReferenceName = plumbing.NewBranchReferenceName(s.branch)
+		}
+		if errPull := worktree.Pull(pullOpts); errPull != nil {
 			switch {
 			case errors.Is(errPull, git.NoErrAlreadyUpToDate),
 				errors.Is(errPull, git.ErrUnstagedChanges),
