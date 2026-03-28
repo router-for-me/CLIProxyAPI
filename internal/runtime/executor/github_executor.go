@@ -20,8 +20,6 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-// copilotEditorVersion is sent as Editor-Version to identify the integration.
-const copilotEditorVersion = "vscode/1.96.0"
 
 // GithubCopilotExecutor handles API requests to GitHub Copilot chat completions.
 // It automatically refreshes the short-lived Copilot token using the stored GitHub user token.
@@ -119,7 +117,7 @@ func (e *GithubCopilotExecutor) Execute(ctx context.Context, auth *cliproxyauth.
 
 	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b, _ := io.ReadAll(httpResp.Body)
+		b, _ := io.ReadAll(io.LimitReader(httpResp.Body, 8<<10))
 		appendAPIResponseChunk(ctx, e.cfg, b)
 		logWithRequestID(ctx).Debugf("github-copilot request error: status %d: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
 		return resp, statusErr{code: httpResp.StatusCode, msg: string(b)}
@@ -189,7 +187,7 @@ func (e *GithubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 
 	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b, _ := io.ReadAll(httpResp.Body)
+		b, _ := io.ReadAll(io.LimitReader(httpResp.Body, 8<<10))
 		appendAPIResponseChunk(ctx, e.cfg, b)
 		logWithRequestID(ctx).Debugf("github-copilot stream error: status %d: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
 		if errClose := httpResp.Body.Close(); errClose != nil {
@@ -295,9 +293,9 @@ func (e *GithubCopilotExecutor) buildRequestBody(ctx context.Context, auth *clip
 func applyCopilotHeaders(r *http.Request, token string, stream bool) {
 	r.Header.Set("Authorization", "Bearer "+token)
 	r.Header.Set("Content-Type", "application/json")
-	r.Header.Set("Editor-Version", copilotEditorVersion)
-	r.Header.Set("Copilot-Integration-Id", "vscode-chat")
-	r.Header.Set("openai-intent", "conversation-panel")
+	r.Header.Set("Editor-Version", githubauth.CopilotEditorVersion)
+	r.Header.Set("Copilot-Integration-Id", githubauth.CopilotIntegrationID)
+	r.Header.Set("openai-intent", githubauth.CopilotOpenAIIntent)
 	if stream {
 		r.Header.Set("Accept", "text/event-stream")
 	} else {

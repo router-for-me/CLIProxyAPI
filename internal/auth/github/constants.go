@@ -35,3 +35,14 @@ const (
 	defaultPollInterval = 5 * time.Second
 	maxPollDuration     = 15 * time.Minute
 )
+
+// Copilot client identity headers sent with every API request.
+// These identify the integration as VS Code to the Copilot backend.
+const (
+	CopilotEditorVersion      = "vscode/1.96.0"
+	CopilotEditorPluginVersion = "copilot-chat/0.26.0"
+	CopilotIntegrationID      = "vscode-chat"
+	CopilotUserAgent          = "GithubCopilot/1.0"
+	CopilotOpenAIIntent       = "conversation-panel"
+)
+

@@ -245,10 +245,10 @@ func (a *GithubAuth) FetchCopilotToken(ctx context.Context, githubToken string) 
 	}
 	req.Header.Set("Authorization", "token "+githubToken)
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Editor-Version", "vscode/1.96.0")
-	req.Header.Set("Editor-Plugin-Version", "copilot-chat/0.26.0")
-	req.Header.Set("Copilot-Integration-Id", "vscode-chat")
-	req.Header.Set("User-Agent", "GithubCopilot/1.0")
+	req.Header.Set("Editor-Version", CopilotEditorVersion)
+	req.Header.Set("Editor-Plugin-Version", CopilotEditorPluginVersion)
+	req.Header.Set("Copilot-Integration-Id", CopilotIntegrationID)
+	req.Header.Set("User-Agent", CopilotUserAgent)
 
 	resp, err := a.httpClient.Do(req)
 	if err != nil {
