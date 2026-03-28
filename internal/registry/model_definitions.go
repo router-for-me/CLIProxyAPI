@@ -19,8 +19,9 @@ type staticModelsJSON struct {
 	CodexPro    []*ModelInfo `json:"codex-pro"`
 	Qwen        []*ModelInfo `json:"qwen"`
 	IFlow       []*ModelInfo `json:"iflow"`
-	Kimi        []*ModelInfo `json:"kimi"`
-	Antigravity []*ModelInfo `json:"antigravity"`
+	Kimi          []*ModelInfo `json:"kimi"`
+	Antigravity   []*ModelInfo `json:"antigravity"`
+	GithubCopilot []*ModelInfo `json:"github-copilot"`
 }
 
 // GetClaudeModels returns the standard Claude model definitions.
@@ -88,6 +89,11 @@ func GetAntigravityModels() []*ModelInfo {
 	return cloneModelInfos(getModels().Antigravity)
 }
 
+// GetGithubCopilotModels returns the standard GitHub Copilot model definitions.
+func GetGithubCopilotModels() []*ModelInfo {
+	return cloneModelInfos(getModels().GithubCopilot)
+}
+
 // cloneModelInfos returns a shallow copy of the slice with each element deep-cloned.
 func cloneModelInfos(models []*ModelInfo) []*ModelInfo {
 	if len(models) == 0 {
@@ -137,6 +143,8 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetKimiModels()
 	case "antigravity":
 		return GetAntigravityModels()
+	case "github-copilot":
+		return GetGithubCopilotModels()
 	default:
 		return nil
 	}
@@ -161,6 +169,7 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		data.IFlow,
 		data.Kimi,
 		data.Antigravity,
+		data.GithubCopilot,
 	}
 	for _, models := range allModels {
 		for _, m := range models {

@@ -2679,5 +2679,73 @@
       "context_length": 114000,
       "max_completion_tokens": 32768
     }
+  ],
+  "github-copilot": [
+    {
+      "id": "gpt-4o",
+      "object": "model",
+      "created": 1715367049,
+      "owned_by": "github-copilot",
+      "type": "github-copilot",
+      "display_name": "GPT-4o (Copilot)",
+      "description": "OpenAI GPT-4o via GitHub Copilot",
+      "context_length": 128000,
+      "max_completion_tokens": 16384
+    },
+    {
+      "id": "gpt-4o-mini",
+      "object": "model",
+      "created": 1721172717,
+      "owned_by": "github-copilot",
+      "type": "github-copilot",
+      "display_name": "GPT-4o Mini (Copilot)",
+      "description": "OpenAI GPT-4o Mini via GitHub Copilot",
+      "context_length": 128000,
+      "max_completion_tokens": 16384
+    },
+    {
+      "id": "o3-mini",
+      "object": "model",
+      "created": 1740470400,
+      "owned_by": "github-copilot",
+      "type": "github-copilot",
+      "display_name": "o3-mini (Copilot)",
+      "description": "OpenAI o3-mini reasoning model via GitHub Copilot",
+      "context_length": 200000,
+      "max_completion_tokens": 65536
+    },
+    {
+      "id": "claude-3.5-sonnet",
+      "object": "model",
+      "created": 1734422400,
+      "owned_by": "github-copilot",
+      "type": "github-copilot",
+      "display_name": "Claude 3.5 Sonnet (Copilot)",
+      "description": "Anthropic Claude 3.5 Sonnet via GitHub Copilot",
+      "context_length": 200000,
+      "max_completion_tokens": 8192
+    },
+    {
+      "id": "claude-3.7-sonnet",
+      "object": "model",
+      "created": 1740700800,
+      "owned_by": "github-copilot",
+      "type": "github-copilot",
+      "display_name": "Claude 3.7 Sonnet (Copilot)",
+      "description": "Anthropic Claude 3.7 Sonnet via GitHub Copilot",
+      "context_length": 200000,
+      "max_completion_tokens": 8192
+    },
+    {
+      "id": "gemini-2.0-flash-001",
+      "object": "model",
+      "created": 1739318400,
+      "owned_by": "github-copilot",
+      "type": "github-copilot",
+      "display_name": "Gemini 2.0 Flash (Copilot)",
+      "description": "Google Gemini 2.0 Flash via GitHub Copilot",
+      "context_length": 1048576,
+      "max_completion_tokens": 8192
+    }
   ]
 }
