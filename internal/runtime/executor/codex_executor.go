@@ -90,6 +90,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 
 	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
 	defer reporter.trackFailure(ctx, &err)
+	defer reporter.ensurePublished(ctx)
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("codex")
@@ -200,6 +201,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 
 	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
 	defer reporter.trackFailure(ctx, &err)
+	defer reporter.ensurePublished(ctx)
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("openai-response")
@@ -290,6 +292,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 
 	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
 	defer reporter.trackFailure(ctx, &err)
+	defer reporter.ensurePublished(ctx)
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("codex")

@@ -112,6 +112,7 @@ func (e *GeminiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 
 	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
 	defer reporter.trackFailure(ctx, &err)
+	defer reporter.ensurePublished(ctx)
 
 	// Official Gemini API via API key or OAuth bearer
 	from := opts.SourceFormat
@@ -220,6 +221,7 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 
 	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
 	defer reporter.trackFailure(ctx, &err)
+	defer reporter.ensurePublished(ctx)
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("gemini")

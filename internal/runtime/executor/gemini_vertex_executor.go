@@ -303,6 +303,7 @@ func (e *GeminiVertexExecutor) executeWithServiceAccount(ctx context.Context, au
 
 	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
 	defer reporter.trackFailure(ctx, &err)
+	defer reporter.ensurePublished(ctx)
 
 	var body []byte
 
@@ -429,6 +430,7 @@ func (e *GeminiVertexExecutor) executeWithAPIKey(ctx context.Context, auth *clip
 
 	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
 	defer reporter.trackFailure(ctx, &err)
+	defer reporter.ensurePublished(ctx)
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("gemini")
@@ -534,6 +536,7 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Conte
 
 	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
 	defer reporter.trackFailure(ctx, &err)
+	defer reporter.ensurePublished(ctx)
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("gemini")
@@ -658,6 +661,7 @@ func (e *GeminiVertexExecutor) executeStreamWithAPIKey(ctx context.Context, auth
 
 	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
 	defer reporter.trackFailure(ctx, &err)
+	defer reporter.ensurePublished(ctx)
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("gemini")
