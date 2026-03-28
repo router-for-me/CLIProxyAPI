@@ -267,7 +267,7 @@ func (m *AmpModule) registerProviderAliases(engine *gin.Engine, baseHandler *han
 	openaiHandlers := openai.NewOpenAIAPIHandler(baseHandler)
 	geminiHandlers := gemini.NewGeminiAPIHandler(baseHandler)
 	claudeCodeHandlers := claude.NewClaudeCodeAPIHandler(baseHandler)
-	openaiResponsesHandlers := openai.NewOpenAIResponsesAPIHandler(baseHandler)
+	openaiResponsesHandlers := openai.NewOpenAIResponsesAPIHandler(baseHandler, nil)
 
 	// Create fallback handler wrapper that forwards to ampcode.com when provider not found
 	// Uses m.getProxy() for hot-reload support (proxy can be updated at runtime)

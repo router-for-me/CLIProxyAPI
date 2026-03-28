@@ -25,6 +25,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api/modules"
 	ampmodule "github.com/router-for-me/CLIProxyAPI/v6/internal/api/modules/amp"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	cliproxyfiles "github.com/router-for-me/CLIProxyAPI/v6/internal/files"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/managementasset"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
@@ -322,7 +323,12 @@ func (s *Server) setupRoutes() {
 	geminiHandlers := gemini.NewGeminiAPIHandler(s.handlers)
 	geminiCLIHandlers := gemini.NewGeminiCLIAPIHandler(s.handlers)
 	claudeCodeHandlers := claude.NewClaudeCodeAPIHandler(s.handlers)
-	openaiResponsesHandlers := openai.NewOpenAIResponsesAPIHandler(s.handlers)
+	fileStore, err := cliproxyfiles.NewStoreWithDir(s.cfg.AuthDir, s.cfg.FilesDir)
+	if err != nil {
+		log.WithError(err).Warn("failed to initialize local file store")
+	}
+	openaiResponsesHandlers := openai.NewOpenAIResponsesAPIHandler(s.handlers, fileStore)
+	openaiFilesHandlers := openai.NewOpenAIFilesAPIHandler(fileStore)
 
 	// OpenAI compatible API routes
 	v1 := s.engine.Group("/v1")
@@ -333,6 +339,10 @@ func (s *Server) setupRoutes() {
 		v1.POST("/completions", openaiHandlers.Completions)
 		v1.POST("/messages", claudeCodeHandlers.ClaudeMessages)
 		v1.POST("/messages/count_tokens", claudeCodeHandlers.ClaudeCountTokens)
+		v1.GET("/files", openaiFilesHandlers.List)
+		v1.POST("/files", openaiFilesHandlers.Create)
+		v1.GET("/files/:id", openaiFilesHandlers.Get)
+		v1.DELETE("/files/:id", openaiFilesHandlers.Delete)
 		v1.GET("/responses", openaiResponsesHandlers.ResponsesWebsocket)
 		v1.POST("/responses", openaiResponsesHandlers.Responses)
 		v1.POST("/responses/compact", openaiResponsesHandlers.Compact)

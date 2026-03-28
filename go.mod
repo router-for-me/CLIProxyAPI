@@ -29,6 +29,7 @@ require (
 	golang.org/x/sync v0.18.0
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 	gopkg.in/yaml.v3 v3.0.1
+	rsc.io/pdf v0.1.1
 )
 
 require (
