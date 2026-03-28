@@ -250,7 +250,7 @@ func (e *GithubCopilotExecutor) HttpRequest(ctx context.Context, auth *cliproxya
 	}
 	token := copilotTokenFromAuth(auth)
 	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
+		applyCopilotHeaders(req, token, false)
 	}
 	httpReq := req.WithContext(ctx)
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)

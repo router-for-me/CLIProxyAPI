@@ -2690,7 +2690,7 @@
       "display_name": "GPT-4o (Copilot)",
       "description": "OpenAI GPT-4o via GitHub Copilot",
       "context_length": 128000,
-      "max_completion_tokens": 16384
+      "max_completion_tokens": 4096
     },
     {
       "id": "gpt-4o-mini",
@@ -2701,51 +2701,150 @@
       "display_name": "GPT-4o Mini (Copilot)",
       "description": "OpenAI GPT-4o Mini via GitHub Copilot",
       "context_length": 128000,
+      "max_completion_tokens": 4096
+    },
+    {
+      "id": "gpt-4.1",
+      "object": "model",
+      "created": 1744588800,
+      "owned_by": "github-copilot",
+      "type": "github-copilot",
+      "display_name": "GPT-4.1 (Copilot)",
+      "description": "OpenAI GPT-4.1 via GitHub Copilot",
+      "context_length": 128000,
       "max_completion_tokens": 16384
     },
     {
-      "id": "o3-mini",
+      "id": "gpt-5.1",
       "object": "model",
-      "created": 1740470400,
+      "created": 1748304000,
       "owned_by": "github-copilot",
       "type": "github-copilot",
-      "display_name": "o3-mini (Copilot)",
-      "description": "OpenAI o3-mini reasoning model via GitHub Copilot",
-      "context_length": 200000,
-      "max_completion_tokens": 65536
+      "display_name": "GPT-5.1 (Copilot)",
+      "description": "OpenAI GPT-5.1 via GitHub Copilot",
+      "context_length": 264000,
+      "max_completion_tokens": 64000
     },
     {
-      "id": "claude-3.5-sonnet",
+      "id": "gpt-5.2",
       "object": "model",
-      "created": 1734422400,
+      "created": 1751328000,
       "owned_by": "github-copilot",
       "type": "github-copilot",
-      "display_name": "Claude 3.5 Sonnet (Copilot)",
-      "description": "Anthropic Claude 3.5 Sonnet via GitHub Copilot",
-      "context_length": 200000,
-      "max_completion_tokens": 8192
+      "display_name": "GPT-5.2 (Copilot)",
+      "description": "OpenAI GPT-5.2 via GitHub Copilot",
+      "context_length": 400000,
+      "max_completion_tokens": 128000
     },
     {
-      "id": "claude-3.7-sonnet",
+      "id": "gpt-5-mini",
       "object": "model",
-      "created": 1740700800,
+      "created": 1748304000,
       "owned_by": "github-copilot",
       "type": "github-copilot",
-      "display_name": "Claude 3.7 Sonnet (Copilot)",
-      "description": "Anthropic Claude 3.7 Sonnet via GitHub Copilot",
-      "context_length": 200000,
-      "max_completion_tokens": 8192
+      "display_name": "GPT-5 Mini (Copilot)",
+      "description": "OpenAI GPT-5 Mini via GitHub Copilot",
+      "context_length": 264000,
+      "max_completion_tokens": 64000
     },
     {
-      "id": "gemini-2.0-flash-001",
+      "id": "claude-sonnet-4.6",
       "object": "model",
-      "created": 1739318400,
+      "created": 1753660800,
       "owned_by": "github-copilot",
       "type": "github-copilot",
-      "display_name": "Gemini 2.0 Flash (Copilot)",
-      "description": "Google Gemini 2.0 Flash via GitHub Copilot",
-      "context_length": 1048576,
-      "max_completion_tokens": 8192
+      "display_name": "Claude Sonnet 4.6 (Copilot)",
+      "description": "Anthropic Claude Sonnet 4.6 via GitHub Copilot",
+      "context_length": 200000,
+      "max_completion_tokens": 32000
+    },
+    {
+      "id": "claude-opus-4.6",
+      "object": "model",
+      "created": 1753660800,
+      "owned_by": "github-copilot",
+      "type": "github-copilot",
+      "display_name": "Claude Opus 4.6 (Copilot)",
+      "description": "Anthropic Claude Opus 4.6 via GitHub Copilot",
+      "context_length": 200000,
+      "max_completion_tokens": 32000
+    },
+    {
+      "id": "claude-sonnet-4.5",
+      "object": "model",
+      "created": 1748304000,
+      "owned_by": "github-copilot",
+      "type": "github-copilot",
+      "display_name": "Claude Sonnet 4.5 (Copilot)",
+      "description": "Anthropic Claude Sonnet 4.5 via GitHub Copilot",
+      "context_length": 200000,
+      "max_completion_tokens": 32000
+    },
+    {
+      "id": "claude-opus-4.5",
+      "object": "model",
+      "created": 1748304000,
+      "owned_by": "github-copilot",
+      "type": "github-copilot",
+      "display_name": "Claude Opus 4.5 (Copilot)",
+      "description": "Anthropic Claude Opus 4.5 via GitHub Copilot",
+      "context_length": 200000,
+      "max_completion_tokens": 32000
+    },
+    {
+      "id": "claude-haiku-4.5",
+      "object": "model",
+      "created": 1748304000,
+      "owned_by": "github-copilot",
+      "type": "github-copilot",
+      "display_name": "Claude Haiku 4.5 (Copilot)",
+      "description": "Anthropic Claude Haiku 4.5 via GitHub Copilot",
+      "context_length": 200000,
+      "max_completion_tokens": 64000
+    },
+    {
+      "id": "claude-sonnet-4",
+      "object": "model",
+      "created": 1746662400,
+      "owned_by": "github-copilot",
+      "type": "github-copilot",
+      "display_name": "Claude Sonnet 4 (Copilot)",
+      "description": "Anthropic Claude Sonnet 4 via GitHub Copilot",
+      "context_length": 216000,
+      "max_completion_tokens": 16000
+    },
+    {
+      "id": "grok-code-fast-1",
+      "object": "model",
+      "created": 1748304000,
+      "owned_by": "github-copilot",
+      "type": "github-copilot",
+      "display_name": "Grok Code Fast 1 (Copilot)",
+      "description": "xAI Grok Code Fast via GitHub Copilot",
+      "context_length": 256000,
+      "max_completion_tokens": 64000
+    },
+    {
+      "id": "gemini-3-flash-preview",
+      "object": "model",
+      "created": 1748304000,
+      "owned_by": "github-copilot",
+      "type": "github-copilot",
+      "display_name": "Gemini 3 Flash Preview (Copilot)",
+      "description": "Google Gemini 3 Flash Preview via GitHub Copilot",
+      "context_length": 128000,
+      "max_completion_tokens": 64000
+    },
+    {
+      "id": "gemini-3.1-pro-preview",
+      "object": "model",
+      "created": 1751328000,
+      "owned_by": "github-copilot",
+      "type": "github-copilot",
+      "display_name": "Gemini 3.1 Pro Preview (Copilot)",
+      "description": "Google Gemini 3.1 Pro Preview via GitHub Copilot",
+      "context_length": 200000,
+      "max_completion_tokens": 64000
     }
   ]
 }
