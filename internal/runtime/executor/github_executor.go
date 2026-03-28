@@ -278,6 +278,15 @@ func (e *GithubCopilotExecutor) buildRequestBody(ctx context.Context, auth *clip
 		return nil, "", fmt.Errorf("github-copilot executor: failed to set model: %w", err)
 	}
 
+	// Request usage data in stream chunks so quota accounting works correctly.
+	// Without this flag, OpenAI-style streaming APIs omit the usage block entirely.
+	if stream {
+		body, err = sjson.SetBytes(body, "stream_options.include_usage", true)
+		if err != nil {
+			return nil, "", fmt.Errorf("github-copilot executor: failed to set stream_options: %w", err)
+		}
+	}
+
 	requestedModel := payloadRequestedModel(opts, req.Model)
 	body = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
 
@@ -294,7 +303,9 @@ func applyCopilotHeaders(r *http.Request, token string, stream bool) {
 	r.Header.Set("Authorization", "Bearer "+token)
 	r.Header.Set("Content-Type", "application/json")
 	r.Header.Set("Editor-Version", githubauth.CopilotEditorVersion)
+	r.Header.Set("Editor-Plugin-Version", githubauth.CopilotEditorPluginVersion)
 	r.Header.Set("Copilot-Integration-Id", githubauth.CopilotIntegrationID)
+	r.Header.Set("User-Agent", githubauth.CopilotUserAgent)
 	r.Header.Set("openai-intent", githubauth.CopilotOpenAIIntent)
 	if stream {
 		r.Header.Set("Accept", "text/event-stream")
