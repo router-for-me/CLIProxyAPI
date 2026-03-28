@@ -179,8 +179,11 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 
 			output = translatorcommon.AppendSSEEventBytes(output, "content_block_stop", template, 2)
 		} else if itemType == "reasoning" {
-			params.ThinkingSignature = itemResult.Get("encrypted_content").String()
+			if signature := itemResult.Get("encrypted_content").String(); signature != "" {
+				params.ThinkingSignature = signature
+			}
 			output = append(output, finalizeCodexThinkingBlock(params)...)
+			params.ThinkingSignature = ""
 		}
 	} else if typeStr == "response.function_call_arguments.delta" {
 		params.HasReceivedArgumentsDelta = true
@@ -389,7 +392,6 @@ func ClaudeTokenCount(_ context.Context, count int64) []byte {
 
 func finalizeCodexThinkingBlock(params *ConvertCodexResponseToClaudeParams) []byte {
 	if !params.ThinkingBlockOpen {
-		params.ThinkingSignature = ""
 		return nil
 	}
 
@@ -408,7 +410,6 @@ func finalizeCodexThinkingBlock(params *ConvertCodexResponseToClaudeParams) []by
 	params.BlockIndex++
 	params.ThinkingBlockOpen = false
 	params.ThinkingStopPending = false
-	params.ThinkingSignature = ""
 
 	return output
 }
