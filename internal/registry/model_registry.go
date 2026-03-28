@@ -746,7 +746,31 @@ func (r *ModelRegistry) ClientSupportsModel(clientID, modelID string) bool {
 		}
 	}
 
+	// Fallback: strip known model variant suffixes (e.g. "-customtools").
+	// These variants share the same provider as the base model.
+	if stripped := stripModelVariantSuffix(modelID); stripped != modelID {
+		for _, id := range models {
+			if strings.EqualFold(strings.TrimSpace(id), stripped) {
+				return true
+			}
+		}
+	}
+
 	return false
+}
+
+// knownModelVariantSuffixes lists suffixes that Google appends to model names
+// for specialised fine-tune variants (e.g. "-customtools" for tool-calling).
+// These variants share the same provider/executor as the base model.
+var knownModelVariantSuffixes = []string{"-customtools"}
+
+func stripModelVariantSuffix(model string) string {
+	for _, suffix := range knownModelVariantSuffixes {
+		if strings.HasSuffix(model, suffix) {
+			return strings.TrimSuffix(model, suffix)
+		}
+	}
+	return model
 }
 
 // GetAvailableModels returns all models that have at least one available client
