@@ -646,6 +646,48 @@ func TestConvertClaudeRequestToOpenAI_AssistantTextToolUseTextOrder(t *testing.T
 	}
 }
 
+func TestConvertClaudeRequestToOpenAI_SkipsAssistantToolUseWithEmptyName(t *testing.T) {
+	inputJSON := `{
+		"model": "claude-3-opus",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "text", "text": "pre"},
+					{"type": "tool_use", "id": "call_empty", "name": "", "input": {"ignored": true}},
+					{"type": "tool_use", "id": "call_1", "name": "do_work", "input": {"a": 1}},
+					{"type": "text", "text": "post"}
+				]
+			}
+		]
+	}`
+
+	result := ConvertClaudeRequestToOpenAI("test-model", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+	messages := resultJSON.Get("messages").Array()
+	if len(messages) != 1 {
+		t.Fatalf("Expected 1 message, got %d. Messages: %s", len(messages), resultJSON.Get("messages").Raw)
+	}
+
+	assistantMsg := messages[0]
+	toolCalls := assistantMsg.Get("tool_calls")
+	if !toolCalls.Exists() || len(toolCalls.Array()) != 1 {
+		t.Fatalf("Expected exactly 1 tool_call, got %s", toolCalls.Raw)
+	}
+	if got := toolCalls.Get("0.id").String(); got != "call_1" {
+		t.Fatalf("Expected tool_call id %q, got %q", "call_1", got)
+	}
+	if got := toolCalls.Get("0.function.name").String(); got != "do_work" {
+		t.Fatalf("Expected tool_call name %q, got %q", "do_work", got)
+	}
+	if got := assistantMsg.Get("content.0.text").String(); got != "pre" {
+		t.Fatalf("Expected content[0] text %q, got %q", "pre", got)
+	}
+	if got := assistantMsg.Get("content.1.text").String(); got != "post" {
+		t.Fatalf("Expected content[1] text %q, got %q", "post", got)
+	}
+}
+
 func TestConvertClaudeRequestToOpenAI_AssistantThinkingToolUseThinkingSplit(t *testing.T) {
 	inputJSON := `{
 		"model": "claude-3-opus",
