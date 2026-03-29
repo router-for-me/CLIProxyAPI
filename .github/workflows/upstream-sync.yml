@@ -51,16 +51,7 @@ jobs:
           branch="${{ steps.prepare.outputs.branch }}"
           pr_number="$(gh pr list --head "${branch}" --base main --json number --jq '.[0].number')"
 
-          body="$(cat <<'EOF'
-## Summary
-- merge the latest `router-for-me/CLIProxyAPI` `main` into the fork on a dedicated sync branch
-- keep fork-specific patches reviewable before they land on `main`
-
-## Notes
-- this PR was generated automatically by the upstream sync workflow
-- resolve merge conflicts in the PR branch before merging if GitHub reports any
-EOF
-)"
+          body=$'## Summary\n- merge the latest `router-for-me/CLIProxyAPI` `main` into the fork on a dedicated sync branch\n- keep fork-specific patches reviewable before they land on `main`\n\n## Notes\n- this PR was generated automatically by the upstream sync workflow\n- resolve merge conflicts in the PR branch before merging if GitHub reports any'
 
           if [ -n "${pr_number}" ] && [ "${pr_number}" != "null" ]; then
             gh pr edit "${pr_number}" --title "chore: sync upstream main" --body "${body}"
