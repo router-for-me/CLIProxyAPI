@@ -613,21 +613,15 @@ func tokenValueFromMetadata(metadata map[string]any) string {
 }
 
 func (h *Handler) authByIndex(authIndex string) *coreauth.Auth {
-	authIndex = strings.TrimSpace(authIndex)
-	if authIndex == "" || h == nil || h.authManager == nil {
-		return nil
-	}
-	auths := h.authManager.List()
-	for _, auth := range auths {
-		if auth == nil {
-			continue
-		}
-		auth.EnsureIndex()
-		if auth.Index == authIndex {
-			return auth
-		}
-	}
-	return nil
+    authIndex = strings.TrimSpace(authIndex)
+    if authIndex == "" || h == nil || h.authManager == nil {
+        return nil
+    }
+    // 使用直接查找替代 List() 全量拷贝
+    if auth, ok := h.authManager.GetByIndex(authIndex); ok {
+        return auth
+    }
+    return nil
 }
 
 func (h *Handler) apiCallTransport(auth *coreauth.Auth) http.RoundTripper {
