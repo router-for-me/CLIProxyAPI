@@ -123,6 +123,10 @@ func (fh *FallbackHandler) WrapHandler(handler gin.HandlerFunc) gin.HandlerFunc 
 			return
 		}
 
+		// Sanitize request body: remove thinking blocks with invalid signatures
+		// to prevent upstream API 400 errors
+		bodyBytes = SanitizeAmpRequestBody(bodyBytes)
+
 		// Restore the body for the handler to read
 		c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 
