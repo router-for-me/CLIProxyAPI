@@ -47,18 +47,20 @@ Get 10% OFF GLM CODING PLAN：https://z.ai/subscribe?ic=8JVLJQFSKB
 - OpenAI Codex support (GPT models) via OAuth login
 - Claude Code support via OAuth login
 - Qwen Code support via OAuth login
+- Qoder support via OAuth login
 - iFlow support via OAuth login
 - Amp CLI and IDE extensions support with provider routing
 - Streaming and non-streaming responses
 - Function calling/tools support
 - Multimodal input support (text and images)
-- Multiple accounts with round-robin load balancing (Gemini, OpenAI, Claude, Qwen and iFlow)
-- Simple CLI authentication flows (Gemini, OpenAI, Claude, Qwen and iFlow)
+- Multiple accounts with round-robin load balancing (Gemini, OpenAI, Claude, Qwen, Qoder and iFlow)
+- Simple CLI authentication flows (Gemini, OpenAI, Claude, Qwen, Qoder and iFlow)
 - Generative Language API Key support
 - AI Studio Build multi-account load balancing
 - Gemini CLI multi-account load balancing
 - Claude Code multi-account load balancing
 - Qwen Code multi-account load balancing
+- Qoder multi-account load balancing
 - iFlow multi-account load balancing
 - OpenAI Codex multi-account load balancing
 - OpenAI-compatible upstream providers via config (e.g., OpenRouter)
@@ -71,6 +73,11 @@ CLIProxyAPI Guides: [https://help.router-for.me/](https://help.router-for.me/)
 ## Management API
 
 see [MANAGEMENT_API.md](https://help.router-for.me/management/api)
+
+> [!NOTE]
+> The management dashboard UI is distributed as a static `management.html` asset and may lag new providers.
+> If Qoder does not appear in the UI after upgrading, delete the local `static/management.html` so the server
+> re-downloads the latest control panel bundle.
 
 ## Amp CLI Support
 

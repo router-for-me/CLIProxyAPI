@@ -48,17 +48,19 @@ GLM CODING PLAN 是专为AI编码打造的订阅套餐，每月最低仅需20元
 - 新增 OpenAI Codex（GPT 系列）支持（OAuth 登录）
 - 新增 Claude Code 支持（OAuth 登录）
 - 新增 Qwen Code 支持（OAuth 登录）
+- 新增 Qoder 支持（OAuth 登录）
 - 新增 iFlow 支持（OAuth 登录）
 - 支持流式与非流式响应
 - 函数调用/工具支持
 - 多模态输入（文本、图片）
-- 多账户支持与轮询负载均衡（Gemini、OpenAI、Claude、Qwen 与 iFlow）
-- 简单的 CLI 身份验证流程（Gemini、OpenAI、Claude、Qwen 与 iFlow）
+- 多账户支持与轮询负载均衡（Gemini、OpenAI、Claude、Qwen、Qoder 与 iFlow）
+- 简单的 CLI 身份验证流程（Gemini、OpenAI、Claude、Qwen、Qoder 与 iFlow）
 - 支持 Gemini AIStudio API 密钥
 - 支持 AI Studio Build 多账户轮询
 - 支持 Gemini CLI 多账户轮询
 - 支持 Claude Code 多账户轮询
 - 支持 Qwen Code 多账户轮询
+- 支持 Qoder 多账户轮询
 - 支持 iFlow 多账户轮询
 - 支持 OpenAI Codex 多账户轮询
 - 通过配置接入上游 OpenAI 兼容提供商（例如 OpenRouter）

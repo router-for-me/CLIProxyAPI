@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codex"
+	qoderauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/qoder"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/geminicli"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
@@ -165,6 +166,17 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 				if pt := strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType); pt != "" {
 					a.Attributes["plan_type"] = pt
 				}
+			}
+		}
+	}
+	if provider == "qoder" {
+		var storage qoderauth.QoderTokenStorage
+		if raw, errMarshal := json.Marshal(metadata); errMarshal == nil {
+			if errUnmarshal := json.Unmarshal(raw, &storage); errUnmarshal == nil {
+				if strings.TrimSpace(storage.Type) == "" {
+					storage.Type = "qoder"
+				}
+				a.Storage = &storage
 			}
 		}
 	}

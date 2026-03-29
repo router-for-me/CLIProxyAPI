@@ -637,6 +637,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/qwen-auth-url", s.mgmt.RequestQwenToken)
 		mgmt.GET("/kimi-auth-url", s.mgmt.RequestKimiToken)
 		mgmt.GET("/iflow-auth-url", s.mgmt.RequestIFlowToken)
+		mgmt.GET("/qoder-auth-url", s.mgmt.RequestQoderToken)
 		mgmt.POST("/iflow-auth-url", s.mgmt.RequestIFlowCookieToken)
 		mgmt.POST("/oauth-callback", s.mgmt.PostOAuthCallback)
 		mgmt.GET("/get-auth-status", s.mgmt.GetAuthStatus)
