@@ -2,6 +2,7 @@ package amp
 
 import (
 	"bytes"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -12,28 +13,29 @@ import (
 )
 
 // ResponseRewriter wraps a gin.ResponseWriter to intercept and modify the response body
-// It's used to rewrite model names in responses when model mapping is used
+// It is used to rewrite model names in responses when model mapping is used
+// and to keep Amp-compatible response shapes.
 type ResponseRewriter struct {
 	gin.ResponseWriter
-	body          *bytes.Buffer
-	originalModel string
-	isStreaming   bool
+	body                   *bytes.Buffer
+	originalModel          string
+	isStreaming            bool
+	suppressedContentBlock map[int]struct{}
 }
 
-// NewResponseRewriter creates a new response rewriter for model name substitution
+// NewResponseRewriter creates a new response rewriter for model name substitution.
 func NewResponseRewriter(w gin.ResponseWriter, originalModel string) *ResponseRewriter {
 	return &ResponseRewriter{
-		ResponseWriter: w,
-		body:           &bytes.Buffer{},
-		originalModel:  originalModel,
+		ResponseWriter:         w,
+		body:                   &bytes.Buffer{},
+		originalModel:          originalModel,
+		suppressedContentBlock: make(map[int]struct{}),
 	}
 }
 
 const maxBufferedResponseBytes = 2 * 1024 * 1024 // 2MB safety cap
 
 func looksLikeSSEChunk(data []byte) bool {
-	// Fallback detection: some upstreams may omit/lie about Content-Type, causing SSE to be buffered.
-	// Heuristics are intentionally simple and cheap.
 	return bytes.Contains(data, []byte("data:")) ||
 		bytes.Contains(data, []byte("event:")) ||
 		bytes.Contains(data, []byte("message_start")) ||
@@ -50,10 +52,8 @@ func (rw *ResponseRewriter) enableStreaming(reason string) error {
 	}
 	rw.isStreaming = true
 
-	// Flush any previously buffered data to avoid reordering or data loss.
 	if rw.body != nil && rw.body.Len() > 0 {
 		buf := rw.body.Bytes()
-		// Copy before Reset() to keep bytes stable.
 		toFlush := make([]byte, len(buf))
 		copy(toFlush, buf)
 		rw.body.Reset()
@@ -70,9 +70,7 @@ func (rw *ResponseRewriter) enableStreaming(reason string) error {
 	return nil
 }
 
-// Write intercepts response writes and buffers them for model name replacement
 func (rw *ResponseRewriter) Write(data []byte) (int, error) {
-	// Detect streaming on first write (header-based)
 	if !rw.isStreaming && rw.body.Len() == 0 {
 		contentType := rw.Header().Get("Content-Type")
 		rw.isStreaming = strings.Contains(contentType, "text/event-stream") ||
@@ -80,13 +78,11 @@ func (rw *ResponseRewriter) Write(data []byte) (int, error) {
 	}
 
 	if !rw.isStreaming {
-		// Content-based fallback: detect SSE-like chunks even if Content-Type is missing/wrong.
 		if looksLikeSSEChunk(data) {
 			if err := rw.enableStreaming("sse heuristic"); err != nil {
 				return 0, err
 			}
 		} else if rw.body.Len()+len(data) > maxBufferedResponseBytes {
-			// Safety cap: avoid unbounded buffering on large responses.
 			log.Warnf("amp response rewriter: buffer exceeded %d bytes, switching to streaming", maxBufferedResponseBytes)
 			if err := rw.enableStreaming("buffer limit"); err != nil {
 				return 0, err
@@ -106,7 +102,6 @@ func (rw *ResponseRewriter) Write(data []byte) (int, error) {
 	return rw.body.Write(data)
 }
 
-// Flush writes the buffered response with model names rewritten
 func (rw *ResponseRewriter) Flush() {
 	if rw.isStreaming {
 		if flusher, ok := rw.ResponseWriter.(http.Flusher); ok {
@@ -121,20 +116,58 @@ func (rw *ResponseRewriter) Flush() {
 	}
 }
 
-// modelFieldPaths lists all JSON paths where model name may appear
 var modelFieldPaths = []string{"message.model", "model", "modelVersion", "response.model", "response.modelVersion"}
 
-// rewriteModelInResponse replaces all occurrences of the mapped model with the original model in JSON
-// It also suppresses "thinking" blocks if "tool_use" is present to ensure Amp client compatibility
-func (rw *ResponseRewriter) rewriteModelInResponse(data []byte) []byte {
-	// 1. Amp Compatibility: Suppress thinking blocks if tool use is detected
-	// The Amp client struggles when both thinking and tool_use blocks are present
+// ensureAmpSignature injects empty signature fields into tool_use/thinking blocks
+// in API responses so that the Amp TUI does not crash on P.signature.length.
+func ensureAmpSignature(data []byte) []byte {
+	for index, block := range gjson.GetBytes(data, "content").Array() {
+		blockType := block.Get("type").String()
+		if blockType != "tool_use" && blockType != "thinking" {
+			continue
+		}
+		signaturePath := fmt.Sprintf("content.%d.signature", index)
+		if gjson.GetBytes(data, signaturePath).Exists() {
+			continue
+		}
+		var err error
+		data, err = sjson.SetBytes(data, signaturePath, "")
+		if err != nil {
+			log.Warnf("Amp ResponseRewriter: failed to add empty signature to %s block: %v", blockType, err)
+			break
+		}
+	}
+
+	contentBlockType := gjson.GetBytes(data, "content_block.type").String()
+	if (contentBlockType == "tool_use" || contentBlockType == "thinking") && !gjson.GetBytes(data, "content_block.signature").Exists() {
+		var err error
+		data, err = sjson.SetBytes(data, "content_block.signature", "")
+		if err != nil {
+			log.Warnf("Amp ResponseRewriter: failed to add empty signature to streaming %s block: %v", contentBlockType, err)
+		}
+	}
+
+	return data
+}
+
+func (rw *ResponseRewriter) markSuppressedContentBlock(index int) {
+	if rw.suppressedContentBlock == nil {
+		rw.suppressedContentBlock = make(map[int]struct{})
+	}
+	rw.suppressedContentBlock[index] = struct{}{}
+}
+
+func (rw *ResponseRewriter) isSuppressedContentBlock(index int) bool {
+	_, ok := rw.suppressedContentBlock[index]
+	return ok
+}
+
+func (rw *ResponseRewriter) suppressAmpThinking(data []byte) []byte {
 	if gjson.GetBytes(data, `content.#(type=="tool_use")`).Exists() {
 		filtered := gjson.GetBytes(data, `content.#(type!="thinking")#`)
 		if filtered.Exists() {
 			originalCount := gjson.GetBytes(data, "content.#").Int()
 			filteredCount := filtered.Get("#").Int()
-
 			if originalCount > filteredCount {
 				var err error
 				data, err = sjson.SetBytes(data, "content", filtered.Value())
@@ -142,11 +175,39 @@ func (rw *ResponseRewriter) rewriteModelInResponse(data []byte) []byte {
 					log.Warnf("Amp ResponseRewriter: failed to suppress thinking blocks: %v", err)
 				} else {
 					log.Debugf("Amp ResponseRewriter: Suppressed %d thinking blocks due to tool usage", originalCount-filteredCount)
-					// Log the result for verification
-					log.Debugf("Amp ResponseRewriter: Resulting content: %s", gjson.GetBytes(data, "content").String())
 				}
 			}
 		}
+	}
+
+	eventType := gjson.GetBytes(data, "type").String()
+	indexResult := gjson.GetBytes(data, "index")
+	if eventType == "content_block_start" && gjson.GetBytes(data, "content_block.type").String() == "thinking" && indexResult.Exists() {
+		rw.markSuppressedContentBlock(int(indexResult.Int()))
+		return nil
+	}
+	if gjson.GetBytes(data, "delta.type").String() == "thinking_delta" {
+		if indexResult.Exists() {
+			rw.markSuppressedContentBlock(int(indexResult.Int()))
+		}
+		return nil
+	}
+	if eventType == "content_block_stop" && indexResult.Exists() {
+		index := int(indexResult.Int())
+		if rw.isSuppressedContentBlock(index) {
+			delete(rw.suppressedContentBlock, index)
+			return nil
+		}
+	}
+
+	return data
+}
+
+func (rw *ResponseRewriter) rewriteModelInResponse(data []byte) []byte {
+	data = ensureAmpSignature(data)
+	data = rw.suppressAmpThinking(data)
+	if len(data) == 0 {
+		return data
 	}
 
 	if rw.originalModel == "" {
@@ -160,24 +221,80 @@ func (rw *ResponseRewriter) rewriteModelInResponse(data []byte) []byte {
 	return data
 }
 
-// rewriteStreamChunk rewrites model names in SSE stream chunks
 func (rw *ResponseRewriter) rewriteStreamChunk(chunk []byte) []byte {
-	if rw.originalModel == "" {
-		return chunk
-	}
-
-	// SSE format: "data: {json}\n\n"
 	lines := bytes.Split(chunk, []byte("\n"))
 	for i, line := range lines {
 		if bytes.HasPrefix(line, []byte("data: ")) {
 			jsonData := bytes.TrimPrefix(line, []byte("data: "))
 			if len(jsonData) > 0 && jsonData[0] == '{' {
-				// Rewrite JSON in the data line
 				rewritten := rw.rewriteModelInResponse(jsonData)
+				if len(rewritten) == 0 {
+					lines[i] = nil
+					if i > 0 && bytes.HasPrefix(lines[i-1], []byte("event: ")) {
+						lines[i-1] = nil
+					}
+					continue
+				}
 				lines[i] = append([]byte("data: "), rewritten...)
 			}
 		}
 	}
-
 	return bytes.Join(lines, []byte("\n"))
+}
+
+// SanitizeAmpRequestBody removes thinking blocks with empty/missing/invalid signatures
+// from the messages array in a request body before forwarding to the upstream API.
+// This prevents 400 errors from the API which requires valid signatures on thinking blocks.
+func SanitizeAmpRequestBody(body []byte) []byte {
+	messages := gjson.GetBytes(body, "messages")
+	if !messages.Exists() || !messages.IsArray() {
+		return body
+	}
+
+	modified := false
+	for msgIdx, msg := range messages.Array() {
+		if msg.Get("role").String() != "assistant" {
+			continue
+		}
+		content := msg.Get("content")
+		if !content.Exists() || !content.IsArray() {
+			continue
+		}
+
+		var keepBlocks []interface{}
+		removedCount := 0
+
+		for _, block := range content.Array() {
+			blockType := block.Get("type").String()
+			if blockType == "thinking" {
+				sig := block.Get("signature")
+				if !sig.Exists() || sig.Type != gjson.String || strings.TrimSpace(sig.String()) == "" {
+					removedCount++
+					continue
+				}
+			}
+			keepBlocks = append(keepBlocks, block.Value())
+		}
+
+		if removedCount > 0 {
+			contentPath := fmt.Sprintf("messages.%d.content", msgIdx)
+			var err error
+			if len(keepBlocks) == 0 {
+				body, err = sjson.SetBytes(body, contentPath, []interface{}{})
+			} else {
+				body, err = sjson.SetBytes(body, contentPath, keepBlocks)
+			}
+			if err != nil {
+				log.Warnf("Amp RequestSanitizer: failed to remove thinking blocks from message %d: %v", msgIdx, err)
+				continue
+			}
+			modified = true
+			log.Debugf("Amp RequestSanitizer: removed %d thinking blocks with invalid signatures from message %d", removedCount, msgIdx)
+		}
+	}
+
+	if modified {
+		log.Debugf("Amp RequestSanitizer: sanitized request body")
+	}
+	return body
 }
