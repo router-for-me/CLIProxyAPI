@@ -2030,7 +2030,7 @@ func (h *Handler) RequestQwenToken(c *gin.Context) {
 
 	go func() {
 		fmt.Println("Waiting for authentication...")
-		tokenData, errPollForToken := qwenAuth.PollForToken(deviceFlow.DeviceCode, deviceFlow.CodeVerifier)
+		tokenData, errPollForToken := qwenAuth.PollForToken(ctx, deviceFlow.DeviceCode, deviceFlow.CodeVerifier)
 		if errPollForToken != nil {
 			SetOAuthSessionError(state, "Authentication failed")
 			fmt.Printf("Authentication failed: %v\n", errPollForToken)

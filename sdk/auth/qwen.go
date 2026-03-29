@@ -27,7 +27,8 @@ func (a *QwenAuthenticator) Provider() string {
 }
 
 func (a *QwenAuthenticator) RefreshLead() *time.Duration {
-	return new(3 * time.Hour)
+	lead := 3 * time.Hour
+	return &lead
 }
 
 func (a *QwenAuthenticator) Login(ctx context.Context, cfg *config.Config, opts *LoginOptions) (*coreauth.Auth, error) {
@@ -65,7 +66,7 @@ func (a *QwenAuthenticator) Login(ctx context.Context, cfg *config.Config, opts 
 
 	fmt.Println("Waiting for Qwen authentication...")
 
-	tokenData, err := authSvc.PollForToken(deviceFlow.DeviceCode, deviceFlow.CodeVerifier)
+	tokenData, err := authSvc.PollForToken(ctx, deviceFlow.DeviceCode, deviceFlow.CodeVerifier)
 	if err != nil {
 		return nil, fmt.Errorf("qwen authentication failed: %w", err)
 	}

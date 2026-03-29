@@ -224,7 +224,10 @@ func (qa *QwenAuth) InitiateDeviceFlow(ctx context.Context) (*DeviceFlow, error)
 }
 
 // PollForToken polls the token endpoint with the device code to obtain an access token.
-func (qa *QwenAuth) PollForToken(deviceCode, codeVerifier string) (*QwenTokenData, error) {
+func (qa *QwenAuth) PollForToken(ctx context.Context, deviceCode, codeVerifier string) (*QwenTokenData, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	pollInterval := 5 * time.Second
 	maxAttempts := 60 // 5 minutes max
 
@@ -235,7 +238,7 @@ func (qa *QwenAuth) PollForToken(deviceCode, codeVerifier string) (*QwenTokenDat
 		data.Set("device_code", deviceCode)
 		data.Set("code_verifier", codeVerifier)
 
-		resp, err := http.PostForm(QwenOAuthTokenEndpoint, data)
+		resp, err := qa.postForm(ctx, QwenOAuthTokenEndpoint, data)
 		if err != nil {
 			fmt.Printf("Polling attempt %d/%d failed: %v\n", attempt+1, maxAttempts, err)
 			time.Sleep(pollInterval)
@@ -308,6 +311,29 @@ func (qa *QwenAuth) PollForToken(deviceCode, codeVerifier string) (*QwenTokenDat
 	}
 
 	return nil, fmt.Errorf("authentication timeout. Please restart the authentication process")
+}
+
+func waitForNextPoll(ctx context.Context, pollInterval time.Duration) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(pollInterval):
+		return nil
+	}
+}
+
+func (qa *QwenAuth) postForm(ctx context.Context, endpoint string, data url.Values) (*http.Response, error) {
+	client := qa.httpClient
+	if client == nil {
+		client = &http.Client{Timeout: 60 * time.Second}
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(data.Encode()))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "application/json")
+	return client.Do(req)
 }
 
 // RefreshTokensWithRetry attempts to refresh tokens with a specified number of retries upon failure.
