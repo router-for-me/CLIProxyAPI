@@ -176,6 +176,215 @@ func TestToolCallWithContent(t *testing.T) {
 	}
 }
 
+func TestToolCallOutputWithImageContent(t *testing.T) {
+	input := []byte(`{
+		"model": "gpt-4o",
+		"messages": [
+			{"role": "user", "content": "Show me the generated image result."},
+			{
+				"role": "assistant",
+				"content": null,
+				"tool_calls": [
+					{
+						"id": "call_img_1",
+						"type": "function",
+						"function": {
+							"name": "render_image",
+							"arguments": "{}"
+						}
+					}
+				]
+			},
+			{
+				"role": "tool",
+				"tool_call_id": "call_img_1",
+				"content": [
+					{"type": "text", "text": "Rendered image attached."},
+					{"type": "image_url", "image_url": {"url": "https://example.com/generated.png"}}
+				]
+			}
+		],
+		"tools": [
+			{
+				"type": "function",
+				"function": {
+					"name": "render_image",
+					"description": "Render image",
+					"parameters": {"type": "object", "properties": {}}
+				}
+			}
+		]
+	}`)
+
+	out := ConvertOpenAIRequestToCodex("gpt-4o", input, true)
+	result := string(out)
+
+	items := gjson.Get(result, "input").Array()
+	if len(items) != 3 {
+		t.Fatalf("expected 3 input items, got %d: %s", len(items), gjson.Get(result, "input").Raw)
+	}
+
+	output := items[2].Get("output")
+	if !output.IsArray() {
+		t.Fatalf("expected tool output to be an array, got: %s", output.Raw)
+	}
+
+	parts := output.Array()
+	if len(parts) != 2 {
+		t.Fatalf("expected 2 output parts, got %d: %s", len(parts), output.Raw)
+	}
+
+	if parts[0].Get("type").String() != "input_text" {
+		t.Errorf("part 0: expected type 'input_text', got '%s'", parts[0].Get("type").String())
+	}
+	if parts[0].Get("text").String() != "Rendered image attached." {
+		t.Errorf("part 0: unexpected text '%s'", parts[0].Get("text").String())
+	}
+	if parts[1].Get("type").String() != "input_image" {
+		t.Errorf("part 1: expected type 'input_image', got '%s'", parts[1].Get("type").String())
+	}
+	if parts[1].Get("image_url").String() != "https://example.com/generated.png" {
+		t.Errorf("part 1: unexpected image_url '%s'", parts[1].Get("image_url").String())
+	}
+}
+
+func TestToolCallOutputWithFileContent(t *testing.T) {
+	input := []byte(`{
+		"model": "gpt-4o",
+		"messages": [
+			{"role": "user", "content": "Process these files"},
+			{
+				"role": "assistant",
+				"content": null,
+				"tool_calls": [
+					{
+						"id": "call_file_1",
+						"type": "function",
+						"function": {"name": "process_files", "arguments": "{}"}
+					}
+				]
+			},
+			{
+				"role": "tool",
+				"tool_call_id": "call_file_1",
+				"content": [
+					{"type": "text", "text": "Files processed"},
+					{"type": "file", "file": {"file_id": "file-abc", "filename": "result.txt"}},
+					{"type": "file", "file": {"file_url": "https://example.com/output.pdf", "filename": "output.pdf"}},
+					{"type": "file", "file": {"file_data": "YW5vdGhlciBmaWxl", "filename": "data.bin"}}
+				]
+			}
+		],
+		"tools": [
+			{
+				"type": "function",
+				"function": {"name": "process_files", "description": "Process", "parameters": {"type": "object", "properties": {}}}
+			}
+		]
+	}`)
+
+	out := ConvertOpenAIRequestToCodex("gpt-4o", input, true)
+	result := string(out)
+
+	items := gjson.Get(result, "input").Array()
+	if len(items) != 3 {
+		t.Fatalf("expected 3 input items, got %d: %s", len(items), gjson.Get(result, "input").Raw)
+	}
+
+	output := items[2].Get("output")
+	if !output.IsArray() {
+		t.Fatalf("expected tool output to be an array, got: %s", output.Raw)
+	}
+
+	parts := output.Array()
+	if len(parts) != 4 {
+		t.Fatalf("expected 4 output parts, got %d: %s", len(parts), output.Raw)
+	}
+
+	if parts[0].Get("type").String() != "input_text" {
+		t.Errorf("part 0: expected input_text, got %s", parts[0].Get("type").String())
+	}
+
+	if parts[1].Get("type").String() != "input_file" {
+		t.Errorf("part 1: expected input_file, got %s", parts[1].Get("type").String())
+	}
+	if parts[1].Get("file_id").String() != "file-abc" {
+		t.Errorf("part 1: expected file_id file-abc, got %s", parts[1].Get("file_id").String())
+	}
+	if parts[1].Get("filename").String() != "result.txt" {
+		t.Errorf("part 1: expected filename result.txt, got %s", parts[1].Get("filename").String())
+	}
+
+	if parts[2].Get("file_url").String() != "https://example.com/output.pdf" {
+		t.Errorf("part 2: expected file_url, got %s", parts[2].Get("file_url").String())
+	}
+	if parts[2].Get("filename").String() != "output.pdf" {
+		t.Errorf("part 2: expected filename output.pdf, got %s", parts[2].Get("filename").String())
+	}
+
+	if parts[3].Get("file_data").String() != "YW5vdGhlciBmaWxl" {
+		t.Errorf("part 3: expected file_data, got %s", parts[3].Get("file_data").String())
+	}
+	if parts[3].Get("filename").String() != "data.bin" {
+		t.Errorf("part 3: expected filename data.bin, got %s", parts[3].Get("filename").String())
+	}
+}
+
+func TestToolCallOutputWithUnknownType(t *testing.T) {
+	input := []byte(`{
+		"model": "gpt-4o",
+		"messages": [
+			{"role": "user", "content": "Test"},
+			{
+				"role": "assistant",
+				"content": null,
+				"tool_calls": [{"id": "call_x", "type": "function", "function": {"name": "test", "arguments": "{}"}}]
+			},
+			{
+				"role": "tool",
+				"tool_call_id": "call_x",
+				"content": [
+					{"type": "text", "text": "normal text"},
+					{"type": "unknown_type", "foo": "bar", "nested": {"a": 1}},
+					{"type": "another_unknown", "value": 42}
+				]
+			}
+		],
+		"tools": [{"type": "function", "function": {"name": "test", "description": "Test", "parameters": {"type": "object", "properties": {}}}}]
+	}`)
+
+	out := ConvertOpenAIRequestToCodex("gpt-4o", input, true)
+	result := string(out)
+
+	items := gjson.Get(result, "input").Array()
+	output := items[2].Get("output")
+	parts := output.Array()
+
+	if len(parts) != 3 {
+		t.Fatalf("expected 3 output parts, got %d: %s", len(parts), output.Raw)
+	}
+
+	// normal text
+	if parts[0].Get("type").String() != "input_text" {
+		t.Errorf("part 0: expected input_text, got %s", parts[0].Get("type").String())
+	}
+
+	// unknown type -> fallback to string
+	if parts[1].Get("type").String() != "input_text" {
+		t.Errorf("part 1: expected input_text (fallback), got %s", parts[1].Get("type").String())
+	}
+	// should contain the raw JSON
+	fallbackText := parts[1].Get("text").String()
+	if !gjson.Valid(fallbackText) {
+		t.Errorf("part 1: fallback text should be valid JSON, got: %s", fallbackText)
+	}
+
+	// another unknown
+	if parts[2].Get("type").String() != "input_text" {
+		t.Errorf("part 2: expected input_text (fallback), got %s", parts[2].Get("type").String())
+	}
+}
+
 // Parallel tool calls: assistant invokes 3 tools at once, all call_ids
 // and outputs must be translated and paired correctly.
 func TestMultipleToolCalls(t *testing.T) {
@@ -592,6 +801,108 @@ func TestCallIDsMatchBetweenCallAndOutput(t *testing.T) {
 	}
 	if funcOutputCount != 2 {
 		t.Errorf("expected 2 function_call_outputs, got %d", funcOutputCount)
+	}
+}
+
+func TestUserFileContentTranslated(t *testing.T) {
+	input := []byte(`{
+		"model": "gpt-4o",
+		"messages": [
+			{
+				"role": "user",
+				"content": [
+					{"type": "text", "text": "Analyze these files"},
+					{"type": "file", "file": {"file_id": "file-123", "filename": "a.txt"}},
+					{"type": "file", "file": {"file_url": "https://example.com/b.pdf", "filename": "b.pdf"}},
+					{"type": "file", "file": {"file_data": "ZmlsZSBjb250ZW50", "filename": "c.txt"}}
+				]
+			}
+		]
+	}`)
+
+	out := ConvertOpenAIRequestToCodex("gpt-4o", input, true)
+	result := string(out)
+
+	items := gjson.Get(result, "input").Array()
+	if len(items) != 1 {
+		t.Fatalf("expected 1 input item, got %d: %s", len(items), gjson.Get(result, "input").Raw)
+	}
+
+	content := items[0].Get("content").Array()
+	if len(content) != 4 {
+		t.Fatalf("expected 4 content parts, got %d: %s", len(content), items[0].Get("content").Raw)
+	}
+
+	if content[0].Get("type").String() != "input_text" {
+		t.Errorf("part 0: expected input_text, got %s", content[0].Get("type").String())
+	}
+	if content[1].Get("type").String() != "input_file" {
+		t.Errorf("part 1: expected input_file, got %s", content[1].Get("type").String())
+	}
+	if content[1].Get("file_id").String() != "file-123" {
+		t.Errorf("part 1: expected file_id file-123, got %s", content[1].Get("file_id").String())
+	}
+	if content[1].Get("filename").String() != "a.txt" {
+		t.Errorf("part 1: expected filename a.txt, got %s", content[1].Get("filename").String())
+	}
+
+	if content[2].Get("file_url").String() != "https://example.com/b.pdf" {
+		t.Errorf("part 2: expected file_url https://example.com/b.pdf, got %s", content[2].Get("file_url").String())
+	}
+	if content[2].Get("filename").String() != "b.pdf" {
+		t.Errorf("part 2: expected filename b.pdf, got %s", content[2].Get("filename").String())
+	}
+
+	if content[3].Get("file_data").String() != "ZmlsZSBjb250ZW50" {
+		t.Errorf("part 3: expected file_data ZmlsZSBjb250ZW50, got %s", content[3].Get("file_data").String())
+	}
+	if content[3].Get("filename").String() != "c.txt" {
+		t.Errorf("part 3: expected filename c.txt, got %s", content[3].Get("filename").String())
+	}
+}
+
+func TestUserImageWithDetail(t *testing.T) {
+	input := []byte(`{
+		"model": "gpt-4o",
+		"messages": [
+			{
+				"role": "user",
+				"content": [
+					{"type": "text", "text": "Analyze this image"},
+					{"type": "image_url", "image_url": {"url": "https://example.com/img.png", "detail": "high"}},
+					{"type": "image_url", "image_url": {"file_id": "file-img-123", "detail": "low"}}
+				]
+			}
+		]
+	}`)
+
+	out := ConvertOpenAIRequestToCodex("gpt-4o", input, true)
+	result := string(out)
+
+	items := gjson.Get(result, "input").Array()
+	content := items[0].Get("content").Array()
+
+	if len(content) != 3 {
+		t.Fatalf("expected 3 content parts, got %d", len(content))
+	}
+
+	// image with url and detail
+	if content[1].Get("type").String() != "input_image" {
+		t.Errorf("part 1: expected input_image, got %s", content[1].Get("type").String())
+	}
+	if content[1].Get("image_url").String() != "https://example.com/img.png" {
+		t.Errorf("part 1: expected image_url, got %s", content[1].Get("image_url").String())
+	}
+	if content[1].Get("detail").String() != "high" {
+		t.Errorf("part 1: expected detail high, got %s", content[1].Get("detail").String())
+	}
+
+	// image with file_id and detail
+	if content[2].Get("file_id").String() != "file-img-123" {
+		t.Errorf("part 2: expected file_id, got %s", content[2].Get("file_id").String())
+	}
+	if content[2].Get("detail").String() != "low" {
+		t.Errorf("part 2: expected detail low, got %s", content[2].Get("detail").String())
 	}
 }
 
