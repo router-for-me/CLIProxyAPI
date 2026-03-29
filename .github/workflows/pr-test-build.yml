@@ -2,6 +2,7 @@ name: pr-test-build
 
 on:
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -21,7 +22,9 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - name: Build
+      - name: Run translator regression tests
+        run: go test ./internal/translator/openai/claude/...
+      - name: Build server
         run: |
           go build -o test-output ./cmd/server
           rm -f test-output

@@ -1,0 +1,69 @@
+name: upstream-sync
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 3 * * 1'
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+      - name: Fetch origin and upstream
+        run: |
+          git remote add upstream https://github.com/router-for-me/CLIProxyAPI.git
+          git fetch origin main
+          git fetch upstream main
+      - name: Prepare sync branch
+        id: prepare
+        run: |
+          set -euo pipefail
+          if [ "$(git rev-parse origin/main)" = "$(git rev-parse upstream/main)" ]; then
+            echo "has_updates=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          branch="sync/upstream-main"
+          git checkout -B "${branch}" origin/main
+          git merge --no-edit upstream/main
+          git push --force-with-lease origin "${branch}"
+
+          echo "has_updates=true" >> $GITHUB_OUTPUT
+          echo "branch=${branch}" >> $GITHUB_OUTPUT
+      - name: Create or update pull request
+        if: steps.prepare.outputs.has_updates == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          branch="${{ steps.prepare.outputs.branch }}"
+          pr_number="$(gh pr list --head "${branch}" --base main --json number --jq '.[0].number')"
+
+          body="$(cat <<'EOF'
+## Summary
+- merge the latest `router-for-me/CLIProxyAPI` `main` into the fork on a dedicated sync branch
+- keep fork-specific patches reviewable before they land on `main`
+
+## Notes
+- this PR was generated automatically by the upstream sync workflow
+- resolve merge conflicts in the PR branch before merging if GitHub reports any
+EOF
+)"
+
+          if [ -n "${pr_number}" ] && [ "${pr_number}" != "null" ]; then
+            gh pr edit "${pr_number}" --title "chore: sync upstream main" --body "${body}"
+          else
+            gh pr create --base main --head "${branch}" --title "chore: sync upstream main" --body "${body}"
+          fi
