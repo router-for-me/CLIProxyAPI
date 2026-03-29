@@ -60,6 +60,19 @@ func TestParseCodexRetryAfter(t *testing.T) {
 	})
 }
 
+func TestNewCodexStatusErrTreatsCapacityAsRetryableRateLimit(t *testing.T) {
+	body := []byte(`{"error":{"message":"Selected model is at capacity. Please try a different model."}}`)
+
+	err := newCodexStatusErr(http.StatusBadRequest, body)
+
+	if got := err.StatusCode(); got != http.StatusTooManyRequests {
+		t.Fatalf("status code = %d, want %d", got, http.StatusTooManyRequests)
+	}
+	if err.RetryAfter() != nil {
+		t.Fatalf("expected nil explicit retryAfter for capacity fallback, got %v", *err.RetryAfter())
+	}
+}
+
 func itoa(v int64) string {
 	return strconv.FormatInt(v, 10)
 }

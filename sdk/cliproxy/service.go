@@ -298,10 +298,12 @@ func (s *Service) applyCoreAuthAddOrUpdate(ctx context.Context, auth *coreauth.A
 	var err error
 	if existing, ok := s.coreManager.GetByID(auth.ID); ok {
 		auth.CreatedAt = existing.CreatedAt
-		auth.LastRefreshedAt = existing.LastRefreshedAt
-		auth.NextRefreshAfter = existing.NextRefreshAfter
-		if len(auth.ModelStates) == 0 && len(existing.ModelStates) > 0 {
-			auth.ModelStates = existing.ModelStates
+		if !existing.Disabled && existing.Status != coreauth.StatusDisabled && !auth.Disabled && auth.Status != coreauth.StatusDisabled {
+			auth.LastRefreshedAt = existing.LastRefreshedAt
+			auth.NextRefreshAfter = existing.NextRefreshAfter
+			if len(auth.ModelStates) == 0 && len(existing.ModelStates) > 0 {
+				auth.ModelStates = existing.ModelStates
+			}
 		}
 		op = "update"
 		_, err = s.coreManager.Update(ctx, auth)

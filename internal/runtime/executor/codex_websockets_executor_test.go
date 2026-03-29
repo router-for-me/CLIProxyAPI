@@ -9,7 +9,9 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	"github.com/tidwall/gjson"
 )
 
@@ -29,6 +31,49 @@ func TestBuildCodexWebsocketRequestBodyPreservesPreviousResponseID(t *testing.T)
 	}
 	if got := gjson.GetBytes(wsReqBody, "type").String(); got == "response.append" {
 		t.Fatalf("unexpected websocket request type: %s", got)
+	}
+}
+
+func TestApplyCodexPromptCacheHeaders_PreservesPromptCacheRetention(t *testing.T) {
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5-codex",
+		Payload: []byte(`{"prompt_cache_key":"cache-key-1","prompt_cache_retention":"persistent"}`),
+	}
+	body := []byte(`{"model":"gpt-5-codex","stream":true,"prompt_cache_retention":"persistent"}`)
+
+	updatedBody, headers, _ := applyCodexPromptCacheHeaders(context.Background(), nil, sdktranslator.FromString("openai-response"), req, cliproxyexecutor.Options{}, body)
+
+	if got := gjson.GetBytes(updatedBody, "prompt_cache_key").String(); got != "cache-key-1" {
+		t.Fatalf("prompt_cache_key = %q, want %q", got, "cache-key-1")
+	}
+	if got := gjson.GetBytes(updatedBody, "prompt_cache_retention").String(); got != "persistent" {
+		t.Fatalf("prompt_cache_retention = %q, want %q", got, "persistent")
+	}
+	if got := headers.Get("session_id"); got != "cache-key-1" {
+		t.Fatalf("session_id = %q, want %q", got, "cache-key-1")
+	}
+	if got := headers.Get("Conversation_id"); got != "" {
+		t.Fatalf("Conversation_id = %q, want empty", got)
+	}
+}
+
+func TestApplyCodexPromptCacheHeaders_ClaudePreservesContinuity(t *testing.T) {
+	req := cliproxyexecutor.Request{
+		Model:   "claude-3-7-sonnet",
+		Payload: []byte(`{"metadata":{"user_id":"user-1"}}`),
+	}
+	body := []byte(`{"model":"gpt-5.4","stream":true}`)
+
+	updatedBody, headers, continuity := applyCodexPromptCacheHeaders(context.Background(), nil, sdktranslator.FromString("claude"), req, cliproxyexecutor.Options{}, body)
+
+	if continuity.Key == "" {
+		t.Fatal("continuity.Key = empty, want non-empty")
+	}
+	if got := gjson.GetBytes(updatedBody, "prompt_cache_key").String(); got != continuity.Key {
+		t.Fatalf("prompt_cache_key = %q, want %q", got, continuity.Key)
+	}
+	if got := headers.Get("session_id"); got != continuity.Key {
+		t.Fatalf("session_id = %q, want %q", got, continuity.Key)
 	}
 }
 

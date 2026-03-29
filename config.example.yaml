@@ -313,6 +313,10 @@ nonstream-keepalive-interval: 0
 # These aliases rename model IDs for both model listing and request routing.
 # Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, qwen, iflow, kiro, github-copilot, kimi.
 # NOTE: Aliases do not apply to gemini-api-key, codex-api-key, claude-api-key, openai-compatibility, vertex-api-key, or ampcode.
+# NOTE: Because aliases affect the merged /v1 model list and merged request routing, overlapping
+# client-visible names can become ambiguous across providers. /api/provider/{provider}/... helps
+# you select the protocol surface, but inference backend selection can still follow the resolved
+# model/alias. For strict backend pinning, use unique aliases/prefixes or avoid overlapping names.
 # You can repeat the same name with different aliases to expose multiple client model names.
 # oauth-model-alias:
 #  antigravity:
