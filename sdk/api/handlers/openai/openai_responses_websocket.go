@@ -81,6 +81,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 	var lastRequest []byte
 	lastResponseOutput := []byte("[]")
 	pinnedAuthID := ""
+	forceDisableIncrementalAfterAuthReset := false
 
 	for {
 		msgType, payload, errReadMessage := conn.ReadMessage()
@@ -107,16 +108,18 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		appendWebsocketEvent(&wsBodyLog, "request", payload)
 
 		allowIncrementalInputWithPreviousResponseID := false
-		if pinnedAuthID != "" && h != nil && h.AuthManager != nil {
-			if pinnedAuth, ok := h.AuthManager.GetByID(pinnedAuthID); ok && pinnedAuth != nil {
-				allowIncrementalInputWithPreviousResponseID = websocketUpstreamSupportsIncrementalInput(pinnedAuth.Attributes, pinnedAuth.Metadata)
+		if !forceDisableIncrementalAfterAuthReset {
+			if pinnedAuthID != "" && h != nil && h.AuthManager != nil {
+				if pinnedAuth, ok := h.AuthManager.GetByID(pinnedAuthID); ok && pinnedAuth != nil {
+					allowIncrementalInputWithPreviousResponseID = websocketUpstreamSupportsIncrementalInput(pinnedAuth.Attributes, pinnedAuth.Metadata)
+				}
+			} else {
+				requestModelName := strings.TrimSpace(gjson.GetBytes(payload, "model").String())
+				if requestModelName == "" {
+					requestModelName = strings.TrimSpace(gjson.GetBytes(lastRequest, "model").String())
+				}
+				allowIncrementalInputWithPreviousResponseID = h.websocketUpstreamSupportsIncrementalInputForModel(requestModelName)
 			}
-		} else {
-			requestModelName := strings.TrimSpace(gjson.GetBytes(payload, "model").String())
-			if requestModelName == "" {
-				requestModelName = strings.TrimSpace(gjson.GetBytes(lastRequest, "model").String())
-			}
-			allowIncrementalInputWithPreviousResponseID = h.websocketUpstreamSupportsIncrementalInputForModel(requestModelName)
 		}
 
 		var requestJSON []byte
@@ -151,6 +154,28 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			}
 			continue
 		}
+		nextSessionRequestSnapshot := updatedLastRequest
+		if shouldBuildResponsesWebsocketFullSnapshot(requestJSON, allowIncrementalInputWithPreviousResponseID) {
+			_, shadowLastRequest, shadowErr := normalizeResponsesWebsocketRequestWithMode(
+				payload,
+				lastRequest,
+				lastResponseOutput,
+				false,
+			)
+			if shadowErr != nil {
+				// 影子快照失败时保留旧快照避免污染会话状态
+				nextSessionRequestSnapshot = lastRequest
+				log.Errorf(
+					"responses websocket: keep previous snapshot id=%s status=%d error=%v",
+					passthroughSessionID,
+					shadowErr.StatusCode,
+					shadowErr.Error,
+				)
+			} else {
+				// 增量模式只发 delta 同时维护完整快照供切号恢复
+				nextSessionRequestSnapshot = shadowLastRequest
+			}
+		}
 		if shouldHandleResponsesWebsocketPrewarmLocally(payload, lastRequest, allowIncrementalInputWithPreviousResponseID) {
 			if updated, errDelete := sjson.DeleteBytes(requestJSON, "generate"); errDelete == nil {
 				requestJSON = updated
@@ -167,8 +192,6 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			}
 			continue
 		}
-		lastRequest = updatedLastRequest
-
 		modelName := gjson.GetBytes(requestJSON, "model").String()
 		cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 		cliCtx = cliproxyexecutor.WithDownstreamWebsocket(cliCtx)
@@ -192,14 +215,33 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		}
 		dataChan, _, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, requestJSON, "")
 
-		completedOutput, errForward := h.forwardResponsesWebsocket(c, conn, cliCancel, dataChan, errChan, &wsBodyLog, passthroughSessionID)
+		completedOutput, terminalStatus, errForward := h.forwardResponsesWebsocket(c, conn, cliCancel, dataChan, errChan, &wsBodyLog, passthroughSessionID)
 		if errForward != nil {
 			wsTerminateErr = errForward
 			appendWebsocketEvent(&wsBodyLog, "disconnect", []byte(errForward.Error()))
 			log.Warnf("responses websocket: forward failed id=%s error=%v", passthroughSessionID, errForward)
 			return
 		}
-		lastResponseOutput = completedOutput
+		if shouldResetResponsesWebsocketAuthPin(terminalStatus) {
+			// 限额错误后解除 pin 让后续请求重新选可用账号
+			log.Infof("responses websocket: reset auth pin id=%s status=%d", passthroughSessionID, terminalStatus)
+			pinnedAuthID = ""
+			// 切号恢复阶段先禁用增量模式避免沿用旧账号 response id
+			forceDisableIncrementalAfterAuthReset = true
+			if h != nil && h.AuthManager != nil {
+				// 主动关闭旧上游会话避免继续复用旧账号连接
+				h.AuthManager.CloseExecutionSession(passthroughSessionID)
+			}
+		} else if forceDisableIncrementalAfterAuthReset && terminalStatus == 0 {
+			// 仅在成功轮次恢复增量模式避免失败轮次继续透传旧 response id
+			forceDisableIncrementalAfterAuthReset = false
+		}
+		if terminalStatus == 0 {
+			// 仅在本轮成功后提交快照避免失败轮次污染会话历史
+			lastRequest = nextSessionRequestSnapshot
+			// 仅在本轮成功后提交输出避免失败把状态推进到空输出
+			lastResponseOutput = completedOutput
+		}
 	}
 }
 
@@ -488,6 +530,14 @@ func shouldHandleResponsesWebsocketPrewarmLocally(rawJSON []byte, lastRequest []
 	return generateResult.Exists() && !generateResult.Bool()
 }
 
+func shouldBuildResponsesWebsocketFullSnapshot(normalizedRequestJSON []byte, allowIncrementalInputWithPreviousResponseID bool) bool {
+	if !allowIncrementalInputWithPreviousResponseID {
+		return false
+	}
+	prev := strings.TrimSpace(gjson.GetBytes(normalizedRequestJSON, "previous_response_id").String())
+	return prev != ""
+}
+
 func writeResponsesWebsocketSyntheticPrewarm(
 	c *gin.Context,
 	conn *websocket.Conn,
@@ -610,21 +660,23 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 	errs <-chan *interfaces.ErrorMessage,
 	wsBodyLog *strings.Builder,
 	sessionID string,
-) ([]byte, error) {
+) ([]byte, int, error) {
 	completed := false
 	completedOutput := []byte("[]")
+	terminalStatusCode := 0
 
 	for {
 		select {
 		case <-c.Request.Context().Done():
 			cancel(c.Request.Context().Err())
-			return completedOutput, c.Request.Context().Err()
+			return completedOutput, terminalStatusCode, c.Request.Context().Err()
 		case errMsg, ok := <-errs:
 			if !ok {
 				errs = nil
 				continue
 			}
 			if errMsg != nil {
+				terminalStatusCode = errMsg.StatusCode
 				h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), errMsg)
 				markAPIResponseTimestamp(c)
 				errorPayload, errWrite := writeResponsesWebsocketError(conn, errMsg)
@@ -644,7 +696,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 					// 	errWrite,
 					// )
 					cancel(errMsg.Error)
-					return completedOutput, errWrite
+					return completedOutput, terminalStatusCode, errWrite
 				}
 			}
 			if errMsg != nil {
@@ -652,7 +704,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 			} else {
 				cancel(nil)
 			}
-			return completedOutput, nil
+			return completedOutput, terminalStatusCode, nil
 		case chunk, ok := <-data:
 			if !ok {
 				if !completed {
@@ -660,6 +712,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 						StatusCode: http.StatusRequestTimeout,
 						Error:      fmt.Errorf("stream closed before response.completed"),
 					}
+					terminalStatusCode = errMsg.StatusCode
 					h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), errMsg)
 					markAPIResponseTimestamp(c)
 					errorPayload, errWrite := writeResponsesWebsocketError(conn, errMsg)
@@ -679,13 +732,13 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 							errWrite,
 						)
 						cancel(errMsg.Error)
-						return completedOutput, errWrite
+						return completedOutput, terminalStatusCode, errWrite
 					}
 					cancel(errMsg.Error)
-					return completedOutput, nil
+					return completedOutput, terminalStatusCode, nil
 				}
 				cancel(nil)
-				return completedOutput, nil
+				return completedOutput, terminalStatusCode, nil
 			}
 
 			payloads := websocketJSONPayloadsFromChunk(chunk)
@@ -712,10 +765,19 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 						errWrite,
 					)
 					cancel(errWrite)
-					return completedOutput, errWrite
+					return completedOutput, terminalStatusCode, errWrite
 				}
 			}
 		}
+	}
+}
+
+func shouldResetResponsesWebsocketAuthPin(statusCode int) bool {
+	switch statusCode {
+	case http.StatusTooManyRequests, http.StatusForbidden, http.StatusPaymentRequired, http.StatusUnauthorized:
+		return true
+	default:
+		return false
 	}
 }
 
