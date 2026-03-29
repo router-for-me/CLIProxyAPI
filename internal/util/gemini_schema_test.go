@@ -870,6 +870,34 @@ func TestCleanJSONSchemaForAntigravity_BooleanEnumToString(t *testing.T) {
 	}
 }
 
+func TestCleanJSONSchemaForAntigravity_BooleanPropertySchemaNormalized(t *testing.T) {
+	input := `{
+		"type": "object",
+		"properties": {
+			"tool_results": {
+				"type": "array",
+				"items": {
+					"type": "object",
+					"properties": {
+						"value": true
+					}
+				}
+			}
+		}
+	}`
+
+	result := CleanJSONSchemaForAntigravity(input)
+
+	if strings.Contains(result, `"value":true`) {
+		t.Fatalf("boolean schema should be normalized, got: %s", result)
+	}
+
+	parsed := gjson.Parse(result)
+	if got := parsed.Get("properties.tool_results.items.properties.value.type").String(); got != "object" {
+		t.Fatalf("expected normalized schema type object, got %q, result: %s", got, result)
+	}
+}
+
 func TestCleanJSONSchemaForGemini_RemovesGeminiUnsupportedMetadataFields(t *testing.T) {
 	input := `{
 		"$schema": "http://json-schema.org/draft-07/schema#",
