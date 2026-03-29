@@ -223,23 +223,27 @@ func (rw *ResponseRewriter) rewriteModelInResponse(data []byte) []byte {
 
 func (rw *ResponseRewriter) rewriteStreamChunk(chunk []byte) []byte {
 	lines := bytes.Split(chunk, []byte("\n"))
-	for i, line := range lines {
+	writeIndex := 0
+	for _, line := range lines {
 		if bytes.HasPrefix(line, []byte("data: ")) {
 			jsonData := bytes.TrimPrefix(line, []byte("data: "))
 			if len(jsonData) > 0 && jsonData[0] == '{' {
 				rewritten := rw.rewriteModelInResponse(jsonData)
 				if len(rewritten) == 0 {
-					lines[i] = nil
-					if i > 0 && bytes.HasPrefix(lines[i-1], []byte("event: ")) {
-						lines[i-1] = nil
+					if writeIndex > 0 && bytes.HasPrefix(lines[writeIndex-1], []byte("event: ")) {
+						writeIndex--
 					}
 					continue
 				}
-				lines[i] = append([]byte("data: "), rewritten...)
+				lines[writeIndex] = append([]byte("data: "), rewritten...)
+				writeIndex++
+				continue
 			}
 		}
+		lines[writeIndex] = line
+		writeIndex++
 	}
-	return bytes.Join(lines, []byte("\n"))
+	return bytes.Join(lines[:writeIndex], []byte("\n"))
 }
 
 // SanitizeAmpRequestBody removes thinking blocks with empty/missing/invalid signatures
