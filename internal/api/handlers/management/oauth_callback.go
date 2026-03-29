@@ -92,6 +92,7 @@ func (h *Handler) PostOAuthCallback(c *gin.Context) {
 			c.JSON(http.StatusConflict, gin.H{"status": "error", "error": "oauth flow is not pending"})
 			return
 		}
+		SetOAuthSessionError(state, errMsg)
 		c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "error": "failed to persist oauth callback"})
 		return
 	}

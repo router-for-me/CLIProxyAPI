@@ -178,6 +178,10 @@ func CompleteOAuthSessionsByProvider(provider string) int {
 	return oauthSessions.CompleteProvider(provider)
 }
 
+func IsOAuthSessionNotPendingError(err error) bool {
+	return errors.Is(err, errOAuthSessionNotPending)
+}
+
 func GetOAuthSession(state string) (provider string, status string, ok bool) {
 	session, ok := oauthSessions.Get(state)
 	if !ok {

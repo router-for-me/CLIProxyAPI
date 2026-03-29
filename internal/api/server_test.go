@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -8,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -333,7 +335,13 @@ func TestOAuthCallbackWriteErrorsAreNotIgnored(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			server := newTestServer(t)
-			if tc.authDir != "use-server-auth-dir" {
+			if tc.authDir == "" {
+				blockedAuthDir := filepath.Join(t.TempDir(), "blocked-auth-dir")
+				if err := os.WriteFile(blockedAuthDir, []byte("blocked"), 0o600); err != nil {
+					t.Fatalf("failed to create blocking auth path: %v", err)
+				}
+				server.cfg.AuthDir = blockedAuthDir
+			} else if tc.authDir != "use-server-auth-dir" {
 				server.cfg.AuthDir = tc.authDir
 			}
 
@@ -358,8 +366,54 @@ func TestOAuthCallbackWriteErrorsAreNotIgnored(t *testing.T) {
 				if _, err := os.Stat(callbackPath); err != nil {
 					t.Fatalf("expected callback file %s: %v", callbackPath, err)
 				}
+				return
+			}
+
+			callbackPath := filepath.Join(server.cfg.AuthDir, ".oauth-anthropic-"+tc.state+".oauth")
+			if _, err := os.Stat(callbackPath); !isMissingCallbackPath(err) {
+				t.Fatalf("expected callback file write to fail cleanly, stat err: %v", err)
+			}
+			if managementHandlers.IsOAuthSessionPending(tc.state, "anthropic") {
+				t.Fatal("expected callback write failure to end pending oauth session")
+			}
+			provider, status, ok := managementHandlers.GetOAuthSession(tc.state)
+			if !ok {
+				t.Fatal("expected oauth session to remain available with error status")
+			}
+			if provider != "anthropic" {
+				t.Fatalf("expected provider anthropic, got %q", provider)
+			}
+			if strings.TrimSpace(status) == "" {
+				t.Fatal("expected oauth session error status to be recorded")
 			}
 		})
+	}
+}
+
+func TestOAuthCallbackWrongProviderKeepsPendingSession(t *testing.T) {
+	server := newTestServer(t)
+	state := "oauth-callback-provider-mismatch"
+	managementHandlers.RegisterOAuthSession(state, "anthropic")
+
+	req := httptest.NewRequest(http.MethodGet, "/codex/callback?state="+url.QueryEscape(state)+"&code=test-code", nil)
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusInternalServerError, rr.Body.String())
+	}
+	if !managementHandlers.IsOAuthSessionPending(state, "anthropic") {
+		t.Fatal("expected wrong callback route to leave pending session intact")
+	}
+	provider, status, ok := managementHandlers.GetOAuthSession(state)
+	if !ok {
+		t.Fatal("expected oauth session to remain registered")
+	}
+	if provider != "anthropic" {
+		t.Fatalf("provider = %q, want %q", provider, "anthropic")
+	}
+	if strings.TrimSpace(status) != "" {
+		t.Fatalf("status = %q, want empty", status)
 	}
 }
 
@@ -679,4 +733,8 @@ func newTestServerWithAccessManager(t *testing.T, accessManager *sdkaccess.Manag
 	authManager := auth.NewManager(nil, nil, nil)
 	configPath := filepath.Join(tmpDir, "config.yaml")
 	return NewServer(cfg, authManager, accessManager, configPath)
+}
+
+func isMissingCallbackPath(err error) bool {
+	return err != nil && (os.IsNotExist(err) || errors.Is(err, syscall.ENOTDIR))
 }

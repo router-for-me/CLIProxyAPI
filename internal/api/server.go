@@ -45,6 +45,14 @@ import (
 
 const oauthCallbackSuccessHTML = `<html><head><meta charset="utf-8"><title>Authentication successful</title><script>setTimeout(function(){window.close();},5000);</script></head><body><h1>Authentication successful!</h1><p>You can close this window.</p><p>This window will close automatically in 5 seconds.</p></body></html>`
 
+func writePendingOAuthCallbackFile(authDir, provider, state, code, errStr string) error {
+	_, err := managementHandlers.WriteOAuthCallbackFileForPendingSession(authDir, provider, state, code, errStr)
+	if err != nil && !managementHandlers.IsOAuthSessionNotPendingError(err) {
+		managementHandlers.SetOAuthSessionError(state, strings.TrimSpace(errStr))
+	}
+	return err
+}
+
 const (
 	corsAllowedMethods       = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
 	corsAllowedHeaders       = "Authorization, Content-Type, X-Requested-With, X-Goog-Api-Key, X-Api-Key, X-Management-Key, X-Local-Password, Idempotency-Key, Anthropic-Beta, Anthropic-Version, Anthropic-Dangerous-Direct-Browser-Access, OpenAI-Beta"
@@ -1003,7 +1011,7 @@ func (s *Server) handleOAuthCallback(c *gin.Context, provider string) {
 		c.String(http.StatusBadRequest, "Authentication callback failed")
 		return
 	}
-	if _, err := managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, provider, state, code, errStr); err != nil {
+	if err := writePendingOAuthCallbackFile(s.cfg.AuthDir, provider, state, code, errStr); err != nil {
 		log.WithError(err).Warnf("failed to persist oauth callback for %s", provider)
 		c.String(http.StatusInternalServerError, "Authentication callback failed")
 		return
