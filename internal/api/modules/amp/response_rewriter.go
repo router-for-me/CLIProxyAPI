@@ -14,19 +14,22 @@ import (
 
 // ResponseRewriter wraps a gin.ResponseWriter to intercept and modify the response body
 // It is used to rewrite model names in responses when model mapping is used
+// and to keep Amp-compatible response shapes.
 type ResponseRewriter struct {
 	gin.ResponseWriter
-	body          *bytes.Buffer
-	originalModel string
-	isStreaming   bool
+	body                   *bytes.Buffer
+	originalModel          string
+	isStreaming            bool
+	suppressedContentBlock map[int]struct{}
 }
 
-// NewResponseRewriter creates a new response rewriter for model name substitution
+// NewResponseRewriter creates a new response rewriter for model name substitution.
 func NewResponseRewriter(w gin.ResponseWriter, originalModel string) *ResponseRewriter {
 	return &ResponseRewriter{
-		ResponseWriter: w,
-		body:           &bytes.Buffer{},
-		originalModel:  originalModel,
+		ResponseWriter:         w,
+		body:                   &bytes.Buffer{},
+		originalModel:          originalModel,
+		suppressedContentBlock: make(map[int]struct{}),
 	}
 }
 
@@ -116,7 +119,7 @@ func (rw *ResponseRewriter) Flush() {
 var modelFieldPaths = []string{"message.model", "model", "modelVersion", "response.model", "response.modelVersion"}
 
 // ensureAmpSignature injects empty signature fields into tool_use/thinking blocks
-// in API responses so that the Amp TUI does not crash on P.signature.length
+// in API responses so that the Amp TUI does not crash on P.signature.length.
 func ensureAmpSignature(data []byte) []byte {
 	for index, block := range gjson.GetBytes(data, "content").Array() {
 		blockType := block.Get("type").String()
@@ -147,10 +150,19 @@ func ensureAmpSignature(data []byte) []byte {
 	return data
 }
 
-func (rw *ResponseRewriter) rewriteModelInResponse(data []byte) []byte {
-	data = ensureAmpSignature(data)
+func (rw *ResponseRewriter) markSuppressedContentBlock(index int) {
+	if rw.suppressedContentBlock == nil {
+		rw.suppressedContentBlock = make(map[int]struct{})
+	}
+	rw.suppressedContentBlock[index] = struct{}{}
+}
 
-	// Suppress thinking blocks if tool_use is present (Amp TUI compat)
+func (rw *ResponseRewriter) isSuppressedContentBlock(index int) bool {
+	_, ok := rw.suppressedContentBlock[index]
+	return ok
+}
+
+func (rw *ResponseRewriter) suppressAmpThinking(data []byte) []byte {
 	if gjson.GetBytes(data, `content.#(type=="tool_use")`).Exists() {
 		filtered := gjson.GetBytes(data, `content.#(type!="thinking")#`)
 		if filtered.Exists() {
@@ -166,6 +178,36 @@ func (rw *ResponseRewriter) rewriteModelInResponse(data []byte) []byte {
 				}
 			}
 		}
+	}
+
+	eventType := gjson.GetBytes(data, "type").String()
+	indexResult := gjson.GetBytes(data, "index")
+	if eventType == "content_block_start" && gjson.GetBytes(data, "content_block.type").String() == "thinking" && indexResult.Exists() {
+		rw.markSuppressedContentBlock(int(indexResult.Int()))
+		return nil
+	}
+	if gjson.GetBytes(data, "delta.type").String() == "thinking_delta" {
+		if indexResult.Exists() {
+			rw.markSuppressedContentBlock(int(indexResult.Int()))
+		}
+		return nil
+	}
+	if eventType == "content_block_stop" && indexResult.Exists() {
+		index := int(indexResult.Int())
+		if rw.isSuppressedContentBlock(index) {
+			delete(rw.suppressedContentBlock, index)
+			return nil
+		}
+	}
+
+	return data
+}
+
+func (rw *ResponseRewriter) rewriteModelInResponse(data []byte) []byte {
+	data = ensureAmpSignature(data)
+	data = rw.suppressAmpThinking(data)
+	if len(data) == 0 {
+		return data
 	}
 
 	if rw.originalModel == "" {
@@ -186,6 +228,13 @@ func (rw *ResponseRewriter) rewriteStreamChunk(chunk []byte) []byte {
 			jsonData := bytes.TrimPrefix(line, []byte("data: "))
 			if len(jsonData) > 0 && jsonData[0] == '{' {
 				rewritten := rw.rewriteModelInResponse(jsonData)
+				if len(rewritten) == 0 {
+					lines[i] = nil
+					if i > 0 && bytes.HasPrefix(lines[i-1], []byte("event: ")) {
+						lines[i-1] = nil
+					}
+					continue
+				}
 				lines[i] = append([]byte("data: "), rewritten...)
 			}
 		}
@@ -219,7 +268,7 @@ func SanitizeAmpRequestBody(body []byte) []byte {
 			blockType := block.Get("type").String()
 			if blockType == "thinking" {
 				sig := block.Get("signature")
-				if !sig.Exists() || sig.Type == gjson.Null || sig.String() == "" {
+				if !sig.Exists() || sig.Type != gjson.String || strings.TrimSpace(sig.String()) == "" {
 					removedCount++
 					continue
 				}
