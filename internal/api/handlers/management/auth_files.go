@@ -2568,10 +2568,8 @@ func performGeminiCLISetup(ctx context.Context, httpClient *http.Client, storage
 				if explicitProject && !strings.EqualFold(responseProjectID, projectID) {
 					log.Infof("Gemini onboarding: requested project %s maps to backend project %s", projectID, responseProjectID)
 					log.Infof("Using backend project ID: %s", responseProjectID)
-					finalProjectID = responseProjectID
-				} else {
-					finalProjectID = responseProjectID
 				}
+				finalProjectID = responseProjectID
 			}
 
 			storage.ProjectID = strings.TrimSpace(finalProjectID)
