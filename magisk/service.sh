@@ -21,7 +21,12 @@ get_pid() {
 is_running() {
     local pid=$(get_pid)
     if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-        return 0
+        if [ -f "/proc/$pid/cmdline" ]; then
+            if grep -q "cli-proxy-api" "/proc/$pid/cmdline" 2>/dev/null; then
+                return 0
+            fi
+        fi
+        rm -f "$PID_FILE"
     fi
     return 1
 }

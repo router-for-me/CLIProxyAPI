@@ -23,11 +23,13 @@ fi
 CONFIG_SRC="$MODDIR/config.yaml"
 CONFIG_BAK="$MODDIR/config_backup/config.yaml.bak"
 
-if [ -f "$CONFIG_BAK" ]; then
-    cp "$CONFIG_BAK" "$CONFIG_SRC"
-else
+if [ ! -f "$CONFIG_BAK" ]; then
     if [ -f "$CONFIG_SRC" ]; then
         cp "$CONFIG_SRC" "$CONFIG_BAK"
+    fi
+else
+    if [ ! -f "$CONFIG_SRC" ]; then
+        cp "$CONFIG_BAK" "$CONFIG_SRC"
     fi
 fi
 

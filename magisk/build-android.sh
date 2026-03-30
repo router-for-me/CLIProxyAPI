@@ -117,7 +117,9 @@ build_magisk_module() {
     chmod 755 "$MODULE_DIR/uninstall.sh"
 
     sed -i "s/version=v1.0.0/version=$VERSION/" "$MODULE_DIR/module.prop"
-    sed -i "s/versionCode=10000/versionCode=$(echo $VERSION | tr -d '.v' | head -c 8)00/" "$MODULE_DIR/module.prop"
+    local version_code_num=$(echo $VERSION | tr -d '.v' | grep -oE '^[0-9]+' || echo "1")
+    [ -z "$version_code_num" ] && version_code_num="1"
+    sed -i "s/versionCode=10000/versionCode=${version_code_num}000/" "$MODULE_DIR/module.prop"
 
     cd "$OUTPUT_DIR"
     zip -r "${MODULE_NAME}.zip" "$MODULE_NAME"
