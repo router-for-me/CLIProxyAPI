@@ -113,35 +113,34 @@ func PrepareFileBackedAuthForMemory(auth *Auth) *Auth {
 func cloneCompactCollection(value any) any {
 	switch typed := value.(type) {
 	case []string:
-		if len(typed) == 0 {
-			return nil
-		}
-		out := make([]string, 0, len(typed))
-		for _, item := range typed {
-			if trimmed := strings.TrimSpace(item); trimmed != "" {
-				out = append(out, trimmed)
-			}
-		}
-		if len(out) == 0 {
-			return nil
-		}
-		return out
+		return compactStringSlice(typed)
 	case []interface{}:
-		out := make([]string, 0, len(typed))
+		items := make([]string, 0, len(typed))
 		for _, item := range typed {
 			if raw, ok := item.(string); ok {
-				if trimmed := strings.TrimSpace(raw); trimmed != "" {
-					out = append(out, trimmed)
-				}
+				items = append(items, raw)
 			}
 		}
-		if len(out) == 0 {
-			return nil
-		}
-		return out
+		return compactStringSlice(items)
 	default:
 		return nil
 	}
+}
+
+func compactStringSlice(items []string) []string {
+	if len(items) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		if trimmed := strings.TrimSpace(item); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func hasCompactExpiry(meta map[string]any) bool {

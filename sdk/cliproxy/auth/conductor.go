@@ -930,16 +930,14 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 		}
 	}
 	auth.EnsureIndex()
-	m.mu.Unlock()
-	_ = m.persist(ctx, auth)
 	authClone := PrepareFileBackedAuthForMemory(auth)
-	m.mu.Lock()
 	m.auths[auth.ID] = authClone
 	m.mu.Unlock()
 	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
 	if m.scheduler != nil {
 		m.scheduler.upsertAuth(authClone)
 	}
+	_ = m.persist(ctx, auth)
 	m.hook.OnAuthUpdated(ctx, auth.Clone())
 	return auth.Clone(), nil
 }
@@ -1096,17 +1094,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		publishSelectedAuthMetadata(opts.Metadata, auth.ID)
 
 		tried[auth.ID] = struct{}{}
-		hydratedAuth, errHydrate := m.hydrateAuthForExecution(auth)
-		if errHydrate != nil {
-			attempted[auth.ID] = struct{}{}
-			lastErr = errHydrate
+		auth, execCtx, ok := m.preparePickedAuthExecution(ctx, auth, attempted, &lastErr)
+		if !ok {
 			continue
-		}
-		auth = hydratedAuth
-		execCtx := ctx
-		if rt := m.roundTripperFor(auth); rt != nil {
-			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
-			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 		}
 
 		models, pooled := m.preparedExecutionModels(auth, routeModel)
@@ -1181,17 +1171,9 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		publishSelectedAuthMetadata(opts.Metadata, auth.ID)
 
 		tried[auth.ID] = struct{}{}
-		hydratedAuth, errHydrate := m.hydrateAuthForExecution(auth)
-		if errHydrate != nil {
-			attempted[auth.ID] = struct{}{}
-			lastErr = errHydrate
+		auth, execCtx, ok := m.preparePickedAuthExecution(ctx, auth, attempted, &lastErr)
+		if !ok {
 			continue
-		}
-		auth = hydratedAuth
-		execCtx := ctx
-		if rt := m.roundTripperFor(auth); rt != nil {
-			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
-			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 		}
 
 		models, pooled := m.preparedExecutionModels(auth, routeModel)
@@ -1274,17 +1256,9 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		publishSelectedAuthMetadata(opts.Metadata, auth.ID)
 
 		tried[auth.ID] = struct{}{}
-		hydratedAuth, errHydrate := m.hydrateAuthForExecution(auth)
-		if errHydrate != nil {
-			attempted[auth.ID] = struct{}{}
-			lastErr = errHydrate
+		auth, execCtx, ok := m.preparePickedAuthExecution(ctx, auth, attempted, &lastErr)
+		if !ok {
 			continue
-		}
-		auth = hydratedAuth
-		execCtx := ctx
-		if rt := m.roundTripperFor(auth); rt != nil {
-			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
-			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 		}
 		models, pooled := m.preparedExecutionModels(auth, routeModel)
 		if len(models) == 0 {
@@ -2881,6 +2855,25 @@ func (m *Manager) hydrateAuthForExecution(auth *Auth) (*Auth, error) {
 		return nil, &Error{Code: "auth_load_failed", Message: err.Error()}
 	}
 	return cloned, nil
+}
+
+func (m *Manager) preparePickedAuthExecution(ctx context.Context, auth *Auth, attempted map[string]struct{}, lastErr *error) (*Auth, context.Context, bool) {
+	hydratedAuth, errHydrate := m.hydrateAuthForExecution(auth)
+	if errHydrate != nil {
+		if auth != nil && attempted != nil {
+			attempted[auth.ID] = struct{}{}
+		}
+		if lastErr != nil {
+			*lastErr = errHydrate
+		}
+		return nil, nil, false
+	}
+	execCtx := ctx
+	if rt := m.roundTripperFor(hydratedAuth); rt != nil {
+		execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
+		execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
+	}
+	return hydratedAuth, execCtx, true
 }
 
 func (m *Manager) executorFor(provider string) ProviderExecutor {
