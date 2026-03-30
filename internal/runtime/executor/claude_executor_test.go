@@ -15,6 +15,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/klauspost/compress/zstd"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
@@ -1180,6 +1181,83 @@ func testClaudeExecutorInvalidCompressedErrorBody(
 	}
 	if statusProvider, ok := err.(interface{ StatusCode() int }); !ok || statusProvider.StatusCode() != http.StatusBadRequest {
 		t.Fatalf("expected status code 400, got: %v", err)
+	}
+}
+
+func TestEnsureModelMaxTokens_UsesRegisteredMaxCompletionTokens(t *testing.T) {
+	reg := registry.GetGlobalRegistry()
+	clientID := "test-claude-max-completion-tokens-client"
+	modelID := "test-claude-max-completion-tokens-model"
+	reg.RegisterClient(clientID, "claude", []*registry.ModelInfo{{
+		ID:                  modelID,
+		Type:                "claude",
+		OwnedBy:             "anthropic",
+		Object:              "model",
+		Created:             time.Now().Unix(),
+		MaxCompletionTokens: 4096,
+		UserDefined:         true,
+	}})
+	defer reg.UnregisterClient(clientID)
+
+	input := []byte(`{"model":"test-claude-max-completion-tokens-model","messages":[{"role":"user","content":"hi"}]}`)
+	out := ensureModelMaxTokens(input, modelID)
+
+	if got := gjson.GetBytes(out, "max_tokens").Int(); got != 4096 {
+		t.Fatalf("max_tokens = %d, want %d", got, 4096)
+	}
+}
+
+func TestEnsureModelMaxTokens_DefaultsMissingValue(t *testing.T) {
+	reg := registry.GetGlobalRegistry()
+	clientID := "test-claude-default-max-tokens-client"
+	modelID := "test-claude-default-max-tokens-model"
+	reg.RegisterClient(clientID, "claude", []*registry.ModelInfo{{
+		ID:          modelID,
+		Type:        "claude",
+		OwnedBy:     "anthropic",
+		Object:      "model",
+		Created:     time.Now().Unix(),
+		UserDefined: true,
+	}})
+	defer reg.UnregisterClient(clientID)
+
+	input := []byte(`{"model":"test-claude-default-max-tokens-model","messages":[{"role":"user","content":"hi"}]}`)
+	out := ensureModelMaxTokens(input, modelID)
+
+	if got := gjson.GetBytes(out, "max_tokens").Int(); got != defaultModelMaxTokens {
+		t.Fatalf("max_tokens = %d, want %d", got, defaultModelMaxTokens)
+	}
+}
+
+func TestEnsureModelMaxTokens_PreservesExplicitValue(t *testing.T) {
+	reg := registry.GetGlobalRegistry()
+	clientID := "test-claude-preserve-max-tokens-client"
+	modelID := "test-claude-preserve-max-tokens-model"
+	reg.RegisterClient(clientID, "claude", []*registry.ModelInfo{{
+		ID:                  modelID,
+		Type:                "claude",
+		OwnedBy:             "anthropic",
+		Object:              "model",
+		Created:             time.Now().Unix(),
+		MaxCompletionTokens: 4096,
+		UserDefined:         true,
+	}})
+	defer reg.UnregisterClient(clientID)
+
+	input := []byte(`{"model":"test-claude-preserve-max-tokens-model","max_tokens":2048,"messages":[{"role":"user","content":"hi"}]}`)
+	out := ensureModelMaxTokens(input, modelID)
+
+	if got := gjson.GetBytes(out, "max_tokens").Int(); got != 2048 {
+		t.Fatalf("max_tokens = %d, want %d", got, 2048)
+	}
+}
+
+func TestEnsureModelMaxTokens_SkipsUnregisteredModel(t *testing.T) {
+	input := []byte(`{"model":"test-claude-unregistered-model","messages":[{"role":"user","content":"hi"}]}`)
+	out := ensureModelMaxTokens(input, "test-claude-unregistered-model")
+
+	if gjson.GetBytes(out, "max_tokens").Exists() {
+		t.Fatalf("max_tokens should remain unset, got %s", gjson.GetBytes(out, "max_tokens").Raw)
 	}
 }
 
