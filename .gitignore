@@ -19,11 +19,12 @@ pgstore/*
 gitstore/*
 objectstore/*
 
+auths/logs/
+
 # Static assets
 static/*
 
 # Authentication data
-auths/*
 !auths/.gitkeep
 
 # Documentation
