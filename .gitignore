@@ -1,9 +1,11 @@
 # Binaries
 cli-proxy-api
 *.exe
+*.zip
 
 # Configuration
 config.yaml
+config_backup/*
 .env
 
 # Generated content

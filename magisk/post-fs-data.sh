@@ -20,8 +20,15 @@ if [ -f "$MODDIR/config.yaml" ]; then
     chmod 644 "$MODDIR/config.yaml"
 fi
 
-if [ -f "$MODDIR/config.yaml" ] && [ ! -f "$MODDIR/config_backup/config.yaml.bak" ]; then
-    cp "$MODDIR/config.yaml" "$MODDIR/config_backup/config.yaml.bak"
+CONFIG_SRC="$MODDIR/config.yaml"
+CONFIG_BAK="$MODDIR/config_backup/config.yaml.bak"
+
+if [ -f "$CONFIG_BAK" ]; then
+    cp "$CONFIG_BAK" "$CONFIG_SRC"
+else
+    if [ -f "$CONFIG_SRC" ]; then
+        cp "$CONFIG_SRC" "$CONFIG_BAK"
+    fi
 fi
 
 echo "[CLIProxyAPI] Module initialized"
