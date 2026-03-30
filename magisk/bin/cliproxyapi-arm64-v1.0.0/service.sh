@@ -69,32 +69,17 @@ do_start() {
 }
 
 do_stop() {
-    local pid=$(get_pid)
-    if [ -z "$pid" ]; then
+    if ! is_running; then
         echo "[CLIProxyAPI] Service is not running"
         return 0
     fi
 
+    local pid=$(get_pid)
+    kill "$pid" 2>/dev/null
+    sleep 1
     if kill -0 "$pid" 2>/dev/null; then
-        local is_valid=0
-        if [ -f "/proc/$pid/cmdline" ]; then
-            if grep -q "cli-proxy-api" "/proc/$pid/cmdline" 2>/dev/null; then
-                is_valid=1
-            fi
-        fi
-
-        if [ "$is_valid" -eq 1 ]; then
-            kill "$pid" 2>/dev/null
-            sleep 1
-            if kill -0 "$pid" 2>/dev/null; then
-                kill -9 "$pid" 2>/dev/null
-                sleep 1
-            fi
-        else
-            rm -f "$PID_FILE"
-            echo "[CLIProxyAPI] Stale PID file removed, service not running"
-            return 0
-        fi
+        kill -9 "$pid" 2>/dev/null
+        sleep 1
     fi
 
     rm -f "$PID_FILE"
