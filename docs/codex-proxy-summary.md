@@ -6,6 +6,7 @@
 - 本机 Go 已切换到 `1.26.1`
 - 已成功登录 1 个 Codex OAuth 账号
 - 认证文件已落盘到 `auths/`
+- `access_token` 到期后会自动续期，并回写到原来的 `auths/*.json`
 - `/v1/models` 已能列出 Codex 模型
 - `/v1/responses` 调用已成功走通
 
@@ -163,6 +164,121 @@ Authorization: Bearer <access_token>
 
 但它不是唯一关键项，因为请求不仅仅是“换 Bearer 后转发”。
 
+## access_token 到期后怎么续期
+
+### 先说结论
+
+- Codex 的 `access_token` 续期主要依赖后台自动刷新，不是重新走登录流程
+- 真正拿去换新 token 的是 `refresh_token`
+- 续期成功后，会把新 token 自动写回 `auths/` 目录里的原认证文件
+- 只要 `refresh_token` 仍然有效，通常不需要重新执行 `-codex-login`
+
+### 一图看懂
+
+```mermaid
+sequenceDiagram
+    participant Service as CLIProxyAPI Service
+    participant Manager as core auth.Manager
+    participant Executor as CodexExecutor
+    participant OpenAI as auth.openai.com
+    participant File as auths/*.json
+
+    Service->>Manager: StartAutoRefresh(interval=15m)
+    loop 周期性检查
+        Manager->>Manager: shouldRefresh(auth)
+        Note over Manager: Codex 默认提前 5 天刷新\n或 token 已经过期
+        Manager->>Executor: Refresh(auth)
+        Executor->>OpenAI: POST /oauth/token<br/>grant_type=refresh_token
+        OpenAI-->>Executor: access_token / refresh_token / id_token / expires_in
+        Executor->>Manager: 更新 auth.Metadata
+        Manager->>File: persist -> store.Save(...)
+    end
+```
+
+### 刷新是怎么被触发的
+
+服务启动后，`coreManager` 会启动后台自动刷新任务：
+
+- 默认检查周期：`15 分钟`
+- 检查对象：所有 OAuth 类型的 auth
+- Codex 默认刷新提前量：`5 天`
+
+也就是说，Codex 不是等 `access_token` 彻底失效才处理，而是倾向于提前续期。
+
+### 真正的刷新请求
+
+后台决定要刷新后，会走 Codex executor 的 `Refresh()` 逻辑：
+
+1. 从 `auth.Metadata["refresh_token"]` 取出 `refresh_token`
+2. 向 OpenAI token 接口发请求
+3. 使用 `grant_type=refresh_token` 换取新的 token
+4. 解析新的 `access_token`、`refresh_token`、`id_token` 和 `expires_in`
+5. 把过期时间重新计算成新的 `expired`
+
+请求目标仍然是：
+
+- `https://auth.openai.com/oauth/token`
+
+而不是重新打开浏览器走一遍 OAuth 登录。
+
+### 刷新成功后会更新哪些字段
+
+续期成功后，会更新 auth 元数据中的这些核心字段：
+
+- `access_token`
+- `refresh_token`，如果上游返回了新的值
+- `id_token`
+- `account_id`
+- `email`
+- `expired`
+- `last_refresh`
+
+之后新的上游请求就会自动使用新的 `access_token` 作为 Bearer Token。
+
+### 会不会自动更新 `auths/` 目录里的文件
+
+会。
+
+刷新成功后，manager 会调用持久化逻辑，把更新后的 metadata 再写回 auth store。默认文件存储模式下，这会直接覆盖原来的 `auths/*.json` 文件，而不是只改内存不落盘。
+
+因此看到的行为应该是：
+
+- 首次登录后生成一个 `auths/codex-xxx.json`
+- 后续自动刷新时，还是更新这同一个文件
+- 不需要你手工再导出或复制新的 token 文件
+
+### 还需不需要重新登录
+
+通常不需要，只要下面几件事同时成立：
+
+- `auths/` 里的 Codex 文件还在
+- 文件里还有可用的 `refresh_token`
+- 后台自动刷新能成功
+- OpenAI 侧没有撤销这次授权
+
+更准确地说，是否要重新登录，取决于这份 OAuth 授权还能不能继续用 `refresh_token` 换新 `access_token`，不只取决于“订阅还在不在”。
+
+### 哪些情况下才需要重新登录
+
+常见情况包括：
+
+- `refresh_token` 已失效
+- 授权被撤销
+- `refresh_token` 被复用或被上游判定不可再用
+- `auths/*.json` 被删除、损坏，或者关键字段丢失
+- 自动刷新长期失败，无法恢复
+
+### 一个实现细节
+
+当前实现更偏向“后台预刷新”，不是“某次请求碰到 `401` 后立刻同步刷新并重放同一请求”。
+
+这意味着：
+
+- 正常情况下，token 会在到期前被自动续上
+- 如果后台刷新没来得及跑到，个别请求仍可能先失败一次
+
+但设计意图很明确：优先依赖 `refresh_token` 自动续期，而不是让用户反复登录
+
 ## CLIProxyAPI 是怎么代理 Codex 请求的
 
 ### 请求入口
@@ -319,6 +435,9 @@ http://127.0.0.1:8317/management.html#/usage
 - [cmd/server/main.go](/Users/link/workspace/CLIProxyAPI/cmd/server/main.go)
 - [config.yaml](/Users/link/workspace/CLIProxyAPI/config.yaml)
 - [Makefile](/Users/link/workspace/CLIProxyAPI/Makefile)
+- [sdk/cliproxy/service.go](/Users/link/workspace/CLIProxyAPI/sdk/cliproxy/service.go)
+- [sdk/cliproxy/auth/conductor.go](/Users/link/workspace/CLIProxyAPI/sdk/cliproxy/auth/conductor.go)
+- [sdk/cliproxy/auth/types.go](/Users/link/workspace/CLIProxyAPI/sdk/cliproxy/auth/types.go)
 - [sdk/auth/codex.go](/Users/link/workspace/CLIProxyAPI/sdk/auth/codex.go)
 - [sdk/auth/codex_device.go](/Users/link/workspace/CLIProxyAPI/sdk/auth/codex_device.go)
 - [sdk/auth/manager.go](/Users/link/workspace/CLIProxyAPI/sdk/auth/manager.go)
