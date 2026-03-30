@@ -176,10 +176,10 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 			out := make([]*coreauth.Auth, 0, 1+len(virtuals))
 			out = append(out, a)
 			out = append(out, virtuals...)
-			return out
+			return prepareFileBackedAuths(out)
 		}
 	}
-	return []*coreauth.Auth{a}
+	return prepareFileBackedAuths([]*coreauth.Auth{a})
 }
 
 // SynthesizeGeminiVirtualAuths creates virtual Auth entries for multi-project Gemini credentials.
@@ -341,4 +341,18 @@ func extractExcludedModelsFromMetadata(metadata map[string]any) []string {
 		}
 	}
 	return result
+}
+
+func prepareFileBackedAuths(auths []*coreauth.Auth) []*coreauth.Auth {
+	if len(auths) == 0 {
+		return nil
+	}
+	out := make([]*coreauth.Auth, 0, len(auths))
+	for _, auth := range auths {
+		if auth == nil {
+			continue
+		}
+		out = append(out, coreauth.PrepareFileBackedAuthForMemory(auth))
+	}
+	return out
 }

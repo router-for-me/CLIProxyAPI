@@ -899,7 +899,8 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 		auth.ID = uuid.NewString()
 	}
 	auth.EnsureIndex()
-	authClone := auth.Clone()
+	_ = m.persist(ctx, auth)
+	authClone := PrepareFileBackedAuthForMemory(auth)
 	m.mu.Lock()
 	m.auths[auth.ID] = authClone
 	m.mu.Unlock()
@@ -907,7 +908,6 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	if m.scheduler != nil {
 		m.scheduler.upsertAuth(authClone)
 	}
-	_ = m.persist(ctx, auth)
 	m.hook.OnAuthRegistered(ctx, auth.Clone())
 	return auth.Clone(), nil
 }
@@ -930,14 +930,16 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 		}
 	}
 	auth.EnsureIndex()
-	authClone := auth.Clone()
+	m.mu.Unlock()
+	_ = m.persist(ctx, auth)
+	authClone := PrepareFileBackedAuthForMemory(auth)
+	m.mu.Lock()
 	m.auths[auth.ID] = authClone
 	m.mu.Unlock()
 	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
 	if m.scheduler != nil {
 		m.scheduler.upsertAuth(authClone)
 	}
-	_ = m.persist(ctx, auth)
 	m.hook.OnAuthUpdated(ctx, auth.Clone())
 	return auth.Clone(), nil
 }
@@ -960,7 +962,7 @@ func (m *Manager) Load(ctx context.Context) error {
 			continue
 		}
 		auth.EnsureIndex()
-		m.auths[auth.ID] = auth.Clone()
+		m.auths[auth.ID] = PrepareFileBackedAuthForMemory(auth)
 	}
 	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
 	if cfg == nil {
@@ -1094,6 +1096,13 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		publishSelectedAuthMetadata(opts.Metadata, auth.ID)
 
 		tried[auth.ID] = struct{}{}
+		hydratedAuth, errHydrate := m.hydrateAuthForExecution(auth)
+		if errHydrate != nil {
+			attempted[auth.ID] = struct{}{}
+			lastErr = errHydrate
+			continue
+		}
+		auth = hydratedAuth
 		execCtx := ctx
 		if rt := m.roundTripperFor(auth); rt != nil {
 			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
@@ -1172,6 +1181,13 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		publishSelectedAuthMetadata(opts.Metadata, auth.ID)
 
 		tried[auth.ID] = struct{}{}
+		hydratedAuth, errHydrate := m.hydrateAuthForExecution(auth)
+		if errHydrate != nil {
+			attempted[auth.ID] = struct{}{}
+			lastErr = errHydrate
+			continue
+		}
+		auth = hydratedAuth
 		execCtx := ctx
 		if rt := m.roundTripperFor(auth); rt != nil {
 			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
@@ -1258,6 +1274,13 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		publishSelectedAuthMetadata(opts.Metadata, auth.ID)
 
 		tried[auth.ID] = struct{}{}
+		hydratedAuth, errHydrate := m.hydrateAuthForExecution(auth)
+		if errHydrate != nil {
+			attempted[auth.ID] = struct{}{}
+			lastErr = errHydrate
+			continue
+		}
+		auth = hydratedAuth
 		execCtx := ctx
 		if rt := m.roundTripperFor(auth); rt != nil {
 			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
@@ -2810,6 +2833,10 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 		return
 	}
 	cloned := auth.Clone()
+	if err := cloned.hydrateFileBackedState(); err != nil {
+		log.Warnf("failed to hydrate auth %s before refresh: %v", id, err)
+		return
+	}
 	updated, err := exec.Refresh(ctx, cloned)
 	if err != nil && errors.Is(err, context.Canceled) {
 		log.Debugf("refresh canceled for %s, %s", auth.Provider, auth.ID)
@@ -2843,6 +2870,17 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 	updated.LastError = nil
 	updated.UpdatedAt = now
 	_, _ = m.Update(ctx, updated)
+}
+
+func (m *Manager) hydrateAuthForExecution(auth *Auth) (*Auth, error) {
+	if auth == nil {
+		return nil, &Error{Code: "auth_not_found", Message: "auth is nil"}
+	}
+	cloned := auth.Clone()
+	if err := cloned.hydrateFileBackedState(); err != nil {
+		return nil, &Error{Code: "auth_load_failed", Message: err.Error()}
+	}
+	return cloned, nil
 }
 
 func (m *Manager) executorFor(provider string) ProviderExecutor {
@@ -2974,8 +3012,12 @@ func (m *Manager) InjectCredentials(req *http.Request, authID string) error {
 	if a == nil || exec == nil {
 		return nil
 	}
+	hydratedAuth, errHydrate := m.hydrateAuthForExecution(a)
+	if errHydrate != nil {
+		return errHydrate
+	}
 	if p, ok := exec.(RequestPreparer); ok && p != nil {
-		return p.PrepareRequest(req, a)
+		return p.PrepareRequest(req, hydratedAuth)
 	}
 	return nil
 }
@@ -2991,6 +3033,11 @@ func (m *Manager) PrepareHttpRequest(ctx context.Context, auth *Auth, req *http.
 	if req == nil {
 		return &Error{Code: "invalid_request", Message: "http request is nil"}
 	}
+	hydratedAuth, errHydrate := m.hydrateAuthForExecution(auth)
+	if errHydrate != nil {
+		return errHydrate
+	}
+	auth = hydratedAuth
 	if ctx != nil {
 		*req = *req.WithContext(ctx)
 	}
@@ -3046,6 +3093,11 @@ func (m *Manager) HttpRequest(ctx context.Context, auth *Auth, req *http.Request
 	if req == nil {
 		return nil, &Error{Code: "invalid_request", Message: "http request is nil"}
 	}
+	hydratedAuth, errHydrate := m.hydrateAuthForExecution(auth)
+	if errHydrate != nil {
+		return nil, errHydrate
+	}
+	auth = hydratedAuth
 	providerKey := executorKeyFromAuth(auth)
 	if providerKey == "" {
 		return nil, &Error{Code: "provider_not_found", Message: "auth provider is empty"}

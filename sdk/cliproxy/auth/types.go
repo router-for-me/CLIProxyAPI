@@ -93,6 +93,8 @@ type Auth struct {
 	Runtime any `json:"-"`
 
 	indexAssigned bool `json:"-"`
+
+	deferredFileHydration bool `json:"-"`
 }
 
 // QuotaState contains limiter tracking data for a credential.
