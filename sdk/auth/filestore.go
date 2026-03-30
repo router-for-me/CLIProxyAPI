@@ -254,7 +254,7 @@ func (s *FileTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth,
 	if email, ok := metadata["email"].(string); ok && email != "" {
 		auth.Attributes["email"] = email
 	}
-	return cliproxyauth.PrepareFileBackedAuthForMemory(auth), nil
+	return auth, nil
 }
 
 func (s *FileTokenStore) idFor(path, baseDir string) string {

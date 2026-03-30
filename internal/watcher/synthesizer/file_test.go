@@ -121,6 +121,44 @@ func TestFileSynthesizer_Synthesize_ValidAuthFile(t *testing.T) {
 	}
 }
 
+func TestFileSynthesizer_Synthesize_RetainsFullMetadataForPersistence(t *testing.T) {
+	tempDir := t.TempDir()
+
+	authData := map[string]any{
+		"type":            "claude",
+		"email":           "full@example.com",
+		"access_token":    "token-full",
+		"refresh_token":   "refresh-full",
+		"custom_required": "must-stay",
+	}
+	data, _ := json.Marshal(authData)
+	if err := os.WriteFile(filepath.Join(tempDir, "full-auth.json"), data, 0o644); err != nil {
+		t.Fatalf("failed to write auth file: %v", err)
+	}
+
+	synth := NewFileSynthesizer()
+	ctx := &SynthesisContext{
+		Config:      &config.Config{},
+		AuthDir:     tempDir,
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 1 || auths[0] == nil {
+		t.Fatalf("expected one auth, got %d", len(auths))
+	}
+	if token, _ := auths[0].Metadata["access_token"].(string); token != "token-full" {
+		t.Fatalf("expected access_token in synthesized metadata, got %q", token)
+	}
+	if marker, _ := auths[0].Metadata["custom_required"].(string); marker != "must-stay" {
+		t.Fatalf("expected custom metadata to be retained, got %q", marker)
+	}
+}
+
 func TestFileSynthesizer_Synthesize_GeminiProviderMapping(t *testing.T) {
 	tempDir := t.TempDir()
 

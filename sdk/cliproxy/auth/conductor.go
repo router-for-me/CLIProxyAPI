@@ -2485,8 +2485,85 @@ func (m *Manager) persist(ctx context.Context, auth *Auth) error {
 	if auth.Metadata == nil {
 		return nil
 	}
-	_, err := m.store.Save(ctx, auth)
+	persistAuth, errPrepare := m.preparePersistAuth(auth)
+	if errPrepare != nil {
+		return errPrepare
+	}
+	if persistAuth == nil || persistAuth.Metadata == nil {
+		return nil
+	}
+	_, err := m.store.Save(ctx, persistAuth)
 	return err
+}
+
+func (m *Manager) preparePersistAuth(auth *Auth) (*Auth, error) {
+	if auth == nil {
+		return nil, nil
+	}
+	if !auth.DeferredFileHydration() {
+		return auth, nil
+	}
+
+	overrides := cloneMetadataMap(auth.Metadata)
+	hydrated := auth.Clone()
+	if err := hydrated.hydrateFileBackedState(); err != nil {
+		return nil, err
+	}
+	hydrated.Metadata = mergeMetadataForPersist(hydrated.Metadata, overrides)
+	return hydrated, nil
+}
+
+func mergeMetadataForPersist(base, overrides map[string]any) map[string]any {
+	if len(base) == 0 {
+		return cloneMetadataMap(overrides)
+	}
+	if len(overrides) == 0 {
+		return cloneMetadataMap(base)
+	}
+
+	merged := cloneMetadataMap(base)
+	for key, value := range overrides {
+		baseMap, okBase := metadataValueAsMap(merged[key])
+		overrideMap, okOverride := metadataValueAsMap(value)
+		if okBase && okOverride {
+			for nestedKey, nestedValue := range overrideMap {
+				baseMap[nestedKey] = nestedValue
+			}
+			merged[key] = baseMap
+			continue
+		}
+		merged[key] = value
+	}
+	return merged
+}
+
+func cloneMetadataMap(src map[string]any) map[string]any {
+	if len(src) == 0 {
+		return nil
+	}
+	cloned := make(map[string]any, len(src))
+	for key, value := range src {
+		cloned[key] = value
+	}
+	return cloned
+}
+
+func metadataValueAsMap(value any) (map[string]any, bool) {
+	switch typed := value.(type) {
+	case map[string]any:
+		return cloneMetadataMap(typed), true
+	case map[string]string:
+		if len(typed) == 0 {
+			return nil, true
+		}
+		out := make(map[string]any, len(typed))
+		for key, item := range typed {
+			out[key] = item
+		}
+		return out, true
+	default:
+		return nil, false
+	}
 }
 
 // StartAutoRefresh launches a background loop that evaluates auth freshness

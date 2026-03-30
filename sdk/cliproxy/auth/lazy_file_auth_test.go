@@ -54,9 +54,11 @@ func TestManagerExecuteHydratesDeferredFileBackedAuth(t *testing.T) {
 		"email":           "user@example.com",
 		"access_token":    "token-123",
 		"refresh_token":   "refresh-123",
+		"token":           map[string]any{"access_token": "nested-token-123", "scope": "all"},
 		"request_retry":   2,
 		"disable_cooling": true,
 		"expires_at":      time.Now().Add(2 * time.Hour).UTC().Format(time.RFC3339),
+		"client_secret":   "drop-me",
 	}
 	body, err := json.Marshal(raw)
 	if err != nil {
@@ -90,8 +92,14 @@ func TestManagerExecuteHydratesDeferredFileBackedAuth(t *testing.T) {
 	if !ok || stored == nil {
 		t.Fatalf("expected auth to be registered")
 	}
-	if _, hasToken := stored.Metadata["access_token"]; hasToken {
-		t.Fatalf("expected in-memory auth metadata to be compact")
+	if token, _ := stored.Metadata["access_token"].(string); token != "token-123" {
+		t.Fatalf("expected compact auth metadata to keep access_token, got %q", token)
+	}
+	if _, hasClientSecret := stored.Metadata["client_secret"]; hasClientSecret {
+		t.Fatalf("expected in-memory auth metadata to drop non-essential secrets")
+	}
+	if _, hasTokenMap := stored.Metadata["token"]; !hasTokenMap {
+		t.Fatalf("expected in-memory auth metadata to keep token object")
 	}
 	if !stored.DeferredFileHydration() {
 		t.Fatalf("expected deferred file hydration to be enabled")
@@ -110,10 +118,50 @@ func TestManagerExecuteHydratesDeferredFileBackedAuth(t *testing.T) {
 	if !ok || afterExec == nil {
 		t.Fatalf("expected auth after execute")
 	}
-	if _, hasToken := afterExec.Metadata["access_token"]; hasToken {
+	if token, _ := afterExec.Metadata["access_token"].(string); token != "token-123" {
+		t.Fatalf("expected compact auth metadata to keep access_token after execute, got %q", token)
+	}
+	if _, hasClientSecret := afterExec.Metadata["client_secret"]; hasClientSecret {
 		t.Fatalf("expected manager snapshot to stay compact after execute")
 	}
 	if !afterExec.DeferredFileHydration() {
 		t.Fatalf("expected deferred hydration flag to remain enabled in manager snapshot")
+	}
+}
+
+func TestCompactMetadataForMemory_KeepsOAuthTokenFields(t *testing.T) {
+	t.Parallel()
+
+	meta := map[string]any{
+		"type":          "antigravity",
+		"access_token":  " access-top ",
+		"refresh_token": " refresh-top ",
+		"token": map[string]any{
+			"access_token":  " nested-access ",
+			"refresh_token": " nested-refresh ",
+			"scope":         " all ",
+		},
+		"client_secret": "drop-me",
+	}
+
+	compact := CompactMetadataForMemory(meta)
+	if compact == nil {
+		t.Fatalf("expected compact metadata")
+	}
+	if token, _ := compact["access_token"].(string); token != "access-top" {
+		t.Fatalf("expected top-level access token to be retained, got %q", token)
+	}
+	if token, _ := compact["refresh_token"].(string); token != "refresh-top" {
+		t.Fatalf("expected top-level refresh token to be retained, got %q", token)
+	}
+	tokenMap, ok := compact["token"].(map[string]any)
+	if !ok || len(tokenMap) == 0 {
+		t.Fatalf("expected nested token object to be retained")
+	}
+	if token, _ := tokenMap["access_token"].(string); token != "nested-access" {
+		t.Fatalf("expected nested access token to be retained, got %q", token)
+	}
+	if _, hasClientSecret := compact["client_secret"]; hasClientSecret {
+		t.Fatalf("expected non-allowlisted metadata to be removed")
 	}
 }

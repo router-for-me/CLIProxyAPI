@@ -15,6 +15,14 @@ var compactMetadataScalarKeys = map[string]struct{}{
 	"type":                     {},
 	"email":                    {},
 	"project_id":               {},
+	"access_token":             {},
+	"refresh_token":            {},
+	"accessToken":              {},
+	"refreshToken":             {},
+	"token_type":               {},
+	"tokenType":                {},
+	"id_token":                 {},
+	"cookie":                   {},
 	"disabled":                 {},
 	"prefix":                   {},
 	"proxy_url":                {},
@@ -47,6 +55,10 @@ var compactMetadataScalarKeys = map[string]struct{}{
 	"virtual_parent_id":        {},
 }
 
+var compactMetadataObjectKeys = map[string]struct{}{
+	"token": {},
+}
+
 var compactMetadataCollectionKeys = map[string]struct{}{
 	"excluded_models": {},
 	"excluded-models": {},
@@ -66,6 +78,12 @@ func CompactMetadataForMemory(meta map[string]any) map[string]any {
 				compact[key] = strings.TrimSpace(typed)
 			case bool, float64, int, int32, int64, json.Number:
 				compact[key] = typed
+			}
+			continue
+		}
+		if _, ok := compactMetadataObjectKeys[key]; ok {
+			if copied := cloneCompactObject(value); copied != nil {
+				compact[key] = copied
 			}
 			continue
 		}
@@ -125,6 +143,54 @@ func cloneCompactCollection(value any) any {
 	default:
 		return nil
 	}
+}
+
+func cloneCompactObject(value any) any {
+	switch typed := value.(type) {
+	case string:
+		if trimmed := strings.TrimSpace(typed); trimmed != "" {
+			return trimmed
+		}
+		return nil
+	case map[string]any:
+		return cloneStringAnyMap(typed)
+	case map[string]string:
+		if len(typed) == 0 {
+			return nil
+		}
+		out := make(map[string]any, len(typed))
+		for key, item := range typed {
+			if trimmed := strings.TrimSpace(item); trimmed != "" {
+				out[key] = trimmed
+			}
+		}
+		if len(out) == 0 {
+			return nil
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func cloneStringAnyMap(src map[string]any) map[string]any {
+	if len(src) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(src))
+	for key, value := range src {
+		if raw, ok := value.(string); ok {
+			if trimmed := strings.TrimSpace(raw); trimmed != "" {
+				out[key] = trimmed
+			}
+			continue
+		}
+		out[key] = value
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func compactStringSlice(items []string) []string {

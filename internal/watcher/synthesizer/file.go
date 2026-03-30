@@ -352,7 +352,7 @@ func prepareFileBackedAuths(auths []*coreauth.Auth) []*coreauth.Auth {
 		if auth == nil {
 			continue
 		}
-		out = append(out, coreauth.PrepareFileBackedAuthForMemory(auth))
+		out = append(out, auth.Clone())
 	}
 	return out
 }
