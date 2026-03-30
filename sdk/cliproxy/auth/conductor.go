@@ -2534,7 +2534,19 @@ func mergeMetadataForPersist(base, overrides map[string]any) map[string]any {
 		}
 		merged[key] = value
 	}
+	applyCompactMetadataClears(merged, overrides)
 	return merged
+}
+
+func applyCompactMetadataClears(merged, overrides map[string]any) {
+	if len(merged) == 0 || len(overrides) == 0 {
+		return
+	}
+	for key := range compactMetadataClearableKeys {
+		if _, exists := overrides[key]; !exists {
+			delete(merged, key)
+		}
+	}
 }
 
 func cloneMetadataMap(src map[string]any) map[string]any {

@@ -55,6 +55,7 @@ func TestManagerExecuteHydratesDeferredFileBackedAuth(t *testing.T) {
 		"access_token":    "token-123",
 		"refresh_token":   "refresh-123",
 		"token":           map[string]any{"access_token": "nested-token-123", "scope": "all"},
+		"websockets":      true,
 		"request_retry":   2,
 		"disable_cooling": true,
 		"expires_at":      time.Now().Add(2 * time.Hour).UTC().Format(time.RFC3339),
@@ -101,6 +102,9 @@ func TestManagerExecuteHydratesDeferredFileBackedAuth(t *testing.T) {
 	if _, hasTokenMap := stored.Metadata["token"]; !hasTokenMap {
 		t.Fatalf("expected in-memory auth metadata to keep token object")
 	}
+	if ws, _ := stored.Metadata["websockets"].(bool); !ws {
+		t.Fatalf("expected in-memory auth metadata to keep websockets flag")
+	}
 	if !stored.DeferredFileHydration() {
 		t.Fatalf("expected deferred file hydration to be enabled")
 	}
@@ -124,6 +128,9 @@ func TestManagerExecuteHydratesDeferredFileBackedAuth(t *testing.T) {
 	if _, hasClientSecret := afterExec.Metadata["client_secret"]; hasClientSecret {
 		t.Fatalf("expected manager snapshot to stay compact after execute")
 	}
+	if ws, _ := afterExec.Metadata["websockets"].(bool); !ws {
+		t.Fatalf("expected manager snapshot to keep websockets flag after execute")
+	}
 	if !afterExec.DeferredFileHydration() {
 		t.Fatalf("expected deferred hydration flag to remain enabled in manager snapshot")
 	}
@@ -141,6 +148,7 @@ func TestCompactMetadataForMemory_KeepsOAuthTokenFields(t *testing.T) {
 			"refresh_token": " nested-refresh ",
 			"scope":         " all ",
 		},
+		"websockets":   true,
 		"client_secret": "drop-me",
 	}
 
@@ -163,5 +171,8 @@ func TestCompactMetadataForMemory_KeepsOAuthTokenFields(t *testing.T) {
 	}
 	if _, hasClientSecret := compact["client_secret"]; hasClientSecret {
 		t.Fatalf("expected non-allowlisted metadata to be removed")
+	}
+	if ws, _ := compact["websockets"].(bool); !ws {
+		t.Fatalf("expected websockets flag to be retained")
 	}
 }

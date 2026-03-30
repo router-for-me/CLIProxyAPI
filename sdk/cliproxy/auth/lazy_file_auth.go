@@ -51,6 +51,7 @@ var compactMetadataScalarKeys = map[string]struct{}{
 	"api_key":                  {},
 	"tool_prefix_disabled":     {},
 	"tool-prefix-disabled":     {},
+	"websockets":               {},
 	"virtual":                  {},
 	"virtual_parent_id":        {},
 }
@@ -60,6 +61,20 @@ var compactMetadataObjectKeys = map[string]struct{}{
 }
 
 var compactMetadataCollectionKeys = map[string]struct{}{
+	"excluded_models": {},
+	"excluded-models": {},
+}
+
+var compactMetadataClearableKeys = map[string]struct{}{
+	"note":            {},
+	"priority":        {},
+	"request_retry":   {},
+	"request-retry":   {},
+	"disable_cooling": {},
+	"disable-cooling": {},
+	"prefix":          {},
+	"proxy_url":       {},
+	"websockets":      {},
 	"excluded_models": {},
 	"excluded-models": {},
 }
