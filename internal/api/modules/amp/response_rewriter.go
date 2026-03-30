@@ -110,7 +110,11 @@ func (rw *ResponseRewriter) Flush() {
 		return
 	}
 	if rw.body.Len() > 0 {
-		if _, err := rw.ResponseWriter.Write(rw.rewriteModelInResponse(rw.body.Bytes())); err != nil {
+		rewritten := rw.rewriteModelInResponse(rw.body.Bytes())
+		// Update Content-Length to match the rewritten body size, since
+		// signature injection and model name changes alter the payload length.
+		rw.ResponseWriter.Header().Set("Content-Length", fmt.Sprintf("%d", len(rewritten)))
+		if _, err := rw.ResponseWriter.Write(rewritten); err != nil {
 			log.Warnf("amp response rewriter: failed to write rewritten response: %v", err)
 		}
 	}
@@ -223,27 +227,91 @@ func (rw *ResponseRewriter) rewriteModelInResponse(data []byte) []byte {
 
 func (rw *ResponseRewriter) rewriteStreamChunk(chunk []byte) []byte {
 	lines := bytes.Split(chunk, []byte("\n"))
-	writeIndex := 0
-	for _, line := range lines {
-		if bytes.HasPrefix(line, []byte("data: ")) {
-			jsonData := bytes.TrimPrefix(line, []byte("data: "))
-			if len(jsonData) > 0 && jsonData[0] == '{' {
-				rewritten := rw.rewriteModelInResponse(jsonData)
-				if len(rewritten) == 0 {
-					if writeIndex > 0 && bytes.HasPrefix(lines[writeIndex-1], []byte("event: ")) {
-						writeIndex--
-					}
+	var out [][]byte
+
+	i := 0
+	for i < len(lines) {
+		line := lines[i]
+		trimmed := bytes.TrimSpace(line)
+
+		// Case 1: "event:" line - look ahead for its "data:" line
+		if bytes.HasPrefix(trimmed, []byte("event: ")) {
+			// Scan forward past blank lines to find the data: line
+			dataIdx := -1
+			for j := i + 1; j < len(lines); j++ {
+				t := bytes.TrimSpace(lines[j])
+				if len(t) == 0 {
 					continue
 				}
-				lines[writeIndex] = append([]byte("data: "), rewritten...)
-				writeIndex++
+				if bytes.HasPrefix(t, []byte("data: ")) {
+					dataIdx = j
+				}
+				break
+			}
+
+			if dataIdx >= 0 {
+				// Found event+data pair - process through model rewriter only
+				// (no thinking suppression for streaming)
+				jsonData := bytes.TrimPrefix(bytes.TrimSpace(lines[dataIdx]), []byte("data: "))
+				if len(jsonData) > 0 && jsonData[0] == '{' {
+					rewritten := rw.rewriteStreamEvent(jsonData)
+					// Emit event line
+					out = append(out, line)
+					// Emit blank lines between event and data
+					for k := i + 1; k < dataIdx; k++ {
+						out = append(out, lines[k])
+					}
+					// Emit rewritten data
+					out = append(out, append([]byte("data: "), rewritten...))
+					i = dataIdx + 1
+					continue
+				}
+			}
+
+			// No data line found (orphan event from cross-chunk split)
+			// Pass it through as-is - the data will arrive in the next chunk
+			out = append(out, line)
+			i++
+			continue
+		}
+
+		// Case 2: standalone "data:" line (no preceding event: in this chunk)
+		if bytes.HasPrefix(trimmed, []byte("data: ")) {
+			jsonData := bytes.TrimPrefix(trimmed, []byte("data: "))
+			if len(jsonData) > 0 && jsonData[0] == '{' {
+				rewritten := rw.rewriteStreamEvent(jsonData)
+				out = append(out, append([]byte("data: "), rewritten...))
+				i++
 				continue
 			}
 		}
-		lines[writeIndex] = line
-		writeIndex++
+
+		// Case 3: everything else
+		out = append(out, line)
+		i++
 	}
-	return bytes.Join(lines[:writeIndex], []byte("\n"))
+
+	return bytes.Join(out, []byte("\n"))
+}
+
+// rewriteStreamEvent processes a single JSON event in the SSE stream.
+// It rewrites model names and ensures signature fields exist.
+// Unlike rewriteModelInResponse, it does NOT suppress thinking blocks
+// in streaming mode - they are passed through with signature injection.
+func (rw *ResponseRewriter) rewriteStreamEvent(data []byte) []byte {
+	// Inject empty signature where needed
+	data = ensureAmpSignature(data)
+
+	// Rewrite model name
+	if rw.originalModel != "" {
+		for _, path := range modelFieldPaths {
+			if gjson.GetBytes(data, path).Exists() {
+				data, _ = sjson.SetBytes(data, path, rw.originalModel)
+			}
+		}
+	}
+
+	return data
 }
 
 // SanitizeAmpRequestBody removes thinking blocks with empty/missing/invalid signatures
