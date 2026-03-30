@@ -53,11 +53,17 @@ mkdir "%MODULE_DIR%"
 
 REM 复制文件
 copy "%OUTPUT_DIR%\cli-proxy-api-android-%ARCH%" "%MODULE_DIR%\cli-proxy-api" >nul
+if %ERRORLEVEL% neq 0 exit /b 1
 copy "%SCRIPT_DIR%\module.prop" "%MODULE_DIR%\" >nul
+if %ERRORLEVEL% neq 0 exit /b 1
 copy "%SCRIPT_DIR%\service.sh" "%MODULE_DIR%\" >nul
+if %ERRORLEVEL% neq 0 exit /b 1
 copy "%SCRIPT_DIR%\post-fs-data.sh" "%MODULE_DIR%\" >nul
+if %ERRORLEVEL% neq 0 exit /b 1
 copy "%SCRIPT_DIR%\uninstall.sh" "%MODULE_DIR%\" >nul
+if %ERRORLEVEL% neq 0 exit /b 1
 copy "%SCRIPT_DIR%\config.yaml" "%MODULE_DIR%\" >nul
+if %ERRORLEVEL% neq 0 exit /b 1
 
 REM 创建子目录
 mkdir "%MODULE_DIR%\auths"
@@ -65,8 +71,8 @@ mkdir "%MODULE_DIR%\logs"
 mkdir "%MODULE_DIR%\config_backup"
 type nul > "%MODULE_DIR%\auths\.gitkeep"
 
-REM 更新 module.prop 中的版本
-powershell -Command "(Get-Content '%MODULE_DIR%\module.prop') -replace 'version=v1.0.0', 'version=%VERSION%' | Set-Content '%MODULE_DIR%\module.prop'"
+REM 更新 module.prop 中的版本和版本代码
+powershell -Command "$v='%VERSION%'; $n=[regex]::Matches($v, '[0-9]+') | Select-Object -First 1 -ExpandProperty Value; if(-not $n){$n='1'}; $vc=$n.PadRight(8,'0')+'000'; (Get-Content '%MODULE_DIR%\module.prop') -replace 'version=v1.0.0', 'version='+$v -replace 'versionCode=10000', ('versionCode='+$vc) | Set-Content '%MODULE_DIR%\module.prop'"
 
 REM 打包 zip
 cd /d "%OUTPUT_DIR%"
