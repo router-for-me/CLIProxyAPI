@@ -18,17 +18,22 @@ get_pid() {
     fi
 }
 
-is_running() {
+get_valid_pid() {
     local pid=$(get_pid)
     if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
         if [ -f "/proc/$pid/cmdline" ]; then
             if grep -q "cli-proxy-api" "/proc/$pid/cmdline" 2>/dev/null; then
+                echo "$pid"
                 return 0
             fi
         fi
         rm -f "$PID_FILE"
     fi
     return 1
+}
+
+is_running() {
+    get_valid_pid >/dev/null 2>&1
 }
 
 wait_for_boot() {
@@ -39,8 +44,9 @@ wait_for_boot() {
 }
 
 do_start() {
-    if is_running; then
-        echo "[CLIProxyAPI] Service is already running (PID: $(get_pid))"
+    local existing_pid=$(get_valid_pid)
+    if [ -n "$existing_pid" ]; then
+        echo "[CLIProxyAPI] Service is already running (PID: $existing_pid)"
         return 0
     fi
 
@@ -69,12 +75,12 @@ do_start() {
 }
 
 do_stop() {
-    if ! is_running; then
+    local pid=$(get_valid_pid)
+    if [ -z "$pid" ]; then
         echo "[CLIProxyAPI] Service is not running"
         return 0
     fi
 
-    local pid=$(get_pid)
     kill "$pid" 2>/dev/null
     sleep 1
     if kill -0 "$pid" 2>/dev/null; then
@@ -87,8 +93,9 @@ do_stop() {
 }
 
 do_status() {
-    if is_running; then
-        echo "[CLIProxyAPI] Service is running (PID: $(get_pid))"
+    local pid=$(get_valid_pid)
+    if [ -n "$pid" ]; then
+        echo "[CLIProxyAPI] Service is running (PID: $pid)"
         return 0
     else
         echo "[CLIProxyAPI] Service is not running"
