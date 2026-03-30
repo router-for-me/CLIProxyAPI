@@ -28,7 +28,7 @@ static/*
 !auths/.gitkeep
 
 # Documentation
-docs/*
+# docs/*
 AGENTS.md
 CLAUDE.md
 GEMINI.md
