@@ -176,3 +176,57 @@ func TestCompactMetadataForMemory_KeepsOAuthTokenFields(t *testing.T) {
 		t.Fatalf("expected websockets flag to be retained")
 	}
 }
+
+func TestPrepareFileBackedAuthForMemory_PreservesRuntimeForGeminiVirtual(t *testing.T) {
+	t.Parallel()
+
+	runtimeMarker := &struct{ Name string }{Name: "shared"}
+	compact := PrepareFileBackedAuthForMemory(&Auth{
+		ID:       "gemini-virtual",
+		Provider: "gemini-cli",
+		Attributes: map[string]string{
+			"path":                 "/tmp/gemini-virtual.json",
+			"gemini_virtual_parent": "gemini-primary",
+			"runtime_only":         "true",
+		},
+		Metadata: map[string]any{
+			"type":       "gemini",
+			"project_id": "project-a",
+			"virtual":    true,
+		},
+		Runtime: runtimeMarker,
+	})
+
+	if compact == nil {
+		t.Fatalf("expected compact auth")
+	}
+	if compact.Runtime == nil {
+		t.Fatalf("expected runtime to be preserved for gemini virtual auth")
+	}
+	if compact.Runtime != runtimeMarker {
+		t.Fatalf("expected runtime pointer to be preserved")
+	}
+}
+
+func TestPrepareFileBackedAuthForMemory_ClearsRuntimeForRegularFileAuth(t *testing.T) {
+	t.Parallel()
+
+	compact := PrepareFileBackedAuthForMemory(&Auth{
+		ID:       "claude-file",
+		Provider: "claude",
+		Attributes: map[string]string{
+			"path": "/tmp/claude.json",
+		},
+		Metadata: map[string]any{
+			"type": "claude",
+		},
+		Runtime: &struct{ Name string }{Name: "drop"},
+	})
+
+	if compact == nil {
+		t.Fatalf("expected compact auth")
+	}
+	if compact.Runtime != nil {
+		t.Fatalf("expected runtime to be cleared for regular file-backed auth")
+	}
+}

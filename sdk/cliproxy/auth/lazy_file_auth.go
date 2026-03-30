@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -137,10 +138,32 @@ func PrepareFileBackedAuthForMemory(auth *Auth) *Auth {
 		return clone
 	}
 	clone.Metadata = CompactMetadataForMemory(clone.Metadata)
-	clone.Runtime = nil
+	if !clone.shouldRetainRuntimeOnDeferredSnapshot() {
+		clone.Runtime = nil
+	}
 	clone.Storage = nil
 	clone.deferredFileHydration = true
 	return clone
+}
+
+func (a *Auth) shouldRetainRuntimeOnDeferredSnapshot() bool {
+	if a == nil {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(a.Provider), "gemini-cli") {
+		return false
+	}
+	if len(a.Attributes) == 0 {
+		return false
+	}
+	if parentID := strings.TrimSpace(a.Attributes["gemini_virtual_parent"]); parentID != "" {
+		return true
+	}
+	if marker := strings.TrimSpace(a.Attributes["gemini_virtual_primary"]); marker != "" {
+		enabled, err := strconv.ParseBool(marker)
+		return err == nil && enabled
+	}
+	return false
 }
 
 func cloneCompactCollection(value any) any {
