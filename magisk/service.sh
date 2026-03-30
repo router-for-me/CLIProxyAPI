@@ -26,6 +26,13 @@ is_running() {
     return 1
 }
 
+wait_for_boot() {
+    while [ "$(getprop sys.boot_completed)" != "1" ]; do
+        sleep 1
+    done
+    sleep 3
+}
+
 do_start() {
     if is_running; then
         echo "[CLIProxyAPI] Service is already running (PID: $(get_pid))"
@@ -90,10 +97,7 @@ CMD="$1"
 
 case "$CMD" in
     start)
-        while [ "$(getprop sys.boot_completed)" != "1" ]; do
-            sleep 1
-        done
-        sleep 3
+        wait_for_boot
         do_start
         ;;
     stop)
@@ -109,10 +113,7 @@ case "$CMD" in
         ;;
     *)
         if [ -z "$CMD" ]; then
-            while [ "$(getprop sys.boot_completed)" != "1" ]; do
-                sleep 1
-            done
-            sleep 3
+            wait_for_boot
             do_start
         else
             echo "Usage: $0 {start|stop|restart|status}"
