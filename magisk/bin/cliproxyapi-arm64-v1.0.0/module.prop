@@ -1,0 +1,9 @@
+id=cliproxyapi
+name=CLIProxyAPI
+version=v1.0.0
+versionCode=10000
+author=CLIProxyAPI Team
+description=AI 代理服务器 - 为 CLI 提供 OpenAI/Gemini/Claude/Codex 兼容 API 接口
+支持多账户轮询、OAuth 认证、负载均衡
+内置 WebUI 管理面板: localhost:8317/management.html，登录密码root
+API 端点: localhost:8317
