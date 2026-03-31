@@ -12,10 +12,11 @@ import (
 
 const (
 	// GeminiCLIVersion is the version string reported in the User-Agent for upstream requests.
-	GeminiCLIVersion = "0.31.0"
+	GeminiCLIVersion = "0.36.0-nightly.20260317.2f90b4653"
 
-	// GeminiCLIApiClientHeader is the value for the X-Goog-Api-Client header sent to the Gemini CLI upstream.
-	GeminiCLIApiClientHeader = "google-genai-sdk/1.41.0 gl-node/v22.19.0"
+	// GeminiCLIDefaultSurface is the default surface marker used when emulating
+	// the official Gemini CLI in a plain terminal environment.
+	GeminiCLIDefaultSurface = "terminal"
 )
 
 // geminiCLIOS maps Go runtime OS names to the Node.js-style platform strings used by Gemini CLI.
@@ -34,7 +35,7 @@ func geminiCLIArch() string {
 	case "amd64":
 		return "x64"
 	case "386":
-		return "x86"
+		return "ia32"
 	default:
 		return runtime.GOARCH
 	}
@@ -43,10 +44,23 @@ func geminiCLIArch() string {
 // GeminiCLIUserAgent returns a User-Agent string that matches the Gemini CLI format.
 // The model parameter is included in the UA; pass "" or "unknown" when the model is not applicable.
 func GeminiCLIUserAgent(model string) string {
+	return GeminiCLIUserAgentWithClient("", model, GeminiCLIDefaultSurface)
+}
+
+// GeminiCLIUserAgentWithClient returns a Gemini CLI User-Agent string with
+// optional client prefix and surface metadata, matching the official CLI shape.
+func GeminiCLIUserAgentWithClient(clientName, model, surface string) string {
 	if model == "" {
 		model = "unknown"
 	}
-	return fmt.Sprintf("GeminiCLI/%s/%s (%s; %s)", GeminiCLIVersion, model, geminiCLIOS(), geminiCLIArch())
+	if surface == "" {
+		surface = GeminiCLIDefaultSurface
+	}
+	prefix := "GeminiCLI"
+	if trimmed := strings.TrimSpace(clientName); trimmed != "" {
+		prefix = "GeminiCLI-" + trimmed
+	}
+	return fmt.Sprintf("%s/%s/%s (%s; %s; %s)", prefix, GeminiCLIVersion, model, geminiCLIOS(), geminiCLIArch(), surface)
 }
 
 // ScrubProxyAndFingerprintHeaders removes all headers that could reveal
