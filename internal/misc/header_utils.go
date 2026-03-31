@@ -16,6 +16,10 @@ const (
 
 	// GeminiCLIApiClientHeader is the value for the X-Goog-Api-Client header sent to the Gemini CLI upstream.
 	GeminiCLIApiClientHeader = "google-genai-sdk/1.41.0 gl-node/v22.19.0"
+
+	// CodexCLIUserAgent is the default Codex CLI fingerprint used when no client-specific
+	// User-Agent is available during login or execution.
+	CodexCLIUserAgent = "codex_cli_rs/0.118.0-alpha.4 (Linux; x86_64) xterm-256color"
 )
 
 // geminiCLIOS maps Go runtime OS names to the Node.js-style platform strings used by Gemini CLI.

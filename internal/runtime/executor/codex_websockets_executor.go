@@ -827,7 +827,11 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 	}
 	headers.Set("OpenAI-Beta", betaHeader)
 	misc.EnsureHeader(headers, ginHeaders, "Session_id", uuid.NewString())
-	ensureHeaderWithConfigPrecedence(headers, ginHeaders, "User-Agent", cfgUserAgent, codexUserAgent)
+	if authUserAgent := codexAuthUserAgent(auth); authUserAgent != "" {
+		headers.Set("User-Agent", authUserAgent)
+	} else {
+		ensureHeaderWithConfigPrecedence(headers, ginHeaders, "User-Agent", cfgUserAgent, codexUserAgent)
+	}
 
 	isAPIKey := false
 	if auth != nil && auth.Attributes != nil {

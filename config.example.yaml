@@ -193,7 +193,7 @@ nonstream-keepalive-interval: 0
 # does not send the header. `user-agent` applies to HTTP and websocket requests;
 # `beta-features` only applies to websocket requests. They do not apply to codex-api-key entries.
 # codex-header-defaults:
-#   user-agent: "codex_cli_rs/0.114.0 (Mac OS 14.2.0; x86_64) vscode/1.111.0"
+#   user-agent: "codex_cli_rs/0.118.0-alpha.4 (Linux; x86_64) xterm-256color"
 #   beta-features: "multi_agent"
 
 # OpenAI compatibility providers

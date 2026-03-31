@@ -163,6 +163,33 @@ func TestApplyCodexWebsocketHeadersConfigUserAgentOverridesClientHeader(t *testi
 	}
 }
 
+func TestApplyCodexWebsocketHeadersAuthFileUserAgentOverridesExistingClientAndConfig(t *testing.T) {
+	cfg := &config.Config{
+		CodexHeaderDefaults: config.CodexHeaderDefaults{
+			UserAgent:    "config-ua",
+			BetaFeatures: "config-beta",
+		},
+	}
+	auth := &cliproxyauth.Auth{
+		Provider: "codex",
+		Metadata: map[string]any{
+			"email":      "user@example.com",
+			"user_agent": "auth-file-ua",
+		},
+	}
+	ctx := contextWithGinHeaders(map[string]string{
+		"User-Agent": "client-ua",
+	})
+	headers := http.Header{}
+	headers.Set("User-Agent", "existing-ua")
+
+	got := applyCodexWebsocketHeaders(ctx, headers, auth, "", cfg)
+
+	if gotVal := got.Get("User-Agent"); gotVal != "auth-file-ua" {
+		t.Fatalf("User-Agent = %s, want %s", gotVal, "auth-file-ua")
+	}
+}
+
 func TestApplyCodexWebsocketHeadersIgnoresConfigForAPIKeyAuth(t *testing.T) {
 	cfg := &config.Config{
 		CodexHeaderDefaults: config.CodexHeaderDefaults{
@@ -243,6 +270,36 @@ func TestApplyCodexHeadersPassesThroughClientIdentityHeaders(t *testing.T) {
 	}
 	if got := req.Header.Get("X-Client-Request-Id"); got != "019d2233-e240-7162-992d-38df0a2a0e0d" {
 		t.Fatalf("X-Client-Request-Id = %s, want %s", got, "019d2233-e240-7162-992d-38df0a2a0e0d")
+	}
+}
+
+func TestApplyCodexHeadersAuthFileUserAgentOverridesExistingClientAndConfig(t *testing.T) {
+	req, err := http.NewRequest(http.MethodPost, "https://example.com/responses", nil)
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	req.Header.Set("User-Agent", "existing-ua")
+
+	cfg := &config.Config{
+		CodexHeaderDefaults: config.CodexHeaderDefaults{
+			UserAgent: "config-ua",
+		},
+	}
+	auth := &cliproxyauth.Auth{
+		Provider: "codex",
+		Metadata: map[string]any{"email": "user@example.com"},
+		Attributes: map[string]string{
+			"header:User-Agent": "auth-file-ua",
+		},
+	}
+	req = req.WithContext(contextWithGinHeaders(map[string]string{
+		"User-Agent": "client-ua",
+	}))
+
+	applyCodexHeaders(req, auth, "oauth-token", true, cfg)
+
+	if got := req.Header.Get("User-Agent"); got != "auth-file-ua" {
+		t.Fatalf("User-Agent = %s, want %s", got, "auth-file-ua")
 	}
 }
 

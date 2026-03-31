@@ -28,7 +28,7 @@ import (
 )
 
 const (
-	codexUserAgent  = "codex_cli_rs/0.116.0 (Mac OS 26.0.1; arm64) Apple_Terminal/464"
+	codexUserAgent  = misc.CodexCLIUserAgent
 	codexOriginator = "codex_cli_rs"
 )
 
@@ -653,7 +653,11 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Codex-Turn-Metadata", "")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Client-Request-Id", "")
 	cfgUserAgent, _ := codexHeaderDefaults(cfg, auth)
-	ensureHeaderWithConfigPrecedence(r.Header, ginHeaders, "User-Agent", cfgUserAgent, codexUserAgent)
+	if authUserAgent := codexAuthUserAgent(auth); authUserAgent != "" {
+		r.Header.Set("User-Agent", authUserAgent)
+	} else {
+		ensureHeaderWithConfigPrecedence(r.Header, ginHeaders, "User-Agent", cfgUserAgent, codexUserAgent)
+	}
 
 	if stream {
 		r.Header.Set("Accept", "text/event-stream")
@@ -685,6 +689,33 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(r, attrs)
+}
+
+func codexAuthUserAgent(auth *cliproxyauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	if auth.Attributes != nil {
+		if ua := strings.TrimSpace(auth.Attributes["header:User-Agent"]); ua != "" {
+			return ua
+		}
+		if ua := strings.TrimSpace(auth.Attributes["user_agent"]); ua != "" {
+			return ua
+		}
+		if ua := strings.TrimSpace(auth.Attributes["user-agent"]); ua != "" {
+			return ua
+		}
+	}
+	if auth.Metadata == nil {
+		return ""
+	}
+	if ua, ok := auth.Metadata["user_agent"].(string); ok && strings.TrimSpace(ua) != "" {
+		return strings.TrimSpace(ua)
+	}
+	if ua, ok := auth.Metadata["user-agent"].(string); ok && strings.TrimSpace(ua) != "" {
+		return strings.TrimSpace(ua)
+	}
+	return ""
 }
 
 func newCodexStatusErr(statusCode int, body []byte) statusErr {
