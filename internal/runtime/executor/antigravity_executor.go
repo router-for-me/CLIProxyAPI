@@ -205,6 +205,7 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 
 	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
 	defer reporter.trackFailure(ctx, &err)
+	defer reporter.ensurePublished(ctx)
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("antigravity")
@@ -347,6 +348,7 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 
 	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
 	defer reporter.trackFailure(ctx, &err)
+	defer reporter.ensurePublished(ctx)
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("antigravity")
@@ -750,6 +752,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 
 	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
 	defer reporter.trackFailure(ctx, &err)
+	defer reporter.ensurePublished(ctx)
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("antigravity")
