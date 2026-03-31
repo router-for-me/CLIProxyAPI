@@ -224,6 +224,17 @@ nonstream-keepalive-interval: 0
 #         alias: "claude-opus-4.66"
 #       - name: "kimi-k2.5"
 #         alias: "claude-opus-4.66"
+#
+#   # MiniMax provider (OpenAI-compatible API with reasoning_split thinking support)
+#   - name: "minimax"
+#     base-url: "https://api.minimax.io/v1"
+#     api-key-entries:
+#       - api-key: "your-minimax-api-key"
+#     models:
+#       - name: "MiniMax-M2.7"
+#       - name: "MiniMax-M2.7-highspeed"
+#       - name: "MiniMax-M2.5"
+#       - name: "MiniMax-M2.5-highspeed"
 
 # Vertex API keys (Vertex-compatible endpoints, base-url is optional)
 # vertex-api-key:

@@ -24,4 +24,7 @@ const (
 
 	// Antigravity represents the Antigravity response format identifier.
 	Antigravity = "antigravity"
+
+	// MiniMax represents the MiniMax provider identifier.
+	MiniMax = "minimax"
 )

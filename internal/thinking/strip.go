@@ -51,6 +51,11 @@ func StripThinkingConfig(body []byte, provider string) []byte {
 			"reasoning_split",
 			"reasoning_effort",
 		}
+	case "minimax":
+		paths = []string{
+			"reasoning_split",
+			"reasoning_effort",
+		}
 	default:
 		return body
 	}
