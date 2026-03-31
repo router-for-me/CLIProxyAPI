@@ -1371,3 +1371,104 @@ func normalizeAPIKeysList(keys []string) []string {
 	}
 	return out
 }
+
+// model-mappings: map[string]string
+
+func (h *Handler) GetModelMappings(c *gin.Context) {
+	c.JSON(200, gin.H{"model-mappings": h.cfg.ModelMappings})
+}
+
+func (h *Handler) PutModelMappings(c *gin.Context) {
+	data, err := c.GetRawData()
+	if err != nil {
+		c.JSON(400, gin.H{"error": "failed to read body"})
+		return
+	}
+	var mappings map[string]string
+	if err = json.Unmarshal(data, &mappings); err != nil {
+		var wrapper struct {
+			Items map[string]string `json:"items"`
+		}
+		if err2 := json.Unmarshal(data, &wrapper); err2 != nil {
+			c.JSON(400, gin.H{"error": "invalid body"})
+			return
+		}
+		mappings = wrapper.Items
+	}
+	// Normalize: trim whitespace, drop empty keys/values
+	normalized := make(map[string]string, len(mappings))
+	for k, v := range mappings {
+		k = strings.TrimSpace(k)
+		v = strings.TrimSpace(v)
+		if k != "" && v != "" {
+			normalized[k] = v
+		}
+	}
+	if len(normalized) == 0 {
+		normalized = nil
+	}
+	h.cfg.ModelMappings = normalized
+	h.persist(c)
+}
+
+func (h *Handler) PatchModelMappings(c *gin.Context) {
+	var body struct {
+		From string `json:"from"`
+		To   string `json:"to"`
+	}
+	if errBindJSON := c.ShouldBindJSON(&body); errBindJSON != nil {
+		c.JSON(400, gin.H{"error": "invalid body"})
+		return
+	}
+	from := strings.TrimSpace(body.From)
+	if from == "" {
+		c.JSON(400, gin.H{"error": "missing from"})
+		return
+	}
+	to := strings.TrimSpace(body.To)
+	if to == "" {
+		// Empty "to" means delete
+		if h.cfg.ModelMappings == nil {
+			c.JSON(404, gin.H{"error": "mapping not found"})
+			return
+		}
+		if _, ok := h.cfg.ModelMappings[from]; !ok {
+			c.JSON(404, gin.H{"error": "mapping not found"})
+			return
+		}
+		delete(h.cfg.ModelMappings, from)
+		if len(h.cfg.ModelMappings) == 0 {
+			h.cfg.ModelMappings = nil
+		}
+		h.persist(c)
+		return
+	}
+	if h.cfg.ModelMappings == nil {
+		h.cfg.ModelMappings = make(map[string]string)
+	}
+	h.cfg.ModelMappings[from] = to
+	h.persist(c)
+}
+
+func (h *Handler) DeleteModelMappings(c *gin.Context) {
+	from := strings.TrimSpace(c.Query("from"))
+	if from == "" {
+		// Delete all mappings
+		h.cfg.ModelMappings = nil
+		h.persist(c)
+		return
+	}
+	if h.cfg.ModelMappings == nil {
+		c.JSON(404, gin.H{"error": "mapping not found"})
+		return
+	}
+	if _, ok := h.cfg.ModelMappings[from]; !ok {
+		c.JSON(404, gin.H{"error": "mapping not found"})
+		return
+	}
+	delete(h.cfg.ModelMappings, from)
+	if len(h.cfg.ModelMappings) == 0 {
+		h.cfg.ModelMappings = nil
+	}
+	h.persist(c)
+}
