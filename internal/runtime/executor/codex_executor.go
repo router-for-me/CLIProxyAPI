@@ -113,6 +113,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	body, _ = sjson.DeleteBytes(body, "previous_response_id")
 	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
 	body, _ = sjson.DeleteBytes(body, "safety_identifier")
+	body, _ = sjson.DeleteBytes(body, "stream_options")
 	if !gjson.GetBytes(body, "instructions").Exists() {
 		body, _ = sjson.SetBytes(body, "instructions", "")
 	}
@@ -311,6 +312,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	body, _ = sjson.DeleteBytes(body, "previous_response_id")
 	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
 	body, _ = sjson.DeleteBytes(body, "safety_identifier")
+	body, _ = sjson.DeleteBytes(body, "stream_options")
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 	if !gjson.GetBytes(body, "instructions").Exists() {
 		body, _ = sjson.SetBytes(body, "instructions", "")
@@ -415,6 +417,7 @@ func (e *CodexExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth
 	body, _ = sjson.DeleteBytes(body, "previous_response_id")
 	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
 	body, _ = sjson.DeleteBytes(body, "safety_identifier")
+	body, _ = sjson.DeleteBytes(body, "stream_options")
 	body, _ = sjson.SetBytes(body, "stream", false)
 	if !gjson.GetBytes(body, "instructions").Exists() {
 		body, _ = sjson.SetBytes(body, "instructions", "")
@@ -685,11 +688,37 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 }
 
 func newCodexStatusErr(statusCode int, body []byte) statusErr {
-	err := statusErr{code: statusCode, msg: string(body)}
-	if retryAfter := parseCodexRetryAfter(statusCode, body, time.Now()); retryAfter != nil {
+	errCode := statusCode
+	if isCodexModelCapacityError(body) {
+		errCode = http.StatusTooManyRequests
+	}
+	err := statusErr{code: errCode, msg: string(body)}
+	if retryAfter := parseCodexRetryAfter(errCode, body, time.Now()); retryAfter != nil {
 		err.retryAfter = retryAfter
 	}
 	return err
+}
+
+func isCodexModelCapacityError(errorBody []byte) bool {
+	if len(errorBody) == 0 {
+		return false
+	}
+	candidates := []string{
+		gjson.GetBytes(errorBody, "error.message").String(),
+		gjson.GetBytes(errorBody, "message").String(),
+		string(errorBody),
+	}
+	for _, candidate := range candidates {
+		lower := strings.ToLower(strings.TrimSpace(candidate))
+		if lower == "" {
+			continue
+		}
+		if strings.Contains(lower, "selected model is at capacity") ||
+			strings.Contains(lower, "model is at capacity. please try a different model") {
+			return true
+		}
+	}
+	return false
 }
 
 func parseCodexRetryAfter(statusCode int, errorBody []byte, now time.Time) *time.Duration {

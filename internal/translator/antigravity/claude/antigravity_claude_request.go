@@ -330,32 +330,45 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 					}
 				}
 
-				// Reorder parts for 'model' role to ensure thinking block is first
+				// Reorder parts for 'model' role:
+				// 1. Thinking parts first (Antigravity API requirement)
+				// 2. Regular parts (text, inlineData, etc.)
+				// 3. FunctionCall parts last
+				//
+				// Moving functionCall parts to the end prevents tool_use↔tool_result
+				// pairing breakage: the Antigravity API internally splits model messages
+				// at functionCall boundaries. If a text part follows a functionCall, the
+				// split creates an extra assistant turn between tool_use and tool_result,
+				// which Claude rejects with "tool_use ids were found without tool_result
+				// blocks immediately after".
 				if role == "model" {
 					partsResult := gjson.GetBytes(clientContentJSON, "parts")
 					if partsResult.IsArray() {
 						parts := partsResult.Array()
-						var thinkingParts []gjson.Result
-						var otherParts []gjson.Result
-						for _, part := range parts {
-							if part.Get("thought").Bool() {
-								thinkingParts = append(thinkingParts, part)
-							} else {
-								otherParts = append(otherParts, part)
-							}
-						}
-						if len(thinkingParts) > 0 {
-							firstPartIsThinking := parts[0].Get("thought").Bool()
-							if !firstPartIsThinking || len(thinkingParts) > 1 {
-								var newParts []interface{}
-								for _, p := range thinkingParts {
-									newParts = append(newParts, p.Value())
+						if len(parts) > 1 {
+							var thinkingParts []gjson.Result
+							var regularParts []gjson.Result
+							var functionCallParts []gjson.Result
+							for _, part := range parts {
+								if part.Get("thought").Bool() {
+									thinkingParts = append(thinkingParts, part)
+								} else if part.Get("functionCall").Exists() {
+									functionCallParts = append(functionCallParts, part)
+								} else {
+									regularParts = append(regularParts, part)
 								}
-								for _, p := range otherParts {
-									newParts = append(newParts, p.Value())
-								}
-								clientContentJSON, _ = sjson.SetBytes(clientContentJSON, "parts", newParts)
 							}
+							var newParts []interface{}
+							for _, p := range thinkingParts {
+								newParts = append(newParts, p.Value())
+							}
+							for _, p := range regularParts {
+								newParts = append(newParts, p.Value())
+							}
+							for _, p := range functionCallParts {
+								newParts = append(newParts, p.Value())
+							}
+							clientContentJSON, _ = sjson.SetBytes(clientContentJSON, "parts", newParts)
 						}
 					}
 				}
