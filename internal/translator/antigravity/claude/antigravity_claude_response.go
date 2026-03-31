@@ -9,6 +9,7 @@ package claude
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"fmt"
 	"strings"
 	"sync/atomic"
@@ -22,6 +23,33 @@ import (
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
+
+// decodeSignature decodes R... (2-layer Base64) to E... (1-layer Base64, Anthropic format).
+// Returns empty string if decoding fails (skip invalid signatures).
+func decodeSignature(signature string) string {
+	if signature == "" {
+		return signature
+	}
+	if strings.HasPrefix(signature, "R") {
+		decoded, err := base64.StdEncoding.DecodeString(signature)
+		if err != nil {
+			log.Warnf("antigravity claude response: failed to decode signature, skipping")
+			return ""
+		}
+		return string(decoded)
+	}
+	return signature
+}
+
+func formatClaudeSignatureValue(modelName, signature string) string {
+	if cache.SignatureCacheEnabled() {
+		return fmt.Sprintf("%s#%s", cache.GetModelGroup(modelName), signature)
+	}
+	if cache.GetModelGroup(modelName) == "claude" {
+		return decodeSignature(signature)
+	}
+	return signature
+}
 
 // Params holds parameters for response conversion and maintains state across streaming chunks.
 // This structure tracks the current state of the response translation process to ensure
@@ -144,13 +172,30 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 					if thoughtSignature := partResult.Get("thoughtSignature"); thoughtSignature.Exists() && thoughtSignature.String() != "" {
 						// log.Debug("Branch: signature_delta")
 
+						// Flush co-located text before emitting the signature
+						if partText := partTextResult.String(); partText != "" {
+							if params.ResponseType != 2 {
+								if params.ResponseType != 0 {
+									appendEvent("content_block_stop", fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, params.ResponseIndex))
+									params.ResponseIndex++
+								}
+								appendEvent("content_block_start", fmt.Sprintf(`{"type":"content_block_start","index":%d,"content_block":{"type":"thinking","thinking":""}}`, params.ResponseIndex))
+								params.ResponseType = 2
+								params.CurrentThinkingText.Reset()
+							}
+							params.CurrentThinkingText.WriteString(partText)
+							data, _ := sjson.SetBytes([]byte(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"thinking_delta","thinking":""}}`, params.ResponseIndex)), "delta.thinking", partText)
+							appendEvent("content_block_delta", string(data))
+						}
+
 						if params.CurrentThinkingText.Len() > 0 {
 							cache.CacheSignature(modelName, params.CurrentThinkingText.String(), thoughtSignature.String())
 							// log.Debugf("Cached signature for thinking block (textLen=%d)", params.CurrentThinkingText.Len())
 							params.CurrentThinkingText.Reset()
 						}
 
-						data, _ := sjson.SetBytes([]byte(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"signature_delta","signature":""}}`, params.ResponseIndex)), "delta.signature", fmt.Sprintf("%s#%s", cache.GetModelGroup(modelName), thoughtSignature.String()))
+						sigValue := formatClaudeSignatureValue(modelName, thoughtSignature.String())
+						data, _ := sjson.SetBytes([]byte(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"signature_delta","signature":""}}`, params.ResponseIndex)), "delta.signature", sigValue)
 						appendEvent("content_block_delta", string(data))
 						params.HasContent = true
 					} else if params.ResponseType == 2 { // Continue existing thinking block if already in thinking state
@@ -419,7 +464,8 @@ func ConvertAntigravityResponseToClaudeNonStream(_ context.Context, _ string, or
 		block := []byte(`{"type":"thinking","thinking":""}`)
 		block, _ = sjson.SetBytes(block, "thinking", thinkingBuilder.String())
 		if thinkingSignature != "" {
-			block, _ = sjson.SetBytes(block, "signature", fmt.Sprintf("%s#%s", cache.GetModelGroup(modelName), thinkingSignature))
+			sigValue := formatClaudeSignatureValue(modelName, thinkingSignature)
+			block, _ = sjson.SetBytes(block, "signature", sigValue)
 		}
 		responseJSON, _ = sjson.SetRawBytes(responseJSON, "content.-1", block)
 		thinkingBuilder.Reset()
