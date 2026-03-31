@@ -190,7 +190,7 @@ func TestApplyCodexWebsocketHeadersAuthFileUserAgentOverridesExistingClientAndCo
 	}
 }
 
-func TestApplyCodexWebsocketHeadersIgnoresConfigForAPIKeyAuth(t *testing.T) {
+func TestApplyCodexWebsocketHeadersUsesConfigUserAgentForAPIKeyAuth(t *testing.T) {
 	cfg := &config.Config{
 		CodexHeaderDefaults: config.CodexHeaderDefaults{
 			UserAgent:    "config-ua",
@@ -204,8 +204,8 @@ func TestApplyCodexWebsocketHeadersIgnoresConfigForAPIKeyAuth(t *testing.T) {
 
 	headers := applyCodexWebsocketHeaders(context.Background(), http.Header{}, auth, "sk-test", cfg)
 
-	if got := headers.Get("User-Agent"); got != codexUserAgent {
-		t.Fatalf("User-Agent = %s, want %s", got, codexUserAgent)
+	if got := headers.Get("User-Agent"); got != "config-ua" {
+		t.Fatalf("User-Agent = %s, want %s", got, "config-ua")
 	}
 	if got := headers.Get("x-codex-beta-features"); got != "" {
 		t.Fatalf("x-codex-beta-features = %q, want empty", got)
@@ -300,6 +300,31 @@ func TestApplyCodexHeadersAuthFileUserAgentOverridesExistingClientAndConfig(t *t
 
 	if got := req.Header.Get("User-Agent"); got != "auth-file-ua" {
 		t.Fatalf("User-Agent = %s, want %s", got, "auth-file-ua")
+	}
+}
+
+func TestApplyCodexHeadersUsesConfigUserAgentForAPIKeyAuth(t *testing.T) {
+	req, err := http.NewRequest(http.MethodPost, "https://example.com/responses", nil)
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+
+	cfg := &config.Config{
+		CodexHeaderDefaults: config.CodexHeaderDefaults{
+			UserAgent: "config-ua",
+		},
+	}
+	auth := &cliproxyauth.Auth{
+		Provider: "codex",
+		Attributes: map[string]string{
+			"api_key": "sk-test",
+		},
+	}
+
+	applyCodexHeaders(req, auth, "sk-test", true, cfg)
+
+	if got := req.Header.Get("User-Agent"); got != "config-ua" {
+		t.Fatalf("User-Agent = %s, want %s", got, "config-ua")
 	}
 }
 

@@ -864,15 +864,19 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 }
 
 func codexHeaderDefaults(cfg *config.Config, auth *cliproxyauth.Auth) (string, string) {
-	if cfg == nil || auth == nil {
+	if cfg == nil {
 		return "", ""
+	}
+	userAgent := strings.TrimSpace(cfg.CodexHeaderDefaults.UserAgent)
+	if auth == nil {
+		return userAgent, ""
 	}
 	if auth.Attributes != nil {
 		if v := strings.TrimSpace(auth.Attributes["api_key"]); v != "" {
-			return "", ""
+			return userAgent, ""
 		}
 	}
-	return strings.TrimSpace(cfg.CodexHeaderDefaults.UserAgent), strings.TrimSpace(cfg.CodexHeaderDefaults.BetaFeatures)
+	return userAgent, strings.TrimSpace(cfg.CodexHeaderDefaults.BetaFeatures)
 }
 
 func ensureHeaderWithPriority(target http.Header, source http.Header, key, configValue, fallbackValue string) {

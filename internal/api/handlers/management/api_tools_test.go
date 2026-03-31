@@ -111,3 +111,90 @@ func TestAuthByIndexDistinguishesSharedAPIKeysAcrossProviders(t *testing.T) {
 		t.Fatalf("authByIndex(compat) returned %q, want %q", gotCompat.ID, compatAuth.ID)
 	}
 }
+
+func TestApplyAPICallDefaultHeadersUsesCodexConfigUserAgent(t *testing.T) {
+	t.Parallel()
+
+	h := &Handler{
+		cfg: &config.Config{
+			CodexHeaderDefaults: config.CodexHeaderDefaults{
+				UserAgent: "codex-config-ua",
+			},
+		},
+	}
+	headers := map[string]string{}
+
+	h.applyAPICallDefaultHeaders(headers, nil, "codex")
+
+	if got := headers["User-Agent"]; got != "codex-config-ua" {
+		t.Fatalf("User-Agent = %q, want %q", got, "codex-config-ua")
+	}
+}
+
+func TestApplyAPICallDefaultHeadersUsesAuthCodexUserAgentBeforeConfig(t *testing.T) {
+	t.Parallel()
+
+	h := &Handler{
+		cfg: &config.Config{
+			CodexHeaderDefaults: config.CodexHeaderDefaults{
+				UserAgent: "codex-config-ua",
+			},
+		},
+	}
+	headers := map[string]string{}
+	auth := &coreauth.Auth{
+		Provider: "codex",
+		Metadata: map[string]any{
+			"user_agent": "auth-file-ua",
+		},
+	}
+
+	h.applyAPICallDefaultHeaders(headers, auth, "")
+
+	if got := headers["User-Agent"]; got != "auth-file-ua" {
+		t.Fatalf("User-Agent = %q, want %q", got, "auth-file-ua")
+	}
+}
+
+func TestApplyAPICallDefaultHeadersUsesClaudeConfigUserAgent(t *testing.T) {
+	t.Parallel()
+
+	h := &Handler{
+		cfg: &config.Config{
+			ClaudeHeaderDefaults: config.ClaudeHeaderDefaults{
+				UserAgent: "claude-config-ua",
+			},
+		},
+	}
+	headers := map[string]string{}
+
+	h.applyAPICallDefaultHeaders(headers, nil, "claude")
+
+	if got := headers["User-Agent"]; got != "claude-config-ua" {
+		t.Fatalf("User-Agent = %q, want %q", got, "claude-config-ua")
+	}
+}
+
+func TestApplyAPICallDefaultHeadersKeepsExplicitUserAgent(t *testing.T) {
+	t.Parallel()
+
+	h := &Handler{
+		cfg: &config.Config{
+			CodexHeaderDefaults: config.CodexHeaderDefaults{
+				UserAgent: "codex-config-ua",
+			},
+		},
+	}
+	headers := map[string]string{
+		"user-agent": "explicit-ua",
+	}
+
+	h.applyAPICallDefaultHeaders(headers, nil, "codex")
+
+	if got := headers["user-agent"]; got != "explicit-ua" {
+		t.Fatalf("user-agent = %q, want %q", got, "explicit-ua")
+	}
+	if got := headers["User-Agent"]; got != "" {
+		t.Fatalf("User-Agent = %q, want empty", got)
+	}
+}
