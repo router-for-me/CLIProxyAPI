@@ -8,22 +8,33 @@
 
 ## CI/CD 流程
 
-### PR 阶段
-- `pr-test-build.yml`：PR 触发构建验证（go build）
+### PR 阶段（verify）
+- `pr-test-build.yml`：PR 触发 go build 验证
 - `pr-path-guard.yml`：禁止 PR 修改 `internal/translator/`
-- `security-scan.yml`：push/PR/每周一执行 govulncheck
 
-### Release 阶段
-- tag push (`v*`) 触发 release 流程
-- `release.yaml`：GoReleaser 发布二进制 + Docker 镜像（DockerHub + GHCR）
-- `docker-image.yml`：多架构 Docker 镜像构建（amd64 + arm64）
-- 支持 Simple Release（仅 x86_64 GHCR），通过 repo variable `SIMPLE_RELEASE=true` 或手动 dispatch
+### Release 阶段（tag push）
+- 在 main 分支上打 `v*` tag 触发 `docker-image.yml`
+- 构建多架构 Docker 镜像（amd64 + arm64）并推送到 DockerHub + GHCR
+- 三个 job：`docker_amd64` → `docker_arm64` → `docker_manifest`
 
 ### Docker 镜像
-- DockerHub：`chaosaiglobal/cli-proxy-api`（需配置 `DOCKERHUB_USERNAME` 和 `DOCKERHUB_TOKEN` secrets）
+- DockerHub：`chaosaiglobal/cli-proxy-api`
 - GHCR：`ghcr.io/chaosaiglobal/cli-proxy-api`
-- GoReleaser 使用 `Dockerfile.goreleaser`（轻量运行时镜像）
-- 本地构建使用 `Dockerfile`（多阶段编译）
+- 需要 repo secrets：`DOCKERHUB_USERNAME`、`DOCKERHUB_TOKEN`
+
+### 发布操作
+```bash
+# 1. 开发分支 → PR → merge 到 main
+git checkout -b feat/xxx main
+# ... 开发 ...
+git push -u origin feat/xxx
+gh pr create
+
+# 2. PR merge 后，在 main 上打 tag
+git checkout main && git pull
+git tag -a v1.0.0 -m "release notes"
+git push origin v1.0.0
+```
 
 ## 构建
 
@@ -32,7 +43,7 @@
 go build -o cli-proxy-api ./cmd/server/
 
 # Docker 构建
-docker compose -f deploy/docker-compose.yml build
+docker compose build
 
 # 需要先刷新 models catalog
 git fetch --depth 1 https://github.com/router-for-me/models.git main
