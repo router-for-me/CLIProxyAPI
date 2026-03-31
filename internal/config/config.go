@@ -62,6 +62,10 @@ type Config struct {
 	// When exceeded, the oldest error log files are deleted. Default is 10. Set to 0 to disable cleanup.
 	ErrorLogsMaxFiles int `yaml:"error-logs-max-files" json:"error-logs-max-files"`
 
+	// RequestLogRetentionDays controls how many days request log files are retained before
+	// automatic age-based cleanup. Default is 3. Set to 0 to disable age-based cleanup.
+	RequestLogRetentionDays int `yaml:"request-log-retention-days" json:"request-log-retention-days"`
+
 	// UsageStatisticsEnabled toggles in-memory usage aggregation; when false, usage data is discarded.
 	UsageStatisticsEnabled bool `yaml:"usage-statistics-enabled" json:"usage-statistics-enabled"`
 
@@ -199,8 +203,12 @@ type QuotaExceeded struct {
 // RoutingConfig configures how credentials are selected for requests.
 type RoutingConfig struct {
 	// Strategy selects the credential selection strategy.
-	// Supported values: "round-robin" (default), "fill-first".
+	// Supported values: "round-robin" (default), "fill-first", "sticky".
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
+
+	// StickyLRUSize sets the LRU cache capacity for sticky routing.
+	// Each entry maps a session/trace key to an auth ID. Default is 1024.
+	StickyLRUSize int `yaml:"sticky-lru-size,omitempty" json:"sticky-lru-size,omitempty"`
 }
 
 // OAuthModelAlias defines a model ID alias for a specific channel.

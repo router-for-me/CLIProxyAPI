@@ -633,6 +633,8 @@ func (s *Service) Run(ctx context.Context) error {
 			switch strategy {
 			case "fill-first", "fillfirst", "ff":
 				return "fill-first"
+			case "sticky":
+				return "sticky"
 			default:
 				return "round-robin"
 			}
@@ -644,6 +646,12 @@ func (s *Service) Run(ctx context.Context) error {
 			switch nextStrategy {
 			case "fill-first":
 				selector = &coreauth.FillFirstSelector{}
+			case "sticky":
+				lruSize := 0
+				if newCfg != nil {
+					lruSize = newCfg.Routing.StickyLRUSize
+				}
+				selector = coreauth.NewStickySelector(lruSize, nil)
 			default:
 				selector = &coreauth.RoundRobinSelector{}
 			}

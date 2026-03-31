@@ -28,7 +28,8 @@ max-retry-interval: 30
 
 # 负载均衡
 routing:
-  strategy: "round-robin"
+  strategy: "round-robin"  # round-robin, fill-first, sticky
+  # sticky-lru-size: 1024  # sticky 模式下 LRU 缓存大小
 
 # Quota 超限自动切换
 quota-exceeded:

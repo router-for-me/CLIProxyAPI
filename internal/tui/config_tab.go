@@ -341,6 +341,7 @@ func (m configTabModel) parseConfig(cfg map[string]any) []configField {
 	fields = append(fields, configField{"Error Logs Max Files", "error-logs-max-files", "int", fmt.Sprintf("%.0f", getFloat(cfg, "error-logs-max-files")), nil})
 	fields = append(fields, configField{"Usage Stats Enabled", "usage-statistics-enabled", "bool", fmt.Sprintf("%v", getBool(cfg, "usage-statistics-enabled")), nil})
 	fields = append(fields, configField{"Request Log", "request-log", "bool", fmt.Sprintf("%v", getBool(cfg, "request-log")), nil})
+	fields = append(fields, configField{"Request Log Retention Days", "request-log-retention-days", "int", fmt.Sprintf("%.0f", getFloat(cfg, "request-log-retention-days")), nil})
 
 	// Quota exceeded
 	fields = append(fields, configField{"Switch Project on Quota", "quota-exceeded/switch-project", "bool", fmt.Sprintf("%v", getBoolNested(cfg, "quota-exceeded", "switch-project")), nil})
@@ -349,8 +350,10 @@ func (m configTabModel) parseConfig(cfg map[string]any) []configField {
 	// Routing
 	if routing, ok := cfg["routing"].(map[string]any); ok {
 		fields = append(fields, configField{"Routing Strategy", "routing/strategy", "string", getString(routing, "strategy"), nil})
+		fields = append(fields, configField{"Sticky LRU Size", "routing/sticky-lru-size", "int", fmt.Sprintf("%.0f", getFloat(routing, "sticky-lru-size")), nil})
 	} else {
 		fields = append(fields, configField{"Routing Strategy", "routing/strategy", "string", "", nil})
+		fields = append(fields, configField{"Sticky LRU Size", "routing/sticky-lru-size", "int", "0", nil})
 	}
 
 	// WebSocket auth
@@ -381,7 +384,7 @@ func fieldSection(apiPath string) string {
 	switch apiPath {
 	case "port", "host", "debug", "proxy-url", "request-retry", "max-retry-interval", "force-model-prefix":
 		return T("section_server")
-	case "logging-to-file", "logs-max-total-size-mb", "error-logs-max-files", "usage-statistics-enabled", "request-log":
+	case "logging-to-file", "logs-max-total-size-mb", "error-logs-max-files", "usage-statistics-enabled", "request-log", "request-log-retention-days":
 		return T("section_logging")
 	case "ws-auth":
 		return T("section_websocket")
