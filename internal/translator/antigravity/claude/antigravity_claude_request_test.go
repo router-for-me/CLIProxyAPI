@@ -1,12 +1,96 @@
 package claude
 
 import (
+	"bytes"
+	"encoding/base64"
 	"strings"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/cache"
 	"github.com/tidwall/gjson"
+	"google.golang.org/protobuf/encoding/protowire"
 )
+
+func testAnthropicNativeSignature(t *testing.T) string {
+	t.Helper()
+
+	payload := buildClaudeSignaturePayload(t, 12, uint64Ptr(2), "claude-sonnet-4-6", true)
+	signature := base64.StdEncoding.EncodeToString(payload)
+	if len(signature) < cache.MinValidSignatureLen {
+		t.Fatalf("test signature too short: %d", len(signature))
+	}
+	return signature
+}
+
+func testMinimalAnthropicSignature(t *testing.T) string {
+	t.Helper()
+
+	payload := buildClaudeSignaturePayload(t, 12, nil, "", false)
+	return base64.StdEncoding.EncodeToString(payload)
+}
+
+func buildClaudeSignaturePayload(t *testing.T, channelID uint64, field2 *uint64, modelText string, includeField7 bool) []byte {
+	t.Helper()
+
+	channelBlock := []byte{}
+	channelBlock = protowire.AppendTag(channelBlock, 1, protowire.VarintType)
+	channelBlock = protowire.AppendVarint(channelBlock, channelID)
+	if field2 != nil {
+		channelBlock = protowire.AppendTag(channelBlock, 2, protowire.VarintType)
+		channelBlock = protowire.AppendVarint(channelBlock, *field2)
+	}
+	if modelText != "" {
+		channelBlock = protowire.AppendTag(channelBlock, 6, protowire.BytesType)
+		channelBlock = protowire.AppendString(channelBlock, modelText)
+	}
+	if includeField7 {
+		channelBlock = protowire.AppendTag(channelBlock, 7, protowire.VarintType)
+		channelBlock = protowire.AppendVarint(channelBlock, 0)
+	}
+
+	container := []byte{}
+	container = protowire.AppendTag(container, 1, protowire.BytesType)
+	container = protowire.AppendBytes(container, channelBlock)
+	container = protowire.AppendTag(container, 2, protowire.BytesType)
+	container = protowire.AppendBytes(container, bytes.Repeat([]byte{0x11}, 12))
+	container = protowire.AppendTag(container, 3, protowire.BytesType)
+	container = protowire.AppendBytes(container, bytes.Repeat([]byte{0x22}, 12))
+	container = protowire.AppendTag(container, 4, protowire.BytesType)
+	container = protowire.AppendBytes(container, bytes.Repeat([]byte{0x33}, 48))
+
+	payload := []byte{}
+	payload = protowire.AppendTag(payload, 2, protowire.BytesType)
+	payload = protowire.AppendBytes(payload, container)
+	payload = protowire.AppendTag(payload, 3, protowire.VarintType)
+	payload = protowire.AppendVarint(payload, 1)
+	return payload
+}
+
+func uint64Ptr(v uint64) *uint64 {
+	return &v
+}
+
+func testNonAnthropicRawSignature(t *testing.T) string {
+	t.Helper()
+
+	payload := bytes.Repeat([]byte{0x34}, 48)
+	signature := base64.StdEncoding.EncodeToString(payload)
+	if len(signature) < cache.MinValidSignatureLen {
+		t.Fatalf("test signature too short: %d", len(signature))
+	}
+	return signature
+}
+
+func testGeminiRawSignature(t *testing.T) string {
+	t.Helper()
+
+	payload := append([]byte{0x0A}, bytes.Repeat([]byte{0x56}, 48)...)
+	signature := base64.StdEncoding.EncodeToString(payload)
+	if len(signature) < cache.MinValidSignatureLen {
+		t.Fatalf("test signature too short: %d", len(signature))
+	}
+	return signature
+}
 
 func TestConvertClaudeRequestToAntigravity_BasicStructure(t *testing.T) {
 	inputJSON := []byte(`{
@@ -113,6 +197,545 @@ func TestConvertClaudeRequestToAntigravity_ThinkingBlocks(t *testing.T) {
 	}
 	if firstPart.Get("thoughtSignature").String() != validSignature {
 		t.Errorf("Expected thoughtSignature '%s', got '%s'", validSignature, firstPart.Get("thoughtSignature").String())
+	}
+}
+
+func TestValidateBypassMode_AcceptsClaudeSingleAndDoubleLayer(t *testing.T) {
+	rawSignature := testAnthropicNativeSignature(t)
+	doubleEncoded := base64.StdEncoding.EncodeToString([]byte(rawSignature))
+
+	inputJSON := []byte(`{
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "thinking", "thinking": "one", "signature": "` + rawSignature + `"},
+					{"type": "thinking", "thinking": "two", "signature": "claude#` + doubleEncoded + `"}
+				]
+			}
+		]
+	}`)
+
+	if err := ValidateClaudeBypassSignatures(inputJSON); err != nil {
+		t.Fatalf("ValidateBypassModeSignatures returned error: %v", err)
+	}
+}
+
+func TestValidateBypassMode_RejectsGeminiSignature(t *testing.T) {
+	inputJSON := []byte(`{
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "thinking", "thinking": "one", "signature": "` + testGeminiRawSignature(t) + `"}
+				]
+			}
+		]
+	}`)
+
+	err := ValidateClaudeBypassSignatures(inputJSON)
+	if err == nil {
+		t.Fatal("expected Gemini signature to be rejected")
+	}
+}
+
+func TestValidateBypassMode_RejectsMissingSignature(t *testing.T) {
+	inputJSON := []byte(`{
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "thinking", "thinking": "one"}
+				]
+			}
+		]
+	}`)
+
+	err := ValidateClaudeBypassSignatures(inputJSON)
+	if err == nil {
+		t.Fatal("expected missing signature to be rejected")
+	}
+	if !strings.Contains(err.Error(), "missing thinking signature") {
+		t.Fatalf("expected missing signature message, got: %v", err)
+	}
+}
+
+func TestValidateBypassMode_RejectsNonREPrefix(t *testing.T) {
+	inputJSON := []byte(`{
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "thinking", "thinking": "one", "signature": "` + testNonAnthropicRawSignature(t) + `"}
+				]
+			}
+		]
+	}`)
+
+	err := ValidateClaudeBypassSignatures(inputJSON)
+	if err == nil {
+		t.Fatal("expected non-R/E signature to be rejected")
+	}
+}
+
+func TestValidateBypassMode_RejectsEPrefixWrongFirstByte(t *testing.T) {
+	t.Parallel()
+	payload := append([]byte{0x10}, bytes.Repeat([]byte{0x34}, 48)...)
+	sig := base64.StdEncoding.EncodeToString(payload)
+	if sig[0] != 'E' {
+		t.Fatalf("test setup: expected E prefix, got %c", sig[0])
+	}
+
+	inputJSON := []byte(`{
+		"messages": [{"role": "assistant", "content": [
+			{"type": "thinking", "thinking": "t", "signature": "` + sig + `"}
+		]}]
+	}`)
+
+	err := ValidateClaudeBypassSignatures(inputJSON)
+	if err == nil {
+		t.Fatal("expected E-prefix with wrong first byte (0x10) to be rejected")
+	}
+	if !strings.Contains(err.Error(), "0x10") {
+		t.Fatalf("expected error to mention 0x10, got: %v", err)
+	}
+}
+
+func TestValidateBypassMode_RejectsTopLevel12WithoutClaudeTree(t *testing.T) {
+	previous := cache.SignatureBypassStrictMode()
+	cache.SetSignatureBypassStrictMode(true)
+	t.Cleanup(func() {
+		cache.SetSignatureBypassStrictMode(previous)
+	})
+
+	payload := append([]byte{0x12}, bytes.Repeat([]byte{0x34}, 48)...)
+	sig := base64.StdEncoding.EncodeToString(payload)
+
+	inputJSON := []byte(`{
+		"messages": [{"role": "assistant", "content": [
+			{"type": "thinking", "thinking": "t", "signature": "` + sig + `"}
+		]}]
+	}`)
+
+	err := ValidateClaudeBypassSignatures(inputJSON)
+	if err == nil {
+		t.Fatal("expected non-Claude protobuf tree to be rejected in strict mode")
+	}
+	if !strings.Contains(err.Error(), "malformed protobuf") && !strings.Contains(err.Error(), "Field 2") {
+		t.Fatalf("expected protobuf tree error, got: %v", err)
+	}
+}
+
+func TestValidateBypassMode_NonStrictAccepts12WithoutClaudeTree(t *testing.T) {
+	previous := cache.SignatureBypassStrictMode()
+	cache.SetSignatureBypassStrictMode(false)
+	t.Cleanup(func() {
+		cache.SetSignatureBypassStrictMode(previous)
+	})
+
+	payload := append([]byte{0x12}, bytes.Repeat([]byte{0x34}, 48)...)
+	sig := base64.StdEncoding.EncodeToString(payload)
+
+	inputJSON := []byte(`{
+		"messages": [{"role": "assistant", "content": [
+			{"type": "thinking", "thinking": "t", "signature": "` + sig + `"}
+		]}]
+	}`)
+
+	err := ValidateClaudeBypassSignatures(inputJSON)
+	if err != nil {
+		t.Fatalf("non-strict mode should accept 0x12 without protobuf tree, got: %v", err)
+	}
+}
+
+func TestValidateBypassMode_RejectsRPrefixInnerNotE(t *testing.T) {
+	t.Parallel()
+	inner := "F" + strings.Repeat("a", 60)
+	outer := base64.StdEncoding.EncodeToString([]byte(inner))
+	if outer[0] != 'R' {
+		t.Fatalf("test setup: expected R prefix, got %c", outer[0])
+	}
+
+	inputJSON := []byte(`{
+		"messages": [{"role": "assistant", "content": [
+			{"type": "thinking", "thinking": "t", "signature": "` + outer + `"}
+		]}]
+	}`)
+
+	err := ValidateClaudeBypassSignatures(inputJSON)
+	if err == nil {
+		t.Fatal("expected R-prefix with non-E inner to be rejected")
+	}
+}
+
+func TestValidateBypassMode_RejectsInvalidBase64(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		sig  string
+	}{
+		{"E invalid", "E!!!invalid!!!"},
+		{"R invalid", "R$$$invalid$$$"},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			inputJSON := []byte(`{
+				"messages": [{"role": "assistant", "content": [
+					{"type": "thinking", "thinking": "t", "signature": "` + tt.sig + `"}
+				]}]
+			}`)
+			err := ValidateClaudeBypassSignatures(inputJSON)
+			if err == nil {
+				t.Fatal("expected invalid base64 to be rejected")
+			}
+			if !strings.Contains(err.Error(), "base64") {
+				t.Fatalf("expected base64 error, got: %v", err)
+			}
+		})
+	}
+}
+
+func TestValidateBypassMode_RejectsPrefixStrippedToEmpty(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		sig  string
+	}{
+		{"prefix only", "claude#"},
+		{"prefix with spaces", "claude#   "},
+		{"hash only", "#"},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			inputJSON := []byte(`{
+				"messages": [{"role": "assistant", "content": [
+					{"type": "thinking", "thinking": "t", "signature": "` + tt.sig + `"}
+				]}]
+			}`)
+			err := ValidateClaudeBypassSignatures(inputJSON)
+			if err == nil {
+				t.Fatal("expected prefix-only signature to be rejected")
+			}
+		})
+	}
+}
+
+func TestValidateBypassMode_HandlesMultipleHashMarks(t *testing.T) {
+	t.Parallel()
+	rawSignature := testAnthropicNativeSignature(t)
+	sig := "claude#" + rawSignature + "#extra"
+
+	inputJSON := []byte(`{
+		"messages": [{"role": "assistant", "content": [
+			{"type": "thinking", "thinking": "t", "signature": "` + sig + `"}
+		]}]
+	}`)
+
+	err := ValidateClaudeBypassSignatures(inputJSON)
+	if err == nil {
+		t.Fatal("expected signature with trailing # to be rejected (invalid base64)")
+	}
+}
+
+func TestValidateBypassMode_HandlesWhitespace(t *testing.T) {
+	t.Parallel()
+	rawSignature := testAnthropicNativeSignature(t)
+	tests := []struct {
+		name string
+		sig  string
+	}{
+		{"leading space", " " + rawSignature},
+		{"trailing space", rawSignature + " "},
+		{"both spaces", " " + rawSignature + " "},
+		{"leading tab", "\t" + rawSignature},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			inputJSON := []byte(`{
+				"messages": [{"role": "assistant", "content": [
+					{"type": "thinking", "thinking": "t", "signature": "` + tt.sig + `"}
+				]}]
+			}`)
+			if err := ValidateClaudeBypassSignatures(inputJSON); err != nil {
+				t.Fatalf("expected whitespace-padded signature to be accepted, got: %v", err)
+			}
+		})
+	}
+}
+
+func TestValidateBypassMode_RejectsOversizedSignature(t *testing.T) {
+	t.Parallel()
+	payload := append([]byte{0x12}, bytes.Repeat([]byte{0x34}, maxBypassSignatureLen)...)
+	sig := base64.StdEncoding.EncodeToString(payload)
+	if len(sig) <= maxBypassSignatureLen {
+		t.Fatalf("test setup: signature should exceed max length, got %d", len(sig))
+	}
+
+	inputJSON := []byte(`{
+		"messages": [{"role": "assistant", "content": [
+			{"type": "thinking", "thinking": "t", "signature": "` + sig + `"}
+		]}]
+	}`)
+
+	err := ValidateClaudeBypassSignatures(inputJSON)
+	if err == nil {
+		t.Fatal("expected oversized signature to be rejected")
+	}
+	if !strings.Contains(err.Error(), "maximum length") {
+		t.Fatalf("expected length error, got: %v", err)
+	}
+}
+
+func TestResolveBypassModeSignature_TrimsWhitespace(t *testing.T) {
+	previous := cache.SignatureCacheEnabled()
+	cache.SetSignatureCacheEnabled(false)
+	t.Cleanup(func() {
+		cache.SetSignatureCacheEnabled(previous)
+	})
+
+	rawSignature := testAnthropicNativeSignature(t)
+	expected := resolveBypassModeSignature(rawSignature)
+	if expected == "" {
+		t.Fatal("test setup: expected non-empty normalized signature")
+	}
+
+	got := resolveBypassModeSignature(rawSignature + "  ")
+	if got != expected {
+		t.Fatalf("expected trailing whitespace to be trimmed:\n  got:  %q\n  want: %q", got, expected)
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_BypassModeNormalizesESignature(t *testing.T) {
+	cache.ClearSignatureCache("")
+	previous := cache.SignatureCacheEnabled()
+	cache.SetSignatureCacheEnabled(false)
+	t.Cleanup(func() {
+		cache.SetSignatureCacheEnabled(previous)
+		cache.ClearSignatureCache("")
+	})
+
+	thinkingText := "Let me think..."
+	cachedSignature := "cachedSignature1234567890123456789012345678901234567890123"
+	rawSignature := testAnthropicNativeSignature(t)
+	expectedSignature := base64.StdEncoding.EncodeToString([]byte(rawSignature))
+
+	cache.CacheSignature("claude-sonnet-4-5-thinking", thinkingText, cachedSignature)
+
+	inputJSON := []byte(`{
+		"model": "claude-sonnet-4-5-thinking",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "thinking", "thinking": "` + thinkingText + `", "signature": "` + rawSignature + `"},
+					{"type": "text", "text": "Answer"}
+				]
+			}
+		]
+	}`)
+
+	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5-thinking", inputJSON, false)
+	outputStr := string(output)
+
+	part := gjson.Get(outputStr, "request.contents.0.parts.0")
+	if part.Get("thoughtSignature").String() != expectedSignature {
+		t.Fatalf("Expected bypass-mode signature '%s', got '%s'", expectedSignature, part.Get("thoughtSignature").String())
+	}
+	if part.Get("thoughtSignature").String() == cachedSignature {
+		t.Fatal("Bypass mode should not reuse cached signature")
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_BypassModePreservesShortValidSignature(t *testing.T) {
+	cache.ClearSignatureCache("")
+	previous := cache.SignatureCacheEnabled()
+	cache.SetSignatureCacheEnabled(false)
+	t.Cleanup(func() {
+		cache.SetSignatureCacheEnabled(previous)
+		cache.ClearSignatureCache("")
+	})
+
+	rawSignature := testMinimalAnthropicSignature(t)
+	expectedSignature := base64.StdEncoding.EncodeToString([]byte(rawSignature))
+	inputJSON := []byte(`{
+		"model": "claude-sonnet-4-5-thinking",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "thinking", "thinking": "tiny", "signature": "` + rawSignature + `"},
+					{"type": "text", "text": "Answer"}
+				]
+			}
+		]
+	}`)
+
+	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5-thinking", inputJSON, false)
+	parts := gjson.GetBytes(output, "request.contents.0.parts").Array()
+	if len(parts) != 2 {
+		t.Fatalf("expected thinking part to be preserved in bypass mode, got %d parts", len(parts))
+	}
+	if parts[0].Get("thoughtSignature").String() != expectedSignature {
+		t.Fatalf("expected normalized short signature %q, got %q", expectedSignature, parts[0].Get("thoughtSignature").String())
+	}
+	if !parts[0].Get("thought").Bool() {
+		t.Fatalf("expected first part to remain a thought block, got %s", parts[0].Raw)
+	}
+	if parts[1].Get("text").String() != "Answer" {
+		t.Fatalf("expected trailing text part, got %s", parts[1].Raw)
+	}
+	if thoughtSig := gjson.GetBytes(output, "request.contents.0.parts.1.thoughtSignature").String(); thoughtSig != "" {
+		t.Fatalf("expected plain text part to have no thought signature, got %q", thoughtSig)
+	}
+	if functionSig := gjson.GetBytes(output, "request.contents.0.parts.0.functionCall.thoughtSignature").String(); functionSig != "" {
+		t.Fatalf("unexpected functionCall payload in thinking part: %q", functionSig)
+	}
+}
+
+func TestInspectClaudeSignaturePayload_ExtractsSpecTree(t *testing.T) {
+	t.Parallel()
+	payload := buildClaudeSignaturePayload(t, 12, uint64Ptr(2), "claude-sonnet-4-6", true)
+
+	tree, err := inspectClaudeSignaturePayload(payload, 1)
+	if err != nil {
+		t.Fatalf("expected structured Claude payload to parse, got: %v", err)
+	}
+	if tree.RoutingClass != "routing_class_12" {
+		t.Fatalf("routing_class = %q, want routing_class_12", tree.RoutingClass)
+	}
+	if tree.InfrastructureClass != "infra_google" {
+		t.Fatalf("infrastructure_class = %q, want infra_google", tree.InfrastructureClass)
+	}
+	if tree.SchemaFeatures != "extended_model_tagged_schema" {
+		t.Fatalf("schema_features = %q, want extended_model_tagged_schema", tree.SchemaFeatures)
+	}
+	if tree.ModelText != "claude-sonnet-4-6" {
+		t.Fatalf("model_text = %q, want claude-sonnet-4-6", tree.ModelText)
+	}
+}
+
+func TestInspectDoubleLayerSignature_TracksEncodingLayers(t *testing.T) {
+	t.Parallel()
+	inner := base64.StdEncoding.EncodeToString(buildClaudeSignaturePayload(t, 11, uint64Ptr(2), "", false))
+	outer := base64.StdEncoding.EncodeToString([]byte(inner))
+
+	tree, err := inspectDoubleLayerSignature(outer)
+	if err != nil {
+		t.Fatalf("expected double-layer Claude signature to parse, got: %v", err)
+	}
+	if tree.EncodingLayers != 2 {
+		t.Fatalf("encoding_layers = %d, want 2", tree.EncodingLayers)
+	}
+	if tree.LegacyRouteHint != "legacy_vertex_direct" {
+		t.Fatalf("legacy_route_hint = %q, want legacy_vertex_direct", tree.LegacyRouteHint)
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_CacheModeDropsRawSignature(t *testing.T) {
+	cache.ClearSignatureCache("")
+	previous := cache.SignatureCacheEnabled()
+	cache.SetSignatureCacheEnabled(true)
+	t.Cleanup(func() {
+		cache.SetSignatureCacheEnabled(previous)
+		cache.ClearSignatureCache("")
+	})
+
+	rawSignature := testAnthropicNativeSignature(t)
+	inputJSON := []byte(`{
+		"model": "claude-sonnet-4-5-thinking",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "thinking", "thinking": "Let me think...", "signature": "` + rawSignature + `"},
+					{"type": "text", "text": "Answer"}
+				]
+			}
+		]
+	}`)
+
+	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5-thinking", inputJSON, false)
+	parts := gjson.GetBytes(output, "request.contents.0.parts").Array()
+	if len(parts) != 1 {
+		t.Fatalf("Expected raw signature thinking block to be dropped in cache mode, got %d parts", len(parts))
+	}
+	if parts[0].Get("text").String() != "Answer" {
+		t.Fatalf("Expected remaining text part, got %s", parts[0].Raw)
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_BypassModeDropsInvalidSignature(t *testing.T) {
+	cache.ClearSignatureCache("")
+	previous := cache.SignatureCacheEnabled()
+	cache.SetSignatureCacheEnabled(false)
+	t.Cleanup(func() {
+		cache.SetSignatureCacheEnabled(previous)
+		cache.ClearSignatureCache("")
+	})
+
+	invalidRawSignature := testNonAnthropicRawSignature(t)
+	inputJSON := []byte(`{
+		"model": "claude-sonnet-4-5-thinking",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "thinking", "thinking": "Let me think...", "signature": "` + invalidRawSignature + `"},
+					{"type": "text", "text": "Answer"}
+				]
+			}
+		]
+	}`)
+
+	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5-thinking", inputJSON, false)
+	outputStr := string(output)
+
+	parts := gjson.Get(outputStr, "request.contents.0.parts").Array()
+	if len(parts) != 1 {
+		t.Fatalf("Expected invalid thinking block to be removed, got %d parts", len(parts))
+	}
+	if parts[0].Get("text").String() != "Answer" {
+		t.Fatalf("Expected remaining text part, got %s", parts[0].Raw)
+	}
+	if parts[0].Get("thought").Bool() {
+		t.Fatal("Invalid raw signature should not preserve thinking block")
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_BypassModeDropsGeminiSignature(t *testing.T) {
+	cache.ClearSignatureCache("")
+	previous := cache.SignatureCacheEnabled()
+	cache.SetSignatureCacheEnabled(false)
+	t.Cleanup(func() {
+		cache.SetSignatureCacheEnabled(previous)
+		cache.ClearSignatureCache("")
+	})
+
+	geminiPayload := append([]byte{0x0A}, bytes.Repeat([]byte{0x56}, 48)...)
+	geminiSig := base64.StdEncoding.EncodeToString(geminiPayload)
+	inputJSON := []byte(`{
+		"model": "claude-sonnet-4-5-thinking",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "thinking", "thinking": "hmm", "signature": "` + geminiSig + `"},
+					{"type": "text", "text": "Answer"}
+				]
+			}
+		]
+	}`)
+
+	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5-thinking", inputJSON, false)
+	parts := gjson.GetBytes(output, "request.contents.0.parts").Array()
+	if len(parts) != 1 {
+		t.Fatalf("expected Gemini-signed thinking block to be dropped, got %d parts", len(parts))
+	}
+	if parts[0].Get("text").String() != "Answer" {
+		t.Fatalf("expected remaining text part, got %s", parts[0].Raw)
 	}
 }
 
