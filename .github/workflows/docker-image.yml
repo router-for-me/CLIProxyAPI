@@ -3,7 +3,13 @@ name: docker-image
 on:
   push:
     tags:
-      - v*
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build (e.g., v1.0.0)'
+        required: true
+        type: string
 
 env:
   APP_NAME: CLIProxyAPI
@@ -37,7 +43,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Generate Build Metadata
         run: |
-          echo "VERSION=${GITHUB_REF_NAME}" >> $GITHUB_ENV
+          echo "VERSION=${{ inputs.tag || github.ref_name }}" >> $GITHUB_ENV
           echo "COMMIT=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
           echo "BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $GITHUB_ENV
           echo "OWNER_LOWER=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
@@ -84,7 +90,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Generate Build Metadata
         run: |
-          echo "VERSION=${GITHUB_REF_NAME}" >> $GITHUB_ENV
+          echo "VERSION=${{ inputs.tag || github.ref_name }}" >> $GITHUB_ENV
           echo "COMMIT=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
           echo "BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $GITHUB_ENV
           echo "OWNER_LOWER=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
@@ -130,7 +136,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Generate Build Metadata
         run: |
-          echo "VERSION=${GITHUB_REF_NAME}" >> $GITHUB_ENV
+          echo "VERSION=${{ inputs.tag || github.ref_name }}" >> $GITHUB_ENV
           echo "OWNER_LOWER=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
       - name: Create and push multi-arch manifests
         run: |
