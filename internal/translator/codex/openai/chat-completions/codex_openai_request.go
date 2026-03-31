@@ -128,7 +128,8 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 				funcOutput, _ = sjson.SetBytes(funcOutput, "type", "function_call_output")
 				funcOutput, _ = sjson.SetBytes(funcOutput, "call_id", toolCallID)
 
-				// Handle content: can be string or array (e.g., with image_url items)
+				// Handle content: can be string, array, or any other JSON value.
+				// Always set output to avoid dropping tool payloads for null/non-array content.
 				if content.Type == gjson.String {
 					funcOutput, _ = sjson.SetBytes(funcOutput, "output", content.String())
 				} else if content.IsArray() {
@@ -191,6 +192,12 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 						}
 					}
 					funcOutput, _ = sjson.SetRawBytes(funcOutput, "output", outputArr)
+				} else {
+					fallbackOutput := content.Raw
+					if fallbackOutput == "" {
+						fallbackOutput = content.String()
+					}
+					funcOutput, _ = sjson.SetBytes(funcOutput, "output", fallbackOutput)
 				}
 
 				out, _ = sjson.SetRawBytes(out, "input.-1", funcOutput)

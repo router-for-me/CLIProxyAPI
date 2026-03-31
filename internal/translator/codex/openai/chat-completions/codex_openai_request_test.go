@@ -330,6 +330,70 @@ func TestToolCallOutputWithFileContent(t *testing.T) {
 	}
 }
 
+func TestToolCallOutputWithNullContent(t *testing.T) {
+	input := []byte(`{
+		"model": "gpt-4o",
+		"messages": [
+			{"role": "user", "content": "Test null tool output"},
+			{
+				"role": "assistant",
+				"content": null,
+				"tool_calls": [{"id": "call_null", "type": "function", "function": {"name": "test", "arguments": "{}"}}]
+			},
+			{
+				"role": "tool",
+				"tool_call_id": "call_null",
+				"content": null
+			}
+		],
+		"tools": [{"type": "function", "function": {"name": "test", "description": "Test", "parameters": {"type": "object", "properties": {}}}}]
+	}`)
+
+	out := ConvertOpenAIRequestToCodex("gpt-4o", input, true)
+	result := string(out)
+
+	items := gjson.Get(result, "input").Array()
+	output := items[2].Get("output")
+	if !output.Exists() {
+		t.Fatalf("expected output field to exist for null tool content: %s", items[2].Raw)
+	}
+	if output.String() != "null" {
+		t.Fatalf("expected null tool content to fall back to string 'null', got: %s", output.Raw)
+	}
+}
+
+func TestToolCallOutputWithObjectContent(t *testing.T) {
+	input := []byte(`{
+		"model": "gpt-4o",
+		"messages": [
+			{"role": "user", "content": "Test object tool output"},
+			{
+				"role": "assistant",
+				"content": null,
+				"tool_calls": [{"id": "call_obj", "type": "function", "function": {"name": "test", "arguments": "{}"}}]
+			},
+			{
+				"role": "tool",
+				"tool_call_id": "call_obj",
+				"content": {"status":"ok","count":2}
+			}
+		],
+		"tools": [{"type": "function", "function": {"name": "test", "description": "Test", "parameters": {"type": "object", "properties": {}}}}]
+	}`)
+
+	out := ConvertOpenAIRequestToCodex("gpt-4o", input, true)
+	result := string(out)
+
+	items := gjson.Get(result, "input").Array()
+	output := items[2].Get("output")
+	if !output.Exists() {
+		t.Fatalf("expected output field to exist for object tool content: %s", items[2].Raw)
+	}
+	if output.String() != `{"status":"ok","count":2}` {
+		t.Fatalf("expected object tool content to fall back to serialized JSON, got: %s", output.Raw)
+	}
+}
+
 func TestToolCallOutputWithUnknownType(t *testing.T) {
 	input := []byte(`{
 		"model": "gpt-4o",
