@@ -1,3 +1,50 @@
+// Claude thinking signature validation for Antigravity bypass mode.
+//
+// Spec reference: SIGNATURE-CHANNEL-SPEC.md
+//
+// # Encoding Detection (Spec §3)
+//
+// Claude signatures use base64 encoding in one or two layers. The raw string's
+// first character determines the encoding depth — this is mathematically equivalent
+// to the spec's "decode first, check byte" approach:
+//
+//   - 'E' prefix → single-layer: payload[0]==0x12, first 6 bits = 000100 = base64 index 4 = 'E'
+//   - 'R' prefix → double-layer: inner[0]=='E' (0x45), first 6 bits = 010001 = base64 index 17 = 'R'
+//
+// All valid signatures are normalized to R-form (double-layer base64) before
+// sending to the Antigravity backend.
+//
+// # Protobuf Structure (Spec §4.1, §4.2) — strict mode only
+//
+// After base64 decoding to raw bytes (first byte must be 0x12):
+//
+//	Top-level protobuf
+//	├── Field 2 (bytes): container                    ← extractBytesField(payload, 2)
+//	│   ├── Field 1 (bytes): channel block            ← extractBytesField(container, 1)
+//	│   │   ├── Field 1 (varint): channel_id [required] → routing_class (11 | 12)
+//	│   │   ├── Field 2 (varint): infra      [optional] → infrastructure_class (aws=1 | google=2)
+//	│   │   ├── Field 3 (varint): version=2  [skipped]
+//	│   │   ├── Field 5 (bytes):  ECDSA sig  [skipped, per Spec §11]
+//	│   │   ├── Field 6 (bytes):  model_text [optional] → schema_features
+//	│   │   └── Field 7 (varint): unknown    [optional] → schema_features
+//	│   ├── Field 2 (bytes): nonce 12B       [skipped]
+//	│   ├── Field 3 (bytes): session 12B     [skipped]
+//	│   ├── Field 4 (bytes): SHA-384 48B     [skipped]
+//	│   └── Field 5 (bytes): metadata        [skipped, per Spec §11]
+//	└── Field 3 (varint): =1                 [skipped]
+//
+// # Output Dimensions (Spec §8)
+//
+//	routing_class:        routing_class_11 | routing_class_12 | unknown
+//	infrastructure_class: infra_default (absent) | infra_aws (1) | infra_google (2) | infra_unknown
+//	schema_features:      compact_schema (len 70-72, no f6/f7) | extended_model_tagged_schema (f6 exists) | unknown
+//	legacy_route_hint:    only for ch=11 — legacy_default_group | legacy_aws_group | legacy_vertex_direct/proxy
+//
+// # Compatibility
+//
+// Verified against all confirmed spec samples (Anthropic Max 20x, Azure, Vertex,
+// Bedrock) and legacy ch=11 signatures. Both single-layer (E) and double-layer (R)
+// encodings are supported. Historical cache-mode 'modelGroup#' prefixes are stripped.
 package claude
 
 import (
@@ -11,8 +58,6 @@ import (
 	"google.golang.org/protobuf/encoding/protowire"
 )
 
-// maxBypassSignatureLen caps the signature string length (after prefix stripping)
-// to prevent base64 decode from allocating excessive memory on malicious input.
 const maxBypassSignatureLen = 8192
 
 type claudeSignatureTree struct {
@@ -27,7 +72,6 @@ type claudeSignatureTree struct {
 	HasField7           bool
 }
 
-// ValidateClaudeBypassSignatures validates Claude thinking signatures in bypass mode.
 func ValidateClaudeBypassSignatures(inputRawJSON []byte) error {
 	messages := gjson.GetBytes(inputRawJSON, "messages")
 	if !messages.IsArray() {
@@ -61,8 +105,6 @@ func ValidateClaudeBypassSignatures(inputRawJSON []byte) error {
 	return nil
 }
 
-// normalizeClaudeBypassSignature validates a raw Claude signature and returns
-// it in the double-layer (R-starting) form expected by upstream.
 func normalizeClaudeBypassSignature(rawSignature string) (string, error) {
 	sig := strings.TrimSpace(rawSignature)
 	if sig == "" {
@@ -281,8 +323,6 @@ func inspectClaudeChannelBlock(channelBlock []byte, encodingLayers int) (*claude
 			tree.LegacyRouteHint = "legacy_vertex_direct"
 		case *tree.Field2 == 2 && tree.EncodingLayers == 1:
 			tree.LegacyRouteHint = "legacy_vertex_proxy"
-		case *tree.Field2 == 2:
-			tree.LegacyRouteHint = "legacy_vertex_group"
 		}
 	}
 
