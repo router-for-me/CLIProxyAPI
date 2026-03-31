@@ -390,6 +390,34 @@ func TestSetWebsocketRequestBody(t *testing.T) {
 	}
 }
 
+func TestShouldResetResponsesWebsocketAuthPin(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name       string
+		statusCode int
+		want       bool
+	}{
+		{name: "too_many_requests", statusCode: http.StatusTooManyRequests, want: true},
+		{name: "forbidden", statusCode: http.StatusForbidden, want: true},
+		{name: "payment_required", statusCode: http.StatusPaymentRequired, want: true},
+		{name: "unauthorized", statusCode: http.StatusUnauthorized, want: true},
+		{name: "internal_error", statusCode: http.StatusInternalServerError, want: false},
+		{name: "zero", statusCode: 0, want: false},
+	}
+
+	for i := range cases {
+		tc := cases[i]
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := shouldResetResponsesWebsocketAuthPin(tc.statusCode)
+			if got != tc.want {
+				t.Fatalf("shouldResetResponsesWebsocketAuthPin(%d) = %v, want %v", tc.statusCode, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestForwardResponsesWebsocketPreservesCompletedEvent(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -417,7 +445,7 @@ func TestForwardResponsesWebsocketPreservesCompletedEvent(t *testing.T) {
 		close(errCh)
 
 		var bodyLog strings.Builder
-		completedOutput, err := (*OpenAIResponsesAPIHandler)(nil).forwardResponsesWebsocket(
+		completedOutput, statusCode, err := (*OpenAIResponsesAPIHandler)(nil).forwardResponsesWebsocket(
 			ctx,
 			conn,
 			func(...interface{}) {},
@@ -428,6 +456,10 @@ func TestForwardResponsesWebsocketPreservesCompletedEvent(t *testing.T) {
 		)
 		if err != nil {
 			serverErrCh <- err
+			return
+		}
+		if statusCode != 0 {
+			serverErrCh <- fmt.Errorf("status code = %d, want 0", statusCode)
 			return
 		}
 		if gjson.GetBytes(completedOutput, "0.id").String() != "out-1" {
