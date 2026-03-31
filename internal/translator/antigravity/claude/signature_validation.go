@@ -58,8 +58,6 @@ import (
 	"google.golang.org/protobuf/encoding/protowire"
 )
 
-// maxBypassSignatureLen caps the signature string length (after prefix stripping)
-// to prevent base64 decode from allocating excessive memory on malicious input.
 const maxBypassSignatureLen = 8192
 
 type claudeSignatureTree struct {
@@ -74,7 +72,6 @@ type claudeSignatureTree struct {
 	HasField7           bool
 }
 
-// ValidateClaudeBypassSignatures validates Claude thinking signatures in bypass mode.
 func ValidateClaudeBypassSignatures(inputRawJSON []byte) error {
 	messages := gjson.GetBytes(inputRawJSON, "messages")
 	if !messages.IsArray() {
@@ -108,8 +105,6 @@ func ValidateClaudeBypassSignatures(inputRawJSON []byte) error {
 	return nil
 }
 
-// normalizeClaudeBypassSignature validates a raw Claude signature and returns
-// it in the double-layer (R-starting) form expected by upstream.
 func normalizeClaudeBypassSignature(rawSignature string) (string, error) {
 	sig := strings.TrimSpace(rawSignature)
 	if sig == "" {
@@ -328,8 +323,6 @@ func inspectClaudeChannelBlock(channelBlock []byte, encodingLayers int) (*claude
 			tree.LegacyRouteHint = "legacy_vertex_direct"
 		case *tree.Field2 == 2 && tree.EncodingLayers == 1:
 			tree.LegacyRouteHint = "legacy_vertex_proxy"
-		case *tree.Field2 == 2:
-			tree.LegacyRouteHint = "legacy_vertex_group"
 		}
 	}
 
