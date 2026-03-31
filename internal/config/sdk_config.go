@@ -24,6 +24,12 @@ type SDKConfig struct {
 	// Default is false (disabled).
 	PassthroughHeaders bool `yaml:"passthrough-headers" json:"passthrough-headers"`
 
+	// ModelMappings defines global model name aliases applied before provider resolution.
+	// When a request arrives with a model name matching a key, it is transparently
+	// rewritten to the corresponding value before any further processing.
+	// Example: {"claude-opus-4-6": "claude-opus-4-6-thinking"}
+	ModelMappings map[string]string `yaml:"model-mappings,omitempty" json:"model-mappings,omitempty"`
+
 	// Streaming configures server-side streaming behavior (keep-alives and safe bootstrap retries).
 	Streaming StreamingConfig `yaml:"streaming" json:"streaming"`
 

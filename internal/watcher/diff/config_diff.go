@@ -85,6 +85,10 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 		changes = append(changes, fmt.Sprintf("routing.strategy: %s -> %s", oldCfg.Routing.Strategy, newCfg.Routing.Strategy))
 	}
 
+	if !reflect.DeepEqual(oldCfg.ModelMappings, newCfg.ModelMappings) {
+		changes = append(changes, fmt.Sprintf("model-mappings: %d -> %d entries", len(oldCfg.ModelMappings), len(newCfg.ModelMappings)))
+	}
+
 	// API keys (redacted) and counts
 	if len(oldCfg.APIKeys) != len(newCfg.APIKeys) {
 		changes = append(changes, fmt.Sprintf("api-keys count: %d -> %d", len(oldCfg.APIKeys), len(newCfg.APIKeys)))

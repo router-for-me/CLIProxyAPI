@@ -26,6 +26,10 @@ request-retry: 3
 max-retry-credentials: 0
 max-retry-interval: 30
 
+# 全局模型名映射（请求中的模型名会在路由前被替换）
+# model-mappings:
+#   claude-opus-4-6: "claude-opus-4-6-thinking"
+
 # 负载均衡
 routing:
   strategy: "round-robin"  # round-robin, fill-first, sticky

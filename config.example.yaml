@@ -96,6 +96,12 @@ quota-exceeded:
   switch-project: true # Whether to automatically switch to another project when a quota is exceeded
   switch-preview-model: true # Whether to automatically switch to a preview model when a quota is exceeded
 
+# Global model name mappings. When a request arrives with a model name matching a key,
+# it is transparently rewritten to the corresponding value before provider resolution.
+# model-mappings:
+#   claude-opus-4-6: "claude-opus-4-6-thinking"
+#   claude-sonnet-4-5: "claude-sonnet-4-6"
+
 # Routing strategy for selecting credentials when multiple match.
 routing:
   strategy: "round-robin" # round-robin (default), fill-first, sticky

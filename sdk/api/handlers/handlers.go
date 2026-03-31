@@ -777,7 +777,15 @@ func statusFromError(err error) int {
 
 func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string, normalizedModel string, err *interfaces.ErrorMessage) {
 	resolvedModelName := modelName
-	initialSuffix := thinking.ParseSuffix(modelName)
+
+	// Apply global model mappings before any other resolution.
+	if h.Cfg != nil && len(h.Cfg.ModelMappings) > 0 {
+		if target, ok := h.Cfg.ModelMappings[resolvedModelName]; ok && target != "" {
+			resolvedModelName = target
+		}
+	}
+
+	initialSuffix := thinking.ParseSuffix(resolvedModelName)
 	if initialSuffix.ModelName == "auto" {
 		resolvedBase := util.ResolveAutoModel(initialSuffix.ModelName)
 		if initialSuffix.HasSuffix {
@@ -786,7 +794,7 @@ func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string
 			resolvedModelName = resolvedBase
 		}
 	} else {
-		resolvedModelName = util.ResolveAutoModel(modelName)
+		resolvedModelName = util.ResolveAutoModel(resolvedModelName)
 	}
 
 	parsed := thinking.ParseSuffix(resolvedModelName)
