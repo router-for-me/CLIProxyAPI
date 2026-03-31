@@ -7,11 +7,13 @@ on:
 
 env:
   APP_NAME: CLIProxyAPI
-  DOCKERHUB_REPO: eceasy/cli-proxy-api
+  DOCKERHUB_REPO: chaosaiglobal/cli-proxy-api
 
 jobs:
   docker_amd64:
     runs-on: ubuntu-latest
+    permissions:
+      packages: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -22,15 +24,23 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
       - name: Login to DockerHub
+        if: ${{ secrets.DOCKERHUB_USERNAME != '' }}
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Generate Build Metadata
         run: |
           echo "VERSION=${GITHUB_REF_NAME}" >> $GITHUB_ENV
-          echo COMMIT=`git rev-parse --short HEAD` >> $GITHUB_ENV
-          echo BUILD_DATE=`date -u +%Y-%m-%dT%H:%M:%SZ` >> $GITHUB_ENV
+          echo "COMMIT=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+          echo "BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $GITHUB_ENV
+          echo "OWNER_LOWER=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
       - name: Build and push (amd64)
         uses: docker/build-push-action@v6
         with:
@@ -44,9 +54,13 @@ jobs:
           tags: |
             ${{ env.DOCKERHUB_REPO }}:latest-amd64
             ${{ env.DOCKERHUB_REPO }}:${{ env.VERSION }}-amd64
+            ghcr.io/${{ env.OWNER_LOWER }}/cli-proxy-api:latest-amd64
+            ghcr.io/${{ env.OWNER_LOWER }}/cli-proxy-api:${{ env.VERSION }}-amd64
 
   docker_arm64:
     runs-on: ubuntu-24.04-arm
+    permissions:
+      packages: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -57,15 +71,23 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
       - name: Login to DockerHub
+        if: ${{ secrets.DOCKERHUB_USERNAME != '' }}
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Generate Build Metadata
         run: |
           echo "VERSION=${GITHUB_REF_NAME}" >> $GITHUB_ENV
-          echo COMMIT=`git rev-parse --short HEAD` >> $GITHUB_ENV
-          echo BUILD_DATE=`date -u +%Y-%m-%dT%H:%M:%SZ` >> $GITHUB_ENV
+          echo "COMMIT=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+          echo "BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $GITHUB_ENV
+          echo "OWNER_LOWER=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
       - name: Build and push (arm64)
         uses: docker/build-push-action@v6
         with:
@@ -79,29 +101,40 @@ jobs:
           tags: |
             ${{ env.DOCKERHUB_REPO }}:latest-arm64
             ${{ env.DOCKERHUB_REPO }}:${{ env.VERSION }}-arm64
+            ghcr.io/${{ env.OWNER_LOWER }}/cli-proxy-api:latest-arm64
+            ghcr.io/${{ env.OWNER_LOWER }}/cli-proxy-api:${{ env.VERSION }}-arm64
 
   docker_manifest:
     runs-on: ubuntu-latest
     needs:
       - docker_amd64
       - docker_arm64
+    permissions:
+      packages: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
       - name: Login to DockerHub
+        if: ${{ secrets.DOCKERHUB_USERNAME != '' }}
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Generate Build Metadata
         run: |
           echo "VERSION=${GITHUB_REF_NAME}" >> $GITHUB_ENV
-          echo COMMIT=`git rev-parse --short HEAD` >> $GITHUB_ENV
-          echo BUILD_DATE=`date -u +%Y-%m-%dT%H:%M:%SZ` >> $GITHUB_ENV
+          echo "OWNER_LOWER=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
       - name: Create and push multi-arch manifests
         run: |
+          # DockerHub manifests
           docker buildx imagetools create \
             --tag "${DOCKERHUB_REPO}:latest" \
             "${DOCKERHUB_REPO}:latest-amd64" \
@@ -110,6 +143,17 @@ jobs:
             --tag "${DOCKERHUB_REPO}:${VERSION}" \
             "${DOCKERHUB_REPO}:${VERSION}-amd64" \
             "${DOCKERHUB_REPO}:${VERSION}-arm64"
+
+          # GHCR manifests
+          GHCR_REPO="ghcr.io/${OWNER_LOWER}/cli-proxy-api"
+          docker buildx imagetools create \
+            --tag "${GHCR_REPO}:latest" \
+            "${GHCR_REPO}:latest-amd64" \
+            "${GHCR_REPO}:latest-arm64"
+          docker buildx imagetools create \
+            --tag "${GHCR_REPO}:${VERSION}" \
+            "${GHCR_REPO}:${VERSION}-amd64" \
+            "${GHCR_REPO}:${VERSION}-arm64"
       - name: Cleanup temporary tags
         continue-on-error: true
         env:
@@ -133,12 +177,7 @@ jobs:
             local url="https://hub.docker.com/v2/repositories/${namespace}/${repo_name}/tags/${tag}/"
             local http_code
             http_code="$(curl -sS -o /dev/null -w "%{http_code}" -X DELETE -H "Authorization: JWT ${token}" "${url}" || true)"
-            if [ "${http_code}" = "204" ] || [ "${http_code}" = "404" ]; then
-              echo "Docker Hub tag removed (or missing): ${DOCKERHUB_REPO}:${tag} (HTTP ${http_code})"
-              return 0
-            fi
-            echo "Docker Hub tag delete failed: ${DOCKERHUB_REPO}:${tag} (HTTP ${http_code})"
-            return 0
+            echo "Docker Hub tag ${tag}: HTTP ${http_code}"
           }
 
           delete_tag "latest-amd64"

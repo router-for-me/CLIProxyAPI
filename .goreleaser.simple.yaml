@@ -1,0 +1,74 @@
+# 简化版 GoReleaser 配置 - 仅发布 x86_64 GHCR 镜像
+version: 2
+
+project_name: cli-proxy-api
+
+builds:
+  - id: cli-proxy-api
+    main: ./cmd/server/
+    binary: cli-proxy-api
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+    ldflags:
+      - -s -w
+      - -X 'main.Version={{.Version}}'
+      - -X 'main.Commit={{.ShortCommit}}'
+      - -X 'main.BuildDate={{.Date}}'
+
+archives: []
+
+checksum:
+  disable: true
+
+changelog:
+  disable: true
+
+# 仅 GHCR x86_64 镜像
+dockers:
+  - id: ghcr-amd64
+    goos: linux
+    goarch: amd64
+    image_templates:
+      - "ghcr.io/{{ .Env.GITHUB_REPO_OWNER_LOWER }}/cli-proxy-api:{{ .Version }}-amd64"
+      - "ghcr.io/{{ .Env.GITHUB_REPO_OWNER_LOWER }}/cli-proxy-api:{{ .Version }}"
+      - "ghcr.io/{{ .Env.GITHUB_REPO_OWNER_LOWER }}/cli-proxy-api:latest"
+    dockerfile: Dockerfile.goreleaser
+    use: buildx
+    extra_files:
+      - deploy/docker-entrypoint.sh
+      - config.example.yaml
+    build_flag_templates:
+      - "--platform=linux/amd64"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
+      - "--label=org.opencontainers.image.revision={{ .Commit }}"
+      - "--label=org.opencontainers.image.source=https://github.com/{{ .Env.GITHUB_REPO_OWNER }}/{{ .Env.GITHUB_REPO_NAME }}"
+
+docker_manifests: []
+
+release:
+  github:
+    owner: "{{ .Env.GITHUB_REPO_OWNER }}"
+    name: "{{ .Env.GITHUB_REPO_NAME }}"
+  draft: false
+  prerelease: auto
+  name_template: "CLIProxyAPI {{.Version}} (Simple)"
+  skip_upload: true
+  header: |
+    > CLI Proxy API - AI Coding Assistant Proxy & Credential Management
+    > ⚡ Simple Release: 仅包含 x86_64 GHCR 镜像
+
+    {{ .Env.TAG_MESSAGE }}
+
+  footer: |
+    ---
+
+    ## 📥 Installation
+
+    **Docker (x86_64 only):**
+    ```bash
+    docker pull ghcr.io/{{ .Env.GITHUB_REPO_OWNER_LOWER }}/cli-proxy-api:{{ .Version }}
+    ```

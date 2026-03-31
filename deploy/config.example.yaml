@@ -1,0 +1,36 @@
+# CLIProxyAPI 生产配置
+# 完整选项参考 config.example.yaml
+
+host: ""
+port: 8317
+
+# Management API
+remote-management:
+  allow-remote: true
+  secret-key: ""
+
+# Auth 目录
+auth-dir: "/root/.cli-proxy-api"
+
+# API keys
+api-keys:
+  - "change-me-to-a-strong-api-key"
+
+debug: false
+logging-to-file: true
+logs-max-total-size-mb: 500
+error-logs-max-files: 10
+
+# 重试
+request-retry: 3
+max-retry-credentials: 0
+max-retry-interval: 30
+
+# 负载均衡
+routing:
+  strategy: "round-robin"
+
+# Quota 超限自动切换
+quota-exceeded:
+  switch-project: true
+  switch-preview-model: true

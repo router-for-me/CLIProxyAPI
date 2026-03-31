@@ -1,0 +1,22 @@
+services:
+  cli-proxy-api:
+    image: ${CLI_PROXY_IMAGE:-chaosaiglobal/cli-proxy-api:latest}
+    container_name: cli-proxy-api
+    env_file:
+      - .env
+    environment:
+      - TZ=${TZ:-Asia/Shanghai}
+      - DEPLOY=${DEPLOY:-}
+    ports:
+      - "${BIND_HOST:-127.0.0.1}:8317:8317"
+    volumes:
+      - ${CLI_PROXY_CONFIG_PATH:-./data/config.yaml}:/CLIProxyAPI/config.yaml:ro
+      - ${CLI_PROXY_AUTH_PATH:-./auths}:/root/.cli-proxy-api
+      - ${CLI_PROXY_LOG_PATH:-./logs}:/CLIProxyAPI/logs
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-T", "5", "-O", "/dev/null", "http://localhost:8317/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
