@@ -215,6 +215,12 @@ func (b *Builder) Build() (*Service, error) {
 		switch strategy {
 		case "fill-first", "fillfirst", "ff":
 			selector = &coreauth.FillFirstSelector{}
+		case "sticky":
+			lruSize := 0
+			if b.cfg != nil {
+				lruSize = b.cfg.Routing.StickyLRUSize
+			}
+			selector = coreauth.NewStickySelector(lruSize, nil)
 		default:
 			selector = &coreauth.RoundRobinSelector{}
 		}

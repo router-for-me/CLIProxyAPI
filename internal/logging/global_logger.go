@@ -178,7 +178,11 @@ func ConfigureLogOutput(cfg *config.Config) error {
 		log.SetOutput(os.Stdout)
 	}
 
-	configureLogDirCleanerLocked(logDir, cfg.LogsMaxTotalSizeMB, protectedPath)
+	retentionDays := cfg.RequestLogRetentionDays
+	if retentionDays == 0 && cfg.RequestLog {
+		retentionDays = 3 // default 3 days when request logging is enabled
+	}
+	configureLogDirCleanerLocked(logDir, cfg.LogsMaxTotalSizeMB, retentionDays, protectedPath)
 	return nil
 }
 

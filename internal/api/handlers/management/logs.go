@@ -145,6 +145,37 @@ func (h *Handler) DeleteLogs(c *gin.Context) {
 	})
 }
 
+// CleanupRequestLogs removes all request log files from the log directory.
+// This is a manual cleanup endpoint for debug/request logs.
+func (h *Handler) CleanupRequestLogs(c *gin.Context) {
+	if h == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler unavailable"})
+		return
+	}
+	if h.cfg == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "configuration unavailable"})
+		return
+	}
+
+	dir := h.logDirectory()
+	if strings.TrimSpace(dir) == "" {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "log directory not configured"})
+		return
+	}
+
+	removed, err := logging.CleanupRequestLogs(dir, "")
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to cleanup request logs: %v", err)})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "Request logs cleaned up successfully",
+		"removed": removed,
+	})
+}
+
 // GetRequestErrorLogs lists error request log files when RequestLog is disabled.
 // It returns an empty list when RequestLog is enabled.
 func (h *Handler) GetRequestErrorLogs(c *gin.Context) {
