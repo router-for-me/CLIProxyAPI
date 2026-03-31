@@ -304,7 +304,7 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 		segmentEnds[providerIndex] = totalWeight
 	}
 	if totalWeight == 0 {
-		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, tried)
+		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, filter)
 	}
 
 	startSlot := s.mixedCursors[cursorKey] % totalWeight
@@ -319,7 +319,7 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 		}
 	}
 	if startProviderIndex < 0 {
-		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, tried)
+		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, filter)
 	}
 
 	slot := startSlot
