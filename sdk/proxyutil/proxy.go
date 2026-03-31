@@ -68,14 +68,18 @@ func Parse(raw string) (Setting, error) {
 	}
 }
 
+func cloneDefaultTransport() *http.Transport {
+	if transport, ok := http.DefaultTransport.(*http.Transport); ok && transport != nil {
+		return transport.Clone()
+	}
+	return &http.Transport{}
+}
+
 // NewDirectTransport returns a transport that bypasses environment proxies.
 func NewDirectTransport() *http.Transport {
-	if transport, ok := http.DefaultTransport.(*http.Transport); ok && transport != nil {
-		clone := transport.Clone()
-		clone.Proxy = nil
-		return clone
-	}
-	return &http.Transport{Proxy: nil}
+	clone := cloneDefaultTransport()
+	clone.Proxy = nil
+	return clone
 }
 
 // BuildHTTPTransport constructs an HTTP transport for the provided proxy setting.
@@ -102,14 +106,16 @@ func BuildHTTPTransport(raw string) (*http.Transport, Mode, error) {
 			if errSOCKS5 != nil {
 				return nil, setting.Mode, fmt.Errorf("create SOCKS5 dialer failed: %w", errSOCKS5)
 			}
-			return &http.Transport{
-				Proxy: nil,
-				DialContext: func(_ context.Context, network, addr string) (net.Conn, error) {
-					return dialer.Dial(network, addr)
-				},
-			}, setting.Mode, nil
+			transport := cloneDefaultTransport()
+			transport.Proxy = nil
+			transport.DialContext = func(_ context.Context, network, addr string) (net.Conn, error) {
+				return dialer.Dial(network, addr)
+			}
+			return transport, setting.Mode, nil
 		}
-		return &http.Transport{Proxy: http.ProxyURL(setting.URL)}, setting.Mode, nil
+		transport := cloneDefaultTransport()
+		transport.Proxy = http.ProxyURL(setting.URL)
+		return transport, setting.Mode, nil
 	default:
 		return nil, setting.Mode, nil
 	}
