@@ -1,36 +1,81 @@
+# 监听地址，127.0.0.1 只允许本机访问，改为 "" 或 "0.0.0.0" 则对外暴露
 host: "127.0.0.1"
+# 监听端口
 port: 8317
+
+# HTTPS 配置，本地使用不需要开启
 tls:
   enable: false
   cert: ""
   key: ""
+
+# 管理后台配置
 remote-management:
+  # 允许非 localhost 访问管理 API，false 则只有本机能访问
   allow-remote: true
+  # 管理 API 密码（首次启动时填明文，会自动替换为 bcrypt 哈希）
+  # 留空则完全禁用管理 API（所有 /v0/management 路由返回 404）
   secret-key: "$2a$10$CUEDeykS9HVjjJd25NFF.eAShxY9u3WHfJVN/dnj0HEdzGRPal7dC"
+  # 禁用管理面板 Web UI
   disable-control-panel: false
+  # 管理面板从此 GitHub 仓库自动下载更新
   panel-github-repository: "https://github.com/router-for-me/Cli-Proxy-API-Management-Center"
+
+# OAuth token 文件存放目录（claude-login / codex-login 等登录后写入）
 auth-dir: "./auths"
+
+# 客户端调用本代理时需要携带的 API Key（可配多个）
 api-keys:
   - cpa_local_e87699c5449699754f308a8f6c3be4e91d2f1131e6538c6f
+
+# 开启 debug 级别日志
 debug: true
+
+# pprof 性能分析服务（只绑本机，按需开启）
 pprof:
   enable: true
   addr: "127.0.0.1:8316"
+
+# 禁用高开销 HTTP 中间件，高并发场景下降低内存压力
 commercial-mode: true
+
+# 日志写入文件而非 stdout
 logging-to-file: true
+# 日志目录总大小上限（MB），0 = 不限制
 logs-max-total-size-mb: 0
-error-logs-max-files: 10
+# 请求日志关闭时保留的错误日志文件数量上限，0 = 不限制
+error-logs-max-files: 100
+
+# 统计各账号的 token 用量
 usage-statistics-enabled: true
+
+# 全局代理（支持 socks5/http/https），留空则不使用
 proxy-url: ""
+
+# true = 无 prefix 的请求只匹配无 prefix 的 credential
 force-model-prefix: false
-passthrough-headers: false
-request-retry: 3
+
+# true = 将上游响应头透传给客户端
+passthrough-headers: true
+
+# 请求失败时的重试次数（触发条件：HTTP 403/408/500/502/503/504）
+request-retry: 2
+# 单次请求最多尝试的账号数，0 = 尝试所有可用账号
 max-retry-credentials: 0
+# 冷却中的账号最长等待时间（秒），超过则跳过
 max-retry-interval: 30
+
+# 配额超限时的自动切换策略
 quota-exceeded:
-  switch-project: true
-  switch-preview-model: true
+  switch-project: true        # 自动切换到其他账号
+  switch-preview-model: true  # 自动切换到 preview 模型
+
+# 多账号路由策略：round-robin（轮询）或 fill-first（用满一个再换下一个）
 routing:
   strategy: "fill-first"
+
+# WebSocket API (/v1/ws) 是否需要 API Key 认证
 ws-auth: false
+
+# 非流式响应的心跳包间隔（秒），0 = 禁用，用于防止长时间无响应被超时断开
 nonstream-keepalive-interval: 0
