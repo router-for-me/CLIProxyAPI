@@ -620,7 +620,8 @@
     "refresh_button": "刷新额度",
     "fetch_all": "获取全部",
     "credit_label": "AI 积分",
-    "credit_amount": "{{count}} 积分"
+    "credit_amount": "{{count}} 积分",
+    "tier_label": "等级"
   },
   "claude_quota": {
     "title": "Claude 额度",

@@ -620,7 +620,8 @@
     "refresh_button": "Refresh Quota",
     "fetch_all": "Fetch All",
     "credit_label": "AI Credit",
-    "credit_amount": "{{count}} credits"
+    "credit_amount": "{{count}} credits",
+    "tier_label": "Tier"
   },
   "claude_quota": {
     "title": "Claude Quota",

@@ -623,7 +623,8 @@
     "refresh_button": "Обновить квоту",
     "fetch_all": "Получить все",
     "credit_label": "AI-кредиты",
-    "credit_amount": "{{count}} кредитов"
+    "credit_amount": "{{count}} кредитов",
+    "tier_label": "Уровень"
   },
   "claude_quota": {
     "title": "Квота Claude",
