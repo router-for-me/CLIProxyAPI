@@ -443,6 +443,7 @@ function ListModeContent<TState extends QuotaStatusState, TData>({
     return styles.quotaListCellLow;
   };
 
+  const showTierColumn = showCredit && Boolean(config.getListTierLabel);
   const showCreditColumn = showCredit && Boolean(config.getListCreditBalance);
 
   return (
@@ -478,6 +479,9 @@ function ListModeContent<TState extends QuotaStatusState, TData>({
             <tr>
               <th className={styles.listThFile}>{t('auth_files.list_col_file')}</th>
               <th className={styles.listThStatus}>{t('auth_files.list_col_status')}</th>
+              {showTierColumn && (
+                <th className={styles.listThCredit}>{t('antigravity_quota.tier_label')}</th>
+              )}
               {showCreditColumn && (
                 <th className={styles.listThCredit}>{t('antigravity_quota.credit_label')}</th>
               )}
@@ -517,6 +521,13 @@ function ListModeContent<TState extends QuotaStatusState, TData>({
                       <span className={styles.listStatusOk}>OK</span>
                     )}
                   </td>
+                  {showTierColumn && (
+                    <td className={styles.listTdCredit}>
+                      {status === 'success' && q && config.getListTierLabel
+                        ? (config.getListTierLabel(q) ?? '-')
+                        : '-'}
+                    </td>
+                  )}
                   {showCreditColumn && (
                     <td className={styles.listTdCredit}>
                       {status === 'success' && q && config.getListCreditBalance

@@ -132,6 +132,7 @@ export interface QuotaConfig<TState, TData> {
   listGroups?: QuotaListGroupDefinition[];
   getListGroupValue?: (quota: TState, groupId: string) => number | null;
   getListCreditBalance?: (quota: TState) => number | null;
+  getListTierLabel?: (quota: TState) => string | null;
 }
 
 const resolveAntigravityProjectId = async (file: AuthFileItem): Promise<string> => {
@@ -166,10 +167,24 @@ const resolveAntigravityProjectId = async (file: AuthFileItem): Promise<string> 
   return DEFAULT_ANTIGRAVITY_PROJECT_ID;
 };
 
-const fetchAntigravityCreditBalance = async (
+interface AntigravityTierInfo {
+  tierLabel: string | null;
+  tierId: string | null;
+  creditBalance: number | null;
+}
+
+const ANTIGRAVITY_TIER_LABELS: Record<string, string> = {
+  'free-tier': 'Free',
+  'standard-tier': 'Standard',
+  'g1-pro-tier': 'Pro',
+  'g1-ultra-tier': 'Ultra',
+};
+
+const fetchAntigravityTierInfo = async (
   authIndex: string,
   projectId: string
-): Promise<number | null> => {
+): Promise<AntigravityTierInfo> => {
+  const empty: AntigravityTierInfo = { tierLabel: null, tierId: null, creditBalance: null };
   const requestBody = JSON.stringify({
     cloudaicompanionProject: projectId,
     metadata: {
@@ -199,34 +214,44 @@ const fetchAntigravityCreditBalance = async (
         payload.paidTier ?? payload.paid_tier;
       const currentTier: GeminiCliUserTier | null | undefined =
         payload.currentTier ?? payload.current_tier;
-      const tier = paidTier ?? currentTier;
-      if (!tier) continue;
 
-      const credits: GeminiCliCredits[] =
-        tier.availableCredits ?? tier.available_credits ?? [];
-      let total = 0;
-      let found = false;
-      for (const credit of credits) {
-        const creditType = normalizeStringValue(credit.creditType ?? credit.credit_type);
-        if (creditType !== 'GOOGLE_ONE_AI') continue;
-        const amount = normalizeNumberValue(credit.creditAmount ?? credit.credit_amount);
-        if (amount !== null) {
-          total += amount;
-          found = true;
+      // Resolve tier label from paidTier first, fallback to currentTier
+      const rawTierId = normalizeStringValue(paidTier?.id) ?? normalizeStringValue(currentTier?.id);
+      const tierId = rawTierId ? rawTierId.toLowerCase() : null;
+      const tierLabel = tierId ? (ANTIGRAVITY_TIER_LABELS[tierId] ?? rawTierId) : null;
+
+      // Try to extract credit balance (available in some tier responses)
+      const tier = paidTier ?? currentTier;
+      let creditBalance: number | null = null;
+      if (tier) {
+        const credits: GeminiCliCredits[] =
+          tier.availableCredits ?? tier.available_credits ?? [];
+        let total = 0;
+        let found = false;
+        for (const credit of credits) {
+          const creditType = normalizeStringValue(credit.creditType ?? credit.credit_type);
+          if (creditType !== 'GOOGLE_ONE_AI') continue;
+          const amount = normalizeNumberValue(credit.creditAmount ?? credit.credit_amount);
+          if (amount !== null) {
+            total += amount;
+            found = true;
+          }
         }
+        if (found) creditBalance = total;
       }
-      if (found) return total;
+
+      return { tierLabel, tierId, creditBalance };
     } catch {
       continue;
     }
   }
-  return null;
+  return empty;
 };
 
 const fetchAntigravityQuota = async (
   file: AuthFileItem,
   t: TFunction
-): Promise<{ groups: AntigravityQuotaGroup[]; creditBalance: number | null }> => {
+): Promise<{ groups: AntigravityQuotaGroup[]; creditBalance: number | null; tierLabel: string | null; tierId: string | null }> => {
   const rawAuthIndex = file['auth_index'] ?? file.authIndex;
   const authIndex = normalizeAuthIndex(rawAuthIndex);
   if (!authIndex) {
@@ -275,10 +300,10 @@ const fetchAntigravityQuota = async (
       }
 
       const showCredit = useQuotaStore.getState().showAntigravityCredit;
-      const creditBalance = showCredit
-        ? await fetchAntigravityCreditBalance(authIndex, projectId)
-        : null;
-      return { groups, creditBalance };
+      const tierInfo = showCredit
+        ? await fetchAntigravityTierInfo(authIndex, projectId)
+        : { tierLabel: null, tierId: null, creditBalance: null };
+      return { groups, ...tierInfo };
     } catch (err: unknown) {
       lastError = err instanceof Error ? err.message : t('common.unknown_error');
       const status = getStatusFromError(err);
@@ -292,7 +317,7 @@ const fetchAntigravityQuota = async (
   }
 
   if (hadSuccess) {
-    return { groups: [], creditBalance: null };
+    return { groups: [], creditBalance: null, tierLabel: null, tierId: null };
   }
 
   throw createStatusError(lastError || t('common.unknown_error'), priorityStatus ?? lastStatus);
@@ -771,8 +796,23 @@ const renderAntigravityItems = (
   const { createElement: h, Fragment } = React;
   const groups = quota.groups ?? [];
   const showCredit = useQuotaStore.getState().showAntigravityCredit;
+  const tierLabel = showCredit ? (quota.tierLabel ?? null) : null;
+  const tierId = showCredit ? (quota.tierId ?? null) : null;
   const creditBalance = showCredit ? (quota.creditBalance ?? null) : null;
+  const isPremiumTier = tierId !== null && (tierId === 'g1-ultra-tier' || tierId === 'g1-pro-tier');
   const nodes: ReactNode[] = [];
+
+  if (tierLabel) {
+    const valueClass = isPremiumTier ? styleMap.premiumPlanValue : styleMap.codexPlanValue;
+    nodes.push(
+      h(
+        'div',
+        { key: 'tier', className: styleMap.codexPlan },
+        h('span', { className: styleMap.codexPlanLabel }, t('antigravity_quota.tier_label')),
+        h('span', { className: valueClass }, tierLabel)
+      )
+    );
+  }
 
   if (creditBalance !== null) {
     nodes.push(
@@ -1233,7 +1273,7 @@ export const CLAUDE_CONFIG: QuotaConfig<
 
 export const ANTIGRAVITY_CONFIG: QuotaConfig<
   AntigravityQuotaState,
-  { groups: AntigravityQuotaGroup[]; creditBalance: number | null }
+  { groups: AntigravityQuotaGroup[]; creditBalance: number | null; tierLabel: string | null; tierId: string | null }
 > = {
   type: 'antigravity',
   i18nPrefix: 'antigravity_quota',
@@ -1242,16 +1282,20 @@ export const ANTIGRAVITY_CONFIG: QuotaConfig<
   fetchQuota: fetchAntigravityQuota,
   storeSelector: (state) => state.antigravityQuota,
   storeSetter: 'setAntigravityQuota',
-  buildLoadingState: () => ({ status: 'loading', groups: [], creditBalance: null }),
+  buildLoadingState: () => ({ status: 'loading', groups: [], creditBalance: null, tierLabel: null, tierId: null }),
   buildSuccessState: (data) => ({
     status: 'success',
     groups: data.groups,
     creditBalance: data.creditBalance,
+    tierLabel: data.tierLabel,
+    tierId: data.tierId,
   }),
   buildErrorState: (message, status) => ({
     status: 'error',
     groups: [],
     creditBalance: null,
+    tierLabel: null,
+    tierId: null,
     error: message,
     errorStatus: status,
   }),
@@ -1267,6 +1311,7 @@ export const ANTIGRAVITY_CONFIG: QuotaConfig<
     return Math.round(Math.max(0, Math.min(1, group.remainingFraction)) * 100);
   },
   getListCreditBalance: (quota) => quota.creditBalance ?? null,
+  getListTierLabel: (quota) => quota.tierLabel ?? null,
 };
 
 export const CODEX_CONFIG: QuotaConfig<
