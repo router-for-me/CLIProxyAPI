@@ -75,6 +75,7 @@ export type VisualConfigValues = {
   maxRetryInterval: string;
   quotaSwitchProject: boolean;
   quotaSwitchPreviewModel: boolean;
+  quotaShowAntigravityCredit: boolean;
   routingStrategy: 'round-robin' | 'fill-first';
   wsAuth: boolean;
   payloadDefaultRules: PayloadRule[];
@@ -114,6 +115,7 @@ export const DEFAULT_VISUAL_VALUES: VisualConfigValues = {
   maxRetryInterval: '',
   quotaSwitchProject: true,
   quotaSwitchPreviewModel: true,
+  quotaShowAntigravityCredit: true,
   routingStrategy: 'round-robin',
   wsAuth: false,
   payloadDefaultRules: [],

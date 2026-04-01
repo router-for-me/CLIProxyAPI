@@ -521,6 +521,12 @@
     "page_size_unit": "个/页",
     "view_mode_paged": "按页显示",
     "view_mode_all": "显示全部",
+    "view_mode_list": "列表",
+    "list_filter_label": "模型筛选：",
+    "list_filter_reset": "重置",
+    "list_col_file": "文件",
+    "list_col_status": "状态",
+    "list_click_load": "加载",
     "too_many_files_warning": "您的凭证总数过多，全部加载会导致页面卡顿，请保持单页浏览。",
     "filter_all": "全部",
     "filter_qwen": "Qwen",
@@ -612,7 +618,9 @@
     "missing_auth_index": "认证文件缺少 auth_index",
     "empty_models": "暂无额度数据",
     "refresh_button": "刷新额度",
-    "fetch_all": "获取全部"
+    "fetch_all": "获取全部",
+    "credit_label": "AI 积分",
+    "credit_amount": "{{count}} 积分"
   },
   "claude_quota": {
     "title": "Claude 额度",
@@ -1254,7 +1262,9 @@
           "switch_project": "切换项目",
           "switch_project_desc": "配额耗尽时自动切换到其他项目",
           "switch_preview_model": "切换预览模型",
-          "switch_preview_model_desc": "配额耗尽时切换到预览版本模型"
+          "switch_preview_model_desc": "配额耗尽时切换到预览版本模型",
+          "show_antigravity_credit": "显示 Antigravity AI 积分",
+          "show_antigravity_credit_desc": "在 Antigravity 额度卡片上显示 AI 积分余额"
         },
         "streaming": {
           "title": "流式传输配置",

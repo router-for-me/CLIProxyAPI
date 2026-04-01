@@ -23,7 +23,7 @@ type QuotaUpdater<T> = T | ((prev: T) => T);
 
 type QuotaSetter<T> = (updater: QuotaUpdater<T>) => void;
 
-type ViewMode = 'paged' | 'all';
+type ViewMode = 'paged' | 'all' | 'list';
 
 const MAX_ITEMS_PER_PAGE = 25;
 const MAX_SHOW_ALL_THRESHOLD = 30;
@@ -111,17 +111,24 @@ export function QuotaSection<TState extends QuotaStatusState, TData>({
     Record<string, TState>
   >;
 
+  const listModelFilter = useQuotaStore((state) => state.antigravityListModelFilter);
+  const setListModelFilter = useQuotaStore((state) => state.setAntigravityListModelFilter);
+  const showAntigravityCredit = useQuotaStore((state) => state.showAntigravityCredit);
+
   /* Removed useRef */
   const [columns, gridRef] = useGridColumns(380); // Min card width 380px matches SCSS
   const [viewMode, setViewMode] = useState<ViewMode>('paged');
   const [showTooManyWarning, setShowTooManyWarning] = useState(false);
+  const hasListMode = Boolean(config.listGroups && config.listGroups.length > 0);
 
   const filteredFiles = useMemo(() => files.filter((file) => config.filterFn(file)), [
     files,
     config
   ]);
   const showAllAllowed = filteredFiles.length <= MAX_SHOW_ALL_THRESHOLD;
-  const effectiveViewMode: ViewMode = viewMode === 'all' && !showAllAllowed ? 'paged' : viewMode;
+  const effectiveViewMode: ViewMode =
+    viewMode === 'list' ? 'list'
+      : viewMode === 'all' && !showAllAllowed ? 'paged' : viewMode;
 
   const {
     pageSize,
@@ -153,7 +160,7 @@ export function QuotaSection<TState extends QuotaStatusState, TData>({
 
   // Update page size based on view mode and columns
   useEffect(() => {
-    if (effectiveViewMode === 'all') {
+    if (effectiveViewMode === 'all' || effectiveViewMode === 'list') {
       setPageSize(Math.max(1, filteredFiles.length));
     } else {
       // Paged mode: 3 rows * columns, capped to avoid oversized pages.
@@ -180,8 +187,8 @@ export function QuotaSection<TState extends QuotaStatusState, TData>({
     if (!wasLoading) return;
 
     pendingQuotaRefreshRef.current = false;
-    const scope = effectiveViewMode === 'all' ? 'all' : 'page';
-    const targets = effectiveViewMode === 'all' ? filteredFiles : pageItems;
+    const scope = effectiveViewMode === 'all' || effectiveViewMode === 'list' ? 'all' : 'page';
+    const targets = effectiveViewMode === 'all' || effectiveViewMode === 'list' ? filteredFiles : pageItems;
     if (targets.length === 0) return;
     loadQuota(targets, scope, setLoading);
   }, [loading, effectiveViewMode, filteredFiles, pageItems, loadQuota, setLoading]);
@@ -282,6 +289,18 @@ export function QuotaSection<TState extends QuotaStatusState, TData>({
             >
               {t('auth_files.view_mode_all')}
             </Button>
+            {hasListMode && (
+              <Button
+                variant="secondary"
+                size="sm"
+                className={`${styles.viewModeButton} ${
+                  effectiveViewMode === 'list' ? styles.viewModeButtonActive : ''
+                }`}
+                onClick={() => setViewMode('list')}
+              >
+                {t('auth_files.view_mode_list')}
+              </Button>
+            )}
           </div>
           <Button
             variant="secondary"
@@ -303,6 +322,17 @@ export function QuotaSection<TState extends QuotaStatusState, TData>({
         <EmptyState
           title={t(`${config.i18nPrefix}.empty_title`)}
           description={t(`${config.i18nPrefix}.empty_desc`)}
+        />
+      ) : effectiveViewMode === 'list' && config.listGroups ? (
+        <ListModeContent
+          config={config}
+          files={filteredFiles}
+          quota={quota}
+          listModelFilter={listModelFilter}
+          setListModelFilter={setListModelFilter}
+          showCredit={showAntigravityCredit}
+          disabled={disabled}
+          onRefreshFile={refreshQuotaForFile}
         />
       ) : (
         <>
@@ -363,5 +393,156 @@ export function QuotaSection<TState extends QuotaStatusState, TData>({
         </div>
       )}
     </Card>
+  );
+}
+
+/* ── List mode sub-component ─────────────────────────────────────── */
+
+interface ListModeContentProps<TState extends QuotaStatusState, TData> {
+  config: QuotaConfig<TState, TData>;
+  files: AuthFileItem[];
+  quota: Record<string, TState>;
+  listModelFilter: string[];
+  setListModelFilter: (filter: string[]) => void;
+  showCredit: boolean;
+  disabled: boolean;
+  onRefreshFile: (file: AuthFileItem) => void;
+}
+
+function ListModeContent<TState extends QuotaStatusState, TData>({
+  config,
+  files,
+  quota,
+  listModelFilter,
+  setListModelFilter,
+  showCredit,
+  disabled,
+  onRefreshFile,
+}: ListModeContentProps<TState, TData>) {
+  const { t } = useTranslation();
+  const allGroups = config.listGroups ?? [];
+  const visibleGroups = listModelFilter.length > 0
+    ? allGroups.filter((g) => listModelFilter.includes(g.id))
+    : allGroups;
+
+  const toggleGroup = useCallback(
+    (groupId: string) => {
+      setListModelFilter(
+        listModelFilter.includes(groupId)
+          ? listModelFilter.filter((id) => id !== groupId)
+          : [...listModelFilter, groupId]
+      );
+    },
+    [listModelFilter, setListModelFilter]
+  );
+
+  const getPercentClass = (value: number | null): string => {
+    if (value === null) return styles.quotaListCellIdle;
+    if (value >= 70) return styles.quotaListCellHigh;
+    if (value >= 30) return styles.quotaListCellMedium;
+    return styles.quotaListCellLow;
+  };
+
+  const showCreditColumn = showCredit && Boolean(config.getListCreditBalance);
+
+  return (
+    <div className={styles.listModeContainer}>
+      <div className={styles.listModelFilter}>
+        <span className={styles.listFilterLabel}>{t('auth_files.list_filter_label')}</span>
+        {allGroups.map((group) => {
+          const active = listModelFilter.length === 0 || listModelFilter.includes(group.id);
+          return (
+            <button
+              key={group.id}
+              type="button"
+              className={`${styles.listFilterChip} ${active ? styles.listFilterChipActive : ''}`}
+              onClick={() => toggleGroup(group.id)}
+            >
+              {group.label}
+            </button>
+          );
+        })}
+        {listModelFilter.length > 0 && (
+          <button
+            type="button"
+            className={styles.listFilterReset}
+            onClick={() => setListModelFilter([])}
+          >
+            {t('auth_files.list_filter_reset')}
+          </button>
+        )}
+      </div>
+      <div className={styles.listTableWrapper}>
+        <table className={styles.listTable}>
+          <thead>
+            <tr>
+              <th className={styles.listThFile}>{t('auth_files.list_col_file')}</th>
+              <th className={styles.listThStatus}>{t('auth_files.list_col_status')}</th>
+              {showCreditColumn && (
+                <th className={styles.listThCredit}>{t('antigravity_quota.credit_label')}</th>
+              )}
+              {visibleGroups.map((g) => (
+                <th key={g.id} className={styles.listThModel}>{g.label}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {files.map((file) => {
+              const q = quota[file.name];
+              const status = q?.status ?? 'idle';
+              const isIdle = status === 'idle';
+              const isLoading = status === 'loading';
+              const isError = status === 'error';
+
+              return (
+                <tr key={file.name} className={isError ? styles.listRowError : ''}>
+                  <td className={styles.listTdFile}>
+                    <span className={styles.listFileName}>{file.name}</span>
+                  </td>
+                  <td className={styles.listTdStatus}>
+                    {isLoading ? (
+                      <span className={styles.listStatusLoading}>...</span>
+                    ) : isError ? (
+                      <span className={styles.listStatusError} title={q?.error}>!</span>
+                    ) : isIdle ? (
+                      <button
+                        type="button"
+                        className={styles.listStatusIdle}
+                        disabled={disabled || file.disabled}
+                        onClick={() => onRefreshFile(file)}
+                      >
+                        {t('auth_files.list_click_load')}
+                      </button>
+                    ) : (
+                      <span className={styles.listStatusOk}>OK</span>
+                    )}
+                  </td>
+                  {showCreditColumn && (
+                    <td className={styles.listTdCredit}>
+                      {status === 'success' && q && config.getListCreditBalance
+                        ? (() => {
+                            const balance = config.getListCreditBalance(q);
+                            return balance !== null ? String(balance) : '-';
+                          })()
+                        : '-'}
+                    </td>
+                  )}
+                  {visibleGroups.map((g) => {
+                    const value = status === 'success' && q && config.getListGroupValue
+                      ? config.getListGroupValue(q, g.id)
+                      : null;
+                    return (
+                      <td key={g.id} className={`${styles.listTdModel} ${getPercentClass(value)}`}>
+                        {status === 'success' ? (value !== null ? `${value}%` : '-') : '-'}
+                      </td>
+                    );
+                  })}
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
   );
 }
