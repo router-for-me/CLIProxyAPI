@@ -18,6 +18,8 @@ services:
       network: host
       args:
         <<: *proxy-vars
+        GOPROXY: "${GOPROXY:-https://proxy.golang.org,direct}"
+        GOSUMDB: "${GOSUMDB:-sum.golang.org}"
         VERSION: ${VERSION:-dev}
         COMMIT: ${COMMIT:-none}
         BUILD_DATE: ${BUILD_DATE:-unknown}
