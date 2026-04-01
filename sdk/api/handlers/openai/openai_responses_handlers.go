@@ -82,6 +82,11 @@ func (h *OpenAIResponsesAPIHandler) Responses(c *gin.Context) {
 		return
 	}
 
+	// Strip prompt caching parameters that upstream providers do not support.
+	// These are valid OpenAI Responses API fields but cause 400 errors on
+	// providers like Codex that reject unknown parameters.
+	rawJSON = stripUnsupportedCacheParams(rawJSON)
+
 	// Check if the client requested a streaming response.
 	streamResult := gjson.GetBytes(rawJSON, "stream")
 	if streamResult.Type == gjson.True {
@@ -103,6 +108,8 @@ func (h *OpenAIResponsesAPIHandler) Compact(c *gin.Context) {
 		})
 		return
 	}
+
+	rawJSON = stripUnsupportedCacheParams(rawJSON)
 
 	streamResult := gjson.GetBytes(rawJSON, "stream")
 	if streamResult.Type == gjson.True {
@@ -272,4 +279,21 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flush
 			_, _ = c.Writer.Write([]byte("\n"))
 		},
 	})
+}
+
+// stripUnsupportedCacheParams removes prompt caching parameters
+// (prompt_cache_key, prompt_cache_retention) from the request payload.
+// These are valid OpenAI Responses API fields but are rejected by upstream
+// providers (e.g. Codex) that do not recognise them.
+func stripUnsupportedCacheParams(rawJSON []byte) []byte {
+	if gjson.GetBytes(rawJSON, "prompt_cache_retention").Exists() {
+		rawJSON, _ = sjson.DeleteBytes(rawJSON, "prompt_cache_retention")
+	}
+	if gjson.GetBytes(rawJSON, "prompt_cache_key").Exists() {
+		rawJSON, _ = sjson.DeleteBytes(rawJSON, "prompt_cache_key")
+	}
+	if gjson.GetBytes(rawJSON, "safety_identifier").Exists() {
+		rawJSON, _ = sjson.DeleteBytes(rawJSON, "safety_identifier")
+	}
+	return rawJSON
 }
