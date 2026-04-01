@@ -117,9 +117,9 @@ export function QuotaSection<TState extends QuotaStatusState, TData>({
 
   /* Removed useRef */
   const [columns, gridRef] = useGridColumns(380); // Min card width 380px matches SCSS
-  const [viewMode, setViewMode] = useState<ViewMode>('paged');
-  const [showTooManyWarning, setShowTooManyWarning] = useState(false);
   const hasListMode = Boolean(config.listGroups && config.listGroups.length > 0);
+  const [viewMode, setViewMode] = useState<ViewMode>(hasListMode ? 'list' : 'paged');
+  const [showTooManyWarning, setShowTooManyWarning] = useState(false);
 
   const filteredFiles = useMemo(() => files.filter((file) => config.filterFn(file)), [
     files,
@@ -263,6 +263,18 @@ export function QuotaSection<TState extends QuotaStatusState, TData>({
       extra={
         <div className={styles.headerActions}>
           <div className={styles.viewModeToggle}>
+            {hasListMode && (
+              <Button
+                variant="secondary"
+                size="sm"
+                className={`${styles.viewModeButton} ${
+                  effectiveViewMode === 'list' ? styles.viewModeButtonActive : ''
+                }`}
+                onClick={() => setViewMode('list')}
+              >
+                {t('auth_files.view_mode_list')}
+              </Button>
+            )}
             <Button
               variant="secondary"
               size="sm"
@@ -289,18 +301,6 @@ export function QuotaSection<TState extends QuotaStatusState, TData>({
             >
               {t('auth_files.view_mode_all')}
             </Button>
-            {hasListMode && (
-              <Button
-                variant="secondary"
-                size="sm"
-                className={`${styles.viewModeButton} ${
-                  effectiveViewMode === 'list' ? styles.viewModeButtonActive : ''
-                }`}
-                onClick={() => setViewMode('list')}
-              >
-                {t('auth_files.view_mode_list')}
-              </Button>
-            )}
           </div>
           <Button
             variant="secondary"
