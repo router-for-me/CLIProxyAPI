@@ -142,7 +142,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		AuthValue: authValue,
 	})
 
-	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 10*time.Second)
+	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
 		recordAPIResponseError(ctx, e.cfg, err)
@@ -272,7 +272,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		AuthValue: authValue,
 	})
 
-	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 10*time.Second)
+	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
 		recordAPIResponseError(ctx, e.cfg, err)
