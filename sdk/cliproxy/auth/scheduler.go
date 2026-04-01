@@ -204,7 +204,7 @@ func (s *authScheduler) pickSingle(ctx context.Context, provider, model string, 
 		}
 		return true
 	}
-	if picked := shard.pickReadyLocked(preferWebsocket, s.strategy, predicate); picked != nil {
+	if picked := shard.pickReadyLocked(preferWebsocket, s.strategy, modelKey, predicate); picked != nil {
 		return picked, nil
 	}
 	return nil, shard.unavailableErrorLocked(provider, model, predicate)
@@ -244,7 +244,7 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 			_, ok := tried[pinnedAuthID]
 			return !ok
 		}
-		if picked := shard.pickReadyLocked(false, s.strategy, predicate); picked != nil {
+		if picked := shard.pickReadyLocked(false, s.strategy, modelKey, predicate); picked != nil {
 			return picked, providerKey, nil
 		}
 		return nil, "", shard.unavailableErrorLocked("mixed", model, predicate)
@@ -265,7 +265,7 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 		if shard == nil {
 			continue
 		}
-		priorityReady, okPriority := shard.highestReadyPriorityLocked(false, predicate)
+		priorityReady, okPriority := shard.highestReadyPriorityLocked(false, modelKey, predicate)
 		if !okPriority {
 			continue
 		}
@@ -284,7 +284,7 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 			if shard == nil {
 				continue
 			}
-			picked := shard.pickReadyAtPriorityLocked(false, bestPriority, s.strategy, predicate)
+			picked := shard.pickReadyAtPriorityLocked(false, bestPriority, s.strategy, modelKey, predicate)
 			if picked != nil {
 				return picked, providerKey, nil
 			}
@@ -338,7 +338,7 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 		if shard == nil {
 			continue
 		}
-		picked := shard.pickReadyAtPriorityLocked(false, bestPriority, schedulerStrategyRoundRobin, predicate)
+		picked := shard.pickReadyAtPriorityLocked(false, bestPriority, schedulerStrategyRoundRobin, modelKey, predicate)
 		if picked == nil {
 			continue
 		}
@@ -678,21 +678,21 @@ func (m *modelScheduler) promoteExpiredLocked(now time.Time) {
 }
 
 // pickReadyLocked selects the next ready auth from the highest available priority bucket.
-func (m *modelScheduler) pickReadyLocked(preferWebsocket bool, strategy schedulerStrategy, predicate func(*scheduledAuth) bool) *Auth {
+func (m *modelScheduler) pickReadyLocked(preferWebsocket bool, strategy schedulerStrategy, model string, predicate func(*scheduledAuth) bool) *Auth {
 	if m == nil {
 		return nil
 	}
 	m.promoteExpiredLocked(time.Now())
-	priorityReady, okPriority := m.highestReadyPriorityLocked(preferWebsocket, predicate)
+	priorityReady, okPriority := m.highestReadyPriorityLocked(preferWebsocket, model, predicate)
 	if !okPriority {
 		return nil
 	}
-	return m.pickReadyAtPriorityLocked(preferWebsocket, priorityReady, strategy, predicate)
+	return m.pickReadyAtPriorityLocked(preferWebsocket, priorityReady, strategy, model, predicate)
 }
 
 // highestReadyPriorityLocked returns the highest priority bucket that still has a matching ready auth.
 // The caller must ensure expired entries are already promoted when needed.
-func (m *modelScheduler) highestReadyPriorityLocked(preferWebsocket bool, predicate func(*scheduledAuth) bool) (int, bool) {
+func (m *modelScheduler) highestReadyPriorityLocked(preferWebsocket bool, model string, predicate func(*scheduledAuth) bool) (int, bool) {
 	if m == nil {
 		return 0, false
 	}
@@ -705,7 +705,7 @@ func (m *modelScheduler) highestReadyPriorityLocked(preferWebsocket bool, predic
 		if preferWebsocket && len(bucket.ws.flat) > 0 {
 			view = &bucket.ws
 		}
-		if view.pickFirst(predicate) != nil {
+		if view.pickFirstWithCircuitBreaker(model, predicate) != nil {
 			return priority, true
 		}
 	}
@@ -714,7 +714,7 @@ func (m *modelScheduler) highestReadyPriorityLocked(preferWebsocket bool, predic
 
 // pickReadyAtPriorityLocked selects the next ready auth from a specific priority bucket.
 // The caller must ensure expired entries are already promoted when needed.
-func (m *modelScheduler) pickReadyAtPriorityLocked(preferWebsocket bool, priority int, strategy schedulerStrategy, predicate func(*scheduledAuth) bool) *Auth {
+func (m *modelScheduler) pickReadyAtPriorityLocked(preferWebsocket bool, priority int, strategy schedulerStrategy, model string, predicate func(*scheduledAuth) bool) *Auth {
 	if m == nil {
 		return nil
 	}
@@ -728,9 +728,9 @@ func (m *modelScheduler) pickReadyAtPriorityLocked(preferWebsocket bool, priorit
 	}
 	var picked *scheduledAuth
 	if strategy == schedulerStrategyFillFirst {
-		picked = view.pickFirst(predicate)
+		picked = view.pickFirstWithCircuitBreaker(model, predicate)
 	} else {
-		picked = view.pickRoundRobin(predicate)
+		picked = view.pickRoundRobinWithCircuitBreaker(model, predicate)
 	}
 	if picked == nil || picked.auth == nil {
 		return nil
@@ -915,6 +915,49 @@ func (v *readyView) pickRoundRobin(predicate func(*scheduledAuth) bool) *schedul
 		index := (start + offset) % len(v.flat)
 		entry := v.flat[index]
 		if predicate != nil && !predicate(entry) {
+			continue
+		}
+		v.cursor = index + 1
+		return entry
+	}
+	return nil
+}
+
+// pickFirstWithCircuitBreaker returns the first ready entry that satisfies predicate and is not circuit-broken.
+func (v *readyView) pickFirstWithCircuitBreaker(model string, predicate func(*scheduledAuth) bool) *scheduledAuth {
+	reg := registry.GetGlobalRegistry()
+	for _, entry := range v.flat {
+		if entry == nil || entry.auth == nil {
+			continue
+		}
+		if predicate != nil && !predicate(entry) {
+			continue
+		}
+		if reg != nil && reg.IsCircuitOpen(entry.auth.ID, model) {
+			continue
+		}
+		return entry
+	}
+	return nil
+}
+
+// pickRoundRobinWithCircuitBreaker returns the next ready entry that is not circuit-broken.
+func (v *readyView) pickRoundRobinWithCircuitBreaker(model string, predicate func(*scheduledAuth) bool) *scheduledAuth {
+	reg := registry.GetGlobalRegistry()
+	if len(v.flat) == 0 {
+		return nil
+	}
+	start := v.cursor % len(v.flat)
+	for offset := 0; offset < len(v.flat); offset++ {
+		index := (start + offset) % len(v.flat)
+		entry := v.flat[index]
+		if entry == nil || entry.auth == nil {
+			continue
+		}
+		if predicate != nil && !predicate(entry) {
+			continue
+		}
+		if reg != nil && reg.IsCircuitOpen(entry.auth.ID, model) {
 			continue
 		}
 		v.cursor = index + 1

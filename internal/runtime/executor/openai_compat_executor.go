@@ -142,10 +142,22 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		AuthValue: authValue,
 	})
 
-	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 10*time.Second)
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
 		recordAPIResponseError(ctx, e.cfg, err)
+		if auth != nil {
+			compatCfg := e.resolveCompatConfig(auth)
+			threshold := 2
+			timeoutSec := 3
+			if compatCfg != nil && compatCfg.CircuitBreakerFailureThreshold > 0 {
+				threshold = compatCfg.CircuitBreakerFailureThreshold
+			}
+			if compatCfg != nil && compatCfg.CircuitBreakerRecoveryTimeout > 0 {
+				timeoutSec = compatCfg.CircuitBreakerRecoveryTimeout
+			}
+			registry.GetGlobalRegistry().RecordFailure(auth.ID, baseModel, threshold, timeoutSec)
+		}
 		return resp, err
 	}
 	defer func() {
@@ -260,10 +272,22 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		AuthValue: authValue,
 	})
 
-	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 10*time.Second)
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
 		recordAPIResponseError(ctx, e.cfg, err)
+		if auth != nil {
+			compatCfg := e.resolveCompatConfig(auth)
+			threshold := 2
+			timeoutSec := 3
+			if compatCfg != nil && compatCfg.CircuitBreakerFailureThreshold > 0 {
+				threshold = compatCfg.CircuitBreakerFailureThreshold
+			}
+			if compatCfg != nil && compatCfg.CircuitBreakerRecoveryTimeout > 0 {
+				timeoutSec = compatCfg.CircuitBreakerRecoveryTimeout
+			}
+			registry.GetGlobalRegistry().RecordFailure(auth.ID, baseModel, threshold, timeoutSec)
+		}
 		return nil, err
 	}
 	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
@@ -277,8 +301,8 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
 		if auth != nil {
 			compatCfg := e.resolveCompatConfig(auth)
-			threshold := 5
-			timeoutSec := 60
+			threshold := 2
+			timeoutSec := 3
 			if compatCfg != nil && compatCfg.CircuitBreakerFailureThreshold > 0 {
 				threshold = compatCfg.CircuitBreakerFailureThreshold
 			}

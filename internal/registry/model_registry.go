@@ -793,7 +793,7 @@ func (r *ModelRegistry) RecordFailure(clientID, modelID string, threshold int, r
 		}
 	} else if tracker.State == CircuitOpen && now.After(tracker.RecoveryAt) {
 		tracker.State = CircuitHalfOpen
-		tracker.Count = 1
+		tracker.Count = 0
 		tracker.LastFailure = now
 		r.invalidateAvailableModelsCacheLocked()
 		log.Debugf("Circuit breaker HALF-OPEN for client %s, model %s", clientID, modelID)
@@ -802,7 +802,7 @@ func (r *ModelRegistry) RecordFailure(clientID, modelID string, threshold int, r
 		tracker.Count++
 		tracker.LastFailure = now
 		if tracker.Count >= threshold {
-			timeout := recoveryTimeoutSec * (1 << tracker.FailureCount)
+			timeout := recoveryTimeoutSec * (1 << (tracker.FailureCount - 1))
 			if timeout <= 0 {
 				timeout = 60
 			}
@@ -860,6 +860,13 @@ func (r *ModelRegistry) isCircuitOpenLocked(clientID, modelID string) bool {
 		return false
 	}
 	return tracker.State == CircuitOpen
+}
+
+// IsCircuitOpen checks if the circuit breaker is open for a specific client and model.
+func (r *ModelRegistry) IsCircuitOpen(clientID, modelID string) bool {
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+	return r.isCircuitOpenLocked(clientID, modelID)
 }
 
 func (r *ModelRegistry) ResetCircuitBreaker(clientID, modelID string) {
