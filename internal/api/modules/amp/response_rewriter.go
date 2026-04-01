@@ -254,11 +254,6 @@ func (rw *ResponseRewriter) rewriteStreamChunk(chunk []byte) []byte {
 				jsonData := bytes.TrimPrefix(bytes.TrimSpace(lines[dataIdx]), []byte("data: "))
 				if len(jsonData) > 0 && jsonData[0] == '{' {
 					rewritten := rw.rewriteStreamEvent(jsonData)
-					if rewritten == nil {
-						// Event suppressed (e.g. thinking block), skip event+data pair
-						i = dataIdx + 1
-						continue
-					}
 					// Emit event line
 					out = append(out, line)
 					// Emit blank lines between event and data
@@ -284,9 +279,7 @@ func (rw *ResponseRewriter) rewriteStreamChunk(chunk []byte) []byte {
 			jsonData := bytes.TrimPrefix(trimmed, []byte("data: "))
 			if len(jsonData) > 0 && jsonData[0] == '{' {
 				rewritten := rw.rewriteStreamEvent(jsonData)
-				if rewritten != nil {
-					out = append(out, append([]byte("data: "), rewritten...))
-				}
+				out = append(out, append([]byte("data: "), rewritten...))
 				i++
 				continue
 			}
@@ -302,13 +295,10 @@ func (rw *ResponseRewriter) rewriteStreamChunk(chunk []byte) []byte {
 
 // rewriteStreamEvent processes a single JSON event in the SSE stream.
 // It rewrites model names and ensures signature fields exist.
+// NOTE: streaming mode does NOT suppress thinking blocks - they are
+// passed through with signature injection to avoid breaking SSE index
+// alignment and TUI rendering.
 func (rw *ResponseRewriter) rewriteStreamEvent(data []byte) []byte {
-	// Suppress thinking blocks before any other processing.
-	data = rw.suppressAmpThinking(data)
-	if len(data) == 0 {
-		return nil
-	}
-
 	// Inject empty signature where needed
 	data = ensureAmpSignature(data)
 
