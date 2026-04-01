@@ -876,7 +876,6 @@ func TestUserFileContentTranslated(t *testing.T) {
 				"role": "user",
 				"content": [
 					{"type": "text", "text": "Analyze these files"},
-					{"type": "file", "file": {"file_id": "file-123", "filename": "a.txt"}},
 					{"type": "file", "file": {"file_url": "https://example.com/b.pdf", "filename": "b.pdf"}},
 					{"type": "file", "file": {"file_data": "ZmlsZSBjb250ZW50", "filename": "c.txt"}}
 				]
@@ -893,8 +892,59 @@ func TestUserFileContentTranslated(t *testing.T) {
 	}
 
 	content := items[0].Get("content").Array()
-	if len(content) != 4 {
-		t.Fatalf("expected 4 content parts, got %d: %s", len(content), items[0].Get("content").Raw)
+	if len(content) != 3 {
+		t.Fatalf("expected 3 content parts, got %d: %s", len(content), items[0].Get("content").Raw)
+	}
+
+	if content[0].Get("type").String() != "input_text" {
+		t.Errorf("part 0: expected input_text, got %s", content[0].Get("type").String())
+	}
+
+	if content[1].Get("type").String() != "input_file" {
+		t.Errorf("part 1: expected input_file, got %s", content[1].Get("type").String())
+	}
+	if content[1].Get("file_url").String() != "https://example.com/b.pdf" {
+		t.Errorf("part 1: expected file_url https://example.com/b.pdf, got %s", content[1].Get("file_url").String())
+	}
+	if content[1].Get("filename").String() != "b.pdf" {
+		t.Errorf("part 1: expected filename b.pdf, got %s", content[1].Get("filename").String())
+	}
+
+	if content[2].Get("file_data").String() != "ZmlsZSBjb250ZW50" {
+		t.Errorf("part 2: expected file_data ZmlsZSBjb250ZW50, got %s", content[2].Get("file_data").String())
+	}
+	if content[2].Get("filename").String() != "c.txt" {
+		t.Errorf("part 2: expected filename c.txt, got %s", content[2].Get("filename").String())
+	}
+}
+
+func TestUserFileContentSkipsFilenameOnlyAndFileIDOnlyParts(t *testing.T) {
+	input := []byte(`{
+		"model": "gpt-4o",
+		"messages": [
+			{
+				"role": "user",
+				"content": [
+					{"type": "text", "text": "Analyze these files"},
+					{"type": "file", "file": {"filename": "missing-source.pdf"}},
+					{"type": "file", "file": {"file_id": "file-123", "filename": "a.txt"}},
+					{"type": "file", "file": {"file_url": "https://example.com/b.pdf", "filename": "b.pdf"}}
+				]
+			}
+		]
+	}`)
+
+	out := ConvertOpenAIRequestToCodex("gpt-4o", input, true)
+	result := string(out)
+
+	items := gjson.Get(result, "input").Array()
+	if len(items) != 1 {
+		t.Fatalf("expected 1 input item, got %d: %s", len(items), gjson.Get(result, "input").Raw)
+	}
+
+	content := items[0].Get("content").Array()
+	if len(content) != 2 {
+		t.Fatalf("expected 2 content parts, got %d: %s", len(content), items[0].Get("content").Raw)
 	}
 
 	if content[0].Get("type").String() != "input_text" {
@@ -903,25 +953,11 @@ func TestUserFileContentTranslated(t *testing.T) {
 	if content[1].Get("type").String() != "input_file" {
 		t.Errorf("part 1: expected input_file, got %s", content[1].Get("type").String())
 	}
-	if content[1].Get("file_id").String() != "file-123" {
-		t.Errorf("part 1: expected file_id file-123, got %s", content[1].Get("file_id").String())
+	if content[1].Get("file_url").String() != "https://example.com/b.pdf" {
+		t.Errorf("part 1: expected file_url https://example.com/b.pdf, got %s", content[1].Get("file_url").String())
 	}
-	if content[1].Get("filename").String() != "a.txt" {
-		t.Errorf("part 1: expected filename a.txt, got %s", content[1].Get("filename").String())
-	}
-
-	if content[2].Get("file_url").String() != "https://example.com/b.pdf" {
-		t.Errorf("part 2: expected file_url https://example.com/b.pdf, got %s", content[2].Get("file_url").String())
-	}
-	if content[2].Get("filename").String() != "b.pdf" {
-		t.Errorf("part 2: expected filename b.pdf, got %s", content[2].Get("filename").String())
-	}
-
-	if content[3].Get("file_data").String() != "ZmlsZSBjb250ZW50" {
-		t.Errorf("part 3: expected file_data ZmlsZSBjb250ZW50, got %s", content[3].Get("file_data").String())
-	}
-	if content[3].Get("filename").String() != "c.txt" {
-		t.Errorf("part 3: expected filename c.txt, got %s", content[3].Get("filename").String())
+	if content[1].Get("filename").String() != "b.pdf" {
+		t.Errorf("part 1: expected filename b.pdf, got %s", content[1].Get("filename").String())
 	}
 }
 

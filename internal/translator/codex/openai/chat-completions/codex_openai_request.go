@@ -264,7 +264,7 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 								fileURL := it.Get("file.file_url").String()
 								filename := it.Get("file.filename").String()
 
-								if fileID != "" || fileData != "" || fileURL != "" || filename != "" {
+								if fileData != "" || fileURL != "" {
 									part := []byte(`{}`)
 									part, _ = sjson.SetBytes(part, "type", "input_file")
 									if fileID != "" {
