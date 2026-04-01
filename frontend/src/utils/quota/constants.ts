@@ -67,6 +67,12 @@ export const ANTIGRAVITY_QUOTA_URLS = [
   'https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels',
 ];
 
+export const ANTIGRAVITY_CODE_ASSIST_URLS = [
+  'https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist',
+  'https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:loadCodeAssist',
+  'https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist',
+];
+
 export const ANTIGRAVITY_REQUEST_HEADERS = {
   Authorization: 'Bearer $TOKEN$',
   'Content-Type': 'application/json',
