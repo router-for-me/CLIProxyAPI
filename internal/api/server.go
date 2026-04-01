@@ -529,6 +529,10 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PUT("/quota-exceeded/switch-preview-model", s.mgmt.PutSwitchPreviewModel)
 		mgmt.PATCH("/quota-exceeded/switch-preview-model", s.mgmt.PutSwitchPreviewModel)
 
+		mgmt.GET("/circuit-breaker", s.mgmt.GetCircuitBreaker)
+		mgmt.DELETE("/circuit-breaker", s.mgmt.DeleteCircuitBreaker)
+		mgmt.PUT("/circuit-breaker", s.mgmt.PutCircuitBreaker)
+
 		mgmt.GET("/api-keys", s.mgmt.GetAPIKeys)
 		mgmt.PUT("/api-keys", s.mgmt.PutAPIKeys)
 		mgmt.PATCH("/api-keys", s.mgmt.PatchAPIKeys)

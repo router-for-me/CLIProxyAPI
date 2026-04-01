@@ -83,6 +83,32 @@ type ThinkingSupport struct {
 	Levels []string `json:"levels,omitempty" yaml:"levels,omitempty"`
 }
 
+// CircuitBreakerState represents the state of a circuit breaker.
+type CircuitBreakerState string
+
+const (
+	CircuitClosed CircuitBreakerState = "closed"
+	CircuitOpen   CircuitBreakerState = "open"
+	CircuitHalfOpen CircuitBreakerState = "half-open"
+)
+
+// failureTracker tracks consecutive failures for circuit breaker logic.
+type failureTracker struct {
+	Count        int               `json:"count"`
+	LastFailure  time.Time         `json:"lastFailure"`
+	State        CircuitBreakerState `json:"state"`
+	RecoveryAt   time.Time         `json:"recoveryAt"`
+	FailureCount int               `json:"failureCount"`
+}
+
+// CircuitBreakerStatus describes the current circuit breaker state for a client-model pair.
+type CircuitBreakerStatus struct {
+	State       CircuitBreakerState `json:"state"`
+	FailureCount int               `json:"failureCount"`
+	LastFailure  time.Time          `json:"lastFailure"`
+	RecoveryAt   time.Time         `json:"recoveryAt,omitempty"`
+}
+
 // ModelRegistration tracks a model's availability
 type ModelRegistration struct {
 	// Info contains the model metadata
@@ -99,6 +125,8 @@ type ModelRegistration struct {
 	Providers map[string]int
 	// SuspendedClients tracks temporarily disabled clients keyed by client ID
 	SuspendedClients map[string]string
+	// CircuitBreakerClients tracks clients with triggered circuit breakers (clientID -> tracker)
+	CircuitBreakerClients map[string]*failureTracker `json:"-"`
 }
 
 // ModelRegistryHook provides optional callbacks for external integrations to track model list changes.
@@ -724,6 +752,194 @@ func (r *ModelRegistry) ResumeClientModel(clientID, modelID string) {
 	log.Debugf("Resumed client %s for model %s", clientID, modelID)
 }
 
+const defaultCircuitBreakerRecoveryTimeout = 60 * time.Second
+
+func (r *ModelRegistry) RecordFailure(clientID, modelID string, threshold int, recoveryTimeoutSec int) {
+	if clientID == "" || modelID == "" || threshold <= 0 {
+		return
+	}
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+	r.ensureAvailableModelsCacheLocked()
+
+	registration, exists := r.models[modelID]
+	if !exists || registration == nil {
+		return
+	}
+	if registration.CircuitBreakerClients == nil {
+		registration.CircuitBreakerClients = make(map[string]*failureTracker)
+	}
+	tracker, exists := registration.CircuitBreakerClients[clientID]
+	now := time.Now()
+	if !exists {
+		tracker = &failureTracker{State: CircuitClosed}
+		registration.CircuitBreakerClients[clientID] = tracker
+	}
+	if tracker.State == CircuitClosed {
+		tracker.Count++
+		tracker.LastFailure = now
+		if tracker.Count >= threshold {
+			tracker.State = CircuitOpen
+			timeout := recoveryTimeoutSec
+			if timeout <= 0 {
+				timeout = 60
+			}
+			tracker.RecoveryAt = now.Add(time.Duration(timeout) * time.Second)
+			tracker.FailureCount++
+			r.invalidateAvailableModelsCacheLocked()
+			log.Debugf("Circuit breaker OPENED for client %s, model %s (failures=%d, failureCount=%d, recoveryAt=%s)",
+				clientID, modelID, tracker.Count, tracker.FailureCount, tracker.RecoveryAt.Format(time.RFC3339))
+			return
+		}
+	} else if tracker.State == CircuitOpen && now.After(tracker.RecoveryAt) {
+		tracker.State = CircuitHalfOpen
+		tracker.Count = 1
+		tracker.LastFailure = now
+		r.invalidateAvailableModelsCacheLocked()
+		log.Debugf("Circuit breaker HALF-OPEN for client %s, model %s", clientID, modelID)
+		return
+	} else if tracker.State == CircuitHalfOpen {
+		tracker.Count++
+		tracker.LastFailure = now
+		if tracker.Count >= threshold {
+			timeout := recoveryTimeoutSec * (1 << tracker.FailureCount)
+			if timeout <= 0 {
+				timeout = 60
+			}
+			if timeout > 3600 {
+				timeout = 3600
+			}
+			tracker.State = CircuitOpen
+			tracker.RecoveryAt = now.Add(time.Duration(timeout) * time.Second)
+			r.invalidateAvailableModelsCacheLocked()
+			log.Debugf("Circuit breaker re-OPENED for client %s, model %s (failureCount=%d, recoveryAt=%s)",
+				clientID, modelID, tracker.FailureCount, tracker.RecoveryAt.Format(time.RFC3339))
+		}
+	}
+}
+
+func (r *ModelRegistry) RecordSuccess(clientID, modelID string) {
+	if clientID == "" || modelID == "" {
+		return
+	}
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+	r.ensureAvailableModelsCacheLocked()
+
+	registration, exists := r.models[modelID]
+	if !exists || registration == nil || registration.CircuitBreakerClients == nil {
+		return
+	}
+	tracker, exists := registration.CircuitBreakerClients[clientID]
+	if !exists || tracker.State == CircuitClosed {
+		return
+	}
+	if tracker.State == CircuitHalfOpen {
+		tracker.State = CircuitClosed
+		tracker.Count = 0
+		r.invalidateAvailableModelsCacheLocked()
+		log.Debugf("Circuit breaker CLOSED (recovery success) for client %s, model %s", clientID, modelID)
+	} else {
+		tracker.Count = 0
+	}
+}
+
+func (r *ModelRegistry) isCircuitOpenLocked(clientID, modelID string) bool {
+	registration, exists := r.models[modelID]
+	if !exists || registration == nil || registration.CircuitBreakerClients == nil {
+		return false
+	}
+	tracker, exists := registration.CircuitBreakerClients[clientID]
+	if !exists || tracker.State == CircuitClosed {
+		return false
+	}
+	if tracker.State == CircuitOpen && time.Now().After(tracker.RecoveryAt) {
+		tracker.State = CircuitHalfOpen
+		tracker.Count = 0
+		r.invalidateAvailableModelsCacheLocked()
+		return false
+	}
+	return tracker.State == CircuitOpen
+}
+
+func (r *ModelRegistry) ResetCircuitBreaker(clientID, modelID string) {
+	if clientID == "" || modelID == "" {
+		return
+	}
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+	r.ensureAvailableModelsCacheLocked()
+
+	registration, exists := r.models[modelID]
+	if !exists || registration == nil || registration.CircuitBreakerClients == nil {
+		return
+	}
+	if _, exists := registration.CircuitBreakerClients[clientID]; exists {
+		delete(registration.CircuitBreakerClients, clientID)
+		r.invalidateAvailableModelsCacheLocked()
+		log.Debugf("Circuit breaker manually reset for client %s, model %s", clientID, modelID)
+	}
+}
+
+func (r *ModelRegistry) ForceOpenCircuitBreaker(clientID, modelID string) {
+	if clientID == "" || modelID == "" {
+		return
+	}
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+	r.ensureAvailableModelsCacheLocked()
+
+	registration, exists := r.models[modelID]
+	if !exists || registration == nil {
+		return
+	}
+	if registration.CircuitBreakerClients == nil {
+		registration.CircuitBreakerClients = make(map[string]*failureTracker)
+	}
+	tracker, exists := registration.CircuitBreakerClients[clientID]
+	if !exists {
+		tracker = &failureTracker{}
+		registration.CircuitBreakerClients[clientID] = tracker
+	}
+	tracker.State = CircuitOpen
+	tracker.RecoveryAt = time.Now().Add(time.Hour * 24)
+	tracker.LastFailure = time.Now()
+	tracker.FailureCount = 999
+	r.invalidateAvailableModelsCacheLocked()
+	log.Debugf("Circuit breaker manually forced open for client %s, model %s", clientID, modelID)
+}
+
+func (r *ModelRegistry) GetCircuitBreakerStatus() map[string]map[string]CircuitBreakerStatus {
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+	log.Infof("GetCircuitBreakerStatus called, total models: %d", len(r.models))
+
+	result := make(map[string]map[string]CircuitBreakerStatus)
+	for modelID, registration := range r.models {
+		if registration == nil || registration.CircuitBreakerClients == nil {
+			continue
+		}
+		for clientID, tracker := range registration.CircuitBreakerClients {
+			if tracker == nil {
+				continue
+			}
+			if _, ok := result[clientID]; !ok {
+				result[clientID] = make(map[string]CircuitBreakerStatus)
+			}
+			status := CircuitBreakerStatus{
+				State:        tracker.State,
+				FailureCount: tracker.Count,
+				LastFailure:  tracker.LastFailure,
+			}
+			if tracker.State == CircuitOpen {
+				status.RecoveryAt = tracker.RecoveryAt
+			}
+			result[clientID][modelID] = status
+		}
+	}
+	return result
+}
+
 // ClientSupportsModel reports whether the client registered support for modelID.
 func (r *ModelRegistry) ClientSupportsModel(clientID, modelID string) bool {
 	clientID = strings.TrimSpace(clientID)
@@ -816,7 +1032,22 @@ func (r *ModelRegistry) buildAvailableModelsLocked(handlerType string, now time.
 			}
 		}
 
-		effectiveClients := availableClients - expiredClients - otherSuspended
+		circuitOpenClients := 0
+		if registration.CircuitBreakerClients != nil {
+			for _, tracker := range registration.CircuitBreakerClients {
+				if tracker == nil {
+					continue
+				}
+				if tracker.State == CircuitOpen && now.Before(tracker.RecoveryAt) {
+					circuitOpenClients++
+					if !tracker.RecoveryAt.IsZero() && (expiresAt.IsZero() || tracker.RecoveryAt.Before(expiresAt)) {
+						expiresAt = tracker.RecoveryAt
+					}
+				}
+			}
+		}
+
+		effectiveClients := availableClients - expiredClients - otherSuspended - circuitOpenClients
 		if effectiveClients < 0 {
 			effectiveClients = 0
 		}
@@ -942,6 +1173,7 @@ func (r *ModelRegistry) GetAvailableModelsByProvider(provider string) []*ModelIn
 		expiredClients := 0
 		cooldownSuspended := 0
 		otherSuspended := 0
+		circuitOpenClients := 0
 		if ok && registration != nil {
 			if registration.QuotaExceededClients != nil {
 				for clientID, quotaTime := range registration.QuotaExceededClients {
@@ -971,10 +1203,23 @@ func (r *ModelRegistry) GetAvailableModelsByProvider(provider string) []*ModelIn
 					otherSuspended++
 				}
 			}
+			if registration.CircuitBreakerClients != nil {
+				for clientID, tracker := range registration.CircuitBreakerClients {
+					if clientID == "" || tracker == nil {
+						continue
+					}
+					if p, okProvider := r.clientProviders[clientID]; !okProvider || p != provider {
+						continue
+					}
+					if tracker.State == CircuitOpen && now.Before(tracker.RecoveryAt) {
+						circuitOpenClients++
+					}
+				}
+			}
 		}
 
 		availableClients := entry.count
-		effectiveClients := availableClients - expiredClients - otherSuspended
+		effectiveClients := availableClients - expiredClients - otherSuspended - circuitOpenClients
 		if effectiveClients < 0 {
 			effectiveClients = 0
 		}
