@@ -54,7 +54,7 @@ var lastRefreshKeys = []string{"last_refresh", "lastRefresh", "last_refreshed_at
 const (
 	anthropicCallbackPort = 54545
 	geminiCallbackPort    = 8085
-	codexCallbackPort     = 1455
+	codexCallbackPort     = codex.DefaultCallbackPort
 	geminiCLIEndpoint     = "https://cloudcode-pa.googleapis.com"
 	geminiCLIVersion      = "v1internal"
 	gitLabLoginModeOAuth  = "oauth"
@@ -141,6 +141,10 @@ func isWebUIRequest(c *gin.Context) bool {
 }
 
 func startCallbackForwarder(port int, provider, targetBase string) (*callbackForwarder, error) {
+	return startCallbackForwarderOn("127.0.0.1", port, provider, targetBase)
+}
+
+func startCallbackForwarderOn(bindHost string, port int, provider, targetBase string) (*callbackForwarder, error) {
 	callbackForwardersMu.Lock()
 	prev := callbackForwarders[port]
 	if prev != nil {
@@ -152,7 +156,12 @@ func startCallbackForwarder(port int, provider, targetBase string) (*callbackFor
 		stopForwarderInstance(port, prev)
 	}
 
-	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	bindHost = strings.TrimSpace(bindHost)
+	if bindHost == "" {
+		bindHost = "127.0.0.1"
+	}
+
+	addr := net.JoinHostPort(bindHost, strconv.Itoa(port))
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("failed to listen on %s: %w", addr, err)
@@ -245,6 +254,117 @@ func (h *Handler) managementCallbackURL(path string) (string, error) {
 		scheme = "https"
 	}
 	return fmt.Sprintf("%s://127.0.0.1:%d%s", scheme, h.cfg.Port, path), nil
+}
+
+func normalizePublicBaseURL(raw string) (string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", fmt.Errorf("public base URL is empty")
+	}
+	parsed, err := url.Parse(trimmed)
+	if err != nil {
+		return "", fmt.Errorf("invalid public base URL: %w", err)
+	}
+	if parsed.Scheme == "" || parsed.Host == "" {
+		return "", fmt.Errorf("invalid public base URL: missing scheme or host")
+	}
+	return (&url.URL{Scheme: parsed.Scheme, Host: parsed.Host}).String(), nil
+}
+
+func requestPublicBaseURL(c *gin.Context) (string, error) {
+	if c == nil || c.Request == nil {
+		return "", fmt.Errorf("request is not available")
+	}
+
+	scheme := "http"
+	if proto := strings.TrimSpace(strings.Split(c.GetHeader("X-Forwarded-Proto"), ",")[0]); proto != "" {
+		scheme = proto
+	} else if c.Request.TLS != nil {
+		scheme = "https"
+	}
+
+	host := strings.TrimSpace(strings.Split(c.GetHeader("X-Forwarded-Host"), ",")[0])
+	if host == "" {
+		host = strings.TrimSpace(c.Request.Host)
+	}
+	if host == "" {
+		return "", fmt.Errorf("request host is empty")
+	}
+
+	if forwardedPort := strings.TrimSpace(strings.Split(c.GetHeader("X-Forwarded-Port"), ",")[0]); forwardedPort != "" && !strings.Contains(host, ":") {
+		if !((scheme == "http" && forwardedPort == "80") || (scheme == "https" && forwardedPort == "443")) {
+			host = net.JoinHostPort(host, forwardedPort)
+		}
+	}
+
+	return (&url.URL{Scheme: scheme, Host: host}).String(), nil
+}
+
+func joinPublicBaseURL(baseURL, path string) (string, error) {
+	normalizedBaseURL, err := normalizePublicBaseURL(baseURL)
+	if err != nil {
+		return "", err
+	}
+	parsed, err := url.Parse(normalizedBaseURL)
+	if err != nil {
+		return "", err
+	}
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	parsed.Path = path
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	return parsed.String(), nil
+}
+
+func (h *Handler) codexPublicBaseURL(c *gin.Context) (string, error) {
+	if h != nil && h.cfg != nil {
+		if baseURL := strings.TrimSpace(h.cfg.CodexOAuth.PublicBaseURL); baseURL != "" {
+			return normalizePublicBaseURL(baseURL)
+		}
+	}
+	return requestPublicBaseURL(c)
+}
+
+func (h *Handler) codexPublicCallbackPort() int {
+	if h != nil && h.cfg != nil && h.cfg.CodexOAuth.PublicCallbackPort > 0 {
+		return h.cfg.CodexOAuth.PublicCallbackPort
+	}
+	return codex.DefaultCallbackPort
+}
+
+func (h *Handler) codexCallbackBindHost() string {
+	if h != nil && h.cfg != nil {
+		if bindHost := strings.TrimSpace(h.cfg.CodexOAuth.BindHost); bindHost != "" {
+			return bindHost
+		}
+	}
+	return "127.0.0.1"
+}
+
+func (h *Handler) codexRedirectURL(c *gin.Context) (string, error) {
+	if h != nil && h.cfg != nil {
+		if redirectURL := strings.TrimSpace(h.cfg.CodexOAuth.RedirectURL); redirectURL != "" {
+			if normalized, err := url.Parse(redirectURL); err == nil && normalized.Scheme != "" && normalized.Host != "" {
+				return normalized.String(), nil
+			}
+			return "", fmt.Errorf("invalid codex redirect URL")
+		}
+	}
+	publicBaseURL, err := h.codexPublicBaseURL(c)
+	if err != nil {
+		return "", err
+	}
+	return codex.RedirectURIForPublicBase(publicBaseURL, h.codexPublicCallbackPort())
+}
+
+func (h *Handler) codexManagementCallbackURL(c *gin.Context, path string) (string, error) {
+	publicBaseURL, err := h.codexPublicBaseURL(c)
+	if err != nil {
+		return "", err
+	}
+	return joinPublicBaseURL(publicBaseURL, path)
 }
 
 func (h *Handler) ListAuthFiles(c *gin.Context) {
@@ -1890,8 +2010,19 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 	// Initialize Codex auth service
 	openaiAuth := codex.NewCodexAuth(h.cfg)
 
+	isWebUI := isWebUIRequest(c)
+	redirectURI := codex.RedirectURIForPort(codex.DefaultCallbackPort)
+	if isWebUI {
+		redirectURI, err = h.codexRedirectURL(c)
+		if err != nil {
+			log.WithError(err).Error("failed to compute codex redirect URL")
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to compute codex redirect url"})
+			return
+		}
+	}
+
 	// Generate authorization URL
-	authURL, err := openaiAuth.GenerateAuthURL(state, pkceCodes)
+	authURL, err := openaiAuth.GenerateAuthURLWithRedirect(state, pkceCodes, redirectURI)
 	if err != nil {
 		log.Errorf("Failed to generate authorization URL: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate authorization url"})
@@ -1900,17 +2031,16 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 
 	RegisterOAuthSession(state, "codex")
 
-	isWebUI := isWebUIRequest(c)
 	var forwarder *callbackForwarder
 	if isWebUI {
-		targetURL, errTarget := h.managementCallbackURL("/codex/callback")
+		targetURL, errTarget := h.codexManagementCallbackURL(c, "/codex/callback")
 		if errTarget != nil {
 			log.WithError(errTarget).Error("failed to compute codex callback target")
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "callback server unavailable"})
 			return
 		}
 		var errStart error
-		if forwarder, errStart = startCallbackForwarder(codexCallbackPort, "codex", targetURL); errStart != nil {
+		if forwarder, errStart = startCallbackForwarderOn(h.codexCallbackBindHost(), codexCallbackPort, "codex", targetURL); errStart != nil {
 			log.WithError(errStart).Error("failed to start codex callback forwarder")
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start callback server"})
 			return
@@ -1960,7 +2090,7 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 
 		log.Debug("Authorization code received, exchanging for tokens...")
 		// Exchange code for tokens using internal auth service
-		bundle, errExchange := openaiAuth.ExchangeCodeForTokens(ctx, code, pkceCodes)
+		bundle, errExchange := openaiAuth.ExchangeCodeForTokensWithRedirect(ctx, code, redirectURI, pkceCodes)
 		if errExchange != nil {
 			authErr := codex.NewAuthenticationError(codex.ErrCodeExchangeFailed, errExchange)
 			SetOAuthSessionError(state, "Failed to exchange authorization code for tokens")

@@ -145,6 +145,9 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if codexUsesConversationAPI(auth) {
+		return e.CodexExecutor.Execute(ctx, auth, req, opts)
+	}
 	if opts.Alt == "responses/compact" {
 		return e.CodexExecutor.executeCompact(ctx, auth, req, opts)
 	}
@@ -353,6 +356,9 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	log.Debugf("Executing Codex Websockets stream request with auth ID: %s, model: %s", auth.ID, req.Model)
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	if codexUsesConversationAPI(auth) {
+		return e.CodexExecutor.ExecuteStream(ctx, auth, req, opts)
 	}
 	if opts.Alt == "responses/compact" {
 		return nil, statusErr{code: http.StatusBadRequest, msg: "streaming not supported for /responses/compact"}
@@ -1363,6 +1369,9 @@ func (e *CodexAutoExecutor) CloseExecutionSession(sessionID string) {
 
 func codexWebsocketsEnabled(auth *cliproxyauth.Auth) bool {
 	if auth == nil {
+		return false
+	}
+	if codexUsesConversationAPI(auth) {
 		return false
 	}
 	if len(auth.Attributes) > 0 {

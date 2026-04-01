@@ -116,6 +116,18 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	if !gjson.GetBytes(body, "instructions").Exists() {
 		body, _ = sjson.SetBytes(body, "instructions", "")
 	}
+	if codexUsesConversationAPI(auth) {
+		return e.executeConversationNonStream(ctx, auth, apiKey, codexConversationRunConfig{
+			From:            from,
+			To:              to,
+			BaseModel:       baseModel,
+			OriginalPayload: originalPayload,
+			CodexBody:       body,
+			Request:         req,
+			Options:         opts,
+			Reporter:        reporter,
+		})
+	}
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
 	httpReq, continuity, err := e.cacheHelper(ctx, auth, from, url, req, opts, body)
@@ -221,6 +233,18 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	body = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 	body, _ = sjson.DeleteBytes(body, "stream")
+	if codexUsesConversationAPI(auth) {
+		return e.executeConversationNonStream(ctx, auth, apiKey, codexConversationRunConfig{
+			From:            from,
+			To:              to,
+			BaseModel:       baseModel,
+			OriginalPayload: originalPayload,
+			CodexBody:       body,
+			Request:         req,
+			Options:         opts,
+			Reporter:        reporter,
+		})
+	}
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses/compact"
 	httpReq, continuity, err := e.cacheHelper(ctx, auth, from, url, req, opts, body)
@@ -316,6 +340,18 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 	if !gjson.GetBytes(body, "instructions").Exists() {
 		body, _ = sjson.SetBytes(body, "instructions", "")
+	}
+	if codexUsesConversationAPI(auth) {
+		return e.executeConversationStream(ctx, auth, apiKey, codexConversationRunConfig{
+			From:            from,
+			To:              to,
+			BaseModel:       baseModel,
+			OriginalPayload: originalPayload,
+			CodexBody:       body,
+			Request:         req,
+			Options:         opts,
+			Reporter:        reporter,
+		})
 	}
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"

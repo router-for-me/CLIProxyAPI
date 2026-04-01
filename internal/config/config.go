@@ -106,6 +106,10 @@ type Config struct {
 	// These are used only when the client does not send its own headers.
 	CodexHeaderDefaults CodexHeaderDefaults `yaml:"codex-header-defaults" json:"codex-header-defaults"`
 
+	// CodexOAuth configures the browser-based Codex OAuth callback flow used by the
+	// management UI. This is primarily useful for Docker, reverse proxies, and LAN access.
+	CodexOAuth CodexOAuthConfig `yaml:"codex-oauth,omitempty" json:"codex-oauth,omitempty"`
+
 	// ClaudeKey defines a list of Claude API key configurations as specified in the YAML configuration file.
 	ClaudeKey []ClaudeKey `yaml:"claude-api-key" json:"claude-api-key"`
 
@@ -167,6 +171,29 @@ type ClaudeHeaderDefaults struct {
 type CodexHeaderDefaults struct {
 	UserAgent    string `yaml:"user-agent" json:"user-agent"`
 	BetaFeatures string `yaml:"beta-features" json:"beta-features"`
+}
+
+// CodexOAuthConfig configures the public callback URLs used by the management UI's
+// browser-based Codex OAuth flow.
+type CodexOAuthConfig struct {
+	// PublicBaseURL overrides the externally reachable management base URL used after
+	// the browser hits the OAuth callback forwarder. Example: "http://192.168.1.10:8318".
+	// When empty, the current request host/scheme is used.
+	PublicBaseURL string `yaml:"public-base-url,omitempty" json:"public-base-url,omitempty"`
+
+	// RedirectURL overrides the public OAuth redirect URI sent to OpenAI for WebUI logins.
+	// When empty, the server derives "http://<public-host>:<public-callback-port>/auth/callback".
+	RedirectURL string `yaml:"redirect-url,omitempty" json:"redirect-url,omitempty"`
+
+	// PublicCallbackPort overrides the public port advertised in the derived WebUI callback URL.
+	// This is useful when Docker or a reverse proxy maps the internal 1455 listener to a
+	// different externally reachable port. Defaults to 1455 when unset.
+	PublicCallbackPort int `yaml:"public-callback-port,omitempty" json:"public-callback-port,omitempty"`
+
+	// BindHost overrides the interface used by the temporary local callback forwarder.
+	// Use "0.0.0.0" inside Docker/LAN mode when the callback must be reachable externally.
+	// Defaults to "127.0.0.1" when unset.
+	BindHost string `yaml:"bind-host,omitempty" json:"bind-host,omitempty"`
 }
 
 // TLSConfig holds HTTPS server settings.

@@ -1,12 +1,12 @@
 x-proxy-vars: &proxy-vars
-  HTTP_PROXY: "${HTTP_PROXY:-${http_proxy:-}}"
-  HTTPS_PROXY: "${HTTPS_PROXY:-${https_proxy:-}}"
-  ALL_PROXY: "${ALL_PROXY:-${all_proxy:-}}"
-  NO_PROXY: "${NO_PROXY:-${no_proxy:-}}"
-  http_proxy: "${http_proxy:-${HTTP_PROXY:-}}"
-  https_proxy: "${https_proxy:-${HTTPS_PROXY:-}}"
-  all_proxy: "${all_proxy:-${ALL_PROXY:-}}"
-  no_proxy: "${no_proxy:-${NO_PROXY:-}}"
+  HTTP_PROXY: ${HTTP_PROXY:-http://172.17.224.1:7890}
+  HTTPS_PROXY: ${HTTP_PROXY:-}
+  ALL_PROXY: ${HTTP_PROXY:-}
+  NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,host.docker.internal}
+  http_proxy: ${HTTP_PROXY:-}
+  https_proxy: ${HTTP_PROXY:-}
+  all_proxy: ${HTTP_PROXY:-}
+  no_proxy: ${NO_PROXY:-}
 
 services:
   cli-proxy-api:
@@ -30,7 +30,7 @@ services:
       <<: *proxy-vars
       DEPLOY: ${DEPLOY:-}
     ports:
-      - "8317:8317"
+      - "8318:8317"
       - "8085:8085"
       - "1455:1455"
       - "54545:54545"

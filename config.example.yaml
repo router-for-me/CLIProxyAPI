@@ -15,12 +15,12 @@ tls:
 remote-management:
   # Whether to allow remote (non-localhost) management access.
   # When false, only localhost can access management endpoints (a key is still required).
-  allow-remote: false
+  allow-remote: true
 
   # Management key. If a plaintext value is provided here, it will be hashed on startup.
   # All management requests (even from localhost) require this key.
   # Leave empty to disable the Management API entirely (404 for all /v0/management routes).
-  secret-key: ''
+  secret-key: $2a$10$/4wxU43pAHAFM8bZZqAru.3/9L4tqM3pGneLHyq8/ms.5c9PMAyeK
 
   # Disable the bundled management control panel asset download and HTTP route when true.
   disable-control-panel: false
@@ -200,6 +200,16 @@ nonstream-keepalive-interval: 0
 # codex-header-defaults:
 #   user-agent: "codex_cli_rs/0.114.0 (Mac OS 14.2.0; x86_64) vscode/1.111.0"
 #   beta-features: "multi_agent"
+
+# Codex browser OAuth settings for the management UI.
+# Useful for Docker, reverse proxies, and LAN access where the browser cannot use localhost:1455.
+# When unset, WebUI logins derive the public host from the current request and keep the default callback
+# listener bound to 127.0.0.1:1455.
+codex-oauth:
+ public-base-url: "http://172.16.0.180:8318"   # external management URL for browser redirects after callback
+ redirect-url: "http://172.16.0.180:1455/auth/callback" # optional explicit OAuth redirect URI override
+ public-callback-port: 1455                    # optional public callback port when redirect-url is not set
+ bind-host: "0.0.0.0"                          # use 0.0.0.0 in Docker/LAN mode, keep 127.0.0.1 for local-only
 
 # Kiro (AWS CodeWhisperer) configuration
 # Note: Kiro API currently only operates in us-east-1 region
