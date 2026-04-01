@@ -117,9 +117,9 @@ export function QuotaSection<TState extends QuotaStatusState, TData>({
 
   /* Removed useRef */
   const [columns, gridRef] = useGridColumns(380); // Min card width 380px matches SCSS
-  const [viewMode, setViewMode] = useState<ViewMode>('paged');
-  const [showTooManyWarning, setShowTooManyWarning] = useState(false);
   const hasListMode = Boolean(config.listGroups && config.listGroups.length > 0);
+  const [viewMode, setViewMode] = useState<ViewMode>(hasListMode ? 'list' : 'paged');
+  const [showTooManyWarning, setShowTooManyWarning] = useState(false);
 
   const filteredFiles = useMemo(() => files.filter((file) => config.filterFn(file)), [
     files,
@@ -263,6 +263,18 @@ export function QuotaSection<TState extends QuotaStatusState, TData>({
       extra={
         <div className={styles.headerActions}>
           <div className={styles.viewModeToggle}>
+            {hasListMode && (
+              <Button
+                variant="secondary"
+                size="sm"
+                className={`${styles.viewModeButton} ${
+                  effectiveViewMode === 'list' ? styles.viewModeButtonActive : ''
+                }`}
+                onClick={() => setViewMode('list')}
+              >
+                {t('auth_files.view_mode_list')}
+              </Button>
+            )}
             <Button
               variant="secondary"
               size="sm"
@@ -289,18 +301,6 @@ export function QuotaSection<TState extends QuotaStatusState, TData>({
             >
               {t('auth_files.view_mode_all')}
             </Button>
-            {hasListMode && (
-              <Button
-                variant="secondary"
-                size="sm"
-                className={`${styles.viewModeButton} ${
-                  effectiveViewMode === 'list' ? styles.viewModeButtonActive : ''
-                }`}
-                onClick={() => setViewMode('list')}
-              >
-                {t('auth_files.view_mode_list')}
-              </Button>
-            )}
           </div>
           <Button
             variant="secondary"
@@ -443,6 +443,25 @@ function ListModeContent<TState extends QuotaStatusState, TData>({
     return styles.quotaListCellLow;
   };
 
+  const formatCountdown = (resetTime?: string): string => {
+    if (!resetTime) return '';
+    const now = Date.now();
+    const reset = new Date(resetTime).getTime();
+    if (isNaN(reset)) return '';
+    const diff = reset - now;
+    if (diff <= 0) return '';
+    const totalMin = Math.floor(diff / 60000);
+    if (totalMin < 1) return '<1m';
+    const d = Math.floor(totalMin / 1440);
+    const h = Math.floor((totalMin % 1440) / 60);
+    const m = totalMin % 60;
+    const parts: string[] = [];
+    if (d > 0) parts.push(`${d}d`);
+    if (h > 0) parts.push(`${h}h`);
+    if (m > 0 && d === 0) parts.push(`${m}m`);
+    return parts.join('');
+  };
+
   const showTierColumn = showCredit && Boolean(config.getListTierLabel);
   const showCreditColumn = showCredit && Boolean(config.getListCreditBalance);
 
@@ -542,9 +561,20 @@ function ListModeContent<TState extends QuotaStatusState, TData>({
                     const value = status === 'success' && q && config.getListGroupValue
                       ? config.getListGroupValue(q, g.id)
                       : null;
+                    const resetTime = status === 'success' && q && config.getListGroupResetTime
+                      ? config.getListGroupResetTime(q, g.id)
+                      : undefined;
+                    const countdown = formatCountdown(resetTime);
                     return (
                       <td key={g.id} className={`${styles.listTdModel} ${getPercentClass(value)}`}>
-                        {status === 'success' ? (value !== null ? `${value}%` : '-') : '-'}
+                        {status === 'success' ? (
+                          value !== null ? (
+                            <>
+                              {`${value}%`}
+                              {countdown && <span className={styles.listCountdown}>{countdown}</span>}
+                            </>
+                          ) : '-'
+                        ) : '-'}
                       </td>
                     );
                   })}

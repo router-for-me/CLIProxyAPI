@@ -133,6 +133,7 @@ export interface QuotaConfig<TState, TData> {
   getListGroupValue?: (quota: TState, groupId: string) => number | null;
   getListCreditBalance?: (quota: TState) => number | null;
   getListTierLabel?: (quota: TState) => string | null;
+  getListGroupResetTime?: (quota: TState, groupId: string) => string | undefined;
 }
 
 const resolveAntigravityProjectId = async (file: AuthFileItem): Promise<string> => {
@@ -1310,6 +1311,10 @@ export const ANTIGRAVITY_CONFIG: QuotaConfig<
   },
   getListCreditBalance: (quota) => quota.creditBalance ?? null,
   getListTierLabel: (quota) => quota.tierLabel ?? null,
+  getListGroupResetTime: (quota, groupId) => {
+    const group = (quota.groups ?? []).find((g) => g.id === groupId);
+    return group?.resetTime;
+  },
 };
 
 export const CODEX_CONFIG: QuotaConfig<
