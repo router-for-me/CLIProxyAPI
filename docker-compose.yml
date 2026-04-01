@@ -15,6 +15,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      network: host
       args:
         <<: *proxy-vars
         VERSION: ${VERSION:-dev}
