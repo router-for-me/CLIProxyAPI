@@ -75,13 +75,71 @@ func TestBuildCodexConversationPromptRejectsTools(t *testing.T) {
 	}
 }
 
+func TestBuildCodexConversationRequestIncludesBrowserFields(t *testing.T) {
+	body := []byte(`{
+		"model":"gpt-5",
+		"input":"hello",
+		"conversation_id":"conv-123",
+		"parent_message_id":"parent-123"
+	}`)
+
+	raw, err := buildCodexConversationRequest(body, nil)
+	if err != nil {
+		t.Fatalf("buildCodexConversationRequest() error = %v", err)
+	}
+
+	if got := gjson.GetBytes(raw, "conversation_id").String(); got != "conv-123" {
+		t.Fatalf("conversation_id = %q, want %q", got, "conv-123")
+	}
+	if got := gjson.GetBytes(raw, "parent_message_id").String(); got != "parent-123" {
+		t.Fatalf("parent_message_id = %q, want %q", got, "parent-123")
+	}
+	if got := gjson.GetBytes(raw, "conversation_mode.kind").String(); got != "primary_assistant" {
+		t.Fatalf("conversation_mode.kind = %q, want %q", got, "primary_assistant")
+	}
+	if !gjson.GetBytes(raw, "supports_buffering").Bool() {
+		t.Fatal("supports_buffering = false, want true")
+	}
+	if !gjson.GetBytes(raw, "suggestions").IsArray() {
+		t.Fatal("suggestions should be an array")
+	}
+	if got := gjson.GetBytes(raw, "messages.0.metadata").Raw; got != `{}` {
+		t.Fatalf("message metadata = %s, want {}", got)
+	}
+}
+
 func TestCodexExecutorExecuteStreamConversationOAuth(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/backend-api/conversation" {
-			t.Fatalf("path = %q, want %q", r.URL.Path, "/backend-api/conversation")
+		switch r.URL.Path {
+		case "/backend-api/sentinel/chat-requirements":
+			if got := r.Header.Get("Authorization"); got != "Bearer oauth-token" {
+				t.Fatalf("requirements Authorization = %q, want %q", got, "Bearer oauth-token")
+			}
+			if got := r.Header.Get("Oai-Device-Id"); got == "" {
+				t.Fatal("requirements missing Oai-Device-Id")
+			}
+			if got := r.Header.Get("Cookie"); !strings.Contains(got, "oai-did=") {
+				t.Fatalf("requirements Cookie = %q, want oai-did", got)
+			}
+			w.Header().Add("Set-Cookie", "oai-sc=oai-sc-value; Path=/")
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"token":"req-token","proofofwork":{"required":false}}`)
+			return
+		case "/backend-api/conversation":
+		default:
+			t.Fatalf("path = %q, want sentinel or conversation endpoint", r.URL.Path)
 		}
 		if got := r.Header.Get("Authorization"); got != "Bearer oauth-token" {
 			t.Fatalf("Authorization = %q, want %q", got, "Bearer oauth-token")
+		}
+		if got := r.Header.Get("Openai-Sentinel-Chat-Requirements-Token"); got != "req-token" {
+			t.Fatalf("requirements token = %q, want %q", got, "req-token")
+		}
+		if got := r.Header.Get("Openai-Sentinel-Proof-Token"); got == "" || !strings.HasPrefix(got, "gAAAAAC") {
+			t.Fatalf("proof token = %q, want gAAAAAC...", got)
+		}
+		if got := r.Header.Get("Cookie"); !strings.Contains(got, "oai-did=") || !strings.Contains(got, "oai-sc=oai-sc-value") || !strings.Contains(got, "__Secure-next-auth.session-token=session-123") {
+			t.Fatalf("Cookie = %q, want oai-did + oai-sc + session token", got)
 		}
 
 		reqBody, err := io.ReadAll(r.Body)
@@ -114,8 +172,9 @@ func TestCodexExecutorExecuteStreamConversationOAuth(t *testing.T) {
 			"base_url": server.URL + "/backend-api/conversation",
 		},
 		Metadata: map[string]any{
-			"access_token": "oauth-token",
-			"account_id":   "acct-1",
+			"access_token":  "oauth-token",
+			"account_id":    "acct-1",
+			"session_token": "session-123",
 		},
 	}
 	req := cliproxyexecutor.Request{
@@ -155,10 +214,66 @@ func TestCodexExecutorExecuteStreamConversationOAuth(t *testing.T) {
 	}
 }
 
+func TestCodexConversationStreamStateConsumesAppendOperations(t *testing.T) {
+	state := newCodexConversationStreamState("gpt-5")
+
+	firstEvents, completed, err := state.consumePayload([]byte(`{"conversation_id":"conv-ops","v":[{"o":"append","p":"/message/content/parts/0","v":"Hel","message_id":"msg-ops"}]}`))
+	if err != nil {
+		t.Fatalf("first consumePayload() error = %v", err)
+	}
+	if completed {
+		t.Fatal("first append event should not complete stream")
+	}
+	firstJoined := joinCodexConversationEvents(firstEvents)
+	for _, want := range []string{`"type":"response.created"`, `"delta":"Hel"`, `"item_id":"msg-ops"`} {
+		if !strings.Contains(firstJoined, want) {
+			t.Fatalf("first event output missing %q:\n%s", want, firstJoined)
+		}
+	}
+
+	secondEvents, completed, err := state.consumePayload([]byte(`{"conversation_id":"conv-ops","v":[{"o":"append","p":"/message/content/parts/0","v":"lo","message_id":"msg-ops"}]}`))
+	if err != nil {
+		t.Fatalf("second consumePayload() error = %v", err)
+	}
+	if completed {
+		t.Fatal("second append event should not complete stream")
+	}
+	secondJoined := joinCodexConversationEvents(secondEvents)
+	if !strings.Contains(secondJoined, `"delta":"lo"`) {
+		t.Fatalf("second event output missing append delta:\n%s", secondJoined)
+	}
+
+	doneEvents, completed, err := state.consumePayload([]byte(`[DONE]`))
+	if err != nil {
+		t.Fatalf("done consumePayload() error = %v", err)
+	}
+	if !completed {
+		t.Fatal("DONE should complete stream")
+	}
+	doneJoined := joinCodexConversationEvents(doneEvents)
+	if !strings.Contains(doneJoined, `"type":"response.completed"`) || !strings.Contains(doneJoined, `"text":"Hello"`) {
+		t.Fatalf("done output missing completion payload:\n%s", doneJoined)
+	}
+}
+
+func joinCodexConversationEvents(events [][]byte) string {
+	parts := make([]string, 0, len(events))
+	for _, event := range events {
+		parts = append(parts, string(event))
+	}
+	return strings.Join(parts, "\n")
+}
+
 func TestCodexExecutorExecuteCompactConversationOAuth(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/backend-api/conversation" {
-			t.Fatalf("path = %q, want %q", r.URL.Path, "/backend-api/conversation")
+		switch r.URL.Path {
+		case "/backend-api/sentinel/chat-requirements":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"token":"req-token","proofofwork":{"required":false}}`)
+			return
+		case "/backend-api/conversation":
+		default:
+			t.Fatalf("path = %q, want %q or sentinel", r.URL.Path, "/backend-api/conversation")
 		}
 
 		w.Header().Set("Content-Type", "text/event-stream")

@@ -1,4 +1,8 @@
+export HTTP_PROXY="http://172.17.224.1:7890"
+export HTTPS_PROXY="http://172.17.224.1:7890"
+
+git fetch
 git pull
-HTTP_PROXY=http://172.17.224.1:7890 HTTPS_PROXY=http://172.17.224.1:7890 docker-compose build
-HTTP_PROXY=http://172.17.224.1:7890 HTTPS_PROXY=http://172.17.224.1:7890 docker-compose down
-HTTP_PROXY=http://172.17.224.1:7890 HTTPS_PROXY=http://172.17.224.1:7890 docker-compose up -d 
+docker-compose build
+docker-compose down
+docker-compose up -d
