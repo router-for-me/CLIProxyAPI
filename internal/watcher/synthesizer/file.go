@@ -3,6 +3,7 @@ package synthesizer
 import (
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -25,36 +26,35 @@ func NewFileSynthesizer() *FileSynthesizer {
 }
 
 // Synthesize generates Auth entries from auth files in the auth directory.
+// It recursively walks subdirectories to discover all JSON credential files.
 func (s *FileSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth, error) {
 	out := make([]*coreauth.Auth, 0, 16)
 	if ctx == nil || ctx.AuthDir == "" {
 		return out, nil
 	}
 
-	entries, err := os.ReadDir(ctx.AuthDir)
+	err := filepath.WalkDir(ctx.AuthDir, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return nil
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if !strings.HasSuffix(strings.ToLower(d.Name()), ".json") {
+			return nil
+		}
+		data, errRead := os.ReadFile(path)
+		if errRead != nil || len(data) == 0 {
+			return nil
+		}
+		if auths := synthesizeFileAuths(ctx, path, data); len(auths) > 0 {
+			out = append(out, auths...)
+		}
+		return nil
+	})
 	if err != nil {
 		// Not an error if directory doesn't exist
 		return out, nil
-	}
-
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		name := e.Name()
-		if !strings.HasSuffix(strings.ToLower(name), ".json") {
-			continue
-		}
-		full := filepath.Join(ctx.AuthDir, name)
-		data, errRead := os.ReadFile(full)
-		if errRead != nil || len(data) == 0 {
-			continue
-		}
-		auths := synthesizeFileAuths(ctx, full, data)
-		if len(auths) == 0 {
-			continue
-		}
-		out = append(out, auths...)
 	}
 	return out, nil
 }
