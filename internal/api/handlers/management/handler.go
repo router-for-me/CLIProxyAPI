@@ -5,6 +5,8 @@ package management
 import (
 	"crypto/subtle"
 	"fmt"
+	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -17,6 +19,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
+	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -33,12 +36,19 @@ const attemptCleanupInterval = 1 * time.Hour
 // attemptMaxIdleTime controls how long an IP can be idle before cleanup
 const attemptMaxIdleTime = 2 * time.Hour
 
+// unavailableVoucherCleanupInterval Controls the time interval for voucher cleaning
+const unavailableVoucherCleanupInterval = 2 * time.Hour
+
 // Handler aggregates config reference, persistence path and helpers.
 type Handler struct {
 	cfg                 *config.Config
 	configFilePath      string
 	mu                  sync.Mutex
 	attemptsMu          sync.Mutex
+	voucherCleanupMu    sync.Mutex
+	voucherCleanupRun   bool
+	apiClientsMu        sync.Mutex
+	apiClients          map[string]*http.Client
 	failedAttempts      map[string]*attemptInfo // keyed by client IP
 	authManager         *coreauth.Manager
 	usageStats          *usage.RequestStatistics
@@ -59,6 +69,7 @@ func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Man
 		cfg:                 cfg,
 		configFilePath:      configFilePath,
 		failedAttempts:      make(map[string]*attemptInfo),
+		apiClients:          make(map[string]*http.Client),
 		authManager:         manager,
 		usageStats:          usage.GetRequestStatistics(),
 		tokenStore:          sdkAuth.GetTokenStore(),
@@ -66,6 +77,7 @@ func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Man
 		envSecret:           envSecret,
 	}
 	h.startAttemptCleanup()
+	h.startVoucherCleanup()
 	return h
 }
 
@@ -320,4 +332,123 @@ func (h *Handler) updateStringField(c *gin.Context, set func(string)) {
 	}
 	set(*body.Value)
 	h.persist(c)
+}
+
+// startVoucherClaenup launches a background goroutine that periodically
+// remove unusable vouchers.
+func (h *Handler) startVoucherCleanup() {
+	go func() {
+		ticker := time.NewTicker(unavailableVoucherCleanupInterval)
+		defer ticker.Stop()
+
+		for range ticker.C {
+			h.voucherCleanupMu.Lock()
+			if h.voucherCleanupRun {
+				h.voucherCleanupMu.Unlock()
+				continue
+			}
+			h.voucherCleanupRun = true
+			h.voucherCleanupMu.Unlock()
+
+			files := h.authManager.List()
+			for _, auth := range files {
+				callReq := h.getCallData(auth)
+				if callReq == nil {
+					continue
+				}
+				httpClient := h.voucherCleanupClient(auth)
+				req, err := http.NewRequest(callReq.Method, callReq.URL, nil)
+				if err != nil {
+					continue
+				}
+				for key, value := range callReq.Header {
+					req.Header.Set(key, value)
+				}
+				resp, err := httpClient.Do(req)
+				if err != nil {
+					continue
+				}
+				if _, errDrain := io.Copy(io.Discard, resp.Body); errDrain != nil {
+					log.Printf("response body read error: %v", errDrain)
+				}
+				if errClose := resp.Body.Close(); errClose != nil {
+					log.Printf("response body close error: %v", errClose)
+				}
+				if resp.StatusCode < 200 || resp.StatusCode > 300 {
+					deleteName := strings.TrimSpace(auth.ID)
+					_, _, errDelete := h.deleteAuthFileByName(nil, deleteName)
+					if errDelete != nil {
+						if errDelete == errAuthFileNotFound {
+							h.disableAuth(nil, auth.ID)
+							continue
+						}
+						log.Printf("delete auth file error: %v, file: %v", errDelete, deleteName)
+					}
+				}
+			}
+
+			h.voucherCleanupMu.Lock()
+			h.voucherCleanupRun = false
+			h.voucherCleanupMu.Unlock()
+		}
+	}()
+}
+
+func (h *Handler) voucherCleanupClient(auth *auth.Auth) *http.Client {
+	key := h.voucherCleanupClientKey(auth)
+
+	h.apiClientsMu.Lock()
+	defer h.apiClientsMu.Unlock()
+
+	if client, ok := h.apiClients[key]; ok && client != nil {
+		return client
+	}
+
+	client := &http.Client{
+		Timeout:   defaultAPICallTimeout,
+		Transport: h.apiCallTransport(auth),
+	}
+	h.apiClients[key] = client
+	return client
+}
+
+func (h *Handler) voucherCleanupClientKey(auth *auth.Auth) string {
+	authProxy := ""
+	if auth != nil {
+		authProxy = strings.TrimSpace(auth.ProxyURL)
+	}
+
+	cfgProxy := ""
+	if h != nil && h.cfg != nil {
+		cfgProxy = strings.TrimSpace(h.cfg.ProxyURL)
+	}
+
+	return authProxy + "|" + cfgProxy
+}
+
+func (h *Handler) getCallData(auth *auth.Auth) *apiCallRequest {
+	var req apiCallRequest
+	switch strings.TrimSpace(auth.Provider) {
+	case "codex":
+		token, errToken := h.resolveTokenForAuth(nil, auth)
+		if errToken != nil {
+			log.Printf("resolveTokenForAuth error: %v", errToken)
+			return nil
+		}
+		req = apiCallRequest{
+			AuthIndexCamel:  &auth.Index,
+			AuthIndexPascal: &auth.Index,
+			Method:          "GET",
+			URL:             "https://chatgpt.com/backend-api/wham/usage",
+			Header: map[string]string{
+				"Authorization": "Bearer " + token,
+				"Content-Type":  "application/json",
+				"User-Agent":    "codex_cli_rs/0.76.0 (Debian 13.0.0; x86_64) WindowsTerminal",
+			},
+		}
+		if claims := extractCodexIDTokenClaims(auth); claims != nil {
+			req.Header["Chatgpt-Account-Id"] = claims["chatgpt_account_id"].(string)
+		}
+	}
+	return &req
 }
