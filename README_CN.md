@@ -8,6 +8,17 @@
 
 ## 赞助商
 
+---
+<td width="180"><a href="https://shop.bmoplus.com/?utm_source=github"><img src="./assets/bmoplus.png" alt="BmoPlus" width="150"></a></td>
+<td>感谢 BmoPlus 赞助了本项目！BmoPlus 是一家专为AI订阅重度用户打造的可靠 AI 账号代充服务商，提供稳定的 ChatGPT Plus / ChatGPT Pro(全程质保) / Claude Pro / Super Grok / Gemini Pro 的官方代充&成品账号。 通过<a href="https://shop.bmoplus.com/?utm_source=github">BmoPlus AI成品号专卖/代充</a>注册下单的用户，可享GPT <b>官网订阅一折</b> 的震撼价格！</td>
+</tr>
+<tr>
+<td width="180"><a href="https://www.lingtrue.com/register"><img src="./assets/lingtrue.png" alt="LingtrueAPI" width="150"></a></td>
+<td>感谢 LingtrueAPI 对本项目的赞助！LingtrueAPI 是一家全球大模型API中转服务平台，提供Claude Code、Codex、Gemini 等多种顶级模型API调用服务，致力于让用户以低成本、高稳定性链接全球AI能力。LingtrueAPI为本软件用户提供了特别优惠：使用<a href="https://www.lingtrue.com/register">此链接</a>注册，并在首次充值时输入 "LingtrueAPI" 优惠码即可享受9折优惠。</td>
+</tr>
+</tbody>
+</table>
+
 ## 功能特性
 
 - 为 CLI 模型提供 OpenAI/Gemini/Claude/Codex 兼容的 API 端点
@@ -47,6 +58,14 @@ CLIProxyAPI 已内置对 [Amp CLI](https://ampcode.com) 和 Amp IDE 扩展的支
 - 智能模型回退与自动路由
 - 以安全为先的设计，管理端点仅限 localhost
 
+当你需要某一类后端的请求/响应协议形态时，优先使用 provider-specific 路径，而不是合并后的 `/v1/...` 端点：
+
+- 对于 messages 风格的后端，使用 `/api/provider/{provider}/v1/messages`。
+- 对于按模型路径暴露生成接口的后端，使用 `/api/provider/{provider}/v1beta/models/...`。
+- 对于 chat-completions 风格的后端，使用 `/api/provider/{provider}/v1/chat/completions`。
+
+这些路径有助于选择协议表面，但当多个后端复用同一个客户端可见模型名时，它们本身并不能保证唯一的推理执行器。实际的推理路由仍然根据请求里的 model/alias 解析。若要严格钉住某个后端，请使用唯一 alias、前缀，或避免让多个后端暴露相同的客户端模型名。
+
 **→ [Amp CLI 完整集成指南](https://help.router-for.me/cn/agent-client/amp-cli.html)**
 
 ## SDK 文档
@@ -82,10 +101,6 @@ CLIProxyAPI 已内置对 [Amp CLI](https://ampcode.com) 和 Amp IDE 扩展的支
 ### [CCS (Claude Code Switch)](https://github.com/kaitranntt/ccs)
 
 CLI 封装器，用于通过 CLIProxyAPI OAuth 即时切换多个 Claude 账户和替代模型（Gemini, Codex, Antigravity），无需 API 密钥。
-
-### [ProxyPal](https://github.com/heyhuynhgiabuu/proxypal)
-
-基于 macOS 平台的原生 CLIProxyAPI GUI：配置供应商、模型映射以及OAuth端点，无需 API 密钥。
 
 ### [Quotio](https://github.com/nguyenphutrong/quotio)
 

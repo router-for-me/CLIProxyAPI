@@ -5,6 +5,16 @@ import (
 	"testing"
 )
 
+func mustDefaultTransport(t *testing.T) *http.Transport {
+	t.Helper()
+
+	transport, ok := http.DefaultTransport.(*http.Transport)
+	if !ok || transport == nil {
+		t.Fatal("http.DefaultTransport is not an *http.Transport")
+	}
+	return transport
+}
+
 func TestParse(t *testing.T) {
 	t.Parallel()
 
@@ -85,5 +95,45 @@ func TestBuildHTTPTransportHTTPProxy(t *testing.T) {
 	}
 	if proxyURL == nil || proxyURL.String() != "http://proxy.example.com:8080" {
 		t.Fatalf("proxy URL = %v, want http://proxy.example.com:8080", proxyURL)
+	}
+
+	defaultTransport := mustDefaultTransport(t)
+	if transport.ForceAttemptHTTP2 != defaultTransport.ForceAttemptHTTP2 {
+		t.Fatalf("ForceAttemptHTTP2 = %v, want %v", transport.ForceAttemptHTTP2, defaultTransport.ForceAttemptHTTP2)
+	}
+	if transport.IdleConnTimeout != defaultTransport.IdleConnTimeout {
+		t.Fatalf("IdleConnTimeout = %v, want %v", transport.IdleConnTimeout, defaultTransport.IdleConnTimeout)
+	}
+	if transport.TLSHandshakeTimeout != defaultTransport.TLSHandshakeTimeout {
+		t.Fatalf("TLSHandshakeTimeout = %v, want %v", transport.TLSHandshakeTimeout, defaultTransport.TLSHandshakeTimeout)
+	}
+}
+
+func TestBuildHTTPTransportSOCKS5ProxyInheritsDefaultTransportSettings(t *testing.T) {
+	t.Parallel()
+
+	transport, mode, errBuild := BuildHTTPTransport("socks5://proxy.example.com:1080")
+	if errBuild != nil {
+		t.Fatalf("BuildHTTPTransport returned error: %v", errBuild)
+	}
+	if mode != ModeProxy {
+		t.Fatalf("mode = %d, want %d", mode, ModeProxy)
+	}
+	if transport == nil {
+		t.Fatal("expected transport, got nil")
+	}
+	if transport.Proxy != nil {
+		t.Fatal("expected SOCKS5 transport to bypass http proxy function")
+	}
+
+	defaultTransport := mustDefaultTransport(t)
+	if transport.ForceAttemptHTTP2 != defaultTransport.ForceAttemptHTTP2 {
+		t.Fatalf("ForceAttemptHTTP2 = %v, want %v", transport.ForceAttemptHTTP2, defaultTransport.ForceAttemptHTTP2)
+	}
+	if transport.IdleConnTimeout != defaultTransport.IdleConnTimeout {
+		t.Fatalf("IdleConnTimeout = %v, want %v", transport.IdleConnTimeout, defaultTransport.IdleConnTimeout)
+	}
+	if transport.TLSHandshakeTimeout != defaultTransport.TLSHandshakeTimeout {
+		t.Fatalf("TLSHandshakeTimeout = %v, want %v", transport.TLSHandshakeTimeout, defaultTransport.TLSHandshakeTimeout)
 	}
 }

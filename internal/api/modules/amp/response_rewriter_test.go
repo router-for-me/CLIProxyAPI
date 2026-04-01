@@ -100,6 +100,44 @@ func TestRewriteStreamChunk_MessageModel(t *testing.T) {
 	}
 }
 
+func TestRewriteStreamChunk_SuppressesThinkingContentBlockFrames(t *testing.T) {
+	rw := &ResponseRewriter{suppressedContentBlock: make(map[int]struct{})}
+
+	chunk := []byte("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"abc\"}}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"name\":\"bash\",\"input\":{}}}\n\n")
+	result := rw.rewriteStreamChunk(chunk)
+
+	if contains(result, []byte("\"thinking\"")) || contains(result, []byte("\"thinking_delta\"")) {
+		t.Fatalf("expected thinking content_block frames to be suppressed, got %s", string(result))
+	}
+	if contains(result, []byte("content_block_stop")) {
+		t.Fatalf("expected suppressed thinking content_block_stop to be removed, got %s", string(result))
+	}
+	if !contains(result, []byte("\"tool_use\"")) {
+		t.Fatalf("expected tool_use content_block frame to remain, got %s", string(result))
+	}
+	if !contains(result, []byte("\"signature\":\"\"")) {
+		t.Fatalf("expected tool_use content_block signature injection, got %s", string(result))
+	}
+}
+
+func TestSanitizeAmpRequestBody_RemovesWhitespaceAndNonStringSignatures(t *testing.T) {
+	input := []byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"drop-whitespace","signature":"   "},{"type":"thinking","thinking":"drop-number","signature":123},{"type":"thinking","thinking":"keep-valid","signature":"valid-signature"},{"type":"text","text":"keep-text"}]}]}`)
+	result := SanitizeAmpRequestBody(input)
+
+	if contains(result, []byte("drop-whitespace")) {
+		t.Fatalf("expected whitespace-only signature block to be removed, got %s", string(result))
+	}
+	if contains(result, []byte("drop-number")) {
+		t.Fatalf("expected non-string signature block to be removed, got %s", string(result))
+	}
+	if !contains(result, []byte("keep-valid")) {
+		t.Fatalf("expected valid thinking block to remain, got %s", string(result))
+	}
+	if !contains(result, []byte("keep-text")) {
+		t.Fatalf("expected non-thinking content to remain, got %s", string(result))
+	}
+}
+
 func contains(data, substr []byte) bool {
 	for i := 0; i <= len(data)-len(substr); i++ {
 		if string(data[i:i+len(substr)]) == string(substr) {

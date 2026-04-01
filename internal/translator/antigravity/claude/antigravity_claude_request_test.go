@@ -361,6 +361,167 @@ func TestConvertClaudeRequestToAntigravity_ReorderThinking(t *testing.T) {
 	}
 }
 
+func TestConvertClaudeRequestToAntigravity_ReorderTextAfterFunctionCall(t *testing.T) {
+	// Bug: text part after tool_use in an assistant message causes Antigravity
+	// to split at functionCall boundary, creating an extra assistant turn that
+	// breaks tool_use↔tool_result adjacency (upstream issue #989).
+	// Fix: reorder parts so functionCall comes last.
+	inputJSON := []byte(`{
+		"model": "claude-sonnet-4-5",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "text", "text": "Let me check..."},
+					{
+						"type": "tool_use",
+						"id": "call_abc",
+						"name": "Read",
+						"input": {"file": "test.go"}
+					},
+					{"type": "text", "text": "Reading the file now"}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{
+						"type": "tool_result",
+						"tool_use_id": "call_abc",
+						"content": "file content"
+					}
+				]
+			}
+		]
+	}`)
+
+	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5", inputJSON, false)
+	outputStr := string(output)
+
+	parts := gjson.Get(outputStr, "request.contents.0.parts").Array()
+	if len(parts) != 3 {
+		t.Fatalf("Expected 3 parts, got %d", len(parts))
+	}
+
+	// Text parts should come before functionCall
+	if parts[0].Get("text").String() != "Let me check..." {
+		t.Errorf("Expected first text part first, got %s", parts[0].Raw)
+	}
+	if parts[1].Get("text").String() != "Reading the file now" {
+		t.Errorf("Expected second text part second, got %s", parts[1].Raw)
+	}
+	if !parts[2].Get("functionCall").Exists() {
+		t.Errorf("Expected functionCall last, got %s", parts[2].Raw)
+	}
+	if parts[2].Get("functionCall.name").String() != "Read" {
+		t.Errorf("Expected functionCall name 'Read', got '%s'", parts[2].Get("functionCall.name").String())
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_ReorderParallelFunctionCalls(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "claude-sonnet-4-5",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "text", "text": "Reading both files."},
+					{
+						"type": "tool_use",
+						"id": "call_1",
+						"name": "Read",
+						"input": {"file": "a.go"}
+					},
+					{"type": "text", "text": "And this one too."},
+					{
+						"type": "tool_use",
+						"id": "call_2",
+						"name": "Read",
+						"input": {"file": "b.go"}
+					}
+				]
+			}
+		]
+	}`)
+
+	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5", inputJSON, false)
+	outputStr := string(output)
+
+	parts := gjson.Get(outputStr, "request.contents.0.parts").Array()
+	if len(parts) != 4 {
+		t.Fatalf("Expected 4 parts, got %d", len(parts))
+	}
+
+	if parts[0].Get("text").String() != "Reading both files." {
+		t.Errorf("Expected first text, got %s", parts[0].Raw)
+	}
+	if parts[1].Get("text").String() != "And this one too." {
+		t.Errorf("Expected second text, got %s", parts[1].Raw)
+	}
+	if parts[2].Get("functionCall.name").String() != "Read" || parts[2].Get("functionCall.id").String() != "call_1" {
+		t.Errorf("Expected fc1 third, got %s", parts[2].Raw)
+	}
+	if parts[3].Get("functionCall.name").String() != "Read" || parts[3].Get("functionCall.id").String() != "call_2" {
+		t.Errorf("Expected fc2 fourth, got %s", parts[3].Raw)
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_ReorderThinkingAndTextBeforeFunctionCall(t *testing.T) {
+	cache.ClearSignatureCache("")
+
+	validSignature := "abc123validSignature1234567890123456789012345678901234567890"
+	thinkingText := "Let me think about this..."
+
+	inputJSON := []byte(`{
+		"model": "claude-sonnet-4-5-thinking",
+		"messages": [
+			{
+				"role": "user",
+				"content": [{"type": "text", "text": "Hello"}]
+			},
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "text", "text": "Before thinking"},
+					{"type": "thinking", "thinking": "` + thinkingText + `", "signature": "` + validSignature + `"},
+					{
+						"type": "tool_use",
+						"id": "call_xyz",
+						"name": "Bash",
+						"input": {"command": "ls"}
+					},
+					{"type": "text", "text": "After tool call"}
+				]
+			}
+		]
+	}`)
+
+	cache.CacheSignature("claude-sonnet-4-5-thinking", thinkingText, validSignature)
+
+	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5-thinking", inputJSON, false)
+	outputStr := string(output)
+
+	// contents.1 = assistant message (contents.0 = user)
+	parts := gjson.Get(outputStr, "request.contents.1.parts").Array()
+	if len(parts) != 4 {
+		t.Fatalf("Expected 4 parts, got %d", len(parts))
+	}
+
+	// Order: thinking → text → text → functionCall
+	if !parts[0].Get("thought").Bool() {
+		t.Error("First part should be thinking")
+	}
+	if parts[1].Get("functionCall").Exists() || parts[1].Get("thought").Bool() {
+		t.Errorf("Second part should be text, got %s", parts[1].Raw)
+	}
+	if parts[2].Get("functionCall").Exists() || parts[2].Get("thought").Bool() {
+		t.Errorf("Third part should be text, got %s", parts[2].Raw)
+	}
+	if !parts[3].Get("functionCall").Exists() {
+		t.Errorf("Last part should be functionCall, got %s", parts[3].Raw)
+	}
+}
+
 func TestConvertClaudeRequestToAntigravity_ToolResult(t *testing.T) {
 	inputJSON := []byte(`{
 		"model": "claude-3-5-sonnet-20240620",
