@@ -32,6 +32,7 @@ import type {
 import { apiCallApi, authFilesApi, getApiCallErrorMessage } from '@/services/api';
 import { useQuotaStore } from '@/stores';
 import {
+  ANTIGRAVITY_CODE_ASSIST_URLS,
   ANTIGRAVITY_QUOTA_GROUPS,
   ANTIGRAVITY_QUOTA_URLS,
   ANTIGRAVITY_REQUEST_HEADERS,
@@ -169,52 +170,57 @@ const fetchAntigravityCreditBalance = async (
   authIndex: string,
   projectId: string
 ): Promise<number | null> => {
-  try {
-    const result = await apiCallApi.request({
-      authIndex,
-      method: 'POST',
-      url: GEMINI_CLI_CODE_ASSIST_URL,
-      header: { ...GEMINI_CLI_REQUEST_HEADERS },
-      data: JSON.stringify({
-        cloudaicompanionProject: projectId,
-        metadata: {
-          ideType: 'IDE_UNSPECIFIED',
-          platform: 'PLATFORM_UNSPECIFIED',
-          pluginType: 'GEMINI',
-          duetProject: projectId,
-        },
-      }),
-    });
+  const requestBody = JSON.stringify({
+    cloudaicompanionProject: projectId,
+    metadata: {
+      ideType: 'IDE_UNSPECIFIED',
+      platform: 'PLATFORM_UNSPECIFIED',
+      pluginType: 'GEMINI',
+      duetProject: projectId,
+    },
+  });
 
-    if (result.statusCode < 200 || result.statusCode >= 300) return null;
+  for (const url of ANTIGRAVITY_CODE_ASSIST_URLS) {
+    try {
+      const result = await apiCallApi.request({
+        authIndex,
+        method: 'POST',
+        url,
+        header: { ...ANTIGRAVITY_REQUEST_HEADERS },
+        data: requestBody,
+      });
 
-    const payload = parseGeminiCliCodeAssistPayload(result.body ?? result.bodyText);
-    if (!payload) return null;
+      if (result.statusCode < 200 || result.statusCode >= 300) continue;
 
-    const paidTier: GeminiCliUserTier | null | undefined =
-      payload.paidTier ?? payload.paid_tier;
-    const currentTier: GeminiCliUserTier | null | undefined =
-      payload.currentTier ?? payload.current_tier;
-    const tier = paidTier ?? currentTier;
-    if (!tier) return null;
+      const payload = parseGeminiCliCodeAssistPayload(result.body ?? result.bodyText);
+      if (!payload) continue;
 
-    const credits: GeminiCliCredits[] =
-      tier.availableCredits ?? tier.available_credits ?? [];
-    let total = 0;
-    let found = false;
-    for (const credit of credits) {
-      const creditType = normalizeStringValue(credit.creditType ?? credit.credit_type);
-      if (creditType !== 'GOOGLE_ONE_AI') continue;
-      const amount = normalizeNumberValue(credit.creditAmount ?? credit.credit_amount);
-      if (amount !== null) {
-        total += amount;
-        found = true;
+      const paidTier: GeminiCliUserTier | null | undefined =
+        payload.paidTier ?? payload.paid_tier;
+      const currentTier: GeminiCliUserTier | null | undefined =
+        payload.currentTier ?? payload.current_tier;
+      const tier = paidTier ?? currentTier;
+      if (!tier) continue;
+
+      const credits: GeminiCliCredits[] =
+        tier.availableCredits ?? tier.available_credits ?? [];
+      let total = 0;
+      let found = false;
+      for (const credit of credits) {
+        const creditType = normalizeStringValue(credit.creditType ?? credit.credit_type);
+        if (creditType !== 'GOOGLE_ONE_AI') continue;
+        const amount = normalizeNumberValue(credit.creditAmount ?? credit.credit_amount);
+        if (amount !== null) {
+          total += amount;
+          found = true;
+        }
       }
+      if (found) return total;
+    } catch {
+      continue;
     }
-    return found ? total : null;
-  } catch {
-    return null;
   }
+  return null;
 };
 
 const fetchAntigravityQuota = async (
