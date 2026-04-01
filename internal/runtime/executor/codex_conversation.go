@@ -25,6 +25,11 @@ import (
 
 const defaultCodexConversationURL = "https://chatgpt.com/backend-api/conversation"
 
+const (
+	codexConversationDefaultTimezoneOffsetMin = -480
+	codexConversationDefaultTimezoneName      = "Asia/Shanghai"
+)
+
 type codexConversationPayload struct {
 	Action                     string                     `json:"action"`
 	Messages                   []codexConversationMessage `json:"messages"`
@@ -201,14 +206,14 @@ func buildCodexConversationRequest(body []byte, auth *cliproxyauth.Auth) ([]byte
 		ParentMessageID:   codexConversationParentMessageID(body),
 		Model:             model,
 		ConversationID:    strings.TrimSpace(gjson.GetBytes(body, "conversation_id").String()),
-		TimezoneOffsetMin: codexConversationTimezoneOffsetMinutes(),
-		Timezone:          codexConversationTimezoneName(),
+		TimezoneOffsetMin: codexConversationTimezoneOffsetMinutes(body),
+		Timezone:          codexConversationTimezoneName(body),
 		Suggestions:       []any{},
 		ConversationMode:  &codexConversationMode{Kind: "primary_assistant"},
 		SupportsBuffering: true,
 	}
 
-	if disabled := codexConversationHistoryAndTrainingDisabled(auth); disabled {
+	if disabled := codexConversationHistoryAndTrainingDisabled(body, auth); disabled {
 		payload.HistoryAndTrainingDisabled = true
 	}
 
@@ -371,24 +376,39 @@ func codexConversationParentMessageID(body []byte) string {
 	return uuid.NewString()
 }
 
-func codexConversationTimezoneOffsetMinutes() int {
-	_, offsetSeconds := time.Now().Zone()
-	return -offsetSeconds / 60
+func codexConversationTimezoneOffsetMinutes(body []byte) int {
+	offset := gjson.GetBytes(body, "timezone_offset_min")
+	if offset.Exists() {
+		switch offset.Type {
+		case gjson.Number:
+			return int(offset.Int())
+		case gjson.String:
+			if strings.TrimSpace(offset.String()) != "" {
+				return int(offset.Int())
+			}
+		}
+	}
+	return codexConversationDefaultTimezoneOffsetMin
 }
 
-func codexConversationTimezoneName() string {
-	location := time.Now().Location()
-	if location == nil {
-		return ""
+func codexConversationTimezoneName(body []byte) string {
+	if timezone := strings.TrimSpace(gjson.GetBytes(body, "timezone").String()); timezone != "" {
+		return timezone
 	}
-	name := strings.TrimSpace(location.String())
-	if name == "" || strings.EqualFold(name, "local") {
-		return ""
-	}
-	return name
+	return codexConversationDefaultTimezoneName
 }
 
-func codexConversationHistoryAndTrainingDisabled(auth *cliproxyauth.Auth) bool {
+func codexConversationHistoryAndTrainingDisabled(body []byte, auth *cliproxyauth.Auth) bool {
+	if value := gjson.GetBytes(body, "history_and_training_disabled"); value.Exists() {
+		switch value.Type {
+		case gjson.True:
+			return true
+		case gjson.False:
+			return false
+		case gjson.String:
+			return strings.EqualFold(strings.TrimSpace(value.String()), "true")
+		}
+	}
 	if auth == nil {
 		return false
 	}
@@ -458,18 +478,17 @@ func (s *codexConversationStreamState) consumePayload(payload []byte) ([][]byte,
 	}
 
 	message := root.Get("message")
-	appendDelta := extractCodexConversationAppendDelta(root)
-	fullText := extractCodexConversationResponseText(root)
-	hasAssistantMessage := message.Exists() && strings.TrimSpace(message.Get("author.role").String()) == "assistant"
-	if !hasAssistantMessage && appendDelta == "" && fullText == "" {
-		return nil, false, nil
-	}
-
 	if conversationID := strings.TrimSpace(root.Get("conversation_id").String()); conversationID != "" {
 		s.ConversationID = conversationID
 	}
 	if messageID := extractCodexConversationResponseMessageID(root); messageID != "" {
 		s.MessageID = messageID
+	}
+	appendDelta := extractCodexConversationAppendDelta(root)
+	fullText := extractCodexConversationResponseText(root)
+	hasAssistantMessage := message.Exists() && strings.TrimSpace(message.Get("author.role").String()) == "assistant"
+	if !hasAssistantMessage && appendDelta == "" && fullText == "" {
+		return nil, false, nil
 	}
 	if model := strings.TrimSpace(message.Get("metadata.model_slug").String()); model != "" {
 		s.Model = model
@@ -624,20 +643,27 @@ func (s *codexConversationStreamState) nextDelta(text string) string {
 	if text == "" {
 		return ""
 	}
-	if s.LastFullText == "" {
-		s.LastFullText = text
-		return text
+	delta, merged := mergeCodexConversationDelta(s.LastFullText, text)
+	s.LastFullText = merged
+	return delta
+}
+
+func mergeCodexConversationDelta(currentText, nextText string) (string, string) {
+	current := currentText
+	candidate := nextText
+	if candidate == "" {
+		return "", current
 	}
-	if text == s.LastFullText {
-		return ""
+	if current == "" {
+		return candidate, candidate
 	}
-	if strings.HasPrefix(text, s.LastFullText) {
-		delta := text[len(s.LastFullText):]
-		s.LastFullText = text
-		return delta
+	if strings.HasPrefix(candidate, current) {
+		return candidate[len(current):], candidate
 	}
-	s.LastFullText = text
-	return text
+	if strings.HasSuffix(current, candidate) {
+		return "", current
+	}
+	return candidate, candidate
 }
 
 func normalizeCodexConversationCreateTime(value gjson.Result) int64 {
@@ -748,12 +774,16 @@ func codexConversationDoneEvent() []byte {
 
 func (e *CodexExecutor) executeConversationNonStream(ctx context.Context, auth *cliproxyauth.Auth, apiKey string, run codexConversationRunConfig) (resp cliproxyexecutor.Response, err error) {
 	targetURL := resolveCodexConversationURL(auth)
+	apiKey, err = e.resolveCodexConversationBearerToken(ctx, auth, targetURL)
+	if err != nil {
+		return resp, err
+	}
 	conversationBody, err := buildCodexConversationRequest(run.CodexBody, auth)
 	if err != nil {
 		return resp, err
 	}
 
-	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := newCodexConversationHTTPClient(ctx, e.cfg, auth, targetURL)
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(conversationBody))
 	if err != nil {
@@ -871,12 +901,16 @@ func (e *CodexExecutor) executeConversationNonStream(ctx context.Context, auth *
 
 func (e *CodexExecutor) executeConversationStream(ctx context.Context, auth *cliproxyauth.Auth, apiKey string, run codexConversationRunConfig) (_ *cliproxyexecutor.StreamResult, err error) {
 	targetURL := resolveCodexConversationURL(auth)
+	apiKey, err = e.resolveCodexConversationBearerToken(ctx, auth, targetURL)
+	if err != nil {
+		return nil, err
+	}
 	conversationBody, err := buildCodexConversationRequest(run.CodexBody, auth)
 	if err != nil {
 		return nil, err
 	}
 
-	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := newCodexConversationHTTPClient(ctx, e.cfg, auth, targetURL)
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(conversationBody))
 	if err != nil {

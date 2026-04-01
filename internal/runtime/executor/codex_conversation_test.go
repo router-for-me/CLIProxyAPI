@@ -80,7 +80,8 @@ func TestBuildCodexConversationRequestIncludesBrowserFields(t *testing.T) {
 		"model":"gpt-5",
 		"input":"hello",
 		"conversation_id":"conv-123",
-		"parent_message_id":"parent-123"
+		"parent_message_id":"parent-123",
+		"history_and_training_disabled":true
 	}`)
 
 	raw, err := buildCodexConversationRequest(body, nil)
@@ -106,11 +107,32 @@ func TestBuildCodexConversationRequestIncludesBrowserFields(t *testing.T) {
 	if got := gjson.GetBytes(raw, "messages.0.metadata").Raw; got != `{}` {
 		t.Fatalf("message metadata = %s, want {}", got)
 	}
+	if got := gjson.GetBytes(raw, "timezone_offset_min").Int(); got != -480 {
+		t.Fatalf("timezone_offset_min = %d, want %d", got, -480)
+	}
+	if got := gjson.GetBytes(raw, "timezone").String(); got != "Asia/Shanghai" {
+		t.Fatalf("timezone = %q, want %q", got, "Asia/Shanghai")
+	}
+	if !gjson.GetBytes(raw, "history_and_training_disabled").Bool() {
+		t.Fatal("history_and_training_disabled = false, want true")
+	}
 }
 
 func TestCodexExecutorExecuteStreamConversationOAuth(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
+		case "/api/auth/csrf":
+			w.Header().Add("Set-Cookie", "__Host-next-auth.csrf-token=csrf-value; Path=/")
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"csrfToken":"csrf-value"}`)
+			return
+		case "/backend-api/me":
+			if got := r.Header.Get("Authorization"); got != "Bearer oauth-token" {
+				t.Fatalf("validate Authorization = %q, want %q", got, "Bearer oauth-token")
+			}
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"id":"user-1"}`)
+			return
 		case "/backend-api/sentinel/chat-requirements":
 			if got := r.Header.Get("Authorization"); got != "Bearer oauth-token" {
 				t.Fatalf("requirements Authorization = %q, want %q", got, "Bearer oauth-token")
@@ -267,6 +289,14 @@ func joinCodexConversationEvents(events [][]byte) string {
 func TestCodexExecutorExecuteCompactConversationOAuth(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
+		case "/api/auth/csrf":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"csrfToken":"csrf-value"}`)
+			return
+		case "/backend-api/me":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"id":"user-1"}`)
+			return
 		case "/backend-api/sentinel/chat-requirements":
 			w.Header().Set("Content-Type", "application/json")
 			fmt.Fprint(w, `{"token":"req-token","proofofwork":{"required":false}}`)
@@ -314,5 +344,89 @@ func TestCodexExecutorExecuteCompactConversationOAuth(t *testing.T) {
 	}
 	if got := gjson.GetBytes(resp.Payload, "output.0.content.0.text").String(); got != "Hello world" {
 		t.Fatalf("text = %q, want %q, payload=%s", got, "Hello world", string(resp.Payload))
+	}
+}
+
+func TestResolveCodexConversationBearerTokenRefreshesBySessionToken(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/auth/csrf":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"csrfToken":"csrf-value"}`)
+			return
+		case "/backend-api/me":
+			http.Error(w, `{"error":"expired"}`, http.StatusUnauthorized)
+			return
+		case "/api/auth/session":
+			if got := r.Header.Get("Cookie"); !strings.Contains(got, "__Secure-next-auth.session-token=session-xyz") {
+				t.Fatalf("session refresh Cookie = %q, want session token", got)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"accessToken":"fresh-token"}`)
+			return
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	exec := NewCodexExecutor(nil)
+	auth := &cliproxyauth.Auth{
+		Provider: "codex",
+		Attributes: map[string]string{
+			"base_url": server.URL + "/backend-api/conversation",
+		},
+		Metadata: map[string]any{
+			"access_token":  "stale-token",
+			"session_token": "session-xyz",
+		},
+	}
+
+	token, err := exec.resolveCodexConversationBearerToken(context.Background(), auth, server.URL+"/backend-api/conversation")
+	if err != nil {
+		t.Fatalf("resolveCodexConversationBearerToken() error = %v", err)
+	}
+	if token != "fresh-token" {
+		t.Fatalf("token = %q, want %q", token, "fresh-token")
+	}
+	if got := metaStringValue(auth.Metadata, "access_token"); got != "fresh-token" {
+		t.Fatalf("auth.Metadata[access_token] = %q, want %q", got, "fresh-token")
+	}
+}
+
+func TestResolveCodexConversationBearerTokenDoesNotReuseStaleToken(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/auth/csrf":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"csrfToken":"csrf-value"}`)
+			return
+		case "/backend-api/me":
+			http.Error(w, `{"error":"expired"}`, http.StatusUnauthorized)
+			return
+		case "/api/auth/session":
+			http.Error(w, `{"error":"expired"}`, http.StatusUnauthorized)
+			return
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	exec := NewCodexExecutor(nil)
+	auth := &cliproxyauth.Auth{
+		Provider: "codex",
+		Attributes: map[string]string{
+			"base_url": server.URL + "/backend-api/conversation",
+		},
+		Metadata: map[string]any{
+			"access_token":  "stale-token",
+			"session_token": "session-xyz",
+		},
+	}
+
+	token, err := exec.resolveCodexConversationBearerToken(context.Background(), auth, server.URL+"/backend-api/conversation")
+	if err == nil {
+		t.Fatalf("resolveCodexConversationBearerToken() token = %q, want error", token)
 	}
 }

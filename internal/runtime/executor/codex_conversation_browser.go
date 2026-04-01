@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	claudeauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/claude"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
@@ -24,9 +26,13 @@ const (
 	codexConversationDefaultLanguage       = "en-US"
 	codexConversationBrowserUserAgent      = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.7103.113 Safari/537.36"
 	codexConversationSecCHUA               = `"Chromium";v="136", "Google Chrome";v="136", "Not.A/Brand";v="99"`
+	codexConversationSecCHUAFullVersion    = `"Chromium";v="136.0.7103.113", "Google Chrome";v="136.0.7103.113", "Not.A/Brand";v="99.0.0.0"`
 	codexConversationSentinelScriptURL     = "https://sentinel.openai.com/sentinel/20260124ceb8/sdk.js"
 	codexConversationSentinelErrorPrefix   = "wQ8Lk5FbGpA2NcR9dShT6gYjU7VxZ4D"
 	codexConversationSentinelMaxAttempts   = 500000
+	codexConversationCSRFPath              = "/api/auth/csrf"
+	codexConversationSessionPath           = "/api/auth/session"
+	codexConversationValidatePath          = "/backend-api/me"
 )
 
 type codexConversationChatRequirementsResponse struct {
@@ -69,6 +75,7 @@ func ensureCodexConversationSession(ctx context.Context, client *http.Client, au
 	misc.EnsureHeader(req.Header, nil, "Sec-Ch-Ua-Arch", `"x86"`)
 	misc.EnsureHeader(req.Header, nil, "Sec-Ch-Ua-Bitness", `"64"`)
 	misc.EnsureHeader(req.Header, nil, "Sec-Ch-Ua-Full-Version", `"136.0.7103.113"`)
+	misc.EnsureHeader(req.Header, nil, "Sec-Ch-Ua-Full-Version-List", codexConversationSecCHUAFullVersion)
 	misc.EnsureHeader(req.Header, nil, "Sec-Ch-Ua-Platform-Version", `"15.0.0"`)
 
 	builtCookieHeader := buildCodexConversationCookieHeader(auth, deviceID, "")
@@ -110,9 +117,212 @@ func ensureCodexConversationSession(ctx context.Context, client *http.Client, au
 		if updatedCookieHeader != "" {
 			req.Header.Set("Cookie", updatedCookieHeader)
 		}
+		codexConversationPersistCookieHeader(auth, "oai-sc="+oaiSC)
+		codexConversationPersistOaiSC(auth, oaiSC)
 	}
 
 	return nil
+}
+
+func newCodexConversationHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, rawURL string) *http.Client {
+	parsed, err := neturl.Parse(strings.TrimSpace(rawURL))
+	if err != nil || parsed == nil {
+		return newProxyAwareHTTPClient(ctx, cfg, auth, 0)
+	}
+	if !strings.EqualFold(parsed.Scheme, "https") {
+		return newProxyAwareHTTPClient(ctx, cfg, auth, 0)
+	}
+
+	host := strings.ToLower(strings.TrimSpace(parsed.Hostname()))
+	if host == "" {
+		return newProxyAwareHTTPClient(ctx, cfg, auth, 0)
+	}
+	if !strings.Contains(host, "chatgpt.com") && !strings.Contains(host, "openai.com") {
+		return newProxyAwareHTTPClient(ctx, cfg, auth, 0)
+	}
+
+	sdkCfg := &config.SDKConfig{}
+	if cfg != nil {
+		*sdkCfg = cfg.SDKConfig
+	}
+	if auth != nil && strings.TrimSpace(auth.ProxyURL) != "" {
+		sdkCfg.ProxyURL = strings.TrimSpace(auth.ProxyURL)
+	}
+
+	return claudeauth.NewAnthropicHttpClient(sdkCfg)
+}
+
+func (e *CodexExecutor) resolveCodexConversationBearerToken(ctx context.Context, auth *cliproxyauth.Auth, targetURL string) (string, error) {
+	if auth == nil {
+		return "", statusErr{code: http.StatusUnauthorized, msg: "codex conversation bridge: missing auth"}
+	}
+
+	client := newCodexConversationHTTPClient(ctx, e.cfg, auth, targetURL)
+	prepareCodexConversationAuthContext(ctx, client, auth, targetURL)
+
+	var lastErr error
+	accessToken := codexConversationAccessToken(auth)
+	if accessToken != "" {
+		valid, err := codexConversationValidateAccessToken(ctx, client, targetURL, accessToken)
+		if err == nil && valid {
+			return accessToken, nil
+		}
+		lastErr = err
+	}
+
+	if sessionToken := codexConversationSessionToken(auth); sessionToken != "" {
+		refreshedToken, err := codexConversationRefreshAccessTokenBySession(ctx, client, auth, targetURL, sessionToken)
+		if err == nil && refreshedToken != "" {
+			if auth.Metadata == nil {
+				auth.Metadata = make(map[string]any)
+			}
+			auth.Metadata["access_token"] = refreshedToken
+			return refreshedToken, nil
+		}
+		lastErr = err
+	}
+
+	if codexConversationRefreshToken(auth) != "" {
+		updated, err := e.Refresh(ctx, auth)
+		if err == nil && updated != nil {
+			if updated.Metadata == nil {
+				updated.Metadata = make(map[string]any)
+			}
+			auth.Metadata = updated.Metadata
+			if updated.Attributes != nil {
+				if auth.Attributes == nil {
+					auth.Attributes = make(map[string]string)
+				}
+				for k, v := range updated.Attributes {
+					auth.Attributes[k] = v
+				}
+			}
+			if refreshedToken := metaStringValue(auth.Metadata, "access_token"); refreshedToken != "" && refreshedToken != accessToken {
+				return refreshedToken, nil
+			}
+		}
+		lastErr = err
+	}
+
+	if lastErr != nil {
+		return "", lastErr
+	}
+	return "", statusErr{code: http.StatusUnauthorized, msg: "codex conversation bridge: no usable access token"}
+}
+
+func codexConversationValidateAccessToken(ctx context.Context, client *http.Client, targetURL, accessToken string) (bool, error) {
+	if client == nil || strings.TrimSpace(accessToken) == "" {
+		return false, nil
+	}
+	endpoint := codexConversationRequestOriginFromRawURL(targetURL) + codexConversationValidatePath
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return false, err
+	}
+	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(accessToken))
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", codexConversationBrowserUserAgent)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return false, err
+	}
+	body, readErr := ioReadAllAndClose(resp)
+	if readErr != nil {
+		return false, readErr
+	}
+	switch resp.StatusCode {
+	case http.StatusOK:
+		return true, nil
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return false, nil
+	default:
+		return false, statusErr{code: resp.StatusCode, msg: summarizeErrorBody(resp.Header.Get("Content-Type"), body)}
+	}
+}
+
+func codexConversationRefreshAccessTokenBySession(ctx context.Context, client *http.Client, auth *cliproxyauth.Auth, targetURL, sessionToken string) (string, error) {
+	if client == nil || strings.TrimSpace(sessionToken) == "" {
+		return "", nil
+	}
+	endpoint := codexConversationRequestOriginFromRawURL(targetURL) + codexConversationSessionPath
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", codexConversationBrowserUserAgent)
+	req.Header.Set("Cookie", buildCodexConversationCookieHeader(auth, codexConversationDeviceID(auth), ""))
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	body, readErr := ioReadAllAndClose(resp)
+	if readErr != nil {
+		return "", readErr
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", newCodexStatusErr(resp.StatusCode, body)
+	}
+
+	var parsed struct {
+		AccessToken string `json:"accessToken"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(parsed.AccessToken) == "" {
+		return "", fmt.Errorf("codex conversation bridge: session refresh response missing accessToken")
+	}
+	return strings.TrimSpace(parsed.AccessToken), nil
+}
+
+func prepareCodexConversationAuthContext(ctx context.Context, client *http.Client, auth *cliproxyauth.Auth, targetURL string) {
+	if client == nil {
+		return
+	}
+
+	endpoint := codexConversationRequestOriginFromRawURL(targetURL) + codexConversationCSRFPath
+	deviceID := codexConversationDeviceID(auth)
+	cookieHeader := buildCodexConversationCookieHeader(auth, deviceID, "")
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Referer", codexConversationRequestOriginFromRawURL(targetURL)+"/")
+	req.Header.Set("User-Agent", codexConversationBrowserUserAgent)
+	req.Header.Set("Accept-Language", codexConversationDefaultAcceptLanguage)
+	req.Header.Set("Oai-Language", codexConversationDefaultLanguage)
+	req.Header.Set("Sec-Fetch-Dest", "empty")
+	req.Header.Set("Sec-Fetch-Mode", "cors")
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	req.Header.Set("Sec-Ch-Ua", codexConversationSecCHUA)
+	req.Header.Set("Sec-Ch-Ua-Mobile", "?0")
+	req.Header.Set("Sec-Ch-Ua-Platform", `"Windows"`)
+	req.Header.Set("Sec-Ch-Ua-Arch", `"x86"`)
+	req.Header.Set("Sec-Ch-Ua-Bitness", `"64"`)
+	req.Header.Set("Sec-Ch-Ua-Full-Version", `"136.0.7103.113"`)
+	req.Header.Set("Sec-Ch-Ua-Full-Version-List", codexConversationSecCHUAFullVersion)
+	req.Header.Set("Sec-Ch-Ua-Platform-Version", `"15.0.0"`)
+	if strings.TrimSpace(cookieHeader) != "" {
+		req.Header.Set("Cookie", cookieHeader)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return
+	}
+	body, readErr := ioReadAllAndClose(resp)
+	if readErr != nil {
+		return
+	}
+	codexConversationPersistCookieHeader(auth, collectCodexConversationSetCookies(resp))
+	if isCodexChallengePage(body) {
+		return
+	}
 }
 
 func codexConversationFetchChatRequirements(ctx context.Context, client *http.Client, targetURL *neturl.URL, bearerToken, deviceID, userAgent, cookieHeader string) (requirementsToken, proofToken, oaiSC string, err error) {
@@ -156,6 +366,11 @@ func codexConversationFetchChatRequirements(ctx context.Context, client *http.Cl
 		req.Header.Set("Sec-Ch-Ua", codexConversationSecCHUA)
 		req.Header.Set("Sec-Ch-Ua-Mobile", "?0")
 		req.Header.Set("Sec-Ch-Ua-Platform", `"Windows"`)
+		req.Header.Set("Sec-Ch-Ua-Arch", `"x86"`)
+		req.Header.Set("Sec-Ch-Ua-Bitness", `"64"`)
+		req.Header.Set("Sec-Ch-Ua-Full-Version", `"136.0.7103.113"`)
+		req.Header.Set("Sec-Ch-Ua-Full-Version-List", codexConversationSecCHUAFullVersion)
+		req.Header.Set("Sec-Ch-Ua-Platform-Version", `"15.0.0"`)
 		if strings.TrimSpace(cookieHeader) != "" {
 			req.Header.Set("Cookie", cookieHeader)
 		}
@@ -283,6 +498,59 @@ func buildCodexConversationCookieHeader(auth *cliproxyauth.Auth, deviceID, oaiSC
 	return mergeCodexConversationCookies(parts...)
 }
 
+func collectCodexConversationSetCookies(resp *http.Response) string {
+	if resp == nil {
+		return ""
+	}
+
+	var parts []string
+	for _, cookie := range resp.Cookies() {
+		if strings.TrimSpace(cookie.Name) == "" || strings.TrimSpace(cookie.Value) == "" {
+			continue
+		}
+		parts = append(parts, cookie.Name+"="+cookie.Value)
+	}
+	for _, setCookie := range resp.Header.Values("Set-Cookie") {
+		for _, segment := range strings.Split(setCookie, ";") {
+			pair := strings.TrimSpace(segment)
+			if pair == "" {
+				continue
+			}
+			key, value, ok := strings.Cut(pair, "=")
+			if !ok {
+				continue
+			}
+			name := strings.TrimSpace(key)
+			if name == "" || strings.Contains(strings.ToLower(name), "path") || strings.Contains(strings.ToLower(name), "domain") || strings.Contains(strings.ToLower(name), "expires") || strings.Contains(strings.ToLower(name), "max-age") || strings.Contains(strings.ToLower(name), "samesite") || strings.Contains(strings.ToLower(name), "httponly") || strings.Contains(strings.ToLower(name), "secure") {
+				continue
+			}
+			parts = append(parts, name+"="+strings.TrimSpace(value))
+			break
+		}
+	}
+	return mergeCodexConversationCookies(parts...)
+}
+
+func codexConversationPersistCookieHeader(auth *cliproxyauth.Auth, cookieHeader string) {
+	if auth == nil || strings.TrimSpace(cookieHeader) == "" {
+		return
+	}
+	if auth.Metadata == nil {
+		auth.Metadata = make(map[string]any)
+	}
+	auth.Metadata["cookie"] = mergeCodexConversationCookies(metaStringValue(auth.Metadata, "cookie"), metaStringValue(auth.Metadata, "cookies"), cookieHeader)
+}
+
+func codexConversationPersistOaiSC(auth *cliproxyauth.Auth, oaiSC string) {
+	if auth == nil || strings.TrimSpace(oaiSC) == "" {
+		return
+	}
+	if auth.Metadata == nil {
+		auth.Metadata = make(map[string]any)
+	}
+	auth.Metadata["oai_sc"] = strings.TrimSpace(oaiSC)
+}
+
 func mergeCodexConversationCookies(parts ...string) string {
 	order := make([]string, 0, 8)
 	values := make(map[string]string)
@@ -341,11 +609,64 @@ func codexConversationDeviceID(auth *cliproxyauth.Auth) string {
 	return uuid.NewString()
 }
 
+func codexConversationAccessToken(auth *cliproxyauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	if value := metaStringValue(auth.Metadata, "access_token"); value != "" {
+		return value
+	}
+	if auth.Attributes != nil {
+		if value := strings.TrimSpace(auth.Attributes["access_token"]); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func codexConversationSessionToken(auth *cliproxyauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	if value := metaStringValue(auth.Metadata, "session_token"); value != "" {
+		return value
+	}
+	if auth.Attributes != nil {
+		if value := strings.TrimSpace(auth.Attributes["session_token"]); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func codexConversationRefreshToken(auth *cliproxyauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	if value := metaStringValue(auth.Metadata, "refresh_token"); value != "" {
+		return value
+	}
+	if auth.Attributes != nil {
+		if value := strings.TrimSpace(auth.Attributes["refresh_token"]); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
 func codexConversationRequestOrigin(targetURL *neturl.URL) string {
 	if targetURL != nil && strings.TrimSpace(targetURL.Scheme) != "" && strings.TrimSpace(targetURL.Host) != "" {
 		return targetURL.Scheme + "://" + targetURL.Host
 	}
 	return "https://chatgpt.com"
+}
+
+func codexConversationRequestOriginFromRawURL(rawURL string) string {
+	parsed, err := neturl.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return "https://chatgpt.com"
+	}
+	return codexConversationRequestOrigin(parsed)
 }
 
 func codexConversationBrowserizeUserAgent(userAgent string) string {
