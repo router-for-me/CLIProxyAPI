@@ -182,16 +182,14 @@ const ANTIGRAVITY_TIER_LABELS: Record<string, string> = {
 
 const fetchAntigravityTierInfo = async (
   authIndex: string,
-  projectId: string
+  _projectId: string
 ): Promise<AntigravityTierInfo> => {
   const empty: AntigravityTierInfo = { tierLabel: null, tierId: null, creditBalance: null };
   const requestBody = JSON.stringify({
-    cloudaicompanionProject: projectId,
     metadata: {
-      ideType: 'IDE_UNSPECIFIED',
-      platform: 'PLATFORM_UNSPECIFIED',
-      pluginType: 'GEMINI',
-      duetProject: projectId,
+      ideType: 'ANTIGRAVITY',
+      ideVersion: '1.20.6',
+      ideName: 'antigravity',
     },
   });
 
