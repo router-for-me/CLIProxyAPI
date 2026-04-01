@@ -1,7 +1,11 @@
 package proxyutil
 
 import (
+	"encoding/base64"
+	"io"
+	"net"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 )
 
@@ -135,5 +139,124 @@ func TestBuildHTTPTransportSOCKS5ProxyInheritsDefaultTransportSettings(t *testin
 	}
 	if transport.TLSHandshakeTimeout != defaultTransport.TLSHandshakeTimeout {
 		t.Fatalf("TLSHandshakeTimeout = %v, want %v", transport.TLSHandshakeTimeout, defaultTransport.TLSHandshakeTimeout)
+	}
+}
+
+func TestBuildDialerHTTPProxySupportsConnect(t *testing.T) {
+	targetListener, errListen := net.Listen("tcp", "127.0.0.1:0")
+	if errListen != nil {
+		t.Fatalf("net.Listen returned error: %v", errListen)
+	}
+	defer targetListener.Close()
+
+	targetDone := make(chan error, 1)
+	go func() {
+		conn, errAccept := targetListener.Accept()
+		if errAccept != nil {
+			targetDone <- errAccept
+			return
+		}
+		defer conn.Close()
+
+		buf := make([]byte, 4)
+		if _, errRead := io.ReadFull(conn, buf); errRead != nil {
+			targetDone <- errRead
+			return
+		}
+		if string(buf) != "ping" {
+			targetDone <- io.ErrUnexpectedEOF
+			return
+		}
+		_, errWrite := conn.Write([]byte("pong"))
+		targetDone <- errWrite
+	}()
+
+	proxyServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodConnect {
+			t.Errorf("method = %s, want CONNECT", r.Method)
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+
+		wantAuth := "Basic " + base64.StdEncoding.EncodeToString([]byte("user:pass"))
+		if got := r.Header.Get("Proxy-Authorization"); got != wantAuth {
+			t.Errorf("Proxy-Authorization = %q, want %q", got, wantAuth)
+			w.WriteHeader(http.StatusProxyAuthRequired)
+			return
+		}
+
+		targetConn, errDial := net.Dial("tcp", targetListener.Addr().String())
+		if errDial != nil {
+			t.Errorf("net.Dial returned error: %v", errDial)
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+
+		hijacker, ok := w.(http.Hijacker)
+		if !ok {
+			t.Error("response writer does not implement http.Hijacker")
+			w.WriteHeader(http.StatusInternalServerError)
+			targetConn.Close()
+			return
+		}
+
+		clientConn, _, errHijack := hijacker.Hijack()
+		if errHijack != nil {
+			t.Errorf("Hijack returned error: %v", errHijack)
+			targetConn.Close()
+			return
+		}
+
+		if _, errWrite := clientConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n")); errWrite != nil {
+			t.Errorf("write CONNECT response returned error: %v", errWrite)
+			clientConn.Close()
+			targetConn.Close()
+			return
+		}
+
+		go func() {
+			defer clientConn.Close()
+			defer targetConn.Close()
+			_, _ = io.Copy(targetConn, clientConn)
+		}()
+		go func() {
+			defer clientConn.Close()
+			defer targetConn.Close()
+			_, _ = io.Copy(clientConn, targetConn)
+		}()
+	}))
+	defer proxyServer.Close()
+
+	dialer, mode, errBuild := BuildDialer("http://user:pass@" + proxyServer.Listener.Addr().String())
+	if errBuild != nil {
+		t.Fatalf("BuildDialer returned error: %v", errBuild)
+	}
+	if mode != ModeProxy {
+		t.Fatalf("mode = %d, want %d", mode, ModeProxy)
+	}
+	if dialer == nil {
+		t.Fatal("expected dialer, got nil")
+	}
+
+	conn, errDial := dialer.Dial("tcp", targetListener.Addr().String())
+	if errDial != nil {
+		t.Fatalf("dialer.Dial returned error: %v", errDial)
+	}
+	defer conn.Close()
+
+	if _, errWrite := conn.Write([]byte("ping")); errWrite != nil {
+		t.Fatalf("conn.Write returned error: %v", errWrite)
+	}
+
+	reply := make([]byte, 4)
+	if _, errRead := io.ReadFull(conn, reply); errRead != nil {
+		t.Fatalf("io.ReadFull returned error: %v", errRead)
+	}
+	if string(reply) != "pong" {
+		t.Fatalf("reply = %q, want %q", reply, "pong")
+	}
+
+	if errTarget := <-targetDone; errTarget != nil {
+		t.Fatalf("target server returned error: %v", errTarget)
 	}
 }
