@@ -76,7 +76,7 @@ export const ANTIGRAVITY_CODE_ASSIST_URLS = [
 export const ANTIGRAVITY_REQUEST_HEADERS = {
   Authorization: 'Bearer $TOKEN$',
   'Content-Type': 'application/json',
-  'User-Agent': 'antigravity/1.11.5 windows/amd64',
+  'User-Agent': 'antigravity/1.20.5 windows/amd64',
 };
 
 export const ANTIGRAVITY_QUOTA_GROUPS: AntigravityQuotaGroupDefinition[] = [
