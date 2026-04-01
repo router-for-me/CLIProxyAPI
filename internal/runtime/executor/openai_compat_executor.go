@@ -148,8 +148,8 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		recordAPIResponseError(ctx, e.cfg, err)
 		if auth != nil {
 			compatCfg := e.resolveCompatConfig(auth)
-			threshold := 2
-			timeoutSec := 3
+			threshold := registry.DefaultCircuitBreakerFailureThreshold
+			timeoutSec := registry.DefaultCircuitBreakerRecoveryTimeoutSec
 			if compatCfg != nil && compatCfg.CircuitBreakerFailureThreshold > 0 {
 				threshold = compatCfg.CircuitBreakerFailureThreshold
 			}
@@ -173,8 +173,8 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
 		if auth != nil {
 			compatCfg := e.resolveCompatConfig(auth)
-			threshold := 5
-			timeoutSec := 60
+			threshold := registry.DefaultCircuitBreakerFailureThreshold
+			timeoutSec := registry.DefaultCircuitBreakerRecoveryTimeoutSec
 			if compatCfg != nil && compatCfg.CircuitBreakerFailureThreshold > 0 {
 				threshold = compatCfg.CircuitBreakerFailureThreshold
 			}
@@ -278,8 +278,8 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		recordAPIResponseError(ctx, e.cfg, err)
 		if auth != nil {
 			compatCfg := e.resolveCompatConfig(auth)
-			threshold := 2
-			timeoutSec := 3
+			threshold := registry.DefaultCircuitBreakerFailureThreshold
+			timeoutSec := registry.DefaultCircuitBreakerRecoveryTimeoutSec
 			if compatCfg != nil && compatCfg.CircuitBreakerFailureThreshold > 0 {
 				threshold = compatCfg.CircuitBreakerFailureThreshold
 			}
@@ -301,8 +301,8 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
 		if auth != nil {
 			compatCfg := e.resolveCompatConfig(auth)
-			threshold := 2
-			timeoutSec := 3
+			threshold := registry.DefaultCircuitBreakerFailureThreshold
+			timeoutSec := registry.DefaultCircuitBreakerRecoveryTimeoutSec
 			if compatCfg != nil && compatCfg.CircuitBreakerFailureThreshold > 0 {
 				threshold = compatCfg.CircuitBreakerFailureThreshold
 			}

@@ -752,7 +752,9 @@ func (r *ModelRegistry) ResumeClientModel(clientID, modelID string) {
 	log.Debugf("Resumed client %s for model %s", clientID, modelID)
 }
 
-const defaultCircuitBreakerRecoveryTimeout = 60 * time.Second
+const DefaultCircuitBreakerFailureThreshold = 3
+const DefaultCircuitBreakerRecoveryTimeoutSec = 120
+const defaultCircuitBreakerRecoveryTimeout = time.Duration(DefaultCircuitBreakerRecoveryTimeoutSec) * time.Second
 
 func (r *ModelRegistry) RecordFailure(clientID, modelID string, threshold int, recoveryTimeoutSec int) {
 	if clientID == "" || modelID == "" || threshold <= 0 {
@@ -782,7 +784,7 @@ func (r *ModelRegistry) RecordFailure(clientID, modelID string, threshold int, r
 			tracker.State = CircuitOpen
 			timeout := recoveryTimeoutSec
 			if timeout <= 0 {
-				timeout = 60
+				timeout = DefaultCircuitBreakerRecoveryTimeoutSec
 			}
 			tracker.RecoveryAt = now.Add(time.Duration(timeout) * time.Second)
 			tracker.FailureCount++
@@ -804,7 +806,7 @@ func (r *ModelRegistry) RecordFailure(clientID, modelID string, threshold int, r
 		if tracker.Count >= threshold {
 			timeout := recoveryTimeoutSec * (1 << (tracker.FailureCount - 1))
 			if timeout <= 0 {
-				timeout = 60
+				timeout = DefaultCircuitBreakerRecoveryTimeoutSec
 			}
 			if timeout > 3600 {
 				timeout = 3600
