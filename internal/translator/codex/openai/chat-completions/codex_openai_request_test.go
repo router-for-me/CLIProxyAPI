@@ -248,6 +248,60 @@ func TestToolCallOutputWithImageContent(t *testing.T) {
 	}
 }
 
+func TestToolCallOutputWithImageContentWithoutSourceFallsBackToText(t *testing.T) {
+	input := []byte(`{
+		"model": "gpt-4o",
+		"messages": [
+			{"role": "user", "content": "Show me the generated image result."},
+			{
+				"role": "assistant",
+				"content": null,
+				"tool_calls": [
+					{
+						"id": "call_img_1",
+						"type": "function",
+						"function": {
+							"name": "render_image",
+							"arguments": "{}"
+						}
+					}
+				]
+			},
+			{
+				"role": "tool",
+				"tool_call_id": "call_img_1",
+				"content": [
+					{"type": "image_url", "image_url": {"detail": "high"}}
+				]
+			}
+		],
+		"tools": [
+			{
+				"type": "function",
+				"function": {
+					"name": "render_image",
+					"description": "Render image",
+					"parameters": {"type": "object", "properties": {}}
+				}
+			}
+		]
+	}`)
+
+	out := ConvertOpenAIRequestToCodex("gpt-4o", input, true)
+	result := string(out)
+
+	parts := gjson.Get(result, "input.2.output").Array()
+	if len(parts) != 1 {
+		t.Fatalf("expected 1 output part, got %d: %s", len(parts), gjson.Get(result, "input.2.output").Raw)
+	}
+	if parts[0].Get("type").String() != "input_text" {
+		t.Errorf("part 0: expected type 'input_text', got '%s'", parts[0].Get("type").String())
+	}
+	if parts[0].Get("text").String() != `{"type": "image_url", "image_url": {"detail": "high"}}` {
+		t.Errorf("part 0: unexpected fallback text '%s'", parts[0].Get("text").String())
+	}
+}
+
 func TestToolCallOutputWithFileContent(t *testing.T) {
 	input := []byte(`{
 		"model": "gpt-4o",

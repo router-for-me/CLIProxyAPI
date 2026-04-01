@@ -147,18 +147,27 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 							outputArr, _ = sjson.SetRawBytes(outputArr, "-1", outputPart)
 						case "image_url":
 							// Handle image_url content in tool message
-							outputPart := []byte(`{}`)
-							outputPart, _ = sjson.SetBytes(outputPart, "type", "input_image")
-							if u := it.Get("image_url.url"); u.Exists() {
-								outputPart, _ = sjson.SetBytes(outputPart, "image_url", u.String())
+							imageURL := it.Get("image_url.url").String()
+							fileID := it.Get("image_url.file_id").String()
+							if imageURL != "" || fileID != "" {
+								outputPart := []byte(`{}`)
+								outputPart, _ = sjson.SetBytes(outputPart, "type", "input_image")
+								if imageURL != "" {
+									outputPart, _ = sjson.SetBytes(outputPart, "image_url", imageURL)
+								}
+								if fileID != "" {
+									outputPart, _ = sjson.SetBytes(outputPart, "file_id", fileID)
+								}
+								if detail := it.Get("image_url.detail").String(); detail != "" {
+									outputPart, _ = sjson.SetBytes(outputPart, "detail", detail)
+								}
+								outputArr, _ = sjson.SetRawBytes(outputArr, "-1", outputPart)
+							} else {
+								outputPart := []byte(`{}`)
+								outputPart, _ = sjson.SetBytes(outputPart, "type", "input_text")
+								outputPart, _ = sjson.SetBytes(outputPart, "text", it.Raw)
+								outputArr, _ = sjson.SetRawBytes(outputArr, "-1", outputPart)
 							}
-							if fid := it.Get("image_url.file_id").String(); fid != "" {
-								outputPart, _ = sjson.SetBytes(outputPart, "file_id", fid)
-							}
-							if detail := it.Get("image_url.detail").String(); detail != "" {
-								outputPart, _ = sjson.SetBytes(outputPart, "detail", detail)
-							}
-							outputArr, _ = sjson.SetRawBytes(outputArr, "-1", outputPart)
 						case "file":
 							// Handle file content in tool message
 							fileID := it.Get("file.file_id").String()
