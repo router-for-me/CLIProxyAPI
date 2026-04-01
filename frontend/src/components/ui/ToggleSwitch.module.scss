@@ -1,0 +1,58 @@
+.root {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: $spacing-sm;
+  cursor: pointer;
+}
+
+.labelLeft {
+  .label {
+    order: -1;
+  }
+}
+
+.disabled {
+  cursor: not-allowed;
+}
+
+.root input {
+  width: 0;
+  height: 0;
+  opacity: 0;
+  position: absolute;
+}
+
+.track {
+  width: 44px;
+  height: 24px;
+  background: var(--border-color);
+  border-radius: $radius-full;
+  position: relative;
+  transition: background $transition-fast;
+}
+
+.thumb {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 18px;
+  height: 18px;
+  background: #fff;
+  border-radius: $radius-full;
+  box-shadow: $shadow-sm;
+  transition: transform $transition-fast;
+}
+
+.root input:checked + .track {
+  background: var(--primary-color);
+}
+
+.root input:checked + .track .thumb {
+  transform: translateX(20px);
+}
+
+.label {
+  color: var(--text-primary);
+  font-weight: 600;
+}

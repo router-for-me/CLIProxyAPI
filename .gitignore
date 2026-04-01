@@ -45,6 +45,10 @@ GEMINI.md
 _bmad/*
 _bmad-output/*
 
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
 # macOS
 .DS_Store
 ._*

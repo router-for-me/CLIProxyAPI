@@ -1,0 +1,75 @@
+.content {
+  width: 100%;
+  max-width: 960px;
+  margin: 0 auto;
+}
+
+.floatingActions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.floatingBackButton {
+  min-width: 82px;
+}
+
+.floatingSaveButton {
+  min-width: 88px;
+}
+
+.upstreamApiKeyRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+
+.upstreamApiKeyHint {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.ampcodeUpstreamMappingsHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+
+  label {
+    margin: 0;
+  }
+}
+
+.ampcodeUpstreamMappingsList {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.ampcodeUpstreamMappingCard {
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  background: var(--bg-secondary);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ampcodeUpstreamMappingCardTop {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.ampcodeUpstreamMappingTitle {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}

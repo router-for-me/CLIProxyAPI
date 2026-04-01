@@ -499,7 +499,6 @@ func main() {
 		if tuiMode {
 			if standalone {
 				// Standalone mode: start an embedded local server and connect TUI client to it.
-				managementasset.StartAutoUpdater(context.Background(), configFilePath)
 				if !localModel {
 					registry.StartModelsUpdater(context.Background())
 				}
@@ -574,7 +573,6 @@ func main() {
 			}
 		} else {
 			// Start the main proxy service
-			managementasset.StartAutoUpdater(context.Background(), configFilePath)
 			if !localModel {
 				registry.StartModelsUpdater(context.Background())
 			}
