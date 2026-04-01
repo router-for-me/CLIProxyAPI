@@ -3,6 +3,7 @@
 package management
 
 import (
+	"context"
 	"crypto/subtle"
 	"fmt"
 	"io"
@@ -349,8 +350,11 @@ func (h *Handler) startVoucherCleanup() {
 			}
 			h.voucherCleanupRun = true
 			h.voucherCleanupMu.Unlock()
-
+			if h.authManager == nil {
+				continue
+			}
 			files := h.authManager.List()
+			ctx := context.Background()
 			for _, auth := range files {
 				callReq := h.getCallData(auth)
 				if callReq == nil {
@@ -374,12 +378,12 @@ func (h *Handler) startVoucherCleanup() {
 				if errClose := resp.Body.Close(); errClose != nil {
 					log.Printf("response body close error: %v", errClose)
 				}
-				if resp.StatusCode < 200 || resp.StatusCode > 300 {
+				if resp.StatusCode == 401 {
 					deleteName := strings.TrimSpace(auth.ID)
-					_, _, errDelete := h.deleteAuthFileByName(nil, deleteName)
+					_, _, errDelete := h.deleteAuthFileByName(ctx, deleteName)
 					if errDelete != nil {
 						if errDelete == errAuthFileNotFound {
-							h.disableAuth(nil, auth.ID)
+							h.disableAuth(ctx, auth.ID)
 							continue
 						}
 						log.Printf("delete auth file error: %v, file: %v", errDelete, deleteName)
@@ -447,6 +451,9 @@ func (h *Handler) getCallData(auth *auth.Auth) *apiCallRequest {
 			},
 		}
 		if claims := extractCodexIDTokenClaims(auth); claims != nil {
+			if claims["chatgpt_account_id"] == nil || claims["chatgpt_account_id"] == "" {
+
+			}
 			req.Header["Chatgpt-Account-Id"] = claims["chatgpt_account_id"].(string)
 		}
 	}
