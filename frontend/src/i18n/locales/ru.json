@@ -521,6 +521,12 @@
     "page_size_unit": "элементов",
     "view_mode_paged": "Постранично",
     "view_mode_all": "Показать все",
+    "view_mode_list": "Список",
+    "list_filter_label": "Модели:",
+    "list_filter_reset": "Сбросить",
+    "list_col_file": "Файл",
+    "list_col_status": "Статус",
+    "list_click_load": "Загрузить",
     "too_many_files_warning": "Слишком много учётных данных. Полный список может повлиять на производительность, используйте постраничный режим.",
     "filter_all": "Все",
     "filter_qwen": "Qwen",
@@ -615,7 +621,9 @@
     "missing_auth_index": "В файле авторизации отсутствует auth_index",
     "empty_models": "Данные по квоте отсутствуют",
     "refresh_button": "Обновить квоту",
-    "fetch_all": "Получить все"
+    "fetch_all": "Получить все",
+    "credit_label": "AI-кредиты",
+    "credit_amount": "{{count}} кредитов"
   },
   "claude_quota": {
     "title": "Квота Claude",
@@ -1259,7 +1267,9 @@
           "switch_project": "Переключить проект",
           "switch_project_desc": "Автоматически переходить на другой проект при превышении квоты",
           "switch_preview_model": "Переключить на preview-модель",
-          "switch_preview_model_desc": "Переключаться на preview-версию модели при превышении квоты"
+          "switch_preview_model_desc": "Переключаться на preview-версию модели при превышении квоты",
+          "show_antigravity_credit": "Показать AI-кредиты Antigravity",
+          "show_antigravity_credit_desc": "Отображать баланс AI-кредитов на карточках квоты Antigravity"
         },
         "streaming": {
           "title": "Настройки стриминга",

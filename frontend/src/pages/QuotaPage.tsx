@@ -4,8 +4,9 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { parse as parseYaml } from 'yaml';
 import { useHeaderRefresh } from '@/hooks/useHeaderRefresh';
-import { useAuthStore } from '@/stores';
+import { useAuthStore, useQuotaStore } from '@/stores';
 import { authFilesApi, configFileApi } from '@/services/api';
 import {
   QuotaSection,
@@ -28,14 +29,30 @@ export function QuotaPage() {
 
   const disableControls = connectionStatus !== 'connected';
 
+  const setShowAntigravityCredit = useQuotaStore((state) => state.setShowAntigravityCredit);
+
   const loadConfig = useCallback(async () => {
     try {
-      await configFileApi.fetchConfigYaml();
+      const yaml = await configFileApi.fetchConfigYaml();
+      if (yaml && typeof yaml === 'string') {
+        try {
+          const parsed = parseYaml(yaml) as Record<string, unknown> | null;
+          const quotaExceeded = parsed?.['quota-exceeded'];
+          if (quotaExceeded && typeof quotaExceeded === 'object' && quotaExceeded !== null) {
+            const qe = quotaExceeded as Record<string, unknown>;
+            setShowAntigravityCredit(
+              qe['show-antigravity-credit'] !== undefined
+                ? Boolean(qe['show-antigravity-credit'])
+                : true
+            );
+          }
+        } catch { /* ignore parse error */ }
+      }
     } catch (err: unknown) {
       const errorMessage = err instanceof Error ? err.message : t('notification.refresh_failed');
       setError((prev) => prev || errorMessage);
     }
-  }, [t]);
+  }, [t, setShowAntigravityCredit]);
 
   const loadFiles = useCallback(async () => {
     setLoading(true);

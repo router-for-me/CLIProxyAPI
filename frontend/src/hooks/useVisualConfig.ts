@@ -512,6 +512,9 @@ export function useVisualConfig() {
         quotaSwitchPreviewModel: Boolean(
           quotaExceeded?.['switch-preview-model'] ?? true
         ),
+        quotaShowAntigravityCredit: Boolean(
+          quotaExceeded?.['show-antigravity-credit'] ?? true
+        ),
 
         routingStrategy:
           routing?.strategy === 'fill-first' ? 'fill-first' : 'round-robin',
@@ -617,13 +620,18 @@ export function useVisualConfig() {
         if (
           docHas(doc, ['quota-exceeded']) ||
           !values.quotaSwitchProject ||
-          !values.quotaSwitchPreviewModel
+          !values.quotaSwitchPreviewModel ||
+          !values.quotaShowAntigravityCredit
         ) {
           ensureMapInDoc(doc, ['quota-exceeded']);
           doc.setIn(['quota-exceeded', 'switch-project'], values.quotaSwitchProject);
           doc.setIn(
             ['quota-exceeded', 'switch-preview-model'],
             values.quotaSwitchPreviewModel
+          );
+          doc.setIn(
+            ['quota-exceeded', 'show-antigravity-credit'],
+            values.quotaShowAntigravityCredit
           );
           deleteIfMapEmpty(doc, ['quota-exceeded']);
         }

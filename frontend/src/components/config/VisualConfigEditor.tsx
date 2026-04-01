@@ -935,6 +935,13 @@ export function VisualConfigEditor({
                 disabled={disabled}
                 onChange={(quotaSwitchPreviewModel) => onChange({ quotaSwitchPreviewModel })}
               />
+              <ToggleRow
+                title={t('config_management.visual.sections.quota.show_antigravity_credit')}
+                description={t('config_management.visual.sections.quota.show_antigravity_credit_desc')}
+                checked={values.quotaShowAntigravityCredit}
+                disabled={disabled}
+                onChange={(quotaShowAntigravityCredit) => onChange({ quotaShowAntigravityCredit })}
+              />
             </SectionGrid>
           </ConfigSection>
 

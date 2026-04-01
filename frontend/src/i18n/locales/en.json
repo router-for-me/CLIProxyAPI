@@ -521,6 +521,12 @@
     "page_size_unit": "items",
     "view_mode_paged": "Paged",
     "view_mode_all": "Show all",
+    "view_mode_list": "List",
+    "list_filter_label": "Models:",
+    "list_filter_reset": "Reset",
+    "list_col_file": "File",
+    "list_col_status": "Status",
+    "list_click_load": "Load",
     "too_many_files_warning": "Too many credentials. Showing all may cause performance issues, please use paged view.",
     "filter_all": "All",
     "filter_qwen": "Qwen",
@@ -612,7 +618,9 @@
     "missing_auth_index": "Auth file missing auth_index",
     "empty_models": "No quota data available",
     "refresh_button": "Refresh Quota",
-    "fetch_all": "Fetch All"
+    "fetch_all": "Fetch All",
+    "credit_label": "AI Credit",
+    "credit_amount": "{{count}} credits"
   },
   "claude_quota": {
     "title": "Claude Quota",
@@ -1254,7 +1262,9 @@
           "switch_project": "Switch Project",
           "switch_project_desc": "Automatically switch to another project when quota is exceeded",
           "switch_preview_model": "Switch to Preview Model",
-          "switch_preview_model_desc": "Switch to preview model version when quota is exceeded"
+          "switch_preview_model_desc": "Switch to preview model version when quota is exceeded",
+          "show_antigravity_credit": "Show Antigravity AI Credit",
+          "show_antigravity_credit_desc": "Display AI credit balance on Antigravity quota cards"
         },
         "streaming": {
           "title": "Streaming Configuration",

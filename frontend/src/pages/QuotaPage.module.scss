@@ -677,3 +677,203 @@
     line-height: 1.6;
   }
 }
+
+/* ── List view mode ─────────────────────────────────────────────── */
+
+.listModeContainer {
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-md;
+}
+
+.listModelFilter {
+  display: flex;
+  align-items: center;
+  gap: $spacing-xs;
+  flex-wrap: wrap;
+}
+
+.listFilterLabel {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-right: 4px;
+  white-space: nowrap;
+}
+
+.listFilterChip {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+
+  &:hover {
+    border-color: var(--primary-color);
+    color: var(--text-primary);
+  }
+}
+
+.listFilterChipActive {
+  background: color-mix(in srgb, var(--primary-color) 14%, var(--bg-secondary));
+  border-color: var(--primary-color);
+  color: var(--primary-color);
+  font-weight: 600;
+}
+
+.listFilterReset {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px dashed var(--border-color);
+  background: transparent;
+  color: var(--text-tertiary);
+  font-size: 12px;
+  cursor: pointer;
+
+  &:hover {
+    color: var(--danger-color);
+    border-color: var(--danger-color);
+  }
+}
+
+.listTableWrapper {
+  overflow-x: auto;
+  border: 1px solid var(--border-color);
+  border-radius: $radius-md;
+}
+
+.listTable {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+
+  th,
+  td {
+    padding: 8px 12px;
+    text-align: center;
+    white-space: nowrap;
+    border-bottom: 1px solid var(--border-color);
+  }
+
+  th {
+    background: var(--bg-secondary);
+    color: var(--text-secondary);
+    font-weight: 600;
+    font-size: 12px;
+    position: sticky;
+    top: 0;
+    z-index: 1;
+  }
+
+  tbody tr:last-child td {
+    border-bottom: none;
+  }
+
+  tbody tr:hover {
+    background: color-mix(in srgb, var(--primary-color) 4%, transparent);
+  }
+}
+
+.listThFile {
+  text-align: left !important;
+  min-width: 180px;
+}
+
+.listThStatus {
+  width: 52px;
+}
+
+.listThCredit {
+  width: 80px;
+}
+
+.listThModel {
+  min-width: 80px;
+}
+
+.listTdFile {
+  text-align: left !important;
+}
+
+.listFileName {
+  font-weight: 600;
+  color: var(--text-primary);
+  word-break: break-all;
+  white-space: normal;
+  max-width: 240px;
+  display: inline-block;
+}
+
+.listTdStatus {
+  width: 52px;
+}
+
+.listTdCredit {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.listTdModel {
+  font-weight: 700;
+  font-size: 13px;
+}
+
+.listStatusLoading {
+  color: var(--text-tertiary);
+}
+
+.listStatusError {
+  color: var(--danger-color);
+  font-weight: 700;
+  cursor: help;
+}
+
+.listStatusIdle {
+  background: none;
+  border: none;
+  color: var(--primary-color);
+  cursor: pointer;
+  font-size: 12px;
+  text-decoration: underline;
+  padding: 0;
+
+  &:disabled {
+    cursor: not-allowed;
+    color: var(--text-tertiary);
+    text-decoration: none;
+  }
+}
+
+.listStatusOk {
+  color: var(--success-color, #22c55e);
+  font-weight: 600;
+}
+
+.listRowError {
+  background: rgba($error-color, 0.04);
+}
+
+.listQuotaListCellIdle,
+.quotaListCellIdle {
+  color: var(--text-tertiary);
+}
+
+.quotaListCellHigh {
+  color: var(--success-color, #22c55e);
+}
+
+.quotaListCellMedium {
+  color: var(--quota-medium-color, #e0aa14);
+}
+
+.quotaListCellLow {
+  color: var(--danger-color);
+}
