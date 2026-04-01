@@ -1,0 +1,359 @@
+@use '../../styles/variables' as *;
+
+.scrollContainer {
+  width: 100%;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
+.tapHint {
+  position: sticky;
+  left: 0;
+  z-index: 3;
+  font-size: 12px;
+  color: var(--text-secondary);
+  padding: 0 4px;
+  margin-bottom: 8px;
+}
+
+.container {
+  display: inline-flex;
+  position: relative;
+  min-width: 100%;
+  min-height: 300px;
+  justify-content: space-between;
+  padding: 20px 0;
+  user-select: none;
+
+  @media (max-width: 768px) {
+    // Give mobile extra horizontal room to reduce line overlap; users can swipe to scroll.
+    min-width: max(100%, 960px);
+    padding: 12px 0;
+  }
+}
+
+// SVG layer for connection lines (behind columns so links are visible)
+.connections {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 1;
+  overflow: visible;
+
+  path {
+    fill: none;
+    stroke-width: 2;
+  }
+}
+
+.column {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  z-index: 2;
+  flex: 0 0 auto;
+
+  &.providers {
+    align-items: flex-end;
+    min-width: 140px;
+  }
+
+  &.sources {
+    align-items: flex-start;
+    min-width: 200px;
+  }
+
+  &.aliases {
+    align-items: flex-start;
+    min-width: 200px;
+  }
+}
+
+.columnHeader {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  margin-bottom: 8px;
+  padding: 0 4px;
+}
+
+.item {
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-size: 13px;
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  max-width: 280px;
+  position: relative;
+  transition: all 0.2s ease;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+
+  &:hover {
+    border-color: var(--primary-color);
+    transform: translateY(-1px);
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.05);
+    z-index: 10;
+  }
+
+  &.dropTarget {
+    background-color: var(--bg-secondary);
+    border-color: var(--primary-color);
+    border-width: 2px;
+  }
+
+  &.selected {
+    border-color: var(--primary-color);
+    background-color: var(--bg-secondary);
+    box-shadow: 0 0 0 2px rgba($primary-color, 0.18);
+  }
+}
+
+// Mindmap-style provider branch (root node)
+.providerItem {
+  border-left: 3px solid transparent;
+  padding-left: 8px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+
+  .providerLabel {
+    font-weight: 600;
+    font-size: 13px;
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .collapseBtn {
+    flex-shrink: 0;
+    width: 24px;
+    height: 24px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: none;
+    background: var(--bg-secondary);
+    border-radius: 4px;
+    cursor: pointer;
+    color: var(--text-secondary);
+    transition: background-color 0.15s, color 0.15s;
+
+    &:hover {
+      background: var(--border-color);
+      color: var(--text-primary);
+    }
+  }
+
+  .chevronDown,
+  .chevronRight {
+    display: inline-block;
+    width: 0;
+    height: 0;
+    border-style: solid;
+  }
+
+  .chevronDown {
+    border-width: 5px 4px 0 4px;
+    border-color: currentColor transparent transparent transparent;
+  }
+
+  .chevronRight {
+    border-width: 4px 0 4px 5px;
+    border-color: transparent transparent transparent currentColor;
+  }
+}
+
+.providerGroup {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  width: 100%;
+}
+
+.sourceItem,
+.aliasItem {
+  cursor: grab;
+
+  &:active {
+    cursor: grabbing;
+  }
+
+  &.dragging {
+    opacity: 0.5;
+    border-style: dashed;
+  }
+}
+
+.dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  position: absolute;
+  top: 50%;
+  margin-top: -3px;
+  flex-shrink: 0;
+
+  &.dotLeft {
+    left: -3px;
+    background: var(--text-tertiary);
+  }
+}
+
+.sourceItem .dot {
+  right: -3px;
+}
+
+.providerBadge {
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  margin-right: 8px;
+  font-weight: 500;
+}
+
+.itemName {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.itemCount {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  margin-left: 8px;
+  background: var(--bg-secondary);
+  padding: 1px 6px;
+  border-radius: 10px;
+}
+
+.contextMenu {
+  position: fixed;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  z-index: 9999;
+  min-width: 120px;
+  overflow: hidden;
+  padding: 4px 0;
+
+  .menuItem {
+    padding: 8px 12px;
+    font-size: 13px;
+    color: var(--text-primary);
+    cursor: pointer;
+    transition: background-color 0.1s;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+
+    &:hover {
+      background-color: var(--bg-secondary);
+    }
+
+    &.danger {
+      color: var(--error-color);
+
+      &:hover {
+        background-color: var(--bg-error-light);
+      }
+    }
+  }
+
+  .menuDivider {
+    height: 1px;
+    margin: 4px 0;
+    background: var(--border-color);
+    padding: 0;
+    cursor: default;
+    pointer-events: none;
+  }
+}
+
+.settingsEmpty {
+  color: var(--text-tertiary);
+  font-size: 13px;
+  text-align: center;
+  padding: $spacing-lg 0;
+}
+
+.settingsList {
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-sm;
+}
+
+.settingsRow {
+  display: grid;
+  grid-template-columns: minmax(200px, 1fr) auto;
+  gap: $spacing-md;
+  align-items: center;
+  padding: $spacing-sm $spacing-md;
+  border: 1px solid var(--border-color);
+  border-radius: $radius-md;
+  background: var(--bg-secondary);
+
+  @media (max-width: 768px) {
+    grid-template-columns: 1fr;
+    align-items: flex-start;
+  }
+}
+
+.settingsNames {
+  display: flex;
+  align-items: center;
+  gap: $spacing-xs;
+  font-size: 13px;
+  color: var(--text-primary);
+  min-width: 0;
+}
+
+.settingsSource,
+.settingsAlias {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 220px;
+}
+
+.settingsArrow {
+  color: var(--text-tertiary);
+}
+
+.settingsActions {
+  display: flex;
+  align-items: center;
+  gap: $spacing-sm;
+}
+
+.settingsLabel {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.settingsDelete {
+  border: 0;
+  background: transparent;
+  color: var(--error-color);
+  padding: 6px;
+  border-radius: 6px;
+  cursor: pointer;
+
+  &:hover {
+    background: var(--bg-error-light);
+  }
+}

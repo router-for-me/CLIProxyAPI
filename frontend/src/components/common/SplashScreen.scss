@@ -1,0 +1,106 @@
+@use 'sass:color';
+@use '../../styles/variables.scss' as *;
+
+.splash-screen {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-primary);
+  opacity: 1;
+  transition: opacity 0.4s ease-out;
+
+  &.fade-out {
+    opacity: 0;
+    pointer-events: none;
+  }
+}
+
+.splash-content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: $spacing-md;
+  animation: splash-enter 0.6s ease-out;
+}
+
+@keyframes splash-enter {
+  from {
+    opacity: 0;
+    transform: scale(0.9) translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+.splash-logo {
+  height: 80px;
+  width: auto;
+  border-radius: $radius-lg;
+  box-shadow: $shadow-lg;
+  animation: splash-logo-pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes splash-logo-pulse {
+  0%, 100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.05);
+  }
+}
+
+.splash-title {
+  font-size: 28px;
+  font-weight: 800;
+  color: var(--text-primary);
+  margin: 0;
+  letter-spacing: -0.5px;
+}
+
+.splash-subtitle {
+  font-size: 16px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  margin: 0;
+  margin-top: -8px;
+}
+
+.splash-loader {
+  width: 120px;
+  height: 3px;
+  background: var(--border-color);
+  border-radius: $radius-full;
+  overflow: hidden;
+  margin-top: $spacing-md;
+}
+
+.splash-loader-bar {
+  width: 100%;
+  height: 100%;
+  background: var(--primary-color);
+  border-radius: $radius-full;
+  animation: splash-loading 1.2s ease-in-out infinite;
+  transform-origin: left;
+}
+
+@keyframes splash-loading {
+  0% {
+    transform: scaleX(0);
+  }
+  50% {
+    transform: scaleX(1);
+    transform-origin: left;
+  }
+  50.01% {
+    transform-origin: right;
+  }
+  100% {
+    transform: scaleX(0);
+    transform-origin: right;
+  }
+}

@@ -1,0 +1,108 @@
+@use '../../styles/mixins' as *;
+@use '../../styles/variables' as *;
+
+.section {
+  display: grid;
+  grid-template-columns: minmax(0, 220px) minmax(0, 1fr);
+  gap: 24px;
+  padding: 26px 0;
+  border-top: 1px solid color-mix(in srgb, var(--border-color) 76%, transparent);
+  scroll-margin-top: 112px;
+
+  &:first-child {
+    border-top: none;
+    padding-top: 0;
+  }
+
+  @include mobile {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 18px;
+    padding: 22px 0;
+    scroll-margin-top: 88px;
+  }
+}
+
+.header {
+  position: sticky;
+  top: 104px;
+  align-self: start;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+
+  @include mobile {
+    position: static;
+  }
+}
+
+.titleRow {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.indexBadge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 42px;
+  height: 42px;
+  padding: 0 12px;
+  border-radius: 14px;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--bg-primary) 92%, transparent), transparent),
+    color-mix(in srgb, var(--primary-color) 11%, var(--bg-secondary));
+  border: 1px solid color-mix(in srgb, var(--primary-color) 18%, var(--border-color));
+  color: var(--primary-hover);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.iconBadge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--bg-secondary) 88%, transparent);
+  border: 1px solid color-mix(in srgb, var(--border-color) 80%, transparent);
+  color: var(--text-secondary);
+  flex: 0 0 auto;
+}
+
+.headingGroup {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.title {
+  margin: 0;
+  font-size: clamp(20px, 2vw, 25px);
+  line-height: 1.08;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.description {
+  margin: 0;
+  max-width: 34ch;
+  color: var(--text-secondary);
+  font-size: 14px;
+  line-height: 1.7;
+
+  @include mobile {
+    max-width: none;
+  }
+}
+
+.content {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}

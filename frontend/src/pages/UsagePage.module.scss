@@ -1,0 +1,1270 @@
+@use '../styles/variables' as *;
+@use '../styles/mixins' as *;
+
+.container {
+  width: 100%;
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  position: relative;
+}
+
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.headerActions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.lastRefreshed {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+}
+
+.timeRangeGroup {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.timeRangeLabel {
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+
+.timeRangeSelectControl {
+  min-width: 164px;
+}
+
+.pageTitle {
+  font-size: 28px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin: 0;
+}
+
+.errorBox {
+  padding: 10px;
+  background-color: rgba($error-color, 0.1);
+  border: 1px solid var(--error-color);
+  border-radius: $radius-sm;
+  color: var(--error-color);
+  font-size: 12px;
+}
+
+.hint {
+  color: var(--text-secondary);
+  font-size: 12px;
+  text-align: center;
+  padding: 16px;
+}
+
+.loadingOverlay {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in srgb, var(--bg-secondary) 78%, transparent);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+}
+
+.loadingOverlayContent {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  border-radius: $radius-lg;
+  border: 1px solid var(--border-color);
+  background: var(--bg-primary);
+  box-shadow: var(--shadow-lg);
+}
+
+.loadingOverlaySpinner {
+  border-color: rgba($primary-color, 0.25);
+  border-top-color: var(--primary-color);
+  box-shadow: 0 0 10px rgba($primary-color, 0.25);
+}
+
+.loadingOverlayText {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+// Stats Grid
+.statsGrid {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+
+  @include mobile {
+    grid-template-columns: 1fr;
+  }
+}
+
+.statCard {
+  --accent: var(--primary-color);
+  --accent-soft: rgba($primary-color, 0.18);
+  --accent-border: rgba($primary-color, 0.35);
+
+  grid-column: span 4;
+  position: relative;
+  padding: 18px;
+  background:
+    radial-gradient(120% 140% at 12% 0%, var(--accent-soft) 0%, rgba(0, 0, 0, 0) 62%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0)),
+    var(--bg-primary);
+  border-radius: $radius-lg;
+  border: 1px solid var(--border-color);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 176px;
+  box-shadow: var(--shadow-lg);
+  transition: transform $transition-fast, box-shadow $transition-fast, border-color $transition-fast;
+  overflow: hidden;
+
+  &::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    height: 3px;
+    width: 100%;
+    background: linear-gradient(90deg, var(--accent), rgba(0, 0, 0, 0));
+    opacity: 0.95;
+  }
+
+  &:hover {
+    transform: translateY(-2px);
+    border-color: var(--accent-border);
+    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.22);
+  }
+
+  @include tablet {
+    grid-column: span 6;
+  }
+
+  @include mobile {
+    grid-column: auto;
+    min-height: 168px;
+  }
+}
+
+.statCard:nth-child(-n + 2) {
+  grid-column: span 6;
+
+  .statValue {
+    font-size: 32px;
+  }
+}
+
+@include mobile {
+  .statCard:nth-child(-n + 2) {
+    grid-column: auto;
+
+    .statValue {
+      font-size: 28px;
+    }
+  }
+}
+
+.statCardHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.statLabelGroup {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.statIconBadge {
+  width: 34px;
+  height: 34px;
+  border-radius: $radius-md;
+  display: grid;
+  place-items: center;
+  color: #fff;
+  font-size: 13px;
+  background: var(--accent);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 10px 22px rgba(0, 0, 0, 0.25);
+  flex-shrink: 0;
+
+  svg {
+    display: block;
+  }
+}
+
+.statHeader {
+  display: flex;
+  align-items: center;
+  gap: $spacing-sm;
+}
+
+.statIcon {
+  font-size: 18px;
+}
+
+.statLabel {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.statValue {
+  font-size: 28px;
+  font-weight: 800;
+  color: var(--text-primary);
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+}
+
+.statValueRow {
+  display: flex;
+  gap: $spacing-lg;
+}
+
+.statValueSmall {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.statValueLabel {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.statValueNum {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.statMeta {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+}
+
+.statSuccess {
+  color: var(--success-color);
+}
+
+.statFailure {
+  color: var(--danger-color);
+}
+
+.statNeutral {
+  color: var(--text-secondary);
+}
+
+.statMetaRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 10px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.statMetaItem {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.statMetaDot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background-color: var(--text-secondary);
+}
+
+.statSubtle {
+  color: var(--text-tertiary);
+}
+
+.statTrend {
+  margin-top: auto;
+  background: var(--bg-tertiary);
+  border-radius: $radius-md;
+  padding: 8px;
+  height: 58px;
+  border: 1px solid var(--border-color);
+}
+
+.statTrendPlaceholder {
+  width: 100%;
+  height: 100%;
+  background: var(--bg-secondary);
+  border-radius: $radius-md;
+}
+
+.sparkline {
+  width: 100%;
+  height: 100% !important;
+}
+
+.statHint {
+  color: var(--text-tertiary);
+  font-style: italic;
+}
+
+// API List (80%比例)
+.apiSortBar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.apiSortBtn {
+  padding: 4px 10px;
+  border-radius: $radius-full;
+  border: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+
+  &:hover {
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: 1px;
+  }
+}
+
+.apiSortBtnActive {
+  border-color: rgba($primary-color, 0.5);
+  background: rgba($primary-color, 0.1);
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.apiList {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.apiItem {
+  background-color: var(--bg-secondary);
+  border-radius: $radius-sm;
+  border: 1px solid var(--border-color);
+  overflow: hidden;
+}
+
+.apiHeader {
+  width: 100%;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+
+  &:hover {
+    background-color: var(--bg-tertiary);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: -2px;
+  }
+}
+
+.apiInfo {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  flex: 1;
+}
+
+.apiEndpoint {
+  font-weight: 600;
+  color: var(--text-primary);
+  font-size: 13px;
+  word-break: break-all;
+}
+
+.apiStats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+}
+
+.apiBadge {
+  font-size: 11px;
+  color: var(--text-secondary);
+  background-color: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  padding: 2px 8px;
+  border-radius: $radius-full;
+}
+
+.expandIcon {
+  color: var(--text-secondary);
+  font-size: 12px;
+  margin-left: 6px;
+}
+
+.apiModels {
+  padding: 10px;
+  padding-top: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  border-top: 1px solid var(--border-color);
+  margin-top: 0;
+  padding-top: 10px;
+}
+
+.modelRow {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 10px;
+  padding: 8px 10px;
+  background-color: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: $radius-md;
+  font-size: 12px;
+
+  @include mobile {
+    grid-template-columns: 1fr;
+    gap: 3px;
+  }
+}
+
+.modelName {
+  color: var(--text-primary);
+  font-weight: 500;
+  word-break: break-all;
+}
+
+.modelStat {
+  color: var(--text-secondary);
+  text-align: right;
+
+  @include mobile {
+    text-align: left;
+  }
+}
+
+// Fixed-height cards with internal scrolling (API details / model stats)
+.detailsFixedCard {
+  display: flex;
+  flex-direction: column;
+  height: 520px;
+  overflow: hidden;
+
+  @include mobile {
+    height: 420px;
+  }
+}
+
+.detailsScroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+}
+
+// Table (80%比例)
+.tableWrapper {
+  overflow-x: auto;
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+
+  th, td {
+    padding: 10px 12px;
+    text-align: left;
+    border-bottom: 1px solid var(--border-color);
+  }
+
+  th {
+    font-weight: 600;
+    color: var(--text-tertiary);
+    background-color: var(--bg-secondary);
+    white-space: nowrap;
+  }
+
+  th.sortableHeader {
+    user-select: none;
+    transition: color 0.15s ease;
+
+    &:hover {
+      color: var(--text-primary);
+    }
+  }
+
+  td {
+    color: var(--text-primary);
+  }
+
+  tbody tr:hover {
+    background-color: var(--bg-tertiary);
+  }
+}
+
+.sortHeaderButton {
+  display: inline-flex;
+  align-items: center;
+  width: 100%;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+
+  &:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: 2px;
+    border-radius: $radius-sm;
+  }
+}
+
+.modelCell {
+  font-weight: 500;
+  max-width: 240px;
+  word-break: break-all;
+}
+
+.credentialType {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: $radius-full;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  vertical-align: middle;
+}
+
+.requestCountCell {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  font-variant-numeric: tabular-nums;
+}
+
+.requestBreakdown {
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+// Pricing Section (80%比例)
+.pricingSection {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.priceForm {
+  padding: 10px;
+  background-color: var(--bg-secondary);
+  border-radius: $radius-sm;
+  border: 1px solid var(--border-color);
+}
+
+.formRow {
+  display: flex;
+  gap: 10px;
+  align-items: flex-end;
+  flex-wrap: wrap;
+
+  @include mobile {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
+
+.formField {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  flex: 1;
+  min-width: 120px;
+
+  label {
+    font-size: 10px;
+    color: var(--text-secondary);
+    font-weight: 500;
+  }
+
+  // 确保 Input 组件的 form-group 包装器不影响布局
+  :global(.form-group) {
+    margin: 0;
+
+    > label {
+      display: none; // 隐藏 Input 自带的 label，使用外层的
+    }
+  }
+
+  :global(.input) {
+    height: 40px;
+    box-sizing: border-box;
+  }
+}
+
+.pricesList {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.pricesTitle {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0;
+}
+
+.pricesGrid {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.priceItem {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px;
+  background-color: var(--bg-secondary);
+  border-radius: $radius-sm;
+  border: 1px solid var(--border-color);
+  gap: 10px;
+
+  @include mobile {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}
+
+.priceInfo {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  flex: 1;
+}
+
+.priceModel {
+  font-weight: 600;
+  color: var(--text-primary);
+  font-size: 11px;
+  word-break: break-all;
+}
+
+.priceMeta {
+  display: flex;
+  gap: 10px;
+  font-size: 10px;
+  color: var(--text-secondary);
+
+  @include mobile {
+    flex-direction: column;
+    gap: 3px;
+  }
+}
+
+.priceActions {
+  display: flex;
+  gap: 3px;
+  flex-shrink: 0;
+}
+
+.editModalBody {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+// Chart Section (80%比例)
+.chartSection {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.chartControls {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+
+  @include mobile {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
+
+.chartWrapper {
+  padding: 14px;
+  background-color: var(--bg-secondary);
+  border-radius: $radius-lg;
+  border: 1px solid var(--border-color);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.chartLegend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  align-items: center;
+  min-width: 0;
+
+  @include mobile {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overflow-y: hidden;
+    -webkit-overflow-scrolling: touch;
+    padding-bottom: 4px;
+  }
+}
+
+.legendItem {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 240px;
+  padding: 4px 10px;
+  border-radius: $radius-full;
+  border: 1px solid var(--border-color);
+  background: var(--bg-primary);
+  font-size: 12px;
+  color: var(--text-secondary);
+
+  @include mobile {
+    max-width: 180px;
+  }
+}
+
+.legendDot {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  flex-shrink: 0;
+}
+
+.legendLabel {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chartArea {
+  height: 280px;
+
+  @include mobile {
+    height: 320px;
+  }
+}
+
+.chartScroller {
+  width: 100%;
+  height: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+
+  // Chart.js 默认会设置 canvas 的 touch-action: none，导致移动端无法横向滚动
+  :global(canvas) {
+    touch-action: pan-x pan-y !important;
+  }
+}
+
+.chartCanvas {
+  position: relative;
+  height: 100%;
+  width: 100%;
+}
+
+.periodButtons {
+  display: flex;
+  gap: 6px;
+}
+
+.chartsGrid {
+  display: grid;
+  gap: 20px;
+  grid-template-columns: minmax(0, 1fr);
+
+  > * {
+    min-width: 0;
+  }
+
+  @include desktop {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.detailsGrid {
+  display: grid;
+  gap: 20px;
+  grid-template-columns: minmax(0, 1fr);
+
+  > * {
+    min-width: 0;
+  }
+
+  @include desktop {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.requestEventsActions {
+  display: inline-flex;
+  align-items: center;
+  gap: $spacing-xs;
+  flex-wrap: wrap;
+}
+
+.requestEventsToolbar {
+  display: flex;
+  gap: $spacing-sm;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  margin-bottom: $spacing-sm;
+}
+
+.requestEventsFilterItem {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 180px;
+}
+
+.requestEventsFilterLabel {
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+
+.requestEventsSelect {
+  min-width: 180px;
+}
+
+.requestEventsMeta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: $spacing-sm;
+  margin-bottom: $spacing-xs;
+  font-size: 12px;
+  color: var(--text-secondary);
+  flex-wrap: wrap;
+}
+
+.requestEventsLimitHint {
+  color: var(--text-tertiary);
+}
+
+.requestEventsTableWrapper {
+  overflow: auto;
+  max-height: 460px;
+  border: 1px solid var(--border-color);
+  border-radius: $radius-md;
+}
+
+.requestEventsTimestamp {
+  white-space: nowrap;
+  min-width: 160px;
+}
+
+.requestEventsSourceCell,
+.requestEventsAuthIndex {
+  font-family:
+    ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New',
+    monospace;
+  font-size: 11px;
+  max-width: 180px;
+  word-break: break-all;
+}
+
+.requestEventsResultSuccess {
+  color: var(--success-badge-text, #065f46);
+  background: var(--success-badge-bg, #d1fae5);
+  border: 1px solid var(--success-badge-border, #6ee7b7);
+}
+
+.requestEventsResultFailed {
+  color: var(--failure-badge-text);
+  background: var(--failure-badge-bg);
+  border: 1px solid var(--failure-badge-border);
+}
+
+.requestEventsResultSuccess,
+.requestEventsResultFailed {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: $radius-full;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.chartLineHeader {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.chartLineList {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+
+  @include mobile {
+    grid-template-columns: 1fr;
+  }
+}
+
+.chartLineItem {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 10px;
+  padding: 12px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: $radius-md;
+
+  @include mobile {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+    gap: 8px;
+  }
+}
+
+.chartLineLabel {
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-weight: 600;
+  min-width: 64px;
+}
+
+.chartLineCount {
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+.chartLineHint {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  margin: 10px 0 0 0;
+}
+
+// Service Health Card
+.healthCard {
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: $radius-lg;
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  box-shadow: var(--shadow-lg);
+}
+
+.healthHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.healthTitle {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin: 0;
+}
+
+.healthMeta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.healthWindow {
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
+.healthRate {
+  display: flex;
+  align-items: center;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--bg-tertiary);
+}
+
+.healthRateHigh {
+  color: var(--success-badge-text, #065f46);
+  background: var(--success-badge-bg, #d1fae5);
+}
+
+.healthRateMedium {
+  color: var(--warning-text, #92400e);
+  background: var(--warning-bg, #fef3c7);
+}
+
+.healthRateLow {
+  color: var(--failure-badge-text);
+  background: var(--failure-badge-bg);
+}
+
+.healthGridScroller {
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+}
+
+.healthGrid {
+  display: grid;
+  gap: 3px;
+  grid-auto-flow: column;
+  grid-template-rows: repeat(7, 10px);
+  width: fit-content;
+  margin: 0 auto;
+}
+
+.healthBlockWrapper {
+  position: relative;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  width: 10px;
+  height: 10px;
+}
+
+.healthBlock {
+  width: 100%;
+  height: 100%;
+  border-radius: 2px;
+  transition: transform 0.15s ease, opacity 0.15s ease;
+
+  .healthBlockWrapper:hover &,
+  .healthBlockWrapper.healthBlockActive & {
+    transform: scaleY(1.6);
+    opacity: 0.85;
+  }
+}
+
+.healthBlockIdle {
+  background-color: var(--border-secondary, #e5e7eb);
+}
+
+.healthTooltip {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  background-color: var(--floating-surface, #ffffff);
+  background-image: none;
+  border: 1px solid var(--floating-border, #e5e7eb);
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: nowrap;
+  box-shadow: var(--floating-shadow, 0 10px 24px rgba(0, 0, 0, 0.16));
+  z-index: $z-dropdown;
+  pointer-events: none;
+  color: var(--text-primary);
+  opacity: 1;
+  background-clip: padding-box;
+
+  &::after {
+    content: '';
+    position: absolute;
+    top: 100%;
+    left: 50%;
+    transform: translateX(-50%);
+    border: 5px solid transparent;
+    border-top-color: var(--floating-surface, #ffffff);
+  }
+
+  &::before {
+    content: '';
+    position: absolute;
+    top: 100%;
+    left: 50%;
+    transform: translateX(-50%);
+    border: 6px solid transparent;
+    border-top-color: var(--floating-border, #e5e7eb);
+  }
+}
+
+// When tooltip should appear below (for top rows)
+.healthTooltipBelow {
+  bottom: auto;
+  top: calc(100% + 8px);
+
+  &::after {
+    top: auto;
+    bottom: 100%;
+    border-top-color: transparent;
+    border-bottom-color: var(--floating-surface, #ffffff);
+  }
+
+  &::before {
+    top: auto;
+    bottom: 100%;
+    border-top-color: transparent;
+    border-bottom-color: var(--floating-border, #e5e7eb);
+  }
+}
+
+.healthTooltipLeft {
+  left: 0;
+  transform: translateX(0);
+
+  &::after,
+  &::before {
+    left: 8px;
+    transform: none;
+  }
+}
+
+.healthTooltipRight {
+  left: auto;
+  right: 0;
+  transform: translateX(0);
+
+  &::after,
+  &::before {
+    left: auto;
+    right: 8px;
+    transform: none;
+  }
+}
+
+.healthTooltipTime {
+  color: var(--text-secondary);
+  display: block;
+  margin-bottom: 2px;
+}
+
+.healthTooltipStats {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.healthTooltipSuccess {
+  color: var(--success-color, #22c55e);
+}
+
+.healthTooltipFailure {
+  color: var(--danger-color, #ef4444);
+}
+
+.healthTooltipRate {
+  color: var(--text-secondary);
+  margin-left: 2px;
+}
+
+.healthLegend {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.healthLegendLabel {
+  font-size: 10px;
+  color: var(--text-tertiary);
+}
+
+.healthLegendColors {
+  display: flex;
+  gap: 3px;
+}
+
+.healthLegendBlock {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+}
+
+@include mobile {
+  .healthCard {
+    padding: 14px;
+    gap: 10px;
+  }
+
+  .healthGrid {
+    grid-template-rows: repeat(7, 6px);
+    gap: 2px;
+    margin: 0;
+  }
+
+  .healthBlockWrapper {
+    width: 6px;
+    height: 6px;
+  }
+
+  .healthTooltip {
+    font-size: 10px;
+    padding: 4px 8px;
+  }
+
+  .healthLegendBlock {
+    width: 8px;
+    height: 8px;
+  }
+}

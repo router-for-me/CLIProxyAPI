@@ -1,3 +1,12 @@
+FROM node:22-alpine AS frontend-builder
+
+WORKDIR /frontend
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
+COPY frontend/ .
+ARG VERSION=dev
+RUN VERSION=${VERSION} npx vite build
+
 FROM golang:1.26-alpine AS builder
 
 WORKDIR /app
@@ -6,6 +15,7 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
+COPY --from=frontend-builder /frontend/dist/index.html ./internal/managementasset/static/management.html
 
 ARG VERSION=dev
 ARG COMMIT=none

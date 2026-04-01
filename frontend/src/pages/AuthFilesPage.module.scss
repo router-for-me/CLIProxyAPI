@@ -1,0 +1,1966 @@
+@use '../styles/variables' as *;
+@use '../styles/mixins' as *;
+
+.container {
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-lg;
+  padding-bottom: calc(
+    var(--auth-files-action-bar-height, 0px) + 16px + env(safe-area-inset-bottom)
+  );
+}
+
+.pageHeader {
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-sm;
+}
+
+.pageTitle {
+  font-size: 28px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin: 0;
+}
+
+.description {
+  font-size: 14px;
+  color: var(--text-secondary);
+  margin: 0;
+}
+
+.headerActions {
+  display: flex;
+  gap: $spacing-sm;
+  flex-wrap: wrap;
+  align-items: center;
+  min-width: 0;
+  max-width: 100%;
+
+  :global(.btn) {
+    min-width: 0;
+  }
+
+  @include mobile {
+    width: 100%;
+  }
+}
+
+.titleWrapper {
+  display: flex;
+  align-items: center;
+  gap: $spacing-sm;
+  line-height: 24px;
+}
+
+.countBadge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 24px;
+  min-width: 24px;
+  padding: 0 8px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--count-badge-text);
+  background-color: var(--count-badge-bg);
+  box-sizing: border-box;
+}
+
+.errorBox {
+  padding: $spacing-md;
+  background-color: rgba($error-color, 0.1);
+  border: 1px solid var(--danger-color);
+  border-radius: $radius-md;
+  color: var(--danger-color);
+  font-size: 14px;
+  margin-bottom: $spacing-md;
+}
+
+// 筛选区域
+.filterSection {
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-md;
+  margin-bottom: $spacing-lg;
+}
+
+.filterRail {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--border-color) 60%, transparent);
+  background: color-mix(in srgb, var(--bg-secondary) 60%, transparent);
+
+  @include mobile {
+    padding: 10px;
+  }
+}
+
+
+.filterAllIconWrap {
+  position: relative;
+  border-color: color-mix(in srgb, var(--primary-color) 20%, var(--border-color));
+  background: linear-gradient(
+    145deg,
+    color-mix(in srgb, var(--bg-secondary) 94%, var(--primary-color) 8%),
+    color-mix(in srgb, var(--bg-primary) 92%, var(--primary-color) 5%)
+  );
+  box-shadow: 0 10px 22px -18px color-mix(in srgb, var(--primary-color) 50%, transparent);
+}
+
+.filterAllIcon {
+  position: relative;
+  z-index: 1;
+  display: block;
+  color: color-mix(in srgb, var(--primary-color) 70%, var(--text-primary));
+}
+
+
+.filterContent {
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-md;
+  min-width: 0;
+}
+
+.filterTags {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.filterTag {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 12px 7px 8px;
+  border-radius: 10px;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.2;
+  border: 1px solid color-mix(in srgb, var(--border-color) 60%, transparent);
+  background: color-mix(in srgb, var(--bg-secondary) 70%, transparent);
+  color: var(--text-secondary);
+  cursor: pointer;
+  white-space: nowrap;
+  transition:
+    border-color $transition-fast,
+    background-color $transition-fast,
+    color $transition-fast;
+
+  &:hover {
+    border-color: color-mix(in srgb, var(--filter-color) 40%, var(--border-color));
+    background: color-mix(in srgb, var(--bg-secondary) 90%, transparent);
+    color: var(--text-primary);
+  }
+}
+
+.filterTagActive {
+  border-color: color-mix(in srgb, var(--filter-color) 50%, var(--border-color));
+  background: color-mix(in srgb, var(--filter-surface) 22%, var(--bg-secondary));
+  color: var(--text-primary);
+
+  .filterTagIconWrap {
+    border-color: color-mix(in srgb, var(--filter-color) 40%, transparent);
+  }
+}
+
+.filterTagLabel {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.filterTagIconWrap {
+  width: 24px;
+  height: 24px;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  border: 1px solid color-mix(in srgb, var(--border-color) 50%, transparent);
+  background: color-mix(in srgb, var(--bg-tertiary) 60%, transparent);
+}
+
+.filterTagIcon {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  object-fit: contain;
+}
+
+.filterTagIconFallback {
+  color: var(--filter-color);
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.filterTagText {
+  min-width: 0;
+  color: inherit;
+  @include text-ellipsis;
+}
+
+.filterTagCount {
+  display: inline-grid;
+  place-items: center;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--filter-color) 12%, transparent);
+  color: var(--text-tertiary);
+  font-size: 11px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  flex: 0 0 auto;
+  line-height: 1;
+  text-align: center;
+}
+
+.filterTagActive .filterTagCount {
+  background: color-mix(in srgb, var(--filter-color) 22%, transparent);
+  color: var(--filter-color);
+}
+
+.filterControlsPanel {
+  padding: 14px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--border-color) 60%, transparent);
+  background: color-mix(in srgb, var(--bg-secondary) 50%, transparent);
+}
+
+.filterControls {
+  display: grid;
+  grid-template-columns: minmax(240px, 1.4fr) repeat(2, minmax(120px, 0.72fr)) minmax(220px, auto);
+  gap: $spacing-md;
+  align-items: flex-end;
+
+  // 修复 Input 组件在 filterItem 中的嵌套样式
+  :global(.form-group) {
+    margin: 0;
+  }
+
+  :global(.input) {
+    height: 40px;
+    box-sizing: border-box;
+  }
+
+  @include tablet {
+    grid-template-columns: minmax(220px, 1fr) repeat(2, minmax(140px, 0.8fr));
+  }
+
+  @include mobile {
+    grid-template-columns: 1fr;
+  }
+}
+
+.filterItem {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+
+  label {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    white-space: nowrap;
+  }
+}
+
+.filterToggleItem {
+  min-width: 0;
+
+  @include tablet {
+    grid-column: 1 / -1;
+  }
+}
+
+.filterToggleGroup {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px;
+  min-height: 40px;
+}
+
+.filterToggleCard {
+  display: flex;
+  align-items: center;
+  min-height: 40px;
+  padding: 0 2px;
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--border-color) 60%, transparent);
+  background: color-mix(in srgb, var(--bg-secondary) 50%, transparent);
+}
+
+.filterToggle {
+  display: flex;
+  align-items: center;
+  min-height: 40px;
+  padding-inline: 2px;
+}
+
+.filterToggleLabel {
+  display: inline-flex;
+  align-items: center;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.pageSizeSelect {
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid color-mix(in srgb, var(--border-color) 70%, transparent);
+  border-radius: 8px;
+  background-color: var(--bg-secondary);
+  color: var(--text-primary);
+  font-size: 14px;
+  cursor: text;
+  height: 40px;
+  box-sizing: border-box;
+
+  &:focus {
+    outline: none;
+    border-color: var(--primary-color);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary-color) 12%, transparent);
+  }
+}
+
+// 卡片网格
+.fileGrid {
+  display: grid;
+  gap: $spacing-md;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 320px), 1fr));
+}
+
+.fileGridQuotaManaged {
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 340px), 1fr));
+}
+
+.fileGridCompact {
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 280px), 1fr));
+}
+
+.antigravityGrid {
+  display: grid;
+  gap: $spacing-md;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+
+  @include tablet {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  @include mobile {
+    grid-template-columns: 1fr;
+  }
+}
+
+.codexGrid {
+  display: grid;
+  gap: $spacing-md;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+
+  @include tablet {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  @include mobile {
+    grid-template-columns: 1fr;
+  }
+}
+
+.geminiCliGrid {
+  display: grid;
+  gap: $spacing-md;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+
+  @include tablet {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  @include mobile {
+    grid-template-columns: 1fr;
+  }
+}
+
+.antigravityControls {
+  display: flex;
+  gap: $spacing-md;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  margin-bottom: $spacing-md;
+}
+
+.antigravityControl {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+
+  label {
+    font-size: 12px;
+    color: var(--text-secondary);
+    font-weight: 500;
+    white-space: nowrap;
+  }
+}
+
+.codexControls {
+  display: flex;
+  gap: $spacing-md;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  margin-bottom: $spacing-md;
+}
+
+.codexControl {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+
+  label {
+    font-size: 12px;
+    color: var(--text-secondary);
+    font-weight: 500;
+    white-space: nowrap;
+  }
+}
+
+.geminiCliControls {
+  display: flex;
+  gap: $spacing-md;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  margin-bottom: $spacing-md;
+}
+
+.geminiCliControl {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+
+  label {
+    font-size: 12px;
+    color: var(--text-secondary);
+    font-weight: 500;
+    white-space: nowrap;
+  }
+}
+
+// 卡片渐变背景 — subtle tint only
+.antigravityCard {
+  background-image: linear-gradient(180deg, rgba(224, 247, 250, 0.06), transparent);
+}
+
+.claudeCard {
+  background-image: linear-gradient(180deg, rgba(251, 236, 228, 0.08), transparent);
+}
+
+.codexCard {
+  background-image: linear-gradient(180deg, rgba(234, 231, 255, 0.08), transparent);
+}
+
+.geminiCliCard {
+  background-image: linear-gradient(180deg, rgba(224, 232, 255, 0.08), transparent);
+}
+
+.kimiCard {
+  background-image: linear-gradient(180deg, rgba(220, 232, 255, 0.08), transparent);
+}
+
+.quotaSection {
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-sm;
+  padding-top: $spacing-sm;
+  margin-top: 2px;
+  border-top: 1px dashed color-mix(in srgb, var(--border-color) 82%, transparent);
+}
+
+.quotaRow {
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-xs;
+}
+
+.quotaRowHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: $spacing-sm;
+  min-width: 0;
+
+  @include mobile {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}
+
+.quotaModel {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1;
+  min-width: 0;
+
+  @include mobile {
+    white-space: normal;
+  }
+}
+
+.quotaBar {
+  height: 8px;
+  background-color: var(--bg-tertiary);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.quotaBarFill {
+  height: 100%;
+  background-color: var(--success-color, #22c55e);
+  transition: width 0.2s ease;
+}
+
+.quotaBarFillHigh {
+  background-color: var(--success-color, #22c55e);
+}
+
+.quotaBarFillMedium {
+  background-color: var(--quota-medium-color, #e0aa14);
+}
+
+.quotaBarFillLow {
+  background-color: var(--danger-color);
+}
+
+.quotaMeta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+
+  @include mobile {
+    justify-content: flex-start;
+  }
+}
+
+.quotaPercent {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.quotaReset {
+  color: var(--text-tertiary);
+}
+
+.quotaAmount {
+  color: var(--text-secondary);
+}
+
+.quotaMessage {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  text-align: center;
+  padding: $spacing-sm 0;
+}
+
+.quotaMessageAction {
+  width: 100%;
+  border: none;
+  background: none;
+  cursor: pointer;
+  text-decoration: underline;
+
+  &:hover:not(:disabled) {
+    color: var(--text-primary);
+  }
+
+  &:disabled {
+    cursor: not-allowed;
+    opacity: 0.6;
+    text-decoration: none;
+  }
+}
+
+.quotaError {
+  font-size: 12px;
+  color: var(--danger-color);
+  background-color: rgba($error-color, 0.08);
+  border: 1px solid var(--danger-color);
+  border-radius: $radius-sm;
+  padding: $spacing-xs $spacing-sm;
+}
+
+.quotaWarning {
+  font-size: 12px;
+  color: var(--warning-text);
+  background-color: var(--warning-bg);
+  border: 1px solid var(--warning-border);
+  border-radius: $radius-sm;
+  padding: $spacing-xs $spacing-sm;
+}
+
+.codexPlan {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.codexPlanLabel {
+  color: var(--text-tertiary);
+}
+
+.codexPlanValue {
+  font-weight: 600;
+  color: var(--text-primary);
+  text-transform: capitalize;
+}
+
+.premiumPlanValue {
+  display: inline-flex;
+  align-items: center;
+  font-weight: 700;
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: rgba(217, 165, 22, 0.15);
+  border: 1px solid rgba(217, 165, 22, 0.3);
+  color: #e0aa14;
+  text-transform: capitalize;
+}
+
+:global([data-theme='dark']) .premiumPlanValue {
+  background: rgba(226, 180, 50, 0.12);
+  border-color: rgba(226, 180, 50, 0.28);
+  color: #ffd862;
+}
+
+// 单个认证文件卡片
+.fileCard {
+  position: relative;
+  overflow: hidden;
+  background-color: color-mix(in srgb, var(--bg-primary) 85%, transparent);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid color-mix(in srgb, var(--border-color) 70%, transparent);
+  border-radius: 12px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+  transition:
+    transform $transition-fast,
+    box-shadow $transition-fast,
+    border-color $transition-fast;
+
+  &:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 8px 24px -12px rgba(0, 0, 0, 0.15);
+    border-color: color-mix(in srgb, var(--primary-color) 28%, var(--border-color));
+  }
+}
+
+.fileCardSelected {
+  border-color: color-mix(in srgb, var(--primary-color) 60%, transparent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--primary-color) 30%, transparent);
+
+  &:hover {
+    border-color: color-mix(in srgb, var(--primary-color) 60%, transparent);
+  }
+}
+
+.fileCardDisabled {
+  opacity: 0.72;
+
+  &:hover {
+    transform: none;
+    box-shadow: none;
+    border-color: var(--border-color);
+  }
+}
+
+.fileCardCompact {
+  padding: 12px;
+  border-radius: 10px;
+
+  .fileCardMain {
+    gap: 8px;
+  }
+
+  .cardHeader {
+    gap: 8px;
+  }
+
+  .cardSelection {
+    margin-top: 6px;
+  }
+
+  .providerAvatar {
+    width: 34px;
+    height: 34px;
+    border-radius: 8px;
+  }
+
+  .providerAvatarImage {
+    width: 16px;
+    height: 16px;
+  }
+
+  .providerAvatarFallback {
+    font-size: 14px;
+  }
+
+  .cardHeaderContent {
+    gap: 3px;
+  }
+
+  .cardBadgeRow {
+    gap: 4px;
+  }
+
+  .typeBadge,
+  .stateBadge {
+    padding: 3px 7px;
+    font-size: 10px;
+  }
+
+  .fileName {
+    font-size: 13px;
+    line-height: 1.3;
+    -webkit-line-clamp: 1;
+  }
+
+  .healthStatusMessage {
+    padding: 6px 8px;
+    border-radius: 8px;
+    font-size: 11px;
+  }
+
+  .quotaSection {
+    display: none;
+  }
+
+  .cardActions {
+    gap: 6px;
+    padding-top: 6px;
+  }
+
+  .cardActionsMain {
+    gap: 4px;
+  }
+
+  .primaryActionButton:global(.btn.btn-sm) {
+    flex: 0 1 auto;
+    min-width: 0;
+    padding-inline: 8px;
+  }
+
+  .cardUtilityActions {
+    gap: 2px;
+    padding: 2px;
+    border-radius: 6px;
+  }
+
+  .iconButton:global(.btn.btn-sm) {
+    width: 28px;
+    height: 28px;
+    min-width: 28px;
+    border-radius: 6px;
+  }
+
+  .statusToggle {
+    gap: 6px;
+  }
+
+  .statusToggleLabel {
+    font-size: 10px;
+  }
+}
+
+.fileCardLayout {
+  display: flex;
+  align-items: stretch;
+  gap: $spacing-md;
+  min-height: 100%;
+}
+
+.fileCardMain {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+}
+
+.cardHeader {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.cardSelection {
+  flex-shrink: 0;
+  margin-top: 8px;
+}
+
+.providerAvatar {
+  width: 40px;
+  height: 40px;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--border-color) 60%, transparent);
+}
+
+.providerAvatarImage {
+  width: 22px;
+  height: 22px;
+  object-fit: contain;
+}
+
+.providerAvatarFallback {
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.cardHeaderContent {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+}
+
+.cardBadgeRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.typeBadge {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 8px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  border: 1px solid transparent;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.stateBadge {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 8px;
+  border-radius: 6px;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  white-space: nowrap;
+  letter-spacing: 0.02em;
+}
+
+.stateBadgeActive {
+  color: var(--success-badge-text, #065f46);
+  background: var(--success-badge-bg, #d1fae5);
+  border: 1px solid var(--success-badge-border, #6ee7b7);
+}
+
+.stateBadgeWarning {
+  color: var(--warning-text);
+  background: var(--warning-bg);
+  border: 1px solid var(--warning-border);
+}
+
+.stateBadgeDisabled {
+  color: var(--text-secondary);
+  background: color-mix(in srgb, var(--bg-tertiary) 86%, transparent);
+  border: 1px solid var(--border-color);
+}
+
+.stateBadgeVirtual {
+  color: var(--text-secondary);
+  background: color-mix(in srgb, var(--bg-tertiary) 82%, transparent);
+  border: 1px dashed color-mix(in srgb, var(--border-primary) 90%, transparent);
+}
+
+.fileName {
+  font-size: 14px;
+  font-weight: 800;
+  color: var(--text-primary);
+  word-break: break-all;
+  line-height: 1.4;
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  letter-spacing: -0.01em;
+}
+
+.cardMeta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 14px;
+  padding: 0 2px;
+}
+
+.cardMetaCompact {
+  gap: 3px 12px;
+}
+
+.cardMetaCompact .metaLabel {
+  font-size: 10px;
+}
+
+.cardMetaCompact .metaValue {
+  font-size: 11px;
+}
+
+.metaItem {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  min-width: 0;
+  padding: 0;
+  border: none;
+  background: none;
+}
+
+.metaLabel {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-tertiary);
+  line-height: 1.2;
+  white-space: nowrap;
+
+  &::after {
+    content: ':';
+  }
+}
+
+.metaValue {
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  line-height: 1.4;
+  word-break: break-word;
+}
+
+.priorityBadge {
+  min-width: 0;
+}
+
+.priorityValue {
+  font-variant-numeric: tabular-nums;
+}
+
+.noteText {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  display: flex;
+  gap: 6px;
+  align-items: flex-start;
+  min-width: 0;
+}
+
+.noteLabel {
+  flex: 0 0 auto;
+  color: var(--text-tertiary);
+  font-weight: 600;
+}
+
+.noteValue {
+  @include text-ellipsis-multiline(2);
+  min-width: 0;
+  word-break: break-word;
+}
+
+.sortSelect {
+  width: 100%;
+  min-width: 0;
+}
+
+.healthStatusMessage {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--warning-text);
+  background-color: color-mix(in srgb, var(--warning-bg) 60%, transparent);
+  border: 1px solid color-mix(in srgb, var(--warning-border) 60%, transparent);
+  border-radius: 8px;
+  padding: 8px 10px;
+  word-break: break-word;
+}
+
+.messageIcon {
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.cardInsights {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 0 2px;
+}
+
+.cardInsightsCompact {
+  gap: 6px;
+}
+
+.cardStats {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.cardStatsCompact {
+  gap: 6px;
+}
+
+.cardStatsCompact .statPill {
+  padding: 3px 8px;
+}
+
+.cardStatsCompact .statLabel {
+  font-size: 10px;
+}
+
+.cardStatsCompact .statValue {
+  font-size: 12px;
+}
+
+.statPill {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  min-width: 0;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: none;
+}
+
+.statLabel {
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.statValue {
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+.statSuccess {
+  background: color-mix(in srgb, var(--success-badge-bg, #d1fae5) 50%, transparent);
+  color: var(--success-badge-text, #065f46);
+}
+
+.statFailure {
+  background: color-mix(in srgb, var(--failure-badge-bg) 50%, transparent);
+  color: var(--failure-badge-text);
+}
+
+.statusPanel {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.statusPanelCompact {
+  gap: 3px;
+}
+
+.statusPanelCompact .statusPanelLabel {
+  display: none;
+}
+
+.statusPanelCompact .statusBar {
+  flex-wrap: wrap;
+  gap: 8px;
+  row-gap: 6px;
+}
+
+.statusPanelCompact .statusBlocks {
+  gap: 2px;
+}
+
+.statusPanelCompact .statusBlockWrapper {
+  min-width: 5px;
+}
+
+.statusPanelCompact .statusRate {
+  margin-left: auto;
+  padding: 5px 7px;
+  font-size: 11px;
+}
+
+.statusPanelLabel {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+// 状态监测栏
+.statusBar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-width: 0;
+  padding: 0;
+  max-width: none;
+
+  @include mobile {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
+
+.statusBlocks {
+  display: flex;
+  gap: 3px;
+  flex: 1;
+  min-width: 0;
+  position: relative;
+}
+
+.statusBlockWrapper {
+  flex: 1;
+  min-width: 5px;
+  position: relative;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.statusBlock {
+  width: 100%;
+  height: 6px;
+  border-radius: 999px;
+  transition:
+    transform 0.15s ease,
+    opacity 0.15s ease;
+
+  .statusBlockWrapper:hover &,
+  .statusBlockWrapper.statusBlockActive & {
+    transform: scaleY(1.6);
+    opacity: 0.9;
+  }
+}
+
+.statusBlockIdle {
+  background-color: var(--border-secondary, #e5e7eb);
+}
+
+.statusTooltip {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--bg-quinary, var(--bg-primary, #fff));
+  border: 1px solid var(--border-secondary, #e5e7eb);
+  border-radius: 10px;
+  padding: 8px 10px;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: nowrap;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.14);
+  z-index: $z-dropdown;
+  pointer-events: none;
+  color: var(--text-primary);
+
+  &::after {
+    content: '';
+    position: absolute;
+    top: 100%;
+    left: 50%;
+    transform: translateX(-50%);
+    border: 5px solid transparent;
+    border-top-color: var(--bg-quinary, var(--bg-primary, #fff));
+  }
+
+  &::before {
+    content: '';
+    position: absolute;
+    top: 100%;
+    left: 50%;
+    transform: translateX(-50%);
+    border: 6px solid transparent;
+    border-top-color: var(--border-secondary, #e5e7eb);
+  }
+}
+
+.statusTooltipLeft {
+  left: 0;
+  transform: translateX(0);
+
+  &::after,
+  &::before {
+    left: 8px;
+    transform: none;
+  }
+}
+
+.statusTooltipRight {
+  left: auto;
+  right: 0;
+  transform: translateX(0);
+
+  &::after,
+  &::before {
+    left: auto;
+    right: 8px;
+    transform: none;
+  }
+}
+
+.tooltipTime {
+  color: var(--text-secondary);
+  display: block;
+  margin-bottom: 2px;
+}
+
+.tooltipStats {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tooltipSuccess {
+  color: var(--success-color, #22c55e);
+}
+
+.tooltipFailure {
+  color: var(--danger-color, #ef4444);
+}
+
+.tooltipRate {
+  color: var(--text-secondary);
+  margin-left: 2px;
+}
+
+.statusRate {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: var(--bg-tertiary);
+  flex-shrink: 0;
+}
+
+.statusRateHigh {
+  color: var(--success-badge-text, #065f46);
+  background: var(--success-badge-bg, #d1fae5);
+}
+
+.statusRateMedium {
+  color: var(--warning-text, #92400e);
+  background: var(--warning-bg, #fef3c7);
+}
+
+.statusRateLow {
+  color: var(--failure-badge-text);
+  background: var(--failure-badge-bg);
+}
+
+@include mobile {
+  .statusTooltip {
+    font-size: 12px;
+    padding: 8px 12px;
+  }
+
+  .statusBlocks {
+    min-width: 0;
+  }
+}
+
+.prefixProxyEditor {
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-md;
+  max-height: 60vh;
+  overflow: auto;
+}
+
+.prefixProxyLoading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: $spacing-sm;
+  font-size: 12px;
+  color: var(--text-secondary);
+  padding: $spacing-sm 0;
+}
+
+.prefixProxyError {
+  padding: $spacing-sm $spacing-md;
+  border-radius: $radius-md;
+  border: 1px solid var(--danger-color);
+  background-color: rgba($error-color, 0.1);
+  color: var(--danger-color);
+  font-size: 12px;
+}
+
+.prefixProxyJsonWrapper {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.prefixProxyLabel {
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+
+.prefixProxyTextarea {
+  width: 100%;
+  padding: $spacing-sm $spacing-md;
+  border: 1px solid var(--border-color);
+  border-radius: $radius-md;
+  background-color: var(--bg-secondary);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-family: monospace;
+  resize: vertical;
+  min-height: 120px;
+  box-sizing: border-box;
+
+  &:focus {
+    outline: none;
+    border-color: var(--primary-color);
+  }
+}
+
+.prefixProxyFields {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: $spacing-sm;
+
+  :global(.form-group) {
+    margin: 0;
+  }
+}
+
+.cardActions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: auto;
+  padding-top: 8px;
+  border-top: 1px solid color-mix(in srgb, var(--border-color) 50%, transparent);
+}
+
+.cardActionsMain {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 1;
+}
+
+.primaryActionButton:global(.btn.btn-sm) {
+  min-width: 0;
+  padding-inline: 10px;
+}
+
+.modelsActionButton:global(.btn.btn-sm) {
+  background: color-mix(in srgb, var(--primary-color) 10%, var(--bg-secondary));
+  border-color: color-mix(in srgb, var(--primary-color) 20%, var(--border-color));
+}
+
+.modelsActionButton:global(.btn.btn-sm):hover {
+  border-color: color-mix(in srgb, var(--primary-color) 35%, var(--border-color));
+  background: color-mix(in srgb, var(--primary-color) 14%, var(--bg-secondary));
+}
+
+.modelsActionButton:global(.btn.btn-sm) > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.modelsActionIconWrap {
+  width: 22px;
+  height: 22px;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--primary-color) 16%, transparent);
+}
+
+.actionButtonLabel {
+  @include text-ellipsis;
+}
+
+.cardUtilityActions {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg-tertiary) 50%, transparent);
+}
+
+.statusToggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  margin-left: auto;
+}
+
+.statusToggleLabel {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-tertiary);
+}
+
+.iconButton:global(.btn.btn-sm) {
+  width: 32px;
+  height: 32px;
+  min-width: 32px;
+  padding: 0;
+  box-sizing: border-box;
+  border-radius: 8px;
+  gap: 0;
+}
+
+.actionIcon {
+  display: block;
+}
+
+@include mobile {
+  .cardActions {
+    flex-wrap: wrap;
+  }
+
+  .cardActionsMain {
+    flex-wrap: wrap;
+    width: 100%;
+  }
+
+  .primaryActionButton:global(.btn.btn-sm) {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .statusToggle {
+    width: 100%;
+    justify-content: space-between;
+  }
+}
+
+// 分页
+.pagination {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: $spacing-md;
+  flex-wrap: wrap;
+  margin-top: $spacing-lg;
+  padding-top: $spacing-md;
+  border-top: 1px solid var(--border-color);
+}
+
+.batchActionContainer {
+  position: fixed;
+  left: var(--content-center-x, 50%);
+  bottom: calc(16px + env(safe-area-inset-bottom));
+  transform: translateX(-50%);
+  z-index: 50;
+  width: min(960px, calc(100vw - 24px));
+  max-width: calc(100vw - 24px);
+  box-sizing: border-box;
+  will-change: transform, opacity;
+}
+
+.batchActionBar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: $spacing-sm;
+  padding: 10px 12px;
+  border-radius: $radius-lg;
+  border: 1px solid color-mix(in srgb, var(--border-color) 70%, transparent);
+  background: color-mix(in srgb, var(--bg-primary) 84%, transparent);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  box-shadow: var(--shadow-lg);
+}
+
+.batchActionLeft,
+.batchActionRight {
+  display: flex;
+  align-items: center;
+  gap: $spacing-xs;
+  flex-wrap: wrap;
+}
+
+.batchActionRight {
+  justify-content: flex-end;
+}
+
+.batchSelectionText {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-right: 2px;
+}
+
+@include mobile {
+  .batchActionContainer {
+    width: calc(100vw - 16px);
+    max-width: calc(100vw - 16px);
+    bottom: calc(12px + env(safe-area-inset-bottom));
+  }
+
+  .batchActionBar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .batchActionLeft,
+  .batchActionRight {
+    justify-content: center;
+  }
+}
+
+.pageInfo {
+  font-size: 13px;
+  color: var(--text-secondary);
+  padding: $spacing-xs $spacing-md;
+  background-color: var(--bg-secondary);
+  border-radius: $radius-md;
+}
+
+// OAuth 模型禁用
+.excludedList {
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-sm;
+}
+
+.excludedItem {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: $spacing-md;
+  background-color: var(--bg-secondary);
+  border-radius: $radius-md;
+  border: 1px solid var(--border-color);
+  gap: $spacing-md;
+
+  @include mobile {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}
+
+.excludedInfo {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.excludedProvider {
+  font-weight: 600;
+  color: var(--text-primary);
+  font-size: 14px;
+}
+
+.excludedModels {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.excludedActions {
+  display: flex;
+  gap: $spacing-xs;
+  flex-shrink: 0;
+}
+
+// OAuth 模型禁用表单：提供商快捷标签
+.providerField {
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-xs;
+
+  :global(.form-group) {
+    margin-bottom: 0;
+  }
+}
+
+.providerTagList {
+  display: flex;
+  flex-wrap: wrap;
+  gap: $spacing-xs;
+}
+
+.providerTag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border-radius: $radius-full;
+  border: 1px solid var(--border-color);
+  background-color: var(--bg-secondary);
+  color: var(--text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all $transition-fast;
+
+  &:hover {
+    border-color: var(--primary-color);
+    color: var(--text-primary);
+    background-color: var(--bg-hover);
+  }
+
+  &:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+}
+
+.providerTagActive {
+  background-color: var(--primary-color);
+  border-color: var(--primary-color);
+  color: #fff;
+
+  &:hover {
+    background-color: var(--primary-color);
+    border-color: var(--primary-color);
+    color: #fff;
+  }
+}
+
+// OAuth 模型别名 - 映射概览
+.aliasChartSection {
+  margin-bottom: $spacing-lg;
+  padding-bottom: $spacing-lg;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.aliasChartHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: $spacing-sm;
+  margin-bottom: $spacing-sm;
+}
+
+.aliasChartTitle {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.aliasChart {
+  width: 100%;
+  min-height: 120px;
+}
+
+.cardExtraButtons {
+  display: flex;
+  gap: $spacing-sm;
+  align-items: center;
+  flex-wrap: wrap;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.viewModeSwitch {
+  display: inline-flex;
+  align-items: center;
+  gap: $spacing-xs;
+  flex-wrap: wrap;
+  min-width: 0;
+  max-width: 100%;
+  padding: 2px;
+  border-radius: $radius-md;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+
+  :global(.btn.btn-sm) {
+    min-width: 0;
+  }
+}
+
+@include mobile {
+  .cardExtraButtons {
+    width: 100%;
+  }
+
+  .viewModeSwitch {
+    width: 100%;
+    justify-content: stretch;
+  }
+
+  .viewModeSwitch :global(.btn.btn-sm) {
+    flex: 1 1 0;
+  }
+}
+
+// OAuth 模型映射表单
+.mappingRow {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr auto auto;
+  align-items: center;
+  gap: $spacing-sm;
+
+  @include mobile {
+    grid-template-columns: 1fr;
+  }
+}
+
+.mappingSeparator {
+  color: var(--text-secondary);
+  text-align: center;
+
+  @include mobile {
+    display: none;
+  }
+}
+
+.mappingFork {
+  display: flex;
+  align-items: center;
+}
+
+// 详情弹窗
+.detailContent {
+  max-height: 400px;
+  overflow: auto;
+}
+
+.jsonContent {
+  background-color: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: $radius-md;
+  padding: $spacing-md;
+  font-family: monospace;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: var(--text-primary);
+  margin: 0;
+}
+
+// 表单
+.formGroup {
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-xs;
+  margin-top: $spacing-md;
+
+  label {
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--text-primary);
+  }
+}
+
+.textarea {
+  width: 100%;
+  padding: $spacing-sm $spacing-md;
+  border: 1px solid var(--border-color);
+  border-radius: $radius-md;
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: 14px;
+  font-family: monospace;
+  resize: vertical;
+
+  &:focus {
+    outline: none;
+    border-color: var(--primary-color);
+  }
+
+  &::placeholder {
+    color: var(--text-tertiary);
+  }
+}
+
+.hint {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  font-style: italic;
+  text-align: center;
+  padding: $spacing-lg;
+}
+
+// 模型列表弹窗
+.modelsList {
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-sm;
+}
+
+.modelItem {
+  display: flex;
+  align-items: center;
+  gap: $spacing-sm;
+  padding: $spacing-sm $spacing-md;
+  background-color: var(--bg-secondary);
+  border-radius: $radius-md;
+  border: 1px solid var(--border-color);
+  flex-wrap: wrap;
+  cursor: pointer;
+  transition: all $transition-fast;
+
+  &:hover {
+    background-color: var(--bg-hover);
+    border-color: var(--primary-color);
+  }
+
+  &:active {
+    transform: scale(0.98);
+  }
+}
+
+.modelId {
+  font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  word-break: break-all;
+}
+
+.modelDisplayName {
+  font-size: 12px;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+
+.modelType {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  background-color: var(--bg-tertiary);
+  padding: 2px 8px;
+  border-radius: 10px;
+  flex-shrink: 0;
+  margin-left: auto;
+}
+
+.modelItemExcluded {
+  opacity: 0.6;
+  background-color: var(--bg-tertiary);
+  border-style: dashed;
+
+  .modelId {
+    text-decoration: line-through;
+    color: var(--text-tertiary);
+  }
+
+  &:hover {
+    border-color: var(--danger-color);
+  }
+}
+
+.modelExcludedBadge {
+  font-size: 10px;
+  color: var(--danger-color);
+  background-color: rgba($error-color, 0.1);
+  padding: 2px 6px;
+  border-radius: 8px;
+  border: 1px solid var(--danger-color);
+  flex-shrink: 0;
+}
+
+// 排除模型勾选列表
+.excludedCheckList {
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-xs;
+  max-height: 280px;
+  overflow-y: auto;
+  border: 1px solid var(--border-color);
+  border-radius: $radius-md;
+  padding: $spacing-sm;
+  background-color: var(--bg-secondary);
+}
+
+.excludedCheckItem {
+  display: flex;
+  align-items: center;
+  gap: $spacing-sm;
+  padding: $spacing-xs $spacing-sm;
+  border-radius: $radius-sm;
+  cursor: pointer;
+  transition: background-color $transition-fast;
+
+  &:hover {
+    background-color: var(--bg-hover);
+  }
+
+  input[type='checkbox'] {
+    width: 16px;
+    height: 16px;
+    cursor: pointer;
+    accent-color: var(--primary-color);
+  }
+}
+
+.excludedCheckLabel {
+  display: flex;
+  align-items: center;
+  gap: $spacing-sm;
+  font-size: 13px;
+  font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+  color: var(--text-primary);
+  word-break: break-all;
+}
+
+.excludedCheckDisplayName {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  font-family: inherit;
+}
