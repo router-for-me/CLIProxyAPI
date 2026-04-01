@@ -443,6 +443,25 @@ function ListModeContent<TState extends QuotaStatusState, TData>({
     return styles.quotaListCellLow;
   };
 
+  const formatCountdown = (resetTime?: string): string => {
+    if (!resetTime) return '';
+    const now = Date.now();
+    const reset = new Date(resetTime).getTime();
+    if (isNaN(reset)) return '';
+    const diff = reset - now;
+    if (diff <= 0) return '';
+    const totalMin = Math.floor(diff / 60000);
+    if (totalMin < 1) return '<1m';
+    const d = Math.floor(totalMin / 1440);
+    const h = Math.floor((totalMin % 1440) / 60);
+    const m = totalMin % 60;
+    const parts: string[] = [];
+    if (d > 0) parts.push(`${d}d`);
+    if (h > 0) parts.push(`${h}h`);
+    if (m > 0 && d === 0) parts.push(`${m}m`);
+    return parts.join('');
+  };
+
   const showTierColumn = showCredit && Boolean(config.getListTierLabel);
   const showCreditColumn = showCredit && Boolean(config.getListCreditBalance);
 
@@ -542,9 +561,20 @@ function ListModeContent<TState extends QuotaStatusState, TData>({
                     const value = status === 'success' && q && config.getListGroupValue
                       ? config.getListGroupValue(q, g.id)
                       : null;
+                    const resetTime = status === 'success' && q && config.getListGroupResetTime
+                      ? config.getListGroupResetTime(q, g.id)
+                      : undefined;
+                    const countdown = formatCountdown(resetTime);
                     return (
                       <td key={g.id} className={`${styles.listTdModel} ${getPercentClass(value)}`}>
-                        {status === 'success' ? (value !== null ? `${value}%` : '-') : '-'}
+                        {status === 'success' ? (
+                          value !== null ? (
+                            <>
+                              {`${value}%`}
+                              {countdown && <span className={styles.listCountdown}>{countdown}</span>}
+                            </>
+                          ) : '-'
+                        ) : '-'}
                       </td>
                     );
                   })}
