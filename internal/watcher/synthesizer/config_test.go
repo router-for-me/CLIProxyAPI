@@ -160,9 +160,10 @@ func TestConfigSynthesizer_ClaudeKeys(t *testing.T) {
 		Config: &config.Config{
 			ClaudeKey: []config.ClaudeKey{
 				{
-					APIKey:  "sk-ant-api-xxx",
-					Prefix:  "main",
-					BaseURL: "https://api.anthropic.com",
+					APIKey:                  "sk-ant-api-xxx",
+					Prefix:                  "main",
+					BaseURL:                 "https://api.anthropic.com",
+					RemoveToolsCacheControl: true,
 					Models: []config.ClaudeModel{
 						{Name: "claude-3-opus"},
 						{Name: "claude-3-sonnet"},
@@ -193,6 +194,9 @@ func TestConfigSynthesizer_ClaudeKeys(t *testing.T) {
 	}
 	if auths[0].Attributes["api_key"] != "sk-ant-api-xxx" {
 		t.Errorf("expected api_key sk-ant-api-xxx, got %s", auths[0].Attributes["api_key"])
+	}
+	if auths[0].Attributes["remove_tools_cache_control"] != "true" {
+		t.Errorf("expected remove_tools_cache_control=true, got %s", auths[0].Attributes["remove_tools_cache_control"])
 	}
 	if _, ok := auths[0].Attributes["models_hash"]; !ok {
 		t.Error("expected models_hash in attributes")

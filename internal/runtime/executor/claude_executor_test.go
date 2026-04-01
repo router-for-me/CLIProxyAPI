@@ -1020,6 +1020,65 @@ func TestEnforceCacheControlLimit_ToolOnlyPayloadStillRespectsLimit(t *testing.T
 	}
 }
 
+func TestRemoveToolsCacheControl(t *testing.T) {
+	tests := []struct {
+		name string
+		auth *cliproxyauth.Auth
+		want bool
+	}{
+		{
+			name: "nil auth",
+			auth: nil,
+			want: false,
+		},
+		{
+			name: "missing attribute",
+			auth: &cliproxyauth.Auth{Attributes: map[string]string{
+				"api_key": "key-123",
+			}},
+			want: false,
+		},
+		{
+			name: "true attribute",
+			auth: &cliproxyauth.Auth{Attributes: map[string]string{
+				"remove_tools_cache_control": " true ",
+			}},
+			want: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := removeToolsCacheControl(tt.auth); got != tt.want {
+				t.Fatalf("removeToolsCacheControl() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestStripToolsCacheControl(t *testing.T) {
+	payload := []byte(`{
+		"tools": [
+			{"name":"t1","cache_control":{"type":"ephemeral"}},
+			{"name":"t2","cache_control":{"type":"ephemeral","ttl":"1h"}},
+			{"name":"t3"}
+		],
+		"system": [{"type":"text","text":"s1","cache_control":{"type":"ephemeral"}}]
+	}`)
+
+	out := stripToolsCacheControl(payload)
+
+	if gjson.GetBytes(out, "tools.0.cache_control").Exists() {
+		t.Fatalf("tools.0.cache_control should be removed")
+	}
+	if gjson.GetBytes(out, "tools.1.cache_control").Exists() {
+		t.Fatalf("tools.1.cache_control should be removed")
+	}
+	if got := gjson.GetBytes(out, "system.0.cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("system cache_control should stay untouched, got %q", got)
+	}
+}
+
 func TestClaudeExecutor_CountTokens_AppliesCacheControlGuards(t *testing.T) {
 	var seenBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1067,6 +1126,54 @@ func TestClaudeExecutor_CountTokens_AppliesCacheControlGuards(t *testing.T) {
 	}
 	if hasTTLOrderingViolation(seenBody) {
 		t.Fatalf("count_tokens body still has ttl ordering violations: %s", string(seenBody))
+	}
+}
+
+func TestClaudeExecutor_CountTokens_RemoveToolsCacheControl(t *testing.T) {
+	var seenBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		seenBody = bytes.Clone(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"input_tokens":42}`))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":                     "key-123",
+		"base_url":                    server.URL,
+		"remove_tools_cache_control":  "true",
+	}}
+
+	payload := []byte(`{
+		"tools": [
+			{"name":"t1","cache_control":{"type":"ephemeral"}},
+			{"name":"t2","cache_control":{"type":"ephemeral","ttl":"1h"}}
+		],
+		"system": [{"type":"text","text":"s1","cache_control":{"type":"ephemeral"}}],
+		"messages": [{"role":"user","content":[{"type":"text","text":"hello"}]}]
+	}`)
+
+	_, err := executor.CountTokens(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-haiku-20241022",
+		Payload: payload,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+	if err != nil {
+		t.Fatalf("CountTokens error: %v", err)
+	}
+
+	if len(seenBody) == 0 {
+		t.Fatal("expected count_tokens request body to be captured")
+	}
+	if gjson.GetBytes(seenBody, "tools.0.cache_control").Exists() {
+		t.Fatalf("tools.0.cache_control should be stripped in count_tokens")
+	}
+	if gjson.GetBytes(seenBody, "tools.1.cache_control").Exists() {
+		t.Fatalf("tools.1.cache_control should be stripped in count_tokens")
+	}
+	if got := gjson.GetBytes(seenBody, "system.0.cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("system cache_control should stay untouched, got %q", got)
 	}
 }
 
