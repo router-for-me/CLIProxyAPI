@@ -6,7 +6,7 @@ import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
 import { Select } from '@/components/ui/Select';
 import { StatusBadge } from '@/features/accountPool/components/StatusBadge';
-import { AccountTable } from '@/features/accountPool/components/AccountTable';
+import { AccountTable, CopyButton } from '@/features/accountPool/components/AccountTable';
 import { BatchImportModal } from '@/features/accountPool/components/BatchImportModal';
 import { useMembersData, useLeadersData } from '@/features/accountPool/hooks/useAccountPoolData';
 import { useProxiesData } from '@/features/accountPool/hooks/useProxiesData';
@@ -317,7 +317,12 @@ export function AccountPoolPage() {
               <tbody>
                 {proxies.map((p) => (
                   <tr key={p.id}>
-                    <td style={{ ...cellStyle, fontFamily: 'monospace', fontSize: '12px' }}>{p.proxy_url}</td>
+                    <td style={{ ...cellStyle, fontFamily: 'monospace', fontSize: '12px' }}>
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                        {p.proxy_url}
+                        <CopyButton value={p.proxy_url} />
+                      </span>
+                    </td>
                     <td style={cellStyle}><StatusBadge status={p.type} /></td>
                     <td style={cellStyle}><StatusBadge status={p.status} /></td>
                     <td style={{ ...cellStyle, textAlign: 'right' }}>
@@ -354,8 +359,20 @@ export function AccountPoolPage() {
                   <tr key={g.id}>
                     <td style={{ ...cellStyle, fontFamily: 'monospace', fontSize: '12px' }}>{g.group_id}</td>
                     <td style={cellStyle}>{g.date}</td>
-                    <td style={{ ...cellStyle, fontSize: '12px' }}>{g.leader_email}</td>
-                    <td style={{ ...cellStyle, fontSize: '12px' }}>{g.member_email || '-'}</td>
+                    <td style={{ ...cellStyle, fontSize: '12px' }}>
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                        {g.leader_email}
+                        <CopyButton value={g.leader_email} />
+                      </span>
+                    </td>
+                    <td style={{ ...cellStyle, fontSize: '12px' }}>
+                      {g.member_email ? (
+                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                          {g.member_email}
+                          <CopyButton value={g.member_email} />
+                        </span>
+                      ) : '-'}
+                    </td>
                     <td style={cellStyle}>
                       <Input
                         defaultValue={g.family_status}

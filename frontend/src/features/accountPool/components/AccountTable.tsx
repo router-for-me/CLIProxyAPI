@@ -19,9 +19,9 @@ interface Props {
   onUpdate: (id: number, data: Partial<Account>) => Promise<void>;
 }
 
-function MaskedField({ value }: { value: string }) {
+export function CopyButton({ value }: { value: string }) {
   const [copied, setCopied] = useState(false);
-  if (!value) return <span style={{ color: 'var(--text-tertiary)' }}>-</span>;
+  if (!value) return null;
 
   const handleCopy = async (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -33,26 +33,43 @@ function MaskedField({ value }: { value: string }) {
   };
 
   return (
+    <button
+      onClick={handleCopy}
+      title="Copy to clipboard"
+      style={{
+        border: 'none',
+        background: 'none',
+        cursor: 'pointer',
+        padding: '2px 4px',
+        fontSize: '12px',
+        color: copied ? 'var(--success-color, #22c55e)' : 'var(--text-secondary)',
+        borderRadius: '3px',
+        lineHeight: 1,
+      }}
+    >
+      {copied ? '✓' : '⎘'}
+    </button>
+  );
+}
+
+function MaskedField({ value }: { value: string }) {
+  if (!value) return <span style={{ color: 'var(--text-tertiary)' }}>-</span>;
+  return (
     <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
       <span style={{ fontFamily: 'monospace', fontSize: '12px', color: 'var(--text-tertiary)' }}>
         {'••••••••'}
       </span>
-      <button
-        onClick={handleCopy}
-        title="Copy to clipboard"
-        style={{
-          border: 'none',
-          background: 'none',
-          cursor: 'pointer',
-          padding: '2px 4px',
-          fontSize: '12px',
-          color: copied ? 'var(--success-color, #22c55e)' : 'var(--text-secondary)',
-          borderRadius: '3px',
-          lineHeight: 1,
-        }}
-      >
-        {copied ? '✓' : '⎘'}
-      </button>
+      <CopyButton value={value} />
+    </span>
+  );
+}
+
+function CopyableText({ value, mono }: { value: string; mono?: boolean }) {
+  if (!value) return <span style={{ color: 'var(--text-tertiary)' }}>-</span>;
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+      <span style={{ fontFamily: mono ? 'monospace' : 'inherit', fontSize: '12px' }}>{value}</span>
+      <CopyButton value={value} />
     </span>
   );
 }
@@ -140,7 +157,7 @@ export function AccountTable({ items, type, onUpdateStatus, onDelete, onUpdate }
                   {isEditing ? (
                     <input style={inputStyle} value={editData.email || ''} onChange={(e) => setEditData({ ...editData, email: e.target.value })} />
                   ) : (
-                    <span style={{ fontFamily: 'monospace', fontSize: '12px' }}>{item.email}</span>
+                    <CopyableText value={item.email} mono />
                   )}
                 </td>
                 <td style={cellStyle}>
