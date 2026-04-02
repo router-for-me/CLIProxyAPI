@@ -41,6 +41,35 @@ export interface AccountGroup {
   updated_at?: string;
 }
 
+export interface GroupRun {
+  id: number;
+  group_id: number;
+  run_date: string;
+  leader_id: number;
+  leader_proxy: string;
+  status: string;
+  to_remove: string[] | null;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface GroupMember {
+  id: number;
+  group_run_id: number;
+  member_id: number;
+  proxy: string;
+  port: number;
+  profile_id: string;
+  status: string;
+  message: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface GroupRunWithMembers extends GroupRun {
+  members: GroupMember[];
+}
+
 export interface ListResponse<T> {
   items: T[] | null;
   total: number;
@@ -123,7 +152,7 @@ export const accountPoolApi = {
   pickNextProxy: (type?: string) =>
     apiClient.post<PoolProxy>(`${BASE}/proxies/pick`, { type }),
 
-  // Groups
+  // Groups (legacy)
   listGroups: (params?: { limit?: number; offset?: number; group_id?: string; leader_email?: string }) =>
     apiClient.get<ListResponse<AccountGroup>>(`${BASE}/groups`, { params }),
 
@@ -134,5 +163,21 @@ export const accountPoolApi = {
     apiClient.put<AccountGroup>(`${BASE}/groups/${id}`, data),
 
   deleteGroup: (id: number) =>
-    apiClient.delete<void>(`${BASE}/groups/${id}`)
+    apiClient.delete<void>(`${BASE}/groups/${id}`),
+
+  // Group Runs
+  listGroupRuns: (params?: { date?: string; group_id?: number; status?: string; limit?: number; offset?: number }) =>
+    apiClient.get<ListResponse<GroupRun>>(`${BASE}/group-runs`, { params }),
+
+  getGroupRun: (id: number) =>
+    apiClient.get<GroupRunWithMembers>(`${BASE}/group-runs/${id}`),
+
+  updateGroupRun: (id: number, data: Partial<GroupRun>) =>
+    apiClient.put<GroupRun>(`${BASE}/group-runs/${id}`, data),
+
+  deleteGroupRun: (id: number) =>
+    apiClient.delete<void>(`${BASE}/group-runs/${id}`),
+
+  updateGroupRunMemberStatus: (runId: number, memberId: number, status: string, message?: string) =>
+    apiClient.patch(`${BASE}/group-runs/${runId}/members/${memberId}/status`, { status, message: message || '' }),
 };

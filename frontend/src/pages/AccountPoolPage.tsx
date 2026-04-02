@@ -10,13 +10,14 @@ import { AccountTable, CopyButton } from '@/features/accountPool/components/Acco
 import { BatchImportModal } from '@/features/accountPool/components/BatchImportModal';
 import { useMembersData, useLeadersData } from '@/features/accountPool/hooks/useAccountPoolData';
 import { useProxiesData } from '@/features/accountPool/hooks/useProxiesData';
-import { useGroupsData } from '@/features/accountPool/hooks/useGroupsData';
+import { useGroupRunsData } from '@/features/accountPool/hooks/useGroupsData';
 import { accountPoolApi } from '@/services/api/accountPool';
 import { useNotificationStore } from '@/stores/useNotificationStore';
 
-type TabKey = 'members' | 'leaders' | 'proxies' | 'groups';
+type TabKey = 'members' | 'leaders' | 'proxies' | 'group-runs';
 
 const ACCOUNT_STATUSES = ['', 'available', 'used', 'banned', 'region-unmatch', 'auth-error', 'oauth-success', 'credential'];
+const GROUP_RUN_STATUSES = ['', 'pending', 'running', 'completed', 'failed'];
 const PROXY_TYPES = ['', 'leader', 'member'];
 
 const tabStyle: React.CSSProperties = {
@@ -69,7 +70,8 @@ export function AccountPoolPage() {
   const { members, total: membersTotal, loading: membersLoading, loadMembers } = useMembersData();
   const { leaders, total: leadersTotal, loading: leadersLoading, loadLeaders } = useLeadersData();
   const { proxies, total: proxiesTotal, loading: proxiesLoading, loadProxies } = useProxiesData();
-  const { groups, total: groupsTotal, loading: groupsLoading, loadGroups } = useGroupsData();
+  const { groupRuns, total: groupRunsTotal, loading: groupRunsLoading, loadGroupRuns, expandedRun, expandedRunId, detailLoading, toggleExpand } = useGroupRunsData();
+  const [dateFilter, setDateFilter] = useState('');
 
   const reload = useCallback(() => {
     const offset = (page - 1) * pageSize;
@@ -83,20 +85,20 @@ export function AccountPoolPage() {
       case 'proxies':
         loadProxies({ type: typeFilter || undefined, status: statusFilter || undefined, limit: pageSize, offset });
         break;
-      case 'groups':
-        loadGroups({ leader_email: search || undefined, limit: pageSize, offset });
+      case 'group-runs':
+        loadGroupRuns({ date: dateFilter || undefined, status: statusFilter || undefined, limit: pageSize, offset });
         break;
     }
-  }, [activeTab, statusFilter, typeFilter, search, page, pageSize, loadMembers, loadLeaders, loadProxies, loadGroups]);
+  }, [activeTab, statusFilter, typeFilter, search, dateFilter, page, pageSize, loadMembers, loadLeaders, loadProxies, loadGroupRuns]);
 
   useEffect(() => { reload(); }, [reload]);
   useHeaderRefresh(reload);
 
-  useEffect(() => { setPage(1); setStatusFilter(''); setSearch(''); setTypeFilter(''); }, [activeTab]);
+  useEffect(() => { setPage(1); setStatusFilter(''); setSearch(''); setTypeFilter(''); setDateFilter(''); }, [activeTab]);
 
-  const currentTotal = activeTab === 'members' ? membersTotal : activeTab === 'leaders' ? leadersTotal : activeTab === 'proxies' ? proxiesTotal : groupsTotal;
+  const currentTotal = activeTab === 'members' ? membersTotal : activeTab === 'leaders' ? leadersTotal : activeTab === 'proxies' ? proxiesTotal : groupRunsTotal;
   const totalPages = Math.max(1, Math.ceil(currentTotal / pageSize));
-  const loading = activeTab === 'members' ? membersLoading : activeTab === 'leaders' ? leadersLoading : activeTab === 'proxies' ? proxiesLoading : groupsLoading;
+  const loading = activeTab === 'members' ? membersLoading : activeTab === 'leaders' ? leadersLoading : activeTab === 'proxies' ? proxiesLoading : groupRunsLoading;
 
   const handleUpdateMemberStatus = async (id: number, status: string) => {
     try {
@@ -168,20 +170,10 @@ export function AccountPoolPage() {
     }
   };
 
-  const handleDeleteGroup = async (id: number) => {
+  const handleDeleteGroupRun = async (id: number) => {
     try {
-      await accountPoolApi.deleteGroup(id);
+      await accountPoolApi.deleteGroupRun(id);
       showNotification(t('account_pool.deleted', { defaultValue: 'Deleted' }), 'success');
-      reload();
-    } catch (err) {
-      showNotification((err as Error).message, 'error');
-    }
-  };
-
-  const handleUpdateGroupStatus = async (id: number, familyStatus: string) => {
-    try {
-      await accountPoolApi.updateGroup(id, { family_status: familyStatus });
-      showNotification(t('account_pool.updated', { defaultValue: 'Updated' }), 'success');
       reload();
     } catch (err) {
       showNotification((err as Error).message, 'error');
@@ -234,25 +226,35 @@ export function AccountPoolPage() {
 
       {/* Tab bar */}
       <div style={{ display: 'flex', borderBottom: '1px solid var(--border-color)', marginBottom: '16px' }}>
-        {(['members', 'leaders', 'proxies', 'groups'] as TabKey[]).map((tab) => (
-          <button key={tab} style={activeTab === tab ? activeTabStyle : tabStyle} onClick={() => setActiveTab(tab)}>
-            {t(`account_pool.tab_${tab}`, { defaultValue: tab.charAt(0).toUpperCase() + tab.slice(1) })}
-            <span style={{ marginLeft: '6px', fontSize: '11px', opacity: 0.6 }}>
-              ({tab === 'members' ? membersTotal : tab === 'leaders' ? leadersTotal : tab === 'proxies' ? proxiesTotal : groupsTotal})
-            </span>
-          </button>
-        ))}
+        {(['members', 'leaders', 'proxies', 'group-runs'] as TabKey[]).map((tab) => {
+          const label = tab === 'group-runs' ? 'Group Runs' : tab.charAt(0).toUpperCase() + tab.slice(1);
+          const count = tab === 'members' ? membersTotal : tab === 'leaders' ? leadersTotal : tab === 'proxies' ? proxiesTotal : groupRunsTotal;
+          return (
+            <button key={tab} style={activeTab === tab ? activeTabStyle : tabStyle} onClick={() => setActiveTab(tab)}>
+              {t(`account_pool.tab_${tab}`, { defaultValue: label })}
+              <span style={{ marginLeft: '6px', fontSize: '11px', opacity: 0.6 }}>({count})</span>
+            </button>
+          );
+        })}
       </div>
 
       <Card>
         {/* Toolbar */}
         <div style={toolbarStyle}>
-          {(activeTab === 'members' || activeTab === 'leaders' || activeTab === 'groups') && (
+          {(activeTab === 'members' || activeTab === 'leaders') && (
             <Input
               value={search}
               onChange={(e) => { setSearch(e.target.value); setPage(1); }}
-              placeholder={activeTab === 'groups' ? 'Search leader email...' : 'Search email...'}
+              placeholder="Search email..."
               style={{ width: '200px' }}
+            />
+          )}
+          {activeTab === 'group-runs' && (
+            <Input
+              type="date"
+              value={dateFilter}
+              onChange={(e) => { setDateFilter(e.target.value); setPage(1); }}
+              style={{ width: '160px' }}
             />
           )}
           {(activeTab === 'members' || activeTab === 'leaders' || activeTab === 'proxies') && (
@@ -260,6 +262,13 @@ export function AccountPoolPage() {
               value={statusFilter}
               onChange={(v) => { setStatusFilter(v); setPage(1); }}
               options={ACCOUNT_STATUSES.map((s) => ({ value: s, label: s || 'All statuses' }))}
+            />
+          )}
+          {activeTab === 'group-runs' && (
+            <Select
+              value={statusFilter}
+              onChange={(v) => { setStatusFilter(v); setPage(1); }}
+              options={GROUP_RUN_STATUSES.map((s) => ({ value: s, label: s || 'All statuses' }))}
             />
           )}
           {activeTab === 'proxies' && (
@@ -342,63 +351,101 @@ export function AccountPoolPage() {
           </div>
         )}
 
-        {/* Groups tab */}
-        {activeTab === 'groups' && !loading && (
+        {/* Group Runs tab */}
+        {activeTab === 'group-runs' && !loading && (
           <div style={{ overflowX: 'auto' }}>
             <table style={{ width: '100%', borderCollapse: 'collapse' }}>
               <thead>
                 <tr style={{ backgroundColor: 'var(--bg-secondary)' }}>
+                  <th style={{ ...cellStyle, fontWeight: 600, textAlign: 'left', width: '30px' }}></th>
                   <th style={{ ...cellStyle, fontWeight: 600, textAlign: 'left', maxWidth: '60px' }}>ID</th>
-                  <th style={{ ...cellStyle, fontWeight: 600, textAlign: 'left' }}>Group ID</th>
+                  <th style={{ ...cellStyle, fontWeight: 600, textAlign: 'left' }}>Group</th>
                   <th style={{ ...cellStyle, fontWeight: 600, textAlign: 'left' }}>Date</th>
-                  <th style={{ ...cellStyle, fontWeight: 600, textAlign: 'left' }}>Leader</th>
-                  <th style={{ ...cellStyle, fontWeight: 600, textAlign: 'left' }}>Member</th>
-                  <th style={{ ...cellStyle, fontWeight: 600, textAlign: 'left' }}>Family Status</th>
+                  <th style={{ ...cellStyle, fontWeight: 600, textAlign: 'left' }}>Leader ID</th>
+                  <th style={{ ...cellStyle, fontWeight: 600, textAlign: 'left' }}>Status</th>
+                  <th style={{ ...cellStyle, fontWeight: 600, textAlign: 'left' }}>To Remove</th>
                   <th style={{ ...cellStyle, fontWeight: 600, textAlign: 'right' }}>Actions</th>
                 </tr>
               </thead>
               <tbody>
-                {groups.map((g) => (
-                  <tr key={g.id}>
-                    <td style={{ ...cellStyle, maxWidth: '60px', color: 'var(--text-tertiary)', fontSize: '12px' }}>{g.id}</td>
-                    <td style={{ ...cellStyle, fontFamily: 'monospace', fontSize: '12px' }}>{g.group_id}</td>
-                    <td style={cellStyle}>{g.date}</td>
-                    <td style={{ ...cellStyle, fontSize: '12px' }}>
-                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
-                        {g.leader_email}
-                        <CopyButton value={g.leader_email} />
-                      </span>
-                    </td>
-                    <td style={{ ...cellStyle, fontSize: '12px' }}>
-                      {g.member_email ? (
-                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
-                          {g.member_email}
-                          <CopyButton value={g.member_email} />
-                        </span>
-                      ) : '-'}
-                    </td>
-                    <td style={cellStyle}>
-                      <Input
-                        defaultValue={g.family_status}
-                        onBlur={(e) => {
-                          if (e.target.value !== g.family_status) {
-                            handleUpdateGroupStatus(g.id, e.target.value);
-                          }
-                        }}
-                        style={{ width: '120px', fontSize: '12px', padding: '2px 6px' }}
-                      />
-                    </td>
-                    <td style={{ ...cellStyle, textAlign: 'right' }}>
-                      <Button size="sm" variant="danger" onClick={() => handleDeleteGroup(g.id)}>
-                        Delete
-                      </Button>
-                    </td>
-                  </tr>
+                {groupRuns.map((r) => (
+                  <>
+                    <tr key={r.id} style={{ cursor: 'pointer' }} onClick={() => toggleExpand(r.id)}>
+                      <td style={{ ...cellStyle, width: '30px', textAlign: 'center', fontSize: '12px' }}>
+                        {expandedRunId === r.id ? '\u25BC' : '\u25B6'}
+                      </td>
+                      <td style={{ ...cellStyle, maxWidth: '60px', color: 'var(--text-tertiary)', fontSize: '12px' }}>{r.id}</td>
+                      <td style={{ ...cellStyle, fontFamily: 'monospace', fontSize: '13px', fontWeight: 600 }}>{r.group_id}</td>
+                      <td style={{ ...cellStyle, fontSize: '12px' }}>{r.run_date?.slice(0, 10)}</td>
+                      <td style={{ ...cellStyle, fontSize: '12px' }}>{r.leader_id}</td>
+                      <td style={cellStyle}><StatusBadge status={r.status} /></td>
+                      <td style={{ ...cellStyle, fontSize: '12px' }}>
+                        {r.to_remove && r.to_remove.length > 0
+                          ? r.to_remove[0] === '*' ? 'All' : r.to_remove.length.toString()
+                          : '-'}
+                      </td>
+                      <td style={{ ...cellStyle, textAlign: 'right' }} onClick={(e) => e.stopPropagation()}>
+                        <Button size="sm" variant="danger" onClick={() => handleDeleteGroupRun(r.id)}>
+                          Delete
+                        </Button>
+                      </td>
+                    </tr>
+                    {expandedRunId === r.id && (
+                      <tr key={`${r.id}-detail`}>
+                        <td colSpan={8} style={{ padding: 0, borderBottom: '1px solid var(--border-color)' }}>
+                          {detailLoading ? (
+                            <div style={{ padding: '12px 20px', color: 'var(--text-secondary)', fontSize: '13px' }}>Loading members...</div>
+                          ) : expandedRun && expandedRun.members && expandedRun.members.length > 0 ? (
+                            <table style={{ width: '100%', borderCollapse: 'collapse', backgroundColor: 'var(--bg-secondary)' }}>
+                              <thead>
+                                <tr>
+                                  <th style={{ ...cellStyle, fontWeight: 600, textAlign: 'left', fontSize: '12px', paddingLeft: '40px' }}>Member ID</th>
+                                  <th style={{ ...cellStyle, fontWeight: 600, textAlign: 'left', fontSize: '12px' }}>Proxy</th>
+                                  <th style={{ ...cellStyle, fontWeight: 600, textAlign: 'left', fontSize: '12px' }}>Port</th>
+                                  <th style={{ ...cellStyle, fontWeight: 600, textAlign: 'left', fontSize: '12px' }}>Profile ID</th>
+                                  <th style={{ ...cellStyle, fontWeight: 600, textAlign: 'left', fontSize: '12px' }}>Status</th>
+                                  <th style={{ ...cellStyle, fontWeight: 600, textAlign: 'left', fontSize: '12px' }}>Message</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {expandedRun.members.map((m) => (
+                                  <tr key={m.id}>
+                                    <td style={{ ...cellStyle, fontSize: '12px', paddingLeft: '40px' }}>{m.member_id}</td>
+                                    <td style={{ ...cellStyle, fontFamily: 'monospace', fontSize: '11px', maxWidth: '250px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                                        {m.proxy ? m.proxy.replace(/\/\/.*@/, '//***@') : '-'}
+                                        {m.proxy && <CopyButton value={m.proxy} />}
+                                      </span>
+                                    </td>
+                                    <td style={{ ...cellStyle, fontSize: '12px', fontFamily: 'monospace' }}>{m.port || '-'}</td>
+                                    <td style={{ ...cellStyle, fontSize: '11px', fontFamily: 'monospace', maxWidth: '150px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                      {m.profile_id ? (
+                                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                                          {m.profile_id.slice(0, 8)}...
+                                          <CopyButton value={m.profile_id} />
+                                        </span>
+                                      ) : '-'}
+                                    </td>
+                                    <td style={cellStyle}><StatusBadge status={m.status} /></td>
+                                    <td style={{ ...cellStyle, fontSize: '11px', color: 'var(--text-secondary)', maxWidth: '200px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                      {m.message || '-'}
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          ) : (
+                            <div style={{ padding: '12px 40px', color: 'var(--text-tertiary)', fontSize: '13px' }}>No members in this run</div>
+                          )}
+                        </td>
+                      </tr>
+                    )}
+                  </>
                 ))}
               </tbody>
             </table>
-            {groups.length === 0 && (
-              <div style={{ textAlign: 'center', padding: '40px 0', color: 'var(--text-tertiary)' }}>No groups found</div>
+            {groupRuns.length === 0 && (
+              <div style={{ textAlign: 'center', padding: '40px 0', color: 'var(--text-tertiary)' }}>No group runs found</div>
             )}
           </div>
         )}
