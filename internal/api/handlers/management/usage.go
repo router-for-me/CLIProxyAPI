@@ -1,13 +1,17 @@
 package management
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 )
+
+const usageFlushTimeout = 5 * time.Second
 
 type usageExportPayload struct {
 	Version    int                      `json:"version"`
@@ -22,6 +26,10 @@ type usageImportPayload struct {
 
 // GetUsageStatistics returns the in-memory request statistics snapshot.
 func (h *Handler) GetUsageStatistics(c *gin.Context) {
+	if err := flushUsageStatistics(c.Request.Context()); err != nil {
+		c.JSON(http.StatusGatewayTimeout, gin.H{"error": "usage statistics are still being processed"})
+		return
+	}
 	var snapshot usage.StatisticsSnapshot
 	if h != nil && h.usageStats != nil {
 		snapshot = h.usageStats.Snapshot()
@@ -34,6 +42,10 @@ func (h *Handler) GetUsageStatistics(c *gin.Context) {
 
 // ExportUsageStatistics returns a complete usage snapshot for backup/migration.
 func (h *Handler) ExportUsageStatistics(c *gin.Context) {
+	if err := flushUsageStatistics(c.Request.Context()); err != nil {
+		c.JSON(http.StatusGatewayTimeout, gin.H{"error": "usage statistics are still being processed"})
+		return
+	}
 	var snapshot usage.StatisticsSnapshot
 	if h != nil && h.usageStats != nil {
 		snapshot = h.usageStats.Snapshot()
@@ -43,6 +55,16 @@ func (h *Handler) ExportUsageStatistics(c *gin.Context) {
 		ExportedAt: time.Now().UTC(),
 		Usage:      snapshot,
 	})
+}
+
+func flushUsageStatistics(parent context.Context) error {
+	ctx := parent
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	flushCtx, cancel := context.WithTimeout(ctx, usageFlushTimeout)
+	defer cancel()
+	return coreusage.FlushDefault(flushCtx)
 }
 
 // ImportUsageStatistics merges a previously exported usage snapshot into memory.

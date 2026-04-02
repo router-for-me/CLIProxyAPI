@@ -47,10 +47,11 @@ type Manager struct {
 	stopOnce sync.Once
 	cancel   context.CancelFunc
 
-	mu     sync.Mutex
-	cond   *sync.Cond
-	queue  []queueItem
-	closed bool
+	mu         sync.Mutex
+	cond       *sync.Cond
+	queue      []queueItem
+	processing int
+	closed     bool
 
 	pluginsMu sync.RWMutex
 	plugins   []Plugin
@@ -122,6 +123,40 @@ func (m *Manager) Publish(ctx context.Context, record Record) {
 	m.cond.Signal()
 }
 
+// Flush blocks until all queued and in-flight records have been delivered or the context is canceled.
+func (m *Manager) Flush(ctx context.Context) error {
+	if m == nil {
+		return nil
+	}
+
+	// Ensure the worker is running even when Flush is called before the first Publish.
+	m.Start(context.Background())
+
+	ticker := time.NewTicker(2 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		m.mu.Lock()
+		idle := len(m.queue) == 0 && m.processing == 0
+		closed := m.closed
+		m.mu.Unlock()
+
+		if idle || closed {
+			return nil
+		}
+		if ctx == nil {
+			<-ticker.C
+			continue
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
 func (m *Manager) run(ctx context.Context) {
 	for {
 		m.mu.Lock()
@@ -134,8 +169,19 @@ func (m *Manager) run(ctx context.Context) {
 		}
 		item := m.queue[0]
 		m.queue = m.queue[1:]
+		m.processing++
 		m.mu.Unlock()
+
 		m.dispatch(item)
+
+		m.mu.Lock()
+		if m.processing > 0 {
+			m.processing--
+		}
+		if len(m.queue) == 0 && m.processing == 0 {
+			m.cond.Broadcast()
+		}
+		m.mu.Unlock()
 	}
 }
 
@@ -177,6 +223,9 @@ func PublishRecord(ctx context.Context, record Record) { DefaultManager().Publis
 
 // StartDefault starts the default manager's dispatcher.
 func StartDefault(ctx context.Context) { DefaultManager().Start(ctx) }
+
+// FlushDefault waits until the default manager has delivered all queued usage records.
+func FlushDefault(ctx context.Context) error { return DefaultManager().Flush(ctx) }
 
 // StopDefault stops the default manager's dispatcher.
 func StopDefault() { DefaultManager().Stop() }
