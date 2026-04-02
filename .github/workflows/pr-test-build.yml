@@ -16,12 +16,101 @@ jobs:
         run: |
           git fetch --depth 1 https://github.com/router-for-me/models.git main
           git show FETCH_HEAD:models.json > internal/registry/models/models.json
+
+      # Build frontend
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Build frontend
+        run: |
+          cd frontend && npm ci && npx vite build
+          cp dist/index.html ../internal/managementasset/static/management.html
+
+      # Build backend (with embedded frontend)
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
           cache: true
       - name: Build
+        run: go build -o cli-proxy-api ./cmd/server
+
+      # Smoke test: start server and verify management API paths
+      - name: Smoke test
         run: |
-          go build -o test-output ./cmd/server
-          rm -f test-output
+          # Create minimal config and auth dir
+          mkdir -p /tmp/smoke-auths
+          cat > /tmp/smoke-config.yaml << 'EOF'
+          host: "127.0.0.1"
+          port: 18317
+          remote-management:
+            allow-remote: false
+            secret-key: "smoke-test-key"
+          auth-dir: "/tmp/smoke-auths"
+          api-keys:
+            - "test-key"
+          debug: false
+          EOF
+
+          # Start server in background
+          ./cli-proxy-api -config /tmp/smoke-config.yaml &
+          SERVER_PID=$!
+          trap "kill $SERVER_PID 2>/dev/null" EXIT
+
+          # Wait for server to be ready
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:18317/ >/dev/null 2>&1; then
+              echo "Server ready after ${i}s"
+              break
+            fi
+            sleep 1
+          done
+
+          AUTH="-H 'Authorization: Bearer smoke-test-key'"
+          BASE="http://127.0.0.1:18317/v0/management"
+          FAIL=0
+
+          # Verify management.html loads
+          STATUS=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18317/management.html)
+          if [ "$STATUS" != "200" ]; then
+            echo "FAIL: /management.html returned $STATUS (expected 200)"
+            FAIL=1
+          else
+            echo "OK: /management.html → $STATUS"
+          fi
+
+          # Verify key management GET endpoints don't 404
+          ENDPOINTS=(
+            "/config"
+            "/api-keys"
+            "/auth-files"
+            "/account-pool/members"
+            "/account-pool/leaders"
+            "/account-pool/proxies"
+            "/account-pool/groups"
+          )
+
+          for ep in "${ENDPOINTS[@]}"; do
+            STATUS=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer smoke-test-key" "${BASE}${ep}")
+            if [ "$STATUS" = "404" ]; then
+              echo "FAIL: ${BASE}${ep} returned 404"
+              FAIL=1
+            else
+              echo "OK: ${ep} → $STATUS"
+            fi
+          done
+
+          # Verify no double-prefix bug: /v0/management/v0/management/* must 404
+          STATUS=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer smoke-test-key" "${BASE}/v0/management/account-pool/members")
+          if [ "$STATUS" != "404" ]; then
+            echo "FAIL: double-prefix path should be 404 but got $STATUS"
+            FAIL=1
+          else
+            echo "OK: double-prefix correctly returns 404"
+          fi
+
+          kill $SERVER_PID 2>/dev/null
+          exit $FAIL
