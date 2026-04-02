@@ -219,6 +219,19 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 	if len(normalized) == 0 {
 		return nil, "", &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
+	if len(normalized) == 1 {
+		// When a single provider is eligible, reuse pickSingle so provider-specific preferences
+		// (for example Codex websocket transport) are applied consistently.
+		providerKey := normalized[0]
+		picked, errPick := s.pickSingle(ctx, providerKey, model, opts, tried)
+		if errPick != nil {
+			return nil, "", errPick
+		}
+		if picked == nil {
+			return nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
+		}
+		return picked, providerKey, nil
+	}
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
 	modelKey := canonicalModelKey(model)
 
@@ -696,16 +709,25 @@ func (m *modelScheduler) highestReadyPriorityLocked(preferWebsocket bool, predic
 	if m == nil {
 		return 0, false
 	}
+	if preferWebsocket {
+		// When downstream is websocket and Codex supports websocket transport, prefer websocket-enabled
+		// credentials even if they are in a lower priority tier than HTTP-only credentials.
+		for _, priority := range m.priorityOrder {
+			bucket := m.readyByPriority[priority]
+			if bucket == nil {
+				continue
+			}
+			if bucket.ws.pickFirst(predicate) != nil {
+				return priority, true
+			}
+		}
+	}
 	for _, priority := range m.priorityOrder {
 		bucket := m.readyByPriority[priority]
 		if bucket == nil {
 			continue
 		}
-		view := &bucket.all
-		if preferWebsocket && len(bucket.ws.flat) > 0 {
-			view = &bucket.ws
-		}
-		if view.pickFirst(predicate) != nil {
+		if bucket.all.pickFirst(predicate) != nil {
 			return priority, true
 		}
 	}
@@ -723,7 +745,7 @@ func (m *modelScheduler) pickReadyAtPriorityLocked(preferWebsocket bool, priorit
 		return nil
 	}
 	view := &bucket.all
-	if preferWebsocket && len(bucket.ws.flat) > 0 {
+	if preferWebsocket && bucket.ws.pickFirst(predicate) != nil {
 		view = &bucket.ws
 	}
 	var picked *scheduledAuth

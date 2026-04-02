@@ -1,4 +1,4 @@
-package executor
+package helps
 
 import (
 	"testing"
@@ -14,8 +14,8 @@ func resetUserIDCache() {
 func TestCachedUserID_ReusesWithinTTL(t *testing.T) {
 	resetUserIDCache()
 
-	first := cachedUserID("api-key-1")
-	second := cachedUserID("api-key-1")
+	first := CachedUserID("api-key-1")
+	second := CachedUserID("api-key-1")
 
 	if first == "" {
 		t.Fatal("expected generated user_id to be non-empty")
@@ -28,7 +28,7 @@ func TestCachedUserID_ReusesWithinTTL(t *testing.T) {
 func TestCachedUserID_ExpiresAfterTTL(t *testing.T) {
 	resetUserIDCache()
 
-	expiredID := cachedUserID("api-key-expired")
+	expiredID := CachedUserID("api-key-expired")
 	cacheKey := userIDCacheKey("api-key-expired")
 	userIDCacheMu.Lock()
 	userIDCache[cacheKey] = userIDCacheEntry{
@@ -37,7 +37,7 @@ func TestCachedUserID_ExpiresAfterTTL(t *testing.T) {
 	}
 	userIDCacheMu.Unlock()
 
-	newID := cachedUserID("api-key-expired")
+	newID := CachedUserID("api-key-expired")
 	if newID == expiredID {
 		t.Fatalf("expected expired user_id to be replaced, got %q", newID)
 	}
@@ -49,8 +49,8 @@ func TestCachedUserID_ExpiresAfterTTL(t *testing.T) {
 func TestCachedUserID_IsScopedByAPIKey(t *testing.T) {
 	resetUserIDCache()
 
-	first := cachedUserID("api-key-1")
-	second := cachedUserID("api-key-2")
+	first := CachedUserID("api-key-1")
+	second := CachedUserID("api-key-2")
 
 	if first == second {
 		t.Fatalf("expected different API keys to have different user_ids, got %q", first)
@@ -61,7 +61,7 @@ func TestCachedUserID_RenewsTTLOnHit(t *testing.T) {
 	resetUserIDCache()
 
 	key := "api-key-renew"
-	id := cachedUserID(key)
+	id := CachedUserID(key)
 	cacheKey := userIDCacheKey(key)
 
 	soon := time.Now()
@@ -72,7 +72,7 @@ func TestCachedUserID_RenewsTTLOnHit(t *testing.T) {
 	}
 	userIDCacheMu.Unlock()
 
-	if refreshed := cachedUserID(key); refreshed != id {
+	if refreshed := CachedUserID(key); refreshed != id {
 		t.Fatalf("expected cached user_id to be reused before expiry, got %q", refreshed)
 	}
 

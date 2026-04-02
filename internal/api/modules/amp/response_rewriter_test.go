@@ -1,6 +1,7 @@
 package amp
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -100,23 +101,29 @@ func TestRewriteStreamChunk_MessageModel(t *testing.T) {
 	}
 }
 
-func TestRewriteStreamChunk_SuppressesThinkingContentBlockFrames(t *testing.T) {
+func TestRewriteStreamChunk_PreservesThinkingWithSignatureInjection(t *testing.T) {
 	rw := &ResponseRewriter{suppressedContentBlock: make(map[int]struct{})}
 
 	chunk := []byte("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"abc\"}}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"name\":\"bash\",\"input\":{}}}\n\n")
 	result := rw.rewriteStreamChunk(chunk)
 
-	if contains(result, []byte("\"thinking\"")) || contains(result, []byte("\"thinking_delta\"")) {
-		t.Fatalf("expected thinking content_block frames to be suppressed, got %s", string(result))
+	// Streaming mode preserves thinking blocks (does NOT suppress them)
+	// to avoid breaking SSE index alignment and TUI rendering
+	if !contains(result, []byte(`"content_block":{"type":"thinking"`)) {
+		t.Fatalf("expected thinking content_block_start to be preserved, got %s", string(result))
 	}
-	if contains(result, []byte("content_block_stop")) {
-		t.Fatalf("expected suppressed thinking content_block_stop to be removed, got %s", string(result))
+	if !contains(result, []byte(`"delta":{"type":"thinking_delta"`)) {
+		t.Fatalf("expected thinking_delta to be preserved, got %s", string(result))
 	}
-	if !contains(result, []byte("\"tool_use\"")) {
+	if !contains(result, []byte(`"type":"content_block_stop","index":0`)) {
+		t.Fatalf("expected content_block_stop for thinking block to be preserved, got %s", string(result))
+	}
+	if !contains(result, []byte(`"content_block":{"type":"tool_use"`)) {
 		t.Fatalf("expected tool_use content_block frame to remain, got %s", string(result))
 	}
-	if !contains(result, []byte("\"signature\":\"\"")) {
-		t.Fatalf("expected tool_use content_block signature injection, got %s", string(result))
+	// Signature should be injected into both thinking and tool_use blocks
+	if count := strings.Count(string(result), `"signature":""`); count != 2 {
+		t.Fatalf("expected 2 signature injections, but got %d in %s", count, string(result))
 	}
 }
 
