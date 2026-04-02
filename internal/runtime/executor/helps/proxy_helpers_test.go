@@ -1,4 +1,4 @@
-package executor
+package helps
 
 import (
 	"context"
@@ -13,7 +13,7 @@ import (
 func TestNewProxyAwareHTTPClientDirectBypassesGlobalProxy(t *testing.T) {
 	t.Parallel()
 
-	client := newProxyAwareHTTPClient(
+	client := NewProxyAwareHTTPClient(
 		context.Background(),
 		&config.Config{SDKConfig: sdkconfig.SDKConfig{ProxyURL: "http://global-proxy.example.com:8080"}},
 		&cliproxyauth.Auth{ProxyURL: "direct"},
@@ -35,7 +35,7 @@ func TestNewProxyAwareHTTPClientPrefersContextRoundTripperForAuthProxy(t *testin
 	expected := &roundTripperSpy{}
 	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", http.RoundTripper(expected))
 
-	client := newProxyAwareHTTPClient(
+	client := NewProxyAwareHTTPClient(
 		ctx,
 		&config.Config{},
 		&cliproxyauth.Auth{ProxyURL: "http://auth-proxy.example.com:8080"},
@@ -52,8 +52,8 @@ func TestNewProxyAwareHTTPClientCachesGlobalProxyTransport(t *testing.T) {
 
 	cfg := &config.Config{SDKConfig: sdkconfig.SDKConfig{ProxyURL: "http://global-proxy.example.com:8080"}}
 
-	first := newProxyAwareHTTPClient(context.Background(), cfg, nil, 0)
-	second := newProxyAwareHTTPClient(context.Background(), cfg, nil, 0)
+	first := NewProxyAwareHTTPClient(context.Background(), cfg, nil, 0)
+	second := NewProxyAwareHTTPClient(context.Background(), cfg, nil, 0)
 
 	if first.Transport == nil || second.Transport == nil {
 		t.Fatalf("expected transports to be configured, got %T and %T", first.Transport, second.Transport)

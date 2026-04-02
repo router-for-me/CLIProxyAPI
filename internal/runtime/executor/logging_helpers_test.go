@@ -9,6 +9,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 )
 
@@ -19,7 +20,7 @@ func TestRecordAPIResponseAggregatesIncrementally(t *testing.T) {
 	ctx := context.WithValue(context.Background(), "gin", ginCtx)
 	cfg := &config.Config{SDKConfig: sdkconfig.SDKConfig{RequestLog: true}}
 
-	recordAPIRequest(ctx, cfg, upstreamRequestLog{
+	helps.RecordAPIRequest(ctx, cfg, helps.UpstreamRequestLog{
 		URL:    "https://example.com/v1/test",
 		Method: http.MethodPost,
 		Headers: http.Header{
@@ -27,13 +28,13 @@ func TestRecordAPIResponseAggregatesIncrementally(t *testing.T) {
 		},
 		Body: []byte(`{"hello":"world"}`),
 	})
-	recordAPIResponseMetadata(ctx, cfg, http.StatusOK, http.Header{
+	helps.RecordAPIResponseMetadata(ctx, cfg, http.StatusOK, http.Header{
 		"Content-Type": []string{"application/json"},
 	})
-	appendAPIResponseChunk(ctx, cfg, []byte(`{"first":1}`))
-	appendAPIResponseChunk(ctx, cfg, []byte(`{"second":2}`))
+	helps.AppendAPIResponseChunk(ctx, cfg, []byte(`{"first":1}`))
+	helps.AppendAPIResponseChunk(ctx, cfg, []byte(`{"second":2}`))
 
-	rawValue, exists := ginCtx.Get(apiResponseKey)
+	rawValue, exists := ginCtx.Get("API_RESPONSE")
 	if !exists {
 		t.Fatal("expected aggregated api response to be stored")
 	}

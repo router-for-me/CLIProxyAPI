@@ -1,4 +1,4 @@
-package executor
+package helps
 
 import (
 	"bytes"
@@ -24,8 +24,8 @@ const (
 	apiResponseKey = "API_RESPONSE"
 )
 
-// upstreamRequestLog captures the outbound upstream request details for logging.
-type upstreamRequestLog struct {
+// UpstreamRequestLog captures the outbound upstream request details for logging.
+type UpstreamRequestLog struct {
 	URL       string
 	Method    string
 	Headers   http.Header
@@ -66,8 +66,8 @@ func appendAttemptResponseText(ginCtx *gin.Context, attempt *upstreamAttempt, te
 	builder.WriteString(text)
 }
 
-// recordAPIRequest stores the upstream request metadata in Gin context for request logging.
-func recordAPIRequest(ctx context.Context, cfg *config.Config, info upstreamRequestLog) {
+// RecordAPIRequest stores the upstream request metadata in Gin context for request logging.
+func RecordAPIRequest(ctx context.Context, cfg *config.Config, info UpstreamRequestLog) {
 	if cfg == nil || !cfg.RequestLog {
 		return
 	}
@@ -113,8 +113,8 @@ func recordAPIRequest(ctx context.Context, cfg *config.Config, info upstreamRequ
 	updateAggregatedRequest(ginCtx, attempts)
 }
 
-// recordAPIResponseMetadata captures upstream response status/header information for the latest attempt.
-func recordAPIResponseMetadata(ctx context.Context, cfg *config.Config, status int, headers http.Header) {
+// RecordAPIResponseMetadata captures upstream response status/header information for the latest attempt.
+func RecordAPIResponseMetadata(ctx context.Context, cfg *config.Config, status int, headers http.Header) {
 	if cfg == nil || !cfg.RequestLog {
 		return
 	}
@@ -140,8 +140,8 @@ func recordAPIResponseMetadata(ctx context.Context, cfg *config.Config, status i
 	}
 }
 
-// recordAPIResponseError adds an error entry for the latest attempt when no HTTP response is available.
-func recordAPIResponseError(ctx context.Context, cfg *config.Config, err error) {
+// RecordAPIResponseError adds an error entry for the latest attempt when no HTTP response is available.
+func RecordAPIResponseError(ctx context.Context, cfg *config.Config, err error) {
 	if cfg == nil || !cfg.RequestLog || err == nil {
 		return
 	}
@@ -163,8 +163,8 @@ func recordAPIResponseError(ctx context.Context, cfg *config.Config, err error) 
 	attempt.errorWritten = true
 }
 
-// appendAPIResponseChunk appends an upstream response chunk to Gin context for request logging.
-func appendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byte) {
+// AppendAPIResponseChunk appends an upstream response chunk to Gin context for request logging.
+func AppendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byte) {
 	if cfg == nil || !cfg.RequestLog {
 		return
 	}
@@ -332,7 +332,7 @@ func writeHeaders(builder *strings.Builder, headers http.Header) {
 	}
 }
 
-func formatAuthInfo(info upstreamRequestLog) string {
+func formatAuthInfo(info UpstreamRequestLog) string {
 	var parts []string
 	if trimmed := strings.TrimSpace(info.Provider); trimmed != "" {
 		parts = append(parts, fmt.Sprintf("provider=%s", trimmed))
@@ -368,7 +368,7 @@ func formatAuthInfo(info upstreamRequestLog) string {
 	return strings.Join(parts, ", ")
 }
 
-func summarizeErrorBody(contentType string, body []byte) string {
+func SummarizeErrorBody(contentType string, body []byte) string {
 	isHTML := strings.Contains(strings.ToLower(contentType), "text/html")
 	if !isHTML {
 		trimmed := bytes.TrimSpace(bytes.ToLower(body))
@@ -426,7 +426,7 @@ func extractJSONErrorMessage(body []byte) string {
 
 // logWithRequestID returns a logrus Entry with request_id field populated from context.
 // If no request ID is found in context, it returns the standard logger.
-func logWithRequestID(ctx context.Context) *log.Entry {
+func LogWithRequestID(ctx context.Context) *log.Entry {
 	if ctx == nil {
 		return log.NewEntry(log.StandardLogger())
 	}
