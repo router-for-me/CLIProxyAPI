@@ -565,17 +565,27 @@ func (e *CodexExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*
 	if auth == nil {
 		return nil, statusErr{code: 500, msg: "codex executor: auth is nil"}
 	}
-	var refreshToken string
+	var refreshToken, idToken string
 	if auth.Metadata != nil {
 		if v, ok := auth.Metadata["refresh_token"].(string); ok && v != "" {
 			refreshToken = v
+		}
+		if v, ok := auth.Metadata["id_token"].(string); ok {
+			idToken = v
 		}
 	}
 	if refreshToken == "" {
 		return auth, nil
 	}
 	svc := codexauth.NewCodexAuth(e.cfg)
-	td, err := svc.RefreshTokensWithRetry(ctx, refreshToken, 3)
+	var td *codexauth.CodexTokenData
+	var err error
+	if codexauth.IsIOSToken(idToken) {
+		log.Debugf("codex executor: using iOS refresh flow")
+		td, err = svc.RefreshTokensIOS(ctx, refreshToken)
+	} else {
+		td, err = svc.RefreshTokensWithRetry(ctx, refreshToken, 3)
+	}
 	if err != nil {
 		return nil, err
 	}

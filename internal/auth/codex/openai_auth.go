@@ -25,6 +25,10 @@ const (
 	TokenURL    = "https://auth.openai.com/oauth/token"
 	ClientID    = "app_EMoamEEZ73f0CkXaXp7hrann"
 	RedirectURI = "http://localhost:1455/auth/callback"
+
+	// IOSClientID and IOSRedirectURI are used by the iOS ChatGPT app OAuth flow.
+	IOSClientID    = "app_LlGpXReQgckcGGUo2JrYvtJK"
+	IOSRedirectURI = "com.openai.chat://auth0.openai.com/ios/com.openai.chat/callback"
 )
 
 // CodexAuth handles the OpenAI OAuth2 authentication flow.
@@ -240,6 +244,95 @@ func (o *CodexAuth) RefreshTokens(ctx context.Context, refreshToken string) (*Co
 		Email:        email,
 		Expire:       time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second).Format(time.RFC3339),
 	}, nil
+}
+
+// RefreshTokensIOS refreshes an access token that was originally issued via the
+// iOS ChatGPT app OAuth flow. It uses the iOS client_id and JSON encoding.
+func (o *CodexAuth) RefreshTokensIOS(ctx context.Context, refreshToken string) (*CodexTokenData, error) {
+	if refreshToken == "" {
+		return nil, fmt.Errorf("refresh token is required")
+	}
+
+	payload := map[string]string{
+		"client_id":     IOSClientID,
+		"grant_type":    "refresh_token",
+		"redirect_uri":  IOSRedirectURI,
+		"refresh_token": refreshToken,
+	}
+	bodyBytes, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal iOS refresh request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", TokenURL, strings.NewReader(string(bodyBytes)))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create iOS refresh request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := o.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("iOS token refresh request failed: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read iOS refresh response: %w", err)
+	}
+	log.Debugf("iOS token refresh response [status=%d]: %s", resp.StatusCode, string(body))
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("iOS token refresh failed with status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var tokenResp struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+		IDToken      string `json:"id_token"`
+		TokenType    string `json:"token_type"`
+		ExpiresIn    int    `json:"expires_in"`
+	}
+	if err = json.Unmarshal(body, &tokenResp); err != nil {
+		return nil, fmt.Errorf("failed to parse iOS refresh response: %w", err)
+	}
+
+	claims, err := ParseJWTToken(tokenResp.IDToken)
+	if err != nil {
+		log.Warnf("Failed to parse refreshed iOS ID token: %v", err)
+	}
+	accountID, email := "", ""
+	if claims != nil {
+		accountID = claims.GetAccountID()
+		email = claims.Email
+	}
+
+	return &CodexTokenData{
+		IDToken:      tokenResp.IDToken,
+		AccessToken:  tokenResp.AccessToken,
+		RefreshToken: tokenResp.RefreshToken,
+		AccountID:    accountID,
+		Email:        email,
+		Expire:       time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second).Format(time.RFC3339),
+	}, nil
+}
+
+// IsIOSToken reports whether the given id_token was issued to the iOS ChatGPT app client.
+func IsIOSToken(idToken string) bool {
+	if idToken == "" {
+		return false
+	}
+	claims, err := ParseJWTToken(idToken)
+	if err != nil || claims == nil {
+		return false
+	}
+	for _, aud := range claims.Aud {
+		if aud == IOSClientID {
+			return true
+		}
+	}
+	return false
 }
 
 // CreateTokenStorage creates a new CodexTokenStorage from a CodexAuthBundle.
