@@ -54,7 +54,7 @@ export interface BatchImportResponse {
   total_lines: number;
 }
 
-const BASE = '/v0/management/account-pool';
+const BASE = '/account-pool';
 
 export const accountPoolApi = {
   // Members
