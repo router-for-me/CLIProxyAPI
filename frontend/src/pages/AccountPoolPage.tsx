@@ -308,6 +308,7 @@ export function AccountPoolPage() {
             <table style={{ width: '100%', borderCollapse: 'collapse' }}>
               <thead>
                 <tr style={{ backgroundColor: 'var(--bg-secondary)' }}>
+                  <th style={{ ...cellStyle, fontWeight: 600, textAlign: 'left', maxWidth: '60px' }}>ID</th>
                   <th style={{ ...cellStyle, fontWeight: 600, textAlign: 'left' }}>Proxy URL</th>
                   <th style={{ ...cellStyle, fontWeight: 600, textAlign: 'left' }}>Type</th>
                   <th style={{ ...cellStyle, fontWeight: 600, textAlign: 'left' }}>Status</th>
@@ -317,6 +318,7 @@ export function AccountPoolPage() {
               <tbody>
                 {proxies.map((p) => (
                   <tr key={p.id}>
+                    <td style={{ ...cellStyle, maxWidth: '60px', color: 'var(--text-tertiary)', fontSize: '12px' }}>{p.id}</td>
                     <td style={{ ...cellStyle, fontFamily: 'monospace', fontSize: '12px' }}>
                       <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
                         {p.proxy_url}
@@ -346,6 +348,7 @@ export function AccountPoolPage() {
             <table style={{ width: '100%', borderCollapse: 'collapse' }}>
               <thead>
                 <tr style={{ backgroundColor: 'var(--bg-secondary)' }}>
+                  <th style={{ ...cellStyle, fontWeight: 600, textAlign: 'left', maxWidth: '60px' }}>ID</th>
                   <th style={{ ...cellStyle, fontWeight: 600, textAlign: 'left' }}>Group ID</th>
                   <th style={{ ...cellStyle, fontWeight: 600, textAlign: 'left' }}>Date</th>
                   <th style={{ ...cellStyle, fontWeight: 600, textAlign: 'left' }}>Leader</th>
@@ -357,6 +360,7 @@ export function AccountPoolPage() {
               <tbody>
                 {groups.map((g) => (
                   <tr key={g.id}>
+                    <td style={{ ...cellStyle, maxWidth: '60px', color: 'var(--text-tertiary)', fontSize: '12px' }}>{g.id}</td>
                     <td style={{ ...cellStyle, fontFamily: 'monospace', fontSize: '12px' }}>{g.group_id}</td>
                     <td style={cellStyle}>{g.date}</td>
                     <td style={{ ...cellStyle, fontSize: '12px' }}>

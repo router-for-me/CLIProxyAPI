@@ -133,6 +133,7 @@ export function AccountTable({ items, type, onUpdateStatus, onDelete, onUpdate }
       <table style={{ width: '100%', borderCollapse: 'collapse' }}>
         <thead>
           <tr style={{ backgroundColor: 'var(--bg-secondary)' }}>
+            <th style={{ ...cellStyle, fontWeight: 600, textAlign: 'left', maxWidth: '60px' }}>ID</th>
             <th style={{ ...cellStyle, fontWeight: 600, textAlign: 'left' }}>Email</th>
             <th style={{ ...cellStyle, fontWeight: 600, textAlign: 'left' }}>Password</th>
             <th style={{ ...cellStyle, fontWeight: 600, textAlign: 'left' }}>Recovery</th>
@@ -153,6 +154,7 @@ export function AccountTable({ items, type, onUpdateStatus, onDelete, onUpdate }
             const isEditing = editingId === item.id;
             return (
               <tr key={item.id} style={{ backgroundColor: isEditing ? 'var(--bg-hover)' : undefined }}>
+                <td style={{ ...cellStyle, maxWidth: '60px', color: 'var(--text-tertiary)', fontSize: '12px' }}>{item.id}</td>
                 <td style={cellStyle}>
                   {isEditing ? (
                     <input style={inputStyle} value={editData.email || ''} onChange={(e) => setEditData({ ...editData, email: e.target.value })} />
