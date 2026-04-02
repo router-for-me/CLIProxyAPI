@@ -392,27 +392,45 @@ func TestAppendWebsocketEvent(t *testing.T) {
 	}
 }
 
-func TestSetWebsocketRequestBody(t *testing.T) {
+func TestAppendWebsocketTimelineEvent(t *testing.T) {
+	var builder strings.Builder
+	ts := time.Date(2026, time.April, 1, 12, 34, 56, 789000000, time.UTC)
+
+	appendWebsocketTimelineEvent(&builder, "request", []byte("  {\"type\":\"response.create\"}\n"), ts)
+
+	got := builder.String()
+	if !strings.Contains(got, "Timestamp: 2026-04-01T12:34:56.789Z") {
+		t.Fatalf("timeline timestamp not found: %s", got)
+	}
+	if !strings.Contains(got, "Event: websocket.request") {
+		t.Fatalf("timeline event not found: %s", got)
+	}
+	if !strings.Contains(got, "{\"type\":\"response.create\"}") {
+		t.Fatalf("timeline payload not found: %s", got)
+	}
+}
+
+func TestSetWebsocketTimelineBody(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
 
-	setWebsocketRequestBody(c, " \n ")
-	if _, exists := c.Get(wsRequestBodyKey); exists {
-		t.Fatalf("request body key should not be set for empty body")
+	setWebsocketTimelineBody(c, " \n ")
+	if _, exists := c.Get(wsTimelineBodyKey); exists {
+		t.Fatalf("timeline body key should not be set for empty body")
 	}
 
-	setWebsocketRequestBody(c, "event body")
-	value, exists := c.Get(wsRequestBodyKey)
+	setWebsocketTimelineBody(c, "timeline body")
+	value, exists := c.Get(wsTimelineBodyKey)
 	if !exists {
-		t.Fatalf("request body key not set")
+		t.Fatalf("timeline body key not set")
 	}
 	bodyBytes, ok := value.([]byte)
 	if !ok {
-		t.Fatalf("request body key type mismatch")
+		t.Fatalf("timeline body key type mismatch")
 	}
-	if string(bodyBytes) != "event body" {
-		t.Fatalf("request body = %q, want %q", string(bodyBytes), "event body")
+	if string(bodyBytes) != "timeline body" {
+		t.Fatalf("timeline body = %q, want %q", string(bodyBytes), "timeline body")
 	}
 }
 
@@ -544,14 +562,14 @@ func TestForwardResponsesWebsocketPreservesCompletedEvent(t *testing.T) {
 		close(data)
 		close(errCh)
 
-		var bodyLog strings.Builder
+		var timelineLog strings.Builder
 		completedOutput, err := (*OpenAIResponsesAPIHandler)(nil).forwardResponsesWebsocket(
 			ctx,
 			conn,
 			func(...interface{}) {},
 			data,
 			errCh,
-			&bodyLog,
+			&timelineLog,
 			"session-1",
 		)
 		if err != nil {
@@ -560,6 +578,10 @@ func TestForwardResponsesWebsocketPreservesCompletedEvent(t *testing.T) {
 		}
 		if gjson.GetBytes(completedOutput, "0.id").String() != "out-1" {
 			serverErrCh <- errors.New("completed output not captured")
+			return
+		}
+		if !strings.Contains(timelineLog.String(), "Event: websocket.response") {
+			serverErrCh <- errors.New("websocket timeline did not capture downstream response")
 			return
 		}
 		serverErrCh <- nil
@@ -591,6 +613,116 @@ func TestForwardResponsesWebsocketPreservesCompletedEvent(t *testing.T) {
 
 	if errServer := <-serverErrCh; errServer != nil {
 		t.Fatalf("server error: %v", errServer)
+	}
+}
+
+func TestForwardResponsesWebsocketLogsAttemptedResponseOnWriteFailure(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	serverErrCh := make(chan error, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := responsesWebsocketUpgrader.Upgrade(w, r, nil)
+		if err != nil {
+			serverErrCh <- err
+			return
+		}
+
+		ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+		ctx.Request = r
+
+		data := make(chan []byte, 1)
+		errCh := make(chan *interfaces.ErrorMessage)
+		data <- []byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"output\":[{\"type\":\"message\",\"id\":\"out-1\"}]}}\n\n")
+		close(data)
+		close(errCh)
+
+		var timelineLog strings.Builder
+		if errClose := conn.Close(); errClose != nil {
+			serverErrCh <- errClose
+			return
+		}
+
+		_, err = (*OpenAIResponsesAPIHandler)(nil).forwardResponsesWebsocket(
+			ctx,
+			conn,
+			func(...interface{}) {},
+			data,
+			errCh,
+			&timelineLog,
+			"session-1",
+		)
+		if err == nil {
+			serverErrCh <- errors.New("expected websocket write failure")
+			return
+		}
+		if !strings.Contains(timelineLog.String(), "Event: websocket.response") {
+			serverErrCh <- errors.New("websocket timeline did not capture attempted downstream response")
+			return
+		}
+		if !strings.Contains(timelineLog.String(), "\"type\":\"response.completed\"") {
+			serverErrCh <- errors.New("websocket timeline did not retain attempted payload")
+			return
+		}
+		serverErrCh <- nil
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer func() {
+		_ = conn.Close()
+	}()
+
+	if errServer := <-serverErrCh; errServer != nil {
+		t.Fatalf("server error: %v", errServer)
+	}
+}
+
+func TestResponsesWebsocketTimelineRecordsDisconnectEvent(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	h := NewOpenAIResponsesAPIHandler(base)
+
+	timelineCh := make(chan string, 1)
+	router := gin.New()
+	router.GET("/v1/responses/ws", func(c *gin.Context) {
+		h.ResponsesWebsocket(c)
+		timeline := ""
+		if value, exists := c.Get(wsTimelineBodyKey); exists {
+			if body, ok := value.([]byte); ok {
+				timeline = string(body)
+			}
+		}
+		timelineCh <- timeline
+	})
+
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/responses/ws"
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+
+	closePayload := websocket.FormatCloseMessage(websocket.CloseGoingAway, "client closing")
+	if err = conn.WriteControl(websocket.CloseMessage, closePayload, time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("write close control: %v", err)
+	}
+	_ = conn.Close()
+
+	select {
+	case timeline := <-timelineCh:
+		if !strings.Contains(timeline, "Event: websocket.disconnect") {
+			t.Fatalf("websocket timeline missing disconnect event: %s", timeline)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for websocket timeline")
 	}
 }
 

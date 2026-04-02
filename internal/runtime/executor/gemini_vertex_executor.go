@@ -18,6 +18,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
@@ -363,6 +364,11 @@ func (e *GeminiVertexExecutor) executeWithServiceAccount(ctx context.Context, au
 		return resp, statusErr{code: 500, msg: "internal server error"}
 	}
 	applyGeminiHeaders(httpReq, auth)
+	var attrs map[string]string
+	if auth != nil {
+		attrs = auth.Attributes
+	}
+	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
 
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
@@ -478,6 +484,11 @@ func (e *GeminiVertexExecutor) executeWithAPIKey(ctx context.Context, auth *clip
 		httpReq.Header.Set("x-goog-api-key", apiKey)
 	}
 	applyGeminiHeaders(httpReq, auth)
+	var attrs map[string]string
+	if auth != nil {
+		attrs = auth.Attributes
+	}
+	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
 
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
@@ -582,6 +593,11 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Conte
 		return nil, statusErr{code: 500, msg: "internal server error"}
 	}
 	applyGeminiHeaders(httpReq, auth)
+	var attrs map[string]string
+	if auth != nil {
+		attrs = auth.Attributes
+	}
+	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
 
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
@@ -706,6 +722,11 @@ func (e *GeminiVertexExecutor) executeStreamWithAPIKey(ctx context.Context, auth
 		httpReq.Header.Set("x-goog-api-key", apiKey)
 	}
 	applyGeminiHeaders(httpReq, auth)
+	var attrs map[string]string
+	if auth != nil {
+		attrs = auth.Attributes
+	}
+	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
 
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
@@ -813,6 +834,11 @@ func (e *GeminiVertexExecutor) countTokensWithServiceAccount(ctx context.Context
 		return cliproxyexecutor.Response{}, statusErr{code: 500, msg: "internal server error"}
 	}
 	applyGeminiHeaders(httpReq, auth)
+	var attrs map[string]string
+	if auth != nil {
+		attrs = auth.Attributes
+	}
+	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
 
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
@@ -897,6 +923,11 @@ func (e *GeminiVertexExecutor) countTokensWithAPIKey(ctx context.Context, auth *
 		httpReq.Header.Set("x-goog-api-key", apiKey)
 	}
 	applyGeminiHeaders(httpReq, auth)
+	var attrs map[string]string
+	if auth != nil {
+		attrs = auth.Attributes
+	}
+	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
 
 	var authID, authLabel, authType, authValue string
 	if auth != nil {

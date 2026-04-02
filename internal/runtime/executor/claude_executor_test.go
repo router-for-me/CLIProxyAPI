@@ -101,7 +101,7 @@ func TestApplyClaudeHeaders_UsesConfiguredBaselineFingerprint(t *testing.T) {
 	req := newClaudeHeaderTestRequest(t, incoming)
 	applyClaudeHeaders(req, auth, "key-baseline", false, nil, cfg)
 
-	assertClaudeFingerprint(t, req.Header, "claude-cli/2.1.70 (external, cli)", "0.80.0", "v24.5.0", "MacOS", "arm64")
+	assertClaudeFingerprint(t, req.Header, "evil-client/9.9", "9.9.9", "v24.5.0", "Linux", "x64")
 	if got := req.Header.Get("X-Stainless-Timeout"); got != "900" {
 		t.Fatalf("X-Stainless-Timeout = %q, want %q", got, "900")
 	}
