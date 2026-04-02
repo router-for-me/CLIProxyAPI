@@ -1,4 +1,4 @@
-package executor
+package helps
 
 import "github.com/tidwall/gjson"
 
@@ -17,7 +17,7 @@ func newClaudeBuiltinToolRegistry() map[string]bool {
 	return registry
 }
 
-func augmentClaudeBuiltinToolRegistry(body []byte, registry map[string]bool) map[string]bool {
+func AugmentClaudeBuiltinToolRegistry(body []byte, registry map[string]bool) map[string]bool {
 	if registry == nil {
 		registry = newClaudeBuiltinToolRegistry()
 	}

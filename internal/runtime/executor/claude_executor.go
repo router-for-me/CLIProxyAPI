@@ -953,7 +953,7 @@ func applyClaudeToolPrefix(body []byte, prefix string) []byte {
 
 	// Collect built-in tool names from the authoritative fallback seed list and
 	// augment it with any typed built-ins present in the current request body.
-	builtinTools := augmentClaudeBuiltinToolRegistry(body, nil)
+	builtinTools := helps.AugmentClaudeBuiltinToolRegistry(body, nil)
 
 	if tools := gjson.GetBytes(body, "tools"); tools.Exists() && tools.IsArray() {
 		tools.ForEach(func(index, tool gjson.Result) bool {
