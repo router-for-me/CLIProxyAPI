@@ -85,10 +85,7 @@ type modelStats struct {
 	TotalRequests int64
 	TotalTokens   int64
 	Details       []RequestDetail
-	DetailsHead   int
 }
-
-const maxRequestDetailsPerModel = 512
 
 // RequestDetail stores the timestamp, latency, and token usage for a single request.
 type RequestDetail struct {
@@ -225,40 +222,7 @@ func (s *RequestStatistics) updateAPIStats(stats *apiStats, model string, detail
 	}
 	modelStatsValue.TotalRequests++
 	modelStatsValue.TotalTokens += detail.Tokens.TotalTokens
-	appendRequestDetail(modelStatsValue, detail)
-}
-
-func appendRequestDetail(stats *modelStats, detail RequestDetail) {
-	if stats == nil {
-		return
-	}
-	if maxRequestDetailsPerModel <= 0 {
-		stats.Details = append(stats.Details, detail)
-		return
-	}
-	if len(stats.Details) < maxRequestDetailsPerModel {
-		stats.Details = append(stats.Details, detail)
-		return
-	}
-	if stats.DetailsHead < 0 || stats.DetailsHead >= len(stats.Details) {
-		stats.DetailsHead = 0
-	}
-	stats.Details[stats.DetailsHead] = detail
-	stats.DetailsHead = (stats.DetailsHead + 1) % len(stats.Details)
-}
-
-func snapshotRequestDetails(stats *modelStats) []RequestDetail {
-	if stats == nil || len(stats.Details) == 0 {
-		return nil
-	}
-	requestDetails := make([]RequestDetail, len(stats.Details))
-	if stats.DetailsHead == 0 {
-		copy(requestDetails, stats.Details)
-		return requestDetails
-	}
-	copied := copy(requestDetails, stats.Details[stats.DetailsHead:])
-	copy(requestDetails[copied:], stats.Details[:stats.DetailsHead])
-	return requestDetails
+	modelStatsValue.Details = append(modelStatsValue.Details, detail)
 }
 
 // Snapshot returns a copy of the aggregated metrics for external consumption.
@@ -284,10 +248,12 @@ func (s *RequestStatistics) Snapshot() StatisticsSnapshot {
 			Models:        make(map[string]ModelSnapshot, len(stats.Models)),
 		}
 		for modelName, modelStatsValue := range stats.Models {
+			requestDetails := make([]RequestDetail, len(modelStatsValue.Details))
+			copy(requestDetails, modelStatsValue.Details)
 			apiSnapshot.Models[modelName] = ModelSnapshot{
 				TotalRequests: modelStatsValue.TotalRequests,
 				TotalTokens:   modelStatsValue.TotalTokens,
-				Details:       snapshotRequestDetails(modelStatsValue),
+				Details:       requestDetails,
 			}
 		}
 		result.APIs[apiName] = apiSnapshot
@@ -343,7 +309,7 @@ func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot) MergeResu
 			if modelStatsValue == nil {
 				continue
 			}
-			for _, detail := range snapshotRequestDetails(modelStatsValue) {
+			for _, detail := range modelStatsValue.Details {
 				seen[dedupKey(apiName, modelName, detail)] = struct{}{}
 			}
 		}
