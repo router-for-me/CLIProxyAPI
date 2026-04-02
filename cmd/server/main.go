@@ -397,6 +397,8 @@ func main() {
 		cfg = &config.Config{}
 	}
 
+	usagePersistencePath := resolveUsagePersistencePath(configFilePath, wd)
+
 	// In cloud deploy mode, check if we have a valid configuration
 	var configFileExists bool
 	if isCloudDeploy {
@@ -418,6 +420,18 @@ func main() {
 		}
 	}
 	usage.SetStatisticsEnabled(cfg.UsageStatisticsEnabled)
+	usagePersistence, err := usage.StartPersistence(usage.GetRequestStatistics(), usagePersistencePath)
+	if err != nil {
+		log.Warnf("failed to start usage persistence at %s: %v", usagePersistencePath, err)
+	}
+	defer func() {
+		if usagePersistence == nil {
+			return
+		}
+		if err := usagePersistence.Stop(); err != nil {
+			log.Errorf("failed to flush usage statistics: %v", err)
+		}
+	}()
 	coreauth.SetQuotaCooldownDisabled(cfg.DisableCooling)
 
 	if err = logging.ConfigureLogOutput(cfg); err != nil {
@@ -581,4 +595,12 @@ func main() {
 			cmd.StartService(cfg, configFilePath, password)
 		}
 	}
+}
+
+func resolveUsagePersistencePath(configFilePath, fallbackDir string) string {
+	baseDir := strings.TrimSpace(filepath.Dir(configFilePath))
+	if baseDir == "." || baseDir == "" {
+		baseDir = fallbackDir
+	}
+	return filepath.Join(baseDir, "stats", "usage-statistics.json")
 }

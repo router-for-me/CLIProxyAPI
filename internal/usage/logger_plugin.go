@@ -71,6 +71,8 @@ type RequestStatistics struct {
 	requestsByHour map[int]int64
 	tokensByDay    map[string]int64
 	tokensByHour   map[int]int64
+
+	onChange func()
 }
 
 // apiStats holds aggregated metrics for a single API key.
@@ -182,8 +184,6 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 	hourKey := timestamp.Hour()
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	s.totalRequests++
 	if success {
 		s.successCount++
@@ -210,6 +210,13 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 	s.requestsByHour[hourKey]++
 	s.tokensByDay[dayKey] += totalTokens
 	s.tokensByHour[hourKey] += totalTokens
+
+	changeHook := s.onChange
+	s.mu.Unlock()
+
+	if changeHook != nil {
+		changeHook()
+	}
 }
 
 func (s *RequestStatistics) updateAPIStats(stats *apiStats, model string, detail RequestDetail) {
@@ -298,7 +305,6 @@ func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot) MergeResu
 	}
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	seen := make(map[string]struct{})
 	for apiName, stats := range s.apis {
@@ -352,7 +358,24 @@ func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot) MergeResu
 		}
 	}
 
+	changeHook := s.onChange
+	s.mu.Unlock()
+
+	if result.Added > 0 && changeHook != nil {
+		changeHook()
+	}
+
 	return result
+}
+
+// SetChangeHook registers a callback that is invoked whenever the statistics store changes.
+func (s *RequestStatistics) SetChangeHook(hook func()) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onChange = hook
 }
 
 func (s *RequestStatistics) recordImported(apiName, modelName string, stats *apiStats, detail RequestDetail) {
