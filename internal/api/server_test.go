@@ -222,6 +222,8 @@ func TestDefaultRequestLoggerFactory_UsesResolvedLogDirectory(t *testing.T) {
 		nil,
 		nil,
 		nil,
+		nil,
+		nil,
 		true,
 		"issue-1711",
 		time.Now(),
