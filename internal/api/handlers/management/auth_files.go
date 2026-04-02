@@ -464,6 +464,24 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 			}
 		}
 	}
+	// Expose enable_1m_context from Attributes (set by synthesizer or PatchAuthFileFields).
+	// Fall back to Metadata for auths registered via UploadAuthFile (no synthesizer).
+	var is1MEnabled bool
+	if v := strings.TrimSpace(authAttribute(auth, "enable_1m_context")); v != "" {
+		is1MEnabled, _ = strconv.ParseBool(v)
+	} else if auth.Metadata != nil {
+		if val, ok := auth.Metadata["enable_1m_context"]; ok {
+			switch v := val.(type) {
+			case bool:
+				is1MEnabled = v
+			case string:
+				is1MEnabled, _ = strconv.ParseBool(strings.TrimSpace(v))
+			}
+		}
+	}
+	if is1MEnabled {
+		entry["enable_1m_context"] = true
+	}
 	return entry
 }
 
@@ -1119,7 +1137,7 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "disabled": *req.Disabled})
 }
 
-// PatchAuthFileFields updates editable fields (prefix, proxy_url, priority, note) of an auth file.
+// PatchAuthFileFields updates editable fields (prefix, proxy_url, priority, note, enable_1m_context) of an auth file.
 func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 	if h.authManager == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
@@ -1127,11 +1145,12 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 	}
 
 	var req struct {
-		Name     string  `json:"name"`
-		Prefix   *string `json:"prefix"`
-		ProxyURL *string `json:"proxy_url"`
-		Priority *int    `json:"priority"`
-		Note     *string `json:"note"`
+		Name            string  `json:"name"`
+		Prefix          *string `json:"prefix"`
+		ProxyURL        *string `json:"proxy_url"`
+		Priority        *int    `json:"priority"`
+		Note            *string `json:"note"`
+		Enable1MContext *bool   `json:"enable_1m_context"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
@@ -1200,6 +1219,22 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 				targetAuth.Metadata["note"] = trimmedNote
 				targetAuth.Attributes["note"] = trimmedNote
 			}
+		}
+		changed = true
+	}
+	if req.Enable1MContext != nil {
+		if targetAuth.Metadata == nil {
+			targetAuth.Metadata = make(map[string]any)
+		}
+		if targetAuth.Attributes == nil {
+			targetAuth.Attributes = make(map[string]string)
+		}
+		if *req.Enable1MContext {
+			targetAuth.Metadata["enable_1m_context"] = true
+			targetAuth.Attributes["enable_1m_context"] = "true"
+		} else {
+			delete(targetAuth.Metadata, "enable_1m_context")
+			delete(targetAuth.Attributes, "enable_1m_context")
 		}
 		changed = true
 	}

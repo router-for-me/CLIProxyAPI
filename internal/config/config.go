@@ -126,6 +126,10 @@ type Config struct {
 	// Payload defines default and override rules for provider payload parameters.
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
 
+	// Claude1MContext controls the context-1m-2025-08-07 Anthropic Beta feature.
+	// When enabled, the 1M context beta header is added to requests for accounts
+	// that have enable_1m_context set in their auth file, limited to the listed models.
+	Claude1MContext Claude1MContext `yaml:"claude-1m-context" json:"claude-1m-context"`
 	legacyMigrationPending bool `yaml:"-" json:"-"`
 }
 
@@ -142,6 +146,18 @@ type ClaudeHeaderDefaults struct {
 	Arch                   string `yaml:"arch" json:"arch"`
 	Timeout                string `yaml:"timeout" json:"timeout"`
 	StabilizeDeviceProfile *bool  `yaml:"stabilize-device-profile,omitempty" json:"stabilize-device-profile,omitempty"`
+}
+
+// Claude1MContext controls the context-1m-2025-08-07 Anthropic Beta feature.
+// When Enabled is true and a per-account toggle is on, the 1M context beta header
+// is added to matching requests. Models lists the model names that support 1M context;
+// an empty list means all models are allowed.
+type Claude1MContext struct {
+	// Enabled is the global toggle. When false, 1M context is never applied.
+	Enabled bool `yaml:"enabled" json:"enabled"`
+	// Models lists model names that support 1M context (e.g. claude-opus-4-6, claude-sonnet-4-6).
+	// An empty list means all models are allowed when the per-account toggle is on.
+	Models []string `yaml:"models" json:"models"`
 }
 
 // CodexHeaderDefaults configures fallback header values injected into Codex

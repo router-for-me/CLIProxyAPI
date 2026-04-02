@@ -14,6 +14,7 @@ import (
 	"io"
 	"net/http"
 	"net/textproto"
+	"strconv"
 	"strings"
 	"time"
 
@@ -169,7 +170,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if err != nil {
 		return resp, err
 	}
-	applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg)
+	applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg, baseModel)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -336,7 +337,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	if err != nil {
 		return nil, err
 	}
-	applyClaudeHeaders(httpReq, auth, apiKey, true, extraBetas, e.cfg)
+	applyClaudeHeaders(httpReq, auth, apiKey, true, extraBetas, e.cfg, baseModel)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -503,7 +504,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
-	applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg)
+	applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg, baseModel)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -780,7 +781,7 @@ func decodeResponseBody(body io.ReadCloser, contentEncoding string) (io.ReadClos
 	return body, nil
 }
 
-func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string, stream bool, extraBetas []string, cfg *config.Config) {
+func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string, stream bool, extraBetas []string, cfg *config.Config, model string) {
 	hdrDefault := func(cfgVal, fallback string) string {
 		if cfgVal != "" {
 			return cfgVal
@@ -821,15 +822,20 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 		}
 	}
 
+	// Determine whether to include the 1M context beta.
+	// Three ways to enable:
+	//   1. Client sends X-CPA-CLAUDE-1M header (explicit override)
+	//   2. Config claude-1m-context.enabled + per-account enable_1m_context attribute + model whitelist
 	hasClaude1MHeader := false
 	if ginHeaders != nil {
 		if _, ok := ginHeaders[textproto.CanonicalMIMEHeaderKey("X-CPA-CLAUDE-1M")]; ok {
 			hasClaude1MHeader = true
 		}
 	}
+	want1M := hasClaude1MHeader || should1MContext(auth, cfg, model)
 
 	// Merge extra betas from request body and request flags.
-	if len(extraBetas) > 0 || hasClaude1MHeader {
+	if len(extraBetas) > 0 || want1M {
 		existingSet := make(map[string]bool)
 		for _, b := range strings.Split(baseBetas, ",") {
 			betaName := strings.TrimSpace(b)
@@ -844,7 +850,7 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 				existingSet[beta] = true
 			}
 		}
-		if hasClaude1MHeader && !existingSet["context-1m-2025-08-07"] {
+		if want1M && !existingSet["context-1m-2025-08-07"] {
 			baseBetas += ",context-1m-2025-08-07"
 		}
 	}
@@ -888,6 +894,55 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	if stream {
 		r.Header.Set("Accept-Encoding", "identity")
 	}
+}
+
+// should1MContext checks whether the 1M context beta should be enabled for this
+// auth + model combination based on config and per-account settings.
+func should1MContext(auth *cliproxyauth.Auth, cfg *config.Config, model string) bool {
+	if cfg == nil || !cfg.Claude1MContext.Enabled {
+		return false
+	}
+	if auth == nil {
+		return false
+	}
+	// Check Attributes first (set by synthesizer / PatchAuthFileFields),
+	// then fall back to Metadata only when the attribute key is absent
+	// (set by UploadAuthFile / registerAuthFromFile).
+	// An explicit Attributes value (including "false") is authoritative.
+	enabled := false
+	if auth.Attributes != nil {
+		if attrVal, hasAttr := auth.Attributes["enable_1m_context"]; hasAttr {
+			enabled, _ = strconv.ParseBool(strings.TrimSpace(attrVal))
+		} else if auth.Metadata != nil {
+			switch v := auth.Metadata["enable_1m_context"].(type) {
+			case bool:
+				enabled = v
+			case string:
+				enabled, _ = strconv.ParseBool(strings.TrimSpace(v))
+			}
+		}
+	} else if auth.Metadata != nil {
+		switch v := auth.Metadata["enable_1m_context"].(type) {
+		case bool:
+			enabled = v
+		case string:
+			enabled, _ = strconv.ParseBool(strings.TrimSpace(v))
+		}
+	}
+	if !enabled {
+		return false
+	}
+	// If models whitelist is empty, allow all models.
+	if len(cfg.Claude1MContext.Models) == 0 {
+		return true
+	}
+	// Check if the request model is in the whitelist.
+	modelsMap := make(map[string]struct{}, len(cfg.Claude1MContext.Models))
+	for _, m := range cfg.Claude1MContext.Models {
+		modelsMap[strings.ToLower(strings.TrimSpace(m))] = struct{}{}
+	}
+	_, ok := modelsMap[strings.ToLower(model)]
+	return ok
 }
 
 func claudeCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {

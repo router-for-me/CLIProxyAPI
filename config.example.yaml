@@ -191,6 +191,16 @@ nonstream-keepalive-interval: 0
 #   timeout: "600"
 #   stabilize-device-profile: false  # optional, default false; set true to enable per-auth/API-key fingerprint pinning
 
+# Claude 1M context beta control.
+# When enabled, the context-1m-2025-08-07 Anthropic Beta header is added per account.
+# Each Claude auth file must also have "enable_1m_context": true to opt in.
+# Models lists which models support 1M context; leave empty to allow all.
+# claude-1m-context:
+#   enabled: true
+#   models:
+#     - claude-opus-4-6
+#     - claude-sonnet-4-6
+
 # Default headers for Codex OAuth model requests.
 # These are used only for file-backed/OAuth Codex requests when the client
 # does not send the header. `user-agent` applies to HTTP and websocket requests;
