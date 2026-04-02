@@ -427,7 +427,6 @@ func (l *FileRequestLogger) ensureTempDir() (string, error) {
 		if i > 0 {
 			log.WithField("temp_dir", resolved).Warn("request logger: using fallback temp directory")
 		}
-		l.tempDir = resolved
 		return resolved, nil
 	}
 

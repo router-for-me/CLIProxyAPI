@@ -182,6 +182,9 @@ func TestLogStreamingRequestFallsBackWhenPrimaryTempDirUnavailable(t *testing.T)
 	if !strings.HasPrefix(writer.responseBodyPath, fallbackDir) {
 		t.Fatalf("expected response temp file under fallback dir %s, got %s", fallbackDir, writer.responseBodyPath)
 	}
+	if logger.tempDir != blockedPath {
+		t.Fatalf("expected preferred temp dir to remain unchanged, got %s", logger.tempDir)
+	}
 
 	if err := writer.WriteStatus(200, map[string][]string{"Content-Type": {"text/event-stream"}}); err != nil {
 		t.Fatalf("WriteStatus: %v", err)
