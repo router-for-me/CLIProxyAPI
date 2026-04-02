@@ -1,4 +1,4 @@
-package executor
+package helps
 
 import (
 	"regexp"
@@ -18,9 +18,9 @@ type SensitiveWordMatcher struct {
 	regex *regexp.Regexp
 }
 
-// buildSensitiveWordMatcher compiles a regex from the word list.
+// BuildSensitiveWordMatcher compiles a regex from the word list.
 // Words are sorted by length (longest first) for proper matching.
-func buildSensitiveWordMatcher(words []string) *SensitiveWordMatcher {
+func BuildSensitiveWordMatcher(words []string) *SensitiveWordMatcher {
 	if len(words) == 0 {
 		return nil
 	}
@@ -81,9 +81,9 @@ func (m *SensitiveWordMatcher) obfuscateText(text string) string {
 	return m.regex.ReplaceAllStringFunc(text, obfuscateWord)
 }
 
-// obfuscateSensitiveWords processes the payload and obfuscates sensitive words
+// ObfuscateSensitiveWords processes the payload and obfuscates sensitive words
 // in system blocks and message content.
-func obfuscateSensitiveWords(payload []byte, matcher *SensitiveWordMatcher) []byte {
+func ObfuscateSensitiveWords(payload []byte, matcher *SensitiveWordMatcher) []byte {
 	if matcher == nil || matcher.regex == nil {
 		return payload
 	}

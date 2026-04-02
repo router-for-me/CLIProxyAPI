@@ -335,6 +335,7 @@ func (s *Service) applyCoreAuthRemoval(ctx context.Context, id string) {
 			log.Errorf("failed to disable auth %s: %v", id, err)
 		}
 		if strings.EqualFold(strings.TrimSpace(existing.Provider), "codex") {
+			executor.CloseCodexWebsocketSessionsForAuthID(existing.ID, "auth_removed")
 			s.ensureExecutorsForAuth(existing)
 		}
 	}
