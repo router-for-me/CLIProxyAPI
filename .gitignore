@@ -27,6 +27,9 @@ auths/*
 
 # Documentation
 docs/*
+!docs/macos-launcher.md
+!docs/macos-launcher_CN.md
+!docs/macos-launcher_JA.md
 AGENTS.md
 CLAUDE.md
 GEMINI.md

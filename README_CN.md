@@ -97,6 +97,7 @@ CLIProxyAPI 已内置对 [Amp CLI](https://ampcode.com) 和 Amp IDE 扩展的支
 - 高级（执行器与翻译器）：[docs/sdk-advanced_CN.md](docs/sdk-advanced_CN.md)
 - 认证: [docs/sdk-access_CN.md](docs/sdk-access_CN.md)
 - 凭据加载/更新: [docs/sdk-watcher_CN.md](docs/sdk-watcher_CN.md)
+- macOS 本地启动器方案：[docs/macos-launcher_CN.md](docs/macos-launcher_CN.md)
 - 自定义 Provider 示例：`examples/custom-provider`
 
 ## 贡献
