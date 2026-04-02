@@ -488,7 +488,7 @@ func extractCodexIDTokenClaims(auth *coreauth.Auth) gin.H {
 	}
 
 	result := gin.H{}
-	if v := strings.TrimSpace(claims.CodexAuthInfo.ChatgptAccountID); v != "" {
+	if v := strings.TrimSpace(claims.GetAccountID()); v != "" {
 		result["chatgpt_account_id"] = v
 	}
 	if v := strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType); v != "" {

@@ -97,6 +97,10 @@ func (c *JWTClaims) GetUserEmail() string {
 
 // GetAccountID extracts the user's account ID (subject) from the JWT claims.
 // It retrieves the unique identifier for the user's ChatGPT account.
+// Falls back to UserID for iOS-originated tokens which omit chatgpt_account_id.
 func (c *JWTClaims) GetAccountID() string {
-	return c.CodexAuthInfo.ChatgptAccountID
+	if c.CodexAuthInfo.ChatgptAccountID != "" {
+		return c.CodexAuthInfo.ChatgptAccountID
+	}
+	return c.CodexAuthInfo.UserID
 }
