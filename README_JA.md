@@ -72,6 +72,8 @@ GLM CODING PLANを10%割引で取得：https://z.ai/subscribe?ic=8JVLJQFSKB
 
 CLIProxyAPIガイド：[https://help.router-for.me/](https://help.router-for.me/)
 
+オプションのgitバックアップ設定ストアでは、`GITSTORE_GIT_BRANCH` は任意です。空のままにするか未設定にすると、リモートリポジトリのデフォルトブランチに従います。特定のブランチを強制したい場合のみ設定してください。
+
 ## 管理API
 
 [MANAGEMENT_API.md](https://help.router-for.me/management/api)を参照
