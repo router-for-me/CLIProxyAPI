@@ -17,19 +17,18 @@ import (
 // and to keep Amp-compatible response shapes.
 type ResponseRewriter struct {
 	gin.ResponseWriter
-	body                   *bytes.Buffer
-	originalModel          string
-	isStreaming            bool
-	suppressedContentBlock map[int]struct{}
+	body             *bytes.Buffer
+	originalModel    string
+	isStreaming      bool
+	suppressThinking bool
 }
 
 // NewResponseRewriter creates a new response rewriter for model name substitution.
 func NewResponseRewriter(w gin.ResponseWriter, originalModel string) *ResponseRewriter {
 	return &ResponseRewriter{
-		ResponseWriter:         w,
-		body:                   &bytes.Buffer{},
-		originalModel:          originalModel,
-		suppressedContentBlock: make(map[int]struct{}),
+		ResponseWriter: w,
+		body:           &bytes.Buffer{},
+		originalModel:  originalModel,
 	}
 }
 
@@ -99,7 +98,8 @@ func (rw *ResponseRewriter) Write(data []byte) (int, error) {
 	}
 
 	if rw.isStreaming {
-		n, err := rw.ResponseWriter.Write(rw.rewriteStreamChunk(data))
+		rewritten := rw.rewriteStreamChunk(data)
+		n, err := rw.ResponseWriter.Write(rewritten)
 		if err == nil {
 			if flusher, ok := rw.ResponseWriter.(http.Flusher); ok {
 				flusher.Flush()
@@ -162,19 +162,10 @@ func ensureAmpSignature(data []byte) []byte {
 	return data
 }
 
-func (rw *ResponseRewriter) markSuppressedContentBlock(index int) {
-	if rw.suppressedContentBlock == nil {
-		rw.suppressedContentBlock = make(map[int]struct{})
-	}
-	rw.suppressedContentBlock[index] = struct{}{}
-}
-
-func (rw *ResponseRewriter) isSuppressedContentBlock(index int) bool {
-	_, ok := rw.suppressedContentBlock[index]
-	return ok
-}
-
 func (rw *ResponseRewriter) suppressAmpThinking(data []byte) []byte {
+	if !rw.suppressThinking {
+		return data
+	}
 	if gjson.GetBytes(data, `content.#(type=="tool_use")`).Exists() {
 		filtered := gjson.GetBytes(data, `content.#(type!="thinking")#`)
 		if filtered.Exists() {
@@ -185,30 +176,8 @@ func (rw *ResponseRewriter) suppressAmpThinking(data []byte) []byte {
 				data, err = sjson.SetBytes(data, "content", filtered.Value())
 				if err != nil {
 					log.Warnf("Amp ResponseRewriter: failed to suppress thinking blocks: %v", err)
-				} else {
-					log.Debugf("Amp ResponseRewriter: Suppressed %d thinking blocks due to tool usage", originalCount-filteredCount)
 				}
 			}
-		}
-	}
-
-	eventType := gjson.GetBytes(data, "type").String()
-	indexResult := gjson.GetBytes(data, "index")
-	if eventType == "content_block_start" && gjson.GetBytes(data, "content_block.type").String() == "thinking" && indexResult.Exists() {
-		rw.markSuppressedContentBlock(int(indexResult.Int()))
-		return nil
-	}
-	if gjson.GetBytes(data, "delta.type").String() == "thinking_delta" {
-		if indexResult.Exists() {
-			rw.markSuppressedContentBlock(int(indexResult.Int()))
-		}
-		return nil
-	}
-	if eventType == "content_block_stop" && indexResult.Exists() {
-		index := int(indexResult.Int())
-		if rw.isSuppressedContentBlock(index) {
-			delete(rw.suppressedContentBlock, index)
-			return nil
 		}
 	}
 
@@ -262,6 +231,10 @@ func (rw *ResponseRewriter) rewriteStreamChunk(chunk []byte) []byte {
 				jsonData := bytes.TrimPrefix(bytes.TrimSpace(lines[dataIdx]), []byte("data: "))
 				if len(jsonData) > 0 && jsonData[0] == '{' {
 					rewritten := rw.rewriteStreamEvent(jsonData)
+					if rewritten == nil {
+						i = dataIdx + 1
+						continue
+					}
 					// Emit event line
 					out = append(out, line)
 					// Emit blank lines between event and data
@@ -287,7 +260,9 @@ func (rw *ResponseRewriter) rewriteStreamChunk(chunk []byte) []byte {
 			jsonData := bytes.TrimPrefix(trimmed, []byte("data: "))
 			if len(jsonData) > 0 && jsonData[0] == '{' {
 				rewritten := rw.rewriteStreamEvent(jsonData)
-				out = append(out, append([]byte("data: "), rewritten...))
+				if rewritten != nil {
+					out = append(out, append([]byte("data: "), rewritten...))
+				}
 				i++
 				continue
 			}

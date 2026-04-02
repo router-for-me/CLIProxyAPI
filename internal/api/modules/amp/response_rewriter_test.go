@@ -102,7 +102,7 @@ func TestRewriteStreamChunk_MessageModel(t *testing.T) {
 }
 
 func TestRewriteStreamChunk_PreservesThinkingWithSignatureInjection(t *testing.T) {
-	rw := &ResponseRewriter{suppressedContentBlock: make(map[int]struct{})}
+	rw := &ResponseRewriter{}
 
 	chunk := []byte("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"abc\"}}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"name\":\"bash\",\"input\":{}}}\n\n")
 	result := rw.rewriteStreamChunk(chunk)
