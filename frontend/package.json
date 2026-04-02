@@ -19,6 +19,7 @@
     "chart.js": "^4.5.1",
     "i18next": "^25.7.1",
     "motion": "^12.34.3",
+    "otpauth": "^9.5.0",
     "react": "^19.2.1",
     "react-chartjs-2": "^5.3.1",
     "react-dom": "^19.2.1",

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import * as OTPAuth from 'otpauth';
 import { useHeaderRefresh } from '@/hooks/useHeaderRefresh';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
@@ -13,6 +14,31 @@ import { useProxiesData } from '@/features/accountPool/hooks/useProxiesData';
 import { useGroupRunsData } from '@/features/accountPool/hooks/useGroupsData';
 import { accountPoolApi } from '@/services/api/accountPool';
 import { useNotificationStore } from '@/stores/useNotificationStore';
+
+function CopyOTPButton({ secret }: { secret: string }) {
+  const [copied, setCopied] = useState(false);
+  const handleCopy = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    try {
+      const totp = new OTPAuth.TOTP({
+        secret: OTPAuth.Secret.fromBase32(secret.replace(/\s+/g, '').toUpperCase()),
+        digits: 6, period: 30, algorithm: 'SHA1',
+      });
+      await navigator.clipboard.writeText(totp.generate());
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch { /* ignore */ }
+  };
+  return (
+    <button onClick={handleCopy} title="Copy OTP code" style={{
+      border: 'none', background: 'none', cursor: 'pointer', padding: '2px 4px',
+      fontSize: '12px', color: copied ? 'var(--success-color, #22c55e)' : 'var(--text-secondary)',
+      borderRadius: '3px', lineHeight: 1,
+    }}>
+      {copied ? '\u2713' : '\u2398'}
+    </button>
+  );
+}
 
 type TabKey = 'members' | 'leaders' | 'proxies' | 'group-runs';
 
@@ -409,11 +435,20 @@ export function AccountPoolPage() {
                                   {expandedRun.leader.password.slice(0, 3)}***
                                   <CopyButton value={expandedRun.leader.password} />
                                 </span>
-                                <span style={{ color: 'var(--text-secondary)', marginRight: '4px' }}>totp:</span>
-                                <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', fontFamily: 'monospace' }}>
-                                  {expandedRun.leader.totp_secret.slice(0, 4)}***
-                                  <CopyButton value={expandedRun.leader.totp_secret} />
+                                <span style={{ color: 'var(--text-secondary)', marginRight: '4px' }}>otp:</span>
+                                <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', fontFamily: 'monospace', marginRight: '12px' }}>
+                                  ••••••
+                                  <CopyOTPButton secret={expandedRun.leader.totp_secret} />
                                 </span>
+                                {expandedRun.leader.proxy && (
+                                  <>
+                                    <span style={{ color: 'var(--text-secondary)', marginRight: '4px' }}>proxy:</span>
+                                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', fontFamily: 'monospace', fontSize: '11px' }}>
+                                      {expandedRun.leader.proxy.replace(/\/\/.*@/, '//***@')}
+                                      <CopyButton value={expandedRun.leader.proxy} />
+                                    </span>
+                                  </>
+                                )}
                               </div>
                               {/* Members table */}
                               {expandedRun.members && expandedRun.members.length > 0 ? (
@@ -423,6 +458,7 @@ export function AccountPoolPage() {
                                       <th style={{ ...cellStyle, fontWeight: 600, textAlign: 'left', fontSize: '12px', paddingLeft: '40px' }}>Email</th>
                                       <th style={{ ...cellStyle, fontWeight: 600, textAlign: 'left', fontSize: '12px' }}>Password</th>
                                       <th style={{ ...cellStyle, fontWeight: 600, textAlign: 'left', fontSize: '12px' }}>TOTP</th>
+                                      <th style={{ ...cellStyle, fontWeight: 600, textAlign: 'left', fontSize: '12px' }}>Proxy</th>
                                       <th style={{ ...cellStyle, fontWeight: 600, textAlign: 'left', fontSize: '12px' }}>Port</th>
                                       <th style={{ ...cellStyle, fontWeight: 600, textAlign: 'left', fontSize: '12px' }}>Status</th>
                                       <th style={{ ...cellStyle, fontWeight: 600, textAlign: 'left', fontSize: '12px' }}>Message</th>
@@ -445,9 +481,17 @@ export function AccountPoolPage() {
                                         </td>
                                         <td style={{ ...cellStyle, fontFamily: 'monospace', fontSize: '12px' }}>
                                           <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
-                                            {m.totp_secret.slice(0, 4)}***
-                                            <CopyButton value={m.totp_secret} />
+                                            ••••••
+                                            <CopyOTPButton secret={m.totp_secret} />
                                           </span>
+                                        </td>
+                                        <td style={{ ...cellStyle, fontFamily: 'monospace', fontSize: '11px', maxWidth: '200px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                          {m.proxy ? (
+                                            <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                                              {m.proxy.replace(/\/\/.*@/, '//***@')}
+                                              <CopyButton value={m.proxy} />
+                                            </span>
+                                          ) : '-'}
                                         </td>
                                         <td style={{ ...cellStyle, fontSize: '12px', fontFamily: 'monospace' }}>{m.port || '-'}</td>
                                         <td style={cellStyle}><StatusBadge status={m.status} /></td>
