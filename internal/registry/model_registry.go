@@ -87,26 +87,26 @@ type ThinkingSupport struct {
 type CircuitBreakerState string
 
 const (
-	CircuitClosed CircuitBreakerState = "closed"
-	CircuitOpen   CircuitBreakerState = "open"
+	CircuitClosed   CircuitBreakerState = "closed"
+	CircuitOpen     CircuitBreakerState = "open"
 	CircuitHalfOpen CircuitBreakerState = "half-open"
 )
 
 // failureTracker tracks consecutive failures for circuit breaker logic.
 type failureTracker struct {
-	Count        int               `json:"count"`
-	LastFailure  time.Time         `json:"lastFailure"`
+	Count        int                 `json:"count"`
+	LastFailure  time.Time           `json:"lastFailure"`
 	State        CircuitBreakerState `json:"state"`
-	RecoveryAt   time.Time         `json:"recoveryAt"`
-	FailureCount int               `json:"failureCount"`
+	RecoveryAt   time.Time           `json:"recoveryAt"`
+	FailureCount int                 `json:"failureCount"`
 }
 
 // CircuitBreakerStatus describes the current circuit breaker state for a client-model pair.
 type CircuitBreakerStatus struct {
-	State       CircuitBreakerState `json:"state"`
-	FailureCount int               `json:"failureCount"`
-	LastFailure  time.Time          `json:"lastFailure"`
-	RecoveryAt   time.Time         `json:"recoveryAt,omitempty"`
+	State        CircuitBreakerState `json:"state"`
+	FailureCount int                 `json:"failureCount"`
+	LastFailure  time.Time           `json:"lastFailure"`
+	RecoveryAt   time.Time           `json:"recoveryAt,omitempty"`
 }
 
 // ModelRegistration tracks a model's availability
@@ -755,6 +755,32 @@ func (r *ModelRegistry) ResumeClientModel(clientID, modelID string) {
 const DefaultCircuitBreakerFailureThreshold = 3
 const DefaultCircuitBreakerRecoveryTimeoutSec = 120
 const defaultCircuitBreakerRecoveryTimeout = time.Duration(DefaultCircuitBreakerRecoveryTimeoutSec) * time.Second
+const maxCircuitBreakerRecoveryDuration = time.Duration(1<<63 - 1)
+
+func normalizeCircuitBreakerBaseTimeoutSec(recoveryTimeoutSec int) int {
+	if recoveryTimeoutSec <= 0 {
+		return DefaultCircuitBreakerRecoveryTimeoutSec
+	}
+	return recoveryTimeoutSec
+}
+
+func computeCircuitBreakerRecoveryDuration(baseTimeoutSec, failureCount int) time.Duration {
+	base := time.Duration(normalizeCircuitBreakerBaseTimeoutSec(baseTimeoutSec)) * time.Second
+	if failureCount <= 1 {
+		return base
+	}
+
+	// Exponential backoff with saturation to avoid duration overflow.
+	scaled := base
+	for i := 1; i < failureCount; i++ {
+		if scaled > maxCircuitBreakerRecoveryDuration/2 {
+			log.Warnf("Circuit breaker recovery duration overflow (base=%ds, failureCount=%d), saturating to max duration", baseTimeoutSec, failureCount)
+			return maxCircuitBreakerRecoveryDuration
+		}
+		scaled *= 2
+	}
+	return scaled
+}
 
 func (r *ModelRegistry) RecordFailure(clientID, modelID string, threshold int, recoveryTimeoutSec int) {
 	if clientID == "" || modelID == "" || threshold <= 0 {
@@ -777,17 +803,14 @@ func (r *ModelRegistry) RecordFailure(clientID, modelID string, threshold int, r
 		tracker = &failureTracker{State: CircuitClosed}
 		registration.CircuitBreakerClients[clientID] = tracker
 	}
+	baseTimeoutSec := normalizeCircuitBreakerBaseTimeoutSec(recoveryTimeoutSec)
 	if tracker.State == CircuitClosed {
 		tracker.Count++
 		tracker.LastFailure = now
 		if tracker.Count >= threshold {
 			tracker.State = CircuitOpen
-			timeout := recoveryTimeoutSec
-			if timeout <= 0 {
-				timeout = DefaultCircuitBreakerRecoveryTimeoutSec
-			}
-			tracker.RecoveryAt = now.Add(time.Duration(timeout) * time.Second)
-			tracker.FailureCount++
+			tracker.FailureCount = 1
+			tracker.RecoveryAt = now.Add(computeCircuitBreakerRecoveryDuration(baseTimeoutSec, tracker.FailureCount))
 			r.invalidateAvailableModelsCacheLocked()
 			log.Debugf("Circuit breaker OPENED for client %s, model %s (failures=%d, failureCount=%d, recoveryAt=%s)",
 				clientID, modelID, tracker.Count, tracker.FailureCount, tracker.RecoveryAt.Format(time.RFC3339))
@@ -801,22 +824,18 @@ func (r *ModelRegistry) RecordFailure(clientID, modelID string, threshold int, r
 		log.Debugf("Circuit breaker HALF-OPEN for client %s, model %s", clientID, modelID)
 		return
 	} else if tracker.State == CircuitHalfOpen {
+		// Any failure in half-open state immediately re-opens the circuit with an increased backoff window.
 		tracker.Count++
 		tracker.LastFailure = now
-		if tracker.Count >= threshold {
-			timeout := recoveryTimeoutSec * (1 << (tracker.FailureCount - 1))
-			if timeout <= 0 {
-				timeout = DefaultCircuitBreakerRecoveryTimeoutSec
-			}
-			if timeout > 3600 {
-				timeout = 3600
-			}
-			tracker.State = CircuitOpen
-			tracker.RecoveryAt = now.Add(time.Duration(timeout) * time.Second)
-			r.invalidateAvailableModelsCacheLocked()
-			log.Debugf("Circuit breaker re-OPENED for client %s, model %s (failureCount=%d, recoveryAt=%s)",
-				clientID, modelID, tracker.FailureCount, tracker.RecoveryAt.Format(time.RFC3339))
+		if tracker.FailureCount < 1 {
+			tracker.FailureCount = 1
 		}
+		tracker.FailureCount++
+		tracker.State = CircuitOpen
+		tracker.RecoveryAt = now.Add(computeCircuitBreakerRecoveryDuration(baseTimeoutSec, tracker.FailureCount))
+		r.invalidateAvailableModelsCacheLocked()
+		log.Debugf("Circuit breaker re-OPENED for client %s, model %s (failureCount=%d, recoveryAt=%s)",
+			clientID, modelID, tracker.FailureCount, tracker.RecoveryAt.Format(time.RFC3339))
 	}
 }
 
@@ -839,6 +858,8 @@ func (r *ModelRegistry) RecordSuccess(clientID, modelID string) {
 	if tracker.State == CircuitHalfOpen {
 		tracker.State = CircuitClosed
 		tracker.Count = 0
+		tracker.FailureCount = 0
+		tracker.RecoveryAt = time.Time{}
 		r.invalidateAvailableModelsCacheLocked()
 		log.Debugf("Circuit breaker CLOSED (recovery success) for client %s, model %s", clientID, modelID)
 	} else {
