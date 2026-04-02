@@ -18,6 +18,7 @@ import (
 
 	"github.com/joho/godotenv"
 	configaccess "github.com/router-for-me/CLIProxyAPI/v6/internal/access/config_access"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/cmd"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
@@ -26,6 +27,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/store"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/store/accountpool"
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/translator"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/tui"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
@@ -455,6 +457,21 @@ func main() {
 		sdkAuth.RegisterTokenStore(sdkAuth.NewFileTokenStore())
 	}
 
+	// Initialize account pool store when PostgreSQL is available.
+	var extraServerOpts []api.ServerOption
+	if usePostgresStore && pgStoreInst != nil {
+		apStore := accountpool.New(pgStoreInst.DB(), pgStoreInst.Schema())
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		if err := apStore.EnsureSchema(ctx); err != nil {
+			cancel()
+			log.Warnf("account pool schema init failed (feature disabled): %v", err)
+		} else {
+			cancel()
+			extraServerOpts = append(extraServerOpts, api.WithAccountPoolStore(apStore))
+			log.Info("account pool store initialized")
+		}
+	}
+
 	// Register built-in access providers before constructing services.
 	configaccess.Register(&cfg.SDKConfig)
 
@@ -531,7 +548,7 @@ func main() {
 					password = localMgmtPassword
 				}
 
-				cancel, done := cmd.StartServiceBackground(cfg, configFilePath, password)
+				cancel, done := cmd.StartServiceBackground(cfg, configFilePath, password, extraServerOpts...)
 
 				client := tui.NewClient(cfg.Port, password)
 				ready := false
@@ -576,7 +593,7 @@ func main() {
 			if !localModel {
 				registry.StartModelsUpdater(context.Background())
 			}
-			cmd.StartService(cfg, configFilePath, password)
+			cmd.StartService(cfg, configFilePath, password, extraServerOpts...)
 		}
 	}
 }

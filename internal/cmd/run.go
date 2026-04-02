@@ -24,11 +24,12 @@ import (
 //   - cfg: The application configuration
 //   - configPath: The path to the configuration file
 //   - localPassword: Optional password accepted for local management requests
-func StartService(cfg *config.Config, configPath string, localPassword string) {
+func StartService(cfg *config.Config, configPath string, localPassword string, extraOpts ...api.ServerOption) {
 	builder := cliproxy.NewBuilder().
 		WithConfig(cfg).
 		WithConfigPath(configPath).
-		WithLocalManagementPassword(localPassword)
+		WithLocalManagementPassword(localPassword).
+		WithServerOptions(extraOpts...)
 
 	ctxSignal, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
@@ -57,11 +58,12 @@ func StartService(cfg *config.Config, configPath string, localPassword string) {
 
 // StartServiceBackground starts the proxy service in a background goroutine
 // and returns a cancel function for shutdown and a done channel.
-func StartServiceBackground(cfg *config.Config, configPath string, localPassword string) (cancel func(), done <-chan struct{}) {
+func StartServiceBackground(cfg *config.Config, configPath string, localPassword string, extraOpts ...api.ServerOption) (cancel func(), done <-chan struct{}) {
 	builder := cliproxy.NewBuilder().
 		WithConfig(cfg).
 		WithConfigPath(configPath).
-		WithLocalManagementPassword(localPassword)
+		WithLocalManagementPassword(localPassword).
+		WithServerOptions(extraOpts...)
 
 	ctx, cancelFn := context.WithCancel(context.Background())
 	doneCh := make(chan struct{})
