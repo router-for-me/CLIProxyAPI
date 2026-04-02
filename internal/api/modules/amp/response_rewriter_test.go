@@ -100,23 +100,89 @@ func TestRewriteStreamChunk_MessageModel(t *testing.T) {
 	}
 }
 
-func TestRewriteStreamChunk_SuppressesThinkingContentBlockFrames(t *testing.T) {
+func TestRewriteStreamChunk_PassesThinkingBlocksWithSignatureInjection(t *testing.T) {
 	rw := &ResponseRewriter{suppressedContentBlock: make(map[int]struct{})}
 
 	chunk := []byte("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"abc\"}}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"name\":\"bash\",\"input\":{}}}\n\n")
 	result := rw.rewriteStreamChunk(chunk)
 
-	if contains(result, []byte("\"thinking\"")) || contains(result, []byte("\"thinking_delta\"")) {
-		t.Fatalf("expected thinking content_block frames to be suppressed, got %s", string(result))
+	// Thinking blocks should pass through in streaming mode
+	if !contains(result, []byte("\"thinking\"")) {
+		t.Fatalf("expected thinking content_block to pass through, got %s", string(result))
 	}
-	if contains(result, []byte("content_block_stop")) {
-		t.Fatalf("expected suppressed thinking content_block_stop to be removed, got %s", string(result))
+	if !contains(result, []byte("\"thinking_delta\"")) {
+		t.Fatalf("expected thinking_delta to pass through, got %s", string(result))
 	}
-	if !contains(result, []byte("\"tool_use\"")) {
-		t.Fatalf("expected tool_use content_block frame to remain, got %s", string(result))
-	}
+	// Thinking block should get signature injected
 	if !contains(result, []byte("\"signature\":\"\"")) {
-		t.Fatalf("expected tool_use content_block signature injection, got %s", string(result))
+		t.Fatalf("expected signature injection on thinking block, got %s", string(result))
+	}
+	// Tool use block should also pass through with signature
+	if !contains(result, []byte("\"tool_use\"")) {
+		t.Fatalf("expected tool_use content_block to remain, got %s", string(result))
+	}
+}
+
+func TestRewriteStreamChunk_ThinkingInterleavedWithContent_PreservesIndices(t *testing.T) {
+	rw := &ResponseRewriter{suppressedContentBlock: make(map[int]struct{})}
+
+	// Simulate a stream: thinking at index 0, signature at index 0, stop index 0, text at index 1, stop index 1
+	chunk := []byte(
+		"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\n" +
+			"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"let me think\"}}\n\n" +
+			"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"sig123\"}}\n\n" +
+			"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n" +
+			"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n" +
+			"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello!\"}}\n\n" +
+			"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":1}\n\n")
+	result := rw.rewriteStreamChunk(chunk)
+
+	// Both thinking (index 0) and text (index 1) should be present
+	if !contains(result, []byte("\"index\":0")) {
+		t.Fatalf("expected index 0 (thinking) to be present, got %s", string(result))
+	}
+	if !contains(result, []byte("\"index\":1")) {
+		t.Fatalf("expected index 1 (text) to be present, got %s", string(result))
+	}
+	// Verify all event types pass through
+	if !contains(result, []byte("\"thinking_delta\"")) {
+		t.Fatalf("expected thinking_delta to pass through, got %s", string(result))
+	}
+	if !contains(result, []byte("\"signature_delta\"")) {
+		t.Fatalf("expected signature_delta to pass through, got %s", string(result))
+	}
+	if !contains(result, []byte("\"text_delta\"")) {
+		t.Fatalf("expected text_delta to pass through, got %s", string(result))
+	}
+	if !contains(result, []byte("Hello!")) {
+		t.Fatalf("expected text content to pass through, got %s", string(result))
+	}
+}
+
+func TestRewriteStreamChunk_ThinkingBlockAsLastChunk(t *testing.T) {
+	rw := &ResponseRewriter{suppressedContentBlock: make(map[int]struct{})}
+
+	// Thinking block arrives as the final chunk with no subsequent content
+	chunk := []byte(
+		"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\n" +
+			"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"final thought\"}}\n\n" +
+			"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n" +
+			"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":10}}\n\n" +
+			"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+	result := rw.rewriteStreamChunk(chunk)
+
+	// Stream should terminate correctly with thinking as last content block
+	if !contains(result, []byte("\"thinking_delta\"")) {
+		t.Fatalf("expected thinking_delta to pass through, got %s", string(result))
+	}
+	if !contains(result, []byte("\"message_delta\"")) {
+		t.Fatalf("expected message_delta to be present, got %s", string(result))
+	}
+	if !contains(result, []byte("\"message_stop\"")) {
+		t.Fatalf("expected message_stop to be present, got %s", string(result))
+	}
+	if !contains(result, []byte("\"end_turn\"")) {
+		t.Fatalf("expected stop_reason end_turn, got %s", string(result))
 	}
 }
 
