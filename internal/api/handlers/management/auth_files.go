@@ -44,11 +44,13 @@ import (
 var lastRefreshKeys = []string{"last_refresh", "lastRefresh", "last_refreshed_at", "lastRefreshedAt"}
 
 const (
-	anthropicCallbackPort = 54545
-	geminiCallbackPort    = 8085
-	codexCallbackPort     = 1455
-	geminiCLIEndpoint     = "https://cloudcode-pa.googleapis.com"
-	geminiCLIVersion      = "v1internal"
+	anthropicCallbackPort       = 54545
+	geminiCallbackPort          = 8085
+	codexCallbackPort           = 1455
+	defaultAntigravityStandardPort = 55121
+	defaultAntigravityPremiumPort  = 55122
+	geminiCLIEndpoint           = "https://cloudcode-pa.googleapis.com"
+	geminiCLIVersion            = "v1internal"
 )
 
 type callbackForwarder struct {
@@ -128,6 +130,24 @@ func isWebUIRequest(c *gin.Context) bool {
 	default:
 		return false
 	}
+}
+
+func (h *Handler) resolveAntigravityWebUICallbackPort(apiPort int) int {
+	if h != nil && h.cfg != nil {
+		if apiPort == 8318 {
+			if port := h.cfg.RemoteManagement.AntigravityWebUICallbackPortPremium; port > 0 {
+				return port
+			}
+			return defaultAntigravityPremiumPort
+		}
+		if port := h.cfg.RemoteManagement.AntigravityWebUICallbackPort; port > 0 {
+			return port
+		}
+	}
+	if apiPort == 8318 {
+		return defaultAntigravityPremiumPort
+	}
+	return defaultAntigravityStandardPort
 }
 
 func startCallbackForwarder(port int, provider, targetBase string) (*callbackForwarder, error) {
@@ -1953,12 +1973,17 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 		return
 	}
 
-	redirectURI := fmt.Sprintf("http://localhost:%d/oauth-callback", antigravity.CallbackPort)
+	isWebUI := isWebUIRequest(c)
+	callbackPort := antigravity.CallbackPort
+	if isWebUI {
+		callbackPort = h.resolveAntigravityWebUICallbackPort(h.cfg.Port)
+	}
+
+	redirectURI := fmt.Sprintf("http://localhost:%d/oauth-callback", callbackPort)
 	authURL := authSvc.BuildAuthURL(state, redirectURI)
 
 	RegisterOAuthSession(state, "antigravity")
 
-	isWebUI := isWebUIRequest(c)
 	var forwarder *callbackForwarder
 	if isWebUI {
 		targetURL, errTarget := h.managementCallbackURL("/antigravity/callback")
@@ -1968,7 +1993,7 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 			return
 		}
 		var errStart error
-		if forwarder, errStart = startCallbackForwarder(antigravity.CallbackPort, "antigravity", targetURL); errStart != nil {
+		if forwarder, errStart = startCallbackForwarder(callbackPort, "antigravity", targetURL); errStart != nil {
 			log.WithError(errStart).Error("failed to start antigravity callback forwarder")
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start callback server"})
 			return

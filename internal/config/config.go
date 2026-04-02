@@ -184,6 +184,10 @@ type RemoteManagement struct {
 	// PanelGitHubRepository overrides the GitHub repository used to fetch the management panel asset.
 	// Accepts either a repository URL (https://github.com/org/repo) or an API releases endpoint.
 	PanelGitHubRepository string `yaml:"panel-github-repository"`
+	// AntigravityWebUICallbackPort overrides the localhost callback port used by the web UI flow on standard instances.
+	AntigravityWebUICallbackPort int `yaml:"antigravity-webui-callback-port"`
+	// AntigravityWebUICallbackPortPremium overrides the localhost callback port used by the web UI flow on premium instances.
+	AntigravityWebUICallbackPortPremium int `yaml:"antigravity-webui-callback-port-premium"`
 }
 
 // QuotaExceeded defines the behavior when API quota limits are exceeded.
