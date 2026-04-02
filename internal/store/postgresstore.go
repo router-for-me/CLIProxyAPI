@@ -150,13 +150,11 @@ func (s *PostgresStore) EnsureSchema(ctx context.Context) error {
 // fsnotify events and file system churn.
 func (s *PostgresStore) StartAuthSync(ctx context.Context, interval time.Duration, onChange func()) {
 	go func() {
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
 		for {
 			select {
 			case <-ctx.Done():
 				return
-			case <-ticker.C:
+			case <-time.After(interval):
 				changed, err := s.incrementalAuthSync(ctx)
 				if err != nil {
 					log.Printf("postgres store: auth sync poll: %v", err)
@@ -210,14 +208,19 @@ func (s *PostgresStore) incrementalAuthSync(ctx context.Context) (bool, error) {
 		return false, fmt.Errorf("iterate auth rows: %w", err)
 	}
 
-	entries, _ := os.ReadDir(s.authDir)
-	for _, e := range entries {
-		if e.IsDir() || seen[e.Name()] {
-			continue
+	_ = filepath.WalkDir(s.authDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
 		}
-		os.Remove(filepath.Join(s.authDir, e.Name()))
-		changed = true
-	}
+		rel, relErr := filepath.Rel(s.authDir, path)
+		if relErr != nil || seen[rel] {
+			return nil
+		}
+		if removeErr := os.Remove(path); removeErr == nil {
+			changed = true
+		}
+		return nil
+	})
 
 	return changed, nil
 }
@@ -389,6 +392,7 @@ func (s *PostgresStore) List(ctx context.Context) ([]*cliproxyauth.Auth, error) 
 			LastRefreshedAt:  time.Time{},
 			NextRefreshAfter: time.Time{},
 		}
+		cliproxyauth.ApplyCustomHeadersFromMetadata(auth)
 		auths = append(auths, auth)
 	}
 	if err = rows.Err(); err != nil {
