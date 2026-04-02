@@ -1,6 +1,9 @@
 package openai
 
-import "github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+import (
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
+)
 
 const (
 	openAIChatEndpoint      = "/chat/completions"
@@ -12,6 +15,12 @@ func resolveEndpointOverride(modelName, requestedEndpoint string) (string, bool)
 		return "", false
 	}
 	info := registry.GetGlobalRegistry().GetModelInfo(modelName, "")
+	if info == nil {
+		baseModel := thinking.ParseSuffix(modelName).ModelName
+		if baseModel != "" && baseModel != modelName {
+			info = registry.GetGlobalRegistry().GetModelInfo(baseModel, "")
+		}
+	}
 	if info == nil || len(info.SupportedEndpoints) == 0 {
 		return "", false
 	}
