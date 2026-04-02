@@ -99,6 +99,22 @@ func NewPostgresStore(ctx context.Context, cfg PostgresStoreConfig) (*PostgresSt
 	return store, nil
 }
 
+// DB returns the underlying database connection for use by extended store modules.
+func (s *PostgresStore) DB() *sql.DB {
+	if s == nil {
+		return nil
+	}
+	return s.db
+}
+
+// Schema returns the configured schema name.
+func (s *PostgresStore) Schema() string {
+	if s == nil {
+		return ""
+	}
+	return s.cfg.Schema
+}
+
 // Close releases the underlying database connection.
 func (s *PostgresStore) Close() error {
 	if s == nil || s.db == nil {
