@@ -36,6 +36,7 @@ export function BatchImportModal({ open, onClose, onImport, title, placeholder }
           onChange={(e) => setText(e.target.value)}
           placeholder={placeholder}
           rows={10}
+          wrap="off"
           style={{
             width: '100%',
             padding: '8px 12px',
@@ -46,6 +47,8 @@ export function BatchImportModal({ open, onClose, onImport, title, placeholder }
             fontFamily: 'monospace',
             fontSize: '13px',
             resize: 'vertical',
+            whiteSpace: 'pre',
+            overflowX: 'auto',
           }}
         />
         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>

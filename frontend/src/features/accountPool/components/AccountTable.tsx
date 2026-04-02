@@ -20,15 +20,39 @@ interface Props {
 }
 
 function MaskedField({ value }: { value: string }) {
-  const [revealed, setRevealed] = useState(false);
+  const [copied, setCopied] = useState(false);
   if (!value) return <span style={{ color: 'var(--text-tertiary)' }}>-</span>;
+
+  const handleCopy = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch { /* ignore */ }
+  };
+
   return (
-    <span
-      onClick={() => setRevealed(!revealed)}
-      style={{ cursor: 'pointer', fontFamily: 'monospace', fontSize: '12px' }}
-      title={revealed ? 'Click to hide' : 'Click to reveal'}
-    >
-      {revealed ? value : '********'}
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+      <span style={{ fontFamily: 'monospace', fontSize: '12px', color: 'var(--text-tertiary)' }}>
+        {'••••••••'}
+      </span>
+      <button
+        onClick={handleCopy}
+        title="Copy to clipboard"
+        style={{
+          border: 'none',
+          background: 'none',
+          cursor: 'pointer',
+          padding: '2px 4px',
+          fontSize: '12px',
+          color: copied ? 'var(--success-color, #22c55e)' : 'var(--text-secondary)',
+          borderRadius: '3px',
+          lineHeight: 1,
+        }}
+      >
+        {copied ? '✓' : '⎘'}
+      </button>
     </span>
   );
 }
