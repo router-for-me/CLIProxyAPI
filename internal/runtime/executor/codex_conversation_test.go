@@ -154,6 +154,18 @@ func TestCodexExecutorExecuteStreamConversationOAuth(t *testing.T) {
 		if got := r.Header.Get("Authorization"); got != "Bearer oauth-token" {
 			t.Fatalf("Authorization = %q, want %q", got, "Bearer oauth-token")
 		}
+		for _, header := range []string{
+			"Originator",
+			"Version",
+			"session_id",
+			"X-Codex-Turn-Metadata",
+			"X-Client-Request-Id",
+			"Chatgpt-Account-Id",
+		} {
+			if got := r.Header.Get(header); got != "" {
+				t.Fatalf("%s = %q, want empty for browser conversation bridge", header, got)
+			}
+		}
 		if got := r.Header.Get("Openai-Sentinel-Chat-Requirements-Token"); got != "req-token" {
 			t.Fatalf("requirements token = %q, want %q", got, "req-token")
 		}
@@ -428,5 +440,31 @@ func TestResolveCodexConversationBearerTokenDoesNotReuseStaleToken(t *testing.T)
 	token, err := exec.resolveCodexConversationBearerToken(context.Background(), auth, server.URL+"/backend-api/conversation")
 	if err == nil {
 		t.Fatalf("resolveCodexConversationBearerToken() token = %q, want error", token)
+	}
+}
+
+func TestCodexConversationSessionTokenFallsBackToCookies(t *testing.T) {
+	auth := &cliproxyauth.Auth{
+		Provider: "codex",
+		Metadata: map[string]any{
+			"cookies": "foo=bar; __Secure-next-auth.session-token=session-from-cookie; other=value",
+		},
+	}
+
+	if got := codexConversationSessionToken(auth); got != "session-from-cookie" {
+		t.Fatalf("codexConversationSessionToken() = %q, want %q", got, "session-from-cookie")
+	}
+}
+
+func TestCodexConversationDeviceIDFallsBackToCookies(t *testing.T) {
+	auth := &cliproxyauth.Auth{
+		Provider: "codex",
+		Metadata: map[string]any{
+			"cookie": "oai-did=device-from-cookie; foo=bar",
+		},
+	}
+
+	if got := codexConversationDeviceID(auth); got != "device-from-cookie" {
+		t.Fatalf("codexConversationDeviceID() = %q, want %q", got, "device-from-cookie")
 	}
 }

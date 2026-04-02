@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
@@ -165,14 +166,15 @@ func applyCodexConversationHeaders(r *http.Request, auth *cliproxyauth.Auth, tok
 		return
 	}
 
-	applyCodexHeaders(r, auth, token, true, cfg)
-
 	var ginHeaders http.Header
 	if ginCtx, ok := r.Context().Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
 		ginHeaders = ginCtx.Request.Header
 	}
 
 	origin := codexConversationRequestOrigin(r.URL)
+	r.Header.Set("Accept", "text/event-stream")
+	r.Header.Set("Authorization", "Bearer "+strings.TrimSpace(token))
+	r.Header.Set("Content-Type", "application/json")
 	misc.EnsureHeader(r.Header, ginHeaders, "Accept-Language", codexConversationDefaultAcceptLanguage)
 	misc.EnsureHeader(r.Header, ginHeaders, "Oai-Language", codexConversationDefaultLanguage)
 	misc.EnsureHeader(r.Header, ginHeaders, "Oai-Device-Id", codexConversationDeviceID(auth))
@@ -186,7 +188,17 @@ func applyCodexConversationHeaders(r *http.Request, auth *cliproxyauth.Auth, tok
 	misc.EnsureHeader(r.Header, ginHeaders, "Sec-Ch-Ua", codexConversationSecCHUA)
 	misc.EnsureHeader(r.Header, ginHeaders, "Sec-Ch-Ua-Mobile", "?0")
 	misc.EnsureHeader(r.Header, ginHeaders, "Sec-Ch-Ua-Platform", `"Windows"`)
+	misc.EnsureHeader(r.Header, ginHeaders, "Sec-Ch-Ua-Arch", `"x86"`)
+	misc.EnsureHeader(r.Header, ginHeaders, "Sec-Ch-Ua-Bitness", `"64"`)
+	misc.EnsureHeader(r.Header, ginHeaders, "Sec-Ch-Ua-Full-Version", `"136.0.7103.113"`)
+	misc.EnsureHeader(r.Header, ginHeaders, "Sec-Ch-Ua-Full-Version-List", codexConversationSecCHUAFullVersion)
+	misc.EnsureHeader(r.Header, ginHeaders, "Sec-Ch-Ua-Platform-Version", `"15.0.0"`)
 	ensureHeaderWithConfigPrecedence(r.Header, ginHeaders, "User-Agent", "", codexConversationBrowserUserAgent)
+	var attrs map[string]string
+	if auth != nil {
+		attrs = auth.Attributes
+	}
+	util.ApplyCustomHeadersFromAttrs(r, attrs)
 }
 
 func buildCodexConversationRequest(body []byte, auth *cliproxyauth.Auth) ([]byte, error) {

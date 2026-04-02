@@ -498,6 +498,38 @@ func buildCodexConversationCookieHeader(auth *cliproxyauth.Auth, deviceID, oaiSC
 	return mergeCodexConversationCookies(parts...)
 }
 
+func codexConversationCookieValue(auth *cliproxyauth.Auth, name string) string {
+	name = strings.TrimSpace(name)
+	if auth == nil || name == "" {
+		return ""
+	}
+
+	if value := codexConversationCookieValueFromStrings(name, metaStringValue(auth.Metadata, "cookie"), metaStringValue(auth.Metadata, "cookies")); value != "" {
+		return value
+	}
+	if auth.Attributes != nil {
+		if value := codexConversationCookieValueFromStrings(name, strings.TrimSpace(auth.Attributes["cookie"]), strings.TrimSpace(auth.Attributes["cookies"])); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func codexConversationCookieValueFromStrings(name string, rawCookies ...string) string {
+	for i := range rawCookies {
+		for _, segment := range strings.Split(rawCookies[i], ";") {
+			key, value, ok := strings.Cut(strings.TrimSpace(segment), "=")
+			if !ok {
+				continue
+			}
+			if strings.EqualFold(strings.TrimSpace(key), name) && strings.TrimSpace(value) != "" {
+				return strings.TrimSpace(value)
+			}
+		}
+	}
+	return ""
+}
+
 func collectCodexConversationSetCookies(resp *http.Response) string {
 	if resp == nil {
 		return ""
@@ -605,6 +637,9 @@ func codexConversationDeviceID(auth *cliproxyauth.Auth) string {
 				return value
 			}
 		}
+		if value := codexConversationCookieValue(auth, "oai-did"); value != "" {
+			return value
+		}
 	}
 	return uuid.NewString()
 }
@@ -635,6 +670,9 @@ func codexConversationSessionToken(auth *cliproxyauth.Auth) string {
 		if value := strings.TrimSpace(auth.Attributes["session_token"]); value != "" {
 			return value
 		}
+	}
+	if value := codexConversationCookieValue(auth, "__Secure-next-auth.session-token"); value != "" {
+		return value
 	}
 	return ""
 }
