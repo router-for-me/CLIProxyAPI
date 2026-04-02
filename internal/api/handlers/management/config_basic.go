@@ -241,6 +241,46 @@ func (h *Handler) PutErrorLogsMaxFiles(c *gin.Context) {
 	h.persist(c)
 }
 
+// RequestLogMaxFiles
+func (h *Handler) GetRequestLogMaxFiles(c *gin.Context) {
+	c.JSON(200, gin.H{"request-log-max-files": h.cfg.RequestLogMaxFiles})
+}
+func (h *Handler) PutRequestLogMaxFiles(c *gin.Context) {
+	var body struct {
+		Value *int `json:"value"`
+	}
+	if errBindJSON := c.ShouldBindJSON(&body); errBindJSON != nil || body.Value == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
+		return
+	}
+	value := *body.Value
+	if value < 0 {
+		value = 0
+	}
+	h.cfg.RequestLogMaxFiles = value
+	h.persist(c)
+}
+
+// RequestLogMaxDays
+func (h *Handler) GetRequestLogMaxDays(c *gin.Context) {
+	c.JSON(200, gin.H{"request-log-max-days": h.cfg.RequestLogMaxDays})
+}
+func (h *Handler) PutRequestLogMaxDays(c *gin.Context) {
+	var body struct {
+		Value *int `json:"value"`
+	}
+	if errBindJSON := c.ShouldBindJSON(&body); errBindJSON != nil || body.Value == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
+		return
+	}
+	value := *body.Value
+	if value < 0 {
+		value = 0
+	}
+	h.cfg.RequestLogMaxDays = value
+	h.persist(c)
+}
+
 // Request log
 func (h *Handler) GetRequestLog(c *gin.Context) { c.JSON(200, gin.H{"request-log": h.cfg.RequestLog}) }
 func (h *Handler) PutRequestLog(c *gin.Context) {

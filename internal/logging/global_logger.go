@@ -24,6 +24,8 @@ var (
 	ginErrorWriter *io.PipeWriter
 )
 
+const noIndexMarkerFileName = ".metadata_never_index"
+
 // LogFormatter defines a custom log format for logrus.
 // This formatter adds timestamp, level, request ID, and source location to each log entry.
 // Format: [2025-12-23 20:14:04] [debug] [manager.go:524] | a1b2c3d4 | Use API key sk-9...0RHO for model gpt-5.2
@@ -158,6 +160,9 @@ func ConfigureLogOutput(cfg *config.Config) error {
 		if err := os.MkdirAll(logDir, 0o755); err != nil {
 			return fmt.Errorf("logging: failed to create log directory: %w", err)
 		}
+		if err := ensureNoIndexMarker(logDir); err != nil {
+			log.WithError(err).Warn("logging: failed to create no-index marker in log directory")
+		}
 		if logWriter != nil {
 			_ = logWriter.Close()
 		}
@@ -178,8 +183,24 @@ func ConfigureLogOutput(cfg *config.Config) error {
 		log.SetOutput(os.Stdout)
 	}
 
-	configureLogDirCleanerLocked(logDir, cfg.LogsMaxTotalSizeMB, protectedPath)
+	configureLogDirCleanerLocked(logDir, cfg.LogsMaxTotalSizeMB, cfg.RequestLogMaxFiles, cfg.RequestLogMaxDays, protectedPath)
 	return nil
+}
+
+func ensureNoIndexMarker(dir string) error {
+	cleanDir := strings.TrimSpace(dir)
+	if cleanDir == "" {
+		return nil
+	}
+	markerPath := filepath.Join(cleanDir, noIndexMarkerFileName)
+	file, err := os.OpenFile(markerPath, os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		if os.IsExist(err) {
+			return nil
+		}
+		return err
+	}
+	return file.Close()
 }
 
 func closeLogOutputs() {

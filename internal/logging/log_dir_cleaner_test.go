@@ -57,6 +57,47 @@ func TestEnforceLogDirSizeLimitSkipsProtected(t *testing.T) {
 	}
 }
 
+func TestEnforceRequestLogRetentionDeletesExpiredAndExcess(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now()
+
+	old := filepath.Join(dir, "v1-responses-old.log")
+	mid := filepath.Join(dir, "v1-responses-mid.log")
+	newest := filepath.Join(dir, "v1-responses-new.log")
+	mainLog := filepath.Join(dir, "main.log")
+	mainRotated := filepath.Join(dir, "main-2026-04-03T10-00-00.log")
+
+	writeLogFile(t, old, 10, now.Add(-72*time.Hour))
+	writeLogFile(t, mid, 10, now.Add(-12*time.Hour))
+	writeLogFile(t, newest, 10, now.Add(-1*time.Hour))
+	writeLogFile(t, mainLog, 10, now.Add(-72*time.Hour))
+	writeLogFile(t, mainRotated, 10, now.Add(-72*time.Hour))
+
+	deleted, err := enforceRequestLogRetention(dir, 1, 1)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if deleted != 2 {
+		t.Fatalf("expected 2 deleted files, got %d", deleted)
+	}
+
+	if _, err := os.Stat(old); !os.IsNotExist(err) {
+		t.Fatalf("expected expired request log removed, stat err=%v", err)
+	}
+	if _, err := os.Stat(mid); !os.IsNotExist(err) {
+		t.Fatalf("expected excess request log removed, stat err=%v", err)
+	}
+	if _, err := os.Stat(newest); err != nil {
+		t.Fatalf("expected newest request log kept, stat err=%v", err)
+	}
+	if _, err := os.Stat(mainLog); err != nil {
+		t.Fatalf("expected main.log kept, stat err=%v", err)
+	}
+	if _, err := os.Stat(mainRotated); err != nil {
+		t.Fatalf("expected rotated main log kept, stat err=%v", err)
+	}
+}
+
 func writeLogFile(t *testing.T, path string, size int, modTime time.Time) {
 	t.Helper()
 

@@ -60,6 +60,9 @@ type ServerOption func(*serverOptionConfig)
 func defaultRequestLoggerFactory(cfg *config.Config, configPath string) logging.RequestLogger {
 	configDir := filepath.Dir(configPath)
 	logsDir := logging.ResolveLogDirectory(cfg)
+	if cfg != nil && cfg.RequestLog && cfg.LogsMaxTotalSizeMB <= 0 && cfg.RequestLogMaxFiles <= 0 && cfg.RequestLogMaxDays <= 0 {
+		log.Warn("request-log is enabled while logs-max-total-size-mb, request-log-max-files, and request-log-max-days are all disabled; request log files may grow without limit")
+	}
 	return logging.NewFileRequestLogger(cfg.RequestLog, logsDir, configDir, cfg.ErrorLogsMaxFiles)
 }
 
@@ -514,6 +517,14 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PUT("/error-logs-max-files", s.mgmt.PutErrorLogsMaxFiles)
 		mgmt.PATCH("/error-logs-max-files", s.mgmt.PutErrorLogsMaxFiles)
 
+		mgmt.GET("/request-log-max-files", s.mgmt.GetRequestLogMaxFiles)
+		mgmt.PUT("/request-log-max-files", s.mgmt.PutRequestLogMaxFiles)
+		mgmt.PATCH("/request-log-max-files", s.mgmt.PutRequestLogMaxFiles)
+
+		mgmt.GET("/request-log-max-days", s.mgmt.GetRequestLogMaxDays)
+		mgmt.PUT("/request-log-max-days", s.mgmt.PutRequestLogMaxDays)
+		mgmt.PATCH("/request-log-max-days", s.mgmt.PutRequestLogMaxDays)
+
 		mgmt.GET("/usage-statistics-enabled", s.mgmt.GetUsageStatisticsEnabled)
 		mgmt.PUT("/usage-statistics-enabled", s.mgmt.PutUsageStatisticsEnabled)
 		mgmt.PATCH("/usage-statistics-enabled", s.mgmt.PutUsageStatisticsEnabled)
@@ -898,7 +909,11 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 		}
 	}
 
-	if oldCfg == nil || oldCfg.LoggingToFile != cfg.LoggingToFile || oldCfg.LogsMaxTotalSizeMB != cfg.LogsMaxTotalSizeMB {
+	if oldCfg == nil ||
+		oldCfg.LoggingToFile != cfg.LoggingToFile ||
+		oldCfg.LogsMaxTotalSizeMB != cfg.LogsMaxTotalSizeMB ||
+		oldCfg.RequestLogMaxFiles != cfg.RequestLogMaxFiles ||
+		oldCfg.RequestLogMaxDays != cfg.RequestLogMaxDays {
 		if err := logging.ConfigureLogOutput(cfg); err != nil {
 			log.Errorf("failed to reconfigure log output: %v", err)
 		}

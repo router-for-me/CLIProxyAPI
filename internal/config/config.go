@@ -62,6 +62,14 @@ type Config struct {
 	// When exceeded, the oldest error log files are deleted. Default is 10. Set to 0 to disable cleanup.
 	ErrorLogsMaxFiles int `yaml:"error-logs-max-files" json:"error-logs-max-files"`
 
+	// RequestLogMaxFiles limits how many request log files are retained in the logs directory.
+	// When exceeded, the oldest request log files are deleted. Set to 0 to disable.
+	RequestLogMaxFiles int `yaml:"request-log-max-files" json:"request-log-max-files"`
+
+	// RequestLogMaxDays limits how long request log files are retained in the logs directory.
+	// Request log files older than this many days are deleted. Set to 0 to disable.
+	RequestLogMaxDays int `yaml:"request-log-max-days" json:"request-log-max-days"`
+
 	// UsageStatisticsEnabled toggles in-memory usage aggregation; when false, usage data is discarded.
 	UsageStatisticsEnabled bool `yaml:"usage-statistics-enabled" json:"usage-statistics-enabled"`
 

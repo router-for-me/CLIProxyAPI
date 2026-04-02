@@ -29,6 +29,14 @@ import (
 
 var requestLogID atomic.Uint64
 
+const (
+	requestLoggerTempDirName    = "cliproxyapi-request-logger"
+	requestLoggerTempMaxAge     = 24 * time.Hour
+	requestBodyTempPrefix       = "request-body-"
+	responseBodyTempPrefix      = "response-body-"
+	requestLoggerTempFileSuffix = ".tmp"
+)
+
 // RequestLogger defines the interface for logging HTTP requests and responses.
 // It provides methods for logging both regular and streaming HTTP request/response cycles.
 type RequestLogger interface {
@@ -146,6 +154,12 @@ type FileRequestLogger struct {
 	// logsDir is the directory where log files are stored.
 	logsDir string
 
+	// tempDir is the preferred directory where streaming spool files are stored.
+	tempDir string
+
+	// fallbackTempDir is a validated writable fallback when the preferred tempDir is unavailable.
+	fallbackTempDir string
+
 	// errorLogsMaxFiles limits the number of error log files retained.
 	errorLogsMaxFiles int
 }
@@ -169,11 +183,22 @@ func NewFileRequestLogger(enabled bool, logsDir string, configDir string, errorL
 			logsDir = filepath.Join(configDir, logsDir)
 		}
 	}
-	return &FileRequestLogger{
+
+	logger := &FileRequestLogger{
 		enabled:           enabled,
 		logsDir:           logsDir,
+		tempDir:           filepath.Join(os.TempDir(), requestLoggerTempDirName),
+		fallbackTempDir:   filepath.Join(logsDir, requestLoggerTempDirName),
 		errorLogsMaxFiles: errorLogsMaxFiles,
 	}
+	if tempDir, errEnsure := logger.ensureTempDir(); errEnsure != nil {
+		log.WithError(errEnsure).Warn("failed to prepare request logger temp directory")
+	} else if removed, errCleanup := cleanupStaleRequestLogTempFiles(tempDir, requestLoggerTempMaxAge); errCleanup != nil {
+		log.WithError(errCleanup).Warn("failed to clean stale request logger temp files")
+	} else if removed > 0 {
+		log.Debugf("request logger: removed %d stale temp file(s)", removed)
+	}
+	return logger
 }
 
 // IsEnabled returns whether request logging is currently enabled.
@@ -243,18 +268,6 @@ func (l *FileRequestLogger) logRequest(url, method string, requestHeaders map[st
 	}
 	filePath := filepath.Join(l.logsDir, filename)
 
-	requestBodyPath, errTemp := l.writeRequestBodyTempFile(body)
-	if errTemp != nil {
-		log.WithError(errTemp).Warn("failed to create request body temp file, falling back to direct write")
-	}
-	if requestBodyPath != "" {
-		defer func() {
-			if errRemove := os.Remove(requestBodyPath); errRemove != nil {
-				log.WithError(errRemove).Warn("failed to remove request body temp file")
-			}
-		}()
-	}
-
 	responseToWrite, decompressErr := l.decompressResponse(responseHeaders, response)
 	if decompressErr != nil {
 		// If decompression fails, continue with original response and annotate the log output.
@@ -272,7 +285,6 @@ func (l *FileRequestLogger) logRequest(url, method string, requestHeaders map[st
 		method,
 		requestHeaders,
 		body,
-		requestBodyPath,
 		websocketTimeline,
 		apiRequest,
 		apiResponse,
@@ -337,14 +349,13 @@ func (l *FileRequestLogger) LogStreamingRequest(url, method string, headers map[
 		requestHeaders[key] = headerValues
 	}
 
-	requestBodyPath, errTemp := l.writeRequestBodyTempFile(body)
-	if errTemp != nil {
-		return nil, fmt.Errorf("failed to create request body temp file: %w", errTemp)
+	tempDir, errEnsure := l.ensureTempDir()
+	if errEnsure != nil {
+		return nil, fmt.Errorf("failed to create request logger temp directory: %w", errEnsure)
 	}
 
-	responseBodyFile, errCreate := os.CreateTemp(l.logsDir, "response-body-*.tmp")
+	responseBodyFile, errCreate := os.CreateTemp(tempDir, responseBodyTempPrefix+"*"+requestLoggerTempFileSuffix)
 	if errCreate != nil {
-		_ = os.Remove(requestBodyPath)
 		return nil, fmt.Errorf("failed to create response body temp file: %w", errCreate)
 	}
 	responseBodyPath := responseBodyFile.Name()
@@ -356,7 +367,7 @@ func (l *FileRequestLogger) LogStreamingRequest(url, method string, headers map[
 		method:           method,
 		timestamp:        time.Now(),
 		requestHeaders:   requestHeaders,
-		requestBodyPath:  requestBodyPath,
+		requestBody:      body,
 		responseBodyPath: responseBodyPath,
 		responseBodyFile: responseBodyFile,
 		chunkChan:        make(chan []byte, 100), // Buffered channel for async writes
@@ -381,9 +392,73 @@ func (l *FileRequestLogger) generateErrorFilename(url string, requestID ...strin
 //   - error: An error if directory creation fails, nil otherwise
 func (l *FileRequestLogger) ensureLogsDir() error {
 	if _, err := os.Stat(l.logsDir); os.IsNotExist(err) {
-		return os.MkdirAll(l.logsDir, 0755)
+		if errMkdir := os.MkdirAll(l.logsDir, 0755); errMkdir != nil {
+			return errMkdir
+		}
+	}
+	if errNoIndex := ensureNoIndexMarker(l.logsDir); errNoIndex != nil {
+		log.WithError(errNoIndex).Warn("failed to create no-index marker in logs directory")
 	}
 	return nil
+}
+
+func (l *FileRequestLogger) ensureTempDir() (string, error) {
+	candidates := make([]string, 0, 2)
+	if primary := strings.TrimSpace(l.tempDir); primary != "" {
+		candidates = append(candidates, primary)
+	}
+	if fallback := strings.TrimSpace(l.fallbackTempDir); fallback != "" {
+		fallback = filepath.Clean(fallback)
+		if len(candidates) == 0 || filepath.Clean(candidates[0]) != fallback {
+			candidates = append(candidates, fallback)
+		}
+	}
+	if len(candidates) == 0 {
+		return "", fmt.Errorf("request logger temp directory is empty")
+	}
+
+	var errs []string
+	for i, candidate := range candidates {
+		resolved, err := ensureWritableTempDir(candidate)
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("%s: %v", candidate, err))
+			continue
+		}
+		if i > 0 {
+			log.WithField("temp_dir", resolved).Warn("request logger: using fallback temp directory")
+		}
+		l.tempDir = resolved
+		return resolved, nil
+	}
+
+	return "", fmt.Errorf("no writable request logger temp directory available (%s)", strings.Join(errs, "; "))
+}
+
+func ensureWritableTempDir(dir string) (string, error) {
+	cleanDir := strings.TrimSpace(dir)
+	if cleanDir == "" {
+		return "", fmt.Errorf("empty temp directory")
+	}
+	cleanDir = filepath.Clean(cleanDir)
+	if errMkdir := os.MkdirAll(cleanDir, 0o755); errMkdir != nil {
+		return "", errMkdir
+	}
+	if errNoIndex := ensureNoIndexMarker(cleanDir); errNoIndex != nil {
+		log.WithError(errNoIndex).Warn("failed to create no-index marker in request logger temp directory")
+	}
+	probeFile, errCreate := os.CreateTemp(cleanDir, "probe-*"+requestLoggerTempFileSuffix)
+	if errCreate != nil {
+		return "", errCreate
+	}
+	probePath := probeFile.Name()
+	if errClose := probeFile.Close(); errClose != nil {
+		_ = os.Remove(probePath)
+		return "", errClose
+	}
+	if errRemove := os.Remove(probePath); errRemove != nil {
+		log.WithError(errRemove).Warn("failed to remove request logger temp probe file")
+	}
+	return cleanDir, nil
 }
 
 // generateFilename creates a sanitized filename from the URL path and current timestamp.
@@ -508,31 +583,11 @@ func (l *FileRequestLogger) cleanupOldErrorLogs() error {
 	return nil
 }
 
-func (l *FileRequestLogger) writeRequestBodyTempFile(body []byte) (string, error) {
-	tmpFile, errCreate := os.CreateTemp(l.logsDir, "request-body-*.tmp")
-	if errCreate != nil {
-		return "", errCreate
-	}
-	tmpPath := tmpFile.Name()
-
-	if _, errCopy := io.Copy(tmpFile, bytes.NewReader(body)); errCopy != nil {
-		_ = tmpFile.Close()
-		_ = os.Remove(tmpPath)
-		return "", errCopy
-	}
-	if errClose := tmpFile.Close(); errClose != nil {
-		_ = os.Remove(tmpPath)
-		return "", errClose
-	}
-	return tmpPath, nil
-}
-
 func (l *FileRequestLogger) writeNonStreamingLog(
 	w io.Writer,
 	url, method string,
 	requestHeaders map[string][]string,
 	requestBody []byte,
-	requestBodyPath string,
 	websocketTimeline []byte,
 	apiRequest []byte,
 	apiResponse []byte,
@@ -551,7 +606,7 @@ func (l *FileRequestLogger) writeNonStreamingLog(
 	isWebsocketTranscript := hasSectionPayload(websocketTimeline)
 	downstreamTransport := inferDownstreamTransport(requestHeaders, websocketTimeline)
 	upstreamTransport := inferUpstreamTransport(apiRequest, apiResponse, apiWebsocketTimeline, apiResponseErrors)
-	if errWrite := writeRequestInfoWithBody(w, url, method, requestHeaders, requestBody, requestBodyPath, requestTimestamp, downstreamTransport, upstreamTransport, !isWebsocketTranscript); errWrite != nil {
+	if errWrite := writeRequestInfoWithBody(w, url, method, requestHeaders, requestBody, requestTimestamp, downstreamTransport, upstreamTransport, !isWebsocketTranscript); errWrite != nil {
 		return errWrite
 	}
 	if errWrite := writeAPISection(w, "=== WEBSOCKET TIMELINE ===\n", "=== WEBSOCKET TIMELINE", websocketTimeline, time.Time{}); errWrite != nil {
@@ -583,7 +638,6 @@ func writeRequestInfoWithBody(
 	url, method string,
 	headers map[string][]string,
 	body []byte,
-	bodyPath string,
 	timestamp time.Time,
 	downstreamTransport string,
 	upstreamTransport string,
@@ -642,24 +696,7 @@ func writeRequestInfoWithBody(
 	}
 
 	bodyTrailingNewlines := 1
-	if bodyPath != "" {
-		bodyFile, errOpen := os.Open(bodyPath)
-		if errOpen != nil {
-			return errOpen
-		}
-		tracker := &trailingNewlineTrackingWriter{writer: w}
-		written, errCopy := io.Copy(tracker, bodyFile)
-		if errCopy != nil {
-			_ = bodyFile.Close()
-			return errCopy
-		}
-		if written > 0 {
-			bodyTrailingNewlines = tracker.trailingNewlines
-		}
-		if errClose := bodyFile.Close(); errClose != nil {
-			log.WithError(errClose).Warn("failed to close request body temp file")
-		}
-	} else if _, errWrite := w.Write(body); errWrite != nil {
+	if _, errWrite := w.Write(body); errWrite != nil {
 		return errWrite
 	} else if len(body) > 0 {
 		bodyTrailingNewlines = countTrailingNewlinesBytes(body)
@@ -1172,8 +1209,8 @@ type FileStreamingLogWriter struct {
 	// requestHeaders stores the request headers.
 	requestHeaders map[string][]string
 
-	// requestBodyPath is a temporary file path holding the request body.
-	requestBodyPath string
+	// requestBody stores the request body snapshot captured at stream start.
+	requestBody []byte
 
 	// responseBodyPath is a temporary file path holding the streaming response body.
 	responseBodyPath string
@@ -1394,7 +1431,7 @@ func (w *FileStreamingLogWriter) asyncWriter() {
 }
 
 func (w *FileStreamingLogWriter) writeFinalLog(logFile *os.File) error {
-	if errWrite := writeRequestInfoWithBody(logFile, w.url, w.method, w.requestHeaders, nil, w.requestBodyPath, w.timestamp, "http", inferUpstreamTransport(w.apiRequest, w.apiResponse, w.apiWebsocketTimeline, nil), true); errWrite != nil {
+	if errWrite := writeRequestInfoWithBody(logFile, w.url, w.method, w.requestHeaders, w.requestBody, w.timestamp, "http", inferUpstreamTransport(w.apiRequest, w.apiResponse, w.apiWebsocketTimeline, nil), true); errWrite != nil {
 		return errWrite
 	}
 	if errWrite := writeAPISection(logFile, "=== API WEBSOCKET TIMELINE ===\n", "=== API WEBSOCKET TIMELINE", w.apiWebsocketTimeline, time.Time{}); errWrite != nil {
@@ -1421,19 +1458,65 @@ func (w *FileStreamingLogWriter) writeFinalLog(logFile *os.File) error {
 }
 
 func (w *FileStreamingLogWriter) cleanupTempFiles() {
-	if w.requestBodyPath != "" {
-		if errRemove := os.Remove(w.requestBodyPath); errRemove != nil {
-			log.WithError(errRemove).Warn("failed to remove request body temp file")
-		}
-		w.requestBodyPath = ""
-	}
-
 	if w.responseBodyPath != "" {
 		if errRemove := os.Remove(w.responseBodyPath); errRemove != nil {
 			log.WithError(errRemove).Warn("failed to remove response body temp file")
 		}
 		w.responseBodyPath = ""
 	}
+}
+
+func cleanupStaleRequestLogTempFiles(tempDir string, maxAge time.Duration) (int, error) {
+	if maxAge <= 0 {
+		return 0, nil
+	}
+
+	dir := strings.TrimSpace(tempDir)
+	if dir == "" {
+		return 0, nil
+	}
+
+	entries, errRead := os.ReadDir(dir)
+	if errRead != nil {
+		if os.IsNotExist(errRead) {
+			return 0, nil
+		}
+		return 0, errRead
+	}
+
+	cutoff := time.Now().Add(-maxAge)
+	removed := 0
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !isRequestLoggerTempFileName(name) {
+			continue
+		}
+		info, errInfo := entry.Info()
+		if errInfo != nil {
+			continue
+		}
+		if info.ModTime().After(cutoff) {
+			continue
+		}
+		if errRemove := os.Remove(filepath.Join(dir, name)); errRemove != nil {
+			log.WithError(errRemove).Warnf("failed to remove stale request logger temp file: %s", name)
+			continue
+		}
+		removed++
+	}
+
+	return removed, nil
+}
+
+func isRequestLoggerTempFileName(name string) bool {
+	trimmed := strings.TrimSpace(name)
+	if trimmed == "" || !strings.HasSuffix(trimmed, requestLoggerTempFileSuffix) {
+		return false
+	}
+	return strings.HasPrefix(trimmed, requestBodyTempPrefix) || strings.HasPrefix(trimmed, responseBodyTempPrefix)
 }
 
 // NoOpStreamingLogWriter is a no-operation implementation for when logging is disabled.
