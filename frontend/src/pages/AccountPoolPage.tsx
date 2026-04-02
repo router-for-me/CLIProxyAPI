@@ -432,19 +432,20 @@ export function AccountPoolPage() {
                                 </span>
                                 <span style={{ color: 'var(--text-secondary)', marginRight: '4px' }}>pwd:</span>
                                 <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', fontFamily: 'monospace', marginRight: '12px' }}>
-                                  {expandedRun.leader.password.slice(0, 3)}***
+                                  {expandedRun.leader.password}
                                   <CopyButton value={expandedRun.leader.password} />
                                 </span>
-                                <span style={{ color: 'var(--text-secondary)', marginRight: '4px' }}>otp:</span>
+                                <span style={{ color: 'var(--text-secondary)', marginRight: '4px' }}>totp:</span>
                                 <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', fontFamily: 'monospace', marginRight: '12px' }}>
-                                  ••••••
+                                  {expandedRun.leader.totp_secret}
+                                  <CopyButton value={expandedRun.leader.totp_secret} />
                                   <CopyOTPButton secret={expandedRun.leader.totp_secret} />
                                 </span>
                                 {expandedRun.leader.proxy && (
                                   <>
                                     <span style={{ color: 'var(--text-secondary)', marginRight: '4px' }}>proxy:</span>
                                     <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', fontFamily: 'monospace', fontSize: '11px' }}>
-                                      {expandedRun.leader.proxy.replace(/\/\/.*@/, '//***@')}
+                                      {expandedRun.leader.proxy}
                                       <CopyButton value={expandedRun.leader.proxy} />
                                     </span>
                                   </>
@@ -457,7 +458,7 @@ export function AccountPoolPage() {
                                     <tr>
                                       <th style={{ ...cellStyle, fontWeight: 600, textAlign: 'left', fontSize: '12px', paddingLeft: '40px' }}>Email</th>
                                       <th style={{ ...cellStyle, fontWeight: 600, textAlign: 'left', fontSize: '12px' }}>Password</th>
-                                      <th style={{ ...cellStyle, fontWeight: 600, textAlign: 'left', fontSize: '12px' }}>TOTP</th>
+                                      <th style={{ ...cellStyle, fontWeight: 600, textAlign: 'left', fontSize: '12px' }}>TOTP Secret</th>
                                       <th style={{ ...cellStyle, fontWeight: 600, textAlign: 'left', fontSize: '12px' }}>Proxy</th>
                                       <th style={{ ...cellStyle, fontWeight: 600, textAlign: 'left', fontSize: '12px' }}>Port</th>
                                       <th style={{ ...cellStyle, fontWeight: 600, textAlign: 'left', fontSize: '12px' }}>Status</th>
@@ -475,20 +476,21 @@ export function AccountPoolPage() {
                                         </td>
                                         <td style={{ ...cellStyle, fontFamily: 'monospace', fontSize: '12px' }}>
                                           <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
-                                            {m.password.slice(0, 3)}***
+                                            {m.password}
                                             <CopyButton value={m.password} />
                                           </span>
                                         </td>
-                                        <td style={{ ...cellStyle, fontFamily: 'monospace', fontSize: '12px' }}>
+                                        <td style={{ ...cellStyle, fontFamily: 'monospace', fontSize: '11px' }}>
                                           <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
-                                            ••••••
+                                            {m.totp_secret}
+                                            <CopyButton value={m.totp_secret} />
                                             <CopyOTPButton secret={m.totp_secret} />
                                           </span>
                                         </td>
-                                        <td style={{ ...cellStyle, fontFamily: 'monospace', fontSize: '11px', maxWidth: '200px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                        <td style={{ ...cellStyle, fontFamily: 'monospace', fontSize: '11px', maxWidth: '250px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                                           {m.proxy ? (
                                             <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
-                                              {m.proxy.replace(/\/\/.*@/, '//***@')}
+                                              {m.proxy}
                                               <CopyButton value={m.proxy} />
                                             </span>
                                           ) : '-'}
