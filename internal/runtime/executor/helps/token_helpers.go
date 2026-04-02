@@ -201,6 +201,10 @@ func collectOpenAIContent(content gjson.Result, segments *[]string) {
 	}
 }
 
+func CollectOpenAIContent(content gjson.Result, segments *[]string) {
+	collectOpenAIContent(content, segments)
+}
+
 func collectOpenAIToolCalls(calls gjson.Result, segments *[]string) {
 	if !calls.Exists() || !calls.IsArray() {
 		return
