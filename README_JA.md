@@ -47,18 +47,20 @@ GLM CODING PLANを10%割引で取得：https://z.ai/subscribe?ic=8JVLJQFSKB
 - OAuthログインによるOpenAI Codexサポート（GPTモデル）
 - OAuthログインによるClaude Codeサポート
 - OAuthログインによるQwen Codeサポート
+- OAuthログインによるQoderサポート
 - OAuthログインによるiFlowサポート
 - プロバイダールーティングによるAmp CLIおよびIDE拡張機能のサポート
 - ストリーミングおよび非ストリーミングレスポンス
 - 関数呼び出し/ツールのサポート
 - マルチモーダル入力サポート（テキストと画像）
-- ラウンドロビン負荷分散による複数アカウント対応（Gemini、OpenAI、Claude、QwenおよびiFlow）
-- シンプルなCLI認証フロー（Gemini、OpenAI、Claude、QwenおよびiFlow）
+- ラウンドロビン負荷分散による複数アカウント対応（Gemini、OpenAI、Claude、Qwen、QoderおよびiFlow）
+- シンプルなCLI認証フロー（Gemini、OpenAI、Claude、Qwen、QoderおよびiFlow）
 - Generative Language APIキーのサポート
 - AI Studioビルドのマルチアカウント負荷分散
 - Gemini CLIのマルチアカウント負荷分散
 - Claude Codeのマルチアカウント負荷分散
 - Qwen Codeのマルチアカウント負荷分散
+- Qoderのマルチアカウント負荷分散
 - iFlowのマルチアカウント負荷分散
 - OpenAI Codexのマルチアカウント負荷分散
 - 設定によるOpenAI互換アップストリームプロバイダー（例：OpenRouter）

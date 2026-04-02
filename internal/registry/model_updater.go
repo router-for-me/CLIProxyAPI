@@ -338,6 +338,7 @@ func validateModelsCatalog(data *staticModelsJSON) error {
 		{name: "qwen", models: data.Qwen},
 		{name: "iflow", models: data.IFlow},
 		{name: "kimi", models: data.Kimi},
+		{name: "qoder", models: data.Qoder},
 		{name: "antigravity", models: data.Antigravity},
 	}
 

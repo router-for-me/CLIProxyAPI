@@ -20,6 +20,7 @@ type staticModelsJSON struct {
 	Qwen        []*ModelInfo `json:"qwen"`
 	IFlow       []*ModelInfo `json:"iflow"`
 	Kimi        []*ModelInfo `json:"kimi"`
+	Qoder       []*ModelInfo `json:"qoder"`
 	Antigravity []*ModelInfo `json:"antigravity"`
 }
 
@@ -137,6 +138,8 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetKimiModels()
 	case "antigravity":
 		return GetAntigravityModels()
+	case "qoder":
+		return GetQoderModels()
 	default:
 		return nil
 	}
@@ -161,6 +164,7 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		data.IFlow,
 		data.Kimi,
 		data.Antigravity,
+		data.Qoder,
 	}
 	for _, models := range allModels {
 		for _, m := range models {
@@ -171,4 +175,9 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 	}
 
 	return nil
+}
+
+// GetQoderModels returns the Qoder model definitions.
+func GetQoderModels() []*ModelInfo {
+	return cloneModelInfos(getModels().Qoder)
 }
