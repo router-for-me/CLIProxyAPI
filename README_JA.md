@@ -126,10 +126,6 @@ CLIProxyAPI経由でGeminiサブスクリプションを使用してSRT字幕を
 
 CLIProxyAPI OAuthを使用して複数のClaudeアカウントや代替モデル（Gemini、Codex、Antigravity）を即座に切り替えるCLIラッパー - APIキー不要
 
-### [ProxyPal](https://github.com/heyhuynhgiabuu/proxypal)
-
-CLIProxyAPI管理用のmacOSネイティブGUI：OAuth経由でプロバイダー、モデルマッピング、エンドポイントを設定 - APIキー不要
-
 ### [Quotio](https://github.com/nguyenphutrong/quotio)
 
 Claude、Gemini、OpenAI、Qwen、Antigravityのサブスクリプションを統合し、リアルタイムのクォータ追跡とスマート自動フェイルオーバーを備えたmacOSネイティブのメニューバーアプリ。Claude Code、OpenCode、Droidなどのコーディングツール向け - APIキー不要

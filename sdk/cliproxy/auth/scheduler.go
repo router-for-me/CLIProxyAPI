@@ -219,6 +219,19 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 	if len(normalized) == 0 {
 		return nil, "", &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
+	if len(normalized) == 1 {
+		// When a single provider is eligible, reuse pickSingle so provider-specific preferences
+		// (for example Codex websocket transport) are applied consistently.
+		providerKey := normalized[0]
+		picked, errPick := s.pickSingle(ctx, providerKey, model, opts, tried)
+		if errPick != nil {
+			return nil, "", errPick
+		}
+		if picked == nil {
+			return nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
+		}
+		return picked, providerKey, nil
+	}
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
 	modelKey := canonicalModelKey(model)
 
@@ -293,12 +306,46 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 	}
 
 	cursorKey := strings.Join(normalized, ",") + ":" + modelKey
-	start := 0
-	if len(normalized) > 0 {
-		start = s.mixedCursors[cursorKey] % len(normalized)
+	weights := make([]int, len(normalized))
+	segmentStarts := make([]int, len(normalized))
+	segmentEnds := make([]int, len(normalized))
+	totalWeight := 0
+	for providerIndex, shard := range candidateShards {
+		segmentStarts[providerIndex] = totalWeight
+		if shard != nil {
+			weights[providerIndex] = shard.readyCountAtPriorityLocked(false, bestPriority)
+		}
+		totalWeight += weights[providerIndex]
+		segmentEnds[providerIndex] = totalWeight
 	}
+	if totalWeight == 0 {
+		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, tried)
+	}
+
+	startSlot := s.mixedCursors[cursorKey] % totalWeight
+	startProviderIndex := -1
+	for providerIndex := range normalized {
+		if weights[providerIndex] == 0 {
+			continue
+		}
+		if startSlot < segmentEnds[providerIndex] {
+			startProviderIndex = providerIndex
+			break
+		}
+	}
+	if startProviderIndex < 0 {
+		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, tried)
+	}
+
+	slot := startSlot
 	for offset := 0; offset < len(normalized); offset++ {
-		providerIndex := (start + offset) % len(normalized)
+		providerIndex := (startProviderIndex + offset) % len(normalized)
+		if weights[providerIndex] == 0 {
+			continue
+		}
+		if providerIndex != startProviderIndex {
+			slot = segmentStarts[providerIndex]
+		}
 		providerKey := normalized[providerIndex]
 		shard := candidateShards[providerIndex]
 		if shard == nil {
@@ -308,7 +355,7 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 		if picked == nil {
 			continue
 		}
-		s.mixedCursors[cursorKey] = providerIndex + 1
+		s.mixedCursors[cursorKey] = slot + 1
 		return picked, providerKey, nil
 	}
 	return nil, "", s.mixedUnavailableErrorLocked(normalized, model, tried)
@@ -667,16 +714,25 @@ func (m *modelScheduler) highestReadyPriorityLocked(preferWebsocket bool, predic
 	if m == nil {
 		return 0, false
 	}
+	if preferWebsocket {
+		// When downstream is websocket and Codex supports websocket transport, prefer websocket-enabled
+		// credentials even if they are in a lower priority tier than HTTP-only credentials.
+		for _, priority := range m.priorityOrder {
+			bucket := m.readyByPriority[priority]
+			if bucket == nil {
+				continue
+			}
+			if bucket.ws.pickFirst(predicate) != nil {
+				return priority, true
+			}
+		}
+	}
 	for _, priority := range m.priorityOrder {
 		bucket := m.readyByPriority[priority]
 		if bucket == nil {
 			continue
 		}
-		view := &bucket.all
-		if preferWebsocket && len(bucket.ws.flat) > 0 {
-			view = &bucket.ws
-		}
-		if view.pickFirst(predicate) != nil {
+		if bucket.all.pickFirst(predicate) != nil {
 			return priority, true
 		}
 	}
@@ -694,7 +750,7 @@ func (m *modelScheduler) pickReadyAtPriorityLocked(preferWebsocket bool, priorit
 		return nil
 	}
 	view := &bucket.all
-	if preferWebsocket && len(bucket.ws.flat) > 0 {
+	if preferWebsocket && bucket.ws.pickFirst(predicate) != nil {
 		view = &bucket.ws
 	}
 	var picked *scheduledAuth
@@ -707,6 +763,20 @@ func (m *modelScheduler) pickReadyAtPriorityLocked(preferWebsocket bool, priorit
 		return nil
 	}
 	return picked.auth
+}
+
+func (m *modelScheduler) readyCountAtPriorityLocked(preferWebsocket bool, priority int) int {
+	if m == nil {
+		return 0
+	}
+	bucket := m.readyByPriority[priority]
+	if bucket == nil {
+		return 0
+	}
+	if preferWebsocket && len(bucket.ws.flat) > 0 {
+		return len(bucket.ws.flat)
+	}
+	return len(bucket.all.flat)
 }
 
 // unavailableErrorLocked returns the correct unavailable or cooldown error for the shard.

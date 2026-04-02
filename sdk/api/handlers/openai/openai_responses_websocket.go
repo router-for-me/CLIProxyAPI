@@ -33,9 +33,6 @@ const (
 	wsDoneMarker         = "[DONE]"
 	wsTurnStateHeader    = "x-codex-turn-state"
 	wsRequestBodyKey     = "REQUEST_BODY_OVERRIDE"
-	wsPayloadLogMaxSize  = 2048
-	wsBodyLogMaxSize     = 64 * 1024
-	wsBodyLogTruncated   = "\n[websocket log truncated]\n"
 )
 
 var responsesWebsocketUpgrader = websocket.Upgrader{
@@ -55,14 +52,14 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		return
 	}
 	passthroughSessionID := uuid.NewString()
-	clientRemoteAddr := ""
-	if c != nil && c.Request != nil {
-		clientRemoteAddr = strings.TrimSpace(c.Request.RemoteAddr)
-	}
-	log.Infof("responses websocket: client connected id=%s remote=%s", passthroughSessionID, clientRemoteAddr)
+	downstreamSessionKey := websocketDownstreamSessionKey(c.Request)
+	retainResponsesWebsocketToolCaches(downstreamSessionKey)
+	clientIP := websocketClientAddress(c)
+	log.Infof("responses websocket: client connected id=%s remote=%s", passthroughSessionID, clientIP)
 	var wsTerminateErr error
 	var wsBodyLog strings.Builder
 	defer func() {
+		releaseResponsesWebsocketToolCaches(downstreamSessionKey)
 		if wsTerminateErr != nil {
 			// log.Infof("responses websocket: session closing id=%s reason=%v", passthroughSessionID, wsTerminateErr)
 		} else {
@@ -167,6 +164,9 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			}
 			continue
 		}
+
+		requestJSON = repairResponsesWebsocketToolCalls(downstreamSessionKey, requestJSON)
+		updatedLastRequest = bytes.Clone(requestJSON)
 		lastRequest = updatedLastRequest
 
 		modelName := gjson.GetBytes(requestJSON, "model").String()
@@ -201,6 +201,13 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		}
 		lastResponseOutput = completedOutput
 	}
+}
+
+func websocketClientAddress(c *gin.Context) string {
+	if c == nil || c.Request == nil {
+		return ""
+	}
+	return strings.TrimSpace(c.ClientIP())
 }
 
 func websocketUpgradeHeaders(req *http.Request) http.Header {
@@ -277,6 +284,15 @@ func normalizeResponseSubsequentRequest(rawJSON []byte, lastRequest []byte, last
 		}
 	}
 
+	// Compaction can cause clients to replace local websocket history with a new
+	// compact transcript on the next `response.create`. When the input already
+	// contains historical model output items, treating it as an incremental append
+	// duplicates stale turn-state and can leave late orphaned function_call items.
+	if shouldReplaceWebsocketTranscript(rawJSON, nextInput) {
+		normalized := normalizeResponseTranscriptReplacement(rawJSON, lastRequest)
+		return normalized, bytes.Clone(normalized), nil
+	}
+
 	// Websocket v2 mode uses response.create with previous_response_id + incremental input.
 	// Do not expand it into a full input transcript; upstream expects the incremental payload.
 	if allowIncrementalInputWithPreviousResponseID {
@@ -318,6 +334,10 @@ func normalizeResponseSubsequentRequest(rawJSON []byte, lastRequest []byte, last
 			Error:      fmt.Errorf("invalid request input: %w", errMerge),
 		}
 	}
+	dedupedInput, errDedupeFunctionCalls := dedupeFunctionCallsByCallID(mergedInput)
+	if errDedupeFunctionCalls == nil {
+		mergedInput = dedupedInput
+	}
 
 	normalized, errDelete := sjson.DeleteBytes(rawJSON, "type")
 	if errDelete != nil {
@@ -346,6 +366,91 @@ func normalizeResponseSubsequentRequest(rawJSON []byte, lastRequest []byte, last
 	}
 	normalized, _ = sjson.SetBytes(normalized, "stream", true)
 	return normalized, bytes.Clone(normalized), nil
+}
+
+func shouldReplaceWebsocketTranscript(rawJSON []byte, nextInput gjson.Result) bool {
+	requestType := strings.TrimSpace(gjson.GetBytes(rawJSON, "type").String())
+	if requestType != wsRequestTypeCreate && requestType != wsRequestTypeAppend {
+		return false
+	}
+	if strings.TrimSpace(gjson.GetBytes(rawJSON, "previous_response_id").String()) != "" {
+		return false
+	}
+	if !nextInput.Exists() || !nextInput.IsArray() {
+		return false
+	}
+
+	for _, item := range nextInput.Array() {
+		switch strings.TrimSpace(item.Get("type").String()) {
+		case "function_call":
+			return true
+		case "message":
+			role := strings.TrimSpace(item.Get("role").String())
+			if role == "assistant" {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+func normalizeResponseTranscriptReplacement(rawJSON []byte, lastRequest []byte) []byte {
+	normalized, errDelete := sjson.DeleteBytes(rawJSON, "type")
+	if errDelete != nil {
+		normalized = bytes.Clone(rawJSON)
+	}
+	normalized, _ = sjson.DeleteBytes(normalized, "previous_response_id")
+	if !gjson.GetBytes(normalized, "model").Exists() {
+		modelName := strings.TrimSpace(gjson.GetBytes(lastRequest, "model").String())
+		if modelName != "" {
+			normalized, _ = sjson.SetBytes(normalized, "model", modelName)
+		}
+	}
+	if !gjson.GetBytes(normalized, "instructions").Exists() {
+		instructions := gjson.GetBytes(lastRequest, "instructions")
+		if instructions.Exists() {
+			normalized, _ = sjson.SetRawBytes(normalized, "instructions", []byte(instructions.Raw))
+		}
+	}
+	normalized, _ = sjson.SetBytes(normalized, "stream", true)
+	return bytes.Clone(normalized)
+}
+
+func dedupeFunctionCallsByCallID(rawArray string) (string, error) {
+	rawArray = strings.TrimSpace(rawArray)
+	if rawArray == "" {
+		return "[]", nil
+	}
+	var items []json.RawMessage
+	if errUnmarshal := json.Unmarshal([]byte(rawArray), &items); errUnmarshal != nil {
+		return "", errUnmarshal
+	}
+
+	seenCallIDs := make(map[string]struct{}, len(items))
+	filtered := make([]json.RawMessage, 0, len(items))
+	for _, item := range items {
+		if len(item) == 0 {
+			continue
+		}
+		itemType := strings.TrimSpace(gjson.GetBytes(item, "type").String())
+		if itemType == "function_call" {
+			callID := strings.TrimSpace(gjson.GetBytes(item, "call_id").String())
+			if callID != "" {
+				if _, ok := seenCallIDs[callID]; ok {
+					continue
+				}
+				seenCallIDs[callID] = struct{}{}
+			}
+		}
+		filtered = append(filtered, item)
+	}
+
+	out, errMarshal := json.Marshal(filtered)
+	if errMarshal != nil {
+		return "", errMarshal
+	}
+	return string(out), nil
 }
 
 func websocketUpstreamSupportsIncrementalInput(attributes map[string]string, metadata map[string]any) bool {
@@ -613,6 +718,10 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 ) ([]byte, error) {
 	completed := false
 	completedOutput := []byte("[]")
+	downstreamSessionKey := ""
+	if c != nil && c.Request != nil {
+		downstreamSessionKey = websocketDownstreamSessionKey(c.Request)
+	}
 
 	for {
 		select {
@@ -690,6 +799,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 
 			payloads := websocketJSONPayloadsFromChunk(chunk)
 			for i := range payloads {
+				recordResponsesWebsocketToolCallsFromPayload(downstreamSessionKey, payloads[i])
 				eventType := gjson.GetBytes(payloads[i], "type").String()
 				if eventType == wsEventTypeCompleted {
 					completed = true
@@ -837,71 +947,18 @@ func appendWebsocketEvent(builder *strings.Builder, eventType string, payload []
 	if builder == nil {
 		return
 	}
-	if builder.Len() >= wsBodyLogMaxSize {
-		return
-	}
 	trimmedPayload := bytes.TrimSpace(payload)
 	if len(trimmedPayload) == 0 {
 		return
 	}
 	if builder.Len() > 0 {
-		if !appendWebsocketLogString(builder, "\n") {
-			return
-		}
+		builder.WriteString("\n")
 	}
-	if !appendWebsocketLogString(builder, "websocket.") {
-		return
-	}
-	if !appendWebsocketLogString(builder, eventType) {
-		return
-	}
-	if !appendWebsocketLogString(builder, "\n") {
-		return
-	}
-	if !appendWebsocketLogBytes(builder, trimmedPayload, len(wsBodyLogTruncated)) {
-		appendWebsocketLogString(builder, wsBodyLogTruncated)
-		return
-	}
-	appendWebsocketLogString(builder, "\n")
-}
-
-func appendWebsocketLogString(builder *strings.Builder, value string) bool {
-	if builder == nil {
-		return false
-	}
-	remaining := wsBodyLogMaxSize - builder.Len()
-	if remaining <= 0 {
-		return false
-	}
-	if len(value) <= remaining {
-		builder.WriteString(value)
-		return true
-	}
-	builder.WriteString(value[:remaining])
-	return false
-}
-
-func appendWebsocketLogBytes(builder *strings.Builder, value []byte, reserveForSuffix int) bool {
-	if builder == nil {
-		return false
-	}
-	remaining := wsBodyLogMaxSize - builder.Len()
-	if remaining <= 0 {
-		return false
-	}
-	if len(value) <= remaining {
-		builder.Write(value)
-		return true
-	}
-	limit := remaining - reserveForSuffix
-	if limit < 0 {
-		limit = 0
-	}
-	if limit > len(value) {
-		limit = len(value)
-	}
-	builder.Write(value[:limit])
-	return false
+	builder.WriteString("websocket.")
+	builder.WriteString(eventType)
+	builder.WriteString("\n")
+	builder.Write(trimmedPayload)
+	builder.WriteString("\n")
 }
 
 func websocketPayloadEventType(payload []byte) string {
@@ -917,15 +974,8 @@ func websocketPayloadPreview(payload []byte) string {
 	if len(trimmedPayload) == 0 {
 		return "<empty>"
 	}
-	preview := trimmedPayload
-	if len(preview) > wsPayloadLogMaxSize {
-		preview = preview[:wsPayloadLogMaxSize]
-	}
-	previewText := strings.ReplaceAll(string(preview), "\n", "\\n")
+	previewText := strings.ReplaceAll(string(trimmedPayload), "\n", "\\n")
 	previewText = strings.ReplaceAll(previewText, "\r", "\\r")
-	if len(trimmedPayload) > wsPayloadLogMaxSize {
-		return fmt.Sprintf("%s...(truncated,total=%d)", previewText, len(trimmedPayload))
-	}
 	return previewText
 }
 

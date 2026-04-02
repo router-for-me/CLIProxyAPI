@@ -1,4 +1,4 @@
-package executor
+package helps
 
 import (
 	"context"
@@ -19,7 +19,7 @@ var (
 	httpClientCacheMutex sync.RWMutex
 )
 
-// newProxyAwareHTTPClient creates an HTTP client with proper proxy configuration priority:
+// NewProxyAwareHTTPClient creates an HTTP client with proper proxy configuration priority:
 // 1. Use auth.ProxyURL if configured (highest priority)
 // 2. Use cfg.ProxyURL if auth proxy is not configured
 // 3. Use RoundTripper from context if neither are configured
@@ -34,7 +34,7 @@ var (
 //
 // Returns:
 //   - *http.Client: An HTTP client with configured proxy or transport
-func newProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
+func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
 	// Priority 1: Use auth.ProxyURL if configured
 	var proxyURL string
 	if auth != nil {
@@ -46,23 +46,18 @@ func newProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 		proxyURL = strings.TrimSpace(cfg.ProxyURL)
 	}
 
-	// Build cache key from proxy URL (empty string for no proxy)
-	cacheKey := proxyURL
-
-	// Check cache first
-	httpClientCacheMutex.RLock()
-	if cachedClient, ok := httpClientCache[cacheKey]; ok {
-		httpClientCacheMutex.RUnlock()
-		// Return a wrapper with the requested timeout but shared transport
-		if timeout > 0 {
-			return &http.Client{
-				Transport: cachedClient.Transport,
-				Timeout:   timeout,
+	// If we have a proxy URL configured, try cache first to reuse TCP/TLS connections.
+	if proxyURL != "" {
+		httpClientCacheMutex.RLock()
+		if cachedClient, ok := httpClientCache[proxyURL]; ok {
+			httpClientCacheMutex.RUnlock()
+			if timeout > 0 {
+				return &http.Client{Transport: cachedClient.Transport, Timeout: timeout}
 			}
+			return cachedClient
 		}
-		return cachedClient
+		httpClientCacheMutex.RUnlock()
 	}
-	httpClientCacheMutex.RUnlock()
 
 	// Create new client
 	httpClient := &http.Client{}
@@ -77,7 +72,7 @@ func newProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 			httpClient.Transport = transport
 			// Cache the client
 			httpClientCacheMutex.Lock()
-			httpClientCache[cacheKey] = httpClient
+			httpClientCache[proxyURL] = httpClient
 			httpClientCacheMutex.Unlock()
 			return httpClient
 		}
@@ -88,13 +83,6 @@ func newProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 	// Priority 3: Use RoundTripper from context (typically from RoundTripperFor)
 	if rt, ok := ctx.Value("cliproxy.roundtripper").(http.RoundTripper); ok && rt != nil {
 		httpClient.Transport = rt
-	}
-
-	// Cache the client for no-proxy case
-	if proxyURL == "" {
-		httpClientCacheMutex.Lock()
-		httpClientCache[cacheKey] = httpClient
-		httpClientCacheMutex.Unlock()
 	}
 
 	return httpClient
