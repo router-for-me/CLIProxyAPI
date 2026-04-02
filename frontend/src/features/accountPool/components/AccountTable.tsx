@@ -153,9 +153,6 @@ export function AccountTable({ items, type, onUpdateStatus, onDelete, onUpdate }
     borderBottom: '1px solid var(--border-color)',
     fontSize: '13px',
     whiteSpace: 'nowrap',
-    overflow: 'hidden',
-    textOverflow: 'ellipsis',
-    maxWidth: '200px',
   };
 
   const inputStyle: React.CSSProperties = {

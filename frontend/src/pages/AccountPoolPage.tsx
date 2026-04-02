@@ -32,10 +32,10 @@ function CopyOTPButton({ secret }: { secret: string }) {
   return (
     <button onClick={handleCopy} title="复制 OTP" style={{
       border: 'none', background: 'none', cursor: 'pointer', padding: '2px 4px',
-      fontSize: '12px', color: copied ? 'var(--success-color, #22c55e)' : 'var(--text-secondary)',
-      borderRadius: '3px', lineHeight: 1,
+      fontSize: '11px', color: copied ? 'var(--success-color, #22c55e)' : 'var(--accent-color, #3b82f6)',
+      borderRadius: '3px', lineHeight: 1, fontWeight: 600,
     }}>
-      {copied ? '\u2713' : '\u2398'}
+      {copied ? '\u2713' : 'OTP'}
     </button>
   );
 }
