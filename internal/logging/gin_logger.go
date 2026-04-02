@@ -45,10 +45,18 @@ func GinLogrusLogger() gin.HandlerFunc {
 
 		// Only generate request ID for AI API paths
 		var requestID string
+		var upstreamID string
 		if isAIAPIPath(path) {
+			upstreamID = c.Request.Header.Get("X-Request-Id")
 			requestID = GenerateRequestID()
 			SetGinRequestID(c, requestID)
 			ctx := WithRequestID(c.Request.Context(), requestID)
+			if upstreamID != "" {
+				SetGinUpstreamRequestID(c, upstreamID)
+				ctx = WithUpstreamRequestID(ctx, upstreamID)
+				log.WithField("request_id", requestID).
+					Infof("upstream request_id association: %s -> %s", upstreamID, requestID)
+			}
 			c.Request = c.Request.WithContext(ctx)
 		}
 
@@ -83,6 +91,9 @@ func GinLogrusLogger() gin.HandlerFunc {
 		}
 
 		entry := log.WithField("request_id", requestID)
+		if upstreamID != "" {
+			entry = entry.WithField("upstream_request_id", upstreamID)
+		}
 
 		switch {
 		case statusCode >= http.StatusInternalServerError:
