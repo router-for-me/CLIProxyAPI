@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import * as OTPAuth from 'otpauth';
 import { Button } from '@/components/ui/Button';
 import { Select } from '@/components/ui/Select';
 import { StatusBadge } from './StatusBadge';
@@ -19,7 +20,7 @@ interface Props {
   onUpdate: (id: number, data: Partial<Account>) => Promise<void>;
 }
 
-export function CopyButton({ value }: { value: string }) {
+export function CopyButton({ value, title = 'Copy to clipboard' }: { value: string; title?: string }) {
   const [copied, setCopied] = useState(false);
   if (!value) return null;
 
@@ -35,7 +36,7 @@ export function CopyButton({ value }: { value: string }) {
   return (
     <button
       onClick={handleCopy}
-      title="Copy to clipboard"
+      title={title}
       style={{
         border: 'none',
         background: 'none',
@@ -52,24 +53,63 @@ export function CopyButton({ value }: { value: string }) {
   );
 }
 
-function MaskedField({ value }: { value: string }) {
-  if (!value) return <span style={{ color: 'var(--text-tertiary)' }}>-</span>;
+function CopyOTPButton({ secret }: { secret: string }) {
+  const [copied, setCopied] = useState(false);
+  if (!secret) return null;
+
+  const handleCopy = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    try {
+      const totp = new OTPAuth.TOTP({
+        secret: OTPAuth.Secret.fromBase32(secret.replace(/\s+/g, '').toUpperCase()),
+        digits: 6,
+        period: 30,
+        algorithm: 'SHA1',
+      });
+      await navigator.clipboard.writeText(totp.generate());
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch { /* ignore */ }
+  };
+
+  return (
+    <button
+      onClick={handleCopy}
+      title="复制 OTP"
+      style={{
+        border: 'none',
+        background: 'none',
+        cursor: 'pointer',
+        padding: '2px 4px',
+        fontSize: '11px',
+        color: copied ? 'var(--success-color, #22c55e)' : 'var(--accent-color, #3b82f6)',
+        borderRadius: '3px',
+        lineHeight: 1,
+        fontWeight: 600,
+      }}
+    >
+      {copied ? '✓' : 'OTP'}
+    </button>
+  );
+}
+
+function TOTPField({ secret }: { secret: string }) {
+  if (!secret) return <span style={{ color: 'var(--text-tertiary)' }}>-</span>;
   return (
     <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
-      <span style={{ fontFamily: 'monospace', fontSize: '12px', color: 'var(--text-tertiary)' }}>
-        {'••••••••'}
-      </span>
-      <CopyButton value={value} />
+      <span style={{ fontFamily: 'monospace', fontSize: '12px' }}>{secret}</span>
+      <CopyButton value={secret} title="复制 TOTP Secret" />
+      <CopyOTPButton secret={secret} />
     </span>
   );
 }
 
-function CopyableText({ value, mono }: { value: string; mono?: boolean }) {
+function CopyableText({ value, mono, title }: { value: string; mono?: boolean; title?: string }) {
   if (!value) return <span style={{ color: 'var(--text-tertiary)' }}>-</span>;
   return (
     <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
       <span style={{ fontFamily: mono ? 'monospace' : 'inherit', fontSize: '12px' }}>{value}</span>
-      <CopyButton value={value} />
+      <CopyButton value={value} title={title} />
     </span>
   );
 }
@@ -166,7 +206,7 @@ export function AccountTable({ items, type, onUpdateStatus, onDelete, onUpdate }
                   {isEditing ? (
                     <input style={inputStyle} value={editData.password || ''} onChange={(e) => setEditData({ ...editData, password: e.target.value })} />
                   ) : (
-                    <MaskedField value={item.password} />
+                    <CopyableText value={item.password} mono title="复制密码" />
                   )}
                 </td>
                 <td style={cellStyle}>
@@ -180,7 +220,7 @@ export function AccountTable({ items, type, onUpdateStatus, onDelete, onUpdate }
                   {isEditing ? (
                     <input style={inputStyle} value={editData.totp_secret || ''} onChange={(e) => setEditData({ ...editData, totp_secret: e.target.value })} />
                   ) : (
-                    <MaskedField value={item.totp_secret} />
+                    <TOTPField secret={item.totp_secret} />
                   )}
                 </td>
                 <td style={cellStyle}>

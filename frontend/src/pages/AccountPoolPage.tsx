@@ -30,7 +30,7 @@ function CopyOTPButton({ secret }: { secret: string }) {
     } catch { /* ignore */ }
   };
   return (
-    <button onClick={handleCopy} title="Copy OTP code" style={{
+    <button onClick={handleCopy} title="复制 OTP" style={{
       border: 'none', background: 'none', cursor: 'pointer', padding: '2px 4px',
       fontSize: '12px', color: copied ? 'var(--success-color, #22c55e)' : 'var(--text-secondary)',
       borderRadius: '3px', lineHeight: 1,
@@ -433,12 +433,12 @@ export function AccountPoolPage() {
                                 <span style={{ color: 'var(--text-secondary)', marginRight: '4px' }}>pwd:</span>
                                 <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', fontFamily: 'monospace', marginRight: '12px' }}>
                                   {expandedRun.leader.password}
-                                  <CopyButton value={expandedRun.leader.password} />
+                                  <CopyButton value={expandedRun.leader.password} title="复制密码" />
                                 </span>
                                 <span style={{ color: 'var(--text-secondary)', marginRight: '4px' }}>totp:</span>
                                 <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', fontFamily: 'monospace', marginRight: '12px' }}>
                                   {expandedRun.leader.totp_secret}
-                                  <CopyButton value={expandedRun.leader.totp_secret} />
+                                  <CopyButton value={expandedRun.leader.totp_secret} title="复制 TOTP Secret" />
                                   <CopyOTPButton secret={expandedRun.leader.totp_secret} />
                                 </span>
                                 {expandedRun.leader.proxy && (
@@ -477,13 +477,13 @@ export function AccountPoolPage() {
                                         <td style={{ ...cellStyle, fontFamily: 'monospace', fontSize: '12px' }}>
                                           <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
                                             {m.password}
-                                            <CopyButton value={m.password} />
+                                            <CopyButton value={m.password} title="复制密码" />
                                           </span>
                                         </td>
                                         <td style={{ ...cellStyle, fontFamily: 'monospace', fontSize: '11px' }}>
                                           <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
                                             {m.totp_secret}
-                                            <CopyButton value={m.totp_secret} />
+                                            <CopyButton value={m.totp_secret} title="复制 TOTP Secret" />
                                             <CopyOTPButton secret={m.totp_secret} />
                                           </span>
                                         </td>
