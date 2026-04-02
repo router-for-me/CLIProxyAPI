@@ -89,6 +89,41 @@ func (s *Store) EnsureSchema(ctx context.Context) error {
 			updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 			UNIQUE(group_id, member_email)
 		)`, s.tableName("account_pool_groups")),
+
+		// Group Runs — replaces file-based groupN.json
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
+			id           BIGSERIAL PRIMARY KEY,
+			group_id     INT NOT NULL,
+			run_date     DATE NOT NULL DEFAULT CURRENT_DATE,
+			leader_id    BIGINT NOT NULL,
+			leader_proxy TEXT NOT NULL DEFAULT '',
+			status       TEXT NOT NULL DEFAULT 'pending',
+			to_remove    JSONB NOT NULL DEFAULT '[]'::jsonb,
+			created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			UNIQUE(group_id, run_date)
+		)`, s.tableName("account_pool_group_runs")),
+
+		fmt.Sprintf(`CREATE INDEX IF NOT EXISTS idx_agr_date ON %s(run_date)`,
+			s.tableName("account_pool_group_runs")),
+
+		// Group Members — member assignments within a group run
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
+			id           BIGSERIAL PRIMARY KEY,
+			group_run_id BIGINT NOT NULL REFERENCES %s(id) ON DELETE CASCADE,
+			member_id    BIGINT NOT NULL,
+			proxy        TEXT NOT NULL DEFAULT '',
+			port         INT NOT NULL DEFAULT 0,
+			profile_id   TEXT NOT NULL DEFAULT '',
+			status       TEXT NOT NULL DEFAULT 'new',
+			message      TEXT NOT NULL DEFAULT '',
+			created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			UNIQUE(group_run_id, member_id)
+		)`, s.tableName("account_pool_group_members"), s.tableName("account_pool_group_runs")),
+
+		fmt.Sprintf(`CREATE INDEX IF NOT EXISTS idx_agm_group_run ON %s(group_run_id)`,
+			s.tableName("account_pool_group_members")),
 	}
 
 	for _, ddl := range tables {

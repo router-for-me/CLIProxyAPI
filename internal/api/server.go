@@ -689,11 +689,23 @@ func (s *Server) registerManagementRoutes() {
 			pool.POST("/proxies/batch", s.mgmt.BatchImportProxies)
 			pool.POST("/proxies/pick", s.mgmt.PickNextAvailableProxy)
 
-			// Groups
+			// Groups (legacy)
 			pool.GET("/groups", s.mgmt.ListGroups)
 			pool.POST("/groups", s.mgmt.CreateGroup)
 			pool.PUT("/groups/:id", s.mgmt.UpdateGroup)
 			pool.DELETE("/groups/:id", s.mgmt.DeleteGroup)
+
+			// Group Runs (DB-backed group execution state)
+			pool.GET("/group-runs", s.mgmt.ListGroupRuns)
+			pool.GET("/group-runs/:id", s.mgmt.GetGroupRun)
+			pool.POST("/group-runs", s.mgmt.CreateGroupRun)
+			pool.PUT("/group-runs/:id", s.mgmt.UpdateGroupRun)
+			pool.DELETE("/group-runs/:id", s.mgmt.DeleteGroupRun)
+			pool.GET("/group-runs/:id/json", s.mgmt.GetGroupRunJSON)
+			pool.POST("/group-runs/:id/members", s.mgmt.AddGroupRunMembers)
+			pool.PUT("/group-runs/:id/members/:mid", s.mgmt.UpdateGroupRunMember)
+			pool.PATCH("/group-runs/:id/members/:mid/status", s.mgmt.UpdateGroupRunMemberStatus)
+			pool.DELETE("/group-runs/:id/members", s.mgmt.DeleteGroupRunMembers)
 		}
 	}
 }
