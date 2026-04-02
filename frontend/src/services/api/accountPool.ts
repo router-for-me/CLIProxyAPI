@@ -124,7 +124,7 @@ export const accountPoolApi = {
     apiClient.post<PoolProxy>(`${BASE}/proxies/pick`, { type }),
 
   // Groups
-  listGroups: (params?: { limit?: number; offset?: number; search?: string }) =>
+  listGroups: (params?: { limit?: number; offset?: number; group_id?: string; leader_email?: string }) =>
     apiClient.get<ListResponse<AccountGroup>>(`${BASE}/groups`, { params }),
 
   createGroup: (data: Partial<AccountGroup>) =>
