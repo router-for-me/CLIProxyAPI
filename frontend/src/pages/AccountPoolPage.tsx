@@ -394,48 +394,76 @@ export function AccountPoolPage() {
                       <tr key={`${r.id}-detail`}>
                         <td colSpan={8} style={{ padding: 0, borderBottom: '1px solid var(--border-color)' }}>
                           {detailLoading ? (
-                            <div style={{ padding: '12px 20px', color: 'var(--text-secondary)', fontSize: '13px' }}>Loading members...</div>
-                          ) : expandedRun && expandedRun.members && expandedRun.members.length > 0 ? (
-                            <table style={{ width: '100%', borderCollapse: 'collapse', backgroundColor: 'var(--bg-secondary)' }}>
-                              <thead>
-                                <tr>
-                                  <th style={{ ...cellStyle, fontWeight: 600, textAlign: 'left', fontSize: '12px', paddingLeft: '40px' }}>Member ID</th>
-                                  <th style={{ ...cellStyle, fontWeight: 600, textAlign: 'left', fontSize: '12px' }}>Proxy</th>
-                                  <th style={{ ...cellStyle, fontWeight: 600, textAlign: 'left', fontSize: '12px' }}>Port</th>
-                                  <th style={{ ...cellStyle, fontWeight: 600, textAlign: 'left', fontSize: '12px' }}>Profile ID</th>
-                                  <th style={{ ...cellStyle, fontWeight: 600, textAlign: 'left', fontSize: '12px' }}>Status</th>
-                                  <th style={{ ...cellStyle, fontWeight: 600, textAlign: 'left', fontSize: '12px' }}>Message</th>
-                                </tr>
-                              </thead>
-                              <tbody>
-                                {expandedRun.members.map((m) => (
-                                  <tr key={m.id}>
-                                    <td style={{ ...cellStyle, fontSize: '12px', paddingLeft: '40px' }}>{m.member_id}</td>
-                                    <td style={{ ...cellStyle, fontFamily: 'monospace', fontSize: '11px', maxWidth: '250px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
-                                        {m.proxy ? m.proxy.replace(/\/\/.*@/, '//***@') : '-'}
-                                        {m.proxy && <CopyButton value={m.proxy} />}
-                                      </span>
-                                    </td>
-                                    <td style={{ ...cellStyle, fontSize: '12px', fontFamily: 'monospace' }}>{m.port || '-'}</td>
-                                    <td style={{ ...cellStyle, fontSize: '11px', fontFamily: 'monospace', maxWidth: '150px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                      {m.profile_id ? (
-                                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
-                                          {m.profile_id.slice(0, 8)}...
-                                          <CopyButton value={m.profile_id} />
-                                        </span>
-                                      ) : '-'}
-                                    </td>
-                                    <td style={cellStyle}><StatusBadge status={m.status} /></td>
-                                    <td style={{ ...cellStyle, fontSize: '11px', color: 'var(--text-secondary)', maxWidth: '200px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                      {m.message || '-'}
-                                    </td>
-                                  </tr>
-                                ))}
-                              </tbody>
-                            </table>
+                            <div style={{ padding: '12px 20px', color: 'var(--text-secondary)', fontSize: '13px' }}>Loading...</div>
+                          ) : expandedRun ? (
+                            <div style={{ backgroundColor: 'var(--bg-secondary)' }}>
+                              {/* Leader info */}
+                              <div style={{ padding: '10px 16px 6px 40px', fontSize: '12px', borderBottom: '1px solid var(--border-color)' }}>
+                                <span style={{ fontWeight: 600, marginRight: '12px' }}>Leader:</span>
+                                <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', marginRight: '12px' }}>
+                                  {expandedRun.leader.email}
+                                  <CopyButton value={expandedRun.leader.email} />
+                                </span>
+                                <span style={{ color: 'var(--text-secondary)', marginRight: '4px' }}>pwd:</span>
+                                <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', fontFamily: 'monospace', marginRight: '12px' }}>
+                                  {expandedRun.leader.password.slice(0, 3)}***
+                                  <CopyButton value={expandedRun.leader.password} />
+                                </span>
+                                <span style={{ color: 'var(--text-secondary)', marginRight: '4px' }}>totp:</span>
+                                <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', fontFamily: 'monospace' }}>
+                                  {expandedRun.leader.totp_secret.slice(0, 4)}***
+                                  <CopyButton value={expandedRun.leader.totp_secret} />
+                                </span>
+                              </div>
+                              {/* Members table */}
+                              {expandedRun.members && expandedRun.members.length > 0 ? (
+                                <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                                  <thead>
+                                    <tr>
+                                      <th style={{ ...cellStyle, fontWeight: 600, textAlign: 'left', fontSize: '12px', paddingLeft: '40px' }}>Email</th>
+                                      <th style={{ ...cellStyle, fontWeight: 600, textAlign: 'left', fontSize: '12px' }}>Password</th>
+                                      <th style={{ ...cellStyle, fontWeight: 600, textAlign: 'left', fontSize: '12px' }}>TOTP</th>
+                                      <th style={{ ...cellStyle, fontWeight: 600, textAlign: 'left', fontSize: '12px' }}>Port</th>
+                                      <th style={{ ...cellStyle, fontWeight: 600, textAlign: 'left', fontSize: '12px' }}>Status</th>
+                                      <th style={{ ...cellStyle, fontWeight: 600, textAlign: 'left', fontSize: '12px' }}>Message</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {expandedRun.members.map((m) => (
+                                      <tr key={m.member_id}>
+                                        <td style={{ ...cellStyle, fontSize: '12px', paddingLeft: '40px' }}>
+                                          <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                                            {m.email}
+                                            <CopyButton value={m.email} />
+                                          </span>
+                                        </td>
+                                        <td style={{ ...cellStyle, fontFamily: 'monospace', fontSize: '12px' }}>
+                                          <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                                            {m.password.slice(0, 3)}***
+                                            <CopyButton value={m.password} />
+                                          </span>
+                                        </td>
+                                        <td style={{ ...cellStyle, fontFamily: 'monospace', fontSize: '12px' }}>
+                                          <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                                            {m.totp_secret.slice(0, 4)}***
+                                            <CopyButton value={m.totp_secret} />
+                                          </span>
+                                        </td>
+                                        <td style={{ ...cellStyle, fontSize: '12px', fontFamily: 'monospace' }}>{m.port || '-'}</td>
+                                        <td style={cellStyle}><StatusBadge status={m.status} /></td>
+                                        <td style={{ ...cellStyle, fontSize: '11px', color: 'var(--text-secondary)', maxWidth: '200px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                          {m.message || '-'}
+                                        </td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              ) : (
+                                <div style={{ padding: '12px 40px', color: 'var(--text-tertiary)', fontSize: '13px' }}>No members in this run</div>
+                              )}
+                            </div>
                           ) : (
-                            <div style={{ padding: '12px 40px', color: 'var(--text-tertiary)', fontSize: '13px' }}>No members in this run</div>
+                            <div style={{ padding: '12px 40px', color: 'var(--text-tertiary)', fontSize: '13px' }}>No data</div>
                           )}
                         </td>
                       </tr>

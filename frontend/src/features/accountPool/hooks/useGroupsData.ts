@@ -1,12 +1,12 @@
 import { useState, useCallback } from 'react';
-import { accountPoolApi, type GroupRun, type GroupRunWithMembers, type ListResponse } from '@/services/api/accountPool';
+import { accountPoolApi, type GroupRun, type GroupRunJSON, type ListResponse } from '@/services/api/accountPool';
 
 export function useGroupRunsData() {
   const [groupRuns, setGroupRuns] = useState<GroupRun[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-  const [expandedRun, setExpandedRun] = useState<GroupRunWithMembers | null>(null);
+  const [expandedRun, setExpandedRun] = useState<GroupRunJSON | null>(null);
   const [expandedRunId, setExpandedRunId] = useState<number | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
 
@@ -33,7 +33,7 @@ export function useGroupRunsData() {
     setExpandedRunId(id);
     setDetailLoading(true);
     try {
-      const data = await accountPoolApi.getGroupRun(id) as GroupRunWithMembers;
+      const data = await accountPoolApi.getGroupRunJSON(id) as GroupRunJSON;
       setExpandedRun(data);
     } catch {
       setExpandedRun(null);

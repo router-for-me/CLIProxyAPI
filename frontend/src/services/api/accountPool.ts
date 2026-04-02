@@ -70,6 +70,36 @@ export interface GroupRunWithMembers extends GroupRun {
   members: GroupMember[];
 }
 
+export interface GroupRunJSONLeader {
+  leader_id: number;
+  email: string;
+  password: string;
+  recovery_email: string;
+  totp_secret: string;
+  proxy: string;
+  profile_id: string;
+}
+
+export interface GroupRunJSONMember {
+  member_id: number;
+  email: string;
+  password: string;
+  recovery_email: string;
+  totp_secret: string;
+  proxy: string;
+  port: number;
+  profile_id: string;
+  status: string;
+  message: string;
+}
+
+export interface GroupRunJSON {
+  group_id: number;
+  leader: GroupRunJSONLeader;
+  members: GroupRunJSONMember[];
+  to_remove: string[] | null;
+}
+
 export interface ListResponse<T> {
   items: T[] | null;
   total: number;
@@ -171,6 +201,9 @@ export const accountPoolApi = {
 
   getGroupRun: (id: number) =>
     apiClient.get<GroupRunWithMembers>(`${BASE}/group-runs/${id}`),
+
+  getGroupRunJSON: (id: number) =>
+    apiClient.get<GroupRunJSON>(`${BASE}/group-runs/${id}/json`),
 
   updateGroupRun: (id: number, data: Partial<GroupRun>) =>
     apiClient.put<GroupRun>(`${BASE}/group-runs/${id}`, data),
