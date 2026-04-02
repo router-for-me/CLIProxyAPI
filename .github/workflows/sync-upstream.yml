@@ -1,0 +1,76 @@
+name: 自动同步上游
+
+on:
+  schedule:
+    # 每天 UTC 02:00（北京时间 10:00）自动同步
+    - cron: '0 2 * * *'
+  workflow_dispatch: # 允许手动触发
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+
+    steps:
+      - name: Checkout 代码
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: 配置 Git 用户
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: 同步上游 router-for-me/CLIProxyAPI
+        run: |
+          echo "🔄 开始同步上游仓库..."
+          git remote add upstream https://github.com/router-for-me/CLIProxyAPI.git || true
+          git fetch upstream
+
+          echo "📊 上游新提交："
+          git log --oneline main..upstream/main | head -20 || echo "无新提交"
+
+          # 检查是否有新提交
+          if [ "$(git rev-parse main)" = "$(git merge-base main upstream/main)" ] && [ "$(git rev-parse upstream/main)" = "$(git rev-parse main)" ]; then
+            echo "✅ 已是最新，无需同步"
+            exit 0
+          fi
+
+          echo "🔀 合并上游代码..."
+          if git merge upstream/main --no-edit; then
+            echo "✅ 合并成功"
+            git push origin main
+            echo "🚀 已推送到 GitHub"
+          else
+            echo "❌ 合并失败，可能有冲突"
+            git merge --abort
+            exit 1
+          fi
+
+      - name: 生成同步报告
+        if: success()
+        run: |
+          echo "## ✅ 同步成功" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**上游仓库**: router-for-me/CLIProxyAPI" >> $GITHUB_STEP_SUMMARY
+          echo "**同步时间**: $(date +'%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 最近提交" >> $GITHUB_STEP_SUMMARY
+          git log --oneline HEAD~10..HEAD >> $GITHUB_STEP_SUMMARY || true
+
+      - name: 同步失败通知
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: '⚠️ 上游同步失败 - ' + new Date().toISOString().split('T')[0],
+              body: `## 同步失败报告\n\n**失败时间**: ${new Date().toISOString()}\n**上游仓库**: router-for-me/CLIProxyAPI\n**Workflow 运行**: ${context.payload.repository.html_url}/actions/runs/${context.runId}\n\n### 可能原因\n\n- main 分支的自定义补丁与上游代码冲突\n- 上游仓库暂时不可访问\n\n### 建议操作\n\n1. 查看 [Actions 日志](${context.payload.repository.html_url}/actions/runs/${context.runId}) 了解详细错误\n2. 本地手动解决冲突：\n   \`\`\`bash\n   cd ~/github/CLIProxyAPI && git checkout main\n   git fetch upstream && git merge upstream/main\n   # 解决冲突后\n   git push origin main\n   \`\`\``
+            })
