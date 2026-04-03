@@ -216,6 +216,41 @@ func (h *Handler) UpdateGroupRunMemberStatus(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
 
+func (h *Handler) ReplaceGroupRunMember(c *gin.Context) {
+	if !h.requireAccountPool(c) {
+		return
+	}
+	runID, ok := parseID(c)
+	if !ok {
+		return
+	}
+	memberID, ok := parseMemberID(c)
+	if !ok {
+		return
+	}
+	var body struct {
+		Reason     string `json:"reason"`
+		ReuseProxy *bool  `json:"reuse_proxy"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if body.Reason == "" {
+		body.Reason = "failed"
+	}
+	reuseProxy := true
+	if body.ReuseProxy != nil {
+		reuseProxy = *body.ReuseProxy
+	}
+	result, err := h.accountPool.ReplaceMember(c.Request.Context(), runID, memberID, body.Reason, reuseProxy)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, result)
+}
+
 func (h *Handler) DeleteGroupRunMembers(c *gin.Context) {
 	if !h.requireAccountPool(c) {
 		return

@@ -275,6 +275,109 @@ func (s *Store) DeleteGroupMembers(ctx context.Context, runID int64) error {
 	return err
 }
 
+// ReplaceMemberResult holds the result of a member replacement.
+type ReplaceMemberResult struct {
+	OldMemberID int64                  `json:"old_member_id"`
+	OldEmail    string                 `json:"old_email"`
+	NewMember   map[string]interface{} `json:"new_member"`
+}
+
+// ReplaceMember atomically replaces a failed member in a group run with a new available member.
+// It marks the old member's pool status to the given reason, picks a new available member,
+// and updates the group_member row to point to the new member.
+func (s *Store) ReplaceMember(ctx context.Context, runID, memberID int64, reason string, reuseProxy bool) (*ReplaceMemberResult, error) {
+	gmTable := s.tableName("account_pool_group_members")
+	poolTable := s.tableName("account_pool_members")
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	// 1. Lock and fetch the existing group_member row
+	var gmID, oldPoolMemberID int64
+	var proxy string
+	var port int
+	gmQuery := fmt.Sprintf(`SELECT gm.id, gm.member_id, gm.proxy, gm.port
+		FROM %s gm WHERE gm.group_run_id = $1 AND gm.member_id = $2 FOR UPDATE`, gmTable)
+	err = tx.QueryRowContext(ctx, gmQuery, runID, memberID).Scan(&gmID, &oldPoolMemberID, &proxy, &port)
+	if err != nil {
+		return nil, fmt.Errorf("group_member not found: %w", err)
+	}
+
+	// Get old member email for reporting
+	var oldEmail string
+	_ = tx.QueryRowContext(ctx, fmt.Sprintf("SELECT email FROM %s WHERE id = $1", poolTable), oldPoolMemberID).Scan(&oldEmail)
+
+	// 2. Mark old member's pool status
+	if reason == "" {
+		reason = "failed"
+	}
+	_, err = tx.ExecContext(ctx, fmt.Sprintf("UPDATE %s SET status = $1, updated_at = NOW() WHERE id = $2", poolTable), reason, oldPoolMemberID)
+	if err != nil {
+		return nil, fmt.Errorf("mark old member: %w", err)
+	}
+
+	// 3. Pick next available member (FOR UPDATE SKIP LOCKED)
+	pickQuery := fmt.Sprintf(`SELECT id, email, password, recovery_email, totp_secret
+		FROM %s WHERE status = 'available' ORDER BY id ASC LIMIT 1 FOR UPDATE SKIP LOCKED`, poolTable)
+	var newID int64
+	var newEmail, newPwd, newRecovery, newTOTP string
+	err = tx.QueryRowContext(ctx, pickQuery).Scan(&newID, &newEmail, &newPwd, &newRecovery, &newTOTP)
+	if err != nil {
+		return nil, fmt.Errorf("no available member to pick: %w", err)
+	}
+
+	// 4. Mark new member as used
+	_, err = tx.ExecContext(ctx, fmt.Sprintf("UPDATE %s SET status = 'used', updated_at = NOW() WHERE id = $1", poolTable), newID)
+	if err != nil {
+		return nil, fmt.Errorf("mark new member used: %w", err)
+	}
+
+	// 5. Update the group_member row to point to new member
+	newProxy := proxy // reuse by default
+	if !reuseProxy {
+		// Pick a new proxy
+		proxyTable := s.tableName("account_pool_proxies")
+		var proxyURL string
+		proxyQuery := fmt.Sprintf(`SELECT proxy_url FROM %s WHERE type = 'member' AND status = 'available'
+			ORDER BY id ASC LIMIT 1 FOR UPDATE SKIP LOCKED`, proxyTable)
+		if err := tx.QueryRowContext(ctx, proxyQuery).Scan(&proxyURL); err == nil {
+			newProxy = proxyURL
+			_, _ = tx.ExecContext(ctx, fmt.Sprintf("UPDATE %s SET status = 'used', updated_at = NOW() WHERE proxy_url = $1", proxyTable), proxyURL)
+		}
+		// If no proxy available, keep old proxy
+	}
+
+	updateGM := fmt.Sprintf(`UPDATE %s SET member_id = $1, proxy = $2, profile_id = '', status = 'new',
+		message = $3, updated_at = NOW() WHERE id = $4`, gmTable)
+	msg := fmt.Sprintf("replaced %s (%s)", oldEmail, reason)
+	_, err = tx.ExecContext(ctx, updateGM, newID, newProxy, msg, gmID)
+	if err != nil {
+		return nil, fmt.Errorf("update group_member: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit: %w", err)
+	}
+
+	return &ReplaceMemberResult{
+		OldMemberID: oldPoolMemberID,
+		OldEmail:    oldEmail,
+		NewMember: map[string]interface{}{
+			"member_id":      newID,
+			"email":          newEmail,
+			"password":       newPwd,
+			"recovery_email": newRecovery,
+			"totp_secret":    newTOTP,
+			"proxy":          newProxy,
+			"port":           port,
+			"status":         "new",
+		},
+	}, nil
+}
+
 // GetGroupRunJSON returns the groupN.json-compatible structure by JOINing credentials.
 func (s *Store) GetGroupRunJSON(ctx context.Context, id int64) (map[string]interface{}, error) {
 	runTable := s.tableName("account_pool_group_runs")

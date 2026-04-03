@@ -705,6 +705,7 @@ func (s *Server) registerManagementRoutes() {
 			pool.POST("/group-runs/:id/members", s.mgmt.AddGroupRunMembers)
 			pool.PUT("/group-runs/:id/members/:mid", s.mgmt.UpdateGroupRunMember)
 			pool.PATCH("/group-runs/:id/members/:mid/status", s.mgmt.UpdateGroupRunMemberStatus)
+			pool.POST("/group-runs/:id/members/:mid/replace", s.mgmt.ReplaceGroupRunMember)
 			pool.DELETE("/group-runs/:id/members", s.mgmt.DeleteGroupRunMembers)
 		}
 	}
