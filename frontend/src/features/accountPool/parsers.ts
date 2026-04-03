@@ -30,12 +30,17 @@ export interface ParseProxyResult {
   errors: ParseError[];
 }
 
-const DELIMITER = '----';
+/** Auto-detect delimiter for a line: prefer "----", fall back to "|" */
+function detectDelimiter(line: string): string {
+  if (line.includes('----')) return '----';
+  if (line.includes('|')) return '|';
+  return '----';
+}
 
 /**
  * Parse batch account import text.
  *
- * Accepted line formats (fields separated by `----`):
+ * Accepted line formats (fields separated by `----` or `|`):
  *   4 fields: email----password----recovery_email----totp_secret
  *   3 fields: email----password----totp_secret  (recovery_email defaults to '')
  */
@@ -50,7 +55,8 @@ export function parseAccountLines(text: string): ParseAccountResult {
     if (!trimmed) return;
 
     const lineNumber = index + 1;
-    const parts = trimmed.split(DELIMITER);
+    const delimiter = detectDelimiter(trimmed);
+    const parts = trimmed.split(delimiter);
 
     if (parts.length === 4) {
       accounts.push({
@@ -70,7 +76,7 @@ export function parseAccountLines(text: string): ParseAccountResult {
       errors.push({
         line: lineNumber,
         raw: trimmed,
-        reason: `Expected 3 or 4 fields separated by "${DELIMITER}", got ${parts.length}`
+        reason: `Expected 3 or 4 fields separated by "----" or "|", got ${parts.length}`
       });
     }
   });
@@ -81,7 +87,7 @@ export function parseAccountLines(text: string): ParseAccountResult {
 /**
  * Parse batch proxy import text.
  *
- * Accepted line formats (fields separated by `----`):
+ * Accepted line formats (fields separated by `----` or `|`):
  *   2 fields: proxy_url----type
  *   1 field:  proxy_url  (type defaults to defaultType)
  */
@@ -96,7 +102,8 @@ export function parseProxyLines(text: string, defaultType: string): ParseProxyRe
     if (!trimmed) return;
 
     const lineNumber = index + 1;
-    const parts = trimmed.split(DELIMITER);
+    const delimiter = detectDelimiter(trimmed);
+    const parts = trimmed.split(delimiter);
 
     if (parts.length === 2) {
       proxies.push({
@@ -112,7 +119,7 @@ export function parseProxyLines(text: string, defaultType: string): ParseProxyRe
       errors.push({
         line: lineNumber,
         raw: trimmed,
-        reason: `Expected 1 or 2 fields separated by "${DELIMITER}", got ${parts.length}`
+        reason: `Expected 1 or 2 fields separated by "----" or "|", got ${parts.length}`
       });
     }
   });
