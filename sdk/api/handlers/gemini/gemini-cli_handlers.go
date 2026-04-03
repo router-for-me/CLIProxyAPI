@@ -50,6 +50,16 @@ func (h *GeminiCLIAPIHandler) Models() []map[string]any {
 // CLIHandler handles CLI-specific requests for Gemini API operations.
 // It restricts access to localhost only and routes requests to appropriate internal handlers.
 func (h *GeminiCLIAPIHandler) CLIHandler(c *gin.Context) {
+	if h.Cfg == nil || !h.Cfg.EnableGeminiCLIEndpoint {
+		c.JSON(http.StatusForbidden, handlers.ErrorResponse{
+			Error: handlers.ErrorDetail{
+				Message: "Gemini CLI endpoint is disabled",
+				Type:    "forbidden",
+			},
+		})
+		return
+	}
+
 	requestHost := c.Request.Host
 	requestHostname := requestHost
 	if hostname, _, errSplitHostPort := net.SplitHostPort(requestHost); errSplitHostPort == nil {
