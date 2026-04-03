@@ -5,6 +5,8 @@ package management
 import (
 	"crypto/subtle"
 	"fmt"
+	log "github.com/sirupsen/logrus"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -148,6 +150,7 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 
 		clientIP := c.ClientIP()
 		localClient := clientIP == "127.0.0.1" || clientIP == "::1"
+
 		cfg := h.cfg
 		var (
 			allowRemote bool
@@ -320,4 +323,117 @@ func (h *Handler) updateStringField(c *gin.Context, set func(string)) {
 	}
 	set(*body.Value)
 	h.persist(c)
+}
+
+type ModelCheckResult struct {
+	Model      string `json:"model"`
+	StatusCode int    `json:"status_code"`
+	Response   string `json:"response"`
+	RespBody   string `json:"respBody,omitempty"`
+	Error      string `json:"error,omitempty"`
+}
+
+type CompGroupResult struct {
+	Compatibility string             `json:"compatibility"`
+	Results       []ModelCheckResult `json:"results"`
+}
+
+func (h *Handler) AllAPICall(cc *gin.Context) {
+	ctx := cc.Request.Context()
+
+	httpClient := &http.Client{
+		Timeout:   defaultAPICallTimeout,
+		Transport: h.apiCallTransport(h.authByIndex("")),
+	}
+
+	var (
+		wg             sync.WaitGroup
+		mu             sync.Mutex
+		groupedResults = make(map[string][]ModelCheckResult)
+	)
+
+	maxConcurrency := 10
+	semaphore := make(chan struct{}, maxConcurrency)
+
+	for _, compatibility := range h.cfg.OpenAICompatibility {
+		comp := compatibility
+
+		if len(comp.APIKeyEntries) == 0 {
+			log.Printf("[%s] skipping: no API keys found\n", comp.Name)
+			continue
+		}
+
+		apiKey := comp.APIKeyEntries[0].APIKey
+		baseURL := comp.BaseURL
+		compName := comp.Name
+
+		for _, model := range comp.Models {
+			mod := model
+
+			wg.Add(1)
+			go func(mName string) {
+				defer wg.Done()
+
+				semaphore <- struct{}{}
+				defer func() { <-semaphore }()
+
+				data := fmt.Sprintf(`{"model":"%s","messages":[{"role":"user","content":"Hi"}],"stream":false,"max_tokens":5}`, mName)
+				req, err := http.NewRequestWithContext(ctx, "POST", baseURL+"/chat/completions", strings.NewReader(data))
+				if err != nil {
+					mu.Lock()
+					groupedResults[compName] = append(groupedResults[compName], ModelCheckResult{
+						Model:    mName,
+						Response: "error",
+						Error:    fmt.Sprintf("failed to create request: %v", err),
+					})
+					mu.Unlock()
+					return
+				}
+
+				req.Header.Set("Content-Type", "application/json")
+				req.Header.Set("Authorization", "Bearer "+apiKey)
+
+				modelResult := ModelCheckResult{
+					Model:      mName,
+					StatusCode: 0,
+					Response:   "error",
+				}
+
+				resp, errDo := httpClient.Do(req)
+				if errDo == nil {
+
+					modelResult.StatusCode = resp.StatusCode
+					if resp.StatusCode == http.StatusOK {
+						modelResult.Response = "successful"
+					}
+
+					if respBody, readErr := io.ReadAll(resp.Body); readErr == nil {
+						modelResult.RespBody = string(respBody)
+					}
+					resp.Body.Close()
+				} else {
+
+					log.Printf("[%s-%s] network failed: %v\n", compName, mName, errDo)
+					modelResult.Error = errDo.Error()
+				}
+				
+				mu.Lock()
+				groupedResults[compName] = append(groupedResults[compName], modelResult)
+				mu.Unlock()
+
+			}(mod.Name)
+		}
+	}
+
+	wg.Wait()
+
+	finalResponse := make([]CompGroupResult, 0, len(groupedResults))
+	for name, models := range groupedResults {
+		finalResponse = append(finalResponse, CompGroupResult{
+			Compatibility: name,
+			Results:       models,
+		})
+	}
+
+	cc.JSON(http.StatusOK, gin.H{"data": finalResponse})
 }
