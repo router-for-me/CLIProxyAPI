@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	copilotauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/copilot"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
@@ -74,7 +75,7 @@ func TestUseGitHubCopilotResponsesEndpoint_CodexModel(t *testing.T) {
 }
 
 func TestUseGitHubCopilotResponsesEndpoint_RegistryResponsesOnlyModel(t *testing.T) {
-	t.Parallel()
+	// Not parallel: shares global model registry with DynamicRegistryWinsOverStatic.
 	if !useGitHubCopilotResponsesEndpoint(sdktranslator.FromString("openai"), "gpt-5.4") {
 		t.Fatal("expected responses-only registry model to use /responses")
 	}
@@ -84,7 +85,7 @@ func TestUseGitHubCopilotResponsesEndpoint_RegistryResponsesOnlyModel(t *testing
 }
 
 func TestUseGitHubCopilotResponsesEndpoint_DynamicRegistryWinsOverStatic(t *testing.T) {
-	t.Parallel()
+	// Not parallel: mutates global model registry, conflicts with RegistryResponsesOnlyModel.
 
 	reg := registry.GetGlobalRegistry()
 	clientID := "github-copilot-test-client"
@@ -704,5 +705,113 @@ func TestStripUnsupportedBetas_AllBetasStripped(t *testing.T) {
 	betas := gjson.GetBytes(result, "betas")
 	if betas.Exists() {
 		t.Fatal("betas field should be deleted when all betas are stripped")
+	}
+}
+
+func TestCopilotModelEntry_Limits(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		capabilities map[string]any
+		wantNil      bool
+		wantPrompt   int
+		wantOutput   int
+		wantContext  int
+	}{
+		{
+			name:         "nil capabilities",
+			capabilities: nil,
+			wantNil:      true,
+		},
+		{
+			name:         "no limits key",
+			capabilities: map[string]any{"family": "claude-opus-4.6"},
+			wantNil:      true,
+		},
+		{
+			name:         "limits is not a map",
+			capabilities: map[string]any{"limits": "invalid"},
+			wantNil:      true,
+		},
+		{
+			name: "all zero values",
+			capabilities: map[string]any{
+				"limits": map[string]any{
+					"max_context_window_tokens": float64(0),
+					"max_prompt_tokens":         float64(0),
+					"max_output_tokens":         float64(0),
+				},
+			},
+			wantNil: true,
+		},
+		{
+			name: "individual account limits (128K prompt)",
+			capabilities: map[string]any{
+				"limits": map[string]any{
+					"max_context_window_tokens": float64(144000),
+					"max_prompt_tokens":         float64(128000),
+					"max_output_tokens":         float64(64000),
+				},
+			},
+			wantNil:     false,
+			wantPrompt:  128000,
+			wantOutput:  64000,
+			wantContext: 144000,
+		},
+		{
+			name: "business account limits (168K prompt)",
+			capabilities: map[string]any{
+				"limits": map[string]any{
+					"max_context_window_tokens": float64(200000),
+					"max_prompt_tokens":         float64(168000),
+					"max_output_tokens":         float64(32000),
+				},
+			},
+			wantNil:     false,
+			wantPrompt:  168000,
+			wantOutput:  32000,
+			wantContext: 200000,
+		},
+		{
+			name: "partial limits (only prompt)",
+			capabilities: map[string]any{
+				"limits": map[string]any{
+					"max_prompt_tokens": float64(128000),
+				},
+			},
+			wantNil:    false,
+			wantPrompt: 128000,
+			wantOutput: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			entry := copilotauth.CopilotModelEntry{
+				ID:           "claude-opus-4.6",
+				Capabilities: tt.capabilities,
+			}
+			limits := entry.Limits()
+			if tt.wantNil {
+				if limits != nil {
+					t.Fatalf("expected nil limits, got %+v", limits)
+				}
+				return
+			}
+			if limits == nil {
+				t.Fatal("expected non-nil limits, got nil")
+			}
+			if limits.MaxPromptTokens != tt.wantPrompt {
+				t.Errorf("MaxPromptTokens = %d, want %d", limits.MaxPromptTokens, tt.wantPrompt)
+			}
+			if limits.MaxOutputTokens != tt.wantOutput {
+				t.Errorf("MaxOutputTokens = %d, want %d", limits.MaxOutputTokens, tt.wantOutput)
+			}
+			if tt.wantContext > 0 && limits.MaxContextWindowTokens != tt.wantContext {
+				t.Errorf("MaxContextWindowTokens = %d, want %d", limits.MaxContextWindowTokens, tt.wantContext)
+			}
+		})
 	}
 }

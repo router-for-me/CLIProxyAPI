@@ -1626,6 +1626,21 @@ func FetchGitHubCopilotModels(ctx context.Context, auth *cliproxyauth.Auth, cfg 
 			m.MaxCompletionTokens = defaultCopilotMaxCompletionTokens
 		}
 
+		// Override with real limits from the Copilot API when available.
+		// The API returns per-account limits (individual vs business) under
+		// capabilities.limits, which are more accurate than our static
+		// fallback values. We use max_prompt_tokens as ContextLength because
+		// that's the hard limit the Copilot API enforces on prompt size —
+		// exceeding it triggers "prompt token count exceeds the limit" errors.
+		if limits := entry.Limits(); limits != nil {
+			if limits.MaxPromptTokens > 0 {
+				m.ContextLength = limits.MaxPromptTokens
+			}
+			if limits.MaxOutputTokens > 0 {
+				m.MaxCompletionTokens = limits.MaxOutputTokens
+			}
+		}
+
 		models = append(models, m)
 	}
 
