@@ -66,6 +66,13 @@ error-logs-max-files: 10
 # When false, disable in-memory usage statistics aggregation
 usage-statistics-enabled: false
 
+# When true, automatically restore and periodically persist usage statistics snapshots.
+usage-statistics-persistence-enabled: true
+
+# Optional path override for the usage statistics snapshot file.
+# Empty uses WRITABLE_PATH/data/usage-statistics.json or <config dir>/data/usage-statistics.json.
+# usage-statistics-persistence-file: ""
+
 # Proxy URL. Supports socks5/http/https protocols. Example: socks5://user:pass@192.168.1.1:1080/
 # Per-entry proxy-url also supports "direct" or "none" to bypass both the global proxy-url and environment proxies explicitly.
 proxy-url: ""

@@ -15,7 +15,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
-	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
+	internalusage "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/wsrelay"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
@@ -89,6 +89,9 @@ type Service struct {
 
 	// wsGateway manages websocket Gemini providers.
 	wsGateway *wsrelay.Manager
+
+	// usagePersistence persists usage statistics snapshots across service restarts.
+	usagePersistence *internalusage.PersistenceManager
 }
 
 // RegisterUsagePlugin registers a usage plugin on the global usage manager.
@@ -474,7 +477,7 @@ func (s *Service) rebindExecutors() {
 //
 // Returns:
 //   - error: An error if the service fails to start or run
-func (s *Service) Run(ctx context.Context) error {
+func (s *Service) Run(ctx context.Context) (runErr error) {
 	if s == nil {
 		return fmt.Errorf("cliproxy: service is nil")
 	}
@@ -483,12 +486,24 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 
 	usage.StartDefault(ctx)
+	if internalusage.EnabledForConfig(s.cfg) {
+		s.usagePersistence = internalusage.NewPersistenceManager(s.cfg, s.configPath, internalusage.GetRequestStatistics())
+		if err := s.usagePersistence.Restore(); err != nil {
+			log.WithError(err).Warn("failed to restore usage statistics snapshot")
+		}
+		s.usagePersistence.Start(ctx)
+	}
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer shutdownCancel()
 	defer func() {
 		if err := s.Shutdown(shutdownCtx); err != nil {
 			log.Errorf("service shutdown returned error: %v", err)
+			if runErr == nil {
+				runErr = err
+				return
+			}
+			runErr = errors.Join(runErr, err)
 		}
 	}()
 
@@ -650,6 +665,9 @@ func (s *Service) Run(ctx context.Context) error {
 			s.coreManager.SetSelector(selector)
 		}
 
+		oldPersistenceEnabled := internalusage.EnabledForConfig(s.cfg)
+		oldPersistencePath := internalusage.ResolvePersistencePathForTesting(s.cfg, s.configPath)
+
 		s.applyRetryConfig(newCfg)
 		s.applyPprofConfig(newCfg)
 		if s.server != nil {
@@ -661,6 +679,26 @@ func (s *Service) Run(ctx context.Context) error {
 		if s.coreManager != nil {
 			s.coreManager.SetConfig(newCfg)
 			s.coreManager.SetOAuthModelAlias(newCfg.OAuthModelAlias)
+		}
+		newPersistenceEnabled := internalusage.EnabledForConfig(newCfg)
+		newPersistencePath := internalusage.ResolvePersistencePathForTesting(newCfg, s.configPath)
+		if oldPersistenceEnabled != newPersistenceEnabled || oldPersistencePath != newPersistencePath {
+			if s.usagePersistence != nil {
+				if err := s.usagePersistence.StopAndSave(); err != nil {
+					log.WithError(err).Warn("failed to persist usage statistics snapshot before config reload")
+				}
+				s.usagePersistence = nil
+			}
+			if newPersistenceEnabled {
+				s.usagePersistence = internalusage.NewPersistenceManager(newCfg, s.configPath, internalusage.GetRequestStatistics())
+				if err := s.usagePersistence.Restore(); err != nil {
+					log.WithError(err).Warn("failed to restore usage statistics snapshot after config reload")
+				}
+				if err := s.usagePersistence.Save(); err != nil {
+					log.WithError(err).Warn("failed to seed usage statistics snapshot after config reload")
+				}
+				s.usagePersistence.Start(ctx)
+			}
 		}
 		s.rebindExecutors()
 	}
@@ -763,6 +801,16 @@ func (s *Service) Shutdown(ctx context.Context) error {
 					shutdownErr = err
 				}
 			}
+		}
+
+		if s.usagePersistence != nil {
+			if err := s.usagePersistence.StopAndSave(); err != nil {
+				log.WithError(err).Warn("failed to persist usage statistics snapshot during shutdown")
+				if shutdownErr == nil {
+					shutdownErr = err
+				}
+			}
+			s.usagePersistence = nil
 		}
 
 		usage.StopDefault()

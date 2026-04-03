@@ -94,3 +94,21 @@ func TestRequestStatisticsMergeSnapshotDedupIgnoresLatency(t *testing.T) {
 		t.Fatalf("details len = %d, want 1", len(details))
 	}
 }
+
+func TestRequestStatisticsRecordFallsBackToProviderIdentifier(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Record(context.Background(), coreusage.Record{
+		Provider:    "gemini",
+		Model:       "gpt-5.4",
+		RequestedAt: time.Date(2026, 3, 20, 12, 0, 0, 0, time.UTC),
+		Detail: coreusage.Detail{
+			InputTokens: 1,
+			TotalTokens: 1,
+		},
+	})
+
+	snapshot := stats.Snapshot()
+	if _, ok := snapshot.APIs["gemini"]; !ok {
+		t.Fatal("expected provider fallback identifier to be recorded")
+	}
+}

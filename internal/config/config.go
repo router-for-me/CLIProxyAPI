@@ -64,6 +64,10 @@ type Config struct {
 
 	// UsageStatisticsEnabled toggles in-memory usage aggregation; when false, usage data is discarded.
 	UsageStatisticsEnabled bool `yaml:"usage-statistics-enabled" json:"usage-statistics-enabled"`
+	// UsageStatisticsPersistenceEnabled toggles writing usage statistics snapshots to disk.
+	UsageStatisticsPersistenceEnabled bool `yaml:"usage-statistics-persistence-enabled" json:"usage-statistics-persistence-enabled"`
+	// UsageStatisticsPersistenceFile overrides the default usage statistics persistence file path.
+	UsageStatisticsPersistenceFile string `yaml:"usage-statistics-persistence-file" json:"usage-statistics-persistence-file"`
 
 	// DisableCooling disables quota cooldown scheduling when true.
 	DisableCooling bool `yaml:"disable-cooling" json:"disable-cooling"`
@@ -567,6 +571,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.LogsMaxTotalSizeMB = 0
 	cfg.ErrorLogsMaxFiles = 10
 	cfg.UsageStatisticsEnabled = false
+	cfg.UsageStatisticsPersistenceEnabled = true
 	cfg.DisableCooling = false
 	cfg.Pprof.Enable = false
 	cfg.Pprof.Addr = DefaultPprofAddr
@@ -619,6 +624,8 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	if cfg.Pprof.Addr == "" {
 		cfg.Pprof.Addr = DefaultPprofAddr
 	}
+
+	cfg.UsageStatisticsPersistenceFile = strings.TrimSpace(cfg.UsageStatisticsPersistenceFile)
 
 	if cfg.LogsMaxTotalSizeMB < 0 {
 		cfg.LogsMaxTotalSizeMB = 0
