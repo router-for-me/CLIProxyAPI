@@ -1,5 +1,7 @@
 package auth
 
+import "fmt"
+
 // Error describes an authentication related failure in a provider agnostic format.
 type Error struct {
 	// Code is a short machine readable identifier.
@@ -29,4 +31,14 @@ func (e *Error) StatusCode() int {
 		return 0
 	}
 	return e.HTTPStatus
+}
+
+// authExhaustedError wraps a last upstream error into a 503 "no available account"
+// message so callers see a clear reason instead of a raw upstream error body.
+func authExhaustedError(lastErr error) *Error {
+	msg := "no available account"
+	if lastErr != nil {
+		msg = fmt.Sprintf("no available account: %s", lastErr)
+	}
+	return &Error{Code: "auth_exhausted", Message: msg, HTTPStatus: 503}
 }
