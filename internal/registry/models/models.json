@@ -280,6 +280,7 @@
         "dynamic_allowed": true,
         "levels": [
           "low",
+          "medium",
           "high"
         ]
       }
@@ -554,6 +555,7 @@
         "dynamic_allowed": true,
         "levels": [
           "low",
+          "medium",
           "high"
         ]
       }
@@ -610,6 +612,8 @@
         "dynamic_allowed": true,
         "levels": [
           "minimal",
+          "low",
+          "medium",
           "high"
         ]
       }
@@ -838,6 +842,7 @@
         "dynamic_allowed": true,
         "levels": [
           "low",
+          "medium",
           "high"
         ]
       }
@@ -896,6 +901,8 @@
         "dynamic_allowed": true,
         "levels": [
           "minimal",
+          "low",
+          "medium",
           "high"
         ]
       }
@@ -1070,6 +1077,8 @@
         "dynamic_allowed": true,
         "levels": [
           "minimal",
+          "low",
+          "medium",
           "high"
         ]
       }
@@ -1371,6 +1380,75 @@
           "xhigh"
         ]
       }
+    },
+    {
+      "id": "gpt-5.3-codex",
+      "object": "model",
+      "created": 1770307200,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 5.3 Codex",
+      "version": "gpt-5.3",
+      "description": "Stable version of GPT 5.3 Codex, The best model for coding and agentic tasks across domains.",
+      "context_length": 400000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      }
+    },
+    {
+      "id": "gpt-5.4",
+      "object": "model",
+      "created": 1772668800,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 5.4",
+      "version": "gpt-5.4",
+      "description": "Stable version of GPT 5.4",
+      "context_length": 1050000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      }
+    },
+    {
+      "id": "gpt-5.4-mini",
+      "object": "model",
+      "created": 1773705600,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 5.4 Mini",
+      "version": "gpt-5.4-mini",
+      "description": "GPT-5.4 mini brings the strengths of GPT-5.4 to a faster, more efficient model designed for high-volume workloads.",
+      "context_length": 400000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      }
     }
   ],
   "codex-team": [
@@ -1611,6 +1689,29 @@
       "version": "gpt-5.4",
       "description": "Stable version of GPT 5.4",
       "context_length": 1050000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      }
+    },
+    {
+      "id": "gpt-5.4-mini",
+      "object": "model",
+      "created": 1773705600,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 5.4 Mini",
+      "version": "gpt-5.4-mini",
+      "description": "GPT-5.4 mini brings the strengths of GPT-5.4 to a faster, more efficient model designed for high-volume workloads.",
+      "context_length": 400000,
       "max_completion_tokens": 128000,
       "supported_parameters": [
         "tools"
@@ -1898,6 +1999,29 @@
           "xhigh"
         ]
       }
+    },
+    {
+      "id": "gpt-5.4-mini",
+      "object": "model",
+      "created": 1773705600,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 5.4 Mini",
+      "version": "gpt-5.4-mini",
+      "description": "GPT-5.4 mini brings the strengths of GPT-5.4 to a faster, more efficient model designed for high-volume workloads.",
+      "context_length": 400000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      }
     }
   ],
   "codex-pro": [
@@ -2173,77 +2297,43 @@
           "xhigh"
         ]
       }
+    },
+    {
+      "id": "gpt-5.4-mini",
+      "object": "model",
+      "created": 1773705600,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 5.4 Mini",
+      "version": "gpt-5.4-mini",
+      "description": "GPT-5.4 mini brings the strengths of GPT-5.4 to a faster, more efficient model designed for high-volume workloads.",
+      "context_length": 400000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      }
     }
   ],
   "qwen": [
-    {
-      "id": "qwen3-coder-plus",
-      "object": "model",
-      "created": 1753228800,
-      "owned_by": "qwen",
-      "type": "qwen",
-      "display_name": "Qwen3 Coder Plus",
-      "version": "3.0",
-      "description": "Advanced code generation and understanding model",
-      "context_length": 32768,
-      "max_completion_tokens": 8192,
-      "supported_parameters": [
-        "temperature",
-        "top_p",
-        "max_tokens",
-        "stream",
-        "stop"
-      ]
-    },
-    {
-      "id": "qwen3-coder-flash",
-      "object": "model",
-      "created": 1753228800,
-      "owned_by": "qwen",
-      "type": "qwen",
-      "display_name": "Qwen3 Coder Flash",
-      "version": "3.0",
-      "description": "Fast code generation model",
-      "context_length": 8192,
-      "max_completion_tokens": 2048,
-      "supported_parameters": [
-        "temperature",
-        "top_p",
-        "max_tokens",
-        "stream",
-        "stop"
-      ]
-    },
     {
       "id": "coder-model",
       "object": "model",
       "created": 1771171200,
       "owned_by": "qwen",
       "type": "qwen",
-      "display_name": "Qwen 3.5 Plus",
-      "version": "3.5",
+      "display_name": "Qwen 3.6 Plus",
+      "version": "3.6",
       "description": "efficient hybrid model with leading coding performance",
       "context_length": 1048576,
       "max_completion_tokens": 65536,
-      "supported_parameters": [
-        "temperature",
-        "top_p",
-        "max_tokens",
-        "stream",
-        "stop"
-      ]
-    },
-    {
-      "id": "vision-model",
-      "object": "model",
-      "created": 1758672000,
-      "owned_by": "qwen",
-      "type": "qwen",
-      "display_name": "Qwen3 Vision Model",
-      "version": "3.0",
-      "description": "Vision model model",
-      "context_length": 32768,
-      "max_completion_tokens": 2048,
       "supported_parameters": [
         "temperature",
         "top_p",
@@ -2639,11 +2729,12 @@
       "context_length": 1048576,
       "max_completion_tokens": 65535,
       "thinking": {
-        "min": 128,
-        "max": 32768,
+        "min": 1,
+        "max": 65535,
         "dynamic_allowed": true,
         "levels": [
           "low",
+          "medium",
           "high"
         ]
       }
@@ -2659,11 +2750,12 @@
       "context_length": 1048576,
       "max_completion_tokens": 65535,
       "thinking": {
-        "min": 128,
-        "max": 32768,
+        "min": 1,
+        "max": 65535,
         "dynamic_allowed": true,
         "levels": [
           "low",
+          "medium",
           "high"
         ]
       }
