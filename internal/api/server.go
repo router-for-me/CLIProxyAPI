@@ -26,6 +26,7 @@ import (
 	ampmodule "github.com/router-for-me/CLIProxyAPI/v6/internal/api/modules/amp"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kiro"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/copilot"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/managementasset"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
@@ -162,7 +163,8 @@ type Server struct {
 	wsAuthEnabled atomic.Bool
 
 	// management handler
-	mgmt *managementHandlers.Handler
+	mgmt           *managementHandlers.Handler
+	copilotService *copilot.Service
 
 	// ampModule is the Amp routing module for model mapping hot-reload
 	ampModule *ampmodule.AmpModule
@@ -269,6 +271,12 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	auth.SetQuotaCooldownDisabled(cfg.DisableCooling)
 	// Initialize management handler
 	s.mgmt = managementHandlers.NewHandler(cfg, configFilePath, authManager)
+	copilotService := copilot.NewService(cfg)
+	if err := copilotService.LoadTokens(); err != nil {
+		log.Warnf("copilot: failed to load tokens: %v", err)
+	}
+	s.copilotService = copilotService
+	s.mgmt.SetCopilotService(copilotService)
 	if optionState.localPassword != "" {
 		s.mgmt.SetLocalPassword(optionState.localPassword)
 	}
@@ -573,6 +581,12 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/quota-exceeded/switch-preview-model", s.mgmt.GetSwitchPreviewModel)
 		mgmt.PUT("/quota-exceeded/switch-preview-model", s.mgmt.PutSwitchPreviewModel)
 		mgmt.PATCH("/quota-exceeded/switch-preview-model", s.mgmt.PutSwitchPreviewModel)
+
+		mgmt.GET("/copilot-quota", s.mgmt.GetCopilotQuota)
+		mgmt.POST("/copilot-quota/auth", s.mgmt.PostCopilotQuotaAuth)
+		mgmt.POST("/copilot-quota/auth/poll", s.mgmt.PostCopilotQuotaAuthPoll)
+		mgmt.DELETE("/copilot-quota/auth/:email", s.mgmt.DeleteCopilotQuotaAuth)
+		mgmt.GET("/copilot-quota/accounts", s.mgmt.GetCopilotQuotaAccounts)
 
 		mgmt.GET("/api-keys", s.mgmt.GetAPIKeys)
 		mgmt.PUT("/api-keys", s.mgmt.PutAPIKeys)
@@ -1054,6 +1068,9 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 	if s.mgmt != nil {
 		s.mgmt.SetConfig(cfg)
 		s.mgmt.SetAuthManager(s.handlers.AuthManager)
+		if s.copilotService != nil {
+			s.copilotService.UpdateConfig(cfg)
+		}
 	}
 
 	// Notify Amp module only when Amp config has changed.
