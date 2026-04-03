@@ -293,15 +293,47 @@ func (s *RequestStatistics) Snapshot() StatisticsSnapshot {
 
 // SummarySnapshot returns aggregates without per-request details, suitable for long-term persistence.
 func (s *RequestStatistics) SummarySnapshot() StatisticsSnapshot {
-	snapshot := s.Snapshot()
-	for apiName, apiSnapshot := range snapshot.APIs {
-		for modelName, modelSnapshot := range apiSnapshot.Models {
-			modelSnapshot.Details = nil
-			apiSnapshot.Models[modelName] = modelSnapshot
-		}
-		snapshot.APIs[apiName] = apiSnapshot
+	result := StatisticsSnapshot{}
+	if s == nil {
+		return result
 	}
-	return snapshot
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	result.TotalRequests = s.totalRequests
+	result.SuccessCount = s.successCount
+	result.FailureCount = s.failureCount
+	result.TotalTokens = s.totalTokens
+
+	result.APIs = make(map[string]APISnapshot, len(s.apis))
+	for apiName, stats := range s.apis {
+		apiSnapshot := APISnapshot{
+			TotalRequests: stats.TotalRequests,
+			TotalTokens:   stats.TotalTokens,
+			Models:        make(map[string]ModelSnapshot, len(stats.Models)),
+		}
+		for modelName, modelStatsValue := range stats.Models {
+			apiSnapshot.Models[modelName] = ModelSnapshot{
+				TotalRequests: modelStatsValue.TotalRequests,
+				TotalTokens:   modelStatsValue.TotalTokens,
+			}
+		}
+		result.APIs[apiName] = apiSnapshot
+	}
+
+	result.RequestsByDay = cloneStringInt64Map(s.requestsByDay)
+	result.RequestsByHour = make(map[string]int64, len(s.requestsByHour))
+	for hour, value := range s.requestsByHour {
+		result.RequestsByHour[formatHour(hour)] = value
+	}
+	result.TokensByDay = cloneStringInt64Map(s.tokensByDay)
+	result.TokensByHour = make(map[string]int64, len(s.tokensByHour))
+	for hour, value := range s.tokensByHour {
+		result.TokensByHour[formatHour(hour)] = value
+	}
+
+	return result
 }
 
 type MergeResult struct {

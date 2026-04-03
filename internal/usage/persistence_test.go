@@ -2,6 +2,7 @@ package usage
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -133,5 +134,75 @@ func TestPersistencePrunesExpiredDailyDetails(t *testing.T) {
 	}
 	if len(entries) != 1 {
 		t.Fatalf("daily file count = %d, want 1", len(entries))
+	}
+}
+
+func TestPersistenceLoadsLegacyUsageSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	statsDir := filepath.Join(dir, "stats")
+	if err := os.MkdirAll(statsDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+
+	payload := map[string]any{
+		"version": 1,
+		"usage": map[string]any{
+			"total_requests": 7,
+			"success_count":  5,
+			"failure_count":  2,
+			"total_tokens":   42,
+			"apis": map[string]any{
+				"legacy-api": map[string]any{
+					"total_requests": 7,
+					"total_tokens":   42,
+					"models": map[string]any{
+						"legacy-model": map[string]any{
+							"total_requests": 7,
+							"total_tokens":   42,
+							"details":        []any{},
+						},
+					},
+				},
+			},
+			"requests_by_day":  map[string]any{"2026-04-01": 7},
+			"requests_by_hour": map[string]any{"10": 7},
+			"tokens_by_day":    map[string]any{"2026-04-01": 42},
+			"tokens_by_hour":   map[string]any{"10": 42},
+		},
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(statsDir, legacyUsageFileName), data, 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	stats := NewRequestStatistics()
+	persistence, err := StartPersistence(stats, statsDir, 14)
+	if err != nil {
+		t.Fatalf("StartPersistence() error = %v", err)
+	}
+	t.Cleanup(func() {
+		_ = persistence.Stop()
+	})
+
+	snapshot := stats.Snapshot()
+	if snapshot.TotalRequests != 7 {
+		t.Fatalf("TotalRequests = %d, want 7", snapshot.TotalRequests)
+	}
+	if snapshot.TotalTokens != 42 {
+		t.Fatalf("TotalTokens = %d, want 42", snapshot.TotalTokens)
+	}
+	apiSnapshot, ok := snapshot.APIs["legacy-api"]
+	if !ok {
+		t.Fatalf("expected legacy-api in APIs")
+	}
+	modelSnapshot, ok := apiSnapshot.Models["legacy-model"]
+	if !ok {
+		t.Fatalf("expected legacy-model in API models")
+	}
+	if modelSnapshot.TotalRequests != 7 {
+		t.Fatalf("legacy model TotalRequests = %d, want 7", modelSnapshot.TotalRequests)
 	}
 }

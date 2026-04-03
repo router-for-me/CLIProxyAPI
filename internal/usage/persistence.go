@@ -34,6 +34,14 @@ type persistedDayDetails struct {
 	Statistics StatisticsSnapshot `json:"statistics"`
 }
 
+type legacyPersistedSnapshot struct {
+	Version    int                `json:"version"`
+	SavedAt    time.Time          `json:"saved_at"`
+	ExportedAt time.Time          `json:"exported_at"`
+	Usage      StatisticsSnapshot `json:"usage"`
+	Statistics StatisticsSnapshot `json:"statistics"`
+}
+
 // Persistence keeps usage statistics on disk and restores them on startup.
 type Persistence struct {
 	baseDir       string
@@ -97,11 +105,11 @@ func (p *Persistence) loadSummary() error {
 			return err
 		}
 	}
-	var snapshot persistedSummary
-	if err := json.Unmarshal(data, &snapshot); err != nil {
+	snapshot, err := decodeSummaryPayload(data)
+	if err != nil {
 		return err
 	}
-	p.stats.ReplaceSummarySnapshot(snapshot.Statistics)
+	p.stats.ReplaceSummarySnapshot(snapshot)
 	return nil
 }
 
@@ -303,6 +311,10 @@ func writeJSONAtomically(path string, payload any) error {
 		_ = tmpFile.Close()
 		return err
 	}
+	if err := tmpFile.Sync(); err != nil {
+		_ = tmpFile.Close()
+		return err
+	}
 	if err := tmpFile.Close(); err != nil {
 		return err
 	}
@@ -325,4 +337,34 @@ func dailyFileDay(name string) (string, bool) {
 		return "", false
 	}
 	return day, true
+}
+
+func decodeSummaryPayload(data []byte) (StatisticsSnapshot, error) {
+	var current persistedSummary
+	if err := json.Unmarshal(data, &current); err == nil {
+		if !isZeroStatisticsSnapshot(current.Statistics) {
+			return current.Statistics, nil
+		}
+	}
+
+	var legacy legacyPersistedSnapshot
+	if err := json.Unmarshal(data, &legacy); err != nil {
+		return StatisticsSnapshot{}, err
+	}
+	if !isZeroStatisticsSnapshot(legacy.Statistics) {
+		return legacy.Statistics, nil
+	}
+	return legacy.Usage, nil
+}
+
+func isZeroStatisticsSnapshot(snapshot StatisticsSnapshot) bool {
+	return snapshot.TotalRequests == 0 &&
+		snapshot.SuccessCount == 0 &&
+		snapshot.FailureCount == 0 &&
+		snapshot.TotalTokens == 0 &&
+		len(snapshot.APIs) == 0 &&
+		len(snapshot.RequestsByDay) == 0 &&
+		len(snapshot.RequestsByHour) == 0 &&
+		len(snapshot.TokensByDay) == 0 &&
+		len(snapshot.TokensByHour) == 0
 }
