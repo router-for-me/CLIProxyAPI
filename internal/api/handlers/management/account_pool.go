@@ -580,7 +580,7 @@ type parsedAccount struct {
 }
 
 // parseAccountLines parses batch import text.
-// Supports formats:
+// Supports formats (separator: "----" or "|"):
 //   - email----password----recovery_email----totp_secret (4 fields)
 //   - email----password----totp_secret (3 fields)
 func parseAccountLines(text string) ([]parsedAccount, []string) {
@@ -592,7 +592,12 @@ func parseAccountLines(text string) ([]parsedAccount, []string) {
 		if line == "" {
 			continue
 		}
-		parts := strings.Split(line, "----")
+		// Auto-detect separator: use "----" if present, otherwise "|"
+		sep := "----"
+		if !strings.Contains(line, "----") && strings.Contains(line, "|") {
+			sep = "|"
+		}
+		parts := strings.Split(line, sep)
 		var a parsedAccount
 		switch len(parts) {
 		case 4:
@@ -605,7 +610,7 @@ func parseAccountLines(text string) ([]parsedAccount, []string) {
 			a.Password = strings.TrimSpace(parts[1])
 			a.TOTPSecret = strings.TrimSpace(parts[2])
 		default:
-			errors = append(errors, fmt.Sprintf("line %d: expected 3 or 4 fields separated by ----", i+1))
+			errors = append(errors, fmt.Sprintf("line %d: expected 3 or 4 fields separated by ---- or |", i+1))
 			continue
 		}
 		if a.Email == "" || a.Password == "" {
