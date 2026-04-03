@@ -8,6 +8,7 @@ import (
 	log "github.com/sirupsen/logrus"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -366,6 +367,7 @@ func (h *Handler) AllAPICall(cc *gin.Context) {
 		apiKey := comp.APIKeyEntries[0].APIKey
 		baseURL := comp.BaseURL
 		compName := comp.Name
+		proxyStr := comp.APIKeyEntries[0].ProxyURL
 
 		for _, model := range comp.Models {
 			mod := model
@@ -379,6 +381,12 @@ func (h *Handler) AllAPICall(cc *gin.Context) {
 
 				data := fmt.Sprintf(`{"model":"%s","messages":[{"role":"user","content":"Hi"}],"stream":false,"max_tokens":5}`, mName)
 				req, err := http.NewRequestWithContext(ctx, "POST", baseURL+"/chat/completions", strings.NewReader(data))
+
+				if proxyStr != "" {
+					parsedProxyURL, _ := url.Parse(proxyStr)
+					http.ProxyURL(parsedProxyURL)
+				}
+
 				if err != nil {
 					mu.Lock()
 					groupedResults[compName] = append(groupedResults[compName], ModelCheckResult{
@@ -400,6 +408,7 @@ func (h *Handler) AllAPICall(cc *gin.Context) {
 				}
 
 				resp, errDo := httpClient.Do(req)
+
 				if errDo == nil {
 
 					modelResult.StatusCode = resp.StatusCode
@@ -416,7 +425,7 @@ func (h *Handler) AllAPICall(cc *gin.Context) {
 					log.Printf("[%s-%s] network failed: %v\n", compName, mName, errDo)
 					modelResult.Error = errDo.Error()
 				}
-				
+
 				mu.Lock()
 				groupedResults[compName] = append(groupedResults[compName], modelResult)
 				mu.Unlock()
