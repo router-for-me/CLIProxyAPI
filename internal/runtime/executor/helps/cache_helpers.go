@@ -1,11 +1,11 @@
-package executor
+package helps
 
 import (
 	"sync"
 	"time"
 )
 
-type codexCache struct {
+type CodexCache struct {
 	ID     string
 	Expire time.Time
 }
@@ -13,7 +13,7 @@ type codexCache struct {
 // codexCacheMap stores prompt cache IDs keyed by model+user_id.
 // Protected by codexCacheMu. Entries expire after 1 hour.
 var (
-	codexCacheMap = make(map[string]codexCache)
+	codexCacheMap = make(map[string]CodexCache)
 	codexCacheMu  sync.RWMutex
 )
 
@@ -47,20 +47,20 @@ func purgeExpiredCodexCache() {
 	}
 }
 
-// getCodexCache retrieves a cached entry, returning ok=false if not found or expired.
-func getCodexCache(key string) (codexCache, bool) {
+// GetCodexCache retrieves a cached entry, returning ok=false if not found or expired.
+func GetCodexCache(key string) (CodexCache, bool) {
 	codexCacheCleanupOnce.Do(startCodexCacheCleanup)
 	codexCacheMu.RLock()
 	cache, ok := codexCacheMap[key]
 	codexCacheMu.RUnlock()
 	if !ok || cache.Expire.Before(time.Now()) {
-		return codexCache{}, false
+		return CodexCache{}, false
 	}
 	return cache, true
 }
 
-// setCodexCache stores a cache entry.
-func setCodexCache(key string, cache codexCache) {
+// SetCodexCache stores a cache entry.
+func SetCodexCache(key string, cache CodexCache) {
 	codexCacheCleanupOnce.Do(startCodexCacheCleanup)
 	codexCacheMu.Lock()
 	codexCacheMap[key] = cache

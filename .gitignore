@@ -33,12 +33,12 @@ GEMINI.md
 
 # Tooling metadata
 .vscode/*
+.worktrees/
 .codex/*
 .claude/*
 .gemini/*
 .serena/*
 .agent/*
-.agents/*
 .agents/*
 .opencode/*
 .idea/*

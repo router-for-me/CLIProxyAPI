@@ -284,12 +284,12 @@ func ConvertCodexResponseToOpenAINonStream(_ context.Context, _ string, original
 	}
 
 	// Process the output array for content and function calls
+	var toolCalls [][]byte
 	outputResult := responseResult.Get("output")
 	if outputResult.IsArray() {
 		outputArray := outputResult.Array()
 		var contentText string
 		var reasoningText string
-		var toolCalls [][]byte
 
 		for _, outputItem := range outputArray {
 			outputType := outputItem.Get("type").String()
@@ -367,8 +367,12 @@ func ConvertCodexResponseToOpenAINonStream(_ context.Context, _ string, original
 	if statusResult := responseResult.Get("status"); statusResult.Exists() {
 		status := statusResult.String()
 		if status == "completed" {
-			template, _ = sjson.SetBytes(template, "choices.0.finish_reason", "stop")
-			template, _ = sjson.SetBytes(template, "choices.0.native_finish_reason", "stop")
+			finishReason := "stop"
+			if len(toolCalls) > 0 {
+				finishReason = "tool_calls"
+			}
+			template, _ = sjson.SetBytes(template, "choices.0.finish_reason", finishReason)
+			template, _ = sjson.SetBytes(template, "choices.0.native_finish_reason", finishReason)
 		}
 	}
 

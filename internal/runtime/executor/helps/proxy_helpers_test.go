@@ -1,4 +1,4 @@
-package executor
+package helps
 
 import (
 	"context"
@@ -13,7 +13,7 @@ import (
 func TestNewProxyAwareHTTPClientDirectBypassesGlobalProxy(t *testing.T) {
 	t.Parallel()
 
-	client := newProxyAwareHTTPClient(
+	client := NewProxyAwareHTTPClient(
 		context.Background(),
 		&config.Config{SDKConfig: sdkconfig.SDKConfig{ProxyURL: "http://global-proxy.example.com:8080"}},
 		&cliproxyauth.Auth{ProxyURL: "direct"},

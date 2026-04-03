@@ -1,4 +1,4 @@
-package executor
+package helps
 
 import (
 	"crypto/sha256"
@@ -49,7 +49,7 @@ func userIDCacheKey(apiKey string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func cachedUserID(apiKey string) string {
+func CachedUserID(apiKey string) string {
 	if apiKey == "" {
 		return generateFakeUserID()
 	}

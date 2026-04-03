@@ -126,10 +126,6 @@ Browser-based tool to translate SRT subtitles using your Gemini subscription via
 
 CLI wrapper for instant switching between multiple Claude accounts and alternative models (Gemini, Codex, Antigravity) via CLIProxyAPI OAuth - no API keys needed
 
-### [ProxyPal](https://github.com/heyhuynhgiabuu/proxypal)
-
-Native macOS GUI for managing CLIProxyAPI: configure providers, model mappings, and endpoints via OAuth - no API keys needed.
-
 ### [Quotio](https://github.com/nguyenphutrong/quotio)
 
 Native macOS menu bar app that unifies Claude, Gemini, OpenAI, Qwen, and Antigravity subscriptions with real-time quota tracking and smart auto-failover for AI coding tools like Claude Code, OpenCode, and Droid - no API keys needed.
@@ -176,6 +172,10 @@ Shadow AI is an AI assistant tool designed specifically for restricted environme
 mode without windows or traces, and enables cross-device AI Q&A interaction and control via the local area network (
 LAN). Essentially, it is an automated collaboration layer of "screen/audio capture + AI inference + low-friction delivery",
 helping users to immersively use AI assistants across applications on controlled devices or in restricted environments.
+
+### [ProxyPal](https://github.com/buddingnewinsights/proxypal)
+
+Cross-platform desktop app (macOS, Windows, Linux) wrapping CLIProxyAPI with a native GUI. Connects Claude, ChatGPT, Gemini, GitHub Copilot, Qwen, iFlow, and custom OpenAI-compatible endpoints with usage analytics, request monitoring, and auto-configuration for popular coding tools - no API keys needed.
 
 > [!NOTE]  
 > If you developed a project based on CLIProxyAPI, please open a PR to add it to this list.

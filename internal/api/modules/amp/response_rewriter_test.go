@@ -1,6 +1,7 @@
 package amp
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -97,6 +98,50 @@ func TestRewriteStreamChunk_MessageModel(t *testing.T) {
 	expected := "data: {\"message\":{\"model\":\"claude-opus-4.5\",\"role\":\"assistant\"}}\n\n"
 	if string(result) != expected {
 		t.Errorf("expected %s, got %s", expected, string(result))
+	}
+}
+
+func TestRewriteStreamChunk_PreservesThinkingWithSignatureInjection(t *testing.T) {
+	rw := &ResponseRewriter{}
+
+	chunk := []byte("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"abc\"}}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"name\":\"bash\",\"input\":{}}}\n\n")
+	result := rw.rewriteStreamChunk(chunk)
+
+	// Streaming mode preserves thinking blocks (does NOT suppress them)
+	// to avoid breaking SSE index alignment and TUI rendering
+	if !contains(result, []byte(`"content_block":{"type":"thinking"`)) {
+		t.Fatalf("expected thinking content_block_start to be preserved, got %s", string(result))
+	}
+	if !contains(result, []byte(`"delta":{"type":"thinking_delta"`)) {
+		t.Fatalf("expected thinking_delta to be preserved, got %s", string(result))
+	}
+	if !contains(result, []byte(`"type":"content_block_stop","index":0`)) {
+		t.Fatalf("expected content_block_stop for thinking block to be preserved, got %s", string(result))
+	}
+	if !contains(result, []byte(`"content_block":{"type":"tool_use"`)) {
+		t.Fatalf("expected tool_use content_block frame to remain, got %s", string(result))
+	}
+	// Signature should be injected into both thinking and tool_use blocks
+	if count := strings.Count(string(result), `"signature":""`); count != 2 {
+		t.Fatalf("expected 2 signature injections, but got %d in %s", count, string(result))
+	}
+}
+
+func TestSanitizeAmpRequestBody_RemovesWhitespaceAndNonStringSignatures(t *testing.T) {
+	input := []byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"drop-whitespace","signature":"   "},{"type":"thinking","thinking":"drop-number","signature":123},{"type":"thinking","thinking":"keep-valid","signature":"valid-signature"},{"type":"text","text":"keep-text"}]}]}`)
+	result := SanitizeAmpRequestBody(input)
+
+	if contains(result, []byte("drop-whitespace")) {
+		t.Fatalf("expected whitespace-only signature block to be removed, got %s", string(result))
+	}
+	if contains(result, []byte("drop-number")) {
+		t.Fatalf("expected non-string signature block to be removed, got %s", string(result))
+	}
+	if !contains(result, []byte("keep-valid")) {
+		t.Fatalf("expected valid thinking block to remain, got %s", string(result))
+	}
+	if !contains(result, []byte("keep-text")) {
+		t.Fatalf("expected non-thinking content to remain, got %s", string(result))
 	}
 }
 
