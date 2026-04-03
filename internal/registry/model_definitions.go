@@ -185,7 +185,7 @@ func GetCodeBuddyModels() []*ModelInfo {
 			OwnedBy:             "tencent",
 			Type:                "codebuddy",
 			DisplayName:         "DeepSeek V3.2 (Volc)",
-			Description:         "DeepSeek V3.2 via CodeBuddy (Volcano Engine)",
+			Description:         "DeepSeek V3.2 via CodeBuddy",
 			ContextLength:       128000,
 			MaxCompletionTokens: 32768,
 			SupportedEndpoints:  []string{"/chat/completions"},
