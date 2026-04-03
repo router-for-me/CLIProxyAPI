@@ -29,7 +29,7 @@ import (
 )
 
 const (
-	codexUserAgent  = "codex-tui/0.118.0 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9 (codex-tui; 0.118.0)"
+	codexUserAgent  = "codex-tui/0.119.0 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9 (codex-tui; 0.119.0)"
 	codexOriginator = "codex-tui"
 )
 
@@ -649,12 +649,13 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 	misc.EnsureHeader(r.Header, ginHeaders, "Version", "")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Codex-Turn-Metadata", "")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Client-Request-Id", "")
+	misc.EnsureHeader(r.Header, ginHeaders, "X-Openai-Subagent", "")
 	cfgUserAgent, _ := codexHeaderDefaults(cfg, auth)
 	ensureHeaderWithConfigPrecedence(r.Header, ginHeaders, "User-Agent", cfgUserAgent, codexUserAgent)
 
-	if strings.Contains(r.Header.Get("User-Agent"), "Mac OS") {
-		misc.EnsureHeader(r.Header, ginHeaders, "Session_id", uuid.NewString())
-	}
+	// Session_id is required on all platforms; Codex CLI always sends it
+	// when a conversation_id exists (see codex-api/src/requests/headers.rs).
+	misc.EnsureHeader(r.Header, ginHeaders, "Session_id", uuid.NewString())
 
 	if stream {
 		r.Header.Set("Accept", "text/event-stream")
