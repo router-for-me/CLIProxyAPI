@@ -2,7 +2,6 @@ package management
 
 import (
 	"net/http"
-	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/copilot"
@@ -83,10 +82,8 @@ func (h *Handler) PostCopilotQuotaAuthPoll(c *gin.Context) {
 		return
 	}
 
-	interval := time.Duration(body.Interval) * time.Second
-
 	ctx := c.Request.Context()
-	token, err := h.copilotService.CompleteDeviceFlow(ctx, body.DeviceCode, interval)
+	token, err := h.copilotService.TryCompleteDeviceFlow(ctx, body.DeviceCode)
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{"status": "error", "message": err.Error()})
 		return

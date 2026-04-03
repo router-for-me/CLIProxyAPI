@@ -282,3 +282,27 @@ func (s *Service) CompleteDeviceFlow(ctx context.Context, deviceCode string, int
 	}
 	return token, nil
 }
+
+// TryCompleteDeviceFlow makes a single attempt to exchange a device code for an access token.
+// If the user has authorized, it fetches their email, saves the token, and returns the TokenInfo.
+// If authorization is still pending, it returns an error with the GitHub error string
+// (e.g., "authorization_pending").
+func (s *Service) TryCompleteDeviceFlow(ctx context.Context, deviceCode string) (*TokenInfo, error) {
+	accessToken, err := s.auth.TryExchangeToken(ctx, deviceCode)
+	if err != nil {
+		return nil, err
+	}
+	email, err := s.auth.FetchUserEmail(ctx, accessToken)
+	if err != nil {
+		return nil, fmt.Errorf("copilot quota: fetch user email: %w", err)
+	}
+	token := &TokenInfo{
+		AccessToken: accessToken,
+		Email:       email,
+		CreatedAt:   time.Now(),
+	}
+	if err := s.SaveToken(token); err != nil {
+		return nil, fmt.Errorf("copilot quota: save token: %w", err)
+	}
+	return token, nil
+}

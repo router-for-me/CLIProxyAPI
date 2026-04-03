@@ -14,6 +14,8 @@ The Plus release stays in lockstep with the mainline features.
 
 This specific fork contains custom functionality not available in the upstream repository:
 - **Usage Persistence**: Automatically tracks token and request statistics and saves them to `usage/usage.json` every 5 minutes and during graceful shutdown. (Ported from rejected upstream PR #1944).
+- **Usage Aggregate & Prune**: Individual request details are retained for the last 48 hours, then automatically rolled into hourly aggregates on each save. This preserves long-term trends (30+ days) without unbounded file growth. Old files without aggregates are migrated transparently on load.
+- **Copilot Quota Management**: Multi-account GitHub Copilot quota monitoring with caching and GitHub Device Code OAuth. Accessible via the Management Center UI and REST API.
 - **Graceful Shutdown Fix**: Resolves an upstream bug in `sdk/cliproxy/service.go` where the graceful shutdown context instantly expired, preventing proper cleanup and data saving on service stop.
 
 See `UPDATE_INSTRUCTIONS.md` for instructions on how to pull future updates from the upstream mainline repository without losing these custom features.

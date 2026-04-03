@@ -125,6 +125,46 @@ func (a *CopilotAuth) PollForToken(ctx context.Context, deviceCode string, inter
 	}
 }
 
+// TryExchangeToken makes a single attempt to exchange a device code for an access token.
+// It returns the token if authorization is complete, or an error describing the current state
+// (e.g., "authorization_pending", "slow_down", "expired_token", "access_denied").
+// Unlike PollForToken, this method does NOT loop or sleep — it returns immediately.
+func (a *CopilotAuth) TryExchangeToken(ctx context.Context, deviceCode string) (string, error) {
+	form := url.Values{}
+	form.Set("client_id", GitHubCopilotClientID)
+	form.Set("device_code", deviceCode)
+	form.Set("grant_type", "urn:ietf:params:oauth:grant-type:device_code")
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, GitHubAccessTokenURL, strings.NewReader(form.Encode()))
+	if err != nil {
+		return "", fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := a.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("failed to do request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var tokenResp AccessTokenResponse
+	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
+		return "", fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	if tokenResp.AccessToken != "" {
+		return tokenResp.AccessToken, nil
+	}
+
+	if tokenResp.Error != "" {
+		return "", errors.New(tokenResp.Error)
+	}
+
+	return "", errors.New("no token and no error in response")
+}
+
 func (a *CopilotAuth) FetchUserEmail(ctx context.Context, accessToken string) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, GitHubUserURL, nil)
 	if err != nil {
