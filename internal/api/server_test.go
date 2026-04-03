@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -93,6 +94,28 @@ func TestUsagePersistenceEnabledHotReload(t *testing.T) {
 	}
 	if secondPlugin == firstPlugin {
 		t.Fatalf("expected database plugin to be re-initialized after re-enabling")
+	}
+}
+
+func TestHealthz(t *testing.T) {
+	server := newTestServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("unexpected status code: got %d want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+
+	var resp struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse response JSON: %v; body=%s", err, rr.Body.String())
+	}
+	if resp.Status != "ok" {
+		t.Fatalf("unexpected response status: got %q want %q", resp.Status, "ok")
 	}
 }
 
