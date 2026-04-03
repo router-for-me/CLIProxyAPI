@@ -244,6 +244,7 @@ var unsupportedConstraints = []string{
 	"minLength", "maxLength", "exclusiveMinimum", "exclusiveMaximum",
 	"pattern", "minItems", "maxItems", "uniqueItems", "format",
 	"default", "examples", // Claude rejects these in VALIDATED mode
+	"multipleOf",
 }
 
 func moveConstraintsToDescription(jsonStr string) string {
