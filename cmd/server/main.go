@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"flag"
 	"fmt"
@@ -35,6 +36,8 @@ import (
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
+
+	_ "github.com/jackc/pgx/v5/stdlib" // register pgx driver for ACCOUNT_POOL_DSN
 )
 
 var (
@@ -457,9 +460,32 @@ func main() {
 		sdkAuth.RegisterTokenStore(sdkAuth.NewFileTokenStore())
 	}
 
-	// Initialize account pool store when PostgreSQL is available.
+	// Initialize account pool store.
+	// Prefer dedicated ACCOUNT_POOL_DSN; fall back to PGSTORE_DSN.
 	var extraServerOpts []api.ServerOption
-	if usePostgresStore && pgStoreInst != nil {
+	if apDSN, ok := lookupEnv("ACCOUNT_POOL_DSN", "account_pool_dsn"); ok {
+		apSchema := "public"
+		if v, ok2 := lookupEnv("ACCOUNT_POOL_SCHEMA", "account_pool_schema"); ok2 {
+			apSchema = v
+		}
+		apDB, err := sql.Open("pgx", apDSN)
+		if err != nil {
+			log.Warnf("account pool: failed to open database: %v", err)
+		} else {
+			apDB.SetMaxOpenConns(10)
+			apDB.SetMaxIdleConns(5)
+			apStore := accountpool.New(apDB, apSchema)
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			if err := apStore.EnsureSchema(ctx); err != nil {
+				cancel()
+				log.Warnf("account pool schema init failed (feature disabled): %v", err)
+			} else {
+				cancel()
+				extraServerOpts = append(extraServerOpts, api.WithAccountPoolStore(apStore))
+				log.Info("account pool store initialized (dedicated DSN)")
+			}
+		}
+	} else if usePostgresStore && pgStoreInst != nil {
 		apStore := accountpool.New(pgStoreInst.DB(), pgStoreInst.Schema())
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		if err := apStore.EnsureSchema(ctx); err != nil {
