@@ -217,10 +217,12 @@ func (b *Builder) Build() (*Service, error) {
 			selector = &coreauth.FillFirstSelector{}
 		case "sticky":
 			lruSize := 0
+			var bodyHash *coreauth.StickyBodyHashConfig
 			if b.cfg != nil {
 				lruSize = b.cfg.Routing.StickyLRUSize
+				bodyHash = buildStickyBodyHashConfig(b.cfg)
 			}
-			selector = coreauth.NewStickySelector(lruSize, nil)
+			selector = coreauth.NewStickySelector(lruSize, nil, bodyHash)
 		default:
 			selector = &coreauth.RoundRobinSelector{}
 		}
@@ -245,4 +247,17 @@ func (b *Builder) Build() (*Service, error) {
 		serverOptions:  append([]api.ServerOption(nil), b.serverOptions...),
 	}
 	return service, nil
+}
+
+// buildStickyBodyHashConfig converts the routing config into a StickyBodyHashConfig.
+// Default: enabled with 0 (let StickySelector use its built-in default of 32 KB).
+func buildStickyBodyHashConfig(cfg *config.Config) *coreauth.StickyBodyHashConfig {
+	enabled := true
+	if cfg.Routing.StickyBodyHash != nil {
+		enabled = *cfg.Routing.StickyBodyHash
+	}
+	return &coreauth.StickyBodyHashConfig{
+		Enabled: enabled,
+		SizeKB:  cfg.Routing.StickyBodyHashSizeKB,
+	}
 }

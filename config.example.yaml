@@ -105,7 +105,9 @@ quota-exceeded:
 # Routing strategy for selecting credentials when multiple match.
 routing:
   strategy: "round-robin" # round-robin (default), fill-first, sticky
-  # sticky-lru-size: 1024  # LRU cache size for sticky routing (default: 1024)
+  # sticky-lru-size: 1024       # LRU cache size for sticky routing (default: 1024)
+  # sticky-body-hash: true      # Enable body-prefix hash as fallback session key (default: true)
+  # sticky-body-hash-size-kb: 32 # Leading KB to hash (default: 32, ≈8K-10K tokens). Range: 8 (≈2K) to 64 (≈16K)
 
 # When true, enable authentication for the WebSocket API (/v1/ws).
 ws-auth: false

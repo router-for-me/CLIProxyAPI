@@ -648,10 +648,12 @@ func (s *Service) Run(ctx context.Context) error {
 				selector = &coreauth.FillFirstSelector{}
 			case "sticky":
 				lruSize := 0
+				var bodyHash *coreauth.StickyBodyHashConfig
 				if newCfg != nil {
 					lruSize = newCfg.Routing.StickyLRUSize
+					bodyHash = buildStickyBodyHashConfig(newCfg)
 				}
-				selector = coreauth.NewStickySelector(lruSize, nil)
+				selector = coreauth.NewStickySelector(lruSize, nil, bodyHash)
 			default:
 				selector = &coreauth.RoundRobinSelector{}
 			}

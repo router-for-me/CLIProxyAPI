@@ -209,6 +209,16 @@ type RoutingConfig struct {
 	// StickyLRUSize sets the LRU cache capacity for sticky routing.
 	// Each entry maps a session/trace key to an auth ID. Default is 1024.
 	StickyLRUSize int `yaml:"sticky-lru-size,omitempty" json:"sticky-lru-size,omitempty"`
+
+	// StickyBodyHash enables body-prefix hashing as a fallback session key
+	// when no explicit session identifier (metadata.user_id, prompt_cache_key)
+	// is found in the request body. Default is true.
+	StickyBodyHash *bool `yaml:"sticky-body-hash,omitempty" json:"sticky-body-hash,omitempty"`
+
+	// StickyBodyHashSizeKB sets the number of leading kilobytes of the request
+	// body used to compute the fallback hash. Default is 32 (≈8K-10K tokens).
+	// Suggested range: 8 (≈2K tokens) to 64 (≈16K tokens).
+	StickyBodyHashSizeKB int `yaml:"sticky-body-hash-size-kb,omitempty" json:"sticky-body-hash-size-kb,omitempty"`
 }
 
 // OAuthModelAlias defines a model ID alias for a specific channel.

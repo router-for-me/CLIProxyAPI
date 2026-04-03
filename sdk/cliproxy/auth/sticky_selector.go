@@ -2,6 +2,8 @@ package auth
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"strings"
 
 	"github.com/tidwall/gjson"
@@ -14,27 +16,60 @@ import (
 //   - prompt_cache_key: Codex CLI sends this in /v1/responses requests
 var defaultStickyGjsonPaths = []string{"metadata.user_id", "prompt_cache_key"}
 
+// defaultBodyPrefixHashSize is the number of leading bytes of the request body
+// used to compute a fallback session key when no gjson path matches.
+// 32 KiB covers the system prompt plus the first few conversation turns,
+// providing a stable session fingerprint for multi-turn conversations.
+const defaultBodyPrefixHashSize = 32 * 1024
+
+// minBodySizeForHash is the minimum request body size required to enable
+// body-prefix hashing. Bodies smaller than this are likely single-turn or
+// trivial requests where sticky routing adds little value and collision
+// risk is higher.
+const minBodySizeForHash = 512
+
 // StickySelector implements session-affinity routing using an LRU cache.
 // It extracts a session key from the request body (via configurable gjson paths),
 // looks up the key in the cache, and pins the request to the cached auth if found.
 // On cache miss it delegates to round-robin and records the binding.
+//
+// When no gjson path produces a key and the request body is large enough,
+// a SHA-256 hash of the first bodyPrefixHashSize bytes is used as a fallback
+// session key. This covers clients (Cursor, Windsurf, Gemini SDK, etc.) that
+// do not send metadata.user_id or prompt_cache_key.
 type StickySelector struct {
-	inner      *RoundRobinSelector
-	cache      *lruCache
-	gjsonPaths []string
+	inner              *RoundRobinSelector
+	cache              *lruCache
+	gjsonPaths         []string
+	bodyPrefixHashSize int
+}
+
+// StickyBodyHashConfig controls the body-prefix-hash fallback.
+type StickyBodyHashConfig struct {
+	Enabled bool // Whether body-prefix hashing is enabled. Default true.
+	SizeKB  int  // Leading KB to hash. 0 → defaultBodyPrefixHashSize (32 KB).
 }
 
 // NewStickySelector creates a sticky selector with the given LRU capacity and gjson paths.
 // A zero or negative lruSize defaults to 1024. Nil gjsonPaths defaults to
 // ["metadata.user_id", "prompt_cache_key"].
-func NewStickySelector(lruSize int, gjsonPaths []string) *StickySelector {
+func NewStickySelector(lruSize int, gjsonPaths []string, bodyHash *StickyBodyHashConfig) *StickySelector {
 	if len(gjsonPaths) == 0 {
 		gjsonPaths = defaultStickyGjsonPaths
 	}
+
+	hashSize := defaultBodyPrefixHashSize
+	if bodyHash != nil && !bodyHash.Enabled {
+		hashSize = 0 // disabled
+	} else if bodyHash != nil && bodyHash.SizeKB > 0 {
+		hashSize = bodyHash.SizeKB * 1024
+	}
+
 	return &StickySelector{
-		inner:      &RoundRobinSelector{},
-		cache:      newLRUCache(lruSize),
-		gjsonPaths: gjsonPaths,
+		inner:              &RoundRobinSelector{},
+		cache:              newLRUCache(lruSize),
+		gjsonPaths:         gjsonPaths,
+		bodyPrefixHashSize: hashSize,
 	}
 }
 
@@ -70,7 +105,8 @@ func (s *StickySelector) Pick(ctx context.Context, provider, model string, opts 
 }
 
 // extractSessionKey tries each configured gjson path against the request body
-// and returns the first non-empty match.
+// and returns the first non-empty match. If no gjson path matches and the body
+// is large enough, it falls back to a SHA-256 hash of the body prefix.
 func (s *StickySelector) extractSessionKey(payload []byte) string {
 	if len(payload) == 0 {
 		return ""
@@ -84,7 +120,22 @@ func (s *StickySelector) extractSessionKey(payload []byte) string {
 			}
 		}
 	}
-	return ""
+	return s.bodyPrefixHash(payload)
+}
+
+// bodyPrefixHash computes a SHA-256 digest of the first N bytes of payload
+// and returns it as a hex-encoded session key prefixed with "bph:".
+// Returns "" if the payload is too small to produce a meaningful fingerprint.
+func (s *StickySelector) bodyPrefixHash(payload []byte) string {
+	if len(payload) < minBodySizeForHash || s.bodyPrefixHashSize <= 0 {
+		return ""
+	}
+	data := payload
+	if len(data) > s.bodyPrefixHashSize {
+		data = data[:s.bodyPrefixHashSize]
+	}
+	sum := sha256.Sum256(data)
+	return "bph:" + hex.EncodeToString(sum[:16])
 }
 
 // EvictSession removes the binding for the given session key.
