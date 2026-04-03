@@ -67,7 +67,14 @@ type Config struct {
 	// UsageStatisticsEnabled toggles in-memory usage aggregation; when false, usage data is discarded.
 	UsageStatisticsEnabled bool `yaml:"usage-statistics-enabled" json:"usage-statistics-enabled"`
 
+	// UsagePersistenceEnabled toggles SQLite persistence for usage statistics.
+	UsagePersistenceEnabled bool `yaml:"usage-persistence-enabled" json:"usage-persistence-enabled"`
+
+	// UsagePersistencePath defines the path to the SQLite database file.
+	UsagePersistencePath string `yaml:"usage-persistence-path" json:"usage-persistence-path"`
+
 	// DisableCooling disables quota cooldown scheduling when true.
+
 	DisableCooling bool `yaml:"disable-cooling" json:"disable-cooling"`
 
 	// RequestRetry defines the retry times when the request failed.
@@ -80,6 +87,9 @@ type Config struct {
 
 	// QuotaExceeded defines the behavior when a quota is exceeded.
 	QuotaExceeded QuotaExceeded `yaml:"quota-exceeded" json:"quota-exceeded"`
+
+	// CopilotQuota configures the GitHub Copilot premium request quota tracking service.
+	CopilotQuota CopilotQuotaConfig `yaml:"copilot-quota"`
 
 	// Routing controls credential selection behavior.
 	Routing RoutingConfig `yaml:"routing" json:"routing"`
@@ -210,6 +220,20 @@ type QuotaExceeded struct {
 
 	// SwitchPreviewModel indicates whether to automatically switch to a preview model when a quota is exceeded.
 	SwitchPreviewModel bool `yaml:"switch-preview-model" json:"switch-preview-model"`
+}
+
+// CopilotQuotaConfig configures the GitHub Copilot premium request quota feature.
+// This service authenticates with GitHub via Device Code OAuth to fetch quota data.
+type CopilotQuotaConfig struct {
+	// Enabled controls whether the Copilot quota service is active.
+	Enabled bool `yaml:"enabled"`
+
+	// CacheTTLSeconds is how long quota API responses are cached (default: 300 = 5 minutes).
+	CacheTTLSeconds int `yaml:"cache-ttl-seconds"`
+
+	// UserAgent is the User-Agent header sent to GitHub's copilot_internal API.
+	// Default: "GitHub-Copilot-Usage-Tray"
+	UserAgent string `yaml:"user-agent"`
 }
 
 // RoutingConfig configures how credentials are selected for requests.
@@ -626,12 +650,17 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.ErrorLogsMaxFiles = 10
 	cfg.UsageStatisticsEnabled = false
 	cfg.UsageDir = "" // Default empty: handled by api.Server
+	cfg.UsagePersistenceEnabled = false
+	cfg.UsagePersistencePath = "usage.db"
 	cfg.DisableCooling = false
 	cfg.Pprof.Enable = false
 	cfg.Pprof.Addr = DefaultPprofAddr
 	cfg.AmpCode.RestrictManagementToLocalhost = false // Default to false: API key auth is sufficient
 	cfg.RemoteManagement.PanelGitHubRepository = DefaultPanelGitHubRepository
 	cfg.IncognitoBrowser = false // Default to normal browser (AWS uses incognito by force)
+	cfg.CopilotQuota.Enabled = true
+	cfg.CopilotQuota.CacheTTLSeconds = 300
+	cfg.CopilotQuota.UserAgent = "GitHub-Copilot-Usage-Tray"
 	if err = yaml.Unmarshal(data, &cfg); err != nil {
 		if optional {
 			// In cloud deploy mode, if YAML parsing fails, return empty config instead of error.

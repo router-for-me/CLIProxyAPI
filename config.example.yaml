@@ -93,6 +93,18 @@ quota-exceeded:
   switch-project: true # Whether to automatically switch to another project when a quota is exceeded
   switch-preview-model: true # Whether to automatically switch to a preview model when a quota is exceeded
 
+# GitHub Copilot Premium Request Quota Tracking
+# Authenticate with GitHub to display your Copilot quota in the management UI.
+# Use the CLI flag --copilot-quota-login to add GitHub accounts.
+copilot-quota:
+  # Enable or disable the Copilot quota service (default: true)
+  enabled: true
+  # How long to cache quota API responses in seconds (default: 300 = 5 minutes)
+  cache-ttl-seconds: 300
+  # User-Agent header sent to GitHub's copilot_internal API
+  # Do not change this unless you know what you're doing
+  user-agent: "GitHub-Copilot-Usage-Tray"
+
 # Routing strategy for selecting credentials when multiple match.
 routing:
   strategy: 'round-robin' # round-robin (default), fill-first
