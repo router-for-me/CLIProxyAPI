@@ -191,12 +191,13 @@ nonstream-keepalive-interval: 0
 #   timeout: "600"
 #   stabilize-device-profile: false  # optional, default false; set true to enable per-auth/API-key fingerprint pinning
 
-# Default headers for Codex OAuth model requests.
-# These are used only for file-backed/OAuth Codex requests when the client
-# does not send the header. `user-agent` applies to HTTP and websocket requests;
-# `beta-features` only applies to websocket requests. They do not apply to codex-api-key entries.
+# Default headers for Codex requests.
+# These are used when neither the incoming request nor the selected credential
+# already defines them. `user-agent` applies to both file-backed/OAuth and
+# codex-api-key Codex requests; `beta-features` only applies to websocket
+# requests for file-backed/OAuth Codex sessions.
 # codex-header-defaults:
-#   user-agent: "codex_cli_rs/0.114.0 (Mac OS 14.2.0; x86_64) vscode/1.111.0"
+#   user-agent: "codex_cli_rs/0.118.0-alpha.4 (Linux; x86_64) xterm-256color"
 #   beta-features: "multi_agent"
 
 # OpenAI compatibility providers

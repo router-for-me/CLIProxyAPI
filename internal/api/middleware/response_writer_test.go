@@ -3,6 +3,7 @@ package middleware
 import (
 	"bytes"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -37,7 +38,7 @@ func TestExtractRequestBodySupportsStringOverride(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
 
-	wrapper := &ResponseWriterWrapper{body: &bytes.Buffer{}}
+	wrapper := &ResponseWriterWrapper{}
 	c.Set(requestBodyOverrideContextKey, "override-as-string")
 
 	body := wrapper.extractRequestBody(c)
@@ -51,7 +52,7 @@ func TestExtractResponseBodyPrefersOverride(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
 
-	wrapper := &ResponseWriterWrapper{body: &bytes.Buffer{}}
+	wrapper := &ResponseWriterWrapper{}
 	wrapper.body.WriteString("original-response")
 
 	body := wrapper.extractResponseBody(c)
@@ -68,6 +69,22 @@ func TestExtractResponseBodyPrefersOverride(t *testing.T) {
 	body[0] = 'X'
 	if got := wrapper.extractResponseBody(c); string(got) != "override-response" {
 		t.Fatalf("response override should be cloned, got %q", string(got))
+	}
+}
+
+func TestExtractAPIResponseSupportsStringBuilder(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+
+	var builder strings.Builder
+	builder.WriteString("streamed-response")
+	c.Set("API_RESPONSE", &builder)
+
+	wrapper := &ResponseWriterWrapper{}
+	body := wrapper.extractAPIResponse(c)
+	if string(body) != "streamed-response" {
+		t.Fatalf("api response = %q, want %q", string(body), "streamed-response")
 	}
 }
 

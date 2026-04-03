@@ -94,3 +94,40 @@ func TestRequestStatisticsMergeSnapshotDedupIgnoresLatency(t *testing.T) {
 		t.Fatalf("details len = %d, want 1", len(details))
 	}
 }
+
+func TestRequestStatisticsRetainsAllDetails(t *testing.T) {
+	stats := NewRequestStatistics()
+	start := time.Date(2026, 3, 20, 12, 0, 0, 0, time.UTC)
+
+	const count = 517
+	for i := 0; i < count; i++ {
+		stats.Record(context.Background(), coreusage.Record{
+			APIKey:      "test-key",
+			Model:       "gpt-5.4",
+			RequestedAt: start.Add(time.Duration(i) * time.Second),
+			Detail: coreusage.Detail{
+				InputTokens:  1,
+				OutputTokens: 1,
+				TotalTokens:  2,
+			},
+		})
+	}
+
+	snapshot := stats.Snapshot()
+	model := snapshot.APIs["test-key"].Models["gpt-5.4"]
+	if model.TotalRequests != int64(count) {
+		t.Fatalf("total requests = %d, want %d", model.TotalRequests, count)
+	}
+	if len(model.Details) != count {
+		t.Fatalf("details len = %d, want %d", len(model.Details), count)
+	}
+
+	wantFirst := start
+	if !model.Details[0].Timestamp.Equal(wantFirst) {
+		t.Fatalf("first retained timestamp = %s, want %s", model.Details[0].Timestamp, wantFirst)
+	}
+	wantLast := start.Add(time.Duration(count-1) * time.Second)
+	if !model.Details[len(model.Details)-1].Timestamp.Equal(wantLast) {
+		t.Fatalf("last retained timestamp = %s, want %s", model.Details[len(model.Details)-1].Timestamp, wantLast)
+	}
+}

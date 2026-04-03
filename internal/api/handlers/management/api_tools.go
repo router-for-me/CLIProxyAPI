@@ -43,6 +43,7 @@ type apiCallRequest struct {
 	AuthIndexSnake  *string           `json:"auth_index"`
 	AuthIndexCamel  *string           `json:"authIndex"`
 	AuthIndexPascal *string           `json:"AuthIndex"`
+	Provider        string            `json:"provider"`
 	Method          string            `json:"method"`
 	URL             string            `json:"url"`
 	Header          map[string]string `json:"header"`
@@ -73,6 +74,9 @@ type apiCallResponse struct {
 //   - auth_index / authIndex / AuthIndex (optional):
 //     The credential "auth_index" from GET /v0/management/auth-files (or other endpoints returning it).
 //     If omitted or not found, credential-specific proxy/token substitution is skipped.
+//   - provider (optional):
+//     Provider hint for applying provider-specific default headers in management-side test calls.
+//     Currently used for Codex / Claude User-Agent defaults when header["User-Agent"] is omitted.
 //   - method (required): HTTP method, e.g. GET, POST, PUT, PATCH, DELETE.
 //   - url (required): Absolute URL including scheme and host, e.g. "https://api.example.com/v1/ping".
 //   - header (optional): Request headers map.
@@ -136,6 +140,7 @@ func (h *Handler) APICall(c *gin.Context) {
 	if reqHeaders == nil {
 		reqHeaders = map[string]string{}
 	}
+	h.applyAPICallDefaultHeaders(reqHeaders, auth, body.Provider)
 
 	var hostOverride string
 	var token string
@@ -225,6 +230,55 @@ func firstNonEmptyString(values ...*string) string {
 		}
 	}
 	return ""
+}
+
+func hasAPICallHeader(headers map[string]string, name string) bool {
+	if len(headers) == 0 {
+		return false
+	}
+	for key := range headers {
+		if strings.EqualFold(strings.TrimSpace(key), name) {
+			return true
+		}
+	}
+	return false
+}
+
+func resolveAPICallProvider(auth *coreauth.Auth, providerHint string) string {
+	if provider := strings.ToLower(strings.TrimSpace(providerHint)); provider != "" {
+		return provider
+	}
+	if auth == nil {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(auth.Provider))
+}
+
+func (h *Handler) applyAPICallDefaultHeaders(headers map[string]string, auth *coreauth.Auth, providerHint string) {
+	if headers == nil {
+		return
+	}
+	if hasAPICallHeader(headers, "User-Agent") {
+		return
+	}
+
+	switch resolveAPICallProvider(auth, providerHint) {
+	case "codex":
+		userAgent := authFileUserAgent(auth)
+		if userAgent == "" && h != nil && h.cfg != nil {
+			userAgent = strings.TrimSpace(h.cfg.CodexHeaderDefaults.UserAgent)
+		}
+		if userAgent != "" {
+			headers["User-Agent"] = userAgent
+		}
+	case "claude":
+		if h == nil || h.cfg == nil {
+			return
+		}
+		if userAgent := strings.TrimSpace(h.cfg.ClaudeHeaderDefaults.UserAgent); userAgent != "" {
+			headers["User-Agent"] = userAgent
+		}
+	}
 }
 
 func tokenValueForAuth(auth *coreauth.Auth) string {

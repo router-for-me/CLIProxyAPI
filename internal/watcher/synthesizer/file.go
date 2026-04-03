@@ -161,6 +161,7 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 	ApplyAuthExcludedModelsMeta(a, cfg, perAccountExcluded, "oauth")
 	// For codex auth files, extract plan_type from the JWT id_token.
 	if provider == "codex" {
+		applyFileAuthUserAgent(a.Attributes, metadata)
 		if idTokenRaw, ok := metadata["id_token"].(string); ok && strings.TrimSpace(idTokenRaw) != "" {
 			if claims, errParse := codex.ParseJWTToken(idTokenRaw); errParse == nil && claims != nil {
 				if pt := strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType); pt != "" {
@@ -181,6 +182,24 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 		}
 	}
 	return []*coreauth.Auth{a}
+}
+
+// applyFileAuthUserAgent maps an auth-file-level user_agent field to the
+// request header attribute used by Codex.
+func applyFileAuthUserAgent(attrs map[string]string, metadata map[string]any) {
+	if attrs == nil || len(metadata) == 0 {
+		return
+	}
+	userAgent := ""
+	if raw, ok := metadata["user_agent"].(string); ok {
+		userAgent = strings.TrimSpace(raw)
+	} else if raw, ok := metadata["user-agent"].(string); ok {
+		userAgent = strings.TrimSpace(raw)
+	}
+	if userAgent == "" {
+		return
+	}
+	attrs["header:User-Agent"] = userAgent
 }
 
 // SynthesizeGeminiVirtualAuths creates virtual Auth entries for multi-project Gemini credentials.

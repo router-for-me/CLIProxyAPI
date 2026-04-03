@@ -130,6 +130,13 @@ func isWebUIRequest(c *gin.Context) bool {
 	}
 }
 
+func codexLoginRequestUserAgent(c *gin.Context) string {
+	if c == nil || isWebUIRequest(c) {
+		return ""
+	}
+	return strings.TrimSpace(c.GetHeader("User-Agent"))
+}
+
 func startCallbackForwarder(port int, provider, targetBase string) (*callbackForwarder, error) {
 	callbackForwardersMu.Lock()
 	prev := callbackForwarders[port]
@@ -350,6 +357,18 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context) {
 						fileData["note"] = trimmed
 					}
 				}
+				if uav := gjson.GetBytes(data, "user_agent"); uav.Exists() && uav.Type == gjson.String {
+					if trimmed := strings.TrimSpace(uav.String()); trimmed != "" {
+						fileData["user_agent"] = trimmed
+					}
+				}
+				if _, ok := fileData["user_agent"]; !ok {
+					if uav := gjson.GetBytes(data, "user-agent"); uav.Exists() && uav.Type == gjson.String {
+						if trimmed := strings.TrimSpace(uav.String()); trimmed != "" {
+							fileData["user_agent"] = trimmed
+						}
+					}
+				}
 			}
 
 			files = append(files, fileData)
@@ -464,7 +483,41 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 			}
 		}
 	}
+	if userAgent := authFileUserAgent(auth); userAgent != "" {
+		entry["user_agent"] = userAgent
+	}
 	return entry
+}
+
+func authFileUserAgent(auth *coreauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	if auth.Attributes != nil {
+		if ua := strings.TrimSpace(auth.Attributes["header:User-Agent"]); ua != "" {
+			return ua
+		}
+		if ua := strings.TrimSpace(auth.Attributes["user_agent"]); ua != "" {
+			return ua
+		}
+		if ua := strings.TrimSpace(auth.Attributes["user-agent"]); ua != "" {
+			return ua
+		}
+	}
+	if auth.Metadata == nil {
+		return ""
+	}
+	if raw, ok := auth.Metadata["user_agent"].(string); ok {
+		if ua := strings.TrimSpace(raw); ua != "" {
+			return ua
+		}
+	}
+	if raw, ok := auth.Metadata["user-agent"].(string); ok {
+		if ua := strings.TrimSpace(raw); ua != "" {
+			return ua
+		}
+	}
+	return ""
 }
 
 func extractCodexIDTokenClaims(auth *coreauth.Auth) gin.H {
@@ -1120,7 +1173,7 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "disabled": *req.Disabled})
 }
 
-// PatchAuthFileFields updates editable fields (prefix, proxy_url, headers, priority, note) of an auth file.
+// PatchAuthFileFields updates editable fields (prefix, proxy_url, headers, priority, note, user_agent) of an auth file.
 func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 	if h.authManager == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
@@ -1128,12 +1181,13 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 	}
 
 	var req struct {
-		Name     string            `json:"name"`
-		Prefix   *string           `json:"prefix"`
-		ProxyURL *string           `json:"proxy_url"`
-		Headers  map[string]string `json:"headers"`
-		Priority *int              `json:"priority"`
-		Note     *string           `json:"note"`
+		Name      string            `json:"name"`
+		Prefix    *string           `json:"prefix"`
+		ProxyURL  *string           `json:"proxy_url"`
+		Headers   map[string]string `json:"headers"`
+		Priority  *int              `json:"priority"`
+		Note      *string           `json:"note"`
+		UserAgent *string           `json:"user_agent"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
@@ -1270,7 +1324,7 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 			changed = true
 		}
 	}
-	if req.Priority != nil || req.Note != nil {
+	if req.Priority != nil || req.Note != nil || req.UserAgent != nil {
 		if targetAuth.Metadata == nil {
 			targetAuth.Metadata = make(map[string]any)
 		}
@@ -1295,6 +1349,22 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 			} else {
 				targetAuth.Metadata["note"] = trimmedNote
 				targetAuth.Attributes["note"] = trimmedNote
+			}
+		}
+		if req.UserAgent != nil {
+			trimmedUserAgent := strings.TrimSpace(*req.UserAgent)
+			if trimmedUserAgent == "" {
+				delete(targetAuth.Metadata, "user_agent")
+				delete(targetAuth.Metadata, "user-agent")
+				delete(targetAuth.Attributes, "header:User-Agent")
+				delete(targetAuth.Attributes, "user_agent")
+				delete(targetAuth.Attributes, "user-agent")
+			} else {
+				targetAuth.Metadata["user_agent"] = trimmedUserAgent
+				delete(targetAuth.Metadata, "user-agent")
+				targetAuth.Attributes["header:User-Agent"] = trimmedUserAgent
+				delete(targetAuth.Attributes, "user_agent")
+				delete(targetAuth.Attributes, "user-agent")
 			}
 		}
 		changed = true
@@ -1828,6 +1898,7 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 	RegisterOAuthSession(state, "codex")
 
 	isWebUI := isWebUIRequest(c)
+	requestUserAgent := codexLoginRequestUserAgent(c)
 	var forwarder *callbackForwarder
 	if isWebUI {
 		targetURL, errTarget := h.managementCallbackURL("/codex/callback")
@@ -1919,6 +1990,12 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 				"email":      tokenStorage.Email,
 				"account_id": tokenStorage.AccountID,
 			},
+		}
+		if requestUserAgent != "" {
+			record.Metadata["user_agent"] = requestUserAgent
+			record.Attributes = map[string]string{
+				"header:User-Agent": requestUserAgent,
+			}
 		}
 		savedPath, errSave := h.saveTokenRecord(ctx, record)
 		if errSave != nil {

@@ -52,6 +52,23 @@ type upstreamAttempt struct {
 	errorWritten         bool
 }
 
+func appendAttemptResponseText(ginCtx *gin.Context, attempt *upstreamAttempt, text string) {
+	if text == "" {
+		return
+	}
+	if attempt != nil && attempt.response != nil {
+		attempt.response.WriteString(text)
+	}
+	if ginCtx == nil {
+		return
+	}
+	builder := aggregatedResponseBuilder(ginCtx)
+	if builder == nil {
+		return
+	}
+	builder.WriteString(text)
+}
+
 // RecordAPIRequest stores the upstream request metadata in Gin context for request logging.
 func RecordAPIRequest(ctx context.Context, cfg *config.Config, info UpstreamRequestLog) {
 	if cfg == nil || !cfg.RequestLog {
@@ -108,21 +125,22 @@ func RecordAPIResponseMetadata(ctx context.Context, cfg *config.Config, status i
 	if ginCtx == nil {
 		return
 	}
-	attempts, attempt := ensureAttempt(ginCtx)
-	ensureResponseIntro(attempt)
+	_, attempt := ensureAttempt(ginCtx)
+	ensureResponseIntro(ginCtx, attempt)
 
 	if status > 0 && !attempt.statusWritten {
-		attempt.response.WriteString(fmt.Sprintf("Status: %d\n", status))
+		appendAttemptResponseText(ginCtx, attempt, fmt.Sprintf("Status: %d\n", status))
 		attempt.statusWritten = true
 	}
 	if !attempt.headersWritten {
-		attempt.response.WriteString("Headers:\n")
+		appendAttemptResponseText(ginCtx, attempt, "Headers:\n")
 		writeHeaders(attempt.response, headers)
+		if builder := aggregatedResponseBuilder(ginCtx); builder != nil {
+			writeHeaders(builder, headers)
+		}
 		attempt.headersWritten = true
-		attempt.response.WriteString("\n")
+		appendAttemptResponseText(ginCtx, attempt, "\n")
 	}
-
-	updateAggregatedResponse(ginCtx, attempts)
 }
 
 // RecordAPIResponseError adds an error entry for the latest attempt when no HTTP response is available.
@@ -134,20 +152,18 @@ func RecordAPIResponseError(ctx context.Context, cfg *config.Config, err error) 
 	if ginCtx == nil {
 		return
 	}
-	attempts, attempt := ensureAttempt(ginCtx)
-	ensureResponseIntro(attempt)
+	_, attempt := ensureAttempt(ginCtx)
+	ensureResponseIntro(ginCtx, attempt)
 
 	if attempt.bodyStarted && !attempt.bodyHasContent {
 		// Ensure body does not stay empty marker if error arrives first.
 		attempt.bodyStarted = false
 	}
 	if attempt.errorWritten {
-		attempt.response.WriteString("\n")
+		appendAttemptResponseText(ginCtx, attempt, "\n")
 	}
-	attempt.response.WriteString(fmt.Sprintf("Error: %s\n", err.Error()))
+	appendAttemptResponseText(ginCtx, attempt, fmt.Sprintf("Error: %s\n", err.Error()))
 	attempt.errorWritten = true
-
-	updateAggregatedResponse(ginCtx, attempts)
 }
 
 // AppendAPIResponseChunk appends an upstream response chunk to Gin context for request logging.
@@ -163,17 +179,20 @@ func AppendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byt
 	if ginCtx == nil {
 		return
 	}
-	attempts, attempt := ensureAttempt(ginCtx)
-	ensureResponseIntro(attempt)
+	_, attempt := ensureAttempt(ginCtx)
+	ensureResponseIntro(ginCtx, attempt)
 
 	if !attempt.headersWritten {
-		attempt.response.WriteString("Headers:\n")
+		appendAttemptResponseText(ginCtx, attempt, "Headers:\n")
 		writeHeaders(attempt.response, nil)
+		if builder := aggregatedResponseBuilder(ginCtx); builder != nil {
+			writeHeaders(builder, nil)
+		}
 		attempt.headersWritten = true
-		attempt.response.WriteString("\n")
+		appendAttemptResponseText(ginCtx, attempt, "\n")
 	}
 	if !attempt.bodyStarted {
-		attempt.response.WriteString("Body:\n")
+		appendAttemptResponseText(ginCtx, attempt, "Body:\n")
 		attempt.bodyStarted = true
 	}
 	currentChunkIsSSEEvent := bytes.HasPrefix(data, []byte("event:"))
@@ -183,13 +202,11 @@ func AppendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byt
 		if attempt.prevWasSSEEvent && currentChunkIsSSEData {
 			separator = "\n"
 		}
-		attempt.response.WriteString(separator)
+		appendAttemptResponseText(ginCtx, attempt, separator)
 	}
-	attempt.response.WriteString(string(data))
+	appendAttemptResponseText(ginCtx, attempt, string(data))
 	attempt.bodyHasContent = true
 	attempt.prevWasSSEEvent = currentChunkIsSSEEvent
-
-	updateAggregatedResponse(ginCtx, attempts)
 }
 
 // RecordAPIWebsocketRequest stores an upstream websocket request event in Gin context.
@@ -359,14 +376,39 @@ func ensureAttempt(ginCtx *gin.Context) ([]*upstreamAttempt, *upstreamAttempt) {
 	return attempts, attempts[len(attempts)-1]
 }
 
-func ensureResponseIntro(attempt *upstreamAttempt) {
+func ensureResponseIntro(ginCtx *gin.Context, attempt *upstreamAttempt) {
 	if attempt == nil || attempt.response == nil || attempt.responseIntroWritten {
 		return
 	}
-	attempt.response.WriteString(fmt.Sprintf("=== API RESPONSE %d ===\n", attempt.index))
-	attempt.response.WriteString(fmt.Sprintf("Timestamp: %s\n", time.Now().Format(time.RFC3339Nano)))
-	attempt.response.WriteString("\n")
+	appendAttemptResponseText(ginCtx, attempt, fmt.Sprintf("=== API RESPONSE %d ===\n", attempt.index))
+	appendAttemptResponseText(ginCtx, attempt, fmt.Sprintf("Timestamp: %s\n", time.Now().Format(time.RFC3339Nano)))
+	appendAttemptResponseText(ginCtx, attempt, "\n")
 	attempt.responseIntroWritten = true
+}
+
+func aggregatedResponseBuilder(ginCtx *gin.Context) *strings.Builder {
+	if ginCtx == nil {
+		return nil
+	}
+	if value, exists := ginCtx.Get(apiResponseKey); exists {
+		switch typed := value.(type) {
+		case *strings.Builder:
+			return typed
+		case []byte:
+			builder := &strings.Builder{}
+			builder.Write(typed)
+			ginCtx.Set(apiResponseKey, builder)
+			return builder
+		case string:
+			builder := &strings.Builder{}
+			builder.WriteString(typed)
+			ginCtx.Set(apiResponseKey, builder)
+			return builder
+		}
+	}
+	builder := &strings.Builder{}
+	ginCtx.Set(apiResponseKey, builder)
+	return builder
 }
 
 func updateAggregatedRequest(ginCtx *gin.Context, attempts []*upstreamAttempt) {
@@ -383,6 +425,11 @@ func updateAggregatedRequest(ginCtx *gin.Context, attempts []*upstreamAttempt) {
 func updateAggregatedResponse(ginCtx *gin.Context, attempts []*upstreamAttempt) {
 	if ginCtx == nil {
 		return
+	}
+	if value, exists := ginCtx.Get(apiResponseKey); exists {
+		if _, ok := value.(*strings.Builder); ok {
+			return
+		}
 	}
 	var builder strings.Builder
 	for idx, attempt := range attempts {

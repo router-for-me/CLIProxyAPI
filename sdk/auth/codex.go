@@ -194,5 +194,18 @@ waitForCallback:
 		return nil, codex.NewAuthenticationError(codex.ErrCodeExchangeFailed, err)
 	}
 
-	return a.buildAuthRecord(authSvc, authBundle)
+	return a.buildAuthRecord(authSvc, authBundle, opts)
+}
+
+func codexLoginUserAgent(opts *LoginOptions) string {
+	if opts == nil || len(opts.Metadata) == 0 {
+		return ""
+	}
+	if ua := strings.TrimSpace(opts.Metadata["user_agent"]); ua != "" {
+		return ua
+	}
+	if ua := strings.TrimSpace(opts.Metadata["user-agent"]); ua != "" {
+		return ua
+	}
+	return ""
 }

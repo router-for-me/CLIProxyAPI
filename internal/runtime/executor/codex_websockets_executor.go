@@ -837,10 +837,21 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 		betaHeader = codexResponsesWebsocketBetaHeaderValue
 	}
 	headers.Set("OpenAI-Beta", betaHeader)
-	if strings.Contains(headers.Get("User-Agent"), "Mac OS") {
+	authUserAgent := codexAuthUserAgent(auth)
+	effectiveUserAgent := strings.TrimSpace(headers.Get("User-Agent"))
+	if effectiveUserAgent == "" && ginHeaders != nil {
+		effectiveUserAgent = strings.TrimSpace(ginHeaders.Get("User-Agent"))
+	}
+	if authUserAgent != "" {
+		effectiveUserAgent = authUserAgent
+		headers.Set("User-Agent", authUserAgent)
+	}
+	if strings.Contains(effectiveUserAgent, "Mac OS") {
 		misc.EnsureHeader(headers, ginHeaders, "Session_id", uuid.NewString())
 	}
-	headers.Del("User-Agent")
+	if authUserAgent == "" {
+		headers.Del("User-Agent")
+	}
 
 	isAPIKey := false
 	if auth != nil && auth.Attributes != nil {
@@ -873,15 +884,19 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 }
 
 func codexHeaderDefaults(cfg *config.Config, auth *cliproxyauth.Auth) (string, string) {
-	if cfg == nil || auth == nil {
+	if cfg == nil {
 		return "", ""
+	}
+	userAgent := strings.TrimSpace(cfg.CodexHeaderDefaults.UserAgent)
+	if auth == nil {
+		return userAgent, ""
 	}
 	if auth.Attributes != nil {
 		if v := strings.TrimSpace(auth.Attributes["api_key"]); v != "" {
-			return "", ""
+			return userAgent, ""
 		}
 	}
-	return strings.TrimSpace(cfg.CodexHeaderDefaults.UserAgent), strings.TrimSpace(cfg.CodexHeaderDefaults.BetaFeatures)
+	return userAgent, strings.TrimSpace(cfg.CodexHeaderDefaults.BetaFeatures)
 }
 
 func ensureHeaderWithPriority(target http.Header, source http.Header, key, configValue, fallbackValue string) {
