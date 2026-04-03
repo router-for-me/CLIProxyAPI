@@ -95,6 +95,7 @@ func main() {
 	var kiroIDCRegion string
 	var kiroIDCFlow string
 	var githubCopilotLogin bool
+	var copilotQuotaLogin bool
 	var projectID string
 	var vertexImport string
 	var configPath string
@@ -132,6 +133,7 @@ func main() {
 	flag.StringVar(&kiroIDCRegion, "kiro-idc-region", "", "IDC region (default: us-east-1)")
 	flag.StringVar(&kiroIDCFlow, "kiro-idc-flow", "", "IDC flow type: authcode (default) or device")
 	flag.BoolVar(&githubCopilotLogin, "github-copilot-login", false, "Login to GitHub Copilot using device flow")
+	flag.BoolVar(&copilotQuotaLogin, "copilot-quota-login", false, "Login to GitHub to view Copilot quota in management UI")
 	flag.StringVar(&projectID, "project_id", "", "Project ID (Gemini only, not required)")
 	flag.StringVar(&configPath, "config", DefaultConfigPath, "Configure File Path")
 	flag.StringVar(&vertexImport, "vertex-import", "", "Import Vertex service account key JSON file")
@@ -538,6 +540,7 @@ func main() {
 	} else if gitlabTokenLogin {
 		cmd.DoGitLabTokenLogin(cfg, options)
 	} else if kimiLogin {
+		// Handle Kimi login
 		cmd.DoKimiLogin(cfg, options)
 	} else if kiroLogin {
 		// For Kiro auth, default to incognito mode for multi-account support
@@ -573,6 +576,9 @@ func main() {
 		setKiroIncognitoMode(cfg, useIncognito, noIncognito)
 		kiro.InitFingerprintConfig(cfg)
 		cmd.DoKiroIDCLogin(cfg, options, kiroIDCStartURL, kiroIDCRegion, kiroIDCFlow)
+	} else if copilotQuotaLogin {
+		// Handle Copilot quota login
+		cmd.DoCopilotQuotaLogin(cfg)
 	} else {
 		// In cloud deploy mode without config file, just wait for shutdown signals
 		if isCloudDeploy && !configFileExists {
