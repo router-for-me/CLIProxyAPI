@@ -2,6 +2,7 @@
 package util
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strconv"
@@ -42,6 +43,7 @@ func cleanJSONSchema(jsonStr string, addPlaceholder bool) string {
 	jsonStr = mergeAllOf(jsonStr)
 	jsonStr = flattenAnyOfOneOf(jsonStr)
 	jsonStr = flattenTypeArrays(jsonStr)
+	jsonStr = normalizeBooleanSchemas(jsonStr)
 
 	// Phase 3: Cleanup
 	jsonStr = removeUnsupportedKeywords(jsonStr)
@@ -57,6 +59,69 @@ func cleanJSONSchema(jsonStr string, addPlaceholder bool) string {
 	}
 
 	return jsonStr
+}
+
+// normalizeBooleanSchemas converts boolean JSON Schema nodes (true/false) to object schemas.
+// Antigravity/Gemini protobuf Schema does not accept raw booleans as schema values.
+func normalizeBooleanSchemas(jsonStr string) string {
+	var root any
+	if err := json.Unmarshal([]byte(jsonStr), &root); err != nil {
+		return jsonStr
+	}
+	root = normalizeBooleanSchemaNode(root, true)
+	normalized, err := json.Marshal(root)
+	if err != nil {
+		return jsonStr
+	}
+	return string(normalized)
+}
+
+func normalizeBooleanSchemaNode(node any, schemaNode bool) any {
+	switch typed := node.(type) {
+	case bool:
+		if schemaNode {
+			// Preserve maximum compatibility by turning boolean schema into
+			// a generic object schema instead of emitting raw booleans.
+			return map[string]any{"type": "object"}
+		}
+		return typed
+	case []any:
+		for i := range typed {
+			typed[i] = normalizeBooleanSchemaNode(typed[i], schemaNode)
+		}
+		return typed
+	case map[string]any:
+		for key, value := range typed {
+			switch key {
+			case "properties", "$defs", "definitions", "patternProperties":
+				// These keys hold maps of child schema definitions.
+				if childMap, ok := value.(map[string]any); ok {
+					for childKey, childVal := range childMap {
+						childMap[childKey] = normalizeBooleanSchemaNode(childVal, true)
+					}
+					typed[key] = childMap
+				} else {
+					typed[key] = normalizeBooleanSchemaNode(value, false)
+				}
+			case "items", "additionalProperties", "propertyNames", "contains", "not", "if", "then", "else":
+				typed[key] = normalizeBooleanSchemaNode(value, true)
+			case "anyOf", "oneOf", "allOf", "prefixItems":
+				if arr, ok := value.([]any); ok {
+					for i := range arr {
+						arr[i] = normalizeBooleanSchemaNode(arr[i], true)
+					}
+					typed[key] = arr
+				} else {
+					typed[key] = normalizeBooleanSchemaNode(value, false)
+				}
+			default:
+				typed[key] = normalizeBooleanSchemaNode(value, false)
+			}
+		}
+		return typed
+	default:
+		return typed
+	}
 }
 
 // removeKeywords removes all occurrences of specified keywords from the JSON schema.
