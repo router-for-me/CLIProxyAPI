@@ -324,13 +324,13 @@ func TestApplyHeaders_XInitiator_AgentWhenLastUserButHistoryHasAssistant(t *test
 	t.Parallel()
 	e := &GitHubCopilotExecutor{}
 	req, _ := http.NewRequest(http.MethodPost, "https://example.com", nil)
-	// When the last role is "user" but the conversation contains tool messages,
-	// the request is a continuation (e.g. tool result with attached text
-	// translated to a synthetic user message). Should be "agent".
-	body := []byte(`{"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":"I will read the file"},{"role":"tool","content":"file contents..."},{"role":"user","content":"tool result here"}]}`)
+	// When the last role is "user" and the message contains tool_result content,
+	// the request is a continuation (e.g. Claude tool result translated to a
+	// synthetic user message). Should be "agent".
+	body := []byte(`{"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":"I will read the file"},{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu1","content":"file contents..."}]}]}`)
 	e.applyHeaders(req, "token", body)
 	if got := req.Header.Get("X-Initiator"); got != "agent" {
-		t.Fatalf("X-Initiator = %q, want agent (history has tool role)", got)
+		t.Fatalf("X-Initiator = %q, want agent (last user contains tool_result)", got)
 	}
 }
 
@@ -338,10 +338,11 @@ func TestApplyHeaders_XInitiator_AgentWithToolRole(t *testing.T) {
 	t.Parallel()
 	e := &GitHubCopilotExecutor{}
 	req, _ := http.NewRequest(http.MethodPost, "https://example.com", nil)
+	// When the last message has role "tool", it's clearly agent-initiated.
 	body := []byte(`{"messages":[{"role":"user","content":"hello"},{"role":"tool","content":"result"}]}`)
 	e.applyHeaders(req, "token", body)
 	if got := req.Header.Get("X-Initiator"); got != "agent" {
-		t.Fatalf("X-Initiator = %q, want agent (tool role exists)", got)
+		t.Fatalf("X-Initiator = %q, want agent (last role is tool)", got)
 	}
 }
 
@@ -392,17 +393,17 @@ func TestApplyHeaders_XInitiator_UserInMultiTurnNoTools(t *testing.T) {
 	}
 }
 
-func TestApplyHeaders_XInitiator_AgentCompactionWithToolHistory(t *testing.T) {
+func TestApplyHeaders_XInitiator_UserFollowUpAfterToolHistory(t *testing.T) {
 	t.Parallel()
 	e := &GitHubCopilotExecutor{}
 	req, _ := http.NewRequest(http.MethodPost, "https://example.com", nil)
-	// Compaction scenario: user prompt after a conversation with tool use history.
-	// The last message is a plain "user" message (compaction summary request),
-	// but the conversation contains tool messages → should be "agent".
+	// User follow-up after a completed tool-use conversation.
+	// The last message is a genuine user question — should be "user", not "agent".
+	// This aligns with opencode's behavior: only active tool loops are agent-initiated.
 	body := []byte(`{"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":[{"type":"tool_use","id":"tu1","name":"Read","input":{}}]},{"role":"tool","tool_call_id":"tu1","content":"file data"},{"role":"assistant","content":"I read the file."},{"role":"user","content":"What did we do so far?"}]}`)
 	e.applyHeaders(req, "token", body)
-	if got := req.Header.Get("X-Initiator"); got != "agent" {
-		t.Fatalf("X-Initiator = %q, want agent (compaction with tool history)", got)
+	if got := req.Header.Get("X-Initiator"); got != "user" {
+		t.Fatalf("X-Initiator = %q, want user (genuine follow-up after tool history)", got)
 	}
 }
 
@@ -499,6 +500,61 @@ func TestApplyGitHubCopilotResponsesDefaults_NoReasoningEffort(t *testing.T) {
 	// reasoning.summary should NOT be set when reasoning.effort is absent
 	if gjson.GetBytes(got, "reasoning.summary").Exists() {
 		t.Fatalf("reasoning.summary should not be set when reasoning.effort is absent, got %q", gjson.GetBytes(got, "reasoning.summary").String())
+	}
+}
+
+// --- Tests for normalizeGitHubCopilotReasoningField ---
+
+func TestNormalizeReasoningField_NonStreaming(t *testing.T) {
+	t.Parallel()
+	data := []byte(`{"choices":[{"message":{"content":"hello","reasoning_text":"I think..."}}]}`)
+	got := normalizeGitHubCopilotReasoningField(data)
+	rc := gjson.GetBytes(got, "choices.0.message.reasoning_content").String()
+	if rc != "I think..." {
+		t.Fatalf("reasoning_content = %q, want %q", rc, "I think...")
+	}
+}
+
+func TestNormalizeReasoningField_Streaming(t *testing.T) {
+	t.Parallel()
+	data := []byte(`{"choices":[{"delta":{"reasoning_text":"thinking delta"}}]}`)
+	got := normalizeGitHubCopilotReasoningField(data)
+	rc := gjson.GetBytes(got, "choices.0.delta.reasoning_content").String()
+	if rc != "thinking delta" {
+		t.Fatalf("reasoning_content = %q, want %q", rc, "thinking delta")
+	}
+}
+
+func TestNormalizeReasoningField_PreservesExistingReasoningContent(t *testing.T) {
+	t.Parallel()
+	data := []byte(`{"choices":[{"message":{"reasoning_text":"old","reasoning_content":"existing"}}]}`)
+	got := normalizeGitHubCopilotReasoningField(data)
+	rc := gjson.GetBytes(got, "choices.0.message.reasoning_content").String()
+	if rc != "existing" {
+		t.Fatalf("reasoning_content = %q, want %q (should not overwrite)", rc, "existing")
+	}
+}
+
+func TestNormalizeReasoningField_MultiChoice(t *testing.T) {
+	t.Parallel()
+	data := []byte(`{"choices":[{"message":{"reasoning_text":"thought-0"}},{"message":{"reasoning_text":"thought-1"}}]}`)
+	got := normalizeGitHubCopilotReasoningField(data)
+	rc0 := gjson.GetBytes(got, "choices.0.message.reasoning_content").String()
+	rc1 := gjson.GetBytes(got, "choices.1.message.reasoning_content").String()
+	if rc0 != "thought-0" {
+		t.Fatalf("choices[0].reasoning_content = %q, want %q", rc0, "thought-0")
+	}
+	if rc1 != "thought-1" {
+		t.Fatalf("choices[1].reasoning_content = %q, want %q", rc1, "thought-1")
+	}
+}
+
+func TestNormalizeReasoningField_NoChoices(t *testing.T) {
+	t.Parallel()
+	data := []byte(`{"id":"chatcmpl-123"}`)
+	got := normalizeGitHubCopilotReasoningField(data)
+	if string(got) != string(data) {
+		t.Fatalf("expected no change, got %s", string(got))
 	}
 }
 

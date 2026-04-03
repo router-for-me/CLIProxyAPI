@@ -385,7 +385,19 @@ func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 			if useResponses && from.String() == "claude" {
 				chunks = translateGitHubCopilotResponsesStreamToClaude(bytes.Clone(line), &param)
 			} else {
-				normalizedLine := normalizeGitHubCopilotReasoningField(bytes.Clone(line))
+				// Strip SSE "data: " prefix before reasoning field normalization,
+				// since normalizeGitHubCopilotReasoningField expects pure JSON.
+				// Re-wrap with the prefix afterward for the translator.
+				normalizedLine := bytes.Clone(line)
+				if bytes.HasPrefix(line, dataTag) {
+					sseData := bytes.TrimSpace(line[len(dataTag):])
+					if !bytes.Equal(sseData, []byte("[DONE]")) && gjson.ValidBytes(sseData) {
+						normalized := normalizeGitHubCopilotReasoningField(bytes.Clone(sseData))
+						if !bytes.Equal(normalized, sseData) {
+							normalizedLine = append(append([]byte(nil), dataTag...), normalized...)
+						}
+					}
+				}
 				chunks = sdktranslator.TranslateStream(ctx, to, from, req.Model, bytes.Clone(opts.OriginalRequest), body, normalizedLine, &param)
 			}
 			for i := range chunks {
@@ -601,14 +613,6 @@ func isAgentInitiated(body []byte) bool {
 					}
 				}
 			}
-			// Fallback: if ANY message has role "tool", this conversation
-			// involves tool use — mark as agent to cover compaction and
-			// multi-turn agent continuations.
-			for _, msg := range arr {
-				if msg.Get("role").String() == "tool" {
-					return true
-				}
-			}
 		}
 
 		return false
@@ -740,19 +744,28 @@ func isCopilotUnsupportedBeta(beta string) bool {
 // (choices[].delta.reasoning_text) and non-streaming messages
 // (choices[].message.reasoning_text). The field is only renamed when
 // 'reasoning_content' is absent or null, preserving standard responses.
+// All choices are processed to support n>1 requests.
 func normalizeGitHubCopilotReasoningField(data []byte) []byte {
-	// Non-streaming: choices[].message.reasoning_text
-	if rt := gjson.GetBytes(data, "choices.0.message.reasoning_text"); rt.Exists() && rt.String() != "" {
-		rc := gjson.GetBytes(data, "choices.0.message.reasoning_content")
-		if !rc.Exists() || rc.Type == gjson.Null || rc.String() == "" {
-			data, _ = sjson.SetBytes(data, "choices.0.message.reasoning_content", rt.String())
-		}
+	choices := gjson.GetBytes(data, "choices")
+	if !choices.Exists() || !choices.IsArray() {
+		return data
 	}
-	// Streaming: choices[].delta.reasoning_text
-	if rt := gjson.GetBytes(data, "choices.0.delta.reasoning_text"); rt.Exists() && rt.String() != "" {
-		rc := gjson.GetBytes(data, "choices.0.delta.reasoning_content")
-		if !rc.Exists() || rc.Type == gjson.Null || rc.String() == "" {
-			data, _ = sjson.SetBytes(data, "choices.0.delta.reasoning_content", rt.String())
+	for i := range choices.Array() {
+		// Non-streaming: choices[i].message.reasoning_text
+		msgRT := fmt.Sprintf("choices.%d.message.reasoning_text", i)
+		msgRC := fmt.Sprintf("choices.%d.message.reasoning_content", i)
+		if rt := gjson.GetBytes(data, msgRT); rt.Exists() && rt.String() != "" {
+			if rc := gjson.GetBytes(data, msgRC); !rc.Exists() || rc.Type == gjson.Null || rc.String() == "" {
+				data, _ = sjson.SetBytes(data, msgRC, rt.String())
+			}
+		}
+		// Streaming: choices[i].delta.reasoning_text
+		deltaRT := fmt.Sprintf("choices.%d.delta.reasoning_text", i)
+		deltaRC := fmt.Sprintf("choices.%d.delta.reasoning_content", i)
+		if rt := gjson.GetBytes(data, deltaRT); rt.Exists() && rt.String() != "" {
+			if rc := gjson.GetBytes(data, deltaRC); !rc.Exists() || rc.Type == gjson.Null || rc.String() == "" {
+				data, _ = sjson.SetBytes(data, deltaRC, rt.String())
+			}
 		}
 	}
 	return data
