@@ -206,3 +206,81 @@ func TestPersistenceLoadsLegacyUsageSnapshot(t *testing.T) {
 		t.Fatalf("legacy model TotalRequests = %d, want 7", modelSnapshot.TotalRequests)
 	}
 }
+
+func TestPersistenceOnlyRewritesDirtyDayFiles(t *testing.T) {
+	dir := t.TempDir()
+	statsDir := filepath.Join(dir, "stats")
+
+	stats := NewRequestStatistics()
+	persistence, err := StartPersistence(stats, statsDir, 14)
+	if err != nil {
+		t.Fatalf("StartPersistence() error = %v", err)
+	}
+
+	stats.Record(context.Background(), coreusage.Record{
+		APIKey:      "test-api",
+		Model:       "gpt-test",
+		RequestedAt: time.Date(2026, 4, 2, 10, 0, 0, 0, time.UTC),
+		Detail: coreusage.Detail{
+			InputTokens:  10,
+			OutputTokens: 5,
+			TotalTokens:  15,
+		},
+	})
+	stats.Record(context.Background(), coreusage.Record{
+		APIKey:      "test-api",
+		Model:       "gpt-test",
+		RequestedAt: time.Date(2026, 4, 3, 11, 0, 0, 0, time.UTC),
+		Detail: coreusage.Detail{
+			InputTokens:  12,
+			OutputTokens: 8,
+			TotalTokens:  20,
+		},
+	})
+	if err := persistence.Flush(); err != nil {
+		t.Fatalf("first Flush() error = %v", err)
+	}
+
+	day1Path := filepath.Join(statsDir, usageDailyDirectoryName, "2026-04-02.json")
+	day2Path := filepath.Join(statsDir, usageDailyDirectoryName, "2026-04-03.json")
+	day1InfoBefore, err := os.Stat(day1Path)
+	if err != nil {
+		t.Fatalf("Stat(day1 before) error = %v", err)
+	}
+	day2InfoBefore, err := os.Stat(day2Path)
+	if err != nil {
+		t.Fatalf("Stat(day2 before) error = %v", err)
+	}
+
+	time.Sleep(1100 * time.Millisecond)
+
+	stats.Record(context.Background(), coreusage.Record{
+		APIKey:      "test-api",
+		Model:       "gpt-test",
+		RequestedAt: time.Date(2026, 4, 3, 12, 0, 0, 0, time.UTC),
+		Detail: coreusage.Detail{
+			InputTokens:  4,
+			OutputTokens: 6,
+			TotalTokens:  10,
+		},
+	})
+	if err := persistence.Flush(); err != nil {
+		t.Fatalf("second Flush() error = %v", err)
+	}
+
+	day1InfoAfter, err := os.Stat(day1Path)
+	if err != nil {
+		t.Fatalf("Stat(day1 after) error = %v", err)
+	}
+	day2InfoAfter, err := os.Stat(day2Path)
+	if err != nil {
+		t.Fatalf("Stat(day2 after) error = %v", err)
+	}
+
+	if !day1InfoAfter.ModTime().Equal(day1InfoBefore.ModTime()) {
+		t.Fatalf("expected unchanged historical day file modtime, before=%v after=%v", day1InfoBefore.ModTime(), day1InfoAfter.ModTime())
+	}
+	if !day2InfoAfter.ModTime().After(day2InfoBefore.ModTime()) {
+		t.Fatalf("expected dirty day file to be rewritten, before=%v after=%v", day2InfoBefore.ModTime(), day2InfoAfter.ModTime())
+	}
+}

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -50,10 +49,11 @@ type Persistence struct {
 	retentionDays int
 	stats         *RequestStatistics
 
-	mu      sync.Mutex
-	flushMu sync.Mutex
-	timer   *time.Timer
-	stopped bool
+	mu        sync.Mutex
+	flushMu   sync.Mutex
+	timer     *time.Timer
+	stopped   bool
+	dirtyDays map[string]struct{}
 }
 
 // StartPersistence loads persisted usage data and wires auto-save hooks.
@@ -71,6 +71,7 @@ func StartPersistence(stats *RequestStatistics, baseDir string, retentionDays in
 		dailyDir:      filepath.Join(baseDir, usageDailyDirectoryName),
 		retentionDays: retentionDays,
 		stats:         stats,
+		dirtyDays:     make(map[string]struct{}),
 	}
 	if err := p.load(); err != nil {
 		return nil, err
@@ -149,6 +150,9 @@ func (p *Persistence) scheduleSave() {
 	if p.stopped {
 		return
 	}
+	for day := range p.stats.ConsumeChangedDays() {
+		p.dirtyDays[day] = struct{}{}
+	}
 	if p.timer != nil {
 		p.timer.Reset(defaultPersistDebounce)
 		return
@@ -180,6 +184,7 @@ func (p *Persistence) Flush() error {
 	snapshot := p.stats.Snapshot()
 	summary := p.stats.SummarySnapshot()
 	daySnapshots := buildDaySnapshots(snapshot, cutoff)
+	dirtyDays := p.takeDirtyDays(daySnapshots)
 
 	if err := os.MkdirAll(p.baseDir, 0o755); err != nil {
 		return err
@@ -195,29 +200,29 @@ func (p *Persistence) Flush() error {
 		return err
 	}
 
-	expectedFiles := make(map[string]struct{}, len(daySnapshots))
-	orderedDays := make([]string, 0, len(daySnapshots))
-	for day := range daySnapshots {
-		orderedDays = append(orderedDays, day)
-	}
-	slices.Sort(orderedDays)
-	for _, day := range orderedDays {
+	for day := range dirtyDays {
+		daySnapshot, ok := daySnapshots[day]
+		if !ok {
+			if err := os.Remove(filepath.Join(p.dailyDir, day+".json")); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+			continue
+		}
 		path := filepath.Join(p.dailyDir, day+".json")
-		expectedFiles[filepath.Base(path)] = struct{}{}
 		if err := writeJSONAtomically(path, persistedDayDetails{
 			Version:    2,
 			Day:        day,
 			SavedAt:    time.Now().UTC(),
-			Statistics: daySnapshots[day],
+			Statistics: daySnapshot,
 		}); err != nil {
 			return err
 		}
 	}
 
-	return p.cleanupDailyFiles(expectedFiles, cutoff)
+	return p.cleanupExpiredDailyFiles(cutoff)
 }
 
-func (p *Persistence) cleanupDailyFiles(expectedFiles map[string]struct{}, cutoff time.Time) error {
+func (p *Persistence) cleanupExpiredDailyFiles(cutoff time.Time) error {
 	entries, err := os.ReadDir(p.dailyDir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -225,15 +230,17 @@ func (p *Persistence) cleanupDailyFiles(expectedFiles map[string]struct{}, cutof
 		}
 		return err
 	}
+	cutoffDay := cutoff.Format("2006-01-02")
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
 		}
 		name := entry.Name()
-		if _, ok := dailyFileDay(name); !ok {
+		day, ok := dailyFileDay(name)
+		if !ok {
 			continue
 		}
-		if _, keep := expectedFiles[name]; keep {
+		if day >= cutoffDay {
 			continue
 		}
 		if err := os.Remove(filepath.Join(p.dailyDir, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -261,6 +268,23 @@ func (p *Persistence) Stop() error {
 func (p *Persistence) detailCutoff(now time.Time) time.Time {
 	dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
 	return dayStart.AddDate(0, 0, -(p.retentionDays - 1))
+}
+
+func (p *Persistence) takeDirtyDays(daySnapshots map[string]StatisticsSnapshot) map[string]struct{} {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	result := make(map[string]struct{}, len(p.dirtyDays))
+	for day := range p.dirtyDays {
+		result[day] = struct{}{}
+	}
+	p.dirtyDays = make(map[string]struct{})
+	for day := range daySnapshots {
+		path := filepath.Join(p.dailyDir, day+".json")
+		if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+			result[day] = struct{}{}
+		}
+	}
+	return result
 }
 
 func buildDaySnapshots(snapshot StatisticsSnapshot, cutoff time.Time) map[string]StatisticsSnapshot {

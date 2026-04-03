@@ -72,7 +72,8 @@ type RequestStatistics struct {
 	tokensByDay    map[string]int64
 	tokensByHour   map[int]int64
 
-	onChange func()
+	onChange          func()
+	recentChangedDays map[string]struct{}
 }
 
 // apiStats holds aggregated metrics for a single API key.
@@ -145,11 +146,12 @@ func GetRequestStatistics() *RequestStatistics { return defaultRequestStatistics
 // NewRequestStatistics constructs an empty statistics store.
 func NewRequestStatistics() *RequestStatistics {
 	return &RequestStatistics{
-		apis:           make(map[string]*apiStats),
-		requestsByDay:  make(map[string]int64),
-		requestsByHour: make(map[int]int64),
-		tokensByDay:    make(map[string]int64),
-		tokensByHour:   make(map[int]int64),
+		apis:              make(map[string]*apiStats),
+		requestsByDay:     make(map[string]int64),
+		requestsByHour:    make(map[int]int64),
+		tokensByDay:       make(map[string]int64),
+		tokensByHour:      make(map[int]int64),
+		recentChangedDays: make(map[string]struct{}),
 	}
 }
 
@@ -210,6 +212,7 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 	s.requestsByHour[hourKey]++
 	s.tokensByDay[dayKey] += totalTokens
 	s.tokensByHour[hourKey] += totalTokens
+	s.recentChangedDays[dayKey] = struct{}{}
 
 	changeHook := s.onChange
 	s.mu.Unlock()
@@ -421,6 +424,21 @@ func (s *RequestStatistics) SetChangeHook(hook func()) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.onChange = hook
+}
+
+// ConsumeChangedDays returns the day keys affected since the last call and clears the change set.
+func (s *RequestStatistics) ConsumeChangedDays() map[string]struct{} {
+	result := make(map[string]struct{})
+	if s == nil {
+		return result
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for day := range s.recentChangedDays {
+		result[day] = struct{}{}
+	}
+	s.recentChangedDays = make(map[string]struct{})
+	return result
 }
 
 // ReplaceSummarySnapshot replaces aggregate counters/maps using the provided snapshot and clears in-memory details.
