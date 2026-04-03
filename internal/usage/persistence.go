@@ -5,24 +5,42 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
 	log "github.com/sirupsen/logrus"
 )
 
-const defaultPersistDebounce = 2 * time.Second
+const (
+	defaultPersistDebounce     = 2 * time.Second
+	defaultDetailRetentionDays = 14
+	usageSummaryFileName       = "usage-summary.json"
+	usageDailyDirectoryName    = "usage-days"
+	legacyUsageFileName        = "usage-statistics.json"
+)
 
-type persistedSnapshot struct {
+type persistedSummary struct {
 	Version    int                `json:"version"`
+	SavedAt    time.Time          `json:"saved_at"`
+	Statistics StatisticsSnapshot `json:"statistics"`
+}
+
+type persistedDayDetails struct {
+	Version    int                `json:"version"`
+	Day        string             `json:"day"`
 	SavedAt    time.Time          `json:"saved_at"`
 	Statistics StatisticsSnapshot `json:"statistics"`
 }
 
 // Persistence keeps usage statistics on disk and restores them on startup.
 type Persistence struct {
-	path  string
-	stats *RequestStatistics
+	baseDir       string
+	summaryPath   string
+	dailyDir      string
+	retentionDays int
+	stats         *RequestStatistics
 
 	mu      sync.Mutex
 	flushMu sync.Mutex
@@ -30,15 +48,21 @@ type Persistence struct {
 	stopped bool
 }
 
-// StartPersistence loads any existing snapshot from disk and wires auto-save hooks.
-func StartPersistence(stats *RequestStatistics, path string) (*Persistence, error) {
+// StartPersistence loads persisted usage data and wires auto-save hooks.
+func StartPersistence(stats *RequestStatistics, baseDir string, retentionDays int) (*Persistence, error) {
 	if stats == nil {
 		return nil, errors.New("usage persistence: nil statistics store")
 	}
-	path = filepath.Clean(path)
+	if retentionDays <= 0 {
+		retentionDays = defaultDetailRetentionDays
+	}
+	baseDir = filepath.Clean(baseDir)
 	p := &Persistence{
-		path:  path,
-		stats: stats,
+		baseDir:       baseDir,
+		summaryPath:   filepath.Join(baseDir, usageSummaryFileName),
+		dailyDir:      filepath.Join(baseDir, usageDailyDirectoryName),
+		retentionDays: retentionDays,
+		stats:         stats,
 	}
 	if err := p.load(); err != nil {
 		return nil, err
@@ -48,20 +72,65 @@ func StartPersistence(stats *RequestStatistics, path string) (*Persistence, erro
 }
 
 func (p *Persistence) load() error {
-	data, err := os.ReadFile(p.path)
+	if err := p.loadSummary(); err != nil {
+		return err
+	}
+	if err := p.loadRecentDayFiles(); err != nil {
+		return err
+	}
+	p.stats.PruneDetailsBefore(p.detailCutoff(time.Now().UTC()))
+	return nil
+}
+
+func (p *Persistence) loadSummary() error {
+	data, err := os.ReadFile(p.summaryPath)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		legacyPath := filepath.Join(p.baseDir, legacyUsageFileName)
+		data, err = os.ReadFile(legacyPath)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
+			return err
+		}
+	}
+	var snapshot persistedSummary
+	if err := json.Unmarshal(data, &snapshot); err != nil {
+		return err
+	}
+	p.stats.ReplaceSummarySnapshot(snapshot.Statistics)
+	return nil
+}
+
+func (p *Persistence) loadRecentDayFiles() error {
+	entries, err := os.ReadDir(p.dailyDir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil
 		}
 		return err
 	}
-	var snapshot persistedSnapshot
-	if err := json.Unmarshal(data, &snapshot); err != nil {
-		return err
-	}
-	result := p.stats.MergeSnapshot(snapshot.Statistics)
-	if result.Added > 0 || result.Skipped > 0 {
-		log.Infof("usage persistence restored statistics from %s (added=%d skipped=%d)", p.path, result.Added, result.Skipped)
+	cutoffDay := p.detailCutoff(time.Now().UTC()).Format("2006-01-02")
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		day, ok := dailyFileDay(entry.Name())
+		if !ok || day < cutoffDay {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(p.dailyDir, entry.Name()))
+		if err != nil {
+			return err
+		}
+		var payload persistedDayDetails
+		if err := json.Unmarshal(data, &payload); err != nil {
+			return err
+		}
+		p.stats.AttachDetailsSnapshot(payload.Statistics)
 	}
 	return nil
 }
@@ -83,7 +152,7 @@ func (p *Persistence) scheduleSave() {
 	})
 }
 
-// Flush writes the current statistics snapshot to disk atomically.
+// Flush writes the current summary and recent day detail snapshots to disk atomically.
 func (p *Persistence) Flush() error {
 	if p == nil || p.stats == nil {
 		return nil
@@ -98,19 +167,128 @@ func (p *Persistence) Flush() error {
 	}
 	p.mu.Unlock()
 
-	snapshot := persistedSnapshot{
-		Version:    1,
-		SavedAt:    time.Now().UTC(),
-		Statistics: p.stats.Snapshot(),
+	cutoff := p.detailCutoff(time.Now().UTC())
+	p.stats.PruneDetailsBefore(cutoff)
+	snapshot := p.stats.Snapshot()
+	summary := p.stats.SummarySnapshot()
+	daySnapshots := buildDaySnapshots(snapshot, cutoff)
+
+	if err := os.MkdirAll(p.baseDir, 0o755); err != nil {
+		return err
 	}
-	data, err := json.MarshalIndent(snapshot, "", "  ")
+	if err := os.MkdirAll(p.dailyDir, 0o755); err != nil {
+		return err
+	}
+	if err := writeJSONAtomically(p.summaryPath, persistedSummary{
+		Version:    2,
+		SavedAt:    time.Now().UTC(),
+		Statistics: summary,
+	}); err != nil {
+		return err
+	}
+
+	expectedFiles := make(map[string]struct{}, len(daySnapshots))
+	orderedDays := make([]string, 0, len(daySnapshots))
+	for day := range daySnapshots {
+		orderedDays = append(orderedDays, day)
+	}
+	slices.Sort(orderedDays)
+	for _, day := range orderedDays {
+		path := filepath.Join(p.dailyDir, day+".json")
+		expectedFiles[filepath.Base(path)] = struct{}{}
+		if err := writeJSONAtomically(path, persistedDayDetails{
+			Version:    2,
+			Day:        day,
+			SavedAt:    time.Now().UTC(),
+			Statistics: daySnapshots[day],
+		}); err != nil {
+			return err
+		}
+	}
+
+	return p.cleanupDailyFiles(expectedFiles, cutoff)
+}
+
+func (p *Persistence) cleanupDailyFiles(expectedFiles map[string]struct{}, cutoff time.Time) error {
+	entries, err := os.ReadDir(p.dailyDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if _, ok := dailyFileDay(name); !ok {
+			continue
+		}
+		if _, keep := expectedFiles[name]; keep {
+			continue
+		}
+		if err := os.Remove(filepath.Join(p.dailyDir, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
+}
+
+// Stop disables future auto-saves and flushes pending data immediately.
+func (p *Persistence) Stop() error {
+	if p == nil {
+		return nil
+	}
+	p.mu.Lock()
+	p.stopped = true
+	if p.timer != nil {
+		p.timer.Stop()
+		p.timer = nil
+	}
+	p.mu.Unlock()
+	return p.Flush()
+}
+
+func (p *Persistence) detailCutoff(now time.Time) time.Time {
+	dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	return dayStart.AddDate(0, 0, -(p.retentionDays - 1))
+}
+
+func buildDaySnapshots(snapshot StatisticsSnapshot, cutoff time.Time) map[string]StatisticsSnapshot {
+	result := make(map[string]StatisticsSnapshot)
+	for apiName, apiSnapshot := range snapshot.APIs {
+		for modelName, modelSnapshot := range apiSnapshot.Models {
+			for _, detail := range modelSnapshot.Details {
+				if detail.Timestamp.Before(cutoff) {
+					continue
+				}
+				day := detail.Timestamp.UTC().Format("2006-01-02")
+				daySnapshot := result[day]
+				if daySnapshot.APIs == nil {
+					daySnapshot.APIs = make(map[string]APISnapshot)
+				}
+				apiDaySnapshot := daySnapshot.APIs[apiName]
+				if apiDaySnapshot.Models == nil {
+					apiDaySnapshot.Models = make(map[string]ModelSnapshot)
+				}
+				modelDaySnapshot := apiDaySnapshot.Models[modelName]
+				modelDaySnapshot.Details = append(modelDaySnapshot.Details, detail)
+				apiDaySnapshot.Models[modelName] = modelDaySnapshot
+				daySnapshot.APIs[apiName] = apiDaySnapshot
+				result[day] = daySnapshot
+			}
+		}
+	}
+	return result
+}
+
+func writeJSONAtomically(path string, payload any) error {
+	data, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(p.path), 0o755); err != nil {
-		return err
-	}
-	tmpFile, err := os.CreateTemp(filepath.Dir(p.path), filepath.Base(p.path)+".*.tmp")
+	tmpFile, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*.tmp")
 	if err != nil {
 		return err
 	}
@@ -128,24 +306,23 @@ func (p *Persistence) Flush() error {
 	if err := tmpFile.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(tmpPath, p.path); err != nil {
+	if err := os.Rename(tmpPath, path); err != nil {
 		return err
 	}
 	cleanup = false
 	return nil
 }
 
-// Stop disables future auto-saves and flushes pending data immediately.
-func (p *Persistence) Stop() error {
-	if p == nil {
-		return nil
+func dailyFileDay(name string) (string, bool) {
+	if !strings.HasSuffix(name, ".json") {
+		return "", false
 	}
-	p.mu.Lock()
-	p.stopped = true
-	if p.timer != nil {
-		p.timer.Stop()
-		p.timer = nil
+	day := strings.TrimSuffix(name, ".json")
+	if len(day) != len("2006-01-02") {
+		return "", false
 	}
-	p.mu.Unlock()
-	return p.Flush()
+	if _, err := time.Parse("2006-01-02", day); err != nil {
+		return "", false
+	}
+	return day, true
 }

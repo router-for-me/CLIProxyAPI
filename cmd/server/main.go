@@ -397,7 +397,7 @@ func main() {
 		cfg = &config.Config{}
 	}
 
-	usagePersistencePath := resolveUsagePersistencePath(configFilePath, wd)
+	usagePersistenceDir := resolveUsagePersistenceDir(configFilePath, wd)
 
 	// In cloud deploy mode, check if we have a valid configuration
 	var configFileExists bool
@@ -420,9 +420,9 @@ func main() {
 		}
 	}
 	usage.SetStatisticsEnabled(cfg.UsageStatisticsEnabled)
-	usagePersistence, err := usage.StartPersistence(usage.GetRequestStatistics(), usagePersistencePath)
+	usagePersistence, err := usage.StartPersistence(usage.GetRequestStatistics(), usagePersistenceDir, cfg.UsageStatisticsDetailRetentionDays)
 	if err != nil {
-		log.Warnf("failed to start usage persistence at %s: %v", usagePersistencePath, err)
+		log.Warnf("failed to start usage persistence at %s: %v", usagePersistenceDir, err)
 	}
 	defer func() {
 		if usagePersistence == nil {
@@ -597,10 +597,10 @@ func main() {
 	}
 }
 
-func resolveUsagePersistencePath(configFilePath, fallbackDir string) string {
+func resolveUsagePersistenceDir(configFilePath, fallbackDir string) string {
 	baseDir := strings.TrimSpace(filepath.Dir(configFilePath))
 	if baseDir == "." || baseDir == "" {
 		baseDir = fallbackDir
 	}
-	return filepath.Join(baseDir, "stats", "usage-statistics.json")
+	return filepath.Join(baseDir, "stats")
 }

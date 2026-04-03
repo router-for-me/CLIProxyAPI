@@ -291,6 +291,19 @@ func (s *RequestStatistics) Snapshot() StatisticsSnapshot {
 	return result
 }
 
+// SummarySnapshot returns aggregates without per-request details, suitable for long-term persistence.
+func (s *RequestStatistics) SummarySnapshot() StatisticsSnapshot {
+	snapshot := s.Snapshot()
+	for apiName, apiSnapshot := range snapshot.APIs {
+		for modelName, modelSnapshot := range apiSnapshot.Models {
+			modelSnapshot.Details = nil
+			apiSnapshot.Models[modelName] = modelSnapshot
+		}
+		snapshot.APIs[apiName] = apiSnapshot
+	}
+	return snapshot
+}
+
 type MergeResult struct {
 	Added   int64 `json:"added"`
 	Skipped int64 `json:"skipped"`
@@ -376,6 +389,133 @@ func (s *RequestStatistics) SetChangeHook(hook func()) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.onChange = hook
+}
+
+// ReplaceSummarySnapshot replaces aggregate counters/maps using the provided snapshot and clears in-memory details.
+func (s *RequestStatistics) ReplaceSummarySnapshot(snapshot StatisticsSnapshot) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.totalRequests = snapshot.TotalRequests
+	s.successCount = snapshot.SuccessCount
+	s.failureCount = snapshot.FailureCount
+	s.totalTokens = snapshot.TotalTokens
+
+	s.apis = make(map[string]*apiStats, len(snapshot.APIs))
+	for apiName, apiSnapshot := range snapshot.APIs {
+		apiName = strings.TrimSpace(apiName)
+		if apiName == "" {
+			continue
+		}
+		stats := &apiStats{
+			TotalRequests: apiSnapshot.TotalRequests,
+			TotalTokens:   apiSnapshot.TotalTokens,
+			Models:        make(map[string]*modelStats, len(apiSnapshot.Models)),
+		}
+		for modelName, modelSnapshot := range apiSnapshot.Models {
+			modelName = strings.TrimSpace(modelName)
+			if modelName == "" {
+				modelName = "unknown"
+			}
+			stats.Models[modelName] = &modelStats{
+				TotalRequests: modelSnapshot.TotalRequests,
+				TotalTokens:   modelSnapshot.TotalTokens,
+			}
+		}
+		s.apis[apiName] = stats
+	}
+
+	s.requestsByDay = cloneStringInt64Map(snapshot.RequestsByDay)
+	s.requestsByHour = make(map[int]int64, len(snapshot.RequestsByHour))
+	for hourKey, value := range snapshot.RequestsByHour {
+		if hour, ok := parseHourKey(hourKey); ok {
+			s.requestsByHour[hour] = value
+		}
+	}
+	s.tokensByDay = cloneStringInt64Map(snapshot.TokensByDay)
+	s.tokensByHour = make(map[int]int64, len(snapshot.TokensByHour))
+	for hourKey, value := range snapshot.TokensByHour {
+		if hour, ok := parseHourKey(hourKey); ok {
+			s.tokensByHour[hour] = value
+		}
+	}
+}
+
+// AttachDetailsSnapshot appends request details from the provided snapshot without modifying aggregate totals.
+func (s *RequestStatistics) AttachDetailsSnapshot(snapshot StatisticsSnapshot) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for apiName, apiSnapshot := range snapshot.APIs {
+		apiName = strings.TrimSpace(apiName)
+		if apiName == "" {
+			continue
+		}
+		stats, ok := s.apis[apiName]
+		if !ok || stats == nil {
+			stats = &apiStats{Models: make(map[string]*modelStats)}
+			s.apis[apiName] = stats
+		} else if stats.Models == nil {
+			stats.Models = make(map[string]*modelStats)
+		}
+		for modelName, modelSnapshot := range apiSnapshot.Models {
+			modelName = strings.TrimSpace(modelName)
+			if modelName == "" {
+				modelName = "unknown"
+			}
+			modelStatsValue, ok := stats.Models[modelName]
+			if !ok || modelStatsValue == nil {
+				modelStatsValue = &modelStats{
+					TotalRequests: modelSnapshot.TotalRequests,
+					TotalTokens:   modelSnapshot.TotalTokens,
+				}
+				stats.Models[modelName] = modelStatsValue
+			}
+			for _, detail := range modelSnapshot.Details {
+				detail.Tokens = normaliseTokenStats(detail.Tokens)
+				if detail.LatencyMs < 0 {
+					detail.LatencyMs = 0
+				}
+				if detail.Timestamp.IsZero() {
+					continue
+				}
+				modelStatsValue.Details = append(modelStatsValue.Details, detail)
+			}
+		}
+	}
+}
+
+// PruneDetailsBefore drops per-request details older than cutoff while preserving long-term aggregates.
+func (s *RequestStatistics) PruneDetailsBefore(cutoff time.Time) {
+	if s == nil || cutoff.IsZero() {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, stats := range s.apis {
+		if stats == nil {
+			continue
+		}
+		for _, modelStatsValue := range stats.Models {
+			if modelStatsValue == nil || len(modelStatsValue.Details) == 0 {
+				continue
+			}
+			filtered := modelStatsValue.Details[:0]
+			for _, detail := range modelStatsValue.Details {
+				if detail.Timestamp.Before(cutoff) {
+					continue
+				}
+				filtered = append(filtered, detail)
+			}
+			modelStatsValue.Details = filtered
+		}
+	}
 }
 
 func (s *RequestStatistics) recordImported(apiName, modelName string, stats *apiStats, detail RequestDetail) {
@@ -504,4 +644,23 @@ func formatHour(hour int) string {
 	}
 	hour = hour % 24
 	return fmt.Sprintf("%02d", hour)
+}
+
+func parseHourKey(value string) (int, bool) {
+	var hour int
+	if _, err := fmt.Sscanf(value, "%d", &hour); err != nil {
+		return 0, false
+	}
+	if hour < 0 || hour > 23 {
+		return 0, false
+	}
+	return hour, true
+}
+
+func cloneStringInt64Map(source map[string]int64) map[string]int64 {
+	result := make(map[string]int64, len(source))
+	for key, value := range source {
+		result[key] = value
+	}
+	return result
 }

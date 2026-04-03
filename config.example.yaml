@@ -66,6 +66,10 @@ error-logs-max-files: 10
 # When false, disable in-memory usage statistics aggregation
 usage-statistics-enabled: false
 
+# How many recent days of per-request usage details to retain in memory and on disk.
+# Aggregated totals remain preserved for longer-term trend/history reporting.
+usage-statistics-detail-retention-days: 14
+
 # Proxy URL. Supports socks5/http/https protocols. Example: socks5://user:pass@192.168.1.1:1080/
 # Per-entry proxy-url also supports "direct" or "none" to bypass both the global proxy-url and environment proxies explicitly.
 proxy-url: ""
