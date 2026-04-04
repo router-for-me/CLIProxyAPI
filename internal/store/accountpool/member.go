@@ -91,14 +91,39 @@ func (s *Store) CreateMember(ctx context.Context, m *Member) error {
 		m.Status, m.NstbrowserProfileID, m.NstbrowserProfileName).Scan(&m.ID, &m.CreatedAt, &m.UpdatedAt)
 }
 
-// UpdateMember updates an existing member.
+// UpdateMember updates an existing member (partial update: only non-empty fields).
 func (s *Store) UpdateMember(ctx context.Context, m *Member) error {
 	table := s.tableName("account_pool_members")
-	query := fmt.Sprintf(`UPDATE %s SET email=$1, password=$2, recovery_email=$3, totp_secret=$4,
-		status=$5, nstbrowser_profile_id=$6, nstbrowser_profile_name=$7, updated_at=NOW()
-		WHERE id=$8 RETURNING updated_at`, table)
-	err := s.db.QueryRowContext(ctx, query, m.Email, m.Password, m.RecoveryEmail, m.TOTPSecret,
-		m.Status, m.NstbrowserProfileID, m.NstbrowserProfileName, m.ID).Scan(&m.UpdatedAt)
+
+	var setClauses []string
+	var args []any
+	idx := 1
+
+	add := func(col, val string) {
+		if val != "" {
+			setClauses = append(setClauses, fmt.Sprintf("%s=$%d", col, idx))
+			args = append(args, val)
+			idx++
+		}
+	}
+	add("email", m.Email)
+	add("password", m.Password)
+	add("recovery_email", m.RecoveryEmail)
+	add("totp_secret", m.TOTPSecret)
+	add("status", m.Status)
+	add("nstbrowser_profile_id", m.NstbrowserProfileID)
+	add("nstbrowser_profile_name", m.NstbrowserProfileName)
+
+	if len(setClauses) == 0 {
+		return fmt.Errorf("no fields to update")
+	}
+
+	setClauses = append(setClauses, "updated_at=NOW()")
+	query := fmt.Sprintf("UPDATE %s SET %s WHERE id=$%d RETURNING updated_at",
+		table, strings.Join(setClauses, ", "), idx)
+	args = append(args, m.ID)
+
+	err := s.db.QueryRowContext(ctx, query, args...).Scan(&m.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return fmt.Errorf("member not found")
 	}

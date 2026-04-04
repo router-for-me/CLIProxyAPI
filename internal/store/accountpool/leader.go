@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -96,13 +97,42 @@ func (s *Store) CreateLeader(ctx context.Context, l *Leader) error {
 // UpdateLeader updates an existing leader.
 func (s *Store) UpdateLeader(ctx context.Context, l *Leader) error {
 	table := s.tableName("account_pool_leaders")
-	query := fmt.Sprintf(`UPDATE %s SET email=$1, password=$2, recovery_email=$3, totp_secret=$4,
-		status=$5, nstbrowser_profile_id=$6, nstbrowser_profile_name=$7,
-		ultra_subscription_expiry=$8, updated_at=NOW()
-		WHERE id=$9 RETURNING updated_at`, table)
-	err := s.db.QueryRowContext(ctx, query, l.Email, l.Password, l.RecoveryEmail, l.TOTPSecret,
-		l.Status, l.NstbrowserProfileID, l.NstbrowserProfileName,
-		l.UltraSubscriptionExpiry, l.ID).Scan(&l.UpdatedAt)
+
+	// Build partial update: only SET fields that are non-zero.
+	var setClauses []string
+	var args []any
+	idx := 1
+
+	add := func(col, val string) {
+		if val != "" {
+			setClauses = append(setClauses, fmt.Sprintf("%s=$%d", col, idx))
+			args = append(args, val)
+			idx++
+		}
+	}
+	add("email", l.Email)
+	add("password", l.Password)
+	add("recovery_email", l.RecoveryEmail)
+	add("totp_secret", l.TOTPSecret)
+	add("status", l.Status)
+	add("nstbrowser_profile_id", l.NstbrowserProfileID)
+	add("nstbrowser_profile_name", l.NstbrowserProfileName)
+	if l.UltraSubscriptionExpiry != nil {
+		setClauses = append(setClauses, fmt.Sprintf("ultra_subscription_expiry=$%d", idx))
+		args = append(args, l.UltraSubscriptionExpiry)
+		idx++
+	}
+
+	if len(setClauses) == 0 {
+		return fmt.Errorf("no fields to update")
+	}
+
+	setClauses = append(setClauses, "updated_at=NOW()")
+	query := fmt.Sprintf("UPDATE %s SET %s WHERE id=$%d RETURNING updated_at",
+		table, strings.Join(setClauses, ", "), idx)
+	args = append(args, l.ID)
+
+	err := s.db.QueryRowContext(ctx, query, args...).Scan(&l.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return fmt.Errorf("leader not found")
 	}
