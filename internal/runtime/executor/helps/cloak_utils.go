@@ -9,21 +9,30 @@ import (
 	"github.com/google/uuid"
 )
 
-// userIDPattern matches Claude Code format: user_[64-hex]_account_[uuid]_session_[uuid]
-var userIDPattern = regexp.MustCompile(`^user_[a-fA-F0-9]{64}_account_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}_session_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+// userIDPattern matches Claude Code 2.1.92+ JSON format:
+// {"device_id":"[64-hex]","account_uuid":"[uuid]","session_id":"[uuid]"}
+var userIDPattern = regexp.MustCompile(`^\{"device_id":"[a-fA-F0-9]{64}","account_uuid":"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}","session_id":"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"\}$`)
 
-// generateFakeUserID generates a fake user ID in Claude Code format.
-// Format: user_[64-hex-chars]_account_[UUID-v4]_session_[UUID-v4]
+// generateFakeUserID generates a fake user ID in Claude Code 2.1.92+ JSON format.
+// Format: {"device_id":"[64-hex]","account_uuid":"[UUID-v4]","session_id":"[UUID-v4]"}
+// Use generateFakeUserIDWithSession when you have a stable session ID to keep consistent
+// with the X-Claude-Code-Session-Id header.
 func generateFakeUserID() string {
-	hexBytes := make([]byte, 32)
-	_, _ = rand.Read(hexBytes)
-	hexPart := hex.EncodeToString(hexBytes)
-	accountUUID := uuid.New().String()
-	sessionUUID := uuid.New().String()
-	return "user_" + hexPart + "_account_" + accountUUID + "_session_" + sessionUUID
+	return generateFakeUserIDWithSession(uuid.New().String())
 }
 
-// isValidUserID checks if a user ID matches Claude Code format.
+// generateFakeUserIDWithSession generates a fake user ID using a specific session UUID.
+// device_id and account_uuid are random; session_id matches the provided value so that
+// metadata.user_id.session_id stays consistent with X-Claude-Code-Session-Id.
+func generateFakeUserIDWithSession(sessionID string) string {
+	hexBytes := make([]byte, 32)
+	_, _ = rand.Read(hexBytes)
+	deviceID := hex.EncodeToString(hexBytes)
+	accountUUID := uuid.New().String()
+	return `{"device_id":"` + deviceID + `","account_uuid":"` + accountUUID + `","session_id":"` + sessionID + `"}`
+}
+
+// isValidUserID checks if a user ID matches Claude Code 2.1.92+ JSON format.
 func isValidUserID(userID string) bool {
 	return userIDPattern.MatchString(userID)
 }
