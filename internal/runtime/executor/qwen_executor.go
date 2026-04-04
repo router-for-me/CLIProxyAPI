@@ -176,12 +176,6 @@ func timeUntilNextDay() time.Duration {
 func ensureQwenSystemMessage(payload []byte) ([]byte, error) {
 	messages := gjson.GetBytes(payload, "messages")
 	if messages.Exists() && messages.IsArray() {
-		for _, msg := range messages.Array() {
-			if strings.EqualFold(msg.Get("role").String(), "system") {
-				return payload, nil
-			}
-		}
-
 		var buf bytes.Buffer
 		buf.WriteByte('[')
 		buf.Write(qwenDefaultSystemMessage)

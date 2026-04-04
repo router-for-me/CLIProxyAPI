@@ -379,7 +379,7 @@ func shouldReplaceWebsocketTranscript(rawJSON []byte, nextInput gjson.Result) bo
 
 	for _, item := range nextInput.Array() {
 		switch strings.TrimSpace(item.Get("type").String()) {
-		case "function_call":
+		case "function_call", "custom_tool_call":
 			return true
 		case "message":
 			role := strings.TrimSpace(item.Get("role").String())
@@ -431,7 +431,7 @@ func dedupeFunctionCallsByCallID(rawArray string) (string, error) {
 			continue
 		}
 		itemType := strings.TrimSpace(gjson.GetBytes(item, "type").String())
-		if itemType == "function_call" {
+		if isResponsesToolCallType(itemType) {
 			callID := strings.TrimSpace(gjson.GetBytes(item, "call_id").String())
 			if callID != "" {
 				if _, ok := seenCallIDs[callID]; ok {
