@@ -298,6 +298,14 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
 			reporter.PublishFailure(ctx)
 			out <- cliproxyexecutor.StreamChunk{Err: errScan}
+		} else {
+			// In case the upstream close the stream without a terminal [DONE] marker.
+			// Feed a synthetic done marker through the translator so pending
+			// response.completed events are still emitted exactly once.
+			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, []byte("data: [DONE]"), &param)
+			for i := range chunks {
+				out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}
+			}
 		}
 		// Ensure we record the request if no usage chunk was ever seen
 		reporter.EnsurePublished(ctx)
