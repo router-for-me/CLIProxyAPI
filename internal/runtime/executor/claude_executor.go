@@ -2079,9 +2079,11 @@ func compressImagesInPayload(payload []byte) []byte {
 }
 
 // maxImagePixels is the pixel-count ceiling applied before full image decode.
-// A 10000×10000 RGBA image allocates ~400 MB; cap well below that to guard
-// against decompression bombs in untrusted client payloads.
-const maxImagePixels = 50_000_000 // 50 MP
+// Guards against decompression bombs (tiny compressed file, enormous declared dimensions)
+// without blocking legitimate oversized images that need to be resized. Claude's own
+// practical limit is ~59 MP (7680×7680), so 150 MP leaves ample headroom while capping
+// RGBA allocations at ~600 MB for truly pathological inputs.
+const maxImagePixels = 150_000_000 // 150 MP
 
 // maybeCompressImage decodes a base64 image and compresses it if it exceeds the size
 // or dimension limits. Returns the (possibly compressed) base64 data, the resulting
