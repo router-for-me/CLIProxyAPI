@@ -377,6 +377,74 @@ func extractJSONErrorMessage(body []byte) string {
 	return ""
 }
 
+// logUpstreamErrorDetail logs the full upstream HTTP request and response when an error
+// occurs, regardless of the RequestLog configuration. This helps diagnose issues like
+// INVALID_ARGUMENT from upstream providers.
+func logUpstreamErrorDetail(ctx context.Context, httpReq *http.Request, requestBody []byte, statusCode int, respHeaders http.Header, respBody []byte) {
+	entry := logWithRequestID(ctx)
+
+	var b strings.Builder
+	b.WriteString("antigravity executor: upstream error detail\n")
+
+	// --- Request ---
+	b.WriteString(">>> REQUEST\n")
+	if httpReq != nil {
+		b.WriteString(fmt.Sprintf("  URL: %s %s\n", httpReq.Method, httpReq.URL.String()))
+		b.WriteString("  Headers:\n")
+		keys := make([]string, 0, len(httpReq.Header))
+		for k := range httpReq.Header {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			for _, v := range httpReq.Header[k] {
+				b.WriteString(fmt.Sprintf("    %s: %s\n", k, util.MaskSensitiveHeaderValue(k, v)))
+			}
+		}
+	}
+	b.WriteString("  Body:\n")
+	if len(requestBody) > 0 {
+		const maxBody = 4096
+		if len(requestBody) > maxBody {
+			b.WriteString(fmt.Sprintf("    %s\n    ... (%d bytes truncated)\n", string(requestBody[:maxBody]), len(requestBody)-maxBody))
+		} else {
+			b.WriteString(fmt.Sprintf("    %s\n", string(requestBody)))
+		}
+	} else {
+		b.WriteString("    <empty>\n")
+	}
+
+	// --- Response ---
+	b.WriteString("<<< RESPONSE\n")
+	b.WriteString(fmt.Sprintf("  Status: %d\n", statusCode))
+	if len(respHeaders) > 0 {
+		b.WriteString("  Headers:\n")
+		keys := make([]string, 0, len(respHeaders))
+		for k := range respHeaders {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			for _, v := range respHeaders[k] {
+				b.WriteString(fmt.Sprintf("    %s: %s\n", k, v))
+			}
+		}
+	}
+	b.WriteString("  Body:\n")
+	if len(respBody) > 0 {
+		const maxBody = 4096
+		if len(respBody) > maxBody {
+			b.WriteString(fmt.Sprintf("    %s\n    ... (%d bytes truncated)\n", string(respBody[:maxBody]), len(respBody)-maxBody))
+		} else {
+			b.WriteString(fmt.Sprintf("    %s\n", string(respBody)))
+		}
+	} else {
+		b.WriteString("    <empty>\n")
+	}
+
+	entry.Warn(b.String())
+}
+
 // logWithRequestID returns a logrus Entry with request_id field populated from context.
 // If no request ID is found in context, it returns the standard logger.
 func logWithRequestID(ctx context.Context) *log.Entry {
