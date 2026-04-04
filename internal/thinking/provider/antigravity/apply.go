@@ -130,6 +130,12 @@ func (a *Applier) applyLevelFormat(body []byte, config thinking.ThinkingConfig) 
 }
 
 func (a *Applier) applyBudgetFormat(body []byte, config thinking.ThinkingConfig, modelInfo *registry.ModelInfo, isClaude bool) ([]byte, error) {
+	// Claude requires top_p >= 0.95 (or unset) when thinking is enabled.
+	// Strip topP for Claude models when thinking will be active.
+	if isClaude && config.Mode != thinking.ModeNone {
+		body = sanitizeTopPForThinking(body)
+	}
+
 	// Remove conflicting fields to avoid both thinkingLevel and thinkingBudget in output
 	result, _ := sjson.DeleteBytes(body, "request.generationConfig.thinkingConfig.thinkingLevel")
 	result, _ = sjson.DeleteBytes(result, "request.generationConfig.thinkingConfig.thinking_level")
@@ -182,6 +188,20 @@ func (a *Applier) applyBudgetFormat(body []byte, config thinking.ThinkingConfig,
 	result, _ = sjson.SetBytes(result, "request.generationConfig.thinkingConfig.thinkingBudget", budget)
 	result, _ = sjson.SetBytes(result, "request.generationConfig.thinkingConfig.includeThoughts", includeThoughts)
 	return result, nil
+}
+
+// sanitizeTopPForThinking removes or clamps topP when thinking is enabled for Claude models.
+// Claude requires top_p >= 0.95 or unset when thinking is active.
+func sanitizeTopPForThinking(body []byte) []byte {
+	topP := gjson.GetBytes(body, "request.generationConfig.topP")
+	if !topP.Exists() {
+		return body
+	}
+	if topP.Num < 0.95 {
+		result, _ := sjson.DeleteBytes(body, "request.generationConfig.topP")
+		return result
+	}
+	return body
 }
 
 // normalizeClaudeBudget applies Claude-specific constraints to thinking budget.
