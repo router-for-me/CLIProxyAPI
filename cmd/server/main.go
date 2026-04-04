@@ -474,6 +474,8 @@ func main() {
 		} else {
 			apDB.SetMaxOpenConns(10)
 			apDB.SetMaxIdleConns(5)
+			apDB.SetConnMaxLifetime(5 * time.Minute)
+			apDB.SetConnMaxIdleTime(2 * time.Minute)
 			apStore := accountpool.New(apDB, apSchema)
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			if err := apStore.EnsureSchema(ctx); err != nil {
