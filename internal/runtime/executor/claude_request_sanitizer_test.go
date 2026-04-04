@@ -15,8 +15,15 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+const (
+	validClaudeSignature     = "valid_signature_1234567890123456789012345678901234567890"
+	syntheticGPTSignature    = "gpt#valid_signature_1234567890123456789012345678901234567890"
+	syntheticClaudeSignature = "claude#valid_signature_1234567890123456789012345678901234567890"
+)
+
 func TestSanitizeClaudeRequestBody_RemovesInvalidThinkingBlocks(t *testing.T) {
 	input := []byte(`{
+		"model": "claude-3-5-sonnet-20241022",
 		"messages": [
 			{
 				"role": "assistant",
@@ -25,7 +32,8 @@ func TestSanitizeClaudeRequestBody_RemovesInvalidThinkingBlocks(t *testing.T) {
 					{"type": "text", "text": "keep text"},
 					{"type": "thinking", "thinking": "blank signature", "signature": "   "},
 					{"type": "tool_use", "id": "tool_1", "name": "search", "input": {"q": "tea"}},
-					{"type": "thinking", "thinking": "signed", "signature": "sig-123"},
+					{"type": "thinking", "thinking": "synthetic", "signature": "` + syntheticGPTSignature + `"},
+					{"type": "thinking", "thinking": "signed", "signature": "` + validClaudeSignature + `"},
 					{"type": "tool_result", "tool_use_id": "tool_1", "content": "ok"}
 				]
 			}
@@ -43,8 +51,8 @@ func TestSanitizeClaudeRequestBody_RemovesInvalidThinkingBlocks(t *testing.T) {
 	if got := content[1].Get("type").String(); got != "tool_use" {
 		t.Fatalf("content[1].type = %q, want %q", got, "tool_use")
 	}
-	if got := content[2].Get("signature").String(); got != "sig-123" {
-		t.Fatalf("content[2].signature = %q, want %q", got, "sig-123")
+	if got := content[2].Get("signature").String(); got != validClaudeSignature {
+		t.Fatalf("content[2].signature = %q, want %q", got, validClaudeSignature)
 	}
 	if got := content[3].Get("type").String(); got != "tool_result" {
 		t.Fatalf("content[3].type = %q, want %q", got, "tool_result")
@@ -53,6 +61,7 @@ func TestSanitizeClaudeRequestBody_RemovesInvalidThinkingBlocks(t *testing.T) {
 
 func TestSanitizeClaudeRequestBody_RemovesNonStringSignature(t *testing.T) {
 	input := []byte(`{
+		"model": "claude-3-5-sonnet-20241022",
 		"messages": [
 			{
 				"role": "assistant",
@@ -76,6 +85,7 @@ func TestSanitizeClaudeRequestBody_RemovesNonStringSignature(t *testing.T) {
 
 func TestSanitizeClaudeRequestBody_PreservesOtherRoles(t *testing.T) {
 	input := []byte(`{
+		"model": "claude-3-5-sonnet-20241022",
 		"messages": [
 			{
 				"role": "user",
@@ -97,8 +107,38 @@ func TestSanitizeClaudeRequestBody_PreservesOtherRoles(t *testing.T) {
 	}
 }
 
+func TestSanitizeClaudeRequestBody_RemovesSyntheticPrefixedThinkingSignatures(t *testing.T) {
+	input := []byte(`{
+		"model": "claude-3-5-sonnet-20241022",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "thinking", "thinking": "gpt synthetic", "signature": "` + syntheticGPTSignature + `"},
+					{"type": "thinking", "thinking": "claude synthetic", "signature": "` + syntheticClaudeSignature + `"},
+					{"type": "thinking", "thinking": "raw claude", "signature": "` + validClaudeSignature + `"},
+					{"type": "text", "text": "keep me"}
+				]
+			}
+		]
+	}`)
+
+	out := sanitizeClaudeRequestBody(input)
+	content := gjson.GetBytes(out, "messages.0.content").Array()
+	if len(content) != 2 {
+		t.Fatalf("content block count = %d, want 2", len(content))
+	}
+	if got := content[0].Get("signature").String(); got != validClaudeSignature {
+		t.Fatalf("content[0].signature = %q, want %q", got, validClaudeSignature)
+	}
+	if got := content[1].Get("type").String(); got != "text" {
+		t.Fatalf("content[1].type = %q, want %q", got, "text")
+	}
+}
+
 func TestSanitizeClaudeRequestBody_RemovesAssistantMessagesThatBecomeEmpty(t *testing.T) {
 	input := []byte(`{
+		"model": "claude-3-5-sonnet-20241022",
 		"messages": [
 			{
 				"role": "user",
@@ -214,15 +254,17 @@ func TestClaudeExecutor_SanitizesUnsignedThinkingAcrossClaudeRequestPaths(t *tes
 			}}
 
 			payload := []byte(`{
-				"messages": [
-					{"role":"user","content":[{"type":"text","text":"hi"}]},
-					{"role":"assistant","content":[
-						{"type":"thinking","thinking":"unsigned scratchpad"},
-						{"type":"text","text":"visible reply"},
-						{"type":"thinking","thinking":"signed scratchpad","signature":"sig-123"}
-					]}
-				]
-			}`)
+					"model":"claude-3-5-sonnet-20241022",
+					"messages": [
+						{"role":"user","content":[{"type":"text","text":"hi"}]},
+						{"role":"assistant","content":[
+							{"type":"thinking","thinking":"unsigned scratchpad"},
+							{"type":"text","text":"visible reply"},
+							{"type":"thinking","thinking":"synthetic scratchpad","signature":"` + syntheticGPTSignature + `"},
+							{"type":"thinking","thinking":"signed scratchpad","signature":"` + validClaudeSignature + `"}
+						]}
+					]
+				}`)
 
 			tc.invoke(t, executor, auth, payload)
 
@@ -237,8 +279,8 @@ func TestClaudeExecutor_SanitizesUnsignedThinkingAcrossClaudeRequestPaths(t *tes
 			if got := content[0].Get("type").String(); got != "text" {
 				t.Fatalf("content[0].type = %q, want %q", got, "text")
 			}
-			if got := content[1].Get("signature").String(); got != "sig-123" {
-				t.Fatalf("content[1].signature = %q, want %q", got, "sig-123")
+			if got := content[1].Get("signature").String(); got != validClaudeSignature {
+				t.Fatalf("content[1].signature = %q, want %q", got, validClaudeSignature)
 			}
 		})
 	}

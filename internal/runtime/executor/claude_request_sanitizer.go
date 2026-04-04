@@ -3,6 +3,7 @@ package executor
 import (
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/cache"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -12,6 +13,10 @@ import (
 // valid Claude signature. Anthropic rejects unsigned thinking blocks when a mixed
 // session returns from non-Claude providers back to Claude.
 func sanitizeClaudeRequestBody(body []byte) []byte {
+	targetModel := gjson.GetBytes(body, "model").String()
+	if targetModel == "" {
+		targetModel = "claude"
+	}
 	messages := gjson.GetBytes(body, "messages")
 	if !messages.Exists() || !messages.IsArray() {
 		return body
@@ -39,7 +44,7 @@ func sanitizeClaudeRequestBody(body []byte) []byte {
 		for _, block := range blocks {
 			if block.Get("type").String() == "thinking" {
 				sig := block.Get("signature")
-				if !sig.Exists() || sig.Type != gjson.String || strings.TrimSpace(sig.String()) == "" {
+				if !sig.Exists() || sig.Type != gjson.String || !isValidClaudeThinkingSignature(targetModel, sig.String()) {
 					removedCount++
 					continue
 				}
@@ -83,4 +88,36 @@ func sanitizeClaudeRequestBody(body []byte) []byte {
 
 	log.Debug("Claude RequestSanitizer: sanitized request body")
 	return sanitizedBody
+}
+
+func isValidClaudeThinkingSignature(modelName, signature string) bool {
+	signature = strings.TrimSpace(signature)
+	if signature == "" {
+		return false
+	}
+
+	// Translator-generated signatures are prefixed with a provider/model group
+	// marker (for example "gpt#..." or "claude#..."). Those markers are useful
+	// for internal routing, but Anthropic expects the raw Claude-issued
+	// signature, so any known prefixed form must be stripped before forwarding.
+	if prefix, _, ok := splitSyntheticThinkingSignature(signature); ok {
+		log.Debugf("Claude RequestSanitizer: dropping synthetic thinking signature with prefix %q", prefix)
+		return false
+	}
+
+	return cache.HasValidSignature(modelName, signature)
+}
+
+func splitSyntheticThinkingSignature(signature string) (prefix, rawSignature string, ok bool) {
+	prefix, rawSignature, found := strings.Cut(signature, "#")
+	if !found || rawSignature == "" {
+		return "", "", false
+	}
+
+	switch prefix {
+	case "gpt", "claude", "gemini":
+		return prefix, rawSignature, true
+	default:
+		return "", "", false
+	}
 }
