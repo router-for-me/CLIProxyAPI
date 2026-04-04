@@ -27,11 +27,11 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/store"
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/translator"
-	_ "time/tzdata"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/tui"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	log "github.com/sirupsen/logrus"
+	_ "time/tzdata"
 )
 
 var (
@@ -489,6 +489,7 @@ func main() {
 			cmd.WaitForCloudDeploy()
 			return
 		}
+		localModel = effectiveLocalModel(localModel, flagExplicitlySet(flag.CommandLine, "local-model"), cfg)
 		if localModel && (!tuiMode || standalone) {
 			log.Info("Local model mode: using embedded model catalog, remote model updates disabled")
 		}
