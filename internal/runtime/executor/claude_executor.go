@@ -1318,6 +1318,7 @@ func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, exp
 				partJSON := part.Raw
 				if !part.Get("cache_control").Exists() {
 					updated, _ := sjson.SetBytes([]byte(partJSON), "cache_control.type", "ephemeral")
+					updated, _ = sjson.SetBytes(updated, "cache_control.scope", "global")
 					partJSON = string(updated)
 				}
 				result += "," + partJSON
@@ -1325,7 +1326,7 @@ func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, exp
 			return true
 		})
 	} else if system.Type == gjson.String && system.String() != "" {
-		partJSON := `{"type":"text","cache_control":{"type":"ephemeral"}}`
+		partJSON := `{"type":"text","cache_control":{"type":"ephemeral","scope":"global"}}`
 		updated, _ := sjson.SetBytes([]byte(partJSON), "text", system.String())
 		partJSON = string(updated)
 		result += "," + partJSON
@@ -1839,7 +1840,7 @@ func injectMessagesCacheControl(payload []byte) []byte {
 		contentCount := int(content.Get("#").Int())
 		if contentCount > 0 {
 			cacheControlPath := fmt.Sprintf("messages.%d.content.%d.cache_control", secondToLastUserIdx, contentCount-1)
-			result, err := sjson.SetBytes(payload, cacheControlPath, map[string]string{"type": "ephemeral"})
+			result, err := sjson.SetBytes(payload, cacheControlPath, map[string]string{"type": "ephemeral", "scope": "global"})
 			if err != nil {
 				log.Warnf("failed to inject cache_control into messages: %v", err)
 				return payload
@@ -1854,7 +1855,8 @@ func injectMessagesCacheControl(payload []byte) []byte {
 				"type": "text",
 				"text": text,
 				"cache_control": map[string]string{
-					"type": "ephemeral",
+					"type":  "ephemeral",
+					"scope": "global",
 				},
 			},
 		}
@@ -1898,7 +1900,7 @@ func injectToolsCacheControl(payload []byte) []byte {
 
 	// Add cache_control to the last tool
 	lastToolPath := fmt.Sprintf("tools.%d.cache_control", toolCount-1)
-	result, err := sjson.SetBytes(payload, lastToolPath, map[string]string{"type": "ephemeral"})
+	result, err := sjson.SetBytes(payload, lastToolPath, map[string]string{"type": "ephemeral", "scope": "global"})
 	if err != nil {
 		log.Warnf("failed to inject cache_control into tools array: %v", err)
 		return payload
@@ -1937,7 +1939,7 @@ func injectSystemCacheControl(payload []byte) []byte {
 
 		// Add cache_control to the last system element
 		lastSystemPath := fmt.Sprintf("system.%d.cache_control", count-1)
-		result, err := sjson.SetBytes(payload, lastSystemPath, map[string]string{"type": "ephemeral"})
+		result, err := sjson.SetBytes(payload, lastSystemPath, map[string]string{"type": "ephemeral", "scope": "global"})
 		if err != nil {
 			log.Warnf("failed to inject cache_control into system array: %v", err)
 			return payload
@@ -1952,7 +1954,8 @@ func injectSystemCacheControl(payload []byte) []byte {
 				"type": "text",
 				"text": text,
 				"cache_control": map[string]string{
-					"type": "ephemeral",
+					"type":  "ephemeral",
+					"scope": "global",
 				},
 			},
 		}
