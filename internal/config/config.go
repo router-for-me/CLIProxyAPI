@@ -102,6 +102,12 @@ type Config struct {
 	// These are used as fallbacks when the client does not send its own headers.
 	ClaudeHeaderDefaults ClaudeHeaderDefaults `yaml:"claude-header-defaults" json:"claude-header-defaults"`
 
+	// PromptCacheTTL sets the global default TTL for cache_control breakpoints that the proxy
+	// auto-injects into Claude requests. Accepted values: "" (5 minutes, default) or "1h"
+	// (extended, requires prompt-caching-scope-2026-01-05 beta which is included by default).
+	// Per-credential prompt-cache-ttl under claude-api-key takes precedence over this value.
+	PromptCacheTTL string `yaml:"prompt-cache-ttl,omitempty" json:"prompt-cache-ttl,omitempty"`
+
 	// OpenAICompatibility defines OpenAI API compatibility configurations for external providers.
 	OpenAICompatibility []OpenAICompatibility `yaml:"openai-compatibility" json:"openai-compatibility"`
 
@@ -372,6 +378,13 @@ type ClaudeKey struct {
 	// Claude /v1/messages requests. It is disabled by default so upstream seed
 	// changes do not alter the proxy's legacy behavior.
 	ExperimentalCCHSigning bool `yaml:"experimental-cch-signing,omitempty" json:"experimental-cch-signing,omitempty"`
+
+	// PromptCacheTTL sets the TTL for cache_control breakpoints auto-injected by the proxy.
+	// When empty the default 5-minute TTL is used. Set to "1h" to request the extended
+	// one-hour cache lifetime supported by the prompt-caching-scope-2026-01-05 beta.
+	// This only affects breakpoints that the proxy injects; client-supplied cache_control
+	// blocks are left untouched.
+	PromptCacheTTL string `yaml:"prompt-cache-ttl,omitempty" json:"prompt-cache-ttl,omitempty"`
 }
 
 func (k ClaudeKey) GetAPIKey() string  { return k.APIKey }

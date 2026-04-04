@@ -179,6 +179,16 @@ nonstream-keepalive-interval: 0
 #       cache-user-id: true          # optional: default is false; set true to reuse cached user_id per API key instead of generating a random one each request
 #     experimental-cch-signing: false # optional: default is false; when true, sign the final /v1/messages body using the current Claude Code cch algorithm
 #                                     # keep this disabled unless you explicitly need the behavior, so upstream seed changes fall back to legacy proxy behavior
+#     prompt-cache-ttl: "1h"          # optional: TTL for cache_control breakpoints auto-injected by the proxy
+#                                     # omit or leave empty for the default 5-minute TTL
+#                                     # set to "1h" for the extended one-hour cache lifetime (recommended for long system prompts)
+#                                     # overrides the global prompt-cache-ttl setting for this credential
+
+# Global prompt cache TTL for auto-injected cache_control breakpoints on all Claude requests
+# (both OAuth and api-key). Per-credential prompt-cache-ttl under claude-api-key takes precedence.
+# Accepted values: "" (default 5 minutes) or "1h" (extended, requires prompt-caching-scope-2026-01-05 beta,
+# which is included in the default Anthropic-Beta header).
+# prompt-cache-ttl: "1h"
 
 # Default headers for Claude API requests. Update when Claude Code releases new versions.
 # In legacy mode, user-agent/package-version/runtime-version/timeout are used as fallbacks
