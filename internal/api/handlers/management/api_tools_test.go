@@ -19,7 +19,7 @@ func TestAPICallTransportDirectBypassesGlobalProxy(t *testing.T) {
 		},
 	}
 
-	transport := h.apiCallTransport(&coreauth.Auth{ProxyURL: "direct"})
+	transport := h.apiCallTransport("", &coreauth.Auth{ProxyURL: "direct"})
 	httpTransport, ok := transport.(*http.Transport)
 	if !ok {
 		t.Fatalf("transport type = %T, want *http.Transport", transport)
@@ -38,7 +38,7 @@ func TestAPICallTransportInvalidAuthFallsBackToGlobalProxy(t *testing.T) {
 		},
 	}
 
-	transport := h.apiCallTransport(&coreauth.Auth{ProxyURL: "bad-value"})
+	transport := h.apiCallTransport("", &coreauth.Auth{ProxyURL: "bad-value"})
 	httpTransport, ok := transport.(*http.Transport)
 	if !ok {
 		t.Fatalf("transport type = %T, want *http.Transport", transport)
@@ -55,6 +55,57 @@ func TestAPICallTransportInvalidAuthFallsBackToGlobalProxy(t *testing.T) {
 	}
 	if proxyURL == nil || proxyURL.String() != "http://global-proxy.example.com:8080" {
 		t.Fatalf("proxy URL = %v, want http://global-proxy.example.com:8080", proxyURL)
+	}
+}
+
+func TestAPICallTransportExplicitDirectOverridesAuthAndGlobal(t *testing.T) {
+	t.Parallel()
+
+	h := &Handler{
+		cfg: &config.Config{
+			SDKConfig: sdkconfig.SDKConfig{ProxyURL: "http://global-proxy.example.com:8080"},
+		},
+	}
+
+	transport := h.apiCallTransport("direct", &coreauth.Auth{ProxyURL: "http://auth-proxy.example.com:8080"})
+	httpTransport, ok := transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport type = %T, want *http.Transport", transport)
+	}
+	if httpTransport.Proxy != nil {
+		t.Fatal("expected explicit direct transport to disable proxy function")
+	}
+}
+
+func TestAPICallTransportExplicitProxyOverridesAuthAndGlobal(t *testing.T) {
+	t.Parallel()
+
+	h := &Handler{
+		cfg: &config.Config{
+			SDKConfig: sdkconfig.SDKConfig{ProxyURL: "http://global-proxy.example.com:8080"},
+		},
+	}
+
+	transport := h.apiCallTransport(
+		"http://request-proxy.example.com:9090",
+		&coreauth.Auth{ProxyURL: "http://auth-proxy.example.com:8080"},
+	)
+	httpTransport, ok := transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport type = %T, want *http.Transport", transport)
+	}
+
+	req, errRequest := http.NewRequest(http.MethodGet, "https://example.com", nil)
+	if errRequest != nil {
+		t.Fatalf("http.NewRequest returned error: %v", errRequest)
+	}
+
+	proxyURL, errProxy := httpTransport.Proxy(req)
+	if errProxy != nil {
+		t.Fatalf("httpTransport.Proxy returned error: %v", errProxy)
+	}
+	if proxyURL == nil || proxyURL.String() != "http://request-proxy.example.com:9090" {
+		t.Fatalf("proxy URL = %v, want http://request-proxy.example.com:9090", proxyURL)
 	}
 }
 
