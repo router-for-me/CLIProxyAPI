@@ -52,6 +52,10 @@ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *
 
 	isClaude := strings.Contains(strings.ToLower(modelInfo.ID), "claude")
 
+	// Clamp maxOutputTokens to model limit. Clients may send values valid for
+	// the direct Claude API (e.g. 200000) that exceed Vertex's per-model cap.
+	body = clampMaxOutputTokens(body, modelInfo)
+
 	// ModeAuto: Always use Budget format with thinkingBudget=-1
 	if config.Mode == thinking.ModeAuto {
 		return a.applyBudgetFormat(body, config, modelInfo, isClaude)
@@ -80,6 +84,7 @@ func (a *Applier) applyCompatible(body []byte, config thinking.ThinkingConfig, m
 	isClaude := false
 	if modelInfo != nil {
 		isClaude = strings.Contains(strings.ToLower(modelInfo.ID), "claude")
+		body = clampMaxOutputTokens(body, modelInfo)
 	}
 
 	if config.Mode == thinking.ModeAuto {
@@ -188,6 +193,21 @@ func (a *Applier) applyBudgetFormat(body []byte, config thinking.ThinkingConfig,
 	result, _ = sjson.SetBytes(result, "request.generationConfig.thinkingConfig.thinkingBudget", budget)
 	result, _ = sjson.SetBytes(result, "request.generationConfig.thinkingConfig.includeThoughts", includeThoughts)
 	return result, nil
+}
+
+// clampMaxOutputTokens caps request.generationConfig.maxOutputTokens to the model's
+// MaxCompletionTokens. Clients targeting the direct Claude API may send values (e.g.
+// 200000) that exceed the Vertex per-model limit (e.g. 64000), causing INVALID_ARGUMENT.
+func clampMaxOutputTokens(body []byte, modelInfo *registry.ModelInfo) []byte {
+	if modelInfo == nil || modelInfo.MaxCompletionTokens <= 0 {
+		return body
+	}
+	v := gjson.GetBytes(body, "request.generationConfig.maxOutputTokens")
+	if !v.Exists() || v.Int() <= int64(modelInfo.MaxCompletionTokens) {
+		return body
+	}
+	result, _ := sjson.SetBytes(body, "request.generationConfig.maxOutputTokens", modelInfo.MaxCompletionTokens)
+	return result
 }
 
 // sanitizeTopPForThinking removes or clamps topP when thinking is enabled for Claude models.
