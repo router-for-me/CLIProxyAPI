@@ -152,6 +152,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	// Normalize TTL values to prevent ordering violations under prompt-caching-scope-2026-01-05.
 	// A 1h-TTL block must not appear after a 5m-TTL block in evaluation order (tools→system→messages).
 	body = normalizeCacheControlTTL(body)
+	body = sanitizeClaudeRequestBody(body)
 
 	// Extract betas from body and convert to header
 	var extraBetas []string
@@ -320,6 +321,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 
 	// Normalize TTL values to prevent ordering violations under prompt-caching-scope-2026-01-05.
 	body = normalizeCacheControlTTL(body)
+	body = sanitizeClaudeRequestBody(body)
 
 	// Extract betas from body and convert to header
 	var extraBetas []string
@@ -492,6 +494,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	// Keep count_tokens requests compatible with Anthropic cache-control constraints too.
 	body = enforceCacheControlLimit(body, 4)
 	body = normalizeCacheControlTTL(body)
+	body = sanitizeClaudeRequestBody(body)
 
 	// Extract betas from body and convert to header (for count_tokens too)
 	var extraBetas []string
