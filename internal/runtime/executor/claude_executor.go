@@ -7,9 +7,14 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"image"
+	"image/jpeg"
+	_ "image/gif"
+	_ "image/png"
 	"io"
 	"net/http"
 	"net/textproto"
@@ -140,8 +145,9 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	body = normalizeClaudeTemperatureForThinking(body)
 
 	// Auto-inject cache_control if missing (optimization for ClawdBot/clients without caching support)
+	cacheTTL := resolvePromptCacheTTL(e.cfg, auth)
 	if countCacheControls(body) == 0 {
-		body = ensureCacheControl(body)
+		body = ensureCacheControl(body, cacheTTL)
 	}
 
 	// Enforce Anthropic's cache_control block limit (max 4 breakpoints per request).
@@ -152,6 +158,11 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	// Normalize TTL values to prevent ordering violations under prompt-caching-scope-2026-01-05.
 	// A 1h-TTL block must not appear after a 5m-TTL block in evaluation order (tools→system→messages).
 	body = normalizeCacheControlTTL(body)
+
+	// Compress oversized images before sending upstream. Claude enforces a 5 MB per-image
+	// limit and rejects dimensions above 8000px; compressing here avoids hard API errors
+	// when clients pass through large screenshots or high-res attachments.
+	body = compressImagesInPayload(body)
 
 	// Extract betas from body and convert to header
 	var extraBetas []string
@@ -311,8 +322,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	body = normalizeClaudeTemperatureForThinking(body)
 
 	// Auto-inject cache_control if missing (optimization for ClawdBot/clients without caching support)
+	cacheTTL := resolvePromptCacheTTL(e.cfg, auth)
 	if countCacheControls(body) == 0 {
-		body = ensureCacheControl(body)
+		body = ensureCacheControl(body, cacheTTL)
 	}
 
 	// Enforce Anthropic's cache_control block limit (max 4 breakpoints per request).
@@ -320,6 +332,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 
 	// Normalize TTL values to prevent ordering violations under prompt-caching-scope-2026-01-05.
 	body = normalizeCacheControlTTL(body)
+
+	// Compress oversized images before sending upstream.
+	body = compressImagesInPayload(body)
 
 	// Extract betas from body and convert to header
 	var extraBetas []string
@@ -1392,6 +1407,32 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 	return payload
 }
 
+// resolvePromptCacheTTL returns the effective TTL to use for auto-injected cache_control
+// breakpoints. The per-credential attribute takes precedence over the global config value.
+// Returns "" for the default 5-minute TTL, or "1h" for the extended lifetime.
+func resolvePromptCacheTTL(cfg *config.Config, auth *cliproxyauth.Auth) string {
+	if auth != nil && auth.Attributes != nil {
+		if v, ok := auth.Attributes["prompt_cache_ttl"]; ok {
+			// Key presence (not value) determines override: an explicit "" resets the
+			// global default back to the standard 5-minute TTL.
+			return strings.TrimSpace(v)
+		}
+	}
+	if cfg != nil {
+		return strings.TrimSpace(cfg.PromptCacheTTL)
+	}
+	return ""
+}
+
+// buildCacheControl returns a cache_control object for use in sjson.SetBytes.
+// When ttl is "1h" the extended TTL field is included; otherwise only type is set.
+func buildCacheControl(ttl string) map[string]string {
+	if ttl == "1h" {
+		return map[string]string{"type": "ephemeral", "ttl": "1h"}
+	}
+	return map[string]string{"type": "ephemeral"}
+}
+
 // ensureCacheControl injects cache_control breakpoints into the payload for optimal prompt caching.
 // According to Anthropic's documentation, cache prefixes are created in order: tools -> system -> messages.
 // This function adds cache_control to:
@@ -1402,18 +1443,18 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 // Up to 4 cache breakpoints are allowed per request. Tools, System, and Messages are INDEPENDENT breakpoints.
 // This enables up to 90% cost reduction on cached tokens (cache read = 0.1x base price).
 // See: https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching
-func ensureCacheControl(payload []byte) []byte {
+func ensureCacheControl(payload []byte, ttl string) []byte {
 	// 1. Inject cache_control into the LAST tool (caches all tool definitions)
 	// Tools are cached first in the hierarchy, so this is the most important breakpoint.
-	payload = injectToolsCacheControl(payload)
+	payload = injectToolsCacheControl(payload, ttl)
 
 	// 2. Inject cache_control into the LAST system prompt element
 	// System is the second level in the cache hierarchy.
-	payload = injectSystemCacheControl(payload)
+	payload = injectSystemCacheControl(payload, ttl)
 
 	// 3. Inject cache_control into messages for multi-turn conversation caching
 	// This caches the conversation history up to the second-to-last user turn.
-	payload = injectMessagesCacheControl(payload)
+	payload = injectMessagesCacheControl(payload, ttl)
 
 	return payload
 }
@@ -1788,7 +1829,7 @@ func enforceCacheControlLimit(payload []byte, maxBlocks int) []byte {
 // Only adds cache_control if:
 // - There are at least 2 user turns in the conversation
 // - No message content already has cache_control
-func injectMessagesCacheControl(payload []byte) []byte {
+func injectMessagesCacheControl(payload []byte, ttl string) []byte {
 	messages := gjson.GetBytes(payload, "messages")
 	if !messages.Exists() || !messages.IsArray() {
 		return payload
@@ -1834,12 +1875,14 @@ func injectMessagesCacheControl(payload []byte) []byte {
 	contentPath := fmt.Sprintf("messages.%d.content", secondToLastUserIdx)
 	content := gjson.GetBytes(payload, contentPath)
 
+	cc := buildCacheControl(ttl)
+
 	if content.IsArray() {
 		// Add cache_control to the last content block of this message
 		contentCount := int(content.Get("#").Int())
 		if contentCount > 0 {
 			cacheControlPath := fmt.Sprintf("messages.%d.content.%d.cache_control", secondToLastUserIdx, contentCount-1)
-			result, err := sjson.SetBytes(payload, cacheControlPath, map[string]string{"type": "ephemeral"})
+			result, err := sjson.SetBytes(payload, cacheControlPath, cc)
 			if err != nil {
 				log.Warnf("failed to inject cache_control into messages: %v", err)
 				return payload
@@ -1851,11 +1894,9 @@ func injectMessagesCacheControl(payload []byte) []byte {
 		text := content.String()
 		newContent := []map[string]interface{}{
 			{
-				"type": "text",
-				"text": text,
-				"cache_control": map[string]string{
-					"type": "ephemeral",
-				},
+				"type":          "text",
+				"text":          text,
+				"cache_control": cc,
 			},
 		}
 		result, err := sjson.SetBytes(payload, contentPath, newContent)
@@ -1872,7 +1913,7 @@ func injectMessagesCacheControl(payload []byte) []byte {
 // injectToolsCacheControl adds cache_control to the last tool in the tools array.
 // Per Anthropic docs: "The cache_control parameter on the last tool definition caches all tool definitions."
 // This only adds cache_control if NO tool in the array already has it.
-func injectToolsCacheControl(payload []byte) []byte {
+func injectToolsCacheControl(payload []byte, ttl string) []byte {
 	tools := gjson.GetBytes(payload, "tools")
 	if !tools.Exists() || !tools.IsArray() {
 		return payload
@@ -1898,7 +1939,7 @@ func injectToolsCacheControl(payload []byte) []byte {
 
 	// Add cache_control to the last tool
 	lastToolPath := fmt.Sprintf("tools.%d.cache_control", toolCount-1)
-	result, err := sjson.SetBytes(payload, lastToolPath, map[string]string{"type": "ephemeral"})
+	result, err := sjson.SetBytes(payload, lastToolPath, buildCacheControl(ttl))
 	if err != nil {
 		log.Warnf("failed to inject cache_control into tools array: %v", err)
 		return payload
@@ -1910,11 +1951,13 @@ func injectToolsCacheControl(payload []byte) []byte {
 // injectSystemCacheControl adds cache_control to the last element in the system prompt.
 // Converts string system prompts to array format if needed.
 // This only adds cache_control if NO system element already has it.
-func injectSystemCacheControl(payload []byte) []byte {
+func injectSystemCacheControl(payload []byte, ttl string) []byte {
 	system := gjson.GetBytes(payload, "system")
 	if !system.Exists() {
 		return payload
 	}
+
+	cc := buildCacheControl(ttl)
 
 	if system.IsArray() {
 		count := int(system.Get("#").Int())
@@ -1937,7 +1980,7 @@ func injectSystemCacheControl(payload []byte) []byte {
 
 		// Add cache_control to the last system element
 		lastSystemPath := fmt.Sprintf("system.%d.cache_control", count-1)
-		result, err := sjson.SetBytes(payload, lastSystemPath, map[string]string{"type": "ephemeral"})
+		result, err := sjson.SetBytes(payload, lastSystemPath, cc)
 		if err != nil {
 			log.Warnf("failed to inject cache_control into system array: %v", err)
 			return payload
@@ -1949,11 +1992,9 @@ func injectSystemCacheControl(payload []byte) []byte {
 		text := system.String()
 		newSystem := []map[string]interface{}{
 			{
-				"type": "text",
-				"text": text,
-				"cache_control": map[string]string{
-					"type": "ephemeral",
-				},
+				"type":          "text",
+				"text":          text,
+				"cache_control": cc,
 			},
 		}
 		result, err := sjson.SetBytes(payload, "system", newSystem)
@@ -1988,4 +2029,170 @@ func ensureModelMaxTokens(body []byte, modelID string) []byte {
 	}
 
 	return body
+}
+
+// claudeMaxImageBytes is the per-image size limit enforced by the Anthropic API.
+// We use 4 MB as a conservative threshold to leave headroom below the hard 5 MB limit.
+const claudeMaxImageBytes = 4 * 1024 * 1024
+
+// claudeMaxImageDim is the maximum pixel dimension (width or height) accepted by Claude.
+// We cap at 7680 to leave headroom below the documented 8000px hard limit.
+const claudeMaxImageDim = 7680
+
+// compressImagesInPayload walks all base64-encoded image blocks in a Claude messages
+// payload and compresses any that exceed the size or dimension limits. Images that
+// cannot be decoded (e.g. unsupported formats) are left unchanged. Compression is
+// attempted at decreasing JPEG quality levels until the result fits within the limit.
+func compressImagesInPayload(payload []byte) []byte {
+	messages := gjson.GetBytes(payload, "messages")
+	if !messages.Exists() || !messages.IsArray() {
+		return payload
+	}
+
+	var msgIdx int
+	messages.ForEach(func(_, msg gjson.Result) bool {
+		content := msg.Get("content")
+		if content.IsArray() {
+			var contentIdx int
+			content.ForEach(func(_, block gjson.Result) bool {
+				if block.Get("type").String() == "image" && block.Get("source.type").String() == "base64" {
+					raw := block.Get("source.data").String()
+					compressed, newType, ok := maybeCompressImage(raw)
+					if ok {
+						sourcePath := fmt.Sprintf("messages.%d.content.%d.source", msgIdx, contentIdx)
+						payload, _ = sjson.SetBytes(payload, sourcePath, map[string]string{
+							"type":       "base64",
+							"data":       compressed,
+							"media_type": newType,
+						})
+					}
+				}
+				contentIdx++
+				return true
+			})
+		}
+		msgIdx++
+		return true
+	})
+
+	return payload
+}
+
+// maxImagePixels is the pixel-count ceiling applied before full image decode.
+// Guards against decompression bombs (tiny compressed file, enormous declared dimensions)
+// without blocking legitimate oversized images that need to be resized. Claude's own
+// practical limit is ~59 MP (7680×7680), so 150 MP leaves ample headroom while capping
+// RGBA allocations at ~600 MB for truly pathological inputs.
+const maxImagePixels = 150_000_000 // 150 MP
+
+// maybeCompressImage decodes a base64 image and compresses it if it exceeds the size
+// or dimension limits. Returns the (possibly compressed) base64 data, the resulting
+// media type, and true if any changes were made. Returns ("", "", false) on any error
+// or when no compression is needed.
+func maybeCompressImage(b64data string) (string, string, bool) {
+	raw, err := base64.StdEncoding.DecodeString(b64data)
+	if err != nil {
+		return "", "", false
+	}
+
+	// Decode metadata only first — this is cheap and lets us reject oversized images
+	// before allocating the full pixel buffer (decompression bomb guard).
+	hdr, _, err := image.DecodeConfig(bytes.NewReader(raw))
+	if err != nil {
+		return "", "", false
+	}
+	if hdr.Width*hdr.Height > maxImagePixels {
+		log.Warnf("[claude] image %dx%d exceeds pixel limit (%d MP), skipping compression",
+			hdr.Width, hdr.Height, maxImagePixels/1_000_000)
+		return "", "", false
+	}
+
+	img, _, err := image.Decode(bytes.NewReader(raw))
+	if err != nil {
+		// Unsupported format or corrupt data — leave as-is.
+		return "", "", false
+	}
+
+	bounds := img.Bounds()
+	w, h := bounds.Dx(), bounds.Dy()
+	needsResize := w > claudeMaxImageDim || h > claudeMaxImageDim
+	needsCompress := len(raw) > claudeMaxImageBytes
+
+	if !needsResize && !needsCompress {
+		return "", "", false
+	}
+
+	if needsResize {
+		newW, newH := scaleToFit(w, h, claudeMaxImageDim)
+		img = resizeNearest(img, newW, newH)
+		log.Debugf("[claude] image resized from %dx%d to %dx%d", w, h, newW, newH)
+	}
+
+	// Further downscale for very large files to help compression.
+	if needsCompress && (img.Bounds().Dx() > 2048 || img.Bounds().Dy() > 2048) {
+		nw, nh := scaleToFit(img.Bounds().Dx(), img.Bounds().Dy(), 2048)
+		img = resizeNearest(img, nw, nh)
+	}
+
+	for _, quality := range []int{85, 70, 50, 30} {
+		var buf bytes.Buffer
+		if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: quality}); err != nil {
+			break
+		}
+		if buf.Len() <= claudeMaxImageBytes {
+			log.Debugf("[claude] image compressed to %.1f MB (quality=%d)", float64(buf.Len())/1024/1024, quality)
+			return base64.StdEncoding.EncodeToString(buf.Bytes()), "image/jpeg", true
+		}
+	}
+
+	// Last resort: aggressive resize + minimum quality.
+	nw, nh := scaleToFit(img.Bounds().Dx(), img.Bounds().Dy(), 1024)
+	img = resizeNearest(img, nw, nh)
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: 30}); err != nil {
+		return "", "", false
+	}
+	log.Debugf("[claude] image aggressively compressed to %.1f MB", float64(buf.Len())/1024/1024)
+	return base64.StdEncoding.EncodeToString(buf.Bytes()), "image/jpeg", true
+}
+
+// scaleToFit returns new dimensions that fit within maxDim while preserving aspect ratio.
+func scaleToFit(w, h, maxDim int) (int, int) {
+	if w <= maxDim && h <= maxDim {
+		return w, h
+	}
+	if w >= h {
+		return maxDim, max(1, h*maxDim/w)
+	}
+	return max(1, w*maxDim/h), maxDim
+}
+
+// resizeNearest scales src to the given dimensions using nearest-neighbor sampling.
+// Nearest-neighbor is fast and sufficient for downscaling to reduce file size.
+func resizeNearest(src image.Image, dstW, dstH int) image.Image {
+	dst := image.NewRGBA(image.Rect(0, 0, dstW, dstH))
+	b := src.Bounds()
+	srcW, srcH := b.Dx(), b.Dy()
+
+	// Fast path: avoid the interface-dispatch overhead of src.At for the common case
+	// where image.Decode already returned an *image.RGBA.
+	if rgba, ok := src.(*image.RGBA); ok {
+		for y := 0; y < dstH; y++ {
+			sy := b.Min.Y + y*srcH/dstH
+			for x := 0; x < dstW; x++ {
+				sx := b.Min.X + x*srcW/dstW
+				dst.SetRGBA(x, y, rgba.RGBAAt(sx, sy))
+			}
+		}
+		return dst
+	}
+
+	for y := 0; y < dstH; y++ {
+		sy := b.Min.Y + y*srcH/dstH
+		for x := 0; x < dstW; x++ {
+			sx := b.Min.X + x*srcW/dstW
+			dst.Set(x, y, src.At(sx, sy))
+		}
+	}
+	return dst
 }
