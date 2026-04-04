@@ -24,6 +24,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
@@ -45,7 +46,7 @@ const (
 	antigravityGeneratePath        = "/v1internal:generateContent"
 	antigravityClientID            = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
 	antigravityClientSecret        = "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"
-	defaultAntigravityAgent        = "antigravity/1.21.9 darwin/arm64"
+	defaultAntigravityAgent        = "antigravity/1.21.9 darwin/arm64" // fallback only; overridden at runtime by misc.AntigravityUserAgent()
 	antigravityAuthType            = "antigravity"
 	refreshSkew                    = 3000 * time.Second
 	antigravityCreditsRetryTTL     = 5 * time.Hour
@@ -1739,7 +1740,7 @@ func resolveUserAgent(auth *cliproxyauth.Auth) string {
 			}
 		}
 	}
-	return defaultAntigravityAgent
+	return misc.AntigravityUserAgent()
 }
 
 func antigravityRetryAttempts(auth *cliproxyauth.Auth, cfg *config.Config) int {
