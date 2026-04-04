@@ -617,6 +617,10 @@ func parseAccountLines(text string) ([]parsedAccount, []string) {
 			errors = append(errors, fmt.Sprintf("line %d: email and password are required", i+1))
 			continue
 		}
+		if a.TOTPSecret == "" {
+			errors = append(errors, fmt.Sprintf("line %d: totp_secret is required", i+1))
+			continue
+		}
 		accounts = append(accounts, a)
 	}
 	return accounts, errors
