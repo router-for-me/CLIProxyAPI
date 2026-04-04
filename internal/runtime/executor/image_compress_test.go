@@ -36,7 +36,7 @@ func makeBase64Image(t *testing.T, w, h int, format string) string {
 
 func TestMaybeCompressImage_SmallImage_NoChange(t *testing.T) {
 	b64 := makeBase64Image(t, 100, 100, "png")
-	_, _, changed := maybeCompressImage(b64, "image/png")
+	_, _, changed := maybeCompressImage(b64)
 	if changed {
 		t.Fatal("small image should not be modified")
 	}
@@ -45,7 +45,7 @@ func TestMaybeCompressImage_SmallImage_NoChange(t *testing.T) {
 func TestMaybeCompressImage_OversizedDimensions(t *testing.T) {
 	// 8100px exceeds claudeMaxImageDim (7680)
 	b64 := makeBase64Image(t, 8100, 100, "png")
-	compressed, newType, changed := maybeCompressImage(b64, "image/png")
+	compressed, newType, changed := maybeCompressImage(b64)
 	if !changed {
 		t.Fatal("oversized image should be compressed")
 	}
@@ -67,7 +67,7 @@ func TestMaybeCompressImage_OversizedDimensions(t *testing.T) {
 }
 
 func TestMaybeCompressImage_InvalidBase64(t *testing.T) {
-	_, _, changed := maybeCompressImage("not-valid-base64!!!", "image/png")
+	_, _, changed := maybeCompressImage("not-valid-base64!!!")
 	if changed {
 		t.Fatal("invalid base64 should return unchanged")
 	}

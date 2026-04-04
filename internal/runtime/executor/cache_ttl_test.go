@@ -51,13 +51,26 @@ func TestResolvePromptCacheTTL_PerKeyOverridesGlobal(t *testing.T) {
 	}
 }
 
-func TestResolvePromptCacheTTL_PerKeyEmpty_FallsBackToGlobal(t *testing.T) {
+func TestResolvePromptCacheTTL_PerKeyEmpty_OverridesGlobal(t *testing.T) {
+	// An explicit per-key "" must win over a global "1h" so that a credential can
+	// opt back to the default 5-minute TTL even when the global default is extended.
 	cfg := &config.Config{PromptCacheTTL: "1h"}
 	auth := &cliproxyauth.Auth{
 		Attributes: map[string]string{"prompt_cache_ttl": ""},
 	}
+	if got := resolvePromptCacheTTL(cfg, auth); got != "" {
+		t.Fatalf("expected empty TTL (key present, value empty), got %q", got)
+	}
+}
+
+func TestResolvePromptCacheTTL_KeyAbsent_FallsBackToGlobal(t *testing.T) {
+	// When the attribute key is absent entirely, the global value should apply.
+	cfg := &config.Config{PromptCacheTTL: "1h"}
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{},
+	}
 	if got := resolvePromptCacheTTL(cfg, auth); got != "1h" {
-		t.Fatalf("expected 1h from global fallback, got %q", got)
+		t.Fatalf("expected 1h from global config when key absent, got %q", got)
 	}
 }
 

@@ -1412,8 +1412,10 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 // Returns "" for the default 5-minute TTL, or "1h" for the extended lifetime.
 func resolvePromptCacheTTL(cfg *config.Config, auth *cliproxyauth.Auth) string {
 	if auth != nil && auth.Attributes != nil {
-		if v := strings.TrimSpace(auth.Attributes["prompt_cache_ttl"]); v != "" {
-			return v
+		if v, ok := auth.Attributes["prompt_cache_ttl"]; ok {
+			// Key presence (not value) determines override: an explicit "" resets the
+			// global default back to the standard 5-minute TTL.
+			return strings.TrimSpace(v)
 		}
 	}
 	if cfg != nil {
@@ -2054,15 +2056,15 @@ func compressImagesInPayload(payload []byte) []byte {
 			var contentIdx int
 			content.ForEach(func(_, block gjson.Result) bool {
 				if block.Get("type").String() == "image" && block.Get("source.type").String() == "base64" {
-					dataPath := fmt.Sprintf("messages.%d.content.%d.source.data", msgIdx, contentIdx)
-					typePath := fmt.Sprintf("messages.%d.content.%d.source.media_type", msgIdx, contentIdx)
 					raw := block.Get("source.data").String()
-					mediaType := block.Get("source.media_type").String()
-
-					compressed, newType, ok := maybeCompressImage(raw, mediaType)
+					compressed, newType, ok := maybeCompressImage(raw)
 					if ok {
-						payload, _ = sjson.SetBytes(payload, dataPath, compressed)
-						payload, _ = sjson.SetBytes(payload, typePath, newType)
+						sourcePath := fmt.Sprintf("messages.%d.content.%d.source", msgIdx, contentIdx)
+						payload, _ = sjson.SetBytes(payload, sourcePath, map[string]string{
+							"type":       "base64",
+							"data":       compressed,
+							"media_type": newType,
+						})
 					}
 				}
 				contentIdx++
@@ -2076,13 +2078,30 @@ func compressImagesInPayload(payload []byte) []byte {
 	return payload
 }
 
+// maxImagePixels is the pixel-count ceiling applied before full image decode.
+// A 10000×10000 RGBA image allocates ~400 MB; cap well below that to guard
+// against decompression bombs in untrusted client payloads.
+const maxImagePixels = 50_000_000 // 50 MP
+
 // maybeCompressImage decodes a base64 image and compresses it if it exceeds the size
 // or dimension limits. Returns the (possibly compressed) base64 data, the resulting
 // media type, and true if any changes were made. Returns ("", "", false) on any error
 // or when no compression is needed.
-func maybeCompressImage(b64data, mediaType string) (string, string, bool) {
+func maybeCompressImage(b64data string) (string, string, bool) {
 	raw, err := base64.StdEncoding.DecodeString(b64data)
 	if err != nil {
+		return "", "", false
+	}
+
+	// Decode metadata only first — this is cheap and lets us reject oversized images
+	// before allocating the full pixel buffer (decompression bomb guard).
+	hdr, _, err := image.DecodeConfig(bytes.NewReader(raw))
+	if err != nil {
+		return "", "", false
+	}
+	if hdr.Width*hdr.Height > maxImagePixels {
+		log.Warnf("[claude] image %dx%d exceeds pixel limit (%d MP), skipping compression",
+			hdr.Width, hdr.Height, maxImagePixels/1_000_000)
 		return "", "", false
 	}
 
@@ -2108,7 +2127,7 @@ func maybeCompressImage(b64data, mediaType string) (string, string, bool) {
 	}
 
 	// Further downscale for very large files to help compression.
-	if needsCompress && img.Bounds().Dx() > 2048 {
+	if needsCompress && (img.Bounds().Dx() > 2048 || img.Bounds().Dy() > 2048) {
 		nw, nh := scaleToFit(img.Bounds().Dx(), img.Bounds().Dy(), 2048)
 		img = resizeNearest(img, nw, nh)
 	}
@@ -2149,9 +2168,23 @@ func scaleToFit(w, h, maxDim int) (int, int) {
 // resizeNearest scales src to the given dimensions using nearest-neighbor sampling.
 // Nearest-neighbor is fast and sufficient for downscaling to reduce file size.
 func resizeNearest(src image.Image, dstW, dstH int) image.Image {
+	dst := image.NewRGBA(image.Rect(0, 0, dstW, dstH))
 	b := src.Bounds()
 	srcW, srcH := b.Dx(), b.Dy()
-	dst := image.NewRGBA(image.Rect(0, 0, dstW, dstH))
+
+	// Fast path: avoid the interface-dispatch overhead of src.At for the common case
+	// where image.Decode already returned an *image.RGBA.
+	if rgba, ok := src.(*image.RGBA); ok {
+		for y := 0; y < dstH; y++ {
+			sy := b.Min.Y + y*srcH/dstH
+			for x := 0; x < dstW; x++ {
+				sx := b.Min.X + x*srcW/dstW
+				dst.SetRGBA(x, y, rgba.RGBAAt(sx, sy))
+			}
+		}
+		return dst
+	}
+
 	for y := 0; y < dstH; y++ {
 		sy := b.Min.Y + y*srcH/dstH
 		for x := 0; x < dstW; x++ {
