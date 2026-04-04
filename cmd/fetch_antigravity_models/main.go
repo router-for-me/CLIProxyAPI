@@ -188,7 +188,7 @@ func fetchModels(ctx context.Context, auth *coreauth.Auth) []modelEntry {
 		httpReq.Close = true
 		httpReq.Header.Set("Content-Type", "application/json")
 		httpReq.Header.Set("Authorization", "Bearer "+accessToken)
-		httpReq.Header.Set("User-Agent", "antigravity/1.19.6 darwin/arm64")
+		httpReq.Header.Set("User-Agent", "antigravity/1.21.9 darwin/arm64")
 
 		httpClient := &http.Client{Timeout: 30 * time.Second}
 		if transport, _, errProxy := proxyutil.BuildHTTPTransport(auth.ProxyURL); errProxy == nil && transport != nil {
