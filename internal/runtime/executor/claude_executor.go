@@ -899,7 +899,7 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 		r.Header.Set("Accept-Encoding", "identity")
 	} else {
 		r.Header.Set("Accept", "application/json")
-		r.Header.Set("Accept-Encoding", "gzip, deflate, br, zstd")
+		r.Header.Set("Accept-Encoding", "br, gzip, deflate")
 	}
 	// Legacy mode keeps OS/Arch runtime-derived; stabilized mode pins OS/Arch
 	// to the configured baseline while still allowing newer official

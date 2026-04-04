@@ -75,7 +75,7 @@ func CachedUserID(apiKey string) string {
 		userIDCacheMu.Unlock()
 	}
 
-	newID := generateFakeUserID()
+	newID := generateFakeUserIDWithSession(CachedSessionID(apiKey))
 
 	userIDCacheMu.Lock()
 	entry, ok = userIDCache[key]

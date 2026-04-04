@@ -1332,8 +1332,8 @@ func TestClaudeExecutor_Execute_SetsCompressedAcceptEncoding(t *testing.T) {
 		t.Fatalf("Execute error: %v", err)
 	}
 
-	if gotEncoding != "gzip, deflate, br, zstd" {
-		t.Errorf("Accept-Encoding = %q, want %q", gotEncoding, "gzip, deflate, br, zstd")
+	if gotEncoding != "br, gzip, deflate" {
+		t.Errorf("Accept-Encoding = %q, want %q", gotEncoding, "br, gzip, deflate")
 	}
 	if gotAccept != "application/json" {
 		t.Errorf("Accept = %q, want %q", gotAccept, "application/json")
