@@ -45,6 +45,18 @@ func newClaudeHeaderTestRequest(t *testing.T, incoming http.Header) *http.Reques
 	return req.WithContext(context.WithValue(req.Context(), "gin", ginCtx))
 }
 
+func newGinContextWithHeaders(t *testing.T, incoming http.Header) context.Context {
+	t.Helper()
+
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	ginReq := httptest.NewRequest(http.MethodPost, "http://localhost/v1/messages", nil)
+	ginReq.Header = incoming.Clone()
+	ginCtx.Request = ginReq
+	return context.WithValue(context.Background(), "gin", ginCtx)
+}
+
 func assertClaudeFingerprint(t *testing.T, headers http.Header, userAgent, pkgVersion, runtimeVersion, osName, arch string) {
 	t.Helper()
 
@@ -104,6 +116,55 @@ func TestApplyClaudeHeaders_UsesConfiguredBaselineFingerprint(t *testing.T) {
 	assertClaudeFingerprint(t, req.Header, "evil-client/9.9", "9.9.9", "v24.5.0", "Linux", "x64")
 	if got := req.Header.Get("X-Stainless-Timeout"); got != "900" {
 		t.Fatalf("X-Stainless-Timeout = %q, want %q", got, "900")
+	}
+}
+
+func TestResolveOutboundClaudeEntrypoint_UsesResolvedDefaultUserAgent(t *testing.T) {
+	resetClaudeDeviceProfileCache()
+	stabilize := true
+
+	cfg := &config.Config{
+		ClaudeHeaderDefaults: config.ClaudeHeaderDefaults{
+			StabilizeDeviceProfile: &stabilize,
+		},
+	}
+	auth := &cliproxyauth.Auth{
+		ID: "auth-entrypoint-default",
+		Attributes: map[string]string{
+			"api_key": "key-entrypoint-default",
+		},
+	}
+	ctx := newGinContextWithHeaders(t, http.Header{
+		"User-Agent": []string{"curl/8.7.1"},
+	})
+
+	if got := resolveOutboundClaudeEntrypoint(ctx, cfg, auth, "key-entrypoint-default"); got != "sdk-cli" {
+		t.Fatalf("resolveOutboundClaudeEntrypoint() = %q, want %q", got, "sdk-cli")
+	}
+}
+
+func TestResolveOutboundClaudeEntrypoint_AuthHeaderOverrideWins(t *testing.T) {
+	resetClaudeDeviceProfileCache()
+	stabilize := true
+
+	cfg := &config.Config{
+		ClaudeHeaderDefaults: config.ClaudeHeaderDefaults{
+			StabilizeDeviceProfile: &stabilize,
+		},
+	}
+	auth := &cliproxyauth.Auth{
+		ID: "auth-entrypoint-override",
+		Attributes: map[string]string{
+			"api_key":           "key-entrypoint-override",
+			"header:User-Agent": "claude-cli/2.1.92 (external, vscode)",
+		},
+	}
+	ctx := newGinContextWithHeaders(t, http.Header{
+		"User-Agent": []string{"curl/8.7.1"},
+	})
+
+	if got := resolveOutboundClaudeEntrypoint(ctx, cfg, auth, "key-entrypoint-override"); got != "vscode" {
+		t.Fatalf("resolveOutboundClaudeEntrypoint() = %q, want %q", got, "vscode")
 	}
 }
 
@@ -167,6 +228,48 @@ func TestApplyClaudeHeaders_TracksHighestClaudeCLIFingerprint(t *testing.T) {
 	})
 	applyClaudeHeaders(lowerReq, auth, "key-upgrade", false, nil, cfg)
 	assertClaudeFingerprint(t, lowerReq.Header, "claude-cli/2.1.63 (external, cli)", "0.75.0", "v24.4.0", "MacOS", "arm64")
+}
+
+func TestClaudeExecutor_CountTokens_BillingEntrypointMatchesResolvedUserAgent(t *testing.T) {
+	resetClaudeDeviceProfileCache()
+	stabilize := true
+	var seenBody []byte
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		seenBody = bytes.Clone(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"input_tokens":1}`))
+	}))
+	defer server.Close()
+
+	cfg := &config.Config{
+		ClaudeHeaderDefaults: config.ClaudeHeaderDefaults{
+			StabilizeDeviceProfile: &stabilize,
+		},
+	}
+	executor := NewClaudeExecutor(cfg)
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": server.URL,
+	}}
+	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+	ctx := newGinContextWithHeaders(t, http.Header{
+		"User-Agent": []string{"curl/8.7.1"},
+	})
+
+	_, err := executor.CountTokens(ctx, auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet-20241022",
+		Payload: payload,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+	if err != nil {
+		t.Fatalf("CountTokens error: %v", err)
+	}
+
+	billingHeader := gjson.GetBytes(seenBody, "system.0.text").String()
+	if !strings.Contains(billingHeader, "cc_entrypoint=sdk-cli;") {
+		t.Fatalf("billing header = %q, want cc_entrypoint=sdk-cli", billingHeader)
+	}
 }
 
 func TestApplyClaudeHeaders_DoesNotDowngradeConfiguredBaselineOnFirstClaudeClient(t *testing.T) {

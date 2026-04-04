@@ -486,7 +486,14 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 
 	if !strings.HasPrefix(baseModel, "claude-3-5-haiku") {
-		body = checkSystemInstructions(body)
+		body = checkSystemInstructionsWithSigningMode(
+			body,
+			false,
+			false,
+			helps.DefaultClaudeVersion(e.cfg),
+			resolveOutboundClaudeEntrypoint(ctx, e.cfg, auth, apiKey),
+			"",
+		)
 	}
 
 	// Keep count_tokens requests compatible with Anthropic cache-control constraints too.
@@ -1158,6 +1165,50 @@ func parseEntrypointFromUA(userAgent string) string {
 	return "cli"
 }
 
+func getAuthUserAgentOverride(auth *cliproxyauth.Auth) string {
+	if auth == nil || len(auth.Attributes) == 0 {
+		return ""
+	}
+	for key, value := range auth.Attributes {
+		trimmedKey := strings.TrimSpace(key)
+		if len(trimmedKey) < len("header:") || !strings.HasPrefix(strings.ToLower(trimmedKey), "header:") {
+			continue
+		}
+		name := strings.TrimSpace(trimmedKey[len("header:"):])
+		if strings.EqualFold(name, "User-Agent") {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func getGinHeadersFromContext(ctx context.Context) http.Header {
+	if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
+		return ginCtx.Request.Header
+	}
+	return nil
+}
+
+func resolveOutboundClaudeUserAgent(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, apiKey string) string {
+	if authUA := getAuthUserAgentOverride(auth); authUA != "" {
+		return authUA
+	}
+
+	ginHeaders := getGinHeadersFromContext(ctx)
+	if helps.ClaudeDeviceProfileStabilizationEnabled(cfg) {
+		profile := helps.ResolveClaudeDeviceProfile(auth, apiKey, ginHeaders, cfg)
+		return strings.TrimSpace(profile.UserAgent)
+	}
+
+	req, _ := http.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages", nil)
+	helps.ApplyClaudeLegacyDeviceHeaders(req, ginHeaders, cfg)
+	return strings.TrimSpace(req.Header.Get("User-Agent"))
+}
+
+func resolveOutboundClaudeEntrypoint(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, apiKey string) string {
+	return parseEntrypointFromUA(resolveOutboundClaudeUserAgent(ctx, cfg, auth, apiKey))
+}
+
 // getWorkloadFromContext extracts workload identifier from the gin request headers.
 func getWorkloadFromContext(ctx context.Context) string {
 	if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
@@ -1377,7 +1428,7 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 	// Skip system instructions for claude-3-5-haiku models
 	if !strings.HasPrefix(model, "claude-3-5-haiku") {
 		billingVersion := helps.DefaultClaudeVersion(cfg)
-		entrypoint := parseEntrypointFromUA(clientUserAgent)
+		entrypoint := resolveOutboundClaudeEntrypoint(ctx, cfg, auth, apiKey)
 		workload := getWorkloadFromContext(ctx)
 		payload = checkSystemInstructionsWithSigningMode(payload, strictMode, useExperimentalCCHSigning, billingVersion, entrypoint, workload)
 	}
