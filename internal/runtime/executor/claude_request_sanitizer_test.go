@@ -97,9 +97,15 @@ func TestSanitizeClaudeRequestBody_PreservesOtherRoles(t *testing.T) {
 	}
 }
 
-func TestSanitizeClaudeRequestBody_LeavesEmptyAssistantContentArray(t *testing.T) {
+func TestSanitizeClaudeRequestBody_RemovesAssistantMessagesThatBecomeEmpty(t *testing.T) {
 	input := []byte(`{
 		"messages": [
+			{
+				"role": "user",
+				"content": [
+					{"type": "text", "text": "keep me"}
+				]
+			},
 			{
 				"role": "assistant",
 				"content": [
@@ -107,12 +113,15 @@ func TestSanitizeClaudeRequestBody_LeavesEmptyAssistantContentArray(t *testing.T
 				]
 			}
 		]
-	}`)
+		}`)
 
 	out := sanitizeClaudeRequestBody(input)
-	content := gjson.GetBytes(out, "messages.0.content").Array()
-	if len(content) != 0 {
-		t.Fatalf("content block count = %d, want 0", len(content))
+	messages := gjson.GetBytes(out, "messages").Array()
+	if len(messages) != 1 {
+		t.Fatalf("message count = %d, want 1", len(messages))
+	}
+	if got := messages[0].Get("role").String(); got != "user" {
+		t.Fatalf("messages[0].role = %q, want %q", got, "user")
 	}
 }
 
@@ -230,6 +239,124 @@ func TestClaudeExecutor_SanitizesUnsignedThinkingAcrossClaudeRequestPaths(t *tes
 			}
 			if got := content[1].Get("signature").String(); got != "sig-123" {
 				t.Fatalf("content[1].signature = %q, want %q", got, "sig-123")
+			}
+		})
+	}
+}
+
+func TestClaudeExecutor_RemovesAssistantMessagesThatBecomeEmptyAcrossClaudeRequestPaths(t *testing.T) {
+	testCases := []struct {
+		name       string
+		invoke     func(t *testing.T, executor *ClaudeExecutor, auth *cliproxyauth.Auth, payload []byte)
+		wantPath   string
+		wantStream bool
+	}{
+		{
+			name: "execute",
+			invoke: func(t *testing.T, executor *ClaudeExecutor, auth *cliproxyauth.Auth, payload []byte) {
+				t.Helper()
+				_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+					Model:   "claude-3-5-sonnet-20241022",
+					Payload: payload,
+				}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+				if err != nil {
+					t.Fatalf("Execute() error = %v", err)
+				}
+			},
+			wantPath: "/v1/messages",
+		},
+		{
+			name: "execute_stream",
+			invoke: func(t *testing.T, executor *ClaudeExecutor, auth *cliproxyauth.Auth, payload []byte) {
+				t.Helper()
+				result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+					Model:   "claude-3-5-sonnet-20241022",
+					Payload: payload,
+				}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+				if err != nil {
+					t.Fatalf("ExecuteStream() error = %v", err)
+				}
+				for chunk := range result.Chunks {
+					if chunk.Err != nil {
+						t.Fatalf("ExecuteStream() chunk error = %v", chunk.Err)
+					}
+				}
+			},
+			wantPath:   "/v1/messages",
+			wantStream: true,
+		},
+		{
+			name: "count_tokens",
+			invoke: func(t *testing.T, executor *ClaudeExecutor, auth *cliproxyauth.Auth, payload []byte) {
+				t.Helper()
+				_, err := executor.CountTokens(context.Background(), auth, cliproxyexecutor.Request{
+					Model:   "claude-3-5-sonnet-20241022",
+					Payload: payload,
+				}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+				if err != nil {
+					t.Fatalf("CountTokens() error = %v", err)
+				}
+			},
+			wantPath: "/v1/messages/count_tokens",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			var seenBody []byte
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != tc.wantPath {
+					t.Fatalf("request path = %q, want %q", r.URL.Path, tc.wantPath)
+				}
+				body, _ := io.ReadAll(r.Body)
+				seenBody = bytes.Clone(body)
+
+				if tc.wantStream {
+					w.Header().Set("Content-Type", "text/event-stream")
+					_, _ = w.Write([]byte("data: {\"type\":\"message_stop\"}\n\n"))
+					return
+				}
+
+				w.Header().Set("Content-Type", "application/json")
+				if tc.wantPath == "/v1/messages/count_tokens" {
+					_, _ = w.Write([]byte(`{"input_tokens":42}`))
+					return
+				}
+				_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","model":"claude-3-5-sonnet-20241022","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+			}))
+			defer server.Close()
+
+			executor := NewClaudeExecutor(&config.Config{})
+			auth := &cliproxyauth.Auth{Attributes: map[string]string{
+				"api_key":  "key-123",
+				"base_url": server.URL,
+			}}
+
+			payload := []byte(`{
+				"messages": [
+					{"role":"user","content":[{"type":"text","text":"first user"}]},
+					{"role":"assistant","content":[
+						{"type":"thinking","thinking":"unsigned scratchpad"}
+					]},
+					{"role":"user","content":[{"type":"text","text":"second user"}]}
+				]
+			}`)
+
+			tc.invoke(t, executor, auth, payload)
+
+			if len(seenBody) == 0 {
+				t.Fatal("expected request body to be captured")
+			}
+
+			messages := gjson.GetBytes(seenBody, "messages").Array()
+			if len(messages) != 2 {
+				t.Fatalf("message count = %d, want 2; body=%s", len(messages), string(seenBody))
+			}
+			if got := messages[0].Get("role").String(); got != "user" {
+				t.Fatalf("messages[0].role = %q, want %q", got, "user")
+			}
+			if got := messages[1].Get("role").String(); got != "user" {
+				t.Fatalf("messages[1].role = %q, want %q", got, "user")
 			}
 		})
 	}

@@ -1,7 +1,6 @@
 package executor
 
 import (
-	"fmt"
 	"strings"
 
 	log "github.com/sirupsen/logrus"
@@ -19,13 +18,17 @@ func sanitizeClaudeRequestBody(body []byte) []byte {
 	}
 
 	modified := false
+	sanitizedMessages := make([]any, 0, len(messages.Array()))
 	for msgIdx, msg := range messages.Array() {
+		msgValue := msg.Value()
 		if msg.Get("role").String() != "assistant" {
+			sanitizedMessages = append(sanitizedMessages, msgValue)
 			continue
 		}
 
 		content := msg.Get("content")
 		if !content.Exists() || !content.IsArray() {
+			sanitizedMessages = append(sanitizedMessages, msgValue)
 			continue
 		}
 
@@ -45,28 +48,39 @@ func sanitizeClaudeRequestBody(body []byte) []byte {
 		}
 
 		if removedCount == 0 {
+			sanitizedMessages = append(sanitizedMessages, msgValue)
 			continue
 		}
 
-		contentPath := fmt.Sprintf("messages.%d.content", msgIdx)
-		var err error
 		if len(keepBlocks) == 0 {
-			body, err = sjson.SetBytes(body, contentPath, []any{})
-		} else {
-			body, err = sjson.SetBytes(body, contentPath, keepBlocks)
-		}
-		if err != nil {
-			log.Warnf("Claude RequestSanitizer: failed to sanitize message %d: %v", msgIdx, err)
+			modified = true
+			log.Warnf("Claude RequestSanitizer: removed assistant message %d after stripping %d invalid thinking blocks", msgIdx, removedCount)
 			continue
 		}
+
+		msgObject, ok := msgValue.(map[string]any)
+		if !ok {
+			log.Warnf("Claude RequestSanitizer: failed to sanitize message %d: unexpected message shape %T", msgIdx, msgValue)
+			sanitizedMessages = append(sanitizedMessages, msgValue)
+			continue
+		}
+		msgObject["content"] = keepBlocks
+		sanitizedMessages = append(sanitizedMessages, msgObject)
 
 		modified = true
 		log.Debugf("Claude RequestSanitizer: removed %d invalid thinking blocks from message %d", removedCount, msgIdx)
 	}
 
-	if modified {
-		log.Debug("Claude RequestSanitizer: sanitized request body")
+	if !modified {
+		return body
 	}
 
-	return body
+	sanitizedBody, err := sjson.SetBytes(body, "messages", sanitizedMessages)
+	if err != nil {
+		log.Warnf("Claude RequestSanitizer: failed to rewrite messages array: %v", err)
+		return body
+	}
+
+	log.Debug("Claude RequestSanitizer: sanitized request body")
+	return sanitizedBody
 }
