@@ -173,22 +173,11 @@ func LookupModelInfo(modelID string, provider ...string) *ModelInfo {
 	if info := GetGlobalRegistry().GetModelInfo(modelID, p); info != nil {
 		return cloneModelInfo(info)
 	}
-
-	// Provider-specific static lookup: search only the catalog for the requested
-	// provider/channel so that cross-provider ID collisions cannot produce a
-	// wrong-provider match.
 	if p != "" {
-		if models := GetStaticModelDefinitionsByChannel(p); models != nil {
-			for _, m := range models {
-				if m != nil && m.ID == modelID {
-					return m // already cloned by GetStaticModelDefinitionsByChannel
-				}
-			}
-			return nil // provider has a catalog but model not in it — treat as user-defined
+		if info, ok := lookupStaticModelInfoByChannel(p, modelID); ok {
+			return info
 		}
 	}
-
-	// No provider hint or provider has no dedicated catalog — fall back to global search.
 	return cloneModelInfo(LookupStaticModelInfo(modelID))
 }
 
