@@ -239,6 +239,11 @@ func (s *OAuthServer) handleSuccess(w http.ResponseWriter, r *http.Request) {
 		platformURL = "https://platform.openai.com"
 	}
 
+	// Validate platformURL to prevent XSS - only allow http/https URLs
+	if !isValidURL(platformURL) {
+		platformURL = "https://platform.openai.com"
+	}
+
 	// Generate success page HTML with dynamic content
 	successHTML := s.generateSuccessHTML(setupRequired, platformURL)
 
@@ -246,6 +251,12 @@ func (s *OAuthServer) handleSuccess(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		log.Errorf("Failed to write success page: %v", err)
 	}
+}
+
+// isValidURL checks if the URL is a valid http/https URL to prevent XSS
+func isValidURL(urlStr string) bool {
+	urlStr = strings.TrimSpace(urlStr)
+	return strings.HasPrefix(urlStr, "https://") || strings.HasPrefix(urlStr, "http://")
 }
 
 // generateSuccessHTML creates the HTML content for the success page.

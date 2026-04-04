@@ -1,17 +1,21 @@
 # Binaries
 cli-proxy-api
+cliproxy
+/server
 *.exe
+
 
 # Configuration
 config.yaml
 .env
-
+.mcp.json
 # Generated content
 bin/*
 logs/*
 conv/*
 temp/*
 refs/*
+tmp/*
 
 # Storage backends
 pgstore/*
@@ -45,6 +49,7 @@ GEMINI.md
 .bmad/*
 _bmad/*
 _bmad-output/*
+.mcp/cache/
 
 # macOS
 .DS_Store
@@ -55,3 +60,4 @@ _bmad-output/*
 .opencode/
 .cli-proxy-api/
 .venv/
+*.bak

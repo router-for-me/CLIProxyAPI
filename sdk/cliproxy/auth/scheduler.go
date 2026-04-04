@@ -592,6 +592,11 @@ func (m *scheduledAuthMeta) supportsModel(modelKey string) bool {
 	if modelKey == "" {
 		return true
 	}
+	// Cursor acts as a universal proxy supporting multiple model families.
+	// Allow any model to be routed to cursor auth.
+	if m.providerKey == "cursor" {
+		return true
+	}
 	if len(m.supportedModelSet) == 0 {
 		return false
 	}
