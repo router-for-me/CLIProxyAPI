@@ -172,32 +172,101 @@ func timeUntilNextDay() time.Duration {
 	return tomorrow.Sub(now)
 }
 
-// ensureQwenSystemMessage prepends a default system message if none exists in "messages".
+// ensureQwenSystemMessage ensures the request has a single system message at the beginning.
+// It always injects the default system prompt and merges any user-provided system messages
+// into the injected system message content to satisfy Qwen's strict message ordering rules.
 func ensureQwenSystemMessage(payload []byte) ([]byte, error) {
-	messages := gjson.GetBytes(payload, "messages")
-	if messages.Exists() && messages.IsArray() {
-		var buf bytes.Buffer
-		buf.WriteByte('[')
-		buf.Write(qwenDefaultSystemMessage)
-		for _, msg := range messages.Array() {
-			buf.WriteByte(',')
-			buf.WriteString(msg.Raw)
+	isInjectedSystemPart := func(part gjson.Result) bool {
+		if !part.Exists() || !part.IsObject() {
+			return false
 		}
-		buf.WriteByte(']')
-		updated, errSet := sjson.SetRawBytes(payload, "messages", buf.Bytes())
-		if errSet != nil {
-			return nil, fmt.Errorf("qwen executor: set default system message failed: %w", errSet)
+		if !strings.EqualFold(part.Get("type").String(), "text") {
+			return false
 		}
-		return updated, nil
+		if !strings.EqualFold(part.Get("cache_control.type").String(), "ephemeral") {
+			return false
+		}
+		text := part.Get("text").String()
+		return text == "" || text == "You are Qwen Code."
 	}
 
-	var buf bytes.Buffer
-	buf.WriteByte('[')
-	buf.Write(qwenDefaultSystemMessage)
-	buf.WriteByte(']')
-	updated, errSet := sjson.SetRawBytes(payload, "messages", buf.Bytes())
+	defaultParts := gjson.ParseBytes(qwenDefaultSystemMessage).Get("content")
+	var systemParts []any
+	if defaultParts.Exists() && defaultParts.IsArray() {
+		for _, part := range defaultParts.Array() {
+			systemParts = append(systemParts, part.Value())
+		}
+	}
+	if len(systemParts) == 0 {
+		systemParts = append(systemParts, map[string]any{
+			"type": "text",
+			"text": "You are Qwen Code.",
+			"cache_control": map[string]any{
+				"type": "ephemeral",
+			},
+		})
+	}
+
+	appendSystemContent := func(content gjson.Result) {
+		makeTextPart := func(text string) map[string]any {
+			return map[string]any{
+				"type": "text",
+				"text": text,
+			}
+		}
+
+		if !content.Exists() || content.Type == gjson.Null {
+			return
+		}
+		if content.IsArray() {
+			for _, part := range content.Array() {
+				if part.Type == gjson.String {
+					systemParts = append(systemParts, makeTextPart(part.String()))
+					continue
+				}
+				if isInjectedSystemPart(part) {
+					continue
+				}
+				systemParts = append(systemParts, part.Value())
+			}
+			return
+		}
+		if content.Type == gjson.String {
+			systemParts = append(systemParts, makeTextPart(content.String()))
+			return
+		}
+		if content.IsObject() {
+			if isInjectedSystemPart(content) {
+				return
+			}
+			systemParts = append(systemParts, content.Value())
+			return
+		}
+		systemParts = append(systemParts, makeTextPart(content.String()))
+	}
+
+	messages := gjson.GetBytes(payload, "messages")
+	var nonSystemMessages []any
+	if messages.Exists() && messages.IsArray() {
+		for _, msg := range messages.Array() {
+			if strings.EqualFold(msg.Get("role").String(), "system") {
+				appendSystemContent(msg.Get("content"))
+				continue
+			}
+			nonSystemMessages = append(nonSystemMessages, msg.Value())
+		}
+	}
+
+	newMessages := make([]any, 0, 1+len(nonSystemMessages))
+	newMessages = append(newMessages, map[string]any{
+		"role":    "system",
+		"content": systemParts,
+	})
+	newMessages = append(newMessages, nonSystemMessages...)
+
+	updated, errSet := sjson.SetBytes(payload, "messages", newMessages)
 	if errSet != nil {
-		return nil, fmt.Errorf("qwen executor: set default system message failed: %w", errSet)
+		return nil, fmt.Errorf("qwen executor: set system message failed: %w", errSet)
 	}
 	return updated, nil
 }
