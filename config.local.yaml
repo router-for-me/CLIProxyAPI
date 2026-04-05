@@ -1,0 +1,7 @@
+host: ""
+port: 8317
+remote-management:
+  allow-remote: false
+  secret-key: "$2a$10$ikZZJDAp2hq9CqrUVK6M2.bQh1yk801yaNJqdSd/cSRtWnNXeK1qK"
+  disable-auto-update-panel: true
+auth-dir: "./auths"
