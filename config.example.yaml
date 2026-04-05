@@ -174,11 +174,24 @@ nonstream-keepalive-interval: 0
 #       strict-mode: false           # false (default): prepend Claude Code prompt to user system messages
 #                                    # true: strip all user system messages, keep only Claude Code prompt
 #       sensitive-words:             # optional: words to obfuscate with zero-width characters
-#         - "API"
-#         - "proxy"
-#       cache-user-id: true          # optional: default is false; set true to reuse cached user_id per API key instead of generating a random one each request
-#     experimental-cch-signing: false # optional: default is false; when true, sign the final /v1/messages body using the current Claude Code cch algorithm
-#                                     # keep this disabled unless you explicitly need the behavior, so upstream seed changes fall back to legacy proxy behavior
+#       - "API"
+#       - "proxy"
+#     cache-user-id: true          # optional: default is false; set true to reuse cached user_id per API key instead of generating a random one each request
+#   experimental-cch-signing: false # optional: default is false; when true, sign the final /v1/messages body using the current Claude Code cch algorithm
+#                                   # keep this disabled unless you explicitly need the behavior, so upstream seed changes fall back to legacy proxy behavior
+
+# AWS Bedrock API keys
+# aws-bedrock-api-key:
+#   - api-key: "your-bedrock-api-key"
+#     region: "us-east-1"
+#     prefix: "test" # optional: require calls like "test/bedrock-llama" to target this credential
+#     base-url: "https://bedrock-runtime.us-east-1.amazonaws.com" # optional override
+#     proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override
+#     models:
+#       - name: "us.meta.llama3-2-90b-instruct-v1:0" # upstream model name
+#         alias: "bedrock-llama"                     # client alias mapped to the upstream model
+#     excluded-models:
+#       - "amazon.titan-*"               # wildcard matching prefix
 
 # Default headers for Claude API requests. Update when Claude Code releases new versions.
 # In legacy mode, user-agent/package-version/runtime-version/timeout are used as fallbacks

@@ -65,6 +65,9 @@ type APIKeyClientResult struct {
 
 	// OpenAICompatCount is the number of OpenAI compatibility API keys loaded
 	OpenAICompatCount int
+
+	// AWSBedrockKeyCount is the number of AWS Bedrock API keys loaded
+	AWSBedrockKeyCount int
 }
 
 // WatcherFactory creates a watcher for configuration and token changes.

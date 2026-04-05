@@ -21,6 +21,7 @@ type staticModelsJSON struct {
 	IFlow       []*ModelInfo `json:"iflow"`
 	Kimi        []*ModelInfo `json:"kimi"`
 	Antigravity []*ModelInfo `json:"antigravity"`
+	AWSBedrock  []*ModelInfo `json:"aws-bedrock"`
 }
 
 // GetClaudeModels returns the standard Claude model definitions.
@@ -88,6 +89,11 @@ func GetAntigravityModels() []*ModelInfo {
 	return cloneModelInfos(getModels().Antigravity)
 }
 
+// GetAWSBedrockModels returns the standard AWS Bedrock model definitions.
+func GetAWSBedrockModels() []*ModelInfo {
+	return cloneModelInfos(getModels().AWSBedrock)
+}
+
 // cloneModelInfos returns a shallow copy of the slice with each element deep-cloned.
 func cloneModelInfos(models []*ModelInfo) []*ModelInfo {
 	if len(models) == 0 {
@@ -137,6 +143,8 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetKimiModels()
 	case "antigravity":
 		return GetAntigravityModels()
+	case "aws-bedrock":
+		return GetAWSBedrockModels()
 	default:
 		return nil
 	}
@@ -161,6 +169,7 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		data.IFlow,
 		data.Kimi,
 		data.Antigravity,
+		data.AWSBedrock,
 	}
 	for _, models := range allModels {
 		for _, m := range models {

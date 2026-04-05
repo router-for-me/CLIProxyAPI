@@ -870,6 +870,10 @@ func (m *Manager) rebuildAPIKeyModelAliasLocked(cfg *internalconfig.Config) {
 			if entry := resolveVertexAPIKeyConfig(cfg, auth); entry != nil {
 				compileAPIKeyModelAliasForModels(byAlias, entry.Models)
 			}
+		case "aws-bedrock":
+			if entry := resolveBedrockAPIKeyConfig(cfg, auth); entry != nil {
+				compileAPIKeyModelAliasForModels(byAlias, entry.Models)
+			}
 		default:
 			// OpenAI-compat uses config selection from auth.Attributes.
 			providerKey := ""
@@ -1510,6 +1514,8 @@ func (m *Manager) applyAPIKeyModelAlias(auth *Auth, requestedModel string) strin
 		upstreamModel = resolveUpstreamModelForCodexAPIKey(cfg, auth, requestedModel)
 	case "vertex":
 		upstreamModel = resolveUpstreamModelForVertexAPIKey(cfg, auth, requestedModel)
+	case "aws-bedrock":
+		upstreamModel = resolveUpstreamModelForBedrockAPIKey(cfg, auth, requestedModel)
 	default:
 		upstreamModel = resolveUpstreamModelForOpenAICompatAPIKey(cfg, auth, requestedModel)
 	}
@@ -1594,6 +1600,38 @@ func resolveVertexAPIKeyConfig(cfg *internalconfig.Config, auth *Auth) *internal
 	return resolveAPIKeyConfig(cfg.VertexCompatAPIKey, auth)
 }
 
+func resolveBedrockAPIKeyConfig(cfg *internalconfig.Config, auth *Auth) *internalconfig.AWSBedrockKey {
+	if cfg == nil || auth == nil || len(cfg.AWSBedrockKey) == 0 {
+		return nil
+	}
+	attrKey, attrBase, attrRegion := "", "", ""
+	if auth.Attributes != nil {
+		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
+		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
+		attrRegion = strings.TrimSpace(auth.Attributes["region"])
+	}
+
+	// Prefer the most specific Bedrock identity: api_key + region (+ base_url when provided).
+	if attrKey != "" && attrRegion != "" {
+		for i := range cfg.AWSBedrockKey {
+			entry := &cfg.AWSBedrockKey[i]
+			cfgKey := strings.TrimSpace(entry.APIKey)
+			cfgBase := strings.TrimSpace(entry.BaseURL)
+			cfgRegion := strings.TrimSpace(entry.Region)
+			if !strings.EqualFold(cfgKey, attrKey) || !strings.EqualFold(cfgRegion, attrRegion) {
+				continue
+			}
+			if attrBase != "" && cfgBase != "" && !strings.EqualFold(cfgBase, attrBase) {
+				continue
+			}
+			return entry
+		}
+	}
+
+	// Fallback to generic matching (api_key/base_url) to keep legacy behavior.
+	return resolveAPIKeyConfig(cfg.AWSBedrockKey, auth)
+}
+
 func resolveUpstreamModelForGeminiAPIKey(cfg *internalconfig.Config, auth *Auth, requestedModel string) string {
 	entry := resolveGeminiAPIKeyConfig(cfg, auth)
 	if entry == nil {
@@ -1620,6 +1658,14 @@ func resolveUpstreamModelForCodexAPIKey(cfg *internalconfig.Config, auth *Auth, 
 
 func resolveUpstreamModelForVertexAPIKey(cfg *internalconfig.Config, auth *Auth, requestedModel string) string {
 	entry := resolveVertexAPIKeyConfig(cfg, auth)
+	if entry == nil {
+		return ""
+	}
+	return resolveModelAliasFromConfigModels(requestedModel, asModelAliasEntries(entry.Models))
+}
+
+func resolveUpstreamModelForBedrockAPIKey(cfg *internalconfig.Config, auth *Auth, requestedModel string) string {
+	entry := resolveBedrockAPIKeyConfig(cfg, auth)
 	if entry == nil {
 		return ""
 	}

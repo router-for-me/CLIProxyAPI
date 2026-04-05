@@ -24,4 +24,10 @@ const (
 
 	// Antigravity represents the Antigravity response format identifier.
 	Antigravity = "antigravity"
+
+	// AWSBedrock represents the AWS Bedrock provider identifier.
+	AWSBedrock = "aws-bedrock"
+
+	// BedrockConverse represents the AWS Bedrock Converse API format identifier.
+	BedrockConverse = "bedrock-converse"
 )

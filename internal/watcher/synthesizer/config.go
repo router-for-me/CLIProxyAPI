@@ -35,8 +35,61 @@ func (s *ConfigSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth,
 	out = append(out, s.synthesizeOpenAICompat(ctx)...)
 	// Vertex-compat
 	out = append(out, s.synthesizeVertexCompat(ctx)...)
+	// AWS Bedrock
+	out = append(out, s.synthesizeAWSBedrockKeys(ctx)...)
 
 	return out, nil
+}
+
+// synthesizeAWSBedrockKeys creates Auth entries for AWS Bedrock API keys.
+func (s *ConfigSynthesizer) synthesizeAWSBedrockKeys(ctx *SynthesisContext) []*coreauth.Auth {
+	cfg := ctx.Config
+	now := ctx.Now
+	idGen := ctx.IDGenerator
+
+	out := make([]*coreauth.Auth, 0, len(cfg.AWSBedrockKey))
+	for i := range cfg.AWSBedrockKey {
+		entry := cfg.AWSBedrockKey[i]
+		key := strings.TrimSpace(entry.APIKey)
+		if key == "" {
+			continue
+		}
+		prefix := strings.TrimSpace(entry.Prefix)
+		base := strings.TrimSpace(entry.BaseURL)
+		proxyURL := strings.TrimSpace(entry.ProxyURL)
+		region := strings.TrimSpace(entry.Region)
+		id, token := idGen.Next("aws-bedrock:apikey", key, base, region)
+		attrs := map[string]string{
+			"source":  fmt.Sprintf("config:aws-bedrock[%s]", token),
+			"api_key": key,
+		}
+		if entry.Priority != 0 {
+			attrs["priority"] = strconv.Itoa(entry.Priority)
+		}
+		if base != "" {
+			attrs["base_url"] = base
+		}
+		if region != "" {
+			attrs["region"] = region
+		}
+		if hash := diff.ComputeAWSBedrockModelsHash(entry.Models); hash != "" {
+			attrs["models_hash"] = hash
+		}
+		a := &coreauth.Auth{
+			ID:         id,
+			Provider:   "aws-bedrock",
+			Label:      "aws-bedrock-apikey",
+			Prefix:     prefix,
+			Status:     coreauth.StatusActive,
+			ProxyURL:   proxyURL,
+			Attributes: attrs,
+			CreatedAt:  now,
+			UpdatedAt:  now,
+		}
+		ApplyAuthExcludedModelsMeta(a, cfg, entry.ExcludedModels, "apikey")
+		out = append(out, a)
+	}
+	return out
 }
 
 // synthesizeGeminiKeys creates Auth entries for Gemini API keys.
