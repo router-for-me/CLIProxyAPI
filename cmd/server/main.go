@@ -5,7 +5,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"flag"
 	"fmt"
@@ -19,7 +18,6 @@ import (
 
 	"github.com/joho/godotenv"
 	configaccess "github.com/router-for-me/CLIProxyAPI/v6/internal/access/config_access"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/cmd"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
@@ -28,7 +26,6 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/store"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/store/accountpool"
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/translator"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/tui"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
@@ -37,7 +34,6 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 
-	_ "github.com/jackc/pgx/v5/stdlib" // register pgx driver for ACCOUNT_POOL_DSN
 )
 
 var (
@@ -136,11 +132,6 @@ func main() {
 	var cfg *config.Config
 	var isCloudDeploy bool
 	var (
-		usePostgresStore     bool
-		pgStoreDSN           string
-		pgStoreSchema        string
-		pgStoreLocalPath     string
-		pgStoreInst          *store.PostgresStore
 		useGitStore          bool
 		gitStoreRemoteURL    string
 		gitStoreUser         string
@@ -181,26 +172,6 @@ func main() {
 		return "", false
 	}
 	writableBase := util.WritablePath()
-	if value, ok := lookupEnv("PGSTORE_DSN", "pgstore_dsn"); ok {
-		usePostgresStore = true
-		pgStoreDSN = value
-	}
-	if usePostgresStore {
-		if value, ok := lookupEnv("PGSTORE_SCHEMA", "pgstore_schema"); ok {
-			pgStoreSchema = value
-		}
-		if value, ok := lookupEnv("PGSTORE_LOCAL_PATH", "pgstore_local_path"); ok {
-			pgStoreLocalPath = value
-		}
-		if pgStoreLocalPath == "" {
-			if writableBase != "" {
-				pgStoreLocalPath = writableBase
-			} else {
-				pgStoreLocalPath = wd
-			}
-		}
-		useGitStore = false
-	}
 	if value, ok := lookupEnv("GITSTORE_GIT_URL", "gitstore_git_url"); ok {
 		useGitStore = true
 		gitStoreRemoteURL = value
@@ -239,39 +210,9 @@ func main() {
 	}
 
 	// Determine and load the configuration file.
-	// Prefer the Postgres store when configured, otherwise fallback to git or local files.
+	// Fallback to git, object store or local files.
 	var configFilePath string
-	if usePostgresStore {
-		if pgStoreLocalPath == "" {
-			pgStoreLocalPath = wd
-		}
-		pgStoreLocalPath = filepath.Join(pgStoreLocalPath, "pgstore")
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		pgStoreInst, err = store.NewPostgresStore(ctx, store.PostgresStoreConfig{
-			DSN:      pgStoreDSN,
-			Schema:   pgStoreSchema,
-			SpoolDir: pgStoreLocalPath,
-		})
-		cancel()
-		if err != nil {
-			log.Errorf("failed to initialize postgres token store: %v", err)
-			return
-		}
-		examplePath := filepath.Join(wd, "config.example.yaml")
-		ctx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
-		if errBootstrap := pgStoreInst.Bootstrap(ctx, examplePath); errBootstrap != nil {
-			cancel()
-			log.Errorf("failed to bootstrap postgres-backed config: %v", errBootstrap)
-			return
-		}
-		cancel()
-		configFilePath = pgStoreInst.ConfigPath()
-		cfg, err = config.LoadConfigOptional(configFilePath, isCloudDeploy)
-		if err == nil {
-			cfg.AuthDir = pgStoreInst.AuthDir()
-			log.Infof("postgres-backed token store enabled, workspace path: %s", pgStoreInst.WorkDir())
-		}
-	} else if useObjectStore {
+	if useObjectStore {
 		if objectStoreLocalPath == "" {
 			if writableBase != "" {
 				objectStoreLocalPath = writableBase
@@ -450,54 +391,12 @@ func main() {
 	}
 
 	// Register the shared token store once so all components use the same persistence backend.
-	if usePostgresStore {
-		sdkAuth.RegisterTokenStore(pgStoreInst)
-	} else if useObjectStore {
+	if useObjectStore {
 		sdkAuth.RegisterTokenStore(objectStoreInst)
 	} else if useGitStore {
 		sdkAuth.RegisterTokenStore(gitStoreInst)
 	} else {
 		sdkAuth.RegisterTokenStore(sdkAuth.NewFileTokenStore())
-	}
-
-	// Initialize account pool store.
-	// Prefer dedicated ACCOUNT_POOL_DSN; fall back to PGSTORE_DSN.
-	var extraServerOpts []api.ServerOption
-	if apDSN, ok := lookupEnv("ACCOUNT_POOL_DSN", "account_pool_dsn"); ok {
-		apSchema := "public"
-		if v, ok2 := lookupEnv("ACCOUNT_POOL_SCHEMA", "account_pool_schema"); ok2 {
-			apSchema = v
-		}
-		apDB, err := sql.Open("pgx", apDSN)
-		if err != nil {
-			log.Warnf("account pool: failed to open database: %v", err)
-		} else {
-			apDB.SetMaxOpenConns(10)
-			apDB.SetMaxIdleConns(5)
-			apDB.SetConnMaxLifetime(5 * time.Minute)
-			apDB.SetConnMaxIdleTime(2 * time.Minute)
-			apStore := accountpool.New(apDB, apSchema)
-			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-			if err := apStore.EnsureSchema(ctx); err != nil {
-				cancel()
-				log.Warnf("account pool schema init failed (feature disabled): %v", err)
-			} else {
-				cancel()
-				extraServerOpts = append(extraServerOpts, api.WithAccountPoolStore(apStore))
-				log.Info("account pool store initialized (dedicated DSN)")
-			}
-		}
-	} else if usePostgresStore && pgStoreInst != nil {
-		apStore := accountpool.New(pgStoreInst.DB(), pgStoreInst.Schema())
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		if err := apStore.EnsureSchema(ctx); err != nil {
-			cancel()
-			log.Warnf("account pool schema init failed (feature disabled): %v", err)
-		} else {
-			cancel()
-			extraServerOpts = append(extraServerOpts, api.WithAccountPoolStore(apStore))
-			log.Info("account pool store initialized")
-		}
 	}
 
 	// Register built-in access providers before constructing services.
@@ -576,7 +475,7 @@ func main() {
 					password = localMgmtPassword
 				}
 
-				cancel, done := cmd.StartServiceBackground(cfg, configFilePath, password, extraServerOpts...)
+				cancel, done := cmd.StartServiceBackground(cfg, configFilePath, password, )
 
 				client := tui.NewClient(cfg.Port, password)
 				ready := false
@@ -621,7 +520,7 @@ func main() {
 			if !localModel {
 				registry.StartModelsUpdater(context.Background())
 			}
-			cmd.StartService(cfg, configFilePath, password, extraServerOpts...)
+			cmd.StartService(cfg, configFilePath, password, )
 		}
 	}
 }

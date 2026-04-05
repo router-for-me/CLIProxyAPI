@@ -26,7 +26,6 @@ import (
 	ampmodule "github.com/router-for-me/CLIProxyAPI/v6/internal/api/modules/amp"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/store/accountpool"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/managementasset"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
@@ -53,7 +52,6 @@ type serverOptionConfig struct {
 	keepAliveTimeout     time.Duration
 	keepAliveOnTimeout   func()
 	postAuthHook         auth.PostAuthHook
-	accountPoolStore     *accountpool.Store
 }
 
 // ServerOption customises HTTP server construction.
@@ -116,13 +114,6 @@ func WithRequestLoggerFactory(factory func(*config.Config, string) logging.Reque
 func WithPostAuthHook(hook auth.PostAuthHook) ServerOption {
 	return func(cfg *serverOptionConfig) {
 		cfg.postAuthHook = hook
-	}
-}
-
-// WithAccountPoolStore attaches an account pool store for account management endpoints.
-func WithAccountPoolStore(s *accountpool.Store) ServerOption {
-	return func(cfg *serverOptionConfig) {
-		cfg.accountPoolStore = s
 	}
 }
 
@@ -279,9 +270,6 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	s.mgmt.SetLogDirectory(logDir)
 	if optionState.postAuthHook != nil {
 		s.mgmt.SetPostAuthHook(optionState.postAuthHook)
-	}
-	if optionState.accountPoolStore != nil {
-		s.mgmt.SetAccountPoolStore(optionState.accountPoolStore)
 	}
 	s.localPassword = optionState.localPassword
 
@@ -659,55 +647,6 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.POST("/oauth-callback", s.mgmt.PostOAuthCallback)
 		mgmt.GET("/get-auth-status", s.mgmt.GetAuthStatus)
 
-		// Account Pool Management
-		pool := mgmt.Group("/account-pool")
-		{
-			// Members
-			pool.GET("/members", s.mgmt.ListMembers)
-			pool.GET("/members/:id", s.mgmt.GetMember)
-			pool.POST("/members", s.mgmt.CreateMember)
-			pool.PUT("/members/:id", s.mgmt.UpdateMember)
-			pool.PATCH("/members/:id/status", s.mgmt.UpdateMemberStatus)
-			pool.DELETE("/members/:id", s.mgmt.DeleteMember)
-			pool.POST("/members/batch", s.mgmt.BatchImportMembers)
-			pool.POST("/members/pick", s.mgmt.PickNextAvailableMember)
-
-			// Leaders
-			pool.GET("/leaders", s.mgmt.ListLeaders)
-			pool.GET("/leaders/:id", s.mgmt.GetLeader)
-			pool.POST("/leaders", s.mgmt.CreateLeader)
-			pool.PUT("/leaders/:id", s.mgmt.UpdateLeader)
-			pool.PATCH("/leaders/:id/status", s.mgmt.UpdateLeaderStatus)
-			pool.DELETE("/leaders/:id", s.mgmt.DeleteLeader)
-			pool.POST("/leaders/batch", s.mgmt.BatchImportLeaders)
-
-			// Proxies
-			pool.GET("/proxies", s.mgmt.ListPoolProxies)
-			pool.POST("/proxies", s.mgmt.CreatePoolProxy)
-			pool.PUT("/proxies/:id", s.mgmt.UpdatePoolProxy)
-			pool.DELETE("/proxies/:id", s.mgmt.DeletePoolProxy)
-			pool.POST("/proxies/batch", s.mgmt.BatchImportProxies)
-			pool.POST("/proxies/pick", s.mgmt.PickNextAvailableProxy)
-
-			// Groups (legacy)
-			pool.GET("/groups", s.mgmt.ListGroups)
-			pool.POST("/groups", s.mgmt.CreateGroup)
-			pool.PUT("/groups/:id", s.mgmt.UpdateGroup)
-			pool.DELETE("/groups/:id", s.mgmt.DeleteGroup)
-
-			// Group Runs (DB-backed group execution state)
-			pool.GET("/group-runs", s.mgmt.ListGroupRuns)
-			pool.GET("/group-runs/:id", s.mgmt.GetGroupRun)
-			pool.POST("/group-runs", s.mgmt.CreateGroupRun)
-			pool.PUT("/group-runs/:id", s.mgmt.UpdateGroupRun)
-			pool.DELETE("/group-runs/:id", s.mgmt.DeleteGroupRun)
-			pool.GET("/group-runs/:id/json", s.mgmt.GetGroupRunJSON)
-			pool.POST("/group-runs/:id/members", s.mgmt.AddGroupRunMembers)
-			pool.PUT("/group-runs/:id/members/:mid", s.mgmt.UpdateGroupRunMember)
-			pool.PATCH("/group-runs/:id/members/:mid/status", s.mgmt.UpdateGroupRunMemberStatus)
-			pool.POST("/group-runs/:id/members/:mid/replace", s.mgmt.ReplaceGroupRunMember)
-			pool.DELETE("/group-runs/:id/members", s.mgmt.DeleteGroupRunMembers)
-		}
 	}
 }
 

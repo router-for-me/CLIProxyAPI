@@ -118,20 +118,7 @@
     "usage_stats": "Статистика использования",
     "config_management": "Панель конфигурации",
     "logs": "Просмотр логов",
-    "system_info": "Информация системы",
-    "account_pool": "Пул аккаунтов"
-  },
-  "account_pool": {
-    "title": "Пул аккаунтов",
-    "description": "Управление участниками, лидерами, прокси и группами",
-    "tab_members": "Участники",
-    "tab_leaders": "Лидеры",
-    "tab_proxies": "Прокси",
-    "tab_groups": "Группы",
-    "batch_import": "Массовый импорт",
-    "status_updated": "Статус обновлён",
-    "updated": "Обновлено",
-    "deleted": "Удалено"
+    "system_info": "Информация системы"
   },
   "dashboard": {
     "title": "Панель управления",

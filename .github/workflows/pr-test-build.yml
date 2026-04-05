@@ -87,10 +87,6 @@ jobs:
             "/config"
             "/api-keys"
             "/auth-files"
-            "/account-pool/members"
-            "/account-pool/leaders"
-            "/account-pool/proxies"
-            "/account-pool/groups"
           )
 
           for ep in "${ENDPOINTS[@]}"; do
@@ -104,7 +100,7 @@ jobs:
           done
 
           # Verify no double-prefix bug: /v0/management/v0/management/* must 404
-          STATUS=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer smoke-test-key" "${BASE}/v0/management/account-pool/members")
+          STATUS=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer smoke-test-key" "${BASE}/v0/management/config")
           if [ "$STATUS" != "404" ]; then
             echo "FAIL: double-prefix path should be 404 but got $STATUS"
             FAIL=1

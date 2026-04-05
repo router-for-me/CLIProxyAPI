@@ -118,20 +118,7 @@
     "usage_stats": "Usage Statistics",
     "config_management": "Config Panel",
     "logs": "Logs Viewer",
-    "system_info": "Management Center Info",
-    "account_pool": "Account Pool"
-  },
-  "account_pool": {
-    "title": "Account Pool",
-    "description": "Manage member accounts, leader accounts, proxies, and groups",
-    "tab_members": "Members",
-    "tab_leaders": "Leaders",
-    "tab_proxies": "Proxies",
-    "tab_groups": "Groups",
-    "batch_import": "Batch Import",
-    "status_updated": "Status updated",
-    "updated": "Updated",
-    "deleted": "Deleted"
+    "system_info": "Management Center Info"
   },
   "dashboard": {
     "title": "Dashboard",

@@ -118,20 +118,7 @@
     "usage_stats": "使用统计",
     "config_management": "配置面板",
     "logs": "日志查看",
-    "system_info": "中心信息",
-    "account_pool": "号池管理"
-  },
-  "account_pool": {
-    "title": "号池管理",
-    "description": "管理子号、Leader号、代理和分组",
-    "tab_members": "子号",
-    "tab_leaders": "Leader号",
-    "tab_proxies": "代理",
-    "tab_groups": "分组",
-    "batch_import": "批量导入",
-    "status_updated": "状态已更新",
-    "updated": "已更新",
-    "deleted": "已删除"
+    "system_info": "中心信息"
   },
   "dashboard": {
     "title": "仪表盘",
