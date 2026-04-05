@@ -321,6 +321,27 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 		}
 	}
 
+	// AWS Bedrock API keys
+	if len(oldCfg.AWSBedrockKey) != len(newCfg.AWSBedrockKey) {
+		changes = append(changes, fmt.Sprintf("aws-bedrock-api-key count: %d -> %d", len(oldCfg.AWSBedrockKey), len(newCfg.AWSBedrockKey)))
+	} else {
+		for i := range oldCfg.AWSBedrockKey {
+			o := oldCfg.AWSBedrockKey[i]
+			n := newCfg.AWSBedrockKey[i]
+			if strings.TrimSpace(o.Region) != strings.TrimSpace(n.Region) {
+				changes = append(changes, fmt.Sprintf("aws-bedrock[%d].region: %s -> %s", i, strings.TrimSpace(o.Region), strings.TrimSpace(n.Region)))
+			}
+			if strings.TrimSpace(o.APIKey) != strings.TrimSpace(n.APIKey) {
+				changes = append(changes, fmt.Sprintf("aws-bedrock[%d].api-key: updated", i))
+			}
+			oldModels := SummarizeAWSBedrockModels(o.Models)
+			newModels := SummarizeAWSBedrockModels(n.Models)
+			if oldModels.hash != newModels.hash {
+				changes = append(changes, fmt.Sprintf("aws-bedrock[%d].models: updated (%d -> %d entries)", i, oldModels.count, newModels.count))
+			}
+		}
+	}
+
 	return changes
 }
 

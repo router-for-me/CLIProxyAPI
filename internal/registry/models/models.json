@@ -2771,5 +2771,195 @@
       "context_length": 114000,
       "max_completion_tokens": 32768
     }
+  ],
+  "aws-bedrock": [
+    {
+      "id": "anthropic.claude-opus-4-5-20251101-v1:0",
+      "object": "model",
+      "owned_by": "anthropic",
+      "type": "claude",
+      "display_name": "Claude 4.5 Opus (Bedrock)",
+      "context_length": 200000,
+      "max_completion_tokens": 65536,
+      "thinking": {
+        "min": 1024,
+        "max": 128000
+      }
+    },
+    {
+      "id": "anthropic.claude-opus-4-6-v1",
+      "object": "model",
+      "owned_by": "anthropic",
+      "type": "claude",
+      "display_name": "Claude 4.6 Opus (Bedrock)",
+      "context_length": 200000,
+      "max_completion_tokens": 65536,
+      "thinking": {
+        "min": 1024,
+        "max": 128000
+      }
+    },
+    {
+      "id": "anthropic.claude-opus-4-20250514-v1:0",
+      "object": "model",
+      "owned_by": "anthropic",
+      "type": "claude",
+      "display_name": "Claude 4 Opus (Bedrock)",
+      "context_length": 200000,
+      "max_completion_tokens": 32768,
+      "thinking": {
+        "min": 1024,
+        "max": 128000
+      }
+    },
+    {
+      "id": "anthropic.claude-sonnet-4-20250514-v1:0",
+      "object": "model",
+      "owned_by": "anthropic",
+      "type": "claude",
+      "display_name": "Claude 4 Sonnet (Bedrock)",
+      "context_length": 200000,
+      "max_completion_tokens": 65536,
+      "thinking": {
+        "min": 1024,
+        "max": 128000
+      }
+    },
+    {
+      "id": "anthropic.claude-sonnet-4-5-20250929-v1:0",
+      "object": "model",
+      "owned_by": "anthropic",
+      "type": "claude",
+      "display_name": "Claude 4.5 Sonnet (Bedrock)",
+      "context_length": 200000,
+      "max_completion_tokens": 65536,
+      "thinking": {
+        "min": 1024,
+        "max": 128000
+      }
+    },
+    {
+      "id": "anthropic.claude-sonnet-4-6",
+      "object": "model",
+      "owned_by": "anthropic",
+      "type": "claude",
+      "display_name": "Claude 4.6 Sonnet (Bedrock)",
+      "context_length": 200000,
+      "max_completion_tokens": 65536,
+      "thinking": {
+        "min": 1024,
+        "max": 128000
+      }
+    },
+    {
+      "id": "anthropic.claude-haiku-4-5-20251001-v1:0",
+      "object": "model",
+      "owned_by": "anthropic",
+      "type": "claude",
+      "display_name": "Claude 4.5 Haiku (Bedrock)",
+      "context_length": 200000,
+      "max_completion_tokens": 65536,
+      "thinking": {
+        "min": 1024,
+        "max": 128000
+      }
+    },
+    {
+      "id": "anthropic.claude-3-7-sonnet-20250219-v1:0",
+      "object": "model",
+      "owned_by": "anthropic",
+      "type": "claude",
+      "display_name": "Claude 3.7 Sonnet (Bedrock)",
+      "context_length": 200000,
+      "max_completion_tokens": 65536,
+      "thinking": {
+        "min": 1024,
+        "max": 128000
+      }
+    },
+    {
+      "id": "zai.glm-5",
+      "object": "model",
+      "owned_by": "zai",
+      "type": "glm",
+      "display_name": "GLM 5 (Bedrock)",
+      "context_length": 200000,
+      "max_completion_tokens": 128000,
+      "thinking": {
+        "min": 1024,
+        "max": 128000
+      }
+    },
+    {
+      "id": "zai.glm-4.7",
+      "object": "model",
+      "owned_by": "zai",
+      "type": "glm",
+      "display_name": "GLM 4.7 (Bedrock)",
+      "context_length": 128000,
+      "max_completion_tokens": 32768
+    },
+    {
+      "id": "zai.glm-4.7-flash",
+      "object": "model",
+      "owned_by": "zai",
+      "type": "glm",
+      "display_name": "GLM 4.7 Flash (Bedrock)",
+      "context_length": 128000,
+      "max_completion_tokens": 4096
+    },
+    {
+      "id": "moonshotai.kimi-k2.5",
+      "object": "model",
+      "owned_by": "moonshotai",
+      "type": "kimi",
+      "display_name": "Kimi K2.5 (Bedrock)",
+      "context_length": 131072,
+      "max_completion_tokens": 16384
+    },
+    {
+      "id": "minimax.minimax-m2.5",
+      "object": "model",
+      "owned_by": "minimax",
+      "type": "minimax",
+      "display_name": "MiniMax M2.5 (Bedrock)",
+      "context_length": 1000000,
+      "max_completion_tokens": 32768
+    },
+    {
+      "id": "qwen.qwen3-coder-480b-a35b-v1:0",
+      "object": "model",
+      "owned_by": "qwen",
+      "type": "qwen",
+      "display_name": "Qwen3 Coder 480B A35B (Bedrock)",
+      "context_length": 262144,
+      "max_completion_tokens": 65536
+    },
+    {
+      "id": "deepseek.v3.2",
+      "object": "model",
+      "created": 1764547200,
+      "owned_by": "deepseek",
+      "type": "deepseek",
+      "display_name": "DeepSeek V3.2 (Bedrock)",
+      "context_length": 128000,
+      "max_completion_tokens": 8192
+    },
+    {
+      "id": "deepseek.r1-v1:0",
+      "object": "model",
+      "owned_by": "deepseek",
+      "type": "deepseek",
+      "display_name": "DeepSeek R1 (Bedrock)",
+      "context_length": 128000,
+      "max_completion_tokens": 32768,
+      "supported_parameters": [
+        "max_tokens",
+        "temperature",
+        "top_p",
+        "stop_sequences",
+        "thinking"
+      ]
+    }
   ]
 }

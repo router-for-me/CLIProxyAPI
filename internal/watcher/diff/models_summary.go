@@ -29,6 +29,11 @@ type VertexModelsSummary struct {
 	count int
 }
 
+type AWSBedrockModelsSummary struct {
+	hash  string
+	count int
+}
+
 // SummarizeGeminiModels hashes Gemini model aliases for change detection.
 func SummarizeGeminiModels(models []config.GeminiModel) GeminiModelsSummary {
 	if len(models) == 0 {
@@ -117,5 +122,26 @@ func SummarizeVertexModels(models []config.VertexCompatModel) VertexModelsSummar
 	return VertexModelsSummary{
 		hash:  hex.EncodeToString(sum[:]),
 		count: len(names),
+	}
+}
+
+// SummarizeAWSBedrockModels hashes Bedrock model aliases for change detection.
+func SummarizeAWSBedrockModels(models []config.AWSBedrockModel) AWSBedrockModelsSummary {
+	if len(models) == 0 {
+		return AWSBedrockModelsSummary{}
+	}
+	keys := normalizeModelPairs(func(out func(key string)) {
+		for _, model := range models {
+			name := strings.TrimSpace(model.Name)
+			alias := strings.TrimSpace(model.Alias)
+			if name == "" && alias == "" {
+				continue
+			}
+			out(strings.ToLower(name) + "|" + strings.ToLower(alias))
+		}
+	})
+	return AWSBedrockModelsSummary{
+		hash:  hashJoined(keys),
+		count: len(keys),
 	}
 }

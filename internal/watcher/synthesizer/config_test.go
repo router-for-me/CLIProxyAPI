@@ -225,6 +225,65 @@ func TestConfigSynthesizer_ClaudeKeys_SkipsEmptyAndHeaders(t *testing.T) {
 	}
 }
 
+func TestConfigSynthesizer_AWSBedrockKeys_ProxyPriorityAndExcludedModels(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			AWSBedrockKey: []config.AWSBedrockKey{
+				{
+					APIKey:         "bedrock-key",
+					Priority:       9,
+					Prefix:         "team-bedrock",
+					ProxyURL:       "http://proxy.local:8080",
+					ExcludedModels: []string{"deepseek.r1-v1:0"},
+				},
+			},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("expected 1 auth, got %d", len(auths))
+	}
+
+	auth := auths[0]
+	if auth.Provider != "aws-bedrock" {
+		t.Fatalf("provider = %q, want %q", auth.Provider, "aws-bedrock")
+	}
+	if auth.Label != "aws-bedrock-apikey" {
+		t.Fatalf("label = %q, want %q", auth.Label, "aws-bedrock-apikey")
+	}
+	if auth.Prefix != "team-bedrock" {
+		t.Fatalf("prefix = %q, want %q", auth.Prefix, "team-bedrock")
+	}
+	if auth.ProxyURL != "http://proxy.local:8080" {
+		t.Fatalf("proxy_url = %q, want %q", auth.ProxyURL, "http://proxy.local:8080")
+	}
+	if auth.Attributes["api_key"] != "bedrock-key" {
+		t.Fatalf("api_key = %q, want %q", auth.Attributes["api_key"], "bedrock-key")
+	}
+	if auth.Attributes["region"] != "us-west-2" {
+		t.Fatalf("region = %q, want %q", auth.Attributes["region"], "us-west-2")
+	}
+	if _, ok := auth.Attributes["base_url"]; ok {
+		t.Fatalf("base_url should not be synthesized for aws-bedrock")
+	}
+	if auth.Attributes["priority"] != "9" {
+		t.Fatalf("priority = %q, want %q", auth.Attributes["priority"], "9")
+	}
+	if auth.Attributes["auth_kind"] != "apikey" {
+		t.Fatalf("auth_kind = %q, want %q", auth.Attributes["auth_kind"], "apikey")
+	}
+	if auth.Attributes["excluded_models"] != "deepseek.r1-v1:0" {
+		t.Fatalf("excluded_models = %q, want %q", auth.Attributes["excluded_models"], "deepseek.r1-v1:0")
+	}
+}
+
 func TestConfigSynthesizer_CodexKeys(t *testing.T) {
 	synth := NewConfigSynthesizer()
 	ctx := &SynthesisContext{
