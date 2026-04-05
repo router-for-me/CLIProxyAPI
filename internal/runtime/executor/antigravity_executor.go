@@ -57,6 +57,11 @@ type AntigravityExecutor struct {
 	cfg *config.Config
 }
 
+// SupportsQuotaFallback implements auth.QuotaFallbackProvider.
+// Antigravity supports a two-phase quota strategy: free quota first,
+// then paid credit (GOOGLE_ONE_AI) on re-entry via agFreeQuotaInCooldown.
+func (e *AntigravityExecutor) SupportsQuotaFallback() bool { return true }
+
 // NewAntigravityExecutor creates a new Antigravity executor instance.
 //
 // Parameters:
@@ -296,16 +301,10 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 			}
 		}
 
-		// Free quota exhausted — record failure and fall through to credit retry.
+		// Free quota exhausted — record failure and let conductor try next credential's free quota.
 		if !usedCredit && antigravityIsFreeQuotaExhausted(httpResp.StatusCode, bodyBytes) {
 			agRecordFreeQuotaFailure(authID)
-			if !agCreditInCooldown(authID) {
-				log.Infof("antigravity executor: free quota exhausted, retrying with enabledCreditTypes=GOOGLE_ONE_AI")
-				translated = antigravityInjectCreditTypes(translated)
-				usedCredit = true
-				continue
-			}
-			log.Infof("antigravity executor: free quota exhausted and credit in cooldown for %s", authID)
+			log.Infof("antigravity executor: free quota exhausted for %s, deferring to conductor for next credential", authID)
 		}
 
 		// Credit channel failed — record failure.
@@ -415,16 +414,10 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 				}
 			}
 
-			// Free quota exhausted — record failure and fall through to credit retry.
+			// Free quota exhausted — record failure and let conductor try next credential's free quota.
 			if !usedCredit && antigravityIsFreeQuotaExhausted(httpResp.StatusCode, bodyBytes) {
 				agRecordFreeQuotaFailure(authID)
-				if !agCreditInCooldown(authID) {
-					log.Infof("antigravity executor: free quota exhausted (claude non-stream), retrying with enabledCreditTypes=GOOGLE_ONE_AI")
-					translated = antigravityInjectCreditTypes(translated)
-					usedCredit = true
-					continue
-				}
-				log.Infof("antigravity executor: free quota exhausted and credit in cooldown for %s (claude non-stream)", authID)
+				log.Infof("antigravity executor: free quota exhausted for %s (claude non-stream), deferring to conductor for next credential", authID)
 			}
 
 			// Credit channel failed — record failure.
@@ -797,16 +790,10 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 				}
 			}
 
-			// Free quota exhausted — record failure and fall through to credit retry.
+			// Free quota exhausted — record failure and let conductor try next credential's free quota.
 			if !usedCredit && antigravityIsFreeQuotaExhausted(httpResp.StatusCode, bodyBytes) {
 				agRecordFreeQuotaFailure(authID)
-				if !agCreditInCooldown(authID) {
-					log.Infof("antigravity executor: free quota exhausted (stream), retrying with enabledCreditTypes=GOOGLE_ONE_AI")
-					translated = antigravityInjectCreditTypes(translated)
-					usedCredit = true
-					continue
-				}
-				log.Infof("antigravity executor: free quota exhausted and credit in cooldown for %s (stream)", authID)
+				log.Infof("antigravity executor: free quota exhausted for %s (stream), deferring to conductor for next credential", authID)
 			}
 
 			// Credit channel failed — record failure.

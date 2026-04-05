@@ -42,6 +42,15 @@ type ProviderExecutor interface {
 	HttpRequest(ctx context.Context, auth *Auth, req *http.Request) (*http.Response, error)
 }
 
+// QuotaFallbackProvider is an optional interface for executors that support
+// a two-phase quota strategy (e.g. free quota → paid credit). When all
+// credentials return 429 in the first pass, the conductor does a second pass
+// only if at least one executor implements this interface. On re-entry,
+// the executor detects prior quota failure and switches to the fallback channel.
+type QuotaFallbackProvider interface {
+	SupportsQuotaFallback() bool
+}
+
 // ExecutionSessionCloser allows executors to release per-session runtime resources.
 type ExecutionSessionCloser interface {
 	CloseExecutionSession(sessionID string)
@@ -1073,13 +1082,31 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 	opts = ensureRequestedModelMetadata(opts, routeModel)
 	tried := make(map[string]struct{})
 	attempted := make(map[string]struct{})
+	fallbackAuths := make(map[string]struct{}) // auths with QuotaFallbackProvider that failed with 429
+	nonQuotaFail := false                      // tracks whether any failure was NOT a 429
+	quotaRetryDone := false
+	quotaRetryBudget := 0 // extra attempts allowed for the quota-retry second pass
 	var lastErr error
 	for {
-		if maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials {
+		if maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials+quotaRetryBudget {
 			return cliproxyexecutor.Response{}, authExhaustedError(lastErr)
 		}
 		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, opts, tried)
 		if errPick != nil {
+			// All credentials exhausted. If every failure was a quota 429 and
+			// at least one executor supports quota fallback (e.g. antigravity
+			// free-quota → credit), re-enable only those auths for a second pass.
+			// Reset scheduler model cooldowns so they're pickable; the executor-level
+			// quota cache (agFreeQuotaInCooldown) stays set, triggering credit.
+			if lastErr != nil && !quotaRetryDone && !nonQuotaFail && len(fallbackAuths) > 0 {
+				quotaRetryDone = true
+				quotaRetryBudget = len(fallbackAuths)
+				m.resetModelCooldownForRetry(fallbackAuths, routeModel)
+				for authID := range fallbackAuths {
+					delete(tried, authID)
+				}
+				continue
+			}
 			if lastErr != nil {
 				return cliproxyexecutor.Response{}, authExhaustedError(lastErr)
 			}
@@ -1116,6 +1143,11 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				result.Error = &Error{Message: errExec.Error()}
 				if se, ok := errors.AsType[cliproxyexecutor.StatusError](errExec); ok && se != nil {
 					result.Error.HTTPStatus = se.StatusCode()
+					if se.StatusCode() != http.StatusTooManyRequests {
+						nonQuotaFail = true
+					}
+				} else {
+					nonQuotaFail = true
 				}
 				if ra := retryAfterFromError(errExec); ra != nil {
 					result.RetryAfter = ra
@@ -1133,6 +1165,12 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		if authErr != nil {
 			if isRequestInvalidError(authErr) {
 				return cliproxyexecutor.Response{}, authErr
+			}
+			// Track fallback-capable auths that failed with 429 for quota retry.
+			if statusCodeFromError(authErr) == http.StatusTooManyRequests {
+				if qf, ok := executor.(QuotaFallbackProvider); ok && qf.SupportsQuotaFallback() {
+					fallbackAuths[auth.ID] = struct{}{}
+				}
 			}
 			lastErr = authErr
 			continue
@@ -1223,9 +1261,13 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	opts = ensureRequestedModelMetadata(opts, routeModel)
 	tried := make(map[string]struct{})
 	attempted := make(map[string]struct{})
+	fallbackAuths := make(map[string]struct{})
+	nonQuotaFail := false
+	quotaRetryDone := false
+	quotaRetryBudget := 0
 	var lastErr error
 	for {
-		if maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials {
+		if maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials+quotaRetryBudget {
 			if lastErr != nil {
 				var bootstrapErr *streamBootstrapError
 				if errors.As(lastErr, &bootstrapErr) && bootstrapErr != nil {
@@ -1236,6 +1278,15 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		}
 		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, opts, tried)
 		if errPick != nil {
+			if lastErr != nil && !quotaRetryDone && !nonQuotaFail && len(fallbackAuths) > 0 {
+				quotaRetryDone = true
+				quotaRetryBudget = len(fallbackAuths)
+				m.resetModelCooldownForRetry(fallbackAuths, routeModel)
+				for authID := range fallbackAuths {
+					delete(tried, authID)
+				}
+				continue
+			}
 			if lastErr != nil {
 				var bootstrapErr *streamBootstrapError
 				if errors.As(lastErr, &bootstrapErr) && bootstrapErr != nil {
@@ -1268,6 +1319,13 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			}
 			if isRequestInvalidError(errStream) {
 				return nil, errStream
+			}
+			if statusCodeFromError(errStream) == http.StatusTooManyRequests {
+				if qf, ok := executor.(QuotaFallbackProvider); ok && qf.SupportsQuotaFallback() {
+					fallbackAuths[auth.ID] = struct{}{}
+				}
+			} else {
+				nonQuotaFail = true
 			}
 			lastErr = errStream
 			continue
@@ -1841,6 +1899,47 @@ func ensureModelState(auth *Auth, model string) *ModelState {
 	state := &ModelState{Status: StatusActive}
 	auth.ModelStates[model] = state
 	return state
+}
+
+// resetModelCooldownForRetry clears scheduler-level quota cooldown for the
+// given auth IDs on the specified model, so they become pickable again in a
+// quota-retry second pass. Only resets the exact model state that was marked
+// Quota.Exceeded (from 429), leaving other models' cooldowns intact.
+// The executor-level quota cache (e.g. agFreeQuotaInCooldown) is NOT affected,
+// allowing executors to detect the retry and switch to credit channels.
+func (m *Manager) resetModelCooldownForRetry(authIDs map[string]struct{}, model string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := time.Now()
+	candidates := modelKeyCandidates(model)
+	for authID := range authIDs {
+		auth, ok := m.auths[authID]
+		if !ok || auth == nil || len(auth.ModelStates) == 0 {
+			continue
+		}
+		reset := false
+		for _, key := range candidates {
+			if state, ok := auth.ModelStates[key]; ok && state != nil && state.Quota.Exceeded {
+				resetModelState(state, now)
+				reset = true
+			}
+		}
+		if reset {
+			updateAggregatedAvailability(auth, now)
+		}
+	}
+}
+
+// modelKeyCandidates returns the model key and its canonical variant (if different).
+func modelKeyCandidates(model string) []string {
+	if model == "" {
+		return nil
+	}
+	canon := canonicalModelKey(model)
+	if canon != "" && canon != model {
+		return []string{model, canon}
+	}
+	return []string{model}
 }
 
 func resetModelState(state *ModelState, now time.Time) {
