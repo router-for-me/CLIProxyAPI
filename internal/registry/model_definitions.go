@@ -100,6 +100,51 @@ func cloneModelInfos(models []*ModelInfo) []*ModelInfo {
 	return out
 }
 
+func getStaticModelDefinitionsByChannelRaw(channel string) []*ModelInfo {
+	key := strings.ToLower(strings.TrimSpace(channel))
+	data := getModels()
+	if data == nil {
+		return nil
+	}
+	switch key {
+	case "claude":
+		return data.Claude
+	case "gemini":
+		return data.Gemini
+	case "vertex":
+		return data.Vertex
+	case "gemini-cli":
+		return data.GeminiCLI
+	case "aistudio":
+		return data.AIStudio
+	case "codex":
+		return data.CodexPro
+	case "qwen":
+		return data.Qwen
+	case "iflow":
+		return data.IFlow
+	case "kimi":
+		return data.Kimi
+	case "antigravity":
+		return data.Antigravity
+	default:
+		return nil
+	}
+}
+
+func lookupStaticModelInfoByChannel(channel, modelID string) (*ModelInfo, bool) {
+	models := getStaticModelDefinitionsByChannelRaw(channel)
+	if models == nil {
+		return nil, false
+	}
+	for _, m := range models {
+		if m != nil && m.ID == modelID {
+			return cloneModelInfo(m), true
+		}
+	}
+	return nil, true
+}
+
 // GetStaticModelDefinitionsByChannel returns static model definitions for a given channel/provider.
 // It returns nil when the channel is unknown.
 //
@@ -115,31 +160,7 @@ func cloneModelInfos(models []*ModelInfo) []*ModelInfo {
 //   - kimi
 //   - antigravity
 func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
-	key := strings.ToLower(strings.TrimSpace(channel))
-	switch key {
-	case "claude":
-		return GetClaudeModels()
-	case "gemini":
-		return GetGeminiModels()
-	case "vertex":
-		return GetGeminiVertexModels()
-	case "gemini-cli":
-		return GetGeminiCLIModels()
-	case "aistudio":
-		return GetAIStudioModels()
-	case "codex":
-		return GetCodexProModels()
-	case "qwen":
-		return GetQwenModels()
-	case "iflow":
-		return GetIFlowModels()
-	case "kimi":
-		return GetKimiModels()
-	case "antigravity":
-		return GetAntigravityModels()
-	default:
-		return nil
-	}
+	return cloneModelInfos(getStaticModelDefinitionsByChannelRaw(channel))
 }
 
 // LookupStaticModelInfo searches all static model definitions for a model by ID.

@@ -53,3 +53,25 @@ func TestApplyThinking_UserDefinedClaudePreservesAdaptiveLevel(t *testing.T) {
 		})
 	}
 }
+
+func TestApplyThinking_KnownProviderStaticMissTreatsCrossCatalogIDAsUserDefined(t *testing.T) {
+	out, err := thinking.ApplyThinking(
+		[]byte(`{"thinking":{"type":"adaptive"},"output_config":{"effort":"max"}}`),
+		"gemini-3-pro-preview",
+		"openai",
+		"claude",
+		"claude",
+	)
+	if err != nil {
+		t.Fatalf("ApplyThinking() error = %v", err)
+	}
+	if got := gjson.GetBytes(out, "thinking.type").String(); got != "adaptive" {
+		t.Fatalf("thinking.type = %q, want %q, body=%s", got, "adaptive", string(out))
+	}
+	if got := gjson.GetBytes(out, "output_config.effort").String(); got != "max" {
+		t.Fatalf("output_config.effort = %q, want %q, body=%s", got, "max", string(out))
+	}
+	if gjson.GetBytes(out, "thinking.budget_tokens").Exists() {
+		t.Fatalf("thinking.budget_tokens should be removed, body=%s", string(out))
+	}
+}

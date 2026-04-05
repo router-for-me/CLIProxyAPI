@@ -147,3 +147,56 @@ func TestLookupModelInfoReturnsCloneForStaticDefinitions(t *testing.T) {
 		t.Fatalf("expected static lookup clone, got %+v", second)
 	}
 }
+
+func TestLookupModelInfoUsesProviderScopedStaticCatalogForDuplicateIDs(t *testing.T) {
+	t.Run("claude versus antigravity duplicate", func(t *testing.T) {
+		claude := LookupModelInfo("claude-sonnet-4-6", "claude")
+		if claude == nil || claude.Type != "claude" || claude.Thinking == nil {
+			t.Fatalf("expected claude model info, got %+v", claude)
+		}
+		if claude.Thinking.Max != 128000 {
+			t.Fatalf("expected claude max thinking 128000, got %d", claude.Thinking.Max)
+		}
+		if len(claude.Thinking.Levels) != 3 {
+			t.Fatalf("expected claude levels, got %+v", claude.Thinking)
+		}
+
+		antigravity := LookupModelInfo("claude-sonnet-4-6", "antigravity")
+		if antigravity == nil || antigravity.Type != "antigravity" || antigravity.Thinking == nil {
+			t.Fatalf("expected antigravity model info, got %+v", antigravity)
+		}
+		if antigravity.Thinking.Max != 64000 {
+			t.Fatalf("expected antigravity max thinking 64000, got %d", antigravity.Thinking.Max)
+		}
+		if len(antigravity.Thinking.Levels) != 0 {
+			t.Fatalf("expected antigravity to use dynamic thinking without levels, got %+v", antigravity.Thinking)
+		}
+	})
+
+	t.Run("gemini versus aistudio duplicate", func(t *testing.T) {
+		gemini := LookupModelInfo("gemini-3-pro-preview", "gemini")
+		if gemini == nil || gemini.Type != "gemini" || gemini.Thinking == nil {
+			t.Fatalf("expected gemini model info, got %+v", gemini)
+		}
+		if len(gemini.Thinking.Levels) != 2 || gemini.Thinking.Levels[0] != "low" || gemini.Thinking.Levels[1] != "high" {
+			t.Fatalf("expected gemini low/high levels, got %+v", gemini.Thinking)
+		}
+
+		aistudio := LookupModelInfo("gemini-3-pro-preview", "aistudio")
+		if aistudio == nil || aistudio.Type != "gemini" || aistudio.Thinking == nil {
+			t.Fatalf("expected aistudio-backed model info, got %+v", aistudio)
+		}
+		if len(aistudio.Thinking.Levels) != 0 {
+			t.Fatalf("expected aistudio variant without discrete levels, got %+v", aistudio.Thinking)
+		}
+		if !aistudio.Thinking.DynamicAllowed {
+			t.Fatalf("expected aistudio dynamic thinking support, got %+v", aistudio.Thinking)
+		}
+	})
+}
+
+func TestLookupModelInfoKnownProviderMissReturnsNil(t *testing.T) {
+	if got := LookupModelInfo("gemini-3-pro-preview", "claude"); got != nil {
+		t.Fatalf("expected nil for known-provider miss on cross-catalog ID, got %+v", got)
+	}
+}
