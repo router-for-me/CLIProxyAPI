@@ -172,103 +172,155 @@ func timeUntilNextDay() time.Duration {
 	return tomorrow.Sub(now)
 }
 
-// ensureQwenSystemMessage ensures the request has a single system message at the beginning.
-// It always injects the default system prompt and merges any user-provided system messages
-// into the injected system message content to satisfy Qwen's strict message ordering rules.
+// ensureQwenSystemMessage handles Qwen message payload formatting and normalization:
+//  1. Prepends the default system message to the very beginning of the messages array
+//  2. Automatically converts any existing system role messages to user role
+//  3. Intelligently splits overlong text content (>10000 characters), prioritizing splits at spaces, line breaks or punctuation to avoid breaking words/numbers
+//  4. Keeps image, file and media content intact without any splitting
 func ensureQwenSystemMessage(payload []byte) ([]byte, error) {
-	isInjectedSystemPart := func(part gjson.Result) bool {
-		if !part.Exists() || !part.IsObject() {
-			return false
-		}
-		if !strings.EqualFold(part.Get("type").String(), "text") {
-			return false
-		}
-		if !strings.EqualFold(part.Get("cache_control.type").String(), "ephemeral") {
-			return false
-		}
-		text := part.Get("text").String()
-		return text == "" || text == "You are Qwen Code."
-	}
-
-	defaultParts := gjson.ParseBytes(qwenDefaultSystemMessage).Get("content")
-	var systemParts []any
-	if defaultParts.Exists() && defaultParts.IsArray() {
-		for _, part := range defaultParts.Array() {
-			systemParts = append(systemParts, part.Value())
-		}
-	}
-	if len(systemParts) == 0 {
-		systemParts = append(systemParts, map[string]any{
-			"type": "text",
-			"text": "You are Qwen Code.",
-			"cache_control": map[string]any{
-				"type": "ephemeral",
-			},
-		})
-	}
-
-	appendSystemContent := func(content gjson.Result) {
-		makeTextPart := func(text string) map[string]any {
-			return map[string]any{
-				"type": "text",
-				"text": text,
-			}
-		}
-
-		if !content.Exists() || content.Type == gjson.Null {
-			return
-		}
-		if content.IsArray() {
-			for _, part := range content.Array() {
-				if part.Type == gjson.String {
-					systemParts = append(systemParts, makeTextPart(part.String()))
-					continue
-				}
-				if isInjectedSystemPart(part) {
-					continue
-				}
-				systemParts = append(systemParts, part.Value())
-			}
-			return
-		}
-		if content.Type == gjson.String {
-			systemParts = append(systemParts, makeTextPart(content.String()))
-			return
-		}
-		if content.IsObject() {
-			if isInjectedSystemPart(content) {
-				return
-			}
-			systemParts = append(systemParts, content.Value())
-			return
-		}
-		systemParts = append(systemParts, makeTextPart(content.String()))
-	}
-
 	messages := gjson.GetBytes(payload, "messages")
-	var nonSystemMessages []any
+	const MAX_LENGTH = 10000;
+
 	if messages.Exists() && messages.IsArray() {
+		var buf bytes.Buffer
+		buf.WriteByte('[')
+		buf.Write(qwenDefaultSystemMessage)
 		for _, msg := range messages.Array() {
+			// buf.WriteByte(',')
+			// buf.WriteString(msg.Raw)
+			processedMsg := msg.Raw
 			if strings.EqualFold(msg.Get("role").String(), "system") {
-				appendSystemContent(msg.Get("content"))
-				continue
+				modified, err := sjson.SetRaw(msg.Raw, "role", `"user"`)
+				if err == nil {
+					processedMsg = modified
+				}
 			}
-			nonSystemMessages = append(nonSystemMessages, msg.Value())
+
+			content := gjson.Get(processedMsg, "content")
+			
+			if content.Type == gjson.String {
+				text := content.String()
+				if len(text) > 0 {
+					var newContents []string
+					if len(text) > MAX_LENGTH {
+						chunks := splitTextChunk(text, MAX_LENGTH)
+						for _, c := range chunks {
+							newContents = append(newContents, `{"type":"text","text":`+fmt.Sprintf("%q", c)+`}`)
+						}
+					} else {
+						newContents = append(newContents, `{"type":"text","text":`+fmt.Sprintf("%q", text)+`}`)
+					}
+
+					var cbuf bytes.Buffer
+					cbuf.WriteByte('[')
+					for i, s := range newContents {
+						if i > 0 {
+							cbuf.WriteByte(',')
+						}
+						cbuf.WriteString(s)
+					}
+					cbuf.WriteByte(']')
+					processedMsg, _ = sjson.SetRaw(processedMsg, "content", cbuf.String())
+				}
+			}
+
+			if content.IsArray() {
+				var newParts []string
+				for _, item := range content.Array() {
+					itemType := item.Get("type").String()
+
+					if itemType == "image_url" || itemType == "image" || itemType == "file" {
+						newParts = append(newParts, item.Raw)
+						continue
+					}
+
+					if itemType == "text" {
+						text := item.Get("text").String()
+						if len(text) == 0 {
+							newParts = append(newParts, item.Raw)
+							continue
+						}
+
+						if len(text) > MAX_LENGTH {
+							chunks := splitTextChunk(text, MAX_LENGTH)
+							for _, chunk := range chunks {
+								part := `{"type":"text","text":` + fmt.Sprintf("%q", chunk) + `}`
+								newParts = append(newParts, part)
+							}
+						} else {
+							newParts = append(newParts, item.Raw)
+						}
+					}
+				}
+
+				var cbuf bytes.Buffer
+				cbuf.WriteByte('[')
+				for i, p := range newParts {
+					if i > 0 {
+						cbuf.WriteByte(',')
+					}
+					cbuf.WriteString(p)
+				}
+				cbuf.WriteByte(']')
+
+				processedMsg, _ = sjson.SetRaw(processedMsg, "content", cbuf.String())
+			}
+
+			buf.WriteByte(',')
+			buf.WriteString(processedMsg)
 		}
+		buf.WriteByte(']')
+		updated, errSet := sjson.SetRawBytes(payload, "messages", buf.Bytes())
+		if errSet != nil {
+			return nil, fmt.Errorf("qwen executor: set default system message failed: %w", errSet)
+		}
+		return updated, nil
 	}
 
-	newMessages := make([]any, 0, 1+len(nonSystemMessages))
-	newMessages = append(newMessages, map[string]any{
-		"role":    "system",
-		"content": systemParts,
-	})
-	newMessages = append(newMessages, nonSystemMessages...)
-
-	updated, errSet := sjson.SetBytes(payload, "messages", newMessages)
+	var buf bytes.Buffer
+	buf.WriteByte('[')
+	buf.Write(qwenDefaultSystemMessage)
+	buf.WriteByte(']')
+	updated, errSet := sjson.SetRawBytes(payload, "messages", buf.Bytes())
 	if errSet != nil {
-		return nil, fmt.Errorf("qwen executor: set system message failed: %w", errSet)
+		return nil, fmt.Errorf("qwen executor: set default system message failed: %w", errSet)
 	}
 	return updated, nil
+}
+
+
+// 智能文本拆分：优先在空格/标点/换行处切分，不切断单词
+func splitTextChunk(text string, max int) []string {
+	var chunks []string
+	runes := []rune(text) // 处理中文等多字节字符
+	for len(runes) > 0 {
+		splitLen := max
+		if len(runes) <= splitLen {
+			chunks = append(chunks, string(runes))
+			break
+		}
+
+		// 向前找最近的安全断点：空格、标点、换行
+		safeIdx := -1
+		// 在 [splitLen*0.8, splitLen] 区间内找断点
+		lookBackStart := splitLen * 8 / 10
+		for i := splitLen; i >= lookBackStart; i-- {
+			r := runes[i]
+			if r == ' ' || r == '\n' || r == '\t' || r == ',' || r == '.' || r == ';' || r == '!' || r == '?' {
+				safeIdx = i + 1 // 切在标点/空格后面
+				break
+			}
+		}
+
+		// 实在找不到断点，才硬切
+		if safeIdx == -1 {
+			safeIdx = splitLen
+		}
+
+		chunks = append(chunks, string(runes[:safeIdx]))
+		runes = runes[safeIdx:]
+	}
+	return chunks
 }
 
 // QwenExecutor is a stateless executor for Qwen Code using OpenAI-compatible chat completions.
