@@ -166,15 +166,17 @@ func (o *CodexAuth) ExchangeCodeForTokensWithRedirect(ctx context.Context, code,
 }
 
 // RefreshTokens refreshes an access token using a refresh token.
-// This method is called when an access token has expired. It makes a request to the
-// token endpoint to obtain a new set of tokens.
-func (o *CodexAuth) RefreshTokens(ctx context.Context, refreshToken string) (*CodexTokenData, error) {
+// clientID overrides the default hardcoded ClientID when non-empty.
+func (o *CodexAuth) RefreshTokens(ctx context.Context, refreshToken, clientID string) (*CodexTokenData, error) {
 	if refreshToken == "" {
 		return nil, fmt.Errorf("refresh token is required")
 	}
+	if clientID == "" {
+		clientID = ClientID
+	}
 
 	data := url.Values{
-		"client_id":     {ClientID},
+		"client_id":     {clientID},
 		"grant_type":    {"refresh_token"},
 		"refresh_token": {refreshToken},
 		"scope":         {"openid profile email"},
@@ -257,9 +259,8 @@ func (o *CodexAuth) CreateTokenStorage(bundle *CodexAuthBundle) *CodexTokenStora
 }
 
 // RefreshTokensWithRetry refreshes tokens with a built-in retry mechanism.
-// It attempts to refresh the tokens up to a specified maximum number of retries,
-// with an exponential backoff strategy to handle transient network errors.
-func (o *CodexAuth) RefreshTokensWithRetry(ctx context.Context, refreshToken string, maxRetries int) (*CodexTokenData, error) {
+// clientID overrides the default hardcoded ClientID when non-empty.
+func (o *CodexAuth) RefreshTokensWithRetry(ctx context.Context, refreshToken, clientID string, maxRetries int) (*CodexTokenData, error) {
 	var lastErr error
 
 	for attempt := 0; attempt < maxRetries; attempt++ {
@@ -272,7 +273,7 @@ func (o *CodexAuth) RefreshTokensWithRetry(ctx context.Context, refreshToken str
 			}
 		}
 
-		tokenData, err := o.RefreshTokens(ctx, refreshToken)
+		tokenData, err := o.RefreshTokens(ctx, refreshToken, clientID)
 		if err == nil {
 			return tokenData, nil
 		}

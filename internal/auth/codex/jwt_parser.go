@@ -100,3 +100,12 @@ func (c *JWTClaims) GetUserEmail() string {
 func (c *JWTClaims) GetAccountID() string {
 	return c.CodexAuthInfo.ChatgptAccountID
 }
+
+// GetClientID returns the first audience value from the JWT claims, which represents
+// the OAuth client_id used during token issuance.
+func (c *JWTClaims) GetClientID() string {
+	if len(c.Aud) > 0 {
+		return c.Aud[0]
+	}
+	return ""
+}
