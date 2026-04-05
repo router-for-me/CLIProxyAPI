@@ -66,9 +66,13 @@ func SetModelRefreshCallback(cb ModelRefreshCallback) {
 
 func init() {
 	// Load embedded data as fallback on startup.
-	if err := loadModelsFromBytes(embeddedModelsJSON, "embed"); err != nil {
+	parsed, err := parseModelsCatalogBytes(embeddedModelsJSON, "embed")
+	if err != nil {
 		panic(fmt.Sprintf("registry: failed to parse embedded models.json: %v", err))
 	}
+	modelsCatalogStore.mu.Lock()
+	modelsCatalogStore.data = parsed
+	modelsCatalogStore.mu.Unlock()
 }
 
 // StartModelsUpdater starts a background updater that fetches models
@@ -120,13 +124,14 @@ func tryRefreshModels(ctx context.Context, label string) {
 		log.Warnf("%s: fetch failed from all URLs, keeping current data", label)
 		return
 	}
+	merged := mergeModelsCatalogWithFallback(oldData, parsed)
 
 	// Detect changes before updating store.
-	changed := detectChangedProviders(oldData, parsed)
+	changed := detectChangedProviders(oldData, merged)
 
 	// Update store with new data regardless.
 	modelsCatalogStore.mu.Lock()
-	modelsCatalogStore.data = parsed
+	modelsCatalogStore.data = merged
 	modelsCatalogStore.mu.Unlock()
 
 	if len(changed) == 0 {
@@ -217,6 +222,7 @@ func detectChangedProviders(oldData, newData *staticModelsJSON) []string {
 		{"iflow", oldData.IFlow, newData.IFlow},
 		{"kimi", oldData.Kimi, newData.Kimi},
 		{"antigravity", oldData.Antigravity, newData.Antigravity},
+		{"aws-bedrock", oldData.AWSBedrock, newData.AWSBedrock},
 	}
 
 	seen := make(map[string]bool, len(sections))
@@ -231,6 +237,63 @@ func detectChangedProviders(oldData, newData *staticModelsJSON) []string {
 		}
 	}
 	return changed
+}
+
+// mergeModelsCatalogWithFallback keeps existing section data when the incoming
+// catalog leaves a section empty. This prevents capability regressions for
+// providers that are temporarily absent from the remote catalog.
+func mergeModelsCatalogWithFallback(existing, incoming *staticModelsJSON) *staticModelsJSON {
+	if existing == nil {
+		return incoming
+	}
+	if incoming == nil {
+		return existing
+	}
+
+	merged := *incoming
+	if len(merged.Claude) == 0 {
+		merged.Claude = existing.Claude
+	}
+	if len(merged.Gemini) == 0 {
+		merged.Gemini = existing.Gemini
+	}
+	if len(merged.Vertex) == 0 {
+		merged.Vertex = existing.Vertex
+	}
+	if len(merged.GeminiCLI) == 0 {
+		merged.GeminiCLI = existing.GeminiCLI
+	}
+	if len(merged.AIStudio) == 0 {
+		merged.AIStudio = existing.AIStudio
+	}
+	if len(merged.CodexFree) == 0 {
+		merged.CodexFree = existing.CodexFree
+	}
+	if len(merged.CodexTeam) == 0 {
+		merged.CodexTeam = existing.CodexTeam
+	}
+	if len(merged.CodexPlus) == 0 {
+		merged.CodexPlus = existing.CodexPlus
+	}
+	if len(merged.CodexPro) == 0 {
+		merged.CodexPro = existing.CodexPro
+	}
+	if len(merged.Qwen) == 0 {
+		merged.Qwen = existing.Qwen
+	}
+	if len(merged.IFlow) == 0 {
+		merged.IFlow = existing.IFlow
+	}
+	if len(merged.Kimi) == 0 {
+		merged.Kimi = existing.Kimi
+	}
+	if len(merged.Antigravity) == 0 {
+		merged.Antigravity = existing.Antigravity
+	}
+	if len(merged.AWSBedrock) == 0 {
+		merged.AWSBedrock = existing.AWSBedrock
+	}
+	return &merged
 }
 
 // modelSectionChanged reports whether two model slices differ.
@@ -297,18 +360,26 @@ func mergeProviderNames(existing, incoming []string) []string {
 }
 
 func loadModelsFromBytes(data []byte, source string) error {
-	var parsed staticModelsJSON
-	if err := json.Unmarshal(data, &parsed); err != nil {
-		return fmt.Errorf("%s: decode models catalog: %w", source, err)
-	}
-	if err := validateModelsCatalog(&parsed); err != nil {
-		return fmt.Errorf("%s: validate models catalog: %w", source, err)
+	parsed, err := parseModelsCatalogBytes(data, source)
+	if err != nil {
+		return err
 	}
 
 	modelsCatalogStore.mu.Lock()
-	modelsCatalogStore.data = &parsed
+	modelsCatalogStore.data = parsed
 	modelsCatalogStore.mu.Unlock()
 	return nil
+}
+
+func parseModelsCatalogBytes(data []byte, source string) (*staticModelsJSON, error) {
+	var parsed staticModelsJSON
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return nil, fmt.Errorf("%s: decode models catalog: %w", source, err)
+	}
+	if err := validateModelsCatalog(&parsed); err != nil {
+		return nil, fmt.Errorf("%s: validate models catalog: %w", source, err)
+	}
+	return &parsed, nil
 }
 
 func getModels() *staticModelsJSON {

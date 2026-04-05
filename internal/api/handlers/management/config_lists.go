@@ -360,6 +360,121 @@ func (h *Handler) DeleteClaudeKey(c *gin.Context) {
 	c.JSON(400, gin.H{"error": "missing api-key or index"})
 }
 
+// aws-bedrock-api-key: []AWSBedrockKey
+func (h *Handler) GetAWSBedrockKeys(c *gin.Context) {
+	c.JSON(200, gin.H{"aws-bedrock-api-key": h.cfg.AWSBedrockKey})
+}
+func (h *Handler) PutAWSBedrockKeys(c *gin.Context) {
+	data, err := c.GetRawData()
+	if err != nil {
+		c.JSON(400, gin.H{"error": "failed to read body"})
+		return
+	}
+	var arr []config.AWSBedrockKey
+	if err = json.Unmarshal(data, &arr); err != nil {
+		var obj struct {
+			Items []config.AWSBedrockKey `json:"items"`
+		}
+		if err2 := json.Unmarshal(data, &obj); err2 != nil || len(obj.Items) == 0 {
+			c.JSON(400, gin.H{"error": "invalid body"})
+			return
+		}
+		arr = obj.Items
+	}
+	h.cfg.AWSBedrockKey = arr
+	h.cfg.SanitizeAWSBedrockKeys()
+	h.persist(c)
+}
+func (h *Handler) PatchAWSBedrockKey(c *gin.Context) {
+	type bedrockKeyPatch struct {
+		APIKey         *string                   `json:"api-key"`
+		Region         *string                   `json:"region"`
+		Prefix         *string                   `json:"prefix"`
+		BaseURL        *string                   `json:"base-url"`
+		ProxyURL       *string                   `json:"proxy-url"`
+		Models         *[]config.AWSBedrockModel `json:"models"`
+		ExcludedModels *[]string                 `json:"excluded-models"`
+	}
+	var body struct {
+		Index *int             `json:"index"`
+		Match *string          `json:"match"`
+		Value *bedrockKeyPatch `json:"value"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil || body.Value == nil {
+		c.JSON(400, gin.H{"error": "invalid body"})
+		return
+	}
+	targetIndex := -1
+	if body.Index != nil && *body.Index >= 0 && *body.Index < len(h.cfg.AWSBedrockKey) {
+		targetIndex = *body.Index
+	}
+	if targetIndex == -1 && body.Match != nil {
+		match := strings.TrimSpace(*body.Match)
+		for i := range h.cfg.AWSBedrockKey {
+			if h.cfg.AWSBedrockKey[i].APIKey == match {
+				targetIndex = i
+				break
+			}
+		}
+	}
+	if targetIndex == -1 {
+		c.JSON(404, gin.H{"error": "item not found"})
+		return
+	}
+
+	entry := h.cfg.AWSBedrockKey[targetIndex]
+	if body.Value.APIKey != nil {
+		entry.APIKey = strings.TrimSpace(*body.Value.APIKey)
+	}
+	if body.Value.Region != nil {
+		entry.Region = strings.TrimSpace(*body.Value.Region)
+	}
+	if body.Value.Prefix != nil {
+		entry.Prefix = strings.TrimSpace(*body.Value.Prefix)
+	}
+	if body.Value.BaseURL != nil {
+		entry.BaseURL = strings.TrimSpace(*body.Value.BaseURL)
+	}
+	if body.Value.ProxyURL != nil {
+		entry.ProxyURL = strings.TrimSpace(*body.Value.ProxyURL)
+	}
+	if body.Value.Models != nil {
+		entry.Models = append([]config.AWSBedrockModel(nil), (*body.Value.Models)...)
+	}
+	if body.Value.ExcludedModels != nil {
+		entry.ExcludedModels = config.NormalizeExcludedModels(*body.Value.ExcludedModels)
+	}
+	h.cfg.AWSBedrockKey[targetIndex] = entry
+	h.cfg.SanitizeAWSBedrockKeys()
+	h.persist(c)
+}
+
+func (h *Handler) DeleteAWSBedrockKey(c *gin.Context) {
+	if val := c.Query("api-key"); val != "" {
+		out := make([]config.AWSBedrockKey, 0, len(h.cfg.AWSBedrockKey))
+		for _, v := range h.cfg.AWSBedrockKey {
+			if v.APIKey != val {
+				out = append(out, v)
+			}
+		}
+		h.cfg.AWSBedrockKey = out
+		h.cfg.SanitizeAWSBedrockKeys()
+		h.persist(c)
+		return
+	}
+	if idxStr := c.Query("index"); idxStr != "" {
+		var idx int
+		_, err := fmt.Sscanf(idxStr, "%d", &idx)
+		if err == nil && idx >= 0 && idx < len(h.cfg.AWSBedrockKey) {
+			h.cfg.AWSBedrockKey = append(h.cfg.AWSBedrockKey[:idx], h.cfg.AWSBedrockKey[idx+1:]...)
+			h.cfg.SanitizeAWSBedrockKeys()
+			h.persist(c)
+			return
+		}
+	}
+	c.JSON(400, gin.H{"error": "missing api-key or index"})
+}
+
 // openai-compatibility: []OpenAICompatibility
 func (h *Handler) GetOpenAICompat(c *gin.Context) {
 	c.JSON(200, gin.H{"openai-compatibility": normalizedOpenAICompatibilityEntries(h.cfg.OpenAICompatibility)})

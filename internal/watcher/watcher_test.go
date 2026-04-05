@@ -73,9 +73,9 @@ func TestBuildAPIKeyClientsCounts(t *testing.T) {
 		},
 	}
 
-	gemini, vertex, claude, codex, compat := BuildAPIKeyClients(cfg)
-	if gemini != 2 || vertex != 1 || claude != 1 || codex != 2 || compat != 2 {
-		t.Fatalf("unexpected counts: %d %d %d %d %d", gemini, vertex, claude, codex, compat)
+	gemini, vertex, claude, codex, compat, bedrock := BuildAPIKeyClients(cfg)
+	if gemini != 2 || vertex != 1 || claude != 1 || codex != 2 || compat != 2 || bedrock != 0 {
+		t.Fatalf("unexpected counts: %d %d %d %d %d %d", gemini, vertex, claude, codex, compat, bedrock)
 	}
 }
 
@@ -706,7 +706,7 @@ func TestReloadClientsFiltersProvidersWithNilCurrentAuths(t *testing.T) {
 		config:  &config.Config{AuthDir: tmp},
 	}
 	w.reloadClients(false, []string{"match"}, false)
-	if w.currentAuths != nil && len(w.currentAuths) != 0 {
+	if len(w.currentAuths) != 0 {
 		t.Fatalf("expected currentAuths to be nil or empty, got %d", len(w.currentAuths))
 	}
 }

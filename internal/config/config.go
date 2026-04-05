@@ -98,6 +98,9 @@ type Config struct {
 	// ClaudeKey defines a list of Claude API key configurations as specified in the YAML configuration file.
 	ClaudeKey []ClaudeKey `yaml:"claude-api-key" json:"claude-api-key"`
 
+	// AWSBedrockKey defines a list of AWS Bedrock API key configurations.
+	AWSBedrockKey []AWSBedrockKey `yaml:"aws-bedrock-api-key" json:"aws-bedrock-api-key"`
+
 	// ClaudeHeaderDefaults configures default header values for Claude API requests.
 	// These are used as fallbacks when the client does not send its own headers.
 	ClaudeHeaderDefaults ClaudeHeaderDefaults `yaml:"claude-header-defaults" json:"claude-header-defaults"`
@@ -389,6 +392,48 @@ type ClaudeModel struct {
 func (m ClaudeModel) GetName() string  { return m.Name }
 func (m ClaudeModel) GetAlias() string { return m.Alias }
 
+// AWSBedrockKey represents the configuration for an AWS Bedrock API key.
+type AWSBedrockKey struct {
+	// APIKey is the standard Bedrock API key.
+	APIKey string `yaml:"api-key" json:"api-key"`
+
+	// Region is the AWS region for the Bedrock endpoint (e.g., us-east-1).
+	Region string `yaml:"region" json:"region"`
+
+	// Priority controls selection preference when multiple credentials match.
+	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
+
+	// Prefix optionally namespaces models for this credential.
+	Prefix string `yaml:"prefix,omitempty" json:"prefix,omitempty"`
+
+	// BaseURL is an optional override for the Bedrock API endpoint URL.
+	BaseURL string `yaml:"base-url,omitempty" json:"base-url,omitempty"`
+
+	// ProxyURL overrides the global proxy setting for this API key if provided.
+	ProxyURL string `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`
+
+	// Models defines upstream model names and aliases for request routing.
+	Models []AWSBedrockModel `yaml:"models" json:"models"`
+
+	// ExcludedModels lists model IDs that should be excluded for this provider.
+	ExcludedModels []string `yaml:"excluded-models,omitempty" json:"excluded-models,omitempty"`
+}
+
+func (k AWSBedrockKey) GetAPIKey() string  { return k.APIKey }
+func (k AWSBedrockKey) GetBaseURL() string { return k.BaseURL }
+
+// AWSBedrockModel describes a mapping between an alias and the actual upstream model name.
+type AWSBedrockModel struct {
+	// Name is the upstream model identifier used when issuing requests.
+	Name string `yaml:"name" json:"name"`
+
+	// Alias is the client-facing model name that maps to Name.
+	Alias string `yaml:"alias" json:"alias"`
+}
+
+func (m AWSBedrockModel) GetName() string  { return m.Name }
+func (m AWSBedrockModel) GetAlias() string { return m.Alias }
+
 // CodexKey represents the configuration for a Codex API key,
 // including the API key itself and an optional base URL for the API endpoint.
 type CodexKey struct {
@@ -659,6 +704,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Sanitize Claude key headers
 	cfg.SanitizeClaudeKeys()
 
+	// Sanitize AWS Bedrock keys
+	cfg.SanitizeAWSBedrockKeys()
+
 	// Sanitize OpenAI compatibility providers: drop entries without base-url
 	cfg.SanitizeOpenAICompatibility()
 
@@ -890,6 +938,18 @@ func (cfg *Config) SanitizeGeminiKeys() {
 		out = append(out, entry)
 	}
 	cfg.GeminiKey = out
+}
+
+// SanitizeAWSBedrockKeys normalizes configuration for AWS Bedrock credentials.
+func (cfg *Config) SanitizeAWSBedrockKeys() {
+	if cfg == nil || len(cfg.AWSBedrockKey) == 0 {
+		return
+	}
+	for i := range cfg.AWSBedrockKey {
+		entry := &cfg.AWSBedrockKey[i]
+		entry.Prefix = normalizeModelPrefix(entry.Prefix)
+		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
+	}
 }
 
 func normalizeModelPrefix(prefix string) string {

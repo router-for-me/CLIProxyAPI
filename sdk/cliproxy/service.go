@@ -428,6 +428,8 @@ func (s *Service) ensureExecutorsForAuthWithMode(a *coreauth.Auth, forceReplace 
 		s.coreManager.RegisterExecutor(executor.NewIFlowExecutor(s.cfg))
 	case "kimi":
 		s.coreManager.RegisterExecutor(executor.NewKimiExecutor(s.cfg))
+	case "aws-bedrock":
+		s.coreManager.RegisterExecutor(executor.NewBedrockExecutor(s.cfg))
 	default:
 		providerKey := strings.ToLower(strings.TrimSpace(a.Provider))
 		if providerKey == "" {
@@ -911,6 +913,17 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 	case "kimi":
 		models = registry.GetKimiModels()
 		models = applyExcludedModels(models, excluded)
+	case "aws-bedrock":
+		models = registry.GetAWSBedrockModels()
+		if entry := s.resolveConfigAWSBedrockKey(a); entry != nil {
+			if len(entry.Models) > 0 {
+				models = buildAWSBedrockConfigModels(entry)
+			}
+			if authKind == "apikey" {
+				excluded = entry.ExcludedModels
+			}
+		}
+		models = applyExcludedModels(models, excluded)
 	default:
 		// Handle OpenAI-compatibility providers by name using config
 		if s.cfg != nil {
@@ -1117,6 +1130,32 @@ func (s *Service) resolveConfigGeminiKey(auth *coreauth.Auth) *config.GeminiKey 
 			continue
 		}
 		if attrKey == "" && attrBase != "" && strings.EqualFold(cfgBase, attrBase) {
+			return entry
+		}
+	}
+	return nil
+}
+
+func (s *Service) resolveConfigAWSBedrockKey(auth *coreauth.Auth) *config.AWSBedrockKey {
+	if auth == nil || s.cfg == nil {
+		return nil
+	}
+	var attrKey, attrRegion string
+	if auth.Attributes != nil {
+		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
+		attrRegion = strings.TrimSpace(auth.Attributes["region"])
+	}
+	for i := range s.cfg.AWSBedrockKey {
+		entry := &s.cfg.AWSBedrockKey[i]
+		cfgKey := strings.TrimSpace(entry.APIKey)
+		cfgRegion := strings.TrimSpace(entry.Region)
+		if attrKey != "" && strings.EqualFold(cfgKey, attrKey) {
+			if cfgRegion == "" || strings.EqualFold(cfgRegion, attrRegion) {
+				return entry
+			}
+			continue
+		}
+		if attrKey == "" && attrRegion != "" && strings.EqualFold(cfgRegion, attrRegion) {
 			return entry
 		}
 	}
@@ -1350,6 +1389,7 @@ func buildConfigModels[T modelEntry](models []T, ownedBy, modelType string) []*M
 		}
 		info := &ModelInfo{
 			ID:          alias,
+			Name:        name,
 			Object:      "model",
 			Created:     now,
 			OwnedBy:     ownedBy,
@@ -1393,6 +1433,15 @@ func buildCodexConfigModels(entry *config.CodexKey) []*ModelInfo {
 		return nil
 	}
 	return buildConfigModels(entry.Models, "openai", "openai")
+}
+
+func buildAWSBedrockConfigModels(entry *config.AWSBedrockKey) []*ModelInfo {
+	if entry == nil {
+		return nil
+	}
+	// AWS Bedrock models can be from different providers (Anthropic, Meta, Amazon, etc.)
+	// We'll use "aws-bedrock" as the generic provider/type for user-defined Bedrock models.
+	return buildConfigModels(entry.Models, "aws-bedrock", "aws-bedrock")
 }
 
 func rewriteModelInfoName(name, oldID, newID string) string {
