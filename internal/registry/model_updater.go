@@ -120,13 +120,14 @@ func tryRefreshModels(ctx context.Context, label string) {
 		log.Warnf("%s: fetch failed from all URLs, keeping current data", label)
 		return
 	}
+	next := pinAWSBedrockModels(oldData, parsed)
 
 	// Detect changes before updating store.
-	changed := detectChangedProviders(oldData, parsed)
+	changed := detectChangedProviders(oldData, next)
 
 	// Update store with new data regardless.
 	modelsCatalogStore.mu.Lock()
-	modelsCatalogStore.data = parsed
+	modelsCatalogStore.data = next
 	modelsCatalogStore.mu.Unlock()
 
 	if len(changed) == 0 {
@@ -229,6 +230,20 @@ func detectChangedProviders(oldData, newData *staticModelsJSON) []string {
 		}
 	}
 	return changed
+}
+
+// pinAWSBedrockModels keeps Bedrock model definitions pinned to local catalog data
+// even when other provider sections are refreshed from remote.
+func pinAWSBedrockModels(existing, incoming *staticModelsJSON) *staticModelsJSON {
+	if existing == nil {
+		return incoming
+	}
+	if incoming == nil {
+		return existing
+	}
+	merged := *incoming
+	merged.AWSBedrock = existing.AWSBedrock
+	return &merged
 }
 
 // modelSectionChanged reports whether two model slices differ.

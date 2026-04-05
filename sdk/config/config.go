@@ -29,6 +29,9 @@ type OpenAICompatibility = internalconfig.OpenAICompatibility
 type OpenAICompatibilityAPIKey = internalconfig.OpenAICompatibilityAPIKey
 type OpenAICompatibilityModel = internalconfig.OpenAICompatibilityModel
 
+type AWSBedrockKey = internalconfig.AWSBedrockKey
+type AWSBedrockModel = internalconfig.AWSBedrockModel
+
 type TLS = internalconfig.TLSConfig
 
 const (

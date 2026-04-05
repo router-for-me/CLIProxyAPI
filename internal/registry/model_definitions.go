@@ -19,8 +19,11 @@ type staticModelsJSON struct {
 	CodexTeam   []*ModelInfo `json:"codex-team"`
 	CodexPlus   []*ModelInfo `json:"codex-plus"`
 	CodexPro    []*ModelInfo `json:"codex-pro"`
+	Qwen        []*ModelInfo `json:"qwen"`
+	IFlow       []*ModelInfo `json:"iflow"`
 	Kimi        []*ModelInfo `json:"kimi"`
 	Antigravity []*ModelInfo `json:"antigravity"`
+	AWSBedrock  []*ModelInfo `json:"aws-bedrock"`
 }
 
 // GetClaudeModels returns the standard Claude model definitions.
@@ -138,9 +141,13 @@ func upsertModelInfos(models []*ModelInfo, extras ...*ModelInfo) []*ModelInfo {
 		}
 		filtered = append(filtered, model)
 	}
-
 	filtered = append(filtered, extraList...)
 	return filtered
+}
+
+// GetAWSBedrockModels returns the standard AWS Bedrock model definitions.
+func GetAWSBedrockModels() []*ModelInfo {
+	return cloneModelInfos(getModels().AWSBedrock)
 }
 
 // cloneModelInfos returns a shallow copy of the slice with each element deep-cloned.
@@ -186,6 +193,8 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetKimiModels()
 	case "antigravity":
 		return GetAntigravityModels()
+	case "aws-bedrock":
+		return GetAWSBedrockModels()
 	default:
 		return nil
 	}
@@ -208,6 +217,7 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		data.CodexPro,
 		data.Kimi,
 		data.Antigravity,
+		data.AWSBedrock,
 	}
 	for _, models := range allModels {
 		for _, m := range models {

@@ -3,6 +3,7 @@ package management
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -424,6 +425,182 @@ func (h *Handler) DeleteClaudeKey(c *gin.Context) {
 		}
 	}
 	c.JSON(400, gin.H{"error": "missing api-key or index"})
+}
+
+// aws-bedrock-api-key: []AWSBedrockKey
+func (h *Handler) GetAWSBedrockKeys(c *gin.Context) {
+	c.JSON(200, gin.H{"aws-bedrock-api-key": h.bedrockKeysWithAuthIndex()})
+}
+func (h *Handler) PutAWSBedrockKeys(c *gin.Context) {
+	data, err := c.GetRawData()
+	if err != nil {
+		c.JSON(400, gin.H{"error": "failed to read body"})
+		return
+	}
+	var arr []config.AWSBedrockKey
+	if err = json.Unmarshal(data, &arr); err != nil {
+		var obj struct {
+			Items []config.AWSBedrockKey `json:"items"`
+		}
+		if err2 := json.Unmarshal(data, &obj); err2 != nil || len(obj.Items) == 0 {
+			c.JSON(400, gin.H{"error": "invalid body"})
+			return
+		}
+		arr = obj.Items
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.cfg.AWSBedrockKey = arr
+	h.cfg.SanitizeAWSBedrockKeys()
+	h.persistLocked(c)
+}
+func (h *Handler) PatchAWSBedrockKey(c *gin.Context) {
+	type bedrockKeyPatch struct {
+		APIKey         *string                   `json:"api-key"`
+		Region         *string                   `json:"region"`
+		Priority       *int                      `json:"priority"`
+		Prefix         *string                   `json:"prefix"`
+		ProxyURL       *string                   `json:"proxy-url"`
+		Models         *[]config.AWSBedrockModel `json:"models"`
+		ExcludedModels *[]string                 `json:"excluded-models"`
+	}
+	var body struct {
+		Index  *int             `json:"index"`
+		Match  *string          `json:"match"`
+		Region *string          `json:"region"`
+		Prefix *string          `json:"prefix"`
+		Value  *bedrockKeyPatch `json:"value"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil || body.Value == nil {
+		c.JSON(400, gin.H{"error": "invalid body"})
+		return
+	}
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	targetIndex := -1
+	if body.Index != nil && *body.Index >= 0 && *body.Index < len(h.cfg.AWSBedrockKey) {
+		targetIndex = *body.Index
+	}
+	if targetIndex == -1 && body.Match != nil {
+		match := strings.TrimSpace(*body.Match)
+		region := strings.TrimSpace(getOptionalString(body.Region))
+		prefix := strings.TrimSpace(getOptionalString(body.Prefix))
+		matches := findAWSBedrockKeyMatches(h.cfg.AWSBedrockKey, match, region, prefix)
+		switch len(matches) {
+		case 0:
+			// keep not-found behavior below
+		case 1:
+			targetIndex = matches[0]
+		default:
+			c.JSON(http.StatusConflict, gin.H{"error": "ambiguous match; provide index or include region"})
+			return
+		}
+	}
+	if targetIndex == -1 {
+		c.JSON(404, gin.H{"error": "item not found"})
+		return
+	}
+
+	entry := &h.cfg.AWSBedrockKey[targetIndex]
+	if body.Value.APIKey != nil {
+		entry.APIKey = strings.TrimSpace(*body.Value.APIKey)
+	}
+	if body.Value.Region != nil {
+		entry.Region = strings.TrimSpace(*body.Value.Region)
+	}
+	if body.Value.Priority != nil {
+		entry.Priority = *body.Value.Priority
+	}
+	if body.Value.Prefix != nil {
+		entry.Prefix = strings.TrimSpace(*body.Value.Prefix)
+	}
+	if body.Value.ProxyURL != nil {
+		entry.ProxyURL = strings.TrimSpace(*body.Value.ProxyURL)
+	}
+	if body.Value.Models != nil {
+		entry.Models = append([]config.AWSBedrockModel(nil), (*body.Value.Models)...)
+	}
+	if body.Value.ExcludedModels != nil {
+		entry.ExcludedModels = config.NormalizeExcludedModels(*body.Value.ExcludedModels)
+	}
+	h.cfg.SanitizeAWSBedrockKeys()
+	h.persistLocked(c)
+}
+
+func (h *Handler) DeleteAWSBedrockKey(c *gin.Context) {
+	if val := strings.TrimSpace(c.Query("api-key")); val != "" {
+		region := strings.TrimSpace(c.Query("region"))
+		prefix := strings.TrimSpace(c.Query("prefix"))
+
+		h.mu.Lock()
+		defer h.mu.Unlock()
+
+		matches := findAWSBedrockKeyMatches(h.cfg.AWSBedrockKey, val, region, prefix)
+		if len(matches) == 0 {
+			c.JSON(404, gin.H{"error": "item not found"})
+			return
+		}
+		if len(matches) > 1 {
+			c.JSON(http.StatusConflict, gin.H{"error": "ambiguous match; provide index or include region"})
+			return
+		}
+		idx := matches[0]
+		h.cfg.AWSBedrockKey = append(h.cfg.AWSBedrockKey[:idx], h.cfg.AWSBedrockKey[idx+1:]...)
+		h.cfg.SanitizeAWSBedrockKeys()
+		h.persistLocked(c)
+		return
+	}
+	if idxStr := c.Query("index"); idxStr != "" {
+		var idx int
+		_, err := fmt.Sscanf(idxStr, "%d", &idx)
+
+		h.mu.Lock()
+		defer h.mu.Unlock()
+
+		if err == nil && idx >= 0 && idx < len(h.cfg.AWSBedrockKey) {
+			h.cfg.AWSBedrockKey = append(h.cfg.AWSBedrockKey[:idx], h.cfg.AWSBedrockKey[idx+1:]...)
+			h.cfg.SanitizeAWSBedrockKeys()
+			h.persistLocked(c)
+			return
+		}
+	}
+	c.JSON(400, gin.H{"error": "missing api-key or index"})
+}
+
+func getOptionalString(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
+}
+
+func findAWSBedrockKeyMatches(entries []config.AWSBedrockKey, apiKey, region, prefix string) []int {
+	apiKey = strings.TrimSpace(apiKey)
+	region = strings.TrimSpace(region)
+	if apiKey == "" {
+		return nil
+	}
+	matches := make([]int, 0, len(entries))
+	for i := range entries {
+		entry := entries[i]
+		if !strings.EqualFold(strings.TrimSpace(entry.APIKey), apiKey) {
+			continue
+		}
+		if region != "" && !strings.EqualFold(strings.TrimSpace(entry.Region), region) {
+			continue
+		}
+		cfgPrefix := strings.TrimSpace(entry.Prefix)
+		if prefix == "" && cfgPrefix != "" {
+			continue
+		}
+		if prefix != "" && !strings.EqualFold(cfgPrefix, prefix) {
+			continue
+		}
+		matches = append(matches, i)
+	}
+	return matches
 }
 
 // openai-compatibility: []OpenAICompatibility

@@ -424,6 +424,8 @@ func (s *Service) ensureExecutorsForAuthWithMode(a *coreauth.Auth, forceReplace 
 		s.coreManager.RegisterExecutor(executor.NewClaudeExecutor(s.cfg))
 	case "kimi":
 		s.coreManager.RegisterExecutor(executor.NewKimiExecutor(s.cfg))
+	case "aws-bedrock":
+		s.coreManager.RegisterExecutor(executor.NewBedrockExecutor(s.cfg))
 	default:
 		providerKey := strings.ToLower(strings.TrimSpace(a.Provider))
 		if providerKey == "" {
@@ -927,6 +929,17 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 	case "kimi":
 		models = registry.GetKimiModels()
 		models = applyExcludedModels(models, excluded)
+	case "aws-bedrock":
+		models = registry.GetAWSBedrockModels()
+		if entry := s.resolveConfigAWSBedrockKey(a); entry != nil {
+			if len(entry.Models) > 0 {
+				models = buildAWSBedrockConfigModels(entry)
+			}
+			if authKind == "apikey" {
+				excluded = entry.ExcludedModels
+			}
+		}
+		models = applyExcludedModels(models, excluded)
 	default:
 		// Handle OpenAI-compatibility providers by name using config
 		if s.cfg != nil {
@@ -1135,6 +1148,89 @@ func (s *Service) resolveConfigGeminiKey(auth *coreauth.Auth) *config.GeminiKey 
 			continue
 		}
 		if attrKey == "" && attrBase != "" && strings.EqualFold(cfgBase, attrBase) {
+			return entry
+		}
+	}
+	return nil
+}
+
+// resolveConfigAWSBedrockKey resolves the AWSBedrockKey config entry for the given auth.
+// Similar to resolveBedrockAPIKeyConfig in auth/conductor.go, but lives here in the
+// service layer so hot-reload can call it on the active config snapshot.
+func (s *Service) resolveConfigAWSBedrockKey(auth *coreauth.Auth) *config.AWSBedrockKey {
+	if auth == nil || s.cfg == nil {
+		return nil
+	}
+	var attrKey, attrRegion, attrPrefix string
+	if auth.Attributes != nil {
+		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
+		attrRegion = strings.TrimSpace(auth.Attributes["region"])
+		attrPrefix = strings.TrimSpace(auth.Attributes["prefix"])
+	}
+	// Fall back to Auth.Prefix when the attribute is not set
+	// (e.g. SDK/manual registration paths).
+	if attrPrefix == "" && auth.Prefix != "" {
+		attrPrefix = strings.TrimSpace(auth.Prefix)
+	}
+
+	// Prefer exact Bedrock identity: api_key + region + prefix.
+	if attrKey != "" && attrRegion != "" {
+		for i := range s.cfg.AWSBedrockKey {
+			entry := &s.cfg.AWSBedrockKey[i]
+			cfgKey := strings.TrimSpace(entry.APIKey)
+			cfgRegion := strings.TrimSpace(entry.Region)
+			if cfgRegion == "" {
+				cfgRegion = "us-west-2"
+			}
+			cfgPrefix := strings.TrimSpace(entry.Prefix)
+			if !strings.EqualFold(cfgKey, attrKey) || !strings.EqualFold(cfgRegion, attrRegion) {
+				continue
+			}
+			if attrPrefix == "" && cfgPrefix != "" {
+				continue
+			}
+			if attrPrefix != "" && !strings.EqualFold(cfgPrefix, attrPrefix) {
+				continue
+			}
+			return entry
+		}
+		return nil
+	}
+
+	if attrKey == "" && attrRegion != "" {
+		for i := range s.cfg.AWSBedrockKey {
+			entry := &s.cfg.AWSBedrockKey[i]
+			cfgRegion := strings.TrimSpace(entry.Region)
+			if cfgRegion == "" {
+				cfgRegion = "us-west-2"
+			}
+			if strings.EqualFold(cfgRegion, attrRegion) {
+				return entry
+			}
+		}
+	}
+
+	// Legacy fallback when region is unavailable.
+	// Apply the same default region used by the Bedrock executor so
+	// key-only auths match against the correct config entry.
+	if attrRegion == "" {
+		attrRegion = "us-west-2"
+	}
+	for i := range s.cfg.AWSBedrockKey {
+		entry := &s.cfg.AWSBedrockKey[i]
+		cfgKey := strings.TrimSpace(entry.APIKey)
+		cfgRegion := strings.TrimSpace(entry.Region)
+		if cfgRegion == "" {
+			cfgRegion = "us-west-2"
+		}
+		cfgPrefix := strings.TrimSpace(entry.Prefix)
+		if attrKey != "" && strings.EqualFold(cfgKey, attrKey) && strings.EqualFold(cfgRegion, attrRegion) {
+			if attrPrefix == "" && cfgPrefix != "" {
+				continue
+			}
+			if attrPrefix != "" && !strings.EqualFold(cfgPrefix, attrPrefix) {
+				continue
+			}
 			return entry
 		}
 	}
@@ -1411,6 +1507,71 @@ func buildCodexConfigModels(entry *config.CodexKey) []*ModelInfo {
 		return nil
 	}
 	return registry.WithCodexBuiltins(buildConfigModels(entry.Models, "openai", "openai"))
+}
+
+func buildAWSBedrockConfigModels(entry *config.AWSBedrockKey) []*ModelInfo {
+	if entry == nil {
+		return nil
+	}
+	if len(entry.Models) == 0 {
+		return nil
+	}
+	now := time.Now().Unix()
+	out := make([]*ModelInfo, 0, len(entry.Models))
+	seen := make(map[string]struct{}, len(entry.Models))
+	for i := range entry.Models {
+		model := entry.Models[i]
+		name := strings.TrimSpace(model.Name)
+		alias := strings.TrimSpace(model.Alias)
+		if alias == "" {
+			alias = name
+		}
+		if alias == "" {
+			continue
+		}
+		key := strings.ToLower(alias)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		display := name
+		if display == "" {
+			display = alias
+		}
+		modelType := "aws-bedrock"
+		var thinkingSupport *registry.ThinkingSupport
+		// Keep routing target driven by Name.
+		// Infer capability/model family from static model catalog by alias first,
+		// then by route target name.
+		for _, candidate := range []string{alias, name} {
+			candidate = strings.TrimSpace(candidate)
+			if candidate == "" {
+				continue
+			}
+			upstream := registry.LookupStaticModelInfo(candidate)
+			if upstream == nil {
+				continue
+			}
+			if upstream.Type != "" {
+				modelType = upstream.Type
+			}
+			thinkingSupport = upstream.Thinking
+			break
+		}
+		info := &ModelInfo{
+			ID:          alias,
+			Name:        name,
+			Object:      "model",
+			Created:     now,
+			OwnedBy:     "aws-bedrock",
+			Type:        modelType,
+			DisplayName: display,
+			UserDefined: true,
+			Thinking:    thinkingSupport,
+		}
+		out = append(out, info)
+	}
+	return out
 }
 
 func rewriteModelInfoName(name, oldID, newID string) string {

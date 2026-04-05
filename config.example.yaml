@@ -197,11 +197,26 @@ nonstream-keepalive-interval: 0
 #       strict-mode: false           # false (default): prepend Claude Code prompt to user system messages
 #                                    # true: strip all user system messages, keep only Claude Code prompt
 #       sensitive-words:             # optional: words to obfuscate with zero-width characters
-#         - "API"
-#         - "proxy"
-#       cache-user-id: true          # optional: default is false; set true to reuse cached user_id per API key instead of generating a random one each request
-#     experimental-cch-signing: false # optional: default is false; when true, sign the final /v1/messages body using the current Claude Code cch algorithm
-#                                     # keep this disabled unless you explicitly need the behavior, so upstream seed changes fall back to legacy proxy behavior
+#       - "API"
+#       - "proxy"
+#     cache-user-id: true          # optional: default is false; set true to reuse cached user_id per API key instead of generating a random one each request
+#   experimental-cch-signing: false # optional: default is false; when true, sign the final /v1/messages body using the current Claude Code cch algorithm
+#                                   # keep this disabled unless you explicitly need the behavior, so upstream seed changes fall back to legacy proxy behavior
+
+# AWS Bedrock API keys
+# aws-bedrock-api-key:
+#   - api-key: "your-bedrock-api-key"
+#     region: "us-west-2" # optional: defaults to us-west-2 when omitted
+#     prefix: "test" # optional: require calls like "test/bedrock-llama" to target this credential
+#     proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override
+#     models:
+#       - name: "deepseek.r1-v1:0" # logical model name (used for matching and model catalog display)
+#         id: "arn:aws:bedrock:us-west-2:123456789012:application-inference-profile/abcd1234" # optional actual invoke target; use ARN when on-demand isn't supported
+#         alias: "bedrock-r1" # client alias
+#       - name: "anthropic.claude-sonnet-4-6"
+#         alias: "bedrock-sonnet-4-6" # without id: requests invoke Name directly
+#     excluded-models:
+#       - "amazon.titan-*"               # wildcard matching prefix
 
 # Default headers for Claude API requests. Update when Claude Code releases new versions.
 # In legacy mode, user-agent/package-version/runtime-version/timeout are used as fallbacks

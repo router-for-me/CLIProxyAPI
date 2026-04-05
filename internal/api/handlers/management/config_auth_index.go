@@ -23,6 +23,11 @@ type codexKeyWithAuthIndex struct {
 	AuthIndex string `json:"auth-index,omitempty"`
 }
 
+type awsBedrockKeyWithAuthIndex struct {
+	config.AWSBedrockKey
+	AuthIndex string `json:"auth-index,omitempty"`
+}
+
 type vertexCompatKeyWithAuthIndex struct {
 	config.VertexCompatKey
 	AuthIndex string `json:"auth-index,omitempty"`
@@ -184,6 +189,35 @@ func (h *Handler) vertexCompatKeysWithAuthIndex() []vertexCompatKeyWithAuthIndex
 		out[i] = vertexCompatKeyWithAuthIndex{
 			VertexCompatKey: entry,
 			AuthIndex:       authIndex,
+		}
+	}
+	return out
+}
+
+func (h *Handler) bedrockKeysWithAuthIndex() []awsBedrockKeyWithAuthIndex {
+	if h == nil {
+		return nil
+	}
+	liveIndexByID := h.liveAuthIndexByID()
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.cfg == nil {
+		return nil
+	}
+
+	idGen := synthesizer.NewStableIDGenerator()
+	out := make([]awsBedrockKeyWithAuthIndex, len(h.cfg.AWSBedrockKey))
+	for i := range h.cfg.AWSBedrockKey {
+		entry := h.cfg.AWSBedrockKey[i]
+		authIndex := ""
+		if key := strings.TrimSpace(entry.APIKey); key != "" {
+			id, _ := idGen.Next("aws-bedrock:apikey", key, entry.Region, entry.Prefix)
+			authIndex = liveIndexByID[id]
+		}
+		out[i] = awsBedrockKeyWithAuthIndex{
+			AWSBedrockKey: entry,
+			AuthIndex:     authIndex,
 		}
 	}
 	return out

@@ -969,6 +969,10 @@ func (m *Manager) rebuildAPIKeyModelAliasLocked(cfg *internalconfig.Config) {
 			if entry := resolveVertexAPIKeyConfig(cfg, auth); entry != nil {
 				compileAPIKeyModelAliasForModels(byAlias, entry.Models)
 			}
+		case "aws-bedrock":
+			if entry := resolveBedrockAPIKeyConfig(cfg, auth); entry != nil {
+				compileBedrockAPIKeyModelAliasForModels(byAlias, entry.Models)
+			}
 		default:
 			// OpenAI-compat uses config selection from auth.Attributes.
 			providerKey := ""
@@ -1036,6 +1040,91 @@ func compileAPIKeyModelAliasForModels[T interface {
 			}
 		}
 	}
+}
+
+func compileBedrockAPIKeyModelAliasForModels(out map[string]string, models []internalconfig.AWSBedrockModel) {
+	if out == nil {
+		return
+	}
+	// Bedrock priority rule:
+	// 1) entries with explicit ID (inference profile ARN / route target) win
+	// 2) entries without ID only fill gaps
+	//
+	// This prevents alias/name collisions from silently falling back to Name
+	// when an explicit ID mapping exists for the same lookup key.
+	for pass := 0; pass < 2; pass++ {
+		requireID := pass == 0
+		for i := range models {
+			name := strings.TrimSpace(models[i].Name)
+			alias := strings.TrimSpace(models[i].Alias)
+			id := strings.TrimSpace(models[i].ID)
+			hasID := id != ""
+			if requireID != hasID {
+				continue
+			}
+			target := id
+			if target == "" {
+				target = name
+			}
+			if target == "" {
+				continue
+			}
+			for _, rawKey := range []string{alias, name, target} {
+				key := strings.ToLower(thinking.ParseSuffix(strings.TrimSpace(rawKey)).ModelName)
+				if key == "" {
+					key = strings.ToLower(strings.TrimSpace(rawKey))
+				}
+				if key == "" {
+					continue
+				}
+				if _, exists := out[key]; exists {
+					continue
+				}
+				out[key] = target
+			}
+		}
+	}
+}
+
+func resolveBedrockModelAliasFromConfigModels(requestedModel string, models []internalconfig.AWSBedrockModel) string {
+	requestedModel = strings.TrimSpace(requestedModel)
+	if requestedModel == "" || len(models) == 0 {
+		return ""
+	}
+	requestResult, candidates := modelAliasLookupCandidates(requestedModel)
+	if len(candidates) == 0 {
+		return ""
+	}
+	for pass := 0; pass < 2; pass++ {
+		requireID := pass == 0
+		for i := range models {
+			name := strings.TrimSpace(models[i].Name)
+			alias := strings.TrimSpace(models[i].Alias)
+			id := strings.TrimSpace(models[i].ID)
+			hasID := id != ""
+			if requireID != hasID {
+				continue
+			}
+			target := id
+			if target == "" {
+				target = name
+			}
+			if target == "" {
+				continue
+			}
+			for _, candidate := range candidates {
+				if candidate == "" {
+					continue
+				}
+				if (alias != "" && strings.EqualFold(alias, candidate)) ||
+					(name != "" && strings.EqualFold(name, candidate)) ||
+					strings.EqualFold(target, candidate) {
+					return preserveResolvedModelSuffix(target, requestResult)
+				}
+			}
+		}
+	}
+	return ""
 }
 
 // SetRetryConfig updates retry attempts, credential retry limit and cooldown wait interval.
@@ -1611,6 +1700,8 @@ func (m *Manager) applyAPIKeyModelAlias(auth *Auth, requestedModel string) strin
 		upstreamModel = resolveUpstreamModelForCodexAPIKey(cfg, auth, requestedModel)
 	case "vertex":
 		upstreamModel = resolveUpstreamModelForVertexAPIKey(cfg, auth, requestedModel)
+	case "aws-bedrock":
+		upstreamModel = resolveUpstreamModelForBedrockAPIKey(cfg, auth, requestedModel)
 	default:
 		upstreamModel = resolveUpstreamModelForOpenAICompatAPIKey(cfg, auth, requestedModel)
 	}
@@ -1695,6 +1786,75 @@ func resolveVertexAPIKeyConfig(cfg *internalconfig.Config, auth *Auth) *internal
 	return resolveAPIKeyConfig(cfg.VertexCompatAPIKey, auth)
 }
 
+func resolveBedrockAPIKeyConfig(cfg *internalconfig.Config, auth *Auth) *internalconfig.AWSBedrockKey {
+	if cfg == nil || auth == nil || len(cfg.AWSBedrockKey) == 0 {
+		return nil
+	}
+	attrKey, attrRegion, attrPrefix := "", "", ""
+	if auth.Attributes != nil {
+		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
+		attrRegion = strings.TrimSpace(auth.Attributes["region"])
+		attrPrefix = strings.TrimSpace(auth.Attributes["prefix"])
+	}
+	// Fall back to Auth.Prefix when the attribute is not set
+	// (e.g. SDK/manual registration paths).
+	if attrPrefix == "" && auth.Prefix != "" {
+		attrPrefix = strings.TrimSpace(auth.Prefix)
+	}
+
+	// Bedrock config identity is api_key + region + prefix.
+	if attrKey != "" && attrRegion != "" {
+		for i := range cfg.AWSBedrockKey {
+			entry := &cfg.AWSBedrockKey[i]
+			cfgKey := strings.TrimSpace(entry.APIKey)
+			cfgRegion := strings.TrimSpace(entry.Region)
+			if cfgRegion == "" {
+				cfgRegion = "us-west-2"
+			}
+			cfgPrefix := strings.TrimSpace(entry.Prefix)
+			if !strings.EqualFold(cfgKey, attrKey) || !strings.EqualFold(cfgRegion, attrRegion) {
+				continue
+			}
+			if attrPrefix == "" && cfgPrefix != "" {
+				continue
+			}
+			if attrPrefix != "" && !strings.EqualFold(cfgPrefix, attrPrefix) {
+				continue
+			}
+			return entry
+		}
+		// Region-qualified auth identity must not fall back to generic key-only matching.
+		// Otherwise a stale/partially-updated auth can bind to another region's entry.
+		return nil
+	}
+
+	// Legacy fallback when region is unavailable.
+	// Apply the same default region used by the Bedrock executor so
+	// key-only auths match against the correct config entry.
+	if attrRegion == "" {
+		attrRegion = "us-west-2"
+	}
+	for i := range cfg.AWSBedrockKey {
+		entry := &cfg.AWSBedrockKey[i]
+		cfgKey := strings.TrimSpace(entry.APIKey)
+		cfgRegion := strings.TrimSpace(entry.Region)
+		if cfgRegion == "" {
+			cfgRegion = "us-west-2"
+		}
+		cfgPrefix := strings.TrimSpace(entry.Prefix)
+		if attrKey != "" && strings.EqualFold(cfgKey, attrKey) && strings.EqualFold(cfgRegion, attrRegion) {
+			if attrPrefix == "" && cfgPrefix != "" {
+				continue
+			}
+			if attrPrefix != "" && !strings.EqualFold(cfgPrefix, attrPrefix) {
+				continue
+			}
+			return entry
+		}
+	}
+	return nil
+}
+
 func resolveUpstreamModelForGeminiAPIKey(cfg *internalconfig.Config, auth *Auth, requestedModel string) string {
 	entry := resolveGeminiAPIKeyConfig(cfg, auth)
 	if entry == nil {
@@ -1725,6 +1885,14 @@ func resolveUpstreamModelForVertexAPIKey(cfg *internalconfig.Config, auth *Auth,
 		return ""
 	}
 	return resolveModelAliasFromConfigModels(requestedModel, asModelAliasEntries(entry.Models))
+}
+
+func resolveUpstreamModelForBedrockAPIKey(cfg *internalconfig.Config, auth *Auth, requestedModel string) string {
+	entry := resolveBedrockAPIKeyConfig(cfg, auth)
+	if entry == nil {
+		return ""
+	}
+	return resolveBedrockModelAliasFromConfigModels(requestedModel, entry.Models)
 }
 
 func resolveUpstreamModelForOpenAICompatAPIKey(cfg *internalconfig.Config, auth *Auth, requestedModel string) string {

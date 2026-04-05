@@ -1,6 +1,7 @@
 package translator
 
 import (
+	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/claude/bedrock"
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/claude/gemini"
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/claude/gemini-cli"
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/claude/openai/chat-completions"
@@ -23,6 +24,7 @@ import (
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/gemini/openai/chat-completions"
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/gemini/openai/responses"
 
+	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/openai/bedrock"
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/openai/claude"
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/openai/gemini"
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/openai/gemini-cli"

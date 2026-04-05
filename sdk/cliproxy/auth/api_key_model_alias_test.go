@@ -108,6 +108,9 @@ func TestAPIKeyModelAlias_MultipleProviders(t *testing.T) {
 		GeminiKey: []internalconfig.GeminiKey{{APIKey: "gemini-key", Models: []internalconfig.GeminiModel{{Name: "gemini-2.5-pro", Alias: "gp"}}}},
 		ClaudeKey: []internalconfig.ClaudeKey{{APIKey: "claude-key", Models: []internalconfig.ClaudeModel{{Name: "claude-sonnet-4", Alias: "cs4"}}}},
 		CodexKey:  []internalconfig.CodexKey{{APIKey: "codex-key", Models: []internalconfig.CodexModel{{Name: "o3", Alias: "o"}}}},
+		AWSBedrockKey: []internalconfig.AWSBedrockKey{
+			{APIKey: "bedrock-key", Models: []internalconfig.AWSBedrockModel{{Name: "us.deepseek.r1-v1:0", Alias: "deepseek-r1"}}},
+		},
 	}
 
 	mgr := NewManager(nil, nil, nil)
@@ -117,6 +120,7 @@ func TestAPIKeyModelAlias_MultipleProviders(t *testing.T) {
 	_, _ = mgr.Register(ctx, &Auth{ID: "gemini-auth", Provider: "gemini", Attributes: map[string]string{"api_key": "gemini-key"}})
 	_, _ = mgr.Register(ctx, &Auth{ID: "claude-auth", Provider: "claude", Attributes: map[string]string{"api_key": "claude-key"}})
 	_, _ = mgr.Register(ctx, &Auth{ID: "codex-auth", Provider: "codex", Attributes: map[string]string{"api_key": "codex-key"}})
+	_, _ = mgr.Register(ctx, &Auth{ID: "bedrock-auth", Provider: "aws-bedrock", Attributes: map[string]string{"api_key": "bedrock-key"}})
 
 	tests := []struct {
 		authID, input, want string
@@ -124,6 +128,7 @@ func TestAPIKeyModelAlias_MultipleProviders(t *testing.T) {
 		{"gemini-auth", "gp", "gemini-2.5-pro"},
 		{"claude-auth", "cs4", "claude-sonnet-4"},
 		{"codex-auth", "o", "o3"},
+		{"bedrock-auth", "deepseek-r1", "us.deepseek.r1-v1:0"},
 	}
 
 	for _, tt := range tests {
@@ -138,6 +143,9 @@ func TestApplyAPIKeyModelAlias(t *testing.T) {
 		GeminiKey: []internalconfig.GeminiKey{
 			{APIKey: "k", Models: []internalconfig.GeminiModel{{Name: "gemini-2.5-pro-exp-03-25", Alias: "g25p"}}},
 		},
+		AWSBedrockKey: []internalconfig.AWSBedrockKey{
+			{APIKey: "k-bedrock", Models: []internalconfig.AWSBedrockModel{{Name: "us.deepseek.r1-v1:0", Alias: "deepseek-r1"}}},
+		},
 	}
 
 	mgr := NewManager(nil, nil, nil)
@@ -145,8 +153,10 @@ func TestApplyAPIKeyModelAlias(t *testing.T) {
 
 	ctx := context.Background()
 	apiKeyAuth := &Auth{ID: "a1", Provider: "gemini", Attributes: map[string]string{"api_key": "k"}}
+	bedrockAPIKeyAuth := &Auth{ID: "a-bedrock", Provider: "aws-bedrock", Attributes: map[string]string{"api_key": "k-bedrock"}}
 	oauthAuth := &Auth{ID: "oauth-auth", Provider: "gemini", Attributes: map[string]string{"auth_kind": "oauth"}}
 	_, _ = mgr.Register(ctx, apiKeyAuth)
+	_, _ = mgr.Register(ctx, bedrockAPIKeyAuth)
 
 	tests := []struct {
 		name       string
@@ -166,6 +176,12 @@ func TestApplyAPIKeyModelAlias(t *testing.T) {
 			inputModel: "some-model",
 			wantModel:  "some-model",
 		},
+		{
+			name:       "bedrock api_key auth with alias",
+			auth:       bedrockAPIKeyAuth,
+			inputModel: "deepseek-r1(32767)",
+			wantModel:  "us.deepseek.r1-v1:0(32767)",
+		},
 	}
 
 	for _, tt := range tests {
@@ -176,5 +192,256 @@ func TestApplyAPIKeyModelAlias(t *testing.T) {
 				t.Errorf("model = %q, want %q", resolvedModel, tt.wantModel)
 			}
 		})
+	}
+}
+
+func TestResolveBedrockAPIKeyConfig_PrefersRegionWhenAPIKeysMatch(t *testing.T) {
+	cfg := &internalconfig.Config{
+		AWSBedrockKey: []internalconfig.AWSBedrockKey{
+			{
+				APIKey: "shared-bedrock-key",
+				Region: "us-east-1",
+				Models: []internalconfig.AWSBedrockModel{
+					{Name: "us.deepseek.r1-v1:0", Alias: "deepseek-r1"},
+				},
+			},
+			{
+				APIKey: "shared-bedrock-key",
+				Region: "eu-west-1",
+				Models: []internalconfig.AWSBedrockModel{
+					{Name: "eu.deepseek.r1-v1:0", Alias: "deepseek-r1"},
+				},
+			},
+		},
+	}
+	auth := &Auth{
+		Provider: "aws-bedrock",
+		Attributes: map[string]string{
+			"api_key": "shared-bedrock-key",
+			"region":  "eu-west-1",
+		},
+	}
+
+	entry := resolveBedrockAPIKeyConfig(cfg, auth)
+	if entry == nil {
+		t.Fatal("expected matched bedrock config entry, got nil")
+	}
+	if entry.Region != "eu-west-1" {
+		t.Fatalf("resolved region = %q, want %q", entry.Region, "eu-west-1")
+	}
+
+	resolved := resolveUpstreamModelForBedrockAPIKey(cfg, auth, "deepseek-r1")
+	if resolved != "eu.deepseek.r1-v1:0" {
+		t.Fatalf("resolved model = %q, want %q", resolved, "eu.deepseek.r1-v1:0")
+	}
+}
+
+func TestResolveBedrockAPIKeyConfig_IgnoresAuthBaseURLAndUsesRegionIdentity(t *testing.T) {
+	cfg := &internalconfig.Config{
+		AWSBedrockKey: []internalconfig.AWSBedrockKey{
+			{
+				APIKey: "shared-bedrock-key",
+				Region: "us-east-1",
+				Models: []internalconfig.AWSBedrockModel{
+					{Name: "us.deepseek.r1-v1:0", Alias: "deepseek-r1"},
+				},
+			},
+		},
+	}
+	auth := &Auth{
+		Provider: "aws-bedrock",
+		Attributes: map[string]string{
+			"api_key":  "shared-bedrock-key",
+			"region":   "us-east-1",
+			"base_url": "https://bedrock-runtime-b.example.com",
+		},
+	}
+
+	entry := resolveBedrockAPIKeyConfig(cfg, auth)
+	if entry == nil {
+		t.Fatal("expected matched bedrock config entry, got nil")
+	}
+	if entry.Region != "us-east-1" {
+		t.Fatalf("resolved region = %q, want %q", entry.Region, "us-east-1")
+	}
+
+	resolved := resolveUpstreamModelForBedrockAPIKey(cfg, auth, "deepseek-r1")
+	if resolved != "us.deepseek.r1-v1:0" {
+		t.Fatalf("resolved model = %q, want %q", resolved, "us.deepseek.r1-v1:0")
+	}
+}
+
+func TestResolveBedrockAPIKeyConfig_DoesNotFallbackAcrossRegionWhenRegionProvided(t *testing.T) {
+	cfg := &internalconfig.Config{
+		AWSBedrockKey: []internalconfig.AWSBedrockKey{
+			{
+				APIKey: "shared-bedrock-key",
+				Region: "us-east-1",
+				Models: []internalconfig.AWSBedrockModel{
+					{Name: "us.deepseek.r1-v1:0", Alias: "deepseek-r1"},
+				},
+			},
+		},
+	}
+	auth := &Auth{
+		Provider: "aws-bedrock",
+		Attributes: map[string]string{
+			"api_key": "shared-bedrock-key",
+			"region":  "eu-west-1",
+		},
+	}
+
+	entry := resolveBedrockAPIKeyConfig(cfg, auth)
+	if entry != nil {
+		t.Fatalf("expected nil entry for mismatched region, got region=%q", entry.Region)
+	}
+
+	resolved := resolveUpstreamModelForBedrockAPIKey(cfg, auth, "deepseek-r1")
+	if resolved != "" {
+		t.Fatalf("resolved model = %q, want empty string when region does not match", resolved)
+	}
+}
+
+func TestResolveUpstreamModelForBedrockAPIKey_UsesModelIDAsInvokeTarget(t *testing.T) {
+	cfg := &internalconfig.Config{
+		AWSBedrockKey: []internalconfig.AWSBedrockKey{
+			{
+				APIKey: "bedrock-key",
+				Region: "us-west-2",
+				Models: []internalconfig.AWSBedrockModel{
+					{
+						Name:  "deepseek.r1-v1:0",
+						ID:    "arn:aws:bedrock:us-west-2:123456789012:application-inference-profile/egz01y3lkius",
+						Alias: "deepseek-r1",
+					},
+				},
+			},
+		},
+	}
+	auth := &Auth{
+		Provider: "aws-bedrock",
+		Attributes: map[string]string{
+			"api_key": "bedrock-key",
+			"region":  "us-west-2",
+		},
+	}
+
+	want := "arn:aws:bedrock:us-west-2:123456789012:application-inference-profile/egz01y3lkius"
+	if got := resolveUpstreamModelForBedrockAPIKey(cfg, auth, "deepseek-r1"); got != want {
+		t.Fatalf("resolved alias = %q, want %q", got, want)
+	}
+	if got := resolveUpstreamModelForBedrockAPIKey(cfg, auth, "deepseek.r1-v1:0"); got != want {
+		t.Fatalf("resolved name = %q, want %q", got, want)
+	}
+}
+
+func TestLookupAPIKeyUpstreamModel_BedrockUsesModelIDTarget(t *testing.T) {
+	cfg := &internalconfig.Config{
+		AWSBedrockKey: []internalconfig.AWSBedrockKey{
+			{
+				APIKey: "bedrock-key",
+				Region: "us-west-2",
+				Models: []internalconfig.AWSBedrockModel{
+					{
+						Name:  "deepseek.r1-v1:0",
+						ID:    "arn:aws:bedrock:us-west-2:123456789012:application-inference-profile/egz01y3lkius",
+						Alias: "deepseek-r1",
+					},
+				},
+			},
+		},
+	}
+	mgr := NewManager(nil, nil, nil)
+	mgr.SetConfig(cfg)
+
+	ctx := context.Background()
+	auth := &Auth{
+		ID:       "bedrock-auth",
+		Provider: "aws-bedrock",
+		Attributes: map[string]string{
+			"api_key": "bedrock-key",
+			"region":  "us-west-2",
+		},
+	}
+	_, _ = mgr.Register(ctx, auth)
+
+	want := "arn:aws:bedrock:us-west-2:123456789012:application-inference-profile/egz01y3lkius"
+	if got := mgr.lookupAPIKeyUpstreamModel("bedrock-auth", "deepseek-r1"); got != want {
+		t.Fatalf("lookup alias = %q, want %q", got, want)
+	}
+	if got := mgr.lookupAPIKeyUpstreamModel("bedrock-auth", "deepseek.r1-v1:0"); got != want {
+		t.Fatalf("lookup name = %q, want %q", got, want)
+	}
+}
+
+func TestResolveUpstreamModelForBedrockAPIKey_PrefersIDWhenAliasCollides(t *testing.T) {
+	cfg := &internalconfig.Config{
+		AWSBedrockKey: []internalconfig.AWSBedrockKey{
+			{
+				APIKey: "bedrock-key",
+				Region: "us-west-2",
+				Models: []internalconfig.AWSBedrockModel{
+					{
+						Name:  "deepseek.r1-v1:0",
+						Alias: "deepseek-r1",
+					},
+					{
+						Name:  "deepseek.r1-v1:0",
+						ID:    "arn:aws:bedrock:us-west-2:123456789012:application-inference-profile/egz01y3lkius",
+						Alias: "deepseek-r1",
+					},
+				},
+			},
+		},
+	}
+	auth := &Auth{
+		Provider: "aws-bedrock",
+		Attributes: map[string]string{
+			"api_key": "bedrock-key",
+			"region":  "us-west-2",
+		},
+	}
+
+	want := "arn:aws:bedrock:us-west-2:123456789012:application-inference-profile/egz01y3lkius"
+	if got := resolveUpstreamModelForBedrockAPIKey(cfg, auth, "deepseek-r1"); got != want {
+		t.Fatalf("resolved alias = %q, want %q", got, want)
+	}
+}
+
+func TestLookupAPIKeyUpstreamModel_BedrockPrefersIDWhenAliasCollides(t *testing.T) {
+	cfg := &internalconfig.Config{
+		AWSBedrockKey: []internalconfig.AWSBedrockKey{
+			{
+				APIKey: "bedrock-key",
+				Region: "us-west-2",
+				Models: []internalconfig.AWSBedrockModel{
+					{
+						Name:  "deepseek.r1-v1:0",
+						Alias: "deepseek-r1",
+					},
+					{
+						Name:  "deepseek.r1-v1:0",
+						ID:    "arn:aws:bedrock:us-west-2:123456789012:application-inference-profile/egz01y3lkius",
+						Alias: "deepseek-r1",
+					},
+				},
+			},
+		},
+	}
+	mgr := NewManager(nil, nil, nil)
+	mgr.SetConfig(cfg)
+	ctx := context.Background()
+	_, _ = mgr.Register(ctx, &Auth{
+		ID:       "bedrock-auth",
+		Provider: "aws-bedrock",
+		Attributes: map[string]string{
+			"api_key": "bedrock-key",
+			"region":  "us-west-2",
+		},
+	})
+
+	want := "arn:aws:bedrock:us-west-2:123456789012:application-inference-profile/egz01y3lkius"
+	if got := mgr.lookupAPIKeyUpstreamModel("bedrock-auth", "deepseek-r1"); got != want {
+		t.Fatalf("lookup alias = %q, want %q", got, want)
 	}
 }

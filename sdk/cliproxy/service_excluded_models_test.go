@@ -63,3 +63,147 @@ func TestRegisterModelsForAuth_UsesPreMergedExcludedModelsAttribute(t *testing.T
 		t.Fatal("expected global excluded model to be present when attribute override is set")
 	}
 }
+
+func TestRegisterModelsForAuth_AWSBedrockAPIKeyAppliesExcludedModels(t *testing.T) {
+	service := &Service{
+		cfg: &config.Config{
+			AWSBedrockKey: []config.AWSBedrockKey{
+				{
+					APIKey: "bedrock-key",
+					Models: []config.AWSBedrockModel{
+						{Name: "us.deepseek.r1-v1:0", Alias: "deepseek-r1"},
+						{Name: "us.deepseek.v3-v1:0", Alias: "deepseek-v3"},
+					},
+					ExcludedModels: []string{"deepseek-r1"},
+				},
+			},
+		},
+	}
+	auth := &coreauth.Auth{
+		ID:       "auth-bedrock-apikey",
+		Provider: "aws-bedrock",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"auth_kind": "apikey",
+			"api_key":   "bedrock-key",
+		},
+	}
+
+	registry := GlobalModelRegistry()
+	registry.UnregisterClient(auth.ID)
+	t.Cleanup(func() {
+		registry.UnregisterClient(auth.ID)
+	})
+
+	service.registerModelsForAuth(auth)
+	models := registry.GetAvailableModelsByProvider("aws-bedrock")
+	if len(models) == 0 {
+		t.Fatal("expected aws-bedrock models to be registered")
+	}
+
+	hasExcluded := false
+	hasAllowed := false
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		switch strings.TrimSpace(model.ID) {
+		case "deepseek-r1":
+			hasExcluded = true
+		case "deepseek-v3":
+			hasAllowed = true
+		}
+	}
+	if hasExcluded {
+		t.Fatal("expected excluded aws-bedrock model deepseek-r1 to be filtered out")
+	}
+	if !hasAllowed {
+		t.Fatal("expected non-excluded aws-bedrock model deepseek-v3 to remain")
+	}
+}
+
+func TestResolveConfigAWSBedrockKey_UsesRegionWhenAPIKeyMatches(t *testing.T) {
+	service := &Service{
+		cfg: &config.Config{
+			AWSBedrockKey: []config.AWSBedrockKey{
+				{
+					APIKey: "bedrock-key",
+					Region: "us-east-1",
+				},
+				{
+					APIKey: "bedrock-key",
+					Region: "eu-west-1",
+				},
+			},
+		},
+	}
+	auth := &coreauth.Auth{
+		Provider: "aws-bedrock",
+		Attributes: map[string]string{
+			"api_key": "bedrock-key",
+			"region":  "eu-west-1",
+		},
+	}
+
+	entry := service.resolveConfigAWSBedrockKey(auth)
+	if entry == nil {
+		t.Fatal("expected matched aws-bedrock config entry, got nil")
+	}
+	if entry.Region != "eu-west-1" {
+		t.Fatalf("resolved region = %q, want %q", entry.Region, "eu-west-1")
+	}
+}
+
+func TestResolveConfigAWSBedrockKey_DoesNotFallbackAcrossRegionWhenRegionProvided(t *testing.T) {
+	service := &Service{
+		cfg: &config.Config{
+			AWSBedrockKey: []config.AWSBedrockKey{
+				{
+					APIKey: "bedrock-key",
+					Region: "us-east-1",
+				},
+			},
+		},
+	}
+	auth := &coreauth.Auth{
+		Provider: "aws-bedrock",
+		Attributes: map[string]string{
+			"api_key": "bedrock-key",
+			"region":  "eu-west-1",
+		},
+	}
+
+	entry := service.resolveConfigAWSBedrockKey(auth)
+	if entry != nil {
+		t.Fatalf("expected nil entry for mismatched region, got region=%q", entry.Region)
+	}
+}
+
+func TestResolveConfigAWSBedrockKey_IgnoresAuthBaseURL(t *testing.T) {
+	service := &Service{
+		cfg: &config.Config{
+			AWSBedrockKey: []config.AWSBedrockKey{
+				{
+					APIKey: "bedrock-key",
+					Region: "us-east-1",
+				},
+			},
+		},
+	}
+	auth := &coreauth.Auth{
+		Provider: "aws-bedrock",
+		Attributes: map[string]string{
+			"api_key":  "bedrock-key",
+			"region":   "us-east-1",
+			"base_url": "https://bedrock-runtime-custom.example.com",
+		},
+	}
+
+	entry := service.resolveConfigAWSBedrockKey(auth)
+	if entry == nil {
+		t.Fatal("expected matched aws-bedrock config entry, got nil")
+	}
+	if entry.Region != "us-east-1" {
+		t.Fatalf("resolved region = %q, want %q", entry.Region, "us-east-1")
+	}
+}
