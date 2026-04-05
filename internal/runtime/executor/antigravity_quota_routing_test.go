@@ -149,28 +149,27 @@ func TestQuotaCooldown_AuthIsolation(t *testing.T) {
 // --- Backoff escalation ---
 
 func TestAgNextCooldown_Escalation(t *testing.T) {
-	d0, l1 := agNextCooldown(0) // level 0 → 10s
+	d0, l1 := agNextCooldown(0) // level 0 -> 10s
 	if d0 != 10*time.Second {
 		t.Errorf("level 0: want 10s, got %v", d0)
 	}
-	d1, l2 := agNextCooldown(l1) // level 1 → 20s
+	d1, l2 := agNextCooldown(l1) // level 1 -> 20s
 	if d1 != 20*time.Second {
 		t.Errorf("level 1: want 20s, got %v", d1)
 	}
-	d2, _ := agNextCooldown(l2) // level 2 → 40s
+	d2, _ := agNextCooldown(l2) // level 2 -> 40s
 	if d2 != 40*time.Second {
 		t.Errorf("level 2: want 40s, got %v", d2)
 	}
 }
 
 func TestAgNextCooldown_CapsAtMax(t *testing.T) {
-	// Level 11: 10s * 2^11 = 20480s ≈ 341min > 30min cap.
-	level := 11
-	d, nextLevel := agNextCooldown(level)
+	// Level 4: 10s * 2^4 = 160s < 3min. Level 5: 10s * 2^5 = 320s > 3min cap.
+	d, nextLevel := agNextCooldown(5)
 	if d != agQuotaBackoffMax {
 		t.Errorf("expected cap at %v, got %v", agQuotaBackoffMax, d)
 	}
-	if nextLevel != level {
+	if nextLevel != 5 {
 		t.Errorf("level should not increment past cap, got %d", nextLevel)
 	}
 }
@@ -224,6 +223,144 @@ func TestAgResetFreeQuota_ClearsBackoffLevel(t *testing.T) {
 
 	if s.freeQuotaBackoffLevel != 0 {
 		t.Errorf("backoff level should be reset to 0, got %d", s.freeQuotaBackoffLevel)
+	}
+}
+
+// --- Soft failure tests ---
+
+func TestAgRecordFreeQuotaSoftFailure_ShortCooldown(t *testing.T) {
+	resetQuotaCache()
+	agRecordFreeQuotaSoftFailure("auth-soft")
+	if !agFreeQuotaInCooldown("auth-soft") {
+		t.Error("should be in cooldown after soft failure")
+	}
+	agQuotaCacheMu.Lock()
+	s := agQuotaCache["auth-soft"]
+	cooldownDuration := time.Until(s.freeQuotaCooldownUntil)
+	level := s.freeQuotaBackoffLevel
+	agQuotaCacheMu.Unlock()
+
+	// Soft failure uses fixed 30s cooldown, not exponential.
+	if cooldownDuration > agSoftCooldown+time.Second {
+		t.Errorf("soft cooldown should be ~%v, got %v", agSoftCooldown, cooldownDuration)
+	}
+	if level != 0 {
+		t.Errorf("soft failure should not escalate level, got %d", level)
+	}
+}
+
+func TestAgRecordFreeQuotaSoftFailure_DoesNotEscalate(t *testing.T) {
+	resetQuotaCache()
+	// Multiple soft failures should NOT escalate.
+	agRecordFreeQuotaSoftFailure("auth-soft2")
+	agRecordFreeQuotaSoftFailure("auth-soft2")
+	agRecordFreeQuotaSoftFailure("auth-soft2")
+
+	agQuotaCacheMu.Lock()
+	level := agQuotaCache["auth-soft2"].freeQuotaBackoffLevel
+	agQuotaCacheMu.Unlock()
+
+	if level != 0 {
+		t.Errorf("repeated soft failures should keep level at 0, got %d", level)
+	}
+}
+
+func TestAgRecordCreditSoftFailure_ShortCooldown(t *testing.T) {
+	resetQuotaCache()
+	agRecordCreditSoftFailure("auth-csoft")
+	if !agCreditInCooldown("auth-csoft") {
+		t.Error("should be in cooldown after soft credit failure")
+	}
+	agQuotaCacheMu.Lock()
+	level := agQuotaCache["auth-csoft"].creditBackoffLevel
+	agQuotaCacheMu.Unlock()
+	if level != 0 {
+		t.Errorf("soft credit failure should not escalate level, got %d", level)
+	}
+}
+
+// --- Probe mechanism tests ---
+
+func TestAgShouldProbe_FreshAuth(t *testing.T) {
+	resetQuotaCache()
+	if !agShouldProbe("auth-probe") {
+		t.Error("fresh auth should allow probe")
+	}
+}
+
+func TestAgShouldProbe_RateLimited(t *testing.T) {
+	resetQuotaCache()
+	// First probe allowed.
+	if !agShouldProbe("auth-probe2") {
+		t.Fatal("first probe should be allowed")
+	}
+	// Immediate second probe should be blocked.
+	if agShouldProbe("auth-probe2") {
+		t.Error("second immediate probe should be blocked by interval")
+	}
+}
+
+func TestAgShouldProbe_EmptyID(t *testing.T) {
+	resetQuotaCache()
+	if agShouldProbe("") {
+		t.Error("empty authID should not allow probe")
+	}
+}
+
+// --- classifyQuotaExhaustion tests ---
+
+func TestClassifyQuotaExhaustion_HardExhaustion(t *testing.T) {
+	body := []byte(`{"error":{"message":"You have exhausted your capacity on this model. Your quota will reset after 2h50m4s."}}`)
+	kind := classifyQuotaExhaustion(http.StatusTooManyRequests, body)
+	if kind != quotaExhaustionHard {
+		t.Errorf("expected hard, got %d", kind)
+	}
+}
+
+func TestClassifyQuotaExhaustion_SoftExhaustion_ResourceExhausted(t *testing.T) {
+	body := []byte(`{"error":{"message":"Resource has been exhausted (e.g. check quota)."}}`)
+	kind := classifyQuotaExhaustion(http.StatusTooManyRequests, body)
+	if kind != quotaExhaustionSoft {
+		t.Errorf("expected soft, got %d", kind)
+	}
+}
+
+func TestClassifyQuotaExhaustion_SoftExhaustion_ResourceExhaustedStatus(t *testing.T) {
+	body := []byte(`{"error":{"status":"RESOURCE_EXHAUSTED"}}`)
+	kind := classifyQuotaExhaustion(http.StatusTooManyRequests, body)
+	if kind != quotaExhaustionSoft {
+		t.Errorf("expected soft, got %d", kind)
+	}
+}
+
+func TestClassifyQuotaExhaustion_SoftExhaustion_GenericQuota(t *testing.T) {
+	body := []byte(`{"error":{"message":"Quota limit reached"}}`)
+	kind := classifyQuotaExhaustion(http.StatusTooManyRequests, body)
+	if kind != quotaExhaustionSoft {
+		t.Errorf("expected soft, got %d", kind)
+	}
+}
+
+func TestClassifyQuotaExhaustion_None_Generic429(t *testing.T) {
+	body := []byte(`{"error":{"message":"rate limit exceeded"}}`)
+	kind := classifyQuotaExhaustion(http.StatusTooManyRequests, body)
+	if kind != quotaExhaustionNone {
+		t.Errorf("expected none, got %d", kind)
+	}
+}
+
+func TestClassifyQuotaExhaustion_None_Non429(t *testing.T) {
+	body := []byte(`{"error":{"status":"RESOURCE_EXHAUSTED"}}`)
+	kind := classifyQuotaExhaustion(http.StatusInternalServerError, body)
+	if kind != quotaExhaustionNone {
+		t.Errorf("expected none for non-429 status, got %d", kind)
+	}
+}
+
+func TestClassifyQuotaExhaustion_None_EmptyBody(t *testing.T) {
+	kind := classifyQuotaExhaustion(http.StatusTooManyRequests, nil)
+	if kind != quotaExhaustionNone {
+		t.Errorf("expected none for empty body, got %d", kind)
 	}
 }
 
@@ -285,6 +422,25 @@ func TestQuotaRouting_FreeReset_UsesFreeAgain(t *testing.T) {
 	}
 }
 
+// --- Soft failure routing tests ---
+
+func TestQuotaRouting_SoftFreeExhausted_UsesCredit(t *testing.T) {
+	resetQuotaCache()
+	agRecordFreeQuotaSoftFailure("auth-soft-route")
+	if d := quotaRoutingDecision("auth-soft-route"); d != "credit" {
+		t.Errorf("after soft free quota failure should route to credit, got %s", d)
+	}
+}
+
+func TestQuotaRouting_SoftBothExhausted_Blocked(t *testing.T) {
+	resetQuotaCache()
+	agRecordFreeQuotaSoftFailure("auth-soft-both")
+	agRecordCreditSoftFailure("auth-soft-both")
+	if d := quotaRoutingDecision("auth-soft-both"); d != "blocked" {
+		t.Errorf("both soft exhausted should be blocked, got %s", d)
+	}
+}
+
 // --- Full multi-auth conductor simulation ---
 
 type routeAttempt struct {
@@ -296,8 +452,8 @@ type routeAttempt struct {
 // quota-retry second pass, matching the real implementation:
 //
 //	Pass 1: try each auth's free quota; on 429 record failure, move to next.
-//	All 429 → quotaRetryDone=false, lastErr is 429 → clear tried, second pass.
-//	Pass 2: same auths; agFreeQuotaInCooldown=true → automatically use credit.
+//	All 429 -> quotaRetryDone=false, lastErr is 429 -> clear tried, second pass.
+//	Pass 2: same auths; agFreeQuotaInCooldown=true -> automatically use credit.
 //
 // This mirrors the conductor's behavior regardless of request-retry config,
 // because the second pass happens within executeMixedOnce (not the outer loop).
@@ -484,7 +640,7 @@ func TestAntigravityNoCapacityRetryDelay(t *testing.T) {
 }
 
 func TestAntigravityIsFreeQuotaExhausted_CaseSensitivity(t *testing.T) {
-	// The function lowercases before checking — verify mixed case works.
+	// The function lowercases before checking -- verify mixed case works.
 	tests := []struct {
 		body string
 		want bool

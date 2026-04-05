@@ -239,13 +239,21 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 
 	// Pre-check quota avoidance: skip free quota if in cooldown.
 	usedCredit := false
+	isProbe := false
 	if agFreeQuotaInCooldown(authID) {
 		if agCreditInCooldown(authID) {
-			return resp, statusErr{code: http.StatusTooManyRequests, msg: "antigravity: both free quota and credit in cooldown"}
+			// Both channels in cooldown — allow periodic probe to detect recovery.
+			if agShouldProbe(authID) {
+				log.Infof("antigravity executor: both channels in cooldown for %s, sending probe request via free quota", authID)
+				isProbe = true
+			} else {
+				return resp, statusErr{code: http.StatusTooManyRequests, msg: "antigravity: both free quota and credit in cooldown"}
+			}
+		} else {
+			log.Debugf("antigravity executor: free quota in cooldown for %s, using credit directly", authID)
+			translated = antigravityInjectCreditTypes(translated)
+			usedCredit = true
 		}
-		log.Debugf("antigravity executor: free quota in cooldown for %s, using credit directly", authID)
-		translated = antigravityInjectCreditTypes(translated)
-		usedCredit = true
 	}
 
 	for attempt := 0; attempt < attempts; attempt++ {
@@ -278,6 +286,10 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 			} else {
 				agResetFreeQuota(authID)
 			}
+			if isProbe {
+				agResetCredit(authID) // probe success means upstream recovered — reset both
+				log.Infof("antigravity executor: probe succeeded for %s, resetting cooldown", authID)
+			}
 			reporter.publish(ctx, parseAntigravityUsage(bodyBytes))
 			var param any
 			converted := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, bodyBytes, &param)
@@ -302,14 +314,27 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 		}
 
 		// Free quota exhausted — record failure and let conductor try next credential's free quota.
-		if !usedCredit && antigravityIsFreeQuotaExhausted(httpResp.StatusCode, bodyBytes) {
-			agRecordFreeQuotaFailure(authID)
-			log.Infof("antigravity executor: free quota exhausted for %s, deferring to conductor for next credential", authID)
+		if !usedCredit {
+			switch classifyQuotaExhaustion(httpResp.StatusCode, bodyBytes) {
+			case quotaExhaustionHard:
+				agRecordFreeQuotaFailure(authID)
+				log.Infof("antigravity executor: free quota exhausted (hard) for %s, deferring to conductor for next credential", authID)
+			case quotaExhaustionSoft:
+				agRecordFreeQuotaSoftFailure(authID)
+				log.Infof("antigravity executor: free quota exhausted (soft) for %s, short cooldown, deferring to conductor", authID)
+			}
 		}
 
 		// Credit channel failed — record failure.
 		if usedCredit && httpResp.StatusCode == http.StatusTooManyRequests {
-			agRecordCreditFailure(authID)
+			switch classifyQuotaExhaustion(httpResp.StatusCode, bodyBytes) {
+			case quotaExhaustionHard:
+				agRecordCreditFailure(authID)
+			case quotaExhaustionSoft:
+				agRecordCreditSoftFailure(authID)
+			default:
+				agRecordCreditFailure(authID)
+			}
 		}
 
 		sErr := statusErr{code: httpResp.StatusCode, msg: string(bodyBytes)}
@@ -370,13 +395,20 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 
 	// Pre-check quota avoidance: skip free quota if in cooldown.
 	usedCredit := false
+	isProbe := false
 	if agFreeQuotaInCooldown(authID) {
 		if agCreditInCooldown(authID) {
-			return resp, statusErr{code: http.StatusTooManyRequests, msg: "antigravity: both free quota and credit in cooldown"}
+			if agShouldProbe(authID) {
+				log.Infof("antigravity executor: both channels in cooldown for %s, sending probe request via free quota (claude non-stream)", authID)
+				isProbe = true
+			} else {
+				return resp, statusErr{code: http.StatusTooManyRequests, msg: "antigravity: both free quota and credit in cooldown"}
+			}
+		} else {
+			log.Debugf("antigravity executor: free quota in cooldown for %s, using credit directly (claude non-stream)", authID)
+			translated = antigravityInjectCreditTypes(translated)
+			usedCredit = true
 		}
-		log.Debugf("antigravity executor: free quota in cooldown for %s, using credit directly (claude non-stream)", authID)
-		translated = antigravityInjectCreditTypes(translated)
-		usedCredit = true
 	}
 
 	for attempt := 0; attempt < attempts; attempt++ {
@@ -415,14 +447,27 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 			}
 
 			// Free quota exhausted — record failure and let conductor try next credential's free quota.
-			if !usedCredit && antigravityIsFreeQuotaExhausted(httpResp.StatusCode, bodyBytes) {
-				agRecordFreeQuotaFailure(authID)
-				log.Infof("antigravity executor: free quota exhausted for %s (claude non-stream), deferring to conductor for next credential", authID)
+			if !usedCredit {
+				switch classifyQuotaExhaustion(httpResp.StatusCode, bodyBytes) {
+				case quotaExhaustionHard:
+					agRecordFreeQuotaFailure(authID)
+					log.Infof("antigravity executor: free quota exhausted (hard) for %s (claude non-stream), deferring to conductor for next credential", authID)
+				case quotaExhaustionSoft:
+					agRecordFreeQuotaSoftFailure(authID)
+					log.Infof("antigravity executor: free quota exhausted (soft) for %s (claude non-stream), short cooldown, deferring to conductor", authID)
+				}
 			}
 
 			// Credit channel failed — record failure.
 			if usedCredit && httpResp.StatusCode == http.StatusTooManyRequests {
-				agRecordCreditFailure(authID)
+				switch classifyQuotaExhaustion(httpResp.StatusCode, bodyBytes) {
+				case quotaExhaustionHard:
+					agRecordCreditFailure(authID)
+				case quotaExhaustionSoft:
+					agRecordCreditSoftFailure(authID)
+				default:
+					agRecordCreditFailure(authID)
+				}
 			}
 
 			sErr := statusErr{code: httpResp.StatusCode, msg: string(bodyBytes)}
@@ -439,6 +484,10 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 			agResetCredit(authID)
 		} else {
 			agResetFreeQuota(authID)
+		}
+		if isProbe {
+			agResetCredit(authID)
+			log.Infof("antigravity executor: probe succeeded for %s (claude non-stream), resetting cooldown", authID)
 		}
 
 		out := make(chan cliproxyexecutor.StreamChunk)
@@ -747,13 +796,20 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 
 	// Pre-check quota avoidance: skip free quota if in cooldown.
 	usedCredit := false
+	isProbe := false
 	if agFreeQuotaInCooldown(authID) {
 		if agCreditInCooldown(authID) {
-			return nil, statusErr{code: http.StatusTooManyRequests, msg: "antigravity: both free quota and credit in cooldown"}
+			if agShouldProbe(authID) {
+				log.Infof("antigravity executor: both channels in cooldown for %s, sending probe request via free quota (stream)", authID)
+				isProbe = true
+			} else {
+				return nil, statusErr{code: http.StatusTooManyRequests, msg: "antigravity: both free quota and credit in cooldown"}
+			}
+		} else {
+			log.Debugf("antigravity executor: free quota in cooldown for %s, using credit directly (stream)", authID)
+			translated = antigravityInjectCreditTypes(translated)
+			usedCredit = true
 		}
-		log.Debugf("antigravity executor: free quota in cooldown for %s, using credit directly (stream)", authID)
-		translated = antigravityInjectCreditTypes(translated)
-		usedCredit = true
 	}
 
 	for attempt := 0; attempt < attempts; attempt++ {
@@ -791,14 +847,27 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 			}
 
 			// Free quota exhausted — record failure and let conductor try next credential's free quota.
-			if !usedCredit && antigravityIsFreeQuotaExhausted(httpResp.StatusCode, bodyBytes) {
-				agRecordFreeQuotaFailure(authID)
-				log.Infof("antigravity executor: free quota exhausted for %s (stream), deferring to conductor for next credential", authID)
+			if !usedCredit {
+				switch classifyQuotaExhaustion(httpResp.StatusCode, bodyBytes) {
+				case quotaExhaustionHard:
+					agRecordFreeQuotaFailure(authID)
+					log.Infof("antigravity executor: free quota exhausted (hard) for %s (stream), deferring to conductor for next credential", authID)
+				case quotaExhaustionSoft:
+					agRecordFreeQuotaSoftFailure(authID)
+					log.Infof("antigravity executor: free quota exhausted (soft) for %s (stream), short cooldown, deferring to conductor", authID)
+				}
 			}
 
 			// Credit channel failed — record failure.
 			if usedCredit && httpResp.StatusCode == http.StatusTooManyRequests {
-				agRecordCreditFailure(authID)
+				switch classifyQuotaExhaustion(httpResp.StatusCode, bodyBytes) {
+				case quotaExhaustionHard:
+					agRecordCreditFailure(authID)
+				case quotaExhaustionSoft:
+					agRecordCreditSoftFailure(authID)
+				default:
+					agRecordCreditFailure(authID)
+				}
 			}
 
 			sErr := statusErr{code: httpResp.StatusCode, msg: string(bodyBytes)}
@@ -815,6 +884,10 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 			agResetCredit(authID)
 		} else {
 			agResetFreeQuota(authID)
+		}
+		if isProbe {
+			agResetCredit(authID)
+			log.Infof("antigravity executor: probe succeeded for %s (stream), resetting cooldown", authID)
 		}
 
 		out := make(chan cliproxyexecutor.StreamChunk)
@@ -1355,14 +1428,7 @@ func antigravityShouldRetryNoCapacity(statusCode int, body []byte) bool {
 // antigravityIsFreeQuotaExhausted checks if the upstream response indicates
 // free-tier quota exhaustion (HTTP 429 with quota-related error body).
 func antigravityIsFreeQuotaExhausted(statusCode int, body []byte) bool {
-	if statusCode != http.StatusTooManyRequests {
-		return false
-	}
-	if len(body) == 0 {
-		return false
-	}
-	msg := strings.ToLower(string(body))
-	return strings.Contains(msg, "resource_exhausted") || strings.Contains(msg, "quota")
+	return classifyQuotaExhaustion(statusCode, body) != quotaExhaustionNone
 }
 
 // antigravityInjectCreditTypes adds enabledCreditTypes=["GOOGLE_ONE_AI"] to
