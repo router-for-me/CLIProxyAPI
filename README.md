@@ -72,8 +72,6 @@ Get 10% OFF GLM CODING PLAN：https://z.ai/subscribe?ic=8JVLJQFSKB
 
 CLIProxyAPI Guides: [https://help.router-for.me/](https://help.router-for.me/)
 
-For the optional git-backed config store, `GITSTORE_GIT_BRANCH` is optional. Leave it empty or unset to follow the remote repository's default branch, and set it only when you want to force a specific branch.
-
 ## Management API
 
 see [MANAGEMENT_API.md](https://help.router-for.me/management/api)

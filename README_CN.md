@@ -72,8 +72,6 @@ GLM CODING PLAN 是专为AI编码打造的订阅套餐，每月最低仅需20元
 
 CLIProxyAPI 用户手册： [https://help.router-for.me/](https://help.router-for.me/cn/)
 
-对于可选的 git 存储配置，`GITSTORE_GIT_BRANCH` 是可选项。留空或不设置时会跟随远程仓库的默认分支，只有在你需要强制指定分支时才设置它。
-
 ## 管理 API 文档
 
 请参见 [MANAGEMENT_API_CN.md](https://help.router-for.me/cn/management/api)
