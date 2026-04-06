@@ -229,11 +229,6 @@ func ensureQwenSystemMessage(payload []byte) ([]byte, error) {
 				for _, item := range content.Array() {
 					itemType := item.Get("type").String()
 
-					if itemType == "image_url" || itemType == "image" || itemType == "file" {
-						newParts = append(newParts, item.Raw)
-						continue
-					}
-
 					if itemType == "text" {
 						text := item.Get("text").String()
 						if len(text) == 0 {
@@ -250,6 +245,8 @@ func ensureQwenSystemMessage(payload []byte) ([]byte, error) {
 						} else {
 							newParts = append(newParts, item.Raw)
 						}
+					} else {
+						newParts = append(newParts, item.Raw)
 					}
 				}
 
@@ -289,10 +286,16 @@ func ensureQwenSystemMessage(payload []byte) ([]byte, error) {
 }
 
 
-// 智能文本拆分：优先在空格/标点/换行处切分，不切断单词
+// splitTextChunk splits text into chunks with a maximum length limit,
+// prioritizing semantic breakpoints to avoid breaking words, numbers or sentences.
+//
+// Key behaviors:
+//  1. Tries to find the nearest safe breakpoint (space, line break, tab, or common punctuation) within the last 20% of the limit
+//  2. Uses []rune to handle multi-byte characters (e.g., Chinese, emoji) correctly
+//  3. Falls back to hard cutting at the exact limit only if no safe breakpoint is found
 func splitTextChunk(text string, max int) []string {
 	var chunks []string
-	runes := []rune(text) // 处理中文等多字节字符
+	runes := []rune(text)
 	for len(runes) > 0 {
 		splitLen := max
 		if len(runes) <= splitLen {
@@ -300,19 +303,19 @@ func splitTextChunk(text string, max int) []string {
 			break
 		}
 
-		// 向前找最近的安全断点：空格、标点、换行
+		// Look backwards for the nearest safe breakpoint: space, punctuation, or line break
 		safeIdx := -1
-		// 在 [splitLen*0.8, splitLen] 区间内找断点
+		// Search within the range [splitLen*0.8, splitLen-1]
 		lookBackStart := splitLen * 8 / 10
-		for i := splitLen; i >= lookBackStart; i-- {
+		for i := splitLen - 1; i >= lookBackStart; i-- {
 			r := runes[i]
 			if r == ' ' || r == '\n' || r == '\t' || r == ',' || r == '.' || r == ';' || r == '!' || r == '?' {
-				safeIdx = i + 1 // 切在标点/空格后面
+				safeIdx = i + 1 // Cut right after the punctuation/space
 				break
 			}
 		}
 
-		// 实在找不到断点，才硬切
+		// Fall back to hard cutting at exact limit if no safe breakpoint found
 		if safeIdx == -1 {
 			safeIdx = splitLen
 		}
