@@ -190,9 +190,10 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	body, _ = sjson.DeleteBytes(body, "previous_response_id")
 	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
 	body, _ = sjson.DeleteBytes(body, "safety_identifier")
-	if !gjson.GetBytes(body, "instructions").Exists() {
-		body, _ = sjson.SetBytes(body, "instructions", "")
-	}
+	body = normalizeCodexWebsocketInstructions(body)
+	executionSessionID := executionSessionIDFromOptions(opts)
+	var turnMeta string
+	body, turnMeta = enrichCodexWebsocketSessionMetadata(body, executionSessionID)
 
 	httpURL := strings.TrimSuffix(baseURL, "/") + "/responses"
 	wsURL, err := buildCodexResponsesWebsocketURL(httpURL)
@@ -201,6 +202,13 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	}
 
 	body, wsHeaders := applyCodexPromptCacheHeaders(from, req, body)
+	if strings.TrimSpace(executionSessionID) != "" {
+		wsHeaders.Set("Session_id", executionSessionID)
+		wsHeaders.Set("x-client-request-id", executionSessionID)
+	}
+	if strings.TrimSpace(turnMeta) != "" {
+		wsHeaders.Set("x-codex-turn-metadata", turnMeta)
+	}
 	wsHeaders = applyCodexWebsocketHeaders(ctx, wsHeaders, auth, apiKey, e.cfg)
 
 	var authID, authLabel, authType, authValue string
@@ -210,7 +218,6 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		authType, authValue = auth.AccountInfo()
 	}
 
-	executionSessionID := executionSessionIDFromOptions(opts)
 	var sess *codexWebsocketSession
 	if executionSessionID != "" {
 		sess = e.getOrCreateSession(executionSessionID)
@@ -388,6 +395,15 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, body, requestedModel)
+	body, _ = sjson.SetBytes(body, "model", baseModel)
+	body, _ = sjson.SetBytes(body, "stream", true)
+	body, _ = sjson.DeleteBytes(body, "previous_response_id")
+	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
+	body, _ = sjson.DeleteBytes(body, "safety_identifier")
+	body = normalizeCodexWebsocketInstructions(body)
+	executionSessionID := executionSessionIDFromOptions(opts)
+	var turnMeta string
+	body, turnMeta = enrichCodexWebsocketSessionMetadata(body, executionSessionID)
 
 	httpURL := strings.TrimSuffix(baseURL, "/") + "/responses"
 	wsURL, err := buildCodexResponsesWebsocketURL(httpURL)
@@ -396,6 +412,13 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	}
 
 	body, wsHeaders := applyCodexPromptCacheHeaders(from, req, body)
+	if strings.TrimSpace(executionSessionID) != "" {
+		wsHeaders.Set("Session_id", executionSessionID)
+		wsHeaders.Set("x-client-request-id", executionSessionID)
+	}
+	if strings.TrimSpace(turnMeta) != "" {
+		wsHeaders.Set("x-codex-turn-metadata", turnMeta)
+	}
 	wsHeaders = applyCodexWebsocketHeaders(ctx, wsHeaders, auth, apiKey, e.cfg)
 
 	var authID, authLabel, authType, authValue string
@@ -403,7 +426,6 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	authLabel = auth.Label
 	authType, authValue = auth.AccountInfo()
 
-	executionSessionID := executionSessionIDFromOptions(opts)
 	var sess *codexWebsocketSession
 	if executionSessionID != "" {
 		sess = e.getOrCreateSession(executionSessionID)
@@ -802,7 +824,6 @@ func applyCodexPromptCacheHeaders(from sdktranslator.Format, req cliproxyexecuto
 
 	if cache.ID != "" {
 		rawJSON, _ = sjson.SetBytes(rawJSON, "prompt_cache_key", cache.ID)
-		headers.Set("Conversation_id", cache.ID)
 	}
 
 	return rawJSON, headers
@@ -1060,6 +1081,30 @@ func websocketHandshakeBody(resp *http.Response) []byte {
 		return nil
 	}
 	return body
+}
+
+func normalizeCodexWebsocketInstructions(body []byte) []byte {
+	instructions := gjson.GetBytes(body, "instructions")
+	if !instructions.Exists() || instructions.Type == gjson.Null || strings.TrimSpace(instructions.String()) == "" {
+		body, _ = sjson.SetBytes(body, "instructions", "You are a helpful assistant.")
+	}
+	return body
+}
+
+func enrichCodexWebsocketSessionMetadata(body []byte, sessionID string) ([]byte, string) {
+	if strings.TrimSpace(sessionID) == "" {
+		sessionID = uuid.NewString()
+	}
+	if promptCacheKey := gjson.GetBytes(body, "prompt_cache_key"); !promptCacheKey.Exists() || strings.TrimSpace(promptCacheKey.String()) == "" {
+		body, _ = sjson.SetBytes(body, "prompt_cache_key", sessionID)
+	}
+	clientMetadata := gjson.GetBytes(body, "client_metadata")
+	if !clientMetadata.Exists() || clientMetadata.Type == gjson.Null {
+		body, _ = sjson.SetRawBytes(body, "client_metadata", []byte(`{}`))
+	}
+	turnMeta := fmt.Sprintf(`{"session_id":"%s","turn_id":"","workspaces":{},"sandbox":"seccomp"}`, sessionID)
+	body, _ = sjson.SetBytes(body, "client_metadata.x-codex-turn-metadata", turnMeta)
+	return body, turnMeta
 }
 
 func closeHTTPResponseBody(resp *http.Response, logPrefix string) {

@@ -159,8 +159,24 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 	}
 	coreauth.ApplyCustomHeadersFromMetadata(a)
 	ApplyAuthExcludedModelsMeta(a, cfg, perAccountExcluded, "oauth")
-	// For codex auth files, extract plan_type from the JWT id_token.
+	// For codex auth files, extract plan_type from the JWT id_token and default websocket support on.
 	if provider == "codex" {
+		if raw, ok := metadata["websockets"]; ok && raw != nil {
+			switch v := raw.(type) {
+			case bool:
+				if v {
+					a.Attributes["websockets"] = "true"
+				} else {
+					a.Attributes["websockets"] = "false"
+				}
+			case string:
+				if trimmed := strings.TrimSpace(v); trimmed != "" {
+					a.Attributes["websockets"] = trimmed
+				}
+			}
+		} else {
+			a.Attributes["websockets"] = "true"
+		}
 		if idTokenRaw, ok := metadata["id_token"].(string); ok && strings.TrimSpace(idTokenRaw) != "" {
 			if claims, errParse := codex.ParseJWTToken(idTokenRaw); errParse == nil && claims != nil {
 				if pt := strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType); pt != "" {

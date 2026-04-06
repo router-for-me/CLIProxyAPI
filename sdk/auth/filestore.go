@@ -251,6 +251,24 @@ func (s *FileTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth,
 		LastRefreshedAt:  time.Time{},
 		NextRefreshAfter: time.Time{},
 	}
+	if provider == "codex" {
+		if raw, ok := metadata["websockets"]; ok && raw != nil {
+			switch v := raw.(type) {
+			case bool:
+				if v {
+					auth.Attributes["websockets"] = "true"
+				} else {
+					auth.Attributes["websockets"] = "false"
+				}
+			case string:
+				if trimmed := strings.TrimSpace(v); trimmed != "" {
+					auth.Attributes["websockets"] = trimmed
+				}
+			}
+		} else {
+			auth.Attributes["websockets"] = "true"
+		}
+	}
 	if email, ok := metadata["email"].(string); ok && email != "" {
 		auth.Attributes["email"] = email
 	}
