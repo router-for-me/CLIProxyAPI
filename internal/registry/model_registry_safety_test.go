@@ -147,3 +147,58 @@ func TestLookupModelInfoReturnsCloneForStaticDefinitions(t *testing.T) {
 		t.Fatalf("expected static lookup clone, got %+v", second)
 	}
 }
+
+func TestNormalizeModelKey(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		input string
+		want  string
+	}{
+		// Thinking level suffixes.
+		{"claude-opus-4-6-thinking(medium)", "claude-opus-4-6-thinking"},
+		{"claude-sonnet-4-6(high)", "claude-sonnet-4-6"},
+		{"gpt-5.2(low)", "gpt-5.2"},
+		// Numeric budget suffixes.
+		{"claude-opus-4-6-thinking(8192)", "claude-opus-4-6-thinking"},
+		{"claude-sonnet-4-6(16384)", "claude-sonnet-4-6"},
+		// No suffix — unchanged.
+		{"claude-opus-4-6-thinking", "claude-opus-4-6-thinking"},
+		{"gemini-3-flash", "gemini-3-flash"},
+		// Whitespace.
+		{"  claude-opus-4-6-thinking(medium)  ", "claude-opus-4-6-thinking"},
+		{"  gemini-3-flash  ", "gemini-3-flash"},
+		// Edge cases.
+		{"", ""},
+		{"()", "()"},
+		{"model()", "model"},
+	}
+	for _, tt := range tests {
+		if got := normalizeModelKey(tt.input); got != tt.want {
+			t.Errorf("normalizeModelKey(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}
+
+func TestSuspendResumeWithThinkingSuffix(t *testing.T) {
+	t.Parallel()
+	r := newTestModelRegistry()
+	r.RegisterClient("client-1", "antigravity", []*ModelInfo{{ID: "claude-opus-4-6-thinking"}})
+
+	// Suspend using suffixed model name (as MarkResult would call it).
+	r.SuspendClientModel("client-1", "claude-opus-4-6-thinking(medium)", "quota")
+
+	// Check using base model name (as legacy path would call it).
+	if !r.IsClientModelSuspended("client-1", "claude-opus-4-6-thinking") {
+		t.Fatal("expected client to be suspended for base model name")
+	}
+	// Check using suffixed model name too.
+	if !r.IsClientModelSuspended("client-1", "claude-opus-4-6-thinking(medium)") {
+		t.Fatal("expected client to be suspended for suffixed model name")
+	}
+
+	// Resume using suffixed model name.
+	r.ResumeClientModel("client-1", "claude-opus-4-6-thinking(medium)")
+	if r.IsClientModelSuspended("client-1", "claude-opus-4-6-thinking") {
+		t.Fatal("expected client to be resumed")
+	}
+}

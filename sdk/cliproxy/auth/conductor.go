@@ -113,6 +113,14 @@ type Selector interface {
 	Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error)
 }
 
+// StickyEvictor is an optional interface for selectors that support
+// evicting sticky session bindings. The conductor calls EvictForPayload
+// after any account-level failure (429, 403, 500, etc.) so the next
+// request routes to a different auth. Only request-invalid errors skip eviction.
+type StickyEvictor interface {
+	EvictForPayload(payload []byte, model string)
+}
+
 // Hook captures lifecycle callbacks for observing auth changes.
 type Hook interface {
 	// OnAuthRegistered fires when a new auth is registered.
@@ -255,6 +263,16 @@ func (m *Manager) SetSelector(selector Selector) {
 	if m.scheduler != nil {
 		m.scheduler.setSelector(selector)
 		m.syncScheduler()
+	}
+}
+
+// evictStickySession clears the sticky binding for the given request payload
+// and model, if the selector supports eviction. This is a no-op for non-sticky
+// selectors.
+func (m *Manager) evictStickySession(payload []byte, model string) {
+	if evictor, ok := m.selector.(StickyEvictor); ok {
+		evictor.EvictForPayload(payload, model)
+		log.Debugf("sticky session evicted for model %s (payload %d bytes)", model, len(payload))
 	}
 }
 
@@ -1166,6 +1184,11 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			if isRequestInvalidError(authErr) {
 				return cliproxyexecutor.Response{}, authErr
 			}
+			// Evict the sticky binding so the next request with the same
+			// session key routes to a different auth. Any account-level failure
+			// (429, 403, 500, 502, etc.) warrants trying a different account;
+			// only request-invalid errors (already handled above) should not evict.
+			m.evictStickySession(opts.OriginalRequest, routeModel)
 			// Track fallback-capable auths that failed with 429 for quota retry.
 			if statusCodeFromError(authErr) == http.StatusTooManyRequests {
 				if qf, ok := executor.(QuotaFallbackProvider); ok && qf.SupportsQuotaFallback() {
@@ -1247,6 +1270,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			if isRequestInvalidError(authErr) {
 				return cliproxyexecutor.Response{}, authErr
 			}
+			m.evictStickySession(opts.OriginalRequest, routeModel)
 			lastErr = authErr
 			continue
 		}
@@ -1320,6 +1344,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			if isRequestInvalidError(errStream) {
 				return nil, errStream
 			}
+			m.evictStickySession(opts.OriginalRequest, routeModel)
 			if statusCodeFromError(errStream) == http.StatusTooManyRequests {
 				if qf, ok := executor.(QuotaFallbackProvider); ok && qf.SupportsQuotaFallback() {
 					fallbackAuths[auth.ID] = struct{}{}
@@ -2392,8 +2417,13 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 		if _, used := tried[candidate.ID]; used {
 			continue
 		}
-		if modelKey != "" && registryRef != nil && !registryRef.ClientSupportsModel(candidate.ID, modelKey) {
-			continue
+		if modelKey != "" && registryRef != nil {
+			if !registryRef.ClientSupportsModel(candidate.ID, modelKey) {
+				continue
+			}
+			if registryRef.IsClientModelSuspended(candidate.ID, modelKey) {
+				continue
+			}
 		}
 		candidates = append(candidates, candidate)
 	}
@@ -2500,8 +2530,13 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 		if _, ok := m.executors[providerKey]; !ok {
 			continue
 		}
-		if modelKey != "" && registryRef != nil && !registryRef.ClientSupportsModel(candidate.ID, modelKey) {
-			continue
+		if modelKey != "" && registryRef != nil {
+			if !registryRef.ClientSupportsModel(candidate.ID, modelKey) {
+				continue
+			}
+			if registryRef.IsClientModelSuspended(candidate.ID, modelKey) {
+				continue
+			}
 		}
 		candidates = append(candidates, candidate)
 	}

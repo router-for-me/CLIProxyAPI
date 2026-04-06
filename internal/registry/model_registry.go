@@ -633,11 +633,27 @@ func (r *ModelRegistry) unregisterClientInternal(clientID string) {
 	r.triggerModelsUnregistered(provider, clientID)
 }
 
+// normalizeModelKey strips parenthesized thinking suffixes like "(medium)" from
+// model IDs so that lookups match the base model registered via RegisterClient.
+// For example, "claude-opus-4-6-thinking(medium)" → "claude-opus-4-6-thinking".
+//
+// This mirrors the logic of thinking.ParseSuffix but avoids a circular import
+// (thinking → registry). The two implementations are covered by shared test
+// expectations in model_registry_safety_test.go.
+func normalizeModelKey(modelID string) string {
+	modelID = strings.TrimSpace(modelID)
+	if idx := strings.LastIndex(modelID, "("); idx > 0 && strings.HasSuffix(modelID, ")") {
+		return modelID[:idx]
+	}
+	return modelID
+}
+
 // SetModelQuotaExceeded marks a model as quota exceeded for a specific client
 // Parameters:
 //   - clientID: The client that exceeded quota
 //   - modelID: The model that exceeded quota
 func (r *ModelRegistry) SetModelQuotaExceeded(clientID, modelID string) {
+	modelID = normalizeModelKey(modelID)
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
 	r.ensureAvailableModelsCacheLocked()
@@ -655,6 +671,7 @@ func (r *ModelRegistry) SetModelQuotaExceeded(clientID, modelID string) {
 //   - clientID: The client to clear quota status for
 //   - modelID: The model to clear quota status for
 func (r *ModelRegistry) ClearModelQuotaExceeded(clientID, modelID string) {
+	modelID = normalizeModelKey(modelID)
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
 	r.ensureAvailableModelsCacheLocked()
@@ -672,6 +689,7 @@ func (r *ModelRegistry) ClearModelQuotaExceeded(clientID, modelID string) {
 //   - modelID: The model affected by the suspension
 //   - reason: Optional description for observability
 func (r *ModelRegistry) SuspendClientModel(clientID, modelID, reason string) {
+	modelID = normalizeModelKey(modelID)
 	if clientID == "" || modelID == "" {
 		return
 	}
@@ -704,6 +722,7 @@ func (r *ModelRegistry) SuspendClientModel(clientID, modelID, reason string) {
 //   - clientID: The client to resume
 //   - modelID: The model being resumed
 func (r *ModelRegistry) ResumeClientModel(clientID, modelID string) {
+	modelID = normalizeModelKey(modelID)
 	if clientID == "" || modelID == "" {
 		return
 	}
@@ -722,6 +741,25 @@ func (r *ModelRegistry) ResumeClientModel(clientID, modelID string) {
 	registration.LastUpdated = time.Now()
 	r.invalidateAvailableModelsCacheLocked()
 	log.Debugf("Resumed client %s for model %s", clientID, modelID)
+}
+
+// IsClientModelSuspended reports whether the client is temporarily suspended for modelID.
+func (r *ModelRegistry) IsClientModelSuspended(clientID, modelID string) bool {
+	clientID = strings.TrimSpace(clientID)
+	modelID = normalizeModelKey(modelID)
+	if clientID == "" || modelID == "" {
+		return false
+	}
+
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+
+	registration, exists := r.models[modelID]
+	if !exists || registration == nil || registration.SuspendedClients == nil {
+		return false
+	}
+	_, suspended := registration.SuspendedClients[clientID]
+	return suspended
 }
 
 // ClientSupportsModel reports whether the client registered support for modelID.

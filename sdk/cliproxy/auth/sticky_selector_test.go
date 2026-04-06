@@ -165,7 +165,8 @@ func TestStickySelector_Pick_GjsonKeyTakesPrecedenceOverHash(t *testing.T) {
 	}
 
 	// Remove the cached gjson-based entry and re-pick — should re-bind via gjson, not hash.
-	s.EvictSession("uid-999")
+	// Session key is now stored as "model:baseKey" composite.
+	s.EvictSessionForModel("uid-999", "claude-sonnet-4-6")
 	second, err := s.Pick(context.Background(), "antigravity", "claude-sonnet-4-6", opts, auths)
 	if err != nil {
 		t.Fatalf("Pick() error = %v", err)
@@ -218,5 +219,108 @@ func TestStickySelector_Config_NilDefaultsToEnabled(t *testing.T) {
 	s := NewStickySelector(16, nil, nil)
 	if s.bodyPrefixHashSize != defaultBodyPrefixHashSize {
 		t.Fatalf("bodyPrefixHashSize = %d, want %d", s.bodyPrefixHashSize, defaultBodyPrefixHashSize)
+	}
+}
+
+func TestStickySelector_PerModelStickyKeys(t *testing.T) {
+	t.Parallel()
+
+	s := NewStickySelector(16, nil, nil)
+	auths := []*Auth{
+		{ID: "acct-a"},
+		{ID: "acct-b"},
+		{ID: "acct-c"},
+	}
+
+	body := []byte(`{"metadata":{"user_id":"uid-shared"}}`)
+	opts := cliproxyexecutor.Options{OriginalRequest: body}
+
+	// Pick for claude model — binds to some account.
+	claude, err := s.Pick(context.Background(), "antigravity", "claude-opus-4-6-thinking", opts, auths)
+	if err != nil {
+		t.Fatalf("Pick(claude) error = %v", err)
+	}
+
+	// Pick for gemini model with same body — should get independent binding.
+	gemini, err := s.Pick(context.Background(), "antigravity", "gemini-3-flash", opts, auths)
+	if err != nil {
+		t.Fatalf("Pick(gemini) error = %v", err)
+	}
+
+	// Both should be cached (2 entries: one per model).
+	if s.CacheLen() != 2 {
+		t.Fatalf("CacheLen() = %d, want 2", s.CacheLen())
+	}
+
+	// Verify each model sticks to its own binding.
+	claude2, _ := s.Pick(context.Background(), "antigravity", "claude-opus-4-6-thinking", opts, auths)
+	if claude2.ID != claude.ID {
+		t.Fatalf("claude sticky broken: got %q, want %q", claude2.ID, claude.ID)
+	}
+	gemini2, _ := s.Pick(context.Background(), "antigravity", "gemini-3-flash", opts, auths)
+	if gemini2.ID != gemini.ID {
+		t.Fatalf("gemini sticky broken: got %q, want %q", gemini2.ID, gemini.ID)
+	}
+}
+
+func TestStickySelector_EvictForPayload_OnlyEvictsTargetModel(t *testing.T) {
+	t.Parallel()
+
+	s := NewStickySelector(16, nil, nil)
+	auths := []*Auth{
+		{ID: "acct-a"},
+		{ID: "acct-b"},
+	}
+
+	body := []byte(`{"metadata":{"user_id":"uid-evict-test"}}`)
+	opts := cliproxyexecutor.Options{OriginalRequest: body}
+
+	// Bind both models.
+	claude, _ := s.Pick(context.Background(), "antigravity", "claude-opus-4-6-thinking", opts, auths)
+	gemini, _ := s.Pick(context.Background(), "antigravity", "gemini-3-flash", opts, auths)
+	if s.CacheLen() != 2 {
+		t.Fatalf("CacheLen() = %d, want 2", s.CacheLen())
+	}
+
+	// Evict only claude.
+	s.EvictForPayload(body, "claude-opus-4-6-thinking")
+	if s.CacheLen() != 1 {
+		t.Fatalf("CacheLen() after evict = %d, want 1", s.CacheLen())
+	}
+
+	// Gemini binding should survive.
+	gemini2, _ := s.Pick(context.Background(), "antigravity", "gemini-3-flash", opts, auths)
+	if gemini2.ID != gemini.ID {
+		t.Fatalf("gemini binding lost after claude eviction: got %q, want %q", gemini2.ID, gemini.ID)
+	}
+
+	// Claude should get a fresh pick (may or may not be the same account via round-robin).
+	claude2, _ := s.Pick(context.Background(), "antigravity", "claude-opus-4-6-thinking", opts, auths)
+	_ = claude
+	_ = claude2
+	if s.CacheLen() != 2 {
+		t.Fatalf("CacheLen() after re-pick = %d, want 2", s.CacheLen())
+	}
+}
+
+func TestStickySelector_EvictSessionForModel(t *testing.T) {
+	t.Parallel()
+
+	s := NewStickySelector(16, nil, nil)
+	auths := []*Auth{{ID: "acct-a"}, {ID: "acct-b"}}
+
+	body := []byte(`{"metadata":{"user_id":"uid-model-evict"}}`)
+	opts := cliproxyexecutor.Options{OriginalRequest: body}
+
+	s.Pick(context.Background(), "antigravity", "model-a", opts, auths)
+	s.Pick(context.Background(), "antigravity", "model-b", opts, auths)
+	if s.CacheLen() != 2 {
+		t.Fatalf("CacheLen() = %d, want 2", s.CacheLen())
+	}
+
+	// Evict only model-a via EvictSessionForModel.
+	s.EvictSessionForModel("uid-model-evict", "model-a")
+	if s.CacheLen() != 1 {
+		t.Fatalf("CacheLen() after EvictSessionForModel = %d, want 1", s.CacheLen())
 	}
 }

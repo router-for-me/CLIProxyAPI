@@ -75,8 +75,10 @@ func NewStickySelector(lruSize int, gjsonPaths []string, bodyHash *StickyBodyHas
 
 // Pick selects an auth using session affinity when a session key is present,
 // falling back to round-robin otherwise.
+// The model parameter is incorporated into the session key so that different
+// models maintain independent sticky pools.
 func (s *StickySelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
-	sessionKey := s.extractSessionKey(opts.OriginalRequest)
+	sessionKey := s.sessionKey(opts.OriginalRequest, model)
 	if sessionKey == "" {
 		return s.inner.Pick(ctx, provider, model, opts, auths)
 	}
@@ -102,6 +104,21 @@ func (s *StickySelector) Pick(ctx context.Context, provider, model string, opts 
 	// Record the binding.
 	s.cache.Put(sessionKey, selected.ID)
 	return selected, nil
+}
+
+// sessionKey builds a composite key from the request payload and model.
+// Including the model ensures that requests for different models maintain
+// independent sticky pools (e.g. Claude and Gemini requests are routed
+// to different accounts even when the session is the same).
+func (s *StickySelector) sessionKey(payload []byte, model string) string {
+	base := s.extractSessionKey(payload)
+	if base == "" {
+		return ""
+	}
+	if model != "" {
+		return model + ":" + base
+	}
+	return base
 }
 
 // extractSessionKey tries each configured gjson path against the request body
@@ -138,9 +155,36 @@ func (s *StickySelector) bodyPrefixHash(payload []byte) string {
 	return "bph:" + hex.EncodeToString(sum[:16])
 }
 
-// EvictSession removes the binding for the given session key.
+// EvictSession removes the binding for the given raw session key.
+// Note: since session keys are now stored as "model:baseKey" composites,
+// callers that know both the base key and model should use EvictSessionForModel
+// or EvictForPayload instead.
 func (s *StickySelector) EvictSession(sessionKey string) {
 	s.cache.Remove(sessionKey)
+}
+
+// EvictSessionForModel removes the binding for a specific base session key and model.
+// The composite key "model:sessionKey" is removed from the cache.
+func (s *StickySelector) EvictSessionForModel(sessionKey, model string) {
+	if sessionKey == "" {
+		return
+	}
+	if model != "" {
+		s.cache.Remove(model + ":" + sessionKey)
+	} else {
+		s.cache.Remove(sessionKey)
+	}
+}
+
+// EvictForPayload recomputes the session key from the request payload and model,
+// then removes the corresponding sticky binding. This is used by the conductor
+// to clear sticky affinity on account-level failures so the next request picks
+// a different auth.
+func (s *StickySelector) EvictForPayload(payload []byte, model string) {
+	key := s.sessionKey(payload, model)
+	if key != "" {
+		s.cache.Remove(key)
+	}
 }
 
 // CacheLen returns the number of active session bindings.
