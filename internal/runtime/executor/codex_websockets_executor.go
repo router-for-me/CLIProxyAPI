@@ -1099,7 +1099,6 @@ func enrichCodexWebsocketSessionMetadata(body []byte, sessionID string) ([]byte,
 func prepareCodexWebsocketRequestBody(body []byte, baseModel string, sessionID string, stream bool) ([]byte, string, string) {
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 	body, _ = sjson.SetBytes(body, "stream", stream)
-	body, _ = sjson.DeleteBytes(body, "previous_response_id")
 	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
 	body, _ = sjson.DeleteBytes(body, "safety_identifier")
 	body = normalizeCodexWebsocketInstructions(body)
