@@ -313,6 +313,13 @@ type PayloadModelRule struct {
 	Protocol string `yaml:"protocol" json:"protocol"`
 }
 
+// TextReplacement defines a literal find/replace rule used for cloaked
+// request or response body rewriting.
+type TextReplacement struct {
+	Find    string `yaml:"find" json:"find"`
+	Replace string `yaml:"replace" json:"replace"`
+}
+
 // CloakConfig configures request cloaking for non-Claude-Code clients.
 // Cloaking disguises API requests to appear as originating from the official Claude Code CLI.
 type CloakConfig struct {
@@ -334,6 +341,14 @@ type CloakConfig struct {
 	// CacheUserID controls whether Claude user_id values are cached per API key.
 	// When false, a fresh random user_id is generated for every request.
 	CacheUserID *bool `yaml:"cache-user-id,omitempty" json:"cache-user-id,omitempty"`
+
+	// RequestReplacements applies literal outbound request rewrites after cloaking
+	// is enabled for the current request.
+	RequestReplacements []TextReplacement `yaml:"request-replacements,omitempty" json:"request-replacements,omitempty"`
+
+	// ResponseReplacements applies literal inbound response rewrites before the
+	// payload is returned to the downstream client.
+	ResponseReplacements []TextReplacement `yaml:"response-replacements,omitempty" json:"response-replacements,omitempty"`
 }
 
 // ClaudeKey represents the configuration for a Claude API key,
@@ -861,6 +876,11 @@ func (cfg *Config) SanitizeClaudeKeys() {
 		entry.Prefix = normalizeModelPrefix(entry.Prefix)
 		entry.Headers = NormalizeHeaders(entry.Headers)
 		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
+		if entry.Cloak != nil {
+			entry.Cloak.Mode = strings.TrimSpace(entry.Cloak.Mode)
+			entry.Cloak.RequestReplacements = NormalizeTextReplacements(entry.Cloak.RequestReplacements)
+			entry.Cloak.ResponseReplacements = NormalizeTextReplacements(entry.Cloak.ResponseReplacements)
+		}
 	}
 }
 
@@ -927,6 +947,34 @@ func NormalizeHeaders(headers map[string]string) map[string]string {
 		return nil
 	}
 	return clean
+}
+
+// NormalizeTextReplacements trims and deduplicates literal text replacement
+// rules by their find token, preserving the first occurrence.
+func NormalizeTextReplacements(entries []TextReplacement) []TextReplacement {
+	if len(entries) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(entries))
+	out := make([]TextReplacement, 0, len(entries))
+	for _, entry := range entries {
+		find := entry.Find
+		if strings.TrimSpace(find) == "" {
+			continue
+		}
+		if _, ok := seen[find]; ok {
+			continue
+		}
+		seen[find] = struct{}{}
+		out = append(out, TextReplacement{
+			Find:    find,
+			Replace: entry.Replace,
+		})
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // NormalizeExcludedModels trims, lowercases, and deduplicates model exclusion patterns.

@@ -278,6 +278,8 @@ func (h *Handler) PatchClaudeKey(c *gin.Context) {
 		Models         *[]config.ClaudeModel `json:"models"`
 		Headers        *map[string]string    `json:"headers"`
 		ExcludedModels *[]string             `json:"excluded-models"`
+		Cloak          *config.CloakConfig   `json:"cloak"`
+		Experimental   *bool                 `json:"experimental-cch-signing"`
 	}
 	var body struct {
 		Index *int            `json:"index"`
@@ -327,6 +329,13 @@ func (h *Handler) PatchClaudeKey(c *gin.Context) {
 	}
 	if body.Value.ExcludedModels != nil {
 		entry.ExcludedModels = config.NormalizeExcludedModels(*body.Value.ExcludedModels)
+	}
+	if body.Value.Cloak != nil {
+		copyCloak := *body.Value.Cloak
+		entry.Cloak = &copyCloak
+	}
+	if body.Value.Experimental != nil {
+		entry.ExperimentalCCHSigning = *body.Value.Experimental
 	}
 	normalizeClaudeKey(&entry)
 	h.cfg.ClaudeKey[targetIndex] = entry
