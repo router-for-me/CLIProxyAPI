@@ -67,13 +67,69 @@ type claudeCloakResponseStreamKey struct {
 	index int
 }
 
+type claudeCloakReplacementStage struct {
+	find    []byte
+	replace []byte
+	pending []byte
+}
+
+func newClaudeCloakReplacementStage(replacement config.TextReplacement) *claudeCloakReplacementStage {
+	if replacement.Find == "" {
+		return nil
+	}
+	return &claudeCloakReplacementStage{
+		find:    []byte(replacement.Find),
+		replace: []byte(replacement.Replace),
+	}
+}
+
+func (s *claudeCloakReplacementStage) process(fragment []byte, flush bool) []byte {
+	if s == nil {
+		return fragment
+	}
+	combined := make([]byte, 0, len(s.pending)+len(fragment))
+	combined = append(combined, s.pending...)
+	combined = append(combined, fragment...)
+	if len(combined) == 0 {
+		return nil
+	}
+	if flush {
+		s.pending = s.pending[:0]
+		return bytes.ReplaceAll(combined, s.find, s.replace)
+	}
+
+	out := make([]byte, 0, len(combined))
+	i := 0
+	for i < len(combined) {
+		if bytes.HasPrefix(combined[i:], s.find) {
+			out = append(out, s.replace...)
+			i += len(s.find)
+			continue
+		}
+		if len(combined)-i < len(s.find) && bytes.HasPrefix(s.find, combined[i:]) {
+			break
+		}
+		out = append(out, combined[i])
+		i++
+	}
+
+	s.pending = append(s.pending[:0], combined[i:]...)
+	return out
+}
+
 type claudeCloakResponseTextStream struct {
-	replacements []config.TextReplacement
-	pending      []byte
+	stages []*claudeCloakReplacementStage
 }
 
 func newClaudeCloakResponseTextStream(replacements []config.TextReplacement) *claudeCloakResponseTextStream {
-	return &claudeCloakResponseTextStream{replacements: replacements}
+	stages := make([]*claudeCloakReplacementStage, 0, len(replacements))
+	for _, replacement := range replacements {
+		stage := newClaudeCloakReplacementStage(replacement)
+		if stage != nil {
+			stages = append(stages, stage)
+		}
+	}
+	return &claudeCloakResponseTextStream{stages: stages}
 }
 
 func (s *claudeCloakResponseTextStream) Consume(fragment []byte) []byte {
@@ -88,69 +144,18 @@ func (s *claudeCloakResponseTextStream) process(fragment []byte, flush bool) []b
 	if s == nil {
 		return fragment
 	}
-	combined := make([]byte, 0, len(s.pending)+len(fragment))
-	combined = append(combined, s.pending...)
-	combined = append(combined, fragment...)
-	if len(combined) == 0 {
-		return nil
-	}
-
-	out := make([]byte, 0, len(combined))
-	i := 0
-	for i < len(combined) {
-		if !flush && couldMatchClaudeCloakReplacementLater(combined[i:], s.replacements) {
-			break
-		}
-		if replacement, matchLen, ok := matchClaudeCloakReplacementAt(combined[i:], s.replacements); ok {
-			out = append(out, replacement.Replace...)
-			i += matchLen
-			continue
-		}
-		out = append(out, combined[i])
-		i++
-	}
-
-	s.pending = append(s.pending[:0], combined[i:]...)
-	if flush {
-		s.pending = s.pending[:0]
+	out := fragment
+	for _, stage := range s.stages {
+		out = stage.process(out, flush)
 	}
 	return out
 }
 
-func matchClaudeCloakReplacementAt(data []byte, replacements []config.TextReplacement) (config.TextReplacement, int, bool) {
-	for _, replacement := range replacements {
-		find := []byte(replacement.Find)
-		if len(find) == 0 || len(data) < len(find) {
-			continue
-		}
-		if bytes.HasPrefix(data, find) {
-			return replacement, len(find), true
-		}
-	}
-	return config.TextReplacement{}, 0, false
-}
-
-func couldMatchClaudeCloakReplacementLater(data []byte, replacements []config.TextReplacement) bool {
-	if len(data) == 0 {
-		return false
-	}
-	for _, replacement := range replacements {
-		find := []byte(replacement.Find)
-		if len(find) <= len(data) || len(find) == 0 {
-			continue
-		}
-		if bytes.HasPrefix(find, data) {
-			return true
-		}
-	}
-	return false
-}
-
 type claudeCloakResponseStreamRewriter struct {
-	replacements  []config.TextReplacement
-	blockKinds    map[int]string
-	streams       map[claudeCloakResponseStreamKey]*claudeCloakResponseTextStream
-	dropNextBlank bool
+	replacements []config.TextReplacement
+	blockKinds   map[int]string
+	streams      map[claudeCloakResponseStreamKey]*claudeCloakResponseTextStream
+	frame        [][]byte
 }
 
 func newClaudeCloakResponseStreamRewriter(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth) *claudeCloakResponseStreamRewriter {
@@ -172,19 +177,38 @@ func (r *claudeCloakResponseStreamRewriter) RewriteLine(line []byte) [][]byte {
 	if r == nil {
 		return [][]byte{line}
 	}
-	trimmed := bytes.TrimSpace(line)
-	if len(trimmed) == 0 {
-		if r.dropNextBlank {
-			r.dropNextBlank = false
+	cloned := append([]byte(nil), line...)
+	if len(bytes.TrimSpace(cloned)) == 0 {
+		if len(r.frame) == 0 {
+			return [][]byte{cloned}
+		}
+		out := r.rewriteFrame(r.frame)
+		r.frame = nil
+		if len(out) == 0 {
 			return nil
 		}
-		return [][]byte{line}
+		return append(out, []byte{})
 	}
+	r.frame = append(r.frame, cloned)
+	return nil
+}
 
-	payload := helps.JSONPayload(line)
-	if len(payload) == 0 || !gjson.ValidBytes(payload) {
-		r.dropNextBlank = false
-		return [][]byte{line}
+func (r *claudeCloakResponseStreamRewriter) FlushPending() [][]byte {
+	if r == nil || len(r.frame) == 0 {
+		return nil
+	}
+	out := r.rewriteFrame(r.frame)
+	r.frame = nil
+	return out
+}
+
+func (r *claudeCloakResponseStreamRewriter) rewriteFrame(frame [][]byte) [][]byte {
+	if len(frame) == 0 {
+		return nil
+	}
+	dataIdx, payload, ok := claudeCloakResponseFramePayload(frame)
+	if !ok || !gjson.ValidBytes(payload) {
+		return claudeCloakCloneLines(frame)
 	}
 
 	root := gjson.ParseBytes(payload)
@@ -193,42 +217,44 @@ func (r *claudeCloakResponseStreamRewriter) RewriteLine(line []byte) [][]byte {
 		if kind := claudeCloakResponseBlockKind(root.Get("content_block.type").String()); kind != "" {
 			r.blockKinds[int(root.Get("index").Int())] = kind
 		}
-		r.dropNextBlank = false
-		return [][]byte{line}
+		return claudeCloakCloneLines(frame)
 	case "content_block_delta":
-		kind, fieldPath, deltaType := claudeCloakResponseDeltaSpec(root.Get("delta.type").String())
+		kind, fieldPath, _ := claudeCloakResponseDeltaSpec(root.Get("delta.type").String())
 		if kind == "" {
-			r.dropNextBlank = false
-			return [][]byte{line}
+			return claudeCloakCloneLines(frame)
 		}
 		index := int(root.Get("index").Int())
 		updatedFragment := r.stream(kind, index).Consume([]byte(root.Get(fieldPath).String()))
 		if len(updatedFragment) == 0 {
-			r.dropNextBlank = true
 			return nil
 		}
 		updatedPayload, err := sjson.SetBytes(payload, fieldPath, string(updatedFragment))
 		if err != nil {
-			r.dropNextBlank = false
-			return [][]byte{line}
+			return claudeCloakCloneLines(frame)
 		}
 		r.blockKinds[index] = kind
-		r.dropNextBlank = false
-		_ = deltaType
-		return [][]byte{claudeCloakResponseStreamLine(line, updatedPayload)}
+		return claudeCloakResponseReplaceFramePayload(frame, dataIdx, updatedPayload)
 	case "content_block_stop":
 		index := int(root.Get("index").Int())
 		kind := r.blockKinds[index]
 		delete(r.blockKinds, index)
 		flushed := r.flush(kind, index)
-		r.dropNextBlank = false
+		stopFrame := claudeCloakCloneLines(frame)
 		if kind == "" || len(flushed) == 0 {
-			return [][]byte{line}
+			return stopFrame
 		}
-		return [][]byte{claudeCloakResponseDeltaLine(line, index, kind, flushed), []byte{}, line}
+		deltaPayload := claudeCloakResponseDeltaPayload(index, kind, flushed)
+		if len(deltaPayload) == 0 {
+			return stopFrame
+		}
+		deltaFrame := claudeCloakResponseSyntheticFrame(frame, deltaPayload, "content_block_delta")
+		out := make([][]byte, 0, len(deltaFrame)+1+len(stopFrame))
+		out = append(out, deltaFrame...)
+		out = append(out, []byte{})
+		out = append(out, stopFrame...)
+		return out
 	default:
-		r.dropNextBlank = false
-		return [][]byte{line}
+		return claudeCloakCloneLines(frame)
 	}
 }
 
@@ -281,7 +307,7 @@ func claudeCloakResponseDeltaSpec(deltaType string) (kind string, fieldPath stri
 	}
 }
 
-func claudeCloakResponseDeltaLine(line []byte, index int, kind string, fragment []byte) []byte {
+func claudeCloakResponseDeltaPayload(index int, kind string, fragment []byte) []byte {
 	var payload []byte
 	switch kind {
 	case "text":
@@ -297,7 +323,63 @@ func claudeCloakResponseDeltaLine(line []byte, index int, kind string, fragment 
 		return nil
 	}
 	payload, _ = sjson.SetBytes(payload, "index", index)
-	return claudeCloakResponseStreamLine(line, payload)
+	return payload
+}
+
+func claudeCloakResponseSyntheticFrame(baseFrame [][]byte, payload []byte, eventName string) [][]byte {
+	if len(baseFrame) == 0 {
+		return nil
+	}
+	out := make([][]byte, 0, 2)
+	if claudeCloakFrameHasEventLine(baseFrame) {
+		out = append(out, []byte("event: "+eventName))
+	}
+	out = append(out, claudeCloakResponseStreamLine(claudeCloakResponseReferenceDataLine(baseFrame), payload))
+	return out
+}
+
+func claudeCloakResponseReplaceFramePayload(frame [][]byte, dataIdx int, payload []byte) [][]byte {
+	out := claudeCloakCloneLines(frame)
+	out[dataIdx] = claudeCloakResponseStreamLine(frame[dataIdx], payload)
+	return out
+}
+
+func claudeCloakResponseFramePayload(frame [][]byte) (int, []byte, bool) {
+	for i, line := range frame {
+		payload := helps.JSONPayload(line)
+		if len(payload) == 0 {
+			continue
+		}
+		return i, payload, true
+	}
+	return -1, nil, false
+}
+
+func claudeCloakFrameHasEventLine(frame [][]byte) bool {
+	for _, line := range frame {
+		if bytes.HasPrefix(bytes.TrimSpace(line), []byte("event:")) {
+			return true
+		}
+	}
+	return false
+}
+
+func claudeCloakResponseReferenceDataLine(frame [][]byte) []byte {
+	for _, line := range frame {
+		trimmed := bytes.TrimSpace(line)
+		if bytes.HasPrefix(trimmed, []byte("data:")) {
+			return line
+		}
+	}
+	return []byte("data:")
+}
+
+func claudeCloakCloneLines(lines [][]byte) [][]byte {
+	out := make([][]byte, len(lines))
+	for i, line := range lines {
+		out[i] = append([]byte(nil), line...)
+	}
+	return out
 }
 
 func claudeCloakResponseStreamLine(line []byte, payload []byte) []byte {

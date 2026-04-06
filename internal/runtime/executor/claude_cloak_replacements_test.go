@@ -155,3 +155,141 @@ func TestApplyClaudeCloakResponseReplacements_AppliesReverseMap(t *testing.T) {
 		t.Fatalf("expected reverse mapping to restore original text, got %s", text)
 	}
 }
+
+func TestClaudeCloakResponseTextStream_AppliesChainedRulesLikeNonStream(t *testing.T) {
+	replacements := []config.TextReplacement{
+		{Find: "A", Replace: "B"},
+		{Find: "B", Replace: "C"},
+	}
+
+	stream := newClaudeCloakResponseTextStream(replacements)
+	got := string(stream.Consume([]byte("A"))) + string(stream.Flush())
+	if got != "C" {
+		t.Fatalf("stream output = %q, want C", got)
+	}
+}
+
+func TestClaudeExecutor_ExecuteStream_PreservesSSEEventPairingForInjectedDelta(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+		for _, frame := range []string{
+			"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-3-5-sonnet\",\"content\":[],\"stop_reason\":null,\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}",
+			"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}",
+			"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Open\"}}",
+			"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Claw\"}}",
+			"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}",
+			"event: message_stop\ndata: {\"type\":\"message_stop\"}",
+		} {
+			_, _ = io.WriteString(w, frame+"\n\n")
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+	}))
+	defer server.Close()
+
+	cfg := &config.Config{
+		ClaudeKey: []config.ClaudeKey{{
+			APIKey:  "key-123",
+			BaseURL: server.URL,
+			Cloak: &config.CloakConfig{
+				Mode: "always",
+				ResponseReplacements: []config.TextReplacement{{
+					Find:    "OpenClaw",
+					Replace: "OCPlatform",
+				}},
+			},
+		}},
+	}
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": server.URL,
+	}}
+
+	executor := NewClaudeExecutor(cfg)
+	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet-20241022",
+		Payload: []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+
+	var out strings.Builder
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error = %v", chunk.Err)
+		}
+		out.Write(chunk.Payload)
+	}
+
+	streamText := out.String()
+	if !strings.Contains(streamText, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"OCPlatform\"}}") {
+		t.Fatalf("expected injected delta to carry a matching content_block_delta event, got %s", streamText)
+	}
+	if strings.Contains(streamText, "event: content_block_delta\nevent: content_block_delta") {
+		t.Fatalf("expected no orphaned or duplicated content_block_delta event headers, got %s", streamText)
+	}
+}
+
+func TestClaudeExecutor_ExecuteStream_DropsEventHeaderWhenDeltaPayloadBecomesEmpty(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+		for _, frame := range []string{
+			"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}",
+			"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"OpenClaw\"}}",
+			"event: message_stop\ndata: {\"type\":\"message_stop\"}",
+		} {
+			_, _ = io.WriteString(w, frame+"\n\n")
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+	}))
+	defer server.Close()
+
+	cfg := &config.Config{
+		ClaudeKey: []config.ClaudeKey{{
+			APIKey:  "key-123",
+			BaseURL: server.URL,
+			Cloak: &config.CloakConfig{
+				Mode: "always",
+				ResponseReplacements: []config.TextReplacement{{
+					Find:    "OpenClaw",
+					Replace: "",
+				}},
+			},
+		}},
+	}
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": server.URL,
+	}}
+
+	executor := NewClaudeExecutor(cfg)
+	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet-20241022",
+		Payload: []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+
+	var out strings.Builder
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error = %v", chunk.Err)
+		}
+		out.Write(chunk.Payload)
+	}
+
+	streamText := out.String()
+	if strings.Contains(streamText, "event: content_block_delta") {
+		t.Fatalf("expected dropped delta frame to remove its event header too, got %s", streamText)
+	}
+	if !strings.Contains(streamText, "event: message_stop\ndata: {\"type\":\"message_stop\"}") {
+		t.Fatalf("expected the next SSE frame to stay well-formed, got %s", streamText)
+	}
+}

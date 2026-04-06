@@ -433,6 +433,12 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 					out <- cliproxyexecutor.StreamChunk{Payload: cloned}
 				}
 			}
+			for _, rewrittenLine := range rewriter.FlushPending() {
+				cloned := make([]byte, len(rewrittenLine)+1)
+				copy(cloned, rewrittenLine)
+				cloned[len(rewrittenLine)] = '\n'
+				out <- cliproxyexecutor.StreamChunk{Payload: cloned}
+			}
 			if errScan := scanner.Err(); errScan != nil {
 				helps.RecordAPIResponseError(ctx, e.cfg, errScan)
 				reporter.PublishFailure(ctx)
@@ -468,6 +474,21 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				for i := range chunks {
 					out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}
 				}
+			}
+		}
+		for _, rewrittenLine := range rewriter.FlushPending() {
+			chunks := sdktranslator.TranslateStream(
+				ctx,
+				to,
+				from,
+				req.Model,
+				opts.OriginalRequest,
+				bodyForTranslation,
+				bytes.Clone(rewrittenLine),
+				&param,
+			)
+			for i := range chunks {
+				out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}
 			}
 		}
 		if errScan := scanner.Err(); errScan != nil {
