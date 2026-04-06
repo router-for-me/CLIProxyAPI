@@ -1046,3 +1046,27 @@ func TestRemoveExtensionFields(t *testing.T) {
 		})
 	}
 }
+
+// uniqueItems should be stripped and moved to description hint (#2123).
+func TestCleanJSONSchemaForAntigravity_UniqueItemsStripped(t *testing.T) {
+	input := `{
+		"type": "object",
+		"properties": {
+			"ids": {
+				"type": "array",
+				"description": "Unique identifiers",
+				"items": {"type": "string"},
+				"uniqueItems": true
+			}
+		}
+	}`
+
+	result := CleanJSONSchemaForAntigravity(input)
+
+	if strings.Contains(result, `"uniqueItems"`) {
+		t.Errorf("uniqueItems should be removed from schema")
+	}
+	if !strings.Contains(result, "uniqueItems: true") {
+		t.Errorf("uniqueItems hint missing in description")
+	}
+}

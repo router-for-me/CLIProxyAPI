@@ -1,8 +1,5 @@
-// Package openai provides response translation functionality for Gemini CLI to OpenAI API compatibility.
-// This package handles the conversion of Gemini CLI API responses into OpenAI Chat Completions-compatible
-// JSON format, transforming streaming events and non-streaming responses into the format
-// expected by OpenAI API clients. It supports both streaming and non-streaming modes,
-// handling text content, tool calls, reasoning content, and usage metadata appropriately.
+// Package chat_completions provides passthrough response translation for OpenAI Chat Completions.
+// It normalizes OpenAI-compatible SSE lines by stripping the "data:" prefix and dropping "[DONE]".
 package chat_completions
 
 import (
@@ -10,11 +7,9 @@ import (
 	"context"
 )
 
-// ConvertOpenAIResponseToOpenAI translates a single chunk of a streaming response from the
-// Gemini CLI API format to the OpenAI Chat Completions streaming format.
-// It processes various Gemini CLI event types and transforms them into OpenAI-compatible JSON responses.
-// The function handles text content, tool calls, reasoning content, and usage metadata, outputting
-// responses that match the OpenAI API format. It supports incremental updates for streaming responses.
+// ConvertOpenAIResponseToOpenAI normalizes a single chunk of an OpenAI-compatible streaming response.
+// If the chunk is an SSE "data:" line, the prefix is stripped and the remaining JSON payload is returned.
+// The "[DONE]" marker yields no output.
 //
 // Parameters:
 //   - ctx: The context for the request, used for cancellation and timeout handling
@@ -23,21 +18,18 @@ import (
 //   - param: A pointer to a parameter object for maintaining state between calls
 //
 // Returns:
-//   - []string: A slice of strings, each containing an OpenAI-compatible JSON response
-func ConvertOpenAIResponseToOpenAI(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) []string {
+//   - [][]byte: A slice of JSON payload chunks in OpenAI format.
+func ConvertOpenAIResponseToOpenAI(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) [][]byte {
 	if bytes.HasPrefix(rawJSON, []byte("data:")) {
 		rawJSON = bytes.TrimSpace(rawJSON[5:])
 	}
 	if bytes.Equal(rawJSON, []byte("[DONE]")) {
-		return []string{}
+		return [][]byte{}
 	}
-	return []string{string(rawJSON)}
+	return [][]byte{rawJSON}
 }
 
-// ConvertOpenAIResponseToOpenAINonStream converts a non-streaming Gemini CLI response to a non-streaming OpenAI response.
-// This function processes the complete Gemini CLI response and transforms it into a single OpenAI-compatible
-// JSON response. It handles message content, tool calls, reasoning content, and usage metadata, combining all
-// the information into a single response that matches the OpenAI API format.
+// ConvertOpenAIResponseToOpenAINonStream passes through a non-streaming OpenAI response.
 //
 // Parameters:
 //   - ctx: The context for the request, used for cancellation and timeout handling
@@ -46,7 +38,7 @@ func ConvertOpenAIResponseToOpenAI(_ context.Context, _ string, originalRequestR
 //   - param: A pointer to a parameter object for the conversion
 //
 // Returns:
-//   - string: An OpenAI-compatible JSON response containing all message content and metadata
-func ConvertOpenAIResponseToOpenAINonStream(ctx context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) string {
-	return string(rawJSON)
+//   - []byte: The OpenAI-compatible JSON response.
+func ConvertOpenAIResponseToOpenAINonStream(ctx context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) []byte {
+	return rawJSON
 }

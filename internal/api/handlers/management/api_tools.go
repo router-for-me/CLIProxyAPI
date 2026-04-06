@@ -5,17 +5,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/geminicli"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v6/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
-	"golang.org/x/net/proxy"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 )
@@ -637,6 +637,11 @@ func (h *Handler) apiCallTransport(auth *coreauth.Auth) http.RoundTripper {
 		if proxyStr := strings.TrimSpace(auth.ProxyURL); proxyStr != "" {
 			proxyCandidates = append(proxyCandidates, proxyStr)
 		}
+		if h != nil && h.cfg != nil {
+			if proxyStr := strings.TrimSpace(proxyURLFromAPIKeyConfig(h.cfg, auth)); proxyStr != "" {
+				proxyCandidates = append(proxyCandidates, proxyStr)
+			}
+		}
 	}
 	if h != nil && h.cfg != nil {
 		if proxyStr := strings.TrimSpace(h.cfg.ProxyURL); proxyStr != "" {
@@ -659,46 +664,128 @@ func (h *Handler) apiCallTransport(auth *coreauth.Auth) http.RoundTripper {
 	return clone
 }
 
-func buildProxyTransport(proxyStr string) *http.Transport {
-	proxyStr = strings.TrimSpace(proxyStr)
-	if proxyStr == "" {
+type apiKeyConfigEntry interface {
+	GetAPIKey() string
+	GetBaseURL() string
+}
+
+func resolveAPIKeyConfig[T apiKeyConfigEntry](entries []T, auth *coreauth.Auth) *T {
+	if auth == nil || len(entries) == 0 {
 		return nil
 	}
-
-	proxyURL, errParse := url.Parse(proxyStr)
-	if errParse != nil {
-		log.WithError(errParse).Debug("parse proxy URL failed")
-		return nil
+	attrKey, attrBase := "", ""
+	if auth.Attributes != nil {
+		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
+		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
 	}
-	if proxyURL.Scheme == "" || proxyURL.Host == "" {
-		log.Debug("proxy URL missing scheme/host")
-		return nil
-	}
-
-	if proxyURL.Scheme == "socks5" {
-		var proxyAuth *proxy.Auth
-		if proxyURL.User != nil {
-			username := proxyURL.User.Username()
-			password, _ := proxyURL.User.Password()
-			proxyAuth = &proxy.Auth{User: username, Password: password}
+	for i := range entries {
+		entry := &entries[i]
+		cfgKey := strings.TrimSpace((*entry).GetAPIKey())
+		cfgBase := strings.TrimSpace((*entry).GetBaseURL())
+		if attrKey != "" && attrBase != "" {
+			if strings.EqualFold(cfgKey, attrKey) && strings.EqualFold(cfgBase, attrBase) {
+				return entry
+			}
+			continue
 		}
-		dialer, errSOCKS5 := proxy.SOCKS5("tcp", proxyURL.Host, proxyAuth, proxy.Direct)
-		if errSOCKS5 != nil {
-			log.WithError(errSOCKS5).Debug("create SOCKS5 dialer failed")
-			return nil
+		if attrKey != "" && strings.EqualFold(cfgKey, attrKey) {
+			if cfgBase == "" || strings.EqualFold(cfgBase, attrBase) {
+				return entry
+			}
 		}
-		return &http.Transport{
-			Proxy: nil,
-			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-				return dialer.Dial(network, addr)
-			},
+		if attrKey == "" && attrBase != "" && strings.EqualFold(cfgBase, attrBase) {
+			return entry
 		}
 	}
-
-	if proxyURL.Scheme == "http" || proxyURL.Scheme == "https" {
-		return &http.Transport{Proxy: http.ProxyURL(proxyURL)}
+	if attrKey != "" {
+		for i := range entries {
+			entry := &entries[i]
+			if strings.EqualFold(strings.TrimSpace((*entry).GetAPIKey()), attrKey) {
+				return entry
+			}
+		}
 	}
-
-	log.Debugf("unsupported proxy scheme: %s", proxyURL.Scheme)
 	return nil
+}
+
+func proxyURLFromAPIKeyConfig(cfg *config.Config, auth *coreauth.Auth) string {
+	if cfg == nil || auth == nil {
+		return ""
+	}
+	authKind, authAccount := auth.AccountInfo()
+	if !strings.EqualFold(strings.TrimSpace(authKind), "api_key") {
+		return ""
+	}
+
+	attrs := auth.Attributes
+	compatName := ""
+	providerKey := ""
+	if len(attrs) > 0 {
+		compatName = strings.TrimSpace(attrs["compat_name"])
+		providerKey = strings.TrimSpace(attrs["provider_key"])
+	}
+	if compatName != "" || strings.EqualFold(strings.TrimSpace(auth.Provider), "openai-compatibility") {
+		return resolveOpenAICompatAPIKeyProxyURL(cfg, auth, strings.TrimSpace(authAccount), providerKey, compatName)
+	}
+
+	switch strings.ToLower(strings.TrimSpace(auth.Provider)) {
+	case "gemini":
+		if entry := resolveAPIKeyConfig(cfg.GeminiKey, auth); entry != nil {
+			return strings.TrimSpace(entry.ProxyURL)
+		}
+	case "claude":
+		if entry := resolveAPIKeyConfig(cfg.ClaudeKey, auth); entry != nil {
+			return strings.TrimSpace(entry.ProxyURL)
+		}
+	case "codex":
+		if entry := resolveAPIKeyConfig(cfg.CodexKey, auth); entry != nil {
+			return strings.TrimSpace(entry.ProxyURL)
+		}
+	}
+	return ""
+}
+
+func resolveOpenAICompatAPIKeyProxyURL(cfg *config.Config, auth *coreauth.Auth, apiKey, providerKey, compatName string) string {
+	if cfg == nil || auth == nil {
+		return ""
+	}
+	apiKey = strings.TrimSpace(apiKey)
+	if apiKey == "" {
+		return ""
+	}
+	candidates := make([]string, 0, 3)
+	if v := strings.TrimSpace(compatName); v != "" {
+		candidates = append(candidates, v)
+	}
+	if v := strings.TrimSpace(providerKey); v != "" {
+		candidates = append(candidates, v)
+	}
+	if v := strings.TrimSpace(auth.Provider); v != "" {
+		candidates = append(candidates, v)
+	}
+
+	for i := range cfg.OpenAICompatibility {
+		compat := &cfg.OpenAICompatibility[i]
+		for _, candidate := range candidates {
+			if candidate != "" && strings.EqualFold(strings.TrimSpace(candidate), compat.Name) {
+				for j := range compat.APIKeyEntries {
+					entry := &compat.APIKeyEntries[j]
+					if strings.EqualFold(strings.TrimSpace(entry.APIKey), apiKey) {
+						return strings.TrimSpace(entry.ProxyURL)
+					}
+				}
+				return ""
+			}
+		}
+	}
+	return ""
+}
+
+func buildProxyTransport(proxyStr string) *http.Transport {
+	transport, _, errBuild := proxyutil.BuildHTTPTransport(proxyStr)
+	if errBuild != nil {
+		log.WithError(errBuild).Debug("build proxy transport failed")
+		return nil
+	}
+	return transport
 }

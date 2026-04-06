@@ -22,7 +22,7 @@ import (
 func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream bool) []byte {
 	rawJSON := inputRawJSON
 	// Base OpenAI Chat Completions API template
-	out := `{"model":"","messages":[]}`
+	out := []byte(`{"model":"","messages":[]}`)
 
 	root := gjson.ParseBytes(rawJSON)
 
@@ -39,29 +39,29 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 	}
 
 	// Model mapping
-	out, _ = sjson.Set(out, "model", modelName)
+	out, _ = sjson.SetBytes(out, "model", modelName)
 
 	// Generation config mapping
 	if genConfig := root.Get("generationConfig"); genConfig.Exists() {
 		// Temperature
 		if temp := genConfig.Get("temperature"); temp.Exists() {
-			out, _ = sjson.Set(out, "temperature", temp.Float())
+			out, _ = sjson.SetBytes(out, "temperature", temp.Float())
 		}
 
 		// Max tokens
 		if maxTokens := genConfig.Get("maxOutputTokens"); maxTokens.Exists() {
-			out, _ = sjson.Set(out, "max_tokens", maxTokens.Int())
+			out, _ = sjson.SetBytes(out, "max_tokens", maxTokens.Int())
 		}
 
 		// Top P
 		if topP := genConfig.Get("topP"); topP.Exists() {
-			out, _ = sjson.Set(out, "top_p", topP.Float())
+			out, _ = sjson.SetBytes(out, "top_p", topP.Float())
 		}
 
 		// Top K (OpenAI doesn't have direct equivalent, but we can map it)
 		if topK := genConfig.Get("topK"); topK.Exists() {
 			// Store as custom parameter for potential use
-			out, _ = sjson.Set(out, "top_k", topK.Int())
+			out, _ = sjson.SetBytes(out, "top_k", topK.Int())
 		}
 
 		// Stop sequences
@@ -72,13 +72,13 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 				return true
 			})
 			if len(stops) > 0 {
-				out, _ = sjson.Set(out, "stop", stops)
+				out, _ = sjson.SetBytes(out, "stop", stops)
 			}
 		}
 
 		// Candidate count (OpenAI 'n' parameter)
 		if candidateCount := genConfig.Get("candidateCount"); candidateCount.Exists() {
-			out, _ = sjson.Set(out, "n", candidateCount.Int())
+			out, _ = sjson.SetBytes(out, "n", candidateCount.Int())
 		}
 
 		// Map Gemini thinkingConfig to OpenAI reasoning_effort.
@@ -92,7 +92,7 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 			if thinkingLevel.Exists() {
 				effort := strings.ToLower(strings.TrimSpace(thinkingLevel.String()))
 				if effort != "" {
-					out, _ = sjson.Set(out, "reasoning_effort", effort)
+					out, _ = sjson.SetBytes(out, "reasoning_effort", effort)
 				}
 			} else {
 				thinkingBudget := thinkingConfig.Get("thinkingBudget")
@@ -101,7 +101,7 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 				}
 				if thinkingBudget.Exists() {
 					if effort, ok := thinking.ConvertBudgetToLevel(int(thinkingBudget.Int())); ok {
-						out, _ = sjson.Set(out, "reasoning_effort", effort)
+						out, _ = sjson.SetBytes(out, "reasoning_effort", effort)
 					}
 				}
 			}
@@ -109,7 +109,7 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 	}
 
 	// Stream parameter
-	out, _ = sjson.Set(out, "stream", stream)
+	out, _ = sjson.SetBytes(out, "stream", stream)
 
 	// Process contents (Gemini messages) -> OpenAI messages
 	var toolCallIDs []string // Track tool call IDs for matching with tool results
@@ -122,16 +122,16 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 	}
 	if systemInstruction.Exists() {
 		parts := systemInstruction.Get("parts")
-		msg := `{"role":"system","content":[]}`
+		msg := []byte(`{"role":"system","content":[]}`)
 		hasContent := false
 
 		if parts.Exists() && parts.IsArray() {
 			parts.ForEach(func(_, part gjson.Result) bool {
 				// Handle text parts
 				if text := part.Get("text"); text.Exists() {
-					contentPart := `{"type":"text","text":""}`
-					contentPart, _ = sjson.Set(contentPart, "text", text.String())
-					msg, _ = sjson.SetRaw(msg, "content.-1", contentPart)
+					contentPart := []byte(`{"type":"text","text":""}`)
+					contentPart, _ = sjson.SetBytes(contentPart, "text", text.String())
+					msg, _ = sjson.SetRawBytes(msg, "content.-1", contentPart)
 					hasContent = true
 				}
 
@@ -144,9 +144,9 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 					data := inlineData.Get("data").String()
 					imageURL := fmt.Sprintf("data:%s;base64,%s", mimeType, data)
 
-					contentPart := `{"type":"image_url","image_url":{"url":""}}`
-					contentPart, _ = sjson.Set(contentPart, "image_url.url", imageURL)
-					msg, _ = sjson.SetRaw(msg, "content.-1", contentPart)
+					contentPart := []byte(`{"type":"image_url","image_url":{"url":""}}`)
+					contentPart, _ = sjson.SetBytes(contentPart, "image_url.url", imageURL)
+					msg, _ = sjson.SetRawBytes(msg, "content.-1", contentPart)
 					hasContent = true
 				}
 				return true
@@ -154,7 +154,7 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 		}
 
 		if hasContent {
-			out, _ = sjson.SetRaw(out, "messages.-1", msg)
+			out, _ = sjson.SetRawBytes(out, "messages.-1", msg)
 		}
 	}
 
@@ -168,14 +168,14 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 				role = "assistant"
 			}
 
-			msg := `{"role":"","content":""}`
-			msg, _ = sjson.Set(msg, "role", role)
+			msg := []byte(`{"role":"","content":""}`)
+			msg, _ = sjson.SetBytes(msg, "role", role)
 
 			var textBuilder strings.Builder
-			contentWrapper := `{"arr":[]}`
+			contentWrapper := []byte(`{"arr":[]}`)
 			contentPartsCount := 0
 			onlyTextContent := true
-			toolCallsWrapper := `{"arr":[]}`
+			toolCallsWrapper := []byte(`{"arr":[]}`)
 			toolCallsCount := 0
 
 			if parts.Exists() && parts.IsArray() {
@@ -184,9 +184,9 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 					if text := part.Get("text"); text.Exists() {
 						formattedText := text.String()
 						textBuilder.WriteString(formattedText)
-						contentPart := `{"type":"text","text":""}`
-						contentPart, _ = sjson.Set(contentPart, "text", formattedText)
-						contentWrapper, _ = sjson.SetRaw(contentWrapper, "arr.-1", contentPart)
+						contentPart := []byte(`{"type":"text","text":""}`)
+						contentPart, _ = sjson.SetBytes(contentPart, "text", formattedText)
+						contentWrapper, _ = sjson.SetRawBytes(contentWrapper, "arr.-1", contentPart)
 						contentPartsCount++
 					}
 
@@ -201,9 +201,9 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 						data := inlineData.Get("data").String()
 						imageURL := fmt.Sprintf("data:%s;base64,%s", mimeType, data)
 
-						contentPart := `{"type":"image_url","image_url":{"url":""}}`
-						contentPart, _ = sjson.Set(contentPart, "image_url.url", imageURL)
-						contentWrapper, _ = sjson.SetRaw(contentWrapper, "arr.-1", contentPart)
+						contentPart := []byte(`{"type":"image_url","image_url":{"url":""}}`)
+						contentPart, _ = sjson.SetBytes(contentPart, "image_url.url", imageURL)
+						contentWrapper, _ = sjson.SetRawBytes(contentWrapper, "arr.-1", contentPart)
 						contentPartsCount++
 					}
 
@@ -212,32 +212,32 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 						toolCallID := genToolCallID()
 						toolCallIDs = append(toolCallIDs, toolCallID)
 
-						toolCall := `{"id":"","type":"function","function":{"name":"","arguments":""}}`
-						toolCall, _ = sjson.Set(toolCall, "id", toolCallID)
-						toolCall, _ = sjson.Set(toolCall, "function.name", functionCall.Get("name").String())
+						toolCall := []byte(`{"id":"","type":"function","function":{"name":"","arguments":""}}`)
+						toolCall, _ = sjson.SetBytes(toolCall, "id", toolCallID)
+						toolCall, _ = sjson.SetBytes(toolCall, "function.name", functionCall.Get("name").String())
 
 						// Convert args to arguments JSON string
 						if args := functionCall.Get("args"); args.Exists() {
-							toolCall, _ = sjson.Set(toolCall, "function.arguments", args.Raw)
+							toolCall, _ = sjson.SetBytes(toolCall, "function.arguments", args.Raw)
 						} else {
-							toolCall, _ = sjson.Set(toolCall, "function.arguments", "{}")
+							toolCall, _ = sjson.SetBytes(toolCall, "function.arguments", "{}")
 						}
 
-						toolCallsWrapper, _ = sjson.SetRaw(toolCallsWrapper, "arr.-1", toolCall)
+						toolCallsWrapper, _ = sjson.SetRawBytes(toolCallsWrapper, "arr.-1", toolCall)
 						toolCallsCount++
 					}
 
 					// Handle function responses (Gemini) -> tool role messages (OpenAI)
 					if functionResponse := part.Get("functionResponse"); functionResponse.Exists() {
 						// Create tool message for function response
-						toolMsg := `{"role":"tool","tool_call_id":"","content":""}`
+						toolMsg := []byte(`{"role":"tool","tool_call_id":"","content":""}`)
 
 						// Convert response.content to JSON string
 						if response := functionResponse.Get("response"); response.Exists() {
 							if contentField := response.Get("content"); contentField.Exists() {
-								toolMsg, _ = sjson.Set(toolMsg, "content", contentField.Raw)
+								toolMsg, _ = sjson.SetBytes(toolMsg, "content", contentField.Raw)
 							} else {
-								toolMsg, _ = sjson.Set(toolMsg, "content", response.Raw)
+								toolMsg, _ = sjson.SetBytes(toolMsg, "content", response.Raw)
 							}
 						}
 
@@ -246,13 +246,13 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 						if len(toolCallIDs) > 0 {
 							// Use the last tool call ID (simple matching by function name)
 							// In a real implementation, you might want more sophisticated matching
-							toolMsg, _ = sjson.Set(toolMsg, "tool_call_id", toolCallIDs[len(toolCallIDs)-1])
+							toolMsg, _ = sjson.SetBytes(toolMsg, "tool_call_id", toolCallIDs[len(toolCallIDs)-1])
 						} else {
 							// Generate a tool call ID if none available
-							toolMsg, _ = sjson.Set(toolMsg, "tool_call_id", genToolCallID())
+							toolMsg, _ = sjson.SetBytes(toolMsg, "tool_call_id", genToolCallID())
 						}
 
-						out, _ = sjson.SetRaw(out, "messages.-1", toolMsg)
+						out, _ = sjson.SetRawBytes(out, "messages.-1", toolMsg)
 					}
 
 					return true
@@ -262,18 +262,18 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 			// Set content
 			if contentPartsCount > 0 {
 				if onlyTextContent {
-					msg, _ = sjson.Set(msg, "content", textBuilder.String())
+					msg, _ = sjson.SetBytes(msg, "content", textBuilder.String())
 				} else {
-					msg, _ = sjson.SetRaw(msg, "content", gjson.Get(contentWrapper, "arr").Raw)
+					msg, _ = sjson.SetRawBytes(msg, "content", []byte(gjson.GetBytes(contentWrapper, "arr").Raw))
 				}
 			}
 
 			// Set tool calls if any
 			if toolCallsCount > 0 {
-				msg, _ = sjson.SetRaw(msg, "tool_calls", gjson.Get(toolCallsWrapper, "arr").Raw)
+				msg, _ = sjson.SetRawBytes(msg, "tool_calls", []byte(gjson.GetBytes(toolCallsWrapper, "arr").Raw))
 			}
 
-			out, _ = sjson.SetRaw(out, "messages.-1", msg)
+			out, _ = sjson.SetRawBytes(out, "messages.-1", msg)
 			return true
 		})
 	}
@@ -283,18 +283,18 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 		tools.ForEach(func(_, tool gjson.Result) bool {
 			if functionDeclarations := tool.Get("functionDeclarations"); functionDeclarations.Exists() && functionDeclarations.IsArray() {
 				functionDeclarations.ForEach(func(_, funcDecl gjson.Result) bool {
-					openAITool := `{"type":"function","function":{"name":"","description":""}}`
-					openAITool, _ = sjson.Set(openAITool, "function.name", funcDecl.Get("name").String())
-					openAITool, _ = sjson.Set(openAITool, "function.description", funcDecl.Get("description").String())
+					openAITool := []byte(`{"type":"function","function":{"name":"","description":""}}`)
+					openAITool, _ = sjson.SetBytes(openAITool, "function.name", funcDecl.Get("name").String())
+					openAITool, _ = sjson.SetBytes(openAITool, "function.description", funcDecl.Get("description").String())
 
 					// Convert parameters schema
 					if parameters := funcDecl.Get("parameters"); parameters.Exists() {
-						openAITool, _ = sjson.SetRaw(openAITool, "function.parameters", parameters.Raw)
+						openAITool, _ = sjson.SetRawBytes(openAITool, "function.parameters", []byte(parameters.Raw))
 					} else if parameters := funcDecl.Get("parametersJsonSchema"); parameters.Exists() {
-						openAITool, _ = sjson.SetRaw(openAITool, "function.parameters", parameters.Raw)
+						openAITool, _ = sjson.SetRawBytes(openAITool, "function.parameters", []byte(parameters.Raw))
 					}
 
-					out, _ = sjson.SetRaw(out, "tools.-1", openAITool)
+					out, _ = sjson.SetRawBytes(out, "tools.-1", openAITool)
 					return true
 				})
 			}
@@ -308,14 +308,14 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 			mode := functionCallingConfig.Get("mode").String()
 			switch mode {
 			case "NONE":
-				out, _ = sjson.Set(out, "tool_choice", "none")
+				out, _ = sjson.SetBytes(out, "tool_choice", "none")
 			case "AUTO":
-				out, _ = sjson.Set(out, "tool_choice", "auto")
+				out, _ = sjson.SetBytes(out, "tool_choice", "auto")
 			case "ANY":
-				out, _ = sjson.Set(out, "tool_choice", "required")
+				out, _ = sjson.SetBytes(out, "tool_choice", "required")
 			}
 		}
 	}
 
-	return []byte(out)
+	return out
 }
