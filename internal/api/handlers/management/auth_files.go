@@ -541,7 +541,7 @@ func isRuntimeOnlyAuth(auth *coreauth.Auth) bool {
 // Download single auth file by name
 func (h *Handler) DownloadAuthFile(c *gin.Context) {
 	name := c.Query("name")
-	if name == "" || strings.Contains(name, string(os.PathSeparator)) {
+	if name == "" || strings.Contains(name, "/") || strings.Contains(name, "\\") || strings.Contains(name, "..") {
 		c.JSON(400, gin.H{"error": "invalid name"})
 		return
 	}
@@ -599,7 +599,7 @@ func (h *Handler) UploadAuthFile(c *gin.Context) {
 		return
 	}
 	name := c.Query("name")
-	if name == "" || strings.Contains(name, string(os.PathSeparator)) {
+	if name == "" || strings.Contains(name, "/") || strings.Contains(name, "\\") || strings.Contains(name, "..") {
 		c.JSON(400, gin.H{"error": "invalid name"})
 		return
 	}
@@ -670,7 +670,7 @@ func (h *Handler) DeleteAuthFile(c *gin.Context) {
 		return
 	}
 	name := c.Query("name")
-	if name == "" || strings.Contains(name, string(os.PathSeparator)) {
+	if name == "" || strings.Contains(name, "/") || strings.Contains(name, "\\") || strings.Contains(name, "..") {
 		c.JSON(400, gin.H{"error": "invalid name"})
 		return
 	}
