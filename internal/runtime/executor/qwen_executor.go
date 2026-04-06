@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"encoding/json"
 
 	qwenauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/qwen"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
@@ -172,117 +173,146 @@ func timeUntilNextDay() time.Duration {
 	return tomorrow.Sub(now)
 }
 
+// Lightweight struct to represent a chat message, designed to:
+//  1. Avoid repeated JSON parsing/serialization (performance boost)
+//  2. Provide type safety for message fields (compile-time checks)
+//  3. Make the code self-documenting (clear structure visible in Go types)
+//  4. Simplify handling of the dynamic "content" field (which can be either string or array)
+type message struct {
+	Role    string      `json:"role"`
+	Content interface{} `json:"content"` // Can be string or []interface{}
+}
+
 // ensureQwenSystemMessage handles Qwen message payload formatting and normalization:
 //  1. Prepends the default system message to the very beginning of the messages array
 //  2. Automatically converts any existing system role messages to user role
 //  3. Intelligently splits overlong text content (>10000 characters), prioritizing splits at spaces, line breaks or punctuation to avoid breaking words/numbers
 //  4. Keeps image, file and media content intact without any splitting
 func ensureQwenSystemMessage(payload []byte) ([]byte, error) {
-	messages := gjson.GetBytes(payload, "messages")
-	const MAX_LENGTH = 10000;
+	const MAX_LENGTH = 10000
 
-	if messages.Exists() && messages.IsArray() {
-		var buf bytes.Buffer
-		buf.WriteByte('[')
-		buf.Write(qwenDefaultSystemMessage)
-		for _, msg := range messages.Array() {
-			// buf.WriteByte(',')
-			// buf.WriteString(msg.Raw)
-			processedMsg := msg.Raw
-			if strings.EqualFold(msg.Get("role").String(), "system") {
-				modified, err := sjson.SetRaw(msg.Raw, "role", `"user"`)
-				if err == nil {
-					processedMsg = modified
-				}
-			}
-
-			content := gjson.Get(processedMsg, "content")
-			
-			if content.Type == gjson.String {
-				text := content.String()
-				if len(text) > 0 {
-					var newContents []string
-					if len(text) > MAX_LENGTH {
-						chunks := splitTextChunk(text, MAX_LENGTH)
-						for _, c := range chunks {
-							newContents = append(newContents, `{"type":"text","text":`+fmt.Sprintf("%q", c)+`}`)
-						}
-					} else {
-						newContents = append(newContents, `{"type":"text","text":`+fmt.Sprintf("%q", text)+`}`)
-					}
-
-					var cbuf bytes.Buffer
-					cbuf.WriteByte('[')
-					for i, s := range newContents {
-						if i > 0 {
-							cbuf.WriteByte(',')
-						}
-						cbuf.WriteString(s)
-					}
-					cbuf.WriteByte(']')
-					processedMsg, _ = sjson.SetRaw(processedMsg, "content", cbuf.String())
-				}
-			}
-
-			if content.IsArray() {
-				var newParts []string
-				for _, item := range content.Array() {
-					itemType := item.Get("type").String()
-
-					if itemType == "text" {
-						text := item.Get("text").String()
-						if len(text) == 0 {
-							newParts = append(newParts, item.Raw)
-							continue
-						}
-
-						if len(text) > MAX_LENGTH {
-							chunks := splitTextChunk(text, MAX_LENGTH)
-							for _, chunk := range chunks {
-								part := `{"type":"text","text":` + fmt.Sprintf("%q", chunk) + `}`
-								newParts = append(newParts, part)
-							}
-						} else {
-							newParts = append(newParts, item.Raw)
-						}
-					} else {
-						newParts = append(newParts, item.Raw)
-					}
-				}
-
-				var cbuf bytes.Buffer
-				cbuf.WriteByte('[')
-				for i, p := range newParts {
-					if i > 0 {
-						cbuf.WriteByte(',')
-					}
-					cbuf.WriteString(p)
-				}
-				cbuf.WriteByte(']')
-
-				processedMsg, _ = sjson.SetRaw(processedMsg, "content", cbuf.String())
-			}
-
-			buf.WriteByte(',')
-			buf.WriteString(processedMsg)
-		}
-		buf.WriteByte(']')
-		updated, errSet := sjson.SetRawBytes(payload, "messages", buf.Bytes())
-		if errSet != nil {
-			return nil, fmt.Errorf("qwen executor: set default system message failed: %w", errSet)
-		}
-		return updated, nil
+	// 1. Parse default system message first (only once)
+	var defaultSysMsg message
+	if err := json.Unmarshal(qwenDefaultSystemMessage, &defaultSysMsg); err != nil {
+		return nil, fmt.Errorf("failed to parse default system message: %w", err)
 	}
 
-	var buf bytes.Buffer
-	buf.WriteByte('[')
-	buf.Write(qwenDefaultSystemMessage)
-	buf.WriteByte(']')
-	updated, errSet := sjson.SetRawBytes(payload, "messages", buf.Bytes())
-	if errSet != nil {
-		return nil, fmt.Errorf("qwen executor: set default system message failed: %w", errSet)
+	// 2. Parse original payload
+	var payloadMap map[string]interface{}
+	if err := json.Unmarshal(payload, &payloadMap); err != nil {
+		return nil, fmt.Errorf("failed to parse payload: %w", err)
 	}
-	return updated, nil
+
+	// 3. Build new message list
+	var newMessages []interface{}
+	newMessages = append(newMessages, defaultSysMsg) // Default system always first
+	
+	// Process existing messages
+	if rawMsgs, ok := payloadMap["messages"]; ok {
+		if msgsArr, ok := rawMsgs.([]interface{}); ok {
+			for _, rawMsg := range msgsArr {
+				// Marshal single message
+				msgBytes, err := json.Marshal(rawMsg)
+				if err != nil {
+					return nil, fmt.Errorf("failed to marshal message: %w", err)
+				}
+
+				var msg message
+				if err := json.Unmarshal(msgBytes, &msg); err != nil {
+					return nil, fmt.Errorf("failed to parse message: %w", err)
+				}
+
+				// Convert existing system role to user
+				if strings.EqualFold(msg.Role, "system") {
+					msg.Role = "user"
+				}
+
+				// Process content
+				if err := processMessageContent(&msg, MAX_LENGTH); err != nil {
+					return nil, err
+				}
+
+				newMessages = append(newMessages, msg)
+			}
+		}
+	}
+
+	// 4. Replace and marshal back
+	payloadMap["messages"] = newMessages
+	result, err := json.Marshal(payloadMap)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal final payload: %w", err)
+	}
+
+	return result, nil
+}
+
+// processMessageContent unified processing of message content (string or array)
+func processMessageContent(msg *message, maxLen int) error {
+	switch content := msg.Content.(type) {
+	case string:
+		// Case 1: content is string
+		if len(content) == 0 {
+			return nil
+		}
+
+		var newContentArr []interface{}
+		if len(content) > maxLen {
+			chunks := splitTextChunk(content, maxLen)
+			for _, c := range chunks {
+				newContentArr = append(newContentArr, map[string]interface{}{
+					"type": "text",
+					"text": c,
+				})
+			}
+		} else {
+			newContentArr = append(newContentArr, map[string]interface{}{
+				"type": "text",
+				"text": content,
+			})
+		}
+		msg.Content = newContentArr
+
+	case []interface{}:
+		// Case 2: content is array
+		var newContentArr []interface{}
+		for _, item := range content {
+			itemMap, ok := item.(map[string]interface{})
+			if !ok {
+				newContentArr = append(newContentArr, item)
+				continue
+			}
+
+			itemType, _ := itemMap["type"].(string)
+			if itemType != "text" {
+				// Non-text types (image/file) keep intact
+				newContentArr = append(newContentArr, item)
+				continue
+			}
+
+			// Process text type
+			text, _ := itemMap["text"].(string)
+			if len(text) == 0 {
+				newContentArr = append(newContentArr, item)
+				continue
+			}
+
+			if len(text) > maxLen {
+				chunks := splitTextChunk(text, maxLen)
+				for _, c := range chunks {
+					newContentArr = append(newContentArr, map[string]interface{}{
+						"type": "text",
+						"text": c,
+					})
+				}
+			} else {
+				newContentArr = append(newContentArr, item)
+			}
+		}
+		msg.Content = newContentArr
+	}
+
+	return nil
 }
 
 
