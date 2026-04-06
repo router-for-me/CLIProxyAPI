@@ -8,7 +8,7 @@ on:
 
 env:
   APP_NAME: CLIProxyAPI
-  DOCKERHUB_REPO: ${{ vars.DOCKERHUB_REPO || 'eceasy/cli-proxy-api' }}
+  DOCKERHUB_REPO: ${{ vars.DOCKERHUB_REPO || 'zippercode/cli-proxy-api' }}
 
 jobs:
   docker_amd64:
