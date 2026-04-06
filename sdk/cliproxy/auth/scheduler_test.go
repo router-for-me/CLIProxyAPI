@@ -34,23 +34,6 @@ func (schedulerTestExecutor) HttpRequest(ctx context.Context, auth *Auth, req *h
 	return nil, nil
 }
 
-type trackingSelector struct {
-	calls      int
-	lastAuthID []string
-}
-
-func (s *trackingSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
-	s.calls++
-	s.lastAuthID = s.lastAuthID[:0]
-	for _, auth := range auths {
-		s.lastAuthID = append(s.lastAuthID, auth.ID)
-	}
-	if len(auths) == 0 {
-		return nil, nil
-	}
-	return auths[len(auths)-1], nil
-}
-
 func newSchedulerForTest(selector Selector, auths ...*Auth) *authScheduler {
 	scheduler := newAuthScheduler(selector)
 	scheduler.rebuild(auths)
@@ -307,33 +290,6 @@ func TestManager_PickNextMixed_UsesWeightedProviderRotationBeforeCredentialRotat
 	}
 }
 
-func TestManagerCustomSelector_FallsBackToLegacyPath(t *testing.T) {
-	t.Parallel()
-
-	selector := &trackingSelector{}
-	manager := NewManager(nil, selector, nil)
-	manager.executors["gemini"] = schedulerTestExecutor{}
-	manager.auths["auth-a"] = &Auth{ID: "auth-a", Provider: "gemini"}
-	manager.auths["auth-b"] = &Auth{ID: "auth-b", Provider: "gemini"}
-
-	got, _, errPick := manager.pickNext(context.Background(), "gemini", "", cliproxyexecutor.Options{}, map[string]struct{}{})
-	if errPick != nil {
-		t.Fatalf("pickNext() error = %v", errPick)
-	}
-	if got == nil {
-		t.Fatalf("pickNext() auth = nil")
-	}
-	if selector.calls != 1 {
-		t.Fatalf("selector.calls = %d, want %d", selector.calls, 1)
-	}
-	if len(selector.lastAuthID) != 2 {
-		t.Fatalf("len(selector.lastAuthID) = %d, want %d", len(selector.lastAuthID), 2)
-	}
-	if got.ID != selector.lastAuthID[len(selector.lastAuthID)-1] {
-		t.Fatalf("pickNext() auth.ID = %q, want selector-picked %q", got.ID, selector.lastAuthID[len(selector.lastAuthID)-1])
-	}
-}
-
 func TestManager_InitializesSchedulerForBuiltInSelector(t *testing.T) {
 	t.Parallel()
 
@@ -499,5 +455,132 @@ func TestManager_SchedulerTracksMarkResultCooldownAndRecovery(t *testing.T) {
 	}
 	if len(seen) != 2 {
 		t.Fatalf("len(seen) = %d, want %d", len(seen), 2)
+	}
+}
+
+func stickyTestManager() (*Manager, *StickySelector) {
+	sticky := NewStickySelector(16, nil, nil)
+	manager := NewManager(nil, sticky, nil)
+	manager.executors["antigravity"] = schedulerTestExecutor{}
+	manager.Register(context.Background(), &Auth{ID: "auth-a", Provider: "antigravity"})
+	manager.Register(context.Background(), &Auth{ID: "auth-b", Provider: "antigravity"})
+	return manager, sticky
+}
+
+func TestManager_StickyFastPath_ReusesCachedAuth(t *testing.T) {
+	t.Parallel()
+
+	manager, _ := stickyTestManager()
+
+	body := []byte(`{"metadata":{"user_id":"test-user"}}`)
+	opts := cliproxyexecutor.Options{OriginalRequest: body}
+
+	// First pick: scheduler round-robin selects some account and records sticky.
+	first, _, _, err := manager.pickNextMixed(context.Background(), []string{"antigravity"}, "", opts, map[string]struct{}{})
+	if err != nil {
+		t.Fatalf("pickNextMixed #1 error = %v", err)
+	}
+	if first == nil {
+		t.Fatal("pickNextMixed #1 returned nil")
+	}
+
+	// Second pick with same body: sticky should return the same account.
+	second, _, _, err := manager.pickNextMixed(context.Background(), []string{"antigravity"}, "", opts, map[string]struct{}{})
+	if err != nil {
+		t.Fatalf("pickNextMixed #2 error = %v", err)
+	}
+	if second.ID != first.ID {
+		t.Fatalf("sticky not reused: got %q, want %q", second.ID, first.ID)
+	}
+}
+
+func TestManager_StickyFastPath_EvictsOnCooldown(t *testing.T) {
+	t.Parallel()
+
+	manager, _ := stickyTestManager()
+
+	body := []byte(`{"metadata":{"user_id":"test-cooldown"}}`)
+	opts := cliproxyexecutor.Options{OriginalRequest: body}
+
+	// First pick: records sticky binding.
+	first, _, _, err := manager.pickNextMixed(context.Background(), []string{"antigravity"}, "", opts, map[string]struct{}{})
+	if err != nil {
+		t.Fatalf("pickNextMixed #1 error = %v", err)
+	}
+
+	// Put the sticky-bound auth into cooldown.
+	manager.MarkResult(context.Background(), Result{
+		AuthID:   first.ID,
+		Provider: "antigravity",
+		Model:    "",
+		Success:  false,
+		Error:    &Error{HTTPStatus: 429, Message: "quota exhausted"},
+	})
+
+	// Next pick: sticky auth in cooldown → evict → scheduler picks the other one.
+	second, _, _, err := manager.pickNextMixed(context.Background(), []string{"antigravity"}, "", opts, map[string]struct{}{})
+	if err != nil {
+		t.Fatalf("pickNextMixed #2 error = %v", err)
+	}
+	if second.ID == first.ID {
+		t.Fatalf("sticky not evicted on cooldown: still got %q", second.ID)
+	}
+}
+
+func TestManager_StickyFastPath_SkipsOnPinnedAuth(t *testing.T) {
+	t.Parallel()
+
+	manager, _ := stickyTestManager()
+
+	body := []byte(`{"metadata":{"user_id":"test-pin"}}`)
+	opts := cliproxyexecutor.Options{OriginalRequest: body}
+
+	// First pick: records sticky binding to some auth.
+	first, _, _, err := manager.pickNextMixed(context.Background(), []string{"antigravity"}, "", opts, map[string]struct{}{})
+	if err != nil {
+		t.Fatalf("pickNextMixed #1 error = %v", err)
+	}
+
+	// Pin to a different auth — sticky should be bypassed.
+	other := "auth-b"
+	if first.ID == "auth-b" {
+		other = "auth-a"
+	}
+	pinnedOpts := cliproxyexecutor.Options{
+		OriginalRequest: body,
+		Metadata:        map[string]any{cliproxyexecutor.PinnedAuthMetadataKey: other},
+	}
+	pinned, _, _, err := manager.pickNextMixed(context.Background(), []string{"antigravity"}, "", pinnedOpts, map[string]struct{}{})
+	if err != nil {
+		t.Fatalf("pickNextMixed pinned error = %v", err)
+	}
+	if pinned.ID != other {
+		t.Fatalf("pin not honored: got %q, want %q", pinned.ID, other)
+	}
+}
+
+func TestScheduler_IsAuthReadyForModel(t *testing.T) {
+	t.Parallel()
+
+	authA := &Auth{ID: "auth-a", Provider: "antigravity"}
+	authB := &Auth{ID: "auth-b", Provider: "antigravity"}
+	scheduler := newSchedulerForTest(&RoundRobinSelector{}, authA, authB)
+
+	// Both should be ready initially.
+	if !scheduler.isAuthReadyForModel("auth-a", []string{"antigravity"}, "") {
+		t.Fatal("auth-a should be ready")
+	}
+	if !scheduler.isAuthReadyForModel("auth-b", []string{"antigravity"}, "") {
+		t.Fatal("auth-b should be ready")
+	}
+
+	// Unknown auth should not be ready.
+	if scheduler.isAuthReadyForModel("auth-x", []string{"antigravity"}, "") {
+		t.Fatal("unknown auth should not be ready")
+	}
+
+	// Wrong provider should not be ready.
+	if scheduler.isAuthReadyForModel("auth-a", []string{"codex"}, "") {
+		t.Fatal("auth with wrong provider should not be ready")
 	}
 }

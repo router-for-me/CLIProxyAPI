@@ -187,6 +187,31 @@ func (s *StickySelector) EvictForPayload(payload []byte, model string) {
 	}
 }
 
+// LookupCachedAuth returns the cached auth ID for the given payload and model,
+// or "" if no binding exists. Used by the scheduler-integrated sticky path
+// to check the cache without performing a full Pick.
+func (s *StickySelector) LookupCachedAuth(payload []byte, model string) string {
+	key := s.sessionKey(payload, model)
+	if key == "" {
+		return ""
+	}
+	authID, ok := s.cache.Get(key)
+	if !ok {
+		return ""
+	}
+	return authID
+}
+
+// RecordBinding stores a session→auth binding in the cache.
+// Used by the scheduler-integrated sticky path to record the selected auth
+// after the scheduler picks one (with cooldown awareness).
+func (s *StickySelector) RecordBinding(payload []byte, model, authID string) {
+	key := s.sessionKey(payload, model)
+	if key != "" && authID != "" {
+		s.cache.Put(key, authID)
+	}
+}
+
 // CacheLen returns the number of active session bindings.
 func (s *StickySelector) CacheLen() int {
 	return s.cache.Len()

@@ -15,8 +15,7 @@ import (
 type schedulerStrategy int
 
 const (
-	schedulerStrategyCustom schedulerStrategy = iota
-	schedulerStrategyRoundRobin
+	schedulerStrategyRoundRobin schedulerStrategy = iota
 	schedulerStrategyFillFirst
 )
 
@@ -112,10 +111,8 @@ func selectorStrategy(selector Selector) schedulerStrategy {
 	switch selector.(type) {
 	case *FillFirstSelector:
 		return schedulerStrategyFillFirst
-	case nil, *RoundRobinSelector:
-		return schedulerStrategyRoundRobin
 	default:
-		return schedulerStrategyCustom
+		return schedulerStrategyRoundRobin
 	}
 }
 
@@ -346,6 +343,38 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 		return picked, providerKey, nil
 	}
 	return nil, "", s.mixedUnavailableErrorLocked(normalized, model, tried)
+}
+
+// isAuthReadyForModel reports whether a specific auth is ready (not in cooldown)
+// for the given model across the supplied providers. Used by sticky routing to
+// check if a cached auth is still viable before preferring it.
+func (s *authScheduler) isAuthReadyForModel(authID string, providers []string, model string) bool {
+	if s == nil || authID == "" {
+		return false
+	}
+	normalized := normalizeProviderKeys(providers)
+	modelKey := canonicalModelKey(model)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	providerKey := s.authProviders[authID]
+	if providerKey == "" || !containsProvider(normalized, providerKey) {
+		return false
+	}
+	providerState := s.providers[providerKey]
+	if providerState == nil {
+		return false
+	}
+	shard := providerState.ensureModelLocked(modelKey, time.Now())
+	if shard == nil {
+		return false
+	}
+	predicate := func(entry *scheduledAuth) bool {
+		return entry != nil && entry.auth != nil && entry.auth.ID == authID
+	}
+	_, ok := shard.highestReadyPriorityLocked(false, predicate)
+	return ok
 }
 
 // mixedUnavailableErrorLocked synthesizes the mixed-provider cooldown or unavailable error.
