@@ -117,6 +117,9 @@ func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) []*corea
 			attrs["models_hash"] = hash
 		}
 		addConfigHeadersToAttrs(ck.Headers, attrs)
+		if ck.RemoveToolsCacheControl {
+			attrs["remove_tools_cache_control"] = "true"
+		}
 		proxyURL := strings.TrimSpace(ck.ProxyURL)
 		a := &coreauth.Auth{
 			ID:         id,
