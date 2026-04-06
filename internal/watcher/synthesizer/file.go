@@ -12,6 +12,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/geminicli"
+	sdkauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
@@ -161,21 +162,8 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 	ApplyAuthExcludedModelsMeta(a, cfg, perAccountExcluded, "oauth")
 	// For codex auth files, extract plan_type from the JWT id_token and default websocket support on.
 	if provider == "codex" {
-		if raw, ok := metadata["websockets"]; ok && raw != nil {
-			switch v := raw.(type) {
-			case bool:
-				if v {
-					a.Attributes["websockets"] = "true"
-				} else {
-					a.Attributes["websockets"] = "false"
-				}
-			case string:
-				if trimmed := strings.TrimSpace(v); trimmed != "" {
-					a.Attributes["websockets"] = trimmed
-				}
-			}
-		} else {
-			a.Attributes["websockets"] = "true"
+		if websockets, ok := sdkauth.CodexWebsocketsAttributeValue(metadata); ok {
+			a.Attributes["websockets"] = websockets
 		}
 		if idTokenRaw, ok := metadata["id_token"].(string); ok && strings.TrimSpace(idTokenRaw) != "" {
 			if claims, errParse := codex.ParseJWTToken(idTokenRaw); errParse == nil && claims != nil {
