@@ -370,7 +370,7 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 	}
 	name := strings.TrimSpace(auth.FileName)
 	if name == "" {
-		name = auth.ID
+		name = filepath.Base(auth.ID)
 	}
 	entry := gin.H{
 		"id":             auth.ID,
