@@ -335,6 +335,7 @@ func (s *Service) applyCoreAuthRemoval(ctx context.Context, id string) {
 			log.Errorf("failed to disable auth %s: %v", id, err)
 		}
 		if strings.EqualFold(strings.TrimSpace(existing.Provider), "codex") {
+			executor.CloseCodexWebsocketSessionsForAuthID(existing.ID, "auth_removed")
 			s.ensureExecutorsForAuth(existing)
 		}
 	}
@@ -498,6 +499,10 @@ func (s *Service) Run(ctx context.Context) error {
 
 	s.applyRetryConfig(s.cfg)
 
+	if s.coreManager != nil && s.cfg != nil {
+		s.coreManager.SetProviderStrategies(s.cfg.Routing.ProviderStrategies)
+	}
+
 	if s.coreManager != nil {
 		if errLoad := s.coreManager.Load(ctx); errLoad != nil {
 			log.Warnf("failed to load auth store: %v", errLoad)
@@ -648,6 +653,9 @@ func (s *Service) Run(ctx context.Context) error {
 				selector = &coreauth.RoundRobinSelector{}
 			}
 			s.coreManager.SetSelector(selector)
+		}
+		if s.coreManager != nil {
+			s.coreManager.SetProviderStrategies(newCfg.Routing.ProviderStrategies)
 		}
 
 		s.applyRetryConfig(newCfg)

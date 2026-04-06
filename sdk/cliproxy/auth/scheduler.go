@@ -32,11 +32,12 @@ const (
 
 // authScheduler keeps the incremental provider/model scheduling state used by Manager.
 type authScheduler struct {
-	mu            sync.Mutex
-	strategy      schedulerStrategy
-	providers     map[string]*providerScheduler
-	authProviders map[string]string
-	mixedCursors  map[string]int
+	mu                 sync.Mutex
+	strategy           schedulerStrategy
+	providerStrategies map[string]schedulerStrategy
+	providers          map[string]*providerScheduler
+	authProviders      map[string]string
+	mixedCursors       map[string]int
 }
 
 // providerScheduler stores auth metadata and model shards for a single provider.
@@ -130,6 +131,37 @@ func (s *authScheduler) setSelector(selector Selector) {
 	clear(s.mixedCursors)
 }
 
+// setProviderStrategies updates the per-provider strategy overrides.
+func (s *authScheduler) setProviderStrategies(m map[string]string) {
+	if s == nil {
+		return
+	}
+	parsed := make(map[string]schedulerStrategy, len(m))
+	for provider, name := range m {
+		switch strings.ToLower(strings.TrimSpace(name)) {
+		case "fill-first", "fillfirst", "ff":
+			parsed[strings.ToLower(strings.TrimSpace(provider))] = schedulerStrategyFillFirst
+		default:
+			parsed[strings.ToLower(strings.TrimSpace(provider))] = schedulerStrategyRoundRobin
+		}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.providerStrategies = parsed
+	clear(s.mixedCursors)
+}
+
+// strategyFor returns the effective strategy for the given provider key.
+// Falls back to the global strategy if no per-provider override is set.
+func (s *authScheduler) strategyFor(providerKey string) schedulerStrategy {
+	if s.providerStrategies != nil {
+		if st, ok := s.providerStrategies[providerKey]; ok {
+			return st
+		}
+	}
+	return s.strategy
+}
+
 // rebuild recreates the complete scheduler state from an auth snapshot.
 func (s *authScheduler) rebuild(auths []*Auth) {
 	if s == nil {
@@ -204,7 +236,7 @@ func (s *authScheduler) pickSingle(ctx context.Context, provider, model string, 
 		}
 		return true
 	}
-	if picked := shard.pickReadyLocked(preferWebsocket, s.strategy, predicate); picked != nil {
+	if picked := shard.pickReadyLocked(preferWebsocket, s.strategyFor(providerKey), predicate); picked != nil {
 		return picked, nil
 	}
 	return nil, shard.unavailableErrorLocked(provider, model, predicate)
@@ -218,6 +250,19 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 	normalized := normalizeProviderKeys(providers)
 	if len(normalized) == 0 {
 		return nil, "", &Error{Code: "provider_not_found", Message: "no provider supplied"}
+	}
+	if len(normalized) == 1 {
+		// When a single provider is eligible, reuse pickSingle so provider-specific preferences
+		// (for example Codex websocket transport) are applied consistently.
+		providerKey := normalized[0]
+		picked, errPick := s.pickSingle(ctx, providerKey, model, opts, tried)
+		if errPick != nil {
+			return nil, "", errPick
+		}
+		if picked == nil {
+			return nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
+		}
+		return picked, providerKey, nil
 	}
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
 	modelKey := canonicalModelKey(model)
@@ -244,7 +289,7 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 			_, ok := tried[pinnedAuthID]
 			return !ok
 		}
-		if picked := shard.pickReadyLocked(false, s.strategy, predicate); picked != nil {
+		if picked := shard.pickReadyLocked(false, s.strategyFor(providerKey), predicate); picked != nil {
 			return picked, providerKey, nil
 		}
 		return nil, "", shard.unavailableErrorLocked("mixed", model, predicate)
@@ -284,7 +329,7 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 			if shard == nil {
 				continue
 			}
-			picked := shard.pickReadyAtPriorityLocked(false, bestPriority, s.strategy, predicate)
+			picked := shard.pickReadyAtPriorityLocked(false, bestPriority, s.strategyFor(providerKey), predicate)
 			if picked != nil {
 				return picked, providerKey, nil
 			}
@@ -696,16 +741,25 @@ func (m *modelScheduler) highestReadyPriorityLocked(preferWebsocket bool, predic
 	if m == nil {
 		return 0, false
 	}
+	if preferWebsocket {
+		// When downstream is websocket and Codex supports websocket transport, prefer websocket-enabled
+		// credentials even if they are in a lower priority tier than HTTP-only credentials.
+		for _, priority := range m.priorityOrder {
+			bucket := m.readyByPriority[priority]
+			if bucket == nil {
+				continue
+			}
+			if bucket.ws.pickFirst(predicate) != nil {
+				return priority, true
+			}
+		}
+	}
 	for _, priority := range m.priorityOrder {
 		bucket := m.readyByPriority[priority]
 		if bucket == nil {
 			continue
 		}
-		view := &bucket.all
-		if preferWebsocket && len(bucket.ws.flat) > 0 {
-			view = &bucket.ws
-		}
-		if view.pickFirst(predicate) != nil {
+		if bucket.all.pickFirst(predicate) != nil {
 			return priority, true
 		}
 	}
@@ -723,7 +777,7 @@ func (m *modelScheduler) pickReadyAtPriorityLocked(preferWebsocket bool, priorit
 		return nil
 	}
 	view := &bucket.all
-	if preferWebsocket && len(bucket.ws.flat) > 0 {
+	if preferWebsocket && bucket.ws.pickFirst(predicate) != nil {
 		view = &bucket.ws
 	}
 	var picked *scheduledAuth

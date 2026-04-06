@@ -1,4 +1,4 @@
-package executor
+package helps
 
 import (
 	"fmt"
@@ -8,8 +8,8 @@ import (
 	"github.com/tiktoken-go/tokenizer"
 )
 
-// tokenizerForModel returns a tokenizer codec suitable for an OpenAI-style model id.
-func tokenizerForModel(model string) (tokenizer.Codec, error) {
+// TokenizerForModel returns a tokenizer codec suitable for an OpenAI-style model id.
+func TokenizerForModel(model string) (tokenizer.Codec, error) {
 	sanitized := strings.ToLower(strings.TrimSpace(model))
 	switch {
 	case sanitized == "":
@@ -37,8 +37,8 @@ func tokenizerForModel(model string) (tokenizer.Codec, error) {
 	}
 }
 
-// countOpenAIChatTokens approximates prompt tokens for OpenAI chat completions payloads.
-func countOpenAIChatTokens(enc tokenizer.Codec, payload []byte) (int64, error) {
+// CountOpenAIChatTokens approximates prompt tokens for OpenAI chat completions payloads.
+func CountOpenAIChatTokens(enc tokenizer.Codec, payload []byte) (int64, error) {
 	if enc == nil {
 		return 0, fmt.Errorf("encoder is nil")
 	}
@@ -69,8 +69,8 @@ func countOpenAIChatTokens(enc tokenizer.Codec, payload []byte) (int64, error) {
 	return int64(count), nil
 }
 
-// buildOpenAIUsageJSON returns a minimal usage structure understood by downstream translators.
-func buildOpenAIUsageJSON(count int64) []byte {
+// BuildOpenAIUsageJSON returns a minimal usage structure understood by downstream translators.
+func BuildOpenAIUsageJSON(count int64) []byte {
 	return []byte(fmt.Sprintf(`{"usage":{"prompt_tokens":%d,"completion_tokens":0,"total_tokens":%d}}`, count, count))
 }
 

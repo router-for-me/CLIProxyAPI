@@ -27,6 +27,9 @@ static/*
 # Authentication data
 !auths/.gitkeep
 
+# Codex token import files (contain sensitive refresh_tokens)
+codex*.txt
+
 # Documentation
 # docs/*
 AGENTS.md
@@ -35,12 +38,12 @@ GEMINI.md
 
 # Tooling metadata
 .vscode/*
+.worktrees/
 .codex/*
 .claude/*
 .gemini/*
 .serena/*
 .agent/*
-.agents/*
 .agents/*
 .opencode/*
 .idea/*
@@ -51,3 +54,9 @@ _bmad-output/*
 # macOS
 .DS_Store
 ._*
+
+# Opencode
+.beads/
+.opencode/
+.cli-proxy-api/
+.venv/

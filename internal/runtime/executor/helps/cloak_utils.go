@@ -1,4 +1,4 @@
-package executor
+package helps
 
 import (
 	"crypto/rand"
@@ -28,9 +28,17 @@ func isValidUserID(userID string) bool {
 	return userIDPattern.MatchString(userID)
 }
 
-// shouldCloak determines if request should be cloaked based on config and client User-Agent.
+func GenerateFakeUserID() string {
+	return generateFakeUserID()
+}
+
+func IsValidUserID(userID string) bool {
+	return isValidUserID(userID)
+}
+
+// ShouldCloak determines if request should be cloaked based on config and client User-Agent.
 // Returns true if cloaking should be applied.
-func shouldCloak(cloakMode string, userAgent string) bool {
+func ShouldCloak(cloakMode string, userAgent string) bool {
 	switch strings.ToLower(cloakMode) {
 	case "always":
 		return true

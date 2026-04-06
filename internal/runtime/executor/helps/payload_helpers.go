@@ -1,4 +1,4 @@
-package executor
+package helps
 
 import (
 	"encoding/json"
@@ -11,12 +11,12 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-// applyPayloadConfigWithRoot behaves like applyPayloadConfig but treats all parameter
+// ApplyPayloadConfigWithRoot behaves like applyPayloadConfig but treats all parameter
 // paths as relative to the provided root path (for example, "request" for Gemini CLI)
 // and restricts matches to the given protocol when supplied. Defaults are checked
 // against the original payload when provided. requestedModel carries the client-visible
 // model name before alias resolution so payload rules can target aliases precisely.
-func applyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string, payload, original []byte, requestedModel string) []byte {
+func ApplyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string, payload, original []byte, requestedModel string) []byte {
 	if cfg == nil || len(payload) == 0 {
 		return payload
 	}
@@ -244,7 +244,7 @@ func payloadRawValue(value any) ([]byte, bool) {
 	}
 }
 
-func payloadRequestedModel(opts cliproxyexecutor.Options, fallback string) string {
+func PayloadRequestedModel(opts cliproxyexecutor.Options, fallback string) string {
 	fallback = strings.TrimSpace(fallback)
 	if len(opts.Metadata) == 0 {
 		return fallback
