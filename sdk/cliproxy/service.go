@@ -5,9 +5,13 @@ package cliproxy
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -15,6 +19,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
+	executorhelps "github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/wsrelay"
@@ -25,6 +30,8 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	log "github.com/sirupsen/logrus"
 )
+
+const qwenSyncReadLimit = 1 << 20
 
 // Service wraps the proxy server lifecycle so external programs can embed the CLI proxy.
 // It manages the complete lifecycle including authentication, file watching, HTTP server,
@@ -903,7 +910,19 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		}
 		models = applyExcludedModels(models, excluded)
 	case "qwen":
-		models = registry.GetQwenModels()
+		models = qwenDynamicModelsFromAuth(a)
+		if len(models) == 0 {
+			changed := s.syncQwenV2ModelsIntoAuthMetadata(context.Background(), a)
+			if changed && s.coreManager != nil {
+				if _, err := s.coreManager.Update(context.Background(), a); err != nil {
+					log.Debugf("qwen models sync: failed to persist auth metadata for %s: %v", a.ID, err)
+				}
+			}
+			models = qwenDynamicModelsFromAuth(a)
+		}
+		if len(models) == 0 {
+			models = registry.GetQwenModels()
+		}
 		models = applyExcludedModels(models, excluded)
 	case "iflow":
 		models = registry.GetIFlowModels()
@@ -1009,6 +1028,273 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 	}
 
 	GlobalModelRegistry().UnregisterClient(a.ID)
+}
+
+func qwenDynamicModelsFromAuth(a *coreauth.Auth) []*ModelInfo {
+	if a == nil || a.Metadata == nil {
+		return nil
+	}
+	raw, ok := a.Metadata["qwen_models"]
+	if !ok || raw == nil {
+		return nil
+	}
+
+	// Be liberal about decoding: auth metadata can come from JSON, so it may be []any.
+	var items []any
+	switch val := raw.(type) {
+	case []any:
+		items = val
+	case []map[string]any:
+		items = make([]any, 0, len(val))
+		for i := range val {
+			items = append(items, val[i])
+		}
+	default:
+		return nil
+	}
+
+	out := make([]*ModelInfo, 0, len(items))
+	for _, item := range items {
+		entry, ok := item.(map[string]any)
+		if !ok || entry == nil {
+			continue
+		}
+		id, _ := entry["id"].(string)
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		name, _ := entry["name"].(string)
+		displayName := strings.TrimSpace(name)
+		if displayName == "" {
+			displayName = id
+		}
+		out = append(out, &ModelInfo{
+			ID:          id,
+			Object:      "model",
+			Created:     time.Now().Unix(),
+			OwnedBy:     "qwen",
+			Type:        "qwen",
+			DisplayName: displayName,
+		})
+	}
+	return out
+}
+
+type qwenV2ModelsResponse struct {
+	Success bool `json:"success"`
+	Data    struct {
+		Data []struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		} `json:"data"`
+	} `json:"data"`
+}
+
+func (s *Service) syncQwenV2ModelsIntoAuthMetadata(ctx context.Context, a *coreauth.Auth) bool {
+	if s == nil || a == nil {
+		return false
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	// If we already have decoded dynamic models, do not re-fetch here.
+	if len(qwenDynamicModelsFromAuth(a)) > 0 {
+		return false
+	}
+
+	tokenCookie, sessionCookies, baseURL := qwenV2CredsFromAuth(a)
+	if strings.TrimSpace(tokenCookie) == "" {
+		return false
+	}
+	if baseURL == "" {
+		baseURL = "https://chat.qwen.ai"
+	}
+
+	cookieHeader := qwenCookieHeader(tokenCookie, sessionCookies)
+	targetURL := strings.TrimSuffix(baseURL, "/") + "/api/v2/models"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
+	if err != nil {
+		log.Debugf("qwen models sync: build request failed: %v", err)
+		return false
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "CLIProxyAPI")
+	if cookieHeader != "" {
+		req.Header.Set("Cookie", cookieHeader)
+	}
+
+	httpClient := executorhelps.NewProxyAwareHTTPClient(ctx, s.cfg, a, 10*time.Second)
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		log.Debugf("qwen models sync: request failed: %v", err)
+		return false
+	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		// Best-effort: sync failure must not block static fallback.
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, qwenSyncReadLimit))
+		if len(b) > 0 {
+			log.Debugf("qwen models sync: status=%d body_length=%d", resp.StatusCode, len(b))
+		} else {
+			log.Debugf("qwen models sync: status=%d", resp.StatusCode)
+		}
+		return false
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, qwenSyncReadLimit))
+	if err != nil {
+		log.Debugf("qwen models sync: read body failed: %v", err)
+		return false
+	}
+	var parsed qwenV2ModelsResponse
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		log.Debugf("qwen models sync: decode failed: %v", err)
+		return false
+	}
+	if !parsed.Success {
+		log.Debugf("qwen models sync: response not successful")
+		return false
+	}
+
+	items := make([]map[string]any, 0, len(parsed.Data.Data))
+	for _, entry := range parsed.Data.Data {
+		id := strings.TrimSpace(entry.ID)
+		if id == "" {
+			continue
+		}
+		name := strings.TrimSpace(entry.Name)
+		items = append(items, map[string]any{
+			"id":   id,
+			"name": name,
+		})
+	}
+	if len(items) == 0 {
+		return false
+	}
+	if a.Metadata == nil {
+		a.Metadata = make(map[string]any)
+	}
+	a.Metadata["qwen_models"] = items
+
+	// Optional best-effort status sync, for callers that want to display account state.
+	if _, ok := a.Metadata["qwen_status"]; !ok {
+		s.syncQwenV2StatusIntoAuthMetadata(ctx, a, baseURL, cookieHeader, httpClient)
+	}
+	return true
+}
+
+func (s *Service) syncQwenV2StatusIntoAuthMetadata(ctx context.Context, a *coreauth.Auth, baseURL string, cookieHeader string, httpClient *http.Client) {
+	if s == nil || a == nil || strings.TrimSpace(baseURL) == "" || httpClient == nil {
+		return
+	}
+	targetURL := strings.TrimSuffix(baseURL, "/") + "/api/v2/users/status"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
+	if err != nil {
+		return
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "CLIProxyAPI")
+	if strings.TrimSpace(cookieHeader) != "" {
+		req.Header.Set("Cookie", cookieHeader)
+	}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return
+	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, qwenSyncReadLimit))
+	if err != nil {
+		return
+	}
+	var decoded any
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		return
+	}
+	if a.Metadata == nil {
+		a.Metadata = make(map[string]any)
+	}
+	a.Metadata["qwen_status"] = decoded
+}
+
+func qwenV2CredsFromAuth(a *coreauth.Auth) (tokenCookie string, sessionCookies map[string]string, baseURL string) {
+	if a == nil {
+		return "", nil, ""
+	}
+	if a.Attributes != nil {
+		if v := strings.TrimSpace(a.Attributes["base_url"]); v != "" {
+			baseURL = v
+		}
+	}
+	if a.Metadata != nil {
+		if v, ok := a.Metadata["token_cookie"].(string); ok && strings.TrimSpace(v) != "" {
+			tokenCookie = v
+		}
+		if raw := a.Metadata["session_cookies"]; raw != nil {
+			sessionCookies = make(map[string]string)
+			switch v := raw.(type) {
+			case map[string]string:
+				for key, value := range v {
+					if strings.TrimSpace(key) == "" || strings.TrimSpace(value) == "" {
+						continue
+					}
+					sessionCookies[key] = value
+				}
+			case map[string]any:
+				for key, value := range v {
+					s, ok := value.(string)
+					if !ok {
+						continue
+					}
+					if strings.TrimSpace(key) == "" || strings.TrimSpace(s) == "" {
+						continue
+					}
+					sessionCookies[key] = s
+				}
+			}
+			if len(sessionCookies) == 0 {
+				sessionCookies = nil
+			}
+		}
+	}
+	if baseURL != "" {
+		if strings.HasPrefix(baseURL, "http://") || strings.HasPrefix(baseURL, "https://") {
+			baseURL = strings.TrimSuffix(baseURL, "/")
+		} else {
+			baseURL = "https://" + strings.TrimSuffix(baseURL, "/")
+		}
+	}
+	return tokenCookie, sessionCookies, baseURL
+}
+
+func qwenCookieHeader(tokenCookie string, sessionCookies map[string]string) string {
+	var parts []string
+	if strings.TrimSpace(tokenCookie) != "" {
+		parts = append(parts, fmt.Sprintf("token=%s", tokenCookie))
+	}
+	if len(sessionCookies) > 0 {
+		keys := make([]string, 0, len(sessionCookies))
+		for k := range sessionCookies {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			value := strings.TrimSpace(sessionCookies[key])
+			if value == "" {
+				continue
+			}
+			parts = append(parts, fmt.Sprintf("%s=%s", key, value))
+		}
+	}
+	return strings.Join(parts, "; ")
 }
 
 // refreshModelRegistrationForAuth re-applies the latest model registration for

@@ -26,6 +26,10 @@ type QwenTokenStorage struct {
 	ResourceURL string `json:"resource_url"`
 	// Email is the Qwen account email address associated with this token.
 	Email string `json:"email"`
+	// TokenCookie stores the authentication cookie used by the Qwen web portal.
+	TokenCookie string `json:"token_cookie,omitempty"`
+	// SessionCookies holds any additional session cookies required by Qwen.
+	SessionCookies map[string]string `json:"session_cookies,omitempty"`
 	// Type indicates the authentication provider type, always "qwen" for this storage.
 	Type string `json:"type"`
 	// Expire is the timestamp when the current access token expires.
@@ -54,11 +58,15 @@ func (ts *QwenTokenStorage) SetMetadata(meta map[string]any) {
 func (ts *QwenTokenStorage) SaveTokenToFile(authFilePath string) error {
 	misc.LogSavingCredentials(authFilePath)
 	ts.Type = "qwen"
-	if err := os.MkdirAll(filepath.Dir(authFilePath), 0700); err != nil {
-		return fmt.Errorf("failed to create directory: %v", err)
+	dir := filepath.Dir(authFilePath)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return fmt.Errorf("failed to create directory: %w", err)
+	}
+	if err := os.Chmod(dir, 0700); err != nil {
+		return fmt.Errorf("failed to set directory permissions: %w", err)
 	}
 
-	f, err := os.Create(authFilePath)
+	f, err := os.OpenFile(authFilePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
 	if err != nil {
 		return fmt.Errorf("failed to create token file: %w", err)
 	}
@@ -74,6 +82,10 @@ func (ts *QwenTokenStorage) SaveTokenToFile(authFilePath string) error {
 
 	if err = json.NewEncoder(f).Encode(data); err != nil {
 		return fmt.Errorf("failed to write token to file: %w", err)
+	}
+
+	if err := os.Chmod(authFilePath, 0600); err != nil {
+		return fmt.Errorf("failed to set token file permissions: %w", err)
 	}
 	return nil
 }

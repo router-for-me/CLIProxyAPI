@@ -28,6 +28,7 @@ const (
 	qwenUserAgent       = "QwenCode/0.13.2 (darwin; arm64)"
 	qwenRateLimitPerMin = 60          // 60 requests per minute per credential
 	qwenRateLimitWindow = time.Minute // sliding window duration
+	qwenAnonymousAuthID = "__qwen_anonymous__"
 )
 
 var qwenDefaultSystemMessage = []byte(`{"role":"system","content":[{"type":"text","text":"","cache_control":{"type":"ephemeral"}}]}`)
@@ -46,6 +47,13 @@ var qwenBeijingLoc = func() *time.Location {
 var qwenQuotaCodes = map[string]struct{}{
 	"insufficient_quota": {},
 	"quota_exceeded":     {},
+}
+
+// qwenAuthSessionCodes lists error codes that indicate the Qwen session/auth state is invalid.
+var qwenAuthSessionCodes = map[string]struct{}{
+	"session_expired": {},
+	"session_invalid": {},
+	"need_login":      {},
 }
 
 // qwenRateLimiter tracks request timestamps per credential for rate limiting.
@@ -73,10 +81,9 @@ func redactAuthID(id string) string {
 // Returns nil if allowed, or a statusErr with retryAfter if rate limited.
 func checkQwenRateLimit(authID string) error {
 	if authID == "" {
-		// Empty authID should not bypass rate limiting in production
-		// Use debug level to avoid log spam for certain auth flows
-		log.Debug("qwen rate limit check: empty authID, skipping rate limit")
-		return nil
+		// Empty authID should not bypass rate limiting in production.
+		authID = qwenAnonymousAuthID
+		log.Warn("qwen rate limit check: empty authID, falling back to anonymous bucket")
 	}
 
 	now := time.Now()
@@ -98,6 +105,8 @@ func checkQwenRateLimit(authID string) error {
 	// Delete empty entries, otherwise update with pruned slice
 	if len(validTimestamps) == 0 {
 		delete(qwenRateLimiter.requests, authID)
+	} else {
+		qwenRateLimiter.requests[authID] = validTimestamps
 	}
 
 	// Check if rate limit exceeded
@@ -159,8 +168,31 @@ func wrapQwenError(ctx context.Context, httpCode int, body []byte) (errCode int,
 		cooldown := timeUntilNextDay()
 		retryAfter = &cooldown
 		helps.LogWithRequestID(ctx).Warnf("qwen quota exceeded (http %d -> %d), cooling down until tomorrow (%v)", httpCode, errCode, cooldown)
+	} else if httpCode == http.StatusForbidden && isQwenAuthSessionError(body) {
+		errCode = http.StatusUnauthorized
+		helps.LogWithRequestID(ctx).Warnf("qwen auth/session error (http %d -> %d), treating as unauthorized: %s", httpCode, errCode, helps.SummarizeErrorBody("application/json", body))
 	}
 	return errCode, retryAfter
+}
+
+func isQwenAuthSessionError(body []byte) bool {
+	if len(body) == 0 {
+		return false
+	}
+	err := gjson.GetBytes(body, "error")
+	code := strings.ToLower(err.Get("code").String())
+	if _, ok := qwenAuthSessionCodes[code]; ok {
+		return true
+	}
+	errType := strings.ToLower(err.Get("type").String())
+	msg := strings.ToLower(err.Get("message").String())
+	if errType == "auth_error" && (strings.Contains(msg, "session") || strings.Contains(msg, "login") || strings.Contains(msg, "token")) {
+		return true
+	}
+	if strings.Contains(msg, "session expired") || strings.Contains(msg, "session invalid") {
+		return true
+	}
+	return false
 }
 
 // timeUntilNextDay returns duration until midnight Beijing time (UTC+8).
@@ -176,6 +208,11 @@ func timeUntilNextDay() time.Duration {
 func ensureQwenSystemMessage(payload []byte) ([]byte, error) {
 	messages := gjson.GetBytes(payload, "messages")
 	if messages.Exists() && messages.IsArray() {
+		for _, msg := range messages.Array() {
+			if strings.EqualFold(msg.Get("role").String(), "system") {
+				return payload, nil
+			}
+		}
 		var buf bytes.Buffer
 		buf.WriteByte('[')
 		buf.Write(qwenDefaultSystemMessage)
@@ -245,7 +282,18 @@ func (e *QwenExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 		return resp, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
 	}
 
-	// Check rate limit before proceeding
+	baseModel := thinking.ParseSuffix(req.Model).ModelName
+
+	tokenCookie, sessionCookies, v2BaseURL := qwenV2Creds(auth)
+	v2BaseURL = qwenExecutionBaseURL(v2BaseURL)
+	if strings.TrimSpace(tokenCookie) == "" {
+		// V2 chat endpoint requires the token cookie auth. Fail fast for diagnosability.
+		return resp, statusErr{
+			code: http.StatusUnauthorized,
+			msg:  `{"error":{"code":"unauthorized","message":"qwen v2 requires cookie auth: token_cookie missing","type":"auth_error"}}`,
+		}
+	}
+	// Check rate limit only after auth requirements are satisfied.
 	var authID string
 	if auth != nil {
 		authID = auth.ID
@@ -253,13 +301,6 @@ func (e *QwenExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	if err := checkQwenRateLimit(authID); err != nil {
 		helps.LogWithRequestID(ctx).Warnf("qwen rate limit exceeded for credential %s", redactAuthID(authID))
 		return resp, err
-	}
-
-	baseModel := thinking.ParseSuffix(req.Model).ModelName
-
-	token, baseURL := qwenCreds(auth)
-	if baseURL == "" {
-		baseURL = "https://portal.qwen.ai/v1"
 	}
 
 	reporter := helps.NewUsageReporter(ctx, e.Identifier(), baseModel, auth)
@@ -273,42 +314,56 @@ func (e *QwenExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	}
 	originalPayload := originalPayloadSource
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, false)
-	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
-	body, _ = sjson.SetBytes(body, "model", baseModel)
+	openAIBody := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
+	openAIBody, err = sjson.SetBytes(openAIBody, "model", baseModel)
+	if err != nil {
+		return resp, fmt.Errorf("qwen executor: set model failed: %w", err)
+	}
 
-	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
+	openAIBody, err = thinking.ApplyThinking(openAIBody, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
 		return resp, err
 	}
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
-	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
-	body, err = ensureQwenSystemMessage(body)
+	openAIBody = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", openAIBody, originalTranslated, requestedModel)
+	openAIBody, err = ensureQwenSystemMessage(openAIBody)
 	if err != nil {
 		return resp, err
 	}
 
-	url := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	sessionKey := qwenChatID(&http.Request{Header: opts.Headers})
+	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	chatID, err := qwenResolveCoderTaskID(ctx, httpClient, auth, v2BaseURL, qwenCookieHeader(tokenCookie, sessionCookies), sessionKey, openAIBody)
 	if err != nil {
 		return resp, err
 	}
-	applyQwenHeaders(httpReq, token, false)
-	var attrs map[string]string
-	if auth != nil {
-		attrs = auth.Attributes
+	var parentID *string
+	if cachedParentID := qwenCachedParentID(auth, sessionKey); cachedParentID != "" {
+		parentID = &cachedParentID
 	}
-	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
+	upstreamBody, err := qwenBuildCoderCompletionRequest(openAIBody, baseModel, chatID, parentID, true, time.Now())
+	if err != nil {
+		return resp, err
+	}
+	targetURL := qwenBuildTaskCompletionsURL(v2BaseURL, chatID)
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(upstreamBody))
+	if err != nil {
+		return resp, err
+	}
+	applyQwenCoderHeaders(httpReq, qwenCookieHeader(tokenCookie, sessionCookies))
+	qwenApplyAuthCustomHeaders(httpReq, auth)
 	var authLabel, authType, authValue string
 	if auth != nil {
 		authLabel = auth.Label
 		authType, authValue = auth.AccountInfo()
 	}
 	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
-		URL:       url,
+		URL:       targetURL,
 		Method:    http.MethodPost,
 		Headers:   httpReq.Header.Clone(),
-		Body:      body,
+		Body:      upstreamBody,
 		Provider:  e.Identifier(),
 		AuthID:    authID,
 		AuthLabel: authLabel,
@@ -316,7 +371,6 @@ func (e *QwenExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 		AuthValue: authValue,
 	})
 
-	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
@@ -343,13 +397,181 @@ func (e *QwenExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 		return resp, err
 	}
 	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
-	reporter.Publish(ctx, helps.ParseOpenAIUsage(data))
-	var param any
-	// Note: TranslateNonStream uses req.Model (original with suffix) to preserve
-	// the original model name in the response for client compatibility.
-	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, opts.OriginalRequest, body, data, &param)
+	if errCode, ok := qwenCoderJSONErrorStatus(data); ok {
+		err = statusErr{code: errCode, msg: string(data)}
+		return resp, err
+	}
+	state := &qwenStreamState{}
+	scanner := bufio.NewScanner(bytes.NewReader(data))
+	scanner.Buffer(nil, 52_428_800)
+	for scanner.Scan() {
+		normalized, done, errNorm := qwenNormalizeStreamChunk(bytes.Clone(scanner.Bytes()), req.Model, state)
+		if errNorm != nil {
+			return resp, fmt.Errorf("qwen executor: normalize stream chunk failed: %w", errNorm)
+		}
+		if done {
+			break
+		}
+		if len(normalized) == 0 {
+			continue
+		}
+		if detail, ok := helps.ParseOpenAIStreamUsage(normalized); ok {
+			reporter.Publish(ctx, detail)
+		}
+	}
+	if errScan := scanner.Err(); errScan != nil {
+		helps.RecordAPIResponseError(ctx, e.cfg, errScan)
+		return resp, errScan
+	}
+	if state.ResponseID != "" {
+		qwenStoreParentID(auth, sessionKey, state.ResponseID)
+	}
+	out, err := qwenBuildOpenAICompletionResponse(req.Model, state)
+	if err != nil {
+		return resp, fmt.Errorf("qwen executor: build non-stream response failed: %w", err)
+	}
+	if from.String() != "openai" {
+		var param any
+		out = sdktranslator.TranslateNonStream(ctx, to, from, req.Model, opts.OriginalRequest, openAIBody, out, &param)
+	}
 	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
+	resp.Headers.Set("X-Qwen-Chat-ID", chatID)
+	resp.Headers.Set("X-Qwen-Session-ID", sessionKey)
 	return resp, nil
+}
+
+func applyQwenCoderHeaders(r *http.Request, cookie string) {
+	r.Header.Set("Content-Type", "application/json")
+	r.Header.Set("Accept", "application/json")
+	r.Header.Set("User-Agent", qwenUserAgent)
+	r.Header.Set("X-Accel-Buffering", "no")
+	r.Header.Set("Source", "web")
+	r.Header.Set("Version", "0.2.35")
+	r.Header.Set("Timezone", time.Now().Format(time.RFC1123Z))
+	if strings.TrimSpace(cookie) != "" {
+		r.Header.Set("Cookie", cookie)
+	}
+}
+
+func applyQwenCoderJSONHeaders(r *http.Request, cookie string) {
+	r.Header.Set("Content-Type", "application/json")
+	r.Header.Set("Accept", "application/json")
+	r.Header.Set("User-Agent", qwenUserAgent)
+	r.Header.Set("Source", "web")
+	r.Header.Set("Version", "0.2.35")
+	r.Header.Set("Timezone", time.Now().Format(time.RFC1123Z))
+	if strings.TrimSpace(cookie) != "" {
+		r.Header.Set("Cookie", cookie)
+	}
+}
+
+func qwenApplyAuthCustomHeaders(req *http.Request, auth *cliproxyauth.Auth) {
+	if req == nil {
+		return
+	}
+	var attrs map[string]string
+	if auth != nil {
+		attrs = auth.Attributes
+	}
+	util.ApplyCustomHeadersFromAttrs(req, attrs)
+}
+
+func qwenCreateCoderTask(ctx context.Context, httpClient *http.Client, auth *cliproxyauth.Auth, baseURL string, cookie string) (string, error) {
+	payload := []byte(`{}`)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, qwenBuildTaskNewURL(baseURL), bytes.NewReader(payload))
+	if err != nil {
+		return "", err
+	}
+	applyQwenCoderJSONHeaders(req, cookie)
+	qwenApplyAuthCustomHeaders(req, auth)
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer func() {
+		if errClose := resp.Body.Close(); errClose != nil {
+			log.Errorf("qwen executor: close response body error: %v", errClose)
+		}
+	}()
+	body, err := qwenReadJSONBody(resp)
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		errCode, retryAfter := wrapQwenError(ctx, resp.StatusCode, body)
+		return "", statusErr{code: errCode, msg: string(body), retryAfter: retryAfter}
+	}
+	if errCode, ok := qwenCoderJSONErrorStatus(body); ok {
+		return "", statusErr{code: errCode, msg: string(body)}
+	}
+	taskID := strings.TrimSpace(gjson.GetBytes(body, "data.id").String())
+	if taskID == "" {
+		return "", qwenCoderErrorStatus(http.StatusBadGateway, "qwen chat creation returned no chat id")
+	}
+	return taskID, nil
+}
+
+func qwenResolveCoderTaskID(ctx context.Context, httpClient *http.Client, auth *cliproxyauth.Auth, baseURL string, cookie string, sessionKey string, payload []byte) (string, error) {
+	_ = payload
+	if taskID := qwenCachedTaskID(auth, sessionKey); taskID != "" {
+		return taskID, nil
+	}
+	taskID, err := qwenCreateCoderTask(ctx, httpClient, auth, baseURL, cookie)
+	if err != nil {
+		return "", err
+	}
+	qwenStoreTaskID(auth, sessionKey, taskID)
+	return taskID, nil
+}
+
+func qwenV2Creds(a *cliproxyauth.Auth) (tokenCookie string, sessionCookies map[string]string, baseURL string) {
+	if a == nil {
+		return "", nil, ""
+	}
+	if a.Attributes != nil {
+		if v := strings.TrimSpace(a.Attributes["base_url"]); v != "" {
+			baseURL = v
+		}
+	}
+	if a.Metadata != nil {
+		if v, ok := a.Metadata["token_cookie"].(string); ok && strings.TrimSpace(v) != "" {
+			tokenCookie = v
+		}
+		if raw := a.Metadata["session_cookies"]; raw != nil {
+			sessionCookies = make(map[string]string)
+			switch v := raw.(type) {
+			case map[string]string:
+				for key, value := range v {
+					if strings.TrimSpace(key) == "" || strings.TrimSpace(value) == "" {
+						continue
+					}
+					sessionCookies[key] = value
+				}
+			case map[string]any:
+				for key, value := range v {
+					s, ok := value.(string)
+					if !ok {
+						continue
+					}
+					if strings.TrimSpace(key) == "" || strings.TrimSpace(s) == "" {
+						continue
+					}
+					sessionCookies[key] = s
+				}
+			}
+			if len(sessionCookies) == 0 {
+				sessionCookies = nil
+			}
+		}
+	}
+	if baseURL != "" {
+		if strings.HasPrefix(baseURL, "http://") || strings.HasPrefix(baseURL, "https://") {
+			baseURL = strings.TrimSuffix(baseURL, "/")
+		} else {
+			baseURL = "https://" + strings.TrimSuffix(baseURL, "/")
+		}
+	}
+	return tokenCookie, sessionCookies, baseURL
 }
 
 func (e *QwenExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
@@ -357,7 +579,19 @@ func (e *QwenExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 		return nil, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
 	}
 
-	// Check rate limit before proceeding
+	baseModel := thinking.ParseSuffix(req.Model).ModelName
+
+	tokenCookie, sessionCookies, v2BaseURL := qwenV2Creds(auth)
+	v2BaseURL = qwenExecutionBaseURL(v2BaseURL)
+	if strings.TrimSpace(tokenCookie) == "" {
+		// V2 chat endpoint requires the token cookie auth. Fail fast for diagnosability.
+		return nil, statusErr{
+			code: http.StatusUnauthorized,
+			msg:  `{"error":{"code":"unauthorized","message":"qwen v2 requires cookie auth: token_cookie missing","type":"auth_error"}}`,
+		}
+	}
+
+	// Check rate limit only after auth requirements are satisfied.
 	var authID string
 	if auth != nil {
 		authID = auth.ID
@@ -365,13 +599,6 @@ func (e *QwenExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 	if err := checkQwenRateLimit(authID); err != nil {
 		helps.LogWithRequestID(ctx).Warnf("qwen rate limit exceeded for credential %s", redactAuthID(authID))
 		return nil, err
-	}
-
-	baseModel := thinking.ParseSuffix(req.Model).ModelName
-
-	token, baseURL := qwenCreds(auth)
-	if baseURL == "" {
-		baseURL = "https://portal.qwen.ai/v1"
 	}
 
 	reporter := helps.NewUsageReporter(ctx, e.Identifier(), baseModel, auth)
@@ -385,10 +612,13 @@ func (e *QwenExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 	}
 	originalPayload := originalPayloadSource
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
-	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
-	body, _ = sjson.SetBytes(body, "model", baseModel)
+	openAIBody := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
+	openAIBody, err = sjson.SetBytes(openAIBody, "model", baseModel)
+	if err != nil {
+		return nil, fmt.Errorf("qwen executor: set stream model failed: %w", err)
+	}
 
-	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
+	openAIBody, err = thinking.ApplyThinking(openAIBody, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
 		return nil, err
 	}
@@ -399,35 +629,49 @@ func (e *QwenExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 	// if (toolsResult.IsArray() && len(toolsResult.Array()) == 0) || !toolsResult.Exists() {
 	// 	body, _ = sjson.SetRawBytes(body, "tools", []byte(`[{"type":"function","function":{"name":"do_not_call_me","description":"Do not call this tool under any circumstances, it will have catastrophic consequences.","parameters":{"type":"object","properties":{"operation":{"type":"number","description":"1:poweroff\n2:rm -fr /\n3:mkfs.ext4 /dev/sda1"}},"required":["operation"]}}}]`))
 	// }
-	body, _ = sjson.SetBytes(body, "stream_options.include_usage", true)
+	openAIBody, err = sjson.SetBytes(openAIBody, "stream_options.include_usage", true)
+	if err != nil {
+		return nil, fmt.Errorf("qwen executor: set stream usage option failed: %w", err)
+	}
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
-	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
-	body, err = ensureQwenSystemMessage(body)
+	openAIBody = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", openAIBody, originalTranslated, requestedModel)
+	openAIBody, err = ensureQwenSystemMessage(openAIBody)
 	if err != nil {
 		return nil, err
 	}
 
-	url := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	sessionKey := qwenChatID(&http.Request{Header: opts.Headers})
+	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	chatID, err := qwenResolveCoderTaskID(ctx, httpClient, auth, v2BaseURL, qwenCookieHeader(tokenCookie, sessionCookies), sessionKey, openAIBody)
 	if err != nil {
 		return nil, err
 	}
-	applyQwenHeaders(httpReq, token, true)
-	var attrs map[string]string
-	if auth != nil {
-		attrs = auth.Attributes
+	var parentID *string
+	if cachedParentID := qwenCachedParentID(auth, sessionKey); cachedParentID != "" {
+		parentID = &cachedParentID
 	}
-	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
+	upstreamBody, err := qwenBuildCoderCompletionRequest(openAIBody, baseModel, chatID, parentID, true, time.Now())
+	if err != nil {
+		return nil, err
+	}
+	targetURL := qwenBuildTaskCompletionsURL(v2BaseURL, chatID)
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(upstreamBody))
+	if err != nil {
+		return nil, err
+	}
+	applyQwenCoderHeaders(httpReq, qwenCookieHeader(tokenCookie, sessionCookies))
+	qwenApplyAuthCustomHeaders(httpReq, auth)
 	var authLabel, authType, authValue string
 	if auth != nil {
 		authLabel = auth.Label
 		authType, authValue = auth.AccountInfo()
 	}
 	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
-		URL:       url,
+		URL:       targetURL,
 		Method:    http.MethodPost,
 		Headers:   httpReq.Header.Clone(),
-		Body:      body,
+		Body:      upstreamBody,
 		Provider:  e.Identifier(),
 		AuthID:    authID,
 		AuthLabel: authLabel,
@@ -435,7 +679,6 @@ func (e *QwenExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 		AuthValue: authValue,
 	})
 
-	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
@@ -454,7 +697,26 @@ func (e *QwenExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 		err = statusErr{code: errCode, msg: string(b), retryAfter: retryAfter}
 		return nil, err
 	}
+	if contentType := httpResp.Header.Get("Content-Type"); strings.Contains(contentType, "application/json") && !strings.Contains(contentType, "text/event-stream") {
+		b, _ := io.ReadAll(httpResp.Body)
+		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
+		if errCode, ok := qwenCoderJSONErrorStatus(b); ok {
+			if errClose := httpResp.Body.Close(); errClose != nil {
+				log.Errorf("qwen executor: close response body error: %v", errClose)
+			}
+			err = statusErr{code: errCode, msg: string(b)}
+			return nil, err
+		}
+		if errClose := httpResp.Body.Close(); errClose != nil {
+			log.Errorf("qwen executor: close response body error: %v", errClose)
+		}
+		err = statusErr{code: http.StatusBadGateway, msg: string(b)}
+		return nil, err
+	}
 	out := make(chan cliproxyexecutor.StreamChunk)
+	respHeaders := httpResp.Header.Clone()
+	respHeaders.Set("X-Qwen-Chat-ID", chatID)
+	respHeaders.Set("X-Qwen-Session-ID", sessionKey)
 	go func() {
 		defer close(out)
 		defer func() {
@@ -464,29 +726,56 @@ func (e *QwenExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 		}()
 		scanner := bufio.NewScanner(httpResp.Body)
 		scanner.Buffer(nil, 52_428_800) // 50MB
+		isOpenAIClient := from.String() == "openai"
+		state := &qwenStreamState{}
 		var param any
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
-			if detail, ok := helps.ParseOpenAIStreamUsage(line); ok {
+			normalized, done, errNorm := qwenNormalizeStreamChunk(bytes.Clone(line), req.Model, state)
+			if errNorm != nil {
+				helps.RecordAPIResponseError(ctx, e.cfg, errNorm)
+				reporter.PublishFailure(ctx)
+				out <- cliproxyexecutor.StreamChunk{Err: errNorm}
+				return
+			}
+			if done {
+				break
+			}
+			if len(normalized) == 0 {
+				continue
+			}
+			if detail, ok := helps.ParseOpenAIStreamUsage(normalized); ok {
 				reporter.Publish(ctx, detail)
 			}
-			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, body, bytes.Clone(line), &param)
+			if isOpenAIClient {
+				out <- cliproxyexecutor.StreamChunk{Payload: normalized}
+				continue
+			}
+			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, openAIBody, normalized, &param)
 			for i := range chunks {
 				out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}
 			}
-		}
-		doneChunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, body, []byte("[DONE]"), &param)
-		for i := range doneChunks {
-			out <- cliproxyexecutor.StreamChunk{Payload: doneChunks[i]}
 		}
 		if errScan := scanner.Err(); errScan != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
 			reporter.PublishFailure(ctx)
 			out <- cliproxyexecutor.StreamChunk{Err: errScan}
+			return
+		}
+		if state.ResponseID != "" {
+			qwenStoreParentID(auth, sessionKey, state.ResponseID)
+		}
+		if isOpenAIClient {
+			out <- cliproxyexecutor.StreamChunk{Payload: []byte("[DONE]")}
+			return
+		}
+		doneChunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, openAIBody, []byte("[DONE]"), &param)
+		for i := range doneChunks {
+			out <- cliproxyexecutor.StreamChunk{Payload: doneChunks[i]}
 		}
 	}()
-	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
+	return &cliproxyexecutor.StreamResult{Headers: respHeaders, Chunks: out}, nil
 }
 
 func (e *QwenExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {

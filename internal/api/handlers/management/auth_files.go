@@ -130,6 +130,18 @@ func isWebUIRequest(c *gin.Context) bool {
 	}
 }
 
+func authFileBaseName(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return ""
+	}
+	name = strings.TrimRight(name, "/\\")
+	if idx := strings.LastIndexAny(name, "/\\"); idx >= 0 && idx+1 < len(name) {
+		return name[idx+1:]
+	}
+	return name
+}
+
 func startCallbackForwarder(port int, provider, targetBase string) (*callbackForwarder, error) {
 	callbackForwardersMu.Lock()
 	prev := callbackForwarders[port]
@@ -263,26 +275,43 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 
 // GetAuthFileModels returns the models supported by a specific auth file
 func (h *Handler) GetAuthFileModels(c *gin.Context) {
-	name := c.Query("name")
+	name := strings.TrimSpace(c.Query("name"))
 	if name == "" {
 		c.JSON(400, gin.H{"error": "name is required"})
 		return
 	}
+	baseName := authFileBaseName(name)
 
 	// Try to find auth ID via authManager
 	var authID string
+	var matchedAuth *coreauth.Auth
 	if h.authManager != nil {
 		auths := h.authManager.List()
 		for _, auth := range auths {
-			if auth.FileName == name || auth.ID == name {
+			if auth == nil {
+				continue
+			}
+			if auth.ID == name || (baseName != "" && auth.ID == baseName) {
 				authID = auth.ID
+				matchedAuth = auth
+				break
+			}
+			fileName := strings.TrimSpace(auth.FileName)
+			fileBase := authFileBaseName(fileName)
+			if fileName == name || (baseName != "" && fileName == baseName) || fileBase == name || (baseName != "" && fileBase == baseName) {
+				authID = auth.ID
+				matchedAuth = auth
 				break
 			}
 		}
 	}
 
 	if authID == "" {
-		authID = name // fallback to filename as ID
+		if baseName != "" {
+			authID = baseName
+		} else {
+			authID = name // fallback to filename as ID
+		}
 	}
 
 	// Get models from registry
@@ -305,8 +334,64 @@ func (h *Handler) GetAuthFileModels(c *gin.Context) {
 		}
 		result = append(result, entry)
 	}
+	response := gin.H{"models": result}
+	if status := qwenAuthStatusFromMetadata(matchedAuth); len(status) > 0 {
+		response["status"] = status
+	}
+	c.JSON(200, response)
+}
 
-	c.JSON(200, gin.H{"models": result})
+func qwenAuthStatusFromMetadata(auth *coreauth.Auth) gin.H {
+	if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "qwen") || auth.Metadata == nil {
+		return nil
+	}
+	status := gin.H{}
+	for _, key := range []string{"qwen_status", "user_status", "account_status"} {
+		if value, ok := auth.Metadata[key]; ok && value != nil {
+			if sanitized := sanitizeQwenStatusValue(value); sanitized != nil {
+				status[key] = sanitized
+			}
+		}
+	}
+	if len(status) == 0 {
+		return nil
+	}
+	return status
+}
+
+func sanitizeQwenStatusValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		out := make(map[string]any)
+		for key, nested := range typed {
+			lower := strings.ToLower(strings.TrimSpace(key))
+			if strings.Contains(lower, "balance") || strings.Contains(lower, "credit") || strings.Contains(lower, "quota") {
+				continue
+			}
+			if sanitized := sanitizeQwenStatusValue(nested); sanitized != nil {
+				out[key] = sanitized
+			}
+		}
+		if len(out) == 0 {
+			return nil
+		}
+		return out
+	case gin.H:
+		return sanitizeQwenStatusValue(map[string]any(typed))
+	case []any:
+		out := make([]any, 0, len(typed))
+		for _, nested := range typed {
+			if sanitized := sanitizeQwenStatusValue(nested); sanitized != nil {
+				out = append(out, sanitized)
+			}
+		}
+		if len(out) == 0 {
+			return nil
+		}
+		return out
+	default:
+		return value
+	}
 }
 
 // List auth files from disk when the auth manager is unavailable.
