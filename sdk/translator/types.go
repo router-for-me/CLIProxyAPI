@@ -10,17 +10,17 @@ type RequestTransform func(model string, rawJSON []byte, stream bool) []byte
 
 // ResponseStreamTransform is a function type that converts a streaming response from a source schema to a target schema.
 // It takes a context, the model name, the raw JSON of the original and converted requests, the raw JSON of the current response chunk, and an optional parameter.
-// It returns a slice of strings, where each string is a chunk of the converted streaming response.
-type ResponseStreamTransform func(ctx context.Context, model string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) []string
+// It returns a slice of byte chunks containing the converted streaming response.
+type ResponseStreamTransform func(ctx context.Context, model string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) [][]byte
 
 // ResponseNonStreamTransform is a function type that converts a non-streaming response from a source schema to a target schema.
 // It takes a context, the model name, the raw JSON of the original and converted requests, the raw JSON of the response, and an optional parameter.
-// It returns the converted response as a single string.
-type ResponseNonStreamTransform func(ctx context.Context, model string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) string
+// It returns the converted response as a single byte slice.
+type ResponseNonStreamTransform func(ctx context.Context, model string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) []byte
 
 // ResponseTokenCountTransform is a function type that transforms a token count from a source format to a target format.
-// It takes a context and the token count as an int64, and returns the transformed token count as a string.
-type ResponseTokenCountTransform func(ctx context.Context, count int64) string
+// It takes a context and the token count as an int64, and returns the transformed token count as bytes.
+type ResponseTokenCountTransform func(ctx context.Context, count int64) []byte
 
 // ResponseTransform is a struct that groups together the functions for transforming streaming and non-streaming responses,
 // as well as token counts.

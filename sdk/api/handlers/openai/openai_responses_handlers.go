@@ -9,7 +9,9 @@ package openai
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 
@@ -21,6 +23,177 @@ import (
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
+
+func writeResponsesSSEChunk(w io.Writer, chunk []byte) {
+	if w == nil || len(chunk) == 0 {
+		return
+	}
+	if _, err := w.Write(chunk); err != nil {
+		return
+	}
+	if bytes.HasSuffix(chunk, []byte("\n\n")) || bytes.HasSuffix(chunk, []byte("\r\n\r\n")) {
+		return
+	}
+	suffix := []byte("\n\n")
+	if bytes.HasSuffix(chunk, []byte("\r\n")) {
+		suffix = []byte("\r\n")
+	} else if bytes.HasSuffix(chunk, []byte("\n")) {
+		suffix = []byte("\n")
+	}
+	if _, err := w.Write(suffix); err != nil {
+		return
+	}
+}
+
+type responsesSSEFramer struct {
+	pending []byte
+}
+
+func (f *responsesSSEFramer) WriteChunk(w io.Writer, chunk []byte) {
+	if len(chunk) == 0 {
+		return
+	}
+	if responsesSSENeedsLineBreak(f.pending, chunk) {
+		f.pending = append(f.pending, '\n')
+	}
+	f.pending = append(f.pending, chunk...)
+	for {
+		frameLen := responsesSSEFrameLen(f.pending)
+		if frameLen == 0 {
+			break
+		}
+		writeResponsesSSEChunk(w, f.pending[:frameLen])
+		copy(f.pending, f.pending[frameLen:])
+		f.pending = f.pending[:len(f.pending)-frameLen]
+	}
+	if len(bytes.TrimSpace(f.pending)) == 0 {
+		f.pending = f.pending[:0]
+		return
+	}
+	if len(f.pending) == 0 || !responsesSSECanEmitWithoutDelimiter(f.pending) {
+		return
+	}
+	writeResponsesSSEChunk(w, f.pending)
+	f.pending = f.pending[:0]
+}
+
+func (f *responsesSSEFramer) Flush(w io.Writer) {
+	if len(f.pending) == 0 {
+		return
+	}
+	if len(bytes.TrimSpace(f.pending)) == 0 {
+		f.pending = f.pending[:0]
+		return
+	}
+	if !responsesSSECanEmitWithoutDelimiter(f.pending) {
+		f.pending = f.pending[:0]
+		return
+	}
+	writeResponsesSSEChunk(w, f.pending)
+	f.pending = f.pending[:0]
+}
+
+func responsesSSEFrameLen(chunk []byte) int {
+	if len(chunk) == 0 {
+		return 0
+	}
+	lf := bytes.Index(chunk, []byte("\n\n"))
+	crlf := bytes.Index(chunk, []byte("\r\n\r\n"))
+	switch {
+	case lf < 0:
+		if crlf < 0 {
+			return 0
+		}
+		return crlf + 4
+	case crlf < 0:
+		return lf + 2
+	case lf < crlf:
+		return lf + 2
+	default:
+		return crlf + 4
+	}
+}
+
+func responsesSSENeedsMoreData(chunk []byte) bool {
+	trimmed := bytes.TrimSpace(chunk)
+	if len(trimmed) == 0 {
+		return false
+	}
+	return responsesSSEHasField(trimmed, []byte("event:")) && !responsesSSEHasField(trimmed, []byte("data:"))
+}
+
+func responsesSSEHasField(chunk []byte, prefix []byte) bool {
+	s := chunk
+	for len(s) > 0 {
+		line := s
+		if i := bytes.IndexByte(s, '\n'); i >= 0 {
+			line = s[:i]
+			s = s[i+1:]
+		} else {
+			s = nil
+		}
+		line = bytes.TrimSpace(line)
+		if bytes.HasPrefix(line, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func responsesSSECanEmitWithoutDelimiter(chunk []byte) bool {
+	trimmed := bytes.TrimSpace(chunk)
+	if len(trimmed) == 0 || responsesSSENeedsMoreData(trimmed) || !responsesSSEHasField(trimmed, []byte("data:")) {
+		return false
+	}
+	return responsesSSEDataLinesValid(trimmed)
+}
+
+func responsesSSEDataLinesValid(chunk []byte) bool {
+	s := chunk
+	for len(s) > 0 {
+		line := s
+		if i := bytes.IndexByte(s, '\n'); i >= 0 {
+			line = s[:i]
+			s = s[i+1:]
+		} else {
+			s = nil
+		}
+		line = bytes.TrimSpace(line)
+		if len(line) == 0 || !bytes.HasPrefix(line, []byte("data:")) {
+			continue
+		}
+		data := bytes.TrimSpace(line[len("data:"):])
+		if len(data) == 0 || bytes.Equal(data, []byte("[DONE]")) {
+			continue
+		}
+		if !json.Valid(data) {
+			return false
+		}
+	}
+	return true
+}
+
+func responsesSSENeedsLineBreak(pending, chunk []byte) bool {
+	if len(pending) == 0 || len(chunk) == 0 {
+		return false
+	}
+	if bytes.HasSuffix(pending, []byte("\n")) || bytes.HasSuffix(pending, []byte("\r")) {
+		return false
+	}
+	if chunk[0] == '\n' || chunk[0] == '\r' {
+		return false
+	}
+	trimmed := bytes.TrimLeft(chunk, " \t")
+	if len(trimmed) == 0 {
+		return false
+	}
+	for _, prefix := range [][]byte{[]byte("data:"), []byte("event:"), []byte("id:"), []byte("retry:"), []byte(":")} {
+		if bytes.HasPrefix(trimmed, prefix) {
+			return true
+		}
+	}
+	return false
+}
 
 // OpenAIResponsesAPIHandler contains the handlers for OpenAIResponses API endpoints.
 // It holds a pool of clients to interact with the backend service.
@@ -221,14 +394,7 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 		c.Header("Connection", "keep-alive")
 		c.Header("Access-Control-Allow-Origin", "*")
 	}
-
-	writeSSEChunk := func(chunk []byte) {
-		if bytes.HasPrefix(chunk, []byte("event:")) {
-			_, _ = c.Writer.Write([]byte("\n"))
-		}
-		_, _ = c.Writer.Write(chunk)
-		_, _ = c.Writer.Write([]byte("\n"))
-	}
+	framer := &responsesSSEFramer{}
 
 	flushPendingChunks := func() {
 		if streamFlushed {
@@ -237,7 +403,7 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 		setSSEHeaders()
 		handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 		for _, chunk := range pendingChunks {
-			writeSSEChunk(chunk)
+			framer.WriteChunk(c.Writer, chunk)
 		}
 		flusher.Flush()
 		pendingChunks = pendingChunks[:0]
@@ -251,7 +417,7 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 		}
 
 		if streamFlushed {
-			writeSSEChunk(chunk)
+			framer.WriteChunk(c.Writer, chunk)
 			flusher.Flush()
 			return
 		}
@@ -311,6 +477,7 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 				flushPendingChunks()
 			}
 		}
+		framer.Flush(c.Writer)
 		_, _ = c.Writer.Write([]byte("\n"))
 		flusher.Flush()
 		cliCancel(nil)
@@ -341,6 +508,7 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 			}
 
 			recoverableHint := !assistantContentStarted && hasEncryptedContentContext(rawJSON) && isInvalidEncryptedContentError(errMsg)
+			framer.Flush(c.Writer)
 			h.writeResponsesStreamTerminalError(c, errMsg, recoverableHint)
 			flusher.Flush()
 			if errMsg != nil {
@@ -364,6 +532,7 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 								return
 							}
 							recoverableHint := !assistantContentStarted && hasEncryptedContentContext(rawJSON) && isInvalidEncryptedContentError(terminal)
+							framer.Flush(c.Writer)
 							h.writeResponsesStreamTerminalError(c, terminal, recoverableHint)
 							flusher.Flush()
 							cliCancel(terminal.Error)
@@ -378,12 +547,10 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 				finishStream()
 				return
 			}
-
 			bufferOrWriteChunk(chunk)
 		}
 	}
 }
-
 func responsesStreamChunkHasVisibleAssistantContent(chunk []byte) bool {
 	for _, line := range bytes.Split(chunk, []byte("\n")) {
 		line = bytes.TrimSpace(line)
@@ -444,23 +611,20 @@ func (h *OpenAIResponsesAPIHandler) writeResponsesStreamTerminalError(c *gin.Con
 	chunk := handlers.BuildOpenAIResponsesStreamErrorChunk(status, errText, 0)
 	_, _ = fmt.Fprintf(c.Writer, "\nevent: error\ndata: %s\n\n", string(chunk))
 }
-
-func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage, onChunk func([]byte)) {
+func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage, framer *responsesSSEFramer) {
+	if framer == nil {
+		framer = &responsesSSEFramer{}
+	}
 	h.ForwardStream(c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
 		WriteChunk: func(chunk []byte) {
-			if onChunk != nil {
-				onChunk(chunk)
-			}
-			if bytes.HasPrefix(chunk, []byte("event:")) {
-				_, _ = c.Writer.Write([]byte("\n"))
-			}
-			_, _ = c.Writer.Write(chunk)
-			_, _ = c.Writer.Write([]byte("\n"))
+			framer.WriteChunk(c.Writer, chunk)
 		},
 		WriteTerminalError: func(errMsg *interfaces.ErrorMessage) {
+			framer.Flush(c.Writer)
 			h.writeResponsesStreamTerminalError(c, errMsg, false)
 		},
 		WriteDone: func() {
+			framer.Flush(c.Writer)
 			_, _ = c.Writer.Write([]byte("\n"))
 		},
 	})
