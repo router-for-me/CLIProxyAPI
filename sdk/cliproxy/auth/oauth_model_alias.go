@@ -190,6 +190,9 @@ func resolveUpstreamModelFromAliasTable(m *Manager, auth *Auth, requestedModel, 
 	if m == nil || auth == nil {
 		return ""
 	}
+	if isQwenLegacyPinnedModel(auth, requestedModel) {
+		return ""
+	}
 	if channel == "" {
 		return ""
 	}

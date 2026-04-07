@@ -277,12 +277,262 @@ func (e *QwenExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth,
 	return httpClient.Do(httpReq)
 }
 
+func qwenShouldUseLegacyChatCompletions(model string) bool {
+	return strings.EqualFold(strings.TrimSpace(model), "coder-model")
+}
+
+func (e *QwenExecutor) executeLegacy(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, baseModel string) (resp cliproxyexecutor.Response, err error) {
+	var authID string
+	if auth != nil {
+		authID = auth.ID
+	}
+	if err := checkQwenRateLimit(authID); err != nil {
+		helps.LogWithRequestID(ctx).Warnf("qwen rate limit exceeded for credential %s", redactAuthID(authID))
+		return resp, err
+	}
+
+	token, baseURL := qwenCreds(auth)
+	if baseURL == "" {
+		baseURL = "https://portal.qwen.ai/v1"
+	}
+
+	reporter := helps.NewUsageReporter(ctx, e.Identifier(), baseModel, auth)
+	defer reporter.TrackFailure(ctx, &err)
+
+	from := opts.SourceFormat
+	to := sdktranslator.FromString("openai")
+	originalPayloadSource := req.Payload
+	if len(opts.OriginalRequest) > 0 {
+		originalPayloadSource = opts.OriginalRequest
+	}
+	originalPayload := originalPayloadSource
+	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, false)
+	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
+	body, err = sjson.SetBytes(body, "model", baseModel)
+	if err != nil {
+		return resp, fmt.Errorf("qwen executor: set legacy model failed: %w", err)
+	}
+
+	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
+	if err != nil {
+		return resp, err
+	}
+
+	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
+	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
+	body, err = ensureQwenSystemMessage(body)
+	if err != nil {
+		return resp, err
+	}
+
+	url := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return resp, err
+	}
+	applyQwenHeaders(httpReq, token, false)
+	qwenApplyAuthCustomHeaders(httpReq, auth)
+	var authLabel, authType, authValue string
+	if auth != nil {
+		authLabel = auth.Label
+		authType, authValue = auth.AccountInfo()
+	}
+	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
+		URL:       url,
+		Method:    http.MethodPost,
+		Headers:   httpReq.Header.Clone(),
+		Body:      body,
+		Provider:  e.Identifier(),
+		AuthID:    authID,
+		AuthLabel: authLabel,
+		AuthType:  authType,
+		AuthValue: authValue,
+	})
+
+	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpResp, err := httpClient.Do(httpReq)
+	if err != nil {
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
+		return resp, err
+	}
+	defer func() {
+		if errClose := httpResp.Body.Close(); errClose != nil {
+			log.Errorf("qwen executor: close response body error: %v", errClose)
+		}
+	}()
+	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		b, _ := io.ReadAll(httpResp.Body)
+		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
+
+		errCode, retryAfter := wrapQwenError(ctx, httpResp.StatusCode, b)
+		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d (mapped: %d), error message: %s", httpResp.StatusCode, errCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
+		err = statusErr{code: errCode, msg: string(b), retryAfter: retryAfter}
+		return resp, err
+	}
+	data, err := io.ReadAll(httpResp.Body)
+	if err != nil {
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
+		return resp, err
+	}
+	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
+	reporter.Publish(ctx, helps.ParseOpenAIUsage(data))
+	var param any
+	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, opts.OriginalRequest, body, data, &param)
+	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
+	return resp, nil
+}
+
+func (e *QwenExecutor) executeStreamLegacy(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, baseModel string) (_ *cliproxyexecutor.StreamResult, err error) {
+	var authID string
+	if auth != nil {
+		authID = auth.ID
+	}
+	if err := checkQwenRateLimit(authID); err != nil {
+		helps.LogWithRequestID(ctx).Warnf("qwen rate limit exceeded for credential %s", redactAuthID(authID))
+		return nil, err
+	}
+
+	token, baseURL := qwenCreds(auth)
+	if baseURL == "" {
+		baseURL = "https://portal.qwen.ai/v1"
+	}
+
+	reporter := helps.NewUsageReporter(ctx, e.Identifier(), baseModel, auth)
+	defer reporter.TrackFailure(ctx, &err)
+
+	from := opts.SourceFormat
+	to := sdktranslator.FromString("openai")
+	originalPayloadSource := req.Payload
+	if len(opts.OriginalRequest) > 0 {
+		originalPayloadSource = opts.OriginalRequest
+	}
+	originalPayload := originalPayloadSource
+	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
+	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
+	body, err = sjson.SetBytes(body, "model", baseModel)
+	if err != nil {
+		return nil, fmt.Errorf("qwen executor: set legacy stream model failed: %w", err)
+	}
+
+	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
+	if err != nil {
+		return nil, err
+	}
+
+	body, err = sjson.SetBytes(body, "stream_options.include_usage", true)
+	if err != nil {
+		return nil, fmt.Errorf("qwen executor: set legacy stream usage option failed: %w", err)
+	}
+	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
+	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
+	body, err = ensureQwenSystemMessage(body)
+	if err != nil {
+		return nil, err
+	}
+
+	url := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	applyQwenHeaders(httpReq, token, true)
+	qwenApplyAuthCustomHeaders(httpReq, auth)
+	var authLabel, authType, authValue string
+	if auth != nil {
+		authLabel = auth.Label
+		authType, authValue = auth.AccountInfo()
+	}
+	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
+		URL:       url,
+		Method:    http.MethodPost,
+		Headers:   httpReq.Header.Clone(),
+		Body:      body,
+		Provider:  e.Identifier(),
+		AuthID:    authID,
+		AuthLabel: authLabel,
+		AuthType:  authType,
+		AuthValue: authValue,
+	})
+
+	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpResp, err := httpClient.Do(httpReq)
+	if err != nil {
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
+		return nil, err
+	}
+	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		b, _ := io.ReadAll(httpResp.Body)
+		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
+
+		errCode, retryAfter := wrapQwenError(ctx, httpResp.StatusCode, b)
+		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d (mapped: %d), error message: %s", httpResp.StatusCode, errCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
+		if errClose := httpResp.Body.Close(); errClose != nil {
+			log.Errorf("qwen executor: close response body error: %v", errClose)
+		}
+		err = statusErr{code: errCode, msg: string(b), retryAfter: retryAfter}
+		return nil, err
+	}
+	out := make(chan cliproxyexecutor.StreamChunk)
+	go func() {
+		defer close(out)
+		defer func() {
+			if errClose := httpResp.Body.Close(); errClose != nil {
+				log.Errorf("qwen executor: close response body error: %v", errClose)
+			}
+		}()
+		scanner := bufio.NewScanner(httpResp.Body)
+		scanner.Buffer(nil, 52_428_800)
+		var param any
+		for scanner.Scan() {
+			line := bytes.Clone(scanner.Bytes())
+			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
+			normalized := bytesTrimDataPrefix(line)
+			if len(normalized) == 0 {
+				continue
+			}
+			if detail, ok := helps.ParseOpenAIStreamUsage(normalized); ok {
+				reporter.Publish(ctx, detail)
+			}
+			if bytes.Equal(normalized, []byte("[DONE]")) {
+				if from.String() == "openai" {
+					out <- cliproxyexecutor.StreamChunk{Payload: []byte("[DONE]")}
+					continue
+				}
+				chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, body, []byte("[DONE]"), &param)
+				for i := range chunks {
+					out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}
+				}
+				continue
+			}
+			if from.String() == "openai" {
+				out <- cliproxyexecutor.StreamChunk{Payload: normalized}
+				continue
+			}
+			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, body, normalized, &param)
+			for i := range chunks {
+				out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}
+			}
+		}
+		if errScan := scanner.Err(); errScan != nil {
+			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
+			reporter.PublishFailure(ctx)
+			out <- cliproxyexecutor.StreamChunk{Err: errScan}
+		}
+	}()
+	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
+}
+
 func (e *QwenExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
 	if opts.Alt == "responses/compact" {
 		return resp, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
 	}
 
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	if qwenShouldUseLegacyChatCompletions(baseModel) {
+		return e.executeLegacy(ctx, auth, req, opts, baseModel)
+	}
 
 	tokenCookie, sessionCookies, v2BaseURL := qwenV2Creds(auth)
 	v2BaseURL = qwenExecutionBaseURL(v2BaseURL)
@@ -580,6 +830,9 @@ func (e *QwenExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 	}
 
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	if qwenShouldUseLegacyChatCompletions(baseModel) {
+		return e.executeStreamLegacy(ctx, auth, req, opts, baseModel)
+	}
 
 	tokenCookie, sessionCookies, v2BaseURL := qwenV2Creds(auth)
 	v2BaseURL = qwenExecutionBaseURL(v2BaseURL)

@@ -33,6 +33,8 @@ import (
 
 const qwenSyncReadLimit = 1 << 20
 
+var qwenStaticPinnedModelIDs = []string{"coder-model"}
+
 // Service wraps the proxy server lifecycle so external programs can embed the CLI proxy.
 // It manages the complete lifecycle including authentication, file watching, HTTP server,
 // and integration with various AI service providers.
@@ -922,6 +924,8 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		}
 		if len(models) == 0 {
 			models = registry.GetQwenModels()
+		} else {
+			models = appendMissingQwenPinnedModels(models)
 		}
 		models = applyExcludedModels(models, excluded)
 	case "iflow":
@@ -1515,6 +1519,32 @@ func applyExcludedModels(models []*ModelInfo, excluded []string) []*ModelInfo {
 		}
 	}
 	return filtered
+}
+
+func appendMissingQwenPinnedModels(models []*ModelInfo) []*ModelInfo {
+	if len(models) == 0 {
+		return models
+	}
+	existing := make(map[string]struct{}, len(models))
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		existing[strings.TrimSpace(model.ID)] = struct{}{}
+	}
+	out := models
+	for _, modelID := range qwenStaticPinnedModelIDs {
+		if _, ok := existing[modelID]; ok {
+			continue
+		}
+		staticModel := registry.LookupStaticModelInfo(modelID)
+		if staticModel == nil {
+			continue
+		}
+		out = append(out, staticModel)
+		existing[modelID] = struct{}{}
+	}
+	return out
 }
 
 func applyModelPrefixes(models []*ModelInfo, prefix string, forceModelPrefix bool) []*ModelInfo {

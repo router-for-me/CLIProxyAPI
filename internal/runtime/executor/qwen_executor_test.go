@@ -268,6 +268,121 @@ func TestQwenExecutorExecuteFailsWithoutTokenCookie(t *testing.T) {
 	}
 }
 
+func TestQwenExecutorExecuteCoderModelUsesLegacyChatCompletions(t *testing.T) {
+	var gotPath string
+	var gotAuth string
+	var gotBody []byte
+	clearQwenRateLimiter()
+	t.Cleanup(clearQwenRateLimiter)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotAuth = r.Header.Get("Authorization")
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer server.Close()
+
+	exec := NewQwenExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		ID: "qwen-auth-coder-model-legacy",
+		Metadata: map[string]any{
+			"access_token": "access-token",
+		},
+		Attributes: map[string]string{
+			"base_url": server.URL + "/v1",
+		},
+	}
+
+	resp, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "coder-model",
+		Payload: []byte(`{"model":"coder-model","messages":[{"role":"user","content":"hello"}]}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if gotPath != "/v1/chat/completions" {
+		t.Fatalf("path = %q, want %q", gotPath, "/v1/chat/completions")
+	}
+	if gotAuth != "Bearer access-token" {
+		t.Fatalf("authorization = %q, want %q", gotAuth, "Bearer access-token")
+	}
+	if got := gjson.GetBytes(gotBody, "model").String(); got != "coder-model" {
+		t.Fatalf("model = %q, want %q", got, "coder-model")
+	}
+	if got := gjson.GetBytes(resp.Payload, "choices.0.message.content").String(); got != "ok" {
+		t.Fatalf("response content = %q, want %q", got, "ok")
+	}
+}
+
+func TestQwenExecutorExecuteStreamCoderModelUsesLegacyChatCompletions(t *testing.T) {
+	var gotPath string
+	var gotAuth string
+	var gotBody []byte
+	clearQwenRateLimiter()
+	t.Cleanup(clearQwenRateLimiter)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotAuth = r.Header.Get("Authorization")
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer server.Close()
+
+	exec := NewQwenExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		ID: "qwen-auth-coder-model-legacy-stream",
+		Metadata: map[string]any{
+			"access_token": "access-token",
+		},
+		Attributes: map[string]string{
+			"base_url": server.URL + "/v1",
+		},
+	}
+
+	result, err := exec.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "coder-model",
+		Payload: []byte(`{"model":"coder-model","messages":[{"role":"user","content":"hello"}],"stream":true}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+	if gotPath != "/v1/chat/completions" {
+		t.Fatalf("path = %q, want %q", gotPath, "/v1/chat/completions")
+	}
+	if gotAuth != "Bearer access-token" {
+		t.Fatalf("authorization = %q, want %q", gotAuth, "Bearer access-token")
+	}
+	if got := gjson.GetBytes(gotBody, "model").String(); got != "coder-model" {
+		t.Fatalf("model = %q, want %q", got, "coder-model")
+	}
+
+	payloads, errs := drainStreamChunks(t, result.Chunks, 2*time.Second)
+	if len(errs) != 0 {
+		t.Fatalf("unexpected stream errors: %v", errs)
+	}
+	if len(payloads) != 2 {
+		t.Fatalf("payload count = %d, want 2", len(payloads))
+	}
+	if !strings.Contains(payloads[0], "\"choices\"") {
+		t.Fatalf("first payload = %q, want normalized openai chunk", payloads[0])
+	}
+	if strings.HasPrefix(payloads[0], "data: ") {
+		t.Fatalf("first payload = %q, should not keep upstream data prefix", payloads[0])
+	}
+	if payloads[1] != "[DONE]" {
+		t.Fatalf("last payload = %q, want %q", payloads[1], "[DONE]")
+	}
+}
+
 func TestQwenExecutorExecuteMissingTokenCookieNotBlockedByRateLimit(t *testing.T) {
 	clearQwenRateLimiter()
 	t.Cleanup(clearQwenRateLimiter)

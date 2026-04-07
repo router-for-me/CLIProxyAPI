@@ -421,8 +421,25 @@ func preserveRequestedModelSuffix(requestedModel, resolved string) string {
 	return preserveResolvedModelSuffix(resolved, thinking.ParseSuffix(requestedModel))
 }
 
+func isQwenLegacyPinnedModel(auth *Auth, model string) bool {
+	if auth == nil {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(auth.Provider), "qwen") {
+		return false
+	}
+	baseModel := strings.TrimSpace(thinking.ParseSuffix(strings.TrimSpace(model)).ModelName)
+	if baseModel == "" {
+		baseModel = strings.TrimSpace(model)
+	}
+	return strings.EqualFold(baseModel, "coder-model")
+}
+
 func (m *Manager) executionModelCandidates(auth *Auth, routeModel string) []string {
 	requestedModel := rewriteModelForAuth(routeModel, auth)
+	if isQwenLegacyPinnedModel(auth, requestedModel) {
+		return []string{requestedModel}
+	}
 	requestedModel = m.applyOAuthModelAlias(auth, requestedModel)
 	if pool := m.resolveOpenAICompatUpstreamModelPool(auth, requestedModel); len(pool) > 0 {
 		if len(pool) == 1 {
@@ -442,6 +459,9 @@ func (m *Manager) selectionModelForAuth(auth *Auth, routeModel string) string {
 	requestedModel := rewriteModelForAuth(routeModel, auth)
 	if strings.TrimSpace(requestedModel) == "" {
 		requestedModel = strings.TrimSpace(routeModel)
+	}
+	if isQwenLegacyPinnedModel(auth, requestedModel) {
+		return requestedModel
 	}
 	resolvedModel := m.applyOAuthModelAlias(auth, requestedModel)
 	if strings.TrimSpace(resolvedModel) == "" {

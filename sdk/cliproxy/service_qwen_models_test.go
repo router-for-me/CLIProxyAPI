@@ -39,14 +39,76 @@ func TestServiceRegisterModelsForAuth_PrefersDynamicQwenModels(t *testing.T) {
 	service.registerModelsForAuth(auth)
 
 	models := reg.GetModelsForClient(auth.ID)
-	if len(models) != 1 {
-		t.Fatalf("expected 1 dynamic model registered, got %d", len(models))
+	if len(models) != 2 {
+		t.Fatalf("expected dynamic model plus static coder-model, got %d", len(models))
 	}
-	if models[0] == nil || models[0].ID != "qwen-dyn-only" {
-		t.Fatalf("models[0] = %#v, want id=%q", models[0], "qwen-dyn-only")
+	foundDynamic := false
+	foundCoder := false
+	for _, m := range models {
+		if m == nil {
+			continue
+		}
+		if m.ID == "qwen-dyn-only" && m.DisplayName == "Qwen Dyn Only" {
+			foundDynamic = true
+		}
+		if m.ID == "coder-model" {
+			foundCoder = true
+		}
 	}
-	if models[0].DisplayName != "Qwen Dyn Only" {
-		t.Fatalf("models[0].DisplayName = %q, want %q", models[0].DisplayName, "Qwen Dyn Only")
+	if !foundDynamic {
+		t.Fatalf("expected dynamic qwen model to remain present, got %#v", models)
+	}
+	if !foundCoder {
+		t.Fatalf("expected static coder-model to be preserved, got %#v", models)
+	}
+}
+
+func TestServiceRegisterModelsForAuth_QwenDynamicModelsKeepStaticCoderModel(t *testing.T) {
+	service := &Service{cfg: &config.Config{}}
+	auth := &coreauth.Auth{
+		ID:       "qwen-auth-dynamic-coder-model",
+		Provider: "qwen",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"auth_kind": "oauth",
+		},
+		Metadata: map[string]any{
+			"qwen_models": []map[string]any{
+				{"id": "qwen-dyn-only", "name": "Qwen Dyn Only"},
+			},
+		},
+	}
+
+	reg := registry.GetGlobalRegistry()
+	reg.UnregisterClient(auth.ID)
+	t.Cleanup(func() {
+		reg.UnregisterClient(auth.ID)
+	})
+
+	service.registerModelsForAuth(auth)
+
+	models := reg.GetModelsForClient(auth.ID)
+	if len(models) < 2 {
+		t.Fatalf("expected dynamic qwen models plus static coder-model, got %d", len(models))
+	}
+	foundDynamic := false
+	foundCoder := false
+	for _, m := range models {
+		if m == nil {
+			continue
+		}
+		if m.ID == "qwen-dyn-only" {
+			foundDynamic = true
+		}
+		if m.ID == "coder-model" {
+			foundCoder = true
+		}
+	}
+	if !foundDynamic {
+		t.Fatalf("expected dynamic model to remain present, got %#v", models)
+	}
+	if !foundCoder {
+		t.Fatalf("expected static coder-model to be preserved, got %#v", models)
 	}
 }
 
@@ -162,14 +224,27 @@ func TestServiceRegisterModelsForAuth_SyncsQwenModelsWhenDynamicMissing(t *testi
 	}
 
 	models := reg.GetModelsForClient(auth.ID)
-	if len(models) != 1 {
-		t.Fatalf("expected 1 synced model registered, got %d", len(models))
+	if len(models) != 2 {
+		t.Fatalf("expected synced model plus static coder-model, got %d", len(models))
 	}
-	if models[0] == nil || models[0].ID != "qwen-dyn-only" {
-		t.Fatalf("models[0] = %#v, want id=%q", models[0], "qwen-dyn-only")
+	foundDynamic := false
+	foundCoder := false
+	for _, m := range models {
+		if m == nil {
+			continue
+		}
+		if m.ID == "qwen-dyn-only" && m.DisplayName == "Qwen Dyn Only" {
+			foundDynamic = true
+		}
+		if m.ID == "coder-model" {
+			foundCoder = true
+		}
 	}
-	if models[0].DisplayName != "Qwen Dyn Only" {
-		t.Fatalf("models[0].DisplayName = %q, want %q", models[0].DisplayName, "Qwen Dyn Only")
+	if !foundDynamic {
+		t.Fatalf("expected synced dynamic qwen model to remain present, got %#v", models)
+	}
+	if !foundCoder {
+		t.Fatalf("expected static coder-model to be preserved after sync, got %#v", models)
 	}
 }
 

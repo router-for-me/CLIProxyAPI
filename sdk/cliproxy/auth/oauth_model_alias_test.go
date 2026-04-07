@@ -194,3 +194,22 @@ func TestApplyOAuthModelAlias_SuffixPreservation(t *testing.T) {
 		t.Errorf("applyOAuthModelAlias() model = %q, want %q", resolvedModel, "gemini-2.5-pro-exp-03-25(8192)")
 	}
 }
+
+func TestApplyOAuthModelAlias_DoesNotRewriteQwenCoderModel(t *testing.T) {
+	t.Parallel()
+
+	aliases := map[string][]internalconfig.OAuthModelAlias{
+		"qwen": {{Name: "qwen3.6-plus", Alias: "coder-model"}},
+	}
+
+	mgr := NewManager(nil, nil, nil)
+	mgr.SetConfig(&internalconfig.Config{})
+	mgr.SetOAuthModelAlias(aliases)
+
+	auth := &Auth{ID: "qwen-auth-id", Provider: "qwen"}
+
+	resolvedModel := mgr.applyOAuthModelAlias(auth, "coder-model")
+	if resolvedModel != "coder-model" {
+		t.Fatalf("applyOAuthModelAlias() model = %q, want %q", resolvedModel, "coder-model")
+	}
+}
