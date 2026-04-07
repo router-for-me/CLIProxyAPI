@@ -32,6 +32,7 @@ import {
   getAuthFileIcon,
   getTypeColor,
   getTypeLabel,
+  hasAuthFileForbiddenStatus,
   hasAuthFileStatusMessage,
   isRuntimeOnlyAuthFile,
   normalizeProviderKey,
@@ -88,6 +89,7 @@ export function AuthFilesPage() {
 
   const [filter, setFilter] = useState<'all' | string>('all');
   const [problemOnly, setProblemOnly] = useState(false);
+  const [forbiddenOnly, setForbiddenOnly] = useState(false);
   const [compactMode, setCompactMode] = useState(false);
   const [search, setSearch] = useState('');
   const [page, setPage] = useState(1);
@@ -354,10 +356,11 @@ export function AuthFilesPage() {
     return Array.from(types);
   }, [files]);
 
-  const filesMatchingProblemFilter = useMemo(
-    () => (problemOnly ? files.filter(hasAuthFileStatusMessage) : files),
-    [files, problemOnly]
-  );
+  const filesMatchingProblemFilter = useMemo(() => {
+    let result = problemOnly ? files.filter(hasAuthFileStatusMessage) : files;
+    if (forbiddenOnly) result = result.filter(hasAuthFileForbiddenStatus);
+    return result;
+  }, [files, problemOnly, forbiddenOnly]);
 
   const sortOptions = useMemo(
     () => [
@@ -753,6 +756,21 @@ export function AuthFilesPage() {
                         label={
                           <span className={styles.filterToggleLabel}>
                             {t('auth_files.problem_filter_only')}
+                          </span>
+                        }
+                      />
+                    </div>
+                    <div className={styles.filterToggleCard}>
+                      <ToggleSwitch
+                        checked={forbiddenOnly}
+                        onChange={(value) => {
+                          setForbiddenOnly(value);
+                          setPage(1);
+                        }}
+                        ariaLabel={t('auth_files.forbidden_filter_only')}
+                        label={
+                          <span className={styles.filterToggleLabel}>
+                            {t('auth_files.forbidden_filter_only')}
                           </span>
                         }
                       />

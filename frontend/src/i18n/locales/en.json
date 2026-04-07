@@ -510,6 +510,7 @@
     "search_placeholder": "Filter by name, type, or provider. Use * as a wildcard",
     "problem_filter_label": "Problem Filter",
     "problem_filter_only": "Only show problematic credentials",
+    "forbidden_filter_only": "Only show 403 credentials",
     "display_options_label": "Display options",
     "compact_mode_label": "Compact mode",
     "sort_label": "Sort",

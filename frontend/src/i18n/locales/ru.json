@@ -510,6 +510,7 @@
     "search_placeholder": "Фильтр по имени, типу или провайдеру, поддерживается wildcard *",
     "problem_filter_label": "Фильтр проблем",
     "problem_filter_only": "Показывать только проблемные учётные данные",
+    "forbidden_filter_only": "Показывать только учётные данные 403",
     "display_options_label": "Параметры отображения",
     "compact_mode_label": "Компактный режим",
     "sort_label": "Сортировка",
