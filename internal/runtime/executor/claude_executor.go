@@ -8,7 +8,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -841,6 +840,9 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 			baseBetas += ",oauth-2025-04-20"
 		}
 	}
+	if !strings.Contains(baseBetas, "interleaved-thinking") {
+		baseBetas += ",interleaved-thinking-2025-05-14"
+	}
 
 	hasClaude1MHeader := false
 	if ginHeaders != nil {
@@ -957,12 +959,9 @@ func applyClaudeToolPrefix(body []byte, prefix string) []byte {
 		return body
 	}
 
-	// Collect built-in tool names (those with a non-empty "type" field) so we can
-	// skip them consistently in both tools and message history.
-	builtinTools := map[string]bool{}
-	for _, name := range []string{"web_search", "code_execution", "text_editor", "computer"} {
-		builtinTools[name] = true
-	}
+	// Collect built-in tool names from the authoritative fallback seed list and
+	// augment it with any typed built-ins present in the current request body.
+	builtinTools := helps.AugmentClaudeBuiltinToolRegistry(body, nil)
 
 	if tools := gjson.GetBytes(body, "tools"); tools.Exists() && tools.IsArray() {
 		tools.ForEach(func(index, tool gjson.Result) bool {
@@ -1471,182 +1470,6 @@ func countCacheControls(payload []byte) int {
 	return count
 }
 
-func parsePayloadObject(payload []byte) (map[string]any, bool) {
-	if len(payload) == 0 {
-		return nil, false
-	}
-	var root map[string]any
-	if err := json.Unmarshal(payload, &root); err != nil {
-		return nil, false
-	}
-	return root, true
-}
-
-func marshalPayloadObject(original []byte, root map[string]any) []byte {
-	if root == nil {
-		return original
-	}
-	out, err := json.Marshal(root)
-	if err != nil {
-		return original
-	}
-	return out
-}
-
-func asObject(v any) (map[string]any, bool) {
-	obj, ok := v.(map[string]any)
-	return obj, ok
-}
-
-func asArray(v any) ([]any, bool) {
-	arr, ok := v.([]any)
-	return arr, ok
-}
-
-func countCacheControlsMap(root map[string]any) int {
-	count := 0
-
-	if system, ok := asArray(root["system"]); ok {
-		for _, item := range system {
-			if obj, ok := asObject(item); ok {
-				if _, exists := obj["cache_control"]; exists {
-					count++
-				}
-			}
-		}
-	}
-
-	if tools, ok := asArray(root["tools"]); ok {
-		for _, item := range tools {
-			if obj, ok := asObject(item); ok {
-				if _, exists := obj["cache_control"]; exists {
-					count++
-				}
-			}
-		}
-	}
-
-	if messages, ok := asArray(root["messages"]); ok {
-		for _, msg := range messages {
-			msgObj, ok := asObject(msg)
-			if !ok {
-				continue
-			}
-			content, ok := asArray(msgObj["content"])
-			if !ok {
-				continue
-			}
-			for _, item := range content {
-				if obj, ok := asObject(item); ok {
-					if _, exists := obj["cache_control"]; exists {
-						count++
-					}
-				}
-			}
-		}
-	}
-
-	return count
-}
-
-func normalizeTTLForBlock(obj map[string]any, seen5m *bool) bool {
-	ccRaw, exists := obj["cache_control"]
-	if !exists {
-		return false
-	}
-	cc, ok := asObject(ccRaw)
-	if !ok {
-		*seen5m = true
-		return false
-	}
-	ttlRaw, ttlExists := cc["ttl"]
-	ttl, ttlIsString := ttlRaw.(string)
-	if !ttlExists || !ttlIsString || ttl != "1h" {
-		*seen5m = true
-		return false
-	}
-	if *seen5m {
-		delete(cc, "ttl")
-		return true
-	}
-	return false
-}
-
-func findLastCacheControlIndex(arr []any) int {
-	last := -1
-	for idx, item := range arr {
-		obj, ok := asObject(item)
-		if !ok {
-			continue
-		}
-		if _, exists := obj["cache_control"]; exists {
-			last = idx
-		}
-	}
-	return last
-}
-
-func stripCacheControlExceptIndex(arr []any, preserveIdx int, excess *int) {
-	for idx, item := range arr {
-		if *excess <= 0 {
-			return
-		}
-		obj, ok := asObject(item)
-		if !ok {
-			continue
-		}
-		if _, exists := obj["cache_control"]; exists && idx != preserveIdx {
-			delete(obj, "cache_control")
-			*excess--
-		}
-	}
-}
-
-func stripAllCacheControl(arr []any, excess *int) {
-	for _, item := range arr {
-		if *excess <= 0 {
-			return
-		}
-		obj, ok := asObject(item)
-		if !ok {
-			continue
-		}
-		if _, exists := obj["cache_control"]; exists {
-			delete(obj, "cache_control")
-			*excess--
-		}
-	}
-}
-
-func stripMessageCacheControl(messages []any, excess *int) {
-	for _, msg := range messages {
-		if *excess <= 0 {
-			return
-		}
-		msgObj, ok := asObject(msg)
-		if !ok {
-			continue
-		}
-		content, ok := asArray(msgObj["content"])
-		if !ok {
-			continue
-		}
-		for _, item := range content {
-			if *excess <= 0 {
-				return
-			}
-			obj, ok := asObject(item)
-			if !ok {
-				continue
-			}
-			if _, exists := obj["cache_control"]; exists {
-				delete(obj, "cache_control")
-				*excess--
-			}
-		}
-	}
-}
-
 // normalizeCacheControlTTL ensures cache_control TTL values don't violate the
 // prompt-caching-scope-2026-01-05 ordering constraint: a 1h-TTL block must not
 // appear after a 5m-TTL block anywhere in the evaluation order.
@@ -1659,58 +1482,75 @@ func stripMessageCacheControl(messages []any, excess *int) {
 // Strategy: walk all cache_control blocks in evaluation order. Once a 5m block
 // is seen, strip ttl from ALL subsequent 1h blocks (downgrading them to 5m).
 func normalizeCacheControlTTL(payload []byte) []byte {
-	root, ok := parsePayloadObject(payload)
-	if !ok {
+	if len(payload) == 0 || !gjson.ValidBytes(payload) {
 		return payload
 	}
 
+	original := payload
 	seen5m := false
 	modified := false
 
-	if tools, ok := asArray(root["tools"]); ok {
-		for _, tool := range tools {
-			if obj, ok := asObject(tool); ok {
-				if normalizeTTLForBlock(obj, &seen5m) {
-					modified = true
-				}
-			}
+	processBlock := func(path string, obj gjson.Result) {
+		cc := obj.Get("cache_control")
+		if !cc.Exists() {
+			return
 		}
+		if !cc.IsObject() {
+			seen5m = true
+			return
+		}
+		ttl := cc.Get("ttl")
+		if ttl.Type != gjson.String || ttl.String() != "1h" {
+			seen5m = true
+			return
+		}
+		if !seen5m {
+			return
+		}
+		ttlPath := path + ".cache_control.ttl"
+		updated, errDel := sjson.DeleteBytes(payload, ttlPath)
+		if errDel != nil {
+			return
+		}
+		payload = updated
+		modified = true
 	}
 
-	if system, ok := asArray(root["system"]); ok {
-		for _, item := range system {
-			if obj, ok := asObject(item); ok {
-				if normalizeTTLForBlock(obj, &seen5m) {
-					modified = true
-				}
-			}
-		}
+	tools := gjson.GetBytes(payload, "tools")
+	if tools.IsArray() {
+		tools.ForEach(func(idx, item gjson.Result) bool {
+			processBlock(fmt.Sprintf("tools.%d", int(idx.Int())), item)
+			return true
+		})
 	}
 
-	if messages, ok := asArray(root["messages"]); ok {
-		for _, msg := range messages {
-			msgObj, ok := asObject(msg)
-			if !ok {
-				continue
+	system := gjson.GetBytes(payload, "system")
+	if system.IsArray() {
+		system.ForEach(func(idx, item gjson.Result) bool {
+			processBlock(fmt.Sprintf("system.%d", int(idx.Int())), item)
+			return true
+		})
+	}
+
+	messages := gjson.GetBytes(payload, "messages")
+	if messages.IsArray() {
+		messages.ForEach(func(msgIdx, msg gjson.Result) bool {
+			content := msg.Get("content")
+			if !content.IsArray() {
+				return true
 			}
-			content, ok := asArray(msgObj["content"])
-			if !ok {
-				continue
-			}
-			for _, item := range content {
-				if obj, ok := asObject(item); ok {
-					if normalizeTTLForBlock(obj, &seen5m) {
-						modified = true
-					}
-				}
-			}
-		}
+			content.ForEach(func(itemIdx, item gjson.Result) bool {
+				processBlock(fmt.Sprintf("messages.%d.content.%d", int(msgIdx.Int()), int(itemIdx.Int())), item)
+				return true
+			})
+			return true
+		})
 	}
 
 	if !modified {
-		return payload
+		return original
 	}
-	return marshalPayloadObject(payload, root)
+	return payload
 }
 
 // enforceCacheControlLimit removes excess cache_control blocks from a payload
@@ -1730,64 +1570,166 @@ func normalizeCacheControlTTL(payload []byte) []byte {
 //	Phase 4: remaining system blocks (last system).
 //	Phase 5: remaining tool blocks (last tool).
 func enforceCacheControlLimit(payload []byte, maxBlocks int) []byte {
-	root, ok := parsePayloadObject(payload)
-	if !ok {
+	if len(payload) == 0 || !gjson.ValidBytes(payload) {
 		return payload
 	}
 
-	total := countCacheControlsMap(root)
+	total := countCacheControls(payload)
 	if total <= maxBlocks {
 		return payload
 	}
 
 	excess := total - maxBlocks
 
-	var system []any
-	if arr, ok := asArray(root["system"]); ok {
-		system = arr
-	}
-	var tools []any
-	if arr, ok := asArray(root["tools"]); ok {
-		tools = arr
-	}
-	var messages []any
-	if arr, ok := asArray(root["messages"]); ok {
-		messages = arr
-	}
-
-	if len(system) > 0 {
-		stripCacheControlExceptIndex(system, findLastCacheControlIndex(system), &excess)
-	}
-	if excess <= 0 {
-		return marshalPayloadObject(payload, root)
-	}
-
-	if len(tools) > 0 {
-		stripCacheControlExceptIndex(tools, findLastCacheControlIndex(tools), &excess)
-	}
-	if excess <= 0 {
-		return marshalPayloadObject(payload, root)
-	}
-
-	if len(messages) > 0 {
-		stripMessageCacheControl(messages, &excess)
-	}
-	if excess <= 0 {
-		return marshalPayloadObject(payload, root)
-	}
-
-	if len(system) > 0 {
-		stripAllCacheControl(system, &excess)
+	system := gjson.GetBytes(payload, "system")
+	if system.IsArray() {
+		lastIdx := -1
+		system.ForEach(func(idx, item gjson.Result) bool {
+			if item.Get("cache_control").Exists() {
+				lastIdx = int(idx.Int())
+			}
+			return true
+		})
+		if lastIdx >= 0 {
+			system.ForEach(func(idx, item gjson.Result) bool {
+				if excess <= 0 {
+					return false
+				}
+				i := int(idx.Int())
+				if i == lastIdx {
+					return true
+				}
+				if !item.Get("cache_control").Exists() {
+					return true
+				}
+				path := fmt.Sprintf("system.%d.cache_control", i)
+				updated, errDel := sjson.DeleteBytes(payload, path)
+				if errDel != nil {
+					return true
+				}
+				payload = updated
+				excess--
+				return true
+			})
+		}
 	}
 	if excess <= 0 {
-		return marshalPayloadObject(payload, root)
+		return payload
 	}
 
-	if len(tools) > 0 {
-		stripAllCacheControl(tools, &excess)
+	tools := gjson.GetBytes(payload, "tools")
+	if tools.IsArray() {
+		lastIdx := -1
+		tools.ForEach(func(idx, item gjson.Result) bool {
+			if item.Get("cache_control").Exists() {
+				lastIdx = int(idx.Int())
+			}
+			return true
+		})
+		if lastIdx >= 0 {
+			tools.ForEach(func(idx, item gjson.Result) bool {
+				if excess <= 0 {
+					return false
+				}
+				i := int(idx.Int())
+				if i == lastIdx {
+					return true
+				}
+				if !item.Get("cache_control").Exists() {
+					return true
+				}
+				path := fmt.Sprintf("tools.%d.cache_control", i)
+				updated, errDel := sjson.DeleteBytes(payload, path)
+				if errDel != nil {
+					return true
+				}
+				payload = updated
+				excess--
+				return true
+			})
+		}
+	}
+	if excess <= 0 {
+		return payload
 	}
 
-	return marshalPayloadObject(payload, root)
+	messages := gjson.GetBytes(payload, "messages")
+	if messages.IsArray() {
+		messages.ForEach(func(msgIdx, msg gjson.Result) bool {
+			if excess <= 0 {
+				return false
+			}
+			content := msg.Get("content")
+			if !content.IsArray() {
+				return true
+			}
+			content.ForEach(func(itemIdx, item gjson.Result) bool {
+				if excess <= 0 {
+					return false
+				}
+				if !item.Get("cache_control").Exists() {
+					return true
+				}
+				path := fmt.Sprintf("messages.%d.content.%d.cache_control", int(msgIdx.Int()), int(itemIdx.Int()))
+				updated, errDel := sjson.DeleteBytes(payload, path)
+				if errDel != nil {
+					return true
+				}
+				payload = updated
+				excess--
+				return true
+			})
+			return true
+		})
+	}
+	if excess <= 0 {
+		return payload
+	}
+
+	system = gjson.GetBytes(payload, "system")
+	if system.IsArray() {
+		system.ForEach(func(idx, item gjson.Result) bool {
+			if excess <= 0 {
+				return false
+			}
+			if !item.Get("cache_control").Exists() {
+				return true
+			}
+			path := fmt.Sprintf("system.%d.cache_control", int(idx.Int()))
+			updated, errDel := sjson.DeleteBytes(payload, path)
+			if errDel != nil {
+				return true
+			}
+			payload = updated
+			excess--
+			return true
+		})
+	}
+	if excess <= 0 {
+		return payload
+	}
+
+	tools = gjson.GetBytes(payload, "tools")
+	if tools.IsArray() {
+		tools.ForEach(func(idx, item gjson.Result) bool {
+			if excess <= 0 {
+				return false
+			}
+			if !item.Get("cache_control").Exists() {
+				return true
+			}
+			path := fmt.Sprintf("tools.%d.cache_control", int(idx.Int()))
+			updated, errDel := sjson.DeleteBytes(payload, path)
+			if errDel != nil {
+				return true
+			}
+			payload = updated
+			excess--
+			return true
+		})
+	}
+
+	return payload
 }
 
 // injectMessagesCacheControl adds cache_control to the second-to-last user turn for multi-turn caching.

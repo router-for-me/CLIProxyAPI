@@ -1,0 +1,11 @@
+{
+  "type": "control_request",
+  "request_id": "req_123",
+  "request": {
+    "subtype": "can_use_tool",
+    "tool_name": "Bash",
+    "input": {"command": "npm test"},
+    "tool_use_id": "toolu_123",
+    "description": "Running npm test"
+  }
+}
