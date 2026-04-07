@@ -25,6 +25,10 @@ remote-management:
   # Disable the bundled management control panel asset download and HTTP route when true.
   disable-control-panel: false
 
+  # Disable automatic periodic background updates of the management panel from GitHub (default: false).
+  # When enabled, the panel is only downloaded on first access if missing, and never auto-updated afterward.
+  # disable-auto-update-panel: false
+
   # GitHub repository for the management control panel. Accepts a repository URL or releases API URL.
   panel-github-repository: "https://github.com/router-for-me/Cli-Proxy-API-Management-Center"
 
@@ -83,10 +87,14 @@ max-retry-credentials: 0
 # Maximum wait time in seconds for a cooled-down credential before triggering a retry.
 max-retry-interval: 30
 
+# When true, disable auth/model cooldown scheduling globally (prevents blackout windows after failure states).
+disable-cooling: false
+
 # Quota exceeded behavior
 quota-exceeded:
   switch-project: true # Whether to automatically switch to another project when a quota is exceeded
   switch-preview-model: true # Whether to automatically switch to a preview model when a quota is exceeded
+  antigravity-credits: true # Whether to retry Antigravity quota_exhausted 429s once with enabledCreditTypes=["GOOGLE_ONE_AI"]
 
 # Routing strategy for selecting credentials when multiple match.
 routing:
@@ -94,6 +102,10 @@ routing:
 
 # When true, enable authentication for the WebSocket API (/v1/ws).
 ws-auth: false
+
+# When true, enable Gemini CLI internal endpoints (/v1internal:*).
+# Default is false for safety.
+enable-gemini-cli-endpoint: false
 
 # When > 0, emit blank lines every N seconds for non-streaming responses to prevent idle timeouts.
 nonstream-keepalive-interval: 0
@@ -168,6 +180,8 @@ nonstream-keepalive-interval: 0
 #         - "API"
 #         - "proxy"
 #       cache-user-id: true          # optional: default is false; set true to reuse cached user_id per API key instead of generating a random one each request
+#     experimental-cch-signing: false # optional: default is false; when true, sign the final /v1/messages body using the current Claude Code cch algorithm
+#                                     # keep this disabled unless you explicitly need the behavior, so upstream seed changes fall back to legacy proxy behavior
 
 # Default headers for Claude API requests. Update when Claude Code releases new versions.
 # In legacy mode, user-agent/package-version/runtime-version/timeout are used as fallbacks
@@ -277,6 +291,10 @@ nonstream-keepalive-interval: 0
 # These aliases rename model IDs for both model listing and request routing.
 # Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, qwen, iflow, kimi.
 # NOTE: Aliases do not apply to gemini-api-key, codex-api-key, claude-api-key, openai-compatibility, vertex-api-key, or ampcode.
+# NOTE: Because aliases affect the merged /v1 model list and merged request routing, overlapping
+# client-visible names can become ambiguous across providers. /api/provider/{provider}/... helps
+# you select the protocol surface, but inference backend selection can still follow the resolved
+# model/alias. For strict backend pinning, use unique aliases/prefixes or avoid overlapping names.
 # You can repeat the same name with different aliases to expose multiple client model names.
 # oauth-model-alias:
 #   gemini-cli:

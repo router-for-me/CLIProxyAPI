@@ -286,10 +286,12 @@ func (s *Service) applyCoreAuthAddOrUpdate(ctx context.Context, auth *coreauth.A
 	var err error
 	if existing, ok := s.coreManager.GetByID(auth.ID); ok {
 		auth.CreatedAt = existing.CreatedAt
-		auth.LastRefreshedAt = existing.LastRefreshedAt
-		auth.NextRefreshAfter = existing.NextRefreshAfter
-		if len(auth.ModelStates) == 0 && len(existing.ModelStates) > 0 {
-			auth.ModelStates = existing.ModelStates
+		if !existing.Disabled && existing.Status != coreauth.StatusDisabled && !auth.Disabled && auth.Status != coreauth.StatusDisabled {
+			auth.LastRefreshedAt = existing.LastRefreshedAt
+			auth.NextRefreshAfter = existing.NextRefreshAfter
+			if len(auth.ModelStates) == 0 && len(existing.ModelStates) > 0 {
+				auth.ModelStates = existing.ModelStates
+			}
 		}
 		op = "update"
 		_, err = s.coreManager.Update(ctx, auth)
@@ -310,6 +312,7 @@ func (s *Service) applyCoreAuthAddOrUpdate(ctx context.Context, auth *coreauth.A
 	// This operation may block on network calls, but the auth configuration
 	// is already effective at this point.
 	s.registerModelsForAuth(auth)
+	s.coreManager.ReconcileRegistryModelStates(ctx, auth.ID)
 
 	// Refresh the scheduler entry so that the auth's supportedModelSet is rebuilt
 	// from the now-populated global model registry. Without this, newly added auths
@@ -333,6 +336,7 @@ func (s *Service) applyCoreAuthRemoval(ctx context.Context, id string) {
 			log.Errorf("failed to disable auth %s: %v", id, err)
 		}
 		if strings.EqualFold(strings.TrimSpace(existing.Provider), "codex") {
+			executor.CloseCodexWebsocketSessionsForAuthID(existing.ID, "auth_removed")
 			s.ensureExecutorsForAuth(existing)
 		}
 	}
@@ -1024,6 +1028,7 @@ func (s *Service) refreshModelRegistrationForAuth(current *coreauth.Auth) bool {
 		s.ensureExecutorsForAuth(current)
 	}
 	s.registerModelsForAuth(current)
+	s.coreManager.ReconcileRegistryModelStates(context.Background(), current.ID)
 
 	latest, ok := s.latestAuthForModelRegistration(current.ID)
 	if !ok || latest.Disabled {
@@ -1037,6 +1042,7 @@ func (s *Service) refreshModelRegistrationForAuth(current *coreauth.Auth) bool {
 	// no auth fields changed, but keeps the refresh path simple and correct.
 	s.ensureExecutorsForAuth(latest)
 	s.registerModelsForAuth(latest)
+	s.coreManager.ReconcileRegistryModelStates(context.Background(), latest.ID)
 	s.coreManager.RefreshSchedulerEntry(current.ID)
 	return true
 }

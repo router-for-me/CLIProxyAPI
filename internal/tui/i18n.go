@@ -201,6 +201,7 @@ var zhStrings = map[string]string{
 	"usage_output":        "输出",
 	"usage_cached":        "缓存",
 	"usage_reasoning":     "思考",
+	"usage_time":          "时间",
 
 	// ── Logs ──
 	"logs_title":       "📋 日志",
@@ -352,6 +353,7 @@ var enStrings = map[string]string{
 	"usage_output":        "Output",
 	"usage_cached":        "Cached",
 	"usage_reasoning":     "Reasoning",
+	"usage_time":          "Time",
 
 	// ── Logs ──
 	"logs_title":       "📋 Logs",

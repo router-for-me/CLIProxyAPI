@@ -1,4 +1,4 @@
-package executor
+package helps
 
 import (
 	"context"
@@ -25,7 +25,7 @@ var sharedEnvironmentProxyTransport = sync.OnceValue(func() *http.Transport {
 	return &http.Transport{Proxy: http.ProxyFromEnvironment}
 })
 
-// newProxyAwareHTTPClient creates an HTTP client with proper proxy configuration priority:
+// NewProxyAwareHTTPClient creates an HTTP client with proper proxy configuration priority:
 // 1. Use auth.ProxyURL if configured (highest priority)
 // 2. Use cfg.ProxyURL if auth proxy is not configured
 // 3. Use environment proxy settings if neither are configured
@@ -39,7 +39,7 @@ var sharedEnvironmentProxyTransport = sync.OnceValue(func() *http.Transport {
 //
 // Returns:
 //   - *http.Client: An HTTP client with configured proxy or transport
-func newProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
+func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
 	httpClient := &http.Client{}
 	if timeout > 0 {
 		httpClient.Timeout = timeout
@@ -110,4 +110,9 @@ func environmentProxyConfigured() bool {
 
 func newEnvironmentProxyTransport() *http.Transport {
 	return sharedEnvironmentProxyTransport()
+}
+
+// EnvironmentProxyTransport returns the shared transport used for environment proxy fallback.
+func EnvironmentProxyTransport() *http.Transport {
+	return newEnvironmentProxyTransport()
 }

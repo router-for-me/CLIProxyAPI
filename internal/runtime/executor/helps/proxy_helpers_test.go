@@ -1,4 +1,4 @@
-package executor
+package helps
 
 import (
 	"context"
@@ -35,7 +35,7 @@ func setEnvironmentProxy(t *testing.T, proxyURL string) {
 func TestNewProxyAwareHTTPClientDirectBypassesGlobalProxy(t *testing.T) {
 	t.Parallel()
 
-	client := newProxyAwareHTTPClient(
+	client := NewProxyAwareHTTPClient(
 		context.Background(),
 		&config.Config{SDKConfig: sdkconfig.SDKConfig{ProxyURL: "http://global-proxy.example.com:8080"}},
 		&cliproxyauth.Auth{ProxyURL: "direct"},
@@ -54,7 +54,7 @@ func TestNewProxyAwareHTTPClientDirectBypassesGlobalProxy(t *testing.T) {
 func TestNewProxyAwareHTTPClientFallsBackToEnvironmentProxy(t *testing.T) {
 	setEnvironmentProxy(t, "http://env-proxy.example.com:8080")
 
-	client := newProxyAwareHTTPClient(context.Background(), &config.Config{}, &cliproxyauth.Auth{}, 0)
+	client := NewProxyAwareHTTPClient(context.Background(), &config.Config{}, &cliproxyauth.Auth{}, 0)
 
 	transport, ok := client.Transport.(*http.Transport)
 	if !ok {
@@ -79,7 +79,7 @@ func TestNewProxyAwareHTTPClientFallsBackToEnvironmentProxy(t *testing.T) {
 func TestNewProxyAwareHTTPClientExplicitProxyWinsOverEnvironmentProxy(t *testing.T) {
 	setEnvironmentProxy(t, "http://env-proxy.example.com:8080")
 
-	client := newProxyAwareHTTPClient(
+	client := NewProxyAwareHTTPClient(
 		context.Background(),
 		&config.Config{SDKConfig: sdkconfig.SDKConfig{ProxyURL: "http://config-proxy.example.com:8080"}},
 		nil,
@@ -106,8 +106,8 @@ func TestNewProxyAwareHTTPClientExplicitProxyWinsOverEnvironmentProxy(t *testing
 func TestNewProxyAwareHTTPClientReusesEnvironmentProxyTransport(t *testing.T) {
 	setEnvironmentProxy(t, "http://env-proxy.example.com:8080")
 
-	clientA := newProxyAwareHTTPClient(context.Background(), &config.Config{}, &cliproxyauth.Auth{}, 0)
-	clientB := newProxyAwareHTTPClient(context.Background(), &config.Config{}, &cliproxyauth.Auth{}, 0)
+	clientA := NewProxyAwareHTTPClient(context.Background(), &config.Config{}, &cliproxyauth.Auth{}, 0)
+	clientB := NewProxyAwareHTTPClient(context.Background(), &config.Config{}, &cliproxyauth.Auth{}, 0)
 
 	transportA, okA := clientA.Transport.(*http.Transport)
 	if !okA {
