@@ -33,7 +33,7 @@ func TestApplyCoreAuthAddOrUpdate_PreservesRuntimeStateWhenRuntimeMetadataMissin
 			HTTPStatus: 429,
 		},
 		ModelStates: map[string]*coreauth.ModelState{
-			"claude-3-7-sonnet": {
+			"claude-3-7-sonnet-20250219": {
 				Status:      coreauth.StatusError,
 				Unavailable: true,
 			},

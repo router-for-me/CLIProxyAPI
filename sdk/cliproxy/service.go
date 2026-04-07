@@ -284,13 +284,18 @@ func (s *Service) applyCoreAuthAddOrUpdate(ctx context.Context, auth *coreauth.A
 	// immediately for API calls, rather than waiting for model registration to complete.
 	op := "register"
 	var err error
+	hasRuntimeMetadata := coreauth.HasRuntimeStateMetadata(auth.Metadata)
+	keepRuntimeState := hasRuntimeMetadata && !auth.Disabled && auth.Status != coreauth.StatusDisabled
 	if existing, ok := s.coreManager.GetByID(auth.ID); ok {
 		auth.CreatedAt = existing.CreatedAt
 		if !existing.Disabled && existing.Status != coreauth.StatusDisabled && !auth.Disabled && auth.Status != coreauth.StatusDisabled {
 			auth.LastRefreshedAt = existing.LastRefreshedAt
 			auth.NextRefreshAfter = existing.NextRefreshAfter
+			if !hasRuntimeMetadata {
+				preserveRuntimeStateFromExistingIfMetadataMissing(auth, existing)
+				keepRuntimeState = true
+			}
 		}
-		preserveRuntimeStateFromExistingIfMetadataMissing(auth, existing)
 		op = "update"
 		_, err = s.coreManager.Update(ctx, auth)
 	} else {
@@ -310,7 +315,11 @@ func (s *Service) applyCoreAuthAddOrUpdate(ctx context.Context, auth *coreauth.A
 	// This operation may block on network calls, but the auth configuration
 	// is already effective at this point.
 	s.registerModelsForAuth(auth)
-	s.coreManager.ReconcileRegistryModelStates(ctx, auth.ID)
+	if keepRuntimeState {
+		s.coreManager.PruneUnsupportedModelStates(ctx, auth.ID)
+	} else {
+		s.coreManager.ReconcileRegistryModelStates(ctx, auth.ID)
+	}
 
 	// Refresh the scheduler entry so that the auth's supportedModelSet is rebuilt
 	// from the now-populated global model registry. Without this, newly added auths
@@ -326,11 +335,14 @@ func preserveRuntimeStateFromExistingIfMetadataMissing(incoming, existing *corea
 	if coreauth.HasRuntimeStateMetadata(incoming.Metadata) {
 		return
 	}
-
-	if incoming.Disabled == existing.Disabled {
-		incoming.Status = existing.Status
-		incoming.StatusMessage = existing.StatusMessage
+	if existing.Disabled || existing.Status == coreauth.StatusDisabled || incoming.Disabled || incoming.Status == coreauth.StatusDisabled {
+		if incoming.Disabled || incoming.Status == coreauth.StatusDisabled {
+			incoming.Status = coreauth.StatusDisabled
+		}
+		return
 	}
+	incoming.Status = existing.Status
+	incoming.StatusMessage = existing.StatusMessage
 	incoming.Unavailable = existing.Unavailable
 	incoming.NextRetryAfter = existing.NextRetryAfter
 	incoming.Quota = existing.Quota
@@ -349,10 +361,6 @@ func preserveRuntimeStateFromExistingIfMetadataMissing(incoming, existing *corea
 		}
 	} else {
 		incoming.ModelStates = nil
-	}
-
-	if incoming.Disabled {
-		incoming.Status = coreauth.StatusDisabled
 	}
 }
 
