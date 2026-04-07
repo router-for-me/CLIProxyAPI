@@ -18,6 +18,7 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
@@ -324,6 +325,20 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		scanner := bufio.NewScanner(httpResp.Body)
 		scanner.Buffer(nil, 52_428_800) // 50MB
 		var param any
+		responsesOutput := from == sdktranslator.FormatOpenAIResponse
+		emittedCompleted := false
+		emitChunks := func(chunks [][]byte) {
+			for i := range chunks {
+				payload := chunks[i]
+				if len(payload) == 0 {
+					continue
+				}
+				if hasOpenAIResponsesCompletedEvent(payload) {
+					emittedCompleted = true
+				}
+				out <- cliproxyexecutor.StreamChunk{Payload: payload}
+			}
+		}
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			appendAPIResponseChunk(ctx, e.cfg, line)
@@ -341,14 +356,24 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			// OpenAI-compatible streams are SSE: lines typically prefixed with "data: ".
 			// Pass through translator; it yields one or more chunks for the target schema.
 			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, bytes.Clone(line), &param)
-			for i := range chunks {
-				out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}
-			}
+			emitChunks(chunks)
 		}
 		if errScan := scanner.Err(); errScan != nil {
 			recordAPIResponseError(ctx, e.cfg, errScan)
 			reporter.publishFailure(ctx)
 			out <- cliproxyexecutor.StreamChunk{Err: errScan}
+			return
+		}
+		if responsesOutput && !emittedCompleted {
+			// EOF can happen before a finish_reason chunk. Flush DONE to force a terminal
+			// response.completed conversion from accumulated stream state.
+			doneChunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, []byte("data: [DONE]"), &param)
+			emitChunks(doneChunks)
+		}
+		if responsesOutput && !emittedCompleted {
+			// Last-resort protocol guard: keep responses API clients from hanging forever
+			// when upstream closed cleanly but never emitted terminal events.
+			emitChunks(synthesizeOpenAIResponsesCompletion(req.Model))
 		}
 		// Ensure we record the request if no usage chunk was ever seen
 		reporter.ensurePublished(ctx)
@@ -439,6 +464,75 @@ func (e *OpenAICompatExecutor) overrideModel(payload []byte, model string) []byt
 	}
 	payload, _ = sjson.SetBytes(payload, "model", model)
 	return payload
+}
+
+func hasOpenAIResponsesCreatedEvent(chunk []byte) bool {
+	return hasOpenAIResponsesEventType(chunk, "response.created")
+}
+
+func hasOpenAIResponsesCompletedEvent(chunk []byte) bool {
+	return hasOpenAIResponsesEventType(chunk, "response.completed")
+}
+
+func hasOpenAIResponsesEventType(chunk []byte, eventType string) bool {
+	if strings.TrimSpace(eventType) == "" {
+		return false
+	}
+	trimmed := bytes.TrimSpace(chunk)
+	if len(trimmed) == 0 {
+		return false
+	}
+	lines := bytes.Split(trimmed, []byte("\n"))
+	for _, line := range lines {
+		line = bytes.TrimSpace(line)
+		if len(line) == 0 {
+			continue
+		}
+		if bytes.HasPrefix(line, []byte("event:")) {
+			sseEventType := strings.TrimSpace(string(bytes.TrimSpace(line[len("event:"):])))
+			if sseEventType == eventType {
+				return true
+			}
+			continue
+		}
+		if bytes.HasPrefix(line, []byte("data:")) {
+			payload := bytes.TrimSpace(line[len("data:"):])
+			if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) {
+				continue
+			}
+			if gjson.GetBytes(payload, "type").String() == eventType {
+				return true
+			}
+		}
+	}
+	if gjson.GetBytes(trimmed, "type").String() == eventType {
+		return true
+	}
+	return false
+}
+
+func synthesizeOpenAIResponsesCompletion(modelName string) [][]byte {
+	responseID := fmt.Sprintf("resp_synth_%d", time.Now().UnixNano())
+	createdAt := time.Now().Unix()
+	created := []byte(`{"type":"response.created","sequence_number":1,"response":{"id":"","object":"response","created_at":0,"status":"in_progress","background":false,"error":null,"output":[]}}`)
+	completed := []byte(`{"type":"response.completed","sequence_number":2,"response":{"id":"","object":"response","created_at":0,"status":"completed","background":false,"error":null,"output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`)
+	created, _ = sjson.SetBytes(created, "response.id", responseID)
+	completed, _ = sjson.SetBytes(completed, "response.id", responseID)
+	created, _ = sjson.SetBytes(created, "response.created_at", createdAt)
+	completed, _ = sjson.SetBytes(completed, "response.created_at", createdAt)
+	if strings.TrimSpace(modelName) != "" {
+		created, _ = sjson.SetBytes(created, "response.model", modelName)
+		completed, _ = sjson.SetBytes(completed, "response.model", modelName)
+	}
+	createdChunk := make([]byte, 0, len(created)+32)
+	createdChunk = append(createdChunk, "event: response.created\n"...)
+	createdChunk = append(createdChunk, "data: "...)
+	createdChunk = append(createdChunk, created...)
+	completedChunk := make([]byte, 0, len(completed)+36)
+	completedChunk = append(completedChunk, "event: response.completed\n"...)
+	completedChunk = append(completedChunk, "data: "...)
+	completedChunk = append(completedChunk, completed...)
+	return [][]byte{createdChunk, completedChunk}
 }
 
 type statusErr struct {

@@ -58,6 +58,7 @@ func TestOpenAIResponsesCompactRejectsStream(t *testing.T) {
 		t.Fatalf("Register auth: %v", err)
 	}
 	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "test-model"}})
+	manager.RefreshSchedulerEntry(auth.ID)
 	t.Cleanup(func() {
 		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
 	})
@@ -91,6 +92,7 @@ func TestOpenAIResponsesCompactExecute(t *testing.T) {
 		t.Fatalf("Register auth: %v", err)
 	}
 	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "test-model"}})
+	manager.RefreshSchedulerEntry(auth.ID)
 	t.Cleanup(func() {
 		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
 	})

@@ -24,6 +24,7 @@ type oaiToResponsesState struct {
 	ResponseID     string
 	Created        int64
 	Started        bool
+	Completed      bool
 	ReasoningID    string
 	ReasoningIndex int
 	// aggregation buffers for response.output
@@ -89,8 +90,16 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 	if len(rawJSON) == 0 {
 		return [][]byte{}
 	}
-	if bytes.Equal(rawJSON, []byte("[DONE]")) {
+	if st.Completed {
 		return [][]byte{}
+	}
+	if bytes.Equal(rawJSON, []byte("[DONE]")) {
+		// Upstream DONE can arrive without finish_reason. Synthesize a terminal finish chunk
+		// for active streams so the existing finalization path emits response.completed.
+		if !st.Started {
+			return [][]byte{}
+		}
+		rawJSON = []byte(`{"object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`)
 	}
 
 	root := gjson.ParseBytes(rawJSON)
@@ -165,6 +174,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 		st.TotalTokens = 0
 		st.ReasoningTokens = 0
 		st.UsageSeen = false
+		st.Completed = false
 		// response.created
 		created := []byte(`{"type":"response.created","sequence_number":0,"response":{"id":"","object":"response","created_at":0,"status":"in_progress","background":false,"error":null,"output":[]}}`)
 		created, _ = sjson.SetBytes(created, "sequence_number", nextSeq())
@@ -596,6 +606,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 					completed, _ = sjson.SetBytes(completed, "response.usage.total_tokens", total)
 				}
 				out = append(out, emitRespEvent("response.completed", completed))
+				st.Completed = true
 			}
 
 			return true

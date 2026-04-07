@@ -17,6 +17,13 @@ type budgetBlockingExecutor struct {
 	calls atomic.Int32
 }
 
+type budgetStreamingExecutor struct {
+	id        string
+	calls     atomic.Int32
+	streamCtx context.Context
+	streamCh  chan cliproxyexecutor.StreamChunk
+}
+
 func (e *budgetBlockingExecutor) Identifier() string {
 	return e.id
 }
@@ -47,6 +54,36 @@ func (e *budgetBlockingExecutor) HttpRequest(context.Context, *Auth, *http.Reque
 	return nil, nil
 }
 
+func (e *budgetStreamingExecutor) Identifier() string {
+	return e.id
+}
+
+func (e *budgetStreamingExecutor) Execute(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, errors.New("not implemented")
+}
+
+func (e *budgetStreamingExecutor) ExecuteStream(ctx context.Context, _ *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	e.calls.Add(1)
+	e.streamCtx = ctx
+	if e.streamCh == nil {
+		e.streamCh = make(chan cliproxyexecutor.StreamChunk, 2)
+	}
+	e.streamCh <- cliproxyexecutor.StreamChunk{Payload: []byte("initial")}
+	return &cliproxyexecutor.StreamResult{Chunks: e.streamCh}, nil
+}
+
+func (e *budgetStreamingExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) {
+	return auth, nil
+}
+
+func (e *budgetStreamingExecutor) CountTokens(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, errors.New("not implemented")
+}
+
+func (e *budgetStreamingExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
+	return nil, nil
+}
+
 func newRequestBudgetTestManager(t *testing.T, budget time.Duration) (*Manager, *budgetBlockingExecutor) {
 	t.Helper()
 
@@ -57,13 +94,14 @@ func newRequestBudgetTestManager(t *testing.T, budget time.Duration) (*Manager, 
 	executor := &budgetBlockingExecutor{id: "claude"}
 	manager.RegisterExecutor(executor)
 
-	auth := &Auth{ID: "budget-auth", Provider: "claude"}
+	auth := &Auth{ID: "budget-auth", Provider: "claude", Status: StatusActive}
 	if _, err := manager.Register(context.Background(), auth); err != nil {
 		t.Fatalf("register auth: %v", err)
 	}
 
 	reg := registry.GetGlobalRegistry()
 	reg.RegisterClient(auth.ID, "claude", []*registry.ModelInfo{{ID: "budget-model"}})
+	manager.RefreshSchedulerEntry(auth.ID)
 	t.Cleanup(func() {
 		reg.UnregisterClient(auth.ID)
 	})
@@ -112,6 +150,59 @@ func TestManagerExecuteStream_RequestBudgetExceededReturnsGatewayTimeout(t *test
 	}
 	if calls := executor.calls.Load(); calls != 1 {
 		t.Fatalf("calls=%d want=1", calls)
+	}
+}
+
+func TestManagerExecuteStream_RequestBudgetRemainsActiveUntilStreamCloses(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	manager.SetRetryConfig(3, 30*time.Second, 0)
+	manager.SetRequestBudget(time.Second)
+
+	executor := &budgetStreamingExecutor{id: "claude"}
+	manager.RegisterExecutor(executor)
+
+	auth := &Auth{ID: "budget-stream-auth", Provider: "claude", Status: StatusActive}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth.ID, "claude", []*registry.ModelInfo{{ID: "budget-model"}})
+	manager.RefreshSchedulerEntry(auth.ID)
+	t.Cleanup(func() {
+		reg.UnregisterClient(auth.ID)
+	})
+
+	result, err := manager.ExecuteStream(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: "budget-model"}, cliproxyexecutor.Options{})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+	if result == nil || result.Chunks == nil {
+		t.Fatal("expected non-nil stream result")
+	}
+	if executor.streamCtx == nil {
+		t.Fatal("expected executor to receive a streaming context")
+	}
+	if err := executor.streamCtx.Err(); err != nil {
+		t.Fatalf("stream context canceled too early: %v", err)
+	}
+
+	close(executor.streamCh)
+
+	count := 0
+	for range result.Chunks {
+		count++
+	}
+	if count != 1 {
+		t.Fatalf("chunk count = %d, want 1", count)
+	}
+
+	deadline := time.Now().Add(200 * time.Millisecond)
+	for executor.streamCtx.Err() == nil && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if executor.streamCtx.Err() == nil {
+		t.Fatal("expected stream context to be canceled after stream close")
 	}
 }
 

@@ -68,6 +68,7 @@ const (
 )
 
 var quotaCooldownDisabled atomic.Bool
+var openAIResponsesBootstrapTimeout = 10 * time.Second
 
 // SetQuotaCooldownDisabled toggles quota cooldown scheduling globally.
 func SetQuotaCooldownDisabled(disable bool) {
@@ -541,11 +542,18 @@ func streamErrorResult(headers http.Header, err error) *cliproxyexecutor.StreamR
 	}
 }
 
-func readStreamBootstrap(ctx context.Context, ch <-chan cliproxyexecutor.StreamChunk) ([]cliproxyexecutor.StreamChunk, bool, error) {
+func readStreamBootstrap(ctx context.Context, opts cliproxyexecutor.Options, ch <-chan cliproxyexecutor.StreamChunk) ([]cliproxyexecutor.StreamChunk, bool, error) {
 	if ch == nil {
 		return nil, true, nil
 	}
 	buffered := make([]cliproxyexecutor.StreamChunk, 0, 1)
+	var bootstrapTimer *time.Timer
+	var bootstrapTimeout <-chan time.Time
+	if strings.TrimSpace(opts.SourceFormat.String()) == "openai-response" && openAIResponsesBootstrapTimeout > 0 {
+		bootstrapTimer = time.NewTimer(openAIResponsesBootstrapTimeout)
+		bootstrapTimeout = bootstrapTimer.C
+		defer bootstrapTimer.Stop()
+	}
 	for {
 		var (
 			chunk cliproxyexecutor.StreamChunk
@@ -555,10 +563,16 @@ func readStreamBootstrap(ctx context.Context, ch <-chan cliproxyexecutor.StreamC
 			select {
 			case <-ctx.Done():
 				return nil, false, ctx.Err()
+			case <-bootstrapTimeout:
+				return buffered, false, &Error{Code: "empty_stream", Message: "upstream stream closed before first payload", Retryable: true}
 			case chunk, ok = <-ch:
 			}
 		} else {
-			chunk, ok = <-ch
+			select {
+			case <-bootstrapTimeout:
+				return buffered, false, &Error{Code: "empty_stream", Message: "upstream stream closed before first payload", Retryable: true}
+			case chunk, ok = <-ch:
+			}
 		}
 		if !ok {
 			return buffered, true, nil
@@ -567,10 +581,60 @@ func readStreamBootstrap(ctx context.Context, ch <-chan cliproxyexecutor.StreamC
 			return nil, false, chunk.Err
 		}
 		buffered = append(buffered, chunk)
-		if len(chunk.Payload) > 0 {
+		if streamBootstrapPayloadStarted(opts, chunk.Payload) {
 			return buffered, false, nil
 		}
 	}
+}
+
+func streamBootstrapPayloadStarted(opts cliproxyexecutor.Options, payload []byte) bool {
+	if len(payload) == 0 {
+		return false
+	}
+	if strings.TrimSpace(opts.SourceFormat.String()) != "openai-response" {
+		return true
+	}
+	eventType := openAIResponsesBootstrapEventType(payload)
+	switch eventType {
+	case "response.created", "response.in_progress":
+		return false
+	default:
+		return true
+	}
+}
+
+func streamBootstrapBufferedStarted(opts cliproxyexecutor.Options, buffered []cliproxyexecutor.StreamChunk) bool {
+	for _, chunk := range buffered {
+		if chunk.Err != nil {
+			continue
+		}
+		if streamBootstrapPayloadStarted(opts, chunk.Payload) {
+			return true
+		}
+	}
+	return false
+}
+
+func openAIResponsesBootstrapEventType(payload []byte) string {
+	for _, line := range bytes.Split(bytes.TrimSpace(payload), []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if len(line) == 0 {
+			continue
+		}
+		if bytes.HasPrefix(line, []byte("event:")) {
+			return strings.TrimSpace(string(bytes.TrimSpace(line[len("event:"):])))
+		}
+		if bytes.HasPrefix(line, []byte("data:")) {
+			data := bytes.TrimSpace(line[len("data:"):])
+			switch {
+			case bytes.Contains(data, []byte(`"type":"response.created"`)):
+				return "response.created"
+			case bytes.Contains(data, []byte(`"type":"response.in_progress"`)):
+				return "response.in_progress"
+			}
+		}
+	}
+	return ""
 }
 
 func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, resultModel string, headers http.Header, buffered []cliproxyexecutor.StreamChunk, remaining <-chan cliproxyexecutor.StreamChunk) *cliproxyexecutor.StreamResult {
@@ -622,6 +686,56 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 	return &cliproxyexecutor.StreamResult{Headers: headers, Chunks: out}
 }
 
+func wrapStreamResultWithCancel(ctx context.Context, result *cliproxyexecutor.StreamResult, cancel context.CancelFunc) *cliproxyexecutor.StreamResult {
+	if cancel == nil {
+		return result
+	}
+	if result == nil || result.Chunks == nil {
+		cancel()
+		return result
+	}
+
+	out := make(chan cliproxyexecutor.StreamChunk)
+	go func() {
+		defer close(out)
+		defer cancel()
+		for {
+			var (
+				chunk cliproxyexecutor.StreamChunk
+				ok    bool
+			)
+			if ctx != nil {
+				select {
+				case <-ctx.Done():
+					discardStreamChunks(result.Chunks)
+					return
+				case chunk, ok = <-result.Chunks:
+				}
+			} else {
+				chunk, ok = <-result.Chunks
+			}
+			if !ok {
+				return
+			}
+			if ctx == nil {
+				out <- chunk
+				continue
+			}
+			select {
+			case <-ctx.Done():
+				discardStreamChunks(result.Chunks)
+				return
+			case out <- chunk:
+			}
+		}
+	}()
+
+	return &cliproxyexecutor.StreamResult{
+		Headers: cloneHTTPHeader(result.Headers),
+		Chunks:  out,
+	}
+}
+
 func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor ProviderExecutor, auth *Auth, provider string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, routeModel string, execModels []string, pooled bool) (*cliproxyexecutor.StreamResult, error) {
 	if executor == nil {
 		return nil, &Error{Code: "executor_not_found", Message: "executor not registered"}
@@ -650,7 +764,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			continue
 		}
 
-		buffered, closed, bootstrapErr := readStreamBootstrap(ctx, streamResult.Chunks)
+		buffered, closed, bootstrapErr := readStreamBootstrap(ctx, opts, streamResult.Chunks)
 		if bootstrapErr != nil {
 			if errCtx := ctx.Err(); errCtx != nil {
 				discardStreamChunks(streamResult.Chunks)
@@ -690,7 +804,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			return nil, newStreamBootstrapError(bootstrapErr, streamResult.Headers)
 		}
 
-		if closed && len(buffered) == 0 {
+		if closed && !streamBootstrapBufferedStarted(opts, buffered) {
 			emptyErr := &Error{Code: "empty_stream", Message: "upstream stream closed before first payload", Retryable: true}
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: emptyErr}
 			m.MarkResult(ctx, result)
@@ -1065,9 +1179,6 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		return nil, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
 	execCtx, cancel, budgetEnabled := m.withRequestBudget(ctx)
-	if cancel != nil {
-		defer cancel()
-	}
 
 	_, maxRetryCredentials, maxWait := m.retrySettings()
 
@@ -1075,7 +1186,7 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 	for attempt := 0; ; attempt++ {
 		result, errStream := m.executeStreamMixedOnce(execCtx, normalized, req, opts, maxRetryCredentials)
 		if errStream == nil {
-			return result, nil
+			return wrapStreamResultWithCancel(execCtx, result, cancel), nil
 		}
 		mappedErr := mapRequestBudgetError(execCtx, budgetEnabled, errStream)
 		lastErr = mappedErr
@@ -1084,11 +1195,19 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 			break
 		}
 		if errWait := waitForCooldown(execCtx, wait); errWait != nil {
-			return nil, mapRequestBudgetError(execCtx, budgetEnabled, errWait)
+			mappedWaitErr := mapRequestBudgetError(execCtx, budgetEnabled, errWait)
+			if cancel != nil {
+				cancel()
+			}
+			return nil, mappedWaitErr
 		}
 	}
-	if lastErr != nil {
-		return nil, mapRequestBudgetError(execCtx, budgetEnabled, lastErr)
+	finalErr := mapRequestBudgetError(execCtx, budgetEnabled, lastErr)
+	if cancel != nil {
+		cancel()
+	}
+	if finalErr != nil {
+		return nil, finalErr
 	}
 	return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 }
@@ -2359,11 +2478,7 @@ func shouldRetrySchedulerPick(err error) bool {
 	if errors.As(err, &cooldownErr) {
 		return true
 	}
-	var authErr *Error
-	if !errors.As(err, &authErr) || authErr == nil {
-		return false
-	}
-	return authErr.Code == "auth_not_found" || authErr.Code == "auth_unavailable"
+	return false
 }
 
 func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, error) {

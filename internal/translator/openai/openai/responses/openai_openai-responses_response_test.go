@@ -303,3 +303,60 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_FunctionCallDoneA
 		t.Fatalf("unexpected completed function_call order: %v", completedOrder)
 	}
 }
+
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_DoneFinalizesWithoutFinishReason(t *testing.T) {
+	request := []byte(`{"model":"glm-4.7"}`)
+	in := []string{
+		`data: {"id":"resp_done","object":"chat.completion.chunk","created":1773896263,"model":"glm-4.7","choices":[{"index":0,"delta":{"role":"assistant","content":"OK"},"finish_reason":null}]}`,
+		`data: [DONE]`,
+	}
+
+	var param any
+	var out [][]byte
+	for _, line := range in {
+		out = append(out, ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "glm-4.7", request, request, []byte(line), &param)...)
+	}
+
+	completedCount := 0
+	completedText := ""
+	for _, chunk := range out {
+		ev, data := parseOpenAIResponsesSSEEvent(t, chunk)
+		if ev != "response.completed" {
+			continue
+		}
+		completedCount++
+		completedText = data.Get("response.output.0.content.0.text").String()
+	}
+
+	if completedCount != 1 {
+		t.Fatalf("response.completed count = %d, want 1", completedCount)
+	}
+	if completedText != "OK" {
+		t.Fatalf("response.completed output text = %q, want %q", completedText, "OK")
+	}
+}
+
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_DoneDoesNotDuplicateCompleted(t *testing.T) {
+	request := []byte(`{"model":"glm-4.7"}`)
+	in := []string{
+		`data: {"id":"resp_dup","object":"chat.completion.chunk","created":1773896263,"model":"glm-4.7","choices":[{"index":0,"delta":{"role":"assistant","content":"OK"},"finish_reason":"stop"}]}`,
+		`data: [DONE]`,
+	}
+
+	var param any
+	var out [][]byte
+	for _, line := range in {
+		out = append(out, ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "glm-4.7", request, request, []byte(line), &param)...)
+	}
+
+	completedCount := 0
+	for _, chunk := range out {
+		ev, _ := parseOpenAIResponsesSSEEvent(t, chunk)
+		if ev == "response.completed" {
+			completedCount++
+		}
+	}
+	if completedCount != 1 {
+		t.Fatalf("response.completed count = %d, want 1", completedCount)
+	}
+}

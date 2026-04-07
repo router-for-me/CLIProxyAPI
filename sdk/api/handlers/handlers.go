@@ -624,6 +624,10 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 		sentPayload := false
 		bootstrapRetries := 0
 		maxBootstrapRetries := StreamingBootstrapRetries(h.Cfg)
+		var responsesLifecycle *openAIResponsesStreamLifecycle
+		if handlerType == "openai-response" {
+			responsesLifecycle = &openAIResponsesStreamLifecycle{}
+		}
 
 		sendErr := func(msg *interfaces.ErrorMessage) bool {
 			if ctx == nil {
@@ -654,7 +658,13 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 		bootstrapEligible := func(err error) bool {
 			status := statusFromError(err)
 			if status == 0 {
+				if isAuthAvailabilityError(err) {
+					return false
+				}
 				return true
+			}
+			if isAuthAvailabilityError(err) {
+				return false
 			}
 			switch status {
 			case http.StatusUnauthorized, http.StatusForbidden, http.StatusPaymentRequired,
@@ -680,6 +690,13 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 					chunk, ok = <-chunks
 				}
 				if !ok {
+					if responsesLifecycle != nil && sentPayload && responsesLifecycle.NeedsSyntheticCompletion() {
+						if synthetic := responsesLifecycle.SyntheticCompletionChunk(); len(synthetic) > 0 {
+							if okSendData := sendData(synthetic); !okSendData {
+								return
+							}
+						}
+					}
 					return
 				}
 				if chunk.Err != nil {
@@ -717,6 +734,9 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 					return
 				}
 				if len(chunk.Payload) > 0 {
+					if responsesLifecycle != nil {
+						responsesLifecycle.Observe(chunk.Payload)
+					}
 					if handlerType == "openai-response" {
 						if err := validateSSEDataJSON(chunk.Payload); err != nil {
 							_ = sendErr(&interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: err})
