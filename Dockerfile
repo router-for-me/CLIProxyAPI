@@ -14,9 +14,9 @@ ARG BUILD_DATE=unknown
 
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w -X 'main.Version=${VERSION}' -X 'main.Commit=${COMMIT}' -X 'main.BuildDate=${BUILD_DATE}'" -o ./CLIProxyAPI ./cmd/server/
 
-FROM alpine:3.22.0
+FROM bitnami/minideb:latest
 
-RUN apk add --no-cache tzdata
+# RUN apk add --no-cache tzdata
 
 RUN mkdir /CLIProxyAPI
 
@@ -28,8 +28,8 @@ WORKDIR /CLIProxyAPI
 
 EXPOSE 8317
 
-ENV TZ=Asia/Shanghai
+ENV TZ=Asia/Tokyo
 
-RUN cp /usr/share/zoneinfo/${TZ} /etc/localtime && echo "${TZ}" > /etc/timezone
+# RUN cp /usr/share/zoneinfo/${TZ} /etc/localtime && echo "${TZ}" > /etc/timezone
 
 CMD ["./CLIProxyAPI"]
