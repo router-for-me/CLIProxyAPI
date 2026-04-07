@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -167,22 +168,63 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 
 	lines := bytes.Split(data, []byte("\n"))
+	outputItemsByIndex := make(map[int64][]byte)
+	var outputItemsFallback [][]byte
 	for _, line := range lines {
 		if !bytes.HasPrefix(line, dataTag) {
 			continue
 		}
 
-		line = bytes.TrimSpace(line[5:])
-		if gjson.GetBytes(line, "type").String() != "response.completed" {
+		eventData := bytes.TrimSpace(line[5:])
+		eventType := gjson.GetBytes(eventData, "type").String()
+
+		if eventType == "response.output_item.done" {
+			itemResult := gjson.GetBytes(eventData, "item")
+			if !itemResult.Exists() || itemResult.Type != gjson.JSON {
+				continue
+			}
+			outputIndexResult := gjson.GetBytes(eventData, "output_index")
+			if outputIndexResult.Exists() {
+				outputItemsByIndex[outputIndexResult.Int()] = []byte(itemResult.Raw)
+			} else {
+				outputItemsFallback = append(outputItemsFallback, []byte(itemResult.Raw))
+			}
 			continue
 		}
 
-		if detail, ok := helps.ParseCodexUsage(line); ok {
+		if eventType != "response.completed" {
+			continue
+		}
+
+		if detail, ok := helps.ParseCodexUsage(eventData); ok {
 			reporter.Publish(ctx, detail)
 		}
 
+		completedData := eventData
+		outputResult := gjson.GetBytes(completedData, "response.output")
+		shouldPatchOutput := (!outputResult.Exists() || !outputResult.IsArray() || len(outputResult.Array()) == 0) && (len(outputItemsByIndex) > 0 || len(outputItemsFallback) > 0)
+		if shouldPatchOutput {
+			completedDataPatched := completedData
+			completedDataPatched, _ = sjson.SetRawBytes(completedDataPatched, "response.output", []byte(`[]`))
+
+			indexes := make([]int64, 0, len(outputItemsByIndex))
+			for idx := range outputItemsByIndex {
+				indexes = append(indexes, idx)
+			}
+			sort.Slice(indexes, func(i, j int) bool {
+				return indexes[i] < indexes[j]
+			})
+			for _, idx := range indexes {
+				completedDataPatched, _ = sjson.SetRawBytes(completedDataPatched, "response.output.-1", outputItemsByIndex[idx])
+			}
+			for _, item := range outputItemsFallback {
+				completedDataPatched, _ = sjson.SetRawBytes(completedDataPatched, "response.output.-1", item)
+			}
+			completedData = completedDataPatched
+		}
+
 		var param any
-		out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, originalPayload, body, line, &param)
+		out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, originalPayload, body, completedData, &param)
 		resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
 		return resp, nil
 	}
