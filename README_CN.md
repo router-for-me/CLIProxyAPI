@@ -109,6 +109,7 @@ go test -v -run TestFunctionName ./package/
 - 高级（执行器与翻译器）：[docs/sdk-advanced_CN.md](docs/sdk-advanced_CN.md)
 - 认证：[docs/sdk-access_CN.md](docs/sdk-access_CN.md)
 - 凭据加载/更新：[docs/sdk-watcher_CN.md](docs/sdk-watcher_CN.md)
+- 227 发布手册：[docs/technical/deploy-ssh-227.md](docs/technical/deploy-ssh-227.md)
 
 ## 贡献
 
