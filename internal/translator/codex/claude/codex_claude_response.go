@@ -26,6 +26,8 @@ type ConvertCodexResponseToClaudeParams struct {
 	HasToolCall               bool
 	BlockIndex                int
 	HasReceivedArgumentsDelta bool
+	HasTextDelta              bool
+	TextBlockOpen             bool
 	ThinkingBlockOpen         bool
 	ThinkingStopPending       bool
 	ThinkingSignature         string
@@ -104,9 +106,11 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 	} else if typeStr == "response.content_part.added" {
 		template = []byte(`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`)
 		template, _ = sjson.SetBytes(template, "index", params.BlockIndex)
+		params.TextBlockOpen = true
 
 		output = translatorcommon.AppendSSEEventBytes(output, "content_block_start", template, 2)
 	} else if typeStr == "response.output_text.delta" {
+		params.HasTextDelta = true
 		template = []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":""}}`)
 		template, _ = sjson.SetBytes(template, "index", params.BlockIndex)
 		template, _ = sjson.SetBytes(template, "delta.text", rootResult.Get("delta").String())
@@ -115,6 +119,7 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 	} else if typeStr == "response.content_part.done" {
 		template = []byte(`{"type":"content_block_stop","index":0}`)
 		template, _ = sjson.SetBytes(template, "index", params.BlockIndex)
+		params.TextBlockOpen = false
 		params.BlockIndex++
 
 		output = translatorcommon.AppendSSEEventBytes(output, "content_block_stop", template, 2)
@@ -172,7 +177,49 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 	} else if typeStr == "response.output_item.done" {
 		itemResult := rootResult.Get("item")
 		itemType := itemResult.Get("type").String()
-		if itemType == "function_call" {
+		if itemType == "message" {
+			if params.HasTextDelta {
+				return [][]byte{output}
+			}
+			contentResult := itemResult.Get("content")
+			if !contentResult.Exists() || !contentResult.IsArray() {
+				return [][]byte{output}
+			}
+			var textBuilder strings.Builder
+			contentResult.ForEach(func(_, part gjson.Result) bool {
+				if part.Get("type").String() != "output_text" {
+					return true
+				}
+				if txt := part.Get("text").String(); txt != "" {
+					textBuilder.WriteString(txt)
+				}
+				return true
+			})
+			text := textBuilder.String()
+			if text == "" {
+				return [][]byte{output}
+			}
+
+			output = append(output, finalizeCodexThinkingBlock(params)...)
+			if !params.TextBlockOpen {
+				template = []byte(`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`)
+				template, _ = sjson.SetBytes(template, "index", params.BlockIndex)
+				params.TextBlockOpen = true
+				output = translatorcommon.AppendSSEEventBytes(output, "content_block_start", template, 2)
+			}
+
+			template = []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":""}}`)
+			template, _ = sjson.SetBytes(template, "index", params.BlockIndex)
+			template, _ = sjson.SetBytes(template, "delta.text", text)
+			output = translatorcommon.AppendSSEEventBytes(output, "content_block_delta", template, 2)
+
+			template = []byte(`{"type":"content_block_stop","index":0}`)
+			template, _ = sjson.SetBytes(template, "index", params.BlockIndex)
+			params.TextBlockOpen = false
+			params.BlockIndex++
+			params.HasTextDelta = true
+			output = translatorcommon.AppendSSEEventBytes(output, "content_block_stop", template, 2)
+		} else if itemType == "function_call" {
 			template = []byte(`{"type":"content_block_stop","index":0}`)
 			template, _ = sjson.SetBytes(template, "index", params.BlockIndex)
 			params.BlockIndex++
