@@ -28,12 +28,26 @@ type SDKConfig struct {
 	// Default is false (disabled).
 	PassthroughHeaders bool `yaml:"passthrough-headers" json:"passthrough-headers"`
 
+	// OAuthRefresh controls background refresh behavior for OAuth / auth-file credentials.
+	OAuthRefresh OAuthRefreshConfig `yaml:"oauth-refresh" json:"oauth-refresh"`
+
 	// Streaming configures server-side streaming behavior (keep-alives and safe bootstrap retries).
 	Streaming StreamingConfig `yaml:"streaming" json:"streaming"`
 
 	// NonStreamKeepAliveInterval controls how often blank lines are emitted for non-streaming responses.
 	// <= 0 disables keep-alives. Value is in seconds.
 	NonStreamKeepAliveInterval int `yaml:"nonstream-keepalive-interval,omitempty" json:"nonstream-keepalive-interval,omitempty"`
+}
+
+// OAuthRefreshConfig controls background refresh scheduling for OAuth/file-backed auths.
+type OAuthRefreshConfig struct {
+	// OnStartup controls whether the auto-refresh loop immediately checks credentials when the service starts.
+	// Nil preserves the legacy default (enabled).
+	OnStartup *bool `yaml:"on-startup,omitempty" json:"on-startup,omitempty"`
+
+	// BatchSize limits how many due credentials may be refreshed in one scheduler pass.
+	// <= 0 preserves the legacy behavior (no per-pass cap).
+	BatchSize int `yaml:"batch-size,omitempty" json:"batch-size,omitempty"`
 }
 
 // StreamingConfig holds server streaming behavior configuration.

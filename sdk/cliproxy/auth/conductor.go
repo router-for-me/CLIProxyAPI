@@ -162,8 +162,9 @@ type Manager struct {
 	rtProvider RoundTripperProvider
 
 	// Auto refresh state
-	refreshCancel    context.CancelFunc
-	refreshSemaphore chan struct{}
+	refreshCancel      context.CancelFunc
+	refreshSemaphore   chan struct{}
+	refreshBatchCursor int
 }
 
 // NewManager constructs a manager with optional custom selector and hook.
@@ -353,6 +354,33 @@ func (m *Manager) SetConfig(cfg *internalconfig.Config) {
 	}
 	m.runtimeConfig.Store(cfg)
 	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
+}
+
+func (m *Manager) oauthRefreshConfig() internalconfig.OAuthRefreshConfig {
+	if m == nil {
+		return internalconfig.OAuthRefreshConfig{}
+	}
+	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+	if cfg == nil {
+		return internalconfig.OAuthRefreshConfig{}
+	}
+	return cfg.OAuthRefresh
+}
+
+func (m *Manager) refreshOnStartupEnabled() bool {
+	cfg := m.oauthRefreshConfig()
+	if cfg.OnStartup == nil {
+		return true
+	}
+	return *cfg.OnStartup
+}
+
+func (m *Manager) refreshBatchSize() int {
+	cfg := m.oauthRefreshConfig()
+	if cfg.BatchSize <= 0 {
+		return 0
+	}
+	return cfg.BatchSize
 }
 
 func (m *Manager) lookupAPIKeyUpstreamModel(authID, requestedModel string) string {
@@ -2879,7 +2907,9 @@ func (m *Manager) StartAutoRefresh(parent context.Context, interval time.Duratio
 	go func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
-		m.checkRefreshes(ctx)
+		if m.refreshOnStartupEnabled() {
+			m.checkRefreshes(ctx)
+		}
 		for {
 			select {
 			case <-ctx.Done():
@@ -2903,22 +2933,57 @@ func (m *Manager) checkRefreshes(ctx context.Context) {
 	// log.Debugf("checking refreshes")
 	now := time.Now()
 	snapshot := m.snapshotAuths()
+	dueIDs := make([]string, 0, len(snapshot))
 	for _, a := range snapshot {
 		typ, _ := a.AccountInfo()
 		if typ != "api_key" {
 			if !m.shouldRefresh(a, now) {
 				continue
 			}
-			log.Debugf("checking refresh for %s, %s, %s", a.Provider, a.ID, typ)
-
-			if exec := m.executorFor(a.Provider); exec == nil {
-				continue
-			}
-			if !m.markRefreshPending(a.ID, now) {
-				continue
-			}
-			go m.refreshAuthWithLimit(ctx, a.ID)
+			dueIDs = append(dueIDs, a.ID)
 		}
+	}
+	if len(dueIDs) == 0 {
+		m.mu.Lock()
+		m.refreshBatchCursor = 0
+		m.mu.Unlock()
+		return
+	}
+	sort.Strings(dueIDs)
+	limit := m.refreshBatchSize()
+	selectedIDs := dueIDs
+	if limit > 0 && len(dueIDs) > limit {
+		m.mu.Lock()
+		start := 0
+		if len(dueIDs) > 0 {
+			start = m.refreshBatchCursor % len(dueIDs)
+		}
+		selectedIDs = make([]string, 0, limit)
+		for i := 0; i < limit; i++ {
+			idx := (start + i) % len(dueIDs)
+			selectedIDs = append(selectedIDs, dueIDs[idx])
+		}
+		m.refreshBatchCursor = (start + limit) % len(dueIDs)
+		m.mu.Unlock()
+	} else {
+		m.mu.Lock()
+		m.refreshBatchCursor = 0
+		m.mu.Unlock()
+	}
+	for _, id := range selectedIDs {
+		auth, ok := m.GetByID(id)
+		if !ok || auth == nil {
+			continue
+		}
+		typ, _ := auth.AccountInfo()
+		log.Debugf("checking refresh for %s, %s, %s", auth.Provider, auth.ID, typ)
+		if exec := m.executorFor(auth.Provider); exec == nil {
+			continue
+		}
+		if !m.markRefreshPending(auth.ID, now) {
+			continue
+		}
+		go m.refreshAuthWithLimit(ctx, auth.ID)
 	}
 }
 

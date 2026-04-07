@@ -35,6 +35,13 @@ remote-management:
 # Authentication directory (supports ~ for home directory)
 auth-dir: "~/.cli-proxy-api"
 
+# Controls background refresh behavior for OAuth / auth-file credentials.
+# Set on-startup: false to avoid an immediate refresh pass on every process start.
+# Set batch-size to limit how many due credentials are refreshed in one scheduler pass.
+# oauth-refresh:
+#   on-startup: false
+#   batch-size: 2
+
 # API keys for authentication
 api-keys:
   - "your-api-key-1"
