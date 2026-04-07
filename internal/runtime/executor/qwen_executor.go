@@ -30,7 +30,7 @@ const (
 	qwenRateLimitWindow = time.Minute // sliding window duration
 )
 
-var qwenDefaultSystemMessage = []byte(`{"role":"system","content":[{"type":"text","text":"You are Qwen Code.","cache_control":{"type":"ephemeral"}}]}`)
+var qwenDefaultSystemMessage = []byte(`{"role":"system","content":[{"type":"text","text":"","cache_control":{"type":"ephemeral"}}]}`)
 
 // qwenBeijingLoc caches the Beijing timezone to avoid repeated LoadLocation syscalls.
 var qwenBeijingLoc = func() *time.Location {
