@@ -167,6 +167,23 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 
 	lines := bytes.Split(data, []byte("\n"))
+
+	// Collect output items from response.output_item.done events, because
+	// the response.completed event may carry an empty "output" array when the
+	// upstream uses streaming mode internally.
+	var doneOutputItems []gjson.Result
+	for _, line := range lines {
+		if !bytes.HasPrefix(line, dataTag) {
+			continue
+		}
+		payload := bytes.TrimSpace(line[5:])
+		if gjson.GetBytes(payload, "type").String() == "response.output_item.done" {
+			if item := gjson.GetBytes(payload, "item"); item.Exists() {
+				doneOutputItems = append(doneOutputItems, item)
+			}
+		}
+	}
+
 	for _, line := range lines {
 		if !bytes.HasPrefix(line, dataTag) {
 			continue
@@ -179,6 +196,25 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 
 		if detail, ok := helps.ParseCodexUsage(line); ok {
 			reporter.Publish(ctx, detail)
+		}
+
+		// If the response.completed event has an empty output array but we
+		// collected output items from earlier events, inject them so the
+		// downstream translator can extract content/tool_calls properly.
+		if len(doneOutputItems) > 0 {
+			existingOutput := gjson.GetBytes(line, "response.output")
+			if !existingOutput.IsArray() || len(existingOutput.Array()) == 0 {
+				var outputRaw []byte
+				outputRaw = append(outputRaw, '[')
+				for i, item := range doneOutputItems {
+					if i > 0 {
+						outputRaw = append(outputRaw, ',')
+					}
+					outputRaw = append(outputRaw, []byte(item.Raw)...)
+				}
+				outputRaw = append(outputRaw, ']')
+				line, _ = sjson.SetRawBytes(line, "response.output", outputRaw)
+			}
 		}
 
 		var param any
