@@ -734,7 +734,7 @@ func newProxyAwareWebsocketDialer(cfg *config.Config, auth *cliproxyauth.Auth) *
 	}
 
 	switch setting.URL.Scheme {
-	case "socks5":
+	case "socks5", "socks5h":
 		var proxyAuth *proxy.Auth
 		if setting.URL.User != nil {
 			username := setting.URL.User.Username()

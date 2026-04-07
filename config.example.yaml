@@ -87,6 +87,9 @@ max-retry-credentials: 0
 # Maximum wait time in seconds for a cooled-down credential before triggering a retry.
 max-retry-interval: 30
 
+# When true, disable auth/model cooldown scheduling globally (prevents blackout windows after failure states).
+disable-cooling: false
+
 # Quota exceeded behavior
 quota-exceeded:
   switch-project: true # Whether to automatically switch to another project when a quota is exceeded
