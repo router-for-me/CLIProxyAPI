@@ -6,10 +6,9 @@ package geminiCLI
 
 import (
 	"context"
-	"fmt"
 
 	. "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/codex/gemini"
-	"github.com/tidwall/sjson"
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/common"
 )
 
 // ConvertCodexResponseToGeminiCLI converts Codex streaming response format to Gemini CLI format.
@@ -24,14 +23,12 @@ import (
 //   - param: A pointer to a parameter object for maintaining state between calls
 //
 // Returns:
-//   - []string: A slice of strings, each containing a Gemini-compatible JSON response wrapped in a response object
-func ConvertCodexResponseToGeminiCLI(ctx context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) []string {
+//   - [][]byte: A slice of Gemini-compatible JSON responses wrapped in a response object
+func ConvertCodexResponseToGeminiCLI(ctx context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) [][]byte {
 	outputs := ConvertCodexResponseToGemini(ctx, modelName, originalRequestRawJSON, requestRawJSON, rawJSON, param)
-	newOutputs := make([]string, 0)
+	newOutputs := make([][]byte, 0, len(outputs))
 	for i := 0; i < len(outputs); i++ {
-		json := `{"response": {}}`
-		output, _ := sjson.SetRaw(json, "response", outputs[i])
-		newOutputs = append(newOutputs, output)
+		newOutputs = append(newOutputs, translatorcommon.WrapGeminiCLIResponse(outputs[i]))
 	}
 	return newOutputs
 }
@@ -47,15 +44,12 @@ func ConvertCodexResponseToGeminiCLI(ctx context.Context, modelName string, orig
 //   - param: A pointer to a parameter object for the conversion
 //
 // Returns:
-//   - string: A Gemini-compatible JSON response wrapped in a response object
-func ConvertCodexResponseToGeminiCLINonStream(ctx context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) string {
-	// log.Debug(string(rawJSON))
-	strJSON := ConvertCodexResponseToGeminiNonStream(ctx, modelName, originalRequestRawJSON, requestRawJSON, rawJSON, param)
-	json := `{"response": {}}`
-	strJSON, _ = sjson.SetRaw(json, "response", strJSON)
-	return strJSON
+//   - []byte: A Gemini-compatible JSON response wrapped in a response object
+func ConvertCodexResponseToGeminiCLINonStream(ctx context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) []byte {
+	out := ConvertCodexResponseToGeminiNonStream(ctx, modelName, originalRequestRawJSON, requestRawJSON, rawJSON, param)
+	return translatorcommon.WrapGeminiCLIResponse(out)
 }
 
-func GeminiCLITokenCount(ctx context.Context, count int64) string {
-	return fmt.Sprintf(`{"totalTokens":%d,"promptTokensDetails":[{"modality":"TEXT","tokenCount":%d}]}`, count, count)
+func GeminiCLITokenCount(ctx context.Context, count int64) []byte {
+	return translatorcommon.GeminiTokenCountJSON(count)
 }

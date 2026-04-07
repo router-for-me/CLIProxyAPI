@@ -509,8 +509,12 @@ func (h *Handler) PutVertexCompatKeys(c *gin.Context) {
 	}
 	for i := range arr {
 		normalizeVertexCompatKey(&arr[i])
+		if arr[i].APIKey == "" {
+			c.JSON(400, gin.H{"error": fmt.Sprintf("vertex-api-key[%d].api-key is required", i)})
+			return
+		}
 	}
-	h.cfg.VertexCompatAPIKey = arr
+	h.cfg.VertexCompatAPIKey = append([]config.VertexCompatKey(nil), arr...)
 	h.cfg.SanitizeVertexCompatKeys()
 	h.persist(c)
 }

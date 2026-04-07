@@ -537,7 +537,7 @@ func TestThinkingTagParser_NormalizedSignedThinkingShapeCachesSignature(t *testi
 
 	var param any
 	output := antigravityclaude.ConvertAntigravityResponseToClaude(context.Background(), "claude-sonnet-4-5-thinking", requestJSON, requestJSON, parsed, &param)
-	outputText := strings.Join(output, "")
+	outputText := string(bytes.Join(output, nil))
 
 	if !strings.Contains(outputText, `"type":"signature_delta"`) {
 		t.Fatal("Expected output to contain a signature delta")

@@ -1,3 +1,5 @@
+version: 2
+
 builds:
   - id: "cli-proxy-api"
     env:
@@ -6,6 +8,7 @@ builds:
       - linux
       - windows
       - darwin
+      - freebsd
     goarch:
       - amd64
       - arm64

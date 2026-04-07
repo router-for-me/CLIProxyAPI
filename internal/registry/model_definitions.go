@@ -3,32 +3,24 @@
 package registry
 
 import (
-	"sort"
 	"strings"
 )
 
-// AntigravityModelConfig captures static antigravity model overrides, including
-// Thinking budget limits and provider max completion tokens.
-type AntigravityModelConfig struct {
-	Thinking            *ThinkingSupport `json:"thinking,omitempty"`
-	MaxCompletionTokens int              `json:"max_completion_tokens,omitempty"`
-}
-
 // staticModelsJSON mirrors the top-level structure of models.json.
 type staticModelsJSON struct {
-	Claude      []*ModelInfo                       `json:"claude"`
-	Gemini      []*ModelInfo                       `json:"gemini"`
-	Vertex      []*ModelInfo                       `json:"vertex"`
-	GeminiCLI   []*ModelInfo                       `json:"gemini-cli"`
-	AIStudio    []*ModelInfo                       `json:"aistudio"`
-	CodexFree   []*ModelInfo                       `json:"codex-free"`
-	CodexTeam   []*ModelInfo                       `json:"codex-team"`
-	CodexPlus   []*ModelInfo                       `json:"codex-plus"`
-	CodexPro    []*ModelInfo                       `json:"codex-pro"`
-	Qwen        []*ModelInfo                       `json:"qwen"`
-	IFlow       []*ModelInfo                       `json:"iflow"`
-	Kimi        []*ModelInfo                       `json:"kimi"`
-	Antigravity map[string]*AntigravityModelConfig `json:"antigravity"`
+	Claude      []*ModelInfo `json:"claude"`
+	Gemini      []*ModelInfo `json:"gemini"`
+	Vertex      []*ModelInfo `json:"vertex"`
+	GeminiCLI   []*ModelInfo `json:"gemini-cli"`
+	AIStudio    []*ModelInfo `json:"aistudio"`
+	CodexFree   []*ModelInfo `json:"codex-free"`
+	CodexTeam   []*ModelInfo `json:"codex-team"`
+	CodexPlus   []*ModelInfo `json:"codex-plus"`
+	CodexPro    []*ModelInfo `json:"codex-pro"`
+	Qwen        []*ModelInfo `json:"qwen"`
+	IFlow       []*ModelInfo `json:"iflow"`
+	Kimi        []*ModelInfo `json:"kimi"`
+	Antigravity []*ModelInfo `json:"antigravity"`
 }
 
 // GetClaudeModels returns the standard Claude model definitions.
@@ -91,33 +83,9 @@ func GetKimiModels() []*ModelInfo {
 	return cloneModelInfos(getModels().Kimi)
 }
 
-// GetAntigravityModelConfig returns static configuration for antigravity models.
-// Keys use upstream model names returned by the Antigravity models endpoint.
-func GetAntigravityModelConfig() map[string]*AntigravityModelConfig {
-	data := getModels()
-	if len(data.Antigravity) == 0 {
-		return nil
-	}
-	out := make(map[string]*AntigravityModelConfig, len(data.Antigravity))
-	for k, v := range data.Antigravity {
-		out[k] = cloneAntigravityModelConfig(v)
-	}
-	return out
-}
-
-func cloneAntigravityModelConfig(cfg *AntigravityModelConfig) *AntigravityModelConfig {
-	if cfg == nil {
-		return nil
-	}
-	copyConfig := *cfg
-	if cfg.Thinking != nil {
-		copyThinking := *cfg.Thinking
-		if len(cfg.Thinking.Levels) > 0 {
-			copyThinking.Levels = append([]string(nil), cfg.Thinking.Levels...)
-		}
-		copyConfig.Thinking = &copyThinking
-	}
-	return &copyConfig
+// GetAntigravityModels returns the standard Antigravity model definitions.
+func GetAntigravityModels() []*ModelInfo {
+	return cloneModelInfos(getModels().Antigravity)
 }
 
 // cloneModelInfos returns a shallow copy of the slice with each element deep-cloned.
@@ -145,7 +113,7 @@ func cloneModelInfos(models []*ModelInfo) []*ModelInfo {
 //   - qwen
 //   - iflow
 //   - kimi
-//   - antigravity (returns static overrides only)
+//   - antigravity
 func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 	key := strings.ToLower(strings.TrimSpace(channel))
 	switch key {
@@ -168,28 +136,7 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 	case "kimi":
 		return GetKimiModels()
 	case "antigravity":
-		cfg := GetAntigravityModelConfig()
-		if len(cfg) == 0 {
-			return nil
-		}
-		models := make([]*ModelInfo, 0, len(cfg))
-		for modelID, entry := range cfg {
-			if modelID == "" || entry == nil {
-				continue
-			}
-			models = append(models, &ModelInfo{
-				ID:                  modelID,
-				Object:              "model",
-				OwnedBy:             "antigravity",
-				Type:                "antigravity",
-				Thinking:            entry.Thinking,
-				MaxCompletionTokens: entry.MaxCompletionTokens,
-			})
-		}
-		sort.Slice(models, func(i, j int) bool {
-			return strings.ToLower(models[i].ID) < strings.ToLower(models[j].ID)
-		})
-		return models
+		return GetAntigravityModels()
 	default:
 		return nil
 	}
@@ -213,21 +160,13 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		data.Qwen,
 		data.IFlow,
 		data.Kimi,
+		data.Antigravity,
 	}
 	for _, models := range allModels {
 		for _, m := range models {
 			if m != nil && m.ID == modelID {
 				return cloneModelInfo(m)
 			}
-		}
-	}
-
-	// Check Antigravity static config
-	if cfg := cloneAntigravityModelConfig(data.Antigravity[modelID]); cfg != nil {
-		return &ModelInfo{
-			ID:                  modelID,
-			Thinking:            cfg.Thinking,
-			MaxCompletionTokens: cfg.MaxCompletionTokens,
 		}
 	}
 

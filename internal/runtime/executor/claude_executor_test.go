@@ -4,20 +4,607 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/klauspost/compress/zstd"
+	xxHash64 "github.com/pierrec/xxHash/xxHash64"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
+
+func resetClaudeDeviceProfileCache() {
+	helps.ResetClaudeDeviceProfileCache()
+}
+
+func newClaudeHeaderTestRequest(t *testing.T, incoming http.Header) *http.Request {
+	t.Helper()
+
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	ginReq := httptest.NewRequest(http.MethodPost, "http://localhost/v1/messages", nil)
+	ginReq.Header = incoming.Clone()
+	ginCtx.Request = ginReq
+
+	req := httptest.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages", nil)
+	return req.WithContext(context.WithValue(req.Context(), "gin", ginCtx))
+}
+
+func assertClaudeFingerprint(t *testing.T, headers http.Header, userAgent, pkgVersion, runtimeVersion, osName, arch string) {
+	t.Helper()
+
+	if got := headers.Get("User-Agent"); got != userAgent {
+		t.Fatalf("User-Agent = %q, want %q", got, userAgent)
+	}
+	if got := headers.Get("X-Stainless-Package-Version"); got != pkgVersion {
+		t.Fatalf("X-Stainless-Package-Version = %q, want %q", got, pkgVersion)
+	}
+	if got := headers.Get("X-Stainless-Runtime-Version"); got != runtimeVersion {
+		t.Fatalf("X-Stainless-Runtime-Version = %q, want %q", got, runtimeVersion)
+	}
+	if got := headers.Get("X-Stainless-Os"); got != osName {
+		t.Fatalf("X-Stainless-Os = %q, want %q", got, osName)
+	}
+	if got := headers.Get("X-Stainless-Arch"); got != arch {
+		t.Fatalf("X-Stainless-Arch = %q, want %q", got, arch)
+	}
+}
+
+func TestApplyClaudeHeaders_UsesConfiguredBaselineFingerprint(t *testing.T) {
+	resetClaudeDeviceProfileCache()
+	stabilize := true
+
+	cfg := &config.Config{
+		ClaudeHeaderDefaults: config.ClaudeHeaderDefaults{
+			UserAgent:              "claude-cli/2.1.70 (external, cli)",
+			PackageVersion:         "0.80.0",
+			RuntimeVersion:         "v24.5.0",
+			OS:                     "MacOS",
+			Arch:                   "arm64",
+			Timeout:                "900",
+			StabilizeDeviceProfile: &stabilize,
+		},
+	}
+	auth := &cliproxyauth.Auth{
+		ID: "auth-baseline",
+		Attributes: map[string]string{
+			"api_key":                            "key-baseline",
+			"header:User-Agent":                  "evil-client/9.9",
+			"header:X-Stainless-Os":              "Linux",
+			"header:X-Stainless-Arch":            "x64",
+			"header:X-Stainless-Package-Version": "9.9.9",
+		},
+	}
+	incoming := http.Header{
+		"User-Agent":                  []string{"curl/8.7.1"},
+		"X-Stainless-Package-Version": []string{"0.10.0"},
+		"X-Stainless-Runtime-Version": []string{"v18.0.0"},
+		"X-Stainless-Os":              []string{"Linux"},
+		"X-Stainless-Arch":            []string{"x64"},
+	}
+
+	req := newClaudeHeaderTestRequest(t, incoming)
+	applyClaudeHeaders(req, auth, "key-baseline", false, nil, cfg)
+
+	assertClaudeFingerprint(t, req.Header, "evil-client/9.9", "9.9.9", "v24.5.0", "Linux", "x64")
+	if got := req.Header.Get("X-Stainless-Timeout"); got != "900" {
+		t.Fatalf("X-Stainless-Timeout = %q, want %q", got, "900")
+	}
+}
+
+func TestApplyClaudeHeaders_TracksHighestClaudeCLIFingerprint(t *testing.T) {
+	resetClaudeDeviceProfileCache()
+	stabilize := true
+
+	cfg := &config.Config{
+		ClaudeHeaderDefaults: config.ClaudeHeaderDefaults{
+			UserAgent:              "claude-cli/2.1.60 (external, cli)",
+			PackageVersion:         "0.70.0",
+			RuntimeVersion:         "v22.0.0",
+			OS:                     "MacOS",
+			Arch:                   "arm64",
+			StabilizeDeviceProfile: &stabilize,
+		},
+	}
+	auth := &cliproxyauth.Auth{
+		ID: "auth-upgrade",
+		Attributes: map[string]string{
+			"api_key": "key-upgrade",
+		},
+	}
+
+	firstReq := newClaudeHeaderTestRequest(t, http.Header{
+		"User-Agent":                  []string{"claude-cli/2.1.62 (external, cli)"},
+		"X-Stainless-Package-Version": []string{"0.74.0"},
+		"X-Stainless-Runtime-Version": []string{"v24.3.0"},
+		"X-Stainless-Os":              []string{"Linux"},
+		"X-Stainless-Arch":            []string{"x64"},
+	})
+	applyClaudeHeaders(firstReq, auth, "key-upgrade", false, nil, cfg)
+	assertClaudeFingerprint(t, firstReq.Header, "claude-cli/2.1.62 (external, cli)", "0.74.0", "v24.3.0", "MacOS", "arm64")
+
+	thirdPartyReq := newClaudeHeaderTestRequest(t, http.Header{
+		"User-Agent":                  []string{"lobe-chat/1.0"},
+		"X-Stainless-Package-Version": []string{"0.10.0"},
+		"X-Stainless-Runtime-Version": []string{"v18.0.0"},
+		"X-Stainless-Os":              []string{"Windows"},
+		"X-Stainless-Arch":            []string{"x64"},
+	})
+	applyClaudeHeaders(thirdPartyReq, auth, "key-upgrade", false, nil, cfg)
+	assertClaudeFingerprint(t, thirdPartyReq.Header, "claude-cli/2.1.62 (external, cli)", "0.74.0", "v24.3.0", "MacOS", "arm64")
+
+	higherReq := newClaudeHeaderTestRequest(t, http.Header{
+		"User-Agent":                  []string{"claude-cli/2.1.63 (external, cli)"},
+		"X-Stainless-Package-Version": []string{"0.75.0"},
+		"X-Stainless-Runtime-Version": []string{"v24.4.0"},
+		"X-Stainless-Os":              []string{"MacOS"},
+		"X-Stainless-Arch":            []string{"arm64"},
+	})
+	applyClaudeHeaders(higherReq, auth, "key-upgrade", false, nil, cfg)
+	assertClaudeFingerprint(t, higherReq.Header, "claude-cli/2.1.63 (external, cli)", "0.75.0", "v24.4.0", "MacOS", "arm64")
+
+	lowerReq := newClaudeHeaderTestRequest(t, http.Header{
+		"User-Agent":                  []string{"claude-cli/2.1.61 (external, cli)"},
+		"X-Stainless-Package-Version": []string{"0.73.0"},
+		"X-Stainless-Runtime-Version": []string{"v24.2.0"},
+		"X-Stainless-Os":              []string{"Windows"},
+		"X-Stainless-Arch":            []string{"x64"},
+	})
+	applyClaudeHeaders(lowerReq, auth, "key-upgrade", false, nil, cfg)
+	assertClaudeFingerprint(t, lowerReq.Header, "claude-cli/2.1.63 (external, cli)", "0.75.0", "v24.4.0", "MacOS", "arm64")
+}
+
+func TestApplyClaudeHeaders_DoesNotDowngradeConfiguredBaselineOnFirstClaudeClient(t *testing.T) {
+	resetClaudeDeviceProfileCache()
+	stabilize := true
+
+	cfg := &config.Config{
+		ClaudeHeaderDefaults: config.ClaudeHeaderDefaults{
+			UserAgent:              "claude-cli/2.1.70 (external, cli)",
+			PackageVersion:         "0.80.0",
+			RuntimeVersion:         "v24.5.0",
+			OS:                     "MacOS",
+			Arch:                   "arm64",
+			StabilizeDeviceProfile: &stabilize,
+		},
+	}
+	auth := &cliproxyauth.Auth{
+		ID: "auth-baseline-floor",
+		Attributes: map[string]string{
+			"api_key": "key-baseline-floor",
+		},
+	}
+
+	olderClaudeReq := newClaudeHeaderTestRequest(t, http.Header{
+		"User-Agent":                  []string{"claude-cli/2.1.62 (external, cli)"},
+		"X-Stainless-Package-Version": []string{"0.74.0"},
+		"X-Stainless-Runtime-Version": []string{"v24.3.0"},
+		"X-Stainless-Os":              []string{"Linux"},
+		"X-Stainless-Arch":            []string{"x64"},
+	})
+	applyClaudeHeaders(olderClaudeReq, auth, "key-baseline-floor", false, nil, cfg)
+	assertClaudeFingerprint(t, olderClaudeReq.Header, "claude-cli/2.1.70 (external, cli)", "0.80.0", "v24.5.0", "MacOS", "arm64")
+
+	newerClaudeReq := newClaudeHeaderTestRequest(t, http.Header{
+		"User-Agent":                  []string{"claude-cli/2.1.71 (external, cli)"},
+		"X-Stainless-Package-Version": []string{"0.81.0"},
+		"X-Stainless-Runtime-Version": []string{"v24.6.0"},
+		"X-Stainless-Os":              []string{"Linux"},
+		"X-Stainless-Arch":            []string{"x64"},
+	})
+	applyClaudeHeaders(newerClaudeReq, auth, "key-baseline-floor", false, nil, cfg)
+	assertClaudeFingerprint(t, newerClaudeReq.Header, "claude-cli/2.1.71 (external, cli)", "0.81.0", "v24.6.0", "MacOS", "arm64")
+}
+
+func TestApplyClaudeHeaders_UpgradesCachedSoftwareFingerprintWhenBaselineAdvances(t *testing.T) {
+	resetClaudeDeviceProfileCache()
+	stabilize := true
+
+	oldCfg := &config.Config{
+		ClaudeHeaderDefaults: config.ClaudeHeaderDefaults{
+			UserAgent:              "claude-cli/2.1.70 (external, cli)",
+			PackageVersion:         "0.80.0",
+			RuntimeVersion:         "v24.5.0",
+			OS:                     "MacOS",
+			Arch:                   "arm64",
+			StabilizeDeviceProfile: &stabilize,
+		},
+	}
+	newCfg := &config.Config{
+		ClaudeHeaderDefaults: config.ClaudeHeaderDefaults{
+			UserAgent:              "claude-cli/2.1.77 (external, cli)",
+			PackageVersion:         "0.87.0",
+			RuntimeVersion:         "v24.8.0",
+			OS:                     "MacOS",
+			Arch:                   "arm64",
+			StabilizeDeviceProfile: &stabilize,
+		},
+	}
+	auth := &cliproxyauth.Auth{
+		ID: "auth-baseline-reload",
+		Attributes: map[string]string{
+			"api_key": "key-baseline-reload",
+		},
+	}
+
+	officialReq := newClaudeHeaderTestRequest(t, http.Header{
+		"User-Agent":                  []string{"claude-cli/2.1.71 (external, cli)"},
+		"X-Stainless-Package-Version": []string{"0.81.0"},
+		"X-Stainless-Runtime-Version": []string{"v24.6.0"},
+		"X-Stainless-Os":              []string{"Linux"},
+		"X-Stainless-Arch":            []string{"x64"},
+	})
+	applyClaudeHeaders(officialReq, auth, "key-baseline-reload", false, nil, oldCfg)
+	assertClaudeFingerprint(t, officialReq.Header, "claude-cli/2.1.71 (external, cli)", "0.81.0", "v24.6.0", "MacOS", "arm64")
+
+	thirdPartyReq := newClaudeHeaderTestRequest(t, http.Header{
+		"User-Agent":                  []string{"curl/8.7.1"},
+		"X-Stainless-Package-Version": []string{"0.10.0"},
+		"X-Stainless-Runtime-Version": []string{"v18.0.0"},
+		"X-Stainless-Os":              []string{"Linux"},
+		"X-Stainless-Arch":            []string{"x64"},
+	})
+	applyClaudeHeaders(thirdPartyReq, auth, "key-baseline-reload", false, nil, newCfg)
+	assertClaudeFingerprint(t, thirdPartyReq.Header, "claude-cli/2.1.77 (external, cli)", "0.87.0", "v24.8.0", "MacOS", "arm64")
+}
+
+func TestApplyClaudeHeaders_LearnsOfficialFingerprintAfterCustomBaselineFallback(t *testing.T) {
+	resetClaudeDeviceProfileCache()
+	stabilize := true
+
+	cfg := &config.Config{
+		ClaudeHeaderDefaults: config.ClaudeHeaderDefaults{
+			UserAgent:              "my-gateway/1.0",
+			PackageVersion:         "custom-pkg",
+			RuntimeVersion:         "custom-runtime",
+			OS:                     "MacOS",
+			Arch:                   "arm64",
+			StabilizeDeviceProfile: &stabilize,
+		},
+	}
+	auth := &cliproxyauth.Auth{
+		ID: "auth-custom-baseline-learning",
+		Attributes: map[string]string{
+			"api_key": "key-custom-baseline-learning",
+		},
+	}
+
+	thirdPartyReq := newClaudeHeaderTestRequest(t, http.Header{
+		"User-Agent":                  []string{"curl/8.7.1"},
+		"X-Stainless-Package-Version": []string{"0.10.0"},
+		"X-Stainless-Runtime-Version": []string{"v18.0.0"},
+		"X-Stainless-Os":              []string{"Linux"},
+		"X-Stainless-Arch":            []string{"x64"},
+	})
+	applyClaudeHeaders(thirdPartyReq, auth, "key-custom-baseline-learning", false, nil, cfg)
+	assertClaudeFingerprint(t, thirdPartyReq.Header, "my-gateway/1.0", "custom-pkg", "custom-runtime", "MacOS", "arm64")
+
+	officialReq := newClaudeHeaderTestRequest(t, http.Header{
+		"User-Agent":                  []string{"claude-cli/2.1.77 (external, cli)"},
+		"X-Stainless-Package-Version": []string{"0.87.0"},
+		"X-Stainless-Runtime-Version": []string{"v24.8.0"},
+		"X-Stainless-Os":              []string{"Linux"},
+		"X-Stainless-Arch":            []string{"x64"},
+	})
+	applyClaudeHeaders(officialReq, auth, "key-custom-baseline-learning", false, nil, cfg)
+	assertClaudeFingerprint(t, officialReq.Header, "claude-cli/2.1.77 (external, cli)", "0.87.0", "v24.8.0", "MacOS", "arm64")
+
+	postLearningThirdPartyReq := newClaudeHeaderTestRequest(t, http.Header{
+		"User-Agent":                  []string{"curl/8.7.1"},
+		"X-Stainless-Package-Version": []string{"0.10.0"},
+		"X-Stainless-Runtime-Version": []string{"v18.0.0"},
+		"X-Stainless-Os":              []string{"Linux"},
+		"X-Stainless-Arch":            []string{"x64"},
+	})
+	applyClaudeHeaders(postLearningThirdPartyReq, auth, "key-custom-baseline-learning", false, nil, cfg)
+	assertClaudeFingerprint(t, postLearningThirdPartyReq.Header, "claude-cli/2.1.77 (external, cli)", "0.87.0", "v24.8.0", "MacOS", "arm64")
+}
+
+func TestResolveClaudeDeviceProfile_RechecksCacheBeforeStoringCandidate(t *testing.T) {
+	resetClaudeDeviceProfileCache()
+	stabilize := true
+
+	cfg := &config.Config{
+		ClaudeHeaderDefaults: config.ClaudeHeaderDefaults{
+			UserAgent:              "claude-cli/2.1.60 (external, cli)",
+			PackageVersion:         "0.70.0",
+			RuntimeVersion:         "v22.0.0",
+			OS:                     "MacOS",
+			Arch:                   "arm64",
+			StabilizeDeviceProfile: &stabilize,
+		},
+	}
+	auth := &cliproxyauth.Auth{
+		ID: "auth-racy-upgrade",
+		Attributes: map[string]string{
+			"api_key": "key-racy-upgrade",
+		},
+	}
+
+	lowPaused := make(chan struct{})
+	releaseLow := make(chan struct{})
+	var pauseOnce sync.Once
+	var releaseOnce sync.Once
+
+	helps.ClaudeDeviceProfileBeforeCandidateStore = func(candidate helps.ClaudeDeviceProfile) {
+		if candidate.UserAgent != "claude-cli/2.1.62 (external, cli)" {
+			return
+		}
+		pauseOnce.Do(func() { close(lowPaused) })
+		<-releaseLow
+	}
+	t.Cleanup(func() {
+		helps.ClaudeDeviceProfileBeforeCandidateStore = nil
+		releaseOnce.Do(func() { close(releaseLow) })
+	})
+
+	lowResultCh := make(chan helps.ClaudeDeviceProfile, 1)
+	go func() {
+		lowResultCh <- helps.ResolveClaudeDeviceProfile(auth, "key-racy-upgrade", http.Header{
+			"User-Agent":                  []string{"claude-cli/2.1.62 (external, cli)"},
+			"X-Stainless-Package-Version": []string{"0.74.0"},
+			"X-Stainless-Runtime-Version": []string{"v24.3.0"},
+			"X-Stainless-Os":              []string{"Linux"},
+			"X-Stainless-Arch":            []string{"x64"},
+		}, cfg)
+	}()
+
+	select {
+	case <-lowPaused:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for lower candidate to pause before storing")
+	}
+
+	highResult := helps.ResolveClaudeDeviceProfile(auth, "key-racy-upgrade", http.Header{
+		"User-Agent":                  []string{"claude-cli/2.1.63 (external, cli)"},
+		"X-Stainless-Package-Version": []string{"0.75.0"},
+		"X-Stainless-Runtime-Version": []string{"v24.4.0"},
+		"X-Stainless-Os":              []string{"MacOS"},
+		"X-Stainless-Arch":            []string{"arm64"},
+	}, cfg)
+	releaseOnce.Do(func() { close(releaseLow) })
+
+	select {
+	case lowResult := <-lowResultCh:
+		if lowResult.UserAgent != "claude-cli/2.1.63 (external, cli)" {
+			t.Fatalf("lowResult.UserAgent = %q, want %q", lowResult.UserAgent, "claude-cli/2.1.63 (external, cli)")
+		}
+		if lowResult.PackageVersion != "0.75.0" {
+			t.Fatalf("lowResult.PackageVersion = %q, want %q", lowResult.PackageVersion, "0.75.0")
+		}
+		if lowResult.OS != "MacOS" || lowResult.Arch != "arm64" {
+			t.Fatalf("lowResult platform = %s/%s, want %s/%s", lowResult.OS, lowResult.Arch, "MacOS", "arm64")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for lower candidate result")
+	}
+
+	if highResult.UserAgent != "claude-cli/2.1.63 (external, cli)" {
+		t.Fatalf("highResult.UserAgent = %q, want %q", highResult.UserAgent, "claude-cli/2.1.63 (external, cli)")
+	}
+	if highResult.OS != "MacOS" || highResult.Arch != "arm64" {
+		t.Fatalf("highResult platform = %s/%s, want %s/%s", highResult.OS, highResult.Arch, "MacOS", "arm64")
+	}
+
+	cached := helps.ResolveClaudeDeviceProfile(auth, "key-racy-upgrade", http.Header{
+		"User-Agent": []string{"curl/8.7.1"},
+	}, cfg)
+	if cached.UserAgent != "claude-cli/2.1.63 (external, cli)" {
+		t.Fatalf("cached.UserAgent = %q, want %q", cached.UserAgent, "claude-cli/2.1.63 (external, cli)")
+	}
+	if cached.PackageVersion != "0.75.0" {
+		t.Fatalf("cached.PackageVersion = %q, want %q", cached.PackageVersion, "0.75.0")
+	}
+	if cached.OS != "MacOS" || cached.Arch != "arm64" {
+		t.Fatalf("cached platform = %s/%s, want %s/%s", cached.OS, cached.Arch, "MacOS", "arm64")
+	}
+}
+
+func TestApplyClaudeHeaders_ThirdPartyBaselineThenOfficialUpgradeKeepsPinnedPlatform(t *testing.T) {
+	resetClaudeDeviceProfileCache()
+	stabilize := true
+
+	cfg := &config.Config{
+		ClaudeHeaderDefaults: config.ClaudeHeaderDefaults{
+			UserAgent:              "claude-cli/2.1.70 (external, cli)",
+			PackageVersion:         "0.80.0",
+			RuntimeVersion:         "v24.5.0",
+			OS:                     "MacOS",
+			Arch:                   "arm64",
+			StabilizeDeviceProfile: &stabilize,
+		},
+	}
+	auth := &cliproxyauth.Auth{
+		ID: "auth-third-party-then-official",
+		Attributes: map[string]string{
+			"api_key": "key-third-party-then-official",
+		},
+	}
+
+	thirdPartyReq := newClaudeHeaderTestRequest(t, http.Header{
+		"User-Agent":                  []string{"curl/8.7.1"},
+		"X-Stainless-Package-Version": []string{"0.10.0"},
+		"X-Stainless-Runtime-Version": []string{"v18.0.0"},
+		"X-Stainless-Os":              []string{"Linux"},
+		"X-Stainless-Arch":            []string{"x64"},
+	})
+	applyClaudeHeaders(thirdPartyReq, auth, "key-third-party-then-official", false, nil, cfg)
+	assertClaudeFingerprint(t, thirdPartyReq.Header, "claude-cli/2.1.70 (external, cli)", "0.80.0", "v24.5.0", "MacOS", "arm64")
+
+	officialReq := newClaudeHeaderTestRequest(t, http.Header{
+		"User-Agent":                  []string{"claude-cli/2.1.77 (external, cli)"},
+		"X-Stainless-Package-Version": []string{"0.87.0"},
+		"X-Stainless-Runtime-Version": []string{"v24.8.0"},
+		"X-Stainless-Os":              []string{"Linux"},
+		"X-Stainless-Arch":            []string{"x64"},
+	})
+	applyClaudeHeaders(officialReq, auth, "key-third-party-then-official", false, nil, cfg)
+	assertClaudeFingerprint(t, officialReq.Header, "claude-cli/2.1.77 (external, cli)", "0.87.0", "v24.8.0", "MacOS", "arm64")
+}
+
+func TestApplyClaudeHeaders_DisableDeviceProfileStabilization(t *testing.T) {
+	resetClaudeDeviceProfileCache()
+
+	stabilize := false
+	cfg := &config.Config{
+		ClaudeHeaderDefaults: config.ClaudeHeaderDefaults{
+			UserAgent:              "claude-cli/2.1.60 (external, cli)",
+			PackageVersion:         "0.70.0",
+			RuntimeVersion:         "v22.0.0",
+			OS:                     "MacOS",
+			Arch:                   "arm64",
+			StabilizeDeviceProfile: &stabilize,
+		},
+	}
+	auth := &cliproxyauth.Auth{
+		ID: "auth-disable-stability",
+		Attributes: map[string]string{
+			"api_key": "key-disable-stability",
+		},
+	}
+
+	firstReq := newClaudeHeaderTestRequest(t, http.Header{
+		"User-Agent":                  []string{"claude-cli/2.1.62 (external, cli)"},
+		"X-Stainless-Package-Version": []string{"0.74.0"},
+		"X-Stainless-Runtime-Version": []string{"v24.3.0"},
+		"X-Stainless-Os":              []string{"Linux"},
+		"X-Stainless-Arch":            []string{"x64"},
+	})
+	applyClaudeHeaders(firstReq, auth, "key-disable-stability", false, nil, cfg)
+	assertClaudeFingerprint(t, firstReq.Header, "claude-cli/2.1.62 (external, cli)", "0.74.0", "v24.3.0", "Linux", "x64")
+
+	thirdPartyReq := newClaudeHeaderTestRequest(t, http.Header{
+		"User-Agent":                  []string{"lobe-chat/1.0"},
+		"X-Stainless-Package-Version": []string{"0.10.0"},
+		"X-Stainless-Runtime-Version": []string{"v18.0.0"},
+		"X-Stainless-Os":              []string{"Windows"},
+		"X-Stainless-Arch":            []string{"x64"},
+	})
+	applyClaudeHeaders(thirdPartyReq, auth, "key-disable-stability", false, nil, cfg)
+	assertClaudeFingerprint(t, thirdPartyReq.Header, "claude-cli/2.1.60 (external, cli)", "0.10.0", "v18.0.0", "Windows", "x64")
+
+	lowerReq := newClaudeHeaderTestRequest(t, http.Header{
+		"User-Agent":                  []string{"claude-cli/2.1.61 (external, cli)"},
+		"X-Stainless-Package-Version": []string{"0.73.0"},
+		"X-Stainless-Runtime-Version": []string{"v24.2.0"},
+		"X-Stainless-Os":              []string{"Windows"},
+		"X-Stainless-Arch":            []string{"x64"},
+	})
+	applyClaudeHeaders(lowerReq, auth, "key-disable-stability", false, nil, cfg)
+	assertClaudeFingerprint(t, lowerReq.Header, "claude-cli/2.1.61 (external, cli)", "0.73.0", "v24.2.0", "Windows", "x64")
+}
+
+func TestApplyClaudeHeaders_LegacyModePreservesConfiguredUserAgentOverrideForClaudeClients(t *testing.T) {
+	resetClaudeDeviceProfileCache()
+
+	stabilize := false
+	cfg := &config.Config{
+		ClaudeHeaderDefaults: config.ClaudeHeaderDefaults{
+			UserAgent:              "claude-cli/2.1.60 (external, cli)",
+			PackageVersion:         "0.70.0",
+			RuntimeVersion:         "v22.0.0",
+			StabilizeDeviceProfile: &stabilize,
+		},
+	}
+	auth := &cliproxyauth.Auth{
+		ID: "auth-legacy-ua-override",
+		Attributes: map[string]string{
+			"api_key":           "key-legacy-ua-override",
+			"header:User-Agent": "config-ua/1.0",
+		},
+	}
+
+	req := newClaudeHeaderTestRequest(t, http.Header{
+		"User-Agent":                  []string{"claude-cli/2.1.62 (external, cli)"},
+		"X-Stainless-Package-Version": []string{"0.74.0"},
+		"X-Stainless-Runtime-Version": []string{"v24.3.0"},
+		"X-Stainless-Os":              []string{"Linux"},
+		"X-Stainless-Arch":            []string{"x64"},
+	})
+	applyClaudeHeaders(req, auth, "key-legacy-ua-override", false, nil, cfg)
+
+	assertClaudeFingerprint(t, req.Header, "config-ua/1.0", "0.74.0", "v24.3.0", "Linux", "x64")
+}
+
+func TestApplyClaudeHeaders_LegacyModeFallsBackToRuntimeOSArchWhenMissing(t *testing.T) {
+	resetClaudeDeviceProfileCache()
+
+	stabilize := false
+	cfg := &config.Config{
+		ClaudeHeaderDefaults: config.ClaudeHeaderDefaults{
+			UserAgent:              "claude-cli/2.1.60 (external, cli)",
+			PackageVersion:         "0.70.0",
+			RuntimeVersion:         "v22.0.0",
+			OS:                     "MacOS",
+			Arch:                   "arm64",
+			StabilizeDeviceProfile: &stabilize,
+		},
+	}
+	auth := &cliproxyauth.Auth{
+		ID: "auth-legacy-runtime-os-arch",
+		Attributes: map[string]string{
+			"api_key": "key-legacy-runtime-os-arch",
+		},
+	}
+
+	req := newClaudeHeaderTestRequest(t, http.Header{
+		"User-Agent": []string{"curl/8.7.1"},
+	})
+	applyClaudeHeaders(req, auth, "key-legacy-runtime-os-arch", false, nil, cfg)
+
+	assertClaudeFingerprint(t, req.Header, "claude-cli/2.1.60 (external, cli)", "0.70.0", "v22.0.0", helps.MapStainlessOS(), helps.MapStainlessArch())
+}
+
+func TestApplyClaudeHeaders_UnsetStabilizationAlsoUsesLegacyRuntimeOSArchFallback(t *testing.T) {
+	resetClaudeDeviceProfileCache()
+
+	cfg := &config.Config{
+		ClaudeHeaderDefaults: config.ClaudeHeaderDefaults{
+			UserAgent:      "claude-cli/2.1.60 (external, cli)",
+			PackageVersion: "0.70.0",
+			RuntimeVersion: "v22.0.0",
+			OS:             "MacOS",
+			Arch:           "arm64",
+		},
+	}
+	auth := &cliproxyauth.Auth{
+		ID: "auth-unset-runtime-os-arch",
+		Attributes: map[string]string{
+			"api_key": "key-unset-runtime-os-arch",
+		},
+	}
+
+	req := newClaudeHeaderTestRequest(t, http.Header{
+		"User-Agent": []string{"curl/8.7.1"},
+	})
+	applyClaudeHeaders(req, auth, "key-unset-runtime-os-arch", false, nil, cfg)
+
+	assertClaudeFingerprint(t, req.Header, "claude-cli/2.1.60 (external, cli)", "0.70.0", "v22.0.0", helps.MapStainlessOS(), helps.MapStainlessArch())
+}
+
+func TestClaudeDeviceProfileStabilizationEnabled_DefaultFalse(t *testing.T) {
+	if helps.ClaudeDeviceProfileStabilizationEnabled(nil) {
+		t.Fatal("expected nil config to default to disabled stabilization")
+	}
+	if helps.ClaudeDeviceProfileStabilizationEnabled(&config.Config{}) {
+		t.Fatal("expected unset stabilize-device-profile to default to disabled stabilization")
+	}
+}
 
 func TestApplyClaudeToolPrefix(t *testing.T) {
 	input := []byte(`{"tools":[{"name":"alpha"},{"name":"proxy_bravo"}],"tool_choice":{"type":"tool","name":"charlie"},"messages":[{"role":"assistant","content":[{"type":"tool_use","name":"delta","id":"t1","input":{}}]}]}`)
@@ -152,6 +739,35 @@ func TestApplyClaudeToolPrefix_ToolChoiceBuiltin(t *testing.T) {
 	}
 }
 
+func TestApplyClaudeToolPrefix_KnownFallbackBuiltinsRemainUnprefixed(t *testing.T) {
+	for _, builtin := range []string{"web_search", "code_execution", "text_editor", "computer"} {
+		t.Run(builtin, func(t *testing.T) {
+			input := []byte(fmt.Sprintf(`{
+				"tools":[{"name":"Read"}],
+				"tool_choice":{"type":"tool","name":%q},
+				"messages":[{"role":"assistant","content":[{"type":"tool_use","name":%q,"id":"toolu_1","input":{}},{"type":"tool_reference","tool_name":%q},{"type":"tool_result","tool_use_id":"toolu_1","content":[{"type":"tool_reference","tool_name":%q}]}]}]
+			}`, builtin, builtin, builtin, builtin))
+			out := applyClaudeToolPrefix(input, "proxy_")
+
+			if got := gjson.GetBytes(out, "tool_choice.name").String(); got != builtin {
+				t.Fatalf("tool_choice.name = %q, want %q", got, builtin)
+			}
+			if got := gjson.GetBytes(out, "messages.0.content.0.name").String(); got != builtin {
+				t.Fatalf("messages.0.content.0.name = %q, want %q", got, builtin)
+			}
+			if got := gjson.GetBytes(out, "messages.0.content.1.tool_name").String(); got != builtin {
+				t.Fatalf("messages.0.content.1.tool_name = %q, want %q", got, builtin)
+			}
+			if got := gjson.GetBytes(out, "messages.0.content.2.content.0.tool_name").String(); got != builtin {
+				t.Fatalf("messages.0.content.2.content.0.tool_name = %q, want %q", got, builtin)
+			}
+			if got := gjson.GetBytes(out, "tools.0.name").String(); got != "proxy_Read" {
+				t.Fatalf("tools.0.name = %q, want %q", got, "proxy_Read")
+			}
+		})
+	}
+}
+
 func TestStripClaudeToolPrefixFromResponse(t *testing.T) {
 	input := []byte(`{"content":[{"type":"tool_use","name":"proxy_alpha","id":"t1","input":{}},{"type":"tool_use","name":"bravo","id":"t2","input":{}}]}`)
 	out := stripClaudeToolPrefixFromResponse(input, "proxy_")
@@ -212,8 +828,6 @@ func TestApplyClaudeToolPrefix_NestedToolReference(t *testing.T) {
 }
 
 func TestClaudeExecutor_ReusesUserIDAcrossModelsWhenCacheEnabled(t *testing.T) {
-	resetUserIDCache()
-
 	var userIDs []string
 	var requestModels []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -273,15 +887,13 @@ func TestClaudeExecutor_ReusesUserIDAcrossModelsWhenCacheEnabled(t *testing.T) {
 	if userIDs[0] != userIDs[1] {
 		t.Fatalf("expected user_id to be reused across models, got %q and %q", userIDs[0], userIDs[1])
 	}
-	if !isValidUserID(userIDs[0]) {
+	if !helps.IsValidUserID(userIDs[0]) {
 		t.Fatalf("user_id %q is not valid", userIDs[0])
 	}
 	t.Logf("✓ End-to-end test passed: Same user_id (%s) was used for both models", userIDs[0])
 }
 
 func TestClaudeExecutor_GeneratesNewUserIDByDefault(t *testing.T) {
-	resetUserIDCache()
-
 	var userIDs []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
@@ -319,7 +931,7 @@ func TestClaudeExecutor_GeneratesNewUserIDByDefault(t *testing.T) {
 	if userIDs[0] == userIDs[1] {
 		t.Fatalf("expected user_id to change when caching is not enabled, got identical values %q", userIDs[0])
 	}
-	if !isValidUserID(userIDs[0]) || !isValidUserID(userIDs[1]) {
+	if !helps.IsValidUserID(userIDs[0]) || !helps.IsValidUserID(userIDs[1]) {
 		t.Fatalf("user_ids should be valid, got %q and %q", userIDs[0], userIDs[1])
 	}
 }
@@ -382,6 +994,28 @@ func TestNormalizeCacheControlTTL_PreservesOriginalBytesWhenNoChange(t *testing.
 	}
 }
 
+func TestNormalizeCacheControlTTL_PreservesKeyOrderWhenModified(t *testing.T) {
+	payload := []byte(`{"model":"m","messages":[{"role":"user","content":[{"type":"text","text":"u1","cache_control":{"type":"ephemeral","ttl":"1h"}}]}],"tools":[{"name":"t1","cache_control":{"type":"ephemeral"}}],"system":[{"type":"text","text":"s1","cache_control":{"type":"ephemeral"}}]}`)
+
+	out := normalizeCacheControlTTL(payload)
+
+	if gjson.GetBytes(out, "messages.0.content.0.cache_control.ttl").Exists() {
+		t.Fatalf("messages.0.content.0.cache_control.ttl should be removed after a default-5m block")
+	}
+
+	outStr := string(out)
+	idxModel := strings.Index(outStr, `"model"`)
+	idxMessages := strings.Index(outStr, `"messages"`)
+	idxTools := strings.Index(outStr, `"tools"`)
+	idxSystem := strings.Index(outStr, `"system"`)
+	if idxModel == -1 || idxMessages == -1 || idxTools == -1 || idxSystem == -1 {
+		t.Fatalf("failed to locate top-level keys in output: %s", outStr)
+	}
+	if !(idxModel < idxMessages && idxMessages < idxTools && idxTools < idxSystem) {
+		t.Fatalf("top-level key order changed:\noriginal: %s\ngot:      %s", payload, out)
+	}
+}
+
 func TestEnforceCacheControlLimit_StripsNonLastToolBeforeMessages(t *testing.T) {
 	payload := []byte(`{
 		"tools": [
@@ -408,6 +1042,31 @@ func TestEnforceCacheControlLimit_StripsNonLastToolBeforeMessages(t *testing.T) 
 	}
 	if !gjson.GetBytes(out, "messages.0.content.0.cache_control").Exists() || !gjson.GetBytes(out, "messages.1.content.0.cache_control").Exists() {
 		t.Fatalf("message cache_control blocks should be preserved when non-last tool removal is enough")
+	}
+}
+
+func TestEnforceCacheControlLimit_PreservesKeyOrderWhenModified(t *testing.T) {
+	payload := []byte(`{"model":"m","messages":[{"role":"user","content":[{"type":"text","text":"u1","cache_control":{"type":"ephemeral"}},{"type":"text","text":"u2","cache_control":{"type":"ephemeral"}}]}],"tools":[{"name":"t1","cache_control":{"type":"ephemeral"}},{"name":"t2","cache_control":{"type":"ephemeral"}}],"system":[{"type":"text","text":"s1","cache_control":{"type":"ephemeral"}}]}`)
+
+	out := enforceCacheControlLimit(payload, 4)
+
+	if got := countCacheControls(out); got != 4 {
+		t.Fatalf("cache_control count = %d, want 4", got)
+	}
+	if gjson.GetBytes(out, "tools.0.cache_control").Exists() {
+		t.Fatalf("tools.0.cache_control should be removed first (non-last tool)")
+	}
+
+	outStr := string(out)
+	idxModel := strings.Index(outStr, `"model"`)
+	idxMessages := strings.Index(outStr, `"messages"`)
+	idxTools := strings.Index(outStr, `"tools"`)
+	idxSystem := strings.Index(outStr, `"system"`)
+	if idxModel == -1 || idxMessages == -1 || idxTools == -1 || idxSystem == -1 {
+		t.Fatalf("failed to locate top-level keys in output: %s", outStr)
+	}
+	if !(idxModel < idxMessages && idxMessages < idxTools && idxTools < idxSystem) {
+		t.Fatalf("top-level key order changed:\noriginal: %s\ngot:      %s", payload, out)
 	}
 }
 
@@ -599,6 +1258,83 @@ func testClaudeExecutorInvalidCompressedErrorBody(
 	}
 }
 
+func TestEnsureModelMaxTokens_UsesRegisteredMaxCompletionTokens(t *testing.T) {
+	reg := registry.GetGlobalRegistry()
+	clientID := "test-claude-max-completion-tokens-client"
+	modelID := "test-claude-max-completion-tokens-model"
+	reg.RegisterClient(clientID, "claude", []*registry.ModelInfo{{
+		ID:                  modelID,
+		Type:                "claude",
+		OwnedBy:             "anthropic",
+		Object:              "model",
+		Created:             time.Now().Unix(),
+		MaxCompletionTokens: 4096,
+		UserDefined:         true,
+	}})
+	defer reg.UnregisterClient(clientID)
+
+	input := []byte(`{"model":"test-claude-max-completion-tokens-model","messages":[{"role":"user","content":"hi"}]}`)
+	out := ensureModelMaxTokens(input, modelID)
+
+	if got := gjson.GetBytes(out, "max_tokens").Int(); got != 4096 {
+		t.Fatalf("max_tokens = %d, want %d", got, 4096)
+	}
+}
+
+func TestEnsureModelMaxTokens_DefaultsMissingValue(t *testing.T) {
+	reg := registry.GetGlobalRegistry()
+	clientID := "test-claude-default-max-tokens-client"
+	modelID := "test-claude-default-max-tokens-model"
+	reg.RegisterClient(clientID, "claude", []*registry.ModelInfo{{
+		ID:          modelID,
+		Type:        "claude",
+		OwnedBy:     "anthropic",
+		Object:      "model",
+		Created:     time.Now().Unix(),
+		UserDefined: true,
+	}})
+	defer reg.UnregisterClient(clientID)
+
+	input := []byte(`{"model":"test-claude-default-max-tokens-model","messages":[{"role":"user","content":"hi"}]}`)
+	out := ensureModelMaxTokens(input, modelID)
+
+	if got := gjson.GetBytes(out, "max_tokens").Int(); got != defaultModelMaxTokens {
+		t.Fatalf("max_tokens = %d, want %d", got, defaultModelMaxTokens)
+	}
+}
+
+func TestEnsureModelMaxTokens_PreservesExplicitValue(t *testing.T) {
+	reg := registry.GetGlobalRegistry()
+	clientID := "test-claude-preserve-max-tokens-client"
+	modelID := "test-claude-preserve-max-tokens-model"
+	reg.RegisterClient(clientID, "claude", []*registry.ModelInfo{{
+		ID:                  modelID,
+		Type:                "claude",
+		OwnedBy:             "anthropic",
+		Object:              "model",
+		Created:             time.Now().Unix(),
+		MaxCompletionTokens: 4096,
+		UserDefined:         true,
+	}})
+	defer reg.UnregisterClient(clientID)
+
+	input := []byte(`{"model":"test-claude-preserve-max-tokens-model","max_tokens":2048,"messages":[{"role":"user","content":"hi"}]}`)
+	out := ensureModelMaxTokens(input, modelID)
+
+	if got := gjson.GetBytes(out, "max_tokens").Int(); got != 2048 {
+		t.Fatalf("max_tokens = %d, want %d", got, 2048)
+	}
+}
+
+func TestEnsureModelMaxTokens_SkipsUnregisteredModel(t *testing.T) {
+	input := []byte(`{"model":"test-claude-unregistered-model","messages":[{"role":"user","content":"hi"}]}`)
+	out := ensureModelMaxTokens(input, "test-claude-unregistered-model")
+
+	if gjson.GetBytes(out, "max_tokens").Exists() {
+		t.Fatalf("max_tokens should remain unset, got %s", gjson.GetBytes(out, "max_tokens").Raw)
+	}
+}
+
 // TestClaudeExecutor_ExecuteStream_SetsIdentityAcceptEncoding verifies that streaming
 // requests use Accept-Encoding: identity so the upstream cannot respond with a
 // compressed SSE body that would silently break the line scanner.
@@ -756,6 +1492,35 @@ func TestDecodeResponseBody_MagicByteGzipNoHeader(t *testing.T) {
 	}
 }
 
+// TestDecodeResponseBody_MagicByteZstdNoHeader verifies that decodeResponseBody
+// detects zstd-compressed content via magic bytes even when Content-Encoding is absent.
+func TestDecodeResponseBody_MagicByteZstdNoHeader(t *testing.T) {
+	const plaintext = "data: {\"type\":\"message_stop\"}\n"
+
+	var buf bytes.Buffer
+	enc, err := zstd.NewWriter(&buf)
+	if err != nil {
+		t.Fatalf("zstd.NewWriter: %v", err)
+	}
+	_, _ = enc.Write([]byte(plaintext))
+	_ = enc.Close()
+
+	rc := io.NopCloser(&buf)
+	decoded, err := decodeResponseBody(rc, "")
+	if err != nil {
+		t.Fatalf("decodeResponseBody error: %v", err)
+	}
+	defer decoded.Close()
+
+	got, err := io.ReadAll(decoded)
+	if err != nil {
+		t.Fatalf("ReadAll error: %v", err)
+	}
+	if string(got) != plaintext {
+		t.Errorf("decoded = %q, want %q", got, plaintext)
+	}
+}
+
 // TestDecodeResponseBody_PlainTextNoHeader verifies that decodeResponseBody returns
 // plain text untouched when Content-Encoding is absent and no magic bytes match.
 func TestDecodeResponseBody_PlainTextNoHeader(t *testing.T) {
@@ -824,77 +1589,6 @@ func TestClaudeExecutor_ExecuteStream_GzipNoContentEncodingHeader(t *testing.T) 
 	}
 	if !strings.Contains(combined.String(), "message_stop") {
 		t.Errorf("unexpected chunk content: %q", combined.String())
-	}
-}
-
-// TestClaudeExecutor_ExecuteStream_AcceptEncodingOverrideCannotBypassIdentity verifies
-// that injecting Accept-Encoding via auth.Attributes cannot override the stream
-// path's enforced identity encoding.
-func TestClaudeExecutor_ExecuteStream_AcceptEncodingOverrideCannotBypassIdentity(t *testing.T) {
-	var gotEncoding string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotEncoding = r.Header.Get("Accept-Encoding")
-		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte("data: {\"type\":\"message_stop\"}\n\n"))
-	}))
-	defer server.Close()
-
-	executor := NewClaudeExecutor(&config.Config{})
-	// Inject Accept-Encoding via the custom header attribute mechanism.
-	auth := &cliproxyauth.Auth{Attributes: map[string]string{
-		"api_key":                "key-123",
-		"base_url":               server.URL,
-		"header:Accept-Encoding": "gzip, deflate, br, zstd",
-	}}
-	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
-
-	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
-		Model:   "claude-3-5-sonnet-20241022",
-		Payload: payload,
-	}, cliproxyexecutor.Options{
-		SourceFormat: sdktranslator.FromString("claude"),
-	})
-	if err != nil {
-		t.Fatalf("ExecuteStream error: %v", err)
-	}
-	for chunk := range result.Chunks {
-		if chunk.Err != nil {
-			t.Fatalf("unexpected chunk error: %v", chunk.Err)
-		}
-	}
-
-	if gotEncoding != "identity" {
-		t.Errorf("Accept-Encoding = %q; stream path must enforce identity regardless of auth.Attributes override", gotEncoding)
-	}
-}
-
-// TestDecodeResponseBody_MagicByteZstdNoHeader verifies that decodeResponseBody
-// detects zstd-compressed content via magic bytes (28 b5 2f fd) even when
-// Content-Encoding is absent.
-func TestDecodeResponseBody_MagicByteZstdNoHeader(t *testing.T) {
-	const plaintext = "data: {\"type\":\"message_stop\"}\n"
-
-	var buf bytes.Buffer
-	enc, err := zstd.NewWriter(&buf)
-	if err != nil {
-		t.Fatalf("zstd.NewWriter: %v", err)
-	}
-	_, _ = enc.Write([]byte(plaintext))
-	_ = enc.Close()
-
-	rc := io.NopCloser(&buf)
-	decoded, err := decodeResponseBody(rc, "")
-	if err != nil {
-		t.Fatalf("decodeResponseBody error: %v", err)
-	}
-	defer decoded.Close()
-
-	got, err := io.ReadAll(decoded)
-	if err != nil {
-		t.Fatalf("ReadAll error: %v", err)
-	}
-	if string(got) != plaintext {
-		t.Errorf("decoded = %q, want %q", got, plaintext)
 	}
 }
 
@@ -981,6 +1675,45 @@ func TestClaudeExecutor_ExecuteStream_GzipErrorBodyNoContentEncodingHeader(t *te
 	}
 }
 
+// TestClaudeExecutor_ExecuteStream_AcceptEncodingOverrideCannotBypassIdentity verifies that the
+// streaming executor enforces Accept-Encoding: identity regardless of auth.Attributes override.
+func TestClaudeExecutor_ExecuteStream_AcceptEncodingOverrideCannotBypassIdentity(t *testing.T) {
+	var gotEncoding string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotEncoding = r.Header.Get("Accept-Encoding")
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"message_stop\"}\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":                "key-123",
+		"base_url":               server.URL,
+		"header:Accept-Encoding": "gzip, deflate, br, zstd",
+	}}
+	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+
+	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet-20241022",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("unexpected chunk error: %v", chunk.Err)
+		}
+	}
+
+	if gotEncoding != "identity" {
+		t.Errorf("Accept-Encoding = %q; stream path must enforce identity regardless of auth.Attributes override", gotEncoding)
+	}
+}
+
 // Test case 1: String system prompt is preserved and converted to a content block
 func TestCheckSystemInstructionsWithMode_StringSystemPreserved(t *testing.T) {
 	payload := []byte(`{"system":"You are a helpful assistant.","messages":[{"role":"user","content":"hi"}]}`)
@@ -1062,5 +1795,157 @@ func TestCheckSystemInstructionsWithMode_StringWithSpecialChars(t *testing.T) {
 	}
 	if blocks[2].Get("text").String() != `Use <xml> tags & "quotes" in output.` {
 		t.Fatalf("blocks[2] text mangled, got %q", blocks[2].Get("text").String())
+	}
+}
+
+func TestClaudeExecutor_ExperimentalCCHSigningDisabledByDefaultKeepsLegacyHeader(t *testing.T) {
+	var seenBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		seenBody = bytes.Clone(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","model":"claude-3-5-sonnet","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": server.URL,
+	}}
+	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet-20241022",
+		Payload: payload,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if len(seenBody) == 0 {
+		t.Fatal("expected request body to be captured")
+	}
+
+	billingHeader := gjson.GetBytes(seenBody, "system.0.text").String()
+	if !strings.HasPrefix(billingHeader, "x-anthropic-billing-header:") {
+		t.Fatalf("system.0.text = %q, want billing header", billingHeader)
+	}
+	if strings.Contains(billingHeader, "cch=00000;") {
+		t.Fatalf("legacy mode should not forward cch placeholder, got %q", billingHeader)
+	}
+}
+
+func TestClaudeExecutor_ExperimentalCCHSigningOptInSignsFinalBody(t *testing.T) {
+	var seenBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		seenBody = bytes.Clone(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","model":"claude-3-5-sonnet","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{
+		ClaudeKey: []config.ClaudeKey{{
+			APIKey:                 "key-123",
+			BaseURL:                server.URL,
+			ExperimentalCCHSigning: true,
+		}},
+	})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": server.URL,
+	}}
+	const messageText = "please keep literal cch=00000 in this message"
+	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"please keep literal cch=00000 in this message"}]}]}`)
+
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet-20241022",
+		Payload: payload,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if len(seenBody) == 0 {
+		t.Fatal("expected request body to be captured")
+	}
+	if got := gjson.GetBytes(seenBody, "messages.0.content.0.text").String(); got != messageText {
+		t.Fatalf("message text = %q, want %q", got, messageText)
+	}
+
+	billingPattern := regexp.MustCompile(`(x-anthropic-billing-header:[^"]*?\bcch=)([0-9a-f]{5})(;)`)
+	match := billingPattern.FindSubmatch(seenBody)
+	if match == nil {
+		t.Fatalf("expected signed billing header in body: %s", string(seenBody))
+	}
+	actualCCH := string(match[2])
+	unsignedBody := billingPattern.ReplaceAll(seenBody, []byte(`${1}00000${3}`))
+	wantCCH := fmt.Sprintf("%05x", xxHash64.Checksum(unsignedBody, 0x6E52736AC806831E)&0xFFFFF)
+	if actualCCH != wantCCH {
+		t.Fatalf("cch = %q, want %q\nbody: %s", actualCCH, wantCCH, string(seenBody))
+	}
+}
+
+func TestApplyCloaking_PreservesConfiguredStrictModeAndSensitiveWordsWhenModeOmitted(t *testing.T) {
+	cfg := &config.Config{
+		ClaudeKey: []config.ClaudeKey{{
+			APIKey: "key-123",
+			Cloak: &config.CloakConfig{
+				StrictMode:     true,
+				SensitiveWords: []string{"proxy"},
+			},
+		}},
+	}
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-123"}}
+	payload := []byte(`{"system":"proxy rules","messages":[{"role":"user","content":[{"type":"text","text":"proxy access"}]}]}`)
+
+	out := applyCloaking(context.Background(), cfg, auth, payload, "claude-3-5-sonnet-20241022", "key-123")
+
+	blocks := gjson.GetBytes(out, "system").Array()
+	if len(blocks) != 2 {
+		t.Fatalf("expected strict mode to keep only injected system blocks, got %d", len(blocks))
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.0.text").String(); !strings.Contains(got, "\u200B") {
+		t.Fatalf("expected configured sensitive word obfuscation to apply, got %q", got)
+	}
+}
+
+func TestNormalizeClaudeTemperatureForThinking_AdaptiveCoercesToOne(t *testing.T) {
+	payload := []byte(`{"temperature":0,"thinking":{"type":"adaptive"},"output_config":{"effort":"max"}}`)
+	out := normalizeClaudeTemperatureForThinking(payload)
+
+	if got := gjson.GetBytes(out, "temperature").Float(); got != 1 {
+		t.Fatalf("temperature = %v, want 1", got)
+	}
+}
+
+func TestNormalizeClaudeTemperatureForThinking_EnabledCoercesToOne(t *testing.T) {
+	payload := []byte(`{"temperature":0.2,"thinking":{"type":"enabled","budget_tokens":2048}}`)
+	out := normalizeClaudeTemperatureForThinking(payload)
+
+	if got := gjson.GetBytes(out, "temperature").Float(); got != 1 {
+		t.Fatalf("temperature = %v, want 1", got)
+	}
+}
+
+func TestNormalizeClaudeTemperatureForThinking_NoThinkingLeavesTemperatureAlone(t *testing.T) {
+	payload := []byte(`{"temperature":0,"messages":[{"role":"user","content":"hi"}]}`)
+	out := normalizeClaudeTemperatureForThinking(payload)
+
+	if got := gjson.GetBytes(out, "temperature").Float(); got != 0 {
+		t.Fatalf("temperature = %v, want 0", got)
+	}
+}
+
+func TestNormalizeClaudeTemperatureForThinking_AfterForcedToolChoiceKeepsOriginalTemperature(t *testing.T) {
+	payload := []byte(`{"temperature":0,"thinking":{"type":"adaptive"},"output_config":{"effort":"max"},"tool_choice":{"type":"any"}}`)
+	out := disableThinkingIfToolChoiceForced(payload)
+	out = normalizeClaudeTemperatureForThinking(out)
+
+	if gjson.GetBytes(out, "thinking").Exists() {
+		t.Fatalf("thinking should be removed when tool_choice forces tool use")
+	}
+	if got := gjson.GetBytes(out, "temperature").Float(); got != 0 {
+		t.Fatalf("temperature = %v, want 0", got)
 	}
 }
