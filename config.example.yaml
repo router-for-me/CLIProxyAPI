@@ -86,6 +86,9 @@ max-retry-credentials: 0
 # 冷却凭据触发重试前的最大等待秒数
 max-retry-interval: 30
 
+# 单个请求（含重试/冷却等待）的总预算秒数。默认 45，设为 0 禁用预算。
+request-budget-seconds: 45
+
 # 配额超出行为
 quota-exceeded:
   switch-project: true  # 配额超时时是否自动切换到其他项目

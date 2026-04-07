@@ -142,6 +142,7 @@ type Manager struct {
 	requestRetry        atomic.Int32
 	maxRetryCredentials atomic.Int32
 	maxRetryInterval    atomic.Int64
+	requestBudgetNanos  atomic.Int64
 
 	// oauthModelAlias stores global OAuth model alias mappings (alias -> upstream name) keyed by channel.
 	oauthModelAlias atomic.Value
@@ -855,6 +856,18 @@ func (m *Manager) SetRetryConfig(retry int, maxRetryInterval time.Duration, maxR
 	m.maxRetryInterval.Store(maxRetryInterval.Nanoseconds())
 }
 
+// SetRequestBudget updates the per-request total timeout budget.
+// A non-positive value disables budget enforcement.
+func (m *Manager) SetRequestBudget(budget time.Duration) {
+	if m == nil {
+		return
+	}
+	if budget < 0 {
+		budget = 0
+	}
+	m.requestBudgetNanos.Store(budget.Nanoseconds())
+}
+
 // RegisterExecutor registers a provider executor with the manager.
 func (m *Manager) RegisterExecutor(executor ProviderExecutor) {
 	if executor == nil {
@@ -979,26 +992,31 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 	if len(normalized) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
+	execCtx, cancel, budgetEnabled := m.withRequestBudget(ctx)
+	if cancel != nil {
+		defer cancel()
+	}
 
 	_, maxRetryCredentials, maxWait := m.retrySettings()
 
 	var lastErr error
 	for attempt := 0; ; attempt++ {
-		resp, errExec := m.executeMixedOnce(ctx, normalized, req, opts, maxRetryCredentials)
+		resp, errExec := m.executeMixedOnce(execCtx, normalized, req, opts, maxRetryCredentials)
 		if errExec == nil {
 			return resp, nil
 		}
-		lastErr = errExec
-		wait, shouldRetry := m.shouldRetryAfterError(errExec, attempt, normalized, req.Model, maxWait)
+		mappedErr := mapRequestBudgetError(execCtx, budgetEnabled, errExec)
+		lastErr = mappedErr
+		wait, shouldRetry := m.shouldRetryAfterError(execCtx, mappedErr, attempt, normalized, req.Model, maxWait)
 		if !shouldRetry {
 			break
 		}
-		if errWait := waitForCooldown(ctx, wait); errWait != nil {
-			return cliproxyexecutor.Response{}, errWait
+		if errWait := waitForCooldown(execCtx, wait); errWait != nil {
+			return cliproxyexecutor.Response{}, mapRequestBudgetError(execCtx, budgetEnabled, errWait)
 		}
 	}
 	if lastErr != nil {
-		return cliproxyexecutor.Response{}, lastErr
+		return cliproxyexecutor.Response{}, mapRequestBudgetError(execCtx, budgetEnabled, lastErr)
 	}
 	return cliproxyexecutor.Response{}, &Error{Code: "auth_not_found", Message: "no auth available"}
 }
@@ -1010,26 +1028,31 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 	if len(normalized) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
+	execCtx, cancel, budgetEnabled := m.withRequestBudget(ctx)
+	if cancel != nil {
+		defer cancel()
+	}
 
 	_, maxRetryCredentials, maxWait := m.retrySettings()
 
 	var lastErr error
 	for attempt := 0; ; attempt++ {
-		resp, errExec := m.executeCountMixedOnce(ctx, normalized, req, opts, maxRetryCredentials)
+		resp, errExec := m.executeCountMixedOnce(execCtx, normalized, req, opts, maxRetryCredentials)
 		if errExec == nil {
 			return resp, nil
 		}
-		lastErr = errExec
-		wait, shouldRetry := m.shouldRetryAfterError(errExec, attempt, normalized, req.Model, maxWait)
+		mappedErr := mapRequestBudgetError(execCtx, budgetEnabled, errExec)
+		lastErr = mappedErr
+		wait, shouldRetry := m.shouldRetryAfterError(execCtx, mappedErr, attempt, normalized, req.Model, maxWait)
 		if !shouldRetry {
 			break
 		}
-		if errWait := waitForCooldown(ctx, wait); errWait != nil {
-			return cliproxyexecutor.Response{}, errWait
+		if errWait := waitForCooldown(execCtx, wait); errWait != nil {
+			return cliproxyexecutor.Response{}, mapRequestBudgetError(execCtx, budgetEnabled, errWait)
 		}
 	}
 	if lastErr != nil {
-		return cliproxyexecutor.Response{}, lastErr
+		return cliproxyexecutor.Response{}, mapRequestBudgetError(execCtx, budgetEnabled, lastErr)
 	}
 	return cliproxyexecutor.Response{}, &Error{Code: "auth_not_found", Message: "no auth available"}
 }
@@ -1041,26 +1064,31 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 	if len(normalized) == 0 {
 		return nil, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
+	execCtx, cancel, budgetEnabled := m.withRequestBudget(ctx)
+	if cancel != nil {
+		defer cancel()
+	}
 
 	_, maxRetryCredentials, maxWait := m.retrySettings()
 
 	var lastErr error
 	for attempt := 0; ; attempt++ {
-		result, errStream := m.executeStreamMixedOnce(ctx, normalized, req, opts, maxRetryCredentials)
+		result, errStream := m.executeStreamMixedOnce(execCtx, normalized, req, opts, maxRetryCredentials)
 		if errStream == nil {
 			return result, nil
 		}
-		lastErr = errStream
-		wait, shouldRetry := m.shouldRetryAfterError(errStream, attempt, normalized, req.Model, maxWait)
+		mappedErr := mapRequestBudgetError(execCtx, budgetEnabled, errStream)
+		lastErr = mappedErr
+		wait, shouldRetry := m.shouldRetryAfterError(execCtx, mappedErr, attempt, normalized, req.Model, maxWait)
 		if !shouldRetry {
 			break
 		}
-		if errWait := waitForCooldown(ctx, wait); errWait != nil {
-			return nil, errWait
+		if errWait := waitForCooldown(execCtx, wait); errWait != nil {
+			return nil, mapRequestBudgetError(execCtx, budgetEnabled, errWait)
 		}
 	}
 	if lastErr != nil {
-		return nil, lastErr
+		return nil, mapRequestBudgetError(execCtx, budgetEnabled, lastErr)
 	}
 	return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 }
@@ -1608,6 +1636,34 @@ func (m *Manager) retrySettings() (int, int, time.Duration) {
 	return int(m.requestRetry.Load()), int(m.maxRetryCredentials.Load()), time.Duration(m.maxRetryInterval.Load())
 }
 
+func (m *Manager) requestBudget() time.Duration {
+	if m == nil {
+		return 0
+	}
+	budget := time.Duration(m.requestBudgetNanos.Load())
+	if budget < 0 {
+		return 0
+	}
+	return budget
+}
+
+func (m *Manager) withRequestBudget(ctx context.Context) (context.Context, context.CancelFunc, bool) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	budget := m.requestBudget()
+	if budget <= 0 {
+		return ctx, nil, false
+	}
+	if deadline, ok := ctx.Deadline(); ok {
+		if until := time.Until(deadline); until > 0 && until <= budget {
+			return ctx, nil, false
+		}
+	}
+	budgetCtx, cancel := context.WithTimeout(ctx, budget)
+	return budgetCtx, cancel, true
+}
+
 func (m *Manager) closestCooldownWait(providers []string, model string, attempt int) (time.Duration, bool) {
 	if m == nil || len(providers) == 0 {
 		return 0, false
@@ -1665,8 +1721,11 @@ func (m *Manager) closestCooldownWait(providers []string, model string, attempt 
 	return minWait, found
 }
 
-func (m *Manager) shouldRetryAfterError(err error, attempt int, providers []string, model string, maxWait time.Duration) (time.Duration, bool) {
+func (m *Manager) shouldRetryAfterError(ctx context.Context, err error, attempt int, providers []string, model string, maxWait time.Duration) (time.Duration, bool) {
 	if err == nil {
+		return 0, false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return 0, false
 	}
 	if maxWait <= 0 {
@@ -1682,7 +1741,43 @@ func (m *Manager) shouldRetryAfterError(err error, attempt int, providers []stri
 	if !found || wait > maxWait {
 		return 0, false
 	}
+	if remaining, ok := remainingContextTime(ctx); ok && wait > remaining {
+		return 0, false
+	}
 	return wait, true
+}
+
+func remainingContextTime(ctx context.Context) (time.Duration, bool) {
+	if ctx == nil {
+		return 0, false
+	}
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return 0, false
+	}
+	remaining := time.Until(deadline)
+	if remaining < 0 {
+		remaining = 0
+	}
+	return remaining, true
+}
+
+func mapRequestBudgetError(ctx context.Context, budgetEnabled bool, err error) error {
+	if err == nil || !budgetEnabled || ctx == nil {
+		return err
+	}
+	if ctx.Err() != context.DeadlineExceeded {
+		return err
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	return &Error{
+		Code:       "upstream_timeout",
+		Message:    "upstream request budget exceeded",
+		Retryable:  true,
+		HTTPStatus: http.StatusGatewayTimeout,
+	}
 }
 
 func waitForCooldown(ctx context.Context, wait time.Duration) error {
