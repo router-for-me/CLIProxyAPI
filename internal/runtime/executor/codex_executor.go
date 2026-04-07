@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -168,61 +169,71 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 
 	lines := bytes.Split(data, []byte("\n"))
 
-	// Collect output items from response.output_item.done events, because
-	// the response.completed event may carry an empty "output" array when the
-	// upstream uses streaming mode internally.
-	var doneOutputItems []gjson.Result
+	// Single-pass: collect output items from response.output_item.done events
+	// (keyed by output_index to preserve order) and locate the
+	// response.completed event. The completed event may carry an empty
+	// "output" array when the upstream uses streaming mode internally.
+	type indexedItem struct {
+		index int64
+		raw   string
+	}
+	var doneOutputItems []indexedItem
+	var completedLine []byte
 	for _, line := range lines {
 		if !bytes.HasPrefix(line, dataTag) {
 			continue
 		}
 		payload := bytes.TrimSpace(line[5:])
-		if gjson.GetBytes(payload, "type").String() == "response.output_item.done" {
+		eventType := gjson.GetBytes(payload, "type").String()
+		switch eventType {
+		case "response.output_item.done":
 			if item := gjson.GetBytes(payload, "item"); item.Exists() {
-				doneOutputItems = append(doneOutputItems, item)
+				idx := gjson.GetBytes(payload, "output_index").Int()
+				doneOutputItems = append(doneOutputItems, indexedItem{index: idx, raw: item.Raw})
 			}
+		case "response.completed":
+			completedLine = payload
 		}
 	}
 
-	for _, line := range lines {
-		if !bytes.HasPrefix(line, dataTag) {
-			continue
-		}
+	if completedLine == nil {
+		err = statusErr{code: 408, msg: "stream error: stream disconnected before completion: stream closed before response.completed"}
+		return resp, err
+	}
 
-		line = bytes.TrimSpace(line[5:])
-		if gjson.GetBytes(line, "type").String() != "response.completed" {
-			continue
-		}
+	if detail, ok := helps.ParseCodexUsage(completedLine); ok {
+		reporter.Publish(ctx, detail)
+	}
 
-		if detail, ok := helps.ParseCodexUsage(line); ok {
-			reporter.Publish(ctx, detail)
-		}
-
-		// If the response.completed event has an empty output array but we
-		// collected output items from earlier events, inject them so the
-		// downstream translator can extract content/tool_calls properly.
-		if len(doneOutputItems) > 0 {
-			existingOutput := gjson.GetBytes(line, "response.output")
-			if !existingOutput.IsArray() || len(existingOutput.Array()) == 0 {
-				var outputRaw []byte
-				outputRaw = append(outputRaw, '[')
-				for i, item := range doneOutputItems {
-					if i > 0 {
-						outputRaw = append(outputRaw, ',')
-					}
-					outputRaw = append(outputRaw, []byte(item.Raw)...)
+	// If the response.completed event has an empty output array but we
+	// collected output items from earlier events, inject them so the
+	// downstream translator can extract content/tool_calls properly.
+	// Items are sorted by output_index to handle parallel_tool_calls
+	// where done events may arrive out of order.
+	if len(doneOutputItems) > 0 {
+		existingOutput := gjson.GetBytes(completedLine, "response.output")
+		if !existingOutput.IsArray() || len(existingOutput.Array()) == 0 {
+			sort.Slice(doneOutputItems, func(i, j int) bool {
+				return doneOutputItems[i].index < doneOutputItems[j].index
+			})
+			var outputRaw []byte
+			outputRaw = append(outputRaw, '[')
+			for i, item := range doneOutputItems {
+				if i > 0 {
+					outputRaw = append(outputRaw, ',')
 				}
-				outputRaw = append(outputRaw, ']')
-				line, _ = sjson.SetRawBytes(line, "response.output", outputRaw)
+				outputRaw = append(outputRaw, []byte(item.raw)...)
+			}
+			outputRaw = append(outputRaw, ']')
+			if updated, setErr := sjson.SetRawBytes(completedLine, "response.output", outputRaw); setErr == nil {
+				completedLine = updated
 			}
 		}
-
-		var param any
-		out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, originalPayload, body, line, &param)
-		resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
-		return resp, nil
 	}
-	err = statusErr{code: 408, msg: "stream error: stream disconnected before completion: stream closed before response.completed"}
+
+	var param any
+	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, originalPayload, body, completedLine, &param)
+	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
 	return resp, err
 }
 

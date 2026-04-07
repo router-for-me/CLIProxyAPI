@@ -165,3 +165,56 @@ func TestCodexExecutorNonStreamExtractsToolCallsFromDoneEvents(t *testing.T) {
 		t.Fatalf("expected function name %q, got %q", "get_weather", funcName)
 	}
 }
+
+// TestCodexExecutorNonStreamSortsByOutputIndex verifies that when
+// response.output_item.done events arrive out of order (e.g. parallel tool
+// calls), the injected output array is sorted by output_index.
+func TestCodexExecutorNonStreamSortsByOutputIndex(t *testing.T) {
+	// Emit output_index=1 before output_index=0 to simulate out-of-order arrival
+	ssePayload := "" +
+		"event: response.output_item.done\n" +
+		`data: {"type":"response.output_item.done","output_index":1,"item":{"id":"fc_second","type":"function_call","status":"completed","call_id":"call_2","name":"get_time","arguments":"{}"}}` + "\n\n" +
+		"event: response.output_item.done\n" +
+		`data: {"type":"response.output_item.done","output_index":0,"item":{"id":"fc_first","type":"function_call","status":"completed","call_id":"call_1","name":"get_weather","arguments":"{\"city\":\"NYC\"}"}}` + "\n\n" +
+		"event: response.completed\n" +
+		`data: {"type":"response.completed","response":{"id":"resp_test","object":"response","created_at":1700000000,"status":"completed","model":"gpt-5.4","output":[],"usage":{"input_tokens":10,"output_tokens":20,"total_tokens":30}}}` + "\n\n"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(ssePayload))
+	}))
+	defer server.Close()
+
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL,
+		"api_key":  "test",
+	}}
+
+	resp, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.4",
+		Payload: []byte(`{"model":"gpt-5.4","input":[{"role":"user","content":"test"}]}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+		Stream:       false,
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+
+	output := gjson.GetBytes(resp.Payload, "response.output")
+	if !output.IsArray() || len(output.Array()) != 2 {
+		t.Fatalf("expected 2 output items, got: %s", string(resp.Payload))
+	}
+
+	// output_index=0 (get_weather) should come first despite arriving second
+	firstName := gjson.GetBytes(resp.Payload, "response.output.0.name").String()
+	if firstName != "get_weather" {
+		t.Fatalf("expected first output name %q (index 0), got %q", "get_weather", firstName)
+	}
+
+	secondName := gjson.GetBytes(resp.Payload, "response.output.1.name").String()
+	if secondName != "get_time" {
+		t.Fatalf("expected second output name %q (index 1), got %q", "get_time", secondName)
+	}
+}
