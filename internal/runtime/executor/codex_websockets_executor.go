@@ -1072,11 +1072,7 @@ func websocketHandshakeBody(resp *http.Response) []byte {
 }
 
 func normalizeCodexWebsocketInstructions(body []byte) []byte {
-	instructions := gjson.GetBytes(body, "instructions")
-	if !instructions.Exists() || instructions.Type == gjson.Null || strings.TrimSpace(instructions.String()) == "" {
-		body, _ = sjson.SetBytes(body, "instructions", "You are a helpful assistant.")
-	}
-	return body
+	return normalizeCodexInstructions(body)
 }
 
 func enrichCodexWebsocketSessionMetadata(body []byte, sessionID string) ([]byte, string, string) {

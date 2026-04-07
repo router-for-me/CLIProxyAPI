@@ -32,6 +32,58 @@ func TestBuildCodexWebsocketRequestBodyPreservesPreviousResponseID(t *testing.T)
 	}
 }
 
+func TestPrepareCodexWebsocketRequestBodyNormalizesMissingInstructionsToEmptyString(t *testing.T) {
+	body, effectiveSessionID, turnMeta := prepareCodexWebsocketRequestBody([]byte(`{"input":[]}`), "gpt-5-codex", "session-123", true)
+
+	if got := gjson.GetBytes(body, "instructions").String(); got != "" {
+		t.Fatalf("instructions = %q, want empty string", got)
+	}
+	if got := gjson.GetBytes(body, "model").String(); got != "gpt-5-codex" {
+		t.Fatalf("model = %q, want gpt-5-codex", got)
+	}
+	if !gjson.GetBytes(body, "stream").Bool() {
+		t.Fatal("stream = false, want true")
+	}
+	if effectiveSessionID != "session-123" {
+		t.Fatalf("effectiveSessionID = %q, want session-123", effectiveSessionID)
+	}
+	if got := gjson.Get(turnMeta, "session_id").String(); got != "session-123" {
+		t.Fatalf("turnMeta.session_id = %q, want session-123", got)
+	}
+	if got := gjson.GetBytes(body, "prompt_cache_key").String(); got != "session-123" {
+		t.Fatalf("prompt_cache_key = %q, want session-123", got)
+	}
+	if got := gjson.GetBytes(body, "client_metadata.x-codex-turn-metadata").String(); got != turnMeta {
+		t.Fatalf("embedded turn metadata mismatch: got %q want %q", got, turnMeta)
+	}
+}
+
+func TestPrepareCodexWebsocketRequestBodyPreservesBlankInstructionsAndGeneratedSessionMetadata(t *testing.T) {
+	body, effectiveSessionID, turnMeta := prepareCodexWebsocketRequestBody([]byte(`{"instructions":"   ","prompt_cache_retention":"ephemeral","safety_identifier":"sid"}`), "gpt-5-codex", "", true)
+
+	if got := gjson.GetBytes(body, "instructions").String(); got != "   " {
+		t.Fatalf("instructions = %q, want blank string preserved", got)
+	}
+	if effectiveSessionID == "" {
+		t.Fatal("effectiveSessionID is empty")
+	}
+	if got := gjson.Get(turnMeta, "session_id").String(); got != effectiveSessionID {
+		t.Fatalf("turnMeta.session_id = %q, want %q", got, effectiveSessionID)
+	}
+	if got := gjson.GetBytes(body, "prompt_cache_key").String(); got != effectiveSessionID {
+		t.Fatalf("prompt_cache_key = %q, want %q", got, effectiveSessionID)
+	}
+	if got := gjson.GetBytes(body, "client_metadata.x-codex-turn-metadata").String(); got != turnMeta {
+		t.Fatalf("embedded turn metadata mismatch: got %q want %q", got, turnMeta)
+	}
+	if gjson.GetBytes(body, "prompt_cache_retention").Exists() {
+		t.Fatalf("prompt_cache_retention should be removed: %s", body)
+	}
+	if gjson.GetBytes(body, "safety_identifier").Exists() {
+		t.Fatalf("safety_identifier should be removed: %s", body)
+	}
+}
+
 func TestApplyCodexWebsocketHeadersDefaultsToCurrentResponsesBeta(t *testing.T) {
 	headers := applyCodexWebsocketHeaders(context.Background(), http.Header{}, nil, "", nil)
 
