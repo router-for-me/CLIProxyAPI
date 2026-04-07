@@ -17,6 +17,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w -X 'main.Version=${VERSION
 FROM bitnami/minideb:latest
 
 # RUN apk add --no-cache tzdata
+RUN install_packages ca-certificates curl wget
 
 RUN mkdir /CLIProxyAPI
 
