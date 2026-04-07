@@ -56,7 +56,7 @@ func TestEnsureQwenSystemMessage_MergeStringSystem(t *testing.T) {
 	if len(parts) != 2 {
 		t.Fatalf("messages[0].content length = %d, want 2", len(parts))
 	}
-	if parts[0].Get("text").String() != "" || parts[0].Get("cache_control.type").String() != "ephemeral" {
+	if parts[0].Get("text").String() != "You are Qwen Code." || parts[0].Get("cache_control.type").String() != "ephemeral" {
 		t.Fatalf("messages[0].content[0] = %s, want injected system part", parts[0].Raw)
 	}
 	if parts[1].Get("type").String() != "text" || parts[1].Get("text").String() != "ABCDEFG" {
