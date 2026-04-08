@@ -97,6 +97,7 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 
 	// Process messages and system
 	messagesJSON := []byte(`[]`)
+	validToolUseIDs := make(map[string]struct{})
 
 	// Handle system message first
 	systemMsgJSON := []byte(`{"role":"system","content":[]}`)
@@ -165,9 +166,15 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 					case "tool_use":
 						// Only allow tool_use -> tool_calls for assistant messages (security: prevent injection).
 						if role == "assistant" {
+							toolName := strings.TrimSpace(part.Get("name").String())
+							if toolName == "" {
+								return true
+							}
+
+							toolCallID := part.Get("id").String()
 							toolCallJSON := []byte(`{"id":"","type":"function","function":{"name":"","arguments":""}}`)
-							toolCallJSON, _ = sjson.SetBytes(toolCallJSON, "id", part.Get("id").String())
-							toolCallJSON, _ = sjson.SetBytes(toolCallJSON, "function.name", part.Get("name").String())
+							toolCallJSON, _ = sjson.SetBytes(toolCallJSON, "id", toolCallID)
+							toolCallJSON, _ = sjson.SetBytes(toolCallJSON, "function.name", toolName)
 
 							// Convert input to arguments JSON string
 							if input := part.Get("input"); input.Exists() {
@@ -176,13 +183,21 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 								toolCallJSON, _ = sjson.SetBytes(toolCallJSON, "function.arguments", "{}")
 							}
 
+							if toolCallID != "" {
+								validToolUseIDs[toolCallID] = struct{}{}
+							}
 							toolCalls = append(toolCalls, gjson.ParseBytes(toolCallJSON).Value())
 						}
 
 					case "tool_result":
 						// Collect tool_result to emit after the main message (ensures tool results follow tool_calls)
+						toolUseID := part.Get("tool_use_id").String()
+						if _, ok := validToolUseIDs[toolUseID]; !ok {
+							return true
+						}
+
 						toolResultJSON := []byte(`{"role":"tool","tool_call_id":"","content":""}`)
-						toolResultJSON, _ = sjson.SetBytes(toolResultJSON, "tool_call_id", part.Get("tool_use_id").String())
+						toolResultJSON, _ = sjson.SetBytes(toolResultJSON, "tool_call_id", toolUseID)
 						toolResultContent, toolResultContentRaw := convertClaudeToolResultContent(part.Get("content"))
 						if toolResultContentRaw {
 							toolResultJSON, _ = sjson.SetRawBytes(toolResultJSON, "content", []byte(toolResultContent))

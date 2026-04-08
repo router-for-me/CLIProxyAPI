@@ -6,6 +6,69 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+func TestConvertClaudeRequestToOpenAI_SkipsEmptyToolUseAndOrphanToolResult(t *testing.T) {
+	inputJSON := `{
+		"model": "claude-opus-4-6",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{
+						"type": "tool_use",
+						"id": "call_1",
+						"name": "",
+						"input": {
+							"skill": "superpowers:using-superpowers",
+							"args": ""
+						}
+					}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{
+						"type": "tool_result",
+						"tool_use_id": "call_1",
+						"content": "<tool_use_error>Error: No such tool available</tool_use_error>",
+						"is_error": true
+					},
+					{
+						"type": "text",
+						"text": "hi"
+					}
+				]
+			}
+		]
+	}`
+
+	result := ConvertClaudeRequestToOpenAI("gpt-5.4", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+	messages := resultJSON.Get("messages").Array()
+
+	if len(messages) != 1 {
+		t.Fatalf("Expected 1 message after filtering invalid tool_use history, got %d. Messages: %s", len(messages), resultJSON.Get("messages").Raw)
+	}
+
+	if got := messages[0].Get("role").String(); got != "user" {
+		t.Fatalf("Expected surviving message role %q, got %q", "user", got)
+	}
+
+	if got := messages[0].Get("content.0.text").String(); got != "hi" {
+		t.Fatalf("Expected surviving user text %q, got %q", "hi", got)
+	}
+
+	if resultJSON.Get("messages.0.tool_calls").Exists() {
+		t.Fatalf("Did not expect tool_calls for empty tool_use history. Messages: %s", resultJSON.Get("messages").Raw)
+	}
+
+	for _, message := range messages {
+		if message.Get("role").String() == "tool" {
+			t.Fatalf("Did not expect orphan tool_result to be emitted as role=tool. Messages: %s", resultJSON.Get("messages").Raw)
+		}
+	}
+}
+
 // TestConvertClaudeRequestToOpenAI_ThinkingToReasoningContent tests the mapping
 // of Claude thinking content to OpenAI reasoning_content field.
 func TestConvertClaudeRequestToOpenAI_ThinkingToReasoningContent(t *testing.T) {
