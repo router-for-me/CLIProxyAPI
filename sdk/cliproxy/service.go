@@ -799,6 +799,7 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		GlobalModelRegistry().UnregisterClient(a.ID)
 		return
 	}
+	log.Infof("[debug-register] auth %q provider=%q disabled=%v", a.ID, a.Provider, a.Disabled)
 	authKind := strings.ToLower(strings.TrimSpace(a.Attributes["auth_kind"]))
 	if authKind == "" {
 		if kind, _ := a.AccountInfo(); strings.EqualFold(kind, "api_key") {
@@ -905,7 +906,9 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		models = applyExcludedModels(models, excluded)
 	case "qwen":
 		models = registry.GetQwenModels()
+		log.Infof("[debug-qwen] auth %q provider=%q GetQwenModels=%d excluded=%v authKind=%q", a.ID, provider, len(models), excluded, authKind)
 		models = applyExcludedModels(models, excluded)
+		log.Infof("[debug-qwen] auth %q after applyExcludedModels=%d", a.ID, len(models))
 	case "iflow":
 		models = registry.GetIFlowModels()
 		models = applyExcludedModels(models, excluded)
@@ -1000,6 +1003,7 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		}
 	}
 	models = applyOAuthModelAlias(s.cfg, provider, authKind, models)
+	log.Infof("[debug-qwen] auth %q after alias: provider=%q authKind=%q models=%d prefix=%q forcePrefix=%v", a.ID, provider, authKind, len(models), a.Prefix, s.cfg != nil && s.cfg.ForceModelPrefix)
 	if len(models) > 0 {
 		key := provider
 		if key == "" {
@@ -1009,6 +1013,7 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		return
 	}
 
+	log.Infof("[debug-qwen] auth %q UNREGISTERED: models empty (provider=%q authKind=%q)", a.ID, provider, authKind)
 	GlobalModelRegistry().UnregisterClient(a.ID)
 }
 

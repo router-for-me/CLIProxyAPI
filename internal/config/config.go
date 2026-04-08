@@ -65,6 +65,9 @@ type Config struct {
 	// UsageStatisticsEnabled toggles in-memory usage aggregation; when false, usage data is discarded.
 	UsageStatisticsEnabled bool `yaml:"usage-statistics-enabled" json:"usage-statistics-enabled"`
 
+	// MetricsPersistence controls automatic persistence of usage statistics.
+	MetricsPersistence MetricsPersistenceConfig `yaml:"metrics-persistence" json:"metrics-persistence"`
+
 	// DisableCooling disables quota cooldown scheduling when true.
 	DisableCooling bool `yaml:"disable-cooling" json:"disable-cooling"`
 
@@ -175,6 +178,14 @@ type PprofConfig struct {
 	Enable bool `yaml:"enable" json:"enable"`
 	// Addr is the host:port address for the pprof HTTP server.
 	Addr string `yaml:"addr" json:"addr"`
+}
+
+// MetricsPersistenceConfig controls automatic persistence of usage statistics.
+type MetricsPersistenceConfig struct {
+	// Enabled toggles automatic metrics persistence.
+	Enabled bool `yaml:"enabled" json:"enabled"`
+	// SaveIntervalSeconds is the interval between automatic saves to disk.
+	SaveIntervalSeconds int `yaml:"save-interval-seconds" json:"save-interval-seconds"`
 }
 
 // RemoteManagement holds management API configuration under 'remote-management'.

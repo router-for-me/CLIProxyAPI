@@ -7,6 +7,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sirupsen/logrus"
+
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 )
@@ -580,6 +582,7 @@ func supportedModelSetForAuth(authID string) map[string]struct{} {
 	}
 	models := registry.GetGlobalRegistry().GetModelsForClient(authID)
 	if len(models) == 0 {
+		logrus.Infof("[debug-scheduler] auth %q has no models in registry (skipped)", authID)
 		return nil
 	}
 	set := make(map[string]struct{}, len(models))
@@ -593,6 +596,7 @@ func supportedModelSetForAuth(authID string) map[string]struct{} {
 		}
 		set[modelKey] = struct{}{}
 	}
+	logrus.Infof("[debug-scheduler] auth %q modelsInRegistry=%d modelKeys=%v", authID, len(models), set)
 	return set
 }
 

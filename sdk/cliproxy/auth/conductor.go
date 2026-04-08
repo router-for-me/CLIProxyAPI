@@ -231,6 +231,8 @@ func (m *Manager) RefreshSchedulerEntry(authID string) {
 	}
 	snapshot := auth.Clone()
 	m.mu.RUnlock()
+	models := registry.GetGlobalRegistry().GetModelsForClient(authID)
+	log.Infof("[debug-refresh] RefreshSchedulerEntry auth=%q modelsInRegistry=%d", authID, len(models))
 	m.scheduler.upsertAuth(snapshot)
 }
 

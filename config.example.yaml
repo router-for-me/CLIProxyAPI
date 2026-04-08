@@ -66,6 +66,12 @@ error-logs-max-files: 10
 # When false, disable in-memory usage statistics aggregation
 usage-statistics-enabled: false
 
+# Metrics persistence automatically saves usage statistics to disk.
+# When enabled, metrics are saved periodically and on graceful shutdown.
+metrics-persistence:
+  enabled: true
+  save-interval-seconds: 300
+
 # Proxy URL. Supports socks5/http/https protocols. Example: socks5://user:pass@192.168.1.1:1080/
 # Per-entry proxy-url also supports "direct" or "none" to bypass both the global proxy-url and environment proxies explicitly.
 proxy-url: ""

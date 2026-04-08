@@ -6,12 +6,15 @@ package cmd
 import (
 	"context"
 	"errors"
+	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy"
 	log "github.com/sirupsen/logrus"
 )
@@ -32,6 +35,11 @@ func StartService(cfg *config.Config, configPath string, localPassword string) {
 
 	ctxSignal, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
+
+	persister := setupMetricsPersistence(cfg, configPath)
+	if persister != nil {
+		defer persister.Stop()
+	}
 
 	runCtx := ctxSignal
 	if localPassword != "" {
@@ -73,8 +81,15 @@ func StartServiceBackground(cfg *config.Config, configPath string, localPassword
 		return cancelFn, doneCh
 	}
 
+	persister := setupMetricsPersistence(cfg, configPath)
+
 	go func() {
-		defer close(doneCh)
+		defer func() {
+			if persister != nil {
+				persister.Stop()
+			}
+			close(doneCh)
+		}()
 		if err := service.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			log.Errorf("proxy service exited with error: %v", err)
 		}
@@ -95,4 +110,35 @@ func WaitForCloudDeploy() {
 	// Block until shutdown signal is received
 	<-ctxSignal.Done()
 	log.Info("Cloud deploy mode: Shutdown signal received; exiting")
+}
+
+func setupMetricsPersistence(cfg *config.Config, configPath string) *usage.MetricsPersister {
+	if cfg == nil {
+		return nil
+	}
+
+	mp := cfg.MetricsPersistence
+	if !mp.Enabled {
+		log.Info("metrics persistence disabled")
+		return nil
+	}
+
+	configDir := filepath.Dir(configPath)
+	metricsDir := filepath.Join(configDir, "metrics")
+	if err := os.MkdirAll(metricsDir, 0755); err != nil {
+		log.WithError(err).Warn("failed to create metrics directory")
+		return nil
+	}
+	metricsPath := filepath.Join(metricsDir, "metrics.json")
+
+	interval := time.Duration(mp.SaveIntervalSeconds) * time.Second
+	if interval <= 0 {
+		interval = 5 * time.Minute
+	}
+
+	persister := usage.NewMetricsPersister(usage.GetRequestStatistics(), metricsPath)
+	persister.Start(interval)
+
+	log.WithField("interval", interval).WithField("path", metricsPath).Info("metrics persistence enabled")
+	return persister
 }
