@@ -168,7 +168,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 
 	lines := bytes.Split(data, []byte("\n"))
-	outputCollector := newCodexResponseOutputCollector()
+	outputItems := codexOutputItems{byIndex: make(map[int64][]byte)}
 	for _, line := range lines {
 		if !bytes.HasPrefix(line, dataTag) {
 			continue
@@ -178,7 +178,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		eventType := gjson.GetBytes(eventData, "type").String()
 
 		if eventType == "response.output_item.done" {
-			outputCollector.AddOutputItemDone(eventData)
+			outputItems.addDoneEvent(eventData)
 			continue
 		}
 
@@ -190,7 +190,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 			reporter.Publish(ctx, detail)
 		}
 
-		completedData := outputCollector.PatchCompletedOutput(eventData)
+		completedData := outputItems.patchCompleted(eventData)
 		var param any
 		out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, originalPayload, body, completedData, &param)
 		resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
@@ -382,7 +382,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		scanner := bufio.NewScanner(httpResp.Body)
 		scanner.Buffer(nil, 52_428_800) // 50MB
 		var param any
-		outputCollector := newCodexResponseOutputCollector()
+		outputItems := codexOutputItems{byIndex: make(map[int64][]byte)}
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
@@ -392,14 +392,14 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				eventType := gjson.GetBytes(eventData, "type").String()
 
 				if eventType == "response.output_item.done" {
-					outputCollector.AddOutputItemDone(eventData)
+					outputItems.addDoneEvent(eventData)
 				}
 
 				if eventType == "response.completed" {
 					if detail, ok := helps.ParseCodexUsage(eventData); ok {
 						reporter.Publish(ctx, detail)
 					}
-					completedData := outputCollector.PatchCompletedOutput(eventData)
+					completedData := outputItems.patchCompleted(eventData)
 					if !bytes.Equal(completedData, eventData) {
 						line = rebuildSSEDataLine(completedData)
 					}
@@ -420,16 +420,12 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
 }
 
-type codexResponseOutputCollector struct {
+type codexOutputItems struct {
 	byIndex  map[int64][]byte
 	fallback [][]byte
 }
 
-func newCodexResponseOutputCollector() codexResponseOutputCollector {
-	return codexResponseOutputCollector{byIndex: make(map[int64][]byte)}
-}
-
-func (c *codexResponseOutputCollector) AddOutputItemDone(eventData []byte) {
+func (o *codexOutputItems) addDoneEvent(eventData []byte) {
 	itemResult := gjson.GetBytes(eventData, "item")
 	if !itemResult.Exists() || itemResult.Type != gjson.JSON {
 		return
@@ -438,16 +434,16 @@ func (c *codexResponseOutputCollector) AddOutputItemDone(eventData []byte) {
 	item := []byte(itemResult.Raw)
 	outputIndexResult := gjson.GetBytes(eventData, "output_index")
 	if outputIndexResult.Exists() {
-		c.byIndex[outputIndexResult.Int()] = item
+		o.byIndex[outputIndexResult.Int()] = item
 		return
 	}
-	c.fallback = append(c.fallback, item)
+	o.fallback = append(o.fallback, item)
 }
 
-func (c *codexResponseOutputCollector) PatchCompletedOutput(eventData []byte) []byte {
+func (o *codexOutputItems) patchCompleted(eventData []byte) []byte {
 	outputResult := gjson.GetBytes(eventData, "response.output")
 	shouldPatchOutput := (!outputResult.Exists() || !outputResult.IsArray() || len(outputResult.Array()) == 0) &&
-		(len(c.byIndex) > 0 || len(c.fallback) > 0)
+		(len(o.byIndex) > 0 || len(o.fallback) > 0)
 	if !shouldPatchOutput {
 		return eventData
 	}
@@ -455,17 +451,17 @@ func (c *codexResponseOutputCollector) PatchCompletedOutput(eventData []byte) []
 	completedDataPatched := bytes.Clone(eventData)
 	completedDataPatched, _ = sjson.SetRawBytes(completedDataPatched, "response.output", []byte(`[]`))
 
-	indexes := make([]int64, 0, len(c.byIndex))
-	for idx := range c.byIndex {
+	indexes := make([]int64, 0, len(o.byIndex))
+	for idx := range o.byIndex {
 		indexes = append(indexes, idx)
 	}
 	sort.Slice(indexes, func(i, j int) bool {
 		return indexes[i] < indexes[j]
 	})
 	for _, idx := range indexes {
-		completedDataPatched, _ = sjson.SetRawBytes(completedDataPatched, "response.output.-1", c.byIndex[idx])
+		completedDataPatched, _ = sjson.SetRawBytes(completedDataPatched, "response.output.-1", o.byIndex[idx])
 	}
-	for _, item := range c.fallback {
+	for _, item := range o.fallback {
 		completedDataPatched, _ = sjson.SetRawBytes(completedDataPatched, "response.output.-1", item)
 	}
 	return completedDataPatched

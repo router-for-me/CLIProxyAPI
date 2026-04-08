@@ -15,13 +15,13 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-func TestCodexResponseOutputCollectorPatchCompletedOutput_SortsByOutputIndex(t *testing.T) {
-	collector := newCodexResponseOutputCollector()
-	collector.AddOutputItemDone([]byte(`{"type":"response.output_item.done","item":{"type":"message","id":"msg_2"},"output_index":2}`))
-	collector.AddOutputItemDone([]byte(`{"type":"response.output_item.done","item":{"type":"message","id":"msg_0"},"output_index":0}`))
-	collector.AddOutputItemDone([]byte(`{"type":"response.output_item.done","item":{"type":"message","id":"msg_fallback"}}`))
+func TestCodexOutputItemsPatchCompleted_SortsByOutputIndex(t *testing.T) {
+	items := codexOutputItems{byIndex: make(map[int64][]byte)}
+	items.addDoneEvent([]byte(`{"type":"response.output_item.done","item":{"type":"message","id":"msg_2"},"output_index":2}`))
+	items.addDoneEvent([]byte(`{"type":"response.output_item.done","item":{"type":"message","id":"msg_0"},"output_index":0}`))
+	items.addDoneEvent([]byte(`{"type":"response.output_item.done","item":{"type":"message","id":"msg_fallback"}}`))
 
-	patched := collector.PatchCompletedOutput([]byte(`{"type":"response.completed","response":{"id":"resp_1","output":[]}}`))
+	patched := items.patchCompleted([]byte(`{"type":"response.completed","response":{"id":"resp_1","output":[]}}`))
 	output := gjson.GetBytes(patched, "response.output")
 	if !output.IsArray() {
 		t.Fatalf("response.output should be an array: %s", patched)
