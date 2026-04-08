@@ -1078,6 +1078,211 @@ func TestConvertClaudeRequestToOpenAI_ExtraToolResultsDoNotPolluteLaterMessages(
 	}
 }
 
+func TestConvertClaudeRequestToOpenAI_UnresolvedGeneratedQueuesDoNotLeakAcrossTurns(t *testing.T) {
+	previousCounter := openAIToolCallIDCounter
+	openAIToolCallIDCounter = 0
+	defer func() {
+		openAIToolCallIDCounter = previousCounter
+	}()
+
+	inputJSON := `{
+		"model": "claude-3-opus",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "", "name": "old_tool", "input": {"step": 1}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type": "text", "text": "no tool result yet"}
+				]
+			},
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "", "name": "new_tool", "input": {"step": 2}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type": "tool_result", "tool_use_id": "", "content": "new result"}
+				]
+			}
+		]
+	}`
+
+	result := ConvertClaudeRequestToOpenAI("test-model", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+	messages := resultJSON.Get("messages").Array()
+
+	if len(messages) != 4 {
+		t.Fatalf("Expected 4 messages, got %d. Messages: %s", len(messages), resultJSON.Get("messages").Raw)
+	}
+
+	oldID := messages[0].Get("tool_calls.0.id").String()
+	newID := messages[2].Get("tool_calls.0.id").String()
+	if oldID == "" || newID == "" || oldID == newID {
+		t.Fatalf("Expected distinct generated ids across turns, got old=%q new=%q", oldID, newID)
+	}
+	if got := messages[3].Get("tool_call_id").String(); got != newID {
+		t.Fatalf("Expected later empty tool_result to bind to latest tool turn id %q, got %q", newID, got)
+	}
+}
+
+func TestConvertClaudeRequestToOpenAI_UnresolvedExplicitQueuesDoNotLeakAcrossTurns(t *testing.T) {
+	previousCounter := openAIToolCallIDCounter
+	openAIToolCallIDCounter = 0
+	defer func() {
+		openAIToolCallIDCounter = previousCounter
+	}()
+
+	inputJSON := `{
+		"model": "claude-3-opus",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "shared_call", "name": "old_tool", "input": {"step": 1}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type": "text", "text": "still waiting"}
+				]
+			},
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "shared_call", "name": "new_tool", "input": {"step": 2}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type": "tool_result", "tool_use_id": "shared_call", "content": "new explicit result"}
+				]
+			}
+		]
+	}`
+
+	result := ConvertClaudeRequestToOpenAI("test-model", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+	messages := resultJSON.Get("messages").Array()
+
+	if len(messages) != 4 {
+		t.Fatalf("Expected 4 messages, got %d. Messages: %s", len(messages), resultJSON.Get("messages").Raw)
+	}
+
+	oldID := messages[0].Get("tool_calls.0.id").String()
+	newID := messages[2].Get("tool_calls.0.id").String()
+	if oldID != "shared_call" {
+		t.Fatalf("Expected first explicit id %q, got %q", "shared_call", oldID)
+	}
+	if newID == "" || newID == "shared_call" {
+		t.Fatalf("Expected second turn explicit id to be uniquified, got %q", newID)
+	}
+	if got := messages[3].Get("tool_call_id").String(); got != newID {
+		t.Fatalf("Expected later explicit tool_result to bind to latest tool turn id %q, got %q", newID, got)
+	}
+}
+
+func TestConvertClaudeRequestToOpenAI_StaleToolQueuesClearAfterUserTurnWithoutResults(t *testing.T) {
+	previousCounter := openAIToolCallIDCounter
+	openAIToolCallIDCounter = 0
+	defer func() {
+		openAIToolCallIDCounter = previousCounter
+	}()
+
+	inputJSON := `{
+		"model": "claude-3-opus",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "", "name": "old_tool", "input": {"step": 1}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type": "text", "text": "plain user turn"}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type": "tool_result", "tool_use_id": "", "content": "late result"}
+				]
+			}
+		]
+	}`
+
+	result := ConvertClaudeRequestToOpenAI("test-model", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+	messages := resultJSON.Get("messages").Array()
+
+	if len(messages) != 2 {
+		t.Fatalf("Expected 2 messages after dropping stale late tool_result, got %d. Messages: %s", len(messages), resultJSON.Get("messages").Raw)
+	}
+	if got := messages[1].Get("role").String(); got != "user" {
+		t.Fatalf("Expected trailing plain user message to remain, got %q", got)
+	}
+}
+
+func TestConvertClaudeRequestToOpenAI_StaleToolQueuesClearAfterAssistantTurnWithoutTools(t *testing.T) {
+	previousCounter := openAIToolCallIDCounter
+	openAIToolCallIDCounter = 0
+	defer func() {
+		openAIToolCallIDCounter = previousCounter
+	}()
+
+	inputJSON := `{
+		"model": "claude-3-opus",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "old_call", "name": "old_tool", "input": {"step": 1}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type": "text", "text": "no result yet"}
+				]
+			},
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "text", "text": "new assistant turn"}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type": "tool_result", "tool_use_id": "old_call", "content": "late explicit result"}
+				]
+			}
+		]
+	}`
+
+	result := ConvertClaudeRequestToOpenAI("test-model", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+	messages := resultJSON.Get("messages").Array()
+
+	if len(messages) != 3 {
+		t.Fatalf("Expected 3 messages after dropping stale explicit tool_result, got %d. Messages: %s", len(messages), resultJSON.Get("messages").Raw)
+	}
+	if got := messages[2].Get("role").String(); got != "assistant" {
+		t.Fatalf("Expected text-only assistant turn to remain as the last message, got %q", got)
+	}
+}
+
 func TestConvertClaudeRequestToOpenAI_ToolResultTextAndImageContent(t *testing.T) {
 	inputJSON := `{
 		"model": "claude-3-opus",

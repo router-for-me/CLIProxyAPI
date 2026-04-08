@@ -139,6 +139,9 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 		messages.ForEach(func(_, message gjson.Result) bool {
 			role := message.Get("role").String()
 			contentResult := message.Get("content")
+			currentTurnGeneratedToolUseIDs := make([]string, 0)
+			currentTurnToolUseIDs := make(map[string][]string)
+			currentMessageHasToolCalls := false
 
 			// Handle content
 			if contentResult.Exists() && contentResult.IsArray() {
@@ -192,9 +195,9 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 							}
 
 							if sourceToolCallID == "" {
-								pendingGeneratedToolUseIDs = append(pendingGeneratedToolUseIDs, toolCallID)
+								currentTurnGeneratedToolUseIDs = append(currentTurnGeneratedToolUseIDs, toolCallID)
 							} else {
-								validToolUseIDs[sourceToolCallID] = append(validToolUseIDs[sourceToolCallID], toolCallID)
+								currentTurnToolUseIDs[sourceToolCallID] = append(currentTurnToolUseIDs[sourceToolCallID], toolCallID)
 							}
 							toolCalls = append(toolCalls, gjson.ParseBytes(toolCallJSON).Value())
 						}
@@ -241,6 +244,7 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 				hasReasoning := reasoningContent != ""
 				hasToolCalls := len(toolCalls) > 0
 				hasToolResults := len(toolResults) > 0
+				currentMessageHasToolCalls = hasToolCalls
 
 				// OpenAI requires: tool messages MUST immediately follow the assistant message with tool_calls.
 				// Therefore, we emit tool_result messages FIRST (they respond to the previous assistant's tool_calls),
@@ -304,6 +308,19 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 				msgJSON, _ = sjson.SetBytes(msgJSON, "role", role)
 				msgJSON, _ = sjson.SetBytes(msgJSON, "content", contentResult.String())
 				messagesJSON, _ = sjson.SetRawBytes(messagesJSON, "-1", msgJSON)
+			}
+
+			if role == "assistant" {
+				if currentMessageHasToolCalls {
+					pendingGeneratedToolUseIDs = currentTurnGeneratedToolUseIDs
+					validToolUseIDs = currentTurnToolUseIDs
+				} else {
+					pendingGeneratedToolUseIDs = nil
+					validToolUseIDs = make(map[string][]string)
+				}
+			} else {
+				pendingGeneratedToolUseIDs = nil
+				validToolUseIDs = make(map[string][]string)
 			}
 
 			return true
