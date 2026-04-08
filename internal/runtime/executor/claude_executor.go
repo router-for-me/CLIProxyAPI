@@ -157,10 +157,13 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	extraBetas, body = extractAndRemoveBetas(body)
 	bodyForTranslation := body
 	bodyForUpstream := body
-	if isClaudeOAuthToken(apiKey) && !auth.ToolPrefixDisabled() {
+	oauthToken := isClaudeOAuthToken(apiKey)
+	if oauthToken && !auth.ToolPrefixDisabled() {
 		bodyForUpstream = applyClaudeToolPrefix(body, claudeToolPrefix)
 	}
-	if experimentalCCHSigningEnabled(e.cfg, auth) {
+	// Enable cch signing by default for OAuth tokens (not just experimental flag).
+	// Claude Code always computes cch; missing or invalid cch is a detectable fingerprint.
+	if oauthToken || experimentalCCHSigningEnabled(e.cfg, auth) {
 		bodyForUpstream = signAnthropicMessagesBody(bodyForUpstream)
 	}
 
@@ -325,10 +328,12 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	extraBetas, body = extractAndRemoveBetas(body)
 	bodyForTranslation := body
 	bodyForUpstream := body
-	if isClaudeOAuthToken(apiKey) && !auth.ToolPrefixDisabled() {
+	oauthToken := isClaudeOAuthToken(apiKey)
+	if oauthToken && !auth.ToolPrefixDisabled() {
 		bodyForUpstream = applyClaudeToolPrefix(body, claudeToolPrefix)
 	}
-	if experimentalCCHSigningEnabled(e.cfg, auth) {
+	// Enable cch signing by default for OAuth tokens (not just experimental flag).
+	if oauthToken || experimentalCCHSigningEnabled(e.cfg, auth) {
 		bodyForUpstream = signAnthropicMessagesBody(bodyForUpstream)
 	}
 
@@ -1291,47 +1296,91 @@ func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, exp
 	// Including any cache_control here creates an intra-system TTL ordering violation
 	// when the client's system blocks use ttl='1h' (prompt-caching-scope-2026-01-05 beta
 	// forbids 1h blocks after 5m blocks, and a no-TTL block defaults to 5m).
-	agentBlock := `{"type":"text","text":"You are a Claude agent, built on Anthropic's Claude Agent SDK."}`
+	// Use Claude Code identity prefix for interactive CLI mode.
+	// Real Claude Code uses "You are Claude Code, Anthropic's official CLI for Claude."
+	// when running in interactive mode (the most common case).
+	agentBlock := `{"type":"text","text":"You are Claude Code, Anthropic's official CLI for Claude."}`
 
-	if strictMode {
-		// Strict mode: billing header + agent identifier only
-		result := "[" + billingBlock + "," + agentBlock + "]"
-		payload, _ = sjson.SetRawBytes(payload, "system", []byte(result))
-		return payload
-	}
-
-	// Non-strict mode: billing header + agent identifier + user system messages
 	// Skip if already injected
 	firstText := gjson.GetBytes(payload, "system.0.text").String()
 	if strings.HasPrefix(firstText, "x-anthropic-billing-header:") {
 		return payload
 	}
 
-	result := "[" + billingBlock + "," + agentBlock
+	// system[] only keeps billing header + agent identifier.
+	// User system instructions are moved to the first user message to avoid
+	// Anthropic's content-based system prompt validation (extra usage detection).
+	systemResult := "[" + billingBlock + "," + agentBlock + "]"
+	payload, _ = sjson.SetRawBytes(payload, "system", []byte(systemResult))
+
+	// Collect user system instructions and prepend to first user message
+	var userSystemParts []string
 	if system.IsArray() {
 		system.ForEach(func(_, part gjson.Result) bool {
 			if part.Get("type").String() == "text" {
-				// Add cache_control to user system messages if not present.
-				// Do NOT add ttl — let it inherit the default (5m) to avoid
-				// TTL ordering violations with the prompt-caching-scope-2026-01-05 beta.
-				partJSON := part.Raw
-				if !part.Get("cache_control").Exists() {
-					updated, _ := sjson.SetBytes([]byte(partJSON), "cache_control.type", "ephemeral")
-					partJSON = string(updated)
+				txt := strings.TrimSpace(part.Get("text").String())
+				if txt != "" {
+					userSystemParts = append(userSystemParts, txt)
 				}
-				result += "," + partJSON
 			}
 			return true
 		})
-	} else if system.Type == gjson.String && system.String() != "" {
-		partJSON := `{"type":"text","cache_control":{"type":"ephemeral"}}`
-		updated, _ := sjson.SetBytes([]byte(partJSON), "text", system.String())
-		partJSON = string(updated)
-		result += "," + partJSON
+	} else if system.Type == gjson.String && strings.TrimSpace(system.String()) != "" {
+		userSystemParts = append(userSystemParts, strings.TrimSpace(system.String()))
 	}
-	result += "]"
 
-	payload, _ = sjson.SetRawBytes(payload, "system", []byte(result))
+	if !strictMode && len(userSystemParts) > 0 {
+		combined := strings.Join(userSystemParts, "\n\n")
+		payload = prependToFirstUserMessage(payload, combined)
+	}
+
+	return payload
+}
+
+// prependToFirstUserMessage prepends text content to the first user message.
+// This avoids putting non-Claude-Code system instructions in system[] which
+// triggers Anthropic's extra usage billing for OAuth-proxied requests.
+func prependToFirstUserMessage(payload []byte, text string) []byte {
+	messages := gjson.GetBytes(payload, "messages")
+	if !messages.Exists() || !messages.IsArray() {
+		return payload
+	}
+
+	// Find the first user message index
+	firstUserIdx := -1
+	messages.ForEach(func(idx, msg gjson.Result) bool {
+		if msg.Get("role").String() == "user" {
+			firstUserIdx = int(idx.Int())
+			return false
+		}
+		return true
+	})
+
+	if firstUserIdx < 0 {
+		return payload
+	}
+
+	prefixBlock := fmt.Sprintf(`<system-reminder>
+As you answer the user's questions, you can use the following context from the system:
+%s
+
+IMPORTANT: this context may or may not be relevant to your tasks. You should not respond to this context unless it is highly relevant to your task.
+</system-reminder>
+`, text)
+
+	contentPath := fmt.Sprintf("messages.%d.content", firstUserIdx)
+	content := gjson.GetBytes(payload, contentPath)
+
+	if content.IsArray() {
+		newBlock := fmt.Sprintf(`{"type":"text","text":%q}`, prefixBlock)
+		existing := content.Raw
+		newArray := "[" + newBlock + "," + existing[1:]
+		payload, _ = sjson.SetRawBytes(payload, contentPath, []byte(newArray))
+	} else if content.Type == gjson.String {
+		newText := prefixBlock + content.String()
+		payload, _ = sjson.SetBytes(payload, contentPath, newText)
+	}
+
 	return payload
 }
 
@@ -1339,7 +1388,9 @@ func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, exp
 // Cloaking includes: system prompt injection, fake user ID, and sensitive word obfuscation.
 func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, payload []byte, model string, apiKey string) []byte {
 	clientUserAgent := getClientUserAgent(ctx)
-	useExperimentalCCHSigning := experimentalCCHSigningEnabled(cfg, auth)
+	// Enable cch signing for OAuth tokens by default (not just experimental flag).
+	oauthToken := isClaudeOAuthToken(apiKey)
+	useCCHSigning := oauthToken || experimentalCCHSigningEnabled(cfg, auth)
 
 	// Get cloak config from ClaudeKey configuration
 	cloakCfg := resolveClaudeKeyCloakConfig(cfg, auth)
@@ -1376,7 +1427,7 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 		billingVersion := helps.DefaultClaudeVersion(cfg)
 		entrypoint := parseEntrypointFromUA(clientUserAgent)
 		workload := getWorkloadFromContext(ctx)
-		payload = checkSystemInstructionsWithSigningMode(payload, strictMode, useExperimentalCCHSigning, billingVersion, entrypoint, workload)
+		payload = checkSystemInstructionsWithSigningMode(payload, strictMode, useCCHSigning, billingVersion, entrypoint, workload)
 	}
 
 	// Inject fake user ID
