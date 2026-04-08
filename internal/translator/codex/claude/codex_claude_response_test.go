@@ -280,3 +280,40 @@ func TestConvertCodexResponseToClaudeNonStream_ThinkingIncludesSignature(t *test
 		t.Fatalf("unexpected thinking text: %q", got)
 	}
 }
+
+func TestConvertCodexResponseToClaude_StreamEmptyOutputUsesOutputItemDoneMessageFallback(t *testing.T) {
+	ctx := context.Background()
+	originalRequest := []byte(`{"tools":[]}`)
+	var param any
+
+	chunks := [][]byte{
+		[]byte("data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5\"}}"),
+		[]byte("data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]},\"output_index\":0}"),
+		[]byte("data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}"),
+	}
+
+	var outputs [][]byte
+	for _, chunk := range chunks {
+		outputs = append(outputs, ConvertCodexResponseToClaude(ctx, "", originalRequest, nil, chunk, &param)...)
+	}
+
+	foundText := false
+	for _, out := range outputs {
+		for _, line := range strings.Split(string(out), "\n") {
+			if !strings.HasPrefix(line, "data: ") {
+				continue
+			}
+			data := gjson.Parse(strings.TrimPrefix(line, "data: "))
+			if data.Get("type").String() == "content_block_delta" && data.Get("delta.type").String() == "text_delta" && data.Get("delta.text").String() == "ok" {
+				foundText = true
+				break
+			}
+		}
+		if foundText {
+			break
+		}
+	}
+	if !foundText {
+		t.Fatalf("expected fallback content from response.output_item.done message; outputs=%q", outputs)
+	}
+}

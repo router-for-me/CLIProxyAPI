@@ -46,6 +46,7 @@ GEMINI.md
 .agents/*
 .opencode/*
 .idea/*
+.beads/*
 .bmad/*
 _bmad/*
 _bmad-output/*

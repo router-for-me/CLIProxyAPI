@@ -174,8 +174,7 @@ func (a *Applier) normalizeClaudeBudget(body []byte, budgetTokens int, modelInfo
 	// Ensure the request satisfies Claude constraints:
 	//  1) Determine effective max_tokens (request overrides model default)
 	//  2) If budget_tokens >= max_tokens, reduce budget_tokens to max_tokens-1
-	//  3) If the adjusted budget falls below the model minimum, try raising max_tokens
-	//     (clamped to MaxCompletionTokens); disable thinking if constraints are unsatisfiable
+	//  3) If the adjusted budget falls below the model minimum, leave the request unchanged
 	//  4) If max_tokens came from model default, write it back into the request
 
 	effectiveMax, setDefaultMax := a.effectiveMaxTokens(body, modelInfo)
@@ -194,28 +193,8 @@ func (a *Applier) normalizeClaudeBudget(body []byte, budgetTokens int, modelInfo
 		minBudget = modelInfo.Thinking.Min
 	}
 	if minBudget > 0 && adjustedBudget > 0 && adjustedBudget < minBudget {
-		// Enforcing budget_tokens < max_tokens pushed the budget below the model minimum.
-		// Try raising max_tokens to fit the original budget.
-		needed := budgetTokens + 1
-		maxAllowed := 0
-		if modelInfo != nil {
-			maxAllowed = modelInfo.MaxCompletionTokens
-		}
-		if maxAllowed > 0 && needed > maxAllowed {
-			// Cannot use original budget; cap max_tokens at model limit.
-			needed = maxAllowed
-		}
-		cappedBudget := needed - 1
-		if cappedBudget < minBudget {
-			// Impossible to satisfy both budget >= minBudget and budget < max_tokens
-			// within the model's completion limit. Disable thinking entirely.
-			body, _ = sjson.DeleteBytes(body, "thinking")
-			return body
-		}
-		body, _ = sjson.SetBytes(body, "max_tokens", needed)
-		if cappedBudget != budgetTokens {
-			body, _ = sjson.SetBytes(body, "thinking.budget_tokens", cappedBudget)
-		}
+		// If enforcing the max_tokens constraint would push the budget below the model minimum,
+		// leave the request unchanged.
 		return body
 	}
 
