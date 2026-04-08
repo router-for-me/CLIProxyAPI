@@ -32,16 +32,6 @@ const (
 
 var qwenDefaultSystemMessage = []byte(`{"role":"system","content":[{"type":"text","text":"","cache_control":{"type":"ephemeral"}}]}`)
 
-// qwenBeijingLoc caches the Beijing timezone to avoid repeated LoadLocation syscalls.
-var qwenBeijingLoc = func() *time.Location {
-	loc, err := time.LoadLocation("Asia/Shanghai")
-	if err != nil || loc == nil {
-		log.Warnf("qwen: failed to load Asia/Shanghai timezone: %v, using fixed UTC+8", err)
-		return time.FixedZone("CST", 8*3600)
-	}
-	return loc
-}()
-
 // qwenQuotaCodes is a package-level set of error codes that indicate quota exhaustion.
 var qwenQuotaCodes = map[string]struct{}{
 	"insufficient_quota": {},
@@ -156,20 +146,11 @@ func wrapQwenError(ctx context.Context, httpCode int, body []byte) (errCode int,
 	// Qwen returns 403 for quota errors, 429 for rate limits
 	if (httpCode == http.StatusForbidden || httpCode == http.StatusTooManyRequests) && isQwenQuotaError(body) {
 		errCode = http.StatusTooManyRequests // Map to 429 to trigger quota logic
-		cooldown := timeUntilNextDay()
-		retryAfter = &cooldown
-		helps.LogWithRequestID(ctx).Warnf("qwen quota exceeded (http %d -> %d), cooling down until tomorrow (%v)", httpCode, errCode, cooldown)
+		// Do not force an excessively long retry-after (e.g. until tomorrow), otherwise
+		// the global request-retry scheduler may skip retries due to max-retry-interval.
+		helps.LogWithRequestID(ctx).Warnf("qwen quota exceeded (http %d -> %d)", httpCode, errCode)
 	}
 	return errCode, retryAfter
-}
-
-// timeUntilNextDay returns duration until midnight Beijing time (UTC+8).
-// Qwen's daily quota resets at 00:00 Beijing time.
-func timeUntilNextDay() time.Duration {
-	now := time.Now()
-	nowLocal := now.In(qwenBeijingLoc)
-	tomorrow := time.Date(nowLocal.Year(), nowLocal.Month(), nowLocal.Day()+1, 0, 0, 0, 0, qwenBeijingLoc)
-	return tomorrow.Sub(now)
 }
 
 // ensureQwenSystemMessage ensures the request has a single system message at the beginning.
