@@ -1857,11 +1857,13 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						case 401:
 							next := now.Add(30 * time.Minute)
 							state.NextRetryAfter = next
+							auth.StatusMessage = "unauthorized"
 							suspendReason = "unauthorized"
 							shouldSuspendModel = true
 						case 402, 403:
 							next := now.Add(30 * time.Minute)
 							state.NextRetryAfter = next
+							auth.StatusMessage = "payment_required"
 							suspendReason = "payment_required"
 							shouldSuspendModel = true
 						case 404:
