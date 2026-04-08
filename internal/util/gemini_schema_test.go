@@ -1047,6 +1047,136 @@ func TestRemoveExtensionFields(t *testing.T) {
 	}
 }
 
+// anyOf flattening should preserve parent-level sibling fields like "items".
+// This is the bug that caused 209+ upstream 400 errors with "items: missing field".
+func TestCleanJSONSchemaForAntigravity_AnyOfFlattening_PreservesParentItems(t *testing.T) {
+	input := `{
+		"type": "object",
+		"properties": {
+			"messages": {
+				"description": "A list of messages",
+				"type": "array",
+				"items": {"type": "string"},
+				"anyOf": [
+					{"type": "array"},
+					{"type": "null"}
+				]
+			}
+		}
+	}`
+
+	result := CleanJSONSchemaForAntigravity(input)
+
+	// The "items" field from the parent must be preserved
+	if !gjson.Get(result, "properties.messages.items").Exists() {
+		t.Errorf("Parent-level 'items' field was lost during anyOf flattening.\nResult: %s", result)
+	}
+	if gjson.Get(result, "properties.messages.type").String() != "array" {
+		t.Errorf("Expected type 'array', got: %s", gjson.Get(result, "properties.messages.type").String())
+	}
+}
+
+// Nullable array via anyOf: common pattern [{type: "array", items: {...}}, {type: "null"}]
+func TestCleanJSONSchemaForAntigravity_AnyOfFlattening_NullableArrayWithItems(t *testing.T) {
+	input := `{
+		"type": "object",
+		"properties": {
+			"tags": {
+				"anyOf": [
+					{"type": "array", "items": {"type": "string"}},
+					{"type": "null"}
+				]
+			}
+		}
+	}`
+
+	expected := `{
+		"type": "object",
+		"properties": {
+			"tags": {
+				"type": "array",
+				"items": {"type": "string"},
+				"description": "Accepts: array | null"
+			}
+		}
+	}`
+
+	result := CleanJSONSchemaForAntigravity(expected)
+	// Items should be preserved in the selected alternative
+	if !gjson.Get(result, "properties.tags.items").Exists() {
+		t.Errorf("items field was lost for nullable array pattern.\nResult: %s", result)
+	}
+
+	result2 := CleanJSONSchemaForAntigravity(input)
+	if !gjson.Get(result2, "properties.tags.items").Exists() {
+		t.Errorf("items field was lost for nullable array anyOf pattern.\nResult: %s", result2)
+	}
+	if gjson.Get(result2, "properties.tags.items.type").String() != "string" {
+		t.Errorf("Expected items.type 'string', got: %s", gjson.Get(result2, "properties.tags.items.type").String())
+	}
+}
+
+// Array type with missing items should get a default items added.
+func TestCleanJSONSchemaForAntigravity_EnsureArrayItems_DefaultFallback(t *testing.T) {
+	input := `{
+		"type": "object",
+		"properties": {
+			"values": {
+				"type": "array"
+			}
+		}
+	}`
+
+	result := CleanJSONSchemaForAntigravity(input)
+
+	if !gjson.Get(result, "properties.values.items").Exists() {
+		t.Errorf("Array without items should get default items.\nResult: %s", result)
+	}
+	if gjson.Get(result, "properties.values.items.type").String() != "string" {
+		t.Errorf("Default items type should be 'string', got: %s", gjson.Get(result, "properties.values.items.type").String())
+	}
+}
+
+// Draft 2020-12 keywords should be removed.
+func TestCleanJSONSchemaForAntigravity_Draft202012KeywordsRemoved(t *testing.T) {
+	input := `{
+		"type": "object",
+		"$vocabulary": {"https://json-schema.org/draft/2020-12/vocab/core": true},
+		"properties": {
+			"items": {
+				"type": "array",
+				"prefixItems": [{"type": "string"}],
+				"items": {"type": "integer"}
+			},
+			"config": {
+				"type": "object",
+				"dependentRequired": {"bar": ["foo"]},
+				"dependentSchemas": {"bar": {"properties": {"foo": {"type": "string"}}}},
+				"if": {"properties": {"type": {"const": "a"}}},
+				"then": {"required": ["value"]},
+				"else": {"required": ["alt"]},
+				"properties": {
+					"type": {"type": "string"},
+					"value": {"type": "string"},
+					"alt": {"type": "string"}
+				}
+			}
+		}
+	}`
+
+	result := CleanJSONSchemaForAntigravity(input)
+
+	for _, keyword := range []string{"$vocabulary", "prefixItems", "dependentRequired", "dependentSchemas", "if", "then", "else"} {
+		if strings.Contains(result, `"`+keyword+`"`) {
+			t.Errorf("Draft 2020-12 keyword %q should be removed.\nResult: %s", keyword, result)
+		}
+	}
+	// Core schema structure should survive
+	if !gjson.Get(result, "properties.items.type").Exists() {
+		t.Errorf("Core schema 'items' property should survive keyword removal.\nResult: %s", result)
+	}
+}
+
 // uniqueItems should be stripped and moved to description hint (#2123).
 func TestCleanJSONSchemaForAntigravity_UniqueItemsStripped(t *testing.T) {
 	input := `{

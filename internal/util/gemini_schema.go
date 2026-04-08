@@ -43,6 +43,9 @@ func cleanJSONSchema(jsonStr string, addPlaceholder bool) string {
 	jsonStr = flattenAnyOfOneOf(jsonStr)
 	jsonStr = flattenTypeArrays(jsonStr)
 
+	// Phase 2.5: Ensure array schemas have items
+	jsonStr = ensureArrayItems(jsonStr)
+
 	// Phase 3: Cleanup
 	jsonStr = removeUnsupportedKeywords(jsonStr)
 	if !addPlaceholder {
@@ -329,9 +332,38 @@ func flattenAnyOfOneOf(jsonStr string) string {
 				selected = appendHintRaw(selected, hint)
 			}
 
-			jsonStr = setRawAt(jsonStr, parentPath, selected)
+			// Merge selected alternative into parent, preserving parent sibling fields
+			// that are not present in the selected alternative. This prevents losing
+			// fields like "items", "type", "required" etc. that exist on the parent
+			// alongside the anyOf/oneOf key.
+			jsonStr = mergeSelectedIntoParent(jsonStr, parentPath, key, selected)
 		}
 	}
+	return jsonStr
+}
+
+// mergeSelectedIntoParent replaces the anyOf/oneOf key in the parent with the
+// fields from the selected alternative, while preserving any sibling fields on
+// the parent that the selected alternative does not override.
+func mergeSelectedIntoParent(jsonStr, parentPath, anyOfKey, selected string) string {
+	// First, delete the anyOf/oneOf key from the parent.
+	anyOfPath := parentPath + "." + anyOfKey
+	if parentPath == "" || parentPath == "@this" {
+		anyOfPath = anyOfKey
+	}
+	jsonStr, _ = sjson.Delete(jsonStr, anyOfPath)
+
+	// Now merge each field from the selected alternative into the parent.
+	// Selected fields take priority over existing parent fields.
+	gjson.Parse(selected).ForEach(func(key, value gjson.Result) bool {
+		fieldPath := parentPath + "." + escapeGJSONPathKey(key.String())
+		if parentPath == "" || parentPath == "@this" {
+			fieldPath = escapeGJSONPathKey(key.String())
+		}
+		jsonStr = setRawAt(jsonStr, fieldPath, value.Raw)
+		return true
+	})
+
 	return jsonStr
 }
 
@@ -437,11 +469,36 @@ func flattenTypeArrays(jsonStr string) string {
 	return jsonStr
 }
 
+// ensureArrayItems walks the schema and adds a default "items" field to any
+// node that has "type": "array" but is missing "items". This prevents upstream
+// APIs (Gemini/Antigravity) from rejecting the schema with "items: missing field".
+func ensureArrayItems(jsonStr string) string {
+	typePaths := findPaths(jsonStr, "type")
+	for _, p := range typePaths {
+		if gjson.Get(jsonStr, p).String() != "array" {
+			continue
+		}
+		parentPath := trimSuffix(p, ".type")
+		itemsPath := parentPath + ".items"
+		if parentPath == "" || parentPath == "@this" {
+			itemsPath = "items"
+		}
+		if !gjson.Get(jsonStr, itemsPath).Exists() {
+			jsonStr = setRawAt(jsonStr, itemsPath, `{"type":"string"}`)
+		}
+	}
+	return jsonStr
+}
+
 func removeUnsupportedKeywords(jsonStr string) string {
 	keywords := append(unsupportedConstraints,
 		"$schema", "$defs", "definitions", "const", "$ref", "$id", "additionalProperties",
-		"propertyNames", "patternProperties", // Gemini doesn't support these schema keywords
-		"enumTitles", "prefill", "deprecated", // Schema metadata fields unsupported by Gemini
+		"propertyNames", "patternProperties",       // Gemini doesn't support these schema keywords
+		"enumTitles", "prefill", "deprecated",       // Schema metadata fields unsupported by Gemini
+		"$dynamicRef", "$dynamicAnchor", "$anchor",  // JSON Schema draft 2020-12 keywords
+		"prefixItems", "$vocabulary",                 // draft 2020-12 array/meta keywords
+		"dependentRequired", "dependentSchemas",      // draft 2020-12 conditional keywords
+		"if", "then", "else",                         // conditional schema keywords
 	)
 
 	deletePaths := make([]string, 0)

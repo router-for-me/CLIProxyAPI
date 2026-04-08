@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
@@ -225,6 +226,11 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 		return resp, err
 	}
 
+	// Pre-validate image MIME types before forwarding to upstream.
+	if errImg := util.ValidatePayloadImages(translated); errImg != nil {
+		return resp, statusErr{code: http.StatusBadRequest, msg: errImg.Error()}
+	}
+
 	requestedModel := payloadRequestedModel(opts, req.Model)
 	translated = applyPayloadConfigWithRoot(e.cfg, baseModel, "antigravity", "request", translated, originalTranslated, requestedModel)
 
@@ -302,6 +308,12 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 		// Error path.
 		log.Debugf("antigravity executor: upstream error status: %d, body: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), bodyBytes))
 		logUpstreamErrorDetail(ctx, httpReq, translated, httpResp.StatusCode, httpResp.Header.Clone(), bodyBytes)
+
+		// Invalidate stale signature cache on "Corrupted thought signature" errors.
+		if httpResp.StatusCode == http.StatusBadRequest && bytes.Contains(bodyBytes, []byte("Corrupted thought signature")) {
+			cache.InvalidateModelSignatures(baseModel)
+			log.Infof("antigravity executor: invalidated signature cache for model %s due to corrupted thought signature", baseModel)
+		}
 
 		if antigravityShouldRetryNoCapacity(httpResp.StatusCode, bodyBytes) {
 			if attempt+1 < attempts {
@@ -788,6 +800,11 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 		return nil, err
 	}
 
+	// Pre-validate image MIME types before forwarding to upstream.
+	if errImg := util.ValidatePayloadImages(translated); errImg != nil {
+		return nil, statusErr{code: http.StatusBadRequest, msg: errImg.Error()}
+	}
+
 	requestedModel := payloadRequestedModel(opts, req.Model)
 	translated = applyPayloadConfigWithRoot(e.cfg, baseModel, "antigravity", "request", translated, originalTranslated, requestedModel)
 
@@ -841,6 +858,12 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 			}
 			appendAPIResponseChunk(ctx, e.cfg, bodyBytes)
 			logUpstreamErrorDetail(ctx, httpReq, translated, httpResp.StatusCode, httpResp.Header.Clone(), bodyBytes)
+
+			// Invalidate stale signature cache on "Corrupted thought signature" errors.
+			if httpResp.StatusCode == http.StatusBadRequest && bytes.Contains(bodyBytes, []byte("Corrupted thought signature")) {
+				cache.InvalidateModelSignatures(baseModel)
+				log.Infof("antigravity executor: invalidated signature cache for model %s due to corrupted thought signature (stream)", baseModel)
+			}
 
 			if antigravityShouldRetryNoCapacity(httpResp.StatusCode, bodyBytes) {
 				if attempt+1 < attempts {

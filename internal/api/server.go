@@ -229,6 +229,9 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		}
 	}
 
+	// Limit request body size to 30MB (matching upstream API limits).
+	engine.Use(middleware.BodyLimitMiddleware(30 << 20))
+
 	engine.Use(corsMiddleware())
 	wd, err := os.Getwd()
 	if err != nil {

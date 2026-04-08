@@ -15,8 +15,10 @@ type SignatureEntry struct {
 }
 
 const (
-	// SignatureCacheTTL is how long signatures are valid
-	SignatureCacheTTL = 3 * time.Hour
+	// SignatureCacheTTL is how long signatures are valid.
+	// Reduced from 3h to 1h to minimize the window during which stale
+	// signatures cause "Corrupted thought signature" upstream 400 errors.
+	SignatureCacheTTL = 1 * time.Hour
 
 	// SignatureTextHashLen is the length of the hash key (16 hex chars = 64-bit key space)
 	SignatureTextHashLen = 16
@@ -157,9 +159,10 @@ func GetCachedSignature(modelName, text string) string {
 		return ""
 	}
 
-	// Refresh TTL on access (sliding expiration).
-	entry.Timestamp = now
-	sc.entries[textHash] = entry
+	// Fixed TTL: do not refresh timestamp on access. Sliding expiration
+	// was removed because it prevented stale signatures from expiring when
+	// they were frequently accessed, causing persistent "Corrupted thought
+	// signature" errors from the upstream API.
 	sc.mu.Unlock()
 
 	return entry.Signature
@@ -172,6 +175,17 @@ func ClearSignatureCache(modelName string) {
 			signatureCache.Delete(key)
 			return true
 		})
+		return
+	}
+	groupKey := GetModelGroup(modelName)
+	signatureCache.Delete(groupKey)
+}
+
+// InvalidateModelSignatures clears all cached signatures for a specific model.
+// Call this when the upstream returns "Corrupted thought signature" to bust
+// stale entries and allow fresh signatures to be cached on the next request.
+func InvalidateModelSignatures(modelName string) {
+	if modelName == "" {
 		return
 	}
 	groupKey := GetModelGroup(modelName)
