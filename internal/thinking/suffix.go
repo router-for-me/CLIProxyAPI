@@ -40,29 +40,12 @@ func ParseSuffix(model string) SuffixResult {
 	modelName := model[:lastOpen]
 	rawSuffix := model[lastOpen+1 : len(model)-1]
 
-	// Validate that the suffix is a valid thinking suffix
-	// Numeric suffix
-	if _, err := strconv.Atoi(rawSuffix); err == nil {
-		return SuffixResult{
-			ModelName: modelName,
-			HasSuffix: true,
-			RawSuffix: rawSuffix,
-		}
-	}
+	// Validate that the suffix is a valid thinking suffix by reusing existing parsers.
+	_, okSpecial := ParseSpecialSuffix(rawSuffix)
+	_, okLevel := ParseLevelSuffix(rawSuffix)
+	_, okNumeric := ParseNumericSuffix(rawSuffix)
 
-	// Special values (case-insensitive)
-	switch strings.ToLower(rawSuffix) {
-	case "none", "auto", "-1":
-		return SuffixResult{
-			ModelName: modelName,
-			HasSuffix: true,
-			RawSuffix: rawSuffix,
-		}
-	}
-
-	// Level values (case-insensitive)
-	switch strings.ToLower(rawSuffix) {
-	case "minimal", "low", "medium", "high", "xhigh", "max":
+	if okSpecial || okLevel || okNumeric {
 		return SuffixResult{
 			ModelName: modelName,
 			HasSuffix: true,
