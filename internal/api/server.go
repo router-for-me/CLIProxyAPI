@@ -63,6 +63,14 @@ func defaultRequestLoggerFactory(cfg *config.Config, configPath string) logging.
 	return logging.NewFileRequestLogger(cfg.RequestLog, logsDir, configDir, cfg.ErrorLogsMaxFiles)
 }
 
+func usageStatisticsPersistencePath(configFilePath string) string {
+	configDir := strings.TrimSpace(filepath.Dir(configFilePath))
+	if configDir == "" {
+		configDir = "."
+	}
+	return filepath.Join(configDir, "usage-statistics.json")
+}
+
 // WithMiddleware appends additional Gin middleware during server construction.
 func WithMiddleware(mw ...gin.HandlerFunc) ServerOption {
 	return func(cfg *serverOptionConfig) {
@@ -261,6 +269,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	}
 	managementasset.SetCurrentConfig(cfg)
 	auth.SetQuotaCooldownDisabled(cfg.DisableCooling)
+	s.syncUsageStatisticsPersistence(cfg)
 	// Initialize management handler
 	s.mgmt = managementHandlers.NewHandler(cfg, configFilePath, authManager)
 	if optionState.localPassword != "" {
@@ -517,6 +526,9 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/usage-statistics-enabled", s.mgmt.GetUsageStatisticsEnabled)
 		mgmt.PUT("/usage-statistics-enabled", s.mgmt.PutUsageStatisticsEnabled)
 		mgmt.PATCH("/usage-statistics-enabled", s.mgmt.PutUsageStatisticsEnabled)
+		mgmt.GET("/usage-statistics-persistence-enabled", s.mgmt.GetUsageStatisticsPersistenceEnabled)
+		mgmt.PUT("/usage-statistics-persistence-enabled", s.mgmt.PutUsageStatisticsPersistenceEnabled)
+		mgmt.PATCH("/usage-statistics-persistence-enabled", s.mgmt.PutUsageStatisticsPersistenceEnabled)
 
 		mgmt.GET("/proxy-url", s.mgmt.GetProxyURL)
 		mgmt.PUT("/proxy-url", s.mgmt.PutProxyURL)
@@ -826,6 +838,7 @@ func (s *Server) Start() error {
 //   - error: An error if the server fails to stop
 func (s *Server) Stop(ctx context.Context) error {
 	log.Debug("Stopping API server...")
+	var stopErrs []error
 
 	if s.keepAliveEnabled {
 		select {
@@ -834,9 +847,17 @@ func (s *Server) Stop(ctx context.Context) error {
 		}
 	}
 
+	if err := s.flushUsageStatisticsPersistence(); err != nil {
+		stopErrs = append(stopErrs, fmt.Errorf("failed to persist usage statistics: %w", err))
+	}
+
 	// Shutdown the HTTP server.
 	if err := s.server.Shutdown(ctx); err != nil {
-		return fmt.Errorf("failed to shutdown HTTP server: %v", err)
+		stopErrs = append(stopErrs, fmt.Errorf("failed to shutdown HTTP server: %v", err))
+	}
+
+	if len(stopErrs) > 0 {
+		return errors.Join(stopErrs...)
 	}
 
 	log.Debug("API server stopped")
@@ -906,6 +927,11 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 
 	if oldCfg == nil || oldCfg.UsageStatisticsEnabled != cfg.UsageStatisticsEnabled {
 		usage.SetStatisticsEnabled(cfg.UsageStatisticsEnabled)
+	}
+	if oldCfg == nil ||
+		oldCfg.UsageStatisticsEnabled != cfg.UsageStatisticsEnabled ||
+		oldCfg.UsageStatisticsPersistenceEnabled != cfg.UsageStatisticsPersistenceEnabled {
+		s.syncUsageStatisticsPersistence(cfg)
 	}
 
 	if s.requestLogger != nil && (oldCfg == nil || oldCfg.ErrorLogsMaxFiles != cfg.ErrorLogsMaxFiles) {
@@ -1022,6 +1048,29 @@ func (s *Server) SetWebsocketAuthChangeHandler(fn func(bool, bool)) {
 		return
 	}
 	s.wsAuthChanged = fn
+}
+
+func (s *Server) syncUsageStatisticsPersistence(cfg *config.Config) {
+	if s == nil {
+		return
+	}
+
+	if cfg == nil || !cfg.UsageStatisticsEnabled || !cfg.UsageStatisticsPersistenceEnabled {
+		usage.GetRequestStatistics().DisablePersistence()
+		return
+	}
+
+	persistencePath := usageStatisticsPersistencePath(s.configFilePath)
+	if err := usage.GetRequestStatistics().EnablePersistence(persistencePath); err != nil {
+		log.WithError(err).Warnf("failed to enable usage statistics persistence at %s", persistencePath)
+	}
+}
+
+func (s *Server) flushUsageStatisticsPersistence() error {
+	if s == nil {
+		return nil
+	}
+	return usage.GetRequestStatistics().FlushPersistence()
 }
 
 // (management handlers moved to internal/api/handlers/management)

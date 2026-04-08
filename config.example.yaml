@@ -66,6 +66,11 @@ error-logs-max-files: 10
 # When false, disable in-memory usage statistics aggregation
 usage-statistics-enabled: false
 
+# When true, save usage statistics to a local JSON file and restore them on startup.
+# The snapshot file is stored next to config.yaml as usage-statistics.json.
+# When false, existing local usage snapshots are ignored and no new snapshot is written.
+usage-statistics-persistence-enabled: true
+
 # Proxy URL. Supports socks5/http/https protocols. Example: socks5://user:pass@192.168.1.1:1080/
 # Per-entry proxy-url also supports "direct" or "none" to bypass both the global proxy-url and environment proxies explicitly.
 proxy-url: ""

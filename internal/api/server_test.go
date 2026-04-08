@@ -1,7 +1,10 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,6 +16,7 @@ import (
 	gin "github.com/gin-gonic/gin"
 	proxyconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	internallogging "github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
@@ -24,6 +28,16 @@ func newTestServer(t *testing.T) *Server {
 	gin.SetMode(gin.TestMode)
 
 	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	return newTestServerWithConfigPath(t, configPath)
+}
+
+func newTestServerWithConfigPath(t *testing.T, configPath string) *Server {
+	t.Helper()
+
+	gin.SetMode(gin.TestMode)
+
+	tmpDir := filepath.Dir(configPath)
 	authDir := filepath.Join(tmpDir, "auth")
 	if err := os.MkdirAll(authDir, 0o700); err != nil {
 		t.Fatalf("failed to create auth dir: %v", err)
@@ -33,17 +47,17 @@ func newTestServer(t *testing.T) *Server {
 		SDKConfig: sdkconfig.SDKConfig{
 			APIKeys: []string{"test-key"},
 		},
-		Port:                   0,
-		AuthDir:                authDir,
-		Debug:                  true,
-		LoggingToFile:          false,
-		UsageStatisticsEnabled: false,
+		Port:                              0,
+		AuthDir:                           authDir,
+		Debug:                             true,
+		LoggingToFile:                     false,
+		UsageStatisticsEnabled:            true,
+		UsageStatisticsPersistenceEnabled: true,
 	}
 
 	authManager := auth.NewManager(nil, nil, nil)
 	accessManager := sdkaccess.NewManager()
 
-	configPath := filepath.Join(tmpDir, "config.yaml")
 	return NewServer(cfg, authManager, accessManager, configPath)
 }
 
@@ -231,5 +245,148 @@ func TestDefaultRequestLoggerFactory_UsesResolvedLogDirectory(t *testing.T) {
 		if strings.HasPrefix(entry.Name(), "error-") && strings.HasSuffix(entry.Name(), ".log") {
 			t.Fatalf("unexpected forced error log in config dir %s", configLogsDir)
 		}
+	}
+}
+
+func TestNewServerRestoresPersistedUsageStatistics(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	usagePath := filepath.Join(tmpDir, "usage-statistics.json")
+	if err := usage.SaveSnapshotToFile(usagePath, usage.StatisticsSnapshot{
+		APIs: map[string]usage.APISnapshot{
+			"persisted-key": {
+				Models: map[string]usage.ModelSnapshot{
+					"gpt-5.4": {
+						Details: []usage.RequestDetail{{
+							Timestamp: time.Date(2026, 4, 8, 10, 0, 0, 0, time.UTC),
+							Tokens: usage.TokenStats{
+								InputTokens:  10,
+								OutputTokens: 20,
+								TotalTokens:  30,
+							},
+						}},
+					},
+				},
+			},
+		},
+	}); err != nil {
+		t.Fatalf("SaveSnapshotToFile returned error: %v", err)
+	}
+
+	_ = newTestServerWithConfigPath(t, configPath)
+
+	snapshot := usage.GetRequestStatistics().Snapshot()
+	modelSnapshot, ok := snapshot.APIs["persisted-key"].Models["gpt-5.4"]
+	if !ok || len(modelSnapshot.Details) == 0 {
+		t.Fatalf("expected persisted usage statistics to be restored, snapshot=%+v", snapshot.APIs["persisted-key"])
+	}
+}
+
+func TestServerStopFlushesUsageStatisticsPersistence(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	server := newTestServerWithConfigPath(t, configPath)
+	usage.GetRequestStatistics().MergeSnapshot(usage.StatisticsSnapshot{
+		APIs: map[string]usage.APISnapshot{
+			"stop-flush-key": {
+				Models: map[string]usage.ModelSnapshot{
+					"gpt-5.4": {
+						Details: []usage.RequestDetail{{
+							Timestamp: time.Date(2026, 4, 8, 11, 0, 0, 0, time.UTC),
+							Tokens: usage.TokenStats{
+								InputTokens:  11,
+								OutputTokens: 19,
+								TotalTokens:  30,
+							},
+						}},
+					},
+				},
+			},
+		},
+	})
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen returned error: %v", err)
+	}
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- server.server.Serve(listener)
+	}()
+
+	if err := server.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop returned error: %v", err)
+	}
+
+	serveErr := <-errCh
+	if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+		t.Fatalf("Serve returned error: %v", serveErr)
+	}
+
+	usagePath := filepath.Join(filepath.Dir(configPath), "usage-statistics.json")
+	snapshot, err := usage.LoadSnapshotFromFile(usagePath)
+	if err != nil {
+		t.Fatalf("LoadSnapshotFromFile returned error: %v", err)
+	}
+	modelSnapshot, ok := snapshot.APIs["stop-flush-key"].Models["gpt-5.4"]
+	if !ok || len(modelSnapshot.Details) == 0 {
+		t.Fatalf("expected stop to flush usage statistics, snapshot=%+v", snapshot.APIs["stop-flush-key"])
+	}
+}
+
+func TestNewServerSkipsUsageStatisticsRestoreWhenPersistenceDisabled(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	usagePath := filepath.Join(tmpDir, "usage-statistics.json")
+	if err := usage.SaveSnapshotToFile(usagePath, usage.StatisticsSnapshot{
+		APIs: map[string]usage.APISnapshot{
+			"disabled-restore-key": {
+				Models: map[string]usage.ModelSnapshot{
+					"gpt-5.4": {
+						Details: []usage.RequestDetail{{
+							Timestamp: time.Date(2026, 4, 8, 12, 0, 0, 0, time.UTC),
+							Tokens: usage.TokenStats{
+								InputTokens:  10,
+								OutputTokens: 20,
+								TotalTokens:  30,
+							},
+						}},
+					},
+				},
+			},
+		},
+	}); err != nil {
+		t.Fatalf("SaveSnapshotToFile returned error: %v", err)
+	}
+
+	authDir := filepath.Join(tmpDir, "auth")
+	if err := os.MkdirAll(authDir, 0o700); err != nil {
+		t.Fatalf("failed to create auth dir: %v", err)
+	}
+	cfg := &proxyconfig.Config{
+		SDKConfig: sdkconfig.SDKConfig{
+			APIKeys: []string{"test-key"},
+		},
+		Port:                              0,
+		AuthDir:                           authDir,
+		Debug:                             true,
+		LoggingToFile:                     false,
+		UsageStatisticsEnabled:            true,
+		UsageStatisticsPersistenceEnabled: false,
+	}
+
+	authManager := auth.NewManager(nil, nil, nil)
+	accessManager := sdkaccess.NewManager()
+	_ = NewServer(cfg, authManager, accessManager, configPath)
+
+	snapshot := usage.GetRequestStatistics().Snapshot()
+	if _, ok := snapshot.APIs["disabled-restore-key"]; ok {
+		t.Fatalf("expected persisted usage statistics restore to stay disabled, snapshot=%+v", snapshot.APIs["disabled-restore-key"])
 	}
 }

@@ -215,9 +215,15 @@ func (m dashboardModel) renderDashboard(cfg, usage map[string]any, authFiles []m
 		proxyURL := getString(cfg, "proxy-url")
 		loggingToFile := getBool(cfg, "logging-to-file")
 		usageEnabled := true
+		usagePersistenceEnabled := true
 		if v, ok := cfg["usage-statistics-enabled"]; ok {
 			if b, ok2 := v.(bool); ok2 {
 				usageEnabled = b
+			}
+		}
+		if v, ok := cfg["usage-statistics-persistence-enabled"]; ok {
+			if b, ok2 := v.(bool); ok2 {
+				usagePersistenceEnabled = b
 			}
 		}
 
@@ -227,6 +233,7 @@ func (m dashboardModel) renderDashboard(cfg, usage map[string]any, authFiles []m
 		}{
 			{T("debug_mode"), boolEmoji(debug)},
 			{T("usage_stats"), boolEmoji(usageEnabled)},
+			{"Usage Stats Local Save", boolEmoji(usagePersistenceEnabled)},
 			{T("log_to_file"), boolEmoji(loggingToFile)},
 			{T("retry_count"), fmt.Sprintf("%.0f", retry)},
 		}

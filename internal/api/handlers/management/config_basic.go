@@ -193,7 +193,15 @@ func (h *Handler) PutUsageStatisticsEnabled(c *gin.Context) {
 	h.updateBoolField(c, func(v bool) { h.cfg.UsageStatisticsEnabled = v })
 }
 
-// UsageStatisticsEnabled
+// UsageStatisticsPersistenceEnabled
+func (h *Handler) GetUsageStatisticsPersistenceEnabled(c *gin.Context) {
+	c.JSON(200, gin.H{"usage-statistics-persistence-enabled": h.cfg.UsageStatisticsPersistenceEnabled})
+}
+func (h *Handler) PutUsageStatisticsPersistenceEnabled(c *gin.Context) {
+	h.updateBoolField(c, func(v bool) { h.cfg.UsageStatisticsPersistenceEnabled = v })
+}
+
+// LoggingToFile
 func (h *Handler) GetLoggingToFile(c *gin.Context) {
 	c.JSON(200, gin.H{"logging-to-file": h.cfg.LoggingToFile})
 }

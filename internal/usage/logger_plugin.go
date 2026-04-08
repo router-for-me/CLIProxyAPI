@@ -64,6 +64,7 @@ type RequestStatistics struct {
 	successCount  int64
 	failureCount  int64
 	totalTokens   int64
+	persistence   *statisticsPersistence
 
 	apis map[string]*apiStats
 
@@ -182,7 +183,6 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 	hourKey := timestamp.Hour()
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	s.totalRequests++
 	if success {
@@ -210,6 +210,10 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 	s.requestsByHour[hourKey]++
 	s.tokensByDay[dayKey] += totalTokens
 	s.tokensByHour[hourKey] += totalTokens
+
+	persistence := s.persistence
+	s.mu.Unlock()
+	s.schedulePersistenceSave(persistence)
 }
 
 func (s *RequestStatistics) updateAPIStats(stats *apiStats, model string, detail RequestDetail) {
@@ -298,7 +302,6 @@ func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot) MergeResu
 	}
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	seen := make(map[string]struct{})
 	for apiName, stats := range s.apis {
@@ -352,6 +355,11 @@ func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot) MergeResu
 		}
 	}
 
+	persistence := s.persistence
+	s.mu.Unlock()
+	if result.Added > 0 {
+		s.schedulePersistenceSave(persistence)
+	}
 	return result
 }
 
