@@ -749,12 +749,23 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		return nil, &Error{Code: "executor_not_found", Message: "executor not registered"}
 	}
 	var lastErr error
+	refreshed := make(map[string]struct{})
 	for idx, execModel := range execModels {
 		resultModel := m.stateModelForExecution(auth, routeModel, execModel, pooled)
 		execReq := req
 		execReq.Model = execModel
 		streamResult, errStream := executor.ExecuteStream(ctx, auth, execReq, opts)
 		if errStream != nil {
+			refreshKey := auth.ID + "\x00" + execModel
+			if _, tried := refreshed[refreshKey]; !tried && shouldRefreshAfterAuthError(auth, errStream) {
+				refreshed[refreshKey] = struct{}{}
+				updatedAuth, refreshErr := m.refreshAuthNow(ctx, auth.ID)
+				if refreshErr == nil && updatedAuth != nil {
+					auth = updatedAuth
+					idx--
+					continue
+				}
+			}
 			if errCtx := ctx.Err(); errCtx != nil {
 				return nil, errCtx
 			}
@@ -774,6 +785,17 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 
 		buffered, closed, bootstrapErr := readStreamBootstrap(ctx, streamResult.Chunks)
 		if bootstrapErr != nil {
+			refreshKey := auth.ID + "\x00" + execModel
+			if _, tried := refreshed[refreshKey]; !tried && shouldRefreshAfterAuthError(auth, bootstrapErr) {
+				refreshed[refreshKey] = struct{}{}
+				discardStreamChunks(streamResult.Chunks)
+				updatedAuth, refreshErr := m.refreshAuthNow(ctx, auth.ID)
+				if refreshErr == nil && updatedAuth != nil {
+					auth = updatedAuth
+					idx--
+					continue
+				}
+			}
 			if errCtx := ctx.Err(); errCtx != nil {
 				discardStreamChunks(streamResult.Chunks)
 				return nil, errCtx
@@ -1229,6 +1251,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		}
 		attempted[auth.ID] = struct{}{}
 		var authErr error
+		refreshed := make(map[string]struct{})
 		for _, upstreamModel := range models {
 			resultModel := m.stateModelForExecution(auth, routeModel, upstreamModel, pooled)
 			execReq := req
@@ -1236,6 +1259,21 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			resp, errExec := executor.Execute(execCtx, auth, execReq, opts)
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: errExec == nil}
 			if errExec != nil {
+				refreshKey := auth.ID + "\x00" + upstreamModel
+				if _, tried := refreshed[refreshKey]; !tried && shouldRefreshAfterAuthError(auth, errExec) {
+					refreshed[refreshKey] = struct{}{}
+					updatedAuth, refreshErr := m.refreshAuthNow(execCtx, auth.ID)
+					if refreshErr == nil && updatedAuth != nil {
+						auth = updatedAuth
+						execReq.Model = upstreamModel
+						resp, errExec = executor.Execute(execCtx, auth, execReq, opts)
+						result = Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: errExec == nil}
+						if errExec == nil {
+							m.MarkResult(execCtx, result)
+							return resp, nil
+						}
+					}
+				}
 				if errCtx := execCtx.Err(); errCtx != nil {
 					return cliproxyexecutor.Response{}, errCtx
 				}
@@ -1307,6 +1345,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		}
 		attempted[auth.ID] = struct{}{}
 		var authErr error
+		refreshed := make(map[string]struct{})
 		for _, upstreamModel := range models {
 			resultModel := m.stateModelForExecution(auth, routeModel, upstreamModel, pooled)
 			execReq := req
@@ -1314,6 +1353,21 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			resp, errExec := executor.CountTokens(execCtx, auth, execReq, opts)
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: errExec == nil}
 			if errExec != nil {
+				refreshKey := auth.ID + "\x00" + upstreamModel
+				if _, tried := refreshed[refreshKey]; !tried && shouldRefreshAfterAuthError(auth, errExec) {
+					refreshed[refreshKey] = struct{}{}
+					updatedAuth, refreshErr := m.refreshAuthNow(execCtx, auth.ID)
+					if refreshErr == nil && updatedAuth != nil {
+						auth = updatedAuth
+						execReq.Model = upstreamModel
+						resp, errExec = executor.CountTokens(execCtx, auth, execReq, opts)
+						result = Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: errExec == nil}
+						if errExec == nil {
+							m.MarkResult(execCtx, result)
+							return resp, nil
+						}
+					}
+				}
 				if errCtx := execCtx.Err(); errCtx != nil {
 					return cliproxyexecutor.Response{}, errCtx
 				}
@@ -2125,6 +2179,43 @@ func retryAfterFromError(err error) *time.Duration {
 		return nil
 	}
 	return new(*retryAfter)
+}
+
+func authRefreshToken(auth *Auth) string {
+	if auth == nil || auth.Metadata == nil {
+		return ""
+	}
+	if v, ok := auth.Metadata["refresh_token"].(string); ok {
+		return strings.TrimSpace(v)
+	}
+	return ""
+}
+
+func shouldRefreshAfterAuthError(auth *Auth, err error) bool {
+	if auth == nil || err == nil {
+		return false
+	}
+	if authRefreshToken(auth) == "" {
+		return false
+	}
+	status := statusCodeFromError(err)
+	if status != http.StatusUnauthorized && status != http.StatusForbidden {
+		return false
+	}
+	if status == http.StatusUnauthorized {
+		return true
+	}
+	lower := strings.ToLower(strings.TrimSpace(err.Error()))
+	return strings.Contains(lower, "unauthorized") ||
+		strings.Contains(lower, "forbidden") ||
+		strings.Contains(lower, "token expired") ||
+		strings.Contains(lower, "expired token") ||
+		strings.Contains(lower, "invalid access token") ||
+		strings.Contains(lower, "session_expired") ||
+		strings.Contains(lower, "session_invalid") ||
+		strings.Contains(lower, "need_login") ||
+		strings.Contains(lower, "need login") ||
+		strings.Contains(lower, "authentication")
 }
 
 func statusCodeFromResult(err *Error) int {
@@ -3000,6 +3091,10 @@ func (m *Manager) markRefreshPending(id string, now time.Time) bool {
 }
 
 func (m *Manager) refreshAuth(ctx context.Context, id string) {
+	_, _ = m.refreshAuthNow(ctx, id)
+}
+
+func (m *Manager) refreshAuthNow(ctx context.Context, id string) (*Auth, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -3011,13 +3106,13 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 	}
 	m.mu.RUnlock()
 	if auth == nil || exec == nil {
-		return
+		return nil, nil
 	}
 	cloned := auth.Clone()
 	updated, err := exec.Refresh(ctx, cloned)
 	if err != nil && errors.Is(err, context.Canceled) {
 		log.Debugf("refresh canceled for %s, %s", auth.Provider, auth.ID)
-		return
+		return nil, err
 	}
 	log.Debugf("refreshed %s, %s, %v", auth.Provider, auth.ID, err)
 	now := time.Now()
@@ -3032,7 +3127,7 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 			}
 		}
 		m.mu.Unlock()
-		return
+		return nil, err
 	}
 	if updated == nil {
 		updated = cloned
@@ -3046,7 +3141,14 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 	updated.NextRefreshAfter = time.Time{}
 	updated.LastError = nil
 	updated.UpdatedAt = now
-	_, _ = m.Update(ctx, updated)
+	saved, err := m.Update(ctx, updated)
+	if err != nil {
+		return nil, err
+	}
+	if saved != nil {
+		return saved, nil
+	}
+	return updated, nil
 }
 
 func (m *Manager) executorFor(provider string) ProviderExecutor {

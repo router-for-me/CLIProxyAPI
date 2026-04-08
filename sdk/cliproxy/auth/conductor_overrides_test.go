@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -260,6 +261,121 @@ func TestManager_MaxRetryCredentials_LimitsCrossCredentialRetries(t *testing.T) 
 				t.Fatalf("expected 2 calls with max-retry-credentials=0, got %d", calls)
 			}
 		})
+	}
+}
+
+type refreshOnUnauthorizedStore struct {
+	saveCount atomic.Int32
+	savedAuth atomic.Value
+}
+
+func (s *refreshOnUnauthorizedStore) List(context.Context) ([]*Auth, error) { return nil, nil }
+
+func (s *refreshOnUnauthorizedStore) Save(_ context.Context, auth *Auth) (string, error) {
+	s.saveCount.Add(1)
+	if auth != nil {
+		s.savedAuth.Store(auth.Clone())
+	}
+	return "", nil
+}
+
+func (s *refreshOnUnauthorizedStore) Delete(context.Context, string) error { return nil }
+
+type refreshOnUnauthorizedExecutor struct {
+	id           string
+	executeCalls atomic.Int32
+	refreshCalls atomic.Int32
+}
+
+func (e *refreshOnUnauthorizedExecutor) Identifier() string { return e.id }
+
+func (e *refreshOnUnauthorizedExecutor) Execute(_ context.Context, auth *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	e.executeCalls.Add(1)
+	token, _ := auth.Metadata["access_token"].(string)
+	if token != "refreshed-token" {
+		return cliproxyexecutor.Response{}, &Error{HTTPStatus: 401, Message: "Unauthorized: token expired"}
+	}
+	return cliproxyexecutor.Response{Payload: []byte(`{"ok":true}`)}, nil
+}
+
+func (e *refreshOnUnauthorizedExecutor) ExecuteStream(_ context.Context, auth *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	ch := make(chan cliproxyexecutor.StreamChunk, 1)
+	token, _ := auth.Metadata["access_token"].(string)
+	if token != "refreshed-token" {
+		ch <- cliproxyexecutor.StreamChunk{Err: &Error{HTTPStatus: 401, Message: "Unauthorized: token expired"}}
+		close(ch)
+		return &cliproxyexecutor.StreamResult{Headers: http.Header{}, Chunks: ch}, nil
+	}
+	ch <- cliproxyexecutor.StreamChunk{Payload: []byte(`{"ok":true}`)}
+	close(ch)
+	return &cliproxyexecutor.StreamResult{Headers: http.Header{}, Chunks: ch}, nil
+}
+
+func (e *refreshOnUnauthorizedExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) {
+	e.refreshCalls.Add(1)
+	cloned := auth.Clone()
+	if cloned.Metadata == nil {
+		cloned.Metadata = map[string]any{}
+	}
+	cloned.Metadata["access_token"] = "refreshed-token"
+	cloned.Metadata["refresh_token"] = "refresh-token"
+	return cloned, nil
+}
+
+func (e *refreshOnUnauthorizedExecutor) CountTokens(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, nil
+}
+
+func (e *refreshOnUnauthorizedExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
+	return nil, nil
+}
+
+func TestManager_Execute_RefreshesUnauthorizedAuthAndPersists(t *testing.T) {
+	store := &refreshOnUnauthorizedStore{}
+	m := NewManager(store, nil, nil)
+	executor := &refreshOnUnauthorizedExecutor{id: "qwen"}
+	m.RegisterExecutor(executor)
+
+	auth := &Auth{
+		ID:       "qwen-auth-refresh",
+		Provider: "qwen",
+		Metadata: map[string]any{
+			"access_token":  "expired-token",
+			"refresh_token": "refresh-token",
+			"type":          "qwen",
+		},
+	}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth.ID, "qwen", []*registry.ModelInfo{{ID: "coder-model"}})
+	t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+
+	if _, err := m.Register(WithSkipPersist(context.Background()), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	resp, err := m.Execute(context.Background(), []string{"qwen"}, cliproxyexecutor.Request{Model: "coder-model"}, cliproxyexecutor.Options{})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if string(resp.Payload) != `{"ok":true}` {
+		t.Fatalf("payload = %s, want success payload", string(resp.Payload))
+	}
+	if executor.refreshCalls.Load() != 1 {
+		t.Fatalf("refresh calls = %d, want 1", executor.refreshCalls.Load())
+	}
+	if executor.executeCalls.Load() != 2 {
+		t.Fatalf("execute calls = %d, want 2", executor.executeCalls.Load())
+	}
+	if store.saveCount.Load() < 1 {
+		t.Fatalf("save count = %d, want at least 1 after refresh update", store.saveCount.Load())
+	}
+	saved, _ := store.savedAuth.Load().(*Auth)
+	if saved == nil {
+		t.Fatal("expected persisted auth after refresh")
+	}
+	if got, _ := saved.Metadata["access_token"].(string); got != "refreshed-token" {
+		t.Fatalf("persisted access_token = %q, want %q", got, "refreshed-token")
 	}
 }
 
