@@ -1830,7 +1830,11 @@ func (m *Manager) closestCooldownWait(providers []string, model string, attempt 
 		if attempt >= effectiveRetry {
 			continue
 		}
-		blocked, reason, next := isAuthBlockedForModel(auth, model, now)
+		checkModel := model
+		if strings.TrimSpace(model) != "" {
+			checkModel = m.selectionModelForAuth(auth, model)
+		}
+		blocked, reason, next := isAuthBlockedForModel(auth, checkModel, now)
 		if !blocked || next.IsZero() || reason == blockReasonDisabled {
 			continue
 		}
