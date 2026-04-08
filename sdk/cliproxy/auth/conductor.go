@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -60,12 +61,13 @@ type RefreshEvaluator interface {
 }
 
 const (
-	refreshCheckInterval  = 5 * time.Second
-	refreshMaxConcurrency = 16
-	refreshPendingBackoff = time.Minute
-	refreshFailureBackoff = 5 * time.Minute
-	quotaBackoffBase      = time.Second
-	quotaBackoffMax       = 30 * time.Minute
+	refreshCheckInterval       = 5 * time.Second
+	refreshMaxConcurrency      = 16
+	refreshPendingBackoff      = time.Minute
+	refreshFailureBackoff      = 5 * time.Minute
+	refreshNonRetryableBackoff = 24 * time.Hour
+	quotaBackoffBase           = time.Second
+	quotaBackoffMax            = 30 * time.Minute
 )
 
 var quotaCooldownDisabled atomic.Bool
@@ -301,6 +303,68 @@ func (m *Manager) ReconcileRegistryModelStates(ctx context.Context, authID strin
 			auth.UpdatedAt = now
 			if errPersist := m.persist(ctx, auth); errPersist != nil {
 				logEntryWithRequestID(ctx).WithField("auth_id", auth.ID).Warnf("failed to persist auth changes during model state reconciliation: %v", errPersist)
+			}
+			snapshot = auth.Clone()
+		}
+	}
+	m.mu.Unlock()
+
+	if m.scheduler != nil && snapshot != nil {
+		m.scheduler.upsertAuth(snapshot)
+	}
+}
+
+// PruneUnsupportedModelStates removes runtime state for models that no longer
+// exist in the registry snapshot while preserving supported-model runtime state.
+func (m *Manager) PruneUnsupportedModelStates(ctx context.Context, authID string) {
+	if m == nil || authID == "" {
+		return
+	}
+
+	supportedModels := registry.GetGlobalRegistry().GetModelsForClient(authID)
+	supported := make(map[string]struct{}, len(supportedModels))
+	for _, model := range supportedModels {
+		if model == nil {
+			continue
+		}
+		modelKey := canonicalModelKey(model.ID)
+		if modelKey == "" {
+			continue
+		}
+		supported[modelKey] = struct{}{}
+	}
+
+	var snapshot *Auth
+	now := time.Now()
+
+	m.mu.Lock()
+	auth, ok := m.auths[authID]
+	if ok && auth != nil && len(auth.ModelStates) > 0 {
+		changed := false
+		for modelKey := range auth.ModelStates {
+			baseModel := canonicalModelKey(modelKey)
+			if baseModel == "" {
+				baseModel = strings.TrimSpace(modelKey)
+			}
+			if _, supportedModel := supported[baseModel]; supportedModel {
+				continue
+			}
+			delete(auth.ModelStates, modelKey)
+			changed = true
+		}
+		if len(auth.ModelStates) == 0 {
+			auth.ModelStates = nil
+		}
+		if changed {
+			updateAggregatedAvailability(auth, now)
+			if !hasModelError(auth, now) {
+				auth.LastError = nil
+				auth.StatusMessage = ""
+				auth.Status = StatusActive
+			}
+			auth.UpdatedAt = now
+			if errPersist := m.persist(ctx, auth); errPersist != nil {
+				logEntryWithRequestID(ctx).WithField("auth_id", auth.ID).Warnf("failed to persist auth changes during model state pruning: %v", errPersist)
 			}
 			snapshot = auth.Clone()
 		}
@@ -1853,7 +1917,11 @@ func (m *Manager) shouldRetryAfterError(err error, attempt int, providers []stri
 	if maxWait <= 0 {
 		return 0, false
 	}
-	if status := statusCodeFromError(err); status == http.StatusOK {
+	status := statusCodeFromError(err)
+	if status == http.StatusOK {
+		return 0, false
+	}
+	if isNonRetryableRequestRetryStatus(status) {
 		return 0, false
 	}
 	if isRequestInvalidError(err) {
@@ -1895,6 +1963,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 
 	m.mu.Lock()
 	if auth, ok := m.auths[result.AuthID]; ok && auth != nil {
+		beforePersistState := persistStateSnapshot(auth)
 		now := time.Now()
 
 		if result.Success {
@@ -2010,7 +2079,10 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			}
 		}
 
-		_ = m.persist(ctx, auth)
+		afterPersistState := persistStateSnapshot(auth)
+		if !reflect.DeepEqual(beforePersistState, afterPersistState) {
+			_ = m.persist(ctx, auth)
+		}
 		authSnapshot = auth.Clone()
 	}
 	m.mu.Unlock()
@@ -2205,6 +2277,57 @@ func cloneError(err *Error) *Error {
 	}
 }
 
+type modelPersistState struct {
+	Status         Status
+	StatusMessage  string
+	Unavailable    bool
+	NextRetryAfter time.Time
+	LastError      *Error
+	Quota          QuotaState
+}
+
+type authPersistState struct {
+	Status         Status
+	StatusMessage  string
+	Unavailable    bool
+	NextRetryAfter time.Time
+	Quota          QuotaState
+	LastError      *Error
+	ModelStates    map[string]modelPersistState
+}
+
+func persistStateSnapshot(auth *Auth) authPersistState {
+	if auth == nil {
+		return authPersistState{}
+	}
+	snapshot := authPersistState{
+		Status:         auth.Status,
+		StatusMessage:  auth.StatusMessage,
+		Unavailable:    auth.Unavailable,
+		NextRetryAfter: auth.NextRetryAfter,
+		Quota:          auth.Quota,
+		LastError:      cloneError(auth.LastError),
+	}
+	if len(auth.ModelStates) == 0 {
+		return snapshot
+	}
+	snapshot.ModelStates = make(map[string]modelPersistState, len(auth.ModelStates))
+	for model, state := range auth.ModelStates {
+		if state == nil {
+			continue
+		}
+		snapshot.ModelStates[model] = modelPersistState{
+			Status:         state.Status,
+			StatusMessage:  state.StatusMessage,
+			Unavailable:    state.Unavailable,
+			NextRetryAfter: state.NextRetryAfter,
+			LastError:      cloneError(state.LastError),
+			Quota:          state.Quota,
+		}
+	}
+	return snapshot
+}
+
 func statusCodeFromError(err error) int {
 	if err == nil {
 		return 0
@@ -2242,6 +2365,20 @@ func statusCodeFromResult(err *Error) int {
 		return 0
 	}
 	return err.StatusCode()
+}
+
+func isNonRetryableRequestRetryStatus(status int) bool {
+	switch status {
+	case http.StatusUnauthorized, // 401
+		http.StatusPaymentRequired,     // 402
+		http.StatusForbidden,           // 403
+		http.StatusNotFound,            // 404
+		http.StatusUnprocessableEntity, // 422
+		http.StatusTooManyRequests:     // 429
+		return true
+	default:
+		return false
+	}
 }
 
 func isModelSupportErrorMessage(message string) bool {
@@ -3149,7 +3286,7 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 	if err != nil {
 		m.mu.Lock()
 		if current := m.auths[id]; current != nil {
-			current.NextRefreshAfter = now.Add(refreshFailureBackoff)
+			current.NextRefreshAfter = now.Add(refreshBackoffForError(err))
 			current.LastError = &Error{Message: err.Error()}
 			m.auths[id] = current
 			if m.scheduler != nil {
@@ -3172,6 +3309,13 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 	updated.LastError = nil
 	updated.UpdatedAt = now
 	_, _ = m.Update(ctx, updated)
+}
+
+func refreshBackoffForError(err error) time.Duration {
+	if util.IsNonRetryableRefreshError(err) {
+		return refreshNonRetryableBackoff
+	}
+	return refreshFailureBackoff
 }
 
 func (m *Manager) executorFor(provider string) ProviderExecutor {

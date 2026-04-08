@@ -1,6 +1,8 @@
 package auth
 
-import "testing"
+import (
+	"testing"
+)
 
 func TestExtractAccessToken(t *testing.T) {
 	t.Parallel()
