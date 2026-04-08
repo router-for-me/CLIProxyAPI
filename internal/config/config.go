@@ -72,6 +72,11 @@ type Config struct {
 	// DisableCooling disables quota cooldown scheduling when true.
 	DisableCooling bool `yaml:"disable-cooling" json:"disable-cooling"`
 
+	// AntigravityBaseURL overrides the default Antigravity API endpoint.
+	// Defaults to https://cloudcode-pa.googleapis.com (prod) when empty.
+	// To switch to backup, set to https://daily-cloudcode-pa.googleapis.com and restart.
+	AntigravityBaseURL string `yaml:"antigravity-base-url" json:"antigravity-base-url"`
+
 	// RequestRetry defines the retry times when the request failed.
 	RequestRetry int `yaml:"request-retry" json:"request-retry"`
 	// MaxRetryCredentials defines the maximum number of credentials to try for a failed request.
