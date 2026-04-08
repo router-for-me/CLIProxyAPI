@@ -117,6 +117,151 @@ func TestConvertOpenAIResponseToClaude_StreamEmptyToolNameDoesNotForceToolUseSto
 	}
 }
 
+func TestConvertOpenAIResponseToClaude_StreamEmptyToolNameDoneDoesNotForceToolUseStopReason(t *testing.T) {
+	originalRequest := []byte(`{"stream":true,"tools":[{"name":"Skill"}]}`)
+	var param any
+
+	_ = ConvertOpenAIResponseToClaude(
+		context.Background(),
+		"claude-opus-4-6",
+		originalRequest,
+		nil,
+		[]byte(`data: {"id":"resp_1","model":"gpt-5.4","created":1,"choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"","arguments":"{\"skill\":\"superpowers:using-superpowers\"}"}}]},"finish_reason":null}]}`),
+		&param,
+	)
+
+	_ = ConvertOpenAIResponseToClaude(
+		context.Background(),
+		"claude-opus-4-6",
+		originalRequest,
+		nil,
+		[]byte(`data: {"id":"resp_1","model":"gpt-5.4","created":1,"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`),
+		&param,
+	)
+
+	doneChunks := ConvertOpenAIResponseToClaude(
+		context.Background(),
+		"claude-opus-4-6",
+		originalRequest,
+		nil,
+		[]byte(`data: [DONE]`),
+		&param,
+	)
+
+	doneJoined := bytes.Join(doneChunks, []byte("\n"))
+	if bytes.Contains(doneJoined, []byte(`"stop_reason":"tool_use"`)) {
+		t.Fatalf("Did not expect tool_use stop_reason on DONE when no valid tool_use block was emitted. Output: %s", string(doneJoined))
+	}
+}
+
+func TestConvertOpenAIResponseToClaude_StreamValidToolNameDonePreservesToolUseStopReason(t *testing.T) {
+	originalRequest := []byte(`{"stream":true,"tools":[{"name":"Skill"}]}`)
+	var param any
+
+	_ = ConvertOpenAIResponseToClaude(
+		context.Background(),
+		"claude-opus-4-6",
+		originalRequest,
+		nil,
+		[]byte(`data: {"id":"resp_1","model":"gpt-5.4","created":1,"choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"Skill","arguments":"{\"skill\":\"superpowers:using-superpowers\"}"}}]},"finish_reason":null}]}`),
+		&param,
+	)
+
+	_ = ConvertOpenAIResponseToClaude(
+		context.Background(),
+		"claude-opus-4-6",
+		originalRequest,
+		nil,
+		[]byte(`data: {"id":"resp_1","model":"gpt-5.4","created":1,"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`),
+		&param,
+	)
+
+	doneChunks := ConvertOpenAIResponseToClaude(
+		context.Background(),
+		"claude-opus-4-6",
+		originalRequest,
+		nil,
+		[]byte(`data: [DONE]`),
+		&param,
+	)
+
+	doneJoined := bytes.Join(doneChunks, []byte("\n"))
+	if !bytes.Contains(doneJoined, []byte(`"stop_reason":"tool_use"`)) {
+		t.Fatalf("Expected tool_use stop_reason on DONE when a valid tool_use block was emitted. Output: %s", string(doneJoined))
+	}
+}
+
+func TestConvertOpenAIResponseToClaude_StreamLengthFinishReasonPreservesMaxTokensWithUsage(t *testing.T) {
+	originalRequest := []byte(`{"stream":true,"tools":[{"name":"Skill"}]}`)
+	var param any
+
+	_ = ConvertOpenAIResponseToClaude(
+		context.Background(),
+		"claude-opus-4-6",
+		originalRequest,
+		nil,
+		[]byte(`data: {"id":"resp_1","model":"gpt-5.4","created":1,"choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"Skill","arguments":"{\"a\":1"}}]},"finish_reason":null}]}`),
+		&param,
+	)
+
+	chunks := ConvertOpenAIResponseToClaude(
+		context.Background(),
+		"claude-opus-4-6",
+		originalRequest,
+		nil,
+		[]byte(`data: {"id":"resp_1","model":"gpt-5.4","created":1,"choices":[{"index":0,"delta":{},"finish_reason":"length"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`),
+		&param,
+	)
+
+	joined := bytes.Join(chunks, []byte("\n"))
+	if !bytes.Contains(joined, []byte(`"stop_reason":"max_tokens"`)) {
+		t.Fatalf("Expected max_tokens stop_reason for finish_reason=length. Output: %s", string(joined))
+	}
+	if bytes.Contains(joined, []byte(`"stop_reason":"tool_use"`)) {
+		t.Fatalf("Did not expect tool_use stop_reason for finish_reason=length. Output: %s", string(joined))
+	}
+}
+
+func TestConvertOpenAIResponseToClaude_StreamLengthFinishReasonPreservesMaxTokensOnDone(t *testing.T) {
+	originalRequest := []byte(`{"stream":true,"tools":[{"name":"Skill"}]}`)
+	var param any
+
+	_ = ConvertOpenAIResponseToClaude(
+		context.Background(),
+		"claude-opus-4-6",
+		originalRequest,
+		nil,
+		[]byte(`data: {"id":"resp_1","model":"gpt-5.4","created":1,"choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"Skill","arguments":"{\"a\":1"}}]},"finish_reason":null}]}`),
+		&param,
+	)
+
+	_ = ConvertOpenAIResponseToClaude(
+		context.Background(),
+		"claude-opus-4-6",
+		originalRequest,
+		nil,
+		[]byte(`data: {"id":"resp_1","model":"gpt-5.4","created":1,"choices":[{"index":0,"delta":{},"finish_reason":"length"}]}`),
+		&param,
+	)
+
+	doneChunks := ConvertOpenAIResponseToClaude(
+		context.Background(),
+		"claude-opus-4-6",
+		originalRequest,
+		nil,
+		[]byte(`data: [DONE]`),
+		&param,
+	)
+
+	doneJoined := bytes.Join(doneChunks, []byte("\n"))
+	if !bytes.Contains(doneJoined, []byte(`"stop_reason":"max_tokens"`)) {
+		t.Fatalf("Expected max_tokens stop_reason on DONE for finish_reason=length. Output: %s", string(doneJoined))
+	}
+	if bytes.Contains(doneJoined, []byte(`"stop_reason":"tool_use"`)) {
+		t.Fatalf("Did not expect tool_use stop_reason on DONE for finish_reason=length. Output: %s", string(doneJoined))
+	}
+}
+
 func TestConvertOpenAIResponseToClaudeNonStream_EmptyToolNameDoesNotPreserveToolUseStopReason(t *testing.T) {
 	rawJSON := []byte(`{
 		"id":"resp_1",
@@ -153,7 +298,7 @@ func TestConvertOpenAIResponseToClaudeNonStream_EmptyToolNameDoesNotPreserveTool
 	}
 }
 
-func TestConvertOpenAINonStreamingToAnthropic_MapsToolName(t *testing.T) {
+func TestConvertOpenAIResponseToClaudeNonStream_MapsToolNameFromOriginalRequest(t *testing.T) {
 	rawJSON := []byte(`{
 		"id":"resp_1",
 		"model":"gpt-5.4",
@@ -167,7 +312,7 @@ func TestConvertOpenAINonStreamingToAnthropic_MapsToolName(t *testing.T) {
 							"id":"call_1",
 							"type":"function",
 							"function":{
-								"name":"Skill",
+								"name":"skill",
 								"arguments":"{}"
 							}
 						}
@@ -179,11 +324,15 @@ func TestConvertOpenAINonStreamingToAnthropic_MapsToolName(t *testing.T) {
 		"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}
 	}`)
 
-	out := convertOpenAINonStreamingToAnthropic(rawJSON)
-	if len(out) != 1 {
-		t.Fatalf("Expected 1 non-streaming Anthropic response, got %d", len(out))
-	}
-	if !bytes.Contains(out[0], []byte(`"name":"Skill"`)) {
-		t.Fatalf("Expected mapped tool name to be preserved in non-streaming Anthropic response. Output: %s", string(out[0]))
+	out := ConvertOpenAIResponseToClaudeNonStream(
+		context.Background(),
+		"claude-opus-4-6",
+		[]byte(`{"tools":[{"name":"Skill"}]}`),
+		nil,
+		rawJSON,
+		nil,
+	)
+	if !bytes.Contains(out, []byte(`"name":"Skill"`)) {
+		t.Fatalf("Expected tool name to be restored from original request casing. Output: %s", string(out))
 	}
 }

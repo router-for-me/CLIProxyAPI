@@ -695,6 +695,389 @@ func TestConvertClaudeRequestToOpenAI_MixedExplicitAndGeneratedToolIDs(t *testin
 	}
 }
 
+func TestConvertClaudeRequestToOpenAI_GeneratedToolIDAvoidsExplicitCollision(t *testing.T) {
+	previousCounter := openAIToolCallIDCounter
+	openAIToolCallIDCounter = 0
+	defer func() {
+		openAIToolCallIDCounter = previousCounter
+	}()
+
+	inputJSON := `{
+		"model": "claude-3-opus",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "call_1", "name": "do_work", "input": {"step": 1}},
+					{"type": "tool_use", "id": "", "name": "read_file", "input": {"step": 2}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type": "tool_result", "tool_use_id": "", "content": "generated result"},
+					{"type": "tool_result", "tool_use_id": "call_1", "content": "explicit result"}
+				]
+			}
+		]
+	}`
+
+	result := ConvertClaudeRequestToOpenAI("test-model", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+	messages := resultJSON.Get("messages").Array()
+
+	if len(messages) != 3 {
+		t.Fatalf("Expected 3 messages, got %d. Messages: %s", len(messages), resultJSON.Get("messages").Raw)
+	}
+
+	if got := messages[0].Get("tool_calls.0.id").String(); got != "call_1" {
+		t.Fatalf("Expected explicit tool_call id %q, got %q", "call_1", got)
+	}
+
+	generatedID := messages[0].Get("tool_calls.1.id").String()
+	if generatedID == "" {
+		t.Fatalf("Expected generated tool_call id, got empty. Messages: %s", resultJSON.Get("messages").Raw)
+	}
+	if generatedID == "call_1" {
+		t.Fatalf("Expected generated tool_call id to avoid collision with explicit id %q. Messages: %s", "call_1", resultJSON.Get("messages").Raw)
+	}
+
+	if got := messages[1].Get("tool_call_id").String(); got != generatedID {
+		t.Fatalf("Expected generated tool_call_id %q, got %q", generatedID, got)
+	}
+	if got := messages[2].Get("tool_call_id").String(); got != "call_1" {
+		t.Fatalf("Expected explicit tool_call_id %q, got %q", "call_1", got)
+	}
+}
+
+func TestConvertClaudeRequestToOpenAI_GeneratedToolIDAvoidsLaterExplicitCollision(t *testing.T) {
+	previousCounter := openAIToolCallIDCounter
+	openAIToolCallIDCounter = 0
+	defer func() {
+		openAIToolCallIDCounter = previousCounter
+	}()
+
+	inputJSON := `{
+		"model": "claude-3-opus",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "", "name": "read_file", "input": {"step": 1}},
+					{"type": "tool_use", "id": "call_1", "name": "do_work", "input": {"step": 2}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type": "tool_result", "tool_use_id": "", "content": "generated result"},
+					{"type": "tool_result", "tool_use_id": "call_1", "content": "explicit result"}
+				]
+			}
+		]
+	}`
+
+	result := ConvertClaudeRequestToOpenAI("test-model", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+	messages := resultJSON.Get("messages").Array()
+
+	if len(messages) != 3 {
+		t.Fatalf("Expected 3 messages, got %d. Messages: %s", len(messages), resultJSON.Get("messages").Raw)
+	}
+
+	generatedID := messages[0].Get("tool_calls.0.id").String()
+	if generatedID == "" {
+		t.Fatalf("Expected generated tool_call id, got empty. Messages: %s", resultJSON.Get("messages").Raw)
+	}
+	if generatedID == "call_1" {
+		t.Fatalf("Expected generated tool_call id to avoid later explicit id %q. Messages: %s", "call_1", resultJSON.Get("messages").Raw)
+	}
+
+	if got := messages[0].Get("tool_calls.1.id").String(); got != "call_1" {
+		t.Fatalf("Expected explicit tool_call id %q, got %q", "call_1", got)
+	}
+	if got := messages[1].Get("tool_call_id").String(); got != generatedID {
+		t.Fatalf("Expected generated tool_call_id %q, got %q", generatedID, got)
+	}
+	if got := messages[2].Get("tool_call_id").String(); got != "call_1" {
+		t.Fatalf("Expected explicit tool_call_id %q, got %q", "call_1", got)
+	}
+}
+
+func TestConvertClaudeRequestToOpenAI_DuplicateExplicitToolUseIDsAreUniquified(t *testing.T) {
+	previousCounter := openAIToolCallIDCounter
+	openAIToolCallIDCounter = 0
+	defer func() {
+		openAIToolCallIDCounter = previousCounter
+	}()
+
+	inputJSON := `{
+		"model": "claude-3-opus",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "dup_call", "name": "first_tool", "input": {"step": 1}},
+					{"type": "tool_use", "id": "dup_call", "name": "second_tool", "input": {"step": 2}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type": "tool_result", "tool_use_id": "dup_call", "content": "first result"},
+					{"type": "tool_result", "tool_use_id": "dup_call", "content": "second result"}
+				]
+			}
+		]
+	}`
+
+	result := ConvertClaudeRequestToOpenAI("test-model", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+	messages := resultJSON.Get("messages").Array()
+
+	if len(messages) != 3 {
+		t.Fatalf("Expected 3 messages, got %d. Messages: %s", len(messages), resultJSON.Get("messages").Raw)
+	}
+
+	firstID := messages[0].Get("tool_calls.0.id").String()
+	secondID := messages[0].Get("tool_calls.1.id").String()
+	if firstID != "dup_call" {
+		t.Fatalf("Expected first explicit tool_call id %q, got %q", "dup_call", firstID)
+	}
+	if secondID == "" || secondID == "dup_call" {
+		t.Fatalf("Expected second duplicate explicit tool_call id to be uniquified, got %q", secondID)
+	}
+
+	if got := messages[1].Get("tool_call_id").String(); got != firstID {
+		t.Fatalf("Expected first tool_result to map to %q, got %q", firstID, got)
+	}
+	if got := messages[2].Get("tool_call_id").String(); got != secondID {
+		t.Fatalf("Expected second tool_result to map to %q, got %q", secondID, got)
+	}
+}
+
+func TestConvertClaudeRequestToOpenAI_DuplicateExplicitToolUseIDsAcrossTurnsAreUniquified(t *testing.T) {
+	previousCounter := openAIToolCallIDCounter
+	openAIToolCallIDCounter = 0
+	defer func() {
+		openAIToolCallIDCounter = previousCounter
+	}()
+
+	inputJSON := `{
+		"model": "claude-3-opus",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "dup_call", "name": "first_tool", "input": {"step": 1}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type": "tool_result", "tool_use_id": "dup_call", "content": "first result"}
+				]
+			},
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "dup_call", "name": "second_tool", "input": {"step": 2}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type": "tool_result", "tool_use_id": "dup_call", "content": "second result"}
+				]
+			}
+		]
+	}`
+
+	result := ConvertClaudeRequestToOpenAI("test-model", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+	messages := resultJSON.Get("messages").Array()
+
+	if len(messages) != 4 {
+		t.Fatalf("Expected 4 messages, got %d. Messages: %s", len(messages), resultJSON.Get("messages").Raw)
+	}
+
+	firstID := messages[0].Get("tool_calls.0.id").String()
+	secondID := messages[2].Get("tool_calls.0.id").String()
+	if firstID != "dup_call" {
+		t.Fatalf("Expected first explicit tool_call id %q, got %q", "dup_call", firstID)
+	}
+	if secondID == "" || secondID == "dup_call" {
+		t.Fatalf("Expected second duplicate explicit tool_call id to be uniquified, got %q", secondID)
+	}
+
+	if got := messages[1].Get("tool_call_id").String(); got != firstID {
+		t.Fatalf("Expected first turn tool_result to map to %q, got %q", firstID, got)
+	}
+	if got := messages[3].Get("tool_call_id").String(); got != secondID {
+		t.Fatalf("Expected second turn tool_result to map to %q, got %q", secondID, got)
+	}
+}
+
+func TestConvertClaudeRequestToOpenAI_MixedDuplicateExplicitAndGeneratedToolIDs(t *testing.T) {
+	previousCounter := openAIToolCallIDCounter
+	openAIToolCallIDCounter = 0
+	defer func() {
+		openAIToolCallIDCounter = previousCounter
+	}()
+
+	inputJSON := `{
+		"model": "claude-3-opus",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "dup_call", "name": "first_tool", "input": {"step": 1}},
+					{"type": "tool_use", "id": "", "name": "generated_tool", "input": {"step": 2}},
+					{"type": "tool_use", "id": "dup_call", "name": "second_tool", "input": {"step": 3}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type": "tool_result", "tool_use_id": "dup_call", "content": "first explicit"},
+					{"type": "tool_result", "tool_use_id": "", "content": "generated"},
+					{"type": "tool_result", "tool_use_id": "dup_call", "content": "second explicit"}
+				]
+			}
+		]
+	}`
+
+	result := ConvertClaudeRequestToOpenAI("test-model", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+	messages := resultJSON.Get("messages").Array()
+
+	if len(messages) != 4 {
+		t.Fatalf("Expected 4 messages, got %d. Messages: %s", len(messages), resultJSON.Get("messages").Raw)
+	}
+
+	firstExplicitID := messages[0].Get("tool_calls.0.id").String()
+	generatedID := messages[0].Get("tool_calls.1.id").String()
+	secondExplicitID := messages[0].Get("tool_calls.2.id").String()
+
+	if firstExplicitID != "dup_call" {
+		t.Fatalf("Expected first explicit tool_call id %q, got %q", "dup_call", firstExplicitID)
+	}
+	if generatedID == "" || generatedID == "dup_call" {
+		t.Fatalf("Expected generated tool_call id distinct from %q, got %q", "dup_call", generatedID)
+	}
+	if secondExplicitID == "" || secondExplicitID == "dup_call" || secondExplicitID == generatedID {
+		t.Fatalf("Expected second duplicate explicit tool_call id to be uniquified, got %q", secondExplicitID)
+	}
+
+	if got := messages[1].Get("tool_call_id").String(); got != firstExplicitID {
+		t.Fatalf("Expected first tool_result to map to %q, got %q", firstExplicitID, got)
+	}
+	if got := messages[2].Get("tool_call_id").String(); got != generatedID {
+		t.Fatalf("Expected generated tool_result to map to %q, got %q", generatedID, got)
+	}
+	if got := messages[3].Get("tool_call_id").String(); got != secondExplicitID {
+		t.Fatalf("Expected second explicit tool_result to map to %q, got %q", secondExplicitID, got)
+	}
+}
+
+func TestConvertClaudeRequestToOpenAI_FilteredToolUseDoesNotPolluteQueues(t *testing.T) {
+	previousCounter := openAIToolCallIDCounter
+	openAIToolCallIDCounter = 0
+	defer func() {
+		openAIToolCallIDCounter = previousCounter
+	}()
+
+	inputJSON := `{
+		"model": "claude-3-opus",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "bad_id", "name": "", "input": {"step": 0}},
+					{"type": "tool_use", "id": "dup_call", "name": "first_tool", "input": {"step": 1}},
+					{"type": "tool_use", "id": "", "name": "generated_tool", "input": {"step": 2}},
+					{"type": "tool_use", "id": "dup_call", "name": "second_tool", "input": {"step": 3}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type": "tool_result", "tool_use_id": "bad_id", "content": "should skip"},
+					{"type": "tool_result", "tool_use_id": "dup_call", "content": "first explicit"},
+					{"type": "tool_result", "tool_use_id": "", "content": "generated"},
+					{"type": "tool_result", "tool_use_id": "dup_call", "content": "second explicit"}
+				]
+			}
+		]
+	}`
+
+	result := ConvertClaudeRequestToOpenAI("test-model", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+	messages := resultJSON.Get("messages").Array()
+
+	if len(messages) != 4 {
+		t.Fatalf("Expected 4 messages after dropping filtered tool_use/tool_result pair, got %d. Messages: %s", len(messages), resultJSON.Get("messages").Raw)
+	}
+
+	for idx := 1; idx < len(messages); idx++ {
+		if got := messages[idx].Get("tool_call_id").String(); got == "bad_id" {
+			t.Fatalf("Did not expect filtered tool_use id %q to survive in tool_result mapping. Messages: %s", "bad_id", resultJSON.Get("messages").Raw)
+		}
+	}
+}
+
+func TestConvertClaudeRequestToOpenAI_ExtraToolResultsDoNotPolluteLaterMessages(t *testing.T) {
+	previousCounter := openAIToolCallIDCounter
+	openAIToolCallIDCounter = 0
+	defer func() {
+		openAIToolCallIDCounter = previousCounter
+	}()
+
+	inputJSON := `{
+		"model": "claude-3-opus",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "dup_call", "name": "first_tool", "input": {"step": 1}},
+					{"type": "tool_use", "id": "", "name": "generated_tool", "input": {"step": 2}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type": "tool_result", "tool_use_id": "dup_call", "content": "first explicit"},
+					{"type": "tool_result", "tool_use_id": "", "content": "generated"},
+					{"type": "tool_result", "tool_use_id": "dup_call", "content": "overflow explicit"},
+					{"type": "tool_result", "tool_use_id": "", "content": "overflow generated"},
+					{"type": "text", "text": "tail text"}
+				]
+			}
+		]
+	}`
+
+	result := ConvertClaudeRequestToOpenAI("test-model", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+	messages := resultJSON.Get("messages").Array()
+
+	if len(messages) != 4 {
+		t.Fatalf("Expected 4 messages, got %d. Messages: %s", len(messages), resultJSON.Get("messages").Raw)
+	}
+
+	if got := messages[3].Get("role").String(); got != "user" {
+		t.Fatalf("Expected trailing user text message, got role %q", got)
+	}
+	if got := messages[3].Get("content.0.text").String(); got != "tail text" {
+		t.Fatalf("Expected trailing user text %q, got %q", "tail text", got)
+	}
+
+	for idx := 1; idx <= 2; idx++ {
+		if messages[idx].Get("content").String() == "overflow explicit" || messages[idx].Get("content").String() == "overflow generated" {
+			t.Fatalf("Did not expect overflow tool_result content to survive. Messages: %s", resultJSON.Get("messages").Raw)
+		}
+	}
+}
+
 func TestConvertClaudeRequestToOpenAI_ToolResultTextAndImageContent(t *testing.T) {
 	inputJSON := `{
 		"model": "claude-3-opus",

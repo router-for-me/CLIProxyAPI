@@ -26,7 +26,8 @@ type ConvertOpenAIResponseToAnthropicParams struct {
 	Model       string
 	CreatedAt   int64
 	ToolNameMap map[string]string
-	SawToolCall bool
+	// Track whether a valid tool_use block was emitted
+	EmittedToolUseBlock bool
 	// Content accumulator for streaming
 	ContentAccumulator strings.Builder
 	// Tool calls accumulator for streaming
@@ -81,7 +82,7 @@ func ConvertOpenAIResponseToClaude(_ context.Context, _ string, originalRequestR
 			Model:                       "",
 			CreatedAt:                   0,
 			ToolNameMap:                 nil,
-			SawToolCall:                 false,
+			EmittedToolUseBlock:         false,
 			ContentAccumulator:          strings.Builder{},
 			ToolCallsAccumulator:        nil,
 			TextContentBlockStarted:     false,
@@ -122,10 +123,15 @@ func effectiveOpenAIFinishReason(param *ConvertOpenAIResponseToAnthropicParams) 
 	if param == nil {
 		return ""
 	}
-	if param.SawToolCall && len(param.ToolCallBlockIndexes) > 0 {
-		return "tool_calls"
+	switch param.FinishReason {
+	case "tool_calls", "function_call":
+		if param.EmittedToolUseBlock {
+			return "tool_calls"
+		}
+		return "stop"
+	default:
+		return param.FinishReason
 	}
-	return param.FinishReason
 }
 
 // convertOpenAIStreamingChunkToAnthropic converts OpenAI streaming chunk to Anthropic streaming events
@@ -218,7 +224,6 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 			}
 
 			toolCalls.ForEach(func(_, toolCall gjson.Result) bool {
-				param.SawToolCall = true
 				index := int(toolCall.Get("index").Int())
 
 				// Initialize accumulator if needed
@@ -253,6 +258,7 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 								contentBlockStartJSONBytes, _ = sjson.SetBytes(contentBlockStartJSONBytes, "content_block.id", util.SanitizeClaudeToolID(accumulator.ID))
 								contentBlockStartJSONBytes, _ = sjson.SetBytes(contentBlockStartJSONBytes, "content_block.name", accumulator.Name)
 								results = append(results, translatorcommon.AppendSSEEventBytes(nil, "content_block_start", contentBlockStartJSONBytes, 2))
+								param.EmittedToolUseBlock = true
 							}
 						}
 					}
@@ -274,11 +280,7 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 	// Handle finish_reason (but don't send message_delta/message_stop yet)
 	if finishReason := root.Get("choices.0.finish_reason"); finishReason.Exists() && finishReason.String() != "" {
 		reason := finishReason.String()
-		if param.SawToolCall {
-			param.FinishReason = "tool_calls"
-		} else {
-			param.FinishReason = reason
-		}
+		param.FinishReason = reason
 
 		// Send content_block_stop for thinking content if needed
 		if param.ThinkingContentBlockStarted {

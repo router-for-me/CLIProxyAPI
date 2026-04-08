@@ -101,8 +101,10 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 
 	// Process messages and system
 	messagesJSON := []byte(`[]`)
-	validToolUseIDs := make(map[string]string)
+	validToolUseIDs := make(map[string][]string)
 	pendingGeneratedToolUseIDs := make([]string, 0)
+	reservedExplicitToolCallIDs := collectClaudeToolUseIDs(root.Get("messages"))
+	assignedToolCallIDs := make(map[string]struct{})
 
 	// Handle system message first
 	systemMsgJSON := []byte(`{"role":"system","content":[]}`)
@@ -177,7 +179,7 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 							}
 
 							sourceToolCallID := strings.TrimSpace(part.Get("id").String())
-							toolCallID := ensureOpenAIToolCallID(sourceToolCallID)
+							toolCallID := ensureOpenAIToolCallID(sourceToolCallID, reservedExplicitToolCallIDs, assignedToolCallIDs)
 							toolCallJSON := []byte(`{"id":"","type":"function","function":{"name":"","arguments":""}}`)
 							toolCallJSON, _ = sjson.SetBytes(toolCallJSON, "id", toolCallID)
 							toolCallJSON, _ = sjson.SetBytes(toolCallJSON, "function.name", toolName)
@@ -192,7 +194,7 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 							if sourceToolCallID == "" {
 								pendingGeneratedToolUseIDs = append(pendingGeneratedToolUseIDs, toolCallID)
 							} else {
-								validToolUseIDs[sourceToolCallID] = toolCallID
+								validToolUseIDs[sourceToolCallID] = append(validToolUseIDs[sourceToolCallID], toolCallID)
 							}
 							toolCalls = append(toolCalls, gjson.ParseBytes(toolCallJSON).Value())
 						}
@@ -208,11 +210,12 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 							toolUseID = pendingGeneratedToolUseIDs[0]
 							pendingGeneratedToolUseIDs = pendingGeneratedToolUseIDs[1:]
 						} else {
-							resolvedToolUseID, ok := validToolUseIDs[sourceToolUseID]
-							if !ok {
+							resolvedToolUseIDs := validToolUseIDs[sourceToolUseID]
+							if len(resolvedToolUseIDs) == 0 {
 								return true
 							}
-							toolUseID = resolvedToolUseID
+							toolUseID = resolvedToolUseIDs[0]
+							validToolUseIDs[sourceToolUseID] = resolvedToolUseIDs[1:]
 						}
 
 						toolResultJSON := []byte(`{"role":"tool","tool_call_id":"","content":""}`)
@@ -362,12 +365,62 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 	return out
 }
 
-func ensureOpenAIToolCallID(id string) string {
+func ensureOpenAIToolCallID(id string, reservedIDs, assignedIDs map[string]struct{}) string {
 	id = strings.TrimSpace(id)
 	if id != "" {
+		if assignedIDs != nil {
+			if _, exists := assignedIDs[id]; exists {
+				id = nextUniqueOpenAIToolCallID(reservedIDs, assignedIDs)
+			}
+			assignedIDs[id] = struct{}{}
+		}
 		return id
 	}
-	return fmt.Sprintf("call_%d", atomic.AddUint64(&openAIToolCallIDCounter, 1))
+	return nextUniqueOpenAIToolCallID(reservedIDs, assignedIDs)
+}
+
+func nextUniqueOpenAIToolCallID(reservedIDs, assignedIDs map[string]struct{}) string {
+	for {
+		candidate := fmt.Sprintf("call_%d", atomic.AddUint64(&openAIToolCallIDCounter, 1))
+		if reservedIDs != nil {
+			if _, exists := reservedIDs[candidate]; exists {
+				continue
+			}
+		}
+		if assignedIDs != nil {
+			if _, exists := assignedIDs[candidate]; exists {
+				continue
+			}
+			assignedIDs[candidate] = struct{}{}
+		}
+		return candidate
+	}
+}
+
+func collectClaudeToolUseIDs(messages gjson.Result) map[string]struct{} {
+	usedIDs := make(map[string]struct{})
+	if !messages.Exists() || !messages.IsArray() {
+		return usedIDs
+	}
+
+	messages.ForEach(func(_, message gjson.Result) bool {
+		content := message.Get("content")
+		if !content.Exists() || !content.IsArray() {
+			return true
+		}
+		content.ForEach(func(_, part gjson.Result) bool {
+			if part.Get("type").String() != "tool_use" {
+				return true
+			}
+			if id := strings.TrimSpace(part.Get("id").String()); id != "" {
+				usedIDs[id] = struct{}{}
+			}
+			return true
+		})
+		return true
+	})
+
+	return usedIDs
 }
 
 func convertClaudeContentPart(part gjson.Result) (string, bool) {
