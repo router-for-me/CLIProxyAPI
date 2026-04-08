@@ -46,21 +46,22 @@ func TestEnsureQwenSystemMessage_MergeStringSystem(t *testing.T) {
 	}
 
 	msgs := gjson.GetBytes(out, "messages").Array()
-	if len(msgs) != 2 {
-		t.Fatalf("messages length = %d, want 2", len(msgs))
+	if len(msgs) != 3 {
+		t.Fatalf("messages length = %d, want 3", len(msgs))
 	}
 	if msgs[0].Get("role").String() != "system" {
 		t.Fatalf("messages[0].role = %q, want %q", msgs[0].Get("role").String(), "system")
 	}
 	parts := msgs[0].Get("content").Array()
-	if len(parts) != 2 {
-		t.Fatalf("messages[0].content length = %d, want 2", len(parts))
+	if len(parts) != 1 {
+		t.Fatalf("messages[0].content length = %d, want 1", len(parts))
 	}
-	if parts[0].Get("text").String() != "You are Qwen Code." || parts[0].Get("cache_control.type").String() != "ephemeral" {
+	if parts[0].Get("text").String() != "" || parts[0].Get("cache_control.type").String() != "ephemeral" {
 		t.Fatalf("messages[0].content[0] = %s, want injected system part", parts[0].Raw)
 	}
-	if parts[1].Get("type").String() != "text" || parts[1].Get("text").String() != "ABCDEFG" {
-		t.Fatalf("messages[0].content[1] = %s, want text part with ABCDEFG", parts[1].Raw)
+	parts = msgs[1].Get("content").Array()
+	if parts[0].Get("type").String() != "text" || parts[0].Get("text").String() != "ABCDEFG" {
+		t.Fatalf("messages[1].content[0] = %s, want text part with ABCDEFG", parts[0].Get("text").Raw)
 	}
 	if msgs[1].Get("role").String() != "user" {
 		t.Fatalf("messages[1].role = %q, want %q", msgs[1].Get("role").String(), "user")
@@ -81,15 +82,15 @@ func TestEnsureQwenSystemMessage_MergeObjectSystem(t *testing.T) {
 	}
 
 	msgs := gjson.GetBytes(out, "messages").Array()
-	if len(msgs) != 2 {
-		t.Fatalf("messages length = %d, want 2", len(msgs))
+	if len(msgs) != 3 {
+		t.Fatalf("messages length = %d, want 3", len(msgs))
 	}
-	parts := msgs[0].Get("content").Array()
-	if len(parts) != 2 {
-		t.Fatalf("messages[0].content length = %d, want 2", len(parts))
+	parts := msgs[1].Get("content").Array()
+	if len(parts) != 1 {
+		t.Fatalf("messages[0].content length = %d, want 1", len(parts))
 	}
-	if parts[1].Get("text").String() != "ABCDEFG" {
-		t.Fatalf("messages[0].content[1].text = %q, want %q", parts[1].Get("text").String(), "ABCDEFG")
+	if parts[0].Get("text").String() != "ABCDEFG" {
+		t.Fatalf("messages[0].content[1].text = %q, want %q", parts[0].Get("text").String(), "ABCDEFG")
 	}
 }
 
@@ -135,17 +136,15 @@ func TestEnsureQwenSystemMessage_MergesMultipleSystemMessages(t *testing.T) {
 	}
 
 	msgs := gjson.GetBytes(out, "messages").Array()
-	if len(msgs) != 2 {
-		t.Fatalf("messages length = %d, want 2", len(msgs))
+	if len(msgs) != 4 {
+		t.Fatalf("messages length = %d, want 4", len(msgs))
 	}
-	parts := msgs[0].Get("content").Array()
-	if len(parts) != 3 {
-		t.Fatalf("messages[0].content length = %d, want 3", len(parts))
+	parts := msgs[1].Get("content").Array()
+	if parts[0].Get("text").String() != "A" {
+		t.Fatalf("messages[0].content[1].text = %q, want %q", parts[0].Get("text").String(), "A")
 	}
-	if parts[1].Get("text").String() != "A" {
-		t.Fatalf("messages[0].content[1].text = %q, want %q", parts[1].Get("text").String(), "A")
-	}
-	if parts[2].Get("text").String() != "B" {
-		t.Fatalf("messages[0].content[2].text = %q, want %q", parts[2].Get("text").String(), "B")
+	parts = msgs[3].Get("content").Array()
+	if parts[0].Get("text").String() != "B" {
+		t.Fatalf("messages[0].content[2].text = %q, want %q", parts[0].Get("text").String(), "B")
 	}
 }
