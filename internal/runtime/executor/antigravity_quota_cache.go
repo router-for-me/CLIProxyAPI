@@ -214,6 +214,13 @@ func classifyQuotaExhaustion(statusCode int, body []byte) quotaExhaustionKind {
 	}
 	msg := strings.ToLower(string(body))
 
+	// Rate limit (QPM/QPS exceeded) — not a quota issue, recovers in seconds.
+	// Must check before "exhausted your capacity" because Google's RATE_LIMIT_EXCEEDED
+	// response body also contains that phrase with a near-zero quotaResetDelay.
+	if strings.Contains(msg, "rate_limit_exceeded") {
+		return quotaExhaustionNone
+	}
+
 	// Hard exhaustion: Anthropic explicitly says account capacity is depleted.
 	if strings.Contains(msg, "exhausted your capacity") {
 		return quotaExhaustionHard
