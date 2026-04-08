@@ -17,9 +17,13 @@ import (
 //   - "gpt-5.2(high)" -> ModelName="gpt-5.2", RawSuffix="high"
 //   - "gemini-2.5-pro" -> ModelName="gemini-2.5-pro", HasSuffix=false
 //
-// This function only extracts the suffix; it does not validate or interpret
-// the suffix content. Use ParseNumericSuffix, ParseLevelSuffix, etc. for
-// content interpretation.
+// Only valid thinking suffixes are recognized:
+//   - Numeric budgets: "16384", "0", "08192"
+//   - Special values: "none", "auto", "-1"
+//   - Level names: "minimal", "low", "medium", "high", "xhigh", "max"
+//
+// Model names with parentheses that don't match valid thinking suffixes
+// are preserved as-is (e.g., "stepfun-ai/step-3.5-flash(free)").
 func ParseSuffix(model string) SuffixResult {
 	// Find the last opening parenthesis
 	lastOpen := strings.LastIndex(model, "(")
@@ -36,11 +40,38 @@ func ParseSuffix(model string) SuffixResult {
 	modelName := model[:lastOpen]
 	rawSuffix := model[lastOpen+1 : len(model)-1]
 
-	return SuffixResult{
-		ModelName: modelName,
-		HasSuffix: true,
-		RawSuffix: rawSuffix,
+	// Validate that the suffix is a valid thinking suffix
+	// Numeric suffix
+	if _, err := strconv.Atoi(rawSuffix); err == nil {
+		return SuffixResult{
+			ModelName: modelName,
+			HasSuffix: true,
+			RawSuffix: rawSuffix,
+		}
 	}
+
+	// Special values (case-insensitive)
+	switch strings.ToLower(rawSuffix) {
+	case "none", "auto", "-1":
+		return SuffixResult{
+			ModelName: modelName,
+			HasSuffix: true,
+			RawSuffix: rawSuffix,
+		}
+	}
+
+	// Level values (case-insensitive)
+	switch strings.ToLower(rawSuffix) {
+	case "minimal", "low", "medium", "high", "xhigh", "max":
+		return SuffixResult{
+			ModelName: modelName,
+			HasSuffix: true,
+			RawSuffix: rawSuffix,
+		}
+	}
+
+	// Not a valid thinking suffix - treat as part of model name
+	return SuffixResult{ModelName: model, HasSuffix: false}
 }
 
 // ParseNumericSuffix attempts to parse a raw suffix as a numeric budget value.
