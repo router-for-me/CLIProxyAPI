@@ -44,9 +44,12 @@ auth-dir: "~/.cli-proxy-api"
 
 # API keys for authentication
 api-keys:
-  - "your-api-key-1"
-  - "your-api-key-2"
-  - "your-api-key-3"
+  - api-key: "your-api-key-1"
+    requests-per-second: 5
+  - api-key: "your-api-key-2"
+    requests-per-second: 5
+  - api-key: "your-api-key-3"
+    requests-per-second: 5
 
 # Enable debug logging
 debug: false

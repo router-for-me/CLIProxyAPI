@@ -190,7 +190,7 @@ func TestBuildConfigChangeDetails_NilSafe(t *testing.T) {
 func TestBuildConfigChangeDetails_SecretsAndCounts(t *testing.T) {
 	oldCfg := &config.Config{
 		SDKConfig: sdkconfig.SDKConfig{
-			APIKeys: []string{"a"},
+			APIKeys: []sdkconfig.APIKeyEntry{{APIKey: "a", RequestsPerSecond: 5}},
 		},
 		AmpCode: config.AmpCode{
 			UpstreamAPIKey: "",
@@ -201,7 +201,11 @@ func TestBuildConfigChangeDetails_SecretsAndCounts(t *testing.T) {
 	}
 	newCfg := &config.Config{
 		SDKConfig: sdkconfig.SDKConfig{
-			APIKeys: []string{"a", "b", "c"},
+			APIKeys: []sdkconfig.APIKeyEntry{
+				{APIKey: "a", RequestsPerSecond: 5},
+				{APIKey: "b", RequestsPerSecond: 5},
+				{APIKey: "c", RequestsPerSecond: 5},
+			},
 		},
 		AmpCode: config.AmpCode{
 			UpstreamAPIKey: "new-key",
@@ -237,7 +241,7 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 		SDKConfig: sdkconfig.SDKConfig{
 			RequestLog:                 false,
 			ProxyURL:                   "http://old-proxy",
-			APIKeys:                    []string{"key-1"},
+			APIKeys:                    []sdkconfig.APIKeyEntry{{APIKey: "key-1", RequestsPerSecond: 5}},
 			ForceModelPrefix:           false,
 			NonStreamKeepAliveInterval: 0,
 		},
@@ -274,9 +278,12 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 			SecretKey:              "",
 		},
 		SDKConfig: sdkconfig.SDKConfig{
-			RequestLog:                 true,
-			ProxyURL:                   "http://new-proxy",
-			APIKeys:                    []string{" key-1 ", "key-2"},
+			RequestLog: true,
+			ProxyURL:   "http://new-proxy",
+			APIKeys: []sdkconfig.APIKeyEntry{
+				{APIKey: " key-1 ", RequestsPerSecond: 5},
+				{APIKey: "key-2", RequestsPerSecond: 5},
+			},
 			ForceModelPrefix:           true,
 			NonStreamKeepAliveInterval: 5,
 		},
@@ -351,7 +358,7 @@ func TestBuildConfigChangeDetails_AllBranches(t *testing.T) {
 		SDKConfig: sdkconfig.SDKConfig{
 			RequestLog: false,
 			ProxyURL:   "http://old-proxy",
-			APIKeys:    []string{" keyA "},
+			APIKeys:    []sdkconfig.APIKeyEntry{{APIKey: " keyA ", RequestsPerSecond: 5}},
 		},
 		OAuthExcludedModels: map[string][]string{"p1": {"a"}},
 		OpenAICompatibility: []config.OpenAICompatibility{
@@ -405,7 +412,7 @@ func TestBuildConfigChangeDetails_AllBranches(t *testing.T) {
 		SDKConfig: sdkconfig.SDKConfig{
 			RequestLog: true,
 			ProxyURL:   "http://new-proxy",
-			APIKeys:    []string{"keyB"},
+			APIKeys:    []sdkconfig.APIKeyEntry{{APIKey: "keyB", RequestsPerSecond: 5}},
 		},
 		OAuthExcludedModels: map[string][]string{"p1": {"b", "c"}, "p2": {"d"}},
 		OpenAICompatibility: []config.OpenAICompatibility{
@@ -439,7 +446,7 @@ func TestBuildConfigChangeDetails_AllBranches(t *testing.T) {
 	expectContains(t, changes, "quota-exceeded.switch-project: false -> true")
 	expectContains(t, changes, "quota-exceeded.switch-preview-model: false -> true")
 	expectContains(t, changes, "quota-exceeded.antigravity-credits: false -> true")
-	expectContains(t, changes, "api-keys: values updated (count unchanged, redacted)")
+	expectContains(t, changes, "api-keys: values or rate limits updated (count unchanged, redacted)")
 	expectContains(t, changes, "gemini[0].base-url: http://g-old -> http://g-new")
 	expectContains(t, changes, "gemini[0].proxy-url: http://gp-old -> http://gp-new")
 	expectContains(t, changes, "gemini[0].api-key: updated")
@@ -540,9 +547,13 @@ func TestBuildConfigChangeDetails_CountBranches(t *testing.T) {
 	expectContains(t, changes, "vertex-api-key count: 0 -> 1")
 }
 
-func TestTrimStrings(t *testing.T) {
-	out := trimStrings([]string{" a ", "b", "  c"})
-	if len(out) != 3 || out[0] != "a" || out[1] != "b" || out[2] != "c" {
-		t.Fatalf("unexpected trimmed strings: %v", out)
+func TestNormalizeAPIKeyEntries(t *testing.T) {
+	out := normalizeAPIKeyEntries([]config.APIKeyEntry{
+		{APIKey: " a ", RequestsPerSecond: 5},
+		{APIKey: "b", RequestsPerSecond: 7},
+		{APIKey: "  c", RequestsPerSecond: 9},
+	})
+	if len(out) != 3 || out[0].APIKey != "a" || out[1].APIKey != "b" || out[2].APIKey != "c" {
+		t.Fatalf("unexpected normalized api key entries: %#v", out)
 	}
 }
