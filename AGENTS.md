@@ -7,12 +7,12 @@ Go 1.26+ proxy server providing OpenAI/Gemini/Claude/Codex compatible APIs with 
 
 ## Commands
 ```bash
-gofmt -w .                                # Format (required after Go changes)
-go build -o cli-proxy-api ./cmd/server     # Build
-go run ./cmd/server                       # Run dev server
-go test ./...                             # Run all tests
-go test -v -run TestName ./path/to/pkg    # Run single test
-go build -o test-output ./cmd/server && rm test-output  # Verify compile (REQUIRED after changes)
+gofmt -w .                                             # Format (required after Go changes)
+go build -o cli-proxy-api ./cmd/server                 # Build
+go run ./cmd/server                                    # Run dev server
+go test ./...                                          # Run all tests
+go test -v -run TestName ./path/to/pkg                 # Run single test
+go build -o test-output ./cmd/server && rm test-output # Verify compile (REQUIRED after changes)
 ```
 - Common flags: `--config <path>`, `--tui`, `--standalone`, `--local-model`, `--no-browser`, `--oauth-callback-port <port>`
 
