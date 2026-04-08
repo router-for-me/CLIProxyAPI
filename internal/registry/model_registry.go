@@ -1177,6 +1177,16 @@ func (r *ModelRegistry) convertModelToMap(model *ModelInfo, handlerType string) 
 				"dynamic_allowed": model.Thinking.DynamicAllowed,
 			}
 		}
+		// Include context limits so Claude Code can manage conversation
+		// context correctly, especially for Copilot-proxied models whose
+		// real prompt limit (128K-168K) is much lower than the 1M window
+		// that Claude Code may assume for Opus 4.6 with 1M context enabled.
+		if model.ContextLength > 0 {
+			result["context_length"] = model.ContextLength
+		}
+		if model.MaxCompletionTokens > 0 {
+			result["max_completion_tokens"] = model.MaxCompletionTokens
+		}
 		return result
 
 	case "gemini":
