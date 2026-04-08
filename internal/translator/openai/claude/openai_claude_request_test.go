@@ -551,6 +551,150 @@ func TestConvertClaudeRequestToOpenAI_ToolResultObjectContent(t *testing.T) {
 	}
 }
 
+func TestConvertClaudeRequestToOpenAI_GeneratesIDForEmptyToolUse(t *testing.T) {
+	inputJSON := `{
+		"model": "claude-3-opus",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "", "name": "do_work", "input": {"a": 1}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type": "tool_result", "tool_use_id": "", "content": "tool ok"}
+				]
+			}
+		]
+	}`
+
+	result := ConvertClaudeRequestToOpenAI("test-model", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+	messages := resultJSON.Get("messages").Array()
+
+	if len(messages) != 2 {
+		t.Fatalf("Expected 2 messages, got %d. Messages: %s", len(messages), resultJSON.Get("messages").Raw)
+	}
+
+	generatedID := messages[0].Get("tool_calls.0.id").String()
+	if generatedID == "" {
+		t.Fatalf("Expected generated tool_call id, got empty. Messages: %s", resultJSON.Get("messages").Raw)
+	}
+
+	if got := messages[1].Get("role").String(); got != "tool" {
+		t.Fatalf("Expected messages[1] role %q, got %q", "tool", got)
+	}
+	if got := messages[1].Get("tool_call_id").String(); got != generatedID {
+		t.Fatalf("Expected tool_call_id %q, got %q", generatedID, got)
+	}
+	if got := messages[1].Get("content").String(); got != "tool ok" {
+		t.Fatalf("Expected tool content %q, got %q", "tool ok", got)
+	}
+}
+
+func TestConvertClaudeRequestToOpenAI_GeneratesDistinctIDsForMultipleEmptyToolUses(t *testing.T) {
+	inputJSON := `{
+		"model": "claude-3-opus",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "", "name": "do_work", "input": {"step": 1}},
+					{"type": "tool_use", "id": "", "name": "read_file", "input": {"step": 2}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type": "tool_result", "tool_use_id": "", "content": "first result"},
+					{"type": "tool_result", "tool_use_id": "", "content": "second result"}
+				]
+			}
+		]
+	}`
+
+	result := ConvertClaudeRequestToOpenAI("test-model", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+	messages := resultJSON.Get("messages").Array()
+
+	if len(messages) != 3 {
+		t.Fatalf("Expected 3 messages, got %d. Messages: %s", len(messages), resultJSON.Get("messages").Raw)
+	}
+
+	firstID := messages[0].Get("tool_calls.0.id").String()
+	secondID := messages[0].Get("tool_calls.1.id").String()
+	if firstID == "" || secondID == "" {
+		t.Fatalf("Expected generated tool_call ids, got %q and %q. Messages: %s", firstID, secondID, resultJSON.Get("messages").Raw)
+	}
+	if firstID == secondID {
+		t.Fatalf("Expected distinct generated tool_call ids, both were %q", firstID)
+	}
+
+	if got := messages[1].Get("tool_call_id").String(); got != firstID {
+		t.Fatalf("Expected first tool_call_id %q, got %q", firstID, got)
+	}
+	if got := messages[1].Get("content").String(); got != "first result" {
+		t.Fatalf("Expected first tool content %q, got %q", "first result", got)
+	}
+	if got := messages[2].Get("tool_call_id").String(); got != secondID {
+		t.Fatalf("Expected second tool_call_id %q, got %q", secondID, got)
+	}
+	if got := messages[2].Get("content").String(); got != "second result" {
+		t.Fatalf("Expected second tool content %q, got %q", "second result", got)
+	}
+}
+
+func TestConvertClaudeRequestToOpenAI_MixedExplicitAndGeneratedToolIDs(t *testing.T) {
+	inputJSON := `{
+		"model": "claude-3-opus",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "call_explicit", "name": "do_work", "input": {"step": 1}},
+					{"type": "tool_use", "id": "", "name": "read_file", "input": {"step": 2}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type": "tool_result", "tool_use_id": "", "content": "generated result"},
+					{"type": "tool_result", "tool_use_id": "call_explicit", "content": "explicit result"}
+				]
+			}
+		]
+	}`
+
+	result := ConvertClaudeRequestToOpenAI("test-model", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+	messages := resultJSON.Get("messages").Array()
+
+	if len(messages) != 3 {
+		t.Fatalf("Expected 3 messages, got %d. Messages: %s", len(messages), resultJSON.Get("messages").Raw)
+	}
+
+	generatedID := messages[0].Get("tool_calls.1.id").String()
+	if generatedID == "" {
+		t.Fatalf("Expected generated tool_call id for empty input id. Messages: %s", resultJSON.Get("messages").Raw)
+	}
+
+	if got := messages[1].Get("tool_call_id").String(); got != generatedID {
+		t.Fatalf("Expected generated tool_call_id %q, got %q", generatedID, got)
+	}
+	if got := messages[1].Get("content").String(); got != "generated result" {
+		t.Fatalf("Expected generated tool content %q, got %q", "generated result", got)
+	}
+
+	if got := messages[2].Get("tool_call_id").String(); got != "call_explicit" {
+		t.Fatalf("Expected explicit tool_call_id %q, got %q", "call_explicit", got)
+	}
+	if got := messages[2].Get("content").String(); got != "explicit result" {
+		t.Fatalf("Expected explicit tool content %q, got %q", "explicit result", got)
+	}
+}
+
 func TestConvertClaudeRequestToOpenAI_ToolResultTextAndImageContent(t *testing.T) {
 	inputJSON := `{
 		"model": "claude-3-opus",

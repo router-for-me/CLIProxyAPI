@@ -6,12 +6,16 @@
 package claude
 
 import (
+	"fmt"
 	"strings"
+	"sync/atomic"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
+
+var openAIToolCallIDCounter uint64
 
 // ConvertClaudeRequestToOpenAI parses and transforms an Anthropic API request into OpenAI Chat Completions API format.
 // It extracts the model name, system instruction, message contents, and tool declarations
@@ -97,7 +101,8 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 
 	// Process messages and system
 	messagesJSON := []byte(`[]`)
-	validToolUseIDs := make(map[string]struct{})
+	validToolUseIDs := make(map[string]string)
+	pendingGeneratedToolUseIDs := make([]string, 0)
 
 	// Handle system message first
 	systemMsgJSON := []byte(`{"role":"system","content":[]}`)
@@ -171,7 +176,8 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 								return true
 							}
 
-							toolCallID := part.Get("id").String()
+							sourceToolCallID := strings.TrimSpace(part.Get("id").String())
+							toolCallID := ensureOpenAIToolCallID(sourceToolCallID)
 							toolCallJSON := []byte(`{"id":"","type":"function","function":{"name":"","arguments":""}}`)
 							toolCallJSON, _ = sjson.SetBytes(toolCallJSON, "id", toolCallID)
 							toolCallJSON, _ = sjson.SetBytes(toolCallJSON, "function.name", toolName)
@@ -183,17 +189,30 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 								toolCallJSON, _ = sjson.SetBytes(toolCallJSON, "function.arguments", "{}")
 							}
 
-							if toolCallID != "" {
-								validToolUseIDs[toolCallID] = struct{}{}
+							if sourceToolCallID == "" {
+								pendingGeneratedToolUseIDs = append(pendingGeneratedToolUseIDs, toolCallID)
+							} else {
+								validToolUseIDs[sourceToolCallID] = toolCallID
 							}
 							toolCalls = append(toolCalls, gjson.ParseBytes(toolCallJSON).Value())
 						}
 
 					case "tool_result":
 						// Collect tool_result to emit after the main message (ensures tool results follow tool_calls)
-						toolUseID := part.Get("tool_use_id").String()
-						if _, ok := validToolUseIDs[toolUseID]; !ok {
-							return true
+						sourceToolUseID := strings.TrimSpace(part.Get("tool_use_id").String())
+						toolUseID := sourceToolUseID
+						if sourceToolUseID == "" {
+							if len(pendingGeneratedToolUseIDs) == 0 {
+								return true
+							}
+							toolUseID = pendingGeneratedToolUseIDs[0]
+							pendingGeneratedToolUseIDs = pendingGeneratedToolUseIDs[1:]
+						} else {
+							resolvedToolUseID, ok := validToolUseIDs[sourceToolUseID]
+							if !ok {
+								return true
+							}
+							toolUseID = resolvedToolUseID
 						}
 
 						toolResultJSON := []byte(`{"role":"tool","tool_call_id":"","content":""}`)
@@ -341,6 +360,14 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 	}
 
 	return out
+}
+
+func ensureOpenAIToolCallID(id string) string {
+	id = strings.TrimSpace(id)
+	if id != "" {
+		return id
+	}
+	return fmt.Sprintf("call_%d", atomic.AddUint64(&openAIToolCallIDCounter, 1))
 }
 
 func convertClaudeContentPart(part gjson.Result) (string, bool) {
