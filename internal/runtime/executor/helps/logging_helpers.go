@@ -568,3 +568,14 @@ func LogWithRequestID(ctx context.Context) *log.Entry {
 	}
 	return log.WithField("request_id", requestID)
 }
+
+func LogUpstreamError(entry *log.Entry, provider, model, authID, authLabel string, httpStatus int, errorMsg string) {
+	entry.WithFields(log.Fields{
+		"provider":    provider,
+		"model":       model,
+		"auth_id":     authID,
+		"auth_label":  authLabel,
+		"http_status": httpStatus,
+		"error_msg":   errorMsg,
+	}).Warn("upstream provider error")
+}

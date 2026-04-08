@@ -215,7 +215,10 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 			b = []byte(msg)
 		}
 		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
-		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
+		errSummary := helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b)
+		entry := helps.LogWithRequestID(ctx)
+		entry.Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, errSummary)
+		helps.LogUpstreamError(entry, e.Identifier(), req.Model, authID, authLabel, httpResp.StatusCode, errSummary)
 		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
 		if errClose := errBody.Close(); errClose != nil {
 			log.Errorf("response body close error: %v", errClose)
@@ -383,7 +386,10 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			b = []byte(msg)
 		}
 		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
-		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
+		errSummary := helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b)
+		entry := helps.LogWithRequestID(ctx)
+		entry.Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, errSummary)
+		helps.LogUpstreamError(entry, e.Identifier(), req.Model, authID, authLabel, httpResp.StatusCode, errSummary)
 		if errClose := errBody.Close(); errClose != nil {
 			log.Errorf("response body close error: %v", errClose)
 		}

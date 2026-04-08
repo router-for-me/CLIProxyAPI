@@ -47,7 +47,7 @@ sudo systemctl restart cliproxyapi
 sleep 2
 
 for i in {1..15}; do
-    if curl -sf http://127.0.0.1:8317/health > /dev/null 2>&1; then
+    if curl -sf http://127.0.0.1:8317/healthz > /dev/null 2>&1; then
         log_info "   ✓ 健康检查通过"
         break
     fi

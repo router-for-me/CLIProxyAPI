@@ -158,7 +158,10 @@ func (e *KimiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		b, _ := io.ReadAll(httpResp.Body)
 		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
-		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
+		errSummary := helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b)
+		entry := helps.LogWithRequestID(ctx)
+		entry.Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, errSummary)
+		helps.LogUpstreamError(entry, e.Identifier(), req.Model, authID, authLabel, httpResp.StatusCode, errSummary)
 		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
 		return resp, err
 	}
@@ -262,7 +265,10 @@ func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		b, _ := io.ReadAll(httpResp.Body)
 		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
-		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
+		errSummary := helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b)
+		entry := helps.LogWithRequestID(ctx)
+		entry.Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, errSummary)
+		helps.LogUpstreamError(entry, e.Identifier(), req.Model, authID, authLabel, httpResp.StatusCode, errSummary)
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("kimi executor: close response body error: %v", errClose)
 		}

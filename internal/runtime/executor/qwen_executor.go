@@ -402,7 +402,10 @@ func (e *QwenExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
 
 		errCode, retryAfter := wrapQwenError(ctx, httpResp.StatusCode, b)
-		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d (mapped: %d), error message: %s", httpResp.StatusCode, errCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
+		errSummary := helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b)
+		entry := helps.LogWithRequestID(ctx)
+		entry.Debugf("request error, error status: %d (mapped: %d), error message: %s", httpResp.StatusCode, errCode, errSummary)
+		helps.LogUpstreamError(entry, e.Identifier(), req.Model, authID, authLabel, httpResp.StatusCode, errSummary)
 		err = statusErr{code: errCode, msg: string(b), retryAfter: retryAfter}
 		return resp, err
 	}
@@ -516,7 +519,10 @@ func (e *QwenExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
 
 		errCode, retryAfter := wrapQwenError(ctx, httpResp.StatusCode, b)
-		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d (mapped: %d), error message: %s", httpResp.StatusCode, errCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
+		errSummary := helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b)
+		entry := helps.LogWithRequestID(ctx)
+		entry.Debugf("request error, error status: %d (mapped: %d), error message: %s", httpResp.StatusCode, errCode, errSummary)
+		helps.LogUpstreamError(entry, e.Identifier(), req.Model, authID, authLabel, httpResp.StatusCode, errSummary)
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("qwen executor: close response body error: %v", errClose)
 		}
