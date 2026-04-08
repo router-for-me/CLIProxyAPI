@@ -117,6 +117,7 @@ func (h *OpenAIAPIHandler) ChatCompletions(c *gin.Context) {
 	if shouldTreatAsResponsesFormat(rawJSON) {
 		modelName := gjson.GetBytes(rawJSON, "model").String()
 		rawJSON = responsesconverter.ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName, rawJSON, stream)
+		rawJSON = sanitizeConvertedResponsesChatCompletions(rawJSON)
 		stream = gjson.GetBytes(rawJSON, "stream").Bool()
 	}
 
