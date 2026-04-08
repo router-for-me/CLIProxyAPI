@@ -124,7 +124,7 @@ func effectiveOpenAIFinishReason(param *ConvertOpenAIResponseToAnthropicParams) 
 		return ""
 	}
 	switch param.FinishReason {
-	case "tool_calls", "function_call":
+	case "tool_calls", "function_call", "stop":
 		if param.EmittedToolUseBlock {
 			return "tool_calls"
 		}
