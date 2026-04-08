@@ -36,6 +36,7 @@ import (
 
 const (
 	antigravityBaseURLDaily = "https://daily-cloudcode-pa.googleapis.com"
+	antigravityBaseURLProd  = "https://cloudcode-pa.googleapis.com"
 	antigravityCountTokensPath     = "/v1internal:countTokens"
 	antigravityStreamPath          = "/v1internal:streamGenerateContent"
 	antigravityGeneratePath        = "/v1internal:generateContent"
@@ -227,7 +228,7 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 	requestedModel := payloadRequestedModel(opts, req.Model)
 	translated = applyPayloadConfigWithRoot(e.cfg, baseModel, "antigravity", "request", translated, originalTranslated, requestedModel)
 
-	baseURL := antigravityResolveBaseURL(auth)
+	baseURL := antigravityResolveBaseURL(auth, e.cfg)
 	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
 
 	attempts := antigravityRetryAttempts(auth, e.cfg)
@@ -247,7 +248,7 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 				log.Infof("antigravity executor: both channels in cooldown for %s, sending probe request via free quota", authID)
 				isProbe = true
 			} else {
-				return resp, statusErr{code: http.StatusTooManyRequests, msg: "antigravity: both free quota and credit in cooldown"}
+				return resp, newCooldownStatusErr("antigravity: both free quota and credit in cooldown")
 			}
 		} else {
 			log.Debugf("antigravity executor: free quota in cooldown for %s, using credit directly", authID)
@@ -341,6 +342,9 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 		if httpResp.StatusCode == http.StatusTooManyRequests {
 			if retryAfter, parseErr := parseRetryDelay(bodyBytes); parseErr == nil && retryAfter != nil {
 				sErr.retryAfter = retryAfter
+			} else {
+				d := antigravityFallbackRetryAfter(bodyBytes)
+				sErr.retryAfter = &d
 			}
 		}
 		return resp, sErr
@@ -383,7 +387,7 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 	requestedModel := payloadRequestedModel(opts, req.Model)
 	translated = applyPayloadConfigWithRoot(e.cfg, baseModel, "antigravity", "request", translated, originalTranslated, requestedModel)
 
-	baseURL := antigravityResolveBaseURL(auth)
+	baseURL := antigravityResolveBaseURL(auth, e.cfg)
 	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
 
 	attempts := antigravityRetryAttempts(auth, e.cfg)
@@ -402,7 +406,7 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 				log.Infof("antigravity executor: both channels in cooldown for %s, sending probe request via free quota (claude non-stream)", authID)
 				isProbe = true
 			} else {
-				return resp, statusErr{code: http.StatusTooManyRequests, msg: "antigravity: both free quota and credit in cooldown"}
+				return resp, newCooldownStatusErr("antigravity: both free quota and credit in cooldown")
 			}
 		} else {
 			log.Debugf("antigravity executor: free quota in cooldown for %s, using credit directly (claude non-stream)", authID)
@@ -474,6 +478,9 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 			if httpResp.StatusCode == http.StatusTooManyRequests {
 				if retryAfter, parseErr := parseRetryDelay(bodyBytes); parseErr == nil && retryAfter != nil {
 					sErr.retryAfter = retryAfter
+				} else {
+					d := antigravityFallbackRetryAfter(bodyBytes)
+					sErr.retryAfter = &d
 				}
 			}
 			return resp, sErr
@@ -784,7 +791,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 	requestedModel := payloadRequestedModel(opts, req.Model)
 	translated = applyPayloadConfigWithRoot(e.cfg, baseModel, "antigravity", "request", translated, originalTranslated, requestedModel)
 
-	baseURL := antigravityResolveBaseURL(auth)
+	baseURL := antigravityResolveBaseURL(auth, e.cfg)
 	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
 
 	attempts := antigravityRetryAttempts(auth, e.cfg)
@@ -803,7 +810,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 				log.Infof("antigravity executor: both channels in cooldown for %s, sending probe request via free quota (stream)", authID)
 				isProbe = true
 			} else {
-				return nil, statusErr{code: http.StatusTooManyRequests, msg: "antigravity: both free quota and credit in cooldown"}
+				return nil, newCooldownStatusErr("antigravity: both free quota and credit in cooldown")
 			}
 		} else {
 			log.Debugf("antigravity executor: free quota in cooldown for %s, using credit directly (stream)", authID)
@@ -874,6 +881,9 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 			if httpResp.StatusCode == http.StatusTooManyRequests {
 				if retryAfter, parseErr := parseRetryDelay(bodyBytes); parseErr == nil && retryAfter != nil {
 					sErr.retryAfter = retryAfter
+				} else {
+					d := antigravityFallbackRetryAfter(bodyBytes)
+					sErr.retryAfter = &d
 				}
 			}
 			return nil, sErr
@@ -984,7 +994,7 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 	payload = deleteJSONField(payload, "model")
 	payload = deleteJSONField(payload, "request.safetySettings")
 
-	baseURL := antigravityResolveBaseURL(auth)
+	baseURL := antigravityResolveBaseURL(auth, e.cfg)
 	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
 
 	var authID, authLabel, authType, authValue string
@@ -996,7 +1006,7 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 
 	base := strings.TrimSuffix(baseURL, "/")
 	if base == "" {
-		base = buildBaseURL(auth)
+		base = buildBaseURL(auth, e.cfg)
 	}
 
 	var requestURL strings.Builder
@@ -1058,6 +1068,9 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 	if httpResp.StatusCode == http.StatusTooManyRequests {
 		if retryAfter, parseErr := parseRetryDelay(bodyBytes); parseErr == nil && retryAfter != nil {
 			sErr.retryAfter = retryAfter
+		} else {
+			d := antigravityFallbackRetryAfter(bodyBytes)
+			sErr.retryAfter = &d
 		}
 	}
 	return cliproxyexecutor.Response{}, sErr
@@ -1130,6 +1143,9 @@ func (e *AntigravityExecutor) refreshToken(ctx context.Context, auth *cliproxyau
 		if httpResp.StatusCode == http.StatusTooManyRequests {
 			if retryAfter, parseErr := parseRetryDelay(bodyBytes); parseErr == nil && retryAfter != nil {
 				sErr.retryAfter = retryAfter
+			} else {
+				d := antigravityFallbackRetryAfter(bodyBytes)
+				sErr.retryAfter = &d
 			}
 		}
 		return auth, sErr
@@ -1203,7 +1219,7 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 
 	base := strings.TrimSuffix(baseURL, "/")
 	if base == "" {
-		base = buildBaseURL(auth)
+		base = buildBaseURL(auth, e.cfg)
 	}
 	path := antigravityGeneratePath
 	if stream {
@@ -1363,8 +1379,8 @@ func int64Value(value any) (int64, bool) {
 	return 0, false
 }
 
-func buildBaseURL(auth *cliproxyauth.Auth) string {
-	return antigravityResolveBaseURL(auth)
+func buildBaseURL(auth *cliproxyauth.Auth, cfg *config.Config) string {
+	return antigravityResolveBaseURL(auth, cfg)
 }
 
 func resolveHost(base string) string {
@@ -1463,11 +1479,14 @@ func antigravityWait(ctx context.Context, wait time.Duration) error {
 	}
 }
 
-func antigravityResolveBaseURL(auth *cliproxyauth.Auth) string {
+func antigravityResolveBaseURL(auth *cliproxyauth.Auth, cfg *config.Config) string {
 	if base := resolveCustomAntigravityBaseURL(auth); base != "" {
 		return base
 	}
-	return antigravityBaseURLDaily
+	if cfg != nil && cfg.AntigravityBaseURL != "" {
+		return strings.TrimSuffix(strings.TrimSpace(cfg.AntigravityBaseURL), "/")
+	}
+	return antigravityBaseURLProd
 }
 
 func resolveCustomAntigravityBaseURL(auth *cliproxyauth.Auth) string {
@@ -1488,6 +1507,38 @@ func resolveCustomAntigravityBaseURL(auth *cliproxyauth.Auth) string {
 		}
 	}
 	return ""
+}
+
+// newCooldownStatusErr returns a 429 statusErr with a 5-minute retryAfter for
+// synthetic errors where both credential channels are exhausted.
+func newCooldownStatusErr(msg string) statusErr {
+	d := 5 * time.Minute
+	return statusErr{code: http.StatusTooManyRequests, msg: msg, retryAfter: &d}
+}
+
+// antigravityParseErrorReason extracts the reason field from Google's ErrorInfo detail.
+func antigravityParseErrorReason(body []byte) string {
+	details := gjson.GetBytes(body, "error.details")
+	if details.Exists() && details.IsArray() {
+		for _, d := range details.Array() {
+			if d.Get("@type").String() == "type.googleapis.com/google.rpc.ErrorInfo" {
+				return d.Get("reason").String()
+			}
+		}
+	}
+	return ""
+}
+
+// antigravityFallbackRetryAfter returns a conservative default cooldown when
+// Google's 429 response carries no RetryInfo header.
+//
+//   - RATE_LIMIT_EXCEEDED: 30s — per-request rate limit, recovers quickly.
+//   - Everything else (QUOTA_EXHAUSTED, MODEL_CAPACITY_EXHAUSTED, unknown): 5min.
+func antigravityFallbackRetryAfter(body []byte) time.Duration {
+	if antigravityParseErrorReason(body) == "RATE_LIMIT_EXCEEDED" {
+		return 30 * time.Second
+	}
+	return 5 * time.Minute
 }
 
 func geminiToAntigravity(modelName string, payload []byte, projectID string) []byte {
