@@ -869,10 +869,16 @@ func patchCompletedOutput(data []byte, itemsByIndex map[int64][]byte, itemsFallb
 	}
 	sort.Slice(indexes, func(i, j int) bool { return indexes[i] < indexes[j] })
 	for _, idx := range indexes {
-		patched, _ = sjson.SetRawBytes(patched, "response.output.-1", itemsByIndex[idx])
+		patched, err = sjson.SetRawBytes(patched, "response.output.-1", itemsByIndex[idx])
+		if err != nil {
+			return data
+		}
 	}
 	for _, item := range itemsFallback {
-		patched, _ = sjson.SetRawBytes(patched, "response.output.-1", item)
+		patched, err = sjson.SetRawBytes(patched, "response.output.-1", item)
+		if err != nil {
+			return data
+		}
 	}
 
 	return patched
