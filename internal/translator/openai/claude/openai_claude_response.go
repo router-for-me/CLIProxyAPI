@@ -122,7 +122,7 @@ func effectiveOpenAIFinishReason(param *ConvertOpenAIResponseToAnthropicParams) 
 	if param == nil {
 		return ""
 	}
-	if param.SawToolCall {
+	if param.SawToolCall && len(param.ToolCallBlockIndexes) > 0 {
 		return "tool_calls"
 	}
 	return param.FinishReason
@@ -407,6 +407,7 @@ func convertOpenAINonStreamingToAnthropic(rawJSON []byte) [][]byte {
 	out := []byte(`{"id":"","type":"message","role":"assistant","model":"","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}`)
 	out, _ = sjson.SetBytes(out, "id", root.Get("id").String())
 	out, _ = sjson.SetBytes(out, "model", root.Get("model").String())
+	hasToolCall := false
 
 	// Process message content and tool calls
 	if choices := root.Get("choices"); choices.Exists() && choices.IsArray() && len(choices.Array()) > 0 {
@@ -436,6 +437,7 @@ func convertOpenAINonStreamingToAnthropic(rawJSON []byte) [][]byte {
 				if toolName == "" {
 					return true
 				}
+				hasToolCall = true
 				toolUseBlock := []byte(`{"type":"tool_use","id":"","name":"","input":{}}`)
 				toolUseBlock, _ = sjson.SetBytes(toolUseBlock, "id", util.SanitizeClaudeToolID(toolCall.Get("id").String()))
 				toolUseBlock, _ = sjson.SetBytes(toolUseBlock, "name", toolName)
@@ -459,7 +461,11 @@ func convertOpenAINonStreamingToAnthropic(rawJSON []byte) [][]byte {
 
 		// Set stop reason
 		if finishReason := choice.Get("finish_reason"); finishReason.Exists() {
-			out, _ = sjson.SetBytes(out, "stop_reason", mapOpenAIFinishReasonToAnthropic(finishReason.String()))
+			stopReason := mapOpenAIFinishReasonToAnthropic(finishReason.String())
+			if stopReason == "tool_use" && !hasToolCall {
+				stopReason = "end_turn"
+			}
+			out, _ = sjson.SetBytes(out, "stop_reason", stopReason)
 		}
 	}
 
@@ -733,6 +739,8 @@ func ConvertOpenAIResponseToClaudeNonStream(_ context.Context, _ string, origina
 		} else {
 			out, _ = sjson.SetBytes(out, "stop_reason", "end_turn")
 		}
+	} else if gjson.GetBytes(out, "stop_reason").String() == "tool_use" && !hasToolCall {
+		out, _ = sjson.SetBytes(out, "stop_reason", "end_turn")
 	}
 
 	return out
