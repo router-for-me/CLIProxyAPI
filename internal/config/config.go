@@ -176,6 +176,8 @@ type RemoteManagement struct {
 	AllowRemote bool `yaml:"allow-remote"`
 	// SecretKey is the management key (plaintext or bcrypt hashed). YAML key intentionally 'secret-key'.
 	SecretKey string `yaml:"secret-key"`
+	// ExternalBaseURL is the externally reachable base URL used by remote management clients.
+	ExternalBaseURL string `yaml:"external-base-url"`
 	// DisableControlPanel skips serving and syncing the bundled management UI when true.
 	DisableControlPanel bool `yaml:"disable-control-panel"`
 	// DisableAutoUpdatePanel disables automatic periodic background updates of the management panel asset from GitHub.
@@ -619,6 +621,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		_ = SaveConfigPreserveCommentsUpdateNestedScalar(configFile, []string{"remote-management", "secret-key"}, hashed)
 	}
 
+	cfg.RemoteManagement.ExternalBaseURL = strings.TrimSpace(cfg.RemoteManagement.ExternalBaseURL)
 	cfg.RemoteManagement.PanelGitHubRepository = strings.TrimSpace(cfg.RemoteManagement.PanelGitHubRepository)
 	if cfg.RemoteManagement.PanelGitHubRepository == "" {
 		cfg.RemoteManagement.PanelGitHubRepository = DefaultPanelGitHubRepository
