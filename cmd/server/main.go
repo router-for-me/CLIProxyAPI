@@ -491,6 +491,12 @@ func main() {
 		cfg.AuthDir = resolvedAuthDir
 	}
 	managementasset.SetCurrentConfig(cfg)
+	usageStatsPath := usage.DefaultPersistencePath(configFilePath)
+	if mergeResult, errLoadUsage := usage.LoadSnapshotFile(usageStatsPath, usage.GetRequestStatistics()); errLoadUsage != nil {
+		log.WithError(errLoadUsage).Warn("failed to restore usage statistics snapshot")
+	} else if mergeResult.Added > 0 || mergeResult.Skipped > 0 {
+		log.Infof("restored usage statistics snapshot: added=%d skipped=%d", mergeResult.Added, mergeResult.Skipped)
+	}
 
 	// Create login options to be used in authentication flows.
 	options := &cmd.LoginOptions{
@@ -606,6 +612,9 @@ func main() {
 				if !localModel {
 					registry.StartModelsUpdater(context.Background())
 				}
+				backgroundCtx, backgroundCancel := context.WithCancel(context.Background())
+				defer backgroundCancel()
+				usage.StartAutoPersistence(backgroundCtx, usageStatsPath, 30*time.Second, usage.GetRequestStatistics())
 				hook := tui.NewLogHook(2000)
 				hook.SetFormatter(&logging.LogFormatter{})
 				log.AddHook(hook)
@@ -682,6 +691,10 @@ func main() {
 			if !localModel {
 				registry.StartModelsUpdater(context.Background())
 			}
+
+			serviceCtx, serviceCancel := context.WithCancel(context.Background())
+			defer serviceCancel()
+			usage.StartAutoPersistence(serviceCtx, usageStatsPath, 30*time.Second, usage.GetRequestStatistics())
 
 			if cfg.AuthDir != "" {
 				kiro.InitializeAndStart(cfg.AuthDir, cfg)

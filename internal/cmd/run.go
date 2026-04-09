@@ -12,6 +12,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy"
 	log "github.com/sirupsen/logrus"
 )
@@ -50,6 +51,9 @@ func StartService(cfg *config.Config, configPath string, localPassword string) {
 	}
 
 	err = service.Run(runCtx)
+	if errFlush := usage.SaveSnapshotFile(usage.DefaultPersistencePath(configPath), usage.GetRequestStatistics()); errFlush != nil {
+		log.WithError(errFlush).Warn("failed to flush usage statistics after service exit")
+	}
 	if err != nil && !errors.Is(err, context.Canceled) {
 		log.Errorf("proxy service exited with error: %v", err)
 	}
@@ -77,6 +81,9 @@ func StartServiceBackground(cfg *config.Config, configPath string, localPassword
 		defer close(doneCh)
 		if err := service.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			log.Errorf("proxy service exited with error: %v", err)
+		}
+		if errFlush := usage.SaveSnapshotFile(usage.DefaultPersistencePath(configPath), usage.GetRequestStatistics()); errFlush != nil {
+			log.WithError(errFlush).Warn("failed to flush usage statistics after background service exit")
 		}
 	}()
 
