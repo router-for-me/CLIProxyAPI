@@ -2874,12 +2874,19 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 	if err != nil {
 		m.mu.Lock()
 		if current := m.auths[id]; current != nil {
+			if isInvalidGrantError(err) {
+				log.Warnf("permanently disabling auth %s (%s): invalid_grant — refresh token revoked or expired", current.ID, current.Provider)
+				current.Disabled = true
+				current.Status = StatusDisabled
+				current.StatusMessage = "auto-disabled: invalid_grant"
+			}
 			current.NextRefreshAfter = now.Add(refreshFailureBackoff)
 			current.LastError = &Error{Message: err.Error()}
 			m.auths[id] = current
 			if m.scheduler != nil {
 				m.scheduler.upsertAuth(current.Clone())
 			}
+			_ = m.persist(context.Background(), current)
 		}
 		m.mu.Unlock()
 		return
@@ -2903,6 +2910,15 @@ func (m *Manager) executorFor(provider string) ProviderExecutor {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.executors[provider]
+}
+
+// isInvalidGrantError checks whether the error indicates the OAuth refresh token
+// has been permanently revoked or expired (Google returns "invalid_grant").
+func isInvalidGrantError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "invalid_grant")
 }
 
 // roundTripperContextKey is an unexported context key type to avoid collisions.
