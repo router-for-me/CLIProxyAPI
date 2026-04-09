@@ -4,6 +4,28 @@
 // debug settings, proxy configuration, and API keys.
 package config
 
+import (
+	"path"
+	"strings"
+)
+
+// APIKeyDefaultPolicyAllowAll permits any model when a key has no explicit AllowedModels list.
+const APIKeyDefaultPolicyAllowAll = "allow-all"
+
+// APIKeyDefaultPolicyDenyAll forbids every model when a key has no explicit AllowedModels list.
+const APIKeyDefaultPolicyDenyAll = "deny-all"
+
+// APIKeyPolicy describes per-client-key access controls. AllowedModels supports
+// path.Match-style globs (e.g. "claude-3-*", "gpt-4o*"). An empty AllowedModels
+// list defers to APIKeyDefaultPolicy on the parent SDKConfig.
+type APIKeyPolicy struct {
+	// Key is the bearer/api key value this policy applies to.
+	Key string `yaml:"key" json:"key"`
+
+	// AllowedModels lists glob patterns of model identifiers this key may target.
+	AllowedModels []string `yaml:"allowed-models,omitempty" json:"allowed-models,omitempty"`
+}
+
 // SDKConfig represents the application's configuration, loaded from a YAML file.
 type SDKConfig struct {
 	// ProxyURL is the URL of an optional proxy server to use for outbound requests.
@@ -24,6 +46,16 @@ type SDKConfig struct {
 	// APIKeys is a list of keys for authenticating clients to this proxy server.
 	APIKeys []string `yaml:"api-keys" json:"api-keys"`
 
+	// APIKeyPolicies stores per-key access policies (allowed model globs).
+	// Keys present here must also exist in APIKeys to be accepted by the auth
+	// provider; entries without a matching APIKeys row are ignored.
+	APIKeyPolicies []APIKeyPolicy `yaml:"api-key-policies,omitempty" json:"api-key-policies,omitempty"`
+
+	// APIKeyDefaultPolicy controls behavior for keys with no entry in
+	// APIKeyPolicies, or whose entry has an empty AllowedModels list. Valid
+	// values are "allow-all" (default, backward compatible) and "deny-all".
+	APIKeyDefaultPolicy string `yaml:"api-key-default-policy,omitempty" json:"api-key-default-policy,omitempty"`
+
 	// PassthroughHeaders controls whether upstream response headers are forwarded to downstream clients.
 	// Default is false (disabled).
 	PassthroughHeaders bool `yaml:"passthrough-headers" json:"passthrough-headers"`
@@ -34,6 +66,66 @@ type SDKConfig struct {
 	// NonStreamKeepAliveInterval controls how often blank lines are emitted for non-streaming responses.
 	// <= 0 disables keep-alives. Value is in seconds.
 	NonStreamKeepAliveInterval int `yaml:"nonstream-keepalive-interval,omitempty" json:"nonstream-keepalive-interval,omitempty"`
+}
+
+// IsModelAllowedForKey reports whether the given client api key may target the
+// given model. Matching uses path.Match glob semantics. An unknown key, or a
+// key whose AllowedModels list is empty, falls back to APIKeyDefaultPolicy:
+// "deny-all" rejects, anything else (including the default empty value) allows.
+//
+// The model argument is matched after stripping any provider prefix of the form
+// "<prefix>/<model>" so that policies stay portable across prefixed credentials.
+func (c *SDKConfig) IsModelAllowedForKey(key, model string) bool {
+	if c == nil {
+		return true
+	}
+	trimmedKey := strings.TrimSpace(key)
+	if trimmedKey == "" {
+		return c.defaultAllows()
+	}
+
+	// Strip a single leading "<prefix>/" segment if present so glob authors do
+	// not have to anticipate every prefixed credential.
+	candidate := model
+	if idx := strings.Index(candidate, "/"); idx >= 0 && idx < len(candidate)-1 {
+		candidate = candidate[idx+1:]
+	}
+
+	for i := range c.APIKeyPolicies {
+		if c.APIKeyPolicies[i].Key != trimmedKey {
+			continue
+		}
+		patterns := c.APIKeyPolicies[i].AllowedModels
+		if len(patterns) == 0 {
+			return c.defaultAllows()
+		}
+		for _, pattern := range patterns {
+			pattern = strings.TrimSpace(pattern)
+			if pattern == "" {
+				continue
+			}
+			if pattern == candidate {
+				return true
+			}
+			if matched, err := path.Match(pattern, candidate); err == nil && matched {
+				return true
+			}
+			// Also try the unstripped form for keys whose policies were
+			// authored against the prefixed model name verbatim.
+			if matched, err := path.Match(pattern, model); err == nil && matched {
+				return true
+			}
+		}
+		return false
+	}
+	return c.defaultAllows()
+}
+
+func (c *SDKConfig) defaultAllows() bool {
+	if c == nil {
+		return true
+	}
+	return strings.EqualFold(strings.TrimSpace(c.APIKeyDefaultPolicy), APIKeyDefaultPolicyDenyAll) == false
 }
 
 // StreamingConfig holds server streaming behavior configuration.
