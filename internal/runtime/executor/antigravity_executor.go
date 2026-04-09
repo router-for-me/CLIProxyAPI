@@ -52,7 +52,7 @@ const (
 	antigravityCreditsRetryTTL             = 5 * time.Hour
 	antigravityCreditsAutoDisableDuration  = 5 * time.Hour
 	antigravityShortQuotaCooldownThreshold = 5 * time.Minute
-	antigravityInstantRetryThreshold       = 1 * time.Second
+	antigravityInstantRetryThreshold       = 3 * time.Second
 	// systemInstruction              = "You are Antigravity, a powerful agentic AI coding assistant designed by the Google Deepmind team working on Advanced Agentic Coding.You are pair programming with a USER to solve their coding task. The task may require creating a new codebase, modifying or debugging an existing codebase, or simply answering a question.**Absolute paths only****Proactiveness**"
 )
 
@@ -727,30 +727,19 @@ attemptLoop:
 
 			httpResp, errDo := httpClient.Do(httpReq)
 			if errDo != nil {
-				if usedCreditsDirect {
-					e.handleDirectCreditsFailure(ctx, auth, baseModel, errDo)
-					httpReq, errReq = e.buildRequest(ctx, auth, token, baseModel, translated, false, opts.Alt, baseURL)
-					if errReq != nil {
-						err = errReq
-						return resp, err
-					}
-					httpResp, errDo = httpClient.Do(httpReq)
+				helps.RecordAPIResponseError(ctx, e.cfg, errDo)
+				if errors.Is(errDo, context.Canceled) || errors.Is(errDo, context.DeadlineExceeded) {
+					return resp, errDo
 				}
-				if errDo != nil {
-					helps.RecordAPIResponseError(ctx, e.cfg, errDo)
-					if errors.Is(errDo, context.Canceled) || errors.Is(errDo, context.DeadlineExceeded) {
-						return resp, errDo
-					}
-					lastStatus = 0
-					lastBody = nil
-					lastErr = errDo
-					if idx+1 < len(baseURLs) {
-						log.Debugf("antigravity executor: request error on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
-						continue
-					}
-					err = errDo
-					return resp, err
+				lastStatus = 0
+				lastBody = nil
+				lastErr = errDo
+				if idx+1 < len(baseURLs) {
+					log.Debugf("antigravity executor: request error on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
+					continue
 				}
+				err = errDo
+				return resp, err
 			}
 
 			helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
@@ -810,7 +799,6 @@ attemptLoop:
 							return resp, nil
 						}
 					}
-				}
 			}
 
 			if httpResp.StatusCode < http.StatusOK || httpResp.StatusCode >= http.StatusMultipleChoices {
@@ -948,30 +936,19 @@ attemptLoop:
 
 			httpResp, errDo := httpClient.Do(httpReq)
 			if errDo != nil {
-				if usedCreditsDirect {
-					e.handleDirectCreditsFailure(ctx, auth, baseModel, errDo)
-					httpReq, errReq = e.buildRequest(ctx, auth, token, baseModel, translated, true, opts.Alt, baseURL)
-					if errReq != nil {
-						err = errReq
-						return resp, err
-					}
-					httpResp, errDo = httpClient.Do(httpReq)
+				helps.RecordAPIResponseError(ctx, e.cfg, errDo)
+				if errors.Is(errDo, context.Canceled) || errors.Is(errDo, context.DeadlineExceeded) {
+					return resp, errDo
 				}
-				if errDo != nil {
-					helps.RecordAPIResponseError(ctx, e.cfg, errDo)
-					if errors.Is(errDo, context.Canceled) || errors.Is(errDo, context.DeadlineExceeded) {
-						return resp, errDo
-					}
-					lastStatus = 0
-					lastBody = nil
-					lastErr = errDo
-					if idx+1 < len(baseURLs) {
-						log.Debugf("antigravity executor: request error on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
-						continue
-					}
-					err = errDo
-					return resp, err
+				lastStatus = 0
+				lastBody = nil
+				lastErr = errDo
+				if idx+1 < len(baseURLs) {
+					log.Debugf("antigravity executor: request error on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
+					continue
 				}
+				err = errDo
+				return resp, err
 			}
 			helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 			if httpResp.StatusCode < http.StatusOK || httpResp.StatusCode >= http.StatusMultipleChoices {
@@ -1019,19 +996,17 @@ attemptLoop:
 							markAntigravityShortCooldown(auth, baseModel, time.Now(), *decision.retryAfter)
 							log.Debugf("antigravity executor: short quota cooldown (%s) for model %s, recorded cooldown and skipping credits fallback", *decision.retryAfter, baseModel)
 						}
-					case antigravity429DecisionFullQuotaExhausted:
-						if usedCreditsDirect {
-							clearAntigravityPreferCredits(auth, baseModel)
-							recordAntigravityCreditsFailure(auth, time.Now())
-						} else {
-							creditsResp, _ := e.attemptCreditsFallback(ctx, auth, httpClient, token, baseModel, translated, true, opts.Alt, baseURL, bodyBytes)
-							if creditsResp != nil {
-								httpResp = creditsResp
-								helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
-							}
+				case antigravity429DecisionFullQuotaExhausted:
+					if usedCreditsDirect {
+						clearAntigravityPreferCredits(auth, baseModel)
+						recordAntigravityCreditsFailure(auth, time.Now())
+					} else {
+						creditsResp, _ := e.attemptCreditsFallback(ctx, auth, httpClient, token, baseModel, translated, true, opts.Alt, baseURL, bodyBytes)
+						if creditsResp != nil {
+							httpResp = creditsResp
+							helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 						}
 					}
-				}
 				if httpResp.StatusCode >= http.StatusOK && httpResp.StatusCode < http.StatusMultipleChoices {
 					goto streamSuccessClaudeNonStream
 				}
@@ -1417,30 +1392,19 @@ attemptLoop:
 			}
 			httpResp, errDo := httpClient.Do(httpReq)
 			if errDo != nil {
-				if usedCreditsDirect {
-					e.handleDirectCreditsFailure(ctx, auth, baseModel, errDo)
-					httpReq, errReq = e.buildRequest(ctx, auth, token, baseModel, translated, true, opts.Alt, baseURL)
-					if errReq != nil {
-						err = errReq
-						return nil, err
-					}
-					httpResp, errDo = httpClient.Do(httpReq)
+				helps.RecordAPIResponseError(ctx, e.cfg, errDo)
+				if errors.Is(errDo, context.Canceled) || errors.Is(errDo, context.DeadlineExceeded) {
+					return nil, errDo
 				}
-				if errDo != nil {
-					helps.RecordAPIResponseError(ctx, e.cfg, errDo)
-					if errors.Is(errDo, context.Canceled) || errors.Is(errDo, context.DeadlineExceeded) {
-						return nil, errDo
-					}
-					lastStatus = 0
-					lastBody = nil
-					lastErr = errDo
-					if idx+1 < len(baseURLs) {
-						log.Debugf("antigravity executor: request error on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
-						continue
-					}
-					err = errDo
-					return nil, err
+				lastStatus = 0
+				lastBody = nil
+				lastErr = errDo
+				if idx+1 < len(baseURLs) {
+					log.Debugf("antigravity executor: request error on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
+					continue
 				}
+				err = errDo
+				return nil, err
 			}
 			helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 			if httpResp.StatusCode < http.StatusOK || httpResp.StatusCode >= http.StatusMultipleChoices {
@@ -1488,42 +1452,17 @@ attemptLoop:
 							markAntigravityShortCooldown(auth, baseModel, time.Now(), *decision.retryAfter)
 							log.Debugf("antigravity executor: short quota cooldown (%s) for model %s, recorded cooldown and skipping credits fallback", *decision.retryAfter, baseModel)
 						}
-					case antigravity429DecisionFullQuotaExhausted:
-						if usedCreditsDirect {
-							clearAntigravityPreferCredits(auth, baseModel)
-							recordAntigravityCreditsFailure(auth, time.Now())
-							httpReq, errReq = e.buildRequest(ctx, auth, token, baseModel, translated, true, opts.Alt, baseURL)
-							if errReq != nil {
-								err = errReq
-								return nil, err
-							}
-							httpResp, errDo = httpClient.Do(httpReq)
-							if errDo != nil {
-								helps.RecordAPIResponseError(ctx, e.cfg, errDo)
-								if errors.Is(errDo, context.Canceled) || errors.Is(errDo, context.DeadlineExceeded) {
-									return nil, errDo
-								}
-								lastStatus = 0
-								lastBody = nil
-								lastErr = errDo
-								if idx+1 < len(baseURLs) {
-									log.Debugf("antigravity executor: request error on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
-									continue
-								}
-								err = errDo
-								return nil, err
-							}
+				case antigravity429DecisionFullQuotaExhausted:
+					if usedCreditsDirect {
+						clearAntigravityPreferCredits(auth, baseModel)
+						recordAntigravityCreditsFailure(auth, time.Now())
+					} else {
+						creditsResp, _ := e.attemptCreditsFallback(ctx, auth, httpClient, token, baseModel, translated, true, opts.Alt, baseURL, bodyBytes)
+						if creditsResp != nil {
+							httpResp = creditsResp
 							helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
-							goto streamSuccessExecuteStream
-						} else {
-							creditsResp, _ := e.attemptCreditsFallback(ctx, auth, httpClient, token, baseModel, translated, true, opts.Alt, baseURL, bodyBytes)
-							if creditsResp != nil {
-								httpResp = creditsResp
-								helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
-							}
 						}
 					}
-				}
 				if httpResp.StatusCode >= http.StatusOK && httpResp.StatusCode < http.StatusMultipleChoices {
 					goto streamSuccessExecuteStream
 				}
