@@ -1346,10 +1346,8 @@ func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, exp
 func buildTextBlock(text string, cacheControl map[string]string) string {
 	block := []byte(`{"type":"text"}`)
 	block, _ = sjson.SetBytes(block, "text", text)
-	if cacheControl != nil {
-		for k, v := range cacheControl {
-			block, _ = sjson.SetBytes(block, "cache_control."+k, v)
-		}
+	if cacheControl != nil && len(cacheControl) > 0 {
+		block, _ = sjson.SetBytes(block, "cache_control", cacheControl)
 	}
 	return string(block)
 }
