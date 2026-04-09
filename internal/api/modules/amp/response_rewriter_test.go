@@ -1,8 +1,11 @@
 package amp
 
 import (
+	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/gin-gonic/gin"
 )
 
 func TestRewriteModelInResponse_TopLevel(t *testing.T) {
@@ -124,6 +127,31 @@ func TestRewriteStreamChunk_PreservesThinkingWithSignatureInjection(t *testing.T
 	// Signature should be injected into both thinking and tool_use blocks
 	if count := strings.Count(string(result), `"signature":""`); count != 2 {
 		t.Fatalf("expected 2 signature injections, but got %d in %s", count, string(result))
+	}
+}
+
+func TestResponseRewriterWriteStringStreamsAndFlushes(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+
+	ctx.Writer.Header().Set("Content-Type", "text/event-stream")
+	rw := NewResponseRewriter(ctx.Writer, "gpt-5.2-codex")
+
+	if _, err := rw.WriteString("data: {\"response\":{\"model\":\"gpt-5.3-codex\"}}\n\n"); err != nil {
+		t.Fatalf("WriteString error: %v", err)
+	}
+	rw.Flush()
+
+	if !rw.isStreaming {
+		t.Fatal("expected writer to switch to streaming mode")
+	}
+	if !recorder.Flushed {
+		t.Fatal("expected underlying recorder to be flushed")
+	}
+	expected := "data: {\"response\":{\"model\":\"gpt-5.2-codex\"}}\n\n"
+	if got := recorder.Body.String(); got != expected {
+		t.Fatalf("streamed body = %q, want %q", got, expected)
 	}
 }
 

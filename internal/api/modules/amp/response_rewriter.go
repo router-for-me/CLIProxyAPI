@@ -71,23 +71,8 @@ func (rw *ResponseRewriter) enableStreaming(reason string) error {
 }
 
 func (rw *ResponseRewriter) Write(data []byte) (int, error) {
-	if !rw.isStreaming && rw.body.Len() == 0 {
-		contentType := rw.Header().Get("Content-Type")
-		rw.isStreaming = strings.Contains(contentType, "text/event-stream") ||
-			strings.Contains(contentType, "stream")
-	}
-
-	if !rw.isStreaming {
-		if looksLikeSSEChunk(data) {
-			if err := rw.enableStreaming("sse heuristic"); err != nil {
-				return 0, err
-			}
-		} else if rw.body.Len()+len(data) > maxBufferedResponseBytes {
-			log.Warnf("amp response rewriter: buffer exceeded %d bytes, switching to streaming", maxBufferedResponseBytes)
-			if err := rw.enableStreaming("buffer limit"); err != nil {
-				return 0, err
-			}
-		}
+	if err := rw.prepareWrite(data); err != nil {
+		return 0, err
 	}
 
 	if rw.isStreaming {
@@ -101,6 +86,48 @@ func (rw *ResponseRewriter) Write(data []byte) (int, error) {
 		return n, err
 	}
 	return rw.body.Write(data)
+}
+
+func (rw *ResponseRewriter) WriteString(data string) (int, error) {
+	chunk := []byte(data)
+	if err := rw.prepareWrite(chunk); err != nil {
+		return 0, err
+	}
+
+	if rw.isStreaming {
+		rewritten := rw.rewriteStreamChunk(chunk)
+		n, err := rw.ResponseWriter.Write(rewritten)
+		if err == nil {
+			if flusher, ok := rw.ResponseWriter.(http.Flusher); ok {
+				flusher.Flush()
+			}
+		}
+		return n, err
+	}
+
+	return rw.body.WriteString(data)
+}
+
+func (rw *ResponseRewriter) prepareWrite(data []byte) error {
+	if !rw.isStreaming && rw.body.Len() == 0 {
+		contentType := rw.Header().Get("Content-Type")
+		rw.isStreaming = strings.Contains(contentType, "text/event-stream") ||
+			strings.Contains(contentType, "stream")
+	}
+
+	if rw.isStreaming {
+		return nil
+	}
+
+	if looksLikeSSEChunk(data) {
+		return rw.enableStreaming("sse heuristic")
+	}
+	if rw.body.Len()+len(data) > maxBufferedResponseBytes {
+		log.Warnf("amp response rewriter: buffer exceeded %d bytes, switching to streaming", maxBufferedResponseBytes)
+		return rw.enableStreaming("buffer limit")
+	}
+
+	return nil
 }
 
 func (rw *ResponseRewriter) Flush() {
