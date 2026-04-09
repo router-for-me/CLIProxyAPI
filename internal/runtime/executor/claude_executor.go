@@ -944,7 +944,7 @@ func claudeCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
 }
 
 func checkSystemInstructions(payload []byte) []byte {
-	return checkSystemInstructionsWithSigningMode(payload, false, false, "2.1.63", "", "")
+	return checkSystemInstructionsWithSigningMode(payload, false, false, false, "2.1.63", "", "")
 }
 
 func isClaudeOAuthToken(apiKey string) bool {
@@ -1263,7 +1263,7 @@ func generateBillingHeader(payload []byte, experimentalCCHSigning bool, version,
 }
 
 func checkSystemInstructionsWithMode(payload []byte, strictMode bool) []byte {
-	return checkSystemInstructionsWithSigningMode(payload, strictMode, false, "2.1.63", "", "")
+	return checkSystemInstructionsWithSigningMode(payload, strictMode, false, false, "2.1.63", "", "")
 }
 
 // checkSystemInstructionsWithSigningMode injects Claude Code-style system blocks:
@@ -1274,7 +1274,7 @@ func checkSystemInstructionsWithMode(payload []byte, strictMode bool) []byte {
 //	system[3]: system instructions (no cache_control)
 //	system[4]: doing tasks (no cache_control)
 //	system[5]: user system messages moved to first user message
-func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, experimentalCCHSigning bool, version, entrypoint, workload string) []byte {
+func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, experimentalCCHSigning bool, oauthMode bool, version, entrypoint, workload string) []byte {
 	system := gjson.GetBytes(payload, "system")
 
 	// Extract original message text for fingerprint computation (before billing injection).
@@ -1337,11 +1337,109 @@ func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, exp
 
 		if len(userSystemParts) > 0 {
 			combined := strings.Join(userSystemParts, "\n\n")
-			payload = prependToFirstUserMessage(payload, combined)
+			if oauthMode {
+				combined = sanitizeForwardedSystemPrompt(combined)
+			}
+			if strings.TrimSpace(combined) != "" {
+				payload = prependToFirstUserMessage(payload, combined)
+			}
 		}
 	}
 
 	return payload
+}
+
+// sanitizeForwardedSystemPrompt removes third-party branding and high-signal
+// product-specific prompt sections before forwarding context into the first user
+// message for Claude OAuth cloaking. The goal is to preserve neutral task/tool
+// guidance while stripping fingerprints like OpenCode branding, product docs,
+// and workflow sections that are unique to the third-party client.
+func sanitizeForwardedSystemPrompt(text string) string {
+	if strings.TrimSpace(text) == "" {
+		return ""
+	}
+
+	lines := strings.Split(text, "\n")
+	var kept []string
+	skipUntilNextHeading := false
+
+	shouldDropLine := func(line string) bool {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			return false
+		}
+		lower := strings.ToLower(trimmed)
+
+		dropSubstrings := []string{
+			"you are opencode",
+			"best coding agent on the planet",
+			"opencode.ai/docs",
+			"github.com/anomalyco/opencode",
+			"anomalyco/opencode",
+			"ctrl+p to list available actions",
+			"to give feedback, users should report the issue at",
+			"you are powered by the model named",
+			"the exact model id is",
+			"here is some useful information about the environment",
+			"skills provide specialized instructions and workflows",
+			"use the skill tool to load a skill",
+			"no skills are currently available",
+			"instructions from:",
+		}
+		for _, sub := range dropSubstrings {
+			if strings.Contains(lower, sub) {
+				return true
+			}
+		}
+
+		switch lower {
+		case "<env>", "</env>", "<directories>", "</directories>", "<example>", "</example>":
+			return true
+		}
+
+		return false
+	}
+
+	shouldDropHeading := func(line string) bool {
+		switch strings.ToLower(strings.TrimSpace(line)) {
+		case "# professional objectivity", "# task management", "# tool usage policy", "# code references":
+			return true
+		default:
+			return false
+		}
+	}
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+
+		if skipUntilNextHeading {
+			if strings.HasPrefix(trimmed, "# ") {
+				skipUntilNextHeading = false
+			} else {
+				continue
+			}
+		}
+
+		if shouldDropHeading(line) {
+			skipUntilNextHeading = true
+			continue
+		}
+
+		if shouldDropLine(line) {
+			continue
+		}
+
+		line = strings.ReplaceAll(line, "OpenCode", "the coding assistant")
+		line = strings.ReplaceAll(line, "opencode", "coding assistant")
+		kept = append(kept, line)
+	}
+
+	result := strings.Join(kept, "\n")
+	// Collapse excessive blank lines after removing sections.
+	for strings.Contains(result, "\n\n\n") {
+		result = strings.ReplaceAll(result, "\n\n\n", "\n\n")
+	}
+	return strings.TrimSpace(result)
 }
 
 // buildTextBlock constructs a JSON text block object with proper escaping.
@@ -1456,7 +1554,7 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 		billingVersion := helps.DefaultClaudeVersion(cfg)
 		entrypoint := parseEntrypointFromUA(clientUserAgent)
 		workload := getWorkloadFromContext(ctx)
-		payload = checkSystemInstructionsWithSigningMode(payload, strictMode, useCCHSigning, billingVersion, entrypoint, workload)
+		payload = checkSystemInstructionsWithSigningMode(payload, strictMode, useCCHSigning, oauthToken, billingVersion, entrypoint, workload)
 	}
 
 	// Inject fake user ID
