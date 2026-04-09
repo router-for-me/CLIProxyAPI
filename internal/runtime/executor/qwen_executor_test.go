@@ -46,6 +46,151 @@ func TestQwenExecutorParseSuffix(t *testing.T) {
 	}
 }
 
+func TestEnsureQwenSystemMessage_MergeStringSystem(t *testing.T) {
+	payload := []byte(`{
+		"model": "qwen3.6-plus",
+		"stream": true,
+		"messages": [
+			{ "role": "system", "content": "ABCDEFG" },
+			{ "role": "user", "content": [ { "type": "text", "text": "你好" } ] }
+		]
+	}`)
+
+	out, err := ensureQwenSystemMessage(payload)
+	if err != nil {
+		t.Fatalf("ensureQwenSystemMessage() error = %v", err)
+	}
+
+	msgs := gjson.GetBytes(out, "messages").Array()
+	if len(msgs) != 2 {
+		t.Fatalf("messages length = %d, want 2", len(msgs))
+	}
+	if msgs[0].Get("role").String() != "system" {
+		t.Fatalf("messages[0].role = %q, want %q", msgs[0].Get("role").String(), "system")
+	}
+	parts := msgs[0].Get("content").Array()
+	if len(parts) != 2 {
+		t.Fatalf("messages[0].content length = %d, want 2", len(parts))
+	}
+	if parts[0].Get("type").String() != "text" || parts[0].Get("cache_control.type").String() != "ephemeral" {
+		t.Fatalf("messages[0].content[0] = %s, want injected system part", parts[0].Raw)
+	}
+	if text := parts[0].Get("text").String(); text != "" && text != "You are Qwen Code." {
+		t.Fatalf("messages[0].content[0].text = %q, want empty string or default prompt", text)
+	}
+	if parts[1].Get("type").String() != "text" || parts[1].Get("text").String() != "ABCDEFG" {
+		t.Fatalf("messages[0].content[1] = %s, want text part with ABCDEFG", parts[1].Raw)
+	}
+	if msgs[1].Get("role").String() != "user" {
+		t.Fatalf("messages[1].role = %q, want %q", msgs[1].Get("role").String(), "user")
+	}
+}
+
+func TestEnsureQwenSystemMessage_MergeObjectSystem(t *testing.T) {
+	payload := []byte(`{
+		"messages": [
+			{ "role": "system", "content": { "type": "text", "text": "ABCDEFG" } },
+			{ "role": "user", "content": [ { "type": "text", "text": "你好" } ] }
+		]
+	}`)
+
+	out, err := ensureQwenSystemMessage(payload)
+	if err != nil {
+		t.Fatalf("ensureQwenSystemMessage() error = %v", err)
+	}
+
+	msgs := gjson.GetBytes(out, "messages").Array()
+	if len(msgs) != 2 {
+		t.Fatalf("messages length = %d, want 2", len(msgs))
+	}
+	parts := msgs[0].Get("content").Array()
+	if len(parts) != 2 {
+		t.Fatalf("messages[0].content length = %d, want 2", len(parts))
+	}
+	if parts[1].Get("text").String() != "ABCDEFG" {
+		t.Fatalf("messages[0].content[1].text = %q, want %q", parts[1].Get("text").String(), "ABCDEFG")
+	}
+}
+
+func TestEnsureQwenSystemMessage_PrependsWhenMissing(t *testing.T) {
+	payload := []byte(`{
+		"messages": [
+			{ "role": "user", "content": [ { "type": "text", "text": "你好" } ] }
+		]
+	}`)
+
+	out, err := ensureQwenSystemMessage(payload)
+	if err != nil {
+		t.Fatalf("ensureQwenSystemMessage() error = %v", err)
+	}
+
+	msgs := gjson.GetBytes(out, "messages").Array()
+	if len(msgs) != 2 {
+		t.Fatalf("messages length = %d, want 2", len(msgs))
+	}
+	if msgs[0].Get("role").String() != "system" {
+		t.Fatalf("messages[0].role = %q, want %q", msgs[0].Get("role").String(), "system")
+	}
+	if !msgs[0].Get("content").IsArray() || len(msgs[0].Get("content").Array()) == 0 {
+		t.Fatalf("messages[0].content = %s, want non-empty array", msgs[0].Get("content").Raw)
+	}
+	if msgs[1].Get("role").String() != "user" {
+		t.Fatalf("messages[1].role = %q, want %q", msgs[1].Get("role").String(), "user")
+	}
+}
+
+func TestEnsureQwenSystemMessage_MergesMultipleSystemMessages(t *testing.T) {
+	payload := []byte(`{
+		"messages": [
+			{ "role": "system", "content": "A" },
+			{ "role": "user", "content": [ { "type": "text", "text": "hi" } ] },
+			{ "role": "system", "content": "B" }
+		]
+	}`)
+
+	out, err := ensureQwenSystemMessage(payload)
+	if err != nil {
+		t.Fatalf("ensureQwenSystemMessage() error = %v", err)
+	}
+
+	msgs := gjson.GetBytes(out, "messages").Array()
+	if len(msgs) != 2 {
+		t.Fatalf("messages length = %d, want 2", len(msgs))
+	}
+	parts := msgs[0].Get("content").Array()
+	if len(parts) != 3 {
+		t.Fatalf("messages[0].content length = %d, want 3", len(parts))
+	}
+	if parts[1].Get("text").String() != "A" {
+		t.Fatalf("messages[0].content[1].text = %q, want %q", parts[1].Get("text").String(), "A")
+	}
+	if parts[2].Get("text").String() != "B" {
+		t.Fatalf("messages[0].content[2].text = %q, want %q", parts[2].Get("text").String(), "B")
+	}
+}
+
+func TestWrapQwenError_InsufficientQuotaDoesNotSetRetryAfter(t *testing.T) {
+	body := []byte(`{"error":{"code":"insufficient_quota","message":"You exceeded your current quota","type":"insufficient_quota"}}`)
+	code, retryAfter := wrapQwenError(context.Background(), http.StatusTooManyRequests, body)
+	if code != http.StatusTooManyRequests {
+		t.Fatalf("wrapQwenError status = %d, want %d", code, http.StatusTooManyRequests)
+	}
+	if retryAfter != nil {
+		t.Fatalf("wrapQwenError retryAfter = %v, want nil", *retryAfter)
+	}
+}
+
+func TestWrapQwenError_Maps403QuotaTo429WithoutRetryAfter(t *testing.T) {
+	body := []byte(`{"error":{"code":"insufficient_quota","message":"You exceeded your current quota","type":"insufficient_quota"}}`)
+	code, retryAfter := wrapQwenError(context.Background(), http.StatusForbidden, body)
+	if code != http.StatusTooManyRequests {
+		t.Fatalf("wrapQwenError status = %d, want %d", code, http.StatusTooManyRequests)
+	}
+	if retryAfter != nil {
+		t.Fatalf("wrapQwenError retryAfter = %v, want nil", *retryAfter)
+	}
+}
+
 func TestQwenExecutorExecuteUsesQwenV2ChatEndpoint(t *testing.T) {
 	var gotPath string
 	var gotQuery string

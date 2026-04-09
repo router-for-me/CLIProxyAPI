@@ -25,23 +25,13 @@ import (
 )
 
 const (
-	qwenUserAgent       = "QwenCode/0.13.2 (darwin; arm64)"
+	qwenUserAgent       = "QwenCode/0.14.2 (darwin; arm64)"
 	qwenRateLimitPerMin = 60          // 60 requests per minute per credential
 	qwenRateLimitWindow = time.Minute // sliding window duration
 	qwenAnonymousAuthID = "__qwen_anonymous__"
 )
 
 var qwenDefaultSystemMessage = []byte(`{"role":"system","content":[{"type":"text","text":"","cache_control":{"type":"ephemeral"}}]}`)
-
-// qwenBeijingLoc caches the Beijing timezone to avoid repeated LoadLocation syscalls.
-var qwenBeijingLoc = func() *time.Location {
-	loc, err := time.LoadLocation("Asia/Shanghai")
-	if err != nil || loc == nil {
-		log.Warnf("qwen: failed to load Asia/Shanghai timezone: %v, using fixed UTC+8", err)
-		return time.FixedZone("CST", 8*3600)
-	}
-	return loc
-}()
 
 // qwenQuotaCodes is a package-level set of error codes that indicate quota exhaustion.
 var qwenQuotaCodes = map[string]struct{}{
@@ -165,9 +155,9 @@ func wrapQwenError(ctx context.Context, httpCode int, body []byte) (errCode int,
 	// Qwen returns 403 for quota errors, 429 for rate limits
 	if (httpCode == http.StatusForbidden || httpCode == http.StatusTooManyRequests) && isQwenQuotaError(body) {
 		errCode = http.StatusTooManyRequests // Map to 429 to trigger quota logic
-		cooldown := timeUntilNextDay()
-		retryAfter = &cooldown
-		helps.LogWithRequestID(ctx).Warnf("qwen quota exceeded (http %d -> %d), cooling down until tomorrow (%v)", httpCode, errCode, cooldown)
+		// Do not force an excessively long retry-after (e.g. until tomorrow), otherwise
+		// the global request-retry scheduler may skip retries due to max-retry-interval.
+		helps.LogWithRequestID(ctx).Warnf("qwen quota exceeded (http %d -> %d)", httpCode, errCode)
 	} else if httpCode == http.StatusForbidden && isQwenAuthSessionError(body) {
 		errCode = http.StatusUnauthorized
 		helps.LogWithRequestID(ctx).Warnf("qwen auth/session error (http %d -> %d), treating as unauthorized: %s", httpCode, errCode, helps.SummarizeErrorBody("application/json", body))
@@ -195,46 +185,101 @@ func isQwenAuthSessionError(body []byte) bool {
 	return false
 }
 
-// timeUntilNextDay returns duration until midnight Beijing time (UTC+8).
-// Qwen's daily quota resets at 00:00 Beijing time.
-func timeUntilNextDay() time.Duration {
-	now := time.Now()
-	nowLocal := now.In(qwenBeijingLoc)
-	tomorrow := time.Date(nowLocal.Year(), nowLocal.Month(), nowLocal.Day()+1, 0, 0, 0, 0, qwenBeijingLoc)
-	return tomorrow.Sub(now)
-}
-
-// ensureQwenSystemMessage prepends a default system message if none exists in "messages".
+// ensureQwenSystemMessage ensures the request has a single system message at the beginning.
+// It always injects the default system prompt and merges any user-provided system messages
+// into the injected system message content to satisfy Qwen's strict message ordering rules.
 func ensureQwenSystemMessage(payload []byte) ([]byte, error) {
+	isInjectedSystemPart := func(part gjson.Result) bool {
+		if !part.Exists() || !part.IsObject() {
+			return false
+		}
+		if !strings.EqualFold(part.Get("type").String(), "text") {
+			return false
+		}
+		if !strings.EqualFold(part.Get("cache_control.type").String(), "ephemeral") {
+			return false
+		}
+		text := part.Get("text").String()
+		return text == "" || text == "You are Qwen Code."
+	}
+
+	defaultParts := gjson.ParseBytes(qwenDefaultSystemMessage).Get("content")
+	var systemParts []any
+	if defaultParts.Exists() && defaultParts.IsArray() {
+		for _, part := range defaultParts.Array() {
+			systemParts = append(systemParts, part.Value())
+		}
+	}
+	if len(systemParts) == 0 {
+		systemParts = append(systemParts, map[string]any{
+			"type": "text",
+			"text": "You are Qwen Code.",
+			"cache_control": map[string]any{
+				"type": "ephemeral",
+			},
+		})
+	}
+
+	appendSystemContent := func(content gjson.Result) {
+		makeTextPart := func(text string) map[string]any {
+			return map[string]any{
+				"type": "text",
+				"text": text,
+			}
+		}
+
+		if !content.Exists() || content.Type == gjson.Null {
+			return
+		}
+		if content.IsArray() {
+			for _, part := range content.Array() {
+				if part.Type == gjson.String {
+					systemParts = append(systemParts, makeTextPart(part.String()))
+					continue
+				}
+				if isInjectedSystemPart(part) {
+					continue
+				}
+				systemParts = append(systemParts, part.Value())
+			}
+			return
+		}
+		if content.Type == gjson.String {
+			systemParts = append(systemParts, makeTextPart(content.String()))
+			return
+		}
+		if content.IsObject() {
+			if isInjectedSystemPart(content) {
+				return
+			}
+			systemParts = append(systemParts, content.Value())
+			return
+		}
+		systemParts = append(systemParts, makeTextPart(content.String()))
+	}
+
 	messages := gjson.GetBytes(payload, "messages")
+	var nonSystemMessages []any
 	if messages.Exists() && messages.IsArray() {
 		for _, msg := range messages.Array() {
 			if strings.EqualFold(msg.Get("role").String(), "system") {
-				return payload, nil
+				appendSystemContent(msg.Get("content"))
+				continue
 			}
+			nonSystemMessages = append(nonSystemMessages, msg.Value())
 		}
-		var buf bytes.Buffer
-		buf.WriteByte('[')
-		buf.Write(qwenDefaultSystemMessage)
-		for _, msg := range messages.Array() {
-			buf.WriteByte(',')
-			buf.WriteString(msg.Raw)
-		}
-		buf.WriteByte(']')
-		updated, errSet := sjson.SetRawBytes(payload, "messages", buf.Bytes())
-		if errSet != nil {
-			return nil, fmt.Errorf("qwen executor: set default system message failed: %w", errSet)
-		}
-		return updated, nil
 	}
 
-	var buf bytes.Buffer
-	buf.WriteByte('[')
-	buf.Write(qwenDefaultSystemMessage)
-	buf.WriteByte(']')
-	updated, errSet := sjson.SetRawBytes(payload, "messages", buf.Bytes())
+	newMessages := make([]any, 0, 1+len(nonSystemMessages))
+	newMessages = append(newMessages, map[string]any{
+		"role":    "system",
+		"content": systemParts,
+	})
+	newMessages = append(newMessages, nonSystemMessages...)
+
+	updated, errSet := sjson.SetBytes(payload, "messages", newMessages)
 	if errSet != nil {
-		return nil, fmt.Errorf("qwen executor: set default system message failed: %w", errSet)
+		return nil, fmt.Errorf("qwen executor: set system message failed: %w", errSet)
 	}
 	return updated, nil
 }

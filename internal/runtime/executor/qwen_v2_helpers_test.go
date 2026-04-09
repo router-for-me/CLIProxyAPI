@@ -197,23 +197,23 @@ func TestQwenParseModelsResponseBuildsRegistryModels(t *testing.T) {
 	}
 }
 
-func TestWrapQwenErrorMapsQuotaTo429(t *testing.T) {
+func TestWrapQwenErrorMapsQuotaTo429WithoutRetryAfter(t *testing.T) {
 	code, retryAfter := wrapQwenError(context.Background(), http.StatusForbidden, []byte(`{"error":{"code":"insufficient_quota","message":"quota exceeded"}}`))
 	if code != http.StatusTooManyRequests {
 		t.Fatalf("code = %d, want %d", code, http.StatusTooManyRequests)
 	}
-	if retryAfter == nil {
-		t.Fatal("retryAfter = nil, want cooldown duration")
+	if retryAfter != nil {
+		t.Fatalf("retryAfter = %v, want nil", *retryAfter)
 	}
 }
 
-func TestWrapQwenErrorMapsQuota429ByMessageTo429(t *testing.T) {
+func TestWrapQwenErrorMapsQuota429ByMessageTo429WithoutRetryAfter(t *testing.T) {
 	code, retryAfter := wrapQwenError(context.Background(), http.StatusTooManyRequests, []byte(`{"error":{"type":"rate_limit_error","message":"free allocated quota exceeded for today"}}`))
 	if code != http.StatusTooManyRequests {
 		t.Fatalf("code = %d, want %d", code, http.StatusTooManyRequests)
 	}
-	if retryAfter == nil {
-		t.Fatal("retryAfter = nil, want cooldown duration")
+	if retryAfter != nil {
+		t.Fatalf("retryAfter = %v, want nil", *retryAfter)
 	}
 }
 

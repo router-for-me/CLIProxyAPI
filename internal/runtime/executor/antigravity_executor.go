@@ -24,6 +24,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
@@ -45,7 +46,7 @@ const (
 	antigravityGeneratePath        = "/v1internal:generateContent"
 	antigravityClientID            = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
 	antigravityClientSecret        = "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"
-	defaultAntigravityAgent        = "antigravity/1.21.9 darwin/arm64"
+	defaultAntigravityAgent        = "antigravity/1.21.9 darwin/arm64" // fallback only; overridden at runtime by misc.AntigravityUserAgent()
 	antigravityAuthType            = "antigravity"
 	refreshSkew                    = 3000 * time.Second
 	antigravityCreditsRetryTTL     = 5 * time.Hour
@@ -260,6 +261,28 @@ func classifyAntigravity429(body []byte) antigravity429Category {
 	return antigravity429Unknown
 }
 
+func antigravityHasQuotaResetDelayOrModelInfo(body []byte) bool {
+	if len(body) == 0 {
+		return false
+	}
+	details := gjson.GetBytes(body, "error.details")
+	if !details.Exists() || !details.IsArray() {
+		return false
+	}
+	for _, detail := range details.Array() {
+		if detail.Get("@type").String() != "type.googleapis.com/google.rpc.ErrorInfo" {
+			continue
+		}
+		if strings.TrimSpace(detail.Get("metadata.quotaResetDelay").String()) != "" {
+			return true
+		}
+		if strings.TrimSpace(detail.Get("metadata.model").String()) != "" {
+			return true
+		}
+	}
+	return false
+}
+
 func antigravityCreditsRetryEnabled(cfg *config.Config) bool {
 	return cfg != nil && cfg.QuotaExceeded.AntigravityCredits
 }
@@ -361,6 +384,12 @@ func shouldMarkAntigravityCreditsExhausted(statusCode int, body []byte, reqErr e
 	lowerBody := strings.ToLower(string(body))
 	for _, keyword := range antigravityCreditsExhaustedKeywords {
 		if strings.Contains(lowerBody, keyword) {
+			if keyword == "resource has been exhausted" &&
+				statusCode == http.StatusTooManyRequests &&
+				classifyAntigravity429(body) == antigravity429Unknown &&
+				!antigravityHasQuotaResetDelayOrModelInfo(body) {
+				return false
+			}
 			return true
 		}
 	}
@@ -574,6 +603,14 @@ attemptLoop:
 					log.Debugf("antigravity executor: rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
 					continue
 				}
+				if antigravityShouldRetryTransientResourceExhausted429(httpResp.StatusCode, bodyBytes) && attempt+1 < attempts {
+					delay := antigravityTransient429RetryDelay(attempt)
+					log.Debugf("antigravity executor: transient 429 resource exhausted for model %s, retrying in %s (attempt %d/%d)", baseModel, delay, attempt+1, attempts)
+					if errWait := antigravityWait(ctx, delay); errWait != nil {
+						return resp, errWait
+					}
+					continue attemptLoop
+				}
 				if antigravityShouldRetryNoCapacity(httpResp.StatusCode, bodyBytes) {
 					if idx+1 < len(baseURLs) {
 						log.Debugf("antigravity executor: no capacity on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
@@ -740,6 +777,14 @@ attemptLoop:
 				if httpResp.StatusCode == http.StatusTooManyRequests && idx+1 < len(baseURLs) {
 					log.Debugf("antigravity executor: rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
 					continue
+				}
+				if antigravityShouldRetryTransientResourceExhausted429(httpResp.StatusCode, bodyBytes) && attempt+1 < attempts {
+					delay := antigravityTransient429RetryDelay(attempt)
+					log.Debugf("antigravity executor: transient 429 resource exhausted for model %s, retrying in %s (attempt %d/%d)", baseModel, delay, attempt+1, attempts)
+					if errWait := antigravityWait(ctx, delay); errWait != nil {
+						return resp, errWait
+					}
+					continue attemptLoop
 				}
 				if antigravityShouldRetryNoCapacity(httpResp.StatusCode, bodyBytes) {
 					if idx+1 < len(baseURLs) {
@@ -1156,6 +1201,14 @@ attemptLoop:
 				if httpResp.StatusCode == http.StatusTooManyRequests && idx+1 < len(baseURLs) {
 					log.Debugf("antigravity executor: rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
 					continue
+				}
+				if antigravityShouldRetryTransientResourceExhausted429(httpResp.StatusCode, bodyBytes) && attempt+1 < attempts {
+					delay := antigravityTransient429RetryDelay(attempt)
+					log.Debugf("antigravity executor: transient 429 resource exhausted for model %s, retrying in %s (attempt %d/%d)", baseModel, delay, attempt+1, attempts)
+					if errWait := antigravityWait(ctx, delay); errWait != nil {
+						return nil, errWait
+					}
+					continue attemptLoop
 				}
 				if antigravityShouldRetryNoCapacity(httpResp.StatusCode, bodyBytes) {
 					if idx+1 < len(baseURLs) {
@@ -1739,7 +1792,7 @@ func resolveUserAgent(auth *cliproxyauth.Auth) string {
 			}
 		}
 	}
-	return defaultAntigravityAgent
+	return misc.AntigravityUserAgent()
 }
 
 func antigravityRetryAttempts(auth *cliproxyauth.Auth, cfg *config.Config) int {
@@ -1773,6 +1826,24 @@ func antigravityShouldRetryNoCapacity(statusCode int, body []byte) bool {
 	return strings.Contains(msg, "no capacity available")
 }
 
+func antigravityShouldRetryTransientResourceExhausted429(statusCode int, body []byte) bool {
+	if statusCode != http.StatusTooManyRequests {
+		return false
+	}
+	if len(body) == 0 {
+		return false
+	}
+	if classifyAntigravity429(body) != antigravity429Unknown {
+		return false
+	}
+	status := strings.TrimSpace(gjson.GetBytes(body, "error.status").String())
+	if !strings.EqualFold(status, "RESOURCE_EXHAUSTED") {
+		return false
+	}
+	msg := strings.ToLower(string(body))
+	return strings.Contains(msg, "resource has been exhausted")
+}
+
 func antigravityNoCapacityRetryDelay(attempt int) time.Duration {
 	if attempt < 0 {
 		attempt = 0
@@ -1780,6 +1851,17 @@ func antigravityNoCapacityRetryDelay(attempt int) time.Duration {
 	delay := time.Duration(attempt+1) * 250 * time.Millisecond
 	if delay > 2*time.Second {
 		delay = 2 * time.Second
+	}
+	return delay
+}
+
+func antigravityTransient429RetryDelay(attempt int) time.Duration {
+	if attempt < 0 {
+		attempt = 0
+	}
+	delay := time.Duration(attempt+1) * 100 * time.Millisecond
+	if delay > 500*time.Millisecond {
+		delay = 500 * time.Millisecond
 	}
 	return delay
 }
