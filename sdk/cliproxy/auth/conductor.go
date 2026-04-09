@@ -166,6 +166,37 @@ type Manager struct {
 	refreshSemaphore chan struct{}
 }
 
+// shouldAttemptQwenImmediateRetry checks if the error is a Qwen 429 and the
+// auth has a refresh token, so one synchronous refresh+retry should be attempted.
+func shouldAttemptQwenImmediateRetry(err error, auth *Auth) bool {
+	if err == nil || auth == nil {
+		return false
+	}
+	if !strings.EqualFold(auth.Provider, "qwen") {
+		return false
+	}
+	if statusCodeFromError(err) != http.StatusTooManyRequests {
+		return false
+	}
+	if auth.Metadata == nil {
+		return false
+	}
+	refreshToken, _ := auth.Metadata["refresh_token"].(string)
+	return strings.TrimSpace(refreshToken) != ""
+}
+
+// qwenImmediateRefreshSync performs a synchronous refresh for a qwen auth and
+// returns the latest in-memory auth clone.
+func (m *Manager) qwenImmediateRefreshSync(ctx context.Context, authID string) *Auth {
+	m.refreshAuth(ctx, authID)
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if updated, ok := m.auths[authID]; ok && updated != nil {
+		return updated.Clone()
+	}
+	return nil
+}
+
 // NewManager constructs a manager with optional custom selector and hook.
 func NewManager(store Store, selector Selector, hook Hook) *Manager {
 	if selector == nil {
@@ -811,11 +842,23 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		resultModel := m.stateModelForExecution(auth, routeModel, execModel, pooled)
 		execReq := req
 		execReq.Model = execModel
+		qwenImmediateRetryAttempted := false
+
+	doExecuteStream:
 		streamResult, errStream := executor.ExecuteStream(ctx, auth, execReq, opts)
 		if errStream != nil {
 			if errCtx := ctx.Err(); errCtx != nil {
 				return nil, errCtx
 			}
+
+			if !qwenImmediateRetryAttempted && shouldAttemptQwenImmediateRetry(errStream, auth) {
+				qwenImmediateRetryAttempted = true
+				if refreshedAuth := m.qwenImmediateRefreshSync(ctx, auth.ID); refreshedAuth != nil {
+					auth = refreshedAuth
+					goto doExecuteStream
+				}
+			}
+
 			rerr := &Error{Message: errStream.Error()}
 			if se, ok := errors.AsType[cliproxyexecutor.StatusError](errStream); ok && se != nil {
 				rerr.HTTPStatus = se.StatusCode()
@@ -832,6 +875,15 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 
 		buffered, closed, bootstrapErr := readStreamBootstrap(ctx, streamResult.Chunks)
 		if bootstrapErr != nil {
+			if !qwenImmediateRetryAttempted && shouldAttemptQwenImmediateRetry(bootstrapErr, auth) {
+				qwenImmediateRetryAttempted = true
+				if refreshedAuth := m.qwenImmediateRefreshSync(ctx, auth.ID); refreshedAuth != nil {
+					discardStreamChunks(streamResult.Chunks)
+					auth = refreshedAuth
+					goto doExecuteStream
+				}
+			}
+
 			if errCtx := ctx.Err(); errCtx != nil {
 				discardStreamChunks(streamResult.Chunks)
 				return nil, errCtx
@@ -1287,16 +1339,35 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		}
 		attempted[auth.ID] = struct{}{}
 		var authErr error
+		qwenImmediateRetryAttempted := false
+
 		for _, upstreamModel := range models {
 			resultModel := m.stateModelForExecution(auth, routeModel, upstreamModel, pooled)
 			execReq := req
 			execReq.Model = upstreamModel
+
+		doExecute:
 			resp, errExec := executor.Execute(execCtx, auth, execReq, opts)
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: errExec == nil}
 			if errExec != nil {
 				if errCtx := execCtx.Err(); errCtx != nil {
 					return cliproxyexecutor.Response{}, errCtx
 				}
+
+				if !qwenImmediateRetryAttempted && shouldAttemptQwenImmediateRetry(errExec, auth) {
+					logEntryWithRequestID(execCtx).WithFields(log.Fields{
+						"auth_id": auth.ID,
+						"model":   execReq.Model,
+					}).Info("qwen 429 encountered, attempting synchronous refresh for immediate retry")
+
+					qwenImmediateRetryAttempted = true
+					if refreshedAuth := m.qwenImmediateRefreshSync(execCtx, auth.ID); refreshedAuth != nil {
+						// Update the auth object to the refreshed one
+						auth = refreshedAuth
+						goto doExecute
+					}
+				}
+
 				result.Error = &Error{Message: errExec.Error()}
 				if se, ok := errors.AsType[cliproxyexecutor.StatusError](errExec); ok && se != nil {
 					result.Error.HTTPStatus = se.StatusCode()
@@ -1365,16 +1436,35 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		}
 		attempted[auth.ID] = struct{}{}
 		var authErr error
+		qwenImmediateRetryAttempted := false
+
 		for _, upstreamModel := range models {
 			resultModel := m.stateModelForExecution(auth, routeModel, upstreamModel, pooled)
 			execReq := req
 			execReq.Model = upstreamModel
+
+		doExecute:
 			resp, errExec := executor.CountTokens(execCtx, auth, execReq, opts)
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: errExec == nil}
 			if errExec != nil {
 				if errCtx := execCtx.Err(); errCtx != nil {
 					return cliproxyexecutor.Response{}, errCtx
 				}
+
+				if !qwenImmediateRetryAttempted && shouldAttemptQwenImmediateRetry(errExec, auth) {
+					logEntryWithRequestID(execCtx).WithFields(log.Fields{
+						"auth_id": auth.ID,
+						"model":   execReq.Model,
+					}).Info("qwen 429 encountered, attempting synchronous refresh for immediate retry (CountTokens)")
+
+					qwenImmediateRetryAttempted = true
+					if refreshedAuth := m.qwenImmediateRefreshSync(execCtx, auth.ID); refreshedAuth != nil {
+						// Update the auth object to the refreshed one
+						auth = refreshedAuth
+						goto doExecute
+					}
+				}
+
 				result.Error = &Error{Message: errExec.Error()}
 				if se, ok := errors.AsType[cliproxyexecutor.StatusError](errExec); ok && se != nil {
 					result.Error.HTTPStatus = se.StatusCode()
@@ -1954,6 +2044,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	clearModelQuota := false
 	setModelQuota := false
 	var authSnapshot *Auth
+	var pendingQwenRefreshID string
 
 	m.mu.Lock()
 	if auth, ok := m.auths[result.AuthID]; ok && auth != nil {
@@ -2026,6 +2117,33 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								shouldSuspendModel = true
 							}
 						case 429:
+							// Qwen 429: 失败后尝试刷新 token（兜底路径）
+							isQwenProvider := strings.EqualFold(auth.Provider, "qwen")
+							refreshToken := ""
+							if auth.Metadata != nil {
+								refreshToken, _ = auth.Metadata["refresh_token"].(string)
+							}
+							hasRefreshToken := strings.TrimSpace(refreshToken) != ""
+							if !disableCooling && isQwenProvider && auth.Metadata != nil {
+								if hasRefreshToken {
+									pendingQwenRefreshID = auth.ID
+									state.Unavailable = false
+									state.Status = StatusActive
+									state.StatusMessage = "qwen quota exceeded, refreshing token"
+									state.NextRetryAfter = time.Time{}
+									state.LastError = nil
+									state.Quota = QuotaState{}
+									auth.StatusMessage = "qwen quota exceeded, refreshing token"
+									auth.LastError = nil
+									auth.NextRetryAfter = time.Time{}
+									break
+								}
+								log.WithFields(log.Fields{
+									"auth_id":  auth.ID,
+									"provider": auth.Provider,
+									"model":    result.Model,
+								}).Warn("qwen 429 refresh skipped: missing refresh_token")
+							}
 							var next time.Time
 							backoffLevel := state.Quota.BackoffLevel
 							if !disableCooling {
@@ -2076,7 +2194,10 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		authSnapshot = auth.Clone()
 	}
 	m.mu.Unlock()
-	if m.scheduler != nil && authSnapshot != nil {
+	if pendingQwenRefreshID != "" {
+		m.refreshAuth(ctx, pendingQwenRefreshID)
+	}
+	if pendingQwenRefreshID == "" && m.scheduler != nil && authSnapshot != nil {
 		m.scheduler.upsertAuth(authSnapshot)
 	}
 
