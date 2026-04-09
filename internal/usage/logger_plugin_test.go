@@ -2,6 +2,8 @@ package usage
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -93,4 +95,76 @@ func TestRequestStatisticsMergeSnapshotDedupIgnoresLatency(t *testing.T) {
 	if len(details) != 1 {
 		t.Fatalf("details len = %d, want 1", len(details))
 	}
+}
+
+func TestSaveAndLoadSnapshotFile(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Record(context.Background(), coreusage.Record{
+		APIKey:      "persisted-key",
+		Model:       "gpt-5.4",
+		RequestedAt: time.Date(2026, 3, 21, 8, 0, 0, 0, time.UTC),
+		Detail: coreusage.Detail{
+			InputTokens:  11,
+			OutputTokens: 22,
+			TotalTokens:  33,
+		},
+	})
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "usage-statistics.json")
+	if err := SaveSnapshotFile(path, stats); err != nil {
+		t.Fatalf("SaveSnapshotFile error: %v", err)
+	}
+
+	restored := NewRequestStatistics()
+	result, err := LoadSnapshotFile(path, restored)
+	if err != nil {
+		t.Fatalf("LoadSnapshotFile error: %v", err)
+	}
+	if result.Added != 1 || result.Skipped != 0 {
+		t.Fatalf("load merge result = %+v, want added=1 skipped=0", result)
+	}
+
+	snapshot := restored.Snapshot()
+	if snapshot.TotalRequests != 1 {
+		t.Fatalf("total requests = %d, want 1", snapshot.TotalRequests)
+	}
+	if snapshot.TotalTokens != 33 {
+		t.Fatalf("total tokens = %d, want 33", snapshot.TotalTokens)
+	}
+	details := snapshot.APIs["persisted-key"].Models["gpt-5.4"].Details
+	if len(details) != 1 {
+		t.Fatalf("details len = %d, want 1", len(details))
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("stat persisted file error: %v", err)
+	}
+}
+
+func TestStartAutoPersistenceFlushesOnCancel(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Record(context.Background(), coreusage.Record{
+		APIKey:      "cancel-key",
+		Model:       "gpt-5.4",
+		RequestedAt: time.Date(2026, 3, 21, 9, 0, 0, 0, time.UTC),
+		Detail: coreusage.Detail{
+			InputTokens:  5,
+			OutputTokens: 7,
+			TotalTokens:  12,
+		},
+	})
+
+	path := filepath.Join(t.TempDir(), "usage-statistics.json")
+	ctx, cancel := context.WithCancel(context.Background())
+	StartAutoPersistence(ctx, path, time.Hour, stats)
+	cancel()
+
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("usage snapshot file was not flushed on cancel")
 }
