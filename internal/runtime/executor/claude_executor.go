@@ -45,6 +45,41 @@ type ClaudeExecutor struct {
 // Previously "proxy_" was used but this is a detectable fingerprint difference.
 const claudeToolPrefix = ""
 
+// oauthToolRenameMap maps OpenCode-style (lowercase) tool names to Claude Code-style
+// (TitleCase) names. Anthropic uses tool name fingerprinting to detect third-party
+// clients on OAuth traffic. Renaming to official names avoids extra-usage billing.
+// Tools without a Claude Code equivalent (e.g. "question", "skill") are removed entirely.
+var oauthToolRenameMap = map[string]string{
+	"bash":       "Bash",
+	"read":       "Read",
+	"write":      "Write",
+	"edit":       "Edit",
+	"glob":       "Glob",
+	"grep":       "Grep",
+	"task":       "Task",
+	"webfetch":  "WebFetch",
+	"todowrite": "TodoWrite",
+	"ls":         "LS",
+	"todoread":   "TodoRead",
+	"notebookedit": "NotebookEdit",
+}
+
+// oauthToolRenameReverseMap is the inverse of oauthToolRenameMap for response decoding.
+var oauthToolRenameReverseMap = func() map[string]string {
+	m := make(map[string]string, len(oauthToolRenameMap))
+	for k, v := range oauthToolRenameMap {
+		m[v] = k
+	}
+	return m
+}()
+
+// oauthToolsToRemove lists tool names that have no Claude Code equivalent and must
+// be stripped from OAuth requests to avoid third-party fingerprinting.
+var oauthToolsToRemove = map[string]bool{
+	"question": true,
+	"skill":    true,
+}
+
 // Anthropic-compatible upstreams may reject or even crash when Claude models
 // omit max_tokens. Prefer registered model metadata before using a fallback.
 const defaultModelMaxTokens = 1024
@@ -161,6 +196,12 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if oauthToken && !auth.ToolPrefixDisabled() {
 		bodyForUpstream = applyClaudeToolPrefix(body, claudeToolPrefix)
 	}
+	// Remap third-party tool names to Claude Code equivalents and remove
+	// tools without official counterparts. This prevents Anthropic from
+	// fingerprinting the request as third-party via tool naming patterns.
+	if oauthToken {
+		bodyForUpstream = remapOAuthToolNames(bodyForUpstream)
+	}
 	// Enable cch signing by default for OAuth tokens (not just experimental flag).
 	// Claude Code always computes cch; missing or invalid cch is a detectable fingerprint.
 	if oauthToken || experimentalCCHSigningEnabled(e.cfg, auth) {
@@ -256,6 +297,10 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if isClaudeOAuthToken(apiKey) && !auth.ToolPrefixDisabled() {
 		data = stripClaudeToolPrefixFromResponse(data, claudeToolPrefix)
 	}
+	// Reverse the OAuth tool name remap so the downstream client sees original names.
+	if isClaudeOAuthToken(apiKey) {
+		data = reverseRemapOAuthToolNames(data)
+	}
 	var param any
 	out := sdktranslator.TranslateNonStream(
 		ctx,
@@ -331,6 +376,12 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	oauthToken := isClaudeOAuthToken(apiKey)
 	if oauthToken && !auth.ToolPrefixDisabled() {
 		bodyForUpstream = applyClaudeToolPrefix(body, claudeToolPrefix)
+	}
+	// Remap third-party tool names to Claude Code equivalents and remove
+	// tools without official counterparts. This prevents Anthropic from
+	// fingerprinting the request as third-party via tool naming patterns.
+	if oauthToken {
+		bodyForUpstream = remapOAuthToolNames(bodyForUpstream)
 	}
 	// Enable cch signing by default for OAuth tokens (not just experimental flag).
 	if oauthToken || experimentalCCHSigningEnabled(e.cfg, auth) {
@@ -424,6 +475,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				if isClaudeOAuthToken(apiKey) && !auth.ToolPrefixDisabled() {
 					line = stripClaudeToolPrefixFromStreamLine(line, claudeToolPrefix)
 				}
+				if isClaudeOAuthToken(apiKey) {
+					line = reverseRemapOAuthToolNamesFromStreamLine(line)
+				}
 				// Forward the line as-is to preserve SSE format
 				cloned := make([]byte, len(line)+1)
 				copy(cloned, line)
@@ -450,6 +504,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			}
 			if isClaudeOAuthToken(apiKey) && !auth.ToolPrefixDisabled() {
 				line = stripClaudeToolPrefixFromStreamLine(line, claudeToolPrefix)
+			}
+			if isClaudeOAuthToken(apiKey) {
+				line = reverseRemapOAuthToolNamesFromStreamLine(line)
 			}
 			chunks := sdktranslator.TranslateStream(
 				ctx,
@@ -502,6 +559,10 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	extraBetas, body = extractAndRemoveBetas(body)
 	if isClaudeOAuthToken(apiKey) && !auth.ToolPrefixDisabled() {
 		body = applyClaudeToolPrefix(body, claudeToolPrefix)
+	}
+	// Remap tool names for OAuth token requests to avoid third-party fingerprinting.
+	if isClaudeOAuthToken(apiKey) {
+		body = remapOAuthToolNames(body)
 	}
 
 	url := fmt.Sprintf("%s/v1/messages/count_tokens?beta=true", baseURL)
@@ -949,6 +1010,203 @@ func checkSystemInstructions(payload []byte) []byte {
 
 func isClaudeOAuthToken(apiKey string) bool {
 	return strings.Contains(apiKey, "sk-ant-oat")
+}
+
+// remapOAuthToolNames renames third-party tool names to Claude Code equivalents
+// and removes tools without an official counterpart. This prevents Anthropic from
+// fingerprinting the request as a third-party client via tool naming patterns.
+//
+// It operates on: tools[].name, tool_choice.name, and all tool_use/tool_reference
+// references in messages. Removed tools' corresponding tool_result blocks are preserved
+// (they just become orphaned, which is safe for Claude).
+func remapOAuthToolNames(body []byte) []byte {
+	// 1. Rename and filter tools array
+	tools := gjson.GetBytes(body, "tools")
+	if !tools.Exists() || !tools.IsArray() {
+		return body
+	}
+
+	// First pass: rename tools that have Claude Code equivalents.
+	tools.ForEach(func(idx, tool gjson.Result) bool {
+		// Skip built-in tools (web_search, code_execution, etc.) which have a "type" field
+		if tool.Get("type").Exists() && tool.Get("type").String() != "" {
+			return true
+		}
+		name := tool.Get("name").String()
+		if newName, ok := oauthToolRenameMap[name]; ok {
+			path := fmt.Sprintf("tools.%d.name", idx.Int())
+			body, _ = sjson.SetBytes(body, path, newName)
+		}
+		return true
+	})
+
+	// Second pass: remove tools that are in oauthToolsToRemove by rebuilding the array.
+	// This avoids index-shifting issues with sjson.DeleteBytes.
+	var newTools []gjson.Result
+	toRemove := false
+	tools.ForEach(func(_, tool gjson.Result) bool {
+		// Skip built-in tools from removal check
+		if tool.Get("type").Exists() && tool.Get("type").String() != "" {
+			newTools = append(newTools, tool)
+			return true
+		}
+		name := tool.Get("name").String()
+		if oauthToolsToRemove[name] {
+			toRemove = true
+			return true
+		}
+		newTools = append(newTools, tool)
+		return true
+	})
+
+	if toRemove {
+		// Rebuild the tools array without removed tools
+		var toolsJSON strings.Builder
+		toolsJSON.WriteByte('[')
+		for i, t := range newTools {
+			if i > 0 {
+				toolsJSON.WriteByte(',')
+			}
+			toolsJSON.WriteString(t.Raw)
+		}
+		toolsJSON.WriteByte(']')
+		body, _ = sjson.SetRawBytes(body, "tools", []byte(toolsJSON.String()))
+	}
+
+	// 2. Rename tool_choice if it references a known tool
+	toolChoiceType := gjson.GetBytes(body, "tool_choice.type").String()
+	if toolChoiceType == "tool" {
+		tcName := gjson.GetBytes(body, "tool_choice.name").String()
+		if newName, ok := oauthToolRenameMap[tcName]; ok {
+			body, _ = sjson.SetBytes(body, "tool_choice.name", newName)
+		}
+	}
+
+	// 3. Rename tool references in messages
+	messages := gjson.GetBytes(body, "messages")
+	if messages.Exists() && messages.IsArray() {
+		messages.ForEach(func(msgIndex, msg gjson.Result) bool {
+			content := msg.Get("content")
+			if !content.Exists() || !content.IsArray() {
+				return true
+			}
+			content.ForEach(func(contentIndex, part gjson.Result) bool {
+				partType := part.Get("type").String()
+				switch partType {
+				case "tool_use":
+					name := part.Get("name").String()
+					if newName, ok := oauthToolRenameMap[name]; ok {
+						path := fmt.Sprintf("messages.%d.content.%d.name", msgIndex.Int(), contentIndex.Int())
+						body, _ = sjson.SetBytes(body, path, newName)
+					}
+				case "tool_reference":
+					toolName := part.Get("tool_name").String()
+					if newName, ok := oauthToolRenameMap[toolName]; ok {
+						path := fmt.Sprintf("messages.%d.content.%d.tool_name", msgIndex.Int(), contentIndex.Int())
+						body, _ = sjson.SetBytes(body, path, newName)
+					}
+				case "tool_result":
+					// Handle nested tool_reference blocks inside tool_result.content[]
+					toolID := part.Get("tool_use_id").String()
+					_ = toolID // tool_use_id stays as-is
+					nestedContent := part.Get("content")
+					if nestedContent.Exists() && nestedContent.IsArray() {
+						nestedContent.ForEach(func(nestedIndex, nestedPart gjson.Result) bool {
+							if nestedPart.Get("type").String() == "tool_reference" {
+								nestedToolName := nestedPart.Get("tool_name").String()
+								if newName, ok := oauthToolRenameMap[nestedToolName]; ok {
+									nestedPath := fmt.Sprintf("messages.%d.content.%d.content.%d.tool_name", msgIndex.Int(), contentIndex.Int(), nestedIndex.Int())
+									body, _ = sjson.SetBytes(body, nestedPath, newName)
+								}
+							}
+							return true
+						})
+					}
+				}
+				return true
+			})
+			return true
+		})
+	}
+
+	return body
+}
+
+// reverseRemapOAuthToolNames reverses the tool name mapping for non-stream responses.
+// It maps Claude Code TitleCase names back to the original lowercase names so the
+// downstream client receives tool names it recognizes.
+func reverseRemapOAuthToolNames(body []byte) []byte {
+	content := gjson.GetBytes(body, "content")
+	if !content.Exists() || !content.IsArray() {
+		return body
+	}
+	content.ForEach(func(index, part gjson.Result) bool {
+		partType := part.Get("type").String()
+		switch partType {
+		case "tool_use":
+			name := part.Get("name").String()
+			if origName, ok := oauthToolRenameReverseMap[name]; ok {
+				path := fmt.Sprintf("content.%d.name", index.Int())
+				body, _ = sjson.SetBytes(body, path, origName)
+			}
+		case "tool_reference":
+			toolName := part.Get("tool_name").String()
+			if origName, ok := oauthToolRenameReverseMap[toolName]; ok {
+				path := fmt.Sprintf("content.%d.tool_name", index.Int())
+				body, _ = sjson.SetBytes(body, path, origName)
+			}
+		}
+		return true
+	})
+	return body
+}
+
+// reverseRemapOAuthToolNamesFromStreamLine reverses the tool name mapping for SSE stream lines.
+func reverseRemapOAuthToolNamesFromStreamLine(line []byte) []byte {
+	payload := helps.JSONPayload(line)
+	if len(payload) == 0 || !gjson.ValidBytes(payload) {
+		return line
+	}
+
+	contentBlock := gjson.GetBytes(payload, "content_block")
+	if !contentBlock.Exists() {
+		return line
+	}
+
+	blockType := contentBlock.Get("type").String()
+	var updated []byte
+	var err error
+
+	switch blockType {
+	case "tool_use":
+		name := contentBlock.Get("name").String()
+		if origName, ok := oauthToolRenameReverseMap[name]; ok {
+			updated, err = sjson.SetBytes(payload, "content_block.name", origName)
+			if err != nil {
+				return line
+			}
+		} else {
+			return line
+		}
+	case "tool_reference":
+		toolName := contentBlock.Get("tool_name").String()
+		if origName, ok := oauthToolRenameReverseMap[toolName]; ok {
+			updated, err = sjson.SetBytes(payload, "content_block.tool_name", origName)
+			if err != nil {
+				return line
+			}
+		} else {
+			return line
+		}
+	default:
+		return line
+	}
+
+	trimmed := bytes.TrimSpace(line)
+	if bytes.HasPrefix(trimmed, []byte("data:")) {
+		return append([]byte("data: "), updated...)
+	}
+	return updated
 }
 
 func applyClaudeToolPrefix(body []byte, prefix string) []byte {
