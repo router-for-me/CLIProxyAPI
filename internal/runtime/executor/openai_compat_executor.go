@@ -73,6 +73,7 @@ func (e *OpenAICompatExecutor) HttpRequest(ctx context.Context, auth *cliproxyau
 
 func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	circuitModel := circuitBreakerModelID(opts, req.Model)
 
 	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
 	defer reporter.trackFailure(ctx, &err)
@@ -157,7 +158,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 			if compatCfg != nil && compatCfg.CircuitBreakerRecoveryTimeout > 0 {
 				timeoutSec = compatCfg.CircuitBreakerRecoveryTimeout
 			}
-			registry.GetGlobalRegistry().RecordFailure(auth.ID, baseModel, threshold, timeoutSec)
+			registry.GetGlobalRegistry().RecordFailure(auth.ID, circuitModel, threshold, timeoutSec)
 		}
 		return resp, err
 	}
@@ -182,7 +183,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 			if compatCfg != nil && compatCfg.CircuitBreakerRecoveryTimeout > 0 {
 				timeoutSec = compatCfg.CircuitBreakerRecoveryTimeout
 			}
-			registry.GetGlobalRegistry().RecordFailure(auth.ID, baseModel, threshold, timeoutSec)
+			registry.GetGlobalRegistry().RecordFailure(auth.ID, circuitModel, threshold, timeoutSec)
 		}
 		return resp, err
 	}
@@ -200,13 +201,14 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, body, &param)
 	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
 	if auth != nil {
-		registry.GetGlobalRegistry().RecordSuccess(auth.ID, baseModel)
+		registry.GetGlobalRegistry().RecordSuccess(auth.ID, circuitModel)
 	}
 	return resp, nil
 }
 
 func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	circuitModel := circuitBreakerModelID(opts, req.Model)
 
 	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
 	defer reporter.trackFailure(ctx, &err)
@@ -287,7 +289,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			if compatCfg != nil && compatCfg.CircuitBreakerRecoveryTimeout > 0 {
 				timeoutSec = compatCfg.CircuitBreakerRecoveryTimeout
 			}
-			registry.GetGlobalRegistry().RecordFailure(auth.ID, baseModel, threshold, timeoutSec)
+			registry.GetGlobalRegistry().RecordFailure(auth.ID, circuitModel, threshold, timeoutSec)
 		}
 		return nil, err
 	}
@@ -310,7 +312,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			if compatCfg != nil && compatCfg.CircuitBreakerRecoveryTimeout > 0 {
 				timeoutSec = compatCfg.CircuitBreakerRecoveryTimeout
 			}
-			registry.GetGlobalRegistry().RecordFailure(auth.ID, baseModel, threshold, timeoutSec)
+			registry.GetGlobalRegistry().RecordFailure(auth.ID, circuitModel, threshold, timeoutSec)
 		}
 		return nil, err
 	}
@@ -378,10 +380,24 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		// Ensure we record the request if no usage chunk was ever seen
 		reporter.ensurePublished(ctx)
 		if auth != nil {
-			registry.GetGlobalRegistry().RecordSuccess(auth.ID, baseModel)
+			registry.GetGlobalRegistry().RecordSuccess(auth.ID, circuitModel)
 		}
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
+}
+
+func circuitBreakerModelID(opts cliproxyexecutor.Options, fallback string) string {
+	model := payloadRequestedModel(opts, fallback)
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return ""
+	}
+	parsed := thinking.ParseSuffix(model)
+	baseModel := strings.TrimSpace(parsed.ModelName)
+	if baseModel != "" {
+		return baseModel
+	}
+	return model
 }
 
 func (e *OpenAICompatExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {

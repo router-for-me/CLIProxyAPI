@@ -792,6 +792,7 @@ func (r *ModelRegistry) RecordFailure(clientID, modelID string, threshold int, r
 
 	registration, exists := r.models[modelID]
 	if !exists || registration == nil {
+		log.Debugf("Circuit breaker failure ignored: model not registered (client=%s, model=%s, threshold=%d)", clientID, modelID, threshold)
 		return
 	}
 	if registration.CircuitBreakerClients == nil {
