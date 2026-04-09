@@ -168,8 +168,21 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 
 	lines := bytes.Split(data, []byte("\n"))
+
+	// Collect output items from response.output_item.done events so we can
+	// patch them back into response.completed if upstream omits them.
 	outputItemsByIndex := make(map[int64][]byte)
 	var outputItemsFallback [][]byte
+
+	// Accumulate text from response.output_text.delta events. The gpt-5.x
+	// reasoning family only emits its assistant text via delta events and
+	// does not include an output message item with content[].type ==
+	// "output_text" in the final response.completed event. We collect deltas
+	// here so we can inject them into response.completed before handing the
+	// event to the non-stream translator.
+	var accumulatedText strings.Builder
+	var completedLine []byte
+
 	for _, line := range lines {
 		if !bytes.HasPrefix(line, dataTag) {
 			continue
@@ -192,44 +205,113 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 			continue
 		}
 
-		if eventType != "response.completed" {
+		if eventType == "response.output_text.delta" {
+			if delta := gjson.GetBytes(eventData, "delta"); delta.Exists() {
+				accumulatedText.WriteString(delta.String())
+			}
 			continue
 		}
 
-		if detail, ok := helps.ParseCodexUsage(eventData); ok {
-			reporter.Publish(ctx, detail)
+		if eventType == "response.completed" {
+			completedLine = eventData
+			// Don't break — keep walking in case more deltas appear after
+			// (defensive; the upstream typically emits completed last).
 		}
-
-		completedData := eventData
-		outputResult := gjson.GetBytes(completedData, "response.output")
-		shouldPatchOutput := (!outputResult.Exists() || !outputResult.IsArray() || len(outputResult.Array()) == 0) && (len(outputItemsByIndex) > 0 || len(outputItemsFallback) > 0)
-		if shouldPatchOutput {
-			completedDataPatched := completedData
-			completedDataPatched, _ = sjson.SetRawBytes(completedDataPatched, "response.output", []byte(`[]`))
-
-			indexes := make([]int64, 0, len(outputItemsByIndex))
-			for idx := range outputItemsByIndex {
-				indexes = append(indexes, idx)
-			}
-			sort.Slice(indexes, func(i, j int) bool {
-				return indexes[i] < indexes[j]
-			})
-			for _, idx := range indexes {
-				completedDataPatched, _ = sjson.SetRawBytes(completedDataPatched, "response.output.-1", outputItemsByIndex[idx])
-			}
-			for _, item := range outputItemsFallback {
-				completedDataPatched, _ = sjson.SetRawBytes(completedDataPatched, "response.output.-1", item)
-			}
-			completedData = completedDataPatched
-		}
-
-		var param any
-		out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, originalPayload, body, completedData, &param)
-		resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
-		return resp, nil
 	}
-	err = statusErr{code: 408, msg: "stream error: stream disconnected before completion: stream closed before response.completed"}
-	return resp, err
+
+	if completedLine == nil {
+		err = statusErr{code: 408, msg: "stream error: stream disconnected before completion: stream closed before response.completed"}
+		return resp, err
+	}
+
+	completedData := completedLine
+
+	outputResult := gjson.GetBytes(completedData, "response.output")
+	shouldPatchOutput := (!outputResult.Exists() || !outputResult.IsArray() || len(outputResult.Array()) == 0) && (len(outputItemsByIndex) > 0 || len(outputItemsFallback) > 0)
+	if shouldPatchOutput {
+		completedDataPatched := completedData
+		completedDataPatched, _ = sjson.SetRawBytes(completedDataPatched, "response.output", []byte(`[]`))
+
+		indexes := make([]int64, 0, len(outputItemsByIndex))
+		for idx := range outputItemsByIndex {
+			indexes = append(indexes, idx)
+		}
+		sort.Slice(indexes, func(i, j int) bool {
+			return indexes[i] < indexes[j]
+		})
+		for _, idx := range indexes {
+			completedDataPatched, _ = sjson.SetRawBytes(completedDataPatched, "response.output.-1", outputItemsByIndex[idx])
+		}
+		for _, item := range outputItemsFallback {
+			completedDataPatched, _ = sjson.SetRawBytes(completedDataPatched, "response.output.-1", item)
+		}
+		completedData = completedDataPatched
+	}
+
+	// If the response.completed event still has no message item with
+	// output_text content (after any output_item patching above), synthesize
+	// one from the accumulated deltas. This recovers the text for
+	// reasoning-model upstream responses that would otherwise translate to a
+	// message with content == null.
+	if accumulatedText.Len() > 0 && !codexResponseHasOutputText(completedData) {
+		completedData = injectCodexOutputText(completedData, accumulatedText.String())
+	}
+
+	if detail, ok := helps.ParseCodexUsage(completedData); ok {
+		reporter.Publish(ctx, detail)
+	}
+
+	var param any
+	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, originalPayload, body, completedData, &param)
+	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
+	return resp, nil
+}
+
+// codexResponseHasOutputText reports whether the given Codex response.completed
+// event already contains a non-empty assistant message item with output_text
+// content. Used to decide whether we need to synthesize a message item from
+// accumulated streaming deltas.
+func codexResponseHasOutputText(line []byte) bool {
+	output := gjson.GetBytes(line, "response.output")
+	if !output.IsArray() {
+		return false
+	}
+	for _, item := range output.Array() {
+		if item.Get("type").String() != "message" {
+			continue
+		}
+		content := item.Get("content")
+		if !content.IsArray() {
+			continue
+		}
+		for _, contentItem := range content.Array() {
+			if contentItem.Get("type").String() != "output_text" {
+				continue
+			}
+			if contentItem.Get("text").String() != "" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// injectCodexOutputText appends a synthesized assistant message item to the
+// response.output array of the given Codex response.completed event so the
+// non-stream translator can extract the text. The original event is returned
+// unchanged on sjson failure (defensive — caller already verified there is
+// no existing output_text content).
+func injectCodexOutputText(line []byte, text string) []byte {
+	msg := []byte(`{"type":"message","content":[{"type":"output_text","text":""}]}`)
+	msg, err := sjson.SetBytes(msg, "content.0.text", text)
+	if err != nil {
+		return line
+	}
+	out, err := sjson.SetRawBytes(line, "response.output.-1", msg)
+	if err != nil {
+		return line
+	}
+	return out
 }
 
 func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
