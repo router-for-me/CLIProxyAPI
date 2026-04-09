@@ -1192,6 +1192,59 @@ func TestClaudeExecutor_CountTokens_AppliesCacheControlGuards(t *testing.T) {
 	}
 }
 
+func TestClaudeExecutor_CountTokens_AliasesOAuthToolNames(t *testing.T) {
+	var seenBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		seenBody = bytes.Clone(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"input_tokens":42}`))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "sk-ant-oat-test",
+		"base_url": server.URL,
+	}}
+
+	payload := []byte(`{
+		"tools": [{"name":"todowrite"}],
+		"tool_choice": {"type":"tool","name":"todowrite"},
+		"messages": [{
+			"role":"assistant",
+			"content":[
+				{"type":"tool_use","name":"todowrite","id":"t1","input":{}},
+				{"type":"tool_reference","tool_name":"todowrite"}
+			]
+		}]
+	}`)
+
+	_, err := executor.CountTokens(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet-20241022",
+		Payload: payload,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+	if err != nil {
+		t.Fatalf("CountTokens error: %v", err)
+	}
+
+	if len(seenBody) == 0 {
+		t.Fatal("expected count_tokens request body to be captured")
+	}
+	if got := gjson.GetBytes(seenBody, "tools.0.name").String(); got == "" || got == "todowrite" {
+		t.Fatalf("tools.0.name = %q, want aliased tool name", got)
+	}
+	if got := gjson.GetBytes(seenBody, "tool_choice.name").String(); got == "" || got == "todowrite" {
+		t.Fatalf("tool_choice.name = %q, want aliased tool choice", got)
+	}
+	if got := gjson.GetBytes(seenBody, "messages.0.content.0.name").String(); got == "" || got == "todowrite" {
+		t.Fatalf("messages.0.content.0.name = %q, want aliased tool_use name", got)
+	}
+	if got := gjson.GetBytes(seenBody, "messages.0.content.1.tool_name").String(); got == "" || got == "todowrite" {
+		t.Fatalf("messages.0.content.1.tool_name = %q, want aliased tool_reference", got)
+	}
+}
+
 func hasTTLOrderingViolation(payload []byte) bool {
 	seen5m := false
 	violates := false
@@ -1872,6 +1925,22 @@ func TestCheckSystemInstructionsWithSigningMode_DropsGlobalScopeFromStaticBlock(
 	}
 	if blocks[2].Get("cache_control").Exists() {
 		t.Fatalf("static block should not carry cache_control, got %s", blocks[2].Get("cache_control").Raw)
+	}
+}
+
+func TestPrependToFirstUserMessage_HandlesEmptyArrayContent(t *testing.T) {
+	payload := []byte(`{"messages":[{"role":"user","content":[]}]}`)
+
+	out := prependToFirstUserMessage(payload, "Be concise.")
+
+	if !gjson.ValidBytes(out) {
+		t.Fatalf("prependToFirstUserMessage returned invalid JSON: %s", string(out))
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.#").Int(); got != 1 {
+		t.Fatalf("messages.0.content length = %d, want 1", got)
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.0.text").String(); !strings.Contains(got, "<system-reminder>") || !strings.Contains(got, "Be concise.") {
+		t.Fatalf("prepended reminder block missing expected content: %q", got)
 	}
 }
 

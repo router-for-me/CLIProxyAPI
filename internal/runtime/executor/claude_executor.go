@@ -156,18 +156,8 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	var extraBetas []string
 	extraBetas, body = extractAndRemoveBetas(body)
 	bodyForTranslation := body
-	bodyForUpstream := body
-	var claudeToolAliasReverse map[string]string
 	oauthToken := isClaudeOAuthToken(apiKey)
-	if oauthToken && !auth.ToolPrefixDisabled() {
-		if claudeToolPrefix != "" {
-			bodyForUpstream = applyClaudeToolPrefix(body, claudeToolPrefix)
-		} else {
-			var claudeToolAliasForward map[string]string
-			claudeToolAliasForward, claudeToolAliasReverse = buildClaudeToolAliasMaps(body)
-			bodyForUpstream = applyClaudeToolAliases(body, claudeToolAliasForward)
-		}
-	}
+	bodyForUpstream, claudeToolAliasReverse := prepareClaudeOAuthToolPayload(body, auth, apiKey)
 	// Enable cch signing by default for OAuth tokens (not just experimental flag).
 	// Claude Code always computes cch; missing or invalid cch is a detectable fingerprint.
 	if oauthToken || experimentalCCHSigningEnabled(e.cfg, auth) {
@@ -260,13 +250,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	} else {
 		reporter.Publish(ctx, helps.ParseClaudeUsage(data))
 	}
-	if isClaudeOAuthToken(apiKey) && !auth.ToolPrefixDisabled() {
-		if len(claudeToolAliasReverse) > 0 {
-			data = stripClaudeToolAliasesFromResponse(data, claudeToolAliasReverse)
-		} else {
-			data = stripClaudeToolPrefixFromResponse(data, claudeToolPrefix)
-		}
-	}
+	data = restoreClaudeOAuthToolResponse(data, auth, apiKey, claudeToolAliasReverse)
 	var param any
 	out := sdktranslator.TranslateNonStream(
 		ctx,
@@ -338,18 +322,8 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	var extraBetas []string
 	extraBetas, body = extractAndRemoveBetas(body)
 	bodyForTranslation := body
-	bodyForUpstream := body
-	var claudeToolAliasReverse map[string]string
 	oauthToken := isClaudeOAuthToken(apiKey)
-	if oauthToken && !auth.ToolPrefixDisabled() {
-		if claudeToolPrefix != "" {
-			bodyForUpstream = applyClaudeToolPrefix(body, claudeToolPrefix)
-		} else {
-			var claudeToolAliasForward map[string]string
-			claudeToolAliasForward, claudeToolAliasReverse = buildClaudeToolAliasMaps(body)
-			bodyForUpstream = applyClaudeToolAliases(body, claudeToolAliasForward)
-		}
-	}
+	bodyForUpstream, claudeToolAliasReverse := prepareClaudeOAuthToolPayload(body, auth, apiKey)
 	// Enable cch signing by default for OAuth tokens (not just experimental flag).
 	if oauthToken || experimentalCCHSigningEnabled(e.cfg, auth) {
 		bodyForUpstream = signAnthropicMessagesBody(bodyForUpstream)
@@ -439,13 +413,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
 					reporter.Publish(ctx, detail)
 				}
-				if isClaudeOAuthToken(apiKey) && !auth.ToolPrefixDisabled() {
-					if len(claudeToolAliasReverse) > 0 {
-						line = stripClaudeToolAliasesFromStreamLine(line, claudeToolAliasReverse)
-					} else {
-						line = stripClaudeToolPrefixFromStreamLine(line, claudeToolPrefix)
-					}
-				}
+				line = restoreClaudeOAuthToolStreamLine(line, auth, apiKey, claudeToolAliasReverse)
 				// Forward the line as-is to preserve SSE format
 				cloned := make([]byte, len(line)+1)
 				copy(cloned, line)
@@ -470,13 +438,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
 				reporter.Publish(ctx, detail)
 			}
-			if isClaudeOAuthToken(apiKey) && !auth.ToolPrefixDisabled() {
-				if len(claudeToolAliasReverse) > 0 {
-					line = stripClaudeToolAliasesFromStreamLine(line, claudeToolAliasReverse)
-				} else {
-					line = stripClaudeToolPrefixFromStreamLine(line, claudeToolPrefix)
-				}
-			}
+			line = restoreClaudeOAuthToolStreamLine(line, auth, apiKey, claudeToolAliasReverse)
 			chunks := sdktranslator.TranslateStream(
 				ctx,
 				to,
@@ -526,9 +488,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	// Extract betas from body and convert to header (for count_tokens too)
 	var extraBetas []string
 	extraBetas, body = extractAndRemoveBetas(body)
-	if isClaudeOAuthToken(apiKey) && !auth.ToolPrefixDisabled() {
-		body = applyClaudeToolPrefix(body, claudeToolPrefix)
-	}
+	body, _ = prepareClaudeOAuthToolPayload(body, auth, apiKey)
 
 	url := fmt.Sprintf("%s/v1/messages/count_tokens?beta=true", baseURL)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
@@ -977,19 +937,39 @@ func isClaudeOAuthToken(apiKey string) bool {
 	return strings.Contains(apiKey, "sk-ant-oat")
 }
 
-func claudeBuiltinToolRegistry(body []byte) map[string]bool {
-	builtinTools := helps.AugmentClaudeBuiltinToolRegistry(body, nil)
-	if tools := gjson.GetBytes(body, "tools"); tools.Exists() && tools.IsArray() {
-		tools.ForEach(func(_, tool gjson.Result) bool {
-			if tool.Get("type").Exists() && tool.Get("type").String() != "" {
-				if name := tool.Get("name").String(); name != "" {
-					builtinTools[name] = true
-				}
-			}
-			return true
-		})
+func prepareClaudeOAuthToolPayload(body []byte, auth *cliproxyauth.Auth, apiKey string) ([]byte, map[string]string) {
+	if !isClaudeOAuthToken(apiKey) || auth.ToolPrefixDisabled() {
+		return body, nil
 	}
-	return builtinTools
+	if claudeToolPrefix != "" {
+		return applyClaudeToolPrefix(body, claudeToolPrefix), nil
+	}
+	claudeToolAliasForward, claudeToolAliasReverse := buildClaudeToolAliasMaps(body)
+	return applyClaudeToolAliases(body, claudeToolAliasForward), claudeToolAliasReverse
+}
+
+func restoreClaudeOAuthToolResponse(body []byte, auth *cliproxyauth.Auth, apiKey string, aliases map[string]string) []byte {
+	if !isClaudeOAuthToken(apiKey) || auth.ToolPrefixDisabled() {
+		return body
+	}
+	if len(aliases) > 0 {
+		return stripClaudeToolAliasesFromResponse(body, aliases)
+	}
+	return stripClaudeToolPrefixFromResponse(body, claudeToolPrefix)
+}
+
+func restoreClaudeOAuthToolStreamLine(line []byte, auth *cliproxyauth.Auth, apiKey string, aliases map[string]string) []byte {
+	if !isClaudeOAuthToken(apiKey) || auth.ToolPrefixDisabled() {
+		return line
+	}
+	if len(aliases) > 0 {
+		return stripClaudeToolAliasesFromStreamLine(line, aliases)
+	}
+	return stripClaudeToolPrefixFromStreamLine(line, claudeToolPrefix)
+}
+
+func claudeBuiltinToolRegistry(body []byte) map[string]bool {
+	return helps.AugmentClaudeBuiltinToolRegistry(body, nil)
 }
 
 func collectClaudeCustomToolNames(body []byte, builtinTools map[string]bool) []string {
@@ -1649,17 +1629,14 @@ func buildTextBlock(text string, cacheControl map[string]string) string {
 	block := []byte(`{"type":"text"}`)
 	block, _ = sjson.SetBytes(block, "text", text)
 	if cacheControl != nil && len(cacheControl) > 0 {
-		// Build cache_control JSON manually to avoid sjson map marshaling issues.
-		// sjson.SetBytes with map[string]string may not produce expected structure.
-		cc := `{"type":"ephemeral"`
+		cc := []byte(`{"type":"ephemeral"}`)
 		if s, ok := cacheControl["scope"]; ok {
-			cc += fmt.Sprintf(`,"scope":"%s"`, s)
+			cc, _ = sjson.SetBytes(cc, "scope", s)
 		}
 		if t, ok := cacheControl["ttl"]; ok {
-			cc += fmt.Sprintf(`,"ttl":"%s"`, t)
+			cc, _ = sjson.SetBytes(cc, "ttl", t)
 		}
-		cc += "}"
-		block, _ = sjson.SetRawBytes(block, "cache_control", []byte(cc))
+		block, _ = sjson.SetRawBytes(block, "cache_control", cc)
 	}
 	return string(block)
 }
@@ -1700,8 +1677,11 @@ IMPORTANT: this context may or may not be relevant to your tasks. You should not
 
 	if content.IsArray() {
 		newBlock := fmt.Sprintf(`{"type":"text","text":%q}`, prefixBlock)
-		existing := content.Raw
-		newArray := "[" + newBlock + "," + existing[1:]
+		newArray := "[" + newBlock + "]"
+		if content.Get("#").Int() > 0 {
+			existing := content.Raw
+			newArray = "[" + newBlock + "," + existing[1:]
+		}
 		payload, _ = sjson.SetRawBytes(payload, contentPath, []byte(newArray))
 	} else if content.Type == gjson.String {
 		newText := prefixBlock + content.String()
