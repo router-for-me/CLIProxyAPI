@@ -632,6 +632,26 @@ func applyQwenHeaders(r *http.Request, token string, stream bool) {
 	r.Header.Set("Accept", "application/json")
 }
 
+func normaliseQwenBaseURL(resourceURL string) string {
+	raw := strings.TrimSpace(resourceURL)
+	if raw == "" {
+		return ""
+	}
+
+	normalized := raw
+	lower := strings.ToLower(normalized)
+	if !strings.HasPrefix(lower, "http://") && !strings.HasPrefix(lower, "https://") {
+		normalized = "https://" + normalized
+	}
+
+	normalized = strings.TrimRight(normalized, "/")
+	if !strings.HasSuffix(strings.ToLower(normalized), "/v1") {
+		normalized += "/v1"
+	}
+
+	return normalized
+}
+
 func qwenCreds(a *cliproxyauth.Auth) (token, baseURL string) {
 	if a == nil {
 		return "", ""
@@ -649,7 +669,7 @@ func qwenCreds(a *cliproxyauth.Auth) (token, baseURL string) {
 			token = v
 		}
 		if v, ok := a.Metadata["resource_url"].(string); ok {
-			baseURL = fmt.Sprintf("https://%s/v1", v)
+			baseURL = normaliseQwenBaseURL(v)
 		}
 	}
 	return
