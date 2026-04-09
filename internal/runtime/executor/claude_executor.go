@@ -1302,11 +1302,14 @@ func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, exp
 	billingBlock := fmt.Sprintf(`{"type":"text","text":"%s"}`, billingText)
 
 	// Build system blocks matching real Claude Code structure.
+	// Use buildTextBlock instead of fmt.Sprintf to properly escape multi-line text.
 	// Cache control scopes: 'org' for agent block, 'global' for core prompt.
-	agentBlock := fmt.Sprintf(`{"type":"text","text":"You are Claude Code, Anthropic's official CLI for Claude.","cache_control":{"type":"ephemeral","scope":"org"}}`)
-	introBlock := fmt.Sprintf(`{"type":"text","text":"%s","cache_control":{"type":"ephemeral","scope":"global"}}`, claudeCodeIntro)
-	systemBlock := fmt.Sprintf(`{"type":"text","text":"%s"}`, claudeCodeSystem)
-	doingTasksBlock := fmt.Sprintf(`{"type":"text","text":"%s"}`, claudeCodeDoingTasks)
+	agentBlock := buildTextBlock("You are Claude Code, Anthropic's official CLI for Claude.",
+		map[string]string{"type": "ephemeral", "scope": "org"})
+	introBlock := buildTextBlock(claudeCodeIntro,
+		map[string]string{"type": "ephemeral", "scope": "global"})
+	systemBlock := buildTextBlock(claudeCodeSystem, nil)
+	doingTasksBlock := buildTextBlock(claudeCodeDoingTasks, nil)
 
 	systemResult := "[" + billingBlock + "," + agentBlock + "," + introBlock + "," + systemBlock + "," + doingTasksBlock + "]"
 	payload, _ = sjson.SetRawBytes(payload, "system", []byte(systemResult))
@@ -1335,6 +1338,20 @@ func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, exp
 	}
 
 	return payload
+}
+
+// buildTextBlock constructs a JSON text block object with proper escaping.
+// Uses sjson.SetBytes to handle multi-line text, quotes, and control characters.
+// cacheControl is optional; pass nil to omit cache_control.
+func buildTextBlock(text string, cacheControl map[string]string) string {
+	block := []byte(`{"type":"text"}`)
+	block, _ = sjson.SetBytes(block, "text", text)
+	if cacheControl != nil {
+		for k, v := range cacheControl {
+			block, _ = sjson.SetBytes(block, "cache_control."+k, v)
+		}
+	}
+	return string(block)
 }
 
 // prependToFirstUserMessage prepends text content to the first user message.
