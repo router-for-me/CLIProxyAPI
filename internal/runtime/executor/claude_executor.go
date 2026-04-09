@@ -1349,97 +1349,17 @@ func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, exp
 	return payload
 }
 
-// sanitizeForwardedSystemPrompt removes third-party branding and high-signal
-// product-specific prompt sections before forwarding context into the first user
-// message for Claude OAuth cloaking. The goal is to preserve neutral task/tool
-// guidance while stripping fingerprints like OpenCode branding, product docs,
-// and workflow sections that are unique to the third-party client.
+// sanitizeForwardedSystemPrompt reduces forwarded third-party system context to a
+// tiny neutral reminder for Claude OAuth cloaking. The goal is to preserve only
+// the minimum tool/task guidance while removing virtually all client-specific
+// prompt structure that Anthropic may classify as third-party agent traffic.
 func sanitizeForwardedSystemPrompt(text string) string {
 	if strings.TrimSpace(text) == "" {
 		return ""
 	}
-
-	lines := strings.Split(text, "\n")
-	var kept []string
-	skipUntilNextHeading := false
-
-	shouldDropLine := func(line string) bool {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" {
-			return false
-		}
-		lower := strings.ToLower(trimmed)
-
-		dropSubstrings := []string{
-			"you are opencode",
-			"best coding agent on the planet",
-			"opencode.ai/docs",
-			"github.com/anomalyco/opencode",
-			"anomalyco/opencode",
-			"ctrl+p to list available actions",
-			"to give feedback, users should report the issue at",
-			"you are powered by the model named",
-			"the exact model id is",
-			"here is some useful information about the environment",
-			"skills provide specialized instructions and workflows",
-			"use the skill tool to load a skill",
-			"no skills are currently available",
-			"instructions from:",
-		}
-		for _, sub := range dropSubstrings {
-			if strings.Contains(lower, sub) {
-				return true
-			}
-		}
-
-		switch lower {
-		case "<env>", "</env>", "<directories>", "</directories>", "<example>", "</example>":
-			return true
-		}
-
-		return false
-	}
-
-	shouldDropHeading := func(line string) bool {
-		switch strings.ToLower(strings.TrimSpace(line)) {
-		case "# professional objectivity", "# task management", "# tool usage policy", "# code references":
-			return true
-		default:
-			return false
-		}
-	}
-
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-
-		if skipUntilNextHeading {
-			if strings.HasPrefix(trimmed, "# ") {
-				skipUntilNextHeading = false
-			} else {
-				continue
-			}
-		}
-
-		if shouldDropHeading(line) {
-			skipUntilNextHeading = true
-			continue
-		}
-
-		if shouldDropLine(line) {
-			continue
-		}
-
-		line = strings.ReplaceAll(line, "OpenCode", "the coding assistant")
-		line = strings.ReplaceAll(line, "opencode", "coding assistant")
-		kept = append(kept, line)
-	}
-
-	result := strings.Join(kept, "\n")
-	// Collapse excessive blank lines after removing sections.
-	for strings.Contains(result, "\n\n\n") {
-		result = strings.ReplaceAll(result, "\n\n\n", "\n\n")
-	}
-	return strings.TrimSpace(result)
+	return strings.TrimSpace(`Use the available tools when needed to help with software engineering tasks.
+Keep responses concise and focused on the user's request.
+Prefer acting on the user's task over describing product-specific workflows.`)
 }
 
 // buildTextBlock constructs a JSON text block object with proper escaping.
