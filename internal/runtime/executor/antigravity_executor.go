@@ -61,7 +61,9 @@ type antigravityCreditsFailureState struct {
 	Count               int
 	DisabledUntil       time.Time
 	PermanentlyDisabled bool
+	ExplicitBalanceExhausted bool
 }
+
 
 type antigravity429DecisionKind string
 
@@ -440,6 +442,38 @@ func clearAntigravityCreditsFailureState(auth *cliproxyauth.Auth) {
 	}
 	antigravityCreditsFailureByAuth.Delete(strings.TrimSpace(auth.ID))
 }
+func markAntigravityCreditsPermanentlyDisabled(auth *cliproxyauth.Auth) {
+	if auth == nil || strings.TrimSpace(auth.ID) == "" {
+		return
+	}
+	authID := strings.TrimSpace(auth.ID)
+	state := antigravityCreditsFailureState{
+		PermanentlyDisabled:   true,
+		ExplicitBalanceExhausted: true,
+	}
+	antigravityCreditsFailureByAuth.Store(authID, state)
+}
+
+func antigravityHasExplicitCreditsBalanceExhaustedReason(body []byte) bool {
+	if len(body) == 0 {
+		return false
+	}
+	details := gjson.GetBytes(body, "error.details")
+	if !details.Exists() || !details.IsArray() {
+		return false
+	}
+	for _, detail := range details.Array() {
+		if detail.Get("@type").String() != "type.googleapis.com/google.rpc.ErrorInfo" {
+			continue
+		}
+		reason := strings.TrimSpace(detail.Get("reason").String())
+		if strings.EqualFold(reason, "INSUFFICIENT_G1_CREDITS_BALANCE") {
+			return true
+		}
+	}
+	return false
+}
+
 
 func antigravityPreferCreditsKey(auth *cliproxyauth.Auth, modelName string) string {
 	if auth == nil {
@@ -545,6 +579,18 @@ func (e *AntigravityExecutor) attemptCreditsFallback(
 		return nil, false
 	}
 	now := time.Now()
+	if shouldForcePermanentDisableCredits(originalBody) {
+		clearAntigravityPreferCredits(auth, modelName)
+		markAntigravityCreditsPermanentlyDisabled(auth)
+		return nil, false
+	}
+
+	if antigravityHasExplicitCreditsBalanceExhaustedReason(originalBody) {
+		clearAntigravityPreferCredits(auth, modelName)
+		markAntigravityCreditsPermanentlyDisabled(auth)
+		return nil, false
+	}
+
 	if antigravityCreditsDisabled(e.cfg, auth, now) {
 		return nil, false
 	}
@@ -586,6 +632,18 @@ func (e *AntigravityExecutor) attemptCreditsFallback(
 		return nil, true
 	}
 	helps.AppendAPIResponseChunk(ctx, e.cfg, bodyBytes)
+	if shouldForcePermanentDisableCredits(bodyBytes) {
+		clearAntigravityPreferCredits(auth, modelName)
+		markAntigravityCreditsPermanentlyDisabled(auth)
+		return nil, true
+	}
+
+	if antigravityHasExplicitCreditsBalanceExhaustedReason(bodyBytes) {
+		clearAntigravityPreferCredits(auth, modelName)
+		markAntigravityCreditsPermanentlyDisabled(auth)
+		return nil, true
+	}
+
 	clearAntigravityPreferCredits(auth, modelName)
 	recordAntigravityCreditsFailure(e.cfg, auth, now)
 	return nil, true
@@ -593,11 +651,38 @@ func (e *AntigravityExecutor) attemptCreditsFallback(
 
 func (e *AntigravityExecutor) handleDirectCreditsFailure(ctx context.Context, auth *cliproxyauth.Auth, modelName string, reqErr error) {
 	if reqErr != nil {
+		if shouldForcePermanentDisableCredits(reqErrBody(reqErr)) {
+			clearAntigravityPreferCredits(auth, modelName)
+			markAntigravityCreditsPermanentlyDisabled(auth)
+			return
+		}
+
+	if antigravityHasExplicitCreditsBalanceExhaustedReason(reqErrBody(reqErr)) {
+		clearAntigravityPreferCredits(auth, modelName)
+		markAntigravityCreditsPermanentlyDisabled(auth)
+		return
+	}
+
 		helps.RecordAPIResponseError(ctx, e.cfg, reqErr)
 	}
 	clearAntigravityPreferCredits(auth, modelName)
 	recordAntigravityCreditsFailure(e.cfg, auth, time.Now())
 }
+func reqErrBody(reqErr error) []byte {
+	if reqErr == nil {
+		return nil
+	}
+	msg := reqErr.Error()
+	if strings.TrimSpace(msg) == "" {
+		return nil
+	}
+	return []byte(msg)
+}
+
+func shouldForcePermanentDisableCredits(body []byte) bool {
+	return antigravityHasExplicitCreditsBalanceExhaustedReason(body)
+}
+
 
 // Execute performs a non-streaming request to the Antigravity API.
 func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
