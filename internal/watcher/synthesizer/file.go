@@ -157,6 +157,19 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 			}
 		}
 	}
+	// Read per-credential antigravity_credits toggle from auth file.
+	if rawAC, ok := metadata["antigravity_credits"]; ok {
+		switch v := rawAC.(type) {
+		case bool:
+			if v {
+				a.Attributes["antigravity_credits"] = "true"
+			}
+		case string:
+			if strings.EqualFold(strings.TrimSpace(v), "true") {
+				a.Attributes["antigravity_credits"] = "true"
+			}
+		}
+	}
 	coreauth.ApplyCustomHeadersFromMetadata(a)
 	ApplyAuthExcludedModelsMeta(a, cfg, perAccountExcluded, "oauth")
 	// For codex auth files, extract plan_type from the JWT id_token.
@@ -233,6 +246,10 @@ func SynthesizeGeminiVirtualAuths(primary *coreauth.Auth, metadata map[string]an
 		// Propagate note from primary auth to virtual auths
 		if noteVal, hasNote := primary.Attributes["note"]; hasNote && noteVal != "" {
 			attrs["note"] = noteVal
+		}
+		// Propagate antigravity_credits from primary auth to virtual auths
+		if acVal, hasAC := primary.Attributes["antigravity_credits"]; hasAC && acVal == "true" {
+			attrs["antigravity_credits"] = "true"
 		}
 		for k, v := range primary.Attributes {
 			if strings.HasPrefix(k, "header:") && strings.TrimSpace(v) != "" {

@@ -287,6 +287,17 @@ func antigravityCreditsRetryEnabled(cfg *config.Config) bool {
 	return cfg != nil && cfg.QuotaExceeded.AntigravityCredits
 }
 
+// antigravityCreditsAlwaysEnabled returns true when the per-credential
+// antigravity_credits toggle is on. When true, every request for this auth
+// unconditionally includes enabledCreditTypes=["GOOGLE_ONE_AI"] — no
+// prefer/exhausted state machine, no retry fallback.
+func antigravityCreditsAlwaysEnabled(auth *cliproxyauth.Auth) bool {
+	if auth == nil || len(auth.Attributes) == 0 {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(auth.Attributes["antigravity_credits"]), "true")
+}
+
 func antigravityCreditsExhausted(auth *cliproxyauth.Auth, now time.Time) bool {
 	if auth == nil || strings.TrimSpace(auth.ID) == "" {
 		return false
@@ -520,10 +531,18 @@ attemptLoop:
 		var lastBody []byte
 		var lastErr error
 
+		creditsAlwaysOn := antigravityCreditsAlwaysEnabled(auth)
+
 		for idx, baseURL := range baseURLs {
 			requestPayload := translated
 			usedCreditsDirect := false
-			if antigravityCreditsRetryEnabled(e.cfg) && antigravityShouldPreferCredits(auth, baseModel, time.Now()) {
+			if creditsAlwaysOn {
+				// Per-credential toggle: unconditionally inject credits on every request.
+				if creditsPayload := injectEnabledCreditTypes(translated); len(creditsPayload) > 0 {
+					requestPayload = creditsPayload
+					usedCreditsDirect = true
+				}
+			} else if antigravityCreditsRetryEnabled(e.cfg) && antigravityShouldPreferCredits(auth, baseModel, time.Now()) {
 				if creditsPayload := injectEnabledCreditTypes(translated); len(creditsPayload) > 0 {
 					requestPayload = creditsPayload
 					usedCreditsDirect = true
@@ -564,7 +583,7 @@ attemptLoop:
 			}
 			helps.AppendAPIResponseChunk(ctx, e.cfg, bodyBytes)
 
-			if httpResp.StatusCode == http.StatusTooManyRequests {
+			if httpResp.StatusCode == http.StatusTooManyRequests && !creditsAlwaysOn {
 				if usedCreditsDirect {
 					if shouldMarkAntigravityCreditsExhausted(httpResp.StatusCode, bodyBytes, nil) {
 						clearAntigravityPreferCredits(auth, baseModel)
@@ -696,10 +715,17 @@ attemptLoop:
 		var lastBody []byte
 		var lastErr error
 
+		creditsAlwaysOn := antigravityCreditsAlwaysEnabled(auth)
+
 		for idx, baseURL := range baseURLs {
 			requestPayload := translated
 			usedCreditsDirect := false
-			if antigravityCreditsRetryEnabled(e.cfg) && antigravityShouldPreferCredits(auth, baseModel, time.Now()) {
+			if creditsAlwaysOn {
+				if creditsPayload := injectEnabledCreditTypes(translated); len(creditsPayload) > 0 {
+					requestPayload = creditsPayload
+					usedCreditsDirect = true
+				}
+			} else if antigravityCreditsRetryEnabled(e.cfg) && antigravityShouldPreferCredits(auth, baseModel, time.Now()) {
 				if creditsPayload := injectEnabledCreditTypes(translated); len(creditsPayload) > 0 {
 					requestPayload = creditsPayload
 					usedCreditsDirect = true
@@ -754,7 +780,7 @@ attemptLoop:
 					return resp, err
 				}
 				helps.AppendAPIResponseChunk(ctx, e.cfg, bodyBytes)
-				if httpResp.StatusCode == http.StatusTooManyRequests {
+				if httpResp.StatusCode == http.StatusTooManyRequests && !creditsAlwaysOn {
 					if usedCreditsDirect {
 						if shouldMarkAntigravityCreditsExhausted(httpResp.StatusCode, bodyBytes, nil) {
 							clearAntigravityPreferCredits(auth, baseModel)
@@ -1121,10 +1147,17 @@ attemptLoop:
 		var lastBody []byte
 		var lastErr error
 
+		creditsAlwaysOn := antigravityCreditsAlwaysEnabled(auth)
+
 		for idx, baseURL := range baseURLs {
 			requestPayload := translated
 			usedCreditsDirect := false
-			if antigravityCreditsRetryEnabled(e.cfg) && antigravityShouldPreferCredits(auth, baseModel, time.Now()) {
+			if creditsAlwaysOn {
+				if creditsPayload := injectEnabledCreditTypes(translated); len(creditsPayload) > 0 {
+					requestPayload = creditsPayload
+					usedCreditsDirect = true
+				}
+			} else if antigravityCreditsRetryEnabled(e.cfg) && antigravityShouldPreferCredits(auth, baseModel, time.Now()) {
 				if creditsPayload := injectEnabledCreditTypes(translated); len(creditsPayload) > 0 {
 					requestPayload = creditsPayload
 					usedCreditsDirect = true
@@ -1178,7 +1211,7 @@ attemptLoop:
 					return nil, err
 				}
 				helps.AppendAPIResponseChunk(ctx, e.cfg, bodyBytes)
-				if httpResp.StatusCode == http.StatusTooManyRequests {
+				if httpResp.StatusCode == http.StatusTooManyRequests && !creditsAlwaysOn {
 					if usedCreditsDirect {
 						if shouldMarkAntigravityCreditsExhausted(httpResp.StatusCode, bodyBytes, nil) {
 							clearAntigravityPreferCredits(auth, baseModel)
