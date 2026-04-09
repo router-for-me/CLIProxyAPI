@@ -1347,7 +1347,17 @@ func buildTextBlock(text string, cacheControl map[string]string) string {
 	block := []byte(`{"type":"text"}`)
 	block, _ = sjson.SetBytes(block, "text", text)
 	if cacheControl != nil && len(cacheControl) > 0 {
-		block, _ = sjson.SetBytes(block, "cache_control", cacheControl)
+		// Build cache_control JSON manually to avoid sjson map marshaling issues.
+		// sjson.SetBytes with map[string]string may not produce expected structure.
+		cc := `{"type":"ephemeral"`
+		if s, ok := cacheControl["scope"]; ok {
+			cc += fmt.Sprintf(`,"scope":"%s"`, s)
+		}
+		if t, ok := cacheControl["ttl"]; ok {
+			cc += fmt.Sprintf(`,"ttl":"%s"`, t)
+		}
+		cc += "}"
+		block, _ = sjson.SetRawBytes(block, "cache_control", []byte(cc))
 	}
 	return string(block)
 }
