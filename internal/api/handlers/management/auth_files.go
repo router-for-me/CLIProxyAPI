@@ -464,6 +464,19 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 			}
 		}
 	}
+	// Expose per-credential antigravity_credits toggle for antigravity auths.
+	if strings.EqualFold(strings.TrimSpace(auth.Provider), "antigravity") {
+		acEnabled := strings.EqualFold(strings.TrimSpace(authAttribute(auth, "antigravity_credits")), "true")
+		if !acEnabled && auth.Metadata != nil {
+			switch v := auth.Metadata["antigravity_credits"].(type) {
+			case bool:
+				acEnabled = v
+			case string:
+				acEnabled = strings.EqualFold(strings.TrimSpace(v), "true")
+			}
+		}
+		entry["antigravity_credits"] = acEnabled
+	}
 	return entry
 }
 
@@ -1128,12 +1141,13 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 	}
 
 	var req struct {
-		Name     string            `json:"name"`
-		Prefix   *string           `json:"prefix"`
-		ProxyURL *string           `json:"proxy_url"`
-		Headers  map[string]string `json:"headers"`
-		Priority *int              `json:"priority"`
-		Note     *string           `json:"note"`
+		Name               string            `json:"name"`
+		Prefix             *string           `json:"prefix"`
+		ProxyURL           *string           `json:"proxy_url"`
+		Headers            map[string]string `json:"headers"`
+		Priority           *int              `json:"priority"`
+		Note               *string           `json:"note"`
+		AntigravityCredits *bool             `json:"antigravity_credits"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
@@ -1296,6 +1310,22 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 				targetAuth.Metadata["note"] = trimmedNote
 				targetAuth.Attributes["note"] = trimmedNote
 			}
+		}
+		changed = true
+	}
+	if req.AntigravityCredits != nil {
+		if targetAuth.Metadata == nil {
+			targetAuth.Metadata = make(map[string]any)
+		}
+		if targetAuth.Attributes == nil {
+			targetAuth.Attributes = make(map[string]string)
+		}
+		if *req.AntigravityCredits {
+			targetAuth.Metadata["antigravity_credits"] = true
+			targetAuth.Attributes["antigravity_credits"] = "true"
+		} else {
+			delete(targetAuth.Metadata, "antigravity_credits")
+			delete(targetAuth.Attributes, "antigravity_credits")
 		}
 		changed = true
 	}
