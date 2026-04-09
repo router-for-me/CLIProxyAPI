@@ -59,24 +59,23 @@ const (
 type antigravity429Category string
 
 type antigravityCreditsFailureState struct {
-	Count               int
-	DisabledUntil       time.Time
-	PermanentlyDisabled bool
+	Count                    int
+	DisabledUntil            time.Time
+	PermanentlyDisabled      bool
 	ExplicitBalanceExhausted bool
 }
-
 
 type antigravity429DecisionKind string
 
 const (
-	antigravity429Unknown                        antigravity429Category     = "unknown"
-	antigravity429RateLimited                    antigravity429Category     = "rate_limited"
-	antigravity429QuotaExhausted                 antigravity429Category     = "quota_exhausted"
-	antigravity429SoftRateLimit                  antigravity429Category     = "soft_rate_limit"
-	antigravity429DecisionSoftRetry              antigravity429DecisionKind = "soft_retry"
-	antigravity429DecisionInstantRetrySameAuth   antigravity429DecisionKind = "instant_retry_same_auth"
+	antigravity429Unknown                         antigravity429Category     = "unknown"
+	antigravity429RateLimited                     antigravity429Category     = "rate_limited"
+	antigravity429QuotaExhausted                  antigravity429Category     = "quota_exhausted"
+	antigravity429SoftRateLimit                   antigravity429Category     = "soft_rate_limit"
+	antigravity429DecisionSoftRetry               antigravity429DecisionKind = "soft_retry"
+	antigravity429DecisionInstantRetrySameAuth    antigravity429DecisionKind = "instant_retry_same_auth"
 	antigravity429DecisionShortCooldownSwitchAuth antigravity429DecisionKind = "short_cooldown_switch_auth"
-	antigravity429DecisionFullQuotaExhausted     antigravity429DecisionKind = "full_quota_exhausted"
+	antigravity429DecisionFullQuotaExhausted      antigravity429DecisionKind = "full_quota_exhausted"
 )
 
 type antigravity429Decision struct {
@@ -86,11 +85,11 @@ type antigravity429Decision struct {
 }
 
 var (
-	randSource                      = rand.New(rand.NewSource(time.Now().UnixNano()))
-	randSourceMutex                 sync.Mutex
-	antigravityCreditsFailureByAuth sync.Map
-	antigravityPreferCreditsByModel sync.Map
-	antigravityShortCooldownByAuth  sync.Map
+	randSource                        = rand.New(rand.NewSource(time.Now().UnixNano()))
+	randSourceMutex                   sync.Mutex
+	antigravityCreditsFailureByAuth   sync.Map
+	antigravityPreferCreditsByModel   sync.Map
+	antigravityShortCooldownByAuth    sync.Map
 	antigravityQuotaExhaustedKeywords = []string{
 		"quota_exhausted",
 		"quota exhausted",
@@ -353,7 +352,6 @@ func antigravityCreditsRetryEnabled(cfg *config.Config) bool {
 	return cfg != nil && cfg.QuotaExceeded.AntigravityCredits
 }
 
-
 func antigravityCreditsFailureStateForAuth(auth *cliproxyauth.Auth) (string, antigravityCreditsFailureState, bool) {
 	if auth == nil || strings.TrimSpace(auth.ID) == "" {
 		return "", antigravityCreditsFailureState{}, false
@@ -415,7 +413,7 @@ func markAntigravityCreditsPermanentlyDisabled(auth *cliproxyauth.Auth) {
 	}
 	authID := strings.TrimSpace(auth.ID)
 	state := antigravityCreditsFailureState{
-		PermanentlyDisabled:   true,
+		PermanentlyDisabled:      true,
 		ExplicitBalanceExhausted: true,
 	}
 	antigravityCreditsFailureByAuth.Store(authID, state)
@@ -440,7 +438,6 @@ func antigravityHasExplicitCreditsBalanceExhaustedReason(body []byte) bool {
 	}
 	return false
 }
-
 
 func antigravityPreferCreditsKey(auth *cliproxyauth.Auth, modelName string) string {
 	if auth == nil {
@@ -507,7 +504,7 @@ func shouldMarkAntigravityCreditsExhausted(statusCode int, body []byte, reqErr e
 		if strings.Contains(lowerBody, keyword) {
 			if keyword == "resource has been exhausted" &&
 				statusCode == http.StatusTooManyRequests &&
-				classifyAntigravity429(body) == antigravity429Unknown &&
+				decideAntigravity429(body).kind == antigravity429DecisionSoftRetry &&
 				!antigravityHasQuotaResetDelayOrModelInfo(body) {
 				return false
 			}
@@ -624,11 +621,11 @@ func (e *AntigravityExecutor) handleDirectCreditsFailure(ctx context.Context, au
 			return
 		}
 
-	if antigravityHasExplicitCreditsBalanceExhaustedReason(reqErrBody(reqErr)) {
-		clearAntigravityPreferCredits(auth, modelName)
-		markAntigravityCreditsPermanentlyDisabled(auth)
-		return
-	}
+		if antigravityHasExplicitCreditsBalanceExhaustedReason(reqErrBody(reqErr)) {
+			clearAntigravityPreferCredits(auth, modelName)
+			markAntigravityCreditsPermanentlyDisabled(auth)
+			return
+		}
 
 		helps.RecordAPIResponseError(ctx, e.cfg, reqErr)
 	}
@@ -649,7 +646,6 @@ func reqErrBody(reqErr error) []byte {
 func shouldForcePermanentDisableCredits(body []byte) bool {
 	return antigravityHasExplicitCreditsBalanceExhaustedReason(body)
 }
-
 
 // Execute performs a non-streaming request to the Antigravity API.
 func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
@@ -878,7 +874,6 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 		return resp, statusErr{code: http.StatusTooManyRequests, msg: fmt.Sprintf("auth in short cooldown, %s remaining", remaining), retryAfter: &d}
 	}
 
-
 	token, updatedAuth, errToken := e.ensureAccessToken(ctx, auth)
 	if errToken != nil {
 		return resp, errToken
@@ -999,20 +994,19 @@ attemptLoop:
 							markAntigravityShortCooldown(auth, baseModel, time.Now(), *decision.retryAfter)
 							log.Debugf("antigravity executor: short quota cooldown (%s) for model %s, recorded cooldown and skipping credits fallback", *decision.retryAfter, baseModel)
 						}
-				case antigravity429DecisionFullQuotaExhausted:
-					if usedCreditsDirect {
-						clearAntigravityPreferCredits(auth, baseModel)
-						recordAntigravityCreditsFailure(auth, time.Now())
-					} else {
-						creditsResp, _ := e.attemptCreditsFallback(ctx, auth, httpClient, token, baseModel, translated, true, opts.Alt, baseURL, bodyBytes)
-						if creditsResp != nil {
-							httpResp = creditsResp
-							helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+					case antigravity429DecisionFullQuotaExhausted:
+						if usedCreditsDirect {
+							clearAntigravityPreferCredits(auth, baseModel)
+							recordAntigravityCreditsFailure(auth, time.Now())
+						} else {
+							creditsResp, _ := e.attemptCreditsFallback(ctx, auth, httpClient, token, baseModel, translated, true, opts.Alt, baseURL, bodyBytes)
+							if creditsResp != nil {
+								httpResp = creditsResp
+								helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+							}
 						}
 					}
 				}
-				}
-
 
 				if httpResp.StatusCode >= http.StatusOK && httpResp.StatusCode < http.StatusMultipleChoices {
 					goto streamSuccessClaudeNonStream
@@ -1341,7 +1335,6 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 		return nil, statusErr{code: http.StatusTooManyRequests, msg: fmt.Sprintf("auth in short cooldown, %s remaining", remaining), retryAfter: &d}
 	}
 
-
 	token, updatedAuth, errToken := e.ensureAccessToken(ctx, auth)
 	if errToken != nil {
 		return nil, errToken
@@ -1461,20 +1454,19 @@ attemptLoop:
 							markAntigravityShortCooldown(auth, baseModel, time.Now(), *decision.retryAfter)
 							log.Debugf("antigravity executor: short quota cooldown (%s) for model %s, recorded cooldown and skipping credits fallback", *decision.retryAfter, baseModel)
 						}
-				case antigravity429DecisionFullQuotaExhausted:
-					if usedCreditsDirect {
-						clearAntigravityPreferCredits(auth, baseModel)
-						recordAntigravityCreditsFailure(auth, time.Now())
-					} else {
-						creditsResp, _ := e.attemptCreditsFallback(ctx, auth, httpClient, token, baseModel, translated, true, opts.Alt, baseURL, bodyBytes)
-						if creditsResp != nil {
-							httpResp = creditsResp
-							helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+					case antigravity429DecisionFullQuotaExhausted:
+						if usedCreditsDirect {
+							clearAntigravityPreferCredits(auth, baseModel)
+							recordAntigravityCreditsFailure(auth, time.Now())
+						} else {
+							creditsResp, _ := e.attemptCreditsFallback(ctx, auth, httpClient, token, baseModel, translated, true, opts.Alt, baseURL, bodyBytes)
+							if creditsResp != nil {
+								httpResp = creditsResp
+								helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+							}
 						}
 					}
 				}
-				}
-
 
 				if httpResp.StatusCode >= http.StatusOK && httpResp.StatusCode < http.StatusMultipleChoices {
 					goto streamSuccessExecuteStream
@@ -2138,7 +2130,6 @@ func antigravityShouldRetryTransientResourceExhausted429(statusCode int, body []
 	return strings.Contains(msg, "resource has been exhausted")
 }
 
-
 func antigravityShouldRetrySoftRateLimit(statusCode int, body []byte) bool {
 	if statusCode != http.StatusTooManyRequests {
 		return false
@@ -2227,9 +2218,6 @@ func antigravityInstantRetryDelay(wait time.Duration) time.Duration {
 	}
 	return wait + 800*time.Millisecond
 }
-
-
-
 
 func antigravityWait(ctx context.Context, wait time.Duration) error {
 	if wait <= 0 {
