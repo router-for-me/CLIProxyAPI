@@ -7,12 +7,12 @@ Go 1.26+ proxy server providing OpenAI/Gemini/Claude/Codex compatible APIs with 
 
 ## Commands
 ```bash
-gofmt -w .                                # Format (required after Go changes)
-go build -o cli-proxy-api ./cmd/server     # Build
-go run ./cmd/server                       # Run dev server
-go test ./...                             # Run all tests
-go test -v -run TestName ./path/to/pkg    # Run single test
-go build -o test-output ./cmd/server && rm test-output  # Verify compile (REQUIRED after changes)
+gofmt -w . # Format (required after Go changes)
+go build -o cli-proxy-api ./cmd/server # Build
+go run ./cmd/server # Run dev server
+go test ./... # Run all tests
+go test -v -run TestName ./path/to/pkg # Run single test
+go build -o test-output ./cmd/server && rm test-output # Verify compile (REQUIRED after changes)
 ```
 - Common flags: `--config <path>`, `--tui`, `--standalone`, `--local-model`, `--no-browser`, `--oauth-callback-port <port>`
 
@@ -26,7 +26,7 @@ go build -o test-output ./cmd/server && rm test-output  # Verify compile (REQUIR
 - `cmd/server/` — Server entrypoint
 - `internal/api/` — Gin HTTP API (routes, middleware, modules)
 - `internal/api/modules/amp/` — Amp integration (Amp-style routes + reverse proxy)
-- `internal/thinking/` — Thinking/reasoning token processing (`internal/thinking/provider/` for per-provider config)
+- `internal/thinking/` — Main thinking/reasoning pipeline. `ApplyThinking()` (apply.go) parses suffixes (`suffix.go`, suffix overrides body), normalizes config to canonical `ThinkingConfig` (`types.go`), normalizes and validates centrally (`validate.go`/`convert.go`), then applies provider-specific output via `ProviderApplier`. Do not break this "canonical representation → per-provider translation" architecture.
 - `internal/runtime/executor/` — Per-provider runtime executors (incl. Codex WebSocket)
 - `internal/translator/` — Provider protocol translators (and shared `common`)
 - `internal/registry/` — Model registry + remote updater (`StartModelsUpdater`); `--local-model` disables remote updates

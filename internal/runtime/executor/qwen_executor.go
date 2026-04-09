@@ -25,22 +25,12 @@ import (
 )
 
 const (
-	qwenUserAgent       = "QwenCode/0.13.2 (darwin; arm64)"
+	qwenUserAgent       = "QwenCode/0.14.2 (darwin; arm64)"
 	qwenRateLimitPerMin = 60          // 60 requests per minute per credential
 	qwenRateLimitWindow = time.Minute // sliding window duration
 )
 
 var qwenDefaultSystemMessage = []byte(`{"role":"system","content":[{"type":"text","text":"","cache_control":{"type":"ephemeral"}}]}`)
-
-// qwenBeijingLoc caches the Beijing timezone to avoid repeated LoadLocation syscalls.
-var qwenBeijingLoc = func() *time.Location {
-	loc, err := time.LoadLocation("Asia/Shanghai")
-	if err != nil || loc == nil {
-		log.Warnf("qwen: failed to load Asia/Shanghai timezone: %v, using fixed UTC+8", err)
-		return time.FixedZone("CST", 8*3600)
-	}
-	return loc
-}()
 
 // qwenQuotaCodes is a package-level set of error codes that indicate quota exhaustion.
 var qwenQuotaCodes = map[string]struct{}{
@@ -156,20 +146,11 @@ func wrapQwenError(ctx context.Context, httpCode int, body []byte) (errCode int,
 	// Qwen returns 403 for quota errors, 429 for rate limits
 	if (httpCode == http.StatusForbidden || httpCode == http.StatusTooManyRequests) && isQwenQuotaError(body) {
 		errCode = http.StatusTooManyRequests // Map to 429 to trigger quota logic
-		cooldown := timeUntilNextDay()
-		retryAfter = &cooldown
-		helps.LogWithRequestID(ctx).Warnf("qwen quota exceeded (http %d -> %d), cooling down until tomorrow (%v)", httpCode, errCode, cooldown)
+		// Do not force an excessively long retry-after (e.g. until tomorrow), otherwise
+		// the global request-retry scheduler may skip retries due to max-retry-interval.
+		helps.LogWithRequestID(ctx).Warnf("qwen quota exceeded (http %d -> %d)", httpCode, errCode)
 	}
 	return errCode, retryAfter
-}
-
-// timeUntilNextDay returns duration until midnight Beijing time (UTC+8).
-// Qwen's daily quota resets at 00:00 Beijing time.
-func timeUntilNextDay() time.Duration {
-	now := time.Now()
-	nowLocal := now.In(qwenBeijingLoc)
-	tomorrow := time.Date(nowLocal.Year(), nowLocal.Month(), nowLocal.Day()+1, 0, 0, 0, 0, qwenBeijingLoc)
-	return tomorrow.Sub(now)
 }
 
 // ensureQwenSystemMessage ensures the request has a single system message at the beginning.
@@ -626,19 +607,23 @@ func (e *QwenExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*c
 }
 
 func applyQwenHeaders(r *http.Request, token string, stream bool) {
-	r.Header.Set("Content-Type", "application/json")
-	r.Header.Set("Authorization", "Bearer "+token)
-	r.Header.Set("User-Agent", qwenUserAgent)
-	r.Header["X-DashScope-UserAgent"] = []string{qwenUserAgent}
 	r.Header.Set("X-Stainless-Runtime-Version", "v22.17.0")
+	r.Header.Set("User-Agent", qwenUserAgent)
 	r.Header.Set("X-Stainless-Lang", "js")
-	r.Header.Set("X-Stainless-Arch", "arm64")
-	r.Header.Set("X-Stainless-Package-Version", "5.11.0")
-	r.Header["X-DashScope-CacheControl"] = []string{"enable"}
-	r.Header.Set("X-Stainless-Retry-Count", "0")
+	r.Header.Set("Accept-Language", "*")
+	r.Header.Set("X-Dashscope-Cachecontrol", "enable")
 	r.Header.Set("X-Stainless-Os", "MacOS")
-	r.Header["X-DashScope-AuthType"] = []string{"qwen-oauth"}
+	r.Header.Set("X-Dashscope-Authtype", "qwen-oauth")
+	r.Header.Set("X-Stainless-Arch", "arm64")
 	r.Header.Set("X-Stainless-Runtime", "node")
+	r.Header.Set("X-Stainless-Retry-Count", "0")
+	r.Header.Set("Accept-Encoding", "gzip, deflate")
+	r.Header.Set("Authorization", "Bearer "+token)
+	r.Header.Set("X-Stainless-Package-Version", "5.11.0")
+	r.Header.Set("Sec-Fetch-Mode", "cors")
+	r.Header.Set("Content-Type", "application/json")
+	r.Header.Set("Connection", "keep-alive")
+	r.Header.Set("X-Dashscope-Useragent", qwenUserAgent)
 
 	if stream {
 		r.Header.Set("Accept", "text/event-stream")
