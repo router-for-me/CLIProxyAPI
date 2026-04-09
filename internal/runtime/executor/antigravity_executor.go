@@ -50,6 +50,7 @@ const (
 	antigravityAuthType                    = "antigravity"
 	refreshSkew                            = 3000 * time.Second
 	antigravityCreditsRetryTTL             = 5 * time.Hour
+	antigravityCreditsAutoDisableDuration  = 5 * time.Hour
 	antigravityShortQuotaCooldownThreshold = 5 * time.Minute
 	antigravityInstantRetryThreshold       = 1 * time.Second
 	// systemInstruction              = "You are Antigravity, a powerful agentic AI coding assistant designed by the Google Deepmind team working on Advanced Agentic Coding.You are pair programming with a USER to solve their coding task. The task may require creating a new codebase, modifying or debugging an existing codebase, or simply answering a question.**Absolute paths only****Proactiveness**"
@@ -352,30 +353,6 @@ func antigravityCreditsRetryEnabled(cfg *config.Config) bool {
 	return cfg != nil && cfg.QuotaExceeded.AntigravityCredits
 }
 
-func antigravityCreditsFailureThreshold(cfg *config.Config) int {
-	if cfg == nil {
-		return 0
-	}
-	return cfg.QuotaExceeded.AntigravityCreditsFailThreshold
-}
-
-func antigravityCreditsFailureStrategy(cfg *config.Config) string {
-	if cfg == nil {
-		return "temporary"
-	}
-	strategy := strings.ToLower(strings.TrimSpace(cfg.QuotaExceeded.AntigravityCreditsFailStrategy))
-	if strategy == "permanent" {
-		return strategy
-	}
-	return "temporary"
-}
-
-func antigravityCreditsDisableDuration(cfg *config.Config) time.Duration {
-	if cfg == nil || cfg.QuotaExceeded.AntigravityCreditsDisableMinutes <= 0 {
-		return 0
-	}
-	return time.Duration(cfg.QuotaExceeded.AntigravityCreditsDisableMinutes) * time.Minute
-}
 
 func antigravityCreditsFailureStateForAuth(auth *cliproxyauth.Auth) (string, antigravityCreditsFailureState, bool) {
 	if auth == nil || strings.TrimSpace(auth.ID) == "" {
@@ -394,7 +371,7 @@ func antigravityCreditsFailureStateForAuth(auth *cliproxyauth.Auth) (string, ant
 	return authID, state, true
 }
 
-func antigravityCreditsDisabled(cfg *config.Config, auth *cliproxyauth.Auth, now time.Time) bool {
+func antigravityCreditsDisabled(auth *cliproxyauth.Auth, now time.Time) bool {
 	authID, state, ok := antigravityCreditsFailureStateForAuth(auth)
 	if !ok {
 		return false
@@ -412,27 +389,17 @@ func antigravityCreditsDisabled(cfg *config.Config, auth *cliproxyauth.Auth, now
 	return false
 }
 
-func recordAntigravityCreditsFailure(cfg *config.Config, auth *cliproxyauth.Auth, now time.Time) {
+func recordAntigravityCreditsFailure(auth *cliproxyauth.Auth, now time.Time) {
 	authID, state, ok := antigravityCreditsFailureStateForAuth(auth)
 	if !ok {
 		return
 	}
-	state.Count++
-	threshold := antigravityCreditsFailureThreshold(cfg)
-	if threshold > 0 && state.Count >= threshold {
-		switch antigravityCreditsFailureStrategy(cfg) {
-		case "permanent":
-			state.PermanentlyDisabled = true
-			state.DisabledUntil = time.Time{}
-		default:
-			disableFor := antigravityCreditsDisableDuration(cfg)
-			if disableFor > 0 {
-				state.DisabledUntil = now.Add(disableFor)
-			} else {
-				state.DisabledUntil = now
-			}
-		}
+	if state.PermanentlyDisabled {
+		antigravityCreditsFailureByAuth.Store(authID, state)
+		return
 	}
+	state.Count++
+	state.DisabledUntil = now.Add(antigravityCreditsAutoDisableDuration)
 	antigravityCreditsFailureByAuth.Store(authID, state)
 }
 
@@ -591,7 +558,7 @@ func (e *AntigravityExecutor) attemptCreditsFallback(
 		return nil, false
 	}
 
-	if antigravityCreditsDisabled(e.cfg, auth, now) {
+	if antigravityCreditsDisabled(auth, now) {
 		return nil, false
 	}
 	creditsPayload := injectEnabledCreditTypes(payload)
@@ -603,14 +570,14 @@ func (e *AntigravityExecutor) attemptCreditsFallback(
 	if errReq != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, errReq)
 		clearAntigravityPreferCredits(auth, modelName)
-		recordAntigravityCreditsFailure(e.cfg, auth, now)
+		recordAntigravityCreditsFailure(auth, now)
 		return nil, true
 	}
 	httpResp, errDo := httpClient.Do(httpReq)
 	if errDo != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, errDo)
 		clearAntigravityPreferCredits(auth, modelName)
-		recordAntigravityCreditsFailure(e.cfg, auth, now)
+		recordAntigravityCreditsFailure(auth, now)
 		return nil, true
 	}
 	if httpResp.StatusCode >= http.StatusOK && httpResp.StatusCode < http.StatusMultipleChoices {
@@ -628,7 +595,7 @@ func (e *AntigravityExecutor) attemptCreditsFallback(
 	if errRead != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, errRead)
 		clearAntigravityPreferCredits(auth, modelName)
-		recordAntigravityCreditsFailure(e.cfg, auth, now)
+		recordAntigravityCreditsFailure(auth, now)
 		return nil, true
 	}
 	helps.AppendAPIResponseChunk(ctx, e.cfg, bodyBytes)
@@ -645,7 +612,7 @@ func (e *AntigravityExecutor) attemptCreditsFallback(
 	}
 
 	clearAntigravityPreferCredits(auth, modelName)
-	recordAntigravityCreditsFailure(e.cfg, auth, now)
+	recordAntigravityCreditsFailure(auth, now)
 	return nil, true
 }
 
@@ -666,7 +633,7 @@ func (e *AntigravityExecutor) handleDirectCreditsFailure(ctx context.Context, au
 		helps.RecordAPIResponseError(ctx, e.cfg, reqErr)
 	}
 	clearAntigravityPreferCredits(auth, modelName)
-	recordAntigravityCreditsFailure(e.cfg, auth, time.Now())
+	recordAntigravityCreditsFailure(auth, time.Now())
 }
 func reqErrBody(reqErr error) []byte {
 	if reqErr == nil {
@@ -820,7 +787,7 @@ attemptLoop:
 				case antigravity429DecisionFullQuotaExhausted:
 					if usedCreditsDirect {
 						clearAntigravityPreferCredits(auth, baseModel)
-						recordAntigravityCreditsFailure(e.cfg, auth, time.Now())
+						recordAntigravityCreditsFailure(auth, time.Now())
 					} else {
 						creditsResp, _ := e.attemptCreditsFallback(ctx, auth, httpClient, token, baseModel, translated, false, opts.Alt, baseURL, bodyBytes)
 						if creditsResp != nil {
@@ -1055,7 +1022,7 @@ attemptLoop:
 					case antigravity429DecisionFullQuotaExhausted:
 						if usedCreditsDirect {
 							clearAntigravityPreferCredits(auth, baseModel)
-							recordAntigravityCreditsFailure(e.cfg, auth, time.Now())
+							recordAntigravityCreditsFailure(auth, time.Now())
 						} else {
 							creditsResp, _ := e.attemptCreditsFallback(ctx, auth, httpClient, token, baseModel, translated, true, opts.Alt, baseURL, bodyBytes)
 							if creditsResp != nil {
@@ -1524,7 +1491,7 @@ attemptLoop:
 					case antigravity429DecisionFullQuotaExhausted:
 						if usedCreditsDirect {
 							clearAntigravityPreferCredits(auth, baseModel)
-							recordAntigravityCreditsFailure(e.cfg, auth, time.Now())
+							recordAntigravityCreditsFailure(auth, time.Now())
 							httpReq, errReq = e.buildRequest(ctx, auth, token, baseModel, translated, true, opts.Alt, baseURL)
 							if errReq != nil {
 								err = errReq

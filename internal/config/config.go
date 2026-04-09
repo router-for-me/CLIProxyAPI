@@ -198,18 +198,6 @@ type QuotaExceeded struct {
 	// AntigravityCredits indicates whether to retry Antigravity quota_exhausted 429s once
 	// on the same credential with enabledCreditTypes=["GOOGLE_ONE_AI"].
 	AntigravityCredits bool `yaml:"antigravity-credits" json:"antigravity-credits"`
-
-	// AntigravityCreditsFailThreshold controls how many consecutive credits request failures
-	// are allowed before credits attempts are disabled for the auth.
-	AntigravityCreditsFailThreshold int `yaml:"antigravity-credits-fail-threshold" json:"antigravity-credits-fail-threshold"`
-
-	// AntigravityCreditsFailStrategy controls whether credits attempts are disabled temporarily
-	// or permanently after reaching the failure threshold. Supported values: temporary, permanent.
-	AntigravityCreditsFailStrategy string `yaml:"antigravity-credits-fail-strategy" json:"antigravity-credits-fail-strategy"`
-
-	// AntigravityCreditsDisableMinutes defines the temporary disable duration after reaching
-	// the failure threshold when the strategy is temporary.
-	AntigravityCreditsDisableMinutes int `yaml:"antigravity-credits-disable-minutes" json:"antigravity-credits-disable-minutes"`
 }
 
 // RoutingConfig configures how credentials are selected for requests.
@@ -593,9 +581,6 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.Pprof.Addr = DefaultPprofAddr
 	cfg.AmpCode.RestrictManagementToLocalhost = false // Default to false: API key auth is sufficient
 	cfg.RemoteManagement.PanelGitHubRepository = DefaultPanelGitHubRepository
-	cfg.QuotaExceeded.AntigravityCreditsFailThreshold = 1
-	cfg.QuotaExceeded.AntigravityCreditsFailStrategy = "temporary"
-	cfg.QuotaExceeded.AntigravityCreditsDisableMinutes = 300
 	if err = yaml.Unmarshal(data, &cfg); err != nil {
 		if optional {
 			// In cloud deploy mode, if YAML parsing fails, return empty config instead of error.
@@ -656,21 +641,6 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		cfg.MaxRetryCredentials = 0
 	}
 
-	if cfg.QuotaExceeded.AntigravityCreditsFailThreshold < 0 {
-		cfg.QuotaExceeded.AntigravityCreditsFailThreshold = 0
-	}
-	cfg.QuotaExceeded.AntigravityCreditsFailStrategy = strings.ToLower(strings.TrimSpace(cfg.QuotaExceeded.AntigravityCreditsFailStrategy))
-	if cfg.QuotaExceeded.AntigravityCreditsFailStrategy == "" {
-		cfg.QuotaExceeded.AntigravityCreditsFailStrategy = "temporary"
-	}
-	switch cfg.QuotaExceeded.AntigravityCreditsFailStrategy {
-	case "temporary", "permanent":
-	default:
-		cfg.QuotaExceeded.AntigravityCreditsFailStrategy = "temporary"
-	}
-	if cfg.QuotaExceeded.AntigravityCreditsDisableMinutes < 0 {
-		cfg.QuotaExceeded.AntigravityCreditsDisableMinutes = 0
-	}
 
 	// Sanitize Gemini API key configuration and migrate legacy entries.
 	cfg.SanitizeGeminiKeys()
