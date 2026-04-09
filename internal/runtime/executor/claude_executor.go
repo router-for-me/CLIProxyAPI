@@ -1269,8 +1269,11 @@ func checkSystemInstructionsWithMode(payload []byte, strictMode bool) []byte {
 // checkSystemInstructionsWithSigningMode injects Claude Code-style system blocks:
 //
 //	system[0]: billing header (no cache_control)
-//	system[1]: agent identifier (no cache_control)
-//	system[2..]: user system messages (cache_control added when missing)
+//	system[1]: agent identifier (cache_control ephemeral, scope=org)
+//	system[2]: core intro prompt (cache_control ephemeral, scope=global)
+//	system[3]: system instructions (no cache_control)
+//	system[4]: doing tasks (no cache_control)
+//	system[5]: user system messages moved to first user message
 func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, experimentalCCHSigning bool, version, entrypoint, workload string) []byte {
 	system := gjson.GetBytes(payload, "system")
 
@@ -1289,49 +1292,46 @@ func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, exp
 		messageText = system.String()
 	}
 
-	billingText := generateBillingHeader(payload, experimentalCCHSigning, version, messageText, entrypoint, workload)
-	billingBlock := fmt.Sprintf(`{"type":"text","text":"%s"}`, billingText)
-	// No cache_control on the agent block. It is a cloaking artifact with zero cache
-	// value (the last system block is what actually triggers caching of all system content).
-	// Including any cache_control here creates an intra-system TTL ordering violation
-	// when the client's system blocks use ttl='1h' (prompt-caching-scope-2026-01-05 beta
-	// forbids 1h blocks after 5m blocks, and a no-TTL block defaults to 5m).
-	// Use Claude Code identity prefix for interactive CLI mode.
-	// Real Claude Code uses "You are Claude Code, Anthropic's official CLI for Claude."
-	// when running in interactive mode (the most common case).
-	agentBlock := `{"type":"text","text":"You are Claude Code, Anthropic's official CLI for Claude."}`
-
 	// Skip if already injected
 	firstText := gjson.GetBytes(payload, "system.0.text").String()
 	if strings.HasPrefix(firstText, "x-anthropic-billing-header:") {
 		return payload
 	}
 
-	// system[] only keeps billing header + agent identifier.
-	// User system instructions are moved to the first user message to avoid
-	// Anthropic's content-based system prompt validation (extra usage detection).
-	systemResult := "[" + billingBlock + "," + agentBlock + "]"
+	billingText := generateBillingHeader(payload, experimentalCCHSigning, version, messageText, entrypoint, workload)
+	billingBlock := fmt.Sprintf(`{"type":"text","text":"%s"}`, billingText)
+
+	// Build system blocks matching real Claude Code structure.
+	// Cache control scopes: 'org' for agent block, 'global' for core prompt.
+	agentBlock := fmt.Sprintf(`{"type":"text","text":"You are Claude Code, Anthropic's official CLI for Claude.","cache_control":{"type":"ephemeral","scope":"org"}}`)
+	introBlock := fmt.Sprintf(`{"type":"text","text":"%s","cache_control":{"type":"ephemeral","scope":"global"}}`, claudeCodeIntro)
+	systemBlock := fmt.Sprintf(`{"type":"text","text":"%s"}`, claudeCodeSystem)
+	doingTasksBlock := fmt.Sprintf(`{"type":"text","text":"%s"}`, claudeCodeDoingTasks)
+
+	systemResult := "[" + billingBlock + "," + agentBlock + "," + introBlock + "," + systemBlock + "," + doingTasksBlock + "]"
 	payload, _ = sjson.SetRawBytes(payload, "system", []byte(systemResult))
 
 	// Collect user system instructions and prepend to first user message
-	var userSystemParts []string
-	if system.IsArray() {
-		system.ForEach(func(_, part gjson.Result) bool {
-			if part.Get("type").String() == "text" {
-				txt := strings.TrimSpace(part.Get("text").String())
-				if txt != "" {
-					userSystemParts = append(userSystemParts, txt)
+	if !strictMode {
+		var userSystemParts []string
+		if system.IsArray() {
+			system.ForEach(func(_, part gjson.Result) bool {
+				if part.Get("type").String() == "text" {
+					txt := strings.TrimSpace(part.Get("text").String())
+					if txt != "" {
+						userSystemParts = append(userSystemParts, txt)
+					}
 				}
-			}
-			return true
-		})
-	} else if system.Type == gjson.String && strings.TrimSpace(system.String()) != "" {
-		userSystemParts = append(userSystemParts, strings.TrimSpace(system.String()))
-	}
+				return true
+			})
+		} else if system.Type == gjson.String && strings.TrimSpace(system.String()) != "" {
+			userSystemParts = append(userSystemParts, strings.TrimSpace(system.String()))
+		}
 
-	if !strictMode && len(userSystemParts) > 0 {
-		combined := strings.Join(userSystemParts, "\n\n")
-		payload = prependToFirstUserMessage(payload, combined)
+		if len(userSystemParts) > 0 {
+			combined := strings.Join(userSystemParts, "\n\n")
+			payload = prependToFirstUserMessage(payload, combined)
+		}
 	}
 
 	return payload
