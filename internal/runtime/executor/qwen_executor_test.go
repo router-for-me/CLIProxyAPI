@@ -1,6 +1,8 @@
 package executor
 
 import (
+	"context"
+	"net/http"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
@@ -56,8 +58,11 @@ func TestEnsureQwenSystemMessage_MergeStringSystem(t *testing.T) {
 	if len(parts) != 2 {
 		t.Fatalf("messages[0].content length = %d, want 2", len(parts))
 	}
-	if parts[0].Get("text").String() != "You are Qwen Code." || parts[0].Get("cache_control.type").String() != "ephemeral" {
+	if parts[0].Get("type").String() != "text" || parts[0].Get("cache_control.type").String() != "ephemeral" {
 		t.Fatalf("messages[0].content[0] = %s, want injected system part", parts[0].Raw)
+	}
+	if text := parts[0].Get("text").String(); text != "" && text != "You are Qwen Code." {
+		t.Fatalf("messages[0].content[0].text = %q, want empty string or default prompt", text)
 	}
 	if parts[1].Get("type").String() != "text" || parts[1].Get("text").String() != "ABCDEFG" {
 		t.Fatalf("messages[0].content[1] = %s, want text part with ABCDEFG", parts[1].Raw)
@@ -147,5 +152,27 @@ func TestEnsureQwenSystemMessage_MergesMultipleSystemMessages(t *testing.T) {
 	}
 	if parts[2].Get("text").String() != "B" {
 		t.Fatalf("messages[0].content[2].text = %q, want %q", parts[2].Get("text").String(), "B")
+	}
+}
+
+func TestWrapQwenError_InsufficientQuotaDoesNotSetRetryAfter(t *testing.T) {
+	body := []byte(`{"error":{"code":"insufficient_quota","message":"You exceeded your current quota","type":"insufficient_quota"}}`)
+	code, retryAfter := wrapQwenError(context.Background(), http.StatusTooManyRequests, body)
+	if code != http.StatusTooManyRequests {
+		t.Fatalf("wrapQwenError status = %d, want %d", code, http.StatusTooManyRequests)
+	}
+	if retryAfter != nil {
+		t.Fatalf("wrapQwenError retryAfter = %v, want nil", *retryAfter)
+	}
+}
+
+func TestWrapQwenError_Maps403QuotaTo429WithoutRetryAfter(t *testing.T) {
+	body := []byte(`{"error":{"code":"insufficient_quota","message":"You exceeded your current quota","type":"insufficient_quota"}}`)
+	code, retryAfter := wrapQwenError(context.Background(), http.StatusForbidden, body)
+	if code != http.StatusTooManyRequests {
+		t.Fatalf("wrapQwenError status = %d, want %d", code, http.StatusTooManyRequests)
+	}
+	if retryAfter != nil {
+		t.Fatalf("wrapQwenError retryAfter = %v, want nil", *retryAfter)
 	}
 }

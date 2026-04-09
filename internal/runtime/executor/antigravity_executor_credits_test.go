@@ -82,17 +82,83 @@ func TestInjectEnabledCreditTypes(t *testing.T) {
 }
 
 func TestShouldMarkAntigravityCreditsExhausted(t *testing.T) {
-	for _, body := range [][]byte{
-		[]byte(`{"error":{"message":"Insufficient GOOGLE_ONE_AI credits"}}`),
-		[]byte(`{"error":{"message":"minimumCreditAmountForUsage requirement not met"}}`),
-		[]byte(`{"error":{"message":"Resource has been exhausted"}}`),
-	} {
-		if !shouldMarkAntigravityCreditsExhausted(http.StatusForbidden, body, nil) {
+	t.Run("credit errors are marked", func(t *testing.T) {
+		for _, body := range [][]byte{
+			[]byte(`{"error":{"message":"Insufficient GOOGLE_ONE_AI credits"}}`),
+			[]byte(`{"error":{"message":"minimumCreditAmountForUsage requirement not met"}}`),
+		} {
+			if !shouldMarkAntigravityCreditsExhausted(http.StatusForbidden, body, nil) {
+				t.Fatalf("shouldMarkAntigravityCreditsExhausted(%s) = false, want true", string(body))
+			}
+		}
+	})
+
+	t.Run("transient 429 resource exhausted is not marked", func(t *testing.T) {
+		body := []byte(`{"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota).","status":"RESOURCE_EXHAUSTED"}}`)
+		if shouldMarkAntigravityCreditsExhausted(http.StatusTooManyRequests, body, nil) {
+			t.Fatalf("shouldMarkAntigravityCreditsExhausted(%s) = true, want false", string(body))
+		}
+	})
+
+	t.Run("resource exhausted with quota metadata is still marked", func(t *testing.T) {
+		body := []byte(`{"error":{"code":429,"message":"Resource has been exhausted","status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","metadata":{"quotaResetDelay":"1h","model":"claude-sonnet-4-6"}}]}}`)
+		if !shouldMarkAntigravityCreditsExhausted(http.StatusTooManyRequests, body, nil) {
 			t.Fatalf("shouldMarkAntigravityCreditsExhausted(%s) = false, want true", string(body))
 		}
-	}
+	})
+
 	if shouldMarkAntigravityCreditsExhausted(http.StatusServiceUnavailable, []byte(`{"error":{"message":"credits exhausted"}}`), nil) {
 		t.Fatal("shouldMarkAntigravityCreditsExhausted() = true for 5xx, want false")
+	}
+}
+
+func TestAntigravityExecute_RetriesTransient429ResourceExhausted(t *testing.T) {
+	resetAntigravityCreditsRetryState()
+	t.Cleanup(resetAntigravityCreditsRetryState)
+
+	var requestCount int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		switch requestCount {
+		case 1:
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota).","status":"RESOURCE_EXHAUSTED"}}`))
+		case 2:
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]}}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2}}}`))
+		default:
+			t.Fatalf("unexpected request count %d", requestCount)
+		}
+	}))
+	defer server.Close()
+
+	exec := NewAntigravityExecutor(&config.Config{RequestRetry: 1})
+	auth := &cliproxyauth.Auth{
+		ID: "auth-transient-429",
+		Attributes: map[string]string{
+			"base_url": server.URL,
+		},
+		Metadata: map[string]any{
+			"access_token": "token",
+			"project_id":   "project-1",
+			"expired":      time.Now().Add(1 * time.Hour).Format(time.RFC3339),
+		},
+	}
+
+	resp, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gemini-2.5-flash",
+		Payload: []byte(`{"request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatAntigravity,
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if len(resp.Payload) == 0 {
+		t.Fatal("Execute() returned empty payload")
+	}
+	if requestCount != 2 {
+		t.Fatalf("request count = %d, want 2", requestCount)
 	}
 }
 
