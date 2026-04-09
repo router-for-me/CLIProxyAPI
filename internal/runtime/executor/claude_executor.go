@@ -1313,7 +1313,7 @@ func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, exp
 		claudeCodeToneAndStyle,
 		claudeCodeOutputEfficiency,
 	}, "\n\n")
-	staticBlock := buildTextBlock(staticPrompt, map[string]string{"scope": "global"})
+	staticBlock := buildTextBlock(staticPrompt, nil)
 
 	systemResult := "[" + billingBlock + "," + agentBlock + "," + staticBlock + "]"
 	payload, _ = sjson.SetRawBytes(payload, "system", []byte(systemResult))
@@ -1452,9 +1452,6 @@ func buildTextBlock(text string, cacheControl map[string]string) string {
 		// Build cache_control JSON manually to avoid sjson map marshaling issues.
 		// sjson.SetBytes with map[string]string may not produce expected structure.
 		cc := `{"type":"ephemeral"`
-		if s, ok := cacheControl["scope"]; ok {
-			cc += fmt.Sprintf(`,"scope":"%s"`, s)
-		}
 		if t, ok := cacheControl["ttl"]; ok {
 			cc += fmt.Sprintf(`,"ttl":"%s"`, t)
 		}
