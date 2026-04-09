@@ -97,6 +97,72 @@ type childBucket struct {
 // cooldownQueue is the blocked auth collection ordered by next retry time during rebuilds.
 type cooldownQueue []*scheduledAuth
 
+type readyViewCursorState struct {
+	cursor       int
+	parentCursor int
+	childCursors map[string]int
+}
+
+type readyBucketCursorState struct {
+	all readyViewCursorState
+	ws  readyViewCursorState
+}
+
+func snapshotReadyViewCursors(view readyView) readyViewCursorState {
+	state := readyViewCursorState{
+		cursor:       view.cursor,
+		parentCursor: view.parentCursor,
+	}
+	if len(view.children) == 0 {
+		return state
+	}
+	state.childCursors = make(map[string]int, len(view.children))
+	for parent, child := range view.children {
+		if child == nil {
+			continue
+		}
+		state.childCursors[parent] = child.cursor
+	}
+	return state
+}
+
+func restoreReadyViewCursors(view *readyView, state readyViewCursorState) {
+	if view == nil {
+		return
+	}
+	if len(view.flat) > 0 {
+		view.cursor = normalizeCursor(state.cursor, len(view.flat))
+	}
+	if len(view.parentOrder) == 0 || len(view.children) == 0 {
+		return
+	}
+	view.parentCursor = normalizeCursor(state.parentCursor, len(view.parentOrder))
+	if len(state.childCursors) == 0 {
+		return
+	}
+	for parent, child := range view.children {
+		if child == nil || len(child.items) == 0 {
+			continue
+		}
+		cursor, ok := state.childCursors[parent]
+		if !ok {
+			continue
+		}
+		child.cursor = normalizeCursor(cursor, len(child.items))
+	}
+}
+
+func normalizeCursor(cursor, size int) int {
+	if size <= 0 || cursor <= 0 {
+		return 0
+	}
+	cursor = cursor % size
+	if cursor < 0 {
+		cursor += size
+	}
+	return cursor
+}
+
 // newAuthScheduler constructs an empty scheduler configured for the supplied selector strategy.
 func newAuthScheduler(selector Selector) *authScheduler {
 	return &authScheduler{
@@ -824,6 +890,17 @@ func (m *modelScheduler) availabilitySummaryLocked(predicate func(*scheduledAuth
 
 // rebuildIndexesLocked reconstructs ready and blocked views from the current entry map.
 func (m *modelScheduler) rebuildIndexesLocked() {
+	cursorStates := make(map[int]readyBucketCursorState, len(m.readyByPriority))
+	for priority, bucket := range m.readyByPriority {
+		if bucket == nil {
+			continue
+		}
+		cursorStates[priority] = readyBucketCursorState{
+			all: snapshotReadyViewCursors(bucket.all),
+			ws:  snapshotReadyViewCursors(bucket.ws),
+		}
+	}
+
 	m.readyByPriority = make(map[int]*readyBucket)
 	m.priorityOrder = m.priorityOrder[:0]
 	m.blocked = m.blocked[:0]
@@ -844,7 +921,12 @@ func (m *modelScheduler) rebuildIndexesLocked() {
 		sort.Slice(entries, func(i, j int) bool {
 			return entries[i].auth.ID < entries[j].auth.ID
 		})
-		m.readyByPriority[priority] = buildReadyBucket(entries)
+		bucket := buildReadyBucket(entries)
+		if cursorState, ok := cursorStates[priority]; ok && bucket != nil {
+			restoreReadyViewCursors(&bucket.all, cursorState.all)
+			restoreReadyViewCursors(&bucket.ws, cursorState.ws)
+		}
+		m.readyByPriority[priority] = bucket
 		m.priorityOrder = append(m.priorityOrder, priority)
 	}
 	sort.Slice(m.priorityOrder, func(i, j int) bool {
