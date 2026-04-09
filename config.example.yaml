@@ -95,6 +95,9 @@ quota-exceeded:
   switch-project: true # Whether to automatically switch to another project when a quota is exceeded
   switch-preview-model: true # Whether to automatically switch to a preview model when a quota is exceeded
   antigravity-credits: true # Whether to retry Antigravity quota_exhausted 429s once with enabledCreditTypes=["GOOGLE_ONE_AI"]
+  antigravity-credits-fail-threshold: 1 # Disable future credits attempts after this many consecutive credits failures for the same auth; 0 disables threshold-based shutdown
+  antigravity-credits-fail-strategy: "temporary" # temporary=disable credits for antigravity-credits-disable-minutes, permanent=disable credits until restart
+  antigravity-credits-disable-minutes: 300 # Only used when antigravity-credits-fail-strategy=temporary
 
 # Routing strategy for selecting credentials when multiple match.
 routing:
@@ -109,7 +112,6 @@ enable-gemini-cli-endpoint: false
 
 # When > 0, emit blank lines every N seconds for non-streaming responses to prevent idle timeouts.
 nonstream-keepalive-interval: 0
-
 # Streaming behavior (SSE keep-alives + safe bootstrap retries).
 # streaming:
 #   keepalive-seconds: 15   # Default: 0 (disabled). <= 0 disables keep-alives.
