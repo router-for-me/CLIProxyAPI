@@ -112,8 +112,13 @@ func defaultClaudeDeviceProfile(cfg *config.Config) ClaudeDeviceProfile {
 		hd = cfg.ClaudeHeaderDefaults
 	}
 
+	defaultUserAgent := defaultClaudeFingerprintUserAgent
+	if version := strings.TrimSpace(hd.Version); version != "" && strings.TrimSpace(hd.UserAgent) == "" {
+		defaultUserAgent = "claude-cli/" + version + " (external, cli)"
+	}
+
 	profile := ClaudeDeviceProfile{
-		UserAgent:      hdrDefault(hd.UserAgent, defaultClaudeFingerprintUserAgent),
+		UserAgent:      hdrDefault(hd.UserAgent, defaultUserAgent),
 		PackageVersion: hdrDefault(hd.PackageVersion, defaultClaudeFingerprintPackageVersion),
 		RuntimeVersion: hdrDefault(hd.RuntimeVersion, defaultClaudeFingerprintRuntimeVersion),
 		OS:             hdrDefault(hd.OS, defaultClaudeFingerprintOS),
@@ -358,9 +363,14 @@ func ApplyClaudeDeviceProfileHeaders(r *http.Request, profile ClaudeDeviceProfil
 	r.Header.Set("X-Stainless-Arch", profile.Arch)
 }
 
-// DefaultClaudeVersion returns the version string (e.g. "2.1.63") from the
-// current baseline device profile. It extracts the version from the User-Agent.
+// DefaultClaudeVersion returns the configured Claude CLI version when present,
+// otherwise it falls back to the baseline device profile's parsed User-Agent.
 func DefaultClaudeVersion(cfg *config.Config) string {
+	if cfg != nil {
+		if version := strings.TrimSpace(cfg.ClaudeHeaderDefaults.Version); version != "" {
+			return version
+		}
+	}
 	profile := defaultClaudeDeviceProfile(cfg)
 	if version, ok := parseClaudeCLIVersion(profile.UserAgent); ok {
 		return strconv.Itoa(version.major) + "." + strconv.Itoa(version.minor) + "." + strconv.Itoa(version.patch)
