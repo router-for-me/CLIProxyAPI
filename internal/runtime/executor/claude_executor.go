@@ -1302,16 +1302,20 @@ func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, exp
 	billingBlock := fmt.Sprintf(`{"type":"text","text":"%s"}`, billingText)
 
 	// Build system blocks matching real Claude Code structure.
-	// Use buildTextBlock instead of fmt.Sprintf to properly escape multi-line text.
-	// Cache control scopes: 'org' for agent block, 'global' for core prompt.
-	agentBlock := buildTextBlock("You are Claude Code, Anthropic's official CLI for Claude.",
-		map[string]string{"type": "ephemeral", "scope": "org"})
-	introBlock := buildTextBlock(claudeCodeIntro,
-		map[string]string{"type": "ephemeral", "scope": "global"})
-	systemBlock := buildTextBlock(claudeCodeSystem, nil)
-	doingTasksBlock := buildTextBlock(claudeCodeDoingTasks, nil)
+	// Important: Claude Code's internal cacheScope='org' does NOT serialize to
+	// scope='org' in the API request. Only scope='global' is sent explicitly.
+	// The system prompt prefix block is sent without cache_control.
+	agentBlock := buildTextBlock("You are Claude Code, Anthropic's official CLI for Claude.", nil)
+	staticPrompt := strings.Join([]string{
+		claudeCodeIntro,
+		claudeCodeSystem,
+		claudeCodeDoingTasks,
+		claudeCodeToneAndStyle,
+		claudeCodeOutputEfficiency,
+	}, "\n\n")
+	staticBlock := buildTextBlock(staticPrompt, map[string]string{"scope": "global"})
 
-	systemResult := "[" + billingBlock + "," + agentBlock + "," + introBlock + "," + systemBlock + "," + doingTasksBlock + "]"
+	systemResult := "[" + billingBlock + "," + agentBlock + "," + staticBlock + "]"
 	payload, _ = sjson.SetRawBytes(payload, "system", []byte(systemResult))
 
 	// Collect user system instructions and prepend to first user message
