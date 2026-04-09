@@ -48,19 +48,21 @@ const claudeToolPrefix = ""
 // oauthToolRenameMap maps OpenCode-style (lowercase) tool names to Claude Code-style
 // (TitleCase) names. Anthropic uses tool name fingerprinting to detect third-party
 // clients on OAuth traffic. Renaming to official names avoids extra-usage billing.
-// Tools without a Claude Code equivalent (e.g. "question", "skill") are removed entirely.
+// All tools are mapped to TitleCase equivalents to match Claude Code naming patterns.
 var oauthToolRenameMap = map[string]string{
-	"bash":       "Bash",
-	"read":       "Read",
-	"write":      "Write",
-	"edit":       "Edit",
-	"glob":       "Glob",
-	"grep":       "Grep",
-	"task":       "Task",
-	"webfetch":  "WebFetch",
-	"todowrite": "TodoWrite",
-	"ls":         "LS",
-	"todoread":   "TodoRead",
+	"bash":         "Bash",
+	"read":         "Read",
+	"write":        "Write",
+	"edit":         "Edit",
+	"glob":         "Glob",
+	"grep":         "Grep",
+	"task":         "Task",
+	"webfetch":    "WebFetch",
+	"todowrite":   "TodoWrite",
+	"question":    "Question",
+	"skill":        "Skill",
+	"ls":           "LS",
+	"todoread":     "TodoRead",
 	"notebookedit": "NotebookEdit",
 }
 
@@ -73,12 +75,9 @@ var oauthToolRenameReverseMap = func() map[string]string {
 	return m
 }()
 
-// oauthToolsToRemove lists tool names that have no Claude Code equivalent and must
-// be stripped from OAuth requests to avoid third-party fingerprinting.
-var oauthToolsToRemove = map[string]bool{
-	"question": true,
-	"skill":    true,
-}
+// oauthToolsToRemove lists tool names that must be stripped from OAuth requests
+// even after remapping. Currently empty — all tools are mapped instead of removed.
+var oauthToolsToRemove = map[string]bool{}
 
 // Anthropic-compatible upstreams may reject or even crash when Claude models
 // omit max_tokens. Prefer registered model metadata before using a fallback.
