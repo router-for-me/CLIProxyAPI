@@ -1019,15 +1019,13 @@ func isClaudeOAuthToken(apiKey string) bool {
 // references in messages. Removed tools' corresponding tool_result blocks are preserved
 // (they just become orphaned, which is safe for Claude).
 func remapOAuthToolNames(body []byte) []byte {
-	// 1. Rewrite tools array in a single pass.
+	// 1. Rewrite tools array in a single pass (if present).
 	// IMPORTANT: do not mutate names first and then rebuild from an older gjson
 	// snapshot. gjson results are snapshots of the original bytes; rebuilding from a
 	// stale snapshot will preserve removals but overwrite renamed names back to their
 	// original lowercase values.
 	tools := gjson.GetBytes(body, "tools")
-	if !tools.Exists() || !tools.IsArray() {
-		return body
-	}
+	if tools.Exists() && tools.IsArray() {
 
 	var toolsJSON strings.Builder
 	toolsJSON.WriteByte('[')
@@ -1065,6 +1063,7 @@ func remapOAuthToolNames(body []byte) []byte {
 	})
 	toolsJSON.WriteByte(']')
 	body, _ = sjson.SetRawBytes(body, "tools", []byte(toolsJSON.String()))
+	}
 
 	// 2. Rename tool_choice if it references a known tool
 	toolChoiceType := gjson.GetBytes(body, "tool_choice.type").String()
@@ -1554,7 +1553,7 @@ func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, exp
 	}
 
 	billingText := generateBillingHeader(payload, experimentalCCHSigning, version, messageText, entrypoint, workload)
-	billingBlock := fmt.Sprintf(`{"type":"text","text":"%s"}`, billingText)
+	billingBlock := buildTextBlock(billingText, nil)
 
 	// Build system blocks matching real Claude Code structure.
 	// Important: Claude Code's internal cacheScope='org' does NOT serialize to
@@ -1562,11 +1561,11 @@ func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, exp
 	// The system prompt prefix block is sent without cache_control.
 	agentBlock := buildTextBlock("You are Claude Code, Anthropic's official CLI for Claude.", nil)
 	staticPrompt := strings.Join([]string{
-		claudeCodeIntro,
-		claudeCodeSystem,
-		claudeCodeDoingTasks,
-		claudeCodeToneAndStyle,
-		claudeCodeOutputEfficiency,
+		helps.ClaudeCodeIntro,
+		helps.ClaudeCodeSystem,
+		helps.ClaudeCodeDoingTasks,
+		helps.ClaudeCodeToneAndStyle,
+		helps.ClaudeCodeOutputEfficiency,
 	}, "\n\n")
 	staticBlock := buildTextBlock(staticPrompt, nil)
 
@@ -1672,8 +1671,12 @@ IMPORTANT: this context may or may not be relevant to your tasks. You should not
 
 	if content.IsArray() {
 		newBlock := fmt.Sprintf(`{"type":"text","text":%q}`, prefixBlock)
-		existing := content.Raw
-		newArray := "[" + newBlock + "," + existing[1:]
+		var newArray string
+		if content.Raw == "[]" || content.Raw == "" {
+			newArray = "[" + newBlock + "]"
+		} else {
+			newArray = "[" + newBlock + "," + content.Raw[1:]
+		}
 		payload, _ = sjson.SetRawBytes(payload, contentPath, []byte(newArray))
 	} else if content.Type == gjson.String {
 		newText := prefixBlock + content.String()
