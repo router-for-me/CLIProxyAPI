@@ -485,7 +485,14 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 
 	if !strings.HasPrefix(baseModel, "claude-3-5-haiku") {
-		body = checkSystemInstructions(body)
+		body = checkSystemInstructionsWithSigningMode(
+			body,
+			false,
+			false,
+			helps.DefaultClaudeVersion(e.cfg),
+			resolveOutboundClaudeEntrypoint(ctx, e.cfg, auth, apiKey),
+			"",
+		)
 	}
 
 	// Keep count_tokens requests compatible with Anthropic cache-control constraints too.
@@ -833,7 +840,7 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 		deviceProfile = helps.ResolveClaudeDeviceProfile(auth, apiKey, ginHeaders, cfg)
 	}
 
-	baseBetas := "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05,structured-outputs-2025-12-15,fast-mode-2026-02-01,redact-thinking-2026-02-12,token-efficient-tools-2026-03-28"
+	baseBetas := "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05,advanced-tool-use-2025-11-20,effort-2025-11-24,structured-outputs-2025-12-15,fast-mode-2026-02-01,redact-thinking-2026-02-12,token-efficient-tools-2026-03-28"
 	if val := strings.TrimSpace(ginHeaders.Get("Anthropic-Beta")); val != "" {
 		baseBetas = val
 		if !strings.Contains(val, "oauth") {
@@ -879,7 +886,7 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 		misc.EnsureHeader(r.Header, ginHeaders, "Anthropic-Dangerous-Direct-Browser-Access", "true")
 	}
 	misc.EnsureHeader(r.Header, ginHeaders, "X-App", "cli")
-	// Values below match Claude Code 2.1.63 / @anthropic-ai/sdk 0.74.0 (updated 2026-02-28).
+	// Values below match Claude Code 2.1.92 / @anthropic-ai/sdk 0.80.0 (updated 2026-04-04).
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Retry-Count", "0")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Runtime", "node")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Lang", "js")
@@ -890,6 +897,8 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	if isAnthropicBase {
 		misc.EnsureHeader(r.Header, ginHeaders, "x-client-request-id", uuid.New().String())
 	}
+	misc.EnsureHeader(r.Header, ginHeaders, "Accept-Language", "*")
+	misc.EnsureHeader(r.Header, ginHeaders, "Sec-Fetch-Mode", "cors")
 	r.Header.Set("Connection", "keep-alive")
 	if stream {
 		r.Header.Set("Accept", "text/event-stream")
@@ -899,7 +908,7 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 		r.Header.Set("Accept-Encoding", "identity")
 	} else {
 		r.Header.Set("Accept", "application/json")
-		r.Header.Set("Accept-Encoding", "gzip, deflate, br, zstd")
+		r.Header.Set("Accept-Encoding", "br, gzip, deflate")
 	}
 	// Legacy mode keeps OS/Arch runtime-derived; stabilized mode pins OS/Arch
 	// to the configured baseline while still allowing newer official
@@ -939,7 +948,7 @@ func claudeCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
 }
 
 func checkSystemInstructions(payload []byte) []byte {
-	return checkSystemInstructionsWithSigningMode(payload, false, false, "2.1.63", "", "")
+	return checkSystemInstructionsWithSigningMode(payload, false, false, "2.1.92", "", "")
 }
 
 func isClaudeOAuthToken(apiKey string) bool {
@@ -1155,6 +1164,50 @@ func parseEntrypointFromUA(userAgent string) string {
 	return "cli"
 }
 
+func getAuthUserAgentOverride(auth *cliproxyauth.Auth) string {
+	if auth == nil || len(auth.Attributes) == 0 {
+		return ""
+	}
+	for key, value := range auth.Attributes {
+		trimmedKey := strings.TrimSpace(key)
+		if len(trimmedKey) < len("header:") || !strings.HasPrefix(strings.ToLower(trimmedKey), "header:") {
+			continue
+		}
+		name := strings.TrimSpace(trimmedKey[len("header:"):])
+		if strings.EqualFold(name, "User-Agent") {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func getGinHeadersFromContext(ctx context.Context) http.Header {
+	if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
+		return ginCtx.Request.Header
+	}
+	return nil
+}
+
+func resolveOutboundClaudeUserAgent(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, apiKey string) string {
+	if authUA := getAuthUserAgentOverride(auth); authUA != "" {
+		return authUA
+	}
+
+	ginHeaders := getGinHeadersFromContext(ctx)
+	if helps.ClaudeDeviceProfileStabilizationEnabled(cfg) {
+		profile := helps.ResolveClaudeDeviceProfile(auth, apiKey, ginHeaders, cfg)
+		return strings.TrimSpace(profile.UserAgent)
+	}
+
+	req, _ := http.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages", nil)
+	helps.ApplyClaudeLegacyDeviceHeaders(req, ginHeaders, cfg)
+	return strings.TrimSpace(req.Header.Get("User-Agent"))
+}
+
+func resolveOutboundClaudeEntrypoint(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, apiKey string) string {
+	return parseEntrypointFromUA(resolveOutboundClaudeUserAgent(ctx, cfg, auth, apiKey))
+}
+
 // getWorkloadFromContext extracts workload identifier from the gin request headers.
 func getWorkloadFromContext(ctx context.Context) string {
 	if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
@@ -1258,7 +1311,7 @@ func generateBillingHeader(payload []byte, experimentalCCHSigning bool, version,
 }
 
 func checkSystemInstructionsWithMode(payload []byte, strictMode bool) []byte {
-	return checkSystemInstructionsWithSigningMode(payload, strictMode, false, "2.1.63", "", "")
+	return checkSystemInstructionsWithSigningMode(payload, strictMode, false, "2.1.92", "", "")
 }
 
 // checkSystemInstructionsWithSigningMode injects Claude Code-style system blocks:
@@ -1374,7 +1427,7 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 	// Skip system instructions for claude-3-5-haiku models
 	if !strings.HasPrefix(model, "claude-3-5-haiku") {
 		billingVersion := helps.DefaultClaudeVersion(cfg)
-		entrypoint := parseEntrypointFromUA(clientUserAgent)
+		entrypoint := resolveOutboundClaudeEntrypoint(ctx, cfg, auth, apiKey)
 		workload := getWorkloadFromContext(ctx)
 		payload = checkSystemInstructionsWithSigningMode(payload, strictMode, useExperimentalCCHSigning, billingVersion, entrypoint, workload)
 	}
