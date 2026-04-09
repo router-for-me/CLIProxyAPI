@@ -1020,64 +1020,62 @@ func isClaudeOAuthToken(apiKey string) bool {
 // references in messages. Removed tools' corresponding tool_result blocks are preserved
 // (they just become orphaned, which is safe for Claude).
 func remapOAuthToolNames(body []byte) []byte {
-	// 1. Rename and filter tools array
+	// 1. Rewrite tools array in a single pass.
+	// IMPORTANT: do not mutate names first and then rebuild from an older gjson
+	// snapshot. gjson results are snapshots of the original bytes; rebuilding from a
+	// stale snapshot will preserve removals but overwrite renamed names back to their
+	// original lowercase values.
 	tools := gjson.GetBytes(body, "tools")
 	if !tools.Exists() || !tools.IsArray() {
 		return body
 	}
 
-	// First pass: rename tools that have Claude Code equivalents.
-	tools.ForEach(func(idx, tool gjson.Result) bool {
-		// Skip built-in tools (web_search, code_execution, etc.) which have a "type" field
-		if tool.Get("type").Exists() && tool.Get("type").String() != "" {
-			return true
-		}
-		name := tool.Get("name").String()
-		if newName, ok := oauthToolRenameMap[name]; ok {
-			path := fmt.Sprintf("tools.%d.name", idx.Int())
-			body, _ = sjson.SetBytes(body, path, newName)
-		}
-		return true
-	})
-
-	// Second pass: remove tools that are in oauthToolsToRemove by rebuilding the array.
-	// This avoids index-shifting issues with sjson.DeleteBytes.
-	var newTools []gjson.Result
-	toRemove := false
+	var toolsJSON strings.Builder
+	toolsJSON.WriteByte('[')
+	toolCount := 0
 	tools.ForEach(func(_, tool gjson.Result) bool {
-		// Skip built-in tools from removal check
+		// Keep Anthropic built-in tools (web_search, code_execution, etc.) unchanged.
 		if tool.Get("type").Exists() && tool.Get("type").String() != "" {
-			newTools = append(newTools, tool)
-			return true
-		}
-		name := tool.Get("name").String()
-		if oauthToolsToRemove[name] {
-			toRemove = true
-			return true
-		}
-		newTools = append(newTools, tool)
-		return true
-	})
-
-	if toRemove {
-		// Rebuild the tools array without removed tools
-		var toolsJSON strings.Builder
-		toolsJSON.WriteByte('[')
-		for i, t := range newTools {
-			if i > 0 {
+			if toolCount > 0 {
 				toolsJSON.WriteByte(',')
 			}
-			toolsJSON.WriteString(t.Raw)
+			toolsJSON.WriteString(tool.Raw)
+			toolCount++
+			return true
 		}
-		toolsJSON.WriteByte(']')
-		body, _ = sjson.SetRawBytes(body, "tools", []byte(toolsJSON.String()))
-	}
+
+		name := tool.Get("name").String()
+		if oauthToolsToRemove[name] {
+			return true
+		}
+
+		toolJSON := tool.Raw
+		if newName, ok := oauthToolRenameMap[name]; ok {
+			updatedTool, err := sjson.Set(toolJSON, "name", newName)
+			if err == nil {
+				toolJSON = updatedTool
+			}
+		}
+
+		if toolCount > 0 {
+			toolsJSON.WriteByte(',')
+		}
+		toolsJSON.WriteString(toolJSON)
+		toolCount++
+		return true
+	})
+	toolsJSON.WriteByte(']')
+	body, _ = sjson.SetRawBytes(body, "tools", []byte(toolsJSON.String()))
 
 	// 2. Rename tool_choice if it references a known tool
 	toolChoiceType := gjson.GetBytes(body, "tool_choice.type").String()
 	if toolChoiceType == "tool" {
 		tcName := gjson.GetBytes(body, "tool_choice.name").String()
-		if newName, ok := oauthToolRenameMap[tcName]; ok {
+		if oauthToolsToRemove[tcName] {
+			// The chosen tool was removed from the tools array, so drop tool_choice to
+			// keep the payload internally consistent and fall back to normal auto tool use.
+			body, _ = sjson.DeleteBytes(body, "tool_choice")
+		} else if newName, ok := oauthToolRenameMap[tcName]; ok {
 			body, _ = sjson.SetBytes(body, "tool_choice.name", newName)
 		}
 	}
