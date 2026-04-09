@@ -159,15 +159,15 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 	}
 	// Read per-credential antigravity_credits toggle from auth file.
 	if rawAC, ok := metadata["antigravity_credits"]; ok {
+		isTrue := false
 		switch v := rawAC.(type) {
 		case bool:
-			if v {
-				a.Attributes["antigravity_credits"] = "true"
-			}
+			isTrue = v
 		case string:
-			if strings.EqualFold(strings.TrimSpace(v), "true") {
-				a.Attributes["antigravity_credits"] = "true"
-			}
+			isTrue = strings.EqualFold(strings.TrimSpace(v), "true")
+		}
+		if isTrue {
+			a.Attributes["antigravity_credits"] = "true"
 		}
 	}
 	coreauth.ApplyCustomHeadersFromMetadata(a)

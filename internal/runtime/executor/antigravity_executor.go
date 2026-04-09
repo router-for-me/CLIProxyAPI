@@ -291,11 +291,26 @@ func antigravityCreditsRetryEnabled(cfg *config.Config) bool {
 // antigravity_credits toggle is on. When true, every request for this auth
 // unconditionally includes enabledCreditTypes=["GOOGLE_ONE_AI"] — no
 // prefer/exhausted state machine, no retry fallback.
+// It checks Attributes first (set by the synthesizer) and falls back to
+// Metadata (set by UploadAuthFile without synthesizer).
 func antigravityCreditsAlwaysEnabled(auth *cliproxyauth.Auth) bool {
-	if auth == nil || len(auth.Attributes) == 0 {
+	if auth == nil {
 		return false
 	}
-	return strings.EqualFold(strings.TrimSpace(auth.Attributes["antigravity_credits"]), "true")
+	if len(auth.Attributes) > 0 {
+		if strings.EqualFold(strings.TrimSpace(auth.Attributes["antigravity_credits"]), "true") {
+			return true
+		}
+	}
+	if auth.Metadata != nil {
+		switch v := auth.Metadata["antigravity_credits"].(type) {
+		case bool:
+			return v
+		case string:
+			return strings.EqualFold(strings.TrimSpace(v), "true")
+		}
+	}
+	return false
 }
 
 func antigravityCreditsExhausted(auth *cliproxyauth.Auth, now time.Time) bool {
