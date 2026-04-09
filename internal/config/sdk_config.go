@@ -4,117 +4,6 @@
 // debug settings, proxy configuration, and API keys.
 package config
 
-import (
-	"bytes"
-	"encoding/json"
-	"fmt"
-	"strings"
-
-	"gopkg.in/yaml.v3"
-)
-
-const DefaultAPIKeyRequestsPerSecond = 5
-
-// APIKeyEntry defines a client-facing API key plus its local request rate limit.
-// The YAML/JSON decoder accepts either:
-//   - a plain string: "sk-..."
-//   - an object: { api-key: "sk-...", requests-per-second: 5 }
-type APIKeyEntry struct {
-	APIKey            string `yaml:"api-key" json:"api-key"`
-	RequestsPerSecond int    `yaml:"requests-per-second,omitempty" json:"requests-per-second"`
-}
-
-func (e *APIKeyEntry) normalize() {
-	if e == nil {
-		return
-	}
-	e.APIKey = strings.TrimSpace(e.APIKey)
-	if e.RequestsPerSecond <= 0 {
-		e.RequestsPerSecond = DefaultAPIKeyRequestsPerSecond
-	}
-}
-
-// UnmarshalYAML supports both legacy string items and structured objects.
-func (e *APIKeyEntry) UnmarshalYAML(value *yaml.Node) error {
-	if e == nil {
-		return nil
-	}
-	switch value.Kind {
-	case yaml.ScalarNode:
-		var apiKey string
-		if err := value.Decode(&apiKey); err != nil {
-			return err
-		}
-		e.APIKey = apiKey
-		e.RequestsPerSecond = DefaultAPIKeyRequestsPerSecond
-	case yaml.MappingNode:
-		type rawEntry APIKeyEntry
-		var decoded rawEntry
-		if err := value.Decode(&decoded); err != nil {
-			return err
-		}
-		*e = APIKeyEntry(decoded)
-	default:
-		return fmt.Errorf("api key entry must be a string or object")
-	}
-	e.normalize()
-	return nil
-}
-
-// UnmarshalJSON supports both legacy string items and structured objects.
-func (e *APIKeyEntry) UnmarshalJSON(data []byte) error {
-	if e == nil {
-		return nil
-	}
-	trimmed := bytes.TrimSpace(data)
-	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
-		*e = APIKeyEntry{}
-		return nil
-	}
-	if trimmed[0] == '"' {
-		var apiKey string
-		if err := json.Unmarshal(trimmed, &apiKey); err != nil {
-			return err
-		}
-		e.APIKey = apiKey
-		e.RequestsPerSecond = DefaultAPIKeyRequestsPerSecond
-		e.normalize()
-		return nil
-	}
-	type rawEntry APIKeyEntry
-	var decoded rawEntry
-	if err := json.Unmarshal(trimmed, &decoded); err != nil {
-		return err
-	}
-	*e = APIKeyEntry(decoded)
-	e.normalize()
-	return nil
-}
-
-// NormalizeAPIKeyEntries trims, defaults, and deduplicates client API keys.
-func NormalizeAPIKeyEntries(entries []APIKeyEntry) []APIKeyEntry {
-	if len(entries) == 0 {
-		return nil
-	}
-	normalized := make([]APIKeyEntry, 0, len(entries))
-	seen := make(map[string]struct{}, len(entries))
-	for _, entry := range entries {
-		entry.normalize()
-		if entry.APIKey == "" {
-			continue
-		}
-		if _, exists := seen[entry.APIKey]; exists {
-			continue
-		}
-		seen[entry.APIKey] = struct{}{}
-		normalized = append(normalized, entry)
-	}
-	if len(normalized) == 0 {
-		return nil
-	}
-	return normalized
-}
-
 // SDKConfig represents the application's configuration, loaded from a YAML file.
 type SDKConfig struct {
 	// ProxyURL is the URL of an optional proxy server to use for outbound requests.
@@ -133,7 +22,7 @@ type SDKConfig struct {
 	RequestLog bool `yaml:"request-log" json:"request-log"`
 
 	// APIKeys is a list of keys for authenticating clients to this proxy server.
-	APIKeys []APIKeyEntry `yaml:"api-keys" json:"api-keys"`
+	APIKeys []string `yaml:"api-keys" json:"api-keys"`
 
 	// PassthroughHeaders controls whether upstream response headers are forwarded to downstream clients.
 	// Default is false (disabled).

@@ -11,11 +11,6 @@ import (
 	"time"
 )
 
-type apiKeyItem struct {
-	APIKey            string `json:"api-key"`
-	RequestsPerSecond int    `json:"requests-per-second"`
-}
-
 // Client wraps HTTP calls to the management API.
 type Client struct {
 	baseURL   string
@@ -259,22 +254,11 @@ func (c *Client) GetAPIKeys() ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	var result []apiKeyItem
-	if err := json.Unmarshal(raw, &result); err == nil {
-		keys := make([]string, 0, len(result))
-		for _, item := range result {
-			if strings.TrimSpace(item.APIKey) == "" {
-				continue
-			}
-			keys = append(keys, item.APIKey)
-		}
-		return keys, nil
-	}
-	var legacy []string
-	if err := json.Unmarshal(raw, &legacy); err != nil {
+	var result []string
+	if err := json.Unmarshal(raw, &result); err != nil {
 		return nil, err
 	}
-	return legacy, nil
+	return result, nil
 }
 
 // AddAPIKey adds a new API key by sending old=nil, new=key which appends.

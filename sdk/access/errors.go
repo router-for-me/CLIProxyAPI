@@ -13,7 +13,6 @@ const (
 	AuthErrorCodeNoCredentials     AuthErrorCode = "no_credentials"
 	AuthErrorCodeInvalidCredential AuthErrorCode = "invalid_credential"
 	AuthErrorCodeNotHandled        AuthErrorCode = "not_handled"
-	AuthErrorCodeRateLimited       AuthErrorCode = "rate_limited"
 	AuthErrorCodeInternal          AuthErrorCode = "internal_error"
 )
 
@@ -73,14 +72,6 @@ func NewInvalidCredentialError() *AuthError {
 
 func NewNotHandledError() *AuthError {
 	return newAuthError(AuthErrorCodeNotHandled, "authentication provider did not handle request", 0, nil)
-}
-
-func NewRateLimitedAuthError(message string) *AuthError {
-	normalizedMessage := strings.TrimSpace(message)
-	if normalizedMessage == "" {
-		normalizedMessage = "API key rate limit exceeded"
-	}
-	return newAuthError(AuthErrorCodeRateLimited, normalizedMessage, http.StatusTooManyRequests, nil)
 }
 
 func NewInternalAuthError(message string, cause error) *AuthError {

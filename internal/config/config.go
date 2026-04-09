@@ -642,8 +642,6 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		cfg.MaxRetryCredentials = 0
 	}
 
-	cfg.SanitizeAPIKeys()
-
 	// Sanitize Gemini API key configuration and migrate legacy entries.
 	cfg.SanitizeGeminiKeys()
 
@@ -746,14 +744,6 @@ func payloadRawString(value any) ([]byte, bool) {
 	default:
 		return nil, false
 	}
-}
-
-// SanitizeAPIKeys trims, defaults, and deduplicates client API keys.
-func (cfg *Config) SanitizeAPIKeys() {
-	if cfg == nil {
-		return
-	}
-	cfg.APIKeys = NormalizeAPIKeyEntries(cfg.APIKeys)
 }
 
 // SanitizeCodexHeaderDefaults trims surrounding whitespace from the

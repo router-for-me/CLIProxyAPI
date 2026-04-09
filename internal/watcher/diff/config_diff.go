@@ -91,8 +91,8 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	// API keys (redacted) and counts
 	if len(oldCfg.APIKeys) != len(newCfg.APIKeys) {
 		changes = append(changes, fmt.Sprintf("api-keys count: %d -> %d", len(oldCfg.APIKeys), len(newCfg.APIKeys)))
-	} else if !reflect.DeepEqual(normalizeAPIKeyEntries(oldCfg.APIKeys), normalizeAPIKeyEntries(newCfg.APIKeys)) {
-		changes = append(changes, "api-keys: values or rate limits updated (count unchanged, redacted)")
+	} else if !reflect.DeepEqual(trimStrings(oldCfg.APIKeys), trimStrings(newCfg.APIKeys)) {
+		changes = append(changes, "api-keys: values updated (count unchanged, redacted)")
 	}
 	if len(oldCfg.GeminiKey) != len(newCfg.GeminiKey) {
 		changes = append(changes, fmt.Sprintf("gemini-api-key count: %d -> %d", len(oldCfg.GeminiKey), len(newCfg.GeminiKey)))
@@ -324,13 +324,10 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	return changes
 }
 
-func normalizeAPIKeyEntries(in []config.APIKeyEntry) []config.APIKeyEntry {
-	out := make([]config.APIKeyEntry, len(in))
+func trimStrings(in []string) []string {
+	out := make([]string, len(in))
 	for i := range in {
-		out[i] = config.APIKeyEntry{
-			APIKey:            strings.TrimSpace(in[i].APIKey),
-			RequestsPerSecond: in[i].RequestsPerSecond,
-		}
+		out[i] = strings.TrimSpace(in[i])
 	}
 	return out
 }
