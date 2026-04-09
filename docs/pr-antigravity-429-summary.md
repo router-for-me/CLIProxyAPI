@@ -142,6 +142,24 @@ quota-exceeded:
 - 编译部署时若源码目录不完整或函数结构有误，会直接导致 `go build` 失败
 - 明确余额不足错误被提级为硬规则后，相关 auth 的积分通道会被直接永久停用
 
+### 10. 秒级 instant retry 等待规则继续收紧
+
+针对实际线上出现的秒级 `RATE_LIMIT_EXCEEDED` 边界抖动问题，进一步调整 instant retry 的等待策略：
+
+- 不再使用模糊缓冲描述
+- 明确以 `RetryInfo.retryDelay` 的原始解析值作为基准
+- 当前实际等待时间为：`retryDelay + 800ms`
+- 例如：
+  - `retryDelay = 0.467174873s` -> 实际等待 `1.267174873s`
+  - `retryDelay = 0.606037544s` -> 实际等待 `1.406037544s`
+
+这样做的原因是：
+
+- `error.message` 中的 `after 0s / 1s` 只是展示文案，不能作为准确冷却依据
+- 真正可靠的冷却值应取 `RetryInfo.retryDelay`
+- 秒级窗口边界存在轻微抖动，按原值裸等或只加较小缓冲时，仍可能偶发再次撞上 429
+- 提升到 `+800ms` 后，更适合当前线上波动场景
+
 ## 验证结果
 
 已完成：
@@ -161,4 +179,6 @@ quota-exceeded:
 - 更合理的 short cooldown / soft retry / instant retry 行为
 - credits 全自动处理，不再暴露额外配置项
 - 对明确积分余额不足错误的自动永久停用能力
+- 秒级 instant retry 已改为严格按 `retryDelay + 800ms` 等待，进一步压制秒级边界 429 外抛
+
 - 已验证可在服务器端完成编译、替换与运行

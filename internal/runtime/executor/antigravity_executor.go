@@ -664,7 +664,6 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 	}
 
 	isClaude := strings.Contains(strings.ToLower(baseModel), "claude")
-
 	if isClaude || strings.Contains(baseModel, "gemini-3-pro") || strings.Contains(baseModel, "gemini-3.1-flash-image") {
 		return e.executeClaudeNonStream(ctx, auth, req, opts)
 	}
@@ -701,7 +700,6 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
 	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
-
 	attempts := antigravityRetryAttempts(auth, e.cfg)
 
 attemptLoop:
@@ -719,6 +717,7 @@ attemptLoop:
 					usedCreditsDirect = true
 				}
 			}
+
 			httpReq, errReq := e.buildRequest(ctx, auth, token, baseModel, requestPayload, false, opts.Alt, baseURL)
 			if errReq != nil {
 				err = errReq
@@ -756,13 +755,14 @@ attemptLoop:
 
 			if httpResp.StatusCode == http.StatusTooManyRequests {
 				decision := decideAntigravity429(bodyBytes)
-
 				switch decision.kind {
 				case antigravity429DecisionInstantRetrySameAuth:
 					if attempt+1 < attempts {
 						if decision.retryAfter != nil && *decision.retryAfter > 0 {
-							log.Debugf("antigravity executor: instant retry for model %s, waiting %s", baseModel, *decision.retryAfter)
-							if errWait := antigravityWait(ctx, *decision.retryAfter); errWait != nil {
+							wait := antigravityInstantRetryDelay(*decision.retryAfter)
+							log.Debugf("antigravity executor: instant retry for model %s, waiting %s", baseModel, wait)
+							if errWait := antigravityWait(ctx, wait); errWait != nil {
+
 								return resp, errWait
 							}
 						}
@@ -799,6 +799,7 @@ attemptLoop:
 							return resp, nil
 						}
 					}
+				}
 			}
 
 			if httpResp.StatusCode < http.StatusOK || httpResp.StatusCode >= http.StatusMultipleChoices {
@@ -984,8 +985,10 @@ attemptLoop:
 					case antigravity429DecisionInstantRetrySameAuth:
 						if attempt+1 < attempts {
 							if decision.retryAfter != nil && *decision.retryAfter > 0 {
-								log.Debugf("antigravity executor: instant retry for model %s, waiting %s", baseModel, *decision.retryAfter)
-								if errWait := antigravityWait(ctx, *decision.retryAfter); errWait != nil {
+								wait := antigravityInstantRetryDelay(*decision.retryAfter)
+								log.Debugf("antigravity executor: instant retry for model %s, waiting %s", baseModel, wait)
+								if errWait := antigravityWait(ctx, wait); errWait != nil {
+
 									return resp, errWait
 								}
 							}
@@ -1007,6 +1010,10 @@ attemptLoop:
 							helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 						}
 					}
+				}
+				}
+
+
 				if httpResp.StatusCode >= http.StatusOK && httpResp.StatusCode < http.StatusMultipleChoices {
 					goto streamSuccessClaudeNonStream
 				}
@@ -1440,8 +1447,10 @@ attemptLoop:
 					case antigravity429DecisionInstantRetrySameAuth:
 						if attempt+1 < attempts {
 							if decision.retryAfter != nil && *decision.retryAfter > 0 {
-								log.Debugf("antigravity executor: instant retry for model %s, waiting %s", baseModel, *decision.retryAfter)
-								if errWait := antigravityWait(ctx, *decision.retryAfter); errWait != nil {
+								wait := antigravityInstantRetryDelay(*decision.retryAfter)
+								log.Debugf("antigravity executor: instant retry for model %s, waiting %s", baseModel, wait)
+								if errWait := antigravityWait(ctx, wait); errWait != nil {
+
 									return nil, errWait
 								}
 							}
@@ -1463,6 +1472,10 @@ attemptLoop:
 							helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 						}
 					}
+				}
+				}
+
+
 				if httpResp.StatusCode >= http.StatusOK && httpResp.StatusCode < http.StatusMultipleChoices {
 					goto streamSuccessExecuteStream
 				}
@@ -2207,6 +2220,16 @@ func antigravityTransient429RetryDelay(attempt int) time.Duration {
 	}
 	return delay
 }
+
+func antigravityInstantRetryDelay(wait time.Duration) time.Duration {
+	if wait <= 0 {
+		return 0
+	}
+	return wait + 800*time.Millisecond
+}
+
+
+
 
 func antigravityWait(ctx context.Context, wait time.Duration) error {
 	if wait <= 0 {
