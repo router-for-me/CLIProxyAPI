@@ -118,6 +118,18 @@ func GetCodeBuddyModels() []*ModelInfo {
 			SupportedEndpoints:  []string{"/chat/completions"},
 		},
 		{
+			ID:                  "glm-5.1",
+			Object:              "model",
+			Created:             now,
+			OwnedBy:             "tencent",
+			Type:                "codebuddy",
+			DisplayName:         "GLM-5.1",
+			Description:         "GLM-5.1 via CodeBuddy",
+			ContextLength:       200000,
+			MaxCompletionTokens: 32768,
+			SupportedEndpoints:  []string{"/chat/completions"},
+		},
+		{
 			ID:                  "glm-5.0-turbo",
 			Object:              "model",
 			Created:             now,
