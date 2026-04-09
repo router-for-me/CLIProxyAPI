@@ -1866,6 +1866,10 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 							auth.StatusMessage = "payment_required"
 							suspendReason = "payment_required"
 							shouldSuspendModel = true
+							logEntryWithRequestID(ctx).Warnf(
+								"antigravity auth banned: auth_file=%s account=%s uploaded_at=%s status=%d event=payment_required",
+								auth.ID, auth.Label, auth.CreatedAt.Format(time.RFC3339), statusCode,
+							)
 						case 404:
 							next := now.Add(12 * time.Hour)
 							state.NextRetryAfter = next
@@ -2268,6 +2272,10 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 	case 402, 403:
 		auth.StatusMessage = "payment_required"
 		auth.NextRetryAfter = now.Add(30 * time.Minute)
+		log.Warnf(
+			"antigravity auth banned: auth_file=%s account=%s uploaded_at=%s status=%d event=payment_required",
+			auth.ID, auth.Label, auth.CreatedAt.Format(time.RFC3339), statusCode,
+		)
 	case 404:
 		auth.StatusMessage = "not_found"
 		auth.NextRetryAfter = now.Add(12 * time.Hour)
