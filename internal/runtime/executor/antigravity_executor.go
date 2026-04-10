@@ -64,6 +64,8 @@ const (
 	antigravityCreditsAutoDisableDuration  = 5 * time.Hour
 	antigravityShortQuotaCooldownThreshold = 5 * time.Minute
 	antigravityInstantRetryThreshold       = 3 * time.Second
+
+	maxGRPCMessageSize = 32 * 1024 * 1024 // 32MB safety limit
 	// systemInstruction              = "You are Antigravity, a powerful agentic AI coding assistant designed by the Google Deepmind team working on Advanced Agentic Coding.You are pair programming with a USER to solve their coding task. The task may require creating a new codebase, modifying or debugging an existing codebase, or simply answering a question.**Absolute paths only****Proactiveness**"
 )
 
@@ -1572,6 +1574,12 @@ attemptLoop:
 							break
 						}
 						length := binary.BigEndian.Uint32(header[1:])
+						if length > maxGRPCMessageSize {
+							errMax := fmt.Errorf("gRPC frame too large: %d bytes (max %d)", length, maxGRPCMessageSize)
+							helps.RecordAPIResponseError(ctx, e.cfg, errMax)
+							out <- cliproxyexecutor.StreamChunk{Err: errMax}
+							break
+						}
 						msg := make([]byte, length)
 						if _, errRead := io.ReadFull(resp.Body, msg); errRead != nil {
 							helps.RecordAPIResponseError(ctx, e.cfg, errRead)
@@ -1583,6 +1591,10 @@ attemptLoop:
 
 						// Decode binary Protobuf to JSON for the translator
 						payload := decodeAntigravityProtoResponse(msg)
+
+						if detail, ok := helps.ParseAntigravityStreamUsage(payload); ok {
+							reporter.Publish(ctx, detail)
+						}
 
 						chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, payload, &param)
 						for i := range chunks {
@@ -2452,6 +2464,23 @@ func encodeAntigravityProtoRequest(payload []byte) []byte {
 		out = protowire.AppendTag(out, 3, protowire.BytesType)
 		out = protowire.AppendString(out, model)
 	}
+
+	// 企业外部模型配置 (tag 15)
+	if enterpriseConfig := gjson.GetBytes(payload, "enterprise_chat_model_config"); enterpriseConfig.Exists() {
+		out = protowire.AppendTag(out, 15, protowire.BytesType)
+		out = protowire.AppendString(out, enterpriseConfig.Raw)
+	}
+
+	// 启用 AI 积分计费 (tag 21)
+	if enableCredits := gjson.GetBytes(payload, "enable_ai_credits"); enableCredits.Exists() {
+		out = protowire.AppendTag(out, 21, protowire.VarintType)
+		val := uint64(0)
+		if enableCredits.Bool() {
+			val = 1
+		}
+		out = protowire.AppendVarint(out, val)
+	}
+
 	return out
 }
 
