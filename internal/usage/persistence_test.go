@@ -110,21 +110,6 @@ func TestPersistenceManagerLoadAndFlush(t *testing.T) {
 	}
 }
 
-func TestUpdateAPIStatsBoundsDetails(t *testing.T) {
-	stats := NewRequestStatistics()
-	bucket := &apiStats{Models: make(map[string]*modelStats)}
-	for i := 0; i < defaultMaxRequestDetails+25; i++ {
-		stats.updateAPIStats(bucket, "model", RequestDetail{Timestamp: time.Unix(int64(i), 0).UTC(), Source: "src"})
-	}
-	got := len(bucket.Models["model"].Details)
-	if got != defaultMaxRequestDetails {
-		t.Fatalf("details len = %d, want %d", got, defaultMaxRequestDetails)
-	}
-	if first := bucket.Models["model"].Details[0].Timestamp.Unix(); first != 25 {
-		t.Fatalf("first retained timestamp = %d, want 25", first)
-	}
-}
-
 func TestRequestStatisticsRestoreSnapshotPreservesAggregates(t *testing.T) {
 	stats := NewRequestStatistics()
 	snapshot := StatisticsSnapshot{
@@ -223,6 +208,30 @@ func TestPersistenceManagerCanPersistAfterLoadFailure(t *testing.T) {
 	}
 }
 
+func TestPersistenceManagerFlushPreservesConcurrentDirtyMark(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Record(context.Background(), coreusage.Record{Provider: "gemini", Model: "m", Source: "seed", RequestedAt: time.Now().UTC(), Detail: coreusage.Detail{TotalTokens: 3}})
+	store := &blockingSnapshotStore{started: make(chan struct{}), release: make(chan struct{})}
+	manager := NewPersistenceManager(store, stats)
+	manager.MarkDirty()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- manager.Flush(context.Background())
+	}()
+
+	<-store.started
+	manager.MarkDirty()
+	close(store.release)
+
+	if err := <-errCh; err != nil {
+		t.Fatalf("Flush() error = %v", err)
+	}
+	if !manager.dirty {
+		t.Fatal("expected dirty flag to remain set when new writes arrive during save")
+	}
+}
+
 type failingSnapshotStore struct {
 	path    string
 	loadErr error
@@ -244,4 +253,23 @@ func (s *failingSnapshotStore) Save(ctx context.Context, snapshot StatisticsSnap
 
 func (s *failingSnapshotStore) Path() string {
 	return s.path
+}
+
+type blockingSnapshotStore struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (s *blockingSnapshotStore) Load(ctx context.Context) (StatisticsSnapshot, error) {
+	return StatisticsSnapshot{}, nil
+}
+
+func (s *blockingSnapshotStore) Save(ctx context.Context, snapshot StatisticsSnapshot) error {
+	close(s.started)
+	<-s.release
+	return nil
+}
+
+func (s *blockingSnapshotStore) Path() string {
+	return "/tmp/blocking"
 }

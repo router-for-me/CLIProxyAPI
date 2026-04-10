@@ -205,8 +205,10 @@ func (m *PersistenceManager) Flush(ctx context.Context) error {
 		m.mu.Unlock()
 		return nil
 	}
-	snapshot := m.stats.Snapshot()
+	m.dirty = false
 	m.mu.Unlock()
+
+	snapshot := m.stats.Snapshot()
 	if err := m.store.Save(ctx, snapshot); err != nil {
 		m.mu.Lock()
 		if !m.closed {
@@ -215,9 +217,6 @@ func (m *PersistenceManager) Flush(ctx context.Context) error {
 		m.mu.Unlock()
 		return err
 	}
-	m.mu.Lock()
-	m.dirty = false
-	m.mu.Unlock()
 	return nil
 }
 

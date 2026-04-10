@@ -237,9 +237,6 @@ func (s *RequestStatistics) updateAPIStats(stats *apiStats, model string, detail
 	modelStatsValue.TotalRequests++
 	modelStatsValue.TotalTokens += detail.Tokens.TotalTokens
 	modelStatsValue.Details = append(modelStatsValue.Details, detail)
-	if len(modelStatsValue.Details) > defaultMaxRequestDetails {
-		modelStatsValue.Details = modelStatsValue.Details[len(modelStatsValue.Details)-defaultMaxRequestDetails:]
-	}
 }
 
 // Snapshot returns a copy of the aggregated metrics for external consumption.
