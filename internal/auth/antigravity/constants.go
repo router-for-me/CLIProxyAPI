@@ -1,6 +1,8 @@
 // Package antigravity provides OAuth2 authentication functionality for the Antigravity provider.
 package antigravity
 
+import "github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
+
 // OAuth client credentials and configuration
 const (
 	ClientID     = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
@@ -28,7 +30,11 @@ const (
 const (
 	APIEndpoint    = "https://cloudcode-pa.googleapis.com"
 	APIVersion     = "v1internal"
-	APIUserAgent   = "google-api-nodejs-client/9.15.1"
-	APIClient      = "google-cloud-sdk vscode_cloudshelleditor/0.1"
-	ClientMetadata = `{"ideType":"IDE_UNSPECIFIED","platform":"PLATFORM_UNSPECIFIED","pluginType":"GEMINI"}`
+	ClientMetadata = `{"ideType":"ANTIGRAVITY","platform":"PLATFORM_UNSPECIFIED","pluginType":"GEMINI"}`
 )
+
+// APIUserAgent returns the User-Agent for Antigravity API calls,
+// using the dynamically fetched latest version.
+func APIUserAgent() string {
+	return misc.AntigravityUserAgent()
+}

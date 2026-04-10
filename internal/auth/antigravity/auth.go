@@ -173,8 +173,7 @@ func (o *AntigravityAuth) FetchProjectID(ctx context.Context, accessToken string
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", APIUserAgent)
-	req.Header.Set("X-Goog-Api-Client", APIClient)
+	req.Header.Set("User-Agent", APIUserAgent())
 	req.Header.Set("Client-Metadata", ClientMetadata)
 
 	resp, errDo := o.httpClient.Do(req)
@@ -277,8 +276,7 @@ func (o *AntigravityAuth) OnboardUser(ctx context.Context, accessToken, tierID s
 		}
 		req.Header.Set("Authorization", "Bearer "+accessToken)
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("User-Agent", APIUserAgent)
-		req.Header.Set("X-Goog-Api-Client", APIClient)
+		req.Header.Set("User-Agent", APIUserAgent())
 		req.Header.Set("Client-Metadata", ClientMetadata)
 
 		resp, errDo := o.httpClient.Do(req)
