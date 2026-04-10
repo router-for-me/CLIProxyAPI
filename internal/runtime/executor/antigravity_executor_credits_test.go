@@ -17,8 +17,9 @@ import (
 )
 
 func resetAntigravityCreditsRetryState() {
-	antigravityCreditsExhaustedByAuth = sync.Map{}
+	antigravityCreditsFailureByAuth = sync.Map{}
 	antigravityPreferCreditsByModel = sync.Map{}
+	antigravityShortCooldownByAuth = sync.Map{}
 }
 
 func TestClassifyAntigravity429(t *testing.T) {
@@ -58,10 +59,10 @@ func TestClassifyAntigravity429(t *testing.T) {
 		}
 	})
 
-	t.Run("unknown", func(t *testing.T) {
+	t.Run("unstructured 429 defaults to soft rate limit", func(t *testing.T) {
 		body := []byte(`{"error":{"message":"too many requests"}}`)
-		if got := classifyAntigravity429(body); got != antigravity429Unknown {
-			t.Fatalf("classifyAntigravity429() = %q, want %q", got, antigravity429Unknown)
+		if got := classifyAntigravity429(body); got != antigravity429SoftRateLimit {
+			t.Fatalf("classifyAntigravity429() = %q, want %q", got, antigravity429SoftRateLimit)
 		}
 	})
 }
@@ -255,7 +256,7 @@ func TestAntigravityExecute_SkipsCreditsRetryWhenAlreadyExhausted(t *testing.T) 
 			"expired":      time.Now().Add(1 * time.Hour).Format(time.RFC3339),
 		},
 	}
-	markAntigravityCreditsExhausted(auth, time.Now())
+	recordAntigravityCreditsFailure(auth, time.Now())
 
 	_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
 		Model:   "gemini-2.5-flash",
