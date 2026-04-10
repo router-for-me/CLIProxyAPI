@@ -56,3 +56,24 @@ go build -o test-output ./cmd/server && rm test-output # Verify compile (REQUIRE
 - Use logrus structured logging; avoid leaking secrets/tokens in logs
 - Avoid panics in HTTP handlers; prefer logged errors and meaningful HTTP status codes
 - Timeouts are allowed only during credential acquisition; after an upstream connection is established, do not set timeouts for any subsequent network behavior. Intentional exceptions that must remain allowed are the Codex websocket liveness deadlines in `internal/runtime/executor/codex_websockets_executor.go`, the wsrelay session deadlines in `internal/wsrelay/session.go`, the management APICall timeout in `internal/api/handlers/management/api_tools.go`, and the `cmd/fetch_antigravity_models` utility timeouts
+
+## Lessons Learned
+
+### OAuth Tool Name Remapping Must Track Whether Renaming Occurred
+- **Symptom**: Responses returned corrupted tool names when the upstream client already sent TitleCase names (e.g. `Bash` not `bash`).
+- **Root cause**: `remapOAuthToolNames` always ran `reverseRemapOAuthToolNames` on the response, even when no names were actually changed. If the request already used TitleCase names matching the rename targets, the reverse pass would incorrectly rewrite them to lowercase.
+- **Fix**: `remapOAuthToolNames` returns `([]byte, bool)` — the bool tracks whether any rename actually occurred. Only call `reverseRemapOAuthToolNames` on responses when `renamed == true`.
+- **Pattern**: When a function transforms data and a later stage needs to undo it, always track whether the transform was a no-op. Never assume the reverse path is safe to run unconditionally.
+- **See**: `internal/runtime/executor/claude_executor.go` — `remapOAuthToolNames()`, `oauthToolNamesRemapped` flag.
+
+### 429 Retry With Token Refresh Pattern (Qwen)
+- **Symptom**: Qwen returns 429 (quota_exceeded) even when the user has available quota under a different session.
+- **Root cause**: Qwen's rate limits are per-access-token; refreshing the token can yield a fresh quota window.
+- **Fix**: Wrap the HTTP call in a `for` loop with a one-shot retry. On 429, call `Refresh()` to get a new token, update `auth`, and `continue`. Use a `qwenImmediateRetryAttempted` bool to prevent infinite loops. Apply to both `Execute` and `ExecuteStream`.
+- **Pattern**: For providers where tokens are session-scoped and rate limits are per-token, a single retry with token refresh is a valid recovery strategy. Guard with a `bool` flag — never retry more than once.
+- **See**: `internal/runtime/executor/qwen_executor.go` — `qwenShouldAttemptImmediateRefreshRetry()`, `refreshForImmediateRetry` field for test injection.
+
+### Antigravity URL Fallback Order: Prefer Production
+- **Symptom**: Antigravity requests were hitting daily/sandbox URLs first, causing unnecessary latency or failures.
+- **Fix**: Move `antigravityBaseURLProd` to the first position in the fallback slice.
+- **Pattern**: When defining URL fallback orders, always place the production endpoint first unless there is an explicit reason to prefer a non-production endpoint. Comment any intentional deviation.
