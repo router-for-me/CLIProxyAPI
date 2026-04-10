@@ -6,6 +6,7 @@ package usage
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -237,7 +238,7 @@ func (s *RequestStatistics) updateAPIStats(stats *apiStats, model string, detail
 	modelStatsValue.TotalTokens += detail.Tokens.TotalTokens
 	modelStatsValue.Details = append(modelStatsValue.Details, detail)
 	if len(modelStatsValue.Details) > defaultMaxRequestDetails {
-		modelStatsValue.Details = append([]RequestDetail(nil), modelStatsValue.Details[len(modelStatsValue.Details)-defaultMaxRequestDetails:]...)
+		modelStatsValue.Details = modelStatsValue.Details[len(modelStatsValue.Details)-defaultMaxRequestDetails:]
 	}
 }
 
@@ -396,6 +397,74 @@ func (s *RequestStatistics) recordImported(apiName, modelName string, stats *api
 	s.tokensByHour[hourKey] += totalTokens
 }
 
+// RestoreSnapshot replaces the current in-memory statistics with a persisted snapshot.
+func (s *RequestStatistics) RestoreSnapshot(snapshot StatisticsSnapshot) {
+	if s == nil {
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.totalRequests = snapshot.TotalRequests
+	s.successCount = snapshot.SuccessCount
+	s.failureCount = snapshot.FailureCount
+	s.totalTokens = snapshot.TotalTokens
+
+	s.apis = make(map[string]*apiStats, len(snapshot.APIs))
+	for apiName, apiSnapshot := range snapshot.APIs {
+		apiName = strings.TrimSpace(apiName)
+		if apiName == "" {
+			continue
+		}
+		stats := &apiStats{
+			TotalRequests: apiSnapshot.TotalRequests,
+			TotalTokens:   apiSnapshot.TotalTokens,
+			Models:        make(map[string]*modelStats, len(apiSnapshot.Models)),
+		}
+		for modelName, modelSnapshot := range apiSnapshot.Models {
+			modelName = strings.TrimSpace(modelName)
+			if modelName == "" {
+				modelName = "unknown"
+			}
+			details := make([]RequestDetail, len(modelSnapshot.Details))
+			copy(details, modelSnapshot.Details)
+			for i := range details {
+				details[i].Tokens = normaliseTokenStats(details[i].Tokens)
+				if details[i].LatencyMs < 0 {
+					details[i].LatencyMs = 0
+				}
+			}
+			stats.Models[modelName] = &modelStats{
+				TotalRequests: modelSnapshot.TotalRequests,
+				TotalTokens:   modelSnapshot.TotalTokens,
+				Details:       details,
+			}
+		}
+		s.apis[apiName] = stats
+	}
+
+	s.requestsByDay = make(map[string]int64, len(snapshot.RequestsByDay))
+	for day, count := range snapshot.RequestsByDay {
+		s.requestsByDay[day] = count
+	}
+
+	s.requestsByHour = make(map[int]int64, len(snapshot.RequestsByHour))
+	for hour, count := range snapshot.RequestsByHour {
+		s.requestsByHour[parseHour(hour)] = count
+	}
+
+	s.tokensByDay = make(map[string]int64, len(snapshot.TokensByDay))
+	for day, count := range snapshot.TokensByDay {
+		s.tokensByDay[day] = count
+	}
+
+	s.tokensByHour = make(map[int]int64, len(snapshot.TokensByHour))
+	for hour, count := range snapshot.TokensByHour {
+		s.tokensByHour[parseHour(hour)] = count
+	}
+}
+
 func dedupKey(apiName, modelName string, detail RequestDetail) string {
 	timestamp := detail.Timestamp.UTC().Format(time.RFC3339Nano)
 	tokens := normaliseTokenStats(detail.Tokens)
@@ -497,4 +566,12 @@ func formatHour(hour int) string {
 	}
 	hour = hour % 24
 	return fmt.Sprintf("%02d", hour)
+}
+
+func parseHour(value string) int {
+	hour, err := strconv.Atoi(strings.TrimSpace(value))
+	if err != nil || hour < 0 {
+		return 0
+	}
+	return hour % 24
 }

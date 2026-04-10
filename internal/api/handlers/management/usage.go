@@ -1,6 +1,7 @@
 package management
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"time"
@@ -70,7 +71,10 @@ func (h *Handler) ImportUsageStatistics(c *gin.Context) {
 
 	result := h.usageStats.MergeSnapshot(payload.Usage)
 	if persistence := usage.GetPersistenceManager(); persistence != nil {
-		if err := persistence.Flush(c.Request.Context()); err != nil {
+		persistence.MarkDirty()
+		flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := persistence.Flush(flushCtx); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to persist imported usage statistics"})
 			return
 		}

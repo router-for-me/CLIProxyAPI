@@ -168,9 +168,9 @@ func (m *PersistenceManager) Load(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	result := m.stats.MergeSnapshot(snapshot)
-	if result.Added > 0 || result.Skipped > 0 {
-		log.Infof("usage statistics restored from %s: added=%d skipped=%d", m.store.Path(), result.Added, result.Skipped)
+	m.stats.RestoreSnapshot(snapshot)
+	if snapshot.TotalRequests > 0 || snapshot.TotalTokens > 0 {
+		log.Infof("usage statistics restored from %s: total_requests=%d total_tokens=%d", m.store.Path(), snapshot.TotalRequests, snapshot.TotalTokens)
 	}
 	return nil
 }
@@ -205,9 +205,20 @@ func (m *PersistenceManager) Flush(ctx context.Context) error {
 		m.mu.Unlock()
 		return nil
 	}
+	snapshot := m.stats.Snapshot()
+	m.mu.Unlock()
+	if err := m.store.Save(ctx, snapshot); err != nil {
+		m.mu.Lock()
+		if !m.closed {
+			m.dirty = true
+		}
+		m.mu.Unlock()
+		return err
+	}
+	m.mu.Lock()
 	m.dirty = false
 	m.mu.Unlock()
-	return m.store.Save(ctx, m.stats.Snapshot())
+	return nil
 }
 
 func (m *PersistenceManager) Close(ctx context.Context) error {
