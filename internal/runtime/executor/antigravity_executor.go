@@ -1564,8 +1564,9 @@ attemptLoop:
 
 				if isGRPC {
 					frameCount := 0
+					header := make([]byte, 5)
+					var msgBuf []byte
 					for {
-						header := make([]byte, 5)
 						if _, errRead := io.ReadFull(resp.Body, header); errRead != nil {
 							if errRead != io.EOF {
 								helps.RecordAPIResponseError(ctx, e.cfg, errRead)
@@ -1580,7 +1581,10 @@ attemptLoop:
 							out <- cliproxyexecutor.StreamChunk{Err: errMax}
 							break
 						}
-						msg := make([]byte, length)
+						if uint32(cap(msgBuf)) < length {
+							msgBuf = make([]byte, length)
+						}
+						msg := msgBuf[:length]
 						if _, errRead := io.ReadFull(resp.Body, msg); errRead != nil {
 							helps.RecordAPIResponseError(ctx, e.cfg, errRead)
 							out <- cliproxyexecutor.StreamChunk{Err: errRead}
@@ -2487,36 +2491,54 @@ func encodeAntigravityProtoRequest(payload []byte) []byte {
 // decodeAntigravityProtoResponse decodes a StreamGenerateContentResponse proto to JSON.
 func decodeAntigravityProtoResponse(msg []byte) []byte {
 	res := []byte(`{"response":{"candidates":[]}}`)
-	_ = walkProtobufFields(msg, func(num protowire.Number, typ protowire.Type, raw []byte) error {
+	err := walkProtobufFields(msg, func(num protowire.Number, typ protowire.Type, raw []byte) error {
 		switch num {
 		case 1: // candidates
 			if typ == protowire.BytesType {
-				candidate := decodeCandidateProto(raw)
+				val, n := protowire.ConsumeBytes(raw)
+				if n < 0 {
+					return protowire.ParseError(n)
+				}
+				candidate := decodeCandidateProto(val)
 				res, _ = sjson.SetRawBytes(res, "response.candidates.-1", candidate)
 			}
 		case 3: // usageMetadata
 			if typ == protowire.BytesType {
-				usage := decodeUsageProto(raw)
+				val, n := protowire.ConsumeBytes(raw)
+				if n < 0 {
+					return protowire.ParseError(n)
+				}
+				usage := decodeUsageProto(val)
 				res, _ = sjson.SetRawBytes(res, "response.usageMetadata", usage)
 			}
 		}
 		return nil
 	})
+	if err != nil {
+		log.Errorf("antigravity executor: failed to decode proto response: %v", err)
+	}
 	return res
 }
 
 func decodeCandidateProto(msg []byte) []byte {
 	res := []byte(`{"content":{"parts":[]}}`)
-	_ = walkProtobufFields(msg, func(num protowire.Number, typ protowire.Type, raw []byte) error {
+	err := walkProtobufFields(msg, func(num protowire.Number, typ protowire.Type, raw []byte) error {
 		switch num {
 		case 2: // content
 			if typ == protowire.BytesType {
-				content := decodeContentProto(raw)
+				val, n := protowire.ConsumeBytes(raw)
+				if n < 0 {
+					return protowire.ParseError(n)
+				}
+				content := decodeContentProto(val)
 				res, _ = sjson.SetRawBytes(res, "content", content)
 			}
 		case 3: // finishReason
 			if typ == protowire.VarintType {
-				val, _ := protowire.ConsumeVarint(raw)
+				val, n := protowire.ConsumeVarint(raw)
+				if n < 0 {
+					return protowire.ParseError(n)
+				}
 				reasons := []string{"FINISH_REASON_UNSPECIFIED", "STOP", "MAX_TOKENS", "SAFETY", "RECITATION", "OTHER"}
 				reason := "UNKNOWN"
 				if val < uint64(len(reasons)) {
@@ -2527,74 +2549,119 @@ func decodeCandidateProto(msg []byte) []byte {
 		}
 		return nil
 	})
+	if err != nil {
+		log.Errorf("antigravity executor: failed to decode candidate proto: %v", err)
+	}
 	return res
 }
 
 func decodeContentProto(msg []byte) []byte {
 	res := []byte(`{"parts":[]}`)
-	_ = walkProtobufFields(msg, func(num protowire.Number, typ protowire.Type, raw []byte) error {
+	err := walkProtobufFields(msg, func(num protowire.Number, typ protowire.Type, raw []byte) error {
 		switch num {
 		case 1: // role
-			role, _ := protowire.ConsumeString(raw)
+			role, n := protowire.ConsumeString(raw)
+			if n < 0 {
+				return protowire.ParseError(n)
+			}
 			res, _ = sjson.SetBytes(res, "role", role)
 		case 2: // parts
 			if typ == protowire.BytesType {
-				part := decodePartProto(raw)
+				val, n := protowire.ConsumeBytes(raw)
+				if n < 0 {
+					return protowire.ParseError(n)
+				}
+				part := decodePartProto(val)
 				res, _ = sjson.SetRawBytes(res, "parts.-1", part)
 			}
 		}
 		return nil
 	})
+	if err != nil {
+		log.Errorf("antigravity executor: failed to decode content proto: %v", err)
+	}
 	return res
 }
 
 func decodePartProto(msg []byte) []byte {
 	res := []byte(`{}`)
-	_ = walkProtobufFields(msg, func(num protowire.Number, typ protowire.Type, raw []byte) error {
+	err := walkProtobufFields(msg, func(num protowire.Number, typ protowire.Type, raw []byte) error {
 		switch num {
 		case 1: // text
-			text, _ := protowire.ConsumeString(raw)
+			text, n := protowire.ConsumeString(raw)
+			if n < 0 {
+				return protowire.ParseError(n)
+			}
 			res, _ = sjson.SetBytes(res, "text", text)
 		case 6: // thought (bool)
-			val, _ := protowire.ConsumeVarint(raw)
+			val, n := protowire.ConsumeVarint(raw)
+			if n < 0 {
+				return protowire.ParseError(n)
+			}
 			res, _ = sjson.SetBytes(res, "thought", val != 0)
 		case 7: // thoughtSignature
-			sig, _ := protowire.ConsumeString(raw)
+			sig, n := protowire.ConsumeString(raw)
+			if n < 0 {
+				return protowire.ParseError(n)
+			}
 			res, _ = sjson.SetBytes(res, "thoughtSignature", sig)
 		}
 		return nil
 	})
+	if err != nil {
+		log.Errorf("antigravity executor: failed to decode part proto: %v", err)
+	}
 	return res
 }
 
 func decodeUsageProto(msg []byte) []byte {
 	res := []byte(`{}`)
-	_ = walkProtobufFields(msg, func(num protowire.Number, typ protowire.Type, raw []byte) error {
+	err := walkProtobufFields(msg, func(num protowire.Number, typ protowire.Type, raw []byte) error {
 		switch num {
 		case 1: // promptTokenCount
-			val, _ := protowire.ConsumeVarint(raw)
+			val, n := protowire.ConsumeVarint(raw)
+			if n < 0 {
+				return protowire.ParseError(n)
+			}
 			res, _ = sjson.SetBytes(res, "promptTokenCount", val)
 		case 2: // candidatesTokenCount
-			val, _ := protowire.ConsumeVarint(raw)
+			val, n := protowire.ConsumeVarint(raw)
+			if n < 0 {
+				return protowire.ParseError(n)
+			}
 			res, _ = sjson.SetBytes(res, "candidatesTokenCount", val)
 		case 3: // totalTokenCount
-			val, _ := protowire.ConsumeVarint(raw)
+			val, n := protowire.ConsumeVarint(raw)
+			if n < 0 {
+				return protowire.ParseError(n)
+			}
 			res, _ = sjson.SetBytes(res, "totalTokenCount", val)
 		}
 		return nil
 	})
+	if err != nil {
+		log.Errorf("antigravity executor: failed to decode usage proto: %v", err)
+	}
 	return res
 }
 
 func decodeAntigravityCountTokensResponse(msg []byte) []byte {
 	res := []byte(`{}`)
-	_ = walkProtobufFields(msg, func(num protowire.Number, typ protowire.Type, raw []byte) error {
+	err := walkProtobufFields(msg, func(num protowire.Number, typ protowire.Type, raw []byte) error {
 		if num == 1 { // totalTokens
-			val, _ := protowire.ConsumeVarint(raw)
-			res, _ = sjson.SetBytes(res, "totalTokens", val)
+			if typ == protowire.VarintType {
+				val, n := protowire.ConsumeVarint(raw)
+				if n < 0 {
+					return protowire.ParseError(n)
+				}
+				res, _ = sjson.SetBytes(res, "totalTokens", val)
+			}
 		}
 		return nil
 	})
+	if err != nil {
+		log.Errorf("antigravity executor: failed to decode count tokens proto: %v", err)
+	}
 	return res
 }
 
