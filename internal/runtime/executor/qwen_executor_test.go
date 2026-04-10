@@ -194,7 +194,7 @@ func TestWrapQwenError_Maps403QuotaTo429WithoutRetryAfter(t *testing.T) {
 func TestQwenExecutorExecuteUsesQwenV2ChatEndpoint(t *testing.T) {
 	var gotPath string
 	var gotQuery string
-	var gotCookie string
+var gotCookie string
 	var gotBody []byte
 	var chatsNewCalls int
 	clearQwenRateLimiter()
@@ -1311,5 +1311,34 @@ func TestQwenExecutorExecuteStreamDoesNotSendDoneOnScannerError(t *testing.T) {
 		if strings.Contains(p, "[DONE]") {
 			t.Fatalf("unexpected [DONE] in payloads when scanner error occurs: %v", payloads)
 		}
+func TestQwenCreds_NormalizesResourceURL(t *testing.T) {
+	tests := []struct {
+		name        string
+		resourceURL string
+		wantBaseURL string
+	}{
+		{"host only", "portal.qwen.ai", "https://portal.qwen.ai/v1"},
+		{"scheme no v1", "https://portal.qwen.ai", "https://portal.qwen.ai/v1"},
+		{"scheme with v1", "https://portal.qwen.ai/v1", "https://portal.qwen.ai/v1"},
+		{"scheme with v1 slash", "https://portal.qwen.ai/v1/", "https://portal.qwen.ai/v1"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			auth := &cliproxyauth.Auth{
+				Metadata: map[string]any{
+					"access_token": "test-token",
+					"resource_url": tt.resourceURL,
+				},
+			}
+
+			token, baseURL := qwenCreds(auth)
+			if token != "test-token" {
+				t.Fatalf("qwenCreds token = %q, want %q", token, "test-token")
+			}
+			if baseURL != tt.wantBaseURL {
+				t.Fatalf("qwenCreds baseURL = %q, want %q", baseURL, tt.wantBaseURL)
+			}
+		})
 	}
 }
