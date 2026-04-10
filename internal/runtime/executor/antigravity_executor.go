@@ -2062,6 +2062,15 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+token)
 	httpReq.Header.Set("User-Agent", resolveUserAgent(auth))
+
+	// --- Inject Official gRPC Headers ---
+	if projectID != "" {
+		httpReq.Header.Set("x-goog-user-project", projectID)
+		httpReq.Header.Set("x-goog-request-params", "project_id="+projectID)
+	}
+	httpReq.Header.Set("x-goog-api-client", antigravityAPIClientDescriptor)
+	httpReq.Header.Set("TE", "trailers")
+
 	if host := resolveHost(base); host != "" {
 		httpReq.Host = host
 	}
