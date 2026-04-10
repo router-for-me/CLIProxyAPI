@@ -109,11 +109,20 @@ enable-gemini-cli-endpoint: false
 
 # When > 0, emit blank lines every N seconds for non-streaming responses to prevent idle timeouts.
 nonstream-keepalive-interval: 0
-
 # Streaming behavior (SSE keep-alives + safe bootstrap retries).
 # streaming:
 #   keepalive-seconds: 15   # Default: 0 (disabled). <= 0 disables keep-alives.
 #   bootstrap-retries: 1    # Default: 0 (disabled). Retries before first byte is sent.
+
+# Signature cache validation for thinking blocks (Antigravity/Claude).
+# When true (default), cached signatures are preferred and validated.
+# When false, client signatures are used directly after normalization (bypass mode for testing).
+# antigravity-signature-cache-enabled: true
+
+# Bypass mode signature validation strictness (only applies when signature cache is disabled).
+# When true, validates full Claude protobuf tree (Field 2 -> Field 1 structure).
+# When false (default), only checks R/E prefix + base64 + first byte 0x12.
+# antigravity-signature-bypass-strict: false
 
 # Gemini API keys
 # gemini-api-key:
