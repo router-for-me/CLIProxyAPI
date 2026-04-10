@@ -156,11 +156,11 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	var extraBetas []string
 	extraBetas, body = extractAndRemoveBetas(body)
 	bodyForTranslation := body
-	bodyForUpstream := body
-	if isClaudeOAuthToken(apiKey) && !auth.ToolPrefixDisabled() {
-		bodyForUpstream = applyClaudeToolPrefix(body, claudeToolPrefix)
-	}
-	if experimentalCCHSigningEnabled(e.cfg, auth) {
+	oauthToken := isClaudeOAuthToken(apiKey)
+	bodyForUpstream, claudeToolAliasReverse := prepareClaudeOAuthToolPayload(body, auth, apiKey)
+	// Enable cch signing by default for OAuth tokens (not just experimental flag).
+	// Claude Code always computes cch; missing or invalid cch is a detectable fingerprint.
+	if oauthToken || experimentalCCHSigningEnabled(e.cfg, auth) {
 		bodyForUpstream = signAnthropicMessagesBody(bodyForUpstream)
 	}
 
@@ -250,9 +250,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	} else {
 		reporter.Publish(ctx, helps.ParseClaudeUsage(data))
 	}
-	if isClaudeOAuthToken(apiKey) && !auth.ToolPrefixDisabled() {
-		data = stripClaudeToolPrefixFromResponse(data, claudeToolPrefix)
-	}
+	data = restoreClaudeOAuthToolResponse(data, auth, apiKey, claudeToolAliasReverse)
 	var param any
 	out := sdktranslator.TranslateNonStream(
 		ctx,
@@ -324,11 +322,10 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	var extraBetas []string
 	extraBetas, body = extractAndRemoveBetas(body)
 	bodyForTranslation := body
-	bodyForUpstream := body
-	if isClaudeOAuthToken(apiKey) && !auth.ToolPrefixDisabled() {
-		bodyForUpstream = applyClaudeToolPrefix(body, claudeToolPrefix)
-	}
-	if experimentalCCHSigningEnabled(e.cfg, auth) {
+	oauthToken := isClaudeOAuthToken(apiKey)
+	bodyForUpstream, claudeToolAliasReverse := prepareClaudeOAuthToolPayload(body, auth, apiKey)
+	// Enable cch signing by default for OAuth tokens (not just experimental flag).
+	if oauthToken || experimentalCCHSigningEnabled(e.cfg, auth) {
 		bodyForUpstream = signAnthropicMessagesBody(bodyForUpstream)
 	}
 
@@ -416,9 +413,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
 					reporter.Publish(ctx, detail)
 				}
-				if isClaudeOAuthToken(apiKey) && !auth.ToolPrefixDisabled() {
-					line = stripClaudeToolPrefixFromStreamLine(line, claudeToolPrefix)
-				}
+				line = restoreClaudeOAuthToolStreamLine(line, auth, apiKey, claudeToolAliasReverse)
 				// Forward the line as-is to preserve SSE format
 				cloned := make([]byte, len(line)+1)
 				copy(cloned, line)
@@ -443,9 +438,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
 				reporter.Publish(ctx, detail)
 			}
-			if isClaudeOAuthToken(apiKey) && !auth.ToolPrefixDisabled() {
-				line = stripClaudeToolPrefixFromStreamLine(line, claudeToolPrefix)
-			}
+			line = restoreClaudeOAuthToolStreamLine(line, auth, apiKey, claudeToolAliasReverse)
 			chunks := sdktranslator.TranslateStream(
 				ctx,
 				to,
@@ -495,9 +488,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	// Extract betas from body and convert to header (for count_tokens too)
 	var extraBetas []string
 	extraBetas, body = extractAndRemoveBetas(body)
-	if isClaudeOAuthToken(apiKey) && !auth.ToolPrefixDisabled() {
-		body = applyClaudeToolPrefix(body, claudeToolPrefix)
-	}
+	body, _ = prepareClaudeOAuthToolPayload(body, auth, apiKey)
 
 	url := fmt.Sprintf("%s/v1/messages/count_tokens?beta=true", baseURL)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
@@ -946,6 +937,202 @@ func isClaudeOAuthToken(apiKey string) bool {
 	return strings.Contains(apiKey, "sk-ant-oat")
 }
 
+func prepareClaudeOAuthToolPayload(body []byte, auth *cliproxyauth.Auth, apiKey string) ([]byte, map[string]string) {
+	if !isClaudeOAuthToken(apiKey) || auth.ToolPrefixDisabled() {
+		return body, nil
+	}
+	if claudeToolPrefix != "" {
+		return applyClaudeToolPrefix(body, claudeToolPrefix), nil
+	}
+	claudeToolAliasForward, claudeToolAliasReverse := buildClaudeToolAliasMaps(body)
+	return applyClaudeToolAliases(body, claudeToolAliasForward), claudeToolAliasReverse
+}
+
+func restoreClaudeOAuthToolResponse(body []byte, auth *cliproxyauth.Auth, apiKey string, aliases map[string]string) []byte {
+	if !isClaudeOAuthToken(apiKey) || auth.ToolPrefixDisabled() {
+		return body
+	}
+	if len(aliases) > 0 {
+		return stripClaudeToolAliasesFromResponse(body, aliases)
+	}
+	return stripClaudeToolPrefixFromResponse(body, claudeToolPrefix)
+}
+
+func restoreClaudeOAuthToolStreamLine(line []byte, auth *cliproxyauth.Auth, apiKey string, aliases map[string]string) []byte {
+	if !isClaudeOAuthToken(apiKey) || auth.ToolPrefixDisabled() {
+		return line
+	}
+	if len(aliases) > 0 {
+		return stripClaudeToolAliasesFromStreamLine(line, aliases)
+	}
+	return stripClaudeToolPrefixFromStreamLine(line, claudeToolPrefix)
+}
+
+func claudeBuiltinToolRegistry(body []byte) map[string]bool {
+	return helps.AugmentClaudeBuiltinToolRegistry(body, nil)
+}
+
+func collectClaudeCustomToolNames(body []byte, builtinTools map[string]bool) []string {
+	seen := make(map[string]bool)
+	names := make([]string, 0)
+	addName := func(name string) {
+		if name == "" || builtinTools[name] || seen[name] {
+			return
+		}
+		seen[name] = true
+		names = append(names, name)
+	}
+
+	if tools := gjson.GetBytes(body, "tools"); tools.Exists() && tools.IsArray() {
+		tools.ForEach(func(_, tool gjson.Result) bool {
+			if tool.Get("type").Exists() && tool.Get("type").String() != "" {
+				return true
+			}
+			addName(tool.Get("name").String())
+			return true
+		})
+	}
+
+	if gjson.GetBytes(body, "tool_choice.type").String() == "tool" {
+		addName(gjson.GetBytes(body, "tool_choice.name").String())
+	}
+
+	if messages := gjson.GetBytes(body, "messages"); messages.Exists() && messages.IsArray() {
+		messages.ForEach(func(_, msg gjson.Result) bool {
+			content := msg.Get("content")
+			if !content.Exists() || !content.IsArray() {
+				return true
+			}
+			content.ForEach(func(_, part gjson.Result) bool {
+				switch part.Get("type").String() {
+				case "tool_use":
+					addName(part.Get("name").String())
+				case "tool_reference":
+					addName(part.Get("tool_name").String())
+				case "tool_result":
+					nestedContent := part.Get("content")
+					if nestedContent.Exists() && nestedContent.IsArray() {
+						nestedContent.ForEach(func(_, nestedPart gjson.Result) bool {
+							if nestedPart.Get("type").String() == "tool_reference" {
+								addName(nestedPart.Get("tool_name").String())
+							}
+							return true
+						})
+					}
+				}
+				return true
+			})
+			return true
+		})
+	}
+
+	return names
+}
+
+func buildClaudeToolAliasMaps(body []byte) (map[string]string, map[string]string) {
+	builtinTools := claudeBuiltinToolRegistry(body)
+	customNames := collectClaudeCustomToolNames(body, builtinTools)
+	if len(customNames) == 0 {
+		return nil, nil
+	}
+
+	existingNames := make(map[string]bool, len(builtinTools)+len(customNames))
+	for name := range builtinTools {
+		existingNames[name] = true
+	}
+	for _, name := range customNames {
+		existingNames[name] = true
+	}
+
+	forward := make(map[string]string, len(customNames))
+	reverse := make(map[string]string, len(customNames))
+	nextAliasIndex := 1
+	for _, name := range customNames {
+		for {
+			alias := fmt.Sprintf("t%d", nextAliasIndex)
+			nextAliasIndex++
+			if existingNames[alias] {
+				continue
+			}
+			existingNames[alias] = true
+			forward[name] = alias
+			reverse[alias] = name
+			break
+		}
+	}
+	return forward, reverse
+}
+
+func applyClaudeToolAliases(body []byte, aliases map[string]string) []byte {
+	if len(aliases) == 0 {
+		return body
+	}
+
+	if tools := gjson.GetBytes(body, "tools"); tools.Exists() && tools.IsArray() {
+		tools.ForEach(func(index, tool gjson.Result) bool {
+			name := tool.Get("name").String()
+			alias, ok := aliases[name]
+			if !ok || alias == "" {
+				return true
+			}
+			path := fmt.Sprintf("tools.%d.name", index.Int())
+			body, _ = sjson.SetBytes(body, path, alias)
+			return true
+		})
+	}
+
+	if gjson.GetBytes(body, "tool_choice.type").String() == "tool" {
+		name := gjson.GetBytes(body, "tool_choice.name").String()
+		if alias, ok := aliases[name]; ok && alias != "" {
+			body, _ = sjson.SetBytes(body, "tool_choice.name", alias)
+		}
+	}
+
+	if messages := gjson.GetBytes(body, "messages"); messages.Exists() && messages.IsArray() {
+		messages.ForEach(func(msgIndex, msg gjson.Result) bool {
+			content := msg.Get("content")
+			if !content.Exists() || !content.IsArray() {
+				return true
+			}
+			content.ForEach(func(contentIndex, part gjson.Result) bool {
+				switch part.Get("type").String() {
+				case "tool_use":
+					name := part.Get("name").String()
+					if alias, ok := aliases[name]; ok && alias != "" {
+						path := fmt.Sprintf("messages.%d.content.%d.name", msgIndex.Int(), contentIndex.Int())
+						body, _ = sjson.SetBytes(body, path, alias)
+					}
+				case "tool_reference":
+					toolName := part.Get("tool_name").String()
+					if alias, ok := aliases[toolName]; ok && alias != "" {
+						path := fmt.Sprintf("messages.%d.content.%d.tool_name", msgIndex.Int(), contentIndex.Int())
+						body, _ = sjson.SetBytes(body, path, alias)
+					}
+				case "tool_result":
+					nestedContent := part.Get("content")
+					if nestedContent.Exists() && nestedContent.IsArray() {
+						nestedContent.ForEach(func(nestedIndex, nestedPart gjson.Result) bool {
+							if nestedPart.Get("type").String() != "tool_reference" {
+								return true
+							}
+							nestedToolName := nestedPart.Get("tool_name").String()
+							if alias, ok := aliases[nestedToolName]; ok && alias != "" {
+								nestedPath := fmt.Sprintf("messages.%d.content.%d.content.%d.tool_name", msgIndex.Int(), contentIndex.Int(), nestedIndex.Int())
+								body, _ = sjson.SetBytes(body, nestedPath, alias)
+							}
+							return true
+						})
+					}
+				}
+				return true
+			})
+			return true
+		})
+	}
+
+	return body
+}
+
 func applyClaudeToolPrefix(body []byte, prefix string) []byte {
 	if prefix == "" {
 		return body
@@ -953,16 +1140,13 @@ func applyClaudeToolPrefix(body []byte, prefix string) []byte {
 
 	// Collect built-in tool names from the authoritative fallback seed list and
 	// augment it with any typed built-ins present in the current request body.
-	builtinTools := helps.AugmentClaudeBuiltinToolRegistry(body, nil)
+	builtinTools := claudeBuiltinToolRegistry(body)
 
 	if tools := gjson.GetBytes(body, "tools"); tools.Exists() && tools.IsArray() {
 		tools.ForEach(func(index, tool gjson.Result) bool {
 			// Skip built-in tools (web_search, code_execution, etc.) which have
 			// a "type" field and require their name to remain unchanged.
 			if tool.Get("type").Exists() && tool.Get("type").String() != "" {
-				if n := tool.Get("name").String(); n != "" {
-					builtinTools[n] = true
-				}
 				return true
 			}
 			name := tool.Get("name").String()
@@ -1076,6 +1260,56 @@ func stripClaudeToolPrefixFromResponse(body []byte, prefix string) []byte {
 	return body
 }
 
+func stripClaudeToolAliasesFromResponse(body []byte, aliases map[string]string) []byte {
+	if len(aliases) == 0 {
+		return body
+	}
+	content := gjson.GetBytes(body, "content")
+	if !content.Exists() || !content.IsArray() {
+		return body
+	}
+	content.ForEach(func(index, part gjson.Result) bool {
+		partType := part.Get("type").String()
+		switch partType {
+		case "tool_use":
+			name := part.Get("name").String()
+			original, ok := aliases[name]
+			if !ok || original == "" {
+				return true
+			}
+			path := fmt.Sprintf("content.%d.name", index.Int())
+			body, _ = sjson.SetBytes(body, path, original)
+		case "tool_reference":
+			toolName := part.Get("tool_name").String()
+			original, ok := aliases[toolName]
+			if !ok || original == "" {
+				return true
+			}
+			path := fmt.Sprintf("content.%d.tool_name", index.Int())
+			body, _ = sjson.SetBytes(body, path, original)
+		case "tool_result":
+			nestedContent := part.Get("content")
+			if nestedContent.Exists() && nestedContent.IsArray() {
+				nestedContent.ForEach(func(nestedIndex, nestedPart gjson.Result) bool {
+					if nestedPart.Get("type").String() != "tool_reference" {
+						return true
+					}
+					nestedToolName := nestedPart.Get("tool_name").String()
+					original, ok := aliases[nestedToolName]
+					if !ok || original == "" {
+						return true
+					}
+					nestedPath := fmt.Sprintf("content.%d.content.%d.tool_name", index.Int(), nestedIndex.Int())
+					body, _ = sjson.SetBytes(body, nestedPath, original)
+					return true
+				})
+			}
+		}
+		return true
+	})
+	return body
+}
+
 func stripClaudeToolPrefixFromStreamLine(line []byte, prefix string) []byte {
 	if prefix == "" {
 		return line
@@ -1109,6 +1343,55 @@ func stripClaudeToolPrefixFromStreamLine(line []byte, prefix string) []byte {
 			return line
 		}
 		updated, err = sjson.SetBytes(payload, "content_block.tool_name", strings.TrimPrefix(toolName, prefix))
+		if err != nil {
+			return line
+		}
+	default:
+		return line
+	}
+
+	trimmed := bytes.TrimSpace(line)
+	if bytes.HasPrefix(trimmed, []byte("data:")) {
+		return append([]byte("data: "), updated...)
+	}
+	return updated
+}
+
+func stripClaudeToolAliasesFromStreamLine(line []byte, aliases map[string]string) []byte {
+	if len(aliases) == 0 {
+		return line
+	}
+	payload := helps.JSONPayload(line)
+	if len(payload) == 0 || !gjson.ValidBytes(payload) {
+		return line
+	}
+	contentBlock := gjson.GetBytes(payload, "content_block")
+	if !contentBlock.Exists() {
+		return line
+	}
+
+	blockType := contentBlock.Get("type").String()
+	var updated []byte
+	var err error
+
+	switch blockType {
+	case "tool_use":
+		name := contentBlock.Get("name").String()
+		original, ok := aliases[name]
+		if !ok || original == "" {
+			return line
+		}
+		updated, err = sjson.SetBytes(payload, "content_block.name", original)
+		if err != nil {
+			return line
+		}
+	case "tool_reference":
+		toolName := contentBlock.Get("tool_name").String()
+		original, ok := aliases[toolName]
+		if !ok || original == "" {
+			return line
+		}
+		updated, err = sjson.SetBytes(payload, "content_block.tool_name", original)
 		if err != nil {
 			return line
 		}
@@ -1265,7 +1548,8 @@ func checkSystemInstructionsWithMode(payload []byte, strictMode bool) []byte {
 //
 //	system[0]: billing header (no cache_control)
 //	system[1]: agent identifier (no cache_control)
-//	system[2..]: user system messages (cache_control added when missing)
+//	system[2]: core intro prompt (ephemeral cache block)
+//	system[3]: user system messages moved to first user message
 func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, experimentalCCHSigning bool, version, entrypoint, workload string) []byte {
 	system := gjson.GetBytes(payload, "system")
 
@@ -1284,54 +1568,126 @@ func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, exp
 		messageText = system.String()
 	}
 
-	billingText := generateBillingHeader(payload, experimentalCCHSigning, version, messageText, entrypoint, workload)
-	billingBlock := fmt.Sprintf(`{"type":"text","text":"%s"}`, billingText)
-	// No cache_control on the agent block. It is a cloaking artifact with zero cache
-	// value (the last system block is what actually triggers caching of all system content).
-	// Including any cache_control here creates an intra-system TTL ordering violation
-	// when the client's system blocks use ttl='1h' (prompt-caching-scope-2026-01-05 beta
-	// forbids 1h blocks after 5m blocks, and a no-TTL block defaults to 5m).
-	agentBlock := `{"type":"text","text":"You are a Claude agent, built on Anthropic's Claude Agent SDK."}`
-
-	if strictMode {
-		// Strict mode: billing header + agent identifier only
-		result := "[" + billingBlock + "," + agentBlock + "]"
-		payload, _ = sjson.SetRawBytes(payload, "system", []byte(result))
-		return payload
-	}
-
-	// Non-strict mode: billing header + agent identifier + user system messages
 	// Skip if already injected
 	firstText := gjson.GetBytes(payload, "system.0.text").String()
 	if strings.HasPrefix(firstText, "x-anthropic-billing-header:") {
 		return payload
 	}
 
-	result := "[" + billingBlock + "," + agentBlock
-	if system.IsArray() {
-		system.ForEach(func(_, part gjson.Result) bool {
-			if part.Get("type").String() == "text" {
-				// Add cache_control to user system messages if not present.
-				// Do NOT add ttl — let it inherit the default (5m) to avoid
-				// TTL ordering violations with the prompt-caching-scope-2026-01-05 beta.
-				partJSON := part.Raw
-				if !part.Get("cache_control").Exists() {
-					updated, _ := sjson.SetBytes([]byte(partJSON), "cache_control.type", "ephemeral")
-					partJSON = string(updated)
-				}
-				result += "," + partJSON
-			}
-			return true
-		})
-	} else if system.Type == gjson.String && system.String() != "" {
-		partJSON := `{"type":"text","cache_control":{"type":"ephemeral"}}`
-		updated, _ := sjson.SetBytes([]byte(partJSON), "text", system.String())
-		partJSON = string(updated)
-		result += "," + partJSON
-	}
-	result += "]"
+	billingText := generateBillingHeader(payload, experimentalCCHSigning, version, messageText, entrypoint, workload)
+	billingBlock := fmt.Sprintf(`{"type":"text","text":"%s"}`, billingText)
 
-	payload, _ = sjson.SetRawBytes(payload, "system", []byte(result))
+	// Build system blocks matching real Claude Code structure.
+	// Important: Claude Code's internal cacheScope='org' does NOT serialize to
+	// scope='org' in the API request. Only scope='global' is sent explicitly.
+	// The system prompt prefix block is sent without cache_control.
+	agentBlock := buildTextBlock("You are Claude Code, Anthropic's official CLI for Claude.", nil)
+	staticPrompt := strings.Join([]string{
+		claudeCodeIntro,
+		claudeCodeSystem,
+		claudeCodeDoingTasks,
+		claudeCodeToneAndStyle,
+		claudeCodeOutputEfficiency,
+	}, "\n\n")
+	// Fall back to an uncached static block because some OAuth request shapes
+	// appear to reject custom cache scope fields from proxied clients.
+	staticBlock := buildTextBlock(staticPrompt, nil)
+
+	systemResult := "[" + billingBlock + "," + agentBlock + "," + staticBlock + "]"
+	payload, _ = sjson.SetRawBytes(payload, "system", []byte(systemResult))
+
+	// Collect user system instructions and prepend to first user message
+	if !strictMode {
+		var userSystemParts []string
+		if system.IsArray() {
+			system.ForEach(func(_, part gjson.Result) bool {
+				if part.Get("type").String() == "text" {
+					txt := strings.TrimSpace(part.Get("text").String())
+					if txt != "" {
+						userSystemParts = append(userSystemParts, txt)
+					}
+				}
+				return true
+			})
+		} else if system.Type == gjson.String && strings.TrimSpace(system.String()) != "" {
+			userSystemParts = append(userSystemParts, strings.TrimSpace(system.String()))
+		}
+
+		if len(userSystemParts) > 0 {
+			combined := strings.Join(userSystemParts, "\n\n")
+			payload = prependToFirstUserMessage(payload, combined)
+		}
+	}
+
+	return payload
+}
+
+// buildTextBlock constructs a JSON text block object with proper escaping.
+// Uses sjson.SetBytes to handle multi-line text, quotes, and control characters.
+// cacheControl is optional; pass nil to omit cache_control.
+func buildTextBlock(text string, cacheControl map[string]string) string {
+	block := []byte(`{"type":"text"}`)
+	block, _ = sjson.SetBytes(block, "text", text)
+	if cacheControl != nil && len(cacheControl) > 0 {
+		cc := []byte(`{"type":"ephemeral"}`)
+		if s, ok := cacheControl["scope"]; ok {
+			cc, _ = sjson.SetBytes(cc, "scope", s)
+		}
+		if t, ok := cacheControl["ttl"]; ok {
+			cc, _ = sjson.SetBytes(cc, "ttl", t)
+		}
+		block, _ = sjson.SetRawBytes(block, "cache_control", cc)
+	}
+	return string(block)
+}
+
+// prependToFirstUserMessage prepends text content to the first user message.
+// This avoids putting non-Claude-Code system instructions in system[] which
+// triggers Anthropic's extra usage billing for OAuth-proxied requests.
+func prependToFirstUserMessage(payload []byte, text string) []byte {
+	messages := gjson.GetBytes(payload, "messages")
+	if !messages.Exists() || !messages.IsArray() {
+		return payload
+	}
+
+	// Find the first user message index
+	firstUserIdx := -1
+	messages.ForEach(func(idx, msg gjson.Result) bool {
+		if msg.Get("role").String() == "user" {
+			firstUserIdx = int(idx.Int())
+			return false
+		}
+		return true
+	})
+
+	if firstUserIdx < 0 {
+		return payload
+	}
+
+	prefixBlock := fmt.Sprintf(`<system-reminder>
+As you answer the user's questions, you can use the following context from the system:
+%s
+
+IMPORTANT: this context may or may not be relevant to your tasks. You should not respond to this context unless it is highly relevant to your task.
+</system-reminder>
+`, text)
+
+	contentPath := fmt.Sprintf("messages.%d.content", firstUserIdx)
+	content := gjson.GetBytes(payload, contentPath)
+
+	if content.IsArray() {
+		newBlock := fmt.Sprintf(`{"type":"text","text":%q}`, prefixBlock)
+		newArray := "[" + newBlock + "]"
+		if content.Get("#").Int() > 0 {
+			existing := content.Raw
+			newArray = "[" + newBlock + "," + existing[1:]
+		}
+		payload, _ = sjson.SetRawBytes(payload, contentPath, []byte(newArray))
+	} else if content.Type == gjson.String {
+		newText := prefixBlock + content.String()
+		payload, _ = sjson.SetBytes(payload, contentPath, newText)
+	}
+
 	return payload
 }
 
@@ -1339,7 +1695,9 @@ func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, exp
 // Cloaking includes: system prompt injection, fake user ID, and sensitive word obfuscation.
 func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, payload []byte, model string, apiKey string) []byte {
 	clientUserAgent := getClientUserAgent(ctx)
-	useExperimentalCCHSigning := experimentalCCHSigningEnabled(cfg, auth)
+	// Enable cch signing for OAuth tokens by default (not just experimental flag).
+	oauthToken := isClaudeOAuthToken(apiKey)
+	useCCHSigning := oauthToken || experimentalCCHSigningEnabled(cfg, auth)
 
 	// Get cloak config from ClaudeKey configuration
 	cloakCfg := resolveClaudeKeyCloakConfig(cfg, auth)
@@ -1376,7 +1734,7 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 		billingVersion := helps.DefaultClaudeVersion(cfg)
 		entrypoint := parseEntrypointFromUA(clientUserAgent)
 		workload := getWorkloadFromContext(ctx)
-		payload = checkSystemInstructionsWithSigningMode(payload, strictMode, useExperimentalCCHSigning, billingVersion, entrypoint, workload)
+		payload = checkSystemInstructionsWithSigningMode(payload, strictMode, useCCHSigning, billingVersion, entrypoint, workload)
 	}
 
 	// Inject fake user ID
