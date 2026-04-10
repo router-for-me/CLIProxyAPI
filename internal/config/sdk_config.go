@@ -19,6 +19,17 @@ type SDKConfig struct {
 	//     while keeping /v1/images/generations and /v1/images/edits enabled and preserving image_generation there.
 	DisableImageGeneration DisableImageGenerationMode `yaml:"disable-image-generation" json:"disable-image-generation"`
 
+	// NoProxyCIDRs lists CIDRs or literal IPs whose targets should bypass the
+	// configured ProxyURL. Management api-call requests to hosts falling
+	// inside these ranges are sent directly instead of being routed through
+	// the proxy. Applies to literal IPs and hostnames that resolve to IPs
+	// inside the list.
+	//
+	// Defaults (used when this field is empty): 127.0.0.0/8, 10.0.0.0/8,
+	// 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, ::1/128, fc00::/7,
+	// fe80::/10. Specifying any value here REPLACES the defaults.
+	NoProxyCIDRs []string `yaml:"no-proxy-cidrs,omitempty" json:"no-proxy-cidrs,omitempty"`
+
 	// EnableGeminiCLIEndpoint controls whether Gemini CLI internal endpoints (/v1internal:*) are enabled.
 	// Default is false for safety; when false, /v1internal:* requests are rejected.
 	EnableGeminiCLIEndpoint bool `yaml:"enable-gemini-cli-endpoint" json:"enable-gemini-cli-endpoint"`
