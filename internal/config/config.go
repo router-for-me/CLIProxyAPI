@@ -589,6 +589,13 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
 	}
 
+	var legacy legacyConfigData
+	if errLegacy := yaml.Unmarshal(data, &legacy); errLegacy == nil {
+		if cfg.migrateLegacyAuthProviders(legacy.Auth.Providers) {
+			cfg.legacyMigrationPending = true
+		}
+	}
+
 	// NOTE: Startup legacy key migration is intentionally disabled.
 	// Reason: avoid mutating config.yaml during server startup.
 	// Re-enable the block below if automatic startup migration is needed again.
@@ -1708,6 +1715,7 @@ func normalizeCollectionNodeStyles(node *yaml.Node) {
 type legacyConfigData struct {
 	LegacyGeminiKeys      []string                    `yaml:"generative-language-api-key"`
 	OpenAICompat          []legacyOpenAICompatibility `yaml:"openai-compatibility"`
+	Auth                  legacyAuthConfig            `yaml:"auth"`
 	AmpUpstreamURL        string                      `yaml:"amp-upstream-url"`
 	AmpUpstreamAPIKey     string                      `yaml:"amp-upstream-api-key"`
 	AmpRestrictManagement *bool                       `yaml:"amp-restrict-management-to-localhost"`
@@ -1718,6 +1726,49 @@ type legacyOpenAICompatibility struct {
 	Name    string   `yaml:"name"`
 	BaseURL string   `yaml:"base-url"`
 	APIKeys []string `yaml:"api-keys"`
+}
+
+type legacyAuthConfig struct {
+	Providers []legacyAccessProvider `yaml:"providers"`
+}
+
+type legacyAccessProvider struct {
+	Type    string   `yaml:"type"`
+	APIKeys []string `yaml:"api-keys"`
+}
+
+func (cfg *Config) migrateLegacyAuthProviders(providers []legacyAccessProvider) bool {
+	if cfg == nil || len(providers) == 0 {
+		return false
+	}
+	changed := false
+	seen := make(map[string]struct{}, len(cfg.APIKeys))
+	for i := range cfg.APIKeys {
+		key := strings.TrimSpace(cfg.APIKeys[i])
+		if key == "" {
+			continue
+		}
+		seen[key] = struct{}{}
+	}
+	for i := range providers {
+		providerType := strings.ToLower(strings.TrimSpace(providers[i].Type))
+		if providerType != "" && providerType != "config-api-key" {
+			continue
+		}
+		for _, raw := range providers[i].APIKeys {
+			key := strings.TrimSpace(raw)
+			if key == "" {
+				continue
+			}
+			if _, exists := seen[key]; exists {
+				continue
+			}
+			cfg.APIKeys = append(cfg.APIKeys, key)
+			seen[key] = struct{}{}
+			changed = true
+		}
+	}
+	return changed
 }
 
 func (cfg *Config) migrateLegacyGeminiKeys(legacy []string) bool {
