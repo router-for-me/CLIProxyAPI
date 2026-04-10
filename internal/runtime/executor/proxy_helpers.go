@@ -61,19 +61,6 @@ func newProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 	return httpClient
 }
 
-// resolveProxyURL returns the effective proxy URL from auth or global config.
-func resolveProxyURL(cfg *config.Config, auth *cliproxyauth.Auth) string {
-	if auth != nil {
-		if u := strings.TrimSpace(auth.ProxyURL); u != "" {
-			return u
-		}
-	}
-	if cfg != nil {
-		return strings.TrimSpace(cfg.ProxyURL)
-	}
-	return ""
-}
-
 // buildProxyTransport creates an HTTP transport configured for the given proxy URL.
 // It supports SOCKS5, HTTP, and HTTPS proxy protocols.
 //

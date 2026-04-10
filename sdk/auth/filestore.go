@@ -23,22 +23,12 @@ type FileTokenStore struct {
 	mu      sync.Mutex
 	dirLock sync.RWMutex
 	baseDir string
-	// HTTPClient is used for token refresh and project ID fetches.
-	// If nil, http.DefaultClient is used.
-	HTTPClient *http.Client
 }
 
 // NewFileTokenStore creates a token store that saves credentials to disk through the
 // TokenStorage implementation embedded in the token record.
 func NewFileTokenStore() *FileTokenStore {
 	return &FileTokenStore{}
-}
-
-func (s *FileTokenStore) httpClient() *http.Client {
-	if s.HTTPClient != nil {
-		return s.HTTPClient
-	}
-	return http.DefaultClient
 }
 
 // SetBaseDir updates the default directory used for auth JSON persistence when no explicit path is provided.
@@ -218,13 +208,13 @@ func (s *FileTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth,
 			// Refresh it using the long-lived refresh_token before querying.
 			if provider == "gemini" {
 				if tokenMap, ok := metadata["token"].(map[string]any); ok {
-					if refreshed, errRefresh := refreshGeminiAccessToken(tokenMap, s.httpClient()); errRefresh == nil {
+					if refreshed, errRefresh := refreshGeminiAccessToken(tokenMap, http.DefaultClient); errRefresh == nil {
 						accessToken = refreshed
 					}
 				}
 			}
 			if accessToken != "" {
-				fetchedProjectID, errFetch := FetchAntigravityProjectID(context.Background(), accessToken, s.httpClient())
+				fetchedProjectID, errFetch := FetchAntigravityProjectID(context.Background(), accessToken, http.DefaultClient)
 				if errFetch == nil && strings.TrimSpace(fetchedProjectID) != "" {
 					metadata["project_id"] = strings.TrimSpace(fetchedProjectID)
 					if raw, errMarshal := json.Marshal(metadata); errMarshal == nil {
