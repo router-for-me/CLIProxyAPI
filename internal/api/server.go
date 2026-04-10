@@ -275,11 +275,10 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	if cfg.UsageStatisticsPersistenceEnabled {
 		persistPath := usage.ResolvePersistencePath(configFilePath, cfg.UsageStatisticsPersistencePath)
 		persistence := usage.NewPersistenceManager(usage.NewFileSnapshotStore(persistPath), usage.GetRequestStatistics())
+		s.usagePersistence = persistence
+		usage.SetPersistenceManager(persistence)
 		if err := persistence.Load(context.Background()); err != nil {
 			log.WithError(err).Warnf("failed to restore usage statistics from %s", persistPath)
-		} else {
-			s.usagePersistence = persistence
-			usage.SetPersistenceManager(persistence)
 		}
 	}
 	if optionState.postAuthHook != nil {

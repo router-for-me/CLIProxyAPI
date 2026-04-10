@@ -192,7 +192,6 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 	hourKey := timestamp.Hour()
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	s.totalRequests++
 	if success {
@@ -221,6 +220,7 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 	s.tokensByDay[dayKey] += totalTokens
 	s.tokensByHour[hourKey] += totalTokens
 
+	s.mu.Unlock()
 	if persistence := defaultPersistence.Load(); persistence != nil {
 		persistence.MarkDirty()
 	}

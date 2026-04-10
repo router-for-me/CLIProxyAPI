@@ -170,7 +170,7 @@ func TestRequestStatisticsRestoreSnapshotPreservesAggregates(t *testing.T) {
 func TestPersistenceManagerFlushRetainsDirtyOnSaveFailure(t *testing.T) {
 	stats := NewRequestStatistics()
 	stats.Record(context.Background(), coreusage.Record{Provider: "gemini", Model: "m", Source: "live", RequestedAt: time.Now().UTC(), Detail: coreusage.Detail{TotalTokens: 3}})
-	store := &failingSnapshotStore{path: "/tmp/failing", err: errors.New("boom")}
+	store := &failingSnapshotStore{path: "/tmp/failing", saveErr: errors.New("boom")}
 	manager := NewPersistenceManager(store, stats)
 	manager.MarkDirty()
 
@@ -204,17 +204,42 @@ func TestFileSnapshotStoreCorruptFile(t *testing.T) {
 	}
 }
 
+func TestPersistenceManagerCanPersistAfterLoadFailure(t *testing.T) {
+	stats := NewRequestStatistics()
+	store := &failingSnapshotStore{path: "/tmp/failing", loadErr: errors.New("bad snapshot")}
+	manager := NewPersistenceManager(store, stats)
+	if err := manager.Load(context.Background()); err == nil {
+		t.Fatal("expected Load() error")
+	}
+
+	stats.Record(context.Background(), coreusage.Record{Provider: "gemini", Model: "m", Source: "live", RequestedAt: time.Now().UTC(), Detail: coreusage.Detail{TotalTokens: 5}})
+	manager.MarkDirty()
+	store.loadErr = nil
+	if err := manager.Flush(context.Background()); err != nil {
+		t.Fatalf("Flush() after load failure error = %v", err)
+	}
+	if store.saves != 1 {
+		t.Fatalf("save count = %d, want 1", store.saves)
+	}
+}
+
 type failingSnapshotStore struct {
-	path string
-	err  error
+	path    string
+	loadErr error
+	saveErr error
+	saves   int
 }
 
 func (s *failingSnapshotStore) Load(ctx context.Context) (StatisticsSnapshot, error) {
+	if s.loadErr != nil {
+		return StatisticsSnapshot{}, s.loadErr
+	}
 	return StatisticsSnapshot{}, nil
 }
 
 func (s *failingSnapshotStore) Save(ctx context.Context, snapshot StatisticsSnapshot) error {
-	return s.err
+	s.saves++
+	return s.saveErr
 }
 
 func (s *failingSnapshotStore) Path() string {
