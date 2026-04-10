@@ -74,3 +74,16 @@ func (m *Manager) Login(ctx context.Context, provider string, cfg *config.Config
 	}
 	return record, savedPath, nil
 }
+
+// SaveAuth persists an auth record directly without going through the login flow.
+func (m *Manager) SaveAuth(record *coreauth.Auth, cfg *config.Config) (string, error) {
+	if m.store == nil {
+		return "", fmt.Errorf("no store configured")
+	}
+	if cfg != nil {
+		if dirSetter, ok := m.store.(interface{ SetBaseDir(string) }); ok {
+			dirSetter.SetBaseDir(cfg.AuthDir)
+		}
+	}
+	return m.store.Save(context.Background(), record)
+}
