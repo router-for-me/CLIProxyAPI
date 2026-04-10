@@ -8,7 +8,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"crypto/tls"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -37,16 +36,26 @@ import (
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
+	"google.golang.org/protobuf/encoding/protowire"
 )
 
 const (
-	antigravityBaseURLDaily                = "https://daily-cloudcode-pa.googleapis.com"
-	antigravitySandboxBaseURLDaily         = "https://daily-cloudcode-pa.sandbox.googleapis.com"
-	antigravityBaseURLProd                 = "https://cloudcode-pa.googleapis.com"
-	antigravityCountTokensPath             = "/v1internal:countTokens"
-	antigravityStreamPath                  = "/v1internal:streamGenerateContent"
-	antigravityGeneratePath                = "/v1internal:generateContent"
-	antigravityClientID                    = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
+	antigravityBaseURLDaily        = "https://daily-cloudcode-pa.googleapis.com"
+	antigravitySandboxBaseURLDaily = "https://daily-cloudcode-pa.sandbox.googleapis.com"
+	antigravityBaseURLProd         = "https://cloudcode-pa.googleapis.com"
+	antigravityCountTokensPath     = "/v1internal:countTokens"
+	antigravityStreamPath          = "/v1internal:streamGenerateContent"
+	antigravityGeneratePath        = "/v1internal:generateContent"
+	antigravityClientID            = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
+
+	// gRPC Constants
+	antigravityGRPCService      = "google.internal.cloudcode.v1.AntigravityService"
+	antigravityGRPCStreamPath   = "/" + antigravityGRPCService + "/StreamGenerateContent"
+	antigravityGRPCGeneratePath = "/" + antigravityGRPCService + "/GenerateContent"
+	antigravityGRPCCountPath    = "/" + antigravityGRPCService + "/CountTokens"
+	antigravityGRPCModelsPath   = "/" + antigravityGRPCService + "/FetchAvailableModels"
+
+	antigravityAPIClientDescriptor         = "google-cloud-sdk vscode_cloudshelleditor/0.1"
 	antigravityClientSecret                = "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"
 	defaultAntigravityAgent                = "antigravity/1.21.9 darwin/arm64" // fallback only; overridden at runtime by misc.AntigravityUserAgent()
 	antigravityAuthType                    = "antigravity"
@@ -136,32 +145,13 @@ var (
 	antigravityTransportOnce sync.Once
 )
 
-func cloneTransportWithHTTP11(base *http.Transport) *http.Transport {
-	if base == nil {
-		return nil
-	}
-
-	clone := base.Clone()
-	clone.ForceAttemptHTTP2 = false
-	// Wipe TLSNextProto to prevent implicit HTTP/2 upgrade.
-	clone.TLSNextProto = make(map[string]func(authority string, c *tls.Conn) http.RoundTripper)
-	if clone.TLSClientConfig == nil {
-		clone.TLSClientConfig = &tls.Config{}
-	} else {
-		clone.TLSClientConfig = clone.TLSClientConfig.Clone()
-	}
-	// Actively advertise only HTTP/1.1 in the ALPN handshake.
-	clone.TLSClientConfig.NextProtos = []string{"http/1.1"}
-	return clone
-}
-
 // initAntigravityTransport creates the shared HTTP/1.1 transport exactly once.
 func initAntigravityTransport() {
 	base, ok := http.DefaultTransport.(*http.Transport)
 	if !ok {
 		base = &http.Transport{}
 	}
-	antigravityTransport = cloneTransportWithHTTP11(base)
+	antigravityTransport = base.Clone()
 }
 
 // newAntigravityHTTPClient creates an HTTP client specifically for Antigravity,
@@ -177,9 +167,9 @@ func newAntigravityHTTPClient(ctx context.Context, cfg *config.Config, auth *cli
 		return client
 	}
 
-	// Preserve proxy settings from proxy-aware transports while forcing HTTP/1.1.
+	// Preserve proxy settings from proxy-aware transports while allowing HTTP/2.
 	if transport, ok := client.Transport.(*http.Transport); ok {
-		client.Transport = cloneTransportWithHTTP11(transport)
+		client.Transport = transport.Clone()
 	}
 	return client
 }
@@ -253,6 +243,20 @@ func (e *AntigravityExecutor) HttpRequest(ctx context.Context, auth *cliproxyaut
 	if err := e.PrepareRequest(httpReq, auth); err != nil {
 		return nil, err
 	}
+
+	// --- Inject Official gRPC Headers ---
+	projectID := ""
+	if auth != nil && auth.Metadata != nil {
+		if pid, ok := auth.Metadata["project_id"].(string); ok {
+			projectID = strings.TrimSpace(pid)
+		}
+	}
+	if projectID != "" {
+		httpReq.Header.Set("x-goog-user-project", projectID)
+		httpReq.Header.Set("x-goog-request-params", "project_id="+projectID)
+	}
+	httpReq.Header.Set("x-goog-api-client", antigravityAPIClientDescriptor)
+	httpReq.Header.Set("TE", "trailers")
 
 	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
 	return httpClient.Do(httpReq)
@@ -1549,42 +1553,90 @@ attemptLoop:
 						log.Errorf("antigravity executor: close response body error: %v", errClose)
 					}
 				}()
-				scanner := bufio.NewScanner(resp.Body)
-				scanner.Buffer(nil, streamScannerBuffer)
+				// If it's gRPC, we need to decode gRPC frames
+				contentType := resp.Header.Get("Content-Type")
+				isGRPC := strings.Contains(contentType, "application/grpc")
 				var param any
-				for scanner.Scan() {
-					line := scanner.Bytes()
-					helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 
-					// Filter usage metadata for all models
-					// Only retain usage statistics in the terminal chunk
-					line = helps.FilterSSEUsageMetadata(line)
+				log.Debugf("antigravity executor: stream response content-type=%q", contentType)
 
-					payload := helps.JSONPayload(line)
-					if payload == nil {
-						continue
+				if isGRPC {
+					frameCount := 0
+					for {
+						header := make([]byte, 5)
+						if _, errRead := io.ReadFull(resp.Body, header); errRead != nil {
+							if errRead != io.EOF {
+								helps.RecordAPIResponseError(ctx, e.cfg, errRead)
+								out <- cliproxyexecutor.StreamChunk{Err: errRead}
+							}
+							break
+						}
+						length := binary.BigEndian.Uint32(header[1:])
+						msg := make([]byte, length)
+						if _, errRead := io.ReadFull(resp.Body, msg); errRead != nil {
+							helps.RecordAPIResponseError(ctx, e.cfg, errRead)
+							out <- cliproxyexecutor.StreamChunk{Err: errRead}
+							break
+						}
+						frameCount++
+						log.Debugf("antigravity executor: gRPC frame flag=%d len=%d", header[0], length)
+
+						// Decode binary Protobuf to JSON for the translator
+						payload := decodeAntigravityProtoResponse(msg)
+
+						chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, payload, &param)
+						for i := range chunks {
+							out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}
+						}
 					}
 
-					if detail, ok := helps.ParseAntigravityStreamUsage(payload); ok {
-						reporter.Publish(ctx, detail)
+					// After body ends, check gRPC trailing status (HTTP/2 trailers)
+					grpcStatus := resp.Trailer.Get("grpc-status")
+					grpcMsg := resp.Trailer.Get("grpc-message")
+					log.Debugf("antigravity executor: gRPC trailer status=%q message=%q frameCount=%d", grpcStatus, grpcMsg, frameCount)
+					if grpcStatus != "" && grpcStatus != "0" {
+						errMsg := fmt.Sprintf("gRPC upstream error (status %s): %s", grpcStatus, grpcMsg)
+						log.Errorf("antigravity executor: %s", errMsg)
+						helps.RecordAPIResponseError(ctx, e.cfg, fmt.Errorf("%s", errMsg))
+						out <- cliproxyexecutor.StreamChunk{Err: statusErr{code: http.StatusBadGateway, msg: errMsg}}
 					}
+				} else {
+					// Fallback to SSE scanner
+					scanner := bufio.NewScanner(resp.Body)
+					scanner.Buffer(nil, streamScannerBuffer)
+					for scanner.Scan() {
+						line := scanner.Bytes()
+						helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 
-					chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, bytes.Clone(payload), &param)
-					for i := range chunks {
-						out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}
+						// Filter usage metadata for all models
+						// Only retain usage statistics in the terminal chunk
+						line = helps.FilterSSEUsageMetadata(line)
+
+						payload := helps.JSONPayload(line)
+						if payload == nil {
+							continue
+						}
+
+						if detail, ok := helps.ParseAntigravityStreamUsage(payload); ok {
+							reporter.Publish(ctx, detail)
+						}
+
+						chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, bytes.Clone(payload), &param)
+						for i := range chunks {
+							out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}
+						}
+					}
+					if errScan := scanner.Err(); errScan != nil {
+						helps.RecordAPIResponseError(ctx, e.cfg, errScan)
+						reporter.PublishFailure(ctx)
+						out <- cliproxyexecutor.StreamChunk{Err: errScan}
 					}
 				}
 				tail := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, []byte("[DONE]"), &param)
 				for i := range tail {
 					out <- cliproxyexecutor.StreamChunk{Payload: tail[i]}
 				}
-				if errScan := scanner.Err(); errScan != nil {
-					helps.RecordAPIResponseError(ctx, e.cfg, errScan)
-					reporter.PublishFailure(ctx)
-					out <- cliproxyexecutor.StreamChunk{Err: errScan}
-				} else {
-					reporter.EnsurePublished(ctx)
-				}
+				reporter.EnsurePublished(ctx)
 			}(httpResp)
 			return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
 		}
@@ -2374,4 +2426,165 @@ func generateProjectID() string {
 	randSourceMutex.Unlock()
 	randomPart := strings.ToLower(uuid.NewString())[:5]
 	return adj + "-" + noun + "-" + randomPart
+}
+
+// encodeGRPCMessage adds the 5-byte gRPC framing header (0 for uncompressed + 4-byte length).
+func encodeGRPCMessage(data []byte) []byte {
+	out := make([]byte, 5+len(data))
+	out[0] = 0 // uncompressed
+	binary.BigEndian.PutUint32(out[1:5], uint32(len(data)))
+	copy(out[5:], data)
+	return out
+}
+
+// encodeAntigravityProtoRequest builds a binary protobuf message for the Antigravity request.
+func encodeAntigravityProtoRequest(payload []byte) []byte {
+	var out []byte
+	if project := gjson.GetBytes(payload, "project").String(); project != "" {
+		out = protowire.AppendTag(out, 1, protowire.BytesType)
+		out = protowire.AppendString(out, project)
+	}
+	if req := gjson.GetBytes(payload, "request"); req.Exists() {
+		out = protowire.AppendTag(out, 2, protowire.BytesType)
+		out = protowire.AppendString(out, req.Raw)
+	}
+	if model := gjson.GetBytes(payload, "model").String(); model != "" {
+		out = protowire.AppendTag(out, 3, protowire.BytesType)
+		out = protowire.AppendString(out, model)
+	}
+	return out
+}
+
+// decodeAntigravityProtoResponse decodes a StreamGenerateContentResponse proto to JSON.
+func decodeAntigravityProtoResponse(msg []byte) []byte {
+	res := []byte(`{"response":{"candidates":[]}}`)
+	_ = walkProtobufFields(msg, func(num protowire.Number, typ protowire.Type, raw []byte) error {
+		switch num {
+		case 1: // candidates
+			if typ == protowire.BytesType {
+				candidate := decodeCandidateProto(raw)
+				res, _ = sjson.SetRawBytes(res, "response.candidates.-1", candidate)
+			}
+		case 3: // usageMetadata
+			if typ == protowire.BytesType {
+				usage := decodeUsageProto(raw)
+				res, _ = sjson.SetRawBytes(res, "response.usageMetadata", usage)
+			}
+		}
+		return nil
+	})
+	return res
+}
+
+func decodeCandidateProto(msg []byte) []byte {
+	res := []byte(`{"content":{"parts":[]}}`)
+	_ = walkProtobufFields(msg, func(num protowire.Number, typ protowire.Type, raw []byte) error {
+		switch num {
+		case 2: // content
+			if typ == protowire.BytesType {
+				content := decodeContentProto(raw)
+				res, _ = sjson.SetRawBytes(res, "content", content)
+			}
+		case 3: // finishReason
+			if typ == protowire.VarintType {
+				val, _ := protowire.ConsumeVarint(raw)
+				reasons := []string{"FINISH_REASON_UNSPECIFIED", "STOP", "MAX_TOKENS", "SAFETY", "RECITATION", "OTHER"}
+				reason := "UNKNOWN"
+				if val < uint64(len(reasons)) {
+					reason = reasons[val]
+				}
+				res, _ = sjson.SetBytes(res, "finishReason", reason)
+			}
+		}
+		return nil
+	})
+	return res
+}
+
+func decodeContentProto(msg []byte) []byte {
+	res := []byte(`{"parts":[]}`)
+	_ = walkProtobufFields(msg, func(num protowire.Number, typ protowire.Type, raw []byte) error {
+		switch num {
+		case 1: // role
+			role, _ := protowire.ConsumeString(raw)
+			res, _ = sjson.SetBytes(res, "role", role)
+		case 2: // parts
+			if typ == protowire.BytesType {
+				part := decodePartProto(raw)
+				res, _ = sjson.SetRawBytes(res, "parts.-1", part)
+			}
+		}
+		return nil
+	})
+	return res
+}
+
+func decodePartProto(msg []byte) []byte {
+	res := []byte(`{}`)
+	_ = walkProtobufFields(msg, func(num protowire.Number, typ protowire.Type, raw []byte) error {
+		switch num {
+		case 1: // text
+			text, _ := protowire.ConsumeString(raw)
+			res, _ = sjson.SetBytes(res, "text", text)
+		case 6: // thought (bool)
+			val, _ := protowire.ConsumeVarint(raw)
+			res, _ = sjson.SetBytes(res, "thought", val != 0)
+		case 7: // thoughtSignature
+			sig, _ := protowire.ConsumeString(raw)
+			res, _ = sjson.SetBytes(res, "thoughtSignature", sig)
+		}
+		return nil
+	})
+	return res
+}
+
+func decodeUsageProto(msg []byte) []byte {
+	res := []byte(`{}`)
+	_ = walkProtobufFields(msg, func(num protowire.Number, typ protowire.Type, raw []byte) error {
+		switch num {
+		case 1: // promptTokenCount
+			val, _ := protowire.ConsumeVarint(raw)
+			res, _ = sjson.SetBytes(res, "promptTokenCount", val)
+		case 2: // candidatesTokenCount
+			val, _ := protowire.ConsumeVarint(raw)
+			res, _ = sjson.SetBytes(res, "candidatesTokenCount", val)
+		case 3: // totalTokenCount
+			val, _ := protowire.ConsumeVarint(raw)
+			res, _ = sjson.SetBytes(res, "totalTokenCount", val)
+		}
+		return nil
+	})
+	return res
+}
+
+func decodeAntigravityCountTokensResponse(msg []byte) []byte {
+	res := []byte(`{}`)
+	_ = walkProtobufFields(msg, func(num protowire.Number, typ protowire.Type, raw []byte) error {
+		if num == 1 { // totalTokens
+			val, _ := protowire.ConsumeVarint(raw)
+			res, _ = sjson.SetBytes(res, "totalTokens", val)
+		}
+		return nil
+	})
+	return res
+}
+
+func walkProtobufFields(msg []byte, visit func(num protowire.Number, typ protowire.Type, raw []byte) error) error {
+	for offset := 0; offset < len(msg); {
+		num, typ, n := protowire.ConsumeTag(msg[offset:])
+		if n < 0 {
+			return fmt.Errorf("malformed protobuf tag: %w", protowire.ParseError(n))
+		}
+		offset += n
+		valueLen := protowire.ConsumeFieldValue(num, typ, msg[offset:])
+		if valueLen < 0 {
+			return fmt.Errorf("malformed protobuf field %d: %w", num, protowire.ParseError(valueLen))
+		}
+		fieldRaw := msg[offset : offset+valueLen]
+		if err := visit(num, typ, fieldRaw); err != nil {
+			return err
+		}
+		offset += valueLen
+	}
+	return nil
 }
