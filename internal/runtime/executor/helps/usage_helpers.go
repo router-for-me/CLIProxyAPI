@@ -241,7 +241,7 @@ func ParseOpenAIStreamUsage(line []byte) (usage.Detail, bool) {
 		return usage.Detail{}, false
 	}
 	usageNode := gjson.GetBytes(payload, "usage")
-	if !usageNode.Exists() || usageNode.Type != gjson.JSON {
+	if !usageNode.Exists() || !usageNode.IsObject() {
 		return usage.Detail{}, false
 	}
 	detail := usage.Detail{
@@ -282,7 +282,7 @@ func ParseClaudeStreamUsage(line []byte) (usage.Detail, bool) {
 		return usage.Detail{}, false
 	}
 	usageNode := gjson.GetBytes(payload, "usage")
-	if !usageNode.Exists() || usageNode.Type != gjson.JSON {
+	if !usageNode.Exists() || !usageNode.IsObject() {
 		return usage.Detail{}, false
 	}
 	detail := usage.Detail{
@@ -344,7 +344,7 @@ func ParseGeminiStreamUsage(line []byte) (usage.Detail, bool) {
 	if !node.Exists() {
 		node = gjson.GetBytes(payload, "usage_metadata")
 	}
-	if !node.Exists() {
+	if !node.Exists() || !node.IsObject() {
 		return usage.Detail{}, false
 	}
 	return parseGeminiFamilyUsageDetail(node), true
@@ -359,7 +359,7 @@ func ParseGeminiCLIStreamUsage(line []byte) (usage.Detail, bool) {
 	if !node.Exists() {
 		node = gjson.GetBytes(payload, "usage_metadata")
 	}
-	if !node.Exists() {
+	if !node.Exists() || !node.IsObject() {
 		return usage.Detail{}, false
 	}
 	return parseGeminiFamilyUsageDetail(node), true
@@ -392,7 +392,7 @@ func ParseAntigravityStreamUsage(line []byte) (usage.Detail, bool) {
 	if !node.Exists() {
 		node = gjson.GetBytes(payload, "usage_metadata")
 	}
-	if !node.Exists() {
+	if !node.Exists() || !node.IsObject() {
 		return usage.Detail{}, false
 	}
 	return parseGeminiFamilyUsageDetail(node), true
