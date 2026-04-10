@@ -247,16 +247,6 @@ func (e *AntigravityExecutor) HttpRequest(ctx context.Context, auth *cliproxyaut
 	}
 
 	// --- Inject Official gRPC Headers ---
-	projectID := ""
-	if auth != nil && auth.Metadata != nil {
-		if pid, ok := auth.Metadata["project_id"].(string); ok {
-			projectID = strings.TrimSpace(pid)
-		}
-	}
-	if projectID != "" {
-		httpReq.Header.Set("x-goog-user-project", projectID)
-		httpReq.Header.Set("x-goog-request-params", "project_id="+projectID)
-	}
 	httpReq.Header.Set("x-goog-api-client", antigravityAPIClientDescriptor)
 	httpReq.Header.Set("TE", "trailers")
 
@@ -2064,10 +2054,6 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 	httpReq.Header.Set("User-Agent", resolveUserAgent(auth))
 
 	// --- Inject Official gRPC Headers ---
-	if projectID != "" {
-		httpReq.Header.Set("x-goog-user-project", projectID)
-		httpReq.Header.Set("x-goog-request-params", "project_id="+projectID)
-	}
 	httpReq.Header.Set("x-goog-api-client", antigravityAPIClientDescriptor)
 	httpReq.Header.Set("TE", "trailers")
 
