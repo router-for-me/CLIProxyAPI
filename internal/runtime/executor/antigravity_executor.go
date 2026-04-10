@@ -8,7 +8,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"crypto/tls"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -43,8 +42,10 @@ const (
 	antigravityGeneratePath        = "/v1internal:generateContent"
 	antigravityClientID            = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
 	antigravityClientSecret        = "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"
-	defaultAntigravityAgent        = "antigravity/1.19.6 darwin/arm64"
+	defaultAntigravityAgent        = "antigravity/1.21.9 darwin/arm64"
 	antigravityAuthType            = "antigravity"
+	antigravityGoogAPIClient       = "gl-node/22.21.1"
+	antigravityClientMetadata      = `{"ideType":"ANTIGRAVITY","platform":"PLATFORM_UNSPECIFIED","pluginType":"GEMINI"}`
 	refreshSkew                    = 3000 * time.Second
 	// systemInstruction              = "You are Antigravity, a powerful agentic AI coding assistant designed by the Google Deepmind team working on Advanced Agentic Coding.You are pair programming with a USER to solve their coding task. The task may require creating a new codebase, modifying or debugging an existing codebase, or simply answering a question.**Absolute paths only****Proactiveness**"
 )
@@ -75,60 +76,16 @@ func NewAntigravityExecutor(cfg *config.Config) *AntigravityExecutor {
 	return &AntigravityExecutor{cfg: cfg}
 }
 
-// antigravityTransport is a singleton HTTP/1.1 transport shared by all Antigravity requests.
-// It is initialized once via antigravityTransportOnce to avoid leaking a new connection pool
-// (and the goroutines managing it) on every request.
-var (
-	antigravityTransport     *http.Transport
-	antigravityTransportOnce sync.Once
-)
-
-func cloneTransportWithHTTP11(base *http.Transport) *http.Transport {
-	if base == nil {
-		return nil
-	}
-
-	clone := base.Clone()
-	clone.ForceAttemptHTTP2 = false
-	// Wipe TLSNextProto to prevent implicit HTTP/2 upgrade.
-	clone.TLSNextProto = make(map[string]func(authority string, c *tls.Conn) http.RoundTripper)
-	if clone.TLSClientConfig == nil {
-		clone.TLSClientConfig = &tls.Config{}
-	} else {
-		clone.TLSClientConfig = clone.TLSClientConfig.Clone()
-	}
-	// Actively advertise only HTTP/1.1 in the ALPN handshake.
-	clone.TLSClientConfig.NextProtos = []string{"http/1.1"}
-	return clone
-}
-
-// initAntigravityTransport creates the shared HTTP/1.1 transport exactly once.
-func initAntigravityTransport() {
-	base, ok := http.DefaultTransport.(*http.Transport)
-	if !ok {
-		base = &http.Transport{}
-	}
-	antigravityTransport = cloneTransportWithHTTP11(base)
-}
-
-// newAntigravityHTTPClient creates an HTTP client specifically for Antigravity,
-// enforcing HTTP/1.1 by disabling HTTP/2 to perfectly mimic Node.js https defaults.
-// The underlying Transport is a singleton to avoid leaking connection pools.
+// newAntigravityHTTPClient returns a shared uTLS+HTTP/2 client with Chrome TLS fingerprint.
+// The singleton transport is keyed by proxy URL to avoid leaking connection pools.
+// newAntigravityHTTPClient creates an HTTP client for Antigravity requests using
+// Chrome TLS fingerprint (uTLS) over HTTP/2 to match the real Antigravity IDE's
+// network behaviour (Node.js with TLS 1.3 + h2 ALPN).
+// The underlying transport is a shared singleton so connection pooling persists
+// across requests. Context-injected round-trippers are used as fallback for non-uTLS hosts.
 func newAntigravityHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
-	antigravityTransportOnce.Do(initAntigravityTransport)
-
-	client := newProxyAwareHTTPClient(ctx, cfg, auth, timeout)
-	// If no transport is set, use the shared HTTP/1.1 transport.
-	if client.Transport == nil {
-		client.Transport = antigravityTransport
-		return client
-	}
-
-	// Preserve proxy settings from proxy-aware transports while forcing HTTP/1.1.
-	if transport, ok := client.Transport.(*http.Transport); ok {
-		client.Transport = cloneTransportWithHTTP11(transport)
-	}
-	return client
+	proxyURL := resolveProxyURL(cfg, auth)
+	return newAntigravityUtlsHTTPClient(ctx, proxyURL, timeout)
 }
 
 // Identifier returns the executor identifier.
@@ -176,7 +133,8 @@ func (e *AntigravityExecutor) HttpRequest(ctx context.Context, auth *cliproxyaut
 	}
 	// Content-Length is managed automatically by Go's http.Client from the Body
 	httpReq.Header.Set("User-Agent", resolveUserAgent(auth))
-	httpReq.Close = true // sends Connection: close
+	httpReq.Header.Set("X-Goog-Api-Client", antigravityGoogAPIClient)
+	httpReq.Header.Set("Client-Metadata", antigravityClientMetadata)
 
 	// Inject Authorization: Bearer <token>
 	if err := e.PrepareRequest(httpReq, auth); err != nil {
@@ -1044,10 +1002,11 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 	if errReq != nil {
 		return cliproxyexecutor.Response{}, errReq
 	}
-	httpReq.Close = true
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+token)
 	httpReq.Header.Set("User-Agent", resolveUserAgent(auth))
+	httpReq.Header.Set("X-Goog-Api-Client", antigravityGoogAPIClient)
+	httpReq.Header.Set("Client-Metadata", antigravityClientMetadata)
 	if host := resolveHost(base); host != "" {
 		httpReq.Host = host
 	}
@@ -1142,8 +1101,8 @@ func (e *AntigravityExecutor) refreshToken(ctx context.Context, auth *cliproxyau
 	}
 	httpReq.Header.Set("Host", "oauth2.googleapis.com")
 	httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	// Real Antigravity uses Go's default User-Agent for OAuth token refresh
-	httpReq.Header.Set("User-Agent", "Go-http-client/2.0")
+	httpReq.Header.Set("User-Agent", "google-api-nodejs-client/9.15.1")
+	httpReq.Header.Set("X-Goog-Api-Client", antigravityGoogAPIClient)
 
 	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
 	httpResp, errDo := httpClient.Do(httpReq)
@@ -1311,10 +1270,11 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 	if errReq != nil {
 		return nil, errReq
 	}
-	httpReq.Close = true
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+token)
 	httpReq.Header.Set("User-Agent", resolveUserAgent(auth))
+	httpReq.Header.Set("X-Goog-Api-Client", antigravityGoogAPIClient)
+	httpReq.Header.Set("Client-Metadata", antigravityClientMetadata)
 	if host := resolveHost(base); host != "" {
 		httpReq.Host = host
 	}
@@ -1417,6 +1377,14 @@ func resolveHost(base string) string {
 	return strings.TrimPrefix(strings.TrimPrefix(base, "https://"), "http://")
 }
 
+// antigravityPlatforms are the platform strings used in real Antigravity IDE installations.
+var antigravityPlatforms = []string{
+	"darwin/arm64",
+	"darwin/amd64",
+	"windows/amd64",
+	"linux/amd64",
+}
+
 func resolveUserAgent(auth *cliproxyauth.Auth) string {
 	if auth != nil {
 		if auth.Attributes != nil {
@@ -1428,6 +1396,12 @@ func resolveUserAgent(auth *cliproxyauth.Auth) string {
 			if ua, ok := auth.Metadata["user_agent"].(string); ok && strings.TrimSpace(ua) != "" {
 				return strings.TrimSpace(ua)
 			}
+		}
+		// Deterministic platform selection based on auth ID hash.
+		if auth.ID != "" {
+			h := sha256.Sum256([]byte("antigravity-ua:" + auth.ID))
+			idx := int(h[0]) % len(antigravityPlatforms)
+			return "antigravity/1.21.9 " + antigravityPlatforms[idx]
 		}
 	}
 	return defaultAntigravityAgent
