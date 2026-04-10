@@ -3,10 +3,16 @@ package executor
 import (
 	"context"
 	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	"github.com/tidwall/gjson"
 )
 
@@ -207,5 +213,170 @@ func TestQwenCreds_NormalizesResourceURL(t *testing.T) {
 				t.Fatalf("qwenCreds baseURL = %q, want %q", baseURL, tt.wantBaseURL)
 			}
 		})
+	}
+}
+
+func TestQwenExecutorExecute_429RefreshAndRetry(t *testing.T) {
+	qwenRateLimiter.Lock()
+	qwenRateLimiter.requests = make(map[string][]time.Time)
+	qwenRateLimiter.Unlock()
+
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		if r.URL.Path != "/v1/chat/completions" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		switch r.Header.Get("Authorization") {
+		case "Bearer old-token":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":{"code":"quota_exceeded","message":"quota exceeded","type":"quota_exceeded"}}`))
+			return
+		case "Bearer new-token":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"id":"chatcmpl-test","object":"chat.completion","created":1,"model":"qwen-max","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+			return
+		default:
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+	}))
+	defer srv.Close()
+
+	exec := NewQwenExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		ID:       "auth-test",
+		Provider: "qwen",
+		Attributes: map[string]string{
+			"base_url": srv.URL + "/v1",
+		},
+		Metadata: map[string]any{
+			"access_token":  "old-token",
+			"refresh_token": "refresh-token",
+		},
+	}
+
+	var refresherCalls int32
+	exec.refreshForImmediateRetry = func(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
+		atomic.AddInt32(&refresherCalls, 1)
+		refreshed := auth.Clone()
+		if refreshed.Metadata == nil {
+			refreshed.Metadata = make(map[string]any)
+		}
+		refreshed.Metadata["access_token"] = "new-token"
+		refreshed.Metadata["refresh_token"] = "refresh-token-2"
+		return refreshed, nil
+	}
+	ctx := context.Background()
+
+	resp, err := exec.Execute(ctx, auth, cliproxyexecutor.Request{
+		Model:   "qwen-max",
+		Payload: []byte(`{"model":"qwen-max","messages":[{"role":"user","content":"hi"}]}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if len(resp.Payload) == 0 {
+		t.Fatalf("Execute() payload is empty")
+	}
+	if atomic.LoadInt32(&calls) != 2 {
+		t.Fatalf("upstream calls = %d, want 2", atomic.LoadInt32(&calls))
+	}
+	if atomic.LoadInt32(&refresherCalls) != 1 {
+		t.Fatalf("refresher calls = %d, want 1", atomic.LoadInt32(&refresherCalls))
+	}
+}
+
+func TestQwenExecutorExecuteStream_429RefreshAndRetry(t *testing.T) {
+	qwenRateLimiter.Lock()
+	qwenRateLimiter.requests = make(map[string][]time.Time)
+	qwenRateLimiter.Unlock()
+
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		if r.URL.Path != "/v1/chat/completions" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		switch r.Header.Get("Authorization") {
+		case "Bearer old-token":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":{"code":"quota_exceeded","message":"quota exceeded","type":"quota_exceeded"}}`))
+			return
+		case "Bearer new-token":
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl-test\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"qwen-max\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n"))
+			if flusher, ok := w.(http.Flusher); ok {
+				flusher.Flush()
+			}
+			return
+		default:
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+	}))
+	defer srv.Close()
+
+	exec := NewQwenExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		ID:       "auth-test",
+		Provider: "qwen",
+		Attributes: map[string]string{
+			"base_url": srv.URL + "/v1",
+		},
+		Metadata: map[string]any{
+			"access_token":  "old-token",
+			"refresh_token": "refresh-token",
+		},
+	}
+
+	var refresherCalls int32
+	exec.refreshForImmediateRetry = func(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
+		atomic.AddInt32(&refresherCalls, 1)
+		refreshed := auth.Clone()
+		if refreshed.Metadata == nil {
+			refreshed.Metadata = make(map[string]any)
+		}
+		refreshed.Metadata["access_token"] = "new-token"
+		refreshed.Metadata["refresh_token"] = "refresh-token-2"
+		return refreshed, nil
+	}
+	ctx := context.Background()
+
+	stream, err := exec.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
+		Model:   "qwen-max",
+		Payload: []byte(`{"model":"qwen-max","stream":true,"messages":[{"role":"user","content":"hi"}]}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+	if atomic.LoadInt32(&calls) != 2 {
+		t.Fatalf("upstream calls = %d, want 2", atomic.LoadInt32(&calls))
+	}
+	if atomic.LoadInt32(&refresherCalls) != 1 {
+		t.Fatalf("refresher calls = %d, want 1", atomic.LoadInt32(&refresherCalls))
+	}
+
+	var sawPayload bool
+	for chunk := range stream.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error = %v", chunk.Err)
+		}
+		if len(chunk.Payload) > 0 {
+			sawPayload = true
+		}
+	}
+	if !sawPayload {
+		t.Fatalf("stream did not produce any payload chunks")
 	}
 }
