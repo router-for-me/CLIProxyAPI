@@ -852,16 +852,22 @@ func (s *Server) Stop(ctx context.Context) error {
 		return fmt.Errorf("failed to shutdown HTTP server: %v", err)
 	}
 
-	if s.usagePersistence != nil {
-		flushCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		defer cancel()
-		if err := s.usagePersistence.Close(flushCtx); err != nil {
-			return fmt.Errorf("failed to persist usage statistics during shutdown: %v", err)
-		}
-		usage.SetPersistenceManager(nil)
-	}
-
 	log.Debug("API server stopped")
+	return nil
+}
+
+// StopUsagePersistence flushes and detaches the usage persistence manager.
+func (s *Server) StopUsagePersistence(ctx context.Context) error {
+	if s == nil || s.usagePersistence == nil {
+		return nil
+	}
+	flushCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := s.usagePersistence.Close(flushCtx); err != nil {
+		return fmt.Errorf("failed to persist usage statistics during shutdown: %v", err)
+	}
+	usage.SetPersistenceManager(nil)
+	s.usagePersistence = nil
 	return nil
 }
 

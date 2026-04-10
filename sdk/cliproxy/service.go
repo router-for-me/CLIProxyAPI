@@ -768,6 +768,17 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		}
 
 		usage.StopDefault()
+
+		if s.server != nil {
+			flushCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			defer cancel()
+			if err := s.server.StopUsagePersistence(flushCtx); err != nil {
+				log.Errorf("error persisting usage statistics during shutdown: %v", err)
+				if shutdownErr == nil {
+					shutdownErr = err
+				}
+			}
+		}
 	})
 	return shutdownErr
 }
