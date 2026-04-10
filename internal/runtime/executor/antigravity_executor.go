@@ -1570,6 +1570,7 @@ attemptLoop:
 						if _, errRead := io.ReadFull(resp.Body, header); errRead != nil {
 							if errRead != io.EOF {
 								helps.RecordAPIResponseError(ctx, e.cfg, errRead)
+								reporter.PublishFailure(ctx)
 								out <- cliproxyexecutor.StreamChunk{Err: errRead}
 							}
 							break
@@ -1578,6 +1579,7 @@ attemptLoop:
 						if length > maxGRPCMessageSize {
 							errMax := fmt.Errorf("gRPC frame too large: %d bytes (max %d)", length, maxGRPCMessageSize)
 							helps.RecordAPIResponseError(ctx, e.cfg, errMax)
+							reporter.PublishFailure(ctx)
 							out <- cliproxyexecutor.StreamChunk{Err: errMax}
 							break
 						}
@@ -1587,6 +1589,7 @@ attemptLoop:
 						msg := msgBuf[:length]
 						if _, errRead := io.ReadFull(resp.Body, msg); errRead != nil {
 							helps.RecordAPIResponseError(ctx, e.cfg, errRead)
+							reporter.PublishFailure(ctx)
 							out <- cliproxyexecutor.StreamChunk{Err: errRead}
 							break
 						}
@@ -1595,6 +1598,9 @@ attemptLoop:
 
 						// Decode binary Protobuf to JSON for the translator
 						payload := decodeAntigravityProtoResponse(msg)
+
+						// Filter usage metadata to ensure we only publish terminal chunk totals
+						payload, _ = helps.StripUsageMetadataFromJSON(payload)
 
 						if detail, ok := helps.ParseAntigravityStreamUsage(payload); ok {
 							reporter.Publish(ctx, detail)
@@ -1614,6 +1620,7 @@ attemptLoop:
 						errMsg := fmt.Sprintf("gRPC upstream error (status %s): %s", grpcStatus, grpcMsg)
 						log.Errorf("antigravity executor: %s", errMsg)
 						helps.RecordAPIResponseError(ctx, e.cfg, fmt.Errorf("%s", errMsg))
+						reporter.PublishFailure(ctx)
 						out <- cliproxyexecutor.StreamChunk{Err: statusErr{code: http.StatusBadGateway, msg: errMsg}}
 					}
 				} else {
