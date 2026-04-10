@@ -16,6 +16,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -878,6 +879,25 @@ func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string
 	// custom model registrations that include thinking suffixes.
 	if len(providers) == 0 && baseModel != resolvedModelName {
 		providers = util.GetProviderName(resolvedModelName)
+	}
+
+	// Fallback: strip known model variant suffixes (e.g. "-customtools") for
+	// provider lookup. When a match is found, both baseModel and
+	// resolvedModelName are normalized because CPA routes gemini-cli through
+	// cloudcode-pa/v1internal (OAuth) which rejects variant suffixes with 404.
+	// The behavioral difference is minor: -customtools only changes tool
+	// selection priority (prefers custom tools over bash), not model
+	// capabilities. registry.StripModelVariantSuffix handles thinking-budget
+	// suffixes like "(8192)" and chained segments like "-thinking" so the
+	// strip is safe for resolvedModelName even when a thinking suffix is
+	// preserved.
+	if len(providers) == 0 {
+		if stripped := registry.StripModelVariantSuffix(baseModel); stripped != baseModel {
+			providers = util.GetProviderName(stripped)
+			if len(providers) > 0 {
+				resolvedModelName = registry.StripModelVariantSuffix(resolvedModelName)
+			}
+		}
 	}
 
 	if len(providers) == 0 {
