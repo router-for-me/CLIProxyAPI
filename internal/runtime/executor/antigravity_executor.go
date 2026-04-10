@@ -2465,13 +2465,13 @@ func encodeAntigravityProtoRequest(payload []byte) []byte {
 		out = protowire.AppendString(out, model)
 	}
 
-	// 企业外部模型配置 (tag 15)
+	// Enterprise external model config (tag 15)
 	if enterpriseConfig := gjson.GetBytes(payload, "enterprise_chat_model_config"); enterpriseConfig.Exists() {
 		out = protowire.AppendTag(out, 15, protowire.BytesType)
 		out = protowire.AppendString(out, enterpriseConfig.Raw)
 	}
 
-	// 启用 AI 积分计费 (tag 21)
+	// Enable AI credits billing (tag 21)
 	if enableCredits := gjson.GetBytes(payload, "enable_ai_credits"); enableCredits.Exists() {
 		out = protowire.AppendTag(out, 21, protowire.VarintType)
 		val := uint64(0)
