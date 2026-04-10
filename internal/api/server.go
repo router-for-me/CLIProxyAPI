@@ -159,6 +159,8 @@ type Server struct {
 	// management handler
 	mgmt *managementHandlers.Handler
 
+	usagePersistence *usage.PersistenceManager
+
 	// ampModule is the Amp routing module for model mapping hot-reload
 	ampModule *ampmodule.AmpModule
 
@@ -270,6 +272,16 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	}
 	logDir := logging.ResolveLogDirectory(cfg)
 	s.mgmt.SetLogDirectory(logDir)
+	if cfg.UsageStatisticsPersistenceEnabled {
+		persistPath := usage.ResolvePersistencePath(configFilePath, cfg.UsageStatisticsPersistencePath)
+		persistence := usage.NewPersistenceManager(usage.NewFileSnapshotStore(persistPath), usage.GetRequestStatistics())
+		if err := persistence.Load(context.Background()); err != nil {
+			log.WithError(err).Warnf("failed to restore usage statistics from %s", persistPath)
+		} else {
+			s.usagePersistence = persistence
+			usage.SetPersistenceManager(persistence)
+		}
+	}
 	if optionState.postAuthHook != nil {
 		s.mgmt.SetPostAuthHook(optionState.postAuthHook)
 	}
@@ -839,6 +851,15 @@ func (s *Server) Stop(ctx context.Context) error {
 	// Shutdown the HTTP server.
 	if err := s.server.Shutdown(ctx); err != nil {
 		return fmt.Errorf("failed to shutdown HTTP server: %v", err)
+	}
+
+	if s.usagePersistence != nil {
+		flushCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		if err := s.usagePersistence.Close(flushCtx); err != nil {
+			return fmt.Errorf("failed to persist usage statistics during shutdown: %v", err)
+		}
+		usage.SetPersistenceManager(nil)
 	}
 
 	log.Debug("API server stopped")

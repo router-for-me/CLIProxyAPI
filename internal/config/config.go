@@ -65,6 +65,13 @@ type Config struct {
 	// UsageStatisticsEnabled toggles in-memory usage aggregation; when false, usage data is discarded.
 	UsageStatisticsEnabled bool `yaml:"usage-statistics-enabled" json:"usage-statistics-enabled"`
 
+	// UsageStatisticsPersistenceEnabled toggles durable local persistence for usage statistics snapshots.
+	UsageStatisticsPersistenceEnabled bool `yaml:"usage-statistics-persistence-enabled" json:"usage-statistics-persistence-enabled"`
+
+	// UsageStatisticsPersistencePath defines where usage statistics snapshots are stored.
+	// Relative paths are resolved relative to the configuration file directory.
+	UsageStatisticsPersistencePath string `yaml:"usage-statistics-persistence-path" json:"usage-statistics-persistence-path"`
+
 	// DisableCooling disables quota cooldown scheduling when true.
 	DisableCooling bool `yaml:"disable-cooling" json:"disable-cooling"`
 
@@ -583,6 +590,8 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.LogsMaxTotalSizeMB = 0
 	cfg.ErrorLogsMaxFiles = 10
 	cfg.UsageStatisticsEnabled = false
+	cfg.UsageStatisticsPersistenceEnabled = false
+	cfg.UsageStatisticsPersistencePath = "usage-statistics.json"
 	cfg.DisableCooling = false
 	cfg.Pprof.Enable = false
 	cfg.Pprof.Addr = DefaultPprofAddr

@@ -15,7 +15,10 @@ import (
 	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 )
 
-var statisticsEnabled atomic.Bool
+var (
+	statisticsEnabled  atomic.Bool
+	defaultPersistence atomic.Pointer[PersistenceManager]
+)
 
 func init() {
 	statisticsEnabled.Store(true)
@@ -140,6 +143,12 @@ var defaultRequestStatistics = NewRequestStatistics()
 // GetRequestStatistics returns the shared statistics store.
 func GetRequestStatistics() *RequestStatistics { return defaultRequestStatistics }
 
+// SetPersistenceManager installs the shared usage persistence manager.
+func SetPersistenceManager(manager *PersistenceManager) { defaultPersistence.Store(manager) }
+
+// GetPersistenceManager returns the shared usage persistence manager.
+func GetPersistenceManager() *PersistenceManager { return defaultPersistence.Load() }
+
 // NewRequestStatistics constructs an empty statistics store.
 func NewRequestStatistics() *RequestStatistics {
 	return &RequestStatistics{
@@ -210,6 +219,10 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 	s.requestsByHour[hourKey]++
 	s.tokensByDay[dayKey] += totalTokens
 	s.tokensByHour[hourKey] += totalTokens
+
+	if persistence := defaultPersistence.Load(); persistence != nil {
+		persistence.MarkDirty()
+	}
 }
 
 func (s *RequestStatistics) updateAPIStats(stats *apiStats, model string, detail RequestDetail) {
@@ -223,6 +236,9 @@ func (s *RequestStatistics) updateAPIStats(stats *apiStats, model string, detail
 	modelStatsValue.TotalRequests++
 	modelStatsValue.TotalTokens += detail.Tokens.TotalTokens
 	modelStatsValue.Details = append(modelStatsValue.Details, detail)
+	if len(modelStatsValue.Details) > defaultMaxRequestDetails {
+		modelStatsValue.Details = append([]RequestDetail(nil), modelStatsValue.Details[len(modelStatsValue.Details)-defaultMaxRequestDetails:]...)
+	}
 }
 
 // Snapshot returns a copy of the aggregated metrics for external consumption.

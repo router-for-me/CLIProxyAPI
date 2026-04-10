@@ -69,6 +69,12 @@ func (h *Handler) ImportUsageStatistics(c *gin.Context) {
 	}
 
 	result := h.usageStats.MergeSnapshot(payload.Usage)
+	if persistence := usage.GetPersistenceManager(); persistence != nil {
+		if err := persistence.Flush(c.Request.Context()); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to persist imported usage statistics"})
+			return
+		}
+	}
 	snapshot := h.usageStats.Snapshot()
 	c.JSON(http.StatusOK, gin.H{
 		"added":           result.Added,
