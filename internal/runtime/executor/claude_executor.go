@@ -1005,22 +1005,22 @@ func should1MContext(auth *cliproxyauth.Auth, cfg *config.Config, model string) 
 		return false
 	}
 	// Check Attributes first (set by synthesizer / PatchAuthFileFields),
-	// then fall back to Metadata only when the attribute key is absent
-	// (set by UploadAuthFile / registerAuthFromFile).
-	// An explicit Attributes value (including "false") is authoritative.
+	// then fall back to Metadata only when the attribute key is absent or
+	// the value is unparseable (set by UploadAuthFile / registerAuthFromFile).
+	// An explicit Attributes value that parses cleanly (including "false")
+	// is authoritative; a malformed attribute should not silently disable
+	// 1M context, so it falls back to Metadata as if absent.
 	enabled := false
+	useMetadataFallback := true
 	if auth.Attributes != nil {
 		if attrVal, hasAttr := auth.Attributes["enable_1m_context"]; hasAttr {
-			enabled, _ = strconv.ParseBool(strings.TrimSpace(attrVal))
-		} else if auth.Metadata != nil {
-			switch v := auth.Metadata["enable_1m_context"].(type) {
-			case bool:
-				enabled = v
-			case string:
-				enabled, _ = strconv.ParseBool(strings.TrimSpace(v))
+			if parsed, err := strconv.ParseBool(strings.TrimSpace(attrVal)); err == nil {
+				enabled = parsed
+				useMetadataFallback = false
 			}
 		}
-	} else if auth.Metadata != nil {
+	}
+	if useMetadataFallback && auth.Metadata != nil {
 		switch v := auth.Metadata["enable_1m_context"].(type) {
 		case bool:
 			enabled = v

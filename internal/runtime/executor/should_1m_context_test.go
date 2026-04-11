@@ -178,3 +178,38 @@ func TestShould1MContext_CaseInsensitiveModel(t *testing.T) {
 		t.Fatal("expected true: model whitelist matching should be case-insensitive")
 	}
 }
+
+func TestShould1MContext_AttributeFalseOverridesMetadataTrue(t *testing.T) {
+	cfg := &config.Config{
+		Claude1MContext: config.Claude1MContext{
+			Enabled: true,
+		},
+	}
+	// Attributes explicitly says false; Metadata says true.
+	// The account-level explicit off must win — Metadata is only a fallback.
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{"enable_1m_context": "false"},
+		Metadata:   map[string]any{"enable_1m_context": true},
+	}
+	if should1MContext(auth, cfg, "claude-opus-4-6") {
+		t.Fatal("expected false: explicit Attribute=false must override Metadata=true")
+	}
+}
+
+func TestShould1MContext_AttributeParseFailureFallsBackToMetadata(t *testing.T) {
+	cfg := &config.Config{
+		Claude1MContext: config.Claude1MContext{
+			Enabled: true,
+		},
+	}
+	// Attribute value is unparseable as bool ("yes" is not accepted by
+	// strconv.ParseBool); the broken attribute should be treated as absent
+	// so the Metadata value remains authoritative.
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{"enable_1m_context": "yes"},
+		Metadata:   map[string]any{"enable_1m_context": true},
+	}
+	if !should1MContext(auth, cfg, "claude-opus-4-6") {
+		t.Fatal("expected true: unparseable Attribute should fall back to Metadata")
+	}
+}
