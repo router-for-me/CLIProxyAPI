@@ -468,11 +468,7 @@ func TestValidateBypassMode_HandlesWhitespace(t *testing.T) {
 
 func TestValidateBypassMode_RejectsOversizedSignature(t *testing.T) {
 	t.Parallel()
-	payload := append([]byte{0x12}, bytes.Repeat([]byte{0x34}, maxBypassSignatureLen)...)
-	sig := base64.StdEncoding.EncodeToString(payload)
-	if len(sig) <= maxBypassSignatureLen {
-		t.Fatalf("test setup: signature should exceed max length, got %d", len(sig))
-	}
+	sig := strings.Repeat("A", maxBypassSignatureLen+1)
 
 	inputJSON := []byte(`{
 		"messages": [{"role": "assistant", "content": [
@@ -486,6 +482,33 @@ func TestValidateBypassMode_RejectsOversizedSignature(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "maximum length") {
 		t.Fatalf("expected length error, got: %v", err)
+	}
+}
+
+func TestValidateBypassMode_StrictAcceptsSignatureBetween16KiBAnd32MiB(t *testing.T) {
+	previous := cache.SignatureBypassStrictMode()
+	cache.SetSignatureBypassStrictMode(true)
+	t.Cleanup(func() {
+		cache.SetSignatureBypassStrictMode(previous)
+	})
+
+	payload := buildClaudeSignaturePayload(t, 12, uint64Ptr(2), strings.Repeat("m", 20000), true)
+	sig := base64.StdEncoding.EncodeToString(payload)
+	if len(sig) <= 1<<14 {
+		t.Fatalf("test setup: signature should exceed previous 16KiB guardrail, got %d", len(sig))
+	}
+	if len(sig) > maxBypassSignatureLen {
+		t.Fatalf("test setup: signature should remain within new max length, got %d", len(sig))
+	}
+
+	inputJSON := []byte(`{
+		"messages": [{"role": "assistant", "content": [
+			{"type": "thinking", "thinking": "t", "signature": "` + sig + `"}
+		]}]
+	}`)
+
+	if err := ValidateClaudeBypassSignatures(inputJSON); err != nil {
+		t.Fatalf("expected strict mode to accept signature below 32MiB max, got: %v", err)
 	}
 }
 
