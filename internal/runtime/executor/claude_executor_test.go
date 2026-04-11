@@ -1953,7 +1953,7 @@ func TestNormalizeClaudeTemperatureForThinking_AfterForcedToolChoiceKeepsOrigina
 func TestRemapOAuthToolNames_TitleCase_NoReverseNeeded(t *testing.T) {
 	body := []byte(`{"tools":[{"name":"Bash","description":"Run shell commands","input_schema":{"type":"object","properties":{"cmd":{"type":"string"}}}}],"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
 
-	out, renamed := remapOAuthToolNames(body)
+	out, renamed, dynReverse := remapOAuthToolNames(body)
 	if renamed {
 		t.Fatalf("renamed = true, want false")
 	}
@@ -1964,7 +1964,7 @@ func TestRemapOAuthToolNames_TitleCase_NoReverseNeeded(t *testing.T) {
 	resp := []byte(`{"content":[{"type":"tool_use","id":"toolu_01","name":"Bash","input":{"cmd":"ls"}}]}`)
 	reversed := resp
 	if renamed {
-		reversed = reverseRemapOAuthToolNames(resp)
+		reversed = reverseRemapOAuthToolNames(resp, dynReverse)
 	}
 	if got := gjson.GetBytes(reversed, "content.0.name").String(); got != "Bash" {
 		t.Fatalf("content.0.name = %q, want %q", got, "Bash")
@@ -1974,7 +1974,7 @@ func TestRemapOAuthToolNames_TitleCase_NoReverseNeeded(t *testing.T) {
 func TestRemapOAuthToolNames_Lowercase_ReverseApplied(t *testing.T) {
 	body := []byte(`{"tools":[{"name":"bash","description":"Run shell commands","input_schema":{"type":"object","properties":{"cmd":{"type":"string"}}}}],"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
 
-	out, renamed := remapOAuthToolNames(body)
+	out, renamed, dynReverse := remapOAuthToolNames(body)
 	if !renamed {
 		t.Fatalf("renamed = false, want true")
 	}
@@ -1985,9 +1985,78 @@ func TestRemapOAuthToolNames_Lowercase_ReverseApplied(t *testing.T) {
 	resp := []byte(`{"content":[{"type":"tool_use","id":"toolu_01","name":"Bash","input":{"cmd":"ls"}}]}`)
 	reversed := resp
 	if renamed {
-		reversed = reverseRemapOAuthToolNames(resp)
+		reversed = reverseRemapOAuthToolNames(resp, dynReverse)
 	}
 	if got := gjson.GetBytes(reversed, "content.0.name").String(); got != "bash" {
 		t.Fatalf("content.0.name = %q, want %q", got, "bash")
+	}
+}
+
+func TestRemapOAuthToolNames_DynamicFallback(t *testing.T) {
+	// Test that tools NOT in the static map are dynamically renamed via snake_case -> TitleCase.
+	// Use fictional tool names that won't be in the static map.
+	body := []byte(`{"tools":[{"name":"custom_plugin_search","description":"Custom","input_schema":{"type":"object"}},{"name":"my_fancy_tool","description":"Fancy","input_schema":{"type":"object"}}],"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+
+	out, renamed, dynReverse := remapOAuthToolNames(body)
+	if !renamed {
+		t.Fatalf("renamed = false, want true")
+	}
+	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "CustomPluginSearch" {
+		t.Fatalf("tools.0.name = %q, want %q", got, "CustomPluginSearch")
+	}
+	if got := gjson.GetBytes(out, "tools.1.name").String(); got != "MyFancyTool" {
+		t.Fatalf("tools.1.name = %q, want %q", got, "MyFancyTool")
+	}
+
+	// Verify dynamic reverse map was populated.
+	if len(dynReverse) != 2 {
+		t.Fatalf("dynReverse has %d entries, want 2", len(dynReverse))
+	}
+	if dynReverse["CustomPluginSearch"] != "custom_plugin_search" {
+		t.Fatalf("dynReverse[CustomPluginSearch] = %q, want %q", dynReverse["CustomPluginSearch"], "custom_plugin_search")
+	}
+
+	// Test reverse remap (non-stream).
+	resp := []byte(`{"content":[{"type":"tool_use","id":"toolu_01","name":"CustomPluginSearch","input":{}}]}`)
+	reversed := reverseRemapOAuthToolNames(resp, dynReverse)
+	if got := gjson.GetBytes(reversed, "content.0.name").String(); got != "custom_plugin_search" {
+		t.Fatalf("content.0.name = %q, want %q", got, "custom_plugin_search")
+	}
+}
+
+func TestRemapOAuthToolNames_MCPToolsPassThrough(t *testing.T) {
+	// Tools with double underscores (mcp__server__tool format) should NOT be renamed.
+	body := []byte(`{"tools":[{"name":"mcp__firecrawl__scrape","description":"Firecrawl","input_schema":{"type":"object"}}],"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+
+	out, renamed, dynReverse := remapOAuthToolNames(body)
+	if renamed {
+		t.Fatalf("renamed = true, want false (MCP tools should pass through)")
+	}
+	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "mcp__firecrawl__scrape" {
+		t.Fatalf("tools.0.name = %q, want %q", got, "mcp__firecrawl__scrape")
+	}
+	if len(dynReverse) != 0 {
+		t.Fatalf("dynReverse has %d entries, want 0", len(dynReverse))
+	}
+}
+
+func TestSnakeCaseToTitleCase(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"lsp_diagnostics", "LspDiagnostics"},
+		{"ast_grep_search", "AstGrepSearch"},
+		{"look_at", "LookAt"},
+		{"interactive_bash", "InteractiveBash"},
+		{"context7_resolve-library-id", "Context7ResolveLibraryId"},
+		{"firecrawl_firecrawl_scrape", "FirecrawlFirecrawlScrape"},
+		{"Bash", "Bash"},             // no separators, unchanged
+		{"mcp__server__tool", "mcp__server__tool"}, // double underscore, unchanged
+		{"", ""},                     // empty string, unchanged
+	}
+	for _, tc := range cases {
+		if got := snakeCaseToTitleCase(tc.in); got != tc.want {
+			t.Errorf("snakeCaseToTitleCase(%q) = %q, want %q", tc.in, got, tc.want)
+		}
 	}
 }
