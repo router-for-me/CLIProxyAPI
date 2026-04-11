@@ -216,7 +216,7 @@ func TestQwenCreds_NormalizesResourceURL(t *testing.T) {
 	}
 }
 
-func TestQwenExecutorExecute_429RefreshAndRetry(t *testing.T) {
+func TestQwenExecutorExecute_429DoesNotRefreshOrRetry(t *testing.T) {
 	qwenRateLimiter.Lock()
 	qwenRateLimiter.requests = make(map[string][]time.Time)
 	qwenRateLimiter.Unlock()
@@ -272,27 +272,31 @@ func TestQwenExecutorExecute_429RefreshAndRetry(t *testing.T) {
 	}
 	ctx := context.Background()
 
-	resp, err := exec.Execute(ctx, auth, cliproxyexecutor.Request{
+	_, err := exec.Execute(ctx, auth, cliproxyexecutor.Request{
 		Model:   "qwen-max",
 		Payload: []byte(`{"model":"qwen-max","messages":[{"role":"user","content":"hi"}]}`),
 	}, cliproxyexecutor.Options{
 		SourceFormat: sdktranslator.FromString("openai"),
 	})
-	if err != nil {
-		t.Fatalf("Execute() error = %v", err)
+	if err == nil {
+		t.Fatalf("Execute() expected error, got nil")
 	}
-	if len(resp.Payload) == 0 {
-		t.Fatalf("Execute() payload is empty")
+	status, ok := err.(statusErr)
+	if !ok {
+		t.Fatalf("Execute() error type = %T, want statusErr", err)
 	}
-	if atomic.LoadInt32(&calls) != 2 {
-		t.Fatalf("upstream calls = %d, want 2", atomic.LoadInt32(&calls))
+	if status.StatusCode() != http.StatusTooManyRequests {
+		t.Fatalf("Execute() status code = %d, want %d", status.StatusCode(), http.StatusTooManyRequests)
 	}
-	if atomic.LoadInt32(&refresherCalls) != 1 {
-		t.Fatalf("refresher calls = %d, want 1", atomic.LoadInt32(&refresherCalls))
+	if atomic.LoadInt32(&calls) != 1 {
+		t.Fatalf("upstream calls = %d, want 1", atomic.LoadInt32(&calls))
+	}
+	if atomic.LoadInt32(&refresherCalls) != 0 {
+		t.Fatalf("refresher calls = %d, want 0", atomic.LoadInt32(&refresherCalls))
 	}
 }
 
-func TestQwenExecutorExecuteStream_429RefreshAndRetry(t *testing.T) {
+func TestQwenExecutorExecuteStream_429DoesNotRefreshOrRetry(t *testing.T) {
 	qwenRateLimiter.Lock()
 	qwenRateLimiter.requests = make(map[string][]time.Time)
 	qwenRateLimiter.Unlock()
@@ -351,32 +355,260 @@ func TestQwenExecutorExecuteStream_429RefreshAndRetry(t *testing.T) {
 	}
 	ctx := context.Background()
 
-	stream, err := exec.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
+	_, err := exec.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
 		Model:   "qwen-max",
 		Payload: []byte(`{"model":"qwen-max","stream":true,"messages":[{"role":"user","content":"hi"}]}`),
 	}, cliproxyexecutor.Options{
 		SourceFormat: sdktranslator.FromString("openai"),
 	})
-	if err != nil {
-		t.Fatalf("ExecuteStream() error = %v", err)
+	if err == nil {
+		t.Fatalf("ExecuteStream() expected error, got nil")
 	}
-	if atomic.LoadInt32(&calls) != 2 {
-		t.Fatalf("upstream calls = %d, want 2", atomic.LoadInt32(&calls))
+	status, ok := err.(statusErr)
+	if !ok {
+		t.Fatalf("ExecuteStream() error type = %T, want statusErr", err)
 	}
-	if atomic.LoadInt32(&refresherCalls) != 1 {
-		t.Fatalf("refresher calls = %d, want 1", atomic.LoadInt32(&refresherCalls))
+	if status.StatusCode() != http.StatusTooManyRequests {
+		t.Fatalf("ExecuteStream() status code = %d, want %d", status.StatusCode(), http.StatusTooManyRequests)
 	}
+	if atomic.LoadInt32(&calls) != 1 {
+		t.Fatalf("upstream calls = %d, want 1", atomic.LoadInt32(&calls))
+	}
+	if atomic.LoadInt32(&refresherCalls) != 0 {
+		t.Fatalf("refresher calls = %d, want 0", atomic.LoadInt32(&refresherCalls))
+	}
+}
 
-	var sawPayload bool
-	for chunk := range stream.Chunks {
-		if chunk.Err != nil {
-			t.Fatalf("stream chunk error = %v", chunk.Err)
+func TestQwenExecutorExecute_429RetryAfterHeaderPropagatesToStatusErr(t *testing.T) {
+	qwenRateLimiter.Lock()
+	qwenRateLimiter.requests = make(map[string][]time.Time)
+	qwenRateLimiter.Unlock()
+
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		if r.URL.Path != "/v1/chat/completions" {
+			w.WriteHeader(http.StatusNotFound)
+			return
 		}
-		if len(chunk.Payload) > 0 {
-			sawPayload = true
-		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Retry-After", "2")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":{"code":"rate_limit_exceeded","message":"rate limited","type":"rate_limit_exceeded"}}`))
+	}))
+	defer srv.Close()
+
+	exec := NewQwenExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		ID:       "auth-test",
+		Provider: "qwen",
+		Attributes: map[string]string{
+			"base_url": srv.URL + "/v1",
+		},
+		Metadata: map[string]any{
+			"access_token": "test-token",
+		},
 	}
-	if !sawPayload {
-		t.Fatalf("stream did not produce any payload chunks")
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, auth, cliproxyexecutor.Request{
+		Model:   "qwen-max",
+		Payload: []byte(`{"model":"qwen-max","messages":[{"role":"user","content":"hi"}]}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+	})
+	if err == nil {
+		t.Fatalf("Execute() expected error, got nil")
+	}
+	status, ok := err.(statusErr)
+	if !ok {
+		t.Fatalf("Execute() error type = %T, want statusErr", err)
+	}
+	if status.StatusCode() != http.StatusTooManyRequests {
+		t.Fatalf("Execute() status code = %d, want %d", status.StatusCode(), http.StatusTooManyRequests)
+	}
+	if status.RetryAfter() == nil {
+		t.Fatalf("Execute() RetryAfter is nil, want non-nil")
+	}
+	if got := *status.RetryAfter(); got != 2*time.Second {
+		t.Fatalf("Execute() RetryAfter = %v, want %v", got, 2*time.Second)
+	}
+	if atomic.LoadInt32(&calls) != 1 {
+		t.Fatalf("upstream calls = %d, want 1", atomic.LoadInt32(&calls))
+	}
+}
+
+func TestQwenExecutorExecuteStream_429RetryAfterHeaderPropagatesToStatusErr(t *testing.T) {
+	qwenRateLimiter.Lock()
+	qwenRateLimiter.requests = make(map[string][]time.Time)
+	qwenRateLimiter.Unlock()
+
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		if r.URL.Path != "/v1/chat/completions" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Retry-After", "2")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":{"code":"rate_limit_exceeded","message":"rate limited","type":"rate_limit_exceeded"}}`))
+	}))
+	defer srv.Close()
+
+	exec := NewQwenExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		ID:       "auth-test",
+		Provider: "qwen",
+		Attributes: map[string]string{
+			"base_url": srv.URL + "/v1",
+		},
+		Metadata: map[string]any{
+			"access_token": "test-token",
+		},
+	}
+	ctx := context.Background()
+
+	_, err := exec.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
+		Model:   "qwen-max",
+		Payload: []byte(`{"model":"qwen-max","stream":true,"messages":[{"role":"user","content":"hi"}]}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+	})
+	if err == nil {
+		t.Fatalf("ExecuteStream() expected error, got nil")
+	}
+	status, ok := err.(statusErr)
+	if !ok {
+		t.Fatalf("ExecuteStream() error type = %T, want statusErr", err)
+	}
+	if status.StatusCode() != http.StatusTooManyRequests {
+		t.Fatalf("ExecuteStream() status code = %d, want %d", status.StatusCode(), http.StatusTooManyRequests)
+	}
+	if status.RetryAfter() == nil {
+		t.Fatalf("ExecuteStream() RetryAfter is nil, want non-nil")
+	}
+	if got := *status.RetryAfter(); got != 2*time.Second {
+		t.Fatalf("ExecuteStream() RetryAfter = %v, want %v", got, 2*time.Second)
+	}
+	if atomic.LoadInt32(&calls) != 1 {
+		t.Fatalf("upstream calls = %d, want 1", atomic.LoadInt32(&calls))
+	}
+}
+
+func TestQwenExecutorExecute_429QuotaExhausted_DisableCoolingSetsDefaultRetryAfter(t *testing.T) {
+	qwenRateLimiter.Lock()
+	qwenRateLimiter.requests = make(map[string][]time.Time)
+	qwenRateLimiter.Unlock()
+
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		if r.URL.Path != "/v1/chat/completions" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":{"code":"quota_exceeded","message":"quota exceeded","type":"quota_exceeded"}}`))
+	}))
+	defer srv.Close()
+
+	exec := NewQwenExecutor(&config.Config{DisableCooling: true})
+	auth := &cliproxyauth.Auth{
+		ID:       "auth-test",
+		Provider: "qwen",
+		Attributes: map[string]string{
+			"base_url": srv.URL + "/v1",
+		},
+		Metadata: map[string]any{
+			"access_token": "test-token",
+		},
+	}
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, auth, cliproxyexecutor.Request{
+		Model:   "qwen-max",
+		Payload: []byte(`{"model":"qwen-max","messages":[{"role":"user","content":"hi"}]}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+	})
+	if err == nil {
+		t.Fatalf("Execute() expected error, got nil")
+	}
+	status, ok := err.(statusErr)
+	if !ok {
+		t.Fatalf("Execute() error type = %T, want statusErr", err)
+	}
+	if status.StatusCode() != http.StatusTooManyRequests {
+		t.Fatalf("Execute() status code = %d, want %d", status.StatusCode(), http.StatusTooManyRequests)
+	}
+	if status.RetryAfter() == nil {
+		t.Fatalf("Execute() RetryAfter is nil, want non-nil")
+	}
+	if got := *status.RetryAfter(); got != time.Second {
+		t.Fatalf("Execute() RetryAfter = %v, want %v", got, time.Second)
+	}
+	if atomic.LoadInt32(&calls) != 1 {
+		t.Fatalf("upstream calls = %d, want 1", atomic.LoadInt32(&calls))
+	}
+}
+
+func TestQwenExecutorExecuteStream_429QuotaExhausted_DisableCoolingSetsDefaultRetryAfter(t *testing.T) {
+	qwenRateLimiter.Lock()
+	qwenRateLimiter.requests = make(map[string][]time.Time)
+	qwenRateLimiter.Unlock()
+
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		if r.URL.Path != "/v1/chat/completions" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":{"code":"quota_exceeded","message":"quota exceeded","type":"quota_exceeded"}}`))
+	}))
+	defer srv.Close()
+
+	exec := NewQwenExecutor(&config.Config{DisableCooling: true})
+	auth := &cliproxyauth.Auth{
+		ID:       "auth-test",
+		Provider: "qwen",
+		Attributes: map[string]string{
+			"base_url": srv.URL + "/v1",
+		},
+		Metadata: map[string]any{
+			"access_token": "test-token",
+		},
+	}
+	ctx := context.Background()
+
+	_, err := exec.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
+		Model:   "qwen-max",
+		Payload: []byte(`{"model":"qwen-max","stream":true,"messages":[{"role":"user","content":"hi"}]}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+	})
+	if err == nil {
+		t.Fatalf("ExecuteStream() expected error, got nil")
+	}
+	status, ok := err.(statusErr)
+	if !ok {
+		t.Fatalf("ExecuteStream() error type = %T, want statusErr", err)
+	}
+	if status.StatusCode() != http.StatusTooManyRequests {
+		t.Fatalf("ExecuteStream() status code = %d, want %d", status.StatusCode(), http.StatusTooManyRequests)
+	}
+	if status.RetryAfter() == nil {
+		t.Fatalf("ExecuteStream() RetryAfter is nil, want non-nil")
+	}
+	if got := *status.RetryAfter(); got != time.Second {
+		t.Fatalf("ExecuteStream() RetryAfter = %v, want %v", got, time.Second)
+	}
+	if atomic.LoadInt32(&calls) != 1 {
+		t.Fatalf("upstream calls = %d, want 1", atomic.LoadInt32(&calls))
 	}
 }
