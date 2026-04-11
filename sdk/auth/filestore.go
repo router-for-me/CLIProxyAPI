@@ -254,6 +254,30 @@ func (s *FileTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth,
 	if email, ok := metadata["email"].(string); ok && email != "" {
 		auth.Attributes["email"] = email
 	}
+	// Extract cloak configuration from auth file metadata into attributes
+	// so that getCloakConfigFromAuth can read them for OAuth credentials.
+	if cloakObj, ok := metadata["cloak"].(map[string]any); ok {
+		if mode, ok := cloakObj["mode"].(string); ok && mode != "" {
+			auth.Attributes["cloak_mode"] = mode
+		}
+		if strict, ok := cloakObj["strict-mode"].(bool); ok && strict {
+			auth.Attributes["cloak_strict_mode"] = "true"
+		}
+		if words, ok := cloakObj["sensitive-words"].([]any); ok && len(words) > 0 {
+			var parts []string
+			for _, w := range words {
+				if s, ok := w.(string); ok {
+					parts = append(parts, s)
+				}
+			}
+			if len(parts) > 0 {
+				auth.Attributes["cloak_sensitive_words"] = strings.Join(parts, ",")
+			}
+		}
+		if cache, ok := cloakObj["cache-user-id"].(bool); ok && cache {
+			auth.Attributes["cloak_cache_user_id"] = "true"
+		}
+	}
 	cliproxyauth.ApplyCustomHeadersFromMetadata(auth)
 	return auth, nil
 }
