@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"path/filepath"
@@ -2051,6 +2052,17 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								shouldSuspendModel = true
 								setModelQuota = true
 							}
+						case 400:
+							if result.Error != nil && isTransientBadRequest(fmt.Errorf("%s", result.Error.Message)) {
+								if disableCooling {
+									state.NextRetryAfter = time.Time{}
+								} else {
+									next := now.Add(1 * time.Minute)
+									state.NextRetryAfter = next
+								}
+							} else {
+								state.NextRetryAfter = time.Time{}
+							}
 						case 408, 500, 502, 503, 504:
 							if disableCooling {
 								state.NextRetryAfter = time.Time{}
@@ -2386,6 +2398,9 @@ func isRequestInvalidError(err error) bool {
 	status := statusCodeFromError(err)
 	switch status {
 	case http.StatusBadRequest:
+		if isTransientBadRequest(err) {
+			return false
+		}
 		return strings.Contains(err.Error(), "invalid_request_error")
 	case http.StatusNotFound:
 		return isRequestScopedNotFoundMessage(err.Error())
@@ -2394,6 +2409,30 @@ func isRequestInvalidError(err error) bool {
 	default:
 		return false
 	}
+}
+
+// isTransientBadRequest detects HTTP 400 responses that are actually transient
+// upstream errors (e.g. model temporarily unavailable) rather than true client
+// request validation failures. These should be retried.
+func isTransientBadRequest(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	transientPatterns := []string{
+		"\u5f53\u524d\u6a21\u578b\u6682\u65f6\u65e0\u6cd5\u4f7f\u7528", // 当前模型暂时无法使用 (model temporarily unavailable)
+		"temporarily unavailable",
+		"model is currently unavailable",
+		"service is temporarily",
+		"try again later",
+		"请稍后再试", // please try again later
+	}
+	for _, p := range transientPatterns {
+		if strings.Contains(msg, p) {
+			return true
+		}
+	}
+	return false
 }
 
 func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time) {
@@ -2454,6 +2493,19 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		}
 		auth.Quota.NextRecoverAt = next
 		auth.NextRetryAfter = next
+	case 400:
+		if resultErr != nil && isTransientBadRequest(fmt.Errorf("%s", resultErr.Message)) {
+			auth.StatusMessage = "transient upstream error"
+			if disableCooling {
+				auth.NextRetryAfter = time.Time{}
+			} else {
+				auth.NextRetryAfter = now.Add(1 * time.Minute)
+			}
+		} else {
+			if auth.StatusMessage == "" {
+				auth.StatusMessage = "bad request"
+			}
+		}
 	case 408, 500, 502, 503, 504:
 		auth.StatusMessage = "transient upstream error"
 		if disableCooling {
