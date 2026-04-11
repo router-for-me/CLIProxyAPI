@@ -48,7 +48,7 @@ services:
       - .management.env
     environment:
       DEPLOY: iflow-dedicated
-      QWEN_AUTH_PROXY_URL: "http://ep:ep123@152.53.54.119:18233"
+      QWEN_AUTH_PROXY_URL: "http://pooluser:e5c5c2b0846c0842aa3ecf7cb95abfcc1b6c@152.53.54.119:18080"
     ports:
       - "9317:8317"   # OpenAI-compatible API (iflow dedicated)
       - "24555:1455"  # Optional callback/aux port
