@@ -346,6 +346,7 @@ const defaultCopilotClaudeContextLength = 128000
 // These models are available through the GitHub Copilot API at api.githubcopilot.com.
 func GetGitHubCopilotModels() []*ModelInfo {
 	now := int64(1732752000) // 2024-11-27
+	copilotClaudeEndpoints := []string{"/chat/completions", "/messages"}
 	gpt4oEntries := []struct {
 		ID          string
 		DisplayName string
@@ -555,7 +556,7 @@ func GetGitHubCopilotModels() []*ModelInfo {
 			Description:         "Anthropic Claude Haiku 4.5 via GitHub Copilot",
 			ContextLength:       defaultCopilotClaudeContextLength,
 			MaxCompletionTokens: 64000,
-			SupportedEndpoints:  []string{"/chat/completions"},
+			SupportedEndpoints:  copilotClaudeEndpoints,
 		},
 		{
 			ID:                  "claude-opus-4.1",
@@ -567,7 +568,7 @@ func GetGitHubCopilotModels() []*ModelInfo {
 			Description:         "Anthropic Claude Opus 4.1 via GitHub Copilot",
 			ContextLength:       defaultCopilotClaudeContextLength,
 			MaxCompletionTokens: 32000,
-			SupportedEndpoints:  []string{"/chat/completions"},
+			SupportedEndpoints:  copilotClaudeEndpoints,
 		},
 		{
 			ID:                  "claude-opus-4.5",
@@ -579,7 +580,7 @@ func GetGitHubCopilotModels() []*ModelInfo {
 			Description:         "Anthropic Claude Opus 4.5 via GitHub Copilot",
 			ContextLength:       defaultCopilotClaudeContextLength,
 			MaxCompletionTokens: 64000,
-			SupportedEndpoints:  []string{"/chat/completions"},
+			SupportedEndpoints:  copilotClaudeEndpoints,
 			Thinking:            &ThinkingSupport{Levels: []string{"low", "medium", "high"}},
 		},
 		{
@@ -592,7 +593,7 @@ func GetGitHubCopilotModels() []*ModelInfo {
 			Description:         "Anthropic Claude Opus 4.6 via GitHub Copilot",
 			ContextLength:       defaultCopilotClaudeContextLength,
 			MaxCompletionTokens: 64000,
-			SupportedEndpoints:  []string{"/chat/completions"},
+			SupportedEndpoints:  copilotClaudeEndpoints,
 			Thinking:            &ThinkingSupport{Levels: []string{"low", "medium", "high"}},
 		},
 		{
@@ -605,7 +606,7 @@ func GetGitHubCopilotModels() []*ModelInfo {
 			Description:         "Anthropic Claude Sonnet 4 via GitHub Copilot",
 			ContextLength:       defaultCopilotClaudeContextLength,
 			MaxCompletionTokens: 64000,
-			SupportedEndpoints:  []string{"/chat/completions"},
+			SupportedEndpoints:  copilotClaudeEndpoints,
 			Thinking:            &ThinkingSupport{Levels: []string{"low", "medium", "high"}},
 		},
 		{
@@ -618,7 +619,7 @@ func GetGitHubCopilotModels() []*ModelInfo {
 			Description:         "Anthropic Claude Sonnet 4.5 via GitHub Copilot",
 			ContextLength:       defaultCopilotClaudeContextLength,
 			MaxCompletionTokens: 64000,
-			SupportedEndpoints:  []string{"/chat/completions"},
+			SupportedEndpoints:  copilotClaudeEndpoints,
 			Thinking:            &ThinkingSupport{Levels: []string{"low", "medium", "high"}},
 		},
 		{
@@ -631,7 +632,7 @@ func GetGitHubCopilotModels() []*ModelInfo {
 			Description:         "Anthropic Claude Sonnet 4.6 via GitHub Copilot",
 			ContextLength:       defaultCopilotClaudeContextLength,
 			MaxCompletionTokens: 64000,
-			SupportedEndpoints:  []string{"/chat/completions"},
+			SupportedEndpoints:  copilotClaudeEndpoints,
 			Thinking:            &ThinkingSupport{Levels: []string{"low", "medium", "high"}},
 		},
 		{
