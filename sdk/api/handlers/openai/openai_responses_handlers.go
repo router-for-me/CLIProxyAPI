@@ -418,9 +418,10 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flush
 	if framer == nil {
 		framer = &responsesSSEFramer{}
 	}
+	recovery := newResponsesStreamRecovery()
 	h.ForwardStream(c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
 		WriteChunk: func(chunk []byte) {
-			framer.WriteChunk(c.Writer, chunk)
+			framer.WriteChunk(c.Writer, recovery.normalizeChunk(chunk))
 		},
 		WriteTerminalError: func(errMsg *interfaces.ErrorMessage) {
 			framer.Flush(c.Writer)
@@ -440,6 +441,10 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flush
 		},
 		WriteDone: func() {
 			framer.Flush(c.Writer)
+			if payload := recovery.synthesizeCompletedPayload(); len(payload) > 0 {
+				writeResponsesSSEChunk(c.Writer, append([]byte("data: "), payload...))
+				return
+			}
 			_, _ = c.Writer.Write([]byte("\n"))
 		},
 	})

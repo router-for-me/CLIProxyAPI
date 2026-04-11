@@ -714,6 +714,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 ) ([]byte, error) {
 	completed := false
 	completedOutput := []byte("[]")
+	recovery := newResponsesStreamRecovery()
 	downstreamSessionKey := ""
 	if c != nil && c.Request != nil {
 		downstreamSessionKey = websocketDownstreamSessionKey(c.Request)
@@ -760,6 +761,23 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 		case chunk, ok := <-data:
 			if !ok {
 				if !completed {
+					if payload := recovery.synthesizeCompletedPayload(); len(payload) > 0 {
+						completed = true
+						completedOutput = responseCompletedOutputFromPayload(payload)
+						markAPIResponseTimestamp(c)
+						if errWrite := writeResponsesWebsocketPayload(conn, wsTimelineLog, payload, time.Now()); errWrite != nil {
+							log.Warnf(
+								"responses websocket: downstream_out write failed id=%s event=%s error=%v",
+								sessionID,
+								websocketPayloadEventType(payload),
+								errWrite,
+							)
+							cancel(errWrite)
+							return completedOutput, errWrite
+						}
+						cancel(nil)
+						return completedOutput, nil
+					}
 					errMsg := &interfaces.ErrorMessage{
 						StatusCode: http.StatusRequestTimeout,
 						Error:      fmt.Errorf("stream closed before response.completed"),
@@ -791,7 +809,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 				return completedOutput, nil
 			}
 
-			payloads := websocketJSONPayloadsFromChunk(chunk)
+			payloads := websocketJSONPayloadsFromChunk(recovery.normalizeChunk(chunk))
 			for i := range payloads {
 				recordResponsesWebsocketToolCallsFromPayload(downstreamSessionKey, payloads[i])
 				eventType := gjson.GetBytes(payloads[i], "type").String()

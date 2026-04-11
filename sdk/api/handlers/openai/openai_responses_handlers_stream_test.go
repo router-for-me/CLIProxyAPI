@@ -10,6 +10,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
+	"github.com/tidwall/gjson"
 )
 
 func newResponsesStreamTestHandler(t *testing.T) (*OpenAIResponsesAPIHandler, *httptest.ResponseRecorder, *gin.Context, http.Flusher) {
@@ -53,7 +54,7 @@ func TestForwardResponsesStreamSeparatesDataOnlySSEChunks(t *testing.T) {
 		t.Errorf("unexpected first event.\nGot: %q\nWant: %q", parts[0], expectedPart1)
 	}
 
-	expectedPart2 := "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"output\":[]}}"
+	expectedPart2 := "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"output\":[{\"type\":\"function_call\",\"arguments\":\"{}\"}]}}"
 	if parts[1] != expectedPart2 {
 		t.Errorf("unexpected second event.\nGot: %q\nWant: %q", parts[1], expectedPart2)
 	}
@@ -138,5 +139,62 @@ func TestForwardResponsesStreamDropsIncompleteTrailingDataChunkOnFlush(t *testin
 
 	if got := recorder.Body.String(); got != "\n" {
 		t.Fatalf("expected incomplete trailing data to be dropped on flush.\nGot: %q", got)
+	}
+}
+
+func TestForwardResponsesStreamSynthesizesMissingCompletedEvent(t *testing.T) {
+	h, recorder, c, flusher := newResponsesStreamTestHandler(t)
+
+	data := make(chan []byte, 4)
+	errs := make(chan *interfaces.ErrorMessage)
+	data <- []byte("data: {\"type\":\"response.created\",\"sequence_number\":1,\"response\":{\"id\":\"resp-1\",\"created_at\":123,\"model\":\"gpt-5.4\"}}")
+	data <- []byte("data: {\"type\":\"response.output_item.added\",\"sequence_number\":2,\"item\":{\"id\":\"msg-1\",\"type\":\"message\",\"status\":\"in_progress\",\"content\":[],\"role\":\"assistant\"},\"output_index\":0}")
+	data <- []byte("data: {\"type\":\"response.output_text.delta\",\"sequence_number\":3,\"item_id\":\"msg-1\",\"output_index\":0,\"delta\":\"hello world\"}")
+	data <- []byte("data: {\"type\":\"response.output_text.done\",\"sequence_number\":4,\"item_id\":\"msg-1\",\"output_index\":0,\"text\":\"hello world\"}")
+	close(data)
+	close(errs)
+
+	h.forwardResponsesStream(c, flusher, func(error) {}, data, errs, nil)
+
+	body := recorder.Body.String()
+	if !strings.Contains(body, "\"type\":\"response.completed\"") {
+		t.Fatalf("expected synthesized response.completed event. Body: %q", body)
+	}
+	if !strings.Contains(body, "\"hello world\"") {
+		t.Fatalf("expected synthesized completion to preserve assistant text. Body: %q", body)
+	}
+
+	parts := strings.Split(strings.TrimSpace(body), "\n\n")
+	last := parts[len(parts)-1]
+	if !strings.HasPrefix(last, "data: ") {
+		t.Fatalf("expected last SSE frame to be data-only completion, got %q", last)
+	}
+	payload := strings.TrimSpace(strings.TrimPrefix(last, "data:"))
+	if gjson.Get(payload, "type").String() != "response.completed" {
+		t.Fatalf("last payload type = %q, want response.completed", gjson.Get(payload, "type").String())
+	}
+	if gjson.Get(payload, "response.output.0.content.0.text").String() != "hello world" {
+		t.Fatalf("synthetic response.output text = %q, want %q", gjson.Get(payload, "response.output.0.content.0.text").String(), "hello world")
+	}
+}
+
+func TestForwardResponsesStreamPatchesEmptyCompletedOutput(t *testing.T) {
+	h, recorder, c, flusher := newResponsesStreamTestHandler(t)
+
+	data := make(chan []byte, 2)
+	errs := make(chan *interfaces.ErrorMessage)
+	data <- []byte("data: {\"type\":\"response.output_item.done\",\"sequence_number\":1,\"item\":{\"id\":\"msg-1\",\"type\":\"message\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\",\"annotations\":[],\"logprobs\":[]}],\"role\":\"assistant\"},\"output_index\":0}")
+	data <- []byte("data: {\"type\":\"response.completed\",\"sequence_number\":2,\"response\":{\"id\":\"resp-1\",\"created_at\":123,\"model\":\"gpt-5.4\",\"output\":[]}}")
+	close(data)
+	close(errs)
+
+	h.forwardResponsesStream(c, flusher, func(error) {}, data, errs, nil)
+
+	body := recorder.Body.String()
+	parts := strings.Split(strings.TrimSpace(body), "\n\n")
+	last := parts[len(parts)-1]
+	payload := strings.TrimSpace(strings.TrimPrefix(last, "data:"))
+	if gjson.Get(payload, "response.output.0.content.0.text").String() != "ok" {
+		t.Fatalf("patched response.output text = %q, want %q. Body: %q", gjson.Get(payload, "response.output.0.content.0.text").String(), "ok", body)
 	}
 }
