@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -151,6 +152,40 @@ func wrapQwenError(ctx context.Context, httpCode int, body []byte) (errCode int,
 		helps.LogWithRequestID(ctx).Warnf("qwen quota exceeded (http %d -> %d)", httpCode, errCode)
 	}
 	return errCode, retryAfter
+}
+
+func qwenDisableCooling(cfg *config.Config, auth *cliproxyauth.Auth) bool {
+	if auth != nil {
+		if override, ok := auth.DisableCoolingOverride(); ok {
+			return override
+		}
+	}
+	if cfg == nil {
+		return false
+	}
+	return cfg.DisableCooling
+}
+
+func parseRetryAfterHeader(header http.Header, now time.Time) *time.Duration {
+	raw := strings.TrimSpace(header.Get("Retry-After"))
+	if raw == "" {
+		return nil
+	}
+	if seconds, err := strconv.Atoi(raw); err == nil {
+		if seconds <= 0 {
+			return nil
+		}
+		d := time.Duration(seconds) * time.Second
+		return &d
+	}
+	if at, err := http.ParseTime(raw); err == nil {
+		if !at.After(now) {
+			return nil
+		}
+		d := at.Sub(now)
+		return &d
+	}
+	return nil
 }
 
 // ensureQwenSystemMessage ensures the request has a single system message at the beginning.
@@ -384,6 +419,13 @@ func (e *QwenExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 			}
 
 			errCode, retryAfter := wrapQwenError(ctx, httpResp.StatusCode, b)
+			if errCode == http.StatusTooManyRequests && retryAfter == nil {
+				retryAfter = parseRetryAfterHeader(httpResp.Header, time.Now())
+			}
+			if errCode == http.StatusTooManyRequests && retryAfter == nil && qwenDisableCooling(e.cfg, auth) && isQwenQuotaError(b) {
+				defaultRetryAfter := time.Second
+				retryAfter = &defaultRetryAfter
+			}
 			helps.LogWithRequestID(ctx).Debugf("request error, error status: %d (mapped: %d), error message: %s", httpResp.StatusCode, errCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
 
 			err = statusErr{code: errCode, msg: string(b), retryAfter: retryAfter}
@@ -511,6 +553,13 @@ func (e *QwenExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 			}
 
 			errCode, retryAfter := wrapQwenError(ctx, httpResp.StatusCode, b)
+			if errCode == http.StatusTooManyRequests && retryAfter == nil {
+				retryAfter = parseRetryAfterHeader(httpResp.Header, time.Now())
+			}
+			if errCode == http.StatusTooManyRequests && retryAfter == nil && qwenDisableCooling(e.cfg, auth) && isQwenQuotaError(b) {
+				defaultRetryAfter := time.Second
+				retryAfter = &defaultRetryAfter
+			}
 			helps.LogWithRequestID(ctx).Debugf("request error, error status: %d (mapped: %d), error message: %s", httpResp.StatusCode, errCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
 
 			err = statusErr{code: errCode, msg: string(b), retryAfter: retryAfter}
