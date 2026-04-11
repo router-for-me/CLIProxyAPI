@@ -39,3 +39,29 @@ func TestIsTransientBadRequest_Nil(t *testing.T) {
 	}
 }
 
+func TestIsTransientBadRequest_CaseInsensitive(t *testing.T) {
+	err := fmt.Errorf("Model Is Temporarily Unavailable")
+	if !isTransientBadRequest(err) {
+		t.Fatal("case-insensitive match should detect mixed-case 'Temporarily Unavailable'")
+	}
+}
+
+func TestIsTransientBadRequest_UpperCase(t *testing.T) {
+	err := fmt.Errorf("TRY AGAIN LATER")
+	if !isTransientBadRequest(err) {
+		t.Fatal("case-insensitive match should detect upper-case 'TRY AGAIN LATER'")
+	}
+}
+
+func TestIsTransientBadRequestMessage_Direct(t *testing.T) {
+	if !isTransientBadRequestMessage("当前模型暂时无法使用") {
+		t.Fatal("isTransientBadRequestMessage should detect Chinese transient pattern")
+	}
+	if isTransientBadRequestMessage("invalid_request_error: bad param") {
+		t.Fatal("isTransientBadRequestMessage should not match real validation errors")
+	}
+	if isTransientBadRequestMessage("") {
+		t.Fatal("empty string should not be transient")
+	}
+}
+

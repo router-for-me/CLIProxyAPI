@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"path/filepath"
@@ -2053,7 +2052,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								setModelQuota = true
 							}
 						case 400:
-							if result.Error != nil && isTransientBadRequest(fmt.Errorf("%s", result.Error.Message)) {
+							if result.Error != nil && isTransientBadRequestMessage(result.Error.Message) {
 								if disableCooling {
 									state.NextRetryAfter = time.Time{}
 								} else {
@@ -2418,9 +2417,14 @@ func isTransientBadRequest(err error) bool {
 	if err == nil {
 		return false
 	}
-	msg := err.Error()
+	return isTransientBadRequestMessage(err.Error())
+}
+
+// isTransientBadRequestMessage checks a raw message string for transient patterns.
+func isTransientBadRequestMessage(s string) bool {
+	msg := strings.ToLower(s)
 	transientPatterns := []string{
-		"\u5f53\u524d\u6a21\u578b\u6682\u65f6\u65e0\u6cd5\u4f7f\u7528", // 当前模型暂时无法使用 (model temporarily unavailable)
+		"当前模型暂时无法使用", // model temporarily unavailable
 		"temporarily unavailable",
 		"model is currently unavailable",
 		"service is temporarily",
@@ -2428,7 +2432,7 @@ func isTransientBadRequest(err error) bool {
 		"请稍后再试", // please try again later
 	}
 	for _, p := range transientPatterns {
-		if strings.Contains(msg, p) {
+		if strings.Contains(msg, strings.ToLower(p)) {
 			return true
 		}
 	}
@@ -2494,7 +2498,7 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		auth.Quota.NextRecoverAt = next
 		auth.NextRetryAfter = next
 	case 400:
-		if resultErr != nil && isTransientBadRequest(fmt.Errorf("%s", resultErr.Message)) {
+		if resultErr != nil && isTransientBadRequestMessage(resultErr.Message) {
 			auth.StatusMessage = "transient upstream error"
 			if disableCooling {
 				auth.NextRetryAfter = time.Time{}
