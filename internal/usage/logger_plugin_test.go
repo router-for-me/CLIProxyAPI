@@ -131,3 +131,81 @@ func TestRequestStatisticsRetainsAllDetails(t *testing.T) {
 		t.Fatalf("last retained timestamp = %s, want %s", model.Details[len(model.Details)-1].Timestamp, wantLast)
 	}
 }
+
+func TestRequestStatisticsMergeSnapshotSummaryOnly(t *testing.T) {
+	stats := NewRequestStatistics()
+	summary := StatisticsSnapshot{
+		TotalRequests: 5,
+		SuccessCount:  4,
+		FailureCount:  1,
+		TotalTokens:   500,
+		APIs: map[string]APISnapshot{
+			"summary-api": {
+				TotalRequests: 5,
+				TotalTokens:   500,
+				Models: map[string]ModelSnapshot{
+					"gpt-5.4": {
+						TotalRequests: 5,
+						TotalTokens:   500,
+					},
+				},
+			},
+		},
+		RequestsByDay: map[string]int64{
+			"2026-04-10": 5,
+		},
+		RequestsByHour: map[string]int64{
+			"13": 5,
+		},
+		TokensByDay: map[string]int64{
+			"2026-04-10": 500,
+		},
+		TokensByHour: map[string]int64{
+			"13": 500,
+		},
+	}
+
+	result := stats.MergeSnapshot(summary)
+	if result.Added != 5 || result.Skipped != 0 {
+		t.Fatalf("merge result = %+v, want added=5 skipped=0", result)
+	}
+
+	snapshot := stats.Snapshot()
+	if snapshot.TotalRequests != 5 {
+		t.Fatalf("total requests = %d, want 5", snapshot.TotalRequests)
+	}
+	if snapshot.SuccessCount != 4 {
+		t.Fatalf("success count = %d, want 4", snapshot.SuccessCount)
+	}
+	if snapshot.FailureCount != 1 {
+		t.Fatalf("failure count = %d, want 1", snapshot.FailureCount)
+	}
+	if snapshot.TotalTokens != 500 {
+		t.Fatalf("total tokens = %d, want 500", snapshot.TotalTokens)
+	}
+
+	api := snapshot.APIs["summary-api"]
+	if api.TotalRequests != 5 || api.TotalTokens != 500 {
+		t.Fatalf("api totals = %+v, want requests=5 tokens=500", api)
+	}
+	model := api.Models["gpt-5.4"]
+	if model.TotalRequests != 5 || model.TotalTokens != 500 {
+		t.Fatalf("model totals = %+v, want requests=5 tokens=500", model)
+	}
+	if len(model.Details) != 0 {
+		t.Fatalf("details len = %d, want 0", len(model.Details))
+	}
+
+	if got := snapshot.RequestsByDay["2026-04-10"]; got != 5 {
+		t.Fatalf("requests_by_day[2026-04-10] = %d, want 5", got)
+	}
+	if got := snapshot.RequestsByHour["13"]; got != 5 {
+		t.Fatalf("requests_by_hour[13] = %d, want 5", got)
+	}
+	if got := snapshot.TokensByDay["2026-04-10"]; got != 500 {
+		t.Fatalf("tokens_by_day[2026-04-10] = %d, want 500", got)
+	}
+	if got := snapshot.TokensByHour["13"]; got != 500 {
+		t.Fatalf("tokens_by_hour[13] = %d, want 500", got)
+	}
+}

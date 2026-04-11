@@ -48,10 +48,10 @@ func (h *Handler) ExportUsageStatistics(c *gin.Context) {
 	}
 	var snapshot usage.StatisticsSnapshot
 	if h != nil && h.usageStats != nil {
-		snapshot = h.usageStats.Snapshot()
+		snapshot = h.usageStats.SnapshotSummary()
 	}
 	c.JSON(http.StatusOK, usageExportPayload{
-		Version:    1,
+		Version:    2,
 		ExportedAt: time.Now().UTC(),
 		Usage:      snapshot,
 	})
@@ -85,7 +85,7 @@ func (h *Handler) ImportUsageStatistics(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid json"})
 		return
 	}
-	if payload.Version != 0 && payload.Version != 1 {
+	if payload.Version != 0 && payload.Version != 1 && payload.Version != 2 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "unsupported version"})
 		return
 	}

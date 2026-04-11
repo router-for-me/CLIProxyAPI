@@ -6,6 +6,7 @@ package usage
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -227,6 +228,15 @@ func (s *RequestStatistics) updateAPIStats(stats *apiStats, model string, detail
 
 // Snapshot returns a copy of the aggregated metrics for external consumption.
 func (s *RequestStatistics) Snapshot() StatisticsSnapshot {
+	return s.snapshotWithDetails(true)
+}
+
+// SnapshotSummary returns a copy of the aggregated metrics without per-request details.
+func (s *RequestStatistics) SnapshotSummary() StatisticsSnapshot {
+	return s.snapshotWithDetails(false)
+}
+
+func (s *RequestStatistics) snapshotWithDetails(includeDetails bool) StatisticsSnapshot {
 	result := StatisticsSnapshot{}
 	if s == nil {
 		return result
@@ -248,13 +258,16 @@ func (s *RequestStatistics) Snapshot() StatisticsSnapshot {
 			Models:        make(map[string]ModelSnapshot, len(stats.Models)),
 		}
 		for modelName, modelStatsValue := range stats.Models {
-			requestDetails := make([]RequestDetail, len(modelStatsValue.Details))
-			copy(requestDetails, modelStatsValue.Details)
-			apiSnapshot.Models[modelName] = ModelSnapshot{
+			modelSnapshot := ModelSnapshot{
 				TotalRequests: modelStatsValue.TotalRequests,
 				TotalTokens:   modelStatsValue.TotalTokens,
-				Details:       requestDetails,
 			}
+			if includeDetails && len(modelStatsValue.Details) > 0 {
+				requestDetails := make([]RequestDetail, len(modelStatsValue.Details))
+				copy(requestDetails, modelStatsValue.Details)
+				modelSnapshot.Details = requestDetails
+			}
+			apiSnapshot.Models[modelName] = modelSnapshot
 		}
 		result.APIs[apiName] = apiSnapshot
 	}
@@ -295,6 +308,9 @@ func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot) MergeResu
 	result := MergeResult{}
 	if s == nil {
 		return result
+	}
+	if !snapshotContainsDetails(snapshot) {
+		return s.mergeSummarySnapshot(snapshot)
 	}
 
 	s.mu.Lock()
@@ -353,6 +369,134 @@ func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot) MergeResu
 	}
 
 	return result
+}
+
+func snapshotContainsDetails(snapshot StatisticsSnapshot) bool {
+	for _, apiSnapshot := range snapshot.APIs {
+		for _, modelSnapshot := range apiSnapshot.Models {
+			if len(modelSnapshot.Details) > 0 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (s *RequestStatistics) mergeSummarySnapshot(snapshot StatisticsSnapshot) MergeResult {
+	result := MergeResult{}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.apis == nil {
+		s.apis = make(map[string]*apiStats)
+	}
+	if s.requestsByDay == nil {
+		s.requestsByDay = make(map[string]int64)
+	}
+	if s.requestsByHour == nil {
+		s.requestsByHour = make(map[int]int64)
+	}
+	if s.tokensByDay == nil {
+		s.tokensByDay = make(map[string]int64)
+	}
+	if s.tokensByHour == nil {
+		s.tokensByHour = make(map[int]int64)
+	}
+
+	importedTotalRequests := snapshot.TotalRequests
+	importedTotalTokens := snapshot.TotalTokens
+	importedSuccessCount := snapshot.SuccessCount
+	importedFailureCount := snapshot.FailureCount
+
+	if importedTotalRequests == 0 {
+		importedTotalRequests = importedSuccessCount + importedFailureCount
+	}
+	if importedTotalRequests == 0 {
+		for _, apiSnapshot := range snapshot.APIs {
+			importedTotalRequests += apiSnapshot.TotalRequests
+		}
+	}
+
+	if importedTotalTokens == 0 {
+		for _, apiSnapshot := range snapshot.APIs {
+			importedTotalTokens += apiSnapshot.TotalTokens
+		}
+	}
+
+	if importedSuccessCount == 0 && importedFailureCount == 0 && importedTotalRequests > 0 {
+		importedSuccessCount = importedTotalRequests
+	}
+
+	s.totalRequests += importedTotalRequests
+	s.successCount += importedSuccessCount
+	s.failureCount += importedFailureCount
+	s.totalTokens += importedTotalTokens
+	result.Added = importedTotalRequests
+
+	for apiName, apiSnapshot := range snapshot.APIs {
+		apiName = strings.TrimSpace(apiName)
+		if apiName == "" {
+			continue
+		}
+		stats, ok := s.apis[apiName]
+		if !ok || stats == nil {
+			stats = &apiStats{Models: make(map[string]*modelStats)}
+			s.apis[apiName] = stats
+		} else if stats.Models == nil {
+			stats.Models = make(map[string]*modelStats)
+		}
+
+		stats.TotalRequests += apiSnapshot.TotalRequests
+		stats.TotalTokens += apiSnapshot.TotalTokens
+
+		for modelName, modelSnapshot := range apiSnapshot.Models {
+			modelName = strings.TrimSpace(modelName)
+			if modelName == "" {
+				modelName = "unknown"
+			}
+			modelStatsValue, ok := stats.Models[modelName]
+			if !ok || modelStatsValue == nil {
+				modelStatsValue = &modelStats{}
+				stats.Models[modelName] = modelStatsValue
+			}
+			modelStatsValue.TotalRequests += modelSnapshot.TotalRequests
+			modelStatsValue.TotalTokens += modelSnapshot.TotalTokens
+		}
+	}
+
+	for day, count := range snapshot.RequestsByDay {
+		s.requestsByDay[day] += count
+	}
+	for hourKey, count := range snapshot.RequestsByHour {
+		hour, ok := parseSnapshotHour(hourKey)
+		if !ok {
+			continue
+		}
+		s.requestsByHour[hour] += count
+	}
+	for day, count := range snapshot.TokensByDay {
+		s.tokensByDay[day] += count
+	}
+	for hourKey, count := range snapshot.TokensByHour {
+		hour, ok := parseSnapshotHour(hourKey)
+		if !ok {
+			continue
+		}
+		s.tokensByHour[hour] += count
+	}
+
+	return result
+}
+
+func parseSnapshotHour(hour string) (int, bool) {
+	parsed, err := strconv.Atoi(strings.TrimSpace(hour))
+	if err != nil {
+		return 0, false
+	}
+	if parsed < 0 {
+		parsed = 0
+	}
+	return parsed % 24, true
 }
 
 func (s *RequestStatistics) recordImported(apiName, modelName string, stats *apiStats, detail RequestDetail) {

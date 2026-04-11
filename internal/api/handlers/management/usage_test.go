@@ -87,3 +87,46 @@ func TestExportUsageStatisticsFlushesPendingRecords(t *testing.T) {
 		t.Fatalf("total_requests = %d, want %d", got, want)
 	}
 }
+
+func TestExportUsageStatisticsOmitsPerRequestDetails(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	stats := usage.NewRequestStatistics()
+	stats.Record(context.Background(), coreusage.Record{
+		APIKey:      "summary-test",
+		Model:       "gpt-5.4",
+		RequestedAt: time.Date(2026, 4, 10, 13, 0, 0, 0, time.UTC),
+		Detail: coreusage.Detail{
+			InputTokens:  11,
+			OutputTokens: 29,
+			TotalTokens:  40,
+		},
+	})
+
+	handler := &Handler{usageStats: stats}
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/usage/export", nil)
+
+	handler.ExportUsageStatistics(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var payload struct {
+		Version int                      `json:"version"`
+		Usage   usage.StatisticsSnapshot `json:"usage"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if payload.Version != 2 {
+		t.Fatalf("version = %d, want 2", payload.Version)
+	}
+
+	model := payload.Usage.APIs["summary-test"].Models["gpt-5.4"]
+	if got := len(model.Details); got != 0 {
+		t.Fatalf("details len = %d, want 0", got)
+	}
+}
