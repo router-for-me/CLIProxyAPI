@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -153,15 +154,38 @@ func wrapQwenError(ctx context.Context, httpCode int, body []byte) (errCode int,
 	return errCode, retryAfter
 }
 
-func qwenShouldAttemptImmediateRefreshRetry(auth *cliproxyauth.Auth) bool {
-	if auth == nil || auth.Metadata == nil {
+func qwenDisableCooling(cfg *config.Config, auth *cliproxyauth.Auth) bool {
+	if auth != nil {
+		if override, ok := auth.DisableCoolingOverride(); ok {
+			return override
+		}
+	}
+	if cfg == nil {
 		return false
 	}
-	if provider := strings.TrimSpace(auth.Provider); provider != "" && !strings.EqualFold(provider, "qwen") {
-		return false
+	return cfg.DisableCooling
+}
+
+func parseRetryAfterHeader(header http.Header, now time.Time) *time.Duration {
+	raw := strings.TrimSpace(header.Get("Retry-After"))
+	if raw == "" {
+		return nil
 	}
-	refreshToken, _ := auth.Metadata["refresh_token"].(string)
-	return strings.TrimSpace(refreshToken) != ""
+	if seconds, err := strconv.Atoi(raw); err == nil {
+		if seconds <= 0 {
+			return nil
+		}
+		d := time.Duration(seconds) * time.Second
+		return &d
+	}
+	if at, err := http.ParseTime(raw); err == nil {
+		if !at.After(now) {
+			return nil
+		}
+		d := at.Sub(now)
+		return &d
+	}
+	return nil
 }
 
 // ensureQwenSystemMessage ensures the request has a single system message at the beginning.
@@ -340,7 +364,6 @@ func (e *QwenExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 		return resp, err
 	}
 
-	qwenImmediateRetryAttempted := false
 	for {
 		if errRate := checkQwenRateLimit(authID); errRate != nil {
 			helps.LogWithRequestID(ctx).Warnf("qwen rate limit exceeded for credential %s", redactAuthID(authID))
@@ -396,27 +419,14 @@ func (e *QwenExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 			}
 
 			errCode, retryAfter := wrapQwenError(ctx, httpResp.StatusCode, b)
-			helps.LogWithRequestID(ctx).Debugf("request error, error status: %d (mapped: %d), error message: %s", httpResp.StatusCode, errCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-
-			if errCode == http.StatusTooManyRequests && !qwenImmediateRetryAttempted && qwenShouldAttemptImmediateRefreshRetry(auth) {
-				helps.LogWithRequestID(ctx).WithFields(log.Fields{
-					"auth_id": redactAuthID(authID),
-					"model":   req.Model,
-				}).Info("qwen 429 encountered, refreshing token for immediate retry")
-
-				qwenImmediateRetryAttempted = true
-				refreshFn := e.refreshForImmediateRetry
-				if refreshFn == nil {
-					refreshFn = e.Refresh
-				}
-				refreshedAuth, errRefresh := refreshFn(ctx, auth)
-				if errRefresh != nil {
-					helps.LogWithRequestID(ctx).WithError(errRefresh).WithField("auth_id", redactAuthID(authID)).Warn("qwen 429 refresh failed; skipping immediate retry")
-				} else if refreshedAuth != nil {
-					auth = refreshedAuth
-					continue
-				}
+			if errCode == http.StatusTooManyRequests && retryAfter == nil {
+				retryAfter = parseRetryAfterHeader(httpResp.Header, time.Now())
 			}
+			if errCode == http.StatusTooManyRequests && retryAfter == nil && qwenDisableCooling(e.cfg, auth) && isQwenQuotaError(b) {
+				defaultRetryAfter := time.Second
+				retryAfter = &defaultRetryAfter
+			}
+			helps.LogWithRequestID(ctx).Debugf("request error, error status: %d (mapped: %d), error message: %s", httpResp.StatusCode, errCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
 
 			err = statusErr{code: errCode, msg: string(b), retryAfter: retryAfter}
 			return resp, err
@@ -488,7 +498,6 @@ func (e *QwenExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 		return nil, err
 	}
 
-	qwenImmediateRetryAttempted := false
 	for {
 		if errRate := checkQwenRateLimit(authID); errRate != nil {
 			helps.LogWithRequestID(ctx).Warnf("qwen rate limit exceeded for credential %s", redactAuthID(authID))
@@ -544,27 +553,14 @@ func (e *QwenExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 			}
 
 			errCode, retryAfter := wrapQwenError(ctx, httpResp.StatusCode, b)
-			helps.LogWithRequestID(ctx).Debugf("request error, error status: %d (mapped: %d), error message: %s", httpResp.StatusCode, errCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-
-			if errCode == http.StatusTooManyRequests && !qwenImmediateRetryAttempted && qwenShouldAttemptImmediateRefreshRetry(auth) {
-				helps.LogWithRequestID(ctx).WithFields(log.Fields{
-					"auth_id": redactAuthID(authID),
-					"model":   req.Model,
-				}).Info("qwen 429 encountered, refreshing token for immediate retry (stream)")
-
-				qwenImmediateRetryAttempted = true
-				refreshFn := e.refreshForImmediateRetry
-				if refreshFn == nil {
-					refreshFn = e.Refresh
-				}
-				refreshedAuth, errRefresh := refreshFn(ctx, auth)
-				if errRefresh != nil {
-					helps.LogWithRequestID(ctx).WithError(errRefresh).WithField("auth_id", redactAuthID(authID)).Warn("qwen 429 refresh failed; skipping immediate retry (stream)")
-				} else if refreshedAuth != nil {
-					auth = refreshedAuth
-					continue
-				}
+			if errCode == http.StatusTooManyRequests && retryAfter == nil {
+				retryAfter = parseRetryAfterHeader(httpResp.Header, time.Now())
 			}
+			if errCode == http.StatusTooManyRequests && retryAfter == nil && qwenDisableCooling(e.cfg, auth) && isQwenQuotaError(b) {
+				defaultRetryAfter := time.Second
+				retryAfter = &defaultRetryAfter
+			}
+			helps.LogWithRequestID(ctx).Debugf("request error, error status: %d (mapped: %d), error message: %s", httpResp.StatusCode, errCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
 
 			err = statusErr{code: errCode, msg: string(b), retryAfter: retryAfter}
 			return nil, err
