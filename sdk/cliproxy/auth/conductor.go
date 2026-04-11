@@ -293,7 +293,17 @@ func (m *Manager) ReconcileRegistryModelStates(ctx context.Context, authID strin
 		}
 		if changed {
 			updateAggregatedAvailability(auth, now)
-			if !hasModelError(auth, now) {
+			// Only clear auth-level status when the auth is otherwise healthy.
+			// hasModelError only inspects per-model state, so without these
+			// extra guards a disabled auth or an auth with a non-model
+			// auth-level failure (e.g. OAuth-level error set by
+			// applyAuthFailureState) would be silently flipped back to
+			// StatusActive, hiding the real problem from management output.
+			if !hasModelError(auth, now) &&
+				!auth.Disabled &&
+				auth.Status != StatusDisabled &&
+				auth.Status != StatusError &&
+				auth.LastError == nil {
 				auth.LastError = nil
 				auth.StatusMessage = ""
 				auth.Status = StatusActive
