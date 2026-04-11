@@ -58,7 +58,7 @@ import (
 	"google.golang.org/protobuf/encoding/protowire"
 )
 
-const maxBypassSignatureLen = 8192
+const maxBypassSignatureLen = 32 * 1024 * 1024
 
 type claudeSignatureTree struct {
 	EncodingLayers      int
