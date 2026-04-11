@@ -1946,17 +1946,46 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 	payload, _ = sjson.SetBytes(payload, "model", modelName)
 
 	useAntigravitySchema := strings.Contains(modelName, "claude") || strings.Contains(modelName, "gemini-3-pro") || strings.Contains(modelName, "gemini-3.1-pro")
-	payloadStr := string(payload)
-	paths := make([]string, 0)
-	util.Walk(gjson.Parse(payloadStr), "", "parametersJsonSchema", &paths)
-	for _, p := range paths {
-		payloadStr, _ = util.RenameKey(payloadStr, p, p[:len(p)-len("parametersJsonSchema")]+"parameters")
-	}
+	var (
+		bodyReader io.Reader
+		payloadLog []byte
+	)
+	if antigravityRequestNeedsSchemaSanitization(payload) {
+		payloadStr := string(payload)
+		paths := make([]string, 0)
+		util.Walk(gjson.Parse(payloadStr), "", "parametersJsonSchema", &paths)
+		for _, p := range paths {
+			payloadStr, _ = util.RenameKey(payloadStr, p, p[:len(p)-len("parametersJsonSchema")]+"parameters")
+		}
 
-	if useAntigravitySchema {
-		payloadStr = util.CleanJSONSchemaForAntigravity(payloadStr)
+		if useAntigravitySchema {
+			payloadStr = util.CleanJSONSchemaForAntigravity(payloadStr)
+		} else {
+			payloadStr = util.CleanJSONSchemaForGemini(payloadStr)
+		}
+
+		if strings.Contains(modelName, "claude") {
+			updated, _ := sjson.SetBytes([]byte(payloadStr), "request.toolConfig.functionCallingConfig.mode", "VALIDATED")
+			payloadStr = string(updated)
+		} else {
+			payloadStr, _ = sjson.Delete(payloadStr, "request.generationConfig.maxOutputTokens")
+		}
+
+		bodyReader = strings.NewReader(payloadStr)
+		if e.cfg != nil && e.cfg.RequestLog {
+			payloadLog = []byte(payloadStr)
+		}
 	} else {
-		payloadStr = util.CleanJSONSchemaForGemini(payloadStr)
+		if strings.Contains(modelName, "claude") {
+			payload, _ = sjson.SetBytes(payload, "request.toolConfig.functionCallingConfig.mode", "VALIDATED")
+		} else {
+			payload, _ = sjson.DeleteBytes(payload, "request.generationConfig.maxOutputTokens")
+		}
+
+		bodyReader = bytes.NewReader(payload)
+		if e.cfg != nil && e.cfg.RequestLog {
+			payloadLog = append([]byte(nil), payload...)
+		}
 	}
 
 	// if useAntigravitySchema {
@@ -1972,14 +2001,7 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 	// 	}
 	// }
 
-	if strings.Contains(modelName, "claude") {
-		updated, _ := sjson.SetBytes([]byte(payloadStr), "request.toolConfig.functionCallingConfig.mode", "VALIDATED")
-		payloadStr = string(updated)
-	} else {
-		payloadStr, _ = sjson.Delete(payloadStr, "request.generationConfig.maxOutputTokens")
-	}
-
-	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, requestURL.String(), strings.NewReader(payloadStr))
+	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, requestURL.String(), bodyReader)
 	if errReq != nil {
 		return nil, errReq
 	}
@@ -2002,10 +2024,6 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 		authLabel = auth.Label
 		authType, authValue = auth.AccountInfo()
 	}
-	var payloadLog []byte
-	if e.cfg != nil && e.cfg.RequestLog {
-		payloadLog = []byte(payloadStr)
-	}
 	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 		URL:       requestURL.String(),
 		Method:    http.MethodPost,
@@ -2019,6 +2037,19 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 	})
 
 	return httpReq, nil
+}
+
+func antigravityRequestNeedsSchemaSanitization(payload []byte) bool {
+	if gjson.GetBytes(payload, "request.tools.0").Exists() {
+		return true
+	}
+	if gjson.GetBytes(payload, "request.generationConfig.responseJsonSchema").Exists() {
+		return true
+	}
+	if gjson.GetBytes(payload, "request.generationConfig.responseSchema").Exists() {
+		return true
+	}
+	return false
 }
 
 func tokenExpiry(metadata map[string]any) time.Time {
