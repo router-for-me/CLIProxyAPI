@@ -177,7 +177,7 @@ Shadow AI 是一款专为受限环境设计的 AI 辅助工具。提供无窗口
 
 跨平台桌面应用（macOS、Windows、Linux），以原生 GUI 封装 CLIProxyAPI。支持连接 Claude、ChatGPT、Gemini、GitHub Copilot、Qwen、iFlow 及自定义 OpenAI 兼容端点，具备使用分析、请求监控和热门编程工具自动配置功能，无需 API 密钥。
 
-### [CLIproxyAPI Quota Inspector](https://github.com/AllenReder/CLIproxyAPI-Quota-Inspector)
+### [CLIProxyAPI Quota Inspector](https://github.com/AllenReder/CLIProxyAPI-Quota-Inspector)
 
 上手即用的面向 CLIProxyAPI 跨平台配额查询工具，支持按账号展示 code 5h/7d 配额窗口、按计划排序、状态着色及多账号汇总分析。
 
