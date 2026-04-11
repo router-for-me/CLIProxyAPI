@@ -153,17 +153,6 @@ func wrapQwenError(ctx context.Context, httpCode int, body []byte) (errCode int,
 	return errCode, retryAfter
 }
 
-func qwenShouldAttemptImmediateRefreshRetry(auth *cliproxyauth.Auth) bool {
-	if auth == nil || auth.Metadata == nil {
-		return false
-	}
-	if provider := strings.TrimSpace(auth.Provider); provider != "" && !strings.EqualFold(provider, "qwen") {
-		return false
-	}
-	refreshToken, _ := auth.Metadata["refresh_token"].(string)
-	return strings.TrimSpace(refreshToken) != ""
-}
-
 // ensureQwenSystemMessage ensures the request has a single system message at the beginning.
 // It always injects the default system prompt and merges any user-provided system messages
 // into the injected system message content to satisfy Qwen's strict message ordering rules.
@@ -340,7 +329,6 @@ func (e *QwenExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 		return resp, err
 	}
 
-	qwenImmediateRetryAttempted := false
 	for {
 		if errRate := checkQwenRateLimit(authID); errRate != nil {
 			helps.LogWithRequestID(ctx).Warnf("qwen rate limit exceeded for credential %s", redactAuthID(authID))
@@ -397,26 +385,6 @@ func (e *QwenExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 
 			errCode, retryAfter := wrapQwenError(ctx, httpResp.StatusCode, b)
 			helps.LogWithRequestID(ctx).Debugf("request error, error status: %d (mapped: %d), error message: %s", httpResp.StatusCode, errCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-
-			if errCode == http.StatusTooManyRequests && !qwenImmediateRetryAttempted && qwenShouldAttemptImmediateRefreshRetry(auth) {
-				helps.LogWithRequestID(ctx).WithFields(log.Fields{
-					"auth_id": redactAuthID(authID),
-					"model":   req.Model,
-				}).Info("qwen 429 encountered, refreshing token for immediate retry")
-
-				qwenImmediateRetryAttempted = true
-				refreshFn := e.refreshForImmediateRetry
-				if refreshFn == nil {
-					refreshFn = e.Refresh
-				}
-				refreshedAuth, errRefresh := refreshFn(ctx, auth)
-				if errRefresh != nil {
-					helps.LogWithRequestID(ctx).WithError(errRefresh).WithField("auth_id", redactAuthID(authID)).Warn("qwen 429 refresh failed; skipping immediate retry")
-				} else if refreshedAuth != nil {
-					auth = refreshedAuth
-					continue
-				}
-			}
 
 			err = statusErr{code: errCode, msg: string(b), retryAfter: retryAfter}
 			return resp, err
@@ -488,7 +456,6 @@ func (e *QwenExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 		return nil, err
 	}
 
-	qwenImmediateRetryAttempted := false
 	for {
 		if errRate := checkQwenRateLimit(authID); errRate != nil {
 			helps.LogWithRequestID(ctx).Warnf("qwen rate limit exceeded for credential %s", redactAuthID(authID))
@@ -545,26 +512,6 @@ func (e *QwenExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 
 			errCode, retryAfter := wrapQwenError(ctx, httpResp.StatusCode, b)
 			helps.LogWithRequestID(ctx).Debugf("request error, error status: %d (mapped: %d), error message: %s", httpResp.StatusCode, errCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-
-			if errCode == http.StatusTooManyRequests && !qwenImmediateRetryAttempted && qwenShouldAttemptImmediateRefreshRetry(auth) {
-				helps.LogWithRequestID(ctx).WithFields(log.Fields{
-					"auth_id": redactAuthID(authID),
-					"model":   req.Model,
-				}).Info("qwen 429 encountered, refreshing token for immediate retry (stream)")
-
-				qwenImmediateRetryAttempted = true
-				refreshFn := e.refreshForImmediateRetry
-				if refreshFn == nil {
-					refreshFn = e.Refresh
-				}
-				refreshedAuth, errRefresh := refreshFn(ctx, auth)
-				if errRefresh != nil {
-					helps.LogWithRequestID(ctx).WithError(errRefresh).WithField("auth_id", redactAuthID(authID)).Warn("qwen 429 refresh failed; skipping immediate retry (stream)")
-				} else if refreshedAuth != nil {
-					auth = refreshedAuth
-					continue
-				}
-			}
 
 			err = statusErr{code: errCode, msg: string(b), retryAfter: retryAfter}
 			return nil, err
