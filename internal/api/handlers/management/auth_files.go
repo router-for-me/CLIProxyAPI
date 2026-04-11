@@ -328,6 +328,10 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context) {
 		if info, errInfo := e.Info(); errInfo == nil {
 			fileData := gin.H{"name": name, "size": info.Size(), "modtime": info.ModTime()}
 
+			// Compute auth_index from filename for usage stats matching
+			sum := sha256.Sum256([]byte("file:" + name))
+			fileData["auth_index"] = hex.EncodeToString(sum[:8])
+
 			// Read file to get type field
 			full := filepath.Join(h.cfg.AuthDir, name)
 			if data, errRead := os.ReadFile(full); errRead == nil {

@@ -17,7 +17,7 @@ func TestServiceApplyCoreAuthAddOrUpdate_DeleteReAddDoesNotInheritStaleRuntimeSt
 	}
 
 	authID := "service-stale-state-auth"
-	modelID := "stale-model"
+	modelID := "claude-sonnet-4-5-20250929"
 	lastRefreshedAt := time.Date(2026, time.March, 1, 8, 0, 0, 0, time.UTC)
 	nextRefreshAfter := lastRefreshedAt.Add(30 * time.Minute)
 

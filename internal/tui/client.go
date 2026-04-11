@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 )
 
 // Client wraps HTTP calls to the management API.
@@ -143,6 +145,21 @@ func (c *Client) PutConfigYAML(yamlContent string) error {
 // GetUsage fetches usage statistics.
 func (c *Client) GetUsage() (map[string]any, error) {
 	return c.getJSON("/v0/management/usage")
+}
+
+// GetUsageSnapshot fetches the usage statistics explicitly typed.
+func (c *Client) GetUsageSnapshot() (usage.StatisticsSnapshot, error) {
+	data, err := c.get("/v0/management/usage")
+	if err != nil {
+		return usage.StatisticsSnapshot{}, err
+	}
+	var resp struct {
+		Usage usage.StatisticsSnapshot `json:"usage"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return usage.StatisticsSnapshot{}, err
+	}
+	return resp.Usage, nil
 }
 
 // GetAuthFiles lists auth credential files.

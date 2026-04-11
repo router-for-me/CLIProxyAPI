@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -42,10 +43,20 @@ type authTabModel struct {
 	editField    int             // index into authEditableFields
 	editInput    textinput.Model // text input for editing
 	editFileName string          // name of file being edited
+
+	// Filtering state
+	filterVisible bool
+	filterInput   textinput.Model // text input for filtering
+	filterText    string          // current applied filter
+	filteredFiles []map[string]any // list of files matching current filter
+
+	// Usage tracking map
+	usageMap map[string]struct{ success, failure int64 }
 }
 
 type authFilesMsg struct {
 	files []map[string]any
+	stats map[string]struct{ success, failure int64 }
 	err   error
 }
 
@@ -57,11 +68,15 @@ type authActionMsg struct {
 func newAuthTabModel(client *Client) authTabModel {
 	ti := textinput.New()
 	ti.CharLimit = 256
+	fi := textinput.New()
+	fi.CharLimit = 256
+	fi.Prompt = "  Filter Provider: "
 	return authTabModel{
-		client:    client,
-		expanded:  -1,
-		confirm:   -1,
-		editInput: ti,
+		client:      client,
+		expanded:    -1,
+		confirm:     -1,
+		editInput:   ti,
+		filterInput: fi,
 	}
 }
 
@@ -71,7 +86,27 @@ func (m authTabModel) Init() tea.Cmd {
 
 func (m authTabModel) fetchFiles() tea.Msg {
 	files, err := m.client.GetAuthFiles()
-	return authFilesMsg{files: files, err: err}
+	
+	// Also background fetch stats
+	stats, _ := m.client.GetUsageSnapshot()
+	authUsageMap := make(map[string]struct{ success, failure int64 })
+	for _, apiStats := range stats.APIs {
+		for _, modelStats := range apiStats.Models {
+			for _, d := range modelStats.Details {
+				if d.AuthIndex != "" {
+					counts := authUsageMap[d.AuthIndex]
+					if d.Failed {
+						counts.failure++
+					} else {
+						counts.success++
+					}
+					authUsageMap[d.AuthIndex] = counts
+				}
+			}
+		}
+	}
+
+	return authFilesMsg{files: files, stats: authUsageMap, err: err}
 }
 
 func (m authTabModel) Update(msg tea.Msg) (authTabModel, tea.Cmd) {
@@ -85,9 +120,8 @@ func (m authTabModel) Update(msg tea.Msg) (authTabModel, tea.Cmd) {
 		} else {
 			m.err = nil
 			m.files = msg.files
-			if m.cursor >= len(m.files) {
-				m.cursor = max(0, len(m.files)-1)
-			}
+			m.usageMap = msg.stats
+			m = m.applyFilter()
 			m.status = ""
 		}
 		m.viewport.SetContent(m.renderContent())
@@ -114,6 +148,11 @@ func (m authTabModel) Update(msg tea.Msg) (authTabModel, tea.Cmd) {
 			return m.handleConfirmInput(msg)
 		}
 
+		// ---- Filter mode ----
+		if m.filterVisible {
+			return m.handleFilterInput(msg)
+		}
+
 		// ---- Normal mode ----
 		return m.handleNormalInput(msg)
 	}
@@ -125,10 +164,10 @@ func (m authTabModel) Update(msg tea.Msg) (authTabModel, tea.Cmd) {
 
 // startEdit activates inline editing for a field on the currently selected auth file.
 func (m *authTabModel) startEdit(fieldIdx int) tea.Cmd {
-	if m.cursor >= len(m.files) {
+	if m.cursor >= len(m.filteredFiles) {
 		return nil
 	}
-	f := m.files[m.cursor]
+	f := m.filteredFiles[m.cursor]
 	m.editFileName = getString(f, "name")
 	m.editField = fieldIdx
 	m.editing = true
@@ -176,19 +215,31 @@ func (m authTabModel) renderContent() string {
 	sb.WriteString(strings.Repeat("─", m.width))
 	sb.WriteString("\n")
 
+	if m.filterVisible {
+		sb.WriteString(m.filterInput.View())
+		sb.WriteString("\n")
+		sb.WriteString(strings.Repeat("─", m.width))
+		sb.WriteString("\n")
+	} else if m.filterText != "" {
+		sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("208")).Render(fmt.Sprintf("    [Filter active: %s] ('/' to change, clear to remove)", m.filterText)))
+		sb.WriteString("\n")
+		sb.WriteString(strings.Repeat("─", m.width))
+		sb.WriteString("\n")
+	}
+
 	if m.err != nil {
 		sb.WriteString(errorStyle.Render("⚠ Error: " + m.err.Error()))
 		sb.WriteString("\n")
 		return sb.String()
 	}
 
-	if len(m.files) == 0 {
+	if len(m.filteredFiles) == 0 {
 		sb.WriteString(subtitleStyle.Render(T("no_auth_files")))
 		sb.WriteString("\n")
 		return sb.String()
 	}
 
-	for i, f := range m.files {
+	for i, f := range m.filteredFiles {
 		name := getString(f, "name")
 		channel := getString(f, "channel")
 		email := getString(f, "email")
@@ -217,8 +268,40 @@ func (m authTabModel) renderContent() string {
 			displayEmail = displayEmail[:25] + "..."
 		}
 
-		row := fmt.Sprintf("%s%s %-24s %-12s %-28s %s",
-			cursor, statusIcon, displayName, channel, displayEmail, statusText)
+		cooldownText := ""
+		nextRetry := getAnyString(f, "next_retry_after")
+		if nextRetry != "" && nextRetry != "<nil>" && nextRetry != "0001-01-01T00:00:00Z" {
+			if t, err := time.Parse(time.RFC3339, nextRetry); err == nil {
+				if d := time.Until(t); d > 0 {
+					h := int(d.Hours())
+					m := int(d.Minutes()) % 60
+					s := int(d.Seconds()) % 60
+					cooldownText = errorStyle.Render(fmt.Sprintf(" ❄ %02d:%02d:%02d", h, m, s))
+				}
+			}
+		}
+
+		// Compute and inject usage stats before rendering
+		authIndex := getAnyString(f, "auth_index")
+		var sCnt, fCnt int64
+		if counts, ok := m.usageMap[authIndex]; ok {
+			sCnt = counts.success
+			fCnt = counts.failure
+		}
+		
+		total := sCnt + fCnt
+		var rate float64
+		if total > 0 {
+			rate = float64(sCnt) / float64(total) * 100.0
+		}
+		
+		f["__success_count"] = fmt.Sprintf("%d", sCnt)
+		f["__failure_count"] = fmt.Sprintf("%d", fCnt)
+		f["__success_rate"] = fmt.Sprintf("%.1f%%", rate)
+		usageText := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render(fmt.Sprintf("│ S: %-3d | F: %-3d | %-5.1f%%", sCnt, fCnt, rate))
+
+		row := fmt.Sprintf("%s%s %-24s %-12s %-28s %-10s %s%s",
+			cursor, statusIcon, displayName, channel, displayEmail, statusText, usageText, cooldownText)
 		sb.WriteString(rowStyle.Render(row))
 		sb.WriteString("\n")
 
@@ -277,6 +360,9 @@ func (m authTabModel) renderDetail(f map[string]any) string {
 		{"Status Msg", "status_message", false},
 		{"File Name", "file_name", false},
 		{"Auth Type", "auth_type", false},
+		{"Success", "__success_count", false},
+		{"Failure", "__failure_count", false},
+		{"Success Rate", "__success_rate", false},
 		{"Prefix", "prefix", true},
 		{"Proxy URL", "proxy_url", true},
 		{"Priority", "priority", true},
@@ -284,11 +370,12 @@ func (m authTabModel) renderDetail(f map[string]any) string {
 		{"Disabled", "disabled", false},
 		{"Created", "created_at", false},
 		{"Updated", "updated_at", false},
+		{"Cooldown End", "next_retry_after", false},
 	}
 
 	for _, field := range fields {
 		val := getAnyString(f, field.key)
-		if val == "" || val == "<nil>" {
+		if val == "" || val == "<nil>" || val == "0001-01-01T00:00:00Z" {
 			if field.editable {
 				val = T("not_set")
 			} else {
@@ -299,6 +386,11 @@ func (m authTabModel) renderDetail(f map[string]any) string {
 		if field.editable {
 			editMark = editableMarker
 		}
+
+		if t, err := time.Parse(time.RFC3339, val); err == nil {
+			val = t.Local().Format("2006-01-02 15:04:05")
+		}
+
 		line := fmt.Sprintf("    │ %s %s%s",
 			labelStyle.Render(fmt.Sprintf("%-12s:", field.label)),
 			valueStyle.Render(val),
@@ -372,8 +464,8 @@ func (m authTabModel) handleConfirmInput(msg tea.KeyMsg) (authTabModel, tea.Cmd)
 	case "y", "Y":
 		idx := m.confirm
 		m.confirm = -1
-		if idx < len(m.files) {
-			name := getString(m.files[idx], "name")
+		if idx < len(m.filteredFiles) {
+			name := getString(m.filteredFiles[idx], "name")
 			return m, func() tea.Msg {
 				err := m.client.DeleteAuthFile(name)
 				if err != nil {
@@ -394,15 +486,21 @@ func (m authTabModel) handleConfirmInput(msg tea.KeyMsg) (authTabModel, tea.Cmd)
 
 func (m authTabModel) handleNormalInput(msg tea.KeyMsg) (authTabModel, tea.Cmd) {
 	switch msg.String() {
+	case "/":
+		m.filterVisible = true
+		m.filterInput.SetValue(m.filterText)
+		m.filterInput.Focus()
+		m.viewport.SetContent(m.renderContent())
+		return m, textinput.Blink
 	case "j", "down":
-		if len(m.files) > 0 {
-			m.cursor = (m.cursor + 1) % len(m.files)
+		if len(m.filteredFiles) > 0 {
+			m.cursor = (m.cursor + 1) % len(m.filteredFiles)
 			m.viewport.SetContent(m.renderContent())
 		}
 		return m, nil
 	case "k", "up":
-		if len(m.files) > 0 {
-			m.cursor = (m.cursor - 1 + len(m.files)) % len(m.files)
+		if len(m.filteredFiles) > 0 {
+			m.cursor = (m.cursor - 1 + len(m.filteredFiles)) % len(m.filteredFiles)
 			m.viewport.SetContent(m.renderContent())
 		}
 		return m, nil
@@ -415,14 +513,14 @@ func (m authTabModel) handleNormalInput(msg tea.KeyMsg) (authTabModel, tea.Cmd) 
 		m.viewport.SetContent(m.renderContent())
 		return m, nil
 	case "d", "D":
-		if m.cursor < len(m.files) {
+		if m.cursor < len(m.filteredFiles) {
 			m.confirm = m.cursor
 			m.viewport.SetContent(m.renderContent())
 		}
 		return m, nil
 	case "e", "E":
-		if m.cursor < len(m.files) {
-			f := m.files[m.cursor]
+		if m.cursor < len(m.filteredFiles) {
+			f := m.filteredFiles[m.cursor]
 			name := getString(f, "name")
 			disabled := getBool(f, "disabled")
 			newDisabled := !disabled
@@ -451,6 +549,42 @@ func (m authTabModel) handleNormalInput(msg tea.KeyMsg) (authTabModel, tea.Cmd) 
 	default:
 		var cmd tea.Cmd
 		m.viewport, cmd = m.viewport.Update(msg)
+		return m, cmd
+	}
+}
+
+func (m authTabModel) applyFilter() authTabModel {
+	m.filterText = strings.TrimSpace(strings.ToLower(m.filterInput.Value()))
+	if m.filterText == "" {
+		m.filteredFiles = m.files
+	} else {
+		m.filteredFiles = make([]map[string]any, 0)
+		for _, f := range m.files {
+			provider := strings.ToLower(getString(f, "auth_type"))
+			if strings.Contains(provider, m.filterText) {
+				m.filteredFiles = append(m.filteredFiles, f)
+			}
+		}
+	}
+	if m.cursor >= len(m.filteredFiles) {
+		m.cursor = max(0, len(m.filteredFiles)-1)
+	}
+	return m
+}
+
+func (m authTabModel) handleFilterInput(msg tea.KeyMsg) (authTabModel, tea.Cmd) {
+	switch msg.String() {
+	case "enter", "esc":
+		m.filterVisible = false
+		m.filterInput.Blur()
+		m = m.applyFilter()
+		m.viewport.SetContent(m.renderContent())
+		return m, nil
+	default:
+		var cmd tea.Cmd
+		m.filterInput, cmd = m.filterInput.Update(msg)
+		m = m.applyFilter()
+		m.viewport.SetContent(m.renderContent())
 		return m, cmd
 	}
 }

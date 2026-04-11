@@ -39,6 +39,32 @@ var qwenQuotaCodes = map[string]struct{}{
 	"quota_exceeded":     {},
 }
 
+// isQwenQuotaError checks if the error response indicates a quota exceeded error.
+// Qwen returns HTTP 403 with error.code="insufficient_quota" when daily quota is exhausted.
+func isQwenQuotaError(body []byte) bool {
+	code := strings.ToLower(gjson.GetBytes(body, "error.code").String())
+	errType := strings.ToLower(gjson.GetBytes(body, "error.type").String())
+
+	// Primary check: exact match on error.code or error.type (most reliable)
+	if _, ok := qwenQuotaCodes[code]; ok {
+		return true
+	}
+	if _, ok := qwenQuotaCodes[errType]; ok {
+		return true
+	}
+
+	// Fallback check: substring match on error.message (may be localized)
+	msg := strings.ToLower(gjson.GetBytes(body, "error.message").String())
+	if strings.Contains(msg, "insufficient") && strings.Contains(msg, "quota") {
+		return true
+	}
+	if strings.Contains(msg, "quota") && (strings.Contains(msg, "exceed") || strings.Contains(msg, "exhaust")) {
+		return true
+	}
+
+	return false
+}
+
 // qwenRateLimiter tracks request timestamps per credential for rate limiting.
 // Qwen has a limit of 60 requests per minute per account.
 var qwenRateLimiter = struct {
@@ -114,33 +140,8 @@ func checkQwenRateLimit(authID string) error {
 	return nil
 }
 
-// isQwenQuotaError checks if the error response indicates a quota exceeded error.
-// Qwen returns HTTP 403 with error.code="insufficient_quota" when daily quota is exhausted.
-func isQwenQuotaError(body []byte) bool {
-	code := strings.ToLower(gjson.GetBytes(body, "error.code").String())
-	errType := strings.ToLower(gjson.GetBytes(body, "error.type").String())
-
-	// Primary check: exact match on error.code or error.type (most reliable)
-	if _, ok := qwenQuotaCodes[code]; ok {
-		return true
-	}
-	if _, ok := qwenQuotaCodes[errType]; ok {
-		return true
-	}
-
-	// Fallback: check message only if code/type don't match (less reliable)
-	msg := strings.ToLower(gjson.GetBytes(body, "error.message").String())
-	if strings.Contains(msg, "insufficient_quota") || strings.Contains(msg, "quota exceeded") ||
-		strings.Contains(msg, "free allocated quota exceeded") {
-		return true
-	}
-
-	return false
-}
-
-// wrapQwenError wraps an HTTP error response, detecting quota errors and mapping them to 429.
-// Returns the appropriate status code and retryAfter duration for statusErr.
-// Only checks for quota errors when httpCode is 403 or 429 to avoid false positives.
+// wrapQwenError wraps an HTTP error response.
+// 403 is returned as-is (fail immediately), 429 is mapped to a 1-minute cooldown.
 func wrapQwenError(ctx context.Context, httpCode int, body []byte) (errCode int, retryAfter *time.Duration) {
 	errCode = httpCode
 	// Only check quota errors for expected status codes to avoid false positives
@@ -451,6 +452,7 @@ func (e *QwenExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 		resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
 		return resp, nil
 	}
+
 }
 
 func (e *QwenExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
