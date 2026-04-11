@@ -66,9 +66,16 @@ const (
 	refreshFailureBackoff = 5 * time.Minute
 	quotaBackoffBase      = time.Second
 	quotaBackoffMax       = 30 * time.Minute
+	persistDebounceWindow = time.Second
 )
 
 var quotaCooldownDisabled atomic.Bool
+
+var authIDSetPool = sync.Pool{
+	New: func() any {
+		return make(map[string]struct{}, 16)
+	},
+}
 
 // SetQuotaCooldownDisabled toggles quota cooldown scheduling globally.
 func SetQuotaCooldownDisabled(disable bool) {
@@ -165,6 +172,13 @@ type Manager struct {
 	refreshCancel      context.CancelFunc
 	refreshSemaphore   chan struct{}
 	refreshBatchCursor int
+
+	// Deferred persistence state
+	persistMu     sync.Mutex
+	persistWake   chan struct{}
+	persistCancel context.CancelFunc
+	persistWG     sync.WaitGroup
+	persistIDs    map[string]struct{}
 }
 
 // NewManager constructs a manager with optional custom selector and hook.
@@ -1280,8 +1294,10 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 	}
 	routeModel := req.Model
 	opts = ensureRequestedModelMetadata(opts, routeModel)
-	tried := make(map[string]struct{})
-	attempted := make(map[string]struct{})
+	tried := borrowAuthIDSet()
+	defer releaseAuthIDSet(tried)
+	attempted := borrowAuthIDSet()
+	defer releaseAuthIDSet(attempted)
 	var lastErr error
 	for {
 		if maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials {
@@ -1358,8 +1374,10 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 	}
 	routeModel := req.Model
 	opts = ensureRequestedModelMetadata(opts, routeModel)
-	tried := make(map[string]struct{})
-	attempted := make(map[string]struct{})
+	tried := borrowAuthIDSet()
+	defer releaseAuthIDSet(tried)
+	attempted := borrowAuthIDSet()
+	defer releaseAuthIDSet(attempted)
 	var lastErr error
 	for {
 		if maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials {
@@ -1436,8 +1454,10 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	}
 	routeModel := req.Model
 	opts = ensureRequestedModelMetadata(opts, routeModel)
-	tried := make(map[string]struct{})
-	attempted := make(map[string]struct{})
+	tried := borrowAuthIDSet()
+	defer releaseAuthIDSet(tried)
+	attempted := borrowAuthIDSet()
+	defer releaseAuthIDSet(attempted)
 	var lastErr error
 	for {
 		if maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials {
@@ -1817,6 +1837,29 @@ func (m *Manager) retrySettings() (int, int, time.Duration) {
 	return int(m.requestRetry.Load()), int(m.maxRetryCredentials.Load()), time.Duration(m.maxRetryInterval.Load())
 }
 
+func borrowAuthIDSet() map[string]struct{} {
+	raw := authIDSetPool.Get()
+	if raw == nil {
+		return make(map[string]struct{}, 16)
+	}
+	set, ok := raw.(map[string]struct{})
+	if !ok || set == nil {
+		return make(map[string]struct{}, 16)
+	}
+	return set
+}
+
+func releaseAuthIDSet(set map[string]struct{}) {
+	if set == nil {
+		return
+	}
+	if len(set) > 4096 {
+		return
+	}
+	clear(set)
+	authIDSetPool.Put(set)
+}
+
 func (m *Manager) closestCooldownWait(providers []string, model string, attempt int) (time.Duration, bool) {
 	if m == nil || len(providers) == 0 {
 		return 0, false
@@ -2100,10 +2143,12 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			}
 		}
 
-		_ = m.persist(ctx, auth)
 		authSnapshot = auth.Clone()
 	}
 	m.mu.Unlock()
+	if authSnapshot != nil {
+		m.enqueuePersistAuthID(ctx, authSnapshot.ID)
+	}
 	if m.scheduler != nil && authSnapshot != nil {
 		m.scheduler.upsertAuth(authSnapshot)
 	}
@@ -2953,6 +2998,153 @@ func (m *Manager) persist(ctx context.Context, auth *Auth) error {
 	return err
 }
 
+func (m *Manager) enqueuePersistAuthID(ctx context.Context, authID string) {
+	if m == nil || shouldSkipPersist(ctx) {
+		return
+	}
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return
+	}
+
+	m.persistMu.Lock()
+	if m.persistIDs == nil {
+		m.persistIDs = make(map[string]struct{}, 32)
+	}
+	m.persistIDs[authID] = struct{}{}
+	if m.persistWake == nil || m.persistCancel == nil {
+		m.startPersistLoopLocked()
+	}
+	wake := m.persistWake
+	m.persistMu.Unlock()
+
+	select {
+	case wake <- struct{}{}:
+	default:
+	}
+}
+
+func (m *Manager) startPersistLoopLocked() {
+	if m == nil {
+		return
+	}
+	if m.persistWake != nil && m.persistCancel != nil {
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	wake := make(chan struct{}, 1)
+	m.persistWake = wake
+	m.persistCancel = cancel
+	m.persistWG.Add(1)
+	go m.runPersistLoop(ctx, wake)
+}
+
+func (m *Manager) stopPersistLoop() {
+	if m == nil {
+		return
+	}
+
+	m.persistMu.Lock()
+	cancel := m.persistCancel
+	m.persistCancel = nil
+	m.persistWake = nil
+	m.persistMu.Unlock()
+
+	if cancel != nil {
+		cancel()
+		m.persistWG.Wait()
+	}
+}
+
+func (m *Manager) runPersistLoop(ctx context.Context, wake <-chan struct{}) {
+	defer m.persistWG.Done()
+
+	var (
+		timer  *time.Timer
+		timerC <-chan time.Time
+	)
+
+	resetTimer := func() {
+		if timer == nil {
+			timer = time.NewTimer(persistDebounceWindow)
+			timerC = timer.C
+			return
+		}
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		timer.Reset(persistDebounceWindow)
+	}
+
+	stopTimer := func() {
+		if timer == nil {
+			return
+		}
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		timer = nil
+		timerC = nil
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			stopTimer()
+			m.flushPersistQueue()
+			return
+		case <-wake:
+			resetTimer()
+		case <-timerC:
+			stopTimer()
+			m.flushPersistQueue()
+		}
+	}
+}
+
+func (m *Manager) flushPersistQueue() {
+	if m == nil {
+		return
+	}
+
+	m.persistMu.Lock()
+	if len(m.persistIDs) == 0 {
+		m.persistMu.Unlock()
+		return
+	}
+	ids := make([]string, 0, len(m.persistIDs))
+	for id := range m.persistIDs {
+		ids = append(ids, id)
+	}
+	clear(m.persistIDs)
+	m.persistMu.Unlock()
+
+	snapshots := make([]*Auth, 0, len(ids))
+	m.mu.RLock()
+	for _, id := range ids {
+		auth := m.auths[id]
+		if auth == nil {
+			continue
+		}
+		snapshots = append(snapshots, auth.Clone())
+	}
+	m.mu.RUnlock()
+
+	for _, snapshot := range snapshots {
+		if err := m.persist(context.Background(), snapshot); err != nil {
+			logEntryWithRequestID(context.Background()).
+				WithField("auth_id", snapshot.ID).
+				Warnf("deferred auth persist failed: %v", err)
+		}
+	}
+}
+
 // StartAutoRefresh launches a background loop that evaluates auth freshness
 // every few seconds and triggers refresh operations when required.
 // Only one loop is kept alive; starting a new one cancels the previous run.
@@ -2989,6 +3181,7 @@ func (m *Manager) StopAutoRefresh() {
 		m.refreshCancel()
 		m.refreshCancel = nil
 	}
+	m.stopPersistLoop()
 }
 
 func (m *Manager) checkRefreshes(ctx context.Context) {
