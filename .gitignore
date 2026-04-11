@@ -50,3 +50,6 @@ _bmad-output/*
 # macOS
 .DS_Store
 ._*
+
+# docker
+docker-compose.override.yml
