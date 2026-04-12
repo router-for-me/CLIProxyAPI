@@ -1041,9 +1041,13 @@ func remapOAuthToolNames(body []byte) ([]byte, *oauthRenameContext) {
 		})
 	}
 
-	// Build effective rename map: only include renames that are safe (no collision).
+	// Build effective rename map: only include renames for tools actually present
+	// in the request and where the target name doesn't collide with an existing tool.
 	for orig, mapped := range oauthToolRenameMap {
 		if orig == mapped {
+			continue
+		}
+		if _, present := existingToolNames[orig]; !present {
 			continue
 		}
 		if _, collision := existingToolNames[mapped]; collision {
