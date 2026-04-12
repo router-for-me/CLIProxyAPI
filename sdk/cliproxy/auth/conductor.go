@@ -60,15 +60,16 @@ type RefreshEvaluator interface {
 }
 
 const (
-	refreshCheckInterval      = 5 * time.Second
-	refreshMaxConcurrency     = 16
-	refreshPendingBackoff     = time.Minute
-	refreshFailureBackoff     = 5 * time.Minute
-	quotaBackoffBase          = time.Second
-	quotaBackoffMax           = 30 * time.Minute
-	mixedProviderWarmupTTL    = time.Minute
-	mixedProviderWarmupPrompt = "hi"
-	mixedProviderWarmupMaxTok = 1
+	refreshCheckInterval       = 5 * time.Second
+	refreshMaxConcurrency      = 16
+	refreshPendingBackoff      = time.Minute
+	refreshFailureBackoff      = 5 * time.Minute
+	quotaBackoffBase           = time.Second
+	quotaBackoffMax            = 30 * time.Minute
+	mixedProviderWarmupTTL     = time.Minute
+	mixedProviderWarmupTimeout = 10 * time.Second
+	mixedProviderWarmupPrompt  = "hi"
+	mixedProviderWarmupMaxTok  = 1
 )
 
 var (
@@ -171,8 +172,9 @@ type Manager struct {
 	refreshCancel    context.CancelFunc
 	refreshSemaphore chan struct{}
 
-	mixedWarmMu    sync.Mutex
-	mixedWarmUntil map[string]time.Time
+	mixedWarmMu       sync.Mutex
+	mixedWarmUntil    map[string]time.Time
+	mixedWarmInFlight map[string]struct{}
 }
 
 // NewManager constructs a manager with optional custom selector and hook.
@@ -184,15 +186,16 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 		hook = NoopHook{}
 	}
 	manager := &Manager{
-		store:            store,
-		executors:        make(map[string]ProviderExecutor),
-		selector:         selector,
-		hook:             hook,
-		auths:            make(map[string]*Auth),
-		providerOffsets:  make(map[string]int),
-		modelPoolOffsets: make(map[string]int),
-		refreshSemaphore: make(chan struct{}, refreshMaxConcurrency),
-		mixedWarmUntil:   make(map[string]time.Time),
+		store:             store,
+		executors:         make(map[string]ProviderExecutor),
+		selector:          selector,
+		hook:              hook,
+		auths:             make(map[string]*Auth),
+		providerOffsets:   make(map[string]int),
+		modelPoolOffsets:  make(map[string]int),
+		refreshSemaphore:  make(chan struct{}, refreshMaxConcurrency),
+		mixedWarmUntil:    make(map[string]time.Time),
+		mixedWarmInFlight: make(map[string]struct{}),
 	}
 	// atomic.Value requires non-nil initial value.
 	manager.runtimeConfig.Store(&internalconfig.Config{})
@@ -2879,6 +2882,7 @@ func (m *Manager) maybeWarmOtherMixedProvidersAsync(ctx context.Context, provide
 		return
 	}
 	selectedProvider = strings.ToLower(strings.TrimSpace(selectedProvider))
+	routeModel = strings.TrimSpace(routeModel)
 	targets := make([]string, 0, len(providers))
 	seen := make(map[string]struct{}, len(providers))
 	for _, provider := range providers {
@@ -2895,16 +2899,17 @@ func (m *Manager) maybeWarmOtherMixedProvidersAsync(ctx context.Context, provide
 		}
 		targets = append(targets, providerKey)
 	}
-	if len(targets) == 0 {
-		return
-	}
-	go func(requestCtx context.Context, targetProviders []string, model string) {
-		for _, providerKey := range targetProviders {
+	now := time.Now()
+	for _, providerKey := range targets {
+		if !m.tryStartMixedProviderWarmup(providerKey, now) {
+			continue
+		}
+		go func(requestCtx context.Context, providerKey, model string) {
 			if err := m.warmMixedProvider(requestCtx, providerKey, model); err != nil {
 				logEntryWithRequestID(requestCtx).Debugf("mixed provider warmup skipped provider=%s model=%s error=%v", providerKey, model, err)
 			}
-		}
-	}(ctx, append([]string(nil), targets...), strings.TrimSpace(routeModel))
+		}(ctx, providerKey, routeModel)
+	}
 }
 
 func shouldWarmMixedProvider(provider string) bool {
@@ -2927,10 +2932,15 @@ func (m *Manager) usesFillFirstSelector() bool {
 }
 
 func (m *Manager) warmMixedProvider(ctx context.Context, provider, routeModel string) error {
-	warmCtx := context.Background()
+	defer m.finishMixedProviderWarmup(provider)
+
+	warmBaseCtx := context.Background()
 	if ctx != nil {
-		warmCtx = context.WithoutCancel(ctx)
+		warmBaseCtx = context.WithoutCancel(ctx)
 	}
+	warmCtx, cancel := context.WithTimeout(warmBaseCtx, mixedProviderWarmupTimeout)
+	defer cancel()
+
 	auth, _, err := m.pickNext(warmCtx, provider, routeModel, cliproxyexecutor.Options{}, nil)
 	if err != nil {
 		return err
@@ -3012,6 +3022,51 @@ func buildMixedProviderWarmupRequest(auth *Auth, provider, model string) (*http.
 	}
 }
 
+func (m *Manager) tryStartMixedProviderWarmup(provider string, now time.Time) bool {
+	if m == nil {
+		return false
+	}
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if provider == "" {
+		return false
+	}
+	m.mixedWarmMu.Lock()
+	defer m.mixedWarmMu.Unlock()
+	m.cleanupExpiredMixedProviderWarmupsLocked(now)
+	if _, ok := m.mixedWarmInFlight[provider]; ok {
+		return false
+	}
+	for key, until := range m.mixedWarmUntil {
+		if !until.After(now) || !strings.HasPrefix(key, provider+"|") {
+			continue
+		}
+		return false
+	}
+	m.mixedWarmInFlight[provider] = struct{}{}
+	return true
+}
+
+func (m *Manager) finishMixedProviderWarmup(provider string) {
+	if m == nil {
+		return
+	}
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if provider == "" {
+		return
+	}
+	m.mixedWarmMu.Lock()
+	defer m.mixedWarmMu.Unlock()
+	delete(m.mixedWarmInFlight, provider)
+}
+
+func (m *Manager) cleanupExpiredMixedProviderWarmupsLocked(now time.Time) {
+	for key, until := range m.mixedWarmUntil {
+		if !until.After(now) {
+			delete(m.mixedWarmUntil, key)
+		}
+	}
+}
+
 func (m *Manager) reserveMixedProviderWarmup(provider, authID string, now time.Time) bool {
 	if m == nil {
 		return false
@@ -3024,6 +3079,7 @@ func (m *Manager) reserveMixedProviderWarmup(provider, authID string, now time.T
 	key := provider + "|" + authID
 	m.mixedWarmMu.Lock()
 	defer m.mixedWarmMu.Unlock()
+	m.cleanupExpiredMixedProviderWarmupsLocked(now)
 	if until, ok := m.mixedWarmUntil[key]; ok && until.After(now) {
 		return false
 	}
