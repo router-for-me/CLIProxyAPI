@@ -1991,3 +1991,101 @@ func TestRemapOAuthToolNames_Lowercase_ReverseApplied(t *testing.T) {
 		t.Fatalf("content.0.name = %q, want %q", got, "bash")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Placeholder API key detection
+// ---------------------------------------------------------------------------
+
+func TestIsPlaceholderAPIKey(t *testing.T) {
+	tests := []struct {
+		key  string
+		want bool
+	}{
+		{"your_oauth_token_here", true},
+		{"YOUR_API_KEY_HERE", true},
+		{"sk-ant-oat01-abc123", false},
+		{"placeholder", true},
+		{"replace_me", true},
+		{"changeme", true},
+		{"  Placeholder  ", true},
+		{"sk-ant-api03-real-key", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		if got := isPlaceholderAPIKey(tt.key); got != tt.want {
+			t.Errorf("isPlaceholderAPIKey(%q) = %v, want %v", tt.key, got, tt.want)
+		}
+	}
+}
+
+func TestClaudeExecutor_Execute_RejectsPlaceholderKey(t *testing.T) {
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{"api_key": "your_oauth_token_here"},
+	}
+	cfg := &config.Config{}
+	e := NewClaudeExecutor(cfg)
+
+	_, err := e.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-sonnet-4-20250514",
+		Payload: []byte(`{"model":"claude-sonnet-4-20250514","messages":[{"role":"user","content":"hi"}]}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+
+	if err == nil {
+		t.Fatal("expected error for placeholder key, got nil")
+	}
+	se, ok := err.(statusErr)
+	if !ok {
+		t.Fatalf("expected statusErr, got %T: %v", err, err)
+	}
+	if se.code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", se.code)
+	}
+}
+
+func TestClaudeExecutor_ExecuteStream_RejectsPlaceholderKey(t *testing.T) {
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{"api_key": "placeholder"},
+	}
+	cfg := &config.Config{}
+	e := NewClaudeExecutor(cfg)
+
+	_, err := e.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-sonnet-4-20250514",
+		Payload: []byte(`{"model":"claude-sonnet-4-20250514","messages":[{"role":"user","content":"hi"}]}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+
+	if err == nil {
+		t.Fatal("expected error for placeholder key, got nil")
+	}
+	se, ok := err.(statusErr)
+	if !ok {
+		t.Fatalf("expected statusErr, got %T: %v", err, err)
+	}
+	if se.code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", se.code)
+	}
+}
+
+func TestClaudeExecutor_CountTokens_RejectsPlaceholderKey(t *testing.T) {
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{"api_key": "replace_me"},
+	}
+	cfg := &config.Config{}
+	e := NewClaudeExecutor(cfg)
+
+	_, err := e.CountTokens(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-sonnet-4-20250514",
+		Payload: []byte(`{"model":"claude-sonnet-4-20250514","messages":[{"role":"user","content":"hi"}]}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+
+	if err == nil {
+		t.Fatal("expected error for placeholder key, got nil")
+	}
+	se, ok := err.(statusErr)
+	if !ok {
+		t.Fatalf("expected statusErr, got %T: %v", err, err)
+	}
+	if se.code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", se.code)
+	}
+}
