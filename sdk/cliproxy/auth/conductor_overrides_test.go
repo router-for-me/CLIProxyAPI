@@ -1111,6 +1111,9 @@ func TestManager_WarmupDeduplicatesWithinTTL(t *testing.T) {
 	if warmExecutor.HTTPRequestCount() != 1 {
 		t.Fatalf("http request count = %d, want 1", warmExecutor.HTTPRequestCount())
 	}
+	if len(m.mixedWarmInFlight) != 0 {
+		t.Fatalf("expected no in-flight warmups after ttl dedupe, got %d", len(m.mixedWarmInFlight))
+	}
 }
 
 func TestManager_WarmupSingleFlightsPerProvider(t *testing.T) {
@@ -1313,7 +1316,7 @@ func TestManager_TryStartMixedProviderWarmupDoesNotUseProviderWideTTL(t *testing
 	now := time.Now()
 	m.mixedWarmUntil["openai|auth-a"] = now.Add(time.Second)
 
-	if !m.tryStartMixedProviderWarmup("openai", now) {
+	if !m.tryStartMixedProviderWarmup("openai", "auth-b", now) {
 		t.Fatal("expected provider warmup gate to allow another auth while no warmup is in flight")
 	}
 	if _, ok := m.mixedWarmInFlight["openai"]; !ok {
@@ -1322,6 +1325,19 @@ func TestManager_TryStartMixedProviderWarmupDoesNotUseProviderWideTTL(t *testing
 	m.finishMixedProviderWarmup("openai")
 	if len(m.mixedWarmInFlight) != 0 {
 		t.Fatalf("expected in-flight gate to clear, got %d entries", len(m.mixedWarmInFlight))
+	}
+}
+
+func TestManager_TryStartMixedProviderWarmupSkipsSameAuthWithinTTL(t *testing.T) {
+	m := NewManager(nil, &FillFirstSelector{}, nil)
+	now := time.Now()
+	m.mixedWarmUntil["openai|auth-a"] = now.Add(time.Second)
+
+	if m.tryStartMixedProviderWarmup("openai", "auth-a", now) {
+		t.Fatal("expected same auth warmup to be skipped within ttl")
+	}
+	if _, ok := m.mixedWarmInFlight["openai"]; ok {
+		t.Fatal("expected in-flight gate to remain unset when ttl blocks warmup")
 	}
 }
 

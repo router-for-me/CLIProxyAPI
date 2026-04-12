@@ -2955,16 +2955,23 @@ func (m *Manager) maybeWarmOtherMixedProvidersAsync(ctx context.Context, provide
 		}
 		targets = append(targets, providerKey)
 	}
-	now := time.Now()
 	for _, providerKey := range targets {
-		if !m.tryStartMixedProviderWarmup(providerKey, now) {
+		auth, _, err := m.pickNext(ctx, providerKey, routeModel, cliproxyexecutor.Options{}, nil)
+		if err != nil {
+			logEntryWithRequestID(ctx).Debugf("mixed provider warmup skipped provider=%s model=%s error=%v", providerKey, routeModel, err)
 			continue
 		}
-		go func(requestCtx context.Context, providerKey, model string) {
-			if err := m.warmMixedProvider(requestCtx, providerKey, model); err != nil {
+		if auth == nil {
+			continue
+		}
+		if !m.tryStartMixedProviderWarmup(providerKey, auth.ID, time.Now()) {
+			continue
+		}
+		go func(requestCtx context.Context, auth *Auth, providerKey, model string) {
+			if err := m.warmMixedProvider(requestCtx, auth, providerKey, model); err != nil {
 				logEntryWithRequestID(requestCtx).Debugf("mixed provider warmup skipped provider=%s model=%s error=%v", providerKey, model, err)
 			}
-		}(ctx, providerKey, routeModel)
+		}(ctx, auth, providerKey, routeModel)
 	}
 }
 
@@ -2987,7 +2994,7 @@ func (m *Manager) usesFillFirstSelector() bool {
 	return ok
 }
 
-func (m *Manager) warmMixedProvider(ctx context.Context, provider, routeModel string) error {
+func (m *Manager) warmMixedProvider(ctx context.Context, auth *Auth, provider, routeModel string) error {
 	defer m.finishMixedProviderWarmup(provider)
 
 	warmBaseCtx := context.Background()
@@ -2997,10 +3004,6 @@ func (m *Manager) warmMixedProvider(ctx context.Context, provider, routeModel st
 	warmCtx, cancel := context.WithTimeout(warmBaseCtx, mixedProviderWarmupTimeout)
 	defer cancel()
 
-	auth, _, err := m.pickNext(warmCtx, provider, routeModel, cliproxyexecutor.Options{}, nil)
-	if err != nil {
-		return err
-	}
 	if auth == nil {
 		return &Error{Code: "auth_not_found", Message: "warmup auth is nil"}
 	}
@@ -3103,18 +3106,23 @@ func buildMixedProviderWarmupRequest(auth *Auth, provider, model string) (*http.
 	}
 }
 
-func (m *Manager) tryStartMixedProviderWarmup(provider string, now time.Time) bool {
+func (m *Manager) tryStartMixedProviderWarmup(provider, authID string, now time.Time) bool {
 	if m == nil {
 		return false
 	}
 	provider = strings.ToLower(strings.TrimSpace(provider))
-	if provider == "" {
+	authID = strings.TrimSpace(authID)
+	if provider == "" || authID == "" {
 		return false
 	}
+	key := provider + "|" + authID
 	m.mixedWarmMu.Lock()
 	defer m.mixedWarmMu.Unlock()
 	m.cleanupExpiredMixedProviderWarmupsLocked(now)
 	if _, ok := m.mixedWarmInFlight[provider]; ok {
+		return false
+	}
+	if until, ok := m.mixedWarmUntil[key]; ok && until.After(now) {
 		return false
 	}
 	m.mixedWarmInFlight[provider] = struct{}{}
