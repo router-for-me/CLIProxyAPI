@@ -2,10 +2,13 @@ package handlers
 
 import (
 	"context"
+	"errors"
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
@@ -460,6 +463,76 @@ func TestExecuteStreamWithAuthManager_DoesNotRetryAfterFirstByte(t *testing.T) {
 	}
 	if executor.Calls() != 1 {
 		t.Fatalf("expected 1 stream attempt, got %d", executor.Calls())
+	}
+}
+
+func TestExecuteStreamWithAuthManager_EnrichesBootstrapRetryAuthUnavailableError(t *testing.T) {
+	executor := &failOnceStreamExecutor{}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+
+	auth1 := &coreauth.Auth{
+		ID:       "auth1",
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Metadata: map[string]any{"email": "test1@example.com"},
+	}
+	if _, err := manager.Register(context.Background(), auth1); err != nil {
+		t.Fatalf("manager.Register(auth1): %v", err)
+	}
+
+	registry.GetGlobalRegistry().RegisterClient(auth1.ID, auth1.Provider, []*registry.ModelInfo{{ID: "test-model"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth1.ID)
+	})
+
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{
+		Streaming: sdkconfig.StreamingConfig{
+			BootstrapRetries: 1,
+		},
+	}, manager)
+	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(context.Background(), "openai", "test-model", []byte(`{"model":"test-model"}`), "")
+	if dataChan == nil || errChan == nil {
+		t.Fatalf("expected non-nil channels")
+	}
+
+	var got []byte
+	for chunk := range dataChan {
+		got = append(got, chunk...)
+	}
+	if len(got) != 0 {
+		t.Fatalf("expected empty payload, got %q", string(got))
+	}
+
+	var gotErr *interfaces.ErrorMessage
+	for msg := range errChan {
+		if msg != nil {
+			gotErr = msg
+		}
+	}
+	if gotErr == nil {
+		t.Fatalf("expected terminal error")
+	}
+	if gotErr.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", gotErr.StatusCode, http.StatusServiceUnavailable)
+	}
+
+	var authErr *coreauth.Error
+	if !errors.As(gotErr.Error, &authErr) || authErr == nil {
+		t.Fatalf("expected coreauth.Error, got %T", gotErr.Error)
+	}
+	if authErr.Code != "auth_unavailable" {
+		t.Fatalf("code = %q, want %q", authErr.Code, "auth_unavailable")
+	}
+	if !strings.Contains(authErr.Message, "providers=codex") {
+		t.Fatalf("message missing provider context: %q", authErr.Message)
+	}
+	if !strings.Contains(authErr.Message, "model=test-model") {
+		t.Fatalf("message missing model context: %q", authErr.Message)
+	}
+
+	if executor.Calls() != 1 {
+		t.Fatalf("expected exactly one upstream call before retry path selection failure, got %d", executor.Calls())
 	}
 }
 

@@ -739,6 +739,35 @@ func TestApplyClaudeToolPrefix_ToolChoiceBuiltin(t *testing.T) {
 	}
 }
 
+func TestApplyClaudeToolPrefix_KnownFallbackBuiltinsRemainUnprefixed(t *testing.T) {
+	for _, builtin := range []string{"web_search", "code_execution", "text_editor", "computer"} {
+		t.Run(builtin, func(t *testing.T) {
+			input := []byte(fmt.Sprintf(`{
+				"tools":[{"name":"Read"}],
+				"tool_choice":{"type":"tool","name":%q},
+				"messages":[{"role":"assistant","content":[{"type":"tool_use","name":%q,"id":"toolu_1","input":{}},{"type":"tool_reference","tool_name":%q},{"type":"tool_result","tool_use_id":"toolu_1","content":[{"type":"tool_reference","tool_name":%q}]}]}]
+			}`, builtin, builtin, builtin, builtin))
+			out := applyClaudeToolPrefix(input, "proxy_")
+
+			if got := gjson.GetBytes(out, "tool_choice.name").String(); got != builtin {
+				t.Fatalf("tool_choice.name = %q, want %q", got, builtin)
+			}
+			if got := gjson.GetBytes(out, "messages.0.content.0.name").String(); got != builtin {
+				t.Fatalf("messages.0.content.0.name = %q, want %q", got, builtin)
+			}
+			if got := gjson.GetBytes(out, "messages.0.content.1.tool_name").String(); got != builtin {
+				t.Fatalf("messages.0.content.1.tool_name = %q, want %q", got, builtin)
+			}
+			if got := gjson.GetBytes(out, "messages.0.content.2.content.0.tool_name").String(); got != builtin {
+				t.Fatalf("messages.0.content.2.content.0.tool_name = %q, want %q", got, builtin)
+			}
+			if got := gjson.GetBytes(out, "tools.0.name").String(); got != "proxy_Read" {
+				t.Fatalf("tools.0.name = %q, want %q", got, "proxy_Read")
+			}
+		})
+	}
+}
+
 func TestStripClaudeToolPrefixFromResponse(t *testing.T) {
 	input := []byte(`{"content":[{"type":"tool_use","name":"proxy_alpha","id":"t1","input":{}},{"type":"tool_use","name":"bravo","id":"t2","input":{}}]}`)
 	out := stripClaudeToolPrefixFromResponse(input, "proxy_")
@@ -965,6 +994,28 @@ func TestNormalizeCacheControlTTL_PreservesOriginalBytesWhenNoChange(t *testing.
 	}
 }
 
+func TestNormalizeCacheControlTTL_PreservesKeyOrderWhenModified(t *testing.T) {
+	payload := []byte(`{"model":"m","messages":[{"role":"user","content":[{"type":"text","text":"u1","cache_control":{"type":"ephemeral","ttl":"1h"}}]}],"tools":[{"name":"t1","cache_control":{"type":"ephemeral"}}],"system":[{"type":"text","text":"s1","cache_control":{"type":"ephemeral"}}]}`)
+
+	out := normalizeCacheControlTTL(payload)
+
+	if gjson.GetBytes(out, "messages.0.content.0.cache_control.ttl").Exists() {
+		t.Fatalf("messages.0.content.0.cache_control.ttl should be removed after a default-5m block")
+	}
+
+	outStr := string(out)
+	idxModel := strings.Index(outStr, `"model"`)
+	idxMessages := strings.Index(outStr, `"messages"`)
+	idxTools := strings.Index(outStr, `"tools"`)
+	idxSystem := strings.Index(outStr, `"system"`)
+	if idxModel == -1 || idxMessages == -1 || idxTools == -1 || idxSystem == -1 {
+		t.Fatalf("failed to locate top-level keys in output: %s", outStr)
+	}
+	if !(idxModel < idxMessages && idxMessages < idxTools && idxTools < idxSystem) {
+		t.Fatalf("top-level key order changed:\noriginal: %s\ngot:      %s", payload, out)
+	}
+}
+
 func TestEnforceCacheControlLimit_StripsNonLastToolBeforeMessages(t *testing.T) {
 	payload := []byte(`{
 		"tools": [
@@ -991,6 +1042,31 @@ func TestEnforceCacheControlLimit_StripsNonLastToolBeforeMessages(t *testing.T) 
 	}
 	if !gjson.GetBytes(out, "messages.0.content.0.cache_control").Exists() || !gjson.GetBytes(out, "messages.1.content.0.cache_control").Exists() {
 		t.Fatalf("message cache_control blocks should be preserved when non-last tool removal is enough")
+	}
+}
+
+func TestEnforceCacheControlLimit_PreservesKeyOrderWhenModified(t *testing.T) {
+	payload := []byte(`{"model":"m","messages":[{"role":"user","content":[{"type":"text","text":"u1","cache_control":{"type":"ephemeral"}},{"type":"text","text":"u2","cache_control":{"type":"ephemeral"}}]}],"tools":[{"name":"t1","cache_control":{"type":"ephemeral"}},{"name":"t2","cache_control":{"type":"ephemeral"}}],"system":[{"type":"text","text":"s1","cache_control":{"type":"ephemeral"}}]}`)
+
+	out := enforceCacheControlLimit(payload, 4)
+
+	if got := countCacheControls(out); got != 4 {
+		t.Fatalf("cache_control count = %d, want 4", got)
+	}
+	if gjson.GetBytes(out, "tools.0.cache_control").Exists() {
+		t.Fatalf("tools.0.cache_control should be removed first (non-last tool)")
+	}
+
+	outStr := string(out)
+	idxModel := strings.Index(outStr, `"model"`)
+	idxMessages := strings.Index(outStr, `"messages"`)
+	idxTools := strings.Index(outStr, `"tools"`)
+	idxSystem := strings.Index(outStr, `"system"`)
+	if idxModel == -1 || idxMessages == -1 || idxTools == -1 || idxSystem == -1 {
+		t.Fatalf("failed to locate top-level keys in output: %s", outStr)
+	}
+	if !(idxModel < idxMessages && idxMessages < idxTools && idxTools < idxSystem) {
+		t.Fatalf("top-level key order changed:\noriginal: %s\ngot:      %s", payload, out)
 	}
 }
 
