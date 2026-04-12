@@ -1263,6 +1263,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 	if len(providers) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
+	ctx = withMixedWarmupEnabled(ctx)
 	routeModel := req.Model
 	opts = ensureRequestedModelMetadata(opts, routeModel)
 	tried := make(map[string]struct{})
@@ -1286,6 +1287,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		entry := logEntryWithRequestID(ctx)
 		debugLogAuthSelection(entry, auth, provider, req.Model)
 		publishSelectedAuthMetadata(opts.Metadata, auth.ID)
+		m.maybeWarmOtherMixedProvidersAsync(ctx, providers, provider, routeModel)
 
 		tried[auth.ID] = struct{}{}
 		execCtx := ctx
@@ -1419,6 +1421,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	if len(providers) == 0 {
 		return nil, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
+	ctx = withMixedWarmupEnabled(ctx)
 	routeModel := req.Model
 	opts = ensureRequestedModelMetadata(opts, routeModel)
 	tried := make(map[string]struct{})
@@ -1450,6 +1453,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		entry := logEntryWithRequestID(ctx)
 		debugLogAuthSelection(entry, auth, provider, req.Model)
 		publishSelectedAuthMetadata(opts.Metadata, auth.ID)
+		m.maybeWarmOtherMixedProvidersAsync(ctx, providers, provider, routeModel)
 
 		tried[auth.ID] = struct{}{}
 		execCtx := ctx
@@ -2873,12 +2877,28 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 		}
 		m.mu.Unlock()
 	}
-	m.maybeWarmOtherMixedProvidersAsync(ctx, eligibleProviders, providerKey, model)
 	return authCopy, executor, providerKey, nil
 }
 
+type mixedWarmupEnabledContextKey struct{}
+
+func withMixedWarmupEnabled(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, mixedWarmupEnabledContextKey{}, true)
+}
+
+func mixedWarmupEnabled(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	enabled, _ := ctx.Value(mixedWarmupEnabledContextKey{}).(bool)
+	return enabled
+}
+
 func (m *Manager) maybeWarmOtherMixedProvidersAsync(ctx context.Context, providers []string, selectedProvider, routeModel string) {
-	if m == nil || !m.usesFillFirstSelector() || len(providers) < 2 {
+	if m == nil || !mixedWarmupEnabled(ctx) || !m.usesFillFirstSelector() || len(providers) < 2 {
 		return
 	}
 	selectedProvider = strings.ToLower(strings.TrimSpace(selectedProvider))
