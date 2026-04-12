@@ -3004,9 +3004,6 @@ func (m *Manager) warmMixedProvider(ctx context.Context, provider, routeModel st
 	if auth == nil {
 		return &Error{Code: "auth_not_found", Message: "warmup auth is nil"}
 	}
-	if !m.reserveMixedProviderWarmup(provider, auth.ID, time.Now()) {
-		return nil
-	}
 	models, _ := m.preparedExecutionModelsWithoutAdvancing(auth, routeModel)
 	if len(models) == 0 {
 		return &Error{Code: "model_not_found", Message: "warmup model is unavailable"}
@@ -3015,29 +3012,57 @@ func (m *Manager) warmMixedProvider(ctx context.Context, provider, routeModel st
 	if err != nil {
 		return err
 	}
+	if !m.reserveMixedProviderWarmup(provider, auth.ID, time.Now()) {
+		return nil
+	}
+	reserved := true
+	clearReservation := func() {
+		if !reserved {
+			return
+		}
+		m.clearMixedProviderWarmup(provider, auth.ID)
+		reserved = false
+	}
 	if rt := m.roundTripperFor(auth); rt != nil {
 		warmCtx = context.WithValue(warmCtx, roundTripperContextKey{}, rt)
 		warmCtx = context.WithValue(warmCtx, "cliproxy.roundtripper", rt)
 	}
 	resp, err := m.HttpRequest(warmCtx, auth, warmReq.WithContext(warmCtx))
+	if resp != nil && resp.Body != nil {
+		defer func() {
+			if errClose := resp.Body.Close(); errClose != nil {
+				logEntryWithRequestID(warmCtx).Debugf("mixed provider warmup close failed provider=%s auth=%s error=%v", provider, auth.ID, errClose)
+			}
+		}()
+		defer func() {
+			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		}()
+	}
 	if err != nil {
+		clearReservation()
 		return err
 	}
-	if resp == nil || resp.Body == nil {
-		return nil
+	if resp == nil {
+		clearReservation()
+		return &Error{Code: "provider_request_failed", Message: "warmup response is nil"}
 	}
-	defer func() {
-		if errClose := resp.Body.Close(); errClose != nil {
-			logEntryWithRequestID(warmCtx).Debugf("mixed provider warmup close failed provider=%s auth=%s error=%v", provider, auth.ID, errClose)
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		clearReservation()
+		message := strings.TrimSpace(resp.Status)
+		if message == "" {
+			message = "warmup request failed with status " + strconv.Itoa(resp.StatusCode)
 		}
-	}()
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		return &Error{Code: "provider_request_failed", Message: message, HTTPStatus: resp.StatusCode}
+	}
 	return nil
 }
 
 func buildMixedProviderWarmupRequest(auth *Auth, provider, model string) (*http.Request, error) {
 	provider = strings.ToLower(strings.TrimSpace(provider))
 	model = strings.TrimSpace(model)
+	if parsed := thinking.ParseSuffix(model); parsed.ModelName != "" {
+		model = strings.TrimSpace(parsed.ModelName)
+	}
 	if auth == nil {
 		return nil, &Error{Code: "auth_not_found", Message: "warmup auth is nil"}
 	}
@@ -3135,6 +3160,20 @@ func (m *Manager) reserveMixedProviderWarmup(provider, authID string, now time.T
 	}
 	m.mixedWarmUntil[key] = now.Add(mixedProviderWarmupTTL)
 	return true
+}
+
+func (m *Manager) clearMixedProviderWarmup(provider, authID string) {
+	if m == nil {
+		return
+	}
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	authID = strings.TrimSpace(authID)
+	if provider == "" || authID == "" {
+		return
+	}
+	m.mixedWarmMu.Lock()
+	defer m.mixedWarmMu.Unlock()
+	delete(m.mixedWarmUntil, provider+"|"+authID)
 }
 
 func (m *Manager) persist(ctx context.Context, auth *Auth) error {

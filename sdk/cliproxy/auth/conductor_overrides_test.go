@@ -160,17 +160,18 @@ func (e *credentialRetryLimitExecutor) Calls() int {
 type authFallbackExecutor struct {
 	id string
 
-	mu                sync.Mutex
-	executeCalls      []string
-	executeModels     []string
-	streamCalls       []string
-	httpRequests      []*http.Request
-	executeErrors     map[string]error
-	streamFirstErrors map[string]error
-	httpRequestErr    error
-	httpRequestSignal chan struct{}
-	httpRequestBlock  chan struct{}
-	httpRequestDone   chan struct{}
+	mu                 sync.Mutex
+	executeCalls       []string
+	executeModels      []string
+	streamCalls        []string
+	httpRequests       []*http.Request
+	executeErrors      map[string]error
+	streamFirstErrors  map[string]error
+	httpRequestErr     error
+	httpResponseStatus int
+	httpRequestSignal  chan struct{}
+	httpRequestBlock   chan struct{}
+	httpRequestDone    chan struct{}
 }
 
 func (e *authFallbackExecutor) Identifier() string {
@@ -220,6 +221,7 @@ func (e *authFallbackExecutor) HttpRequest(_ context.Context, _ *Auth, req *http
 		e.httpRequests = append(e.httpRequests, req.Clone(req.Context()))
 	}
 	err := e.httpRequestErr
+	status := e.httpResponseStatus
 	signal := e.httpRequestSignal
 	block := e.httpRequestBlock
 	done := e.httpRequestDone
@@ -252,8 +254,12 @@ func (e *authFallbackExecutor) HttpRequest(_ context.Context, _ *Auth, req *http
 	if err != nil {
 		return nil, err
 	}
+	if status == 0 {
+		status = http.StatusOK
+	}
 	return &http.Response{
-		StatusCode: http.StatusOK,
+		Status:     http.StatusText(status),
+		StatusCode: status,
 		Body:       io.NopCloser(strings.NewReader(`{"id":"warmup"}`)),
 		Header:     make(http.Header),
 	}, nil
@@ -1398,6 +1404,108 @@ func TestManager_WarmupDoesNotAdvanceModelPoolOffset(t *testing.T) {
 	key := openAICompatModelPoolKey(warmedAuth, model)
 	if gotOffset := m.currentModelPoolOffset(key, 2); gotOffset != 1 {
 		t.Fatalf("model pool offset = %d, want 1 after first real execute", gotOffset)
+	}
+}
+
+func TestManager_WarmupStripsThinkingSuffixFromPayload(t *testing.T) {
+	m := NewManager(nil, &FillFirstSelector{}, nil)
+	signal := make(chan struct{}, 4)
+	primaryExecutor := &authFallbackExecutor{id: "claude"}
+	warmExecutor := &authFallbackExecutor{id: "openai", httpRequestSignal: signal}
+	m.RegisterExecutor(primaryExecutor)
+	m.RegisterExecutor(warmExecutor)
+
+	model := "gpt-4.1(8192)"
+	selectedAuth := &Auth{ID: "aa-selected", Provider: "claude"}
+	warmedAuth := &Auth{ID: "bb-warmed", Provider: "openai", Attributes: map[string]string{"base_url": "https://warmed.example"}}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(selectedAuth.ID, "claude", []*registry.ModelInfo{{ID: model}})
+	reg.RegisterClient(warmedAuth.ID, "openai", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(selectedAuth.ID)
+		reg.UnregisterClient(warmedAuth.ID)
+	})
+
+	if _, errRegister := m.Register(context.Background(), selectedAuth); errRegister != nil {
+		t.Fatalf("register selected auth: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), warmedAuth); errRegister != nil {
+		t.Fatalf("register warmed auth: %v", errRegister)
+	}
+
+	if _, errExecute := m.Execute(context.Background(), []string{"claude", "openai"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{}); errExecute != nil {
+		t.Fatalf("trigger warmup execute: %v", errExecute)
+	}
+	select {
+	case <-signal:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected async warmup request")
+	}
+
+	requests := warmExecutor.HTTPRequests()
+	if len(requests) != 1 {
+		t.Fatalf("http requests len = %d, want 1", len(requests))
+	}
+	if reqModel := strings.TrimSpace(readJSONFieldFromBody(t, requests[0], "model")); reqModel != "gpt-4.1" {
+		t.Fatalf("warmup model = %q, want %q", reqModel, "gpt-4.1")
+	}
+}
+
+func TestManager_WarmupClearsTTLOnNon2xxResponse(t *testing.T) {
+	m := NewManager(nil, &FillFirstSelector{}, nil)
+	signal := make(chan struct{}, 4)
+	primaryExecutor := &authFallbackExecutor{id: "claude"}
+	warmExecutor := &authFallbackExecutor{id: "openai", httpRequestSignal: signal, httpResponseStatus: http.StatusUnauthorized}
+	m.RegisterExecutor(primaryExecutor)
+	m.RegisterExecutor(warmExecutor)
+
+	model := "gpt-4.1"
+	selectedAuth := &Auth{ID: "aa-selected", Provider: "claude"}
+	warmedAuth := &Auth{ID: "bb-warmed", Provider: "openai", Attributes: map[string]string{"base_url": "https://warmed.example"}}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(selectedAuth.ID, "claude", []*registry.ModelInfo{{ID: model}})
+	reg.RegisterClient(warmedAuth.ID, "openai", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(selectedAuth.ID)
+		reg.UnregisterClient(warmedAuth.ID)
+	})
+
+	if _, errRegister := m.Register(context.Background(), selectedAuth); errRegister != nil {
+		t.Fatalf("register selected auth: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), warmedAuth); errRegister != nil {
+		t.Fatalf("register warmed auth: %v", errRegister)
+	}
+
+	if _, errExecute := m.Execute(context.Background(), []string{"claude", "openai"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{}); errExecute != nil {
+		t.Fatalf("trigger warmup execute: %v", errExecute)
+	}
+	select {
+	case <-signal:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected async warmup request")
+	}
+
+	deadlineWait := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadlineWait) {
+		m.mixedWarmMu.Lock()
+		_, ok := m.mixedWarmUntil["openai|bb-warmed"]
+		m.mixedWarmMu.Unlock()
+		if !ok {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	m.mixedWarmMu.Lock()
+	_, ok := m.mixedWarmUntil["openai|bb-warmed"]
+	m.mixedWarmMu.Unlock()
+	if ok {
+		t.Fatal("expected non-2xx warmup to clear TTL reservation")
+	}
+	if !m.reserveMixedProviderWarmup("openai", "bb-warmed", time.Now()) {
+		t.Fatal("expected auth to be warmable again after failed warmup")
 	}
 }
 
