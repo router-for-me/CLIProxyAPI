@@ -130,3 +130,62 @@ func TestApplyPayloadConfigWithRoot_SkipsDisabledFilterParams(t *testing.T) {
 		t.Fatalf("enabled filter param should remove top_p, got %s", got)
 	}
 }
+
+func TestApplyPayloadConfigWithRoot_KeepsRuleWhenDisabledRawParamHasInvalidJSON(t *testing.T) {
+	cfg := &config.Config{
+		Payload: config.PayloadConfig{
+			DefaultRaw: []config.PayloadRule{
+				{
+					Models: []config.PayloadModelRule{{Name: "gpt-*"}},
+					Params: map[string]any{
+						"metadata":  `{"enabled":`,
+						"reasoning": `{"budget_tokens":1024}`,
+					},
+					DisabledParams: []string{" metadata "},
+				},
+			},
+		},
+	}
+
+	cfg.SanitizePayloadRules()
+	if len(cfg.Payload.DefaultRaw) != 1 {
+		t.Fatalf("disabled invalid raw param should not drop the whole rule, got %d rules", len(cfg.Payload.DefaultRaw))
+	}
+
+	payload := []byte(`{"model":"gpt-4o","messages":[]}`)
+	got := helps.ApplyPayloadConfigWithRoot(cfg, "gpt-4o", "", "", payload, payload, "")
+
+	if gjson.GetBytes(got, "metadata").Exists() {
+		t.Fatalf("disabled invalid raw param should not be written, got %s", got)
+	}
+	if value := gjson.GetBytes(got, "reasoning.budget_tokens"); !value.Exists() || value.Int() != 1024 {
+		t.Fatalf("enabled raw param should still be written after sanitize, got %s", got)
+	}
+}
+
+func TestApplyPayloadConfigWithRoot_DropsRuleWhenEnabledRawParamHasInvalidJSON(t *testing.T) {
+	cfg := &config.Config{
+		Payload: config.PayloadConfig{
+			DefaultRaw: []config.PayloadRule{
+				{
+					Models: []config.PayloadModelRule{{Name: "gpt-*"}},
+					Params: map[string]any{
+						"metadata":  `{"enabled":`,
+						"reasoning": `{"budget_tokens":1024}`,
+					},
+				},
+			},
+		},
+	}
+
+	cfg.SanitizePayloadRules()
+	if len(cfg.Payload.DefaultRaw) != 0 {
+		t.Fatalf("enabled invalid raw param should still drop the rule, got %d rules", len(cfg.Payload.DefaultRaw))
+	}
+
+	payload := []byte(`{"model":"gpt-4o","messages":[]}`)
+	got := helps.ApplyPayloadConfigWithRoot(cfg, "gpt-4o", "", "", payload, payload, "")
+	if gjson.GetBytes(got, "reasoning").Exists() {
+		t.Fatalf("dropped rule should not write any raw params, got %s", got)
+	}
+}

@@ -728,8 +728,12 @@ func sanitizePayloadRawRules(rules []PayloadRule, section string) []PayloadRule 
 		if len(rule.Params) == 0 {
 			continue
 		}
+		disabledParams := payloadDisabledParamSet(rule.DisabledParams)
 		invalid := false
 		for path, value := range rule.Params {
+			if payloadParamDisabled(disabledParams, path) {
+				continue
+			}
 			raw, ok := payloadRawString(value)
 			if !ok {
 				continue
@@ -751,6 +755,32 @@ func sanitizePayloadRawRules(rules []PayloadRule, section string) []PayloadRule 
 		out = append(out, rule)
 	}
 	return out
+}
+
+func payloadDisabledParamSet(paths []string) map[string]struct{} {
+	if len(paths) == 0 {
+		return nil
+	}
+	out := make(map[string]struct{}, len(paths))
+	for _, path := range paths {
+		trimmed := strings.TrimSpace(path)
+		if trimmed == "" {
+			continue
+		}
+		out[trimmed] = struct{}{}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func payloadParamDisabled(disabled map[string]struct{}, path string) bool {
+	if len(disabled) == 0 {
+		return false
+	}
+	_, ok := disabled[strings.TrimSpace(path)]
+	return ok
 }
 
 func payloadRawString(value any) ([]byte, bool) {
