@@ -970,10 +970,9 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	r.Header.Set("Anthropic-Beta", baseBetas)
 
 	misc.EnsureHeader(r.Header, ginHeaders, "Anthropic-Version", "2023-06-01")
-	// Only set browser access header for API key mode; real Claude Code CLI does not send it.
-	if useAPIKey {
-		misc.EnsureHeader(r.Header, ginHeaders, "Anthropic-Dangerous-Direct-Browser-Access", "true")
-	}
+	// Real Claude Code passes dangerouslyAllowBrowser:true to the SDK for all auth
+	// modes (API key and OAuth), confirmed via source (services/api/client.ts).
+	misc.EnsureHeader(r.Header, ginHeaders, "Anthropic-Dangerous-Direct-Browser-Access", "true")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-App", "cli")
 	// Values below match Claude Code 2.1.87 / @anthropic-ai/sdk 0.80.0 (updated 2026-04-14).
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Retry-Count", "0")
