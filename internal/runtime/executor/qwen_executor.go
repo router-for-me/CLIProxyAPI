@@ -268,6 +268,7 @@ func ensureQwenSystemMessage(payload []byte) ([]byte, error) {
 type QwenExecutor struct {
 	cfg                      *config.Config
 	refreshForImmediateRetry func(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error)
+	refreshTokens            func(ctx context.Context, refreshToken string) (*qwenauth.QwenTokenData, error)
 }
 
 func NewQwenExecutor(cfg *config.Config) *QwenExecutor { return &QwenExecutor{cfg: cfg} }
@@ -651,7 +652,11 @@ func (e *QwenExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*c
 	}
 
 	svc := qwenauth.NewQwenAuth(e.cfg)
-	td, err := svc.RefreshTokens(ctx, refreshToken)
+	refreshTokens := e.refreshTokens
+	if refreshTokens == nil {
+		refreshTokens = svc.RefreshTokens
+	}
+	td, err := refreshTokens(ctx, refreshToken)
 	if err != nil {
 		return nil, err
 	}
@@ -668,8 +673,21 @@ func (e *QwenExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*c
 	// Use "expired" for consistency with existing file format
 	auth.Metadata["expired"] = td.Expire
 	auth.Metadata["type"] = "qwen"
-	now := time.Now().Format(time.RFC3339)
-	auth.Metadata["last_refresh"] = now
+	now := time.Now().UTC()
+	auth.Metadata["last_refresh"] = now.Format(time.RFC3339)
+	auth.LastRefreshedAt = now
+	auth.UpdatedAt = now
+
+	// Update the underlying storage object so FileTokenStore persists the
+	// refreshed tokens (especially the rotated refresh_token) to disk.
+	// We clone the storage object first to avoid race conditions with other
+	// goroutines that might be using the shared auth record.
+	if storage, ok := auth.Storage.(*qwenauth.QwenTokenStorage); ok {
+		newStorage := storage.Clone()
+		svc.UpdateTokenStorage(newStorage, td)
+		auth.Storage = newStorage
+	}
+
 	return auth, nil
 }
 

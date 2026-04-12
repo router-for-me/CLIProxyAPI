@@ -349,11 +349,17 @@ func (o *QwenAuth) CreateTokenStorage(tokenData *QwenTokenData) *QwenTokenStorag
 	return storage
 }
 
-// UpdateTokenStorage updates an existing token storage with new token data
+// UpdateTokenStorage updates an existing token storage with new token data.
+// It only overwrites RefreshToken and ResourceURL if the new values are non-empty,
+// preserving existing credentials when the server omits them during rotation.
 func (o *QwenAuth) UpdateTokenStorage(storage *QwenTokenStorage, tokenData *QwenTokenData) {
 	storage.AccessToken = tokenData.AccessToken
-	storage.RefreshToken = tokenData.RefreshToken
+	if tokenData.RefreshToken != "" {
+		storage.RefreshToken = tokenData.RefreshToken
+	}
 	storage.LastRefresh = time.Now().Format(time.RFC3339)
-	storage.ResourceURL = tokenData.ResourceURL
+	if tokenData.ResourceURL != "" {
+		storage.ResourceURL = tokenData.ResourceURL
+	}
 	storage.Expire = tokenData.Expire
 }

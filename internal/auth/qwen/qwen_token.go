@@ -36,6 +36,21 @@ type QwenTokenStorage struct {
 	Metadata map[string]any `json:"-"`
 }
 
+// Clone creates a deep copy of the token storage.
+func (ts *QwenTokenStorage) Clone() *QwenTokenStorage {
+	if ts == nil {
+		return nil
+	}
+	clone := *ts
+	if ts.Metadata != nil {
+		clone.Metadata = make(map[string]any, len(ts.Metadata))
+		for k, v := range ts.Metadata {
+			clone.Metadata[k] = v
+		}
+	}
+	return &clone
+}
+
 // SetMetadata allows external callers to inject metadata into the storage before saving.
 func (ts *QwenTokenStorage) SetMetadata(meta map[string]any) {
 	ts.Metadata = meta
