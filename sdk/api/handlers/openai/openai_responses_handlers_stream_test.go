@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
@@ -260,6 +261,50 @@ func TestForwardResponsesStreamRecoversTransportErrorDuringCustomToolCall(t *tes
 		t.Fatalf("recovered tool name = %q, want %q", gjson.Get(payload, "response.output.0.name").String(), "apply_patch")
 	}
 	expectedInput := "*** Begin Patch\n*** Add File: /tmp/fix.txt\n+hello\n"
+	if gjson.Get(payload, "response.output.0.input").String() != expectedInput {
+		t.Fatalf("recovered tool input = %q, want %q", gjson.Get(payload, "response.output.0.input").String(), expectedInput)
+	}
+}
+
+func TestForwardResponsesStreamRecoversTerminalErrorChannelDuringCustomToolCall(t *testing.T) {
+	h, recorder, c, flusher := newResponsesStreamTestHandler(t)
+
+	data := make(chan []byte, 3)
+	errs := make(chan *interfaces.ErrorMessage, 1)
+	data <- []byte("data: {\"type\":\"response.created\",\"sequence_number\":1,\"response\":{\"id\":\"resp-1\",\"created_at\":123,\"model\":\"gpt-5.4\"}}")
+	data <- []byte("data: {\"type\":\"response.output_item.added\",\"sequence_number\":2,\"item\":{\"id\":\"ctc-1\",\"type\":\"custom_tool_call\",\"status\":\"in_progress\",\"call_id\":\"call-1\",\"input\":\"\",\"name\":\"apply_patch\"},\"output_index\":2}")
+	data <- []byte("data: {\"type\":\"response.custom_tool_call_input.delta\",\"sequence_number\":3,\"item_id\":\"ctc-1\",\"output_index\":2,\"delta\":\"*** Begin Patch\\n*** Add File: /tmp/fix.txt\\n\"}")
+
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		errs <- &interfaces.ErrorMessage{
+			StatusCode: http.StatusInternalServerError,
+			Error:      errors.New("stream error: stream ID 23; INTERNAL_ERROR; received from peer"),
+		}
+		close(errs)
+		close(data)
+	}()
+
+	h.forwardResponsesStream(c, flusher, func(error) {}, data, errs, nil, nil)
+
+	body := recorder.Body.String()
+	if strings.Contains(body, "event: error") {
+		t.Fatalf("expected terminal error to be replaced by completion. Body: %q", body)
+	}
+	if strings.Contains(body, "\"type\":\"error\"") {
+		t.Fatalf("expected terminal error payload to be suppressed. Body: %q", body)
+	}
+	if !strings.Contains(body, "\"type\":\"response.completed\"") {
+		t.Fatalf("expected synthesized response.completed event. Body: %q", body)
+	}
+
+	parts := strings.Split(strings.TrimSpace(body), "\n\n")
+	last := parts[len(parts)-1]
+	payload := strings.TrimSpace(strings.TrimPrefix(last, "data:"))
+	if gjson.Get(payload, "response.output.0.type").String() != "custom_tool_call" {
+		t.Fatalf("recovered output type = %q, want custom_tool_call", gjson.Get(payload, "response.output.0.type").String())
+	}
+	expectedInput := "*** Begin Patch\n*** Add File: /tmp/fix.txt\n"
 	if gjson.Get(payload, "response.output.0.input").String() != expectedInput {
 		t.Fatalf("recovered tool input = %q, want %q", gjson.Get(payload, "response.output.0.input").String(), expectedInput)
 	}

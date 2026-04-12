@@ -1075,6 +1075,113 @@ func TestForwardResponsesWebsocketRecoversTransportErrorDuringCustomToolCall(t *
 	}
 }
 
+func TestForwardResponsesWebsocketRecoversTerminalErrorChannelDuringCustomToolCall(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	serverErrCh := make(chan error, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := responsesWebsocketUpgrader.Upgrade(w, r, nil)
+		if err != nil {
+			serverErrCh <- err
+			return
+		}
+		defer func() {
+			_ = conn.Close()
+		}()
+
+		ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+		ctx.Request = r
+
+		data := make(chan []byte, 3)
+		errCh := make(chan *interfaces.ErrorMessage, 1)
+		data <- []byte("data: {\"type\":\"response.created\",\"sequence_number\":1,\"response\":{\"id\":\"resp-1\",\"created_at\":123,\"model\":\"gpt-5.4\"}}")
+		data <- []byte("data: {\"type\":\"response.output_item.added\",\"sequence_number\":2,\"item\":{\"id\":\"ctc-1\",\"type\":\"custom_tool_call\",\"status\":\"in_progress\",\"call_id\":\"call-1\",\"input\":\"\",\"name\":\"apply_patch\"},\"output_index\":2}")
+		data <- []byte("data: {\"type\":\"response.custom_tool_call_input.delta\",\"sequence_number\":3,\"item_id\":\"ctc-1\",\"output_index\":2,\"delta\":\"*** Begin Patch\\n*** Add File: /tmp/fix.txt\\n\"}")
+
+		go func() {
+			time.Sleep(10 * time.Millisecond)
+			errCh <- &interfaces.ErrorMessage{
+				StatusCode: http.StatusInternalServerError,
+				Error:      errors.New("stream error: stream ID 23; INTERNAL_ERROR; received from peer"),
+			}
+			close(errCh)
+			close(data)
+		}()
+
+		var timelineLog strings.Builder
+		completedOutput, err := (*OpenAIResponsesAPIHandler)(nil).forwardResponsesWebsocket(
+			ctx,
+			conn,
+			func(...interface{}) {},
+			data,
+			errCh,
+			&timelineLog,
+			"session-custom-tool-terminal-recover",
+		)
+		if err != nil {
+			serverErrCh <- err
+			return
+		}
+		if gjson.GetBytes(completedOutput, "0.type").String() != "custom_tool_call" {
+			serverErrCh <- errors.New("completed output type not recovered from terminal error")
+			return
+		}
+		expectedInput := "*** Begin Patch\n*** Add File: /tmp/fix.txt\n"
+		if gjson.GetBytes(completedOutput, "0.input").String() != expectedInput {
+			serverErrCh <- errors.New("completed output input not recovered from terminal error")
+			return
+		}
+		if strings.Contains(timelineLog.String(), "\"type\":\"error\"") && !strings.Contains(timelineLog.String(), "\"type\":\"response.completed\"") {
+			serverErrCh <- errors.New("timeline retained terminal error without recovered completion")
+			return
+		}
+		serverErrCh <- nil
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer func() {
+		_ = conn.Close()
+	}()
+
+	if errSetDeadline := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); errSetDeadline != nil {
+		t.Fatalf("set read deadline: %v", errSetDeadline)
+	}
+
+	var completedPayload []byte
+	for i := 0; i < 5; i++ {
+		_, payload, errReadMessage := conn.ReadMessage()
+		if errReadMessage != nil {
+			t.Fatalf("read websocket message: %v", errReadMessage)
+		}
+		if gjson.GetBytes(payload, "type").String() == wsEventTypeCompleted {
+			completedPayload = payload
+			break
+		}
+		if gjson.GetBytes(payload, "type").String() == wsEventTypeError {
+			t.Fatalf("unexpected websocket error payload: %s", string(payload))
+		}
+	}
+	if len(completedPayload) == 0 {
+		t.Fatal("expected recovered response.completed payload")
+	}
+	if gjson.GetBytes(completedPayload, "response.output.0.type").String() != "custom_tool_call" {
+		t.Fatalf("response.output type = %q, want %q", gjson.GetBytes(completedPayload, "response.output.0.type").String(), "custom_tool_call")
+	}
+	expectedInput := "*** Begin Patch\n*** Add File: /tmp/fix.txt\n"
+	if gjson.GetBytes(completedPayload, "response.output.0.input").String() != expectedInput {
+		t.Fatalf("response.output input = %q, want %q", gjson.GetBytes(completedPayload, "response.output.0.input").String(), expectedInput)
+	}
+
+	if errServer := <-serverErrCh; errServer != nil {
+		t.Fatalf("server error: %v", errServer)
+	}
+}
+
 func TestResponsesWebsocketTimelineRecordsDisconnectEvent(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

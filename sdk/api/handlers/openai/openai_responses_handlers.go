@@ -460,6 +460,9 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flush
 			if errMsg == nil {
 				return nil
 			}
+			if payload := recovery.recoverTerminalErrorPayload(errMsg); len(payload) > 0 {
+				return writeResponsesSSEChunk(c.Writer, append([]byte("data: "), payload...))
+			}
 			status := http.StatusInternalServerError
 			if errMsg.StatusCode > 0 {
 				status = errMsg.StatusCode

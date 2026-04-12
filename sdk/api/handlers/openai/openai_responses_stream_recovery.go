@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -264,6 +266,25 @@ func (r *responsesStreamRecovery) recoverErrorPayload(payload []byte) []byte {
 		return nil
 	}
 	return r.synthesizeCompletedPayload()
+}
+
+func (r *responsesStreamRecovery) recoverTerminalErrorPayload(errMsg *interfaces.ErrorMessage) []byte {
+	if r == nil || errMsg == nil {
+		return nil
+	}
+
+	status := errMsg.StatusCode
+	if status <= 0 {
+		status = 500
+	}
+
+	errText := ""
+	if errMsg.Error != nil {
+		errText = errMsg.Error.Error()
+	}
+
+	payload := handlers.BuildOpenAIResponsesStreamErrorChunk(status, errText, 0)
+	return r.recoverErrorPayload(payload)
 }
 
 func (r *responsesStreamRecovery) captureMeta(payload []byte) {

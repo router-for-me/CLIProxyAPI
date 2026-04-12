@@ -731,6 +731,23 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 				continue
 			}
 			if errMsg != nil {
+				if payload := recovery.recoverTerminalErrorPayload(errMsg); len(payload) > 0 {
+					completed = true
+					completedOutput = responseCompletedOutputFromPayload(payload)
+					markAPIResponseTimestamp(c)
+					if errWrite := writeResponsesWebsocketPayload(conn, wsTimelineLog, payload, time.Now()); errWrite != nil {
+						log.Warnf(
+							"responses websocket: downstream_out write failed id=%s event=%s error=%v",
+							sessionID,
+							websocketPayloadEventType(payload),
+							errWrite,
+						)
+						cancel(errWrite)
+						return completedOutput, errWrite
+					}
+					cancel(nil)
+					return completedOutput, nil
+				}
 				h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), errMsg)
 				markAPIResponseTimestamp(c)
 				errorPayload, errWrite := writeResponsesWebsocketError(conn, wsTimelineLog, errMsg)
