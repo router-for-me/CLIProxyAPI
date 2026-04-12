@@ -2903,19 +2903,19 @@ func (m *Manager) StartAutoRefresh(parent context.Context, interval time.Duratio
 	}
 
 	m.mu.Lock()
-	cancel := m.refreshCancel
+	cancelPrev := m.refreshCancel
 	m.refreshCancel = nil
 	m.refreshLoop = nil
 	m.mu.Unlock()
-	if cancel != nil {
-		cancel()
+	if cancelPrev != nil {
+		cancelPrev()
 	}
 
-	ctx, cancel := context.WithCancel(parent)
+	ctx, cancelCtx := context.WithCancel(parent)
 	loop := newAuthAutoRefreshLoop(m, interval)
 
 	m.mu.Lock()
-	m.refreshCancel = cancel
+	m.refreshCancel = cancelCtx
 	m.refreshLoop = loop
 	m.mu.Unlock()
 
