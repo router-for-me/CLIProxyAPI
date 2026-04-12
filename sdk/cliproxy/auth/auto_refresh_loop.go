@@ -11,8 +11,9 @@ import (
 )
 
 type authAutoRefreshLoop struct {
-	manager  *Manager
-	interval time.Duration
+	manager     *Manager
+	interval    time.Duration
+	concurrency int
 
 	mu    sync.Mutex
 	queue refreshMinHeap
@@ -23,21 +24,25 @@ type authAutoRefreshLoop struct {
 	jobs   chan string
 }
 
-func newAuthAutoRefreshLoop(manager *Manager, interval time.Duration) *authAutoRefreshLoop {
+func newAuthAutoRefreshLoop(manager *Manager, interval time.Duration, concurrency int) *authAutoRefreshLoop {
 	if interval <= 0 {
 		interval = refreshCheckInterval
 	}
-	jobBuffer := refreshMaxConcurrency * 4
+	if concurrency <= 0 {
+		concurrency = refreshMaxConcurrency
+	}
+	jobBuffer := concurrency * 4
 	if jobBuffer < 64 {
 		jobBuffer = 64
 	}
 	return &authAutoRefreshLoop{
-		manager:  manager,
-		interval: interval,
-		index:    make(map[string]*refreshHeapItem),
-		dirty:    make(map[string]struct{}),
-		wakeCh:   make(chan struct{}, 1),
-		jobs:     make(chan string, jobBuffer),
+		manager:     manager,
+		interval:    interval,
+		concurrency: concurrency,
+		index:       make(map[string]*refreshHeapItem),
+		dirty:       make(map[string]struct{}),
+		wakeCh:      make(chan struct{}, 1),
+		jobs:        make(chan string, jobBuffer),
 	}
 }
 
@@ -59,7 +64,11 @@ func (l *authAutoRefreshLoop) run(ctx context.Context) {
 		return
 	}
 
-	for i := 0; i < refreshMaxConcurrency; i++ {
+	workers := l.concurrency
+	if workers <= 0 {
+		workers = refreshMaxConcurrency
+	}
+	for i := 0; i < workers; i++ {
 		go l.worker(ctx)
 	}
 

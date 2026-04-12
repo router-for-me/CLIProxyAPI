@@ -90,6 +90,10 @@ max-retry-interval: 30
 # When true, disable auth/model cooldown scheduling globally (prevents blackout windows after failure states).
 disable-cooling: false
 
+# Core auth auto-refresh worker pool size (OAuth/file-based auth token refresh).
+# When > 0, overrides the default worker count (16).
+# auth-auto-refresh-workers: 16
+
 # Quota exceeded behavior
 quota-exceeded:
   switch-project: true # Whether to automatically switch to another project when a quota is exceeded
