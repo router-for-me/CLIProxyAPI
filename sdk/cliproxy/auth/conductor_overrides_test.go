@@ -1222,6 +1222,10 @@ func TestManager_WarmupUsesIndependentTimeout(t *testing.T) {
 	case <-time.After(mixedProviderWarmupTimeout + 2*time.Second):
 		t.Fatal("expected warmup request to finish after timeout")
 	}
+	deadlineWait := time.Now().Add(500 * time.Millisecond)
+	for len(m.mixedWarmInFlight) != 0 && time.Now().Before(deadlineWait) {
+		time.Sleep(10 * time.Millisecond)
+	}
 	if len(m.mixedWarmInFlight) != 0 {
 		t.Fatalf("expected no in-flight warmups after timeout, got %d", len(m.mixedWarmInFlight))
 	}
@@ -1284,5 +1288,22 @@ func TestManager_ExecuteCountDoesNotWarmOtherProviders(t *testing.T) {
 	}
 	if warmExecutor.HTTPRequestCount() != 0 {
 		t.Fatalf("http request count = %d, want 0", warmExecutor.HTTPRequestCount())
+	}
+}
+
+func TestManager_TryStartMixedProviderWarmupDoesNotUseProviderWideTTL(t *testing.T) {
+	m := NewManager(nil, &FillFirstSelector{}, nil)
+	now := time.Now()
+	m.mixedWarmUntil["openai|auth-a"] = now.Add(time.Second)
+
+	if !m.tryStartMixedProviderWarmup("openai", now) {
+		t.Fatal("expected provider warmup gate to allow another auth while no warmup is in flight")
+	}
+	if _, ok := m.mixedWarmInFlight["openai"]; !ok {
+		t.Fatal("expected in-flight gate to be set for provider")
+	}
+	m.finishMixedProviderWarmup("openai")
+	if len(m.mixedWarmInFlight) != 0 {
+		t.Fatalf("expected in-flight gate to clear, got %d entries", len(m.mixedWarmInFlight))
 	}
 }

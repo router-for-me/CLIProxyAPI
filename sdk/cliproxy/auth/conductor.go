@@ -3056,12 +3056,6 @@ func (m *Manager) tryStartMixedProviderWarmup(provider string, now time.Time) bo
 	if _, ok := m.mixedWarmInFlight[provider]; ok {
 		return false
 	}
-	for key, until := range m.mixedWarmUntil {
-		if !until.After(now) || !strings.HasPrefix(key, provider+"|") {
-			continue
-		}
-		return false
-	}
 	m.mixedWarmInFlight[provider] = struct{}{}
 	return true
 }
