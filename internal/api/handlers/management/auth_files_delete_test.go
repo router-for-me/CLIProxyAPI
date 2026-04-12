@@ -99,6 +99,43 @@ func TestDeleteAuthFile_UsesAuthPathFromManager(t *testing.T) {
 	}
 }
 
+func TestListAuthFiles_RescanRefreshesManagerFromDisk(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	authDir := t.TempDir()
+	fileName := "rescan-user.json"
+	filePath := filepath.Join(authDir, fileName)
+	if errWrite := os.WriteFile(filePath, []byte(`{"type":"codex","email":"rescan@example.com"}`), 0o600); errWrite != nil {
+		t.Fatalf("failed to write auth file: %v", errWrite)
+	}
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
+
+	listRec := httptest.NewRecorder()
+	listCtx, _ := gin.CreateTestContext(listRec)
+	listReq := httptest.NewRequest(http.MethodGet, "/v0/management/auth-files?rescan=1", nil)
+	listCtx.Request = listReq
+
+	h.ListAuthFiles(listCtx)
+
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("expected list status %d, got %d with body %s", http.StatusOK, listRec.Code, listRec.Body.String())
+	}
+	var listPayload map[string]any
+	if errUnmarshal := json.Unmarshal(listRec.Body.Bytes(), &listPayload); errUnmarshal != nil {
+		t.Fatalf("failed to decode list payload: %v", errUnmarshal)
+	}
+	filesRaw, ok := listPayload["files"].([]any)
+	if !ok {
+		t.Fatalf("expected files array, payload: %#v", listPayload)
+	}
+	if len(filesRaw) != 1 {
+		t.Fatalf("expected 1 file after rescan, got %d", len(filesRaw))
+	}
+}
+
 func TestDeleteAuthFile_FallbackToAuthDirPath(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	gin.SetMode(gin.TestMode)

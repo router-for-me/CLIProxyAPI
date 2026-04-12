@@ -247,6 +247,9 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 		return
 	}
 	auths := h.authManager.List()
+	if shouldRescanAuthFiles(c) {
+		auths = h.rescanAuthFiles(c.Request.Context())
+	}
 	files := make([]gin.H, 0, len(auths))
 	for _, auth := range auths {
 		if entry := h.buildAuthFileEntry(auth); entry != nil {
@@ -259,6 +262,51 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 		return strings.ToLower(nameI) < strings.ToLower(nameJ)
 	})
 	c.JSON(200, gin.H{"files": files})
+}
+
+func shouldRescanAuthFiles(c *gin.Context) bool {
+	if c == nil {
+		return false
+	}
+	raw := strings.TrimSpace(c.Query("rescan"))
+	if raw == "" {
+		return false
+	}
+	switch strings.ToLower(raw) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+func (h *Handler) rescanAuthFiles(_ context.Context) []*coreauth.Auth {
+	if h == nil || h.cfg == nil {
+		return nil
+	}
+	entries, err := os.ReadDir(h.cfg.AuthDir)
+	if err != nil {
+		log.WithError(err).Warn("failed to rescan auth files from disk")
+		if h.authManager == nil {
+			return nil
+		}
+		return h.authManager.List()
+	}
+	out := make([]*coreauth.Auth, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(strings.ToLower(entry.Name()), ".json") {
+			continue
+		}
+		path := filepath.Join(h.cfg.AuthDir, entry.Name())
+		auth, err := h.buildAuthFromFileData(path, nil)
+		if err != nil {
+			log.WithError(err).Warnf("failed to parse auth file during rescan: %s", entry.Name())
+			continue
+		}
+		out = append(out, auth)
+	}
+	log.Infof("rescanned auth files from disk: %d entries", len(out))
+	return out
 }
 
 // GetAuthFileModels returns the models supported by a specific auth file
