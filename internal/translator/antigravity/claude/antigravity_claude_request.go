@@ -170,9 +170,15 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 							continue
 						}
 
-						// Valid signature, send as thought block
-						// Always include "text" field — Google Antigravity API requires it
-						// even for redacted thinking where the text is empty.
+						// Drop empty-text thinking blocks (redacted thinking from Claude Max).
+						// Antigravity wraps empty text into a prompt-caching-scope object that
+						// omits the required inner "thinking" field, causing:
+						//   400 "messages.N.content.0.thinking.thinking: Field required"
+						if thinkingText == "" {
+							continue
+						}
+
+						// Valid signature with content, send as thought block.
 						partJSON := []byte(`{}`)
 						partJSON, _ = sjson.SetBytes(partJSON, "thought", true)
 						partJSON, _ = sjson.SetBytes(partJSON, "text", thinkingText)

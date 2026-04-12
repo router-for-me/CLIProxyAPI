@@ -2181,6 +2181,225 @@ func TestConvertClaudeRequestToAntigravity_ToolResultImageMissingMediaType(t *te
 	}
 }
 
+func TestConvertClaudeRequestToAntigravity_BypassMode_DropsRedactedThinkingBlocks(t *testing.T) {
+	cache.ClearSignatureCache("")
+	previous := cache.SignatureCacheEnabled()
+	cache.SetSignatureCacheEnabled(false)
+	t.Cleanup(func() {
+		cache.SetSignatureCacheEnabled(previous)
+		cache.ClearSignatureCache("")
+	})
+
+	validSignature := testAnthropicNativeSignature(t)
+
+	inputJSON := []byte(`{
+		"model": "claude-opus-4-6",
+		"messages": [
+			{
+				"role": "user",
+				"content": [{"type": "text", "text": "Hello"}]
+			},
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "thinking", "thinking": "", "signature": "` + validSignature + `"},
+					{"type": "text", "text": "I can help with that."}
+				]
+			},
+			{
+				"role": "user",
+				"content": [{"type": "text", "text": "Follow up question"}]
+			}
+		],
+		"thinking": {"type": "enabled", "budget_tokens": 10000}
+	}`)
+
+	output := ConvertClaudeRequestToAntigravity("claude-opus-4-6", inputJSON, false)
+
+	assistantParts := gjson.GetBytes(output, "request.contents.1.parts").Array()
+	if len(assistantParts) != 1 {
+		t.Fatalf("Expected 1 part (redacted thinking dropped), got %d: %s",
+			len(assistantParts), gjson.GetBytes(output, "request.contents.1.parts").Raw)
+	}
+	if assistantParts[0].Get("thought").Bool() {
+		t.Fatal("Redacted thinking block with empty text should be dropped")
+	}
+	if assistantParts[0].Get("text").String() != "I can help with that." {
+		t.Fatalf("Expected text part preserved, got: %s", assistantParts[0].Raw)
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_BypassMode_DropsWrappedRedactedThinking(t *testing.T) {
+	cache.ClearSignatureCache("")
+	previous := cache.SignatureCacheEnabled()
+	cache.SetSignatureCacheEnabled(false)
+	t.Cleanup(func() {
+		cache.SetSignatureCacheEnabled(previous)
+		cache.ClearSignatureCache("")
+	})
+
+	validSignature := testAnthropicNativeSignature(t)
+
+	inputJSON := []byte(`{
+		"model": "claude-sonnet-4-6",
+		"messages": [
+			{
+				"role": "user",
+				"content": [{"type": "text", "text": "Test user message"}]
+			},
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "thinking", "thinking": {"cache_control": {"type": "ephemeral"}}, "signature": "` + validSignature + `"},
+					{"type": "text", "text": "Answer"}
+				]
+			},
+			{
+				"role": "user",
+				"content": [{"type": "text", "text": "Follow up"}]
+			}
+		],
+		"thinking": {"type": "enabled", "budget_tokens": 8000}
+	}`)
+
+	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-6", inputJSON, false)
+
+	assistantParts := gjson.GetBytes(output, "request.contents.1.parts").Array()
+	if len(assistantParts) != 1 {
+		t.Fatalf("Expected 1 part (wrapped redacted thinking dropped), got %d: %s",
+			len(assistantParts), gjson.GetBytes(output, "request.contents.1.parts").Raw)
+	}
+	if assistantParts[0].Get("text").String() != "Answer" {
+		t.Fatalf("Expected text part preserved, got: %s", assistantParts[0].Raw)
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_BypassMode_KeepsNonEmptyThinking(t *testing.T) {
+	cache.ClearSignatureCache("")
+	previous := cache.SignatureCacheEnabled()
+	cache.SetSignatureCacheEnabled(false)
+	t.Cleanup(func() {
+		cache.SetSignatureCacheEnabled(previous)
+		cache.ClearSignatureCache("")
+	})
+
+	validSignature := testAnthropicNativeSignature(t)
+
+	inputJSON := []byte(`{
+		"model": "claude-opus-4-6",
+		"messages": [
+			{
+				"role": "user",
+				"content": [{"type": "text", "text": "Hello"}]
+			},
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "thinking", "thinking": "Let me reason about this carefully...", "signature": "` + validSignature + `"},
+					{"type": "text", "text": "Here is my answer."}
+				]
+			}
+		],
+		"thinking": {"type": "enabled", "budget_tokens": 10000}
+	}`)
+
+	output := ConvertClaudeRequestToAntigravity("claude-opus-4-6", inputJSON, false)
+
+	assistantParts := gjson.GetBytes(output, "request.contents.1.parts").Array()
+	if len(assistantParts) != 2 {
+		t.Fatalf("Expected 2 parts (thinking + text), got %d", len(assistantParts))
+	}
+	if !assistantParts[0].Get("thought").Bool() {
+		t.Fatal("First part should be a thought block")
+	}
+	if assistantParts[0].Get("text").String() != "Let me reason about this carefully..." {
+		t.Fatalf("Thinking text mismatch, got: %s", assistantParts[0].Get("text").String())
+	}
+	if assistantParts[1].Get("text").String() != "Here is my answer." {
+		t.Fatalf("Text part mismatch, got: %s", assistantParts[1].Raw)
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_BypassMode_MultiTurnRedactedThinking(t *testing.T) {
+	cache.ClearSignatureCache("")
+	previous := cache.SignatureCacheEnabled()
+	cache.SetSignatureCacheEnabled(false)
+	t.Cleanup(func() {
+		cache.SetSignatureCacheEnabled(previous)
+		cache.ClearSignatureCache("")
+	})
+
+	sig := testAnthropicNativeSignature(t)
+
+	inputJSON := []byte(`{
+		"model": "claude-opus-4-6",
+		"messages": [
+			{"role": "user", "content": [{"type": "text", "text": "First question"}]},
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "thinking", "thinking": "", "signature": "` + sig + `"},
+					{"type": "text", "text": "First answer"},
+					{"type": "tool_use", "id": "Bash-123-456", "name": "Bash", "input": {"command": "ls"}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type": "tool_result", "tool_use_id": "Bash-123-456", "content": "file1.txt\nfile2.txt"}
+				]
+			},
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "thinking", "thinking": "", "signature": "` + sig + `"},
+					{"type": "text", "text": "Here are the files."}
+				]
+			},
+			{"role": "user", "content": [{"type": "text", "text": "Thanks"}]}
+		],
+		"thinking": {"type": "enabled", "budget_tokens": 10000}
+	}`)
+
+	output := ConvertClaudeRequestToAntigravity("claude-opus-4-6", inputJSON, false)
+
+	if !gjson.ValidBytes(output) {
+		t.Fatalf("Output is not valid JSON: %s", string(output))
+	}
+
+	firstAssistantParts := gjson.GetBytes(output, "request.contents.1.parts").Array()
+	for _, p := range firstAssistantParts {
+		if p.Get("thought").Bool() {
+			t.Fatal("Redacted thinking should be dropped from first assistant message")
+		}
+	}
+	hasText := false
+	hasFC := false
+	for _, p := range firstAssistantParts {
+		if p.Get("text").String() == "First answer" {
+			hasText = true
+		}
+		if p.Get("functionCall").Exists() {
+			hasFC = true
+		}
+	}
+	if !hasText || !hasFC {
+		t.Fatalf("First assistant should have text + functionCall, got: %s",
+			gjson.GetBytes(output, "request.contents.1.parts").Raw)
+	}
+
+	secondAssistantParts := gjson.GetBytes(output, "request.contents.3.parts").Array()
+	for _, p := range secondAssistantParts {
+		if p.Get("thought").Bool() {
+			t.Fatal("Redacted thinking should be dropped from second assistant message")
+		}
+	}
+	if len(secondAssistantParts) != 1 || secondAssistantParts[0].Get("text").String() != "Here are the files." {
+		t.Fatalf("Second assistant should have only text part, got: %s",
+			gjson.GetBytes(output, "request.contents.3.parts").Raw)
+	}
+}
+
 func TestConvertClaudeRequestToAntigravity_ToolAndThinking_NoExistingSystem(t *testing.T) {
 	// When tools + thinking but no system instruction, should create one with hint
 	inputJSON := []byte(`{
