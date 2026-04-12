@@ -1,6 +1,7 @@
 package openai
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -234,4 +235,59 @@ func TestForwardResponsesStreamPatchesEmptyCompletedOutput(t *testing.T) {
 	if gjson.Get(payload, "response.output.0.content.0.text").String() != "ok" {
 		t.Fatalf("patched response.output text = %q, want %q. Body: %q", gjson.Get(payload, "response.output.0.content.0.text").String(), "ok", body)
 	}
+}
+
+func TestForwardResponsesStreamCancelsOnDownstreamWriteError(t *testing.T) {
+	h, recorder, c, flusher := newResponsesStreamTestHandler(t)
+
+	writeErr := errors.New("broken pipe")
+	c.Writer = &failingResponsesWriter{
+		ResponseWriter: c.Writer,
+		failAfter:      1,
+		err:            writeErr,
+	}
+	flusher = c.Writer.(http.Flusher)
+
+	data := make(chan []byte, 2)
+	errs := make(chan *interfaces.ErrorMessage)
+	data <- []byte("data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-1\"}}\n\n")
+	data <- []byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"later\"}\n\n")
+	close(data)
+	close(errs)
+
+	var cancelErr error
+	h.forwardResponsesStream(c, flusher, func(err error) { cancelErr = err }, data, errs, nil, nil)
+
+	if !errors.Is(cancelErr, writeErr) {
+		t.Fatalf("cancel error = %v, want %v", cancelErr, writeErr)
+	}
+	body := recorder.Body.String()
+	if !strings.Contains(body, "\"type\":\"response.created\"") {
+		t.Fatalf("expected first chunk to be written before failure. Body: %q", body)
+	}
+	if strings.Contains(body, "later") {
+		t.Fatalf("expected stream to stop after downstream write failure. Body: %q", body)
+	}
+}
+
+type failingResponsesWriter struct {
+	gin.ResponseWriter
+	failAfter int
+	err       error
+}
+
+func (w *failingResponsesWriter) Write(data []byte) (int, error) {
+	if w.failAfter == 0 {
+		return 0, w.err
+	}
+	w.failAfter--
+	return w.ResponseWriter.Write(data)
+}
+
+func (w *failingResponsesWriter) WriteString(data string) (int, error) {
+	if w.failAfter == 0 {
+		return 0, w.err
+	}
+	w.failAfter--
+	return w.ResponseWriter.WriteString(data)
 }

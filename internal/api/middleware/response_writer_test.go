@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"bytes"
+	"errors"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -154,6 +155,75 @@ func TestFinalizeStreamingWritesAPIWebsocketTimeline(t *testing.T) {
 	}
 }
 
+func TestWriteBuffersOnlySuccessfulPrefixWhenClientWriteFails(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+
+	writeErr := errors.New("write failed")
+	underlying := &partialWriteResponseWriter{
+		ResponseWriter: c.Writer,
+		writeN:         3,
+		err:            writeErr,
+	}
+
+	wrapper := &ResponseWriterWrapper{
+		ResponseWriter: underlying,
+		body:           &bytes.Buffer{},
+		logger:         &testRequestLogger{enabled: true},
+		requestInfo:    &RequestInfo{},
+	}
+
+	n, err := wrapper.Write([]byte("abcdef"))
+	if n != 3 {
+		t.Fatalf("Write returned n=%d, want 3", n)
+	}
+	if !errors.Is(err, writeErr) {
+		t.Fatalf("Write returned err=%v, want %v", err, writeErr)
+	}
+	if got := wrapper.body.String(); got != "abc" {
+		t.Fatalf("buffered body = %q, want %q", got, "abc")
+	}
+}
+
+func TestWriteStreamingLogsOnlySuccessfulPrefixWhenClientWriteFails(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+
+	writeErr := errors.New("write failed")
+	underlying := &partialWriteResponseWriter{
+		ResponseWriter: c.Writer,
+		writeN:         4,
+		err:            writeErr,
+	}
+
+	wrapper := &ResponseWriterWrapper{
+		ResponseWriter: underlying,
+		logger:         &testRequestLogger{enabled: true},
+		requestInfo:    &RequestInfo{},
+		isStreaming:    true,
+		chunkChannel:   make(chan []byte, 1),
+	}
+
+	n, err := wrapper.Write([]byte("abcdefgh"))
+	if n != 4 {
+		t.Fatalf("Write returned n=%d, want 4", n)
+	}
+	if !errors.Is(err, writeErr) {
+		t.Fatalf("Write returned err=%v, want %v", err, writeErr)
+	}
+
+	select {
+	case chunk := <-wrapper.chunkChannel:
+		if string(chunk) != "abcd" {
+			t.Fatalf("logged chunk = %q, want %q", string(chunk), "abcd")
+		}
+	default:
+		t.Fatal("expected streaming write to enqueue successful prefix")
+	}
+}
+
 type testRequestLogger struct {
 	enabled bool
 }
@@ -173,6 +243,26 @@ func (l *testRequestLogger) IsEnabled() bool {
 type testStreamingLogWriter struct {
 	apiWebsocketTimeline []byte
 	closed               bool
+}
+
+type partialWriteResponseWriter struct {
+	gin.ResponseWriter
+	writeN int
+	err    error
+}
+
+func (w *partialWriteResponseWriter) Write(data []byte) (int, error) {
+	if w.writeN >= len(data) {
+		return w.ResponseWriter.Write(data)
+	}
+	return w.writeN, w.err
+}
+
+func (w *partialWriteResponseWriter) WriteString(data string) (int, error) {
+	if w.writeN >= len(data) {
+		return w.ResponseWriter.WriteString(data)
+	}
+	return w.writeN, w.err
 }
 
 func (w *testStreamingLogWriter) WriteChunkAsync([]byte) {}

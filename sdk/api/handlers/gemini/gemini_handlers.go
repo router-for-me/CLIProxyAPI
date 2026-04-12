@@ -237,11 +237,23 @@ func (h *GeminiAPIHandler) handleStreamGenerateContent(c *gin.Context, modelName
 
 			// Write first chunk
 			if alt == "" {
-				_, _ = c.Writer.Write([]byte("data: "))
-				_, _ = c.Writer.Write(chunk)
-				_, _ = c.Writer.Write([]byte("\n\n"))
+				if _, err := c.Writer.Write([]byte("data: ")); err != nil {
+					cliCancel(err)
+					return
+				}
+				if _, err := c.Writer.Write(chunk); err != nil {
+					cliCancel(err)
+					return
+				}
+				if _, err := c.Writer.Write([]byte("\n\n")); err != nil {
+					cliCancel(err)
+					return
+				}
 			} else {
-				_, _ = c.Writer.Write(chunk)
+				if _, err := c.Writer.Write(chunk); err != nil {
+					cliCancel(err)
+					return
+				}
 			}
 			flusher.Flush()
 
@@ -309,18 +321,24 @@ func (h *GeminiAPIHandler) forwardGeminiStream(c *gin.Context, flusher http.Flus
 
 	h.ForwardStream(c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
 		KeepAliveInterval: keepAliveInterval,
-		WriteChunk: func(chunk []byte) {
+		WriteChunk: func(chunk []byte) error {
 			if alt == "" {
-				_, _ = c.Writer.Write([]byte("data: "))
-				_, _ = c.Writer.Write(chunk)
-				_, _ = c.Writer.Write([]byte("\n\n"))
+				if _, err := c.Writer.Write([]byte("data: ")); err != nil {
+					return err
+				}
+				if _, err := c.Writer.Write(chunk); err != nil {
+					return err
+				}
+				_, err := c.Writer.Write([]byte("\n\n"))
+				return err
 			} else {
-				_, _ = c.Writer.Write(chunk)
+				_, err := c.Writer.Write(chunk)
+				return err
 			}
 		},
-		WriteTerminalError: func(errMsg *interfaces.ErrorMessage) {
+		WriteTerminalError: func(errMsg *interfaces.ErrorMessage) error {
 			if errMsg == nil {
-				return
+				return nil
 			}
 			status := http.StatusInternalServerError
 			if errMsg.StatusCode > 0 {
@@ -332,9 +350,11 @@ func (h *GeminiAPIHandler) forwardGeminiStream(c *gin.Context, flusher http.Flus
 			}
 			body := handlers.BuildErrorResponseBody(status, errText)
 			if alt == "" {
-				_, _ = fmt.Fprintf(c.Writer, "event: error\ndata: %s\n\n", string(body))
+				_, err := fmt.Fprintf(c.Writer, "event: error\ndata: %s\n\n", string(body))
+				return err
 			} else {
-				_, _ = c.Writer.Write(body)
+				_, err := c.Writer.Write(body)
+				return err
 			}
 		},
 	})

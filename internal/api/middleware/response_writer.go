@@ -77,6 +77,10 @@ func (w *ResponseWriterWrapper) Write(data []byte) (int, error) {
 
 	// CRITICAL: Write to client first (zero latency)
 	n, err := w.ResponseWriter.Write(data)
+	if n <= 0 {
+		return n, err
+	}
+	written := data[:n]
 
 	// THEN: Handle logging based on response type
 	if w.isStreaming && w.chunkChannel != nil {
@@ -86,14 +90,14 @@ func (w *ResponseWriterWrapper) Write(data []byte) (int, error) {
 		}
 		// For streaming responses: Send to async logging channel (non-blocking)
 		select {
-		case w.chunkChannel <- append([]byte(nil), data...): // Non-blocking send with copy
+		case w.chunkChannel <- append([]byte(nil), written...): // Non-blocking send with copy
 		default: // Channel full, skip logging to avoid blocking
 		}
 		return n, err
 	}
 
 	if w.shouldBufferResponseBody() {
-		w.body.Write(data)
+		w.body.Write(written)
 	}
 
 	return n, err
@@ -125,6 +129,10 @@ func (w *ResponseWriterWrapper) WriteString(data string) (int, error) {
 
 	// CRITICAL: Write to client first (zero latency)
 	n, err := w.ResponseWriter.WriteString(data)
+	if n <= 0 {
+		return n, err
+	}
+	written := data[:n]
 
 	// THEN: Capture for logging
 	if w.isStreaming && w.chunkChannel != nil {
@@ -133,14 +141,14 @@ func (w *ResponseWriterWrapper) WriteString(data string) (int, error) {
 			w.firstChunkTimestamp = time.Now()
 		}
 		select {
-		case w.chunkChannel <- []byte(data):
+		case w.chunkChannel <- []byte(written):
 		default:
 		}
 		return n, err
 	}
 
 	if w.shouldBufferResponseBody() {
-		w.body.WriteString(data)
+		w.body.WriteString(written)
 	}
 	return n, err
 }

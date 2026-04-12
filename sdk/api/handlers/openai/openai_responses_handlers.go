@@ -23,15 +23,15 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-func writeResponsesSSEChunk(w io.Writer, chunk []byte) {
+func writeResponsesSSEChunk(w io.Writer, chunk []byte) error {
 	if w == nil || len(chunk) == 0 {
-		return
+		return nil
 	}
 	if _, err := w.Write(chunk); err != nil {
-		return
+		return err
 	}
 	if bytes.HasSuffix(chunk, []byte("\n\n")) || bytes.HasSuffix(chunk, []byte("\r\n\r\n")) {
-		return
+		return nil
 	}
 	suffix := []byte("\n\n")
 	if bytes.HasSuffix(chunk, []byte("\r\n")) {
@@ -40,8 +40,9 @@ func writeResponsesSSEChunk(w io.Writer, chunk []byte) {
 		suffix = []byte("\n")
 	}
 	if _, err := w.Write(suffix); err != nil {
-		return
+		return err
 	}
+	return nil
 }
 
 type responsesSSEFramer struct {
@@ -49,9 +50,9 @@ type responsesSSEFramer struct {
 	transformFrame func([]byte) []byte
 }
 
-func (f *responsesSSEFramer) WriteChunk(w io.Writer, chunk []byte) {
+func (f *responsesSSEFramer) WriteChunk(w io.Writer, chunk []byte) error {
 	if len(chunk) == 0 {
-		return
+		return nil
 	}
 	if responsesSSENeedsLineBreak(f.pending, chunk) {
 		f.pending = append(f.pending, '\n')
@@ -66,39 +67,47 @@ func (f *responsesSSEFramer) WriteChunk(w io.Writer, chunk []byte) {
 		if f.transformFrame != nil {
 			frame = f.transformFrame(frame)
 		}
-		writeResponsesSSEChunk(w, frame)
+		if err := writeResponsesSSEChunk(w, frame); err != nil {
+			return err
+		}
 		copy(f.pending, f.pending[frameLen:])
 		f.pending = f.pending[:len(f.pending)-frameLen]
 	}
 	if len(bytes.TrimSpace(f.pending)) == 0 {
 		f.pending = f.pending[:0]
-		return
+		return nil
 	}
 	if len(f.pending) == 0 || !responsesSSECanEmitWithoutDelimiter(f.pending) {
-		return
+		return nil
 	}
 	frame := f.pending
 	if f.transformFrame != nil {
 		frame = f.transformFrame(frame)
 	}
-	writeResponsesSSEChunk(w, frame)
+	if err := writeResponsesSSEChunk(w, frame); err != nil {
+		return err
+	}
 	f.pending = f.pending[:0]
+	return nil
 }
 
-func (f *responsesSSEFramer) Flush(w io.Writer) {
+func (f *responsesSSEFramer) Flush(w io.Writer) error {
 	if len(f.pending) == 0 {
-		return
+		return nil
 	}
 	if len(bytes.TrimSpace(f.pending)) == 0 {
 		f.pending = f.pending[:0]
-		return
+		return nil
 	}
 	if !responsesSSECanEmitWithoutDelimiter(f.pending) {
 		f.pending = f.pending[:0]
-		return
+		return nil
 	}
-	writeResponsesSSEChunk(w, f.pending)
+	if err := writeResponsesSSEChunk(w, f.pending); err != nil {
+		return err
+	}
 	f.pending = f.pending[:0]
+	return nil
 }
 
 func responsesSSEFrameLen(chunk []byte) int {
@@ -403,7 +412,10 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 				// Stream closed without data? Send headers and done.
 				setSSEHeaders()
 				handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
-				_, _ = c.Writer.Write([]byte("\n"))
+				if _, err := c.Writer.Write([]byte("\n")); err != nil {
+					cliCancel(err)
+					return
+				}
 				flusher.Flush()
 				cliCancel(nil)
 				return
@@ -414,7 +426,10 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 			handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 
 			// Write first chunk logic (matching forwardResponsesStream)
-			framer.WriteChunk(c.Writer, recovery.normalizeChunk(chunk))
+			if err := framer.WriteChunk(c.Writer, recovery.normalizeChunk(chunk)); err != nil {
+				cliCancel(err)
+				return
+			}
 			flusher.Flush()
 
 			// Continue
@@ -435,13 +450,15 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flush
 		framer.transformFrame = recovery.normalizeFrame
 	}
 	h.ForwardStream(c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
-		WriteChunk: func(chunk []byte) {
-			framer.WriteChunk(c.Writer, recovery.normalizeChunk(chunk))
+		WriteChunk: func(chunk []byte) error {
+			return framer.WriteChunk(c.Writer, recovery.normalizeChunk(chunk))
 		},
-		WriteTerminalError: func(errMsg *interfaces.ErrorMessage) {
-			framer.Flush(c.Writer)
+		WriteTerminalError: func(errMsg *interfaces.ErrorMessage) error {
+			if err := framer.Flush(c.Writer); err != nil {
+				return err
+			}
 			if errMsg == nil {
-				return
+				return nil
 			}
 			status := http.StatusInternalServerError
 			if errMsg.StatusCode > 0 {
@@ -452,15 +469,18 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flush
 				errText = errMsg.Error.Error()
 			}
 			chunk := handlers.BuildOpenAIResponsesStreamErrorChunk(status, errText, 0)
-			_, _ = fmt.Fprintf(c.Writer, "\nevent: error\ndata: %s\n\n", string(chunk))
+			_, err := fmt.Fprintf(c.Writer, "\nevent: error\ndata: %s\n\n", string(chunk))
+			return err
 		},
-		WriteDone: func() {
-			framer.Flush(c.Writer)
-			if payload := recovery.synthesizeCompletedPayload(); len(payload) > 0 {
-				writeResponsesSSEChunk(c.Writer, append([]byte("data: "), payload...))
-				return
+		WriteDone: func() error {
+			if err := framer.Flush(c.Writer); err != nil {
+				return err
 			}
-			_, _ = c.Writer.Write([]byte("\n"))
+			if payload := recovery.synthesizeCompletedPayload(); len(payload) > 0 {
+				return writeResponsesSSEChunk(c.Writer, append([]byte("data: "), payload...))
+			}
+			_, err := c.Writer.Write([]byte("\n"))
+			return err
 		},
 	})
 }

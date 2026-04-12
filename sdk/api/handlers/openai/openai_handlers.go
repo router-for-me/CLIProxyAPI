@@ -498,7 +498,10 @@ func (h *OpenAIAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON []byt
 				// Stream closed without data? Send DONE or just headers.
 				setSSEHeaders()
 				handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
-				_, _ = fmt.Fprintf(c.Writer, "data: [DONE]\n\n")
+				if _, err := fmt.Fprintf(c.Writer, "data: [DONE]\n\n"); err != nil {
+					cliCancel(err)
+					return
+				}
 				flusher.Flush()
 				cliCancel(nil)
 				return
@@ -508,7 +511,10 @@ func (h *OpenAIAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON []byt
 			setSSEHeaders()
 			handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 
-			_, _ = fmt.Fprintf(c.Writer, "data: %s\n\n", string(chunk))
+			if _, err := fmt.Fprintf(c.Writer, "data: %s\n\n", string(chunk)); err != nil {
+				cliCancel(err)
+				return
+			}
 			flusher.Flush()
 
 			// Continue streaming the rest
@@ -604,7 +610,10 @@ func (h *OpenAIAPIHandler) handleCompletionsStreamingResponse(c *gin.Context, ra
 			if !ok {
 				setSSEHeaders()
 				handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
-				_, _ = fmt.Fprintf(c.Writer, "data: [DONE]\n\n")
+				if _, err := fmt.Fprintf(c.Writer, "data: [DONE]\n\n"); err != nil {
+					cliCancel(err)
+					return
+				}
 				flusher.Flush()
 				cliCancel(nil)
 				return
@@ -617,7 +626,10 @@ func (h *OpenAIAPIHandler) handleCompletionsStreamingResponse(c *gin.Context, ra
 			// Write the first chunk
 			converted := convertChatCompletionsStreamChunkToCompletions(chunk)
 			if converted != nil {
-				_, _ = fmt.Fprintf(c.Writer, "data: %s\n\n", string(converted))
+				if _, err := fmt.Fprintf(c.Writer, "data: %s\n\n", string(converted)); err != nil {
+					cliCancel(err)
+					return
+				}
 				flusher.Flush()
 			}
 
@@ -659,12 +671,13 @@ func (h *OpenAIAPIHandler) handleCompletionsStreamingResponse(c *gin.Context, ra
 }
 func (h *OpenAIAPIHandler) handleStreamResult(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage) {
 	h.ForwardStream(c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
-		WriteChunk: func(chunk []byte) {
-			_, _ = fmt.Fprintf(c.Writer, "data: %s\n\n", string(chunk))
+		WriteChunk: func(chunk []byte) error {
+			_, err := fmt.Fprintf(c.Writer, "data: %s\n\n", string(chunk))
+			return err
 		},
-		WriteTerminalError: func(errMsg *interfaces.ErrorMessage) {
+		WriteTerminalError: func(errMsg *interfaces.ErrorMessage) error {
 			if errMsg == nil {
-				return
+				return nil
 			}
 			status := http.StatusInternalServerError
 			if errMsg.StatusCode > 0 {
@@ -675,10 +688,12 @@ func (h *OpenAIAPIHandler) handleStreamResult(c *gin.Context, flusher http.Flush
 				errText = errMsg.Error.Error()
 			}
 			body := handlers.BuildErrorResponseBody(status, errText)
-			_, _ = fmt.Fprintf(c.Writer, "data: %s\n\n", string(body))
+			_, err := fmt.Fprintf(c.Writer, "data: %s\n\n", string(body))
+			return err
 		},
-		WriteDone: func() {
-			_, _ = fmt.Fprint(c.Writer, "data: [DONE]\n\n")
+		WriteDone: func() error {
+			_, err := fmt.Fprint(c.Writer, "data: [DONE]\n\n")
+			return err
 		},
 	})
 }

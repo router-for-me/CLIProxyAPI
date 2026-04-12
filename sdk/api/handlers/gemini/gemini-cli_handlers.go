@@ -209,25 +209,31 @@ func (h *GeminiCLIAPIHandler) forwardCLIStream(c *gin.Context, flusher http.Flus
 
 	h.ForwardStream(c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
 		KeepAliveInterval: keepAliveInterval,
-		WriteChunk: func(chunk []byte) {
+		WriteChunk: func(chunk []byte) error {
 			if alt == "" {
 				if bytes.Equal(chunk, []byte("data: [DONE]")) || bytes.Equal(chunk, []byte("[DONE]")) {
-					return
+					return nil
 				}
 
 				if !bytes.HasPrefix(chunk, []byte("data:")) {
-					_, _ = c.Writer.Write([]byte("data: "))
+					if _, err := c.Writer.Write([]byte("data: ")); err != nil {
+						return err
+					}
 				}
 
-				_, _ = c.Writer.Write(chunk)
-				_, _ = c.Writer.Write([]byte("\n\n"))
+				if _, err := c.Writer.Write(chunk); err != nil {
+					return err
+				}
+				_, err := c.Writer.Write([]byte("\n\n"))
+				return err
 			} else {
-				_, _ = c.Writer.Write(chunk)
+				_, err := c.Writer.Write(chunk)
+				return err
 			}
 		},
-		WriteTerminalError: func(errMsg *interfaces.ErrorMessage) {
+		WriteTerminalError: func(errMsg *interfaces.ErrorMessage) error {
 			if errMsg == nil {
-				return
+				return nil
 			}
 			status := http.StatusInternalServerError
 			if errMsg.StatusCode > 0 {
@@ -239,9 +245,11 @@ func (h *GeminiCLIAPIHandler) forwardCLIStream(c *gin.Context, flusher http.Flus
 			}
 			body := handlers.BuildErrorResponseBody(status, errText)
 			if alt == "" {
-				_, _ = fmt.Fprintf(c.Writer, "event: error\ndata: %s\n\n", string(body))
+				_, err := fmt.Fprintf(c.Writer, "event: error\ndata: %s\n\n", string(body))
+				return err
 			} else {
-				_, _ = c.Writer.Write(body)
+				_, err := c.Writer.Write(body)
+				return err
 			}
 		},
 	})
