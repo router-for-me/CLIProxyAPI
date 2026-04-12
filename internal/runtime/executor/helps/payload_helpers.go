@@ -39,10 +39,14 @@ func ApplyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string
 	// Apply default rules: first write wins per field across all matching rules.
 	for i := range rules.Default {
 		rule := &rules.Default[i]
-		if !payloadModelRulesMatch(rule.Models, protocol, candidates) {
+		if rule.Disabled || !payloadModelRulesMatch(rule.Models, protocol, candidates) {
 			continue
 		}
+		disabledParams := payloadDisabledParamSet(rule.DisabledParams)
 		for path, value := range rule.Params {
+			if payloadParamDisabled(disabledParams, path) {
+				continue
+			}
 			fullPath := buildPayloadPath(root, path)
 			if fullPath == "" {
 				continue
@@ -64,10 +68,14 @@ func ApplyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string
 	// Apply default raw rules: first write wins per field across all matching rules.
 	for i := range rules.DefaultRaw {
 		rule := &rules.DefaultRaw[i]
-		if !payloadModelRulesMatch(rule.Models, protocol, candidates) {
+		if rule.Disabled || !payloadModelRulesMatch(rule.Models, protocol, candidates) {
 			continue
 		}
+		disabledParams := payloadDisabledParamSet(rule.DisabledParams)
 		for path, value := range rule.Params {
+			if payloadParamDisabled(disabledParams, path) {
+				continue
+			}
 			fullPath := buildPayloadPath(root, path)
 			if fullPath == "" {
 				continue
@@ -93,10 +101,14 @@ func ApplyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string
 	// Apply override rules: last write wins per field across all matching rules.
 	for i := range rules.Override {
 		rule := &rules.Override[i]
-		if !payloadModelRulesMatch(rule.Models, protocol, candidates) {
+		if rule.Disabled || !payloadModelRulesMatch(rule.Models, protocol, candidates) {
 			continue
 		}
+		disabledParams := payloadDisabledParamSet(rule.DisabledParams)
 		for path, value := range rule.Params {
+			if payloadParamDisabled(disabledParams, path) {
+				continue
+			}
 			fullPath := buildPayloadPath(root, path)
 			if fullPath == "" {
 				continue
@@ -111,10 +123,14 @@ func ApplyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string
 	// Apply override raw rules: last write wins per field across all matching rules.
 	for i := range rules.OverrideRaw {
 		rule := &rules.OverrideRaw[i]
-		if !payloadModelRulesMatch(rule.Models, protocol, candidates) {
+		if rule.Disabled || !payloadModelRulesMatch(rule.Models, protocol, candidates) {
 			continue
 		}
+		disabledParams := payloadDisabledParamSet(rule.DisabledParams)
 		for path, value := range rule.Params {
+			if payloadParamDisabled(disabledParams, path) {
+				continue
+			}
 			fullPath := buildPayloadPath(root, path)
 			if fullPath == "" {
 				continue
@@ -133,10 +149,14 @@ func ApplyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string
 	// Apply filter rules: remove matching paths from payload.
 	for i := range rules.Filter {
 		rule := &rules.Filter[i]
-		if !payloadModelRulesMatch(rule.Models, protocol, candidates) {
+		if rule.Disabled || !payloadModelRulesMatch(rule.Models, protocol, candidates) {
 			continue
 		}
+		disabledParams := payloadDisabledParamSet(rule.DisabledParams)
 		for _, path := range rule.Params {
+			if payloadParamDisabled(disabledParams, path) {
+				continue
+			}
 			fullPath := buildPayloadPath(root, path)
 			if fullPath == "" {
 				continue
@@ -149,6 +169,32 @@ func ApplyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string
 		}
 	}
 	return out
+}
+
+func payloadDisabledParamSet(paths []string) map[string]struct{} {
+	if len(paths) == 0 {
+		return nil
+	}
+	out := make(map[string]struct{}, len(paths))
+	for _, path := range paths {
+		trimmed := strings.TrimSpace(path)
+		if trimmed == "" {
+			continue
+		}
+		out[trimmed] = struct{}{}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func payloadParamDisabled(disabled map[string]struct{}, path string) bool {
+	if len(disabled) == 0 {
+		return false
+	}
+	_, ok := disabled[strings.TrimSpace(path)]
+	return ok
 }
 
 func payloadModelRulesMatch(rules []config.PayloadModelRule, protocol string, models []string) bool {

@@ -301,19 +301,27 @@ type PayloadConfig struct {
 
 // PayloadFilterRule describes a rule to remove specific JSON paths from matching model payloads.
 type PayloadFilterRule struct {
+	// Disabled skips this rule entirely when true.
+	Disabled bool `yaml:"disabled,omitempty" json:"disabled,omitempty"`
 	// Models lists model entries with name pattern and protocol constraint.
 	Models []PayloadModelRule `yaml:"models" json:"models"`
 	// Params lists JSON paths (gjson/sjson syntax) to remove from the payload.
 	Params []string `yaml:"params" json:"params"`
+	// DisabledParams lists JSON paths that should remain visible in config but not be applied.
+	DisabledParams []string `yaml:"disabled-params,omitempty" json:"disabled-params,omitempty"`
 }
 
 // PayloadRule describes a single rule targeting a list of models with parameter updates.
 type PayloadRule struct {
+	// Disabled skips this rule entirely when true.
+	Disabled bool `yaml:"disabled,omitempty" json:"disabled,omitempty"`
 	// Models lists model entries with name pattern and protocol constraint.
 	Models []PayloadModelRule `yaml:"models" json:"models"`
 	// Params maps JSON paths (gjson/sjson syntax) to values written into the payload.
 	// For *-raw rules, values are treated as raw JSON fragments (strings are used as-is).
 	Params map[string]any `yaml:"params" json:"params"`
+	// DisabledParams lists JSON paths that should remain visible in config but not be applied.
+	DisabledParams []string `yaml:"disabled-params,omitempty" json:"disabled-params,omitempty"`
 }
 
 // PayloadModelRule ties a model name pattern to a specific translator protocol.
