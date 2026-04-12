@@ -443,6 +443,20 @@ func openAICompatModelPoolKey(auth *Auth, requestedModel string) string {
 	return strings.ToLower(strings.TrimSpace(auth.ID)) + "|" + openAICompatProviderKey(auth) + "|" + strings.ToLower(base)
 }
 
+func (m *Manager) currentModelPoolOffset(key string, size int) int {
+	if m == nil || size <= 1 {
+		return 0
+	}
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return 0
+	}
+	m.mu.RLock()
+	offset := m.modelPoolOffsets[key]
+	m.mu.RUnlock()
+	return offset % size
+}
+
 func (m *Manager) nextModelPoolOffset(key string, size int) int {
 	if m == nil || size <= 1 {
 		return 0
@@ -513,13 +527,27 @@ func preserveRequestedModelSuffix(requestedModel, resolved string) string {
 }
 
 func (m *Manager) executionModelCandidates(auth *Auth, routeModel string) []string {
+	return m.executionModelCandidatesWithPoolOffset(auth, routeModel, true)
+}
+
+func (m *Manager) executionModelCandidatesWithoutAdvancing(auth *Auth, routeModel string) []string {
+	return m.executionModelCandidatesWithPoolOffset(auth, routeModel, false)
+}
+
+func (m *Manager) executionModelCandidatesWithPoolOffset(auth *Auth, routeModel string, advance bool) []string {
 	requestedModel := rewriteModelForAuth(routeModel, auth)
 	requestedModel = m.applyOAuthModelAlias(auth, requestedModel)
 	if pool := m.resolveOpenAICompatUpstreamModelPool(auth, requestedModel); len(pool) > 0 {
 		if len(pool) == 1 {
 			return pool
 		}
-		offset := m.nextModelPoolOffset(openAICompatModelPoolKey(auth, requestedModel), len(pool))
+		key := openAICompatModelPoolKey(auth, requestedModel)
+		offset := 0
+		if advance {
+			offset = m.nextModelPoolOffset(key, len(pool))
+		} else {
+			offset = m.currentModelPoolOffset(key, len(pool))
+		}
 		return rotateStrings(pool, offset)
 	}
 	resolved := m.applyAPIKeyModelAlias(auth, requestedModel)
@@ -584,7 +612,15 @@ func (m *Manager) filterExecutionModels(auth *Auth, routeModel string, candidate
 }
 
 func (m *Manager) preparedExecutionModels(auth *Auth, routeModel string) ([]string, bool) {
-	candidates := m.executionModelCandidates(auth, routeModel)
+	return m.preparedExecutionModelsWithPoolOffset(auth, routeModel, true)
+}
+
+func (m *Manager) preparedExecutionModelsWithoutAdvancing(auth *Auth, routeModel string) ([]string, bool) {
+	return m.preparedExecutionModelsWithPoolOffset(auth, routeModel, false)
+}
+
+func (m *Manager) preparedExecutionModelsWithPoolOffset(auth *Auth, routeModel string, advance bool) ([]string, bool) {
+	candidates := m.executionModelCandidatesWithPoolOffset(auth, routeModel, advance)
 	pooled := len(candidates) > 1
 	return m.filterExecutionModels(auth, routeModel, candidates, pooled), pooled
 }
@@ -2971,7 +3007,7 @@ func (m *Manager) warmMixedProvider(ctx context.Context, provider, routeModel st
 	if !m.reserveMixedProviderWarmup(provider, auth.ID, time.Now()) {
 		return nil
 	}
-	models, _ := m.preparedExecutionModels(auth, routeModel)
+	models, _ := m.preparedExecutionModelsWithoutAdvancing(auth, routeModel)
 	if len(models) == 0 {
 		return &Error{Code: "model_not_found", Message: "warmup model is unavailable"}
 	}

@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"strings"
@@ -161,6 +162,7 @@ type authFallbackExecutor struct {
 
 	mu                sync.Mutex
 	executeCalls      []string
+	executeModels     []string
 	streamCalls       []string
 	httpRequests      []*http.Request
 	executeErrors     map[string]error
@@ -175,9 +177,10 @@ func (e *authFallbackExecutor) Identifier() string {
 	return e.id
 }
 
-func (e *authFallbackExecutor) Execute(_ context.Context, auth *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+func (e *authFallbackExecutor) Execute(_ context.Context, auth *Auth, req cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	e.mu.Lock()
 	e.executeCalls = append(e.executeCalls, auth.ID)
+	e.executeModels = append(e.executeModels, req.Model)
 	err := e.executeErrors[auth.ID]
 	e.mu.Unlock()
 	if err != nil {
@@ -261,6 +264,14 @@ func (e *authFallbackExecutor) ExecuteCalls() []string {
 	defer e.mu.Unlock()
 	out := make([]string, len(e.executeCalls))
 	copy(out, e.executeCalls)
+	return out
+}
+
+func (e *authFallbackExecutor) ExecuteModels() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	out := make([]string, len(e.executeModels))
+	copy(out, e.executeModels)
 	return out
 }
 
@@ -1306,4 +1317,103 @@ func TestManager_TryStartMixedProviderWarmupDoesNotUseProviderWideTTL(t *testing
 	if len(m.mixedWarmInFlight) != 0 {
 		t.Fatalf("expected in-flight gate to clear, got %d entries", len(m.mixedWarmInFlight))
 	}
+}
+
+func TestManager_WarmupDoesNotAdvanceModelPoolOffset(t *testing.T) {
+	m := NewManager(nil, &FillFirstSelector{}, nil)
+	cfg := &internalconfig.Config{
+		OpenAICompatibility: []internalconfig.OpenAICompatibility{{
+			Name: "openai",
+			Models: []internalconfig.OpenAICompatibilityModel{
+				{Name: "qwen3.5-plus", Alias: "claude-opus-4.66"},
+				{Name: "glm-5", Alias: "claude-opus-4.66"},
+			},
+		}},
+	}
+	m.SetConfig(cfg)
+
+	signal := make(chan struct{}, 4)
+	primaryExecutor := &authFallbackExecutor{id: "claude"}
+	warmExecutor := &authFallbackExecutor{id: "openai", httpRequestSignal: signal}
+	m.RegisterExecutor(primaryExecutor)
+	m.RegisterExecutor(warmExecutor)
+
+	model := "claude-opus-4.66"
+	selectedAuth := &Auth{ID: "aa-selected", Provider: "claude"}
+	warmedAuth := &Auth{
+		ID:       "bb-warmed",
+		Provider: "openai",
+		Attributes: map[string]string{
+			"api_key":      "test-key",
+			"base_url":     "https://warmed.example",
+			"compat_name":  "openai",
+			"provider_key": "openai",
+		},
+	}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(selectedAuth.ID, "claude", []*registry.ModelInfo{{ID: model}})
+	reg.RegisterClient(warmedAuth.ID, "openai", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(selectedAuth.ID)
+		reg.UnregisterClient(warmedAuth.ID)
+	})
+
+	if _, errRegister := m.Register(context.Background(), selectedAuth); errRegister != nil {
+		t.Fatalf("register selected auth: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), warmedAuth); errRegister != nil {
+		t.Fatalf("register warmed auth: %v", errRegister)
+	}
+
+	if _, errExecute := m.Execute(context.Background(), []string{"claude", "openai"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{}); errExecute != nil {
+		t.Fatalf("trigger warmup execute: %v", errExecute)
+	}
+	select {
+	case <-signal:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected async warmup request")
+	}
+
+	if got := warmExecutor.HTTPRequests(); len(got) != 1 {
+		t.Fatalf("http requests len = %d, want 1", len(got))
+	} else if reqModel := strings.TrimSpace(readJSONFieldFromBody(t, got[0], "model")); reqModel != "qwen3.5-plus" {
+		t.Fatalf("warmup model = %q, want %q", reqModel, "qwen3.5-plus")
+	}
+
+	resp, errExecute := m.Execute(context.Background(), []string{"openai"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute != nil {
+		t.Fatalf("direct execute after warmup: %v", errExecute)
+	}
+	if string(resp.Payload) != warmedAuth.ID {
+		t.Fatalf("payload = %q, want %q", string(resp.Payload), warmedAuth.ID)
+	}
+	gotModels := warmExecutor.ExecuteModels()
+	if len(gotModels) != 1 {
+		t.Fatalf("execute models len = %d, want 1", len(gotModels))
+	}
+	if gotModels[0] != "qwen3.5-plus" {
+		t.Fatalf("first real execute model = %q, want %q", gotModels[0], "qwen3.5-plus")
+	}
+	key := openAICompatModelPoolKey(warmedAuth, model)
+	if gotOffset := m.currentModelPoolOffset(key, 2); gotOffset != 1 {
+		t.Fatalf("model pool offset = %d, want 1 after first real execute", gotOffset)
+	}
+}
+
+func readJSONFieldFromBody(t *testing.T, req *http.Request, field string) string {
+	t.Helper()
+	if req == nil || req.Body == nil {
+		t.Fatal("expected request body")
+	}
+	body, err := io.ReadAll(req.Body)
+	if err != nil {
+		t.Fatalf("read request body: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatalf("unmarshal request body: %v", err)
+	}
+	value, _ := payload[field].(string)
+	return value
 }
