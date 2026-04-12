@@ -45,7 +45,8 @@ func writeResponsesSSEChunk(w io.Writer, chunk []byte) {
 }
 
 type responsesSSEFramer struct {
-	pending []byte
+	pending        []byte
+	transformFrame func([]byte) []byte
 }
 
 func (f *responsesSSEFramer) WriteChunk(w io.Writer, chunk []byte) {
@@ -61,7 +62,11 @@ func (f *responsesSSEFramer) WriteChunk(w io.Writer, chunk []byte) {
 		if frameLen == 0 {
 			break
 		}
-		writeResponsesSSEChunk(w, f.pending[:frameLen])
+		frame := f.pending[:frameLen]
+		if f.transformFrame != nil {
+			frame = f.transformFrame(frame)
+		}
+		writeResponsesSSEChunk(w, frame)
 		copy(f.pending, f.pending[frameLen:])
 		f.pending = f.pending[:len(f.pending)-frameLen]
 	}
@@ -72,7 +77,11 @@ func (f *responsesSSEFramer) WriteChunk(w io.Writer, chunk []byte) {
 	if len(f.pending) == 0 || !responsesSSECanEmitWithoutDelimiter(f.pending) {
 		return
 	}
-	writeResponsesSSEChunk(w, f.pending)
+	frame := f.pending
+	if f.transformFrame != nil {
+		frame = f.transformFrame(frame)
+	}
+	writeResponsesSSEChunk(w, frame)
 	f.pending = f.pending[:0]
 }
 
@@ -366,7 +375,8 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 		c.Header("Connection", "keep-alive")
 		c.Header("Access-Control-Allow-Origin", "*")
 	}
-	framer := &responsesSSEFramer{}
+	recovery := newResponsesStreamRecovery()
+	framer := &responsesSSEFramer{transformFrame: recovery.normalizeFrame}
 
 	// Peek at the first chunk
 	for {
@@ -404,21 +414,26 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 			handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 
 			// Write first chunk logic (matching forwardResponsesStream)
-			framer.WriteChunk(c.Writer, chunk)
+			framer.WriteChunk(c.Writer, recovery.normalizeChunk(chunk))
 			flusher.Flush()
 
 			// Continue
-			h.forwardResponsesStream(c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan, framer)
+			h.forwardResponsesStream(c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan, framer, recovery)
 			return
 		}
 	}
 }
 
-func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage, framer *responsesSSEFramer) {
+func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage, framer *responsesSSEFramer, recovery *responsesStreamRecovery) {
 	if framer == nil {
 		framer = &responsesSSEFramer{}
 	}
-	recovery := newResponsesStreamRecovery()
+	if recovery == nil {
+		recovery = newResponsesStreamRecovery()
+	}
+	if framer.transformFrame == nil {
+		framer.transformFrame = recovery.normalizeFrame
+	}
 	h.ForwardStream(c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
 		WriteChunk: func(chunk []byte) {
 			framer.WriteChunk(c.Writer, recovery.normalizeChunk(chunk))

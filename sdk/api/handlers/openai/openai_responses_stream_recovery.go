@@ -177,6 +177,28 @@ func (r *responsesStreamRecovery) synthesizeCompletedPayload() []byte {
 	return payload
 }
 
+func (r *responsesStreamRecovery) normalizeFrame(frame []byte) []byte {
+	if r == nil || len(frame) == 0 {
+		return frame
+	}
+
+	eventName, payload := responsesSSEFrameEventAndPayload(frame)
+	if eventName != "error" || len(payload) == 0 || !json.Valid(payload) {
+		return frame
+	}
+
+	normalized := r.normalizePayload(payload)
+	if gjson.GetBytes(normalized, "type").String() != "response.completed" {
+		return frame
+	}
+
+	rebuilt := append([]byte("data: "), normalized...)
+	if bytes.HasSuffix(frame, []byte("\r\n\r\n")) {
+		return append(rebuilt, []byte("\r\n\r\n")...)
+	}
+	return append(rebuilt, []byte("\n\n")...)
+}
+
 func (r *responsesStreamRecovery) normalizePayload(payload []byte) []byte {
 	if r == nil {
 		return payload
@@ -214,9 +236,28 @@ func (r *responsesStreamRecovery) normalizePayload(payload []byte) []byte {
 		payload = r.patchCompletedPayload(payload)
 		r.captureMeta(payload)
 		r.completedSeen = true
+	case "error":
+		if recovered := r.recoverErrorPayload(payload); len(recovered) > 0 {
+			payload = recovered
+		}
 	}
 
 	return payload
+}
+
+func (r *responsesStreamRecovery) recoverErrorPayload(payload []byte) []byte {
+	if r == nil || r.completedSeen || len(payload) == 0 || !json.Valid(payload) {
+		return nil
+	}
+	if strings.TrimSpace(gjson.GetBytes(payload, "type").String()) != "error" {
+		return nil
+	}
+	code := strings.TrimSpace(gjson.GetBytes(payload, "code").String())
+	message := strings.TrimSpace(gjson.GetBytes(payload, "message").String())
+	if !responsesErrorLooksRecoverable(code, message) {
+		return nil
+	}
+	return r.synthesizeCompletedPayload()
 }
 
 func (r *responsesStreamRecovery) captureMeta(payload []byte) {
@@ -601,4 +642,45 @@ func lineEndingBytes(line []byte) []byte {
 	default:
 		return nil
 	}
+}
+
+func responsesSSEFrameEventAndPayload(frame []byte) (string, []byte) {
+	lines := bytes.Split(frame, []byte("\n"))
+	eventName := ""
+	dataLines := make([][]byte, 0, 1)
+	for i := range lines {
+		line := bytes.TrimSpace(lines[i])
+		if len(line) == 0 {
+			continue
+		}
+		switch {
+		case bytes.HasPrefix(line, []byte("event:")):
+			eventName = strings.TrimSpace(string(line[len("event:"):]))
+		case bytes.HasPrefix(line, []byte("data:")):
+			data := bytes.TrimSpace(line[len("data:"):])
+			if len(data) > 0 {
+				dataLines = append(dataLines, bytes.Clone(data))
+			}
+		}
+	}
+	if len(dataLines) == 0 {
+		return eventName, nil
+	}
+	return eventName, bytes.Join(dataLines, []byte("\n"))
+}
+
+func responsesErrorLooksRecoverable(code, message string) bool {
+	code = strings.ToLower(strings.TrimSpace(code))
+	message = strings.ToLower(strings.TrimSpace(message))
+	if message == "" {
+		return false
+	}
+	if code != "internal_server_error" && code != "server_error" {
+		return false
+	}
+	return strings.Contains(message, "stream error:") ||
+		strings.Contains(message, "received from peer") ||
+		strings.Contains(message, "unexpected eof") ||
+		strings.Contains(message, "stream closed") ||
+		strings.Contains(message, "response.completed")
 }

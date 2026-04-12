@@ -42,7 +42,7 @@ func TestForwardResponsesStreamSeparatesDataOnlySSEChunks(t *testing.T) {
 	close(data)
 	close(errs)
 
-	h.forwardResponsesStream(c, flusher, func(error) {}, data, errs, nil)
+	h.forwardResponsesStream(c, flusher, func(error) {}, data, errs, nil, nil)
 	body := recorder.Body.String()
 	parts := strings.Split(strings.TrimSpace(body), "\n\n")
 	if len(parts) != 2 {
@@ -71,7 +71,7 @@ func TestForwardResponsesStreamReassemblesSplitSSEEventChunks(t *testing.T) {
 	close(data)
 	close(errs)
 
-	h.forwardResponsesStream(c, flusher, func(error) {}, data, errs, nil)
+	h.forwardResponsesStream(c, flusher, func(error) {}, data, errs, nil, nil)
 
 	got := strings.TrimSuffix(recorder.Body.String(), "\n")
 	want := "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-1\"}}\n\n"
@@ -90,7 +90,7 @@ func TestForwardResponsesStreamPreservesValidFullSSEEventChunks(t *testing.T) {
 	close(data)
 	close(errs)
 
-	h.forwardResponsesStream(c, flusher, func(error) {}, data, errs, nil)
+	h.forwardResponsesStream(c, flusher, func(error) {}, data, errs, nil, nil)
 
 	got := strings.TrimSuffix(recorder.Body.String(), "\n")
 	if got != string(chunk) {
@@ -108,7 +108,7 @@ func TestForwardResponsesStreamBuffersSplitDataPayloadChunks(t *testing.T) {
 	close(data)
 	close(errs)
 
-	h.forwardResponsesStream(c, flusher, func(error) {}, data, errs, nil)
+	h.forwardResponsesStream(c, flusher, func(error) {}, data, errs, nil, nil)
 
 	got := recorder.Body.String()
 	want := "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-1\"}}\n\n\n"
@@ -135,7 +135,7 @@ func TestForwardResponsesStreamDropsIncompleteTrailingDataChunkOnFlush(t *testin
 	close(data)
 	close(errs)
 
-	h.forwardResponsesStream(c, flusher, func(error) {}, data, errs, nil)
+	h.forwardResponsesStream(c, flusher, func(error) {}, data, errs, nil, nil)
 
 	if got := recorder.Body.String(); got != "\n" {
 		t.Fatalf("expected incomplete trailing data to be dropped on flush.\nGot: %q", got)
@@ -154,7 +154,7 @@ func TestForwardResponsesStreamSynthesizesMissingCompletedEvent(t *testing.T) {
 	close(data)
 	close(errs)
 
-	h.forwardResponsesStream(c, flusher, func(error) {}, data, errs, nil)
+	h.forwardResponsesStream(c, flusher, func(error) {}, data, errs, nil, nil)
 
 	body := recorder.Body.String()
 	if !strings.Contains(body, "\"type\":\"response.completed\"") {
@@ -178,6 +178,43 @@ func TestForwardResponsesStreamSynthesizesMissingCompletedEvent(t *testing.T) {
 	}
 }
 
+func TestForwardResponsesStreamRecoversTransportErrorFrame(t *testing.T) {
+	h, recorder, c, flusher := newResponsesStreamTestHandler(t)
+
+	data := make(chan []byte, 5)
+	errs := make(chan *interfaces.ErrorMessage)
+	data <- []byte("data: {\"type\":\"response.created\",\"sequence_number\":1,\"response\":{\"id\":\"resp-1\",\"created_at\":123,\"model\":\"gpt-5.4\"}}")
+	data <- []byte("data: {\"type\":\"response.output_item.added\",\"sequence_number\":2,\"item\":{\"id\":\"msg-1\",\"type\":\"message\",\"status\":\"in_progress\",\"content\":[],\"role\":\"assistant\"},\"output_index\":0}")
+	data <- []byte("data: {\"type\":\"response.output_text.delta\",\"sequence_number\":3,\"item_id\":\"msg-1\",\"output_index\":0,\"delta\":\"partial answer\"}")
+	data <- []byte("event: error\n")
+	data <- []byte("data: {\"type\":\"error\",\"code\":\"internal_server_error\",\"message\":\"stream error: stream ID 219; INTERNAL_ERROR; received from peer\",\"sequence_number\":4}\n\n")
+	close(data)
+	close(errs)
+
+	h.forwardResponsesStream(c, flusher, func(error) {}, data, errs, nil, nil)
+
+	body := recorder.Body.String()
+	if strings.Contains(body, "event: error") {
+		t.Fatalf("expected error event to be replaced by completion. Body: %q", body)
+	}
+	if strings.Contains(body, "\"type\":\"error\"") {
+		t.Fatalf("expected upstream transport error to be suppressed. Body: %q", body)
+	}
+	if !strings.Contains(body, "\"type\":\"response.completed\"") {
+		t.Fatalf("expected recovered response.completed event. Body: %q", body)
+	}
+
+	parts := strings.Split(strings.TrimSpace(body), "\n\n")
+	last := parts[len(parts)-1]
+	payload := strings.TrimSpace(strings.TrimPrefix(last, "data:"))
+	if gjson.Get(payload, "type").String() != "response.completed" {
+		t.Fatalf("last payload type = %q, want response.completed", gjson.Get(payload, "type").String())
+	}
+	if gjson.Get(payload, "response.output.0.content.0.text").String() != "partial answer" {
+		t.Fatalf("recovered response.output text = %q, want %q", gjson.Get(payload, "response.output.0.content.0.text").String(), "partial answer")
+	}
+}
+
 func TestForwardResponsesStreamPatchesEmptyCompletedOutput(t *testing.T) {
 	h, recorder, c, flusher := newResponsesStreamTestHandler(t)
 
@@ -188,7 +225,7 @@ func TestForwardResponsesStreamPatchesEmptyCompletedOutput(t *testing.T) {
 	close(data)
 	close(errs)
 
-	h.forwardResponsesStream(c, flusher, func(error) {}, data, errs, nil)
+	h.forwardResponsesStream(c, flusher, func(error) {}, data, errs, nil, nil)
 
 	body := recorder.Body.String()
 	parts := strings.Split(strings.TrimSpace(body), "\n\n")

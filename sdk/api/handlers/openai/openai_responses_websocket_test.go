@@ -883,6 +883,97 @@ func TestForwardResponsesWebsocketSynthesizesMissingCompletedEvent(t *testing.T)
 	}
 }
 
+func TestForwardResponsesWebsocketRecoversTransportErrorPayload(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	serverErrCh := make(chan error, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := responsesWebsocketUpgrader.Upgrade(w, r, nil)
+		if err != nil {
+			serverErrCh <- err
+			return
+		}
+		defer func() {
+			_ = conn.Close()
+		}()
+
+		ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+		ctx.Request = r
+
+		data := make(chan []byte, 4)
+		errCh := make(chan *interfaces.ErrorMessage)
+		data <- []byte("data: {\"type\":\"response.created\",\"sequence_number\":1,\"response\":{\"id\":\"resp-1\",\"created_at\":123,\"model\":\"gpt-5.4\"}}")
+		data <- []byte("data: {\"type\":\"response.output_item.added\",\"sequence_number\":2,\"item\":{\"id\":\"msg-1\",\"type\":\"message\",\"status\":\"in_progress\",\"content\":[],\"role\":\"assistant\"},\"output_index\":0}")
+		data <- []byte("data: {\"type\":\"response.output_text.delta\",\"sequence_number\":3,\"item_id\":\"msg-1\",\"output_index\":0,\"delta\":\"partial websocket answer\"}")
+		data <- []byte("event: error\ndata: {\"type\":\"error\",\"code\":\"internal_server_error\",\"message\":\"stream error: stream ID 219; INTERNAL_ERROR; received from peer\",\"sequence_number\":4}\n\n")
+		close(data)
+		close(errCh)
+
+		var timelineLog strings.Builder
+		completedOutput, err := (*OpenAIResponsesAPIHandler)(nil).forwardResponsesWebsocket(
+			ctx,
+			conn,
+			func(...interface{}) {},
+			data,
+			errCh,
+			&timelineLog,
+			"session-transport-recover",
+		)
+		if err != nil {
+			serverErrCh <- err
+			return
+		}
+		if gjson.GetBytes(completedOutput, "0.content.0.text").String() != "partial websocket answer" {
+			serverErrCh <- errors.New("completed output not recovered from transport error")
+			return
+		}
+		if strings.Contains(timelineLog.String(), "\"type\":\"error\"") && !strings.Contains(timelineLog.String(), "\"type\":\"response.completed\"") {
+			serverErrCh <- errors.New("timeline retained error without recovered completion")
+			return
+		}
+		serverErrCh <- nil
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer func() {
+		_ = conn.Close()
+	}()
+
+	if errSetDeadline := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); errSetDeadline != nil {
+		t.Fatalf("set read deadline: %v", errSetDeadline)
+	}
+
+	var completedPayload []byte
+	for i := 0; i < 5; i++ {
+		_, payload, errReadMessage := conn.ReadMessage()
+		if errReadMessage != nil {
+			t.Fatalf("read websocket message: %v", errReadMessage)
+		}
+		if gjson.GetBytes(payload, "type").String() == wsEventTypeCompleted {
+			completedPayload = payload
+			break
+		}
+		if gjson.GetBytes(payload, "type").String() == wsEventTypeError {
+			t.Fatalf("unexpected websocket error payload: %s", string(payload))
+		}
+	}
+	if len(completedPayload) == 0 {
+		t.Fatal("expected recovered response.completed payload")
+	}
+	if gjson.GetBytes(completedPayload, "response.output.0.content.0.text").String() != "partial websocket answer" {
+		t.Fatalf("response.output text = %q, want %q", gjson.GetBytes(completedPayload, "response.output.0.content.0.text").String(), "partial websocket answer")
+	}
+
+	if errServer := <-serverErrCh; errServer != nil {
+		t.Fatalf("server error: %v", errServer)
+	}
+}
+
 func TestResponsesWebsocketTimelineRecordsDisconnectEvent(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
