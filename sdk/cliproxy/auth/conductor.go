@@ -1323,7 +1323,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		entry := logEntryWithRequestID(ctx)
 		debugLogAuthSelection(entry, auth, provider, req.Model)
 		publishSelectedAuthMetadata(opts.Metadata, auth.ID)
-		m.maybeWarmOtherMixedProvidersAsync(ctx, providers, provider, routeModel)
+		m.maybeWarmOtherMixedProvidersAsync(ctx, providers, provider, routeModel, opts)
 
 		tried[auth.ID] = struct{}{}
 		execCtx := ctx
@@ -1489,7 +1489,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		entry := logEntryWithRequestID(ctx)
 		debugLogAuthSelection(entry, auth, provider, req.Model)
 		publishSelectedAuthMetadata(opts.Metadata, auth.ID)
-		m.maybeWarmOtherMixedProvidersAsync(ctx, providers, provider, routeModel)
+		m.maybeWarmOtherMixedProvidersAsync(ctx, providers, provider, routeModel, opts)
 
 		tried[auth.ID] = struct{}{}
 		execCtx := ctx
@@ -2933,7 +2933,7 @@ func mixedWarmupEnabled(ctx context.Context) bool {
 	return enabled
 }
 
-func (m *Manager) maybeWarmOtherMixedProvidersAsync(ctx context.Context, providers []string, selectedProvider, routeModel string) {
+func (m *Manager) maybeWarmOtherMixedProvidersAsync(ctx context.Context, providers []string, selectedProvider, routeModel string, opts cliproxyexecutor.Options) {
 	if m == nil || !mixedWarmupEnabled(ctx) || !m.usesFillFirstSelector() || len(providers) < 2 {
 		return
 	}
@@ -2956,7 +2956,7 @@ func (m *Manager) maybeWarmOtherMixedProvidersAsync(ctx context.Context, provide
 		targets = append(targets, providerKey)
 	}
 	for _, providerKey := range targets {
-		auth, _, err := m.pickNext(ctx, providerKey, routeModel, cliproxyexecutor.Options{}, nil)
+		auth, _, err := m.pickNext(ctx, providerKey, routeModel, opts, nil)
 		if err != nil {
 			logEntryWithRequestID(ctx).Debugf("mixed provider warmup skipped provider=%s model=%s error=%v", providerKey, routeModel, err)
 			continue

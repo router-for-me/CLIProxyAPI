@@ -1063,6 +1063,54 @@ func TestManager_WarmupFailureDoesNotAffectPrimaryRequest(t *testing.T) {
 	}
 }
 
+func TestManager_WarmupRespectsPinnedAuthMetadata(t *testing.T) {
+	m := NewManager(nil, &FillFirstSelector{}, nil)
+	signal := make(chan struct{}, 4)
+	primaryExecutor := &authFallbackExecutor{id: "claude"}
+	warmExecutor := &authFallbackExecutor{id: "openai", httpRequestSignal: signal}
+	m.RegisterExecutor(primaryExecutor)
+	m.RegisterExecutor(warmExecutor)
+
+	model := "gpt-4.1"
+	selectedAuth := &Auth{ID: "aa-selected", Provider: "claude"}
+	warmedAuth := &Auth{ID: "bb-warmed", Provider: "openai", Attributes: map[string]string{"base_url": "https://warmed.example"}}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(selectedAuth.ID, "claude", []*registry.ModelInfo{{ID: model}})
+	reg.RegisterClient(warmedAuth.ID, "openai", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(selectedAuth.ID)
+		reg.UnregisterClient(warmedAuth.ID)
+	})
+
+	if _, errRegister := m.Register(context.Background(), selectedAuth); errRegister != nil {
+		t.Fatalf("register selected auth: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), warmedAuth); errRegister != nil {
+		t.Fatalf("register warmed auth: %v", errRegister)
+	}
+
+	opts := cliproxyexecutor.Options{Metadata: map[string]any{cliproxyexecutor.PinnedAuthMetadataKey: selectedAuth.ID}}
+	resp, errExecute := m.Execute(context.Background(), []string{"claude", "openai"}, cliproxyexecutor.Request{Model: model}, opts)
+	if errExecute != nil {
+		t.Fatalf("execute: %v", errExecute)
+	}
+	if string(resp.Payload) != selectedAuth.ID {
+		t.Fatalf("payload = %q, want %q", string(resp.Payload), selectedAuth.ID)
+	}
+	select {
+	case <-signal:
+		t.Fatal("unexpected warmup request for pinned auth session")
+	case <-time.After(200 * time.Millisecond):
+	}
+	if warmExecutor.HTTPRequestCount() != 0 {
+		t.Fatalf("http request count = %d, want 0", warmExecutor.HTTPRequestCount())
+	}
+	if len(m.mixedWarmInFlight) != 0 {
+		t.Fatalf("expected no in-flight warmups for pinned auth session, got %d", len(m.mixedWarmInFlight))
+	}
+}
+
 func TestManager_WarmupDeduplicatesWithinTTL(t *testing.T) {
 	m := NewManager(nil, &FillFirstSelector{}, nil)
 	signal := make(chan struct{}, 4)
