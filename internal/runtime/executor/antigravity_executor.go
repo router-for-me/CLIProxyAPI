@@ -685,6 +685,7 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 	}
 
 	reporter := helps.NewUsageReporter(ctx, e.Identifier(), baseModel, auth)
+	reporter.CaptureModelReasoningEffort(opts.OriginalRequest, req.Payload)
 	defer reporter.TrackFailure(ctx, &err)
 
 	from := opts.SourceFormat
@@ -897,6 +898,7 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 	}
 
 	reporter := helps.NewUsageReporter(ctx, e.Identifier(), baseModel, auth)
+	reporter.CaptureModelReasoningEffort(opts.OriginalRequest, req.Payload)
 	defer reporter.TrackFailure(ctx, &err)
 
 	from := opts.SourceFormat
@@ -1360,6 +1362,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 	}
 
 	reporter := helps.NewUsageReporter(ctx, e.Identifier(), baseModel, auth)
+	reporter.CaptureModelReasoningEffort(opts.OriginalRequest, req.Payload)
 	defer reporter.TrackFailure(ctx, &err)
 
 	from := opts.SourceFormat

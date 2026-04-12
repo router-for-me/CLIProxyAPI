@@ -141,6 +141,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	}
 
 	reporter := helps.NewUsageReporter(ctx, e.Identifier(), baseModel, auth)
+	reporter.CaptureModelReasoningEffort(opts.OriginalRequest, req.Payload)
 	defer reporter.TrackFailure(ctx, &err)
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("claude")
@@ -328,6 +329,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	}
 
 	reporter := helps.NewUsageReporter(ctx, e.Identifier(), baseModel, auth)
+	reporter.CaptureModelReasoningEffort(opts.OriginalRequest, req.Payload)
 	defer reporter.TrackFailure(ctx, &err)
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("claude")

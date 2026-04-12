@@ -94,6 +94,7 @@ type RequestDetail struct {
 	LatencyMs int64      `json:"latency_ms"`
 	Source    string     `json:"source"`
 	AuthIndex string     `json:"auth_index"`
+	ModelReasoningEffort string     `json:"model_reasoning_effort,omitempty"`
 	Tokens    TokenStats `json:"tokens"`
 	Failed    bool       `json:"failed"`
 }
@@ -203,6 +204,7 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 		LatencyMs: normaliseLatency(record.Latency),
 		Source:    record.Source,
 		AuthIndex: record.AuthIndex,
+		ModelReasoningEffort: strings.TrimSpace(record.ModelReasoningEffort),
 		Tokens:    detail,
 		Failed:    failed,
 	})
@@ -528,12 +530,13 @@ func dedupKey(apiName, modelName string, detail RequestDetail) string {
 	timestamp := detail.Timestamp.UTC().Format(time.RFC3339Nano)
 	tokens := normaliseTokenStats(detail.Tokens)
 	return fmt.Sprintf(
-		"%s|%s|%s|%s|%s|%t|%d|%d|%d|%d|%d",
+		"%s|%s|%s|%s|%s|%s|%t|%d|%d|%d|%d|%d",
 		apiName,
 		modelName,
 		timestamp,
 		detail.Source,
 		detail.AuthIndex,
+		strings.TrimSpace(detail.ModelReasoningEffort),
 		detail.Failed,
 		tokens.InputTokens,
 		tokens.OutputTokens,

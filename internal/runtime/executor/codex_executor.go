@@ -91,6 +91,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	}
 
 	reporter := helps.NewUsageReporter(ctx, e.Identifier(), baseModel, auth)
+	reporter.CaptureModelReasoningEffort(opts.OriginalRequest, req.Payload)
 	defer reporter.TrackFailure(ctx, &err)
 
 	from := opts.SourceFormat
@@ -241,6 +242,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	}
 
 	reporter := helps.NewUsageReporter(ctx, e.Identifier(), baseModel, auth)
+	reporter.CaptureModelReasoningEffort(opts.OriginalRequest, req.Payload)
 	defer reporter.TrackFailure(ctx, &err)
 
 	from := opts.SourceFormat
@@ -332,6 +334,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	}
 
 	reporter := helps.NewUsageReporter(ctx, e.Identifier(), baseModel, auth)
+	reporter.CaptureModelReasoningEffort(opts.OriginalRequest, req.Payload)
 	defer reporter.TrackFailure(ctx, &err)
 
 	from := opts.SourceFormat

@@ -166,6 +166,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	}
 
 	reporter := helps.NewUsageReporter(ctx, e.Identifier(), baseModel, auth)
+	reporter.CaptureModelReasoningEffort(opts.OriginalRequest, req.Payload)
 	defer reporter.TrackFailure(ctx, &err)
 
 	from := opts.SourceFormat
@@ -375,6 +376,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	}
 
 	reporter := helps.NewUsageReporter(ctx, e.Identifier(), baseModel, auth)
+	reporter.CaptureModelReasoningEffort(opts.OriginalRequest, req.Payload)
 	defer reporter.TrackFailure(ctx, &err)
 
 	from := opts.SourceFormat

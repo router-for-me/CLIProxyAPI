@@ -12,6 +12,7 @@ import (
 type Record struct {
 	Provider    string
 	Model       string
+	ModelReasoningEffort string
 	APIKey      string
 	AuthID      string
 	AuthIndex   string

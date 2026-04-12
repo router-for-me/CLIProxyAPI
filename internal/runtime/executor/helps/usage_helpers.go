@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	"github.com/tidwall/gjson"
@@ -22,6 +23,7 @@ type UsageReporter struct {
 	authIndex   string
 	apiKey      string
 	source      string
+	modelReasoningEffort string
 	requestedAt time.Time
 	once        sync.Once
 }
@@ -35,11 +37,26 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 		apiKey:      apiKey,
 		source:      resolveUsageSource(auth, apiKey),
 	}
+	if suffix := strings.TrimSpace(thinking.ParseSuffix(model).RawSuffix); suffix != "" {
+		reporter.modelReasoningEffort = normalizeReasoningEffortValue(suffix)
+	}
 	if auth != nil {
 		reporter.authID = auth.ID
 		reporter.authIndex = auth.EnsureIndex()
 	}
 	return reporter
+}
+
+func (r *UsageReporter) CaptureModelReasoningEffort(payloads ...[]byte) {
+	if r == nil {
+		return
+	}
+	for _, payload := range payloads {
+		if effort := extractReasoningEffortFromPayload(payload); effort != "" {
+			r.modelReasoningEffort = effort
+			return
+		}
+	}
 }
 
 func (r *UsageReporter) Publish(ctx context.Context, detail usage.Detail) {
@@ -94,6 +111,7 @@ func (r *UsageReporter) buildRecord(detail usage.Detail, failed bool) usage.Reco
 	return usage.Record{
 		Provider:    r.provider,
 		Model:       r.model,
+		ModelReasoningEffort: r.modelReasoningEffort,
 		Source:      r.source,
 		APIKey:      r.apiKey,
 		AuthID:      r.authID,
@@ -103,6 +121,47 @@ func (r *UsageReporter) buildRecord(detail usage.Detail, failed bool) usage.Reco
 		Failed:      failed,
 		Detail:      detail,
 	}
+}
+
+func normalizeReasoningEffortValue(value string) string {
+	return strings.ToLower(strings.TrimSpace(value))
+}
+
+func extractReasoningEffortFromPayload(payload []byte) string {
+	if len(payload) == 0 {
+		return ""
+	}
+
+	for _, path := range []string{
+		"reasoning_effort",
+		"reasoning.effort",
+		"output_config.effort",
+		"generationConfig.thinkingConfig.thinkingLevel",
+		"request.generationConfig.thinkingConfig.thinkingLevel",
+	} {
+		if value := normalizeReasoningEffortValue(gjson.GetBytes(payload, path).String()); value != "" {
+			return value
+		}
+	}
+
+	for _, path := range []string{
+		"thinking.budget_tokens",
+		"generationConfig.thinkingConfig.thinkingBudget",
+		"request.generationConfig.thinkingConfig.thinkingBudget",
+	} {
+		if result := gjson.GetBytes(payload, path); result.Exists() {
+			budget := result.Int()
+			if budget != 0 {
+				return fmt.Sprintf("budget:%d", budget)
+			}
+		}
+	}
+
+	if value := normalizeReasoningEffortValue(gjson.GetBytes(payload, "thinking.type").String()); value != "" {
+		return value
+	}
+
+	return ""
 }
 
 func (r *UsageReporter) latency() time.Duration {
