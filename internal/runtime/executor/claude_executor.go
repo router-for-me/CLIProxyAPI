@@ -346,6 +346,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	apiKey, baseURL := claudeCreds(auth)
+	if isPlaceholderAPIKey(apiKey) {
+		return nil, statusErr{code: http.StatusUnauthorized, msg: "placeholder API key detected; configure a real Claude OAuth token or API key"}
+	}
 	if baseURL == "" {
 		baseURL = "https://api.anthropic.com"
 	}
@@ -559,6 +562,9 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	apiKey, baseURL := claudeCreds(auth)
+	if isPlaceholderAPIKey(apiKey) {
+		return cliproxyexecutor.Response{}, statusErr{code: http.StatusUnauthorized, msg: "placeholder API key detected; configure a real Claude OAuth token or API key"}
+	}
 	if baseURL == "" {
 		baseURL = "https://api.anthropic.com"
 	}
@@ -973,7 +979,9 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Retry-Count", "0")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Runtime", "node")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Lang", "js")
-	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Helper-Method", "stream")
+	if stream {
+		misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Helper-Method", "stream")
+	}
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Timeout", hdrDefault(hd.Timeout, "600"))
 	// Session ID: stable per auth/apiKey, matches Claude Code's X-Claude-Code-Session-Id header.
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Claude-Code-Session-Id", helps.CachedSessionID(apiKey))
