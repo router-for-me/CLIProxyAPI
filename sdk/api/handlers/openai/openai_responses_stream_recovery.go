@@ -21,9 +21,11 @@ type responsesRecoveredMessage struct {
 type responsesRecoveredFunctionCall struct {
 	ItemID      string
 	OutputIndex int64
+	ItemType    string
 	CallID      string
 	Name        string
 	Arguments   strings.Builder
+	Input       strings.Builder
 }
 
 type responsesRecoveredOutput struct {
@@ -232,6 +234,10 @@ func (r *responsesStreamRecovery) normalizePayload(payload []byte) []byte {
 		r.recordFunctionCallArgumentsDelta(payload)
 	case "response.function_call_arguments.done":
 		r.recordFunctionCallArgumentsDone(payload)
+	case "response.custom_tool_call_input.delta":
+		r.recordCustomToolCallInputDelta(payload)
+	case "response.custom_tool_call_input.done":
+		r.recordCustomToolCallInputDone(payload)
 	case "response.completed":
 		payload = r.patchCompletedPayload(payload)
 		r.captureMeta(payload)
@@ -300,10 +306,13 @@ func (r *responsesStreamRecovery) recordOutputItemAdded(payload []byte) {
 		if message != nil && message.ItemID == "" {
 			message.ItemID = strings.TrimSpace(item.Get("id").String())
 		}
-	case "function_call":
+	case "function_call", "custom_tool_call":
 		call := r.ensureFunctionCall(strings.TrimSpace(item.Get("id").String()), outputIndex)
 		if call == nil {
 			return
+		}
+		if itemType := strings.TrimSpace(item.Get("type").String()); itemType != "" {
+			call.ItemType = itemType
 		}
 		if callID := strings.TrimSpace(item.Get("call_id").String()); callID != "" {
 			call.CallID = callID
@@ -363,6 +372,7 @@ func (r *responsesStreamRecovery) recordFunctionCallArgumentsDelta(payload []byt
 	if call == nil {
 		return
 	}
+	call.ItemType = "function_call"
 	if delta := gjson.GetBytes(payload, "delta").String(); delta != "" {
 		call.Arguments.WriteString(delta)
 	}
@@ -376,9 +386,39 @@ func (r *responsesStreamRecovery) recordFunctionCallArgumentsDone(payload []byte
 	if call == nil {
 		return
 	}
+	call.ItemType = "function_call"
 	if args := gjson.GetBytes(payload, "arguments").String(); args != "" {
 		call.Arguments.Reset()
 		call.Arguments.WriteString(args)
+	}
+}
+
+func (r *responsesStreamRecovery) recordCustomToolCallInputDelta(payload []byte) {
+	call := r.ensureFunctionCall(
+		strings.TrimSpace(gjson.GetBytes(payload, "item_id").String()),
+		gjson.GetBytes(payload, "output_index").Int(),
+	)
+	if call == nil {
+		return
+	}
+	call.ItemType = "custom_tool_call"
+	if delta := gjson.GetBytes(payload, "delta").String(); delta != "" {
+		call.Input.WriteString(delta)
+	}
+}
+
+func (r *responsesStreamRecovery) recordCustomToolCallInputDone(payload []byte) {
+	call := r.ensureFunctionCall(
+		strings.TrimSpace(gjson.GetBytes(payload, "item_id").String()),
+		gjson.GetBytes(payload, "output_index").Int(),
+	)
+	if call == nil {
+		return
+	}
+	call.ItemType = "custom_tool_call"
+	if input := gjson.GetBytes(payload, "input").String(); input != "" {
+		call.Input.Reset()
+		call.Input.WriteString(input)
 	}
 }
 
@@ -600,25 +640,55 @@ func buildRecoveredFunctionCallRaw(call *responsesRecoveredFunctionCall) []byte 
 	if call == nil {
 		return nil
 	}
+	itemType := strings.TrimSpace(call.ItemType)
+	if itemType == "" {
+		itemType = "function_call"
+	}
 	callID := strings.TrimSpace(call.CallID)
 	name := strings.TrimSpace(call.Name)
 	if callID == "" && name == "" {
 		return nil
 	}
-	arguments := call.Arguments.String()
-	if strings.TrimSpace(arguments) == "" {
-		arguments = "{}"
-	}
-	item := []byte(`{"id":"","type":"function_call","status":"completed","arguments":"","call_id":"","name":""}`)
+
 	itemID := strings.TrimSpace(call.ItemID)
 	if itemID == "" {
-		itemID = fmt.Sprintf("fc_%s", callID)
+		switch itemType {
+		case "custom_tool_call":
+			if callID != "" {
+				itemID = fmt.Sprintf("ctc_%s", callID)
+			} else {
+				itemID = fmt.Sprintf("ctc_%d", call.OutputIndex)
+			}
+		default:
+			if callID != "" {
+				itemID = fmt.Sprintf("fc_%s", callID)
+			} else {
+				itemID = fmt.Sprintf("fc_%d", call.OutputIndex)
+			}
+		}
 	}
-	item, _ = sjson.SetBytes(item, "id", itemID)
-	item, _ = sjson.SetBytes(item, "arguments", arguments)
-	item, _ = sjson.SetBytes(item, "call_id", callID)
-	item, _ = sjson.SetBytes(item, "name", name)
-	return item
+
+	switch itemType {
+	case "custom_tool_call":
+		input := call.Input.String()
+		item := []byte(`{"id":"","type":"custom_tool_call","status":"completed","input":"","call_id":"","name":""}`)
+		item, _ = sjson.SetBytes(item, "id", itemID)
+		item, _ = sjson.SetBytes(item, "input", input)
+		item, _ = sjson.SetBytes(item, "call_id", callID)
+		item, _ = sjson.SetBytes(item, "name", name)
+		return item
+	default:
+		arguments := call.Arguments.String()
+		if strings.TrimSpace(arguments) == "" {
+			arguments = "{}"
+		}
+		item := []byte(`{"id":"","type":"function_call","status":"completed","arguments":"","call_id":"","name":""}`)
+		item, _ = sjson.SetBytes(item, "id", itemID)
+		item, _ = sjson.SetBytes(item, "arguments", arguments)
+		item, _ = sjson.SetBytes(item, "call_id", callID)
+		item, _ = sjson.SetBytes(item, "name", name)
+		return item
+	}
 }
 
 func recordRecoveredIdentifiers(raw []byte, seenItemIDs, seenCallIDs map[string]struct{}) {

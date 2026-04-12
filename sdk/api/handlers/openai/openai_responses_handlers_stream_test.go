@@ -216,6 +216,55 @@ func TestForwardResponsesStreamRecoversTransportErrorFrame(t *testing.T) {
 	}
 }
 
+func TestForwardResponsesStreamRecoversTransportErrorDuringCustomToolCall(t *testing.T) {
+	h, recorder, c, flusher := newResponsesStreamTestHandler(t)
+
+	data := make(chan []byte, 7)
+	errs := make(chan *interfaces.ErrorMessage)
+	data <- []byte("data: {\"type\":\"response.created\",\"sequence_number\":1,\"response\":{\"id\":\"resp-1\",\"created_at\":123,\"model\":\"gpt-5.4\"}}")
+	data <- []byte("data: {\"type\":\"response.output_item.added\",\"sequence_number\":2,\"item\":{\"id\":\"ctc-1\",\"type\":\"custom_tool_call\",\"status\":\"in_progress\",\"call_id\":\"call-1\",\"input\":\"\",\"name\":\"apply_patch\"},\"output_index\":2}")
+	data <- []byte("data: {\"type\":\"response.custom_tool_call_input.delta\",\"sequence_number\":3,\"item_id\":\"ctc-1\",\"output_index\":2,\"delta\":\"*** Begin Patch\\n\"}")
+	data <- []byte(": keep-alive\n\n")
+	data <- []byte("data: {\"type\":\"response.custom_tool_call_input.delta\",\"sequence_number\":4,\"item_id\":\"ctc-1\",\"output_index\":2,\"delta\":\"*** Add File: /tmp/fix.txt\\n+hello\\n\"}")
+	data <- []byte("event: error\n")
+	data <- []byte("data: {\"type\":\"error\",\"code\":\"internal_server_error\",\"message\":\"stream error: stream ID 27; INTERNAL_ERROR; received from peer\",\"sequence_number\":0}\n\n")
+	close(data)
+	close(errs)
+
+	h.forwardResponsesStream(c, flusher, func(error) {}, data, errs, nil, nil)
+
+	body := recorder.Body.String()
+	if strings.Contains(body, "event: error") {
+		t.Fatalf("expected error event to be replaced by completion. Body: %q", body)
+	}
+	if strings.Contains(body, "\"type\":\"error\"") {
+		t.Fatalf("expected upstream transport error to be suppressed. Body: %q", body)
+	}
+	if !strings.Contains(body, "\"type\":\"response.completed\"") {
+		t.Fatalf("expected recovered response.completed event. Body: %q", body)
+	}
+
+	parts := strings.Split(strings.TrimSpace(body), "\n\n")
+	last := parts[len(parts)-1]
+	payload := strings.TrimSpace(strings.TrimPrefix(last, "data:"))
+	if gjson.Get(payload, "type").String() != "response.completed" {
+		t.Fatalf("last payload type = %q, want response.completed", gjson.Get(payload, "type").String())
+	}
+	if gjson.Get(payload, "response.output.0.type").String() != "custom_tool_call" {
+		t.Fatalf("recovered output type = %q, want custom_tool_call", gjson.Get(payload, "response.output.0.type").String())
+	}
+	if gjson.Get(payload, "response.output.0.call_id").String() != "call-1" {
+		t.Fatalf("recovered call_id = %q, want %q", gjson.Get(payload, "response.output.0.call_id").String(), "call-1")
+	}
+	if gjson.Get(payload, "response.output.0.name").String() != "apply_patch" {
+		t.Fatalf("recovered tool name = %q, want %q", gjson.Get(payload, "response.output.0.name").String(), "apply_patch")
+	}
+	expectedInput := "*** Begin Patch\n*** Add File: /tmp/fix.txt\n+hello\n"
+	if gjson.Get(payload, "response.output.0.input").String() != expectedInput {
+		t.Fatalf("recovered tool input = %q, want %q", gjson.Get(payload, "response.output.0.input").String(), expectedInput)
+	}
+}
+
 func TestForwardResponsesStreamPatchesEmptyCompletedOutput(t *testing.T) {
 	h, recorder, c, flusher := newResponsesStreamTestHandler(t)
 
