@@ -175,6 +175,57 @@ func TestSanitizeAmpRequestBody_MixedInvalidThinkingAndToolUseSignature(t *testi
 	}
 }
 
+func TestNormalizeAmpToolNames_NonStreaming(t *testing.T) {
+	input := []byte(`{"content":[{"type":"tool_use","id":"toolu_01","name":"bash","input":{"cmd":"ls"}},{"type":"tool_use","id":"toolu_02","name":"read","input":{"path":"/tmp"}},{"type":"text","text":"hello"}]}`)
+	result := normalizeAmpToolNames(input)
+
+	if !contains(result, []byte(`"name":"Bash"`)) {
+		t.Errorf("expected bash->Bash, got %s", string(result))
+	}
+	if !contains(result, []byte(`"name":"Read"`)) {
+		t.Errorf("expected read->Read, got %s", string(result))
+	}
+	if contains(result, []byte(`"name":"bash"`)) {
+		t.Errorf("expected lowercase bash to be replaced, got %s", string(result))
+	}
+}
+
+func TestNormalizeAmpToolNames_Streaming(t *testing.T) {
+	input := []byte(`{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","name":"grep","id":"toolu_01","input":{}}}`)
+	result := normalizeAmpToolNames(input)
+
+	if !contains(result, []byte(`"name":"Grep"`)) {
+		t.Errorf("expected grep->Grep in streaming, got %s", string(result))
+	}
+}
+
+func TestNormalizeAmpToolNames_AlreadyCorrect(t *testing.T) {
+	input := []byte(`{"content":[{"type":"tool_use","id":"toolu_01","name":"Bash","input":{"cmd":"ls"}}]}`)
+	result := normalizeAmpToolNames(input)
+
+	if string(result) != string(input) {
+		t.Errorf("expected no modification for correctly-cased tool, got %s", string(result))
+	}
+}
+
+func TestNormalizeAmpToolNames_GlobPreserved(t *testing.T) {
+	input := []byte(`{"content":[{"type":"tool_use","id":"toolu_01","name":"glob","input":{"pattern":"*.go"}}]}`)
+	result := normalizeAmpToolNames(input)
+
+	if string(result) != string(input) {
+		t.Errorf("expected glob to remain lowercase, got %s", string(result))
+	}
+}
+
+func TestNormalizeAmpToolNames_UnknownToolUntouched(t *testing.T) {
+	input := []byte(`{"content":[{"type":"tool_use","id":"toolu_01","name":"edit_file","input":{"path":"/tmp/x"}}]}`)
+	result := normalizeAmpToolNames(input)
+
+	if string(result) != string(input) {
+		t.Errorf("expected no modification for unknown tool, got %s", string(result))
+	}
+}
+
 func contains(data, substr []byte) bool {
 	for i := 0; i <= len(data)-len(substr); i++ {
 		if string(data[i:i+len(substr)]) == string(substr) {
