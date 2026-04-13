@@ -946,8 +946,14 @@ func (m *Manager) rebuildAPIKeyModelAliasLocked(cfg *internalconfig.Config) {
 				compileAPIKeyModelAliasForModels(byAlias, entry.Models)
 			}
 		case "claude":
-			if entry := resolveClaudeAPIKeyConfig(cfg, auth); entry != nil {
-				compileAPIKeyModelAliasForModels(byAlias, entry.Models)
+			if auth.Attributes != nil && auth.Attributes["anthropic_compat"] == "true" {
+				if entry := resolveAnthropicCompatAPIKeyConfig(cfg, auth); entry != nil {
+					compileAPIKeyModelAliasForModels(byAlias, entry.Models)
+				}
+			} else {
+				if entry := resolveClaudeAPIKeyConfig(cfg, auth); entry != nil {
+					compileAPIKeyModelAliasForModels(byAlias, entry.Models)
+				}
 			}
 		case "codex":
 			if entry := resolveCodexAPIKeyConfig(cfg, auth); entry != nil {
@@ -1594,7 +1600,11 @@ func (m *Manager) applyAPIKeyModelAlias(auth *Auth, requestedModel string) strin
 	case "gemini":
 		upstreamModel = resolveUpstreamModelForGeminiAPIKey(cfg, auth, requestedModel)
 	case "claude":
-		upstreamModel = resolveUpstreamModelForClaudeAPIKey(cfg, auth, requestedModel)
+		if auth.Attributes != nil && auth.Attributes["anthropic_compat"] == "true" {
+			upstreamModel = resolveUpstreamModelForAnthropicCompatAPIKey(cfg, auth, requestedModel)
+		} else {
+			upstreamModel = resolveUpstreamModelForClaudeAPIKey(cfg, auth, requestedModel)
+		}
 	case "codex":
 		upstreamModel = resolveUpstreamModelForCodexAPIKey(cfg, auth, requestedModel)
 	case "vertex":
@@ -1693,6 +1703,41 @@ func resolveUpstreamModelForGeminiAPIKey(cfg *internalconfig.Config, auth *Auth,
 
 func resolveUpstreamModelForClaudeAPIKey(cfg *internalconfig.Config, auth *Auth, requestedModel string) string {
 	entry := resolveClaudeAPIKeyConfig(cfg, auth)
+	if entry == nil {
+		return ""
+	}
+	return resolveModelAliasFromConfigModels(requestedModel, asModelAliasEntries(entry.Models))
+}
+
+func resolveAnthropicCompatAPIKeyConfig(cfg *internalconfig.Config, auth *Auth) *internalconfig.AnthropicCompatibility {
+	if cfg == nil || auth == nil {
+		return nil
+	}
+	var attrKey, attrBase, compatName string
+	if auth.Attributes != nil {
+		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
+		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
+		compatName = strings.TrimSpace(auth.Attributes["compat_name"])
+	}
+	for i := range cfg.AnthropicCompatibility {
+		entry := &cfg.AnthropicCompatibility[i]
+		if compatName != "" && strings.EqualFold(entry.Name, compatName) {
+			return entry
+		}
+		if attrBase != "" && strings.EqualFold(strings.TrimSpace(entry.BaseURL), attrBase) {
+			return entry
+		}
+		for j := range entry.APIKeyEntries {
+			if attrKey != "" && strings.EqualFold(strings.TrimSpace(entry.APIKeyEntries[j].APIKey), attrKey) {
+				return entry
+			}
+		}
+	}
+	return nil
+}
+
+func resolveUpstreamModelForAnthropicCompatAPIKey(cfg *internalconfig.Config, auth *Auth, requestedModel string) string {
+	entry := resolveAnthropicCompatAPIKeyConfig(cfg, auth)
 	if entry == nil {
 		return ""
 	}
