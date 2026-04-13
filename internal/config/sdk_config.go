@@ -37,6 +37,9 @@ type SDKConfig struct {
 	// NonStreamKeepAliveInterval controls how often blank lines are emitted for non-streaming responses.
 	// <= 0 disables keep-alives. Value is in seconds.
 	NonStreamKeepAliveInterval int `yaml:"nonstream-keepalive-interval,omitempty" json:"nonstream-keepalive-interval,omitempty"`
+
+	// SessionAffinity configures optional sticky session to auth routing.
+	SessionAffinity SessionAffinityConfig `yaml:"session-affinity,omitempty" json:"session-affinity,omitempty"`
 }
 
 // OAuthRefreshConfig controls background refresh scheduling for OAuth/file-backed auths.
@@ -60,4 +63,37 @@ type StreamingConfig struct {
 	// to allow auth rotation / transient recovery.
 	// <= 0 disables bootstrap retries. Default is 0.
 	BootstrapRetries int `yaml:"bootstrap-retries,omitempty" json:"bootstrap-retries,omitempty"`
+}
+
+// SessionAffinityConfig controls session-to-auth sticky routing behavior.
+type SessionAffinityConfig struct {
+	// Provider selects the session affinity backend.
+	// Supported values: "", "memory" (default), "redis".
+	Provider string `yaml:"provider,omitempty" json:"provider,omitempty"`
+
+	// Header is the preferred downstream header carrying the session affinity key.
+	// Defaults to "X-Session-Affinity" when empty.
+	Header string `yaml:"header,omitempty" json:"header,omitempty"`
+
+	// TTLSeconds controls binding expiration for backends that support TTL.
+	// <= 0 defaults to 86400 seconds.
+	TTLSeconds int `yaml:"ttl-seconds,omitempty" json:"ttl-seconds,omitempty"`
+
+	// Redis configures the Redis-backed affinity store.
+	Redis SessionAffinityRedisConfig `yaml:"redis,omitempty" json:"redis,omitempty"`
+}
+
+// SessionAffinityRedisConfig holds Redis connection parameters.
+type SessionAffinityRedisConfig struct {
+	// Addr is the Redis server address in host:port form.
+	Addr string `yaml:"addr,omitempty" json:"addr,omitempty"`
+
+	// Password is the optional Redis password.
+	Password string `yaml:"password,omitempty" json:"password,omitempty"`
+
+	// DB is the Redis logical database index.
+	DB int `yaml:"db,omitempty" json:"db,omitempty"`
+
+	// KeyPrefix namespaces affinity bindings in Redis.
+	KeyPrefix string `yaml:"key-prefix,omitempty" json:"key-prefix,omitempty"`
 }

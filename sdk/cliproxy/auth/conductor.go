@@ -2598,6 +2598,51 @@ func (m *Manager) GetByID(id string) (*Auth, bool) {
 	return auth.Clone(), true
 }
 
+// CanUsePinnedAuth reports whether authID is currently eligible for a routed request.
+func (m *Manager) CanUsePinnedAuth(authID string, providers []string, routeModel string) bool {
+	authID = strings.TrimSpace(authID)
+	if m == nil || authID == "" {
+		return false
+	}
+
+	providerSet := make(map[string]struct{}, len(providers))
+	for _, provider := range providers {
+		providerKey := strings.ToLower(strings.TrimSpace(provider))
+		if providerKey == "" {
+			continue
+		}
+		providerSet[providerKey] = struct{}{}
+	}
+
+	now := time.Now()
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	auth, ok := m.auths[authID]
+	if !ok || auth == nil || auth.Disabled {
+		return false
+	}
+
+	providerKey := strings.ToLower(strings.TrimSpace(auth.Provider))
+	if len(providerSet) > 0 {
+		if _, ok = providerSet[providerKey]; !ok {
+			return false
+		}
+	}
+
+	registryRef := registry.GetGlobalRegistry()
+	if strings.TrimSpace(routeModel) != "" && !m.authSupportsRouteModel(registryRef, auth, routeModel) {
+		return false
+	}
+
+	checkModel := routeModel
+	if strings.TrimSpace(routeModel) != "" {
+		checkModel = m.selectionModelForAuth(auth, routeModel)
+	}
+	blocked, _, _ := isAuthBlockedForModel(auth, checkModel, now)
+	return !blocked
+}
+
 // Executor returns the registered provider executor for a provider key.
 func (m *Manager) Executor(provider string) (ProviderExecutor, bool) {
 	if m == nil {

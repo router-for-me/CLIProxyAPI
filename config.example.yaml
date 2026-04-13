@@ -111,6 +111,18 @@ quota-exceeded:
 routing:
   strategy: "round-robin" # round-robin (default), fill-first
 
+# Sticky session -> auth routing.
+# Default provider is memory. Set provider: redis to persist bindings across restarts.
+# session-affinity:
+#   provider: "memory" # memory (default), redis
+#   header: "X-Session-Affinity"
+#   ttl-seconds: 86400
+#   redis:
+#     addr: "127.0.0.1:6379"
+#     password: ""
+#     db: 0
+#     key-prefix: "cliproxy:session-affinity:"
+
 # When true, enable authentication for the WebSocket API (/v1/ws).
 ws-auth: false
 
