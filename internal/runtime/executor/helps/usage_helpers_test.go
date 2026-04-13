@@ -101,6 +101,22 @@ func TestParseOpenAIStreamUsageNullUsageIgnored(t *testing.T) {
 	}
 }
 
+func TestParseOpenAIStreamUsageEmptyUsageObjectIgnored(t *testing.T) {
+	line := []byte(`data: {"choices":[{"delta":{"content":"hi"}}],"usage":{}}`)
+	_, ok := ParseOpenAIStreamUsage(line)
+	if ok {
+		t.Fatal("expected usage:{} chunk to be ignored")
+	}
+}
+
+func TestParseOpenAIStreamUsageZeroUsageObjectIgnored(t *testing.T) {
+	line := []byte(`data: {"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}`)
+	_, ok := ParseOpenAIStreamUsage(line)
+	if ok {
+		t.Fatal("expected all-zero usage chunk to be ignored")
+	}
+}
+
 func TestUsageReporterBuildRecordIncludesLatency(t *testing.T) {
 	reporter := &UsageReporter{
 		provider:    "openai",
