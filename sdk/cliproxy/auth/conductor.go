@@ -170,6 +170,7 @@ type Manager struct {
 
 	// Auto refresh state
 	refreshCancel      context.CancelFunc
+	refreshLoop        *authAutoRefreshLoop
 	refreshSemaphore   chan struct{}
 	refreshBatchCursor int
 
@@ -227,6 +228,16 @@ func (m *Manager) syncScheduler() {
 		return
 	}
 	m.syncSchedulerFromSnapshot(m.snapshotAuths())
+}
+
+func (m *Manager) snapshotAuths() []*Auth {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]*Auth, 0, len(m.auths))
+	for _, a := range m.auths {
+		out = append(out, a.Clone())
+	}
+	return out
 }
 
 // RefreshSchedulerEntry re-upserts a single auth into the scheduler so that its
@@ -1130,6 +1141,7 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	if m.scheduler != nil {
 		m.scheduler.upsertAuth(authClone)
 	}
+	m.queueRefreshReschedule(auth.ID)
 	_ = m.persist(ctx, auth)
 	m.hook.OnAuthRegistered(ctx, auth.Clone())
 	return auth.Clone(), nil
@@ -1160,6 +1172,7 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	if m.scheduler != nil {
 		m.scheduler.upsertAuth(authClone)
 	}
+	m.queueRefreshReschedule(auth.ID)
 	_ = m.persist(ctx, auth)
 	m.hook.OnAuthUpdated(ctx, auth.Clone())
 	return auth.Clone(), nil
@@ -3152,34 +3165,49 @@ func (m *Manager) StartAutoRefresh(parent context.Context, interval time.Duratio
 	if interval <= 0 {
 		interval = refreshCheckInterval
 	}
-	if m.refreshCancel != nil {
-		m.refreshCancel()
-		m.refreshCancel = nil
+
+	m.mu.Lock()
+	cancelPrev := m.refreshCancel
+	m.refreshCancel = nil
+	m.refreshLoop = nil
+	m.mu.Unlock()
+	if cancelPrev != nil {
+		cancelPrev()
 	}
-	ctx, cancel := context.WithCancel(parent)
-	m.refreshCancel = cancel
-	go func() {
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		if m.refreshOnStartupEnabled() {
-			m.checkRefreshes(ctx)
-		}
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				m.checkRefreshes(ctx)
-			}
-		}
-	}()
+
+	ctx, cancelCtx := context.WithCancel(parent)
+	workers := refreshMaxConcurrency
+	if cfg, ok := m.runtimeConfig.Load().(*internalconfig.Config); ok && cfg != nil && cfg.AuthAutoRefreshWorkers > 0 {
+		workers = cfg.AuthAutoRefreshWorkers
+	}
+	loop := newAuthAutoRefreshLoop(m, interval, workers)
+
+	m.mu.Lock()
+	m.refreshCancel = cancelCtx
+	m.refreshLoop = loop
+	m.refreshSemaphore = make(chan struct{}, workers)
+	m.mu.Unlock()
+
+	initialRebuildAt := time.Now()
+	if !m.refreshOnStartupEnabled() {
+		initialRebuildAt = initialRebuildAt.Add(interval)
+	}
+	loop.rebuild(initialRebuildAt)
+	if m.refreshOnStartupEnabled() {
+		m.checkRefreshes(ctx)
+	}
+	go loop.run(ctx)
 }
 
 // StopAutoRefresh cancels the background refresh loop, if running.
 func (m *Manager) StopAutoRefresh() {
-	if m.refreshCancel != nil {
-		m.refreshCancel()
-		m.refreshCancel = nil
+	m.mu.Lock()
+	cancel := m.refreshCancel
+	m.refreshCancel = nil
+	m.refreshLoop = nil
+	m.mu.Unlock()
+	if cancel != nil {
+		cancel()
 	}
 	m.stopPersistLoop()
 }
@@ -3256,14 +3284,17 @@ func (m *Manager) refreshAuthWithLimit(ctx context.Context, id string) {
 	m.refreshAuth(ctx, id)
 }
 
-func (m *Manager) snapshotAuths() []*Auth {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	out := make([]*Auth, 0, len(m.auths))
-	for _, a := range m.auths {
-		out = append(out, a.Clone())
+func (m *Manager) queueRefreshReschedule(authID string) {
+	if m == nil || authID == "" {
+		return
 	}
-	return out
+	m.mu.RLock()
+	loop := m.refreshLoop
+	m.mu.RUnlock()
+	if loop == nil {
+		return
+	}
+	loop.queueReschedule(authID)
 }
 
 func (m *Manager) shouldRefresh(a *Auth, now time.Time) bool {
@@ -3473,16 +3504,20 @@ func lookupMetadataTime(meta map[string]any, keys ...string) (time.Time, bool) {
 
 func (m *Manager) markRefreshPending(id string, now time.Time) bool {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	auth, ok := m.auths[id]
 	if !ok || auth == nil || auth.Disabled {
+		m.mu.Unlock()
 		return false
 	}
 	if !auth.NextRefreshAfter.IsZero() && now.Before(auth.NextRefreshAfter) {
+		m.mu.Unlock()
 		return false
 	}
 	auth.NextRefreshAfter = now.Add(refreshPendingBackoff)
 	m.auths[id] = auth
+	m.mu.Unlock()
+
+	m.queueRefreshReschedule(id)
 	return true
 }
 
@@ -3509,16 +3544,21 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 	log.Debugf("refreshed %s, %s, %v", auth.Provider, auth.ID, err)
 	now := time.Now()
 	if err != nil {
+		shouldReschedule := false
 		m.mu.Lock()
 		if current := m.auths[id]; current != nil {
 			current.NextRefreshAfter = now.Add(refreshFailureBackoff)
 			current.LastError = &Error{Message: err.Error()}
 			m.auths[id] = current
+			shouldReschedule = true
 			if m.scheduler != nil {
 				m.scheduler.upsertAuth(current.Clone())
 			}
 		}
 		m.mu.Unlock()
+		if shouldReschedule {
+			m.queueRefreshReschedule(id)
+		}
 		return
 	}
 	if updated == nil {

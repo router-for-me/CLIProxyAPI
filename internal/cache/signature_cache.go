@@ -207,9 +207,12 @@ func init() {
 
 // SetSignatureCacheEnabled switches Antigravity signature handling between cache mode and bypass mode.
 func SetSignatureCacheEnabled(enabled bool) {
-	signatureCacheEnabled.Store(enabled)
+	previous := signatureCacheEnabled.Swap(enabled)
+	if previous == enabled {
+		return
+	}
 	if !enabled {
-		log.Warn("antigravity signature cache DISABLED - bypass mode active, cached signatures will not be used for request translation")
+		log.Info("antigravity signature cache DISABLED - bypass mode active, cached signatures will not be used for request translation")
 	}
 }
 
@@ -220,11 +223,14 @@ func SignatureCacheEnabled() bool {
 
 // SetSignatureBypassStrictMode controls whether bypass mode uses strict protobuf-tree validation.
 func SetSignatureBypassStrictMode(strict bool) {
-	signatureBypassStrictMode.Store(strict)
+	previous := signatureBypassStrictMode.Swap(strict)
+	if previous == strict {
+		return
+	}
 	if strict {
-		log.Info("antigravity bypass signature validation: strict mode (protobuf tree)")
+		log.Debug("antigravity bypass signature validation: strict mode (protobuf tree)")
 	} else {
-		log.Info("antigravity bypass signature validation: basic mode (R/E + 0x12)")
+		log.Debug("antigravity bypass signature validation: basic mode (R/E + 0x12)")
 	}
 }
 
