@@ -55,6 +55,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/cache"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 	"google.golang.org/protobuf/encoding/protowire"
 )
 
@@ -70,6 +71,44 @@ type claudeSignatureTree struct {
 	ModelText           string
 	LegacyRouteHint     string
 	HasField7           bool
+}
+
+// StripEmptySignatureThinkingBlocks removes thinking blocks with empty signatures
+// from messages[].content[]. These come from proxy-generated responses (Antigravity/Gemini)
+// where no real Claude signature exists.
+func StripEmptySignatureThinkingBlocks(payload []byte) []byte {
+	messages := gjson.GetBytes(payload, "messages")
+	if !messages.IsArray() {
+		return payload
+	}
+	modified := false
+	for i, msg := range messages.Array() {
+		content := msg.Get("content")
+		if !content.IsArray() {
+			continue
+		}
+		var kept []string
+		stripped := false
+		for _, part := range content.Array() {
+			if part.Get("type").String() == "thinking" && strings.TrimSpace(part.Get("signature").String()) == "" {
+				stripped = true
+				continue
+			}
+			kept = append(kept, part.Raw)
+		}
+		if stripped {
+			modified = true
+			if len(kept) == 0 {
+				payload, _ = sjson.SetRawBytes(payload, fmt.Sprintf("messages.%d.content", i), []byte("[]"))
+			} else {
+				payload, _ = sjson.SetRawBytes(payload, fmt.Sprintf("messages.%d.content", i), []byte("["+strings.Join(kept, ",")+"]"))
+			}
+		}
+	}
+	if !modified {
+		return payload
+	}
+	return payload
 }
 
 func ValidateClaudeBypassSignatures(inputRawJSON []byte) error {

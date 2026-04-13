@@ -184,22 +184,24 @@ func newAntigravityHTTPClient(ctx context.Context, cfg *config.Config, auth *cli
 	return client
 }
 
-func validateAntigravityRequestSignatures(from sdktranslator.Format, rawJSON []byte) error {
+func validateAntigravityRequestSignatures(from sdktranslator.Format, rawJSON []byte) ([]byte, error) {
 	if from.String() != "claude" {
-		return nil
+		return rawJSON, nil
 	}
+	// Always strip thinking blocks with empty signatures (proxy-generated).
+	rawJSON = antigravityclaude.StripEmptySignatureThinkingBlocks(rawJSON)
 	if cache.SignatureCacheEnabled() {
-		return nil
+		return rawJSON, nil
 	}
 	if !cache.SignatureBypassStrictMode() {
 		// Non-strict bypass: let the translator handle invalid signatures
 		// by dropping unsigned thinking blocks silently (no 400).
-		return nil
+		return rawJSON, nil
 	}
 	if err := antigravityclaude.ValidateClaudeBypassSignatures(rawJSON); err != nil {
-		return statusErr{code: http.StatusBadRequest, msg: err.Error()}
+		return rawJSON, statusErr{code: http.StatusBadRequest, msg: err.Error()}
 	}
-	return nil
+	return rawJSON, nil
 }
 
 // Identifier returns the executor identifier.
@@ -695,9 +697,11 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := originalPayloadSource
-	if errValidate := validateAntigravityRequestSignatures(from, originalPayload); errValidate != nil {
+	originalPayload, errValidate := validateAntigravityRequestSignatures(from, originalPayload)
+	if errValidate != nil {
 		return resp, errValidate
 	}
+	req.Payload = originalPayload
 	token, updatedAuth, errToken := e.ensureAccessToken(ctx, auth)
 	if errToken != nil {
 		return resp, errToken
@@ -907,9 +911,11 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := originalPayloadSource
-	if errValidate := validateAntigravityRequestSignatures(from, originalPayload); errValidate != nil {
+	originalPayload, errValidate := validateAntigravityRequestSignatures(from, originalPayload)
+	if errValidate != nil {
 		return resp, errValidate
 	}
+	req.Payload = originalPayload
 	token, updatedAuth, errToken := e.ensureAccessToken(ctx, auth)
 	if errToken != nil {
 		return resp, errToken
@@ -1370,9 +1376,11 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := originalPayloadSource
-	if errValidate := validateAntigravityRequestSignatures(from, originalPayload); errValidate != nil {
+	originalPayload, errValidate := validateAntigravityRequestSignatures(from, originalPayload)
+	if errValidate != nil {
 		return nil, errValidate
 	}
+	req.Payload = originalPayload
 	token, updatedAuth, errToken := e.ensureAccessToken(ctx, auth)
 	if errToken != nil {
 		return nil, errToken
@@ -1626,9 +1634,11 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 	if len(opts.OriginalRequest) > 0 {
 		originalPayloadSource = opts.OriginalRequest
 	}
-	if errValidate := validateAntigravityRequestSignatures(from, originalPayloadSource); errValidate != nil {
+	originalPayloadSource, errValidate := validateAntigravityRequestSignatures(from, originalPayloadSource)
+	if errValidate != nil {
 		return cliproxyexecutor.Response{}, errValidate
 	}
+	req.Payload = originalPayloadSource
 	token, updatedAuth, errToken := e.ensureAccessToken(ctx, auth)
 	if errToken != nil {
 		return cliproxyexecutor.Response{}, errToken
