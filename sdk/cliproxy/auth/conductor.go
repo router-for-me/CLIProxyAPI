@@ -2421,8 +2421,47 @@ func isTransientBadRequest(err error) bool {
 }
 
 // isTransientBadRequestMessage checks a raw message string for transient patterns.
+// It handles both decoded UTF-8 text and raw JSON strings containing \uXXXX escapes.
 func isTransientBadRequestMessage(s string) bool {
 	msg := strings.ToLower(s)
+	if matchesTransientPatterns(msg) {
+		return true
+	}
+	// Some executor layers pass upstream 400 bodies as raw JSON strings with
+	// escaped Unicode (e.g. \u5f53\u524d...). Attempt to decode so that
+	// Chinese/multibyte patterns can still match.
+	if strings.Contains(msg, `\u`) {
+		decoded := unescapeUnicodeSequences(msg)
+		if decoded != msg && matchesTransientPatterns(decoded) {
+			return true
+		}
+	}
+	return false
+}
+
+// unescapeUnicodeSequences replaces \uXXXX sequences in s with their UTF-8
+// representation. This handles the common case where upstream JSON bodies are
+// passed through as raw strings without JSON-decoding.
+func unescapeUnicodeSequences(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); {
+		if i+5 < len(s) && s[i] == '\\' && s[i+1] == 'u' {
+			hex := s[i+2 : i+6]
+			code, err := strconv.ParseInt(hex, 16, 32)
+			if err == nil {
+				b.WriteRune(rune(code))
+				i += 6
+				continue
+			}
+		}
+		b.WriteByte(s[i])
+		i++
+	}
+	return b.String()
+}
+
+func matchesTransientPatterns(msg string) bool {
 	transientPatterns := []string{
 		"当前模型暂时无法使用", // model temporarily unavailable
 		"temporarily unavailable",
