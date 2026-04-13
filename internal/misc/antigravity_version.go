@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"runtime"
 	"sync"
 	"time"
 
@@ -103,8 +104,18 @@ func AntigravityLatestVersion() string {
 
 // AntigravityUserAgent returns the User-Agent string for antigravity requests
 // using the latest version fetched from the releases API.
+// OS and architecture are derived from the Go runtime to match the real
+// Antigravity binary on the current platform (e.g. linux/amd64 on a VPS).
 func AntigravityUserAgent() string {
-	return fmt.Sprintf("antigravity/%s darwin/arm64", AntigravityLatestVersion())
+	os := runtime.GOOS   // "darwin", "linux", "windows"
+	arch := runtime.GOARCH // "arm64", "amd64", "386"
+	switch arch {
+	case "amd64":
+		arch = "amd64"
+	case "386":
+		arch = "386"
+	}
+	return fmt.Sprintf("antigravity/%s %s/%s", AntigravityLatestVersion(), os, arch)
 }
 
 func fetchAntigravityLatestVersion(ctx context.Context) (string, error) {
