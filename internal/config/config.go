@@ -728,6 +728,10 @@ func sanitizePayloadRawRules(rules []PayloadRule, section string) []PayloadRule 
 		if len(rule.Params) == 0 {
 			continue
 		}
+		if rule.Disabled {
+			out = append(out, rule)
+			continue
+		}
 		disabledParams := payloadDisabledParamSet(rule.DisabledParams)
 		invalid := false
 		for path, value := range rule.Params {
