@@ -130,7 +130,6 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := originalPayloadSource
-	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, false)
 	basePayload := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
 
 	basePayload, err = thinking.ApplyThinking(basePayload, req.Model, from.String(), to.String(), e.Identifier())
@@ -140,7 +139,13 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 
 	basePayload = fixGeminiCLIImageAspectRatio(baseModel, basePayload)
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
-	basePayload = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, "gemini", "request", basePayload, originalTranslated, requestedModel)
+	var originalTranslated []byte
+	basePayload = helps.ApplyPayloadConfigWithRootLazy(e.cfg, baseModel, "gemini", "request", basePayload, func() []byte {
+		if len(originalTranslated) == 0 {
+			originalTranslated = sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, false)
+		}
+		return originalTranslated
+	}, requestedModel)
 
 	action := "generateContent"
 	if req.Metadata != nil {
@@ -286,7 +291,6 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := originalPayloadSource
-	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
 	basePayload := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
 
 	basePayload, err = thinking.ApplyThinking(basePayload, req.Model, from.String(), to.String(), e.Identifier())
@@ -296,7 +300,13 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 
 	basePayload = fixGeminiCLIImageAspectRatio(baseModel, basePayload)
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
-	basePayload = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, "gemini", "request", basePayload, originalTranslated, requestedModel)
+	var originalTranslated []byte
+	basePayload = helps.ApplyPayloadConfigWithRootLazy(e.cfg, baseModel, "gemini", "request", basePayload, func() []byte {
+		if len(originalTranslated) == 0 {
+			originalTranslated = sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
+		}
+		return originalTranslated
+	}, requestedModel)
 
 	projectID := resolveGeminiProjectID(auth)
 

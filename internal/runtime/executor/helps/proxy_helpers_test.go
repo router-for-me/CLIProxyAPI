@@ -2,69 +2,56 @@ package helps
 
 import (
 	"context"
+	"net"
 	"net/http"
+	"net/url"
+	"sync/atomic"
 	"testing"
-
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
+	"time"
 )
 
-func TestNewProxyAwareHTTPClientDirectBypassesGlobalProxy(t *testing.T) {
+func TestPrewarmableTransportUsesPrewarmedConnFirst(t *testing.T) {
 	t.Parallel()
 
-	client := NewProxyAwareHTTPClient(
-		context.Background(),
-		&config.Config{SDKConfig: sdkconfig.SDKConfig{ProxyURL: "http://global-proxy.example.com:8080"}},
-		&cliproxyauth.Auth{ProxyURL: "direct"},
-		0,
-	)
+	serverConn, clientConn := net.Pipe()
+	defer func() {
+		_ = serverConn.Close()
+	}()
 
-	transport, ok := client.Transport.(*http.Transport)
-	if !ok {
-		t.Fatalf("transport type = %T, want *http.Transport", client.Transport)
+	var dialCount atomic.Int32
+	base := &http.Transport{
+		DialContext: func(context.Context, string, string) (net.Conn, error) {
+			dialCount.Add(1)
+			return nil, nil
+		},
 	}
-	if transport.Proxy != nil {
-		t.Fatal("expected direct transport to disable proxy function")
+
+	wrapped := newPrewarmableTransport(base)
+	targetURL, errParse := url.Parse("http://example.com")
+	if errParse != nil {
+		t.Fatalf("Parse() error = %v", errParse)
+	}
+
+	wrapped.storePrewarmedConn("tcp", canonicalAddr(targetURL.Hostname(), targetURL.Port(), targetURL.Scheme), clientConn, time.Now().Add(prewarmedConnTTL))
+
+	gotConn, errDial := wrapped.dialContext(context.Background(), "tcp", "example.com:80")
+	if errDial != nil {
+		t.Fatalf("dialContext() error = %v", errDial)
+	}
+	if gotConn != clientConn {
+		t.Fatalf("dialContext() did not return prewarmed conn")
+	}
+	if got := dialCount.Load(); got != 0 {
+		t.Fatalf("dial count = %d, want 0", got)
 	}
 }
 
-func TestNewProxyAwareHTTPClientPrefersContextRoundTripperForAuthProxy(t *testing.T) {
+func TestWrapPrewarmableRoundTripperWrapsHTTPTransport(t *testing.T) {
 	t.Parallel()
 
-	expected := &roundTripperSpy{}
-	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", http.RoundTripper(expected))
-
-	client := NewProxyAwareHTTPClient(
-		ctx,
-		&config.Config{},
-		&cliproxyauth.Auth{ProxyURL: "http://auth-proxy.example.com:8080"},
-		0,
-	)
-
-	if client.Transport != expected {
-		t.Fatalf("transport = %T %v, want cached context round tripper", client.Transport, client.Transport)
+	base := &http.Transport{}
+	wrapped := wrapPrewarmableRoundTripper(base)
+	if _, ok := wrapped.(*prewarmableTransport); !ok {
+		t.Fatalf("wrapped transport type = %T", wrapped)
 	}
-}
-
-func TestNewProxyAwareHTTPClientCachesGlobalProxyTransport(t *testing.T) {
-	t.Parallel()
-
-	cfg := &config.Config{SDKConfig: sdkconfig.SDKConfig{ProxyURL: "http://global-proxy.example.com:8080"}}
-
-	first := NewProxyAwareHTTPClient(context.Background(), cfg, nil, 0)
-	second := NewProxyAwareHTTPClient(context.Background(), cfg, nil, 0)
-
-	if first.Transport == nil || second.Transport == nil {
-		t.Fatalf("expected transports to be configured, got %T and %T", first.Transport, second.Transport)
-	}
-	if first.Transport != second.Transport {
-		t.Fatal("expected global proxy transport to be reused")
-	}
-}
-
-type roundTripperSpy struct{}
-
-func (spy *roundTripperSpy) RoundTrip(*http.Request) (*http.Response, error) {
-	return nil, nil
 }

@@ -119,6 +119,36 @@ func TestSchedulerPick_FillFirstSticksToFirstReady(t *testing.T) {
 	}
 }
 
+func TestSchedulerPick_FillFirstInitialStickySessionUsesRoundRobinForFirstBind(t *testing.T) {
+	t.Parallel()
+
+	scheduler := newSchedulerForTest(
+		&FillFirstSelector{},
+		&Auth{ID: "b", Provider: "gemini"},
+		&Auth{ID: "a", Provider: "gemini"},
+		&Auth{ID: "c", Provider: "gemini"},
+	)
+
+	opts := cliproxyexecutor.Options{
+		Metadata: map[string]any{
+			cliproxyexecutor.InitialStickySessionMetadataKey: true,
+		},
+	}
+	want := []string{"a", "b", "c"}
+	for index, wantID := range want {
+		got, errPick := scheduler.pickSingle(context.Background(), "gemini", "", opts, nil)
+		if errPick != nil {
+			t.Fatalf("pickSingle() #%d error = %v", index, errPick)
+		}
+		if got == nil {
+			t.Fatalf("pickSingle() #%d auth = nil", index)
+		}
+		if got.ID != wantID {
+			t.Fatalf("pickSingle() #%d auth.ID = %q, want %q", index, got.ID, wantID)
+		}
+	}
+}
+
 func TestSchedulerPick_PromotesExpiredCooldownBeforePick(t *testing.T) {
 	t.Parallel()
 
@@ -295,6 +325,37 @@ func TestSchedulerPick_MixedProvidersPrefersHighestPriorityTier(t *testing.T) {
 		if got.ID != wantIDs[index] {
 			t.Fatalf("pickMixed() #%d auth.ID = %q, want %q", index, got.ID, wantIDs[index])
 		}
+	}
+}
+
+func TestSchedulerReadyCountAtPriorityRespectsTriedFilter(t *testing.T) {
+	t.Parallel()
+
+	scheduler := newSchedulerForTest(
+		&RoundRobinSelector{},
+		&Auth{ID: "gemini-a", Provider: "gemini", Attributes: map[string]string{"priority": "10"}},
+		&Auth{ID: "gemini-b", Provider: "gemini", Attributes: map[string]string{"priority": "10"}},
+	)
+
+	scheduler.mu.Lock()
+	defer scheduler.mu.Unlock()
+
+	providerState := scheduler.providers["gemini"]
+	if providerState == nil {
+		t.Fatalf("providerState = nil")
+	}
+	shard := providerState.ensureModelLocked("", time.Now())
+	if shard == nil {
+		t.Fatalf("shard = nil")
+	}
+
+	if got := shard.readyCountAtPriorityLocked(false, 10, authFilter{}); got != 2 {
+		t.Fatalf("readyCountAtPriorityLocked() = %d, want %d", got, 2)
+	}
+
+	filter := authFilter{tried: map[string]struct{}{"gemini-a": {}}}
+	if got := shard.readyCountAtPriorityLocked(false, 10, filter); got != 1 {
+		t.Fatalf("readyCountAtPriorityLocked() with tried filter = %d, want %d", got, 1)
 	}
 }
 

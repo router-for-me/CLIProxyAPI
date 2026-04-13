@@ -93,7 +93,7 @@ func TestBuildExecutionMetadataUsesSessionAffinityBinding(t *testing.T) {
 	ginCtx.Request.Header.Set(defaultSessionAffinityHeader, "session-a")
 
 	ctx := context.WithValue(context.Background(), "gin", ginCtx)
-	meta := handler.buildExecutionMetadata(ctx, []string{"gemini"}, "")
+	meta := handler.buildExecutionMetadata(ctx, []string{"gemini"}, "", nil)
 
 	if got := meta[coreexecutor.PinnedAuthMetadataKey]; got != "auth-1" {
 		t.Fatalf("pinned auth = %v, want auth-1", got)
@@ -126,7 +126,7 @@ func TestBuildExecutionMetadataDeletesStaleSessionAffinityBinding(t *testing.T) 
 	ginCtx.Request.Header.Set(defaultSessionAffinityHeader, "session-stale")
 
 	ctx := context.WithValue(context.Background(), "gin", ginCtx)
-	meta := handler.buildExecutionMetadata(ctx, []string{"gemini"}, "")
+	meta := handler.buildExecutionMetadata(ctx, []string{"gemini"}, "", nil)
 
 	if _, ok := meta[coreexecutor.PinnedAuthMetadataKey]; ok {
 		t.Fatalf("unexpected pinned auth for stale binding")
@@ -159,7 +159,7 @@ func TestBuildExecutionMetadataBindsSelectedAuthToSession(t *testing.T) {
 	ginCtx.Request.Header.Set(defaultSessionAffinityHeader, "session-bind")
 
 	ctx := context.WithValue(context.Background(), "gin", ginCtx)
-	meta := handler.buildExecutionMetadata(ctx, []string{"gemini"}, "")
+	meta := handler.buildExecutionMetadata(ctx, []string{"gemini"}, "", nil)
 	callback, ok := meta[coreexecutor.SelectedAuthCallbackMetadataKey].(func(string))
 	if !ok || callback == nil {
 		t.Fatalf("selected auth callback missing")
@@ -201,7 +201,7 @@ func TestBuildExecutionMetadataUsesConfiguredSessionAffinityHeader(t *testing.T)
 	ginCtx.Request.Header.Set("X-Custom-Affinity", "custom-session")
 
 	ctx := context.WithValue(context.Background(), "gin", ginCtx)
-	meta := handler.buildExecutionMetadata(ctx, []string{"gemini"}, "")
+	meta := handler.buildExecutionMetadata(ctx, []string{"gemini"}, "", nil)
 
 	if got := meta[coreexecutor.PinnedAuthMetadataKey]; got != "auth-custom" {
 		t.Fatalf("pinned auth = %v, want auth-custom", got)
@@ -227,9 +227,64 @@ func TestBuildExecutionMetadataDoesNotUseExecutionSessionAsAffinityKey(t *testin
 	}
 
 	ctx := WithExecutionSessionID(context.Background(), "exec-session-1")
-	meta := handler.buildExecutionMetadata(ctx, []string{"gemini"}, "")
+	meta := handler.buildExecutionMetadata(ctx, []string{"gemini"}, "", nil)
 
 	if _, ok := meta[coreexecutor.PinnedAuthMetadataKey]; ok {
 		t.Fatalf("execution session id must not act as session affinity key")
+	}
+}
+
+func TestBuildExecutionMetadataDerivesSessionAffinityKeyFromPreviousResponseID(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	manager := coreauth.NewManager(nil, nil, nil)
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       "auth-prev",
+		Provider: "gemini",
+		Metadata: map[string]any{"token": "x"},
+	}); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	store := NewMemorySessionAffinityStore()
+	store.Set(context.Background(), "body:previous_response_id:resp_123", "auth-prev")
+	handler := &BaseAPIHandler{
+		AuthManager:             manager,
+		SessionAffinityStore:    store,
+		sessionAffinityHotCache: newSessionAffinityHotCache(defaultSessionAffinityHotCacheTTL),
+	}
+
+	meta := handler.buildExecutionMetadata(context.Background(), []string{"gemini"}, "", []byte(`{"model":"gpt-test","previous_response_id":"resp_123"}`))
+
+	if got := meta[coreexecutor.PinnedAuthMetadataKey]; got != "auth-prev" {
+		t.Fatalf("pinned auth = %v, want auth-prev", got)
+	}
+}
+
+func TestBuildExecutionMetadataDoesNotDeriveSessionAffinityKeyFromBodyFingerprint(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	manager := coreauth.NewManager(nil, nil, nil)
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       "auth-a",
+		Provider: "gemini",
+		Metadata: map[string]any{"token": "x"},
+	}); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	payload := []byte(`{"model":"gpt-test","input":[{"role":"user","content":"hi"}]}`)
+	store := NewMemorySessionAffinityStore()
+	handler := &BaseAPIHandler{
+		AuthManager:             manager,
+		SessionAffinityStore:    store,
+		sessionAffinityHotCache: newSessionAffinityHotCache(defaultSessionAffinityHotCacheTTL),
+	}
+
+	meta := handler.buildExecutionMetadata(context.Background(), []string{"gemini"}, "", payload)
+
+	if _, ok := meta[coreexecutor.PinnedAuthMetadataKey]; ok {
+		t.Fatalf("pinned auth must be empty for body fingerprint fallback")
+	}
+	if _, ok := meta[coreexecutor.InitialStickySessionMetadataKey]; ok {
+		t.Fatalf("initial sticky marker must be empty without an explicit session key")
 	}
 }

@@ -11,18 +11,31 @@ import (
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
 	"golang.org/x/net/context"
 )
 
 const (
-	defaultSessionAffinityHeader    = "X-Session-Affinity"
-	defaultSessionAffinityTTL       = 24 * time.Hour
-	defaultSessionAffinityKeyPrefix = "cliproxy:session-affinity:"
-	defaultSessionAffinityProbe     = 5 * time.Second
-	defaultSessionAffinityPingWait  = 2 * time.Second
+	defaultSessionAffinityHeader      = "X-Session-Affinity"
+	defaultSessionAffinityTTL         = 24 * time.Hour
+	defaultSessionAffinityKeyPrefix   = "cliproxy:session-affinity:"
+	defaultSessionAffinityProbe       = 5 * time.Second
+	defaultSessionAffinityPingWait    = 2 * time.Second
+	defaultSessionAffinityHotCacheTTL = 30 * time.Second
 )
 
 type sessionAffinityContextKey struct{}
+
+type sessionAffinityHotCache struct {
+	mu       sync.RWMutex
+	ttl      time.Duration
+	bindings map[string]sessionAffinityHotEntry
+}
+
+type sessionAffinityHotEntry struct {
+	authID    string
+	expiresAt time.Time
+}
 
 // SessionAffinityStore persists session-to-auth bindings for sticky routing.
 type SessionAffinityStore interface {
@@ -403,9 +416,65 @@ func WithSessionAffinityKey(ctx context.Context, sessionKey string) context.Cont
 	return context.WithValue(ctx, sessionAffinityContextKey{}, sessionKey)
 }
 
-func sessionAffinityKeyFromContext(ctx context.Context, headerName string) string {
+func newSessionAffinityHotCache(ttl time.Duration) *sessionAffinityHotCache {
+	if ttl <= 0 {
+		ttl = defaultSessionAffinityHotCacheTTL
+	}
+	return &sessionAffinityHotCache{
+		ttl:      ttl,
+		bindings: make(map[string]sessionAffinityHotEntry),
+	}
+}
+
+func (c *sessionAffinityHotCache) Get(sessionKey string) (string, bool) {
+	sessionKey = strings.TrimSpace(sessionKey)
+	if c == nil || sessionKey == "" {
+		return "", false
+	}
+	now := time.Now()
+	c.mu.RLock()
+	entry, ok := c.bindings[sessionKey]
+	c.mu.RUnlock()
+	if !ok || strings.TrimSpace(entry.authID) == "" {
+		return "", false
+	}
+	if !entry.expiresAt.IsZero() && !entry.expiresAt.After(now) {
+		c.Delete(sessionKey)
+		return "", false
+	}
+	return entry.authID, true
+}
+
+func (c *sessionAffinityHotCache) Set(sessionKey, authID string) {
+	sessionKey = strings.TrimSpace(sessionKey)
+	authID = strings.TrimSpace(authID)
+	if c == nil || sessionKey == "" || authID == "" {
+		return
+	}
+	c.mu.Lock()
+	if c.bindings == nil {
+		c.bindings = make(map[string]sessionAffinityHotEntry)
+	}
+	c.bindings[sessionKey] = sessionAffinityHotEntry{
+		authID:    authID,
+		expiresAt: time.Now().Add(c.ttl),
+	}
+	c.mu.Unlock()
+}
+
+func (c *sessionAffinityHotCache) Delete(sessionKey string) {
+	sessionKey = strings.TrimSpace(sessionKey)
+	if c == nil || sessionKey == "" {
+		return
+	}
+	c.mu.Lock()
+	delete(c.bindings, sessionKey)
+	c.mu.Unlock()
+}
+
+func sessionAffinityKeyFromContext(ctx context.Context, headerName string, rawJSON []byte) string {
 	if ctx == nil {
-		return ""
+		return sessionAffinityKeyFromPayload(rawJSON)
 	}
 	raw := ctx.Value(sessionAffinityContextKey{})
 	switch v := raw.(type) {
@@ -426,10 +495,30 @@ func sessionAffinityKeyFromContext(ctx context.Context, headerName string) strin
 			return key
 		}
 	}
+	return sessionAffinityKeyFromPayload(rawJSON)
+}
+
+func sessionAffinityKeyFromPayload(rawJSON []byte) string {
+	if len(rawJSON) == 0 || !gjson.ValidBytes(rawJSON) {
+		return ""
+	}
+	for _, path := range []string{
+		"previous_response_id",
+		"conversation_id",
+		"thread_id",
+		"session_id",
+		"metadata.session_id",
+		"metadata.conversation_id",
+		"prompt_cache_key",
+	} {
+		if value := strings.TrimSpace(gjson.GetBytes(rawJSON, path).String()); value != "" {
+			return "body:" + path + ":" + value
+		}
+	}
 	return ""
 }
 
-func (h *BaseAPIHandler) buildExecutionMetadata(ctx context.Context, providers []string, normalizedModel string) map[string]any {
+func (h *BaseAPIHandler) buildExecutionMetadata(ctx context.Context, providers []string, normalizedModel string, rawJSON []byte) map[string]any {
 	meta := requestExecutionMetadata(ctx)
 	if h == nil || h.SessionAffinityStore == nil || h.AuthManager == nil {
 		return meta
@@ -438,17 +527,19 @@ func (h *BaseAPIHandler) buildExecutionMetadata(ctx context.Context, providers [
 		return meta
 	}
 
-	sessionKey := sessionAffinityKeyFromContext(ctx, h.sessionAffinityHeaderName())
+	sessionKey := sessionAffinityKeyFromContext(ctx, h.sessionAffinityHeaderName(), rawJSON)
 	if sessionKey == "" {
 		return meta
 	}
 
-	if authID, ok := h.SessionAffinityStore.Get(ctx, sessionKey); ok {
+	if authID, ok := h.sessionAffinityGet(ctx, sessionKey); ok {
 		if h.AuthManager.CanUsePinnedAuth(authID, providers, normalizedModel) {
 			meta[coreexecutor.PinnedAuthMetadataKey] = authID
 		} else {
-			h.SessionAffinityStore.Delete(ctx, sessionKey)
+			h.sessionAffinityDelete(ctx, sessionKey)
 		}
+	} else {
+		meta[coreexecutor.InitialStickySessionMetadataKey] = true
 	}
 
 	if selectedAuthCallback := selectedAuthCallbackFromExecutionMetadata(meta); selectedAuthCallback != nil {
@@ -482,7 +573,36 @@ func (h *BaseAPIHandler) bindSessionAffinity(ctx context.Context, sessionKey str
 	if !h.AuthManager.CanUsePinnedAuth(authID, providers, normalizedModel) {
 		return
 	}
+	if h.sessionAffinityHotCache != nil {
+		h.sessionAffinityHotCache.Set(sessionKey, authID)
+	}
 	h.SessionAffinityStore.Set(ctx, sessionKey, authID)
+}
+
+func (h *BaseAPIHandler) sessionAffinityGet(ctx context.Context, sessionKey string) (string, bool) {
+	if h == nil || h.SessionAffinityStore == nil {
+		return "", false
+	}
+	if h.sessionAffinityHotCache != nil {
+		if authID, ok := h.sessionAffinityHotCache.Get(sessionKey); ok {
+			return authID, true
+		}
+	}
+	authID, ok := h.SessionAffinityStore.Get(ctx, sessionKey)
+	if ok && h.sessionAffinityHotCache != nil {
+		h.sessionAffinityHotCache.Set(sessionKey, authID)
+	}
+	return authID, ok
+}
+
+func (h *BaseAPIHandler) sessionAffinityDelete(ctx context.Context, sessionKey string) {
+	if h == nil || h.SessionAffinityStore == nil {
+		return
+	}
+	if h.sessionAffinityHotCache != nil {
+		h.sessionAffinityHotCache.Delete(sessionKey)
+	}
+	h.SessionAffinityStore.Delete(ctx, sessionKey)
 }
 
 var _ SessionAffinityStore = (*MemorySessionAffinityStore)(nil)

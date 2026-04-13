@@ -273,6 +273,9 @@ type BaseAPIHandler struct {
 
 	// SessionAffinityStore keeps optional session-to-auth sticky bindings.
 	SessionAffinityStore SessionAffinityStore
+
+	// sessionAffinityHotCache keeps a short-lived in-process mirror of recent bindings.
+	sessionAffinityHotCache *sessionAffinityHotCache
 }
 
 // NewBaseAPIHandlers creates a new API handlers instance.
@@ -289,6 +292,9 @@ func NewBaseAPIHandlers(cfg *config.SDKConfig, authManager *coreauth.Manager) *B
 		Cfg:                  cfg,
 		AuthManager:          authManager,
 		SessionAffinityStore: NewSessionAffinityStore(cfg),
+		sessionAffinityHotCache: newSessionAffinityHotCache(
+			defaultSessionAffinityHotCacheTTL,
+		),
 	}
 }
 
@@ -300,6 +306,9 @@ func NewBaseAPIHandlers(cfg *config.SDKConfig, authManager *coreauth.Manager) *B
 func (h *BaseAPIHandler) UpdateClients(cfg *config.SDKConfig) {
 	h.Cfg = cfg
 	h.SessionAffinityStore = reconcileSessionAffinityStore(h.SessionAffinityStore, cfg)
+	if h.sessionAffinityHotCache == nil {
+		h.sessionAffinityHotCache = newSessionAffinityHotCache(defaultSessionAffinityHotCacheTTL)
+	}
 }
 
 // GetAlt extracts the 'alt' parameter from the request query string.
@@ -488,7 +497,7 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 	if errMsg != nil {
 		return nil, nil, errMsg
 	}
-	reqMeta := h.buildExecutionMetadata(ctx, providers, normalizedModel)
+	reqMeta := h.buildExecutionMetadata(ctx, providers, normalizedModel, rawJSON)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
 	payload := rawJSON
 	if len(payload) == 0 {
@@ -535,7 +544,7 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 	if errMsg != nil {
 		return nil, nil, errMsg
 	}
-	reqMeta := h.buildExecutionMetadata(ctx, providers, normalizedModel)
+	reqMeta := h.buildExecutionMetadata(ctx, providers, normalizedModel, rawJSON)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
 	payload := rawJSON
 	if len(payload) == 0 {
@@ -586,7 +595,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 		close(errChan)
 		return nil, nil, errChan
 	}
-	reqMeta := h.buildExecutionMetadata(ctx, providers, normalizedModel)
+	reqMeta := h.buildExecutionMetadata(ctx, providers, normalizedModel, rawJSON)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
 	payload := rawJSON
 	if len(payload) == 0 {

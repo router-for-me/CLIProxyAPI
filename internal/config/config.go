@@ -159,9 +159,12 @@ type ClaudeHeaderDefaults struct {
 // requests when neither the incoming request nor the selected credential supplies them.
 // UserAgent applies to both auth-file and codex-api-key HTTP/websocket requests.
 // BetaFeatures only applies to websocket requests for auth-file/OAuth Codex sessions.
+// RequestCompression enables zstd request-body compression for official ChatGPT Codex
+// backend HTTP requests when using OAuth/auth-file sessions.
 type CodexHeaderDefaults struct {
-	UserAgent    string `yaml:"user-agent" json:"user-agent"`
-	BetaFeatures string `yaml:"beta-features" json:"beta-features"`
+	UserAgent          string `yaml:"user-agent" json:"user-agent"`
+	BetaFeatures       string `yaml:"beta-features" json:"beta-features"`
+	RequestCompression *bool  `yaml:"request-compression,omitempty" json:"request-compression,omitempty"`
 }
 
 // TLSConfig holds HTTPS server settings.
