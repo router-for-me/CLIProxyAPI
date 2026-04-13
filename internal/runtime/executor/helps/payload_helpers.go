@@ -161,8 +161,16 @@ func payloadModelRulesMatch(rules []config.PayloadModelRule, protocol string, mo
 			if name == "" {
 				continue
 			}
-			if ep := strings.TrimSpace(entry.Protocol); ep != "" && protocol != "" && !strings.EqualFold(ep, protocol) {
-				continue
+			if ep := strings.TrimSpace(entry.Protocol); ep != "" && protocol != "" {
+				// Normalize "openai-response" to "openai" for matching purposes
+				// so filter rules targeting "openai" also match Responses API requests
+				normalizedProto := protocol
+				if strings.EqualFold(normalizedProto, "openai-response") {
+					normalizedProto = "openai"
+				}
+				if !strings.EqualFold(ep, normalizedProto) {
+					continue
+				}
 			}
 			if matchModelPattern(name, model) {
 				return true
@@ -273,12 +281,13 @@ func PayloadRequestedModel(opts cliproxyexecutor.Options, fallback string) strin
 	}
 }
 
-// matchModelPattern performs simple wildcard matching where '*' matches zero or more characters.
+// matchModelPattern performs case-insensitive wildcard matching where '*' matches zero or more characters.
 // Examples:
 //
 //	"*-5" matches "gpt-5"
 //	"gpt-*" matches "gpt-5" and "gpt-4"
 //	"gemini-*-pro" matches "gemini-2.5-pro" and "gemini-3-pro".
+//	"grok-*" matches "Grok-3" (case-insensitive).
 func matchModelPattern(pattern, model string) bool {
 	pattern = strings.TrimSpace(pattern)
 	model = strings.TrimSpace(model)
@@ -288,6 +297,9 @@ func matchModelPattern(pattern, model string) bool {
 	if pattern == "*" {
 		return true
 	}
+	// Fold both to lowercase for case-insensitive matching.
+	pattern = strings.ToLower(pattern)
+	model = strings.ToLower(model)
 	// Iterative glob-style matcher supporting only '*' wildcard.
 	pi, si := 0, 0
 	starIdx := -1
