@@ -1111,9 +1111,14 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 		}
 		openAICompatCount += len(entry.APIKeyEntries)
 	}
+	anthropicCompatCount := 0
+	for i := range cfg.AnthropicCompatibility {
+		entry := cfg.AnthropicCompatibility[i]
+		anthropicCompatCount += len(entry.APIKeyEntries)
+	}
 
-	total := authEntries + geminiAPIKeyCount + claudeAPIKeyCount + codexAPIKeyCount + vertexAICompatCount + openAICompatCount
-	fmt.Printf("server clients and configuration updated: %d clients (%d auth entries + %d Gemini API keys + %d Claude API keys + %d Codex keys + %d Vertex-compat + %d OpenAI-compat)\n",
+	total := authEntries + geminiAPIKeyCount + claudeAPIKeyCount + codexAPIKeyCount + vertexAICompatCount + openAICompatCount + anthropicCompatCount
+	fmt.Printf("server clients and configuration updated: %d clients (%d auth entries + %d Gemini API keys + %d Claude API keys + %d Codex keys + %d Vertex-compat + %d OpenAI-compat + %d Anthropic-compat)\n",
 		total,
 		authEntries,
 		geminiAPIKeyCount,
@@ -1121,6 +1126,7 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 		codexAPIKeyCount,
 		vertexAICompatCount,
 		openAICompatCount,
+		anthropicCompatCount,
 	)
 }
 
