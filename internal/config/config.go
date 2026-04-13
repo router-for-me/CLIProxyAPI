@@ -508,6 +508,11 @@ type OpenAICompatibility struct {
 	// BaseURL is the base URL for the external OpenAI-compatible API endpoint.
 	BaseURL string `yaml:"base-url" json:"base-url"`
 
+	// EndpointMode controls which upstream endpoint family is used.
+	// Supported values: "auto", "chat-completions", "responses".
+	// When empty, it defaults to "auto".
+	EndpointMode string `yaml:"endpoint-mode,omitempty" json:"endpoint-mode,omitempty"`
+
 	// APIKeyEntries defines API keys with optional per-key proxy configuration.
 	APIKeyEntries []OpenAICompatibilityAPIKey `yaml:"api-key-entries,omitempty" json:"api-key-entries,omitempty"`
 
@@ -831,6 +836,7 @@ func (cfg *Config) SanitizeOpenAICompatibility() {
 		e.Name = strings.TrimSpace(e.Name)
 		e.Prefix = normalizeModelPrefix(e.Prefix)
 		e.BaseURL = strings.TrimSpace(e.BaseURL)
+		e.EndpointMode = normalizeOpenAICompatibilityEndpointMode(e.EndpointMode)
 		e.Headers = NormalizeHeaders(e.Headers)
 		if e.BaseURL == "" {
 			// Skip providers with no base-url; treated as removed
@@ -839,6 +845,21 @@ func (cfg *Config) SanitizeOpenAICompatibility() {
 		out = append(out, e)
 	}
 	cfg.OpenAICompatibility = out
+}
+
+func normalizeOpenAICompatibilityEndpointMode(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "default", "legacy", "provider-default", "upstream":
+		return ""
+	case "auto":
+		return "auto"
+	case "chat-completions":
+		return "chat-completions"
+	case "responses":
+		return "responses"
+	default:
+		return ""
+	}
 }
 
 // SanitizeCodexKeys removes Codex API key entries missing a BaseURL.

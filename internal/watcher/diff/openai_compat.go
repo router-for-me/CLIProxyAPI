@@ -142,6 +142,9 @@ func openAICompatSignature(entry config.OpenAICompatibility) string {
 	if v := strings.TrimSpace(entry.BaseURL); v != "" {
 		parts = append(parts, "base="+v)
 	}
+	if v := strings.TrimSpace(entry.EndpointMode); v != "" {
+		parts = append(parts, "endpoint_mode="+strings.ToLower(v))
+	}
 
 	models := make([]string, 0, len(entry.Models))
 	for _, model := range entry.Models {
