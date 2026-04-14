@@ -167,6 +167,11 @@ func (e *IFlowExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		return resp, err
 	}
 	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
+	if errValidate := validateOpenAINonStreamSuccessBody(data); errValidate != nil {
+		log.Debugf("iflow non-stream invalid 200 payload: %s", summarizeInvalidOpenAI200Body(data))
+		err = errValidate
+		return resp, err
+	}
 	reporter.Publish(ctx, helps.ParseOpenAIUsage(data))
 	// Ensure usage is recorded even if upstream omits usage metadata.
 	reporter.EnsurePublished(ctx)
