@@ -15,7 +15,6 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/wsrelay"
@@ -90,15 +89,7 @@ type Service struct {
 
 	// wsGateway manages websocket Gemini providers.
 	wsGateway *wsrelay.Manager
-
-	codexWarmMu    sync.Mutex
-	codexWarmUntil map[string]time.Time
 }
-
-const (
-	codexWarmupTTL     = 5 * time.Minute
-	codexWarmupTimeout = 10 * time.Second
-)
 
 // RegisterUsagePlugin registers a usage plugin on the global usage manager.
 // This allows external code to monitor API usage and token consumption.
@@ -328,7 +319,6 @@ func (s *Service) applyCoreAuthAddOrUpdate(ctx context.Context, auth *coreauth.A
 	// have an empty supportedModelSet (because Register/Update upserts into the
 	// scheduler before registerModelsForAuth runs) and are invisible to the scheduler.
 	s.coreManager.RefreshSchedulerEntry(auth.ID)
-	s.maybeWarmCodexAuthAsync(auth)
 }
 
 func (s *Service) applyCoreAuthRemoval(ctx context.Context, id string) {
@@ -358,75 +348,6 @@ func (s *Service) applyRetryConfig(cfg *config.Config) {
 	}
 	maxInterval := time.Duration(cfg.MaxRetryInterval) * time.Second
 	s.coreManager.SetRetryConfig(cfg.RequestRetry, maxInterval, cfg.MaxRetryCredentials)
-}
-
-func (s *Service) maybeWarmCodexAuthAsync(auth *coreauth.Auth) {
-	if s == nil || s.coreManager == nil || auth == nil {
-		return
-	}
-	if auth.Disabled || auth.Status == coreauth.StatusDisabled {
-		return
-	}
-	if !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
-		return
-	}
-	authCopy := auth.Clone()
-	go func() {
-		warmCtx, cancel := context.WithTimeout(context.Background(), codexWarmupTimeout)
-		defer cancel()
-		if err := s.warmCodexAuth(warmCtx, authCopy); err != nil {
-			log.Debugf("codex warmup skipped auth=%s error=%v", authCopy.ID, err)
-		}
-	}()
-}
-
-func (s *Service) warmCodexAuth(ctx context.Context, auth *coreauth.Auth) error {
-	if s == nil || s.coreManager == nil {
-		return nil
-	}
-	if auth == nil || strings.TrimSpace(auth.ID) == "" {
-		return fmt.Errorf("codex warmup auth is empty")
-	}
-	if !s.reserveCodexWarmup(auth.ID, time.Now()) {
-		return nil
-	}
-	if rt := s.coreManager.RoundTripperForAuth(auth); rt != nil {
-		ctx = context.WithValue(ctx, "cliproxy.roundtripper", rt)
-	}
-	s.cfgMu.RLock()
-	cfg := s.cfg
-	s.cfgMu.RUnlock()
-	return helps.PrewarmProxyAwareHTTPClient(ctx, cfg, auth, codexWarmURL(auth))
-}
-
-func (s *Service) reserveCodexWarmup(authID string, now time.Time) bool {
-	if s == nil {
-		return false
-	}
-	authID = strings.TrimSpace(authID)
-	if authID == "" {
-		return false
-	}
-	s.codexWarmMu.Lock()
-	defer s.codexWarmMu.Unlock()
-	if s.codexWarmUntil == nil {
-		s.codexWarmUntil = make(map[string]time.Time)
-	}
-	if until, ok := s.codexWarmUntil[authID]; ok && until.After(now) {
-		return false
-	}
-	s.codexWarmUntil[authID] = now.Add(codexWarmupTTL)
-	return true
-}
-
-func codexWarmURL(auth *coreauth.Auth) string {
-	baseURL := "https://chatgpt.com/backend-api/codex"
-	if auth != nil && auth.Attributes != nil {
-		if raw := strings.TrimSpace(auth.Attributes["base_url"]); raw != "" {
-			baseURL = raw
-		}
-	}
-	return strings.TrimSuffix(baseURL, "/") + "/responses"
 }
 
 func openAICompatInfoFromAuth(a *coreauth.Auth) (providerKey string, compatName string, ok bool) {

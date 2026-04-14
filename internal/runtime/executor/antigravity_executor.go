@@ -92,7 +92,6 @@ var (
 	antigravityCreditsFailureByAuth   sync.Map
 	antigravityPreferCreditsByModel   sync.Map
 	antigravityShortCooldownByAuth    sync.Map
-	antigravityRefreshFlights         sync.Map
 	antigravityQuotaExhaustedKeywords = []string{
 		"quota_exhausted",
 		"quota exhausted",
@@ -112,12 +111,6 @@ var (
 		"resource has been exhausted",
 	}
 )
-
-type antigravityRefreshFlight struct {
-	wg      sync.WaitGroup
-	updated *cliproxyauth.Auth
-	err     error
-}
 
 // AntigravityExecutor proxies requests to the antigravity upstream.
 type AntigravityExecutor struct {
@@ -713,6 +706,7 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 	if updatedAuth != nil {
 		auth = updatedAuth
 	}
+	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, false)
 	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
 
 	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
@@ -721,13 +715,7 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 	}
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
-	var originalTranslated []byte
-	translated = helps.ApplyPayloadConfigWithRootLazy(e.cfg, baseModel, "antigravity", "request", translated, func() []byte {
-		if len(originalTranslated) == 0 {
-			originalTranslated = sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, false)
-		}
-		return originalTranslated
-	}, requestedModel)
+	translated = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, "antigravity", "request", translated, originalTranslated, requestedModel)
 
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
 	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
@@ -931,6 +919,7 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 	if updatedAuth != nil {
 		auth = updatedAuth
 	}
+	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
 	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
 
 	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
@@ -939,13 +928,7 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 	}
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
-	var originalTranslated []byte
-	translated = helps.ApplyPayloadConfigWithRootLazy(e.cfg, baseModel, "antigravity", "request", translated, func() []byte {
-		if len(originalTranslated) == 0 {
-			originalTranslated = sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
-		}
-		return originalTranslated
-	}, requestedModel)
+	translated = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, "antigravity", "request", translated, originalTranslated, requestedModel)
 
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
 	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
@@ -1400,6 +1383,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 	if updatedAuth != nil {
 		auth = updatedAuth
 	}
+	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
 	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
 
 	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
@@ -1408,13 +1392,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 	}
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
-	var originalTranslated []byte
-	translated = helps.ApplyPayloadConfigWithRootLazy(e.cfg, baseModel, "antigravity", "request", translated, func() []byte {
-		if len(originalTranslated) == 0 {
-			originalTranslated = sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
-		}
-		return originalTranslated
-	}, requestedModel)
+	translated = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, "antigravity", "request", translated, originalTranslated, requestedModel)
 
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
 	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
@@ -1814,46 +1792,11 @@ func (e *AntigravityExecutor) ensureAccessToken(ctx context.Context, auth *clipr
 			refreshCtx = context.WithValue(refreshCtx, "cliproxy.roundtripper", rt)
 		}
 	}
-	updated, errRefresh := e.refreshTokenShared(refreshCtx, auth)
+	updated, errRefresh := e.refreshToken(refreshCtx, auth.Clone())
 	if errRefresh != nil {
 		return "", nil, errRefresh
 	}
 	return metaStringValue(updated.Metadata, "access_token"), updated, nil
-}
-
-func (e *AntigravityExecutor) refreshTokenShared(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
-	if auth == nil {
-		return nil, statusErr{code: http.StatusUnauthorized, msg: "missing auth"}
-	}
-	authID := strings.TrimSpace(auth.ID)
-	if authID == "" {
-		return e.refreshToken(ctx, auth.Clone())
-	}
-
-	flight := &antigravityRefreshFlight{}
-	actual, loaded := antigravityRefreshFlights.LoadOrStore(authID, flight)
-	current, _ := actual.(*antigravityRefreshFlight)
-	if current == nil {
-		antigravityRefreshFlights.Delete(authID)
-		return e.refreshToken(ctx, auth.Clone())
-	}
-	if loaded {
-		current.wg.Wait()
-		if current.updated == nil {
-			return nil, current.err
-		}
-		return current.updated.Clone(), current.err
-	}
-	current.wg.Add(1)
-
-	defer antigravityRefreshFlights.Delete(authID)
-	defer current.wg.Done()
-
-	current.updated, current.err = e.refreshToken(ctx, auth.Clone())
-	if current.updated == nil {
-		return nil, current.err
-	}
-	return current.updated.Clone(), current.err
 }
 
 func (e *AntigravityExecutor) refreshToken(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {

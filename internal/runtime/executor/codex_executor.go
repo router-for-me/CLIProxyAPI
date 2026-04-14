@@ -11,7 +11,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/klauspost/compress/zstd"
 	codexauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
@@ -32,7 +31,7 @@ import (
 
 const (
 	codexUserAgent  = misc.CodexCLIUserAgent
-	codexOriginator = "Codex Desktop"
+	codexOriginator = "codex_cli_rs"
 )
 
 var dataTag = []byte("data:")
@@ -102,6 +101,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := originalPayloadSource
+	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, false)
 	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
 
 	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
@@ -110,16 +110,13 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	}
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
-	var originalTranslated []byte
-	body = helps.ApplyPayloadConfigWithRootLazy(e.cfg, baseModel, to.String(), "", body, func() []byte {
-		if len(originalTranslated) == 0 {
-			originalTranslated = sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, false)
-		}
-		return originalTranslated
-	}, requestedModel)
+	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 	body, _ = sjson.SetBytes(body, "stream", true)
-	body = stripUnsupportedCodexFields(body, false)
+	body, _ = sjson.DeleteBytes(body, "previous_response_id")
+	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
+	body, _ = sjson.DeleteBytes(body, "safety_identifier")
+	body, _ = sjson.DeleteBytes(body, "stream_options")
 	body = normalizeCodexInstructions(body)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
@@ -128,10 +125,6 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		return resp, err
 	}
 	applyCodexHeaders(httpReq, auth, apiKey, true, e.cfg)
-	bodyForLog, err := maybeCompressCodexRequest(httpReq, auth, e.cfg)
-	if err != nil {
-		return resp, err
-	}
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -142,7 +135,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		URL:       url,
 		Method:    http.MethodPost,
 		Headers:   httpReq.Header.Clone(),
-		Body:      bodyForLog,
+		Body:      body,
 		Provider:  e.Identifier(),
 		AuthID:    authID,
 		AuthLabel: authLabel,
@@ -259,6 +252,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := originalPayloadSource
+	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, false)
 	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
 
 	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
@@ -267,13 +261,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	}
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
-	var originalTranslated []byte
-	body = helps.ApplyPayloadConfigWithRootLazy(e.cfg, baseModel, to.String(), "", body, func() []byte {
-		if len(originalTranslated) == 0 {
-			originalTranslated = sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, false)
-		}
-		return originalTranslated
-	}, requestedModel)
+	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 	body, _ = sjson.DeleteBytes(body, "stream")
 	body = normalizeCodexInstructions(body)
@@ -284,10 +272,6 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 		return resp, err
 	}
 	applyCodexHeaders(httpReq, auth, apiKey, false, e.cfg)
-	bodyForLog, err := maybeCompressCodexRequest(httpReq, auth, e.cfg)
-	if err != nil {
-		return resp, err
-	}
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -298,7 +282,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 		URL:       url,
 		Method:    http.MethodPost,
 		Headers:   httpReq.Header.Clone(),
-		Body:      bodyForLog,
+		Body:      body,
 		Provider:  e.Identifier(),
 		AuthID:    authID,
 		AuthLabel: authLabel,
@@ -360,6 +344,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := originalPayloadSource
+	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
 	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
 
 	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
@@ -368,14 +353,11 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	}
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
-	var originalTranslated []byte
-	body = helps.ApplyPayloadConfigWithRootLazy(e.cfg, baseModel, to.String(), "", body, func() []byte {
-		if len(originalTranslated) == 0 {
-			originalTranslated = sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
-		}
-		return originalTranslated
-	}, requestedModel)
-	body = stripUnsupportedCodexFields(body, false)
+	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
+	body, _ = sjson.DeleteBytes(body, "previous_response_id")
+	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
+	body, _ = sjson.DeleteBytes(body, "safety_identifier")
+	body, _ = sjson.DeleteBytes(body, "stream_options")
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 	body = normalizeCodexInstructions(body)
 
@@ -385,10 +367,6 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		return nil, err
 	}
 	applyCodexHeaders(httpReq, auth, apiKey, true, e.cfg)
-	bodyForLog, err := maybeCompressCodexRequest(httpReq, auth, e.cfg)
-	if err != nil {
-		return nil, err
-	}
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -399,7 +377,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		URL:       url,
 		Method:    http.MethodPost,
 		Headers:   httpReq.Header.Clone(),
-		Body:      bodyForLog,
+		Body:      body,
 		Provider:  e.Identifier(),
 		AuthID:    authID,
 		AuthLabel: authLabel,
@@ -479,7 +457,10 @@ func (e *CodexExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth
 	}
 
 	body, _ = sjson.SetBytes(body, "model", baseModel)
-	body = stripUnsupportedCodexFields(body, false)
+	body, _ = sjson.DeleteBytes(body, "previous_response_id")
+	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
+	body, _ = sjson.DeleteBytes(body, "safety_identifier")
+	body, _ = sjson.DeleteBytes(body, "stream_options")
 	body, _ = sjson.SetBytes(body, "stream", false)
 	body = normalizeCodexInstructions(body)
 
@@ -706,39 +687,22 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 	if ginCtx, ok := r.Context().Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
 		ginHeaders = ginCtx.Request.Header
 	}
-	official := shouldUseOfficialCodexClientSemantics(auth, ginHeaders)
 
-	_, cfgBetaFeatures := codexHeaderDefaults(cfg, official)
-	if official {
-		ensureHeaderWithPriority(r.Header, ginHeaders, "x-codex-beta-features", cfgBetaFeatures, "")
-	} else {
-		misc.EnsureHeader(r.Header, ginHeaders, "x-codex-beta-features", "")
+	if ginHeaders.Get("X-Codex-Beta-Features") != "" {
+		r.Header.Set("X-Codex-Beta-Features", ginHeaders.Get("X-Codex-Beta-Features"))
 	}
-	misc.EnsureHeader(r.Header, ginHeaders, "OpenAI-Beta", "")
-	misc.EnsureHeader(r.Header, ginHeaders, "X-Codex-Turn-State", "")
 	misc.EnsureHeader(r.Header, ginHeaders, "Version", "")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Codex-Turn-Metadata", "")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Client-Request-Id", "")
-	if official {
-		misc.EnsureHeader(r.Header, ginHeaders, "X-ResponsesAPI-Include-Timing-Metrics", "")
-	}
-	misc.EnsureHeader(r.Header, ginHeaders, "X-OpenAI-Subagent", "")
-	misc.EnsureHeader(r.Header, ginHeaders, "X-Codex-Installation-Id", "")
-	misc.EnsureHeader(r.Header, ginHeaders, "X-Codex-Window-Id", "")
-	misc.EnsureHeader(r.Header, ginHeaders, "X-Codex-Parent-Thread-Id", "")
-	cfgUserAgent, _ := codexHeaderDefaults(cfg, official)
+	cfgUserAgent, _ := codexHeaderDefaults(cfg, auth)
 	if authUserAgent := codexAuthUserAgent(auth); authUserAgent != "" {
 		r.Header.Set("User-Agent", authUserAgent)
 	} else {
 		ensureHeaderWithConfigPrecedence(r.Header, ginHeaders, "User-Agent", cfgUserAgent, codexUserAgent)
 	}
-	if official {
-		if sessionID := strings.TrimSpace(r.Header.Get("Session_id")); sessionID != "" && strings.TrimSpace(r.Header.Get("X-Client-Request-Id")) == "" {
-			r.Header.Set("X-Client-Request-Id", sessionID)
-		}
-		if requestID := strings.TrimSpace(r.Header.Get("X-Client-Request-Id")); requestID != "" && strings.TrimSpace(r.Header.Get("Session_id")) == "" {
-			r.Header.Set("Session_id", requestID)
-		}
+
+	if strings.Contains(r.Header.Get("User-Agent"), "Mac OS") {
+		misc.EnsureHeader(r.Header, ginHeaders, "Session_id", uuid.NewString())
 	}
 
 	if stream {
@@ -746,14 +710,24 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 	} else {
 		r.Header.Set("Accept", "application/json")
 	}
+	r.Header.Set("Connection", "Keep-Alive")
+
+	isAPIKey := false
+	if auth != nil && auth.Attributes != nil {
+		if v := strings.TrimSpace(auth.Attributes["api_key"]); v != "" {
+			isAPIKey = true
+		}
+	}
 	if originator := strings.TrimSpace(ginHeaders.Get("Originator")); originator != "" {
 		r.Header.Set("Originator", originator)
-	} else if official {
+	} else if !isAPIKey {
 		r.Header.Set("Originator", codexOriginator)
 	}
-	if official && auth != nil && auth.Metadata != nil {
-		if accountID, ok := auth.Metadata["account_id"].(string); ok {
-			r.Header.Set("ChatGPT-Account-ID", accountID)
+	if !isAPIKey {
+		if auth != nil && auth.Metadata != nil {
+			if accountID, ok := auth.Metadata["account_id"].(string); ok {
+				r.Header.Set("Chatgpt-Account-Id", accountID)
+			}
 		}
 	}
 	var attrs map[string]string
@@ -808,125 +782,6 @@ func normalizeCodexInstructions(body []byte) []byte {
 		body, _ = sjson.SetBytes(body, "instructions", "")
 	}
 	return body
-}
-
-func stripUnsupportedCodexFields(body []byte, preservePreviousResponseID bool) []byte {
-	if !preservePreviousResponseID {
-		body, _ = sjson.DeleteBytes(body, "previous_response_id")
-	}
-	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
-	body, _ = sjson.DeleteBytes(body, "safety_identifier")
-	body, _ = sjson.DeleteBytes(body, "stream_options")
-	return body
-}
-
-func shouldUseOfficialCodexClientSemantics(auth *cliproxyauth.Auth, headers http.Header) bool {
-	if hasExplicitCodexClientHeaders(headers) {
-		return true
-	}
-	if auth == nil {
-		return false
-	}
-	if auth.Attributes != nil && strings.TrimSpace(auth.Attributes["api_key"]) != "" {
-		return false
-	}
-	_, baseURL := codexCreds(auth)
-	return isOfficialCodexBackendURL(baseURL)
-}
-
-func hasExplicitCodexClientHeaders(headers http.Header) bool {
-	if headers == nil {
-		return false
-	}
-	for _, key := range []string{
-		"Originator",
-		"OpenAI-Beta",
-		"x-codex-beta-features",
-		"x-codex-turn-state",
-		"x-codex-turn-metadata",
-		"x-responsesapi-include-timing-metrics",
-	} {
-		if strings.TrimSpace(headers.Get(key)) != "" {
-			return true
-		}
-	}
-	return false
-}
-
-func isOfficialCodexBackendURL(baseURL string) bool {
-	baseURL = strings.TrimSpace(baseURL)
-	if baseURL == "" {
-		return true
-	}
-	lower := strings.ToLower(baseURL)
-	return strings.HasPrefix(lower, "https://chatgpt.com/backend-api/codex") ||
-		strings.HasPrefix(lower, "http://chatgpt.com/backend-api/codex")
-}
-
-func maybeCompressCodexRequest(req *http.Request, auth *cliproxyauth.Auth, cfg *config.Config) ([]byte, error) {
-	if req == nil || req.Body == nil {
-		return nil, nil
-	}
-	body, err := io.ReadAll(req.Body)
-	if err != nil {
-		return nil, fmt.Errorf("codex executor: read request body failed: %w", err)
-	}
-	if errClose := req.Body.Close(); errClose != nil {
-		log.Errorf("codex executor: close request body error: %v", errClose)
-	}
-	encoded := body
-	if shouldCompressCodexRequest(req, auth, cfg) {
-		encoded, err = compressZstd(body)
-		if err != nil {
-			return nil, fmt.Errorf("codex executor: zstd compress request failed: %w", err)
-		}
-		req.Header.Set("Content-Encoding", "zstd")
-	} else {
-		req.Header.Del("Content-Encoding")
-	}
-	req.Body = io.NopCloser(bytes.NewReader(encoded))
-	req.ContentLength = int64(len(encoded))
-	req.GetBody = func() (io.ReadCloser, error) {
-		return io.NopCloser(bytes.NewReader(encoded)), nil
-	}
-	return encoded, nil
-}
-
-func shouldCompressCodexRequest(req *http.Request, auth *cliproxyauth.Auth, cfg *config.Config) bool {
-	if req == nil || req.URL == nil || auth == nil {
-		return false
-	}
-	if auth.Attributes != nil && strings.TrimSpace(auth.Attributes["api_key"]) != "" {
-		return false
-	}
-	if !shouldUseOfficialCodexClientSemantics(auth, req.Header) {
-		return false
-	}
-	if !codexRequestCompressionEnabled(cfg) {
-		return false
-	}
-	path := req.URL.Path
-	return strings.Contains(path, "/backend-api/codex") && strings.HasSuffix(path, "/responses")
-}
-
-func codexRequestCompressionEnabled(cfg *config.Config) bool {
-	return cfg != nil && cfg.CodexHeaderDefaults.RequestCompression != nil && *cfg.CodexHeaderDefaults.RequestCompression
-}
-
-func compressZstd(data []byte) ([]byte, error) {
-	var buf bytes.Buffer
-	encoder, err := zstd.NewWriter(&buf)
-	if err != nil {
-		return nil, err
-	}
-	if _, err = encoder.Write(data); err != nil {
-		encoder.Close()
-		return nil, err
-	}
-	if err = encoder.Close(); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
 }
 
 func isCodexModelCapacityError(errorBody []byte) bool {

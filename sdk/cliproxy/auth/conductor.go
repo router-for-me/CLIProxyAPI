@@ -3641,14 +3641,6 @@ func (m *Manager) roundTripperFor(auth *Auth) http.RoundTripper {
 	return p.RoundTripperFor(auth)
 }
 
-// RoundTripperForAuth exposes the per-auth transport selected by the registered provider.
-func (m *Manager) RoundTripperForAuth(auth *Auth) http.RoundTripper {
-	if m == nil {
-		return nil
-	}
-	return m.roundTripperFor(auth)
-}
-
 // RoundTripperProvider defines a minimal provider of per-auth HTTP transports.
 type RoundTripperProvider interface {
 	RoundTripperFor(auth *Auth) http.RoundTripper

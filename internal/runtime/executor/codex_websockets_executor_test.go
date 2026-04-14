@@ -1,15 +1,12 @@
 package executor
 
 import (
-	"bytes"
 	"context"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	"github.com/gin-gonic/gin"
-	"github.com/klauspost/compress/zstd"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
@@ -38,14 +35,11 @@ func TestBuildCodexWebsocketRequestBodyPreservesPreviousResponseID(t *testing.T)
 func TestApplyCodexWebsocketHeadersDefaultsToCurrentResponsesBeta(t *testing.T) {
 	headers := applyCodexWebsocketHeaders(context.Background(), http.Header{}, nil, "", nil)
 
-	if got := headers.Get("OpenAI-Beta"); got != "" {
-		t.Fatalf("OpenAI-Beta = %s, want empty", got)
+	if got := headers.Get("OpenAI-Beta"); got != codexResponsesWebsocketBetaHeaderValue {
+		t.Fatalf("OpenAI-Beta = %s, want %s", got, codexResponsesWebsocketBetaHeaderValue)
 	}
-	if got := headers.Get("User-Agent"); got != codexUserAgent {
-		t.Fatalf("User-Agent = %s, want %s", got, codexUserAgent)
-	}
-	if got := headers.Get("Originator"); got != "" {
-		t.Fatalf("Originator = %s, want empty", got)
+	if got := headers.Get("User-Agent"); got != "" {
+		t.Fatalf("User-Agent = %s, want empty", got)
 	}
 	if got := headers.Get("Version"); got != "" {
 		t.Fatalf("Version = %q, want empty", got)
@@ -103,8 +97,8 @@ func TestApplyCodexWebsocketHeadersUsesConfigDefaultsForOAuth(t *testing.T) {
 
 	headers := applyCodexWebsocketHeaders(context.Background(), http.Header{}, auth, "", cfg)
 
-	if got := headers.Get("User-Agent"); got != "my-codex-client/1.0" {
-		t.Fatalf("User-Agent = %s, want %s", got, "my-codex-client/1.0")
+	if got := headers.Get("User-Agent"); got != "" {
+		t.Fatalf("User-Agent = %s, want empty", got)
 	}
 	if got := headers.Get("x-codex-beta-features"); got != "feature-a,feature-b" {
 		t.Fatalf("x-codex-beta-features = %s, want %s", got, "feature-a,feature-b")
@@ -135,8 +129,8 @@ func TestApplyCodexWebsocketHeadersPrefersExistingHeadersOverClientAndConfig(t *
 
 	got := applyCodexWebsocketHeaders(ctx, headers, auth, "", cfg)
 
-	if gotVal := got.Get("User-Agent"); gotVal != "existing-ua" {
-		t.Fatalf("User-Agent = %s, want %s", gotVal, "existing-ua")
+	if gotVal := got.Get("User-Agent"); gotVal != "" {
+		t.Fatalf("User-Agent = %s, want empty", gotVal)
 	}
 	if gotVal := got.Get("x-codex-beta-features"); gotVal != "existing-beta" {
 		t.Fatalf("x-codex-beta-features = %s, want %s", gotVal, "existing-beta")
@@ -161,8 +155,8 @@ func TestApplyCodexWebsocketHeadersConfigUserAgentOverridesClientHeader(t *testi
 
 	headers := applyCodexWebsocketHeaders(ctx, http.Header{}, auth, "", cfg)
 
-	if got := headers.Get("User-Agent"); got != "config-ua" {
-		t.Fatalf("User-Agent = %s, want %s", got, "config-ua")
+	if got := headers.Get("User-Agent"); got != "" {
+		t.Fatalf("User-Agent = %s, want empty", got)
 	}
 	if got := headers.Get("x-codex-beta-features"); got != "client-beta" {
 		t.Fatalf("x-codex-beta-features = %s, want %s", got, "client-beta")
@@ -210,8 +204,8 @@ func TestApplyCodexWebsocketHeadersUsesConfigUserAgentForAPIKeyAuth(t *testing.T
 
 	headers := applyCodexWebsocketHeaders(context.Background(), http.Header{}, auth, "sk-test", cfg)
 
-	if got := headers.Get("User-Agent"); got != "config-ua" {
-		t.Fatalf("User-Agent = %s, want %s", got, "config-ua")
+	if got := headers.Get("User-Agent"); got != "" {
+		t.Fatalf("User-Agent = %s, want empty", got)
 	}
 	if got := headers.Get("x-codex-beta-features"); got != "" {
 		t.Fatalf("x-codex-beta-features = %q, want empty", got)
@@ -242,8 +236,8 @@ func TestApplyCodexHeadersUsesConfigUserAgentForOAuth(t *testing.T) {
 	if got := req.Header.Get("User-Agent"); got != "config-ua" {
 		t.Fatalf("User-Agent = %s, want %s", got, "config-ua")
 	}
-	if got := req.Header.Get("x-codex-beta-features"); got != "config-beta" {
-		t.Fatalf("x-codex-beta-features = %q, want %q", got, "config-beta")
+	if got := req.Header.Get("x-codex-beta-features"); got != "" {
+		t.Fatalf("x-codex-beta-features = %q, want empty", got)
 	}
 }
 
@@ -258,24 +252,15 @@ func TestApplyCodexHeadersPassesThroughClientIdentityHeaders(t *testing.T) {
 	}
 	req = req.WithContext(contextWithGinHeaders(map[string]string{
 		"Originator":            "Codex Desktop",
-		"OpenAI-Beta":           "responses=latest",
-		"X-Codex-Turn-State":    "turn-state-1",
 		"Version":               "0.115.0-alpha.27",
 		"X-Codex-Turn-Metadata": `{"turn_id":"turn-1"}`,
 		"X-Client-Request-Id":   "019d2233-e240-7162-992d-38df0a2a0e0d",
-		"X-OpenAI-Subagent":     "review",
 	}))
 
 	applyCodexHeaders(req, auth, "oauth-token", true, nil)
 
 	if got := req.Header.Get("Originator"); got != "Codex Desktop" {
 		t.Fatalf("Originator = %s, want %s", got, "Codex Desktop")
-	}
-	if got := req.Header.Get("OpenAI-Beta"); got != "responses=latest" {
-		t.Fatalf("OpenAI-Beta = %s, want %s", got, "responses=latest")
-	}
-	if got := req.Header.Get("X-Codex-Turn-State"); got != "turn-state-1" {
-		t.Fatalf("X-Codex-Turn-State = %s, want %s", got, "turn-state-1")
 	}
 	if got := req.Header.Get("Version"); got != "0.115.0-alpha.27" {
 		t.Fatalf("Version = %s, want %s", got, "0.115.0-alpha.27")
@@ -285,99 +270,6 @@ func TestApplyCodexHeadersPassesThroughClientIdentityHeaders(t *testing.T) {
 	}
 	if got := req.Header.Get("X-Client-Request-Id"); got != "019d2233-e240-7162-992d-38df0a2a0e0d" {
 		t.Fatalf("X-Client-Request-Id = %s, want %s", got, "019d2233-e240-7162-992d-38df0a2a0e0d")
-	}
-	if got := req.Header.Get("X-OpenAI-Subagent"); got != "review" {
-		t.Fatalf("X-OpenAI-Subagent = %s, want %s", got, "review")
-	}
-}
-
-func TestMaybeCompressCodexRequest_CompressesOAuthResponsesRequest(t *testing.T) {
-	req, err := http.NewRequest(http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", io.NopCloser(bytes.NewReader([]byte(`{"input":[{"type":"message"}]}`))))
-	if err != nil {
-		t.Fatalf("NewRequest() error = %v", err)
-	}
-	req.Header.Set("Originator", "Codex Desktop")
-	enabled := true
-	cfg := &config.Config{
-		CodexHeaderDefaults: config.CodexHeaderDefaults{
-			RequestCompression: &enabled,
-		},
-	}
-	auth := &cliproxyauth.Auth{
-		Provider: "codex",
-		Metadata: map[string]any{"email": "user@example.com"},
-	}
-
-	encoded, err := maybeCompressCodexRequest(req, auth, cfg)
-	if err != nil {
-		t.Fatalf("maybeCompressCodexRequest() error = %v", err)
-	}
-	if got := req.Header.Get("Content-Encoding"); got != "zstd" {
-		t.Fatalf("Content-Encoding = %q, want %q", got, "zstd")
-	}
-
-	decoder, err := zstd.NewReader(bytes.NewReader(encoded))
-	if err != nil {
-		t.Fatalf("zstd.NewReader() error = %v", err)
-	}
-	defer decoder.Close()
-	decoded, err := io.ReadAll(decoder)
-	if err != nil {
-		t.Fatalf("ReadAll(decoded) error = %v", err)
-	}
-	if string(decoded) != `{"input":[{"type":"message"}]}` {
-		t.Fatalf("decoded body = %s", string(decoded))
-	}
-}
-
-func TestMaybeCompressCodexRequest_DoesNotCompressAPIKeyRequest(t *testing.T) {
-	req, err := http.NewRequest(http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", io.NopCloser(bytes.NewReader([]byte(`{"input":[{"type":"message"}]}`))))
-	if err != nil {
-		t.Fatalf("NewRequest() error = %v", err)
-	}
-	enabled := true
-	cfg := &config.Config{
-		CodexHeaderDefaults: config.CodexHeaderDefaults{
-			RequestCompression: &enabled,
-		},
-	}
-	auth := &cliproxyauth.Auth{
-		Provider:   "codex",
-		Attributes: map[string]string{"api_key": "sk-test"},
-	}
-
-	encoded, err := maybeCompressCodexRequest(req, auth, cfg)
-	if err != nil {
-		t.Fatalf("maybeCompressCodexRequest() error = %v", err)
-	}
-	if got := req.Header.Get("Content-Encoding"); got != "" {
-		t.Fatalf("Content-Encoding = %q, want empty", got)
-	}
-	if string(encoded) != `{"input":[{"type":"message"}]}` {
-		t.Fatalf("encoded body = %s", string(encoded))
-	}
-}
-
-func TestMaybeCompressCodexRequest_DoesNotCompressWhenDisabled(t *testing.T) {
-	req, err := http.NewRequest(http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", io.NopCloser(bytes.NewReader([]byte(`{"input":[{"type":"message"}]}`))))
-	if err != nil {
-		t.Fatalf("NewRequest() error = %v", err)
-	}
-	req.Header.Set("Originator", "Codex Desktop")
-	auth := &cliproxyauth.Auth{
-		Provider: "codex",
-		Metadata: map[string]any{"email": "user@example.com"},
-	}
-
-	encoded, err := maybeCompressCodexRequest(req, auth, nil)
-	if err != nil {
-		t.Fatalf("maybeCompressCodexRequest() error = %v", err)
-	}
-	if got := req.Header.Get("Content-Encoding"); got != "" {
-		t.Fatalf("Content-Encoding = %q, want empty", got)
-	}
-	if string(encoded) != `{"input":[{"type":"message"}]}` {
-		t.Fatalf("encoded body = %s", string(encoded))
 	}
 }
 
@@ -444,12 +336,6 @@ func TestApplyCodexHeadersDoesNotInjectClientOnlyHeadersByDefault(t *testing.T) 
 
 	applyCodexHeaders(req, nil, "oauth-token", true, nil)
 
-	if got := req.Header.Get("User-Agent"); got != codexUserAgent {
-		t.Fatalf("User-Agent = %q, want %q", got, codexUserAgent)
-	}
-	if got := req.Header.Get("Originator"); got != "" {
-		t.Fatalf("Originator = %q, want empty", got)
-	}
 	if got := req.Header.Get("Version"); got != "" {
 		t.Fatalf("Version = %q, want empty", got)
 	}
