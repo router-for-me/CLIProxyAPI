@@ -714,6 +714,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 ) ([]byte, error) {
 	completed := false
 	completedOutput := []byte("[]")
+	noticeFilter := newResponsesNoticeFilter()
 	downstreamSessionKey := ""
 	if c != nil && c.Request != nil {
 		downstreamSessionKey = websocketDownstreamSessionKey(c.Request)
@@ -793,11 +794,18 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 
 			payloads := websocketJSONPayloadsFromChunk(chunk)
 			for i := range payloads {
-				recordResponsesWebsocketToolCallsFromPayload(downstreamSessionKey, payloads[i])
-				eventType := gjson.GetBytes(payloads[i], "type").String()
+				filteredPayload := payloads[i]
+				if noticeFilter != nil {
+					filteredPayload = noticeFilter.FilterPayload(filteredPayload)
+				}
+				if len(filteredPayload) == 0 {
+					continue
+				}
+				recordResponsesWebsocketToolCallsFromPayload(downstreamSessionKey, filteredPayload)
+				eventType := gjson.GetBytes(filteredPayload, "type").String()
 				if eventType == wsEventTypeCompleted {
 					completed = true
-					completedOutput = responseCompletedOutputFromPayload(payloads[i])
+					completedOutput = responseCompletedOutputFromPayload(filteredPayload)
 				}
 				markAPIResponseTimestamp(c)
 				// log.Infof(
@@ -807,11 +815,11 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 				// 	websocketPayloadEventType(payloads[i]),
 				// 	websocketPayloadPreview(payloads[i]),
 				// )
-				if errWrite := writeResponsesWebsocketPayload(conn, wsTimelineLog, payloads[i], time.Now()); errWrite != nil {
+				if errWrite := writeResponsesWebsocketPayload(conn, wsTimelineLog, filteredPayload, time.Now()); errWrite != nil {
 					log.Warnf(
 						"responses websocket: downstream_out write failed id=%s event=%s error=%v",
 						sessionID,
-						websocketPayloadEventType(payloads[i]),
+						websocketPayloadEventType(filteredPayload),
 						errWrite,
 					)
 					cancel(errWrite)

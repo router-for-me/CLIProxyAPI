@@ -45,7 +45,8 @@ func writeResponsesSSEChunk(w io.Writer, chunk []byte) {
 }
 
 type responsesSSEFramer struct {
-	pending []byte
+	pending      []byte
+	noticeFilter *responsesNoticeFilter
 }
 
 func (f *responsesSSEFramer) WriteChunk(w io.Writer, chunk []byte) {
@@ -61,7 +62,11 @@ func (f *responsesSSEFramer) WriteChunk(w io.Writer, chunk []byte) {
 		if frameLen == 0 {
 			break
 		}
-		writeResponsesSSEChunk(w, f.pending[:frameLen])
+		frame := f.pending[:frameLen]
+		if f.noticeFilter != nil {
+			frame = f.noticeFilter.FilterSSEFrame(frame)
+		}
+		writeResponsesSSEChunk(w, frame)
 		copy(f.pending, f.pending[frameLen:])
 		f.pending = f.pending[:len(f.pending)-frameLen]
 	}
@@ -72,7 +77,11 @@ func (f *responsesSSEFramer) WriteChunk(w io.Writer, chunk []byte) {
 	if len(f.pending) == 0 || !responsesSSECanEmitWithoutDelimiter(f.pending) {
 		return
 	}
-	writeResponsesSSEChunk(w, f.pending)
+	frame := f.pending
+	if f.noticeFilter != nil {
+		frame = f.noticeFilter.FilterSSEFrame(frame)
+	}
+	writeResponsesSSEChunk(w, frame)
 	f.pending = f.pending[:0]
 }
 
@@ -88,7 +97,11 @@ func (f *responsesSSEFramer) Flush(w io.Writer) {
 		f.pending = f.pending[:0]
 		return
 	}
-	writeResponsesSSEChunk(w, f.pending)
+	frame := f.pending
+	if f.noticeFilter != nil {
+		frame = f.noticeFilter.FilterSSEFrame(frame)
+	}
+	writeResponsesSSEChunk(w, frame)
 	f.pending = f.pending[:0]
 }
 
@@ -304,6 +317,7 @@ func (h *OpenAIResponsesAPIHandler) Compact(c *gin.Context) {
 		cliCancel(errMsg.Error)
 		return
 	}
+	resp = newResponsesNoticeFilter().FilterResponseObject(resp)
 	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 	_, _ = c.Writer.Write(resp)
 	cliCancel()
@@ -330,6 +344,7 @@ func (h *OpenAIResponsesAPIHandler) handleNonStreamingResponse(c *gin.Context, r
 		cliCancel(errMsg.Error)
 		return
 	}
+	resp = newResponsesNoticeFilter().FilterResponseObject(resp)
 	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 	_, _ = c.Writer.Write(resp)
 	cliCancel()
@@ -366,7 +381,7 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 		c.Header("Connection", "keep-alive")
 		c.Header("Access-Control-Allow-Origin", "*")
 	}
-	framer := &responsesSSEFramer{}
+	framer := &responsesSSEFramer{noticeFilter: newResponsesNoticeFilter()}
 
 	// Peek at the first chunk
 	for {
