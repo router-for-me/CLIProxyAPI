@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -371,34 +372,91 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				log.Errorf("codex executor: close response body error: %v", errClose)
 			}
 		}()
-		scanner := bufio.NewScanner(httpResp.Body)
-		scanner.Buffer(nil, 52_428_800) // 50MB
+		reader := bufio.NewReaderSize(httpResp.Body, 64*1024)
 		var param any
-		for scanner.Scan() {
-			line := scanner.Bytes()
-			appendAPIResponseChunk(ctx, e.cfg, line)
-
-			if bytes.HasPrefix(line, dataTag) {
-				data := bytes.TrimSpace(line[5:])
-				if gjson.GetBytes(data, "type").String() == "response.completed" {
-					if detail, ok := parseCodexUsage(data); ok {
+		for {
+			frame, errRead := readCodexSSEFrame(reader)
+			if len(frame) > 0 {
+				appendAPIResponseChunk(ctx, e.cfg, frame)
+				rawPayload := codexSSEPayload(frame)
+				payload := rawPayload
+				payload = normalizeCodexWebsocketCompletion(payload)
+				if gjson.GetBytes(payload, "type").String() == "response.completed" {
+					if detail, ok := parseCodexUsage(payload); ok {
 						reporter.publish(ctx, detail)
 					}
 				}
-			}
 
-			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, originalPayload, body, bytes.Clone(line), &param)
-			for i := range chunks {
-				out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}
+				translatedInput := frame
+				if len(payload) > 0 && !bytes.Equal(payload, rawPayload) {
+					translatedInput = encodeCodexWebsocketAsSSE(payload)
+					translatedInput = append(translatedInput, '\n', '\n')
+				}
+
+				chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, originalPayload, body, translatedInput, &param)
+				for i := range chunks {
+					out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}
+				}
 			}
-		}
-		if errScan := scanner.Err(); errScan != nil {
-			recordAPIResponseError(ctx, e.cfg, errScan)
+			if errRead == nil {
+				continue
+			}
+			if errRead == io.EOF {
+				return
+			}
+			recordAPIResponseError(ctx, e.cfg, errRead)
 			reporter.publishFailure(ctx)
-			out <- cliproxyexecutor.StreamChunk{Err: errScan}
+			out <- cliproxyexecutor.StreamChunk{Err: errRead}
+			return
 		}
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
+}
+
+func readCodexSSEFrame(reader *bufio.Reader) ([]byte, error) {
+	if reader == nil {
+		return nil, io.EOF
+	}
+
+	var frame []byte
+	for {
+		line, err := reader.ReadBytes('\n')
+		if len(line) > 0 {
+			frame = append(frame, line...)
+			if bytes.Equal(line, []byte("\n")) || bytes.Equal(line, []byte("\r\n")) {
+				return frame, nil
+			}
+		}
+		if err == nil {
+			continue
+		}
+		if err == io.EOF && len(frame) > 0 {
+			return frame, io.EOF
+		}
+		return frame, err
+	}
+}
+
+func codexSSEPayload(frame []byte) []byte {
+	trimmed := bytes.TrimSpace(frame)
+	if len(trimmed) == 0 {
+		return nil
+	}
+	for _, line := range bytes.Split(trimmed, []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if !bytes.HasPrefix(line, dataTag) {
+			continue
+		}
+		payload := bytes.TrimSpace(line[len(dataTag):])
+		if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) {
+			return payload
+		}
+		return bytes.Clone(payload)
+	}
+	if json.Valid(trimmed) {
+		return bytes.Clone(trimmed)
+	}
+	return nil
 }
 
 func (e *CodexExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {

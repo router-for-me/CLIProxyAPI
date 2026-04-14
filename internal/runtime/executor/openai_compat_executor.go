@@ -544,10 +544,12 @@ func synthesizeOpenAIResponsesCompletion(modelName string) [][]byte {
 	createdChunk = append(createdChunk, "event: response.created\n"...)
 	createdChunk = append(createdChunk, "data: "...)
 	createdChunk = append(createdChunk, created...)
+	createdChunk = append(createdChunk, '\n', '\n')
 	completedChunk := make([]byte, 0, len(completed)+36)
 	completedChunk = append(completedChunk, "event: response.completed\n"...)
 	completedChunk = append(completedChunk, "data: "...)
 	completedChunk = append(completedChunk, completed...)
+	completedChunk = append(completedChunk, '\n', '\n')
 	return [][]byte{createdChunk, completedChunk}
 }
 

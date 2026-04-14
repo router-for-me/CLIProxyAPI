@@ -6,6 +6,7 @@ package handlers
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -22,6 +23,9 @@ import (
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
+	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 	"golang.org/x/net/context"
 )
 
@@ -50,6 +54,7 @@ const idempotencyKeyMetadataKey = "idempotency_key"
 const (
 	defaultStreamingKeepAliveSeconds = 0
 	defaultStreamingBootstrapRetries = 0
+	maxThinkingFallbackRetries       = 6
 )
 
 type pinnedAuthContextKey struct{}
@@ -466,6 +471,189 @@ func appendAPIResponse(c *gin.Context, data []byte) {
 	c.Set("API_RESPONSE", bytes.Clone(data))
 }
 
+func extractThinkingFallbackMessage(err error) string {
+	if err == nil {
+		return ""
+	}
+	raw := strings.TrimSpace(err.Error())
+	if raw == "" {
+		return ""
+	}
+	parse := func(candidate string) string {
+		if candidate == "" || !gjson.Valid(candidate) {
+			return ""
+		}
+		if msg := strings.TrimSpace(gjson.Get(candidate, "error.message").String()); msg != "" {
+			return msg
+		}
+		if msg := strings.TrimSpace(gjson.Get(candidate, "message").String()); msg != "" {
+			return msg
+		}
+		return ""
+	}
+	if msg := parse(raw); msg != "" {
+		return msg
+	}
+	if idx := strings.Index(raw, "{"); idx >= 0 && idx < len(raw) {
+		if msg := parse(strings.TrimSpace(raw[idx:])); msg != "" {
+			return msg
+		}
+	}
+	return raw
+}
+
+func shouldFallbackThinkingEffort(err error) bool {
+	if err == nil {
+		return false
+	}
+	var thinkingErr *thinking.ThinkingError
+	if errors.As(err, &thinkingErr) && thinkingErr != nil {
+		switch thinkingErr.Code {
+		case thinking.ErrLevelNotSupported, thinking.ErrBudgetOutOfRange:
+			return true
+		}
+	}
+	msg := strings.ToLower(strings.TrimSpace(extractThinkingFallbackMessage(err)))
+	if msg == "" {
+		return false
+	}
+	if strings.Contains(msg, "valid levels") && strings.Contains(msg, "not supported") {
+		return true
+	}
+	hasThinkingKeyword := strings.Contains(msg, "reasoning_effort") ||
+		strings.Contains(msg, "reasoning.effort") ||
+		(strings.Contains(msg, "reasoning") && strings.Contains(msg, "effort")) ||
+		strings.Contains(msg, "thinking")
+	hasUnsupportedSignal := strings.Contains(msg, "not supported") ||
+		strings.Contains(msg, "unsupported") ||
+		strings.Contains(msg, "out of range") ||
+		strings.Contains(msg, "invalid")
+	return hasThinkingKeyword && hasUnsupportedSignal
+}
+
+func nextLowerThinkingEffort(current string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(current)) {
+	case "max":
+		return "xhigh", true
+	case "xhigh":
+		return "high", true
+	case "high":
+		return "medium", true
+	case "medium":
+		return "low", true
+	case "low":
+		return "minimal", true
+	case "minimal":
+		return "none", true
+	default:
+		return "", false
+	}
+}
+
+func parseThinkingEffort(req coreexecutor.Request) (string, bool) {
+	suffix := thinking.ParseSuffix(req.Model)
+	if suffix.HasSuffix {
+		if level, ok := thinking.ParseLevelSuffix(suffix.RawSuffix); ok {
+			return strings.ToLower(string(level)), true
+		}
+	}
+	if len(req.Payload) == 0 || !gjson.ValidBytes(req.Payload) {
+		return "", false
+	}
+	for _, path := range []string{"reasoning.effort", "reasoning_effort", "output_config.effort"} {
+		value := strings.ToLower(strings.TrimSpace(gjson.GetBytes(req.Payload, path).String()))
+		if value == "" {
+			continue
+		}
+		switch value {
+		case "max", "xhigh", "high", "medium", "low", "minimal", "none":
+			return value, true
+		}
+	}
+	return "", false
+}
+
+func rewriteThinkingEffortInPayload(payload []byte, effort string, modelName string) ([]byte, bool) {
+	if len(payload) == 0 || !gjson.ValidBytes(payload) {
+		return payload, false
+	}
+	out := bytes.Clone(payload)
+	changed := false
+	setString := func(path, value string) {
+		if !gjson.GetBytes(out, path).Exists() {
+			return
+		}
+		updated, err := sjson.SetBytes(out, path, value)
+		if err != nil {
+			return
+		}
+		out = updated
+		changed = true
+	}
+	setString("reasoning.effort", effort)
+	setString("reasoning_effort", effort)
+	setString("output_config.effort", effort)
+	if modelName != "" && gjson.GetBytes(out, "model").Exists() {
+		updated, err := sjson.SetBytes(out, "model", modelName)
+		if err == nil {
+			out = updated
+			changed = true
+		}
+	}
+	return out, changed
+}
+
+func downgradeRequestThinkingEffort(ctx context.Context, providers []string, req coreexecutor.Request, opts coreexecutor.Options, cause error) (coreexecutor.Request, coreexecutor.Options, bool) {
+	current, ok := parseThinkingEffort(req)
+	if !ok {
+		return req, opts, false
+	}
+	next, ok := nextLowerThinkingEffort(current)
+	if !ok {
+		return req, opts, false
+	}
+
+	newReq := req
+	newOpts := opts
+	changed := false
+
+	suffix := thinking.ParseSuffix(req.Model)
+	if suffix.HasSuffix {
+		if _, ok := thinking.ParseLevelSuffix(suffix.RawSuffix); ok {
+			base := strings.TrimSpace(suffix.ModelName)
+			if base != "" {
+				newReq.Model = fmt.Sprintf("%s(%s)", base, next)
+				changed = true
+			}
+		}
+	}
+
+	if updatedPayload, payloadChanged := rewriteThinkingEffortInPayload(newReq.Payload, next, newReq.Model); payloadChanged {
+		newReq.Payload = updatedPayload
+		changed = true
+	}
+	if len(newOpts.OriginalRequest) > 0 {
+		if updatedOriginal, originalChanged := rewriteThinkingEffortInPayload(newOpts.OriginalRequest, next, newReq.Model); originalChanged {
+			newOpts.OriginalRequest = updatedOriginal
+			changed = true
+		}
+	}
+
+	if !changed {
+		return req, opts, false
+	}
+
+	log.WithFields(log.Fields{
+		"request_id": logging.GetRequestID(ctx),
+		"providers":  strings.Join(providers, ","),
+		"model":      req.Model,
+		"from":       current,
+		"to":         next,
+		"error":      strings.TrimSpace(extractThinkingFallbackMessage(cause)),
+	}).Warn("thinking: effort fallback applied for request retry |")
+	return newReq, newOpts, true
+}
+
 // ExecuteWithAuthManager executes a non-streaming request via the core auth manager.
 // This path is the only supported execution route.
 func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) ([]byte, http.Header, *interfaces.ErrorMessage) {
@@ -490,8 +678,26 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 		SourceFormat:    sdktranslator.FromString(handlerType),
 	}
 	opts.Metadata = reqMeta
-	resp, err := h.AuthManager.Execute(ctx, providers, req, opts)
-	if err != nil {
+	var (
+		resp coreexecutor.Response
+		err  error
+	)
+	thinkingFallbackRetries := 0
+	for {
+		if reqMeta != nil {
+			reqMeta[coreexecutor.RequestedModelMetadataKey] = req.Model
+		}
+		resp, err = h.AuthManager.Execute(ctx, providers, req, opts)
+		if err == nil {
+			break
+		}
+		if thinkingFallbackRetries < maxThinkingFallbackRetries && shouldFallbackThinkingEffort(err) {
+			if nextReq, nextOpts, ok := downgradeRequestThinkingEffort(ctx, providers, req, opts, err); ok {
+				req, opts = nextReq, nextOpts
+				thinkingFallbackRetries++
+				continue
+			}
+		}
 		status := http.StatusInternalServerError
 		if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
 			if code := se.StatusCode(); code > 0 {
@@ -586,8 +792,26 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 		SourceFormat:    sdktranslator.FromString(handlerType),
 	}
 	opts.Metadata = reqMeta
-	streamResult, err := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
-	if err != nil {
+	var (
+		streamResult *coreexecutor.StreamResult
+		err          error
+	)
+	thinkingFallbackRetries := 0
+	for {
+		if reqMeta != nil {
+			reqMeta[coreexecutor.RequestedModelMetadataKey] = req.Model
+		}
+		streamResult, err = h.AuthManager.ExecuteStream(ctx, providers, req, opts)
+		if err == nil {
+			break
+		}
+		if thinkingFallbackRetries < maxThinkingFallbackRetries && shouldFallbackThinkingEffort(err) {
+			if nextReq, nextOpts, ok := downgradeRequestThinkingEffort(ctx, providers, req, opts, err); ok {
+				req, opts = nextReq, nextOpts
+				thinkingFallbackRetries++
+				continue
+			}
+		}
 		errChan := make(chan *interfaces.ErrorMessage, 1)
 		status := http.StatusInternalServerError
 		if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
@@ -625,7 +849,19 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 		bootstrapRetries := 0
 		maxBootstrapRetries := StreamingBootstrapRetries(h.Cfg)
 		var responsesLifecycle *openAIResponsesStreamLifecycle
+		var responsesSSEValidationCarry []byte
+		var responsesPayloadCarry []byte
 		if handlerType == "openai-response" {
+			responsesLifecycle = &openAIResponsesStreamLifecycle{}
+		}
+		resetPrePayloadState := func() {
+			if handlerType != "openai-response" {
+				return
+			}
+			// We have not emitted anything downstream yet; discard partial parser/lifecycle
+			// state before switching to a fresh upstream stream.
+			responsesSSEValidationCarry = nil
+			responsesPayloadCarry = nil
 			responsesLifecycle = &openAIResponsesStreamLifecycle{}
 		}
 
@@ -677,76 +913,130 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 
 	outer:
 		for {
-			for {
-				var chunk coreexecutor.StreamChunk
-				var ok bool
-				if ctx != nil {
-					select {
-					case <-ctx.Done():
-						return
-					case chunk, ok = <-chunks:
-					}
-				} else {
-					chunk, ok = <-chunks
-				}
-				if !ok {
-					if responsesLifecycle != nil && sentPayload && responsesLifecycle.NeedsSyntheticCompletion() {
-						if synthetic := responsesLifecycle.SyntheticCompletionChunk(); len(synthetic) > 0 {
-							if okSendData := sendData(synthetic); !okSendData {
-								return
-							}
-						}
-					}
+			var chunk coreexecutor.StreamChunk
+			var ok bool
+			if ctx != nil {
+				select {
+				case <-ctx.Done():
 					return
+				case chunk, ok = <-chunks:
 				}
-				if chunk.Err != nil {
-					streamErr := chunk.Err
-					// Safe bootstrap recovery: if the upstream fails before any payload bytes are sent,
-					// retry a few times (to allow auth rotation / transient recovery) and then attempt model fallback.
-					if !sentPayload {
-						if bootstrapRetries < maxBootstrapRetries && bootstrapEligible(streamErr) {
-							bootstrapRetries++
-							retryResult, retryErr := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
-							if retryErr == nil {
-								if passthroughHeadersEnabled {
-									replaceHeader(upstreamHeaders, FilterUpstreamHeaders(retryResult.Headers))
-								}
-								chunks = retryResult.Chunks
-								continue outer
-							}
-							streamErr = retryErr
-						}
-					}
+			} else {
+				chunk, ok = <-chunks
+			}
 
-					status := http.StatusInternalServerError
-					if se, ok := streamErr.(interface{ StatusCode() int }); ok && se != nil {
-						if code := se.StatusCode(); code > 0 {
-							status = code
-						}
+			if !ok {
+				if handlerType == "openai-response" {
+					if err := validateSSEDataJSONWithCarry(&responsesSSEValidationCarry, nil, true); err != nil {
+						_ = sendErr(&interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: err})
+						return
 					}
-					var addon http.Header
-					if he, ok := streamErr.(interface{ Headers() http.Header }); ok && he != nil {
-						if hdr := he.Headers(); hdr != nil {
-							addon = hdr.Clone()
+					if len(responsesPayloadCarry) > 0 {
+						sentPayload = true
+						if okSendData := sendData(cloneBytes(responsesPayloadCarry)); !okSendData {
+							return
 						}
+						responsesPayloadCarry = nil
 					}
-					_ = sendErr(&interfaces.ErrorMessage{StatusCode: status, Error: streamErr, Addon: addon})
-					return
 				}
-				if len(chunk.Payload) > 0 {
-					if responsesLifecycle != nil {
-						responsesLifecycle.Observe(chunk.Payload)
-					}
-					if handlerType == "openai-response" {
-						if err := validateSSEDataJSON(chunk.Payload); err != nil {
-							_ = sendErr(&interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: err})
+				if responsesLifecycle != nil && sentPayload && responsesLifecycle.NeedsSyntheticCompletion() {
+					if synthetic := responsesLifecycle.SyntheticCompletionChunk(); len(synthetic) > 0 {
+						if okSendData := sendData(synthetic); !okSendData {
 							return
 						}
 					}
-					sentPayload = true
-					if okSendData := sendData(cloneBytes(chunk.Payload)); !okSendData {
+				}
+				return
+			}
+
+			if chunk.Err != nil {
+				streamErr := chunk.Err
+				// Safe bootstrap recovery: if the upstream fails before any payload bytes are sent,
+				// retry a few times (to allow auth rotation / transient recovery) and then attempt model fallback.
+				if !sentPayload {
+					if bootstrapRetries < maxBootstrapRetries && bootstrapEligible(streamErr) {
+						bootstrapRetries++
+						resetPrePayloadState()
+						if reqMeta != nil {
+							reqMeta[coreexecutor.RequestedModelMetadataKey] = req.Model
+						}
+						retryResult, retryErr := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
+						if retryErr == nil {
+							if passthroughHeadersEnabled {
+								replaceHeader(upstreamHeaders, FilterUpstreamHeaders(retryResult.Headers))
+							}
+							chunks = retryResult.Chunks
+							continue outer
+						}
+						streamErr = retryErr
+					}
+
+					for thinkingFallbackRetries < maxThinkingFallbackRetries && shouldFallbackThinkingEffort(streamErr) {
+						nextReq, nextOpts, okFallback := downgradeRequestThinkingEffort(ctx, providers, req, opts, streamErr)
+						if !okFallback {
+							break
+						}
+						req, opts = nextReq, nextOpts
+						thinkingFallbackRetries++
+						resetPrePayloadState()
+						if reqMeta != nil {
+							reqMeta[coreexecutor.RequestedModelMetadataKey] = req.Model
+						}
+						retryResult, retryErr := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
+						if retryErr == nil {
+							if passthroughHeadersEnabled {
+								replaceHeader(upstreamHeaders, FilterUpstreamHeaders(retryResult.Headers))
+							}
+							chunks = retryResult.Chunks
+							bootstrapRetries = 0
+							continue outer
+						}
+						streamErr = retryErr
+					}
+				}
+
+				status := http.StatusInternalServerError
+				if se, ok := streamErr.(interface{ StatusCode() int }); ok && se != nil {
+					if code := se.StatusCode(); code > 0 {
+						status = code
+					}
+				}
+				var addon http.Header
+				if he, ok := streamErr.(interface{ Headers() http.Header }); ok && he != nil {
+					if hdr := he.Headers(); hdr != nil {
+						addon = hdr.Clone()
+					}
+				}
+				_ = sendErr(&interfaces.ErrorMessage{StatusCode: status, Error: streamErr, Addon: addon})
+				return
+			}
+
+			if len(chunk.Payload) > 0 {
+				if responsesLifecycle != nil {
+					responsesLifecycle.Observe(chunk.Payload)
+				}
+				if handlerType == "openai-response" {
+					if err := validateSSEDataJSONWithCarry(&responsesSSEValidationCarry, chunk.Payload, false); err != nil {
+						_ = sendErr(&interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: err})
 						return
 					}
+					if len(responsesSSEValidationCarry) > 0 {
+						responsesPayloadCarry = append(responsesPayloadCarry, chunk.Payload...)
+						continue
+					}
+					if len(responsesPayloadCarry) > 0 {
+						responsesPayloadCarry = append(responsesPayloadCarry, chunk.Payload...)
+						sentPayload = true
+						if okSendData := sendData(cloneBytes(responsesPayloadCarry)); !okSendData {
+							return
+						}
+						responsesPayloadCarry = nil
+						continue
+					}
+				}
+				sentPayload = true
+				if okSendData := sendData(cloneBytes(chunk.Payload)); !okSendData {
+					return
 				}
 			}
 		}
@@ -754,33 +1044,91 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 	return dataChan, upstreamHeaders, errChan
 }
 
-func validateSSEDataJSON(chunk []byte) error {
-	for _, line := range bytes.Split(chunk, []byte("\n")) {
-		line = bytes.TrimSpace(line)
-		if len(line) == 0 {
-			continue
-		}
-		if !bytes.HasPrefix(line, []byte("data:")) {
-			continue
-		}
-		data := bytes.TrimSpace(line[5:])
-		if len(data) == 0 {
-			continue
-		}
-		if bytes.Equal(data, []byte("[DONE]")) {
-			continue
-		}
-		if json.Valid(data) {
-			continue
-		}
-		const max = 512
-		preview := data
-		if len(preview) > max {
-			preview = preview[:max]
-		}
-		return fmt.Errorf("invalid SSE data JSON (len=%d): %q", len(data), preview)
+func validateSSEDataJSONWithCarry(carry *[]byte, chunk []byte, finalize bool) error {
+	if carry == nil {
+		tmp := []byte(nil)
+		carry = &tmp
 	}
+	buf := make([]byte, 0, len(*carry)+len(chunk))
+	buf = append(buf, *carry...)
+	buf = append(buf, chunk...)
+	*carry = nil
+
+	lines := bytes.Split(buf, []byte("\n"))
+	if len(lines) == 0 {
+		return nil
+	}
+	endsWithNewline := len(buf) > 0 && buf[len(buf)-1] == '\n'
+	lastIdx := len(lines) - 1
+	limit := len(lines)
+	if !finalize && !endsWithNewline {
+		limit = lastIdx
+	}
+	for i := 0; i < limit; i++ {
+		if err := validateSSEDataJSONLine(lines[i]); err != nil {
+			return err
+		}
+	}
+
+	if finalize || endsWithNewline {
+		if !endsWithNewline && lastIdx >= 0 {
+			if err := validateSSEDataJSONLine(lines[lastIdx]); err != nil {
+				return err
+			}
+		}
+		*carry = nil
+		return nil
+	}
+
+	tail := bytes.TrimRight(lines[lastIdx], "\r")
+	trimmed := bytes.TrimSpace(tail)
+	if len(trimmed) == 0 {
+		*carry = nil
+		return nil
+	}
+	if bytes.HasPrefix(trimmed, []byte("data:")) {
+		data := bytes.TrimSpace(trimmed[5:])
+		if len(data) == 0 || bytes.Equal(data, []byte("[DONE]")) || json.Valid(data) {
+			*carry = nil
+			return nil
+		}
+	}
+	*carry = bytes.Clone(tail)
 	return nil
+}
+
+func validateSSEDataJSONLine(line []byte) error {
+	line = bytes.TrimSpace(bytes.TrimRight(line, "\r"))
+	if len(line) == 0 {
+		return nil
+	}
+	if bytes.HasPrefix(line, []byte(":")) ||
+		bytes.HasPrefix(line, []byte("event:")) ||
+		bytes.HasPrefix(line, []byte("id:")) ||
+		bytes.HasPrefix(line, []byte("retry:")) {
+		return nil
+	}
+	if !bytes.HasPrefix(line, []byte("data:")) {
+		return nil
+	}
+	data := bytes.TrimSpace(line[5:])
+	if len(data) == 0 || bytes.Equal(data, []byte("[DONE]")) {
+		return nil
+	}
+	if json.Valid(data) {
+		return nil
+	}
+	const max = 512
+	preview := data
+	if len(preview) > max {
+		preview = preview[:max]
+	}
+	return fmt.Errorf("invalid SSE data JSON (len=%d): %q", len(data), preview)
+}
+
+func validateSSEDataJSON(chunk []byte) error {
+	var carry []byte
+	return validateSSEDataJSONWithCarry(&carry, chunk, true)
 }
 
 func statusFromError(err error) int {

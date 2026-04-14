@@ -247,6 +247,38 @@ func TestNormalizeResponsesWebsocketRequestWithPreviousResponseIDMergedWhenIncre
 	}
 }
 
+func TestNormalizeResponsesWebsocketPrewarmFollowUpUsesFreshCreateRequest(t *testing.T) {
+	lastRequest := []byte(`{"model":"test-model","stream":true,"instructions":"be helpful","input":[]}`)
+	raw := []byte(`{"type":"response.create","previous_response_id":"resp_prewarm_test","input":[{"type":"message","id":"msg-1"}],"generate":false}`)
+
+	normalized, next, errMsg := normalizeResponsesWebsocketPrewarmFollowUp(raw, nil, nil, lastRequest, "resp_prewarm_test")
+	if errMsg != nil {
+		t.Fatalf("unexpected error: %v", errMsg.Error)
+	}
+	if gjson.GetBytes(normalized, "previous_response_id").Exists() {
+		t.Fatalf("previous_response_id must be removed for synthetic prewarm follow-up")
+	}
+	if gjson.GetBytes(normalized, "generate").Exists() {
+		t.Fatalf("generate must be removed for synthetic prewarm follow-up")
+	}
+	if gjson.GetBytes(normalized, "model").String() != "test-model" {
+		t.Fatalf("unexpected model: %s", gjson.GetBytes(normalized, "model").String())
+	}
+	if gjson.GetBytes(normalized, "instructions").String() != "be helpful" {
+		t.Fatalf("unexpected instructions: %s", gjson.GetBytes(normalized, "instructions").String())
+	}
+	if !gjson.GetBytes(normalized, "stream").Bool() {
+		t.Fatalf("expected stream=true")
+	}
+	input := gjson.GetBytes(normalized, "input").Array()
+	if len(input) != 1 || input[0].Get("id").String() != "msg-1" {
+		t.Fatalf("unexpected input: %s", normalized)
+	}
+	if !bytes.Equal(next, normalized) {
+		t.Fatalf("next request snapshot should match normalized request")
+	}
+}
+
 func TestNormalizeResponsesWebsocketRequestAppend(t *testing.T) {
 	lastRequest := []byte(`{"model":"test-model","stream":true,"input":[{"type":"message","id":"msg-1"}]}`)
 	lastResponseOutput := []byte(`[
@@ -308,6 +340,29 @@ func TestWebsocketJSONPayloadsFromPlainJSONChunk(t *testing.T) {
 	}
 	if gjson.GetBytes(payloads[0], "type").String() != "response.completed" {
 		t.Fatalf("unexpected payload type: %s", gjson.GetBytes(payloads[0], "type").String())
+	}
+}
+
+func TestWebsocketJSONPayloadsFromChunkWithCarry_ReassemblesSplitFrame(t *testing.T) {
+	part1 := []byte("event: response.completed\ndata: {\"type\":\"response.completed\"")
+	payloads1, carry := websocketJSONPayloadsFromChunkWithCarry(nil, part1, false)
+	if len(payloads1) != 0 {
+		t.Fatalf("payloads1 len = %d, want 0", len(payloads1))
+	}
+	if len(carry) == 0 {
+		t.Fatalf("expected non-empty carry for split frame")
+	}
+
+	part2 := []byte(",\"response\":{\"id\":\"resp-1\"}}\n\n")
+	payloads2, carry2 := websocketJSONPayloadsFromChunkWithCarry(carry, part2, false)
+	if len(payloads2) != 1 {
+		t.Fatalf("payloads2 len = %d, want 1", len(payloads2))
+	}
+	if len(carry2) != 0 {
+		t.Fatalf("carry2 len = %d, want 0", len(carry2))
+	}
+	if gjson.GetBytes(payloads2[0], "type").String() != "response.completed" {
+		t.Fatalf("unexpected payload type: %s", gjson.GetBytes(payloads2[0], "type").String())
 	}
 }
 
@@ -478,6 +533,7 @@ func TestWebsocketUpstreamSupportsIncrementalInputForModel(t *testing.T) {
 		t.Fatalf("Register auth: %v", err)
 	}
 	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "test-model"}})
+	manager.RefreshSchedulerEntry(auth.ID)
 	t.Cleanup(func() {
 		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
 	})
@@ -500,6 +556,7 @@ func TestResponsesWebsocketPrewarmHandledLocallyForSSEUpstream(t *testing.T) {
 		t.Fatalf("Register auth: %v", err)
 	}
 	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "test-model"}})
+	manager.RefreshSchedulerEntry(auth.ID)
 	t.Cleanup(func() {
 		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
 	})
@@ -617,6 +674,8 @@ func TestResponsesWebsocketPinsOnlyWebsocketCapableAuth(t *testing.T) {
 
 	registry.GetGlobalRegistry().RegisterClient(authSSE.ID, authSSE.Provider, []*registry.ModelInfo{{ID: "test-model"}})
 	registry.GetGlobalRegistry().RegisterClient(authWS.ID, authWS.Provider, []*registry.ModelInfo{{ID: "test-model"}})
+	manager.RefreshSchedulerEntry(authSSE.ID)
+	manager.RefreshSchedulerEntry(authWS.ID)
 	t.Cleanup(func() {
 		registry.GetGlobalRegistry().UnregisterClient(authSSE.ID)
 		registry.GetGlobalRegistry().UnregisterClient(authWS.ID)

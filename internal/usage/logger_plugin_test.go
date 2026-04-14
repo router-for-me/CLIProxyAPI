@@ -94,3 +94,32 @@ func TestRequestStatisticsMergeSnapshotDedupIgnoresLatency(t *testing.T) {
 		t.Fatalf("details len = %d, want 1", len(details))
 	}
 }
+
+func TestRequestStatisticsRecordSkipsFailedZeroTokenDetail(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Record(context.Background(), coreusage.Record{
+		APIKey:      "test-key",
+		Model:       "gpt-5.4",
+		RequestedAt: time.Date(2026, 3, 20, 13, 0, 0, 0, time.UTC),
+		Failed:      true,
+		Detail: coreusage.Detail{
+			InputTokens:     0,
+			OutputTokens:    0,
+			ReasoningTokens: 0,
+			CachedTokens:    0,
+			TotalTokens:     0,
+		},
+	})
+
+	snapshot := stats.Snapshot()
+	if snapshot.TotalRequests != 1 {
+		t.Fatalf("total_requests = %d, want 1", snapshot.TotalRequests)
+	}
+	if snapshot.FailureCount != 1 {
+		t.Fatalf("failure_count = %d, want 1", snapshot.FailureCount)
+	}
+	details := snapshot.APIs["test-key"].Models["gpt-5.4"].Details
+	if len(details) != 0 {
+		t.Fatalf("details len = %d, want 0", len(details))
+	}
+}

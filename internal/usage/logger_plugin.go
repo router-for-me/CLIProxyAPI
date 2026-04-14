@@ -222,6 +222,9 @@ func (s *RequestStatistics) updateAPIStats(stats *apiStats, model string, detail
 	}
 	modelStatsValue.TotalRequests++
 	modelStatsValue.TotalTokens += detail.Tokens.TotalTokens
+	if shouldSkipDetail(detail) {
+		return
+	}
 	modelStatsValue.Details = append(modelStatsValue.Details, detail)
 }
 
@@ -466,6 +469,18 @@ func normaliseTokenStats(tokens TokenStats) TokenStats {
 		tokens.TotalTokens = tokens.InputTokens + tokens.OutputTokens + tokens.ReasoningTokens + tokens.CachedTokens
 	}
 	return tokens
+}
+
+func shouldSkipDetail(detail RequestDetail) bool {
+	if !detail.Failed {
+		return false
+	}
+	tokens := detail.Tokens
+	return tokens.InputTokens == 0 &&
+		tokens.OutputTokens == 0 &&
+		tokens.ReasoningTokens == 0 &&
+		tokens.CachedTokens == 0 &&
+		tokens.TotalTokens == 0
 }
 
 func normaliseLatency(latency time.Duration) int64 {

@@ -954,19 +954,23 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 				compat := &s.cfg.OpenAICompatibility[i]
 				if strings.EqualFold(compat.Name, compatName) {
 					isCompatAuth = true
-					// Convert compatibility models to registry models
+					// Convert compatibility models to registry models.
+					// Thinking capability resolution priority:
+					// 1) explicit config thinking
+					// 2) static built-in model metadata
+					// 3) unknown => passthrough (UserDefined=true, no strict local validation)
 					ms := make([]*ModelInfo, 0, len(compat.Models))
 					for j := range compat.Models {
 						m := compat.Models[j]
 						// Use alias as model ID, fallback to name if alias is empty
-						modelID := m.Alias
+						modelID := strings.TrimSpace(m.Alias)
 						if modelID == "" {
-							modelID = m.Name
+							modelID = strings.TrimSpace(m.Name)
 						}
-						thinking := m.Thinking
-						if thinking == nil {
-							thinking = &registry.ThinkingSupport{Levels: []string{"low", "medium", "high"}}
+						if modelID == "" {
+							continue
 						}
+						thinking, userDefined := resolveOpenAICompatThinkingSupport(m, modelID)
 						ms = append(ms, &ModelInfo{
 							ID:          modelID,
 							Object:      "model",
@@ -974,7 +978,7 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 							OwnedBy:     compat.Name,
 							Type:        "openai-compatibility",
 							DisplayName: modelID,
-							UserDefined: false,
+							UserDefined: userDefined,
 							Thinking:    thinking,
 						})
 					}
@@ -1393,6 +1397,28 @@ func buildCodexConfigModels(entry *config.CodexKey) []*ModelInfo {
 		return nil
 	}
 	return buildConfigModels(entry.Models, "openai", "openai")
+}
+
+func resolveOpenAICompatThinkingSupport(model config.OpenAICompatibilityModel, modelID string) (*registry.ThinkingSupport, bool) {
+	if model.Thinking != nil {
+		return model.Thinking, false
+	}
+
+	candidates := []string{
+		strings.TrimSpace(modelID),
+		strings.TrimSpace(model.Name),
+	}
+	for _, candidate := range candidates {
+		if candidate == "" {
+			continue
+		}
+		if upstream := registry.LookupStaticModelInfo(candidate); upstream != nil && upstream.Thinking != nil {
+			return upstream.Thinking, false
+		}
+	}
+
+	// Unknown capability: keep passthrough mode and let upstream validate effort.
+	return nil, true
 }
 
 func rewriteModelInfoName(name, oldID, newID string) string {

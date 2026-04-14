@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -152,6 +153,20 @@ type authAwareStreamExecutor struct {
 
 type invalidJSONStreamExecutor struct{}
 
+type splitJSONAcrossChunksStreamExecutor struct{}
+
+type thinkingFallbackStreamExecutor struct {
+	mu     sync.Mutex
+	models []string
+	calls  int
+}
+
+type splitThenThinkingFallbackStreamExecutor struct {
+	mu     sync.Mutex
+	models []string
+	calls  int
+}
+
 type createdThenCloseStreamExecutor struct {
 	mu    sync.Mutex
 	calls int
@@ -278,6 +293,146 @@ func (e *invalidJSONStreamExecutor) HttpRequest(ctx context.Context, auth *corea
 		Message:    "HttpRequest not implemented",
 		HTTPStatus: http.StatusNotImplemented,
 	}
+}
+
+func (e *splitJSONAcrossChunksStreamExecutor) Identifier() string { return "codex" }
+
+func (e *splitJSONAcrossChunksStreamExecutor) Execute(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, &coreauth.Error{Code: "not_implemented", Message: "Execute not implemented"}
+}
+
+func (e *splitJSONAcrossChunksStreamExecutor) ExecuteStream(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+	ch := make(chan coreexecutor.StreamChunk, 2)
+	ch <- coreexecutor.StreamChunk{Payload: []byte("event: response.completed\ndata: {\"type\":\"response.completed\"")}
+	ch <- coreexecutor.StreamChunk{Payload: []byte(",\"response\":{\"id\":\"resp-1\",\"output\":[]}}\n\n")}
+	close(ch)
+	return &coreexecutor.StreamResult{Chunks: ch}, nil
+}
+
+func (e *splitJSONAcrossChunksStreamExecutor) Refresh(ctx context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+	return auth, nil
+}
+
+func (e *splitJSONAcrossChunksStreamExecutor) CountTokens(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, &coreauth.Error{Code: "not_implemented", Message: "CountTokens not implemented"}
+}
+
+func (e *splitJSONAcrossChunksStreamExecutor) HttpRequest(ctx context.Context, auth *coreauth.Auth, req *http.Request) (*http.Response, error) {
+	return nil, &coreauth.Error{
+		Code:       "not_implemented",
+		Message:    "HttpRequest not implemented",
+		HTTPStatus: http.StatusNotImplemented,
+	}
+}
+
+func (e *thinkingFallbackStreamExecutor) Identifier() string { return "codex" }
+
+func (e *thinkingFallbackStreamExecutor) Execute(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, &coreauth.Error{Code: "not_implemented", Message: "Execute not implemented"}
+}
+
+func (e *thinkingFallbackStreamExecutor) ExecuteStream(_ context.Context, _ *coreauth.Auth, req coreexecutor.Request, _ coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+	e.mu.Lock()
+	e.calls++
+	e.models = append(e.models, req.Model)
+	call := e.calls
+	model := req.Model
+	e.mu.Unlock()
+
+	if call == 1 {
+		return nil, &coreauth.Error{
+			Code:       "invalid_request",
+			Message:    `{"error":{"message":"level \"xhigh\" not supported, valid levels: high"}}`,
+			Retryable:  false,
+			HTTPStatus: http.StatusBadRequest,
+		}
+	}
+
+	ch := make(chan coreexecutor.StreamChunk, 1)
+	ch <- coreexecutor.StreamChunk{Payload: []byte(fmt.Sprintf("model=%s", model))}
+	close(ch)
+	return &coreexecutor.StreamResult{Chunks: ch}, nil
+}
+
+func (e *thinkingFallbackStreamExecutor) Refresh(ctx context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+	return auth, nil
+}
+
+func (e *thinkingFallbackStreamExecutor) CountTokens(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, &coreauth.Error{Code: "not_implemented", Message: "CountTokens not implemented"}
+}
+
+func (e *thinkingFallbackStreamExecutor) HttpRequest(ctx context.Context, auth *coreauth.Auth, req *http.Request) (*http.Response, error) {
+	return nil, &coreauth.Error{
+		Code:       "not_implemented",
+		Message:    "HttpRequest not implemented",
+		HTTPStatus: http.StatusNotImplemented,
+	}
+}
+
+func (e *thinkingFallbackStreamExecutor) Models() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	out := make([]string, len(e.models))
+	copy(out, e.models)
+	return out
+}
+
+func (e *splitThenThinkingFallbackStreamExecutor) Identifier() string { return "codex" }
+
+func (e *splitThenThinkingFallbackStreamExecutor) Execute(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, &coreauth.Error{Code: "not_implemented", Message: "Execute not implemented"}
+}
+
+func (e *splitThenThinkingFallbackStreamExecutor) ExecuteStream(_ context.Context, _ *coreauth.Auth, req coreexecutor.Request, _ coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+	e.mu.Lock()
+	e.calls++
+	e.models = append(e.models, req.Model)
+	call := e.calls
+	e.mu.Unlock()
+
+	ch := make(chan coreexecutor.StreamChunk, 2)
+	if call == 1 {
+		ch <- coreexecutor.StreamChunk{Payload: []byte("event: response.completed\ndata: {\"type\":\"response.completed\"")}
+		ch <- coreexecutor.StreamChunk{
+			Err: &coreauth.Error{
+				Code:       "invalid_request",
+				Message:    `{"error":{"message":"level \"xhigh\" not supported, valid levels: high"}}`,
+				Retryable:  false,
+				HTTPStatus: http.StatusBadRequest,
+			},
+		}
+		close(ch)
+		return &coreexecutor.StreamResult{Chunks: ch}, nil
+	}
+
+	ch <- coreexecutor.StreamChunk{Payload: []byte("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-retry\",\"output\":[]}}\n\n")}
+	close(ch)
+	return &coreexecutor.StreamResult{Chunks: ch}, nil
+}
+
+func (e *splitThenThinkingFallbackStreamExecutor) Refresh(ctx context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+	return auth, nil
+}
+
+func (e *splitThenThinkingFallbackStreamExecutor) CountTokens(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, &coreauth.Error{Code: "not_implemented", Message: "CountTokens not implemented"}
+}
+
+func (e *splitThenThinkingFallbackStreamExecutor) HttpRequest(ctx context.Context, auth *coreauth.Auth, req *http.Request) (*http.Response, error) {
+	return nil, &coreauth.Error{
+		Code:       "not_implemented",
+		Message:    "HttpRequest not implemented",
+		HTTPStatus: http.StatusNotImplemented,
+	}
+}
+
+func (e *splitThenThinkingFallbackStreamExecutor) Models() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	out := make([]string, len(e.models))
+	copy(out, e.models)
+	return out
 }
 
 func (e *authAwareStreamExecutor) Identifier() string { return "codex" }
@@ -694,6 +849,141 @@ func TestExecuteStreamWithAuthManager_ValidatesOpenAIResponsesStreamDataJSON(t *
 	}
 	if !gotErr {
 		t.Fatalf("expected terminal error")
+	}
+}
+
+func TestExecuteStreamWithAuthManager_AllowsSplitOpenAIResponsesJSONAcrossChunks(t *testing.T) {
+	executor := &splitJSONAcrossChunksStreamExecutor{}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+
+	auth := &coreauth.Auth{
+		ID:       "auth-split",
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("manager.Register(auth): %v", err)
+	}
+	registerTestModel(t, manager, auth)
+
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(context.Background(), "openai-response", "test-model", []byte(`{"model":"test-model"}`), "")
+	if dataChan == nil || errChan == nil {
+		t.Fatalf("expected non-nil channels")
+	}
+
+	var got strings.Builder
+	for chunk := range dataChan {
+		got.Write(chunk)
+	}
+	for msg := range errChan {
+		if msg != nil {
+			t.Fatalf("unexpected error: %+v", msg)
+		}
+	}
+	if !strings.Contains(got.String(), "response.completed") {
+		t.Fatalf("expected completed payload, got %q", got.String())
+	}
+}
+
+func TestExecuteStreamWithAuthManager_FallbacksThinkingEffortBeforeFirstPayload(t *testing.T) {
+	executor := &thinkingFallbackStreamExecutor{}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+
+	auth := &coreauth.Auth{
+		ID:       "auth-thinking-fallback",
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("manager.Register(auth): %v", err)
+	}
+	registerTestModel(t, manager, auth)
+
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(
+		context.Background(),
+		"openai",
+		"test-model(xhigh)",
+		[]byte(`{"model":"test-model(xhigh)","reasoning_effort":"xhigh"}`),
+		"",
+	)
+	if dataChan == nil || errChan == nil {
+		t.Fatalf("expected non-nil channels")
+	}
+
+	var got strings.Builder
+	for chunk := range dataChan {
+		got.Write(chunk)
+	}
+	for msg := range errChan {
+		if msg != nil {
+			t.Fatalf("unexpected error: %+v", msg)
+		}
+	}
+
+	models := executor.Models()
+	if len(models) < 2 {
+		t.Fatalf("expected at least 2 attempts, got %v", models)
+	}
+	if models[0] != "test-model(xhigh)" {
+		t.Fatalf("first attempt model = %q, want %q", models[0], "test-model(xhigh)")
+	}
+	if models[1] != "test-model(high)" {
+		t.Fatalf("second attempt model = %q, want %q", models[1], "test-model(high)")
+	}
+	if !strings.Contains(got.String(), "model=test-model(high)") {
+		t.Fatalf("expected downgraded model response, got %q", got.String())
+	}
+}
+
+func TestExecuteStreamWithAuthManager_ClearsSSECarryBeforeThinkingFallbackRetry(t *testing.T) {
+	executor := &splitThenThinkingFallbackStreamExecutor{}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+
+	auth := &coreauth.Auth{
+		ID:       "auth-thinking-carry-reset",
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("manager.Register(auth): %v", err)
+	}
+	registerTestModel(t, manager, auth)
+
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(
+		context.Background(),
+		"openai-response",
+		"test-model(xhigh)",
+		[]byte(`{"model":"test-model(xhigh)","reasoning_effort":"xhigh"}`),
+		"",
+	)
+	if dataChan == nil || errChan == nil {
+		t.Fatalf("expected non-nil channels")
+	}
+
+	var got strings.Builder
+	for chunk := range dataChan {
+		got.Write(chunk)
+	}
+	for msg := range errChan {
+		if msg != nil {
+			t.Fatalf("unexpected error: %+v", msg)
+		}
+	}
+	models := executor.Models()
+	if len(models) < 2 {
+		t.Fatalf("expected at least 2 attempts, got %v", models)
+	}
+	if models[0] != "test-model(xhigh)" || models[1] != "test-model(high)" {
+		t.Fatalf("unexpected attempt models: %v", models)
+	}
+	if !strings.Contains(got.String(), "\"id\":\"resp-retry\"") {
+		t.Fatalf("expected retry payload to pass through cleanly, got %q", got.String())
 	}
 }
 

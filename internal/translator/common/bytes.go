@@ -33,12 +33,13 @@ func ClaudeInputTokensJSON(count int64) []byte {
 }
 
 func SSEEventData(event string, payload []byte) []byte {
-	out := make([]byte, 0, len(event)+len(payload)+14)
+	out := make([]byte, 0, len(event)+len(payload)+16)
 	out = append(out, "event: "...)
 	out = append(out, event...)
 	out = append(out, '\n')
 	out = append(out, "data: "...)
 	out = append(out, payload...)
+	out = append(out, '\n', '\n')
 	return out
 }
 

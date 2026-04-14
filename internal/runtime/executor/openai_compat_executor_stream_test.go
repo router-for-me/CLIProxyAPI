@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
@@ -118,6 +119,18 @@ func TestOpenAICompatExecutorExecuteStream_ResponsesEmptyUpstreamSynthesizesComp
 	}
 	if !gotCompleted {
 		t.Fatal("expected synthetic response.completed event")
+	}
+}
+
+func TestSynthesizeOpenAIResponsesCompletion_UsesValidSSEDelimiter(t *testing.T) {
+	chunks := synthesizeOpenAIResponsesCompletion("glm-4.7")
+	if len(chunks) != 2 {
+		t.Fatalf("chunks len = %d, want 2", len(chunks))
+	}
+	for i, chunk := range chunks {
+		if !strings.HasSuffix(string(chunk), "\n\n") {
+			t.Fatalf("chunk[%d] missing SSE frame delimiter: %q", i, string(chunk))
+		}
 	}
 }
 

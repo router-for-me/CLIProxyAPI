@@ -136,3 +136,13 @@ The embedded server calls this automatically for built‑in providers; for custo
 - Toggle debug logs: Management API GET/PUT `/v0/management/debug`
 - Hot reload changes in `config.yaml` and `auths/` are picked up automatically by the watcher
 
+## Streaming Responses Notes
+
+When implementing or modifying a provider executor that serves `/v1/responses` streaming traffic, keep the SSE contract strict:
+
+- Read and forward complete SSE frames instead of scanning line-by-line. Event boundaries are defined by the blank line delimiter (`\n\n` or `\r\n\r\n`).
+- Translators may normalize bare `data:` payloads into standard SSE frames, but they must not wrap an already complete frame again.
+- SSE validators and handlers must accept standard control lines such as `event:`, `id:`, `retry:`, and comment lines beginning with `:`.
+- For OpenAI Responses streams, the downstream client must receive a terminal `response.completed` event whenever the upstream completed successfully. If an upstream closes cleanly without that terminal event, synthesize a completion event as a last-resort fallback.
+
+These rules matter for Codex-style upstreams in particular: it is possible for usage accounting to succeed server-side while the client still reports `stream closed before response.completed` if the completion frame is broken, rewrapped, or dropped during translation.

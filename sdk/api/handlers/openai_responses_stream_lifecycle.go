@@ -80,6 +80,7 @@ func (l *openAIResponsesStreamLifecycle) SyntheticCompletionChunk() []byte {
 	chunk = append(chunk, "event: response.completed\n"...)
 	chunk = append(chunk, "data: "...)
 	chunk = append(chunk, completed...)
+	chunk = append(chunk, '\n', '\n')
 	return chunk
 }
 

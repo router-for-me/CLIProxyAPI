@@ -129,3 +129,13 @@ cliproxy.GlobalModelRegistry().RegisterClient(authID, "myprov", models)
 - 切换调试日志：管理 API GET/PUT `/v0/management/debug`
 - 热更新：`config.yaml` 与 `auths/` 变化会自动被侦测并应用
 
+## 流式 Responses 注意事项
+
+当你实现或修改承载 `/v1/responses` 流式请求的 provider 执行器时，必须严格遵守 SSE 契约：
+
+- 按完整 SSE frame 读取和转发，而不是按单行扫描。事件边界由空行分隔符决定，即 `\n\n` 或 `\r\n\r\n`。
+- 翻译器可以把裸 `data:` 负载标准化为完整 SSE frame，但不能对已经完整的 frame 再包一层。
+- SSE 校验器与 handler 必须接受标准控制行，例如 `event:`、`id:`、`retry:`，以及以 `:` 开头的注释行。
+- 对 OpenAI Responses 流来说，只要上游成功完成，下游客户端就必须收到终止事件 `response.completed`。如果上游正常关闭但缺失这个终止事件，应在最后兜底补一个 synthetic completion 事件。
+
+这些约束对 Codex 一类上游尤其重要：如果 completion frame 在读取、翻译或转发过程中被拆坏、重复包裹或丢失，就可能出现“服务端 usage 已记成功，但客户端仍报 `stream closed before response.completed`”的现象。

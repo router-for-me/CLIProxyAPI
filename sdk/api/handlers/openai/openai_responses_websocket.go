@@ -81,6 +81,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 	var lastRequest []byte
 	lastResponseOutput := []byte("[]")
 	pinnedAuthID := ""
+	lastSyntheticPrewarmResponseID := ""
 
 	for {
 		msgType, payload, errReadMessage := conn.ReadMessage()
@@ -128,6 +129,15 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			lastResponseOutput,
 			allowIncrementalInputWithPreviousResponseID,
 		)
+		if errMsg == nil && lastSyntheticPrewarmResponseID != "" {
+			requestJSON, updatedLastRequest, errMsg = normalizeResponsesWebsocketPrewarmFollowUp(
+				payload,
+				requestJSON,
+				updatedLastRequest,
+				lastRequest,
+				lastSyntheticPrewarmResponseID,
+			)
+		}
 		if errMsg != nil {
 			h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), errMsg)
 			markAPIResponseTimestamp(c)
@@ -159,8 +169,9 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 				updatedLastRequest = updated
 			}
 			lastRequest = updatedLastRequest
+			lastSyntheticPrewarmResponseID = prewarmSyntheticResponseID(requestJSON)
 			lastResponseOutput = []byte("[]")
-			if errWrite := writeResponsesWebsocketSyntheticPrewarm(c, conn, requestJSON, &wsBodyLog, passthroughSessionID); errWrite != nil {
+			if errWrite := writeResponsesWebsocketSyntheticPrewarm(c, conn, requestJSON, lastSyntheticPrewarmResponseID, &wsBodyLog, passthroughSessionID); errWrite != nil {
 				wsTerminateErr = errWrite
 				appendWebsocketEvent(&wsBodyLog, "disconnect", []byte(errWrite.Error()))
 				return
@@ -168,6 +179,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			continue
 		}
 		lastRequest = updatedLastRequest
+		lastSyntheticPrewarmResponseID = ""
 
 		modelName := gjson.GetBytes(requestJSON, "model").String()
 		cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
@@ -488,14 +500,51 @@ func shouldHandleResponsesWebsocketPrewarmLocally(rawJSON []byte, lastRequest []
 	return generateResult.Exists() && !generateResult.Bool()
 }
 
+func normalizeResponsesWebsocketPrewarmFollowUp(rawJSON []byte, requestJSON []byte, updatedLastRequest []byte, lastRequest []byte, syntheticResponseID string) ([]byte, []byte, *interfaces.ErrorMessage) {
+	if syntheticResponseID == "" {
+		return requestJSON, updatedLastRequest, nil
+	}
+	if strings.TrimSpace(gjson.GetBytes(rawJSON, "previous_response_id").String()) != syntheticResponseID {
+		return requestJSON, updatedLastRequest, nil
+	}
+	normalized, errDelete := sjson.DeleteBytes(rawJSON, "type")
+	if errDelete != nil {
+		normalized = bytes.Clone(rawJSON)
+	}
+	normalized, _ = sjson.DeleteBytes(normalized, "previous_response_id")
+	normalized, _ = sjson.DeleteBytes(normalized, "generate")
+	if !gjson.GetBytes(normalized, "model").Exists() {
+		modelName := strings.TrimSpace(gjson.GetBytes(lastRequest, "model").String())
+		if modelName != "" {
+			normalized, _ = sjson.SetBytes(normalized, "model", modelName)
+		}
+	}
+	if !gjson.GetBytes(normalized, "instructions").Exists() {
+		instructions := gjson.GetBytes(lastRequest, "instructions")
+		if instructions.Exists() {
+			normalized, _ = sjson.SetRawBytes(normalized, "instructions", []byte(instructions.Raw))
+		}
+	}
+	normalized, _ = sjson.SetBytes(normalized, "stream", true)
+	if !gjson.GetBytes(normalized, "input").Exists() {
+		normalized, _ = sjson.SetRawBytes(normalized, "input", []byte("[]"))
+	}
+	return normalized, bytes.Clone(normalized), nil
+}
+
+func prewarmSyntheticResponseID(requestJSON []byte) string {
+	return "resp_prewarm_" + uuid.NewString()
+}
+
 func writeResponsesWebsocketSyntheticPrewarm(
 	c *gin.Context,
 	conn *websocket.Conn,
 	requestJSON []byte,
+	responseID string,
 	wsBodyLog *strings.Builder,
 	sessionID string,
 ) error {
-	payloads, errPayloads := syntheticResponsesWebsocketPrewarmPayloads(requestJSON)
+	payloads, errPayloads := syntheticResponsesWebsocketPrewarmPayloads(requestJSON, responseID)
 	if errPayloads != nil {
 		return errPayloads
 	}
@@ -522,8 +571,10 @@ func writeResponsesWebsocketSyntheticPrewarm(
 	return nil
 }
 
-func syntheticResponsesWebsocketPrewarmPayloads(requestJSON []byte) ([][]byte, error) {
-	responseID := "resp_prewarm_" + uuid.NewString()
+func syntheticResponsesWebsocketPrewarmPayloads(requestJSON []byte, responseID string) ([][]byte, error) {
+	if strings.TrimSpace(responseID) == "" {
+		responseID = prewarmSyntheticResponseID(requestJSON)
+	}
 	createdAt := time.Now().Unix()
 	modelName := strings.TrimSpace(gjson.GetBytes(requestJSON, "model").String())
 
@@ -613,6 +664,27 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 ) ([]byte, error) {
 	completed := false
 	completedOutput := []byte("[]")
+	chunkCarry := []byte(nil)
+
+	writePayload := func(payload []byte) error {
+		eventType := gjson.GetBytes(payload, "type").String()
+		if eventType == wsEventTypeCompleted {
+			completed = true
+			completedOutput = responseCompletedOutputFromPayload(payload)
+		}
+		markAPIResponseTimestamp(c)
+		appendWebsocketEvent(wsBodyLog, "response", payload)
+		if errWrite := conn.WriteMessage(websocket.TextMessage, payload); errWrite != nil {
+			log.Warnf(
+				"responses websocket: downstream_out write failed id=%s event=%s error=%v",
+				sessionID,
+				websocketPayloadEventType(payload),
+				errWrite,
+			)
+			return errWrite
+		}
+		return nil
+	}
 
 	for {
 		select {
@@ -655,6 +727,14 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 			return completedOutput, nil
 		case chunk, ok := <-data:
 			if !ok {
+				payloads, remaining := websocketJSONPayloadsFromChunkWithCarry(chunkCarry, nil, true)
+				chunkCarry = remaining
+				for i := range payloads {
+					if errWrite := writePayload(payloads[i]); errWrite != nil {
+						cancel(errWrite)
+						return completedOutput, errWrite
+					}
+				}
 				if !completed {
 					errMsg := &interfaces.ErrorMessage{
 						StatusCode: http.StatusRequestTimeout,
@@ -688,29 +768,10 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 				return completedOutput, nil
 			}
 
-			payloads := websocketJSONPayloadsFromChunk(chunk)
+			payloads, remaining := websocketJSONPayloadsFromChunkWithCarry(chunkCarry, chunk, false)
+			chunkCarry = remaining
 			for i := range payloads {
-				eventType := gjson.GetBytes(payloads[i], "type").String()
-				if eventType == wsEventTypeCompleted {
-					completed = true
-					completedOutput = responseCompletedOutputFromPayload(payloads[i])
-				}
-				markAPIResponseTimestamp(c)
-				appendWebsocketEvent(wsBodyLog, "response", payloads[i])
-				// log.Infof(
-				// 	"responses websocket: downstream_out id=%s type=%d event=%s payload=%s",
-				// 	sessionID,
-				// 	websocket.TextMessage,
-				// 	websocketPayloadEventType(payloads[i]),
-				// 	websocketPayloadPreview(payloads[i]),
-				// )
-				if errWrite := conn.WriteMessage(websocket.TextMessage, payloads[i]); errWrite != nil {
-					log.Warnf(
-						"responses websocket: downstream_out write failed id=%s event=%s error=%v",
-						sessionID,
-						websocketPayloadEventType(payloads[i]),
-						errWrite,
-					)
+				if errWrite := writePayload(payloads[i]); errWrite != nil {
 					cancel(errWrite)
 					return completedOutput, errWrite
 				}
@@ -728,36 +789,61 @@ func responseCompletedOutputFromPayload(payload []byte) []byte {
 }
 
 func websocketJSONPayloadsFromChunk(chunk []byte) [][]byte {
-	payloads := make([][]byte, 0, 2)
-	lines := bytes.Split(chunk, []byte("\n"))
-	for i := range lines {
-		line := bytes.TrimSpace(lines[i])
-		if len(line) == 0 || bytes.HasPrefix(line, []byte("event:")) {
-			continue
-		}
-		if bytes.HasPrefix(line, []byte("data:")) {
-			line = bytes.TrimSpace(line[len("data:"):])
-		}
-		if len(line) == 0 || bytes.Equal(line, []byte(wsDoneMarker)) {
-			continue
-		}
-		if json.Valid(line) {
-			payloads = append(payloads, bytes.Clone(line))
-		}
-	}
-
-	if len(payloads) > 0 {
-		return payloads
-	}
-
-	trimmed := bytes.TrimSpace(chunk)
-	if bytes.HasPrefix(trimmed, []byte("data:")) {
-		trimmed = bytes.TrimSpace(trimmed[len("data:"):])
-	}
-	if len(trimmed) > 0 && !bytes.Equal(trimmed, []byte(wsDoneMarker)) && json.Valid(trimmed) {
-		payloads = append(payloads, bytes.Clone(trimmed))
-	}
+	payloads, _ := websocketJSONPayloadsFromChunkWithCarry(nil, chunk, true)
 	return payloads
+}
+
+func websocketJSONPayloadsFromChunkWithCarry(carry []byte, chunk []byte, finalize bool) ([][]byte, []byte) {
+	payloads := make([][]byte, 0, 2)
+	buf := make([]byte, 0, len(carry)+len(chunk))
+	buf = append(buf, carry...)
+	buf = append(buf, chunk...)
+
+	parseFrame := func(frame []byte) {
+		lines := bytes.Split(frame, []byte("\n"))
+		for i := range lines {
+			line := bytes.TrimSpace(lines[i])
+			if len(line) == 0 || bytes.HasPrefix(line, []byte("event:")) {
+				continue
+			}
+			if bytes.HasPrefix(line, []byte("data:")) {
+				line = bytes.TrimSpace(line[len("data:"):])
+			}
+			if len(line) == 0 || bytes.Equal(line, []byte(wsDoneMarker)) {
+				continue
+			}
+			if json.Valid(line) {
+				payloads = append(payloads, bytes.Clone(line))
+			}
+		}
+	}
+
+	for {
+		idx := bytes.Index(buf, []byte("\n\n"))
+		if idx < 0 {
+			break
+		}
+		parseFrame(buf[:idx])
+		buf = buf[idx+2:]
+	}
+
+	if len(payloads) == 0 {
+		trimmed := bytes.TrimSpace(buf)
+		if len(trimmed) > 0 && !bytes.Equal(trimmed, []byte(wsDoneMarker)) && json.Valid(trimmed) {
+			payloads = append(payloads, bytes.Clone(trimmed))
+			buf = nil
+		}
+	}
+
+	if finalize && len(buf) > 0 {
+		parseFrame(buf)
+		buf = nil
+	}
+
+	if len(buf) == 0 {
+		return payloads, nil
+	}
+	return payloads, bytes.Clone(buf)
 }
 
 func writeResponsesWebsocketError(conn *websocket.Conn, errMsg *interfaces.ErrorMessage) ([]byte, error) {
