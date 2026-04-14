@@ -535,6 +535,16 @@ func (h *BaseAPIHandler) buildExecutionMetadata(ctx context.Context, providers [
 	if authID, ok := h.sessionAffinityGet(ctx, sessionKey); ok {
 		if h.AuthManager.CanUsePinnedAuth(authID, providers, normalizedModel) {
 			meta[coreexecutor.PinnedAuthMetadataKey] = authID
+			if releaseCallback := pinnedAuthReleaseCallbackFromExecutionMetadata(meta); releaseCallback != nil {
+				meta[coreexecutor.PinnedAuthReleaseCallbackMetadataKey] = func() {
+					releaseCallback()
+					h.sessionAffinityDelete(ctx, sessionKey)
+				}
+			} else {
+				meta[coreexecutor.PinnedAuthReleaseCallbackMetadataKey] = func() {
+					h.sessionAffinityDelete(ctx, sessionKey)
+				}
+			}
 		} else {
 			h.sessionAffinityDelete(ctx, sessionKey)
 		}
@@ -561,6 +571,14 @@ func selectedAuthCallbackFromExecutionMetadata(meta map[string]any) func(string)
 		return nil
 	}
 	callback, _ := meta[coreexecutor.SelectedAuthCallbackMetadataKey].(func(string))
+	return callback
+}
+
+func pinnedAuthReleaseCallbackFromExecutionMetadata(meta map[string]any) func() {
+	if len(meta) == 0 {
+		return nil
+	}
+	callback, _ := meta[coreexecutor.PinnedAuthReleaseCallbackMetadataKey].(func())
 	return callback
 }
 

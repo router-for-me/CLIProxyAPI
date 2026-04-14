@@ -13,6 +13,8 @@ const RequestedModelMetadataKey = "requested_model"
 const (
 	// PinnedAuthMetadataKey locks execution to a specific auth ID.
 	PinnedAuthMetadataKey = "pinned_auth_id"
+	// PinnedAuthReleaseCallbackMetadataKey carries an optional callback invoked when a pinned auth is released.
+	PinnedAuthReleaseCallbackMetadataKey = "pinned_auth_release_callback"
 	// InitialStickySessionMetadataKey marks the first request of a sticky session before any auth is bound.
 	InitialStickySessionMetadataKey = "initial_sticky_session"
 	// SelectedAuthMetadataKey stores the auth ID selected by the scheduler.

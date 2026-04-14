@@ -1344,6 +1344,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		}
 		attempted[auth.ID] = struct{}{}
 		var authErr error
+		pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
 		for _, upstreamModel := range models {
 			resultModel := m.stateModelForExecution(auth, routeModel, upstreamModel, pooled)
 			execReq := req
@@ -1366,6 +1367,10 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 					return cliproxyexecutor.Response{}, errExec
 				}
 				authErr = errExec
+				if pinnedAuthID != "" && auth.ID == pinnedAuthID && shouldReleasePinnedAuthAfterError(errExec) {
+					releasePinnedAuthSelection(opts.Metadata)
+					break
+				}
 				continue
 			}
 			m.MarkResult(execCtx, result)
@@ -1424,6 +1429,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		}
 		attempted[auth.ID] = struct{}{}
 		var authErr error
+		pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
 		for _, upstreamModel := range models {
 			resultModel := m.stateModelForExecution(auth, routeModel, upstreamModel, pooled)
 			execReq := req
@@ -1446,6 +1452,10 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 					return cliproxyexecutor.Response{}, errExec
 				}
 				authErr = errExec
+				if pinnedAuthID != "" && auth.ID == pinnedAuthID && shouldReleasePinnedAuthAfterError(errExec) {
+					releasePinnedAuthSelection(opts.Metadata)
+					break
+				}
 				continue
 			}
 			m.MarkResult(execCtx, result)
@@ -1518,6 +1528,10 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			if isRequestInvalidError(errStream) {
 				return nil, errStream
 			}
+			pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
+			if pinnedAuthID != "" && auth.ID == pinnedAuthID && shouldReleasePinnedAuthAfterError(errStream) {
+				releasePinnedAuthSelection(opts.Metadata)
+			}
 			lastErr = errStream
 			continue
 		}
@@ -1579,6 +1593,82 @@ func pinnedAuthIDFromMetadata(meta map[string]any) string {
 		return strings.TrimSpace(string(val))
 	default:
 		return ""
+	}
+}
+
+func pinnedAuthReleaseCallbackFromMetadata(meta map[string]any) func() {
+	if len(meta) == 0 {
+		return nil
+	}
+	callback, _ := meta[cliproxyexecutor.PinnedAuthReleaseCallbackMetadataKey].(func())
+	return callback
+}
+
+func releasePinnedAuthSelection(meta map[string]any) {
+	if len(meta) == 0 {
+		return
+	}
+	delete(meta, cliproxyexecutor.PinnedAuthMetadataKey)
+	if callback := pinnedAuthReleaseCallbackFromMetadata(meta); callback != nil {
+		callback()
+	}
+}
+
+func isQuotaExceededMessage(message string) bool {
+	lower := strings.ToLower(strings.TrimSpace(message))
+	if lower == "" {
+		return false
+	}
+	patterns := [...]string{
+		"usage_limit_reached",
+		"usage limit has been reached",
+		"usage limit reached",
+		"quota exhausted",
+		"quota exceeded",
+		"insufficient_quota",
+		"exceeded your current quota",
+		"not enough credits",
+		"payment_required",
+	}
+	for _, pattern := range patterns {
+		if strings.Contains(lower, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
+func isModelCapacityMessage(message string) bool {
+	lower := strings.ToLower(strings.TrimSpace(message))
+	if lower == "" {
+		return false
+	}
+	return strings.Contains(lower, "selected model is at capacity") ||
+		strings.Contains(lower, "model is at capacity. please try a different model")
+}
+
+func shouldReleasePinnedAuthAfterError(err error) bool {
+	if err == nil {
+		return false
+	}
+	status := statusCodeFromError(err)
+	if status == 0 {
+		return false
+	}
+	message := err.Error()
+	if isModelCapacityMessage(message) {
+		return false
+	}
+	switch status {
+	case http.StatusPaymentRequired, http.StatusForbidden:
+		return isQuotaExceededMessage(message)
+	case http.StatusTooManyRequests:
+		if isQuotaExceededMessage(message) {
+			return true
+		}
+		return retryAfterFromError(err) != nil
+	default:
+		return false
 	}
 }
 

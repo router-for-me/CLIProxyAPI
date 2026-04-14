@@ -172,6 +172,43 @@ func TestBuildExecutionMetadataBindsSelectedAuthToSession(t *testing.T) {
 	}
 }
 
+func TestBuildExecutionMetadataPinnedAuthReleaseDeletesSessionBinding(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	manager := coreauth.NewManager(nil, nil, nil)
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       "auth-release",
+		Provider: "gemini",
+		Metadata: map[string]any{"token": "x"},
+	}); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	store := NewMemorySessionAffinityStore()
+	store.Set(context.Background(), "session-release", "auth-release")
+	handler := &BaseAPIHandler{
+		AuthManager:          manager,
+		SessionAffinityStore: store,
+	}
+
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	ginCtx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	ginCtx.Request.Header.Set(defaultSessionAffinityHeader, "session-release")
+
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+	meta := handler.buildExecutionMetadata(ctx, []string{"gemini"}, "", nil)
+	callback, ok := meta[coreexecutor.PinnedAuthReleaseCallbackMetadataKey].(func())
+	if !ok || callback == nil {
+		t.Fatalf("pinned auth release callback missing")
+	}
+
+	callback()
+
+	if _, ok := store.Get(context.Background(), "session-release"); ok {
+		t.Fatalf("expected session affinity binding to be deleted")
+	}
+}
+
 func TestBuildExecutionMetadataUsesConfiguredSessionAffinityHeader(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	manager := coreauth.NewManager(nil, nil, nil)
