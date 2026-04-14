@@ -12,9 +12,7 @@ import (
 	"github.com/klauspost/compress/zstd"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	"github.com/tidwall/gjson"
 )
 
@@ -113,9 +111,6 @@ func TestApplyCodexWebsocketHeadersUsesConfigDefaultsForOAuth(t *testing.T) {
 	}
 	if got := headers.Get("OpenAI-Beta"); got != codexResponsesWebsocketBetaHeaderValue {
 		t.Fatalf("OpenAI-Beta = %s, want %s", got, codexResponsesWebsocketBetaHeaderValue)
-	}
-	if got := headers.Get("Originator"); got != codexOriginator {
-		t.Fatalf("Originator = %s, want %s", got, codexOriginator)
 	}
 }
 
@@ -250,94 +245,6 @@ func TestApplyCodexHeadersUsesConfigUserAgentForOAuth(t *testing.T) {
 	if got := req.Header.Get("x-codex-beta-features"); got != "config-beta" {
 		t.Fatalf("x-codex-beta-features = %q, want %q", got, "config-beta")
 	}
-	if got := req.Header.Get("Originator"); got != codexOriginator {
-		t.Fatalf("Originator = %q, want %q", got, codexOriginator)
-	}
-	if got := req.Header.Get("OpenAI-Beta"); got != "" {
-		t.Fatalf("OpenAI-Beta = %q, want empty", got)
-	}
-}
-
-func TestApplyCodexHeadersPassesThroughSessionIDAndBackfillsClientRequestID(t *testing.T) {
-	req, err := http.NewRequest(http.MethodPost, "https://example.com/responses", nil)
-	if err != nil {
-		t.Fatalf("NewRequest() error = %v", err)
-	}
-	auth := &cliproxyauth.Auth{
-		Provider: "codex",
-		Metadata: map[string]any{"email": "user@example.com"},
-	}
-	req = req.WithContext(contextWithGinHeaders(map[string]string{
-		"Session_id": "sess-123",
-	}))
-
-	applyCodexHeaders(req, auth, "oauth-token", true, nil)
-
-	if got := req.Header.Get("Session_id"); got != "sess-123" {
-		t.Fatalf("Session_id = %q, want %q", got, "sess-123")
-	}
-	if got := req.Header.Get("X-Client-Request-Id"); got != "sess-123" {
-		t.Fatalf("X-Client-Request-Id = %q, want %q", got, "sess-123")
-	}
-}
-
-func TestApplyCodexPromptCacheHeaders_OpenAIDoesNotSynthesizeSessionFromAPIKey(t *testing.T) {
-	ctx := contextWithGinHeaders(map[string]string{})
-	if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil {
-		ginCtx.Set("apiKey", "test-api-key")
-	}
-	req := cliproxyexecutor.Request{
-		Model:   "gpt-5.3-codex",
-		Payload: []byte(`{"model":"gpt-5.3-codex"}`),
-	}
-
-	body, headers := applyCodexPromptCacheHeaders(ctx, sdktranslator.FromString("openai"), req, []byte(`{"model":"gpt-5.3-codex"}`))
-
-	if got := gjson.GetBytes(body, "prompt_cache_key").String(); got != "" {
-		t.Fatalf("prompt_cache_key = %q, want empty", got)
-	}
-	if got := headers.Get("Session_id"); got != "" {
-		t.Fatalf("Session_id = %q, want empty", got)
-	}
-}
-
-func TestApplyCodexPromptCacheHeaders_PrefersIncomingSessionID(t *testing.T) {
-	ctx := contextWithGinHeaders(map[string]string{
-		"Session_id": "sess-123",
-	})
-	if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil {
-		ginCtx.Set("apiKey", "test-api-key")
-	}
-	req := cliproxyexecutor.Request{
-		Model:   "gpt-5.3-codex",
-		Payload: []byte(`{"model":"gpt-5.3-codex"}`),
-	}
-
-	body, headers := applyCodexPromptCacheHeaders(ctx, sdktranslator.FromString("openai"), req, []byte(`{"model":"gpt-5.3-codex"}`))
-
-	if got := gjson.GetBytes(body, "prompt_cache_key").String(); got != "sess-123" {
-		t.Fatalf("prompt_cache_key = %q, want %q", got, "sess-123")
-	}
-	if got := headers.Get("Session_id"); got != "sess-123" {
-		t.Fatalf("Session_id = %q, want %q", got, "sess-123")
-	}
-}
-
-func TestApplyCodexPromptCacheHeaders_UsesPayloadConversationID(t *testing.T) {
-	ctx := contextWithGinHeaders(map[string]string{})
-	req := cliproxyexecutor.Request{
-		Model:   "gpt-5.3-codex",
-		Payload: []byte(`{"model":"gpt-5.3-codex","conversation_id":"conv-123"}`),
-	}
-
-	body, headers := applyCodexPromptCacheHeaders(ctx, sdktranslator.FromString("openai"), req, []byte(`{"model":"gpt-5.3-codex"}`))
-
-	if got := gjson.GetBytes(body, "prompt_cache_key").String(); got != "conv-123" {
-		t.Fatalf("prompt_cache_key = %q, want %q", got, "conv-123")
-	}
-	if got := headers.Get("Session_id"); got != "conv-123" {
-		t.Fatalf("Session_id = %q, want %q", got, "conv-123")
-	}
 }
 
 func TestApplyCodexHeadersPassesThroughClientIdentityHeaders(t *testing.T) {
@@ -389,7 +296,7 @@ func TestMaybeCompressCodexRequest_CompressesOAuthResponsesRequest(t *testing.T)
 	if err != nil {
 		t.Fatalf("NewRequest() error = %v", err)
 	}
-	req.Header.Set("Originator", codexOriginator)
+	req.Header.Set("Originator", "Codex Desktop")
 	enabled := true
 	cfg := &config.Config{
 		CodexHeaderDefaults: config.CodexHeaderDefaults{
@@ -446,15 +353,8 @@ func TestMaybeCompressCodexRequest_DoesNotCompressAPIKeyRequest(t *testing.T) {
 	if got := req.Header.Get("Content-Encoding"); got != "" {
 		t.Fatalf("Content-Encoding = %q, want empty", got)
 	}
-	if encoded != nil {
-		t.Fatalf("encoded = %q, want nil", string(encoded))
-	}
-	body, errRead := io.ReadAll(req.Body)
-	if errRead != nil {
-		t.Fatalf("ReadAll(req.Body) error = %v", errRead)
-	}
-	if string(body) != `{"input":[{"type":"message"}]}` {
-		t.Fatalf("body = %s", string(body))
+	if string(encoded) != `{"input":[{"type":"message"}]}` {
+		t.Fatalf("encoded body = %s", string(encoded))
 	}
 }
 
@@ -463,7 +363,7 @@ func TestMaybeCompressCodexRequest_DoesNotCompressWhenDisabled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRequest() error = %v", err)
 	}
-	req.Header.Set("Originator", codexOriginator)
+	req.Header.Set("Originator", "Codex Desktop")
 	auth := &cliproxyauth.Auth{
 		Provider: "codex",
 		Metadata: map[string]any{"email": "user@example.com"},
@@ -476,38 +376,8 @@ func TestMaybeCompressCodexRequest_DoesNotCompressWhenDisabled(t *testing.T) {
 	if got := req.Header.Get("Content-Encoding"); got != "" {
 		t.Fatalf("Content-Encoding = %q, want empty", got)
 	}
-	if encoded != nil {
-		t.Fatalf("encoded = %q, want nil", string(encoded))
-	}
-	body, errRead := io.ReadAll(req.Body)
-	if errRead != nil {
-		t.Fatalf("ReadAll(req.Body) error = %v", errRead)
-	}
-	if string(body) != `{"input":[{"type":"message"}]}` {
-		t.Fatalf("body = %s", string(body))
-	}
-}
-
-func TestMaybeCompressCodexRequest_SkipsBodyBufferingWhenUnused(t *testing.T) {
-	req, err := http.NewRequest(http.MethodPost, "https://example.com/responses", io.NopCloser(bytes.NewReader([]byte(`{"input":[{"type":"message"}]}`))))
-	if err != nil {
-		t.Fatalf("NewRequest() error = %v", err)
-	}
-	cfg := &config.Config{}
-
-	encoded, err := maybeCompressCodexRequest(req, nil, cfg)
-	if err != nil {
-		t.Fatalf("maybeCompressCodexRequest() error = %v", err)
-	}
-	if encoded != nil {
-		t.Fatalf("encoded = %q, want nil", string(encoded))
-	}
-	body, errRead := io.ReadAll(req.Body)
-	if errRead != nil {
-		t.Fatalf("ReadAll(req.Body) error = %v", errRead)
-	}
-	if string(body) != `{"input":[{"type":"message"}]}` {
-		t.Fatalf("body = %s", string(body))
+	if string(encoded) != `{"input":[{"type":"message"}]}` {
+		t.Fatalf("encoded body = %s", string(encoded))
 	}
 }
 

@@ -69,34 +69,6 @@ func TestWriteErrorResponse_AddonHeadersEnabled(t *testing.T) {
 	}
 }
 
-func TestWriteErrorResponse_AddonHeadersEnabledForNativeCodexRequests(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	recorder := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(recorder)
-	c.Request = httptest.NewRequest(http.MethodGet, "/", nil)
-	c.Request.Header.Set("Originator", "codex_cli_rs")
-
-	handler := NewBaseAPIHandlers(nil, nil)
-	handler.WriteErrorResponse(c, &interfaces.ErrorMessage{
-		StatusCode: http.StatusTooManyRequests,
-		Error:      errors.New("rate limit"),
-		Addon: http.Header{
-			"Retry-After":  {"30"},
-			"X-Request-Id": {"req-1"},
-		},
-	})
-
-	if recorder.Code != http.StatusTooManyRequests {
-		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusTooManyRequests)
-	}
-	if got := recorder.Header().Get("Retry-After"); got != "30" {
-		t.Fatalf("Retry-After = %q, want %q", got, "30")
-	}
-	if got := recorder.Header().Get("X-Request-Id"); got != "req-1" {
-		t.Fatalf("X-Request-Id = %q, want %q", got, "req-1")
-	}
-}
-
 func TestEnrichAuthSelectionError_DefaultsTo503WithContext(t *testing.T) {
 	in := &coreauth.Error{Code: "auth_not_found", Message: "no auth available"}
 	out := enrichAuthSelectionError(in, []string{"claude"}, "claude-sonnet-4-6")

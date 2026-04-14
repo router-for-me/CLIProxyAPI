@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
@@ -175,9 +176,21 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := originalPayloadSource
-	body, err := buildCodexRequestBody(e.cfg, from, to, req, opts, originalPayload, true)
+	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, false)
+	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
+
+	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
 		return resp, err
+	}
+
+	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
+	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
+	body, _ = sjson.SetBytes(body, "model", baseModel)
+	body, _ = sjson.SetBytes(body, "stream", true)
+	body = stripUnsupportedCodexFields(body, true)
+	if !gjson.GetBytes(body, "instructions").Exists() {
+		body, _ = sjson.SetBytes(body, "instructions", "")
 	}
 
 	httpURL := strings.TrimSuffix(baseURL, "/") + "/responses"
@@ -186,7 +199,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		return resp, err
 	}
 
-	body, wsHeaders := applyCodexPromptCacheHeaders(ctx, from, req, body)
+	body, wsHeaders := applyCodexPromptCacheHeaders(from, req, body)
 	wsHeaders = applyCodexWebsocketHeaders(ctx, wsHeaders, auth, apiKey, e.cfg)
 
 	var authID, authLabel, authType, authValue string
@@ -337,17 +350,9 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 			if detail, ok := helps.ParseCodexUsage(payload); ok {
 				reporter.Publish(ctx, detail)
 			}
-			if isNativeCodexSourceFormat(from) {
-				if response := gjson.GetBytes(payload, "response"); response.Exists() && response.Type == gjson.JSON {
-					resp = cliproxyexecutor.Response{Payload: []byte(response.Raw)}
-				} else {
-					resp = cliproxyexecutor.Response{Payload: payload}
-				}
-			} else {
-				var param any
-				out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, originalPayload, body, payload, &param)
-				resp = cliproxyexecutor.Response{Payload: out}
-			}
+			var param any
+			out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, originalPayload, body, payload, &param)
+			resp = cliproxyexecutor.Response{Payload: out}
 			return resp, nil
 		}
 	}
@@ -374,15 +379,15 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("codex")
-	originalPayloadSource := req.Payload
-	if len(opts.OriginalRequest) > 0 {
-		originalPayloadSource = opts.OriginalRequest
-	}
-	originalPayload := originalPayloadSource
-	body, err := buildCodexRequestBody(e.cfg, from, to, req, opts, originalPayload, true)
+	body := req.Payload
+
+	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
 		return nil, err
 	}
+
+	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
+	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, body, requestedModel)
 
 	httpURL := strings.TrimSuffix(baseURL, "/") + "/responses"
 	wsURL, err := buildCodexResponsesWebsocketURL(httpURL)
@@ -390,7 +395,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		return nil, err
 	}
 
-	body, wsHeaders := applyCodexPromptCacheHeaders(ctx, from, req, body)
+	body, wsHeaders := applyCodexPromptCacheHeaders(from, req, body)
 	wsHeaders = applyCodexWebsocketHeaders(ctx, wsHeaders, auth, apiKey, e.cfg)
 
 	var authID, authLabel, authType, authValue string
@@ -597,20 +602,12 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			}
 
 			line := encodeCodexWebsocketAsSSE(payload)
-			if isNativeCodexSourceFormat(from) {
-				if !send(cliproxyexecutor.StreamChunk{Payload: line}) {
+			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, body, body, line, &param)
+			for i := range chunks {
+				if !send(cliproxyexecutor.StreamChunk{Payload: chunks[i]}) {
 					terminateReason = "context_done"
 					terminateErr = ctx.Err()
 					return
-				}
-			} else {
-				chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, originalPayload, body, line, &param)
-				for i := range chunks {
-					if !send(cliproxyexecutor.StreamChunk{Payload: chunks[i]}) {
-						terminateReason = "context_done"
-						terminateErr = ctx.Err()
-						return
-					}
 				}
 			}
 			if eventType == "response.completed" || eventType == "response.done" {
@@ -776,16 +773,36 @@ func buildCodexResponsesWebsocketURL(httpURL string) (string, error) {
 	return parsed.String(), nil
 }
 
-func applyCodexPromptCacheHeaders(ctx context.Context, from sdktranslator.Format, req cliproxyexecutor.Request, rawJSON []byte) ([]byte, http.Header) {
+func applyCodexPromptCacheHeaders(from sdktranslator.Format, req cliproxyexecutor.Request, rawJSON []byte) ([]byte, http.Header) {
 	headers := http.Header{}
 	if len(rawJSON) == 0 {
 		return rawJSON, headers
 	}
 
-	cacheID := resolveCodexPromptCacheID(ctx, from, req)
-	if cacheID != "" {
-		rawJSON, _ = sjson.SetBytes(rawJSON, "prompt_cache_key", cacheID)
-		headers.Set("Session_id", cacheID)
+	var cache helps.CodexCache
+	if from == "claude" {
+		userIDResult := gjson.GetBytes(req.Payload, "metadata.user_id")
+		if userIDResult.Exists() {
+			key := fmt.Sprintf("%s-%s", req.Model, userIDResult.String())
+			if cached, ok := helps.GetCodexCache(key); ok {
+				cache = cached
+			} else {
+				cache = helps.CodexCache{
+					ID:     uuid.New().String(),
+					Expire: time.Now().Add(1 * time.Hour),
+				}
+				helps.SetCodexCache(key, cache)
+			}
+		}
+	} else if from == "openai-response" {
+		if promptCacheKey := gjson.GetBytes(req.Payload, "prompt_cache_key"); promptCacheKey.Exists() {
+			cache.ID = promptCacheKey.String()
+		}
+	}
+
+	if cache.ID != "" {
+		rawJSON, _ = sjson.SetBytes(rawJSON, "prompt_cache_key", cache.ID)
+		headers.Set("Session_id", cache.ID)
 	}
 
 	return rawJSON, headers
@@ -815,7 +832,6 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 	misc.EnsureHeader(headers, ginHeaders, "x-codex-turn-state", "")
 	misc.EnsureHeader(headers, ginHeaders, "x-codex-turn-metadata", "")
 	misc.EnsureHeader(headers, ginHeaders, "x-client-request-id", "")
-	misc.EnsureHeader(headers, ginHeaders, "Session_id", "")
 	misc.EnsureHeader(headers, ginHeaders, "x-codex-installation-id", "")
 	misc.EnsureHeader(headers, ginHeaders, "x-codex-window-id", "")
 	misc.EnsureHeader(headers, ginHeaders, "x-codex-parent-thread-id", "")

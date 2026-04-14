@@ -65,9 +65,6 @@ type Config struct {
 	// UsageStatisticsEnabled toggles in-memory usage aggregation; when false, usage data is discarded.
 	UsageStatisticsEnabled bool `yaml:"usage-statistics-enabled" json:"usage-statistics-enabled"`
 
-	// UsageStatisticsPersistence controls periodic summary persistence for usage statistics.
-	UsageStatisticsPersistence UsageStatisticsPersistenceConfig `yaml:"usage-statistics-persistence" json:"usage-statistics-persistence"`
-
 	// DisableCooling disables quota cooldown scheduling when true.
 	DisableCooling bool `yaml:"disable-cooling" json:"disable-cooling"`
 
@@ -168,15 +165,6 @@ type CodexHeaderDefaults struct {
 	UserAgent          string `yaml:"user-agent" json:"user-agent"`
 	BetaFeatures       string `yaml:"beta-features" json:"beta-features"`
 	RequestCompression *bool  `yaml:"request-compression,omitempty" json:"request-compression,omitempty"`
-}
-
-// UsageStatisticsPersistenceConfig controls periodic summary persistence for usage statistics.
-// Persisted data is stored as merged summary totals so file size grows with cardinality,
-// not with raw request count.
-type UsageStatisticsPersistenceConfig struct {
-	Enabled              bool   `yaml:"enabled" json:"enabled"`
-	FilePath             string `yaml:"file-path" json:"file-path"`
-	FlushIntervalSeconds int    `yaml:"flush-interval-seconds" json:"flush-interval-seconds"`
 }
 
 // TLSConfig holds HTTPS server settings.

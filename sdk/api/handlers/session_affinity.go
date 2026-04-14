@@ -472,9 +472,9 @@ func (c *sessionAffinityHotCache) Delete(sessionKey string) {
 	c.mu.Unlock()
 }
 
-func sessionAffinityKeyFromContext(ctx context.Context, providers []string, headerName string, rawJSON []byte) string {
+func sessionAffinityKeyFromContext(ctx context.Context, headerName string, rawJSON []byte) string {
 	if ctx == nil {
-		return sessionAffinityKeyFromPayloadForProviders(providers, rawJSON)
+		return sessionAffinityKeyFromPayload(rawJSON)
 	}
 	raw := ctx.Value(sessionAffinityContextKey{})
 	switch v := raw.(type) {
@@ -494,19 +494,15 @@ func sessionAffinityKeyFromContext(ctx context.Context, providers []string, head
 		if key := strings.TrimSpace(ginCtx.GetHeader(headerName)); key != "" {
 			return key
 		}
-		if isCodexProviderRequest(providers) {
-			for _, key := range []string{"Session_id", "X-Client-Request-Id"} {
-				if value := strings.TrimSpace(ginCtx.GetHeader(key)); value != "" {
-					return value
-				}
-			}
-		}
 	}
-	return sessionAffinityKeyFromPayloadForProviders(providers, rawJSON)
+	return sessionAffinityKeyFromPayload(rawJSON)
 }
 
 func sessionAffinityKeyFromPayload(rawJSON []byte) string {
-	return sessionAffinityKeyFromPayloadPaths(rawJSON, []string{
+	if len(rawJSON) == 0 || !gjson.ValidBytes(rawJSON) {
+		return ""
+	}
+	for _, path := range []string{
 		"previous_response_id",
 		"conversation_id",
 		"thread_id",
@@ -514,43 +510,12 @@ func sessionAffinityKeyFromPayload(rawJSON []byte) string {
 		"metadata.session_id",
 		"metadata.conversation_id",
 		"prompt_cache_key",
-	})
-}
-
-func sessionAffinityKeyFromPayloadForProviders(providers []string, rawJSON []byte) string {
-	if isCodexProviderRequest(providers) {
-		return sessionAffinityKeyFromPayloadPaths(rawJSON, []string{
-			"prompt_cache_key",
-			"session_id",
-			"conversation_id",
-			"thread_id",
-			"metadata.session_id",
-			"metadata.conversation_id",
-			"previous_response_id",
-		})
-	}
-	return sessionAffinityKeyFromPayload(rawJSON)
-}
-
-func sessionAffinityKeyFromPayloadPaths(rawJSON []byte, paths []string) string {
-	if len(rawJSON) == 0 || !gjson.ValidBytes(rawJSON) {
-		return ""
-	}
-	for _, path := range paths {
+	} {
 		if value := strings.TrimSpace(gjson.GetBytes(rawJSON, path).String()); value != "" {
 			return "body:" + path + ":" + value
 		}
 	}
 	return ""
-}
-
-func isCodexProviderRequest(providers []string) bool {
-	for _, provider := range providers {
-		if strings.EqualFold(strings.TrimSpace(provider), "codex") {
-			return true
-		}
-	}
-	return false
 }
 
 func (h *BaseAPIHandler) buildExecutionMetadata(ctx context.Context, providers []string, normalizedModel string, rawJSON []byte) map[string]any {
@@ -562,7 +527,7 @@ func (h *BaseAPIHandler) buildExecutionMetadata(ctx context.Context, providers [
 		return meta
 	}
 
-	sessionKey := sessionAffinityKeyFromContext(ctx, providers, h.sessionAffinityHeaderName(), rawJSON)
+	sessionKey := sessionAffinityKeyFromContext(ctx, h.sessionAffinityHeaderName(), rawJSON)
 	if sessionKey == "" {
 		return meta
 	}

@@ -193,56 +193,8 @@ func StreamingBootstrapRetries(cfg *config.SDKConfig) int {
 
 // PassthroughHeadersEnabled returns whether upstream response headers should be forwarded to clients.
 // Default is false.
-func PassthroughHeadersEnabled(cfg *config.SDKConfig, ctxs ...context.Context) bool {
-	if cfg != nil && cfg.PassthroughHeaders {
-		return true
-	}
-	for _, ctx := range ctxs {
-		if nativeCodexHeadersFromContext(ctx) {
-			return true
-		}
-	}
-	return false
-}
-
-func nativeCodexHeadersFromContext(ctx context.Context) bool {
-	if ctx == nil {
-		return false
-	}
-	ginCtx, ok := ctx.Value("gin").(*gin.Context)
-	if !ok || ginCtx == nil || ginCtx.Request == nil {
-		return false
-	}
-	return hasNativeCodexClientHeaders(ginCtx.Request.Header)
-}
-
-func hasNativeCodexClientHeaders(headers http.Header) bool {
-	if headers == nil {
-		return false
-	}
-	for _, key := range []string{
-		"Originator",
-		"OpenAI-Beta",
-		"X-Codex-Beta-Features",
-		"X-Codex-Turn-State",
-		"X-Codex-Turn-Metadata",
-		"X-ResponsesAPI-Include-Timing-Metrics",
-		"X-OpenAI-Subagent",
-		"X-Codex-Installation-Id",
-		"X-Codex-Window-Id",
-		"X-Codex-Parent-Thread-Id",
-	} {
-		if strings.TrimSpace(headers.Get(key)) != "" {
-			return true
-		}
-	}
-	return false
-}
-
-// HasNativeCodexClientHeaders reports whether the downstream request already carries
-// Codex-native client semantics and should avoid OpenAI Responses compatibility rewrites.
-func HasNativeCodexClientHeaders(headers http.Header) bool {
-	return hasNativeCodexClientHeaders(headers)
+func PassthroughHeadersEnabled(cfg *config.SDKConfig) bool {
+	return cfg != nil && cfg.PassthroughHeaders
 }
 
 func requestExecutionMetadata(ctx context.Context) map[string]any {
@@ -605,7 +557,7 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 		}
 		return nil, nil, &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
 	}
-	if !PassthroughHeadersEnabled(h.Cfg, ctx) {
+	if !PassthroughHeadersEnabled(h.Cfg) {
 		return resp.Payload, nil, nil
 	}
 	return resp.Payload, FilterUpstreamHeaders(resp.Headers), nil
@@ -652,7 +604,7 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 		}
 		return nil, nil, &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
 	}
-	if !PassthroughHeadersEnabled(h.Cfg, ctx) {
+	if !PassthroughHeadersEnabled(h.Cfg) {
 		return resp.Payload, nil, nil
 	}
 	return resp.Payload, FilterUpstreamHeaders(resp.Headers), nil
@@ -706,7 +658,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 		close(errChan)
 		return nil, nil, errChan
 	}
-	passthroughHeadersEnabled := PassthroughHeadersEnabled(h.Cfg, ctx)
+	passthroughHeadersEnabled := PassthroughHeadersEnabled(h.Cfg)
 	// Capture upstream headers from the initial connection synchronously before the goroutine starts.
 	// Keep a mutable map so bootstrap retries can replace it before first payload is sent.
 	var upstreamHeaders http.Header
@@ -995,11 +947,7 @@ func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.Erro
 	if msg != nil && msg.StatusCode > 0 {
 		status = msg.StatusCode
 	}
-	passthroughHeaders := PassthroughHeadersEnabled(h.Cfg)
-	if !passthroughHeaders && c != nil && c.Request != nil {
-		passthroughHeaders = hasNativeCodexClientHeaders(c.Request.Header)
-	}
-	if msg != nil && msg.Addon != nil && passthroughHeaders {
+	if msg != nil && msg.Addon != nil && PassthroughHeadersEnabled(h.Cfg) {
 		for key, values := range msg.Addon {
 			if len(values) == 0 {
 				continue

@@ -191,7 +191,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 				}
 			})
 		}
-		dataChan, _, errChan := h.ExecuteStreamWithAuthManager(cliCtx, responsesSourceFormat(c), modelName, requestJSON, "")
+		dataChan, _, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, requestJSON, "")
 
 		completedOutput, errForward := h.forwardResponsesWebsocket(c, conn, cliCancel, dataChan, errChan, &wsTimelineLog, passthroughSessionID)
 		if errForward != nil {
