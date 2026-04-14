@@ -10,7 +10,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -260,8 +259,7 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 					out, _ = sjson.SetBytes(out, "text.format.strict", v.Value())
 				}
 				if v := js.Get("schema"); v.Exists() {
-					normalizedSchema := util.NormalizeOpenAIResponseSchema(v.Raw)
-					out, _ = sjson.SetRawBytes(out, "text.format.schema", []byte(normalizedSchema))
+					out, _ = sjson.SetRawBytes(out, "text.format.schema", []byte(v.Raw))
 				}
 			}
 		}
