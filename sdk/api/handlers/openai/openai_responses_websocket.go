@@ -173,9 +173,6 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		cliCtx = handlers.WithExecutionSessionID(cliCtx, passthroughSessionID)
 		if pinnedAuthID != "" {
 			cliCtx = handlers.WithPinnedAuthID(cliCtx, pinnedAuthID)
-			cliCtx = handlers.WithPinnedAuthReleaseCallback(cliCtx, func() {
-				pinnedAuthID = ""
-			})
 		} else {
 			cliCtx = handlers.WithSelectedAuthIDCallback(cliCtx, func(authID string) {
 				authID = strings.TrimSpace(authID)

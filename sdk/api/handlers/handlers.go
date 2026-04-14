@@ -53,7 +53,6 @@ const (
 )
 
 type pinnedAuthContextKey struct{}
-type pinnedAuthReleaseCallbackContextKey struct{}
 type selectedAuthCallbackContextKey struct{}
 type executionSessionContextKey struct{}
 
@@ -67,17 +66,6 @@ func WithPinnedAuthID(ctx context.Context, authID string) context.Context {
 		ctx = context.Background()
 	}
 	return context.WithValue(ctx, pinnedAuthContextKey{}, authID)
-}
-
-// WithPinnedAuthReleaseCallback returns a child context that is notified when the pinned auth is released.
-func WithPinnedAuthReleaseCallback(ctx context.Context, callback func()) context.Context {
-	if callback == nil {
-		return ctx
-	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	return context.WithValue(ctx, pinnedAuthReleaseCallbackContextKey{}, callback)
 }
 
 // WithSelectedAuthIDCallback returns a child context that receives the selected auth ID.
@@ -218,13 +206,10 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 		key = logging.GenerateRequestID()
 	}
 
-	meta := make(map[string]any, 5)
+	meta := make(map[string]any, 4)
 	meta[idempotencyKeyMetadataKey] = key
 	if pinnedAuthID := pinnedAuthIDFromContext(ctx); pinnedAuthID != "" {
 		meta[coreexecutor.PinnedAuthMetadataKey] = pinnedAuthID
-	}
-	if releaseCallback := pinnedAuthReleaseCallbackFromContext(ctx); releaseCallback != nil {
-		meta[coreexecutor.PinnedAuthReleaseCallbackMetadataKey] = releaseCallback
 	}
 	if selectedCallback := selectedAuthIDCallbackFromContext(ctx); selectedCallback != nil {
 		meta[coreexecutor.SelectedAuthCallbackMetadataKey] = selectedCallback
@@ -248,17 +233,6 @@ func pinnedAuthIDFromContext(ctx context.Context) string {
 	default:
 		return ""
 	}
-}
-
-func pinnedAuthReleaseCallbackFromContext(ctx context.Context) func() {
-	if ctx == nil {
-		return nil
-	}
-	raw := ctx.Value(pinnedAuthReleaseCallbackContextKey{})
-	if callback, ok := raw.(func()); ok && callback != nil {
-		return callback
-	}
-	return nil
 }
 
 func selectedAuthIDCallbackFromContext(ctx context.Context) func(string) {

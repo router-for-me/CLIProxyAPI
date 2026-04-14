@@ -741,67 +741,6 @@ func TestManager_Execute_DisableCooling_RetriesAfter429RetryAfter(t *testing.T) 
 	}
 }
 
-func TestManager_Execute_ReleasesPinnedAuthOnUsageLimitReached(t *testing.T) {
-	m := NewManager(nil, nil, nil)
-	executor := &authFallbackExecutor{
-		id: "codex",
-		executeErrors: map[string]error{
-			"auth-pinned": &retryAfterStatusError{
-				status:     http.StatusTooManyRequests,
-				message:    `{"error":{"type":"usage_limit_reached","message":"The usage limit has been reached","resets_in_seconds":60}}`,
-				retryAfter: time.Minute,
-			},
-		},
-	}
-	m.RegisterExecutor(executor)
-
-	authPinned := &Auth{ID: "auth-pinned", Provider: "codex"}
-	authFallback := &Auth{ID: "auth-fallback", Provider: "codex"}
-	if _, errRegister := m.Register(context.Background(), authPinned); errRegister != nil {
-		t.Fatalf("register pinned auth: %v", errRegister)
-	}
-	if _, errRegister := m.Register(context.Background(), authFallback); errRegister != nil {
-		t.Fatalf("register fallback auth: %v", errRegister)
-	}
-
-	model := "gpt-5.3-codex"
-	reg := registry.GetGlobalRegistry()
-	reg.RegisterClient(authPinned.ID, "codex", []*registry.ModelInfo{{ID: model}})
-	reg.RegisterClient(authFallback.ID, "codex", []*registry.ModelInfo{{ID: model}})
-	t.Cleanup(func() {
-		reg.UnregisterClient(authPinned.ID)
-		reg.UnregisterClient(authFallback.ID)
-	})
-
-	released := 0
-	opts := cliproxyexecutor.Options{
-		Metadata: map[string]any{
-			cliproxyexecutor.PinnedAuthMetadataKey: "auth-pinned",
-			cliproxyexecutor.PinnedAuthReleaseCallbackMetadataKey: func() {
-				released++
-			},
-		},
-	}
-	resp, errExecute := m.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: model}, opts)
-	if errExecute != nil {
-		t.Fatalf("execute error: %v", errExecute)
-	}
-	if string(resp.Payload) != "auth-fallback" {
-		t.Fatalf("response payload = %q, want auth-fallback", string(resp.Payload))
-	}
-	if released != 1 {
-		t.Fatalf("release callback count = %d, want 1", released)
-	}
-
-	calls := executor.ExecuteCalls()
-	if len(calls) != 2 {
-		t.Fatalf("execute calls = %d, want 2", len(calls))
-	}
-	if calls[0] != "auth-pinned" || calls[1] != "auth-fallback" {
-		t.Fatalf("execute calls = %v, want [auth-pinned auth-fallback]", calls)
-	}
-}
-
 func TestManager_MarkResult_RequestScopedNotFoundDoesNotCooldownAuth(t *testing.T) {
 	m := NewManager(nil, nil, nil)
 
