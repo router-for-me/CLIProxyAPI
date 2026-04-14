@@ -113,3 +113,22 @@ func TestReadStreamBootstrap_OpenAIResponsesPreambleTimesOut(t *testing.T) {
 	}
 	close(ch)
 }
+
+func TestShouldRetryAfterError_ExhaustedBootstrapDoesNotCooldownRetry(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	manager.SetRetryConfig(3, 30*time.Second, 0)
+
+	err := newStreamBootstrapError(&Error{
+		Code:       "empty_stream",
+		Message:    "upstream stream closed before first payload",
+		Retryable:  true,
+		HTTPStatus: 500,
+	}, nil)
+	wait, shouldRetry := manager.shouldRetryAfterError(context.Background(), err, 0, []string{"openai-compatibility"}, "test-model", 30*time.Second)
+	if shouldRetry {
+		t.Fatalf("shouldRetry=%v wait=%v, want false", shouldRetry, wait)
+	}
+	if wait != 0 {
+		t.Fatalf("wait=%v want=0", wait)
+	}
+}

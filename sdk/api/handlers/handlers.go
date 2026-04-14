@@ -891,25 +891,28 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 			}
 		}
 
-		bootstrapEligible := func(err error) bool {
-			status := statusFromError(err)
-			if status == 0 {
+			bootstrapEligible := func(err error) bool {
+				if exhausted, ok := err.(interface{ BootstrapRetryExhausted() bool }); ok && exhausted.BootstrapRetryExhausted() {
+					return false
+				}
+				status := statusFromError(err)
+				if status == 0 {
+					if isAuthAvailabilityError(err) {
+						return false
+					}
+					return true
+				}
 				if isAuthAvailabilityError(err) {
 					return false
 				}
-				return true
+				switch status {
+				case http.StatusUnauthorized, http.StatusForbidden, http.StatusPaymentRequired,
+					http.StatusRequestTimeout, http.StatusTooManyRequests:
+					return true
+				default:
+					return status >= http.StatusInternalServerError
+				}
 			}
-			if isAuthAvailabilityError(err) {
-				return false
-			}
-			switch status {
-			case http.StatusUnauthorized, http.StatusForbidden, http.StatusPaymentRequired,
-				http.StatusRequestTimeout, http.StatusTooManyRequests:
-				return true
-			default:
-				return status >= http.StatusInternalServerError
-			}
-		}
 
 	outer:
 		for {

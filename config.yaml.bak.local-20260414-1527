@@ -1,0 +1,191 @@
+host: "0.0.0.0"
+port: 18318
+auth-dir: "/Users/joslyn/.cli-proxy-api"
+proxy-url: ""
+api-keys:
+  - quotio-local-1E1D3E21-4352-4C8B-BAAF-3D5872526952
+  - sk-H43s38wVhUl7q8VXzOOhUPDMmXb1PjN1
+  - sk-PSFvERPe0KggMsIXxR70OfnonvwGWsUX
+remote-management:
+  allow-remote: true
+  secret-key: "$2a$10$mPQytKs4o0eZonQamOdDuexoQVvv4UfZNV/MpduFW8l94xDW23lG6"
+routing:
+  strategy: "round-robin"
+quota-exceeded:
+  switch-project: true
+  switch-preview-model: true
+request-retry: 5
+max-retry-credentials: 5
+max-retry-interval: 180
+usage-statistics-enabled: true
+codex-api-key:
+  - api-key: "0H9UQ2N1-J2HJ-HE8Q-P3Y4-HEP00AJ057G6"
+    base-url: "https://yunyi.rdzhvip.com/codex"
+openai-compatibility:
+  - name: "clove"
+    base-url: "https://clove.cc.cd/v1"
+    circuit-breaker-failure-threshold: 2
+    circuit-breaker-recovery-timeout: 43200
+    api-key-entries:
+      - api-key: "sk-9bXYb3qVzHFMKaWR4r8cJyG0w7A1hDHbyoO5kuZ4BzWGvfls"
+    models:
+      - name: "claude-sonnet-4.6"
+      - name: "claude-sonnet-4.6-thinking"
+      - name: "gpt-5"
+      - name: "gpt-5.4"
+      - name: "qwen3-coder-plus"
+      - name: "qwen3-coder-flash"
+      - name: "gpt-5-nano"
+      - name: "gpt-5.3"
+      - name: "gpt-5-codex-mini"
+      - name: "gemini-3-flash"
+      - name: "gpt-5.3-codex-high"
+        alias: "gpt-5.3-codex"
+      - name: "grok-3"
+      - name: "grok-4"
+      - name: "minimaxai/minimax-m2.1"
+        alias: "MiniMax-M2.1"
+  - name: "hotaru"
+    base-url: "https://api.hotaruapi.top/v1"
+    circuit-breaker-failure-threshold: 2
+    circuit-breaker-recovery-timeout: 43200
+    api-key-entries:
+      - api-key: "sk-SIvL69mhHz53qzQucDKmjVly9xqlpuChooPaMtxWiCjPFqU1"
+    models:
+      - name: "gpt-5"
+      - name: "gpt-5-codex"
+      - name: "gpt-5-codex-high"
+        alias: "gpt-5-codex"
+      - name: "gpt-5-codex-low"
+        alias: "gpt-5-codex"
+      - name: "gpt-5-codex-medium"
+        alias: "gpt-5-codex"
+  - name: "justdoit"
+    base-url: "https://justdoitme.me/v1"
+    circuit-breaker-failure-threshold: 2
+    circuit-breaker-recovery-timeout: 43200
+    api-key-entries:
+      - api-key: "sk-Is6r8IzW4XCMXLbYDCkGRpjPyBuWGy5GF5EOe11wJ1cvWjg8"
+    models:
+      - name: "MiniMax-M2.7-highspeed"
+        alias: "MiniMax-M2.7"
+  - name: "120server"
+    base-url: "http://120.24.86.32:3000/v1"
+    circuit-breaker-failure-threshold: 2
+    circuit-breaker-recovery-timeout: 43200
+    api-key-entries:
+      - api-key: "sk-cp-db2c4e3a0daf03057c987daf31ee4d2a131e44f9e40257cd495666afd467cbf4"
+    models:
+      - name: "MiniMax-M2.5"
+      - name: "MiniMax-M2.7"
+  - name: "nih_cc"
+    base-url: "https://api.nih.cc/v1"
+    circuit-breaker-failure-threshold: 3
+    circuit-breaker-recovery-timeout: 43200
+    api-key-entries:
+      - api-key: "sk-vdQ6GKnaXCdw8vWTYS3spGDJtqxnSChtCuQM8ImtZis92Hjw"
+    models:
+      - name: "z-ai/glm5"
+        alias: "glm-5"
+      - name: "gpt-5"
+      - name: "gpt-5-codex-mini"
+      - name: "anthropic/claude-sonnet-4"
+        alias: "claude-sonnet-4"
+      - name: "gpt-5.1-codex"
+      - name: "deepseek-ai/deepseek-v3.2"
+        alias: "deepseek-v3.2"
+      - name: "gpt-5.1"
+      - name: "gpt-5.2"
+      - name: "gpt-5-codex"
+      - name: "gpt-5-codex-mini"
+      - name: "claude-sonnet-4.5"
+      - name: "claude-sonnet-4.6"
+      - name: "gpt-5.4"
+      - name: "gpt-5.4-mini"
+      - name: "moonshotai/kimi-k2-instruct"
+        alias: "kimi-k2-instruct"
+      - name: "moonshotai/kimi-k2-instruct-0905"
+        alias: "kimi-k2-instruct-0905"
+      - name: "moonshotai/kimi-k2-thinking"
+        alias: "kimi-k2-thinking"
+      - name: "moonshotai/kimi-k2.5"
+        alias: "Kimi-K2.5"
+      - name: "z-ai/glm4.7"
+        alias: "glm-4.7"
+      - name: "gpt-5.1-codex-mini"
+      - name: "gpt-5.1-codex-max"
+      - name: "gpt-5.3-codex"
+      - name: "anthropic/claude-sonnet-4.6-thinking"
+        alias: "claude-sonnet-4.6-thinking"
+      - name: "gpt-5.2-codex"
+  - name: "us-ci"
+    base-url: "https://openai.api-test.us.ci/v1"
+    circuit-breaker-failure-threshold: 2
+    circuit-breaker-recovery-timeout: 43200
+    api-key-entries:
+      - api-key: "sk-aCMa3bwGtG5qS4o4JgWLp5kOemAN09Qe1n8SWuNkFXM6XWdP"
+    models:
+      - name: "MiniMax-M2.7"
+        alias: "MiniMax-M2.7"
+      - name: "MiniMax-M2.5"
+        alias: "MiniMax-M2.5"
+      - name: "glm-5"
+        alias: "glm-5"
+      - name: "glm-5.1"
+        alias: "glm-5.1"
+      - name: "kimi-k2.5"
+        alias: "kimi-k2.5"
+      - name: "glm-5-turbo"
+        alias: "glm-5-turbo"
+      - name: "MiniMax-M2.1"
+        alias: "MiniMax-M2.1"
+      - name: "glm-4.7"
+        alias: "glm-4.7"
+  - name: "121628"
+    base-url: "https://ai.121628.xyz/v1"
+    circuit-breaker-failure-threshold: 2
+    circuit-breaker-recovery-timeout: 43200
+    api-key-entries:
+      - api-key: "sk-pa0iaYFXroAQkEwBUOUdXoWp9k9mhurflHDPBSq6rgzof60B"
+    models:
+      - name: "claude-3-5-sonnet-20241022"
+      - name: "claude-sonnet-4-20250514"
+      - name: "claude-sonnet-4-5-20250929"
+      - name: "claude-sonnet-4.6"
+      - name: "deepseek-chat"
+      - name: "deepseek-ocr"
+      - name: "deepseek-v3"
+      - name: "deepseek-v3.1"
+      - name: "deepseek-v3.1-terminus"
+      - name: "deepseek-v3.2"
+      - name: "gemini-3-flash-preview"
+        alias: "gemini-3-flash"
+      - name: "gemini-3.1-flash-lite-preview"
+      - name: "gemma-2-27b-it"
+      - name: "gemma-2-2b-it"
+      - name: "gemma-2-9b-it"
+      - name: "gemma-3-12b-it"
+      - name: "gemma-3-1b-it"
+      - name: "gemma-3-27b-it"
+      - name: "gemma-3-4b-it"
+      - name: "gemma-3n-e2b-it"
+      - name: "gemma-3n-e4b-it"
+      - name: "gemma-7b"
+      - name: "glm-4.7"
+      - name: "glm-5"
+      - name: "gpt-oss-120b"
+      - name: "kimi-k2-thinking"
+      - name: "kimi-k2.5"
+      - name: "LongCat-Flash-Chat"
+      - name: "LongCat-Flash-Lite"
+      - name: "LongCat-Flash-Thinking"
+      - name: "minimax-m2.5"
+        alias: "MiniMax-M2.5"
+      - name: "qwen3-235b"
+      - name: "qwen3-235b-Instruct"
+      - name: "qwen3-235b-thinking"
+      - name: "qwen3-coder-480b"
+      - name: "qwen3-vl-235b"
+      - name: "qwen3.5-122b"
+      - name: "qwen3.5-397b"
+      - name: "shieldgemma-9b"

@@ -46,6 +46,54 @@ func TestConvertCodexResponseToOpenAI_FirstChunkUsesRequestModelName(t *testing.
 	}
 }
 
+func TestConvertCodexResponseToOpenAI_AcceptsFullSSEFrameForDelta(t *testing.T) {
+	ctx := context.Background()
+	var param any
+
+	out := ConvertCodexResponseToOpenAI(
+		ctx,
+		"gpt-5.3-codex",
+		nil,
+		nil,
+		[]byte("event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"OK\"}\n\n"),
+		&param,
+	)
+	if len(out) != 1 {
+		t.Fatalf("expected 1 chunk, got %d", len(out))
+	}
+	if got := gjson.GetBytes(out[0], "choices.0.delta.content").String(); got != "OK" {
+		t.Fatalf("delta content = %q, want %q", got, "OK")
+	}
+}
+
+func TestConvertCodexResponseToOpenAI_AcceptsFullSSEFrameForCompleted(t *testing.T) {
+	ctx := context.Background()
+	var param any
+
+	_ = ConvertCodexResponseToOpenAI(
+		ctx,
+		"gpt-5.3-codex",
+		nil,
+		nil,
+		[]byte("event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_123\",\"created_at\":1700000000,\"model\":\"gpt-5.3-codex\"}}\n\n"),
+		&param,
+	)
+	out := ConvertCodexResponseToOpenAI(
+		ctx,
+		"gpt-5.3-codex",
+		nil,
+		nil,
+		[]byte("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_123\",\"created_at\":1700000000,\"model\":\"gpt-5.3-codex\"}}\n\n"),
+		&param,
+	)
+	if len(out) != 1 {
+		t.Fatalf("expected 1 chunk, got %d", len(out))
+	}
+	if got := gjson.GetBytes(out[0], "choices.0.finish_reason").String(); got != "stop" {
+		t.Fatalf("finish_reason = %q, want %q", got, "stop")
+	}
+}
+
 func TestConvertCodexResponseToOpenAI_ToolCallChunkOmitsNullContentFields(t *testing.T) {
 	ctx := context.Background()
 	var param any

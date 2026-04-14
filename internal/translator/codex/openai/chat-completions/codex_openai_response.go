@@ -8,6 +8,7 @@ package chat_completions
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"time"
 
 	"github.com/tidwall/gjson"
@@ -17,6 +18,35 @@ import (
 var (
 	dataTag = []byte("data:")
 )
+
+func codexChatCompletionsPayload(raw []byte) []byte {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
+		return nil
+	}
+	if bytes.HasPrefix(trimmed, dataTag) {
+		return bytes.TrimSpace(trimmed[len(dataTag):])
+	}
+	var dataLines [][]byte
+	for _, line := range bytes.Split(trimmed, []byte("\n")) {
+		line = bytes.TrimSpace(bytes.TrimRight(line, "\r"))
+		if !bytes.HasPrefix(line, dataTag) {
+			continue
+		}
+		data := bytes.TrimSpace(line[len(dataTag):])
+		dataLines = append(dataLines, data)
+	}
+	if len(dataLines) == 0 {
+		if json.Valid(trimmed) {
+			return trimmed
+		}
+		return nil
+	}
+	if len(dataLines) == 1 {
+		return dataLines[0]
+	}
+	return bytes.Join(dataLines, []byte("\n"))
+}
 
 // ConvertCliToOpenAIParams holds parameters for response conversion.
 type ConvertCliToOpenAIParams struct {
@@ -54,10 +84,11 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 		}
 	}
 
-	if !bytes.HasPrefix(rawJSON, dataTag) {
+	payload := codexChatCompletionsPayload(rawJSON)
+	if len(payload) == 0 {
 		return [][]byte{}
 	}
-	rawJSON = bytes.TrimSpace(rawJSON[5:])
+	rawJSON = payload
 
 	// Initialize the OpenAI SSE template.
 	template := []byte(`{"id":"","object":"chat.completion.chunk","created":12345,"model":"model","choices":[{"index":0,"delta":{},"finish_reason":null,"native_finish_reason":null}]}`)

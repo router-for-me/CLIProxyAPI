@@ -532,6 +532,20 @@ func (e *streamBootstrapError) Headers() http.Header {
 	return cloneHTTPHeader(e.headers)
 }
 
+func (e *streamBootstrapError) StatusCode() int {
+	if e == nil || e.cause == nil {
+		return 0
+	}
+	if se, ok := e.cause.(interface{ StatusCode() int }); ok && se != nil {
+		return se.StatusCode()
+	}
+	return 0
+}
+
+func (e *streamBootstrapError) BootstrapRetryExhausted() bool {
+	return e != nil
+}
+
 func streamErrorResult(headers http.Header, err error) *cliproxyexecutor.StreamResult {
 	ch := make(chan cliproxyexecutor.StreamChunk, 1)
 	ch <- cliproxyexecutor.StreamChunk{Err: err}
@@ -1382,7 +1396,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			if lastErr != nil {
 				var bootstrapErr *streamBootstrapError
 				if errors.As(lastErr, &bootstrapErr) && bootstrapErr != nil {
-					return streamErrorResult(bootstrapErr.Headers(), bootstrapErr.cause), nil
+					return streamErrorResult(bootstrapErr.Headers(), bootstrapErr), nil
 				}
 				return nil, lastErr
 			}
@@ -1393,7 +1407,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			if lastErr != nil {
 				var bootstrapErr *streamBootstrapError
 				if errors.As(lastErr, &bootstrapErr) && bootstrapErr != nil {
-					return streamErrorResult(bootstrapErr.Headers(), bootstrapErr.cause), nil
+					return streamErrorResult(bootstrapErr.Headers(), bootstrapErr), nil
 				}
 				return nil, lastErr
 			}
@@ -1842,6 +1856,9 @@ func (m *Manager) closestCooldownWait(providers []string, model string, attempt 
 
 func (m *Manager) shouldRetryAfterError(ctx context.Context, err error, attempt int, providers []string, model string, maxWait time.Duration) (time.Duration, bool) {
 	if err == nil {
+		return 0, false
+	}
+	if exhausted, ok := err.(interface{ BootstrapRetryExhausted() bool }); ok && exhausted.BootstrapRetryExhausted() {
 		return 0, false
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {

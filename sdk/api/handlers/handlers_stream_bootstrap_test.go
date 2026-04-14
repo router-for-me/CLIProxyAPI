@@ -221,6 +221,11 @@ type authUnavailableStreamExecutor struct {
 	calls int
 }
 
+type bootstrapExhaustedStreamExecutor struct {
+	mu    sync.Mutex
+	calls int
+}
+
 func (e *authUnavailableStreamExecutor) Identifier() string { return "codex" }
 
 func (e *authUnavailableStreamExecutor) Execute(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
@@ -261,6 +266,47 @@ func (e *authUnavailableStreamExecutor) HttpRequest(ctx context.Context, auth *c
 }
 
 func (e *authUnavailableStreamExecutor) Calls() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.calls
+}
+
+func (e *bootstrapExhaustedStreamExecutor) Identifier() string { return "codex" }
+
+func (e *bootstrapExhaustedStreamExecutor) Execute(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, &coreauth.Error{Code: "not_implemented", Message: "Execute not implemented"}
+}
+
+func (e *bootstrapExhaustedStreamExecutor) ExecuteStream(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+	e.mu.Lock()
+	e.calls++
+	e.mu.Unlock()
+
+	ch := make(chan coreexecutor.StreamChunk)
+	close(ch)
+	return &coreexecutor.StreamResult{
+		Headers: http.Header{"X-Upstream-Attempt": {"1"}},
+		Chunks:  ch,
+	}, nil
+}
+
+func (e *bootstrapExhaustedStreamExecutor) Refresh(ctx context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+	return auth, nil
+}
+
+func (e *bootstrapExhaustedStreamExecutor) CountTokens(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, &coreauth.Error{Code: "not_implemented", Message: "CountTokens not implemented"}
+}
+
+func (e *bootstrapExhaustedStreamExecutor) HttpRequest(ctx context.Context, auth *coreauth.Auth, req *http.Request) (*http.Response, error) {
+	return nil, &coreauth.Error{
+		Code:       "not_implemented",
+		Message:    "HttpRequest not implemented",
+		HTTPStatus: http.StatusNotImplemented,
+	}
+}
+
+func (e *bootstrapExhaustedStreamExecutor) Calls() int {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.calls
@@ -1086,5 +1132,57 @@ func TestExecuteStreamWithAuthManager_AuthUnavailableDoesNotBootstrapRetry(t *te
 	}
 	if executor.Calls() != 1 {
 		t.Fatalf("expected no bootstrap retry, got %d calls", executor.Calls())
+	}
+}
+
+func TestExecuteStreamWithAuthManager_ExhaustedBootstrapDoesNotRetryWholeRequest(t *testing.T) {
+	executor := &bootstrapExhaustedStreamExecutor{}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+
+	auth1 := &coreauth.Auth{
+		ID:       "auth1",
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Metadata: map[string]any{"email": "test1@example.com"},
+	}
+	if _, err := manager.Register(context.Background(), auth1); err != nil {
+		t.Fatalf("manager.Register(auth1): %v", err)
+	}
+
+	registerTestModel(t, manager, auth1)
+
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{
+		Streaming: sdkconfig.StreamingConfig{
+			BootstrapRetries: 2,
+		},
+	}, manager)
+	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(context.Background(), "openai", "test-model", []byte(`{"model":"test-model"}`), "")
+	if dataChan == nil || errChan == nil {
+		t.Fatalf("expected non-nil channels")
+	}
+
+	for range dataChan {
+		t.Fatalf("expected no payload")
+	}
+
+	var gotErr *interfaces.ErrorMessage
+	for msg := range errChan {
+		if msg != nil {
+			gotErr = msg
+		}
+	}
+
+	if gotErr == nil {
+		t.Fatal("expected terminal error")
+	}
+	if gotErr.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("expected status %d, got %d", http.StatusInternalServerError, gotErr.StatusCode)
+	}
+	if gotErr.Error == nil || !strings.Contains(gotErr.Error.Error(), "empty_stream") {
+		t.Fatalf("expected empty_stream error, got %+v", gotErr.Error)
+	}
+	if executor.Calls() != 1 {
+		t.Fatalf("expected exhausted bootstrap to avoid whole-request retry, got %d calls", executor.Calls())
 	}
 }
