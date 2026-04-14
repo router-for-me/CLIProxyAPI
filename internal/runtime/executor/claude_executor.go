@@ -64,6 +64,10 @@ var oauthToolRenameMap = map[string]string{
 	"ls":           "LS",
 	"todoread":     "TodoRead",
 	"notebookedit": "NotebookEdit",
+	"taskcreate":   "TaskCreate",
+	"taskget":      "TaskGet",
+	"taskupdate":   "TaskUpdate",
+	"tasklist":     "TaskList",
 }
 
 // oauthToolRenameReverseMap is the inverse of oauthToolRenameMap for response decoding.
@@ -946,7 +950,7 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 		misc.EnsureHeader(r.Header, ginHeaders, "Anthropic-Dangerous-Direct-Browser-Access", "true")
 	}
 	misc.EnsureHeader(r.Header, ginHeaders, "X-App", "cli")
-	// Values below match Claude Code 2.1.63 / @anthropic-ai/sdk 0.74.0 (updated 2026-02-28).
+	// Values below match Claude Code 2.1.88 / @anthropic-ai/sdk 0.74.0.
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Retry-Count", "0")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Runtime", "node")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Lang", "js")
@@ -1006,7 +1010,7 @@ func claudeCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
 }
 
 func checkSystemInstructions(payload []byte) []byte {
-	return checkSystemInstructionsWithSigningMode(payload, false, false, false, "2.1.63", "", "")
+	return checkSystemInstructionsWithSigningMode(payload, false, false, false, "2.1.88", "", "")
 }
 
 func isClaudeOAuthToken(apiKey string) bool {
@@ -1525,7 +1529,7 @@ func generateBillingHeader(payload []byte, experimentalCCHSigning bool, version,
 }
 
 func checkSystemInstructionsWithMode(payload []byte, strictMode bool) []byte {
-	return checkSystemInstructionsWithSigningMode(payload, strictMode, false, false, "2.1.63", "", "")
+	return checkSystemInstructionsWithSigningMode(payload, strictMode, false, false, "2.1.88", "", "")
 }
 
 // checkSystemInstructionsWithSigningMode injects Claude Code-style system blocks:
@@ -1564,20 +1568,33 @@ func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, exp
 	billingBlock := buildTextBlock(billingText, nil)
 
 	// Build system blocks matching real Claude Code structure.
-	// Important: Claude Code's internal cacheScope='org' does NOT serialize to
-	// scope='org' in the API request. Only scope='global' is sent explicitly.
-	// The system prompt prefix block is sent without cache_control.
+	// Claude Code sends each section as a SEPARATE system[] entry (not concatenated).
+	// This matches the exact block structure that Claude Code's getSystemPrompt() returns.
 	agentBlock := buildTextBlock("You are Claude Code, Anthropic's official CLI for Claude.", nil)
-	staticPrompt := strings.Join([]string{
-		helps.ClaudeCodeIntro,
-		helps.ClaudeCodeSystem,
-		helps.ClaudeCodeDoingTasks,
-		helps.ClaudeCodeToneAndStyle,
-		helps.ClaudeCodeOutputEfficiency,
-	}, "\n\n")
-	staticBlock := buildTextBlock(staticPrompt, nil)
+	usingToolsSection := helps.BuildUsingToolsSection(helps.ResolveTaskToolName(payload))
 
-	systemResult := "[" + billingBlock + "," + agentBlock + "," + staticBlock + "]"
+	// Each section is a separate text block, matching Claude Code's array structure:
+	// system[0]: billing header (no cache_control)
+	// system[1]: agent identifier (no cache_control)
+	// system[2]: intro (ClaudeCodeIntro)
+	// system[3]: system instructions (ClaudeCodeSystem)
+	// system[4]: doing tasks (ClaudeCodeDoingTasks)
+	// system[5]: actions (ClaudeCodeActions)
+	// system[6]: using tools (dynamic)
+	// system[7]: tone and style (ClaudeCodeToneAndStyle)
+	// system[8]: output efficiency (ClaudeCodeOutputEfficiency)
+	introBlock := buildTextBlock(helps.ClaudeCodeIntro, nil)
+	systemBlock := buildTextBlock(helps.ClaudeCodeSystem, nil)
+	doingTasksBlock := buildTextBlock(helps.ClaudeCodeDoingTasks, nil)
+	actionsBlock := buildTextBlock(helps.ClaudeCodeActions, nil)
+	usingToolsBlock := buildTextBlock(usingToolsSection, nil)
+	toneAndStyleBlock := buildTextBlock(helps.ClaudeCodeToneAndStyle, nil)
+	outputEfficiencyBlock := buildTextBlock(helps.ClaudeCodeOutputEfficiency, nil)
+
+	systemResult := "[" + billingBlock + "," + agentBlock + "," +
+		introBlock + "," + systemBlock + "," + doingTasksBlock + "," +
+		actionsBlock + "," + usingToolsBlock + "," + toneAndStyleBlock + "," +
+		outputEfficiencyBlock + "]"
 	payload, _ = sjson.SetRawBytes(payload, "system", []byte(systemResult))
 
 	// Collect user system instructions and prepend to first user message
