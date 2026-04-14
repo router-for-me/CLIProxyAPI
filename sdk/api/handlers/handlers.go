@@ -474,10 +474,9 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 	if errMsg != nil {
 		return nil, nil, errMsg
 	}
-	normalizedPayload := normalizeRequestPayload(handlerType, rawJSON)
 	reqMeta := requestExecutionMetadata(ctx)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
-	payload := normalizedPayload
+	payload := rawJSON
 	if len(payload) == 0 {
 		payload = nil
 	}
@@ -488,7 +487,7 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 	opts := coreexecutor.Options{
 		Stream:          false,
 		Alt:             alt,
-		OriginalRequest: normalizedPayload,
+		OriginalRequest: rawJSON,
 		SourceFormat:    sdktranslator.FromString(handlerType),
 	}
 	opts.Metadata = reqMeta
@@ -522,10 +521,9 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 	if errMsg != nil {
 		return nil, nil, errMsg
 	}
-	normalizedPayload := normalizeRequestPayload(handlerType, rawJSON)
 	reqMeta := requestExecutionMetadata(ctx)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
-	payload := normalizedPayload
+	payload := rawJSON
 	if len(payload) == 0 {
 		payload = nil
 	}
@@ -536,7 +534,7 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 	opts := coreexecutor.Options{
 		Stream:          false,
 		Alt:             alt,
-		OriginalRequest: normalizedPayload,
+		OriginalRequest: rawJSON,
 		SourceFormat:    sdktranslator.FromString(handlerType),
 	}
 	opts.Metadata = reqMeta
@@ -574,10 +572,9 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 		close(errChan)
 		return nil, nil, errChan
 	}
-	normalizedPayload := normalizeRequestPayload(handlerType, rawJSON)
 	reqMeta := requestExecutionMetadata(ctx)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
-	payload := normalizedPayload
+	payload := rawJSON
 	if len(payload) == 0 {
 		payload = nil
 	}
@@ -588,7 +585,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 	opts := coreexecutor.Options{
 		Stream:          true,
 		Alt:             alt,
-		OriginalRequest: normalizedPayload,
+		OriginalRequest: rawJSON,
 		SourceFormat:    sdktranslator.FromString(handlerType),
 	}
 	opts.Metadata = reqMeta
