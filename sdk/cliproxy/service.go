@@ -616,9 +616,13 @@ func (s *Service) Run(ctx context.Context) error {
 	var watcherWrapper *WatcherWrapper
 	reloadCallback := func(newCfg *config.Config) {
 		previousStrategy := ""
+		var previousSessionAffinity bool
+		var previousSessionAffinityTTL string
 		s.cfgMu.RLock()
 		if s.cfg != nil {
 			previousStrategy = strings.ToLower(strings.TrimSpace(s.cfg.Routing.Strategy))
+			previousSessionAffinity = s.cfg.Routing.ClaudeCodeSessionAffinity || s.cfg.Routing.SessionAffinity
+			previousSessionAffinityTTL = s.cfg.Routing.SessionAffinityTTL
 		}
 		s.cfgMu.RUnlock()
 
@@ -642,7 +646,15 @@ func (s *Service) Run(ctx context.Context) error {
 		}
 		previousStrategy = normalizeStrategy(previousStrategy)
 		nextStrategy = normalizeStrategy(nextStrategy)
-		if s.coreManager != nil && previousStrategy != nextStrategy {
+
+		nextSessionAffinity := newCfg.Routing.ClaudeCodeSessionAffinity || newCfg.Routing.SessionAffinity
+		nextSessionAffinityTTL := newCfg.Routing.SessionAffinityTTL
+
+		selectorChanged := previousStrategy != nextStrategy ||
+			previousSessionAffinity != nextSessionAffinity ||
+			previousSessionAffinityTTL != nextSessionAffinityTTL
+
+		if s.coreManager != nil && selectorChanged {
 			var selector coreauth.Selector
 			switch nextStrategy {
 			case "fill-first":
@@ -650,6 +662,20 @@ func (s *Service) Run(ctx context.Context) error {
 			default:
 				selector = &coreauth.RoundRobinSelector{}
 			}
+
+			if nextSessionAffinity {
+				ttl := time.Hour
+				if ttlStr := strings.TrimSpace(nextSessionAffinityTTL); ttlStr != "" {
+					if parsed, err := time.ParseDuration(ttlStr); err == nil && parsed > 0 {
+						ttl = parsed
+					}
+				}
+				selector = coreauth.NewSessionAffinitySelectorWithConfig(coreauth.SessionAffinityConfig{
+					Fallback: selector,
+					TTL:      ttl,
+				})
+			}
+
 			s.coreManager.SetSelector(selector)
 		}
 
