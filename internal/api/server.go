@@ -263,6 +263,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	managementasset.SetCurrentConfig(cfg)
 	auth.SetQuotaCooldownDisabled(cfg.DisableCooling)
 	applySignatureCacheConfig(nil, cfg)
+	s.applyUsagePersistence(cfg)
 	// Initialize management handler
 	s.mgmt = managementHandlers.NewHandler(cfg, configFilePath, authManager)
 	if optionState.localPassword != "" {
@@ -840,9 +841,52 @@ func (s *Server) Stop(ctx context.Context) error {
 	if err := s.server.Shutdown(ctx); err != nil {
 		return fmt.Errorf("failed to shutdown HTTP server: %v", err)
 	}
+	if err := usage.StopDefaultPersistence(ctx); err != nil {
+		return fmt.Errorf("failed to stop usage persistence: %v", err)
+	}
 
 	log.Debug("API server stopped")
 	return nil
+}
+
+func (s *Server) applyUsagePersistence(cfg *config.Config) {
+	if cfg == nil {
+		return
+	}
+	if err := usage.ConfigureDefaultPersistence(context.Background(), resolveUsagePersistenceConfig(cfg, s.configFilePath)); err != nil {
+		log.Errorf("failed to configure usage persistence: %v", err)
+	}
+}
+
+func resolveUsagePersistenceConfig(cfg *config.Config, configFilePath string) usage.PersistenceConfig {
+	if cfg == nil {
+		return usage.PersistenceConfig{}
+	}
+	persistenceCfg := cfg.UsageStatisticsPersistence
+	filePath := strings.TrimSpace(persistenceCfg.FilePath)
+	if persistenceCfg.Enabled {
+		if filePath == "" {
+			baseDir := filepath.Dir(configFilePath)
+			if strings.TrimSpace(baseDir) == "" {
+				baseDir = "."
+			}
+			filePath = filepath.Join(baseDir, "usage-statistics.json")
+		} else if !filepath.IsAbs(filePath) {
+			baseDir := filepath.Dir(configFilePath)
+			if strings.TrimSpace(baseDir) == "" {
+				if abs, err := filepath.Abs(filePath); err == nil {
+					filePath = abs
+				}
+			} else {
+				filePath = filepath.Join(baseDir, filePath)
+			}
+		}
+	}
+	return usage.PersistenceConfig{
+		Enabled:       persistenceCfg.Enabled,
+		FilePath:      filePath,
+		FlushInterval: time.Duration(persistenceCfg.FlushIntervalSeconds) * time.Second,
+	}
 }
 
 // corsMiddleware returns a Gin middleware handler that adds CORS headers
@@ -908,6 +952,9 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 
 	if oldCfg == nil || oldCfg.UsageStatisticsEnabled != cfg.UsageStatisticsEnabled {
 		usage.SetStatisticsEnabled(cfg.UsageStatisticsEnabled)
+	}
+	if oldCfg == nil || oldCfg.UsageStatisticsPersistence != cfg.UsageStatisticsPersistence {
+		s.applyUsagePersistence(cfg)
 	}
 
 	if s.requestLogger != nil && (oldCfg == nil || oldCfg.ErrorLogsMaxFiles != cfg.ErrorLogsMaxFiles) {

@@ -32,7 +32,7 @@ import (
 
 const (
 	codexUserAgent  = misc.CodexCLIUserAgent
-	codexOriginator = "Codex Desktop"
+	codexOriginator = "codex_cli_rs"
 )
 
 var dataTag = []byte("data:")
@@ -102,25 +102,10 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := originalPayloadSource
-	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
-
-	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
+	body, err := buildCodexRequestBody(e.cfg, from, to, req, opts, originalPayload, false)
 	if err != nil {
 		return resp, err
 	}
-
-	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
-	var originalTranslated []byte
-	body = helps.ApplyPayloadConfigWithRootLazy(e.cfg, baseModel, to.String(), "", body, func() []byte {
-		if len(originalTranslated) == 0 {
-			originalTranslated = sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, false)
-		}
-		return originalTranslated
-	}, requestedModel)
-	body, _ = sjson.SetBytes(body, "model", baseModel)
-	body, _ = sjson.SetBytes(body, "stream", true)
-	body = stripUnsupportedCodexFields(body, false)
-	body = normalizeCodexInstructions(body)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
 	httpReq, err := e.cacheHelper(ctx, from, url, req, body)
@@ -174,6 +159,16 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		return resp, err
 	}
 	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
+	if isNativeCodexSourceFormat(from) {
+		reporter.Publish(ctx, helps.ParseOpenAIUsage(data))
+		reporter.EnsurePublished(ctx)
+		if rootType := strings.TrimSpace(gjson.GetBytes(data, "type").String()); rootType == "response.completed" {
+			if response := gjson.GetBytes(data, "response"); response.Exists() && response.Type == gjson.JSON {
+				return cliproxyexecutor.Response{Payload: []byte(response.Raw), Headers: httpResp.Header.Clone()}, nil
+			}
+		}
+		return cliproxyexecutor.Response{Payload: data, Headers: httpResp.Header.Clone()}, nil
+	}
 
 	lines := bytes.Split(data, []byte("\n"))
 	outputItemsByIndex := make(map[int64][]byte)
@@ -360,24 +355,10 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := originalPayloadSource
-	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
-
-	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
+	body, err := buildCodexRequestBody(e.cfg, from, to, req, opts, originalPayload, true)
 	if err != nil {
 		return nil, err
 	}
-
-	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
-	var originalTranslated []byte
-	body = helps.ApplyPayloadConfigWithRootLazy(e.cfg, baseModel, to.String(), "", body, func() []byte {
-		if len(originalTranslated) == 0 {
-			originalTranslated = sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
-		}
-		return originalTranslated
-	}, requestedModel)
-	body = stripUnsupportedCodexFields(body, false)
-	body, _ = sjson.SetBytes(body, "model", baseModel)
-	body = normalizeCodexInstructions(body)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
 	httpReq, err := e.cacheHelper(ctx, from, url, req, body)
@@ -660,42 +641,86 @@ func (e *CodexExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*
 }
 
 func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Format, url string, req cliproxyexecutor.Request, rawJSON []byte) (*http.Request, error) {
-	var cache helps.CodexCache
-	if from == "claude" {
-		userIDResult := gjson.GetBytes(req.Payload, "metadata.user_id")
-		if userIDResult.Exists() {
-			key := fmt.Sprintf("%s-%s", req.Model, userIDResult.String())
-			var ok bool
-			if cache, ok = helps.GetCodexCache(key); !ok {
-				cache = helps.CodexCache{
-					ID:     uuid.New().String(),
-					Expire: time.Now().Add(1 * time.Hour),
-				}
-				helps.SetCodexCache(key, cache)
-			}
-		}
-	} else if from == "openai-response" {
-		promptCacheKey := gjson.GetBytes(req.Payload, "prompt_cache_key")
-		if promptCacheKey.Exists() {
-			cache.ID = promptCacheKey.String()
-		}
-	} else if from == "openai" {
-		if apiKey := strings.TrimSpace(helps.APIKeyFromContext(ctx)); apiKey != "" {
-			cache.ID = uuid.NewSHA1(uuid.NameSpaceOID, []byte("cli-proxy-api:codex:prompt-cache:"+apiKey)).String()
-		}
-	}
-
-	if cache.ID != "" {
-		rawJSON, _ = sjson.SetBytes(rawJSON, "prompt_cache_key", cache.ID)
+	cacheID := resolveCodexPromptCacheID(ctx, from, req)
+	if cacheID != "" {
+		rawJSON, _ = sjson.SetBytes(rawJSON, "prompt_cache_key", cacheID)
 	}
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(rawJSON))
 	if err != nil {
 		return nil, err
 	}
-	if cache.ID != "" {
-		httpReq.Header.Set("Session_id", cache.ID)
+	if cacheID != "" {
+		httpReq.Header.Set("Session_id", cacheID)
 	}
 	return httpReq, nil
+}
+
+func resolveCodexPromptCacheID(ctx context.Context, from sdktranslator.Format, req cliproxyexecutor.Request) string {
+	if headerID := codexSessionIDFromContext(ctx); headerID != "" {
+		return headerID
+	}
+	if payloadID := codexSessionIDFromPayload(req.Payload); payloadID != "" {
+		return payloadID
+	}
+
+	switch from {
+	case "claude":
+		userIDResult := gjson.GetBytes(req.Payload, "metadata.user_id")
+		if userIDResult.Exists() {
+			key := fmt.Sprintf("%s-%s", req.Model, userIDResult.String())
+			if cache, ok := helps.GetCodexCache(key); ok {
+				return cache.ID
+			}
+			cache := helps.CodexCache{
+				ID:     uuid.New().String(),
+				Expire: time.Now().Add(1 * time.Hour),
+			}
+			helps.SetCodexCache(key, cache)
+			return cache.ID
+		}
+	case "openai-response":
+		promptCacheKey := strings.TrimSpace(gjson.GetBytes(req.Payload, "prompt_cache_key").String())
+		if promptCacheKey != "" {
+			return promptCacheKey
+		}
+	}
+
+	return ""
+}
+
+func codexSessionIDFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	ginCtx, ok := ctx.Value("gin").(*gin.Context)
+	if !ok || ginCtx == nil || ginCtx.Request == nil {
+		return ""
+	}
+	for _, key := range []string{"Session_id", "X-Client-Request-Id"} {
+		if value := strings.TrimSpace(ginCtx.Request.Header.Get(key)); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func codexSessionIDFromPayload(rawJSON []byte) string {
+	if len(rawJSON) == 0 || !gjson.ValidBytes(rawJSON) {
+		return ""
+	}
+	for _, path := range []string{
+		"prompt_cache_key",
+		"session_id",
+		"conversation_id",
+		"thread_id",
+		"metadata.session_id",
+		"metadata.conversation_id",
+	} {
+		if value := strings.TrimSpace(gjson.GetBytes(rawJSON, path).String()); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, stream bool, cfg *config.Config) {
@@ -719,6 +744,7 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 	misc.EnsureHeader(r.Header, ginHeaders, "Version", "")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Codex-Turn-Metadata", "")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Client-Request-Id", "")
+	misc.EnsureHeader(r.Header, ginHeaders, "Session_id", "")
 	if official {
 		misc.EnsureHeader(r.Header, ginHeaders, "X-ResponsesAPI-Include-Timing-Metrics", "")
 	}
@@ -810,6 +836,52 @@ func normalizeCodexInstructions(body []byte) []byte {
 	return body
 }
 
+func isNativeCodexSourceFormat(from sdktranslator.Format) bool {
+	return strings.EqualFold(strings.TrimSpace(from.String()), "codex")
+}
+
+func buildCodexRequestBody(cfg *config.Config, from, to sdktranslator.Format, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, originalPayload []byte, stream bool) ([]byte, error) {
+	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	if isNativeCodexSourceFormat(from) {
+		body := bytes.Clone(req.Payload)
+		if len(body) == 0 {
+			body = bytes.Clone(originalPayload)
+		}
+		if len(body) == 0 {
+			body = []byte(`{}`)
+		}
+		if baseModel != "" {
+			body, _ = sjson.SetBytes(body, "model", baseModel)
+		}
+		return body, nil
+	}
+
+	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, stream)
+	var err error
+	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), "codex")
+	if err != nil {
+		return nil, err
+	}
+
+	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
+	var originalTranslated []byte
+	body = helps.ApplyPayloadConfigWithRootLazy(cfg, baseModel, to.String(), "", body, func() []byte {
+		if len(originalTranslated) == 0 {
+			originalTranslated = sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, stream)
+		}
+		return originalTranslated
+	}, requestedModel)
+	body, _ = sjson.SetBytes(body, "model", baseModel)
+	if stream {
+		body = stripUnsupportedCodexFields(body, false)
+	} else {
+		body, _ = sjson.SetBytes(body, "stream", true)
+		body = stripUnsupportedCodexFields(body, false)
+	}
+	body = normalizeCodexInstructions(body)
+	return body, nil
+}
+
 func stripUnsupportedCodexFields(body []byte, preservePreviousResponseID bool) []byte {
 	if !preservePreviousResponseID {
 		body, _ = sjson.DeleteBytes(body, "previous_response_id")
@@ -867,6 +939,11 @@ func maybeCompressCodexRequest(req *http.Request, auth *cliproxyauth.Auth, cfg *
 	if req == nil || req.Body == nil {
 		return nil, nil
 	}
+	compress := shouldCompressCodexRequest(req, auth, cfg)
+	if !compress && (cfg == nil || !cfg.RequestLog) {
+		req.Header.Del("Content-Encoding")
+		return nil, nil
+	}
 	body, err := io.ReadAll(req.Body)
 	if err != nil {
 		return nil, fmt.Errorf("codex executor: read request body failed: %w", err)
@@ -875,7 +952,7 @@ func maybeCompressCodexRequest(req *http.Request, auth *cliproxyauth.Auth, cfg *
 		log.Errorf("codex executor: close request body error: %v", errClose)
 	}
 	encoded := body
-	if shouldCompressCodexRequest(req, auth, cfg) {
+	if compress {
 		encoded, err = compressZstd(body)
 		if err != nil {
 			return nil, fmt.Errorf("codex executor: zstd compress request failed: %w", err)

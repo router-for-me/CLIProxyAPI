@@ -31,8 +31,8 @@ func (h *Handler) GetUsageStatistics(c *gin.Context) {
 		return
 	}
 	var snapshot usage.StatisticsSnapshot
-	if h != nil && h.usageStats != nil {
-		snapshot = h.usageStats.Snapshot()
+	if h != nil {
+		snapshot = usage.SnapshotWithPersistence(h.usageStats, true)
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"usage":           snapshot,
@@ -47,8 +47,8 @@ func (h *Handler) ExportUsageStatistics(c *gin.Context) {
 		return
 	}
 	var snapshot usage.StatisticsSnapshot
-	if h != nil && h.usageStats != nil {
-		snapshot = h.usageStats.SnapshotSummary()
+	if h != nil {
+		snapshot = usage.SnapshotWithPersistence(h.usageStats, false)
 	}
 	c.JSON(http.StatusOK, usageExportPayload{
 		Version:    2,

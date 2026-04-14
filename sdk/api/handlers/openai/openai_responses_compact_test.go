@@ -20,6 +20,7 @@ type compactCaptureExecutor struct {
 	alt          string
 	sourceFormat string
 	calls        int
+	headers      http.Header
 }
 
 func (e *compactCaptureExecutor) Identifier() string { return "test-provider" }
@@ -28,7 +29,7 @@ func (e *compactCaptureExecutor) Execute(ctx context.Context, auth *coreauth.Aut
 	e.calls++
 	e.alt = opts.Alt
 	e.sourceFormat = opts.SourceFormat.String()
-	return coreexecutor.Response{Payload: []byte(`{"ok":true}`)}, nil
+	return coreexecutor.Response{Payload: []byte(`{"ok":true}`), Headers: e.headers}, nil
 }
 
 func (e *compactCaptureExecutor) ExecuteStream(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (*coreexecutor.StreamResult, error) {
@@ -116,5 +117,77 @@ func TestOpenAIResponsesCompactExecute(t *testing.T) {
 	}
 	if strings.TrimSpace(resp.Body.String()) != `{"ok":true}` {
 		t.Fatalf("body = %s", resp.Body.String())
+	}
+}
+
+func TestOpenAIResponsesCompactUsesCodexSourceFormatForNativeClientHeaders(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	executor := &compactCaptureExecutor{}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+
+	auth := &coreauth.Auth{ID: "auth3", Provider: executor.Identifier(), Status: coreauth.StatusActive}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "test-model"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	h := NewOpenAIResponsesAPIHandler(base)
+	router := gin.New()
+	router.POST("/v1/responses/compact", h.Compact)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses/compact", strings.NewReader(`{"model":"test-model","input":"hello"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Originator", "codex_cli_rs")
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.Code, http.StatusOK)
+	}
+	if executor.sourceFormat != "codex" {
+		t.Fatalf("source format = %q, want %q", executor.sourceFormat, "codex")
+	}
+}
+
+func TestOpenAIResponsesCompactPassesThroughHeadersForNativeCodexRequests(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	executor := &compactCaptureExecutor{
+		headers: http.Header{
+			"X-Request-Id": {"req-1"},
+		},
+	}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+
+	auth := &coreauth.Auth{ID: "auth4", Provider: executor.Identifier(), Status: coreauth.StatusActive}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "test-model"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	h := NewOpenAIResponsesAPIHandler(base)
+	router := gin.New()
+	router.POST("/v1/responses/compact", h.Compact)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses/compact", strings.NewReader(`{"model":"test-model","input":"hello"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Originator", "codex_cli_rs")
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.Code, http.StatusOK)
+	}
+	if got := resp.Header().Get("X-Request-Id"); got != "req-1" {
+		t.Fatalf("X-Request-Id = %q, want %q", got, "req-1")
 	}
 }

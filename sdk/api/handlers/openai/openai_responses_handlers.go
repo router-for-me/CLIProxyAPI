@@ -219,6 +219,13 @@ func (h *OpenAIResponsesAPIHandler) HandlerType() string {
 	return OpenaiResponse
 }
 
+func responsesSourceFormat(c *gin.Context) string {
+	if c != nil && c.Request != nil && handlers.HasNativeCodexClientHeaders(c.Request.Header) {
+		return Codex
+	}
+	return OpenaiResponse
+}
+
 // Models returns the OpenAIResponses-compatible model metadata supported by this handler.
 func (h *OpenAIResponsesAPIHandler) Models() []map[string]any {
 	// Get dynamic models from the global registry
@@ -297,7 +304,7 @@ func (h *OpenAIResponsesAPIHandler) Compact(c *gin.Context) {
 	modelName := gjson.GetBytes(rawJSON, "model").String()
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
-	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "responses/compact")
+	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, responsesSourceFormat(c), modelName, rawJSON, "responses/compact")
 	stopKeepAlive()
 	if errMsg != nil {
 		h.WriteErrorResponse(c, errMsg)
@@ -323,7 +330,7 @@ func (h *OpenAIResponsesAPIHandler) handleNonStreamingResponse(c *gin.Context, r
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
 
-	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "")
+	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, responsesSourceFormat(c), modelName, rawJSON, "")
 	stopKeepAlive()
 	if errMsg != nil {
 		h.WriteErrorResponse(c, errMsg)
@@ -358,7 +365,7 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 	// New core execution path
 	modelName := gjson.GetBytes(rawJSON, "model").String()
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
-	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "")
+	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, responsesSourceFormat(c), modelName, rawJSON, "")
 
 	setSSEHeaders := func() {
 		c.Header("Content-Type", "text/event-stream")

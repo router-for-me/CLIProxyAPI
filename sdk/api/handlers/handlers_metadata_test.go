@@ -297,6 +297,104 @@ func TestBuildExecutionMetadataDerivesSessionAffinityKeyFromPreviousResponseID(t
 	}
 }
 
+func TestBuildExecutionMetadataUsesCodexSessionHeaderForAffinity(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	manager := coreauth.NewManager(nil, nil, nil)
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       "auth-codex",
+		Provider: "codex",
+		Metadata: map[string]any{"token": "x"},
+	}); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	store := NewMemorySessionAffinityStore()
+	store.Set(context.Background(), "019d8a94-b1e5-7b52-8f2f-ef2423b4513e", "auth-codex")
+	handler := &BaseAPIHandler{
+		AuthManager:             manager,
+		SessionAffinityStore:    store,
+		sessionAffinityHotCache: newSessionAffinityHotCache(defaultSessionAffinityHotCacheTTL),
+	}
+
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	ginCtx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	ginCtx.Request.Header.Set("Session_id", "019d8a94-b1e5-7b52-8f2f-ef2423b4513e")
+
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+	meta := handler.buildExecutionMetadata(ctx, []string{"codex"}, "", []byte(`{"model":"gpt-5-codex"}`))
+
+	if got := meta[coreexecutor.PinnedAuthMetadataKey]; got != "auth-codex" {
+		t.Fatalf("pinned auth = %v, want auth-codex", got)
+	}
+}
+
+func TestBuildExecutionMetadataUsesCodexClientRequestIDForAffinity(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	manager := coreauth.NewManager(nil, nil, nil)
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       "auth-codex",
+		Provider: "codex",
+		Metadata: map[string]any{"token": "x"},
+	}); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	store := NewMemorySessionAffinityStore()
+	store.Set(context.Background(), "019d8a94-b1e5-7b52-8f2f-ef2423b4513e", "auth-codex")
+	handler := &BaseAPIHandler{
+		AuthManager:             manager,
+		SessionAffinityStore:    store,
+		sessionAffinityHotCache: newSessionAffinityHotCache(defaultSessionAffinityHotCacheTTL),
+	}
+
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	ginCtx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	ginCtx.Request.Header.Set("X-Client-Request-Id", "019d8a94-b1e5-7b52-8f2f-ef2423b4513e")
+
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+	meta := handler.buildExecutionMetadata(ctx, []string{"codex"}, "", []byte(`{"model":"gpt-5-codex"}`))
+
+	if got := meta[coreexecutor.PinnedAuthMetadataKey]; got != "auth-codex" {
+		t.Fatalf("pinned auth = %v, want auth-codex", got)
+	}
+}
+
+func TestBuildExecutionMetadataPrefersStableCodexSessionIDOverPreviousResponseID(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	manager := coreauth.NewManager(nil, nil, nil)
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       "auth-session",
+		Provider: "codex",
+		Metadata: map[string]any{"token": "x"},
+	}); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       "auth-prev",
+		Provider: "codex",
+		Metadata: map[string]any{"token": "x"},
+	}); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	store := NewMemorySessionAffinityStore()
+	store.Set(context.Background(), "body:session_id:session-123", "auth-session")
+	store.Set(context.Background(), "body:previous_response_id:resp-123", "auth-prev")
+	handler := &BaseAPIHandler{
+		AuthManager:             manager,
+		SessionAffinityStore:    store,
+		sessionAffinityHotCache: newSessionAffinityHotCache(defaultSessionAffinityHotCacheTTL),
+	}
+
+	meta := handler.buildExecutionMetadata(context.Background(), []string{"codex"}, "", []byte(`{"model":"gpt-5-codex","session_id":"session-123","previous_response_id":"resp-123"}`))
+
+	if got := meta[coreexecutor.PinnedAuthMetadataKey]; got != "auth-session" {
+		t.Fatalf("pinned auth = %v, want auth-session", got)
+	}
+}
+
 func TestBuildExecutionMetadataDoesNotDeriveSessionAffinityKeyFromBodyFingerprint(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	manager := coreauth.NewManager(nil, nil, nil)
