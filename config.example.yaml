@@ -241,7 +241,7 @@ nonstream-keepalive-interval: 0
 #       # Requests to that alias will round-robin across the upstream names below,
 #       # and if the chosen upstream fails before producing output, the request will
 #       # continue with the next upstream model in the same alias pool.
-#       - name: "qwen3.5-plus"
+#       - name: "deepseek-v3.1"
 #         alias: "claude-opus-4.66"
 #       - name: "glm-5"
 #         alias: "claude-opus-4.66"
@@ -302,7 +302,7 @@ nonstream-keepalive-interval: 0
 
 # Global OAuth model name aliases (per channel)
 # These aliases rename model IDs for both model listing and request routing.
-# Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, qwen, iflow, kimi.
+# Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, iflow, kimi.
 # NOTE: Aliases do not apply to gemini-api-key, codex-api-key, claude-api-key, openai-compatibility, vertex-api-key, or ampcode.
 # NOTE: Because aliases affect the merged /v1 model list and merged request routing, overlapping
 # client-visible names can become ambiguous across providers. /api/provider/{provider}/... helps
@@ -329,9 +329,6 @@ nonstream-keepalive-interval: 0
 #   codex:
 #     - name: "gpt-5"
 #       alias: "g5"
-#   qwen:
-#     - name: "qwen3-coder-plus"
-#       alias: "qwen-plus"
 #   iflow:
 #     - name: "glm-4.7"
 #       alias: "glm-god"
@@ -356,8 +353,6 @@ nonstream-keepalive-interval: 0
 #     - "claude-3-5-haiku-20241022"
 #   codex:
 #     - "gpt-5-codex-mini"
-#   qwen:
-#     - "vision-model"
 #   iflow:
 #     - "tstars2.0"
 #   kimi:

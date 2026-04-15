@@ -50,19 +50,17 @@ GLM CODING PLANを10%割引で取得：https://z.ai/subscribe?ic=8JVLJQFSKB
 - CLIモデル向けのOpenAI/Gemini/Claude互換APIエンドポイント
 - OAuthログインによるOpenAI Codexサポート（GPTモデル）
 - OAuthログインによるClaude Codeサポート
-- OAuthログインによるQwen Codeサポート
 - OAuthログインによるiFlowサポート
 - プロバイダールーティングによるAmp CLIおよびIDE拡張機能のサポート
 - ストリーミングおよび非ストリーミングレスポンス
 - 関数呼び出し/ツールのサポート
 - マルチモーダル入力サポート（テキストと画像）
-- ラウンドロビン負荷分散による複数アカウント対応（Gemini、OpenAI、Claude、QwenおよびiFlow）
-- シンプルなCLI認証フロー（Gemini、OpenAI、Claude、QwenおよびiFlow）
+- ラウンドロビン負荷分散による複数アカウント対応（Gemini、OpenAI、ClaudeおよびiFlow）
+- シンプルなCLI認証フロー（Gemini、OpenAI、ClaudeおよびiFlow）
 - Generative Language APIキーのサポート
 - AI Studioビルドのマルチアカウント負荷分散
 - Gemini CLIのマルチアカウント負荷分散
 - Claude Codeのマルチアカウント負荷分散
-- Qwen Codeのマルチアカウント負荷分散
 - iFlowのマルチアカウント負荷分散
 - OpenAI Codexのマルチアカウント負荷分散
 - 設定によるOpenAI互換アップストリームプロバイダー（例：OpenRouter）
@@ -132,11 +130,11 @@ CLIProxyAPI OAuthを使用して複数のClaudeアカウントや代替モデル
 
 ### [Quotio](https://github.com/nguyenphutrong/quotio)
 
-Claude、Gemini、OpenAI、Qwen、Antigravityのサブスクリプションを統合し、リアルタイムのクォータ追跡とスマート自動フェイルオーバーを備えたmacOSネイティブのメニューバーアプリ。Claude Code、OpenCode、Droidなどのコーディングツール向け - APIキー不要
+Claude、Gemini、OpenAI、Antigravityのサブスクリプションを統合し、リアルタイムのクォータ追跡とスマート自動フェイルオーバーを備えたmacOSネイティブのメニューバーアプリ。Claude Code、OpenCode、Droidなどのコーディングツール向け - APIキー不要
 
 ### [CodMate](https://github.com/loocor/CodMate)
 
-CLI AIセッション（Codex、Claude Code、Gemini CLI）を管理するmacOS SwiftUIネイティブアプリ。統合プロバイダー管理、Gitレビュー、プロジェクト整理、グローバル検索、ターミナル統合機能を搭載。CLIProxyAPIと統合し、Codex、Claude、Gemini、Antigravity、Qwen CodeのOAuth認証を提供。単一のプロキシエンドポイントを通じた組み込みおよびサードパーティプロバイダーの再ルーティングに対応 - OAuthプロバイダーではAPIキー不要
+CLI AIセッション（Codex、Claude Code、Gemini CLI）を管理するmacOS SwiftUIネイティブアプリ。統合プロバイダー管理、Gitレビュー、プロジェクト整理、グローバル検索、ターミナル統合機能を搭載。CLIProxyAPIと統合し、Codex、Claude、Gemini、AntigravityのOAuth認証を提供。単一のプロキシエンドポイントを通じた組み込みおよびサードパーティプロバイダーの再ルーティングに対応 - OAuthプロバイダーではAPIキー不要
 
 ### [ProxyPilot](https://github.com/Finesssee/ProxyPilot)
 
@@ -160,7 +158,7 @@ PowerShellスクリプトで実装されたWindowsトレイアプリケーショ
 
 ### [霖君](https://github.com/wangdabaoqq/LinJun)
 
-霖君はAIプログラミングアシスタントを管理するクロスプラットフォームデスクトップアプリケーションで、macOS、Windows、Linuxシステムに対応。Claude Code、Gemini CLI、OpenAI Codex、Qwen Codeなどのコーディングツールを統合管理し、ローカルプロキシによるマルチアカウントクォータ追跡とワンクリック設定が可能
+霖君はAIプログラミングアシスタントを管理するクロスプラットフォームデスクトップアプリケーションで、macOS、Windows、Linuxシステムに対応。Claude Code、Gemini CLI、OpenAI Codexなどのコーディングツールを統合管理し、ローカルプロキシによるマルチアカウントクォータ追跡とワンクリック設定が可能
 
 ### [CLIProxyAPI Dashboard](https://github.com/itsmylife44/cliproxyapi-dashboard)
 
@@ -176,7 +174,7 @@ Shadow AIは制限された環境向けに特別に設計されたAIアシスタ
 
 ### [ProxyPal](https://github.com/buddingnewinsights/proxypal)
 
-CLIProxyAPIをネイティブGUIでラップしたクロスプラットフォームデスクトップアプリ（macOS、Windows、Linux）。Claude、ChatGPT、Gemini、GitHub Copilot、Qwen、iFlow、カスタムOpenAI互換エンドポイントに対応し、使用状況分析、リクエスト監視、人気コーディングツールの自動設定機能を搭載 - APIキー不要
+CLIProxyAPIをネイティブGUIでラップしたクロスプラットフォームデスクトップアプリ（macOS、Windows、Linux）。Claude、ChatGPT、Gemini、GitHub Copilot、iFlow、カスタムOpenAI互換エンドポイントに対応し、使用状況分析、リクエスト監視、人気コーディングツールの自動設定機能を搭載 - APIキー不要
 
 ### [CLIProxyAPI Quota Inspector](https://github.com/AllenReder/CLIProxyAPI-Quota-Inspector)
 
