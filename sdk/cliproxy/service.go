@@ -879,6 +879,11 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		if a.Attributes != nil {
 			codexPlanType = strings.TrimSpace(a.Attributes["plan_type"])
 		}
+		if authKind != "apikey" {
+			if override := codexOAuthPlanOverride(); override != "" {
+				codexPlanType = override
+			}
+		}
 		switch strings.ToLower(codexPlanType) {
 		case "pro":
 			models = registry.GetCodexProModels()
@@ -1178,6 +1183,20 @@ func (s *Service) resolveConfigCodexKey(auth *coreauth.Auth) *config.CodexKey {
 		}
 	}
 	return nil
+}
+
+func codexOAuthPlanOverride() string {
+	raw := strings.TrimSpace(os.Getenv("CODEX_OAUTH_PLAN_OVERRIDE"))
+	if raw == "" {
+		return ""
+	}
+	switch strings.ToLower(raw) {
+	case "free", "plus", "pro", "team", "business", "go":
+		return raw
+	default:
+		log.Warnf("ignoring invalid CODEX_OAUTH_PLAN_OVERRIDE value: %q", raw)
+		return ""
+	}
 }
 
 func (s *Service) oauthExcludedModels(provider, authKind string) []string {
