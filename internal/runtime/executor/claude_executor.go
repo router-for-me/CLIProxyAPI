@@ -1063,9 +1063,11 @@ func isClaudeOAuthToken(apiKey string) bool {
 
 // remapOAuthToolNamesEx extends remapOAuthToolNames with an option to strip tools
 // that have no mapping in oauthToolRenameMap. When stripUnmapped is true (used for
-// non-OpenCode clients like OpenClaw), custom tools that are not in the rename map
-// and are not Anthropic built-in tools are removed from the tools array. This prevents
-// client-specific tool catalogs (e.g. nodes, cron, gateway) from leaking upstream.
+// ALL OAuth clients), custom tools not in the rename map and not Anthropic built-in
+// are removed from the tools array. This prevents client-specific tool catalogs
+// (e.g. lsp_*, session_*, nodes, cron, gateway) from leaking upstream as third-party
+// fingerprints. The base remapOAuthToolNames handles tool_choice and message refs,
+// including dropping tool_choice when it references an unmapped/stripped tool.
 func remapOAuthToolNamesEx(body []byte, stripUnmapped bool) ([]byte, bool) {
 	if !stripUnmapped {
 		return remapOAuthToolNames(body)
@@ -1182,17 +1184,23 @@ func remapOAuthToolNames(body []byte) ([]byte, bool) {
 		body, _ = sjson.SetRawBytes(body, "tools", []byte(toolsJSON.String()))
 	}
 
-	// 2. Rename tool_choice if it references a known tool
+	// 2. Rename or drop tool_choice if it references a known/unknown tool
 	toolChoiceType := gjson.GetBytes(body, "tool_choice.type").String()
 	if toolChoiceType == "tool" {
 		tcName := gjson.GetBytes(body, "tool_choice.name").String()
+		tcNameLower := strings.ToLower(tcName)
 		if oauthToolsToRemove[tcName] {
-			// The chosen tool was removed from the tools array, so drop tool_choice to
-			// keep the payload internally consistent and fall back to normal auto tool use.
+			// Explicitly removed tool — drop tool_choice.
 			body, _ = sjson.DeleteBytes(body, "tool_choice")
-		} else if newName, ok := oauthToolRenameMap[tcName]; ok && newName != tcName {
-			body, _ = sjson.SetBytes(body, "tool_choice.name", newName)
-			renamed = true
+		} else if newName, ok := oauthToolRenameMap[tcNameLower]; ok {
+			if newName != tcName {
+				body, _ = sjson.SetBytes(body, "tool_choice.name", newName)
+				renamed = true
+			}
+		} else {
+			// Unmapped tool (e.g. lsp_*, session_*) — was stripped from tools[],
+			// so drop tool_choice to keep payload consistent.
+			body, _ = sjson.DeleteBytes(body, "tool_choice")
 		}
 	}
 
