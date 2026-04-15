@@ -2,7 +2,7 @@ package helps
 
 import "github.com/tidwall/gjson"
 
-// Claude Code system prompt static sections (extracted from Claude Code v2.1.88).
+// Claude Code system prompt static sections (extracted from Claude Code v2.1.108).
 // These sections are sent as system[] blocks to Anthropic's API.
 // The structure and content must match real Claude Code to pass server-side validation.
 
