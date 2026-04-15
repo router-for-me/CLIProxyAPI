@@ -1098,7 +1098,7 @@ func remapOAuthToolNamesEx(body []byte, stripUnmapped bool) ([]byte, bool) {
 			nameLower := strings.ToLower(name)
 			newName, hasMapped := oauthToolRenameMap[nameLower]
 			if !hasMapped {
-				// Tool has no mapping — strip it for non-OpenCode clients.
+				// Tool has no mapping u2014 strip it for all OAuth clients.
 				return true
 			}
 
@@ -1204,12 +1204,6 @@ func remapOAuthToolNames(body []byte) ([]byte, bool) {
 		} else {
 			// Unmapped non-builtin tool (e.g. lsp_*, session_*) u2014 was stripped
 			// from tools[], so drop tool_choice to keep payload consistent.
-			body, _ = sjson.DeleteBytes(body, "tool_choice")
-		}
-	}
-		} else {
-			// Unmapped tool (e.g. lsp_*, session_*) — was stripped from tools[],
-			// so drop tool_choice to keep payload consistent.
 			body, _ = sjson.DeleteBytes(body, "tool_choice")
 		}
 	}
