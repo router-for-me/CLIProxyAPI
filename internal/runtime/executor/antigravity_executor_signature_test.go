@@ -134,7 +134,7 @@ func TestAntigravityExecutor_NonStrictBypassSkipsPrecheck(t *testing.T) {
 	payload := invalidClaudeThinkingPayload()
 	from := sdktranslator.FromString("claude")
 
-	err := validateAntigravityRequestSignatures(from, payload)
+	_, err := validateAntigravityRequestSignatures(from, payload)
 	if err != nil {
 		t.Fatalf("non-strict bypass should skip precheck, got: %v", err)
 	}
@@ -150,7 +150,7 @@ func TestAntigravityExecutor_CacheModeSkipsPrecheck(t *testing.T) {
 	payload := invalidClaudeThinkingPayload()
 	from := sdktranslator.FromString("claude")
 
-	err := validateAntigravityRequestSignatures(from, payload)
+	_, err := validateAntigravityRequestSignatures(from, payload)
 	if err != nil {
 		t.Fatalf("cache mode should skip precheck, got: %v", err)
 	}
