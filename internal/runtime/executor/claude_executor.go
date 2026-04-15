@@ -586,15 +586,16 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	if isClaudeOAuthToken(apiKey) && !auth.ToolPrefixDisabled() {
 		body = applyClaudeToolPrefix(body, claudeToolPrefix)
 	}
-	// Remap tool names for OAuth token requests to avoid third-party fingerprinting.
+	// Apply non-OpenCode OAuth transforms: default effort then tool remap.
+	// Order matches Execute/ExecuteStream: toolPrefix → defaultEffort → remapTools.
 	oauthTokenCT := isClaudeOAuthToken(apiKey)
 	if oauthTokenCT {
 		clientSourceCT := detectOAuthClientSource(getClientUserAgent(ctx))
-		stripUnmapped := clientSourceCT != oauthClientOpenCode
-		body, _ = remapOAuthToolNamesEx(body, stripUnmapped)
 		if clientSourceCT != oauthClientOpenCode {
 			body = ensureDefaultEffort(body, "medium")
 		}
+		stripUnmapped := clientSourceCT != oauthClientOpenCode
+		body, _ = remapOAuthToolNamesEx(body, stripUnmapped)
 	}
 
 	url := fmt.Sprintf("%s/v1/messages/count_tokens?beta=true", baseURL)
@@ -937,11 +938,12 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	}
 
 	baseBetas := "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05,structured-outputs-2025-12-15,fast-mode-2026-02-01,redact-thinking-2026-02-12,token-efficient-tools-2026-03-28"
-	// For non-OpenCode OAuth clients (e.g. OpenClaw), ignore the client's Anthropic-Beta
-	// header entirely and use the full Claude Code default beta set. Client betas like
-	// "fine-grained-tool-streaming-2025-05-14" alone are a strong third-party fingerprint.
-	isNonOpenCodeOAuth := len(oauthClientOpts) > 0 && oauthClientOpts[0] != oauthClientOpenCode
-	if !isNonOpenCodeOAuth {
+	// For ALL OAuth clients (OpenCode, OpenClaw, etc.), ignore the client's Anthropic-Beta
+	// header and use the full Claude Code default beta set. Client betas are an incomplete
+	// subset that acts as a strong third-party fingerprint for Anthropic's detection.
+	isOAuthRequest := len(oauthClientOpts) > 0
+	isNonOpenCodeOAuth := isOAuthRequest && oauthClientOpts[0] != oauthClientOpenCode
+	if !isOAuthRequest {
 		if val := strings.TrimSpace(ginHeaders.Get("Anthropic-Beta")); val != "" {
 			baseBetas = val
 			if !strings.Contains(val, "oauth") {
@@ -952,7 +954,7 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	if !strings.Contains(baseBetas, "interleaved-thinking") {
 		baseBetas += ",interleaved-thinking-2025-05-14"
 	}
-	if isNonOpenCodeOAuth && !strings.Contains(baseBetas, "effort") {
+	if isOAuthRequest && !strings.Contains(baseBetas, "effort") {
 		baseBetas += ",effort-2025-11-24"
 	}
 
@@ -1016,11 +1018,10 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	// Legacy mode keeps OS/Arch runtime-derived; stabilized mode pins OS/Arch
 	// to the configured baseline while still allowing newer official
 	// User-Agent/package/runtime tuples to upgrade the software fingerprint.
-	// For non-OpenCode OAuth clients, always force baseline device profile to prevent
-	// client Stainless headers (e.g. SDK 0.73.0, Node v25.9.0) from leaking upstream.
-	if stabilizeDeviceProfile || isNonOpenCodeOAuth {
+	// For ALL OAuth clients, force baseline device profile to prevent client Stainless
+	// headers (e.g. SDK version, Node version) from leaking upstream and being fingerprinted.
+	if stabilizeDeviceProfile || isOAuthRequest {
 		if !stabilizeDeviceProfile {
-			// Non-OpenCode OAuth without explicit stabilization: use default baseline directly
 			deviceProfile = helps.DefaultClaudeDeviceProfilePublic(cfg)
 		}
 		helps.ApplyClaudeDeviceProfileHeaders(r, deviceProfile)
@@ -1517,6 +1518,11 @@ const (
 
 // detectOAuthClientSource identifies the downstream client from its User-Agent.
 // This is used ONLY on the Claude OAuth path to apply client-specific transformations.
+// ALL OAuth clients get: forced baseline device profile, full default Anthropic-Beta,
+// and effort beta appended. Client-specific differences:
+// OpenCode: preserves client tools (only remaps known names, keeps unmapped tools).
+// OpenClaw and Other: strict tool filtering (unmapped tools stripped), default effort injected.
+// Unknown clients are treated as strict (same as OpenClaw) as a safety default.
 func detectOAuthClientSource(userAgent string) oauthClientSource {
 	ua := strings.TrimSpace(userAgent)
 	switch {
