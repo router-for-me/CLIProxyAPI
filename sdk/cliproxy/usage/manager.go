@@ -5,21 +5,26 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
 )
 
 // Record contains the usage statistics captured for a single provider request.
 type Record struct {
-	Provider    string
-	Model       string
-	APIKey      string
-	AuthID      string
-	AuthIndex   string
-	Source      string
-	RequestedAt time.Time
-	Latency     time.Duration
-	Failed      bool
-	Detail      Detail
+	Provider     string
+	Model        string
+	APIKey       string
+	AuthID       string
+	AuthIndex    string
+	Source       string
+	RequestedAt  time.Time
+	Latency      time.Duration
+	Failed       bool
+	FailureStage string
+	ErrorCode    string
+	ErrorMessage string
+	StatusCode   int
+	Detail       Detail
 }
 
 // Detail holds the token usage breakdown.
@@ -40,6 +45,8 @@ type queueItem struct {
 	ctx    context.Context
 	record Record
 }
+
+const usagePublishedContextKey = "__cliproxy_usage_published__"
 
 // Manager maintains a queue of usage records and delivers them to registered plugins.
 type Manager struct {
@@ -110,6 +117,7 @@ func (m *Manager) Publish(ctx context.Context, record Record) {
 	if m == nil {
 		return
 	}
+	MarkRecordPublished(ctx)
 	// ensure worker is running even if Start was not called explicitly
 	m.Start(context.Background())
 	m.mu.Lock()
@@ -165,6 +173,35 @@ func safeInvoke(plugin Plugin, ctx context.Context, record Record) {
 }
 
 var defaultManager = NewManager(512)
+
+// MarkRecordPublished flags the current request context as having emitted usage.
+func MarkRecordPublished(ctx context.Context) {
+	if ctx == nil {
+		return
+	}
+	ginCtx, ok := ctx.Value("gin").(*gin.Context)
+	if !ok || ginCtx == nil {
+		return
+	}
+	ginCtx.Set(usagePublishedContextKey, true)
+}
+
+// RecordPublished reports whether usage has already been emitted for the request.
+func RecordPublished(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	ginCtx, ok := ctx.Value("gin").(*gin.Context)
+	if !ok || ginCtx == nil {
+		return false
+	}
+	value, exists := ginCtx.Get(usagePublishedContextKey)
+	if !exists {
+		return false
+	}
+	published, ok := value.(bool)
+	return ok && published
+}
 
 // DefaultManager returns the global usage manager instance.
 func DefaultManager() *Manager { return defaultManager }

@@ -89,12 +89,16 @@ type modelStats struct {
 
 // RequestDetail stores the timestamp, latency, and token usage for a single request.
 type RequestDetail struct {
-	Timestamp time.Time  `json:"timestamp"`
-	LatencyMs int64      `json:"latency_ms"`
-	Source    string     `json:"source"`
-	AuthIndex string     `json:"auth_index"`
-	Tokens    TokenStats `json:"tokens"`
-	Failed    bool       `json:"failed"`
+	Timestamp    time.Time  `json:"timestamp"`
+	LatencyMs    int64      `json:"latency_ms"`
+	Source       string     `json:"source"`
+	AuthIndex    string     `json:"auth_index"`
+	Tokens       TokenStats `json:"tokens"`
+	Failed       bool       `json:"failed"`
+	FailureStage string     `json:"failure_stage,omitempty"`
+	ErrorCode    string     `json:"error_code,omitempty"`
+	ErrorMessage string     `json:"error_message,omitempty"`
+	StatusCode   int        `json:"status_code,omitempty"`
 }
 
 // TokenStats captures the token usage breakdown for a request.
@@ -198,12 +202,16 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 		s.apis[statsKey] = stats
 	}
 	s.updateAPIStats(stats, modelName, RequestDetail{
-		Timestamp: timestamp,
-		LatencyMs: normaliseLatency(record.Latency),
-		Source:    record.Source,
-		AuthIndex: record.AuthIndex,
-		Tokens:    detail,
-		Failed:    failed,
+		Timestamp:    timestamp,
+		LatencyMs:    normaliseLatency(record.Latency),
+		Source:       record.Source,
+		AuthIndex:    record.AuthIndex,
+		Tokens:       detail,
+		Failed:       failed,
+		FailureStage: strings.TrimSpace(record.FailureStage),
+		ErrorCode:    strings.TrimSpace(record.ErrorCode),
+		ErrorMessage: strings.TrimSpace(record.ErrorMessage),
+		StatusCode:   record.StatusCode,
 	})
 
 	s.requestsByDay[dayKey]++
@@ -387,13 +395,17 @@ func dedupKey(apiName, modelName string, detail RequestDetail) string {
 	timestamp := detail.Timestamp.UTC().Format(time.RFC3339Nano)
 	tokens := normaliseTokenStats(detail.Tokens)
 	return fmt.Sprintf(
-		"%s|%s|%s|%s|%s|%t|%d|%d|%d|%d|%d",
+		"%s|%s|%s|%s|%s|%t|%s|%s|%s|%d|%d|%d|%d|%d|%d",
 		apiName,
 		modelName,
 		timestamp,
 		detail.Source,
 		detail.AuthIndex,
 		detail.Failed,
+		detail.FailureStage,
+		detail.ErrorCode,
+		detail.ErrorMessage,
+		detail.StatusCode,
 		tokens.InputTokens,
 		tokens.OutputTokens,
 		tokens.ReasoningTokens,
@@ -472,15 +484,7 @@ func normaliseTokenStats(tokens TokenStats) TokenStats {
 }
 
 func shouldSkipDetail(detail RequestDetail) bool {
-	if !detail.Failed {
-		return false
-	}
-	tokens := detail.Tokens
-	return tokens.InputTokens == 0 &&
-		tokens.OutputTokens == 0 &&
-		tokens.ReasoningTokens == 0 &&
-		tokens.CachedTokens == 0 &&
-		tokens.TotalTokens == 0
+	return false
 }
 
 func normaliseLatency(latency time.Duration) int64 {

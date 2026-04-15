@@ -3,6 +3,7 @@ package executor
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -16,14 +17,18 @@ import (
 )
 
 type usageReporter struct {
-	provider    string
-	model       string
-	authID      string
-	authIndex   string
-	apiKey      string
-	source      string
-	requestedAt time.Time
-	once        sync.Once
+	provider     string
+	model        string
+	authID       string
+	authIndex    string
+	apiKey       string
+	source       string
+	requestedAt  time.Time
+	failureStage string
+	errorCode    string
+	errorMessage string
+	statusCode   int
+	once         sync.Once
 }
 
 func newUsageReporter(ctx context.Context, provider, model string, auth *cliproxyauth.Auth) *usageReporter {
@@ -55,6 +60,7 @@ func (r *usageReporter) trackFailure(ctx context.Context, errPtr *error) {
 		return
 	}
 	if *errPtr != nil {
+		r.captureFailure(*errPtr)
 		r.publishFailure(ctx)
 	}
 }
@@ -95,17 +101,62 @@ func (r *usageReporter) buildRecord(detail usage.Detail, failed bool) usage.Reco
 		return usage.Record{Detail: detail, Failed: failed}
 	}
 	return usage.Record{
-		Provider:    r.provider,
-		Model:       r.model,
-		Source:      r.source,
-		APIKey:      r.apiKey,
-		AuthID:      r.authID,
-		AuthIndex:   r.authIndex,
-		RequestedAt: r.requestedAt,
-		Latency:     r.latency(),
-		Failed:      failed,
-		Detail:      detail,
+		Provider:     r.provider,
+		Model:        r.model,
+		Source:       r.source,
+		APIKey:       r.apiKey,
+		AuthID:       r.authID,
+		AuthIndex:    r.authIndex,
+		RequestedAt:  r.requestedAt,
+		Latency:      r.latency(),
+		Failed:       failed,
+		FailureStage: r.failureStage,
+		ErrorCode:    r.errorCode,
+		ErrorMessage: r.errorMessage,
+		StatusCode:   r.statusCode,
+		Detail:       detail,
 	}
+}
+
+func (r *usageReporter) captureFailure(err error) {
+	if r == nil || err == nil {
+		return
+	}
+	r.failureStage = resolveFailureStage(err)
+	r.errorCode, r.errorMessage, r.statusCode = resolveErrorFields(err)
+}
+
+func resolveFailureStage(err error) string {
+	var authErr *cliproxyauth.Error
+	if errors.As(err, &authErr) && authErr != nil {
+		switch strings.TrimSpace(authErr.Code) {
+		case "auth_unavailable", "auth_not_found":
+			return "auth_selection"
+		}
+	}
+	return "request_execution"
+}
+
+func resolveErrorFields(err error) (code, message string, status int) {
+	if err == nil {
+		return "", "", 0
+	}
+	var authErr *cliproxyauth.Error
+	if errors.As(err, &authErr) && authErr != nil {
+		code = strings.TrimSpace(authErr.Code)
+		message = strings.TrimSpace(authErr.Message)
+		status = authErr.StatusCode()
+		if message == "" {
+			message = strings.TrimSpace(authErr.Error())
+		}
+		return code, message, status
+	}
+	if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
+		if value := se.StatusCode(); value > 0 {
+			status = value
+		}
+	}
+	return "", strings.TrimSpace(err.Error()), status
 }
 
 func (r *usageReporter) latency() time.Duration {

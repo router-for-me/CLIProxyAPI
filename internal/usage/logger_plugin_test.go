@@ -95,7 +95,7 @@ func TestRequestStatisticsMergeSnapshotDedupIgnoresLatency(t *testing.T) {
 	}
 }
 
-func TestRequestStatisticsRecordSkipsFailedZeroTokenDetail(t *testing.T) {
+func TestRequestStatisticsRecordKeepsFailedZeroTokenDetail(t *testing.T) {
 	stats := NewRequestStatistics()
 	stats.Record(context.Background(), coreusage.Record{
 		APIKey:      "test-key",
@@ -119,7 +119,42 @@ func TestRequestStatisticsRecordSkipsFailedZeroTokenDetail(t *testing.T) {
 		t.Fatalf("failure_count = %d, want 1", snapshot.FailureCount)
 	}
 	details := snapshot.APIs["test-key"].Models["gpt-5.4"].Details
-	if len(details) != 0 {
-		t.Fatalf("details len = %d, want 0", len(details))
+	if len(details) != 1 {
+		t.Fatalf("details len = %d, want 1", len(details))
+	}
+	if !details[0].Failed {
+		t.Fatalf("detail failed = false, want true")
+	}
+}
+
+func TestRequestStatisticsRecordIncludesFailureMetadata(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Record(context.Background(), coreusage.Record{
+		APIKey:       "test-key",
+		Model:        "gpt-5.4",
+		RequestedAt:  time.Date(2026, 3, 20, 13, 5, 0, 0, time.UTC),
+		Failed:       true,
+		FailureStage: "auth_selection",
+		ErrorCode:    "auth_unavailable",
+		ErrorMessage: "no auth available",
+		StatusCode:   503,
+	})
+
+	snapshot := stats.Snapshot()
+	details := snapshot.APIs["test-key"].Models["gpt-5.4"].Details
+	if len(details) != 1 {
+		t.Fatalf("details len = %d, want 1", len(details))
+	}
+	if details[0].FailureStage != "auth_selection" {
+		t.Fatalf("failure_stage = %q, want %q", details[0].FailureStage, "auth_selection")
+	}
+	if details[0].ErrorCode != "auth_unavailable" {
+		t.Fatalf("error_code = %q, want %q", details[0].ErrorCode, "auth_unavailable")
+	}
+	if details[0].ErrorMessage != "no auth available" {
+		t.Fatalf("error_message = %q, want %q", details[0].ErrorMessage, "no auth available")
+	}
+	if details[0].StatusCode != 503 {
+		t.Fatalf("status_code = %d, want 503", details[0].StatusCode)
 	}
 }

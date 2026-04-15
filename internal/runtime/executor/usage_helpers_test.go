@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 )
 
@@ -60,5 +61,33 @@ func TestUsageReporterBuildRecordIncludesLatency(t *testing.T) {
 	}
 	if record.Latency > 3*time.Second {
 		t.Fatalf("latency = %v, want <= 3s", record.Latency)
+	}
+}
+
+func TestUsageReporterBuildRecordIncludesFailureMetadata(t *testing.T) {
+	reporter := &usageReporter{
+		provider:    "openai",
+		model:       "gpt-5.4",
+		requestedAt: time.Now().Add(-time.Second),
+	}
+
+	reporter.captureFailure(&cliproxyauth.Error{
+		Code:      "auth_unavailable",
+		Message:   "no auth available",
+		Retryable: true,
+	})
+
+	record := reporter.buildRecord(usage.Detail{}, true)
+	if record.FailureStage != "auth_selection" {
+		t.Fatalf("failure_stage = %q, want %q", record.FailureStage, "auth_selection")
+	}
+	if record.ErrorCode != "auth_unavailable" {
+		t.Fatalf("error_code = %q, want %q", record.ErrorCode, "auth_unavailable")
+	}
+	if record.ErrorMessage != "no auth available" {
+		t.Fatalf("error_message = %q, want %q", record.ErrorMessage, "no auth available")
+	}
+	if record.StatusCode != 503 {
+		t.Fatalf("status_code = %d, want 503", record.StatusCode)
 	}
 }

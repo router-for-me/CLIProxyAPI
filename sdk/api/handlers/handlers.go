@@ -21,6 +21,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	log "github.com/sirupsen/logrus"
@@ -710,6 +711,7 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 				addon = hdr.Clone()
 			}
 		}
+		publishHandlerFailureUsage(ctx, strings.Join(providers, ","), req.Model, status, err)
 		return nil, nil, &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
 	}
 	if !PassthroughHeadersEnabled(h.Cfg) {
@@ -825,6 +827,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 				addon = hdr.Clone()
 			}
 		}
+		publishHandlerFailureUsage(ctx, strings.Join(providers, ","), req.Model, status, err)
 		errChan <- &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
 		close(errChan)
 		return nil, nil, errChan
@@ -891,28 +894,28 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 			}
 		}
 
-			bootstrapEligible := func(err error) bool {
-				if exhausted, ok := err.(interface{ BootstrapRetryExhausted() bool }); ok && exhausted.BootstrapRetryExhausted() {
-					return false
-				}
-				status := statusFromError(err)
-				if status == 0 {
-					if isAuthAvailabilityError(err) {
-						return false
-					}
-					return true
-				}
+		bootstrapEligible := func(err error) bool {
+			if exhausted, ok := err.(interface{ BootstrapRetryExhausted() bool }); ok && exhausted.BootstrapRetryExhausted() {
+				return false
+			}
+			status := statusFromError(err)
+			if status == 0 {
 				if isAuthAvailabilityError(err) {
 					return false
 				}
-				switch status {
-				case http.StatusUnauthorized, http.StatusForbidden, http.StatusPaymentRequired,
-					http.StatusRequestTimeout, http.StatusTooManyRequests:
-					return true
-				default:
-					return status >= http.StatusInternalServerError
-				}
+				return true
 			}
+			if isAuthAvailabilityError(err) {
+				return false
+			}
+			switch status {
+			case http.StatusUnauthorized, http.StatusForbidden, http.StatusPaymentRequired,
+				http.StatusRequestTimeout, http.StatusTooManyRequests:
+				return true
+			default:
+				return status >= http.StatusInternalServerError
+			}
+		}
 
 	outer:
 		for {
@@ -931,6 +934,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 			if !ok {
 				if handlerType == "openai-response" {
 					if err := validateSSEDataJSONWithCarry(&responsesSSEValidationCarry, nil, true); err != nil {
+						publishHandlerFailureUsage(ctx, strings.Join(providers, ","), req.Model, http.StatusBadGateway, err)
 						_ = sendErr(&interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: err})
 						return
 					}
@@ -1010,6 +1014,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 						addon = hdr.Clone()
 					}
 				}
+				publishHandlerFailureUsage(ctx, strings.Join(providers, ","), req.Model, status, streamErr)
 				_ = sendErr(&interfaces.ErrorMessage{StatusCode: status, Error: streamErr, Addon: addon})
 				return
 			}
@@ -1020,6 +1025,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 				}
 				if handlerType == "openai-response" {
 					if err := validateSSEDataJSONWithCarry(&responsesSSEValidationCarry, chunk.Payload, false); err != nil {
+						publishHandlerFailureUsage(ctx, strings.Join(providers, ","), req.Model, http.StatusBadGateway, err)
 						_ = sendErr(&interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: err})
 						return
 					}
@@ -1144,6 +1150,82 @@ func statusFromError(err error) int {
 		}
 	}
 	return 0
+}
+
+func publishHandlerFailureUsage(ctx context.Context, provider, model string, status int, err error) {
+	if coreusage.RecordPublished(ctx) {
+		return
+	}
+	errorCode, errorMessage, resolvedStatus := resolveHandlerUsageError(err, status)
+	coreusage.PublishRecord(ctx, coreusage.Record{
+		Provider:     strings.TrimSpace(provider),
+		Model:        strings.TrimSpace(model),
+		APIKey:       handlerAPIKeyFromContext(ctx),
+		RequestedAt:  time.Now(),
+		Failed:       true,
+		FailureStage: resolveHandlerFailureStage(err),
+		ErrorCode:    errorCode,
+		ErrorMessage: errorMessage,
+		StatusCode:   resolvedStatus,
+	})
+}
+
+func resolveHandlerFailureStage(err error) string {
+	var authErr *coreauth.Error
+	if errors.As(err, &authErr) && authErr != nil {
+		switch strings.TrimSpace(authErr.Code) {
+		case "auth_unavailable", "auth_not_found":
+			return "auth_selection"
+		}
+	}
+	return "request_execution"
+}
+
+func resolveHandlerUsageError(err error, fallbackStatus int) (code, message string, status int) {
+	status = fallbackStatus
+	if err == nil {
+		return "", "", status
+	}
+	var authErr *coreauth.Error
+	if errors.As(err, &authErr) && authErr != nil {
+		code = strings.TrimSpace(authErr.Code)
+		message = strings.TrimSpace(authErr.Message)
+		if resolved := authErr.StatusCode(); resolved > 0 {
+			status = resolved
+		}
+		if message == "" {
+			message = strings.TrimSpace(authErr.Error())
+		}
+		return code, message, status
+	}
+	if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
+		if resolved := se.StatusCode(); resolved > 0 {
+			status = resolved
+		}
+	}
+	return "", strings.TrimSpace(err.Error()), status
+}
+
+func handlerAPIKeyFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	ginCtx, ok := ctx.Value("gin").(*gin.Context)
+	if !ok || ginCtx == nil {
+		return ""
+	}
+	value, exists := ginCtx.Get("apiKey")
+	if !exists {
+		return ""
+	}
+	switch typed := value.(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	case fmt.Stringer:
+		return strings.TrimSpace(typed.String())
+	default:
+		return strings.TrimSpace(fmt.Sprintf("%v", typed))
+	}
 }
 
 func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string, normalizedModel string, err *interfaces.ErrorMessage) {

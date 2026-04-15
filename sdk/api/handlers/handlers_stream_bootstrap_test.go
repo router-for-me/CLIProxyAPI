@@ -4,14 +4,18 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 )
 
@@ -27,6 +31,33 @@ func registerTestModel(t *testing.T, manager *coreauth.Manager, auths ...*coreau
 			registry.GetGlobalRegistry().UnregisterClient(auth.ID)
 		})
 	}
+}
+
+type usageCapturePlugin struct {
+	mu      sync.Mutex
+	records []coreusage.Record
+}
+
+func (p *usageCapturePlugin) HandleUsage(_ context.Context, record coreusage.Record) {
+	p.mu.Lock()
+	p.records = append(p.records, record)
+	p.mu.Unlock()
+}
+
+func (p *usageCapturePlugin) waitForRecord(match func(coreusage.Record) bool, timeout time.Duration) (coreusage.Record, bool) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		p.mu.Lock()
+		for _, record := range p.records {
+			if match(record) {
+				p.mu.Unlock()
+				return record, true
+			}
+		}
+		p.mu.Unlock()
+		time.Sleep(10 * time.Millisecond)
+	}
+	return coreusage.Record{}, false
 }
 
 type failOnceStreamExecutor struct {
@@ -1087,6 +1118,8 @@ func TestExecuteStreamWithAuthManager_AuthUnavailableDoesNotBootstrapRetry(t *te
 	executor := &authUnavailableStreamExecutor{}
 	manager := coreauth.NewManager(nil, nil, nil)
 	manager.RegisterExecutor(executor)
+	plugin := &usageCapturePlugin{}
+	coreusage.RegisterPlugin(plugin)
 
 	auth1 := &coreauth.Auth{
 		ID:       "auth1",
@@ -1105,7 +1138,11 @@ func TestExecuteStreamWithAuthManager_AuthUnavailableDoesNotBootstrapRetry(t *te
 			BootstrapRetries: 2,
 		},
 	}, manager)
-	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(context.Background(), "openai", "test-model", []byte(`{"model":"test-model"}`), "")
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	ginCtx.Set("apiKey", "usage-auth-unavailable-test")
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(ctx, "openai", "test-model", []byte(`{"model":"test-model"}`), "")
 	if dataChan == nil || errChan == nil {
 		t.Fatalf("expected non-nil channels")
 	}
@@ -1132,6 +1169,24 @@ func TestExecuteStreamWithAuthManager_AuthUnavailableDoesNotBootstrapRetry(t *te
 	}
 	if executor.Calls() != 1 {
 		t.Fatalf("expected no bootstrap retry, got %d calls", executor.Calls())
+	}
+	record, ok := plugin.waitForRecord(func(record coreusage.Record) bool {
+		return record.APIKey == "usage-auth-unavailable-test" && record.ErrorCode == "auth_unavailable"
+	}, time.Second)
+	if !ok {
+		t.Fatal("expected failed usage record")
+	}
+	if !record.Failed {
+		t.Fatalf("record failed = false, want true")
+	}
+	if record.FailureStage != "auth_selection" {
+		t.Fatalf("failure_stage = %q, want %q", record.FailureStage, "auth_selection")
+	}
+	if record.ErrorMessage != "no auth available" {
+		t.Fatalf("error_message = %q, want %q", record.ErrorMessage, "no auth available")
+	}
+	if record.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status_code = %d, want %d", record.StatusCode, http.StatusServiceUnavailable)
 	}
 }
 
