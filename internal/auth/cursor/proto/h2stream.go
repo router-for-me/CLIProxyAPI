@@ -33,10 +33,10 @@ type H2Stream struct {
 	err    error
 
 	// Send-side flow control
-	sendWindow   int32      // available bytes we can send on this stream
-	connWindow   int32      // available bytes on the connection level
-	windowCond   *sync.Cond // signaled when window is updated
-	windowMu     sync.Mutex // protects sendWindow, connWindow
+	sendWindow int32      // available bytes we can send on this stream
+	connWindow int32      // available bytes on the connection level
+	windowCond *sync.Cond // signaled when window is updated
+	windowMu   sync.Mutex // protects sendWindow, connWindow
 }
 
 // ID returns the unique identifier for this stream (for logging).

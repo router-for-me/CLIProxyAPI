@@ -26,6 +26,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	antigravityclaude "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/antigravity/claude"
@@ -184,22 +185,24 @@ func newAntigravityHTTPClient(ctx context.Context, cfg *config.Config, auth *cli
 	return client
 }
 
-func validateAntigravityRequestSignatures(from sdktranslator.Format, rawJSON []byte) error {
+func validateAntigravityRequestSignatures(from sdktranslator.Format, rawJSON []byte) ([]byte, error) {
 	if from.String() != "claude" {
-		return nil
+		return rawJSON, nil
 	}
+	// Always strip thinking blocks with empty signatures (proxy-generated).
+	rawJSON = antigravityclaude.StripEmptySignatureThinkingBlocks(rawJSON)
 	if cache.SignatureCacheEnabled() {
-		return nil
+		return rawJSON, nil
 	}
 	if !cache.SignatureBypassStrictMode() {
 		// Non-strict bypass: let the translator handle invalid signatures
 		// by dropping unsigned thinking blocks silently (no 400).
-		return nil
+		return rawJSON, nil
 	}
 	if err := antigravityclaude.ValidateClaudeBypassSignatures(rawJSON); err != nil {
-		return statusErr{code: http.StatusBadRequest, msg: err.Error()}
+		return rawJSON, statusErr{code: http.StatusBadRequest, msg: err.Error()}
 	}
-	return nil
+	return rawJSON, nil
 }
 
 // Identifier returns the executor identifier.
@@ -695,9 +698,11 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := originalPayloadSource
-	if errValidate := validateAntigravityRequestSignatures(from, originalPayload); errValidate != nil {
+	originalPayload, errValidate := validateAntigravityRequestSignatures(from, originalPayload)
+	if errValidate != nil {
 		return resp, errValidate
 	}
+	req.Payload = originalPayload
 	token, updatedAuth, errToken := e.ensureAccessToken(ctx, auth)
 	if errToken != nil {
 		return resp, errToken
@@ -907,9 +912,11 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := originalPayloadSource
-	if errValidate := validateAntigravityRequestSignatures(from, originalPayload); errValidate != nil {
+	originalPayload, errValidate := validateAntigravityRequestSignatures(from, originalPayload)
+	if errValidate != nil {
 		return resp, errValidate
 	}
+	req.Payload = originalPayload
 	token, updatedAuth, errToken := e.ensureAccessToken(ctx, auth)
 	if errToken != nil {
 		return resp, errToken
@@ -1370,9 +1377,11 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := originalPayloadSource
-	if errValidate := validateAntigravityRequestSignatures(from, originalPayload); errValidate != nil {
+	originalPayload, errValidate := validateAntigravityRequestSignatures(from, originalPayload)
+	if errValidate != nil {
 		return nil, errValidate
 	}
+	req.Payload = originalPayload
 	token, updatedAuth, errToken := e.ensureAccessToken(ctx, auth)
 	if errToken != nil {
 		return nil, errToken
@@ -1626,9 +1635,11 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 	if len(opts.OriginalRequest) > 0 {
 		originalPayloadSource = opts.OriginalRequest
 	}
-	if errValidate := validateAntigravityRequestSignatures(from, originalPayloadSource); errValidate != nil {
+	originalPayloadSource, errValidate := validateAntigravityRequestSignatures(from, originalPayloadSource)
+	if errValidate != nil {
 		return cliproxyexecutor.Response{}, errValidate
 	}
+	req.Payload = originalPayloadSource
 	token, updatedAuth, errToken := e.ensureAccessToken(ctx, auth)
 	if errToken != nil {
 		return cliproxyexecutor.Response{}, errToken
@@ -1945,18 +1956,56 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 	payload = geminiToAntigravity(modelName, payload, projectID)
 	payload, _ = sjson.SetBytes(payload, "model", modelName)
 
-	useAntigravitySchema := strings.Contains(modelName, "claude") || strings.Contains(modelName, "gemini-3-pro") || strings.Contains(modelName, "gemini-3.1-pro")
-	payloadStr := string(payload)
-	paths := make([]string, 0)
-	util.Walk(gjson.Parse(payloadStr), "", "parametersJsonSchema", &paths)
-	for _, p := range paths {
-		payloadStr, _ = util.RenameKey(payloadStr, p, p[:len(p)-len("parametersJsonSchema")]+"parameters")
+	// Cap maxOutputTokens to model's max_completion_tokens from registry
+	if maxOut := gjson.GetBytes(payload, "request.generationConfig.maxOutputTokens"); maxOut.Exists() && maxOut.Type == gjson.Number {
+		if modelInfo := registry.LookupModelInfo(modelName, "antigravity"); modelInfo != nil && modelInfo.MaxCompletionTokens > 0 {
+			if int(maxOut.Int()) > modelInfo.MaxCompletionTokens {
+				payload, _ = sjson.SetBytes(payload, "request.generationConfig.maxOutputTokens", modelInfo.MaxCompletionTokens)
+			}
+		}
 	}
 
-	if useAntigravitySchema {
-		payloadStr = util.CleanJSONSchemaForAntigravity(payloadStr)
+	useAntigravitySchema := strings.Contains(modelName, "claude") || strings.Contains(modelName, "gemini-3-pro") || strings.Contains(modelName, "gemini-3.1-pro")
+	var (
+		bodyReader io.Reader
+		payloadLog []byte
+	)
+	if antigravityRequestNeedsSchemaSanitization(payload) {
+		payloadStr := string(payload)
+		paths := make([]string, 0)
+		util.Walk(gjson.Parse(payloadStr), "", "parametersJsonSchema", &paths)
+		for _, p := range paths {
+			payloadStr, _ = util.RenameKey(payloadStr, p, p[:len(p)-len("parametersJsonSchema")]+"parameters")
+		}
+
+		if useAntigravitySchema {
+			payloadStr = util.CleanJSONSchemaForAntigravity(payloadStr)
+		} else {
+			payloadStr = util.CleanJSONSchemaForGemini(payloadStr)
+		}
+
+		if strings.Contains(modelName, "claude") {
+			updated, _ := sjson.SetBytes([]byte(payloadStr), "request.toolConfig.functionCallingConfig.mode", "VALIDATED")
+			payloadStr = string(updated)
+		} else {
+			payloadStr, _ = sjson.Delete(payloadStr, "request.generationConfig.maxOutputTokens")
+		}
+
+		bodyReader = strings.NewReader(payloadStr)
+		if e.cfg != nil && e.cfg.RequestLog {
+			payloadLog = []byte(payloadStr)
+		}
 	} else {
-		payloadStr = util.CleanJSONSchemaForGemini(payloadStr)
+		if strings.Contains(modelName, "claude") {
+			payload, _ = sjson.SetBytes(payload, "request.toolConfig.functionCallingConfig.mode", "VALIDATED")
+		} else {
+			payload, _ = sjson.DeleteBytes(payload, "request.generationConfig.maxOutputTokens")
+		}
+
+		bodyReader = bytes.NewReader(payload)
+		if e.cfg != nil && e.cfg.RequestLog {
+			payloadLog = append([]byte(nil), payload...)
+		}
 	}
 
 	// if useAntigravitySchema {
@@ -1972,14 +2021,7 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 	// 	}
 	// }
 
-	if strings.Contains(modelName, "claude") {
-		updated, _ := sjson.SetBytes([]byte(payloadStr), "request.toolConfig.functionCallingConfig.mode", "VALIDATED")
-		payloadStr = string(updated)
-	} else {
-		payloadStr, _ = sjson.Delete(payloadStr, "request.generationConfig.maxOutputTokens")
-	}
-
-	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, requestURL.String(), strings.NewReader(payloadStr))
+	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, requestURL.String(), bodyReader)
 	if errReq != nil {
 		return nil, errReq
 	}
@@ -2002,10 +2044,6 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 		authLabel = auth.Label
 		authType, authValue = auth.AccountInfo()
 	}
-	var payloadLog []byte
-	if e.cfg != nil && e.cfg.RequestLog {
-		payloadLog = []byte(payloadStr)
-	}
 	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 		URL:       requestURL.String(),
 		Method:    http.MethodPost,
@@ -2019,6 +2057,19 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 	})
 
 	return httpReq, nil
+}
+
+func antigravityRequestNeedsSchemaSanitization(payload []byte) bool {
+	if gjson.GetBytes(payload, "request.tools.0").Exists() {
+		return true
+	}
+	if gjson.GetBytes(payload, "request.generationConfig.responseJsonSchema").Exists() {
+		return true
+	}
+	if gjson.GetBytes(payload, "request.generationConfig.responseSchema").Exists() {
+		return true
+	}
+	return false
 }
 
 func tokenExpiry(metadata map[string]any) time.Time {

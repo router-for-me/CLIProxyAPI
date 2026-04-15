@@ -75,7 +75,7 @@ var gitLabAgenticCatalog = []gitLabCatalogModel{
 }
 
 var gitLabModelAliases = map[string]string{
-	"duo-chat-haiku-4-6":  "duo-chat-haiku-4-5",
+	"duo-chat-haiku-4-6": "duo-chat-haiku-4-5",
 }
 
 func NewGitLabExecutor(cfg *config.Config) *GitLabExecutor {

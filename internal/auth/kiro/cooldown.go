@@ -6,8 +6,8 @@ import (
 )
 
 const (
-	CooldownReason429         = "rate_limit_exceeded"
-	CooldownReasonSuspended   = "account_suspended"
+	CooldownReason429            = "rate_limit_exceeded"
+	CooldownReasonSuspended      = "account_suspended"
 	CooldownReasonQuotaExhausted = "quota_exhausted"
 
 	DefaultShortCooldown = 1 * time.Minute

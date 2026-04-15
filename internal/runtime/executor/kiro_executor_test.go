@@ -281,8 +281,8 @@ func TestGetAuthValue(t *testing.T) {
 			expected: "attribute_value",
 		},
 		{
-			name: "Both nil",
-			auth: &cliproxyauth.Auth{},
+			name:     "Both nil",
+			auth:     &cliproxyauth.Auth{},
 			key:      "test_key",
 			expected: "",
 		},
@@ -326,9 +326,9 @@ func TestGetAuthValue(t *testing.T) {
 
 func TestGetAccountKey(t *testing.T) {
 	tests := []struct {
-		name     string
-		auth     *cliproxyauth.Auth
-		checkFn  func(t *testing.T, result string)
+		name    string
+		auth    *cliproxyauth.Auth
+		checkFn func(t *testing.T, result string)
 	}{
 		{
 			name: "From client_id",

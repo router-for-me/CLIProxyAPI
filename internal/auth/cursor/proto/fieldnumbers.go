@@ -4,23 +4,23 @@ package proto
 
 // AgentClientMessage (msg 118) oneof "message"
 const (
-	ACM_RunRequest              = 1 // AgentRunRequest
-	ACM_ExecClientMessage       = 2 // ExecClientMessage
-	ACM_KvClientMessage         = 3 // KvClientMessage
-	ACM_ConversationAction      = 4 // ConversationAction
-	ACM_ExecClientControlMsg    = 5 // ExecClientControlMessage
-	ACM_InteractionResponse     = 6 // InteractionResponse
-	ACM_ClientHeartbeat         = 7 // ClientHeartbeat
+	ACM_RunRequest           = 1 // AgentRunRequest
+	ACM_ExecClientMessage    = 2 // ExecClientMessage
+	ACM_KvClientMessage      = 3 // KvClientMessage
+	ACM_ConversationAction   = 4 // ConversationAction
+	ACM_ExecClientControlMsg = 5 // ExecClientControlMessage
+	ACM_InteractionResponse  = 6 // InteractionResponse
+	ACM_ClientHeartbeat      = 7 // ClientHeartbeat
 )
 
 // AgentServerMessage (msg 119) oneof "message"
 const (
-	ASM_InteractionUpdate         = 1 // InteractionUpdate
-	ASM_ExecServerMessage         = 2 // ExecServerMessage
-	ASM_ConversationCheckpoint    = 3 // ConversationStateStructure
-	ASM_KvServerMessage           = 4 // KvServerMessage
-	ASM_ExecServerControlMessage  = 5 // ExecServerControlMessage
-	ASM_InteractionQuery          = 7 // InteractionQuery
+	ASM_InteractionUpdate        = 1 // InteractionUpdate
+	ASM_ExecServerMessage        = 2 // ExecServerMessage
+	ASM_ConversationCheckpoint   = 3 // ConversationStateStructure
+	ASM_KvServerMessage          = 4 // KvServerMessage
+	ASM_ExecServerControlMessage = 5 // ExecServerControlMessage
+	ASM_InteractionQuery         = 7 // InteractionQuery
 )
 
 // AgentRunRequest (msg 91)
@@ -77,10 +77,10 @@ const (
 
 // ModelDetails (msg 88)
 const (
-	MD_ModelId        = 1 // string
+	MD_ModelId         = 1 // string
 	MD_ThinkingDetails = 2 // ThinkingDetails (optional)
-	MD_DisplayModelId = 3 // string
-	MD_DisplayName    = 4 // string
+	MD_DisplayModelId  = 3 // string
+	MD_DisplayName     = 4 // string
 )
 
 // McpTools (msg 307)
@@ -122,9 +122,9 @@ const (
 
 // InteractionUpdate oneof "message"
 const (
-	IU_TextDelta         = 1  // TextDeltaUpdate
-	IU_ThinkingDelta     = 4  // ThinkingDeltaUpdate
-	IU_ThinkingCompleted = 5  // ThinkingCompletedUpdate
+	IU_TextDelta         = 1 // TextDeltaUpdate
+	IU_ThinkingDelta     = 4 // ThinkingDeltaUpdate
+	IU_ThinkingCompleted = 5 // ThinkingCompletedUpdate
 )
 
 // TextDeltaUpdate (msg 92)
@@ -169,22 +169,22 @@ const (
 
 // ExecServerMessage
 const (
-	ESM_Id      = 1  // uint32
-	ESM_ExecId  = 15 // string
+	ESM_Id     = 1  // uint32
+	ESM_ExecId = 15 // string
 	// oneof message:
-	ESM_ShellArgs              = 2  // ShellArgs
-	ESM_WriteArgs              = 3  // WriteArgs
-	ESM_DeleteArgs             = 4  // DeleteArgs
-	ESM_GrepArgs               = 5  // GrepArgs
-	ESM_ReadArgs               = 7  // ReadArgs (NOTE: 6 is skipped)
-	ESM_LsArgs                 = 8  // LsArgs
-	ESM_DiagnosticsArgs        = 9  // DiagnosticsArgs
-	ESM_RequestContextArgs     = 10 // RequestContextArgs
-	ESM_McpArgs                = 11 // McpArgs
-	ESM_ShellStreamArgs        = 14 // ShellArgs (stream variant)
-	ESM_BackgroundShellSpawn   = 16 // BackgroundShellSpawnArgs
-	ESM_FetchArgs              = 20 // FetchArgs
-	ESM_WriteShellStdinArgs    = 23 // WriteShellStdinArgs
+	ESM_ShellArgs            = 2  // ShellArgs
+	ESM_WriteArgs            = 3  // WriteArgs
+	ESM_DeleteArgs           = 4  // DeleteArgs
+	ESM_GrepArgs             = 5  // GrepArgs
+	ESM_ReadArgs             = 7  // ReadArgs (NOTE: 6 is skipped)
+	ESM_LsArgs               = 8  // LsArgs
+	ESM_DiagnosticsArgs      = 9  // DiagnosticsArgs
+	ESM_RequestContextArgs   = 10 // RequestContextArgs
+	ESM_McpArgs              = 11 // McpArgs
+	ESM_ShellStreamArgs      = 14 // ShellArgs (stream variant)
+	ESM_BackgroundShellSpawn = 16 // BackgroundShellSpawnArgs
+	ESM_FetchArgs            = 20 // FetchArgs
+	ESM_WriteShellStdinArgs  = 23 // WriteShellStdinArgs
 )
 
 // ExecClientMessage
@@ -192,19 +192,19 @@ const (
 	ECM_Id     = 1  // uint32
 	ECM_ExecId = 15 // string
 	// oneof message (mirrors server fields):
-	ECM_ShellResult              = 2
-	ECM_WriteResult              = 3
-	ECM_DeleteResult             = 4
-	ECM_GrepResult               = 5
-	ECM_ReadResult               = 7
-	ECM_LsResult                 = 8
-	ECM_DiagnosticsResult        = 9
-	ECM_RequestContextResult     = 10
-	ECM_McpResult                = 11
-	ECM_ShellStream              = 14
-	ECM_BackgroundShellSpawnRes  = 16
-	ECM_FetchResult              = 20
-	ECM_WriteShellStdinResult    = 23
+	ECM_ShellResult             = 2
+	ECM_WriteResult             = 3
+	ECM_DeleteResult            = 4
+	ECM_GrepResult              = 5
+	ECM_ReadResult              = 7
+	ECM_LsResult                = 8
+	ECM_DiagnosticsResult       = 9
+	ECM_RequestContextResult    = 10
+	ECM_McpResult               = 11
+	ECM_ShellStream             = 14
+	ECM_BackgroundShellSpawnRes = 16
+	ECM_FetchResult             = 20
+	ECM_WriteShellStdinResult   = 23
 )
 
 // McpArgs
@@ -276,28 +276,28 @@ const (
 // ShellResult oneof: success=1 (+ various), rejected=?
 // The TS code uses specific result field numbers from the oneof:
 const (
-	RR_Rejected = 3 // ReadResult.rejected
-	SR_Rejected = 5 // ShellResult.rejected (from TS: ShellResult has success/various/rejected)
-	WR_Rejected = 5 // WriteResult.rejected
-	DR_Rejected = 3 // DeleteResult.rejected
-	LR_Rejected = 3 // LsResult.rejected
-	GR_Error    = 2 // GrepResult.error
-	FR_Error    = 2 // FetchResult.error
+	RR_Rejected   = 3 // ReadResult.rejected
+	SR_Rejected   = 5 // ShellResult.rejected (from TS: ShellResult has success/various/rejected)
+	WR_Rejected   = 5 // WriteResult.rejected
+	DR_Rejected   = 3 // DeleteResult.rejected
+	LR_Rejected   = 3 // LsResult.rejected
+	GR_Error      = 2 // GrepResult.error
+	FR_Error      = 2 // FetchResult.error
 	BSSR_Rejected = 2 // BackgroundShellSpawnResult.rejected (error field)
 	WSSR_Error    = 2 // WriteShellStdinResult.error
 )
 
 // --- Rejection struct fields ---
 const (
-	REJ_Path             = 1
-	REJ_Reason           = 2
-	SREJ_Command         = 1
-	SREJ_WorkingDir      = 2
-	SREJ_Reason          = 3
-	SREJ_IsReadonly      = 4
-	GERR_Error           = 1
-	FERR_Url             = 1
-	FERR_Error           = 2
+	REJ_Path        = 1
+	REJ_Reason      = 2
+	SREJ_Command    = 1
+	SREJ_WorkingDir = 2
+	SREJ_Reason     = 3
+	SREJ_IsReadonly = 4
+	GERR_Error      = 1
+	FERR_Url        = 1
+	FERR_Error      = 2
 )
 
 // ReadArgs

@@ -24,8 +24,8 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api/middleware"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api/modules"
 	ampmodule "github.com/router-for-me/CLIProxyAPI/v6/internal/api/modules/amp"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kiro"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/managementasset"
@@ -684,7 +684,6 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.POST("/gitlab-auth-url", s.mgmt.RequestGitLabPATToken)
 		mgmt.GET("/gemini-cli-auth-url", s.mgmt.RequestGeminiCLIToken)
 		mgmt.GET("/antigravity-auth-url", s.mgmt.RequestAntigravityToken)
-		mgmt.GET("/qwen-auth-url", s.mgmt.RequestQwenToken)
 		mgmt.GET("/kilo-auth-url", s.mgmt.RequestKiloToken)
 		mgmt.GET("/kimi-auth-url", s.mgmt.RequestKimiToken)
 		mgmt.GET("/iflow-auth-url", s.mgmt.RequestIFlowToken)
@@ -1122,20 +1121,17 @@ func applySignatureCacheConfig(oldCfg, cfg *config.Config) {
 	if oldCfg == nil {
 		cache.SetSignatureCacheEnabled(newVal)
 		cache.SetSignatureBypassStrictMode(newStrict)
-		log.Debugf("antigravity_signature_cache_enabled toggled to %t", newVal)
 		return
 	}
 
 	oldVal := configuredSignatureCacheEnabled(oldCfg)
 	if oldVal != newVal {
 		cache.SetSignatureCacheEnabled(newVal)
-		log.Debugf("antigravity_signature_cache_enabled updated from %t to %t", oldVal, newVal)
 	}
 
 	oldStrict := configuredSignatureBypassStrict(oldCfg)
 	if oldStrict != newStrict {
 		cache.SetSignatureBypassStrictMode(newStrict)
-		log.Debugf("antigravity_signature_bypass_strict updated from %t to %t", oldStrict, newStrict)
 	}
 }
 

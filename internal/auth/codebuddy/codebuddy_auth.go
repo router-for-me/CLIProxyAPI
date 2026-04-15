@@ -63,7 +63,7 @@ func (a *CodeBuddyAuth) FetchAuthState(ctx context.Context) (*AuthState, error) 
 		return nil, fmt.Errorf("codebuddy: failed to create auth state request: %w", err)
 	}
 
-requestID := uuid.NewString()
+	requestID := uuid.NewString()
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Requested-With", "XMLHttpRequest")

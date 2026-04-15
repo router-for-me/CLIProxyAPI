@@ -96,7 +96,7 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 	normalizedAuthDir := w.normalizeAuthPath(w.authDir)
 	isConfigEvent := normalizedName == normalizedConfigPath && event.Op&configOps != 0
 	authOps := fsnotify.Create | fsnotify.Write | fsnotify.Remove | fsnotify.Rename
-	isAuthJSON := strings.HasPrefix(normalizedName, normalizedAuthDir) && strings.HasSuffix(normalizedName, ".json") && event.Op&authOps != 0
+	isAuthJSON := filepath.Dir(normalizedName) == normalizedAuthDir && strings.HasSuffix(normalizedName, ".json") && event.Op&authOps != 0
 	isKiroIDEToken := w.isKiroIDETokenFile(event.Name) && event.Op&authOps != 0
 	if !isConfigEvent && !isAuthJSON && !isKiroIDEToken {
 		// Ignore unrelated files (e.g., cookie snapshots *.cookie) and other noise.

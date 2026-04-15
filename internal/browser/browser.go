@@ -39,7 +39,7 @@ func CloseBrowser() error {
 	if lastBrowserProcess == nil || lastBrowserProcess.Process == nil {
 		return nil
 	}
-	
+
 	err := lastBrowserProcess.Process.Kill()
 	lastBrowserProcess = nil
 	return err
