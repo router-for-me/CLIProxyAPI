@@ -108,14 +108,20 @@ func (h *Handler) deleteFromStringList(c *gin.Context, target *[]string, after f
 func (h *Handler) GetAPIKeys(c *gin.Context) { c.JSON(200, gin.H{"api-keys": h.cfg.APIKeys}) }
 func (h *Handler) PutAPIKeys(c *gin.Context) {
 	h.putStringList(c, func(v []string) {
-		h.cfg.APIKeys = append([]string(nil), v...)
+		h.cfg.APIKeys = config.FlexAPIKeyList(v)
 	}, nil)
 }
 func (h *Handler) PatchAPIKeys(c *gin.Context) {
-	h.patchStringList(c, &h.cfg.APIKeys, func() {})
+	asSlice := []string(h.cfg.APIKeys)
+	h.patchStringList(c, &asSlice, func() {
+		h.cfg.APIKeys = config.FlexAPIKeyList(asSlice)
+	})
 }
 func (h *Handler) DeleteAPIKeys(c *gin.Context) {
-	h.deleteFromStringList(c, &h.cfg.APIKeys, func() {})
+	asSlice := []string(h.cfg.APIKeys)
+	h.deleteFromStringList(c, &asSlice, func() {
+		h.cfg.APIKeys = config.FlexAPIKeyList(asSlice)
+	})
 }
 
 // gemini-api-key: []GeminiKey

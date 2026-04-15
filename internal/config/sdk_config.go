@@ -4,6 +4,44 @@
 // debug settings, proxy configuration, and API keys.
 package config
 
+import (
+	"strings"
+
+	"gopkg.in/yaml.v3"
+)
+
+// FlexAPIKeyList is a []string that can unmarshal YAML entries in either plain
+// string form ("sk-xxx") or object form ({api-key: "sk-xxx", name: "Alice"}).
+// This allows the config file to store display names alongside keys without
+// breaking the authentication logic, which only needs the key value.
+type FlexAPIKeyList []string
+
+func (l *FlexAPIKeyList) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind != yaml.SequenceNode {
+		return nil
+	}
+	result := make([]string, 0, len(value.Content))
+	for _, node := range value.Content {
+		switch node.Kind {
+		case yaml.ScalarNode:
+			if key := strings.TrimSpace(node.Value); key != "" {
+				result = append(result, key)
+			}
+		case yaml.MappingNode:
+			var obj struct {
+				Key string `yaml:"api-key"`
+			}
+			if err := node.Decode(&obj); err == nil {
+				if key := strings.TrimSpace(obj.Key); key != "" {
+					result = append(result, key)
+				}
+			}
+		}
+	}
+	*l = result
+	return nil
+}
+
 // SDKConfig represents the application's configuration, loaded from a YAML file.
 type SDKConfig struct {
 	// ProxyURL is the URL of an optional proxy server to use for outbound requests.
@@ -25,7 +63,8 @@ type SDKConfig struct {
 	RequestLog bool `yaml:"request-log" json:"request-log"`
 
 	// APIKeys is a list of keys for authenticating clients to this proxy server.
-	APIKeys []string `yaml:"api-keys" json:"api-keys"`
+	// Each YAML entry may be a plain string or an object with "api-key" and optional "name" fields.
+	APIKeys FlexAPIKeyList `yaml:"api-keys" json:"api-keys"`
 
 	// PassthroughHeaders controls whether upstream response headers are forwarded to downstream clients.
 	// Default is false (disabled).

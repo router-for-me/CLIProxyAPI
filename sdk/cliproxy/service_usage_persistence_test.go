@@ -18,7 +18,7 @@ func TestRun_FailsWhenUsagePersistenceInitFails(t *testing.T) {
 	tmpDir := t.TempDir()
 	cfg := &config.Config{
 		SDKConfig: config.SDKConfig{
-			APIKeys: []string{"test-key"},
+			APIKeys: config.FlexAPIKeyList{"test-key"},
 		},
 		AuthDir:                 filepath.Join(tmpDir, "auth"),
 		UsagePersistenceEnabled: true,

@@ -6,6 +6,8 @@ package config
 
 import internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 
+type FlexAPIKeyList = internalconfig.FlexAPIKeyList
+
 type SDKConfig = internalconfig.SDKConfig
 
 type Config = internalconfig.Config

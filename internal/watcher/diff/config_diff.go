@@ -91,7 +91,7 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	// API keys (redacted) and counts
 	if len(oldCfg.APIKeys) != len(newCfg.APIKeys) {
 		changes = append(changes, fmt.Sprintf("api-keys count: %d -> %d", len(oldCfg.APIKeys), len(newCfg.APIKeys)))
-	} else if !reflect.DeepEqual(trimStrings(oldCfg.APIKeys), trimStrings(newCfg.APIKeys)) {
+	} else if !reflect.DeepEqual(trimStrings([]string(oldCfg.APIKeys)), trimStrings([]string(newCfg.APIKeys))) {
 		changes = append(changes, "api-keys: values updated (count unchanged, redacted)")
 	}
 	if len(oldCfg.GeminiKey) != len(newCfg.GeminiKey) {

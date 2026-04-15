@@ -190,7 +190,7 @@ func TestBuildConfigChangeDetails_NilSafe(t *testing.T) {
 func TestBuildConfigChangeDetails_SecretsAndCounts(t *testing.T) {
 	oldCfg := &config.Config{
 		SDKConfig: sdkconfig.SDKConfig{
-			APIKeys: []string{"a"},
+			APIKeys: sdkconfig.FlexAPIKeyList{"a"},
 		},
 		AmpCode: config.AmpCode{
 			UpstreamAPIKey: "",
@@ -201,7 +201,7 @@ func TestBuildConfigChangeDetails_SecretsAndCounts(t *testing.T) {
 	}
 	newCfg := &config.Config{
 		SDKConfig: sdkconfig.SDKConfig{
-			APIKeys: []string{"a", "b", "c"},
+			APIKeys: sdkconfig.FlexAPIKeyList{"a", "b", "c"},
 		},
 		AmpCode: config.AmpCode{
 			UpstreamAPIKey: "new-key",
@@ -237,7 +237,7 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 		SDKConfig: sdkconfig.SDKConfig{
 			RequestLog:                 false,
 			ProxyURL:                   "http://old-proxy",
-			APIKeys:                    []string{"key-1"},
+			APIKeys:                    sdkconfig.FlexAPIKeyList{"key-1"},
 			ForceModelPrefix:           false,
 			NonStreamKeepAliveInterval: 0,
 		},
@@ -276,7 +276,7 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 		SDKConfig: sdkconfig.SDKConfig{
 			RequestLog:                 true,
 			ProxyURL:                   "http://new-proxy",
-			APIKeys:                    []string{" key-1 ", "key-2"},
+			APIKeys:                    sdkconfig.FlexAPIKeyList{" key-1 ", "key-2"},
 			ForceModelPrefix:           true,
 			NonStreamKeepAliveInterval: 5,
 		},
@@ -351,7 +351,7 @@ func TestBuildConfigChangeDetails_AllBranches(t *testing.T) {
 		SDKConfig: sdkconfig.SDKConfig{
 			RequestLog: false,
 			ProxyURL:   "http://old-proxy",
-			APIKeys:    []string{" keyA "},
+			APIKeys:    sdkconfig.FlexAPIKeyList{" keyA "},
 		},
 		OAuthExcludedModels: map[string][]string{"p1": {"a"}},
 		OpenAICompatibility: []config.OpenAICompatibility{
@@ -405,7 +405,7 @@ func TestBuildConfigChangeDetails_AllBranches(t *testing.T) {
 		SDKConfig: sdkconfig.SDKConfig{
 			RequestLog: true,
 			ProxyURL:   "http://new-proxy",
-			APIKeys:    []string{"keyB"},
+			APIKeys:    sdkconfig.FlexAPIKeyList{"keyB"},
 		},
 		OAuthExcludedModels: map[string][]string{"p1": {"b", "c"}, "p2": {"d"}},
 		OpenAICompatibility: []config.OpenAICompatibility{

@@ -16,7 +16,7 @@ func Register(cfg *sdkconfig.SDKConfig) {
 		return
 	}
 
-	keys := normalizeKeys(cfg.APIKeys)
+	keys := normalizeKeys([]string(cfg.APIKeys))
 	if len(keys) == 0 {
 		sdkaccess.UnregisterProvider(sdkaccess.AccessProviderTypeConfigAPIKey)
 		return
