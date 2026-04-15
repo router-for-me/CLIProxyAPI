@@ -106,6 +106,12 @@ func (e *GitHubCopilotExecutor) HttpRequest(ctx context.Context, auth *cliproxya
 
 // Execute handles non-streaming requests to GitHub Copilot.
 func (e *GitHubCopilotExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
+	if nativeExec, nativeAuth, nativeReq, ok, errGateway := e.nativeGateway(ctx, auth, req); errGateway != nil {
+		return resp, errGateway
+	} else if ok {
+		return nativeExec.Execute(ctx, nativeAuth, nativeReq, opts)
+	}
+
 	apiToken, baseURL, errToken := e.ensureAPIToken(ctx, auth)
 	if errToken != nil {
 		return resp, errToken
@@ -239,6 +245,12 @@ func (e *GitHubCopilotExecutor) Execute(ctx context.Context, auth *cliproxyauth.
 
 // ExecuteStream handles streaming requests to GitHub Copilot.
 func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
+	if nativeExec, nativeAuth, nativeReq, ok, errGateway := e.nativeGateway(ctx, auth, req); errGateway != nil {
+		return nil, errGateway
+	} else if ok {
+		return nativeExec.ExecuteStream(ctx, nativeAuth, nativeReq, opts)
+	}
+
 	apiToken, baseURL, errToken := e.ensureAPIToken(ctx, auth)
 	if errToken != nil {
 		return nil, errToken
@@ -422,7 +434,13 @@ func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 
 // CountTokens estimates token count locally using tiktoken, since the GitHub
 // Copilot API does not expose a dedicated token counting endpoint.
-func (e *GitHubCopilotExecutor) CountTokens(ctx context.Context, _ *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+func (e *GitHubCopilotExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	if nativeExec, nativeAuth, nativeReq, ok, errGateway := e.nativeGateway(ctx, auth, req); errGateway != nil {
+		return cliproxyexecutor.Response{}, errGateway
+	} else if ok {
+		return nativeExec.CountTokens(ctx, nativeAuth, nativeReq, opts)
+	}
+
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	from := opts.SourceFormat
@@ -465,6 +483,70 @@ func (e *GitHubCopilotExecutor) Refresh(ctx context.Context, auth *cliproxyauth.
 	}
 
 	return auth, nil
+}
+
+func (e *GitHubCopilotExecutor) nativeGateway(
+	ctx context.Context,
+	auth *cliproxyauth.Auth,
+	req cliproxyexecutor.Request,
+) (cliproxyauth.ProviderExecutor, *cliproxyauth.Auth, cliproxyexecutor.Request, bool, error) {
+	if !githubCopilotUsesAnthropicGateway(req.Model) {
+		return nil, nil, req, false, nil
+	}
+	if auth == nil || metaStringValue(auth.Metadata, "access_token") == "" {
+		return nil, nil, req, false, nil
+	}
+	apiToken, baseURL, err := e.ensureAPIToken(ctx, auth)
+	if err != nil {
+		return nil, nil, req, false, err
+	}
+	nativeAuth := buildCopilotAnthropicGatewayAuth(auth, apiToken, baseURL, req.Payload)
+	if nativeAuth == nil {
+		return nil, nil, req, false, nil
+	}
+	return NewClaudeExecutor(e.cfg), nativeAuth, req, true, nil
+}
+
+func githubCopilotUsesAnthropicGateway(model string) bool {
+	baseModel := strings.ToLower(thinking.ParseSuffix(model).ModelName)
+	return strings.HasPrefix(baseModel, "claude-")
+}
+
+func buildCopilotAnthropicGatewayAuth(auth *cliproxyauth.Auth, apiToken, baseURL string, body []byte) *cliproxyauth.Auth {
+	apiToken = strings.TrimSpace(apiToken)
+	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	if apiToken == "" || baseURL == "" {
+		return nil
+	}
+
+	nativeAuth := auth.Clone()
+	if nativeAuth == nil {
+		nativeAuth = &cliproxyauth.Auth{}
+	}
+	nativeAuth.Provider = "claude"
+	if nativeAuth.Attributes == nil {
+		nativeAuth.Attributes = make(map[string]string)
+	}
+	nativeAuth.Attributes["api_key"] = apiToken
+	nativeAuth.Attributes["base_url"] = baseURL
+	nativeAuth.Attributes["header:Content-Type"] = "application/json"
+	nativeAuth.Attributes["header:Accept"] = "application/json"
+	nativeAuth.Attributes["header:User-Agent"] = copilotUserAgent
+	nativeAuth.Attributes["header:Editor-Version"] = copilotEditorVersion
+	nativeAuth.Attributes["header:Editor-Plugin-Version"] = copilotPluginVersion
+	nativeAuth.Attributes["header:Openai-Intent"] = copilotOpenAIIntent
+	nativeAuth.Attributes["header:Copilot-Integration-Id"] = copilotIntegrationID
+	nativeAuth.Attributes["header:X-Github-Api-Version"] = copilotGitHubAPIVer
+	nativeAuth.Attributes["header:X-Request-Id"] = uuid.NewString()
+	if isAgentInitiated(body) {
+		nativeAuth.Attributes["header:X-Initiator"] = "agent"
+	} else {
+		nativeAuth.Attributes["header:X-Initiator"] = "user"
+	}
+	if detectVisionContent(body) {
+		nativeAuth.Attributes["header:Copilot-Vision-Request"] = "true"
+	}
+	return nativeAuth
 }
 
 // ensureAPIToken gets or refreshes the Copilot API token.
