@@ -198,14 +198,14 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	oauthToken := isClaudeOAuthToken(apiKey)
 	clientSource := detectOAuthClientSource(getClientUserAgent(ctx))
 	oauthToolNamesRemapped := false
-	// For non-OpenCode OAuth clients, default effort to "medium" when thinking is
-	// adaptive but no effort is specified. This prevents bare adaptive-thinking
-	// requests which may look unusual to Anthropic's fingerprinting.
-	if oauthToken && clientSource != oauthClientOpenCode {
-		bodyForUpstream = ensureDefaultEffort(bodyForUpstream, "medium")
-	}
 	if oauthToken && !auth.ToolPrefixDisabled() {
 		bodyForUpstream = applyClaudeToolPrefix(body, claudeToolPrefix)
+	}
+	// For non-OpenCode OAuth clients, default effort to "medium" when thinking is
+	// adaptive but no effort is specified. Must run AFTER applyClaudeToolPrefix
+	// which rebuilds from `body` and would overwrite earlier bodyForUpstream mutations.
+	if oauthToken && clientSource != oauthClientOpenCode {
+		bodyForUpstream = ensureDefaultEffort(bodyForUpstream, "medium")
 	}
 	// Remap third-party tool names to Claude Code equivalents and remove
 	// tools without official counterparts. This prevents Anthropic from
@@ -392,11 +392,11 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	oauthToken := isClaudeOAuthToken(apiKey)
 	clientSourceStream := detectOAuthClientSource(getClientUserAgent(ctx))
 	oauthToolNamesRemapped := false
-	if oauthToken && clientSourceStream != oauthClientOpenCode {
-		bodyForUpstream = ensureDefaultEffort(bodyForUpstream, "medium")
-	}
 	if oauthToken && !auth.ToolPrefixDisabled() {
 		bodyForUpstream = applyClaudeToolPrefix(body, claudeToolPrefix)
+	}
+	if oauthToken && clientSourceStream != oauthClientOpenCode {
+		bodyForUpstream = ensureDefaultEffort(bodyForUpstream, "medium")
 	}
 	// Remap third-party tool names to Claude Code equivalents and remove
 	// tools without official counterparts. This prevents Anthropic from
@@ -592,6 +592,9 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 		clientSourceCT := detectOAuthClientSource(getClientUserAgent(ctx))
 		stripUnmapped := clientSourceCT != oauthClientOpenCode
 		body, _ = remapOAuthToolNamesEx(body, stripUnmapped)
+		if clientSourceCT != oauthClientOpenCode {
+			body = ensureDefaultEffort(body, "medium")
+		}
 	}
 
 	url := fmt.Sprintf("%s/v1/messages/count_tokens?beta=true", baseURL)
