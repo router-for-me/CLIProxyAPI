@@ -207,12 +207,12 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if oauthToken && clientSource != oauthClientOpenCode {
 		bodyForUpstream = ensureDefaultEffort(bodyForUpstream, "medium")
 	}
-	// Remap third-party tool names to Claude Code equivalents and remove
-	// tools without official counterparts. This prevents Anthropic from
-	// fingerprinting the request as third-party via tool naming patterns.
+	// Remap third-party tool names to Claude Code equivalents and strip unmapped
+	// tools for ALL OAuth clients. Even OpenCode sub-agents (plan agent, etc.) send
+	// 30+ tools (lsp_*, session_*, background_*, context7_*, etc.) that are strong
+	// third-party fingerprints. Only mapped tools survive upstream.
 	if oauthToken {
-		stripUnmapped := clientSource != oauthClientOpenCode
-		bodyForUpstream, oauthToolNamesRemapped = remapOAuthToolNamesEx(bodyForUpstream, stripUnmapped)
+		bodyForUpstream, oauthToolNamesRemapped = remapOAuthToolNamesEx(bodyForUpstream, true)
 	}
 	// Enable cch signing by default for OAuth tokens (not just experimental flag).
 	// Claude Code always computes cch; missing or invalid cch is a detectable fingerprint.
@@ -398,12 +398,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	if oauthToken && clientSourceStream != oauthClientOpenCode {
 		bodyForUpstream = ensureDefaultEffort(bodyForUpstream, "medium")
 	}
-	// Remap third-party tool names to Claude Code equivalents and remove
-	// tools without official counterparts. This prevents Anthropic from
-	// fingerprinting the request as third-party via tool naming patterns.
+	// Strip unmapped tools for ALL OAuth clients (including OpenCode sub-agents).
 	if oauthToken {
-		stripUnmapped := clientSourceStream != oauthClientOpenCode
-		bodyForUpstream, oauthToolNamesRemapped = remapOAuthToolNamesEx(bodyForUpstream, stripUnmapped)
+		bodyForUpstream, oauthToolNamesRemapped = remapOAuthToolNamesEx(bodyForUpstream, true)
 	}
 	// Enable cch signing by default for OAuth tokens (not just experimental flag).
 	if oauthToken || experimentalCCHSigningEnabled(e.cfg, auth) {
@@ -594,8 +591,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 		if clientSourceCT != oauthClientOpenCode {
 			body = ensureDefaultEffort(body, "medium")
 		}
-		stripUnmapped := clientSourceCT != oauthClientOpenCode
-		body, _ = remapOAuthToolNamesEx(body, stripUnmapped)
+		body, _ = remapOAuthToolNamesEx(body, true)
 	}
 
 	url := fmt.Sprintf("%s/v1/messages/count_tokens?beta=true", baseURL)
@@ -1519,9 +1515,9 @@ const (
 // detectOAuthClientSource identifies the downstream client from its User-Agent.
 // This is used ONLY on the Claude OAuth path to apply client-specific transformations.
 // ALL OAuth clients get: forced baseline device profile, full default Anthropic-Beta,
-// and effort beta appended. Client-specific differences:
-// OpenCode: preserves client tools (only remaps known names, keeps unmapped tools).
-// OpenClaw and Other: strict tool filtering (unmapped tools stripped), default effort injected.
+// effort beta appended, and unmapped tools stripped. Client-specific differences:
+// OpenCode: keeps client effort value (no default injection).
+// OpenClaw and Other: also injects default effort="medium" when missing.
 // Unknown clients are treated as strict (same as OpenClaw) as a safety default.
 func detectOAuthClientSource(userAgent string) oauthClientSource {
 	ua := strings.TrimSpace(userAgent)
