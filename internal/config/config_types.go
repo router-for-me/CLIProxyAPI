@@ -235,6 +235,16 @@ type OAuthModelAlias struct {
 	ForceMapping bool `yaml:"force-mapping,omitempty" json:"force-mapping,omitempty"`
 }
 
+// VirtualModel defines a global virtual model alias that maps to a specific model.
+// Virtual models are resolved before provider selection and work across all providers
+// regardless of auth type. The provider is determined by the normal alias mechanism.
+type VirtualModel struct {
+	// Name is the client-facing virtual model name used in requests.
+	Name string `yaml:"name" json:"name"`
+	// Model is the upstream model identifier to route requests to.
+	Model string `yaml:"model" json:"model"`
+}
+
 // PayloadConfig defines default and override parameter rules applied to provider payloads.
 type PayloadConfig struct {
 	// Default defines rules that only set parameters when they are missing in the payload.

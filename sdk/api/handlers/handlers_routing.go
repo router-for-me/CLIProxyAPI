@@ -178,6 +178,15 @@ func (h *BaseAPIHandler) getRequestDetailsWithOptions(modelName string, allowIma
 	parsed := thinking.ParseSuffix(resolvedModelName)
 	baseModel := strings.TrimSpace(parsed.ModelName)
 
+	if h.AuthManager != nil {
+		virtualModel := h.AuthManager.ResolveVirtualModel(baseModel)
+		if virtualModel != "" {
+			resolvedModelName = virtualModel
+			parsed = thinking.ParseSuffix(resolvedModelName)
+			baseModel = strings.TrimSpace(parsed.ModelName)
+		}
+	}
+
 	if errMsg := h.validateImageOnlyModel(baseModel, allowImageModel); errMsg != nil {
 		return nil, "", errMsg
 	}

@@ -100,6 +100,33 @@ func (cfg *Config) SanitizeOAuthModelAlias() {
 	cfg.OAuthModelAlias = out
 }
 
+// SanitizeVirtualModels normalizes and deduplicates global virtual model definitions.
+// It trims whitespace, drops empty entries, and ensures virtual model names are unique globally.
+func (cfg *Config) SanitizeVirtualModels() {
+	if cfg == nil || len(cfg.VirtualModels) == 0 {
+		return
+	}
+	seenName := make(map[string]struct{}, len(cfg.VirtualModels))
+	clean := make([]VirtualModel, 0, len(cfg.VirtualModels))
+	for _, vm := range cfg.VirtualModels {
+		name := strings.TrimSpace(vm.Name)
+		model := strings.TrimSpace(vm.Model)
+		if name == "" || model == "" {
+			continue
+		}
+		nameKey := strings.ToLower(name)
+		if _, ok := seenName[nameKey]; ok {
+			continue
+		}
+		seenName[nameKey] = struct{}{}
+		clean = append(clean, VirtualModel{
+			Name:  name,
+			Model: model,
+		})
+	}
+	cfg.VirtualModels = clean
+}
+
 // SanitizeOpenAICompatibility removes OpenAI-compatibility provider entries that are
 // not actionable, specifically those missing a BaseURL. It trims whitespace before
 // evaluation and preserves the relative order of remaining entries.
