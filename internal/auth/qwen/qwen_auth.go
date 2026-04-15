@@ -1,6 +1,7 @@
 package qwen
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -13,9 +14,20 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	log "github.com/sirupsen/logrus"
+)
+
+const qwenAuthErrorBodyPreviewLimit = 256
+
+const (
+	qwenOAuthEnhancedUserAgent            = "QwenCode/0.14.2 (darwin; arm64)"
+	qwenOAuthEnhancedRuntimeVersionHeader = "v22.17.0"
+	qwenOAuthEnhancedPackageVersionHeader = "5.11.0"
+	qwenOAuthEnhancedDashscopeAuthType    = "qwen-oauth"
+	qwenOAuthEnhancedDashscopeCacheCtl    = "enable"
 )
 
 const (
@@ -114,6 +126,115 @@ func (qa *QwenAuth) generatePKCEPair() (string, string, error) {
 	return codeVerifier, codeChallenge, nil
 }
 
+func isLikelyHTMLResponse(contentType string, body []byte) bool {
+	if strings.Contains(strings.ToLower(contentType), "text/html") {
+		return true
+	}
+
+	trimmed := bytes.TrimSpace(bytes.ToLower(body))
+	if len(trimmed) == 0 {
+		return false
+	}
+
+	return bytes.HasPrefix(trimmed, []byte("<!doctype html")) || bytes.HasPrefix(trimmed, []byte("<html")) || trimmed[0] == '<'
+}
+
+func isLikelyJSONBody(body []byte) bool {
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 {
+		return false
+	}
+
+	switch trimmed[0] {
+	case '{', '[', '"', 't', 'f', 'n', '-':
+		return true
+	}
+
+	return trimmed[0] >= '0' && trimmed[0] <= '9'
+}
+
+func summarizeResponseForError(resp *http.Response, body []byte) string {
+	bodyPreview := strings.TrimSpace(string(body))
+	if bodyPreview == "" {
+		bodyPreview = "empty response body"
+	}
+	if len(bodyPreview) > qwenAuthErrorBodyPreviewLimit {
+		bodyPreview = bodyPreview[:qwenAuthErrorBodyPreviewLimit] + "..."
+	}
+
+	contentType := ""
+	statusCode := 0
+	status := ""
+	finalURL := ""
+	if resp != nil {
+		statusCode = resp.StatusCode
+		status = resp.Status
+		contentType = resp.Header.Get("Content-Type")
+		if resp.Request != nil && resp.Request.URL != nil {
+			finalURL = resp.Request.URL.String()
+		}
+	}
+
+	if finalURL != "" {
+		return fmt.Sprintf("status=%d status_text=%q content_type=%q final_url=%q body=%q", statusCode, status, contentType, finalURL, bodyPreview)
+	}
+
+	return fmt.Sprintf("status=%d status_text=%q content_type=%q body=%q", statusCode, status, contentType, bodyPreview)
+}
+
+func containsQwenWAFMarker(body []byte) bool {
+	lowerBody := strings.ToLower(string(body))
+	return strings.Contains(lowerBody, "aliyun_waf_") || strings.Contains(lowerBody, "captcha") || strings.Contains(lowerBody, "waf")
+}
+
+func shouldRetryWithEnhancedHeaders(resp *http.Response, body []byte, retryOn2xxNonJSON bool) bool {
+	if resp == nil {
+		return false
+	}
+
+	if isLikelyHTMLResponse(resp.Header.Get("Content-Type"), body) || containsQwenWAFMarker(body) {
+		return true
+	}
+
+	if retryOn2xxNonJSON && resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices && !isLikelyJSONBody(body) {
+		return true
+	}
+
+	switch resp.StatusCode {
+	case http.StatusForbidden, http.StatusTooManyRequests, http.StatusServiceUnavailable:
+		return true
+	}
+
+	return false
+}
+
+func applyQwenOAuthRequestHeaders(req *http.Request, contentType string, includeRequestID bool, enhanced bool) {
+	req.Header.Set("Content-Type", contentType)
+	req.Header.Set("Accept", "application/json")
+	if includeRequestID {
+		req.Header.Set("x-request-id", uuid.NewString())
+	}
+
+	if !enhanced {
+		return
+	}
+
+	req.Header.Set("User-Agent", qwenOAuthEnhancedUserAgent)
+	req.Header.Set("X-Stainless-Runtime-Version", qwenOAuthEnhancedRuntimeVersionHeader)
+	req.Header.Set("X-Stainless-Lang", "js")
+	req.Header.Set("Accept-Language", "*")
+	req.Header.Set("X-Dashscope-Cachecontrol", qwenOAuthEnhancedDashscopeCacheCtl)
+	req.Header.Set("X-Stainless-Os", "MacOS")
+	req.Header.Set("X-Dashscope-Authtype", qwenOAuthEnhancedDashscopeAuthType)
+	req.Header.Set("X-Stainless-Arch", "arm64")
+	req.Header.Set("X-Stainless-Runtime", "node")
+	req.Header.Set("X-Stainless-Retry-Count", "0")
+	req.Header.Set("X-Stainless-Package-Version", qwenOAuthEnhancedPackageVersionHeader)
+	req.Header.Set("Sec-Fetch-Mode", "cors")
+	req.Header.Set("Connection", "keep-alive")
+	req.Header.Set("X-Dashscope-Useragent", qwenOAuthEnhancedUserAgent)
+}
+
 // RefreshTokens exchanges a refresh token for a new access token.
 func (qa *QwenAuth) RefreshTokens(ctx context.Context, refreshToken string) (*QwenTokenData, error) {
 	data := url.Values{}
@@ -126,8 +247,7 @@ func (qa *QwenAuth) RefreshTokens(ctx context.Context, refreshToken string) (*Qw
 		return nil, fmt.Errorf("failed to create token request: %w", err)
 	}
 
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("Accept", "application/json")
+	applyQwenOAuthRequestHeaders(req, "application/x-www-form-urlencoded", false, false)
 
 	resp, err := qa.httpClient.Do(req)
 
@@ -144,12 +264,42 @@ func (qa *QwenAuth) RefreshTokens(ctx context.Context, refreshToken string) (*Qw
 		return nil, fmt.Errorf("failed to read response body: %w", err)
 	}
 
+	if shouldRetryWithEnhancedHeaders(resp, body, true) {
+		log.Warnf("qwen oauth refresh got suspicious upstream response, retrying with enhanced headers: %s", summarizeResponseForError(resp, body))
+
+		enhancedReq, errBuild := http.NewRequestWithContext(ctx, "POST", QwenOAuthTokenEndpoint, strings.NewReader(data.Encode()))
+		if errBuild != nil {
+			log.Warnf("qwen oauth refresh enhanced retry skipped: failed to build request: %v", errBuild)
+		} else {
+			applyQwenOAuthRequestHeaders(enhancedReq, "application/x-www-form-urlencoded", false, true)
+			enhancedResp, errDo := qa.httpClient.Do(enhancedReq)
+			if errDo != nil {
+				log.Warnf("qwen oauth refresh enhanced retry failed: %v", errDo)
+			} else {
+				defer func() {
+					_ = enhancedResp.Body.Close()
+				}()
+				enhancedBody, errRead := io.ReadAll(enhancedResp.Body)
+				if errRead != nil {
+					log.Warnf("qwen oauth refresh enhanced retry read failed: %v", errRead)
+				} else {
+					resp = enhancedResp
+					body = enhancedBody
+				}
+			}
+		}
+	}
+
 	if resp.StatusCode != http.StatusOK {
 		var errorData map[string]interface{}
 		if err = json.Unmarshal(body, &errorData); err == nil {
 			return nil, fmt.Errorf("token refresh failed: %v - %v", errorData["error"], errorData["error_description"])
 		}
-		return nil, fmt.Errorf("token refresh failed: %s", string(body))
+		return nil, fmt.Errorf("token refresh failed: unexpected upstream response (%s)", summarizeResponseForError(resp, body))
+	}
+
+	if isLikelyHTMLResponse(resp.Header.Get("Content-Type"), body) || !isLikelyJSONBody(body) {
+		return nil, fmt.Errorf("token refresh failed: expected JSON response but received non-JSON content (%s)", summarizeResponseForError(resp, body))
 	}
 
 	var tokenData QwenTokenResponse
@@ -185,8 +335,7 @@ func (qa *QwenAuth) InitiateDeviceFlow(ctx context.Context) (*DeviceFlow, error)
 		return nil, fmt.Errorf("failed to create token request: %w", err)
 	}
 
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("Accept", "application/json")
+	applyQwenOAuthRequestHeaders(req, "application/x-www-form-urlencoded", true, false)
 
 	resp, err := qa.httpClient.Do(req)
 
@@ -203,8 +352,38 @@ func (qa *QwenAuth) InitiateDeviceFlow(ctx context.Context) (*DeviceFlow, error)
 		return nil, fmt.Errorf("failed to read response body: %w", err)
 	}
 
+	if shouldRetryWithEnhancedHeaders(resp, body, true) {
+		log.Warnf("qwen oauth device flow got suspicious upstream response, retrying with enhanced headers: %s", summarizeResponseForError(resp, body))
+
+		enhancedReq, errBuild := http.NewRequestWithContext(ctx, "POST", QwenOAuthDeviceCodeEndpoint, strings.NewReader(data.Encode()))
+		if errBuild != nil {
+			log.Warnf("qwen oauth device flow enhanced retry skipped: failed to build request: %v", errBuild)
+		} else {
+			applyQwenOAuthRequestHeaders(enhancedReq, "application/x-www-form-urlencoded", true, true)
+			enhancedResp, errDo := qa.httpClient.Do(enhancedReq)
+			if errDo != nil {
+				log.Warnf("qwen oauth device flow enhanced retry failed: %v", errDo)
+			} else {
+				defer func() {
+					_ = enhancedResp.Body.Close()
+				}()
+				enhancedBody, errRead := io.ReadAll(enhancedResp.Body)
+				if errRead != nil {
+					log.Warnf("qwen oauth device flow enhanced retry read failed: %v", errRead)
+				} else {
+					resp = enhancedResp
+					body = enhancedBody
+				}
+			}
+		}
+	}
+
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("device authorization failed: %d %s. Response: %s", resp.StatusCode, resp.Status, string(body))
+		return nil, fmt.Errorf("device authorization failed: unexpected upstream response (%s)", summarizeResponseForError(resp, body))
+	}
+
+	if isLikelyHTMLResponse(resp.Header.Get("Content-Type"), body) || !isLikelyJSONBody(body) {
+		return nil, fmt.Errorf("device authorization failed: expected JSON response but received non-JSON content (%s)", summarizeResponseForError(resp, body))
 	}
 
 	var result DeviceFlow
@@ -235,7 +414,15 @@ func (qa *QwenAuth) PollForToken(deviceCode, codeVerifier string) (*QwenTokenDat
 		data.Set("device_code", deviceCode)
 		data.Set("code_verifier", codeVerifier)
 
-		resp, err := http.PostForm(QwenOAuthTokenEndpoint, data)
+		req, err := http.NewRequest("POST", QwenOAuthTokenEndpoint, strings.NewReader(data.Encode()))
+		if err != nil {
+			fmt.Printf("Polling attempt %d/%d failed: %v\n", attempt+1, maxAttempts, err)
+			time.Sleep(pollInterval)
+			continue
+		}
+		applyQwenOAuthRequestHeaders(req, "application/x-www-form-urlencoded", false, false)
+
+		resp, err := qa.httpClient.Do(req)
 		if err != nil {
 			fmt.Printf("Polling attempt %d/%d failed: %v\n", attempt+1, maxAttempts, err)
 			time.Sleep(pollInterval)
@@ -285,10 +472,72 @@ func (qa *QwenAuth) PollForToken(deviceCode, codeVerifier string) (*QwenTokenDat
 				return nil, fmt.Errorf("device token poll failed: %s - %s", errorType, errorDesc)
 			}
 
-			// If JSON parsing fails, fall back to text response
-			return nil, fmt.Errorf("device token poll failed: %d %s. Response: %s", resp.StatusCode, resp.Status, string(body))
+			if shouldRetryWithEnhancedHeaders(resp, body, false) {
+				log.Warnf("qwen oauth token poll got suspicious upstream response, retrying with enhanced headers: %s", summarizeResponseForError(resp, body))
+
+				enhancedReq, errBuild := http.NewRequest("POST", QwenOAuthTokenEndpoint, strings.NewReader(data.Encode()))
+				if errBuild != nil {
+					log.Warnf("qwen oauth token poll enhanced retry skipped: failed to build request: %v", errBuild)
+				} else {
+					applyQwenOAuthRequestHeaders(enhancedReq, "application/x-www-form-urlencoded", false, true)
+					enhancedResp, errDo := qa.httpClient.Do(enhancedReq)
+					if errDo != nil {
+						log.Warnf("qwen oauth token poll enhanced retry failed: %v", errDo)
+					} else {
+						enhancedBody, errRead := io.ReadAll(enhancedResp.Body)
+						_ = enhancedResp.Body.Close()
+						if errRead != nil {
+							log.Warnf("qwen oauth token poll enhanced retry read failed: %v", errRead)
+						} else {
+							resp = enhancedResp
+							body = enhancedBody
+						}
+					}
+				}
+			}
+
+			if resp.StatusCode != http.StatusOK {
+				var retryErrorData map[string]interface{}
+				if err = json.Unmarshal(body, &retryErrorData); err == nil {
+					errorType, _ := retryErrorData["error"].(string)
+					errorDesc, _ := retryErrorData["error_description"].(string)
+					return nil, fmt.Errorf("device token poll failed: %s - %s", errorType, errorDesc)
+				}
+
+				// If JSON parsing fails, fall back to summarized text response
+				return nil, fmt.Errorf("device token poll failed: unexpected upstream response (%s)", summarizeResponseForError(resp, body))
+			}
 		}
+
+		if shouldRetryWithEnhancedHeaders(resp, body, true) {
+			log.Warnf("qwen oauth token poll got suspicious upstream response, retrying with enhanced headers: %s", summarizeResponseForError(resp, body))
+
+			enhancedReq, errBuild := http.NewRequest("POST", QwenOAuthTokenEndpoint, strings.NewReader(data.Encode()))
+			if errBuild != nil {
+				log.Warnf("qwen oauth token poll enhanced retry skipped: failed to build request: %v", errBuild)
+			} else {
+				applyQwenOAuthRequestHeaders(enhancedReq, "application/x-www-form-urlencoded", false, true)
+				enhancedResp, errDo := qa.httpClient.Do(enhancedReq)
+				if errDo != nil {
+					log.Warnf("qwen oauth token poll enhanced retry failed: %v", errDo)
+				} else {
+					enhancedBody, errRead := io.ReadAll(enhancedResp.Body)
+					_ = enhancedResp.Body.Close()
+					if errRead != nil {
+						log.Warnf("qwen oauth token poll enhanced retry read failed: %v", errRead)
+					} else {
+						resp = enhancedResp
+						body = enhancedBody
+					}
+				}
+			}
+		}
+
 		// log.Debugf("%s", string(body))
+		if isLikelyHTMLResponse(resp.Header.Get("Content-Type"), body) || !isLikelyJSONBody(body) {
+			return nil, fmt.Errorf("device token poll failed: expected JSON response but received non-JSON content (%s)", summarizeResponseForError(resp, body))
+		}
+
 		// Success - parse token data
 		var response QwenTokenResponse
 		if err = json.Unmarshal(body, &response); err != nil {
