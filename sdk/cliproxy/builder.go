@@ -225,6 +225,7 @@ func (b *Builder) Build() (*Service, error) {
 	coreManager.SetRoundTripperProvider(newDefaultRoundTripperProvider())
 	coreManager.SetConfig(b.cfg)
 	coreManager.SetOAuthModelAlias(b.cfg.OAuthModelAlias)
+	coreManager.SetVirtualModels(b.cfg.VirtualModels)
 
 	service := &Service{
 		cfg:            b.cfg,

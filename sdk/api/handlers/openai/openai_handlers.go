@@ -63,8 +63,8 @@ func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
 	allModels := h.Models()
 
 	// Filter to only include the 4 required fields: id, object, created, owned_by
-	filteredModels := make([]map[string]any, len(allModels))
-	for i, model := range allModels {
+	filteredModels := make([]map[string]any, 0, len(allModels))
+	for _, model := range allModels {
 		filteredModel := map[string]any{
 			"id":     model["id"],
 			"object": model["object"],
@@ -80,7 +80,19 @@ func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
 			filteredModel["owned_by"] = ownedBy
 		}
 
-		filteredModels[i] = filteredModel
+		filteredModels = append(filteredModels, filteredModel)
+	}
+
+	// Add virtual models from config
+	if h.Cfg != nil && len(h.Cfg.VirtualModels) > 0 {
+		for _, vm := range h.Cfg.VirtualModels {
+			filteredModels = append(filteredModels, map[string]any{
+				"id":       vm.Name,
+				"object":   "model",
+				"created":  0,
+				"owned_by": "virtual",
+			})
+		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{

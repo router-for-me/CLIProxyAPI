@@ -72,6 +72,19 @@ func (h *GeminiAPIHandler) GeminiModels(c *gin.Context) {
 		}
 		normalizedModels = append(normalizedModels, normalizedModel)
 	}
+
+	// Add virtual models from config
+	if h.Cfg != nil && len(h.Cfg.VirtualModels) > 0 {
+		for _, vm := range h.Cfg.VirtualModels {
+			normalizedModels = append(normalizedModels, map[string]any{
+				"name":                       "models/" + vm.Name,
+				"displayName":                vm.Name,
+				"description":                "Virtual model: " + vm.Name,
+				"supportedGenerationMethods": defaultMethods,
+			})
+		}
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"models": normalizedModels,
 	})
