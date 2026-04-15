@@ -942,7 +942,7 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	// header and use the full Claude Code default beta set. Client betas are an incomplete
 	// subset that acts as a strong third-party fingerprint for Anthropic's detection.
 	isOAuthRequest := len(oauthClientOpts) > 0
-	isNonOpenCodeOAuth := isOAuthRequest && oauthClientOpts[0] != oauthClientOpenCode
+	_ = isOAuthRequest && oauthClientOpts[0] != oauthClientOpenCode // reserved for future use
 	if !isOAuthRequest {
 		if val := strings.TrimSpace(ginHeaders.Get("Anthropic-Beta")); val != "" {
 			baseBetas = val
