@@ -196,6 +196,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	bodyForTranslation := body
 	bodyForUpstream := body
 	oauthToken := isClaudeOAuthToken(apiKey)
+	clientSource := detectOAuthClientSource(getClientUserAgent(ctx))
 	oauthToolNamesRemapped := false
 	if oauthToken && !auth.ToolPrefixDisabled() {
 		bodyForUpstream = applyClaudeToolPrefix(body, claudeToolPrefix)
@@ -204,7 +205,8 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	// tools without official counterparts. This prevents Anthropic from
 	// fingerprinting the request as third-party via tool naming patterns.
 	if oauthToken {
-		bodyForUpstream, oauthToolNamesRemapped = remapOAuthToolNames(bodyForUpstream)
+		stripUnmapped := clientSource != oauthClientOpenCode
+		bodyForUpstream, oauthToolNamesRemapped = remapOAuthToolNamesEx(bodyForUpstream, stripUnmapped)
 	}
 	// Enable cch signing by default for OAuth tokens (not just experimental flag).
 	// Claude Code always computes cch; missing or invalid cch is a detectable fingerprint.
@@ -217,7 +219,11 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if err != nil {
 		return resp, err
 	}
-	applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg)
+	if oauthToken {
+		applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg, clientSource)
+	} else {
+		applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg)
+	}
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -378,6 +384,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	bodyForTranslation := body
 	bodyForUpstream := body
 	oauthToken := isClaudeOAuthToken(apiKey)
+	clientSourceStream := detectOAuthClientSource(getClientUserAgent(ctx))
 	oauthToolNamesRemapped := false
 	if oauthToken && !auth.ToolPrefixDisabled() {
 		bodyForUpstream = applyClaudeToolPrefix(body, claudeToolPrefix)
@@ -386,7 +393,8 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	// tools without official counterparts. This prevents Anthropic from
 	// fingerprinting the request as third-party via tool naming patterns.
 	if oauthToken {
-		bodyForUpstream, oauthToolNamesRemapped = remapOAuthToolNames(bodyForUpstream)
+		stripUnmapped := clientSourceStream != oauthClientOpenCode
+		bodyForUpstream, oauthToolNamesRemapped = remapOAuthToolNamesEx(bodyForUpstream, stripUnmapped)
 	}
 	// Enable cch signing by default for OAuth tokens (not just experimental flag).
 	if oauthToken || experimentalCCHSigningEnabled(e.cfg, auth) {
@@ -398,7 +406,11 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	if err != nil {
 		return nil, err
 	}
-	applyClaudeHeaders(httpReq, auth, apiKey, true, extraBetas, e.cfg)
+	if oauthToken {
+		applyClaudeHeaders(httpReq, auth, apiKey, true, extraBetas, e.cfg, clientSourceStream)
+	} else {
+		applyClaudeHeaders(httpReq, auth, apiKey, true, extraBetas, e.cfg)
+	}
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -566,8 +578,11 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 		body = applyClaudeToolPrefix(body, claudeToolPrefix)
 	}
 	// Remap tool names for OAuth token requests to avoid third-party fingerprinting.
-	if isClaudeOAuthToken(apiKey) {
-		body, _ = remapOAuthToolNames(body)
+	oauthTokenCT := isClaudeOAuthToken(apiKey)
+	if oauthTokenCT {
+		clientSourceCT := detectOAuthClientSource(getClientUserAgent(ctx))
+		stripUnmapped := clientSourceCT != oauthClientOpenCode
+		body, _ = remapOAuthToolNamesEx(body, stripUnmapped)
 	}
 
 	url := fmt.Sprintf("%s/v1/messages/count_tokens?beta=true", baseURL)
@@ -575,7 +590,12 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
-	applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg)
+	if oauthTokenCT {
+		clientSourceCT := detectOAuthClientSource(getClientUserAgent(ctx))
+		applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg, clientSourceCT)
+	} else {
+		applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg)
+	}
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -871,7 +891,7 @@ func decodeResponseBody(body io.ReadCloser, contentEncoding string) (io.ReadClos
 	return body, nil
 }
 
-func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string, stream bool, extraBetas []string, cfg *config.Config) {
+func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string, stream bool, extraBetas []string, cfg *config.Config, oauthClientOpts ...oauthClientSource) {
 	hdrDefault := func(cfgVal, fallback string) string {
 		if cfgVal != "" {
 			return cfgVal
@@ -905,14 +925,23 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	}
 
 	baseBetas := "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05,structured-outputs-2025-12-15,fast-mode-2026-02-01,redact-thinking-2026-02-12,token-efficient-tools-2026-03-28"
-	if val := strings.TrimSpace(ginHeaders.Get("Anthropic-Beta")); val != "" {
-		baseBetas = val
-		if !strings.Contains(val, "oauth") {
-			baseBetas += ",oauth-2025-04-20"
+	// For non-OpenCode OAuth clients (e.g. OpenClaw), ignore the client's Anthropic-Beta
+	// header entirely and use the full Claude Code default beta set. Client betas like
+	// "fine-grained-tool-streaming-2025-05-14" alone are a strong third-party fingerprint.
+	isNonOpenCodeOAuth := len(oauthClientOpts) > 0 && oauthClientOpts[0] != oauthClientOpenCode
+	if !isNonOpenCodeOAuth {
+		if val := strings.TrimSpace(ginHeaders.Get("Anthropic-Beta")); val != "" {
+			baseBetas = val
+			if !strings.Contains(val, "oauth") {
+				baseBetas += ",oauth-2025-04-20"
+			}
 		}
 	}
 	if !strings.Contains(baseBetas, "interleaved-thinking") {
 		baseBetas += ",interleaved-thinking-2025-05-14"
+	}
+	if isNonOpenCodeOAuth && !strings.Contains(baseBetas, "effort") {
+		baseBetas += ",effort-2025-11-24"
 	}
 
 	hasClaude1MHeader := false
@@ -975,7 +1004,13 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	// Legacy mode keeps OS/Arch runtime-derived; stabilized mode pins OS/Arch
 	// to the configured baseline while still allowing newer official
 	// User-Agent/package/runtime tuples to upgrade the software fingerprint.
-	if stabilizeDeviceProfile {
+	// For non-OpenCode OAuth clients, always force baseline device profile to prevent
+	// client Stainless headers (e.g. SDK 0.73.0, Node v25.9.0) from leaking upstream.
+	if stabilizeDeviceProfile || isNonOpenCodeOAuth {
+		if !stabilizeDeviceProfile {
+			// Non-OpenCode OAuth without explicit stabilization: use default baseline directly
+			deviceProfile = helps.DefaultClaudeDeviceProfilePublic(cfg)
+		}
 		helps.ApplyClaudeDeviceProfileHeaders(r, deviceProfile)
 	} else {
 		helps.ApplyClaudeLegacyDeviceHeaders(r, ginHeaders, cfg)
@@ -1015,6 +1050,71 @@ func checkSystemInstructions(payload []byte) []byte {
 
 func isClaudeOAuthToken(apiKey string) bool {
 	return strings.Contains(apiKey, "sk-ant-oat")
+}
+
+// remapOAuthToolNamesEx extends remapOAuthToolNames with an option to strip tools
+// that have no mapping in oauthToolRenameMap. When stripUnmapped is true (used for
+// non-OpenCode clients like OpenClaw), custom tools that are not in the rename map
+// and are not Anthropic built-in tools are removed from the tools array. This prevents
+// client-specific tool catalogs (e.g. nodes, cron, gateway) from leaking upstream.
+func remapOAuthToolNamesEx(body []byte, stripUnmapped bool) ([]byte, bool) {
+	if !stripUnmapped {
+		return remapOAuthToolNames(body)
+	}
+
+	renamed := false
+	tools := gjson.GetBytes(body, "tools")
+	if tools.Exists() && tools.IsArray() {
+		var toolsJSON strings.Builder
+		toolsJSON.WriteByte('[')
+		toolCount := 0
+		tools.ForEach(func(_, tool gjson.Result) bool {
+			// Keep Anthropic built-in tools (web_search, code_execution, etc.) unchanged.
+			if tool.Get("type").Exists() && tool.Get("type").String() != "" {
+				if toolCount > 0 {
+					toolsJSON.WriteByte(',')
+				}
+				toolsJSON.WriteString(tool.Raw)
+				toolCount++
+				return true
+			}
+
+			name := tool.Get("name").String()
+			if oauthToolsToRemove[name] {
+				return true
+			}
+
+			nameLower := strings.ToLower(name)
+			newName, hasMapped := oauthToolRenameMap[nameLower]
+			if !hasMapped {
+				// Tool has no mapping — strip it for non-OpenCode clients.
+				return true
+			}
+
+			toolJSON := tool.Raw
+			if newName != name {
+				updatedTool, err := sjson.Set(toolJSON, "name", newName)
+				if err == nil {
+					toolJSON = updatedTool
+					renamed = true
+				}
+			}
+
+			if toolCount > 0 {
+				toolsJSON.WriteByte(',')
+			}
+			toolsJSON.WriteString(toolJSON)
+			toolCount++
+			return true
+		})
+		toolsJSON.WriteByte(']')
+		body, _ = sjson.SetRawBytes(body, "tools", []byte(toolsJSON.String()))
+	}
+
+	// Delegate remaining remap logic (tool_choice, messages tool_use refs) to base function.
+	// Re-run with stripUnmapped=false since tools are already filtered.
+	body, moreRenamed := remapOAuthToolNames(body)
+	return body, renamed || moreRenamed
 }
 
 // remapOAuthToolNames renames third-party tool names to Claude Code equivalents
@@ -1392,6 +1492,29 @@ func stripClaudeToolPrefixFromStreamLine(line []byte, prefix string) []byte {
 		return append([]byte("data: "), updated...)
 	}
 	return updated
+}
+
+// oauthClientSource represents the detected downstream client type for OAuth request handling.
+type oauthClientSource int
+
+const (
+	oauthClientOpenCode oauthClientSource = iota // OpenCode (UA starts with "opencode/")
+	oauthClientOpenClaw                          // OpenClaw (UA starts with "Anthropic/JS")
+	oauthClientOther                             // Unknown third-party client
+)
+
+// detectOAuthClientSource identifies the downstream client from its User-Agent.
+// This is used ONLY on the Claude OAuth path to apply client-specific transformations.
+func detectOAuthClientSource(userAgent string) oauthClientSource {
+	ua := strings.TrimSpace(userAgent)
+	switch {
+	case strings.HasPrefix(ua, "opencode/"):
+		return oauthClientOpenCode
+	case strings.HasPrefix(ua, "Anthropic/JS"):
+		return oauthClientOpenClaw
+	default:
+		return oauthClientOther
+	}
 }
 
 // getClientUserAgent extracts the client User-Agent from the gin context.

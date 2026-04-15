@@ -99,6 +99,12 @@ func MapStainlessArch() string {
 	return mapStainlessArch()
 }
 
+// DefaultClaudeDeviceProfilePublic returns the default baseline device profile.
+// Exported for use by the executor when forcing baseline headers on non-OpenCode OAuth clients.
+func DefaultClaudeDeviceProfilePublic(cfg *config.Config) ClaudeDeviceProfile {
+	return defaultClaudeDeviceProfile(cfg)
+}
+
 func defaultClaudeDeviceProfile(cfg *config.Config) ClaudeDeviceProfile {
 	hdrDefault := func(cfgVal, fallback string) string {
 		if strings.TrimSpace(cfgVal) != "" {
