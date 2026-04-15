@@ -165,6 +165,9 @@ type Manager struct {
 	// It is initialized in NewManager; never Load() before first Store().
 	runtimeConfig atomic.Value
 
+	// configFilePath stores the active config.yaml path used to persist CPA-owned runtime state.
+	configFilePath atomic.Value
+
 	// Optional HTTP RoundTripper provider injected by host.
 	rtProvider RoundTripperProvider
 
@@ -192,6 +195,7 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 	}
 	// atomic.Value requires non-nil initial value.
 	manager.runtimeConfig.Store(&internalconfig.Config{})
+	manager.configFilePath.Store("")
 	manager.apiKeyModelAlias.Store(apiKeyModelAliasTable(nil))
 	manager.scheduler = newAuthScheduler(selector)
 	return manager
@@ -344,6 +348,45 @@ func (m *Manager) SetSelector(selector Selector) {
 	}
 }
 
+func selectorForRoutingStrategy(strategy string) Selector {
+	switch strings.ToLower(strings.TrimSpace(strategy)) {
+	case "fill-first", "fillfirst", "ff":
+		return &FillFirstSelector{}
+	default:
+		return &RoundRobinSelector{}
+	}
+}
+
+func sameSelectorKind(current Selector, next Selector) bool {
+	switch current.(type) {
+	case *FillFirstSelector:
+		_, ok := next.(*FillFirstSelector)
+		return ok
+	case *RoundRobinSelector:
+		_, ok := next.(*RoundRobinSelector)
+		return ok
+	default:
+		return false
+	}
+}
+
+func (m *Manager) applyBuiltInSelectorForConfig(cfg *internalconfig.Config) {
+	if m == nil || cfg == nil {
+		return
+	}
+	m.mu.RLock()
+	current := m.selector
+	m.mu.RUnlock()
+	if !isBuiltInSelector(current) {
+		return
+	}
+	next := selectorForRoutingStrategy(cfg.Routing.Strategy)
+	if sameSelectorKind(current, next) {
+		return
+	}
+	m.SetSelector(next)
+}
+
 // SetStore swaps the underlying persistence store.
 func (m *Manager) SetStore(store Store) {
 	m.mu.Lock()
@@ -368,7 +411,17 @@ func (m *Manager) SetConfig(cfg *internalconfig.Config) {
 		cfg = &internalconfig.Config{}
 	}
 	m.runtimeConfig.Store(cfg)
+	m.applyBuiltInSelectorForConfig(cfg)
+	SetOAuthQuotaRuntimeConfig(cfg)
 	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
+}
+
+// SetConfigFilePath updates the config.yaml path used when persisting quota-group runtime state.
+func (m *Manager) SetConfigFilePath(path string) {
+	if m == nil {
+		return
+	}
+	m.configFilePath.Store(strings.TrimSpace(path))
 }
 
 func (m *Manager) lookupAPIKeyUpstreamModel(authID, requestedModel string) string {
@@ -1178,6 +1231,7 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 	if len(normalized) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
+	m.ClearExpiredOAuthQuotaGroupAutoStates(time.Now())
 
 	_, maxRetryCredentials, maxWait := m.retrySettings()
 
@@ -1209,6 +1263,7 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 	if len(normalized) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
+	m.ClearExpiredOAuthQuotaGroupAutoStates(time.Now())
 
 	_, maxRetryCredentials, maxWait := m.retrySettings()
 
@@ -1240,6 +1295,7 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 	if len(normalized) == 0 {
 		return nil, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
+	m.ClearExpiredOAuthQuotaGroupAutoStates(time.Now())
 
 	_, maxRetryCredentials, maxWait := m.retrySettings()
 
@@ -1972,6 +2028,8 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	clearModelQuota := false
 	setModelQuota := false
 	var authSnapshot *Auth
+	var runtimeCfgToPublish *internalconfig.Config
+	persistRuntimeConfig := false
 
 	m.mu.Lock()
 	if auth, ok := m.auths[result.AuthID]; ok && auth != nil {
@@ -1979,6 +2037,10 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 
 		if result.Success {
 			if result.Model != "" {
+				if cfg, changed := m.clearOAuthQuotaGroupAutoStateLocked(auth, result.Model, now); changed {
+					runtimeCfgToPublish = cfg
+					persistRuntimeConfig = true
+				}
 				state := ensureModelState(auth, result.Model)
 				resetModelState(state, now)
 				updateAggregatedAvailability(auth, now)
@@ -2046,6 +2108,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						case 429:
 							var next time.Time
 							backoffLevel := state.Quota.BackoffLevel
+							_, matchedQuotaGroup := resolveOAuthQuotaGroup(auth, result.Model)
 							if !disableCooling {
 								if result.RetryAfter != nil {
 									next = now.Add(*result.RetryAfter)
@@ -2057,14 +2120,28 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 									backoffLevel = nextLevel
 								}
 							}
-							state.NextRetryAfter = next
-							state.Quota = QuotaState{
-								Exceeded:      true,
-								Reason:        "quota",
-								NextRecoverAt: next,
-								BackoffLevel:  backoffLevel,
+							if matchedQuotaGroup {
+								state.Unavailable = false
+								state.NextRetryAfter = time.Time{}
+								state.Quota = QuotaState{}
 							}
-							if !disableCooling {
+							if !disableCooling && !next.IsZero() && matchedQuotaGroup {
+								resetSource := "computed_backoff"
+								if result.RetryAfter != nil {
+									resetSource = "retry_after"
+								}
+								if cfg, changed := m.setOAuthQuotaGroupAutoStateLocked(auth, result.Model, result.Provider, next, resetSource, now); changed {
+									runtimeCfgToPublish = cfg
+									persistRuntimeConfig = true
+								}
+							} else if !disableCooling && !next.IsZero() {
+								state.NextRetryAfter = next
+								state.Quota = QuotaState{
+									Exceeded:      true,
+									Reason:        "quota",
+									NextRecoverAt: next,
+									BackoffLevel:  backoffLevel,
+								}
 								suspendReason = "quota"
 								shouldSuspendModel = true
 								setModelQuota = true
@@ -2094,6 +2171,14 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		authSnapshot = auth.Clone()
 	}
 	m.mu.Unlock()
+	if runtimeCfgToPublish != nil {
+		m.SetConfig(runtimeCfgToPublish)
+		if persistRuntimeConfig {
+			if err := m.persistRuntimeConfigSnapshot(runtimeCfgToPublish); err != nil {
+				log.WithError(err).Warn("failed to persist oauth-account-quota-group-state")
+			}
+		}
+	}
 	if m.scheduler != nil && authSnapshot != nil {
 		m.scheduler.upsertAuth(authSnapshot)
 	}
@@ -2161,16 +2246,12 @@ func updateAggregatedAvailability(auth *Auth, now time.Time) {
 	if auth == nil {
 		return
 	}
-	if len(auth.ModelStates) == 0 {
-		clearAggregatedAvailability(auth)
-		return
-	}
-	allUnavailable := true
+	hasState := false
+	modelAllUnavailable := true
 	earliestRetry := time.Time{}
 	quotaExceeded := false
 	quotaRecover := time.Time{}
 	maxBackoffLevel := 0
-	hasState := false
 	for _, state := range auth.ModelStates {
 		if state == nil {
 			continue
@@ -2193,7 +2274,7 @@ func updateAggregatedAvailability(auth *Auth, now time.Time) {
 			}
 		}
 		if !stateUnavailable {
-			allUnavailable = false
+			modelAllUnavailable = false
 		}
 		if state.Quota.Exceeded {
 			quotaExceeded = true
@@ -2205,17 +2286,57 @@ func updateAggregatedAvailability(auth *Auth, now time.Time) {
 			}
 		}
 	}
-	if !hasState {
+
+	supportedModels := registry.GetGlobalRegistry().GetModelsForClient(auth.ID)
+	modelIDs := make([]string, 0, len(supportedModels))
+	for _, model := range supportedModels {
+		if model == nil {
+			continue
+		}
+		modelIDs = append(modelIDs, model.ID)
+	}
+	effectiveGroups := collectOAuthQuotaGroupsForModels(auth, modelIDs)
+	hasEffectiveGroups := len(effectiveGroups) > 0
+	groupAllUnavailable := hasEffectiveGroups
+	groupQuotaRecover := time.Time{}
+	groupQuotaExceeded := false
+	for _, group := range effectiveGroups {
+		state, ok := oauthQuotaGroupState(auth.ID, group.ID)
+		if !ok {
+			groupAllUnavailable = false
+			continue
+		}
+		if state.ManualSuspended {
+			continue
+		}
+		if !state.AutoSuspendedUntil.IsZero() && state.AutoSuspendedUntil.After(now) {
+			groupQuotaExceeded = true
+			if groupQuotaRecover.IsZero() || state.AutoSuspendedUntil.Before(groupQuotaRecover) {
+				groupQuotaRecover = state.AutoSuspendedUntil
+			}
+			continue
+		}
+		groupAllUnavailable = false
+	}
+
+	if !hasState && !hasEffectiveGroups {
 		clearAggregatedAvailability(auth)
 		return
 	}
-	auth.Unavailable = allUnavailable
-	if allUnavailable {
+
+	auth.Unavailable = (hasState && modelAllUnavailable) || groupAllUnavailable
+	if auth.Unavailable {
+		if groupAllUnavailable && (!groupQuotaRecover.IsZero() && (earliestRetry.IsZero() || groupQuotaRecover.Before(earliestRetry))) {
+			earliestRetry = groupQuotaRecover
+		}
 		auth.NextRetryAfter = earliestRetry
 	} else {
 		auth.NextRetryAfter = time.Time{}
 	}
-	if quotaExceeded {
+	if groupQuotaExceeded && (quotaRecover.IsZero() || (!groupQuotaRecover.IsZero() && groupQuotaRecover.Before(quotaRecover))) {
+		quotaRecover = groupQuotaRecover
+	}
+	if quotaExceeded || groupQuotaExceeded {
 		auth.Quota.Exceeded = true
 		auth.Quota.Reason = "quota"
 		auth.Quota.NextRecoverAt = quotaRecover

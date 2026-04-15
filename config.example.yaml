@@ -360,6 +360,59 @@ nonstream-keepalive-interval: 0
 #   kimi:
 #     - "kimi-k2-thinking"
 
+# OAuth quota groups for Google-backed shared quota families.
+# These groups are used for per-account + per-quota-family suspension logic.
+# oauth-quota-groups:
+#   - id: "claude_45"
+#     label: "Claude"
+#     providers: ["antigravity", "gemini", "gemini-cli"]
+#     patterns:
+#       - "claude-opus-4-6*"
+#       - "claude-opus-4-5*"
+#       - "claude-sonnet-4-6*"
+#       - "claude-sonnet-4-5*"
+#       - "gpt-oss-120b-medium*"
+#     priority: 300
+#     enabled: true
+#   - id: "g3_pro"
+#     label: "Gemini Pro"
+#     providers: ["antigravity", "gemini", "gemini-cli"]
+#     patterns:
+#       - "gemini-3.1-pro-high*"
+#       - "gemini-3.1-pro-low*"
+#       - "gemini-3-pro-high*"
+#       - "gemini-3-pro-low*"
+#       - "gemini-3-pro-image*"
+#     priority: 200
+#     enabled: true
+#   - id: "g3_flash"
+#     label: "Gemini Flash"
+#     providers: ["antigravity", "gemini", "gemini-cli"]
+#     patterns:
+#       - "gemini-3-flash*"
+#       - "gemini-3.1-flash*"
+#       - "gemini-3-flash-image*"
+#       - "gemini-3.1-flash-image*"
+#       - "gemini-3-flash-lite*"
+#       - "gemini-3.1-flash-lite*"
+#     priority: 100
+#     enabled: true
+
+# CPA-owned persisted state for account + quota-group manual/auto suspension.
+# This section is normally maintained by the management API.
+# oauth-account-quota-group-state:
+#   - auth_id: "auth-123"
+#     group_id: "claude_45"
+#     manual_suspended: true
+#     manual_reason: "maintenance"
+#     auto_suspended_until: 2026-04-14T12:00:00Z
+#     auto_reason: "quota_exhausted"
+#     source_model: "claude-opus-4-6-thinking"
+#     source_provider: "antigravity"
+#     reset_time_source: "retry_after"
+#     updated_at: 2026-04-14T10:00:00Z
+#     updated_by: "management:manual"
+
 # Optional payload configuration
 # payload:
 #   default: # Default rules only set parameters when they are missing in the payload.

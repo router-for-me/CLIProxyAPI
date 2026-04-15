@@ -259,6 +259,8 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	s.applyAccessConfig(nil, cfg)
 	if authManager != nil {
 		authManager.SetRetryConfig(cfg.RequestRetry, time.Duration(cfg.MaxRetryInterval)*time.Second, cfg.MaxRetryCredentials)
+		authManager.SetConfig(cfg)
+		authManager.SetConfigFilePath(configFilePath)
 	}
 	managementasset.SetCurrentConfig(cfg)
 	auth.SetQuotaCooldownDisabled(cfg.DisableCooling)
@@ -612,13 +614,19 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PATCH("/oauth-model-alias", s.mgmt.PatchOAuthModelAlias)
 		mgmt.DELETE("/oauth-model-alias", s.mgmt.DeleteOAuthModelAlias)
 
+		mgmt.GET("/oauth-quota-groups", s.mgmt.GetOAuthQuotaGroups)
+		mgmt.PUT("/oauth-quota-groups", s.mgmt.PutOAuthQuotaGroups)
+
 		mgmt.GET("/auth-files", s.mgmt.ListAuthFiles)
 		mgmt.GET("/auth-files/models", s.mgmt.GetAuthFileModels)
+		mgmt.GET("/auth-files/quota-groups", s.mgmt.GetAuthFileQuotaGroups)
 		mgmt.GET("/model-definitions/:channel", s.mgmt.GetStaticModelDefinitions)
 		mgmt.GET("/auth-files/download", s.mgmt.DownloadAuthFile)
 		mgmt.POST("/auth-files", s.mgmt.UploadAuthFile)
 		mgmt.DELETE("/auth-files", s.mgmt.DeleteAuthFile)
 		mgmt.PATCH("/auth-files/status", s.mgmt.PatchAuthFileStatus)
+		mgmt.PATCH("/auth-files/quota-groups/manual", s.mgmt.PatchAuthFileQuotaGroupsManual)
+		mgmt.PATCH("/auth-files/quota-groups/auto/clear", s.mgmt.PatchAuthFileQuotaGroupsAutoClear)
 		mgmt.PATCH("/auth-files/fields", s.mgmt.PatchAuthFileFields)
 		mgmt.POST("/vertex/import", s.mgmt.ImportVertexCredential)
 
@@ -907,6 +915,8 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 
 	if s.handlers != nil && s.handlers.AuthManager != nil {
 		s.handlers.AuthManager.SetRetryConfig(cfg.RequestRetry, time.Duration(cfg.MaxRetryInterval)*time.Second, cfg.MaxRetryCredentials)
+		s.handlers.AuthManager.SetConfig(cfg)
+		s.handlers.AuthManager.SetConfigFilePath(s.configFilePath)
 	}
 
 	// Update log level dynamically when debug flag changes

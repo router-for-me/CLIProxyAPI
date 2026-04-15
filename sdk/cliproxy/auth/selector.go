@@ -376,6 +376,17 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 		return true, blockReasonDisabled, time.Time{}
 	}
 	if model != "" {
+		if blocked, cooldown, next := oauthQuotaGroupBlock(auth, model, now); blocked {
+			if cooldown {
+				if next.Before(now) {
+					next = now
+				}
+				return true, blockReasonCooldown, next
+			}
+			return true, blockReasonDisabled, time.Time{}
+		}
+	}
+	if model != "" {
 		if len(auth.ModelStates) > 0 {
 			state, ok := auth.ModelStates[model]
 			if (!ok || state == nil) && model != "" {

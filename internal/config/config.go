@@ -134,6 +134,12 @@ type Config struct {
 	// gemini-api-key, codex-api-key, claude-api-key, openai-compatibility, vertex-api-key, and ampcode.
 	OAuthModelAlias map[string][]OAuthModelAlias `yaml:"oauth-model-alias,omitempty" json:"oauth-model-alias,omitempty"`
 
+	// OAuthQuotaGroups defines shared quota families used for OAuth-backed Google model routing.
+	OAuthQuotaGroups []OAuthQuotaGroup `yaml:"oauth-quota-groups,omitempty" json:"oauth-quota-groups,omitempty"`
+
+	// OAuthAccountQuotaGroupState persists manual and auto suspension state for account/group pairs.
+	OAuthAccountQuotaGroupState []OAuthAccountQuotaGroupState `yaml:"oauth-account-quota-group-state,omitempty" json:"oauth-account-quota-group-state,omitempty"`
+
 	// Payload defines default and override rules for provider payload parameters.
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
 
@@ -243,6 +249,9 @@ type OAuthModelAlias struct {
 	Alias string `yaml:"alias" json:"alias"`
 	Fork  bool   `yaml:"fork,omitempty" json:"fork,omitempty"`
 }
+
+func (m OAuthModelAlias) GetName() string  { return m.Name }
+func (m OAuthModelAlias) GetAlias() string { return m.Alias }
 
 // AmpModelMapping defines a model name mapping for Amp CLI requests.
 // When Amp requests a model that isn't available locally, this mapping
@@ -695,6 +704,10 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Normalize global OAuth model name aliases.
 	cfg.SanitizeOAuthModelAlias()
 
+	// Normalize OAuth quota-group definitions and persisted quota-group runtime state.
+	cfg.OAuthQuotaGroups = NormalizeOAuthQuotaGroups(cfg.OAuthQuotaGroups)
+	cfg.OAuthAccountQuotaGroupState = NormalizeOAuthAccountQuotaGroupState(cfg.OAuthAccountQuotaGroupState)
+
 	// Validate raw payload rules and drop invalid entries.
 	cfg.SanitizePayloadRules()
 
@@ -1062,6 +1075,7 @@ func SaveConfigPreserveComments(configFile string, cfg *Config) error {
 
 	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "oauth-excluded-models")
 	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "oauth-model-alias")
+	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "oauth-account-quota-group-state")
 
 	// Merge generated into original in-place, preserving comments/order of existing nodes.
 	mergeMappingPreserve(original.Content[0], generated.Content[0])

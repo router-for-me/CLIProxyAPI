@@ -65,6 +65,10 @@ func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Man
 		allowRemoteOverride: envSecret != "",
 		envSecret:           envSecret,
 	}
+	if manager != nil {
+		manager.SetConfig(cfg)
+		manager.SetConfigFilePath(configFilePath)
+	}
 	h.startAttemptCleanup()
 	return h
 }
@@ -105,10 +109,21 @@ func NewHandlerWithoutConfigFilePath(cfg *config.Config, manager *coreauth.Manag
 }
 
 // SetConfig updates the in-memory config reference when the server hot-reloads.
-func (h *Handler) SetConfig(cfg *config.Config) { h.cfg = cfg }
+func (h *Handler) SetConfig(cfg *config.Config) {
+	h.cfg = cfg
+	if h.authManager != nil {
+		h.authManager.SetConfig(cfg)
+	}
+}
 
 // SetAuthManager updates the auth manager reference used by management endpoints.
-func (h *Handler) SetAuthManager(manager *coreauth.Manager) { h.authManager = manager }
+func (h *Handler) SetAuthManager(manager *coreauth.Manager) {
+	h.authManager = manager
+	if manager != nil {
+		manager.SetConfig(h.cfg)
+		manager.SetConfigFilePath(h.configFilePath)
+	}
+}
 
 // SetUsageStatistics allows replacing the usage statistics reference.
 func (h *Handler) SetUsageStatistics(stats *usage.RequestStatistics) { h.usageStats = stats }
@@ -280,6 +295,10 @@ func (h *Handler) persist(c *gin.Context) bool {
 	if err := config.SaveConfigPreserveComments(h.configFilePath, h.cfg); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to save config: %v", err)})
 		return false
+	}
+	if h.authManager != nil {
+		h.authManager.SetConfig(h.cfg)
+		h.authManager.SetConfigFilePath(h.configFilePath)
 	}
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	return true
