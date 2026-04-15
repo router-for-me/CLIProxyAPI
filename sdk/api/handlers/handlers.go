@@ -894,6 +894,16 @@ func (h *BaseAPIHandler) getRequestDetailsWithOptions(modelName string, allowIma
 	parsed := thinking.ParseSuffix(resolvedModelName)
 	baseModel := strings.TrimSpace(parsed.ModelName)
 
+	// Check if this is a virtual model first
+	if h.AuthManager != nil {
+		virtualModel := h.AuthManager.ResolveVirtualModel(baseModel)
+		if virtualModel != "" {
+			resolvedModelName = virtualModel
+			parsed = thinking.ParseSuffix(resolvedModelName)
+			baseModel = strings.TrimSpace(parsed.ModelName)
+		}
+	}
+
 	if strings.EqualFold(routeModelBaseName(baseModel), "gpt-image-2") && !allowImageModel {
 		return nil, "", &interfaces.ErrorMessage{
 			StatusCode: http.StatusServiceUnavailable,
@@ -904,7 +914,6 @@ func (h *BaseAPIHandler) getRequestDetailsWithOptions(modelName string, allowIma
 	if h != nil && h.AuthManager != nil && h.AuthManager.HomeEnabled() {
 		return []string{"home"}, resolvedModelName, nil
 	}
-
 	providers = util.GetProviderName(baseModel)
 	// Fallback: if baseModel has no provider but differs from resolvedModelName,
 	// try using the full model name. This handles edge cases where custom models
