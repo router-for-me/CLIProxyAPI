@@ -1184,19 +1184,29 @@ func remapOAuthToolNames(body []byte) ([]byte, bool) {
 		body, _ = sjson.SetRawBytes(body, "tools", []byte(toolsJSON.String()))
 	}
 
-	// 2. Rename or drop tool_choice if it references a known/unknown tool
+	// 2. Rename or drop tool_choice if it references a known/unknown tool.
+	// Preserve Anthropic built-in tools (web_search, code_execution, etc.).
 	toolChoiceType := gjson.GetBytes(body, "tool_choice.type").String()
 	if toolChoiceType == "tool" {
 		tcName := gjson.GetBytes(body, "tool_choice.name").String()
 		tcNameLower := strings.ToLower(tcName)
+		builtinTools := helps.AugmentClaudeBuiltinToolRegistry(body, nil)
 		if oauthToolsToRemove[tcName] {
-			// Explicitly removed tool — drop tool_choice.
+			// Explicitly removed tool u2014 drop tool_choice.
 			body, _ = sjson.DeleteBytes(body, "tool_choice")
+		} else if builtinTools[tcName] {
+			// Anthropic built-in tool u2014 keep as-is.
 		} else if newName, ok := oauthToolRenameMap[tcNameLower]; ok {
 			if newName != tcName {
 				body, _ = sjson.SetBytes(body, "tool_choice.name", newName)
 				renamed = true
 			}
+		} else {
+			// Unmapped non-builtin tool (e.g. lsp_*, session_*) u2014 was stripped
+			// from tools[], so drop tool_choice to keep payload consistent.
+			body, _ = sjson.DeleteBytes(body, "tool_choice")
+		}
+	}
 		} else {
 			// Unmapped tool (e.g. lsp_*, session_*) — was stripped from tools[],
 			// so drop tool_choice to keep payload consistent.
