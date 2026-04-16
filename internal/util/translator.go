@@ -276,6 +276,18 @@ func MapToolName(toolNameMap map[string]string, name string) string {
 	return name
 }
 
+func NormalizeRequestToolName(name string, toolNameMap map[string]string) (normalized string, ok bool) {
+	normalized = strings.TrimSpace(name)
+	if normalized == "" {
+		return "", false
+	}
+	normalized = strings.TrimSpace(MapToolName(toolNameMap, normalized))
+	if normalized == "" {
+		return "", false
+	}
+	return normalized, true
+}
+
 // SanitizedToolNameMap builds a sanitized-name → original-name map from Claude request tools.
 // It is used to restore exact tool names for clients (e.g. Claude Code) after the proxy
 // sanitizes tool names for Gemini/Vertex API compatibility via SanitizeFunctionName.

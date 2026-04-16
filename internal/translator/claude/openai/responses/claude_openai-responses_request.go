@@ -125,6 +125,175 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 	// Stream
 	out, _ = sjson.SetBytes(out, "stream", stream)
 
+	appendInputItem := func(item gjson.Result) {
+		typ := item.Get("type").String()
+		if typ == "" && item.Get("role").String() != "" {
+			typ = "message"
+		}
+		switch typ {
+		case "message":
+			var role string
+			var textAggregate strings.Builder
+			var partsJSON []string
+			hasImage := false
+			hasFile := false
+			hasThinking := false
+			if parts := item.Get("content"); parts.Exists() && parts.IsArray() {
+				parts.ForEach(func(_, part gjson.Result) bool {
+					ptype := part.Get("type").String()
+					switch ptype {
+					case "input_text", "output_text":
+						if t := part.Get("text"); t.Exists() {
+							txt := t.String()
+							textAggregate.WriteString(txt)
+							contentPart := []byte(`{"type":"text","text":""}`)
+							contentPart, _ = sjson.SetBytes(contentPart, "text", txt)
+							partsJSON = append(partsJSON, string(contentPart))
+						}
+						if ptype == "input_text" {
+							role = "user"
+						} else {
+							role = "assistant"
+						}
+					case "input_image":
+						url := part.Get("image_url").String()
+						if url == "" {
+							url = part.Get("url").String()
+						}
+						if url != "" {
+							var contentPart []byte
+							if strings.HasPrefix(url, "data:") {
+								trimmed := strings.TrimPrefix(url, "data:")
+								mediaAndData := strings.SplitN(trimmed, ";base64,", 2)
+								mediaType := "application/octet-stream"
+								data := ""
+								if len(mediaAndData) == 2 {
+									if mediaAndData[0] != "" {
+										mediaType = mediaAndData[0]
+									}
+									data = mediaAndData[1]
+								}
+								if data != "" {
+									contentPart = []byte(`{"type":"image","source":{"type":"base64","media_type":"","data":""}}`)
+									contentPart, _ = sjson.SetBytes(contentPart, "source.media_type", mediaType)
+									contentPart, _ = sjson.SetBytes(contentPart, "source.data", data)
+								}
+							} else {
+								contentPart = []byte(`{"type":"image","source":{"type":"url","url":""}}`)
+								contentPart, _ = sjson.SetBytes(contentPart, "source.url", url)
+							}
+							if len(contentPart) > 0 {
+								partsJSON = append(partsJSON, string(contentPart))
+								if role == "" {
+									role = "user"
+								}
+								hasImage = true
+							}
+						}
+					case "input_file":
+						fileData := part.Get("file_data").String()
+						if fileData != "" {
+							mediaType := "application/octet-stream"
+							data := fileData
+							if strings.HasPrefix(fileData, "data:") {
+								trimmed := strings.TrimPrefix(fileData, "data:")
+								mediaAndData := strings.SplitN(trimmed, ";base64,", 2)
+								if len(mediaAndData) == 2 {
+									if mediaAndData[0] != "" {
+										mediaType = mediaAndData[0]
+									}
+									data = mediaAndData[1]
+								}
+							}
+							contentPart := []byte(`{"type":"document","source":{"type":"base64","media_type":"","data":""}}`)
+							contentPart, _ = sjson.SetBytes(contentPart, "source.media_type", mediaType)
+							contentPart, _ = sjson.SetBytes(contentPart, "source.data", data)
+							partsJSON = append(partsJSON, string(contentPart))
+							if role == "" {
+								role = "user"
+							}
+							hasFile = true
+						}
+					}
+					return true
+				})
+			} else if parts.Type == gjson.String {
+				textAggregate.WriteString(parts.String())
+			}
+
+			if role == "" {
+				r := item.Get("role").String()
+				switch r {
+				case "user", "assistant", "system":
+					role = r
+				default:
+					role = "user"
+				}
+			}
+			if role == "assistant" {
+				if reasoning := strings.TrimSpace(item.Get("reasoning_content").String()); reasoning != "" {
+					thinkingPart := []byte(`{"type":"thinking","thinking":""}`)
+					thinkingPart, _ = sjson.SetBytes(thinkingPart, "thinking", reasoning)
+					partsJSON = append([]string{string(thinkingPart)}, partsJSON...)
+					hasThinking = true
+				}
+			}
+
+			if len(partsJSON) > 0 {
+				msg := []byte(`{"role":"","content":[]}`)
+				msg, _ = sjson.SetBytes(msg, "role", role)
+				if len(partsJSON) == 1 && !hasImage && !hasFile && !hasThinking {
+					msg, _ = sjson.DeleteBytes(msg, "content")
+					textPart := gjson.Parse(partsJSON[0])
+					msg, _ = sjson.SetBytes(msg, "content", textPart.Get("text").String())
+				} else {
+					for _, partJSON := range partsJSON {
+						msg, _ = sjson.SetRawBytes(msg, "content.-1", []byte(partJSON))
+					}
+				}
+				out, _ = sjson.SetRawBytes(out, "messages.-1", msg)
+			} else if textAggregate.Len() > 0 || role == "system" {
+				msg := []byte(`{"role":"","content":""}`)
+				msg, _ = sjson.SetBytes(msg, "role", role)
+				msg, _ = sjson.SetBytes(msg, "content", textAggregate.String())
+				out, _ = sjson.SetRawBytes(out, "messages.-1", msg)
+			}
+
+		case "function_call":
+			callID := item.Get("call_id").String()
+			if callID == "" {
+				callID = genToolCallID()
+			}
+			name := item.Get("name").String()
+			argsStr := item.Get("arguments").String()
+
+			toolUse := []byte(`{"type":"tool_use","id":"","name":"","input":{}}`)
+			toolUse, _ = sjson.SetBytes(toolUse, "id", callID)
+			toolUse, _ = sjson.SetBytes(toolUse, "name", name)
+			if argsStr != "" && gjson.Valid(argsStr) {
+				argsJSON := gjson.Parse(argsStr)
+				if argsJSON.IsObject() {
+					toolUse, _ = sjson.SetRawBytes(toolUse, "input", []byte(argsJSON.Raw))
+				}
+			}
+
+			asst := []byte(`{"role":"assistant","content":[]}`)
+			asst, _ = sjson.SetRawBytes(asst, "content.-1", toolUse)
+			out, _ = sjson.SetRawBytes(out, "messages.-1", asst)
+
+		case "function_call_output":
+			callID := item.Get("call_id").String()
+			outputStr := item.Get("output").String()
+			toolResult := []byte(`{"type":"tool_result","tool_use_id":"","content":""}`)
+			toolResult, _ = sjson.SetBytes(toolResult, "tool_use_id", callID)
+			toolResult, _ = sjson.SetBytes(toolResult, "content", outputStr)
+
+			usr := []byte(`{"role":"user","content":[]}`)
+			usr, _ = sjson.SetRawBytes(usr, "content.-1", toolResult)
+			out, _ = sjson.SetRawBytes(out, "messages.-1", usr)
+		}
+	}
+
 	// instructions -> as a leading message (use role user for Claude API compatibility)
 	instructionsText := ""
 	extractedFromSystem := false
@@ -168,185 +337,23 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 		}
 	}
 
-	// input array processing
+	// input processing
 	if input := root.Get("input"); input.Exists() && input.IsArray() {
 		input.ForEach(func(_, item gjson.Result) bool {
 			if extractedFromSystem && strings.EqualFold(item.Get("role").String(), "system") {
 				return true
 			}
-			typ := item.Get("type").String()
-			if typ == "" && item.Get("role").String() != "" {
-				typ = "message"
-			}
-			switch typ {
-			case "message":
-				// Determine role and construct Claude-compatible content parts.
-				var role string
-				var textAggregate strings.Builder
-				var partsJSON []string
-				hasImage := false
-				hasFile := false
-				hasThinking := false
-				if parts := item.Get("content"); parts.Exists() && parts.IsArray() {
-					parts.ForEach(func(_, part gjson.Result) bool {
-						ptype := part.Get("type").String()
-						switch ptype {
-						case "input_text", "output_text":
-							if t := part.Get("text"); t.Exists() {
-								txt := t.String()
-								textAggregate.WriteString(txt)
-								contentPart := []byte(`{"type":"text","text":""}`)
-								contentPart, _ = sjson.SetBytes(contentPart, "text", txt)
-								partsJSON = append(partsJSON, string(contentPart))
-							}
-							if ptype == "input_text" {
-								role = "user"
-							} else {
-								role = "assistant"
-							}
-						case "input_image":
-							url := part.Get("image_url").String()
-							if url == "" {
-								url = part.Get("url").String()
-							}
-							if url != "" {
-								var contentPart []byte
-								if strings.HasPrefix(url, "data:") {
-									trimmed := strings.TrimPrefix(url, "data:")
-									mediaAndData := strings.SplitN(trimmed, ";base64,", 2)
-									mediaType := "application/octet-stream"
-									data := ""
-									if len(mediaAndData) == 2 {
-										if mediaAndData[0] != "" {
-											mediaType = mediaAndData[0]
-										}
-										data = mediaAndData[1]
-									}
-									if data != "" {
-										contentPart = []byte(`{"type":"image","source":{"type":"base64","media_type":"","data":""}}`)
-										contentPart, _ = sjson.SetBytes(contentPart, "source.media_type", mediaType)
-										contentPart, _ = sjson.SetBytes(contentPart, "source.data", data)
-									}
-								} else {
-									contentPart = []byte(`{"type":"image","source":{"type":"url","url":""}}`)
-									contentPart, _ = sjson.SetBytes(contentPart, "source.url", url)
-								}
-								if len(contentPart) > 0 {
-									partsJSON = append(partsJSON, string(contentPart))
-									if role == "" {
-										role = "user"
-									}
-									hasImage = true
-								}
-							}
-						case "input_file":
-							fileData := part.Get("file_data").String()
-							if fileData != "" {
-								mediaType := "application/octet-stream"
-								data := fileData
-								if strings.HasPrefix(fileData, "data:") {
-									trimmed := strings.TrimPrefix(fileData, "data:")
-									mediaAndData := strings.SplitN(trimmed, ";base64,", 2)
-									if len(mediaAndData) == 2 {
-										if mediaAndData[0] != "" {
-											mediaType = mediaAndData[0]
-										}
-										data = mediaAndData[1]
-									}
-								}
-								contentPart := []byte(`{"type":"document","source":{"type":"base64","media_type":"","data":""}}`)
-								contentPart, _ = sjson.SetBytes(contentPart, "source.media_type", mediaType)
-								contentPart, _ = sjson.SetBytes(contentPart, "source.data", data)
-								partsJSON = append(partsJSON, string(contentPart))
-								if role == "" {
-									role = "user"
-								}
-								hasFile = true
-							}
-						}
-						return true
-					})
-				} else if parts.Type == gjson.String {
-					textAggregate.WriteString(parts.String())
-				}
-
-				// Fallback to given role if content types not decisive
-				if role == "" {
-					r := item.Get("role").String()
-					switch r {
-					case "user", "assistant", "system":
-						role = r
-					default:
-						role = "user"
-					}
-				}
-				if role == "assistant" {
-					if reasoning := strings.TrimSpace(item.Get("reasoning_content").String()); reasoning != "" {
-						thinkingPart := []byte(`{"type":"thinking","thinking":""}`)
-						thinkingPart, _ = sjson.SetBytes(thinkingPart, "thinking", reasoning)
-						partsJSON = append([]string{string(thinkingPart)}, partsJSON...)
-						hasThinking = true
-					}
-				}
-
-				if len(partsJSON) > 0 {
-					msg := []byte(`{"role":"","content":[]}`)
-					msg, _ = sjson.SetBytes(msg, "role", role)
-					if len(partsJSON) == 1 && !hasImage && !hasFile && !hasThinking {
-						// Preserve legacy behavior for single text content
-						msg, _ = sjson.DeleteBytes(msg, "content")
-						textPart := gjson.Parse(partsJSON[0])
-						msg, _ = sjson.SetBytes(msg, "content", textPart.Get("text").String())
-					} else {
-						for _, partJSON := range partsJSON {
-							msg, _ = sjson.SetRawBytes(msg, "content.-1", []byte(partJSON))
-						}
-					}
-					out, _ = sjson.SetRawBytes(out, "messages.-1", msg)
-				} else if textAggregate.Len() > 0 || role == "system" {
-					msg := []byte(`{"role":"","content":""}`)
-					msg, _ = sjson.SetBytes(msg, "role", role)
-					msg, _ = sjson.SetBytes(msg, "content", textAggregate.String())
-					out, _ = sjson.SetRawBytes(out, "messages.-1", msg)
-				}
-
-			case "function_call":
-				// Map to assistant tool_use
-				callID := item.Get("call_id").String()
-				if callID == "" {
-					callID = genToolCallID()
-				}
-				name := item.Get("name").String()
-				argsStr := item.Get("arguments").String()
-
-				toolUse := []byte(`{"type":"tool_use","id":"","name":"","input":{}}`)
-				toolUse, _ = sjson.SetBytes(toolUse, "id", callID)
-				toolUse, _ = sjson.SetBytes(toolUse, "name", name)
-				if argsStr != "" && gjson.Valid(argsStr) {
-					argsJSON := gjson.Parse(argsStr)
-					if argsJSON.IsObject() {
-						toolUse, _ = sjson.SetRawBytes(toolUse, "input", []byte(argsJSON.Raw))
-					}
-				}
-
-				asst := []byte(`{"role":"assistant","content":[]}`)
-				asst, _ = sjson.SetRawBytes(asst, "content.-1", toolUse)
-				out, _ = sjson.SetRawBytes(out, "messages.-1", asst)
-
-			case "function_call_output":
-				// Map to user tool_result
-				callID := item.Get("call_id").String()
-				outputStr := item.Get("output").String()
-				toolResult := []byte(`{"type":"tool_result","tool_use_id":"","content":""}`)
-				toolResult, _ = sjson.SetBytes(toolResult, "tool_use_id", callID)
-				toolResult, _ = sjson.SetBytes(toolResult, "content", outputStr)
-
-				usr := []byte(`{"role":"user","content":[]}`)
-				usr, _ = sjson.SetRawBytes(usr, "content.-1", toolResult)
-				out, _ = sjson.SetRawBytes(out, "messages.-1", usr)
-			}
+			appendInputItem(item)
 			return true
 		})
+	} else if input.IsObject() {
+		if !(extractedFromSystem && strings.EqualFold(input.Get("role").String(), "system")) {
+			appendInputItem(input)
+		}
+	} else if input.Type == gjson.String {
+		msg := []byte(`{"role":"user","content":""}`)
+		msg, _ = sjson.SetBytes(msg, "content", input.String())
+		out, _ = sjson.SetRawBytes(out, "messages.-1", msg)
 	}
 
 	// tools mapping: parameters -> input_schema

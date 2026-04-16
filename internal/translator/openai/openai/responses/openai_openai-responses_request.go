@@ -3,6 +3,7 @@ package responses
 import (
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -171,13 +172,12 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 			}
 
 			chatTool := []byte(`{"type":"function","function":{}}`)
-
-			// Convert tool structure from responses format to chat completions format
-			function := []byte(`{"name":"","description":"","parameters":{}}`)
-
-			if name := tool.Get("name"); name.Exists() {
-				function, _ = sjson.SetBytes(function, "name", name.String())
+			name, ok := util.NormalizeRequestToolName(tool.Get("name").String(), nil)
+			if !ok {
+				return true
 			}
+			function := []byte(`{"name":"","description":"","parameters":{}}`)
+			function, _ = sjson.SetBytes(function, "name", name)
 
 			if description := tool.Get("description"); description.Exists() {
 				function, _ = sjson.SetBytes(function, "description", description.String())
@@ -207,7 +207,16 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 
 	// Convert tool_choice if present
 	if toolChoice := root.Get("tool_choice"); toolChoice.Exists() {
-		out, _ = sjson.SetBytes(out, "tool_choice", toolChoice.String())
+		switch toolChoice.Type {
+		case gjson.String:
+			out, _ = sjson.SetBytes(out, "tool_choice", toolChoice.String())
+		case gjson.JSON:
+			if name, ok := util.NormalizeRequestToolName(toolChoice.Get("name").String(), nil); ok {
+				choice := []byte(`{"type":"function","function":{"name":""}}`)
+				choice, _ = sjson.SetBytes(choice, "function.name", name)
+				out, _ = sjson.SetRawBytes(out, "tool_choice", choice)
+			}
+		}
 	}
 
 	return out

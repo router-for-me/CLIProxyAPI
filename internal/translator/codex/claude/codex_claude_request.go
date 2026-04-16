@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -154,7 +155,10 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 						functionCallMessage := []byte(`{"type":"function_call"}`)
 						functionCallMessage, _ = sjson.SetBytes(functionCallMessage, "call_id", messageContentResult.Get("id").String())
 						{
-							name := messageContentResult.Get("name").String()
+							name, ok := util.NormalizeRequestToolName(messageContentResult.Get("name").String(), nil)
+							if !ok {
+								break
+							}
 							toolMap := buildReverseMapFromClaudeOriginalToShort(rawJSON)
 							if short, ok := toolMap[name]; ok {
 								name = short
@@ -235,9 +239,8 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 		// Build short name map from declared tools
 		var names []string
 		for i := 0; i < len(toolResults); i++ {
-			n := toolResults[i].Get("name").String()
-			if n != "" {
-				names = append(names, n)
+			if name, ok := util.NormalizeRequestToolName(toolResults[i].Get("name").String(), nil); ok {
+				names = append(names, name)
 			}
 		}
 		shortMap := buildShortNameMap(names)
@@ -251,16 +254,16 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 			}
 			tool := []byte(toolResult.Raw)
 			tool, _ = sjson.SetBytes(tool, "type", "function")
-			// Apply shortened name if needed
-			if v := toolResult.Get("name"); v.Exists() {
-				name := v.String()
-				if short, ok := shortMap[name]; ok {
-					name = short
-				} else {
-					name = shortenNameIfNeeded(name)
-				}
-				tool, _ = sjson.SetBytes(tool, "name", name)
+			name, ok := util.NormalizeRequestToolName(toolResult.Get("name").String(), nil)
+			if !ok {
+				continue
 			}
+			if short, ok := shortMap[name]; ok {
+				name = short
+			} else {
+				name = shortenNameIfNeeded(name)
+			}
+			tool, _ = sjson.SetBytes(tool, "name", name)
 			tool, _ = sjson.SetRawBytes(tool, "parameters", []byte(normalizeToolParameters(toolResult.Get("input_schema").Raw)))
 			tool, _ = sjson.DeleteBytes(tool, "input_schema")
 			tool, _ = sjson.DeleteBytes(tool, "parameters.$schema")
@@ -401,8 +404,7 @@ func buildReverseMapFromClaudeOriginalToShort(original []byte) map[string]string
 	var names []string
 	arr := tools.Array()
 	for i := 0; i < len(arr); i++ {
-		n := arr[i].Get("name").String()
-		if n != "" {
+		if n, ok := util.NormalizeRequestToolName(arr[i].Get("name").String(), nil); ok {
 			names = append(names, n)
 		}
 	}

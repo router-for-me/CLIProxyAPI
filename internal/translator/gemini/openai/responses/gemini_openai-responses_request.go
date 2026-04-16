@@ -374,11 +374,12 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 
 		tools.ForEach(func(_, tool gjson.Result) bool {
 			if tool.Get("type").String() == "function" {
-				funcDecl := []byte(`{"name":"","description":"","parametersJsonSchema":{}}`)
-
-				if name := tool.Get("name"); name.Exists() {
-					funcDecl, _ = sjson.SetBytes(funcDecl, "name", util.SanitizeFunctionName(name.String()))
+				name, ok := util.NormalizeRequestToolName(tool.Get("name").String(), nil)
+				if !ok {
+					return true
 				}
+				funcDecl := []byte(`{"name":"","description":"","parametersJsonSchema":{}}`)
+				funcDecl, _ = sjson.SetBytes(funcDecl, "name", util.SanitizeFunctionName(name))
 				if desc := tool.Get("description"); desc.Exists() {
 					funcDecl, _ = sjson.SetBytes(funcDecl, "description", desc.String())
 				}

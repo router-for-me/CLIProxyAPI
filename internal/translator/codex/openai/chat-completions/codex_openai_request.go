@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -79,8 +80,8 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 				if t.Get("type").String() == "function" {
 					fn := t.Get("function")
 					if fn.Exists() {
-						if v := fn.Get("name"); v.Exists() {
-							names = append(names, v.String())
+						if name, ok := util.NormalizeRequestToolName(fn.Get("name").String(), nil); ok {
+							names = append(names, name)
 						}
 					}
 				}
@@ -217,7 +218,10 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 								funcCall, _ = sjson.SetBytes(funcCall, "type", "function_call")
 								funcCall, _ = sjson.SetBytes(funcCall, "call_id", tc.Get("id").String())
 								{
-									name := tc.Get("function.name").String()
+									name, ok := util.NormalizeRequestToolName(tc.Get("function.name").String(), nil)
+									if !ok {
+										continue
+									}
 									if short, ok := originalToolNameMap[name]; ok {
 										name = short
 									} else {
@@ -287,7 +291,7 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 		arr := tools.Array()
 		for i := 0; i < len(arr); i++ {
 			t := arr[i]
-			toolType := t.Get("type").String()
+			toolType := strings.TrimSpace(t.Get("type").String())
 			// Pass through built-in tools (e.g. {"type":"web_search"}) directly for the Responses API.
 			// Only "function" needs structural conversion because Chat Completions nests details under "function".
 			if toolType != "" && toolType != "function" && t.IsObject() {
@@ -296,28 +300,30 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 			}
 
 			if toolType == "function" {
+				fn := t.Get("function")
+				if !fn.Exists() || !fn.IsObject() {
+					continue
+				}
+				name, ok := util.NormalizeRequestToolName(fn.Get("name").String(), nil)
+				if !ok {
+					continue
+				}
+				if short, ok := originalToolNameMap[name]; ok {
+					name = short
+				} else {
+					name = shortenNameIfNeeded(name)
+				}
 				item := []byte(`{}`)
 				item, _ = sjson.SetBytes(item, "type", "function")
-				fn := t.Get("function")
-				if fn.Exists() {
-					if v := fn.Get("name"); v.Exists() {
-						name := v.String()
-						if short, ok := originalToolNameMap[name]; ok {
-							name = short
-						} else {
-							name = shortenNameIfNeeded(name)
-						}
-						item, _ = sjson.SetBytes(item, "name", name)
-					}
-					if v := fn.Get("description"); v.Exists() {
-						item, _ = sjson.SetBytes(item, "description", v.Value())
-					}
-					if v := fn.Get("parameters"); v.Exists() {
-						item, _ = sjson.SetRawBytes(item, "parameters", []byte(v.Raw))
-					}
-					if v := fn.Get("strict"); v.Exists() {
-						item, _ = sjson.SetBytes(item, "strict", v.Value())
-					}
+				item, _ = sjson.SetBytes(item, "name", name)
+				if v := fn.Get("description"); v.Exists() {
+					item, _ = sjson.SetBytes(item, "description", v.Value())
+				}
+				if v := fn.Get("parameters"); v.Exists() {
+					item, _ = sjson.SetRawBytes(item, "parameters", []byte(v.Raw))
+				}
+				if v := fn.Get("strict"); v.Exists() {
+					item, _ = sjson.SetBytes(item, "strict", v.Value())
 				}
 				out, _ = sjson.SetRawBytes(out, "tools.-1", item)
 			}
@@ -332,21 +338,20 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 		case tc.Type == gjson.String:
 			out, _ = sjson.SetBytes(out, "tool_choice", tc.String())
 		case tc.IsObject():
-			tcType := tc.Get("type").String()
+			tcType := strings.TrimSpace(tc.Get("type").String())
 			if tcType == "function" {
-				name := tc.Get("function.name").String()
-				if name != "" {
-					if short, ok := originalToolNameMap[name]; ok {
-						name = short
-					} else {
-						name = shortenNameIfNeeded(name)
-					}
+				name, ok := util.NormalizeRequestToolName(tc.Get("function.name").String(), nil)
+				if !ok {
+					break
+				}
+				if short, ok := originalToolNameMap[name]; ok {
+					name = short
+				} else {
+					name = shortenNameIfNeeded(name)
 				}
 				choice := []byte(`{}`)
 				choice, _ = sjson.SetBytes(choice, "type", "function")
-				if name != "" {
-					choice, _ = sjson.SetBytes(choice, "name", name)
-				}
+				choice, _ = sjson.SetBytes(choice, "name", name)
 				out, _ = sjson.SetRawBytes(out, "tool_choice", choice)
 			} else if tcType != "" {
 				// Built-in tool choices (e.g. {"type":"web_search"}) are already Responses-compatible.
