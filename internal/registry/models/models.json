@@ -68,6 +68,7 @@
           "low",
           "medium",
           "high",
+          "xhigh",
           "max"
         ]
       }
@@ -90,6 +91,7 @@
           "low",
           "medium",
           "high",
+          "xhigh",
           "max"
         ]
       }
