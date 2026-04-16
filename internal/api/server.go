@@ -517,6 +517,10 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PUT("/logs-max-total-size-mb", s.mgmt.PutLogsMaxTotalSizeMB)
 		mgmt.PATCH("/logs-max-total-size-mb", s.mgmt.PutLogsMaxTotalSizeMB)
 
+		mgmt.GET("/usage-retention-days", s.mgmt.GetUsageRetentionDays)
+		mgmt.PUT("/usage-retention-days", s.mgmt.PutUsageRetentionDays)
+		mgmt.PATCH("/usage-retention-days", s.mgmt.PutUsageRetentionDays)
+
 		mgmt.GET("/error-logs-max-files", s.mgmt.GetErrorLogsMaxFiles)
 		mgmt.PUT("/error-logs-max-files", s.mgmt.PutErrorLogsMaxFiles)
 		mgmt.PATCH("/error-logs-max-files", s.mgmt.PutErrorLogsMaxFiles)
@@ -532,6 +536,7 @@ func (s *Server) registerManagementRoutes() {
 
 		mgmt.POST("/api-call", s.mgmt.APICall)
 		mgmt.POST("/custom/codex-cleanup", s.mgmt.CleanupCodexAuth)
+		mgmt.POST("/custom/monitor-cleanup", s.mgmt.CleanupMonitorLogs)
 
 		mgmt.GET("/quota-exceeded/switch-project", s.mgmt.GetSwitchProject)
 		mgmt.PUT("/quota-exceeded/switch-project", s.mgmt.PutSwitchProject)
@@ -919,7 +924,7 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 	usageAuthDirChanged := cfg.UsagePersistenceEnabled && oldCfg != nil && oldCfg.AuthDir != cfg.AuthDir
 	// AuthDir changes only affect the SQLite backend.
 	if usagePersistenceChanged || (usageAuthDirChanged && usage.UsingSQLiteBackend()) {
-		if err := usage.UpdatePersistence(context.Background(), cfg.UsagePersistenceEnabled, cfg.AuthDir); err != nil {
+		if err := usage.UpdatePersistence(context.Background(), cfg.UsagePersistenceEnabled, cfg.AuthDir, cfg.UsageRetentionDays); err != nil {
 			log.Warnf("usage database init failed, using memory only: %v", err)
 		} else if oldCfg != nil {
 			log.Debugf("usage_persistence_enabled updated from %t to %t", oldCfg.UsagePersistenceEnabled, cfg.UsagePersistenceEnabled)
@@ -931,6 +936,12 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 	if s.requestLogger != nil && (oldCfg == nil || oldCfg.ErrorLogsMaxFiles != cfg.ErrorLogsMaxFiles) {
 		if setter, ok := s.requestLogger.(interface{ SetErrorLogsMaxFiles(int) }); ok {
 			setter.SetErrorLogsMaxFiles(cfg.ErrorLogsMaxFiles)
+		}
+	}
+
+	if cfg.UsagePersistenceEnabled && (oldCfg == nil || oldCfg.UsageRetentionDays != cfg.UsageRetentionDays) {
+		if plugin := usage.GetDatabasePlugin(); plugin != nil {
+			plugin.SetRetentionDays(cfg.UsageRetentionDays)
 		}
 	}
 

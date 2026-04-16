@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 )
@@ -241,16 +242,56 @@ func TestGetMonitorRequestLogs_ApiFilterContains(t *testing.T) {
 	}
 }
 
+func TestGetMonitorRequestLogs_ProviderTypeFilter(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	base := time.Date(2026, 2, 6, 12, 0, 0, 0, time.Local)
+	h := newMonitorTestHandler(
+		testUsageRecord(base.Add(-2*time.Hour), "api-1", "model-a", "gemini-key-1", false),
+		testUsageRecord(base.Add(-1*time.Hour), "api-2", "model-b", "claude-key-1", false),
+	)
+	h.cfg = &config.Config{
+		GeminiKey: []config.GeminiKey{
+			{APIKey: "gemini-key-1"},
+		},
+		ClaudeKey: []config.ClaudeKey{
+			{APIKey: "claude-key-1"},
+		},
+	}
+
+	rr := executeMonitorRequest(h.GetMonitorRequestLogs, "/monitor/request-logs?provider_type=gemini")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d, body=%s", rr.Code, rr.Body.String())
+	}
+
+	var resp struct {
+		Total int `json:"total"`
+		Items []struct {
+			Source string `json:"source"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response failed: %v", err)
+	}
+
+	if resp.Total != 1 || len(resp.Items) != 1 {
+		t.Fatalf("unexpected filtered result: total=%d items=%d", resp.Total, len(resp.Items))
+	}
+	if resp.Items[0].Source != "gemini-key-1" {
+		t.Fatalf("unexpected source after provider_type filter: %s", resp.Items[0].Source)
+	}
+}
+
 func TestGetMonitorRequestLogs_DatabasePluginPath(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	usage.CloseDatabasePlugin()
-	t.Cleanup(usage.CloseDatabasePlugin)
 
 	authDir := t.TempDir()
-	if err := usage.InitDatabasePlugin(context.Background(), "", "", authDir); err != nil {
+	if err := usage.InitDatabasePlugin(context.Background(), "", "", authDir, 30); err != nil {
 		t.Fatalf("InitDatabasePlugin failed: %v", err)
 	}
+	t.Cleanup(usage.CloseDatabasePlugin)
 	plugin := usage.GetDatabasePlugin()
 	if plugin == nil {
 		t.Fatalf("expected database plugin to be initialized")

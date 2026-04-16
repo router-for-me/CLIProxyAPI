@@ -12,6 +12,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
@@ -240,6 +241,48 @@ func (h *Handler) PutErrorLogsMaxFiles(c *gin.Context) {
 	}
 	h.cfg.ErrorLogsMaxFiles = value
 	h.persist(c)
+}
+
+func (h *Handler) GetUsageRetentionDays(c *gin.Context) {
+	c.JSON(200, gin.H{"usage-retention-days": usage.NormalizeRetentionDays(h.cfg.UsageRetentionDays)})
+}
+
+func (h *Handler) PutUsageRetentionDays(c *gin.Context) {
+	var body struct {
+		Value *int `json:"value"`
+	}
+	if errBindJSON := c.ShouldBindJSON(&body); errBindJSON != nil || body.Value == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
+		return
+	}
+	value := usage.NormalizeRetentionDays(*body.Value)
+	h.cfg.UsageRetentionDays = value
+	if plugin := usage.GetDatabasePlugin(); plugin != nil {
+		plugin.SetRetentionDays(value)
+	}
+	h.persist(c)
+}
+
+func (h *Handler) CleanupMonitorLogs(c *gin.Context) {
+	plugin := usage.GetDatabasePlugin()
+	if plugin == nil {
+		c.JSON(http.StatusConflict, gin.H{"error": "usage persistence disabled"})
+		return
+	}
+
+	retentionDays := usage.NormalizeRetentionDays(h.cfg.UsageRetentionDays)
+	plugin.SetRetentionDays(retentionDays)
+	deleted, err := plugin.CleanupExpiredRecords(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "cleanup failed", "message": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"deleted":              deleted,
+		"usage-retention-days": retentionDays,
+		"status":               "ok",
+	})
 }
 
 // Request log

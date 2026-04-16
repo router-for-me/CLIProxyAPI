@@ -40,6 +40,8 @@ type monitorRecordFilter struct {
 	APIContains string
 	Model       string
 	Source      string
+	Sources     []string
+	AuthIndices []string
 	Status      string
 	Start       *time.Time
 	End         *time.Time
@@ -60,6 +62,7 @@ type monitorRequestLogItem struct {
 	APIKey          string                 `json:"api_key"`
 	Model           string                 `json:"model"`
 	Source          string                 `json:"source"`
+	SourceRef       monitorSourceRef       `json:"source_ref"`
 	AuthIndex       string                 `json:"auth_index"`
 	Failed          bool                   `json:"failed"`
 	InputTokens     int64                  `json:"input_tokens"`
@@ -90,6 +93,7 @@ type monitorModelStats struct {
 
 type monitorChannelStatsItem struct {
 	Source          string                 `json:"source"`
+	SourceRef       monitorSourceRef       `json:"source_ref"`
 	TotalRequests   int64                  `json:"total_requests"`
 	SuccessRequests int64                  `json:"success_requests"`
 	FailedRequests  int64                  `json:"failed_requests"`
@@ -101,6 +105,7 @@ type monitorChannelStatsItem struct {
 
 type monitorFailureStatsItem struct {
 	Source       string              `json:"source"`
+	SourceRef    monitorSourceRef    `json:"source_ref"`
 	FailedCount  int64               `json:"failed_count"`
 	LastFailedAt *time.Time          `json:"last_failed_at,omitempty"`
 	Models       []monitorModelStats `json:"models"`
@@ -160,6 +165,8 @@ func (h *Handler) GetMonitorRequestLogs(c *gin.Context) {
 		return
 	}
 
+	sourceResolver := newMonitorSourceResolver(h.cfg, h.authManager)
+
 	dbPlugin := usage.GetDatabasePlugin()
 	if dbPlugin != nil && !isExplicitAllTimeRange(c) {
 		start, end = applyDefaultTimeRange(start, end, 1)
@@ -175,6 +182,25 @@ func (h *Handler) GetMonitorRequestLogs(c *gin.Context) {
 		End:         end,
 	}
 
+	providerType := normalizeMonitorProviderType(firstQuery(c, "provider_type", "providerType"))
+	if providerType != "" {
+		filter.Sources, filter.AuthIndices = sourceResolver.FilterKeysForProviderType(providerType)
+		if len(filter.Sources) == 0 && len(filter.AuthIndices) == 0 {
+			c.JSON(http.StatusOK, gin.H{
+				"items":       []monitorRequestLogItem{},
+				"page":        monitorDefaultPage,
+				"page_size":   pageSize,
+				"total":       0,
+				"total_pages": 0,
+				"has_prev":    false,
+				"has_next":    false,
+				"filters":     monitorFilterOptions{APIs: []string{}, Models: []string{}, Sources: []string{}},
+				"time_range":  monitorTimeRange{Start: start, End: end},
+			})
+			return
+		}
+	}
+
 	if dbPlugin != nil {
 		queryResult, queryErr := dbPlugin.QueryMonitorRequestLogs(c.Request.Context(), toUsageMonitorFilter(filter), page, pageSize, monitorRecentLimit)
 		if queryErr == nil {
@@ -186,6 +212,7 @@ func (h *Handler) GetMonitorRequestLogs(c *gin.Context) {
 					APIKey:          row.APIKey,
 					Model:           row.Model,
 					Source:          row.Source,
+					SourceRef:       sourceResolver.Resolve(row.Source, row.AuthIndex),
 					AuthIndex:       row.AuthIndex,
 					Failed:          row.Failed,
 					InputTokens:     row.InputTokens,
@@ -244,6 +271,7 @@ func (h *Handler) GetMonitorRequestLogs(c *gin.Context) {
 			APIKey:          record.APIKey,
 			Model:           record.Model,
 			Source:          record.Source,
+			SourceRef:       sourceResolver.Resolve(record.Source, record.AuthIndex),
 			AuthIndex:       record.AuthIndex,
 			Failed:          record.Failed,
 			InputTokens:     record.InputTokens,
@@ -322,6 +350,7 @@ func (h *Handler) GetMonitorChannelStats(c *gin.Context) {
 	modelFilter := firstQuery(c, "model")
 
 	if dbPlugin != nil {
+		sourceResolver := newMonitorSourceResolver(h.cfg, h.authManager)
 		usageFilter := toUsageMonitorFilter(filter)
 		usageFilter.Model = strings.TrimSpace(modelFilter)
 		usageFilter.Status = strings.TrimSpace(status)
@@ -345,6 +374,7 @@ func (h *Handler) GetMonitorChannelStats(c *gin.Context) {
 
 				items = append(items, monitorChannelStatsItem{
 					Source:          channel.Source,
+					SourceRef:       sourceResolver.Resolve(channel.Source, ""),
 					TotalRequests:   channel.TotalRequests,
 					SuccessRequests: channel.SuccessRequests,
 					FailedRequests:  channel.FailedRequests,
@@ -370,6 +400,7 @@ func (h *Handler) GetMonitorChannelStats(c *gin.Context) {
 	}
 
 	channelMap := make(map[string]*monitorChannelAggregate)
+	sourceResolver := newMonitorSourceResolver(h.cfg, h.authManager)
 	modelSet := make(map[string]struct{})
 	sourceSet := make(map[string]struct{})
 
@@ -458,6 +489,7 @@ func (h *Handler) GetMonitorChannelStats(c *gin.Context) {
 
 		items = append(items, monitorChannelStatsItem{
 			Source:          agg.Source,
+			SourceRef:       sourceResolver.Resolve(agg.Source, ""),
 			TotalRequests:   agg.TotalRequests,
 			SuccessRequests: agg.SuccessRequests,
 			FailedRequests:  agg.FailedRequests,
@@ -515,6 +547,7 @@ func (h *Handler) GetMonitorFailureAnalysis(c *gin.Context) {
 	modelFilter := firstQuery(c, "model")
 
 	if dbPlugin != nil {
+		sourceResolver := newMonitorSourceResolver(h.cfg, h.authManager)
 		usageFilter := toUsageMonitorFilter(filter)
 		usageFilter.Model = strings.TrimSpace(modelFilter)
 
@@ -537,6 +570,7 @@ func (h *Handler) GetMonitorFailureAnalysis(c *gin.Context) {
 
 				items = append(items, monitorFailureStatsItem{
 					Source:       channel.Source,
+					SourceRef:    sourceResolver.Resolve(channel.Source, ""),
 					FailedCount:  channel.FailedCount,
 					LastFailedAt: cloneTimePointer(channel.LastFailedAt),
 					Models:       models,
@@ -573,6 +607,7 @@ func (h *Handler) GetMonitorFailureAnalysis(c *gin.Context) {
 	})
 
 	channelMap := make(map[string]*monitorChannelAggregate)
+	sourceResolver := newMonitorSourceResolver(h.cfg, h.authManager)
 	modelSet := make(map[string]struct{})
 	sourceSet := make(map[string]struct{})
 
@@ -653,6 +688,7 @@ func (h *Handler) GetMonitorFailureAnalysis(c *gin.Context) {
 
 		items = append(items, monitorFailureStatsItem{
 			Source:       agg.Source,
+			SourceRef:    sourceResolver.Resolve(agg.Source, ""),
 			FailedCount:  agg.FailedRequests,
 			LastFailedAt: timePointer(agg.LastRequestAt),
 			Models:       models,
@@ -717,6 +753,26 @@ func (f monitorRecordFilter) matches(record monitorRecord) bool {
 	if f.Source != "" && record.Source != f.Source {
 		return false
 	}
+	if len(f.Sources) > 0 || len(f.AuthIndices) > 0 {
+		matched := false
+		for _, source := range f.Sources {
+			if record.Source == source {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			for _, authIndex := range f.AuthIndices {
+				if record.AuthIndex == authIndex {
+					matched = true
+					break
+				}
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
 	if f.Status == "success" && record.Failed {
 		return false
 	}
@@ -779,6 +835,8 @@ func toUsageMonitorFilter(filter monitorRecordFilter) usage.MonitorQueryFilter {
 		APIContains: strings.TrimSpace(filter.APIContains),
 		Model:       strings.TrimSpace(filter.Model),
 		Source:      strings.TrimSpace(filter.Source),
+		Sources:     append([]string(nil), filter.Sources...),
+		AuthIndices: append([]string(nil), filter.AuthIndices...),
 		Status:      strings.TrimSpace(filter.Status),
 		Start:       filter.Start,
 		End:         filter.End,
