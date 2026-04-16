@@ -194,6 +194,7 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 			key = strings.TrimSpace(ginCtx.GetHeader("Idempotency-Key"))
 		}
 	}
+
 	meta := make(map[string]any)
 	if key != "" {
 		meta[idempotencyKeyMetadataKey] = key

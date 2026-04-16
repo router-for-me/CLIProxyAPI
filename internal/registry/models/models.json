@@ -73,6 +73,29 @@
       }
     },
     {
+      "id": "claude-opus-4-7",
+      "object": "model",
+      "created": 1776297600,
+      "owned_by": "anthropic",
+      "type": "claude",
+      "display_name": "Claude Opus 4.7",
+      "description": "Premium model combining maximum intelligence with practical performance",
+      "context_length": 1000000,
+      "max_completion_tokens": 128000,
+      "thinking": {
+        "min": 1024,
+        "max": 128000,
+        "zero_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    },
+    {
       "id": "claude-opus-4-5-20251101",
       "object": "model",
       "created": 1761955200,
@@ -1600,187 +1623,6 @@
           "xhigh"
         ]
       }
-    }
-  ],
-  "iflow": [
-    {
-      "id": "qwen3-coder-plus",
-      "object": "model",
-      "created": 1753228800,
-      "owned_by": "iflow",
-      "type": "iflow",
-      "display_name": "Qwen3-Coder-Plus",
-      "description": "Qwen3 Coder Plus code generation"
-    },
-    {
-      "id": "qwen3-max",
-      "object": "model",
-      "created": 1758672000,
-      "owned_by": "iflow",
-      "type": "iflow",
-      "display_name": "Qwen3-Max",
-      "description": "Qwen3 flagship model"
-    },
-    {
-      "id": "qwen3-vl-plus",
-      "object": "model",
-      "created": 1758672000,
-      "owned_by": "iflow",
-      "type": "iflow",
-      "display_name": "Qwen3-VL-Plus",
-      "description": "Qwen3 multimodal vision-language"
-    },
-    {
-      "id": "qwen3-max-preview",
-      "object": "model",
-      "created": 1757030400,
-      "owned_by": "iflow",
-      "type": "iflow",
-      "display_name": "Qwen3-Max-Preview",
-      "description": "Qwen3 Max preview build",
-      "thinking": {
-        "levels": [
-          "none",
-          "auto",
-          "minimal",
-          "low",
-          "medium",
-          "high",
-          "xhigh"
-        ]
-      }
-    },
-    {
-      "id": "glm-4.6",
-      "object": "model",
-      "created": 1759190400,
-      "owned_by": "iflow",
-      "type": "iflow",
-      "display_name": "GLM-4.6",
-      "description": "Zhipu GLM 4.6 general model",
-      "thinking": {
-        "levels": [
-          "none",
-          "auto",
-          "minimal",
-          "low",
-          "medium",
-          "high",
-          "xhigh"
-        ]
-      }
-    },
-    {
-      "id": "kimi-k2",
-      "object": "model",
-      "created": 1752192000,
-      "owned_by": "iflow",
-      "type": "iflow",
-      "display_name": "Kimi-K2",
-      "description": "Moonshot Kimi K2 general model"
-    },
-    {
-      "id": "deepseek-v3.2",
-      "object": "model",
-      "created": 1759104000,
-      "owned_by": "iflow",
-      "type": "iflow",
-      "display_name": "DeepSeek-V3.2-Exp",
-      "description": "DeepSeek V3.2 experimental",
-      "thinking": {
-        "levels": [
-          "none",
-          "auto",
-          "minimal",
-          "low",
-          "medium",
-          "high",
-          "xhigh"
-        ]
-      }
-    },
-    {
-      "id": "deepseek-v3.1",
-      "object": "model",
-      "created": 1756339200,
-      "owned_by": "iflow",
-      "type": "iflow",
-      "display_name": "DeepSeek-V3.1-Terminus",
-      "description": "DeepSeek V3.1 Terminus",
-      "thinking": {
-        "levels": [
-          "none",
-          "auto",
-          "minimal",
-          "low",
-          "medium",
-          "high",
-          "xhigh"
-        ]
-      }
-    },
-    {
-      "id": "deepseek-r1",
-      "object": "model",
-      "created": 1737331200,
-      "owned_by": "iflow",
-      "type": "iflow",
-      "display_name": "DeepSeek-R1",
-      "description": "DeepSeek reasoning model R1"
-    },
-    {
-      "id": "deepseek-v3",
-      "object": "model",
-      "created": 1734307200,
-      "owned_by": "iflow",
-      "type": "iflow",
-      "display_name": "DeepSeek-V3-671B",
-      "description": "DeepSeek V3 671B"
-    },
-    {
-      "id": "qwen3-32b",
-      "object": "model",
-      "created": 1747094400,
-      "owned_by": "iflow",
-      "type": "iflow",
-      "display_name": "Qwen3-32B",
-      "description": "Qwen3 32B"
-    },
-    {
-      "id": "qwen3-235b-a22b-thinking-2507",
-      "object": "model",
-      "created": 1753401600,
-      "owned_by": "iflow",
-      "type": "iflow",
-      "display_name": "Qwen3-235B-A22B-Thinking",
-      "description": "Qwen3 235B A22B Thinking (2507)"
-    },
-    {
-      "id": "qwen3-235b-a22b-instruct",
-      "object": "model",
-      "created": 1753401600,
-      "owned_by": "iflow",
-      "type": "iflow",
-      "display_name": "Qwen3-235B-A22B-Instruct",
-      "description": "Qwen3 235B A22B Instruct"
-    },
-    {
-      "id": "qwen3-235b",
-      "object": "model",
-      "created": 1753401600,
-      "owned_by": "iflow",
-      "type": "iflow",
-      "display_name": "Qwen3-235B-A22B",
-      "description": "Qwen3 235B A22B"
-    },
-    {
-      "id": "iflow-rome-30ba3b",
-      "object": "model",
-      "created": 1736899200,
-      "owned_by": "iflow",
-      "type": "iflow",
-      "display_name": "iFlow-ROME",
-      "description": "iFlow Rome 30BA3B model"
     }
   ],
   "kimi": [
