@@ -294,7 +294,10 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 
 			// Convert Anthropic input_schema to OpenAI function parameters
 			if inputSchema := tool.Get("input_schema"); inputSchema.Exists() {
-				openAIToolJSON, _ = sjson.SetBytes(openAIToolJSON, "function.parameters", inputSchema.Value())
+				cleaned := util.CleanJSONSchemaForStrictUpstream(inputSchema.Raw)
+				openAIToolJSON, _ = sjson.SetRawBytes(openAIToolJSON, "function.parameters", []byte(cleaned))
+			} else {
+				openAIToolJSON, _ = sjson.SetRawBytes(openAIToolJSON, "function.parameters", []byte(util.CleanJSONSchemaForStrictUpstream("")))
 			}
 
 			toolsJSON, _ = sjson.SetRawBytes(toolsJSON, "-1", openAIToolJSON)

@@ -222,17 +222,19 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 					tool, _ = sjson.SetBytes(tool, "description", v.String())
 				}
 				if prm := fn.Get("parameters"); prm.Exists() {
-					// Remove optional $schema field if present
-					cleaned := []byte(prm.Raw)
-					cleaned, _ = sjson.DeleteBytes(cleaned, "$schema")
-					cleaned, _ = sjson.SetBytes(cleaned, "additionalProperties", false)
-					tool, _ = sjson.SetRawBytes(tool, "parameters", cleaned)
+					cleaned := util.CleanJSONSchemaForStrictUpstream(prm.Raw)
+					cleanedBytes := []byte(cleaned)
+					cleanedBytes, _ = sjson.SetBytes(cleanedBytes, "additionalProperties", false)
+					tool, _ = sjson.SetRawBytes(tool, "parameters", cleanedBytes)
 				} else if prm = fn.Get("parametersJsonSchema"); prm.Exists() {
-					// Remove optional $schema field if present
-					cleaned := []byte(prm.Raw)
-					cleaned, _ = sjson.DeleteBytes(cleaned, "$schema")
-					cleaned, _ = sjson.SetBytes(cleaned, "additionalProperties", false)
-					tool, _ = sjson.SetRawBytes(tool, "parameters", cleaned)
+					cleaned := util.CleanJSONSchemaForStrictUpstream(prm.Raw)
+					cleanedBytes := []byte(cleaned)
+					cleanedBytes, _ = sjson.SetBytes(cleanedBytes, "additionalProperties", false)
+					tool, _ = sjson.SetRawBytes(tool, "parameters", cleanedBytes)
+				} else {
+					cleanedBytes := []byte(util.CleanJSONSchemaForStrictUpstream(""))
+					cleanedBytes, _ = sjson.SetBytes(cleanedBytes, "additionalProperties", false)
+					tool, _ = sjson.SetRawBytes(tool, "parameters", cleanedBytes)
 				}
 				tool, _ = sjson.SetBytes(tool, "strict", false)
 				out, _ = sjson.SetRawBytes(out, "tools.-1", tool)

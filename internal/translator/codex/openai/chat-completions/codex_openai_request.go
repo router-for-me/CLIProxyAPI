@@ -28,7 +28,7 @@ import (
 // Returns:
 //   - []byte: The transformed request data in OpenAI Responses API format
 func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream bool) []byte {
-	rawJSON := inputRawJSON
+	rawJSON := util.NormalizeOpenAIChatRequestJSON(inputRawJSON)
 	// Start with empty JSON object
 	out := []byte(`{"instructions":""}`)
 
@@ -263,7 +263,10 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 					out, _ = sjson.SetBytes(out, "text.format.strict", v.Value())
 				}
 				if v := js.Get("schema"); v.Exists() {
-					out, _ = sjson.SetRawBytes(out, "text.format.schema", []byte(v.Raw))
+					cleaned := util.CleanJSONSchemaForStrictUpstream(v.Raw)
+					out, _ = sjson.SetRawBytes(out, "text.format.schema", []byte(cleaned))
+				} else {
+					out, _ = sjson.SetRawBytes(out, "text.format.schema", []byte(util.CleanJSONSchemaForStrictUpstream("")))
 				}
 			}
 		}
@@ -320,7 +323,10 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 					item, _ = sjson.SetBytes(item, "description", v.Value())
 				}
 				if v := fn.Get("parameters"); v.Exists() {
-					item, _ = sjson.SetRawBytes(item, "parameters", []byte(v.Raw))
+					cleaned := util.CleanJSONSchemaForStrictUpstream(v.Raw)
+					item, _ = sjson.SetRawBytes(item, "parameters", []byte(cleaned))
+				} else {
+					item, _ = sjson.SetRawBytes(item, "parameters", []byte(util.CleanJSONSchemaForStrictUpstream("")))
 				}
 				if v := fn.Get("strict"); v.Exists() {
 					item, _ = sjson.SetBytes(item, "strict", v.Value())

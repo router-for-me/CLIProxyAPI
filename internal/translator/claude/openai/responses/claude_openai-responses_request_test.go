@@ -110,3 +110,35 @@ func TestConvertOpenAIResponsesRequestToClaude_InputObjectFunctionCallOutput(t *
 		t.Fatalf("expected tool output sunny, got %q", got)
 	}
 }
+
+func TestConvertOpenAIResponsesRequestToClaude_CleansToolSchema(t *testing.T) {
+	input := []byte(`{
+		"model":"MiniMax-M2.7",
+		"input":"hello",
+		"tools":[
+			{
+				"type":"function",
+				"name":"sessions_list",
+				"description":"list",
+				"parameters":{
+					"type":"object",
+					"properties":{
+						"sessions":{"type":"array","items":null}
+					},
+					"required":null
+				}
+			}
+		],
+		"stream":false
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToClaude("MiniMax-M2.7", input, false)
+	result := gjson.ParseBytes(out)
+
+	if got := result.Get("tools.0.input_schema.properties.sessions.items.type").String(); got == "" {
+		t.Fatalf("expected sessions.items.type to be normalized: %s", result.Get("tools").Raw)
+	}
+	if result.Get("tools.0.input_schema.required").Exists() {
+		t.Fatalf("required should be removed when null: %s", result.Get("tools").Raw)
+	}
+}

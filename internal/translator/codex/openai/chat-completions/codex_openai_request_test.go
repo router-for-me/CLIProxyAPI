@@ -633,3 +633,94 @@ func TestToolsDefinitionTranslated(t *testing.T) {
 		t.Errorf("tool 'search' not found in output tools: %s", gjson.Get(result, "tools").Raw)
 	}
 }
+
+func TestStructuredOutputAndToolsSchemasAreCleaned(t *testing.T) {
+	input := []byte(`{
+		"model": "gpt-4o",
+		"messages": [
+			{"role": "user", "content": "Hi"}
+		],
+		"response_format": {
+			"type": "json_schema",
+			"json_schema": {
+				"name": "wander_story_payload",
+				"schema": {
+					"type": "object",
+					"properties": {
+						"rewardTitleEffects": {
+							"type": "array",
+							"items": {
+								"oneOf": [
+									{"type": "string"},
+									{"type": "object", "properties": {"title": {"type": "string"}}}
+								]
+							}
+						}
+					}
+				}
+			}
+		},
+		"tools": [
+			{
+				"type": "function",
+				"function": {
+					"name": "sessions_list",
+					"description": "List sessions",
+					"parameters": {
+						"type": "object",
+						"properties": {
+							"sessions": {"type": "array", "items": null}
+						},
+						"required": null
+					}
+				}
+			}
+		]
+	}`)
+
+	out := ConvertOpenAIRequestToCodex("gpt-4o", input, true)
+	result := string(out)
+
+	if gjson.Get(result, "text.format.schema.properties.rewardTitleEffects.items.oneOf").Exists() {
+		t.Fatalf("response schema oneOf should be removed: %s", result)
+	}
+	if got := gjson.Get(result, "tools.0.parameters.properties.sessions.items.type").String(); got == "" {
+		t.Fatalf("tool array items should be normalized: %s", result)
+	}
+	if gjson.Get(result, "tools.0.parameters.required").Exists() {
+		t.Fatalf("tool required should be removed when null: %s", result)
+	}
+}
+
+func TestNormalizeClaudeStyleToolBlocksInChatMessages(t *testing.T) {
+	input := []byte(`{
+		"model": "gpt-4o",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type":"text","text":"checking"},
+					{"type":"tool_use","id":"call_1","name":"sessions_list","input":{"limit":10}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type":"tool_result","tool_use_id":"call_1","content":"ok"}
+				]
+			}
+		]
+	}`)
+
+	out := ConvertOpenAIRequestToCodex("gpt-4o", input, true)
+	items := gjson.GetBytes(out, "input").Array()
+	if len(items) != 4 {
+		t.Fatalf("expected 4 normalized input items, got %d: %s", len(items), gjson.GetBytes(out, "input").Raw)
+	}
+	if items[1].Get("type").String() != "function_call" || items[2].Get("type").String() != "tool" && items[2].Get("type").String() != "message" {
+		t.Fatalf("unexpected normalized transcript: %s", gjson.GetBytes(out, "input").Raw)
+	}
+	if items[3].Get("type").String() != "function_call_output" {
+		t.Fatalf("expected function_call_output tail: %s", gjson.GetBytes(out, "input").Raw)
+	}
+}

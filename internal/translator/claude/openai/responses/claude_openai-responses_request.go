@@ -33,7 +33,7 @@ var (
 // - max_output_tokens -> max_tokens
 // - stream passthrough via parameter
 func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte, stream bool) []byte {
-	rawJSON := inputRawJSON
+	rawJSON := util.NormalizeOpenAIResponsesRequestJSON(inputRawJSON)
 
 	if account == "" {
 		u, _ := uuid.NewRandom()
@@ -371,9 +371,13 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 			}
 
 			if params := tool.Get("parameters"); params.Exists() {
-				tJSON, _ = sjson.SetRawBytes(tJSON, "input_schema", []byte(params.Raw))
+				cleaned := util.CleanJSONSchemaForStrictUpstream(params.Raw)
+				tJSON, _ = sjson.SetRawBytes(tJSON, "input_schema", []byte(cleaned))
 			} else if params = tool.Get("parametersJsonSchema"); params.Exists() {
-				tJSON, _ = sjson.SetRawBytes(tJSON, "input_schema", []byte(params.Raw))
+				cleaned := util.CleanJSONSchemaForStrictUpstream(params.Raw)
+				tJSON, _ = sjson.SetRawBytes(tJSON, "input_schema", []byte(cleaned))
+			} else {
+				tJSON, _ = sjson.SetRawBytes(tJSON, "input_schema", []byte(util.CleanJSONSchemaForStrictUpstream("")))
 			}
 
 			toolsJSON, _ = sjson.SetRawBytes(toolsJSON, "-1", tJSON)

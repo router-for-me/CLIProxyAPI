@@ -45,7 +45,7 @@ var (
 // Returns:
 //   - []byte: The transformed request data in Claude Code API format
 func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream bool) []byte {
-	rawJSON := inputRawJSON
+	rawJSON := util.NormalizeOpenAIChatRequestJSON(inputRawJSON)
 
 	if account == "" {
 		u, _ := uuid.NewRandom()
@@ -298,9 +298,13 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 
 				// Convert parameters schema for the tool
 				if parameters := function.Get("parameters"); parameters.Exists() {
-					anthropicTool, _ = sjson.SetRawBytes(anthropicTool, "input_schema", []byte(parameters.Raw))
+					cleaned := util.CleanJSONSchemaForStrictUpstream(parameters.Raw)
+					anthropicTool, _ = sjson.SetRawBytes(anthropicTool, "input_schema", []byte(cleaned))
 				} else if parameters := function.Get("parametersJsonSchema"); parameters.Exists() {
-					anthropicTool, _ = sjson.SetRawBytes(anthropicTool, "input_schema", []byte(parameters.Raw))
+					cleaned := util.CleanJSONSchemaForStrictUpstream(parameters.Raw)
+					anthropicTool, _ = sjson.SetRawBytes(anthropicTool, "input_schema", []byte(cleaned))
+				} else {
+					anthropicTool, _ = sjson.SetRawBytes(anthropicTool, "input_schema", []byte(util.CleanJSONSchemaForStrictUpstream("")))
 				}
 
 				out, _ = sjson.SetRawBytes(out, "tools.-1", anthropicTool)

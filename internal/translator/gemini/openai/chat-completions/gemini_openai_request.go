@@ -27,7 +27,7 @@ const geminiFunctionThoughtSignature = "skip_thought_signature_validator"
 // Returns:
 //   - []byte: The transformed request data in Gemini API format
 func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool) []byte {
-	rawJSON := inputRawJSON
+	rawJSON := util.NormalizeOpenAIChatRequestJSON(inputRawJSON)
 	// Base envelope (no default thinkingConfig)
 	out := []byte(`{"contents":[]}`)
 
@@ -307,36 +307,26 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 				if fn.Exists() && fn.IsObject() {
 					fnRaw := fn.Raw
 					if fn.Get("parameters").Exists() {
-						renamed, errRename := util.RenameKey(fnRaw, "parameters", "parametersJsonSchema")
-						if errRename != nil {
-							log.Warnf("Failed to rename parameters for tool '%s': %v", fn.Get("name").String(), errRename)
-							var errSet error
-							fnRawBytes := []byte(fnRaw)
-							fnRawBytes, errSet = sjson.SetBytes(fnRawBytes, "parametersJsonSchema.type", "object")
-							if errSet != nil {
-								log.Warnf("Failed to set default schema type for tool '%s': %v", fn.Get("name").String(), errSet)
-								continue
-							}
-							fnRawBytes, errSet = sjson.SetRawBytes(fnRawBytes, "parametersJsonSchema.properties", []byte(`{}`))
-							if errSet != nil {
-								log.Warnf("Failed to set default schema properties for tool '%s': %v", fn.Get("name").String(), errSet)
-								continue
-							}
-							fnRaw = string(fnRawBytes)
-						} else {
-							fnRaw = renamed
+						cleaned := util.CleanJSONSchemaForStrictUpstream(fn.Get("parameters").Raw)
+						var errSet error
+						fnRawBytes := []byte(fnRaw)
+						fnRawBytes, errSet = sjson.DeleteBytes(fnRawBytes, "parameters")
+						if errSet != nil {
+							log.Warnf("Failed to delete parameters for tool '%s': %v", fn.Get("name").String(), errSet)
+							continue
 						}
+						fnRawBytes, errSet = sjson.SetRawBytes(fnRawBytes, "parametersJsonSchema", []byte(cleaned))
+						if errSet != nil {
+							log.Warnf("Failed to set cleaned schema for tool '%s': %v", fn.Get("name").String(), errSet)
+							continue
+						}
+						fnRaw = string(fnRawBytes)
 					} else {
 						var errSet error
 						fnRawBytes := []byte(fnRaw)
-						fnRawBytes, errSet = sjson.SetBytes(fnRawBytes, "parametersJsonSchema.type", "object")
+						fnRawBytes, errSet = sjson.SetRawBytes(fnRawBytes, "parametersJsonSchema", []byte(util.CleanJSONSchemaForStrictUpstream("")))
 						if errSet != nil {
-							log.Warnf("Failed to set default schema type for tool '%s': %v", fn.Get("name").String(), errSet)
-							continue
-						}
-						fnRawBytes, errSet = sjson.SetRawBytes(fnRawBytes, "parametersJsonSchema.properties", []byte(`{}`))
-						if errSet != nil {
-							log.Warnf("Failed to set default schema properties for tool '%s': %v", fn.Get("name").String(), errSet)
+							log.Warnf("Failed to set default schema for tool '%s': %v", fn.Get("name").String(), errSet)
 							continue
 						}
 						fnRaw = string(fnRawBytes)
