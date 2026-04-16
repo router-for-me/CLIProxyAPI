@@ -129,11 +129,11 @@ func TestModifyResponse_GzipScenarios(t *testing.T) {
 			wantCE:   "",
 		},
 		{
-			name:     "skips_non_2xx_status",
+			name:     "decompresses_non_2xx_status_when_gzip_detected",
 			header:   http.Header{},
 			body:     good,
 			status:   404,
-			wantBody: good,
+			wantBody: goodJSON,
 			wantCE:   "",
 		},
 	}

@@ -6,6 +6,7 @@ package handlers
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -13,7 +14,6 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
@@ -187,7 +187,7 @@ func PassthroughHeadersEnabled(cfg *config.SDKConfig) bool {
 
 func requestExecutionMetadata(ctx context.Context) map[string]any {
 	// Idempotency-Key is an optional client-supplied header used to correlate retries.
-	// It is forwarded as execution metadata; when absent we generate a UUID.
+	// Only include it if the client explicitly provides it.
 	key := ""
 	if ctx != nil {
 		if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
@@ -195,7 +195,7 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 		}
 	}
 	if key == "" {
-		key = uuid.NewString()
+		return make(map[string]any)
 	}
 
 	meta := map[string]any{idempotencyKeyMetadataKey: key}
@@ -339,12 +339,13 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 		}
 	}
 	newCtx, cancel := context.WithCancel(parentCtx)
+	cancelCtx := newCtx
 	if requestCtx != nil && requestCtx != parentCtx {
 		go func() {
 			select {
 			case <-requestCtx.Done():
 				cancel()
-			case <-newCtx.Done():
+			case <-cancelCtx.Done():
 			}
 		}()
 	}
@@ -491,6 +492,7 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 	opts.Metadata = reqMeta
 	resp, err := h.AuthManager.Execute(ctx, providers, req, opts)
 	if err != nil {
+		err = enrichAuthSelectionError(err, providers, normalizedModel)
 		status := http.StatusInternalServerError
 		if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
 			if code := se.StatusCode(); code > 0 {
@@ -537,6 +539,7 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 	opts.Metadata = reqMeta
 	resp, err := h.AuthManager.ExecuteCount(ctx, providers, req, opts)
 	if err != nil {
+		err = enrichAuthSelectionError(err, providers, normalizedModel)
 		status := http.StatusInternalServerError
 		if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
 			if code := se.StatusCode(); code > 0 {
@@ -587,6 +590,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 	opts.Metadata = reqMeta
 	streamResult, err := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
 	if err != nil {
+		err = enrichAuthSelectionError(err, providers, normalizedModel)
 		errChan := make(chan *interfaces.ErrorMessage, 1)
 		status := http.StatusInternalServerError
 		if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
@@ -696,7 +700,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 								chunks = retryResult.Chunks
 								continue outer
 							}
-							streamErr = retryErr
+							streamErr = enrichAuthSelectionError(retryErr, providers, normalizedModel)
 						}
 					}
 
@@ -836,6 +840,54 @@ func replaceHeader(dst http.Header, src http.Header) {
 	}
 	for key, values := range src {
 		dst[key] = append([]string(nil), values...)
+	}
+}
+
+func enrichAuthSelectionError(err error, providers []string, model string) error {
+	if err == nil {
+		return nil
+	}
+
+	var authErr *coreauth.Error
+	if !errors.As(err, &authErr) || authErr == nil {
+		return err
+	}
+
+	code := strings.TrimSpace(authErr.Code)
+	if code != "auth_not_found" && code != "auth_unavailable" {
+		return err
+	}
+
+	providerText := strings.Join(providers, ",")
+	if providerText == "" {
+		providerText = "unknown"
+	}
+	modelText := strings.TrimSpace(model)
+	if modelText == "" {
+		modelText = "unknown"
+	}
+
+	baseMessage := strings.TrimSpace(authErr.Message)
+	if baseMessage == "" {
+		baseMessage = "no auth available"
+	}
+	detail := fmt.Sprintf("%s (providers=%s, model=%s)", baseMessage, providerText, modelText)
+
+	// Clarify the most common alias confusion between Anthropic route names and internal provider keys.
+	if strings.Contains(","+providerText+",", ",claude,") {
+		detail += "; check Claude auth/key session and cooldown state via /v0/management/auth-files"
+	}
+
+	status := authErr.HTTPStatus
+	if status <= 0 {
+		status = http.StatusServiceUnavailable
+	}
+
+	return &coreauth.Error{
+		Code:       authErr.Code,
+		Message:    detail,
+		Retryable:  authErr.Retryable,
+		HTTPStatus: status,
 	}
 }
 

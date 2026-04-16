@@ -80,53 +80,97 @@ func (m *Manager) applyOAuthModelAlias(auth *Auth, requestedModel string) string
 	return upstreamModel
 }
 
-func resolveModelAliasFromConfigModels(requestedModel string, models []modelAliasEntry) string {
+func modelAliasLookupCandidates(requestedModel string) (thinking.SuffixResult, []string) {
 	requestedModel = strings.TrimSpace(requestedModel)
 	if requestedModel == "" {
-		return ""
+		return thinking.SuffixResult{}, nil
 	}
-	if len(models) == 0 {
-		return ""
-	}
-
 	requestResult := thinking.ParseSuffix(requestedModel)
 	base := requestResult.ModelName
+	if base == "" {
+		base = requestedModel
+	}
 	candidates := []string{base}
 	if base != requestedModel {
 		candidates = append(candidates, requestedModel)
 	}
+	return requestResult, candidates
+}
 
-	preserveSuffix := func(resolved string) string {
-		resolved = strings.TrimSpace(resolved)
-		if resolved == "" {
-			return ""
-		}
-		if thinking.ParseSuffix(resolved).HasSuffix {
-			return resolved
-		}
-		if requestResult.HasSuffix && requestResult.RawSuffix != "" {
-			return resolved + "(" + requestResult.RawSuffix + ")"
-		}
+func preserveResolvedModelSuffix(resolved string, requestResult thinking.SuffixResult) string {
+	resolved = strings.TrimSpace(resolved)
+	if resolved == "" {
+		return ""
+	}
+	if thinking.ParseSuffix(resolved).HasSuffix {
 		return resolved
 	}
+	if requestResult.HasSuffix && requestResult.RawSuffix != "" {
+		return resolved + "(" + requestResult.RawSuffix + ")"
+	}
+	return resolved
+}
 
+func resolveModelAliasPoolFromConfigModels(requestedModel string, models []modelAliasEntry) []string {
+	requestedModel = strings.TrimSpace(requestedModel)
+	if requestedModel == "" {
+		return nil
+	}
+	if len(models) == 0 {
+		return nil
+	}
+
+	requestResult, candidates := modelAliasLookupCandidates(requestedModel)
+	if len(candidates) == 0 {
+		return nil
+	}
+
+	out := make([]string, 0)
+	seen := make(map[string]struct{})
 	for i := range models {
 		name := strings.TrimSpace(models[i].GetName())
 		alias := strings.TrimSpace(models[i].GetAlias())
 		for _, candidate := range candidates {
-			if candidate == "" {
+			if candidate == "" || alias == "" || !strings.EqualFold(alias, candidate) {
 				continue
 			}
-			if alias != "" && strings.EqualFold(alias, candidate) {
-				if name != "" {
-					return preserveSuffix(name)
-				}
-				return preserveSuffix(candidate)
+			resolved := candidate
+			if name != "" {
+				resolved = name
 			}
-			if name != "" && strings.EqualFold(name, candidate) {
-				return preserveSuffix(name)
+			resolved = preserveResolvedModelSuffix(resolved, requestResult)
+			key := strings.ToLower(strings.TrimSpace(resolved))
+			if key == "" {
+				break
 			}
+			if _, exists := seen[key]; exists {
+				break
+			}
+			seen[key] = struct{}{}
+			out = append(out, resolved)
+			break
 		}
+	}
+	if len(out) > 0 {
+		return out
+	}
+
+	for i := range models {
+		name := strings.TrimSpace(models[i].GetName())
+		for _, candidate := range candidates {
+			if candidate == "" || name == "" || !strings.EqualFold(name, candidate) {
+				continue
+			}
+			return []string{preserveResolvedModelSuffix(name, requestResult)}
+		}
+	}
+	return nil
+}
+
+func resolveModelAliasFromConfigModels(requestedModel string, models []modelAliasEntry) string {
+	resolved := resolveModelAliasPoolFromConfigModels(requestedModel, models)
+	if len(resolved) > 0 {
+		return resolved[0]
 	}
 	return ""
 }
@@ -221,7 +265,7 @@ func modelAliasChannel(auth *Auth) string {
 // and auth kind. Returns empty string if the provider/authKind combination doesn't support
 // OAuth model alias (e.g., API key authentication).
 //
-// Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, qwen, iflow, kimi.
+// Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, iflow, kimi.
 func OAuthModelAliasChannel(provider, authKind string) string {
 	provider = strings.ToLower(strings.TrimSpace(provider))
 	authKind = strings.ToLower(strings.TrimSpace(authKind))
@@ -245,7 +289,7 @@ func OAuthModelAliasChannel(provider, authKind string) string {
 			return ""
 		}
 		return "codex"
-	case "gemini-cli", "aistudio", "antigravity", "qwen", "iflow", "kimi":
+	case "gemini-cli", "aistudio", "antigravity", "iflow", "kimi":
 		return provider
 	default:
 		return ""

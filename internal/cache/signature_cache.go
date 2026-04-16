@@ -5,7 +5,10 @@ import (
 	"encoding/hex"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
+
+	log "github.com/sirupsen/logrus"
 )
 
 // SignatureEntry holds a cached thinking signature with timestamp
@@ -192,4 +195,46 @@ func GetModelGroup(modelName string) string {
 		return "gemini"
 	}
 	return modelName
+}
+
+var signatureCacheEnabled atomic.Bool
+var signatureBypassStrictMode atomic.Bool
+
+func init() {
+	signatureCacheEnabled.Store(true)
+	signatureBypassStrictMode.Store(false)
+}
+
+// SetSignatureCacheEnabled switches Antigravity signature handling between cache mode and bypass mode.
+func SetSignatureCacheEnabled(enabled bool) {
+	previous := signatureCacheEnabled.Swap(enabled)
+	if previous == enabled {
+		return
+	}
+	if !enabled {
+		log.Info("antigravity signature cache DISABLED - bypass mode active, cached signatures will not be used for request translation")
+	}
+}
+
+// SignatureCacheEnabled returns whether signature cache validation is enabled.
+func SignatureCacheEnabled() bool {
+	return signatureCacheEnabled.Load()
+}
+
+// SetSignatureBypassStrictMode controls whether bypass mode uses strict protobuf-tree validation.
+func SetSignatureBypassStrictMode(strict bool) {
+	previous := signatureBypassStrictMode.Swap(strict)
+	if previous == strict {
+		return
+	}
+	if strict {
+		log.Debug("antigravity bypass signature validation: strict mode (protobuf tree)")
+	} else {
+		log.Debug("antigravity bypass signature validation: basic mode (R/E + 0x12)")
+	}
+}
+
+// SignatureBypassStrictMode returns whether bypass mode uses strict protobuf-tree validation.
+func SignatureBypassStrictMode() bool {
+	return signatureBypassStrictMode.Load()
 }

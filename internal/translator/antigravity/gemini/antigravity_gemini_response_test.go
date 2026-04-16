@@ -59,8 +59,8 @@ func TestConvertAntigravityResponseToGeminiNonStream(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			result := ConvertAntigravityResponseToGeminiNonStream(context.Background(), "", nil, nil, tt.input, nil)
-			if result != tt.expected {
-				t.Errorf("ConvertAntigravityResponseToGeminiNonStream() = %s, want %s", result, tt.expected)
+			if string(result) != tt.expected {
+				t.Errorf("ConvertAntigravityResponseToGeminiNonStream() = %s, want %s", string(result), tt.expected)
 			}
 		})
 	}
@@ -87,8 +87,8 @@ func TestConvertAntigravityResponseToGeminiStream(t *testing.T) {
 			if len(results) != 1 {
 				t.Fatalf("expected 1 result, got %d", len(results))
 			}
-			if results[0] != tt.expected {
-				t.Errorf("ConvertAntigravityResponseToGemini() = %s, want %s", results[0], tt.expected)
+			if string(results[0]) != tt.expected {
+				t.Errorf("ConvertAntigravityResponseToGemini() = %s, want %s", string(results[0]), tt.expected)
 			}
 		})
 	}

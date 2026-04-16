@@ -7,9 +7,9 @@ package gemini
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"time"
 
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/common"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -20,10 +20,11 @@ var (
 
 // ConvertCodexResponseToGeminiParams holds parameters for response conversion.
 type ConvertCodexResponseToGeminiParams struct {
-	Model             string
-	CreatedAt         int64
-	ResponseID        string
-	LastStorageOutput string
+	Model              string
+	CreatedAt          int64
+	ResponseID         string
+	LastStorageOutput  []byte
+	HasOutputTextDelta bool
 }
 
 // ConvertCodexResponseToGemini converts Codex streaming response format to Gemini format.
@@ -38,19 +39,20 @@ type ConvertCodexResponseToGeminiParams struct {
 //   - param: A pointer to a parameter object for maintaining state between calls
 //
 // Returns:
-//   - []string: A slice of strings, each containing a Gemini-compatible JSON response
-func ConvertCodexResponseToGemini(_ context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) []string {
+//   - [][]byte: A slice of Gemini-compatible JSON responses
+func ConvertCodexResponseToGemini(_ context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) [][]byte {
 	if *param == nil {
 		*param = &ConvertCodexResponseToGeminiParams{
-			Model:             modelName,
-			CreatedAt:         0,
-			ResponseID:        "",
-			LastStorageOutput: "",
+			Model:              modelName,
+			CreatedAt:          0,
+			ResponseID:         "",
+			LastStorageOutput:  nil,
+			HasOutputTextDelta: false,
 		}
 	}
 
 	if !bytes.HasPrefix(rawJSON, dataTag) {
-		return []string{}
+		return [][]byte{}
 	}
 	rawJSON = bytes.TrimSpace(rawJSON[5:])
 
@@ -58,18 +60,18 @@ func ConvertCodexResponseToGemini(_ context.Context, modelName string, originalR
 	typeResult := rootResult.Get("type")
 	typeStr := typeResult.String()
 
+	params := (*param).(*ConvertCodexResponseToGeminiParams)
+
 	// Base Gemini response template
-	template := `{"candidates":[{"content":{"role":"model","parts":[]}}],"usageMetadata":{"trafficType":"PROVISIONED_THROUGHPUT"},"modelVersion":"gemini-2.5-pro","createTime":"2025-08-15T02:52:03.884209Z","responseId":"06CeaPH7NaCU48APvNXDyA4"}`
-	if (*param).(*ConvertCodexResponseToGeminiParams).LastStorageOutput != "" && typeStr == "response.output_item.done" {
-		template = (*param).(*ConvertCodexResponseToGeminiParams).LastStorageOutput
-	} else {
-		template, _ = sjson.Set(template, "modelVersion", (*param).(*ConvertCodexResponseToGeminiParams).Model)
+	template := []byte(`{"candidates":[{"content":{"role":"model","parts":[]}}],"usageMetadata":{"trafficType":"PROVISIONED_THROUGHPUT"},"modelVersion":"gemini-2.5-pro","createTime":"2025-08-15T02:52:03.884209Z","responseId":"06CeaPH7NaCU48APvNXDyA4"}`)
+	{
+		template, _ = sjson.SetBytes(template, "modelVersion", params.Model)
 		createdAtResult := rootResult.Get("response.created_at")
 		if createdAtResult.Exists() {
-			(*param).(*ConvertCodexResponseToGeminiParams).CreatedAt = createdAtResult.Int()
-			template, _ = sjson.Set(template, "createTime", time.Unix((*param).(*ConvertCodexResponseToGeminiParams).CreatedAt, 0).Format(time.RFC3339Nano))
+			params.CreatedAt = createdAtResult.Int()
+			template, _ = sjson.SetBytes(template, "createTime", time.Unix(params.CreatedAt, 0).Format(time.RFC3339Nano))
 		}
-		template, _ = sjson.Set(template, "responseId", (*param).(*ConvertCodexResponseToGeminiParams).ResponseID)
+		template, _ = sjson.SetBytes(template, "responseId", params.ResponseID)
 	}
 
 	// Handle function call completion
@@ -78,7 +80,7 @@ func ConvertCodexResponseToGemini(_ context.Context, modelName string, originalR
 		itemType := itemResult.Get("type").String()
 		if itemType == "function_call" {
 			// Create function call part
-			functionCall := `{"functionCall":{"name":"","args":{}}}`
+			functionCall := []byte(`{"functionCall":{"name":"","args":{}}}`)
 			{
 				// Restore original tool name if shortened
 				n := itemResult.Get("name").String()
@@ -86,7 +88,7 @@ func ConvertCodexResponseToGemini(_ context.Context, modelName string, originalR
 				if orig, ok := rev[n]; ok {
 					n = orig
 				}
-				functionCall, _ = sjson.Set(functionCall, "functionCall.name", n)
+				functionCall, _ = sjson.SetBytes(functionCall, "functionCall.name", n)
 			}
 
 			// Parse and set arguments
@@ -94,47 +96,77 @@ func ConvertCodexResponseToGemini(_ context.Context, modelName string, originalR
 			if argsStr != "" {
 				argsResult := gjson.Parse(argsStr)
 				if argsResult.IsObject() {
-					functionCall, _ = sjson.SetRaw(functionCall, "functionCall.args", argsStr)
+					functionCall, _ = sjson.SetRawBytes(functionCall, "functionCall.args", []byte(argsStr))
 				}
 			}
 
-			template, _ = sjson.SetRaw(template, "candidates.0.content.parts.-1", functionCall)
-			template, _ = sjson.Set(template, "candidates.0.finishReason", "STOP")
+			template, _ = sjson.SetRawBytes(template, "candidates.0.content.parts.-1", functionCall)
+			template, _ = sjson.SetBytes(template, "candidates.0.finishReason", "STOP")
 
-			(*param).(*ConvertCodexResponseToGeminiParams).LastStorageOutput = template
+			params.LastStorageOutput = append([]byte(nil), template...)
 
 			// Use this return to storage message
-			return []string{}
+			return [][]byte{}
 		}
 	}
 
 	if typeStr == "response.created" { // Handle response creation - set model and response ID
-		template, _ = sjson.Set(template, "modelVersion", rootResult.Get("response.model").String())
-		template, _ = sjson.Set(template, "responseId", rootResult.Get("response.id").String())
-		(*param).(*ConvertCodexResponseToGeminiParams).ResponseID = rootResult.Get("response.id").String()
+		template, _ = sjson.SetBytes(template, "modelVersion", rootResult.Get("response.model").String())
+		template, _ = sjson.SetBytes(template, "responseId", rootResult.Get("response.id").String())
+		params.ResponseID = rootResult.Get("response.id").String()
 	} else if typeStr == "response.reasoning_summary_text.delta" { // Handle reasoning/thinking content delta
-		part := `{"thought":true,"text":""}`
-		part, _ = sjson.Set(part, "text", rootResult.Get("delta").String())
-		template, _ = sjson.SetRaw(template, "candidates.0.content.parts.-1", part)
+		part := []byte(`{"thought":true,"text":""}`)
+		part, _ = sjson.SetBytes(part, "text", rootResult.Get("delta").String())
+		template, _ = sjson.SetRawBytes(template, "candidates.0.content.parts.-1", part)
 	} else if typeStr == "response.output_text.delta" { // Handle regular text content delta
-		part := `{"text":""}`
-		part, _ = sjson.Set(part, "text", rootResult.Get("delta").String())
-		template, _ = sjson.SetRaw(template, "candidates.0.content.parts.-1", part)
+		params.HasOutputTextDelta = true
+		part := []byte(`{"text":""}`)
+		part, _ = sjson.SetBytes(part, "text", rootResult.Get("delta").String())
+		template, _ = sjson.SetRawBytes(template, "candidates.0.content.parts.-1", part)
+	} else if typeStr == "response.output_item.done" { // Fallback: emit final message text when no delta chunks were received
+		itemResult := rootResult.Get("item")
+		if itemResult.Get("type").String() != "message" || params.HasOutputTextDelta {
+			return [][]byte{}
+		}
+		contentResult := itemResult.Get("content")
+		if !contentResult.Exists() || !contentResult.IsArray() {
+			return [][]byte{}
+		}
+		wroteText := false
+		contentResult.ForEach(func(_, partResult gjson.Result) bool {
+			if partResult.Get("type").String() != "output_text" {
+				return true
+			}
+			text := partResult.Get("text").String()
+			if text == "" {
+				return true
+			}
+			part := []byte(`{"text":""}`)
+			part, _ = sjson.SetBytes(part, "text", text)
+			template, _ = sjson.SetRawBytes(template, "candidates.0.content.parts.-1", part)
+			wroteText = true
+			return true
+		})
+		if wroteText {
+			params.HasOutputTextDelta = true
+			return [][]byte{template}
+		}
+		return [][]byte{}
 	} else if typeStr == "response.completed" { // Handle response completion with usage metadata
-		template, _ = sjson.Set(template, "usageMetadata.promptTokenCount", rootResult.Get("response.usage.input_tokens").Int())
-		template, _ = sjson.Set(template, "usageMetadata.candidatesTokenCount", rootResult.Get("response.usage.output_tokens").Int())
+		template, _ = sjson.SetBytes(template, "usageMetadata.promptTokenCount", rootResult.Get("response.usage.input_tokens").Int())
+		template, _ = sjson.SetBytes(template, "usageMetadata.candidatesTokenCount", rootResult.Get("response.usage.output_tokens").Int())
 		totalTokens := rootResult.Get("response.usage.input_tokens").Int() + rootResult.Get("response.usage.output_tokens").Int()
-		template, _ = sjson.Set(template, "usageMetadata.totalTokenCount", totalTokens)
+		template, _ = sjson.SetBytes(template, "usageMetadata.totalTokenCount", totalTokens)
 	} else {
-		return []string{}
+		return [][]byte{}
 	}
 
-	if (*param).(*ConvertCodexResponseToGeminiParams).LastStorageOutput != "" {
-		return []string{(*param).(*ConvertCodexResponseToGeminiParams).LastStorageOutput, template}
-	} else {
-		return []string{template}
+	if len(params.LastStorageOutput) > 0 {
+		stored := append([]byte(nil), params.LastStorageOutput...)
+		params.LastStorageOutput = nil
+		return [][]byte{stored, template}
 	}
-
+	return [][]byte{template}
 }
 
 // ConvertCodexResponseToGeminiNonStream converts a non-streaming Codex response to a non-streaming Gemini response.
@@ -149,32 +181,32 @@ func ConvertCodexResponseToGemini(_ context.Context, modelName string, originalR
 //   - param: A pointer to a parameter object for the conversion (unused in current implementation)
 //
 // Returns:
-//   - string: A Gemini-compatible JSON response containing all message content and metadata
-func ConvertCodexResponseToGeminiNonStream(_ context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) string {
+//   - []byte: A Gemini-compatible JSON response containing all message content and metadata
+func ConvertCodexResponseToGeminiNonStream(_ context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) []byte {
 	rootResult := gjson.ParseBytes(rawJSON)
 
 	// Verify this is a response.completed event
 	if rootResult.Get("type").String() != "response.completed" {
-		return ""
+		return []byte{}
 	}
 
 	// Base Gemini response template for non-streaming
-	template := `{"candidates":[{"content":{"role":"model","parts":[]},"finishReason":"STOP"}],"usageMetadata":{"trafficType":"PROVISIONED_THROUGHPUT"},"modelVersion":"","createTime":"","responseId":""}`
+	template := []byte(`{"candidates":[{"content":{"role":"model","parts":[]},"finishReason":"STOP"}],"usageMetadata":{"trafficType":"PROVISIONED_THROUGHPUT"},"modelVersion":"","createTime":"","responseId":""}`)
 
 	// Set model version
-	template, _ = sjson.Set(template, "modelVersion", modelName)
+	template, _ = sjson.SetBytes(template, "modelVersion", modelName)
 
 	// Set response metadata from the completed response
 	responseData := rootResult.Get("response")
 	if responseData.Exists() {
 		// Set response ID
 		if responseId := responseData.Get("id"); responseId.Exists() {
-			template, _ = sjson.Set(template, "responseId", responseId.String())
+			template, _ = sjson.SetBytes(template, "responseId", responseId.String())
 		}
 
 		// Set creation time
 		if createdAt := responseData.Get("created_at"); createdAt.Exists() {
-			template, _ = sjson.Set(template, "createTime", time.Unix(createdAt.Int(), 0).Format(time.RFC3339Nano))
+			template, _ = sjson.SetBytes(template, "createTime", time.Unix(createdAt.Int(), 0).Format(time.RFC3339Nano))
 		}
 
 		// Set usage metadata
@@ -183,14 +215,14 @@ func ConvertCodexResponseToGeminiNonStream(_ context.Context, modelName string, 
 			outputTokens := usage.Get("output_tokens").Int()
 			totalTokens := inputTokens + outputTokens
 
-			template, _ = sjson.Set(template, "usageMetadata.promptTokenCount", inputTokens)
-			template, _ = sjson.Set(template, "usageMetadata.candidatesTokenCount", outputTokens)
-			template, _ = sjson.Set(template, "usageMetadata.totalTokenCount", totalTokens)
+			template, _ = sjson.SetBytes(template, "usageMetadata.promptTokenCount", inputTokens)
+			template, _ = sjson.SetBytes(template, "usageMetadata.candidatesTokenCount", outputTokens)
+			template, _ = sjson.SetBytes(template, "usageMetadata.totalTokenCount", totalTokens)
 		}
 
 		// Process output content to build parts array
 		hasToolCall := false
-		var pendingFunctionCalls []string
+		var pendingFunctionCalls [][]byte
 
 		flushPendingFunctionCalls := func() {
 			if len(pendingFunctionCalls) == 0 {
@@ -199,7 +231,7 @@ func ConvertCodexResponseToGeminiNonStream(_ context.Context, modelName string, 
 			// Add all pending function calls as individual parts
 			// This maintains the original Gemini API format while ensuring consecutive calls are grouped together
 			for _, fc := range pendingFunctionCalls {
-				template, _ = sjson.SetRaw(template, "candidates.0.content.parts.-1", fc)
+				template, _ = sjson.SetRawBytes(template, "candidates.0.content.parts.-1", fc)
 			}
 			pendingFunctionCalls = nil
 		}
@@ -215,9 +247,9 @@ func ConvertCodexResponseToGeminiNonStream(_ context.Context, modelName string, 
 
 					// Add thinking content
 					if content := value.Get("content"); content.Exists() {
-						part := `{"text":"","thought":true}`
-						part, _ = sjson.Set(part, "text", content.String())
-						template, _ = sjson.SetRaw(template, "candidates.0.content.parts.-1", part)
+						part := []byte(`{"text":"","thought":true}`)
+						part, _ = sjson.SetBytes(part, "text", content.String())
+						template, _ = sjson.SetRawBytes(template, "candidates.0.content.parts.-1", part)
 					}
 
 				case "message":
@@ -229,9 +261,9 @@ func ConvertCodexResponseToGeminiNonStream(_ context.Context, modelName string, 
 						content.ForEach(func(_, contentItem gjson.Result) bool {
 							if contentItem.Get("type").String() == "output_text" {
 								if text := contentItem.Get("text"); text.Exists() {
-									part := `{"text":""}`
-									part, _ = sjson.Set(part, "text", text.String())
-									template, _ = sjson.SetRaw(template, "candidates.0.content.parts.-1", part)
+									part := []byte(`{"text":""}`)
+									part, _ = sjson.SetBytes(part, "text", text.String())
+									template, _ = sjson.SetRawBytes(template, "candidates.0.content.parts.-1", part)
 								}
 							}
 							return true
@@ -241,21 +273,21 @@ func ConvertCodexResponseToGeminiNonStream(_ context.Context, modelName string, 
 				case "function_call":
 					// Collect function call for potential merging with consecutive ones
 					hasToolCall = true
-					functionCall := `{"functionCall":{"args":{},"name":""}}`
+					functionCall := []byte(`{"functionCall":{"args":{},"name":""}}`)
 					{
 						n := value.Get("name").String()
 						rev := buildReverseMapFromGeminiOriginal(originalRequestRawJSON)
 						if orig, ok := rev[n]; ok {
 							n = orig
 						}
-						functionCall, _ = sjson.Set(functionCall, "functionCall.name", n)
+						functionCall, _ = sjson.SetBytes(functionCall, "functionCall.name", n)
 					}
 
 					// Parse and set arguments
 					if argsStr := value.Get("arguments").String(); argsStr != "" {
 						argsResult := gjson.Parse(argsStr)
 						if argsResult.IsObject() {
-							functionCall, _ = sjson.SetRaw(functionCall, "functionCall.args", argsStr)
+							functionCall, _ = sjson.SetRawBytes(functionCall, "functionCall.args", []byte(argsStr))
 						}
 					}
 
@@ -270,9 +302,9 @@ func ConvertCodexResponseToGeminiNonStream(_ context.Context, modelName string, 
 
 		// Set finish reason based on whether there were tool calls
 		if hasToolCall {
-			template, _ = sjson.Set(template, "candidates.0.finishReason", "STOP")
+			template, _ = sjson.SetBytes(template, "candidates.0.finishReason", "STOP")
 		} else {
-			template, _ = sjson.Set(template, "candidates.0.finishReason", "STOP")
+			template, _ = sjson.SetBytes(template, "candidates.0.finishReason", "STOP")
 		}
 	}
 	return template
@@ -307,6 +339,6 @@ func buildReverseMapFromGeminiOriginal(original []byte) map[string]string {
 	return rev
 }
 
-func GeminiTokenCount(ctx context.Context, count int64) string {
-	return fmt.Sprintf(`{"totalTokens":%d,"promptTokensDetails":[{"modality":"TEXT","tokenCount":%d}]}`, count, count)
+func GeminiTokenCount(ctx context.Context, count int64) []byte {
+	return translatorcommon.GeminiTokenCountJSON(count)
 }
