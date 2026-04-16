@@ -322,36 +322,42 @@ func validateModelsCatalog(data *staticModelsJSON) error {
 		return fmt.Errorf("catalog is nil")
 	}
 
-	requiredSections := []struct {
-		name   string
-		models []*ModelInfo
-	}{
-		{name: "claude", models: data.Claude},
-		{name: "gemini", models: data.Gemini},
-		{name: "vertex", models: data.Vertex},
-		{name: "gemini-cli", models: data.GeminiCLI},
-		{name: "aistudio", models: data.AIStudio},
-		{name: "codex-free", models: data.CodexFree},
-		{name: "codex-team", models: data.CodexTeam},
-		{name: "codex-plus", models: data.CodexPlus},
-		{name: "codex-pro", models: data.CodexPro},
-		{name: "qwen", models: data.Qwen},
-		{name: "iflow", models: data.IFlow},
-		{name: "kimi", models: data.Kimi},
-		{name: "antigravity", models: data.Antigravity},
+	type sectionSpec struct {
+		name     string
+		models   []*ModelInfo
+		required bool
 	}
 
-	for _, section := range requiredSections {
-		if err := validateModelSection(section.name, section.models); err != nil {
+	sections := []sectionSpec{
+		{name: "claude", models: data.Claude, required: true},
+		{name: "gemini", models: data.Gemini, required: true},
+		{name: "vertex", models: data.Vertex, required: true},
+		{name: "gemini-cli", models: data.GeminiCLI, required: true},
+		{name: "aistudio", models: data.AIStudio, required: true},
+		{name: "codex-free", models: data.CodexFree, required: true},
+		{name: "codex-team", models: data.CodexTeam, required: true},
+		{name: "codex-plus", models: data.CodexPlus, required: true},
+		{name: "codex-pro", models: data.CodexPro, required: true},
+		{name: "qwen", models: data.Qwen, required: false},
+		{name: "iflow", models: data.IFlow, required: false},
+		{name: "kimi", models: data.Kimi, required: true},
+		{name: "antigravity", models: data.Antigravity, required: true},
+	}
+
+	for _, section := range sections {
+		if err := validateModelSection(section.name, section.models, section.required); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func validateModelSection(section string, models []*ModelInfo) error {
+func validateModelSection(section string, models []*ModelInfo, required bool) error {
 	if len(models) == 0 {
-		return fmt.Errorf("%s section is empty", section)
+		if required {
+			return fmt.Errorf("%s section is empty", section)
+		}
+		return nil
 	}
 
 	seen := make(map[string]struct{}, len(models))
