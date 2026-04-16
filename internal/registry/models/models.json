@@ -73,6 +73,29 @@
       }
     },
     {
+      "id": "claude-opus-4-7",
+      "object": "model",
+      "created": 1776297600,
+      "owned_by": "anthropic",
+      "type": "claude",
+      "display_name": "Claude Opus 4.7",
+      "description": "Premium model combining maximum intelligence with practical performance",
+      "context_length": 1000000,
+      "max_completion_tokens": 128000,
+      "thinking": {
+        "min": 1024,
+        "max": 128000,
+        "zero_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    },
+    {
       "id": "claude-opus-4-5-20251101",
       "object": "model",
       "created": 1761955200,
