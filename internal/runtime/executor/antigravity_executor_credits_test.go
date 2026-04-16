@@ -2,6 +2,7 @@ package executor
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -20,6 +21,7 @@ func resetAntigravityCreditsRetryState() {
 	antigravityCreditsFailureByAuth = sync.Map{}
 	antigravityPreferCreditsByModel = sync.Map{}
 	antigravityShortCooldownByAuth = sync.Map{}
+	antigravityModelPools = sync.Map{}
 }
 
 func TestClassifyAntigravity429(t *testing.T) {
@@ -79,37 +81,6 @@ func TestInjectEnabledCreditTypes(t *testing.T) {
 
 	if got := injectEnabledCreditTypes([]byte(`not json`)); got != nil {
 		t.Fatalf("injectEnabledCreditTypes() for invalid json = %s, want nil", string(got))
-	}
-}
-
-func TestShouldMarkAntigravityCreditsExhausted(t *testing.T) {
-	t.Run("credit errors are marked", func(t *testing.T) {
-		for _, body := range [][]byte{
-			[]byte(`{"error":{"message":"Insufficient GOOGLE_ONE_AI credits"}}`),
-			[]byte(`{"error":{"message":"minimumCreditAmountForUsage requirement not met"}}`),
-		} {
-			if !shouldMarkAntigravityCreditsExhausted(http.StatusForbidden, body, nil) {
-				t.Fatalf("shouldMarkAntigravityCreditsExhausted(%s) = false, want true", string(body))
-			}
-		}
-	})
-
-	t.Run("transient 429 resource exhausted is not marked", func(t *testing.T) {
-		body := []byte(`{"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota).","status":"RESOURCE_EXHAUSTED"}}`)
-		if shouldMarkAntigravityCreditsExhausted(http.StatusTooManyRequests, body, nil) {
-			t.Fatalf("shouldMarkAntigravityCreditsExhausted(%s) = true, want false", string(body))
-		}
-	})
-
-	t.Run("resource exhausted with quota metadata is still marked", func(t *testing.T) {
-		body := []byte(`{"error":{"code":429,"message":"Resource has been exhausted","status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","metadata":{"quotaResetDelay":"1h","model":"claude-sonnet-4-6"}}]}}`)
-		if !shouldMarkAntigravityCreditsExhausted(http.StatusTooManyRequests, body, nil) {
-			t.Fatalf("shouldMarkAntigravityCreditsExhausted(%s) = false, want true", string(body))
-		}
-	})
-
-	if shouldMarkAntigravityCreditsExhausted(http.StatusServiceUnavailable, []byte(`{"error":{"message":"credits exhausted"}}`), nil) {
-		t.Fatal("shouldMarkAntigravityCreditsExhausted() = true for 5xx, want false")
 	}
 }
 
@@ -470,7 +441,7 @@ func TestAntigravityExecute_DoesNotDirectInjectCreditsWhenFlagDisabled(t *testin
 			"expired":      time.Now().Add(1 * time.Hour).Format(time.RFC3339),
 		},
 	}
-	markAntigravityPreferCredits(auth, "gemini-2.5-flash", time.Now(), nil)
+	markAntigravityPreferCredits(auth, "gemini-2.5-flash", time.Now(), nil, time.Time{})
 
 	_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
 		Model:   "gemini-2.5-flash",
@@ -486,5 +457,541 @@ func TestAntigravityExecute_DoesNotDirectInjectCreditsWhenFlagDisabled(t *testin
 	}
 	if strings.Contains(requestBodies[0], `"enabledCreditTypes":["GOOGLE_ONE_AI"]`) {
 		t.Fatalf("request unexpectedly used enabledCreditTypes with flag disabled: %s", requestBodies[0])
+	}
+}
+
+// --- Pool tracking unit tests ---
+
+func TestAntigravityModelQuotaPool_ShouldActivateCredits(t *testing.T) {
+	t.Run("threshold=0 always activates", func(t *testing.T) {
+		pool := &antigravityModelQuotaPool{
+			seen:      make(map[string]time.Time),
+			exhausted: make(map[string]time.Time),
+		}
+		now := time.Now()
+		pool.seen["a1"] = now
+		if !pool.shouldActivateCredits(0, 3, now) {
+			t.Fatal("threshold=0 should always return true")
+		}
+	})
+
+	t.Run("insufficient sample returns false", func(t *testing.T) {
+		pool := &antigravityModelQuotaPool{
+			seen:      make(map[string]time.Time),
+			exhausted: make(map[string]time.Time),
+		}
+		now := time.Now()
+		pool.seen["a1"] = now
+		pool.exhausted["a1"] = now.Add(1 * time.Hour)
+		pool.seen["a2"] = now
+		// a2 is NOT exhausted → not all exhausted, so small pool exception doesn't apply
+		// 2 seen, minSample=3 → false
+		if pool.shouldActivateCredits(0.8, 3, now) {
+			t.Fatal("should return false when sample < minSampleSize")
+		}
+	})
+
+	t.Run("small pool all exhausted activates credits", func(t *testing.T) {
+		pool := &antigravityModelQuotaPool{
+			seen:      make(map[string]time.Time),
+			exhausted: make(map[string]time.Time),
+		}
+		now := time.Now()
+		pool.seen["a1"] = now
+		pool.exhausted["a1"] = now.Add(1 * time.Hour)
+		pool.seen["a2"] = now
+		pool.exhausted["a2"] = now.Add(1 * time.Hour)
+		// 2 seen, 2 exhausted (all exhausted) → small pool exception → true
+		if !pool.shouldActivateCredits(0.8, 3, now) {
+			t.Fatal("should return true when all auths are exhausted (small pool exception)")
+		}
+	})
+
+	t.Run("below threshold returns false", func(t *testing.T) {
+		pool := &antigravityModelQuotaPool{
+			seen:      make(map[string]time.Time),
+			exhausted: make(map[string]time.Time),
+		}
+		now := time.Now()
+		for i := 0; i < 10; i++ {
+			id := "auth-" + strings.Repeat("x", i+1)
+			pool.seen[id] = now
+		}
+		// Only 5 out of 10 exhausted = 50% < 80%
+		for i := 0; i < 5; i++ {
+			id := "auth-" + strings.Repeat("x", i+1)
+			pool.exhausted[id] = now.Add(1 * time.Hour)
+		}
+		if pool.shouldActivateCredits(0.8, 3, now) {
+			t.Fatal("50% exhausted should not activate at 80% threshold")
+		}
+	})
+
+	t.Run("at threshold returns true", func(t *testing.T) {
+		pool := &antigravityModelQuotaPool{
+			seen:      make(map[string]time.Time),
+			exhausted: make(map[string]time.Time),
+		}
+		now := time.Now()
+		for i := 0; i < 10; i++ {
+			id := "auth-" + strings.Repeat("x", i+1)
+			pool.seen[id] = now
+		}
+		// 8 out of 10 exhausted = 80% >= 80%
+		for i := 0; i < 8; i++ {
+			id := "auth-" + strings.Repeat("x", i+1)
+			pool.exhausted[id] = now.Add(1 * time.Hour)
+		}
+		if !pool.shouldActivateCredits(0.8, 3, now) {
+			t.Fatal("80% exhausted should activate at 80% threshold")
+		}
+	})
+
+	t.Run("expired exhausted entries are not counted", func(t *testing.T) {
+		pool := &antigravityModelQuotaPool{
+			seen:      make(map[string]time.Time),
+			exhausted: make(map[string]time.Time),
+		}
+		now := time.Now()
+		for i := 0; i < 5; i++ {
+			id := "auth-" + strings.Repeat("x", i+1)
+			pool.seen[id] = now
+			// Reset time is in the past
+			pool.exhausted[id] = now.Add(-1 * time.Minute)
+		}
+		if pool.shouldActivateCredits(0.8, 3, now) {
+			t.Fatal("expired exhausted entries should not count")
+		}
+	})
+
+	t.Run("stale seen entries are not counted", func(t *testing.T) {
+		pool := &antigravityModelQuotaPool{
+			seen:      make(map[string]time.Time),
+			exhausted: make(map[string]time.Time),
+		}
+		now := time.Now()
+		// All entries are stale (>12h)
+		for i := 0; i < 5; i++ {
+			id := "auth-" + strings.Repeat("x", i+1)
+			pool.seen[id] = now.Add(-13 * time.Hour)
+			pool.exhausted[id] = now.Add(1 * time.Hour)
+		}
+		if pool.shouldActivateCredits(0.8, 3, now) {
+			t.Fatal("stale seen entries should not count")
+		}
+	})
+}
+
+func TestParseQuotaResetTimestamp(t *testing.T) {
+	t.Run("valid timestamp", func(t *testing.T) {
+		body := []byte(`{"error":{"details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","metadata":{"quotaResetTimeStamp":"2026-04-15T06:32:14Z"}}]}}`)
+		ts, ok := parseQuotaResetTimestamp(body)
+		if !ok {
+			t.Fatal("parseQuotaResetTimestamp() returned false, want true")
+		}
+		expected, _ := time.Parse(time.RFC3339, "2026-04-15T06:32:14Z")
+		if !ts.Equal(expected) {
+			t.Fatalf("parseQuotaResetTimestamp() = %v, want %v", ts, expected)
+		}
+	})
+
+	t.Run("missing metadata", func(t *testing.T) {
+		body := []byte(`{"error":{"details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo"}]}}`)
+		_, ok := parseQuotaResetTimestamp(body)
+		if ok {
+			t.Fatal("parseQuotaResetTimestamp() returned true for missing metadata")
+		}
+	})
+
+	t.Run("missing details", func(t *testing.T) {
+		body := []byte(`{"error":{"message":"quota exhausted"}}`)
+		_, ok := parseQuotaResetTimestamp(body)
+		if ok {
+			t.Fatal("parseQuotaResetTimestamp() returned true for missing details")
+		}
+	})
+
+	t.Run("malformed timestamp", func(t *testing.T) {
+		body := []byte(`{"error":{"details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","metadata":{"quotaResetTimeStamp":"not-a-date"}}]}}`)
+		_, ok := parseQuotaResetTimestamp(body)
+		if ok {
+			t.Fatal("parseQuotaResetTimestamp() returned true for malformed timestamp")
+		}
+	})
+}
+
+func TestAntigravityAuthHasCredits(t *testing.T) {
+	t.Run("sufficient balance", func(t *testing.T) {
+		auth := &cliproxyauth.Auth{
+			Metadata: map[string]any{
+				"credit_amount":     "25000",
+				"min_credit_amount": "50",
+			},
+		}
+		if !antigravityAuthHasCredits(auth) {
+			t.Fatal("antigravityAuthHasCredits() = false, want true")
+		}
+	})
+
+	t.Run("insufficient balance", func(t *testing.T) {
+		auth := &cliproxyauth.Auth{
+			Metadata: map[string]any{
+				"credit_amount":     "30",
+				"min_credit_amount": "50",
+			},
+		}
+		if antigravityAuthHasCredits(auth) {
+			t.Fatal("antigravityAuthHasCredits() = true, want false")
+		}
+	})
+
+	t.Run("no credits fields is backward compatible", func(t *testing.T) {
+		auth := &cliproxyauth.Auth{
+			Metadata: map[string]any{
+				"access_token": "token",
+			},
+		}
+		if !antigravityAuthHasCredits(auth) {
+			t.Fatal("antigravityAuthHasCredits() = false with no credits fields, want true (backward compat)")
+		}
+	})
+
+	t.Run("nil auth returns true", func(t *testing.T) {
+		if !antigravityAuthHasCredits(nil) {
+			t.Fatal("antigravityAuthHasCredits(nil) = false, want true")
+		}
+	})
+
+	t.Run("nil metadata returns true", func(t *testing.T) {
+		auth := &cliproxyauth.Auth{}
+		if !antigravityAuthHasCredits(auth) {
+			t.Fatal("antigravityAuthHasCredits(nil metadata) = false, want true")
+		}
+	})
+}
+
+func TestAntigravityQuotaResetTime(t *testing.T) {
+	now := time.Now()
+
+	t.Run("prefers quotaResetTimeStamp", func(t *testing.T) {
+		expected, _ := time.Parse(time.RFC3339, "2026-04-15T06:32:14Z")
+		body := []byte(`{"error":{"details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","metadata":{"quotaResetTimeStamp":"2026-04-15T06:32:14Z"}}]}}`)
+		d := 10 * time.Minute
+		got := antigravityQuotaResetTime(body, &d, now)
+		if !got.Equal(expected) {
+			t.Fatalf("antigravityQuotaResetTime() = %v, want %v", got, expected)
+		}
+	})
+
+	t.Run("falls back to retryAfter", func(t *testing.T) {
+		body := []byte(`{"error":{"message":"quota exhausted"}}`)
+		d := 30 * time.Minute
+		got := antigravityQuotaResetTime(body, &d, now)
+		expected := now.Add(30 * time.Minute)
+		if got.Sub(expected) > time.Second {
+			t.Fatalf("antigravityQuotaResetTime() = %v, want ~%v", got, expected)
+		}
+	})
+
+	t.Run("falls back to 5h default", func(t *testing.T) {
+		body := []byte(`{"error":{"message":"quota exhausted"}}`)
+		got := antigravityQuotaResetTime(body, nil, now)
+		expected := now.Add(5 * time.Hour)
+		if got.Sub(expected) > time.Second {
+			t.Fatalf("antigravityQuotaResetTime() = %v, want ~%v", got, expected)
+		}
+	})
+}
+
+func TestAntigravityExecute_RetriesQuotaExhaustedWithCredits_ThresholdZeroBackwardCompat(t *testing.T) {
+	resetAntigravityCreditsRetryState()
+	t.Cleanup(resetAntigravityCreditsRetryState)
+
+	var (
+		mu            sync.Mutex
+		requestBodies []string
+	)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = r.Body.Close()
+
+		mu.Lock()
+		requestBodies = append(requestBodies, string(body))
+		reqNum := len(requestBodies)
+		mu.Unlock()
+
+		if reqNum == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":{"status":"RESOURCE_EXHAUSTED","message":"QUOTA_EXHAUSTED"}}`))
+			return
+		}
+
+		if !strings.Contains(string(body), `"enabledCreditTypes":["GOOGLE_ONE_AI"]`) {
+			t.Fatalf("second request body missing enabledCreditTypes: %s", string(body))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]}}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2}}}`))
+	}))
+	defer server.Close()
+
+	// threshold=0 (default) → backward compatible: credits on first QUOTA_EXHAUSTED
+	exec := NewAntigravityExecutor(&config.Config{
+		QuotaExceeded: config.QuotaExceeded{
+			AntigravityCredits:          true,
+			AntigravityCreditsThreshold: 0,
+		},
+	})
+	auth := &cliproxyauth.Auth{
+		ID: "auth-threshold-zero",
+		Attributes: map[string]string{
+			"base_url": server.URL,
+		},
+		Metadata: map[string]any{
+			"access_token": "token",
+			"project_id":   "project-1",
+			"expired":      time.Now().Add(1 * time.Hour).Format(time.RFC3339),
+		},
+	}
+
+	resp, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gemini-2.5-flash",
+		Payload: []byte(`{"request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatAntigravity,
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if len(resp.Payload) == 0 {
+		t.Fatal("Execute() returned empty payload")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(requestBodies) != 2 {
+		t.Fatalf("request count = %d, want 2", len(requestBodies))
+	}
+}
+
+func TestAntigravityExecute_PoolGatesCreditsActivation(t *testing.T) {
+	resetAntigravityCreditsRetryState()
+	t.Cleanup(resetAntigravityCreditsRetryState)
+
+	var requestCount int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":{"status":"RESOURCE_EXHAUSTED","message":"QUOTA_EXHAUSTED"}}`))
+	}))
+	defer server.Close()
+
+	// threshold=0.8, MaxRetryCredentials=8 (minSampleSize)
+	// Pre-populate pool with non-exhausted auths so small pool exception doesn't apply.
+	// 1 exhausted / 4 seen = 25% < 80% and 4 < minSample(8) → credits should NOT activate.
+	baseModel := "gemini-2.5-flash"
+	pool := getAntigravityModelPool(baseModel)
+	now := time.Now()
+	for i := range 3 {
+		pool.markSeen(fmt.Sprintf("auth-healthy-%d", i), now)
+	}
+
+	exec := NewAntigravityExecutor(&config.Config{
+		QuotaExceeded: config.QuotaExceeded{
+			AntigravityCredits:          true,
+			AntigravityCreditsThreshold: 0.8,
+		},
+		MaxRetryCredentials: 8,
+	})
+	auth := &cliproxyauth.Auth{
+		ID: "auth-pool-gated",
+		Attributes: map[string]string{
+			"base_url": server.URL,
+		},
+		Metadata: map[string]any{
+			"access_token":      "token",
+			"project_id":        "project-1",
+			"expired":           time.Now().Add(1 * time.Hour).Format(time.RFC3339),
+			"credit_amount":     "25000",
+			"min_credit_amount": "50",
+		},
+	}
+
+	_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gemini-2.5-flash",
+		Payload: []byte(`{"request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatAntigravity,
+	})
+	if err == nil {
+		t.Fatal("Execute() error = nil, want 429 (credits should not activate)")
+	}
+	// Only 1 request (no credits fallback attempt)
+	if requestCount != 1 {
+		t.Fatalf("request count = %d, want 1 (no credits fallback due to pool gating)", requestCount)
+	}
+}
+
+func TestAntigravityExecute_PoolActivatesCreditsWhenThresholdMet(t *testing.T) {
+	resetAntigravityCreditsRetryState()
+	t.Cleanup(resetAntigravityCreditsRetryState)
+
+	var (
+		mu            sync.Mutex
+		requestBodies []string
+	)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = r.Body.Close()
+
+		mu.Lock()
+		requestBodies = append(requestBodies, string(body))
+		reqNum := len(requestBodies)
+		mu.Unlock()
+
+		if reqNum == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":{"status":"RESOURCE_EXHAUSTED","message":"QUOTA_EXHAUSTED"}}`))
+			return
+		}
+
+		// Second request should have credits injected
+		if !strings.Contains(string(body), `"enabledCreditTypes":["GOOGLE_ONE_AI"]`) {
+			t.Fatalf("second request body missing enabledCreditTypes: %s", string(body))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]}}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2}}}`))
+	}))
+	defer server.Close()
+
+	// threshold=0.8, minSampleSize=5
+	// Pre-populate pool so 4/5 auths are exhausted (80% >= 80%)
+	baseModel := "gemini-2.5-flash"
+	pool := getAntigravityModelPool(baseModel)
+	now := time.Now()
+	for i := range 5 {
+		id := fmt.Sprintf("auth-pool-%d", i)
+		pool.markSeen(id, now)
+		if i < 4 {
+			pool.markExhausted(id, now.Add(1*time.Hour))
+		}
+	}
+
+	exec := NewAntigravityExecutor(&config.Config{
+		QuotaExceeded: config.QuotaExceeded{
+			AntigravityCredits:          true,
+			AntigravityCreditsThreshold: 0.8,
+		},
+		MaxRetryCredentials: 5,
+	})
+	auth := &cliproxyauth.Auth{
+		ID: "auth-pool-4", // This auth is already in the pool as seen but not exhausted
+		Attributes: map[string]string{
+			"base_url": server.URL,
+		},
+		Metadata: map[string]any{
+			"access_token":      "token",
+			"project_id":        "project-1",
+			"expired":           time.Now().Add(1 * time.Hour).Format(time.RFC3339),
+			"credit_amount":     "25000",
+			"min_credit_amount": "50",
+		},
+	}
+
+	resp, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   baseModel,
+		Payload: []byte(`{"request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatAntigravity,
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if len(resp.Payload) == 0 {
+		t.Fatal("Execute() returned empty payload")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(requestBodies) != 2 {
+		t.Fatalf("request count = %d, want 2 (credits fallback should activate when pool threshold met)", len(requestBodies))
+	}
+}
+
+func TestAntigravityExecute_AuthWithoutCreditsSkipsFallback(t *testing.T) {
+	resetAntigravityCreditsRetryState()
+	t.Cleanup(resetAntigravityCreditsRetryState)
+
+	var requestCount int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":{"status":"RESOURCE_EXHAUSTED","message":"QUOTA_EXHAUSTED"}}`))
+	}))
+	defer server.Close()
+
+	// threshold=0 → would normally activate credits immediately
+	// But auth has insufficient credits balance
+	exec := NewAntigravityExecutor(&config.Config{
+		QuotaExceeded: config.QuotaExceeded{
+			AntigravityCredits:          true,
+			AntigravityCreditsThreshold: 0,
+		},
+	})
+	auth := &cliproxyauth.Auth{
+		ID: "auth-no-credits",
+		Attributes: map[string]string{
+			"base_url": server.URL,
+		},
+		Metadata: map[string]any{
+			"access_token":      "token",
+			"project_id":        "project-1",
+			"expired":           time.Now().Add(1 * time.Hour).Format(time.RFC3339),
+			"credit_amount":     "30",
+			"min_credit_amount": "50",
+		},
+	}
+
+	_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gemini-2.5-flash",
+		Payload: []byte(`{"request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatAntigravity,
+	})
+	if err == nil {
+		t.Fatal("Execute() error = nil, want 429 (credits should be skipped due to low balance)")
+	}
+	// Only 1 request (no credits fallback because auth has insufficient credits)
+	if requestCount != 1 {
+		t.Fatalf("request count = %d, want 1 (no credits fallback for low balance auth)", requestCount)
+	}
+}
+
+func TestParseMetaFloat(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   any
+		wantVal float64
+		wantOK  bool
+	}{
+		{"string", "25000", 25000, true},
+		{"float64", float64(100), 100, true},
+		{"int", int(50), 50, true},
+		{"int64", int64(75), 75, true},
+		{"empty string", "", 0, false},
+		{"invalid string", "abc", 0, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			meta := map[string]any{"key": tt.value}
+			got, ok := parseMetaFloat(meta, "key")
+			if ok != tt.wantOK {
+				t.Fatalf("parseMetaFloat() ok = %v, want %v", ok, tt.wantOK)
+			}
+			if ok && got != tt.wantVal {
+				t.Fatalf("parseMetaFloat() = %f, want %f", got, tt.wantVal)
+			}
+		})
 	}
 }

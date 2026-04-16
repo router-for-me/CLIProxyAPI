@@ -99,6 +99,7 @@ quota-exceeded:
   switch-project: true # Whether to automatically switch to another project when a quota is exceeded
   switch-preview-model: true # Whether to automatically switch to a preview model when a quota is exceeded
   antigravity-credits: true # Whether to retry Antigravity quota_exhausted 429s once with enabledCreditTypes=["GOOGLE_ONE_AI"]
+  antigravity-credits-threshold: 0 # Pool exhaustion ratio before activating credits (0=immediate, 0.8=80% exhausted, 1.0=all exhausted)
 
 # Routing strategy for selecting credentials when multiple match.
 routing:
