@@ -51,6 +51,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if oldCfg.ErrorLogsMaxFiles != newCfg.ErrorLogsMaxFiles {
 		changes = append(changes, fmt.Sprintf("error-logs-max-files: %d -> %d", oldCfg.ErrorLogsMaxFiles, newCfg.ErrorLogsMaxFiles))
 	}
+	if oldCfg.UsageRetentionDays != newCfg.UsageRetentionDays {
+		changes = append(changes, fmt.Sprintf("usage-retention-days: %d -> %d", oldCfg.UsageRetentionDays, newCfg.UsageRetentionDays))
+	}
 	if oldCfg.RequestRetry != newCfg.RequestRetry {
 		changes = append(changes, fmt.Sprintf("request-retry: %d -> %d", oldCfg.RequestRetry, newCfg.RequestRetry))
 	}

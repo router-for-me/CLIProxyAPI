@@ -47,7 +47,7 @@ usage-persistence-enabled: true
 ### Automatic Usage Data Cleanup
 
 Automatically cleans up old usage statistics data:
-- Configurable retention period via `USAGE_RETENTION_DAYS` environment variable (default: 30 days)
+- Configurable retention period via `usage-retention-days` in `config.yaml` (default: 30 days)
 - Executes cleanup on startup and every 4 hours
 - Supports both PostgreSQL and SQLite backends
 

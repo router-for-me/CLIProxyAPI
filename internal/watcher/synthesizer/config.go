@@ -225,12 +225,17 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 				attrs["models_hash"] = hash
 			}
 			addConfigHeadersToAttrs(compat.Headers, attrs)
+			status := coreauth.StatusActive
+			if entry.Disabled {
+				status = coreauth.StatusDisabled
+			}
 			a := &coreauth.Auth{
 				ID:         id,
 				Provider:   providerName,
 				Label:      compat.Name,
 				Prefix:     prefix,
-				Status:     coreauth.StatusActive,
+				Status:     status,
+				Disabled:   entry.Disabled,
 				ProxyURL:   proxyURL,
 				Attributes: attrs,
 				CreatedAt:  now,
