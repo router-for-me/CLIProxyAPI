@@ -582,6 +582,13 @@ func markAntigravityCreditsPermanentlyDisabled(auth *cliproxyauth.Auth) {
 	auth.Metadata["min_credit_amount"] = "1"
 }
 
+func clearAntigravityCreditsPermanentlyDisabled(auth *cliproxyauth.Auth) {
+	if auth == nil || strings.TrimSpace(auth.ID) == "" {
+		return
+	}
+	antigravityCreditsFailureByAuth.Delete(strings.TrimSpace(auth.ID))
+}
+
 func antigravityHasExplicitCreditsBalanceExhaustedReason(body []byte) bool {
 	if len(body) == 0 {
 		return false
@@ -2125,6 +2132,9 @@ func (e *AntigravityExecutor) updateAntigravityCreditsBalance(ctx context.Contex
 		}
 		auth.Metadata["credit_amount"] = credit.Get("creditAmount").String()
 		auth.Metadata["min_credit_amount"] = credit.Get("minimumCreditAmountForUsage").String()
+		if antigravityAuthHasCredits(auth) {
+			clearAntigravityCreditsPermanentlyDisabled(auth)
+		}
 		return
 	}
 }
