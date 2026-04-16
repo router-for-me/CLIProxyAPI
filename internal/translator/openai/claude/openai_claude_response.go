@@ -158,8 +158,8 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 			// Don't send content_block_start for text here - wait for actual content
 		}
 
-		// Handle reasoning content delta
-		if reasoning := delta.Get("reasoning_content"); reasoning.Exists() {
+		// Handle reasoning content delta.
+		if reasoning := getOpenAIReasoning(delta); reasoning.Exists() {
 			for _, reasoningText := range collectOpenAIReasoningTexts(reasoning) {
 				if reasoningText == "" {
 					continue
@@ -397,7 +397,7 @@ func convertOpenAINonStreamingToAnthropic(rawJSON []byte) [][]byte {
 	if choices := root.Get("choices"); choices.Exists() && choices.IsArray() && len(choices.Array()) > 0 {
 		choice := choices.Array()[0] // Take first choice
 
-		reasoningNode := choice.Get("message.reasoning_content")
+		reasoningNode := getOpenAIReasoning(choice.Get("message"))
 		for _, reasoningText := range collectOpenAIReasoningTexts(reasoningNode) {
 			if reasoningText == "" {
 				continue
@@ -483,6 +483,16 @@ func (p *ConvertOpenAIResponseToAnthropicParams) toolContentBlockIndex(openAIToo
 	p.NextContentBlockIndex++
 	p.ToolCallBlockIndexes[openAIToolIndex] = idx
 	return idx
+}
+
+// getOpenAIReasoning returns the reasoning field from a JSON object.
+// Checks "reasoning" first (OpenAI Chat Completions standard, AWS Bedrock),
+// then fallback to "reasoning_content" (third-party compat: DeepSeek/vLLM/LiteLLM).
+func getOpenAIReasoning(obj gjson.Result) gjson.Result {
+	if r := obj.Get("reasoning"); r.Exists() {
+		return r
+	}
+	return obj.Get("reasoning_content")
 }
 
 func collectOpenAIReasoningTexts(node gjson.Result) []string {
@@ -658,7 +668,7 @@ func ConvertOpenAIResponseToClaudeNonStream(_ context.Context, _ string, origina
 				}
 			}
 
-			if reasoning := message.Get("reasoning_content"); reasoning.Exists() {
+			if reasoning := getOpenAIReasoning(message); reasoning.Exists() {
 				for _, reasoningText := range collectOpenAIReasoningTexts(reasoning) {
 					if reasoningText == "" {
 						continue
