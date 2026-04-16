@@ -538,7 +538,7 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 
 	if s.cfg != nil {
-		if err := internalusage.UpdatePersistence(ctx, s.cfg.UsagePersistenceEnabled, s.cfg.AuthDir); err != nil {
+		if err := internalusage.UpdatePersistence(ctx, s.cfg.UsagePersistenceEnabled, s.cfg.AuthDir, s.cfg.UsageRetentionDays); err != nil {
 			if s.cfg.UsagePersistenceEnabled {
 				return fmt.Errorf("cliproxy: initialize usage persistence: %w", err)
 			}

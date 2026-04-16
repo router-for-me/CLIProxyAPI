@@ -2,6 +2,7 @@ package usage
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -100,5 +101,35 @@ func TestGetCombinedSnapshot_StoreOnlySnapshotIgnoresMemory(t *testing.T) {
 	}
 	if _, exists := snapshot.APIs["db-api"]; !exists {
 		t.Fatalf("db api missing in snapshot")
+	}
+}
+
+func TestUpdatePersistenceFallsBackToLocalStoreWhenPostgresUnavailable(t *testing.T) {
+	CloseDatabasePlugin()
+	defer CloseDatabasePlugin()
+
+	t.Setenv("PGSTORE_DSN", "postgres://invalid dsn")
+	t.Setenv("PGSTORE_SCHEMA", "")
+
+	authDir := filepath.Join(t.TempDir(), "auth")
+	if err := UpdatePersistence(context.Background(), true, authDir, 30); err != nil {
+		t.Fatalf("UpdatePersistence() error = %v", err)
+	}
+
+	plugin := GetDatabasePlugin()
+	if plugin == nil {
+		t.Fatalf("expected database plugin to be initialized")
+	}
+	if plugin.storeOnlySnapshot {
+		t.Fatalf("expected local fallback store, got postgres snapshot-only mode")
+	}
+}
+
+func TestNormalizeRetentionDays(t *testing.T) {
+	if got := NormalizeRetentionDays(15); got != 15 {
+		t.Fatalf("NormalizeRetentionDays(15) = %d, want 15", got)
+	}
+	if got := NormalizeRetentionDays(0); got != defaultRetentionDays {
+		t.Fatalf("NormalizeRetentionDays(0) = %d, want %d", got, defaultRetentionDays)
 	}
 }

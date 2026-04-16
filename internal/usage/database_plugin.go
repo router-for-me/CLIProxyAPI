@@ -2,8 +2,6 @@ package usage
 
 import (
 	"context"
-	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -40,6 +38,13 @@ func init() {
 	coreusage.RegisterPlugin(databasePluginAdapter{})
 }
 
+func NormalizeRetentionDays(retentionDays int) int {
+	if retentionDays > 0 {
+		return retentionDays
+	}
+	return defaultRetentionDays
+}
+
 // DatabasePlugin persists usage records to database and provides combined statistics.
 type DatabasePlugin struct {
 	store             UsageStore
@@ -57,8 +62,7 @@ type DatabasePlugin struct {
 
 // InitDatabasePlugin initializes the global database plugin.
 // If initialization fails, returns the error but does not prevent the system from running.
-// Reads USAGE_RETENTION_DAYS environment variable for data retention period (default 30 days).
-func InitDatabasePlugin(ctx context.Context, pgDSN, pgSchema, authDir string) error {
+func InitDatabasePlugin(ctx context.Context, pgDSN, pgSchema, authDir string, retentionDays int) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -81,12 +85,7 @@ func InitDatabasePlugin(ctx context.Context, pgDSN, pgSchema, authDir string) er
 		return err
 	}
 
-	retentionDays := defaultRetentionDays
-	if envVal := os.Getenv("USAGE_RETENTION_DAYS"); envVal != "" {
-		if days, parseErr := strconv.Atoi(envVal); parseErr == nil && days > 0 {
-			retentionDays = days
-		}
-	}
+	retentionDays = NormalizeRetentionDays(retentionDays)
 
 	plugin := &DatabasePlugin{
 		store:             store,
@@ -136,11 +135,28 @@ func CloseDatabasePlugin() {
 	}
 }
 
+func (p *DatabasePlugin) SetRetentionDays(retentionDays int) {
+	if p == nil {
+		return
+	}
+	p.retentionDays = NormalizeRetentionDays(retentionDays)
+}
+
+func (p *DatabasePlugin) CleanupExpiredRecords(ctx context.Context) (int64, error) {
+	if p == nil || p.store == nil {
+		return 0, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return p.store.DeleteOldRecords(ctx, NormalizeRetentionDays(p.retentionDays))
+}
+
 // UpdatePersistence enables or disables usage persistence based on the provided flag.
 // When enabling, it reads PGSTORE_DSN/pgstore_dsn and PGSTORE_SCHEMA/pgstore_schema
 // from environment variables to determine the database backend.
 // If PGSTORE_DSN is empty, SQLite is used with the database stored in authDir.
-func UpdatePersistence(ctx context.Context, enabled bool, authDir string) error {
+func UpdatePersistence(ctx context.Context, enabled bool, authDir string, retentionDays int) error {
 	if !enabled {
 		CloseDatabasePlugin()
 		return nil
@@ -148,7 +164,15 @@ func UpdatePersistence(ctx context.Context, enabled bool, authDir string) error 
 	pgStoreDSN := util.GetEnvTrimmed("PGSTORE_DSN", "pgstore_dsn")
 	pgStoreSchema := util.GetEnvTrimmed("PGSTORE_SCHEMA", "pgstore_schema")
 	CloseDatabasePlugin()
-	return InitDatabasePlugin(ctx, pgStoreDSN, pgStoreSchema, authDir)
+	if pgStoreDSN == "" {
+		return InitDatabasePlugin(ctx, "", "", authDir, retentionDays)
+	}
+	if err := InitDatabasePlugin(ctx, pgStoreDSN, pgStoreSchema, authDir, retentionDays); err != nil {
+		log.WithError(err).Warn("usage: postgres unavailable, falling back to local usage storage")
+		CloseDatabasePlugin()
+		return InitDatabasePlugin(ctx, "", "", authDir, retentionDays)
+	}
+	return nil
 }
 
 // UsingSQLiteBackend returns true if the usage persistence would use SQLite (no PGSTORE_DSN set).

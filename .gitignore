@@ -51,9 +51,9 @@ _bmad-output/*
 .DS_Store
 ._*
 usage.*
-
-# Opencode
-.beads/
-.opencode/
+/.gocache
+/.gomodcache
+/.gotmp
+/.gopath
 .cli-proxy-api/
 .venv/

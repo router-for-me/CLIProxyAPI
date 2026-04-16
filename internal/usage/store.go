@@ -3,6 +3,7 @@ package usage
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -88,16 +89,65 @@ type UsageStore interface {
 const (
 	defaultMirrorSyncBatchSize = 10000
 	defaultLocalUsageFileName  = "usage.db"
+	defaultImportBatchSize     = 1000
 )
 
 // NewUsageStore creates a UsageStore based on environment configuration.
-// If pgDSN is provided, it uses PostgreSQL for writes and a local SQLite mirror for reads;
-// otherwise it uses SQLite in authDir directly.
+// If pgDSN is provided, it uses PostgreSQL directly; otherwise it uses SQLite in authDir directly.
 func NewUsageStore(ctx context.Context, pgDSN, pgSchema, authDir string) (UsageStore, error) {
 	if strings.TrimSpace(pgDSN) != "" {
-		return newMirrorUsageStore(ctx, pgDSN, pgSchema, authDir)
+		return newPgUsageStore(ctx, pgDSN, pgSchema)
 	}
 	return newSQLiteUsageStore(authDir)
+}
+
+func MigrateSQLiteToPostgres(ctx context.Context, pgDSN, pgSchema, legacyAuthDir string) error {
+	if strings.TrimSpace(pgDSN) == "" {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	legacyPath := legacySQLiteUsageDBPath(legacyAuthDir)
+	if strings.TrimSpace(legacyPath) == "" {
+		return nil
+	}
+	if _, err := os.Stat(legacyPath); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("usage store: stat legacy sqlite db: %w", err)
+	}
+
+	pgStore, err := newPgUsageStore(ctx, pgDSN, pgSchema)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = pgStore.Close() }()
+
+	empty, err := pgStore.IsEmpty(ctx)
+	if err != nil {
+		return err
+	}
+	if !empty {
+		return nil
+	}
+
+	sqliteStore, err := newSQLiteUsageStoreAtPath(legacyPath)
+	if err != nil {
+		return fmt.Errorf("usage store: open legacy sqlite for migration: %w", err)
+	}
+	defer func() { _ = sqliteStore.Close() }()
+
+	imported, err := sqliteStore.ExportTo(ctx, pgStore, defaultImportBatchSize)
+	if err != nil {
+		return err
+	}
+	if imported > 0 {
+		logMigration("usage store: imported %d records from legacy sqlite %s", imported, legacyPath)
+	}
+	return nil
 }
 
 type mirrorUsageStore struct {
@@ -135,6 +185,18 @@ func resolveLocalUsageDBPath(authDir string) string {
 		}
 		return filepath.Join(cleaned, defaultLocalUsageFileName)
 	}
+	if authDir == "" {
+		if cwd, err := os.Getwd(); err == nil {
+			authDir = cwd
+		}
+	}
+	if authDir == "" {
+		return defaultLocalUsageFileName
+	}
+	return filepath.Join(authDir, defaultLocalUsageFileName)
+}
+
+func legacySQLiteUsageDBPath(authDir string) string {
 	if authDir == "" {
 		if cwd, err := os.Getwd(); err == nil {
 			authDir = cwd
@@ -431,9 +493,25 @@ func (s *pgUsageStore) Insert(ctx context.Context, record UsageRecord) error {
 	return nil
 }
 
+func (s *pgUsageStore) IsEmpty(ctx context.Context) (bool, error) {
+	table := s.fullTableName("usage_records")
+	query := fmt.Sprintf("SELECT COUNT(*) FROM %s", table)
+	var count int64
+	if err := s.db.QueryRowContext(ctx, query).Scan(&count); err != nil {
+		return false, fmt.Errorf("usage store: inspect postgres usage table: %w", err)
+	}
+	return count == 0, nil
+}
+
 func (s *pgUsageStore) InsertBatch(ctx context.Context, records []UsageRecord) (added, skipped int64, err error) {
 	if len(records) == 0 {
 		return 0, 0, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err = ctx.Err(); err != nil {
+		return 0, 0, fmt.Errorf("usage store: insert batch context: %w", err)
 	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -457,6 +535,9 @@ func (s *pgUsageStore) InsertBatch(ctx context.Context, records []UsageRecord) (
 	defer stmt.Close()
 
 	for _, record := range records {
+		if err = ctx.Err(); err != nil {
+			return added, skipped, fmt.Errorf("usage store: insert batch context: %w", err)
+		}
 		failed := 0
 		if record.Failed {
 			failed = 1
@@ -483,7 +564,13 @@ func (s *pgUsageStore) InsertBatch(ctx context.Context, records []UsageRecord) (
 		added++
 	}
 
+	if err = ctx.Err(); err != nil {
+		return added, skipped, fmt.Errorf("usage store: insert batch context: %w", err)
+	}
 	if err = tx.Commit(); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return added, skipped, fmt.Errorf("usage store: insert batch context: %w", ctxErr)
+		}
 		return 0, 0, fmt.Errorf("usage store: commit tx: %w", err)
 	}
 	return added, skipped, nil
@@ -1137,7 +1224,95 @@ func (s *sqliteUsageStore) Close() error {
 	return s.db.Close()
 }
 
+func (s *sqliteUsageStore) ExportTo(ctx context.Context, dest UsageStore, batchSize int) (int64, error) {
+	if s == nil || s.db == nil {
+		return 0, fmt.Errorf("usage store: sqlite store not initialized")
+	}
+	if dest == nil {
+		return 0, fmt.Errorf("usage store: export destination is nil")
+	}
+	if batchSize <= 0 {
+		batchSize = defaultImportBatchSize
+	}
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT api_key, model, source, auth_index, failed, requested_at,
+			input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens,
+			method, path
+		FROM usage_records
+		ORDER BY id ASC
+	`)
+	if err != nil {
+		return 0, fmt.Errorf("usage store: query legacy sqlite records: %w", err)
+	}
+	defer rows.Close()
+
+	var (
+		total int64
+		batch []UsageRecord
+	)
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		added, skipped, errInsert := dest.InsertBatch(ctx, batch)
+		total += added
+		batch = batch[:0]
+		if errInsert != nil {
+			return fmt.Errorf("usage store: import sqlite batch to postgres: %w", errInsert)
+		}
+		if skipped > 0 {
+			return fmt.Errorf("usage store: import sqlite batch skipped %d records", skipped)
+		}
+		return nil
+	}
+
+	for rows.Next() {
+		var (
+			record   UsageRecord
+			failed   int
+			unixTime int64
+		)
+		if err = rows.Scan(
+			&record.APIKey,
+			&record.Model,
+			&record.Source,
+			&record.AuthIndex,
+			&failed,
+			&unixTime,
+			&record.InputTokens,
+			&record.OutputTokens,
+			&record.ReasoningTokens,
+			&record.CachedTokens,
+			&record.TotalTokens,
+			&record.Method,
+			&record.Path,
+		); err != nil {
+			return total, fmt.Errorf("usage store: scan legacy sqlite record: %w", err)
+		}
+		record.Failed = failed != 0
+		record.RequestedAt = time.Unix(unixTime, 0)
+		batch = append(batch, record)
+		if len(batch) >= batchSize {
+			if err = flush(); err != nil {
+				return total, err
+			}
+		}
+	}
+	if err = rows.Err(); err != nil {
+		return total, fmt.Errorf("usage store: iterate legacy sqlite records: %w", err)
+	}
+	if err = flush(); err != nil {
+		return total, err
+	}
+	return total, nil
+}
+
 func quoteIdentifier(identifier string) string {
 	replaced := strings.ReplaceAll(identifier, "\"", "\"\"")
 	return "\"" + replaced + "\""
+}
+
+func logMigration(format string, args ...any) {
+	fmt.Printf(format+"\n", args...)
 }

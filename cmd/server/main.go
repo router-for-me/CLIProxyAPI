@@ -28,6 +28,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/store"
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/translator"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/tui"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	log "github.com/sirupsen/logrus"
@@ -40,6 +41,8 @@ var (
 	BuildDate         = "unknown"
 	DefaultConfigPath = ""
 )
+
+const usageMigrationTimeout = 5 * time.Minute
 
 // init initializes the shared logger setup.
 func init() {
@@ -239,7 +242,10 @@ func main() {
 	// Determine and load the configuration file.
 	// Prefer the Postgres store when configured, otherwise fallback to git or local files.
 	var configFilePath string
+	legacyConfigPath := resolveLegacyConfigPath(wd, configPath)
+	legacyAuthDir := resolveLegacyAuthDir(legacyConfigPath)
 	if usePostgresStore {
+		configFilePath = legacyConfigPath
 		if pgStoreLocalPath == "" {
 			pgStoreLocalPath = wd
 		}
@@ -257,13 +263,20 @@ func main() {
 		}
 		examplePath := filepath.Join(wd, "config.example.yaml")
 		ctx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
-		if errBootstrap := pgStoreInst.Bootstrap(ctx, examplePath); errBootstrap != nil {
+		if errBootstrap := pgStoreInst.BootstrapWithFileMigration(ctx, examplePath, legacyConfigPath, legacyAuthDir); errBootstrap != nil {
 			cancel()
+			_ = pgStoreInst.Close()
 			log.Errorf("failed to bootstrap postgres-backed config: %v", errBootstrap)
 			return
 		}
 		cancel()
-		configFilePath = pgStoreInst.ConfigPath()
+		ctx, cancel = context.WithTimeout(context.Background(), usageMigrationTimeout)
+		if errUsage := usage.MigrateSQLiteToPostgres(ctx, pgStoreDSN, pgStoreSchema, legacyAuthDir); errUsage != nil {
+			cancel()
+			log.Warnf("failed to migrate legacy sqlite usage database, continuing with local runtime storage: %v", errUsage)
+		} else {
+			cancel()
+		}
 		cfg, err = config.LoadConfigOptional(configFilePath, isCloudDeploy)
 		if err == nil {
 			cfg.AuthDir = pgStoreInst.AuthDir()
@@ -582,4 +595,37 @@ func main() {
 			cmd.StartService(cfg, configFilePath, password)
 		}
 	}
+}
+
+func resolveLegacyConfigPath(wd, configPath string) string {
+	if trimmed := strings.TrimSpace(configPath); trimmed != "" {
+		return trimmed
+	}
+	return filepath.Join(wd, "config.yaml")
+}
+
+func resolveLegacyAuthDir(configPath string) string {
+	defaultPath, err := util.ResolveAuthDir("~/.cli-proxy-api")
+	if err != nil {
+		defaultPath = ""
+	}
+
+	trimmedConfigPath := strings.TrimSpace(configPath)
+	if trimmedConfigPath == "" {
+		return defaultPath
+	}
+	if _, err = os.Stat(trimmedConfigPath); err != nil {
+		return defaultPath
+	}
+
+	cfg, err := config.LoadConfigOptional(trimmedConfigPath, false)
+	if err != nil || cfg == nil {
+		return defaultPath
+	}
+
+	resolved, err := util.ResolveAuthDir(cfg.AuthDir)
+	if err != nil || strings.TrimSpace(resolved) == "" {
+		return defaultPath
+	}
+	return resolved
 }

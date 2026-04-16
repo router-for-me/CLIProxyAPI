@@ -14,6 +14,7 @@ import (
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
@@ -44,6 +45,13 @@ type PostgresStore struct {
 	authDir    string
 	mu         sync.Mutex
 }
+
+type configBootstrapMode int
+
+const (
+	configBootstrapImportLocal configBootstrapMode = iota
+	configBootstrapSyncDatabase
+)
 
 // NewPostgresStore establishes a connection to PostgreSQL and prepares the local workspace.
 func NewPostgresStore(ctx context.Context, cfg PostgresStoreConfig) (*PostgresStore, error) {
@@ -162,15 +170,26 @@ func (s *PostgresStore) BootstrapWithFileMigration(ctx context.Context, exampleC
 		return err
 	}
 
-	configEmpty, err := s.configRecordMissing(ctx)
+	if err := s.SetConfigPath(localConfigPath); err != nil {
+		return err
+	}
+
+	mode, err := s.selectConfigBootstrapMode(ctx)
 	if err != nil {
 		return err
 	}
-	if configEmpty {
-		if imported, errImport := s.importConfigFromFile(ctx, localConfigPath); errImport != nil {
+	switch mode {
+	case configBootstrapImportLocal:
+		if imported, errImport := s.importConfigFromFile(ctx, s.configPath); errImport != nil {
 			return errImport
 		} else if imported {
-			log.Infof("postgres store: imported config from local file %s", localConfigPath)
+			log.Infof("postgres store: imported config from local file %s", s.configPath)
+		} else if err := s.syncConfigFromDatabase(ctx, exampleConfigPath); err != nil {
+			return err
+		}
+	default:
+		if err := s.syncConfigFromDatabase(ctx, exampleConfigPath); err != nil {
+			return err
 		}
 	}
 
@@ -188,13 +207,22 @@ func (s *PostgresStore) BootstrapWithFileMigration(ctx context.Context, exampleC
 		}
 	}
 
-	if err := s.syncConfigFromDatabase(ctx, exampleConfigPath); err != nil {
-		return err
-	}
 	if err := s.syncAuthFromDatabase(ctx); err != nil {
 		return err
 	}
 	return nil
+}
+
+func (s *PostgresStore) selectConfigBootstrapMode(ctx context.Context) (configBootstrapMode, error) {
+	content, updatedAt, dbExists, err := s.loadConfigRecord(ctx)
+	if err != nil {
+		return configBootstrapImportLocal, err
+	}
+	localExists, localValid, localModTime, err := inspectLocalConfig(s.configPath)
+	if err != nil {
+		return configBootstrapImportLocal, err
+	}
+	return chooseConfigBootstrapMode(localExists, localValid, localModTime, dbExists, updatedAt, content != ""), nil
 }
 
 // ConfigPath returns the managed configuration file path inside the spool directory.
@@ -203,6 +231,25 @@ func (s *PostgresStore) ConfigPath() string {
 		return ""
 	}
 	return s.configPath
+}
+
+func (s *PostgresStore) SetConfigPath(path string) error {
+	if s == nil {
+		return fmt.Errorf("postgres store: store not initialized")
+	}
+	trimmed := strings.TrimSpace(path)
+	if trimmed == "" {
+		return nil
+	}
+	absPath, err := filepath.Abs(trimmed)
+	if err != nil {
+		return fmt.Errorf("postgres store: resolve config path: %w", err)
+	}
+	if err = os.MkdirAll(filepath.Dir(absPath), 0o700); err != nil {
+		return fmt.Errorf("postgres store: create config directory: %w", err)
+	}
+	s.configPath = absPath
+	return nil
 }
 
 // AuthDir returns the local directory containing mirrored auth files.
@@ -439,6 +486,19 @@ func (s *PostgresStore) PersistConfig(ctx context.Context) error {
 	return s.persistConfig(ctx, data)
 }
 
+func chooseConfigBootstrapMode(localExists, localValid bool, localModTime time.Time, dbExists bool, dbUpdatedAt time.Time, dbHasContent bool) configBootstrapMode {
+	if !dbExists || !dbHasContent {
+		return configBootstrapImportLocal
+	}
+	if !localExists || !localValid {
+		return configBootstrapSyncDatabase
+	}
+	if !dbUpdatedAt.IsZero() && localModTime.Before(dbUpdatedAt) {
+		return configBootstrapSyncDatabase
+	}
+	return configBootstrapImportLocal
+}
+
 // syncConfigFromDatabase writes the database-stored config to disk or seeds the database from template.
 func (s *PostgresStore) syncConfigFromDatabase(ctx context.Context, exampleConfigPath string) error {
 	query := fmt.Sprintf("SELECT content FROM %s WHERE id = $1", s.fullTableName(s.cfg.ConfigTable))
@@ -481,6 +541,22 @@ func (s *PostgresStore) syncConfigFromDatabase(ctx context.Context, exampleConfi
 	return nil
 }
 
+func (s *PostgresStore) loadConfigRecord(ctx context.Context) (string, time.Time, bool, error) {
+	query := fmt.Sprintf("SELECT content, updated_at FROM %s WHERE id = $1", s.fullTableName(s.cfg.ConfigTable))
+	var (
+		content   string
+		updatedAt time.Time
+	)
+	err := s.db.QueryRowContext(ctx, query, defaultConfigKey).Scan(&content, &updatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", time.Time{}, false, nil
+	}
+	if err != nil {
+		return "", time.Time{}, false, fmt.Errorf("postgres store: inspect config record: %w", err)
+	}
+	return content, updatedAt, true, nil
+}
+
 func (s *PostgresStore) configRecordMissing(ctx context.Context) (bool, error) {
 	query := fmt.Sprintf("SELECT 1 FROM %s WHERE id = $1", s.fullTableName(s.cfg.ConfigTable))
 	var marker int
@@ -518,10 +594,41 @@ func (s *PostgresStore) importConfigFromFile(ctx context.Context, localConfigPat
 	if len(bytesTrimSpace(data)) == 0 {
 		return false, nil
 	}
+	if _, err := config.LoadConfigOptional(trimmed, false); err != nil {
+		return false, fmt.Errorf("postgres store: validate local config for migration: %w", err)
+	}
 	if err := s.persistConfig(ctx, data); err != nil {
 		return false, err
 	}
 	return true, nil
+}
+
+func inspectLocalConfig(path string) (bool, bool, time.Time, error) {
+	trimmed := strings.TrimSpace(path)
+	if trimmed == "" {
+		return false, false, time.Time{}, nil
+	}
+	info, err := os.Stat(trimmed)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return false, false, time.Time{}, nil
+		}
+		return false, false, time.Time{}, fmt.Errorf("postgres store: stat local config: %w", err)
+	}
+	if info.IsDir() {
+		return false, false, time.Time{}, fmt.Errorf("postgres store: local config path is directory: %s", trimmed)
+	}
+	data, err := os.ReadFile(trimmed)
+	if err != nil {
+		return true, false, info.ModTime(), fmt.Errorf("postgres store: read local config: %w", err)
+	}
+	if len(bytesTrimSpace(data)) == 0 {
+		return true, false, info.ModTime(), nil
+	}
+	if _, err := config.LoadConfigOptional(trimmed, false); err != nil {
+		return true, false, info.ModTime(), nil
+	}
+	return true, true, info.ModTime(), nil
 }
 
 func (s *PostgresStore) importAuthDir(ctx context.Context, localAuthDir string) (int, error) {
