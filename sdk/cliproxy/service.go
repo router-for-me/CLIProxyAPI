@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	configaccess "github.com/router-for-me/CLIProxyAPI/v6/internal/access/config_access"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
@@ -89,6 +90,44 @@ type Service struct {
 
 	// wsGateway manages websocket Gemini providers.
 	wsGateway *wsrelay.Manager
+}
+
+type serviceAuthHook struct {
+	service *Service
+}
+
+func (h serviceAuthHook) OnAuthRegistered(ctx context.Context, auth *coreauth.Auth) {
+	h.syncAuthState(ctx, auth)
+}
+
+func (h serviceAuthHook) OnAuthUpdated(ctx context.Context, auth *coreauth.Auth) {
+	h.syncAuthState(ctx, auth)
+}
+
+func (serviceAuthHook) OnResult(context.Context, coreauth.Result) {}
+
+func (h serviceAuthHook) syncAuthState(_ context.Context, auth *coreauth.Auth) {
+	if h.service == nil || h.service.coreManager == nil || auth == nil || auth.ID == "" {
+		return
+	}
+	h.service.ensureExecutorsForAuth(auth)
+	h.service.registerModelsForAuth(auth)
+	h.service.coreManager.RefreshSchedulerEntry(auth.ID)
+}
+
+func (s *Service) syncLoadedAuthModels() {
+	if s == nil || s.coreManager == nil {
+		return
+	}
+	auths := s.coreManager.List()
+	for _, auth := range auths {
+		if auth == nil || auth.ID == "" {
+			continue
+		}
+		s.ensureExecutorsForAuth(auth)
+		s.registerModelsForAuth(auth)
+		s.coreManager.RefreshSchedulerEntry(auth.ID)
+	}
 }
 
 // RegisterUsagePlugin registers a usage plugin on the global usage manager.
@@ -480,6 +519,9 @@ func (s *Service) Run(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if err := s.ensureDefaults(); err != nil {
+		return err
+	}
 
 	usage.StartDefault(ctx)
 
@@ -527,6 +569,8 @@ func (s *Service) Run(ctx context.Context) error {
 	if apiKeyResult == nil {
 		apiKeyResult = &APIKeyClientResult{}
 	}
+
+	s.syncLoadedAuthModels()
 
 	// legacy clients removed; no caches to refresh
 
@@ -807,6 +851,53 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		usage.StopDefault()
 	})
 	return shutdownErr
+}
+
+func (s *Service) ensureDefaults() error {
+	if s == nil {
+		return fmt.Errorf("cliproxy: service is nil")
+	}
+	if s.cfg == nil {
+		return fmt.Errorf("cliproxy: configuration is required")
+	}
+	if s.tokenProvider == nil {
+		s.tokenProvider = NewFileTokenClientProvider()
+	}
+	if s.apiKeyProvider == nil {
+		s.apiKeyProvider = NewAPIKeyClientProvider()
+	}
+	if s.watcherFactory == nil {
+		s.watcherFactory = defaultWatcherFactory
+	}
+	if s.authManager == nil {
+		s.authManager = newDefaultAuthManager()
+	}
+	if s.accessManager == nil {
+		s.accessManager = sdkaccess.NewManager()
+	}
+	configaccess.Register(&s.cfg.SDKConfig)
+	s.accessManager.SetProviders(sdkaccess.RegisteredProviders())
+	if s.coreManager == nil {
+		tokenStore := sdkAuth.GetTokenStore()
+		if dirSetter, ok := tokenStore.(interface{ SetBaseDir(string) }); ok {
+			dirSetter.SetBaseDir(s.cfg.AuthDir)
+		}
+		strategy := strings.ToLower(strings.TrimSpace(s.cfg.Routing.Strategy))
+		var selector coreauth.Selector
+		switch strategy {
+		case "fill-first", "fillfirst", "ff":
+			selector = &coreauth.FillFirstSelector{}
+		case "sequential-fill", "sequentialfill", "sf":
+			selector = &coreauth.SequentialFillSelector{}
+		default:
+			selector = &coreauth.RoundRobinSelector{}
+		}
+		s.coreManager = coreauth.NewManager(tokenStore, selector, serviceAuthHook{service: s})
+	}
+	s.coreManager.SetRoundTripperProvider(newDefaultRoundTripperProvider())
+	s.coreManager.SetConfig(s.cfg)
+	s.coreManager.SetOAuthModelAlias(s.cfg.OAuthModelAlias)
+	return nil
 }
 
 func (s *Service) ensureAuthDir() error {
@@ -1429,7 +1520,7 @@ func buildCodexConfigModels(entry *config.CodexKey) []*ModelInfo {
 	if entry == nil {
 		return nil
 	}
-	return buildConfigModels(entry.Models, "openai", "openai")
+	return buildConfigModels(entry.Models, "openai", "codex")
 }
 
 func rewriteModelInfoName(name, oldID, newID string) string {

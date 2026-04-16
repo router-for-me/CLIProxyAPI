@@ -13,8 +13,8 @@ type modelAliasEntry interface {
 }
 
 type oauthModelAliasTable struct {
-	// reverse maps channel -> alias (lower) -> original upstream model name.
-	reverse map[string]map[string]string
+	// reverse maps channel -> alias (lower) -> original upstream model names.
+	reverse map[string]map[string][]string
 }
 
 func compileOAuthModelAliasTable(aliases map[string][]internalconfig.OAuthModelAlias) *oauthModelAliasTable {
@@ -22,14 +22,15 @@ func compileOAuthModelAliasTable(aliases map[string][]internalconfig.OAuthModelA
 		return &oauthModelAliasTable{}
 	}
 	out := &oauthModelAliasTable{
-		reverse: make(map[string]map[string]string, len(aliases)),
+		reverse: make(map[string]map[string][]string, len(aliases)),
 	}
 	for rawChannel, entries := range aliases {
 		channel := strings.ToLower(strings.TrimSpace(rawChannel))
 		if channel == "" || len(entries) == 0 {
 			continue
 		}
-		rev := make(map[string]string, len(entries))
+		rev := make(map[string][]string, len(entries))
+		seenPairs := make(map[string]struct{}, len(entries))
 		for _, entry := range entries {
 			name := strings.TrimSpace(entry.Name)
 			alias := strings.TrimSpace(entry.Alias)
@@ -40,10 +41,12 @@ func compileOAuthModelAliasTable(aliases map[string][]internalconfig.OAuthModelA
 				continue
 			}
 			aliasKey := strings.ToLower(alias)
-			if _, exists := rev[aliasKey]; exists {
+			pairKey := aliasKey + "\x00" + strings.ToLower(name)
+			if _, exists := seenPairs[pairKey]; exists {
 				continue
 			}
-			rev[aliasKey] = name
+			seenPairs[pairKey] = struct{}{}
+			rev[aliasKey] = append(rev[aliasKey], name)
 		}
 		if len(rev) > 0 {
 			out.reverse[channel] = rev
@@ -183,15 +186,23 @@ func resolveModelAliasFromConfigModels(requestedModel string, models []modelAlia
 // the suffix is preserved in the returned model name. However, if the alias's
 // original name already contains a suffix, the config suffix takes priority.
 func (m *Manager) resolveOAuthUpstreamModel(auth *Auth, requestedModel string) string {
-	return resolveUpstreamModelFromAliasTable(m, auth, requestedModel, modelAliasChannel(auth))
-}
-
-func resolveUpstreamModelFromAliasTable(m *Manager, auth *Auth, requestedModel, channel string) string {
-	if m == nil || auth == nil {
+	pool := m.resolveOAuthUpstreamModelPool(auth, requestedModel)
+	if len(pool) == 0 {
 		return ""
 	}
+	return pool[0]
+}
+
+func (m *Manager) resolveOAuthUpstreamModelPool(auth *Auth, requestedModel string) []string {
+	return resolveUpstreamModelPoolFromAliasTable(m, auth, requestedModel, modelAliasChannel(auth))
+}
+
+func resolveUpstreamModelPoolFromAliasTable(m *Manager, auth *Auth, requestedModel, channel string) []string {
+	if m == nil || auth == nil {
+		return nil
+	}
 	if channel == "" {
-		return ""
+		return nil
 	}
 
 	// Extract thinking suffix from requested model using ParseSuffix
@@ -207,11 +218,11 @@ func resolveUpstreamModelFromAliasTable(m *Manager, auth *Auth, requestedModel, 
 	raw := m.oauthModelAlias.Load()
 	table, _ := raw.(*oauthModelAliasTable)
 	if table == nil || table.reverse == nil {
-		return ""
+		return nil
 	}
 	rev := table.reverse[channel]
 	if rev == nil {
-		return ""
+		return nil
 	}
 
 	for _, candidate := range candidates {
@@ -219,26 +230,41 @@ func resolveUpstreamModelFromAliasTable(m *Manager, auth *Auth, requestedModel, 
 		if key == "" {
 			continue
 		}
-		original := strings.TrimSpace(rev[key])
-		if original == "" {
+		originals := rev[key]
+		if len(originals) == 0 {
 			continue
 		}
-		if strings.EqualFold(original, baseModel) {
-			return ""
-		}
+		out := make([]string, 0, len(originals))
+		seen := make(map[string]struct{}, len(originals))
+		for _, original := range originals {
+			original = strings.TrimSpace(original)
+			if original == "" {
+				continue
+			}
+			if strings.EqualFold(original, baseModel) {
+				continue
+			}
 
-		// If config already has suffix, it takes priority.
-		if thinking.ParseSuffix(original).HasSuffix {
-			return original
+			resolved := original
+			if !thinking.ParseSuffix(original).HasSuffix && requestResult.HasSuffix && requestResult.RawSuffix != "" {
+				resolved = original + "(" + requestResult.RawSuffix + ")"
+			}
+			resolvedKey := strings.ToLower(strings.TrimSpace(resolved))
+			if resolvedKey == "" {
+				continue
+			}
+			if _, exists := seen[resolvedKey]; exists {
+				continue
+			}
+			seen[resolvedKey] = struct{}{}
+			out = append(out, resolved)
 		}
-		// Preserve user's thinking suffix on the resolved model.
-		if requestResult.HasSuffix && requestResult.RawSuffix != "" {
-			return original + "(" + requestResult.RawSuffix + ")"
+		if len(out) > 0 {
+			return out
 		}
-		return original
 	}
 
-	return ""
+	return nil
 }
 
 // modelAliasChannel extracts the OAuth model alias channel from an Auth object.

@@ -1003,6 +1003,11 @@ func (h *Handler) buildAuthFromFileData(path string, data []byte) (*coreauth.Aut
 		label = email
 	}
 	lastRefresh, hasLastRefresh := extractLastRefreshTimestamp(metadata)
+	disabled, _ := metadata["disabled"].(bool)
+	status := coreauth.StatusActive
+	if disabled {
+		status = coreauth.StatusDisabled
+	}
 
 	authID := h.authIDForPath(path)
 	if authID == "" {
@@ -1017,7 +1022,8 @@ func (h *Handler) buildAuthFromFileData(path string, data []byte) (*coreauth.Aut
 		Provider:   provider,
 		FileName:   filepath.Base(path),
 		Label:      label,
-		Status:     coreauth.StatusActive,
+		Status:     status,
+		Disabled:   disabled,
 		Attributes: attr,
 		Metadata:   metadata,
 		CreatedAt:  time.Now(),

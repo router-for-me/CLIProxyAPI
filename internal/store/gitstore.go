@@ -285,8 +285,15 @@ func (s *GitTokenStore) Save(_ context.Context, auth *cliproxyauth.Auth) (string
 		return "", fmt.Errorf("auth filestore: create dir failed: %w", err)
 	}
 
+	if auth.Metadata != nil {
+		auth.Metadata["disabled"] = auth.Disabled
+	}
+
 	switch {
 	case auth.Storage != nil:
+		if setter, ok := auth.Storage.(interface{ SetMetadata(map[string]any) }); ok {
+			setter.SetMetadata(auth.Metadata)
+		}
 		if err = auth.Storage.SaveTokenToFile(path); err != nil {
 			return "", err
 		}

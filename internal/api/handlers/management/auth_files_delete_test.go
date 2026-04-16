@@ -127,3 +127,34 @@ func TestDeleteAuthFile_FallbackToAuthDirPath(t *testing.T) {
 		t.Fatalf("expected auth file to be removed from auth dir, stat err: %v", errStat)
 	}
 }
+
+func TestRegisterAuthFromFilePreservesDisabledState(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	authDir := t.TempDir()
+	fileName := "codex-user@example.com-plus.json"
+	filePath := filepath.Join(authDir, fileName)
+	data := []byte(`{"type":"codex","email":"user@example.com","disabled":true}`)
+	if err := os.WriteFile(filePath, data, 0o600); err != nil {
+		t.Fatalf("failed to write auth file: %v", err)
+	}
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
+
+	if err := h.registerAuthFromFile(context.Background(), filePath, data); err != nil {
+		t.Fatalf("registerAuthFromFile() error = %v", err)
+	}
+
+	auth, ok := manager.GetByID(fileName)
+	if !ok || auth == nil {
+		t.Fatal("expected auth to be registered")
+	}
+	if !auth.Disabled {
+		t.Fatal("expected auth.Disabled to be true")
+	}
+	if auth.Status != coreauth.StatusDisabled {
+		t.Fatalf("expected auth status disabled, got %q", auth.Status)
+	}
+}

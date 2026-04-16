@@ -1,6 +1,15 @@
 package auth
 
-import "testing"
+import (
+	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"testing"
+
+	codexauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codex"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+)
 
 func TestExtractAccessToken(t *testing.T) {
 	t.Parallel()
@@ -76,5 +85,48 @@ func TestExtractAccessToken(t *testing.T) {
 				t.Errorf("extractAccessToken() = %q, want %q", got, tt.expected)
 			}
 		})
+	}
+}
+
+func TestFileTokenStoreSaveSyncsDisabledIntoStorageMetadata(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	store := NewFileTokenStore()
+	store.SetBaseDir(dir)
+
+	path := filepath.Join(dir, "codex-test.json")
+	record := &cliproxyauth.Auth{
+		ID:       "codex-test.json",
+		FileName: "codex-test.json",
+		Disabled: false,
+		Attributes: map[string]string{
+			"path": path,
+		},
+		Metadata: map[string]any{
+			"type":     "codex",
+			"email":    "u@example.com",
+			"disabled": true,
+		},
+		Storage: &codexauth.CodexTokenStorage{
+			Email: "u@example.com",
+		},
+	}
+
+	if _, err := store.Save(context.Background(), record); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	disabled, _ := payload["disabled"].(bool)
+	if disabled {
+		t.Fatalf("expected disabled=false in persisted payload, got true: %s", string(raw))
 	}
 }

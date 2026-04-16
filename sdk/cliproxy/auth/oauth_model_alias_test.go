@@ -192,3 +192,65 @@ func TestApplyOAuthModelAlias_SuffixPreservation(t *testing.T) {
 		t.Errorf("applyOAuthModelAlias() model = %q, want %q", resolvedModel, "gemini-2.5-pro-exp-03-25(8192)")
 	}
 }
+
+func TestResolveOAuthUpstreamModelPool_MultipleTargetsPreservesOrder(t *testing.T) {
+	t.Parallel()
+
+	aliases := map[string][]internalconfig.OAuthModelAlias{
+		"codex": {
+			{Name: "gpt-5", Alias: "g5"},
+			{Name: "gpt-5-chat", Alias: "g5"},
+		},
+	}
+
+	mgr := NewManager(nil, nil, nil)
+	mgr.SetConfig(&internalconfig.Config{})
+	mgr.SetOAuthModelAlias(aliases)
+
+	auth := &Auth{ID: "test-auth-id", Provider: "codex", Attributes: map[string]string{"auth_kind": "oauth"}}
+	got := mgr.resolveOAuthUpstreamModelPool(auth, "g5")
+	want := []string{"gpt-5", "gpt-5-chat"}
+	if len(got) != len(want) {
+		t.Fatalf("resolveOAuthUpstreamModelPool() len = %d, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("resolveOAuthUpstreamModelPool()[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestPrepareExecutionModels_RotatesOAuthAliasPool(t *testing.T) {
+	t.Parallel()
+
+	aliases := map[string][]internalconfig.OAuthModelAlias{
+		"codex": {
+			{Name: "gpt-5", Alias: "g5"},
+			{Name: "gpt-5-chat", Alias: "g5"},
+		},
+	}
+
+	mgr := NewManager(nil, nil, nil)
+	mgr.SetConfig(&internalconfig.Config{})
+	mgr.SetOAuthModelAlias(aliases)
+
+	auth := &Auth{ID: "test-auth-id", Provider: "codex", Attributes: map[string]string{"auth_kind": "oauth"}}
+
+	first := mgr.prepareExecutionModels(auth, "g5")
+	second := mgr.prepareExecutionModels(auth, "g5")
+
+	wantFirst := []string{"gpt-5", "gpt-5-chat"}
+	wantSecond := []string{"gpt-5-chat", "gpt-5"}
+
+	if len(first) != len(wantFirst) || len(second) != len(wantSecond) {
+		t.Fatalf("unexpected pool sizes: first=%v second=%v", first, second)
+	}
+	for i := range wantFirst {
+		if first[i] != wantFirst[i] {
+			t.Fatalf("first[%d] = %q, want %q", i, first[i], wantFirst[i])
+		}
+		if second[i] != wantSecond[i] {
+			t.Fatalf("second[%d] = %q, want %q", i, second[i], wantSecond[i])
+		}
+	}
+}

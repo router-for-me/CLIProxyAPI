@@ -157,6 +157,46 @@ func (s *PostgresStore) Bootstrap(ctx context.Context, exampleConfigPath string)
 	return nil
 }
 
+func (s *PostgresStore) BootstrapWithFileMigration(ctx context.Context, exampleConfigPath, localConfigPath, localAuthDir string) error {
+	if err := s.EnsureSchema(ctx); err != nil {
+		return err
+	}
+
+	configEmpty, err := s.configRecordMissing(ctx)
+	if err != nil {
+		return err
+	}
+	if configEmpty {
+		if imported, errImport := s.importConfigFromFile(ctx, localConfigPath); errImport != nil {
+			return errImport
+		} else if imported {
+			log.Infof("postgres store: imported config from local file %s", localConfigPath)
+		}
+	}
+
+	authEmpty, err := s.authTableEmpty(ctx)
+	if err != nil {
+		return err
+	}
+	if authEmpty {
+		imported, errImport := s.importAuthDir(ctx, localAuthDir)
+		if errImport != nil {
+			return errImport
+		}
+		if imported > 0 {
+			log.Infof("postgres store: imported %d auth files from %s", imported, localAuthDir)
+		}
+	}
+
+	if err := s.syncConfigFromDatabase(ctx, exampleConfigPath); err != nil {
+		return err
+	}
+	if err := s.syncAuthFromDatabase(ctx); err != nil {
+		return err
+	}
+	return nil
+}
+
 // ConfigPath returns the managed configuration file path inside the spool directory.
 func (s *PostgresStore) ConfigPath() string {
 	if s == nil {
@@ -212,8 +252,15 @@ func (s *PostgresStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (stri
 		return "", fmt.Errorf("postgres store: create auth directory: %w", err)
 	}
 
+	if auth.Metadata != nil {
+		auth.Metadata["disabled"] = auth.Disabled
+	}
+
 	switch {
 	case auth.Storage != nil:
+		if setter, ok := auth.Storage.(interface{ SetMetadata(map[string]any) }); ok {
+			setter.SetMetadata(auth.Metadata)
+		}
 		if err = auth.Storage.SaveTokenToFile(path); err != nil {
 			return "", err
 		}
@@ -432,6 +479,100 @@ func (s *PostgresStore) syncConfigFromDatabase(ctx context.Context, exampleConfi
 		}
 	}
 	return nil
+}
+
+func (s *PostgresStore) configRecordMissing(ctx context.Context) (bool, error) {
+	query := fmt.Sprintf("SELECT 1 FROM %s WHERE id = $1", s.fullTableName(s.cfg.ConfigTable))
+	var marker int
+	err := s.db.QueryRowContext(ctx, query, defaultConfigKey).Scan(&marker)
+	if errors.Is(err, sql.ErrNoRows) {
+		return true, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("postgres store: inspect config record: %w", err)
+	}
+	return false, nil
+}
+
+func (s *PostgresStore) authTableEmpty(ctx context.Context) (bool, error) {
+	query := fmt.Sprintf("SELECT COUNT(*) FROM %s", s.fullTableName(s.cfg.AuthTable))
+	var count int64
+	if err := s.db.QueryRowContext(ctx, query).Scan(&count); err != nil {
+		return false, fmt.Errorf("postgres store: inspect auth table: %w", err)
+	}
+	return count == 0, nil
+}
+
+func (s *PostgresStore) importConfigFromFile(ctx context.Context, localConfigPath string) (bool, error) {
+	trimmed := strings.TrimSpace(localConfigPath)
+	if trimmed == "" {
+		return false, nil
+	}
+	data, err := os.ReadFile(trimmed)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return false, nil
+		}
+		return false, fmt.Errorf("postgres store: read local config for migration: %w", err)
+	}
+	if len(bytesTrimSpace(data)) == 0 {
+		return false, nil
+	}
+	if err := s.persistConfig(ctx, data); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (s *PostgresStore) importAuthDir(ctx context.Context, localAuthDir string) (int, error) {
+	trimmed := strings.TrimSpace(localAuthDir)
+	if trimmed == "" {
+		return 0, nil
+	}
+	info, err := os.Stat(trimmed)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("postgres store: stat local auth dir for migration: %w", err)
+	}
+	if !info.IsDir() {
+		return 0, nil
+	}
+
+	imported := 0
+	err = filepath.WalkDir(trimmed, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if !strings.HasSuffix(strings.ToLower(d.Name()), ".json") {
+			return nil
+		}
+
+		relID, errRel := filepath.Rel(trimmed, path)
+		if errRel != nil {
+			return fmt.Errorf("postgres store: compute auth migration path: %w", errRel)
+		}
+		data, errRead := os.ReadFile(path)
+		if errRead != nil {
+			return fmt.Errorf("postgres store: read auth file for migration: %w", errRead)
+		}
+		if len(bytesTrimSpace(data)) == 0 {
+			return nil
+		}
+		if errPersist := s.persistAuth(ctx, filepath.ToSlash(relID), data); errPersist != nil {
+			return errPersist
+		}
+		imported++
+		return nil
+	})
+	if err != nil {
+		return imported, err
+	}
+	return imported, nil
 }
 
 // syncAuthFromDatabase populates the local auth directory from PostgreSQL data.
@@ -663,4 +804,8 @@ func normalizeLineEndings(s string) string {
 	s = strings.ReplaceAll(s, "\r\n", "\n")
 	s = strings.ReplaceAll(s, "\r", "\n")
 	return s
+}
+
+func bytesTrimSpace(data []byte) []byte {
+	return []byte(strings.TrimSpace(string(data)))
 }
