@@ -1726,21 +1726,20 @@ func TestCheckSystemInstructionsWithMode_StringSystemPreserved(t *testing.T) {
 	}
 
 	blocks := system.Array()
-	if len(blocks) != 3 {
-		t.Fatalf("expected 3 system blocks, got %d", len(blocks))
+	if len(blocks) != 9 {
+		t.Fatalf("expected 9 system blocks, got %d", len(blocks))
 	}
 
 	if !strings.HasPrefix(blocks[0].Get("text").String(), "x-anthropic-billing-header:") {
 		t.Fatalf("blocks[0] should be billing header, got %q", blocks[0].Get("text").String())
 	}
-	if blocks[1].Get("text").String() != "You are a Claude agent, built on Anthropic's Claude Agent SDK." {
+	if blocks[1].Get("text").String() != "You are Claude Code, Anthropic's official CLI for Claude." {
 		t.Fatalf("blocks[1] should be agent block, got %q", blocks[1].Get("text").String())
 	}
-	if blocks[2].Get("text").String() != "You are a helpful assistant." {
-		t.Fatalf("blocks[2] should be user system prompt, got %q", blocks[2].Get("text").String())
-	}
-	if blocks[2].Get("cache_control.type").String() != "ephemeral" {
-		t.Fatalf("blocks[2] should have cache_control.type=ephemeral")
+	// User system prompt is moved to the first user message in non-strict mode.
+	userText := gjson.GetBytes(out, "messages.0.content").String()
+	if !strings.Contains(userText, "You are a helpful assistant.") {
+		t.Fatalf("user system prompt should be prepended to first user message, got %q", userText)
 	}
 }
 
@@ -1751,8 +1750,8 @@ func TestCheckSystemInstructionsWithMode_StringSystemStrict(t *testing.T) {
 	out := checkSystemInstructionsWithMode(payload, true)
 
 	blocks := gjson.GetBytes(out, "system").Array()
-	if len(blocks) != 2 {
-		t.Fatalf("strict mode should produce 2 blocks, got %d", len(blocks))
+	if len(blocks) != 9 {
+		t.Fatalf("strict mode should produce 9 blocks, got %d", len(blocks))
 	}
 }
 
@@ -1763,8 +1762,8 @@ func TestCheckSystemInstructionsWithMode_EmptyStringSystemIgnored(t *testing.T) 
 	out := checkSystemInstructionsWithMode(payload, false)
 
 	blocks := gjson.GetBytes(out, "system").Array()
-	if len(blocks) != 2 {
-		t.Fatalf("empty string system should produce 2 blocks, got %d", len(blocks))
+	if len(blocks) != 9 {
+		t.Fatalf("empty string system should produce 9 blocks, got %d", len(blocks))
 	}
 }
 
@@ -1775,11 +1774,13 @@ func TestCheckSystemInstructionsWithMode_ArraySystemStillWorks(t *testing.T) {
 	out := checkSystemInstructionsWithMode(payload, false)
 
 	blocks := gjson.GetBytes(out, "system").Array()
-	if len(blocks) != 3 {
-		t.Fatalf("expected 3 system blocks, got %d", len(blocks))
+	if len(blocks) != 9 {
+		t.Fatalf("expected 9 system blocks, got %d", len(blocks))
 	}
-	if blocks[2].Get("text").String() != "Be concise." {
-		t.Fatalf("blocks[2] should be user system prompt, got %q", blocks[2].Get("text").String())
+	// User system prompt is moved to the first user message in non-strict mode.
+	userText := gjson.GetBytes(out, "messages.0.content").String()
+	if !strings.Contains(userText, "Be concise.") {
+		t.Fatalf("user system prompt should be prepended to first user message, got %q", userText)
 	}
 }
 
@@ -1790,11 +1791,13 @@ func TestCheckSystemInstructionsWithMode_StringWithSpecialChars(t *testing.T) {
 	out := checkSystemInstructionsWithMode(payload, false)
 
 	blocks := gjson.GetBytes(out, "system").Array()
-	if len(blocks) != 3 {
-		t.Fatalf("expected 3 system blocks, got %d", len(blocks))
+	if len(blocks) != 9 {
+		t.Fatalf("expected 9 system blocks, got %d", len(blocks))
 	}
-	if blocks[2].Get("text").String() != `Use <xml> tags & "quotes" in output.` {
-		t.Fatalf("blocks[2] text mangled, got %q", blocks[2].Get("text").String())
+	// User system prompt is moved to the first user message in non-strict mode.
+	userText := gjson.GetBytes(out, "messages.0.content").String()
+	if !strings.Contains(userText, `Use <xml> tags & "quotes" in output.`) {
+		t.Fatalf("user system prompt should be prepended to first user message, got %q", userText)
 	}
 }
 
@@ -1902,7 +1905,7 @@ func TestApplyCloaking_PreservesConfiguredStrictModeAndSensitiveWordsWhenModeOmi
 	out := applyCloaking(context.Background(), cfg, auth, payload, "claude-3-5-sonnet-20241022", "key-123")
 
 	blocks := gjson.GetBytes(out, "system").Array()
-	if len(blocks) != 2 {
+	if len(blocks) != 9 {
 		t.Fatalf("expected strict mode to keep only injected system blocks, got %d", len(blocks))
 	}
 	if got := gjson.GetBytes(out, "messages.0.content.0.text").String(); !strings.Contains(got, "\u200B") {
@@ -1950,44 +1953,124 @@ func TestNormalizeClaudeTemperatureForThinking_AfterForcedToolChoiceKeepsOrigina
 	}
 }
 
-func TestRemapOAuthToolNames_TitleCase_NoReverseNeeded(t *testing.T) {
-	body := []byte(`{"tools":[{"name":"Bash","description":"Run shell commands","input_schema":{"type":"object","properties":{"cmd":{"type":"string"}}}}],"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
-
-	out, renamed := remapOAuthToolNames(body)
-	if renamed {
-		t.Fatalf("renamed = true, want false")
-	}
-	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "Bash" {
-		t.Fatalf("tools.0.name = %q, want %q", got, "Bash")
-	}
-
-	resp := []byte(`{"content":[{"type":"tool_use","id":"toolu_01","name":"Bash","input":{"cmd":"ls"}}]}`)
-	reversed := resp
-	if renamed {
-		reversed = reverseRemapOAuthToolNames(resp)
-	}
-	if got := gjson.GetBytes(reversed, "content.0.name").String(); got != "Bash" {
-		t.Fatalf("content.0.name = %q, want %q", got, "Bash")
+func TestApplyClaudeToolAliases(t *testing.T) {
+	input := []byte(`{"tools":[{"name":"todowrite","description":"Write todos","input_schema":{"type":"object"}}],"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+	out := applyClaudeToolAliases(input, map[string]string{"todowrite": "t1"})
+	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "t1" {
+		t.Fatalf("tools.0.name = %q, want %q", got, "t1")
 	}
 }
 
-func TestRemapOAuthToolNames_Lowercase_ReverseApplied(t *testing.T) {
-	body := []byte(`{"tools":[{"name":"bash","description":"Run shell commands","input_schema":{"type":"object","properties":{"cmd":{"type":"string"}}}}],"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+func TestStripClaudeToolAliasesFromStreamLine(t *testing.T) {
+	line := []byte(`data: {"type":"content_block_start","content_block":{"type":"tool_use","id":"toolu_01","name":"t1","input":{}}}`)
+	out := stripClaudeToolAliasesFromStreamLine(line, map[string]string{"t1": "todowrite"})
+	if got := gjson.GetBytes(helps.JSONPayload(out), "content_block.name").String(); got != "todowrite" {
+		t.Fatalf("content_block.name = %q, want %q", got, "todowrite")
+	}
+}
 
-	out, renamed := remapOAuthToolNames(body)
-	if !renamed {
-		t.Fatalf("renamed = false, want true")
+func TestClaudeExecutor_Execute_OAuthCustomToolsReachUpstreamWithAliases(t *testing.T) {
+	var seenBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		seenBody = bytes.Clone(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","model":"claude-3-5-sonnet","role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"t1","input":{"path":"notes.txt"}}],"stop_reason":"tool_use","usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "sk-ant-oat-test-key",
+		"base_url": server.URL,
+	}}
+	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}],"tools":[{"name":"Read","description":"Read files","input_schema":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}],"tool_choice":{"type":"tool","name":"Read"}}`)
+
+	resp, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet-20241022",
+		Payload: payload,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
 	}
-	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "Bash" {
-		t.Fatalf("tools.0.name = %q, want %q", got, "Bash")
+	if len(seenBody) == 0 {
+		t.Fatal("expected upstream request body to be captured")
+	}
+	if got := gjson.GetBytes(seenBody, "tools.0.name").String(); got != "t1" {
+		t.Fatalf("upstream tools.0.name = %q, want %q", got, "t1")
+	}
+	if got := gjson.GetBytes(seenBody, "tool_choice.name").String(); got != "t1" {
+		t.Fatalf("upstream tool_choice.name = %q, want %q", got, "t1")
+	}
+	if got := gjson.GetBytes(resp.Payload, "content.0.name").String(); got != "Read" {
+		t.Fatalf("translated content.0.name = %q, want %q", got, "Read")
+	}
+}
+
+func TestClaudeExecutor_ExecuteStream_OAuthCustomToolsReachUpstreamWithAliases(t *testing.T) {
+	var seenBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		seenBody = bytes.Clone(body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"t1\",\"input\":{}}}\n\n"))
+		_, _ = w.Write([]byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"path\\\":\\\"notes.txt\\\"}\"}}\n\n"))
+		_, _ = w.Write([]byte("event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n"))
+		_, _ = w.Write([]byte("event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}\n\n"))
+		_, _ = w.Write([]byte("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "sk-ant-oat-test-key",
+		"base_url": server.URL,
+	}}
+	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}],"tools":[{"name":"Read","description":"Read files","input_schema":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}],"tool_choice":{"type":"tool","name":"Read"}}`)
+
+	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet-20241022",
+		Payload: payload,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+	if len(seenBody) == 0 {
+		t.Fatal("expected upstream request body to be captured")
+	}
+	if got := gjson.GetBytes(seenBody, "tools.0.name").String(); got != "t1" {
+		t.Fatalf("upstream tools.0.name = %q, want %q", got, "t1")
+	}
+	if got := gjson.GetBytes(seenBody, "tool_choice.name").String(); got != "t1" {
+		t.Fatalf("upstream tool_choice.name = %q, want %q", got, "t1")
 	}
 
-	resp := []byte(`{"content":[{"type":"tool_use","id":"toolu_01","name":"Bash","input":{"cmd":"ls"}}]}`)
-	reversed := resp
-	if renamed {
-		reversed = reverseRemapOAuthToolNames(resp)
+	var combined bytes.Buffer
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("unexpected chunk error: %v", chunk.Err)
+		}
+		combined.Write(chunk.Payload)
 	}
-	if got := gjson.GetBytes(reversed, "content.0.name").String(); got != "bash" {
-		t.Fatalf("content.0.name = %q, want %q", got, "bash")
+	if !strings.Contains(combined.String(), `"name":"Read"`) {
+		t.Fatalf("expected restored tool alias in stream payload, got %s", combined.String())
+	}
+}
+
+func TestBuildClaudeToolAliasMaps(t *testing.T) {
+	body := []byte(`{"tools":[{"name":"bash","description":"shell","input_schema":{"type":"object"}},{"name":"lsp_diagnostics","description":"diag","input_schema":{"type":"object"}}],"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+	forward, reverse := buildClaudeToolAliasMaps(body)
+	if len(forward) != 2 {
+		t.Fatalf("forward has %d entries, want 2", len(forward))
+	}
+	for orig, alias := range forward {
+		if reverse[alias] != orig {
+			t.Errorf("reverse[%q] = %q, want %q", alias, reverse[alias], orig)
+		}
+	}
+	for _, alias := range forward {
+		if len(alias) > 4 {
+			t.Errorf("alias %q too long, expected short opaque name", alias)
+		}
 	}
 }

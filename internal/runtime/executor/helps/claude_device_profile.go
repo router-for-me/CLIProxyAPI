@@ -16,8 +16,8 @@ import (
 )
 
 const (
-	defaultClaudeFingerprintUserAgent      = "claude-cli/2.1.63 (external, cli)"
-	defaultClaudeFingerprintPackageVersion = "0.74.0"
+	defaultClaudeFingerprintUserAgent      = "claude-cli/2.1.108 (external, sdk-cli)"
+	defaultClaudeFingerprintPackageVersion = "0.81.0"
 	defaultClaudeFingerprintRuntimeVersion = "v24.3.0"
 	defaultClaudeFingerprintOS             = "MacOS"
 	defaultClaudeFingerprintArch           = "arm64"
@@ -97,6 +97,12 @@ func MapStainlessOS() string {
 
 func MapStainlessArch() string {
 	return mapStainlessArch()
+}
+
+// DefaultClaudeDeviceProfilePublic returns the default baseline device profile.
+// Exported for use by the executor when forcing baseline headers on OAuth clients.
+func DefaultClaudeDeviceProfilePublic(cfg *config.Config) ClaudeDeviceProfile {
+	return defaultClaudeDeviceProfile(cfg)
 }
 
 func defaultClaudeDeviceProfile(cfg *config.Config) ClaudeDeviceProfile {
@@ -358,14 +364,14 @@ func ApplyClaudeDeviceProfileHeaders(r *http.Request, profile ClaudeDeviceProfil
 	r.Header.Set("X-Stainless-Arch", profile.Arch)
 }
 
-// DefaultClaudeVersion returns the version string (e.g. "2.1.63") from the
+// DefaultClaudeVersion returns the version string (e.g. "2.1.108") from the
 // current baseline device profile. It extracts the version from the User-Agent.
 func DefaultClaudeVersion(cfg *config.Config) string {
 	profile := defaultClaudeDeviceProfile(cfg)
 	if version, ok := parseClaudeCLIVersion(profile.UserAgent); ok {
 		return strconv.Itoa(version.major) + "." + strconv.Itoa(version.minor) + "." + strconv.Itoa(version.patch)
 	}
-	return "2.1.63"
+	return "2.1.108"
 }
 
 func ApplyClaudeLegacyDeviceHeaders(r *http.Request, ginHeaders http.Header, cfg *config.Config) {
