@@ -84,16 +84,7 @@ func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
 	}
 
 	// Add virtual models from config
-	if h.Cfg != nil && len(h.Cfg.VirtualModels) > 0 {
-		for _, vm := range h.Cfg.VirtualModels {
-			filteredModels = append(filteredModels, map[string]any{
-				"id":       vm.Name,
-				"object":   "model",
-				"created":  0,
-				"owned_by": "virtual",
-			})
-		}
-	}
+	filteredModels = h.AppendVirtualModels(filteredModels)
 
 	c.JSON(http.StatusOK, gin.H{
 		"object": "list",

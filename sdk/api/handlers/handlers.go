@@ -288,6 +288,22 @@ func NewBaseAPIHandlers(cfg *config.SDKConfig, authManager *coreauth.Manager) *B
 //   - cfg: The new application configuration
 func (h *BaseAPIHandler) UpdateClients(cfg *config.SDKConfig) { h.Cfg = cfg }
 
+// AppendVirtualModels appends virtual model entries in OpenAI/Claude format to the given model list.
+func (h *BaseAPIHandler) AppendVirtualModels(models []map[string]any) []map[string]any {
+	if h.Cfg == nil || len(h.Cfg.VirtualModels) == 0 {
+		return models
+	}
+	for _, vm := range h.Cfg.VirtualModels {
+		models = append(models, map[string]any{
+			"id":       vm.Name,
+			"object":   "model",
+			"created":  int64(0),
+			"owned_by": "virtual",
+		})
+	}
+	return models
+}
+
 // GetAlt extracts the 'alt' parameter from the request query string.
 // It checks both 'alt' and '$alt' parameters and returns the appropriate value.
 //
@@ -800,7 +816,13 @@ func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string
 	if h.AuthManager != nil {
 		virtualModel := h.AuthManager.ResolveVirtualModel(baseModel)
 		if virtualModel != "" {
-			resolvedModelName = virtualModel
+			// Preserve the thinking suffix from the original request.
+			// e.g. "fast(8192)" -> resolve "fast" to "gpt-5-codex-mini" -> "gpt-5-codex-mini(8192)"
+			if initialSuffix.HasSuffix {
+				resolvedModelName = virtualModel + "(" + initialSuffix.RawSuffix + ")"
+			} else {
+				resolvedModelName = virtualModel
+			}
 			parsed = thinking.ParseSuffix(resolvedModelName)
 			baseModel = strings.TrimSpace(parsed.ModelName)
 		}
