@@ -129,19 +129,7 @@ func (h *ClaudeCodeAPIHandler) ClaudeCountTokens(c *gin.Context) {
 // Parameters:
 //   - c: The Gin context for the request.
 func (h *ClaudeCodeAPIHandler) ClaudeModels(c *gin.Context) {
-	models := h.Models()
-
-	// Add virtual models from config
-	if h.Cfg != nil && len(h.Cfg.VirtualModels) > 0 {
-		for _, vm := range h.Cfg.VirtualModels {
-			models = append(models, map[string]any{
-				"id":       vm.Name,
-				"object":   "model",
-				"created":  int64(0),
-				"owned_by": "virtual",
-			})
-		}
-	}
+	models := h.AppendVirtualModels(h.Models())
 
 	firstID := ""
 	lastID := ""

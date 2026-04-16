@@ -3,6 +3,8 @@ package auth
 import (
 	"strings"
 
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 )
 
@@ -46,11 +48,16 @@ func (m *Manager) SetVirtualModels(models []internalconfig.VirtualModel) {
 		return
 	}
 	table := compileVirtualModelTable(models)
-	// atomic.Value requires non-nil store values.
-	if table == nil {
-		table = &virtualModelTable{}
-	}
 	m.virtualModels.Store(table)
+}
+
+// resolveVirtualModelForRequest resolves the virtual model in a request and returns the
+// potentially modified request. This avoids repeating the same resolve block in every Execute* method.
+func resolveVirtualModelForRequest(m *Manager, req cliproxyexecutor.Request) cliproxyexecutor.Request {
+	if virtualModel := m.ResolveVirtualModel(req.Model); virtualModel != "" {
+		req.Model = virtualModel
+	}
+	return req
 }
 
 // ResolveVirtualModel attempts to resolve a requested model name through the virtual model table.
