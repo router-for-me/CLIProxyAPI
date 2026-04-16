@@ -47,6 +47,14 @@ func applyCustomHeaders(r *http.Request, headers map[string]string) {
 		if k == "" || v == "" {
 			continue
 		}
+		// Host is read from req.Host (not req.Header) by net/http when
+		// writing the request; setting it via Header.Set is silently
+		// dropped on the wire. Handle it explicitly so user-configured
+		// virtual-host overrides actually take effect upstream.
+		if http.CanonicalHeaderKey(k) == "Host" {
+			r.Host = v
+			continue
+		}
 		r.Header.Set(k, v)
 	}
 }
