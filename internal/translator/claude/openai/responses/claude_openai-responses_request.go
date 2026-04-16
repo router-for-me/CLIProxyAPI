@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -185,6 +186,7 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 				var partsJSON []string
 				hasImage := false
 				hasFile := false
+				hasThinking := false
 				if parts := item.Get("content"); parts.Exists() && parts.IsArray() {
 					parts.ForEach(func(_, part gjson.Result) bool {
 						ptype := part.Get("type").String()
@@ -278,11 +280,19 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 						role = "user"
 					}
 				}
+				if role == "assistant" {
+					if reasoning := strings.TrimSpace(item.Get("reasoning_content").String()); reasoning != "" {
+						thinkingPart := []byte(`{"type":"thinking","thinking":""}`)
+						thinkingPart, _ = sjson.SetBytes(thinkingPart, "thinking", reasoning)
+						partsJSON = append([]string{string(thinkingPart)}, partsJSON...)
+						hasThinking = true
+					}
+				}
 
 				if len(partsJSON) > 0 {
 					msg := []byte(`{"role":"","content":[]}`)
 					msg, _ = sjson.SetBytes(msg, "role", role)
-					if len(partsJSON) == 1 && !hasImage && !hasFile {
+					if len(partsJSON) == 1 && !hasImage && !hasFile && !hasThinking {
 						// Preserve legacy behavior for single text content
 						msg, _ = sjson.DeleteBytes(msg, "content")
 						textPart := gjson.Parse(partsJSON[0])
@@ -343,10 +353,12 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 	if tools := root.Get("tools"); tools.Exists() && tools.IsArray() {
 		toolsJSON := []byte("[]")
 		tools.ForEach(func(_, tool gjson.Result) bool {
-			tJSON := []byte(`{"name":"","description":"","input_schema":{}}`)
-			if n := tool.Get("name"); n.Exists() {
-				tJSON, _ = sjson.SetBytes(tJSON, "name", n.String())
+			name, ok := util.NormalizeRequestToolName(tool.Get("name").String(), nil)
+			if !ok {
+				return true
 			}
+			tJSON := []byte(`{"name":"","description":"","input_schema":{}}`)
+			tJSON, _ = sjson.SetBytes(tJSON, "name", name)
 			if d := tool.Get("description"); d.Exists() {
 				tJSON, _ = sjson.SetBytes(tJSON, "description", d.String())
 			}
@@ -379,7 +391,10 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 			}
 		case gjson.JSON:
 			if toolChoice.Get("type").String() == "function" {
-				fn := toolChoice.Get("function.name").String()
+				fn, ok := util.NormalizeRequestToolName(toolChoice.Get("function.name").String(), nil)
+				if !ok {
+					break
+				}
 				toolChoiceJSON := []byte(`{"name":"","type":"tool"}`)
 				toolChoiceJSON, _ = sjson.SetBytes(toolChoiceJSON, "name", fn)
 				out, _ = sjson.SetRawBytes(out, "tool_choice", toolChoiceJSON)
