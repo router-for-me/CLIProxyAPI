@@ -621,9 +621,13 @@ func (s *Service) Run(ctx context.Context) error {
 	var watcherWrapper *WatcherWrapper
 	reloadCallback := func(newCfg *config.Config) {
 		previousStrategy := ""
+		var previousSessionAffinity bool
+		var previousSessionAffinityTTL string
 		s.cfgMu.RLock()
 		if s.cfg != nil {
-			previousStrategy = s.cfg.Routing.Strategy
+			previousStrategy = strings.ToLower(strings.TrimSpace(s.cfg.Routing.Strategy))
+			previousSessionAffinity = s.cfg.Routing.ClaudeCodeSessionAffinity || s.cfg.Routing.SessionAffinity
+			previousSessionAffinityTTL = s.cfg.Routing.SessionAffinityTTL
 		}
 		s.cfgMu.RUnlock()
 
@@ -636,10 +640,52 @@ func (s *Service) Run(ctx context.Context) error {
 			return
 		}
 
-		previousStrategy, _ = coreauth.NormalizeRoutingStrategy(previousStrategy)
-		nextStrategy, _ := coreauth.NormalizeRoutingStrategy(newCfg.Routing.Strategy)
-		if s.coreManager != nil && previousStrategy != nextStrategy {
-			s.coreManager.SetSelector(coreauth.SelectorForRoutingStrategy(nextStrategy))
+		nextStrategy := strings.ToLower(strings.TrimSpace(newCfg.Routing.Strategy))
+		normalizeStrategy := func(strategy string) string {
+			switch strategy {
+			case "fill-first", "fillfirst", "ff":
+				return "fill-first"
+			case "sequential-fill", "sf":
+				return "sequential-fill"
+			default:
+				return "round-robin"
+			}
+		}
+		previousStrategy = normalizeStrategy(previousStrategy)
+		nextStrategy = normalizeStrategy(nextStrategy)
+
+		nextSessionAffinity := newCfg.Routing.ClaudeCodeSessionAffinity || newCfg.Routing.SessionAffinity
+		nextSessionAffinityTTL := newCfg.Routing.SessionAffinityTTL
+
+		selectorChanged := previousStrategy != nextStrategy ||
+			previousSessionAffinity != nextSessionAffinity ||
+			previousSessionAffinityTTL != nextSessionAffinityTTL
+
+		if s.coreManager != nil && selectorChanged {
+			var selector coreauth.Selector
+			switch nextStrategy {
+			case "fill-first":
+				selector = &coreauth.FillFirstSelector{}
+			case "sequential-fill":
+				selector = &coreauth.SequentialFillSelector{}
+			default:
+				selector = &coreauth.RoundRobinSelector{}
+			}
+
+			if nextSessionAffinity {
+				ttl := time.Hour
+				if ttlStr := strings.TrimSpace(nextSessionAffinityTTL); ttlStr != "" {
+					if parsed, err := time.ParseDuration(ttlStr); err == nil && parsed > 0 {
+						ttl = parsed
+					}
+				}
+				selector = coreauth.NewSessionAffinitySelectorWithConfig(coreauth.SessionAffinityConfig{
+					Fallback: selector,
+					TTL:      ttl,
+				})
+			}
+
+			s.coreManager.SetSelector(selector)
 		}
 
 		s.applyRetryConfig(newCfg)
