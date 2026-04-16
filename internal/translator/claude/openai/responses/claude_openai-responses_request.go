@@ -282,8 +282,14 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 			out, _ = sjson.SetRawBytes(out, "messages.-1", asst)
 
 		case "function_call_output":
-			callID := item.Get("call_id").String()
+			callID := strings.TrimSpace(item.Get("call_id").String())
+			if callID == "" {
+				break
+			}
 			outputStr := item.Get("output").String()
+			if strings.TrimSpace(outputStr) == "" {
+				outputStr = "(empty)"
+			}
 			toolResult := []byte(`{"type":"tool_result","tool_use_id":"","content":""}`)
 			toolResult, _ = sjson.SetBytes(toolResult, "tool_use_id", callID)
 			toolResult, _ = sjson.SetBytes(toolResult, "content", outputStr)

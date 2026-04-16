@@ -288,6 +288,9 @@ func buildResponsesFunctionCall(callID, name, args string) string {
 }
 
 func buildResponsesFunctionCallOutput(callID, output string) string {
+	if strings.TrimSpace(output) == "" {
+		output = "(empty)"
+	}
 	item := []byte(`{"type":"function_call_output","call_id":"","output":""}`)
 	item, _ = sjson.SetBytes(item, "call_id", callID)
 	item, _ = sjson.SetBytes(item, "output", output)
