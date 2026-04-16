@@ -80,6 +80,15 @@ type Config struct {
 	// MaxRetryInterval defines the maximum wait time in seconds before retrying a cooled-down credential.
 	MaxRetryInterval int `yaml:"max-retry-interval" json:"max-retry-interval"`
 
+	// TTFTTimeout defines the global Time-To-First-Token timeout for streaming requests, in seconds.
+	// If no first token (including thinking tokens) is received within this duration, the request
+	// is aborted and retried with a different credential/model. 0 = disabled (default).
+	TTFTTimeout int `yaml:"ttft-timeout" json:"ttft-timeout"`
+	// TTFTTimeoutModels provides per-model TTFT timeout overrides, in seconds.
+	// Keys are client-facing model names (the model name in the request, before alias resolution).
+	// Values override the global ttft-timeout for that specific model.
+	TTFTTimeoutModels map[string]int `yaml:"ttft-timeout-models,omitempty" json:"ttft-timeout-models,omitempty"`
+
 	// QuotaExceeded defines the behavior when a quota is exceeded.
 	QuotaExceeded QuotaExceeded `yaml:"quota-exceeded" json:"quota-exceeded"`
 
@@ -209,6 +218,12 @@ type QuotaExceeded struct {
 	// AntigravityCredits indicates whether to retry Antigravity quota_exhausted 429s once
 	// on the same credential with enabledCreditTypes=["GOOGLE_ONE_AI"].
 	AntigravityCredits bool `yaml:"antigravity-credits" json:"antigravity-credits"`
+
+	// AntigravityCreditsThreshold controls when credits are activated based on pool exhaustion ratio.
+	// 0 (default): activate credits on first QUOTA_EXHAUSTED (backward compatible).
+	// 0.8: only activate when 80% of known auths for the model are exhausted.
+	// 1.0: only activate when all known auths are exhausted.
+	AntigravityCreditsThreshold float64 `yaml:"antigravity-credits-threshold" json:"antigravity-credits-threshold"`
 }
 
 // RoutingConfig configures how credentials are selected for requests.
