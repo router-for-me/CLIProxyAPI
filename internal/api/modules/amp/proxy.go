@@ -112,14 +112,17 @@ func createReverseProxy(upstreamURL string, secretSource SecretSource) (*httputi
 		// Log upstream error responses for diagnostics (502, 503, etc.)
 		// These are NOT proxy connection errors - the upstream responded with an error status
 		if resp.StatusCode >= 500 {
-			log.Errorf("amp upstream responded with error [%d] for %s %s", resp.StatusCode, resp.Request.Method, resp.Request.URL.Path)
+			if resp.Request != nil {
+				log.Errorf("amp upstream responded with error [%d] for %s %s", resp.StatusCode, resp.Request.Method, resp.Request.URL.Path)
+			} else {
+				log.Errorf("amp upstream responded with error [%d]", resp.StatusCode)
+			}
 		} else if resp.StatusCode >= 400 {
-			log.Warnf("amp upstream responded with client error [%d] for %s %s", resp.StatusCode, resp.Request.Method, resp.Request.URL.Path)
-		}
-
-		// Only process successful responses for gzip decompression
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return nil
+			if resp.Request != nil {
+				log.Warnf("amp upstream responded with client error [%d] for %s %s", resp.StatusCode, resp.Request.Method, resp.Request.URL.Path)
+			} else {
+				log.Warnf("amp upstream responded with client error [%d]", resp.StatusCode)
+			}
 		}
 
 		// Skip if already marked as gzip (Content-Encoding set)

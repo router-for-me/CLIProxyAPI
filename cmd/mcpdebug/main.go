@@ -15,6 +15,6 @@ func main() {
 	fmt.Printf("Result length: %d bytes\n", len(resultBytes))
 
 	// Write to file for analysis
-	os.WriteFile("mcp_result.bin", resultBytes)
+	os.WriteFile("mcp_result.bin", resultBytes, 0644)
 	fmt.Println("Wrote mcp_result.bin")
 }

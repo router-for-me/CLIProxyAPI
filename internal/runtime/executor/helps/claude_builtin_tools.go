@@ -7,6 +7,16 @@ var defaultClaudeBuiltinToolNames = []string{
 	"code_execution",
 	"text_editor",
 	"computer",
+	"TodoWrite",
+	"todowrite",
+	"TaskCreate",
+	"taskcreate",
+	"TaskGet",
+	"taskget",
+	"TaskUpdate",
+	"taskupdate",
+	"TaskList",
+	"tasklist",
 }
 
 func newClaudeBuiltinToolRegistry() map[string]bool {

@@ -5,7 +5,8 @@ import (
 )
 
 // newAuthManager creates a new authentication manager instance with all supported
-// authenticators and a file-based token store.
+// authenticators and a file-based token store. It initializes authenticators for
+// Gemini, Codex, Claude, iFlow, Antigravity, Kimi, Kiro, GitHub Copilot, Kilo, GitLab, and CodeBuddy providers.
 //
 // Returns:
 //   - *sdkAuth.Manager: A configured authentication manager instance
