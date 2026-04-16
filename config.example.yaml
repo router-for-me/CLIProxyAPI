@@ -309,7 +309,7 @@ nonstream-keepalive-interval: 0
 
 # Global OAuth model name aliases (per channel)
 # These aliases rename model IDs for both model listing and request routing.
-# Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, iflow, kimi.
+# Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, kimi.
 # NOTE: Aliases do not apply to gemini-api-key, codex-api-key, claude-api-key, openai-compatibility, vertex-api-key, or ampcode.
 # NOTE: Because aliases affect the merged /v1 model list and merged request routing, overlapping
 # client-visible names can become ambiguous across providers. /api/provider/{provider}/... helps
@@ -336,9 +336,6 @@ nonstream-keepalive-interval: 0
 #   codex:
 #     - name: "gpt-5"
 #       alias: "g5"
-#   iflow:
-#     - name: "glm-4.7"
-#       alias: "glm-god"
 #   kimi:
 #     - name: "kimi-k2.5"
 #       alias: "k2.5"
@@ -360,8 +357,6 @@ nonstream-keepalive-interval: 0
 #     - "claude-3-5-haiku-20241022"
 #   codex:
 #     - "gpt-5-codex-mini"
-#   iflow:
-#     - "tstars2.0"
 #   kimi:
 #     - "kimi-k2-thinking"
 
