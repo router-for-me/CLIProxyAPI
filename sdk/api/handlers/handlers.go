@@ -359,6 +359,22 @@ func isNilInterface(value any) bool {
 	}
 }
 
+// AppendVirtualModels appends virtual model entries in OpenAI/Claude format to the given model list.
+func (h *BaseAPIHandler) AppendVirtualModels(models []map[string]any) []map[string]any {
+	if h.Cfg == nil || len(h.Cfg.VirtualModels) == 0 {
+		return models
+	}
+	for _, vm := range h.Cfg.VirtualModels {
+		models = append(models, map[string]any{
+			"id":       vm.Name,
+			"object":   "model",
+			"created":  int64(0),
+			"owned_by": "virtual",
+		})
+	}
+	return models
+}
+
 // GetAlt extracts the 'alt' parameter from the request query string.
 // It checks both 'alt' and '$alt' parameters and returns the appropriate value.
 //

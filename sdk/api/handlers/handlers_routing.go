@@ -181,7 +181,11 @@ func (h *BaseAPIHandler) getRequestDetailsWithOptions(modelName string, allowIma
 	if h.AuthManager != nil {
 		virtualModel := h.AuthManager.ResolveVirtualModel(baseModel)
 		if virtualModel != "" {
-			resolvedModelName = virtualModel
+			if initialSuffix.HasSuffix {
+				resolvedModelName = virtualModel + "(" + initialSuffix.RawSuffix + ")"
+			} else {
+				resolvedModelName = virtualModel
+			}
 			parsed = thinking.ParseSuffix(resolvedModelName)
 			baseModel = strings.TrimSpace(parsed.ModelName)
 		}
