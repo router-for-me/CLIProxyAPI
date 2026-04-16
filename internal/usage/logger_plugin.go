@@ -90,13 +90,13 @@ type modelStats struct {
 
 // RequestDetail stores the timestamp, latency, and token usage for a single request.
 type RequestDetail struct {
-	Timestamp time.Time  `json:"timestamp"`
-	LatencyMs int64      `json:"latency_ms"`
-	Source    string     `json:"source"`
-	AuthIndex string     `json:"auth_index"`
+	Timestamp            time.Time  `json:"timestamp"`
+	LatencyMs            int64      `json:"latency_ms"`
+	Source               string     `json:"source"`
+	AuthIndex            string     `json:"auth_index"`
 	ModelReasoningEffort string     `json:"model_reasoning_effort,omitempty"`
-	Tokens    TokenStats `json:"tokens"`
-	Failed    bool       `json:"failed"`
+	Tokens               TokenStats `json:"tokens"`
+	Failed               bool       `json:"failed"`
 }
 
 // TokenStats captures the token usage breakdown for a request.
@@ -200,13 +200,13 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 		s.apis[statsKey] = stats
 	}
 	s.updateAPIStats(stats, modelName, RequestDetail{
-		Timestamp: timestamp,
-		LatencyMs: normaliseLatency(record.Latency),
-		Source:    record.Source,
-		AuthIndex: record.AuthIndex,
+		Timestamp:            timestamp,
+		LatencyMs:            normaliseLatency(record.Latency),
+		Source:               record.Source,
+		AuthIndex:            record.AuthIndex,
 		ModelReasoningEffort: strings.TrimSpace(record.ModelReasoningEffort),
-		Tokens:    detail,
-		Failed:    failed,
+		Tokens:               detail,
+		Failed:               failed,
 	})
 
 	s.requestsByDay[dayKey]++

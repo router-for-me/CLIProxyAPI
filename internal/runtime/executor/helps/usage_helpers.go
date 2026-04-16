@@ -17,15 +17,15 @@ import (
 )
 
 type UsageReporter struct {
-	provider    string
-	model       string
-	authID      string
-	authIndex   string
-	apiKey      string
-	source      string
+	provider             string
+	model                string
+	authID               string
+	authIndex            string
+	apiKey               string
+	source               string
 	modelReasoningEffort string
-	requestedAt time.Time
-	once        sync.Once
+	requestedAt          time.Time
+	once                 sync.Once
 }
 
 func NewUsageReporter(ctx context.Context, provider, model string, auth *cliproxyauth.Auth) *UsageReporter {
@@ -109,17 +109,17 @@ func (r *UsageReporter) buildRecord(detail usage.Detail, failed bool) usage.Reco
 		return usage.Record{Detail: detail, Failed: failed}
 	}
 	return usage.Record{
-		Provider:    r.provider,
-		Model:       r.model,
+		Provider:             r.provider,
+		Model:                r.model,
 		ModelReasoningEffort: r.modelReasoningEffort,
-		Source:      r.source,
-		APIKey:      r.apiKey,
-		AuthID:      r.authID,
-		AuthIndex:   r.authIndex,
-		RequestedAt: r.requestedAt,
-		Latency:     r.latency(),
-		Failed:      failed,
-		Detail:      detail,
+		Source:               r.source,
+		APIKey:               r.apiKey,
+		AuthID:               r.authID,
+		AuthIndex:            r.authIndex,
+		RequestedAt:          r.requestedAt,
+		Latency:              r.latency(),
+		Failed:               failed,
+		Detail:               detail,
 	}
 }
 
