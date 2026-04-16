@@ -451,6 +451,17 @@ func openAICompatModelPoolKey(auth *Auth, requestedModel string) string {
 	return strings.ToLower(strings.TrimSpace(auth.ID)) + "|" + openAICompatProviderKey(auth) + "|" + strings.ToLower(base)
 }
 
+func apiKeyModelPoolKey(auth *Auth, requestedModel string) string {
+	if auth == nil {
+		return ""
+	}
+	base := strings.TrimSpace(thinking.ParseSuffix(requestedModel).ModelName)
+	if base == "" {
+		base = strings.TrimSpace(requestedModel)
+	}
+	return strings.ToLower(strings.TrimSpace(auth.ID)) + "|" + strings.ToLower(strings.TrimSpace(auth.Provider)) + "|" + strings.ToLower(base)
+}
+
 func oauthModelAliasPoolKey(auth *Auth, requestedModel string) string {
 	if auth == nil {
 		return ""
@@ -542,6 +553,13 @@ func (m *Manager) executionModelCandidates(auth *Auth, routeModel string) []stri
 		}
 	} else {
 		requestedModel = m.applyOAuthModelAlias(auth, requestedModel)
+	}
+	if pool := m.resolveAPIKeyUpstreamModelPool(auth, requestedModel); len(pool) > 0 {
+		if len(pool) == 1 {
+			return pool
+		}
+		offset := m.nextModelPoolOffset(apiKeyModelPoolKey(auth, requestedModel), len(pool))
+		return rotateStrings(pool, offset)
 	}
 	if pool := m.resolveOpenAICompatUpstreamModelPool(auth, requestedModel); len(pool) > 0 {
 		if len(pool) == 1 {
@@ -1773,12 +1791,28 @@ func resolveUpstreamModelForGeminiAPIKey(cfg *internalconfig.Config, auth *Auth,
 	return resolveModelAliasFromConfigModels(requestedModel, asModelAliasEntries(entry.Models))
 }
 
+func resolveUpstreamModelPoolForGeminiAPIKey(cfg *internalconfig.Config, auth *Auth, requestedModel string) []string {
+	entry := resolveGeminiAPIKeyConfig(cfg, auth)
+	if entry == nil {
+		return nil
+	}
+	return resolveModelAliasPoolFromConfigModels(requestedModel, asModelAliasEntries(entry.Models))
+}
+
 func resolveUpstreamModelForClaudeAPIKey(cfg *internalconfig.Config, auth *Auth, requestedModel string) string {
 	entry := resolveClaudeAPIKeyConfig(cfg, auth)
 	if entry == nil {
 		return ""
 	}
 	return resolveModelAliasFromConfigModels(requestedModel, asModelAliasEntries(entry.Models))
+}
+
+func resolveUpstreamModelPoolForClaudeAPIKey(cfg *internalconfig.Config, auth *Auth, requestedModel string) []string {
+	entry := resolveClaudeAPIKeyConfig(cfg, auth)
+	if entry == nil {
+		return nil
+	}
+	return resolveModelAliasPoolFromConfigModels(requestedModel, asModelAliasEntries(entry.Models))
 }
 
 func resolveUpstreamModelForCodexAPIKey(cfg *internalconfig.Config, auth *Auth, requestedModel string) string {
@@ -1789,12 +1823,28 @@ func resolveUpstreamModelForCodexAPIKey(cfg *internalconfig.Config, auth *Auth, 
 	return resolveModelAliasFromConfigModels(requestedModel, asModelAliasEntries(entry.Models))
 }
 
+func resolveUpstreamModelPoolForCodexAPIKey(cfg *internalconfig.Config, auth *Auth, requestedModel string) []string {
+	entry := resolveCodexAPIKeyConfig(cfg, auth)
+	if entry == nil {
+		return nil
+	}
+	return resolveModelAliasPoolFromConfigModels(requestedModel, asModelAliasEntries(entry.Models))
+}
+
 func resolveUpstreamModelForVertexAPIKey(cfg *internalconfig.Config, auth *Auth, requestedModel string) string {
 	entry := resolveVertexAPIKeyConfig(cfg, auth)
 	if entry == nil {
 		return ""
 	}
 	return resolveModelAliasFromConfigModels(requestedModel, asModelAliasEntries(entry.Models))
+}
+
+func resolveUpstreamModelPoolForVertexAPIKey(cfg *internalconfig.Config, auth *Auth, requestedModel string) []string {
+	entry := resolveVertexAPIKeyConfig(cfg, auth)
+	if entry == nil {
+		return nil
+	}
+	return resolveModelAliasPoolFromConfigModels(requestedModel, asModelAliasEntries(entry.Models))
 }
 
 func resolveUpstreamModelForOpenAICompatAPIKey(cfg *internalconfig.Config, auth *Auth, requestedModel string) string {
@@ -1812,6 +1862,55 @@ func resolveUpstreamModelForOpenAICompatAPIKey(cfg *internalconfig.Config, auth 
 		return ""
 	}
 	return resolveModelAliasFromConfigModels(requestedModel, asModelAliasEntries(entry.Models))
+}
+
+func resolveUpstreamModelPoolForOpenAICompatAPIKey(cfg *internalconfig.Config, auth *Auth, requestedModel string) []string {
+	providerKey := ""
+	compatName := ""
+	if auth != nil && len(auth.Attributes) > 0 {
+		providerKey = strings.TrimSpace(auth.Attributes["provider_key"])
+		compatName = strings.TrimSpace(auth.Attributes["compat_name"])
+	}
+	if compatName == "" && !strings.EqualFold(strings.TrimSpace(auth.Provider), "openai-compatibility") {
+		return nil
+	}
+	entry := resolveOpenAICompatConfig(cfg, providerKey, compatName, auth.Provider)
+	if entry == nil {
+		return nil
+	}
+	return resolveModelAliasPoolFromConfigModels(requestedModel, asModelAliasEntries(entry.Models))
+}
+
+func (m *Manager) resolveAPIKeyUpstreamModelPool(auth *Auth, requestedModel string) []string {
+	if m == nil || auth == nil {
+		return nil
+	}
+	kind, _ := auth.AccountInfo()
+	if !strings.EqualFold(strings.TrimSpace(kind), "api_key") {
+		return nil
+	}
+	requestedModel = strings.TrimSpace(requestedModel)
+	if requestedModel == "" {
+		return nil
+	}
+
+	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+	if cfg == nil {
+		cfg = &internalconfig.Config{}
+	}
+
+	switch strings.ToLower(strings.TrimSpace(auth.Provider)) {
+	case "claude":
+		return resolveUpstreamModelPoolForClaudeAPIKey(cfg, auth, requestedModel)
+	case "codex":
+		return resolveUpstreamModelPoolForCodexAPIKey(cfg, auth, requestedModel)
+	case "gemini":
+		return resolveUpstreamModelPoolForGeminiAPIKey(cfg, auth, requestedModel)
+	case "vertex":
+		return resolveUpstreamModelPoolForVertexAPIKey(cfg, auth, requestedModel)
+	default:
+		return resolveUpstreamModelPoolForOpenAICompatAPIKey(cfg, auth, requestedModel)
+	}
 }
 
 type apiKeyModelAliasTable map[string]map[string]string
