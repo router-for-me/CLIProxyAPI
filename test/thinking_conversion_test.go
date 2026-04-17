@@ -14,7 +14,6 @@ import (
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/thinking/provider/codex"
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/thinking/provider/gemini"
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/thinking/provider/geminicli"
-	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/thinking/provider/iflow"
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/thinking/provider/kimi"
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/thinking/provider/openai"
 
@@ -1065,184 +1064,6 @@ func TestThinkingE2EMatrix_Suffix(t *testing.T) {
 			expectValue:     "20000",
 			includeThoughts: "true",
 			expectErr:       false,
-		},
-
-		// iflow tests: glm-test and minimax-test (Cases 90-105)
-
-		// glm-test (from: openai, claude)
-		// Case 90: OpenAI to iflow, no suffix → passthrough
-		{
-			name:        "90",
-			from:        "openai",
-			to:          "iflow",
-			model:       "glm-test",
-			inputJSON:   `{"model":"glm-test","messages":[{"role":"user","content":"hi"}]}`,
-			expectField: "",
-			expectErr:   false,
-		},
-		// Case 91: OpenAI to iflow, (medium) → enable_thinking=true
-		{
-			name:        "91",
-			from:        "openai",
-			to:          "iflow",
-			model:       "glm-test(medium)",
-			inputJSON:   `{"model":"glm-test(medium)","messages":[{"role":"user","content":"hi"}]}`,
-			expectField: "chat_template_kwargs.enable_thinking",
-			expectValue: "true",
-			expectErr:   false,
-		},
-		// Case 92: OpenAI to iflow, (auto) → enable_thinking=true
-		{
-			name:        "92",
-			from:        "openai",
-			to:          "iflow",
-			model:       "glm-test(auto)",
-			inputJSON:   `{"model":"glm-test(auto)","messages":[{"role":"user","content":"hi"}]}`,
-			expectField: "chat_template_kwargs.enable_thinking",
-			expectValue: "true",
-			expectErr:   false,
-		},
-		// Case 93: OpenAI to iflow, (none) → enable_thinking=false
-		{
-			name:        "93",
-			from:        "openai",
-			to:          "iflow",
-			model:       "glm-test(none)",
-			inputJSON:   `{"model":"glm-test(none)","messages":[{"role":"user","content":"hi"}]}`,
-			expectField: "chat_template_kwargs.enable_thinking",
-			expectValue: "false",
-			expectErr:   false,
-		},
-		// Case 94: Claude to iflow, no suffix → passthrough
-		{
-			name:        "94",
-			from:        "claude",
-			to:          "iflow",
-			model:       "glm-test",
-			inputJSON:   `{"model":"glm-test","messages":[{"role":"user","content":"hi"}]}`,
-			expectField: "",
-			expectErr:   false,
-		},
-		// Case 95: Claude to iflow, (8192) → enable_thinking=true
-		{
-			name:        "95",
-			from:        "claude",
-			to:          "iflow",
-			model:       "glm-test(8192)",
-			inputJSON:   `{"model":"glm-test(8192)","messages":[{"role":"user","content":"hi"}]}`,
-			expectField: "chat_template_kwargs.enable_thinking",
-			expectValue: "true",
-			expectErr:   false,
-		},
-		// Case 96: Claude to iflow, (-1) → enable_thinking=true
-		{
-			name:        "96",
-			from:        "claude",
-			to:          "iflow",
-			model:       "glm-test(-1)",
-			inputJSON:   `{"model":"glm-test(-1)","messages":[{"role":"user","content":"hi"}]}`,
-			expectField: "chat_template_kwargs.enable_thinking",
-			expectValue: "true",
-			expectErr:   false,
-		},
-		// Case 97: Claude to iflow, (0) → enable_thinking=false
-		{
-			name:        "97",
-			from:        "claude",
-			to:          "iflow",
-			model:       "glm-test(0)",
-			inputJSON:   `{"model":"glm-test(0)","messages":[{"role":"user","content":"hi"}]}`,
-			expectField: "chat_template_kwargs.enable_thinking",
-			expectValue: "false",
-			expectErr:   false,
-		},
-
-		// minimax-test (from: openai, gemini)
-		// Case 98: OpenAI to iflow, no suffix → passthrough
-		{
-			name:        "98",
-			from:        "openai",
-			to:          "iflow",
-			model:       "minimax-test",
-			inputJSON:   `{"model":"minimax-test","messages":[{"role":"user","content":"hi"}]}`,
-			expectField: "",
-			expectErr:   false,
-		},
-		// Case 99: OpenAI to iflow, (medium) → reasoning_split=true
-		{
-			name:        "99",
-			from:        "openai",
-			to:          "iflow",
-			model:       "minimax-test(medium)",
-			inputJSON:   `{"model":"minimax-test(medium)","messages":[{"role":"user","content":"hi"}]}`,
-			expectField: "reasoning_split",
-			expectValue: "true",
-			expectErr:   false,
-		},
-		// Case 100: OpenAI to iflow, (auto) → reasoning_split=true
-		{
-			name:        "100",
-			from:        "openai",
-			to:          "iflow",
-			model:       "minimax-test(auto)",
-			inputJSON:   `{"model":"minimax-test(auto)","messages":[{"role":"user","content":"hi"}]}`,
-			expectField: "reasoning_split",
-			expectValue: "true",
-			expectErr:   false,
-		},
-		// Case 101: OpenAI to iflow, (none) → reasoning_split=false
-		{
-			name:        "101",
-			from:        "openai",
-			to:          "iflow",
-			model:       "minimax-test(none)",
-			inputJSON:   `{"model":"minimax-test(none)","messages":[{"role":"user","content":"hi"}]}`,
-			expectField: "reasoning_split",
-			expectValue: "false",
-			expectErr:   false,
-		},
-		// Case 102: Gemini to iflow, no suffix → passthrough
-		{
-			name:        "102",
-			from:        "gemini",
-			to:          "iflow",
-			model:       "minimax-test",
-			inputJSON:   `{"model":"minimax-test","contents":[{"role":"user","parts":[{"text":"hi"}]}]}`,
-			expectField: "",
-			expectErr:   false,
-		},
-		// Case 103: Gemini to iflow, (8192) → reasoning_split=true
-		{
-			name:        "103",
-			from:        "gemini",
-			to:          "iflow",
-			model:       "minimax-test(8192)",
-			inputJSON:   `{"model":"minimax-test(8192)","contents":[{"role":"user","parts":[{"text":"hi"}]}]}`,
-			expectField: "reasoning_split",
-			expectValue: "true",
-			expectErr:   false,
-		},
-		// Case 104: Gemini to iflow, (-1) → reasoning_split=true
-		{
-			name:        "104",
-			from:        "gemini",
-			to:          "iflow",
-			model:       "minimax-test(-1)",
-			inputJSON:   `{"model":"minimax-test(-1)","contents":[{"role":"user","parts":[{"text":"hi"}]}]}`,
-			expectField: "reasoning_split",
-			expectValue: "true",
-			expectErr:   false,
-		},
-		// Case 105: Gemini to iflow, (0) → reasoning_split=false
-		{
-			name:        "105",
-			from:        "gemini",
-			to:          "iflow",
-			model:       "minimax-test(0)",
-			inputJSON:   `{"model":"minimax-test(0)","contents":[{"role":"user","parts":[{"text":"hi"}]}]}`,
-			expectField: "reasoning_split",
-			expectValue: "false",
-			expectErr:   false,
 		},
 
 		// Gemini Family Cross-Channel Consistency (Cases 106-114)
@@ -2346,184 +2167,6 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
 			expectErr:   true,
 		},
 
-		// iflow tests: glm-test and minimax-test (Cases 90-105)
-
-		// glm-test (from: openai, claude)
-		// Case 90: OpenAI to iflow, no param → passthrough
-		{
-			name:        "90",
-			from:        "openai",
-			to:          "iflow",
-			model:       "glm-test",
-			inputJSON:   `{"model":"glm-test","messages":[{"role":"user","content":"hi"}]}`,
-			expectField: "",
-			expectErr:   false,
-		},
-		// Case 91: OpenAI to iflow, reasoning_effort=medium → enable_thinking=true
-		{
-			name:        "91",
-			from:        "openai",
-			to:          "iflow",
-			model:       "glm-test",
-			inputJSON:   `{"model":"glm-test","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"medium"}`,
-			expectField: "chat_template_kwargs.enable_thinking",
-			expectValue: "true",
-			expectErr:   false,
-		},
-		// Case 92: OpenAI to iflow, reasoning_effort=auto → enable_thinking=true
-		{
-			name:        "92",
-			from:        "openai",
-			to:          "iflow",
-			model:       "glm-test",
-			inputJSON:   `{"model":"glm-test","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"auto"}`,
-			expectField: "chat_template_kwargs.enable_thinking",
-			expectValue: "true",
-			expectErr:   false,
-		},
-		// Case 93: OpenAI to iflow, reasoning_effort=none → enable_thinking=false
-		{
-			name:        "93",
-			from:        "openai",
-			to:          "iflow",
-			model:       "glm-test",
-			inputJSON:   `{"model":"glm-test","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"none"}`,
-			expectField: "chat_template_kwargs.enable_thinking",
-			expectValue: "false",
-			expectErr:   false,
-		},
-		// Case 94: Claude to iflow, no param → passthrough
-		{
-			name:        "94",
-			from:        "claude",
-			to:          "iflow",
-			model:       "glm-test",
-			inputJSON:   `{"model":"glm-test","messages":[{"role":"user","content":"hi"}]}`,
-			expectField: "",
-			expectErr:   false,
-		},
-		// Case 95: Claude to iflow, thinking.budget_tokens=8192 → enable_thinking=true
-		{
-			name:        "95",
-			from:        "claude",
-			to:          "iflow",
-			model:       "glm-test",
-			inputJSON:   `{"model":"glm-test","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"enabled","budget_tokens":8192}}`,
-			expectField: "chat_template_kwargs.enable_thinking",
-			expectValue: "true",
-			expectErr:   false,
-		},
-		// Case 96: Claude to iflow, thinking.budget_tokens=-1 → enable_thinking=true
-		{
-			name:        "96",
-			from:        "claude",
-			to:          "iflow",
-			model:       "glm-test",
-			inputJSON:   `{"model":"glm-test","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"enabled","budget_tokens":-1}}`,
-			expectField: "chat_template_kwargs.enable_thinking",
-			expectValue: "true",
-			expectErr:   false,
-		},
-		// Case 97: Claude to iflow, thinking.budget_tokens=0 → enable_thinking=false
-		{
-			name:        "97",
-			from:        "claude",
-			to:          "iflow",
-			model:       "glm-test",
-			inputJSON:   `{"model":"glm-test","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"enabled","budget_tokens":0}}`,
-			expectField: "chat_template_kwargs.enable_thinking",
-			expectValue: "false",
-			expectErr:   false,
-		},
-
-		// minimax-test (from: openai, gemini)
-		// Case 98: OpenAI to iflow, no param → passthrough
-		{
-			name:        "98",
-			from:        "openai",
-			to:          "iflow",
-			model:       "minimax-test",
-			inputJSON:   `{"model":"minimax-test","messages":[{"role":"user","content":"hi"}]}`,
-			expectField: "",
-			expectErr:   false,
-		},
-		// Case 99: OpenAI to iflow, reasoning_effort=medium → reasoning_split=true
-		{
-			name:        "99",
-			from:        "openai",
-			to:          "iflow",
-			model:       "minimax-test",
-			inputJSON:   `{"model":"minimax-test","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"medium"}`,
-			expectField: "reasoning_split",
-			expectValue: "true",
-			expectErr:   false,
-		},
-		// Case 100: OpenAI to iflow, reasoning_effort=auto → reasoning_split=true
-		{
-			name:        "100",
-			from:        "openai",
-			to:          "iflow",
-			model:       "minimax-test",
-			inputJSON:   `{"model":"minimax-test","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"auto"}`,
-			expectField: "reasoning_split",
-			expectValue: "true",
-			expectErr:   false,
-		},
-		// Case 101: OpenAI to iflow, reasoning_effort=none → reasoning_split=false
-		{
-			name:        "101",
-			from:        "openai",
-			to:          "iflow",
-			model:       "minimax-test",
-			inputJSON:   `{"model":"minimax-test","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"none"}`,
-			expectField: "reasoning_split",
-			expectValue: "false",
-			expectErr:   false,
-		},
-		// Case 102: Gemini to iflow, no param → passthrough
-		{
-			name:        "102",
-			from:        "gemini",
-			to:          "iflow",
-			model:       "minimax-test",
-			inputJSON:   `{"model":"minimax-test","contents":[{"role":"user","parts":[{"text":"hi"}]}]}`,
-			expectField: "",
-			expectErr:   false,
-		},
-		// Case 103: Gemini to iflow, thinkingBudget=8192 → reasoning_split=true
-		{
-			name:        "103",
-			from:        "gemini",
-			to:          "iflow",
-			model:       "minimax-test",
-			inputJSON:   `{"model":"minimax-test","contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"thinkingConfig":{"thinkingBudget":8192}}}`,
-			expectField: "reasoning_split",
-			expectValue: "true",
-			expectErr:   false,
-		},
-		// Case 104: Gemini to iflow, thinkingBudget=-1 → reasoning_split=true
-		{
-			name:        "104",
-			from:        "gemini",
-			to:          "iflow",
-			model:       "minimax-test",
-			inputJSON:   `{"model":"minimax-test","contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"thinkingConfig":{"thinkingBudget":-1}}}`,
-			expectField: "reasoning_split",
-			expectValue: "true",
-			expectErr:   false,
-		},
-		// Case 105: Gemini to iflow, thinkingBudget=0 → reasoning_split=false
-		{
-			name:        "105",
-			from:        "gemini",
-			to:          "iflow",
-			model:       "minimax-test",
-			inputJSON:   `{"model":"minimax-test","contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"thinkingConfig":{"thinkingBudget":0}}}`,
-			expectField: "reasoning_split",
-			expectValue: "false",
-			expectErr:   false,
-		},
-
 		// Gemini Family Cross-Channel Consistency (Cases 106-114)
 		// Tests that gemini/gemini-cli/antigravity as same API family should have consistent validation behavior
 
@@ -3018,27 +2661,6 @@ func TestThinkingE2EClaudeAdaptive_Body(t *testing.T) {
 			expectValue: "high",
 			expectErr:   false,
 		},
-
-		{
-			name:        "C19",
-			from:        "claude",
-			to:          "iflow",
-			model:       "glm-test",
-			inputJSON:   `{"model":"glm-test","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"},"output_config":{"effort":"minimal"}}`,
-			expectField: "chat_template_kwargs.enable_thinking",
-			expectValue: "true",
-			expectErr:   false,
-		},
-		{
-			name:        "C20",
-			from:        "claude",
-			to:          "iflow",
-			model:       "minimax-test",
-			inputJSON:   `{"model":"minimax-test","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"},"output_config":{"effort":"high"}}`,
-			expectField: "reasoning_split",
-			expectValue: "true",
-			expectErr:   false,
-		},
 		{
 			name:            "C21",
 			from:            "claude",
@@ -3215,24 +2837,6 @@ func getTestModels() []*registry.ModelInfo {
 			UserDefined: true,
 			Thinking:    nil,
 		},
-		{
-			ID:          "glm-test",
-			Object:      "model",
-			Created:     1700000000,
-			OwnedBy:     "test",
-			Type:        "iflow",
-			DisplayName: "GLM Test Model",
-			Thinking:    &registry.ThinkingSupport{Levels: []string{"none", "auto", "minimal", "low", "medium", "high", "xhigh"}},
-		},
-		{
-			ID:          "minimax-test",
-			Object:      "model",
-			Created:     1700000000,
-			OwnedBy:     "test",
-			Type:        "iflow",
-			DisplayName: "MiniMax Test Model",
-			Thinking:    &registry.ThinkingSupport{Levels: []string{"none", "auto", "minimal", "low", "medium", "high", "xhigh"}},
-		},
 	}
 }
 
@@ -3247,10 +2851,6 @@ func runThinkingTests(t *testing.T, cases []thinkingTestCase) {
 
 			translateTo := tc.to
 			applyTo := tc.to
-			if tc.to == "iflow" {
-				translateTo = "openai"
-				applyTo = "iflow"
-			}
 
 			body := sdktranslator.TranslateRequest(
 				sdktranslator.FromString(tc.from),
@@ -3290,8 +2890,6 @@ func runThinkingTests(t *testing.T, cases []thinkingTestCase) {
 					hasThinking = gjson.GetBytes(body, "reasoning_effort").Exists()
 				case "codex":
 					hasThinking = gjson.GetBytes(body, "reasoning.effort").Exists() || gjson.GetBytes(body, "reasoning").Exists()
-				case "iflow":
-					hasThinking = gjson.GetBytes(body, "chat_template_kwargs.enable_thinking").Exists() || gjson.GetBytes(body, "reasoning_split").Exists()
 				}
 				if hasThinking {
 					t.Fatalf("expected no thinking field but found one, body=%s", string(body))
@@ -3330,23 +2928,6 @@ func runThinkingTests(t *testing.T, cases []thinkingTestCase) {
 				actual := fmt.Sprintf("%v", itVal.Bool())
 				if actual != tc.includeThoughts {
 					t.Fatalf("includeThoughts: expected %s, got %s, body=%s", tc.includeThoughts, actual, string(body))
-				}
-			}
-
-			// Verify clear_thinking for iFlow GLM models when enable_thinking=true
-			if tc.to == "iflow" && tc.expectField == "chat_template_kwargs.enable_thinking" && tc.expectValue == "true" {
-				baseModel := thinking.ParseSuffix(tc.model).ModelName
-				isGLM := strings.HasPrefix(strings.ToLower(baseModel), "glm")
-				ctVal := gjson.GetBytes(body, "chat_template_kwargs.clear_thinking")
-				if isGLM {
-					if !ctVal.Exists() {
-						t.Fatalf("expected clear_thinking field not found for GLM model, body=%s", string(body))
-					}
-					if ctVal.Bool() != false {
-						t.Fatalf("clear_thinking: expected false, got %v, body=%s", ctVal.Bool(), string(body))
-					}
-				} else if ctVal.Exists() {
-					t.Fatalf("expected no clear_thinking field for non-GLM enable_thinking model, body=%s", string(body))
 				}
 			}
 		})
