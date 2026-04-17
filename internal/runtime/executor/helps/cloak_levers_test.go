@@ -7,8 +7,6 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 )
 
-func boolPtr(b bool) *bool { return &b }
-
 // TestResolveOAuthLevers_DefaultsTrue verifies that nil cfg and nil fields both
 // default to the legacy behavior (all levers enabled).
 func TestResolveOAuthLevers_DefaultsTrue(t *testing.T) {

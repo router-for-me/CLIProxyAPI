@@ -407,7 +407,10 @@ func equalStringSet(a, b []string) bool {
 	return true
 }
 
-// equalPBool reports whether two *bool pointers represent the same effective value.
+// equalPBool reports whether two *bool pointers are equal by pointer identity and
+// dereferenced value: both nil → equal; one nil, one non-nil → not equal (nil and
+// an explicit true are treated as different so that setting a lever to true is
+// flagged as a config change from the default nil state).
 func equalPBool(a, b *bool) bool {
 	if a == nil && b == nil {
 		return true
