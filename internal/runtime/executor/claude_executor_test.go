@@ -1929,7 +1929,9 @@ func TestApplyCloaking_PreservesConfiguredStrictModeAndSensitiveWordsWhenModeOmi
 	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-123"}}
 	payload := []byte(`{"system":"proxy rules","messages":[{"role":"user","content":[{"type":"text","text":"proxy access"}]}]}`)
 
-	out := applyCloaking(context.Background(), cfg, auth, payload, "claude-3-5-sonnet-20241022", "key-123")
+	cloakCfgStrict := resolveClaudeKeyCloakConfig(cfg, auth)
+	leversStrict := helps.ResolveOAuthLevers(cloakCfgStrict, auth, nil)
+	out := applyCloaking(context.Background(), cfg, auth, payload, "claude-3-5-sonnet-20241022", "key-123", isClaudeOAuthToken("key-123"), leversStrict)
 
 	// Strict mode u2192 3 injected system blocks (billing+agent+static); user system NOT forwarded to messages.
 	blocks := gjson.GetBytes(out, "system").Array()

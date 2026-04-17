@@ -160,9 +160,13 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		return resp, err
 	}
 
+	oauthToken := isClaudeOAuthToken(apiKey)
+	// Resolve OAuth cloaking levers once; thread them into applyCloaking to avoid a second resolution.
+	execLevers := helps.ResolveOAuthLevers(resolveClaudeKeyCloakConfig(e.cfg, auth), auth, helps.HeaderFromContext(ctx))
+
 	// Apply cloaking (system prompt injection, fake user ID, sensitive word obfuscation)
 	// based on client type and configuration.
-	body = applyCloaking(ctx, e.cfg, auth, body, baseModel, apiKey)
+	body = applyCloaking(ctx, e.cfg, auth, body, baseModel, apiKey, oauthToken, execLevers)
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
@@ -191,13 +195,6 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	extraBetas, body = extractAndRemoveBetas(body)
 	bodyForTranslation := body
 	bodyForUpstream := body
-	oauthToken := isClaudeOAuthToken(apiKey)
-	// Resolve OAuth cloaking levers to gate tool-name remapping.
-	var execReqHeader http.Header
-	if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
-		execReqHeader = ginCtx.Request.Header
-	}
-	execLevers := helps.ResolveOAuthLevers(resolveClaudeKeyCloakConfig(e.cfg, auth), auth, execReqHeader)
 	oauthToolNamesRemapped := false
 	if oauthToken && !auth.ToolPrefixDisabled() {
 		bodyForUpstream = applyClaudeToolPrefix(body, claudeToolPrefix)
@@ -351,9 +348,13 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		return nil, err
 	}
 
+	streamOAuthToken := isClaudeOAuthToken(apiKey)
+	// Resolve OAuth cloaking levers once; thread them into applyCloaking to avoid a second resolution.
+	streamLevers := helps.ResolveOAuthLevers(resolveClaudeKeyCloakConfig(e.cfg, auth), auth, helps.HeaderFromContext(ctx))
+
 	// Apply cloaking (system prompt injection, fake user ID, sensitive word obfuscation)
 	// based on client type and configuration.
-	body = applyCloaking(ctx, e.cfg, auth, body, baseModel, apiKey)
+	body = applyCloaking(ctx, e.cfg, auth, body, baseModel, apiKey, streamOAuthToken, streamLevers)
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
@@ -379,25 +380,18 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	extraBetas, body = extractAndRemoveBetas(body)
 	bodyForTranslation := body
 	bodyForUpstream := body
-	oauthToken := isClaudeOAuthToken(apiKey)
-	// Resolve OAuth cloaking levers to gate tool-name remapping.
-	var streamReqHeader http.Header
-	if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
-		streamReqHeader = ginCtx.Request.Header
-	}
-	streamLevers := helps.ResolveOAuthLevers(resolveClaudeKeyCloakConfig(e.cfg, auth), auth, streamReqHeader)
 	oauthToolNamesRemapped := false
-	if oauthToken && !auth.ToolPrefixDisabled() {
+	if streamOAuthToken && !auth.ToolPrefixDisabled() {
 		bodyForUpstream = applyClaudeToolPrefix(body, claudeToolPrefix)
 	}
 	// Remap third-party tool names to Claude Code equivalents and remove
 	// tools without official counterparts. This prevents Anthropic from
 	// fingerprinting the request as third-party via tool naming patterns.
-	if oauthToken && streamLevers.RemapToolNames {
+	if streamOAuthToken && streamLevers.RemapToolNames {
 		bodyForUpstream, oauthToolNamesRemapped = remapOAuthToolNames(bodyForUpstream)
 	}
 	// Enable cch signing by default for OAuth tokens (not just experimental flag).
-	if oauthToken || experimentalCCHSigningEnabled(e.cfg, auth) {
+	if streamOAuthToken || experimentalCCHSigningEnabled(e.cfg, auth) {
 		bodyForUpstream = signAnthropicMessagesBody(bodyForUpstream)
 	}
 
@@ -561,11 +555,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 
 	// Resolve levers before checkSystemInstructions so all three (SanitizeSystemPrompt,
 	// InjectBillingHeader, RemapToolNames) match the Execute/ExecuteStream request shape.
-	var countReqHeader http.Header
-	if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
-		countReqHeader = ginCtx.Request.Header
-	}
-	countLevers := helps.ResolveOAuthLevers(resolveClaudeKeyCloakConfig(e.cfg, auth), auth, countReqHeader)
+	countLevers := helps.ResolveOAuthLevers(resolveClaudeKeyCloakConfig(e.cfg, auth), auth, helps.HeaderFromContext(ctx))
 	oauthCount := isClaudeOAuthToken(apiKey)
 	if !strings.HasPrefix(baseModel, "claude-3-5-haiku") {
 		body = checkSystemInstructionsWithSigningMode(body, false, false, oauthCount,
@@ -1736,10 +1726,10 @@ IMPORTANT: this context may or may not be relevant to your tasks. You should not
 
 // applyCloaking applies cloaking transformations to the payload based on config and client.
 // Cloaking includes: system prompt injection, fake user ID, and sensitive word obfuscation.
-func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, payload []byte, model string, apiKey string) []byte {
+// oauthToken and levers must be pre-resolved by the caller to avoid redundant computation.
+func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, payload []byte, model string, apiKey string, oauthToken bool, levers helps.OAuthLevers) []byte {
 	clientUserAgent := getClientUserAgent(ctx)
 	// Enable cch signing for OAuth tokens by default (not just experimental flag).
-	oauthToken := isClaudeOAuthToken(apiKey)
 	useCCHSigning := oauthToken || experimentalCCHSigningEnabled(cfg, auth)
 
 	// Get cloak config from ClaudeKey configuration
@@ -1766,13 +1756,6 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 			cacheUserID = *cloakCfg.CacheUserID
 		}
 	}
-
-	// Resolve OAuth cloaking levers from config and optional header opt-out.
-	var reqHeader http.Header
-	if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
-		reqHeader = ginCtx.Request.Header
-	}
-	levers := helps.ResolveOAuthLevers(cloakCfg, auth, reqHeader)
 
 	// Determine if cloaking should be applied
 	if !helps.ShouldCloak(cloakMode, clientUserAgent) {

@@ -47,6 +47,9 @@ GEMINI.md
 _bmad/*
 _bmad-output/*
 
+# Factory validation artifacts
+.factory/validation/**
+
 # macOS
 .DS_Store
 ._*
