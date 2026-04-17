@@ -50,10 +50,13 @@ func TestCountTokens_MatchesExecuteWhenLeversOverridden(t *testing.T) {
 				"api_key":  testOAuthKey,
 				"base_url": server.URL,
 			}}
-			payload := []byte(`{"system":"My custom system prompt","messages":[{"role":"user","content":"hello"}]}`)
+			// Payload includes a tools field with lowercase tool name to exercise the
+			// RemapToolNames branch (remap converts "read" -> "Read" for OAuth requests).
+			payload := []byte(`{"system":"My custom system prompt","messages":[{"role":"user","content":"hello"}],"tools":[{"name":"read","description":"Read files","input_schema":{"type":"object","properties":{}}}]}`)
 
+			ctx := context.Background()
 			_, err := exec.CountTokens(
-				context.Background(),
+				ctx,
 				auth,
 				cliproxyexecutor.Request{Model: "claude-3-5-sonnet-20241022", Payload: payload},
 				cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")},
@@ -65,11 +68,12 @@ func TestCountTokens_MatchesExecuteWhenLeversOverridden(t *testing.T) {
 				t.Fatal("no request body captured")
 			}
 
-			// Also compute the expected body via direct call to
-			// checkSystemInstructionsWithSigningMode so we can compare shapes.
+			// Compute expected using the same dynamic billing inputs that CountTokens now uses,
+			// so the assertion is meaningful even when version/entrypoint/workload are non-empty.
+			billingVersion, billingEntrypoint, billingWorkload := resolveBillingHeaderInputs(ctx, cfg)
 			expected := checkSystemInstructionsWithSigningMode(
 				bytes.Clone(payload), false, false, true,
-				tc.sanitize, tc.billing, "2.1.63", "", "",
+				tc.sanitize, tc.billing, billingVersion, billingEntrypoint, billingWorkload,
 			)
 
 			// --- InjectBillingHeader assertion ---
@@ -91,6 +95,21 @@ func TestCountTokens_MatchesExecuteWhenLeversOverridden(t *testing.T) {
 			if gotSanitized != expSanitized {
 				t.Errorf("SanitizeSystemPrompt=%v: sanitize mismatch — got sanitized=%v, want sanitized=%v",
 					tc.sanitize, gotSanitized, expSanitized)
+			}
+
+			// --- RemapToolNames assertion ---
+			// With a "read" tool in the payload, remap converts it to "Read" for OAuth requests.
+			gotToolName := gjson.GetBytes(capturedBody, "tools.0.name").String()
+			if tc.remap && isClaudeOAuthToken(testOAuthKey) {
+				// Tool was remapped: "read" (lowercase) -> "Read" (TitleCase).
+				if gotToolName != "Read" {
+					t.Errorf("RemapToolNames=true: expected tool name \"Read\", got %q", gotToolName)
+				}
+			} else {
+				// Tool was NOT remapped: original lowercase name preserved.
+				if gotToolName != "read" {
+					t.Errorf("RemapToolNames=false: expected original tool name \"read\", got %q", gotToolName)
+				}
 			}
 		})
 	}

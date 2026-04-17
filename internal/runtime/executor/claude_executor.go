@@ -544,6 +544,16 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
 }
 
+// resolveBillingHeaderInputs returns the (version, entrypoint, workload) triple used to
+// construct the x-anthropic-billing-header block. Centralising the derivation here ensures
+// CountTokens and Execute/ExecuteStream always produce identical billing strings.
+func resolveBillingHeaderInputs(ctx context.Context, cfg *config.Config) (version, entrypoint, workload string) {
+	version = helps.DefaultClaudeVersion(cfg)
+	entrypoint = parseEntrypointFromUA(getClientUserAgent(ctx))
+	workload = getWorkloadFromContext(ctx)
+	return
+}
+
 func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
@@ -568,9 +578,10 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	countLevers := helps.ResolveOAuthLevers(resolveClaudeKeyCloakConfig(e.cfg, auth), auth, countReqHeader)
 	oauthCount := isClaudeOAuthToken(apiKey)
 	if !strings.HasPrefix(baseModel, "claude-3-5-haiku") {
+		billingVersion, billingEntrypoint, billingWorkload := resolveBillingHeaderInputs(ctx, e.cfg)
 		body = checkSystemInstructionsWithSigningMode(body, false, false, oauthCount,
 			countLevers.SanitizeSystemPrompt, countLevers.InjectBillingHeader,
-			"2.1.63", "", "")
+			billingVersion, billingEntrypoint, billingWorkload)
 	}
 
 	// Keep count_tokens requests compatible with Anthropic cache-control constraints too.
