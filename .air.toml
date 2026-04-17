@@ -1,0 +1,25 @@
+# Air config for local development.
+# Strategy:
+# - Go code changes: rebuild and restart process.
+# - config.yaml/auths changes: handled by in-process fsnotify watcher (no Air restart).
+
+root = "."
+tmp_dir = "tmp"
+
+[build]
+cmd = "go build -o ./tmp/cli-proxy-new ./cmd/server"
+bin = "./tmp/cli-proxy-new"
+args_bin = ["-config", "config.yaml"]
+include_ext = ["go"]
+include_file = ["go.mod", "go.sum"]
+exclude_dir = ["tmp", "auths", ".git", "testdata", "logs"]
+exclude_regex = ["_test\\.go"]
+stop_on_error = true
+send_interrupt = true
+kill_delay = "500ms"
+
+[log]
+time = true
+
+[misc]
+clean_on_exit = true

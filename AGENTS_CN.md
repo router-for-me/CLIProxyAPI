@@ -5,6 +5,27 @@ CLIProxyAPI 是一个基于 Go 语言的代理服务器，为 CLI 工具提供 O
 
 ## 构建与测试命令
 
+### 本地开发环境
+
+项目使用**两套配置文件**：
+- `config.yaml` — 本地开发（`auth-dir: "./auths"`）
+- `config-277.yaml` — 227 服务器生产部署（`auth-dir: "/opt/cliproxy/auths"`）
+
+```bash
+# 本地 Go 路径
+export PATH="/Users/joslyn/local/go/bin:$PATH"
+export GOROOT="/Users/joslyn/local/go"
+
+# 直接运行（默认读取 config.yaml）
+go run ./cmd/server
+
+# 或指定配置文件
+go run ./cmd/server -config config.yaml
+
+# 编译二进制
+go build -o cli-proxy-new ./cmd/server
+```
+
 ### 构建
 ```bash
 # 构建服务器二进制

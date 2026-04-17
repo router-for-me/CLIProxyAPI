@@ -51,10 +51,22 @@ cp config.example.yaml config.yaml
 ./cli-proxy-new
 ```
 
+### 設定ファイル
+
+2つの設定ファイルを使い分けます：
+
+| ファイル | 用途 | `auth-dir` |
+|----------|------|------------|
+| `config.yaml` | ローカル開発 | `./auths` |
+| `config-277.yaml` | 本番環境（227サーバー） | `/opt/cliproxy/auths` |
+
+- **ローカル開発**：`go run ./cmd/server`（デフォルトで `config.yaml` を読む）
+- **本番デプロイ**：`./cli-proxy-new -config config-277.yaml`
+
 ### Docker
 
 ```bash
-docker run -v ./config.yaml:/app/config.yaml -p 8080:8080 ghcr.io/router-for-me/cliproxyapi:latest
+docker run -v ./config-277.yaml:/app/config.yaml -p 8080:8080 ghcr.io/router-for-me/cliproxyapi:latest
 ```
 
 ## プロジェクト構造

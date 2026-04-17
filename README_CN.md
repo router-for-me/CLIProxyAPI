@@ -56,16 +56,25 @@ cp config.example.yaml config.yaml
 ./cli-proxy-new
 ```
 
-### 配置
+### 配置文件说明
 
-编辑 `config.yaml` 配置 OAuth 账户、API 密钥、端口等。
+项目使用**两套配置文件**，分别对应不同环境：
+
+| 文件 | 用途 | `auth-dir` |
+|------|------|------------|
+| `config.yaml` | 本地开发 | `./auths`（本地相对路径） |
+| `config-277.yaml` | 生产部署（227 服务器） | `/opt/cliproxy/auths` |
+
+- **本地开发（推荐）**：`./bin/air`（由 `.air.toml` 管理，等价于使用 `-config config.yaml` 启动）
+- **本地回退启动**：`go run ./cmd/server`
+- **生产部署**：`./cli-proxy-new -config config-277.yaml`
 
 详细配置说明请参考 [用户手册](https://help.router-for.me/cn/)
 
 ### Docker 运行
 
 ```bash
-docker run -v ./config.yaml:/app/config.yaml -p 8080:8080 ghcr.io/router-for-me/cliproxyapi:latest
+docker run -v ./config-277.yaml:/app/config.yaml -p 8080:8080 ghcr.io/router-for-me/cliproxyapi:latest
 ```
 
 ## 项目结构
@@ -86,6 +95,30 @@ examples/          # 示例代码
 ## 开发指南
 
 详见 [AGENTS.md](AGENTS.md) - 包含构建测试命令和代码风格指南。
+
+### 热启动（Air）
+
+安装 Air（首次执行）：
+
+```bash
+GOBIN="$(pwd)/bin" go install github.com/air-verse/air@latest
+```
+
+本地开发热启动：
+
+```bash
+../bin/air
+```
+
+行为约定：
+- Go 源码变更（`*.go`、`go.mod`、`go.sum`）：Air 自动重建并重启服务。
+- `config.yaml` 和 `auths/*` 变更：Air 不重启，依赖进程内 watcher 热加载。
+- 生产流程不变：继续构建二进制并指定生产配置运行。
+
+常见问题：
+- `./bin/air: no such file or directory`：确认在仓库根目录执行安装命令。
+- 改代码后未自动重启：确认在仓库根目录执行 `./bin/air`，并成功加载 `.air.toml`。
+- 改配置触发整进程重启：检查 `.air.toml` 中是否正确排除了 YAML 与 `auths` 路径。
 
 ### 构建
 
@@ -110,6 +143,7 @@ go test -v -run TestFunctionName ./package/
 - 认证：[docs/sdk-access_CN.md](docs/sdk-access_CN.md)
 - 凭据加载/更新：[docs/sdk-watcher_CN.md](docs/sdk-watcher_CN.md)
 - 227 发布手册：[docs/technical/deploy-ssh-227.md](docs/technical/deploy-ssh-227.md)
+- 发布指导文档：[发布指导文档.md](发布指导文档.md)
 
 ## 贡献
 

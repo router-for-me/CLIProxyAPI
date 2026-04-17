@@ -8,11 +8,20 @@
 - 远端代码目录：`/opt/cliproxy`
 - 远端监听端口：`18318`
 - 远端启动方式：二进制直跑
-- 当前启动命令：`./cli-proxy -config config.yaml`
+- 当前启动命令：`./cli-proxy -config config-277.yaml`
+
+## 配置文件说明
+
+| 文件 | 用途 | `auth-dir` |
+|------|------|------------|
+| `config.yaml` | 本地开发（不部署到服务器） | `./auths` |
+| `config-277.yaml` | 227 服务器生产配置 | `/opt/cliproxy/auths` |
+
+> ⚠️ 生产环境统一使用 `config-277.yaml`，本地 `config.yaml` 不会同步到远端。
 
 ## 部署原则
 
-- 保留远端 `config.yaml`
+- 保留远端 `config-277.yaml`
 - 保留远端 `auths/`
 - 保留远端 `logs/`
 - 仅同步代码和静态资源
@@ -40,8 +49,8 @@ git status --short
 ```bash
 ssh -i "$HOME/.ssh/id_ed25519" -o IdentitiesOnly=yes "root@192.168.15.227" '
   set -e
-  readlink -f /proc/$(pgrep -f "./cli-proxy -config config.yaml" | head -n 1)/cwd
-  readlink -f /proc/$(pgrep -f "./cli-proxy -config config.yaml" | head -n 1)/exe
+  readlink -f /proc/$(pgrep -f "./cli-proxy -config config-277.yaml" | head -n 1)/cwd
+  readlink -f /proc/$(pgrep -f "./cli-proxy -config config-277.yaml" | head -n 1)/exe
   (ss -ltnp || netstat -ltnp) 2>/dev/null | grep 18318 || true
 '
 ```
@@ -51,6 +60,15 @@ ssh -i "$HOME/.ssh/id_ed25519" -o IdentitiesOnly=yes "root@192.168.15.227" '
 - 工作目录是 `/opt/cliproxy`
 - 可执行文件是 `/opt/cliproxy/cli-proxy`
 - `18318` 正在监听
+- 并记录发布前主进程 PID（用于发布后核验进程已完成切换）
+
+可以单独记录一次旧 PID：
+
+```bash
+ssh -i "$HOME/.ssh/id_ed25519" -o IdentitiesOnly=yes "root@192.168.15.227" '
+  pgrep -f "./cli-proxy -config config-277.yaml" | head -n 1
+'
+```
 
 ## 一次标准发布
 
@@ -64,6 +82,7 @@ rsync -avz --delete \
   --exclude 'logs' \
   --exclude 'auths' \
   --exclude 'config.yaml' \
+  --exclude 'config-277.yaml' \
   --exclude 'config.yaml.*' \
   --exclude 'cli-proxy-new' \
   -e "ssh -i \"$HOME/.ssh/id_ed25519\" -o IdentitiesOnly=yes" \
@@ -112,27 +131,36 @@ ssh -i "$HOME/.ssh/id_ed25519" -o IdentitiesOnly=yes "root@192.168.15.227" '
 ssh -i "$HOME/.ssh/id_ed25519" -o IdentitiesOnly=yes "root@192.168.15.227" '
   set -euo pipefail
   cd /opt/cliproxy
-  pkill -f "./cli-proxy -config config.yaml" || true
+  old_pid="$(pgrep -f "./cli-proxy -config config-277.yaml" | head -n 1 || true)"
+  echo "old_pid=${old_pid:-none}"
+  pkill -f "./cli-proxy -config config-277.yaml" || true
   sleep 2
-  nohup ./cli-proxy -config config.yaml > logs/app.log 2>&1 < /dev/null &
+  nohup ./cli-proxy -config config-277.yaml > logs/app.log 2>&1 < /dev/null &
   echo $! > logs/app.pid
   sleep 3
-  cat logs/app.pid
+  new_pid="$(cat logs/app.pid)"
+  echo "new_pid=$new_pid"
+  if [ -n "${old_pid:-}" ] && [ "$old_pid" = "$new_pid" ]; then
+    echo "PID 核验失败：重启前后 PID 相同，疑似未完成进程切换"
+    exit 1
+  fi
   (ss -ltnp || netstat -ltnp) 2>/dev/null | grep 18318 || true
   tail -n 20 logs/app.log
 '
 ```
+
+PID 核验原则：重启后 `new_pid` 必须存在，并且与 `old_pid` 不同。
 
 如果不希望留下多余的父 shell 进程，启动后可以再检查一次：
 
 ```bash
 ssh -i "$HOME/.ssh/id_ed25519" -o IdentitiesOnly=yes "root@192.168.15.227" '
   ps -fp $(cat /opt/cliproxy/logs/app.pid) || true
-  pgrep -af "./cli-proxy -config config.yaml" || true
+  pgrep -af "./cli-proxy -config config-277.yaml" || true
 '
 ```
 
-理想状态是只剩下真正的 `./cli-proxy -config config.yaml` 主进程。
+理想状态是只剩下真正的 `./cli-proxy -config config-277.yaml` 主进程。
 
 ## 发布后验证
 
@@ -226,7 +254,7 @@ go.mod requires go >= 1.26.0
 
 - 显式用 `/usr/bin/go`
 
-### 3. 把远端 `config.yaml` 覆盖掉了
+### 3. 把远端 `config-277.yaml` 覆盖掉了
 
 风险：
 
@@ -236,7 +264,7 @@ go.mod requires go >= 1.26.0
 
 正确做法：
 
-- `rsync` 时排除 `config.yaml`、`auths/`、`logs/`
+- `rsync` 时排除 `config.yaml`、`config-277.yaml`、`auths/`、`logs/`
 
 ### 4. 只看端口起来，没测真实流式
 
@@ -270,9 +298,9 @@ ssh -i "$HOME/.ssh/id_ed25519" -o IdentitiesOnly=yes "root@192.168.15.227" '
   cd /opt/cliproxy
   cp -f cli-proxy.bak.YYYYMMDD_HHMMSS cli-proxy
   chmod +x cli-proxy
-  pkill -f "./cli-proxy -config config.yaml" || true
+  pkill -f "./cli-proxy -config config-277.yaml" || true
   sleep 2
-  nohup ./cli-proxy -config config.yaml > logs/app.log 2>&1 < /dev/null &
+  nohup ./cli-proxy -config config-277.yaml > logs/app.log 2>&1 < /dev/null &
   echo $! > logs/app.pid
   sleep 3
   (ss -ltnp || netstat -ltnp) 2>/dev/null | grep 18318 || true
@@ -282,7 +310,7 @@ ssh -i "$HOME/.ssh/id_ed25519" -o IdentitiesOnly=yes "root@192.168.15.227" '
 ## 本次已验证通过的事实
 
 - 227 实际部署目录是 `/opt/cliproxy`
-- 227 实际运行命令是 `./cli-proxy -config config.yaml`
+- 227 实际运行命令是 `./cli-proxy -config config-277.yaml`
 - 227 实际监听端口是 `18318`
 - 227 编译必须显式使用 `/usr/bin/go`
 - `GET /v1/models` 已验证正常
@@ -297,7 +325,7 @@ ssh -i "$HOME/.ssh/id_ed25519" -o IdentitiesOnly=yes "root@192.168.15.227" '
 2. 远端用 `/usr/bin/go build -o cli-proxy.new ./cmd/server`
 3. 备份旧 `cli-proxy`
 4. 用 `cli-proxy.new` 替换正式二进制
-5. 重启 `./cli-proxy -config config.yaml`
+5. 重启 `./cli-proxy -config config-277.yaml`
 6. 验证 `/v1/models`
 7. 验证 `glm-4.7` 流式
 8. 验证 `codex exec`

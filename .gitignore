@@ -12,6 +12,7 @@ bin/*
 logs/*
 conv/*
 temp/*
+tmp/*
 refs/*
 
 # Storage backends

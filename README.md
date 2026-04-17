@@ -51,10 +51,25 @@ cp config.example.yaml config.yaml
 ./cli-proxy-new
 ```
 
+### Configuration Files
+
+The project uses **two config files** for different environments:
+
+| File | Purpose | `auth-dir` |
+|------|---------|------------|
+| `config.yaml` | Local development | `./auths` (local relative path) |
+| `config-277.yaml` | Production (227 server) | `/opt/cliproxy/auths` |
+
+- **Local development (recommended)**: `./bin/air` (managed by `.air.toml`, equivalent to running with `-config config.yaml`)
+- **Fallback local run**: `go run ./cmd/server`
+- **Production deployment**: `./cli-proxy-new -config config-277.yaml`
+
+For detailed configuration options, see the [User Manual](https://help.router-for.me/cn/).
+
 ### Docker
 
 ```bash
-docker run -v ./config.yaml:/app/config.yaml -p 8080:8080 ghcr.io/router-for-me/cliproxyapi:latest
+docker run -v ./config-277.yaml:/app/config.yaml -p 8080:8080 ghcr.io/router-for-me/cliproxyapi:latest
 ```
 
 ## Project Structure
@@ -75,6 +90,30 @@ examples/          # Example code
 ## Development
 
 See [AGENTS.md](AGENTS.md) for build/test commands and code style guidelines.
+
+### Hot Reload (Air)
+
+Install Air (one time):
+
+```bash
+GOBIN="$(pwd)/bin" go install github.com/air-verse/air@latest
+```
+
+Start local development with hot restart:
+
+```bash
+./bin/air
+```
+
+Behavior conventions:
+- Go source changes (`*.go`, `go.mod`, `go.sum`): Air rebuilds and restarts the server.
+- `config.yaml` and `auths/*` changes: no Air restart; reloaded by in-process watcher.
+- Production flow is unchanged: build binary and run with production config.
+
+Troubleshooting:
+- `./bin/air: no such file or directory`: run the install command from repo root.
+- App does not restart after code changes: confirm `.air.toml` is loaded from repo root.
+- Config changes causing full restart: ensure YAML/auth paths are excluded in `.air.toml`.
 
 ### Build
 
