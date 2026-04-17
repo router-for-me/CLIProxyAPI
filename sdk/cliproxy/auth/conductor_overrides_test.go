@@ -153,6 +153,147 @@ func TestManager_ShouldRetryAfterError_SequentialFillUsesConfiguredRequestRetry(
 	}
 }
 
+type sequentialFillRetryProbeExecutor struct {
+	id string
+
+	mu           sync.Mutex
+	executeCalls int
+}
+
+func (e *sequentialFillRetryProbeExecutor) Identifier() string {
+	return e.id
+}
+
+func (e *sequentialFillRetryProbeExecutor) Execute(_ context.Context, _ *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.executeCalls++
+	if e.executeCalls == 1 {
+		return cliproxyexecutor.Response{}, &Error{HTTPStatus: http.StatusTooManyRequests, Message: "quota"}
+	}
+	return cliproxyexecutor.Response{Payload: []byte("ok")}, nil
+}
+
+func (e *sequentialFillRetryProbeExecutor) ExecuteStream(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	return nil, nil
+}
+
+func (e *sequentialFillRetryProbeExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) {
+	return auth, nil
+}
+
+func (e *sequentialFillRetryProbeExecutor) CountTokens(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, nil
+}
+
+func (e *sequentialFillRetryProbeExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
+	return nil, nil
+}
+
+func (e *sequentialFillRetryProbeExecutor) ExecuteCalls() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.executeCalls
+}
+
+func TestManager_Execute_SequentialFillRetriesAfter429Cooldown(t *testing.T) {
+	prev := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(prev) })
+
+	m := NewManager(nil, &SequentialFillSelector{}, nil)
+	m.SetRetryConfig(3, 30*time.Second, 3)
+
+	executor := &sequentialFillRetryProbeExecutor{id: "claude"}
+	m.RegisterExecutor(executor)
+
+	auth := &Auth{
+		ID:       "sf-retry-auth",
+		Provider: "claude",
+	}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	model := "sf-retry-model"
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth.ID, "claude", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+
+	start := time.Now()
+	resp, errExecute := m.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute != nil {
+		t.Fatalf("execute error = %v, want success after retry", errExecute)
+	}
+	if string(resp.Payload) != "ok" {
+		t.Fatalf("payload = %q, want %q", string(resp.Payload), "ok")
+	}
+	if got := executor.ExecuteCalls(); got != 2 {
+		t.Fatalf("execute calls = %d, want %d", got, 2)
+	}
+	if waited := time.Since(start); waited < quotaBackoffBase {
+		t.Fatalf("retry wait = %v, want at least %v", waited, quotaBackoffBase)
+	}
+}
+
+func TestManager_Execute_SequentialFillMaxRetryCredentialsAllowsThreeFallbacks(t *testing.T) {
+	model := "sf-max-retry-credentials-model"
+	selector := &SequentialFillSelector{
+		current: map[string]string{
+			"claude:" + model: "b",
+		},
+	}
+	manager := NewManager(nil, selector, nil)
+	manager.SetRetryConfig(0, 0, 3)
+
+	executor := &authFallbackExecutor{
+		id: "claude",
+		executeErrors: map[string]error{
+			"b": &Error{HTTPStatus: http.StatusInternalServerError, Message: "boom-b"},
+			"c": &Error{HTTPStatus: http.StatusInternalServerError, Message: "boom-c"},
+			"d": &Error{HTTPStatus: http.StatusInternalServerError, Message: "boom-d"},
+		},
+	}
+	manager.RegisterExecutor(executor)
+
+	auths := []*Auth{
+		{ID: "a", Provider: "claude"},
+		{ID: "b", Provider: "claude"},
+		{ID: "c", Provider: "claude"},
+		{ID: "d", Provider: "claude"},
+	}
+
+	reg := registry.GetGlobalRegistry()
+	for _, auth := range auths {
+		reg.RegisterClient(auth.ID, "claude", []*registry.ModelInfo{{ID: model}})
+		if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+			t.Fatalf("register auth %s: %v", auth.ID, errRegister)
+		}
+	}
+	t.Cleanup(func() {
+		for _, auth := range auths {
+			reg.UnregisterClient(auth.ID)
+		}
+	})
+
+	resp, errExecute := manager.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute != nil {
+		t.Fatalf("execute error = %v, want success after three fallback credentials", errExecute)
+	}
+	if string(resp.Payload) != "a" {
+		t.Fatalf("payload = %q, want %q from successful auth fallback", string(resp.Payload), "a")
+	}
+	if got := executor.ExecuteCalls(); len(got) != 4 {
+		t.Fatalf("execute calls = %v, want four attempts [b c d a]", got)
+	}
+	want := []string{"b", "c", "d", "a"}
+	for i, authID := range want {
+		if got := executor.ExecuteCalls()[i]; got != authID {
+			t.Fatalf("execute call %d auth = %q, want %q", i, got, authID)
+		}
+	}
+}
+
 type credentialRetryLimitExecutor struct {
 	id string
 
@@ -468,8 +609,8 @@ func TestManager_MaxRetryCredentials_LimitsCrossCredentialRetries(t *testing.T) 
 			if errInvoke := tc.invoke(limitedManager); errInvoke == nil {
 				t.Fatalf("expected error for limited retry execution")
 			}
-			if calls := limitedExecutor.Calls(); calls != 1 {
-				t.Fatalf("expected 1 call with max-retry-credentials=1, got %d", calls)
+			if calls := limitedExecutor.Calls(); calls != 2 {
+				t.Fatalf("expected 2 calls with max-retry-credentials=1, got %d", calls)
 			}
 
 			unlimitedManager, unlimitedExecutor := newCredentialRetryLimitTestManager(t, 0)
