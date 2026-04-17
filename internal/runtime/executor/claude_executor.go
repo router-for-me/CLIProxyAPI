@@ -1023,7 +1023,7 @@ func claudeCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
 }
 
 func checkSystemInstructions(payload []byte) []byte {
-	return checkSystemInstructionsWithSigningMode(payload, false, false, false, true, "2.1.63", "", "")
+	return checkSystemInstructionsWithSigningMode(payload, false, false, false, true, true, "2.1.63", "", "")
 }
 
 func isClaudeOAuthToken(apiKey string) bool {
@@ -1542,7 +1542,7 @@ func generateBillingHeader(payload []byte, experimentalCCHSigning bool, version,
 }
 
 func checkSystemInstructionsWithMode(payload []byte, strictMode bool) []byte {
-	return checkSystemInstructionsWithSigningMode(payload, strictMode, false, false, true, "2.1.63", "", "")
+	return checkSystemInstructionsWithSigningMode(payload, strictMode, false, false, true, true, "2.1.63", "", "")
 }
 
 // checkSystemInstructionsWithSigningMode injects Claude Code-style system blocks:
@@ -1556,7 +1556,9 @@ func checkSystemInstructionsWithMode(payload []byte, strictMode bool) []byte {
 //
 // sanitizeSystemPrompt controls whether forwarded system content is collapsed to a stub
 // (true = sanitize, which is the legacy default). Pass false to forward the original text.
-func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, experimentalCCHSigning bool, oauthMode bool, sanitizeSystemPrompt bool, version, entrypoint, workload string) []byte {
+// injectBillingHeader controls whether the x-anthropic-billing-header block is prepended
+// (true = legacy default). Pass false to skip billing header injection entirely.
+func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, experimentalCCHSigning bool, oauthMode bool, sanitizeSystemPrompt bool, injectBillingHeader bool, version, entrypoint, workload string) []byte {
 	system := gjson.GetBytes(payload, "system")
 
 	// Extract original message text for fingerprint computation (before billing injection).
@@ -1580,9 +1582,6 @@ func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, exp
 		return payload
 	}
 
-	billingText := generateBillingHeader(payload, experimentalCCHSigning, version, messageText, entrypoint, workload)
-	billingBlock := buildTextBlock(billingText, nil)
-
 	// Build system blocks matching real Claude Code structure.
 	// Important: Claude Code's internal cacheScope='org' does NOT serialize to
 	// scope='org' in the API request. Only scope='global' is sent explicitly.
@@ -1597,7 +1596,14 @@ func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, exp
 	}, "\n\n")
 	staticBlock := buildTextBlock(staticPrompt, nil)
 
-	systemResult := "[" + billingBlock + "," + agentBlock + "," + staticBlock + "]"
+	var systemResult string
+	if injectBillingHeader {
+		billingText := generateBillingHeader(payload, experimentalCCHSigning, version, messageText, entrypoint, workload)
+		billingBlock := buildTextBlock(billingText, nil)
+		systemResult = "[" + billingBlock + "," + agentBlock + "," + staticBlock + "]"
+	} else {
+		systemResult = "[" + agentBlock + "," + staticBlock + "]"
+	}
 	payload, _ = sjson.SetRawBytes(payload, "system", []byte(systemResult))
 
 	// Collect user system instructions and prepend to first user message
@@ -1764,7 +1770,7 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 		billingVersion := helps.DefaultClaudeVersion(cfg)
 		entrypoint := parseEntrypointFromUA(clientUserAgent)
 		workload := getWorkloadFromContext(ctx)
-		payload = checkSystemInstructionsWithSigningMode(payload, strictMode, useCCHSigning, oauthToken, levers.SanitizeSystemPrompt, billingVersion, entrypoint, workload)
+		payload = checkSystemInstructionsWithSigningMode(payload, strictMode, useCCHSigning, oauthToken, levers.SanitizeSystemPrompt, levers.InjectBillingHeader, billingVersion, entrypoint, workload)
 	}
 
 	// Inject fake user ID
