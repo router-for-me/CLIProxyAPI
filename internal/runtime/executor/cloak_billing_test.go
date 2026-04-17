@@ -104,3 +104,36 @@ func TestBilling_DisabledDoesNotForceCCHSigning(t *testing.T) {
 		t.Errorf("billing header injected despite InjectBillingHeader=false: %s", firstText)
 	}
 }
+
+// testPlainAPIKey is a non-OAuth API key (no "sk-ant-oat" prefix) for testing non-OAuth paths.
+const testPlainAPIKey = "sk-ant-FAKE-NOT-AN-OAUTH-KEY"
+
+// TestApplyCloaking_NonOAuthAlwaysInjectsBillingHeader is a regression test ensuring that
+// non-OAuth (plain Claude API-key) traffic always injects the billing block even when
+// OAuthInjectBillingHeader is explicitly set to false in the cloaking config.
+//
+// Without the oauthToken discriminator gate, a non-OAuth request with
+// OAuthInjectBillingHeader=false would incorrectly skip billing injection.
+func TestApplyCloaking_NonOAuthAlwaysInjectsBillingHeader(t *testing.T) {
+	disable := false
+	cfg := &config.Config{
+		ClaudeKey: []config.ClaudeKey{{
+			APIKey: testPlainAPIKey,
+			Cloak: &config.CloakConfig{
+				Mode:                     "always",
+				OAuthInjectBillingHeader: &disable, // lever says skip billing
+			},
+		}},
+	}
+	auth := &clipproxyauth.Auth{Attributes: map[string]string{"api_key": testPlainAPIKey}}
+	payload := []byte(`{"system":"My system","messages":[{"role":"user","content":"hello"}]}`)
+
+	// Use a non-OAuth key — isClaudeOAuthToken returns false for this key.
+	out := applyCloaking(context.Background(), cfg, auth, payload, "claude-3-5-sonnet-20241022", testPlainAPIKey)
+
+	// Billing block must be present regardless of the lever value.
+	firstText := gjson.GetBytes(out, "system.0.text").String()
+	if !strings.HasPrefix(firstText, "x-anthropic-billing-header:") {
+		t.Errorf("expected billing header in system[0] for non-OAuth traffic even when OAuthInjectBillingHeader=false, got: %s", firstText)
+	}
+}
