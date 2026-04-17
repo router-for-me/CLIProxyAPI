@@ -4,7 +4,6 @@
 package executor
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"fmt"
@@ -30,9 +29,6 @@ const (
 
 	// glAPIVersion is the API version used for Gemini requests.
 	glAPIVersion = "v1beta"
-
-	// streamScannerBuffer is the buffer size for SSE stream scanning.
-	streamScannerBuffer = 52_428_800
 )
 
 // GeminiExecutor is a stateless executor for the official Gemini API using API keys.
@@ -133,7 +129,10 @@ func (e *GeminiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	body = fixGeminiImageAspectRatio(baseModel, body)
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
-	body, _ = sjson.SetBytes(body, "model", baseModel)
+	body = helps.EditJSONBytes(body,
+		helps.SetJSONEdit("model", baseModel),
+		helps.DeleteJSONEdit("session_id"),
+	)
 
 	action := "generateContent"
 	if req.Metadata != nil {
@@ -146,8 +145,6 @@ func (e *GeminiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if opts.Alt != "" && action != "countTokens" {
 		url = url + fmt.Sprintf("?$alt=%s", opts.Alt)
 	}
-
-	body, _ = sjson.DeleteBytes(body, "session_id")
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
@@ -169,7 +166,7 @@ func (e *GeminiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 		URL:       url,
 		Method:    http.MethodPost,
-		Headers:   httpReq.Header.Clone(),
+		Headers:   httpReq.Header,
 		Body:      body,
 		Provider:  e.Identifier(),
 		AuthID:    authID,
@@ -189,7 +186,7 @@ func (e *GeminiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 			log.Errorf("gemini executor: close response body error: %v", errClose)
 		}
 	}()
-	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header)
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		b, _ := io.ReadAll(httpResp.Body)
 		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
@@ -240,7 +237,10 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	body = fixGeminiImageAspectRatio(baseModel, body)
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
-	body, _ = sjson.SetBytes(body, "model", baseModel)
+	body = helps.EditJSONBytes(body,
+		helps.SetJSONEdit("model", baseModel),
+		helps.DeleteJSONEdit("session_id"),
+	)
 
 	baseURL := resolveGeminiBaseURL(auth)
 	url := fmt.Sprintf("%s/%s/models/%s:%s", baseURL, glAPIVersion, baseModel, "streamGenerateContent")
@@ -249,8 +249,6 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	} else {
 		url = url + fmt.Sprintf("?$alt=%s", opts.Alt)
 	}
-
-	body, _ = sjson.DeleteBytes(body, "session_id")
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
@@ -272,7 +270,7 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 		URL:       url,
 		Method:    http.MethodPost,
-		Headers:   httpReq.Header.Clone(),
+		Headers:   httpReq.Header,
 		Body:      body,
 		Provider:  e.Identifier(),
 		AuthID:    authID,
@@ -287,7 +285,7 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return nil, err
 	}
-	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header)
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		b, _ := io.ReadAll(httpResp.Body)
 		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
@@ -298,7 +296,7 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
 		return nil, err
 	}
-	out := make(chan cliproxyexecutor.StreamChunk)
+	out := make(chan cliproxyexecutor.StreamChunk, helps.StreamChunkBufferSize)
 	go func() {
 		defer close(out)
 		defer func() {
@@ -306,33 +304,31 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				log.Errorf("gemini executor: close response body error: %v", errClose)
 			}
 		}()
-		scanner := bufio.NewScanner(httpResp.Body)
-		scanner.Buffer(nil, streamScannerBuffer)
 		var param any
-		for scanner.Scan() {
-			line := scanner.Bytes()
+		errRead := helps.ReadStreamLines(httpResp.Body, func(line []byte) error {
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			filtered := helps.FilterSSEUsageMetadata(line)
 			payload := helps.JSONPayload(filtered)
 			if len(payload) == 0 {
-				continue
+				return nil
 			}
 			if detail, ok := helps.ParseGeminiStreamUsage(payload); ok {
 				reporter.Publish(ctx, detail)
 			}
-			lines := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, body, bytes.Clone(payload), &param)
+			lines := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, body, payload, &param)
 			for i := range lines {
 				out <- cliproxyexecutor.StreamChunk{Payload: lines[i]}
 			}
-		}
+			return nil
+		})
 		lines := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, body, []byte("[DONE]"), &param)
 		for i := range lines {
 			out <- cliproxyexecutor.StreamChunk{Payload: lines[i]}
 		}
-		if errScan := scanner.Err(); errScan != nil {
-			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
+		if errRead != nil {
+			helps.RecordAPIResponseError(ctx, e.cfg, errRead)
 			reporter.PublishFailure(ctx)
-			out <- cliproxyexecutor.StreamChunk{Err: errScan}
+			out <- cliproxyexecutor.StreamChunk{Err: errRead}
 		}
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
@@ -355,10 +351,12 @@ func (e *GeminiExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 
 	translatedReq = fixGeminiImageAspectRatio(baseModel, translatedReq)
 	respCtx := context.WithValue(ctx, "alt", opts.Alt)
-	translatedReq, _ = sjson.DeleteBytes(translatedReq, "tools")
-	translatedReq, _ = sjson.DeleteBytes(translatedReq, "generationConfig")
-	translatedReq, _ = sjson.DeleteBytes(translatedReq, "safetySettings")
-	translatedReq, _ = sjson.SetBytes(translatedReq, "model", baseModel)
+	translatedReq = helps.EditJSONBytes(translatedReq,
+		helps.DeleteJSONEdit("tools"),
+		helps.DeleteJSONEdit("generationConfig"),
+		helps.DeleteJSONEdit("safetySettings"),
+		helps.SetJSONEdit("model", baseModel),
+	)
 
 	baseURL := resolveGeminiBaseURL(auth)
 	url := fmt.Sprintf("%s/%s/models/%s:%s", baseURL, glAPIVersion, baseModel, "countTokens")
@@ -385,7 +383,7 @@ func (e *GeminiExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 		URL:       url,
 		Method:    http.MethodPost,
-		Headers:   httpReq.Header.Clone(),
+		Headers:   httpReq.Header,
 		Body:      translatedReq,
 		Provider:  e.Identifier(),
 		AuthID:    authID,
@@ -405,7 +403,7 @@ func (e *GeminiExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 			helps.LogWithRequestID(ctx).Errorf("response body close error: %v", errClose)
 		}
 	}()
-	helps.RecordAPIResponseMetadata(ctx, e.cfg, resp.StatusCode, resp.Header.Clone())
+	helps.RecordAPIResponseMetadata(ctx, e.cfg, resp.StatusCode, resp.Header)
 
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {

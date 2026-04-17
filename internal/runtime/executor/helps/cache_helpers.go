@@ -10,12 +10,9 @@ type CodexCache struct {
 	Expire time.Time
 }
 
-// codexCacheMap stores prompt cache IDs keyed by model+user_id.
-// Protected by codexCacheMu. Entries expire after 1 hour.
-var (
-	codexCacheMap = make(map[string]CodexCache)
-	codexCacheMu  sync.RWMutex
-)
+// codexCacheStore stores prompt cache IDs keyed by model+user_id.
+// Entries are sharded to reduce write contention under concurrent access.
+var codexCacheStore = newShardedStringMap[CodexCache]()
 
 // codexCacheCleanupInterval controls how often expired entries are purged.
 const codexCacheCleanupInterval = 15 * time.Minute
@@ -35,25 +32,23 @@ func startCodexCacheCleanup() {
 	}()
 }
 
-// purgeExpiredCodexCache removes entries that have expired.
+// purgeExpiredCodexCache removes expired entries from one shard per run.
 func purgeExpiredCodexCache() {
-	now := time.Now()
-	codexCacheMu.Lock()
-	defer codexCacheMu.Unlock()
-	for key, cache := range codexCacheMap {
-		if cache.Expire.Before(now) {
-			delete(codexCacheMap, key)
-		}
-	}
+	codexCacheStore.cleanupNextShard(time.Now(), func(cache CodexCache, now time.Time) bool {
+		return cache.Expire.Before(now)
+	})
 }
 
 // GetCodexCache retrieves a cached entry, returning ok=false if not found or expired.
 func GetCodexCache(key string) (CodexCache, bool) {
 	codexCacheCleanupOnce.Do(startCodexCacheCleanup)
-	codexCacheMu.RLock()
-	cache, ok := codexCacheMap[key]
-	codexCacheMu.RUnlock()
-	if !ok || cache.Expire.Before(time.Now()) {
+	cache, ok := codexCacheStore.load(key)
+	if !ok {
+		return CodexCache{}, false
+	}
+	now := time.Now()
+	if cache.Expire.Before(now) {
+		deleteExpiredCodexCache(key, now)
 		return CodexCache{}, false
 	}
 	return cache, true
@@ -62,7 +57,15 @@ func GetCodexCache(key string) (CodexCache, bool) {
 // SetCodexCache stores a cache entry.
 func SetCodexCache(key string, cache CodexCache) {
 	codexCacheCleanupOnce.Do(startCodexCacheCleanup)
-	codexCacheMu.Lock()
-	codexCacheMap[key] = cache
-	codexCacheMu.Unlock()
+	codexCacheStore.store(key, cache)
+}
+
+func deleteExpiredCodexCache(key string, now time.Time) {
+	shard := codexCacheStore.shardForKey(key)
+	shard.mu.Lock()
+	entry, ok := shard.entries[key]
+	if ok && entry.Expire.Before(now) {
+		delete(shard.entries, key)
+	}
+	shard.mu.Unlock()
 }

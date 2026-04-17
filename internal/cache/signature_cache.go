@@ -43,6 +43,13 @@ type groupCache struct {
 	entries map[string]SignatureEntry
 }
 
+func missingCachedSignature(groupKey string) string {
+	if groupKey == "gemini" {
+		return "skip_thought_signature_validator"
+	}
+	return ""
+}
+
 // hashText creates a stable, Unicode-safe key from text content
 func hashText(text string) string {
 	h := sha256.Sum256([]byte(text))
@@ -124,48 +131,49 @@ func GetCachedSignature(modelName, text string) string {
 	groupKey := GetModelGroup(modelName)
 
 	if text == "" {
-		if groupKey == "gemini" {
-			return "skip_thought_signature_validator"
-		}
-		return ""
+		return missingCachedSignature(groupKey)
 	}
 	val, ok := signatureCache.Load(groupKey)
 	if !ok {
-		if groupKey == "gemini" {
-			return "skip_thought_signature_validator"
-		}
-		return ""
+		return missingCachedSignature(groupKey)
 	}
 	sc := val.(*groupCache)
-
 	textHash := hashText(text)
-
 	now := time.Now()
+	if signature, ok := lookupCachedSignature(sc, textHash, now); ok {
+		return signature
+	}
+	return missingCachedSignature(groupKey)
+}
 
+func lookupCachedSignature(sc *groupCache, textHash string, now time.Time) (string, bool) {
+	sc.mu.RLock()
+	entry, exists := sc.entries[textHash]
+	if exists && now.Sub(entry.Timestamp) <= SignatureCacheTTL {
+		sc.mu.RUnlock()
+		return entry.Signature, true
+	}
+	sc.mu.RUnlock()
+
+	if !exists {
+		return "", false
+	}
+	return removeExpiredSignature(sc, textHash, now)
+}
+
+func removeExpiredSignature(sc *groupCache, textHash string, now time.Time) (string, bool) {
 	sc.mu.Lock()
+	defer sc.mu.Unlock()
+
 	entry, exists := sc.entries[textHash]
 	if !exists {
-		sc.mu.Unlock()
-		if groupKey == "gemini" {
-			return "skip_thought_signature_validator"
-		}
-		return ""
+		return "", false
 	}
 	if now.Sub(entry.Timestamp) > SignatureCacheTTL {
 		delete(sc.entries, textHash)
-		sc.mu.Unlock()
-		if groupKey == "gemini" {
-			return "skip_thought_signature_validator"
-		}
-		return ""
+		return "", false
 	}
-
-	// Refresh TTL on access (sliding expiration).
-	entry.Timestamp = now
-	sc.entries[textHash] = entry
-	sc.mu.Unlock()
-
-	return entry.Signature
+	return entry.Signature, true
 }
 
 // ClearSignatureCache clears signature cache for a specific model group or all groups.

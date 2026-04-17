@@ -13,12 +13,32 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-var proxyTransportCache sync.Map
+const (
+	pooledTransportMaxIdleConns        = 512
+	pooledTransportMaxIdleConnsPerHost = 64
+	pooledTransportIdleConnTimeout     = 90 * time.Second
+	defaultClientCacheKey              = "default"
+)
 
-// NewProxyAwareHTTPClient creates an HTTP client with proper proxy configuration priority:
-// 1. Use auth.ProxyURL if configured (highest priority)
-// 2. Use cfg.ProxyURL if auth proxy is not configured
-// 3. Use RoundTripper from context if neither are configured
+type clientCacheKey struct {
+	timeout      time.Duration
+	transportKey string
+}
+
+var (
+	defaultTransport     http.RoundTripper
+	defaultTransportOnce sync.Once
+	httpClientCache      sync.Map
+	proxyTransportCache  sync.Map
+)
+
+// NewProxyAwareHTTPClient creates an HTTP client with pooled transport reuse.
+// Priority:
+// 1. Use the context RoundTripper when auth.ProxyURL is managed upstream.
+// 2. Use auth.ProxyURL if configured.
+// 3. Use cfg.ProxyURL if auth proxy is not configured.
+// 4. Use the context RoundTripper when no explicit proxy is configured.
+// 5. Fall back to the shared default transport.
 //
 // Parameters:
 //   - ctx: The context containing optional RoundTripper
@@ -29,46 +49,24 @@ var proxyTransportCache sync.Map
 // Returns:
 //   - *http.Client: An HTTP client with configured proxy or transport
 func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
-	httpClient := &http.Client{}
-	if timeout > 0 {
-		httpClient.Timeout = timeout
+	if rt := contextRoundTripper(ctx); rt != nil && authProxyURL(auth) != "" {
+		return newHTTPClient(rt, timeout)
 	}
 
-	if rt, ok := ctx.Value("cliproxy.roundtripper").(http.RoundTripper); ok && rt != nil {
-		if auth != nil && strings.TrimSpace(auth.ProxyURL) != "" {
-			httpClient.Transport = rt
-			return httpClient
-		}
-	}
-
-	// Priority 1: Use auth.ProxyURL if configured
-	var proxyURL string
-	if auth != nil {
-		proxyURL = strings.TrimSpace(auth.ProxyURL)
-	}
-
-	// Priority 2: Use cfg.ProxyURL if auth proxy is not configured
-	if proxyURL == "" && cfg != nil {
-		proxyURL = strings.TrimSpace(cfg.ProxyURL)
-	}
-
-	// If we have a proxy URL configured, set up the transport
+	proxyURL := resolvedProxyURL(cfg, auth)
 	if proxyURL != "" {
 		transport := cachedProxyTransport(proxyURL)
 		if transport != nil {
-			httpClient.Transport = transport
-			return httpClient
+			return cachedHTTPClient("proxy:"+proxyURL, transport, timeout)
 		}
-		// If proxy setup failed, log and fall through to context RoundTripper
 		log.Debugf("failed to setup proxy from URL: %s, falling back to context transport", proxyURL)
 	}
 
-	// Priority 3: Use RoundTripper from context (typically from RoundTripperFor)
-	if rt, ok := ctx.Value("cliproxy.roundtripper").(http.RoundTripper); ok && rt != nil {
-		httpClient.Transport = rt
+	if rt := contextRoundTripper(ctx); rt != nil {
+		return newHTTPClient(rt, timeout)
 	}
 
-	return httpClient
+	return cachedHTTPClient(defaultClientCacheKey, cachedDefaultTransport(), timeout)
 }
 
 func cachedProxyTransport(proxyURL string) http.RoundTripper {
@@ -94,6 +92,61 @@ func cachedProxyTransport(proxyURL string) http.RoundTripper {
 	return transport
 }
 
+func cachedDefaultTransport() http.RoundTripper {
+	defaultTransportOnce.Do(func() {
+		defaultTransport = buildPooledTransport(cloneDefaultTransport())
+	})
+	return defaultTransport
+}
+
+func cachedHTTPClient(transportKey string, transport http.RoundTripper, timeout time.Duration) *http.Client {
+	key := clientCacheKey{timeout: timeout, transportKey: transportKey}
+	if cached, ok := httpClientCache.Load(key); ok {
+		if client, okClient := cached.(*http.Client); okClient {
+			return client
+		}
+	}
+
+	client := newHTTPClient(transport, timeout)
+	actual, _ := httpClientCache.LoadOrStore(key, client)
+	if cached, ok := actual.(*http.Client); ok {
+		return cached
+	}
+	return client
+}
+
+func newHTTPClient(transport http.RoundTripper, timeout time.Duration) *http.Client {
+	return &http.Client{
+		Timeout:   timeout,
+		Transport: transport,
+	}
+}
+
+func contextRoundTripper(ctx context.Context) http.RoundTripper {
+	if ctx == nil {
+		return nil
+	}
+	rt, _ := ctx.Value("cliproxy.roundtripper").(http.RoundTripper)
+	return rt
+}
+
+func resolvedProxyURL(cfg *config.Config, auth *cliproxyauth.Auth) string {
+	if proxyURL := authProxyURL(auth); proxyURL != "" {
+		return proxyURL
+	}
+	if cfg == nil {
+		return ""
+	}
+	return strings.TrimSpace(cfg.ProxyURL)
+}
+
+func authProxyURL(auth *cliproxyauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	return strings.TrimSpace(auth.ProxyURL)
+}
+
 // buildProxyTransport creates an HTTP transport configured for the given proxy URL.
 // It supports SOCKS5, HTTP, and HTTPS proxy protocols.
 //
@@ -108,5 +161,26 @@ func buildProxyTransport(proxyURL string) *http.Transport {
 		log.Errorf("%v", errBuild)
 		return nil
 	}
+	return buildPooledTransport(transport)
+}
+
+func cloneDefaultTransport() *http.Transport {
+	if transport, ok := http.DefaultTransport.(*http.Transport); ok && transport != nil {
+		return transport.Clone()
+	}
+	return &http.Transport{}
+}
+
+func buildPooledTransport(base *http.Transport) *http.Transport {
+	if base == nil {
+		base = &http.Transport{}
+	}
+
+	transport := base.Clone()
+	transport.MaxIdleConns = pooledTransportMaxIdleConns
+	transport.MaxIdleConnsPerHost = pooledTransportMaxIdleConnsPerHost
+	transport.MaxConnsPerHost = 0
+	transport.IdleConnTimeout = pooledTransportIdleConnTimeout
+	transport.ForceAttemptHTTP2 = true
 	return transport
 }

@@ -279,11 +279,8 @@ func (o *CodexAuth) RefreshTokensWithRetry(ctx context.Context, refreshToken str
 
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		if attempt > 0 {
-			// Wait before retry
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-time.After(time.Duration(attempt) * time.Second):
+			if errWait := refreshRetryWait(ctx, refreshRetryDelay(attempt)); errWait != nil {
+				return nil, errWait
 			}
 		}
 

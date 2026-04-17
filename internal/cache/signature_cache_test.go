@@ -191,26 +191,61 @@ func TestCacheSignature_Overwrite(t *testing.T) {
 	}
 }
 
-// Note: TTL expiration test is tricky to test without mocking time
-// We test the logic path exists but actual expiration would require time manipulation
 func TestCacheSignature_ExpirationLogic(t *testing.T) {
 	ClearSignatureCache("")
 
-	// This test verifies the expiration check exists
-	// In a real scenario, we'd mock time.Now()
 	text := "text"
 	sig := "validSig1234567890123456789012345678901234567890123456"
-
 	CacheSignature(testModelName, text, sig)
+	groupKey := GetModelGroup(testModelName)
+	textHash := hashText(text)
+	sc := getOrCreateGroupCache(groupKey)
 
-	// Fresh entry should be retrievable
-	if got := GetCachedSignature(testModelName, text); got != sig {
-		t.Errorf("Fresh entry should be retrievable, got '%s'", got)
+	sc.mu.Lock()
+	entry := sc.entries[textHash]
+	entry.Timestamp = time.Now().Add(-(SignatureCacheTTL + time.Minute))
+	sc.entries[textHash] = entry
+	sc.mu.Unlock()
+
+	if got := GetCachedSignature(testModelName, text); got != "" {
+		t.Errorf("Expired entry should not be retrievable, got '%s'", got)
 	}
 
-	// We can't easily test actual expiration without time mocking
-	// but the logic is verified by the implementation
-	_ = time.Now() // Acknowledge we're not testing time passage
+	sc.mu.RLock()
+	_, exists := sc.entries[textHash]
+	sc.mu.RUnlock()
+	if exists {
+		t.Fatal("expected expired cache entry to be removed")
+	}
+}
+
+func TestCacheSignature_GetDoesNotRefreshTTL(t *testing.T) {
+	ClearSignatureCache("")
+
+	text := "text"
+	sig := "validSig1234567890123456789012345678901234567890123456"
+	CacheSignature(testModelName, text, sig)
+	groupKey := GetModelGroup(testModelName)
+	textHash := hashText(text)
+	sc := getOrCreateGroupCache(groupKey)
+	expectedTimestamp := time.Now().Add(-time.Hour).Round(0)
+
+	sc.mu.Lock()
+	entry := sc.entries[textHash]
+	entry.Timestamp = expectedTimestamp
+	sc.entries[textHash] = entry
+	sc.mu.Unlock()
+
+	if got := GetCachedSignature(testModelName, text); got != sig {
+		t.Fatalf("Expected signature '%s', got '%s'", sig, got)
+	}
+
+	sc.mu.RLock()
+	stored := sc.entries[textHash]
+	sc.mu.RUnlock()
+	if !stored.Timestamp.Equal(expectedTimestamp) {
+		t.Fatalf("expected GetCachedSignature to keep absolute TTL timestamp %s, got %s", expectedTimestamp, stored.Timestamp)
+	}
 }
 
 func TestSignatureModeSetters_LogAtInfoLevel(t *testing.T) {

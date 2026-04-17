@@ -185,13 +185,15 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
-	body, _ = sjson.SetBytes(body, "model", baseModel)
-	body, _ = sjson.SetBytes(body, "stream", true)
-	body, _ = sjson.DeleteBytes(body, "previous_response_id")
-	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
-	body, _ = sjson.DeleteBytes(body, "safety_identifier")
+	body = helps.EditJSONBytes(body,
+		helps.SetJSONEdit("model", baseModel),
+		helps.SetJSONEdit("stream", true),
+		helps.DeleteJSONEdit("previous_response_id"),
+		helps.DeleteJSONEdit("prompt_cache_retention"),
+		helps.DeleteJSONEdit("safety_identifier"),
+	)
 	if !gjson.GetBytes(body, "instructions").Exists() {
-		body, _ = sjson.SetBytes(body, "instructions", "")
+		body, _ = helps.SetJSONBytes(body, "instructions", "")
 	}
 
 	httpURL := strings.TrimSuffix(baseURL, "/") + "/responses"
@@ -222,7 +224,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	wsReqLog := helps.UpstreamRequestLog{
 		URL:       wsURL,
 		Method:    "WEBSOCKET",
-		Headers:   wsHeaders.Clone(),
+		Headers:   wsHeaders,
 		Body:      wsReqBody,
 		Provider:  e.Identifier(),
 		AuthID:    authID,
@@ -236,7 +238,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	if errDial != nil {
 		bodyErr := websocketHandshakeBody(respHS)
 		if respHS != nil {
-			helps.RecordAPIWebsocketUpgradeRejection(ctx, e.cfg, websocketUpgradeRequestLog(wsReqLog), respHS.StatusCode, respHS.Header.Clone(), bodyErr)
+			helps.RecordAPIWebsocketUpgradeRejection(ctx, e.cfg, websocketUpgradeRequestLog(wsReqLog), respHS.StatusCode, respHS.Header, bodyErr)
 		}
 		if respHS != nil && respHS.StatusCode == http.StatusUpgradeRequired {
 			return e.CodexExecutor.Execute(ctx, auth, req, opts)
@@ -282,7 +284,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 				helps.RecordAPIWebsocketRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 					URL:       wsURL,
 					Method:    "WEBSOCKET",
-					Headers:   wsHeaders.Clone(),
+					Headers:   wsHeaders,
 					Body:      wsReqBodyRetry,
 					Provider:  e.Identifier(),
 					AuthID:    authID,
@@ -417,7 +419,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	wsReqLog := helps.UpstreamRequestLog{
 		URL:       wsURL,
 		Method:    "WEBSOCKET",
-		Headers:   wsHeaders.Clone(),
+		Headers:   wsHeaders,
 		Body:      wsReqBody,
 		Provider:  e.Identifier(),
 		AuthID:    authID,
@@ -435,7 +437,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	if errDial != nil {
 		bodyErr := websocketHandshakeBody(respHS)
 		if respHS != nil {
-			helps.RecordAPIWebsocketUpgradeRejection(ctx, e.cfg, websocketUpgradeRequestLog(wsReqLog), respHS.StatusCode, respHS.Header.Clone(), bodyErr)
+			helps.RecordAPIWebsocketUpgradeRejection(ctx, e.cfg, websocketUpgradeRequestLog(wsReqLog), respHS.StatusCode, respHS.Header, bodyErr)
 		}
 		if respHS != nil && respHS.StatusCode == http.StatusUpgradeRequired {
 			return e.CodexExecutor.ExecuteStream(ctx, auth, req, opts)
@@ -479,7 +481,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			helps.RecordAPIWebsocketRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 				URL:       wsURL,
 				Method:    "WEBSOCKET",
-				Headers:   wsHeaders.Clone(),
+				Headers:   wsHeaders,
 				Body:      wsReqBodyRetry,
 				Provider:  e.Identifier(),
 				AuthID:    authID,
@@ -506,7 +508,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		}
 	}
 
-	out := make(chan cliproxyexecutor.StreamChunk)
+	out := make(chan cliproxyexecutor.StreamChunk, helps.StreamChunkBufferSize)
 	go func() {
 		terminateReason := "completed"
 		var terminateErr error
@@ -802,7 +804,7 @@ func applyCodexPromptCacheHeaders(from sdktranslator.Format, req cliproxyexecuto
 	}
 
 	if cache.ID != "" {
-		rawJSON, _ = sjson.SetBytes(rawJSON, "prompt_cache_key", cache.ID)
+		rawJSON, _ = helps.SetJSONBytes(rawJSON, "prompt_cache_key", cache.ID)
 		headers.Set("Conversation_id", cache.ID)
 	}
 
@@ -1062,7 +1064,7 @@ func recordAPIWebsocketHandshake(ctx context.Context, cfg *config.Config, resp *
 	if resp == nil {
 		return
 	}
-	helps.RecordAPIWebsocketHandshake(ctx, cfg, resp.StatusCode, resp.Header.Clone())
+	helps.RecordAPIWebsocketHandshake(ctx, cfg, resp.StatusCode, resp.Header)
 	closeHTTPResponseBody(resp, "codex websockets executor: close handshake response body error")
 }
 

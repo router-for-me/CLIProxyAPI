@@ -23,6 +23,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	log "github.com/sirupsen/logrus"
+	"golang.org/x/sync/singleflight"
 )
 
 // ProviderExecutor defines the contract required by Manager to execute provider calls.
@@ -182,6 +183,7 @@ type Manager struct {
 	// Auto refresh state
 	refreshCancel      context.CancelFunc
 	refreshLoop        *authAutoRefreshLoop
+	refreshGroup       singleflight.Group
 	refreshSemaphore   chan struct{}
 	refreshBatchCursor int
 
@@ -3434,17 +3436,7 @@ func (m *Manager) checkRefreshes(ctx context.Context) {
 }
 
 func (m *Manager) refreshAuthWithLimit(ctx context.Context, id string) {
-	if m.refreshSemaphore == nil {
-		m.refreshAuth(ctx, id)
-		return
-	}
-	select {
-	case m.refreshSemaphore <- struct{}{}:
-		defer func() { <-m.refreshSemaphore }()
-	case <-ctx.Done():
-		return
-	}
-	m.refreshAuth(ctx, id)
+	m.refreshAuthShared(ctx, id, true)
 }
 
 func (m *Manager) queueRefreshReschedule(authID string) {
@@ -3685,9 +3677,46 @@ func (m *Manager) markRefreshPending(id string, now time.Time) bool {
 }
 
 func (m *Manager) refreshAuth(ctx context.Context, id string) {
+	m.refreshAuthShared(ctx, id, false)
+}
+
+func (m *Manager) refreshAuthShared(ctx context.Context, id string, useLimit bool) {
+	if id == "" {
+		return
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	_, _, _ = m.refreshGroup.Do(id, func() (any, error) {
+		if !m.acquireRefreshSlot(ctx, useLimit) {
+			return nil, ctx.Err()
+		}
+		defer m.releaseRefreshSlot(useLimit)
+		m.refreshAuthOnce(ctx, id)
+		return nil, nil
+	})
+}
+
+func (m *Manager) acquireRefreshSlot(ctx context.Context, useLimit bool) bool {
+	if !useLimit || m.refreshSemaphore == nil {
+		return true
+	}
+	select {
+	case m.refreshSemaphore <- struct{}{}:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func (m *Manager) releaseRefreshSlot(useLimit bool) {
+	if !useLimit || m.refreshSemaphore == nil {
+		return
+	}
+	<-m.refreshSemaphore
+}
+
+func (m *Manager) refreshAuthOnce(ctx context.Context, id string) {
 	m.mu.RLock()
 	auth := m.auths[id]
 	var exec ProviderExecutor

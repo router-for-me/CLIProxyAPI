@@ -27,6 +27,7 @@ const (
 )
 
 // UpstreamRequestLog captures the outbound upstream request details for logging.
+// Headers are formatted synchronously and are not retained after the helper returns.
 type UpstreamRequestLog struct {
 	URL       string
 	Method    string

@@ -4,7 +4,6 @@
 package executor
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -167,22 +166,24 @@ func initAntigravityTransport() {
 
 // newAntigravityHTTPClient creates an HTTP client specifically for Antigravity,
 // enforcing HTTP/1.1 by disabling HTTP/2 to perfectly mimic Node.js https defaults.
-// The underlying Transport is a singleton to avoid leaking connection pools.
+// It copies the shared proxy-aware client so Antigravity-specific transport tweaks
+// never mutate the shared client cache.
 func newAntigravityHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
 	antigravityTransportOnce.Do(initAntigravityTransport)
 
-	client := helps.NewProxyAwareHTTPClient(ctx, cfg, auth, timeout)
+	baseClient := helps.NewProxyAwareHTTPClient(ctx, cfg, auth, timeout)
+	client := *baseClient
 	// If no transport is set, use the shared HTTP/1.1 transport.
 	if client.Transport == nil {
 		client.Transport = antigravityTransport
-		return client
+		return &client
 	}
 
 	// Preserve proxy settings from proxy-aware transports while forcing HTTP/1.1.
 	if transport, ok := client.Transport.(*http.Transport); ok {
 		client.Transport = cloneTransportWithHTTP11(transport)
 	}
-	return client
+	return &client
 }
 
 func validateAntigravityRequestSignatures(from sdktranslator.Format, rawJSON []byte) ([]byte, error) {
@@ -607,7 +608,7 @@ func (e *AntigravityExecutor) attemptCreditsFallback(
 		return httpResp, true
 	}
 
-	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header)
 	bodyBytes, errRead := io.ReadAll(httpResp.Body)
 	if errClose := httpResp.Body.Close(); errClose != nil {
 		log.Errorf("antigravity executor: close credits fallback response body error: %v", errClose)
@@ -764,7 +765,7 @@ attemptLoop:
 				return resp, err
 			}
 
-			helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+			helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header)
 			bodyBytes, errRead := io.ReadAll(httpResp.Body)
 			if errClose := httpResp.Body.Close(); errClose != nil {
 				log.Errorf("antigravity executor: close response body error: %v", errClose)
@@ -803,7 +804,7 @@ attemptLoop:
 					} else {
 						creditsResp, _ := e.attemptCreditsFallback(ctx, auth, httpClient, token, baseModel, translated, false, opts.Alt, baseURL, bodyBytes)
 						if creditsResp != nil {
-							helps.RecordAPIResponseMetadata(ctx, e.cfg, creditsResp.StatusCode, creditsResp.Header.Clone())
+							helps.RecordAPIResponseMetadata(ctx, e.cfg, creditsResp.StatusCode, creditsResp.Header)
 							creditsBody, errCreditsRead := io.ReadAll(creditsResp.Body)
 							if errClose := creditsResp.Body.Close(); errClose != nil {
 								log.Errorf("antigravity executor: close credits success response body error: %v", errClose)
@@ -977,7 +978,7 @@ attemptLoop:
 				err = errDo
 				return resp, err
 			}
-			helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+			helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header)
 			if httpResp.StatusCode < http.StatusOK || httpResp.StatusCode >= http.StatusMultipleChoices {
 				bodyBytes, errRead := io.ReadAll(httpResp.Body)
 				if errClose := httpResp.Body.Close(); errClose != nil {
@@ -1033,7 +1034,7 @@ attemptLoop:
 							creditsResp, _ := e.attemptCreditsFallback(ctx, auth, httpClient, token, baseModel, translated, true, opts.Alt, baseURL, bodyBytes)
 							if creditsResp != nil {
 								httpResp = creditsResp
-								helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+								helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header)
 							}
 						}
 					}
@@ -1086,7 +1087,7 @@ attemptLoop:
 			}
 
 		streamSuccessClaudeNonStream:
-			out := make(chan cliproxyexecutor.StreamChunk)
+			out := make(chan cliproxyexecutor.StreamChunk, helps.StreamChunkBufferSize)
 			go func(resp *http.Response) {
 				defer close(out)
 				defer func() {
@@ -1094,10 +1095,7 @@ attemptLoop:
 						log.Errorf("antigravity executor: close response body error: %v", errClose)
 					}
 				}()
-				scanner := bufio.NewScanner(resp.Body)
-				scanner.Buffer(nil, streamScannerBuffer)
-				for scanner.Scan() {
-					line := scanner.Bytes()
+				errRead := helps.ReadStreamLines(resp.Body, func(line []byte) error {
 					helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 
 					// Filter usage metadata for all models
@@ -1106,7 +1104,7 @@ attemptLoop:
 
 					payload := helps.JSONPayload(line)
 					if payload == nil {
-						continue
+						return nil
 					}
 
 					if detail, ok := helps.ParseAntigravityStreamUsage(payload); ok {
@@ -1114,11 +1112,12 @@ attemptLoop:
 					}
 
 					out <- cliproxyexecutor.StreamChunk{Payload: payload}
-				}
-				if errScan := scanner.Err(); errScan != nil {
-					helps.RecordAPIResponseError(ctx, e.cfg, errScan)
+					return nil
+				})
+				if errRead != nil {
+					helps.RecordAPIResponseError(ctx, e.cfg, errRead)
 					reporter.PublishFailure(ctx)
-					out <- cliproxyexecutor.StreamChunk{Err: errScan}
+					out <- cliproxyexecutor.StreamChunk{Err: errRead}
 				} else {
 					reporter.EnsurePublished(ctx)
 				}
@@ -1441,7 +1440,7 @@ attemptLoop:
 				err = errDo
 				return nil, err
 			}
-			helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+			helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header)
 			if httpResp.StatusCode < http.StatusOK || httpResp.StatusCode >= http.StatusMultipleChoices {
 				bodyBytes, errRead := io.ReadAll(httpResp.Body)
 				if errClose := httpResp.Body.Close(); errClose != nil {
@@ -1497,7 +1496,7 @@ attemptLoop:
 							creditsResp, _ := e.attemptCreditsFallback(ctx, auth, httpClient, token, baseModel, translated, true, opts.Alt, baseURL, bodyBytes)
 							if creditsResp != nil {
 								httpResp = creditsResp
-								helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+								helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header)
 							}
 						}
 					}
@@ -1550,7 +1549,7 @@ attemptLoop:
 			}
 
 		streamSuccessExecuteStream:
-			out := make(chan cliproxyexecutor.StreamChunk)
+			out := make(chan cliproxyexecutor.StreamChunk, helps.StreamChunkBufferSize)
 			go func(resp *http.Response) {
 				defer close(out)
 				defer func() {
@@ -1558,11 +1557,8 @@ attemptLoop:
 						log.Errorf("antigravity executor: close response body error: %v", errClose)
 					}
 				}()
-				scanner := bufio.NewScanner(resp.Body)
-				scanner.Buffer(nil, streamScannerBuffer)
 				var param any
-				for scanner.Scan() {
-					line := scanner.Bytes()
+				errRead := helps.ReadStreamLines(resp.Body, func(line []byte) error {
 					helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 
 					// Filter usage metadata for all models
@@ -1571,26 +1567,27 @@ attemptLoop:
 
 					payload := helps.JSONPayload(line)
 					if payload == nil {
-						continue
+						return nil
 					}
 
 					if detail, ok := helps.ParseAntigravityStreamUsage(payload); ok {
 						reporter.Publish(ctx, detail)
 					}
 
-					chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, bytes.Clone(payload), &param)
+					chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, payload, &param)
 					for i := range chunks {
 						out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}
 					}
-				}
+					return nil
+				})
 				tail := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, []byte("[DONE]"), &param)
 				for i := range tail {
 					out <- cliproxyexecutor.StreamChunk{Payload: tail[i]}
 				}
-				if errScan := scanner.Err(); errScan != nil {
-					helps.RecordAPIResponseError(ctx, e.cfg, errScan)
+				if errRead != nil {
+					helps.RecordAPIResponseError(ctx, e.cfg, errRead)
 					reporter.PublishFailure(ctx)
-					out <- cliproxyexecutor.StreamChunk{Err: errScan}
+					out <- cliproxyexecutor.StreamChunk{Err: errRead}
 				} else {
 					reporter.EnsurePublished(ctx)
 				}
@@ -1711,7 +1708,7 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 		helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 			URL:       requestURL.String(),
 			Method:    http.MethodPost,
-			Headers:   httpReq.Header.Clone(),
+			Headers:   httpReq.Header,
 			Body:      payload,
 			Provider:  e.Identifier(),
 			AuthID:    authID,
@@ -1736,7 +1733,7 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 			return cliproxyexecutor.Response{}, errDo
 		}
 
-		helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+		helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header)
 		bodyBytes, errRead := io.ReadAll(httpResp.Body)
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("antigravity executor: close response body error: %v", errClose)
@@ -2047,7 +2044,7 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 		URL:       requestURL.String(),
 		Method:    http.MethodPost,
-		Headers:   httpReq.Header.Clone(),
+		Headers:   httpReq.Header,
 		Body:      payloadLog,
 		Provider:  e.Identifier(),
 		AuthID:    authID,

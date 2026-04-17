@@ -22,7 +22,6 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 // AIStudioExecutor routes AI Studio requests through a websocket-backed transport.
@@ -96,7 +95,7 @@ func (e *AIStudioExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.A
 	wsReq := &wsrelay.HTTPRequest{
 		Method:  httpReq.Method,
 		URL:     httpReq.URL.String(),
-		Headers: httpReq.Header.Clone(),
+		Headers: httpReq.Header,
 		Body:    body,
 	}
 	wsResp, errRelay := e.relay.NonStream(ctx, auth.ID, wsReq)
@@ -159,7 +158,7 @@ func (e *AIStudioExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth,
 	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 		URL:       endpoint,
 		Method:    http.MethodPost,
-		Headers:   wsReq.Headers.Clone(),
+		Headers:   wsReq.Headers,
 		Body:      body.payload,
 		Provider:  e.Identifier(),
 		AuthID:    authID,
@@ -173,7 +172,7 @@ func (e *AIStudioExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth,
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return resp, err
 	}
-	helps.RecordAPIResponseMetadata(ctx, e.cfg, wsResp.Status, wsResp.Headers.Clone())
+	helps.RecordAPIResponseMetadata(ctx, e.cfg, wsResp.Status, wsResp.Headers)
 	if len(wsResp.Body) > 0 {
 		helps.AppendAPIResponseChunk(ctx, e.cfg, wsResp.Body)
 	}
@@ -223,7 +222,7 @@ func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 		URL:       endpoint,
 		Method:    http.MethodPost,
-		Headers:   wsReq.Headers.Clone(),
+		Headers:   wsReq.Headers,
 		Body:      body.payload,
 		Provider:  e.Identifier(),
 		AuthID:    authID,
@@ -245,7 +244,7 @@ func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 	if firstEvent.Status > 0 && firstEvent.Status != http.StatusOK {
 		metadataLogged := false
 		if firstEvent.Status > 0 {
-			helps.RecordAPIResponseMetadata(ctx, e.cfg, firstEvent.Status, firstEvent.Headers.Clone())
+			helps.RecordAPIResponseMetadata(ctx, e.cfg, firstEvent.Status, firstEvent.Headers)
 			metadataLogged = true
 		}
 		var body bytes.Buffer
@@ -265,7 +264,7 @@ func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 				break
 			}
 			if !metadataLogged && event.Status > 0 {
-				helps.RecordAPIResponseMetadata(ctx, e.cfg, event.Status, event.Headers.Clone())
+				helps.RecordAPIResponseMetadata(ctx, e.cfg, event.Status, event.Headers)
 				metadataLogged = true
 			}
 			if len(event.Payload) > 0 {
@@ -278,7 +277,7 @@ func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 		}
 		return nil, statusErr{code: firstEvent.Status, msg: body.String()}
 	}
-	out := make(chan cliproxyexecutor.StreamChunk)
+	out := make(chan cliproxyexecutor.StreamChunk, helps.StreamChunkBufferSize)
 	go func(first wsrelay.StreamEvent) {
 		defer close(out)
 		var param any
@@ -293,7 +292,7 @@ func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 			switch event.Type {
 			case wsrelay.MessageTypeStreamStart:
 				if !metadataLogged && event.Status > 0 {
-					helps.RecordAPIResponseMetadata(ctx, e.cfg, event.Status, event.Headers.Clone())
+					helps.RecordAPIResponseMetadata(ctx, e.cfg, event.Status, event.Headers)
 					metadataLogged = true
 				}
 			case wsrelay.MessageTypeStreamChunk:
@@ -313,7 +312,7 @@ func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 				return false
 			case wsrelay.MessageTypeHTTPResp:
 				if !metadataLogged && event.Status > 0 {
-					helps.RecordAPIResponseMetadata(ctx, e.cfg, event.Status, event.Headers.Clone())
+					helps.RecordAPIResponseMetadata(ctx, e.cfg, event.Status, event.Headers)
 					metadataLogged = true
 				}
 				if len(event.Payload) > 0 {
@@ -353,9 +352,11 @@ func (e *AIStudioExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.A
 		return cliproxyexecutor.Response{}, err
 	}
 
-	body.payload, _ = sjson.DeleteBytes(body.payload, "generationConfig")
-	body.payload, _ = sjson.DeleteBytes(body.payload, "tools")
-	body.payload, _ = sjson.DeleteBytes(body.payload, "safetySettings")
+	body.payload = helps.EditJSONBytes(body.payload,
+		helps.DeleteJSONEdit("generationConfig"),
+		helps.DeleteJSONEdit("tools"),
+		helps.DeleteJSONEdit("safetySettings"),
+	)
 
 	endpoint := e.buildEndpoint(baseModel, "countTokens", "")
 	wsReq := &wsrelay.HTTPRequest{
@@ -373,7 +374,7 @@ func (e *AIStudioExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.A
 	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 		URL:       endpoint,
 		Method:    http.MethodPost,
-		Headers:   wsReq.Headers.Clone(),
+		Headers:   wsReq.Headers,
 		Body:      body.payload,
 		Provider:  e.Identifier(),
 		AuthID:    authID,
@@ -386,7 +387,7 @@ func (e *AIStudioExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.A
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return cliproxyexecutor.Response{}, err
 	}
-	helps.RecordAPIResponseMetadata(ctx, e.cfg, resp.Status, resp.Headers.Clone())
+	helps.RecordAPIResponseMetadata(ctx, e.cfg, resp.Status, resp.Headers)
 	if len(resp.Body) > 0 {
 		helps.AppendAPIResponseChunk(ctx, e.cfg, resp.Body)
 	}
@@ -430,9 +431,11 @@ func (e *AIStudioExecutor) translateRequest(req cliproxyexecutor.Request, opts c
 	payload = fixGeminiImageAspectRatio(baseModel, payload)
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	payload = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", payload, originalTranslated, requestedModel)
-	payload, _ = sjson.DeleteBytes(payload, "generationConfig.maxOutputTokens")
-	payload, _ = sjson.DeleteBytes(payload, "generationConfig.responseMimeType")
-	payload, _ = sjson.DeleteBytes(payload, "generationConfig.responseJsonSchema")
+	payload = helps.EditJSONBytes(payload,
+		helps.DeleteJSONEdit("generationConfig.maxOutputTokens"),
+		helps.DeleteJSONEdit("generationConfig.responseMimeType"),
+		helps.DeleteJSONEdit("generationConfig.responseJsonSchema"),
+	)
 	metadataAction := "generateContent"
 	if req.Metadata != nil {
 		if action, _ := req.Metadata["action"].(string); action == "countTokens" {
@@ -443,7 +446,7 @@ func (e *AIStudioExecutor) translateRequest(req cliproxyexecutor.Request, opts c
 	if stream && action != "countTokens" {
 		action = "streamGenerateContent"
 	}
-	payload, _ = sjson.DeleteBytes(payload, "session_id")
+	payload, _ = helps.DeleteJSONBytes(payload, "session_id")
 	return payload, translatedPayload{payload: payload, action: action, toFormat: to}, nil
 }
 

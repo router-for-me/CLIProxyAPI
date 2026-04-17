@@ -1,6 +1,7 @@
 package helps
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 
@@ -8,7 +9,6 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 // ApplyPayloadConfigWithRoot behaves like applyPayloadConfig but treats all parameter
@@ -32,6 +32,9 @@ func ApplyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string
 	candidates := payloadModelCandidates(model, requestedModel)
 	out := payload
 	source := original
+	if len(source) == 0 && (len(rules.Default) > 0 || len(rules.DefaultRaw) > 0) {
+		source = bytes.Clone(payload)
+	}
 	if len(source) == 0 {
 		source = payload
 	}
@@ -53,7 +56,7 @@ func ApplyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string
 			if _, ok := appliedDefaults[fullPath]; ok {
 				continue
 			}
-			updated, errSet := sjson.SetBytes(out, fullPath, value)
+			updated, errSet := SetJSONBytes(out, fullPath, value)
 			if errSet != nil {
 				continue
 			}
@@ -82,7 +85,7 @@ func ApplyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string
 			if !ok {
 				continue
 			}
-			updated, errSet := sjson.SetRawBytes(out, fullPath, rawValue)
+			updated, errSet := SetRawJSONBytes(out, fullPath, rawValue)
 			if errSet != nil {
 				continue
 			}
@@ -101,7 +104,7 @@ func ApplyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string
 			if fullPath == "" {
 				continue
 			}
-			updated, errSet := sjson.SetBytes(out, fullPath, value)
+			updated, errSet := SetJSONBytes(out, fullPath, value)
 			if errSet != nil {
 				continue
 			}
@@ -123,7 +126,7 @@ func ApplyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string
 			if !ok {
 				continue
 			}
-			updated, errSet := sjson.SetRawBytes(out, fullPath, rawValue)
+			updated, errSet := SetRawJSONBytes(out, fullPath, rawValue)
 			if errSet != nil {
 				continue
 			}
@@ -141,7 +144,7 @@ func ApplyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string
 			if fullPath == "" {
 				continue
 			}
-			updated, errDel := sjson.DeleteBytes(out, fullPath)
+			updated, errDel := DeleteJSONBytes(out, fullPath)
 			if errDel != nil {
 				continue
 			}

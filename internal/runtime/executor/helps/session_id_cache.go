@@ -15,8 +15,7 @@ type sessionIDCacheEntry struct {
 }
 
 var (
-	sessionIDCache            = make(map[string]sessionIDCacheEntry)
-	sessionIDCacheMu          sync.RWMutex
+	sessionIDCacheStore       = newShardedStringMap[sessionIDCacheEntry]()
 	sessionIDCacheCleanupOnce sync.Once
 )
 
@@ -36,14 +35,9 @@ func startSessionIDCacheCleanup() {
 }
 
 func purgeExpiredSessionIDs() {
-	now := time.Now()
-	sessionIDCacheMu.Lock()
-	for key, entry := range sessionIDCache {
-		if !entry.expire.After(now) {
-			delete(sessionIDCache, key)
-		}
-	}
-	sessionIDCacheMu.Unlock()
+	sessionIDCacheStore.cleanupNextShard(time.Now(), func(entry sessionIDCacheEntry, now time.Time) bool {
+		return !entry.expire.After(now)
+	})
 }
 
 func sessionIDCacheKey(apiKey string) string {
@@ -61,32 +55,33 @@ func CachedSessionID(apiKey string) string {
 
 	key := sessionIDCacheKey(apiKey)
 	now := time.Now()
+	shard := sessionIDCacheStore.shardForKey(key)
 
-	sessionIDCacheMu.RLock()
-	entry, ok := sessionIDCache[key]
+	shard.mu.RLock()
+	entry, ok := shard.entries[key]
 	valid := ok && entry.value != "" && entry.expire.After(now)
-	sessionIDCacheMu.RUnlock()
+	shard.mu.RUnlock()
 	if valid {
-		sessionIDCacheMu.Lock()
-		entry = sessionIDCache[key]
+		shard.mu.Lock()
+		entry = shard.entries[key]
 		if entry.value != "" && entry.expire.After(now) {
 			entry.expire = now.Add(sessionIDTTL)
-			sessionIDCache[key] = entry
-			sessionIDCacheMu.Unlock()
+			shard.entries[key] = entry
+			shard.mu.Unlock()
 			return entry.value
 		}
-		sessionIDCacheMu.Unlock()
+		shard.mu.Unlock()
 	}
 
 	newID := uuid.New().String()
 
-	sessionIDCacheMu.Lock()
-	entry, ok = sessionIDCache[key]
+	shard.mu.Lock()
+	entry, ok = shard.entries[key]
 	if !ok || entry.value == "" || !entry.expire.After(now) {
 		entry.value = newID
 	}
 	entry.expire = now.Add(sessionIDTTL)
-	sessionIDCache[key] = entry
-	sessionIDCacheMu.Unlock()
+	shard.entries[key] = entry
+	shard.mu.Unlock()
 	return entry.value
 }
