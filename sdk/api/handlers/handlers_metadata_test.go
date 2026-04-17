@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	"golang.org/x/net/context"
 )
@@ -17,7 +16,6 @@ func TestRequestExecutionMetadataUsesIdempotencyHeader(t *testing.T) {
 	ginCtx, _ := gin.CreateTestContext(recorder)
 	ginCtx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	ginCtx.Request.Header.Set("Idempotency-Key", "client-key")
-	logging.SetGinRequestID(ginCtx, "req-ignored")
 
 	ctx := context.WithValue(context.Background(), "gin", ginCtx)
 	meta := requestExecutionMetadata(ctx)
@@ -27,17 +25,8 @@ func TestRequestExecutionMetadataUsesIdempotencyHeader(t *testing.T) {
 	}
 }
 
-func TestRequestExecutionMetadataFallsBackToRequestID(t *testing.T) {
-	ctx := logging.WithRequestID(context.Background(), "req-1234")
-	meta := requestExecutionMetadata(ctx)
-
-	if got := meta[idempotencyKeyMetadataKey]; got != "req-1234" {
-		t.Fatalf("idempotency key = %v, want req-1234", got)
-	}
-}
-
 func TestRequestExecutionMetadataIncludesExecutionHints(t *testing.T) {
-	base := logging.WithRequestID(context.Background(), "req-5678")
+	base := context.Background()
 	base = WithPinnedAuthID(base, "auth-1")
 	base = WithExecutionSessionID(base, "session-1")
 
@@ -47,8 +36,8 @@ func TestRequestExecutionMetadataIncludesExecutionHints(t *testing.T) {
 	})
 
 	meta := requestExecutionMetadata(base)
-	if got := meta[idempotencyKeyMetadataKey]; got != "req-5678" {
-		t.Fatalf("idempotency key = %v, want req-5678", got)
+	if _, ok := meta[idempotencyKeyMetadataKey]; ok {
+		t.Fatalf("unexpected idempotency key in metadata: %v", meta[idempotencyKeyMetadataKey])
 	}
 	if got := meta[coreexecutor.PinnedAuthMetadataKey]; got != "auth-1" {
 		t.Fatalf("pinned auth = %v, want auth-1", got)

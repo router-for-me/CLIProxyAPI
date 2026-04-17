@@ -16,7 +16,6 @@ var providerAppliers = map[string]ProviderApplier{
 	"claude":      nil,
 	"openai":      nil,
 	"codex":       nil,
-	"iflow":       nil,
 	"antigravity": nil,
 	"kimi":        nil,
 }
@@ -63,7 +62,7 @@ func IsUserDefinedModel(modelInfo *registry.ModelInfo) bool {
 //   - body: Original request body JSON
 //   - model: Model name, optionally with thinking suffix (e.g., "claude-sonnet-4-5(16384)")
 //   - fromFormat: Source request format (e.g., openai, codex, gemini)
-//   - toFormat: Target provider format for the request body (gemini, gemini-cli, antigravity, claude, openai, codex, iflow)
+//   - toFormat: Target provider format for the request body (gemini, gemini-cli, antigravity, claude, openai, codex, kimi)
 //   - providerKey: Provider identifier used for registry model lookups (may differ from toFormat, e.g., openrouter -> openai)
 //
 // Returns:
@@ -327,12 +326,6 @@ func extractThinkingConfig(body []byte, provider string) ThinkingConfig {
 		return extractOpenAIConfig(body)
 	case "codex":
 		return extractCodexConfig(body)
-	case "iflow":
-		config := extractIFlowConfig(body)
-		if hasThinkingConfig(config) {
-			return config
-		}
-		return extractOpenAIConfig(body)
 	case "kimi":
 		// Kimi uses OpenAI-compatible reasoning_effort format
 		return extractOpenAIConfig(body)
@@ -490,37 +483,6 @@ func extractCodexConfig(body []byte) ThinkingConfig {
 			return ThinkingConfig{Mode: ModeNone, Budget: 0}
 		}
 		return ThinkingConfig{Mode: ModeLevel, Level: ThinkingLevel(value)}
-	}
-
-	return ThinkingConfig{}
-}
-
-// extractIFlowConfig extracts thinking configuration from iFlow format request body.
-//
-// iFlow API format (supports multiple model families):
-//   - GLM format: chat_template_kwargs.enable_thinking (boolean)
-//   - MiniMax format: reasoning_split (boolean)
-//
-// Returns ModeBudget with Budget=1 as a sentinel value indicating "enabled".
-// The actual budget/configuration is determined by the iFlow applier based on model capabilities.
-// Budget=1 is used because iFlow models don't use numeric budgets; they only support on/off.
-func extractIFlowConfig(body []byte) ThinkingConfig {
-	// GLM format: chat_template_kwargs.enable_thinking
-	if enabled := gjson.GetBytes(body, "chat_template_kwargs.enable_thinking"); enabled.Exists() {
-		if enabled.Bool() {
-			// Budget=1 is a sentinel meaning "enabled" (iFlow doesn't use numeric budgets)
-			return ThinkingConfig{Mode: ModeBudget, Budget: 1}
-		}
-		return ThinkingConfig{Mode: ModeNone, Budget: 0}
-	}
-
-	// MiniMax format: reasoning_split
-	if split := gjson.GetBytes(body, "reasoning_split"); split.Exists() {
-		if split.Bool() {
-			// Budget=1 is a sentinel meaning "enabled" (iFlow doesn't use numeric budgets)
-			return ThinkingConfig{Mode: ModeBudget, Budget: 1}
-		}
-		return ThinkingConfig{Mode: ModeNone, Budget: 0}
 	}
 
 	return ThinkingConfig{}
