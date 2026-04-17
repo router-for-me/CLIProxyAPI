@@ -1,0 +1,68 @@
+{
+  "featureId": "F-0.3",
+  "reviewedAt": "2026-04-17T16:05:00Z",
+  "commitId": "9530f2abb910cc3881e83ee85f2a251ad812d51a",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "fail",
+  "overallStatus": "fail",
+  "issues": [
+    {
+      "file": "internal/registry/model_registry_safety_test.go",
+      "line": 139,
+      "severity": "blocking",
+      "description": "The commit recorded for F-0.3 modifies registry test code instead of applying the required whitespace-only formatting to internal/config/config.go, internal/config/config_cloak_levers_test.go, and internal/watcher/diff/config_diff.go. `git show 9530f2a --name-only` lists only this file, so the requested deliverable was not implemented."
+    },
+    {
+      "file": "C:\\Users\\Janak Kalaria\\.factory\\missions\\b756700f-a1d9-401e-9ad5-2dab1494af4d\\handoffs\\2026-04-17T15-09-46-452Z__F-0.3__3765a6b3-5fb2-4ea8-b1aa-bd10d6caf4aa.json",
+      "line": 6,
+      "severity": "blocking",
+      "description": "The handoff binds F-0.3 to commit `9530f2a...` and claims no whitespace PR was necessary, but the feature explicitly required a separate formatting-only commit/PR against dev. No PR metadata or formatting commit for the three target files is present."
+    }
+  ],
+  "blockingIssues": [
+    {
+      "file": "internal/registry/model_registry_safety_test.go",
+      "line": 139,
+      "severity": "blocking",
+      "description": "The recorded F-0.3 commit is an unrelated registry-test change, not the requested gofmt-only update for the three target files."
+    },
+    {
+      "file": "C:\\Users\\Janak Kalaria\\.factory\\missions\\b756700f-a1d9-401e-9ad5-2dab1494af4d\\handoffs\\2026-04-17T15-09-46-452Z__F-0.3__3765a6b3-5fb2-4ea8-b1aa-bd10d6caf4aa.json",
+      "line": 10,
+      "severity": "blocking",
+      "description": "The submitted handoff explicitly says no formatting PR was needed, so the feature deliverable (single small PR with only formatting changes) was never produced."
+    }
+  ],
+  "codeReview": {
+    "summary": "F-0.3 was not implemented. The referenced commit 9530f2a changes only internal/registry/model_registry_safety_test.go, while recent history for the three requested files remains on the earlier Milestone A branch commits. The transcript/handoff switched from an initial gofmt attempt to a claim that no change was needed, so no formatting-only PR or commit was delivered.",
+    "issues": [
+      {
+        "file": "internal/registry/model_registry_safety_test.go",
+        "line": 139,
+        "severity": "blocking",
+        "description": "The commit attached to this feature changes registry clone-safety test logic/comments instead of touching the three files named in the feature description."
+      },
+      {
+        "file": "C:\\Users\\Janak Kalaria\\.factory\\missions\\b756700f-a1d9-401e-9ad5-2dab1494af4d\\handoffs\\2026-04-17T15-09-46-452Z__F-0.3__3765a6b3-5fb2-4ea8-b1aa-bd10d6caf4aa.json",
+        "line": 10,
+        "severity": "blocking",
+        "description": "The handoff contradicts the feature contract by asserting that no whitespace drift PR was necessary; this leaves the required formatting-only deliverable absent."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "The on-disk claude-cache-pr-worker skill exists and documents a fallback path, but the runtime Skill tool could not load it. That mismatch pushed the worker into ad-hoc execution and contributed to the incorrect handoff.",
+      "evidence": "Transcript skeleton shows `Error: Skill \"claude-cache-pr-worker\" not found`. The skill file at C:\\Users\\Janak Kalaria\\.factory\\skills\\claude-cache-pr-worker\\SKILL.md lines 124-129 defines a fallback procedure when the skill-loader fails."
+    },
+    {
+      "area": "services",
+      "observation": "Mission guidance depends on `.factory/services.yaml`, but this checkout does not contain that file (`.factory` only has `validation/`). The missing manifest caused the worker to improvise baseline/test commands instead of following a shared source of truth.",
+      "evidence": "Mission AGENTS.md lines 31-44 say the baseline command comes from `.factory/services.yaml`. In the transcript skeleton, `Read G:\\Droid.Claude\\CLIProxyAPI\\router-dev\\.factory\\services.yaml` failed with ENOENT, and `LS G:\\Droid.Claude\\CLIProxyAPI\\router-dev\\.factory` showed only `validation/`."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Fail: the recorded F-0.3 commit is the unrelated F-0.2 registry-test fix, and no formatting-only commit/PR touched internal/config/config.go, internal/config/config_cloak_levers_test.go, or internal/watcher/diff/config_diff.go."
+}

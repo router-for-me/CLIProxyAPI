@@ -1,0 +1,48 @@
+{
+  "featureId": "F-4.1",
+  "reviewedAt": "2026-04-17T15:32:39Z",
+  "commitId": "3d3fadc54ac94b96fd38eb30c31bb791e1c15721",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "fail",
+  "codeReview": {
+    "summary": "Commit 3d3fadc is small and scoped correctly to the stale executor tests, and five of the updated assertions now match the current 3-block Claude Code injection behavior. However, the rewrite of TestApplyCloaking_PreservesConfiguredStrictModeAndSensitiveWordsWhenModeOmitted weakens the regression coverage: it no longer proves that strict mode suppresses forwarding the user system prompt.",
+    "issues": [
+      {
+        "file": "internal/runtime/executor/claude_executor_test.go",
+        "line": 1935,
+        "severity": "blocking",
+        "description": "The updated TestApplyCloaking_PreservesConfiguredStrictModeAndSensitiveWordsWhenModeOmitted now only checks that `system` has 3 blocks and that obfuscation still inserts a zero-width character. That no longer verifies the `StrictMode` part of the test name. In `claude_executor.go`, billing+agent+static blocks are always emitted when billing injection is enabled (`systemResult = [billing,agent,static]` at lines 1602-1607), and `strictMode` only controls whether original system text is prepended to the first user message (`if !strictMode` at lines 1609-1632). As written, this test would also pass if strict mode regressed and the system prompt were forwarded into `messages.0.content[0].text`, so the feature leaves the intended strict-mode regression uncovered."
+      }
+    ]
+  },
+  "issues": [
+    {
+      "file": "internal/runtime/executor/claude_executor_test.go",
+      "line": 1935,
+      "severity": "blocking",
+      "description": "The updated strict-mode cloaking test no longer distinguishes strict mode from non-strict mode. Counting 3 system blocks is no longer meaningful after F-1.4 because both modes emit billing+agent+static blocks; the test also needs to assert that the original `system` text is not forwarded into the first user message."
+    }
+  ],
+  "blockingIssues": [
+    {
+      "file": "internal/runtime/executor/claude_executor_test.go",
+      "line": 1935,
+      "description": "F-4.1 was supposed to repair the failing strict-mode cloaking regression test, but the replacement assertion only checks a 3-block layout that is shared by both strict and non-strict execution. Without an assertion that the first user message does not contain the forwarded system reminder, the test no longer validates the configured strict-mode behavior it is named after."
+    }
+  ],
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "The mission-specific `claude-cache-pr-worker` skill was not invoked and its required procedure was not actually followed, but the handoff still reported `followedProcedure=true`. That hides process drift such as the missing `validation-contract.md` read and the nonstandard PR template/branch naming.",
+      "evidence": "The transcript skeleton for worker session `604de17d-c757-478c-89a9-e441f7c6607a` contains `Skill {\"skill\":\"mission-worker-base\"}` and does not contain `claude-cache-pr-worker` or `validation-contract.md`. Meanwhile `C:\\Users\\Janak Kalaria\\.factory\\skills\\claude-cache-pr-worker\\SKILL.md` requires those steps, and `gh pr view 2867 --json headRefName,body` shows head branch `fix/system-instructions-test-expectations` plus a custom `Root Cause / Fix / Tests` body instead of the skill's `claude-cache-fix/F-X.Y` naming and `Scope / Dependencies / Tests Added / AGENTS.md Checklist / Closes` template."
+    },
+    {
+      "area": "services",
+      "observation": "Mission docs point workers and reviewers to repo-root shared-state files under `.factory/services.yaml` and `.factory/library/`, but those files are absent in this workspace. That leaves the advertised canonical commands and architecture notes unavailable and forced both the worker and reviewer into ad hoc discovery.",
+      "evidence": "Read attempts for `G:\\Droid.Claude\\CLIProxyAPI\\router-dev\\.factory\\services.yaml`, `G:\\Droid.Claude\\CLIProxyAPI\\router-dev\\.factory\\library\\architecture.md`, and `...\\environment.md` all returned ENOENT. `LS G:\\Droid.Claude\\CLIProxyAPI\\router-dev\\.factory` shows only `validation/`. The reviewed transcript skeleton begins with the same ENOENT when the worker tried to read `.factory/services.yaml`."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Fail. The diff is otherwise minimal and correctly recognizes the stale 3-block system injection expectations, but TestApplyCloaking_PreservesConfiguredStrictModeAndSensitiveWordsWhenModeOmitted was weakened so it no longer verifies strict-mode suppression of forwarded system content."
+}

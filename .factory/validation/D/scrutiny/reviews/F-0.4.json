@@ -1,0 +1,33 @@
+{
+  "featureId": "F-0.4",
+  "reviewedAt": "2026-04-17T15:39:02Z",
+  "commitId": "3d3fadc54ac94b96fd38eb30c31bb791e1c15721",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "issues": [],
+  "blockingIssues": [],
+  "codeReview": {
+    "summary": "F-0.4 is a workspace-only cleanup, and the current workspace matches the requested end state. The recorded commit diff is just the ambient HEAD commit and is unrelated to the cleanup, but there were no tracked code changes to review for this feature. The relevant outcome is present: `tmp/` is gone, `git status --porcelain` shows only untracked validation artifacts, and `go list ./...` no longer includes any `tmp` package.",
+    "issues": []
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "F-0.4 is a local workspace cleanup, but the feature is still assigned the PR-only `claude-cache-pr-worker` skill. The worker had to bypass the documented procedure because it does not fit a no-commit/no-PR task.",
+      "evidence": "The F-0.4 entry in `C:\\Users\\Janak Kalaria\\.factory\\missions\\b756700f-a1d9-401e-9ad5-2dab1494af4d\\features.json` sets `skillName` to `claude-cache-pr-worker`. `C:\\Users\\Janak Kalaria\\.factory\\skills\\claude-cache-pr-worker\\SKILL.md` says its role is to \"Open exactly one small PR\". The handoff file `C:\\Users\\Janak Kalaria\\.factory\\missions\\b756700f-a1d9-401e-9ad5-2dab1494af4d\\handoffs\\2026-04-17T15-20-51-563Z__F-0.4__9fe3a0cf-c07f-43d7-b67d-f02dcd31aa32.json` line 38 records `\"followedProcedure\": false`, and lines 42-44 explain the worker skipped the skill because the task was local-only."
+    },
+    {
+      "area": "conventions",
+      "observation": "The handoff/reporting contract currently requires a `commitId` even for local-only features that explicitly must not create a commit. That forced the worker to attach ambient HEAD, which makes commit-based scrutiny misleading for no-commit fixes.",
+      "evidence": "The F-0.4 description in `features.json` says \"This is a LOCAL workspace fix, NOT a PR — do not commit or push.\" In `worker-transcripts.jsonl` line 12, the first `EndFeatureRun` failed with `When successState is \"success\", commitId must be provided`, after which the worker ran `git rev-parse HEAD` and reused commit `3d3fadc54ac94b96fd38eb30c31bb791e1c15721`."
+    },
+    {
+      "area": "services",
+      "observation": "The repo-root shared-state files `.factory/services.yaml` and `.factory/library/` that mission/review instructions reference are absent in the current checkout, so reviewers have to fall back to mission docs and transcripts instead of a canonical on-disk source.",
+      "evidence": "Current `LS G:\\Droid.Claude\\CLIProxyAPI\\router-dev\\.factory` shows only `validation/`. Direct reads of `G:\\Droid.Claude\\CLIProxyAPI\\router-dev\\.factory\\services.yaml` and `G:\\Droid.Claude\\CLIProxyAPI\\router-dev\\.factory\\library\\architecture.md` returned ENOENT during this review."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Pass: the requested local cleanup is present. `tmp/` has been removed, `go list ./...` no longer sees any `tmp` package, and `git status --porcelain` shows no tracked repository changes."
+}

@@ -1,0 +1,53 @@
+{
+  "featureId": "F-0.2",
+  "reviewedAt": "2026-04-17T15:39:53Z",
+  "commitId": "9530f2a",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "fail",
+  "codeReview": {
+    "summary": "Commit 9530f2a makes the intended minimal repair: it replaces the nonexistent `glm-4.6` lookup in `TestLookupModelInfoReturnsCloneForStaticDefinitions` with the existing static model `claude-sonnet-4-6`, and PR #2865 explains why path (b) was chosen instead of expanding the registry. However, the feature still does not fully satisfy its mission-level PR gates because the opened PR only shows the agents-md-guard check; the required `pr-test-build` and `translator-path-guard` successes from X.3.1 and X.3.3 are absent.",
+    "issues": [
+      {
+        "file": "PR #2865 checks",
+        "line": 1,
+        "severity": "blocking",
+        "description": "`gh pr checks 2865 --repo router-for-me/CLIProxyAPI` returns only `close-when-agents-md-changed pass`. The validation contract lines 176-178 map F-0.2 to X.3.1-X.3.3, which require `pr-test-build`, `agents-md-guard`, and `translator-path-guard` to be SUCCESS for every opened PR, so the feature's PR evidence is incomplete."
+      }
+    ]
+  },
+  "issues": [
+    {
+      "file": "PR #2865 checks",
+      "line": 1,
+      "severity": "blocking",
+      "description": "Only the `close-when-agents-md-changed` / agents-md-guard check is present on PR #2865; the required `pr-test-build` and `translator-path-guard` successes are missing."
+    }
+  ],
+  "blockingIssues": [
+    {
+      "file": "PR #2865 checks",
+      "line": 1,
+      "description": "The F-0.2 code change is correct, but the PR does not satisfy the mission's required CI-gate evidence because `gh pr checks 2865` shows only one successful check instead of the three required by X.3.1-X.3.3."
+    }
+  ],
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "The mission-specific skill and AGENTS guidance are still written for the earlier 'Claude Cache Fixes' executor PR chain and do not match Milestone D registry-test repair work. The worker therefore used `mission-worker-base` and a custom branch name, yet the handoff still reported `followedProcedure=true`.",
+      "evidence": "Mission AGENTS.md lines 1, 29-31, and 74-76 describe the 'Claude Cache Fixes' mission, executor baseline tests, and a specific PR workflow; `C:\\Users\\Janak Kalaria\\.factory\\skills\\claude-cache-pr-worker\\SKILL.md` lines 3-4 and 32-33 require that same mission-specific flow. But features.json lines 420-423 define F-0.2 as a registry-test repair, and the transcript skeleton for session `51929873-be20-49fd-9618-57775cb5250d` shows `Skill {\"skill\":\"mission-worker-base\"}` plus `git checkout -b fix/registry-safety-test-glm-4.6`, while the handoff file reports `skillFeedback.followedProcedure=true`."
+    },
+    {
+      "area": "services",
+      "observation": "The shared-state files advertised at repo-root `.factory/services.yaml` and `.factory/library/` are missing in this checkout, leaving workers and reviewers without the promised canonical commands and architecture notes at the documented locations.",
+      "evidence": "`LS G:\\Droid.Claude\\CLIProxyAPI\\router-dev\\.factory` shows only `validation/`. `Glob` searches under `G:\\Droid.Claude\\CLIProxyAPI\\router-dev\\.factory` found no `services.yaml`, `architecture.md`, or `library/**` entries, and direct `Read` attempts for `G:\\Droid.Claude\\CLIProxyAPI\\router-dev\\.factory\\services.yaml` and `...\\.factory\\library\\architecture.md` returned ENOENT."
+    },
+    {
+      "area": "services",
+      "observation": "Mission-wide CI expectations appear out of sync with the actual automation exposed on Milestone D PRs. The validation contract requires three named checks for each opened PR, but PR #2865 only exposes one check.",
+      "evidence": "validation-contract.md lines 176-178 require `pr-test-build`, `agents-md-guard`, and `translator-path-guard` success. `gh pr checks 2865 --repo router-for-me/CLIProxyAPI` returns only `close-when-agents-md-changed pass`."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Fail. The registry test repair itself is correct, minimal, and documented in the PR body, but PR #2865 does not satisfy the feature's required CI-gate evidence because only the agents-md-guard check is present."
+}

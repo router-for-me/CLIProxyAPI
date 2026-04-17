@@ -1,0 +1,48 @@
+﻿{
+  "featureId": "F-0.1",
+  "reviewedAt": "2026-04-17T15:05:00Z",
+  "commitId": "34696d9",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "fail",
+  "codeReview": {
+    "summary": "The code change itself is correct and minimal: commit 34696d9 removes only the unused `strings` import from `test/thinking_conversion_test.go`, which matches the feature's stated repair path. However, the requested deliverable was a single small PR scoped to this one file, and the worker pushed the commit onto an existing F-1.5 PR that already contains many unrelated changes.",
+    "issues": [
+      {
+        "file": "PR #2864 metadata",
+        "line": 1,
+        "severity": "blocking",
+        "description": "F-0.1 required a dedicated small PR against `dev` limited to `test/thinking_conversion_test.go`, but commit 34696d9 was pushed onto existing PR #2864 (`feat(executor): header-based opt-out for OAuth cloaking levers`). That PR includes numerous unrelated file changes, so this feature was not delivered in the required isolated scope."
+      }
+    ]
+  },
+  "issues": [
+    {
+      "file": "PR #2864 metadata",
+      "line": 1,
+      "severity": "blocking",
+      "description": "The implementation was appended to unrelated PR #2864 / branch `claude-cache-fix/F-1.5` instead of being delivered as its own one-file PR for F-0.1."
+    }
+  ],
+  "blockingIssues": [
+    {
+      "file": "PR #2864 metadata",
+      "line": 1,
+      "description": "`gh pr view 2864` shows title `feat(executor): header-based opt-out for OAuth cloaking levers`, head branch `claude-cache-fix/F-1.5`, and a file list spanning many unrelated files. This violates the feature requirement to ship the fix as a single small PR scoped to `test/thinking_conversion_test.go`."
+    }
+  ],
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "The worker skipped the assigned `claude-cache-pr-worker` skill, used `mission-worker-base`, and then pushed the F-0.1 fix onto the existing F-1.5 branch/PR. The isolation rules in the feature skill appear necessary even for trivial fixes and should not be bypassed.",
+      "evidence": "worker-transcripts.jsonl skeleton for session 34d5bb7f-51f0-48e9-b479-dd034f08bfe5 shows `Skill {\"skill\":\"mission-worker-base\"}`; handoff.skillFeedback.followedProcedure=false; handoff.verification reports `git push ne0ark HEAD`; `gh pr view 2864` shows headRefName `claude-cache-fix/F-1.5` and title `feat(executor): header-based opt-out for OAuth cloaking levers`."
+    },
+    {
+      "area": "services",
+      "observation": "Mission docs point workers to repo-root `.factory/services.yaml` and `.factory/library/architecture.md`, but those files are absent in this workspace. That leaves the canonical validation commands undocumented at the advertised locations and likely contributed to ad hoc verification commands.",
+      "evidence": "Read attempts for `G:\\Droid.Claude\\CLIProxyAPI\\router-dev\\.factory\\services.yaml` and `G:\\Droid.Claude\\CLIProxyAPI\\router-dev\\.factory\\library\\architecture.md` returned ENOENT; `LS G:\\Droid.Claude\\CLIProxyAPI\\router-dev\\.factory` shows only `validation/`; the transcript skeleton shows `go test ./test/... -run TestThinkingE2EMatrix_Suffix -count=1` instead of the mission baseline command described in mission AGENTS.md."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Fail. The import removal itself is correct, but F-0.1 was not delivered as its own small PR: commit 34696d9 was appended to unrelated PR #2864 / branch `claude-cache-fix/F-1.5`, so the feature violates the required one-file, one-PR scope."
+}

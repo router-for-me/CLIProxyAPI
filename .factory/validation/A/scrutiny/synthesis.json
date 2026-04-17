@@ -1,0 +1,44 @@
+{
+  "milestone": "A",
+  "round": 1,
+  "status": "fail",
+  "validatorsRun": {
+    "test": {
+      "passed": false,
+      "command": "go test ./...",
+      "exitCode": 1
+    },
+    "typecheck": {
+      "passed": true,
+      "command": "go build -o test-output ./cmd/server; if (Test-Path 'test-output.exe') { Remove-Item -Force 'test-output.exe' } elseif (Test-Path 'test-output') { Remove-Item -Force 'test-output' }",
+      "exitCode": 0
+    },
+    "lint": {
+      "passed": false,
+      "command": "$base = git merge-base HEAD origin/dev; $range = \"$base...HEAD\"; $files = git diff --name-only $range -- '*.go'; foreach ($f in $files) { gofmt -l $f }",
+      "exitCode": 0
+    }
+  },
+  "reviewsSummary": {
+    "total": 0,
+    "passed": 0,
+    "failed": 0,
+    "failedFeatures": []
+  },
+  "blockingIssues": [
+    {
+      "featureId": "validators",
+      "severity": "blocking",
+      "description": "Full test suite failed. Reproduced failures in test/thinking_conversion_test.go (unused import \"strings\"), internal/registry/model_registry_safety_test.go (TestLookupModelInfoReturnsCloneForStaticDefinitions), and six internal/runtime/executor prompt-handling tests already called out in the F-1.2 handoff."
+    },
+    {
+      "featureId": "validators",
+      "severity": "blocking",
+      "description": "Lint check for Go files changed on the milestone A branch reported formatting drift in internal/config/config.go, internal/config/config_cloak_levers_test.go, and internal/watcher/diff/config_diff.go. A temporary gofmt run cleared the lint output, but validators still failed because the test suite remained red."
+    }
+  ],
+  "appliedUpdates": [],
+  "suggestedGuidanceUpdates": [],
+  "rejectedObservations": [],
+  "previousRound": null
+}

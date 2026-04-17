@@ -1,0 +1,97 @@
+{
+  "milestone": "D",
+  "round": 1,
+  "status": "fail",
+  "validatorsRun": {
+    "test": {
+      "passed": true,
+      "command": "go test ./...",
+      "exitCode": 0
+    },
+    "typecheck": {
+      "passed": true,
+      "command": "go build -o test-output ./cmd/server; if (Test-Path '.\\\\test-output.exe') { Remove-Item -Force '.\\\\test-output.exe' }; if (Test-Path '.\\\\test-output') { Remove-Item -Force '.\\\\test-output' }",
+      "exitCode": 0
+    },
+    "lint": {
+      "passed": true,
+      "command": "$base = git merge-base HEAD origin/dev; $range = \"$base...HEAD\"; $files = git diff --name-only $range -- '*.go'; foreach ($f in $files) { gofmt -l $f }",
+      "exitCode": 0
+    }
+  },
+  "reviewsSummary": {
+    "total": 5,
+    "passed": 1,
+    "failed": 4,
+    "failedFeatures": [
+      "F-0.1",
+      "F-0.2",
+      "F-0.3",
+      "F-4.1"
+    ]
+  },
+  "blockingIssues": [
+    {
+      "featureId": "F-0.1",
+      "severity": "blocking",
+      "description": "The import-removal fix was appended to unrelated PR #2864 / branch `claude-cache-fix/F-1.5` instead of being delivered as its own one-file PR scoped to `test/thinking_conversion_test.go`."
+    },
+    {
+      "featureId": "F-0.2",
+      "severity": "blocking",
+      "description": "The registry-test repair itself is correct, but PR #2865 does not meet the mission's required CI-gate evidence: `gh pr checks` shows only the agents-md-guard result and not the required `pr-test-build` and `translator-path-guard` successes."
+    },
+    {
+      "featureId": "F-0.3",
+      "severity": "blocking",
+      "description": "The recorded F-0.3 commit is an unrelated registry-test change; no formatting-only commit/PR was produced for `internal/config/config.go`, `internal/config/config_cloak_levers_test.go`, and `internal/watcher/diff/config_diff.go`."
+    },
+    {
+      "featureId": "F-4.1",
+      "severity": "blocking",
+      "description": "The rewritten strict-mode cloaking test no longer verifies that strict mode suppresses forwarding the original system prompt into the first user message, so the intended regression remains uncovered."
+    }
+  ],
+  "appliedUpdates": [],
+  "suggestedGuidanceUpdates": [
+    {
+      "target": "mission AGENTS.md / claude-cache-pr-worker skill",
+      "suggestion": "Split Milestone D away from the stale 'Claude Cache Fixes' PR-chain procedure, or provide a Milestone D-specific worker skill that matches the actual feature set and required workflow.",
+      "evidence": "F-0.1, F-0.2, F-0.3, and F-4.1 reviewers all found workers bypassing the assigned `claude-cache-pr-worker` flow because the mission AGENTS and skill content still described the earlier cache-fix PR chain rather than Milestone D repairs.",
+      "isSystemic": true
+    },
+    {
+      "target": "mission bootstrap / shared state references",
+      "suggestion": "Either populate repo-root `.factory/services.yaml` and `.factory/library/*` for this workspace or stop directing workers/reviewers to those paths when they are absent.",
+      "evidence": "Multiple reviews plus this validator session hit ENOENT for `G:\\Droid.Claude\\CLIProxyAPI\\router-dev\\.factory\\services.yaml` and `.factory\\library\\...`; `LS .factory` shows only `validation/`, so the advertised canonical command and knowledge files are unavailable.",
+      "isSystemic": true
+    },
+    {
+      "target": "validation-contract.md / mission CI expectations",
+      "suggestion": "Align the contract's required PR checks with the automation that actually runs on Milestone D PRs, or restore the missing checks before using them as scrutiny blockers.",
+      "evidence": "F-0.2 review found that `gh pr checks 2865` exposed only the agents-md-guard result, while the contract still requires `pr-test-build`, `agents-md-guard`, and `translator-path-guard` successes for every PR.",
+      "isSystemic": true
+    },
+    {
+      "target": "feature modeling / handoff contract",
+      "suggestion": "Do not assign PR-only skills to local workspace cleanup features, and allow successful no-commit handoffs for explicit local-only fixes.",
+      "evidence": "F-0.4 is a local cleanup that explicitly must not create a PR or commit, yet it was assigned `claude-cache-pr-worker` and the worker had to attach ambient HEAD because success handoffs currently require a `commitId`.",
+      "isSystemic": true
+    }
+  ],
+  "rejectedObservations": [
+    {
+      "observation": "Missing repo-root `.factory/services.yaml` / `.factory/library/*`",
+      "reason": "duplicate — kept once as a systemic recommendation and rejected repeated copies from multiple reviews."
+    },
+    {
+      "observation": "Workers bypassed the assigned Milestone D skill flow",
+      "reason": "duplicate — captured once as a mission/skill guidance recommendation rather than repeating near-identical reports from several features."
+    },
+    {
+      "observation": "Isolation rules for one-file fixes should not be bypassed",
+      "reason": "already-documented — current mission instructions already require workers to invoke assigned skills and keep feature scope isolated; the failure was execution drift, not missing written guidance."
+    }
+  ],
+  "previousRound": null
+}
