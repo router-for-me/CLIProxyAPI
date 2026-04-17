@@ -109,6 +109,17 @@ type CircuitBreakerStatus struct {
 	RecoveryAt   time.Time           `json:"recoveryAt,omitempty"`
 }
 
+// CircuitBreakerPersistStatus captures the full internal tracker state for persistence.
+// Unlike CircuitBreakerStatus (which is a public API view), this includes all fields
+// needed to fully restore a failureTracker on restart.
+type CircuitBreakerPersistStatus struct {
+	State        CircuitBreakerState `json:"state" bson:"state"`
+	Count        int                 `json:"count" bson:"count"`
+	FailureCount int                 `json:"failureCount" bson:"failure_count"`
+	LastFailure  time.Time           `json:"lastFailure" bson:"last_failure"`
+	RecoveryAt   time.Time           `json:"recoveryAt" bson:"recovery_at"`
+}
+
 // ModelRegistration tracks a model's availability
 type ModelRegistration struct {
 	// Info contains the model metadata
@@ -853,7 +864,11 @@ func (r *ModelRegistry) RecordSuccess(clientID, modelID string) {
 		return
 	}
 	tracker, exists := registration.CircuitBreakerClients[clientID]
-	if !exists || tracker.State == CircuitClosed {
+	if !exists {
+		return
+	}
+	if tracker.State == CircuitClosed {
+		tracker.Count = 0
 		return
 	}
 	if tracker.State == CircuitHalfOpen {
@@ -969,6 +984,97 @@ func (r *ModelRegistry) GetCircuitBreakerStatus() map[string]map[string]CircuitB
 		}
 	}
 	return result
+}
+
+// SnapshotCircuitBreakersPersist returns a full deep-copy snapshot of all circuit-breaker tracker
+// state suitable for persistence. Unlike the public CircuitBreakerStatus, this captures all internal
+// fields including Count and FailureCount.
+func (r *ModelRegistry) SnapshotCircuitBreakersPersist() map[string]map[string]CircuitBreakerPersistStatus {
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+
+	result := make(map[string]map[string]CircuitBreakerPersistStatus, len(r.models))
+	for modelID, registration := range r.models {
+		if registration == nil || registration.CircuitBreakerClients == nil {
+			continue
+		}
+		clientMap := make(map[string]CircuitBreakerPersistStatus, len(registration.CircuitBreakerClients))
+		for clientID, tracker := range registration.CircuitBreakerClients {
+			if tracker == nil {
+				continue
+			}
+			clientMap[clientID] = CircuitBreakerPersistStatus{
+				State:        tracker.State,
+				Count:        tracker.Count,
+				FailureCount: tracker.FailureCount,
+				LastFailure:  tracker.LastFailure,
+				RecoveryAt:   tracker.RecoveryAt,
+			}
+		}
+		if len(clientMap) > 0 {
+			result[modelID] = clientMap
+		}
+	}
+	return result
+}
+
+// RestoreCircuitBreakers applies a previously persisted circuit-breaker snapshot.
+// It only restores entries for currently registered client/model pairs; unknown entries are skipped.
+// Returns the number of entries applied and skipped.
+func (r *ModelRegistry) RestoreCircuitBreakers(snapshot map[string]map[string]CircuitBreakerPersistStatus) (applied, skipped int) {
+	if snapshot == nil {
+		return 0, 0
+	}
+
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+	r.ensureAvailableModelsCacheLocked()
+
+	for modelID, clientMap := range snapshot {
+		registration, exists := r.models[modelID]
+		if !exists || registration == nil {
+			skipped += len(clientMap)
+			continue
+		}
+		if registration.CircuitBreakerClients == nil {
+			registration.CircuitBreakerClients = make(map[string]*failureTracker, len(clientMap))
+		}
+		for clientID, persisted := range clientMap {
+			if !r.clientSupportsModelLocked(clientID, modelID) {
+				skipped++
+				continue
+			}
+			tracker := registration.CircuitBreakerClients[clientID]
+			if tracker == nil {
+				tracker = &failureTracker{State: CircuitClosed}
+				registration.CircuitBreakerClients[clientID] = tracker
+			}
+			tracker.State = persisted.State
+			tracker.Count = persisted.Count
+			tracker.FailureCount = persisted.FailureCount
+			tracker.LastFailure = persisted.LastFailure
+			tracker.RecoveryAt = persisted.RecoveryAt
+			applied++
+		}
+	}
+
+	if applied > 0 {
+		r.invalidateAvailableModelsCacheLocked()
+	}
+	return applied, skipped
+}
+
+func (r *ModelRegistry) clientSupportsModelLocked(clientID, modelID string) bool {
+	models, exists := r.clientModels[clientID]
+	if !exists || len(models) == 0 {
+		return false
+	}
+	for _, id := range models {
+		if strings.EqualFold(strings.TrimSpace(id), modelID) {
+			return true
+		}
+	}
+	return false
 }
 
 // ClientSupportsModel reports whether the client registered support for modelID.

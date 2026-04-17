@@ -9,6 +9,7 @@ import (
 
 	configaccess "github.com/router-for-me/CLIProxyAPI/v6/internal/access/config_access"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/store/mongostate"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -45,6 +46,9 @@ type Builder struct {
 
 	// coreManager handles core authentication and execution.
 	coreManager *coreauth.Manager
+
+	// runtimeStateMgr manages periodic persistence and startup restoration of runtime state.
+	runtimeStateMgr runtimeStateManager
 
 	// serverOptions contains additional server configuration options.
 	serverOptions []api.ServerOption
@@ -138,6 +142,12 @@ func (b *Builder) WithCoreAuthManager(mgr *coreauth.Manager) *Builder {
 	return b
 }
 
+// WithRuntimeStateManager sets the runtime state persistence manager.
+func (b *Builder) WithRuntimeStateManager(mgr *mongostate.Manager) *Builder {
+	b.runtimeStateMgr = mgr
+	return b
+}
+
 // WithServerOptions appends server configuration options used during construction.
 func (b *Builder) WithServerOptions(opts ...api.ServerOption) *Builder {
 	b.serverOptions = append(b.serverOptions, opts...)
@@ -227,16 +237,17 @@ func (b *Builder) Build() (*Service, error) {
 	coreManager.SetOAuthModelAlias(b.cfg.OAuthModelAlias)
 
 	service := &Service{
-		cfg:            b.cfg,
-		configPath:     b.configPath,
-		tokenProvider:  tokenProvider,
-		apiKeyProvider: apiKeyProvider,
-		watcherFactory: watcherFactory,
-		hooks:          b.hooks,
-		authManager:    authManager,
-		accessManager:  accessManager,
-		coreManager:    coreManager,
-		serverOptions:  append([]api.ServerOption(nil), b.serverOptions...),
+		cfg:               b.cfg,
+		configPath:        b.configPath,
+		tokenProvider:     tokenProvider,
+		apiKeyProvider:   apiKeyProvider,
+		watcherFactory:    watcherFactory,
+		hooks:             b.hooks,
+		authManager:       authManager,
+		accessManager:     accessManager,
+		coreManager:       coreManager,
+		runtimeStateMgr:  b.runtimeStateMgr,
+		serverOptions:     append([]api.ServerOption(nil), b.serverOptions...),
 	}
 	return service, nil
 }

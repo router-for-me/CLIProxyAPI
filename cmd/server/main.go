@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -26,6 +27,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/store"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/store/mongostate"
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/translator"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/tui"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
@@ -48,6 +50,38 @@ func init() {
 	buildinfo.Version = Version
 	buildinfo.Commit = Commit
 	buildinfo.BuildDate = BuildDate
+}
+
+func initRuntimeStateManager(ctx context.Context, cfg *config.Config) *mongostate.Manager {
+	if cfg == nil || !cfg.MongoState.Enabled {
+		return nil
+	}
+	if strings.TrimSpace(cfg.MongoState.URI) == "" {
+		log.Warn("mongostate: enabled but uri is empty; runtime state persistence disabled")
+		cfg.MongoState.Enabled = false
+		return nil
+	}
+
+	mongoStore, errMongostate := mongostate.NewMongoStore(ctx, mongostate.NewStoreConfig(
+		cfg.MongoState.URI,
+		cfg.MongoState.Database,
+		cfg.MongoState.SnapshotCollection,
+		cfg.MongoState.ConnectTimeoutSeconds,
+		cfg.MongoState.OperationTimeoutSeconds,
+		"main",
+	))
+	if errMongostate != nil {
+		log.Warnf("mongostate: failed to connect: %v; runtime state persistence disabled", errMongostate)
+		cfg.MongoState.Enabled = false
+		return nil
+	}
+	if mongoStore == nil {
+		cfg.MongoState.Enabled = false
+		return nil
+	}
+
+	log.Info("mongostate: initialized")
+	return mongostate.NewManager(mongoStore, mongostate.StoreConfig{})
 }
 
 // main is the entry point of the application.
@@ -420,6 +454,38 @@ func main() {
 	usage.SetStatisticsEnabled(cfg.UsageStatisticsEnabled)
 	coreauth.SetQuotaCooldownDisabled(cfg.DisableCooling)
 
+	// MongoDB state store environment variable overrides.
+	if v := os.Getenv("MONGOSTATE_ENABLED"); v != "" {
+		cfg.MongoState.Enabled = strings.EqualFold(v, "true") || v == "1"
+	}
+	if v := os.Getenv("MONGOSTATE_URI"); v != "" {
+		cfg.MongoState.URI = v
+	}
+	if v := os.Getenv("MONGOSTATE_DATABASE"); v != "" {
+		cfg.MongoState.Database = v
+	}
+	if v := os.Getenv("MONGOSTATE_SNAPSHOT_COLLECTION"); v != "" {
+		cfg.MongoState.SnapshotCollection = v
+	}
+	if v := os.Getenv("MONGOSTATE_CONNECT_TIMEOUT_SECONDS"); v != "" {
+		if sec, err := strconv.Atoi(v); err == nil {
+			cfg.MongoState.ConnectTimeoutSeconds = sec
+		}
+	}
+	if v := os.Getenv("MONGOSTATE_OPERATION_TIMEOUT_SECONDS"); v != "" {
+		if sec, err := strconv.Atoi(v); err == nil {
+			cfg.MongoState.OperationTimeoutSeconds = sec
+		}
+	}
+	if v := os.Getenv("MONGOSTATE_FLUSH_INTERVAL_SECONDS"); v != "" {
+		if sec, err := strconv.Atoi(v); err == nil {
+			cfg.MongoState.FlushIntervalSeconds = sec
+		}
+	}
+
+	// Initialize MongoDB state store if enabled.
+	runtimeStateMgr := initRuntimeStateManager(context.Background(), cfg)
+
 	if err = logging.ConfigureLogOutput(cfg, configFilePath); err != nil {
 		log.Errorf("failed to configure log output: %v", err)
 		return
@@ -532,7 +598,7 @@ func main() {
 					password = localMgmtPassword
 				}
 
-				cancel, done := cmd.StartServiceBackground(cfg, configFilePath, password)
+				cancel, done := cmd.StartServiceBackground(cfg, configFilePath, password, runtimeStateMgr)
 
 				client := tui.NewClient(cfg.Port, password)
 				ready := false
@@ -578,7 +644,7 @@ func main() {
 			if !localModel {
 				registry.StartModelsUpdater(context.Background())
 			}
-			cmd.StartService(cfg, configFilePath, password)
+			cmd.StartService(cfg, configFilePath, password, runtimeStateMgr)
 		}
 	}
 }

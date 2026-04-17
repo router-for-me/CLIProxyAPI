@@ -129,7 +129,50 @@ type Config struct {
 	// Payload defines default and override rules for provider payload parameters.
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
 
+	// MongoState configures MongoDB-backed runtime state persistence (circuit breaker + usage).
+	MongoState MongoStateConfig `yaml:"mongo-state" json:"mongo-state"`
+
 	legacyMigrationPending bool `yaml:"-" json:"-"`
+}
+
+// MongoStateConfig configures MongoDB-backed runtime state persistence.
+type MongoStateConfig struct {
+	// Enabled toggles state persistence via MongoDB.
+	Enabled bool `yaml:"enabled" json:"enabled"`
+	// URI is the MongoDB connection URI (including credentials).
+	URI string `yaml:"uri" json:"-"`
+	// Database is the MongoDB database name.
+	Database string `yaml:"database" json:"database"`
+	// SnapshotCollection is the collection name for state snapshots.
+	SnapshotCollection string `yaml:"snapshot-collection" json:"snapshot-collection"`
+	// ConnectTimeoutSeconds is the connection establishment timeout.
+	ConnectTimeoutSeconds int `yaml:"connect-timeout-seconds" json:"connect-timeout-seconds"`
+	// OperationTimeoutSeconds is the per-operation timeout.
+	OperationTimeoutSeconds int `yaml:"operation-timeout-seconds" json:"operation-timeout-seconds"`
+	// FlushIntervalSeconds is the background flush interval.
+	FlushIntervalSeconds int `yaml:"flush-interval-seconds" json:"flush-interval-seconds"`
+}
+
+func (c *Config) normalizeMongoStateConfig() {
+	c.MongoState.URI = strings.TrimSpace(c.MongoState.URI)
+	c.MongoState.Database = strings.TrimSpace(c.MongoState.Database)
+	c.MongoState.SnapshotCollection = strings.TrimSpace(c.MongoState.SnapshotCollection)
+
+	if c.MongoState.Database == "" {
+		c.MongoState.Database = "cliproxy_state"
+	}
+	if c.MongoState.SnapshotCollection == "" {
+		c.MongoState.SnapshotCollection = "service_state_snapshots"
+	}
+	if c.MongoState.ConnectTimeoutSeconds <= 0 {
+		c.MongoState.ConnectTimeoutSeconds = 10
+	}
+	if c.MongoState.OperationTimeoutSeconds <= 0 {
+		c.MongoState.OperationTimeoutSeconds = 5
+	}
+	if c.MongoState.FlushIntervalSeconds <= 0 {
+		c.MongoState.FlushIntervalSeconds = 30
+	}
 }
 
 // ClaudeHeaderDefaults configures default header values injected into Claude API requests.
@@ -637,6 +680,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	if cfg.RemoteManagement.PanelGitHubRepository == "" {
 		cfg.RemoteManagement.PanelGitHubRepository = DefaultPanelGitHubRepository
 	}
+	cfg.normalizeMongoStateConfig()
 
 	cfg.Pprof.Addr = strings.TrimSpace(cfg.Pprof.Addr)
 	if cfg.Pprof.Addr == "" {

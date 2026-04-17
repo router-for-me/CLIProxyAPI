@@ -26,6 +26,14 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+type runtimeStateManager interface {
+	Restore(ctx context.Context) (restoredCB, restoredUsage bool, err error)
+	StartPeriodic(ctx context.Context, intervalSec int)
+	Stop()
+	FlushNow(ctx context.Context) error
+	Close(ctx context.Context) error
+}
+
 // Service wraps the proxy server lifecycle so external programs can embed the CLI proxy.
 // It manages the complete lifecycle including authentication, file watching, HTTP server,
 // and integration with various AI service providers.
@@ -83,6 +91,12 @@ type Service struct {
 
 	// coreManager handles core authentication and execution.
 	coreManager *coreauth.Manager
+
+	// runtimeStateMgr manages periodic persistence and startup restoration of runtime state.
+	runtimeStateMgr runtimeStateManager
+
+	// runtimeStateCancel cancels the runtime state persistence background goroutine.
+	runtimeStateCancel context.CancelFunc
 
 	// shutdownOnce ensures shutdown is called only once.
 	shutdownOnce sync.Once
@@ -147,6 +161,62 @@ func (s *Service) consumeAuthUpdates(ctx context.Context) {
 				}
 			}
 		}
+	}
+}
+
+func (s *Service) syncAuthState(ctx context.Context, snapshot []*coreauth.Auth) {
+	if s == nil || s.coreManager == nil {
+		return
+	}
+
+	ctx = coreauth.WithSkipPersist(ctx)
+	expected := make(map[string]*coreauth.Auth, len(snapshot))
+	for _, auth := range snapshot {
+		if auth == nil || auth.ID == "" {
+			continue
+		}
+		clone := auth.Clone()
+		expected[clone.ID] = clone
+		s.applyCoreAuthAddOrUpdate(ctx, clone)
+	}
+
+	for _, existing := range s.coreManager.List() {
+		if existing == nil || existing.ID == "" {
+			continue
+		}
+		if _, ok := expected[existing.ID]; ok {
+			continue
+		}
+		s.applyCoreAuthRemoval(ctx, existing.ID)
+	}
+}
+
+func (s *Service) restoreRuntimeState(ctx context.Context) {
+	if s == nil || s.runtimeStateMgr == nil {
+		return
+	}
+
+	restoredCB, restoredUsage, errRestore := s.runtimeStateMgr.Restore(ctx)
+	if errRestore != nil {
+		log.Warnf("runtime state restore failed: %v", errRestore)
+	}
+	if restoredCB || restoredUsage {
+		log.Infof("runtime state restored: cb=%v, usage=%v", restoredCB, restoredUsage)
+	}
+	s.runtimeStateMgr.StartPeriodic(ctx, s.cfg.MongoState.FlushIntervalSeconds)
+}
+
+func (s *Service) bootstrapWatcherState(ctx context.Context) {
+	if s == nil || s.watcher == nil {
+		s.restoreRuntimeState(ctx)
+		return
+	}
+
+	s.syncAuthState(ctx, s.watcher.SnapshotAuths())
+	s.restoreRuntimeState(ctx)
+	s.ensureAuthUpdateQueue(ctx)
+	if s.authUpdates != nil {
+		s.watcher.SetAuthUpdateQueue(s.authUpdates)
 	}
 }
 
@@ -593,24 +663,6 @@ func (s *Service) Run(ctx context.Context) error {
 		}
 	})
 
-	s.serverErr = make(chan error, 1)
-	go func() {
-		if errStart := s.server.Start(); errStart != nil {
-			s.serverErr <- errStart
-		} else {
-			s.serverErr <- nil
-		}
-	}()
-
-	time.Sleep(100 * time.Millisecond)
-	fmt.Printf("API server started successfully on: %s:%d\n", s.cfg.Host, s.cfg.Port)
-
-	s.applyPprofConfig(s.cfg)
-
-	if s.hooks.OnAfterStart != nil {
-		s.hooks.OnAfterStart(s)
-	}
-
 	var watcherWrapper *WatcherWrapper
 	reloadCallback := func(newCfg *config.Config) {
 		previousStrategy := ""
@@ -677,10 +729,6 @@ func (s *Service) Run(ctx context.Context) error {
 		return fmt.Errorf("cliproxy: failed to create watcher: %w", err)
 	}
 	s.watcher = watcherWrapper
-	s.ensureAuthUpdateQueue(ctx)
-	if s.authUpdates != nil {
-		watcherWrapper.SetAuthUpdateQueue(s.authUpdates)
-	}
 	watcherWrapper.SetConfig(s.cfg)
 
 	watcherCtx, watcherCancel := context.WithCancel(context.Background())
@@ -689,6 +737,30 @@ func (s *Service) Run(ctx context.Context) error {
 		return fmt.Errorf("cliproxy: failed to start watcher: %w", err)
 	}
 	log.Info("file watcher started for config and auth directory changes")
+	s.bootstrapWatcherState(ctx)
+
+	s.serverErr = make(chan error, 1)
+	go func() {
+		if errStart := s.server.Start(); errStart != nil {
+			s.serverErr <- errStart
+		} else {
+			s.serverErr <- nil
+		}
+	}()
+
+	select {
+	case err = <-s.serverErr:
+		return err
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	fmt.Printf("API server started successfully on: %s:%d\n", s.cfg.Host, s.cfg.Port)
+
+	s.applyPprofConfig(s.cfg)
+
+	if s.hooks.OnAfterStart != nil {
+		s.hooks.OnAfterStart(s)
+	}
 
 	// Prefer core auth manager auto refresh if available.
 	if s.coreManager != nil {
@@ -760,6 +832,20 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		}
 
 		// no legacy clients to persist
+
+		if s.runtimeStateMgr != nil {
+			s.runtimeStateMgr.Stop()
+			flushCtx, flushCancel := context.WithTimeout(ctx, 10*time.Second)
+			if errFlush := s.runtimeStateMgr.FlushNow(flushCtx); errFlush != nil {
+				log.Warnf("runtime state flush on shutdown failed: %v", errFlush)
+			}
+			flushCancel()
+			closeCtx, closeCancel := context.WithTimeout(ctx, 10*time.Second)
+			if errClose := s.runtimeStateMgr.Close(closeCtx); errClose != nil {
+				log.Warnf("runtime state close on shutdown failed: %v", errClose)
+			}
+			closeCancel()
+		}
 
 		if s.server != nil {
 			shutdownCtx, cancel := context.WithTimeout(ctx, 30*time.Second)

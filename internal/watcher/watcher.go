@@ -170,3 +170,24 @@ func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 	w.clientsMutex.RUnlock()
 	return snapshotCoreAuths(cfg, w.authDir)
 }
+
+// SnapshotAuths returns the watcher's current auth snapshot when available.
+// Before the incremental queue is attached, this reflects the startup baseline
+// captured by reloadClients without forcing a re-synthesis pass.
+func (w *Watcher) SnapshotAuths() []*coreauth.Auth {
+	w.clientsMutex.RLock()
+	if len(w.currentAuths) > 0 {
+		auths := make([]*coreauth.Auth, 0, len(w.currentAuths))
+		for _, auth := range w.currentAuths {
+			if auth != nil {
+				auths = append(auths, auth.Clone())
+			}
+		}
+		w.clientsMutex.RUnlock()
+		return auths
+	}
+	cfg := w.config
+	authDir := w.authDir
+	w.clientsMutex.RUnlock()
+	return snapshotCoreAuths(cfg, authDir)
+}
