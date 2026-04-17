@@ -13,7 +13,7 @@ func boolPtr(b bool) *bool { return &b }
 // default to the legacy behavior (all levers enabled).
 func TestResolveOAuthLevers_DefaultsTrue(t *testing.T) {
 	t.Run("nil cfg", func(t *testing.T) {
-		levers := ResolveOAuthLevers(nil, nil, nil)
+		levers := ResolveOAuthLevers(nil, nil)
 		if !levers.SanitizeSystemPrompt {
 			t.Error("SanitizeSystemPrompt should default to true")
 		}
@@ -27,7 +27,7 @@ func TestResolveOAuthLevers_DefaultsTrue(t *testing.T) {
 
 	t.Run("empty cfg (all nil pointers)", func(t *testing.T) {
 		cfg := &config.CloakConfig{}
-		levers := ResolveOAuthLevers(cfg, nil, nil)
+		levers := ResolveOAuthLevers(cfg, nil)
 		if !levers.SanitizeSystemPrompt {
 			t.Error("SanitizeSystemPrompt should default to true")
 		}
@@ -49,7 +49,7 @@ func TestResolveOAuthLevers_HeaderOptOutWithoutToken_Ignored(t *testing.T) {
 	hdr := http.Header{}
 	hdr.Set("X-Cliproxy-Cloak-Opt-Out", "all")
 	// No X-Cliproxy-Cloak-Token presented
-	levers := ResolveOAuthLevers(cfg, nil, hdr)
+	levers := ResolveOAuthLevers(cfg, hdr)
 	if !levers.SanitizeSystemPrompt {
 		t.Error("SanitizeSystemPrompt should remain true when token is missing")
 	}
@@ -70,7 +70,7 @@ func TestResolveOAuthLevers_HeaderOptOut_WithValidToken_DisablesSpecified(t *tes
 	hdr := http.Header{}
 	hdr.Set("X-Cliproxy-Cloak-Token", "supersecret")
 	hdr.Set("X-Cliproxy-Cloak-Opt-Out", "sanitize")
-	levers := ResolveOAuthLevers(cfg, nil, hdr)
+	levers := ResolveOAuthLevers(cfg, hdr)
 	if levers.SanitizeSystemPrompt {
 		t.Error("SanitizeSystemPrompt should be false after sanitize opt-out")
 	}
@@ -92,7 +92,7 @@ func TestResolveOAuthLevers_HeaderOptOut_All_DisablesEverything(t *testing.T) {
 	hdr := http.Header{}
 	hdr.Set("X-Cliproxy-Cloak-Token", "supersecret")
 	hdr.Set("X-Cliproxy-Cloak-Opt-Out", "all")
-	levers := ResolveOAuthLevers(cfg, nil, hdr)
+	levers := ResolveOAuthLevers(cfg, hdr)
 	if levers.SanitizeSystemPrompt {
 		t.Error("SanitizeSystemPrompt should be false")
 	}
@@ -113,7 +113,7 @@ func TestResolveOAuthLevers_HeaderOptOut_EmptySecret_AlwaysIgnoresHeader(t *test
 	hdr := http.Header{}
 	hdr.Set("X-Cliproxy-Cloak-Token", "anything")
 	hdr.Set("X-Cliproxy-Cloak-Opt-Out", "all")
-	levers := ResolveOAuthLevers(cfg, nil, hdr)
+	levers := ResolveOAuthLevers(cfg, hdr)
 	if !levers.SanitizeSystemPrompt {
 		t.Error("SanitizeSystemPrompt should remain true when secret is empty")
 	}

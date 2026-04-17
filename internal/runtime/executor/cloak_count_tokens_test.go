@@ -10,7 +10,7 @@ import (
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	clipproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	"github.com/tidwall/gjson"
@@ -46,7 +46,7 @@ func TestCountTokens_MatchesExecuteWhenLeversOverridden(t *testing.T) {
 				}},
 			}
 			exec := NewClaudeExecutor(cfg)
-			auth := &clipproxyauth.Auth{Attributes: map[string]string{
+			auth := &cliproxyauth.Auth{Attributes: map[string]string{
 				"api_key":  testOAuthKey,
 				"base_url": server.URL,
 			}}

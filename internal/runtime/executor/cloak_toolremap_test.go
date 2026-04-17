@@ -15,7 +15,7 @@ func TestApplyCloaking_ToolRemapDisabled_KeepsOriginalNames(t *testing.T) {
 	cfg := &config.CloakConfig{
 		OAuthRemapToolNames: &disable,
 	}
-	levers := helps.ResolveOAuthLevers(cfg, nil, nil)
+	levers := helps.ResolveOAuthLevers(cfg, nil)
 
 	payload := []byte(`{"tools":[{"name":"bash","description":"run bash"},{"name":"read","description":"read file"}]}`)
 
@@ -44,7 +44,7 @@ func TestApplyCloaking_ToolRemapDisabled_KeepsOriginalNames(t *testing.T) {
 // Claude Code equivalents to avoid Anthropic fingerprinting.
 func TestApplyCloaking_ToolRemapEnabled_RenamesToClaudeCodeNames(t *testing.T) {
 	// nil config => default (remap enabled)
-	levers := helps.ResolveOAuthLevers(nil, nil, nil)
+	levers := helps.ResolveOAuthLevers(nil, nil)
 
 	payload := []byte(`{"tools":[{"name":"bash","description":"run bash"},{"name":"read","description":"read file"}]}`)
 
@@ -75,7 +75,7 @@ func TestResponsePath_ToolRemapDisabled_NoReverseApplied(t *testing.T) {
 	cfg := &config.CloakConfig{
 		OAuthRemapToolNames: &disable,
 	}
-	levers := helps.ResolveOAuthLevers(cfg, nil, nil)
+	levers := helps.ResolveOAuthLevers(cfg, nil)
 
 	payload := []byte(`{"tools":[{"name":"bash"}]}`)
 
