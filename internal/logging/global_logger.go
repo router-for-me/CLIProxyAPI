@@ -2,12 +2,14 @@ package logging
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
@@ -22,7 +24,10 @@ var (
 	logWriter      *lumberjack.Logger
 	ginInfoWriter  *io.PipeWriter
 	ginErrorWriter *io.PipeWriter
+	rotateCancel   context.CancelFunc
 )
+
+const runtimeLogMaxSizeMB = 1024 * 1024
 
 // LogFormatter defines a custom log format for logrus.
 // This formatter adds timestamp, level, request ID, and source location to each log entry.
@@ -145,15 +150,19 @@ func ResolveLogDirectory(cfg *config.Config) string {
 // ConfigureLogOutput switches the global log destination between rotating files and stdout.
 // When logsMaxTotalSizeMB > 0, a background cleaner removes the oldest log files in the logs directory
 // until the total size is within the limit.
-func ConfigureLogOutput(cfg *config.Config) error {
+func ConfigureLogOutput(cfg *config.Config, configFilePath string) error {
 	SetupBaseLogger()
 
 	writerMu.Lock()
 	defer writerMu.Unlock()
 
 	logDir := ResolveLogDirectory(cfg)
+	policy, errPolicy := LoadFileLogPolicy(configFilePath)
+	if errPolicy != nil {
+		log.WithError(errPolicy).Warnf("logging: failed to load %s, keeping last valid/default policy", LoggingConfigFileName)
+	}
 
-	protectedPath := ""
+	stopRuntimeRotationLocked()
 	if cfg.LoggingToFile {
 		if err := os.MkdirAll(logDir, 0o755); err != nil {
 			return fmt.Errorf("logging: failed to create log directory: %w", err)
@@ -161,15 +170,17 @@ func ConfigureLogOutput(cfg *config.Config) error {
 		if logWriter != nil {
 			_ = logWriter.Close()
 		}
-		protectedPath = filepath.Join(logDir, "main.log")
 		logWriter = &lumberjack.Logger{
-			Filename:   protectedPath,
-			MaxSize:    10,
+			Filename:   filepath.Join(logDir, "main.log"),
+			MaxSize:    runtimeLogMaxSizeMB,
 			MaxBackups: 0,
-			MaxAge:     0,
-			Compress:   false,
+			MaxAge:     policy.Runtime.DeleteAfterDays,
+			Compress:   policy.Runtime.CompressAfterDays > 0,
 		}
 		log.SetOutput(logWriter)
+		if policy.Runtime.RotateDaily {
+			startRuntimeRotationLocked(logWriter)
+		}
 	} else {
 		if logWriter != nil {
 			_ = logWriter.Close()
@@ -178,7 +189,6 @@ func ConfigureLogOutput(cfg *config.Config) error {
 		log.SetOutput(os.Stdout)
 	}
 
-	configureLogDirCleanerLocked(logDir, cfg.LogsMaxTotalSizeMB, protectedPath)
 	return nil
 }
 
@@ -186,7 +196,7 @@ func closeLogOutputs() {
 	writerMu.Lock()
 	defer writerMu.Unlock()
 
-	stopLogDirCleanerLocked()
+	stopRuntimeRotationLocked()
 
 	if logWriter != nil {
 		_ = logWriter.Close()
@@ -199,5 +209,43 @@ func closeLogOutputs() {
 	if ginErrorWriter != nil {
 		_ = ginErrorWriter.Close()
 		ginErrorWriter = nil
+	}
+}
+
+func startRuntimeRotationLocked(writer *lumberjack.Logger) {
+	if writer == nil {
+		return
+	}
+	stopRuntimeRotationLocked()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	rotateCancel = cancel
+
+	go runRuntimeRotation(ctx, writer)
+}
+
+func stopRuntimeRotationLocked() {
+	if rotateCancel == nil {
+		return
+	}
+	rotateCancel()
+	rotateCancel = nil
+}
+
+func runRuntimeRotation(ctx context.Context, writer *lumberjack.Logger) {
+	for {
+		now := time.Now()
+		next := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 0, 1, 0, now.Location())
+		timer := time.NewTimer(time.Until(next))
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+
+		if err := writer.Rotate(); err != nil {
+			log.WithError(err).Warn("logging: failed to rotate runtime log file")
+		}
 	}
 }

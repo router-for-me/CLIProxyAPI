@@ -899,10 +899,9 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 		}
 	}
 
-	if oldCfg == nil || oldCfg.LoggingToFile != cfg.LoggingToFile || oldCfg.LogsMaxTotalSizeMB != cfg.LogsMaxTotalSizeMB {
-		if err := logging.ConfigureLogOutput(cfg); err != nil {
-			log.Errorf("failed to reconfigure log output: %v", err)
-		}
+	if oldCfg == nil || oldCfg.LoggingToFile != cfg.LoggingToFile || oldCfg.AuthDir != cfg.AuthDir || oldCfg.LogsMaxTotalSizeMB != cfg.LogsMaxTotalSizeMB {
+		s.cfg = cfg
+		s.UpdateLoggingConfig()
 	}
 
 	if oldCfg == nil || oldCfg.UsageStatisticsEnabled != cfg.UsageStatisticsEnabled {
@@ -1024,6 +1023,26 @@ func (s *Server) SetWebsocketAuthChangeHandler(fn func(bool, bool)) {
 		return
 	}
 	s.wsAuthChanged = fn
+}
+
+func (s *Server) UpdateLoggingConfig() {
+	if s == nil || s.cfg == nil {
+		return
+	}
+	if err := logging.ConfigureLogOutput(s.cfg, s.configFilePath); err != nil {
+		log.Errorf("failed to reconfigure log output: %v", err)
+	}
+
+	logDir := logging.ResolveLogDirectory(s.cfg)
+	configDir := filepath.Dir(s.configFilePath)
+	if s.requestLogger != nil {
+		if reconfigurer, ok := s.requestLogger.(interface{ Reconfigure(string, string) }); ok {
+			reconfigurer.Reconfigure(logDir, configDir)
+		}
+	}
+	if s.mgmt != nil {
+		s.mgmt.SetLogDirectory(logDir)
+	}
 }
 
 // (management handlers moved to internal/api/handlers/management)

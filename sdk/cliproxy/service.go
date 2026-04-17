@@ -666,7 +666,13 @@ func (s *Service) Run(ctx context.Context) error {
 		s.rebindExecutors()
 	}
 
-	watcherWrapper, err = s.watcherFactory(s.configPath, s.cfg.AuthDir, reloadCallback)
+	reloadLoggingCallback := func() {
+		if s.server != nil {
+			s.server.UpdateLoggingConfig()
+		}
+	}
+
+	watcherWrapper, err = s.watcherFactory(s.configPath, s.cfg.AuthDir, reloadCallback, reloadLoggingCallback)
 	if err != nil {
 		return fmt.Errorf("cliproxy: failed to create watcher: %w", err)
 	}

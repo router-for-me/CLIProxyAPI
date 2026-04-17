@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"compress/flate"
 	"compress/gzip"
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -133,8 +135,17 @@ type FileRequestLogger struct {
 	// logsDir is the directory where log files are stored.
 	logsDir string
 
+	// configDir is the directory where logging.ini is stored.
+	configDir string
+
 	// errorLogsMaxFiles limits the number of error log files retained.
 	errorLogsMaxFiles int
+
+	writeMu sync.Mutex
+
+	retentionMu     sync.Mutex
+	requestPolicy   RequestLogPolicy
+	retentionCancel context.CancelFunc
 }
 
 // NewFileRequestLogger creates a new file-based request logger.
@@ -149,18 +160,14 @@ type FileRequestLogger struct {
 // Returns:
 //   - *FileRequestLogger: A new file-based request logger instance
 func NewFileRequestLogger(enabled bool, logsDir string, configDir string, errorLogsMaxFiles int) *FileRequestLogger {
-	// Resolve logsDir relative to the configuration file directory when it's not absolute.
-	if !filepath.IsAbs(logsDir) {
-		// If configDir is provided, resolve logsDir relative to it.
-		if configDir != "" {
-			logsDir = filepath.Join(configDir, logsDir)
-		}
-	}
-	return &FileRequestLogger{
+	logger := &FileRequestLogger{
 		enabled:           enabled,
-		logsDir:           logsDir,
+		logsDir:           resolveRequestLogsDir(logsDir, configDir),
+		configDir:         configDir,
 		errorLogsMaxFiles: errorLogsMaxFiles,
 	}
+	logger.reloadRequestPolicy()
+	return logger
 }
 
 // IsEnabled returns whether request logging is currently enabled.
@@ -217,18 +224,20 @@ func (l *FileRequestLogger) logRequest(url, method string, requestHeaders map[st
 	if !l.enabled && !force {
 		return nil
 	}
+	requestID = l.normalizeRequestID(requestID)
+	if requestTimestamp.IsZero() {
+		requestTimestamp = time.Now()
+	}
 
 	// Ensure logs directory exists
 	if errEnsure := l.ensureLogsDir(); errEnsure != nil {
 		return fmt.Errorf("failed to create logs directory: %w", errEnsure)
 	}
 
-	// Generate filename with request ID
-	filename := l.generateFilename(url, requestID)
+	recordType := requestLogTypeNormal
 	if force && !l.enabled {
-		filename = l.generateErrorFilename(url, requestID)
+		recordType = requestLogTypeError
 	}
-	filePath := filepath.Join(l.logsDir, filename)
 
 	requestBodyPath, errTemp := l.writeRequestBodyTempFile(body)
 	if errTemp != nil {
@@ -248,36 +257,38 @@ func (l *FileRequestLogger) logRequest(url, method string, requestHeaders map[st
 		responseToWrite = response
 	}
 
-	logFile, errOpen := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
-	if errOpen != nil {
-		return fmt.Errorf("failed to create log file: %w", errOpen)
+	record, errRecord := newRequestRecordBuffer(requestRecordMeta{
+		RequestID:  requestID,
+		Timestamp:  requestTimestamp,
+		URL:        url,
+		Method:     method,
+		StatusCode: statusCode,
+		RecordType: recordType,
+	}, func(w io.Writer) error {
+		return l.writeNonStreamingLog(
+			w,
+			url,
+			method,
+			requestHeaders,
+			body,
+			requestBodyPath,
+			apiRequest,
+			apiResponse,
+			apiResponseErrors,
+			statusCode,
+			responseHeaders,
+			responseToWrite,
+			decompressErr,
+			requestTimestamp,
+			apiResponseTimestamp,
+		)
+	})
+	if errRecord != nil {
+		return fmt.Errorf("failed to write log file: %w", errRecord)
 	}
 
-	writeErr := l.writeNonStreamingLog(
-		logFile,
-		url,
-		method,
-		requestHeaders,
-		body,
-		requestBodyPath,
-		apiRequest,
-		apiResponse,
-		apiResponseErrors,
-		statusCode,
-		responseHeaders,
-		responseToWrite,
-		decompressErr,
-		requestTimestamp,
-		apiResponseTimestamp,
-	)
-	if errClose := logFile.Close(); errClose != nil {
-		log.WithError(errClose).Warn("failed to close request log file")
-		if writeErr == nil {
-			return errClose
-		}
-	}
-	if writeErr != nil {
-		return fmt.Errorf("failed to write log file: %w", writeErr)
+	if errAppend := l.appendAggregatedRecord(l.recordFilePath(recordType, requestTimestamp), record); errAppend != nil {
+		return fmt.Errorf("failed to append request log file: %w", errAppend)
 	}
 
 	if force && !l.enabled {
@@ -305,15 +316,12 @@ func (l *FileRequestLogger) LogStreamingRequest(url, method string, headers map[
 	if !l.enabled {
 		return &NoOpStreamingLogWriter{}, nil
 	}
+	requestID = l.normalizeRequestID(requestID)
 
 	// Ensure logs directory exists
 	if err := l.ensureLogsDir(); err != nil {
 		return nil, fmt.Errorf("failed to create logs directory: %w", err)
 	}
-
-	// Generate filename with request ID
-	filename := l.generateFilename(url, requestID)
-	filePath := filepath.Join(l.logsDir, filename)
 
 	requestHeaders := make(map[string][]string, len(headers))
 	for key, values := range headers {
@@ -336,7 +344,9 @@ func (l *FileRequestLogger) LogStreamingRequest(url, method string, headers map[
 
 	// Create streaming writer
 	writer := &FileStreamingLogWriter{
-		logFilePath:      filePath,
+		logger:           l,
+		recordType:       requestLogTypeNormal,
+		requestID:        requestID,
 		url:              url,
 		method:           method,
 		timestamp:        time.Now(),
@@ -353,11 +363,6 @@ func (l *FileRequestLogger) LogStreamingRequest(url, method string, headers map[
 	go writer.asyncWriter()
 
 	return writer, nil
-}
-
-// generateErrorFilename creates a filename with an error prefix to differentiate forced error logs.
-func (l *FileRequestLogger) generateErrorFilename(url string, requestID ...string) string {
-	return fmt.Sprintf("error-%s", l.generateFilename(url, requestID...))
 }
 
 // ensureLogsDir creates the logs directory if it doesn't exist.
@@ -963,8 +968,10 @@ func (l *FileRequestLogger) formatRequestInfo(url, method string, headers map[st
 // It spools streaming response chunks to a temporary file to avoid retaining large responses in memory.
 // The final log file is assembled when Close is called.
 type FileStreamingLogWriter struct {
-	// logFilePath is the final log file path.
-	logFilePath string
+	logger *FileRequestLogger
+
+	requestID  string
+	recordType string
 
 	// url is the request URL (masked upstream in middleware).
 	url string
@@ -1122,27 +1129,17 @@ func (w *FileStreamingLogWriter) Close() error {
 	default:
 	}
 
-	if w.logFilePath == "" {
+	if w.logger == nil {
 		w.cleanupTempFiles()
 		return nil
 	}
 
-	logFile, errOpen := os.OpenFile(w.logFilePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
-	if errOpen != nil {
-		w.cleanupTempFiles()
-		return fmt.Errorf("failed to create log file: %w", errOpen)
-	}
-
-	writeErr := w.writeFinalLog(logFile)
-	if errClose := logFile.Close(); errClose != nil {
-		log.WithError(errClose).Warn("failed to close request log file")
-		if writeErr == nil {
-			writeErr = errClose
-		}
-	}
-
+	record, errRecord := w.writeFinalLog()
 	w.cleanupTempFiles()
-	return writeErr
+	if errRecord != nil {
+		return errRecord
+	}
+	return w.logger.appendAggregatedRecord(w.logger.recordFilePath(w.recordType, w.timestamp), record)
 }
 
 // asyncWriter runs in a goroutine to buffer chunks from the channel.
@@ -1181,20 +1178,10 @@ func (w *FileStreamingLogWriter) asyncWriter() {
 	w.responseBodyFile = nil
 }
 
-func (w *FileStreamingLogWriter) writeFinalLog(logFile *os.File) error {
-	if errWrite := writeRequestInfoWithBody(logFile, w.url, w.method, w.requestHeaders, nil, w.requestBodyPath, w.timestamp); errWrite != nil {
-		return errWrite
-	}
-	if errWrite := writeAPISection(logFile, "=== API REQUEST ===\n", "=== API REQUEST", w.apiRequest, time.Time{}); errWrite != nil {
-		return errWrite
-	}
-	if errWrite := writeAPISection(logFile, "=== API RESPONSE ===\n", "=== API RESPONSE", w.apiResponse, w.apiResponseTimestamp); errWrite != nil {
-		return errWrite
-	}
-
+func (w *FileStreamingLogWriter) writeFinalLog() ([]byte, error) {
 	responseBodyFile, errOpen := os.Open(w.responseBodyPath)
 	if errOpen != nil {
-		return errOpen
+		return nil, errOpen
 	}
 	defer func() {
 		if errClose := responseBodyFile.Close(); errClose != nil {
@@ -1202,7 +1189,25 @@ func (w *FileStreamingLogWriter) writeFinalLog(logFile *os.File) error {
 		}
 	}()
 
-	return writeResponseSection(logFile, w.responseStatus, w.statusWritten, w.responseHeaders, responseBodyFile, nil, false)
+	return newRequestRecordBuffer(requestRecordMeta{
+		RequestID:  w.requestID,
+		Timestamp:  w.timestamp,
+		URL:        w.url,
+		Method:     w.method,
+		StatusCode: w.responseStatus,
+		RecordType: w.recordType,
+	}, func(dst io.Writer) error {
+		if errWrite := writeRequestInfoWithBody(dst, w.url, w.method, w.requestHeaders, nil, w.requestBodyPath, w.timestamp); errWrite != nil {
+			return errWrite
+		}
+		if errWrite := writeAPISection(dst, "=== API REQUEST ===\n", "=== API REQUEST", w.apiRequest, time.Time{}); errWrite != nil {
+			return errWrite
+		}
+		if errWrite := writeAPISection(dst, "=== API RESPONSE ===\n", "=== API RESPONSE", w.apiResponse, w.apiResponseTimestamp); errWrite != nil {
+			return errWrite
+		}
+		return writeResponseSection(dst, w.responseStatus, w.statusWritten, w.responseHeaders, responseBodyFile, nil, false)
+	})
 }
 
 func (w *FileStreamingLogWriter) cleanupTempFiles() {

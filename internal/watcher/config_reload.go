@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"os"
 	"reflect"
+	"strings"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
@@ -26,6 +27,15 @@ func (w *Watcher) stopConfigReloadTimer() {
 	w.configReloadMu.Unlock()
 }
 
+func (w *Watcher) stopLoggingReloadTimer() {
+	w.loggingReloadMu.Lock()
+	if w.loggingReloadTimer != nil {
+		w.loggingReloadTimer.Stop()
+		w.loggingReloadTimer = nil
+	}
+	w.loggingReloadMu.Unlock()
+}
+
 func (w *Watcher) scheduleConfigReload() {
 	w.configReloadMu.Lock()
 	defer w.configReloadMu.Unlock()
@@ -37,6 +47,20 @@ func (w *Watcher) scheduleConfigReload() {
 		w.configReloadTimer = nil
 		w.configReloadMu.Unlock()
 		w.reloadConfigIfChanged()
+	})
+}
+
+func (w *Watcher) scheduleLoggingReload() {
+	w.loggingReloadMu.Lock()
+	defer w.loggingReloadMu.Unlock()
+	if w.loggingReloadTimer != nil {
+		w.loggingReloadTimer.Stop()
+	}
+	w.loggingReloadTimer = time.AfterFunc(configReloadDebounce, func() {
+		w.loggingReloadMu.Lock()
+		w.loggingReloadTimer = nil
+		w.loggingReloadMu.Unlock()
+		w.reloadLoggingConfigIfChanged()
 	})
 }
 
@@ -75,6 +99,41 @@ func (w *Watcher) reloadConfigIfChanged() {
 		w.clientsMutex.Unlock()
 		w.persistConfigAsync()
 	}
+}
+
+func (w *Watcher) reloadLoggingConfigIfChanged() {
+	if w.loggingReloadCallback == nil {
+		return
+	}
+
+	state := "__missing__"
+	data, err := os.ReadFile(w.loggingConfigPath)
+	switch {
+	case err == nil:
+		trimmed := strings.TrimSpace(string(data))
+		if trimmed == "" {
+			state = "__empty__"
+		} else {
+			sum := sha256.Sum256(data)
+			state = hex.EncodeToString(sum[:])
+		}
+	case !os.IsNotExist(err):
+		log.Errorf("failed to read logging config for hash check: %v", err)
+		return
+	}
+
+	w.clientsMutex.Lock()
+	currentHash := w.lastLoggingConfigHash
+	if currentHash == state {
+		w.clientsMutex.Unlock()
+		log.Debugf("logging config unchanged, skipping reload")
+		return
+	}
+	w.lastLoggingConfigHash = state
+	w.clientsMutex.Unlock()
+
+	log.Infof("logging config changed, reloading: %s", w.loggingConfigPath)
+	w.loggingReloadCallback()
 }
 
 func (w *Watcher) reloadConfig() bool {

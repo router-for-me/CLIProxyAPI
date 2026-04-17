@@ -188,7 +188,7 @@ func TestDefaultRequestLoggerFactory_UsesResolvedLogDirectory(t *testing.T) {
 	}
 	foundErrorLogInAuthDir := false
 	for _, entry := range authEntries {
-		if strings.HasPrefix(entry.Name(), "error-") && strings.HasSuffix(entry.Name(), ".log") {
+		if strings.HasPrefix(entry.Name(), "request-error-") && strings.HasSuffix(entry.Name(), ".log") {
 			foundErrorLogInAuthDir = true
 			break
 		}
@@ -203,7 +203,7 @@ func TestDefaultRequestLoggerFactory_UsesResolvedLogDirectory(t *testing.T) {
 		t.Fatalf("failed to inspect config logs dir %s: %v", configLogsDir, errReadConfigDir)
 	}
 	for _, entry := range configEntries {
-		if strings.HasPrefix(entry.Name(), "error-") && strings.HasSuffix(entry.Name(), ".log") {
+		if strings.HasPrefix(entry.Name(), "request-error-") && strings.HasSuffix(entry.Name(), ".log") {
 			t.Fatalf("unexpected forced error log in config dir %s", configLogsDir)
 		}
 	}

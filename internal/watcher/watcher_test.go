@@ -278,7 +278,7 @@ func TestStartAndStopSuccess(t *testing.T) {
 	var reloads int32
 	w, err := NewWatcher(configPath, authDir, func(*config.Config) {
 		atomic.AddInt32(&reloads, 1)
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("failed to create watcher: %v", err)
 	}
@@ -307,7 +307,7 @@ func TestStartFailsWhenConfigMissing(t *testing.T) {
 	}
 	configPath := filepath.Join(tmpDir, "missing-config.yaml")
 
-	w, err := NewWatcher(configPath, authDir, nil)
+	w, err := NewWatcher(configPath, authDir, nil, nil)
 	if err != nil {
 		t.Fatalf("failed to create watcher: %v", err)
 	}
@@ -1450,7 +1450,7 @@ func TestStartFailsWhenAuthDirMissing(t *testing.T) {
 	}
 	authDir := filepath.Join(tmpDir, "missing-auth")
 
-	w, err := NewWatcher(configPath, authDir, nil)
+	w, err := NewWatcher(configPath, authDir, nil, nil)
 	if err != nil {
 		t.Fatalf("failed to create watcher: %v", err)
 	}
@@ -1514,7 +1514,7 @@ func TestNewWatcherDetectsPersisterAndAuthDir(t *testing.T) {
 	sdkAuth.RegisterTokenStore(store)
 	defer sdkAuth.RegisterTokenStore(orig)
 
-	w, err := NewWatcher("config.yaml", "auth", nil)
+	w, err := NewWatcher("config.yaml", "auth", nil, nil)
 	if err != nil {
 		t.Fatalf("NewWatcher failed: %v", err)
 	}

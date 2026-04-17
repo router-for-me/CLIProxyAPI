@@ -4,6 +4,7 @@ package watcher
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"gopkg.in/yaml.v3"
 
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
@@ -30,35 +32,41 @@ type authDirProvider interface {
 
 // Watcher manages file watching for configuration and authentication files
 type Watcher struct {
-	configPath        string
-	authDir           string
-	config            *config.Config
-	clientsMutex      sync.RWMutex
-	configReloadMu    sync.Mutex
-	configReloadTimer *time.Timer
-	serverUpdateMu    sync.Mutex
-	serverUpdateTimer *time.Timer
-	serverUpdateLast  time.Time
-	serverUpdatePend  bool
-	stopped           atomic.Bool
-	reloadCallback    func(*config.Config)
-	watcher           *fsnotify.Watcher
-	lastAuthHashes    map[string]string
-	lastAuthContents  map[string]*coreauth.Auth
-	fileAuthsByPath   map[string]map[string]*coreauth.Auth
-	lastRemoveTimes   map[string]time.Time
-	lastConfigHash    string
-	authQueue         chan<- AuthUpdate
-	currentAuths      map[string]*coreauth.Auth
-	runtimeAuths      map[string]*coreauth.Auth
-	dispatchMu        sync.Mutex
-	dispatchCond      *sync.Cond
-	pendingUpdates    map[string]AuthUpdate
-	pendingOrder      []string
-	dispatchCancel    context.CancelFunc
-	storePersister    storePersister
-	mirroredAuthDir   string
-	oldConfigYaml     []byte
+	configPath            string
+	configDir             string
+	loggingConfigPath     string
+	authDir               string
+	config                *config.Config
+	clientsMutex          sync.RWMutex
+	configReloadMu        sync.Mutex
+	configReloadTimer     *time.Timer
+	loggingReloadMu       sync.Mutex
+	loggingReloadTimer    *time.Timer
+	serverUpdateMu        sync.Mutex
+	serverUpdateTimer     *time.Timer
+	serverUpdateLast      time.Time
+	serverUpdatePend      bool
+	stopped               atomic.Bool
+	reloadCallback        func(*config.Config)
+	loggingReloadCallback func()
+	watcher               *fsnotify.Watcher
+	lastAuthHashes        map[string]string
+	lastAuthContents      map[string]*coreauth.Auth
+	fileAuthsByPath       map[string]map[string]*coreauth.Auth
+	lastRemoveTimes       map[string]time.Time
+	lastConfigHash        string
+	lastLoggingConfigHash string
+	authQueue             chan<- AuthUpdate
+	currentAuths          map[string]*coreauth.Auth
+	runtimeAuths          map[string]*coreauth.Auth
+	dispatchMu            sync.Mutex
+	dispatchCond          *sync.Cond
+	pendingUpdates        map[string]AuthUpdate
+	pendingOrder          []string
+	dispatchCancel        context.CancelFunc
+	storePersister        storePersister
+	mirroredAuthDir       string
+	oldConfigYaml         []byte
 }
 
 // AuthUpdateAction represents the type of change detected in auth sources.
@@ -87,18 +95,22 @@ const (
 )
 
 // NewWatcher creates a new file watcher instance
-func NewWatcher(configPath, authDir string, reloadCallback func(*config.Config)) (*Watcher, error) {
+func NewWatcher(configPath, authDir string, reloadCallback func(*config.Config), loggingReloadCallback func()) (*Watcher, error) {
 	watcher, errNewWatcher := fsnotify.NewWatcher()
 	if errNewWatcher != nil {
 		return nil, errNewWatcher
 	}
+	configDir := filepath.Dir(strings.TrimSpace(configPath))
 	w := &Watcher{
-		configPath:      configPath,
-		authDir:         authDir,
-		reloadCallback:  reloadCallback,
-		watcher:         watcher,
-		lastAuthHashes:  make(map[string]string),
-		fileAuthsByPath: make(map[string]map[string]*coreauth.Auth),
+		configPath:            configPath,
+		configDir:             configDir,
+		loggingConfigPath:     logging.ResolveLoggingConfigPath(configPath),
+		authDir:               authDir,
+		reloadCallback:        reloadCallback,
+		loggingReloadCallback: loggingReloadCallback,
+		watcher:               watcher,
+		lastAuthHashes:        make(map[string]string),
+		fileAuthsByPath:       make(map[string]map[string]*coreauth.Auth),
 	}
 	w.dispatchCond = sync.NewCond(&w.dispatchMu)
 	if store := sdkAuth.GetTokenStore(); store != nil {
@@ -126,6 +138,7 @@ func (w *Watcher) Stop() error {
 	w.stopped.Store(true)
 	w.stopDispatch()
 	w.stopConfigReloadTimer()
+	w.stopLoggingReloadTimer()
 	w.stopServerUpdateTimer()
 	return w.watcher.Close()
 }

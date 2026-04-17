@@ -189,7 +189,7 @@ func (h *Handler) GetRequestErrorLogs(c *gin.Context) {
 			continue
 		}
 		name := entry.Name()
-		if !strings.HasPrefix(name, "error-") || !strings.HasSuffix(name, ".log") {
+		if !logging.IsRequestErrorLogFileName(name) {
 			continue
 		}
 		info, errInfo := entry.Info()
@@ -240,8 +240,7 @@ func (h *Handler) GetRequestLogByID(c *gin.Context) {
 		return
 	}
 
-	entries, err := os.ReadDir(dir)
-	if err != nil {
+	if _, err := os.Stat(dir); err != nil {
 		if os.IsNotExist(err) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "log directory not found"})
 			return
@@ -250,51 +249,27 @@ func (h *Handler) GetRequestLogByID(c *gin.Context) {
 		return
 	}
 
-	suffix := "-" + requestID + ".log"
-	var matchedFile string
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		name := entry.Name()
-		if strings.HasSuffix(name, suffix) {
-			matchedFile = name
-			break
-		}
-	}
-
-	if matchedFile == "" {
-		c.JSON(http.StatusNotFound, gin.H{"error": "log file not found for the given request ID"})
+	files, errCollect := h.collectRequestLogFiles(dir)
+	if errCollect != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to list request logs: %v", errCollect)})
 		return
 	}
 
-	dirAbs, errAbs := filepath.Abs(dir)
-	if errAbs != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to resolve log directory: %v", errAbs)})
-		return
-	}
-	fullPath := filepath.Clean(filepath.Join(dirAbs, matchedFile))
-	prefix := dirAbs + string(os.PathSeparator)
-	if !strings.HasPrefix(fullPath, prefix) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid log file path"})
-		return
-	}
-
-	info, errStat := os.Stat(fullPath)
-	if errStat != nil {
-		if os.IsNotExist(errStat) {
-			c.JSON(http.StatusNotFound, gin.H{"error": "log file not found"})
+	for _, path := range files {
+		record, errExtract := logging.ExtractRequestRecordByID(path, requestID)
+		if errExtract == nil {
+			c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", "request-"+requestID+".log"))
+			c.Data(http.StatusOK, "text/plain; charset=utf-8", record)
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to read log file: %v", errStat)})
-		return
-	}
-	if info.IsDir() {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid log file"})
+		if os.IsNotExist(errExtract) {
+			continue
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to search request log %s: %v", filepath.Base(path), errExtract)})
 		return
 	}
 
-	c.FileAttachment(fullPath, matchedFile)
+	c.JSON(http.StatusNotFound, gin.H{"error": "log file not found for the given request ID"})
 }
 
 // DownloadRequestErrorLog downloads a specific error request log file by name.
@@ -319,7 +294,7 @@ func (h *Handler) DownloadRequestErrorLog(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid log file name"})
 		return
 	}
-	if !strings.HasPrefix(name, "error-") || !strings.HasSuffix(name, ".log") {
+	if !logging.IsRequestErrorLogFileName(name) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "log file not found"})
 		return
 	}
@@ -419,7 +394,7 @@ func newLogAccumulator(cutoff int64, limit int) *logAccumulator {
 }
 
 func (acc *logAccumulator) consumeFile(path string) error {
-	file, err := os.Open(path)
+	file, err := logging.OpenLogFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
@@ -440,6 +415,36 @@ func (acc *logAccumulator) consumeFile(path string) error {
 		return errScan
 	}
 	return nil
+}
+
+func (h *Handler) collectRequestLogFiles(dir string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	type candidate struct {
+		path  string
+		order int64
+	}
+	cands := make([]candidate, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if order, ok := logging.RequestLogOrder(name); ok {
+			cands = append(cands, candidate{
+				path:  filepath.Join(dir, name),
+				order: order,
+			})
+		}
+	}
+	sort.Slice(cands, func(i, j int) bool { return cands[i].order > cands[j].order })
+	paths := make([]string, 0, len(cands))
+	for _, cand := range cands {
+		paths = append(paths, cand.path)
+	}
+	return paths, nil
 }
 
 func (acc *logAccumulator) addLine(raw string) {

@@ -33,6 +33,14 @@ func (w *Watcher) start(ctx context.Context) error {
 	}
 	log.Debugf("watching config file: %s", w.configPath)
 
+	if strings.TrimSpace(w.configDir) != "" {
+		if errAddConfigDir := w.watcher.Add(w.configDir); errAddConfigDir != nil {
+			log.Errorf("failed to watch config directory %s: %v", w.configDir, errAddConfigDir)
+			return errAddConfigDir
+		}
+		log.Debugf("watching config directory: %s", w.configDir)
+	}
+
 	if errAddAuthDir := w.watcher.Add(w.authDir); errAddAuthDir != nil {
 		log.Errorf("failed to watch auth directory %s: %v", w.authDir, errAddAuthDir)
 		return errAddAuthDir
@@ -69,11 +77,14 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 	configOps := fsnotify.Write | fsnotify.Create | fsnotify.Rename
 	normalizedName := w.normalizeAuthPath(event.Name)
 	normalizedConfigPath := w.normalizeAuthPath(w.configPath)
+	normalizedLoggingConfigPath := w.normalizeAuthPath(w.loggingConfigPath)
 	normalizedAuthDir := w.normalizeAuthPath(w.authDir)
 	isConfigEvent := normalizedName == normalizedConfigPath && event.Op&configOps != 0
+	loggingOps := fsnotify.Write | fsnotify.Create | fsnotify.Rename | fsnotify.Remove
+	isLoggingConfigEvent := normalizedName == normalizedLoggingConfigPath && event.Op&loggingOps != 0
 	authOps := fsnotify.Create | fsnotify.Write | fsnotify.Remove | fsnotify.Rename
 	isAuthJSON := strings.HasPrefix(normalizedName, normalizedAuthDir) && strings.HasSuffix(normalizedName, ".json") && event.Op&authOps != 0
-	if !isConfigEvent && !isAuthJSON {
+	if !isConfigEvent && !isAuthJSON && !isLoggingConfigEvent {
 		// Ignore unrelated files (e.g., cookie snapshots *.cookie) and other noise.
 		return
 	}
@@ -85,6 +96,12 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 	if isConfigEvent {
 		log.Debugf("config file change details - operation: %s, timestamp: %s", event.Op.String(), now.Format("2006-01-02 15:04:05.000"))
 		w.scheduleConfigReload()
+		return
+	}
+
+	if isLoggingConfigEvent {
+		log.Debugf("logging config change details - operation: %s, timestamp: %s", event.Op.String(), now.Format("2006-01-02 15:04:05.000"))
+		w.scheduleLoggingReload()
 		return
 	}
 
