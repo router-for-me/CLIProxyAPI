@@ -1006,7 +1006,7 @@ func claudeCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
 }
 
 func checkSystemInstructions(payload []byte) []byte {
-	return checkSystemInstructionsWithSigningMode(payload, false, false, false, "2.1.63", "", "")
+	return checkSystemInstructionsWithSigningMode(payload, false, false, false, true, "2.1.63", "", "")
 }
 
 func isClaudeOAuthToken(apiKey string) bool {
@@ -1525,7 +1525,7 @@ func generateBillingHeader(payload []byte, experimentalCCHSigning bool, version,
 }
 
 func checkSystemInstructionsWithMode(payload []byte, strictMode bool) []byte {
-	return checkSystemInstructionsWithSigningMode(payload, strictMode, false, false, "2.1.63", "", "")
+	return checkSystemInstructionsWithSigningMode(payload, strictMode, false, false, true, "2.1.63", "", "")
 }
 
 // checkSystemInstructionsWithSigningMode injects Claude Code-style system blocks:
@@ -1536,7 +1536,10 @@ func checkSystemInstructionsWithMode(payload []byte, strictMode bool) []byte {
 //	system[3]: system instructions (no cache_control)
 //	system[4]: doing tasks (no cache_control)
 //	system[5]: user system messages moved to first user message
-func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, experimentalCCHSigning bool, oauthMode bool, version, entrypoint, workload string) []byte {
+//
+// sanitizeSystemPrompt controls whether forwarded system content is collapsed to a stub
+// (true = sanitize, which is the legacy default). Pass false to forward the original text.
+func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, experimentalCCHSigning bool, oauthMode bool, sanitizeSystemPrompt bool, version, entrypoint, workload string) []byte {
 	system := gjson.GetBytes(payload, "system")
 
 	// Extract original message text for fingerprint computation (before billing injection).
@@ -1599,7 +1602,7 @@ func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, exp
 
 		if len(userSystemParts) > 0 {
 			combined := strings.Join(userSystemParts, "\n\n")
-			if oauthMode {
+			if oauthMode && sanitizeSystemPrompt {
 				combined = sanitizeForwardedSystemPrompt(combined)
 			}
 			if strings.TrimSpace(combined) != "" {
@@ -1727,6 +1730,13 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 		}
 	}
 
+	// Resolve OAuth cloaking levers from config and optional header opt-out.
+	var reqHeader http.Header
+	if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
+		reqHeader = ginCtx.Request.Header
+	}
+	levers := helps.ResolveOAuthLevers(cloakCfg, auth, reqHeader)
+
 	// Determine if cloaking should be applied
 	if !helps.ShouldCloak(cloakMode, clientUserAgent) {
 		return payload
@@ -1737,7 +1747,7 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 		billingVersion := helps.DefaultClaudeVersion(cfg)
 		entrypoint := parseEntrypointFromUA(clientUserAgent)
 		workload := getWorkloadFromContext(ctx)
-		payload = checkSystemInstructionsWithSigningMode(payload, strictMode, useCCHSigning, oauthToken, billingVersion, entrypoint, workload)
+		payload = checkSystemInstructionsWithSigningMode(payload, strictMode, useCCHSigning, oauthToken, levers.SanitizeSystemPrompt, billingVersion, entrypoint, workload)
 	}
 
 	// Inject fake user ID

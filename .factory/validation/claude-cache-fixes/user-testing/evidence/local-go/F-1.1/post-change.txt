@@ -1,0 +1,47 @@
+﻿=== RUN   TestCloakConfigOAuthLeverDefaults
+--- PASS: TestCloakConfigOAuthLeverDefaults (0.00s)
+=== RUN   TestCloakConfigOAuthLeverYAMLRoundTrip
+--- PASS: TestCloakConfigOAuthLeverYAMLRoundTrip (0.00s)
+PASS
+ok  	github.com/router-for-me/CLIProxyAPI/v6/internal/config	0.530s
+=== RUN   TestEnsureCacheControl
+=== RUN   TestEnsureCacheControl/String_System_Prompt
+=== RUN   TestEnsureCacheControl/Array_System_Prompt
+=== RUN   TestEnsureCacheControl/Tools_Caching
+=== RUN   TestEnsureCacheControl/Independent_Cache_Breakpoints
+=== RUN   TestEnsureCacheControl/Only_Tools_No_System
+=== RUN   TestEnsureCacheControl/Many_Tools_(Claude_Code_Scenario)
+    caching_verify_test.go:154: test passed: 50 tools - cache_control only on last tool
+=== RUN   TestEnsureCacheControl/Empty_Tools_Array
+=== RUN   TestEnsureCacheControl/Messages_Caching_Second-To-Last_User
+=== RUN   TestEnsureCacheControl/Messages_Skip_When_Cache_Control_Exists
+--- PASS: TestEnsureCacheControl (0.00s)
+    --- PASS: TestEnsureCacheControl/String_System_Prompt (0.00s)
+    --- PASS: TestEnsureCacheControl/Array_System_Prompt (0.00s)
+    --- PASS: TestEnsureCacheControl/Tools_Caching (0.00s)
+    --- PASS: TestEnsureCacheControl/Independent_Cache_Breakpoints (0.00s)
+    --- PASS: TestEnsureCacheControl/Only_Tools_No_System (0.00s)
+    --- PASS: TestEnsureCacheControl/Many_Tools_(Claude_Code_Scenario) (0.00s)
+    --- PASS: TestEnsureCacheControl/Empty_Tools_Array (0.00s)
+    --- PASS: TestEnsureCacheControl/Messages_Caching_Second-To-Last_User (0.00s)
+    --- PASS: TestEnsureCacheControl/Messages_Skip_When_Cache_Control_Exists (0.00s)
+=== RUN   TestCacheControlOrder
+    caching_verify_test.go:257: cache order correct: tools -> system
+--- PASS: TestCacheControlOrder (0.00s)
+=== RUN   TestNormalizeCacheControlTTL_DowngradesLaterOneHourBlocks
+--- PASS: TestNormalizeCacheControlTTL_DowngradesLaterOneHourBlocks (0.00s)
+=== RUN   TestNormalizeCacheControlTTL_PreservesOriginalBytesWhenNoChange
+--- PASS: TestNormalizeCacheControlTTL_PreservesOriginalBytesWhenNoChange (0.00s)
+=== RUN   TestNormalizeCacheControlTTL_PreservesKeyOrderWhenModified
+--- PASS: TestNormalizeCacheControlTTL_PreservesKeyOrderWhenModified (0.00s)
+=== RUN   TestEnforceCacheControlLimit_StripsNonLastToolBeforeMessages
+--- PASS: TestEnforceCacheControlLimit_StripsNonLastToolBeforeMessages (0.00s)
+=== RUN   TestEnforceCacheControlLimit_PreservesKeyOrderWhenModified
+--- PASS: TestEnforceCacheControlLimit_PreservesKeyOrderWhenModified (0.00s)
+=== RUN   TestEnforceCacheControlLimit_ToolOnlyPayloadStillRespectsLimit
+--- PASS: TestEnforceCacheControlLimit_ToolOnlyPayloadStillRespectsLimit (0.00s)
+PASS
+ok  	github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor	0.193s
+testing: warning: no tests to run
+PASS
+ok  	github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps	1.555s [no tests to run]
