@@ -1777,6 +1777,7 @@
       "display_name": "Gemini 3.1 Flash Image",
       "name": "gemini-3.1-flash-image",
       "description": "Gemini 3.1 Flash Image",
+      "context_length": 1048576,
       "thinking": {
         "min": 128,
         "max": 32768,
