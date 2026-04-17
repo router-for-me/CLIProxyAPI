@@ -14,7 +14,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
@@ -79,6 +78,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 	var lastRequest []byte
 	lastResponseOutput := []byte("[]")
 	pinnedAuthID := ""
+	incrementalInputSupportByModel := make(map[string]bool)
 
 	for {
 		msgType, payload, errReadMessage := conn.ReadMessage()
@@ -104,16 +104,18 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		appendWebsocketTimelineEvent(&wsTimelineLog, "request", payload, time.Now())
 
 		allowIncrementalInputWithPreviousResponseID := false
-		if pinnedAuthID != "" && h != nil && h.AuthManager != nil {
-			if pinnedAuth, ok := h.AuthManager.GetByID(pinnedAuthID); ok && pinnedAuth != nil {
-				allowIncrementalInputWithPreviousResponseID = websocketUpstreamSupportsIncrementalInput(pinnedAuth.Attributes, pinnedAuth.Metadata)
-			}
+		if pinnedAuthID != "" {
+			allowIncrementalInputWithPreviousResponseID = true
 		} else {
 			requestModelName := strings.TrimSpace(gjson.GetBytes(payload, "model").String())
 			if requestModelName == "" {
 				requestModelName = strings.TrimSpace(gjson.GetBytes(lastRequest, "model").String())
 			}
-			allowIncrementalInputWithPreviousResponseID = h.websocketUpstreamSupportsIncrementalInputForModel(requestModelName)
+			allowIncrementalInputWithPreviousResponseID = cachedResponsesWebsocketIncrementalInputSupport(
+				incrementalInputSupportByModel,
+				requestModelName,
+				h.websocketUpstreamSupportsIncrementalInputForModel,
+			)
 		}
 
 		var requestJSON []byte
@@ -205,6 +207,25 @@ func websocketClientAddress(c *gin.Context) string {
 		return ""
 	}
 	return strings.TrimSpace(c.ClientIP())
+}
+
+func cachedResponsesWebsocketIncrementalInputSupport(cache map[string]bool, modelName string, resolve func(string) bool) bool {
+	if resolve == nil {
+		return false
+	}
+
+	modelName = strings.TrimSpace(modelName)
+	if modelName == "" || cache == nil {
+		return resolve(modelName)
+	}
+
+	if supported, ok := cache[modelName]; ok {
+		return supported
+	}
+
+	supported := resolve(modelName)
+	cache[modelName] = supported
+	return supported
 }
 
 func websocketUpgradeHeaders(req *http.Request) http.Header {
@@ -507,76 +528,13 @@ func (h *OpenAIResponsesAPIHandler) websocketUpstreamSupportsIncrementalInputFor
 		return false
 	}
 
-	providerSet := make(map[string]struct{}, len(providers))
-	for i := 0; i < len(providers); i++ {
-		providerKey := strings.TrimSpace(strings.ToLower(providers[i]))
-		if providerKey == "" {
-			continue
-		}
-		providerSet[providerKey] = struct{}{}
-	}
-	if len(providerSet) == 0 {
-		return false
-	}
-
 	modelKey := baseModel
 	if modelKey == "" {
 		modelKey = strings.TrimSpace(resolvedModelName)
 	}
-	registryRef := registry.GetGlobalRegistry()
-	now := time.Now()
-	auths := h.AuthManager.List()
-	for i := 0; i < len(auths); i++ {
-		auth := auths[i]
-		if auth == nil {
-			continue
-		}
-		providerKey := strings.TrimSpace(strings.ToLower(auth.Provider))
-		if _, ok := providerSet[providerKey]; !ok {
-			continue
-		}
-		if modelKey != "" && registryRef != nil && !registryRef.ClientSupportsModel(auth.ID, modelKey) {
-			continue
-		}
-		if !responsesWebsocketAuthAvailableForModel(auth, modelKey, now) {
-			continue
-		}
-		if websocketUpstreamSupportsIncrementalInput(auth.Attributes, auth.Metadata) {
-			return true
-		}
-	}
-	return false
-}
-
-func responsesWebsocketAuthAvailableForModel(auth *coreauth.Auth, modelName string, now time.Time) bool {
-	if auth == nil {
-		return false
-	}
-	if auth.Disabled || auth.Status == coreauth.StatusDisabled {
-		return false
-	}
-	if modelName != "" && len(auth.ModelStates) > 0 {
-		state, ok := auth.ModelStates[modelName]
-		if (!ok || state == nil) && modelName != "" {
-			baseModel := strings.TrimSpace(thinking.ParseSuffix(modelName).ModelName)
-			if baseModel != "" && baseModel != modelName {
-				state, ok = auth.ModelStates[baseModel]
-			}
-		}
-		if ok && state != nil {
-			if state.Status == coreauth.StatusDisabled {
-				return false
-			}
-			if state.Unavailable && !state.NextRetryAfter.IsZero() && state.NextRetryAfter.After(now) {
-				return false
-			}
-			return true
-		}
-	}
-	if auth.Unavailable && !auth.NextRetryAfter.IsZero() && auth.NextRetryAfter.After(now) {
-		return false
-	}
-	return true
+	return h.AuthManager.AnyAvailableAuthForModel(providers, modelKey, func(auth *coreauth.Auth) bool {
+		return websocketUpstreamSupportsIncrementalInput(auth.Attributes, auth.Metadata)
+	})
 }
 
 func shouldHandleResponsesWebsocketPrewarmLocally(rawJSON []byte, lastRequest []byte, allowIncrementalInputWithPreviousResponseID bool) bool {

@@ -1,5 +1,5 @@
 // Package openai provides utilities to translate OpenAI Chat Completions
-// request JSON into OpenAI Responses API request JSON using gjson/sjson.
+// request JSON into OpenAI Responses API request JSON.
 // It supports tools, multimodal text/image inputs, and Structured Outputs.
 // The package handles the conversion of OpenAI API requests into the format
 // expected by the OpenAI Responses API, including proper mapping of messages,
@@ -7,11 +7,12 @@
 package chat_completions
 
 import (
+	"encoding/json"
 	"strconv"
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 // ConvertOpenAIRequestToCodex converts an OpenAI Chat Completions request JSON
@@ -28,335 +29,335 @@ import (
 //   - []byte: The transformed request data in OpenAI Responses API format
 func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream bool) []byte {
 	rawJSON := inputRawJSON
-	// Start with empty JSON object
-	out := []byte(`{"instructions":""}`)
+	out := codexRequest{
+		Instructions:      "",
+		Stream:            stream,
+		Reasoning:         codexReasoning{Effort: "medium", Summary: "auto"},
+		ParallelToolCalls: true,
+		Include:           []string{"reasoning.encrypted_content"},
+		Model:             modelName,
+		Input:             make([]any, 0),
+		Store:             false,
+	}
 
-	// Stream must be set to true
-	out, _ = sjson.SetBytes(out, "stream", stream)
-
-	// Codex not support temperature, top_p, top_k, max_output_tokens, so comment them
-	// if v := gjson.GetBytes(rawJSON, "temperature"); v.Exists() {
-	// 	out, _ = sjson.SetBytes(out, "temperature", v.Value())
-	// }
-	// if v := gjson.GetBytes(rawJSON, "top_p"); v.Exists() {
-	// 	out, _ = sjson.SetBytes(out, "top_p", v.Value())
-	// }
-	// if v := gjson.GetBytes(rawJSON, "top_k"); v.Exists() {
-	// 	out, _ = sjson.SetBytes(out, "top_k", v.Value())
-	// }
-
-	// Map token limits
-	// if v := gjson.GetBytes(rawJSON, "max_tokens"); v.Exists() {
-	// 	out, _ = sjson.SetBytes(out, "max_output_tokens", v.Value())
-	// }
-	// if v := gjson.GetBytes(rawJSON, "max_completion_tokens"); v.Exists() {
-	// 	out, _ = sjson.SetBytes(out, "max_output_tokens", v.Value())
-	// }
-
-	// Map reasoning effort
 	if v := gjson.GetBytes(rawJSON, "reasoning_effort"); v.Exists() {
-		out, _ = sjson.SetBytes(out, "reasoning.effort", v.Value())
-	} else {
-		out, _ = sjson.SetBytes(out, "reasoning.effort", "medium")
-	}
-	out, _ = sjson.SetBytes(out, "parallel_tool_calls", true)
-	out, _ = sjson.SetBytes(out, "reasoning.summary", "auto")
-	out, _ = sjson.SetBytes(out, "include", []string{"reasoning.encrypted_content"})
-
-	// Model
-	out, _ = sjson.SetBytes(out, "model", modelName)
-
-	// Build tool name shortening map from original tools (if any)
-	originalToolNameMap := map[string]string{}
-	{
-		tools := gjson.GetBytes(rawJSON, "tools")
-		if tools.IsArray() && len(tools.Array()) > 0 {
-			// Collect original tool names
-			var names []string
-			arr := tools.Array()
-			for i := 0; i < len(arr); i++ {
-				t := arr[i]
-				if t.Get("type").String() == "function" {
-					fn := t.Get("function")
-					if fn.Exists() {
-						if v := fn.Get("name"); v.Exists() {
-							names = append(names, v.String())
-						}
-					}
-				}
-			}
-			if len(names) > 0 {
-				originalToolNameMap = buildShortNameMap(names)
-			}
-		}
+		out.Reasoning.Effort = v.Value()
 	}
 
-	// Extract system instructions from first system message (string or text object)
+	tools := gjson.GetBytes(rawJSON, "tools")
+	originalToolNameMap := buildOriginalToolNameMap(tools)
+
 	messages := gjson.GetBytes(rawJSON, "messages")
-	// if messages.IsArray() {
-	// 	arr := messages.Array()
-	// 	for i := 0; i < len(arr); i++ {
-	// 		m := arr[i]
-	// 		if m.Get("role").String() == "system" {
-	// 			c := m.Get("content")
-	// 			if c.Type == gjson.String {
-	// 				out, _ = sjson.SetBytes(out, "instructions", c.String())
-	// 			} else if c.IsObject() && c.Get("type").String() == "text" {
-	// 				out, _ = sjson.SetBytes(out, "instructions", c.Get("text").String())
-	// 			}
-	// 			break
-	// 		}
-	// 	}
-	// }
-
-	// Build input from messages, handling all message types including tool calls
-	out, _ = sjson.SetRawBytes(out, "input", []byte(`[]`))
 	if messages.IsArray() {
-		arr := messages.Array()
-		for i := 0; i < len(arr); i++ {
-			m := arr[i]
+		messageItems := messages.Array()
+		for i := 0; i < len(messageItems); i++ {
+			m := messageItems[i]
 			role := m.Get("role").String()
 
-			switch role {
-			case "tool":
-				// Handle tool response messages as top-level function_call_output objects
-				toolCallID := m.Get("tool_call_id").String()
-				content := m.Get("content").String()
-
-				// Create function_call_output object
-				funcOutput := []byte(`{}`)
-				funcOutput, _ = sjson.SetBytes(funcOutput, "type", "function_call_output")
-				funcOutput, _ = sjson.SetBytes(funcOutput, "call_id", toolCallID)
-				funcOutput, _ = sjson.SetBytes(funcOutput, "output", content)
-				out, _ = sjson.SetRawBytes(out, "input.-1", funcOutput)
-
-			default:
-				// Handle regular messages
-				msg := []byte(`{}`)
-				msg, _ = sjson.SetBytes(msg, "type", "message")
-				if role == "system" {
-					msg, _ = sjson.SetBytes(msg, "role", "developer")
-				} else {
-					msg, _ = sjson.SetBytes(msg, "role", role)
-				}
-
-				msg, _ = sjson.SetRawBytes(msg, "content", []byte(`[]`))
-
-				// Handle regular content
-				c := m.Get("content")
-				if c.Exists() && c.Type == gjson.String && c.String() != "" {
-					// Single string content
-					partType := "input_text"
-					if role == "assistant" {
-						partType = "output_text"
-					}
-					part := []byte(`{}`)
-					part, _ = sjson.SetBytes(part, "type", partType)
-					part, _ = sjson.SetBytes(part, "text", c.String())
-					msg, _ = sjson.SetRawBytes(msg, "content.-1", part)
-				} else if c.Exists() && c.IsArray() {
-					items := c.Array()
-					for j := 0; j < len(items); j++ {
-						it := items[j]
-						t := it.Get("type").String()
-						switch t {
-						case "text":
-							partType := "input_text"
-							if role == "assistant" {
-								partType = "output_text"
-							}
-							part := []byte(`{}`)
-							part, _ = sjson.SetBytes(part, "type", partType)
-							part, _ = sjson.SetBytes(part, "text", it.Get("text").String())
-							msg, _ = sjson.SetRawBytes(msg, "content.-1", part)
-						case "image_url":
-							// Map image inputs to input_image for Responses API
-							if role == "user" {
-								part := []byte(`{}`)
-								part, _ = sjson.SetBytes(part, "type", "input_image")
-								if u := it.Get("image_url.url"); u.Exists() {
-									part, _ = sjson.SetBytes(part, "image_url", u.String())
-								}
-								msg, _ = sjson.SetRawBytes(msg, "content.-1", part)
-							}
-						case "file":
-							if role == "user" {
-								fileData := it.Get("file.file_data").String()
-								filename := it.Get("file.filename").String()
-								if fileData != "" {
-									part := []byte(`{}`)
-									part, _ = sjson.SetBytes(part, "type", "input_file")
-									part, _ = sjson.SetBytes(part, "file_data", fileData)
-									if filename != "" {
-										part, _ = sjson.SetBytes(part, "filename", filename)
-									}
-									msg, _ = sjson.SetRawBytes(msg, "content.-1", part)
-								}
-							}
-						}
-					}
-				}
-
-				// Don't emit empty assistant messages when only tool_calls
-				// are present — Responses API needs function_call items
-				// directly, otherwise call_id matching fails (#2132).
-				if role != "assistant" || len(gjson.GetBytes(msg, "content").Array()) > 0 {
-					out, _ = sjson.SetRawBytes(out, "input.-1", msg)
-				}
-
-				// Handle tool calls for assistant messages as separate top-level objects
-				if role == "assistant" {
-					toolCalls := m.Get("tool_calls")
-					if toolCalls.Exists() && toolCalls.IsArray() {
-						toolCallsArr := toolCalls.Array()
-						for j := 0; j < len(toolCallsArr); j++ {
-							tc := toolCallsArr[j]
-							if tc.Get("type").String() == "function" {
-								// Create function_call as top-level object
-								funcCall := []byte(`{}`)
-								funcCall, _ = sjson.SetBytes(funcCall, "type", "function_call")
-								funcCall, _ = sjson.SetBytes(funcCall, "call_id", tc.Get("id").String())
-								{
-									name := tc.Get("function.name").String()
-									if short, ok := originalToolNameMap[name]; ok {
-										name = short
-									} else {
-										name = shortenNameIfNeeded(name)
-									}
-									funcCall, _ = sjson.SetBytes(funcCall, "name", name)
-								}
-								funcCall, _ = sjson.SetBytes(funcCall, "arguments", tc.Get("function.arguments").String())
-								out, _ = sjson.SetRawBytes(out, "input.-1", funcCall)
-							}
-						}
-					}
-				}
-			}
-		}
-	}
-
-	// Map response_format and text settings to Responses API text.format
-	rf := gjson.GetBytes(rawJSON, "response_format")
-	text := gjson.GetBytes(rawJSON, "text")
-	if rf.Exists() {
-		// Always create text object when response_format provided
-		if !gjson.GetBytes(out, "text").Exists() {
-			out, _ = sjson.SetRawBytes(out, "text", []byte(`{}`))
-		}
-
-		rft := rf.Get("type").String()
-		switch rft {
-		case "text":
-			out, _ = sjson.SetBytes(out, "text.format.type", "text")
-		case "json_schema":
-			js := rf.Get("json_schema")
-			if js.Exists() {
-				out, _ = sjson.SetBytes(out, "text.format.type", "json_schema")
-				if v := js.Get("name"); v.Exists() {
-					out, _ = sjson.SetBytes(out, "text.format.name", v.Value())
-				}
-				if v := js.Get("strict"); v.Exists() {
-					out, _ = sjson.SetBytes(out, "text.format.strict", v.Value())
-				}
-				if v := js.Get("schema"); v.Exists() {
-					out, _ = sjson.SetRawBytes(out, "text.format.schema", []byte(v.Raw))
-				}
-			}
-		}
-
-		// Map verbosity if provided
-		if text.Exists() {
-			if v := text.Get("verbosity"); v.Exists() {
-				out, _ = sjson.SetBytes(out, "text.verbosity", v.Value())
-			}
-		}
-	} else if text.Exists() {
-		// If only text.verbosity present (no response_format), map verbosity
-		if v := text.Get("verbosity"); v.Exists() {
-			if !gjson.GetBytes(out, "text").Exists() {
-				out, _ = sjson.SetRawBytes(out, "text", []byte(`{}`))
-			}
-			out, _ = sjson.SetBytes(out, "text.verbosity", v.Value())
-		}
-	}
-
-	// Map tools (flatten function fields)
-	tools := gjson.GetBytes(rawJSON, "tools")
-	if tools.IsArray() && len(tools.Array()) > 0 {
-		out, _ = sjson.SetRawBytes(out, "tools", []byte(`[]`))
-		arr := tools.Array()
-		for i := 0; i < len(arr); i++ {
-			t := arr[i]
-			toolType := t.Get("type").String()
-			// Pass through built-in tools (e.g. {"type":"web_search"}) directly for the Responses API.
-			// Only "function" needs structural conversion because Chat Completions nests details under "function".
-			if toolType != "" && toolType != "function" && t.IsObject() {
-				out, _ = sjson.SetRawBytes(out, "tools.-1", []byte(t.Raw))
+			if role == "tool" {
+				out.Input = append(out.Input, codexFunctionCallOutput{
+					Type:   "function_call_output",
+					CallID: m.Get("tool_call_id").String(),
+					Output: m.Get("content").String(),
+				})
 				continue
 			}
 
-			if toolType == "function" {
-				item := []byte(`{}`)
-				item, _ = sjson.SetBytes(item, "type", "function")
-				fn := t.Get("function")
-				if fn.Exists() {
-					if v := fn.Get("name"); v.Exists() {
-						name := v.String()
-						if short, ok := originalToolNameMap[name]; ok {
-							name = short
-						} else {
-							name = shortenNameIfNeeded(name)
-						}
-						item, _ = sjson.SetBytes(item, "name", name)
-					}
-					if v := fn.Get("description"); v.Exists() {
-						item, _ = sjson.SetBytes(item, "description", v.Value())
-					}
-					if v := fn.Get("parameters"); v.Exists() {
-						item, _ = sjson.SetRawBytes(item, "parameters", []byte(v.Raw))
-					}
-					if v := fn.Get("strict"); v.Exists() {
-						item, _ = sjson.SetBytes(item, "strict", v.Value())
-					}
-				}
-				out, _ = sjson.SetRawBytes(out, "tools.-1", item)
+			msg := codexMessage{
+				Type:    "message",
+				Role:    codexMessageRole(role),
+				Content: make([]any, 0),
+			}
+			appendCodexMessageContent(&msg.Content, role, m.Get("content"))
+
+			// Keep non-assistant messages even when content is empty.
+			if role != "assistant" || len(msg.Content) > 0 {
+				out.Input = append(out.Input, msg)
+			}
+
+			if role == "assistant" {
+				appendCodexAssistantToolCalls(&out.Input, m.Get("tool_calls"), originalToolNameMap)
 			}
 		}
 	}
 
-	// Map tool_choice when present.
-	// Chat Completions: "tool_choice" can be a string ("auto"/"none") or an object (e.g. {"type":"function","function":{"name":"..."}}).
-	// Responses API: keep built-in tool choices as-is; flatten function choice to {"type":"function","name":"..."}.
+	rf := gjson.GetBytes(rawJSON, "response_format")
+	text := gjson.GetBytes(rawJSON, "text")
+	if rf.Exists() {
+		out.Text = &codexText{}
+
+		switch rf.Get("type").String() {
+		case "text":
+			out.Text.Format = &codexTextFormat{Type: "text"}
+		case "json_schema":
+			if js := rf.Get("json_schema"); js.Exists() {
+				out.Text.Format = &codexTextFormat{
+					Type:   "json_schema",
+					Name:   jsonFieldValue(js.Get("name")),
+					Strict: jsonFieldValue(js.Get("strict")),
+					Schema: util.RawJSON(js.Get("schema").Raw),
+				}
+			}
+		}
+
+		if v := text.Get("verbosity"); v.Exists() {
+			out.Text.Verbosity = v.Value()
+		}
+	} else if v := text.Get("verbosity"); v.Exists() {
+		out.Text = &codexText{Verbosity: v.Value()}
+	}
+
+	if tools.IsArray() {
+		toolItems := tools.Array()
+		out.Tools = make([]any, 0, len(toolItems))
+		for i := 0; i < len(toolItems); i++ {
+			t := toolItems[i]
+			toolType := t.Get("type").String()
+			if toolType != "" && toolType != "function" && t.IsObject() {
+				out.Tools = append(out.Tools, util.RawJSON(t.Raw))
+				continue
+			}
+			if toolType != "function" {
+				continue
+			}
+
+			fn := t.Get("function")
+			if !fn.Exists() {
+				continue
+			}
+			out.Tools = append(out.Tools, codexTool{
+				Type:        "function",
+				Name:        resolveToolName(fn.Get("name").String(), originalToolNameMap),
+				Description: jsonFieldValue(fn.Get("description")),
+				Parameters:  util.RawJSON(fn.Get("parameters").Raw),
+				Strict:      jsonFieldValue(fn.Get("strict")),
+			})
+		}
+		if len(out.Tools) == 0 {
+			out.Tools = nil
+		}
+	}
+
 	if tc := gjson.GetBytes(rawJSON, "tool_choice"); tc.Exists() {
 		switch {
 		case tc.Type == gjson.String:
-			out, _ = sjson.SetBytes(out, "tool_choice", tc.String())
+			out.ToolChoice = tc.String()
 		case tc.IsObject():
 			tcType := tc.Get("type").String()
 			if tcType == "function" {
-				name := tc.Get("function.name").String()
-				if name != "" {
-					if short, ok := originalToolNameMap[name]; ok {
-						name = short
-					} else {
-						name = shortenNameIfNeeded(name)
-					}
+				out.ToolChoice = codexFunctionToolChoice{
+					Type: "function",
+					Name: resolveToolName(tc.Get("function.name").String(), originalToolNameMap),
 				}
-				choice := []byte(`{}`)
-				choice, _ = sjson.SetBytes(choice, "type", "function")
-				if name != "" {
-					choice, _ = sjson.SetBytes(choice, "name", name)
-				}
-				out, _ = sjson.SetRawBytes(out, "tool_choice", choice)
 			} else if tcType != "" {
-				// Built-in tool choices (e.g. {"type":"web_search"}) are already Responses-compatible.
-				out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(tc.Raw))
+				out.ToolChoice = util.RawJSON(tc.Raw)
 			}
 		}
 	}
 
-	out, _ = sjson.SetBytes(out, "store", false)
-	return out
+	marshaled, _ := json.Marshal(out)
+	return marshaled
+}
+
+type codexRequest struct {
+	Instructions      string         `json:"instructions"`
+	Stream            bool           `json:"stream"`
+	Reasoning         codexReasoning `json:"reasoning"`
+	ParallelToolCalls bool           `json:"parallel_tool_calls"`
+	Include           []string       `json:"include"`
+	Model             string         `json:"model"`
+	Input             []any          `json:"input"`
+	Text              *codexText     `json:"text,omitempty"`
+	Tools             []any          `json:"tools,omitempty"`
+	ToolChoice        any            `json:"tool_choice,omitempty"`
+	Store             bool           `json:"store"`
+}
+
+type codexReasoning struct {
+	Effort  any    `json:"effort"`
+	Summary string `json:"summary"`
+}
+
+type codexText struct {
+	Format    *codexTextFormat `json:"format,omitempty"`
+	Verbosity any              `json:"verbosity,omitempty"`
+}
+
+type codexTextFormat struct {
+	Type   string          `json:"type,omitempty"`
+	Name   any             `json:"name,omitempty"`
+	Strict any             `json:"strict,omitempty"`
+	Schema json.RawMessage `json:"schema,omitempty"`
+}
+
+type codexMessage struct {
+	Type    string `json:"type"`
+	Role    string `json:"role"`
+	Content []any  `json:"content"`
+}
+
+type codexTextContent struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
+type codexImageContent struct {
+	Type     string `json:"type"`
+	ImageURL string `json:"image_url,omitempty"`
+}
+
+type codexFileContent struct {
+	Type     string `json:"type"`
+	FileData string `json:"file_data"`
+	Filename string `json:"filename,omitempty"`
+}
+
+type codexFunctionCall struct {
+	Type      string `json:"type"`
+	CallID    string `json:"call_id"`
+	Name      string `json:"name,omitempty"`
+	Arguments string `json:"arguments"`
+}
+
+type codexFunctionCallOutput struct {
+	Type   string `json:"type"`
+	CallID string `json:"call_id"`
+	Output string `json:"output"`
+}
+
+type codexTool struct {
+	Type        string          `json:"type"`
+	Name        string          `json:"name,omitempty"`
+	Description any             `json:"description,omitempty"`
+	Parameters  json.RawMessage `json:"parameters,omitempty"`
+	Strict      any             `json:"strict,omitempty"`
+}
+
+type codexFunctionToolChoice struct {
+	Type string `json:"type"`
+	Name string `json:"name,omitempty"`
+}
+
+func buildOriginalToolNameMap(tools gjson.Result) map[string]string {
+	if !tools.IsArray() {
+		return map[string]string{}
+	}
+
+	names := make([]string, 0, len(tools.Array()))
+	toolItems := tools.Array()
+	for i := 0; i < len(toolItems); i++ {
+		t := toolItems[i]
+		if t.Get("type").String() != "function" {
+			continue
+		}
+		if name := t.Get("function.name"); name.Exists() {
+			names = append(names, name.String())
+		}
+	}
+	if len(names) == 0 {
+		return map[string]string{}
+	}
+	return buildShortNameMap(names)
+}
+
+func codexMessageRole(role string) string {
+	if role == "system" {
+		return "developer"
+	}
+	return role
+}
+
+func codexTextPartType(role string) string {
+	if role == "assistant" {
+		return "output_text"
+	}
+	return "input_text"
+}
+
+func appendCodexMessageContent(parts *[]any, role string, content gjson.Result) {
+	if !content.Exists() {
+		return
+	}
+
+	if content.Type == gjson.String {
+		if text := content.String(); text != "" {
+			*parts = append(*parts, codexTextContent{
+				Type: codexTextPartType(role),
+				Text: text,
+			})
+		}
+		return
+	}
+
+	if !content.IsArray() {
+		return
+	}
+
+	contentItems := content.Array()
+	for i := 0; i < len(contentItems); i++ {
+		it := contentItems[i]
+		switch it.Get("type").String() {
+		case "text":
+			*parts = append(*parts, codexTextContent{
+				Type: codexTextPartType(role),
+				Text: it.Get("text").String(),
+			})
+		case "image_url":
+			if role == "user" {
+				*parts = append(*parts, codexImageContent{
+					Type:     "input_image",
+					ImageURL: it.Get("image_url.url").String(),
+				})
+			}
+		case "file":
+			if role != "user" {
+				continue
+			}
+			fileData := it.Get("file.file_data").String()
+			if fileData == "" {
+				continue
+			}
+			*parts = append(*parts, codexFileContent{
+				Type:     "input_file",
+				FileData: fileData,
+				Filename: it.Get("file.filename").String(),
+			})
+		}
+	}
+}
+
+func appendCodexAssistantToolCalls(input *[]any, toolCalls gjson.Result, originalToolNameMap map[string]string) {
+	if !toolCalls.Exists() || !toolCalls.IsArray() {
+		return
+	}
+
+	callItems := toolCalls.Array()
+	for i := 0; i < len(callItems); i++ {
+		tc := callItems[i]
+		if tc.Get("type").String() != "function" {
+			continue
+		}
+		*input = append(*input, codexFunctionCall{
+			Type:      "function_call",
+			CallID:    tc.Get("id").String(),
+			Name:      resolveToolName(tc.Get("function.name").String(), originalToolNameMap),
+			Arguments: tc.Get("function.arguments").String(),
+		})
+	}
+}
+
+func resolveToolName(name string, originalToolNameMap map[string]string) string {
+	if short, ok := originalToolNameMap[name]; ok {
+		return short
+	}
+	return shortenNameIfNeeded(name)
+}
+
+func jsonFieldValue(result gjson.Result) any {
+	if !result.Exists() {
+		return nil
+	}
+	return result.Value()
 }
 
 // shortenNameIfNeeded applies the simple shortening rule for a single name.

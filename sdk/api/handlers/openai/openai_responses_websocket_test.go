@@ -867,6 +867,32 @@ func TestWebsocketUpstreamSupportsIncrementalInputForModel(t *testing.T) {
 	}
 }
 
+func TestCachedResponsesWebsocketIncrementalInputSupport(t *testing.T) {
+	cache := make(map[string]bool)
+	calls := 0
+	resolve := func(modelName string) bool {
+		calls++
+		return modelName == "test-model"
+	}
+
+	if !cachedResponsesWebsocketIncrementalInputSupport(cache, "test-model", resolve) {
+		t.Fatalf("expected cached lookup to return true")
+	}
+	if !cachedResponsesWebsocketIncrementalInputSupport(cache, "test-model", resolve) {
+		t.Fatalf("expected cached lookup to return true on second call")
+	}
+	if calls != 1 {
+		t.Fatalf("expected resolver to be called once, got %d", calls)
+	}
+
+	if cachedResponsesWebsocketIncrementalInputSupport(cache, "", resolve) {
+		t.Fatalf("expected empty model lookup to return false")
+	}
+	if calls != 2 {
+		t.Fatalf("expected empty model lookup to bypass cache, got %d resolver calls", calls)
+	}
+}
+
 func TestResponsesWebsocketPrewarmHandledLocallyForSSEUpstream(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

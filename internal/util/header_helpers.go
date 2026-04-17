@@ -47,6 +47,9 @@ func applyCustomHeaders(r *http.Request, headers map[string]string) {
 		if k == "" || v == "" {
 			continue
 		}
+		if http.CanonicalHeaderKey(k) == "Host" {
+			r.Host = v
+		}
 		r.Header.Set(k, v)
 	}
 }

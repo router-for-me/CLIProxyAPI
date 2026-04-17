@@ -2602,6 +2602,52 @@ func (m *Manager) List() []*Auth {
 	return list
 }
 
+// AnyAvailableAuthForModel reports whether any matching auth is currently usable.
+func (m *Manager) AnyAvailableAuthForModel(providers []string, model string, predicate func(*Auth) bool) bool {
+	if m == nil || predicate == nil {
+		return false
+	}
+
+	providerSet := make(map[string]struct{}, len(providers))
+	for i := 0; i < len(providers); i++ {
+		providerKey := strings.TrimSpace(strings.ToLower(providers[i]))
+		if providerKey == "" {
+			continue
+		}
+		providerSet[providerKey] = struct{}{}
+	}
+	if len(providerSet) == 0 {
+		return false
+	}
+
+	registryRef := registry.GetGlobalRegistry()
+	now := time.Now()
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	for _, auth := range m.auths {
+		if auth == nil {
+			continue
+		}
+		providerKey := strings.TrimSpace(strings.ToLower(auth.Provider))
+		if _, ok := providerSet[providerKey]; !ok {
+			continue
+		}
+		if model != "" && !m.authSupportsRouteModel(registryRef, auth, model) {
+			continue
+		}
+		if !AuthAvailableForModel(auth, model, now) {
+			continue
+		}
+		if predicate(auth) {
+			return true
+		}
+	}
+
+	return false
+}
+
 // GetByID retrieves an auth entry by its ID.
 
 func (m *Manager) GetByID(id string) (*Auth, bool) {

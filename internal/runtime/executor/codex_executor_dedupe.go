@@ -36,6 +36,7 @@ type codexNonStreamHTTPResult struct {
 	completedData       []byte
 	outputItemsByIndex  map[int64][]byte
 	outputItemsFallback [][]byte
+	functionCallsByItem map[string]*codexStreamFunctionCallState
 }
 
 func (e *CodexExecutor) prepareCodexRequest(ctx context.Context, from sdktranslator.Format, url string, req cliproxyexecutor.Request, rawJSON []byte) (codexPreparedRequest, error) {
@@ -248,11 +249,22 @@ func (result codexNonStreamHTTPResult) clone() codexNonStreamHTTPResult {
 			cloned.outputItemsFallback[i] = bytes.Clone(result.outputItemsFallback[i])
 		}
 	}
+	if len(result.functionCallsByItem) > 0 {
+		cloned.functionCallsByItem = make(map[string]*codexStreamFunctionCallState, len(result.functionCallsByItem))
+		for key, state := range result.functionCallsByItem {
+			if state == nil {
+				continue
+			}
+			copied := *state
+			cloned.functionCallsByItem[key] = &copied
+		}
+	}
 	return cloned
 }
 
 func collectCodexResponseAggregate(body io.Reader, captureBody bool) (codexNonStreamHTTPResult, error) {
 	result := codexNonStreamHTTPResult{}
+	streamState := newCodexStreamCompletionState()
 	if captureBody {
 		result.body = make([]byte, 0, 1024)
 	}
@@ -266,27 +278,15 @@ func collectCodexResponseAggregate(body io.Reader, captureBody bool) (codexNonSt
 		}
 
 		eventData := bytes.TrimSpace(line[len(dataTag):])
-		switch gjson.GetBytes(eventData, "type").String() {
-		case "response.output_item.done":
-			itemResult := gjson.GetBytes(eventData, "item")
-			if !itemResult.Exists() || itemResult.Type != gjson.JSON {
-				return nil
-			}
-			itemBytes := []byte(itemResult.Raw)
-			outputIndexResult := gjson.GetBytes(eventData, "output_index")
-			if outputIndexResult.Exists() {
-				if result.outputItemsByIndex == nil {
-					result.outputItemsByIndex = make(map[int64][]byte)
-				}
-				result.outputItemsByIndex[outputIndexResult.Int()] = itemBytes
-				return nil
-			}
-			result.outputItemsFallback = append(result.outputItemsFallback, itemBytes)
-		case "response.completed":
+		streamState.recordEvent(eventData)
+		if gjson.GetBytes(eventData, "type").String() == "response.completed" {
 			result.completedData = bytes.Clone(eventData)
 		}
 		return nil
 	})
+	result.outputItemsByIndex = streamState.outputItemsByIndex
+	result.outputItemsFallback = streamState.outputItemsFallback
+	result.functionCallsByItem = streamState.functionCallsByItem
 	return result, err
 }
 
