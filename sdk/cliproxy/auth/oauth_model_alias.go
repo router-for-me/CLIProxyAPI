@@ -68,6 +68,7 @@ func (m *Manager) SetOAuthModelAlias(aliases map[string][]internalconfig.OAuthMo
 		table = &oauthModelAliasTable{}
 	}
 	m.oauthModelAlias.Store(table)
+	m.clearRouteAwareCaches()
 }
 
 // applyOAuthModelAlias resolves the upstream model from OAuth model alias.

@@ -150,6 +150,10 @@ type Manager struct {
 	mu        sync.RWMutex
 	auths     map[string]*Auth
 	scheduler *authScheduler
+	// routeAwareSingleCache stores provider/model pairs proven safe for scheduler single-provider fast path.
+	routeAwareSingleCache sync.Map
+	// routeAwareMixedCache stores provider/model combinations proven safe for scheduler mixed fast path.
+	routeAwareMixedCache sync.Map
 	// providerOffsets tracks per-model provider rotation state for multi-provider routing.
 	providerOffsets map[string]int
 
@@ -227,6 +231,7 @@ func (m *Manager) syncSchedulerFromSnapshot(auths []*Auth) {
 	if m == nil || m.scheduler == nil {
 		return
 	}
+	m.clearRouteAwareCaches()
 	m.scheduler.rebuild(auths)
 }
 
@@ -1144,6 +1149,7 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	m.mu.Lock()
 	m.auths[auth.ID] = authClone
 	m.mu.Unlock()
+	m.clearRouteAwareCaches()
 	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
 	if m.scheduler != nil {
 		m.scheduler.upsertAuth(authClone)
@@ -1175,6 +1181,7 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	authClone := auth.Clone()
 	m.auths[auth.ID] = authClone
 	m.mu.Unlock()
+	m.clearRouteAwareCaches()
 	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
 	if m.scheduler != nil {
 		m.scheduler.upsertAuth(authClone)
@@ -1334,8 +1341,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			return cliproxyexecutor.Response{}, errPick
 		}
 
-		entry := logEntryWithRequestID(ctx)
-		debugLogAuthSelection(entry, auth, provider, req.Model)
+		if log.IsLevelEnabled(log.DebugLevel) {
+			debugLogAuthSelection(logEntryWithRequestID(ctx), auth, provider, req.Model)
+		}
 		publishSelectedAuthMetadata(opts.Metadata, auth.ID)
 
 		tried[auth.ID] = struct{}{}
@@ -1414,8 +1422,9 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			return cliproxyexecutor.Response{}, errPick
 		}
 
-		entry := logEntryWithRequestID(ctx)
-		debugLogAuthSelection(entry, auth, provider, req.Model)
+		if log.IsLevelEnabled(log.DebugLevel) {
+			debugLogAuthSelection(logEntryWithRequestID(ctx), auth, provider, req.Model)
+		}
 		publishSelectedAuthMetadata(opts.Metadata, auth.ID)
 
 		tried[auth.ID] = struct{}{}
@@ -1502,8 +1511,9 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			return nil, errPick
 		}
 
-		entry := logEntryWithRequestID(ctx)
-		debugLogAuthSelection(entry, auth, provider, req.Model)
+		if log.IsLevelEnabled(log.DebugLevel) {
+			debugLogAuthSelection(logEntryWithRequestID(ctx), auth, provider, req.Model)
+		}
 		publishSelectedAuthMetadata(opts.Metadata, auth.ID)
 
 		tried[auth.ID] = struct{}{}
@@ -2732,10 +2742,182 @@ func (m *Manager) eligibleMixedProviders(providers []string) []string {
 }
 
 func (m *Manager) routeAwareSelectionRequired(auth *Auth, routeModel string) bool {
-	if auth == nil || strings.TrimSpace(routeModel) == "" {
+	routeModel = strings.TrimSpace(routeModel)
+	if auth == nil || routeModel == "" {
 		return false
 	}
-	return m.selectionModelKeyForAuth(auth, routeModel) != canonicalModelKey(routeModel)
+	return m.routeAwareSelectionRequiredWithKey(auth, routeModel, canonicalModelKey(routeModel))
+}
+
+type singleRouteAwareCacheKey struct {
+	routeKey string
+	provider string
+}
+
+type mixedRouteAwareCacheKey struct {
+	routeKey      string
+	providerCount uint8
+	providers     [4]string
+}
+
+func (m *Manager) clearRouteAwareCaches() {
+	if m == nil {
+		return
+	}
+	m.routeAwareSingleCache.Clear()
+	m.routeAwareMixedCache.Clear()
+}
+
+func makeSingleRouteAwareCacheKey(routeKey, provider string) (singleRouteAwareCacheKey, bool) {
+	provider = strings.TrimSpace(provider)
+	if routeKey == "" || provider == "" {
+		return singleRouteAwareCacheKey{}, false
+	}
+	return singleRouteAwareCacheKey{routeKey: routeKey, provider: provider}, true
+}
+
+func makeMixedRouteAwareCacheKey(routeKey string, providers []string) (mixedRouteAwareCacheKey, bool) {
+	if routeKey == "" || len(providers) == 0 || len(providers) > len((mixedRouteAwareCacheKey{}).providers) {
+		return mixedRouteAwareCacheKey{}, false
+	}
+	key := mixedRouteAwareCacheKey{
+		routeKey:      routeKey,
+		providerCount: uint8(len(providers)),
+	}
+	copy(key.providers[:], providers)
+	return key, true
+}
+
+func (m *Manager) routeAwareSelectionRequiredWithKey(auth *Auth, routeModel, routeKey string) bool {
+	if auth == nil || routeModel == "" || routeKey == "" {
+		return false
+	}
+	prefix := strings.TrimSpace(auth.Prefix)
+	prefixRewrite := prefix != "" && strings.HasPrefix(routeModel, prefix+"/")
+	channel := m.oauthModelAliasChannelForAuth(auth)
+	if !prefixRewrite && channel == "" {
+		return false
+	}
+	if !prefixRewrite && !m.oauthModelAliasConfigured(channel) {
+		return false
+	}
+	return m.selectionModelKeyForAuth(auth, routeModel) != routeKey
+}
+
+func (m *Manager) oauthModelAliasConfigured(channel string) bool {
+	if m == nil || channel == "" {
+		return false
+	}
+	raw := m.oauthModelAlias.Load()
+	table, _ := raw.(*oauthModelAliasTable)
+	return table != nil && table.reverse != nil && table.reverse[channel] != nil
+}
+
+func (m *Manager) oauthModelAliasChannelForAuth(auth *Auth) string {
+	if auth == nil {
+		return ""
+	}
+	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
+	switch provider {
+	case "gemini":
+		return ""
+	case "vertex", "claude", "codex":
+		if auth.Attributes != nil {
+			authKind := strings.ToLower(strings.TrimSpace(auth.Attributes["auth_kind"]))
+			if authKind == "apikey" {
+				return ""
+			}
+			if authKind != "" {
+				return provider
+			}
+			if apiKey := strings.TrimSpace(auth.Attributes["api_key"]); apiKey != "" {
+				return ""
+			}
+		}
+		return provider
+	case "gemini-cli", "aistudio", "antigravity", "kimi":
+		return provider
+	default:
+		return ""
+	}
+}
+
+func (m *Manager) mixedLegacySelectionRequired(providers []string, routeModel string, tried map[string]struct{}) bool {
+	if m == nil || routeModel == "" || len(providers) == 0 {
+		return false
+	}
+	routeKey := canonicalModelKey(routeModel)
+	if routeKey == "" {
+		return false
+	}
+	cacheKey, cacheable := makeMixedRouteAwareCacheKey(routeKey, providers)
+	if cacheable {
+		if _, ok := m.routeAwareMixedCache.Load(cacheKey); ok {
+			return false
+		}
+	}
+	providerSet := make(map[string]struct{}, len(providers))
+	for _, providerKey := range providers {
+		providerSet[providerKey] = struct{}{}
+	}
+	required := false
+	m.mu.RLock()
+	for _, candidate := range m.auths {
+		if candidate == nil || candidate.Disabled {
+			continue
+		}
+		if _, ok := providerSet[strings.TrimSpace(strings.ToLower(candidate.Provider))]; !ok {
+			continue
+		}
+		if _, used := tried[candidate.ID]; used {
+			continue
+		}
+		if m.routeAwareSelectionRequiredWithKey(candidate, routeModel, routeKey) {
+			required = true
+			break
+		}
+	}
+	m.mu.RUnlock()
+	if !required && cacheable {
+		m.routeAwareMixedCache.Store(cacheKey, struct{}{})
+	}
+	return required
+}
+
+func (m *Manager) singleLegacySelectionRequired(provider, routeModel string, tried map[string]struct{}) bool {
+	if m == nil || routeModel == "" {
+		return false
+	}
+	routeKey := canonicalModelKey(routeModel)
+	if routeKey == "" {
+		return false
+	}
+	cacheKey, cacheable := makeSingleRouteAwareCacheKey(routeKey, provider)
+	if cacheable {
+		if _, ok := m.routeAwareSingleCache.Load(cacheKey); ok {
+			return false
+		}
+	}
+	required := false
+	provider = strings.TrimSpace(provider)
+	m.mu.RLock()
+	for _, candidate := range m.auths {
+		if candidate == nil || candidate.Disabled || candidate.Provider != provider {
+			continue
+		}
+		if _, used := tried[candidate.ID]; used {
+			continue
+		}
+		if m.routeAwareSelectionRequiredWithKey(candidate, routeModel, routeKey) {
+			required = true
+			break
+		}
+	}
+	m.mu.RUnlock()
+	if !required && cacheable {
+		m.routeAwareSingleCache.Store(cacheKey, struct{}{})
+	}
+	return required
 }
 
 func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, error) {
@@ -2807,21 +2989,9 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 	if !m.useSchedulerFastPath() {
 		return m.pickNextLegacy(ctx, provider, model, opts, tried)
 	}
-	if strings.TrimSpace(model) != "" {
-		m.mu.RLock()
-		for _, candidate := range m.auths {
-			if candidate == nil || candidate.Provider != provider || candidate.Disabled {
-				continue
-			}
-			if _, used := tried[candidate.ID]; used {
-				continue
-			}
-			if m.routeAwareSelectionRequired(candidate, model) {
-				m.mu.RUnlock()
-				return m.pickNextLegacy(ctx, provider, model, opts, tried)
-			}
-		}
-		m.mu.RUnlock()
+	model = strings.TrimSpace(model)
+	if model != "" && m.singleLegacySelectionRequired(provider, model, tried) {
+		return m.pickNextLegacy(ctx, provider, model, opts, tried)
 	}
 	executor, okExecutor := m.Executor(provider)
 	if !okExecutor {
@@ -2947,28 +3117,9 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 	if len(eligibleProviders) == 0 {
 		return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
-	if strings.TrimSpace(model) != "" {
-		providerSet := make(map[string]struct{}, len(eligibleProviders))
-		for _, providerKey := range eligibleProviders {
-			providerSet[providerKey] = struct{}{}
-		}
-		m.mu.RLock()
-		for _, candidate := range m.auths {
-			if candidate == nil || candidate.Disabled {
-				continue
-			}
-			if _, ok := providerSet[strings.TrimSpace(strings.ToLower(candidate.Provider))]; !ok {
-				continue
-			}
-			if _, used := tried[candidate.ID]; used {
-				continue
-			}
-			if m.routeAwareSelectionRequired(candidate, model) {
-				m.mu.RUnlock()
-				return m.pickNextMixedLegacy(ctx, providers, model, opts, tried)
-			}
-		}
-		m.mu.RUnlock()
+	model = strings.TrimSpace(model)
+	if model != "" && m.mixedLegacySelectionRequired(eligibleProviders, model, tried) {
+		return m.pickNextMixedLegacy(ctx, providers, model, opts, tried)
 	}
 
 	selected, providerKey, errPick := m.scheduler.pickMixed(ctx, eligibleProviders, model, opts, tried)

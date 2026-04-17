@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 )
@@ -406,6 +407,52 @@ func TestManager_SchedulerTracksRegisterAndUpdate(t *testing.T) {
 	}
 	if got == nil || got.ID != "auth-b" {
 		t.Fatalf("scheduler.pickSingle() after update auth = %v, want auth-b", got)
+	}
+}
+
+func TestManager_SingleLegacySelectionRequired_ClearsCachedSafeResultOnRegister(t *testing.T) {
+	t.Parallel()
+
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	routeModel := "team/gpt-5"
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: "plain", Provider: "gemini"}); errRegister != nil {
+		t.Fatalf("Register(plain) error = %v", errRegister)
+	}
+
+	if manager.singleLegacySelectionRequired("gemini", routeModel, nil) {
+		t.Fatalf("singleLegacySelectionRequired() = true, want false before prefixed auth is added")
+	}
+
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: "prefixed", Provider: "gemini", Prefix: "team"}); errRegister != nil {
+		t.Fatalf("Register(prefixed) error = %v", errRegister)
+	}
+
+	if !manager.singleLegacySelectionRequired("gemini", routeModel, nil) {
+		t.Fatalf("singleLegacySelectionRequired() = false, want true after prefixed auth is added")
+	}
+}
+
+func TestManager_SingleLegacySelectionRequired_ClearsCachedSafeResultOnOAuthAliasChange(t *testing.T) {
+	t.Parallel()
+
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.SetConfig(&internalconfig.Config{})
+	routeModel := "claude-sonnet-4-5"
+	auth := &Auth{ID: "claude-oauth", Provider: "claude", Attributes: map[string]string{"auth_kind": "oauth"}}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("Register(claude-oauth) error = %v", errRegister)
+	}
+
+	if manager.singleLegacySelectionRequired("claude", routeModel, nil) {
+		t.Fatalf("singleLegacySelectionRequired() = true, want false before alias is configured")
+	}
+
+	manager.SetOAuthModelAlias(map[string][]internalconfig.OAuthModelAlias{
+		"claude": {{Name: "claude-sonnet-4-5-20250514", Alias: "claude-sonnet-4-5"}},
+	})
+
+	if !manager.singleLegacySelectionRequired("claude", routeModel, nil) {
+		t.Fatalf("singleLegacySelectionRequired() = false, want true after alias is configured")
 	}
 }
 
