@@ -162,7 +162,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 
 	oauthToken := isClaudeOAuthToken(apiKey)
 	// Resolve OAuth cloaking levers once; thread them into applyCloaking to avoid a second resolution.
-	execLevers := helps.ResolveOAuthLevers(resolveClaudeKeyCloakConfig(e.cfg, auth), auth, helps.HeaderFromContext(ctx))
+	execLevers := helps.ResolveOAuthLevers(resolveClaudeKeyCloakConfig(e.cfg, auth), helps.HeaderFromContext(ctx))
 
 	// Apply cloaking (system prompt injection, fake user ID, sensitive word obfuscation)
 	// based on client type and configuration.
@@ -350,7 +350,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 
 	streamOAuthToken := isClaudeOAuthToken(apiKey)
 	// Resolve OAuth cloaking levers once; thread them into applyCloaking to avoid a second resolution.
-	streamLevers := helps.ResolveOAuthLevers(resolveClaudeKeyCloakConfig(e.cfg, auth), auth, helps.HeaderFromContext(ctx))
+	streamLevers := helps.ResolveOAuthLevers(resolveClaudeKeyCloakConfig(e.cfg, auth), helps.HeaderFromContext(ctx))
 
 	// Apply cloaking (system prompt injection, fake user ID, sensitive word obfuscation)
 	// based on client type and configuration.
@@ -555,7 +555,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 
 	// Resolve levers before checkSystemInstructions so all three (SanitizeSystemPrompt,
 	// InjectBillingHeader, RemapToolNames) match the Execute/ExecuteStream request shape.
-	countLevers := helps.ResolveOAuthLevers(resolveClaudeKeyCloakConfig(e.cfg, auth), auth, helps.HeaderFromContext(ctx))
+	countLevers := helps.ResolveOAuthLevers(resolveClaudeKeyCloakConfig(e.cfg, auth), helps.HeaderFromContext(ctx))
 	oauthCount := isClaudeOAuthToken(apiKey)
 	if !strings.HasPrefix(baseModel, "claude-3-5-haiku") {
 		body = checkSystemInstructionsWithSigningMode(body, false, false, oauthCount,

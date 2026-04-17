@@ -5,7 +5,6 @@ import (
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	clipproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
 // OAuthLevers holds the resolved per-request OAuth cloaking lever values.
@@ -28,7 +27,7 @@ type OAuthLevers struct {
 // presents a matching X-Cliproxy-Cloak-Token value.
 //
 // Nil cfg (or nil fields) defaults to the legacy behavior (all levers enabled).
-func ResolveOAuthLevers(cfg *config.CloakConfig, _ *clipproxyauth.Auth, header http.Header) OAuthLevers {
+func ResolveOAuthLevers(cfg *config.CloakConfig, header http.Header) OAuthLevers {
 	// Start from config-level values (nil => legacy true).
 	levers := OAuthLevers{
 		SanitizeSystemPrompt: resolvePointerBool(cfg, func(c *config.CloakConfig) *bool { return c.OAuthSanitizeSystemPrompt }),

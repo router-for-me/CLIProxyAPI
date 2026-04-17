@@ -7,7 +7,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
-	clipproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/tidwall/gjson"
 )
 
@@ -31,11 +31,11 @@ func TestApplyCloaking_SanitizeDisabled_PreservesClientSystem(t *testing.T) {
 			},
 		}},
 	}
-	auth := &clipproxyauth.Auth{Attributes: map[string]string{"api_key": testOAuthKey}}
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": testOAuthKey}}
 	payload := []byte(`{"system":"My custom system prompt","messages":[{"role":"user","content":"hello"}]}`)
 
 	cloakCfg := resolveClaudeKeyCloakConfig(cfg, auth)
-	levers := helps.ResolveOAuthLevers(cloakCfg, auth, nil)
+	levers := helps.ResolveOAuthLevers(cloakCfg, nil)
 	out := applyCloaking(context.Background(), cfg, auth, payload, "claude-3-5-sonnet-20241022", testOAuthKey, isClaudeOAuthToken(testOAuthKey), levers)
 
 	// The first user message should contain the original system text, not the stub.
@@ -62,11 +62,11 @@ func TestApplyCloaking_SanitizeEnabled_SameAsHEAD(t *testing.T) {
 			},
 		}},
 	}
-	auth := &clipproxyauth.Auth{Attributes: map[string]string{"api_key": testOAuthKey}}
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": testOAuthKey}}
 	payload := []byte(`{"system":"My detailed custom system prompt with lots of info","messages":[{"role":"user","content":"hello"}]}`)
 
 	cloakCfg := resolveClaudeKeyCloakConfig(cfg, auth)
-	levers := helps.ResolveOAuthLevers(cloakCfg, auth, nil)
+	levers := helps.ResolveOAuthLevers(cloakCfg, nil)
 	out := applyCloaking(context.Background(), cfg, auth, payload, "claude-3-5-sonnet-20241022", testOAuthKey, isClaudeOAuthToken(testOAuthKey), levers)
 
 	// The first user message should contain the sanitize stub, not the original text.
