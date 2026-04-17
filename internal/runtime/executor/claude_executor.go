@@ -162,7 +162,9 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 
 	// Apply cloaking (system prompt injection, fake user ID, sensitive word obfuscation)
 	// based on client type and configuration.
+	bodyBeforeCloaking := body
 	body = applyCloaking(ctx, e.cfg, auth, body, baseModel, apiKey)
+	cloakedByProxy := didApplyClaudeCodeCloaking(bodyBeforeCloaking, body)
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
@@ -172,8 +174,9 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	body = disableThinkingIfToolChoiceForced(body)
 	body = normalizeClaudeTemperatureForThinking(body)
 
-	// Cloaked Claude-Code-style payloads require canonical cache_control placement.
-	if isClaudeCodeCloakedPayload(body) {
+	// Only requests newly cloaked by this proxy should be canonicalized into the
+	// Claude Code-style cache_control layout.
+	if cloakedByProxy {
 		body = ensureCloakedCacheControl(body)
 	} else if countCacheControls(body) == 0 {
 		// Auto-inject cache_control if missing (optimization for ClawdBot/clients without caching support)
@@ -350,7 +353,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 
 	// Apply cloaking (system prompt injection, fake user ID, sensitive word obfuscation)
 	// based on client type and configuration.
+	bodyBeforeCloaking := body
 	body = applyCloaking(ctx, e.cfg, auth, body, baseModel, apiKey)
+	cloakedByProxy := didApplyClaudeCodeCloaking(bodyBeforeCloaking, body)
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
@@ -360,8 +365,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	body = disableThinkingIfToolChoiceForced(body)
 	body = normalizeClaudeTemperatureForThinking(body)
 
-	// Cloaked Claude-Code-style payloads require canonical cache_control placement.
-	if isClaudeCodeCloakedPayload(body) {
+	// Only requests newly cloaked by this proxy should be canonicalized into the
+	// Claude Code-style cache_control layout.
+	if cloakedByProxy {
 		body = ensureCloakedCacheControl(body)
 	} else if countCacheControls(body) == 0 {
 		// Auto-inject cache_control if missing (optimization for ClawdBot/clients without caching support)
@@ -1786,6 +1792,10 @@ func ensureCacheControl(payload []byte) []byte {
 
 func isClaudeCodeCloakedPayload(payload []byte) bool {
 	return strings.HasPrefix(gjson.GetBytes(payload, "system.0.text").String(), "x-anthropic-billing-header:")
+}
+
+func didApplyClaudeCodeCloaking(before, after []byte) bool {
+	return !isClaudeCodeCloakedPayload(before) && isClaudeCodeCloakedPayload(after)
 }
 
 // ensureCloakedCacheControl rewrites cache_control blocks to match Claude Code's

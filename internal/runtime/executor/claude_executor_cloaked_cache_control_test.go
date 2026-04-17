@@ -32,10 +32,14 @@ func TestClaudeExecutorExecute_RewritesCloakedCacheControl(t *testing.T) {
 		"base_url":   server.URL,
 		"cloak_mode": "always",
 	}}
+	payload := nonCloakedCacheControlRewritePayload()
+	if isClaudeCodeCloakedPayload(payload) {
+		t.Fatal("test payload should start non-cloaked")
+	}
 
 	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
 		Model:   "claude-3-5-sonnet-20241022",
-		Payload: cloakedCacheControlRewritePayload(),
+		Payload: payload,
 	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
@@ -60,10 +64,14 @@ func TestClaudeExecutorExecuteStream_RewritesCloakedCacheControl(t *testing.T) {
 		"base_url":   server.URL,
 		"cloak_mode": "always",
 	}}
+	payload := nonCloakedCacheControlRewritePayload()
+	if isClaudeCodeCloakedPayload(payload) {
+		t.Fatal("test payload should start non-cloaked")
+	}
 
 	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
 		Model:   "claude-3-5-sonnet-20241022",
-		Payload: cloakedCacheControlRewritePayload(),
+		Payload: payload,
 	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
 	if err != nil {
 		t.Fatalf("ExecuteStream() error = %v", err)
@@ -77,10 +85,41 @@ func TestClaudeExecutorExecuteStream_RewritesCloakedCacheControl(t *testing.T) {
 	assertCloakedCacheControlRewrite(t, seenBody)
 }
 
-func cloakedCacheControlRewritePayload() []byte {
+func TestClaudeExecutorExecute_PreCloakedInputNotRewrittenWhenCloakingDisabled(t *testing.T) {
+	var seenBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		seenBody = bytes.Clone(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","model":"claude-3-5-sonnet","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":    "key-123",
+		"base_url":   server.URL,
+		"cloak_mode": "never",
+	}}
+	payload := preCloakedCacheControlPassThroughPayload()
+	if !isClaudeCodeCloakedPayload(payload) {
+		t.Fatal("test payload should start pre-cloaked")
+	}
+
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet-20241022",
+		Payload: payload,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	assertPreCloakedCacheControlUnchanged(t, seenBody)
+}
+
+func nonCloakedCacheControlRewritePayload() []byte {
 	return []byte(`{
 		"system": [
-			{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.63.abcde; cc_entrypoint=cli; cch=00000;","cache_control":{"type":"ephemeral"}},
 			{"type":"text","text":"You are Claude Code, Anthropic's official CLI for Claude.","cache_control":{"type":"ephemeral","ttl":"1h"}},
 			{"type":"text","text":"Follow the user's instructions closely."}
 		],
@@ -91,6 +130,24 @@ func cloakedCacheControlRewritePayload() []byte {
 		"messages": [
 			{"role":"user","content":[{"type":"text","text":"first","cache_control":{"type":"ephemeral"}}]},
 			{"role":"user","content":[{"type":"text","text":"second","cache_control":{"type":"ephemeral"}},{"type":"text","text":"third"}]}
+		]
+	}`)
+}
+
+func preCloakedCacheControlPassThroughPayload() []byte {
+	return []byte(`{
+		"system": [
+			{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.63.abcde; cc_entrypoint=cli; cch=00000;","cache_control":{"type":"ephemeral"}},
+			{"type":"text","text":"You are Claude Code, Anthropic's official CLI for Claude."},
+			{"type":"text","text":"Follow the user's instructions closely."}
+		],
+		"tools": [
+			{"name":"t1","input_schema":{"type":"object"},"cache_control":{"type":"ephemeral"}},
+			{"name":"t2","input_schema":{"type":"object"}}
+		],
+		"messages": [
+			{"role":"user","content":[{"type":"text","text":"first","cache_control":{"type":"ephemeral"}}]},
+			{"role":"user","content":[{"type":"text","text":"second"},{"type":"text","text":"third"}]}
 		]
 	}`)
 }
@@ -139,6 +196,41 @@ func assertCloakedCacheControlRewrite(t *testing.T, body []byte) {
 	}
 	if got := countCacheControls(body); got != 4 {
 		t.Fatalf("cache_control count = %d, want 4", got)
+	}
+}
+
+func assertPreCloakedCacheControlUnchanged(t *testing.T, body []byte) {
+	t.Helper()
+
+	if len(body) == 0 {
+		t.Fatal("expected upstream request body to be captured")
+	}
+	if !strings.HasPrefix(gjson.GetBytes(body, "system.0.text").String(), "x-anthropic-billing-header:") {
+		t.Fatalf("system.0.text = %q, want cloaked billing header", gjson.GetBytes(body, "system.0.text").String())
+	}
+	if gjson.GetBytes(body, "system.0.cache_control.type").String() != "ephemeral" {
+		t.Fatalf("system.0.cache_control.type = %q, want %q", gjson.GetBytes(body, "system.0.cache_control.type").String(), "ephemeral")
+	}
+	if gjson.GetBytes(body, "system.1.cache_control").Exists() {
+		t.Fatalf("system.1.cache_control should remain missing when cloaking is disabled")
+	}
+	if gjson.GetBytes(body, "tools.0.cache_control.type").String() != "ephemeral" {
+		t.Fatalf("tools.0.cache_control.type = %q, want %q", gjson.GetBytes(body, "tools.0.cache_control.type").String(), "ephemeral")
+	}
+	if gjson.GetBytes(body, "tools.1.cache_control").Exists() {
+		t.Fatalf("tools.1.cache_control should remain missing when cloaking is disabled")
+	}
+	if gjson.GetBytes(body, "messages.0.content.0.cache_control.type").String() != "ephemeral" {
+		t.Fatalf("messages.0.content.0.cache_control.type = %q, want %q", gjson.GetBytes(body, "messages.0.content.0.cache_control.type").String(), "ephemeral")
+	}
+	if gjson.GetBytes(body, "messages.1.content.0.cache_control").Exists() {
+		t.Fatalf("messages.1.content.0.cache_control should remain missing when cloaking is disabled")
+	}
+	if got := countMessageCacheControls(body); got != 1 {
+		t.Fatalf("message cache_control count = %d, want 1", got)
+	}
+	if got := countCacheControls(body); got != 3 {
+		t.Fatalf("cache_control count = %d, want 3", got)
 	}
 }
 
