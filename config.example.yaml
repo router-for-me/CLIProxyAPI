@@ -200,6 +200,13 @@ nonstream-keepalive-interval: 0
 #         - "API"
 #         - "proxy"
 #       cache-user-id: true          # optional: default is false; set true to reuse cached user_id per API key instead of generating a random one each request
+#       # OAuth cloaking levers — all default to true (legacy behavior). Set to false to opt out.
+#       oauth-sanitize-system-prompt: true  # when false, client system prompts are forwarded as-is instead of being collapsed to a stub
+#       oauth-remap-tool-names: true        # when false, tool names are NOT remapped to Claude Code canonical names
+#       oauth-inject-billing-header: true   # when false, the x-anthropic-billing-header block is NOT prepended to the system prompt
+#       # oauth-disable-header: ""          # optional shared secret; when set, clients can disable individual levers at request time
+#                                           # via X-Cliproxy-Cloak-Opt-Out + X-Cliproxy-Cloak-Token headers. Empty = opt-out disabled.
+#                                           # X-Cliproxy-Cloak-Opt-Out values (comma-separated): all, sanitize, tool-remap, billing
 #     experimental-cch-signing: false # optional: default is false; when true, sign the final /v1/messages body using the current Claude Code cch algorithm
 #                                     # keep this disabled unless you explicitly need the behavior, so upstream seed changes fall back to legacy proxy behavior
 
