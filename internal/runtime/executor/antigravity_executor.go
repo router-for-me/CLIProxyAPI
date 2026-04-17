@@ -28,6 +28,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/temporal"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	antigravityclaude "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/antigravity/claude"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
@@ -703,6 +704,12 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 		return resp, errValidate
 	}
 	req.Payload = originalPayload
+	// Re-apply temporal injection after signature validation (which forces
+	// req.Payload back to the raw original). Without this, the conductor's
+	// anti-drift hook is silently stripped for every Antigravity request.
+	if temporal.ShouldInject(temporal.ConfigOrDefault(e.cfg.Temporal)) {
+		req.Payload = temporal.InjectIntoPayload(req.Payload, baseModel)
+	}
 	token, updatedAuth, errToken := e.ensureAccessToken(ctx, auth)
 	if errToken != nil {
 		return resp, errToken
@@ -917,6 +924,12 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 		return resp, errValidate
 	}
 	req.Payload = originalPayload
+	// Re-apply temporal injection after signature validation (which forces
+	// req.Payload back to the raw original). Without this, the conductor's
+	// anti-drift hook is silently stripped for every Antigravity request.
+	if temporal.ShouldInject(temporal.ConfigOrDefault(e.cfg.Temporal)) {
+		req.Payload = temporal.InjectIntoPayload(req.Payload, baseModel)
+	}
 	token, updatedAuth, errToken := e.ensureAccessToken(ctx, auth)
 	if errToken != nil {
 		return resp, errToken
@@ -1382,6 +1395,12 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 		return nil, errValidate
 	}
 	req.Payload = originalPayload
+	// Re-apply temporal injection after signature validation (which forces
+	// req.Payload back to the raw original). Without this, the conductor's
+	// anti-drift hook is silently stripped for every Antigravity request.
+	if temporal.ShouldInject(temporal.ConfigOrDefault(e.cfg.Temporal)) {
+		req.Payload = temporal.InjectIntoPayload(req.Payload, baseModel)
+	}
 	token, updatedAuth, errToken := e.ensureAccessToken(ctx, auth)
 	if errToken != nil {
 		return nil, errToken

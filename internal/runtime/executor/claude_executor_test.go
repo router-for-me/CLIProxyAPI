@@ -1783,6 +1783,40 @@ func TestCheckSystemInstructionsWithMode_ArraySystemStillWorks(t *testing.T) {
 	}
 }
 
+// Regression: temporal_context block injected by conductor must survive the
+// Claude Code-shaped system rebuild in checkSystemInstructionsWithSigningMode.
+// Before the fix, the rebuild dropped the block and OAuth sanitization then
+// discarded it from the forwarded user-system prompt.
+func TestCheckSystemInstructionsWithSigningMode_PreservesTemporalContext(t *testing.T) {
+	temporalText := `<temporal_context><temporal day="Friday" date="2026-04-17"/></temporal_context>`
+	payload := []byte(`{"system":[{"type":"text","text":"` + temporalText + `"},{"type":"text","text":"You are helpful."}],"messages":[{"role":"user","content":"hi"}]}`)
+
+	out := checkSystemInstructionsWithSigningMode(payload, false, false, true, "2.1.63", "", "")
+
+	system := gjson.GetBytes(out, "system")
+	if !system.IsArray() {
+		t.Fatalf("system should be array, got %s", system.Type)
+	}
+	blocks := system.Array()
+	var foundTemporal bool
+	for _, b := range blocks {
+		if strings.Contains(b.Get("text").String(), "<temporal_context>") {
+			foundTemporal = true
+			break
+		}
+	}
+	if !foundTemporal {
+		t.Fatalf("temporal_context block missing from rebuilt system: %s", string(out))
+	}
+
+	// In OAuth mode the forwarded user-system prompt gets sanitized to a
+	// neutral string. We should not see the temporal text duplicated there.
+	firstUserContent := gjson.GetBytes(out, "messages.0.content").String()
+	if strings.Contains(firstUserContent, "<temporal_context>") {
+		t.Fatalf("temporal duplicated into first user message: %s", firstUserContent)
+	}
+}
+
 // Test case 5: Special characters in string system prompt survive conversion
 func TestCheckSystemInstructionsWithMode_StringWithSpecialChars(t *testing.T) {
 	payload := []byte(`{"system":"Use <xml> tags & \"quotes\" in output.","messages":[{"role":"user","content":"hi"}]}`)
