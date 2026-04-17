@@ -192,6 +192,12 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	bodyForTranslation := body
 	bodyForUpstream := body
 	oauthToken := isClaudeOAuthToken(apiKey)
+	// Resolve OAuth cloaking levers to gate tool-name remapping.
+	var execReqHeader http.Header
+	if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
+		execReqHeader = ginCtx.Request.Header
+	}
+	execLevers := helps.ResolveOAuthLevers(resolveClaudeKeyCloakConfig(e.cfg, auth), auth, execReqHeader)
 	oauthToolNamesRemapped := false
 	if oauthToken && !auth.ToolPrefixDisabled() {
 		bodyForUpstream = applyClaudeToolPrefix(body, claudeToolPrefix)
@@ -199,7 +205,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	// Remap third-party tool names to Claude Code equivalents and remove
 	// tools without official counterparts. This prevents Anthropic from
 	// fingerprinting the request as third-party via tool naming patterns.
-	if oauthToken {
+	if oauthToken && execLevers.RemapToolNames {
 		bodyForUpstream, oauthToolNamesRemapped = remapOAuthToolNames(bodyForUpstream)
 	}
 	// Enable cch signing by default for OAuth tokens (not just experimental flag).
@@ -374,6 +380,12 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	bodyForTranslation := body
 	bodyForUpstream := body
 	oauthToken := isClaudeOAuthToken(apiKey)
+	// Resolve OAuth cloaking levers to gate tool-name remapping.
+	var streamReqHeader http.Header
+	if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
+		streamReqHeader = ginCtx.Request.Header
+	}
+	streamLevers := helps.ResolveOAuthLevers(resolveClaudeKeyCloakConfig(e.cfg, auth), auth, streamReqHeader)
 	oauthToolNamesRemapped := false
 	if oauthToken && !auth.ToolPrefixDisabled() {
 		bodyForUpstream = applyClaudeToolPrefix(body, claudeToolPrefix)
@@ -381,7 +393,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	// Remap third-party tool names to Claude Code equivalents and remove
 	// tools without official counterparts. This prevents Anthropic from
 	// fingerprinting the request as third-party via tool naming patterns.
-	if oauthToken {
+	if oauthToken && streamLevers.RemapToolNames {
 		bodyForUpstream, oauthToolNamesRemapped = remapOAuthToolNames(bodyForUpstream)
 	}
 	// Enable cch signing by default for OAuth tokens (not just experimental flag).
@@ -562,7 +574,12 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 		body = applyClaudeToolPrefix(body, claudeToolPrefix)
 	}
 	// Remap tool names for OAuth token requests to avoid third-party fingerprinting.
-	if isClaudeOAuthToken(apiKey) {
+	var countReqHeader http.Header
+	if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
+		countReqHeader = ginCtx.Request.Header
+	}
+	countLevers := helps.ResolveOAuthLevers(resolveClaudeKeyCloakConfig(e.cfg, auth), auth, countReqHeader)
+	if isClaudeOAuthToken(apiKey) && countLevers.RemapToolNames {
 		body, _ = remapOAuthToolNames(body)
 	}
 
