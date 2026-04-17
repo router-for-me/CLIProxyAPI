@@ -172,8 +172,11 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	body = disableThinkingIfToolChoiceForced(body)
 	body = normalizeClaudeTemperatureForThinking(body)
 
-	// Auto-inject cache_control if missing (optimization for ClawdBot/clients without caching support)
-	if countCacheControls(body) == 0 {
+	// Cloaked Claude-Code-style payloads require canonical cache_control placement.
+	if isClaudeCodeCloakedPayload(body) {
+		body = ensureCloakedCacheControl(body)
+	} else if countCacheControls(body) == 0 {
+		// Auto-inject cache_control if missing (optimization for ClawdBot/clients without caching support)
 		body = ensureCacheControl(body)
 	}
 
@@ -357,8 +360,11 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	body = disableThinkingIfToolChoiceForced(body)
 	body = normalizeClaudeTemperatureForThinking(body)
 
-	// Auto-inject cache_control if missing (optimization for ClawdBot/clients without caching support)
-	if countCacheControls(body) == 0 {
+	// Cloaked Claude-Code-style payloads require canonical cache_control placement.
+	if isClaudeCodeCloakedPayload(body) {
+		body = ensureCloakedCacheControl(body)
+	} else if countCacheControls(body) == 0 {
+		// Auto-inject cache_control if missing (optimization for ClawdBot/clients without caching support)
 		body = ensureCacheControl(body)
 	}
 
@@ -1778,6 +1784,74 @@ func ensureCacheControl(payload []byte) []byte {
 	return payload
 }
 
+func isClaudeCodeCloakedPayload(payload []byte) bool {
+	return strings.HasPrefix(gjson.GetBytes(payload, "system.0.text").String(), "x-anthropic-billing-header:")
+}
+
+// ensureCloakedCacheControl rewrites cache_control blocks to match Claude Code's
+// cloaked layout: system[1..N-1], tools[last], and messages[last].content[last].
+func ensureCloakedCacheControl(payload []byte) []byte {
+	payload = stripCacheControlMarkers(payload)
+	payload = injectCloakedSystemCacheControl(payload)
+	payload = injectToolsCacheControl(payload)
+	payload = injectLastMessageCacheControl(payload)
+	return payload
+}
+
+func stripCacheControlMarkers(payload []byte) []byte {
+	system := gjson.GetBytes(payload, "system")
+	if system.IsArray() {
+		system.ForEach(func(idx, _ gjson.Result) bool {
+			payload, _ = sjson.DeleteBytes(payload, fmt.Sprintf("system.%d.cache_control", int(idx.Int())))
+			return true
+		})
+	}
+
+	tools := gjson.GetBytes(payload, "tools")
+	if tools.IsArray() {
+		tools.ForEach(func(idx, _ gjson.Result) bool {
+			payload, _ = sjson.DeleteBytes(payload, fmt.Sprintf("tools.%d.cache_control", int(idx.Int())))
+			return true
+		})
+	}
+
+	messages := gjson.GetBytes(payload, "messages")
+	if messages.IsArray() {
+		messages.ForEach(func(msgIdx, msg gjson.Result) bool {
+			content := msg.Get("content")
+			if !content.IsArray() {
+				return true
+			}
+			content.ForEach(func(itemIdx, _ gjson.Result) bool {
+				payload, _ = sjson.DeleteBytes(payload, fmt.Sprintf("messages.%d.content.%d.cache_control", int(msgIdx.Int()), int(itemIdx.Int())))
+				return true
+			})
+			return true
+		})
+	}
+
+	return payload
+}
+
+func injectCloakedSystemCacheControl(payload []byte) []byte {
+	system := gjson.GetBytes(payload, "system")
+	if !system.IsArray() {
+		return payload
+	}
+
+	count := int(system.Get("#").Int())
+	for i := 1; i < count; i++ {
+		result, err := sjson.SetRawBytes(payload, fmt.Sprintf("system.%d.cache_control", i), []byte(`{"type":"ephemeral"}`))
+		if err != nil {
+			log.Warnf("failed to inject cloaked cache_control into system array: %v", err)
+			return payload
+		}
+		payload = result
+	}
+
+	return payload
+}
+
 func countCacheControls(payload []byte) int {
 	count := 0
 
@@ -2167,6 +2241,56 @@ func injectMessagesCacheControl(payload []byte) []byte {
 			return payload
 		}
 		payload = result
+	}
+
+	return payload
+}
+
+func injectLastMessageCacheControl(payload []byte) []byte {
+	messages := gjson.GetBytes(payload, "messages")
+	if !messages.Exists() || !messages.IsArray() {
+		return payload
+	}
+
+	messageCount := int(messages.Get("#").Int())
+	if messageCount == 0 {
+		return payload
+	}
+
+	contentPath := fmt.Sprintf("messages.%d.content", messageCount-1)
+	content := gjson.GetBytes(payload, contentPath)
+
+	if content.IsArray() {
+		contentCount := int(content.Get("#").Int())
+		if contentCount == 0 {
+			return payload
+		}
+		cacheControlPath := fmt.Sprintf("messages.%d.content.%d.cache_control", messageCount-1, contentCount-1)
+		result, err := sjson.SetBytes(payload, cacheControlPath, map[string]string{"type": "ephemeral"})
+		if err != nil {
+			log.Warnf("failed to inject cloaked cache_control into messages: %v", err)
+			return payload
+		}
+		return result
+	}
+
+	if content.Type == gjson.String {
+		text := content.String()
+		newContent := []map[string]interface{}{
+			{
+				"type": "text",
+				"text": text,
+				"cache_control": map[string]string{
+					"type": "ephemeral",
+				},
+			},
+		}
+		result, err := sjson.SetBytes(payload, contentPath, newContent)
+		if err != nil {
+			log.Warnf("failed to inject cloaked cache_control into message string content: %v", err)
+			return payload
+		}
+		return result
 	}
 
 	return payload
