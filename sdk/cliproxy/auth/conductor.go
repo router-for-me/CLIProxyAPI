@@ -19,6 +19,7 @@ import (
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/temporal"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
@@ -375,6 +376,26 @@ func (m *Manager) SetConfig(cfg *internalconfig.Config) {
 	}
 	m.runtimeConfig.Store(cfg)
 	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
+	// Surface the effective temporal injection state so future drift
+	// regressions (see 2026-04-17 debug session) are visible at reload.
+	effective := temporal.DefaultConfig()
+	source := "default"
+	if cfg.Temporal != nil {
+		effective = *cfg.Temporal
+		source = "config"
+	}
+	log.Infof("temporal injection state: enabled=%t interval=%d source=%s",
+		effective.Enabled, effective.InjectInterval, source)
+}
+
+// temporalConfig returns the temporal injection settings from the current runtime config.
+// Falls back to DefaultConfig when no config is loaded or the temporal block is omitted.
+func (m *Manager) temporalConfig() temporal.Config {
+	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+	if cfg == nil {
+		return temporal.DefaultConfig()
+	}
+	return temporal.ConfigOrDefault(cfg.Temporal)
 }
 
 func (m *Manager) lookupAPIKeyUpstreamModel(authID, requestedModel string) string {
@@ -834,6 +855,11 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		resultModel := m.stateModelForExecution(auth, routeModel, execModel, pooled)
 		execReq := req
 		execReq.Model = execModel
+		// Inject temporal context after model resolution so image-model
+		// safeguards see the actual upstream model, not a route alias.
+		if temporal.ShouldInject(m.temporalConfig()) {
+			execReq.Payload = temporal.InjectIntoPayload(execReq.Payload, execModel)
+		}
 		streamResult, errStream := executor.ExecuteStream(ctx, auth, execReq, opts)
 		if errStream != nil {
 			if errCtx := ctx.Err(); errCtx != nil {
@@ -1333,6 +1359,11 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			resultModel := m.stateModelForExecution(auth, routeModel, upstreamModel, pooled)
 			execReq := req
 			execReq.Model = upstreamModel
+			// Inject temporal context after model resolution so image-model
+			// safeguards see the actual upstream model, not a route alias.
+			if temporal.ShouldInject(m.temporalConfig()) {
+				execReq.Payload = temporal.InjectIntoPayload(execReq.Payload, upstreamModel)
+			}
 			resp, errExec := executor.Execute(execCtx, auth, execReq, opts)
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: errExec == nil}
 			if errExec != nil {
