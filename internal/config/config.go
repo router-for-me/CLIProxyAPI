@@ -361,6 +361,31 @@ type CloakConfig struct {
 	// CacheUserID controls whether Claude user_id values are cached per API key.
 	// When false, a fresh random user_id is generated for every request.
 	CacheUserID *bool `yaml:"cache-user-id,omitempty" json:"cache-user-id,omitempty"`
+
+	// OAuthSanitizeSystemPrompt controls whether system prompts from non-Claude-Code
+	// clients are sanitized (collapsed to a stub) when using OAuth tokens.
+	// nil (omitted) or true preserves the legacy behavior (sanitize enabled).
+	// Set explicitly to false to allow the original client system prompt through.
+	OAuthSanitizeSystemPrompt *bool `yaml:"oauth-sanitize-system-prompt,omitempty" json:"oauth-sanitize-system-prompt,omitempty"`
+
+	// OAuthRemapToolNames controls whether tool names are remapped to Claude Code
+	// canonical names when using OAuth tokens.
+	// nil (omitted) or true preserves the legacy behavior (remap enabled).
+	// Set explicitly to false to keep original tool names.
+	OAuthRemapToolNames *bool `yaml:"oauth-remap-tool-names,omitempty" json:"oauth-remap-tool-names,omitempty"`
+
+	// OAuthInjectBillingHeader controls whether the x-anthropic-billing-account
+	// header block is injected into the system prompt when using OAuth tokens.
+	// nil (omitted) or true preserves the legacy behavior (injection enabled).
+	// Set explicitly to false to skip billing header injection.
+	OAuthInjectBillingHeader *bool `yaml:"oauth-inject-billing-header,omitempty" json:"oauth-inject-billing-header,omitempty"`
+
+	// OAuthDisableHeader is a shared secret. When non-empty, clients may present
+	// this value in the X-Cliproxy-Cloak-Token header alongside
+	// X-Cliproxy-Cloak-Opt-Out to selectively disable cloaking behaviors
+	// at request time without changing the config file.
+	// Empty string (default) disables the header opt-out mechanism entirely.
+	OAuthDisableHeader string `yaml:"oauth-disable-header,omitempty" json:"oauth-disable-header,omitempty"`
 }
 
 // ClaudeKey represents the configuration for a Claude API key,
