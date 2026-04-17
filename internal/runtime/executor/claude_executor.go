@@ -1558,7 +1558,16 @@ func checkSystemInstructionsWithMode(payload []byte, strictMode bool) []byte {
 // (true = sanitize, which is the legacy default). Pass false to forward the original text.
 // injectBillingHeader controls whether the x-anthropic-billing-header block is prepended
 // (true = legacy default). Pass false to skip billing header injection entirely.
+// IMPORTANT: injectBillingHeader is only honoured when oauthMode is true. Non-OAuth
+// (plain Claude API-key) traffic always injects the billing block regardless of the lever
+// value, preserving legacy behavior for direct API-key callers.
 func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, experimentalCCHSigning bool, oauthMode bool, sanitizeSystemPrompt bool, injectBillingHeader bool, version, entrypoint, workload string) []byte {
+	// Gate InjectBillingHeader lever to OAuth requests only.
+	// Non-OAuth (plain API-key) callers always get the billing block injected.
+	if !oauthMode {
+		injectBillingHeader = true
+	}
+
 	system := gjson.GetBytes(payload, "system")
 
 	// Extract original message text for fingerprint computation (before billing injection).
