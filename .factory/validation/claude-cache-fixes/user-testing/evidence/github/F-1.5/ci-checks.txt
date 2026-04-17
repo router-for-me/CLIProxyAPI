@@ -1,0 +1,3 @@
+﻿build	pass	57s	https://github.com/router-for-me/CLIProxyAPI/actions/runs/24570757164/job/71842930219	
+close-when-agents-md-changed	pass	4s	https://github.com/router-for-me/CLIProxyAPI/actions/runs/24570757174/job/71842930327	
+ensure-no-translator-changes	pass	8s	https://github.com/router-for-me/CLIProxyAPI/actions/runs/24570757221/job/71842930280	
