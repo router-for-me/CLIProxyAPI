@@ -9,6 +9,7 @@ package claude
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"strings"
 
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/common"
@@ -20,6 +21,43 @@ import (
 var (
 	dataTag = []byte("data:")
 )
+
+func codexClaudePayload(raw []byte) []byte {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
+		return nil
+	}
+	if bytes.HasPrefix(trimmed, dataTag) {
+		payload := bytes.TrimSpace(trimmed[len(dataTag):])
+		if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) {
+			return nil
+		}
+		return payload
+	}
+
+	var dataLines [][]byte
+	for _, line := range bytes.Split(trimmed, []byte("\n")) {
+		line = bytes.TrimSpace(bytes.TrimRight(line, "\r"))
+		if !bytes.HasPrefix(line, dataTag) {
+			continue
+		}
+		data := bytes.TrimSpace(line[len(dataTag):])
+		if len(data) == 0 || bytes.Equal(data, []byte("[DONE]")) {
+			continue
+		}
+		dataLines = append(dataLines, data)
+	}
+	if len(dataLines) == 0 {
+		if json.Valid(trimmed) {
+			return trimmed
+		}
+		return nil
+	}
+	if len(dataLines) == 1 {
+		return dataLines[0]
+	}
+	return bytes.Join(dataLines, []byte("\n"))
+}
 
 // ConvertCodexResponseToClaudeParams holds parameters for response conversion.
 type ConvertCodexResponseToClaudeParams struct {
@@ -44,7 +82,7 @@ type ConvertCodexResponseToClaudeParams struct {
 //
 // Returns:
 //   - [][]byte: A slice of Claude Code-compatible JSON responses
-func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) [][]byte {
+func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRawJSON, _ []byte, rawJSON []byte, param *any) [][]byte {
 	if *param == nil {
 		*param = &ConvertCodexResponseToClaudeParams{
 			HasToolCall: false,
@@ -52,11 +90,11 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 		}
 	}
 
-	// log.Debugf("rawJSON: %s", string(rawJSON))
-	if !bytes.HasPrefix(rawJSON, dataTag) {
+	payload := codexClaudePayload(rawJSON)
+	if len(payload) == 0 {
 		return [][]byte{}
 	}
-	rawJSON = bytes.TrimSpace(rawJSON[5:])
+	rawJSON = payload
 
 	output := make([]byte, 0, 512)
 	rootResult := gjson.ParseBytes(rawJSON)
