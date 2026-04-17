@@ -559,8 +559,18 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, stream)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 
+	// Resolve levers before checkSystemInstructions so all three (SanitizeSystemPrompt,
+	// InjectBillingHeader, RemapToolNames) match the Execute/ExecuteStream request shape.
+	var countReqHeader http.Header
+	if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
+		countReqHeader = ginCtx.Request.Header
+	}
+	countLevers := helps.ResolveOAuthLevers(resolveClaudeKeyCloakConfig(e.cfg, auth), auth, countReqHeader)
+	oauthCount := isClaudeOAuthToken(apiKey)
 	if !strings.HasPrefix(baseModel, "claude-3-5-haiku") {
-		body = checkSystemInstructions(body)
+		body = checkSystemInstructionsWithSigningMode(body, false, false, oauthCount,
+			countLevers.SanitizeSystemPrompt, countLevers.InjectBillingHeader,
+			"2.1.63", "", "")
 	}
 
 	// Keep count_tokens requests compatible with Anthropic cache-control constraints too.
@@ -570,16 +580,11 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	// Extract betas from body and convert to header (for count_tokens too)
 	var extraBetas []string
 	extraBetas, body = extractAndRemoveBetas(body)
-	if isClaudeOAuthToken(apiKey) && !auth.ToolPrefixDisabled() {
+	if oauthCount && !auth.ToolPrefixDisabled() {
 		body = applyClaudeToolPrefix(body, claudeToolPrefix)
 	}
 	// Remap tool names for OAuth token requests to avoid third-party fingerprinting.
-	var countReqHeader http.Header
-	if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
-		countReqHeader = ginCtx.Request.Header
-	}
-	countLevers := helps.ResolveOAuthLevers(resolveClaudeKeyCloakConfig(e.cfg, auth), auth, countReqHeader)
-	if isClaudeOAuthToken(apiKey) && countLevers.RemapToolNames {
+	if oauthCount && countLevers.RemapToolNames {
 		body, _ = remapOAuthToolNames(body)
 	}
 
