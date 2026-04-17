@@ -137,6 +137,8 @@ nonstream-keepalive-interval: 0
 #       X-Custom-Header: "custom-value"
 #     proxy-url: "socks5://proxy.example.com:1080" # 可选: 每个密钥的代理覆盖
 #     # proxy-url: "direct" # 可选: 显式直连此凭据
+#     # circuit-breaker-failure-threshold: 5    # 可选: 连续失败次数达到此值时熔断器打开(0=运行时默认)
+#     # circuit-breaker-recovery-timeout: 60    # 可选: 进入半开状态前的基准秒数(默认 60，重新打开时翻倍)
 #     models:
 #       - name: "gpt-5-codex"   # 上游模型名称
 #         alias: "codex-latest" # 客户端别名，映射到上游模型

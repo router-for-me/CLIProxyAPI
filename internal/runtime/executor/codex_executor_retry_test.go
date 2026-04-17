@@ -1,10 +1,19 @@
 package executor
 
 import (
+	"context"
+	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"testing"
 	"time"
+
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 )
 
 func TestParseCodexRetryAfter(t *testing.T) {
@@ -75,4 +84,73 @@ func TestNewCodexStatusErrTreatsCapacityAsRetryableRateLimit(t *testing.T) {
 
 func itoa(v int64) string {
 	return strconv.FormatInt(v, 10)
+}
+
+func TestCodexExecutorCircuitBreakerUsesRequestedModel(t *testing.T) {
+	const (
+		authID        = "cb-codex-auth"
+		aliasModel    = "cb-codex-alias"
+		upstreamModel = "cb-codex-upstream"
+	)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/responses" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusGatewayTimeout)
+		_, _ = w.Write([]byte(`{"error":{"message":"timeout","type":"server_error","code":"internal_server_error"}}`))
+	}))
+	defer upstream.Close()
+
+	executor := NewCodexExecutor(&config.Config{
+		CodexKey: []config.CodexKey{{
+			APIKey:                         "test-key",
+			BaseURL:                        upstream.URL,
+			CircuitBreakerFailureThreshold: 2,
+			CircuitBreakerRecoveryTimeout:  43200,
+		}},
+	})
+	auth := &cliproxyauth.Auth{
+		ID:       authID,
+		Provider: "codex",
+		Attributes: map[string]string{
+			"base_url": upstream.URL,
+			"api_key":  "test-key",
+		},
+	}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(authID, "codex", []*registry.ModelInfo{{ID: aliasModel}})
+	t.Cleanup(func() {
+		reg.ResetCircuitBreaker(authID, aliasModel)
+		reg.ResetCircuitBreaker(authID, upstreamModel)
+		reg.UnregisterClient(authID)
+	})
+
+	req := cliproxyexecutor.Request{
+		Model:   upstreamModel,
+		Payload: []byte(fmt.Sprintf(`{"model":"%s","messages":[{"role":"user","content":"hi"}]}`, aliasModel)),
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAI,
+		Metadata: map[string]any{
+			cliproxyexecutor.RequestedModelMetadataKey: aliasModel,
+		},
+	}
+
+	for i := 0; i < 2; i++ {
+		_, err := executor.Execute(context.Background(), auth, req, opts)
+		if err == nil {
+			t.Fatalf("attempt %d: expected upstream error", i+1)
+		}
+	}
+
+	if !reg.IsCircuitOpen(authID, aliasModel) {
+		t.Fatalf("expected circuit to open for requested model %q", aliasModel)
+	}
+	if reg.IsCircuitOpen(authID, upstreamModel) {
+		t.Fatalf("did not expect circuit to open for upstream model %q", upstreamModel)
+	}
 }

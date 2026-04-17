@@ -8,8 +8,11 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	"github.com/tidwall/gjson"
 )
 
@@ -105,6 +108,72 @@ func TestApplyCodexWebsocketHeadersUsesConfigDefaultsForOAuth(t *testing.T) {
 	}
 	if got := headers.Get("OpenAI-Beta"); got != codexResponsesWebsocketBetaHeaderValue {
 		t.Fatalf("OpenAI-Beta = %s, want %s", got, codexResponsesWebsocketBetaHeaderValue)
+	}
+}
+
+func TestCodexWebsocketsExecutorCircuitBreakerUsesRequestedModel(t *testing.T) {
+	const (
+		authID        = "cb-codex-ws-auth"
+		aliasModel    = "cb-codex-ws-alias"
+		upstreamModel = "cb-codex-ws-upstream"
+	)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte(`{"error":{"message":"bad gateway"}}`))
+	}))
+	defer upstream.Close()
+
+	executor := NewCodexWebsocketsExecutor(&config.Config{
+		CodexKey: []config.CodexKey{{
+			APIKey:                         "test-key",
+			BaseURL:                        upstream.URL,
+			CircuitBreakerFailureThreshold: 2,
+			CircuitBreakerRecoveryTimeout:  43200,
+		}},
+	})
+	auth := &cliproxyauth.Auth{
+		ID:       authID,
+		Provider: "codex",
+		Attributes: map[string]string{
+			"base_url":   upstream.URL,
+			"api_key":    "test-key",
+			"websockets": "true",
+		},
+	}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(authID, "codex", []*registry.ModelInfo{{ID: aliasModel}})
+	t.Cleanup(func() {
+		reg.ResetCircuitBreaker(authID, aliasModel)
+		reg.ResetCircuitBreaker(authID, upstreamModel)
+		reg.UnregisterClient(authID)
+	})
+
+	req := cliproxyexecutor.Request{
+		Model:   upstreamModel,
+		Payload: []byte(`{"model":"cb-codex-ws-alias","input":"hi"}`),
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+		Metadata: map[string]any{
+			cliproxyexecutor.RequestedModelMetadataKey: aliasModel,
+		},
+	}
+
+	for i := 0; i < 2; i++ {
+		_, err := executor.Execute(context.Background(), auth, req, opts)
+		if err == nil {
+			t.Fatalf("attempt %d: expected upstream error", i+1)
+		}
+	}
+
+	if !reg.IsCircuitOpen(authID, aliasModel) {
+		t.Fatalf("expected circuit to open for requested model %q", aliasModel)
+	}
+	if reg.IsCircuitOpen(authID, upstreamModel) {
+		t.Fatalf("did not expect circuit to open for upstream model %q", upstreamModel)
 	}
 }
 

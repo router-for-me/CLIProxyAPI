@@ -412,6 +412,15 @@ type CodexKey struct {
 	// Headers optionally adds extra HTTP headers for requests sent with this key.
 	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
 
+	// CircuitBreakerFailureThreshold sets the number of consecutive failures required to open
+	// the circuit breaker for a credential-model pair. A value of 0 uses the runtime default.
+	CircuitBreakerFailureThreshold int `yaml:"circuit-breaker-failure-threshold,omitempty" json:"circuit-breaker-failure-threshold,omitempty"`
+
+	// CircuitBreakerRecoveryTimeout specifies the base wait time in seconds before transitioning
+	// from OPEN to HALF-OPEN state. Subsequent re-openings use exponential backoff (timeout * 2^n).
+	// Defaults to 60 seconds when omitted or <= 0.
+	CircuitBreakerRecoveryTimeout int `yaml:"circuit-breaker-recovery-timeout,omitempty" json:"circuit-breaker-recovery-timeout,omitempty"`
+
 	// ExcludedModels lists model IDs that should be excluded for this provider.
 	ExcludedModels []string `yaml:"excluded-models,omitempty" json:"excluded-models,omitempty"`
 }

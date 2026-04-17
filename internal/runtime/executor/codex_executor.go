@@ -14,6 +14,7 @@ import (
 	codexauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -83,6 +84,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		return e.executeCompact(ctx, auth, req, opts)
 	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	circuitModel := circuitBreakerModelID(opts, req.Model)
 
 	apiKey, baseURL := codexCreds(auth)
 	if baseURL == "" {
@@ -146,6 +148,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
 		recordAPIResponseError(ctx, e.cfg, err)
+		e.recordCodexFailure(auth, circuitModel)
 		return resp, err
 	}
 	defer func() {
@@ -159,11 +162,13 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		appendAPIResponseChunk(ctx, e.cfg, b)
 		logWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
 		err = newCodexStatusErr(httpResp.StatusCode, b)
+		e.recordCodexFailure(auth, circuitModel)
 		return resp, err
 	}
 	data, err := io.ReadAll(httpResp.Body)
 	if err != nil {
 		recordAPIResponseError(ctx, e.cfg, err)
+		e.recordCodexFailure(auth, circuitModel)
 		return resp, err
 	}
 	appendAPIResponseChunk(ctx, e.cfg, data)
@@ -186,14 +191,17 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		var param any
 		out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, originalPayload, body, line, &param)
 		resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
+		e.recordCodexSuccess(auth, circuitModel)
 		return resp, nil
 	}
 	err = statusErr{code: 408, msg: "stream error: stream disconnected before completion: stream closed before response.completed"}
+	e.recordCodexFailure(auth, circuitModel)
 	return resp, err
 }
 
 func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	circuitModel := circuitBreakerModelID(opts, req.Model)
 
 	apiKey, baseURL := codexCreds(auth)
 	if baseURL == "" {
@@ -250,6 +258,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
 		recordAPIResponseError(ctx, e.cfg, err)
+		e.recordCodexFailure(auth, circuitModel)
 		return resp, err
 	}
 	defer func() {
@@ -263,11 +272,13 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 		appendAPIResponseChunk(ctx, e.cfg, b)
 		logWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
 		err = newCodexStatusErr(httpResp.StatusCode, b)
+		e.recordCodexFailure(auth, circuitModel)
 		return resp, err
 	}
 	data, err := io.ReadAll(httpResp.Body)
 	if err != nil {
 		recordAPIResponseError(ctx, e.cfg, err)
+		e.recordCodexFailure(auth, circuitModel)
 		return resp, err
 	}
 	appendAPIResponseChunk(ctx, e.cfg, data)
@@ -276,6 +287,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	var param any
 	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, originalPayload, body, data, &param)
 	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
+	e.recordCodexSuccess(auth, circuitModel)
 	return resp, nil
 }
 
@@ -284,6 +296,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		return nil, statusErr{code: http.StatusBadRequest, msg: "streaming not supported for /responses/compact"}
 	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	circuitModel := circuitBreakerModelID(opts, req.Model)
 
 	apiKey, baseURL := codexCreds(auth)
 	if baseURL == "" {
@@ -347,6 +360,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
 		recordAPIResponseError(ctx, e.cfg, err)
+		e.recordCodexFailure(auth, circuitModel)
 		return nil, err
 	}
 	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
@@ -362,6 +376,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		appendAPIResponseChunk(ctx, e.cfg, data)
 		logWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
 		err = newCodexStatusErr(httpResp.StatusCode, data)
+		e.recordCodexFailure(auth, circuitModel)
 		return nil, err
 	}
 	out := make(chan cliproxyexecutor.StreamChunk)
@@ -385,6 +400,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 					if detail, ok := parseCodexUsage(payload); ok {
 						reporter.publish(ctx, detail)
 					}
+					e.recordCodexSuccess(auth, circuitModel)
 				}
 
 				translatedInput := frame
@@ -405,6 +421,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				return
 			}
 			recordAPIResponseError(ctx, e.cfg, errRead)
+			e.recordCodexFailure(auth, circuitModel)
 			reporter.publishFailure(ctx)
 			out <- cliproxyexecutor.StreamChunk{Err: errRead}
 			return
@@ -853,4 +870,33 @@ func (e *CodexExecutor) resolveCodexConfig(auth *cliproxyauth.Auth) *config.Code
 		}
 	}
 	return nil
+}
+
+func (e *CodexExecutor) codexCircuitBreakerSettings(auth *cliproxyauth.Auth) (int, int) {
+	threshold := registry.DefaultCircuitBreakerFailureThreshold
+	timeoutSec := registry.DefaultCircuitBreakerRecoveryTimeoutSec
+	if cfg := e.resolveCodexConfig(auth); cfg != nil {
+		if cfg.CircuitBreakerFailureThreshold > 0 {
+			threshold = cfg.CircuitBreakerFailureThreshold
+		}
+		if cfg.CircuitBreakerRecoveryTimeout > 0 {
+			timeoutSec = cfg.CircuitBreakerRecoveryTimeout
+		}
+	}
+	return threshold, timeoutSec
+}
+
+func (e *CodexExecutor) recordCodexFailure(auth *cliproxyauth.Auth, model string) {
+	if auth == nil || auth.ID == "" || strings.TrimSpace(model) == "" {
+		return
+	}
+	threshold, timeoutSec := e.codexCircuitBreakerSettings(auth)
+	registry.GetGlobalRegistry().RecordFailure(auth.ID, model, threshold, timeoutSec)
+}
+
+func (e *CodexExecutor) recordCodexSuccess(auth *cliproxyauth.Auth, model string) {
+	if auth == nil || auth.ID == "" || strings.TrimSpace(model) == "" {
+		return
+	}
+	registry.GetGlobalRegistry().RecordSuccess(auth.ID, model)
 }

@@ -150,6 +150,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	}
 
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	circuitModel := circuitBreakerModelID(opts, req.Model)
 	apiKey, baseURL := codexCreds(auth)
 	if baseURL == "" {
 		baseURL = "https://chatgpt.com/backend-api/codex"
@@ -234,9 +235,11 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 			return e.CodexExecutor.Execute(ctx, auth, req, opts)
 		}
 		if respHS != nil && respHS.StatusCode > 0 {
+			e.recordCodexFailure(auth, circuitModel)
 			return resp, statusErr{code: respHS.StatusCode, msg: string(bodyErr)}
 		}
 		recordAPIResponseError(ctx, e.cfg, errDial)
+		e.recordCodexFailure(auth, circuitModel)
 		return resp, errDial
 	}
 	closeHTTPResponseBody(respHS, "codex websockets executor: close handshake response body error")
@@ -288,14 +291,17 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 				} else {
 					e.invalidateUpstreamConn(sess, connRetry, "send_error", errSendRetry)
 					recordAPIResponseError(ctx, e.cfg, errSendRetry)
+					e.recordCodexFailure(auth, circuitModel)
 					return resp, errSendRetry
 				}
 			} else {
 				recordAPIResponseError(ctx, e.cfg, errDialRetry)
+				e.recordCodexFailure(auth, circuitModel)
 				return resp, errDialRetry
 			}
 		} else {
 			recordAPIResponseError(ctx, e.cfg, errSend)
+			e.recordCodexFailure(auth, circuitModel)
 			return resp, errSend
 		}
 	}
@@ -307,6 +313,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		msgType, payload, errRead := readCodexWebsocketMessage(ctx, sess, conn, readCh)
 		if errRead != nil {
 			recordAPIResponseError(ctx, e.cfg, errRead)
+			e.recordCodexFailure(auth, circuitModel)
 			return resp, errRead
 		}
 		if msgType != websocket.TextMessage {
@@ -316,6 +323,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 					e.invalidateUpstreamConn(sess, conn, "unexpected_binary", err)
 				}
 				recordAPIResponseError(ctx, e.cfg, err)
+				e.recordCodexFailure(auth, circuitModel)
 				return resp, err
 			}
 			continue
@@ -332,6 +340,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 				e.invalidateUpstreamConn(sess, conn, "upstream_error", wsErr)
 			}
 			recordAPIResponseError(ctx, e.cfg, wsErr)
+			e.recordCodexFailure(auth, circuitModel)
 			return resp, wsErr
 		}
 
@@ -344,6 +353,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 			var param any
 			out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, originalPayload, body, payload, &param)
 			resp = cliproxyexecutor.Response{Payload: out}
+			e.recordCodexSuccess(auth, circuitModel)
 			return resp, nil
 		}
 	}
@@ -359,6 +369,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	}
 
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	circuitModel := circuitBreakerModelID(opts, req.Model)
 	apiKey, baseURL := codexCreds(auth)
 	if baseURL == "" {
 		baseURL = "https://chatgpt.com/backend-api/codex"
@@ -430,9 +441,11 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			return e.CodexExecutor.ExecuteStream(ctx, auth, req, opts)
 		}
 		if respHS != nil && respHS.StatusCode > 0 {
+			e.recordCodexFailure(auth, circuitModel)
 			return nil, statusErr{code: respHS.StatusCode, msg: string(bodyErr)}
 		}
 		recordAPIResponseError(ctx, e.cfg, errDial)
+		e.recordCodexFailure(auth, circuitModel)
 		if sess != nil {
 			sess.reqMu.Unlock()
 		}
@@ -480,6 +493,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				e.invalidateUpstreamConn(sess, connRetry, "send_error", errSendRetry)
 				sess.clearActive(readCh)
 				sess.reqMu.Unlock()
+				e.recordCodexFailure(auth, circuitModel)
 				return nil, errSendRetry
 			}
 			conn = connRetry
@@ -489,6 +503,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			if errClose := conn.Close(); errClose != nil {
 				log.Errorf("codex websockets executor: close websocket error: %v", errClose)
 			}
+			e.recordCodexFailure(auth, circuitModel)
 			return nil, errSend
 		}
 	}
@@ -543,6 +558,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				terminateReason = "read_error"
 				terminateErr = errRead
 				recordAPIResponseError(ctx, e.cfg, errRead)
+				e.recordCodexFailure(auth, circuitModel)
 				reporter.publishFailure(ctx)
 				_ = send(cliproxyexecutor.StreamChunk{Err: errRead})
 				return
@@ -553,6 +569,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 					terminateReason = "unexpected_binary"
 					terminateErr = err
 					recordAPIResponseError(ctx, e.cfg, err)
+					e.recordCodexFailure(auth, circuitModel)
 					reporter.publishFailure(ctx)
 					if sess != nil {
 						e.invalidateUpstreamConn(sess, conn, "unexpected_binary", err)
@@ -573,6 +590,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				terminateReason = "upstream_error"
 				terminateErr = wsErr
 				recordAPIResponseError(ctx, e.cfg, wsErr)
+				e.recordCodexFailure(auth, circuitModel)
 				reporter.publishFailure(ctx)
 				if sess != nil {
 					e.invalidateUpstreamConn(sess, conn, "upstream_error", wsErr)
@@ -587,6 +605,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				if detail, ok := parseCodexUsage(payload); ok {
 					reporter.publish(ctx, detail)
 				}
+				e.recordCodexSuccess(auth, circuitModel)
 			}
 
 			line := encodeCodexWebsocketAsSSE(payload)
