@@ -31,6 +31,9 @@ AGENTS.md
 CLAUDE.md
 GEMINI.md
 
+# Factory validation artifacts
+.factory/validation/**
+
 # Tooling metadata
 .vscode/*
 .worktrees/
