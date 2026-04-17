@@ -1002,6 +1002,9 @@ func (m *Manager) rebuildAPIKeyModelAliasLocked(cfg *internalconfig.Config) {
 		if strings.TrimSpace(auth.ID) == "" {
 			continue
 		}
+		if auth.Disabled || auth.Status == StatusDisabled {
+			continue
+		}
 		kind, _ := auth.AccountInfo()
 		if !strings.EqualFold(strings.TrimSpace(kind), "api_key") {
 			continue

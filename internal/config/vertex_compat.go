@@ -37,6 +37,9 @@ type VertexCompatKey struct {
 
 	// ExcludedModels lists model IDs that should be excluded for this provider.
 	ExcludedModels []string `yaml:"excluded-models,omitempty" json:"excluded-models,omitempty"`
+
+	// Disabled indicates whether this API key is disabled and should not be used for routing.
+	Disabled bool `yaml:"disabled,omitempty" json:"disabled,omitempty"`
 }
 
 func (k VertexCompatKey) GetAPIKey() string  { return k.APIKey }

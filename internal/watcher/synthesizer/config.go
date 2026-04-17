@@ -70,12 +70,17 @@ func (s *ConfigSynthesizer) synthesizeGeminiKeys(ctx *SynthesisContext) []*corea
 			attrs["models_hash"] = hash
 		}
 		addConfigHeadersToAttrs(entry.Headers, attrs)
+		status := coreauth.StatusActive
+		if entry.Disabled {
+			status = coreauth.StatusDisabled
+		}
 		a := &coreauth.Auth{
 			ID:         id,
 			Provider:   "gemini",
 			Label:      "gemini-apikey",
 			Prefix:     prefix,
-			Status:     coreauth.StatusActive,
+			Status:     status,
+			Disabled:   entry.Disabled,
 			ProxyURL:   proxyURL,
 			Attributes: attrs,
 			CreatedAt:  now,
@@ -118,12 +123,17 @@ func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) []*corea
 		}
 		addConfigHeadersToAttrs(ck.Headers, attrs)
 		proxyURL := strings.TrimSpace(ck.ProxyURL)
+		status := coreauth.StatusActive
+		if ck.Disabled {
+			status = coreauth.StatusDisabled
+		}
 		a := &coreauth.Auth{
 			ID:         id,
 			Provider:   "claude",
 			Label:      "claude-apikey",
 			Prefix:     prefix,
-			Status:     coreauth.StatusActive,
+			Status:     status,
+			Disabled:   ck.Disabled,
 			ProxyURL:   proxyURL,
 			Attributes: attrs,
 			CreatedAt:  now,
@@ -168,12 +178,17 @@ func (s *ConfigSynthesizer) synthesizeCodexKeys(ctx *SynthesisContext) []*coreau
 		}
 		addConfigHeadersToAttrs(ck.Headers, attrs)
 		proxyURL := strings.TrimSpace(ck.ProxyURL)
+		status := coreauth.StatusActive
+		if ck.Disabled {
+			status = coreauth.StatusDisabled
+		}
 		a := &coreauth.Auth{
 			ID:         id,
 			Provider:   "codex",
 			Label:      "codex-apikey",
 			Prefix:     prefix,
-			Status:     coreauth.StatusActive,
+			Status:     status,
+			Disabled:   ck.Disabled,
 			ProxyURL:   proxyURL,
 			Attributes: attrs,
 			CreatedAt:  now,
@@ -309,12 +324,17 @@ func (s *ConfigSynthesizer) synthesizeVertexCompat(ctx *SynthesisContext) []*cor
 			attrs["models_hash"] = hash
 		}
 		addConfigHeadersToAttrs(compat.Headers, attrs)
+		status := coreauth.StatusActive
+		if compat.Disabled {
+			status = coreauth.StatusDisabled
+		}
 		a := &coreauth.Auth{
 			ID:         id,
 			Provider:   providerName,
 			Label:      "vertex-apikey",
 			Prefix:     prefix,
-			Status:     coreauth.StatusActive,
+			Status:     status,
+			Disabled:   compat.Disabled,
 			ProxyURL:   proxyURL,
 			Attributes: attrs,
 			CreatedAt:  now,

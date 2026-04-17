@@ -272,12 +272,16 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 	}
 }
 
-// persist saves the current in-memory config to disk.
-func (h *Handler) persist(c *gin.Context) bool {
+// persistConfig saves the current in-memory config to disk without writing an HTTP response.
+func (h *Handler) persistConfig() error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	// Preserve comments when writing
-	if err := config.SaveConfigPreserveComments(h.configFilePath, h.cfg); err != nil {
+	return config.SaveConfigPreserveComments(h.configFilePath, h.cfg)
+}
+
+// persist saves the current in-memory config to disk.
+func (h *Handler) persist(c *gin.Context) bool {
+	if err := h.persistConfig(); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to save config: %v", err)})
 		return false
 	}

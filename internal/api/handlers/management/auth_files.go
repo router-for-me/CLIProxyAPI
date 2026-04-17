@@ -1122,6 +1122,14 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 		return
 	}
 
+	// For config-based auths (Metadata == nil), persist the disabled state to the config file
+	// so it survives config reloads and server restarts.
+	if targetAuth.Metadata == nil && h.cfg != nil {
+		if persistErr := h.persistDisabledStateToConfig(targetAuth, *req.Disabled); persistErr != nil {
+			log.WithError(persistErr).Warnf("failed to persist disabled state to config for auth %s", targetAuth.ID)
+		}
+	}
+
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "disabled": *req.Disabled})
 }
 
@@ -1318,6 +1326,81 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+}
+
+// persistDisabledStateToConfig updates the disabled field in the config file for config-based auths.
+// This ensures the disabled state survives config reloads and server restarts.
+func (h *Handler) persistDisabledStateToConfig(auth *coreauth.Auth, disabled bool) error {
+	if auth == nil || auth.Attributes == nil || h.cfg == nil {
+		return nil
+	}
+	source := strings.TrimSpace(auth.Attributes["source"])
+	if !strings.HasPrefix(source, "config:") {
+		return nil
+	}
+	apiKey := strings.TrimSpace(auth.Attributes["api_key"])
+	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
+	changed := false
+
+	switch provider {
+	case "gemini":
+		for i := range h.cfg.GeminiKey {
+			if strings.TrimSpace(h.cfg.GeminiKey[i].APIKey) == apiKey {
+				h.cfg.GeminiKey[i].Disabled = disabled
+				changed = true
+				break
+			}
+		}
+	case "claude":
+		for i := range h.cfg.ClaudeKey {
+			if strings.TrimSpace(h.cfg.ClaudeKey[i].APIKey) == apiKey {
+				h.cfg.ClaudeKey[i].Disabled = disabled
+				changed = true
+				break
+			}
+		}
+	case "codex":
+		for i := range h.cfg.CodexKey {
+			if strings.TrimSpace(h.cfg.CodexKey[i].APIKey) == apiKey {
+				h.cfg.CodexKey[i].Disabled = disabled
+				changed = true
+				break
+			}
+		}
+	case "vertex":
+		for i := range h.cfg.VertexCompatAPIKey {
+			if strings.TrimSpace(h.cfg.VertexCompatAPIKey[i].APIKey) == apiKey {
+				h.cfg.VertexCompatAPIKey[i].Disabled = disabled
+				changed = true
+				break
+			}
+		}
+	default:
+		// OpenAI-compatibility and other providers
+		compatName := strings.TrimSpace(auth.Attributes["compat_name"])
+		proxyURL := strings.TrimSpace(auth.ProxyURL)
+		for i := range h.cfg.OpenAICompatibility {
+			if !strings.EqualFold(h.cfg.OpenAICompatibility[i].Name, compatName) {
+				continue
+			}
+			for j := range h.cfg.OpenAICompatibility[i].APIKeyEntries {
+				entry := &h.cfg.OpenAICompatibility[i].APIKeyEntries[j]
+				if strings.TrimSpace(entry.APIKey) == apiKey && strings.TrimSpace(entry.ProxyURL) == proxyURL {
+					entry.Disabled = disabled
+					changed = true
+					break
+				}
+			}
+			if changed {
+				break
+			}
+		}
+	}
+
+	if !changed {
+		return nil
+	}
+	return h.persistConfig()
 }
 
 func (h *Handler) disableAuth(ctx context.Context, id string) {

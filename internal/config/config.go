@@ -405,6 +405,9 @@ type ClaudeKey struct {
 	// Claude /v1/messages requests. It is disabled by default so upstream seed
 	// changes do not alter the proxy's legacy behavior.
 	ExperimentalCCHSigning bool `yaml:"experimental-cch-signing,omitempty" json:"experimental-cch-signing,omitempty"`
+
+	// Disabled indicates whether this API key is disabled and should not be used for routing.
+	Disabled bool `yaml:"disabled,omitempty" json:"disabled,omitempty"`
 }
 
 func (k ClaudeKey) GetAPIKey() string  { return k.APIKey }
@@ -453,6 +456,9 @@ type CodexKey struct {
 
 	// ExcludedModels lists model IDs that should be excluded for this provider.
 	ExcludedModels []string `yaml:"excluded-models,omitempty" json:"excluded-models,omitempty"`
+
+	// Disabled indicates whether this API key is disabled and should not be used for routing.
+	Disabled bool `yaml:"disabled,omitempty" json:"disabled,omitempty"`
 }
 
 func (k CodexKey) GetAPIKey() string  { return k.APIKey }
@@ -497,6 +503,9 @@ type GeminiKey struct {
 
 	// ExcludedModels lists model IDs that should be excluded for this provider.
 	ExcludedModels []string `yaml:"excluded-models,omitempty" json:"excluded-models,omitempty"`
+
+	// Disabled indicates whether this API key is disabled and should not be used for routing.
+	Disabled bool `yaml:"disabled,omitempty" json:"disabled,omitempty"`
 }
 
 func (k GeminiKey) GetAPIKey() string  { return k.APIKey }
