@@ -170,6 +170,18 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 				if len(o.Cloak.SensitiveWords) != len(n.Cloak.SensitiveWords) {
 					changes = append(changes, fmt.Sprintf("claude[%d].cloak.sensitive-words: %d -> %d", i, len(o.Cloak.SensitiveWords), len(n.Cloak.SensitiveWords)))
 				}
+				if !equalPBool(o.Cloak.OAuthSanitizeSystemPrompt, n.Cloak.OAuthSanitizeSystemPrompt) {
+					changes = append(changes, fmt.Sprintf("claude[%d].cloak.oauth-sanitize-system-prompt: %s -> %s", i, formatPBool(o.Cloak.OAuthSanitizeSystemPrompt), formatPBool(n.Cloak.OAuthSanitizeSystemPrompt)))
+				}
+				if !equalPBool(o.Cloak.OAuthRemapToolNames, n.Cloak.OAuthRemapToolNames) {
+					changes = append(changes, fmt.Sprintf("claude[%d].cloak.oauth-remap-tool-names: %s -> %s", i, formatPBool(o.Cloak.OAuthRemapToolNames), formatPBool(n.Cloak.OAuthRemapToolNames)))
+				}
+				if !equalPBool(o.Cloak.OAuthInjectBillingHeader, n.Cloak.OAuthInjectBillingHeader) {
+					changes = append(changes, fmt.Sprintf("claude[%d].cloak.oauth-inject-billing-header: %s -> %s", i, formatPBool(o.Cloak.OAuthInjectBillingHeader), formatPBool(n.Cloak.OAuthInjectBillingHeader)))
+				}
+				if strings.TrimSpace(o.Cloak.OAuthDisableHeader) != strings.TrimSpace(n.Cloak.OAuthDisableHeader) {
+					changes = append(changes, fmt.Sprintf("claude[%d].cloak.oauth-disable-header: updated", i))
+				}
 			}
 		}
 	}
@@ -393,6 +405,28 @@ func equalStringSet(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// equalPBool reports whether two *bool pointers represent the same effective value.
+func equalPBool(a, b *bool) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return *a == *b
+}
+
+// formatPBool renders a *bool for human-readable diff output.
+func formatPBool(v *bool) string {
+	if v == nil {
+		return "<nil>"
+	}
+	if *v {
+		return "true"
+	}
+	return "false"
 }
 
 // equalUpstreamAPIKeys compares two slices of AmpUpstreamAPIKeyEntry for equality.
