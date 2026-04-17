@@ -20,10 +20,10 @@ func ApplyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string
 	if cfg == nil || len(payload) == 0 {
 		return payload
 	}
-	rules := cfg.Payload
-	if len(rules.Default) == 0 && len(rules.DefaultRaw) == 0 && len(rules.Override) == 0 && len(rules.OverrideRaw) == 0 && len(rules.Filter) == 0 {
+	if !payloadRulesConfigured(cfg) {
 		return payload
 	}
+	rules := cfg.Payload
 	model = strings.TrimSpace(model)
 	requestedModel = strings.TrimSpace(requestedModel)
 	if model == "" && requestedModel == "" {
@@ -149,6 +149,18 @@ func ApplyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string
 		}
 	}
 	return out
+}
+
+func payloadRulesConfigured(cfg *config.Config) bool {
+	if cfg == nil {
+		return false
+	}
+	rules := cfg.Payload
+	return len(rules.Default) > 0 ||
+		len(rules.DefaultRaw) > 0 ||
+		len(rules.Override) > 0 ||
+		len(rules.OverrideRaw) > 0 ||
+		len(rules.Filter) > 0
 }
 
 func payloadModelRulesMatch(rules []config.PayloadModelRule, protocol string, models []string) bool {

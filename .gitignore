@@ -50,3 +50,5 @@ _bmad-output/*
 # macOS
 .DS_Store
 ._*
+# Added by code-review-graph
+.code-review-graph/
