@@ -111,6 +111,48 @@ func TestManager_ShouldRetryAfterError_UsesOAuthModelAliasForCooldown(t *testing
 	}
 }
 
+func TestManager_ShouldRetryAfterError_SequentialFillUsesConfiguredRequestRetry(t *testing.T) {
+	m := NewManager(nil, &SequentialFillSelector{}, nil)
+	m.SetRetryConfig(5, 30*time.Second, 0)
+
+	model := "test-model"
+	next := time.Now().Add(5 * time.Second)
+
+	auth := &Auth{
+		ID:       "auth-1",
+		Provider: "claude",
+		ModelStates: map[string]*ModelState{
+			model: {
+				Unavailable:    true,
+				Status:         StatusError,
+				NextRetryAfter: next,
+				Quota: QuotaState{
+					Exceeded:      true,
+					Reason:        "quota",
+					NextRecoverAt: next,
+				},
+			},
+		},
+	}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	_, _, maxWait := m.retrySettings()
+	wait, shouldRetry := m.shouldRetryAfterError(&Error{HTTPStatus: http.StatusTooManyRequests, Message: "quota"}, 4, []string{"claude"}, model, maxWait)
+	if !shouldRetry {
+		t.Fatalf("expected shouldRetry=true on attempt=4 when request_retry=5, got false (wait=%v)", wait)
+	}
+	if wait <= 0 {
+		t.Fatalf("expected wait > 0, got %v", wait)
+	}
+
+	_, shouldRetry = m.shouldRetryAfterError(&Error{HTTPStatus: http.StatusTooManyRequests, Message: "quota"}, 5, []string{"claude"}, model, maxWait)
+	if shouldRetry {
+		t.Fatalf("expected shouldRetry=false on attempt=5 when request_retry=5, got true")
+	}
+}
+
 type credentialRetryLimitExecutor struct {
 	id string
 
@@ -357,8 +399,6 @@ func (e *retryAfterStatusError) RetryAfter() *time.Duration {
 	d := e.retryAfter
 	return &d
 }
-
-
 
 func newCredentialRetryLimitTestManager(t *testing.T, maxRetryCredentials int) (*Manager, *credentialRetryLimitExecutor) {
 	t.Helper()

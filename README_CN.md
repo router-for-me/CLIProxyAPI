@@ -27,7 +27,7 @@
 - 坚持使用当前凭证直到其不可用
 - 随机起始点以在凭证间均衡负载
 - 顺序推进，不会跳回已恢复的凭证
-- 通过 `MaxRetryAttempts = 2` 保持粘性
+- 正常遵循 `request-retry` 和 `max-retry-credentials` 配置
 
 配置方式：
 ```yaml

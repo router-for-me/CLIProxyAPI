@@ -46,9 +46,9 @@ type FillFirstSelector struct{}
 // exhausted (in cooldown/unavailable), then advance to the next provider.
 // Within each provider, the same sticky sequential selection applies.
 type SequentialFillSelector struct {
-	mu              sync.Mutex
-	current         map[string]string // actualProvider:model -> current auth ID
-	stickyProvider  map[string]string // model -> current provider name (sticky)
+	mu             sync.Mutex
+	current        map[string]string // actualProvider:model -> current auth ID
+	stickyProvider map[string]string // model -> current provider name (sticky)
 }
 
 type blockReason int
@@ -488,13 +488,6 @@ func (s *SequentialFillSelector) pickSticky(provider, model string, available []
 	// Wrap around: all subsequent credentials unavailable, start from beginning.
 	s.current[key] = available[0].ID
 	return available[0]
-}
-
-// MaxRetryAttempts implements RetryLimiter.
-// Returns 2 to limit attempts to current credential + 1 retry,
-// preserving stickiness and preventing credential pool exhaustion.
-func (s *SequentialFillSelector) MaxRetryAttempts() int {
-	return 2
 }
 
 func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, blockReason, time.Time) {

@@ -27,7 +27,7 @@ A sticky credential selection strategy (`sf` or `sequential-fill`) that optimize
 - Sticks to the current credential until it becomes unavailable
 - Random starting point for initial selection to balance load across credentials
 - Sequential advancement without jumping back to recovered credentials
-- Preserves stickiness with `MaxRetryAttempts = 2`
+- Honors the normal `request-retry` and `max-retry-credentials` settings
 
 Configuration:
 ```yaml

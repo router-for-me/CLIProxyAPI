@@ -105,11 +105,6 @@ type Selector interface {
 	Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error)
 }
 
-// RetryLimiter may be implemented by a Selector to cap retry attempts.
-type RetryLimiter interface {
-	MaxRetryAttempts() int
-}
-
 // StoppableSelector is an optional interface for selectors that hold resources.
 // Selectors that implement this interface will have Stop called during shutdown.
 type StoppableSelector interface {
@@ -1859,13 +1854,7 @@ func (m *Manager) retrySettings() (int, int, time.Duration) {
 	if m == nil {
 		return 0, 0, 0
 	}
-	retries := int(m.requestRetry.Load())
-	if rl, ok := m.selector.(RetryLimiter); ok {
-		if v := rl.MaxRetryAttempts(); v > 0 {
-			retries = v
-		}
-	}
-	return retries, int(m.maxRetryCredentials.Load()), time.Duration(m.maxRetryInterval.Load())
+	return int(m.requestRetry.Load()), int(m.maxRetryCredentials.Load()), time.Duration(m.maxRetryInterval.Load())
 }
 
 func (m *Manager) closestCooldownWait(providers []string, model string, attempt int) (time.Duration, bool) {
@@ -1876,11 +1865,6 @@ func (m *Manager) closestCooldownWait(providers []string, model string, attempt 
 	defaultRetry := int(m.requestRetry.Load())
 	if defaultRetry < 0 {
 		defaultRetry = 0
-	}
-	if rl, ok := m.selector.(RetryLimiter); ok {
-		if v := rl.MaxRetryAttempts(); v > 0 {
-			defaultRetry = v
-		}
 	}
 	providerSet := make(map[string]struct{}, len(providers))
 	for i := range providers {
