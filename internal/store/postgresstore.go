@@ -148,7 +148,13 @@ func (s *PostgresStore) EnsureSchema(ctx context.Context) error {
 // adds/refreshes credentials, other pods pick them up within the poll interval.
 // Only files whose content has actually changed are written, avoiding unnecessary
 // fsnotify events and file system churn.
+//
+// A non-positive interval disables the poller to avoid a tight loop on misconfiguration.
 func (s *PostgresStore) StartAuthSync(ctx context.Context, interval time.Duration, onChange func()) {
+	if interval <= 0 {
+		log.Warnf("postgres store: auth sync disabled — non-positive interval %s", interval)
+		return
+	}
 	go func() {
 		for {
 			select {
@@ -213,12 +219,19 @@ func (s *PostgresStore) incrementalAuthSync(ctx context.Context) (bool, error) {
 			return nil
 		}
 		rel, relErr := filepath.Rel(s.authDir, path)
-		if relErr != nil || seen[rel] {
+		if relErr != nil {
 			return nil
 		}
-		if removeErr := os.Remove(path); removeErr == nil {
-			changed = true
+		// Normalize to forward slashes so the key matches DB ids on Windows,
+		// where filepath.Rel returns paths with "\" separators.
+		if seen[filepath.ToSlash(rel)] {
+			return nil
 		}
+		if removeErr := os.Remove(path); removeErr != nil {
+			log.Warnf("postgres store: failed to remove orphan auth file %s: %v", path, removeErr)
+			return nil
+		}
+		changed = true
 		return nil
 	})
 

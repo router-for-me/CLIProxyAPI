@@ -31,6 +31,8 @@ require (
 	gopkg.in/yaml.v3 v3.0.1
 )
 
+require github.com/DATA-DOG/go-sqlmock v1.5.2
+
 require (
 	cloud.google.com/go/compute/metadata v0.3.0 // indirect
 	github.com/Microsoft/go-winio v0.6.2 // indirect
