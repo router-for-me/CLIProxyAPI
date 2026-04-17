@@ -10,7 +10,10 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-const testOAuthKey = "sk-ant-oat01-testkey"
+// testOAuthKey is a fake non-functional key used only to trigger the OAuth token code path.
+// isClaudeOAuthToken checks for "sk-ant-oat" substring; this value is deliberately
+// malformed and cannot be used against the Anthropic API.
+const testOAuthKey = "TEST-sk-ant-oat-FAKE-NOT-A-REAL-KEY"
 
 // TestApplyCloaking_SanitizeDisabled_PreservesClientSystem verifies that when
 // OAuthSanitizeSystemPrompt is explicitly set to false, the original client system
