@@ -28,6 +28,7 @@ import (
 
 type runtimeStateManager interface {
 	Restore(ctx context.Context) (restoredCB, restoredUsage bool, err error)
+	FlushIntervalSeconds() int
 	StartPeriodic(ctx context.Context, intervalSec int)
 	Stop()
 	FlushNow(ctx context.Context) error
@@ -203,7 +204,7 @@ func (s *Service) restoreRuntimeState(ctx context.Context) {
 	if restoredCB || restoredUsage {
 		log.Infof("runtime state restored: cb=%v, usage=%v", restoredCB, restoredUsage)
 	}
-	s.runtimeStateMgr.StartPeriodic(ctx, s.cfg.MongoState.FlushIntervalSeconds)
+	s.runtimeStateMgr.StartPeriodic(ctx, s.runtimeStateMgr.FlushIntervalSeconds())
 }
 
 func (s *Service) bootstrapWatcherState(ctx context.Context) {

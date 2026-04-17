@@ -65,16 +65,6 @@ error-logs-max-files: 10
 # 为 false 时，禁用内存使用统计聚合
 usage-statistics-enabled: false
 
-# MongoDB 运行时状态持久化（熔断器状态 + usage 统计）
-# mongo-state:
-#   enabled: false
-#   uri: "mongodb://127.0.0.1:27017"
-#   database: "cliproxy_state"
-#   snapshot-collection: "service_state_snapshots"
-#   connect-timeout-seconds: 10
-#   operation-timeout-seconds: 5
-#   flush-interval-seconds: 30
-
 # 代理 URL。支持 socks5/http/https 协议。示例: socks5://user:pass@192.168.1.1:1080/
 # 每个入口的 proxy-url 也支持 "direct" 或 "none" 以显式跳过全局 proxy-url 和环境代理。
 proxy-url: ""

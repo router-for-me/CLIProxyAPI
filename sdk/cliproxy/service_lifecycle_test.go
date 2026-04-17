@@ -19,6 +19,7 @@ import (
 
 type runtimeStateManagerStub struct {
 	restore       func(ctx context.Context) (bool, bool, error)
+	flushInterval int
 	startPeriodic func(ctx context.Context, intervalSec int)
 	stop          func()
 	flushNow      func(ctx context.Context) error
@@ -30,6 +31,13 @@ func (s *runtimeStateManagerStub) Restore(ctx context.Context) (bool, bool, erro
 		return s.restore(ctx)
 	}
 	return false, false, nil
+}
+
+func (s *runtimeStateManagerStub) FlushIntervalSeconds() int {
+	if s != nil && s.flushInterval > 0 {
+		return s.flushInterval
+	}
+	return 30
 }
 
 func (s *runtimeStateManagerStub) StartPeriodic(ctx context.Context, intervalSec int) {
@@ -83,7 +91,6 @@ func TestServiceBootstrapWatcherState_ReconcilesSnapshotBeforeRestore(t *testing
 		cfg:         &config.Config{},
 		coreManager: coreauth.NewManager(nil, nil, nil),
 	}
-	service.cfg.MongoState.FlushIntervalSeconds = 17
 
 	if _, err := service.coreManager.Register(context.Background(), &coreauth.Auth{ID: staleAuthID, Provider: "claude", Status: coreauth.StatusActive}); err != nil {
 		t.Fatalf("failed to seed stale auth: %v", err)
@@ -93,6 +100,7 @@ func TestServiceBootstrapWatcherState_ReconcilesSnapshotBeforeRestore(t *testing
 	var sawStaleDisabledDuringRestore bool
 	var startPeriodicInterval int
 	service.runtimeStateMgr = &runtimeStateManagerStub{
+		flushInterval: 17,
 		restore: func(ctx context.Context) (bool, bool, error) {
 			current, ok := service.coreManager.GetByID(currentAuthID)
 			sawCurrentDuringRestore = ok && current != nil && !current.Disabled
@@ -134,12 +142,12 @@ func TestServiceBootstrapWatcherState_AttachesAuthQueueAfterRestore(t *testing.T
 		cfg:         &config.Config{},
 		coreManager: coreauth.NewManager(nil, nil, nil),
 	}
-	service.cfg.MongoState.FlushIntervalSeconds = 9
 
 	callOrder := make([]string, 0, 4)
 	queueAttachedDuringRestore := false
 	queueAssigned := false
 	service.runtimeStateMgr = &runtimeStateManagerStub{
+		flushInterval: 9,
 		restore: func(ctx context.Context) (bool, bool, error) {
 			callOrder = append(callOrder, "restore")
 			queueAttachedDuringRestore = service.authUpdates != nil

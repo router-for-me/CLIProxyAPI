@@ -68,6 +68,14 @@ func (m *Manager) FlushNow(ctx context.Context) error {
 	return m.flush(ctx)
 }
 
+// FlushIntervalSeconds reports the configured periodic flush interval.
+func (m *Manager) FlushIntervalSeconds() int {
+	if m == nil || m.cfg.FlushIntervalSec <= 0 {
+		return 30
+	}
+	return m.cfg.FlushIntervalSec
+}
+
 // StartPeriodic begins a background goroutine that flushes state at the configured interval.
 func (m *Manager) StartPeriodic(ctx context.Context, intervalSec int) {
 	if m == nil {

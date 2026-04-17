@@ -22,17 +22,22 @@ type StoreConfig struct {
 	ConnectTimeoutSec int
 	// OperationTimeoutSec is the per-operation timeout in seconds.
 	OperationTimeoutSec int
+	// FlushIntervalSec is the background flush interval in seconds.
+	FlushIntervalSec int
 	// InstanceID is a unique identifier for this running instance (used in logging).
 	InstanceID string
 }
 
 // NewStoreConfig builds a StoreConfig from the generic mongo config section.
-func NewStoreConfig(uri, database, collection string, connectTimeoutSec, operationTimeoutSec int, instanceID string) StoreConfig {
+func NewStoreConfig(uri, database, collection string, connectTimeoutSec, operationTimeoutSec, flushIntervalSec int, instanceID string) StoreConfig {
 	if connectTimeoutSec <= 0 {
 		connectTimeoutSec = 10
 	}
 	if operationTimeoutSec <= 0 {
 		operationTimeoutSec = 5
+	}
+	if flushIntervalSec <= 0 {
+		flushIntervalSec = 30
 	}
 	return StoreConfig{
 		URI:                 uri,
@@ -40,6 +45,7 @@ func NewStoreConfig(uri, database, collection string, connectTimeoutSec, operati
 		Collection:          collection,
 		ConnectTimeoutSec:   connectTimeoutSec,
 		OperationTimeoutSec: operationTimeoutSec,
+		FlushIntervalSec:    flushIntervalSec,
 		InstanceID:          instanceID,
 	}
 }

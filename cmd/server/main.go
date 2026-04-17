@@ -13,7 +13,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -52,36 +51,25 @@ func init() {
 	buildinfo.BuildDate = BuildDate
 }
 
-func initRuntimeStateManager(ctx context.Context, cfg *config.Config) *mongostate.Manager {
-	if cfg == nil || !cfg.MongoState.Enabled {
-		return nil
+func initRuntimeStateManager(ctx context.Context, runtimeCfg mongostate.RuntimeConfig) (*mongostate.Manager, error) {
+	if !runtimeCfg.Enabled {
+		return nil, nil
 	}
-	if strings.TrimSpace(cfg.MongoState.URI) == "" {
-		log.Warn("mongostate: enabled but uri is empty; runtime state persistence disabled")
-		cfg.MongoState.Enabled = false
-		return nil
+	if runtimeCfg.URI == "" {
+		return nil, fmt.Errorf("mongostate: enabled but uri is empty")
 	}
 
-	mongoStore, errMongostate := mongostate.NewMongoStore(ctx, mongostate.NewStoreConfig(
-		cfg.MongoState.URI,
-		cfg.MongoState.Database,
-		cfg.MongoState.SnapshotCollection,
-		cfg.MongoState.ConnectTimeoutSeconds,
-		cfg.MongoState.OperationTimeoutSeconds,
-		"main",
-	))
-	if errMongostate != nil {
-		log.Warnf("mongostate: failed to connect: %v; runtime state persistence disabled", errMongostate)
-		cfg.MongoState.Enabled = false
-		return nil
+	storeCfg := runtimeCfg.ToStoreConfig("main")
+	mongoStore, err := mongostate.NewMongoStore(ctx, storeCfg)
+	if err != nil {
+		return nil, err
 	}
 	if mongoStore == nil {
-		cfg.MongoState.Enabled = false
-		return nil
+		return nil, fmt.Errorf("mongostate: store initialization returned nil")
 	}
 
 	log.Info("mongostate: initialized")
-	return mongostate.NewManager(mongoStore, mongostate.StoreConfig{})
+	return mongostate.NewManager(mongoStore, storeCfg), nil
 }
 
 // main is the entry point of the application.
@@ -454,37 +442,22 @@ func main() {
 	usage.SetStatisticsEnabled(cfg.UsageStatisticsEnabled)
 	coreauth.SetQuotaCooldownDisabled(cfg.DisableCooling)
 
-	// MongoDB state store environment variable overrides.
-	if v := os.Getenv("MONGOSTATE_ENABLED"); v != "" {
-		cfg.MongoState.Enabled = strings.EqualFold(v, "true") || v == "1"
+	runtimeStateCfg, runtimeStateCfgPath, runtimeStateCfgFound, err := mongostate.LoadRuntimeConfig(configFilePath)
+	if err != nil {
+		log.Errorf("failed to load state-store config: %v", err)
+		return
 	}
-	if v := os.Getenv("MONGOSTATE_URI"); v != "" {
-		cfg.MongoState.URI = v
-	}
-	if v := os.Getenv("MONGOSTATE_DATABASE"); v != "" {
-		cfg.MongoState.Database = v
-	}
-	if v := os.Getenv("MONGOSTATE_SNAPSHOT_COLLECTION"); v != "" {
-		cfg.MongoState.SnapshotCollection = v
-	}
-	if v := os.Getenv("MONGOSTATE_CONNECT_TIMEOUT_SECONDS"); v != "" {
-		if sec, err := strconv.Atoi(v); err == nil {
-			cfg.MongoState.ConnectTimeoutSeconds = sec
-		}
-	}
-	if v := os.Getenv("MONGOSTATE_OPERATION_TIMEOUT_SECONDS"); v != "" {
-		if sec, err := strconv.Atoi(v); err == nil {
-			cfg.MongoState.OperationTimeoutSeconds = sec
-		}
-	}
-	if v := os.Getenv("MONGOSTATE_FLUSH_INTERVAL_SECONDS"); v != "" {
-		if sec, err := strconv.Atoi(v); err == nil {
-			cfg.MongoState.FlushIntervalSeconds = sec
-		}
+	mongostate.ApplyEnvOverrides(&runtimeStateCfg)
+	if !runtimeStateCfgFound && !runtimeStateCfg.Enabled {
+		log.Infof("mongostate: state-store config not found at %s; runtime state persistence disabled", runtimeStateCfgPath)
 	}
 
 	// Initialize MongoDB state store if enabled.
-	runtimeStateMgr := initRuntimeStateManager(context.Background(), cfg)
+	runtimeStateMgr, err := initRuntimeStateManager(context.Background(), runtimeStateCfg)
+	if err != nil {
+		log.Errorf("failed to initialize runtime state manager: %v", err)
+		return
+	}
 
 	if err = logging.ConfigureLogOutput(cfg, configFilePath); err != nil {
 		log.Errorf("failed to configure log output: %v", err)

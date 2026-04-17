@@ -6,6 +6,8 @@ cli-proxy-new
 # Configuration
 config.yaml
 config-277.yaml
+state-store.*.ini
+!state-store.example.ini
 .env
 
 # Generated content

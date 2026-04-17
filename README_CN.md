@@ -58,12 +58,22 @@ cp config.example.yaml config.yaml
 
 ### 配置文件说明
 
-项目使用**两套配置文件**，分别对应不同环境：
+项目使用**两类配置文件**：业务配置使用 YAML，运行时状态持久化使用独立 INI。
 
 | 文件 | 用途 | `auth-dir` |
 |------|------|------------|
 | `config.yaml` | 本地开发 | `./auths`（本地相对路径） |
 | `config-277.yaml` | 生产部署（227 服务器） | `/opt/cliproxy/auths` |
+
+运行时状态持久化配置：
+
+| 文件 | 用途 | MongoDB 地址 |
+|------|------|--------------|
+| `state-store.local.ini` | 本地开发（不入库） | `192.168.15.227` |
+| `state-store.277.ini` | 生产部署（不入库） | `127.0.0.1` |
+
+- 仓库仅提供 `state-store.example.ini` 模板，真实状态配置文件需要在本地和生产环境分别维护。
+- 解析规则：`config.yaml` 读取 `state-store.local.ini`，`config-277.yaml` 读取 `state-store.277.ini`。
 
 - **本地开发（推荐）**：`./bin/air`（由 `.air.toml` 管理，等价于使用 `-config config.yaml` 启动）
 - **本地回退启动**：`go run ./cmd/server`
@@ -74,7 +84,7 @@ cp config.example.yaml config.yaml
 ### Docker 运行
 
 ```bash
-docker run -v ./config-277.yaml:/app/config.yaml -p 8080:8080 ghcr.io/router-for-me/cliproxyapi:latest
+docker run -v ./config-277.yaml:/app/config-277.yaml -v ./state-store.277.ini:/app/state-store.277.ini -p 8080:8080 ghcr.io/router-for-me/cliproxyapi:latest ./CLIProxyAPI -config /app/config-277.yaml
 ```
 
 ## 项目结构
