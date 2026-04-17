@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	clipproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/tidwall/gjson"
 )
@@ -26,7 +27,9 @@ func TestBilling_DisabledSkipsHeaderBlock(t *testing.T) {
 	auth := &clipproxyauth.Auth{Attributes: map[string]string{"api_key": testOAuthKey}}
 	payload := []byte(`{"system":"My system","messages":[{"role":"user","content":"hello"}]}`)
 
-	out := applyCloaking(context.Background(), cfg, auth, payload, "claude-3-5-sonnet-20241022", testOAuthKey)
+	cloakCfg := resolveClaudeKeyCloakConfig(cfg, auth)
+	levers := helps.ResolveOAuthLevers(cloakCfg, auth, nil)
+	out := applyCloaking(context.Background(), cfg, auth, payload, "claude-3-5-sonnet-20241022", testOAuthKey, isClaudeOAuthToken(testOAuthKey), levers)
 
 	systemBlocks := gjson.GetBytes(out, "system")
 	if !systemBlocks.IsArray() {
@@ -56,7 +59,9 @@ func TestBilling_DisabledKeepsCacheControlInvariants(t *testing.T) {
 	auth := &clipproxyauth.Auth{Attributes: map[string]string{"api_key": testOAuthKey}}
 	payload := []byte(`{"system":"My system","messages":[{"role":"user","content":"hello"}]}`)
 
-	out := applyCloaking(context.Background(), cfg, auth, payload, "claude-3-5-sonnet-20241022", testOAuthKey)
+	cloakCfg2 := resolveClaudeKeyCloakConfig(cfg, auth)
+	levers2 := helps.ResolveOAuthLevers(cloakCfg2, auth, nil)
+	out := applyCloaking(context.Background(), cfg, auth, payload, "claude-3-5-sonnet-20241022", testOAuthKey, isClaudeOAuthToken(testOAuthKey), levers2)
 
 	// Then run ensureCacheControl to verify the remaining blocks can still be processed.
 	processed := ensureCacheControl(out)
@@ -93,7 +98,9 @@ func TestBilling_DisabledDoesNotForceCCHSigning(t *testing.T) {
 	payload := []byte(`{"system":"Test system","messages":[{"role":"user","content":"hello"}]}`)
 
 	// This call must not panic or crash even when billing is disabled.
-	out := applyCloaking(context.Background(), cfg, auth, payload, "claude-3-5-sonnet-20241022", testOAuthKey)
+	cloakCfg3 := resolveClaudeKeyCloakConfig(cfg, auth)
+	levers3 := helps.ResolveOAuthLevers(cloakCfg3, auth, nil)
+	out := applyCloaking(context.Background(), cfg, auth, payload, "claude-3-5-sonnet-20241022", testOAuthKey, isClaudeOAuthToken(testOAuthKey), levers3)
 	if len(out) == 0 {
 		t.Fatal("applyCloaking returned empty payload")
 	}
@@ -128,8 +135,10 @@ func TestApplyCloaking_NonOAuthAlwaysInjectsBillingHeader(t *testing.T) {
 	auth := &clipproxyauth.Auth{Attributes: map[string]string{"api_key": testPlainAPIKey}}
 	payload := []byte(`{"system":"My system","messages":[{"role":"user","content":"hello"}]}`)
 
+	cloakCfgNonOAuth := resolveClaudeKeyCloakConfig(cfg, auth)
+	leversNonOAuth := helps.ResolveOAuthLevers(cloakCfgNonOAuth, auth, nil)
 	// Use a non-OAuth key — isClaudeOAuthToken returns false for this key.
-	out := applyCloaking(context.Background(), cfg, auth, payload, "claude-3-5-sonnet-20241022", testPlainAPIKey)
+	out := applyCloaking(context.Background(), cfg, auth, payload, "claude-3-5-sonnet-20241022", testPlainAPIKey, isClaudeOAuthToken(testPlainAPIKey), leversNonOAuth)
 
 	// Billing block must be present regardless of the lever value.
 	firstText := gjson.GetBytes(out, "system.0.text").String()
