@@ -174,6 +174,11 @@ type Manager struct {
 	// Auto refresh state
 	refreshCancel context.CancelFunc
 	refreshLoop   *authAutoRefreshLoop
+
+	// quotaGroupCleanupCancel cancels the background OAuth quota-group
+	// expired-state cleanup loop. nil when no loop is running. See
+	// StartOAuthQuotaGroupCleanup.
+	quotaGroupCleanupCancel context.CancelFunc
 }
 
 // NewManager constructs a manager with optional custom selector and hook.
@@ -1231,7 +1236,10 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 	if len(normalized) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
-	m.ClearExpiredOAuthQuotaGroupAutoStates(time.Now())
+	// Expired quota-group auto suspensions are reaped by the background loop
+	// started via StartOAuthQuotaGroupCleanup (see oauth_quota_groups_manager.go).
+	// The per-request lock-free check in oauthQuotaGroupBlock already skips
+	// entries whose AutoSuspendedUntil is in the past.
 
 	_, maxRetryCredentials, maxWait := m.retrySettings()
 
@@ -1263,7 +1271,10 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 	if len(normalized) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
-	m.ClearExpiredOAuthQuotaGroupAutoStates(time.Now())
+	// Expired quota-group auto suspensions are reaped by the background loop
+	// started via StartOAuthQuotaGroupCleanup (see oauth_quota_groups_manager.go).
+	// The per-request lock-free check in oauthQuotaGroupBlock already skips
+	// entries whose AutoSuspendedUntil is in the past.
 
 	_, maxRetryCredentials, maxWait := m.retrySettings()
 
@@ -1295,7 +1306,10 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 	if len(normalized) == 0 {
 		return nil, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
-	m.ClearExpiredOAuthQuotaGroupAutoStates(time.Now())
+	// Expired quota-group auto suspensions are reaped by the background loop
+	// started via StartOAuthQuotaGroupCleanup (see oauth_quota_groups_manager.go).
+	// The per-request lock-free check in oauthQuotaGroupBlock already skips
+	// entries whose AutoSuspendedUntil is in the past.
 
 	_, maxRetryCredentials, maxWait := m.retrySettings()
 
@@ -3053,6 +3067,12 @@ func (m *Manager) StartAutoRefresh(parent context.Context, interval time.Duratio
 
 	loop.rebuild(time.Now())
 	go loop.run(ctx)
+
+	// Piggy-back the quota-group cleanup loop on the refresh lifecycle so hosts
+	// that already call StartAutoRefresh/StopAutoRefresh get background reaping
+	// for free. Cancelling the refresh context also cancels this one because
+	// StartOAuthQuotaGroupCleanup derives its context from the supplied parent.
+	m.StartOAuthQuotaGroupCleanup(ctx, 0)
 }
 
 // StopAutoRefresh cancels the background refresh loop, if running.
@@ -3066,6 +3086,7 @@ func (m *Manager) StopAutoRefresh() {
 	if cancel != nil {
 		cancel()
 	}
+	m.StopOAuthQuotaGroupCleanup()
 	// Stop selector if it implements StoppableSelector (e.g., SessionAffinitySelector)
 	if stoppable, ok := m.selector.(StoppableSelector); ok {
 		stoppable.Stop()

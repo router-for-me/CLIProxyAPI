@@ -1,14 +1,29 @@
 package auth
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	log "github.com/sirupsen/logrus"
 )
+
+// oauthQuotaGroupPersistMu serializes config.yaml writes triggered by quota-
+// group state changes so concurrent goroutines never race on the same file.
+// The actual write is still atomic (temp+rename) in SaveConfigPreserveComments,
+// but this lock ensures a deterministic ordering and avoids unnecessary
+// re-entrant load/merge work piling up.
+var oauthQuotaGroupPersistMu sync.Mutex
+
+// defaultOAuthQuotaGroupCleanupInterval is the cadence at which expired auto
+// suspensions are reaped in the background. Chosen to be short enough that
+// users rarely observe a stale cooldown banner yet large enough that the
+// cleanup never dominates CPU or I/O.
+const defaultOAuthQuotaGroupCleanupInterval = 30 * time.Second
 
 func (m *Manager) configFilePathValue() string {
 	if m == nil {
@@ -34,7 +49,35 @@ func (m *Manager) persistRuntimeConfigSnapshot(cfg *internalconfig.Config) error
 	if path == "" {
 		return nil
 	}
+	oauthQuotaGroupPersistMu.Lock()
+	defer oauthQuotaGroupPersistMu.Unlock()
 	return internalconfig.SaveConfigPreserveComments(path, cfg)
+}
+
+// cloneRuntimeConfigForQuotaGroups returns a shallow copy of the currently
+// published runtime config that is safe to mutate without affecting readers
+// that already hold the previous pointer. Only the slice headers that the
+// quota-group code actually writes to are re-aliased; every other field
+// aliases the previous snapshot, which is acceptable because the publisher
+// replaces the whole struct via SetConfig once mutation completes.
+func (m *Manager) cloneRuntimeConfigForQuotaGroups() *internalconfig.Config {
+	var prev *internalconfig.Config
+	if m != nil {
+		prev, _ = m.runtimeConfig.Load().(*internalconfig.Config)
+	}
+	if prev == nil {
+		return &internalconfig.Config{}
+	}
+	next := *prev
+	if len(prev.OAuthAccountQuotaGroupState) > 0 {
+		next.OAuthAccountQuotaGroupState = append(
+			make([]internalconfig.OAuthAccountQuotaGroupState, 0, len(prev.OAuthAccountQuotaGroupState)),
+			prev.OAuthAccountQuotaGroupState...,
+		)
+	} else {
+		next.OAuthAccountQuotaGroupState = nil
+	}
+	return &next
 }
 
 func findOAuthQuotaGroupState(entries []internalconfig.OAuthAccountQuotaGroupState, authID, groupID string) (internalconfig.OAuthAccountQuotaGroupState, bool) {
@@ -56,10 +99,7 @@ func (m *Manager) setOAuthQuotaGroupAutoStateLocked(auth *Auth, model, provider 
 	if !ok {
 		return nil, false
 	}
-	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
-	if cfg == nil {
-		cfg = &internalconfig.Config{}
-	}
+	cfg := m.cloneRuntimeConfigForQuotaGroups()
 
 	current, _ := findOAuthQuotaGroupState(cfg.OAuthAccountQuotaGroupState, auth.ID, group.ID)
 	next := current
@@ -95,10 +135,7 @@ func (m *Manager) clearOAuthQuotaGroupAutoStateLocked(auth *Auth, model string, 
 	if !ok {
 		return nil, false
 	}
-	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
-	if cfg == nil {
-		cfg = &internalconfig.Config{}
-	}
+	cfg := m.cloneRuntimeConfigForQuotaGroups()
 	current, ok := findOAuthQuotaGroupState(cfg.OAuthAccountQuotaGroupState, auth.ID, group.ID)
 	if !ok || current.AutoSuspendedUntil.IsZero() {
 		return nil, false
@@ -137,10 +174,7 @@ func (m *Manager) ClearExpiredOAuthQuotaGroupAutoStates(now time.Time) bool {
 	)
 
 	m.mu.Lock()
-	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
-	if cfg == nil {
-		cfg = &internalconfig.Config{}
-	}
+	cfg := m.cloneRuntimeConfigForQuotaGroups()
 
 	entries := internalconfig.NormalizeOAuthAccountQuotaGroupState(cfg.OAuthAccountQuotaGroupState)
 	if len(entries) == 0 {
@@ -207,4 +241,66 @@ func (m *Manager) ClearExpiredOAuthQuotaGroupAutoStates(now time.Time) bool {
 		}
 	}
 	return true
+}
+
+// StartOAuthQuotaGroupCleanup launches a background goroutine that periodically
+// reaps expired auto cooldowns. Keeping cleanup off the request path avoids the
+// original implementation's issue where every Execute/ExecuteStream/CountTokens
+// call took the global Manager lock and potentially re-wrote config.yaml.
+//
+// Only one loop is kept alive; starting a new one cancels the previous run.
+// Pass a non-positive interval to use the default cadence.
+func (m *Manager) StartOAuthQuotaGroupCleanup(parent context.Context, interval time.Duration) {
+	if m == nil {
+		return
+	}
+	if interval <= 0 {
+		interval = defaultOAuthQuotaGroupCleanupInterval
+	}
+
+	m.mu.Lock()
+	if m.quotaGroupCleanupCancel != nil {
+		m.quotaGroupCleanupCancel()
+	}
+	ctx, cancel := context.WithCancel(parent)
+	m.quotaGroupCleanupCancel = cancel
+	m.mu.Unlock()
+
+	go func() {
+		// Run once shortly after start so any expired entries loaded from disk
+		// are reaped without waiting for the first tick.
+		primer := time.NewTimer(time.Second)
+		defer primer.Stop()
+		select {
+		case <-ctx.Done():
+			return
+		case <-primer.C:
+			m.ClearExpiredOAuthQuotaGroupAutoStates(time.Now())
+		}
+
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				m.ClearExpiredOAuthQuotaGroupAutoStates(time.Now())
+			}
+		}
+	}()
+}
+
+// StopOAuthQuotaGroupCleanup cancels any running background cleanup loop.
+func (m *Manager) StopOAuthQuotaGroupCleanup() {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	cancel := m.quotaGroupCleanupCancel
+	m.quotaGroupCleanupCancel = nil
+	m.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 }

@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"syscall"
 
@@ -1081,12 +1082,8 @@ func SaveConfigPreserveComments(configFile string, cfg *Config) error {
 	mergeMappingPreserve(original.Content[0], generated.Content[0])
 	normalizeCollectionNodeStyles(original.Content[0])
 
-	// Write back.
-	f, err := os.Create(configFile)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = f.Close() }()
+	// Render the merged YAML into memory first so a rendering failure never
+	// leaves the on-disk file truncated.
 	var buf bytes.Buffer
 	enc := yaml.NewEncoder(&buf)
 	enc.SetIndent(2)
@@ -1098,8 +1095,50 @@ func SaveConfigPreserveComments(configFile string, cfg *Config) error {
 		return err
 	}
 	data = NormalizeCommentIndentation(buf.Bytes())
-	_, err = f.Write(data)
-	return err
+
+	// Write atomically: temp file in the same directory, fsync, then rename.
+	// This prevents a partial write from corrupting the live config on crash
+	// or concurrent writer races.
+	return writeFileAtomic(configFile, data, 0o644)
+}
+
+// writeFileAtomic writes data to path by first writing to a sibling temp file,
+// flushing it to disk, and then renaming over the target. Rename on the same
+// filesystem is atomic on POSIX and best-effort atomic on Windows (ReplaceFile
+// semantics via os.Rename in Go).
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	base := filepath.Base(path)
+	tmp, err := os.CreateTemp(dir, "."+base+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	cleanup := func() { _ = os.Remove(tmpName) }
+
+	if _, err = tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return err
+	}
+	if err = tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return err
+	}
+	if err = tmp.Chmod(perm); err != nil {
+		// Non-fatal on Windows where Chmod has limited effect; ignore.
+		_ = err
+	}
+	if err = tmp.Close(); err != nil {
+		cleanup()
+		return err
+	}
+	if err = os.Rename(tmpName, path); err != nil {
+		cleanup()
+		return err
+	}
+	return nil
 }
 
 // SaveConfigPreserveCommentsUpdateNestedScalar updates a nested scalar key path like ["a","b"]
