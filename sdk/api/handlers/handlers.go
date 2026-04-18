@@ -851,6 +851,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 		sentPayload := false
 		bootstrapRetries := 0
 		maxBootstrapRetries := StreamingBootstrapRetries(h.Cfg)
+		failureDetector := &streamFailureDetector{}
 		var responsesLifecycle *openAIResponsesStreamLifecycle
 		var responsesSSEValidationCarry []byte
 		var responsesPayloadCarry []byte
@@ -858,6 +859,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 			responsesLifecycle = &openAIResponsesStreamLifecycle{}
 		}
 		resetPrePayloadState := func() {
+			failureDetector = &streamFailureDetector{}
 			if handlerType != "openai-response" {
 				return
 			}
@@ -1020,6 +1022,11 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 			}
 
 			if len(chunk.Payload) > 0 {
+				if err := failureDetector.Observe(chunk.Payload); err != nil {
+					publishHandlerFailureUsage(ctx, strings.Join(providers, ","), req.Model, http.StatusBadGateway, err)
+					_ = sendErr(&interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: err})
+					return
+				}
 				if responsesLifecycle != nil {
 					responsesLifecycle.Observe(chunk.Payload)
 				}
@@ -1153,6 +1160,7 @@ func statusFromError(err error) int {
 }
 
 func publishHandlerFailureUsage(ctx context.Context, provider, model string, status int, err error) {
+	coreusage.MarkRequestFailed(ctx)
 	if coreusage.RecordPublished(ctx) {
 		return
 	}

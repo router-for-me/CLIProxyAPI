@@ -186,6 +186,10 @@ type invalidJSONStreamExecutor struct{}
 
 type splitJSONAcrossChunksStreamExecutor struct{}
 
+type sseDataErrorStreamExecutor struct{}
+
+type openAIResponsesErrorEventStreamExecutor struct{}
+
 type thinkingFallbackStreamExecutor struct {
 	mu     sync.Mutex
 	models []string
@@ -395,6 +399,64 @@ func (e *splitJSONAcrossChunksStreamExecutor) CountTokens(context.Context, *core
 }
 
 func (e *splitJSONAcrossChunksStreamExecutor) HttpRequest(ctx context.Context, auth *coreauth.Auth, req *http.Request) (*http.Response, error) {
+	return nil, &coreauth.Error{
+		Code:       "not_implemented",
+		Message:    "HttpRequest not implemented",
+		HTTPStatus: http.StatusNotImplemented,
+	}
+}
+
+func (e *sseDataErrorStreamExecutor) Identifier() string { return "codex" }
+
+func (e *sseDataErrorStreamExecutor) Execute(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, &coreauth.Error{Code: "not_implemented", Message: "Execute not implemented"}
+}
+
+func (e *sseDataErrorStreamExecutor) ExecuteStream(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+	ch := make(chan coreexecutor.StreamChunk, 1)
+	ch <- coreexecutor.StreamChunk{Payload: []byte("data: {\"error\":{\"message\":\"max_tokens too large\",\"type\":\"invalid_request_error\",\"code\":\"invalid_parameter_error\"}}\n\n")}
+	close(ch)
+	return &coreexecutor.StreamResult{Chunks: ch}, nil
+}
+
+func (e *sseDataErrorStreamExecutor) Refresh(ctx context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+	return auth, nil
+}
+
+func (e *sseDataErrorStreamExecutor) CountTokens(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, &coreauth.Error{Code: "not_implemented", Message: "CountTokens not implemented"}
+}
+
+func (e *sseDataErrorStreamExecutor) HttpRequest(ctx context.Context, auth *coreauth.Auth, req *http.Request) (*http.Response, error) {
+	return nil, &coreauth.Error{
+		Code:       "not_implemented",
+		Message:    "HttpRequest not implemented",
+		HTTPStatus: http.StatusNotImplemented,
+	}
+}
+
+func (e *openAIResponsesErrorEventStreamExecutor) Identifier() string { return "codex" }
+
+func (e *openAIResponsesErrorEventStreamExecutor) Execute(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, &coreauth.Error{Code: "not_implemented", Message: "Execute not implemented"}
+}
+
+func (e *openAIResponsesErrorEventStreamExecutor) ExecuteStream(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+	ch := make(chan coreexecutor.StreamChunk, 1)
+	ch <- coreexecutor.StreamChunk{Payload: []byte("event: error\ndata: {\"type\":\"error\",\"error\":{\"message\":\"stream failed\",\"code\":\"upstream_error\"}}\n\n")}
+	close(ch)
+	return &coreexecutor.StreamResult{Chunks: ch}, nil
+}
+
+func (e *openAIResponsesErrorEventStreamExecutor) Refresh(ctx context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+	return auth, nil
+}
+
+func (e *openAIResponsesErrorEventStreamExecutor) CountTokens(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, &coreauth.Error{Code: "not_implemented", Message: "CountTokens not implemented"}
+}
+
+func (e *openAIResponsesErrorEventStreamExecutor) HttpRequest(ctx context.Context, auth *coreauth.Auth, req *http.Request) (*http.Response, error) {
 	return nil, &coreauth.Error{
 		Code:       "not_implemented",
 		Message:    "HttpRequest not implemented",
@@ -961,6 +1023,136 @@ func TestExecuteStreamWithAuthManager_AllowsSplitOpenAIResponsesJSONAcrossChunks
 	}
 	if !strings.Contains(got.String(), "response.completed") {
 		t.Fatalf("expected completed payload, got %q", got.String())
+	}
+}
+
+func TestExecuteStreamWithAuthManager_FailsOnSSEDataErrorPayload(t *testing.T) {
+	executor := &sseDataErrorStreamExecutor{}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	plugin := &usageCapturePlugin{}
+	coreusage.RegisterPlugin(plugin)
+
+	auth := &coreauth.Auth{
+		ID:       "auth-sse-data-error",
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("manager.Register(auth): %v", err)
+	}
+	registerTestModel(t, manager, auth)
+
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	ginCtx.Set("apiKey", "usage-sse-data-error-test")
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(ctx, "openai", "test-model", []byte(`{"model":"test-model"}`), "")
+	if dataChan == nil || errChan == nil {
+		t.Fatalf("expected non-nil channels")
+	}
+
+	for chunk := range dataChan {
+		t.Fatalf("expected no payload, got %q", string(chunk))
+	}
+
+	var gotErr *interfaces.ErrorMessage
+	for msg := range errChan {
+		if msg != nil {
+			gotErr = msg
+		}
+	}
+	if gotErr == nil {
+		t.Fatal("expected terminal error")
+	}
+	if gotErr.StatusCode != http.StatusBadGateway {
+		t.Fatalf("expected status %d, got %d", http.StatusBadGateway, gotErr.StatusCode)
+	}
+	if gotErr.Error == nil || !strings.Contains(gotErr.Error.Error(), `"invalid_parameter_error"`) {
+		t.Fatalf("expected error payload in terminal error, got %+v", gotErr.Error)
+	}
+
+	record, ok := plugin.waitForRecord(func(record coreusage.Record) bool {
+		return record.APIKey == "usage-sse-data-error-test"
+	}, time.Second)
+	if !ok {
+		t.Fatal("expected failed usage record")
+	}
+	if !record.Failed {
+		t.Fatalf("record failed = false, want true")
+	}
+	if record.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status_code = %d, want %d", record.StatusCode, http.StatusBadGateway)
+	}
+	if !strings.Contains(record.ErrorMessage, `"invalid_parameter_error"`) {
+		t.Fatalf("unexpected error_message: %q", record.ErrorMessage)
+	}
+}
+
+func TestExecuteStreamWithAuthManager_FailsOnOpenAIResponsesErrorEvent(t *testing.T) {
+	executor := &openAIResponsesErrorEventStreamExecutor{}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	plugin := &usageCapturePlugin{}
+	coreusage.RegisterPlugin(plugin)
+
+	auth := &coreauth.Auth{
+		ID:       "auth-openai-responses-error",
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("manager.Register(auth): %v", err)
+	}
+	registerTestModel(t, manager, auth)
+
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	ginCtx.Set("apiKey", "usage-openai-responses-error-test")
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(ctx, "openai-response", "test-model", []byte(`{"model":"test-model"}`), "")
+	if dataChan == nil || errChan == nil {
+		t.Fatalf("expected non-nil channels")
+	}
+
+	for chunk := range dataChan {
+		t.Fatalf("expected no payload, got %q", string(chunk))
+	}
+
+	var gotErr *interfaces.ErrorMessage
+	for msg := range errChan {
+		if msg != nil {
+			gotErr = msg
+		}
+	}
+	if gotErr == nil {
+		t.Fatal("expected terminal error")
+	}
+	if gotErr.StatusCode != http.StatusBadGateway {
+		t.Fatalf("expected status %d, got %d", http.StatusBadGateway, gotErr.StatusCode)
+	}
+	if gotErr.Error == nil || !strings.Contains(gotErr.Error.Error(), `"stream failed"`) {
+		t.Fatalf("expected stream failure payload, got %+v", gotErr.Error)
+	}
+
+	record, ok := plugin.waitForRecord(func(record coreusage.Record) bool {
+		return record.APIKey == "usage-openai-responses-error-test"
+	}, time.Second)
+	if !ok {
+		t.Fatal("expected failed usage record")
+	}
+	if !record.Failed {
+		t.Fatalf("record failed = false, want true")
+	}
+	if record.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status_code = %d, want %d", record.StatusCode, http.StatusBadGateway)
+	}
+	if !strings.Contains(record.ErrorMessage, `"stream failed"`) {
+		t.Fatalf("unexpected error_message: %q", record.ErrorMessage)
 	}
 }
 

@@ -50,7 +50,10 @@ type queueItem struct {
 	record Record
 }
 
-const usagePublishedContextKey = "__cliproxy_usage_published__"
+const (
+	usagePublishedContextKey         = "__cliproxy_usage_published__"
+	requestExecutionFailedContextKey = "__cliproxy_request_execution_failed__"
+)
 
 // Manager maintains a queue of usage records and delivers them to registered plugins.
 type Manager struct {
@@ -205,6 +208,37 @@ func RecordPublished(ctx context.Context) bool {
 	}
 	published, ok := value.(bool)
 	return ok && published
+}
+
+// MarkRequestFailed flags the current request context as having ended in a
+// business-level failure even if the transport-level HTTP status remains 200.
+func MarkRequestFailed(ctx context.Context) {
+	if ctx == nil {
+		return
+	}
+	ginCtx, ok := ctx.Value("gin").(*gin.Context)
+	if !ok || ginCtx == nil {
+		return
+	}
+	ginCtx.Set(requestExecutionFailedContextKey, true)
+}
+
+// RequestFailed reports whether the current request context has been marked as
+// a business-level failure by the stream handling path.
+func RequestFailed(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	ginCtx, ok := ctx.Value("gin").(*gin.Context)
+	if !ok || ginCtx == nil {
+		return false
+	}
+	value, exists := ginCtx.Get(requestExecutionFailedContextKey)
+	if !exists {
+		return false
+	}
+	failed, ok := value.(bool)
+	return ok && failed
 }
 
 // DefaultManager returns the global usage manager instance.

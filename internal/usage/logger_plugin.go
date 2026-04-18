@@ -455,6 +455,9 @@ func resolveSuccess(ctx context.Context) bool {
 	if ctx == nil {
 		return true
 	}
+	if coreusage.RequestFailed(ctx) {
+		return false
+	}
 	ginCtx, ok := ctx.Value("gin").(*gin.Context)
 	if !ok || ginCtx == nil {
 		return true
