@@ -1,6 +1,8 @@
 # Binaries
 cli-proxy-api
 *.exe
+server
+coverage.out
 
 # Configuration
 config.yaml
