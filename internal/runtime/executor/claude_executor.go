@@ -1018,7 +1018,7 @@ func isClaudeOAuthToken(apiKey string) bool {
 // Amp's `glob`→`Glob`), because the global reverse map contained `Bash`→`bash`
 // regardless of what the client originally sent.
 func remapOAuthToolNames(body []byte) ([]byte, map[string]string) {
-	reverseMap := make(map[string]string)
+	reverseMap := make(map[string]string, len(oauthToolRenameMap))
 	recordRename := func(original, renamed string) {
 		// Preserve the first-seen original name if the same upstream name is
 		// produced from multiple call sites; they all map back identically.
