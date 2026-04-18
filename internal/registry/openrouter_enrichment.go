@@ -4,7 +4,6 @@ package registry
 import (
 	"context"
 	"encoding/json"
-	"io"
 	"net/http"
 	"strings"
 	"sync"
@@ -14,12 +13,17 @@ import (
 )
 
 const (
-	openRouterFetchTimeout   = 30 * time.Second
+	openRouterFetchTimeout    = 30 * time.Second
 	openRouterRefreshInterval = 24 * time.Hour
-	openRouterModelsURL      = "https://openrouter.ai/api/v1/models"
+	openRouterModelsURL       = "https://openrouter.ai/api/v1/models"
 )
 
-var enrichmentOnce sync.Once
+var (
+	enrichmentOnce sync.Once
+	// Single package-level client so TCP keep-alive is reused across the
+	// daily refresh cadence and any manual /models/refresh invocations.
+	enrichmentClient = &http.Client{Timeout: openRouterFetchTimeout}
+)
 
 // openRouterModel represents a model in OpenRouter's API response
 type openRouterModel struct {
@@ -76,40 +80,30 @@ func runOpenRouterEnrichment(ctx context.Context) {
 // registered models that lack context_length metadata.
 // Returns the number of models actually enriched.
 func fetchAndEnrichOpenRouter(ctx context.Context) int {
-	client := &http.Client{Timeout: openRouterFetchTimeout}
 	reqCtx, cancel := context.WithTimeout(ctx, openRouterFetchTimeout)
-	req, err := http.NewRequestWithContext(reqCtx, "GET", openRouterModelsURL, nil)
+	defer cancel()
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, openRouterModelsURL, nil)
 	if err != nil {
-		cancel()
 		log.Debugf("OpenRouter enrichment: request creation failed: %v", err)
 		return 0
 	}
 
-	resp, err := client.Do(req)
+	resp, err := enrichmentClient.Do(req)
 	if err != nil {
-		cancel()
 		log.Debugf("OpenRouter enrichment: fetch failed: %v", err)
 		return 0
 	}
+	defer resp.Body.Close()
 
-	if resp.StatusCode != 200 {
-		resp.Body.Close()
-		cancel()
+	if resp.StatusCode != http.StatusOK {
 		log.Debugf("OpenRouter enrichment: returned status %d", resp.StatusCode)
 		return 0
 	}
 
-	data, err := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	cancel()
-
-	if err != nil {
-		log.Debugf("OpenRouter enrichment: read error: %v", err)
-		return 0
-	}
-
+	// Stream-decode rather than buffering the full response; the OpenRouter
+	// catalog is hundreds of KB today and only grows.
 	var parsed openRouterModelsResponse
-	if err := json.Unmarshal(data, &parsed); err != nil {
+	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
 		log.Warnf("OpenRouter enrichment: parse failed: %v", err)
 		return 0
 	}
@@ -151,28 +145,26 @@ func enrichModelsFromOpenRouter(models []openRouterModel) int {
 		var ctxLen int
 		var found bool
 
-		// First try exact match
+		// 1) Exact match on the full OpenRouter ID (e.g. local "openai/gpt-4").
 		if cl, ok := openRouterContextLengths[modelID]; ok {
 			ctxLen = cl
 			found = true
 		} else {
-			// Try substring matching:
-			// - Check if local ID is contained in OpenRouter ID (e.g., "gemini-3.1-pro" in "google/gemini-3.1-pro-preview")
-			// - Check if OpenRouter ID is contained in local ID
-			// - Check if OpenRouter ID suffix matches local ID
+			// 2) Exact match on the OpenRouter base name (portion after the
+			//    last slash) — e.g. local "gpt-4o" against upstream
+			//    "openai/gpt-4o". Prefix/substring matches are intentionally
+			//    avoided here: matching "gpt-4" against "gpt-4o" or
+			//    "claude-3" against "claude-3-opus" would attach wrong
+			//    context_length values to distinct models.
 			for orID, cl := range openRouterContextLengths {
-				if strings.Contains(orID, modelID) || strings.Contains(modelID, orID) {
-					// Extract the base name from OpenRouter ID (after last slash)
-					orBase := orID
-					if slashIdx := strings.LastIndex(orID, "/"); slashIdx >= 0 {
-						orBase = orID[slashIdx+1:]
-					}
-					// Check if local ID matches the base or is a prefix/suffix
-					if orBase == modelID || strings.HasPrefix(orBase, modelID) || strings.HasPrefix(modelID, orBase) {
-						ctxLen = cl
-						found = true
-						break
-					}
+				orBase := orID
+				if slashIdx := strings.LastIndex(orID, "/"); slashIdx >= 0 {
+					orBase = orID[slashIdx+1:]
+				}
+				if orBase == modelID {
+					ctxLen = cl
+					found = true
+					break
 				}
 			}
 		}

@@ -1378,7 +1378,8 @@ func (r *ModelRegistry) GetModelHealthDetails(modelID string) (providers map[str
 }
 
 // SetModelContextLength updates the context_length on the live model registration.
-// This writes through to the actual stored ModelInfo, not a clone.
+// This writes through to the actual stored ModelInfo, not a clone, and invalidates
+// the per-handler GetAvailableModels cache so subsequent reads reflect the new value.
 func (r *ModelRegistry) SetModelContextLength(modelID string, contextLength int) bool {
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
@@ -1386,6 +1387,10 @@ func (r *ModelRegistry) SetModelContextLength(modelID string, contextLength int)
 	if !ok || reg == nil || reg.Info == nil {
 		return false
 	}
+	if reg.Info.ContextLength == contextLength {
+		return true
+	}
 	reg.Info.ContextLength = contextLength
+	r.invalidateAvailableModelsCacheLocked()
 	return true
 }
