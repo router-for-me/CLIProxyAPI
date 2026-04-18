@@ -1062,12 +1062,30 @@ func isClaudeOAuthToken(apiKey string) bool {
 }
 
 // remapOAuthToolNamesEx extends remapOAuthToolNames with an option to strip tools
-// that have no mapping in oauthToolRenameMap. When stripUnmapped is true (used for
-// ALL OAuth clients), custom tools not in the rename map and not Anthropic built-in
-// are removed from the tools array. This prevents client-specific tool catalogs
-// (e.g. lsp_*, session_*, nodes, cron, gateway) from leaking upstream as third-party
-// fingerprints. The base remapOAuthToolNames handles tool_choice and message refs,
-// including dropping tool_choice when it references an unmapped/stripped tool.
+// that have no mapping in oauthToolRenameMap.
+//
+// Behavior when stripUnmapped is true (used for ALL OAuth requests today):
+//   - Tools whose lowercase name is in oauthToolRenameMap → kept and renamed to
+//     the TitleCase form (e.g. "bash" → "Bash").
+//   - Anthropic built-in tools (those with a non-empty `type` field, e.g.
+//     web_search_20250305, code_execution_20250825) → kept verbatim.
+//   - Everything else (e.g. lsp_definition, context7_get_docs, session_create,
+//     mcp__*, custom client gateways) → REMOVED from tools[]. References from
+//     tool_choice and message tool_use blocks are reconciled by the base
+//     remapOAuthToolNames pass that runs after stripping.
+//
+// Trade-off: this is intentionally aggressive. Stripping happens uniformly for
+// EVERY OAuth client (including OpenCode, OpenClaw, and unknown user agents) so
+// the upstream Claude session never sees a client-specific tool catalog. That
+// matches the real Claude Code fingerprint and prevents extra-usage metering
+// flagged by Anthropic's downstream classifier, but it also means clients lose
+// the ability to advertise their own custom tools through this proxy. If a
+// client wants a non-Claude-Code tool to survive, the only path today is to add
+// it to oauthToolRenameMap.
+//
+// stripUnmapped=false is reserved for direct API-key (non-OAuth) traffic, where
+// the request shape is not under fingerprint pressure and clients are free to
+// expose arbitrary tools.
 func remapOAuthToolNamesEx(body []byte, stripUnmapped bool) ([]byte, bool) {
 	if !stripUnmapped {
 		return remapOAuthToolNames(body)
