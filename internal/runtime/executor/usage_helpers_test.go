@@ -1,9 +1,11 @@
 package executor
 
 import (
+	"context"
 	"testing"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 )
@@ -55,7 +57,7 @@ func TestUsageReporterBuildRecordIncludesLatency(t *testing.T) {
 		requestedAt: time.Now().Add(-1500 * time.Millisecond),
 	}
 
-	record := reporter.buildRecord(usage.Detail{TotalTokens: 3}, false)
+	record := reporter.buildRecord(context.Background(), usage.Detail{TotalTokens: 3}, false)
 	if record.Latency < time.Second {
 		t.Fatalf("latency = %v, want >= 1s", record.Latency)
 	}
@@ -77,7 +79,7 @@ func TestUsageReporterBuildRecordIncludesFailureMetadata(t *testing.T) {
 		Retryable: true,
 	})
 
-	record := reporter.buildRecord(usage.Detail{}, true)
+	record := reporter.buildRecord(context.Background(), usage.Detail{}, true)
 	if record.FailureStage != "auth_selection" {
 		t.Fatalf("failure_stage = %q, want %q", record.FailureStage, "auth_selection")
 	}
@@ -89,5 +91,25 @@ func TestUsageReporterBuildRecordIncludesFailureMetadata(t *testing.T) {
 	}
 	if record.StatusCode != 503 {
 		t.Fatalf("status_code = %d, want 503", record.StatusCode)
+	}
+}
+
+func TestUsageReporterBuildRecordIncludesAttemptSummary(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ginCtx := &gin.Context{}
+	ginCtx.Set(apiAttemptsKey, []*upstreamAttempt{
+		{index: 1, upstreamRequestIDs: []string{"up-1", "up-2"}},
+		{index: 2, upstreamRequestIDs: []string{"up-2", "up-3"}},
+	})
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+
+	reporter := &usageReporter{provider: "openai", model: "gpt-5.4", requestedAt: time.Now()}
+	record := reporter.buildRecord(ctx, usage.Detail{}, true)
+
+	if record.AttemptCount != 2 {
+		t.Fatalf("attempt_count = %d, want 2", record.AttemptCount)
+	}
+	if len(record.UpstreamRequestIDs) != 3 || record.UpstreamRequestIDs[0] != "up-1" || record.UpstreamRequestIDs[1] != "up-2" || record.UpstreamRequestIDs[2] != "up-3" {
+		t.Fatalf("upstream_request_ids = %#v, want [up-1 up-2 up-3]", record.UpstreamRequestIDs)
 	}
 }

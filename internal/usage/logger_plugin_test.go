@@ -130,14 +130,18 @@ func TestRequestStatisticsRecordKeepsFailedZeroTokenDetail(t *testing.T) {
 func TestRequestStatisticsRecordIncludesFailureMetadata(t *testing.T) {
 	stats := NewRequestStatistics()
 	stats.Record(context.Background(), coreusage.Record{
-		APIKey:       "test-key",
-		Model:        "gpt-5.4",
-		RequestedAt:  time.Date(2026, 3, 20, 13, 5, 0, 0, time.UTC),
-		Failed:       true,
-		FailureStage: "auth_selection",
-		ErrorCode:    "auth_unavailable",
-		ErrorMessage: "no auth available",
-		StatusCode:   503,
+		APIKey:             "test-key",
+		Model:              "gpt-5.4",
+		RequestID:          "req-1234",
+		RequestLogRef:      "req-1234",
+		AttemptCount:       3,
+		UpstreamRequestIDs: []string{"up-a", "up-b"},
+		RequestedAt:        time.Date(2026, 3, 20, 13, 5, 0, 0, time.UTC),
+		Failed:             true,
+		FailureStage:       "auth_selection",
+		ErrorCode:          "auth_unavailable",
+		ErrorMessage:       "no auth available",
+		StatusCode:         503,
 	})
 
 	snapshot := stats.Snapshot()
@@ -156,5 +160,17 @@ func TestRequestStatisticsRecordIncludesFailureMetadata(t *testing.T) {
 	}
 	if details[0].StatusCode != 503 {
 		t.Fatalf("status_code = %d, want 503", details[0].StatusCode)
+	}
+	if details[0].RequestID != "req-1234" {
+		t.Fatalf("request_id = %q, want %q", details[0].RequestID, "req-1234")
+	}
+	if details[0].RequestLogRef != "req-1234" {
+		t.Fatalf("request_log_ref = %q, want %q", details[0].RequestLogRef, "req-1234")
+	}
+	if details[0].AttemptCount != 3 {
+		t.Fatalf("attempt_count = %d, want %d", details[0].AttemptCount, 3)
+	}
+	if len(details[0].UpstreamRequestIDs) != 2 || details[0].UpstreamRequestIDs[0] != "up-a" || details[0].UpstreamRequestIDs[1] != "up-b" {
+		t.Fatalf("upstream_request_ids = %#v, want [up-a up-b]", details[0].UpstreamRequestIDs)
 	}
 }

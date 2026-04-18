@@ -41,6 +41,8 @@ type upstreamAttempt struct {
 	index                int
 	request              string
 	response             *strings.Builder
+	statusCode           int
+	upstreamRequestIDs   []string
 	responseIntroWritten bool
 	statusWritten        bool
 	headersWritten       bool
@@ -111,7 +113,9 @@ func recordAPIResponseMetadata(ctx context.Context, cfg *config.Config, status i
 	if status > 0 && !attempt.statusWritten {
 		attempt.response.WriteString(fmt.Sprintf("Status: %d\n", status))
 		attempt.statusWritten = true
+		attempt.statusCode = status
 	}
+	attempt.upstreamRequestIDs = mergeRequestIDs(attempt.upstreamRequestIDs, extractUpstreamRequestIDs(headers)...)
 	if !attempt.headersWritten {
 		attempt.response.WriteString("Headers:\n")
 		writeHeaders(attempt.response, headers)
@@ -259,6 +263,33 @@ func updateAggregatedResponse(ginCtx *gin.Context, attempts []*upstreamAttempt) 
 	ginCtx.Set(apiResponseKey, []byte(builder.String()))
 }
 
+type upstreamAttemptSummary struct {
+	AttemptCount       int
+	UpstreamRequestIDs []string
+}
+
+func usageAttemptSummary(ctx context.Context) upstreamAttemptSummary {
+	ginCtx := ginContextFrom(ctx)
+	if ginCtx == nil {
+		return upstreamAttemptSummary{}
+	}
+	attempts := getAttempts(ginCtx)
+	if len(attempts) == 0 {
+		return upstreamAttemptSummary{}
+	}
+	requestIDs := make([]string, 0, len(attempts))
+	for _, attempt := range attempts {
+		if attempt == nil || len(attempt.upstreamRequestIDs) == 0 {
+			continue
+		}
+		requestIDs = mergeRequestIDs(requestIDs, attempt.upstreamRequestIDs...)
+	}
+	return upstreamAttemptSummary{
+		AttemptCount:       len(attempts),
+		UpstreamRequestIDs: requestIDs,
+	}
+}
+
 func writeHeaders(builder *strings.Builder, headers http.Header) {
 	if builder == nil {
 		return
@@ -283,6 +314,63 @@ func writeHeaders(builder *strings.Builder, headers http.Header) {
 			builder.WriteString(fmt.Sprintf("%s: %s\n", key, masked))
 		}
 	}
+}
+
+func extractUpstreamRequestIDs(headers http.Header) []string {
+	if len(headers) == 0 {
+		return nil
+	}
+	keys := []string{
+		"X-Oneapi-Request-Id",
+		"X-Request-Id",
+		"X-Fc-Request-Id",
+		"X-Amzn-Requestid",
+		"Openai-Request-Id",
+		"X-Openai-Request-Id",
+		"Anthropic-Request-Id",
+	}
+	requestIDs := make([]string, 0, len(keys))
+	for _, key := range keys {
+		for _, value := range headers.Values(key) {
+			trimmed := strings.TrimSpace(value)
+			if trimmed == "" {
+				continue
+			}
+			requestIDs = mergeRequestIDs(requestIDs, trimmed)
+		}
+	}
+	return requestIDs
+}
+
+func mergeRequestIDs(base []string, values ...string) []string {
+	if len(values) == 0 {
+		return base
+	}
+	seen := make(map[string]struct{}, len(base)+len(values))
+	merged := make([]string, 0, len(base)+len(values))
+	for _, value := range base {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			continue
+		}
+		if _, exists := seen[trimmed]; exists {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		merged = append(merged, trimmed)
+	}
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			continue
+		}
+		if _, exists := seen[trimmed]; exists {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		merged = append(merged, trimmed)
+	}
+	return merged
 }
 
 func formatAuthInfo(info upstreamRequestLog) string {

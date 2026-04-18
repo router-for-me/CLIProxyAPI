@@ -89,16 +89,20 @@ type modelStats struct {
 
 // RequestDetail stores the timestamp, latency, and token usage for a single request.
 type RequestDetail struct {
-	Timestamp    time.Time  `json:"timestamp"`
-	LatencyMs    int64      `json:"latency_ms"`
-	Source       string     `json:"source"`
-	AuthIndex    string     `json:"auth_index"`
-	Tokens       TokenStats `json:"tokens"`
-	Failed       bool       `json:"failed"`
-	FailureStage string     `json:"failure_stage,omitempty"`
-	ErrorCode    string     `json:"error_code,omitempty"`
-	ErrorMessage string     `json:"error_message,omitempty"`
-	StatusCode   int        `json:"status_code,omitempty"`
+	Timestamp          time.Time  `json:"timestamp"`
+	LatencyMs          int64      `json:"latency_ms"`
+	Source             string     `json:"source"`
+	AuthIndex          string     `json:"auth_index"`
+	RequestID          string     `json:"request_id,omitempty"`
+	RequestLogRef      string     `json:"request_log_ref,omitempty"`
+	AttemptCount       int        `json:"attempt_count,omitempty"`
+	UpstreamRequestIDs []string   `json:"upstream_request_ids,omitempty"`
+	Tokens             TokenStats `json:"tokens"`
+	Failed             bool       `json:"failed"`
+	FailureStage       string     `json:"failure_stage,omitempty"`
+	ErrorCode          string     `json:"error_code,omitempty"`
+	ErrorMessage       string     `json:"error_message,omitempty"`
+	StatusCode         int        `json:"status_code,omitempty"`
 }
 
 // TokenStats captures the token usage breakdown for a request.
@@ -202,16 +206,20 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 		s.apis[statsKey] = stats
 	}
 	s.updateAPIStats(stats, modelName, RequestDetail{
-		Timestamp:    timestamp,
-		LatencyMs:    normaliseLatency(record.Latency),
-		Source:       record.Source,
-		AuthIndex:    record.AuthIndex,
-		Tokens:       detail,
-		Failed:       failed,
-		FailureStage: strings.TrimSpace(record.FailureStage),
-		ErrorCode:    strings.TrimSpace(record.ErrorCode),
-		ErrorMessage: strings.TrimSpace(record.ErrorMessage),
-		StatusCode:   record.StatusCode,
+		Timestamp:          timestamp,
+		LatencyMs:          normaliseLatency(record.Latency),
+		Source:             record.Source,
+		AuthIndex:          record.AuthIndex,
+		RequestID:          strings.TrimSpace(record.RequestID),
+		RequestLogRef:      strings.TrimSpace(record.RequestLogRef),
+		AttemptCount:       maxInt(record.AttemptCount, 0),
+		UpstreamRequestIDs: append([]string(nil), record.UpstreamRequestIDs...),
+		Tokens:             detail,
+		Failed:             failed,
+		FailureStage:       strings.TrimSpace(record.FailureStage),
+		ErrorCode:          strings.TrimSpace(record.ErrorCode),
+		ErrorMessage:       strings.TrimSpace(record.ErrorMessage),
+		StatusCode:         record.StatusCode,
 	})
 
 	s.requestsByDay[dayKey]++
@@ -395,12 +403,16 @@ func dedupKey(apiName, modelName string, detail RequestDetail) string {
 	timestamp := detail.Timestamp.UTC().Format(time.RFC3339Nano)
 	tokens := normaliseTokenStats(detail.Tokens)
 	return fmt.Sprintf(
-		"%s|%s|%s|%s|%s|%t|%s|%s|%s|%d|%d|%d|%d|%d|%d",
+		"%s|%s|%s|%s|%s|%s|%s|%d|%s|%t|%s|%s|%s|%d|%d|%d|%d|%d|%d",
 		apiName,
 		modelName,
 		timestamp,
 		detail.Source,
 		detail.AuthIndex,
+		detail.RequestID,
+		detail.RequestLogRef,
+		detail.AttemptCount,
+		strings.Join(detail.UpstreamRequestIDs, ","),
 		detail.Failed,
 		detail.FailureStage,
 		detail.ErrorCode,
@@ -492,6 +504,13 @@ func normaliseLatency(latency time.Duration) int64 {
 		return 0
 	}
 	return latency.Milliseconds()
+}
+
+func maxInt(value, floor int) int {
+	if value < floor {
+		return floor
+	}
+	return value
 }
 
 func formatHour(hour int) string {

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	"github.com/tidwall/gjson"
@@ -79,7 +80,7 @@ func (r *usageReporter) publishWithOutcome(ctx context.Context, detail usage.Det
 		return
 	}
 	r.once.Do(func() {
-		usage.PublishRecord(ctx, r.buildRecord(detail, failed))
+		usage.PublishRecord(ctx, r.buildRecord(ctx, detail, failed))
 	})
 }
 
@@ -92,29 +93,34 @@ func (r *usageReporter) ensurePublished(ctx context.Context) {
 		return
 	}
 	r.once.Do(func() {
-		usage.PublishRecord(ctx, r.buildRecord(usage.Detail{}, false))
+		usage.PublishRecord(ctx, r.buildRecord(ctx, usage.Detail{}, false))
 	})
 }
 
-func (r *usageReporter) buildRecord(detail usage.Detail, failed bool) usage.Record {
+func (r *usageReporter) buildRecord(ctx context.Context, detail usage.Detail, failed bool) usage.Record {
 	if r == nil {
 		return usage.Record{Detail: detail, Failed: failed}
 	}
+	attemptSummary := usageAttemptSummary(ctx)
 	return usage.Record{
-		Provider:     r.provider,
-		Model:        r.model,
-		Source:       r.source,
-		APIKey:       r.apiKey,
-		AuthID:       r.authID,
-		AuthIndex:    r.authIndex,
-		RequestedAt:  r.requestedAt,
-		Latency:      r.latency(),
-		Failed:       failed,
-		FailureStage: r.failureStage,
-		ErrorCode:    r.errorCode,
-		ErrorMessage: r.errorMessage,
-		StatusCode:   r.statusCode,
-		Detail:       detail,
+		Provider:           r.provider,
+		Model:              r.model,
+		Source:             r.source,
+		APIKey:             r.apiKey,
+		AuthID:             r.authID,
+		AuthIndex:          r.authIndex,
+		RequestID:          requestIDFromContext(ctx),
+		RequestLogRef:      requestLogRefFromContext(ctx),
+		AttemptCount:       attemptSummary.AttemptCount,
+		UpstreamRequestIDs: append([]string(nil), attemptSummary.UpstreamRequestIDs...),
+		RequestedAt:        r.requestedAt,
+		Latency:            r.latency(),
+		Failed:             failed,
+		FailureStage:       r.failureStage,
+		ErrorCode:          r.errorCode,
+		ErrorMessage:       r.errorMessage,
+		StatusCode:         r.statusCode,
+		Detail:             detail,
 	}
 }
 
@@ -189,6 +195,24 @@ func apiKeyFromContext(ctx context.Context) string {
 		}
 	}
 	return ""
+}
+
+func requestIDFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	if requestID := strings.TrimSpace(logging.GetRequestID(ctx)); requestID != "" {
+		return requestID
+	}
+	ginCtx, ok := ctx.Value("gin").(*gin.Context)
+	if !ok || ginCtx == nil {
+		return ""
+	}
+	return strings.TrimSpace(logging.GetGinRequestID(ginCtx))
+}
+
+func requestLogRefFromContext(ctx context.Context) string {
+	return requestIDFromContext(ctx)
 }
 
 func resolveUsageSource(auth *cliproxyauth.Auth, ctxAPIKey string) string {

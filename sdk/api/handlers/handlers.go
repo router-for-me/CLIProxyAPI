@@ -1158,15 +1158,17 @@ func publishHandlerFailureUsage(ctx context.Context, provider, model string, sta
 	}
 	errorCode, errorMessage, resolvedStatus := resolveHandlerUsageError(err, status)
 	coreusage.PublishRecord(ctx, coreusage.Record{
-		Provider:     strings.TrimSpace(provider),
-		Model:        strings.TrimSpace(model),
-		APIKey:       handlerAPIKeyFromContext(ctx),
-		RequestedAt:  time.Now(),
-		Failed:       true,
-		FailureStage: resolveHandlerFailureStage(err),
-		ErrorCode:    errorCode,
-		ErrorMessage: errorMessage,
-		StatusCode:   resolvedStatus,
+		Provider:      strings.TrimSpace(provider),
+		Model:         strings.TrimSpace(model),
+		APIKey:        handlerAPIKeyFromContext(ctx),
+		RequestID:     handlerRequestIDFromContext(ctx),
+		RequestLogRef: handlerRequestIDFromContext(ctx),
+		RequestedAt:   time.Now(),
+		Failed:        true,
+		FailureStage:  resolveHandlerFailureStage(err),
+		ErrorCode:     errorCode,
+		ErrorMessage:  errorMessage,
+		StatusCode:    resolvedStatus,
 	})
 }
 
@@ -1226,6 +1228,20 @@ func handlerAPIKeyFromContext(ctx context.Context) string {
 	default:
 		return strings.TrimSpace(fmt.Sprintf("%v", typed))
 	}
+}
+
+func handlerRequestIDFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	if requestID := strings.TrimSpace(logging.GetRequestID(ctx)); requestID != "" {
+		return requestID
+	}
+	ginCtx, ok := ctx.Value("gin").(*gin.Context)
+	if !ok || ginCtx == nil {
+		return ""
+	}
+	return strings.TrimSpace(logging.GetGinRequestID(ginCtx))
 }
 
 func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string, normalizedModel string, err *interfaces.ErrorMessage) {
