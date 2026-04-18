@@ -199,6 +199,39 @@ func TestConfigSynthesizer_ClaudeKeys(t *testing.T) {
 	}
 }
 
+func TestConfigSynthesizer_ClaudeKeys_AutoDetectsMiniMaxCompatKind(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			ClaudeKey: []config.ClaudeKey{
+				{
+					APIKey:  "sk-mini-test",
+					BaseURL: "https://api.minimaxi.com/anthropic",
+				},
+				{
+					APIKey:  "sk-mini-test-global",
+					BaseURL: "https://api.minimaxi.io/anthropic",
+				},
+			},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 2 {
+		t.Fatalf("expected 2 auths, got %d", len(auths))
+	}
+	for i := range auths {
+		if got := auths[i].Attributes["compat_kind"]; got != "minimax" {
+			t.Fatalf("auth %d compat_kind = %q, want %q", i, got, "minimax")
+		}
+	}
+}
+
 func TestConfigSynthesizer_ClaudeKeys_SkipsEmptyAndHeaders(t *testing.T) {
 	synth := NewConfigSynthesizer()
 	ctx := &SynthesisContext{
@@ -302,6 +335,7 @@ func TestConfigSynthesizer_OpenAICompat(t *testing.T) {
 			compat: []config.OpenAICompatibility{
 				{
 					Name:    "CustomProvider",
+					Kind:    "newapi",
 					BaseURL: "https://custom.api.com",
 					APIKeyEntries: []config.OpenAICompatibilityAPIKey{
 						{APIKey: "key-1"},
@@ -364,6 +398,11 @@ func TestConfigSynthesizer_OpenAICompat(t *testing.T) {
 			}
 			if len(auths) != tt.wantLen {
 				t.Fatalf("expected %d auths, got %d", tt.wantLen, len(auths))
+			}
+			if tt.name == "with APIKeyEntries" {
+				if got := auths[0].Attributes["compat_kind"]; got != "newapi" {
+					t.Fatalf("compat_kind = %q, want %q", got, "newapi")
+				}
 			}
 		})
 	}

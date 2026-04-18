@@ -11,6 +11,7 @@ func TestDiffOpenAICompatibility(t *testing.T) {
 	oldList := []config.OpenAICompatibility{
 		{
 			Name: "provider-a",
+			Kind: "newapi",
 			APIKeyEntries: []config.OpenAICompatibilityAPIKey{
 				{APIKey: "key-a"},
 			},
@@ -22,6 +23,7 @@ func TestDiffOpenAICompatibility(t *testing.T) {
 	newList := []config.OpenAICompatibility{
 		{
 			Name: "provider-a",
+			Kind: "kimi",
 			APIKeyEntries: []config.OpenAICompatibilityAPIKey{
 				{APIKey: "key-a"},
 				{APIKey: "key-b"},
@@ -40,7 +42,7 @@ func TestDiffOpenAICompatibility(t *testing.T) {
 
 	changes := DiffOpenAICompatibility(oldList, newList)
 	expectContains(t, changes, "provider added: provider-b (api-keys=1, models=0)")
-	expectContains(t, changes, "provider updated: provider-a (api-keys 1 -> 2, models 1 -> 2, headers updated)")
+	expectContains(t, changes, "provider updated: provider-a (kind newapi -> kimi, api-keys 1 -> 2, models 1 -> 2, headers updated)")
 }
 
 func TestDiffOpenAICompatibility_RemovedAndUnchanged(t *testing.T) {

@@ -2159,6 +2159,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	suspendReason := ""
 	clearModelQuota := false
 	setModelQuota := false
+	var modelQuotaRecoverAt time.Time
 	var authSnapshot *Auth
 
 	m.mu.Lock()
@@ -2256,6 +2257,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								suspendReason = "quota"
 								shouldSuspendModel = true
 								setModelQuota = true
+								modelQuotaRecoverAt = next
 							}
 						case 408, 500, 502, 503, 504:
 							if disableCooling {
@@ -2290,7 +2292,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		registry.GetGlobalRegistry().ClearModelQuotaExceeded(result.AuthID, result.Model)
 	}
 	if setModelQuota && result.Model != "" {
-		registry.GetGlobalRegistry().SetModelQuotaExceeded(result.AuthID, result.Model)
+		registry.GetGlobalRegistry().SetModelQuotaExceeded(result.AuthID, result.Model, modelQuotaRecoverAt)
 	}
 	if shouldResumeModel {
 		registry.GetGlobalRegistry().ResumeClientModel(result.AuthID, result.Model)
@@ -2530,12 +2532,25 @@ func isModelSupportErrorMessage(message string) bool {
 		"requested model is not supported",
 		"requested model is unsupported",
 		"requested model is unavailable",
+		"requested model does not exist",
+		"requested model is not available",
 		"model is not supported",
 		"model not supported",
+		"model does not exist",
+		"model not found",
 		"unsupported model",
 		"model unavailable",
 		"not available for your plan",
 		"not available for your account",
+		"not available for this account",
+		"not enabled for your account",
+		"not enabled for this account",
+		"does not have access to model",
+		"model has been disabled",
+		"模型不存在",
+		"模型未开通",
+		"模型不可用",
+		"没有该模型权限",
 	}
 	for _, pattern := range patterns {
 		if strings.Contains(lower, pattern) {
@@ -2550,7 +2565,9 @@ func isModelSupportError(err error) bool {
 		return false
 	}
 	status := statusCodeFromError(err)
-	if status != http.StatusBadRequest && status != http.StatusUnprocessableEntity {
+	switch status {
+	case http.StatusBadRequest, http.StatusForbidden, http.StatusNotFound, http.StatusUnprocessableEntity:
+	default:
 		return false
 	}
 	return isModelSupportErrorMessage(err.Error())
@@ -2561,10 +2578,49 @@ func isModelSupportResultError(err *Error) bool {
 		return false
 	}
 	status := statusCodeFromResult(err)
-	if status != http.StatusBadRequest && status != http.StatusUnprocessableEntity {
+	switch status {
+	case http.StatusBadRequest, http.StatusForbidden, http.StatusNotFound, http.StatusUnprocessableEntity:
+	default:
 		return false
 	}
 	return isModelSupportErrorMessage(err.Message)
+}
+
+func isRetryableAvailabilityErrorMessage(message string) bool {
+	lower := strings.ToLower(strings.TrimSpace(message))
+	if lower == "" {
+		return false
+	}
+	patterns := [...]string{
+		"insufficient_quota",
+		"quota exhausted",
+		"quota_exhausted",
+		"rate limit",
+		"rate_limit",
+		"too many requests",
+		"resource exhausted",
+		"no available key",
+		"no available api key",
+		"no available channel",
+		"channel unavailable",
+		"upstream unavailable",
+		"provider unavailable",
+		"no healthy upstream",
+		"无可用key",
+		"无可用 key",
+		"无可用渠道",
+		"渠道不可用",
+		"上游不可用",
+		"额度已用尽",
+		"额度不足",
+		"频率限制",
+	}
+	for _, pattern := range patterns {
+		if strings.Contains(lower, pattern) {
+			return true
+		}
+	}
+	return false
 }
 
 func isRequestScopedNotFoundMessage(message string) bool {
@@ -2600,7 +2656,7 @@ func isRequestInvalidError(err error) bool {
 	status := statusCodeFromError(err)
 	switch status {
 	case http.StatusBadRequest:
-		return strings.Contains(err.Error(), "invalid_request_error")
+		return strings.Contains(err.Error(), "invalid_request_error") && !isRetryableAvailabilityErrorMessage(err.Error())
 	case http.StatusNotFound:
 		return isRequestScopedNotFoundMessage(err.Error())
 	case http.StatusUnprocessableEntity:

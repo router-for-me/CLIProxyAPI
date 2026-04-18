@@ -86,13 +86,13 @@ func TestGetAvailableModelsByProviderReturnsClones(t *testing.T) {
 func TestCleanupExpiredQuotasInvalidatesAvailableModelsCache(t *testing.T) {
 	r := newTestModelRegistry()
 	r.RegisterClient("client-1", "openai", []*ModelInfo{{ID: "m1", Created: 1}})
-	r.SetModelQuotaExceeded("client-1", "m1")
+	r.SetModelQuotaExceeded("client-1", "m1", time.Now().Add(5*time.Minute))
 	if models := r.GetAvailableModels("openai"); len(models) != 1 {
 		t.Fatalf("expected cooldown model to remain listed before cleanup, got %d", len(models))
 	}
 
 	r.mutex.Lock()
-	quotaTime := time.Now().Add(-6 * time.Minute)
+	quotaTime := time.Now().Add(-1 * time.Minute)
 	r.models["m1"].QuotaExceededClients["client-1"] = &quotaTime
 	r.mutex.Unlock()
 

@@ -462,6 +462,9 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 			}
 		}
 	}
+	if compatKind := strings.TrimSpace(authAttribute(auth, "compat_kind")); compatKind != "" {
+		entry["compat_kind"] = compatKind
+	}
 	return entry
 }
 

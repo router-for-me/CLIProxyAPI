@@ -36,6 +36,9 @@ type Watcher struct {
 	clientsMutex      sync.RWMutex
 	configReloadMu    sync.Mutex
 	configReloadTimer *time.Timer
+	configReloadLast  time.Time
+	configReloadPend  bool
+	configReloadRun   bool
 	serverUpdateMu    sync.Mutex
 	serverUpdateTimer *time.Timer
 	serverUpdateLast  time.Time
@@ -82,6 +85,7 @@ const (
 	// before deciding whether a Remove event indicates a real deletion.
 	replaceCheckDelay        = 50 * time.Millisecond
 	configReloadDebounce     = 150 * time.Millisecond
+	configReloadCooldown     = 2 * time.Second
 	authRemoveDebounceWindow = 1 * time.Second
 	serverUpdateDebounce     = 1 * time.Second
 )
