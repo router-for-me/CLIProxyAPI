@@ -209,11 +209,26 @@ func (h *Handler) APICall(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, apiCallResponse{
+	responseHeader := resp.Header.Clone()
+	responseBody := append([]byte(nil), respBody...)
+	response := apiCallResponse{
 		StatusCode: resp.StatusCode,
-		Header:     resp.Header,
-		Body:       string(respBody),
-	})
+		Header:     responseHeader,
+		Body:       string(responseBody),
+	}
+	c.JSON(http.StatusOK, response)
+
+	if h != nil && h.apiCallEvents != nil {
+		eventCtx := context.WithoutCancel(c.Request.Context())
+		h.apiCallEvents.Publish(eventCtx, ManagementAPICallEvent{
+			AuthIndex:  authIndex,
+			Method:     method,
+			URL:        urlStr,
+			StatusCode: resp.StatusCode,
+			RespHeader: responseHeader.Clone(),
+			RespBody:   append([]byte(nil), responseBody...),
+		})
+	}
 }
 
 func firstNonEmptyString(values ...*string) string {

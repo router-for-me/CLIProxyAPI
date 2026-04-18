@@ -103,6 +103,7 @@ quota-exceeded:
 # Routing strategy for selecting credentials when multiple match.
 routing:
   strategy: "round-robin" # round-robin (default), fill-first
+  warmup: false # when true and strategy is fill-first, qualifying Codex usage events may warm up other enabled Codex OAuth auths
   # Enable universal session-sticky routing for all clients.
   # Session IDs are extracted from: X-Session-ID header, Idempotency-Key,
   # metadata.user_id, conversation_id, or first few messages hash.

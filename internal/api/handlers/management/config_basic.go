@@ -317,6 +317,14 @@ func (h *Handler) PutRoutingStrategy(c *gin.Context) {
 	h.persist(c)
 }
 
+// RoutingWarmup
+func (h *Handler) GetRoutingWarmup(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{"warmup": h.cfg.Routing.Warmup})
+}
+func (h *Handler) PutRoutingWarmup(c *gin.Context) {
+	h.updateBoolField(c, func(v bool) { h.cfg.Routing.Warmup = v })
+}
+
 // Proxy URL
 func (h *Handler) GetProxyURL(c *gin.Context) { c.JSON(200, gin.H{"proxy-url": h.cfg.ProxyURL}) }
 func (h *Handler) PutProxyURL(c *gin.Context) {

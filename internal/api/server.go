@@ -581,6 +581,9 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/routing/strategy", s.mgmt.GetRoutingStrategy)
 		mgmt.PUT("/routing/strategy", s.mgmt.PutRoutingStrategy)
 		mgmt.PATCH("/routing/strategy", s.mgmt.PutRoutingStrategy)
+		mgmt.GET("/routing/warmup", s.mgmt.GetRoutingWarmup)
+		mgmt.PUT("/routing/warmup", s.mgmt.PutRoutingWarmup)
+		mgmt.PATCH("/routing/warmup", s.mgmt.PutRoutingWarmup)
 
 		mgmt.GET("/claude-api-key", s.mgmt.GetClaudeKeys)
 		mgmt.PUT("/claude-api-key", s.mgmt.PutClaudeKeys)
