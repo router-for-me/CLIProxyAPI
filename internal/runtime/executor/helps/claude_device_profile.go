@@ -100,7 +100,8 @@ func MapStainlessArch() string {
 }
 
 // DefaultClaudeDeviceProfilePublic returns the default baseline device profile.
-// Exported for use by the executor when forcing baseline headers on non-OpenCode OAuth clients.
+// Exported for use by the executor when forcing baseline headers on all OAuth
+// clients (not just non-OpenCode; see claude_executor.go applyClaudeHeaders).
 func DefaultClaudeDeviceProfilePublic(cfg *config.Config) ClaudeDeviceProfile {
 	return defaultClaudeDeviceProfile(cfg)
 }

@@ -1098,7 +1098,7 @@ func remapOAuthToolNamesEx(body []byte, stripUnmapped bool) ([]byte, bool) {
 			nameLower := strings.ToLower(name)
 			newName, hasMapped := oauthToolRenameMap[nameLower]
 			if !hasMapped {
-				// Tool has no mapping u2014 strip it for all OAuth clients.
+				// Tool has no mapping — strip it for all OAuth clients.
 				return true
 			}
 
@@ -1192,17 +1192,17 @@ func remapOAuthToolNames(body []byte) ([]byte, bool) {
 		tcNameLower := strings.ToLower(tcName)
 		builtinTools := helps.AugmentClaudeBuiltinToolRegistry(body, nil)
 		if oauthToolsToRemove[tcName] {
-			// Explicitly removed tool u2014 drop tool_choice.
+			// Explicitly removed tool — drop tool_choice.
 			body, _ = sjson.DeleteBytes(body, "tool_choice")
 		} else if builtinTools[tcName] {
-			// Anthropic built-in tool u2014 keep as-is.
+			// Anthropic built-in tool — keep as-is.
 		} else if newName, ok := oauthToolRenameMap[tcNameLower]; ok {
 			if newName != tcName {
 				body, _ = sjson.SetBytes(body, "tool_choice.name", newName)
 				renamed = true
 			}
 		} else {
-			// Unmapped non-builtin tool (e.g. lsp_*, session_*) u2014 was stripped
+			// Unmapped non-builtin tool (e.g. lsp_*, session_*) — was stripped
 			// from tools[], so drop tool_choice to keep payload consistent.
 			body, _ = sjson.DeleteBytes(body, "tool_choice")
 		}
