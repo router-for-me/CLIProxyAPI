@@ -142,11 +142,14 @@ func parseWarmupQuotaSnapshot(body []byte) (WarmupQuotaSnapshot, bool) {
 }
 
 func warmupAllowed(snapshot WarmupQuotaSnapshot) bool {
-	if !snapshot.HasFiveHourWindow || !snapshot.HasWeeklyWindow {
-		return false
+	if snapshot.HasFiveHourWindow && snapshot.HasWeeklyWindow {
+		return snapshot.FiveHourResetRemaining >= 5*time.Hour &&
+			snapshot.WeeklyResetRemaining >= 7*24*time.Hour
 	}
-	return snapshot.FiveHourResetRemaining >= 5*time.Hour &&
-		snapshot.WeeklyResetRemaining >= 7*24*time.Hour
+	if snapshot.HasWeeklyWindow {
+		return snapshot.WeeklyResetRemaining >= 7*24*time.Hour
+	}
+	return false
 }
 
 func (l *WarmupListener) isWarmupEnabled() bool {

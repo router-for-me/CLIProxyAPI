@@ -14,7 +14,7 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 )
 
-func TestParseWarmupQuotaSnapshotRequiresBothWindows(t *testing.T) {
+func TestWarmupAllowedWeeklyOnlyWindowFromRateLimit(t *testing.T) {
 	t.Parallel()
 
 	body := []byte(`{
@@ -34,8 +34,113 @@ func TestParseWarmupQuotaSnapshotRequiresBothWindows(t *testing.T) {
 	if !snapshot.HasWeeklyWindow {
 		t.Fatal("expected weekly window")
 	}
+	if !warmupAllowed(snapshot) {
+		t.Fatal("weekly-only window should allow warmup when weekly threshold is met")
+	}
+}
+
+func TestWarmupAllowedDualWindowsRequireBothThresholds(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{
+			name: "both windows meet threshold",
+			body: `{
+				"rate_limit":{
+					"primary_window":{"limit_window_seconds":18000,"reset_after_seconds":18000,"reset_at":1777149808},
+					"secondary_window":{"limit_window_seconds":604800,"reset_after_seconds":604800,"reset_at":1777149808}
+				}
+			}`,
+			want: true,
+		},
+		{
+			name: "five-hour below threshold",
+			body: `{
+				"rate_limit":{
+					"primary_window":{"limit_window_seconds":18000,"reset_after_seconds":17999,"reset_at":1777149808},
+					"secondary_window":{"limit_window_seconds":604800,"reset_after_seconds":604800,"reset_at":1777149808}
+				}
+			}`,
+			want: false,
+		},
+		{
+			name: "weekly below threshold",
+			body: `{
+				"rate_limit":{
+					"primary_window":{"limit_window_seconds":18000,"reset_after_seconds":18000,"reset_at":1777149808},
+					"secondary_window":{"limit_window_seconds":604800,"reset_after_seconds":604799,"reset_at":1777149808}
+				}
+			}`,
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			snapshot, ok := parseWarmupQuotaSnapshot([]byte(tt.body))
+			if !ok {
+				t.Fatal("expected parse success")
+			}
+			if got := warmupAllowed(snapshot); got != tt.want {
+				t.Fatalf("warmupAllowed() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestWarmupAllowedRejectsSingleFiveHourWindow(t *testing.T) {
+	t.Parallel()
+
+	body := []byte(`{
+		"rate_limit":{
+			"primary_window":{"limit_window_seconds":18000,"reset_after_seconds":18000,"reset_at":1777149808},
+			"secondary_window":null
+		}
+	}`)
+
+	snapshot, ok := parseWarmupQuotaSnapshot(body)
+	if !ok {
+		t.Fatal("expected parse success")
+	}
+	if !snapshot.HasFiveHourWindow {
+		t.Fatal("expected five-hour window")
+	}
+	if snapshot.HasWeeklyWindow {
+		t.Fatal("did not expect weekly window")
+	}
 	if warmupAllowed(snapshot) {
-		t.Fatal("warmup should require both windows")
+		t.Fatal("five-hour-only window should not allow warmup")
+	}
+}
+
+func TestWarmupAllowedIgnoresCodeReviewRateLimit(t *testing.T) {
+	t.Parallel()
+
+	body := []byte(`{
+		"rate_limit":{
+			"primary_window":{"limit_window_seconds":18000,"reset_after_seconds":18000,"reset_at":1777149808},
+			"secondary_window":null
+		},
+		"code_review_rate_limit":{
+			"primary_window":{"limit_window_seconds":604800,"reset_after_seconds":604800,"reset_at":1777149808},
+			"secondary_window":null
+		}
+	}`)
+
+	snapshot, ok := parseWarmupQuotaSnapshot(body)
+	if !ok {
+		t.Fatal("expected parse success")
+	}
+	if snapshot.HasWeeklyWindow {
+		t.Fatal("did not expect weekly window from code_review_rate_limit")
+	}
+	if warmupAllowed(snapshot) {
+		t.Fatal("code_review_rate_limit should not affect warmup decision")
 	}
 }
 
