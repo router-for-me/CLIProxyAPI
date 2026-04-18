@@ -50,18 +50,16 @@ GLM CODING PLANを10%割引で取得：https://z.ai/subscribe?ic=8JVLJQFSKB
 - CLIモデル向けのOpenAI/Gemini/Claude互換APIエンドポイント
 - OAuthログインによるOpenAI Codexサポート（GPTモデル）
 - OAuthログインによるClaude Codeサポート
-- OAuthログインによるiFlowサポート
 - プロバイダールーティングによるAmp CLIおよびIDE拡張機能のサポート
 - ストリーミングおよび非ストリーミングレスポンス
 - 関数呼び出し/ツールのサポート
 - マルチモーダル入力サポート（テキストと画像）
-- ラウンドロビン負荷分散による複数アカウント対応（Gemini、OpenAI、ClaudeおよびiFlow）
-- シンプルなCLI認証フロー（Gemini、OpenAI、ClaudeおよびiFlow）
+- ラウンドロビン負荷分散による複数アカウント対応（Gemini、OpenAI、Claude）
+- シンプルなCLI認証フロー（Gemini、OpenAI、Claude）
 - Generative Language APIキーのサポート
 - AI Studioビルドのマルチアカウント負荷分散
 - Gemini CLIのマルチアカウント負荷分散
 - Claude Codeのマルチアカウント負荷分散
-- iFlowのマルチアカウント負荷分散
 - OpenAI Codexのマルチアカウント負荷分散
 - 設定によるOpenAI互換アップストリームプロバイダー（例：OpenRouter）
 - プロキシ埋め込み用の再利用可能なGo SDK（`docs/sdk-usage.md`を参照）
@@ -174,7 +172,7 @@ Shadow AIは制限された環境向けに特別に設計されたAIアシスタ
 
 ### [ProxyPal](https://github.com/buddingnewinsights/proxypal)
 
-CLIProxyAPIをネイティブGUIでラップしたクロスプラットフォームデスクトップアプリ（macOS、Windows、Linux）。Claude、ChatGPT、Gemini、GitHub Copilot、iFlow、カスタムOpenAI互換エンドポイントに対応し、使用状況分析、リクエスト監視、人気コーディングツールの自動設定機能を搭載 - APIキー不要
+CLIProxyAPIをネイティブGUIでラップしたクロスプラットフォームデスクトップアプリ（macOS、Windows、Linux）。Claude、ChatGPT、Gemini、GitHub Copilot、カスタムOpenAI互換エンドポイントに対応し、使用状況分析、リクエスト監視、人気コーディングツールの自動設定機能を搭載 - APIキー不要
 
 ### [CLIProxyAPI Quota Inspector](https://github.com/AllenReder/CLIProxyAPI-Quota-Inspector)
 

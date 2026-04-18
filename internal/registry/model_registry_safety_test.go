@@ -136,13 +136,43 @@ func TestGetAvailableModelsReturnsClonedSupportedParameters(t *testing.T) {
 }
 
 func TestLookupModelInfoReturnsCloneForStaticDefinitions(t *testing.T) {
-	first := LookupModelInfo("glm-4.6")
+	var modelID string
+	catalog := getModels()
+	sections := [][]*ModelInfo{
+		catalog.Claude,
+		catalog.Gemini,
+		catalog.Vertex,
+		catalog.GeminiCLI,
+		catalog.AIStudio,
+		catalog.CodexFree,
+		catalog.CodexTeam,
+		catalog.CodexPlus,
+		catalog.CodexPro,
+		catalog.Kimi,
+		catalog.Antigravity,
+	}
+	for _, models := range sections {
+		for _, model := range models {
+			if model != nil && model.Thinking != nil && len(model.Thinking.Levels) > 0 {
+				modelID = model.ID
+				break
+			}
+		}
+		if modelID != "" {
+			break
+		}
+	}
+	if modelID == "" {
+		t.Fatal("expected at least one static model with thinking levels")
+	}
+
+	first := LookupModelInfo(modelID)
 	if first == nil || first.Thinking == nil || len(first.Thinking.Levels) == 0 {
 		t.Fatalf("expected static model with thinking levels, got %+v", first)
 	}
 	first.Thinking.Levels[0] = "mutated"
 
-	second := LookupModelInfo("glm-4.6")
+	second := LookupModelInfo(modelID)
 	if second == nil || second.Thinking == nil || len(second.Thinking.Levels) == 0 || second.Thinking.Levels[0] == "mutated" {
 		t.Fatalf("expected static lookup clone, got %+v", second)
 	}
