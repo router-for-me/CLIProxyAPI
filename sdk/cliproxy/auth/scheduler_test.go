@@ -151,6 +151,42 @@ func TestSchedulerPick_PromotesExpiredCooldownBeforePick(t *testing.T) {
 	}
 }
 
+func TestSchedulerPick_SkipsAuthLevelCooldownForModelRequests(t *testing.T) {
+	t.Parallel()
+
+	model := "gemini-2.5-pro"
+	registerSchedulerModels(t, "gemini", model, "auth-cooling", "auth-ready")
+	scheduler := newSchedulerForTest(
+		&RoundRobinSelector{},
+		&Auth{
+			ID:             "auth-cooling",
+			Provider:       "gemini",
+			Unavailable:    true,
+			NextRetryAfter: time.Now().Add(30 * time.Minute),
+			Quota: QuotaState{
+				Exceeded:      true,
+				Reason:        "quota",
+				NextRecoverAt: time.Now().Add(30 * time.Minute),
+			},
+		},
+		&Auth{
+			ID:       "auth-ready",
+			Provider: "gemini",
+		},
+	)
+
+	got, errPick := scheduler.pickSingle(context.Background(), "gemini", model, cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickSingle() error = %v", errPick)
+	}
+	if got == nil {
+		t.Fatalf("pickSingle() auth = nil")
+	}
+	if got.ID != "auth-ready" {
+		t.Fatalf("pickSingle() auth.ID = %q, want %q", got.ID, "auth-ready")
+	}
+}
+
 func TestSchedulerPick_GeminiVirtualParentUsesTwoLevelRotation(t *testing.T) {
 	t.Parallel()
 

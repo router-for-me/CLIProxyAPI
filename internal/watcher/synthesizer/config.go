@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher/diff"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
@@ -111,6 +112,9 @@ func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) []*corea
 		attrs := map[string]string{
 			"source":  fmt.Sprintf("config:claude[%s]", token),
 			"api_key": key,
+		}
+		if kind := internalconfig.InferCompatKindFromBaseURL(base); kind != "" {
+			attrs["compat_kind"] = kind
 		}
 		if ck.Priority != 0 {
 			attrs["priority"] = strconv.Itoa(ck.Priority)
@@ -230,6 +234,9 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 				"compat_name":  compat.Name,
 				"provider_key": providerName,
 			}
+			if kind := internalconfig.NormalizeOpenAICompatibilityKind(compat.Kind); kind != "" {
+				attrs["compat_kind"] = kind
+			}
 			if compat.Priority != 0 {
 				attrs["priority"] = strconv.Itoa(compat.Priority)
 			}
@@ -268,6 +275,9 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 				"base_url":     base,
 				"compat_name":  compat.Name,
 				"provider_key": providerName,
+			}
+			if kind := internalconfig.NormalizeOpenAICompatibilityKind(compat.Kind); kind != "" {
+				attrs["compat_kind"] = kind
 			}
 			if compat.Priority != 0 {
 				attrs["priority"] = strconv.Itoa(compat.Priority)

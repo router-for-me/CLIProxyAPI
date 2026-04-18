@@ -1579,6 +1579,116 @@ func TestScheduleConfigReloadDebounces(t *testing.T) {
 	}
 }
 
+func TestScheduleConfigReloadCoalescesLatestConfigWithinCooldown(t *testing.T) {
+	tmp := t.TempDir()
+	authDir := tmp
+	cfgPath := tmp + "/config.yaml"
+	writeConfig := func(port int) {
+		t.Helper()
+		content := fmt.Sprintf("auth_dir: %s\nport: %d\n", authDir, port)
+		if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+			t.Fatalf("failed to write config: %v", err)
+		}
+	}
+
+	writeConfig(8080)
+
+	var (
+		mu    sync.Mutex
+		ports []int
+	)
+	w := &Watcher{
+		configPath: cfgPath,
+		authDir:    authDir,
+		reloadCallback: func(cfg *config.Config) {
+			if cfg == nil {
+				return
+			}
+			mu.Lock()
+			ports = append(ports, cfg.Port)
+			mu.Unlock()
+		},
+	}
+	w.SetConfig(&config.Config{AuthDir: authDir})
+
+	w.scheduleConfigReload()
+	time.Sleep(400 * time.Millisecond)
+
+	writeConfig(9090)
+	w.scheduleConfigReload()
+	time.Sleep(500 * time.Millisecond)
+
+	mu.Lock()
+	if len(ports) != 1 {
+		mu.Unlock()
+		t.Fatalf("expected one applied reload during cooldown, got %v", ports)
+	}
+	mu.Unlock()
+
+	writeConfig(10010)
+	w.scheduleConfigReload()
+	time.Sleep(configReloadCooldown + 600*time.Millisecond)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(ports) != 2 {
+		t.Fatalf("expected two applied reloads total, got %v", ports)
+	}
+	if ports[0] != 8080 || ports[1] != 10010 {
+		t.Fatalf("unexpected applied ports: %v", ports)
+	}
+}
+
+func TestScheduleConfigReloadSerializesRunningReload(t *testing.T) {
+	tmp := t.TempDir()
+	authDir := tmp
+	cfgPath := tmp + "/config.yaml"
+	writeConfig := func(port int) {
+		t.Helper()
+		content := fmt.Sprintf("auth_dir: %s\nport: %d\n", authDir, port)
+		if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+			t.Fatalf("failed to write config: %v", err)
+		}
+	}
+
+	writeConfig(7001)
+
+	var (
+		mu    sync.Mutex
+		ports []int
+	)
+	w := &Watcher{
+		configPath: cfgPath,
+		authDir:    authDir,
+		reloadCallback: func(cfg *config.Config) {
+			if cfg == nil {
+				return
+			}
+			mu.Lock()
+			ports = append(ports, cfg.Port)
+			mu.Unlock()
+			time.Sleep(350 * time.Millisecond)
+		},
+	}
+	w.SetConfig(&config.Config{AuthDir: authDir})
+
+	w.scheduleConfigReload()
+	time.Sleep(220 * time.Millisecond)
+
+	writeConfig(7002)
+	w.scheduleConfigReload()
+	time.Sleep(configReloadCooldown + 900*time.Millisecond)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(ports) != 2 {
+		t.Fatalf("expected queued second reload after running reload, got %v", ports)
+	}
+	if ports[0] != 7001 || ports[1] != 7002 {
+		t.Fatalf("unexpected applied ports: %v", ports)
+	}
+}
+
 func TestPrepareAuthUpdatesLockedForceAndDelete(t *testing.T) {
 	w := &Watcher{
 		currentAuths: map[string]*coreauth.Auth{

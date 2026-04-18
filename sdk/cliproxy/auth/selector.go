@@ -46,9 +46,9 @@ type FillFirstSelector struct{}
 // exhausted (in cooldown/unavailable), then advance to the next provider.
 // Within each provider, the same sticky sequential selection applies.
 type SequentialFillSelector struct {
-	mu              sync.Mutex
-	current         map[string]string // actualProvider:model -> current auth ID
-	stickyProvider  map[string]string // model -> current provider name (sticky)
+	mu             sync.Mutex
+	current        map[string]string // actualProvider:model -> current auth ID
+	stickyProvider map[string]string // model -> current provider name (sticky)
 }
 
 type blockReason int
@@ -504,6 +504,7 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 	if auth.Disabled || auth.Status == StatusDisabled {
 		return true, blockReasonDisabled, time.Time{}
 	}
+	authBlocked, authReason, authNext := authLevelBlockState(auth, now)
 	if model != "" {
 		if len(auth.ModelStates) > 0 {
 			state, ok := auth.ModelStates[model]
@@ -535,9 +536,25 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 						return true, blockReasonOther, next
 					}
 				}
+				if authBlocked {
+					return true, authReason, authNext
+				}
 				return false, blockReasonNone, time.Time{}
 			}
 		}
+		if authBlocked {
+			return true, authReason, authNext
+		}
+		return false, blockReasonNone, time.Time{}
+	}
+	if authBlocked {
+		return true, authReason, authNext
+	}
+	return false, blockReasonNone, time.Time{}
+}
+
+func authLevelBlockState(auth *Auth, now time.Time) (bool, blockReason, time.Time) {
+	if auth == nil {
 		return false, blockReasonNone, time.Time{}
 	}
 	if auth.Unavailable && auth.NextRetryAfter.After(now) {

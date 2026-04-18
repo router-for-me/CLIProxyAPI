@@ -120,8 +120,9 @@ func (e *openAICompatPoolExecutor) StreamModels() []string {
 type authScopedOpenAICompatPoolExecutor struct {
 	id string
 
-	mu           sync.Mutex
-	executeCalls []string
+	mu            sync.Mutex
+	executeCalls  []string
+	executeErrors map[string]error
 }
 
 func (e *authScopedOpenAICompatPoolExecutor) Identifier() string { return e.id }
@@ -130,7 +131,11 @@ func (e *authScopedOpenAICompatPoolExecutor) Execute(_ context.Context, auth *Au
 	call := auth.ID + "|" + req.Model
 	e.mu.Lock()
 	e.executeCalls = append(e.executeCalls, call)
+	err := e.executeErrors[call]
 	e.mu.Unlock()
+	if err != nil {
+		return cliproxyexecutor.Response{}, err
+	}
 	return cliproxyexecutor.Response{Payload: []byte(call)}, nil
 }
 
@@ -725,6 +730,122 @@ func TestManagerExecute_OpenAICompatAliasPoolBlockedAuthDoesNotConsumeRetryBudge
 	}
 	if !strings.HasPrefix(got[0], goodAuth.ID+"|") {
 		t.Fatalf("execute call = %q, want fallback auth %q", got[0], goodAuth.ID)
+	}
+}
+
+func TestManagerExecute_OpenAICompatAliasPoolSuspends403ModelSupportErrors(t *testing.T) {
+	alias := "claude-opus-4.66"
+	executor := &openAICompatPoolExecutor{
+		id: "pool",
+		executeErrors: map[string]error{
+			"deepseek-v3.1": &Error{
+				HTTPStatus: http.StatusForbidden,
+				Message:    "forbidden: requested model is not available for your account",
+			},
+		},
+	}
+	m := newOpenAICompatPoolTestManager(t, alias, []internalconfig.OpenAICompatibilityModel{
+		{Name: "deepseek-v3.1", Alias: alias},
+		{Name: "glm-5", Alias: alias},
+	}, executor)
+
+	for i := 0; i < 2; i++ {
+		resp, err := m.Execute(context.Background(), []string{"pool"}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{})
+		if err != nil {
+			t.Fatalf("execute %d error = %v", i, err)
+		}
+		if string(resp.Payload) != "glm-5" {
+			t.Fatalf("execute %d payload = %q, want %q", i, string(resp.Payload), "glm-5")
+		}
+	}
+
+	want := []string{"deepseek-v3.1", "glm-5", "glm-5"}
+	if got := executor.ExecuteModels(); len(got) != len(want) {
+		t.Fatalf("execute models len = %d, want %d (%v)", len(got), len(want), got)
+	} else {
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("execute model %d = %q, want %q", i, got[i], want[i])
+			}
+		}
+	}
+}
+
+func TestManagerExecute_OpenAICompatAvailability400FallsBackToNextAuth(t *testing.T) {
+	alias := "claude-opus-4.66"
+	cfg := &internalconfig.Config{
+		OpenAICompatibility: []internalconfig.OpenAICompatibility{{
+			Name: "pool",
+			Models: []internalconfig.OpenAICompatibilityModel{
+				{Name: "deepseek-v3.1", Alias: alias},
+			},
+		}},
+	}
+	m := NewManager(nil, nil, nil)
+	m.SetConfig(cfg)
+	executor := &authScopedOpenAICompatPoolExecutor{
+		id: "pool",
+		executeErrors: map[string]error{
+			"aa-bad-auth|deepseek-v3.1": &Error{
+				HTTPStatus: http.StatusBadRequest,
+				Message:    "invalid_request_error: no available channel for this key",
+			},
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	badAuth := &Auth{
+		ID:       "aa-bad-auth",
+		Provider: "pool",
+		Status:   StatusActive,
+		Attributes: map[string]string{
+			"api_key":      "bad-key",
+			"compat_name":  "pool",
+			"provider_key": "pool",
+		},
+	}
+	goodAuth := &Auth{
+		ID:       "bb-good-auth",
+		Provider: "pool",
+		Status:   StatusActive,
+		Attributes: map[string]string{
+			"api_key":      "good-key",
+			"compat_name":  "pool",
+			"provider_key": "pool",
+		},
+	}
+	if _, err := m.Register(context.Background(), badAuth); err != nil {
+		t.Fatalf("register bad auth: %v", err)
+	}
+	if _, err := m.Register(context.Background(), goodAuth); err != nil {
+		t.Fatalf("register good auth: %v", err)
+	}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(badAuth.ID, "pool", []*registry.ModelInfo{{ID: alias}})
+	reg.RegisterClient(goodAuth.ID, "pool", []*registry.ModelInfo{{ID: alias}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(badAuth.ID)
+		reg.UnregisterClient(goodAuth.ID)
+	})
+
+	resp, err := m.Execute(context.Background(), []string{"pool"}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{})
+	if err != nil {
+		t.Fatalf("execute error = %v", err)
+	}
+	if string(resp.Payload) != "bb-good-auth|deepseek-v3.1" {
+		t.Fatalf("payload = %q, want %q", string(resp.Payload), "bb-good-auth|deepseek-v3.1")
+	}
+
+	got := executor.ExecuteCalls()
+	want := []string{"aa-bad-auth|deepseek-v3.1", "bb-good-auth|deepseek-v3.1"}
+	if len(got) != len(want) {
+		t.Fatalf("execute calls len = %d, want %d (%v)", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("execute call %d = %q, want %q", i, got[i], want[i])
+		}
 	}
 }
 

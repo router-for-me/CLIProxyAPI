@@ -438,6 +438,74 @@ func TestIsAuthBlockedForModel_UnavailableWithoutNextRetryIsNotBlocked(t *testin
 	}
 }
 
+func TestIsAuthBlockedForModel_AuthLevelCooldownBlocksSpecificModelWithoutModelState(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	nextRetry := now.Add(20 * time.Minute)
+	auth := &Auth{
+		ID:             "a",
+		Unavailable:    true,
+		NextRetryAfter: nextRetry,
+		Quota: QuotaState{
+			Exceeded:      true,
+			Reason:        "quota",
+			NextRecoverAt: nextRetry,
+		},
+	}
+
+	blocked, reason, next := isAuthBlockedForModel(auth, "test-model", now)
+	if !blocked {
+		t.Fatalf("blocked = false, want true")
+	}
+	if reason != blockReasonCooldown {
+		t.Fatalf("reason = %v, want %v", reason, blockReasonCooldown)
+	}
+	if next.IsZero() {
+		t.Fatalf("next = zero, want %v", nextRetry)
+	}
+	if delta := next.Sub(nextRetry); delta > time.Second || delta < -time.Second {
+		t.Fatalf("next = %v, want near %v", next, nextRetry)
+	}
+}
+
+func TestIsAuthBlockedForModel_AuthLevelCooldownOverridesCleanModelState(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	nextRetry := now.Add(15 * time.Minute)
+	model := "test-model"
+	auth := &Auth{
+		ID:             "a",
+		Unavailable:    true,
+		NextRetryAfter: nextRetry,
+		Quota: QuotaState{
+			Exceeded:      true,
+			Reason:        "quota",
+			NextRecoverAt: nextRetry,
+		},
+		ModelStates: map[string]*ModelState{
+			model: {
+				Status: StatusActive,
+			},
+		},
+	}
+
+	blocked, reason, next := isAuthBlockedForModel(auth, model, now)
+	if !blocked {
+		t.Fatalf("blocked = false, want true")
+	}
+	if reason != blockReasonCooldown {
+		t.Fatalf("reason = %v, want %v", reason, blockReasonCooldown)
+	}
+	if next.IsZero() {
+		t.Fatalf("next = zero, want %v", nextRetry)
+	}
+	if delta := next.Sub(nextRetry); delta > time.Second || delta < -time.Second {
+		t.Fatalf("next = %v, want near %v", next, nextRetry)
+	}
+}
+
 func TestFillFirstSelectorPick_ThinkingSuffixFallsBackToBaseModelState(t *testing.T) {
 	t.Parallel()
 

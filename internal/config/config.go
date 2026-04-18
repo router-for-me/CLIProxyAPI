@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 	"syscall"
@@ -529,6 +530,10 @@ type OpenAICompatibility struct {
 	// Name is the identifier for this OpenAI compatibility configuration.
 	Name string `yaml:"name" json:"name"`
 
+	// Kind selects a built-in compatibility profile (for example: kimi, minimax, zhipu, xfyun, maas, langengyun, newapi).
+	// Empty keeps the generic compatibility behavior.
+	Kind string `yaml:"kind,omitempty" json:"kind,omitempty"`
+
 	// Priority controls selection preference when multiple providers or credentials match.
 	// Higher values are preferred; defaults to 0.
 	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
@@ -577,6 +582,34 @@ type OpenAICompatibilityModel struct {
 
 func (m OpenAICompatibilityModel) GetName() string  { return m.Name }
 func (m OpenAICompatibilityModel) GetAlias() string { return m.Alias }
+
+// NormalizeOpenAICompatibilityKind trims and lowercases a compatibility provider profile identifier.
+func NormalizeOpenAICompatibilityKind(kind string) string {
+	return strings.ToLower(strings.TrimSpace(kind))
+}
+
+// InferCompatKindFromBaseURL detects known provider profiles from an upstream base URL.
+// It is intentionally conservative and only returns a non-empty kind for well-known
+// official host patterns.
+func InferCompatKindFromBaseURL(rawBaseURL string) string {
+	baseURL := strings.TrimSpace(rawBaseURL)
+	if baseURL == "" {
+		return ""
+	}
+	parsed, err := url.Parse(baseURL)
+	if err != nil {
+		return ""
+	}
+	host := strings.ToLower(strings.TrimSpace(parsed.Hostname()))
+	path := strings.ToLower(strings.TrimSpace(parsed.Path))
+	switch host {
+	case "api.minimaxi.com", "api.minimaxi.io":
+		if path == "/anthropic" || strings.HasPrefix(path, "/anthropic/") {
+			return "minimax"
+		}
+	}
+	return ""
+}
 
 // LoadConfig reads a YAML configuration file from the given path,
 // unmarshals it into a Config struct, applies environment variable overrides,
@@ -860,9 +893,36 @@ func (cfg *Config) SanitizeOpenAICompatibility() {
 	for i := range cfg.OpenAICompatibility {
 		e := cfg.OpenAICompatibility[i]
 		e.Name = strings.TrimSpace(e.Name)
+		e.Kind = NormalizeOpenAICompatibilityKind(e.Kind)
 		e.Prefix = normalizeModelPrefix(e.Prefix)
 		e.BaseURL = strings.TrimSpace(e.BaseURL)
 		e.Headers = NormalizeHeaders(e.Headers)
+		if len(e.APIKeyEntries) > 0 {
+			keys := make([]OpenAICompatibilityAPIKey, 0, len(e.APIKeyEntries))
+			for j := range e.APIKeyEntries {
+				keyEntry := e.APIKeyEntries[j]
+				keyEntry.APIKey = strings.TrimSpace(keyEntry.APIKey)
+				keyEntry.ProxyURL = strings.TrimSpace(keyEntry.ProxyURL)
+				if keyEntry.APIKey == "" && keyEntry.ProxyURL == "" && !keyEntry.Disabled {
+					continue
+				}
+				keys = append(keys, keyEntry)
+			}
+			e.APIKeyEntries = keys
+		}
+		if len(e.Models) > 0 {
+			models := make([]OpenAICompatibilityModel, 0, len(e.Models))
+			for j := range e.Models {
+				model := e.Models[j]
+				model.Name = strings.TrimSpace(model.Name)
+				model.Alias = strings.TrimSpace(model.Alias)
+				if model.Name == "" && model.Alias == "" {
+					continue
+				}
+				models = append(models, model)
+			}
+			e.Models = models
+		}
 		if e.BaseURL == "" {
 			// Skip providers with no base-url; treated as removed
 			continue

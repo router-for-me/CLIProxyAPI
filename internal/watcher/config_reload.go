@@ -23,32 +23,88 @@ func (w *Watcher) stopConfigReloadTimer() {
 		w.configReloadTimer.Stop()
 		w.configReloadTimer = nil
 	}
+	w.configReloadPend = false
 	w.configReloadMu.Unlock()
 }
 
 func (w *Watcher) scheduleConfigReload() {
+	if w == nil || w.stopped.Load() {
+		return
+	}
 	w.configReloadMu.Lock()
-	defer w.configReloadMu.Unlock()
+	w.scheduleConfigReloadLocked(configReloadDebounce)
+	w.configReloadMu.Unlock()
+}
+
+func (w *Watcher) scheduleConfigReloadLocked(baseDelay time.Duration) {
+	if w == nil {
+		return
+	}
+	if baseDelay < 10*time.Millisecond {
+		baseDelay = 10 * time.Millisecond
+	}
+	w.configReloadPend = true
+	if w.configReloadRun {
+		log.Debug("config reload already running; coalescing latest config change")
+		return
+	}
+	delay := baseDelay
+	if !w.configReloadLast.IsZero() {
+		if remaining := configReloadCooldown - time.Since(w.configReloadLast); remaining > delay {
+			delay = remaining
+		}
+	}
+	if delay > baseDelay {
+		log.Debugf("deferring config reload for %s to honor reload cooldown", delay)
+	}
 	if w.configReloadTimer != nil {
 		w.configReloadTimer.Stop()
 	}
-	w.configReloadTimer = time.AfterFunc(configReloadDebounce, func() {
-		w.configReloadMu.Lock()
-		w.configReloadTimer = nil
-		w.configReloadMu.Unlock()
-		w.reloadConfigIfChanged()
+	w.configReloadTimer = time.AfterFunc(delay, func() {
+		w.runScheduledConfigReload()
 	})
 }
 
-func (w *Watcher) reloadConfigIfChanged() {
+func (w *Watcher) runScheduledConfigReload() {
+	if w == nil || w.stopped.Load() {
+		return
+	}
+	w.configReloadMu.Lock()
+	if w.configReloadRun {
+		w.configReloadMu.Unlock()
+		return
+	}
+	w.configReloadTimer = nil
+	if !w.configReloadPend {
+		w.configReloadMu.Unlock()
+		return
+	}
+	w.configReloadPend = false
+	w.configReloadRun = true
+	w.configReloadMu.Unlock()
+
+	reloaded := w.reloadConfigIfChanged()
+
+	w.configReloadMu.Lock()
+	w.configReloadRun = false
+	if reloaded {
+		w.configReloadLast = time.Now()
+	}
+	if w.configReloadPend && !w.stopped.Load() {
+		w.scheduleConfigReloadLocked(configReloadDebounce)
+	}
+	w.configReloadMu.Unlock()
+}
+
+func (w *Watcher) reloadConfigIfChanged() bool {
 	data, err := os.ReadFile(w.configPath)
 	if err != nil {
 		log.Errorf("failed to read config file for hash check: %v", err)
-		return
+		return false
 	}
 	if len(data) == 0 {
 		log.Debugf("ignoring empty config file write event")
-		return
+		return false
 	}
 	sum := sha256.Sum256(data)
 	newHash := hex.EncodeToString(sum[:])
@@ -59,22 +115,20 @@ func (w *Watcher) reloadConfigIfChanged() {
 
 	if currentHash != "" && currentHash == newHash {
 		log.Debugf("config file content unchanged (hash match), skipping reload")
-		return
+		return false
 	}
 	log.Infof("config file changed, reloading: %s", w.configPath)
 	if w.reloadConfig() {
-		finalHash := newHash
-		if updatedData, errRead := os.ReadFile(w.configPath); errRead == nil && len(updatedData) > 0 {
-			sumUpdated := sha256.Sum256(updatedData)
-			finalHash = hex.EncodeToString(sumUpdated[:])
-		} else if errRead != nil {
-			log.WithError(errRead).Debug("failed to compute updated config hash after reload")
-		}
 		w.clientsMutex.Lock()
-		w.lastConfigHash = finalHash
+		// Record the hash of the config content that was actually applied.
+		// If the file changes again while reload is running, a pending reload
+		// should still observe a new hash and apply the latest content.
+		w.lastConfigHash = newHash
 		w.clientsMutex.Unlock()
 		w.persistConfigAsync()
+		return true
 	}
+	return false
 }
 
 func (w *Watcher) reloadConfig() bool {

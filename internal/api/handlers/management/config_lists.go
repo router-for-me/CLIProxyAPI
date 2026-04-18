@@ -447,6 +447,7 @@ func (h *Handler) PutOpenAICompat(c *gin.Context) {
 func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 	type openAICompatPatch struct {
 		Name          *string                             `json:"name"`
+		Kind          *string                             `json:"kind"`
 		Prefix        *string                             `json:"prefix"`
 		BaseURL       *string                             `json:"base-url"`
 		APIKeyEntries *[]config.OpenAICompatibilityAPIKey `json:"api-key-entries"`
@@ -483,6 +484,9 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 	entry := h.cfg.OpenAICompatibility[targetIndex]
 	if body.Value.Name != nil {
 		entry.Name = strings.TrimSpace(*body.Value.Name)
+	}
+	if body.Value.Kind != nil {
+		entry.Kind = config.NormalizeOpenAICompatibilityKind(*body.Value.Kind)
 	}
 	if body.Value.Prefix != nil {
 		entry.Prefix = strings.TrimSpace(*body.Value.Prefix)
@@ -1046,16 +1050,19 @@ func normalizeOpenAICompatibilityEntry(entry *config.OpenAICompatibility) {
 	if entry == nil {
 		return
 	}
+	entry.Name = strings.TrimSpace(entry.Name)
+	entry.Kind = config.NormalizeOpenAICompatibilityKind(entry.Kind)
+	entry.Prefix = strings.TrimSpace(entry.Prefix)
 	// Trim base-url; empty base-url indicates provider should be removed by sanitization
 	entry.BaseURL = strings.TrimSpace(entry.BaseURL)
 	entry.Headers = config.NormalizeHeaders(entry.Headers)
-	existing := make(map[string]struct{}, len(entry.APIKeyEntries))
 	for i := range entry.APIKeyEntries {
-		trimmed := strings.TrimSpace(entry.APIKeyEntries[i].APIKey)
-		entry.APIKeyEntries[i].APIKey = trimmed
-		if trimmed != "" {
-			existing[trimmed] = struct{}{}
-		}
+		entry.APIKeyEntries[i].APIKey = strings.TrimSpace(entry.APIKeyEntries[i].APIKey)
+		entry.APIKeyEntries[i].ProxyURL = strings.TrimSpace(entry.APIKeyEntries[i].ProxyURL)
+	}
+	for i := range entry.Models {
+		entry.Models[i].Name = strings.TrimSpace(entry.Models[i].Name)
+		entry.Models[i].Alias = strings.TrimSpace(entry.Models[i].Alias)
 	}
 }
 
@@ -1068,6 +1075,9 @@ func normalizedOpenAICompatibilityEntries(entries []config.OpenAICompatibility) 
 		copyEntry := entries[i]
 		if len(copyEntry.APIKeyEntries) > 0 {
 			copyEntry.APIKeyEntries = append([]config.OpenAICompatibilityAPIKey(nil), copyEntry.APIKeyEntries...)
+		}
+		if len(copyEntry.Models) > 0 {
+			copyEntry.Models = append([]config.OpenAICompatibilityModel(nil), copyEntry.Models...)
 		}
 		normalizeOpenAICompatibilityEntry(&copyEntry)
 		out[i] = copyEntry
