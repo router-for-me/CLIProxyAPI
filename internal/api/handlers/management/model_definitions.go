@@ -108,12 +108,12 @@ func (h *Handler) GetModelsHealth(c *gin.Context) {
 
 // RefreshModels triggers an immediate refresh of model metadata from OpenRouter and the enrichment cache.
 // This re-fetches context_length from OpenRouter's public /api/v1/models endpoint and enriches registered models that lack this data.
+//
+// TriggerOpenRouterRefresh returns the number of *newly* enriched models on this
+// invocation. A zero return is a legitimate outcome — everything is already
+// enriched, or no new models matched — and must not be reported as an error.
 func (h *Handler) RefreshModels(c *gin.Context) {
 	count := registry.TriggerOpenRouterRefresh(c.Request.Context())
-	if count == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "no models registered"})
-		return
-	}
 	lastRefresh := registry.GetOpenRouterLastRefresh()
 	c.JSON(http.StatusOK, gin.H{
 		"status":         "refreshed",
