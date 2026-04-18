@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -91,6 +92,8 @@ func (l *WarmupListener) setAuthManager(manager *coreauth.Manager) {
 	l.authManager = manager
 	if manager != nil {
 		l.execute = manager.Execute
+	} else {
+		l.execute = nil
 	}
 	l.mu.Unlock()
 }
@@ -102,6 +105,15 @@ func (l *WarmupListener) currentAuthManager() *coreauth.Manager {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.authManager
+}
+
+func (l *WarmupListener) currentExecute() func(context.Context, []string, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	if l == nil {
+		return nil
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.execute
 }
 
 func parseWarmupQuotaSnapshot(body []byte) (WarmupQuotaSnapshot, bool) {
@@ -314,18 +326,7 @@ func (l *WarmupListener) authByIndex(authIndex string) *coreauth.Auth {
 	if authIndex == "" || manager == nil {
 		return nil
 	}
-
-	auths := manager.List()
-	for _, auth := range auths {
-		if auth == nil {
-			continue
-		}
-		auth.EnsureIndex()
-		if auth.Index == authIndex {
-			return auth
-		}
-	}
-	return nil
+	return findAuthByStableIndex(manager.List(), authIndex)
 }
 
 func isSourceCodexOAuthCandidate(auth *coreauth.Auth) bool {
@@ -337,6 +338,25 @@ func isSourceCodexOAuthCandidate(auth *coreauth.Auth) bool {
 	}
 	accountType, _ := auth.AccountInfo()
 	return accountType == "oauth"
+}
+
+func isWarmupUsageURL(raw string) bool {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return false
+	}
+
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	if !strings.EqualFold(parsed.Scheme, "https") {
+		return false
+	}
+	if !strings.EqualFold(parsed.Hostname(), "api.openai.com") {
+		return false
+	}
+	return parsed.Path == "/v1/usage"
 }
 
 func (l *WarmupListener) executeWarmup(ctx context.Context, target *coreauth.Auth, model string) error {
@@ -352,7 +372,7 @@ func (l *WarmupListener) executeWarmup(ctx context.Context, target *coreauth.Aut
 		return fmt.Errorf("warmup model is empty")
 	}
 
-	execFn := l.execute
+	execFn := l.currentExecute()
 	if execFn == nil {
 		if manager := l.currentAuthManager(); manager != nil {
 			execFn = manager.Execute
@@ -400,6 +420,10 @@ func (l *WarmupListener) OnManagementAPICall(ctx context.Context, evt Management
 
 	source := l.authByIndex(sourceAuthIndex)
 	if !isSourceCodexOAuthCandidate(source) {
+		return
+	}
+
+	if !isWarmupUsageURL(evt.URL) {
 		return
 	}
 

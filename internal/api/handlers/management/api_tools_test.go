@@ -216,6 +216,37 @@ func TestAuthByIndexDistinguishesSharedAPIKeysAcrossProviders(t *testing.T) {
 	}
 }
 
+func TestFindAuthByStableIndexWorksWithoutEnsureIndex(t *testing.T) {
+	t.Parallel()
+
+	auth := &coreauth.Auth{
+		ID:       "gemini-no-index",
+		Provider: "gemini",
+		Attributes: map[string]string{
+			"api_key": "shared-key",
+		},
+	}
+	if auth.Index != "" {
+		t.Fatalf("expected empty initial index, got %q", auth.Index)
+	}
+
+	wantIndex := auth.StableIndex()
+	if wantIndex == "" {
+		t.Fatal("expected stable index")
+	}
+
+	got := findAuthByStableIndex([]*coreauth.Auth{auth}, wantIndex)
+	if got == nil {
+		t.Fatal("expected auth by stable index")
+	}
+	if got != auth {
+		t.Fatal("helper should return original auth pointer")
+	}
+	if auth.Index != "" {
+		t.Fatalf("helper should not assign index, got %q", auth.Index)
+	}
+}
+
 func TestAPICallPublishesEventAfterSuccessResponse(t *testing.T) {
 	t.Parallel()
 

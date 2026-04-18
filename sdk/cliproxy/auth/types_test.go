@@ -96,3 +96,28 @@ func TestEnsureIndexUsesCredentialIdentity(t *testing.T) {
 		t.Fatalf("duplicate config entries should be separated by source-derived seed, got %q", geminiIndex)
 	}
 }
+
+func TestStableIndexDoesNotAssignIndex(t *testing.T) {
+	t.Parallel()
+
+	auth := &Auth{
+		Provider: "gemini",
+		Attributes: map[string]string{
+			"api_key": "stable-key",
+			"source":  "config:gemini[stable-index-no-write]",
+		},
+	}
+
+	index := auth.StableIndex()
+	if index == "" {
+		t.Fatal("stable index should not be empty")
+	}
+	if auth.Index != "" {
+		t.Fatalf("StableIndex should not assign Index, got %q", auth.Index)
+	}
+
+	assigned := auth.EnsureIndex()
+	if assigned != index {
+		t.Fatalf("EnsureIndex = %q, want %q", assigned, index)
+	}
+}

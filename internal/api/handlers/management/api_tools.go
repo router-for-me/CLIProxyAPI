@@ -633,17 +633,7 @@ func (h *Handler) authByIndex(authIndex string) *coreauth.Auth {
 	if authIndex == "" || h == nil || h.authManager == nil {
 		return nil
 	}
-	auths := h.authManager.List()
-	for _, auth := range auths {
-		if auth == nil {
-			continue
-		}
-		auth.EnsureIndex()
-		if auth.Index == authIndex {
-			return auth
-		}
-	}
-	return nil
+	return findAuthByStableIndex(h.authManager.List(), authIndex)
 }
 
 func (h *Handler) apiCallTransport(auth *coreauth.Auth) http.RoundTripper {

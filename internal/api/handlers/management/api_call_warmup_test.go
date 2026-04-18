@@ -288,6 +288,93 @@ func TestWarmupListenerNonQuotaEventDoesNotConsumeCooldown(t *testing.T) {
 	}
 }
 
+func TestWarmupListenerSkipsNonUsageURLEvenWhenBodyLooksLikeQuota(t *testing.T) {
+	t.Parallel()
+
+	testID := strings.ReplaceAll(strings.ToLower(t.Name()), "/", "-")
+	manager := coreauth.NewManager(nil, nil, nil)
+	source := &coreauth.Auth{ID: "source-" + testID, Provider: "codex", Metadata: map[string]any{"email": "source@example.com"}}
+	target := &coreauth.Auth{ID: "target-" + testID, Provider: "codex", Metadata: map[string]any{"email": "target@example.com"}}
+	if _, err := manager.Register(context.Background(), source); err != nil {
+		t.Fatalf("register source: %v", err)
+	}
+	if _, err := manager.Register(context.Background(), target); err != nil {
+		t.Fatalf("register target: %v", err)
+	}
+
+	sourceAuth, ok := manager.GetByID(source.ID)
+	if !ok {
+		t.Fatal("source auth missing")
+	}
+	sourceIndex := sourceAuth.EnsureIndex()
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(target.ID, "codex", []*registry.ModelInfo{{ID: "gpt-5.4-mini"}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(target.ID)
+	})
+
+	calls := 0
+	listener := &WarmupListener{
+		cfg:               &config.Config{Routing: config.RoutingConfig{Strategy: "fill-first", Warmup: true}},
+		authManager:       manager,
+		lastAcceptedAt:    map[string]time.Time{},
+		warmedAuthIndexes: map[string]struct{}{},
+		now:               func() time.Time { return time.Unix(1000, 0) },
+		execute: func(context.Context, []string, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+			calls++
+			return cliproxyexecutor.Response{}, nil
+		},
+	}
+
+	listener.OnManagementAPICall(context.Background(), ManagementAPICallEvent{
+		AuthIndex:  sourceIndex,
+		Method:     "GET",
+		URL:        "https://api.openai.com/v1/models",
+		StatusCode: 200,
+		RespBody: []byte(`{
+			"rate_limit":{
+				"primary_window":{"limit_window_seconds":18000,"reset_after_seconds":18000,"reset_at":1777149808},
+				"secondary_window":{"limit_window_seconds":604800,"reset_after_seconds":604800,"reset_at":1777149808}
+			}
+		}`),
+	})
+
+	if calls != 0 {
+		t.Fatalf("execute calls = %d, want 0", calls)
+	}
+}
+
+func TestWarmupListenerCurrentExecuteTracksManagerHotUpdate(t *testing.T) {
+	t.Parallel()
+
+	oldErr := errors.New("old execute")
+	listener := &WarmupListener{
+		execute: func(context.Context, []string, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+			return cliproxyexecutor.Response{}, oldErr
+		},
+	}
+
+	execBefore := listener.currentExecute()
+	if execBefore == nil {
+		t.Fatal("expected current execute before update")
+	}
+	if _, err := execBefore(context.Background(), []string{"codex"}, cliproxyexecutor.Request{}, cliproxyexecutor.Options{}); !errors.Is(err, oldErr) {
+		t.Fatalf("before update error = %v, want old execute error", err)
+	}
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	listener.setAuthManager(manager)
+
+	execAfter := listener.currentExecute()
+	if execAfter == nil {
+		t.Fatal("expected current execute after update")
+	}
+	if _, err := execAfter(context.Background(), []string{"codex"}, cliproxyexecutor.Request{}, cliproxyexecutor.Options{}); errors.Is(err, oldErr) {
+		t.Fatalf("after update still used old execute: %v", err)
+	}
+}
+
 func TestWarmupListenerMarksSourceOnlyAfterSuccess(t *testing.T) {
 	t.Parallel()
 

@@ -215,6 +215,21 @@ func (a *Auth) indexSeed() string {
 	return ""
 }
 
+// StableIndex computes the deterministic auth index without mutating Auth fields.
+func (a *Auth) StableIndex() string {
+	if a == nil {
+		return ""
+	}
+	if idx := strings.TrimSpace(a.Index); idx != "" {
+		return idx
+	}
+	seed := a.indexSeed()
+	if seed == "" {
+		return ""
+	}
+	return stableAuthIndex(seed)
+}
+
 // EnsureIndex returns a stable index derived from the auth file name or credential identity.
 func (a *Auth) EnsureIndex() string {
 	if a == nil {
@@ -224,12 +239,10 @@ func (a *Auth) EnsureIndex() string {
 		return a.Index
 	}
 
-	seed := a.indexSeed()
-	if seed == "" {
+	idx := a.StableIndex()
+	if idx == "" {
 		return ""
 	}
-
-	idx := stableAuthIndex(seed)
 	a.Index = idx
 	a.indexAssigned = true
 	return idx
