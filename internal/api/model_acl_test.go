@@ -205,6 +205,47 @@ func TestModelACLMiddleware_OversizedBodyRejectedViaContentLength(t *testing.T) 
 	}
 }
 
+func TestModelACLMiddleware_GeminiPathPreservesPrefix(t *testing.T) {
+	// Gemini deployments that opt into force-model-prefix use paths like
+	// /v1beta/models/teamA/gemini-3-pro:generateContent where the routed
+	// model identifier is literally "teamA/gemini-3-pro" — the first "/"
+	// after the prefix is part of the model, not a path separator. The
+	// extractor must forward the whole segment-before-":" so the ACL
+	// checks the real model rather than truncating to the prefix segment.
+	cfg := &config.Config{
+		SDKConfig: config.SDKConfig{
+			APIKeys: []string{"sk-prefixed"},
+			APIKeyPolicies: []config.APIKeyPolicy{
+				// IsModelAllowedForKey strips the "<prefix>/" before glob
+				// matching, so "gemini-3-*" should accept prefixed and
+				// unprefixed forms alike.
+				{Key: "sk-prefixed", AllowedModels: []string{"gemini-3-*"}},
+			},
+		},
+	}
+	router := newTestRouter(cfg, "sk-prefixed")
+
+	// Allowed prefixed model.
+	req := httptest.NewRequest(http.MethodPost, "/v1beta/models/teamA/gemini-3-pro:generateContent", strings.NewReader("{}"))
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("allowed prefixed gemini model: expected 200, got %d body=%s", w.Code, w.Body.String())
+	}
+
+	// Disallowed prefixed model — if the extractor were still truncating at
+	// the first "/", this would erroneously check "teamA" against the ACL
+	// and the test would give a false-positive pass. By choosing a model
+	// segment that definitely does not match "gemini-3-*" we lock in that
+	// the extractor forwards the real identifier.
+	req = httptest.NewRequest(http.MethodPost, "/v1beta/models/teamA/claude-3-sonnet:generateContent", strings.NewReader("{}"))
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("disallowed prefixed gemini model: expected 403, got %d body=%s", w.Code, w.Body.String())
+	}
+}
+
 func TestModelACLMiddleware_ModelInPeekLargeBodyPassesThrough(t *testing.T) {
 	// When "model" appears within the peek window but the body as a whole is
 	// larger than the peek, the middleware must (a) still extract the model

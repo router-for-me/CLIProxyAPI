@@ -140,15 +140,17 @@ func extractRequestedModel(c *gin.Context) (model string, ok bool, err error) {
 	}
 
 	// Gemini-style: /v1beta/models/<model>:<action>
+	//
+	// The <model> segment may itself contain a "/" when the deployment uses
+	// force-model-prefix (e.g. /v1beta/models/teamA/gemini-3-pro:generateContent,
+	// where the routed model identifier is literally "teamA/gemini-3-pro").
+	// GeminiHandler forwards the whole segment-before-":" as the model, and
+	// IsModelAllowedForKey tolerates a leading "<prefix>/" on matches. So the
+	// ACL extractor mirrors that: everything between the prefix and ":" is the
+	// model, including embedded slashes.
 	if strings.HasPrefix(c.Request.URL.Path, "/v1beta/models/") {
 		rest := strings.TrimPrefix(c.Request.URL.Path, "/v1beta/models/")
-		// Drop everything from the first ':' (action) onward.
 		if idx := strings.Index(rest, ":"); idx >= 0 {
-			rest = rest[:idx]
-		}
-		// Drop everything from the first '/' onward (no nested paths today,
-		// but be defensive).
-		if idx := strings.Index(rest, "/"); idx >= 0 {
 			rest = rest[:idx]
 		}
 		rest = strings.TrimSpace(rest)
