@@ -212,7 +212,7 @@ func (b *Builder) Build() (*Service, error) {
 		sessionAffinity := false
 		sessionAffinityTTL := time.Hour
 		if b.cfg != nil {
-			strategy = strings.ToLower(strings.TrimSpace(b.cfg.Routing.Strategy))
+			strategy = normalizeRoutingStrategyName(b.cfg.Routing.Strategy)
 			// Support both legacy ClaudeCodeSessionAffinity and new universal SessionAffinity
 			sessionAffinity = b.cfg.Routing.ClaudeCodeSessionAffinity || b.cfg.Routing.SessionAffinity
 			if ttlStr := strings.TrimSpace(b.cfg.Routing.SessionAffinityTTL); ttlStr != "" {
@@ -225,6 +225,12 @@ func (b *Builder) Build() (*Service, error) {
 		switch strategy {
 		case "fill-first", "fillfirst", "ff":
 			selector = &coreauth.FillFirstSelector{}
+		case "oauth-quota-burst-sync-sticky":
+			selector = &coreauth.OAuthQuotaBurstSyncStickySelector{}
+		case "oauth-quota-reserve-staggered":
+			selector = &coreauth.OAuthQuotaReserveStaggeredSelector{}
+		case "oauth-quota-weekly-guarded-sticky":
+			selector = &coreauth.OAuthQuotaWeeklyGuardedStickySelector{}
 		default:
 			selector = &coreauth.RoundRobinSelector{}
 		}

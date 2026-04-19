@@ -214,7 +214,9 @@ type QuotaExceeded struct {
 // RoutingConfig configures how credentials are selected for requests.
 type RoutingConfig struct {
 	// Strategy selects the credential selection strategy.
-	// Supported values: "round-robin" (default), "fill-first".
+	// Supported values: "round-robin" (default), "fill-first",
+	// "oauth-quota-burst-sync-sticky", "oauth-quota-reserve-staggered",
+	// "oauth-quota-weekly-guarded-sticky".
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
 
 	// ClaudeCodeSessionAffinity enables session-sticky routing for Claude Code clients.

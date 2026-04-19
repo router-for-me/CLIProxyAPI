@@ -286,6 +286,12 @@ func normalizeRoutingStrategy(strategy string) (string, bool) {
 		return "round-robin", true
 	case "fill-first", "fillfirst", "ff":
 		return "fill-first", true
+	case "oauth-quota-burst-sync-sticky", "quota-burst-sync-sticky", "burst-sync-sticky", "oauth-burst-sync-sticky":
+		return "oauth-quota-burst-sync-sticky", true
+	case "oauth-quota-reserve-staggered", "quota-reserve-staggered", "reserve-staggered", "oauth-reserve-staggered":
+		return "oauth-quota-reserve-staggered", true
+	case "oauth-quota-weekly-guarded-sticky", "quota-weekly-guarded-sticky", "weekly-guarded-sticky", "oauth-weekly-guarded-sticky":
+		return "oauth-quota-weekly-guarded-sticky", true
 	default:
 		return "", false
 	}

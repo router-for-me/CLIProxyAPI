@@ -102,7 +102,20 @@ quota-exceeded:
 
 # Routing strategy for selecting credentials when multiple match.
 routing:
-  strategy: "round-robin" # round-robin (default), fill-first
+  strategy: "round-robin" # round-robin (default), fill-first, oauth-quota-burst-sync-sticky, oauth-quota-reserve-staggered, oauth-quota-weekly-guarded-sticky
+  # oauth-quota-* strategies read optional auth metadata such as:
+  # oauth_quota_windows:
+  #   - label: "5-Hour Window"
+  #     scope: "short"
+  #     triggered: true
+  #     used_percent: 72
+  #     reset_at: "2026-04-17T05:00:00Z"
+  #   - label: "7-Day Window"
+  #     scope: "long"
+  #     triggered: true
+  #     used_percent: 41
+  #     reset_at: "2026-04-20T12:00:00Z"
+  # When the metadata is absent, CPA falls back to cooldown / next-recover hints.
   # Enable universal session-sticky routing for all clients.
   # Session IDs are extracted from: X-Session-ID header, Idempotency-Key,
   # metadata.user_id, conversation_id, or first few messages hash.

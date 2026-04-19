@@ -629,17 +629,8 @@ func (s *Service) Run(ctx context.Context) error {
 			return
 		}
 
-		nextStrategy := strings.ToLower(strings.TrimSpace(newCfg.Routing.Strategy))
-		normalizeStrategy := func(strategy string) string {
-			switch strategy {
-			case "fill-first", "fillfirst", "ff":
-				return "fill-first"
-			default:
-				return "round-robin"
-			}
-		}
-		previousStrategy = normalizeStrategy(previousStrategy)
-		nextStrategy = normalizeStrategy(nextStrategy)
+		nextStrategy := normalizeRoutingStrategyName(newCfg.Routing.Strategy)
+		previousStrategy = normalizeRoutingStrategyName(previousStrategy)
 
 		nextSessionAffinity := newCfg.Routing.ClaudeCodeSessionAffinity || newCfg.Routing.SessionAffinity
 		nextSessionAffinityTTL := newCfg.Routing.SessionAffinityTTL
@@ -653,6 +644,12 @@ func (s *Service) Run(ctx context.Context) error {
 			switch nextStrategy {
 			case "fill-first":
 				selector = &coreauth.FillFirstSelector{}
+			case "oauth-quota-burst-sync-sticky":
+				selector = &coreauth.OAuthQuotaBurstSyncStickySelector{}
+			case "oauth-quota-reserve-staggered":
+				selector = &coreauth.OAuthQuotaReserveStaggeredSelector{}
+			case "oauth-quota-weekly-guarded-sticky":
+				selector = &coreauth.OAuthQuotaWeeklyGuardedStickySelector{}
 			default:
 				selector = &coreauth.RoundRobinSelector{}
 			}

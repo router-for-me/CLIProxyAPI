@@ -1359,3 +1359,426 @@ func TestSessionAffinitySelector_Concurrent(t *testing.T) {
 	default:
 	}
 }
+
+func TestOAuthQuotaBurstSyncStickySelector_PrefersUntriggeredWindows(t *testing.T) {
+	t.Parallel()
+
+	selector := &OAuthQuotaBurstSyncStickySelector{}
+	auths := []*Auth{
+		{
+			ID: "triggered",
+			Metadata: map[string]any{
+				"oauth_quota_windows": []any{
+					map[string]any{
+						"label":               "5-Hour Window",
+						"scope":               "short",
+						"triggered":           true,
+						"used_percent":        20.0,
+						"reset_after_seconds": 1800,
+					},
+					map[string]any{
+						"label":               "7-Day Window",
+						"scope":               "long",
+						"triggered":           true,
+						"used_percent":        10.0,
+						"reset_after_seconds": 86400,
+					},
+				},
+			},
+		},
+		{
+			ID: "untriggered",
+			Metadata: map[string]any{
+				"oauth_quota_windows": []any{
+					map[string]any{
+						"label":     "5-Hour Window",
+						"scope":     "short",
+						"triggered": false,
+					},
+					map[string]any{
+						"label":     "7-Day Window",
+						"scope":     "long",
+						"triggered": false,
+					},
+				},
+			},
+		},
+	}
+
+	got, err := selector.Pick(context.Background(), "codex", "", cliproxyexecutor.Options{}, auths)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if got == nil {
+		t.Fatalf("Pick() auth = nil")
+	}
+	if got.ID != "untriggered" {
+		t.Fatalf("Pick() auth.ID = %q, want %q", got.ID, "untriggered")
+	}
+}
+
+func TestOAuthQuotaBurstSyncStickySelector_PrefersEarlierShortReset(t *testing.T) {
+	t.Parallel()
+
+	selector := &OAuthQuotaBurstSyncStickySelector{}
+	auths := []*Auth{
+		{
+			ID: "later",
+			Metadata: map[string]any{
+				"oauth_quota_windows": []any{
+					map[string]any{
+						"label":               "5-Hour Window",
+						"scope":               "short",
+						"triggered":           true,
+						"used_percent":        60.0,
+						"reset_after_seconds": 5400,
+					},
+					map[string]any{
+						"label":               "7-Day Window",
+						"scope":               "long",
+						"triggered":           true,
+						"used_percent":        30.0,
+						"reset_after_seconds": 172800,
+					},
+				},
+			},
+		},
+		{
+			ID: "sooner",
+			Metadata: map[string]any{
+				"oauth_quota_windows": []any{
+					map[string]any{
+						"label":               "5-Hour Window",
+						"scope":               "short",
+						"triggered":           true,
+						"used_percent":        40.0,
+						"reset_after_seconds": 900,
+					},
+					map[string]any{
+						"label":               "7-Day Window",
+						"scope":               "long",
+						"triggered":           true,
+						"used_percent":        20.0,
+						"reset_after_seconds": 259200,
+					},
+				},
+			},
+		},
+	}
+
+	got, err := selector.Pick(context.Background(), "codex", "", cliproxyexecutor.Options{}, auths)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if got == nil {
+		t.Fatalf("Pick() auth = nil")
+	}
+	if got.ID != "sooner" {
+		t.Fatalf("Pick() auth.ID = %q, want %q", got.ID, "sooner")
+	}
+}
+
+func TestOAuthQuotaReserveStaggeredSelector_PreservesUntriggeredReserve(t *testing.T) {
+	t.Parallel()
+
+	selector := &OAuthQuotaReserveStaggeredSelector{}
+	auths := []*Auth{
+		{
+			ID: "reserve",
+			Metadata: map[string]any{
+				"oauth_quota_windows": []any{
+					map[string]any{
+						"label":     "5-Hour Window",
+						"scope":     "short",
+						"triggered": false,
+					},
+					map[string]any{
+						"label":     "7-Day Window",
+						"scope":     "long",
+						"triggered": false,
+					},
+				},
+			},
+		},
+		{
+			ID: "active",
+			Metadata: map[string]any{
+				"oauth_quota_windows": []any{
+					map[string]any{
+						"label":               "5-Hour Window",
+						"scope":               "short",
+						"triggered":           true,
+						"used_percent":        70.0,
+						"reset_after_seconds": 1200,
+					},
+					map[string]any{
+						"label":               "7-Day Window",
+						"scope":               "long",
+						"triggered":           true,
+						"used_percent":        80.0,
+						"reset_after_seconds": 86400,
+					},
+				},
+			},
+		},
+	}
+
+	got, err := selector.Pick(context.Background(), "codex", "", cliproxyexecutor.Options{}, auths)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if got == nil {
+		t.Fatalf("Pick() auth = nil")
+	}
+	if got.ID != "active" {
+		t.Fatalf("Pick() auth.ID = %q, want %q", got.ID, "active")
+	}
+}
+
+func TestOAuthQuotaWeeklyGuardedStickySelector_PrefersHealthyTriggeredPool(t *testing.T) {
+	t.Parallel()
+
+	selector := &OAuthQuotaWeeklyGuardedStickySelector{}
+	auths := []*Auth{
+		{
+			ID: "healthy-triggered",
+			Metadata: map[string]any{
+				"oauth_quota_windows": []any{
+					map[string]any{
+						"label":                   "5-Hour Window",
+						"scope":                   "short",
+						"triggered":               true,
+						"used_percent":            65.0,
+						"reset_after_seconds":     900,
+						"window_duration_seconds": 18000,
+					},
+					map[string]any{
+						"label":                   "7-Day Window",
+						"scope":                   "long",
+						"triggered":               true,
+						"used_percent":            25.0,
+						"reset_after_seconds":     604800,
+						"window_duration_seconds": 604800,
+					},
+				},
+			},
+		},
+		{
+			ID: "reserve",
+			Metadata: map[string]any{
+				"oauth_quota_windows": []any{
+					map[string]any{
+						"label":     "5-Hour Window",
+						"scope":     "short",
+						"triggered": false,
+					},
+					map[string]any{
+						"label":     "7-Day Window",
+						"scope":     "long",
+						"triggered": false,
+					},
+				},
+			},
+		},
+	}
+
+	got, err := selector.Pick(context.Background(), "codex", "", cliproxyexecutor.Options{}, auths)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if got == nil {
+		t.Fatalf("Pick() auth = nil")
+	}
+	if got.ID != "healthy-triggered" {
+		t.Fatalf("Pick() auth.ID = %q, want %q", got.ID, "healthy-triggered")
+	}
+}
+
+func TestOAuthQuotaWeeklyGuardedStickySelector_AvoidsWeeklyDepletedAccount(t *testing.T) {
+	t.Parallel()
+
+	selector := &OAuthQuotaWeeklyGuardedStickySelector{}
+	auths := []*Auth{
+		{
+			ID: "weekly-depleted",
+			Metadata: map[string]any{
+				"oauth_quota_windows": []any{
+					map[string]any{
+						"label":                   "5-Hour Window",
+						"scope":                   "short",
+						"triggered":               true,
+						"used_percent":            55.0,
+						"reset_after_seconds":     600,
+						"window_duration_seconds": 18000,
+					},
+					map[string]any{
+						"label":                   "7-Day Window",
+						"scope":                   "long",
+						"triggered":               true,
+						"used_percent":            85.0,
+						"reset_after_seconds":     604800,
+						"window_duration_seconds": 604800,
+					},
+				},
+			},
+		},
+		{
+			ID: "reserve",
+			Metadata: map[string]any{
+				"oauth_quota_windows": []any{
+					map[string]any{
+						"label":     "5-Hour Window",
+						"scope":     "short",
+						"triggered": false,
+					},
+					map[string]any{
+						"label":     "7-Day Window",
+						"scope":     "long",
+						"triggered": false,
+					},
+				},
+			},
+		},
+	}
+
+	got, err := selector.Pick(context.Background(), "codex", "", cliproxyexecutor.Options{}, auths)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if got == nil {
+		t.Fatalf("Pick() auth = nil")
+	}
+	if got.ID != "reserve" {
+		t.Fatalf("Pick() auth.ID = %q, want %q", got.ID, "reserve")
+	}
+}
+
+func TestOAuthQuotaWeeklyGuardedStickySelector_PrefersHealthyWeeklyMarginWithinTriggeredPool(t *testing.T) {
+	t.Parallel()
+
+	selector := &OAuthQuotaWeeklyGuardedStickySelector{}
+	auths := []*Auth{
+		{
+			ID: "caution",
+			Metadata: map[string]any{
+				"oauth_quota_windows": []any{
+					map[string]any{
+						"label":                   "5-Hour Window",
+						"scope":                   "short",
+						"triggered":               true,
+						"used_percent":            40.0,
+						"reset_after_seconds":     1200,
+						"window_duration_seconds": 18000,
+					},
+					map[string]any{
+						"label":                   "7-Day Window",
+						"scope":                   "long",
+						"triggered":               true,
+						"used_percent":            72.0,
+						"reset_after_seconds":     604800,
+						"window_duration_seconds": 604800,
+					},
+				},
+			},
+		},
+		{
+			ID: "healthy",
+			Metadata: map[string]any{
+				"oauth_quota_windows": []any{
+					map[string]any{
+						"label":                   "5-Hour Window",
+						"scope":                   "short",
+						"triggered":               true,
+						"used_percent":            45.0,
+						"reset_after_seconds":     1800,
+						"window_duration_seconds": 18000,
+					},
+					map[string]any{
+						"label":                   "7-Day Window",
+						"scope":                   "long",
+						"triggered":               true,
+						"used_percent":            35.0,
+						"reset_after_seconds":     604800,
+						"window_duration_seconds": 604800,
+					},
+				},
+			},
+		},
+	}
+
+	got, err := selector.Pick(context.Background(), "codex", "", cliproxyexecutor.Options{}, auths)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if got == nil {
+		t.Fatalf("Pick() auth = nil")
+	}
+	if got.ID != "healthy" {
+		t.Fatalf("Pick() auth.ID = %q, want %q", got.ID, "healthy")
+	}
+}
+
+func TestOAuthQuotaWeeklyGuardedStickySelector_PrefersSoonerShortResetWithinHealthyPool(t *testing.T) {
+	t.Parallel()
+
+	selector := &OAuthQuotaWeeklyGuardedStickySelector{}
+	auths := []*Auth{
+		{
+			ID: "later",
+			Metadata: map[string]any{
+				"oauth_quota_windows": []any{
+					map[string]any{
+						"label":                   "5-Hour Window",
+						"scope":                   "short",
+						"triggered":               true,
+						"used_percent":            35.0,
+						"reset_after_seconds":     3600,
+						"window_duration_seconds": 18000,
+					},
+					map[string]any{
+						"label":                   "7-Day Window",
+						"scope":                   "long",
+						"triggered":               true,
+						"used_percent":            30.0,
+						"reset_after_seconds":     604800,
+						"window_duration_seconds": 604800,
+					},
+				},
+			},
+		},
+		{
+			ID: "sooner",
+			Metadata: map[string]any{
+				"oauth_quota_windows": []any{
+					map[string]any{
+						"label":                   "5-Hour Window",
+						"scope":                   "short",
+						"triggered":               true,
+						"used_percent":            35.0,
+						"reset_after_seconds":     600,
+						"window_duration_seconds": 18000,
+					},
+					map[string]any{
+						"label":                   "7-Day Window",
+						"scope":                   "long",
+						"triggered":               true,
+						"used_percent":            28.0,
+						"reset_after_seconds":     604800,
+						"window_duration_seconds": 604800,
+					},
+				},
+			},
+		},
+	}
+
+	got, err := selector.Pick(context.Background(), "codex", "", cliproxyexecutor.Options{}, auths)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if got == nil {
+		t.Fatalf("Pick() auth = nil")
+	}
+	if got.ID != "sooner" {
+		t.Fatalf("Pick() auth.ID = %q, want %q", got.ID, "sooner")
+	}
+}
