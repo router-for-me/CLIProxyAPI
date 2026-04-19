@@ -88,9 +88,9 @@ func pickOAuthQuotaAware(ctx context.Context, provider, model string, opts clipr
 		return available[0], nil
 	}
 
-	metrics := make([]quotaRoutingMetrics, 0, len(available))
-	for i := 0; i < len(available); i++ {
-		metrics = append(metrics, buildQuotaRoutingMetrics(available[i], model, now))
+	metrics := make([]quotaRoutingMetrics, len(available))
+	for i, auth := range available {
+		metrics[i] = buildQuotaRoutingMetrics(auth, model, now)
 	}
 
 	sort.SliceStable(metrics, func(i, j int) bool {
@@ -119,8 +119,7 @@ func buildQuotaRoutingMetrics(auth *Auth, model string, now time.Time) quotaRout
 	if len(windowSignals) > 0 {
 		metrics.hasQuotaSignals = true
 	}
-	for i := 0; i < len(windowSignals); i++ {
-		signal := windowSignals[i]
+	for _, signal := range windowSignals {
 		if signal == nil {
 			continue
 		}
@@ -387,7 +386,7 @@ func authStableKey(auth *Auth) string {
 	if name := strings.TrimSpace(auth.FileName); name != "" {
 		return name
 	}
-	return fmt.Sprintf("%p", auth)
+	return ""
 }
 
 func lessDurationWithKnown(left time.Duration, leftKnown bool, right time.Duration, rightKnown bool) bool {
