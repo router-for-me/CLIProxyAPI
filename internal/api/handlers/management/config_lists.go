@@ -224,6 +224,18 @@ func parseAPIKeysPayload(data []byte) (keys []string, policies []config.APIKeyPo
 	return keys, policies, true
 }
 
+// apiKeyValuePresent reports whether any entry in keys equals value. Used by
+// PatchAPIKeys and DeleteAPIKeys to decide whether a policy migration/removal
+// would orphan a still-valid duplicate credential.
+func apiKeyValuePresent(keys []string, value string) bool {
+	for _, k := range keys {
+		if k == value {
+			return true
+		}
+	}
+	return false
+}
+
 // dedupeKeyList trims and de-duplicates raw key strings while preserving order.
 func dedupeKeyList(in []string) []string {
 	out := make([]string, 0, len(in))
@@ -265,7 +277,16 @@ func (h *Handler) PatchAPIKeys(c *gin.Context) {
 	if body.Index != nil && body.Value != nil && *body.Index >= 0 && *body.Index < len(*target) {
 		prev := (*target)[*body.Index]
 		(*target)[*body.Index] = *body.Value
-		h.renameAPIKeyPolicy(prev, *body.Value)
+		// Indexed patch rewrites exactly one slot. When duplicates of the
+		// previous value remain in APIKeys we must NOT migrate the policy
+		// away from them — doing so would leave the leftover duplicates
+		// unrestricted (falling back to the default allow-all policy).
+		// Only migrate the policy when this was the last slot carrying
+		// prev; in any other case the caller has to set a new policy via
+		// PUT /api-keys explicitly.
+		if !apiKeyValuePresent(*target, prev) {
+			h.renameAPIKeyPolicy(prev, *body.Value)
+		}
 		h.persistLocked(c)
 		return
 	}
@@ -275,7 +296,11 @@ func (h *Handler) PatchAPIKeys(c *gin.Context) {
 			if (*target)[i] == *body.Old {
 				(*target)[i] = *body.New
 				renamed = true
-				break
+				// No break: rename every duplicate so no "old" slot is
+				// left behind after the policy migrates — a leftover
+				// duplicate would otherwise fall back to the default
+				// policy (usually allow-all) and become less restricted
+				// than intended.
 			}
 		}
 		if renamed {
@@ -305,7 +330,13 @@ func (h *Handler) DeleteAPIKeys(c *gin.Context) {
 		if err == nil && idx >= 0 && idx < len(*target) {
 			removed := (*target)[idx]
 			*target = append((*target)[:idx], (*target)[idx+1:]...)
-			h.removeAPIKeyPolicy(removed)
+			// Only drop the policy row if no other entries in APIKeys
+			// still carry this value. Otherwise the remaining duplicates
+			// would lose their restriction and fall back to the default
+			// policy (usually allow-all) — broader access than intended.
+			if !apiKeyValuePresent(*target, removed) {
+				h.removeAPIKeyPolicy(removed)
+			}
 			h.persistLocked(c)
 			return
 		}

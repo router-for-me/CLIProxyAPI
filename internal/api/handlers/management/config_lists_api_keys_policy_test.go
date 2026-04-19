@@ -302,6 +302,149 @@ func TestDeleteAPIKeys_LastPolicyClearsSlice(t *testing.T) {
 	}
 }
 
+// TestPatchAPIKeys_RenameViaOldNewRenamesAllDuplicates pins down a subtle
+// behavior for legacy configs that accidentally contain duplicate values in
+// APIKeys. A name-based patch (old/new) is a bulk rename, so it must rewrite
+// every slot that matches `old`. If it stopped at the first match, the
+// corresponding policy migration (renameAPIKeyPolicy is always global) would
+// leave the surviving duplicates unrestricted — falling back to the default
+// allow-all policy.
+func TestPatchAPIKeys_RenameViaOldNewRenamesAllDuplicates(t *testing.T) {
+	t.Parallel()
+	gin.SetMode(gin.TestMode)
+
+	h := &Handler{
+		cfg: &config.Config{
+			SDKConfig: config.SDKConfig{
+				APIKeys: []string{"sk-dup", "sk-other", "sk-dup"},
+				APIKeyPolicies: []config.APIKeyPolicy{
+					{Key: "sk-dup", AllowedModels: []string{"gpt-4o*"}},
+				},
+			},
+		},
+		configFilePath: writeTestConfigFile(t),
+	}
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPatch, "/v0/management/api-keys",
+		bytes.NewBufferString(`{"old":"sk-dup","new":"sk-new"}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	h.PatchAPIKeys(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	// Both sk-dup entries must have become sk-new so nothing is left behind.
+	wantKeys := []string{"sk-new", "sk-other", "sk-new"}
+	if got := h.cfg.APIKeys; len(got) != len(wantKeys) {
+		t.Fatalf("APIKeys after rename = %#v, want %#v", got, wantKeys)
+	}
+	for i := range wantKeys {
+		if h.cfg.APIKeys[i] != wantKeys[i] {
+			t.Fatalf("APIKeys[%d] = %q, want %q (full=%#v)", i, h.cfg.APIKeys[i], wantKeys[i], h.cfg.APIKeys)
+		}
+	}
+	// And the policy must now apply under the new key — sanity check via the
+	// ACL so a regression surfaces as a permissiveness change, not just a
+	// shape mismatch.
+	if !h.cfg.IsModelAllowedForKey("sk-new", "gpt-4o-mini") {
+		t.Fatalf("sk-new must allow gpt-4o-mini via migrated policy")
+	}
+	if h.cfg.IsModelAllowedForKey("sk-new", "claude-3-5-sonnet-20241022") {
+		t.Fatalf("sk-new must still reject models outside its allowlist")
+	}
+}
+
+// TestPatchAPIKeys_IndexedReplaceLeavesPolicyWhenDuplicateRemains covers the
+// indexed-patch path under duplicate-APIKeys conditions. When the caller
+// rewrites one slot but another slot still holds the old value, migrating the
+// policy away from that value would leave the surviving slot unrestricted.
+// The policy must stay attached to the old value; the new value falls back to
+// the default until the caller sets an explicit policy via PUT.
+func TestPatchAPIKeys_IndexedReplaceLeavesPolicyWhenDuplicateRemains(t *testing.T) {
+	t.Parallel()
+	gin.SetMode(gin.TestMode)
+
+	h := &Handler{
+		cfg: &config.Config{
+			SDKConfig: config.SDKConfig{
+				APIKeys: []string{"sk-dup", "sk-dup"},
+				APIKeyPolicies: []config.APIKeyPolicy{
+					{Key: "sk-dup", AllowedModels: []string{"gpt-4o*"}},
+				},
+			},
+		},
+		configFilePath: writeTestConfigFile(t),
+	}
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPatch, "/v0/management/api-keys",
+		bytes.NewBufferString(`{"index":0,"value":"sk-new"}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	h.PatchAPIKeys(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	// Remaining sk-dup must still be restricted by its policy.
+	if findPolicy(h.cfg.APIKeyPolicies, "sk-dup") == nil {
+		t.Fatalf("policy for surviving sk-dup duplicate must remain")
+	}
+	if !h.cfg.IsModelAllowedForKey("sk-dup", "gpt-4o-mini") {
+		t.Fatalf("surviving sk-dup must still allow gpt-4o-mini")
+	}
+	if h.cfg.IsModelAllowedForKey("sk-dup", "claude-3-5-sonnet-20241022") {
+		t.Fatalf("surviving sk-dup must still reject claude — policy must not have moved")
+	}
+}
+
+// TestDeleteAPIKeys_ByIndexKeepsPolicyWhenDuplicateRemains mirrors the patch
+// case above for the delete path: removing one of two entries with the same
+// value must not drop the policy row, otherwise the surviving duplicate
+// becomes unrestricted under the default policy.
+func TestDeleteAPIKeys_ByIndexKeepsPolicyWhenDuplicateRemains(t *testing.T) {
+	t.Parallel()
+	gin.SetMode(gin.TestMode)
+
+	h := &Handler{
+		cfg: &config.Config{
+			SDKConfig: config.SDKConfig{
+				APIKeys: []string{"sk-dup", "sk-dup"},
+				APIKeyPolicies: []config.APIKeyPolicy{
+					{Key: "sk-dup", AllowedModels: []string{"gpt-4o*"}},
+				},
+			},
+		},
+		configFilePath: writeTestConfigFile(t),
+	}
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodDelete, "/v0/management/api-keys?index=0", nil)
+
+	h.DeleteAPIKeys(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := h.cfg.APIKeys; len(got) != 1 || got[0] != "sk-dup" {
+		t.Fatalf("APIKeys after indexed delete = %#v, want [sk-dup]", got)
+	}
+	if findPolicy(h.cfg.APIKeyPolicies, "sk-dup") == nil {
+		t.Fatalf("policy for surviving sk-dup must remain")
+	}
+	if !h.cfg.IsModelAllowedForKey("sk-dup", "gpt-4o-mini") {
+		t.Fatalf("surviving sk-dup must still allow gpt-4o-mini")
+	}
+	if h.cfg.IsModelAllowedForKey("sk-dup", "claude-3-5-sonnet-20241022") {
+		t.Fatalf("surviving sk-dup must still reject claude — policy must not have been dropped")
+	}
+}
+
 // PutAPIKeys replaces the entire policy set; stale policies for keys that
 // were dropped in the PUT body must not survive.
 func TestPutAPIKeys_StructuredBodyRebuildsPolicies(t *testing.T) {
