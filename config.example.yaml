@@ -103,6 +103,13 @@ quota-exceeded:
 # Routing strategy for selecting credentials when multiple match.
 routing:
   strategy: "round-robin" # round-robin (default), fill-first
+  # Enable universal session-sticky routing for all clients.
+  # Session IDs are extracted from: X-Session-ID header, Idempotency-Key,
+  # metadata.user_id, conversation_id, or first few messages hash.
+  # Automatic failover is always enabled when bound auth becomes unavailable.
+  session-affinity: false # default: false
+  # How long session-to-auth bindings are retained. Default: 1h
+  session-affinity-ttl: "1h"
 
 # When true, enable authentication for the WebSocket API (/v1/ws).
 ws-auth: false
@@ -241,7 +248,7 @@ nonstream-keepalive-interval: 0
 #       # Requests to that alias will round-robin across the upstream names below,
 #       # and if the chosen upstream fails before producing output, the request will
 #       # continue with the next upstream model in the same alias pool.
-#       - name: "qwen3.5-plus"
+#       - name: "deepseek-v3.1"
 #         alias: "claude-opus-4.66"
 #       - name: "glm-5"
 #         alias: "claude-opus-4.66"
@@ -302,7 +309,7 @@ nonstream-keepalive-interval: 0
 
 # Global OAuth model name aliases (per channel)
 # These aliases rename model IDs for both model listing and request routing.
-# Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, qwen, iflow, kimi.
+# Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, kimi.
 # NOTE: Aliases do not apply to gemini-api-key, codex-api-key, claude-api-key, openai-compatibility, vertex-api-key, or ampcode.
 # NOTE: Because aliases affect the merged /v1 model list and merged request routing, overlapping
 # client-visible names can become ambiguous across providers. /api/provider/{provider}/... helps
@@ -329,12 +336,6 @@ nonstream-keepalive-interval: 0
 #   codex:
 #     - name: "gpt-5"
 #       alias: "g5"
-#   qwen:
-#     - name: "qwen3-coder-plus"
-#       alias: "qwen-plus"
-#   iflow:
-#     - name: "glm-4.7"
-#       alias: "glm-god"
 #   kimi:
 #     - name: "kimi-k2.5"
 #       alias: "k2.5"
@@ -356,10 +357,6 @@ nonstream-keepalive-interval: 0
 #     - "claude-3-5-haiku-20241022"
 #   codex:
 #     - "gpt-5-codex-mini"
-#   qwen:
-#     - "vision-model"
-#   iflow:
-#     - "tstars2.0"
 #   kimi:
 #     - "kimi-k2-thinking"
 
