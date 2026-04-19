@@ -1096,47 +1096,57 @@ func SaveConfigPreserveComments(configFile string, cfg *Config) error {
 	}
 	data = NormalizeCommentIndentation(buf.Bytes())
 
-	// Write atomically: temp file in the same directory, fsync, then rename.
-	// This prevents a partial write from corrupting the live config on crash
-	// or concurrent writer races.
-	return writeFileAtomic(configFile, data, 0o644)
+	// Write atomically while preserving the current file's permission bits so
+	// a world-readable default cannot silently relax a restrictive umask on
+	// secret-bearing configs (addresses PR #2885 review feedback).
+	return writeConfigFileAtomically(configFile, data)
 }
 
-// writeFileAtomic writes data to path by first writing to a sibling temp file,
-// flushing it to disk, and then renaming over the target. Rename on the same
-// filesystem is atomic on POSIX and best-effort atomic on Windows (ReplaceFile
-// semantics via os.Rename in Go).
-func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
-	dir := filepath.Dir(path)
-	base := filepath.Base(path)
-	tmp, err := os.CreateTemp(dir, "."+base+".tmp-*")
+// writeConfigFileAtomically writes data to configFile via a sibling temp file
+// with fsync + rename, preserving the existing file's permission bits when the
+// target already exists. When the target does not exist a restrictive 0o600
+// default is used so newly-created configs never widen access. Chmod errors
+// are propagated (not swallowed) so callers can detect failed permission
+// preservation.
+func writeConfigFileAtomically(configFile string, data []byte) error {
+	mode := os.FileMode(0o600)
+	if info, err := os.Stat(configFile); err == nil {
+		mode = info.Mode().Perm()
+	}
+
+	dir := filepath.Dir(configFile)
+	tmp, err := os.CreateTemp(dir, ".config-*.tmp")
 	if err != nil {
 		return err
 	}
 	tmpName := tmp.Name()
-	cleanup := func() { _ = os.Remove(tmpName) }
+	cleanup := func() {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+	}
 
-	if _, err = tmp.Write(data); err != nil {
-		_ = tmp.Close()
+	if err := tmp.Chmod(mode); err != nil {
 		cleanup()
 		return err
 	}
-	if err = tmp.Sync(); err != nil {
-		_ = tmp.Close()
+	if _, err := tmp.Write(data); err != nil {
 		cleanup()
 		return err
 	}
-	if err = tmp.Chmod(perm); err != nil {
-		// Non-fatal on Windows where Chmod has limited effect; ignore.
-		_ = err
-	}
-	if err = tmp.Close(); err != nil {
+	if err := tmp.Sync(); err != nil {
 		cleanup()
 		return err
 	}
-	if err = os.Rename(tmpName, path); err != nil {
-		cleanup()
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpName)
 		return err
+	}
+	if err := os.Rename(tmpName, configFile); err != nil {
+		_ = os.Remove(configFile)
+		if retryErr := os.Rename(tmpName, configFile); retryErr != nil {
+			_ = os.Remove(tmpName)
+			return retryErr
+		}
 	}
 	return nil
 }
@@ -1173,11 +1183,6 @@ func SaveConfigPreserveCommentsUpdateNestedScalar(configFile string, path []stri
 			node = next
 		}
 	}
-	f, err := os.Create(configFile)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = f.Close() }()
 	var buf bytes.Buffer
 	enc := yaml.NewEncoder(&buf)
 	enc.SetIndent(2)
@@ -1189,8 +1194,7 @@ func SaveConfigPreserveCommentsUpdateNestedScalar(configFile string, path []stri
 		return err
 	}
 	data = NormalizeCommentIndentation(buf.Bytes())
-	_, err = f.Write(data)
-	return err
+	return writeConfigFileAtomically(configFile, data)
 }
 
 // NormalizeCommentIndentation removes indentation from standalone YAML comment lines to keep them left aligned.

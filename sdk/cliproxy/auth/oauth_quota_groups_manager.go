@@ -157,6 +157,102 @@ func (m *Manager) clearOAuthQuotaGroupAutoStateLocked(auth *Auth, model string, 
 	return cfg, true
 }
 
+func (m *Manager) OAuthQuotaGroupStateSnapshot() []internalconfig.OAuthAccountQuotaGroupState {
+	if m == nil {
+		return nil
+	}
+	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+	if cfg == nil {
+		return nil
+	}
+	return internalconfig.NormalizeOAuthAccountQuotaGroupState(cfg.OAuthAccountQuotaGroupState)
+}
+
+func (m *Manager) SetOAuthQuotaGroupManualState(authID, groupID string, manualSuspended bool, reason, updatedBy string, now time.Time) *internalconfig.Config {
+	if m == nil {
+		return nil
+	}
+	authID = strings.TrimSpace(authID)
+	groupID = strings.ToLower(strings.TrimSpace(groupID))
+	if authID == "" || groupID == "" {
+		return nil
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	now = now.UTC()
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+	if cfg == nil {
+		cfg = &internalconfig.Config{}
+	}
+	current, _ := findOAuthQuotaGroupState(cfg.OAuthAccountQuotaGroupState, authID, groupID)
+	current.AuthID = authID
+	current.GroupID = groupID
+	current.ManualSuspended = manualSuspended
+	current.ManualReason = strings.TrimSpace(reason)
+	current.UpdatedAt = now
+	current.UpdatedBy = strings.TrimSpace(updatedBy)
+	if current.UpdatedBy == "" {
+		current.UpdatedBy = "management:manual"
+	}
+	if !current.ManualSuspended {
+		current.ManualReason = ""
+	}
+	if !current.ManualSuspended && current.AutoSuspendedUntil.IsZero() {
+		cfg.OAuthAccountQuotaGroupState = internalconfig.RemoveOAuthAccountQuotaGroupState(cfg.OAuthAccountQuotaGroupState, authID, groupID)
+	} else {
+		cfg.OAuthAccountQuotaGroupState = internalconfig.UpsertOAuthAccountQuotaGroupState(cfg.OAuthAccountQuotaGroupState, current)
+	}
+	return cfg
+}
+
+func (m *Manager) ClearOAuthQuotaGroupAutoState(authID, groupID, updatedBy string, now time.Time) *internalconfig.Config {
+	if m == nil {
+		return nil
+	}
+	authID = strings.TrimSpace(authID)
+	groupID = strings.ToLower(strings.TrimSpace(groupID))
+	if authID == "" || groupID == "" {
+		return nil
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	now = now.UTC()
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+	if cfg == nil {
+		cfg = &internalconfig.Config{}
+	}
+	current, ok := findOAuthQuotaGroupState(cfg.OAuthAccountQuotaGroupState, authID, groupID)
+	if !ok {
+		return cfg
+	}
+	current.AutoSuspendedUntil = time.Time{}
+	current.AutoReason = ""
+	current.SourceModel = ""
+	current.SourceProvider = ""
+	current.ResetTimeSource = ""
+	current.UpdatedAt = now
+	current.UpdatedBy = strings.TrimSpace(updatedBy)
+	if current.UpdatedBy == "" {
+		current.UpdatedBy = "management:auto-clear"
+	}
+	if current.ManualSuspended {
+		cfg.OAuthAccountQuotaGroupState = internalconfig.UpsertOAuthAccountQuotaGroupState(cfg.OAuthAccountQuotaGroupState, current)
+	} else {
+		cfg.OAuthAccountQuotaGroupState = internalconfig.RemoveOAuthAccountQuotaGroupState(cfg.OAuthAccountQuotaGroupState, authID, groupID)
+	}
+	return cfg
+}
+
 // ClearExpiredOAuthQuotaGroupAutoStates removes auto cooldown state that has
 // already passed its reset time while preserving manual suspensions.
 func (m *Manager) ClearExpiredOAuthQuotaGroupAutoStates(now time.Time) bool {

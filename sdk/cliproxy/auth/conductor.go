@@ -165,6 +165,9 @@ type Manager struct {
 	// It is initialized in NewManager; never Load() before first Store().
 	runtimeConfig atomic.Value
 
+	// oauthQuotaRuntime stores the manager-scoped quota-group routing snapshot.
+	oauthQuotaRuntime atomic.Value
+
 	// configFilePath stores the active config.yaml path used to persist CPA-owned runtime state.
 	configFilePath atomic.Value
 
@@ -200,6 +203,7 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 	}
 	// atomic.Value requires non-nil initial value.
 	manager.runtimeConfig.Store(&internalconfig.Config{})
+	manager.oauthQuotaRuntime.Store(buildOAuthQuotaRuntimeSnapshot(&internalconfig.Config{}))
 	manager.configFilePath.Store("")
 	manager.apiKeyModelAlias.Store(apiKeyModelAliasTable(nil))
 	manager.scheduler = newAuthScheduler(selector)
@@ -416,8 +420,16 @@ func (m *Manager) SetConfig(cfg *internalconfig.Config) {
 		cfg = &internalconfig.Config{}
 	}
 	m.runtimeConfig.Store(cfg)
+	snapshot := buildOAuthQuotaRuntimeSnapshot(cfg)
+	m.oauthQuotaRuntime.Store(snapshot)
+	m.mu.Lock()
+	for _, auth := range m.auths {
+		if auth != nil {
+			auth.quotaRuntime = snapshot
+		}
+	}
+	m.mu.Unlock()
 	m.applyBuiltInSelectorForConfig(cfg)
-	SetOAuthQuotaRuntimeConfig(cfg)
 	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
 }
 
@@ -1155,6 +1167,9 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	}
 	auth.EnsureIndex()
 	authClone := auth.Clone()
+	if snapshot, ok := m.oauthQuotaRuntime.Load().(*oauthQuotaRuntimeSnapshot); ok {
+		authClone.quotaRuntime = snapshot
+	}
 	m.mu.Lock()
 	m.auths[auth.ID] = authClone
 	m.mu.Unlock()
@@ -1187,6 +1202,9 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	}
 	auth.EnsureIndex()
 	authClone := auth.Clone()
+	if snapshot, ok := m.oauthQuotaRuntime.Load().(*oauthQuotaRuntimeSnapshot); ok {
+		authClone.quotaRuntime = snapshot
+	}
 	m.auths[auth.ID] = authClone
 	m.mu.Unlock()
 	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
@@ -1217,7 +1235,11 @@ func (m *Manager) Load(ctx context.Context) error {
 			continue
 		}
 		auth.EnsureIndex()
-		m.auths[auth.ID] = auth.Clone()
+		authClone := auth.Clone()
+		if snapshot, ok := m.oauthQuotaRuntime.Load().(*oauthQuotaRuntimeSnapshot); ok {
+			authClone.quotaRuntime = snapshot
+		}
+		m.auths[auth.ID] = authClone
 	}
 	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
 	if cfg == nil {
@@ -2315,7 +2337,7 @@ func updateAggregatedAvailability(auth *Auth, now time.Time) {
 	groupQuotaRecover := time.Time{}
 	groupQuotaExceeded := false
 	for _, group := range effectiveGroups {
-		state, ok := oauthQuotaGroupState(auth.ID, group.ID)
+		state, ok := oauthQuotaGroupState(auth, group.ID)
 		if !ok {
 			groupAllUnavailable = false
 			continue

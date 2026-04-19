@@ -4,7 +4,6 @@ import (
 	"path"
 	"sort"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
@@ -16,13 +15,7 @@ type oauthQuotaRuntimeSnapshot struct {
 	states          map[string]map[string]internalconfig.OAuthAccountQuotaGroupState
 }
 
-var oauthQuotaRuntime atomic.Value
-
-func init() {
-	oauthQuotaRuntime.Store(buildOAuthQuotaRuntimeSnapshot(&internalconfig.Config{}))
-}
-
-func buildOAuthQuotaRuntimeSnapshot(cfg *internalconfig.Config) oauthQuotaRuntimeSnapshot {
+func buildOAuthQuotaRuntimeSnapshot(cfg *internalconfig.Config) *oauthQuotaRuntimeSnapshot {
 	if cfg == nil {
 		cfg = &internalconfig.Config{}
 	}
@@ -77,21 +70,16 @@ func buildOAuthQuotaRuntimeSnapshot(cfg *internalconfig.Config) oauthQuotaRuntim
 		stateCopy[authID][groupID] = entry
 	}
 
-	return oauthQuotaRuntimeSnapshot{
+	return &oauthQuotaRuntimeSnapshot{
 		groups:          groupCopy,
 		oauthModelAlias: aliasCopy,
 		states:          stateCopy,
 	}
 }
 
-// SetOAuthQuotaRuntimeConfig updates the global quota-group routing snapshot.
-func SetOAuthQuotaRuntimeConfig(cfg *internalconfig.Config) {
-	oauthQuotaRuntime.Store(buildOAuthQuotaRuntimeSnapshot(cfg))
-}
-
-func currentOAuthQuotaRuntimeSnapshot() oauthQuotaRuntimeSnapshot {
-	if snapshot, ok := oauthQuotaRuntime.Load().(oauthQuotaRuntimeSnapshot); ok {
-		return snapshot
+func oauthQuotaRuntimeSnapshotForAuth(auth *Auth) *oauthQuotaRuntimeSnapshot {
+	if auth != nil && auth.quotaRuntime != nil {
+		return auth.quotaRuntime
 	}
 	return buildOAuthQuotaRuntimeSnapshot(nil)
 }
@@ -118,7 +106,7 @@ func wildcardMatchCI(pattern, value string) bool {
 	return pattern == value
 }
 
-func oauthQuotaGroupCandidates(auth *Auth, model string, snapshot oauthQuotaRuntimeSnapshot) []string {
+func oauthQuotaGroupCandidates(auth *Auth, model string, snapshot *oauthQuotaRuntimeSnapshot) []string {
 	model = strings.TrimSpace(model)
 	if model == "" {
 		return nil
@@ -157,7 +145,7 @@ func resolveOAuthQuotaGroup(auth *Auth, model string) (internalconfig.OAuthQuota
 	if auth == nil || !oauthQuotaProviderSupported(auth.Provider) {
 		return internalconfig.OAuthQuotaGroup{}, false
 	}
-	snapshot := currentOAuthQuotaRuntimeSnapshot()
+	snapshot := oauthQuotaRuntimeSnapshotForAuth(auth)
 	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
 	candidates := oauthQuotaGroupCandidates(auth, model, snapshot)
 	if len(candidates) == 0 {
@@ -189,13 +177,16 @@ func resolveOAuthQuotaGroup(auth *Auth, model string) (internalconfig.OAuthQuota
 	return internalconfig.OAuthQuotaGroup{}, false
 }
 
-func oauthQuotaGroupState(authID, groupID string) (internalconfig.OAuthAccountQuotaGroupState, bool) {
-	authID = strings.TrimSpace(authID)
+func oauthQuotaGroupState(auth *Auth, groupID string) (internalconfig.OAuthAccountQuotaGroupState, bool) {
+	if auth == nil {
+		return internalconfig.OAuthAccountQuotaGroupState{}, false
+	}
+	authID := strings.TrimSpace(auth.ID)
 	groupID = strings.ToLower(strings.TrimSpace(groupID))
 	if authID == "" || groupID == "" {
 		return internalconfig.OAuthAccountQuotaGroupState{}, false
 	}
-	snapshot := currentOAuthQuotaRuntimeSnapshot()
+	snapshot := oauthQuotaRuntimeSnapshotForAuth(auth)
 	byAuth := snapshot.states[authID]
 	if len(byAuth) == 0 {
 		return internalconfig.OAuthAccountQuotaGroupState{}, false
@@ -212,7 +203,7 @@ func oauthQuotaGroupBlock(auth *Auth, model string, now time.Time) (bool, bool, 
 	if !ok {
 		return false, false, time.Time{}
 	}
-	state, ok := oauthQuotaGroupState(auth.ID, group.ID)
+	state, ok := oauthQuotaGroupState(auth, group.ID)
 	if !ok {
 		return false, false, time.Time{}
 	}
@@ -229,7 +220,7 @@ func collectOAuthQuotaGroupsForModels(auth *Auth, models []string) []internalcon
 	if auth == nil || !oauthQuotaProviderSupported(auth.Provider) {
 		return nil
 	}
-	snapshot := currentOAuthQuotaRuntimeSnapshot()
+	snapshot := oauthQuotaRuntimeSnapshotForAuth(auth)
 	seen := make(map[string]internalconfig.OAuthQuotaGroup)
 	for _, model := range models {
 		group, ok := resolveOAuthQuotaGroup(auth, model)

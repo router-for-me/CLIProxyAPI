@@ -21,14 +21,19 @@ func testOAuthQuotaConfig() *internalconfig.Config {
 	}
 }
 
+func applyOAuthQuotaRuntime(cfg *internalconfig.Config, auths ...*Auth) {
+	snapshot := buildOAuthQuotaRuntimeSnapshot(cfg)
+	for _, auth := range auths {
+		if auth != nil {
+			auth.quotaRuntime = snapshot
+		}
+	}
+}
+
 func TestResolveOAuthQuotaGroup_UsesAliasAndPriority(t *testing.T) {
 	cfg := testOAuthQuotaConfig()
-	SetOAuthQuotaRuntimeConfig(cfg)
-	t.Cleanup(func() {
-		SetOAuthQuotaRuntimeConfig(&internalconfig.Config{})
-	})
-
 	auth := &Auth{ID: "auth-1", Provider: "antigravity"}
+	applyOAuthQuotaRuntime(cfg, auth)
 
 	imageGroup, ok := resolveOAuthQuotaGroup(auth, "gemini-3.1-flash-image-4k")
 	if !ok {
@@ -80,12 +85,9 @@ func TestIsAuthBlockedForModel_UsesQuotaGroupState(t *testing.T) {
 			AutoReason:         "quota_exhausted",
 		},
 	}
-	SetOAuthQuotaRuntimeConfig(cfg)
-	t.Cleanup(func() {
-		SetOAuthQuotaRuntimeConfig(&internalconfig.Config{})
-	})
-
 	manualAuth := &Auth{ID: "manual-auth", Provider: "antigravity"}
+	autoAuth := &Auth{ID: "auto-auth", Provider: "antigravity"}
+	applyOAuthQuotaRuntime(cfg, manualAuth, autoAuth)
 	blocked, reason, next := isAuthBlockedForModel(manualAuth, "claude-sonnet-4-6", now)
 	if !blocked {
 		t.Fatal("manual quota-group block = false, want true")
@@ -97,7 +99,6 @@ func TestIsAuthBlockedForModel_UsesQuotaGroupState(t *testing.T) {
 		t.Fatalf("manual quota-group next = %v, want zero", next)
 	}
 
-	autoAuth := &Auth{ID: "auto-auth", Provider: "antigravity"}
 	blocked, reason, next = isAuthBlockedForModel(autoAuth, "gemini-3.1-pro-high", now)
 	if !blocked {
 		t.Fatal("auto quota-group block = false, want true")
@@ -131,12 +132,8 @@ func TestUpdateAggregatedAvailability_UsesEffectiveQuotaGroups(t *testing.T) {
 			ManualSuspended: true,
 		},
 	}
-	SetOAuthQuotaRuntimeConfig(cfg)
-	t.Cleanup(func() {
-		SetOAuthQuotaRuntimeConfig(&internalconfig.Config{})
-	})
-
 	auth := &Auth{ID: "agg-auth", Provider: "antigravity"}
+	applyOAuthQuotaRuntime(cfg, auth)
 	reg := registry.GetGlobalRegistry()
 	reg.RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{
 		{ID: "claude-sonnet-4-6"},
@@ -157,7 +154,7 @@ func TestUpdateAggregatedAvailability_UsesEffectiveQuotaGroups(t *testing.T) {
 		AutoSuspendedUntil: now.Add(10 * time.Minute),
 		AutoReason:         "quota_exhausted",
 	})
-	SetOAuthQuotaRuntimeConfig(cfg)
+	applyOAuthQuotaRuntime(cfg, auth)
 
 	updateAggregatedAvailability(auth, now)
 	if !auth.Unavailable {

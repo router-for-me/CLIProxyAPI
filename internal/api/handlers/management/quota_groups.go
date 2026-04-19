@@ -91,7 +91,7 @@ func (h *Handler) GetAuthFileQuotaGroups(c *gin.Context) {
 	}
 	h.authManager.ClearExpiredOAuthQuotaGroupAutoStates(time.Now())
 	definitions := config.NormalizeOAuthQuotaGroups(h.cfg.OAuthQuotaGroups)
-	stateEntries := config.NormalizeOAuthAccountQuotaGroupState(h.cfg.OAuthAccountQuotaGroupState)
+	stateEntries := h.authManager.OAuthQuotaGroupStateSnapshot()
 	groupPriority := make(map[string]int, len(definitions))
 	for _, group := range definitions {
 		groupPriority[group.ID] = group.Priority
@@ -174,24 +174,8 @@ func (h *Handler) PatchAuthFileQuotaGroupsManual(c *gin.Context) {
 	}
 
 	now := time.Now().UTC()
-	current, _ := lookupOAuthAccountQuotaGroupState(h.cfg.OAuthAccountQuotaGroupState, authID, groupID)
-	current.AuthID = authID
-	current.GroupID = groupID
-	current.ManualSuspended = *body.ManualSuspended
-	current.ManualReason = strings.TrimSpace(body.Reason)
-	current.UpdatedAt = now
-	current.UpdatedBy = strings.TrimSpace(body.UpdatedBy)
-	if current.UpdatedBy == "" {
-		current.UpdatedBy = "management:manual"
-	}
-	if !current.ManualSuspended {
-		current.ManualReason = ""
-	}
-
-	if !current.ManualSuspended && current.AutoSuspendedUntil.IsZero() {
-		h.cfg.OAuthAccountQuotaGroupState = config.RemoveOAuthAccountQuotaGroupState(h.cfg.OAuthAccountQuotaGroupState, authID, groupID)
-	} else {
-		h.cfg.OAuthAccountQuotaGroupState = config.UpsertOAuthAccountQuotaGroupState(h.cfg.OAuthAccountQuotaGroupState, current)
+	if next := h.authManager.SetOAuthQuotaGroupManualState(authID, groupID, *body.ManualSuspended, body.Reason, body.UpdatedBy, now); next != nil {
+		h.cfg = next
 	}
 	h.persist(c)
 }
@@ -213,26 +197,8 @@ func (h *Handler) PatchAuthFileQuotaGroupsAutoClear(c *gin.Context) {
 		return
 	}
 
-	current, ok := lookupOAuthAccountQuotaGroupState(h.cfg.OAuthAccountQuotaGroupState, authID, groupID)
-	if !ok {
-		c.JSON(http.StatusOK, gin.H{"status": "ok"})
-		return
-	}
-	current.AutoSuspendedUntil = time.Time{}
-	current.AutoReason = ""
-	current.SourceModel = ""
-	current.SourceProvider = ""
-	current.ResetTimeSource = ""
-	current.UpdatedAt = time.Now().UTC()
-	current.UpdatedBy = strings.TrimSpace(body.UpdatedBy)
-	if current.UpdatedBy == "" {
-		current.UpdatedBy = "management:auto-clear"
-	}
-
-	if current.ManualSuspended {
-		h.cfg.OAuthAccountQuotaGroupState = config.UpsertOAuthAccountQuotaGroupState(h.cfg.OAuthAccountQuotaGroupState, current)
-	} else {
-		h.cfg.OAuthAccountQuotaGroupState = config.RemoveOAuthAccountQuotaGroupState(h.cfg.OAuthAccountQuotaGroupState, authID, groupID)
+	if next := h.authManager.ClearOAuthQuotaGroupAutoState(authID, groupID, body.UpdatedBy, time.Now().UTC()); next != nil {
+		h.cfg = next
 	}
 	h.persist(c)
 }

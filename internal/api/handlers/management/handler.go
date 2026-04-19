@@ -120,7 +120,6 @@ func (h *Handler) SetConfig(cfg *config.Config) {
 func (h *Handler) SetAuthManager(manager *coreauth.Manager) {
 	h.authManager = manager
 	if manager != nil {
-		manager.SetConfig(h.cfg)
 		manager.SetConfigFilePath(h.configFilePath)
 	}
 }
@@ -297,7 +296,6 @@ func (h *Handler) persist(c *gin.Context) bool {
 		return false
 	}
 	if h.authManager != nil {
-		h.authManager.SetConfig(h.cfg)
 		h.authManager.SetConfigFilePath(h.configFilePath)
 	}
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
