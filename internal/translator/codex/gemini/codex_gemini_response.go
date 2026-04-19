@@ -7,6 +7,8 @@ package gemini
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"strings"
 	"time"
 
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/common"
@@ -25,6 +27,7 @@ type ConvertCodexResponseToGeminiParams struct {
 	ResponseID         string
 	LastStorageOutput  []byte
 	HasOutputTextDelta bool
+	LastImageHashByID  map[string][32]byte
 }
 
 // ConvertCodexResponseToGemini converts Codex streaming response format to Gemini format.
@@ -48,6 +51,7 @@ func ConvertCodexResponseToGemini(_ context.Context, modelName string, originalR
 			ResponseID:         "",
 			LastStorageOutput:  nil,
 			HasOutputTextDelta: false,
+			LastImageHashByID:  make(map[string][32]byte),
 		}
 	}
 
@@ -74,10 +78,63 @@ func ConvertCodexResponseToGemini(_ context.Context, modelName string, originalR
 		template, _ = sjson.SetBytes(template, "responseId", params.ResponseID)
 	}
 
+	if typeStr == "response.image_generation_call.partial_image" {
+		itemID := rootResult.Get("item_id").String()
+		b64 := rootResult.Get("partial_image_b64").String()
+		if b64 == "" {
+			return [][]byte{}
+		}
+		if itemID != "" {
+			if params.LastImageHashByID == nil {
+				params.LastImageHashByID = make(map[string][32]byte)
+			}
+			hash := sha256.Sum256([]byte(b64))
+			if last, ok := params.LastImageHashByID[itemID]; ok && last == hash {
+				return [][]byte{}
+			}
+			params.LastImageHashByID[itemID] = hash
+		}
+
+		outputFormat := rootResult.Get("output_format").String()
+		mimeType := mimeTypeFromCodexOutputFormat(outputFormat)
+
+		part := []byte(`{"inlineData":{"data":"","mimeType":""}}`)
+		part, _ = sjson.SetBytes(part, "inlineData.data", b64)
+		part, _ = sjson.SetBytes(part, "inlineData.mimeType", mimeType)
+		template, _ = sjson.SetRawBytes(template, "candidates.0.content.parts.-1", part)
+		return [][]byte{template}
+	}
+
 	// Handle function call completion
 	if typeStr == "response.output_item.done" {
 		itemResult := rootResult.Get("item")
 		itemType := itemResult.Get("type").String()
+		if itemType == "image_generation_call" {
+			itemID := itemResult.Get("id").String()
+			b64 := itemResult.Get("result").String()
+			if b64 == "" {
+				return [][]byte{}
+			}
+			if itemID != "" {
+				if params.LastImageHashByID == nil {
+					params.LastImageHashByID = make(map[string][32]byte)
+				}
+				hash := sha256.Sum256([]byte(b64))
+				if last, ok := params.LastImageHashByID[itemID]; ok && last == hash {
+					return [][]byte{}
+				}
+				params.LastImageHashByID[itemID] = hash
+			}
+
+			outputFormat := itemResult.Get("output_format").String()
+			mimeType := mimeTypeFromCodexOutputFormat(outputFormat)
+
+			part := []byte(`{"inlineData":{"data":"","mimeType":""}}`)
+			part, _ = sjson.SetBytes(part, "inlineData.data", b64)
+			part, _ = sjson.SetBytes(part, "inlineData.mimeType", mimeType)
+			template, _ = sjson.SetRawBytes(template, "candidates.0.content.parts.-1", part)
+			return [][]byte{template}
+		}
 		if itemType == "function_call" {
 			// Create function call part
 			functionCall := []byte(`{"functionCall":{"name":"","args":{}}}`)
@@ -270,6 +327,20 @@ func ConvertCodexResponseToGeminiNonStream(_ context.Context, modelName string, 
 						})
 					}
 
+				case "image_generation_call":
+					flushPendingFunctionCalls()
+					b64 := value.Get("result").String()
+					if b64 == "" {
+						break
+					}
+					outputFormat := value.Get("output_format").String()
+					mimeType := mimeTypeFromCodexOutputFormat(outputFormat)
+
+					part := []byte(`{"inlineData":{"data":"","mimeType":""}}`)
+					part, _ = sjson.SetBytes(part, "inlineData.data", b64)
+					part, _ = sjson.SetBytes(part, "inlineData.mimeType", mimeType)
+					template, _ = sjson.SetRawBytes(template, "candidates.0.content.parts.-1", part)
+
 				case "function_call":
 					// Collect function call for potential merging with consecutive ones
 					hasToolCall = true
@@ -341,4 +412,25 @@ func buildReverseMapFromGeminiOriginal(original []byte) map[string]string {
 
 func GeminiTokenCount(ctx context.Context, count int64) []byte {
 	return translatorcommon.GeminiTokenCountJSON(count)
+}
+
+func mimeTypeFromCodexOutputFormat(outputFormat string) string {
+	if outputFormat == "" {
+		return "image/png"
+	}
+	if strings.Contains(outputFormat, "/") {
+		return outputFormat
+	}
+	switch strings.ToLower(outputFormat) {
+	case "png":
+		return "image/png"
+	case "jpg", "jpeg":
+		return "image/jpeg"
+	case "webp":
+		return "image/webp"
+	case "gif":
+		return "image/gif"
+	default:
+		return "image/png"
+	}
 }

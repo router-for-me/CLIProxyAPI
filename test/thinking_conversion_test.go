@@ -2,7 +2,6 @@ package test
 
 import (
 	"fmt"
-	"strings"
 	"testing"
 	"time"
 
@@ -1066,12 +1065,12 @@ func TestThinkingE2EMatrix_Suffix(t *testing.T) {
 			expectErr:       false,
 		},
 
-		// Gemini Family Cross-Channel Consistency (Cases 106-114)
+		// Gemini Family Cross-Channel Consistency (Cases 90-95)
 		// Tests that gemini/gemini-cli/antigravity as same API family should have consistent validation behavior
 
-		// Case 106: Gemini to Antigravity, budget 64000 (suffix) → clamped to Max
+		// Case 90: Gemini to Antigravity, budget 64000 (suffix) → clamped to Max
 		{
-			name:            "106",
+			name:            "90",
 			from:            "gemini",
 			to:              "antigravity",
 			model:           "gemini-budget-model(64000)",
@@ -1081,9 +1080,9 @@ func TestThinkingE2EMatrix_Suffix(t *testing.T) {
 			includeThoughts: "true",
 			expectErr:       false,
 		},
-		// Case 107: Gemini to Gemini-CLI, budget 64000 (suffix) → clamped to Max
+		// Case 91: Gemini to Gemini-CLI, budget 64000 (suffix) → clamped to Max
 		{
-			name:            "107",
+			name:            "91",
 			from:            "gemini",
 			to:              "gemini-cli",
 			model:           "gemini-budget-model(64000)",
@@ -1093,9 +1092,9 @@ func TestThinkingE2EMatrix_Suffix(t *testing.T) {
 			includeThoughts: "true",
 			expectErr:       false,
 		},
-		// Case 108: Gemini-CLI to Antigravity, budget 64000 (suffix) → clamped to Max
+		// Case 92: Gemini-CLI to Antigravity, budget 64000 (suffix) → clamped to Max
 		{
-			name:            "108",
+			name:            "92",
 			from:            "gemini-cli",
 			to:              "antigravity",
 			model:           "gemini-budget-model(64000)",
@@ -1105,9 +1104,9 @@ func TestThinkingE2EMatrix_Suffix(t *testing.T) {
 			includeThoughts: "true",
 			expectErr:       false,
 		},
-		// Case 109: Gemini-CLI to Gemini, budget 64000 (suffix) → clamped to Max
+		// Case 93: Gemini-CLI to Gemini, budget 64000 (suffix) → clamped to Max
 		{
-			name:            "109",
+			name:            "93",
 			from:            "gemini-cli",
 			to:              "gemini",
 			model:           "gemini-budget-model(64000)",
@@ -1117,9 +1116,9 @@ func TestThinkingE2EMatrix_Suffix(t *testing.T) {
 			includeThoughts: "true",
 			expectErr:       false,
 		},
-		// Case 110: Gemini to Antigravity, budget 8192 → passthrough (normal value)
+		// Case 94: Gemini to Antigravity, budget 8192 → passthrough (normal value)
 		{
-			name:            "110",
+			name:            "94",
 			from:            "gemini",
 			to:              "antigravity",
 			model:           "gemini-budget-model(8192)",
@@ -1129,9 +1128,9 @@ func TestThinkingE2EMatrix_Suffix(t *testing.T) {
 			includeThoughts: "true",
 			expectErr:       false,
 		},
-		// Case 111: Gemini-CLI to Antigravity, budget 8192 → passthrough (normal value)
+		// Case 95: Gemini-CLI to Antigravity, budget 8192 → passthrough (normal value)
 		{
-			name:            "111",
+			name:            "95",
 			from:            "gemini-cli",
 			to:              "antigravity",
 			model:           "gemini-budget-model(8192)",
@@ -2167,12 +2166,12 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
 			expectErr:   true,
 		},
 
-		// Gemini Family Cross-Channel Consistency (Cases 106-114)
+		// Gemini Family Cross-Channel Consistency (Cases 90-95)
 		// Tests that gemini/gemini-cli/antigravity as same API family should have consistent validation behavior
 
-		// Case 106: Gemini to Antigravity, thinkingBudget=64000 → exceeds Max error (same family strict validation)
+		// Case 90: Gemini to Antigravity, thinkingBudget=64000 → exceeds Max error (same family strict validation)
 		{
-			name:        "106",
+			name:        "90",
 			from:        "gemini",
 			to:          "antigravity",
 			model:       "gemini-budget-model",
@@ -2180,9 +2179,9 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
 			expectField: "",
 			expectErr:   true,
 		},
-		// Case 107: Gemini to Gemini-CLI, thinkingBudget=64000 → exceeds Max error (same family strict validation)
+		// Case 91: Gemini to Gemini-CLI, thinkingBudget=64000 → exceeds Max error (same family strict validation)
 		{
-			name:        "107",
+			name:        "91",
 			from:        "gemini",
 			to:          "gemini-cli",
 			model:       "gemini-budget-model",
@@ -2190,9 +2189,9 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
 			expectField: "",
 			expectErr:   true,
 		},
-		// Case 108: Gemini-CLI to Antigravity, thinkingBudget=64000 → exceeds Max error (same family strict validation)
+		// Case 92: Gemini-CLI to Antigravity, thinkingBudget=64000 → exceeds Max error (same family strict validation)
 		{
-			name:        "108",
+			name:        "92",
 			from:        "gemini-cli",
 			to:          "antigravity",
 			model:       "gemini-budget-model",
@@ -2200,9 +2199,9 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
 			expectField: "",
 			expectErr:   true,
 		},
-		// Case 109: Gemini-CLI to Gemini, thinkingBudget=64000 → exceeds Max error (same family strict validation)
+		// Case 93: Gemini-CLI to Gemini, thinkingBudget=64000 → exceeds Max error (same family strict validation)
 		{
-			name:        "109",
+			name:        "93",
 			from:        "gemini-cli",
 			to:          "gemini",
 			model:       "gemini-budget-model",
@@ -2210,9 +2209,9 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
 			expectField: "",
 			expectErr:   true,
 		},
-		// Case 110: Gemini to Antigravity, thinkingBudget=8192 → passthrough (normal value)
+		// Case 94: Gemini to Antigravity, thinkingBudget=8192 → passthrough (normal value)
 		{
-			name:            "110",
+			name:            "94",
 			from:            "gemini",
 			to:              "antigravity",
 			model:           "gemini-budget-model",
@@ -2222,9 +2221,9 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
 			includeThoughts: "true",
 			expectErr:       false,
 		},
-		// Case 111: Gemini-CLI to Antigravity, thinkingBudget=8192 → passthrough (normal value)
+		// Case 95: Gemini-CLI to Antigravity, thinkingBudget=8192 → passthrough (normal value)
 		{
-			name:            "111",
+			name:            "95",
 			from:            "gemini-cli",
 			to:              "antigravity",
 			model:           "gemini-budget-model",
