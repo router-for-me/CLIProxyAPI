@@ -140,7 +140,7 @@ func (h *Handler) PutAPIKeys(c *gin.Context) {
 	}
 
 	h.cfg.APIKeys = append([]string(nil), keys...)
-	h.cfg.APIKeyPolicies = append([]config.APIKeyPolicy(nil), policies...)
+	h.cfg.SetAPIKeyPolicies(policies)
 	h.persist(c)
 }
 
@@ -239,11 +239,138 @@ func dedupeKeyList(in []string) []string {
 	}
 	return out
 }
+// PatchAPIKeys mutates the bearer-key list in place (rename via old/new,
+// overwrite via index/value) AND keeps APIKeyPolicies in sync so that renamed
+// keys do not silently shed their model-allowlist (see issue flagged by the
+// Codex review on the prior PR: rotation leaked policy rows and caused new
+// keys to fall back to the default policy). Unknown shapes 400.
 func (h *Handler) PatchAPIKeys(c *gin.Context) {
-	h.patchStringList(c, &h.cfg.APIKeys, func() {})
+	var body struct {
+		Old   *string `json:"old"`
+		New   *string `json:"new"`
+		Index *int    `json:"index"`
+		Value *string `json:"value"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(400, gin.H{"error": "invalid body"})
+		return
+	}
+	target := &h.cfg.APIKeys
+
+	if body.Index != nil && body.Value != nil && *body.Index >= 0 && *body.Index < len(*target) {
+		prev := (*target)[*body.Index]
+		(*target)[*body.Index] = *body.Value
+		h.renameAPIKeyPolicy(prev, *body.Value)
+		h.persist(c)
+		return
+	}
+	if body.Old != nil && body.New != nil {
+		renamed := false
+		for i := range *target {
+			if (*target)[i] == *body.Old {
+				(*target)[i] = *body.New
+				renamed = true
+				break
+			}
+		}
+		if renamed {
+			h.renameAPIKeyPolicy(*body.Old, *body.New)
+		} else {
+			*target = append(*target, *body.New)
+			// New key has no prior policy — nothing to rename. The default
+			// policy applies until PUT /api-keys sets an explicit policy.
+		}
+		h.persist(c)
+		return
+	}
+	c.JSON(400, gin.H{"error": "missing fields"})
 }
+
+// DeleteAPIKeys removes the bearer key matched by ?index= or ?value= AND
+// drops any APIKeyPolicies entries keyed by the deleted value, so the policy
+// cannot outlive the credential.
 func (h *Handler) DeleteAPIKeys(c *gin.Context) {
-	h.deleteFromStringList(c, &h.cfg.APIKeys, func() {})
+	target := &h.cfg.APIKeys
+
+	if idxStr := c.Query("index"); idxStr != "" {
+		var idx int
+		_, err := fmt.Sscanf(idxStr, "%d", &idx)
+		if err == nil && idx >= 0 && idx < len(*target) {
+			removed := (*target)[idx]
+			*target = append((*target)[:idx], (*target)[idx+1:]...)
+			h.removeAPIKeyPolicy(removed)
+			h.persist(c)
+			return
+		}
+	}
+	if val := strings.TrimSpace(c.Query("value")); val != "" {
+		out := make([]string, 0, len(*target))
+		for _, v := range *target {
+			if strings.TrimSpace(v) != val {
+				out = append(out, v)
+			}
+		}
+		*target = out
+		h.removeAPIKeyPolicy(val)
+		h.persist(c)
+		return
+	}
+	c.JSON(400, gin.H{"error": "missing index or value"})
+}
+
+// renameAPIKeyPolicy updates the Key field of any APIKeyPolicy whose Key
+// matches oldKey. If newKey already has a policy row we drop the old one
+// (newKey's policy wins — callers should use PUT /api-keys if they want a
+// different merge). Any mutation invalidates the cached lookup map.
+func (h *Handler) renameAPIKeyPolicy(oldKey, newKey string) {
+	oldKey = strings.TrimSpace(oldKey)
+	newKey = strings.TrimSpace(newKey)
+	if oldKey == "" || oldKey == newKey || len(h.cfg.APIKeyPolicies) == 0 {
+		return
+	}
+	hasNew := false
+	for i := range h.cfg.APIKeyPolicies {
+		if h.cfg.APIKeyPolicies[i].Key == newKey {
+			hasNew = true
+			break
+		}
+	}
+	out := h.cfg.APIKeyPolicies[:0]
+	for i := range h.cfg.APIKeyPolicies {
+		p := h.cfg.APIKeyPolicies[i]
+		if p.Key == oldKey {
+			if hasNew {
+				// Drop the old row entirely.
+				continue
+			}
+			p.Key = newKey
+		}
+		out = append(out, p)
+	}
+	h.cfg.APIKeyPolicies = append([]config.APIKeyPolicy(nil), out...)
+	h.cfg.InvalidatePolicyIndex()
+}
+
+// removeAPIKeyPolicy drops every APIKeyPolicy row keyed by the given value.
+// The cached lookup map is invalidated.
+func (h *Handler) removeAPIKeyPolicy(key string) {
+	key = strings.TrimSpace(key)
+	if key == "" || len(h.cfg.APIKeyPolicies) == 0 {
+		return
+	}
+	out := make([]config.APIKeyPolicy, 0, len(h.cfg.APIKeyPolicies))
+	for i := range h.cfg.APIKeyPolicies {
+		if h.cfg.APIKeyPolicies[i].Key == key {
+			continue
+		}
+		out = append(out, h.cfg.APIKeyPolicies[i])
+	}
+	if len(out) == 0 {
+		h.cfg.APIKeyPolicies = nil
+	} else {
+		h.cfg.APIKeyPolicies = out
+	}
+	h.cfg.InvalidatePolicyIndex()
 }
 
 // gemini-api-key: []GeminiKey

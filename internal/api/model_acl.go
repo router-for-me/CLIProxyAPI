@@ -19,6 +19,7 @@ package api
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -27,6 +28,18 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/tidwall/gjson"
 )
+
+// modelACLMaxBodyBytes caps the request body the ACL middleware is willing to
+// buffer in order to extract the "model" field. Set generously enough to
+// accommodate real chat-completion payloads (long prompts, many turns) while
+// bounding memory growth per request. Requests above this size are rejected
+// with HTTP 413 so they cannot silently bypass policy by being too large to
+// inspect.
+const modelACLMaxBodyBytes int64 = 10 * 1024 * 1024 // 10 MiB
+
+// errBodyTooLarge is used as a sentinel so extractRequestedModel can
+// distinguish a client payload that exceeded the cap from an I/O failure.
+var errBodyTooLarge = errors.New("model_acl: request body exceeds cap")
 
 // ModelACLMiddleware enforces SDKConfig.APIKeyPolicies for the routes it is
 // installed on. The cfgFn closure is evaluated on every request so that hot
@@ -60,7 +73,27 @@ func ModelACLMiddleware(cfgFn func() *config.Config) gin.HandlerFunc {
 			return
 		}
 
-		model, found := extractRequestedModel(c)
+		model, found, err := extractRequestedModel(c)
+		if err != nil {
+			if errors.Is(err, errBodyTooLarge) {
+				c.AbortWithStatusJSON(http.StatusRequestEntityTooLarge, gin.H{
+					"error": gin.H{
+						"type":    "request_too_large",
+						"message": "request body exceeds the model-ACL inspection cap",
+					},
+				})
+				return
+			}
+			// Any other read error: fail closed rather than silently skipping
+			// policy enforcement. Treat as a bad request.
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{
+				"error": gin.H{
+					"type":    "invalid_request_body",
+					"message": "could not read request body for model ACL enforcement",
+				},
+			})
+			return
+		}
 		if !found {
 			// No model in this request shape (listing, ping, etc.) — allow.
 			c.Next()
@@ -83,13 +116,18 @@ func ModelACLMiddleware(cfgFn func() *config.Config) gin.HandlerFunc {
 }
 
 // extractRequestedModel returns the model identifier the current request is
-// targeting, or ok=false when none can be determined for the route.
+// targeting, or ok=false when none can be determined for the route. An error
+// is returned only when reading the request body fails (including when the
+// body exceeds modelACLMaxBodyBytes — see errBodyTooLarge).
 //
 // The function intentionally consumes and restores the request body so that
-// downstream handlers see an unmodified io.Reader.
-func extractRequestedModel(c *gin.Context) (model string, ok bool) {
+// downstream handlers see an unmodified io.Reader. To keep this cheap in
+// memory, the body is read through a LimitReader that aborts with
+// errBodyTooLarge if the client attempted to send more than
+// modelACLMaxBodyBytes, so oversized requests cannot silently bypass policy.
+func extractRequestedModel(c *gin.Context) (model string, ok bool, err error) {
 	if c == nil || c.Request == nil {
-		return "", false
+		return "", false, nil
 	}
 
 	// Gemini-style: /v1beta/models/<model>:<action>
@@ -106,36 +144,51 @@ func extractRequestedModel(c *gin.Context) (model string, ok bool) {
 		}
 		rest = strings.TrimSpace(rest)
 		if rest != "" {
-			return rest, true
+			return rest, true, nil
 		}
 	}
 
 	// JSON body: "model" field. Only POST/PUT/PATCH carry bodies we care about.
 	method := c.Request.Method
 	if method != http.MethodPost && method != http.MethodPut && method != http.MethodPatch {
-		return "", false
+		return "", false, nil
 	}
 	if c.Request.Body == nil {
-		return "", false
+		return "", false, nil
 	}
 
-	bodyBytes, err := io.ReadAll(c.Request.Body)
-	if err != nil {
-		return "", false
+	// Short-circuit the too-large case cheaply when Content-Length is known.
+	if c.Request.ContentLength > modelACLMaxBodyBytes {
+		return "", false, errBodyTooLarge
+	}
+
+	// Read at most cap+1 bytes; if the limited reader hits EOF at cap+1 we
+	// know the client sent more than the cap and abort. Otherwise we restore
+	// exactly the bytes we consumed.
+	limited := io.LimitReader(c.Request.Body, modelACLMaxBodyBytes+1)
+	bodyBytes, readErr := io.ReadAll(limited)
+	if readErr != nil {
+		return "", false, readErr
+	}
+	if int64(len(bodyBytes)) > modelACLMaxBodyBytes {
+		// Drain and discard the remainder so the underlying connection can
+		// close cleanly without us holding extra state.
+		_, _ = io.Copy(io.Discard, c.Request.Body)
+		return "", false, errBodyTooLarge
 	}
 	// Always restore the body so downstream handlers can re-read it.
 	c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 
 	if len(bodyBytes) == 0 {
-		return "", false
+		return "", false, nil
 	}
 	res := gjson.GetBytes(bodyBytes, "model")
 	if !res.Exists() || res.Type != gjson.String {
-		return "", false
+		return "", false, nil
 	}
 	model = strings.TrimSpace(res.String())
 	if model == "" {
-		return "", false
+		return "", false, nil
 	}
-	return model, true
+	return model, true, nil
 }

@@ -7,6 +7,7 @@ package config
 import (
 	"path"
 	"strings"
+	"sync/atomic"
 )
 
 // APIKeyDefaultPolicyAllowAll permits any model when a key has no explicit AllowedModels list.
@@ -51,6 +52,16 @@ type SDKConfig struct {
 	// provider; entries without a matching APIKeys row are ignored.
 	APIKeyPolicies []APIKeyPolicy `yaml:"api-key-policies,omitempty" json:"api-key-policies,omitempty"`
 
+	// policyIndex is a lazily-built, per-request-cheap lookup from api-key
+	// value to its APIKeyPolicy. It is populated on first read after any
+	// mutation to APIKeyPolicies. Mutators must call InvalidatePolicyIndex
+	// so subsequent reads rebuild it. The pointer-based cache avoids locking
+	// on the read path in the ModelACLMiddleware hot loop. The field is
+	// unexported and carries no serialization tags — encoding/json and
+	// yaml.v3 both ignore unexported fields, so it will not leak into
+	// persisted config files.
+	policyIndex atomic.Pointer[map[string]*APIKeyPolicy]
+
 	// APIKeyDefaultPolicy controls behavior for keys with no entry in
 	// APIKeyPolicies, or whose entry has an empty AllowedModels list. Valid
 	// values are "allow-all" (default, backward compatible) and "deny-all".
@@ -91,34 +102,87 @@ func (c *SDKConfig) IsModelAllowedForKey(key, model string) bool {
 		candidate = candidate[idx+1:]
 	}
 
-	for i := range c.APIKeyPolicies {
-		if c.APIKeyPolicies[i].Key != trimmedKey {
+	policy, ok := c.lookupPolicy(trimmedKey)
+	if !ok {
+		return c.defaultAllows()
+	}
+	patterns := policy.AllowedModels
+	if len(patterns) == 0 {
+		return c.defaultAllows()
+	}
+	for _, pattern := range patterns {
+		pattern = strings.TrimSpace(pattern)
+		if pattern == "" {
 			continue
 		}
-		patterns := c.APIKeyPolicies[i].AllowedModels
-		if len(patterns) == 0 {
-			return c.defaultAllows()
+		if pattern == candidate {
+			return true
 		}
-		for _, pattern := range patterns {
-			pattern = strings.TrimSpace(pattern)
-			if pattern == "" {
-				continue
-			}
-			if pattern == candidate {
-				return true
-			}
-			if matched, err := path.Match(pattern, candidate); err == nil && matched {
-				return true
-			}
-			// Also try the unstripped form for keys whose policies were
-			// authored against the prefixed model name verbatim.
-			if matched, err := path.Match(pattern, model); err == nil && matched {
-				return true
-			}
+		if matched, err := path.Match(pattern, candidate); err == nil && matched {
+			return true
 		}
-		return false
+		// Also try the unstripped form for keys whose policies were
+		// authored against the prefixed model name verbatim.
+		if matched, err := path.Match(pattern, model); err == nil && matched {
+			return true
+		}
 	}
-	return c.defaultAllows()
+	return false
+}
+
+// lookupPolicy returns the APIKeyPolicy for the given key using an O(1) map
+// cache. The cache is lazily rebuilt after any mutation that calls
+// InvalidatePolicyIndex. Callers must not retain the returned pointer across
+// a mutation of APIKeyPolicies — the backing entry may have been replaced.
+func (c *SDKConfig) lookupPolicy(key string) (*APIKeyPolicy, bool) {
+	if c == nil {
+		return nil, false
+	}
+	mp := c.policyIndex.Load()
+	if mp == nil {
+		built := make(map[string]*APIKeyPolicy, len(c.APIKeyPolicies))
+		for i := range c.APIKeyPolicies {
+			built[c.APIKeyPolicies[i].Key] = &c.APIKeyPolicies[i]
+		}
+		// Publish only if nobody beat us to it. If another goroutine won the
+		// race, adopt their map — both are semantically equivalent snapshots
+		// of the same APIKeyPolicies slice at this moment.
+		if c.policyIndex.CompareAndSwap(nil, &built) {
+			mp = &built
+		} else {
+			mp = c.policyIndex.Load()
+		}
+	}
+	if mp == nil {
+		return nil, false
+	}
+	policy, ok := (*mp)[key]
+	return policy, ok
+}
+
+// InvalidatePolicyIndex clears the cached lookup map. Call this after any
+// mutation of APIKeyPolicies (assignment, in-place edit, append, delete) so
+// subsequent reads rebuild the index. Safe to call on a nil receiver.
+func (c *SDKConfig) InvalidatePolicyIndex() {
+	if c == nil {
+		return
+	}
+	c.policyIndex.Store(nil)
+}
+
+// SetAPIKeyPolicies atomically replaces the policy slice and invalidates the
+// cached lookup map in one step. Prefer this over direct slice assignment to
+// keep read-side lookups consistent.
+func (c *SDKConfig) SetAPIKeyPolicies(policies []APIKeyPolicy) {
+	if c == nil {
+		return
+	}
+	if len(policies) == 0 {
+		c.APIKeyPolicies = nil
+	} else {
+		c.APIKeyPolicies = append([]APIKeyPolicy(nil), policies...)
+	}
+	c.InvalidatePolicyIndex()
 }
 
 func (c *SDKConfig) defaultAllows() bool {

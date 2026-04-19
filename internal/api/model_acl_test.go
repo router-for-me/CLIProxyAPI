@@ -152,6 +152,59 @@ func TestModelACLMiddleware_GeminiPathExtraction(t *testing.T) {
 	}
 }
 
+func TestModelACLMiddleware_OversizedBodyRejectedWith413(t *testing.T) {
+	// An oversized request body must not silently bypass policy by being
+	// too large to inspect — the middleware is expected to return 413 so
+	// the client sees a clear failure instead of the ACL being skipped.
+	cfg := &config.Config{
+		SDKConfig: config.SDKConfig{
+			APIKeys: []string{"sk-narrow"},
+			APIKeyPolicies: []config.APIKeyPolicy{
+				{Key: "sk-narrow", AllowedModels: []string{"gpt-4o*"}},
+			},
+		},
+	}
+	router := newTestRouter(cfg, "sk-narrow")
+
+	// Build a body just over the cap.
+	filler := bytes.Repeat([]byte("a"), int(modelACLMaxBodyBytes)+128)
+	body := append([]byte(`{"model":"gpt-4o","pad":"`), filler...)
+	body = append(body, '"', '}')
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected 413, got %d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "request_too_large") {
+		t.Fatalf("expected request_too_large error type, got %s", w.Body.String())
+	}
+}
+
+func TestModelACLMiddleware_OversizedBodyRejectedViaContentLength(t *testing.T) {
+	// When Content-Length alone tells us the body is too large we should
+	// bail before reading, to avoid buffering a large payload even briefly.
+	cfg := &config.Config{
+		SDKConfig: config.SDKConfig{
+			APIKeys: []string{"sk-narrow"},
+			APIKeyPolicies: []config.APIKeyPolicy{
+				{Key: "sk-narrow", AllowedModels: []string{"gpt-4o*"}},
+			},
+		},
+	}
+	router := newTestRouter(cfg, "sk-narrow")
+	body := []byte(`{"model":"gpt-4o"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.ContentLength = modelACLMaxBodyBytes + 1
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected 413 via Content-Length, got %d body=%s", w.Code, w.Body.String())
+	}
+}
+
 func TestModelACLMiddleware_ListEndpointAlwaysAllowed(t *testing.T) {
 	// /v1/models has no body and no model in path; the middleware must
 	// permit it regardless of policy so clients can still discover models.
