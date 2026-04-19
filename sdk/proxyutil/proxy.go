@@ -32,9 +32,26 @@ type Setting struct {
 	URL  *url.URL
 }
 
+func normalizeDuplicatedProxyURL(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if len(trimmed) < 2 || len(trimmed)%2 != 0 {
+		return trimmed
+	}
+	half := len(trimmed) / 2
+	left := trimmed[:half]
+	right := trimmed[half:]
+	if left != right {
+		return trimmed
+	}
+	if !strings.Contains(left, "://") {
+		return trimmed
+	}
+	return left
+}
+
 // Parse normalizes a proxy configuration value into inherit, direct, or proxy modes.
 func Parse(raw string) (Setting, error) {
-	trimmed := strings.TrimSpace(raw)
+	trimmed := normalizeDuplicatedProxyURL(raw)
 	setting := Setting{Raw: trimmed}
 
 	if trimmed == "" {

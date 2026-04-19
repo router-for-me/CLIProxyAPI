@@ -28,3 +28,41 @@ func TestNewProxyAwareHTTPClientDirectBypassesGlobalProxy(t *testing.T) {
 		t.Fatal("expected direct transport to disable proxy function")
 	}
 }
+
+func TestNewProxyAwareHTTPClientReusesAuthProxyTransport(t *testing.T) {
+	t.Parallel()
+
+	auth := &cliproxyauth.Auth{ProxyURL: "socks5://auth-proxy-cache.example.com:1080"}
+	clientOne := NewProxyAwareHTTPClient(context.Background(), nil, auth, 0)
+	clientTwo := NewProxyAwareHTTPClient(context.Background(), nil, auth, 0)
+
+	if clientOne.Transport == nil {
+		t.Fatal("expected first client transport to be set")
+	}
+	if clientTwo.Transport == nil {
+		t.Fatal("expected second client transport to be set")
+	}
+	if clientOne.Transport != clientTwo.Transport {
+		t.Fatal("expected auth proxy transport to be reused")
+	}
+}
+
+func TestNewProxyAwareHTTPClientReusesGlobalProxyTransport(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{
+		SDKConfig: sdkconfig.SDKConfig{ProxyURL: "http://global-proxy-cache.example.com:8080"},
+	}
+	clientOne := NewProxyAwareHTTPClient(context.Background(), cfg, nil, 0)
+	clientTwo := NewProxyAwareHTTPClient(context.Background(), cfg, nil, 0)
+
+	if clientOne.Transport == nil {
+		t.Fatal("expected first client transport to be set")
+	}
+	if clientTwo.Transport == nil {
+		t.Fatal("expected second client transport to be set")
+	}
+	if clientOne.Transport != clientTwo.Transport {
+		t.Fatal("expected global proxy transport to be reused")
+	}
+}
