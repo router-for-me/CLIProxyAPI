@@ -82,6 +82,23 @@ func ModelACLMiddleware(cfgFn func() *config.Config) gin.HandlerFunc {
 			return
 		}
 
+		// Websocket upgrades cannot be inspected at this layer — the model
+		// is selected later in frames consumed by ResponsesWebsocket, not in
+		// the upgrade request itself. To prevent a restricted key from
+		// escaping the ACL via the upgrade path, reject the upgrade when
+		// the calling key has any per-model restriction. Unrestricted keys
+		// (empty AllowedModels AND allow-all default) still pass through
+		// so the legacy websocket flow keeps working for them.
+		if isWebsocketUpgradeRequest(c.Request) && keyHasModelRestriction(cfg, apiKey) {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
+				"error": gin.H{
+					"type":    "websocket_not_allowed_for_restricted_key",
+					"message": "model-restricted api keys cannot use websocket upgrade routes; model selection happens in frames the ACL cannot inspect",
+				},
+			})
+			return
+		}
+
 		model, found, err := extractRequestedModel(c)
 		if err != nil {
 			if errors.Is(err, errBodyTooLarge) {
@@ -218,9 +235,11 @@ func extractRequestedModel(c *gin.Context) (model string, ok bool, err error) {
 		return "", false, readErr
 	}
 	if int64(len(rest)) > remaining {
-		// Drain and discard the remainder so the underlying connection can
-		// close cleanly without us holding extra state.
-		_, _ = io.Copy(io.Discard, c.Request.Body)
+		// Do NOT drain the rest of the body. A chunked/streamed request
+		// without a trustworthy Content-Length could hold the handler
+		// goroutine indefinitely, turning the ACL check into a
+		// request-slot exhaustion path. Returning here lets net/http
+		// close the connection without us reading another byte.
 		return "", false, errBodyTooLarge
 	}
 
@@ -248,4 +267,41 @@ func extractModelFromBytes(body []byte) (model string, ok bool, err error) {
 		return "", false, nil
 	}
 	return model, true, nil
+}
+
+// isWebsocketUpgradeRequest reports whether the request is attempting to
+// upgrade to a websocket. Any route served by a ModelACLMiddleware-instrumented
+// group that also carries "Upgrade: websocket" counts — we do not scope this to
+// a specific path because future routes may join the upgrade set and we want
+// the ACL guard to keep working without per-route updates.
+func isWebsocketUpgradeRequest(req *http.Request) bool {
+	if req == nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(req.Header.Get("Upgrade")), "websocket")
+}
+
+// keyHasModelRestriction reports whether the given api key is subject to any
+// per-model restriction under cfg. A key is "restricted" when either:
+//
+//   - it has an explicit APIKeyPolicy entry with a non-empty AllowedModels list
+//     (so some models would be denied under the normal ACL), or
+//   - the deployment's default policy is "deny-all" AND the key has no
+//     matching policy entry (so every model is denied under the default).
+//
+// Unrestricted keys (no policy, allow-all default) return false and are
+// allowed to take the legacy paths the middleware cannot inspect, such as
+// websocket upgrades.
+func keyHasModelRestriction(cfg *config.Config, key string) bool {
+	key = strings.TrimSpace(key)
+	if key == "" || cfg == nil {
+		return false
+	}
+	for i := range cfg.APIKeyPolicies {
+		if cfg.APIKeyPolicies[i].Key == key {
+			return len(cfg.APIKeyPolicies[i].AllowedModels) > 0
+		}
+	}
+	// No explicit policy for this key — fall back to the default.
+	return strings.EqualFold(strings.TrimSpace(cfg.APIKeyDefaultPolicy), config.APIKeyDefaultPolicyDenyAll)
 }
