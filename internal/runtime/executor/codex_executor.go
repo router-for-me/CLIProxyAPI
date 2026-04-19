@@ -658,8 +658,18 @@ func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Form
 			cache.ID = promptCacheKey.String()
 		}
 	} else if from == "openai" {
-		if apiKey := strings.TrimSpace(helps.APIKeyFromContext(ctx)); apiKey != "" {
-			cache.ID = uuid.NewSHA1(uuid.NameSpaceOID, []byte("cli-proxy-api:codex:prompt-cache:"+apiKey)).String()
+		// Precedence: prompt_cache_key > Idempotency-Key > apiKey hash > random UUID.
+		if pck := gjson.GetBytes(req.Payload, "prompt_cache_key"); pck.Exists() {
+			cache.ID = pck.String()
+		} else if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
+			if ik := strings.TrimSpace(ginCtx.Request.Header.Get("Idempotency-Key")); ik != "" {
+				cache.ID = uuid.NewSHA1(uuid.NameSpaceOID, []byte("cli-proxy-api:codex:prompt-cache:idem:"+ik)).String()
+			}
+		}
+		if cache.ID == "" {
+			if apiKey := strings.TrimSpace(helps.APIKeyFromContext(ctx)); apiKey != "" {
+				cache.ID = uuid.NewSHA1(uuid.NameSpaceOID, []byte("cli-proxy-api:codex:prompt-cache:"+apiKey)).String()
+			}
 		}
 	}
 
