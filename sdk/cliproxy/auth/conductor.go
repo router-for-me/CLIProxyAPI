@@ -1272,6 +1272,8 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 	opts = ensureRequestedModelMetadata(opts, routeModel)
 	tried := make(map[string]struct{})
 	attempted := make(map[string]struct{})
+	minInterval := m.minRetryInterval()
+	var lastAttemptTime time.Time
 	var lastErr error
 	for {
 		if maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials {
@@ -1279,6 +1281,13 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				return cliproxyexecutor.Response{}, lastErr
 			}
 			return cliproxyexecutor.Response{}, &Error{Code: "auth_not_found", Message: "no auth available"}
+		}
+		if minInterval > 0 && !lastAttemptTime.IsZero() {
+			if elapsed := time.Since(lastAttemptTime); elapsed < minInterval {
+				if errWait := waitForCooldown(ctx, minInterval-elapsed); errWait != nil {
+					return cliproxyexecutor.Response{}, errWait
+				}
+			}
 		}
 		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, opts, tried)
 		if errPick != nil {
@@ -1304,6 +1313,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			continue
 		}
 		attempted[auth.ID] = struct{}{}
+		lastAttemptTime = time.Now()
 		var authErr error
 		for _, upstreamModel := range models {
 			resultModel := m.stateModelForExecution(auth, routeModel, upstreamModel, pooled)
@@ -1350,6 +1360,8 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 	opts = ensureRequestedModelMetadata(opts, routeModel)
 	tried := make(map[string]struct{})
 	attempted := make(map[string]struct{})
+	minInterval := m.minRetryInterval()
+	var lastAttemptTime time.Time
 	var lastErr error
 	for {
 		if maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials {
@@ -1357,6 +1369,13 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				return cliproxyexecutor.Response{}, lastErr
 			}
 			return cliproxyexecutor.Response{}, &Error{Code: "auth_not_found", Message: "no auth available"}
+		}
+		if minInterval > 0 && !lastAttemptTime.IsZero() {
+			if elapsed := time.Since(lastAttemptTime); elapsed < minInterval {
+				if errWait := waitForCooldown(ctx, minInterval-elapsed); errWait != nil {
+					return cliproxyexecutor.Response{}, errWait
+				}
+			}
 		}
 		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, opts, tried)
 		if errPick != nil {
@@ -1382,6 +1401,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			continue
 		}
 		attempted[auth.ID] = struct{}{}
+		lastAttemptTime = time.Now()
 		var authErr error
 		for _, upstreamModel := range models {
 			resultModel := m.stateModelForExecution(auth, routeModel, upstreamModel, pooled)
@@ -1428,6 +1448,8 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	opts = ensureRequestedModelMetadata(opts, routeModel)
 	tried := make(map[string]struct{})
 	attempted := make(map[string]struct{})
+	minInterval := m.minRetryInterval()
+	var lastAttemptTime time.Time
 	var lastErr error
 	for {
 		if maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials {
@@ -1439,6 +1461,13 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				return nil, lastErr
 			}
 			return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
+		}
+		if minInterval > 0 && !lastAttemptTime.IsZero() {
+			if elapsed := time.Since(lastAttemptTime); elapsed < minInterval {
+				if errWait := waitForCooldown(ctx, minInterval-elapsed); errWait != nil {
+					return nil, errWait
+				}
+			}
 		}
 		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, opts, tried)
 		if errPick != nil {
@@ -1467,6 +1496,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			continue
 		}
 		attempted[auth.ID] = struct{}{}
+		lastAttemptTime = time.Now()
 		streamResult, errStream := m.executeStreamWithModelPool(execCtx, executor, auth, provider, req, opts, routeModel, models, pooled)
 		if errStream != nil {
 			if errCtx := execCtx.Err(); errCtx != nil {
@@ -1807,6 +1837,17 @@ func (m *Manager) retrySettings() (int, int, time.Duration) {
 	return int(m.requestRetry.Load()), int(m.maxRetryCredentials.Load()), time.Duration(m.maxRetryInterval.Load())
 }
 
+func (m *Manager) minRetryInterval() time.Duration {
+	if m == nil {
+		return 100 * time.Millisecond
+	}
+	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+	if cfg == nil || cfg.MinRetryInterval <= 0 {
+		return 100 * time.Millisecond
+	}
+	return time.Duration(cfg.MinRetryInterval) * time.Millisecond
+}
+
 func (m *Manager) closestCooldownWait(providers []string, model string, attempt int) (time.Duration, bool) {
 	if m == nil || len(providers) == 0 {
 		return 0, false
@@ -2009,7 +2050,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					}
 
 					statusCode := statusCodeFromResult(result.Error)
-					if isModelSupportResultError(result.Error) {
+					if statusCode != 404 && isModelSupportResultError(result.Error) {
 						next := now.Add(12 * time.Hour)
 						state.NextRetryAfter = next
 						suspendReason = "model_not_supported"
@@ -2017,14 +2058,10 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					} else {
 						switch statusCode {
 						case 401:
-							if disableCooling {
-								state.NextRetryAfter = time.Time{}
-							} else {
-								next := now.Add(30 * time.Minute)
-								state.NextRetryAfter = next
-								suspendReason = "unauthorized"
-								shouldSuspendModel = true
-							}
+							auth.QuotaExhaustedPermanent = true
+							state.NextRetryAfter = time.Time{}
+							suspendReason = "quota_exhausted_permanent"
+							shouldSuspendModel = true
 						case 402, 403:
 							if disableCooling {
 								state.NextRetryAfter = time.Time{}
@@ -2034,48 +2071,28 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								suspendReason = "payment_required"
 								shouldSuspendModel = true
 							}
-						case 404:
-							if disableCooling {
-								state.NextRetryAfter = time.Time{}
-							} else {
-								next := now.Add(12 * time.Hour)
-								state.NextRetryAfter = next
-								suspendReason = "not_found"
-								shouldSuspendModel = true
-							}
 						case 429:
-							var next time.Time
-							backoffLevel := state.Quota.BackoffLevel
-							if !disableCooling {
-								if result.RetryAfter != nil {
-									next = now.Add(*result.RetryAfter)
-								} else {
-									cooldown, nextLevel := nextQuotaCooldown(backoffLevel, disableCooling)
-									if cooldown > 0 {
-										next = now.Add(cooldown)
-									}
-									backoffLevel = nextLevel
+							if result.Error != nil && isRule1QuotaExhausted(result.Error.Message) {
+								auth.QuotaExhaustedPermanent = true
+								state.NextRetryAfter = time.Time{}
+								suspendReason = "quota_exhausted_permanent"
+								shouldSuspendModel = true
+							} else if !disableCooling {
+								next := now.Add(30 * time.Minute)
+								state.NextRetryAfter = next
+								state.Quota = QuotaState{
+									Exceeded:      true,
+									Reason:        "quota",
+									NextRecoverAt: next,
 								}
-							}
-							state.NextRetryAfter = next
-							state.Quota = QuotaState{
-								Exceeded:      true,
-								Reason:        "quota",
-								NextRecoverAt: next,
-								BackoffLevel:  backoffLevel,
-							}
-							if !disableCooling {
 								suspendReason = "quota"
 								shouldSuspendModel = true
 								setModelQuota = true
 							}
-						case 408, 500, 502, 503, 504:
-							if disableCooling {
-								state.NextRetryAfter = time.Time{}
-							} else {
-								next := now.Add(1 * time.Minute)
-								state.NextRetryAfter = next
-							}
+						case 503:
+							state.NextRetryAfter = time.Time{}
+						case 408, 500, 502, 504:
+							state.NextRetryAfter = time.Time{}
 						default:
 							state.NextRetryAfter = time.Time{}
 						}
@@ -2086,7 +2103,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					updateAggregatedAvailability(auth, now)
 				}
 			} else {
-				applyAuthFailureState(auth, result.Error, result.RetryAfter, now)
+				applyAuthFailureState(auth, result.Error, now)
 			}
 		}
 
@@ -2389,11 +2406,9 @@ func isRequestScopedNotFoundResultError(err *Error) bool {
 }
 
 // isRequestInvalidError returns true if the error represents a client request
-// error that should not be retried. Specifically, it treats 400 responses with
-// "invalid_request_error", request-scoped 404 item misses caused by `store=false`,
-// and all 422 responses as request-shape failures, where switching auths or
-// pooled upstream models will not help. Model-support errors are excluded so
-// routing can fall through to another auth or upstream.
+// error that should not be retried. All 4xx errors except 401/402/403/408/429
+// are treated as non-retryable. Model-support errors are excluded so routing
+// can fall through to another auth or upstream.
 func isRequestInvalidError(err error) bool {
 	if err == nil {
 		return false
@@ -2402,19 +2417,25 @@ func isRequestInvalidError(err error) bool {
 		return false
 	}
 	status := statusCodeFromError(err)
-	switch status {
-	case http.StatusBadRequest:
-		return strings.Contains(err.Error(), "invalid_request_error")
-	case http.StatusNotFound:
-		return isRequestScopedNotFoundMessage(err.Error())
-	case http.StatusUnprocessableEntity:
-		return true
-	default:
-		return false
+	if status >= 400 && status < 500 {
+		switch status {
+		case 401, 402, 403, 408, 429:
+			return false
+		default:
+			return true
+		}
 	}
+	return false
 }
 
-func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time) {
+// isRule1QuotaExhausted detects the Rule 1 pattern: RESOURCE_EXHAUSTED with "e.g." in the message,
+// indicating a permanently exhausted quota.
+func isRule1QuotaExhausted(message string) bool {
+	return strings.Contains(message, "e.g.") &&
+		strings.Contains(message, "RESOURCE_EXHAUSTED")
+}
+
+func applyAuthFailureState(auth *Auth, resultErr *Error, now time.Time) {
 	if auth == nil {
 		return
 	}
@@ -2434,74 +2455,34 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 	statusCode := statusCodeFromResult(resultErr)
 	switch statusCode {
 	case 401:
-		auth.StatusMessage = "unauthorized"
-		if disableCooling {
-			auth.NextRetryAfter = time.Time{}
-		} else {
-			auth.NextRetryAfter = now.Add(30 * time.Minute)
-		}
+		auth.QuotaExhaustedPermanent = true
+		auth.StatusMessage = "quota_exhausted_permanent"
 	case 402, 403:
 		auth.StatusMessage = "payment_required"
-		if disableCooling {
-			auth.NextRetryAfter = time.Time{}
-		} else {
+		if !disableCooling {
 			auth.NextRetryAfter = now.Add(30 * time.Minute)
 		}
-	case 404:
-		auth.StatusMessage = "not_found"
-		if disableCooling {
-			auth.NextRetryAfter = time.Time{}
-		} else {
-			auth.NextRetryAfter = now.Add(12 * time.Hour)
-		}
 	case 429:
-		auth.StatusMessage = "quota exhausted"
-		auth.Quota.Exceeded = true
-		auth.Quota.Reason = "quota"
-		var next time.Time
-		if !disableCooling {
-			if retryAfter != nil {
-				next = now.Add(*retryAfter)
-			} else {
-				cooldown, nextLevel := nextQuotaCooldown(auth.Quota.BackoffLevel, disableCooling)
-				if cooldown > 0 {
-					next = now.Add(cooldown)
-				}
-				auth.Quota.BackoffLevel = nextLevel
+		if resultErr != nil && isRule1QuotaExhausted(resultErr.Message) {
+			auth.QuotaExhaustedPermanent = true
+			auth.StatusMessage = "quota_exhausted_permanent"
+		} else {
+			auth.StatusMessage = "quota exhausted"
+			auth.Quota.Exceeded = true
+			auth.Quota.Reason = "quota"
+			if !disableCooling {
+				next := now.Add(30 * time.Minute)
+				auth.Quota.NextRecoverAt = next
+				auth.NextRetryAfter = next
 			}
 		}
-		auth.Quota.NextRecoverAt = next
-		auth.NextRetryAfter = next
-	case 408, 500, 502, 503, 504:
+	case 503, 408, 500, 502, 504:
 		auth.StatusMessage = "transient upstream error"
-		if disableCooling {
-			auth.NextRetryAfter = time.Time{}
-		} else {
-			auth.NextRetryAfter = now.Add(1 * time.Minute)
-		}
 	default:
 		if auth.StatusMessage == "" {
 			auth.StatusMessage = "request failed"
 		}
 	}
-}
-
-// nextQuotaCooldown returns the next cooldown duration and updated backoff level for repeated quota errors.
-func nextQuotaCooldown(prevLevel int, disableCooling bool) (time.Duration, int) {
-	if prevLevel < 0 {
-		prevLevel = 0
-	}
-	if disableCooling {
-		return 0, prevLevel
-	}
-	cooldown := quotaBackoffBase * time.Duration(1<<prevLevel)
-	if cooldown < quotaBackoffBase {
-		cooldown = quotaBackoffBase
-	}
-	if cooldown >= quotaBackoffMax {
-		return quotaBackoffMax, prevLevel
-	}
-	return cooldown, prevLevel + 1
 }
 
 // List returns all auth entries currently known by the manager.

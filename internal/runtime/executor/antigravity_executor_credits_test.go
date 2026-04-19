@@ -17,35 +17,34 @@ import (
 )
 
 func resetAntigravityCreditsRetryState() {
-	antigravityCreditsFailureByAuth = sync.Map{}
-	antigravityPreferCreditsByModel = sync.Map{}
-	antigravityShortCooldownByAuth = sync.Map{}
+	modelCreditsActive = sync.Map{}
+	modelCooldowns = sync.Map{}
 }
 
-func TestClassifyAntigravity429(t *testing.T) {
-	t.Run("quota exhausted", func(t *testing.T) {
-		body := []byte(`{"error":{"status":"RESOURCE_EXHAUSTED","message":"QUOTA_EXHAUSTED"}}`)
-		if got := classifyAntigravity429(body); got != antigravity429QuotaExhausted {
-			t.Fatalf("classifyAntigravity429() = %q, want %q", got, antigravity429QuotaExhausted)
+func TestClassifyAntigravity429Rule(t *testing.T) {
+	t.Run("rule 1: permanent quota exhausted with e.g.", func(t *testing.T) {
+		body := []byte(`{"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota).","status":"RESOURCE_EXHAUSTED"}}`)
+		if got := classifyAntigravity429Rule(body); got != antigravity429Rule1Permanent {
+			t.Fatalf("classifyAntigravity429Rule() = %d, want %d (Rule1Permanent)", got, antigravity429Rule1Permanent)
 		}
 	})
 
-	t.Run("structured rate limit", func(t *testing.T) {
+	t.Run("rule 2: quota exhausted with model metadata", func(t *testing.T) {
 		body := []byte(`{
 			"error": {
 				"status": "RESOURCE_EXHAUSTED",
+				"message": "You have exhausted your capacity on this model.",
 				"details": [
-					{"@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": "RATE_LIMIT_EXCEEDED"},
-					{"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "0.5s"}
+					{"@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": "QUOTA_EXHAUSTED", "metadata": {"model": "gemini-3.1-flash-image"}}
 				]
 			}
 		}`)
-		if got := classifyAntigravity429(body); got != antigravity429RateLimited {
-			t.Fatalf("classifyAntigravity429() = %q, want %q", got, antigravity429RateLimited)
+		if got := classifyAntigravity429Rule(body); got != antigravity429Rule2QuotaModel {
+			t.Fatalf("classifyAntigravity429Rule() = %d, want %d (Rule2QuotaModel)", got, antigravity429Rule2QuotaModel)
 		}
 	})
 
-	t.Run("structured quota exhausted", func(t *testing.T) {
+	t.Run("rule 2: quota exhausted without model metadata falls to none", func(t *testing.T) {
 		body := []byte(`{
 			"error": {
 				"status": "RESOURCE_EXHAUSTED",
@@ -54,15 +53,36 @@ func TestClassifyAntigravity429(t *testing.T) {
 				]
 			}
 		}`)
-		if got := classifyAntigravity429(body); got != antigravity429QuotaExhausted {
-			t.Fatalf("classifyAntigravity429() = %q, want %q", got, antigravity429QuotaExhausted)
+		if got := classifyAntigravity429Rule(body); got != antigravity429RuleNone {
+			t.Fatalf("classifyAntigravity429Rule() = %d, want %d (RuleNone)", got, antigravity429RuleNone)
 		}
 	})
 
-	t.Run("unstructured 429 defaults to soft rate limit", func(t *testing.T) {
+	t.Run("rule 3: rate limit exceeded with model metadata", func(t *testing.T) {
+		body := []byte(`{
+			"error": {
+				"status": "RESOURCE_EXHAUSTED",
+				"details": [
+					{"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "0.847655010s"},
+					{"@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": "RATE_LIMIT_EXCEEDED", "metadata": {"model": "claude-opus-4-6"}}
+				]
+			}
+		}`)
+		if got := classifyAntigravity429Rule(body); got != antigravity429Rule3RateLimit {
+			t.Fatalf("classifyAntigravity429Rule() = %d, want %d (Rule3RateLimit)", got, antigravity429Rule3RateLimit)
+		}
+	})
+
+	t.Run("unstructured 429 defaults to none", func(t *testing.T) {
 		body := []byte(`{"error":{"message":"too many requests"}}`)
-		if got := classifyAntigravity429(body); got != antigravity429SoftRateLimit {
-			t.Fatalf("classifyAntigravity429() = %q, want %q", got, antigravity429SoftRateLimit)
+		if got := classifyAntigravity429Rule(body); got != antigravity429RuleNone {
+			t.Fatalf("classifyAntigravity429Rule() = %d, want %d (RuleNone)", got, antigravity429RuleNone)
+		}
+	})
+
+	t.Run("empty body defaults to none", func(t *testing.T) {
+		if got := classifyAntigravity429Rule(nil); got != antigravity429RuleNone {
+			t.Fatalf("classifyAntigravity429Rule(nil) = %d, want %d (RuleNone)", got, antigravity429RuleNone)
 		}
 	})
 }
@@ -82,60 +102,75 @@ func TestInjectEnabledCreditTypes(t *testing.T) {
 	}
 }
 
-func TestShouldMarkAntigravityCreditsExhausted(t *testing.T) {
-	t.Run("credit errors are marked", func(t *testing.T) {
-		for _, body := range [][]byte{
-			[]byte(`{"error":{"message":"Insufficient GOOGLE_ONE_AI credits"}}`),
-			[]byte(`{"error":{"message":"minimumCreditAmountForUsage requirement not met"}}`),
-		} {
-			if !shouldMarkAntigravityCreditsExhausted(http.StatusForbidden, body, nil) {
-				t.Fatalf("shouldMarkAntigravityCreditsExhausted(%s) = false, want true", string(body))
-			}
-		}
-	})
-
-	t.Run("transient 429 resource exhausted is not marked", func(t *testing.T) {
-		body := []byte(`{"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota).","status":"RESOURCE_EXHAUSTED"}}`)
-		if shouldMarkAntigravityCreditsExhausted(http.StatusTooManyRequests, body, nil) {
-			t.Fatalf("shouldMarkAntigravityCreditsExhausted(%s) = true, want false", string(body))
-		}
-	})
-
-	t.Run("resource exhausted with quota metadata is still marked", func(t *testing.T) {
-		body := []byte(`{"error":{"code":429,"message":"Resource has been exhausted","status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","metadata":{"quotaResetDelay":"1h","model":"claude-sonnet-4-6"}}]}}`)
-		if !shouldMarkAntigravityCreditsExhausted(http.StatusTooManyRequests, body, nil) {
-			t.Fatalf("shouldMarkAntigravityCreditsExhausted(%s) = false, want true", string(body))
-		}
-	})
-
-	if shouldMarkAntigravityCreditsExhausted(http.StatusServiceUnavailable, []byte(`{"error":{"message":"credits exhausted"}}`), nil) {
-		t.Fatal("shouldMarkAntigravityCreditsExhausted() = true for 5xx, want false")
-	}
-}
-
-func TestAntigravityExecute_RetriesTransient429ResourceExhausted(t *testing.T) {
+func TestModelCreditsActiveLifecycle(t *testing.T) {
 	resetAntigravityCreditsRetryState()
 	t.Cleanup(resetAntigravityCreditsRetryState)
 
-	var requestCount int
+	auth := &cliproxyauth.Auth{ID: "test-auth"}
+	model := "gemini-2.5-flash"
+	now := time.Now()
+
+	if isModelCreditsActive(auth, model, now) {
+		t.Fatal("isModelCreditsActive() = true before marking, want false")
+	}
+
+	markModelCreditsActive(auth, model, now)
+	if !isModelCreditsActive(auth, model, now) {
+		t.Fatal("isModelCreditsActive() = false after marking, want true")
+	}
+
+	expired := now.Add(creditsDuration + time.Minute)
+	if isModelCreditsActive(auth, model, expired) {
+		t.Fatal("isModelCreditsActive() = true after expiry, want false")
+	}
+
+	markModelCreditsActive(auth, model, now)
+	clearModelCreditsActive(auth, model)
+	if isModelCreditsActive(auth, model, now) {
+		t.Fatal("isModelCreditsActive() = true after clearing, want false")
+	}
+}
+
+func TestModelCooldownLifecycle(t *testing.T) {
+	resetAntigravityCreditsRetryState()
+	t.Cleanup(resetAntigravityCreditsRetryState)
+
+	auth := &cliproxyauth.Auth{ID: "test-auth"}
+	model := "gemini-2.5-flash"
+	now := time.Now()
+
+	if inCooldown, _ := isModelInCooldown(auth, model, now); inCooldown {
+		t.Fatal("isModelInCooldown() = true before marking, want false")
+	}
+
+	markModelCooldown(auth, model, now)
+	inCooldown, remaining := isModelInCooldown(auth, model, now)
+	if !inCooldown {
+		t.Fatal("isModelInCooldown() = false after marking, want true")
+	}
+	if remaining <= 0 || remaining > modelCooldownDuration {
+		t.Fatalf("remaining = %v, want between 0 and %v", remaining, modelCooldownDuration)
+	}
+
+	expired := now.Add(modelCooldownDuration + time.Minute)
+	if inCooldown, _ := isModelInCooldown(auth, model, expired); inCooldown {
+		t.Fatal("isModelInCooldown() = true after expiry, want false")
+	}
+}
+
+func TestAntigravityExecute_Rule1PermanentBan(t *testing.T) {
+	resetAntigravityCreditsRetryState()
+	t.Cleanup(resetAntigravityCreditsRetryState)
+
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requestCount++
-		switch requestCount {
-		case 1:
-			w.WriteHeader(http.StatusTooManyRequests)
-			_, _ = w.Write([]byte(`{"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota).","status":"RESOURCE_EXHAUSTED"}}`))
-		case 2:
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]}}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2}}}`))
-		default:
-			t.Fatalf("unexpected request count %d", requestCount)
-		}
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota).","status":"RESOURCE_EXHAUSTED"}}`))
 	}))
 	defer server.Close()
 
-	exec := NewAntigravityExecutor(&config.Config{RequestRetry: 1})
+	exec := NewAntigravityExecutor(&config.Config{})
 	auth := &cliproxyauth.Auth{
-		ID: "auth-transient-429",
+		ID: "auth-rule1",
 		Attributes: map[string]string{
 			"base_url": server.URL,
 		},
@@ -146,20 +181,17 @@ func TestAntigravityExecute_RetriesTransient429ResourceExhausted(t *testing.T) {
 		},
 	}
 
-	resp, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+	_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
 		Model:   "gemini-2.5-flash",
 		Payload: []byte(`{"request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}}`),
 	}, cliproxyexecutor.Options{
 		SourceFormat: sdktranslator.FormatAntigravity,
 	})
-	if err != nil {
-		t.Fatalf("Execute() error = %v", err)
+	if err == nil {
+		t.Fatal("Execute() error = nil, want error")
 	}
-	if len(resp.Payload) == 0 {
-		t.Fatal("Execute() returned empty payload")
-	}
-	if requestCount != 2 {
-		t.Fatalf("request count = %d, want 2", requestCount)
+	if !auth.QuotaExhaustedPermanent {
+		t.Fatal("auth.QuotaExhaustedPermanent = false, want true")
 	}
 }
 
@@ -183,7 +215,7 @@ func TestAntigravityExecute_RetriesQuotaExhaustedWithCredits(t *testing.T) {
 
 		if reqNum == 1 {
 			w.WriteHeader(http.StatusTooManyRequests)
-			_, _ = w.Write([]byte(`{"error":{"status":"RESOURCE_EXHAUSTED","message":"QUOTA_EXHAUSTED"}}`))
+			_, _ = w.Write([]byte(`{"error":{"status":"RESOURCE_EXHAUSTED","message":"You have exhausted your capacity.","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"QUOTA_EXHAUSTED","metadata":{"model":"gemini-2.5-flash"}}]}}`))
 			return
 		}
 
@@ -195,8 +227,9 @@ func TestAntigravityExecute_RetriesQuotaExhaustedWithCredits(t *testing.T) {
 	}))
 	defer server.Close()
 
+	creditsEnabled := true
 	exec := NewAntigravityExecutor(&config.Config{
-		QuotaExceeded: config.QuotaExceeded{AntigravityCredits: true},
+		CreditsEnabled: &creditsEnabled,
 	})
 	auth := &cliproxyauth.Auth{
 		ID: "auth-credits-ok",
@@ -230,55 +263,6 @@ func TestAntigravityExecute_RetriesQuotaExhaustedWithCredits(t *testing.T) {
 	}
 }
 
-func TestAntigravityExecute_SkipsCreditsRetryWhenAlreadyExhausted(t *testing.T) {
-	resetAntigravityCreditsRetryState()
-	t.Cleanup(resetAntigravityCreditsRetryState)
-
-	var requestCount int
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requestCount++
-		w.WriteHeader(http.StatusTooManyRequests)
-		_, _ = w.Write([]byte(`{"error":{"status":"RESOURCE_EXHAUSTED","message":"QUOTA_EXHAUSTED"}}`))
-	}))
-	defer server.Close()
-
-	exec := NewAntigravityExecutor(&config.Config{
-		QuotaExceeded: config.QuotaExceeded{AntigravityCredits: true},
-	})
-	auth := &cliproxyauth.Auth{
-		ID: "auth-credits-exhausted",
-		Attributes: map[string]string{
-			"base_url": server.URL,
-		},
-		Metadata: map[string]any{
-			"access_token": "token",
-			"project_id":   "project-1",
-			"expired":      time.Now().Add(1 * time.Hour).Format(time.RFC3339),
-		},
-	}
-	recordAntigravityCreditsFailure(auth, time.Now())
-
-	_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
-		Model:   "gemini-2.5-flash",
-		Payload: []byte(`{"request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}}`),
-	}, cliproxyexecutor.Options{
-		SourceFormat: sdktranslator.FormatAntigravity,
-	})
-	if err == nil {
-		t.Fatal("Execute() error = nil, want 429")
-	}
-	sErr, ok := err.(statusErr)
-	if !ok {
-		t.Fatalf("Execute() error type = %T, want statusErr", err)
-	}
-	if got := sErr.StatusCode(); got != http.StatusTooManyRequests {
-		t.Fatalf("Execute() status code = %d, want %d", got, http.StatusTooManyRequests)
-	}
-	if requestCount != 1 {
-		t.Fatalf("request count = %d, want 1", requestCount)
-	}
-}
-
 func TestAntigravityExecute_PrefersCreditsAfterSuccessfulFallback(t *testing.T) {
 	resetAntigravityCreditsRetryState()
 	t.Cleanup(resetAntigravityCreditsRetryState)
@@ -300,7 +284,7 @@ func TestAntigravityExecute_PrefersCreditsAfterSuccessfulFallback(t *testing.T) 
 		switch reqNum {
 		case 1:
 			w.WriteHeader(http.StatusTooManyRequests)
-			_, _ = w.Write([]byte(`{"error":{"status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"QUOTA_EXHAUSTED"},{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"10s"}]}}`))
+			_, _ = w.Write([]byte(`{"error":{"status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"QUOTA_EXHAUSTED","metadata":{"model":"gemini-2.5-flash"}}]}}`))
 		case 2, 3:
 			if !strings.Contains(string(body), `"enabledCreditTypes":["GOOGLE_ONE_AI"]`) {
 				t.Fatalf("request %d body missing enabledCreditTypes: %s", reqNum, string(body))
@@ -313,8 +297,9 @@ func TestAntigravityExecute_PrefersCreditsAfterSuccessfulFallback(t *testing.T) 
 	}))
 	defer server.Close()
 
+	creditsEnabled := true
 	exec := NewAntigravityExecutor(&config.Config{
-		QuotaExceeded: config.QuotaExceeded{AntigravityCredits: true},
+		CreditsEnabled: &creditsEnabled,
 	})
 	auth := &cliproxyauth.Auth{
 		ID: "auth-prefer-credits",
@@ -357,91 +342,6 @@ func TestAntigravityExecute_PrefersCreditsAfterSuccessfulFallback(t *testing.T) 
 	}
 }
 
-func TestAntigravityExecute_PreservesBaseURLFallbackAfterCreditsRetryFailure(t *testing.T) {
-	resetAntigravityCreditsRetryState()
-	t.Cleanup(resetAntigravityCreditsRetryState)
-
-	var (
-		mu          sync.Mutex
-		firstCount  int
-		secondCount int
-	)
-
-	firstServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		_ = r.Body.Close()
-
-		mu.Lock()
-		firstCount++
-		reqNum := firstCount
-		mu.Unlock()
-
-		switch reqNum {
-		case 1:
-			w.WriteHeader(http.StatusTooManyRequests)
-			_, _ = w.Write([]byte(`{"error":{"status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"QUOTA_EXHAUSTED"}]}}`))
-		case 2:
-			if !strings.Contains(string(body), `"enabledCreditTypes":["GOOGLE_ONE_AI"]`) {
-				t.Fatalf("credits retry missing enabledCreditTypes: %s", string(body))
-			}
-			w.WriteHeader(http.StatusForbidden)
-			_, _ = w.Write([]byte(`{"error":{"message":"permission denied"}}`))
-		default:
-			t.Fatalf("unexpected first server request count %d", reqNum)
-		}
-	}))
-	defer firstServer.Close()
-
-	secondServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		secondCount++
-		mu.Unlock()
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]}}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2}}}`))
-	}))
-	defer secondServer.Close()
-
-	exec := NewAntigravityExecutor(&config.Config{
-		QuotaExceeded: config.QuotaExceeded{AntigravityCredits: true},
-	})
-	auth := &cliproxyauth.Auth{
-		ID: "auth-baseurl-fallback",
-		Attributes: map[string]string{
-			"base_url": firstServer.URL,
-		},
-		Metadata: map[string]any{
-			"access_token": "token",
-			"project_id":   "project-1",
-			"expired":      time.Now().Add(1 * time.Hour).Format(time.RFC3339),
-		},
-	}
-
-	originalOrder := antigravityBaseURLFallbackOrder
-	defer func() { antigravityBaseURLFallbackOrder = originalOrder }()
-	antigravityBaseURLFallbackOrder = func(auth *cliproxyauth.Auth) []string {
-		return []string{firstServer.URL, secondServer.URL}
-	}
-
-	resp, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
-		Model:   "gemini-2.5-flash",
-		Payload: []byte(`{"request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}}`),
-	}, cliproxyexecutor.Options{
-		SourceFormat: sdktranslator.FormatAntigravity,
-	})
-	if err != nil {
-		t.Fatalf("Execute() error = %v", err)
-	}
-	if len(resp.Payload) == 0 {
-		t.Fatal("Execute() returned empty payload")
-	}
-	if firstCount != 2 {
-		t.Fatalf("first server request count = %d, want 2", firstCount)
-	}
-	if secondCount != 1 {
-		t.Fatalf("second server request count = %d, want 1", secondCount)
-	}
-}
-
 func TestAntigravityExecute_DoesNotDirectInjectCreditsWhenFlagDisabled(t *testing.T) {
 	resetAntigravityCreditsRetryState()
 	t.Cleanup(resetAntigravityCreditsRetryState)
@@ -452,12 +352,13 @@ func TestAntigravityExecute_DoesNotDirectInjectCreditsWhenFlagDisabled(t *testin
 		_ = r.Body.Close()
 		requestBodies = append(requestBodies, string(body))
 		w.WriteHeader(http.StatusTooManyRequests)
-		_, _ = w.Write([]byte(`{"error":{"status":"RESOURCE_EXHAUSTED","message":"QUOTA_EXHAUSTED"}}`))
+		_, _ = w.Write([]byte(`{"error":{"status":"RESOURCE_EXHAUSTED","message":"You have exhausted your capacity.","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"QUOTA_EXHAUSTED","metadata":{"model":"gemini-2.5-flash"}}]}}`))
 	}))
 	defer server.Close()
 
+	creditsDisabled := false
 	exec := NewAntigravityExecutor(&config.Config{
-		QuotaExceeded: config.QuotaExceeded{AntigravityCredits: false},
+		CreditsEnabled: &creditsDisabled,
 	})
 	auth := &cliproxyauth.Auth{
 		ID: "auth-flag-disabled",
@@ -470,7 +371,7 @@ func TestAntigravityExecute_DoesNotDirectInjectCreditsWhenFlagDisabled(t *testin
 			"expired":      time.Now().Add(1 * time.Hour).Format(time.RFC3339),
 		},
 	}
-	markAntigravityPreferCredits(auth, "gemini-2.5-flash", time.Now(), nil)
+	markModelCreditsActive(auth, "gemini-2.5-flash", time.Now())
 
 	_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
 		Model:   "gemini-2.5-flash",
@@ -486,5 +387,25 @@ func TestAntigravityExecute_DoesNotDirectInjectCreditsWhenFlagDisabled(t *testin
 	}
 	if strings.Contains(requestBodies[0], `"enabledCreditTypes":["GOOGLE_ONE_AI"]`) {
 		t.Fatalf("request unexpectedly used enabledCreditTypes with flag disabled: %s", requestBodies[0])
+	}
+}
+
+func TestClearAntigravityAuthState(t *testing.T) {
+	resetAntigravityCreditsRetryState()
+	t.Cleanup(resetAntigravityCreditsRetryState)
+
+	auth := &cliproxyauth.Auth{ID: "test-clear"}
+	now := time.Now()
+
+	markModelCreditsActive(auth, "model-a", now)
+	markModelCooldown(auth, "model-b", now)
+
+	ClearAntigravityAuthState("test-clear")
+
+	if isModelCreditsActive(auth, "model-a", now) {
+		t.Fatal("model-a credits still active after clear")
+	}
+	if inCooldown, _ := isModelInCooldown(auth, "model-b", now); inCooldown {
+		t.Fatal("model-b still in cooldown after clear")
 	}
 }

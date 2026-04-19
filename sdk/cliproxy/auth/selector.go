@@ -113,6 +113,14 @@ func (e *modelCooldownError) Headers() http.Header {
 	return headers
 }
 
+type concurrencyLimitError struct{}
+
+func (e *concurrencyLimitError) Error() string {
+	return `{"error":{"code":429,"message":"All OAuth connections have reached the concurrency limit","status":"CONCURRENCY_LIMIT"}}`
+}
+
+func (e *concurrencyLimitError) StatusCode() int { return http.StatusTooManyRequests }
+
 func authPriority(auth *Auth) int {
 	if auth == nil || auth.Attributes == nil {
 		return 0
@@ -373,6 +381,9 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 		return true, blockReasonOther, time.Time{}
 	}
 	if auth.Disabled || auth.Status == StatusDisabled {
+		return true, blockReasonDisabled, time.Time{}
+	}
+	if auth.QuotaExhaustedPermanent {
 		return true, blockReasonDisabled, time.Time{}
 	}
 	if model != "" {

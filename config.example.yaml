@@ -100,6 +100,17 @@ quota-exceeded:
   switch-preview-model: true # Whether to automatically switch to a preview model when a quota is exceeded
   antigravity-credits: true # Whether to retry Antigravity quota_exhausted 429s once with enabledCreditTypes=["GOOGLE_ONE_AI"]
 
+# Enable Credits retry mechanism (Google One AI) for quota exhaustion.
+# When true (default), 429 QUOTA_EXHAUSTED errors trigger a retry with enabledCreditTypes.
+# Takes precedence over quota-exceeded.antigravity-credits when set.
+credits-enabled: true
+
+# Maximum concurrent requests per auth credential. 0 = unlimited (default).
+max-concurrency-per-auth: 0
+
+# Minimum interval between retries in milliseconds. Default: 100.
+min-retry-interval: 100
+
 # Routing strategy for selecting credentials when multiple match.
 routing:
   strategy: "round-robin" # round-robin (default), fill-first

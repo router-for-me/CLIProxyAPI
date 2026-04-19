@@ -89,6 +89,11 @@ type Auth struct {
 	// ModelStates tracks per-model runtime availability data.
 	ModelStates map[string]*ModelState `json:"model_states,omitempty"`
 
+	// QuotaExhaustedPermanent marks this credential as permanently banned due to
+	// quota exhaustion (Rule 1) or 401 rejection. Memory-only, cleared on restart
+	// or via management API disable→enable toggle.
+	QuotaExhaustedPermanent bool `json:"-"`
+
 	// Runtime carries non-serialisable data used during execution (in-memory only).
 	Runtime any `json:"-"`
 
