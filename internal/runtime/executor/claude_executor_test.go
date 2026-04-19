@@ -1941,6 +1941,58 @@ func TestApplyCloaking_PreservesConfiguredStrictModeAndSensitiveWordsWhenModeOmi
 	}
 }
 
+func TestApplyCloaking_StrictMode_SuppressesUserSystemTextInFirstMessage(t *testing.T) {
+	// Regression guard: strict mode must (a) inject the billing+agent+static 3-block system
+	// and (b) NOT forward the user's original system prompt into the first user message.
+	cfg := &config.Config{
+		ClaudeKey: []config.ClaudeKey{{
+			APIKey: "key-123",
+			Cloak: &config.CloakConfig{
+				StrictMode: true,
+			},
+		}},
+	}
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-123"}}
+	userSystemText := "My custom system instructions that should NOT be forwarded"
+	payload := []byte(fmt.Sprintf(
+		`{"system":%q,"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]}`,
+		userSystemText,
+	))
+
+	out := applyCloaking(context.Background(), cfg, auth, payload, "claude-3-5-sonnet-20241022", "key-123")
+
+	// (a) 3 injected system blocks: billing header, agent block, static prompt.
+	blocks := gjson.GetBytes(out, "system").Array()
+	if len(blocks) != 3 {
+		t.Fatalf("strict mode: expected 3 system blocks (billing+agent+static), got %d", len(blocks))
+	}
+	firstText := blocks[0].Get("text").String()
+	if !strings.HasPrefix(firstText, "x-anthropic-billing-header:") {
+		t.Fatalf("system[0] should be billing block, got text starting with %q", truncate(firstText, 60))
+	}
+	agentText := blocks[1].Get("text").String()
+	if !strings.Contains(agentText, "Claude Code") {
+		t.Fatalf("system[1] should be agent block, got %q", truncate(agentText, 80))
+	}
+	staticText := blocks[2].Get("text").String()
+	if !strings.Contains(staticText, helps.ClaudeCodeIntro) {
+		t.Fatalf("system[2] should contain static prompt intro, got text starting with %q", truncate(staticText, 80))
+	}
+
+	// (b) User's original system text must NOT appear in the first user message.
+	firstUserText := gjson.GetBytes(out, "messages.0.content.0.text").String()
+	if strings.Contains(firstUserText, userSystemText) {
+		t.Fatalf("strict mode: user system text must NOT be forwarded to first user message, but found %q in %q", userSystemText, firstUserText)
+	}
+}
+
+func truncate(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
+}
+
 func TestNormalizeClaudeTemperatureForThinking_AdaptiveCoercesToOne(t *testing.T) {
 	payload := []byte(`{"temperature":0,"thinking":{"type":"adaptive"},"output_config":{"effort":"max"}}`)
 	out := normalizeClaudeTemperatureForThinking(payload)
