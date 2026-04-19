@@ -139,9 +139,11 @@ func (h *Handler) PutAPIKeys(c *gin.Context) {
 		return
 	}
 
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	h.cfg.APIKeys = append([]string(nil), keys...)
 	h.cfg.SetAPIKeyPolicies(policies)
-	h.persist(c)
+	h.persistLocked(c)
 }
 
 // parseAPIKeysPayload accepts both the legacy plain-string formats and the
@@ -255,13 +257,16 @@ func (h *Handler) PatchAPIKeys(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "invalid body"})
 		return
 	}
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	target := &h.cfg.APIKeys
 
 	if body.Index != nil && body.Value != nil && *body.Index >= 0 && *body.Index < len(*target) {
 		prev := (*target)[*body.Index]
 		(*target)[*body.Index] = *body.Value
 		h.renameAPIKeyPolicy(prev, *body.Value)
-		h.persist(c)
+		h.persistLocked(c)
 		return
 	}
 	if body.Old != nil && body.New != nil {
@@ -280,7 +285,7 @@ func (h *Handler) PatchAPIKeys(c *gin.Context) {
 			// New key has no prior policy — nothing to rename. The default
 			// policy applies until PUT /api-keys sets an explicit policy.
 		}
-		h.persist(c)
+		h.persistLocked(c)
 		return
 	}
 	c.JSON(400, gin.H{"error": "missing fields"})
@@ -290,6 +295,8 @@ func (h *Handler) PatchAPIKeys(c *gin.Context) {
 // drops any APIKeyPolicies entries keyed by the deleted value, so the policy
 // cannot outlive the credential.
 func (h *Handler) DeleteAPIKeys(c *gin.Context) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	target := &h.cfg.APIKeys
 
 	if idxStr := c.Query("index"); idxStr != "" {
@@ -299,7 +306,7 @@ func (h *Handler) DeleteAPIKeys(c *gin.Context) {
 			removed := (*target)[idx]
 			*target = append((*target)[:idx], (*target)[idx+1:]...)
 			h.removeAPIKeyPolicy(removed)
-			h.persist(c)
+			h.persistLocked(c)
 			return
 		}
 	}
@@ -312,7 +319,7 @@ func (h *Handler) DeleteAPIKeys(c *gin.Context) {
 		}
 		*target = out
 		h.removeAPIKeyPolicy(val)
-		h.persist(c)
+		h.persistLocked(c)
 		return
 	}
 	c.JSON(400, gin.H{"error": "missing index or value"})
@@ -335,7 +342,12 @@ func (h *Handler) renameAPIKeyPolicy(oldKey, newKey string) {
 			break
 		}
 	}
-	out := h.cfg.APIKeyPolicies[:0]
+	// Allocate a fresh slice rather than reusing h.cfg.APIKeyPolicies' backing
+	// array: SDKConfig.policyIndex caches pointers into that array, and a
+	// concurrent reader resolving the cache mid-write would observe a
+	// partially-mutated entry. A new backing array keeps the old pointers
+	// valid until InvalidatePolicyIndex forces a refresh.
+	out := make([]config.APIKeyPolicy, 0, len(h.cfg.APIKeyPolicies))
 	for i := range h.cfg.APIKeyPolicies {
 		p := h.cfg.APIKeyPolicies[i]
 		if p.Key == oldKey {
@@ -347,7 +359,7 @@ func (h *Handler) renameAPIKeyPolicy(oldKey, newKey string) {
 		}
 		out = append(out, p)
 	}
-	h.cfg.APIKeyPolicies = append([]config.APIKeyPolicy(nil), out...)
+	h.cfg.APIKeyPolicies = out
 	h.cfg.InvalidatePolicyIndex()
 }
 

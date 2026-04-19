@@ -37,6 +37,15 @@ import (
 // inspect.
 const modelACLMaxBodyBytes int64 = 10 * 1024 * 1024 // 10 MiB
 
+// modelACLPeekBytes is the size of the initial read the middleware performs
+// before committing to buffering the full body. Real-world chat-completion
+// payloads place "model" within the first few hundred bytes of JSON, so a
+// 16 KiB peek is nearly always sufficient. When "model" is visible in the
+// peek, the middleware avoids allocating up to modelACLMaxBodyBytes per
+// request — under concurrency this is the difference between a bounded
+// constant memory footprint and N*10 MiB.
+const modelACLPeekBytes int64 = 16 * 1024 // 16 KiB
+
 // errBodyTooLarge is used as a sentinel so extractRequestedModel can
 // distinguish a client payload that exceeded the cap from an I/O failure.
 var errBodyTooLarge = errors.New("model_acl: request body exceeds cap")
@@ -162,27 +171,73 @@ func extractRequestedModel(c *gin.Context) (model string, ok bool, err error) {
 		return "", false, errBodyTooLarge
 	}
 
-	// Read at most cap+1 bytes; if the limited reader hits EOF at cap+1 we
-	// know the client sent more than the cap and abort. Otherwise we restore
-	// exactly the bytes we consumed.
-	limited := io.LimitReader(c.Request.Body, modelACLMaxBodyBytes+1)
-	bodyBytes, readErr := io.ReadAll(limited)
+	// Peek the first modelACLPeekBytes. For well-formed chat-completion-shaped
+	// payloads the "model" field lives near the top of the JSON object, so
+	// this peek almost always contains it. When it does we can skip the full
+	// body read entirely and only allocate ~16 KiB per request instead of up
+	// to modelACLMaxBodyBytes.
+	peek := make([]byte, modelACLPeekBytes)
+	peekN, peekErr := io.ReadFull(c.Request.Body, peek)
+	peek = peek[:peekN]
+	bodyFullyRead := peekErr == io.EOF || peekErr == io.ErrUnexpectedEOF
+	if peekErr != nil && !bodyFullyRead {
+		return "", false, peekErr
+	}
+
+	if bodyFullyRead {
+		// Peek consumed everything. Restore body from peek alone.
+		c.Request.Body = io.NopCloser(bytes.NewReader(peek))
+		return extractModelFromBytes(peek)
+	}
+
+	// Body is larger than the peek window. Try extracting from the peek
+	// first; gjson tolerates truncated JSON — if the "model" field appears
+	// before the truncation point it returns the value, otherwise
+	// Exists() is false and we fall back to buffering the remainder.
+	if model, ok, _ := extractModelFromBytes(peek); ok {
+		// Found without needing the rest. Stitch peek + underlying body so
+		// downstream handlers still see the full payload.
+		c.Request.Body = io.NopCloser(io.MultiReader(bytes.NewReader(peek), c.Request.Body))
+		return model, true, nil
+	}
+
+	// "model" was not present in the peek. Read the remainder, bounded so
+	// the peek + remainder together stay under modelACLMaxBodyBytes.
+	remaining := modelACLMaxBodyBytes - int64(len(peek))
+	if remaining <= 0 {
+		// Should not happen given modelACLPeekBytes < modelACLMaxBodyBytes,
+		// but keep it explicit: if the peek alone filled the cap, no room
+		// to inspect further.
+		return "", false, errBodyTooLarge
+	}
+	limited := io.LimitReader(c.Request.Body, remaining+1)
+	rest, readErr := io.ReadAll(limited)
 	if readErr != nil {
 		return "", false, readErr
 	}
-	if int64(len(bodyBytes)) > modelACLMaxBodyBytes {
+	if int64(len(rest)) > remaining {
 		// Drain and discard the remainder so the underlying connection can
 		// close cleanly without us holding extra state.
 		_, _ = io.Copy(io.Discard, c.Request.Body)
 		return "", false, errBodyTooLarge
 	}
-	// Always restore the body so downstream handlers can re-read it.
+
+	bodyBytes := make([]byte, 0, len(peek)+len(rest))
+	bodyBytes = append(bodyBytes, peek...)
+	bodyBytes = append(bodyBytes, rest...)
 	c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 
-	if len(bodyBytes) == 0 {
+	return extractModelFromBytes(bodyBytes)
+}
+
+// extractModelFromBytes scans a (possibly truncated) JSON buffer for a
+// top-level "model" string field and returns it. A missing or empty field
+// yields ok=false; this is never an error condition.
+func extractModelFromBytes(body []byte) (model string, ok bool, err error) {
+	if len(body) == 0 {
 		return "", false, nil
 	}
-	res := gjson.GetBytes(bodyBytes, "model")
+	res := gjson.GetBytes(body, "model")
 	if !res.Exists() || res.Type != gjson.String {
 		return "", false, nil
 	}

@@ -205,6 +205,83 @@ func TestModelACLMiddleware_OversizedBodyRejectedViaContentLength(t *testing.T) 
 	}
 }
 
+func TestModelACLMiddleware_ModelInPeekLargeBodyPassesThrough(t *testing.T) {
+	// When "model" appears within the peek window but the body as a whole is
+	// larger than the peek, the middleware must (a) still extract the model
+	// correctly, (b) enforce policy based on it, and (c) preserve the full
+	// body for the downstream handler. This locks in the peek-first
+	// optimization: the fast path is only valid if the downstream reader
+	// still sees every byte.
+	cfg := &config.Config{
+		SDKConfig: config.SDKConfig{
+			APIKeys: []string{"sk-narrow"},
+			APIKeyPolicies: []config.APIKeyPolicy{
+				{Key: "sk-narrow", AllowedModels: []string{"gpt-4o*"}},
+			},
+		},
+	}
+	router := newTestRouter(cfg, "sk-narrow")
+
+	// Body with model at the top, then a large trailing "pad" string that
+	// pushes total size well beyond modelACLPeekBytes but well below
+	// modelACLMaxBodyBytes.
+	padSize := int(modelACLPeekBytes) * 4
+	filler := bytes.Repeat([]byte("x"), padSize)
+	body := append([]byte(`{"model":"gpt-4o-mini","pad":"`), filler...)
+	body = append(body, '"', '}')
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", w.Code, w.Body.String()[:min(200, len(w.Body.String()))])
+	}
+	if w.Body.Len() != len(body) {
+		t.Fatalf("downstream handler received %d bytes, want %d (full body must be preserved)", w.Body.Len(), len(body))
+	}
+	if !bytes.Equal(w.Body.Bytes(), body) {
+		t.Fatalf("downstream handler received mutated body")
+	}
+}
+
+func TestModelACLMiddleware_ModelAfterPeekFallsBackCorrectly(t *testing.T) {
+	// When "model" is NOT in the peek window but is within the cap, the
+	// middleware must fall back to reading the remainder and still extract
+	// the model correctly. This covers the less common but legal case of
+	// a large prompt preceding the "model" field.
+	cfg := &config.Config{
+		SDKConfig: config.SDKConfig{
+			APIKeys: []string{"sk-narrow"},
+			APIKeyPolicies: []config.APIKeyPolicy{
+				{Key: "sk-narrow", AllowedModels: []string{"gpt-4o*"}},
+			},
+		},
+	}
+	router := newTestRouter(cfg, "sk-narrow")
+
+	// Place a large "pad" field BEFORE "model" so the peek window fills
+	// before gjson can see the model key.
+	padSize := int(modelACLPeekBytes) * 2
+	filler := bytes.Repeat([]byte("y"), padSize)
+	body := append([]byte(`{"pad":"`), filler...)
+	body = append(body, '"', ',')
+	body = append(body, []byte(`"model":"gpt-4o-late"}`)...)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 (model allowed), got %d", w.Code)
+	}
+	if w.Body.Len() != len(body) {
+		t.Fatalf("downstream body length %d != request length %d", w.Body.Len(), len(body))
+	}
+}
+
 func TestModelACLMiddleware_ListEndpointAlwaysAllowed(t *testing.T) {
 	// /v1/models has no body and no model in path; the middleware must
 	// permit it regardless of policy so clients can still discover models.
