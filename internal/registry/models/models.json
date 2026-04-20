@@ -1602,6 +1602,29 @@
       }
     },
     {
+      "id": "gpt-5.4-pro",
+      "object": "model",
+      "created": 1776640000,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 5.4 Pro",
+      "version": "gpt-5.4-pro",
+      "description": "Stable version of GPT 5.4 Pro",
+      "context_length": 1050000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      }
+    },
+    {
       "id": "gpt-5.4-mini",
       "object": "model",
       "created": 1773705600,
