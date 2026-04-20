@@ -1023,7 +1023,27 @@ func validateClaudeUpstreamPayload(baseURL string, body []byte) error {
 	if config.InferCompatKindFromBaseURL(baseURL) != "minimax" {
 		return nil
 	}
+	if err := validateMiniMaxStructuredOutputCompatibility(body); err != nil {
+		return err
+	}
 	return validateMiniMaxToolResultAdjacency(body)
+}
+
+func validateMiniMaxStructuredOutputCompatibility(body []byte) error {
+	if len(body) == 0 || !gjson.ValidBytes(body) {
+		return nil
+	}
+	format := gjson.GetBytes(body, "output_config.format")
+	if !format.Exists() {
+		return nil
+	}
+	if format.IsObject() && len(format.Map()) == 0 {
+		return nil
+	}
+	return statusErr{
+		code: http.StatusBadRequest,
+		msg:  "request_feature_unsupported: minimax anthropic compatibility does not support output_config.format",
+	}
 }
 
 func validateMiniMaxToolResultAdjacency(body []byte) error {

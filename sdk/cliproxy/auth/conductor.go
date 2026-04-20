@@ -2177,7 +2177,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			}
 		} else {
 			if result.Model != "" {
-				if !isRequestScopedNotFoundResultError(result.Error) {
+				if !isRequestScopedNotFoundResultError(result.Error) && !isRequestScopedFeatureUnsupportedResultError(result.Error) {
 					disableCooling := quotaCooldownDisabledForAuth(auth)
 					state := ensureModelState(auth, result.Model)
 					state.Unavailable = true
@@ -2618,6 +2618,23 @@ func isRetryableAvailabilityErrorMessage(message string) bool {
 	return false
 }
 
+func isRequestScopedFeatureUnsupportedMessage(message string) bool {
+	lower := strings.ToLower(strings.TrimSpace(message))
+	if lower == "" {
+		return false
+	}
+	patterns := [...]string{
+		"request_feature_unsupported:",
+		"minimax anthropic compatibility does not support output_config.format",
+	}
+	for _, pattern := range patterns {
+		if strings.Contains(lower, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
 func isRequestScopedNotFoundMessage(message string) bool {
 	if message == "" {
 		return false
@@ -2635,6 +2652,13 @@ func isRequestScopedNotFoundResultError(err *Error) bool {
 	return isRequestScopedNotFoundMessage(err.Message)
 }
 
+func isRequestScopedFeatureUnsupportedResultError(err *Error) bool {
+	if err == nil || statusCodeFromResult(err) != http.StatusBadRequest {
+		return false
+	}
+	return isRequestScopedFeatureUnsupportedMessage(err.Message)
+}
+
 // isRequestInvalidError returns true if the error represents a client request
 // error that should not be retried. Specifically, it treats 400 responses with
 // "invalid_request_error", request-scoped 404 item misses caused by `store=false`,
@@ -2646,6 +2670,9 @@ func isRequestInvalidError(err error) bool {
 		return false
 	}
 	if isModelSupportError(err) {
+		return false
+	}
+	if isRequestScopedFeatureUnsupportedMessage(err.Error()) {
 		return false
 	}
 	status := statusCodeFromError(err)
@@ -2665,7 +2692,7 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 	if auth == nil {
 		return
 	}
-	if isRequestScopedNotFoundResultError(resultErr) {
+	if isRequestScopedNotFoundResultError(resultErr) || isRequestScopedFeatureUnsupportedResultError(resultErr) {
 		return
 	}
 	disableCooling := quotaCooldownDisabledForAuth(auth)

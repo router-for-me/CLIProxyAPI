@@ -2131,3 +2131,52 @@ func TestRemapOAuthToolNames_Lowercase_ReverseApplied(t *testing.T) {
 		t.Fatalf("content.0.name = %q, want %q", got, "bash")
 	}
 }
+
+func TestValidateClaudeUpstreamPayload_MiniMaxRejectsStructuredOutputFormat(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte(`{
+		"model":"MiniMax-M2.5",
+		"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}],
+		"output_config":{
+			"format":{
+				"type":"json_schema",
+				"json_schema":{"name":"result","schema":{"type":"object"}}
+			}
+		}
+	}`)
+
+	err := validateClaudeUpstreamPayload("https://api.minimaxi.io/anthropic", payload)
+	if err == nil {
+		t.Fatal("expected validation error, got nil")
+	}
+	se, ok := err.(statusErr)
+	if !ok {
+		t.Fatalf("error type = %T, want statusErr", err)
+	}
+	if se.StatusCode() != http.StatusBadRequest {
+		t.Fatalf("status code = %d, want %d", se.StatusCode(), http.StatusBadRequest)
+	}
+	if !strings.Contains(err.Error(), "request_feature_unsupported:") {
+		t.Fatalf("error = %q, want request_feature_unsupported prefix", err.Error())
+	}
+}
+
+func TestValidateClaudeUpstreamPayload_NonMiniMaxAllowsStructuredOutputFormat(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte(`{
+		"model":"claude-sonnet-4-6",
+		"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}],
+		"output_config":{
+			"format":{
+				"type":"json_schema",
+				"json_schema":{"name":"result","schema":{"type":"object"}}
+			}
+		}
+	}`)
+
+	if err := validateClaudeUpstreamPayload("https://api.anthropic.com", payload); err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+}

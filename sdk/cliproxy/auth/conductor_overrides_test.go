@@ -890,6 +890,66 @@ func TestManagerExecuteStream_ModelSupportBadRequestFallsBackAndSuspendsAuth(t *
 	}
 }
 
+func TestManager_RequestScopedFeatureUnsupportedBadRequest_FallsBackWithoutSuspendingAuth(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	executor := &authFallbackExecutor{
+		id: "claude",
+		executeErrors: map[string]error{
+			"aa-bad-auth": &Error{
+				HTTPStatus: http.StatusBadRequest,
+				Message:    "request_feature_unsupported: minimax anthropic compatibility does not support output_config.format",
+			},
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	model := "claude-sonnet-4-6"
+	badAuth := &Auth{ID: "aa-bad-auth", Provider: "claude"}
+	goodAuth := &Auth{ID: "bb-good-auth", Provider: "claude"}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(badAuth.ID, "claude", []*registry.ModelInfo{{ID: model}})
+	reg.RegisterClient(goodAuth.ID, "claude", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(badAuth.ID)
+		reg.UnregisterClient(goodAuth.ID)
+	})
+
+	if _, errRegister := m.Register(context.Background(), badAuth); errRegister != nil {
+		t.Fatalf("register bad auth: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), goodAuth); errRegister != nil {
+		t.Fatalf("register good auth: %v", errRegister)
+	}
+
+	resp, errExecute := m.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute != nil {
+		t.Fatalf("execute error = %v, want fallback success", errExecute)
+	}
+	if string(resp.Payload) != goodAuth.ID {
+		t.Fatalf("payload = %q, want %q", string(resp.Payload), goodAuth.ID)
+	}
+
+	got := executor.ExecuteCalls()
+	want := []string{badAuth.ID, goodAuth.ID}
+	if len(got) != len(want) {
+		t.Fatalf("execute calls = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("execute call %d auth = %q, want %q", i, got[i], want[i])
+		}
+	}
+
+	updatedBad, ok := m.GetByID(badAuth.ID)
+	if !ok || updatedBad == nil {
+		t.Fatalf("expected bad auth to remain registered")
+	}
+	if state := updatedBad.ModelStates[model]; state != nil {
+		t.Fatalf("expected request-scoped feature incompatibility to avoid model suspension, got state=%+v", *state)
+	}
+}
+
 func TestManager_MarkResult_RespectsAuthDisableCoolingOverride(t *testing.T) {
 	prev := quotaCooldownDisabled.Load()
 	quotaCooldownDisabled.Store(false)
