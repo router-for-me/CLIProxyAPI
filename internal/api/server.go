@@ -64,6 +64,27 @@ func defaultRequestLoggerFactory(cfg *config.Config, configPath string) logging.
 	return logging.NewFileRequestLogger(cfg.RequestLog, logsDir, configDir, cfg.ErrorLogsMaxFiles)
 }
 
+func logRequestLoggingState(cfg *config.Config) {
+	if cfg == nil {
+		return
+	}
+	logDir := logging.ResolveLogDirectory(cfg)
+	fields := log.Fields{
+		"commercial_mode": cfg.CommercialMode,
+		"request_log":     cfg.RequestLog,
+		"log_dir":         logDir,
+	}
+	if cfg.CommercialMode {
+		if cfg.RequestLog {
+			log.WithFields(fields).Warn("request logging is configured but middleware is disabled because commercial-mode is enabled")
+			return
+		}
+		log.WithFields(fields).Info("request logging middleware disabled because commercial-mode is enabled")
+		return
+	}
+	log.WithFields(fields).Info("request logging configuration active")
+}
+
 // WithMiddleware appends additional Gin middleware during server construction.
 func WithMiddleware(mw ...gin.HandlerFunc) ServerOption {
 	return func(cfg *serverOptionConfig) {
@@ -229,6 +250,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 			}
 		}
 	}
+	logRequestLoggingState(cfg)
 
 	engine.Use(corsMiddleware())
 	wd, err := os.Getwd()
@@ -898,6 +920,9 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 		if err := logging.ConfigureLogOutput(cfg); err != nil {
 			log.Errorf("failed to reconfigure log output: %v", err)
 		}
+	}
+	if oldCfg == nil || oldCfg.RequestLog != cfg.RequestLog || oldCfg.CommercialMode != cfg.CommercialMode || oldCfg.AuthDir != cfg.AuthDir {
+		logRequestLoggingState(cfg)
 	}
 
 	if oldCfg == nil || oldCfg.UsageStatisticsEnabled != cfg.UsageStatisticsEnabled {

@@ -31,6 +31,7 @@ func TestParse(t *testing.T) {
 		{name: "https", input: "https://proxy.example.com:8443", want: ModeProxy},
 		{name: "socks5", input: "socks5://proxy.example.com:1080", want: ModeProxy},
 		{name: "socks5h", input: "socks5h://proxy.example.com:1080", want: ModeProxy},
+		{name: "duplicated socks5 URL is normalized", input: "socks5://proxy.example.com:1080socks5://proxy.example.com:1080", want: ModeProxy},
 		{name: "invalid", input: "bad-value", want: ModeInvalid, wantErr: true},
 	}
 
@@ -157,5 +158,35 @@ func TestBuildHTTPTransportSOCKS5HProxy(t *testing.T) {
 	}
 	if transport.DialContext == nil {
 		t.Fatal("expected SOCKS5H transport to have custom DialContext")
+	}
+}
+
+func TestBuildHTTPTransportNormalizesDuplicatedSOCKS5ProxyURL(t *testing.T) {
+	t.Parallel()
+
+	transport, mode, errBuild := BuildHTTPTransport("socks5://proxy.example.com:1080socks5://proxy.example.com:1080")
+	if errBuild != nil {
+		t.Fatalf("BuildHTTPTransport returned error: %v", errBuild)
+	}
+	if mode != ModeProxy {
+		t.Fatalf("mode = %d, want %d", mode, ModeProxy)
+	}
+	if transport == nil {
+		t.Fatal("expected transport, got nil")
+	}
+	if transport.DialContext == nil {
+		t.Fatal("expected duplicated SOCKS5 URL to normalize into a working transport")
+	}
+}
+
+func TestParseMixedConcatenatedProxyURLRemainsInvalid(t *testing.T) {
+	t.Parallel()
+
+	setting, errParse := Parse("socks5://proxy.example.com:1080http://proxy.example.com:8080")
+	if errParse == nil {
+		t.Fatal("expected mixed concatenated proxy URL to remain invalid")
+	}
+	if setting.Mode != ModeInvalid {
+		t.Fatalf("mode = %d, want %d", setting.Mode, ModeInvalid)
 	}
 }

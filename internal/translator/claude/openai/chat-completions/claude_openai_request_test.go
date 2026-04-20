@@ -243,3 +243,61 @@ func TestConvertOpenAIRequestToClaude_SystemOnlyInputKeepsFallbackUserMessage(t 
 		t.Fatalf("Expected fallback text %q, got %q", "", got)
 	}
 }
+
+func TestConvertOpenAIRequestToClaude_ToolResultPrecedesTrailingUserText(t *testing.T) {
+	inputJSON := `{
+		"model": "gpt-4.1",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": "",
+				"tool_calls": [
+					{
+						"id": "call_1",
+						"type": "function",
+						"function": {
+							"name": "do_work",
+							"arguments": "{\"a\":1}"
+						}
+					}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type": "tool_result", "tool_use_id": "call_1", "content": "tool ok"},
+					{"type": "text", "text": "continue"}
+				]
+			}
+		]
+	}`
+
+	result := ConvertOpenAIRequestToClaude("claude-sonnet-4-5", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+	messages := resultJSON.Get("messages").Array()
+
+	if len(messages) != 3 {
+		t.Fatalf("Expected 3 messages, got %d. Messages: %s", len(messages), resultJSON.Get("messages").Raw)
+	}
+	if got := messages[0].Get("role").String(); got != "assistant" {
+		t.Fatalf("Expected first message role %q, got %q", "assistant", got)
+	}
+	if got := messages[0].Get("content.0.type").String(); got != "tool_use" {
+		t.Fatalf("Expected first message to contain tool_use, got %s", messages[0].Raw)
+	}
+	if got := messages[1].Get("role").String(); got != "user" {
+		t.Fatalf("Expected second message role %q, got %q", "user", got)
+	}
+	if got := messages[1].Get("content.0.type").String(); got != "tool_result" {
+		t.Fatalf("Expected second message to contain tool_result, got %s", messages[1].Raw)
+	}
+	if got := messages[1].Get("content.0.tool_use_id").String(); got != "call_1" {
+		t.Fatalf("Expected tool_use_id %q, got %q", "call_1", got)
+	}
+	if got := messages[2].Get("role").String(); got != "user" {
+		t.Fatalf("Expected trailing user message role %q, got %q", "user", got)
+	}
+	if got := messages[2].Get("content.0.text").String(); got != "continue" {
+		t.Fatalf("Expected trailing user text %q, got %q", "continue", got)
+	}
+}

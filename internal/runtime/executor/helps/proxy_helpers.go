@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
@@ -11,6 +12,8 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
 )
+
+var proxyTransportCache sync.Map
 
 // NewProxyAwareHTTPClient creates an HTTP client with proper proxy configuration priority:
 // 1. Use auth.ProxyURL if configured (highest priority)
@@ -70,10 +73,24 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 // Returns:
 //   - *http.Transport: A configured transport, or nil if the proxy URL is invalid
 func buildProxyTransport(proxyURL string) *http.Transport {
+	proxyURL = strings.TrimSpace(proxyURL)
+	if proxyURL == "" {
+		return nil
+	}
+	if cached, ok := proxyTransportCache.Load(proxyURL); ok {
+		if transport, okCast := cached.(*http.Transport); okCast && transport != nil {
+			return transport
+		}
+	}
 	transport, _, errBuild := proxyutil.BuildHTTPTransport(proxyURL)
 	if errBuild != nil {
 		log.Errorf("%v", errBuild)
 		return nil
+	}
+	actual, _ := proxyTransportCache.LoadOrStore(proxyURL, transport)
+	cached, ok := actual.(*http.Transport)
+	if ok && cached != nil {
+		return cached
 	}
 	return transport
 }

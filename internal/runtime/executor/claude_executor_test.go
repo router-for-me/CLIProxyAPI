@@ -263,6 +263,92 @@ func TestApplyClaudeHeaders_UpgradesCachedSoftwareFingerprintWhenBaselineAdvance
 	assertClaudeFingerprint(t, thirdPartyReq.Header, "claude-cli/2.1.77 (external, cli)", "0.87.0", "v24.8.0", "MacOS", "arm64")
 }
 
+func TestValidateMiniMaxToolResultAdjacencyRejectsIncompleteSequence(t *testing.T) {
+	t.Parallel()
+
+	body := []byte(`{
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type":"tool_use","id":"call_1","name":"read","input":{}},
+					{"type":"tool_use","id":"call_2","name":"glob","input":{}},
+					{"type":"tool_use","id":"call_3","name":"grep","input":{}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type":"tool_result","tool_use_id":"call_1","content":"ok"}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type":"text","text":"continue"}
+				]
+			}
+		]
+	}`)
+
+	err := validateMiniMaxToolResultAdjacency(body)
+	if err == nil {
+		t.Fatal("expected invalid MiniMax tool sequence error")
+	}
+	statusProvider, ok := err.(interface{ StatusCode() int })
+	if !ok || statusProvider.StatusCode() != http.StatusBadRequest {
+		t.Fatalf("expected bad request status error, got %T: %v", err, err)
+	}
+	if !strings.Contains(err.Error(), "tool_result must immediately follow tool_use") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestValidateMiniMaxToolResultAdjacencyAcceptsCompletedSequence(t *testing.T) {
+	t.Parallel()
+
+	body := []byte(`{
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type":"tool_use","id":"call_1","name":"read","input":{}},
+					{"type":"tool_use","id":"call_2","name":"glob","input":{}},
+					{"type":"tool_use","id":"call_3","name":"grep","input":{}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type":"tool_result","tool_use_id":"call_1","content":"ok"}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type":"tool_result","tool_use_id":"call_2","content":"ok"}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type":"tool_result","tool_use_id":"call_3","content":"ok"}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type":"text","text":"continue"}
+				]
+			}
+		]
+	}`)
+
+	if err := validateMiniMaxToolResultAdjacency(body); err != nil {
+		t.Fatalf("expected completed MiniMax tool sequence to pass, got %v", err)
+	}
+}
+
 func TestApplyClaudeHeaders_LearnsOfficialFingerprintAfterCustomBaselineFallback(t *testing.T) {
 	resetClaudeDeviceProfileCache()
 	stabilize := true

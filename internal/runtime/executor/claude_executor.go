@@ -211,6 +211,9 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if oauthToken || experimentalCCHSigningEnabled(e.cfg, auth) {
 		bodyForUpstream = signAnthropicMessagesBody(bodyForUpstream)
 	}
+	if errValidate := validateClaudeUpstreamPayload(baseURL, bodyForUpstream); errValidate != nil {
+		return resp, errValidate
+	}
 
 	url := fmt.Sprintf("%s/v1/messages?beta=true", baseURL)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyForUpstream))
@@ -396,6 +399,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	if oauthToken || experimentalCCHSigningEnabled(e.cfg, auth) {
 		bodyForUpstream = signAnthropicMessagesBody(bodyForUpstream)
 	}
+	if errValidate := validateClaudeUpstreamPayload(baseURL, bodyForUpstream); errValidate != nil {
+		return nil, errValidate
+	}
 
 	url := fmt.Sprintf("%s/v1/messages?beta=true", baseURL)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyForUpstream))
@@ -572,6 +578,9 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	// Remap tool names for OAuth token requests to avoid third-party fingerprinting.
 	if isClaudeOAuthToken(apiKey) {
 		body, _ = remapOAuthToolNames(body)
+	}
+	if errValidate := validateClaudeUpstreamPayload(baseURL, body); errValidate != nil {
+		return cliproxyexecutor.Response{}, errValidate
 	}
 
 	url := fmt.Sprintf("%s/v1/messages/count_tokens?beta=true", baseURL)
@@ -1019,6 +1028,90 @@ func checkSystemInstructions(payload []byte) []byte {
 
 func isClaudeOAuthToken(apiKey string) bool {
 	return strings.Contains(apiKey, "sk-ant-oat")
+}
+
+func validateClaudeUpstreamPayload(baseURL string, body []byte) error {
+	if config.InferCompatKindFromBaseURL(baseURL) != "minimax" {
+		return nil
+	}
+	return validateMiniMaxToolResultAdjacency(body)
+}
+
+func validateMiniMaxToolResultAdjacency(body []byte) error {
+	if len(body) == 0 || !gjson.ValidBytes(body) {
+		return nil
+	}
+	messages := gjson.GetBytes(body, "messages")
+	if !messages.Exists() || !messages.IsArray() {
+		return nil
+	}
+
+	pending := make([]string, 0)
+	removePending := func(id string) bool {
+		for idx := range pending {
+			if pending[idx] != id {
+				continue
+			}
+			pending = append(pending[:idx], pending[idx+1:]...)
+			return true
+		}
+		return false
+	}
+
+	for msgIdx, msg := range messages.Array() {
+		role := strings.TrimSpace(msg.Get("role").String())
+		switch role {
+		case "assistant":
+			if len(pending) > 0 {
+				return statusErr{code: http.StatusBadRequest, msg: fmt.Sprintf("minimax invalid tool_result sequence: pending tool results must be completed before assistant message %d", msgIdx)}
+			}
+			content := msg.Get("content")
+			if !content.Exists() || !content.IsArray() {
+				continue
+			}
+			for _, part := range content.Array() {
+				if strings.TrimSpace(part.Get("type").String()) != "tool_use" {
+					continue
+				}
+				id := strings.TrimSpace(part.Get("id").String())
+				if id != "" {
+					pending = append(pending, id)
+				}
+			}
+		case "user":
+			if len(pending) == 0 {
+				continue
+			}
+			content := msg.Get("content")
+			if !content.Exists() || !content.IsArray() {
+				return statusErr{code: http.StatusBadRequest, msg: fmt.Sprintf("minimax invalid tool_result sequence: pending tool results must be completed before non-tool user message %d", msgIdx)}
+			}
+			for partIdx, part := range content.Array() {
+				if strings.TrimSpace(part.Get("type").String()) != "tool_result" {
+					if len(pending) > 0 {
+						return statusErr{code: http.StatusBadRequest, msg: fmt.Sprintf("minimax invalid tool_result sequence: tool_result must immediately follow tool_use before user content at message %d part %d", msgIdx, partIdx)}
+					}
+					continue
+				}
+				toolUseID := strings.TrimSpace(part.Get("tool_use_id").String())
+				if toolUseID == "" {
+					return statusErr{code: http.StatusBadRequest, msg: fmt.Sprintf("minimax invalid tool_result sequence: missing tool_use_id at message %d part %d", msgIdx, partIdx)}
+				}
+				if !removePending(toolUseID) {
+					return statusErr{code: http.StatusBadRequest, msg: fmt.Sprintf("minimax invalid tool_result sequence: unexpected tool_use_id %q at message %d part %d", toolUseID, msgIdx, partIdx)}
+				}
+			}
+		default:
+			if len(pending) > 0 {
+				return statusErr{code: http.StatusBadRequest, msg: fmt.Sprintf("minimax invalid tool_result sequence: pending tool results must be completed before role %q at message %d", role, msgIdx)}
+			}
+		}
+	}
+
+	if len(pending) > 0 {
+		return statusErr{code: http.StatusBadRequest, msg: fmt.Sprintf("minimax invalid tool_result sequence: %d tool result(s) missing for preceding tool_use", len(pending))}
+	}
+	return nil
 }
 
 // remapOAuthToolNames renames third-party tool names to Claude Code equivalents
