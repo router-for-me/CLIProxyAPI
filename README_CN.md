@@ -86,6 +86,8 @@ cli-proxy-api.exe --background
 
 启动成功后会打印后台进程 PID 并立即返回。之后即使关闭终端，代理服务也会继续运行。
 
+`--background` 仅用于常规服务启动，请勿与交互/登录/导入/TUI 模式组合使用（例如：`--login`、`--codex-login`、`--codex-device-login`、`--claude-login`、`--antigravity-login`、`--kimi-login`、`--vertex-import`、`--tui`）。
+
 ## 管理 API 文档
 
 请参见 [MANAGEMENT_API_CN.md](https://help.router-for.me/cn/management/api)

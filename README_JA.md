@@ -84,6 +84,8 @@ cli-proxy-api.exe --background
 
 起動に成功すると、デタッチされた PID を表示してコマンドはすぐ終了します。以後はターミナルを閉じてもプロキシは動作し続けます。
 
+`--background` は通常のサービス起動専用です。対話/ログイン/インポート/TUI モード（例：`--login`、`--codex-login`、`--codex-device-login`、`--claude-login`、`--antigravity-login`、`--kimi-login`、`--vertex-import`、`--tui`）と組み合わせないでください。
+
 ## 管理API
 
 [MANAGEMENT_API.md](https://help.router-for.me/management/api)を参照

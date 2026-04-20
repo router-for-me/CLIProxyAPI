@@ -9,7 +9,8 @@ import (
 	"syscall"
 )
 
-const backgroundCreationFlags = 0x00000008 | 0x00000200
+const detachedProcess = 0x00000008
+const backgroundCreationFlags = detachedProcess | syscall.CREATE_NEW_PROCESS_GROUP
 
 // StartDetachedIfRequested relaunches the current process in detached mode when requested.
 // It returns true when parent process should exit immediately.
@@ -26,7 +27,12 @@ func StartDetachedIfRequested(enabled bool, args []string) (bool, error) {
 		_ = devNull.Close()
 	}()
 
-	child := exec.Command(os.Args[0], args...)
+	executablePath, err := os.Executable()
+	if err != nil {
+		return false, fmt.Errorf("resolve executable path: %w", err)
+	}
+
+	child := exec.Command(executablePath, args...)
 	child.Stdin = devNull
 	child.Stdout = devNull
 	child.Stderr = devNull
@@ -36,9 +42,6 @@ func StartDetachedIfRequested(enabled bool, args []string) (bool, error) {
 
 	if err := child.Start(); err != nil {
 		return false, fmt.Errorf("start detached child process: %w", err)
-	}
-	if child.Process == nil {
-		return false, fmt.Errorf("detached process started without pid")
 	}
 
 	fmt.Printf("CLIProxyAPI detached successfully (pid: %d)\n", child.Process.Pid)

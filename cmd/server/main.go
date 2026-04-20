@@ -124,23 +124,9 @@ func main() {
 	// Parse the command-line flags.
 	flag.Parse()
 
-	if background {
-		filteredArgs := make([]string, 0, len(os.Args)-1)
-		for _, arg := range os.Args[1:] {
-			if arg == "--background" || arg == "-background" ||
-				strings.HasPrefix(arg, "--background=") || strings.HasPrefix(arg, "-background=") {
-				continue
-			}
-			filteredArgs = append(filteredArgs, arg)
-		}
-		exited, errStartDetached := cmd.StartDetachedIfRequested(true, filteredArgs)
-		if errStartDetached != nil {
-			log.Errorf("failed to start detached background process: %v", errStartDetached)
-			return
-		}
-		if exited {
-			return
-		}
+	if background && (login || codexLogin || codexDeviceLogin || claudeLogin || antigravityLogin || kimiLogin || vertexImport != "" || tuiMode) {
+		log.Error("--background cannot be combined with interactive/login/import/tui modes")
+		return
 	}
 
 	// Core application variables.
@@ -502,6 +488,24 @@ func main() {
 	} else if kimiLogin {
 		cmd.DoKimiLogin(cfg, options)
 	} else {
+		if background {
+			filteredArgs := make([]string, 0, len(os.Args)-1)
+			for _, arg := range os.Args[1:] {
+				if arg == "--background" || arg == "-background" ||
+					strings.HasPrefix(arg, "--background=") || strings.HasPrefix(arg, "-background=") {
+					continue
+				}
+				filteredArgs = append(filteredArgs, arg)
+			}
+			exited, errStartDetached := cmd.StartDetachedIfRequested(true, filteredArgs)
+			if errStartDetached != nil {
+				log.Errorf("failed to start detached background process: %v", errStartDetached)
+				return
+			}
+			if exited {
+				return
+			}
+		}
 		// In cloud deploy mode without config file, just wait for shutdown signals
 		if isCloudDeploy && !configFileExists {
 			// No config file available, just wait for shutdown
