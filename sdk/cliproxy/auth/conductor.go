@@ -2132,6 +2132,15 @@ func waitForCooldown(ctx context.Context, wait time.Duration) error {
 	}
 }
 
+func isTransientUpstreamStatus(statusCode int) bool {
+	switch statusCode {
+	case 408, 500, 502, 503, 504, 520, 521, 522, 523, 524:
+		return true
+	default:
+		return false
+	}
+}
+
 // MarkResult records an execution result and notifies hooks.
 func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	if result.AuthID == "" {
@@ -2243,15 +2252,17 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								setModelQuota = true
 								modelQuotaRecoverAt = next
 							}
-						case 408, 500, 502, 503, 504:
-							if disableCooling {
-								state.NextRetryAfter = time.Time{}
-							} else {
-								next := now.Add(1 * time.Minute)
-								state.NextRetryAfter = next
-							}
 						default:
-							state.NextRetryAfter = time.Time{}
+							if isTransientUpstreamStatus(statusCode) {
+								if disableCooling {
+									state.NextRetryAfter = time.Time{}
+								} else {
+									next := now.Add(1 * time.Minute)
+									state.NextRetryAfter = next
+								}
+							} else {
+								state.NextRetryAfter = time.Time{}
+							}
 						}
 					}
 
@@ -2708,14 +2719,16 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		}
 		auth.Quota.NextRecoverAt = next
 		auth.NextRetryAfter = next
-	case 408, 500, 502, 503, 504:
-		auth.StatusMessage = "transient upstream error"
-		if disableCooling {
-			auth.NextRetryAfter = time.Time{}
-		} else {
-			auth.NextRetryAfter = now.Add(1 * time.Minute)
-		}
 	default:
+		if isTransientUpstreamStatus(statusCode) {
+			auth.StatusMessage = "transient upstream error"
+			if disableCooling {
+				auth.NextRetryAfter = time.Time{}
+			} else {
+				auth.NextRetryAfter = now.Add(1 * time.Minute)
+			}
+			return
+		}
 		if auth.StatusMessage == "" {
 			auth.StatusMessage = "request failed"
 		}
