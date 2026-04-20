@@ -179,16 +179,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		eventType := gjson.GetBytes(eventData, "type").String()
 
 		if eventType == "response.output_item.done" {
-			itemResult := gjson.GetBytes(eventData, "item")
-			if !itemResult.Exists() || itemResult.Type != gjson.JSON {
-				continue
-			}
-			outputIndexResult := gjson.GetBytes(eventData, "output_index")
-			if outputIndexResult.Exists() {
-				outputItemsByIndex[outputIndexResult.Int()] = []byte(itemResult.Raw)
-			} else {
-				outputItemsFallback = append(outputItemsFallback, []byte(itemResult.Raw))
-			}
+			collectOutputItem(eventData, outputItemsByIndex, &outputItemsFallback)
 			continue
 		}
 
@@ -200,28 +191,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 			reporter.Publish(ctx, detail)
 		}
 
-		completedData := eventData
-		outputResult := gjson.GetBytes(completedData, "response.output")
-		shouldPatchOutput := (!outputResult.Exists() || !outputResult.IsArray() || len(outputResult.Array()) == 0) && (len(outputItemsByIndex) > 0 || len(outputItemsFallback) > 0)
-		if shouldPatchOutput {
-			completedDataPatched := completedData
-			completedDataPatched, _ = sjson.SetRawBytes(completedDataPatched, "response.output", []byte(`[]`))
-
-			indexes := make([]int64, 0, len(outputItemsByIndex))
-			for idx := range outputItemsByIndex {
-				indexes = append(indexes, idx)
-			}
-			sort.Slice(indexes, func(i, j int) bool {
-				return indexes[i] < indexes[j]
-			})
-			for _, idx := range indexes {
-				completedDataPatched, _ = sjson.SetRawBytes(completedDataPatched, "response.output.-1", outputItemsByIndex[idx])
-			}
-			for _, item := range outputItemsFallback {
-				completedDataPatched, _ = sjson.SetRawBytes(completedDataPatched, "response.output.-1", item)
-			}
-			completedData = completedDataPatched
-		}
+		completedData := patchCompletedOutput(eventData, outputItemsByIndex, outputItemsFallback)
 
 		var param any
 		out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, originalPayload, body, completedData, &param)
@@ -414,16 +384,29 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		scanner := bufio.NewScanner(httpResp.Body)
 		scanner.Buffer(nil, 52_428_800) // 50MB
 		var param any
+
+		// Collect output items so we can populate response.completed.response.output
+		// which the upstream Codex API may return empty during streaming.
+		outputItemsByIndex := make(map[int64][]byte)
+		var outputItemsFallback [][]byte
+
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 
 			if bytes.HasPrefix(line, dataTag) {
 				data := bytes.TrimSpace(line[5:])
-				if gjson.GetBytes(data, "type").String() == "response.completed" {
+				eventType := gjson.GetBytes(data, "type").String()
+
+				if eventType == "response.output_item.done" {
+					collectOutputItem(data, outputItemsByIndex, &outputItemsFallback)
+				}
+
+				if eventType == "response.completed" {
 					if detail, ok := helps.ParseCodexUsage(data); ok {
 						reporter.Publish(ctx, detail)
 					}
+					line = patchCompletedOutputInSSELine(line, outputItemsByIndex, outputItemsFallback)
 				}
 			}
 
@@ -846,4 +829,73 @@ func (e *CodexExecutor) resolveCodexConfig(auth *cliproxyauth.Auth) *config.Code
 		}
 	}
 	return nil
+}
+
+// collectOutputItem extracts an output item from a response.output_item.done event
+// and stores it by index (or in the fallback slice when no index is present).
+func collectOutputItem(eventData []byte, itemsByIndex map[int64][]byte, itemsFallback *[][]byte) {
+	itemResult := gjson.GetBytes(eventData, "item")
+	if !itemResult.Exists() || itemResult.Type != gjson.JSON {
+		return
+	}
+	outputIndexResult := gjson.GetBytes(eventData, "output_index")
+	if outputIndexResult.Exists() {
+		itemsByIndex[outputIndexResult.Int()] = []byte(itemResult.Raw)
+	} else {
+		*itemsFallback = append(*itemsFallback, []byte(itemResult.Raw))
+	}
+}
+
+// patchCompletedOutput injects collected output items into a response.completed JSON
+// payload when the upstream returned an empty response.output array. Returns the
+// original data unchanged if output is already populated or no items were collected.
+func patchCompletedOutput(data []byte, itemsByIndex map[int64][]byte, itemsFallback [][]byte) []byte {
+	if len(itemsByIndex) == 0 && len(itemsFallback) == 0 {
+		return data
+	}
+	outputResult := gjson.GetBytes(data, "response.output")
+	if outputResult.Exists() && outputResult.IsArray() && len(outputResult.Array()) > 0 {
+		return data
+	}
+
+	patched, err := sjson.SetRawBytes(data, "response.output", []byte(`[]`))
+	if err != nil {
+		return data
+	}
+
+	indexes := make([]int64, 0, len(itemsByIndex))
+	for idx := range itemsByIndex {
+		indexes = append(indexes, idx)
+	}
+	sort.Slice(indexes, func(i, j int) bool { return indexes[i] < indexes[j] })
+	for _, idx := range indexes {
+		patched, err = sjson.SetRawBytes(patched, "response.output.-1", itemsByIndex[idx])
+		if err != nil {
+			return data
+		}
+	}
+	for _, item := range itemsFallback {
+		patched, err = sjson.SetRawBytes(patched, "response.output.-1", item)
+		if err != nil {
+			return data
+		}
+	}
+
+	return patched
+}
+
+// patchCompletedOutputInSSELine wraps patchCompletedOutput for SSE "data:" framed lines.
+func patchCompletedOutputInSSELine(line []byte, itemsByIndex map[int64][]byte, itemsFallback [][]byte) []byte {
+	if len(itemsByIndex) == 0 && len(itemsFallback) == 0 {
+		return line
+	}
+	if !bytes.HasPrefix(line, dataTag) {
+		return line
+	}
+	data := bytes.TrimSpace(line[5:])
+	patched := patchCompletedOutput(data, itemsByIndex, itemsFallback)
+	if bytes.Equal(patched, data) {
+		return line
+	}
+	return append([]byte("data: "), patched...)
 }
