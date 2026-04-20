@@ -42,6 +42,10 @@ GLM CODING PLANを10%割引で取得：https://z.ai/subscribe?ic=8JVLJQFSKB
 <td width="180"><a href="https://poixe.com/i/m8kvep"><img src="./assets/poixeai.png" alt="PoixeAI" width="150"></a></td>
 <td>Poixe AIのスポンサーシップに感謝します！Poixe AIは信頼できるAIモデルAPIサービスを提供しており、プラットフォームが提供するLLM APIを使って簡単にAI製品を構築できます。また、サプライヤーとしてプラットフォームに大規模モデルのリソースを提供し、収益を得ることも可能です。CLIProxyAPIの<a href="https://poixe.com/i/m8kvep">専用リンク</a>から登録すると、チャージ時に追加で$5が付与されます。</td>
 </tr>
+<tr>
+<td width="180"><a href="https://coder.visioncoder.cn"><img src="./assets/visioncoder.png" alt="VisionCoder" width="150"></a></td>
+<td>VisionCoderのご支援に感謝します！<a href="https://coder.visioncoder.cn">VisionCoder 開発プラットフォーム</a> は、信頼性が高く効率的なAPIリレーサービスプロバイダーで、Claude Code、Codex、Geminiなどの主要AIモデルを提供し、開発者やチームがより簡単にAI機能を統合して生産性を向上できるよう支援します。さらに、VisionCoderはユーザー向けに <a href="https://coder.visioncoder.cn">Token Plan</a> の期間限定キャンペーン（1か月購入で1か月分プレゼント）も提供しています。</td>
+</tr>
 </tbody>
 </table>
 
