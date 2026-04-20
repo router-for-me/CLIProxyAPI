@@ -714,13 +714,13 @@ func TestNormalizeClaudeStyleToolBlocksInChatMessages(t *testing.T) {
 
 	out := ConvertOpenAIRequestToCodex("gpt-4o", input, true)
 	items := gjson.GetBytes(out, "input").Array()
-	if len(items) != 4 {
-		t.Fatalf("expected 4 normalized input items, got %d: %s", len(items), gjson.GetBytes(out, "input").Raw)
+	if len(items) != 3 {
+		t.Fatalf("expected 3 normalized input items, got %d: %s", len(items), gjson.GetBytes(out, "input").Raw)
 	}
-	if items[1].Get("type").String() != "function_call" || items[2].Get("type").String() != "tool" && items[2].Get("type").String() != "message" {
+	if items[0].Get("type").String() != "message" || items[1].Get("type").String() != "function_call" {
 		t.Fatalf("unexpected normalized transcript: %s", gjson.GetBytes(out, "input").Raw)
 	}
-	if items[3].Get("type").String() != "function_call_output" {
+	if items[2].Get("type").String() != "function_call_output" {
 		t.Fatalf("expected function_call_output tail: %s", gjson.GetBytes(out, "input").Raw)
 	}
 }

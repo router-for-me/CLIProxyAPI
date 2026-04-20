@@ -121,12 +121,12 @@ func TestRegisterModelsForAuth_UsesProviderNativeTypeForConfiguredModels(t *test
 	t.Parallel()
 
 	tests := []struct {
-		name         string
-		auth         *coreauth.Auth
-		cfg          *config.Config
-		wantModelID  string
-		wantType     string
-		wantOwnedBy  string
+		name        string
+		auth        *coreauth.Auth
+		cfg         *config.Config
+		wantModelID string
+		wantType    string
+		wantOwnedBy string
 	}{
 		{
 			name: "gemini",

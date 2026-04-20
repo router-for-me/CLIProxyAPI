@@ -290,6 +290,13 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 func (h *Handler) persistConfig() error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	return config.SaveConfigPreserveComments(h.configFilePath, h.cfg)
+}
+
+// persist saves the current in-memory config to disk.
+func (h *Handler) persist(c *gin.Context) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	return h.persistLocked(c)
 }
 
