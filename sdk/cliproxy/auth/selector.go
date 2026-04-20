@@ -490,13 +490,6 @@ func (s *SequentialFillSelector) pickSticky(provider, model string, available []
 	return available[0]
 }
 
-// MaxRetryAttempts implements RetryLimiter.
-// Returns 2 to limit attempts to current credential + 1 retry,
-// preserving stickiness and preventing credential pool exhaustion.
-func (s *SequentialFillSelector) MaxRetryAttempts() int {
-	return 2
-}
-
 func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, blockReason, time.Time) {
 	if auth == nil {
 		return true, blockReasonOther, time.Time{}

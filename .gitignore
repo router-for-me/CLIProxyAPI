@@ -57,3 +57,4 @@ usage.*
 /.gopath
 .cli-proxy-api/
 .venv/
+AGENTS.md

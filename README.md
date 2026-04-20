@@ -27,7 +27,7 @@ A sticky credential selection strategy (`sf` or `sequential-fill`) that optimize
 - Sticks to the current credential until it becomes unavailable
 - Random starting point for initial selection to balance load across credentials
 - Sequential advancement without jumping back to recovered credentials
-- Preserves stickiness with `MaxRetryAttempts = 2`
+- Honors the normal `request-retry` and `max-retry-credentials` settings
 
 Configuration:
 ```yaml
@@ -106,6 +106,12 @@ Get 10% OFF GLM CODING PLAN：https://z.ai/subscribe?ic=8JVLJQFSKB
 <tr>
 <td width="180"><a href="https://poixe.com/i/m8kvep"><img src="./assets/poixeai.png" alt="PoixeAI" width="150"></a></td>
 <td>Thanks to Poixe AI for sponsoring this project! Poixe AI provides reliable LLM API services. You can leverage the platform's API endpoints to seamlessly build AI-powered products. Additionally, you can become a vendor by providing AI API resources to the platform and earn revenue. Register through the exclusive CLIProxyAPI <a href="https://poixe.com/i/m8kvep">referral link</a> and receive a bonus of $5 USD on your first top-up.</td>
+</tr>
+<tr>
+<td width="180"><a href="https://coder.visioncoder.cn"><img src="./assets/visioncoder.png" alt="VisionCoder" width="150"></a></td>
+<td>Thanks to VisionCoder for supporting this project. <a href="https://coder.visioncoder.cn" target="_blank">VisionCoder Developer Platform</a> is a reliable and efficient API relay service provider, offering access to mainstream AI models such as Claude Code, Codex, and Gemini. It helps developers and teams integrate AI capabilities more easily and improve productivity.
+<p></p>
+VisionCoder is also offering our users a limited-time <a href="https://coder.visioncoder.cn" target="_blank">Token Plan</a> promotion: buy 1 month and get 1 month free.</td>
 </tr>
 </tbody>
 </table>
