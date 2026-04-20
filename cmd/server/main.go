@@ -73,6 +73,7 @@ func main() {
 	var tuiMode bool
 	var standalone bool
 	var localModel bool
+	var background bool
 
 	// Define command-line flags for different operation modes.
 	flag.BoolVar(&login, "login", false, "Login Google Account")
@@ -91,6 +92,7 @@ func main() {
 	flag.BoolVar(&tuiMode, "tui", false, "Start with terminal management UI")
 	flag.BoolVar(&standalone, "standalone", false, "In TUI mode, start an embedded local server")
 	flag.BoolVar(&localModel, "local-model", false, "Use embedded model catalog only, skip remote model fetching")
+	flag.BoolVar(&background, "background", false, "Run as detached background process on Windows")
 
 	flag.CommandLine.Usage = func() {
 		out := flag.CommandLine.Output()
@@ -121,6 +123,25 @@ func main() {
 
 	// Parse the command-line flags.
 	flag.Parse()
+
+	if background {
+		filteredArgs := make([]string, 0, len(os.Args)-1)
+		for _, arg := range os.Args[1:] {
+			if arg == "--background" || arg == "-background" ||
+				strings.HasPrefix(arg, "--background=") || strings.HasPrefix(arg, "-background=") {
+				continue
+			}
+			filteredArgs = append(filteredArgs, arg)
+		}
+		exited, errStartDetached := cmd.StartDetachedIfRequested(true, filteredArgs)
+		if errStartDetached != nil {
+			log.Errorf("failed to start detached background process: %v", errStartDetached)
+			return
+		}
+		if exited {
+			return
+		}
+	}
 
 	// Core application variables.
 	var err error
