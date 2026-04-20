@@ -60,6 +60,12 @@ type ToolCallAccumulator struct {
 	ID        string
 	Name      string
 	Arguments strings.Builder
+	// StartEmitted tracks whether content_block_start has been sent for this
+	// tool. Some upstreams send the function.name field across multiple
+	// streaming chunks (or repeat it); without this guard we emit duplicate
+	// content_block_start events, which crashes Anthropic-format clients
+	// (e.g. Amp's tool_use normalizer).
+	StartEmitted bool
 }
 
 // ConvertOpenAIResponseToClaude converts OpenAI streaming response format to Anthropic API format.
@@ -236,9 +242,17 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 
 				// Handle function name
 				if function := toolCall.Get("function"); function.Exists() {
-					if name := function.Get("name"); name.Exists() {
+					// Only emit content_block_start once we have a non-empty name
+					// AND we haven't already emitted it for this tool index.
+					// Upstreams sometimes send "name":"" or repeat the name field;
+					// without these guards Amp's tool_use parser bails with
+					// "Skipping tool_use normalization due to missing name" or
+					// crashes on duplicate start events.
+					if name := function.Get("name"); name.Exists() && name.String() != "" {
 						accumulator.Name = util.MapToolName(param.ToolNameMap, name.String())
+					}
 
+					if !accumulator.StartEmitted && accumulator.Name != "" {
 						stopThinkingContentBlock(param, &results)
 
 						stopTextContentBlock(param, &results)
@@ -250,6 +264,7 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 						contentBlockStartJSONBytes, _ = sjson.SetBytes(contentBlockStartJSONBytes, "content_block.id", util.SanitizeClaudeToolID(accumulator.ID))
 						contentBlockStartJSONBytes, _ = sjson.SetBytes(contentBlockStartJSONBytes, "content_block.name", accumulator.Name)
 						results = append(results, translatorcommon.AppendSSEEventBytes(nil, "content_block_start", contentBlockStartJSONBytes, 2))
+						accumulator.StartEmitted = true
 					}
 
 					// Handle function arguments
