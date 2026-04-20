@@ -182,13 +182,10 @@ func (m *Manager) SetOAuthQuotaGroupManualState(authID, groupID string, manualSu
 	}
 	now = now.UTC()
 
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	var authSnapshot *Auth
 
-	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
-	if cfg == nil {
-		cfg = &internalconfig.Config{}
-	}
+	m.mu.Lock()
+	cfg := m.cloneRuntimeConfigForQuotaGroups()
 	current, _ := findOAuthQuotaGroupState(cfg.OAuthAccountQuotaGroupState, authID, groupID)
 	current.AuthID = authID
 	current.GroupID = groupID
@@ -207,6 +204,17 @@ func (m *Manager) SetOAuthQuotaGroupManualState(authID, groupID string, manualSu
 	} else {
 		cfg.OAuthAccountQuotaGroupState = internalconfig.UpsertOAuthAccountQuotaGroupState(cfg.OAuthAccountQuotaGroupState, current)
 	}
+	m.publishRuntimeConfigLocked(cfg)
+	if auth := m.auths[authID]; auth != nil {
+		updateAggregatedAvailability(auth, now)
+		auth.UpdatedAt = now
+		authSnapshot = auth.Clone()
+	}
+	m.mu.Unlock()
+
+	if m.scheduler != nil && authSnapshot != nil {
+		m.scheduler.upsertAuth(authSnapshot)
+	}
 	return cfg
 }
 
@@ -224,15 +232,13 @@ func (m *Manager) ClearOAuthQuotaGroupAutoState(authID, groupID, updatedBy strin
 	}
 	now = now.UTC()
 
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	var authSnapshot *Auth
 
-	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
-	if cfg == nil {
-		cfg = &internalconfig.Config{}
-	}
+	m.mu.Lock()
+	cfg := m.cloneRuntimeConfigForQuotaGroups()
 	current, ok := findOAuthQuotaGroupState(cfg.OAuthAccountQuotaGroupState, authID, groupID)
 	if !ok {
+		m.mu.Unlock()
 		return cfg
 	}
 	current.AutoSuspendedUntil = time.Time{}
@@ -249,6 +255,17 @@ func (m *Manager) ClearOAuthQuotaGroupAutoState(authID, groupID, updatedBy strin
 		cfg.OAuthAccountQuotaGroupState = internalconfig.UpsertOAuthAccountQuotaGroupState(cfg.OAuthAccountQuotaGroupState, current)
 	} else {
 		cfg.OAuthAccountQuotaGroupState = internalconfig.RemoveOAuthAccountQuotaGroupState(cfg.OAuthAccountQuotaGroupState, authID, groupID)
+	}
+	m.publishRuntimeConfigLocked(cfg)
+	if auth := m.auths[authID]; auth != nil {
+		updateAggregatedAvailability(auth, now)
+		auth.UpdatedAt = now
+		authSnapshot = auth.Clone()
+	}
+	m.mu.Unlock()
+
+	if m.scheduler != nil && authSnapshot != nil {
+		m.scheduler.upsertAuth(authSnapshot)
 	}
 	return cfg
 }
@@ -309,6 +326,7 @@ func (m *Manager) ClearExpiredOAuthQuotaGroupAutoStates(now time.Time) bool {
 	if changed {
 		cfg.OAuthAccountQuotaGroupState = internalconfig.NormalizeOAuthAccountQuotaGroupState(nextEntries)
 		cfgToPublish = cfg
+		m.publishRuntimeConfigLocked(cfgToPublish)
 		for authID := range affectedAuthIDs {
 			auth := m.auths[authID]
 			if auth == nil {
@@ -325,7 +343,6 @@ func (m *Manager) ClearExpiredOAuthQuotaGroupAutoStates(now time.Time) bool {
 		return false
 	}
 
-	m.SetConfig(cfgToPublish)
 	if err := m.persistRuntimeConfigSnapshot(cfgToPublish); err != nil {
 		log.WithError(err).Warn("failed to persist expired oauth-account-quota-group-state cleanup")
 	}

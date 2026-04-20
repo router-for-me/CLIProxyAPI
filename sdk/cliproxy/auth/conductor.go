@@ -412,7 +412,7 @@ func (m *Manager) SetRoundTripperProvider(p RoundTripperProvider) {
 
 // SetConfig updates the runtime config snapshot used by request-time helpers.
 // Callers should provide the latest config on reload so per-credential alias mapping stays in sync.
-func (m *Manager) SetConfig(cfg *internalconfig.Config) {
+func (m *Manager) publishRuntimeConfigLocked(cfg *internalconfig.Config) {
 	if m == nil {
 		return
 	}
@@ -422,15 +422,25 @@ func (m *Manager) SetConfig(cfg *internalconfig.Config) {
 	m.runtimeConfig.Store(cfg)
 	snapshot := buildOAuthQuotaRuntimeSnapshot(cfg)
 	m.oauthQuotaRuntime.Store(snapshot)
-	m.mu.Lock()
 	for _, auth := range m.auths {
 		if auth != nil {
 			auth.quotaRuntime = snapshot
 		}
 	}
+	m.rebuildAPIKeyModelAliasLocked(cfg)
+}
+
+func (m *Manager) SetConfig(cfg *internalconfig.Config) {
+	if m == nil {
+		return
+	}
+	if cfg == nil {
+		cfg = &internalconfig.Config{}
+	}
+	m.mu.Lock()
+	m.publishRuntimeConfigLocked(cfg)
 	m.mu.Unlock()
 	m.applyBuiltInSelectorForConfig(cfg)
-	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
 }
 
 // SetConfigFilePath updates the config.yaml path used when persisting quota-group runtime state.
@@ -2065,9 +2075,21 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	setModelQuota := false
 	var authSnapshot *Auth
 	var runtimeCfgToPublish *internalconfig.Config
+	var runtimeCfgToPersist *internalconfig.Config
 	persistRuntimeConfig := false
 
 	m.mu.Lock()
+	publishRuntimeConfig := func() {
+		if runtimeCfgToPublish == nil {
+			return
+		}
+		m.publishRuntimeConfigLocked(runtimeCfgToPublish)
+		if persistRuntimeConfig {
+			runtimeCfgToPersist = runtimeCfgToPublish
+		}
+		runtimeCfgToPublish = nil
+		persistRuntimeConfig = false
+	}
 	if auth, ok := m.auths[result.AuthID]; ok && auth != nil {
 		now := time.Now()
 
@@ -2079,6 +2101,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				}
 				state := ensureModelState(auth, result.Model)
 				resetModelState(state, now)
+				publishRuntimeConfig()
 				updateAggregatedAvailability(auth, now)
 				if !hasModelError(auth, now) {
 					auth.LastError = nil
@@ -2196,6 +2219,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 
 					auth.Status = StatusError
 					auth.UpdatedAt = now
+					publishRuntimeConfig()
 					updateAggregatedAvailability(auth, now)
 				}
 			} else {
@@ -2203,16 +2227,14 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			}
 		}
 
+		publishRuntimeConfig()
 		_ = m.persist(ctx, auth)
 		authSnapshot = auth.Clone()
 	}
 	m.mu.Unlock()
-	if runtimeCfgToPublish != nil {
-		m.SetConfig(runtimeCfgToPublish)
-		if persistRuntimeConfig {
-			if err := m.persistRuntimeConfigSnapshot(runtimeCfgToPublish); err != nil {
-				log.WithError(err).Warn("failed to persist oauth-account-quota-group-state")
-			}
+	if runtimeCfgToPersist != nil {
+		if err := m.persistRuntimeConfigSnapshot(runtimeCfgToPersist); err != nil {
+			log.WithError(err).Warn("failed to persist oauth-account-quota-group-state")
 		}
 	}
 	if m.scheduler != nil && authSnapshot != nil {

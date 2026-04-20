@@ -186,6 +186,14 @@ func TestManagerMarkResult_QuotaGroupCooldownLifecycle(t *testing.T) {
 	}
 
 	model := "gemini-3.1-flash-lite"
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{
+		{ID: model},
+	})
+	t.Cleanup(func() {
+		reg.UnregisterClient(auth.ID)
+	})
+
 	retryAfter := 3 * time.Minute
 	manager.MarkResult(context.Background(), Result{
 		AuthID:     auth.ID,
@@ -234,6 +242,25 @@ func TestManagerMarkResult_QuotaGroupCooldownLifecycle(t *testing.T) {
 	if modelState.Quota.Exceeded {
 		t.Fatal("modelState.Quota.Exceeded = true, want false")
 	}
+	if !updatedAuth.Unavailable {
+		t.Fatal("updatedAuth.Unavailable = false, want true while the only effective quota group is auto-suspended")
+	}
+	if updatedAuth.NextRetryAfter.IsZero() {
+		t.Fatal("updatedAuth.NextRetryAfter = zero, want aggregated retry timestamp")
+	}
+	if !updatedAuth.Quota.Exceeded {
+		t.Fatal("updatedAuth.Quota.Exceeded = false, want true")
+	}
+	blocked, reason, next := isAuthBlockedForModel(updatedAuth, model, time.Now().UTC())
+	if !blocked {
+		t.Fatal("updated auth is not blocked by quota-group cooldown")
+	}
+	if reason != blockReasonCooldown {
+		t.Fatalf("updated auth block reason = %v, want %v", reason, blockReasonCooldown)
+	}
+	if next.IsZero() {
+		t.Fatal("updated auth block next = zero, want future timestamp")
+	}
 
 	manager.MarkResult(context.Background(), Result{
 		AuthID:   auth.ID,
@@ -248,6 +275,20 @@ func TestManagerMarkResult_QuotaGroupCooldownLifecycle(t *testing.T) {
 	}
 	if _, ok := findOAuthQuotaGroupState(runtimeCfg.OAuthAccountQuotaGroupState, auth.ID, internalconfig.OAuthQuotaGroupG3Flash); ok {
 		t.Fatal("quota-group state still present after success")
+	}
+	updatedAuth, ok = manager.GetByID(auth.ID)
+	if !ok || updatedAuth == nil {
+		t.Fatal("updated auth missing after success")
+	}
+	blocked, reason, next = isAuthBlockedForModel(updatedAuth, model, time.Now().UTC())
+	if blocked {
+		t.Fatal("updated auth is still blocked after success")
+	}
+	if reason != blockReasonNone {
+		t.Fatalf("updated auth block reason after success = %v, want %v", reason, blockReasonNone)
+	}
+	if !next.IsZero() {
+		t.Fatalf("updated auth block next after success = %v, want zero", next)
 	}
 }
 
@@ -359,5 +400,142 @@ func TestManagerClearExpiredOAuthQuotaGroupAutoStates_RemovesExpiredState(t *tes
 	}
 	if state.AutoReason != "" || state.SourceModel != "" || state.SourceProvider != "" || state.ResetTimeSource != "" {
 		t.Fatalf("manual state still has stale auto metadata: %#v", state)
+	}
+}
+
+func TestManagerSetOAuthQuotaGroupManualState_PublishesSnapshot(t *testing.T) {
+	now := time.Now().UTC()
+	manager := NewManager(nil, nil, nil)
+	cfg := testOAuthQuotaConfig()
+	manager.SetConfig(cfg)
+	t.Cleanup(func() {
+		manager.SetConfig(&internalconfig.Config{})
+	})
+
+	auth := &Auth{
+		ID:       "manual-publish-auth",
+		Provider: "antigravity",
+		Status:   StatusActive,
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{
+		{ID: "claude-sonnet-4-6"},
+	})
+	t.Cleanup(func() {
+		reg.UnregisterClient(auth.ID)
+	})
+
+	next := manager.SetOAuthQuotaGroupManualState(auth.ID, internalconfig.OAuthQuotaGroupClaude45, true, "maintenance", "test", now)
+	if next == nil {
+		t.Fatal("SetOAuthQuotaGroupManualState returned nil config")
+	}
+
+	runtimeCfg, _ := manager.runtimeConfig.Load().(*internalconfig.Config)
+	if runtimeCfg == nil {
+		t.Fatal("runtime config = nil")
+	}
+	state, ok := findOAuthQuotaGroupState(runtimeCfg.OAuthAccountQuotaGroupState, auth.ID, internalconfig.OAuthQuotaGroupClaude45)
+	if !ok {
+		t.Fatal("manual quota-group state missing from runtime config")
+	}
+	if !state.ManualSuspended {
+		t.Fatal("manual quota-group state not marked suspended")
+	}
+
+	updatedAuth, ok := manager.GetByID(auth.ID)
+	if !ok || updatedAuth == nil {
+		t.Fatal("updated auth missing")
+	}
+	blocked, reason, nextRetry := isAuthBlockedForModel(updatedAuth, "claude-sonnet-4-6", now)
+	if !blocked {
+		t.Fatal("manual suspension did not block the auth")
+	}
+	if reason != blockReasonDisabled {
+		t.Fatalf("manual suspension reason = %v, want %v", reason, blockReasonDisabled)
+	}
+	if !nextRetry.IsZero() {
+		t.Fatalf("manual suspension retry = %v, want zero", nextRetry)
+	}
+	if !updatedAuth.Unavailable {
+		t.Fatal("updatedAuth.Unavailable = false, want true")
+	}
+	if updatedAuth.Quota.Exceeded {
+		t.Fatal("updatedAuth.Quota.Exceeded = true, want false")
+	}
+}
+
+func TestManagerClearOAuthQuotaGroupAutoState_PublishesSnapshot(t *testing.T) {
+	now := time.Now().UTC()
+	manager := NewManager(nil, nil, nil)
+	cfg := testOAuthQuotaConfig()
+	cfg.OAuthAccountQuotaGroupState = []internalconfig.OAuthAccountQuotaGroupState{
+		{
+			AuthID:             "auto-clear-auth",
+			GroupID:            internalconfig.OAuthQuotaGroupG3Flash,
+			AutoSuspendedUntil: now.Add(5 * time.Minute),
+			AutoReason:         "quota_exhausted",
+			SourceModel:        "gemini-3.1-flash-lite",
+			SourceProvider:     "antigravity",
+			ResetTimeSource:    "retry_after",
+		},
+	}
+	manager.SetConfig(cfg)
+	t.Cleanup(func() {
+		manager.SetConfig(&internalconfig.Config{})
+	})
+
+	auth := &Auth{
+		ID:       "auto-clear-auth",
+		Provider: "antigravity",
+		Status:   StatusActive,
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{
+		{ID: "gemini-3.1-flash-lite"},
+	})
+	t.Cleanup(func() {
+		reg.UnregisterClient(auth.ID)
+	})
+
+	next := manager.ClearOAuthQuotaGroupAutoState(auth.ID, internalconfig.OAuthQuotaGroupG3Flash, "test", now)
+	if next == nil {
+		t.Fatal("ClearOAuthQuotaGroupAutoState returned nil config")
+	}
+
+	runtimeCfg, _ := manager.runtimeConfig.Load().(*internalconfig.Config)
+	if runtimeCfg == nil {
+		t.Fatal("runtime config = nil")
+	}
+	if _, ok := findOAuthQuotaGroupState(runtimeCfg.OAuthAccountQuotaGroupState, auth.ID, internalconfig.OAuthQuotaGroupG3Flash); ok {
+		t.Fatal("auto quota-group state still present in runtime config")
+	}
+
+	updatedAuth, ok := manager.GetByID(auth.ID)
+	if !ok || updatedAuth == nil {
+		t.Fatal("updated auth missing")
+	}
+	blocked, reason, nextRetry := isAuthBlockedForModel(updatedAuth, "gemini-3.1-flash-lite", now)
+	if blocked {
+		t.Fatal("auth is still blocked after auto-clear")
+	}
+	if reason != blockReasonNone {
+		t.Fatalf("auto-clear reason = %v, want %v", reason, blockReasonNone)
+	}
+	if !nextRetry.IsZero() {
+		t.Fatalf("auto-clear retry = %v, want zero", nextRetry)
+	}
+	if updatedAuth.Unavailable {
+		t.Fatal("updatedAuth.Unavailable = true, want false")
+	}
+	if updatedAuth.Quota.Exceeded {
+		t.Fatal("updatedAuth.Quota.Exceeded = true, want false")
 	}
 }
