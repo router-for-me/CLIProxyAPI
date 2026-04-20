@@ -30,6 +30,8 @@ A proxy server that provides OpenAI/Gemini/Claude/Codex compatible API interface
 - OpenAI-compatible upstream providers via config (e.g., OpenRouter)
 - Model aliases and smart routing
 - Circuit breaker support for OpenAI-compatible providers
+- Responses API capability auto-detection (native /responses vs chat fallback)
+- previous_response_id support for incremental tool turns in chat fallback mode
 - Weighted provider rotation for fair scheduling
 - Anthropic API key authentication
 - Request-level 404 error handling optimization

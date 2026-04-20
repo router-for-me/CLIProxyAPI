@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -85,12 +86,54 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	}
 
 	from := opts.SourceFormat
+	isResponseFormat := from == sdktranslator.FormatOpenAIResponse
+
+	// Resolve Responses capability mode for openai-response format (non-compact).
+	var responsesMode ResponsesMode
+	if isResponseFormat && opts.Alt != "responses/compact" {
+		responsesMode = globalResponsesCapabilityResolver.Resolve(auth.ID)
+	}
+
+	// Determine target format and endpoint based on mode.
 	to := sdktranslator.FromString("openai")
 	endpoint := "/chat/completions"
 	if opts.Alt == "responses/compact" {
-		to = sdktranslator.FromString("openai-response")
-		endpoint = "/responses/compact"
+		// Compact endpoint: use native /responses/compact unless explicitly known as chat_fallback.
+		compactMode := globalResponsesCapabilityResolver.Resolve(auth.ID)
+		if compactMode != ResponsesModeChatFallback {
+			// unknown or native: try /responses/compact directly.
+			to = sdktranslator.FormatOpenAIResponse
+			endpoint = "/responses/compact"
+		}
+		// chat_fallback: to=openai, endpoint=/chat/completions (translate via chat)
+	} else if isResponseFormat && (responsesMode == ResponsesModeNative || responsesMode == ResponsesModeUnknown) {
+		to = sdktranslator.FormatOpenAIResponse
+		endpoint = "/responses"
 	}
+	// Default (chat_fallback or non-response-format): to=openai, endpoint=/chat/completions
+
+	// Handle previous_response_id for chat_fallback mode.
+	if isResponseFormat && responsesMode == ResponsesModeChatFallback {
+		prevID := strings.TrimSpace(gjson.GetBytes(req.Payload, "previous_response_id").String())
+		if prevID != "" {
+			snapshot, ok := globalResponsesStateStore.Get(prevID)
+			if !ok {
+				err = statusErr{
+					code: http.StatusBadRequest,
+					msg: fmt.Sprintf("chat-only fallback mode: previous_response_id %q not found or expired; incremental tool turns require prior response state", prevID),
+				}
+				return
+			}
+			// Rebuild full transcript from snapshot + current request.
+			merged, mergeErr := MergeResponsesTranscript(req.Payload, snapshot)
+			if mergeErr != nil {
+				err = statusErr{code: http.StatusBadRequest, msg: fmt.Sprintf("failed to rebuild transcript: %v", mergeErr)}
+				return
+			}
+			req.Payload = merged
+		}
+	}
+
 	originalPayloadSource := req.Payload
 	if len(opts.OriginalRequest) > 0 {
 		originalPayloadSource = opts.OriginalRequest
@@ -100,7 +143,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, opts.Stream)
 	requestedModel := payloadRequestedModel(opts, req.Model)
 	translated = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", translated, originalTranslated, requestedModel)
-	if opts.Alt == "responses/compact" {
+	if opts.Alt == "responses/compact" && endpoint == "/responses/compact" {
 		if updated, errDelete := sjson.DeleteBytes(translated, "stream"); errDelete == nil {
 			translated = updated
 		}
@@ -172,19 +215,32 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		b, _ := io.ReadAll(httpResp.Body)
 		appendAPIResponseChunk(ctx, e.cfg, b)
 		logWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
-		if auth != nil {
-			compatCfg := e.resolveCompatConfig(auth)
-			threshold := registry.DefaultCircuitBreakerFailureThreshold
-			timeoutSec := registry.DefaultCircuitBreakerRecoveryTimeoutSec
-			if compatCfg != nil && compatCfg.CircuitBreakerFailureThreshold > 0 {
-				threshold = compatCfg.CircuitBreakerFailureThreshold
-			}
-			if compatCfg != nil && compatCfg.CircuitBreakerRecoveryTimeout > 0 {
-				timeoutSec = compatCfg.CircuitBreakerRecoveryTimeout
-			}
-			registry.GetGlobalRegistry().RecordFailure(auth.ID, circuitModel, threshold, timeoutSec)
+
+		// Unknown mode: if the error is a capability error, cache as chat_fallback and retry.
+		if isResponseFormat && responsesMode == ResponsesModeUnknown && isCapabilityError(httpResp.StatusCode, b) {
+			log.Infof("openai compat executor: /responses capability error (status=%d), caching auth=%s as chat_fallback and retrying", httpResp.StatusCode, authID)
+			globalResponsesCapabilityResolver.Set(authID, ResponsesModeChatFallback)
+			// Retry with chat_fallback mode (do not record circuit breaker for capability errors).
+			return e.executeWithResponsesMode(ctx, auth, req, opts, ResponsesModeChatFallback)
 		}
+
+		// Record circuit breaker failure only for non-capability errors.
+		if !(isResponseFormat && responsesMode == ResponsesModeUnknown && isCapabilityError(httpResp.StatusCode, b)) {
+			if auth != nil {
+				compatCfg := e.resolveCompatConfig(auth)
+				threshold := registry.DefaultCircuitBreakerFailureThreshold
+				timeoutSec := registry.DefaultCircuitBreakerRecoveryTimeoutSec
+				if compatCfg != nil && compatCfg.CircuitBreakerFailureThreshold > 0 {
+					threshold = compatCfg.CircuitBreakerFailureThreshold
+				}
+				if compatCfg != nil && compatCfg.CircuitBreakerRecoveryTimeout > 0 {
+					timeoutSec = compatCfg.CircuitBreakerRecoveryTimeout
+				}
+				registry.GetGlobalRegistry().RecordFailure(auth.ID, circuitModel, threshold, timeoutSec)
+			}
+		}
+
+		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
 		return resp, err
 	}
 	body, err := io.ReadAll(httpResp.Body)
@@ -196,14 +252,47 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	reporter.publish(ctx, parseOpenAIUsage(body))
 	// Ensure we at least record the request even if upstream doesn't return usage
 	reporter.ensurePublished(ctx)
+
+	// Cache native mode on first success for unknown.
+	if isResponseFormat && responsesMode == ResponsesModeUnknown {
+		globalResponsesCapabilityResolver.Set(authID, ResponsesModeNative)
+	}
+
 	// Translate response back to source format when needed
 	var param any
 	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, body, &param)
 	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
+
+	// Store response state for chat_fallback mode.
+	if isResponseFormat && (responsesMode == ResponsesModeChatFallback || (responsesMode == ResponsesModeUnknown && endpoint == "/chat/completions")) {
+		responseID := gjson.GetBytes(out, "id").String()
+		if responseID != "" {
+			snapshot := ResponsesSnapshot{
+				Model:        gjson.GetBytes(out, "model").String(),
+				Instructions: gjson.GetBytes(translated, "instructions").String(),
+				Input:        json.RawMessage(gjson.GetBytes(translated, "input").Raw),
+				Output:       json.RawMessage(gjson.GetBytes(out, "output").Raw),
+				CreatedAt:    gjson.GetBytes(out, "created_at").Int(),
+			}
+			globalResponsesStateStore.Put(responseID, snapshot)
+		}
+	}
+
 	if auth != nil {
 		registry.GetGlobalRegistry().RecordSuccess(auth.ID, circuitModel)
 	}
 	return resp, nil
+}
+
+// executeWithResponsesMode executes a non-streaming request with a pre-determined ResponsesMode,
+// used for retrying after capability detection.
+func (e *OpenAICompatExecutor) executeWithResponsesMode(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, mode ResponsesMode) (cliproxyexecutor.Response, error) {
+	// Override the mode by setting it on the resolver temporarily.
+	// The Execute method will pick it up via Resolve().
+	if auth != nil {
+		globalResponsesCapabilityResolver.Set(auth.ID, mode)
+	}
+	return e.Execute(ctx, auth, req, opts)
 }
 
 func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
@@ -220,7 +309,43 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	}
 
 	from := opts.SourceFormat
+	isResponseFormat := from == sdktranslator.FormatOpenAIResponse
+
+	// Resolve Responses capability mode for openai-response format (non-compact).
+	var responsesMode ResponsesMode
+	if isResponseFormat && opts.Alt != "responses/compact" {
+		responsesMode = globalResponsesCapabilityResolver.Resolve(auth.ID)
+	}
+
+	// Determine target format and endpoint based on mode.
 	to := sdktranslator.FromString("openai")
+	endpoint := "/chat/completions"
+	if isResponseFormat && (responsesMode == ResponsesModeNative || responsesMode == ResponsesModeUnknown) {
+		to = sdktranslator.FormatOpenAIResponse
+		endpoint = "/responses"
+	}
+
+	// Handle previous_response_id for chat_fallback mode.
+	if isResponseFormat && responsesMode == ResponsesModeChatFallback {
+		prevID := strings.TrimSpace(gjson.GetBytes(req.Payload, "previous_response_id").String())
+		if prevID != "" {
+			snapshot, ok := globalResponsesStateStore.Get(prevID)
+			if !ok {
+				err = statusErr{
+					code: http.StatusBadRequest,
+					msg: fmt.Sprintf("chat-only fallback mode: previous_response_id %q not found or expired; incremental tool turns require prior response state", prevID),
+				}
+				return nil, err
+			}
+			merged, mergeErr := MergeResponsesTranscript(req.Payload, snapshot)
+			if mergeErr != nil {
+				err = statusErr{code: http.StatusBadRequest, msg: fmt.Sprintf("failed to rebuild transcript: %v", mergeErr)}
+				return nil, err
+			}
+			req.Payload = merged
+		}
+	}
+
 	originalPayloadSource := req.Payload
 	if len(opts.OriginalRequest) > 0 {
 		originalPayloadSource = opts.OriginalRequest
@@ -238,9 +363,11 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 
 	// Request usage data in the final streaming chunk so that token statistics
 	// are captured even when the upstream is an OpenAI-compatible provider.
-	translated, _ = sjson.SetBytes(translated, "stream_options.include_usage", true)
+	if to == sdktranslator.FromString("openai") {
+		translated, _ = sjson.SetBytes(translated, "stream_options.include_usage", true)
+	}
 
-	url := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
+	url := strings.TrimSuffix(baseURL, "/") + endpoint
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
 	if err != nil {
 		return nil, err
@@ -298,10 +425,20 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		b, _ := io.ReadAll(httpResp.Body)
 		appendAPIResponseChunk(ctx, e.cfg, b)
 		logWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-		if errClose := httpResp.Body.Close(); errClose != nil {
-			log.Errorf("openai compat executor: close response body error: %v", errClose)
+
+		// Unknown mode: if the error is a capability error, cache as chat_fallback and retry.
+		if isResponseFormat && responsesMode == ResponsesModeUnknown && isCapabilityError(httpResp.StatusCode, b) {
+			if errClose := httpResp.Body.Close(); errClose != nil {
+				log.Errorf("openai compat executor stream: close response body error: %v", errClose)
+			}
+			log.Infof("openai compat executor stream: /responses capability error (status=%d), caching auth=%s as chat_fallback and retrying", httpResp.StatusCode, authID)
+			globalResponsesCapabilityResolver.Set(authID, ResponsesModeChatFallback)
+			return e.executeStreamWithResponsesMode(ctx, auth, req, opts, ResponsesModeChatFallback)
 		}
-		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
+
+		if errClose := httpResp.Body.Close(); errClose != nil {
+			log.Errorf("openai compat executor stream: close response body error: %v", errClose)
+		}
 		if auth != nil {
 			compatCfg := e.resolveCompatConfig(auth)
 			threshold := registry.DefaultCircuitBreakerFailureThreshold
@@ -314,8 +451,15 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			}
 			registry.GetGlobalRegistry().RecordFailure(auth.ID, circuitModel, threshold, timeoutSec)
 		}
+		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
 		return nil, err
 	}
+
+	// Cache native mode on first success for unknown.
+	if isResponseFormat && responsesMode == ResponsesModeUnknown {
+		globalResponsesCapabilityResolver.Set(authID, ResponsesModeNative)
+	}
+
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
 		defer close(out)
@@ -329,6 +473,12 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		var param any
 		responsesOutput := from == sdktranslator.FormatOpenAIResponse
 		emittedCompleted := false
+
+		// State capture for chat_fallback mode: intercept response.completed to store snapshot.
+		var capturedCompletedPayload []byte
+		var capturedResponseID string
+		shouldCaptureState := isResponseFormat && (responsesMode == ResponsesModeChatFallback || endpoint == "/chat/completions")
+
 		emitChunks := func(chunks [][]byte) {
 			for i := range chunks {
 				payload := chunks[i]
@@ -337,6 +487,11 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 				}
 				if hasOpenAIResponsesCompletedEvent(payload) {
 					emittedCompleted = true
+					// Capture state from response.completed event for chat_fallback mode.
+					if shouldCaptureState {
+						capturedCompletedPayload = extractSSEDataPayload(payload)
+						capturedResponseID = gjson.GetBytes(capturedCompletedPayload, "response.id").String()
+					}
 				}
 				out <- cliproxyexecutor.StreamChunk{Payload: payload}
 			}
@@ -377,6 +532,19 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			// when upstream closed cleanly but never emitted terminal events.
 			emitChunks(synthesizeOpenAIResponsesCompletion(req.Model))
 		}
+
+		// Store response state for chat_fallback mode after stream completes.
+		if shouldCaptureState && capturedResponseID != "" && len(capturedCompletedPayload) > 0 {
+			snapshot := ResponsesSnapshot{
+				Model:        gjson.GetBytes(capturedCompletedPayload, "response.model").String(),
+				Instructions: gjson.GetBytes(translated, "instructions").String(),
+				Input:        json.RawMessage(gjson.GetBytes(translated, "input").Raw),
+				Output:       json.RawMessage(gjson.GetBytes(capturedCompletedPayload, "response.output").Raw),
+				CreatedAt:    gjson.GetBytes(capturedCompletedPayload, "response.created_at").Int(),
+			}
+			globalResponsesStateStore.Put(capturedResponseID, snapshot)
+		}
+
 		// Ensure we record the request if no usage chunk was ever seen
 		reporter.ensurePublished(ctx)
 		if auth != nil {
@@ -384,6 +552,15 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		}
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
+}
+
+// executeStreamWithResponsesMode executes a streaming request with a pre-determined ResponsesMode,
+// used for retrying after capability detection.
+func (e *OpenAICompatExecutor) executeStreamWithResponsesMode(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, mode ResponsesMode) (*cliproxyexecutor.StreamResult, error) {
+	if auth != nil {
+		globalResponsesCapabilityResolver.Set(auth.ID, mode)
+	}
+	return e.ExecuteStream(ctx, auth, req, opts)
 }
 
 func circuitBreakerModelID(opts cliproxyexecutor.Options, fallback string) string {
@@ -488,6 +665,25 @@ func hasOpenAIResponsesCreatedEvent(chunk []byte) bool {
 
 func hasOpenAIResponsesCompletedEvent(chunk []byte) bool {
 	return hasOpenAIResponsesEventType(chunk, "response.completed")
+}
+
+// extractSSEDataPayload extracts the JSON payload from an SSE frame like:
+//   event: response.completed\n
+//   data: {"type":"response.completed",...}\n
+// It returns just the JSON object after "data: ".
+func extractSSEDataPayload(sseFrame []byte) []byte {
+	lines := bytes.Split(sseFrame, []byte("\n"))
+	for _, line := range lines {
+		line = bytes.TrimSpace(line)
+		if bytes.HasPrefix(line, []byte("data:")) {
+			payload := bytes.TrimSpace(line[len("data:"):])
+			if len(payload) > 0 && !bytes.Equal(payload, []byte("[DONE]")) {
+				return payload
+			}
+		}
+	}
+	// If no SSE framing, return as-is (might be raw JSON).
+	return bytes.TrimSpace(sseFrame)
 }
 
 func hasOpenAIResponsesEventType(chunk []byte, eventType string) bool {

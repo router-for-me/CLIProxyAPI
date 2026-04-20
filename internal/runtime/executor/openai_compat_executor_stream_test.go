@@ -15,6 +15,10 @@ import (
 )
 
 func TestOpenAICompatExecutorExecuteStream_ResponsesDoneWithoutFinishReasonStillCompletes(t *testing.T) {
+	// Ensure clean capability resolver state for the empty auth ID used by this test.
+	globalResponsesCapabilityResolver.Invalidate("")
+	defer globalResponsesCapabilityResolver.Invalidate("")
+
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/chat/completions" {
 			w.WriteHeader(http.StatusNotFound)
@@ -69,6 +73,10 @@ func TestOpenAICompatExecutorExecuteStream_ResponsesDoneWithoutFinishReasonStill
 }
 
 func TestOpenAICompatExecutorExecuteStream_ResponsesEmptyUpstreamSynthesizesCompletion(t *testing.T) {
+	// Ensure clean capability resolver state for the empty auth ID used by this test.
+	globalResponsesCapabilityResolver.Invalidate("")
+	defer globalResponsesCapabilityResolver.Invalidate("")
+
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/chat/completions" {
 			w.WriteHeader(http.StatusNotFound)
@@ -135,6 +143,10 @@ func TestSynthesizeOpenAIResponsesCompletion_UsesValidSSEDelimiter(t *testing.T)
 }
 
 func TestOpenAICompatExecutorExecuteStream_OpenAISourceNoSynthesis(t *testing.T) {
+	// Ensure clean capability resolver state for the empty auth ID used by this test.
+	globalResponsesCapabilityResolver.Invalidate("")
+	defer globalResponsesCapabilityResolver.Invalidate("")
+
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/chat/completions" {
 			w.WriteHeader(http.StatusNotFound)

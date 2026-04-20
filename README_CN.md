@@ -30,6 +30,9 @@
 - 通过配置接入上游 OpenAI 兼容提供商（如 OpenRouter）
 - 模型别名与智能路由
 - 熔断器支持（针对 OpenAI 兼容提供商）
+- Responses API 能力自动检测（原生 /responses vs chat 回退模式）
+- previous_response_id 支持（chat 回退模式下增量工具调用）
+- 加权提供商轮询，实现更公平的调度
 - 加权提供商轮询，实现更公平的调度
 - Anthropic 兼容 API 密钥认证
 - 请求级 404 错误处理优化

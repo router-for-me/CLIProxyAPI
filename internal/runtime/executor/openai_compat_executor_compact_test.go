@@ -15,6 +15,10 @@ import (
 )
 
 func TestOpenAICompatExecutorCompactPassthrough(t *testing.T) {
+	// Ensure clean capability resolver state for the empty auth ID used by this test.
+	globalResponsesCapabilityResolver.Invalidate("")
+	defer globalResponsesCapabilityResolver.Invalidate("")
+
 	var gotPath string
 	var gotBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

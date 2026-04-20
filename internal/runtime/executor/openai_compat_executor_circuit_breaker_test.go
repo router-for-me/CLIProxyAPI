@@ -64,6 +64,10 @@ func TestCircuitBreakerModelID(t *testing.T) {
 }
 
 func TestOpenAICompatExecutorCircuitBreakerUsesRequestedModel(t *testing.T) {
+	// Ensure clean capability resolver state for the auth ID used by this test.
+	globalResponsesCapabilityResolver.Invalidate("cb-openai-compat-auth")
+	defer globalResponsesCapabilityResolver.Invalidate("cb-openai-compat-auth")
+
 	const (
 		providerName  = "cb-openai-compat"
 		authID        = "cb-openai-compat-auth"
