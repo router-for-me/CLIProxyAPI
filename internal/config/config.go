@@ -767,11 +767,11 @@ func payloadDisabledParamSet(paths []string) map[string]struct{} {
 	}
 	out := make(map[string]struct{}, len(paths))
 	for _, path := range paths {
-		trimmed := strings.TrimSpace(path)
-		if trimmed == "" {
+		normalized := normalizeDisabledPayloadPath(path)
+		if normalized == "" {
 			continue
 		}
-		out[trimmed] = struct{}{}
+		out[normalized] = struct{}{}
 	}
 	if len(out) == 0 {
 		return nil
@@ -783,8 +783,13 @@ func payloadParamDisabled(disabled map[string]struct{}, path string) bool {
 	if len(disabled) == 0 {
 		return false
 	}
-	_, ok := disabled[strings.TrimSpace(path)]
+	_, ok := disabled[normalizeDisabledPayloadPath(path)]
 	return ok
+}
+
+func normalizeDisabledPayloadPath(path string) string {
+	trimmed := strings.TrimSpace(path)
+	return strings.TrimPrefix(trimmed, ".")
 }
 
 func payloadRawString(value any) ([]byte, bool) {

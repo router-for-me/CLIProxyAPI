@@ -14,8 +14,8 @@ func TestApplyPayloadConfigWithRoot_SkipsDisabledDefaultRule(t *testing.T) {
 			Default: []config.PayloadRule{
 				{
 					Disabled: true,
-					Models: []config.PayloadModelRule{{Name: "gpt-*"}},
-					Params: map[string]any{"temperature": 0.7},
+					Models:   []config.PayloadModelRule{{Name: "gpt-*"}},
+					Params:   map[string]any{"temperature": 0.7},
 				},
 			},
 		},
@@ -187,5 +187,26 @@ func TestApplyPayloadConfigWithRoot_DropsRuleWhenEnabledRawParamHasInvalidJSON(t
 	got := helps.ApplyPayloadConfigWithRoot(cfg, "gpt-4o", "", "", payload, payload, "")
 	if gjson.GetBytes(got, "reasoning").Exists() {
 		t.Fatalf("dropped rule should not write any raw params, got %s", got)
+	}
+}
+
+func TestApplyPayloadConfigWithRoot_SkipsDisabledParamsWithEquivalentDottedPath(t *testing.T) {
+	cfg := &config.Config{
+		Payload: config.PayloadConfig{
+			Override: []config.PayloadRule{
+				{
+					Models:         []config.PayloadModelRule{{Name: "gpt-*"}},
+					Params:         map[string]any{".trace_id": "abc123"},
+					DisabledParams: []string{"trace_id"},
+				},
+			},
+		},
+	}
+
+	payload := []byte(`{"model":"gpt-4o","metadata":{}}`)
+	got := helps.ApplyPayloadConfigWithRoot(cfg, "gpt-4o", "", "", payload, payload, "metadata")
+
+	if gjson.GetBytes(got, "metadata.trace_id").Exists() {
+		t.Fatalf("disabled dotted param should not be written, got %s", got)
 	}
 }
