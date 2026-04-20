@@ -3,6 +3,7 @@
 package management
 
 import (
+	"context"
 	"crypto/subtle"
 	"fmt"
 	"net/http"
@@ -16,8 +17,10 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher/synthesizer"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -290,7 +293,11 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 func (h *Handler) persistConfig() error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return config.SaveConfigPreserveComments(h.configFilePath, h.cfg)
+	if err := config.SaveConfigPreserveComments(h.configFilePath, h.cfg); err != nil {
+		return err
+	}
+	h.syncRuntimeConfigLocked(context.Background())
+	return nil
 }
 
 // persist saves the current in-memory config to disk.
@@ -308,8 +315,88 @@ func (h *Handler) persistLocked(c *gin.Context) bool {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to save config: %v", err)})
 		return false
 	}
+	ctx := context.Background()
+	if c != nil && c.Request != nil {
+		ctx = c.Request.Context()
+	}
+	h.syncRuntimeConfigLocked(ctx)
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	return true
+}
+
+func isConfigBackedAuth(auth *coreauth.Auth) bool {
+	if auth == nil || auth.Attributes == nil {
+		return false
+	}
+	source := strings.ToLower(strings.TrimSpace(auth.Attributes["source"]))
+	return strings.HasPrefix(source, "config:")
+}
+
+func (h *Handler) syncRuntimeConfigLocked(ctx context.Context) {
+	if h == nil || h.cfg == nil || h.authManager == nil {
+		return
+	}
+
+	h.authManager.SetConfig(h.cfg)
+	h.authManager.SetRetryConfig(h.cfg.RequestRetry, time.Duration(h.cfg.MaxRetryInterval)*time.Second, h.cfg.MaxRetryCredentials)
+	coreauth.SetQuotaCooldownDisabled(h.cfg.DisableCooling)
+
+	sctx := &synthesizer.SynthesisContext{
+		Config:      h.cfg,
+		AuthDir:     h.cfg.AuthDir,
+		Now:         time.Now().UTC(),
+		IDGenerator: synthesizer.NewStableIDGenerator(),
+	}
+	synthesized, err := synthesizer.NewConfigSynthesizer().Synthesize(sctx)
+	if err != nil {
+		log.WithError(err).Warn("failed to synthesize config-backed auths for runtime sync")
+		return
+	}
+
+	syncCtx := coreauth.WithSkipPersist(ctx)
+	desired := make(map[string]*coreauth.Auth, len(synthesized))
+	for _, auth := range synthesized {
+		if auth == nil || strings.TrimSpace(auth.ID) == "" {
+			continue
+		}
+		desired[auth.ID] = auth
+
+		if existing, ok := h.authManager.GetByID(auth.ID); ok && existing != nil {
+			auth.CreatedAt = existing.CreatedAt
+			if !existing.Disabled && existing.Status != coreauth.StatusDisabled && !auth.Disabled && auth.Status != coreauth.StatusDisabled {
+				auth.LastRefreshedAt = existing.LastRefreshedAt
+				auth.NextRefreshAfter = existing.NextRefreshAfter
+				if len(auth.ModelStates) == 0 && len(existing.ModelStates) > 0 {
+					auth.ModelStates = existing.ModelStates
+				}
+			}
+			if _, errUpdate := h.authManager.Update(syncCtx, auth); errUpdate != nil {
+				log.WithError(errUpdate).Warnf("failed to sync config-backed auth %s", auth.ID)
+			}
+			continue
+		}
+
+		if _, errRegister := h.authManager.Register(syncCtx, auth); errRegister != nil {
+			log.WithError(errRegister).Warnf("failed to register config-backed auth %s", auth.ID)
+		}
+	}
+
+	now := sctx.Now
+	for _, existing := range h.authManager.List() {
+		if !isConfigBackedAuth(existing) {
+			continue
+		}
+		if _, ok := desired[existing.ID]; ok {
+			continue
+		}
+		existing.Disabled = true
+		existing.Status = coreauth.StatusDisabled
+		existing.StatusMessage = "removed via management API"
+		existing.UpdatedAt = now
+		if _, errUpdate := h.authManager.Update(syncCtx, existing); errUpdate != nil {
+			log.WithError(errUpdate).Warnf("failed to disable removed config-backed auth %s", existing.ID)
+		}
+	}
 }
 
 // Helper methods for simple types
