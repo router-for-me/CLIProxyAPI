@@ -38,6 +38,7 @@ package temporal
 import (
 	"bytes"
 	"fmt"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -132,8 +133,9 @@ func InjectIntoPayload(payload []byte, model string) []byte {
 		return payload
 	}
 	// Skip if payload already contains a temporal tag (e.g. from Claude Code's
-	// built-in injection). Avoids duplicate/conflicting temporal context.
-	if bytes.Contains(payload, []byte("<temporal ")) {
+	// built-in injection). Check both raw and JSON-escaped forms since some
+	// serializers encode < as \u003c in JSON strings.
+	if bytes.Contains(payload, []byte("<temporal ")) || bytes.Contains(payload, []byte("\\u003ctemporal ")) {
 		return payload
 	}
 	tag := BuildTemporalTag(time.Now().UTC())
@@ -202,6 +204,20 @@ func injectIntoMessages(payload []byte, messages gjson.Result, text string) []by
 		return payload
 	}
 	return result
+}
+
+// validTemporalRe matches the shape produced by BuildTemporalTag: a
+// <temporal_context> wrapper around a single self-closing <temporal .../> tag
+// with recognizable date attributes and nothing else.
+var validTemporalRe = regexp.MustCompile(
+	`^<temporal_context><temporal\s+day="[A-Z][a-z]+" date="\d{4}-\d{2}-\d{2}"[^>]*/></temporal_context>$`,
+)
+
+// IsValidTemporalBlock returns true only if text matches the shape produced by
+// BuildTemporalTag, preventing callers from smuggling arbitrary content inside
+// a <temporal_context> wrapper to bypass sanitization.
+func IsValidTemporalBlock(text string) bool {
+	return validTemporalRe.MatchString(strings.TrimSpace(text))
 }
 
 func dayName(w time.Weekday) string {
