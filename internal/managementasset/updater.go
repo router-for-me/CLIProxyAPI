@@ -30,7 +30,7 @@ const (
 	managementAssetName          = "management.html"
 	httpUserAgent                = "CLIProxyAPI-management-updater"
 	managementSyncMinInterval    = 30 * time.Second
-	updateCheckInterval          = 3 * time.Hour
+	updateCheckInterval          = 30 * time.Minute
 	maxAssetDownloadSize         = 50 << 20 // 10 MB safety limit for management asset downloads
 )
 
