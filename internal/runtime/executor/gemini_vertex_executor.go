@@ -334,8 +334,10 @@ func (e *GeminiVertexExecutor) executeWithServiceAccount(ctx context.Context, au
 		}
 
 		body = fixGeminiImageAspectRatio(baseModel, body)
+		body = sanitizeGeminiUpstreamBody(body)
 		requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 		body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
+		body = sanitizeGeminiUpstreamBody(body)
 		body, _ = sjson.SetBytes(body, "model", baseModel)
 	}
 
@@ -813,6 +815,7 @@ func (e *GeminiVertexExecutor) countTokensWithServiceAccount(ctx context.Context
 	}
 
 	translatedReq = fixGeminiImageAspectRatio(baseModel, translatedReq)
+	translatedReq = sanitizeGeminiUpstreamBody(translatedReq)
 	translatedReq, _ = sjson.SetBytes(translatedReq, "model", baseModel)
 	respCtx := context.WithValue(ctx, "alt", opts.Alt)
 	translatedReq, _ = sjson.DeleteBytes(translatedReq, "tools")
@@ -902,6 +905,7 @@ func (e *GeminiVertexExecutor) countTokensWithAPIKey(ctx context.Context, auth *
 	}
 
 	translatedReq = fixGeminiImageAspectRatio(baseModel, translatedReq)
+	translatedReq = sanitizeGeminiUpstreamBody(translatedReq)
 	translatedReq, _ = sjson.SetBytes(translatedReq, "model", baseModel)
 	respCtx := context.WithValue(ctx, "alt", opts.Alt)
 	translatedReq, _ = sjson.DeleteBytes(translatedReq, "tools")
