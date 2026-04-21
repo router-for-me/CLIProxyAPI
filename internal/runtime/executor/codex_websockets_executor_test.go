@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	"github.com/tidwall/gjson"
 )
@@ -42,6 +44,74 @@ func TestBuildCodexWebsocketRequestBodyIncludesClientMetadata(t *testing.T) {
 
 	if got := gjson.GetBytes(wsReqBody, "client_metadata.x-codex-turn-metadata").String(); got != `{"turn_id":"turn-1","sandbox":"none"}` {
 		t.Fatalf("client_metadata.x-codex-turn-metadata = %q, want %q", got, `{"turn_id":"turn-1","sandbox":"none"}`)
+	}
+}
+
+func TestPrepareCodexWebsocketRequestBuildsSharedRequestState(t *testing.T) {
+	executor := NewCodexWebsocketsExecutor(&config.Config{
+		CodexHeaderDefaults: config.CodexHeaderDefaults{
+			UserAgent: "config-ua",
+		},
+	})
+	executor.store = &codexWebsocketSessionStore{sessions: make(map[string]*codexWebsocketSession)}
+
+	auth := &cliproxyauth.Auth{
+		ID:       "auth-1",
+		Label:    "primary",
+		Provider: "codex",
+		Metadata: map[string]any{"email": "user@example.com"},
+	}
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5-codex",
+		Payload: []byte(`{"input":[]}`),
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat: "openai",
+		Metadata: map[string]any{
+			cliproxyexecutor.ExecutionSessionMetadataKey: "session-1",
+		},
+	}
+
+	prepared, err := executor.prepareCodexWebsocketRequest(
+		context.Background(),
+		auth,
+		req,
+		opts,
+		[]byte(`{"model":"gpt-5-codex","input":[]}`),
+		"oauth-token",
+		"https://chatgpt.com/backend-api/codex/responses",
+	)
+	if err != nil {
+		t.Fatalf("prepareCodexWebsocketRequest() error = %v", err)
+	}
+	defer prepared.unlockSession()
+
+	if got := prepared.wsURL; got != "wss://chatgpt.com/backend-api/codex/responses" {
+		t.Fatalf("wsURL = %q, want %q", got, "wss://chatgpt.com/backend-api/codex/responses")
+	}
+	if got := prepared.wsHeaders.Get("Authorization"); got != "Bearer oauth-token" {
+		t.Fatalf("Authorization = %q, want %q", got, "Bearer oauth-token")
+	}
+	if got := prepared.wsHeaders.Get("User-Agent"); got != "config-ua" {
+		t.Fatalf("User-Agent = %q, want %q", got, "config-ua")
+	}
+	if got := gjson.GetBytes(prepared.wsReqBody, "type").String(); got != "response.create" {
+		t.Fatalf("type = %q, want %q", got, "response.create")
+	}
+	if !bytes.Equal(prepared.wsReqLog.Body, prepared.wsReqBody) {
+		t.Fatal("wsReqLog.Body should match wsReqBody")
+	}
+	if got := prepared.wsReqLog.URL; got != prepared.wsURL {
+		t.Fatalf("wsReqLog.URL = %q, want %q", got, prepared.wsURL)
+	}
+	if got := prepared.authID; got != "auth-1" {
+		t.Fatalf("authID = %q, want %q", got, "auth-1")
+	}
+	if got := prepared.executionSessionID; got != "session-1" {
+		t.Fatalf("executionSessionID = %q, want %q", got, "session-1")
+	}
+	if prepared.sess == nil || prepared.sess.sessionID != "session-1" {
+		t.Fatalf("session = %#v, want session-1", prepared.sess)
 	}
 }
 
