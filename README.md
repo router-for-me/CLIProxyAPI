@@ -33,7 +33,15 @@ Configuration:
 ```yaml
 routing:
   strategy: "sf"  # or "sequential-fill"
+  group-strategies:
+    minimax: "sf"
+    kimi: "sf"
+    codex: "round-robin"
 ```
+
+Credentials can opt into a specific routing group with `routing-group`, so one
+deployment can keep Codex on round-robin while routing MiniMax / Kimi through
+stable-first semantics.
 
 ### Usage Statistics Persistence
 

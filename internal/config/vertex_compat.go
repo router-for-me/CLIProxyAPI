@@ -20,6 +20,10 @@ type VertexCompatKey struct {
 	// Prefix optionally namespaces model aliases for this credential (e.g., "teamA/vertex-pro").
 	Prefix string `yaml:"prefix,omitempty" json:"prefix,omitempty"`
 
+	// RoutingGroup assigns this credential to a logical routing pool so
+	// routing.group-strategies can override its selection behavior independently.
+	RoutingGroup string `yaml:"routing-group,omitempty" json:"routing-group,omitempty"`
+
 	// BaseURL optionally overrides the Vertex-compatible API endpoint.
 	// The executor will append "/v1/publishers/google/models/{model}:action" to this.
 	// When empty, requests fall back to the default Vertex API base URL.
@@ -73,6 +77,7 @@ func (cfg *Config) SanitizeVertexCompatKeys() {
 			continue
 		}
 		entry.Prefix = normalizeModelPrefix(entry.Prefix)
+		entry.RoutingGroup = normalizeRoutingGroup(entry.RoutingGroup)
 		entry.BaseURL = strings.TrimSpace(entry.BaseURL)
 		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
 		entry.Headers = NormalizeHeaders(entry.Headers)

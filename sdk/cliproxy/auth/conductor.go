@@ -165,12 +165,22 @@ type Manager struct {
 	// It is initialized in NewManager; never Load() before first Store().
 	runtimeConfig atomic.Value
 
+	// dynamicSelectors caches per-routing-group selector instances when routing
+	// group strategy overrides are enabled.
+	dynamicSelectorsMu sync.Mutex
+	dynamicSelectors   map[string]Selector
+
 	// Optional HTTP RoundTripper provider injected by host.
 	rtProvider RoundTripperProvider
 
 	// Auto refresh state
 	refreshCancel context.CancelFunc
 	refreshLoop   *authAutoRefreshLoop
+
+	// halfOpenProbeNext tracks the earliest time another half-open probe may be
+	// sent for one auth/model combination.
+	halfOpenProbeMu   sync.Mutex
+	halfOpenProbeNext map[string]time.Time
 }
 
 // NewManager constructs a manager with optional custom selector and hook.
@@ -182,13 +192,15 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 		hook = NoopHook{}
 	}
 	manager := &Manager{
-		store:            store,
-		executors:        make(map[string]ProviderExecutor),
-		selector:         selector,
-		hook:             hook,
-		auths:            make(map[string]*Auth),
-		providerOffsets:  make(map[string]int),
-		modelPoolOffsets: make(map[string]int),
+		store:             store,
+		executors:         make(map[string]ProviderExecutor),
+		selector:          selector,
+		hook:              hook,
+		auths:             make(map[string]*Auth),
+		providerOffsets:   make(map[string]int),
+		modelPoolOffsets:  make(map[string]int),
+		dynamicSelectors:  make(map[string]Selector),
+		halfOpenProbeNext: make(map[string]time.Time),
 	}
 	// atomic.Value requires non-nil initial value.
 	manager.runtimeConfig.Store(&internalconfig.Config{})
@@ -369,6 +381,9 @@ func (m *Manager) SetConfig(cfg *internalconfig.Config) {
 	}
 	m.runtimeConfig.Store(cfg)
 	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
+	if !m.hasRoutingGroupStrategies() {
+		m.stopDynamicSelectors()
+	}
 }
 
 func (m *Manager) lookupAPIKeyUpstreamModel(authID, requestedModel string) string {
@@ -647,7 +662,15 @@ func (m *Manager) availableAuthsForRouteModel(auths []*Auth, provider, routeMode
 		checkModel := m.selectionModelForAuth(candidate, routeModel)
 		blocked, reason, next := isAuthBlockedForModel(candidate, checkModel, now)
 		if !blocked {
-			priority := authPriority(candidate)
+			healthBlocked, healthNext := m.healthSelectionBlocked(candidate, checkModel, now)
+			if healthBlocked {
+				cooldownCount++
+				if !healthNext.IsZero() && (earliest.IsZero() || healthNext.Before(earliest)) {
+					earliest = healthNext
+				}
+				continue
+			}
+			priority := effectiveSelectionPriority(candidate, checkModel, now)
 			availableByPriority[priority] = append(availableByPriority[priority], candidate)
 			continue
 		}
@@ -690,11 +713,231 @@ func (m *Manager) availableAuthsForRouteModel(auths []*Auth, provider, routeMode
 	return available, nil
 }
 
+func copyTriedMap(src map[string]struct{}) map[string]struct{} {
+	if len(src) == 0 {
+		return make(map[string]struct{})
+	}
+	out := make(map[string]struct{}, len(src))
+	for key := range src {
+		out[key] = struct{}{}
+	}
+	return out
+}
+
+func halfOpenProbeKey(authID, model string) string {
+	return strings.TrimSpace(authID) + "\x00" + canonicalModelKey(model)
+}
+
+func (m *Manager) nextHalfOpenProbeAt(authID, model string) time.Time {
+	if m == nil {
+		return time.Time{}
+	}
+	key := halfOpenProbeKey(authID, model)
+	if key == "\x00" {
+		return time.Time{}
+	}
+	m.halfOpenProbeMu.Lock()
+	defer m.halfOpenProbeMu.Unlock()
+	next := m.halfOpenProbeNext[key]
+	if !next.IsZero() && !next.After(time.Now()) {
+		delete(m.halfOpenProbeNext, key)
+		return time.Time{}
+	}
+	return next
+}
+
+func (m *Manager) reserveHalfOpenProbe(authID, model string, now time.Time) (bool, time.Time) {
+	if m == nil {
+		return true, time.Time{}
+	}
+	key := halfOpenProbeKey(authID, model)
+	if key == "\x00" {
+		return true, time.Time{}
+	}
+	m.halfOpenProbeMu.Lock()
+	defer m.halfOpenProbeMu.Unlock()
+	if next := m.halfOpenProbeNext[key]; !next.IsZero() && next.After(now) {
+		return false, next
+	}
+	next := now.Add(healthHalfOpenInterval)
+	m.halfOpenProbeNext[key] = next
+	return true, next
+}
+
+func healthRequiresHalfOpenProbe(auth *Auth, model string, now time.Time) bool {
+	state := resolveHealthState(auth, model)
+	switch state.BreakerState {
+	case HealthBreakerHalfOpen:
+		return true
+	case HealthBreakerOpen:
+		return !state.OpenUntil.IsZero() && !state.OpenUntil.After(now)
+	default:
+		return false
+	}
+}
+
+func (m *Manager) healthSelectionBlocked(auth *Auth, model string, now time.Time) (bool, time.Time) {
+	state := resolveHealthState(auth, model)
+	switch state.BreakerState {
+	case HealthBreakerOpen:
+		if !state.OpenUntil.IsZero() && state.OpenUntil.After(now) {
+			return true, state.OpenUntil
+		}
+		fallthrough
+	case HealthBreakerHalfOpen:
+		if next := m.nextHalfOpenProbeAt(auth.ID, model); !next.IsZero() && next.After(now) {
+			return true, next
+		}
+	}
+	return false, time.Time{}
+}
+
 func selectionArgForSelector(selector Selector, routeModel string) string {
 	if isBuiltInSelector(selector) {
 		return ""
 	}
 	return routeModel
+}
+
+func authRoutingGroup(auth *Auth) string {
+	if auth == nil {
+		return ""
+	}
+	if auth.Attributes != nil {
+		for _, key := range []string{"routing_group", "routing-group"} {
+			if value := normalizeRoutingGroupKey(auth.Attributes[key]); value != "" {
+				return value
+			}
+		}
+		if value := normalizeRoutingGroupKey(auth.Attributes["compat_name"]); value != "" {
+			return value
+		}
+		if value := normalizeRoutingGroupKey(auth.Attributes["provider_key"]); value != "" {
+			return value
+		}
+	}
+	if value := normalizeRoutingGroupKey(auth.Prefix); value != "" {
+		return value
+	}
+	return normalizeRoutingGroupKey(auth.Provider)
+}
+
+func commonRoutingGroup(auths []*Auth) string {
+	group := ""
+	for _, auth := range auths {
+		if auth == nil {
+			continue
+		}
+		current := authRoutingGroup(auth)
+		if current == "" {
+			return ""
+		}
+		if group == "" {
+			group = current
+			continue
+		}
+		if group != current {
+			return ""
+		}
+	}
+	return group
+}
+
+func (m *Manager) routingGroupStrategies() map[string]string {
+	if m == nil {
+		return nil
+	}
+	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+	if cfg == nil {
+		return nil
+	}
+	return NormalizeRoutingGroupStrategies(cfg.Routing.GroupStrategies)
+}
+
+func (m *Manager) hasRoutingGroupStrategies() bool {
+	return len(m.routingGroupStrategies()) > 0
+}
+
+func (m *Manager) routingStrategyForAuths(auths []*Auth) (string, string, bool) {
+	overrides := m.routingGroupStrategies()
+	if len(overrides) == 0 {
+		return "", "", false
+	}
+	group := commonRoutingGroup(auths)
+	if group == "" {
+		return "", "", false
+	}
+	strategy, ok := overrides[group]
+	if !ok {
+		return "", "", false
+	}
+	return group, strategy, true
+}
+
+func (m *Manager) selectorForStrategyGroup(group, strategy string) Selector {
+	if m == nil {
+		return SelectorForRoutingStrategy(strategy)
+	}
+	normalizedStrategy, ok := NormalizeRoutingStrategy(strategy)
+	if !ok {
+		return m.selector
+	}
+	group = normalizeRoutingGroupKey(group)
+	if group == "" {
+		return SelectorForRoutingStrategy(normalizedStrategy)
+	}
+	cacheKey := group + "\x00" + normalizedStrategy
+
+	m.dynamicSelectorsMu.Lock()
+	defer m.dynamicSelectorsMu.Unlock()
+	if selector, ok := m.dynamicSelectors[cacheKey]; ok && selector != nil {
+		return selector
+	}
+
+	var selector Selector = SelectorForRoutingStrategy(normalizedStrategy)
+	if sessionSelector, ok := m.selector.(*SessionAffinitySelector); ok && sessionSelector != nil {
+		ttl := time.Hour
+		if sessionSelector.cache != nil && sessionSelector.cache.ttl > 0 {
+			ttl = sessionSelector.cache.ttl
+		}
+		selector = NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+			Fallback: selector,
+			TTL:      ttl,
+		})
+	}
+	m.dynamicSelectors[cacheKey] = selector
+	return selector
+}
+
+func (m *Manager) selectorForAuths(auths []*Auth) Selector {
+	group, strategy, ok := m.routingStrategyForAuths(auths)
+	if !ok {
+		return m.selector
+	}
+	return m.selectorForStrategyGroup(group, strategy)
+}
+
+func (m *Manager) stopDynamicSelectors() {
+	if m == nil {
+		return
+	}
+	m.dynamicSelectorsMu.Lock()
+	selectors := make([]Selector, 0, len(m.dynamicSelectors))
+	for key, selector := range m.dynamicSelectors {
+		if selector == nil {
+			delete(m.dynamicSelectors, key)
+			continue
+		}
+		selectors = append(selectors, selector)
+	}
+	m.dynamicSelectors = make(map[string]Selector)
+	m.dynamicSelectorsMu.Unlock()
+
+	for _, selector := range selectors {
+		if stoppable, ok := selector.(StoppableSelector); ok {
+			stoppable.Stop()
+		}
+	}
 }
 
 func (m *Manager) authSupportsRouteModel(registryRef *registry.ModelRegistry, auth *Auth, routeModel string) bool {
@@ -2163,6 +2406,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			if result.Model != "" {
 				state := ensureModelState(auth, result.Model)
 				resetModelState(state, now)
+				applyHealthSuccess(&state.Health, now)
 				updateAggregatedAvailability(auth, now)
 				if !hasModelError(auth, now) {
 					auth.LastError = nil
@@ -2174,6 +2418,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				clearModelQuota = true
 			} else {
 				clearAuthStateOnSuccess(auth, now)
+				applyHealthSuccess(&auth.Health, now)
 			}
 		} else {
 			if result.Model != "" {
@@ -2183,14 +2428,14 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					state.Unavailable = true
 					state.Status = StatusError
 					state.UpdatedAt = now
+					statusCode := statusCodeFromResult(result.Error)
+					applyHealthFailure(&state.Health, now, statusCode)
 					if result.Error != nil {
 						state.LastError = cloneError(result.Error)
 						state.StatusMessage = result.Error.Message
 						auth.LastError = cloneError(result.Error)
 						auth.StatusMessage = result.Error.Message
 					}
-
-					statusCode := statusCodeFromResult(result.Error)
 					if isModelSupportResultError(result.Error) {
 						next := now.Add(12 * time.Hour)
 						state.NextRetryAfter = next
@@ -2458,6 +2703,147 @@ func clearAuthStateOnSuccess(auth *Auth, now time.Time) {
 	auth.UpdatedAt = now
 }
 
+func applyHealthSuccess(health *HealthState, now time.Time) {
+	if health == nil {
+		return
+	}
+	score := recoveredHealthScore(*health, now)
+	health.Observed = true
+	health.SuccessCount++
+	health.LastSuccessAt = now
+	health.LastUpdatedAt = now
+	health.LastStatusCode = http.StatusOK
+	switch health.BreakerState {
+	case HealthBreakerOpen:
+		if !health.OpenUntil.IsZero() && health.OpenUntil.After(now) {
+			return
+		}
+		health.BreakerState = HealthBreakerHalfOpen
+		health.HalfOpenSuccesses = 1
+		health.ConsecutiveFailures = 0
+		health.OpenUntil = time.Time{}
+		if score < healthBreakerThreshold {
+			score = healthBreakerThreshold
+		}
+		health.Score = score
+		return
+	case HealthBreakerHalfOpen:
+		health.HalfOpenSuccesses++
+		health.ConsecutiveFailures = 0
+		if health.HalfOpenSuccesses >= healthHalfOpenSuccesses {
+			score += healthScoreStepSuccess
+			if score > healthScoreDefault {
+				score = healthScoreDefault
+			}
+			health.Score = score
+			health.BreakerState = HealthBreakerClosed
+			health.OpenUntil = time.Time{}
+			health.HalfOpenSuccesses = 0
+			return
+		}
+		if score < healthBreakerThreshold {
+			score = healthBreakerThreshold
+		}
+		health.Score = score
+		return
+	default:
+		score += healthScoreStepSuccess
+		if score > healthScoreDefault {
+			score = healthScoreDefault
+		}
+		health.Score = score
+		health.ConsecutiveFailures = 0
+		health.BreakerState = HealthBreakerClosed
+		health.OpenUntil = time.Time{}
+		health.HalfOpenSuccesses = 0
+	}
+}
+
+func applyHealthFailure(health *HealthState, now time.Time, statusCode int) {
+	if health == nil {
+		return
+	}
+	score := recoveredHealthScore(*health, now)
+	nextConsecutive := health.ConsecutiveFailures + 1
+	score -= healthFailurePenalty(statusCode, nextConsecutive)
+	if score < 0 {
+		score = 0
+	}
+	health.Observed = true
+	health.Score = score
+	health.ConsecutiveFailures = nextConsecutive
+	health.FailureCount++
+	health.LastFailureAt = now
+	health.LastUpdatedAt = now
+	health.LastStatusCode = statusCode
+	health.HalfOpenSuccesses = 0
+	if shouldOpenHealthCircuit(*health, statusCode) {
+		health.BreakerState = HealthBreakerOpen
+		health.OpenUntil = now.Add(healthOpenCooldown(statusCode, nextConsecutive))
+	} else if health.BreakerState == HealthBreakerHalfOpen {
+		health.BreakerState = HealthBreakerOpen
+		health.OpenUntil = now.Add(healthOpenCooldown(statusCode, nextConsecutive))
+	} else if health.BreakerState == HealthBreakerOpen && health.OpenUntil.Before(now) {
+		health.OpenUntil = now.Add(healthOpenCooldown(statusCode, nextConsecutive))
+	} else {
+		health.BreakerState = HealthBreakerClosed
+		health.OpenUntil = time.Time{}
+	}
+}
+
+func healthFailurePenalty(statusCode, consecutiveFailures int) int {
+	penalty := 10
+	switch statusCode {
+	case http.StatusUnauthorized, http.StatusPaymentRequired, http.StatusForbidden, http.StatusNotFound:
+		penalty = 35
+	case http.StatusTooManyRequests:
+		penalty = 30
+	case http.StatusRequestTimeout, http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout, 520, 521, 522, 523, 524:
+		penalty = 20
+	default:
+		if statusCode >= 500 {
+			penalty = 20
+		}
+	}
+	if consecutiveFailures > 1 {
+		penalty += minInt(20, (consecutiveFailures-1)*5)
+	}
+	return penalty
+}
+
+func shouldOpenHealthCircuit(health HealthState, statusCode int) bool {
+	switch statusCode {
+	case http.StatusUnauthorized, http.StatusPaymentRequired, http.StatusForbidden, http.StatusNotFound:
+		return true
+	case http.StatusTooManyRequests:
+		return health.ConsecutiveFailures >= 2
+	}
+	if health.ConsecutiveFailures >= 3 {
+		return true
+	}
+	return health.ConsecutiveFailures >= 2 && health.Score <= healthBreakerThreshold
+}
+
+func healthOpenCooldown(statusCode, consecutiveFailures int) time.Duration {
+	switch statusCode {
+	case http.StatusUnauthorized, http.StatusPaymentRequired, http.StatusForbidden, http.StatusNotFound:
+		return 10 * time.Minute
+	case http.StatusTooManyRequests:
+		return time.Duration(minInt(10, consecutiveFailures)) * time.Minute
+	case http.StatusRequestTimeout, http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout, 520, 521, 522, 523, 524:
+		return time.Duration(minInt(5, consecutiveFailures)) * time.Minute
+	default:
+		return time.Duration(minInt(3, consecutiveFailures)) * time.Minute
+	}
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 func cloneError(err *Error) *Error {
 	if err == nil {
 		return nil
@@ -2587,6 +2973,10 @@ func isRetryableAvailabilityErrorMessage(message string) bool {
 		return false
 	}
 	patterns := [...]string{
+		"payment required",
+		"insufficient balance",
+		"balance insufficient",
+		"account balance insufficient",
 		"insufficient_quota",
 		"quota exhausted",
 		"quota_exhausted",
@@ -2608,6 +2998,9 @@ func isRetryableAvailabilityErrorMessage(message string) bool {
 		"上游不可用",
 		"额度已用尽",
 		"额度不足",
+		"余额不足",
+		"账户余额不足",
+		"帐户余额不足",
 		"频率限制",
 	}
 	for _, pattern := range patterns {
@@ -2695,6 +3088,7 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 	if isRequestScopedNotFoundResultError(resultErr) || isRequestScopedFeatureUnsupportedResultError(resultErr) {
 		return
 	}
+	applyHealthFailure(&auth.Health, now, statusCodeFromResult(resultErr))
 	disableCooling := quotaCooldownDisabledForAuth(auth)
 	auth.Unavailable = true
 	auth.Status = StatusError
@@ -2922,6 +3316,9 @@ func (m *Manager) useSchedulerFastPath() bool {
 	if m == nil || m.scheduler == nil {
 		return false
 	}
+	if m.hasRoutingGroupStrategies() {
+		return false
+	}
 	return isBuiltInSelector(m.selector)
 }
 
@@ -2949,6 +3346,7 @@ func (m *Manager) routeAwareSelectionRequired(auth *Auth, routeModel string) boo
 
 func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, error) {
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
+	localTried := copyTriedMap(tried)
 
 	m.mu.RLock()
 	executor, okExecutor := m.executors[provider]
@@ -2973,7 +3371,7 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 		if pinnedAuthID != "" && candidate.ID != pinnedAuthID {
 			continue
 		}
-		if _, used := tried[candidate.ID]; used {
+		if _, used := localTried[candidate.ID]; used {
 			continue
 		}
 		if modelKey != "" && !m.authSupportsRouteModel(registryRef, candidate, model) {
@@ -2985,31 +3383,61 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 		m.mu.RUnlock()
 		return nil, nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
-	available, errAvailable := m.availableAuthsForRouteModel(candidates, provider, model, time.Now())
-	if errAvailable != nil {
-		m.mu.RUnlock()
-		return nil, nil, errAvailable
-	}
-	selected, errPick := m.selector.Pick(ctx, provider, selectionArgForSelector(m.selector, model), opts, available)
-	if errPick != nil {
-		m.mu.RUnlock()
-		return nil, nil, errPick
-	}
-	if selected == nil {
-		m.mu.RUnlock()
-		return nil, nil, &Error{Code: "auth_not_found", Message: "selector returned no auth"}
-	}
-	authCopy := selected.Clone()
-	m.mu.RUnlock()
-	if !selected.indexAssigned {
-		m.mu.Lock()
-		if current := m.auths[authCopy.ID]; current != nil && !current.indexAssigned {
-			current.EnsureIndex()
-			authCopy = current.Clone()
+	for {
+		available, errAvailable := m.availableAuthsForRouteModel(candidates, provider, model, time.Now())
+		if errAvailable != nil {
+			m.mu.RUnlock()
+			return nil, nil, errAvailable
 		}
-		m.mu.Unlock()
+		selector := m.selectorForAuths(available)
+		selected, errPick := selector.Pick(ctx, provider, selectionArgForSelector(selector, model), opts, available)
+		if errPick != nil {
+			m.mu.RUnlock()
+			return nil, nil, errPick
+		}
+		if selected == nil {
+			m.mu.RUnlock()
+			return nil, nil, &Error{Code: "auth_not_found", Message: "selector returned no auth"}
+		}
+		checkModel := m.selectionModelForAuth(selected, model)
+		if healthRequiresHalfOpenProbe(selected, checkModel, time.Now()) {
+			if okReserve, _ := m.reserveHalfOpenProbe(selected.ID, checkModel, time.Now()); !okReserve {
+				localTried[selected.ID] = struct{}{}
+				candidates = candidates[:0]
+				for _, candidate := range m.auths {
+					if candidate.Provider != provider || candidate.Disabled {
+						continue
+					}
+					if pinnedAuthID != "" && candidate.ID != pinnedAuthID {
+						continue
+					}
+					if _, used := localTried[candidate.ID]; used {
+						continue
+					}
+					if modelKey != "" && !m.authSupportsRouteModel(registryRef, candidate, model) {
+						continue
+					}
+					candidates = append(candidates, candidate)
+				}
+				if len(candidates) == 0 {
+					m.mu.RUnlock()
+					return nil, nil, &Error{Code: "auth_not_found", Message: "no auth available"}
+				}
+				continue
+			}
+		}
+		authCopy := selected.Clone()
+		m.mu.RUnlock()
+		if !selected.indexAssigned {
+			m.mu.Lock()
+			if current := m.auths[authCopy.ID]; current != nil && !current.indexAssigned {
+				current.EnsureIndex()
+				authCopy = current.Clone()
+			}
+			m.mu.Unlock()
+		}
+		return authCopy, executor, nil
 	}
-	return authCopy, executor, nil
 }
 
 func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, error) {
@@ -3061,6 +3489,7 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 
 func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
+	localTried := copyTriedMap(tried)
 
 	providerSet := make(map[string]struct{}, len(providers))
 	for _, provider := range providers {
@@ -3099,7 +3528,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 		if _, ok := providerSet[providerKey]; !ok {
 			continue
 		}
-		if _, used := tried[candidate.ID]; used {
+		if _, used := localTried[candidate.ID]; used {
 			continue
 		}
 		if _, ok := m.executors[providerKey]; !ok {
@@ -3114,37 +3543,77 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 		m.mu.RUnlock()
 		return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
-	available, errAvailable := m.availableAuthsForRouteModel(candidates, "mixed", model, time.Now())
-	if errAvailable != nil {
-		m.mu.RUnlock()
-		return nil, nil, "", errAvailable
-	}
-	selected, errPick := m.selector.Pick(ctx, "mixed", selectionArgForSelector(m.selector, model), opts, available)
-	if errPick != nil {
-		m.mu.RUnlock()
-		return nil, nil, "", errPick
-	}
-	if selected == nil {
-		m.mu.RUnlock()
-		return nil, nil, "", &Error{Code: "auth_not_found", Message: "selector returned no auth"}
-	}
-	providerKey := strings.TrimSpace(strings.ToLower(selected.Provider))
-	executor, okExecutor := m.executors[providerKey]
-	if !okExecutor {
-		m.mu.RUnlock()
-		return nil, nil, "", &Error{Code: "executor_not_found", Message: "executor not registered"}
-	}
-	authCopy := selected.Clone()
-	m.mu.RUnlock()
-	if !selected.indexAssigned {
-		m.mu.Lock()
-		if current := m.auths[authCopy.ID]; current != nil && !current.indexAssigned {
-			current.EnsureIndex()
-			authCopy = current.Clone()
+	for {
+		available, errAvailable := m.availableAuthsForRouteModel(candidates, "mixed", model, time.Now())
+		if errAvailable != nil {
+			m.mu.RUnlock()
+			return nil, nil, "", errAvailable
 		}
-		m.mu.Unlock()
+		selector := m.selectorForAuths(available)
+		selected, errPick := selector.Pick(ctx, "mixed", selectionArgForSelector(selector, model), opts, available)
+		if errPick != nil {
+			m.mu.RUnlock()
+			return nil, nil, "", errPick
+		}
+		if selected == nil {
+			m.mu.RUnlock()
+			return nil, nil, "", &Error{Code: "auth_not_found", Message: "selector returned no auth"}
+		}
+		checkModel := m.selectionModelForAuth(selected, model)
+		if healthRequiresHalfOpenProbe(selected, checkModel, time.Now()) {
+			if okReserve, _ := m.reserveHalfOpenProbe(selected.ID, checkModel, time.Now()); !okReserve {
+				localTried[selected.ID] = struct{}{}
+				candidates = candidates[:0]
+				for _, candidate := range m.auths {
+					if candidate == nil || candidate.Disabled {
+						continue
+					}
+					if pinnedAuthID != "" && candidate.ID != pinnedAuthID {
+						continue
+					}
+					providerKey := strings.TrimSpace(strings.ToLower(candidate.Provider))
+					if providerKey == "" {
+						continue
+					}
+					if _, ok := providerSet[providerKey]; !ok {
+						continue
+					}
+					if _, used := localTried[candidate.ID]; used {
+						continue
+					}
+					if _, ok := m.executors[providerKey]; !ok {
+						continue
+					}
+					if modelKey != "" && !m.authSupportsRouteModel(registryRef, candidate, model) {
+						continue
+					}
+					candidates = append(candidates, candidate)
+				}
+				if len(candidates) == 0 {
+					m.mu.RUnlock()
+					return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
+				}
+				continue
+			}
+		}
+		providerKey := strings.TrimSpace(strings.ToLower(selected.Provider))
+		executor, okExecutor := m.executors[providerKey]
+		if !okExecutor {
+			m.mu.RUnlock()
+			return nil, nil, "", &Error{Code: "executor_not_found", Message: "executor not registered"}
+		}
+		authCopy := selected.Clone()
+		m.mu.RUnlock()
+		if !selected.indexAssigned {
+			m.mu.Lock()
+			if current := m.auths[authCopy.ID]; current != nil && !current.indexAssigned {
+				current.EnsureIndex()
+				authCopy = current.Clone()
+			}
+			m.mu.Unlock()
+		}
+		return authCopy, executor, providerKey, nil
 	}
-	return authCopy, executor, providerKey, nil
 }
 
 func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
@@ -3290,6 +3759,7 @@ func (m *Manager) StopAutoRefresh() {
 	if stoppable, ok := m.selector.(StoppableSelector); ok {
 		stoppable.Stop()
 	}
+	m.stopDynamicSelectors()
 }
 
 func (m *Manager) queueRefreshReschedule(authID string) {

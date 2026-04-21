@@ -41,3 +41,31 @@ func SelectorForRoutingStrategy(strategy string) Selector {
 		return &RoundRobinSelector{}
 	}
 }
+
+func normalizeRoutingGroupKey(group string) string {
+	return strings.ToLower(strings.TrimSpace(group))
+}
+
+// NormalizeRoutingGroupStrategies canonicalizes routing group strategy overrides.
+// Empty group names and unsupported strategies are discarded.
+func NormalizeRoutingGroupStrategies(overrides map[string]string) map[string]string {
+	if len(overrides) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(overrides))
+	for group, strategy := range overrides {
+		normalizedGroup := normalizeRoutingGroupKey(group)
+		if normalizedGroup == "" {
+			continue
+		}
+		normalizedStrategy, ok := NormalizeRoutingStrategy(strategy)
+		if !ok {
+			continue
+		}
+		out[normalizedGroup] = normalizedStrategy
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}

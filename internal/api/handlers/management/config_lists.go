@@ -1088,12 +1088,14 @@ func normalizeOpenAICompatibilityEntry(entry *config.OpenAICompatibility) {
 	entry.Name = strings.TrimSpace(entry.Name)
 	entry.Kind = config.NormalizeOpenAICompatibilityKind(entry.Kind)
 	entry.Prefix = strings.TrimSpace(entry.Prefix)
+	entry.RoutingGroup = strings.TrimSpace(entry.RoutingGroup)
 	// Trim base-url; empty base-url indicates provider should be removed by sanitization
 	entry.BaseURL = strings.TrimSpace(entry.BaseURL)
 	entry.Headers = config.NormalizeHeaders(entry.Headers)
 	for i := range entry.APIKeyEntries {
 		entry.APIKeyEntries[i].APIKey = strings.TrimSpace(entry.APIKeyEntries[i].APIKey)
 		entry.APIKeyEntries[i].ProxyURL = strings.TrimSpace(entry.APIKeyEntries[i].ProxyURL)
+		entry.APIKeyEntries[i].RoutingGroup = strings.TrimSpace(entry.APIKeyEntries[i].RoutingGroup)
 	}
 	for i := range entry.Models {
 		entry.Models[i].Name = strings.TrimSpace(entry.Models[i].Name)
@@ -1125,6 +1127,8 @@ func normalizeClaudeKey(entry *config.ClaudeKey) {
 		return
 	}
 	entry.APIKey = strings.TrimSpace(entry.APIKey)
+	entry.Prefix = strings.TrimSpace(entry.Prefix)
+	entry.RoutingGroup = strings.TrimSpace(entry.RoutingGroup)
 	entry.BaseURL = strings.TrimSpace(entry.BaseURL)
 	entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
 	entry.Headers = config.NormalizeHeaders(entry.Headers)
@@ -1151,6 +1155,7 @@ func normalizeCodexKey(entry *config.CodexKey) {
 	}
 	entry.APIKey = strings.TrimSpace(entry.APIKey)
 	entry.Prefix = strings.TrimSpace(entry.Prefix)
+	entry.RoutingGroup = strings.TrimSpace(entry.RoutingGroup)
 	entry.BaseURL = strings.TrimSpace(entry.BaseURL)
 	entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
 	entry.Headers = config.NormalizeHeaders(entry.Headers)
@@ -1177,6 +1182,7 @@ func normalizeVertexCompatKey(entry *config.VertexCompatKey) {
 	}
 	entry.APIKey = strings.TrimSpace(entry.APIKey)
 	entry.Prefix = strings.TrimSpace(entry.Prefix)
+	entry.RoutingGroup = strings.TrimSpace(entry.RoutingGroup)
 	entry.BaseURL = strings.TrimSpace(entry.BaseURL)
 	entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
 	entry.Headers = config.NormalizeHeaders(entry.Headers)

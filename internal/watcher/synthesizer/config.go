@@ -61,6 +61,9 @@ func (s *ConfigSynthesizer) synthesizeGeminiKeys(ctx *SynthesisContext) []*corea
 			"source":  fmt.Sprintf("config:gemini[%s]", token),
 			"api_key": key,
 		}
+		if routingGroup := strings.TrimSpace(entry.RoutingGroup); routingGroup != "" {
+			attrs["routing_group"] = routingGroup
+		}
 		if entry.Priority != 0 {
 			attrs["priority"] = strconv.Itoa(entry.Priority)
 		}
@@ -112,6 +115,9 @@ func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) []*corea
 		attrs := map[string]string{
 			"source":  fmt.Sprintf("config:claude[%s]", token),
 			"api_key": key,
+		}
+		if routingGroup := strings.TrimSpace(ck.RoutingGroup); routingGroup != "" {
+			attrs["routing_group"] = routingGroup
 		}
 		if kind := internalconfig.InferCompatKindFromBaseURL(base); kind != "" {
 			attrs["compat_kind"] = kind
@@ -167,6 +173,9 @@ func (s *ConfigSynthesizer) synthesizeCodexKeys(ctx *SynthesisContext) []*coreau
 		attrs := map[string]string{
 			"source":  fmt.Sprintf("config:codex[%s]", token),
 			"api_key": key,
+		}
+		if routingGroup := strings.TrimSpace(ck.RoutingGroup); routingGroup != "" {
+			attrs["routing_group"] = routingGroup
 		}
 		if ck.Priority != 0 {
 			attrs["priority"] = strconv.Itoa(ck.Priority)
@@ -234,6 +243,13 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 				"compat_name":  compat.Name,
 				"provider_key": providerName,
 			}
+			routingGroup := strings.TrimSpace(entry.RoutingGroup)
+			if routingGroup == "" {
+				routingGroup = strings.TrimSpace(compat.RoutingGroup)
+			}
+			if routingGroup != "" {
+				attrs["routing_group"] = routingGroup
+			}
 			if kind := internalconfig.NormalizeOpenAICompatibilityKind(compat.Kind); kind != "" {
 				attrs["compat_kind"] = kind
 			}
@@ -275,6 +291,9 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 				"base_url":     base,
 				"compat_name":  compat.Name,
 				"provider_key": providerName,
+			}
+			if routingGroup := strings.TrimSpace(compat.RoutingGroup); routingGroup != "" {
+				attrs["routing_group"] = routingGroup
 			}
 			if kind := internalconfig.NormalizeOpenAICompatibilityKind(compat.Kind); kind != "" {
 				attrs["compat_kind"] = kind
@@ -323,6 +342,9 @@ func (s *ConfigSynthesizer) synthesizeVertexCompat(ctx *SynthesisContext) []*cor
 			"source":       fmt.Sprintf("config:vertex-apikey[%s]", token),
 			"base_url":     base,
 			"provider_key": providerName,
+		}
+		if routingGroup := strings.TrimSpace(compat.RoutingGroup); routingGroup != "" {
+			attrs["routing_group"] = routingGroup
 		}
 		if compat.Priority != 0 {
 			attrs["priority"] = strconv.Itoa(compat.Priority)

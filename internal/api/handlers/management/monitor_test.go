@@ -14,6 +14,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 )
 
@@ -502,5 +503,144 @@ func TestGetMonitorServiceHealth_EmptySnapshot(t *testing.T) {
 	}
 	if resp.SuccessRate != 0 {
 		t.Fatalf("expected 0 success rate for empty data, got %f", resp.SuccessRate)
+	}
+}
+
+func TestGetMonitorKeyStats_DefaultExcludesDisabledAuth(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	stats := usage.NewRequestStatistics()
+	manager := coreauth.NewManager(nil, &coreauth.RoundRobinSelector{}, nil)
+
+	disabledAuth := &coreauth.Auth{
+		ID:       "auth-disabled",
+		Provider: "codex",
+		Disabled: true,
+		Status:   coreauth.StatusDisabled,
+		Attributes: map[string]string{
+			"api_key": "sk-disabled",
+		},
+	}
+	if _, err := manager.Register(context.Background(), disabledAuth); err != nil {
+		t.Fatalf("register disabled auth failed: %v", err)
+	}
+	disabledRuntime, ok := manager.GetByID("auth-disabled")
+	if !ok || disabledRuntime == nil {
+		t.Fatal("expected disabled auth to exist in manager")
+	}
+
+	activeAuth := &coreauth.Auth{
+		ID:       "auth-active",
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"api_key": "sk-active",
+		},
+	}
+	if _, err := manager.Register(context.Background(), activeAuth); err != nil {
+		t.Fatalf("register active auth failed: %v", err)
+	}
+	activeRuntime, ok := manager.GetByID("auth-active")
+	if !ok || activeRuntime == nil {
+		t.Fatal("expected active auth to exist in manager")
+	}
+
+	now := time.Now()
+	stats.Record(context.Background(), coreusage.Record{
+		APIKey:      "api-1",
+		Model:       "model-a",
+		Source:      "sk-disabled",
+		AuthIndex:   disabledRuntime.EnsureIndex(),
+		RequestedAt: now.Add(-5 * time.Minute),
+		Failed:      true,
+	})
+	stats.Record(context.Background(), coreusage.Record{
+		APIKey:      "api-2",
+		Model:       "model-b",
+		Source:      "sk-active",
+		AuthIndex:   activeRuntime.EnsureIndex(),
+		RequestedAt: now.Add(-3 * time.Minute),
+		Failed:      false,
+	})
+
+	h := &Handler{usageStats: stats, authManager: manager}
+	rr := executeMonitorRequest(h.GetMonitorKeyStats, "/monitor/key-stats")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d, body=%s", rr.Code, rr.Body.String())
+	}
+
+	var resp struct {
+		BySource    map[string]any `json:"by_source"`
+		ByAuthIndex map[string]any `json:"by_auth_index"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response failed: %v", err)
+	}
+
+	if _, exists := resp.BySource["sk-disabled"]; exists {
+		t.Fatalf("expected disabled source to be excluded, got %+v", resp.BySource["sk-disabled"])
+	}
+	if _, exists := resp.ByAuthIndex[disabledRuntime.EnsureIndex()]; exists {
+		t.Fatalf("expected disabled auth index to be excluded, got %+v", resp.ByAuthIndex[disabledRuntime.EnsureIndex()])
+	}
+	if _, exists := resp.BySource["sk-active"]; !exists {
+		t.Fatalf("expected active source to remain present, got %+v", resp.BySource)
+	}
+	if _, exists := resp.ByAuthIndex[activeRuntime.EnsureIndex()]; !exists {
+		t.Fatalf("expected active auth index to remain present, got %+v", resp.ByAuthIndex)
+	}
+}
+
+func TestGetMonitorKeyStats_IncludeDisabledOptIn(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	stats := usage.NewRequestStatistics()
+	manager := coreauth.NewManager(nil, &coreauth.RoundRobinSelector{}, nil)
+
+	auth := &coreauth.Auth{
+		ID:       "auth-disabled",
+		Provider: "codex",
+		Disabled: true,
+		Status:   coreauth.StatusDisabled,
+		Attributes: map[string]string{
+			"api_key": "sk-disabled",
+		},
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register disabled auth failed: %v", err)
+	}
+	runtimeAuth, ok := manager.GetByID("auth-disabled")
+	if !ok || runtimeAuth == nil {
+		t.Fatal("expected disabled auth to exist in manager")
+	}
+
+	stats.Record(context.Background(), coreusage.Record{
+		APIKey:      "api-1",
+		Model:       "model-a",
+		Source:      "sk-disabled",
+		AuthIndex:   runtimeAuth.EnsureIndex(),
+		RequestedAt: time.Now().Add(-5 * time.Minute),
+		Failed:      true,
+	})
+
+	h := &Handler{usageStats: stats, authManager: manager}
+	rr := executeMonitorRequest(h.GetMonitorKeyStats, "/monitor/key-stats?include_disabled=1")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d, body=%s", rr.Code, rr.Body.String())
+	}
+
+	var resp struct {
+		BySource    map[string]any `json:"by_source"`
+		ByAuthIndex map[string]any `json:"by_auth_index"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response failed: %v", err)
+	}
+
+	if _, exists := resp.BySource["sk-disabled"]; !exists {
+		t.Fatalf("expected disabled source to be included when opted in, got %+v", resp.BySource)
+	}
+	if _, exists := resp.ByAuthIndex[runtimeAuth.EnsureIndex()]; !exists {
+		t.Fatalf("expected disabled auth index to be included when opted in, got %+v", resp.ByAuthIndex)
 	}
 }

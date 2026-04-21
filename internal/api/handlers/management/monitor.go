@@ -1898,6 +1898,12 @@ func (h *Handler) GetMonitorKeyStats(c *gin.Context) {
 
 	now := time.Now()
 	windowStart := now.Add(-windowDuration)
+	includeDisabled := false
+	switch strings.ToLower(strings.TrimSpace(firstQuery(c, "include_disabled", "includeDisabled"))) {
+	case "1", "true", "yes", "on":
+		includeDisabled = true
+	}
+	sourceResolver := newMonitorSourceResolver(h.cfg, h.authManager)
 
 	type blockStats struct {
 		Success int64 `json:"success"`
@@ -1921,11 +1927,21 @@ func (h *Handler) GetMonitorKeyStats(c *gin.Context) {
 		m[key] = s
 		return s
 	}
+	shouldSkipRow := func(source, authIndex string) bool {
+		if includeDisabled {
+			return false
+		}
+		ref := sourceResolver.Resolve(source, authIndex)
+		return ref.Disabled
+	}
 
 	if dbPlugin := usage.GetDatabasePlugin(); dbPlugin != nil {
 		rows, queryErr := dbPlugin.QueryMonitorKeyStatsBlocks(c.Request.Context(), windowStart.Unix(), now.Unix(), int(blockDuration.Seconds()))
 		if queryErr == nil {
 			for _, row := range rows {
+				if shouldSkipRow(row.Source, row.AuthIndex) {
+					continue
+				}
 				if row.BlockIndex < 0 || row.BlockIndex >= blockCount {
 					continue
 				}
@@ -1947,6 +1963,9 @@ func (h *Handler) GetMonitorKeyStats(c *gin.Context) {
 
 	visitSnapshotRecords(h.usageSnapshot(), func(record monitorRecord) {
 		if record.Timestamp.Before(windowStart) || record.Timestamp.After(now) {
+			return
+		}
+		if shouldSkipRow(record.Source, record.AuthIndex) {
 			return
 		}
 		idx := int(record.Timestamp.Sub(windowStart) / blockDuration)

@@ -101,7 +101,7 @@ func newMonitorSourceResolver(cfg *config.Config, authManager *coreauth.Manager)
 			}
 		}
 		for index, entry := range cfg.GeminiKey {
-			ref := buildProviderMonitorSourceRef("gemini", index, providerDisplayName("gemini"), entry.APIKey, hasDisableAllModelsRule(entry.ExcludedModels))
+			ref := buildProviderMonitorSourceRef("gemini", index, providerDisplayName("gemini"), entry.APIKey, entry.Disabled || hasDisableAllModelsRule(entry.ExcludedModels))
 			for _, candidate := range collectProviderSourceCandidates(entry.APIKey, entry.Prefix) {
 				if candidate == "" {
 					continue
@@ -112,7 +112,7 @@ func newMonitorSourceResolver(cfg *config.Config, authManager *coreauth.Manager)
 			}
 		}
 		for index, entry := range cfg.ClaudeKey {
-			ref := buildProviderMonitorSourceRef("claude", index, providerDisplayName("claude"), entry.APIKey, hasDisableAllModelsRule(entry.ExcludedModels))
+			ref := buildProviderMonitorSourceRef("claude", index, providerDisplayName("claude"), entry.APIKey, entry.Disabled || hasDisableAllModelsRule(entry.ExcludedModels))
 			for _, candidate := range collectProviderSourceCandidates(entry.APIKey, entry.Prefix) {
 				if candidate == "" {
 					continue
@@ -123,7 +123,7 @@ func newMonitorSourceResolver(cfg *config.Config, authManager *coreauth.Manager)
 			}
 		}
 		for index, entry := range cfg.CodexKey {
-			ref := buildProviderMonitorSourceRef("codex", index, providerDisplayName("codex"), entry.APIKey, hasDisableAllModelsRule(entry.ExcludedModels))
+			ref := buildProviderMonitorSourceRef("codex", index, providerDisplayName("codex"), entry.APIKey, entry.Disabled || hasDisableAllModelsRule(entry.ExcludedModels))
 			for _, candidate := range collectProviderSourceCandidates(entry.APIKey, entry.Prefix) {
 				if candidate == "" {
 					continue
@@ -134,7 +134,7 @@ func newMonitorSourceResolver(cfg *config.Config, authManager *coreauth.Manager)
 			}
 		}
 		for index, entry := range cfg.VertexCompatAPIKey {
-			ref := buildProviderMonitorSourceRef("vertex", index, providerDisplayName("vertex"), entry.APIKey, hasDisableAllModelsRule(entry.ExcludedModels))
+			ref := buildProviderMonitorSourceRef("vertex", index, providerDisplayName("vertex"), entry.APIKey, entry.Disabled || hasDisableAllModelsRule(entry.ExcludedModels))
 			for _, candidate := range collectProviderSourceCandidates(entry.APIKey, entry.Prefix) {
 				if candidate == "" {
 					continue

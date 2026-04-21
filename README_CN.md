@@ -33,7 +33,14 @@
 ```yaml
 routing:
   strategy: "sf"  # 或 "sequential-fill"
+  group-strategies:
+    minimax: "sf"
+    kimi: "sf"
+    codex: "round-robin"
 ```
+
+每个凭证还可以通过 `routing-group` 归入指定路由池，这样同一个部署里
+就能让 MiniMax / Kimi 走稳定优先，而 Codex 继续保持轮转策略。
 
 ### 使用量统计持久化
 

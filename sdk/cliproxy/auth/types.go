@@ -76,6 +76,8 @@ type Auth struct {
 	Quota QuotaState `json:"quota"`
 	// LastError stores the last failure encountered while executing or refreshing.
 	LastError *Error `json:"last_error,omitempty"`
+	// Health stores in-memory routing quality signals derived from recent auth-level outcomes.
+	Health HealthState `json:"-"`
 	// CreatedAt is the creation timestamp in UTC.
 	CreatedAt time.Time `json:"created_at"`
 	// UpdatedAt is the last modification timestamp in UTC.
@@ -107,6 +109,41 @@ type QuotaState struct {
 	BackoffLevel int `json:"backoff_level,omitempty"`
 }
 
+// HealthState captures in-memory health signals used to bias credential selection.
+type HealthState struct {
+	// Observed reports whether this state has seen any execution results.
+	Observed bool `json:"-"`
+	// Score tracks the latest health score in the range [0,100].
+	Score int `json:"-"`
+	// ConsecutiveFailures counts recent consecutive failures without an intervening success.
+	ConsecutiveFailures int `json:"-"`
+	// SuccessCount and FailureCount retain lightweight counters for diagnostics.
+	SuccessCount int `json:"-"`
+	FailureCount int `json:"-"`
+	// LastSuccessAt and LastFailureAt capture the latest result timestamps.
+	LastSuccessAt time.Time `json:"-"`
+	LastFailureAt time.Time `json:"-"`
+	// LastStatusCode keeps the latest HTTP status that influenced this score.
+	LastStatusCode int `json:"-"`
+	// LastUpdatedAt is when the score was last adjusted.
+	LastUpdatedAt time.Time `json:"-"`
+	// BreakerState controls whether this auth/model is healthy, fully open, or half-open.
+	BreakerState HealthBreakerState `json:"-"`
+	// OpenUntil is the earliest time the breaker may attempt half-open recovery.
+	OpenUntil time.Time `json:"-"`
+	// HalfOpenSuccesses tracks consecutive successful probe requests during recovery.
+	HalfOpenSuccesses int `json:"-"`
+}
+
+// HealthBreakerState describes the routing breaker stage derived from recent health outcomes.
+type HealthBreakerState string
+
+const (
+	HealthBreakerClosed   HealthBreakerState = "closed"
+	HealthBreakerOpen     HealthBreakerState = "open"
+	HealthBreakerHalfOpen HealthBreakerState = "half-open"
+)
+
 // ModelState captures the execution state for a specific model under an auth entry.
 type ModelState struct {
 	// Status reflects the lifecycle status for this model.
@@ -121,6 +158,8 @@ type ModelState struct {
 	LastError *Error `json:"last_error,omitempty"`
 	// Quota retains quota information if this model hit rate limits.
 	Quota QuotaState `json:"quota"`
+	// Health stores in-memory routing quality signals derived from recent model-specific outcomes.
+	Health HealthState `json:"-"`
 	// UpdatedAt tracks the last update timestamp for this model state.
 	UpdatedAt time.Time `json:"updated_at"`
 }

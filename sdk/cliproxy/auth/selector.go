@@ -144,6 +144,78 @@ func authPriority(auth *Auth) int {
 	return parsed
 }
 
+const (
+	healthScoreDefault       = 100
+	healthScoreStepSuccess   = 15
+	healthRecoveryStep       = 5
+	healthRecoveryInterval   = 2 * time.Minute
+	healthPriorityMultiplier = 100
+	healthBreakerThreshold   = 50
+	healthHalfOpenSuccesses  = 2
+	healthHalfOpenInterval   = 20 * time.Second
+)
+
+func healthStateKnown(state HealthState) bool {
+	return state.Observed
+}
+
+func resolveHealthState(auth *Auth, model string) HealthState {
+	if auth == nil {
+		return HealthState{}
+	}
+	if model != "" && len(auth.ModelStates) > 0 {
+		if state, ok := auth.ModelStates[model]; ok && state != nil && healthStateKnown(state.Health) {
+			return state.Health
+		}
+		baseModel := canonicalModelKey(model)
+		if baseModel != "" && baseModel != model {
+			if state, ok := auth.ModelStates[baseModel]; ok && state != nil && healthStateKnown(state.Health) {
+				return state.Health
+			}
+		}
+	}
+	if healthStateKnown(auth.Health) {
+		return auth.Health
+	}
+	return HealthState{}
+}
+
+func recoveredHealthScore(state HealthState, now time.Time) int {
+	if !healthStateKnown(state) {
+		return healthScoreDefault
+	}
+	score := state.Score
+	if !state.LastUpdatedAt.IsZero() && now.After(state.LastUpdatedAt) && healthRecoveryInterval > 0 {
+		recoveryTicks := int(now.Sub(state.LastUpdatedAt) / healthRecoveryInterval)
+		if recoveryTicks > 0 {
+			score += recoveryTicks * healthRecoveryStep
+		}
+	}
+	if score < 0 {
+		score = 0
+	}
+	if score > healthScoreDefault {
+		score = healthScoreDefault
+	}
+	return score
+}
+
+func healthTier(auth *Auth, model string, now time.Time) int {
+	score := recoveredHealthScore(resolveHealthState(auth, model), now)
+	if score < 0 {
+		return 0
+	}
+	tier := score / 10
+	if tier > 10 {
+		tier = 10
+	}
+	return tier
+}
+
+func effectiveSelectionPriority(auth *Auth, model string, now time.Time) int {
+	return authPriority(auth)*healthPriorityMultiplier + healthTier(auth, model, now)
+}
+
 func canonicalModelKey(model string) string {
 	model = strings.TrimSpace(model)
 	if model == "" {
@@ -219,7 +291,7 @@ func collectAvailableByPriority(auths []*Auth, model string, now time.Time) (ava
 		candidate := auths[i]
 		blocked, reason, next := isAuthBlockedForModel(candidate, model, now)
 		if !blocked {
-			priority := authPriority(candidate)
+			priority := effectiveSelectionPriority(candidate, model, now)
 			available[priority] = append(available[priority], candidate)
 			continue
 		}

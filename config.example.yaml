@@ -109,7 +109,14 @@ quota-exceeded:
 
 # Routing strategy for selecting credentials when multiple match.
 routing:
-  strategy: "round-robin" # round-robin (default), fill-first
+  strategy: "round-robin" # round-robin (default), fill-first, sequential-fill (sf)
+  # Optional: override the strategy for a specific routing group.
+  # The group name comes from a credential's explicit routing-group field,
+  # or falls back to built-in identifiers such as provider prefix / compat name.
+  # group-strategies:
+  #   minimax: "sf"
+  #   kimi: "sf"
+  #   codex: "round-robin"
   # Enable universal session-sticky routing for all clients.
   # Session IDs are extracted from: X-Session-ID header, Idempotency-Key,
   # metadata.user_id, conversation_id, or first few messages hash.
@@ -244,6 +251,7 @@ nonstream-keepalive-interval: 0
 #     api-key-entries:
 #       - api-key: "sk-or-v1-...b780"
 #         proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override
+#         routing-group: "kimi" # optional: route this key through routing.group-strategies["kimi"]
 #         disabled: false # optional: disable this key without removing it
 #         # proxy-url: "direct" # optional: explicit direct connect for this credential
 #       - api-key: "sk-or-v1-...b781" # without proxy-url
@@ -268,6 +276,7 @@ nonstream-keepalive-interval: 0
 # vertex-api-key:
 #   - api-key: "vk-123..."                        # x-goog-api-key header
 #     prefix: "test"                              # optional: require calls like "test/vertex-pro" to target this credential
+#     routing-group: "vertex-fallback"            # optional: route this key through a specific routing group
 #     base-url: "https://example.com/api"         # optional, e.g. https://zenmux.ai/api; falls back to Google Vertex when omitted
 #     proxy-url: "socks5://proxy.example.com:1080" # optional per-key proxy override
 #     # proxy-url: "direct" # optional: explicit direct connect for this credential
