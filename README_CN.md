@@ -184,3 +184,8 @@ QQ 群：188637136
 或
 
 Telegram 群：https://t.me/CLIProxyAPI
+
+
+## OpenClaw
+
+This fork includes an OpenClaw-compatible autonomy layer. See `openclaw/INSTALL_OPENCLAW.md`.
