@@ -6,6 +6,7 @@ package misc
 import (
 	"fmt"
 	"net/http"
+	"os"
 	"runtime"
 	"strings"
 )
@@ -17,10 +18,16 @@ const (
 	// GeminiCLIApiClientHeader is the value for the X-Goog-Api-Client header sent to the Gemini CLI upstream.
 	GeminiCLIApiClientHeader = "google-genai-sdk/1.41.0 gl-node/v22.19.0"
 
-	// CodexCLIUserAgent is the default Codex CLI fingerprint used when no client-specific
-	// User-Agent is available during login or execution.
-	CodexCLIUserAgent = "codex_cli_rs/0.118.0-alpha.4 (Linux; x86_64) xterm-256color"
+	// CodexCLIOriginator is the default Originator header used for Codex upstream requests.
+	CodexCLIOriginator = "codex_cli_rs"
+
+	codexCLIFallbackVersion  = "0.118.0-alpha.4"
+	codexCLIFallbackTerminal = "xterm-256color"
 )
+
+// CodexCLIUserAgent is the default Codex CLI-style fingerprint used when no client-specific
+// User-Agent is available during login or execution.
+var CodexCLIUserAgent = DefaultCodexCLIUserAgent()
 
 // geminiCLIOS maps Go runtime OS names to the Node.js-style platform strings used by Gemini CLI.
 func geminiCLIOS() string {
@@ -51,6 +58,160 @@ func GeminiCLIUserAgent(model string) string {
 		model = "unknown"
 	}
 	return fmt.Sprintf("GeminiCLI/%s/%s (%s; %s)", GeminiCLIVersion, model, geminiCLIOS(), geminiCLIArch())
+}
+
+// DefaultCodexCLIUserAgent returns the fallback Codex CLI-style User-Agent used by
+// the proxy when the downstream request does not provide one.
+func DefaultCodexCLIUserAgent() string {
+	return CodexCLIUserAgentWithOriginator(CodexCLIOriginator)
+}
+
+// CodexCLIUserAgentWithOriginator returns the fallback Codex-style User-Agent for the
+// provided Originator value.
+func CodexCLIUserAgentWithOriginator(originator string) string {
+	if trimmed := strings.TrimSpace(originator); trimmed != "" {
+		originator = trimmed
+	} else {
+		originator = CodexCLIOriginator
+	}
+	return fmt.Sprintf(
+		"%s/%s (%s; %s) %s",
+		originator,
+		codexCLIFallbackVersion,
+		codexCLIOS(),
+		codexCLIArch(),
+		codexTerminal(),
+	)
+}
+
+func codexCLIOS() string {
+	switch runtime.GOOS {
+	case "linux":
+		if distro := codexLinuxOSDescriptor(os.ReadFile); distro != "" {
+			return distro
+		}
+		return "Linux"
+	case "darwin":
+		return "Mac OS"
+	case "windows":
+		return "Windows"
+	default:
+		return runtime.GOOS
+	}
+}
+
+func codexCLIArch() string {
+	switch runtime.GOARCH {
+	case "amd64":
+		return "x86_64"
+	case "386":
+		return "x86"
+	default:
+		return runtime.GOARCH
+	}
+}
+
+func codexTerminal() string {
+	return codexTerminalFromEnv(func(key string) string {
+		return os.Getenv(key)
+	})
+}
+
+func codexTerminalFromEnv(getenv func(string) string) string {
+	if getenv == nil {
+		return codexCLIFallbackTerminal
+	}
+
+	if termProgram := strings.TrimSpace(getenv("TERM_PROGRAM")); termProgram != "" {
+		version := strings.TrimSpace(getenv("TERM_PROGRAM_VERSION"))
+		if version == "" && strings.EqualFold(termProgram, "VTE") {
+			version = strings.TrimSpace(getenv("VTE_VERSION"))
+		}
+		return codexSanitizeTerminalToken(codexFormatTerminalToken(termProgram, version))
+	}
+
+	if vteVersion := strings.TrimSpace(getenv("VTE_VERSION")); vteVersion != "" {
+		return codexSanitizeTerminalToken(codexFormatTerminalToken("VTE", vteVersion))
+	}
+	if term := strings.TrimSpace(getenv("TERM")); term != "" {
+		return codexSanitizeTerminalToken(term)
+	}
+	return codexCLIFallbackTerminal
+}
+
+func codexFormatTerminalToken(name string, version string) string {
+	name = strings.TrimSpace(name)
+	version = strings.TrimSpace(version)
+	if name == "" {
+		return codexCLIFallbackTerminal
+	}
+	if version == "" {
+		return name
+	}
+	return name + "/" + version
+}
+
+func codexSanitizeTerminalToken(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return codexCLIFallbackTerminal
+	}
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z':
+			return r
+		case r >= 'A' && r <= 'Z':
+			return r
+		case r >= '0' && r <= '9':
+			return r
+		case r == '-', r == '_', r == '.', r == '/':
+			return r
+		default:
+			return '_'
+		}
+	}, value)
+}
+
+func codexLinuxOSDescriptor(readFile func(string) ([]byte, error)) string {
+	if readFile == nil {
+		return ""
+	}
+	data, err := readFile("/etc/os-release")
+	if err != nil {
+		return ""
+	}
+
+	values := make(map[string]string)
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if key == "" || value == "" {
+			continue
+		}
+		values[key] = strings.Trim(value, `"'`)
+	}
+
+	name := strings.TrimSpace(values["NAME"])
+	versionID := strings.TrimSpace(values["VERSION_ID"])
+	prettyName := strings.TrimSpace(values["PRETTY_NAME"])
+	switch {
+	case name != "" && versionID != "":
+		return name + " " + versionID
+	case prettyName != "":
+		return prettyName
+	case name != "":
+		return name
+	default:
+		return ""
+	}
 }
 
 // ScrubProxyAndFingerprintHeaders removes all headers that could reveal

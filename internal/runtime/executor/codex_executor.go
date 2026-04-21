@@ -26,13 +26,11 @@ import (
 	"github.com/tiktoken-go/tokenizer"
 
 	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 )
 
-const (
-	codexUserAgent  = misc.CodexCLIUserAgent
-	codexOriginator = "codex_cli_rs"
-)
+var codexUserAgent = misc.CodexCLIUserAgent
+
+const codexOriginator = misc.CodexCLIOriginator
 
 var dataTag = []byte("data:")
 
@@ -343,6 +341,9 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	}
 	httpReq := prepared.httpReq
 	applyCodexHeaders(httpReq, auth, apiKey, true, e.cfg)
+	if err = maybeEnableCodexRequestCompression(httpReq, auth); err != nil {
+		return resp, fmt.Errorf("codex executor: request compression failed: %w", err)
+	}
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -428,6 +429,9 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	}
 	httpReq := prepared.httpReq
 	applyCodexHeaders(httpReq, auth, apiKey, false, e.cfg)
+	if err = maybeEnableCodexRequestCompression(httpReq, auth); err != nil {
+		return resp, fmt.Errorf("codex executor: request compression failed: %w", err)
+	}
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -511,6 +515,9 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		return nil, err
 	}
 	applyCodexHeaders(httpReq, auth, apiKey, true, e.cfg)
+	if err = maybeEnableCodexRequestCompression(httpReq, auth); err != nil {
+		return nil, fmt.Errorf("codex executor: request compression failed: %w", err)
+	}
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -839,18 +846,13 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 		r.Header.Set("X-Codex-Beta-Features", ginHeaders.Get("X-Codex-Beta-Features"))
 	}
 	misc.EnsureHeader(r.Header, ginHeaders, "Version", "")
-	misc.EnsureHeader(r.Header, ginHeaders, "X-Codex-Turn-Metadata", "")
-	misc.EnsureHeader(r.Header, ginHeaders, "X-Client-Request-Id", "")
-	cfgUserAgent, _ := codexHeaderDefaults(cfg, auth)
-	if authUserAgent := codexAuthUserAgent(auth); authUserAgent != "" {
-		r.Header.Set("User-Agent", authUserAgent)
-	} else {
-		ensureHeaderWithConfigPrecedence(r.Header, ginHeaders, "User-Agent", cfgUserAgent, codexUserAgent)
-	}
-
-	if strings.Contains(r.Header.Get("User-Agent"), "Mac OS") {
-		misc.EnsureHeader(r.Header, ginHeaders, "Session_id", uuid.NewString())
-	}
+	codexEnsureTurnMetadataHeader(r.Header, ginHeaders)
+	misc.EnsureHeader(r.Header, ginHeaders, "X-Codex-Turn-State", "")
+	misc.EnsureHeader(r.Header, ginHeaders, "X-OpenAI-Subagent", "")
+	misc.EnsureHeader(r.Header, ginHeaders, "Traceparent", "")
+	misc.EnsureHeader(r.Header, ginHeaders, "Tracestate", "")
+	r.Header.Set("User-Agent", codexResolvedUserAgent(r.Header, ginHeaders, auth, cfg))
+	codexEnsureSessionHeaders(r.Header, ginHeaders, auth)
 
 	if stream {
 		r.Header.Set("Accept", "text/event-stream")
@@ -859,21 +861,13 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 	}
 	r.Header.Set("Connection", "Keep-Alive")
 
-	isAPIKey := false
-	if auth != nil && auth.Attributes != nil {
-		if v := strings.TrimSpace(auth.Attributes["api_key"]); v != "" {
-			isAPIKey = true
-		}
-	}
-	if originator := strings.TrimSpace(ginHeaders.Get("Originator")); originator != "" {
-		r.Header.Set("Originator", originator)
-	} else if !isAPIKey {
-		r.Header.Set("Originator", codexOriginator)
-	}
-	if !isAPIKey {
+	r.Header.Set("Originator", codexResolvedOriginator(r.Header, ginHeaders, auth))
+	if !codexIsAPIKeyAuth(auth) {
 		if auth != nil && auth.Metadata != nil {
 			if accountID, ok := auth.Metadata["account_id"].(string); ok {
-				r.Header.Set("Chatgpt-Account-Id", accountID)
+				if trimmed := strings.TrimSpace(accountID); trimmed != "" {
+					r.Header.Set("Chatgpt-Account-Id", trimmed)
+				}
 			}
 		}
 	}

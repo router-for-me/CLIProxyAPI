@@ -23,6 +23,15 @@ import (
 
 const codexResponseDedupeHashLen = 16
 
+var codexDedupeIgnoredHeaders = map[string]struct{}{
+	"Authorization":                         {},
+	"X-Codex-Turn-Metadata":                 {},
+	"X-Client-Request-Id":                   {},
+	"Traceparent":                           {},
+	"Tracestate":                            {},
+	"X-Responsesapi-Include-Timing-Metrics": {},
+}
+
 type codexPreparedRequest struct {
 	httpReq       *http.Request
 	body          []byte
@@ -298,7 +307,7 @@ func hashCodexDedupeHeaders(headers http.Header) string {
 	keys := make([]string, 0, len(headers))
 	for key := range headers {
 		canonical := http.CanonicalHeaderKey(key)
-		if canonical == "Authorization" || canonical == "X-Client-Request-Id" {
+		if _, ignored := codexDedupeIgnoredHeaders[canonical]; ignored {
 			continue
 		}
 		keys = append(keys, canonical)

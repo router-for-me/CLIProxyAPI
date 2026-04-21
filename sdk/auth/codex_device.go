@@ -272,10 +272,15 @@ func (a *CodexAuthenticator) buildAuthRecord(authSvc *codex.CodexAuth, authBundl
 	}
 
 	fileName := codex.CredentialFileName(tokenStorage.Email, planType, hashAccountID, true)
+	originator := codexLoginOriginator(opts)
+	userAgent := codexLoginUserAgent(opts)
 	metadata := map[string]any{
 		"email": tokenStorage.Email,
 	}
-	if userAgent := codexLoginUserAgent(opts); userAgent != "" {
+	if originator != "" {
+		metadata["originator"] = originator
+	}
+	if userAgent != "" {
 		metadata["user_agent"] = userAgent
 	}
 
@@ -287,7 +292,10 @@ func (a *CodexAuthenticator) buildAuthRecord(authSvc *codex.CodexAuth, authBundl
 	attrs := map[string]string{
 		"plan_type": planType,
 	}
-	if userAgent := codexLoginUserAgent(opts); userAgent != "" {
+	if originator != "" {
+		attrs["header:Originator"] = originator
+	}
+	if userAgent != "" {
 		attrs["header:User-Agent"] = userAgent
 	}
 

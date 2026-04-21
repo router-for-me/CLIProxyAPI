@@ -3,6 +3,7 @@ package executor
 import (
 	"context"
 	"io"
+	"net/http"
 	"net/http/httptest"
 	"testing"
 
@@ -60,5 +61,30 @@ func TestCodexExecutorCacheHelper_OpenAIChatCompletions_StablePromptCacheKeyFrom
 	gotKey2 := gjson.GetBytes(body2, "prompt_cache_key").String()
 	if gotKey2 != expectedKey {
 		t.Fatalf("prompt_cache_key (second call) = %q, want %q", gotKey2, expectedKey)
+	}
+}
+
+func TestHashCodexDedupeHeaders_IgnoresTraceAndTimingHeaders(t *testing.T) {
+	left := http.Header{
+		"Content-Type":                          []string{"application/json"},
+		"X-Codex-Turn-Metadata":                 []string{`{"turn_id":"turn-left","sandbox":"none"}`},
+		"Traceparent":                           []string{"00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01"},
+		"Tracestate":                            []string{"vendor-a=value-a"},
+		"X-Responsesapi-Include-Timing-Metrics": []string{"1"},
+		"X-Client-Request-Id":                   []string{"req-left"},
+	}
+	right := http.Header{
+		"Content-Type":                          []string{"application/json"},
+		"X-Codex-Turn-Metadata":                 []string{`{"turn_id":"turn-right","sandbox":"none"}`},
+		"Traceparent":                           []string{"00-cccccccccccccccccccccccccccccccc-dddddddddddddddd-01"},
+		"Tracestate":                            []string{"vendor-b=value-b"},
+		"X-Responsesapi-Include-Timing-Metrics": []string{"0"},
+		"X-Client-Request-Id":                   []string{"req-right"},
+	}
+
+	leftHash := hashCodexDedupeHeaders(left)
+	rightHash := hashCodexDedupeHeaders(right)
+	if leftHash != rightHash {
+		t.Fatalf("hashCodexDedupeHeaders() mismatch: left=%q right=%q", leftHash, rightHash)
 	}
 }

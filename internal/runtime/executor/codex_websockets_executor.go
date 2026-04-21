@@ -220,7 +220,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		defer sess.reqMu.Unlock()
 	}
 
-	wsReqBody := buildCodexWebsocketRequestBody(body)
+	wsReqBody := buildCodexWebsocketRequestBody(body, wsHeaders.Get("X-Codex-Turn-Metadata"))
 	wsReqLog := helps.UpstreamRequestLog{
 		URL:       wsURL,
 		Method:    "WEBSOCKET",
@@ -280,7 +280,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 			// execution session.
 			connRetry, respHSRetry, errDialRetry := e.ensureUpstreamConn(ctx, auth, sess, authID, wsURL, wsHeaders)
 			if errDialRetry == nil && connRetry != nil {
-				wsReqBodyRetry := buildCodexWebsocketRequestBody(body)
+				wsReqBodyRetry := buildCodexWebsocketRequestBody(body, wsHeaders.Get("X-Codex-Turn-Metadata"))
 				helps.RecordAPIWebsocketRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 					URL:       wsURL,
 					Method:    "WEBSOCKET",
@@ -415,7 +415,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		}
 	}
 
-	wsReqBody := buildCodexWebsocketRequestBody(body)
+	wsReqBody := buildCodexWebsocketRequestBody(body, wsHeaders.Get("X-Codex-Turn-Metadata"))
 	wsReqLog := helps.UpstreamRequestLog{
 		URL:       wsURL,
 		Method:    "WEBSOCKET",
@@ -477,7 +477,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				sess.reqMu.Unlock()
 				return nil, errDialRetry
 			}
-			wsReqBodyRetry := buildCodexWebsocketRequestBody(body)
+			wsReqBodyRetry := buildCodexWebsocketRequestBody(body, wsHeaders.Get("X-Codex-Turn-Metadata"))
 			helps.RecordAPIWebsocketRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 				URL:       wsURL,
 				Method:    "WEBSOCKET",
@@ -648,20 +648,26 @@ func writeCodexWebsocketMessage(sess *codexWebsocketSession, conn *websocket.Con
 	return conn.WriteMessage(websocket.TextMessage, payload)
 }
 
-func buildCodexWebsocketRequestBody(body []byte) []byte {
+func buildCodexWebsocketRequestBody(body []byte, turnMetadataHeader string) []byte {
 	if len(body) == 0 {
-		return nil
+		body = []byte(`{}`)
 	}
 
 	// Match codex-rs websocket v2 semantics: every request is `response.create`.
 	// Incremental follow-up turns continue on the same websocket using
 	// `previous_response_id` + incremental `input`, not `response.append`.
 	wsReqBody, errSet := sjson.SetBytes(bytes.Clone(body), "type", "response.create")
+	if errSet == nil && strings.TrimSpace(turnMetadataHeader) != "" {
+		wsReqBody, errSet = sjson.SetBytes(wsReqBody, "client_metadata.x-codex-turn-metadata", turnMetadataHeader)
+	}
 	if errSet == nil && len(wsReqBody) > 0 {
 		return wsReqBody
 	}
 	fallback := bytes.Clone(body)
 	fallback, _ = sjson.SetBytes(fallback, "type", "response.create")
+	if strings.TrimSpace(turnMetadataHeader) != "" {
+		fallback, _ = sjson.SetBytes(fallback, "client_metadata.x-codex-turn-metadata", turnMetadataHeader)
+	}
 	return fallback
 }
 
@@ -708,6 +714,11 @@ func newProxyAwareWebsocketDialer(cfg *config.Config, auth *cliproxyauth.Auth) *
 			Timeout:   30 * time.Second,
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
+	}
+	if tlsConfig, err := misc.CustomTLSConfigFromEnv(); err != nil {
+		log.Warnf("custom CA disabled for codex websocket dialer: %v", err)
+	} else if tlsConfig != nil {
+		dialer.TLSClientConfig = tlsConfig
 	}
 
 	proxyURL := ""
@@ -827,10 +838,12 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 	_, cfgBetaFeatures := codexHeaderDefaults(cfg, auth)
 	ensureHeaderWithPriority(headers, ginHeaders, "x-codex-beta-features", cfgBetaFeatures, "")
 	misc.EnsureHeader(headers, ginHeaders, "x-codex-turn-state", "")
-	misc.EnsureHeader(headers, ginHeaders, "x-codex-turn-metadata", "")
-	misc.EnsureHeader(headers, ginHeaders, "x-client-request-id", "")
+	codexEnsureTurnMetadataHeader(headers, ginHeaders)
 	misc.EnsureHeader(headers, ginHeaders, "x-responsesapi-include-timing-metrics", "")
 	misc.EnsureHeader(headers, ginHeaders, "Version", "")
+	misc.EnsureHeader(headers, ginHeaders, "x-openai-subagent", "")
+	misc.EnsureHeader(headers, ginHeaders, "traceparent", "")
+	misc.EnsureHeader(headers, ginHeaders, "tracestate", "")
 
 	betaHeader := strings.TrimSpace(headers.Get("OpenAI-Beta"))
 	if betaHeader == "" && ginHeaders != nil {
@@ -840,34 +853,10 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 		betaHeader = codexResponsesWebsocketBetaHeaderValue
 	}
 	headers.Set("OpenAI-Beta", betaHeader)
-	authUserAgent := codexAuthUserAgent(auth)
-	effectiveUserAgent := strings.TrimSpace(headers.Get("User-Agent"))
-	if effectiveUserAgent == "" && ginHeaders != nil {
-		effectiveUserAgent = strings.TrimSpace(ginHeaders.Get("User-Agent"))
-	}
-	if authUserAgent != "" {
-		effectiveUserAgent = authUserAgent
-		headers.Set("User-Agent", authUserAgent)
-	}
-	if strings.Contains(effectiveUserAgent, "Mac OS") {
-		misc.EnsureHeader(headers, ginHeaders, "Session_id", uuid.NewString())
-	}
-	if authUserAgent == "" {
-		headers.Del("User-Agent")
-	}
-
-	isAPIKey := false
-	if auth != nil && auth.Attributes != nil {
-		if v := strings.TrimSpace(auth.Attributes["api_key"]); v != "" {
-			isAPIKey = true
-		}
-	}
-	if originator := strings.TrimSpace(ginHeaders.Get("Originator")); originator != "" {
-		headers.Set("Originator", originator)
-	} else if !isAPIKey {
-		headers.Set("Originator", codexOriginator)
-	}
-	if !isAPIKey {
+	headers.Set("User-Agent", codexResolvedUserAgent(headers, ginHeaders, auth, cfg))
+	codexEnsureSessionHeaders(headers, ginHeaders, auth)
+	headers.Set("Originator", codexResolvedOriginator(headers, ginHeaders, auth))
+	if !codexIsAPIKeyAuth(auth) {
 		if auth != nil && auth.Metadata != nil {
 			if accountID, ok := auth.Metadata["account_id"].(string); ok {
 				if trimmed := strings.TrimSpace(accountID); trimmed != "" {

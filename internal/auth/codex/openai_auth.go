@@ -15,16 +15,18 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	log "github.com/sirupsen/logrus"
 )
 
 // OAuth configuration constants for OpenAI Codex
 const (
-	AuthURL     = "https://auth.openai.com/oauth/authorize"
-	TokenURL    = "https://auth.openai.com/oauth/token"
-	ClientID    = "app_EMoamEEZ73f0CkXaXp7hrann"
-	RedirectURI = "http://localhost:1455/auth/callback"
+	AuthURL          = "https://auth.openai.com/oauth/authorize"
+	TokenURL         = "https://auth.openai.com/oauth/token"
+	ClientID         = "app_EMoamEEZ73f0CkXaXp7hrann"
+	RedirectURI      = "http://localhost:1455/auth/callback"
+	DefaultAuthScope = "openid profile email offline_access api.connectors.read api.connectors.invoke"
 )
 
 // CodexAuth handles the OpenAI OAuth2 authentication flow.
@@ -61,6 +63,12 @@ func NewCodexAuthWithProxyURL(cfg *config.Config, proxyURL string) *CodexAuth {
 // It constructs the URL with the necessary parameters, including the client ID,
 // response type, redirect URI, scopes, and PKCE challenge.
 func (o *CodexAuth) GenerateAuthURL(state string, pkceCodes *PKCECodes) (string, error) {
+	return o.GenerateAuthURLWithOptions(state, pkceCodes, "", "")
+}
+
+// GenerateAuthURLWithOptions creates the OAuth authorization URL with optional
+// latest Codex-specific parameters such as originator and allowed_workspace_id.
+func (o *CodexAuth) GenerateAuthURLWithOptions(state string, pkceCodes *PKCECodes, originator string, allowedWorkspaceID string) (string, error) {
 	if pkceCodes == nil {
 		return "", fmt.Errorf("PKCE codes are required")
 	}
@@ -69,17 +77,28 @@ func (o *CodexAuth) GenerateAuthURL(state string, pkceCodes *PKCECodes) (string,
 		"client_id":                  {ClientID},
 		"response_type":              {"code"},
 		"redirect_uri":               {RedirectURI},
-		"scope":                      {"openid email profile offline_access"},
+		"scope":                      {DefaultAuthScope},
 		"state":                      {state},
 		"code_challenge":             {pkceCodes.CodeChallenge},
 		"code_challenge_method":      {"S256"},
-		"prompt":                     {"login"},
 		"id_token_add_organizations": {"true"},
 		"codex_cli_simplified_flow":  {"true"},
+		"originator":                 {resolvedCodexOAuthOriginator(originator)},
+	}
+	if workspaceID := strings.TrimSpace(allowedWorkspaceID); workspaceID != "" {
+		params.Set("allowed_workspace_id", workspaceID)
 	}
 
 	authURL := fmt.Sprintf("%s?%s", AuthURL, params.Encode())
 	return authURL, nil
+}
+
+func resolvedCodexOAuthOriginator(originator string) string {
+	originator = strings.TrimSpace(originator)
+	if originator != "" {
+		return originator
+	}
+	return misc.CodexCLIOriginator
 }
 
 // ExchangeCodeForTokens exchanges an authorization code for access and refresh tokens.

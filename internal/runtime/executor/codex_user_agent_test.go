@@ -1,11 +1,30 @@
 package executor
 
-import "testing"
+import (
+	"strings"
+	"testing"
 
-func TestCodexDefaultUserAgentMatchesLinuxRelease(t *testing.T) {
-	const want = "codex_cli_rs/0.118.0-alpha.4 (Linux; x86_64) xterm-256color"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+)
 
-	if got := codexUserAgent; got != want {
-		t.Fatalf("codexUserAgent = %q, want %q", got, want)
+func TestCodexDefaultUserAgentUsesDefaultOriginatorIdentity(t *testing.T) {
+	if !strings.HasPrefix(codexUserAgent, codexOriginator+"/") {
+		t.Fatalf("codexUserAgent = %q, want %q prefix", codexUserAgent, codexOriginator+"/")
+	}
+	if !strings.Contains(codexUserAgent, "(") || !strings.Contains(codexUserAgent, ")") {
+		t.Fatalf("codexUserAgent = %q, want platform segment", codexUserAgent)
+	}
+}
+
+func TestCodexResolvedUserAgentFollowsAuthOriginatorFallback(t *testing.T) {
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{
+			"header:Originator": "codex_vscode",
+		},
+	}
+
+	got := codexResolvedUserAgent(nil, nil, auth, nil)
+	if !strings.HasPrefix(got, "codex_vscode/") {
+		t.Fatalf("codexResolvedUserAgent() = %q, want codex_vscode/ prefix", got)
 	}
 }
