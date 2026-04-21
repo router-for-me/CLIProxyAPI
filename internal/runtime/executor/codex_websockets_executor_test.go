@@ -16,7 +16,7 @@ import (
 func TestBuildCodexWebsocketRequestBodyPreservesPreviousResponseID(t *testing.T) {
 	body := []byte(`{"model":"gpt-5-codex","previous_response_id":"resp-1","input":[{"type":"message","id":"msg-1"}]}`)
 
-	wsReqBody := buildCodexWebsocketRequestBody(body)
+	wsReqBody := buildCodexWebsocketRequestBody(body, "")
 
 	if got := gjson.GetBytes(wsReqBody, "type").String(); got != "response.create" {
 		t.Fatalf("type = %s, want response.create", got)
@@ -50,8 +50,12 @@ func TestApplyCodexWebsocketHeadersDefaultsToCurrentResponsesBeta(t *testing.T) 
 	if got := headers.Get("X-Codex-Turn-Metadata"); got != "" {
 		t.Fatalf("X-Codex-Turn-Metadata = %q, want empty", got)
 	}
-	if got := headers.Get("X-Client-Request-Id"); got != "" {
-		t.Fatalf("X-Client-Request-Id = %q, want empty", got)
+	// After aligning with codex-rs we always mirror the Session_id into
+	// X-Client-Request-Id so upstream can correlate traces. When no caller
+	// supplied a Session_id either, the header falls back to a generated UUID
+	// which must match the Session_id value we just wrote out.
+	if got, want := headers.Get("X-Client-Request-Id"), headers.Get("Session_id"); got == "" || got != want {
+		t.Fatalf("X-Client-Request-Id = %q, want non-empty and equal to Session_id=%q", got, want)
 	}
 }
 
@@ -328,6 +332,23 @@ func TestApplyCodexHeadersUsesConfigUserAgentForAPIKeyAuth(t *testing.T) {
 	}
 }
 
+func TestApplyCodexHeadersPassesThroughCallerClientRequestID(t *testing.T) {
+	req, err := http.NewRequest(http.MethodPost, "https://example.com/responses", nil)
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	ctx := contextWithGinHeaders(map[string]string{
+		"X-Client-Request-Id": "caller-trace-7",
+	})
+	req = req.WithContext(ctx)
+
+	applyCodexHeaders(req, nil, "oauth-token", false, nil)
+
+	if got := req.Header.Get("X-Client-Request-Id"); got != "caller-trace-7" {
+		t.Fatalf("X-Client-Request-Id = %q, want caller-trace-7", got)
+	}
+}
+
 func TestApplyCodexHeadersDoesNotInjectClientOnlyHeadersByDefault(t *testing.T) {
 	req, err := http.NewRequest(http.MethodPost, "https://example.com/responses", nil)
 	if err != nil {
@@ -342,8 +363,12 @@ func TestApplyCodexHeadersDoesNotInjectClientOnlyHeadersByDefault(t *testing.T) 
 	if got := req.Header.Get("X-Codex-Turn-Metadata"); got != "" {
 		t.Fatalf("X-Codex-Turn-Metadata = %q, want empty", got)
 	}
-	if got := req.Header.Get("X-Client-Request-Id"); got != "" {
-		t.Fatalf("X-Client-Request-Id = %q, want empty", got)
+	// Aligning with codex-rs, we always attach X-Client-Request-Id set to the
+	// Session_id value (which will be minted as a UUID when neither caller nor
+	// cache provides one). The header must never be left empty because
+	// upstream relies on it for turn-level trace correlation.
+	if got, want := req.Header.Get("X-Client-Request-Id"), req.Header.Get("Session_id"); got == "" || got != want {
+		t.Fatalf("X-Client-Request-Id = %q, want non-empty and equal to Session_id=%q", got, want)
 	}
 }
 
@@ -369,5 +394,54 @@ func TestNewProxyAwareWebsocketDialerDirectDisablesProxy(t *testing.T) {
 
 	if dialer.Proxy != nil {
 		t.Fatal("expected websocket proxy function to be nil for direct mode")
+	}
+}
+
+func TestBuildCodexWebsocketRequestBodyInjectsClientMetadataFromTurnMetadata(t *testing.T) {
+	body := []byte(`{"model":"gpt-5-codex","input":[{"type":"message","id":"msg-1"}]}`)
+
+	out := buildCodexWebsocketRequestBody(body, "trace-xyz")
+
+	if got := gjson.GetBytes(out, "client_metadata.x-codex-turn-metadata").String(); got != "trace-xyz" {
+		t.Fatalf("client_metadata.x-codex-turn-metadata = %q, want trace-xyz", got)
+	}
+	if got := gjson.GetBytes(out, "type").String(); got != "response.create" {
+		t.Fatalf("type = %q, want response.create", got)
+	}
+}
+
+func TestBuildCodexWebsocketRequestBodyOmitsClientMetadataWhenTurnMetadataEmpty(t *testing.T) {
+	body := []byte(`{"model":"gpt-5-codex","input":[{"type":"message","id":"msg-1"}]}`)
+
+	out := buildCodexWebsocketRequestBody(body, "   ")
+
+	if gjson.GetBytes(out, "client_metadata").Exists() {
+		t.Fatalf("client_metadata should be omitted when turn metadata is empty; got %s", string(out))
+	}
+}
+
+func TestCodexWebsocketTurnMetadataReadsBothCasings(t *testing.T) {
+	h := http.Header{}
+	h.Set("X-Codex-Turn-Metadata", "canonical")
+	if got := codexWebsocketTurnMetadata(h); got != "canonical" {
+		t.Fatalf("canonical casing = %q, want canonical", got)
+	}
+
+	h2 := http.Header{}
+	h2["x-codex-turn-metadata"] = []string{"lowercase"}
+	if got := codexWebsocketTurnMetadata(h2); got != "lowercase" {
+		t.Fatalf("lowercase casing = %q, want lowercase", got)
+	}
+}
+
+func TestApplyCodexWebsocketHeadersMirrorsClientSuppliedRequestID(t *testing.T) {
+	ctx := contextWithGinHeaders(map[string]string{
+		"x-client-request-id": "caller-trace-42",
+	})
+
+	headers := applyCodexWebsocketHeaders(ctx, http.Header{}, nil, "", nil)
+
+	if got := headers.Get("x-client-request-id"); got != "caller-trace-42" {
+		t.Fatalf("x-client-request-id = %q, want caller-trace-42", got)
 	}
 }

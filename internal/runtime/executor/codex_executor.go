@@ -567,13 +567,15 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		}()
 		var param any
 		streamState := newCodexStreamCompletionState()
+		terminalFailure := false
 		errRead := helps.ReadStreamLines(httpResp.Body, func(line []byte) error {
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 
 			if bytes.HasPrefix(line, dataTag) {
 				data := bytes.TrimSpace(line[5:])
 				streamState.recordEvent(data)
-				if gjson.GetBytes(data, "type").String() == "response.completed" {
+				switch gjson.GetBytes(data, "type").String() {
+				case "response.completed":
 					if detail, ok := helps.ParseCodexUsage(data); ok {
 						reporter.Publish(ctx, detail)
 					}
@@ -588,6 +590,24 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 						line = append(append([]byte{}, dataTag...), ' ')
 						line = append(line, data...)
 					}
+				case "response.incomplete":
+					// Mirror codex-rs: treat response.incomplete as a terminal
+					// failure for telemetry purposes, but keep forwarding the
+					// event to the downstream client so SDKs relying on it for
+					// signalling (rate limits, safety stops, etc.) still work.
+					reason := gjson.GetBytes(data, "response.incomplete_details.reason").String()
+					if reason == "" {
+						reason = "unknown"
+					}
+					log.Warnf("codex stream terminated with response.incomplete: reason=%s", reason)
+					terminalFailure = true
+				case "response.failed":
+					message := gjson.GetBytes(data, "response.error.message").String()
+					if message == "" {
+						message = "response.failed"
+					}
+					log.Warnf("codex stream terminated with response.failed: %s", message)
+					terminalFailure = true
 				}
 			}
 
@@ -601,6 +621,8 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			helps.RecordAPIResponseError(ctx, e.cfg, errRead)
 			reporter.PublishFailure(ctx)
 			out <- cliproxyexecutor.StreamChunk{Err: errRead}
+		} else if terminalFailure {
+			reporter.PublishFailure(ctx)
 		}
 		reporter.EnsurePublished(ctx)
 	}()
@@ -856,7 +878,6 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 	misc.EnsureHeader(r.Header, ginHeaders, "Version", "")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Codex-Turn-State", "")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Codex-Turn-Metadata", "")
-	misc.EnsureHeader(r.Header, ginHeaders, "X-Client-Request-Id", "")
 	cfgUserAgent, _ := codexHeaderDefaults(cfg, auth)
 	if authUserAgent := codexAuthUserAgent(auth); authUserAgent != "" {
 		r.Header.Set("User-Agent", authUserAgent)
@@ -877,6 +898,17 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 			r.Header.Set("Session_id", v)
 		} else {
 			r.Header.Set("Session_id", uuid.NewString())
+		}
+	}
+
+	// Align with codex-rs: attach x-client-request-id mirroring the
+	// conversation id so upstream traces can correlate turns to a session.
+	// Caller-supplied value always wins; otherwise we mirror Session_id.
+	if strings.TrimSpace(r.Header.Get("X-Client-Request-Id")) == "" {
+		if v := strings.TrimSpace(ginHeaders.Get("X-Client-Request-Id")); v != "" {
+			r.Header.Set("X-Client-Request-Id", v)
+		} else if v := strings.TrimSpace(r.Header.Get("Session_id")); v != "" {
+			r.Header.Set("X-Client-Request-Id", v)
 		}
 	}
 

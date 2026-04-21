@@ -1,9 +1,11 @@
 package executor
 
 import (
+	"bytes"
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -149,5 +151,39 @@ func TestCodexExecutorCompactDedupeSeparatesPromptCacheKeys(t *testing.T) {
 	}
 	if upstreamCalls.Load() != 2 {
 		t.Fatalf("upstream calls = %d, want 2", upstreamCalls.Load())
+	}
+}
+
+func TestCollectCodexResponseAggregateDoesNotCaptureIncompleteAsCompleted(t *testing.T) {
+	sse := strings.Join([]string{
+		"data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\"}}",
+		"",
+		"data: {\"type\":\"response.incomplete\",\"response\":{\"id\":\"resp_1\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"}}}",
+		"",
+	}, "\n") + "\n"
+
+	got, err := collectCodexResponseAggregate(bytes.NewBufferString(sse), false)
+	if err != nil {
+		t.Fatalf("collectCodexResponseAggregate error: %v", err)
+	}
+	if len(got.completedData) != 0 {
+		t.Fatalf("completedData must be empty on response.incomplete; got %q", string(got.completedData))
+	}
+}
+
+func TestCollectCodexResponseAggregateDoesNotCaptureFailedAsCompleted(t *testing.T) {
+	sse := strings.Join([]string{
+		"data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\"}}",
+		"",
+		"data: {\"type\":\"response.failed\",\"response\":{\"id\":\"resp_1\",\"error\":{\"message\":\"server overloaded\"}}}",
+		"",
+	}, "\n") + "\n"
+
+	got, err := collectCodexResponseAggregate(bytes.NewBufferString(sse), false)
+	if err != nil {
+		t.Fatalf("collectCodexResponseAggregate error: %v", err)
+	}
+	if len(got.completedData) != 0 {
+		t.Fatalf("completedData must be empty on response.failed; got %q", string(got.completedData))
 	}
 }

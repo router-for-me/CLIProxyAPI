@@ -220,7 +220,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		defer sess.reqMu.Unlock()
 	}
 
-	wsReqBody := buildCodexWebsocketRequestBody(body)
+	wsReqBody := buildCodexWebsocketRequestBody(body, codexWebsocketTurnMetadata(wsHeaders))
 	wsReqLog := helps.UpstreamRequestLog{
 		URL:       wsURL,
 		Method:    "WEBSOCKET",
@@ -281,7 +281,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 			// execution session.
 			connRetry, respHSRetry, errDialRetry := e.ensureUpstreamConn(ctx, auth, sess, authID, wsURL, wsHeaders)
 			if errDialRetry == nil && connRetry != nil {
-				wsReqBodyRetry := buildCodexWebsocketRequestBody(body)
+				wsReqBodyRetry := buildCodexWebsocketRequestBody(body, codexWebsocketTurnMetadata(wsHeaders))
 				helps.RecordAPIWebsocketRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 					URL:       wsURL,
 					Method:    "WEBSOCKET",
@@ -417,7 +417,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		}
 	}
 
-	wsReqBody := buildCodexWebsocketRequestBody(body)
+	wsReqBody := buildCodexWebsocketRequestBody(body, codexWebsocketTurnMetadata(wsHeaders))
 	wsReqLog := helps.UpstreamRequestLog{
 		URL:       wsURL,
 		Method:    "WEBSOCKET",
@@ -480,7 +480,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				sess.reqMu.Unlock()
 				return nil, errDialRetry
 			}
-			wsReqBodyRetry := buildCodexWebsocketRequestBody(body)
+			wsReqBodyRetry := buildCodexWebsocketRequestBody(body, codexWebsocketTurnMetadata(wsHeaders))
 			helps.RecordAPIWebsocketRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 				URL:       wsURL,
 				Method:    "WEBSOCKET",
@@ -651,7 +651,7 @@ func writeCodexWebsocketMessage(sess *codexWebsocketSession, conn *websocket.Con
 	return conn.WriteMessage(websocket.TextMessage, payload)
 }
 
-func buildCodexWebsocketRequestBody(body []byte) []byte {
+func buildCodexWebsocketRequestBody(body []byte, turnMetadata string) []byte {
 	if len(body) == 0 {
 		return nil
 	}
@@ -660,12 +660,52 @@ func buildCodexWebsocketRequestBody(body []byte) []byte {
 	// Incremental follow-up turns continue on the same websocket using
 	// `previous_response_id` + incremental `input`, not `response.append`.
 	wsReqBody, errSet := sjson.SetBytes(bytes.Clone(body), "type", "response.create")
-	if errSet == nil && len(wsReqBody) > 0 {
-		return wsReqBody
+	if errSet != nil || len(wsReqBody) == 0 {
+		wsReqBody = bytes.Clone(body)
+		wsReqBody, _ = sjson.SetBytes(wsReqBody, "type", "response.create")
 	}
-	fallback := bytes.Clone(body)
-	fallback, _ = sjson.SetBytes(fallback, "type", "response.create")
-	return fallback
+
+	// Mirror codex-rs `build_ws_client_metadata`: when the turn carries a
+	// turn-metadata header we expose the same value inside the websocket
+	// payload as `client_metadata["x-codex-turn-metadata"]`. This is an
+	// additive side-channel required by the upstream server to route/trace
+	// per-turn observability data alongside the regular headers.
+	if trimmed := strings.TrimSpace(turnMetadata); trimmed != "" {
+		// Preserve any caller-supplied entries under client_metadata by writing
+		// to the specific key rather than replacing the whole object.
+		if updated, errMeta := sjson.SetBytes(wsReqBody, "client_metadata.x-codex-turn-metadata", trimmed); errMeta == nil && len(updated) > 0 {
+			wsReqBody = updated
+		}
+	}
+	return wsReqBody
+}
+
+// codexWebsocketTurnMetadata extracts the x-codex-turn-metadata value from
+// the headers we are about to send with the websocket handshake. Returning a
+// trimmed string keeps the zero-value path a no-op for buildCodexWebsocketRequestBody.
+func codexWebsocketTurnMetadata(headers http.Header) string {
+	if headers == nil {
+		return ""
+	}
+	// http.Header.Get canonicalizes the key, which handles the usual path
+	// where the header was written via Set/Add. But some call sites insert
+	// headers by direct map assignment with the lower-case key used on the
+	// wire; those entries never match a canonical Get, so we iterate as a
+	// fallback to handle both forms uniformly.
+	if v := strings.TrimSpace(headers.Get("X-Codex-Turn-Metadata")); v != "" {
+		return v
+	}
+	for key, values := range headers {
+		if !strings.EqualFold(key, "x-codex-turn-metadata") {
+			continue
+		}
+		for _, v := range values {
+			if trimmed := strings.TrimSpace(v); trimmed != "" {
+				return trimmed
+			}
+		}
+	}
+	return ""
 }
 
 func readCodexWebsocketMessage(ctx context.Context, sess *codexWebsocketSession, conn *websocket.Conn, readCh chan codexWebsocketRead) (int, []byte, error) {
@@ -838,7 +878,6 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 	ensureHeaderWithPriority(headers, ginHeaders, "x-codex-beta-features", cfgBetaFeatures, "")
 	misc.EnsureHeader(headers, ginHeaders, "x-codex-turn-state", "")
 	misc.EnsureHeader(headers, ginHeaders, "x-codex-turn-metadata", "")
-	misc.EnsureHeader(headers, ginHeaders, "x-client-request-id", "")
 	misc.EnsureHeader(headers, ginHeaders, "x-responsesapi-include-timing-metrics", "")
 	misc.EnsureHeader(headers, ginHeaders, "Version", "")
 
@@ -874,6 +913,20 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 			headers.Set("Session_id", v)
 		} else {
 			headers.Set("Session_id", uuid.NewString())
+		}
+	}
+	// Mirror codex-rs: attach x-client-request-id (the conversation id) on every
+	// turn so upstream can correlate traces. Caller-supplied value always wins.
+	if strings.TrimSpace(headers.Get("x-client-request-id")) == "" {
+		if ginHeaders != nil {
+			if v := strings.TrimSpace(ginHeaders.Get("x-client-request-id")); v != "" {
+				headers.Set("x-client-request-id", v)
+			}
+		}
+	}
+	if strings.TrimSpace(headers.Get("x-client-request-id")) == "" {
+		if v := strings.TrimSpace(headers.Get("Session_id")); v != "" {
+			headers.Set("x-client-request-id", v)
 		}
 	}
 	if authUserAgent == "" {

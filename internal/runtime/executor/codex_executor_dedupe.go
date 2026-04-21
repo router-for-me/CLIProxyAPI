@@ -427,8 +427,24 @@ func collectCodexResponseAggregate(body io.Reader, captureBody bool) (codexNonSt
 
 		eventData := bytes.TrimSpace(line[len(dataTag):])
 		streamState.recordEvent(eventData)
-		if gjson.GetBytes(eventData, "type").String() == "response.completed" {
+		switch gjson.GetBytes(eventData, "type").String() {
+		case "response.completed":
 			result.completedData = bytes.Clone(eventData)
+		case "response.incomplete":
+			// Upstream signalled the turn stopped before completion. We do not
+			// treat this as success: leave completedData unset so downstream
+			// logic surfaces an error instead of replaying a partial payload.
+			reason := gjson.GetBytes(eventData, "response.incomplete_details.reason").String()
+			if reason == "" {
+				reason = "unknown"
+			}
+			log.Warnf("codex aggregate terminated with response.incomplete: reason=%s", reason)
+		case "response.failed":
+			message := gjson.GetBytes(eventData, "response.error.message").String()
+			if message == "" {
+				message = "response.failed"
+			}
+			log.Warnf("codex aggregate terminated with response.failed: %s", message)
 		}
 		return nil
 	})
