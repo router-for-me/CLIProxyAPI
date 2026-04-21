@@ -230,7 +230,7 @@ func TestApplyAPICallDefaultHeadersUsesCodexConfigUserAgent(t *testing.T) {
 	}
 }
 
-func TestApplyAPICallDefaultHeadersUsesAuthCodexUserAgentBeforeConfig(t *testing.T) {
+func TestApplyAPICallDefaultHeadersUsesCodexConfigUserAgentBeforeAuth(t *testing.T) {
 	t.Parallel()
 
 	h := &Handler{
@@ -250,8 +250,8 @@ func TestApplyAPICallDefaultHeadersUsesAuthCodexUserAgentBeforeConfig(t *testing
 
 	h.applyAPICallDefaultHeaders(headers, auth, "")
 
-	if got := headers["User-Agent"]; got != "auth-file-ua" {
-		t.Fatalf("User-Agent = %q, want %q", got, "auth-file-ua")
+	if got := headers["User-Agent"]; got != "codex-config-ua" {
+		t.Fatalf("User-Agent = %q, want %q", got, "codex-config-ua")
 	}
 }
 

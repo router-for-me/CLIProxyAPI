@@ -265,9 +265,12 @@ func (h *Handler) applyAPICallDefaultHeaders(headers map[string]string, auth *co
 
 	switch resolveAPICallProvider(auth, providerHint) {
 	case "codex":
-		userAgent := authFileUserAgent(auth)
-		if userAgent == "" && h != nil && h.cfg != nil {
+		userAgent := ""
+		if h != nil && h.cfg != nil {
 			userAgent = strings.TrimSpace(h.cfg.CodexHeaderDefaults.UserAgent)
+		}
+		if userAgent == "" {
+			userAgent = authFileUserAgent(auth)
 		}
 		if userAgent != "" {
 			headers["User-Agent"] = userAgent

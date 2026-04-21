@@ -871,6 +871,9 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(&http.Request{Header: headers}, attrs)
+	if cfgUserAgent := codexConfiguredUserAgent(cfg, auth); cfgUserAgent != "" {
+		headers.Set("User-Agent", cfgUserAgent)
+	}
 
 	return headers
 }

@@ -19,6 +19,9 @@ func codexIsAPIKeyAuth(auth *cliproxyauth.Auth) bool {
 }
 
 func codexResolvedUserAgent(target http.Header, source http.Header, auth *cliproxyauth.Auth, cfg *config.Config) string {
+	if cfgUserAgent := codexConfiguredUserAgent(cfg, auth); cfgUserAgent != "" {
+		return cfgUserAgent
+	}
 	if authUserAgent := codexAuthUserAgent(auth); authUserAgent != "" {
 		return authUserAgent
 	}
@@ -27,16 +30,17 @@ func codexResolvedUserAgent(target http.Header, source http.Header, auth *clipro
 			return userAgent
 		}
 	}
-	cfgUserAgent, _ := codexHeaderDefaults(cfg, auth)
-	if cfgUserAgent != "" {
-		return cfgUserAgent
-	}
 	if source != nil {
 		if userAgent := strings.TrimSpace(source.Get("User-Agent")); userAgent != "" {
 			return userAgent
 		}
 	}
 	return misc.CodexCLIUserAgentWithOriginator(codexResolvedOriginator(target, source, auth))
+}
+
+func codexConfiguredUserAgent(cfg *config.Config, auth *cliproxyauth.Auth) string {
+	userAgent, _ := codexHeaderDefaults(cfg, auth)
+	return userAgent
 }
 
 func codexResolvedOriginator(target http.Header, source http.Header, auth *cliproxyauth.Auth) string {

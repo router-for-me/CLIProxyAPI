@@ -155,7 +155,7 @@ func TestApplyCodexWebsocketHeadersUsesConfigDefaultsForOAuth(t *testing.T) {
 	}
 }
 
-func TestApplyCodexWebsocketHeadersPrefersExistingHeadersOverClientAndConfig(t *testing.T) {
+func TestApplyCodexWebsocketHeadersConfigUserAgentOverridesExistingHeader(t *testing.T) {
 	cfg := &config.Config{
 		CodexHeaderDefaults: config.CodexHeaderDefaults{
 			UserAgent:    "config-ua",
@@ -176,8 +176,8 @@ func TestApplyCodexWebsocketHeadersPrefersExistingHeadersOverClientAndConfig(t *
 
 	got := applyCodexWebsocketHeaders(ctx, headers, auth, "", cfg)
 
-	if gotVal := got.Get("User-Agent"); gotVal != "existing-ua" {
-		t.Fatalf("User-Agent = %s, want %s", gotVal, "existing-ua")
+	if gotVal := got.Get("User-Agent"); gotVal != "config-ua" {
+		t.Fatalf("User-Agent = %s, want %s", gotVal, "config-ua")
 	}
 	if gotVal := got.Get("x-codex-beta-features"); gotVal != "existing-beta" {
 		t.Fatalf("x-codex-beta-features = %s, want %s", gotVal, "existing-beta")
@@ -210,7 +210,7 @@ func TestApplyCodexWebsocketHeadersConfigUserAgentOverridesClientHeader(t *testi
 	}
 }
 
-func TestApplyCodexWebsocketHeadersAuthFileUserAgentOverridesExistingClientAndConfig(t *testing.T) {
+func TestApplyCodexWebsocketHeadersConfigUserAgentOverridesAuthFileAndClient(t *testing.T) {
 	cfg := &config.Config{
 		CodexHeaderDefaults: config.CodexHeaderDefaults{
 			UserAgent:    "config-ua",
@@ -232,8 +232,8 @@ func TestApplyCodexWebsocketHeadersAuthFileUserAgentOverridesExistingClientAndCo
 
 	got := applyCodexWebsocketHeaders(ctx, headers, auth, "", cfg)
 
-	if gotVal := got.Get("User-Agent"); gotVal != "auth-file-ua" {
-		t.Fatalf("User-Agent = %s, want %s", gotVal, "auth-file-ua")
+	if gotVal := got.Get("User-Agent"); gotVal != "config-ua" {
+		t.Fatalf("User-Agent = %s, want %s", gotVal, "config-ua")
 	}
 }
 
@@ -357,7 +357,7 @@ func TestApplyCodexHeadersUsesDerivedSessionHeadersWithoutForwardingConversation
 	}
 }
 
-func TestApplyCodexHeadersAuthFileUserAgentOverridesExistingClientAndConfig(t *testing.T) {
+func TestApplyCodexHeadersConfigUserAgentOverridesAuthFileAndClient(t *testing.T) {
 	req, err := http.NewRequest(http.MethodPost, "https://example.com/responses", nil)
 	if err != nil {
 		t.Fatalf("NewRequest() error = %v", err)
@@ -382,8 +382,8 @@ func TestApplyCodexHeadersAuthFileUserAgentOverridesExistingClientAndConfig(t *t
 
 	applyCodexHeaders(req, auth, "oauth-token", true, cfg)
 
-	if got := req.Header.Get("User-Agent"); got != "auth-file-ua" {
-		t.Fatalf("User-Agent = %s, want %s", got, "auth-file-ua")
+	if got := req.Header.Get("User-Agent"); got != "config-ua" {
+		t.Fatalf("User-Agent = %s, want %s", got, "config-ua")
 	}
 }
 

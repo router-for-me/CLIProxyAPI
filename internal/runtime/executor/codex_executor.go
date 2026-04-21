@@ -876,6 +876,9 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(r, attrs)
+	if cfgUserAgent := codexConfiguredUserAgent(cfg, auth); cfgUserAgent != "" {
+		r.Header.Set("User-Agent", cfgUserAgent)
+	}
 }
 
 func codexAuthUserAgent(auth *cliproxyauth.Auth) string {

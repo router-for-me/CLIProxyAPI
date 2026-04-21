@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
@@ -26,5 +27,24 @@ func TestCodexResolvedUserAgentFollowsAuthOriginatorFallback(t *testing.T) {
 	got := codexResolvedUserAgent(nil, nil, auth, nil)
 	if !strings.HasPrefix(got, "codex_vscode/") {
 		t.Fatalf("codexResolvedUserAgent() = %q, want codex_vscode/ prefix", got)
+	}
+}
+
+func TestCodexResolvedUserAgentPrefersConfiguredUserAgent(t *testing.T) {
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{
+			"header:User-Agent": "auth-file-ua",
+			"header:Originator": "codex_vscode",
+		},
+	}
+	cfg := &config.Config{
+		CodexHeaderDefaults: config.CodexHeaderDefaults{
+			UserAgent: "config-ua",
+		},
+	}
+
+	got := codexResolvedUserAgent(nil, nil, auth, cfg)
+	if got != "config-ua" {
+		t.Fatalf("codexResolvedUserAgent() = %q, want %q", got, "config-ua")
 	}
 }
