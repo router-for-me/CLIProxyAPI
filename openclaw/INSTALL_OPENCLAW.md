@@ -47,3 +47,25 @@ This installs the skill into:
 
 Keep service code/config in this repository.
 Keep local runbooks / scripts / cron wiring in your OpenClaw workspace.
+
+
+## Sync fork with upstream
+
+This fork keeps OpenClaw-specific autonomy files while tracking upstream service updates.
+
+Use:
+
+```bash
+bash scripts/sync_upstream.sh
+```
+
+Behavior:
+- fetch `upstream` and `origin`
+- merge `upstream/main` into local `main`
+- push the merged result back to `origin/main`
+
+If you only want a local dry run without push:
+
+```bash
+PUSH=0 bash scripts/sync_upstream.sh
+```

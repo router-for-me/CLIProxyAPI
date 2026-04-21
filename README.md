@@ -215,3 +215,6 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## OpenClaw
 
 This fork includes an OpenClaw-compatible autonomy layer. See `openclaw/INSTALL_OPENCLAW.md`.
+
+
+Fork maintenance: use `bash scripts/sync_upstream.sh` to keep this fork aligned with upstream while preserving the OpenClaw layer.
