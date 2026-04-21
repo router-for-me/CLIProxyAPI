@@ -211,11 +211,68 @@ func TestConvertOpenAIResponsesRequestToCodex_OriginalIssue(t *testing.T) {
 		t.Error("parallel_tool_calls should be true")
 	}
 
+	// Align with codex-rs: without a reasoning block, include MUST NOT be set.
 	include := gjson.Get(outputStr, "include")
-	if !include.IsArray() || len(include.Array()) != 1 {
-		t.Error("include should be an array with one element")
-	} else if include.Array()[0].String() != "reasoning.encrypted_content" {
-		t.Errorf("Expected include[0] to be 'reasoning.encrypted_content', got '%s'", include.Array()[0].String())
+	if include.Exists() {
+		t.Errorf("include should not be set when reasoning is absent, got: %s", include.Raw)
+	}
+}
+
+// TestConvertOpenAIResponsesRequestToCodex_IncludeOnlyWithReasoning verifies
+// that include=["reasoning.encrypted_content"] is injected when (and only when)
+// the request carries a reasoning block, matching codex-rs client behavior.
+func TestConvertOpenAIResponsesRequestToCodex_IncludeOnlyWithReasoning(t *testing.T) {
+	withReasoning := []byte(`{
+		"model": "gpt-5.2",
+		"reasoning": {"effort": "high"},
+		"input": [{"role":"user","content":"hi"}]
+	}`)
+	out := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", withReasoning, false)
+	include := gjson.GetBytes(out, "include")
+	if !include.IsArray() || len(include.Array()) != 1 || include.Array()[0].String() != "reasoning.encrypted_content" {
+		t.Fatalf("expected include=[reasoning.encrypted_content] when reasoning present, got: %s", include.Raw)
+	}
+
+	withoutReasoning := []byte(`{
+		"model": "gpt-5.2",
+		"input": [{"role":"user","content":"hi"}]
+	}`)
+	out = ConvertOpenAIResponsesRequestToCodex("gpt-5.2", withoutReasoning, false)
+	if gjson.GetBytes(out, "include").Exists() {
+		t.Fatalf("include should be absent when reasoning is missing, got: %s", string(out))
+	}
+
+	// Caller-provided include must be preserved verbatim when reasoning exists.
+	callerInclude := []byte(`{
+		"model": "gpt-5.2",
+		"reasoning": {"effort": "high"},
+		"include": ["reasoning.encrypted_content","other.field"],
+		"input": [{"role":"user","content":"hi"}]
+	}`)
+	out = ConvertOpenAIResponsesRequestToCodex("gpt-5.2", callerInclude, false)
+	arr := gjson.GetBytes(out, "include").Array()
+	if len(arr) != 2 || arr[1].String() != "other.field" {
+		t.Fatalf("caller-supplied include should be preserved, got: %s", string(out))
+	}
+}
+
+// TestConvertOpenAIResponsesRequestToCodex_ServiceTierPassthrough verifies that
+// we no longer drop non-"priority" service_tier values. codex-rs accepts the
+// full ServiceTier enum, so the proxy must pass through whatever the caller
+// sent.
+func TestConvertOpenAIResponsesRequestToCodex_ServiceTierPassthrough(t *testing.T) {
+	cases := []string{"auto", "default", "flex", "priority", "scale"}
+	for _, tier := range cases {
+		inputJSON := []byte(`{
+			"model": "gpt-5.2",
+			"service_tier": "` + tier + `",
+			"input": [{"role":"user","content":"hi"}]
+		}`)
+		out := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
+		got := gjson.GetBytes(out, "service_tier").String()
+		if got != tier {
+			t.Errorf("service_tier=%q was changed to %q (want passthrough)", tier, got)
+		}
 	}
 }
 

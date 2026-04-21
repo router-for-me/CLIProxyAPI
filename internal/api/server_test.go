@@ -47,6 +47,38 @@ func newTestServer(t *testing.T) *Server {
 	return NewServer(cfg, authManager, accessManager, configPath)
 }
 
+func newManagementTestServer(t *testing.T) *Server {
+	t.Helper()
+
+	gin.SetMode(gin.TestMode)
+
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if err := os.MkdirAll(authDir, 0o700); err != nil {
+		t.Fatalf("failed to create auth dir: %v", err)
+	}
+
+	cfg := &proxyconfig.Config{
+		SDKConfig: sdkconfig.SDKConfig{
+			APIKeys: []string{"test-key"},
+		},
+		Port:                   0,
+		AuthDir:                authDir,
+		Debug:                  true,
+		LoggingToFile:          false,
+		UsageStatisticsEnabled: false,
+		RemoteManagement: proxyconfig.RemoteManagement{
+			SecretKey: "test-secret",
+		},
+	}
+
+	authManager := auth.NewManager(nil, nil, nil)
+	accessManager := sdkaccess.NewManager()
+
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	return NewServer(cfg, authManager, accessManager, configPath)
+}
+
 func TestHealthz(t *testing.T) {
 	server := newTestServer(t)
 
@@ -66,6 +98,74 @@ func TestHealthz(t *testing.T) {
 	}
 	if resp.Status != "ok" {
 		t.Fatalf("unexpected response status: got %q want %q", resp.Status, "ok")
+	}
+}
+
+func TestNewServer_ConfiguresInboundHTTPServerLimits(t *testing.T) {
+	server := newTestServer(t)
+
+	if server.server == nil {
+		t.Fatal("expected underlying http server to be initialized")
+	}
+	if server.server.ReadHeaderTimeout != inboundReadHeaderTimeout {
+		t.Fatalf("unexpected ReadHeaderTimeout: got %s want %s", server.server.ReadHeaderTimeout, inboundReadHeaderTimeout)
+	}
+	if server.server.IdleTimeout != inboundIdleTimeout {
+		t.Fatalf("unexpected IdleTimeout: got %s want %s", server.server.IdleTimeout, inboundIdleTimeout)
+	}
+	if server.server.MaxHeaderBytes != inboundMaxHeaderBytes {
+		t.Fatalf("unexpected MaxHeaderBytes: got %d want %d", server.server.MaxHeaderBytes, inboundMaxHeaderBytes)
+	}
+}
+
+func TestPublicCORSOptions_UsesExplicitHeaders(t *testing.T) {
+	server := newTestServer(t)
+
+	req := httptest.NewRequest(http.MethodOptions, "/v1/models", nil)
+	req.Header.Set("Origin", "https://example.com")
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("unexpected status code: got %d want %d", rr.Code, http.StatusNoContent)
+	}
+	if rr.Header().Get("Access-Control-Allow-Origin") != "*" {
+		t.Fatalf("unexpected allow origin: got %q want %q", rr.Header().Get("Access-Control-Allow-Origin"), "*")
+	}
+	if got := rr.Header().Get("Access-Control-Allow-Headers"); got != corsAllowedHeaders {
+		t.Fatalf("unexpected allow headers: got %q want %q", got, corsAllowedHeaders)
+	}
+}
+
+func TestManagementCORSOptions_Denied(t *testing.T) {
+	server := newManagementTestServer(t)
+
+	req := httptest.NewRequest(http.MethodOptions, "/v0/management/config", nil)
+	req.Header.Set("Origin", "https://evil.example")
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("unexpected status code: got %d want %d", rr.Code, http.StatusForbidden)
+	}
+	if rr.Header().Get("Access-Control-Allow-Origin") != "" {
+		t.Fatalf("expected empty allow origin, got %q", rr.Header().Get("Access-Control-Allow-Origin"))
+	}
+}
+
+func TestManagementHTMLCORSOptions_Denied(t *testing.T) {
+	server := newTestServer(t)
+
+	req := httptest.NewRequest(http.MethodOptions, "/management.html", nil)
+	req.Header.Set("Origin", "https://evil.example")
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("unexpected status code: got %d want %d", rr.Code, http.StatusForbidden)
+	}
+	if rr.Header().Get("Access-Control-Allow-Origin") != "" {
+		t.Fatalf("expected empty allow origin, got %q", rr.Header().Get("Access-Control-Allow-Origin"))
 	}
 }
 

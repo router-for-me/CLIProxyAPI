@@ -6,6 +6,7 @@ package misc
 import (
 	"fmt"
 	"net/http"
+	"os"
 	"runtime"
 	"strings"
 )
@@ -17,10 +18,143 @@ const (
 	// GeminiCLIApiClientHeader is the value for the X-Goog-Api-Client header sent to the Gemini CLI upstream.
 	GeminiCLIApiClientHeader = "google-genai-sdk/1.41.0 gl-node/v22.19.0"
 
-	// CodexCLIUserAgent is the default Codex CLI fingerprint used when no client-specific
-	// User-Agent is available during login or execution.
-	CodexCLIUserAgent = "codex_cli_rs/0.118.0-alpha.4 (Linux; x86_64) xterm-256color"
+	// CodexCLIVersion is the upstream-compatible Codex CLI version embedded in
+	// the User-Agent. Keep in sync with the upstream release the proxy aims to
+	// mimic; picking a slightly-behind release minimizes the risk of upstream
+	// rejecting unknown clients while still matching a real CLI build.
+	CodexCLIVersion = "0.118.0-alpha.4"
+
+	// CodexDefaultOriginator mirrors codex-rs's DEFAULT_ORIGINATOR. Changing this
+	// value will affect both the "Originator" header and the User-Agent token
+	// emitted when neither a caller- nor config-supplied override is present.
+	CodexDefaultOriginator = "codex_cli_rs"
+
+	// CodexOriginatorEnvVar is the env var name codex-rs itself honours. We
+	// accept the same variable so operators can point the proxy at internal
+	// originator values (e.g. "codex_vscode") without touching YAML.
+	CodexOriginatorEnvVar = "CODEX_INTERNAL_ORIGINATOR_OVERRIDE"
+
+	// CodexResidencyEnvVar lets operators set the residency header without
+	// editing config.
+	CodexResidencyEnvVar = "CODEX_INTERNAL_RESIDENCY_OVERRIDE"
+
+	// CodexResidencyHeader is the residency hint header upstream honours.
+	CodexResidencyHeader = "x-openai-internal-codex-residency"
+
+	// CodexSubagentHeader is the sub-agent hint header upstream honours.
+	CodexSubagentHeader = "x-openai-subagent"
 )
+
+// CodexCLIUserAgent is the default Codex CLI User-Agent string. Historically
+// this was a hard-coded Linux/x86_64/xterm-256color value; it is now computed
+// dynamically from runtime info so a proxy running on macOS or Windows emits a
+// plausible fingerprint rather than masquerading as Linux.
+//
+// The format mirrors codex-rs's get_codex_user_agent():
+//
+//	codex_cli_rs/<version> (<OS type>; <arch>) <terminal>
+//
+// Callers who need a different version or originator should build their own
+// string via BuildCodexUserAgent.
+var CodexCLIUserAgent = BuildCodexUserAgent(CodexCLIVersion)
+
+// BuildCodexUserAgent renders a Codex CLI User-Agent using the given build
+// version and the current runtime's OS / architecture / terminal. It never
+// panics and always returns a syntactically valid User-Agent string.
+func BuildCodexUserAgent(version string) string {
+	version = strings.TrimSpace(version)
+	if version == "" {
+		version = CodexCLIVersion
+	}
+	return fmt.Sprintf(
+		"codex_cli_rs/%s (%s; %s) %s",
+		version,
+		codexOSDescriptor(),
+		codexArchDescriptor(),
+		codexTerminalDescriptor(),
+	)
+}
+
+// codexOSDescriptor maps runtime.GOOS to the human-readable OS token codex-rs
+// emits via os_info.os_type(). We intentionally omit OS version (which codex-rs
+// includes as "Mac OS 14.6.1" for example) because there is no portable way to
+// obtain it without CGO or shelling out, and an inaccurate version is worse
+// than none: the proxy should not misrepresent the host kernel.
+func codexOSDescriptor() string {
+	switch runtime.GOOS {
+	case "darwin":
+		return "Mac OS"
+	case "linux":
+		return "Linux"
+	case "windows":
+		return "Windows"
+	case "freebsd", "netbsd", "openbsd", "dragonfly":
+		// Capitalize to match os_info convention, e.g. "FreeBSD".
+		if len(runtime.GOOS) == 0 {
+			return "Unknown"
+		}
+		return strings.ToUpper(runtime.GOOS[:1]) + runtime.GOOS[1:]
+	default:
+		return runtime.GOOS
+	}
+}
+
+// codexArchDescriptor returns the architecture token using the same naming
+// convention as os_info / uname: "x86_64", "arm64", etc.
+func codexArchDescriptor() string {
+	switch runtime.GOARCH {
+	case "amd64":
+		return "x86_64"
+	case "386":
+		return "i686"
+	case "arm64":
+		return "arm64"
+	case "arm":
+		return "armv7l"
+	default:
+		return runtime.GOARCH
+	}
+}
+
+// codexTerminalDescriptor approximates codex-rs's terminal_detection::user_agent().
+// It prefers TERM_PROGRAM (set by iTerm2, vscode, Apple Terminal, ...) in
+// "name/version" form when TERM_PROGRAM_VERSION is also present, otherwise
+// falls back to $TERM (e.g. "xterm-256color"). Returns "unknown" if neither is
+// available.
+func codexTerminalDescriptor() string {
+	program := strings.TrimSpace(os.Getenv("TERM_PROGRAM"))
+	version := strings.TrimSpace(os.Getenv("TERM_PROGRAM_VERSION"))
+	if program != "" {
+		token := sanitizeTerminalToken(program)
+		if version != "" {
+			token = token + "/" + sanitizeTerminalToken(version)
+		}
+		return token
+	}
+	if term := strings.TrimSpace(os.Getenv("TERM")); term != "" {
+		return sanitizeTerminalToken(term)
+	}
+	return "unknown"
+}
+
+// sanitizeTerminalToken strips characters that would produce an invalid HTTP
+// header value. Whitespace and non-printable bytes are replaced with '_', which
+// matches codex-rs's sanitize_user_agent fallback.
+func sanitizeTerminalToken(in string) string {
+	if in == "" {
+		return ""
+	}
+	b := make([]byte, 0, len(in))
+	for i := 0; i < len(in); i++ {
+		c := in[i]
+		if c < 0x20 || c == 0x7f || c == ' ' || c == '\t' {
+			b = append(b, '_')
+			continue
+		}
+		b = append(b, c)
+	}
+	return string(b)
+}
 
 // geminiCLIOS maps Go runtime OS names to the Node.js-style platform strings used by Gemini CLI.
 func geminiCLIOS() string {
@@ -98,6 +232,56 @@ func ScrubProxyAndFingerprintHeaders(req *http.Request) {
 	// Antigravity (Node.js) sends "gzip, deflate, br" by default;
 	// Electron-based clients may add "zstd" which is a fingerprint mismatch.
 	req.Header.Del("Accept-Encoding")
+}
+
+// ResolveCodexOriginator returns the effective originator string, honouring
+// (in decreasing priority): an explicit config-provided value, the
+// CODEX_INTERNAL_ORIGINATOR_OVERRIDE environment variable, and finally the
+// built-in DEFAULT_ORIGINATOR. Invalid values (non-ASCII or illegal header
+// characters) are discarded and the function falls back to the default so we
+// never emit a malformed header.
+//
+// This matches the precedence implemented in codex-rs
+// default_client::get_originator_value.
+func ResolveCodexOriginator(configured string) string {
+	if v := strings.TrimSpace(configured); v != "" && isValidHeaderValue(v) {
+		return v
+	}
+	if v := strings.TrimSpace(os.Getenv(CodexOriginatorEnvVar)); v != "" && isValidHeaderValue(v) {
+		return v
+	}
+	return CodexDefaultOriginator
+}
+
+// ResolveCodexResidency returns the residency header value following the same
+// precedence as ResolveCodexOriginator. Unlike originator, an empty result is a
+// valid outcome — the caller should not set the header in that case, which
+// mirrors codex-rs's behaviour of only emitting the residency header when a
+// value is configured.
+func ResolveCodexResidency(configured string) string {
+	if v := strings.TrimSpace(configured); v != "" && isValidHeaderValue(v) {
+		return v
+	}
+	if v := strings.TrimSpace(os.Getenv(CodexResidencyEnvVar)); v != "" && isValidHeaderValue(v) {
+		return v
+	}
+	return ""
+}
+
+// isValidHeaderValue returns true when s would be accepted by
+// net/http as a header value. We keep the check permissive (RFC 7230 VCHAR
+// plus SP and HTAB) because codex-rs also sanitizes only obviously-bad bytes.
+func isValidHeaderValue(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == '\t' {
+			continue
+		}
+		if c < 0x20 || c == 0x7f {
+			return false
+		}
+	}
+	return true
 }
 
 // EnsureHeader ensures that a header exists in the target header map by checking

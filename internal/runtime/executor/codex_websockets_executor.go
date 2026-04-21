@@ -250,6 +250,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		return resp, errDial
 	}
 	recordAPIWebsocketHandshake(ctx, e.cfg, respHS)
+	captureCodexWebsocketSessionHeaders(auth, wsHeaders, respHS)
 	if sess == nil {
 		logCodexWebsocketConnected(executionSessionID, authID, wsURL)
 		defer func() {
@@ -293,6 +294,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 					AuthValue: authValue,
 				})
 				recordAPIWebsocketHandshake(ctx, e.cfg, respHSRetry)
+				captureCodexWebsocketSessionHeaders(auth, wsHeaders, respHSRetry)
 				if errSendRetry := writeCodexWebsocketMessage(sess, connRetry, wsReqBodyRetry); errSendRetry == nil {
 					conn = connRetry
 					wsReqBody = wsReqBodyRetry
@@ -452,6 +454,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		return nil, errDial
 	}
 	recordAPIWebsocketHandshake(ctx, e.cfg, respHS)
+	captureCodexWebsocketSessionHeaders(auth, wsHeaders, respHS)
 
 	if sess == nil {
 		logCodexWebsocketConnected(executionSessionID, authID, wsURL)
@@ -824,6 +827,13 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 		ginHeaders = ginCtx.Request.Header.Clone()
 	}
 
+	// Replay cached sticky session state for this logical session before
+	// applying ensure/default logic, so that later EnsureHeader calls do not
+	// overwrite anything we just populated from cache.
+	if promptCacheID := strings.TrimSpace(headers.Get("Conversation_id")); promptCacheID != "" {
+		_ = injectCodexSessionHeaders(headers, codexSessionKey(auth, promptCacheID))
+	}
+
 	_, cfgBetaFeatures := codexHeaderDefaults(cfg, auth)
 	ensureHeaderWithPriority(headers, ginHeaders, "x-codex-beta-features", cfgBetaFeatures, "")
 	misc.EnsureHeader(headers, ginHeaders, "x-codex-turn-state", "")
@@ -841,16 +851,30 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 	}
 	headers.Set("OpenAI-Beta", betaHeader)
 	authUserAgent := codexAuthUserAgent(auth)
-	effectiveUserAgent := strings.TrimSpace(headers.Get("User-Agent"))
-	if effectiveUserAgent == "" && ginHeaders != nil {
-		effectiveUserAgent = strings.TrimSpace(ginHeaders.Get("User-Agent"))
-	}
 	if authUserAgent != "" {
-		effectiveUserAgent = authUserAgent
 		headers.Set("User-Agent", authUserAgent)
 	}
-	if strings.Contains(effectiveUserAgent, "Mac OS") {
-		misc.EnsureHeader(headers, ginHeaders, "Session_id", uuid.NewString())
+	// Align Session_id with codex-rs: always send a stable, conversation-scoped
+	// session id (not a per-request UUID). Prefer, in order:
+	//   1. Caller-supplied Session_id header (gin -> target already-set).
+	//   2. The Conversation_id previously set by applyCodexPromptCacheHeaders,
+	//      which is derived from the (provider, api_key / user_id) pair and is
+	//      stable across requests belonging to the same logical session.
+	//   3. A freshly minted UUID (last-resort fallback for edge cases where no
+	//      cache id could be derived).
+	if strings.TrimSpace(headers.Get("Session_id")) == "" {
+		if ginHeaders != nil {
+			if v := strings.TrimSpace(ginHeaders.Get("Session_id")); v != "" {
+				headers.Set("Session_id", v)
+			}
+		}
+	}
+	if strings.TrimSpace(headers.Get("Session_id")) == "" {
+		if v := strings.TrimSpace(headers.Get("Conversation_id")); v != "" {
+			headers.Set("Session_id", v)
+		} else {
+			headers.Set("Session_id", uuid.NewString())
+		}
 	}
 	if authUserAgent == "" {
 		headers.Del("User-Agent")
@@ -865,8 +889,18 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 	if originator := strings.TrimSpace(ginHeaders.Get("Originator")); originator != "" {
 		headers.Set("Originator", originator)
 	} else if !isAPIKey {
-		headers.Set("Originator", codexOriginator)
+		headers.Set("Originator", codexOriginatorFor(cfg))
 	}
+	// Residency: client-supplied wins; otherwise fall back to config/env.
+	if residency := strings.TrimSpace(ginHeaders.Get(misc.CodexResidencyHeader)); residency != "" {
+		headers.Set(misc.CodexResidencyHeader, residency)
+	} else if !isAPIKey {
+		if v := codexResidencyFor(cfg); v != "" && strings.TrimSpace(headers.Get(misc.CodexResidencyHeader)) == "" {
+			headers.Set(misc.CodexResidencyHeader, v)
+		}
+	}
+	// x-openai-subagent is pure passthrough.
+	misc.EnsureHeader(headers, ginHeaders, misc.CodexSubagentHeader, "")
 	if !isAPIKey {
 		if auth != nil && auth.Metadata != nil {
 			if accountID, ok := auth.Metadata["account_id"].(string); ok {

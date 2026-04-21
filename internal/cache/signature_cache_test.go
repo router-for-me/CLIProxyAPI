@@ -2,6 +2,7 @@ package cache
 
 import (
 	"bytes"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -10,6 +11,14 @@ import (
 )
 
 const testModelName = "claude-sonnet-4-5"
+
+func makeTestSignature(prefix string) string {
+	padding := MinValidSignatureLen + 5 - len(prefix)
+	if padding < 0 {
+		padding = 0
+	}
+	return prefix + strings.Repeat("x", padding)
+}
 
 func TestCacheSignature_BasicStorageAndRetrieval(t *testing.T) {
 	ClearSignatureCache("")
@@ -245,6 +254,96 @@ func TestCacheSignature_GetDoesNotRefreshTTL(t *testing.T) {
 	sc.mu.RUnlock()
 	if !stored.Timestamp.Equal(expectedTimestamp) {
 		t.Fatalf("expected GetCachedSignature to keep absolute TTL timestamp %s, got %s", expectedTimestamp, stored.Timestamp)
+	}
+}
+
+func TestCacheSignature_EvictsOldestWhenGroupExceedsCapacity(t *testing.T) {
+	ClearSignatureCache("")
+
+	groupKey := GetModelGroup(testModelName)
+	sc := getOrCreateGroupCache(groupKey)
+	oldestText := "oldest-entry"
+	oldestHash := hashText(oldestText)
+	now := time.Now()
+
+	sc.mu.Lock()
+	sc.entries = make(map[string]SignatureEntry, SignatureCacheMaxEntriesPerGroup)
+	sc.entries[oldestHash] = SignatureEntry{
+		Signature: makeTestSignature("oldest"),
+		Timestamp: now.Add(-time.Hour),
+	}
+	for i := 0; i < SignatureCacheMaxEntriesPerGroup-1; i++ {
+		textHash := hashText(fmt.Sprintf("seed-%05d", i))
+		sc.entries[textHash] = SignatureEntry{
+			Signature: makeTestSignature(fmt.Sprintf("seed-%05d", i)),
+			Timestamp: now.Add(time.Duration(i+1) * time.Second),
+		}
+	}
+	sc.mu.Unlock()
+
+	newText := "new-entry"
+	newSignature := makeTestSignature("new-entry")
+	CacheSignature(testModelName, newText, newSignature)
+
+	sc.mu.RLock()
+	defer sc.mu.RUnlock()
+
+	if len(sc.entries) != SignatureCacheMaxEntriesPerGroup {
+		t.Fatalf("expected cache size %d, got %d", SignatureCacheMaxEntriesPerGroup, len(sc.entries))
+	}
+	if _, exists := sc.entries[oldestHash]; exists {
+		t.Fatal("expected oldest cache entry to be evicted")
+	}
+	newEntry, exists := sc.entries[hashText(newText)]
+	if !exists {
+		t.Fatal("expected new cache entry to be retained")
+	}
+	if newEntry.Signature != newSignature {
+		t.Fatalf("expected retained signature %q, got %q", newSignature, newEntry.Signature)
+	}
+}
+
+func TestRunProtectedCacheCleanupLoop_RestartsAfterPanic(t *testing.T) {
+	previousDelay := CacheCleanupRestartDelay
+	CacheCleanupRestartDelay = 0
+	t.Cleanup(func() {
+		CacheCleanupRestartDelay = previousDelay
+	})
+
+	stop := make(chan struct{})
+	secondCall := make(chan struct{})
+	done := make(chan struct{})
+	calls := 0
+
+	go func() {
+		runProtectedCacheCleanupLoop(time.Millisecond, func() {
+			calls++
+			if calls == 1 {
+				panic("boom")
+			}
+			if calls == 2 {
+				close(secondCall)
+			}
+		}, stop)
+		close(done)
+	}()
+
+	select {
+	case <-secondCall:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("timed out waiting for restarted cleanup loop")
+	}
+
+	close(stop)
+
+	select {
+	case <-done:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("timed out waiting for cleanup loop to stop")
+	}
+
+	if calls < 2 {
+		t.Fatalf("expected cleanup loop to restart after panic, got %d calls", calls)
 	}
 }
 

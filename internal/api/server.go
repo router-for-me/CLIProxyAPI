@@ -43,6 +43,14 @@ import (
 
 const oauthCallbackSuccessHTML = `<html><head><meta charset="utf-8"><title>Authentication successful</title><script>setTimeout(function(){window.close();},5000);</script></head><body><h1>Authentication successful!</h1><p>You can close this window.</p><p>This window will close automatically in 5 seconds.</p></body></html>`
 
+const (
+	inboundReadHeaderTimeout = 30 * time.Second
+	inboundIdleTimeout       = 120 * time.Second
+	inboundMaxHeaderBytes    = 1 << 20
+	corsAllowedMethods       = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+	corsAllowedHeaders       = "Authorization, Content-Type, Accept, X-Requested-With, Idempotency-Key, X-Local-Password, X-API-Key, Anthropic-Beta, OpenAI-Beta"
+)
+
 type serverOptionConfig struct {
 	extraMiddleware      []gin.HandlerFunc
 	engineConfigurator   func(*gin.Engine)
@@ -309,8 +317,11 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 
 	// Create HTTP server
 	s.server = &http.Server{
-		Addr:    fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
-		Handler: engine,
+		Addr:              fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
+		Handler:           engine,
+		ReadHeaderTimeout: inboundReadHeaderTimeout,
+		IdleTimeout:       inboundIdleTimeout,
+		MaxHeaderBytes:    inboundMaxHeaderBytes,
 	}
 
 	return s
@@ -835,17 +846,41 @@ func (s *Server) Stop(ctx context.Context) error {
 //   - gin.HandlerFunc: The CORS middleware handler
 func corsMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		c.Header("Access-Control-Allow-Origin", "*")
-		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-		c.Header("Access-Control-Allow-Headers", "*")
+		if managementCORSPath(c.Request.URL.Path) {
+			disableManagementCORS(c)
+			return
+		}
 
-		if c.Request.Method == "OPTIONS" {
+		c.Header("Access-Control-Allow-Origin", "*")
+		c.Header("Access-Control-Allow-Methods", corsAllowedMethods)
+		c.Header("Access-Control-Allow-Headers", corsAllowedHeaders)
+
+		if c.Request.Method == http.MethodOptions {
 			c.AbortWithStatus(http.StatusNoContent)
 			return
 		}
 
 		c.Next()
 	}
+}
+
+func managementCORSPath(path string) bool {
+	path = strings.TrimSpace(path)
+	return path == "/management.html" || strings.HasPrefix(path, "/v0/management")
+}
+
+func disableManagementCORS(c *gin.Context) {
+	c.Header("Access-Control-Allow-Origin", "")
+	c.Header("Access-Control-Allow-Methods", "")
+	c.Header("Access-Control-Allow-Headers", "")
+	c.Header("Access-Control-Allow-Credentials", "")
+
+	if c.Request.Method == http.MethodOptions {
+		c.AbortWithStatus(http.StatusForbidden)
+		return
+	}
+
+	c.Next()
 }
 
 func (s *Server) applyAccessConfig(oldCfg, newCfg *config.Config) {

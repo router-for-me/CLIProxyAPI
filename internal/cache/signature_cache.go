@@ -3,6 +3,7 @@ package cache
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -29,7 +30,13 @@ const (
 
 	// CacheCleanupInterval controls how often stale entries are purged
 	CacheCleanupInterval = 10 * time.Minute
+
+	// SignatureCacheMaxEntriesPerGroup bounds per-model-group memory usage.
+	SignatureCacheMaxEntriesPerGroup = 10000
 )
+
+// CacheCleanupRestartDelay prevents tight restart loops after a panic.
+var CacheCleanupRestartDelay = time.Second
 
 // signatureCache stores signatures by model group -> textHash -> SignatureEntry
 var signatureCache sync.Map
@@ -72,13 +79,7 @@ func getOrCreateGroupCache(groupKey string) *groupCache {
 // startCacheCleanup launches a background goroutine that periodically
 // removes caches where all entries have expired.
 func startCacheCleanup() {
-	go func() {
-		ticker := time.NewTicker(CacheCleanupInterval)
-		defer ticker.Stop()
-		for range ticker.C {
-			purgeExpiredCaches()
-		}
-	}()
+	go runProtectedCacheCleanupLoop(CacheCleanupInterval, purgeExpiredCaches, nil)
 }
 
 // purgeExpiredCaches removes caches with no valid (non-expired) entries.
@@ -103,6 +104,48 @@ func purgeExpiredCaches() {
 	})
 }
 
+func runProtectedCacheCleanupLoop(interval time.Duration, cleanup func(), stop <-chan struct{}) {
+	for {
+		panicValue := runCacheCleanupLoop(interval, cleanup, stop)
+		if panicValue == nil {
+			return
+		}
+		log.Errorf("signature cache cleanup loop panicked, restarting: %v\n%s", panicValue, debug.Stack())
+		if stop != nil && stopRequested(stop) {
+			return
+		}
+		time.Sleep(CacheCleanupRestartDelay)
+	}
+}
+
+func runCacheCleanupLoop(interval time.Duration, cleanup func(), stop <-chan struct{}) (panicValue any) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			panicValue = recovered
+		}
+	}()
+
+	for {
+		select {
+		case <-ticker.C:
+			cleanup()
+		case <-stop:
+			return nil
+		}
+	}
+}
+
+func stopRequested(stop <-chan struct{}) bool {
+	select {
+	case <-stop:
+		return true
+	default:
+		return false
+	}
+}
+
 // CacheSignature stores a thinking signature for a given model group and text.
 // Used for Claude models that require signed thinking blocks in multi-turn conversations.
 func CacheSignature(modelName, text, signature string) {
@@ -123,6 +166,38 @@ func CacheSignature(modelName, text, signature string) {
 		Signature: signature,
 		Timestamp: time.Now(),
 	}
+	enforceGroupEntryLimitLocked(sc.entries)
+}
+
+func enforceGroupEntryLimitLocked(entries map[string]SignatureEntry) {
+	excessEntries := len(entries) - SignatureCacheMaxEntriesPerGroup
+	if excessEntries <= 0 {
+		return
+	}
+
+	for range excessEntries {
+		oldestKey, ok := oldestEntryKey(entries)
+		if !ok {
+			return
+		}
+		delete(entries, oldestKey)
+	}
+}
+
+func oldestEntryKey(entries map[string]SignatureEntry) (string, bool) {
+	var (
+		oldestKey string
+		oldestAt  time.Time
+		found     bool
+	)
+	for key, entry := range entries {
+		if !found || entry.Timestamp.Before(oldestAt) {
+			oldestKey = key
+			oldestAt = entry.Timestamp
+			found = true
+		}
+	}
+	return oldestKey, found
 }
 
 // GetCachedSignature retrieves a cached signature for a given model group and text.

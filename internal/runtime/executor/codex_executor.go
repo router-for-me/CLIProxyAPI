@@ -29,10 +29,13 @@ import (
 	"github.com/google/uuid"
 )
 
-const (
-	codexUserAgent  = misc.CodexCLIUserAgent
-	codexOriginator = "codex_cli_rs"
-)
+
+// codexUserAgent is the default User-Agent string used when no explicit
+// client-, config-, or auth-file- provided value is available. It is built
+// dynamically at startup by misc.BuildCodexUserAgent so the proxy emits a
+// plausible fingerprint for the actual host OS/arch/terminal rather than a
+// hard-coded Linux string.
+var codexUserAgent = misc.CodexCLIUserAgent
 
 var dataTag = []byte("data:")
 
@@ -364,6 +367,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	if err != nil {
 		return resp, err
 	}
+	captureCodexSessionHeaders(codexSessionKey(auth, prepared.promptCacheID), prepared.promptCacheID, result.headers)
 	if result.statusCode < 200 || result.statusCode >= 300 {
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", result.statusCode, helps.SummarizeErrorBody(result.headers.Get("Content-Type"), result.body))
 		err = newCodexStatusErr(result.statusCode, result.body)
@@ -449,6 +453,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	if err != nil {
 		return resp, err
 	}
+	captureCodexSessionHeaders(codexSessionKey(auth, prepared.promptCacheID), prepared.promptCacheID, result.headers)
 	if result.statusCode < 200 || result.statusCode >= 300 {
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", result.statusCode, helps.SummarizeErrorBody(result.headers.Get("Content-Type"), result.body))
 		err = newCodexStatusErr(result.statusCode, result.body)
@@ -506,10 +511,11 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	body = normalizeCodexInstructions(body)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
-	httpReq, err := e.cacheHelper(ctx, from, url, req, body)
+	prepared, err := e.prepareCodexRequest(ctx, from, url, req, body)
 	if err != nil {
 		return nil, err
 	}
+	httpReq := prepared.httpReq
 	applyCodexHeaders(httpReq, auth, apiKey, true, e.cfg)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
@@ -536,6 +542,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		return nil, err
 	}
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header)
+	captureCodexSessionHeaders(codexSessionKey(auth, prepared.promptCacheID), prepared.promptCacheID, httpResp.Header)
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		data, readErr := io.ReadAll(httpResp.Body)
 		if errClose := httpResp.Body.Close(); errClose != nil {
@@ -835,10 +842,19 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 		ginHeaders = ginCtx.Request.Header
 	}
 
+	// Replay any sticky session/turn state we previously captured. The
+	// Session_id header was already set by prepareCodexRequest to the stable
+	// prompt-cache id when available, so we can use it to rebuild the session
+	// cache key here.
+	if promptCacheID := strings.TrimSpace(r.Header.Get("Session_id")); promptCacheID != "" {
+		_ = injectCodexSessionHeaders(r.Header, codexSessionKey(auth, promptCacheID))
+	}
+
 	if ginHeaders.Get("X-Codex-Beta-Features") != "" {
 		r.Header.Set("X-Codex-Beta-Features", ginHeaders.Get("X-Codex-Beta-Features"))
 	}
 	misc.EnsureHeader(r.Header, ginHeaders, "Version", "")
+	misc.EnsureHeader(r.Header, ginHeaders, "X-Codex-Turn-State", "")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Codex-Turn-Metadata", "")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Client-Request-Id", "")
 	cfgUserAgent, _ := codexHeaderDefaults(cfg, auth)
@@ -848,8 +864,20 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 		ensureHeaderWithConfigPrecedence(r.Header, ginHeaders, "User-Agent", cfgUserAgent, codexUserAgent)
 	}
 
-	if strings.Contains(r.Header.Get("User-Agent"), "Mac OS") {
-		misc.EnsureHeader(r.Header, ginHeaders, "Session_id", uuid.NewString())
+	// Align Session_id with codex-rs: always send a stable session id regardless
+	// of the platform string in User-Agent. The preferred value comes from
+	// cacheHelper (which derives it from the API key or user id and is stable
+	// across requests of the same logical session). Fall back to caller-supplied
+	// header, then to the Conversation_id header, and finally mint a UUID so the
+	// header is never missing upstream.
+	if strings.TrimSpace(r.Header.Get("Session_id")) == "" {
+		if v := strings.TrimSpace(ginHeaders.Get("Session_id")); v != "" {
+			r.Header.Set("Session_id", v)
+		} else if v := strings.TrimSpace(r.Header.Get("Conversation_id")); v != "" {
+			r.Header.Set("Session_id", v)
+		} else {
+			r.Header.Set("Session_id", uuid.NewString())
+		}
 	}
 
 	if stream {
@@ -868,8 +896,20 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 	if originator := strings.TrimSpace(ginHeaders.Get("Originator")); originator != "" {
 		r.Header.Set("Originator", originator)
 	} else if !isAPIKey {
-		r.Header.Set("Originator", codexOriginator)
+		r.Header.Set("Originator", codexOriginatorFor(cfg))
 	}
+	// Residency header: prefer client-supplied value; otherwise use config or env.
+	if residency := strings.TrimSpace(ginHeaders.Get(misc.CodexResidencyHeader)); residency != "" {
+		r.Header.Set(misc.CodexResidencyHeader, residency)
+	} else if !isAPIKey {
+		if v := codexResidencyFor(cfg); v != "" && strings.TrimSpace(r.Header.Get(misc.CodexResidencyHeader)) == "" {
+			r.Header.Set(misc.CodexResidencyHeader, v)
+		}
+	}
+	// Sub-agent hint: pure passthrough. Upstream treats this as optional
+	// metadata; we never synthesize a value but we do preserve whatever the
+	// caller sends under either the canonical or capitalized variant.
+	misc.EnsureHeader(r.Header, ginHeaders, misc.CodexSubagentHeader, "")
 	if !isAPIKey {
 		if auth != nil && auth.Metadata != nil {
 			if accountID, ok := auth.Metadata["account_id"].(string); ok {
@@ -882,6 +922,26 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(r, attrs)
+}
+
+// codexOriginatorFor resolves the originator value for the given config,
+// honouring config > env > built-in default.
+func codexOriginatorFor(cfg *config.Config) string {
+	configured := ""
+	if cfg != nil {
+		configured = cfg.CodexHeaderDefaults.Originator
+	}
+	return misc.ResolveCodexOriginator(configured)
+}
+
+// codexResidencyFor resolves the residency header value; empty means "do not
+// send" (matches codex-rs behaviour).
+func codexResidencyFor(cfg *config.Config) string {
+	configured := ""
+	if cfg != nil {
+		configured = cfg.CodexHeaderDefaults.Residency
+	}
+	return misc.ResolveCodexResidency(configured)
 }
 
 func codexAuthUserAgent(auth *cliproxyauth.Auth) string {

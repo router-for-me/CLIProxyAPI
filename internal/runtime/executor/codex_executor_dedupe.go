@@ -53,6 +53,9 @@ func (e *CodexExecutor) prepareCodexRequest(ctx context.Context, from sdktransla
 	if cache.ID != "" {
 		httpReq.Header.Set("Session_id", cache.ID)
 	}
+	// Injection of sticky turn-state / turn-metadata happens later in
+	// applyCodexHeaders, which has access to the authenticated identity
+	// required to build the logical-session key.
 	return codexPreparedRequest{
 		httpReq:       httpReq,
 		body:          body,
@@ -60,31 +63,176 @@ func (e *CodexExecutor) prepareCodexRequest(ctx context.Context, from sdktransla
 	}, nil
 }
 
+// resolvePromptCache decides which prompt_cache_key value to send upstream.
+//
+// Goals:
+//  1. Keep requests belonging to the same logical conversation locked to a
+//     single, stable key so upstream prompt caches and our sticky-session
+//     state (turn-state / turn-metadata) actually get reused.
+//  2. Keep unrelated conversations from the same API key *separated* so the
+//     proxy doesn't accidentally stitch independent threads together (which
+//     confuses both upstream cache and any server-side routing).
+//  3. Preserve the legacy behaviour for clients that supply no conversation
+//     hint at all, so existing API-key-only deployments still benefit from
+//     some degree of caching.
+//
+// The precedence mirrors what codex-rs does — it uses the caller-owned
+// conversation_id as prompt_cache_key — with additional fallbacks that mine
+// conversation-scoped fields out of common client payloads.
 func (e *CodexExecutor) resolvePromptCache(ctx context.Context, from sdktranslator.Format, req cliproxyexecutor.Request) helps.CodexCache {
-	var cache helps.CodexCache
+	// Path 1: the caller already supplied a prompt_cache_key. Trust it; this
+	// is the codex-rs native path (prompt_cache_key == conversation_id).
+	if key := strings.TrimSpace(gjson.GetBytes(req.Payload, "prompt_cache_key").String()); key != "" {
+		return helps.CodexCache{ID: key}
+	}
+	if key := strings.TrimSpace(gjson.GetBytes(req.Payload, "metadata.prompt_cache_key").String()); key != "" {
+		return helps.CodexCache{ID: key}
+	}
+
+	// Path 2: Claude path retains legacy behaviour (model + user_id) so
+	// existing deployments keep warming the same cache entry. We only fall
+	// back to the generic fingerprinting logic when user_id is missing.
 	if from == "claude" {
-		userIDResult := gjson.GetBytes(req.Payload, "metadata.user_id")
-		if userIDResult.Exists() {
-			key := fmt.Sprintf("%s-%s", req.Model, userIDResult.String())
-			var ok bool
-			if cache, ok = helps.GetCodexCache(key); !ok {
-				cache = helps.CodexCache{
-					ID:     uuid.New().String(),
-					Expire: time.Now().Add(time.Hour),
-				}
-				helps.SetCodexCache(key, cache)
-			}
-		}
-	} else if from == "openai-response" {
-		promptCacheKey := gjson.GetBytes(req.Payload, "prompt_cache_key")
-		if promptCacheKey.Exists() {
-			cache.ID = promptCacheKey.String()
-		}
-	} else if from == "openai" {
-		if apiKey := strings.TrimSpace(helps.APIKeyFromContext(ctx)); apiKey != "" {
-			cache.ID = uuid.NewSHA1(uuid.NameSpaceOID, []byte("cli-proxy-api:codex:prompt-cache:"+apiKey)).String()
+		if userID := strings.TrimSpace(gjson.GetBytes(req.Payload, "metadata.user_id").String()); userID != "" {
+			key := fmt.Sprintf("%s-%s", req.Model, userID)
+			return loadOrCreateCodexCache(key)
 		}
 	}
+
+	// Path 3/4: derive a conversation fingerprint from whatever
+	// conversation-scoped fields the caller happened to include. The
+	// fingerprint goes through codexCacheStore, so repeated requests with the
+	// same fingerprint map to the same stable UUID even after translator
+	// re-renders the payload.
+	if fp := conversationFingerprint(req); fp != "" {
+		scope := codexPromptCacheScope(ctx)
+		key := "fp:" + scope + ":" + req.Model + ":" + fp
+		return loadOrCreateCodexCache(key)
+	}
+
+	// Path 5 (fallback): api_key-level stable UUID. This is strictly less
+	// precise than a real conversation id but preserves backwards-compatible
+	// behaviour for callers that send neither prompt_cache_key nor any
+	// identifiable content (e.g. the upstream smoke tests that post just
+	// {"model": "..."}).
+	if from == "openai" {
+		if apiKey := strings.TrimSpace(helps.APIKeyFromContext(ctx)); apiKey != "" {
+			return helps.CodexCache{
+				ID: uuid.NewSHA1(uuid.NameSpaceOID, []byte("cli-proxy-api:codex:prompt-cache:"+apiKey)).String(),
+			}
+		}
+	}
+
+	return helps.CodexCache{}
+}
+
+// conversationFingerprint extracts a conversation-scoped hint out of req.Payload.
+// It intentionally inspects many candidate fields because we serve several
+// provider schemas (Claude, OpenAI Chat, OpenAI Responses) and each encodes
+// conversation identity differently. Returns an empty string when no stable
+// hint can be found.
+func conversationFingerprint(req cliproxyexecutor.Request) string {
+	payload := req.Payload
+	if len(payload) == 0 {
+		return ""
+	}
+
+	// Prefer explicit conversation identifiers before falling back to a
+	// content hash. Order matters: more-specific wins.
+	identifierFields := []string{
+		"metadata.conversation_id",
+		"metadata.conversationId",
+		"metadata.thread_id",
+		"metadata.threadId",
+		"metadata.session_id",
+		"metadata.sessionId",
+		"conversation_id",
+		"conversationId",
+		"thread_id",
+		"threadId",
+		// OpenAI "user" top-level field identifies an end-user; two users on
+		// the same api key are almost never the same conversation.
+		"user",
+	}
+	for _, field := range identifierFields {
+		if v := strings.TrimSpace(gjson.GetBytes(payload, field).String()); v != "" {
+			return "id:" + shortHashString(field+"="+v)
+		}
+	}
+
+	// Content-derived fingerprint: hash the first user turn. Same first user
+	// message + same model ⇒ same conversation, which is the assumption
+	// prompt caching is built on anyway.
+	if content := firstUserContent(payload); content != "" {
+		return "c:" + shortHashString(content)
+	}
+
+	return ""
+}
+
+// firstUserContent returns a normalized string representation of the first
+// user message, looking under the common field names used by the provider
+// schemas this proxy accepts.
+func firstUserContent(payload []byte) string {
+	// OpenAI Chat Completions: messages[*].role == "user"
+	if msgs := gjson.GetBytes(payload, "messages"); msgs.IsArray() {
+		for _, m := range msgs.Array() {
+			if strings.EqualFold(strings.TrimSpace(m.Get("role").String()), "user") {
+				if c := strings.TrimSpace(m.Get("content").Raw); c != "" && c != "null" {
+					return c
+				}
+			}
+		}
+	}
+	// OpenAI Responses: input[*].role == "user"
+	if inputs := gjson.GetBytes(payload, "input"); inputs.IsArray() {
+		for _, m := range inputs.Array() {
+			if strings.EqualFold(strings.TrimSpace(m.Get("role").String()), "user") {
+				if c := strings.TrimSpace(m.Get("content").Raw); c != "" && c != "null" {
+					return c
+				}
+			}
+		}
+		// If "input" is a flat array of strings/objects with no explicit role,
+		// hash the whole first element.
+		if first := inputs.Array(); len(first) > 0 {
+			if c := strings.TrimSpace(first[0].Raw); c != "" && c != "null" {
+				return c
+			}
+		}
+	}
+	// Anthropic Messages API: messages[*].role == "user"; same field name as
+	// OpenAI chat so the first branch already handles it. Fall back to
+	// top-level "prompt" for older / non-standard clients.
+	if p := strings.TrimSpace(gjson.GetBytes(payload, "prompt").Raw); p != "" && p != "null" {
+		return p
+	}
+	return ""
+}
+
+// codexPromptCacheScope produces a stable per-caller scope string. Scoping by
+// api key (or gin client identity when available) keeps fingerprints from
+// colliding across tenants — two different users asking "hello" should not
+// share a prompt_cache_key even though their first-user-message hashes match.
+func codexPromptCacheScope(ctx context.Context) string {
+	if apiKey := strings.TrimSpace(helps.APIKeyFromContext(ctx)); apiKey != "" {
+		return "api:" + shortHashString(apiKey)
+	}
+	return "anon"
+}
+
+// loadOrCreateCodexCache returns the cached UUID for key, creating a new
+// entry with a 1-hour TTL when absent. Centralising this logic keeps the
+// derivation paths consistent and avoids drift between Claude/OpenAI.
+func loadOrCreateCodexCache(key string) helps.CodexCache {
+	if cache, ok := helps.GetCodexCache(key); ok {
+		return cache
+	}
+	cache := helps.CodexCache{
+		ID:     uuid.New().String(),
+		Expire: time.Now().Add(time.Hour),
+	}
+	helps.SetCodexCache(key, cache)
 	return cache
 }
 

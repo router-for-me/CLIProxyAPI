@@ -4,8 +4,6 @@
 package middleware
 
 import (
-	"bytes"
-	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -42,13 +40,7 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 		loggerEnabled := logger.IsEnabled()
 
 		// Capture request information
-		requestInfo, err := captureRequestInfo(c, shouldCaptureRequestBody(loggerEnabled, c.Request))
-		if err != nil {
-			// Log error but continue processing
-			// In a real implementation, you might want to use a proper logger here
-			c.Next()
-			return
-		}
+		requestInfo, bodyCapture := captureRequestInfo(c, shouldCaptureRequestBody(loggerEnabled, c.Request))
 
 		// Create response writer wrapper
 		wrapper := NewResponseWriterWrapper(c.Writer, logger, requestInfo)
@@ -60,8 +52,12 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 		// Process the request
 		c.Next()
 
+		if bodyCapture != nil {
+			bodyCapture.applyToContext(c)
+		}
+
 		// Finalize logging after request processing
-		if err = wrapper.Finalize(c); err != nil {
+		if err := wrapper.Finalize(c); err != nil {
 			// Log error but don't interrupt the response
 			// In a real implementation, you might want to use a proper logger here
 		}
@@ -106,9 +102,9 @@ func shouldCaptureRequestBody(loggerEnabled bool, req *http.Request) bool {
 }
 
 // captureRequestInfo extracts relevant information from the incoming HTTP request.
-// It captures the URL, method, headers, and body. The request body is read and then
-// restored so that it can be processed by subsequent handlers.
-func captureRequestInfo(c *gin.Context, captureBody bool) (*RequestInfo, error) {
+// When body capture is enabled, it wraps Request.Body so payload bytes are captured
+// incrementally as downstream handlers read them.
+func captureRequestInfo(c *gin.Context, captureBody bool) (*RequestInfo, *capturedRequestBody) {
 	// Capture URL with sensitive query parameters masked
 	maskedQuery := util.MaskSensitiveQuery(c.Request.URL.RawQuery)
 	url := c.Request.URL.Path
@@ -125,28 +121,19 @@ func captureRequestInfo(c *gin.Context, captureBody bool) (*RequestInfo, error) 
 		headers[key] = values
 	}
 
-	// Capture request body
-	var body []byte
-	if captureBody && c.Request.Body != nil {
-		// Read the body
-		bodyBytes, err := io.ReadAll(c.Request.Body)
-		if err != nil {
-			return nil, err
-		}
-
-		// Restore the body for the actual request processing
-		c.Request.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
-		body = bodyBytes
-	}
-
-	return &RequestInfo{
+	requestInfo := &RequestInfo{
 		URL:       url,
 		Method:    method,
 		Headers:   headers,
-		Body:      body,
 		RequestID: logging.GetGinRequestID(c),
 		Timestamp: time.Now(),
-	}, nil
+	}
+
+	if !captureBody {
+		return requestInfo, nil
+	}
+
+	return requestInfo, newCapturedRequestBody(c, requestInfo, maxLoggedRequestBodyBytes)
 }
 
 // shouldLogRequest determines whether the request should be logged.

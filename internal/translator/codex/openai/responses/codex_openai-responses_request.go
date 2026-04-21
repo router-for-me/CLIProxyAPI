@@ -20,17 +20,15 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 	rawJSON, _ = sjson.SetBytes(rawJSON, "stream", true)
 	rawJSON, _ = sjson.SetBytes(rawJSON, "store", false)
 	rawJSON, _ = sjson.SetBytes(rawJSON, "parallel_tool_calls", true)
-	rawJSON, _ = sjson.SetBytes(rawJSON, "include", []string{"reasoning.encrypted_content"})
+	// Align with codex-rs: include "reasoning.encrypted_content" ONLY when the
+	// request actually carries a reasoning block. Otherwise leave include empty
+	// so the request fingerprint matches the original CLI behavior.
+	rawJSON = applyCodexIncludeField(rawJSON)
 	// Codex Responses rejects token limit fields, so strip them out before forwarding.
 	rawJSON, _ = sjson.DeleteBytes(rawJSON, "max_output_tokens")
 	rawJSON, _ = sjson.DeleteBytes(rawJSON, "max_completion_tokens")
 	rawJSON, _ = sjson.DeleteBytes(rawJSON, "temperature")
 	rawJSON, _ = sjson.DeleteBytes(rawJSON, "top_p")
-	if v := gjson.GetBytes(rawJSON, "service_tier"); v.Exists() {
-		if v.String() != "priority" {
-			rawJSON, _ = sjson.DeleteBytes(rawJSON, "service_tier")
-		}
-	}
 
 	rawJSON, _ = sjson.DeleteBytes(rawJSON, "truncation")
 	rawJSON = applyResponsesCompactionCompatibility(rawJSON)
@@ -42,6 +40,33 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 	rawJSON = convertSystemRoleToDeveloper(rawJSON)
 	rawJSON = normalizeCodexBuiltinTools(rawJSON)
 
+	return rawJSON
+}
+
+// applyCodexIncludeField mirrors codex-rs behavior: the upstream client only
+// sets include=["reasoning.encrypted_content"] when the request has a
+// reasoning block. When there is no reasoning, include is left empty (and we
+// remove any stale value the caller injected). This keeps the proxied request
+// body byte-for-byte closer to what the native Codex CLI emits.
+func applyCodexIncludeField(rawJSON []byte) []byte {
+	hasReasoning := gjson.GetBytes(rawJSON, "reasoning").Exists()
+
+	existing := gjson.GetBytes(rawJSON, "include")
+	callerAlreadySet := existing.IsArray() && len(existing.Array()) > 0
+
+	if hasReasoning {
+		if callerAlreadySet {
+			// Respect caller-provided include list as-is.
+			return rawJSON
+		}
+		updated, _ := sjson.SetBytes(rawJSON, "include", []string{"reasoning.encrypted_content"})
+		return updated
+	}
+
+	// No reasoning block: drop any include field to match codex-rs.
+	if existing.Exists() {
+		rawJSON, _ = sjson.DeleteBytes(rawJSON, "include")
+	}
 	return rawJSON
 }
 

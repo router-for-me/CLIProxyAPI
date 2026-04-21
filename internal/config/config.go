@@ -162,6 +162,16 @@ type ClaudeHeaderDefaults struct {
 type CodexHeaderDefaults struct {
 	UserAgent    string `yaml:"user-agent" json:"user-agent"`
 	BetaFeatures string `yaml:"beta-features" json:"beta-features"`
+	// Originator overrides the default originator value sent in the
+	// "Originator" header for OAuth/ChatGPT Codex requests. When empty the
+	// proxy falls back to the CODEX_INTERNAL_ORIGINATOR_OVERRIDE environment
+	// variable and finally to the built-in "codex_cli_rs" default. See
+	// codex-rs/core/src/default_client.rs for the upstream behaviour we are
+	// aligning with.
+	Originator string `yaml:"originator,omitempty" json:"originator,omitempty"`
+	// Residency overrides the value sent in the upstream
+	// "x-openai-internal-codex-residency" header. Empty means "do not send".
+	Residency string `yaml:"residency,omitempty" json:"residency,omitempty"`
 }
 
 // TLSConfig holds HTTPS server settings.
@@ -781,6 +791,8 @@ func (cfg *Config) SanitizeCodexHeaderDefaults() {
 	}
 	cfg.CodexHeaderDefaults.UserAgent = strings.TrimSpace(cfg.CodexHeaderDefaults.UserAgent)
 	cfg.CodexHeaderDefaults.BetaFeatures = strings.TrimSpace(cfg.CodexHeaderDefaults.BetaFeatures)
+	cfg.CodexHeaderDefaults.Originator = strings.TrimSpace(cfg.CodexHeaderDefaults.Originator)
+	cfg.CodexHeaderDefaults.Residency = strings.TrimSpace(cfg.CodexHeaderDefaults.Residency)
 }
 
 // SanitizeClaudeHeaderDefaults trims surrounding whitespace from the
