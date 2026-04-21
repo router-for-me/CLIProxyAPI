@@ -1102,12 +1102,20 @@ func SaveConfigPreserveComments(configFile string, cfg *Config) error {
 	return writeConfigFileAtomically(configFile, data)
 }
 
+var renameFile = os.Rename
+
 // writeConfigFileAtomically writes data to configFile via a sibling temp file
 // with fsync + rename, preserving the existing file's permission bits when the
 // target already exists. When the target does not exist a restrictive 0o600
 // default is used so newly-created configs never widen access. Chmod errors
 // are propagated (not swallowed) so callers can detect failed permission
 // preservation.
+//
+// Some hosts bind-mount configFile as a single file (for example Docker
+// `source:/path/to/config.yaml`). Renaming over those mount targets can fail
+// with EBUSY even though truncating and rewriting the mounted file itself is
+// allowed. In that case fall back to an in-place overwrite after the fully
+// rendered temp file has been fsynced.
 func writeConfigFileAtomically(configFile string, data []byte) error {
 	mode := os.FileMode(0o600)
 	if info, err := os.Stat(configFile); err == nil {
@@ -1141,14 +1149,39 @@ func writeConfigFileAtomically(configFile string, data []byte) error {
 		_ = os.Remove(tmpName)
 		return err
 	}
-	if err := os.Rename(tmpName, configFile); err != nil {
+	if err := renameFile(tmpName, configFile); err != nil {
+		if errors.Is(err, syscall.EBUSY) {
+			fallbackErr := overwriteConfigFileInPlace(configFile, data, mode)
+			_ = os.Remove(tmpName)
+			return fallbackErr
+		}
 		_ = os.Remove(configFile)
-		if retryErr := os.Rename(tmpName, configFile); retryErr != nil {
+		if retryErr := renameFile(tmpName, configFile); retryErr != nil {
 			_ = os.Remove(tmpName)
 			return retryErr
 		}
 	}
 	return nil
+}
+
+func overwriteConfigFileInPlace(configFile string, data []byte, mode os.FileMode) error {
+	f, err := os.OpenFile(configFile, os.O_WRONLY|os.O_TRUNC, mode)
+	if err != nil {
+		return err
+	}
+	if err := f.Chmod(mode); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
 }
 
 // SaveConfigPreserveCommentsUpdateNestedScalar updates a nested scalar key path like ["a","b"]
