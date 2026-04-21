@@ -59,9 +59,6 @@ func patchCodexCompletedOutput(eventData []byte, outputItemsByIndex map[int64][]
 		return eventData
 	}
 
-	completedDataPatched := eventData
-	completedDataPatched, _ = sjson.SetRawBytes(completedDataPatched, "response.output", []byte(`[]`))
-
 	indexes := make([]int64, 0, len(outputItemsByIndex))
 	for idx := range outputItemsByIndex {
 		indexes = append(indexes, idx)
@@ -69,12 +66,36 @@ func patchCodexCompletedOutput(eventData []byte, outputItemsByIndex map[int64][]
 	sort.Slice(indexes, func(i, j int) bool {
 		return indexes[i] < indexes[j]
 	})
+
+	items := make([][]byte, 0, len(outputItemsByIndex)+len(outputItemsFallback))
 	for _, idx := range indexes {
-		completedDataPatched, _ = sjson.SetRawBytes(completedDataPatched, "response.output.-1", outputItemsByIndex[idx])
+		items = append(items, outputItemsByIndex[idx])
 	}
-	for _, item := range outputItemsFallback {
-		completedDataPatched, _ = sjson.SetRawBytes(completedDataPatched, "response.output.-1", item)
+	items = append(items, outputItemsFallback...)
+
+	outputArray := []byte("[]")
+	if len(items) > 0 {
+		var buf bytes.Buffer
+		totalLen := 2
+		for _, item := range items {
+			totalLen += len(item)
+		}
+		if len(items) > 1 {
+			totalLen += len(items) - 1
+		}
+		buf.Grow(totalLen)
+		buf.WriteByte('[')
+		for i, item := range items {
+			if i > 0 {
+				buf.WriteByte(',')
+			}
+			buf.Write(item)
+		}
+		buf.WriteByte(']')
+		outputArray = buf.Bytes()
 	}
+
+	completedDataPatched, _ := sjson.SetRawBytes(eventData, "response.output", outputArray)
 	return completedDataPatched
 }
 
