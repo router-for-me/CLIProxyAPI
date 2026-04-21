@@ -20,6 +20,7 @@ import (
 	claudeauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/claude"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/temporal"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
@@ -1660,7 +1661,7 @@ func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, exp
 		system.ForEach(func(_, part gjson.Result) bool {
 			if part.Get("type").String() == "text" {
 				txt := part.Get("text").String()
-				if strings.Contains(txt, "<temporal_context>") {
+				if strings.Contains(txt, "<temporal_context>") && temporal.IsValidTemporalBlock(txt) {
 					preservedTemporal = txt
 					return false
 				}

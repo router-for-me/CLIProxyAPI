@@ -1929,7 +1929,7 @@ func TestCheckSystemInstructionsWithMode_ArraySystemStillWorks(t *testing.T) {
 // discarded it from the forwarded user-system prompt.
 func TestCheckSystemInstructionsWithSigningMode_PreservesTemporalContext(t *testing.T) {
 	temporalText := `<temporal_context><temporal day="Friday" date="2026-04-17"/></temporal_context>`
-	payload := []byte(`{"system":[{"type":"text","text":"` + temporalText + `"},{"type":"text","text":"You are helpful."}],"messages":[{"role":"user","content":"hi"}]}`)
+	payload := []byte(`{"system":[{"type":"text","text":"` + strings.ReplaceAll(temporalText, `"`, `\"`) + `"},{"type":"text","text":"You are helpful."}],"messages":[{"role":"user","content":"hi"}]}`)
 
 	out := checkSystemInstructionsWithSigningMode(payload, false, false, true, "2.1.63", "", "")
 
