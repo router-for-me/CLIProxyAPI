@@ -1670,6 +1670,23 @@
         "zero_allowed": true,
         "dynamic_allowed": true
       }
+    },
+    {
+      "id": "kimi-k2.6",
+      "object": "model",
+      "created": 1776729600,
+      "owned_by": "moonshot",
+      "type": "kimi",
+      "display_name": "Kimi K2.6",
+      "description": "Kimi K2.6 - Latest Moonshot AI coding model with improved capabilities",
+      "context_length": 262144,
+      "max_completion_tokens": 65536,
+      "thinking": {
+        "min": 1024,
+        "max": 32000,
+        "zero_allowed": true,
+        "dynamic_allowed": true
+      }
     }
   ],
   "antigravity": [
