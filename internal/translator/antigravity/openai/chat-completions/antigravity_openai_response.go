@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	log "github.com/sirupsen/logrus"
 
 	. "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/gemini/openai/chat-completions"
@@ -26,6 +27,7 @@ type convertCliResponseToOpenAIChatParams struct {
 	FunctionIndex        int
 	SawToolCall          bool   // Tracks if any tool call was seen in the entire stream
 	UpstreamFinishReason string // Caches the upstream finish reason for final chunk
+	SanitizedNameMap     map[string]string
 }
 
 // functionCallIDCounter provides a process-wide unique counter for function call identifiers.
@@ -44,25 +46,29 @@ var functionCallIDCounter uint64
 //   - param: A pointer to a parameter object for maintaining state between calls
 //
 // Returns:
-//   - []string: A slice of strings, each containing an OpenAI-compatible JSON response
-func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) []string {
+//   - [][]byte: A slice of OpenAI-compatible JSON responses
+func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) [][]byte {
 	if *param == nil {
 		*param = &convertCliResponseToOpenAIChatParams{
-			UnixTimestamp: 0,
-			FunctionIndex: 0,
+			UnixTimestamp:    0,
+			FunctionIndex:    0,
+			SanitizedNameMap: util.SanitizedToolNameMap(originalRequestRawJSON),
 		}
+	}
+	if (*param).(*convertCliResponseToOpenAIChatParams).SanitizedNameMap == nil {
+		(*param).(*convertCliResponseToOpenAIChatParams).SanitizedNameMap = util.SanitizedToolNameMap(originalRequestRawJSON)
 	}
 
 	if bytes.Equal(rawJSON, []byte("[DONE]")) {
-		return []string{}
+		return [][]byte{}
 	}
 
 	// Initialize the OpenAI SSE template.
-	template := `{"id":"","object":"chat.completion.chunk","created":12345,"model":"model","choices":[{"index":0,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":null},"finish_reason":null,"native_finish_reason":null}]}`
+	template := []byte(`{"id":"","object":"chat.completion.chunk","created":12345,"model":"model","choices":[{"index":0,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":null},"finish_reason":null,"native_finish_reason":null}]}`)
 
 	// Extract and set the model version.
 	if modelVersionResult := gjson.GetBytes(rawJSON, "response.modelVersion"); modelVersionResult.Exists() {
-		template, _ = sjson.Set(template, "model", modelVersionResult.String())
+		template, _ = sjson.SetBytes(template, "model", modelVersionResult.String())
 	}
 
 	// Extract and set the creation timestamp.
@@ -71,14 +77,14 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 		if err == nil {
 			(*param).(*convertCliResponseToOpenAIChatParams).UnixTimestamp = t.Unix()
 		}
-		template, _ = sjson.Set(template, "created", (*param).(*convertCliResponseToOpenAIChatParams).UnixTimestamp)
+		template, _ = sjson.SetBytes(template, "created", (*param).(*convertCliResponseToOpenAIChatParams).UnixTimestamp)
 	} else {
-		template, _ = sjson.Set(template, "created", (*param).(*convertCliResponseToOpenAIChatParams).UnixTimestamp)
+		template, _ = sjson.SetBytes(template, "created", (*param).(*convertCliResponseToOpenAIChatParams).UnixTimestamp)
 	}
 
 	// Extract and set the response ID.
 	if responseIDResult := gjson.GetBytes(rawJSON, "response.responseId"); responseIDResult.Exists() {
-		template, _ = sjson.Set(template, "id", responseIDResult.String())
+		template, _ = sjson.SetBytes(template, "id", responseIDResult.String())
 	}
 
 	// Cache the finish reason - do NOT set it in output yet (will be set on final chunk)
@@ -90,21 +96,21 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 	if usageResult := gjson.GetBytes(rawJSON, "response.usageMetadata"); usageResult.Exists() {
 		cachedTokenCount := usageResult.Get("cachedContentTokenCount").Int()
 		if candidatesTokenCountResult := usageResult.Get("candidatesTokenCount"); candidatesTokenCountResult.Exists() {
-			template, _ = sjson.Set(template, "usage.completion_tokens", candidatesTokenCountResult.Int())
+			template, _ = sjson.SetBytes(template, "usage.completion_tokens", candidatesTokenCountResult.Int())
 		}
 		if totalTokenCountResult := usageResult.Get("totalTokenCount"); totalTokenCountResult.Exists() {
-			template, _ = sjson.Set(template, "usage.total_tokens", totalTokenCountResult.Int())
+			template, _ = sjson.SetBytes(template, "usage.total_tokens", totalTokenCountResult.Int())
 		}
 		promptTokenCount := usageResult.Get("promptTokenCount").Int()
 		thoughtsTokenCount := usageResult.Get("thoughtsTokenCount").Int()
-		template, _ = sjson.Set(template, "usage.prompt_tokens", promptTokenCount)
+		template, _ = sjson.SetBytes(template, "usage.prompt_tokens", promptTokenCount)
 		if thoughtsTokenCount > 0 {
-			template, _ = sjson.Set(template, "usage.completion_tokens_details.reasoning_tokens", thoughtsTokenCount)
+			template, _ = sjson.SetBytes(template, "usage.completion_tokens_details.reasoning_tokens", thoughtsTokenCount)
 		}
 		// Include cached token count if present (indicates prompt caching is working)
 		if cachedTokenCount > 0 {
 			var err error
-			template, err = sjson.Set(template, "usage.prompt_tokens_details.cached_tokens", cachedTokenCount)
+			template, err = sjson.SetBytes(template, "usage.prompt_tokens_details.cached_tokens", cachedTokenCount)
 			if err != nil {
 				log.Warnf("antigravity openai response: failed to set cached_tokens: %v", err)
 			}
@@ -141,33 +147,33 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 
 				// Handle text content, distinguishing between regular content and reasoning/thoughts.
 				if partResult.Get("thought").Bool() {
-					template, _ = sjson.Set(template, "choices.0.delta.reasoning_content", textContent)
+					template, _ = sjson.SetBytes(template, "choices.0.delta.reasoning_content", textContent)
 				} else {
-					template, _ = sjson.Set(template, "choices.0.delta.content", textContent)
+					template, _ = sjson.SetBytes(template, "choices.0.delta.content", textContent)
 				}
-				template, _ = sjson.Set(template, "choices.0.delta.role", "assistant")
+				template, _ = sjson.SetBytes(template, "choices.0.delta.role", "assistant")
 			} else if functionCallResult.Exists() {
 				// Handle function call content.
 				(*param).(*convertCliResponseToOpenAIChatParams).SawToolCall = true // Persist across chunks
-				toolCallsResult := gjson.Get(template, "choices.0.delta.tool_calls")
+				toolCallsResult := gjson.GetBytes(template, "choices.0.delta.tool_calls")
 				functionCallIndex := (*param).(*convertCliResponseToOpenAIChatParams).FunctionIndex
 				(*param).(*convertCliResponseToOpenAIChatParams).FunctionIndex++
 				if toolCallsResult.Exists() && toolCallsResult.IsArray() {
 					functionCallIndex = len(toolCallsResult.Array())
 				} else {
-					template, _ = sjson.SetRaw(template, "choices.0.delta.tool_calls", `[]`)
+					template, _ = sjson.SetRawBytes(template, "choices.0.delta.tool_calls", []byte(`[]`))
 				}
 
-				functionCallTemplate := `{"id": "","index": 0,"type": "function","function": {"name": "","arguments": ""}}`
-				fcName := functionCallResult.Get("name").String()
-				functionCallTemplate, _ = sjson.Set(functionCallTemplate, "id", fmt.Sprintf("%s-%d-%d", fcName, time.Now().UnixNano(), atomic.AddUint64(&functionCallIDCounter, 1)))
-				functionCallTemplate, _ = sjson.Set(functionCallTemplate, "index", functionCallIndex)
-				functionCallTemplate, _ = sjson.Set(functionCallTemplate, "function.name", fcName)
+				functionCallTemplate := []byte(`{"id": "","index": 0,"type": "function","function": {"name": "","arguments": ""}}`)
+				fcName := util.RestoreSanitizedToolName((*param).(*convertCliResponseToOpenAIChatParams).SanitizedNameMap, functionCallResult.Get("name").String())
+				functionCallTemplate, _ = sjson.SetBytes(functionCallTemplate, "id", fmt.Sprintf("%s-%d-%d", fcName, time.Now().UnixNano(), atomic.AddUint64(&functionCallIDCounter, 1)))
+				functionCallTemplate, _ = sjson.SetBytes(functionCallTemplate, "index", functionCallIndex)
+				functionCallTemplate, _ = sjson.SetBytes(functionCallTemplate, "function.name", fcName)
 				if fcArgsResult := functionCallResult.Get("args"); fcArgsResult.Exists() {
-					functionCallTemplate, _ = sjson.Set(functionCallTemplate, "function.arguments", fcArgsResult.Raw)
+					functionCallTemplate, _ = sjson.SetBytes(functionCallTemplate, "function.arguments", fcArgsResult.Raw)
 				}
-				template, _ = sjson.Set(template, "choices.0.delta.role", "assistant")
-				template, _ = sjson.SetRaw(template, "choices.0.delta.tool_calls.-1", functionCallTemplate)
+				template, _ = sjson.SetBytes(template, "choices.0.delta.role", "assistant")
+				template, _ = sjson.SetRawBytes(template, "choices.0.delta.tool_calls.-1", functionCallTemplate)
 			} else if inlineDataResult.Exists() {
 				data := inlineDataResult.Get("data").String()
 				if data == "" {
@@ -181,16 +187,16 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 					mimeType = "image/png"
 				}
 				imageURL := fmt.Sprintf("data:%s;base64,%s", mimeType, data)
-				imagesResult := gjson.Get(template, "choices.0.delta.images")
+				imagesResult := gjson.GetBytes(template, "choices.0.delta.images")
 				if !imagesResult.Exists() || !imagesResult.IsArray() {
-					template, _ = sjson.SetRaw(template, "choices.0.delta.images", `[]`)
+					template, _ = sjson.SetRawBytes(template, "choices.0.delta.images", []byte(`[]`))
 				}
-				imageIndex := len(gjson.Get(template, "choices.0.delta.images").Array())
-				imagePayload := `{"type":"image_url","image_url":{"url":""}}`
-				imagePayload, _ = sjson.Set(imagePayload, "index", imageIndex)
-				imagePayload, _ = sjson.Set(imagePayload, "image_url.url", imageURL)
-				template, _ = sjson.Set(template, "choices.0.delta.role", "assistant")
-				template, _ = sjson.SetRaw(template, "choices.0.delta.images.-1", imagePayload)
+				imageIndex := len(gjson.GetBytes(template, "choices.0.delta.images").Array())
+				imagePayload := []byte(`{"type":"image_url","image_url":{"url":""}}`)
+				imagePayload, _ = sjson.SetBytes(imagePayload, "index", imageIndex)
+				imagePayload, _ = sjson.SetBytes(imagePayload, "image_url.url", imageURL)
+				template, _ = sjson.SetBytes(template, "choices.0.delta.role", "assistant")
+				template, _ = sjson.SetRawBytes(template, "choices.0.delta.images.-1", imagePayload)
 			}
 		}
 	}
@@ -212,11 +218,11 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 		} else {
 			finishReason = "stop"
 		}
-		template, _ = sjson.Set(template, "choices.0.finish_reason", finishReason)
-		template, _ = sjson.Set(template, "choices.0.native_finish_reason", strings.ToLower(upstreamFinishReason))
+		template, _ = sjson.SetBytes(template, "choices.0.finish_reason", finishReason)
+		template, _ = sjson.SetBytes(template, "choices.0.native_finish_reason", strings.ToLower(upstreamFinishReason))
 	}
 
-	return []string{template}
+	return [][]byte{template}
 }
 
 // ConvertAntigravityResponseToOpenAINonStream converts a non-streaming Gemini CLI response to a non-streaming OpenAI response.
@@ -231,11 +237,11 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 //   - param: A pointer to a parameter object for the conversion
 //
 // Returns:
-//   - string: An OpenAI-compatible JSON response containing all message content and metadata
-func ConvertAntigravityResponseToOpenAINonStream(ctx context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) string {
+//   - []byte: An OpenAI-compatible JSON response containing all message content and metadata
+func ConvertAntigravityResponseToOpenAINonStream(ctx context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) []byte {
 	responseResult := gjson.GetBytes(rawJSON, "response")
 	if responseResult.Exists() {
 		return ConvertGeminiResponseToOpenAINonStream(ctx, modelName, originalRequestRawJSON, requestRawJSON, []byte(responseResult.Raw), param)
 	}
-	return ""
+	return []byte{}
 }

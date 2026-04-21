@@ -42,8 +42,8 @@ func TestCodexExecutorCacheHelper_OpenAIChatCompletions_StablePromptCacheKeyFrom
 	if gotKey != expectedKey {
 		t.Fatalf("prompt_cache_key = %q, want %q", gotKey, expectedKey)
 	}
-	if gotConversation := httpReq.Header.Get("Conversation_id"); gotConversation != expectedKey {
-		t.Fatalf("Conversation_id = %q, want %q", gotConversation, expectedKey)
+	if gotConversation := httpReq.Header.Get("Conversation_id"); gotConversation != "" {
+		t.Fatalf("Conversation_id = %q, want empty", gotConversation)
 	}
 	if gotSession := httpReq.Header.Get("Session_id"); gotSession != expectedKey {
 		t.Fatalf("Session_id = %q, want %q", gotSession, expectedKey)

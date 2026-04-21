@@ -162,7 +162,60 @@ func stableAuthIndex(seed string) string {
 	return hex.EncodeToString(sum[:8])
 }
 
-// EnsureIndex returns a stable index derived from the auth file name or API key.
+func (a *Auth) indexSeed() string {
+	if a == nil {
+		return ""
+	}
+
+	if fileName := strings.TrimSpace(a.FileName); fileName != "" {
+		return "file:" + fileName
+	}
+
+	providerKey := strings.ToLower(strings.TrimSpace(a.Provider))
+	compatName := ""
+	baseURL := ""
+	apiKey := ""
+	source := ""
+	if a.Attributes != nil {
+		if value := strings.TrimSpace(a.Attributes["provider_key"]); value != "" {
+			providerKey = strings.ToLower(value)
+		}
+		compatName = strings.ToLower(strings.TrimSpace(a.Attributes["compat_name"]))
+		baseURL = strings.TrimSpace(a.Attributes["base_url"])
+		apiKey = strings.TrimSpace(a.Attributes["api_key"])
+		source = strings.TrimSpace(a.Attributes["source"])
+	}
+
+	proxyURL := strings.TrimSpace(a.ProxyURL)
+	hasCredentialIdentity := compatName != "" || baseURL != "" || proxyURL != "" || apiKey != "" || source != ""
+	if providerKey != "" && hasCredentialIdentity {
+		parts := []string{"provider=" + providerKey}
+		if compatName != "" {
+			parts = append(parts, "compat="+compatName)
+		}
+		if baseURL != "" {
+			parts = append(parts, "base="+baseURL)
+		}
+		if proxyURL != "" {
+			parts = append(parts, "proxy="+proxyURL)
+		}
+		if apiKey != "" {
+			parts = append(parts, "api_key="+apiKey)
+		}
+		if source != "" {
+			parts = append(parts, "source="+source)
+		}
+		return "config:" + strings.Join(parts, "\x00")
+	}
+
+	if id := strings.TrimSpace(a.ID); id != "" {
+		return "id:" + id
+	}
+
+	return ""
+}
+
+// EnsureIndex returns a stable index derived from the auth file name or credential identity.
 func (a *Auth) EnsureIndex() string {
 	if a == nil {
 		return ""
@@ -171,20 +224,9 @@ func (a *Auth) EnsureIndex() string {
 		return a.Index
 	}
 
-	seed := strings.TrimSpace(a.FileName)
-	if seed != "" {
-		seed = "file:" + seed
-	} else if a.Attributes != nil {
-		if apiKey := strings.TrimSpace(a.Attributes["api_key"]); apiKey != "" {
-			seed = "api_key:" + apiKey
-		}
-	}
+	seed := a.indexSeed()
 	if seed == "" {
-		if id := strings.TrimSpace(a.ID); id != "" {
-			seed = "id:" + id
-		} else {
-			return ""
-		}
+		return ""
 	}
 
 	idx := stableAuthIndex(seed)
@@ -360,18 +402,6 @@ func (a *Auth) AccountInfo() (string, string) {
 					}
 				}
 				return "oauth", email
-			}
-		}
-	}
-
-	// For iFlow provider, prioritize OAuth type if email is present
-	if strings.ToLower(a.Provider) == "iflow" {
-		if a.Metadata != nil {
-			if email, ok := a.Metadata["email"].(string); ok {
-				email = strings.TrimSpace(email)
-				if email != "" {
-					return "oauth", email
-				}
 			}
 		}
 	}

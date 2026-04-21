@@ -248,6 +248,9 @@ func (m usageTabModel) renderContent() string {
 
 							// Token type breakdown from details
 							sb.WriteString(m.renderTokenBreakdown(stats))
+
+							// Latency breakdown from details
+							sb.WriteString(m.renderLatencyBreakdown(stats))
 						}
 					}
 				}
@@ -306,6 +309,57 @@ func (m usageTabModel) renderTokenBreakdown(modelStats map[string]any) string {
 
 	return fmt.Sprintf("    │  %s\n",
 		lipgloss.NewStyle().Foreground(colorMuted).Render(strings.Join(parts, "  ")))
+}
+
+// renderLatencyBreakdown aggregates latency_ms from model details and displays avg/min/max.
+func (m usageTabModel) renderLatencyBreakdown(modelStats map[string]any) string {
+	details, ok := modelStats["details"]
+	if !ok {
+		return ""
+	}
+	detailList, ok := details.([]any)
+	if !ok || len(detailList) == 0 {
+		return ""
+	}
+
+	var totalLatency int64
+	var count int
+	var minLatency, maxLatency int64
+	first := true
+
+	for _, d := range detailList {
+		dm, ok := d.(map[string]any)
+		if !ok {
+			continue
+		}
+		latencyMs := int64(getFloat(dm, "latency_ms"))
+		if latencyMs <= 0 {
+			continue
+		}
+		totalLatency += latencyMs
+		count++
+		if first {
+			minLatency = latencyMs
+			maxLatency = latencyMs
+			first = false
+		} else {
+			if latencyMs < minLatency {
+				minLatency = latencyMs
+			}
+			if latencyMs > maxLatency {
+				maxLatency = latencyMs
+			}
+		}
+	}
+
+	if count == 0 {
+		return ""
+	}
+
+	avgLatency := totalLatency / int64(count)
+	return fmt.Sprintf("    │  %s: avg %dms  min %dms  max %dms\n",
+		lipgloss.NewStyle().Foreground(colorMuted).Render(T("usage_time")),
+		avgLatency, minLatency, maxLatency)
 }
 
 // renderBarChart renders a simple ASCII horizontal bar chart.

@@ -4,12 +4,12 @@ package claude
 
 import (
 	"net/http"
-	"net/url"
 	"strings"
 	"sync"
 
 	tls "github.com/refraction-networking/utls"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/proxy"
@@ -31,17 +31,12 @@ type utlsRoundTripper struct {
 // newUtlsRoundTripper creates a new utls-based round tripper with optional proxy support
 func newUtlsRoundTripper(cfg *config.SDKConfig) *utlsRoundTripper {
 	var dialer proxy.Dialer = proxy.Direct
-	if cfg != nil && cfg.ProxyURL != "" {
-		proxyURL, err := url.Parse(cfg.ProxyURL)
-		if err != nil {
-			log.Errorf("failed to parse proxy URL %q: %v", cfg.ProxyURL, err)
-		} else {
-			pDialer, err := proxy.FromURL(proxyURL, proxy.Direct)
-			if err != nil {
-				log.Errorf("failed to create proxy dialer for %q: %v", cfg.ProxyURL, err)
-			} else {
-				dialer = pDialer
-			}
+	if cfg != nil {
+		proxyDialer, mode, errBuild := proxyutil.BuildDialer(cfg.ProxyURL)
+		if errBuild != nil {
+			log.Errorf("failed to configure proxy dialer for %q: %v", cfg.ProxyURL, errBuild)
+		} else if mode != proxyutil.ModeInherit && proxyDialer != nil {
+			dialer = proxyDialer
 		}
 	}
 

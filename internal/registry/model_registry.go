@@ -71,16 +71,16 @@ type availableModelsCacheEntry struct {
 // Values are interpreted in provider-native token units.
 type ThinkingSupport struct {
 	// Min is the minimum allowed thinking budget (inclusive).
-	Min int `json:"min,omitempty"`
+	Min int `json:"min,omitempty" yaml:"min,omitempty"`
 	// Max is the maximum allowed thinking budget (inclusive).
-	Max int `json:"max,omitempty"`
+	Max int `json:"max,omitempty" yaml:"max,omitempty"`
 	// ZeroAllowed indicates whether 0 is a valid value (to disable thinking).
-	ZeroAllowed bool `json:"zero_allowed,omitempty"`
+	ZeroAllowed bool `json:"zero_allowed,omitempty" yaml:"zero-allowed,omitempty"`
 	// DynamicAllowed indicates whether -1 is a valid value (dynamic thinking budget).
-	DynamicAllowed bool `json:"dynamic_allowed,omitempty"`
+	DynamicAllowed bool `json:"dynamic_allowed,omitempty" yaml:"dynamic-allowed,omitempty"`
 	// Levels defines discrete reasoning effort levels (e.g., "low", "medium", "high").
 	// When set, the model uses level-based reasoning instead of token budgets.
-	Levels []string `json:"levels,omitempty"`
+	Levels []string `json:"levels,omitempty" yaml:"levels,omitempty"`
 }
 
 // ModelRegistration tracks a model's availability
@@ -187,6 +187,7 @@ func (r *ModelRegistry) SetHook(hook ModelRegistryHook) {
 }
 
 const defaultModelRegistryHookTimeout = 5 * time.Second
+const modelQuotaExceededWindow = 5 * time.Minute
 
 func (r *ModelRegistry) triggerModelsRegistered(provider, clientID string, models []*ModelInfo) {
 	hook := r.hook
@@ -388,6 +389,9 @@ func (r *ModelRegistry) RegisterClient(clientID, clientProvider string, models [
 				reg.InfoByProvider[provider] = cloneModelInfo(model)
 			}
 			reg.LastUpdated = now
+			// Re-registering an existing client/model binding starts a fresh registry
+			// snapshot for that binding. Cooldown and suspension are transient
+			// scheduling state and must not survive this reconciliation step.
 			if reg.QuotaExceededClients != nil {
 				delete(reg.QuotaExceededClients, clientID)
 			}
@@ -781,7 +785,6 @@ func (r *ModelRegistry) GetAvailableModels(handlerType string) []map[string]any 
 
 func (r *ModelRegistry) buildAvailableModelsLocked(handlerType string, now time.Time) ([]map[string]any, time.Time) {
 	models := make([]map[string]any, 0, len(r.models))
-	quotaExpiredDuration := 5 * time.Minute
 	var expiresAt time.Time
 
 	for _, registration := range r.models {
@@ -792,7 +795,7 @@ func (r *ModelRegistry) buildAvailableModelsLocked(handlerType string, now time.
 			if quotaTime == nil {
 				continue
 			}
-			recoveryAt := quotaTime.Add(quotaExpiredDuration)
+			recoveryAt := quotaTime.Add(modelQuotaExceededWindow)
 			if now.Before(recoveryAt) {
 				expiredClients++
 				if expiresAt.IsZero() || recoveryAt.Before(expiresAt) {
@@ -927,7 +930,6 @@ func (r *ModelRegistry) GetAvailableModelsByProvider(provider string) []*ModelIn
 		return nil
 	}
 
-	quotaExpiredDuration := 5 * time.Minute
 	now := time.Now()
 	result := make([]*ModelInfo, 0, len(providerModels))
 
@@ -949,7 +951,7 @@ func (r *ModelRegistry) GetAvailableModelsByProvider(provider string) []*ModelIn
 					if p, okProvider := r.clientProviders[clientID]; !okProvider || p != provider {
 						continue
 					}
-					if quotaTime != nil && now.Sub(*quotaTime) < quotaExpiredDuration {
+					if quotaTime != nil && now.Sub(*quotaTime) < modelQuotaExceededWindow {
 						expiredClients++
 					}
 				}
@@ -1003,12 +1005,11 @@ func (r *ModelRegistry) GetModelCount(modelID string) int {
 
 	if registration, exists := r.models[modelID]; exists {
 		now := time.Now()
-		quotaExpiredDuration := 5 * time.Minute
 
 		// Count clients that have exceeded quota but haven't recovered yet
 		expiredClients := 0
 		for _, quotaTime := range registration.QuotaExceededClients {
-			if quotaTime != nil && now.Sub(*quotaTime) < quotaExpiredDuration {
+			if quotaTime != nil && now.Sub(*quotaTime) < modelQuotaExceededWindow {
 				expiredClients++
 			}
 		}
@@ -1217,12 +1218,11 @@ func (r *ModelRegistry) CleanupExpiredQuotas() {
 	defer r.mutex.Unlock()
 
 	now := time.Now()
-	quotaExpiredDuration := 5 * time.Minute
 	invalidated := false
 
 	for modelID, registration := range r.models {
 		for clientID, quotaTime := range registration.QuotaExceededClients {
-			if quotaTime != nil && now.Sub(*quotaTime) >= quotaExpiredDuration {
+			if quotaTime != nil && now.Sub(*quotaTime) >= modelQuotaExceededWindow {
 				delete(registration.QuotaExceededClients, clientID)
 				invalidated = true
 				log.Debugf("Cleaned up expired quota tracking for model %s, client %s", modelID, clientID)

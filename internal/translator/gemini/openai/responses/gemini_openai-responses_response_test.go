@@ -8,10 +8,10 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-func parseSSEEvent(t *testing.T, chunk string) (string, gjson.Result) {
+func parseSSEEvent(t *testing.T, chunk []byte) (string, gjson.Result) {
 	t.Helper()
 
-	lines := strings.Split(chunk, "\n")
+	lines := strings.Split(string(chunk), "\n")
 	if len(lines) < 2 {
 		t.Fatalf("unexpected SSE chunk: %q", chunk)
 	}
@@ -39,7 +39,7 @@ func TestConvertGeminiResponseToOpenAIResponses_UnwrapAndAggregateText(t *testin
 	originalReq := []byte(`{"instructions":"test instructions","model":"gpt-5","max_output_tokens":123}`)
 
 	var param any
-	var out []string
+	var out [][]byte
 	for _, line := range in {
 		out = append(out, ConvertGeminiResponseToOpenAIResponses(context.Background(), "test-model", originalReq, nil, []byte(line), &param)...)
 	}
@@ -163,7 +163,7 @@ func TestConvertGeminiResponseToOpenAIResponses_ReasoningEncryptedContent(t *tes
 	}
 
 	var param any
-	var out []string
+	var out [][]byte
 	for _, line := range in {
 		out = append(out, ConvertGeminiResponseToOpenAIResponses(context.Background(), "test-model", nil, nil, []byte(line), &param)...)
 	}
@@ -203,7 +203,7 @@ func TestConvertGeminiResponseToOpenAIResponses_FunctionCallEventOrder(t *testin
 	}
 
 	var param any
-	var out []string
+	var out [][]byte
 	for _, line := range in {
 		out = append(out, ConvertGeminiResponseToOpenAIResponses(context.Background(), "test-model", nil, nil, []byte(line), &param)...)
 	}
@@ -307,7 +307,7 @@ func TestConvertGeminiResponseToOpenAIResponses_ResponseOutputOrdering(t *testin
 	}
 
 	var param any
-	var out []string
+	var out [][]byte
 	for _, line := range in {
 		out = append(out, ConvertGeminiResponseToOpenAIResponses(context.Background(), "test-model", nil, nil, []byte(line), &param)...)
 	}

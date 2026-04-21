@@ -8,7 +8,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -75,24 +74,39 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 		w.clientsMutex.Lock()
 
 		w.lastAuthHashes = make(map[string]string)
-		w.lastAuthContents = make(map[string]*coreauth.Auth)
+		cacheAuthContents := log.IsLevelEnabled(log.DebugLevel)
+		if cacheAuthContents {
+			w.lastAuthContents = make(map[string]*coreauth.Auth)
+		} else {
+			w.lastAuthContents = nil
+		}
 		w.fileAuthsByPath = make(map[string]map[string]*coreauth.Auth)
 		if resolvedAuthDir, errResolveAuthDir := util.ResolveAuthDir(cfg.AuthDir); errResolveAuthDir != nil {
 			log.Errorf("failed to resolve auth directory for hash cache: %v", errResolveAuthDir)
 		} else if resolvedAuthDir != "" {
-			_ = filepath.Walk(resolvedAuthDir, func(path string, info fs.FileInfo, err error) error {
-				if err != nil {
-					return nil
-				}
-				if !info.IsDir() && strings.HasSuffix(strings.ToLower(info.Name()), ".json") {
-					if data, errReadFile := os.ReadFile(path); errReadFile == nil && len(data) > 0 {
+			entries, errReadDir := os.ReadDir(resolvedAuthDir)
+			if errReadDir != nil {
+				log.Errorf("failed to read auth directory for hash cache: %v", errReadDir)
+			} else {
+				for _, entry := range entries {
+					if entry == nil || entry.IsDir() {
+						continue
+					}
+					name := entry.Name()
+					if !strings.HasSuffix(strings.ToLower(name), ".json") {
+						continue
+					}
+					fullPath := filepath.Join(resolvedAuthDir, name)
+					if data, errReadFile := os.ReadFile(fullPath); errReadFile == nil && len(data) > 0 {
 						sum := sha256.Sum256(data)
-						normalizedPath := w.normalizeAuthPath(path)
+						normalizedPath := w.normalizeAuthPath(fullPath)
 						w.lastAuthHashes[normalizedPath] = hex.EncodeToString(sum[:])
-						// Parse and cache auth content for future diff comparisons
-						var auth coreauth.Auth
-						if errParse := json.Unmarshal(data, &auth); errParse == nil {
-							w.lastAuthContents[normalizedPath] = &auth
+						// Parse and cache auth content for future diff comparisons (debug only).
+						if cacheAuthContents {
+							var auth coreauth.Auth
+							if errParse := json.Unmarshal(data, &auth); errParse == nil {
+								w.lastAuthContents[normalizedPath] = &auth
+							}
 						}
 						ctx := &synthesizer.SynthesisContext{
 							Config:      cfg,
@@ -100,15 +114,14 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 							Now:         time.Now(),
 							IDGenerator: synthesizer.NewStableIDGenerator(),
 						}
-						if generated := synthesizer.SynthesizeAuthFile(ctx, path, data); len(generated) > 0 {
+						if generated := synthesizer.SynthesizeAuthFile(ctx, fullPath, data); len(generated) > 0 {
 							if pathAuths := authSliceToMap(generated); len(pathAuths) > 0 {
-								w.fileAuthsByPath[normalizedPath] = pathAuths
+								w.fileAuthsByPath[normalizedPath] = authIDSet(pathAuths)
 							}
 						}
 					}
 				}
-				return nil
-			})
+			}
 		}
 		w.clientsMutex.Unlock()
 	}
@@ -171,25 +184,30 @@ func (w *Watcher) addOrUpdateClient(path string) {
 	}
 
 	// Get old auth for diff comparison
+	cacheAuthContents := log.IsLevelEnabled(log.DebugLevel)
 	var oldAuth *coreauth.Auth
-	if w.lastAuthContents != nil {
+	if cacheAuthContents && w.lastAuthContents != nil {
 		oldAuth = w.lastAuthContents[normalized]
 	}
 
 	// Compute and log field changes
-	if changes := diff.BuildAuthChangeDetails(oldAuth, &newAuth); len(changes) > 0 {
-		log.Debugf("auth field changes for %s:", filepath.Base(path))
-		for _, c := range changes {
-			log.Debugf("  %s", c)
+	if cacheAuthContents {
+		if changes := diff.BuildAuthChangeDetails(oldAuth, &newAuth); len(changes) > 0 {
+			log.Debugf("auth field changes for %s:", filepath.Base(path))
+			for _, c := range changes {
+				log.Debugf("  %s", c)
+			}
 		}
 	}
 
 	// Update caches
 	w.lastAuthHashes[normalized] = curHash
-	if w.lastAuthContents == nil {
-		w.lastAuthContents = make(map[string]*coreauth.Auth)
+	if cacheAuthContents {
+		if w.lastAuthContents == nil {
+			w.lastAuthContents = make(map[string]*coreauth.Auth)
+		}
+		w.lastAuthContents[normalized] = &newAuth
 	}
-	w.lastAuthContents[normalized] = &newAuth
 
 	oldByID := make(map[string]*coreauth.Auth, len(w.fileAuthsByPath[normalized]))
 	for id, a := range w.fileAuthsByPath[normalized] {
@@ -206,7 +224,7 @@ func (w *Watcher) addOrUpdateClient(path string) {
 	generated := synthesizer.SynthesizeAuthFile(sctx, path, data)
 	newByID := authSliceToMap(generated)
 	if len(newByID) > 0 {
-		w.fileAuthsByPath[normalized] = newByID
+		w.fileAuthsByPath[normalized] = authIDSet(newByID)
 	} else {
 		delete(w.fileAuthsByPath, normalized)
 	}
@@ -273,6 +291,14 @@ func authSliceToMap(auths []*coreauth.Auth) map[string]*coreauth.Auth {
 	return byID
 }
 
+func authIDSet(auths map[string]*coreauth.Auth) map[string]*coreauth.Auth {
+	set := make(map[string]*coreauth.Auth, len(auths))
+	for id := range auths {
+		set[id] = nil
+	}
+	return set
+}
+
 func (w *Watcher) loadFileClients(cfg *config.Config) int {
 	authFileCount := 0
 	successfulAuthCount := 0
@@ -286,23 +312,25 @@ func (w *Watcher) loadFileClients(cfg *config.Config) int {
 		return 0
 	}
 
-	errWalk := filepath.Walk(authDir, func(path string, info fs.FileInfo, err error) error {
-		if err != nil {
-			log.Debugf("error accessing path %s: %v", path, err)
-			return err
+	entries, errReadDir := os.ReadDir(authDir)
+	if errReadDir != nil {
+		log.Errorf("error reading auth directory: %v", errReadDir)
+		return 0
+	}
+	for _, entry := range entries {
+		if entry == nil || entry.IsDir() {
+			continue
 		}
-		if !info.IsDir() && strings.HasSuffix(strings.ToLower(info.Name()), ".json") {
-			authFileCount++
-			log.Debugf("processing auth file %d: %s", authFileCount, filepath.Base(path))
-			if data, errCreate := os.ReadFile(path); errCreate == nil && len(data) > 0 {
-				successfulAuthCount++
-			}
+		name := entry.Name()
+		if !strings.HasSuffix(strings.ToLower(name), ".json") {
+			continue
 		}
-		return nil
-	})
-
-	if errWalk != nil {
-		log.Errorf("error walking auth directory: %v", errWalk)
+		authFileCount++
+		log.Debugf("processing auth file %d: %s", authFileCount, name)
+		fullPath := filepath.Join(authDir, name)
+		if data, errReadFile := os.ReadFile(fullPath); errReadFile == nil && len(data) > 0 {
+			successfulAuthCount++
+		}
 	}
 	log.Debugf("auth directory scan complete - found %d .json files, %d readable", authFileCount, successfulAuthCount)
 	return authFileCount
