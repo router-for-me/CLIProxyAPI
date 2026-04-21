@@ -226,7 +226,6 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 			toolCalls.ForEach(func(_, toolCall gjson.Result) bool {
 				param.SawToolCall = true
 				index := int(toolCall.Get("index").Int())
-				blockIndex := param.toolContentBlockIndex(index)
 
 				// Initialize accumulator if needed
 				if _, exists := param.ToolCallsAccumulator[index]; !exists {
@@ -242,20 +241,26 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 
 				// Handle function name
 				if function := toolCall.Get("function"); function.Exists() {
-					// Only emit content_block_start once we have a non-empty name
-					// AND we haven't already emitted it for this tool index.
-					// Upstreams sometimes send "name":"" or repeat the name field;
-					// without these guards Amp's tool_use parser bails with
-					// "Skipping tool_use normalization due to missing name" or
-					// crashes on duplicate start events.
-					if name := function.Get("name"); name.Exists() && name.String() != "" {
-						accumulator.Name = util.MapToolName(param.ToolNameMap, name.String())
+					// Only record the name until content_block_start has been
+					// emitted. Upstreams sometimes send "name":"" or repeat the
+					// name field across chunks; reassigning after start would
+					// also risk drift from what we already announced.
+					if !accumulator.StartEmitted {
+						if name := function.Get("name"); name.Exists() && name.String() != "" {
+							accumulator.Name = util.MapToolName(param.ToolNameMap, name.String())
+						}
 					}
 
 					if !accumulator.StartEmitted && accumulator.Name != "" {
 						stopThinkingContentBlock(param, &results)
 
 						stopTextContentBlock(param, &results)
+
+						// Reserve the Anthropic block index only at emit time
+						// so suppressed tool calls (never-named) don't create
+						// gaps in the sequential index space that strict
+						// clients depend on.
+						blockIndex := param.toolContentBlockIndex(index)
 
 						// Send content_block_start for tool_use
 						contentBlockStartJSON := `{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"","name":"","input":{}}}`
@@ -306,6 +311,12 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 		if !param.ContentBlocksStopped {
 			for index := range param.ToolCallsAccumulator {
 				accumulator := param.ToolCallsAccumulator[index]
+				// Skip tool calls whose start was never emitted (e.g. empty
+				// name throughout the stream). Emitting delta/stop for a
+				// block that has no start violates Anthropic event ordering.
+				if !accumulator.StartEmitted {
+					continue
+				}
 				blockIndex := param.toolContentBlockIndex(index)
 
 				// Send complete input_json_delta with all accumulated arguments
@@ -370,6 +381,11 @@ func convertOpenAIDoneToAnthropic(param *ConvertOpenAIResponseToAnthropicParams)
 	if !param.ContentBlocksStopped {
 		for index := range param.ToolCallsAccumulator {
 			accumulator := param.ToolCallsAccumulator[index]
+			// Same guard as in the streaming finish_reason path: never emit
+			// delta/stop for a tool block whose start was suppressed.
+			if !accumulator.StartEmitted {
+				continue
+			}
 			blockIndex := param.toolContentBlockIndex(index)
 
 			if accumulator.Arguments.Len() > 0 {
