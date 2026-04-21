@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"net/http"
@@ -9,6 +10,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	"github.com/tidwall/gjson"
@@ -86,5 +89,53 @@ func TestHashCodexDedupeHeaders_IgnoresTraceAndTimingHeaders(t *testing.T) {
 	rightHash := hashCodexDedupeHeaders(right)
 	if leftHash != rightHash {
 		t.Fatalf("hashCodexDedupeHeaders() mismatch: left=%q right=%q", leftHash, rightHash)
+	}
+}
+
+func TestPrepareCodexHTTPCallAppliesHeadersAndPreservesLogBody(t *testing.T) {
+	t.Setenv(codexCompressionEnv, "1")
+
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "codex",
+		Metadata: map[string]any{"account_id": "acct_123"},
+	}
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5.4",
+		Payload: []byte(`{"model":"gpt-5.4","input":"hello"}`),
+	}
+	rawJSON := []byte(`{"model":"gpt-5.4","input":"hello"}`)
+
+	call, err := executor.prepareCodexHTTPCall(
+		context.Background(),
+		auth,
+		sdktranslator.FromString("openai-response"),
+		"https://example.com/responses",
+		req,
+		rawJSON,
+		"oauth-token",
+		true,
+	)
+	if err != nil {
+		t.Fatalf("prepareCodexHTTPCall() error = %v", err)
+	}
+
+	if got := call.prepared.httpReq.Header.Get("Authorization"); got != "Bearer oauth-token" {
+		t.Fatalf("Authorization = %q, want %q", got, "Bearer oauth-token")
+	}
+	if got := call.prepared.httpReq.Header.Get("Accept"); got != "text/event-stream" {
+		t.Fatalf("Accept = %q, want %q", got, "text/event-stream")
+	}
+	if got := call.prepared.httpReq.Header.Get("Content-Encoding"); got != "zstd" {
+		t.Fatalf("Content-Encoding = %q, want %q", got, "zstd")
+	}
+	if !bytes.Equal(call.requestLog.Body, rawJSON) {
+		t.Fatalf("requestLog.Body = %q, want %q", string(call.requestLog.Body), string(rawJSON))
+	}
+	if got := call.requestLog.URL; got != "https://example.com/responses" {
+		t.Fatalf("requestLog.URL = %q, want %q", got, "https://example.com/responses")
+	}
+	if got := call.requestLog.Headers.Get("Content-Encoding"); got != "zstd" {
+		t.Fatalf("requestLog.Headers[Content-Encoding] = %q, want %q", got, "zstd")
 	}
 }

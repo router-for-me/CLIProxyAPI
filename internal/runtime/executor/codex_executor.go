@@ -293,6 +293,71 @@ func (e *CodexExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth
 	return httpClient.Do(httpReq)
 }
 
+type codexPreparedHTTPCall struct {
+	url        string
+	prepared   codexPreparedRequest
+	requestLog helps.UpstreamRequestLog
+}
+
+func (e *CodexExecutor) prepareCodexHTTPCall(
+	ctx context.Context,
+	auth *cliproxyauth.Auth,
+	from sdktranslator.Format,
+	url string,
+	req cliproxyexecutor.Request,
+	body []byte,
+	token string,
+	stream bool,
+) (codexPreparedHTTPCall, error) {
+	prepared, err := e.prepareCodexRequest(ctx, from, url, req, body)
+	if err != nil {
+		return codexPreparedHTTPCall{}, err
+	}
+	applyCodexHeaders(prepared.httpReq, auth, token, stream, e.cfg)
+	if err := maybeEnableCodexRequestCompression(prepared.httpReq, auth); err != nil {
+		return codexPreparedHTTPCall{}, fmt.Errorf("codex executor: request compression failed: %w", err)
+	}
+	return codexPreparedHTTPCall{
+		url:      url,
+		prepared: prepared,
+		requestLog: codexUpstreamRequestLog(
+			url,
+			http.MethodPost,
+			prepared.httpReq.Header,
+			prepared.body,
+			e.Identifier(),
+			auth,
+		),
+	}, nil
+}
+
+func codexUpstreamRequestLog(
+	url string,
+	method string,
+	headers http.Header,
+	body []byte,
+	provider string,
+	auth *cliproxyauth.Auth,
+) helps.UpstreamRequestLog {
+	var authID, authLabel, authType, authValue string
+	if auth != nil {
+		authID = auth.ID
+		authLabel = auth.Label
+		authType, authValue = auth.AccountInfo()
+	}
+	return helps.UpstreamRequestLog{
+		URL:       url,
+		Method:    method,
+		Headers:   headers,
+		Body:      body,
+		Provider:  provider,
+		AuthID:    authID,
+		AuthLabel: authLabel,
+		AuthType:  authType,
+		AuthValue: authValue,
+	}
+}
+
 func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
 	if opts.Alt == "responses/compact" {
 		return e.executeCompact(ctx, auth, req, opts)
@@ -335,33 +400,12 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	body = normalizeCodexInstructions(body)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
-	prepared, err := e.prepareCodexRequest(ctx, from, url, req, body)
+	call, err := e.prepareCodexHTTPCall(ctx, auth, from, url, req, body, apiKey, true)
 	if err != nil {
 		return resp, err
 	}
-	httpReq := prepared.httpReq
-	applyCodexHeaders(httpReq, auth, apiKey, true, e.cfg)
-	if err = maybeEnableCodexRequestCompression(httpReq, auth); err != nil {
-		return resp, fmt.Errorf("codex executor: request compression failed: %w", err)
-	}
-	var authID, authLabel, authType, authValue string
-	if auth != nil {
-		authID = auth.ID
-		authLabel = auth.Label
-		authType, authValue = auth.AccountInfo()
-	}
-	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
-		URL:       url,
-		Method:    http.MethodPost,
-		Headers:   httpReq.Header,
-		Body:      prepared.body,
-		Provider:  e.Identifier(),
-		AuthID:    authID,
-		AuthLabel: authLabel,
-		AuthType:  authType,
-		AuthValue: authValue,
-	})
-	result, usageOwner, err := e.fetchCodexResponsesAggregate(ctx, auth, url, prepared)
+	helps.RecordAPIRequest(ctx, e.cfg, call.requestLog)
+	result, usageOwner, err := e.fetchCodexResponsesAggregate(ctx, auth, call.url, call.prepared)
 	if err != nil {
 		return resp, err
 	}
@@ -423,33 +467,12 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	body = normalizeCodexInstructions(body)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses/compact"
-	prepared, err := e.prepareCodexRequest(ctx, from, url, req, body)
+	call, err := e.prepareCodexHTTPCall(ctx, auth, from, url, req, body, apiKey, false)
 	if err != nil {
 		return resp, err
 	}
-	httpReq := prepared.httpReq
-	applyCodexHeaders(httpReq, auth, apiKey, false, e.cfg)
-	if err = maybeEnableCodexRequestCompression(httpReq, auth); err != nil {
-		return resp, fmt.Errorf("codex executor: request compression failed: %w", err)
-	}
-	var authID, authLabel, authType, authValue string
-	if auth != nil {
-		authID = auth.ID
-		authLabel = auth.Label
-		authType, authValue = auth.AccountInfo()
-	}
-	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
-		URL:       url,
-		Method:    http.MethodPost,
-		Headers:   httpReq.Header,
-		Body:      prepared.body,
-		Provider:  e.Identifier(),
-		AuthID:    authID,
-		AuthLabel: authLabel,
-		AuthType:  authType,
-		AuthValue: authValue,
-	})
-	result, usageOwner, err := e.fetchCodexNonStreamResponse(ctx, auth, url, prepared)
+	helps.RecordAPIRequest(ctx, e.cfg, call.requestLog)
+	result, usageOwner, err := e.fetchCodexNonStreamResponse(ctx, auth, call.url, call.prepared)
 	if err != nil {
 		return resp, err
 	}
@@ -510,34 +533,14 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	body = normalizeCodexInstructions(body)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
-	httpReq, err := e.cacheHelper(ctx, from, url, req, body)
+	call, err := e.prepareCodexHTTPCall(ctx, auth, from, url, req, body, apiKey, true)
 	if err != nil {
 		return nil, err
 	}
-	applyCodexHeaders(httpReq, auth, apiKey, true, e.cfg)
-	if err = maybeEnableCodexRequestCompression(httpReq, auth); err != nil {
-		return nil, fmt.Errorf("codex executor: request compression failed: %w", err)
-	}
-	var authID, authLabel, authType, authValue string
-	if auth != nil {
-		authID = auth.ID
-		authLabel = auth.Label
-		authType, authValue = auth.AccountInfo()
-	}
-	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
-		URL:       url,
-		Method:    http.MethodPost,
-		Headers:   httpReq.Header,
-		Body:      body,
-		Provider:  e.Identifier(),
-		AuthID:    authID,
-		AuthLabel: authLabel,
-		AuthType:  authType,
-		AuthValue: authValue,
-	})
+	helps.RecordAPIRequest(ctx, e.cfg, call.requestLog)
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-	httpResp, err := httpClient.Do(httpReq)
+	httpResp, err := httpClient.Do(call.prepared.httpReq)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return nil, err
