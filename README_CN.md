@@ -95,6 +95,12 @@ CLIProxyAPI 已内置对 [Amp CLI](https://ampcode.com) 和 Amp IDE 扩展的支
 
 这些路径有助于选择协议表面，但当多个后端复用同一个客户端可见模型名时，它们本身并不能保证唯一的推理执行器。实际的推理路由仍然根据请求里的 model/alias 解析。若要严格钉住某个后端，请使用唯一 alias、前缀，或避免让多个后端暴露相同的客户端模型名。
 
+### Gemini / Vertex 兼容性说明
+
+- 对于 Gemini 原生客户端或桥接链路，优先使用 Google 风格的 provider 路径，例如 `/api/provider/google/v1beta/models/{model}:generateContent` 和 `...:streamGenerateContent`，这样请求/响应体能尽量保持原生 Gemini 形态。
+- OpenAI Responses 里的 `developer` 消息会被折叠进 Gemini 的 `systemInstruction`，不会再以 Gemini 不支持的 role 原样透传。
+- CLIProxyAPI 在转发到 Gemini API / Vertex 上游前，会移除中继链路专用的 `includeServerSideToolInvocations` 标记，以降低 Google/Vertex 在混合代理链路里返回 `400` 报错的概率。
+
 **→ [Amp CLI 完整集成指南](https://help.router-for.me/cn/agent-client/amp-cli.html)**
 
 ## SDK 文档

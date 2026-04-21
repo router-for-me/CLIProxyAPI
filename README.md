@@ -96,6 +96,12 @@ When you need the request/response shape of a specific backend family, use the p
 
 These routes help you select the protocol surface, but they do not by themselves guarantee a unique inference executor when the same client-visible model name is reused across multiple backends. Inference routing is still resolved from the request model/alias. For strict backend pinning, use unique aliases, prefixes, or otherwise avoid overlapping client-visible model names.
 
+### Gemini / Vertex compatibility notes
+
+- For Gemini-native clients and bridges, prefer the Google-style provider routes such as `/api/provider/google/v1beta/models/{model}:generateContent` and `...:streamGenerateContent` so the request/response body stays in native Gemini format end-to-end.
+- OpenAI Responses `developer` messages are folded into Gemini `systemInstruction` instead of being forwarded as an unsupported Gemini role.
+- CLIProxyAPI strips relay-only `includeServerSideToolInvocations` flags before forwarding requests to Gemini API / Vertex upstreams, which helps avoid Google/Vertex `400` errors in mixed proxy chains.
+
 **→ [Complete Amp CLI Integration Guide](https://help.router-for.me/agent-client/amp-cli.html)**
 
 ## SDK Docs
