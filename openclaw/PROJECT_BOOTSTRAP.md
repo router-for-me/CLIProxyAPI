@@ -110,3 +110,8 @@ Before enabling aggressive automation, read `openclaw/SELF_HEAL_RUNBOOK.md`.
 ## Unified navigation
 
 For a single OpenClaw ops entrypoint, see `openclaw/OPS_INDEX.md`.
+
+
+## Existing local deployment migration
+
+If you already run a local `CLIProxyAPIPlus` deployment, read `openclaw/MIGRATION_FROM_CLIPROXYAPIPLUS.md` before cutover.

@@ -98,3 +98,8 @@ See `openclaw/SELF_HEAL_RUNBOOK.md` for the boundary between automatic recovery,
 ## Unified navigation
 
 For the full OpenClaw ops map, see `openclaw/OPS_INDEX.md`.
+
+
+## Migration from existing local CLIProxyAPIPlus setup
+
+See `openclaw/MIGRATION_FROM_CLIPROXYAPIPLUS.md` if you are replacing an existing local deployment path.

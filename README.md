@@ -259,3 +259,6 @@ Recommended default:
 
 
 Need help choosing repositories? See `openclaw/REPO_SELECTION.md`.
+
+
+Migrating from an existing local `CLIProxyAPIPlus` deployment? See `openclaw/MIGRATION_FROM_CLIPROXYAPIPLUS.md`.

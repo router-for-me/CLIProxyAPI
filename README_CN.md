@@ -254,3 +254,6 @@ Management Center 的定位是：**人工运维管理界面**。
 
 
 如果你不知道该先用哪个仓库，请看：`openclaw/REPO_SELECTION.md`。
+
+
+如果你是从现有本地 `CLIProxyAPIPlus` 部署迁移，请先看：`openclaw/MIGRATION_FROM_CLIPROXYAPIPLUS.md`。

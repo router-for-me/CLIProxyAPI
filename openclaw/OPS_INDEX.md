@@ -40,3 +40,5 @@ After following the docs in this index, the fork should be usable as:
 ## Repository choice
 
 - Selection matrix: `openclaw/REPO_SELECTION.md`
+
+- Migration guide from local CLIProxyAPIPlus deployment: `openclaw/MIGRATION_FROM_CLIPROXYAPIPLUS.md`
