@@ -131,8 +131,10 @@ func (e *GeminiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	}
 
 	body = fixGeminiImageAspectRatio(baseModel, body)
+	body = sanitizeGeminiUpstreamBody(body)
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
+	body = sanitizeGeminiUpstreamBody(body)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 
 	action := "generateContent"
@@ -238,8 +240,10 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	}
 
 	body = fixGeminiImageAspectRatio(baseModel, body)
+	body = sanitizeGeminiUpstreamBody(body)
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
+	body = sanitizeGeminiUpstreamBody(body)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 
 	baseURL := resolveGeminiBaseURL(auth)
@@ -354,6 +358,7 @@ func (e *GeminiExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	}
 
 	translatedReq = fixGeminiImageAspectRatio(baseModel, translatedReq)
+	translatedReq = sanitizeGeminiUpstreamBody(translatedReq)
 	respCtx := context.WithValue(ctx, "alt", opts.Alt)
 	translatedReq, _ = sjson.DeleteBytes(translatedReq, "tools")
 	translatedReq, _ = sjson.DeleteBytes(translatedReq, "generationConfig")
@@ -509,6 +514,26 @@ func applyGeminiHeaders(req *http.Request, auth *cliproxyauth.Auth) {
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(req, attrs)
+}
+
+func sanitizeGeminiUpstreamBody(rawJSON []byte) []byte {
+	if len(rawJSON) == 0 {
+		return rawJSON
+	}
+	paths := []string{
+		"toolConfig.includeServerSideToolInvocations",
+		"toolConfig.include_server_side_tool_invocations",
+		"tool_config.includeServerSideToolInvocations",
+		"tool_config.include_server_side_tool_invocations",
+		"request.toolConfig.includeServerSideToolInvocations",
+		"request.toolConfig.include_server_side_tool_invocations",
+		"request.tool_config.includeServerSideToolInvocations",
+		"request.tool_config.include_server_side_tool_invocations",
+	}
+	for _, path := range paths {
+		rawJSON, _ = sjson.DeleteBytes(rawJSON, path)
+	}
+	return rawJSON
 }
 
 func fixGeminiImageAspectRatio(modelName string, rawJSON []byte) []byte {
