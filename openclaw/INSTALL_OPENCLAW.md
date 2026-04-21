@@ -93,3 +93,8 @@ For a full step-by-step handoff from plain fork to OpenClaw-managed project, see
 ## Self-heal policy
 
 See `openclaw/SELF_HEAL_RUNBOOK.md` for the boundary between automatic recovery, alert-only mode, and mandatory human intervention.
+
+
+## Unified navigation
+
+For the full OpenClaw ops map, see `openclaw/OPS_INDEX.md`.

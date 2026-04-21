@@ -240,3 +240,6 @@ Use the Management Center as the **human operator UI**.
 
 Relationship notes:
 - `openclaw/PROJECT_RELATIONSHIP.md`
+
+
+For a single OpenClaw navigation entrypoint, see `openclaw/OPS_INDEX.md`.
