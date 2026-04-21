@@ -193,8 +193,8 @@ func (h *Handler) APICall(c *gin.Context) {
 
 	resp, errDo := httpClient.Do(req)
 	if errDo != nil {
-		log.WithError(errDo).Debug("management APICall request failed")
-		c.JSON(http.StatusBadGateway, gin.H{"error": "request failed"})
+		log.WithError(errDo).Error("management APICall request failed")
+		c.JSON(http.StatusBadGateway, gin.H{"error": "request failed: " + errDo.Error()})
 		return
 	}
 	defer func() {
