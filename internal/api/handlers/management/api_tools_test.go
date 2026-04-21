@@ -19,7 +19,7 @@ func TestAPICallTransportDirectBypassesGlobalProxy(t *testing.T) {
 		},
 	}
 
-	transport := h.apiCallTransport(&coreauth.Auth{ProxyURL: "direct"})
+	transport := h.apiCallTransport(&coreauth.Auth{ProxyURL: "direct"}, false)
 	httpTransport, ok := transport.(*http.Transport)
 	if !ok {
 		t.Fatalf("transport type = %T, want *http.Transport", transport)
@@ -38,7 +38,7 @@ func TestAPICallTransportInvalidAuthFallsBackToGlobalProxy(t *testing.T) {
 		},
 	}
 
-	transport := h.apiCallTransport(&coreauth.Auth{ProxyURL: "bad-value"})
+	transport := h.apiCallTransport(&coreauth.Auth{ProxyURL: "bad-value"}, false)
 	httpTransport, ok := transport.(*http.Transport)
 	if !ok {
 		t.Fatalf("transport type = %T, want *http.Transport", transport)
@@ -135,7 +135,7 @@ func TestAPICallTransportAPIKeyAuthFallsBackToConfigProxyURL(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			transport := h.apiCallTransport(tc.auth)
+			transport := h.apiCallTransport(tc.auth, false)
 			httpTransport, ok := transport.(*http.Transport)
 			if !ok {
 				t.Fatalf("transport type = %T, want *http.Transport", transport)
