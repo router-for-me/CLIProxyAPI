@@ -221,3 +221,6 @@ Fork maintenance: use `bash scripts/sync_upstream.sh` to keep this fork aligned 
 
 
 OpenClaw template assets are also included: `scripts/heartbeat_example.sh`, `scripts/self_heal_example.sh`, and `openclaw/CRON_TEMPLATE.md`.
+
+
+OpenClaw bootstrap docs are included in `openclaw/PROJECT_BOOTSTRAP.md`, with local-ops guidance in `LOCAL_OPERATIONS.md`.

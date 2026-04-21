@@ -80,3 +80,11 @@ This fork also ships example operational templates:
 - `openclaw/CRON_TEMPLATE.md`
 
 These are templates, not machine-specific production scripts. Adjust environment variables and paths for your own deployment.
+
+
+## Bootstrap the project
+
+For a full step-by-step handoff from plain fork to OpenClaw-managed project, see:
+
+- `openclaw/PROJECT_BOOTSTRAP.md`
+- `LOCAL_OPERATIONS.md`

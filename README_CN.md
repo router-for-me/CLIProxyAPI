@@ -219,3 +219,6 @@ Telegram 群：https://t.me/CLIProxyAPI
 ## OpenClaw
 
 This fork includes an OpenClaw-compatible autonomy layer. See `openclaw/INSTALL_OPENCLAW.md`.
+
+
+本 fork 还包含 OpenClaw 接管引导：`openclaw/PROJECT_BOOTSTRAP.md`，以及本机运维模板：`LOCAL_OPERATIONS.md`。
