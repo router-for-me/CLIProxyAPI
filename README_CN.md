@@ -238,3 +238,16 @@ Management Center 的定位是：**人工运维管理界面**。
 
 
 若需要 OpenClaw 统一导航入口，请看：`openclaw/OPS_INDEX.md`。
+
+
+## 是否两个仓库都要用？
+
+**不一定。**
+
+- 如果你要的是：**服务主仓 + OpenClaw 自治/自愈/bootstrap**，只用这个仓库就够。
+- 如果你还需要：**浏览器里的专用管理后台 UI**，再加上配套仓：
+  - https://github.com/luyuehm/Cli-Proxy-API-Management-Center
+
+推荐默认口径：
+- 必选：`luyuehm/CLIProxyAPI`
+- 可选配套：`luyuehm/Cli-Proxy-API-Management-Center`

@@ -243,3 +243,16 @@ Relationship notes:
 
 
 For a single OpenClaw navigation entrypoint, see `openclaw/OPS_INDEX.md`.
+
+
+## Do I need both repositories?
+
+Not necessarily.
+
+- If you want the **service fork + OpenClaw autonomy/self-heal/bootstrap**, use this repository.
+- If you also want a dedicated browser management UI, add the companion project:
+  - https://github.com/luyuehm/Cli-Proxy-API-Management-Center
+
+Recommended default:
+- required: `luyuehm/CLIProxyAPI`
+- optional companion: `luyuehm/Cli-Proxy-API-Management-Center`
