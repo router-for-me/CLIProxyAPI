@@ -2,6 +2,7 @@ package management
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -48,6 +49,7 @@ type apiCallRequest struct {
 	URL             string            `json:"url"`
 	Header          map[string]string `json:"header"`
 	Data            string            `json:"data"`
+	Insecure        bool              `json:"insecure"`
 }
 
 type apiCallResponse struct {
@@ -189,7 +191,7 @@ func (h *Handler) APICall(c *gin.Context) {
 	httpClient := &http.Client{
 		Timeout: defaultAPICallTimeout,
 	}
-	httpClient.Transport = h.apiCallTransport(auth)
+	httpClient.Transport = h.apiCallTransport(auth, body.Insecure)
 
 	resp, errDo := httpClient.Do(req)
 	if errDo != nil {
@@ -318,7 +320,7 @@ func (h *Handler) refreshGeminiOAuthAccessToken(ctx context.Context, auth *corea
 	ctxToken := ctx
 	httpClient := &http.Client{
 		Timeout:   defaultAPICallTimeout,
-		Transport: h.apiCallTransport(auth),
+		Transport: h.apiCallTransport(auth, false),
 	}
 	ctxToken = context.WithValue(ctxToken, oauth2.HTTPClient, httpClient)
 
@@ -377,7 +379,7 @@ func (h *Handler) refreshAntigravityOAuthAccessToken(ctx context.Context, auth *
 
 	httpClient := &http.Client{
 		Timeout:   defaultAPICallTimeout,
-		Transport: h.apiCallTransport(auth),
+		Transport: h.apiCallTransport(auth, false),
 	}
 	resp, errDo := httpClient.Do(req)
 	if errDo != nil {
@@ -631,7 +633,7 @@ func (h *Handler) authByIndex(authIndex string) *coreauth.Auth {
 	return nil
 }
 
-func (h *Handler) apiCallTransport(auth *coreauth.Auth) http.RoundTripper {
+func (h *Handler) apiCallTransport(auth *coreauth.Auth, insecure bool) http.RoundTripper {
 	var proxyCandidates []string
 	if auth != nil {
 		if proxyStr := strings.TrimSpace(auth.ProxyURL); proxyStr != "" {
@@ -651,16 +653,32 @@ func (h *Handler) apiCallTransport(auth *coreauth.Auth) http.RoundTripper {
 
 	for _, proxyStr := range proxyCandidates {
 		if transport := buildProxyTransport(proxyStr); transport != nil {
+			if insecure {
+				if transport.TLSClientConfig == nil {
+					transport.TLSClientConfig = &tls.Config{}
+				}
+				transport.TLSClientConfig.InsecureSkipVerify = true
+			}
 			return transport
 		}
 	}
 
 	transport, ok := http.DefaultTransport.(*http.Transport)
 	if !ok || transport == nil {
-		return &http.Transport{Proxy: nil}
+		t := &http.Transport{Proxy: nil}
+		if insecure {
+			t.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+		}
+		return t
 	}
 	clone := transport.Clone()
 	clone.Proxy = nil
+	if insecure {
+		if clone.TLSClientConfig == nil {
+			clone.TLSClientConfig = &tls.Config{}
+		}
+		clone.TLSClientConfig.InsecureSkipVerify = true
+	}
 	return clone
 }
 
