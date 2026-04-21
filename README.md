@@ -218,3 +218,6 @@ This fork includes an OpenClaw-compatible autonomy layer. See `openclaw/INSTALL_
 
 
 Fork maintenance: use `bash scripts/sync_upstream.sh` to keep this fork aligned with upstream while preserving the OpenClaw layer.
+
+
+OpenClaw template assets are also included: `scripts/heartbeat_example.sh`, `scripts/self_heal_example.sh`, and `openclaw/CRON_TEMPLATE.md`.

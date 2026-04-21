@@ -69,3 +69,14 @@ If you only want a local dry run without push:
 ```bash
 PUSH=0 bash scripts/sync_upstream.sh
 ```
+
+
+## Included templates
+
+This fork also ships example operational templates:
+
+- `scripts/heartbeat_example.sh`
+- `scripts/self_heal_example.sh`
+- `openclaw/CRON_TEMPLATE.md`
+
+These are templates, not machine-specific production scripts. Adjust environment variables and paths for your own deployment.
