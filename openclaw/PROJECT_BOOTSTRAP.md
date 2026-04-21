@@ -100,3 +100,8 @@ You are done when:
 - local overrides are documented in `LOCAL_OPERATIONS.md`
 - OpenClaw skill is installed
 - optional cron can run without spamming on healthy status
+
+
+## Self-heal decision boundary
+
+Before enabling aggressive automation, read `openclaw/SELF_HEAL_RUNBOOK.md`.

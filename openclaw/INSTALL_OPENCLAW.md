@@ -88,3 +88,8 @@ For a full step-by-step handoff from plain fork to OpenClaw-managed project, see
 
 - `openclaw/PROJECT_BOOTSTRAP.md`
 - `LOCAL_OPERATIONS.md`
+
+
+## Self-heal policy
+
+See `openclaw/SELF_HEAL_RUNBOOK.md` for the boundary between automatic recovery, alert-only mode, and mandatory human intervention.

@@ -224,3 +224,6 @@ OpenClaw template assets are also included: `scripts/heartbeat_example.sh`, `scr
 
 
 OpenClaw bootstrap docs are included in `openclaw/PROJECT_BOOTSTRAP.md`, with local-ops guidance in `LOCAL_OPERATIONS.md`.
+
+
+OpenClaw self-heal policy is documented in `openclaw/SELF_HEAL_RUNBOOK.md`.
