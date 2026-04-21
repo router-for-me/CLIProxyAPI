@@ -39,13 +39,10 @@ type codexPreparedRequest struct {
 }
 
 type codexNonStreamHTTPResult struct {
-	statusCode          int
-	headers             http.Header
-	body                []byte
-	completedData       []byte
-	outputItemsByIndex  map[int64][]byte
-	outputItemsFallback [][]byte
-	functionCallsByItem map[string]*codexStreamFunctionCallState
+	statusCode    int
+	headers       http.Header
+	body          []byte
+	completedData []byte
 }
 
 func (e *CodexExecutor) prepareCodexRequest(ctx context.Context, from sdktranslator.Format, url string, req cliproxyexecutor.Request, rawJSON []byte) (codexPreparedRequest, error) {
@@ -246,28 +243,6 @@ func (result codexNonStreamHTTPResult) clone() codexNonStreamHTTPResult {
 	if len(result.completedData) > 0 {
 		cloned.completedData = bytes.Clone(result.completedData)
 	}
-	if len(result.outputItemsByIndex) > 0 {
-		cloned.outputItemsByIndex = make(map[int64][]byte, len(result.outputItemsByIndex))
-		for idx, item := range result.outputItemsByIndex {
-			cloned.outputItemsByIndex[idx] = bytes.Clone(item)
-		}
-	}
-	if len(result.outputItemsFallback) > 0 {
-		cloned.outputItemsFallback = make([][]byte, len(result.outputItemsFallback))
-		for i := range result.outputItemsFallback {
-			cloned.outputItemsFallback[i] = bytes.Clone(result.outputItemsFallback[i])
-		}
-	}
-	if len(result.functionCallsByItem) > 0 {
-		cloned.functionCallsByItem = make(map[string]*codexStreamFunctionCallState, len(result.functionCallsByItem))
-		for key, state := range result.functionCallsByItem {
-			if state == nil {
-				continue
-			}
-			copied := *state
-			cloned.functionCallsByItem[key] = &copied
-		}
-	}
 	return cloned
 }
 
@@ -282,20 +257,15 @@ func collectCodexResponseAggregate(body io.Reader, captureBody bool) (codexNonSt
 			result.body = append(result.body, line...)
 			result.body = append(result.body, '\n')
 		}
-		if !bytes.HasPrefix(line, dataTag) {
+		eventData, ok := codexEventData(line)
+		if !ok {
 			return nil
 		}
-
-		eventData := bytes.TrimSpace(line[len(dataTag):])
-		streamState.recordEvent(eventData)
-		if gjson.GetBytes(eventData, "type").String() == "response.completed" {
-			result.completedData = bytes.Clone(eventData)
+		if completed, isCompleted := streamState.processEventData(eventData, true); isCompleted {
+			result.completedData = bytes.Clone(completed.data)
 		}
 		return nil
 	})
-	result.outputItemsByIndex = streamState.outputItemsByIndex
-	result.outputItemsFallback = streamState.outputItemsFallback
-	result.functionCallsByItem = streamState.functionCallsByItem
 	return result, err
 }
 

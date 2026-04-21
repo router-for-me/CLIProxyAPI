@@ -102,3 +102,21 @@ func TestPatchCodexCompletedOutputRecoversFunctionCall(t *testing.T) {
 		t.Fatalf("response.output.0.arguments = %q, want %q", got, `{"q":"hello"}`)
 	}
 }
+
+func TestCollectCodexResponseAggregatePatchesCompletedOutputButKeepsCapturedBody(t *testing.T) {
+	stream := strings.NewReader(
+		"data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]},\"output_index\":0}\n" +
+			"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"output\":[]}}\n\n",
+	)
+
+	result, err := collectCodexResponseAggregate(stream, true)
+	if err != nil {
+		t.Fatalf("collectCodexResponseAggregate() error = %v", err)
+	}
+	if got := gjson.GetBytes(result.completedData, "response.output.0.content.0.text").String(); got != "ok" {
+		t.Fatalf("patched completed output text = %q, want %q", got, "ok")
+	}
+	if !strings.Contains(string(result.body), `"response":{"id":"resp_1","output":[]}`) {
+		t.Fatalf("captured body did not preserve original completed event: %s", string(result.body))
+	}
+}

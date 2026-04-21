@@ -48,6 +48,11 @@ type codexStreamCompletionState struct {
 	functionCallsByItem map[string]*codexStreamFunctionCallState
 }
 
+type codexCompletedStreamEvent struct {
+	data           []byte
+	recoveredCount int
+}
+
 func newCodexStreamCompletionState() *codexStreamCompletionState {
 	return &codexStreamCompletionState{
 		outputItemsByIndex:  make(map[int64][]byte),
@@ -76,12 +81,38 @@ func (s *codexStreamCompletionState) functionCallByItem(itemID string, outputInd
 	return nil
 }
 
+func codexEventData(line []byte) ([]byte, bool) {
+	if !bytes.HasPrefix(line, dataTag) {
+		return nil, false
+	}
+	return bytes.TrimSpace(line[len(dataTag):]), true
+}
+
+func codexSSEDataLine(data []byte) []byte {
+	line := make([]byte, 0, len(dataTag)+1+len(data))
+	line = append(line, dataTag...)
+	line = append(line, ' ')
+	line = append(line, data...)
+	return line
+}
+
+func codexEventType(eventData []byte) string {
+	if len(eventData) == 0 {
+		return ""
+	}
+	return gjson.GetBytes(eventData, "type").String()
+}
+
 func (s *codexStreamCompletionState) recordEvent(eventData []byte) {
+	s.recordEventWithType(codexEventType(eventData), eventData)
+}
+
+func (s *codexStreamCompletionState) recordEventWithType(eventType string, eventData []byte) {
 	if s == nil || len(eventData) == 0 {
 		return
 	}
 
-	switch gjson.GetBytes(eventData, "type").String() {
+	switch eventType {
 	case "response.output_item.done":
 		itemResult := gjson.GetBytes(eventData, "item")
 		if !itemResult.Exists() || itemResult.Type != gjson.JSON {
@@ -138,6 +169,27 @@ func (s *codexStreamCompletionState) recordEvent(eventData []byte) {
 			state.Arguments = arguments
 		}
 	}
+}
+
+func (s *codexStreamCompletionState) processEventData(eventData []byte, patchCompleted bool) (codexCompletedStreamEvent, bool) {
+	if s == nil || len(eventData) == 0 {
+		return codexCompletedStreamEvent{}, false
+	}
+
+	eventType := codexEventType(eventData)
+	s.recordEventWithType(eventType, eventData)
+	if eventType != "response.completed" {
+		return codexCompletedStreamEvent{}, false
+	}
+
+	completed := codexCompletedStreamEvent{data: eventData}
+	if patchCompleted {
+		if patched, recoveredCount := s.patchCompletedOutputIfEmpty(eventData); recoveredCount > 0 {
+			completed.data = patched
+			completed.recoveredCount = recoveredCount
+		}
+	}
+	return completed, true
 }
 
 func (s *codexStreamCompletionState) patchCompletedOutputIfEmpty(completedData []byte) ([]byte, int) {
@@ -422,9 +474,8 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 			reporter.EnsurePublished(ctx)
 		}
 
-		completedData := patchCodexCompletedOutput(result.completedData, result.outputItemsByIndex, result.outputItemsFallback, result.functionCallsByItem)
 		var param any
-		out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, originalPayload, body, completedData, &param)
+		out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, originalPayload, body, result.completedData, &param)
 		resp = cliproxyexecutor.Response{Payload: out, Headers: result.headers.Clone()}
 		return resp, nil
 	}
@@ -573,23 +624,19 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		errRead := helps.ReadStreamLines(httpResp.Body, func(line []byte) error {
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 
-			if bytes.HasPrefix(line, dataTag) {
-				data := bytes.TrimSpace(line[5:])
-				streamState.recordEvent(data)
-				if gjson.GetBytes(data, "type").String() == "response.completed" {
-					if detail, ok := helps.ParseCodexUsage(data); ok {
+			if eventData, ok := codexEventData(line); ok {
+				if completed, isCompleted := streamState.processEventData(eventData, true); isCompleted {
+					if detail, ok := helps.ParseCodexUsage(completed.data); ok {
 						reporter.Publish(ctx, detail)
 					}
-					if patched, recoveredCount := streamState.patchCompletedOutputIfEmpty(data); recoveredCount > 0 {
+					if completed.recoveredCount > 0 {
 						log.Warnf(
 							"codex stream completed with empty response.output; recovered_items=%d cached_done_items=%d cached_function_calls=%d",
-							recoveredCount,
+							completed.recoveredCount,
 							len(streamState.outputItemsByIndex)+len(streamState.outputItemsFallback),
 							len(streamState.functionCallsByItem),
 						)
-						data = patched
-						line = append(append([]byte{}, dataTag...), ' ')
-						line = append(line, data...)
+						line = codexSSEDataLine(completed.data)
 					}
 				}
 			}
@@ -930,16 +977,6 @@ func normalizeCodexInstructions(body []byte) []byte {
 		body, _ = helps.SetJSONBytes(body, "instructions", "")
 	}
 	return body
-}
-
-func patchCodexCompletedOutput(completedData []byte, outputItemsByIndex map[int64][]byte, outputItemsFallback [][]byte, functionCallsByItem map[string]*codexStreamFunctionCallState) []byte {
-	streamState := &codexStreamCompletionState{
-		outputItemsByIndex:  outputItemsByIndex,
-		outputItemsFallback: outputItemsFallback,
-		functionCallsByItem: functionCallsByItem,
-	}
-	patched, _ := streamState.patchCompletedOutputIfEmpty(completedData)
-	return patched
 }
 
 func isCodexModelCapacityError(errorBody []byte) bool {
