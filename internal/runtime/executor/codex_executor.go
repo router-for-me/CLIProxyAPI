@@ -36,6 +36,48 @@ const (
 
 var dataTag = []byte("data:")
 
+// Streamed Codex responses may emit response.output_item.done events while leaving
+// response.completed.response.output empty. Keep the stream path aligned with the
+// already-patched non-stream path by reconstructing response.output from those items.
+func collectCodexOutputItemDone(eventData []byte, outputItemsByIndex map[int64][]byte, outputItemsFallback *[][]byte) {
+	itemResult := gjson.GetBytes(eventData, "item")
+	if !itemResult.Exists() || itemResult.Type != gjson.JSON {
+		return
+	}
+	outputIndexResult := gjson.GetBytes(eventData, "output_index")
+	if outputIndexResult.Exists() {
+		outputItemsByIndex[outputIndexResult.Int()] = []byte(itemResult.Raw)
+		return
+	}
+	*outputItemsFallback = append(*outputItemsFallback, []byte(itemResult.Raw))
+}
+
+func patchCodexCompletedOutput(eventData []byte, outputItemsByIndex map[int64][]byte, outputItemsFallback [][]byte) []byte {
+	outputResult := gjson.GetBytes(eventData, "response.output")
+	shouldPatchOutput := (!outputResult.Exists() || !outputResult.IsArray() || len(outputResult.Array()) == 0) && (len(outputItemsByIndex) > 0 || len(outputItemsFallback) > 0)
+	if !shouldPatchOutput {
+		return eventData
+	}
+
+	completedDataPatched := eventData
+	completedDataPatched, _ = sjson.SetRawBytes(completedDataPatched, "response.output", []byte(`[]`))
+
+	indexes := make([]int64, 0, len(outputItemsByIndex))
+	for idx := range outputItemsByIndex {
+		indexes = append(indexes, idx)
+	}
+	sort.Slice(indexes, func(i, j int) bool {
+		return indexes[i] < indexes[j]
+	})
+	for _, idx := range indexes {
+		completedDataPatched, _ = sjson.SetRawBytes(completedDataPatched, "response.output.-1", outputItemsByIndex[idx])
+	}
+	for _, item := range outputItemsFallback {
+		completedDataPatched, _ = sjson.SetRawBytes(completedDataPatched, "response.output.-1", item)
+	}
+	return completedDataPatched
+}
+
 // CodexExecutor is a stateless executor for Codex (OpenAI Responses API entrypoint).
 // If api_key is unavailable on auth, it falls back to legacy via ClientAdapter.
 type CodexExecutor struct {
@@ -414,20 +456,28 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		scanner := bufio.NewScanner(httpResp.Body)
 		scanner.Buffer(nil, 52_428_800) // 50MB
 		var param any
+		outputItemsByIndex := make(map[int64][]byte)
+		var outputItemsFallback [][]byte
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
+			translatedLine := bytes.Clone(line)
 
 			if bytes.HasPrefix(line, dataTag) {
 				data := bytes.TrimSpace(line[5:])
-				if gjson.GetBytes(data, "type").String() == "response.completed" {
+				switch gjson.GetBytes(data, "type").String() {
+				case "response.output_item.done":
+					collectCodexOutputItemDone(data, outputItemsByIndex, &outputItemsFallback)
+				case "response.completed":
 					if detail, ok := helps.ParseCodexUsage(data); ok {
 						reporter.Publish(ctx, detail)
 					}
+					data = patchCodexCompletedOutput(data, outputItemsByIndex, outputItemsFallback)
+					translatedLine = append([]byte("data: "), data...)
 				}
 			}
 
-			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, originalPayload, body, bytes.Clone(line), &param)
+			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, originalPayload, body, translatedLine, &param)
 			for i := range chunks {
 				out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}
 			}
