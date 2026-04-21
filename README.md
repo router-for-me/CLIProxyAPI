@@ -227,3 +227,16 @@ OpenClaw bootstrap docs are included in `openclaw/PROJECT_BOOTSTRAP.md`, with lo
 
 
 OpenClaw self-heal policy is documented in `openclaw/SELF_HEAL_RUNBOOK.md`.
+
+
+## Companion Management Center
+
+For a dedicated browser-based management UI, see the companion project:
+
+- https://github.com/luyuehm/Cli-Proxy-API-Management-Center
+
+Use this fork as the **service + OpenClaw autonomy** entrypoint.
+Use the Management Center as the **human operator UI**.
+
+Relationship notes:
+- `openclaw/PROJECT_RELATIONSHIP.md`

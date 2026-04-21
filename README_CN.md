@@ -222,3 +222,16 @@ This fork includes an OpenClaw-compatible autonomy layer. See `openclaw/INSTALL_
 
 
 本 fork 还包含 OpenClaw 接管引导：`openclaw/PROJECT_BOOTSTRAP.md`，以及本机运维模板：`LOCAL_OPERATIONS.md`。
+
+
+## 配套 Management Center
+
+如果你需要浏览器里的管理后台，请使用配套项目：
+
+- https://github.com/luyuehm/Cli-Proxy-API-Management-Center
+
+本 fork 的定位是：**服务主仓 + OpenClaw 自治层**。
+Management Center 的定位是：**人工运维管理界面**。
+
+关系说明见：
+- `openclaw/PROJECT_RELATIONSHIP.md`
