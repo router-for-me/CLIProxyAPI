@@ -293,10 +293,28 @@ func (s *codexStreamCompletionState) patchCompletedOutputIfEmpty(completedData [
 	})
 
 	patched := completedData
-	patched, _ = sjson.SetRawBytes(patched, "response.output", []byte(`[]`))
-	for _, item := range recovered {
-		patched, _ = sjson.SetRawBytes(patched, "response.output.-1", item.raw)
+	outputArray := []byte("[]")
+	if len(recovered) > 0 {
+		var buf bytes.Buffer
+		totalLen := 2
+		for _, item := range recovered {
+			totalLen += len(item.raw)
+		}
+		if len(recovered) > 1 {
+			totalLen += len(recovered) - 1
+		}
+		buf.Grow(totalLen)
+		buf.WriteByte('[')
+		for i, item := range recovered {
+			if i > 0 {
+				buf.WriteByte(',')
+			}
+			buf.Write(item.raw)
+		}
+		buf.WriteByte(']')
+		outputArray = buf.Bytes()
 	}
+	patched, _ = sjson.SetRawBytes(patched, "response.output", outputArray)
 	return patched, len(recovered)
 }
 
