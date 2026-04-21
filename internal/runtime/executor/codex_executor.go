@@ -851,7 +851,8 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 	misc.EnsureHeader(r.Header, ginHeaders, "X-OpenAI-Subagent", "")
 	misc.EnsureHeader(r.Header, ginHeaders, "Traceparent", "")
 	misc.EnsureHeader(r.Header, ginHeaders, "Tracestate", "")
-	r.Header.Set("User-Agent", codexResolvedUserAgent(r.Header, ginHeaders, auth, cfg))
+	identity := codexResolvedIdentity(r.Header, ginHeaders, auth, cfg)
+	r.Header.Set("User-Agent", identity.userAgent)
 	codexEnsureSessionHeaders(r.Header, ginHeaders, auth)
 
 	if stream {
@@ -861,7 +862,7 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 	}
 	r.Header.Set("Connection", "Keep-Alive")
 
-	r.Header.Set("Originator", codexResolvedOriginator(r.Header, ginHeaders, auth))
+	r.Header.Set("Originator", identity.originator)
 	if !codexIsAPIKeyAuth(auth) {
 		if auth != nil && auth.Metadata != nil {
 			if accountID, ok := auth.Metadata["account_id"].(string); ok {

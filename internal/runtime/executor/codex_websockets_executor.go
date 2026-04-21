@@ -853,9 +853,10 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 		betaHeader = codexResponsesWebsocketBetaHeaderValue
 	}
 	headers.Set("OpenAI-Beta", betaHeader)
-	headers.Set("User-Agent", codexResolvedUserAgent(headers, ginHeaders, auth, cfg))
+	identity := codexResolvedIdentity(headers, ginHeaders, auth, cfg)
+	headers.Set("User-Agent", identity.userAgent)
 	codexEnsureSessionHeaders(headers, ginHeaders, auth)
-	headers.Set("Originator", codexResolvedOriginator(headers, ginHeaders, auth))
+	headers.Set("Originator", identity.originator)
 	if !codexIsAPIKeyAuth(auth) {
 		if auth != nil && auth.Metadata != nil {
 			if accountID, ok := auth.Metadata["account_id"].(string); ok {

@@ -11,6 +11,11 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
+type codexRequestIdentity struct {
+	userAgent  string
+	originator string
+}
+
 func codexIsAPIKeyAuth(auth *cliproxyauth.Auth) bool {
 	if auth == nil || auth.Attributes == nil {
 		return false
@@ -19,23 +24,7 @@ func codexIsAPIKeyAuth(auth *cliproxyauth.Auth) bool {
 }
 
 func codexResolvedUserAgent(target http.Header, source http.Header, auth *cliproxyauth.Auth, cfg *config.Config) string {
-	if cfgUserAgent := codexConfiguredUserAgent(cfg, auth); cfgUserAgent != "" {
-		return cfgUserAgent
-	}
-	if authUserAgent := codexAuthUserAgent(auth); authUserAgent != "" {
-		return authUserAgent
-	}
-	if target != nil {
-		if userAgent := strings.TrimSpace(target.Get("User-Agent")); userAgent != "" {
-			return userAgent
-		}
-	}
-	if source != nil {
-		if userAgent := strings.TrimSpace(source.Get("User-Agent")); userAgent != "" {
-			return userAgent
-		}
-	}
-	return misc.CodexCLIUserAgentWithOriginator(codexResolvedOriginator(target, source, auth))
+	return codexResolvedIdentity(target, source, auth, cfg).userAgent
 }
 
 func codexConfiguredUserAgent(cfg *config.Config, auth *cliproxyauth.Auth) string {
@@ -44,6 +33,31 @@ func codexConfiguredUserAgent(cfg *config.Config, auth *cliproxyauth.Auth) strin
 }
 
 func codexResolvedOriginator(target http.Header, source http.Header, auth *cliproxyauth.Auth) string {
+	return codexResolvedIdentity(target, source, auth, nil).originator
+}
+
+func codexResolvedIdentity(target http.Header, source http.Header, auth *cliproxyauth.Auth, cfg *config.Config) codexRequestIdentity {
+	identity := codexRequestIdentity{
+		originator: codexResolvedOriginatorValue(target, source, auth),
+	}
+	configuredUserAgent := codexConfiguredUserAgent(cfg, auth)
+	authUserAgent := codexAuthUserAgent(auth)
+	switch {
+	case configuredUserAgent != "":
+		identity.userAgent = configuredUserAgent
+	case authUserAgent != "":
+		identity.userAgent = authUserAgent
+	case target != nil && strings.TrimSpace(target.Get("User-Agent")) != "":
+		identity.userAgent = strings.TrimSpace(target.Get("User-Agent"))
+	case source != nil && strings.TrimSpace(source.Get("User-Agent")) != "":
+		identity.userAgent = strings.TrimSpace(source.Get("User-Agent"))
+	default:
+		identity.userAgent = misc.CodexCLIUserAgentWithOriginator(identity.originator)
+	}
+	return identity
+}
+
+func codexResolvedOriginatorValue(target http.Header, source http.Header, auth *cliproxyauth.Auth) string {
 	if authOriginator := codexAuthOriginator(auth); authOriginator != "" {
 		return authOriginator
 	}
