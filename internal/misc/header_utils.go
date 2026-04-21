@@ -9,6 +9,7 @@ import (
 	"os"
 	"runtime"
 	"strings"
+	"sync"
 )
 
 const (
@@ -25,9 +26,17 @@ const (
 	codexCLIFallbackTerminal = "xterm-256color"
 )
 
-// CodexCLIUserAgent is the default Codex CLI-style fingerprint used when no client-specific
-// User-Agent is available during login or execution.
-var CodexCLIUserAgent = DefaultCodexCLIUserAgent()
+var (
+	codexCLIOSOnce      sync.Once
+	codexCLIOSCached    string
+	codexTerminalOnce   sync.Once
+	codexTerminalCached string
+	codexUserAgentCache sync.Map
+
+	// CodexCLIUserAgent is the default Codex CLI-style fingerprint used when no client-specific
+	// User-Agent is available during login or execution.
+	CodexCLIUserAgent = DefaultCodexCLIUserAgent()
+)
 
 // geminiCLIOS maps Go runtime OS names to the Node.js-style platform strings used by Gemini CLI.
 func geminiCLIOS() string {
@@ -69,12 +78,11 @@ func DefaultCodexCLIUserAgent() string {
 // CodexCLIUserAgentWithOriginator returns the fallback Codex-style User-Agent for the
 // provided Originator value.
 func CodexCLIUserAgentWithOriginator(originator string) string {
-	if trimmed := strings.TrimSpace(originator); trimmed != "" {
-		originator = trimmed
-	} else {
-		originator = CodexCLIOriginator
+	originator = codexNormalizedOriginator(originator)
+	if cached, ok := codexUserAgentCache.Load(originator); ok {
+		return cached.(string)
 	}
-	return fmt.Sprintf(
+	userAgent := fmt.Sprintf(
 		"%s/%s (%s; %s) %s",
 		originator,
 		codexCLIFallbackVersion,
@@ -82,22 +90,35 @@ func CodexCLIUserAgentWithOriginator(originator string) string {
 		codexCLIArch(),
 		codexTerminal(),
 	)
+	cached, _ := codexUserAgentCache.LoadOrStore(originator, userAgent)
+	return cached.(string)
+}
+
+func codexNormalizedOriginator(originator string) string {
+	if trimmed := strings.TrimSpace(originator); trimmed != "" {
+		return trimmed
+	}
+	return CodexCLIOriginator
 }
 
 func codexCLIOS() string {
-	switch runtime.GOOS {
-	case "linux":
-		if distro := codexLinuxOSDescriptor(os.ReadFile); distro != "" {
-			return distro
+	codexCLIOSOnce.Do(func() {
+		switch runtime.GOOS {
+		case "linux":
+			if distro := codexLinuxOSDescriptor(os.ReadFile); distro != "" {
+				codexCLIOSCached = distro
+				return
+			}
+			codexCLIOSCached = "Linux"
+		case "darwin":
+			codexCLIOSCached = "Mac OS"
+		case "windows":
+			codexCLIOSCached = "Windows"
+		default:
+			codexCLIOSCached = runtime.GOOS
 		}
-		return "Linux"
-	case "darwin":
-		return "Mac OS"
-	case "windows":
-		return "Windows"
-	default:
-		return runtime.GOOS
-	}
+	})
+	return codexCLIOSCached
 }
 
 func codexCLIArch() string {
@@ -112,9 +133,12 @@ func codexCLIArch() string {
 }
 
 func codexTerminal() string {
-	return codexTerminalFromEnv(func(key string) string {
-		return os.Getenv(key)
+	codexTerminalOnce.Do(func() {
+		codexTerminalCached = codexTerminalFromEnv(func(key string) string {
+			return os.Getenv(key)
+		})
 	})
+	return codexTerminalCached
 }
 
 func codexTerminalFromEnv(getenv func(string) string) string {

@@ -1,6 +1,9 @@
 package misc
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestCodexTerminalFromEnvUsesTermProgramVersion(t *testing.T) {
 	got := codexTerminalFromEnv(func(key string) string {
@@ -72,5 +75,30 @@ func TestCodexLinuxOSDescriptorFallsBackToPrettyName(t *testing.T) {
 
 	if got != "Fedora Linux 41" {
 		t.Fatalf("codexLinuxOSDescriptor() = %q, want %q", got, "Fedora Linux 41")
+	}
+}
+
+func TestCodexCLIUserAgentWithOriginatorTrimsWhitespace(t *testing.T) {
+	got := CodexCLIUserAgentWithOriginator("  codex_vscode  ")
+
+	if !strings.HasPrefix(got, "codex_vscode/") {
+		t.Fatalf("CodexCLIUserAgentWithOriginator() = %q, want codex_vscode/ prefix", got)
+	}
+}
+
+func TestCodexCLIUserAgentWithOriginatorFallsBackToDefaultOriginator(t *testing.T) {
+	got := CodexCLIUserAgentWithOriginator(" \t ")
+
+	if got != CodexCLIUserAgent {
+		t.Fatalf("CodexCLIUserAgentWithOriginator() = %q, want %q", got, CodexCLIUserAgent)
+	}
+}
+
+func TestCodexCLIUserAgentWithOriginatorUsesNormalizedCacheKey(t *testing.T) {
+	left := CodexCLIUserAgentWithOriginator("codex_vscode")
+	right := CodexCLIUserAgentWithOriginator(" codex_vscode ")
+
+	if left != right {
+		t.Fatalf("normalized originators should produce identical user agents: %q != %q", left, right)
 	}
 }
