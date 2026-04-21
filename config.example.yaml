@@ -307,6 +307,13 @@ nonstream-keepalive-interval: 0
 #     - from: "claude-haiku-4-5-20251001"
 #       to: "gemini-2.5-flash"
 
+# MCP Forwarding (minimal v1)
+# mcp:
+#   # Upstream MCP server URL. Leave empty to disable /mcp/* forwarding.
+#   upstream-url: "https://your-mcp-server.example.com"
+#   # Optional: if set, forwarded requests inject Authorization and X-Api-Key headers.
+#   upstream-api-key: ""
+
 # Global OAuth model name aliases (per channel)
 # These aliases rename model IDs for both model listing and request routing.
 # Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, kimi.
