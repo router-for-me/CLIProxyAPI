@@ -50,3 +50,8 @@ Not always.
 But for a complete operator/deployment setup, the recommended default is:
 - `CLIProxyAPI` as the main service + OpenClaw autonomy repository
 - `Cli-Proxy-API-Management-Center` as the optional companion UI
+
+
+## Repository selection
+
+See `openclaw/REPO_SELECTION.md` for a scenario-based choice matrix.

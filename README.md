@@ -256,3 +256,6 @@ Not necessarily.
 Recommended default:
 - required: `luyuehm/CLIProxyAPI`
 - optional companion: `luyuehm/Cli-Proxy-API-Management-Center`
+
+
+Need help choosing repositories? See `openclaw/REPO_SELECTION.md`.

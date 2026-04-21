@@ -36,3 +36,7 @@ After following the docs in this index, the fork should be usable as:
 - the primary CLIProxyAPI service fork
 - an OpenClaw-installable autonomy layer
 - a self-heal / heartbeat / cron-enabled project template
+
+## Repository choice
+
+- Selection matrix: `openclaw/REPO_SELECTION.md`

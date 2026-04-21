@@ -251,3 +251,6 @@ Management Center 的定位是：**人工运维管理界面**。
 推荐默认口径：
 - 必选：`luyuehm/CLIProxyAPI`
 - 可选配套：`luyuehm/Cli-Proxy-API-Management-Center`
+
+
+如果你不知道该先用哪个仓库，请看：`openclaw/REPO_SELECTION.md`。
