@@ -92,6 +92,26 @@ type codexWebsocketRead struct {
 	err     error
 }
 
+type codexPreparedWebsocketRequest struct {
+	body               []byte
+	wsURL              string
+	wsHeaders          http.Header
+	wsReqBody          []byte
+	wsReqLog           helps.UpstreamRequestLog
+	authID             string
+	executionSessionID string
+	sess               *codexWebsocketSession
+	sessionLocked      bool
+}
+
+func (r *codexPreparedWebsocketRequest) unlockSession() {
+	if r == nil || !r.sessionLocked || r.sess == nil {
+		return
+	}
+	r.sess.reqMu.Unlock()
+	r.sessionLocked = false
+}
+
 func (s *codexWebsocketSession) setActive(ch chan codexWebsocketRead) {
 	if s == nil {
 		return
@@ -197,41 +217,19 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	}
 
 	httpURL := strings.TrimSuffix(baseURL, "/") + "/responses"
-	wsURL, err := buildCodexResponsesWebsocketURL(httpURL)
+	prepared, err := e.prepareCodexWebsocketRequest(ctx, auth, req, opts, body, apiKey, httpURL)
 	if err != nil {
 		return resp, err
 	}
-
-	body, wsHeaders := applyCodexPromptCacheHeaders(from, req, body)
-	wsHeaders = applyCodexWebsocketHeaders(ctx, wsHeaders, auth, apiKey, e.cfg)
-
-	var authID, authLabel, authType, authValue string
-	if auth != nil {
-		authID = auth.ID
-		authLabel = auth.Label
-		authType, authValue = auth.AccountInfo()
-	}
-
-	executionSessionID := executionSessionIDFromOptions(opts)
-	var sess *codexWebsocketSession
-	if executionSessionID != "" {
-		sess = e.getOrCreateSession(executionSessionID)
-		sess.reqMu.Lock()
-		defer sess.reqMu.Unlock()
-	}
-
-	wsReqBody := buildCodexWebsocketRequestBody(body, codexWebsocketTurnMetadata(wsHeaders))
-	wsReqLog := helps.UpstreamRequestLog{
-		URL:       wsURL,
-		Method:    "WEBSOCKET",
-		Headers:   wsHeaders,
-		Body:      wsReqBody,
-		Provider:  e.Identifier(),
-		AuthID:    authID,
-		AuthLabel: authLabel,
-		AuthType:  authType,
-		AuthValue: authValue,
-	}
+	defer prepared.unlockSession()
+	body = prepared.body
+	wsReqBody := prepared.wsReqBody
+	wsReqLog := prepared.wsReqLog
+	wsURL := prepared.wsURL
+	wsHeaders := prepared.wsHeaders
+	authID := prepared.authID
+	executionSessionID := prepared.executionSessionID
+	sess := prepared.sess
 	helps.RecordAPIWebsocketRequest(ctx, e.cfg, wsReqLog)
 
 	conn, respHS, errDial := e.ensureUpstreamConn(ctx, auth, sess, authID, wsURL, wsHeaders)
@@ -250,7 +248,6 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		return resp, errDial
 	}
 	recordAPIWebsocketHandshake(ctx, e.cfg, respHS)
-	captureCodexWebsocketSessionHeaders(auth, wsHeaders, respHS)
 	if sess == nil {
 		logCodexWebsocketConnected(executionSessionID, authID, wsURL)
 		defer func() {
@@ -274,40 +271,12 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 
 	if errSend := writeCodexWebsocketMessage(sess, conn, wsReqBody); errSend != nil {
 		if sess != nil {
-			e.invalidateUpstreamConn(sess, conn, "send_error", errSend)
-
-			// Retry once with a fresh websocket connection. This is mainly to handle
-			// upstream closing the socket between sequential requests within the same
-			// execution session.
-			connRetry, respHSRetry, errDialRetry := e.ensureUpstreamConn(ctx, auth, sess, authID, wsURL, wsHeaders)
-			if errDialRetry == nil && connRetry != nil {
-				wsReqBodyRetry := buildCodexWebsocketRequestBody(body, codexWebsocketTurnMetadata(wsHeaders))
-				helps.RecordAPIWebsocketRequest(ctx, e.cfg, helps.UpstreamRequestLog{
-					URL:       wsURL,
-					Method:    "WEBSOCKET",
-					Headers:   wsHeaders,
-					Body:      wsReqBodyRetry,
-					Provider:  e.Identifier(),
-					AuthID:    authID,
-					AuthLabel: authLabel,
-					AuthType:  authType,
-					AuthValue: authValue,
-				})
-				recordAPIWebsocketHandshake(ctx, e.cfg, respHSRetry)
-				captureCodexWebsocketSessionHeaders(auth, wsHeaders, respHSRetry)
-				if errSendRetry := writeCodexWebsocketMessage(sess, connRetry, wsReqBodyRetry); errSendRetry == nil {
-					conn = connRetry
-					wsReqBody = wsReqBodyRetry
-				} else {
-					e.invalidateUpstreamConn(sess, connRetry, "send_error", errSendRetry)
-					helps.RecordAPIWebsocketError(ctx, e.cfg, "send_retry", errSendRetry)
-					return resp, errSendRetry
-				}
-			} else {
-				closeHTTPResponseBody(respHSRetry, "codex websockets executor: close handshake response body error")
-				helps.RecordAPIWebsocketError(ctx, e.cfg, "dial_retry", errDialRetry)
-				return resp, errDialRetry
+			connRetry, wsReqBodyRetry, errRetry := e.retrySessionWebsocketRequest(ctx, auth, sess, conn, authID, wsURL, wsHeaders, wsReqLog, body, errSend)
+			if errRetry != nil {
+				return resp, errRetry
 			}
+			conn = connRetry
+			wsReqBody = wsReqBodyRetry
 		} else {
 			helps.RecordAPIWebsocketError(ctx, e.cfg, "send", errSend)
 			return resp, errSend
@@ -395,40 +364,18 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, body, requestedModel)
 
 	httpURL := strings.TrimSuffix(baseURL, "/") + "/responses"
-	wsURL, err := buildCodexResponsesWebsocketURL(httpURL)
+	prepared, err := e.prepareCodexWebsocketRequest(ctx, auth, req, opts, body, apiKey, httpURL)
 	if err != nil {
 		return nil, err
 	}
-
-	body, wsHeaders := applyCodexPromptCacheHeaders(from, req, body)
-	wsHeaders = applyCodexWebsocketHeaders(ctx, wsHeaders, auth, apiKey, e.cfg)
-
-	var authID, authLabel, authType, authValue string
-	authID = auth.ID
-	authLabel = auth.Label
-	authType, authValue = auth.AccountInfo()
-
-	executionSessionID := executionSessionIDFromOptions(opts)
-	var sess *codexWebsocketSession
-	if executionSessionID != "" {
-		sess = e.getOrCreateSession(executionSessionID)
-		if sess != nil {
-			sess.reqMu.Lock()
-		}
-	}
-
-	wsReqBody := buildCodexWebsocketRequestBody(body, codexWebsocketTurnMetadata(wsHeaders))
-	wsReqLog := helps.UpstreamRequestLog{
-		URL:       wsURL,
-		Method:    "WEBSOCKET",
-		Headers:   wsHeaders,
-		Body:      wsReqBody,
-		Provider:  e.Identifier(),
-		AuthID:    authID,
-		AuthLabel: authLabel,
-		AuthType:  authType,
-		AuthValue: authValue,
-	}
+	body = prepared.body
+	wsReqBody := prepared.wsReqBody
+	wsReqLog := prepared.wsReqLog
+	wsURL := prepared.wsURL
+	wsHeaders := prepared.wsHeaders
+	authID := prepared.authID
+	executionSessionID := prepared.executionSessionID
+	sess := prepared.sess
 	helps.RecordAPIWebsocketRequest(ctx, e.cfg, wsReqLog)
 
 	conn, respHS, errDial := e.ensureUpstreamConn(ctx, auth, sess, authID, wsURL, wsHeaders)
@@ -448,13 +395,10 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			return nil, statusErr{code: respHS.StatusCode, msg: string(bodyErr)}
 		}
 		helps.RecordAPIWebsocketError(ctx, e.cfg, "dial", errDial)
-		if sess != nil {
-			sess.reqMu.Unlock()
-		}
+		prepared.unlockSession()
 		return nil, errDial
 	}
 	recordAPIWebsocketHandshake(ctx, e.cfg, respHS)
-	captureCodexWebsocketSessionHeaders(auth, wsHeaders, respHS)
 
 	if sess == nil {
 		logCodexWebsocketConnected(executionSessionID, authID, wsURL)
@@ -469,36 +413,11 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	if errSend := writeCodexWebsocketMessage(sess, conn, wsReqBody); errSend != nil {
 		helps.RecordAPIWebsocketError(ctx, e.cfg, "send", errSend)
 		if sess != nil {
-			e.invalidateUpstreamConn(sess, conn, "send_error", errSend)
-
-			// Retry once with a new websocket connection for the same execution session.
-			connRetry, respHSRetry, errDialRetry := e.ensureUpstreamConn(ctx, auth, sess, authID, wsURL, wsHeaders)
-			if errDialRetry != nil || connRetry == nil {
-				closeHTTPResponseBody(respHSRetry, "codex websockets executor: close handshake response body error")
-				helps.RecordAPIWebsocketError(ctx, e.cfg, "dial_retry", errDialRetry)
+			connRetry, wsReqBodyRetry, errRetry := e.retrySessionWebsocketRequest(ctx, auth, sess, conn, authID, wsURL, wsHeaders, wsReqLog, body, errSend)
+			if errRetry != nil {
 				sess.clearActive(readCh)
-				sess.reqMu.Unlock()
-				return nil, errDialRetry
-			}
-			wsReqBodyRetry := buildCodexWebsocketRequestBody(body, codexWebsocketTurnMetadata(wsHeaders))
-			helps.RecordAPIWebsocketRequest(ctx, e.cfg, helps.UpstreamRequestLog{
-				URL:       wsURL,
-				Method:    "WEBSOCKET",
-				Headers:   wsHeaders,
-				Body:      wsReqBodyRetry,
-				Provider:  e.Identifier(),
-				AuthID:    authID,
-				AuthLabel: authLabel,
-				AuthType:  authType,
-				AuthValue: authValue,
-			})
-			recordAPIWebsocketHandshake(ctx, e.cfg, respHSRetry)
-			if errSendRetry := writeCodexWebsocketMessage(sess, connRetry, wsReqBodyRetry); errSendRetry != nil {
-				helps.RecordAPIWebsocketError(ctx, e.cfg, "send_retry", errSendRetry)
-				e.invalidateUpstreamConn(sess, connRetry, "send_error", errSendRetry)
-				sess.clearActive(readCh)
-				sess.reqMu.Unlock()
-				return nil, errSendRetry
+				prepared.unlockSession()
+				return nil, errRetry
 			}
 			conn = connRetry
 			wsReqBody = wsReqBodyRetry
@@ -520,7 +439,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		defer func() {
 			if sess != nil {
 				sess.clearActive(readCh)
-				sess.reqMu.Unlock()
+				prepared.unlockSession()
 				return
 			}
 			logCodexWebsocketDisconnected(executionSessionID, authID, wsURL, terminateReason, terminateErr)
@@ -625,6 +544,101 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	return &cliproxyexecutor.StreamResult{Headers: upstreamHeaders, Chunks: out}, nil
 }
 
+func (e *CodexWebsocketsExecutor) prepareCodexWebsocketRequest(
+	ctx context.Context,
+	auth *cliproxyauth.Auth,
+	req cliproxyexecutor.Request,
+	opts cliproxyexecutor.Options,
+	body []byte,
+	apiKey string,
+	httpURL string,
+) (*codexPreparedWebsocketRequest, error) {
+	wsURL, err := buildCodexResponsesWebsocketURL(httpURL)
+	if err != nil {
+		return nil, err
+	}
+
+	body, wsHeaders := applyCodexPromptCacheHeaders(opts.SourceFormat, req, body)
+	wsHeaders = applyCodexWebsocketHeaders(ctx, wsHeaders, auth, apiKey, e.cfg)
+
+	var authID, authLabel, authType, authValue string
+	if auth != nil {
+		authID = auth.ID
+		authLabel = auth.Label
+		authType, authValue = auth.AccountInfo()
+	}
+
+	prepared := &codexPreparedWebsocketRequest{
+		body:               body,
+		wsURL:              wsURL,
+		wsHeaders:          wsHeaders,
+		authID:             authID,
+		executionSessionID: executionSessionIDFromOptions(opts),
+	}
+	if prepared.executionSessionID != "" {
+		prepared.sess = e.getOrCreateSession(prepared.executionSessionID)
+		if prepared.sess != nil {
+			prepared.sess.reqMu.Lock()
+			prepared.sessionLocked = true
+		}
+	}
+
+	prepared.wsReqBody = buildCodexWebsocketRequestBody(body, wsHeaders.Get("X-Codex-Turn-Metadata"))
+	prepared.wsReqLog = helps.UpstreamRequestLog{
+		URL:       wsURL,
+		Method:    "WEBSOCKET",
+		Headers:   wsHeaders,
+		Body:      prepared.wsReqBody,
+		Provider:  e.Identifier(),
+		AuthID:    authID,
+		AuthLabel: authLabel,
+		AuthType:  authType,
+		AuthValue: authValue,
+	}
+	return prepared, nil
+}
+
+func (e *CodexWebsocketsExecutor) retrySessionWebsocketRequest(
+	ctx context.Context,
+	auth *cliproxyauth.Auth,
+	sess *codexWebsocketSession,
+	conn *websocket.Conn,
+	authID string,
+	wsURL string,
+	wsHeaders http.Header,
+	wsReqLog helps.UpstreamRequestLog,
+	body []byte,
+	sendErr error,
+) (*websocket.Conn, []byte, error) {
+	if sess == nil {
+		return nil, nil, sendErr
+	}
+
+	e.invalidateUpstreamConn(sess, conn, "send_error", sendErr)
+
+	// Retry once with a fresh websocket connection. This mainly handles upstream
+	// closing the socket between sequential requests within the same execution session.
+	connRetry, respHSRetry, errDialRetry := e.ensureUpstreamConn(ctx, auth, sess, authID, wsURL, wsHeaders)
+	if errDialRetry != nil || connRetry == nil {
+		closeHTTPResponseBody(respHSRetry, "codex websockets executor: close handshake response body error")
+		helps.RecordAPIWebsocketError(ctx, e.cfg, "dial_retry", errDialRetry)
+		return nil, nil, errDialRetry
+	}
+
+	wsReqBodyRetry := buildCodexWebsocketRequestBody(body, wsHeaders.Get("X-Codex-Turn-Metadata"))
+	wsReqLog.Body = wsReqBodyRetry
+	helps.RecordAPIWebsocketRequest(ctx, e.cfg, wsReqLog)
+	recordAPIWebsocketHandshake(ctx, e.cfg, respHSRetry)
+
+	if errSendRetry := writeCodexWebsocketMessage(sess, connRetry, wsReqBodyRetry); errSendRetry != nil {
+		e.invalidateUpstreamConn(sess, connRetry, "send_error", errSendRetry)
+		helps.RecordAPIWebsocketError(ctx, e.cfg, "send_retry", errSendRetry)
+		return nil, nil, errSendRetry
+	}
+
+	return connRetry, wsReqBodyRetry, nil
+}
+
 func (e *CodexWebsocketsExecutor) dialCodexWebsocket(ctx context.Context, auth *cliproxyauth.Auth, wsURL string, headers http.Header) (*websocket.Conn, *http.Response, error) {
 	dialer := newProxyAwareWebsocketDialer(e.cfg, auth)
 	dialer.HandshakeTimeout = codexResponsesWebsocketHandshakeTO
@@ -651,61 +665,27 @@ func writeCodexWebsocketMessage(sess *codexWebsocketSession, conn *websocket.Con
 	return conn.WriteMessage(websocket.TextMessage, payload)
 }
 
-func buildCodexWebsocketRequestBody(body []byte, turnMetadata string) []byte {
+func buildCodexWebsocketRequestBody(body []byte, turnMetadataHeader string) []byte {
 	if len(body) == 0 {
-		return nil
+		body = []byte(`{}`)
 	}
 
 	// Match codex-rs websocket v2 semantics: every request is `response.create`.
 	// Incremental follow-up turns continue on the same websocket using
 	// `previous_response_id` + incremental `input`, not `response.append`.
 	wsReqBody, errSet := sjson.SetBytes(bytes.Clone(body), "type", "response.create")
-	if errSet != nil || len(wsReqBody) == 0 {
-		wsReqBody = bytes.Clone(body)
-		wsReqBody, _ = sjson.SetBytes(wsReqBody, "type", "response.create")
+	if errSet == nil && strings.TrimSpace(turnMetadataHeader) != "" {
+		wsReqBody, errSet = sjson.SetBytes(wsReqBody, "client_metadata.x-codex-turn-metadata", turnMetadataHeader)
 	}
-
-	// Mirror codex-rs `build_ws_client_metadata`: when the turn carries a
-	// turn-metadata header we expose the same value inside the websocket
-	// payload as `client_metadata["x-codex-turn-metadata"]`. This is an
-	// additive side-channel required by the upstream server to route/trace
-	// per-turn observability data alongside the regular headers.
-	if trimmed := strings.TrimSpace(turnMetadata); trimmed != "" {
-		// Preserve any caller-supplied entries under client_metadata by writing
-		// to the specific key rather than replacing the whole object.
-		if updated, errMeta := sjson.SetBytes(wsReqBody, "client_metadata.x-codex-turn-metadata", trimmed); errMeta == nil && len(updated) > 0 {
-			wsReqBody = updated
-		}
+	if errSet == nil && len(wsReqBody) > 0 {
+		return wsReqBody
 	}
-	return wsReqBody
-}
-
-// codexWebsocketTurnMetadata extracts the x-codex-turn-metadata value from
-// the headers we are about to send with the websocket handshake. Returning a
-// trimmed string keeps the zero-value path a no-op for buildCodexWebsocketRequestBody.
-func codexWebsocketTurnMetadata(headers http.Header) string {
-	if headers == nil {
-		return ""
+	fallback := bytes.Clone(body)
+	fallback, _ = sjson.SetBytes(fallback, "type", "response.create")
+	if strings.TrimSpace(turnMetadataHeader) != "" {
+		fallback, _ = sjson.SetBytes(fallback, "client_metadata.x-codex-turn-metadata", turnMetadataHeader)
 	}
-	// http.Header.Get canonicalizes the key, which handles the usual path
-	// where the header was written via Set/Add. But some call sites insert
-	// headers by direct map assignment with the lower-case key used on the
-	// wire; those entries never match a canonical Get, so we iterate as a
-	// fallback to handle both forms uniformly.
-	if v := strings.TrimSpace(headers.Get("X-Codex-Turn-Metadata")); v != "" {
-		return v
-	}
-	for key, values := range headers {
-		if !strings.EqualFold(key, "x-codex-turn-metadata") {
-			continue
-		}
-		for _, v := range values {
-			if trimmed := strings.TrimSpace(v); trimmed != "" {
-				return trimmed
-			}
-		}
-	}
-	return ""
+	return fallback
 }
 
 func readCodexWebsocketMessage(ctx context.Context, sess *codexWebsocketSession, conn *websocket.Conn, readCh chan codexWebsocketRead) (int, []byte, error) {
@@ -751,6 +731,11 @@ func newProxyAwareWebsocketDialer(cfg *config.Config, auth *cliproxyauth.Auth) *
 			Timeout:   30 * time.Second,
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
+	}
+	if tlsConfig, err := misc.CustomTLSConfigFromEnv(); err != nil {
+		log.Warnf("custom CA disabled for codex websocket dialer: %v", err)
+	} else if tlsConfig != nil {
+		dialer.TLSClientConfig = tlsConfig
 	}
 
 	proxyURL := ""
@@ -867,19 +852,15 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 		ginHeaders = ginCtx.Request.Header.Clone()
 	}
 
-	// Replay cached sticky session state for this logical session before
-	// applying ensure/default logic, so that later EnsureHeader calls do not
-	// overwrite anything we just populated from cache.
-	if promptCacheID := strings.TrimSpace(headers.Get("Conversation_id")); promptCacheID != "" {
-		_ = injectCodexSessionHeaders(headers, codexSessionKey(auth, promptCacheID))
-	}
-
 	_, cfgBetaFeatures := codexHeaderDefaults(cfg, auth)
 	ensureHeaderWithPriority(headers, ginHeaders, "x-codex-beta-features", cfgBetaFeatures, "")
 	misc.EnsureHeader(headers, ginHeaders, "x-codex-turn-state", "")
-	misc.EnsureHeader(headers, ginHeaders, "x-codex-turn-metadata", "")
+	codexEnsureTurnMetadataHeader(headers, ginHeaders)
 	misc.EnsureHeader(headers, ginHeaders, "x-responsesapi-include-timing-metrics", "")
 	misc.EnsureHeader(headers, ginHeaders, "Version", "")
+	misc.EnsureHeader(headers, ginHeaders, "x-openai-subagent", "")
+	misc.EnsureHeader(headers, ginHeaders, "traceparent", "")
+	misc.EnsureHeader(headers, ginHeaders, "tracestate", "")
 
 	betaHeader := strings.TrimSpace(headers.Get("OpenAI-Beta"))
 	if betaHeader == "" && ginHeaders != nil {
@@ -889,72 +870,11 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 		betaHeader = codexResponsesWebsocketBetaHeaderValue
 	}
 	headers.Set("OpenAI-Beta", betaHeader)
-	authUserAgent := codexAuthUserAgent(auth)
-	if authUserAgent != "" {
-		headers.Set("User-Agent", authUserAgent)
-	}
-	// Align Session_id with codex-rs: always send a stable, conversation-scoped
-	// session id (not a per-request UUID). Prefer, in order:
-	//   1. Caller-supplied Session_id header (gin -> target already-set).
-	//   2. The Conversation_id previously set by applyCodexPromptCacheHeaders,
-	//      which is derived from the (provider, api_key / user_id) pair and is
-	//      stable across requests belonging to the same logical session.
-	//   3. A freshly minted UUID (last-resort fallback for edge cases where no
-	//      cache id could be derived).
-	if strings.TrimSpace(headers.Get("Session_id")) == "" {
-		if ginHeaders != nil {
-			if v := strings.TrimSpace(ginHeaders.Get("Session_id")); v != "" {
-				headers.Set("Session_id", v)
-			}
-		}
-	}
-	if strings.TrimSpace(headers.Get("Session_id")) == "" {
-		if v := strings.TrimSpace(headers.Get("Conversation_id")); v != "" {
-			headers.Set("Session_id", v)
-		} else {
-			headers.Set("Session_id", uuid.NewString())
-		}
-	}
-	// Mirror codex-rs: attach x-client-request-id (the conversation id) on every
-	// turn so upstream can correlate traces. Caller-supplied value always wins.
-	if strings.TrimSpace(headers.Get("x-client-request-id")) == "" {
-		if ginHeaders != nil {
-			if v := strings.TrimSpace(ginHeaders.Get("x-client-request-id")); v != "" {
-				headers.Set("x-client-request-id", v)
-			}
-		}
-	}
-	if strings.TrimSpace(headers.Get("x-client-request-id")) == "" {
-		if v := strings.TrimSpace(headers.Get("Session_id")); v != "" {
-			headers.Set("x-client-request-id", v)
-		}
-	}
-	if authUserAgent == "" {
-		headers.Del("User-Agent")
-	}
-
-	isAPIKey := false
-	if auth != nil && auth.Attributes != nil {
-		if v := strings.TrimSpace(auth.Attributes["api_key"]); v != "" {
-			isAPIKey = true
-		}
-	}
-	if originator := strings.TrimSpace(ginHeaders.Get("Originator")); originator != "" {
-		headers.Set("Originator", originator)
-	} else if !isAPIKey {
-		headers.Set("Originator", codexOriginatorFor(cfg))
-	}
-	// Residency: client-supplied wins; otherwise fall back to config/env.
-	if residency := strings.TrimSpace(ginHeaders.Get(misc.CodexResidencyHeader)); residency != "" {
-		headers.Set(misc.CodexResidencyHeader, residency)
-	} else if !isAPIKey {
-		if v := codexResidencyFor(cfg); v != "" && strings.TrimSpace(headers.Get(misc.CodexResidencyHeader)) == "" {
-			headers.Set(misc.CodexResidencyHeader, v)
-		}
-	}
-	// x-openai-subagent is pure passthrough.
-	misc.EnsureHeader(headers, ginHeaders, misc.CodexSubagentHeader, "")
-	if !isAPIKey {
+	identity := codexResolvedIdentity(headers, ginHeaders, auth, cfg)
+	headers.Set("User-Agent", identity.userAgent)
+	codexEnsureSessionHeaders(headers, ginHeaders, auth)
+	headers.Set("Originator", identity.originator)
+	if !codexIsAPIKeyAuth(auth) {
 		if auth != nil && auth.Metadata != nil {
 			if accountID, ok := auth.Metadata["account_id"].(string); ok {
 				if trimmed := strings.TrimSpace(accountID); trimmed != "" {
@@ -969,6 +889,9 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(&http.Request{Header: headers}, attrs)
+	if cfgUserAgent := codexConfiguredUserAgent(cfg, auth); cfgUserAgent != "" {
+		headers.Set("User-Agent", cfgUserAgent)
+	}
 
 	return headers
 }

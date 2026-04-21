@@ -6,6 +6,7 @@ package util
 import (
 	"net/http"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
@@ -23,8 +24,31 @@ func SetProxy(cfg *config.SDKConfig, httpClient *http.Client) *http.Client {
 	if errBuild != nil {
 		log.Errorf("%v", errBuild)
 	}
-	if transport != nil {
-		httpClient.Transport = transport
+
+	pool, errCA := misc.CustomRootCAsFromEnv()
+	if errCA != nil {
+		log.Warnf("custom CA disabled: %v", errCA)
+		pool = nil
 	}
+
+	if transport == nil && pool == nil {
+		return httpClient
+	}
+	if transport == nil {
+		transport = cloneDefaultTransport()
+	}
+	if pool != nil {
+		if customTransport, ok := misc.RoundTripperWithCustomRootCAs(transport, pool).(*http.Transport); ok && customTransport != nil {
+			transport = customTransport
+		}
+	}
+	httpClient.Transport = transport
 	return httpClient
+}
+
+func cloneDefaultTransport() *http.Transport {
+	if transport, ok := http.DefaultTransport.(*http.Transport); ok && transport != nil {
+		return transport.Clone()
+	}
+	return &http.Transport{}
 }

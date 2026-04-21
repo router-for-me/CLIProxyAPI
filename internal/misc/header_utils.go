@@ -9,6 +9,7 @@ import (
 	"os"
 	"runtime"
 	"strings"
+	"sync"
 )
 
 const (
@@ -29,6 +30,10 @@ const (
 	// emitted when neither a caller- nor config-supplied override is present.
 	CodexDefaultOriginator = "codex_cli_rs"
 
+	// CodexCLIOriginator is kept as the public default Originator name because
+	// the executor code already consumes this symbol directly.
+	CodexCLIOriginator = CodexDefaultOriginator
+
 	// CodexOriginatorEnvVar is the env var name codex-rs itself honours. We
 	// accept the same variable so operators can point the proxy at internal
 	// originator values (e.g. "codex_vscode") without touching YAML.
@@ -42,21 +47,21 @@ const (
 	CodexResidencyHeader = "x-openai-internal-codex-residency"
 
 	// CodexSubagentHeader is the sub-agent hint header upstream honours.
-	CodexSubagentHeader = "x-openai-subagent"
+	CodexSubagentHeader      = "x-openai-subagent"
+	codexCLIFallbackTerminal = "xterm-256color"
 )
 
-// CodexCLIUserAgent is the default Codex CLI User-Agent string. Historically
-// this was a hard-coded Linux/x86_64/xterm-256color value; it is now computed
-// dynamically from runtime info so a proxy running on macOS or Windows emits a
-// plausible fingerprint rather than masquerading as Linux.
-//
-// The format mirrors codex-rs's get_codex_user_agent():
-//
-//	codex_cli_rs/<version> (<OS type>; <arch>) <terminal>
-//
-// Callers who need a different version or originator should build their own
-// string via BuildCodexUserAgent.
-var CodexCLIUserAgent = BuildCodexUserAgent(CodexCLIVersion)
+var (
+	codexCLIOSOnce      sync.Once
+	codexCLIOSCached    string
+	codexTerminalOnce   sync.Once
+	codexTerminalCached string
+	codexUserAgentCache sync.Map
+
+	// CodexCLIUserAgent is the default Codex CLI-style fingerprint used when no client-specific
+	// User-Agent is available during login or execution.
+	CodexCLIUserAgent = DefaultCodexCLIUserAgent()
+)
 
 // BuildCodexUserAgent renders a Codex CLI User-Agent using the given build
 // version and the current runtime's OS / architecture / terminal. It never
@@ -67,11 +72,12 @@ func BuildCodexUserAgent(version string) string {
 		version = CodexCLIVersion
 	}
 	return fmt.Sprintf(
-		"codex_cli_rs/%s (%s; %s) %s",
+		"%s/%s (%s; %s) %s",
+		CodexCLIOriginator,
 		version,
-		codexOSDescriptor(),
-		codexArchDescriptor(),
-		codexTerminalDescriptor(),
+		codexCLIOS(),
+		codexCLIArch(),
+		codexTerminal(),
 	)
 }
 
@@ -185,6 +191,175 @@ func GeminiCLIUserAgent(model string) string {
 		model = "unknown"
 	}
 	return fmt.Sprintf("GeminiCLI/%s/%s (%s; %s)", GeminiCLIVersion, model, geminiCLIOS(), geminiCLIArch())
+}
+
+// DefaultCodexCLIUserAgent returns the fallback Codex CLI-style User-Agent used by
+// the proxy when the downstream request does not provide one.
+func DefaultCodexCLIUserAgent() string {
+	return CodexCLIUserAgentWithOriginator(CodexCLIOriginator)
+}
+
+// CodexCLIUserAgentWithOriginator returns the fallback Codex-style User-Agent for the
+// provided Originator value.
+func CodexCLIUserAgentWithOriginator(originator string) string {
+	originator = codexNormalizedOriginator(originator)
+	if cached, ok := codexUserAgentCache.Load(originator); ok {
+		return cached.(string)
+	}
+	userAgent := fmt.Sprintf(
+		"%s/%s (%s; %s) %s",
+		originator,
+		CodexCLIVersion,
+		codexCLIOS(),
+		codexCLIArch(),
+		codexTerminal(),
+	)
+	cached, _ := codexUserAgentCache.LoadOrStore(originator, userAgent)
+	return cached.(string)
+}
+
+func codexNormalizedOriginator(originator string) string {
+	if trimmed := strings.TrimSpace(originator); trimmed != "" {
+		return trimmed
+	}
+	return CodexCLIOriginator
+}
+
+func codexCLIOS() string {
+	codexCLIOSOnce.Do(func() {
+		switch runtime.GOOS {
+		case "linux":
+			if distro := codexLinuxOSDescriptor(os.ReadFile); distro != "" {
+				codexCLIOSCached = distro
+				return
+			}
+			codexCLIOSCached = "Linux"
+		case "darwin":
+			codexCLIOSCached = "Mac OS"
+		case "windows":
+			codexCLIOSCached = "Windows"
+		default:
+			codexCLIOSCached = runtime.GOOS
+		}
+	})
+	return codexCLIOSCached
+}
+
+func codexCLIArch() string {
+	switch runtime.GOARCH {
+	case "amd64":
+		return "x86_64"
+	case "386":
+		return "x86"
+	default:
+		return runtime.GOARCH
+	}
+}
+
+func codexTerminal() string {
+	codexTerminalOnce.Do(func() {
+		codexTerminalCached = codexTerminalFromEnv(func(key string) string {
+			return os.Getenv(key)
+		})
+	})
+	return codexTerminalCached
+}
+
+func codexTerminalFromEnv(getenv func(string) string) string {
+	if getenv == nil {
+		return codexCLIFallbackTerminal
+	}
+
+	if termProgram := strings.TrimSpace(getenv("TERM_PROGRAM")); termProgram != "" {
+		version := strings.TrimSpace(getenv("TERM_PROGRAM_VERSION"))
+		if version == "" && strings.EqualFold(termProgram, "VTE") {
+			version = strings.TrimSpace(getenv("VTE_VERSION"))
+		}
+		return codexSanitizeTerminalToken(codexFormatTerminalToken(termProgram, version))
+	}
+
+	if vteVersion := strings.TrimSpace(getenv("VTE_VERSION")); vteVersion != "" {
+		return codexSanitizeTerminalToken(codexFormatTerminalToken("VTE", vteVersion))
+	}
+	if term := strings.TrimSpace(getenv("TERM")); term != "" {
+		return codexSanitizeTerminalToken(term)
+	}
+	return codexCLIFallbackTerminal
+}
+
+func codexFormatTerminalToken(name string, version string) string {
+	name = strings.TrimSpace(name)
+	version = strings.TrimSpace(version)
+	if name == "" {
+		return codexCLIFallbackTerminal
+	}
+	if version == "" {
+		return name
+	}
+	return name + "/" + version
+}
+
+func codexSanitizeTerminalToken(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return codexCLIFallbackTerminal
+	}
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z':
+			return r
+		case r >= 'A' && r <= 'Z':
+			return r
+		case r >= '0' && r <= '9':
+			return r
+		case r == '-', r == '_', r == '.', r == '/':
+			return r
+		default:
+			return '_'
+		}
+	}, value)
+}
+
+func codexLinuxOSDescriptor(readFile func(string) ([]byte, error)) string {
+	if readFile == nil {
+		return ""
+	}
+	data, err := readFile("/etc/os-release")
+	if err != nil {
+		return ""
+	}
+
+	values := make(map[string]string)
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if key == "" || value == "" {
+			continue
+		}
+		values[key] = strings.Trim(value, `"'`)
+	}
+
+	name := strings.TrimSpace(values["NAME"])
+	versionID := strings.TrimSpace(values["VERSION_ID"])
+	prettyName := strings.TrimSpace(values["PRETTY_NAME"])
+	switch {
+	case name != "" && versionID != "":
+		return name + " " + versionID
+	case prettyName != "":
+		return prettyName
+	case name != "":
+		return name
+	default:
+		return ""
+	}
 }
 
 // ScrubProxyAndFingerprintHeaders removes all headers that could reveal

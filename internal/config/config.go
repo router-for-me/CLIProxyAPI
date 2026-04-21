@@ -102,8 +102,8 @@ type Config struct {
 	// Codex defines a list of Codex API key configurations as specified in the YAML configuration file.
 	CodexKey []CodexKey `yaml:"codex-api-key" json:"codex-api-key"`
 
-	// CodexHeaderDefaults configures fallback headers for Codex requests.
-	// These are used only when the request and credential do not already define their own values.
+	// CodexHeaderDefaults configures default headers for Codex requests.
+	// The configured UserAgent takes precedence over generated or credential-provided defaults.
 	CodexHeaderDefaults CodexHeaderDefaults `yaml:"codex-header-defaults" json:"codex-header-defaults"`
 
 	// ClaudeKey defines a list of Claude API key configurations as specified in the YAML configuration file.
@@ -155,9 +155,9 @@ type ClaudeHeaderDefaults struct {
 	StabilizeDeviceProfile *bool  `yaml:"stabilize-device-profile,omitempty" json:"stabilize-device-profile,omitempty"`
 }
 
-// CodexHeaderDefaults configures fallback header values injected into Codex
-// requests when neither the incoming request nor the selected credential supplies them.
-// UserAgent applies to both auth-file and codex-api-key HTTP/websocket requests.
+// CodexHeaderDefaults configures default header values injected into Codex
+// requests. UserAgent applies to both auth-file and codex-api-key HTTP/websocket
+// requests and overrides generated or credential-provided defaults when set.
 // BetaFeatures only applies to websocket requests for auth-file/OAuth Codex sessions.
 type CodexHeaderDefaults struct {
 	UserAgent    string `yaml:"user-agent" json:"user-agent"`

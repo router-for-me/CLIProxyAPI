@@ -1,14 +1,19 @@
 package executor
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	"github.com/tidwall/gjson"
 )
@@ -32,14 +37,92 @@ func TestBuildCodexWebsocketRequestBodyPreservesPreviousResponseID(t *testing.T)
 	}
 }
 
+func TestBuildCodexWebsocketRequestBodyIncludesClientMetadata(t *testing.T) {
+	body := []byte(`{"model":"gpt-5-codex","input":[{"type":"message","id":"msg-1"}]}`)
+
+	wsReqBody := buildCodexWebsocketRequestBody(body, `{"turn_id":"turn-1","sandbox":"none"}`)
+
+	if got := gjson.GetBytes(wsReqBody, "client_metadata.x-codex-turn-metadata").String(); got != `{"turn_id":"turn-1","sandbox":"none"}` {
+		t.Fatalf("client_metadata.x-codex-turn-metadata = %q, want %q", got, `{"turn_id":"turn-1","sandbox":"none"}`)
+	}
+}
+
+func TestPrepareCodexWebsocketRequestBuildsSharedRequestState(t *testing.T) {
+	executor := NewCodexWebsocketsExecutor(&config.Config{
+		CodexHeaderDefaults: config.CodexHeaderDefaults{
+			UserAgent: "config-ua",
+		},
+	})
+	executor.store = &codexWebsocketSessionStore{sessions: make(map[string]*codexWebsocketSession)}
+
+	auth := &cliproxyauth.Auth{
+		ID:       "auth-1",
+		Label:    "primary",
+		Provider: "codex",
+		Metadata: map[string]any{"email": "user@example.com"},
+	}
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5-codex",
+		Payload: []byte(`{"input":[]}`),
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat: "openai",
+		Metadata: map[string]any{
+			cliproxyexecutor.ExecutionSessionMetadataKey: "session-1",
+		},
+	}
+
+	prepared, err := executor.prepareCodexWebsocketRequest(
+		context.Background(),
+		auth,
+		req,
+		opts,
+		[]byte(`{"model":"gpt-5-codex","input":[]}`),
+		"oauth-token",
+		"https://chatgpt.com/backend-api/codex/responses",
+	)
+	if err != nil {
+		t.Fatalf("prepareCodexWebsocketRequest() error = %v", err)
+	}
+	defer prepared.unlockSession()
+
+	if got := prepared.wsURL; got != "wss://chatgpt.com/backend-api/codex/responses" {
+		t.Fatalf("wsURL = %q, want %q", got, "wss://chatgpt.com/backend-api/codex/responses")
+	}
+	if got := prepared.wsHeaders.Get("Authorization"); got != "Bearer oauth-token" {
+		t.Fatalf("Authorization = %q, want %q", got, "Bearer oauth-token")
+	}
+	if got := prepared.wsHeaders.Get("User-Agent"); got != "config-ua" {
+		t.Fatalf("User-Agent = %q, want %q", got, "config-ua")
+	}
+	if got := gjson.GetBytes(prepared.wsReqBody, "type").String(); got != "response.create" {
+		t.Fatalf("type = %q, want %q", got, "response.create")
+	}
+	if !bytes.Equal(prepared.wsReqLog.Body, prepared.wsReqBody) {
+		t.Fatal("wsReqLog.Body should match wsReqBody")
+	}
+	if got := prepared.wsReqLog.URL; got != prepared.wsURL {
+		t.Fatalf("wsReqLog.URL = %q, want %q", got, prepared.wsURL)
+	}
+	if got := prepared.authID; got != "auth-1" {
+		t.Fatalf("authID = %q, want %q", got, "auth-1")
+	}
+	if got := prepared.executionSessionID; got != "session-1" {
+		t.Fatalf("executionSessionID = %q, want %q", got, "session-1")
+	}
+	if prepared.sess == nil || prepared.sess.sessionID != "session-1" {
+		t.Fatalf("session = %#v, want session-1", prepared.sess)
+	}
+}
+
 func TestApplyCodexWebsocketHeadersDefaultsToCurrentResponsesBeta(t *testing.T) {
 	headers := applyCodexWebsocketHeaders(context.Background(), http.Header{}, nil, "", nil)
 
 	if got := headers.Get("OpenAI-Beta"); got != codexResponsesWebsocketBetaHeaderValue {
 		t.Fatalf("OpenAI-Beta = %s, want %s", got, codexResponsesWebsocketBetaHeaderValue)
 	}
-	if got := headers.Get("User-Agent"); got != "" {
-		t.Fatalf("User-Agent = %s, want empty", got)
+	if got := headers.Get("User-Agent"); got != misc.CodexCLIUserAgent {
+		t.Fatalf("User-Agent = %s, want %s", got, misc.CodexCLIUserAgent)
 	}
 	if got := headers.Get("Version"); got != "" {
 		t.Fatalf("Version = %q, want empty", got)
@@ -47,15 +130,15 @@ func TestApplyCodexWebsocketHeadersDefaultsToCurrentResponsesBeta(t *testing.T) 
 	if got := headers.Get("x-codex-beta-features"); got != "" {
 		t.Fatalf("x-codex-beta-features = %q, want empty", got)
 	}
-	if got := headers.Get("X-Codex-Turn-Metadata"); got != "" {
-		t.Fatalf("X-Codex-Turn-Metadata = %q, want empty", got)
+	if got := headers.Get("Originator"); got != codexOriginator {
+		t.Fatalf("Originator = %q, want %q", got, codexOriginator)
 	}
-	// After aligning with codex-rs we always mirror the Session_id into
-	// X-Client-Request-Id so upstream can correlate traces. When no caller
-	// supplied a Session_id either, the header falls back to a generated UUID
-	// which must match the Session_id value we just wrote out.
-	if got, want := headers.Get("X-Client-Request-Id"), headers.Get("Session_id"); got == "" || got != want {
-		t.Fatalf("X-Client-Request-Id = %q, want non-empty and equal to Session_id=%q", got, want)
+	assertGeneratedCodexTurnMetadata(t, headers.Get("X-Codex-Turn-Metadata"))
+	if got := headers.Get("Session_id"); got == "" {
+		t.Fatal("Session_id should be generated by default")
+	}
+	if got := headers.Get("X-Client-Request-Id"); got != headers.Get("Session_id") {
+		t.Fatalf("X-Client-Request-Id = %q, want Session_id %q", got, headers.Get("Session_id"))
 	}
 }
 
@@ -87,6 +170,36 @@ func TestApplyCodexWebsocketHeadersPassesThroughClientIdentityHeaders(t *testing
 	}
 }
 
+func TestApplyCodexWebsocketHeadersUsesDerivedSessionHeadersWithoutForwardingConversationID(t *testing.T) {
+	auth := &cliproxyauth.Auth{
+		Provider: "codex",
+		Attributes: map[string]string{
+			"header:Originator": "codex_vscode",
+		},
+	}
+	headers := http.Header{
+		"Conversation_id": []string{"conv-1"},
+	}
+
+	got := applyCodexWebsocketHeaders(context.Background(), headers, auth, "", nil)
+
+	if gotConversation := got.Get("Conversation_id"); gotConversation != "" {
+		t.Fatalf("Conversation_id = %q, want empty", gotConversation)
+	}
+	if gotSession := got.Get("Session_id"); gotSession != "conv-1" {
+		t.Fatalf("Session_id = %q, want %q", gotSession, "conv-1")
+	}
+	if gotRequestID := got.Get("X-Client-Request-Id"); gotRequestID != "conv-1" {
+		t.Fatalf("X-Client-Request-Id = %q, want %q", gotRequestID, "conv-1")
+	}
+	if gotOriginator := got.Get("Originator"); gotOriginator != "codex_vscode" {
+		t.Fatalf("Originator = %q, want %q", gotOriginator, "codex_vscode")
+	}
+	if gotUA := got.Get("User-Agent"); !strings.HasPrefix(gotUA, "codex_vscode/") {
+		t.Fatalf("User-Agent = %q, want codex_vscode/ prefix", gotUA)
+	}
+}
+
 func TestApplyCodexWebsocketHeadersUsesConfigDefaultsForOAuth(t *testing.T) {
 	cfg := &config.Config{
 		CodexHeaderDefaults: config.CodexHeaderDefaults{
@@ -101,8 +214,8 @@ func TestApplyCodexWebsocketHeadersUsesConfigDefaultsForOAuth(t *testing.T) {
 
 	headers := applyCodexWebsocketHeaders(context.Background(), http.Header{}, auth, "", cfg)
 
-	if got := headers.Get("User-Agent"); got != "" {
-		t.Fatalf("User-Agent = %s, want empty", got)
+	if got := headers.Get("User-Agent"); got != "my-codex-client/1.0" {
+		t.Fatalf("User-Agent = %s, want %s", got, "my-codex-client/1.0")
 	}
 	if got := headers.Get("x-codex-beta-features"); got != "feature-a,feature-b" {
 		t.Fatalf("x-codex-beta-features = %s, want %s", got, "feature-a,feature-b")
@@ -112,7 +225,7 @@ func TestApplyCodexWebsocketHeadersUsesConfigDefaultsForOAuth(t *testing.T) {
 	}
 }
 
-func TestApplyCodexWebsocketHeadersPrefersExistingHeadersOverClientAndConfig(t *testing.T) {
+func TestApplyCodexWebsocketHeadersConfigUserAgentOverridesExistingHeader(t *testing.T) {
 	cfg := &config.Config{
 		CodexHeaderDefaults: config.CodexHeaderDefaults{
 			UserAgent:    "config-ua",
@@ -133,8 +246,8 @@ func TestApplyCodexWebsocketHeadersPrefersExistingHeadersOverClientAndConfig(t *
 
 	got := applyCodexWebsocketHeaders(ctx, headers, auth, "", cfg)
 
-	if gotVal := got.Get("User-Agent"); gotVal != "" {
-		t.Fatalf("User-Agent = %s, want empty", gotVal)
+	if gotVal := got.Get("User-Agent"); gotVal != "config-ua" {
+		t.Fatalf("User-Agent = %s, want %s", gotVal, "config-ua")
 	}
 	if gotVal := got.Get("x-codex-beta-features"); gotVal != "existing-beta" {
 		t.Fatalf("x-codex-beta-features = %s, want %s", gotVal, "existing-beta")
@@ -159,15 +272,15 @@ func TestApplyCodexWebsocketHeadersConfigUserAgentOverridesClientHeader(t *testi
 
 	headers := applyCodexWebsocketHeaders(ctx, http.Header{}, auth, "", cfg)
 
-	if got := headers.Get("User-Agent"); got != "" {
-		t.Fatalf("User-Agent = %s, want empty", got)
+	if got := headers.Get("User-Agent"); got != "config-ua" {
+		t.Fatalf("User-Agent = %s, want %s", got, "config-ua")
 	}
 	if got := headers.Get("x-codex-beta-features"); got != "client-beta" {
 		t.Fatalf("x-codex-beta-features = %s, want %s", got, "client-beta")
 	}
 }
 
-func TestApplyCodexWebsocketHeadersAuthFileUserAgentOverridesExistingClientAndConfig(t *testing.T) {
+func TestApplyCodexWebsocketHeadersConfigUserAgentOverridesAuthFileAndClient(t *testing.T) {
 	cfg := &config.Config{
 		CodexHeaderDefaults: config.CodexHeaderDefaults{
 			UserAgent:    "config-ua",
@@ -189,8 +302,8 @@ func TestApplyCodexWebsocketHeadersAuthFileUserAgentOverridesExistingClientAndCo
 
 	got := applyCodexWebsocketHeaders(ctx, headers, auth, "", cfg)
 
-	if gotVal := got.Get("User-Agent"); gotVal != "auth-file-ua" {
-		t.Fatalf("User-Agent = %s, want %s", gotVal, "auth-file-ua")
+	if gotVal := got.Get("User-Agent"); gotVal != "config-ua" {
+		t.Fatalf("User-Agent = %s, want %s", gotVal, "config-ua")
 	}
 }
 
@@ -208,11 +321,14 @@ func TestApplyCodexWebsocketHeadersUsesConfigUserAgentForAPIKeyAuth(t *testing.T
 
 	headers := applyCodexWebsocketHeaders(context.Background(), http.Header{}, auth, "sk-test", cfg)
 
-	if got := headers.Get("User-Agent"); got != "" {
-		t.Fatalf("User-Agent = %s, want empty", got)
+	if got := headers.Get("User-Agent"); got != "config-ua" {
+		t.Fatalf("User-Agent = %s, want %s", got, "config-ua")
 	}
 	if got := headers.Get("x-codex-beta-features"); got != "" {
 		t.Fatalf("x-codex-beta-features = %q, want empty", got)
+	}
+	if got := headers.Get("Originator"); got != codexOriginator {
+		t.Fatalf("Originator = %s, want %s", got, codexOriginator)
 	}
 }
 
@@ -277,7 +393,41 @@ func TestApplyCodexHeadersPassesThroughClientIdentityHeaders(t *testing.T) {
 	}
 }
 
-func TestApplyCodexHeadersAuthFileUserAgentOverridesExistingClientAndConfig(t *testing.T) {
+func TestApplyCodexHeadersUsesDerivedSessionHeadersWithoutForwardingConversationID(t *testing.T) {
+	req, err := http.NewRequest(http.MethodPost, "https://example.com/responses", nil)
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	auth := &cliproxyauth.Auth{
+		Provider: "codex",
+		Attributes: map[string]string{
+			"header:Originator": "codex_vscode",
+		},
+	}
+	req = req.WithContext(contextWithGinHeaders(map[string]string{
+		"Conversation_id": "conv-1",
+	}))
+
+	applyCodexHeaders(req, auth, "oauth-token", true, nil)
+
+	if gotConversation := req.Header.Get("Conversation_id"); gotConversation != "" {
+		t.Fatalf("Conversation_id = %q, want empty", gotConversation)
+	}
+	if gotSession := req.Header.Get("Session_id"); gotSession != "conv-1" {
+		t.Fatalf("Session_id = %q, want %q", gotSession, "conv-1")
+	}
+	if gotRequestID := req.Header.Get("X-Client-Request-Id"); gotRequestID != "conv-1" {
+		t.Fatalf("X-Client-Request-Id = %q, want %q", gotRequestID, "conv-1")
+	}
+	if gotOriginator := req.Header.Get("Originator"); gotOriginator != "codex_vscode" {
+		t.Fatalf("Originator = %q, want %q", gotOriginator, "codex_vscode")
+	}
+	if gotUA := req.Header.Get("User-Agent"); !strings.HasPrefix(gotUA, "codex_vscode/") {
+		t.Fatalf("User-Agent = %q, want codex_vscode/ prefix", gotUA)
+	}
+}
+
+func TestApplyCodexHeadersConfigUserAgentOverridesAuthFileAndClient(t *testing.T) {
 	req, err := http.NewRequest(http.MethodPost, "https://example.com/responses", nil)
 	if err != nil {
 		t.Fatalf("NewRequest() error = %v", err)
@@ -302,8 +452,8 @@ func TestApplyCodexHeadersAuthFileUserAgentOverridesExistingClientAndConfig(t *t
 
 	applyCodexHeaders(req, auth, "oauth-token", true, cfg)
 
-	if got := req.Header.Get("User-Agent"); got != "auth-file-ua" {
-		t.Fatalf("User-Agent = %s, want %s", got, "auth-file-ua")
+	if got := req.Header.Get("User-Agent"); got != "config-ua" {
+		t.Fatalf("User-Agent = %s, want %s", got, "config-ua")
 	}
 }
 
@@ -332,23 +482,6 @@ func TestApplyCodexHeadersUsesConfigUserAgentForAPIKeyAuth(t *testing.T) {
 	}
 }
 
-func TestApplyCodexHeadersPassesThroughCallerClientRequestID(t *testing.T) {
-	req, err := http.NewRequest(http.MethodPost, "https://example.com/responses", nil)
-	if err != nil {
-		t.Fatalf("NewRequest() error = %v", err)
-	}
-	ctx := contextWithGinHeaders(map[string]string{
-		"X-Client-Request-Id": "caller-trace-7",
-	})
-	req = req.WithContext(ctx)
-
-	applyCodexHeaders(req, nil, "oauth-token", false, nil)
-
-	if got := req.Header.Get("X-Client-Request-Id"); got != "caller-trace-7" {
-		t.Fatalf("X-Client-Request-Id = %q, want caller-trace-7", got)
-	}
-}
-
 func TestApplyCodexHeadersDoesNotInjectClientOnlyHeadersByDefault(t *testing.T) {
 	req, err := http.NewRequest(http.MethodPost, "https://example.com/responses", nil)
 	if err != nil {
@@ -357,18 +490,21 @@ func TestApplyCodexHeadersDoesNotInjectClientOnlyHeadersByDefault(t *testing.T) 
 
 	applyCodexHeaders(req, nil, "oauth-token", true, nil)
 
+	if got := req.Header.Get("User-Agent"); got != misc.CodexCLIUserAgent {
+		t.Fatalf("User-Agent = %q, want %q", got, misc.CodexCLIUserAgent)
+	}
+	if got := req.Header.Get("Originator"); got != codexOriginator {
+		t.Fatalf("Originator = %q, want %q", got, codexOriginator)
+	}
 	if got := req.Header.Get("Version"); got != "" {
 		t.Fatalf("Version = %q, want empty", got)
 	}
-	if got := req.Header.Get("X-Codex-Turn-Metadata"); got != "" {
-		t.Fatalf("X-Codex-Turn-Metadata = %q, want empty", got)
+	assertGeneratedCodexTurnMetadata(t, req.Header.Get("X-Codex-Turn-Metadata"))
+	if got := req.Header.Get("Session_id"); got == "" {
+		t.Fatal("Session_id should be generated by default")
 	}
-	// Aligning with codex-rs, we always attach X-Client-Request-Id set to the
-	// Session_id value (which will be minted as a UUID when neither caller nor
-	// cache provides one). The header must never be left empty because
-	// upstream relies on it for turn-level trace correlation.
-	if got, want := req.Header.Get("X-Client-Request-Id"), req.Header.Get("Session_id"); got == "" || got != want {
-		t.Fatalf("X-Client-Request-Id = %q, want non-empty and equal to Session_id=%q", got, want)
+	if got := req.Header.Get("X-Client-Request-Id"); got != req.Header.Get("Session_id") {
+		t.Fatalf("X-Client-Request-Id = %q, want Session_id %q", got, req.Header.Get("Session_id"))
 	}
 }
 
@@ -384,6 +520,27 @@ func contextWithGinHeaders(headers map[string]string) context.Context {
 	return context.WithValue(context.Background(), "gin", ginCtx)
 }
 
+func assertGeneratedCodexTurnMetadata(t *testing.T, raw string) {
+	t.Helper()
+
+	if strings.TrimSpace(raw) == "" {
+		t.Fatal("X-Codex-Turn-Metadata should be generated by default")
+	}
+
+	var metadata map[string]any
+	if err := json.Unmarshal([]byte(raw), &metadata); err != nil {
+		t.Fatalf("X-Codex-Turn-Metadata should be valid JSON: %v", err)
+	}
+
+	turnID, _ := metadata["turn_id"].(string)
+	if strings.TrimSpace(turnID) == "" {
+		t.Fatalf("turn_id = %q, want non-empty", turnID)
+	}
+	if sandbox, _ := metadata["sandbox"].(string); sandbox != codexDefaultSandboxTag {
+		t.Fatalf("sandbox = %q, want %q", sandbox, codexDefaultSandboxTag)
+	}
+}
+
 func TestNewProxyAwareWebsocketDialerDirectDisablesProxy(t *testing.T) {
 	t.Parallel()
 
@@ -394,54 +551,5 @@ func TestNewProxyAwareWebsocketDialerDirectDisablesProxy(t *testing.T) {
 
 	if dialer.Proxy != nil {
 		t.Fatal("expected websocket proxy function to be nil for direct mode")
-	}
-}
-
-func TestBuildCodexWebsocketRequestBodyInjectsClientMetadataFromTurnMetadata(t *testing.T) {
-	body := []byte(`{"model":"gpt-5-codex","input":[{"type":"message","id":"msg-1"}]}`)
-
-	out := buildCodexWebsocketRequestBody(body, "trace-xyz")
-
-	if got := gjson.GetBytes(out, "client_metadata.x-codex-turn-metadata").String(); got != "trace-xyz" {
-		t.Fatalf("client_metadata.x-codex-turn-metadata = %q, want trace-xyz", got)
-	}
-	if got := gjson.GetBytes(out, "type").String(); got != "response.create" {
-		t.Fatalf("type = %q, want response.create", got)
-	}
-}
-
-func TestBuildCodexWebsocketRequestBodyOmitsClientMetadataWhenTurnMetadataEmpty(t *testing.T) {
-	body := []byte(`{"model":"gpt-5-codex","input":[{"type":"message","id":"msg-1"}]}`)
-
-	out := buildCodexWebsocketRequestBody(body, "   ")
-
-	if gjson.GetBytes(out, "client_metadata").Exists() {
-		t.Fatalf("client_metadata should be omitted when turn metadata is empty; got %s", string(out))
-	}
-}
-
-func TestCodexWebsocketTurnMetadataReadsBothCasings(t *testing.T) {
-	h := http.Header{}
-	h.Set("X-Codex-Turn-Metadata", "canonical")
-	if got := codexWebsocketTurnMetadata(h); got != "canonical" {
-		t.Fatalf("canonical casing = %q, want canonical", got)
-	}
-
-	h2 := http.Header{}
-	h2["x-codex-turn-metadata"] = []string{"lowercase"}
-	if got := codexWebsocketTurnMetadata(h2); got != "lowercase" {
-		t.Fatalf("lowercase casing = %q, want lowercase", got)
-	}
-}
-
-func TestApplyCodexWebsocketHeadersMirrorsClientSuppliedRequestID(t *testing.T) {
-	ctx := contextWithGinHeaders(map[string]string{
-		"x-client-request-id": "caller-trace-42",
-	})
-
-	headers := applyCodexWebsocketHeaders(ctx, http.Header{}, nil, "", nil)
-
-	if got := headers.Get("x-client-request-id"); got != "caller-trace-42" {
-		t.Fatalf("x-client-request-id = %q, want caller-trace-42", got)
 	}
 }

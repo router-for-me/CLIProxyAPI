@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"bytes"
 	"context"
 	"net/http"
 	"net/http/httptest"
@@ -46,7 +47,7 @@ func TestCodexExecutorExecute_EmptyStreamCompletionOutputUsesOutputItemDone(t *t
 	}
 }
 
-func TestCodexExecutorExecuteStreamEmptyCompletionOutputUsesOutputItemDone(t *testing.T) {
+func TestCodexExecutorExecuteStream_EmptyStreamCompletionOutputUsesOutputItemDone(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte("data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]},\"output_index\":0}\n"))
@@ -62,24 +63,37 @@ func TestCodexExecutorExecuteStreamEmptyCompletionOutputUsesOutputItemDone(t *te
 
 	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
 		Model:   "gpt-5.4-mini",
-		Payload: []byte(`{"model":"gpt-5.4-mini","messages":[{"role":"user","content":"Say ok"}],"stream":true}`),
+		Payload: []byte(`{"model":"gpt-5.4-mini","input":"Say ok"}`),
 	}, cliproxyexecutor.Options{
-		SourceFormat: sdktranslator.FromString("openai"),
+		SourceFormat: sdktranslator.FromString("openai-response"),
 		Stream:       true,
 	})
 	if err != nil {
 		t.Fatalf("ExecuteStream error: %v", err)
 	}
 
-	var payload []byte
+	var completed []byte
 	for chunk := range result.Chunks {
 		if chunk.Err != nil {
 			t.Fatalf("stream chunk error: %v", chunk.Err)
 		}
-		payload = append(payload, chunk.Payload...)
+		payload := bytes.TrimSpace(chunk.Payload)
+		if !bytes.HasPrefix(payload, []byte("data:")) {
+			continue
+		}
+		data := bytes.TrimSpace(payload[5:])
+		if gjson.GetBytes(data, "type").String() == "response.completed" {
+			completed = append([]byte(nil), data...)
+		}
 	}
-	if !strings.Contains(string(payload), "ok") {
-		t.Fatalf("stream payload did not contain assistant text: %s", string(payload))
+
+	if len(completed) == 0 {
+		t.Fatal("missing response.completed chunk")
+	}
+
+	gotContent := gjson.GetBytes(completed, "response.output.0.content.0.text").String()
+	if gotContent != "ok" {
+		t.Fatalf("response.output[0].content[0].text = %q, want %q; completed=%s", gotContent, "ok", string(completed))
 	}
 }
 
@@ -100,5 +114,23 @@ func TestPatchCodexCompletedOutputRecoversFunctionCall(t *testing.T) {
 	}
 	if got := gjson.GetBytes(patched, "response.output.0.arguments").String(); got != `{"q":"hello"}` {
 		t.Fatalf("response.output.0.arguments = %q, want %q", got, `{"q":"hello"}`)
+	}
+}
+
+func TestCollectCodexResponseAggregatePatchesCompletedOutputButKeepsCapturedBody(t *testing.T) {
+	stream := strings.NewReader(
+		"data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]},\"output_index\":0}\n" +
+			"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"output\":[]}}\n\n",
+	)
+
+	result, err := collectCodexResponseAggregate(stream, true)
+	if err != nil {
+		t.Fatalf("collectCodexResponseAggregate() error = %v", err)
+	}
+	if got := gjson.GetBytes(result.completedData, "response.output.0.content.0.text").String(); got != "ok" {
+		t.Fatalf("patched completed output text = %q, want %q", got, "ok")
+	}
+	if !strings.Contains(string(result.body), `"response":{"id":"resp_1","output":[]}`) {
+		t.Fatalf("captured body did not preserve original completed event: %s", string(result.body))
 	}
 }

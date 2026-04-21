@@ -23,6 +23,15 @@ import (
 
 const codexResponseDedupeHashLen = 16
 
+var codexDedupeIgnoredHeaders = map[string]struct{}{
+	"Authorization":                         {},
+	"X-Codex-Turn-Metadata":                 {},
+	"X-Client-Request-Id":                   {},
+	"Traceparent":                           {},
+	"Tracestate":                            {},
+	"X-Responsesapi-Include-Timing-Metrics": {},
+}
+
 type codexPreparedRequest struct {
 	httpReq       *http.Request
 	body          []byte
@@ -30,13 +39,10 @@ type codexPreparedRequest struct {
 }
 
 type codexNonStreamHTTPResult struct {
-	statusCode          int
-	headers             http.Header
-	body                []byte
-	completedData       []byte
-	outputItemsByIndex  map[int64][]byte
-	outputItemsFallback [][]byte
-	functionCallsByItem map[string]*codexStreamFunctionCallState
+	statusCode    int
+	headers       http.Header
+	body          []byte
+	completedData []byte
 }
 
 func (e *CodexExecutor) prepareCodexRequest(ctx context.Context, from sdktranslator.Format, url string, req cliproxyexecutor.Request, rawJSON []byte) (codexPreparedRequest, error) {
@@ -385,28 +391,6 @@ func (result codexNonStreamHTTPResult) clone() codexNonStreamHTTPResult {
 	if len(result.completedData) > 0 {
 		cloned.completedData = bytes.Clone(result.completedData)
 	}
-	if len(result.outputItemsByIndex) > 0 {
-		cloned.outputItemsByIndex = make(map[int64][]byte, len(result.outputItemsByIndex))
-		for idx, item := range result.outputItemsByIndex {
-			cloned.outputItemsByIndex[idx] = bytes.Clone(item)
-		}
-	}
-	if len(result.outputItemsFallback) > 0 {
-		cloned.outputItemsFallback = make([][]byte, len(result.outputItemsFallback))
-		for i := range result.outputItemsFallback {
-			cloned.outputItemsFallback[i] = bytes.Clone(result.outputItemsFallback[i])
-		}
-	}
-	if len(result.functionCallsByItem) > 0 {
-		cloned.functionCallsByItem = make(map[string]*codexStreamFunctionCallState, len(result.functionCallsByItem))
-		for key, state := range result.functionCallsByItem {
-			if state == nil {
-				continue
-			}
-			copied := *state
-			cloned.functionCallsByItem[key] = &copied
-		}
-	}
 	return cloned
 }
 
@@ -421,19 +405,13 @@ func collectCodexResponseAggregate(body io.Reader, captureBody bool) (codexNonSt
 			result.body = append(result.body, line...)
 			result.body = append(result.body, '\n')
 		}
-		if !bytes.HasPrefix(line, dataTag) {
+		eventData, ok := codexEventData(line)
+		if !ok {
 			return nil
 		}
-
-		eventData := bytes.TrimSpace(line[len(dataTag):])
-		streamState.recordEvent(eventData)
-		switch gjson.GetBytes(eventData, "type").String() {
-		case "response.completed":
-			result.completedData = bytes.Clone(eventData)
+		eventType := codexEventType(eventData)
+		switch eventType {
 		case "response.incomplete":
-			// Upstream signalled the turn stopped before completion. We do not
-			// treat this as success: leave completedData unset so downstream
-			// logic surfaces an error instead of replaying a partial payload.
 			reason := gjson.GetBytes(eventData, "response.incomplete_details.reason").String()
 			if reason == "" {
 				reason = "unknown"
@@ -446,11 +424,11 @@ func collectCodexResponseAggregate(body io.Reader, captureBody bool) (codexNonSt
 			}
 			log.Warnf("codex aggregate terminated with response.failed: %s", message)
 		}
+		if completed, isCompleted := streamState.processEventDataWithType(eventType, eventData, true); isCompleted {
+			result.completedData = bytes.Clone(completed.data)
+		}
 		return nil
 	})
-	result.outputItemsByIndex = streamState.outputItemsByIndex
-	result.outputItemsFallback = streamState.outputItemsFallback
-	result.functionCallsByItem = streamState.functionCallsByItem
 	return result, err
 }
 
@@ -462,7 +440,7 @@ func hashCodexDedupeHeaders(headers http.Header) string {
 	keys := make([]string, 0, len(headers))
 	for key := range headers {
 		canonical := http.CanonicalHeaderKey(key)
-		if canonical == "Authorization" || canonical == "X-Client-Request-Id" {
+		if _, ignored := codexDedupeIgnoredHeaders[canonical]; ignored {
 			continue
 		}
 		keys = append(keys, canonical)

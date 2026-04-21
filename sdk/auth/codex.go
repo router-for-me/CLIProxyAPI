@@ -82,7 +82,12 @@ func (a *CodexAuthenticator) Login(ctx context.Context, cfg *config.Config, opts
 
 	authSvc := codex.NewCodexAuth(cfg)
 
-	authURL, err := authSvc.GenerateAuthURL(state, pkceCodes)
+	authURL, err := authSvc.GenerateAuthURLWithOptions(
+		state,
+		pkceCodes,
+		codexLoginOriginator(opts),
+		codexLoginWorkspaceID(opts),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("codex authorization url generation failed: %w", err)
 	}
@@ -199,13 +204,42 @@ waitForCallback:
 
 func codexLoginUserAgent(opts *LoginOptions) string {
 	if opts == nil || len(opts.Metadata) == 0 {
-		return ""
+		return misc.CodexCLIUserAgent
 	}
 	if ua := strings.TrimSpace(opts.Metadata["user_agent"]); ua != "" {
 		return ua
 	}
 	if ua := strings.TrimSpace(opts.Metadata["user-agent"]); ua != "" {
 		return ua
+	}
+	return misc.CodexCLIUserAgentWithOriginator(codexLoginOriginator(opts))
+}
+
+func codexLoginOriginator(opts *LoginOptions) string {
+	if opts == nil || len(opts.Metadata) == 0 {
+		return misc.CodexCLIOriginator
+	}
+	for _, key := range []string{"originator", "Originator", "header:Originator", "header:originator"} {
+		if value := strings.TrimSpace(opts.Metadata[key]); value != "" {
+			return value
+		}
+	}
+	return misc.CodexCLIOriginator
+}
+
+func codexLoginWorkspaceID(opts *LoginOptions) string {
+	if opts == nil || len(opts.Metadata) == 0 {
+		return ""
+	}
+	for _, key := range []string{
+		"allowed_workspace_id",
+		"workspace_id",
+		"chatgpt_workspace_id",
+		"forced_chatgpt_workspace_id",
+	} {
+		if value := strings.TrimSpace(opts.Metadata[key]); value != "" {
+			return value
+		}
 	}
 	return ""
 }

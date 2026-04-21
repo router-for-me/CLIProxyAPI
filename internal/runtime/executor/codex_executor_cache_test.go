@@ -1,14 +1,18 @@
 package executor
 
 import (
+	"bytes"
 	"context"
 	"io"
+	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	"github.com/tidwall/gjson"
@@ -21,7 +25,6 @@ func ctxWithAPIKey(t *testing.T, apiKey string) context.Context {
 	if apiKey != "" {
 		ginCtx.Set("apiKey", apiKey)
 	}
-	//nolint:revive // gin context is deliberately stashed under "gin" elsewhere in the codebase.
 	return context.WithValue(context.Background(), "gin", ginCtx)
 }
 
@@ -75,9 +78,6 @@ func TestCodexExecutorCacheHelper_OpenAIChatCompletions_StablePromptCacheKeyFrom
 	}
 }
 
-// assertPromptCacheKey extracts prompt_cache_key from a rebuilt request body
-// and asserts its value, while also returning it so callers can compare
-// across invocations.
 func assertPromptCacheKey(t *testing.T, executor *CodexExecutor, ctx context.Context, format string, req cliproxyexecutor.Request, rawJSON []byte) string {
 	t.Helper()
 	httpReq, err := executor.cacheHelper(ctx, sdktranslator.FromString(format), "https://example.com/responses", req, rawJSON)
@@ -108,9 +108,6 @@ func TestCodexExecutorCacheHelper_DifferentConversationsGetDifferentKeys(t *test
 	executor := &CodexExecutor{}
 	ctx := ctxWithAPIKey(t, "api-key-shared")
 
-	// Two independent conversations coming from the *same* api key must not
-	// collide. Before the cache-derivation refactor both of these would have
-	// produced the api-key-derived UUID and shared upstream prompt cache.
 	convA := []byte(`{"model":"gpt-5","messages":[{"role":"user","content":"first question about python"}]}`)
 	convB := []byte(`{"model":"gpt-5","messages":[{"role":"user","content":"completely different topic about cooking"}]}`)
 
@@ -129,9 +126,6 @@ func TestCodexExecutorCacheHelper_SameConversationReusesKeyAcrossTurns(t *testin
 	executor := &CodexExecutor{}
 	ctx := ctxWithAPIKey(t, "api-key-convos")
 
-	// First turn has just the opening user message; second turn appends
-	// assistant + follow-up. The first user message is unchanged, so the
-	// fingerprint — and therefore the cache key — should be identical.
 	turn1 := []byte(`{"model":"gpt-5","messages":[{"role":"user","content":"explain closures"}]}`)
 	turn2 := []byte(`{"model":"gpt-5","messages":[{"role":"user","content":"explain closures"},{"role":"assistant","content":"..."},{"role":"user","content":"show an example"}]}`)
 
@@ -150,8 +144,6 @@ func TestCodexExecutorCacheHelper_ConversationIDFieldPreferredOverContent(t *tes
 	executor := &CodexExecutor{}
 	ctx := ctxWithAPIKey(t, "api-key-field")
 
-	// Two payloads with *different* first-user-messages but the *same*
-	// explicit conversation_id must collapse to the same cache key.
 	p1 := []byte(`{"model":"gpt-5","metadata":{"conversation_id":"conv-42"},"messages":[{"role":"user","content":"first"}]}`)
 	p2 := []byte(`{"model":"gpt-5","metadata":{"conversation_id":"conv-42"},"messages":[{"role":"user","content":"second"}]}`)
 
@@ -165,8 +157,6 @@ func TestCodexExecutorCacheHelper_ConversationIDFieldPreferredOverContent(t *tes
 func TestCodexExecutorCacheHelper_DifferentTenantsDoNotCollide(t *testing.T) {
 	executor := &CodexExecutor{}
 
-	// Same conversation-level content from two different api keys must
-	// *never* collide, otherwise tenant isolation for prompt cache is broken.
 	payload := []byte(`{"model":"gpt-5","messages":[{"role":"user","content":"hello"}]}`)
 	req := cliproxyexecutor.Request{Model: "gpt-5", Payload: payload}
 
@@ -184,14 +174,85 @@ func TestCodexExecutorCacheHelper_ClaudeUserIDBackwardsCompatible(t *testing.T) 
 	payload := []byte(`{"model":"claude-sonnet","metadata":{"user_id":"u-7"},"messages":[{"role":"user","content":"hi"}]}`)
 	req := cliproxyexecutor.Request{Model: "claude-sonnet", Payload: payload}
 
-	// First call populates the cache; second call must reuse the same id.
 	k1 := assertPromptCacheKey(t, executor, ctx, "claude", req, payload)
 	k2 := assertPromptCacheKey(t, executor, ctx, "claude", req, payload)
 	if k1 == "" || k1 != k2 {
 		t.Fatalf("Claude path must keep stable id from metadata.user_id: got %q and %q", k1, k2)
 	}
-	// And the entry must actually be parked under the legacy "model-userID" key.
 	if _, ok := helps.GetCodexCache("claude-sonnet-u-7"); !ok {
 		t.Fatalf("expected legacy claude cache key to be populated")
+	}
+}
+
+func TestHashCodexDedupeHeaders_IgnoresTraceAndTimingHeaders(t *testing.T) {
+	left := http.Header{
+		"Content-Type":                          []string{"application/json"},
+		"X-Codex-Turn-Metadata":                 []string{`{"turn_id":"turn-left","sandbox":"none"}`},
+		"Traceparent":                           []string{"00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01"},
+		"Tracestate":                            []string{"vendor-a=value-a"},
+		"X-Responsesapi-Include-Timing-Metrics": []string{"1"},
+		"X-Client-Request-Id":                   []string{"req-left"},
+	}
+	right := http.Header{
+		"Content-Type":                          []string{"application/json"},
+		"X-Codex-Turn-Metadata":                 []string{`{"turn_id":"turn-right","sandbox":"none"}`},
+		"Traceparent":                           []string{"00-cccccccccccccccccccccccccccccccc-dddddddddddddddd-01"},
+		"Tracestate":                            []string{"vendor-b=value-b"},
+		"X-Responsesapi-Include-Timing-Metrics": []string{"0"},
+		"X-Client-Request-Id":                   []string{"req-right"},
+	}
+
+	leftHash := hashCodexDedupeHeaders(left)
+	rightHash := hashCodexDedupeHeaders(right)
+	if leftHash != rightHash {
+		t.Fatalf("hashCodexDedupeHeaders() mismatch: left=%q right=%q", leftHash, rightHash)
+	}
+}
+
+func TestPrepareCodexHTTPCallAppliesHeadersAndPreservesLogBody(t *testing.T) {
+	t.Setenv(codexCompressionEnv, "1")
+
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "codex",
+		Metadata: map[string]any{"account_id": "acct_123"},
+	}
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5.4",
+		Payload: []byte(`{"model":"gpt-5.4","input":"hello"}`),
+	}
+	rawJSON := []byte(`{"model":"gpt-5.4","input":"hello"}`)
+
+	call, err := executor.prepareCodexHTTPCall(
+		context.Background(),
+		auth,
+		sdktranslator.FromString("openai-response"),
+		"https://example.com/responses",
+		req,
+		rawJSON,
+		"oauth-token",
+		true,
+	)
+	if err != nil {
+		t.Fatalf("prepareCodexHTTPCall() error = %v", err)
+	}
+
+	if got := call.prepared.httpReq.Header.Get("Authorization"); got != "Bearer oauth-token" {
+		t.Fatalf("Authorization = %q, want %q", got, "Bearer oauth-token")
+	}
+	if got := call.prepared.httpReq.Header.Get("Accept"); got != "text/event-stream" {
+		t.Fatalf("Accept = %q, want %q", got, "text/event-stream")
+	}
+	if got := call.prepared.httpReq.Header.Get("Content-Encoding"); got != "zstd" {
+		t.Fatalf("Content-Encoding = %q, want %q", got, "zstd")
+	}
+	if !bytes.Equal(call.requestLog.Body, rawJSON) {
+		t.Fatalf("requestLog.Body = %q, want %q", string(call.requestLog.Body), string(rawJSON))
+	}
+	if got := call.requestLog.URL; got != "https://example.com/responses" {
+		t.Fatalf("requestLog.URL = %q, want %q", got, "https://example.com/responses")
+	}
+	if got := call.requestLog.Headers.Get("Content-Encoding"); got != "zstd" {
+		t.Fatalf("requestLog.Headers[Content-Encoding] = %q, want %q", got, "zstd")
 	}
 }

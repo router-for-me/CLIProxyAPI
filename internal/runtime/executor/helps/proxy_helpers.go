@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
@@ -49,7 +50,16 @@ var (
 // Returns:
 //   - *http.Client: An HTTP client with configured proxy or transport
 func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
+	pool, errCA := misc.CustomRootCAsFromEnv()
+	if errCA != nil {
+		log.Warnf("custom CA disabled: %v", errCA)
+		pool = nil
+	}
+
 	if rt := contextRoundTripper(ctx); rt != nil && authProxyURL(auth) != "" {
+		if pool != nil {
+			rt = misc.RoundTripperWithCustomRootCAs(rt, pool)
+		}
 		return newHTTPClient(rt, timeout)
 	}
 
@@ -57,15 +67,25 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 	if proxyURL != "" {
 		transport := cachedProxyTransport(proxyURL)
 		if transport != nil {
+			if pool != nil {
+				transport = misc.RoundTripperWithCustomRootCAs(transport, pool)
+				return newHTTPClient(transport, timeout)
+			}
 			return cachedHTTPClient("proxy:"+proxyURL, transport, timeout)
 		}
 		log.Debugf("failed to setup proxy from URL: %s, falling back to context transport", proxyURL)
 	}
 
 	if rt := contextRoundTripper(ctx); rt != nil {
+		if pool != nil {
+			rt = misc.RoundTripperWithCustomRootCAs(rt, pool)
+		}
 		return newHTTPClient(rt, timeout)
 	}
 
+	if pool != nil {
+		return newHTTPClient(misc.RoundTripperWithCustomRootCAs(cachedDefaultTransport(), pool), timeout)
+	}
 	return cachedHTTPClient(defaultClientCacheKey, cachedDefaultTransport(), timeout)
 }
 
