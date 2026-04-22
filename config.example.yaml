@@ -226,6 +226,21 @@ nonstream-keepalive-interval: 0
 #   user-agent: "codex_cli_rs/0.114.0 (Mac OS 14.2.0; x86_64) vscode/1.111.0"
 #   beta-features: "multi_agent"
 
+# MiniMax API keys (OpenAI-compatible endpoint at api.minimax.io/v1)
+# minimax-api-key:
+#   - api-key: "eyJhbGci..."
+#     prefix: "test" # optional: require calls like "test/MiniMax-M2.7" to target this credential
+#     base-url: "https://api.minimax.io/v1" # optional: defaults to https://api.minimax.io/v1
+#     headers:
+#       X-Custom-Header: "custom-value"
+#     proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override
+#     # proxy-url: "direct" # optional: explicit direct connect for this credential
+#     models:
+#       - name: "MiniMax-M2.7"           # upstream model name
+#         alias: "minimax-latest"        # client alias mapped to the upstream model
+#     excluded-models:
+#       - "MiniMax-M2.7-highspeed"
+
 # OpenAI compatibility providers
 # openai-compatibility:
 #   - name: "openrouter" # The name of the provider; it will be used in the user agent and other places.

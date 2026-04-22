@@ -1863,5 +1863,29 @@
         ]
       }
     }
+  ],
+  "minimax": [
+    {
+      "id": "MiniMax-M2.7",
+      "object": "model",
+      "created": 1745280000,
+      "owned_by": "minimax",
+      "type": "minimax",
+      "display_name": "MiniMax M2.7",
+      "description": "Peak Performance. Ultimate Value. Master the Complex.",
+      "context_length": 1000000,
+      "max_completion_tokens": 40960
+    },
+    {
+      "id": "MiniMax-M2.7-highspeed",
+      "object": "model",
+      "created": 1745280000,
+      "owned_by": "minimax",
+      "type": "minimax",
+      "display_name": "MiniMax M2.7 Highspeed",
+      "description": "Same performance, faster and more agile.",
+      "context_length": 1000000,
+      "max_completion_tokens": 40960
+    }
   ]
 }
