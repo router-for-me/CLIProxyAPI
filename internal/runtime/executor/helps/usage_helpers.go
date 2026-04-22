@@ -283,6 +283,11 @@ func ParseClaudeStreamUsage(line []byte) (usage.Detail, bool) {
 	}
 	usageNode := gjson.GetBytes(payload, "usage")
 	if !usageNode.Exists() {
+		// Fallback: some providers (e.g., Qwen) nest usage under message.usage
+		// in message_start events instead of placing it at the top level.
+		usageNode = gjson.GetBytes(payload, "message.usage")
+	}
+	if !usageNode.Exists() {
 		return usage.Detail{}, false
 	}
 	detail := usage.Detail{

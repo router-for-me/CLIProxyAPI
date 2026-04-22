@@ -26,6 +26,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
@@ -466,11 +467,12 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		if from == to {
 			scanner := bufio.NewScanner(decodedBody)
 			scanner.Buffer(nil, 52_428_800) // 50MB
+			var totalUsage usage.Detail
 			for scanner.Scan() {
 				line := scanner.Bytes()
 				helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 				if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
-					reporter.Publish(ctx, detail)
+					totalUsage = mergeDetail(totalUsage, detail)
 				}
 				if isClaudeOAuthToken(apiKey) && !auth.ToolPrefixDisabled() {
 					line = stripClaudeToolPrefixFromStreamLine(line, claudeToolPrefix)
@@ -484,6 +486,11 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				cloned[len(line)] = '\n'
 				out <- cliproxyexecutor.StreamChunk{Payload: cloned}
 			}
+			// Publish accumulated usage at the end of the stream to avoid
+			// sync.Once capturing partial values (e.g., message_start with output=0).
+			if totalUsage != (usage.Detail{}) {
+				reporter.Publish(ctx, totalUsage)
+			}
 			if errScan := scanner.Err(); errScan != nil {
 				helps.RecordAPIResponseError(ctx, e.cfg, errScan)
 				reporter.PublishFailure(ctx)
@@ -496,11 +503,12 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		scanner := bufio.NewScanner(decodedBody)
 		scanner.Buffer(nil, 52_428_800) // 50MB
 		var param any
+		var totalUsage usage.Detail
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
-				reporter.Publish(ctx, detail)
+				totalUsage = mergeDetail(totalUsage, detail)
 			}
 			if isClaudeOAuthToken(apiKey) && !auth.ToolPrefixDisabled() {
 				line = stripClaudeToolPrefixFromStreamLine(line, claudeToolPrefix)
@@ -521,6 +529,10 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			for i := range chunks {
 				out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}
 			}
+		}
+		// Publish accumulated usage at the end of the stream.
+		if totalUsage != (usage.Detail{}) {
+			reporter.Publish(ctx, totalUsage)
 		}
 		if errScan := scanner.Err(); errScan != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
@@ -2280,4 +2292,18 @@ func ensureModelMaxTokens(body []byte, modelID string) []byte {
 	}
 
 	return body
+}
+
+// mergeDetail returns a Detail with each token field set to the maximum of a and b.
+// Standard Anthropic events contain cumulative counts; some providers (e.g., Qwen)
+// emit delta values. Taking the maximum ensures correctness for both.
+func mergeDetail(a, b usage.Detail) usage.Detail {
+	res := usage.Detail{
+		InputTokens:     max(a.InputTokens, b.InputTokens),
+		OutputTokens:    max(a.OutputTokens, b.OutputTokens),
+		ReasoningTokens: max(a.ReasoningTokens, b.ReasoningTokens),
+		CachedTokens:    max(a.CachedTokens, b.CachedTokens),
+	}
+	res.TotalTokens = res.InputTokens + res.OutputTokens + res.ReasoningTokens
+	return res
 }
