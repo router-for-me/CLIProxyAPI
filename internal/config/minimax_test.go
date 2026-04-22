@@ -10,7 +10,7 @@ func TestSanitizeMiniMaxKeys(t *testing.T) {
 	cfg := &Config{
 		MiniMaxKey: []MiniMaxKey{
 			{APIKey: "  key1  ", BaseURL: "  https://api.minimax.io/v1  "},
-			{APIKey: ""},   // should be removed
+			{APIKey: ""}, // should be removed
 			{APIKey: "key2", Prefix: "  myprefix  "},
 		},
 	}

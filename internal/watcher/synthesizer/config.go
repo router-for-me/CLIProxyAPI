@@ -346,8 +346,8 @@ func (s *ConfigSynthesizer) synthesizeMiniMaxKeys(ctx *SynthesisContext) []*core
 		proxyURL := strings.TrimSpace(entry.ProxyURL)
 		id, token := idGen.Next("minimax:apikey", key, base)
 		attrs := map[string]string{
-			"source":  fmt.Sprintf("config:minimax[%s]", token),
-			"api_key": key,
+			"source":   fmt.Sprintf("config:minimax[%s]", token),
+			"api_key":  key,
 			"base_url": base,
 		}
 		if entry.Priority != 0 {
