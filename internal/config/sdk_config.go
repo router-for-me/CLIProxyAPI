@@ -41,8 +41,12 @@ type SDKConfig struct {
 
 // OAuthRefreshConfig controls background refresh scheduling for OAuth/file-backed auths.
 type OAuthRefreshConfig struct {
+	// Enabled controls whether the background auto-refresh loop runs for OAuth / auth-file credentials.
+	// Nil preserves the new default (disabled).
+	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+
 	// OnStartup controls whether the auto-refresh loop immediately checks credentials when the service starts.
-	// Nil preserves the legacy default (enabled).
+	// Nil preserves the legacy default (enabled) once auto-refresh itself is enabled.
 	OnStartup *bool `yaml:"on-startup,omitempty" json:"on-startup,omitempty"`
 
 	// BatchSize limits how many due credentials may be refreshed in one scheduler pass.

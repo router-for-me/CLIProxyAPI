@@ -110,6 +110,18 @@ func newDefaultAuthManager() *sdkAuth.Manager {
 	)
 }
 
+func (s *Service) syncCoreAutoRefresh() {
+	if s == nil || s.coreManager == nil {
+		return
+	}
+	interval := 15 * time.Minute
+	if s.coreManager.StartAutoRefresh(context.Background(), interval) {
+		log.Infof("core auth auto-refresh started (interval=%s)", interval)
+		return
+	}
+	log.Info("core auth auto-refresh disabled")
+}
+
 func (s *Service) ensureAuthUpdateQueue(ctx context.Context) {
 	if s == nil {
 		return
@@ -686,6 +698,7 @@ func (s *Service) Run(ctx context.Context) error {
 			s.coreManager.SetOAuthModelAlias(newCfg.OAuthModelAlias)
 		}
 		s.rebindExecutors()
+		s.syncCoreAutoRefresh()
 	}
 
 	watcherWrapper, err = s.watcherFactory(s.configPath, s.cfg.AuthDir, reloadCallback)
@@ -707,11 +720,7 @@ func (s *Service) Run(ctx context.Context) error {
 	log.Info("file watcher started for config and auth directory changes")
 
 	// Prefer core auth manager auto refresh if available.
-	if s.coreManager != nil {
-		interval := 15 * time.Minute
-		s.coreManager.StartAutoRefresh(context.Background(), interval)
-		log.Infof("core auth auto-refresh started (interval=%s)", interval)
-	}
+	s.syncCoreAutoRefresh()
 
 	select {
 	case <-ctx.Done():

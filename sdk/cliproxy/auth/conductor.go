@@ -411,6 +411,14 @@ func (m *Manager) oauthRefreshConfig() internalconfig.OAuthRefreshConfig {
 	return cfg.OAuthRefresh
 }
 
+func (m *Manager) autoRefreshEnabled() bool {
+	cfg := m.oauthRefreshConfig()
+	if cfg.Enabled == nil {
+		return false
+	}
+	return *cfg.Enabled
+}
+
 func (m *Manager) refreshOnStartupEnabled() bool {
 	cfg := m.oauthRefreshConfig()
 	if cfg.OnStartup == nil {
@@ -3372,7 +3380,8 @@ func (m *Manager) flushPersistQueue() {
 // StartAutoRefresh launches a background loop that evaluates auth freshness
 // every few seconds and triggers refresh operations when required.
 // Only one loop is kept alive; starting a new one cancels the previous run.
-func (m *Manager) StartAutoRefresh(parent context.Context, interval time.Duration) {
+// When oauth-refresh.enabled is false or unset, any existing loop is stopped and no new loop is started.
+func (m *Manager) StartAutoRefresh(parent context.Context, interval time.Duration) bool {
 	if interval <= 0 {
 		interval = refreshCheckInterval
 	}
@@ -3384,6 +3393,9 @@ func (m *Manager) StartAutoRefresh(parent context.Context, interval time.Duratio
 	m.mu.Unlock()
 	if cancelPrev != nil {
 		cancelPrev()
+	}
+	if !m.autoRefreshEnabled() {
+		return false
 	}
 
 	ctx, cancelCtx := context.WithCancel(parent)
@@ -3408,6 +3420,7 @@ func (m *Manager) StartAutoRefresh(parent context.Context, interval time.Duratio
 		m.checkRefreshes(ctx)
 	}
 	go loop.run(ctx)
+	return true
 }
 
 // StopAutoRefresh cancels the background refresh loop, if running.

@@ -51,7 +51,7 @@ func (e *autoRefreshTestExecutor) refreshedIDs() []string {
 	return out
 }
 
-func TestManager_StartAutoRefresh_ImmediateByDefault(t *testing.T) {
+func TestManager_StartAutoRefresh_DisabledByDefault(t *testing.T) {
 	manager := NewManager(nil, &RoundRobinSelector{}, nil)
 	executor := &autoRefreshTestExecutor{provider: "test"}
 	manager.RegisterExecutor(executor)
@@ -68,21 +68,61 @@ func TestManager_StartAutoRefresh_ImmediateByDefault(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	manager.StartAutoRefresh(ctx, time.Hour)
+	if started := manager.StartAutoRefresh(ctx, time.Hour); started {
+		t.Fatal("expected auto refresh to stay disabled by default")
+	}
+	t.Cleanup(manager.StopAutoRefresh)
+
+	time.Sleep(100 * time.Millisecond)
+	if got := len(executor.refreshedIDs()); got != 0 {
+		t.Fatalf("startup refresh calls = %d, want 0", got)
+	}
+}
+
+func TestManager_StartAutoRefresh_EnabledImmediateByDefault(t *testing.T) {
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	executor := &autoRefreshTestExecutor{provider: "test"}
+	manager.RegisterExecutor(executor)
+
+	enabled := true
+	manager.SetConfig(&internalconfig.Config{
+		SDKConfig: internalconfig.SDKConfig{
+			OAuthRefresh: internalconfig.OAuthRefreshConfig{
+				Enabled: &enabled,
+			},
+		},
+	})
+
+	auth := &Auth{
+		ID:       "startup-disabled",
+		Provider: "test",
+		Metadata: map[string]any{"refresh_interval_seconds": 3600},
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if started := manager.StartAutoRefresh(ctx, time.Hour); !started {
+		t.Fatal("expected auto refresh to start when enabled")
+	}
 	t.Cleanup(manager.StopAutoRefresh)
 
 	waitForRefreshCalls(t, executor, 1, time.Second)
 }
 
-func TestManager_StartAutoRefresh_CanSkipStartupCheck(t *testing.T) {
+func TestManager_StartAutoRefresh_EnabledCanSkipStartupCheck(t *testing.T) {
 	manager := NewManager(nil, &RoundRobinSelector{}, nil)
 	executor := &autoRefreshTestExecutor{provider: "test"}
 	manager.RegisterExecutor(executor)
 
+	enabled := true
 	disabled := false
 	manager.SetConfig(&internalconfig.Config{
 		SDKConfig: internalconfig.SDKConfig{
 			OAuthRefresh: internalconfig.OAuthRefreshConfig{
+				Enabled:   &enabled,
 				OnStartup: &disabled,
 			},
 		},
@@ -99,7 +139,9 @@ func TestManager_StartAutoRefresh_CanSkipStartupCheck(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	manager.StartAutoRefresh(ctx, time.Hour)
+	if started := manager.StartAutoRefresh(ctx, time.Hour); !started {
+		t.Fatal("expected auto refresh to start when enabled")
+	}
 	t.Cleanup(manager.StopAutoRefresh)
 
 	time.Sleep(100 * time.Millisecond)
