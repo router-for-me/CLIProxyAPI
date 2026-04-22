@@ -610,6 +610,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PATCH("/openai-compatibility", s.mgmt.PatchOpenAICompat)
 		mgmt.DELETE("/openai-compatibility", s.mgmt.DeleteOpenAICompat)
 		mgmt.POST("/openai-compatibility/sync-models", s.mgmt.SyncOpenAICompatModels)
+		mgmt.POST("/openai-compatibility/lookup-aliases", s.mgmt.LookupOpenAICompatAliases)
 
 		mgmt.GET("/vertex-api-key", s.mgmt.GetVertexCompatKeys)
 		mgmt.PUT("/vertex-api-key", s.mgmt.PutVertexCompatKeys)

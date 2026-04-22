@@ -24,9 +24,12 @@ const (
 var modelScopeOpenAPIBaseURL = "https://modelscope.cn/openapi/v1"
 
 type openAICompatSyncRequest struct {
-	Name          string `json:"name"`
-	All           bool   `json:"all"`
-	TimeoutSecond *int   `json:"timeout_seconds"`
+	Name            string                 `json:"name"`
+	All             bool                   `json:"all"`
+	Preview         bool                   `json:"preview"`
+	SkipAliasLookup bool                   `json:"skip_alias_lookup"`
+	SelectedModels  []selectedModelPayload `json:"selected_models"`
+	TimeoutSecond   *int                   `json:"timeout_seconds"`
 }
 
 type openAICompatSyncResult struct {
@@ -61,6 +64,21 @@ type modelScopeModel struct {
 	Downloads   int64  `json:"downloads"`
 }
 
+type selectedModelPayload struct {
+	Name  string `json:"name"`
+	Alias string `json:"alias"`
+}
+
+type openAICompatAliasLookupRequest struct {
+	Models        []string `json:"models"`
+	TimeoutSecond *int     `json:"timeout_seconds"`
+}
+
+type openAICompatAliasMatch struct {
+	Name  string `json:"name"`
+	Alias string `json:"alias"`
+}
+
 // SyncOpenAICompatModels fetches latest models for OpenAI-compatible providers and rewrites
 // the provider model list using ModelScope display_name as canonical alias when available.
 func (h *Handler) SyncOpenAICompatModels(c *gin.Context) {
@@ -79,13 +97,10 @@ func (h *Handler) SyncOpenAICompatModels(c *gin.Context) {
 		return
 	}
 
-	timeout := openAICompatSyncDefaultTimeout
-	if req.TimeoutSecond != nil {
-		if *req.TimeoutSecond <= 0 {
-			c.JSON(http.StatusBadRequest, gin.H{"status": "error", "errors": []string{"timeout_seconds must be greater than 0"}})
-			return
-		}
-		timeout = time.Duration(*req.TimeoutSecond) * time.Second
+	timeout, errTimeout := resolveSyncTimeout(req.TimeoutSecond)
+	if errTimeout != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "errors": []string{errTimeout.Error()}})
+		return
 	}
 
 	selected, errSelect := selectOpenAICompatProviders(h.cfg.OpenAICompatibility, strings.TrimSpace(req.Name), req.All)
@@ -95,6 +110,52 @@ func (h *Handler) SyncOpenAICompatModels(c *gin.Context) {
 			status = http.StatusNotFound
 		}
 		c.JSON(status, gin.H{"status": "error", "errors": []string{errSelect.Error()}})
+		return
+	}
+
+	if req.Preview {
+		if !req.SkipAliasLookup {
+			c.JSON(http.StatusBadRequest, gin.H{"status": "error", "errors": []string{"preview requires skip_alias_lookup=true"}})
+			return
+		}
+		if len(selected) != 1 {
+			c.JSON(http.StatusBadRequest, gin.H{"status": "error", "errors": []string{"exactly one provider is required"}})
+			return
+		}
+
+		entry := h.cfg.OpenAICompatibility[selected[0]]
+		modelNames, warnings, errFetch := h.fetchOpenAICompatUpstreamModels(c.Request.Context(), entry, timeout)
+		if errFetch != nil {
+			c.JSON(http.StatusBadGateway, gin.H{
+				"status":   "error",
+				"provider": providerDisplayName(entry),
+				"errors":   append(warnings, errFetch.Error()),
+			})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"status":        "ok",
+			"provider":      providerDisplayName(entry),
+			"models":        modelNames,
+			"fetched_count": len(modelNames),
+			"errors":        warnings,
+		})
+		return
+	}
+
+	if len(req.SelectedModels) > 0 {
+		if len(selected) != 1 {
+			c.JSON(http.StatusBadRequest, gin.H{"status": "error", "errors": []string{"exactly one provider is required"}})
+			return
+		}
+		entry := h.cfg.OpenAICompatibility[selected[0]]
+		models, errModels := buildSelectedOpenAICompatModels(req.SelectedModels)
+		if errModels != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"status": "error", "errors": []string{errModels.Error()}})
+			return
+		}
+		h.persistSelectedOpenAICompatModels(c, selected[0], entry, models)
 		return
 	}
 
@@ -164,6 +225,46 @@ func (h *Handler) SyncOpenAICompatModels(c *gin.Context) {
 		"fetched_count":    totalFetched,
 		"unmatched_models": unmatchedByProvider,
 		"errors":           warnings,
+	})
+}
+
+func (h *Handler) LookupOpenAICompatAliases(c *gin.Context) {
+	var req openAICompatAliasLookupRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "errors": []string{"invalid body"}})
+		return
+	}
+	if len(req.Models) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "errors": []string{"models is required"}})
+		return
+	}
+
+	timeout, errTimeout := resolveSyncTimeout(req.TimeoutSecond)
+	if errTimeout != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "errors": []string{errTimeout.Error()}})
+		return
+	}
+
+	matched := make([]openAICompatAliasMatch, 0, len(req.Models))
+	unmatched := make([]string, 0)
+	for _, raw := range req.Models {
+		name := strings.TrimSpace(raw)
+		if name == "" {
+			continue
+		}
+
+		alias, ok, err := h.lookupModelScopeCanonicalAlias(c.Request.Context(), name, timeout)
+		if err != nil || !ok || strings.TrimSpace(alias) == "" {
+			unmatched = append(unmatched, name)
+			continue
+		}
+		matched = append(matched, openAICompatAliasMatch{Name: name, Alias: alias})
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"status":    "ok",
+		"matched":   matched,
+		"unmatched": unmatched,
 	})
 }
 
@@ -530,10 +631,66 @@ func cloneOpenAICompatibilityEntries(entries []config.OpenAICompatibility) []con
 	return out
 }
 
+func buildSelectedOpenAICompatModels(input []selectedModelPayload) ([]config.OpenAICompatibilityModel, error) {
+	if len(input) == 0 {
+		return nil, fmt.Errorf("selected_models is required")
+	}
+
+	out := make([]config.OpenAICompatibilityModel, 0, len(input))
+	for _, item := range input {
+		name := strings.TrimSpace(item.Name)
+		alias := strings.TrimSpace(item.Alias)
+		if name == "" {
+			return nil, fmt.Errorf("selected model name is required")
+		}
+		if alias == "" {
+			return nil, fmt.Errorf("alias is required for model %s", name)
+		}
+		out = append(out, config.OpenAICompatibilityModel{Name: name, Alias: alias})
+	}
+	return out, nil
+}
+
+func (h *Handler) persistSelectedOpenAICompatModels(c *gin.Context, providerIndex int, entry config.OpenAICompatibility, models []config.OpenAICompatibilityModel) {
+	updatedProviders := cloneOpenAICompatibilityEntries(h.cfg.OpenAICompatibility)
+	updatedProviders[providerIndex].Models = append([]config.OpenAICompatibilityModel(nil), models...)
+
+	originalProviders := h.cfg.OpenAICompatibility
+	h.cfg.OpenAICompatibility = updatedProviders
+	h.cfg.SanitizeOpenAICompatibility()
+	if err := h.persistConfigOnly(); err != nil {
+		h.cfg.OpenAICompatibility = originalProviders
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"status":   "error",
+			"provider": providerDisplayName(entry),
+			"errors":   []string{fmt.Sprintf("failed to save config: %v", err)},
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"status":        "ok",
+		"provider":      providerDisplayName(entry),
+		"updated_count": len(models),
+		"errors":        []string{},
+	})
+}
+
 func (h *Handler) persistConfigOnly() error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return config.SaveConfigPreserveComments(h.configFilePath, h.cfg)
+}
+
+func resolveSyncTimeout(timeoutSecond *int) (time.Duration, error) {
+	timeout := openAICompatSyncDefaultTimeout
+	if timeoutSecond == nil {
+		return timeout, nil
+	}
+	if *timeoutSecond <= 0 {
+		return 0, fmt.Errorf("timeout_seconds must be greater than 0")
+	}
+	return time.Duration(*timeoutSecond) * time.Second, nil
 }
 
 func joinURLPath(baseURL string, pathSuffix string) (string, error) {

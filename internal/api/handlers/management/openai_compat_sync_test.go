@@ -383,6 +383,113 @@ func TestSyncOpenAICompatModels_ErrorPaths(t *testing.T) {
 	})
 }
 
+func TestSyncOpenAICompatModels_PreviewRawModels(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"data":[{"id":"kimi-k2.5"},{"id":"GLM-5.1"}]}`))
+	}))
+	defer upstream.Close()
+
+	cfg := &config.Config{
+		OpenAICompatibility: []config.OpenAICompatibility{{
+			Name:          "us-ci",
+			BaseURL:       upstream.URL,
+			APIKeyEntries: []config.OpenAICompatibilityAPIKey{{APIKey: "k"}},
+			Models:        []config.OpenAICompatibilityModel{{Name: "old-model"}},
+		}},
+	}
+	h, configPath := newSyncTestHandler(t, cfg)
+
+	status, body := performSyncRequest(t, h, `{"name":"us-ci","preview":true,"skip_alias_lookup":true}`)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%v", status, body)
+	}
+	if int(body["fetched_count"].(float64)) != 2 {
+		t.Fatalf("fetched_count = %v, want 2", body["fetched_count"])
+	}
+	if _, ok := body["models"].([]any); !ok {
+		t.Fatalf("models type = %T, want array", body["models"])
+	}
+	if len(h.cfg.OpenAICompatibility[0].Models) != 1 || h.cfg.OpenAICompatibility[0].Models[0].Name != "old-model" {
+		t.Fatalf("preview should not mutate config: %+v", h.cfg.OpenAICompatibility[0].Models)
+	}
+	content, errRead := os.ReadFile(configPath)
+	if errRead != nil {
+		t.Fatalf("read config file: %v", errRead)
+	}
+	if !strings.Contains(string(content), "old-model") {
+		t.Fatalf("preview unexpectedly rewrote config: %s", string(content))
+	}
+}
+
+func TestSyncOpenAICompatModels_ConfirmReplaceModels(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	cfg := &config.Config{
+		OpenAICompatibility: []config.OpenAICompatibility{{
+			Name:    "us-ci",
+			BaseURL: "https://example.com/v1",
+			Models:  []config.OpenAICompatibilityModel{{Name: "old-model", Alias: "Old"}},
+		}},
+	}
+	h, _ := newSyncTestHandler(t, cfg)
+
+	status, body := performSyncRequest(t, h, `{
+		"name":"us-ci",
+		"preview":false,
+		"selected_models":[
+			{"name":"kimi-k2.5","alias":"Kimi-K2.5"},
+			{"name":"glm-5.1","alias":"GLM-5.1"}
+		]
+	}`)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%v", status, body)
+	}
+	models := h.cfg.OpenAICompatibility[0].Models
+	if len(models) != 2 || models[0].Name == "old-model" {
+		t.Fatalf("models = %+v, want replaced list", models)
+	}
+}
+
+func TestLookupOpenAICompatAliases_MixedResults(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	modelScope := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Query().Get("search") {
+		case "kimi-k2.5":
+			_, _ = w.Write([]byte(`{"success":true,"data":{"models":[{"id":"moonshotai/Kimi-K2.5","display_name":"Kimi-K2.5","downloads":100}]}}`))
+		default:
+			_, _ = w.Write([]byte(`{"success":true,"data":{"models":[]}}`))
+		}
+	}))
+	defer modelScope.Close()
+
+	restore := swapModelScopeBaseURL(modelScope.URL)
+	defer restore()
+
+	h, _ := newSyncTestHandler(t, &config.Config{})
+	status, body := performLookupAliasesRequest(t, h, `{"models":["kimi-k2.5","unknown-model"]}`)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%v", status, body)
+	}
+	matched := body["matched"].([]any)
+	unmatched := body["unmatched"].([]any)
+	if len(matched) != 1 || len(unmatched) != 1 {
+		t.Fatalf("matched=%v unmatched=%v", matched, unmatched)
+	}
+}
+
+func TestLookupOpenAICompatAliases_RejectsEmptyModels(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	h, _ := newSyncTestHandler(t, &config.Config{})
+	status, _ := performLookupAliasesRequest(t, h, `{"models":[]}`)
+	if status != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", status)
+	}
+}
+
 func newSyncTestHandler(t *testing.T, cfg *config.Config) (*Handler, string) {
 	t.Helper()
 
@@ -408,6 +515,24 @@ func performSyncRequest(t *testing.T, h *Handler, body string) (int, map[string]
 	router.POST("/v0/management/openai-compatibility/sync-models", h.SyncOpenAICompatModels)
 
 	req := httptest.NewRequest(http.MethodPost, "/v0/management/openai-compatibility/sync-models", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, req)
+
+	var parsed map[string]any
+	if errDecode := json.Unmarshal(recorder.Body.Bytes(), &parsed); errDecode != nil {
+		t.Fatalf("decode response: %v body=%s", errDecode, recorder.Body.String())
+	}
+	return recorder.Code, parsed
+}
+
+func performLookupAliasesRequest(t *testing.T, h *Handler, body string) (int, map[string]any) {
+	t.Helper()
+
+	router := gin.New()
+	router.POST("/v0/management/openai-compatibility/lookup-aliases", h.LookupOpenAICompatAliases)
+
+	req := httptest.NewRequest(http.MethodPost, "/v0/management/openai-compatibility/lookup-aliases", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
 	recorder := httptest.NewRecorder()
 	router.ServeHTTP(recorder, req)
