@@ -72,6 +72,78 @@ func TestOpenAICompatExecutorExecuteStream_ResponsesDoneWithoutFinishReasonStill
 	}
 }
 
+func TestOpenAICompatExecutorExecuteStream_NativeResponsesPreservesFullSSEFrames(t *testing.T) {
+	const authID = "test-native-preserve-sse"
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/responses" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+
+		_, _ = fmt.Fprint(w, "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_native\",\"created_at\":1775540000,\"model\":\"qwen3.6-plus\",\"status\":\"in_progress\",\"output\":[]}}\n\n")
+		if flusher != nil {
+			flusher.Flush()
+		}
+		_, _ = fmt.Fprint(w, "event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_1\",\"name\":\"FetchUrl\",\"arguments\":\"\",\"status\":\"completed\"}}\n\n")
+		if flusher != nil {
+			flusher.Flush()
+		}
+		_, _ = fmt.Fprint(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_native\",\"created_at\":1775540000,\"model\":\"qwen3.6-plus\",\"status\":\"completed\",\"output\":[{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_1\",\"name\":\"FetchUrl\",\"arguments\":\"{}\",\"status\":\"completed\"}],\"usage\":{\"input_tokens\":12,\"output_tokens\":3,\"total_tokens\":15}}}\n\n")
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}))
+	defer upstream.Close()
+
+	globalResponsesCapabilityResolver.Set(authID, ResponsesModeNative)
+	defer globalResponsesCapabilityResolver.Invalidate(authID)
+
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{})
+	auth := testAuthForServer(upstream.URL, authID)
+	stream, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "Qwen3.6-Plus",
+		Payload: []byte(`{"model":"Qwen3.6-Plus","input":"hi","stream":true}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+		Stream:       true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+	if stream == nil {
+		t.Fatal("stream result is nil")
+	}
+
+	var chunks []string
+	for chunk := range stream.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("unexpected stream chunk error: %v", chunk.Err)
+		}
+		chunks = append(chunks, string(chunk.Payload))
+	}
+
+	if len(chunks) != 3 {
+		t.Fatalf("chunk count = %d, want 3; chunks=%q", len(chunks), chunks)
+	}
+	if !strings.HasPrefix(chunks[0], "event: response.created\n") {
+		t.Fatalf("first chunk lost SSE event header: %q", chunks[0])
+	}
+	if !strings.Contains(chunks[1], "\nevent:") && !strings.HasPrefix(chunks[1], "event: response.output_item.added\n") {
+		t.Fatalf("second chunk missing output_item.added SSE frame: %q", chunks[1])
+	}
+	if !strings.HasPrefix(chunks[2], "event: response.completed\n") {
+		t.Fatalf("third chunk lost completed SSE event header: %q", chunks[2])
+	}
+	for i, chunk := range chunks {
+		if !strings.HasSuffix(chunk, "\n\n") {
+			t.Fatalf("chunk[%d] missing SSE frame delimiter: %q", i, chunk)
+		}
+	}
+}
+
 func TestOpenAICompatExecutorExecuteStream_ResponsesEmptyUpstreamSynthesizesCompletion(t *testing.T) {
 	// Ensure clean capability resolver state for the empty auth ID used by this test.
 	globalResponsesCapabilityResolver.Invalidate("")

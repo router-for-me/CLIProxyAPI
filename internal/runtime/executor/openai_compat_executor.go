@@ -468,8 +468,6 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 				log.Errorf("openai compat executor: close response body error: %v", errClose)
 			}
 		}()
-		scanner := bufio.NewScanner(httpResp.Body)
-		scanner.Buffer(nil, 52_428_800) // 50MB
 		var param any
 		responsesOutput := from == sdktranslator.FormatOpenAIResponse
 		emittedCompleted := false
@@ -496,30 +494,57 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 				out <- cliproxyexecutor.StreamChunk{Payload: payload}
 			}
 		}
-		for scanner.Scan() {
-			line := scanner.Bytes()
-			appendAPIResponseChunk(ctx, e.cfg, line)
-			if detail, ok := parseOpenAIStreamUsage(line); ok {
-				reporter.publish(ctx, detail)
+		if to == sdktranslator.FormatOpenAIResponse {
+			reader := bufio.NewReader(httpResp.Body)
+			for {
+				frame, errRead := readCodexSSEFrame(reader)
+				if len(frame) > 0 {
+					appendAPIResponseChunk(ctx, e.cfg, frame)
+					if detail, ok := parseOpenAIStreamUsage(frame); ok {
+						reporter.publish(ctx, detail)
+					}
+					chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, bytes.Clone(frame), &param)
+					emitChunks(chunks)
+				}
+				if errRead == nil {
+					continue
+				}
+				if errRead == io.EOF {
+					break
+				}
+				recordAPIResponseError(ctx, e.cfg, errRead)
+				reporter.publishFailure(ctx)
+				out <- cliproxyexecutor.StreamChunk{Err: errRead}
+				return
 			}
-			if len(line) == 0 {
-				continue
-			}
+		} else {
+			scanner := bufio.NewScanner(httpResp.Body)
+			scanner.Buffer(nil, 52_428_800) // 50MB
+			for scanner.Scan() {
+				line := scanner.Bytes()
+				appendAPIResponseChunk(ctx, e.cfg, line)
+				if detail, ok := parseOpenAIStreamUsage(line); ok {
+					reporter.publish(ctx, detail)
+				}
+				if len(line) == 0 {
+					continue
+				}
 
-			if !bytes.HasPrefix(line, []byte("data:")) {
-				continue
-			}
+				if !bytes.HasPrefix(line, []byte("data:")) {
+					continue
+				}
 
-			// OpenAI-compatible streams are SSE: lines typically prefixed with "data: ".
-			// Pass through translator; it yields one or more chunks for the target schema.
-			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, bytes.Clone(line), &param)
-			emitChunks(chunks)
-		}
-		if errScan := scanner.Err(); errScan != nil {
-			recordAPIResponseError(ctx, e.cfg, errScan)
-			reporter.publishFailure(ctx)
-			out <- cliproxyexecutor.StreamChunk{Err: errScan}
-			return
+				// OpenAI-compatible streams are SSE: lines typically prefixed with "data: ".
+				// Pass through translator; it yields one or more chunks for the target schema.
+				chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, bytes.Clone(line), &param)
+				emitChunks(chunks)
+			}
+			if errScan := scanner.Err(); errScan != nil {
+				recordAPIResponseError(ctx, e.cfg, errScan)
+				reporter.publishFailure(ctx)
+				out <- cliproxyexecutor.StreamChunk{Err: errScan}
+				return
+			}
 		}
 		if responsesOutput && !emittedCompleted {
 			// EOF can happen before a finish_reason chunk. Flush DONE to force a terminal

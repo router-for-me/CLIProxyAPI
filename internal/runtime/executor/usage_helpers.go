@@ -314,26 +314,43 @@ func parseOpenAIUsage(data []byte) usage.Detail {
 }
 
 func parseOpenAIStreamUsage(line []byte) (usage.Detail, bool) {
-	payload := jsonPayload(line)
-	if len(payload) == 0 || !gjson.ValidBytes(payload) {
+	trimmed := bytes.TrimSpace(line)
+	if len(trimmed) == 0 {
 		return usage.Detail{}, false
 	}
-	usageNode := gjson.GetBytes(payload, "usage")
-	if !usageNode.Exists() {
-		return usage.Detail{}, false
+
+	candidates := [][]byte{trimmed}
+	if bytes.Contains(trimmed, []byte("\n")) {
+		for _, part := range bytes.Split(trimmed, []byte("\n")) {
+			if payload := bytes.TrimSpace(part); len(payload) > 0 {
+				candidates = append(candidates, payload)
+			}
+		}
 	}
-	detail := usage.Detail{
-		InputTokens:  usageNode.Get("prompt_tokens").Int(),
-		OutputTokens: usageNode.Get("completion_tokens").Int(),
-		TotalTokens:  usageNode.Get("total_tokens").Int(),
+
+	for _, candidate := range candidates {
+		payload := jsonPayload(candidate)
+		if len(payload) == 0 || !gjson.ValidBytes(payload) {
+			continue
+		}
+		usageNode := gjson.GetBytes(payload, "usage")
+		if !usageNode.Exists() {
+			continue
+		}
+		detail := usage.Detail{
+			InputTokens:  usageNode.Get("prompt_tokens").Int(),
+			OutputTokens: usageNode.Get("completion_tokens").Int(),
+			TotalTokens:  usageNode.Get("total_tokens").Int(),
+		}
+		if cached := usageNode.Get("prompt_tokens_details.cached_tokens"); cached.Exists() {
+			detail.CachedTokens = cached.Int()
+		}
+		if reasoning := usageNode.Get("completion_tokens_details.reasoning_tokens"); reasoning.Exists() {
+			detail.ReasoningTokens = reasoning.Int()
+		}
+		return detail, true
 	}
-	if cached := usageNode.Get("prompt_tokens_details.cached_tokens"); cached.Exists() {
-		detail.CachedTokens = cached.Int()
-	}
-	if reasoning := usageNode.Get("completion_tokens_details.reasoning_tokens"); reasoning.Exists() {
-		detail.ReasoningTokens = reasoning.Int()
-	}
-	return detail, true
+	return usage.Detail{}, false
 }
 
 func parseClaudeUsage(data []byte) usage.Detail {
