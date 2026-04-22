@@ -1344,6 +1344,14 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				if isRequestInvalidError(errExec) {
 					return cliproxyexecutor.Response{}, errExec
 				}
+				if isServerError(errExec) {
+					// Server errors (HTTP 500) should not trigger fallback to
+					// another auth entry. Switching providers will not resolve
+					// an upstream outage, and may route to an incompatible auth
+					// (e.g. wrong base-url), producing a misleading error that
+					// masks the real server failure.
+					return cliproxyexecutor.Response{}, errExec
+				}
 				authErr = errExec
 				continue
 			}
@@ -1422,6 +1430,14 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				if isRequestInvalidError(errExec) {
 					return cliproxyexecutor.Response{}, errExec
 				}
+				if isServerError(errExec) {
+					// Server errors (HTTP 500) should not trigger fallback to
+					// another auth entry. Switching providers will not resolve
+					// an upstream outage, and may route to an incompatible auth
+					// (e.g. wrong base-url), producing a misleading error that
+					// masks the real server failure.
+					return cliproxyexecutor.Response{}, errExec
+				}
 				authErr = errExec
 				continue
 			}
@@ -1483,6 +1499,11 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				return nil, errCtx
 			}
 			if isRequestInvalidError(errStream) {
+				return nil, errStream
+			}
+			if isServerError(errStream) {
+				// Server errors (HTTP 500) should not trigger fallback to
+				// another auth entry for the same reasons as Execute/ExecuteCount.
 				return nil, errStream
 			}
 			lastErr = errStream
@@ -2457,7 +2478,8 @@ func isRequestInvalidError(err error) bool {
 		msg := err.Error()
 		return strings.Contains(msg, "invalid_request_error") ||
 			strings.Contains(msg, "INVALID_ARGUMENT") ||
-			strings.Contains(msg, "FAILED_PRECONDITION")
+			strings.Contains(msg, "FAILED_PRECONDITION") ||
+			strings.Contains(msg, "image_generation_user_error")
 	case http.StatusNotFound:
 		return isRequestScopedNotFoundMessage(err.Error())
 	case http.StatusUnprocessableEntity:
@@ -2469,6 +2491,13 @@ func isRequestInvalidError(err error) bool {
 	default:
 		return false
 	}
+}
+
+// isServerError returns true for HTTP 500 responses. Server errors should not
+// trigger fallback to another auth entry — switching providers will not resolve
+// an upstream outage and only masks the real error.
+func isServerError(err error) bool {
+	return statusCodeFromError(err) == http.StatusInternalServerError
 }
 
 func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time) {
@@ -2570,6 +2599,26 @@ func (m *Manager) List() []*Auth {
 		list = append(list, auth.Clone())
 	}
 	return list
+}
+
+// HasAuthWithBaseURL checks if any auth entry for the given provider has a
+// base_url attribute configured. This is used to detect models with independent
+// upstream deployments (e.g., Azure) that require direct endpoint routing.
+func (m *Manager) HasAuthWithBaseURL(provider string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, auth := range m.auths {
+		if auth == nil || auth.Disabled {
+			continue
+		}
+		if !strings.EqualFold(auth.Provider, provider) {
+			continue
+		}
+		if auth.Attributes != nil && strings.TrimSpace(auth.Attributes["base_url"]) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // GetByID retrieves an auth entry by its ID.

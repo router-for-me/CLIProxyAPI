@@ -815,13 +815,6 @@ func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string
 	parsed := thinking.ParseSuffix(resolvedModelName)
 	baseModel := strings.TrimSpace(parsed.ModelName)
 
-	if strings.EqualFold(baseModel, "gpt-image-2") {
-		return nil, "", &interfaces.ErrorMessage{
-			StatusCode: http.StatusServiceUnavailable,
-			Error:      fmt.Errorf("model %s is only supported on /v1/images/generations and /v1/images/edits", baseModel),
-		}
-	}
-
 	providers = util.GetProviderName(baseModel)
 	// Fallback: if baseModel has no provider but differs from resolvedModelName,
 	// try using the full model name. This handles edge cases where custom models
@@ -830,6 +823,16 @@ func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string
 	// custom model registrations that include thinking suffixes.
 	if len(providers) == 0 && baseModel != resolvedModelName {
 		providers = util.GetProviderName(resolvedModelName)
+	}
+
+	// gpt-image-2 without a dedicated provider config is not supported via the
+	// Responses API orchestration path; it must be used through /v1/images/generations
+	// or /v1/images/edits. If a provider IS configured, allow it to proceed.
+	if strings.EqualFold(baseModel, "gpt-image-2") && len(providers) == 0 {
+		return nil, "", &interfaces.ErrorMessage{
+			StatusCode: http.StatusServiceUnavailable,
+			Error:      fmt.Errorf("model %s is only supported on /v1/images/generations and /v1/images/edits", baseModel),
+		}
 	}
 
 	if len(providers) == 0 {

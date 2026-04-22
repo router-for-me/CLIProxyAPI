@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -143,6 +144,9 @@ func (e *CodexExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth
 }
 
 func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
+	if opts.Alt == "images/generations" || opts.Alt == "images/edits" {
+		return e.executeImagesGeneration(ctx, auth, req, opts)
+	}
 	if opts.Alt == "responses/compact" {
 		return e.executeCompact(ctx, auth, req, opts)
 	}
@@ -859,6 +863,15 @@ func ensureImageGenerationTool(body []byte, baseModel string, auth *cliproxyauth
 	return body
 }
 
+// isAzureOpenAIURL returns true when the upstream base URL matches the
+// Azure OpenAI deployment format (e.g., *.openai.azure.com).
+func isAzureOpenAIURL(rawURL string) bool {
+	if parsed, err := url.Parse(rawURL); err == nil {
+		return strings.HasSuffix(strings.ToLower(parsed.Host), ".openai.azure.com")
+	}
+	return strings.Contains(strings.ToLower(rawURL), ".openai.azure.com")
+}
+
 func isCodexModelCapacityError(errorBody []byte) bool {
 	if len(errorBody) == 0 {
 		return false
@@ -955,4 +968,124 @@ func (e *CodexExecutor) resolveCodexConfig(auth *cliproxyauth.Auth) *config.Code
 		}
 	}
 	return nil
+}
+
+// executeImagesGeneration handles direct /images/generations or /images/edits requests
+// for image models that have independent upstream configurations (e.g., Azure OpenAI
+// gpt-image-2 deployments).
+//
+// Background:
+// The gateway's normal image generation path routes through the Responses API:
+//
+//	/openai/v1/responses  ->  gpt-5.4-mini  ->  image_generation tool call  ->  gpt-image-2
+//
+// This works for OpenAI where all models share one endpoint, but fails on Azure because
+// each model is a separate deployment with its own URL. Azure does not support cross-deployment
+// tool routing, so the tool call returns 404.
+//
+// This method bypasses the Responses API orchestration and sends a standard OpenAI-compatible
+// request directly to the configured base URL:
+//
+//	Azure generations:  https://{resource}/openai/deployments/{deployment-id}/images/generations?api-version=2024-02-01
+//	Azure edits:        https://{resource}/openai/deployments/{deployment-id}/images/edits?api-version=2024-02-01
+//
+// Parameter translation:
+// Azure gpt-image supports the same parameters as OpenAI: prompt, n, size, quality,
+// output_compression, output_format. The only difference is response_format:
+// Azure gpt-image always returns base64 and does not accept this parameter, so it is stripped
+// only when the base-url indicates an Azure deployment.
+func (e *CodexExecutor) executeImagesGeneration(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
+	apiKey, baseURL := codexCreds(auth)
+	if baseURL == "" {
+		return resp, statusErr{code: http.StatusUnauthorized, msg: "missing provider baseURL for " + opts.Alt}
+	}
+
+	reporter := helps.NewUsageReporter(ctx, e.Identifier(), thinking.ParseSuffix(req.Model).ModelName, auth)
+	defer reporter.TrackFailure(ctx, &err)
+
+	// Use OriginalRequest if Payload is empty (matches Execute/executeCompact pattern).
+	body := req.Payload
+	if len(body) == 0 {
+		body = opts.OriginalRequest
+	}
+	// Set the resolved model name in the request body.
+	body, _ = sjson.SetBytes(body, "model", thinking.ParseSuffix(req.Model).ModelName)
+	// Azure gpt-image deployments always return base64-encoded images and do not
+	// accept response_format. Strip it only for Azure deployments to avoid
+	// "unknown parameter" errors. Non-Azure providers may need this parameter.
+	if isAzureOpenAIURL(baseURL) {
+		body, _ = sjson.DeleteBytes(body, "response_format")
+	}
+
+	// Build the full URL: insert the endpoint path (e.g., /images/generations,
+	// /images/edits) into the base URL. If baseURL contains query params
+	// (e.g., Azure's ?api-version=...), preserve them by inserting the path
+	// segment before the "?".
+	//   baseURL = "https://.../deployments/gpt-image-2?api-version=2024-02-01"
+	//   url     = "https://.../deployments/gpt-image-2/images/generations?api-version=2024-02-01"
+	path := "/" + opts.Alt
+	url := strings.TrimSuffix(baseURL, "/")
+	if idx := strings.Index(url, "?"); idx >= 0 {
+		url = url[:idx] + path + url[idx:]
+	} else {
+		url += path
+	}
+
+	// Build and send HTTP request.
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return resp, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	applyCodexHeaders(httpReq, auth, apiKey, false, e.cfg)
+
+	// Record request details for logging/debugging.
+	var authID, authLabel, authType, authValue string
+	if auth != nil {
+		authID = auth.ID
+		authLabel = auth.Label
+		authType, authValue = auth.AccountInfo()
+	}
+	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
+		URL:       url,
+		Method:    http.MethodPost,
+		Headers:   httpReq.Header.Clone(),
+		Body:      body,
+		Provider:  e.Identifier(),
+		AuthID:    authID,
+		AuthLabel: authLabel,
+		AuthType:  authType,
+		AuthValue: authValue,
+	})
+
+	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpResp, err := httpClient.Do(httpReq)
+	if err != nil {
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
+		return resp, err
+	}
+	defer func() {
+		if errClose := httpResp.Body.Close(); errClose != nil {
+			log.Errorf("codex executor images: close response body error: %v", errClose)
+		}
+	}()
+	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		b, _ := io.ReadAll(httpResp.Body)
+		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
+		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
+		return resp, newCodexStatusErr(httpResp.StatusCode, b)
+	}
+	data, err := io.ReadAll(httpResp.Body)
+	if err != nil {
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
+		return resp, err
+	}
+	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
+
+	// Return the raw API response to the client.
+	// The format matches the standard OpenAI /images/generations or /images/edits schema.
+	reporter.EnsurePublished(ctx)
+	resp = cliproxyexecutor.Response{Payload: data, Headers: httpResp.Header.Clone()}
+	return resp, nil
 }

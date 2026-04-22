@@ -121,12 +121,12 @@ func (e *credentialRetryLimitExecutor) Identifier() string {
 
 func (e *credentialRetryLimitExecutor) Execute(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	e.recordCall()
-	return cliproxyexecutor.Response{}, &Error{HTTPStatus: 500, Message: "boom"}
+	return cliproxyexecutor.Response{}, &Error{HTTPStatus: 401, Message: "boom"}
 }
 
 func (e *credentialRetryLimitExecutor) ExecuteStream(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
 	e.recordCall()
-	return nil, &Error{HTTPStatus: 500, Message: "boom"}
+	return nil, &Error{HTTPStatus: 401, Message: "boom"}
 }
 
 func (e *credentialRetryLimitExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) {
@@ -135,7 +135,7 @@ func (e *credentialRetryLimitExecutor) Refresh(_ context.Context, auth *Auth) (*
 
 func (e *credentialRetryLimitExecutor) CountTokens(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	e.recordCall()
-	return cliproxyexecutor.Response{}, &Error{HTTPStatus: 500, Message: "boom"}
+	return cliproxyexecutor.Response{}, &Error{HTTPStatus: 401, Message: "boom"}
 }
 
 func (e *credentialRetryLimitExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {

@@ -15,6 +15,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
@@ -213,6 +214,41 @@ func (h *OpenAIAPIHandler) ImagesGenerations(c *gin.Context) {
 	if responseFormat == "" {
 		responseFormat = "b64_json"
 	}
+
+	// Direct path: model has an independent upstream config (e.g., Azure deployment).
+	// Forward as a standard OpenAI /images/generations request, bypassing the
+	// Responses API orchestration (gpt-5.4-mini -> image_generation tool call).
+	// This is needed for providers like Azure where each model is a separate
+	// deployment with its own URL, making cross-deployment tool routing impossible.
+	//
+	// Two conditions must both be met:
+	// 1. The model's provider is "codex" (the only provider that supports images/generations alts).
+	// 2. At least one codex auth entry has a base_url configured (indicating a dedicated upstream
+	//    like an Azure deployment). Without base_url, the default OpenAI endpoint would be used,
+	//    and the direct path would fail with 401 instead of falling back to Responses API.
+	providers := util.GetProviderName(imageModel)
+	hasCodexProvider := false
+	for _, p := range providers {
+		if strings.EqualFold(p, "codex") {
+			hasCodexProvider = true
+			break
+		}
+	}
+	if hasCodexProvider && h.AuthManager.HasAuthWithBaseURL("codex") {
+		// response_format will be stripped in the executor for Azure deployments.
+		// Set the gateway default so downstream logic has a consistent value.
+		if !gjson.GetBytes(rawJSON, "response_format").Exists() {
+			rawJSON, _ = sjson.SetBytes(rawJSON, "response_format", "b64_json")
+		}
+		// Direct routing is non-streaming. Strip gateway-only fields (stream) that
+		// would otherwise be forwarded upstream and rejected by Azure as unknown parameters.
+		if gjson.GetBytes(rawJSON, "stream").Exists() {
+			rawJSON, _ = sjson.DeleteBytes(rawJSON, "stream")
+		}
+		h.directImageGeneration(c, rawJSON, imageModel, "images/generations")
+		return
+	}
+
 	stream := gjson.GetBytes(rawJSON, "stream").Bool()
 
 	tool := []byte(`{"type":"image_generation","action":"generate"}`)
@@ -348,6 +384,20 @@ func (h *OpenAIAPIHandler) imagesEditsFromMultipart(c *gin.Context) {
 	if responseFormat == "" {
 		responseFormat = "b64_json"
 	}
+
+	editProviders := util.GetProviderName(imageModel)
+	hasCodexProvider := false
+	for _, p := range editProviders {
+		if strings.EqualFold(p, "codex") {
+			hasCodexProvider = true
+			break
+		}
+	}
+	if hasCodexProvider && h.AuthManager.HasAuthWithBaseURL("codex") {
+		h.directImageEditsMultipart(c, prompt, images, maskDataURL, imageModel, responseFormat)
+		return
+	}
+
 	stream := parseBoolField(c.PostForm("stream"), false)
 
 	tool := []byte(`{"type":"image_generation","action":"edit"}`)
@@ -468,6 +518,20 @@ func (h *OpenAIAPIHandler) imagesEditsFromJSON(c *gin.Context) {
 	if responseFormat == "" {
 		responseFormat = "b64_json"
 	}
+
+	editJSONProviders := util.GetProviderName(imageModel)
+	hasCodexProviderJSON := false
+	for _, p := range editJSONProviders {
+		if strings.EqualFold(p, "codex") {
+			hasCodexProviderJSON = true
+			break
+		}
+	}
+	if hasCodexProviderJSON && h.AuthManager.HasAuthWithBaseURL("codex") {
+		h.directImageEditsJSON(c, rawJSON, imageModel)
+		return
+	}
+
 	stream := gjson.GetBytes(rawJSON, "stream").Bool()
 
 	tool := []byte(`{"type":"image_generation","action":"edit"}`)
@@ -895,4 +959,88 @@ func (h *OpenAIAPIHandler) forwardImagesStream(ctx context.Context, c *gin.Conte
 			}
 		}
 	}
+}
+
+// directImageGeneration forwards the request directly to the image model's upstream
+// /images/generations or /images/edits endpoint, bypassing the Responses API
+// orchestration path.
+//
+// This is used when GetProviderName(imageModel) returns a non-empty value, meaning
+// the model has an independent upstream configuration (e.g., an Azure deployment with
+// its own base-url). Instead of routing through gpt-5.4-mini's responses endpoint
+// with a tool call, the request is sent directly as a standard OpenAPI-compatible call.
+//
+// The alt parameter ("images/generations" or "images/edits") tells the codex executor
+// which URL path to construct, preserving any query params from the configured base-url
+// (such as Azure's ?api-version=...).
+//
+// The response is returned directly to the client in standard OpenAI format:
+// {"created": <timestamp>, "data": [{"b64_json": "..."}]}
+func (h *OpenAIAPIHandler) directImageGeneration(c *gin.Context, body []byte, imageModel string, alt string) {
+	cliCtx, cliCancel := h.GetContextWithCancel(h, c, c.Request.Context())
+
+	out, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, "codex", imageModel, body, alt)
+	cliCancel()
+
+	if errMsg != nil {
+		h.WriteErrorResponse(c, errMsg)
+		return
+	}
+
+	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+	c.Header("Content-Type", "application/json")
+	_, _ = c.Writer.Write(out)
+}
+
+// directImageEditsMultipart handles direct /images/edits for models with independent
+// upstream configs. Reconstructs a JSON body from the multipart form fields, preserving
+// all caller-supplied options (size, quality, background, output_format, etc.).
+func (h *OpenAIAPIHandler) directImageEditsMultipart(c *gin.Context, prompt string, images []string, maskDataURL *string, imageModel string, responseFormat string) {
+	body := []byte(`{"model":"","prompt":"","images":[],"response_format":"b64_json"}`)
+	body, _ = sjson.SetBytes(body, "model", imageModel)
+	body, _ = sjson.SetBytes(body, "prompt", prompt)
+	body, _ = sjson.SetBytes(body, "images", images)
+	body, _ = sjson.SetBytes(body, "response_format", responseFormat)
+
+	// Preserve caller-supplied options that would otherwise be dropped.
+	for _, field := range []string{"size", "quality", "background", "output_format", "input_fidelity", "moderation"} {
+		if v := strings.TrimSpace(c.PostForm(field)); v != "" {
+			body, _ = sjson.SetBytes(body, field, v)
+		}
+	}
+	for _, field := range []string{"output_compression", "partial_images"} {
+		if v := strings.TrimSpace(c.PostForm(field)); v != "" {
+			body, _ = sjson.SetBytes(body, field, parseIntField(v, 0))
+		}
+	}
+	if v := strings.TrimSpace(c.PostForm("n")); v != "" {
+		body, _ = sjson.SetBytes(body, "n", parseIntField(v, 0))
+	}
+
+	if maskDataURL != nil && *maskDataURL != "" {
+		body, _ = sjson.SetBytes(body, "mask.image_url", *maskDataURL)
+	}
+
+	h.directImageGeneration(c, body, imageModel, "images/edits")
+}
+
+// directImageEditsJSON handles direct /images/edits for models with independent
+// upstream configs from a JSON request body. Copies the original body, sets
+// the model field to the resolved image model, and ensures response_format
+// defaults to "b64_json", then forwards via directImageGeneration.
+func (h *OpenAIAPIHandler) directImageEditsJSON(c *gin.Context, rawJSON []byte, imageModel string) {
+	body := make([]byte, len(rawJSON))
+	copy(body, rawJSON)
+	body, _ = sjson.SetBytes(body, "model", imageModel)
+
+	if !gjson.GetBytes(body, "response_format").Exists() {
+		body, _ = sjson.SetBytes(body, "response_format", "b64_json")
+	}
+	// Direct routing is non-streaming. Strip gateway-only fields (stream) that
+	// would otherwise be forwarded upstream and rejected by Azure as unknown parameters.
+	if gjson.GetBytes(body, "stream").Exists() {
+		body, _ = sjson.DeleteBytes(body, "stream")
+	}
+
+	h.directImageGeneration(c, body, imageModel, "images/edits")
 }

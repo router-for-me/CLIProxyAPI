@@ -1411,7 +1411,32 @@ func buildCodexConfigModels(entry *config.CodexKey) []*ModelInfo {
 	if entry == nil {
 		return nil
 	}
-	return registry.WithCodexBuiltins(buildConfigModels(entry.Models, "openai", "openai"))
+	models := buildConfigModels(entry.Models, "openai", "openai")
+	// Only inject the hardcoded gpt-image-2 builtin when this auth entry
+	// actually configures an image model. Otherwise the scheduler may pick
+	// a text-only auth (e.g. gpt-5.4 with .../openai/v1) and route to the
+	// wrong base URL.
+	if hasImageModel(entry) {
+		models = registry.WithCodexBuiltins(models)
+	}
+	return models
+}
+
+func hasImageModel(entry *config.CodexKey) bool {
+	// Only inject the gpt-image-2 builtin when the auth entry configures
+	// an image model AND has a base-url. Without base-url, the executor
+	// would fail with "missing provider baseURL", which is worse than
+	// falling back to the Responses API path.
+	if strings.TrimSpace(entry.BaseURL) == "" {
+		return false
+	}
+	for _, m := range entry.Models {
+		name := strings.ToLower(strings.TrimSpace(m.Name))
+		if strings.Contains(name, "image") || strings.Contains(name, "dall-e") || strings.Contains(name, "dalle") {
+			return true
+		}
+	}
+	return false
 }
 
 func rewriteModelInfoName(name, oldID, newID string) string {
