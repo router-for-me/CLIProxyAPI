@@ -174,13 +174,34 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	appendAPIResponseChunk(ctx, e.cfg, data)
 
 	lines := bytes.Split(data, []byte("\n"))
+	var textBuilder strings.Builder
+	sawTextDelta := false
 	for _, line := range lines {
 		if !bytes.HasPrefix(line, dataTag) {
 			continue
 		}
 
 		line = bytes.TrimSpace(line[5:])
-		if gjson.GetBytes(line, "type").String() != "response.completed" {
+		line = normalizeCodexWebsocketCompletion(line)
+		switch gjson.GetBytes(line, "type").String() {
+		case "response.output_text.delta":
+			delta := gjson.GetBytes(line, "delta").String()
+			if delta != "" {
+				textBuilder.WriteString(delta)
+				sawTextDelta = true
+			}
+			continue
+		case "response.output_text.done":
+			if sawTextDelta {
+				continue
+			}
+			if text := gjson.GetBytes(line, "text").String(); text != "" {
+				textBuilder.WriteString(text)
+			}
+			continue
+		case "response.completed":
+			// fall through
+		default:
 			continue
 		}
 
@@ -188,6 +209,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 			reporter.publish(ctx, detail)
 		}
 
+		line = enrichCodexCompletedPayloadWithText(line, textBuilder.String())
 		var param any
 		out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, originalPayload, body, line, &param)
 		resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
@@ -474,6 +496,35 @@ func codexSSEPayload(frame []byte) []byte {
 		return bytes.Clone(trimmed)
 	}
 	return nil
+}
+
+func enrichCodexCompletedPayloadWithText(payload []byte, text string) []byte {
+	if strings.TrimSpace(text) == "" {
+		return payload
+	}
+	if gjson.GetBytes(payload, "type").String() != "response.completed" {
+		return payload
+	}
+	if gjson.GetBytes(payload, "response.output.#").Int() > 0 {
+		return payload
+	}
+
+	itemID := "msg_0"
+	if responseID := strings.TrimSpace(gjson.GetBytes(payload, "response.id").String()); responseID != "" {
+		itemID = fmt.Sprintf("msg_%s_0", responseID)
+	}
+
+	item := []byte(`{"id":"","type":"message","status":"completed","content":[{"type":"output_text","annotations":[],"logprobs":[],"text":""}],"role":"assistant"}`)
+	item, _ = sjson.SetBytes(item, "id", itemID)
+	item, _ = sjson.SetBytes(item, "content.0.text", text)
+
+	outputsWrapper := []byte(`{"arr":[]}`)
+	outputsWrapper, _ = sjson.SetRawBytes(outputsWrapper, "arr.-1", item)
+	enriched, err := sjson.SetRawBytes(payload, "response.output", []byte(gjson.GetBytes(outputsWrapper, "arr").Raw))
+	if err != nil {
+		return payload
+	}
+	return enriched
 }
 
 func (e *CodexExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
