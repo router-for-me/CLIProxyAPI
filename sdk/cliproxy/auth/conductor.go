@@ -1588,7 +1588,18 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				if ra := retryAfterFromError(errExec); ra != nil {
 					result.RetryAfter = ra
 				}
-				m.MarkResult(execCtx, result)
+				// count_tokens 404s from non-Anthropic upstreams indicate an
+				// unsupported endpoint, not a missing model. Recording them via
+				// MarkResult would incorrectly suspend the auth for 12 hours and
+				// block ALL subsequent requests for the same model.
+				if result.Error.HTTPStatus != http.StatusNotFound {
+					m.MarkResult(execCtx, result)
+				} else {
+					logEntryWithRequestID(execCtx).Debugf(
+						"skipping MarkResult for count_tokens 404 on auth=%s model=%s: %s",
+						auth.ID, upstreamModel, errExec.Error(),
+					)
+				}
 				if isRequestInvalidError(errExec) {
 					return cliproxyexecutor.Response{}, errExec
 				}
