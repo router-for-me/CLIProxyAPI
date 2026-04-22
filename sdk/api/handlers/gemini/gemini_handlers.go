@@ -72,6 +72,19 @@ func (h *GeminiAPIHandler) GeminiModels(c *gin.Context) {
 		}
 		normalizedModels = append(normalizedModels, normalizedModel)
 	}
+
+	// Add virtual models from config
+	if h.Cfg != nil && len(h.Cfg.VirtualModels) > 0 {
+		for _, vm := range h.Cfg.VirtualModels {
+			normalizedModels = append(normalizedModels, map[string]any{
+				"name":                       "models/" + vm.Name,
+				"displayName":                vm.Name,
+				"description":                "Virtual model: " + vm.Name,
+				"supportedGenerationMethods": defaultMethods,
+			})
+		}
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"models": normalizedModels,
 	})
@@ -116,7 +129,22 @@ func (h *GeminiAPIHandler) GeminiGetHandler(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusNotFound, handlers.ErrorResponse{
+		// Check virtual models if not found in registry
+		if h.Cfg != nil && len(h.Cfg.VirtualModels) > 0 {
+			for _, vm := range h.Cfg.VirtualModels {
+				if vm.Name == action || vm.Name == strings.TrimPrefix(action, "models/") {
+					c.JSON(http.StatusOK, map[string]any{
+						"name":                       "models/" + vm.Name,
+						"displayName":                vm.Name,
+						"description":                "Virtual model: " + vm.Name,
+						"supportedGenerationMethods": []string{"generateContent"},
+					})
+					return
+				}
+			}
+		}
+
+		c.JSON(http.StatusNotFound, handlers.ErrorResponse{
 		Error: handlers.ErrorDetail{
 			Message: "Not Found",
 			Type:    "not_found",

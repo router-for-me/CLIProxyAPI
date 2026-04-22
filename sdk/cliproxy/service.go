@@ -684,6 +684,7 @@ func (s *Service) Run(ctx context.Context) error {
 		if s.coreManager != nil {
 			s.coreManager.SetConfig(newCfg)
 			s.coreManager.SetOAuthModelAlias(newCfg.OAuthModelAlias)
+			s.coreManager.SetVirtualModels(newCfg.VirtualModels)
 		}
 		s.rebindExecutors()
 	}

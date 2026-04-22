@@ -244,6 +244,16 @@ type OAuthModelAlias struct {
 	Fork  bool   `yaml:"fork,omitempty" json:"fork,omitempty"`
 }
 
+// VirtualModel defines a global virtual model alias that maps to a specific model.
+// Virtual models are resolved before provider selection and work across all providers
+// regardless of auth type. The provider is determined by the normal alias mechanism.
+type VirtualModel struct {
+	// Name is the client-facing virtual model name used in requests.
+	Name string `yaml:"name" json:"name"`
+	// Model is the upstream model identifier to route requests to.
+	Model string `yaml:"model" json:"model"`
+}
+
 // AmpModelMapping defines a model name mapping for Amp CLI requests.
 // When Amp requests a model that isn't available locally, this mapping
 // allows routing to an alternative model that IS available.
@@ -695,6 +705,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Normalize global OAuth model name aliases.
 	cfg.SanitizeOAuthModelAlias()
 
+	// Normalize global virtual models.
+	cfg.SanitizeVirtualModels()
+
 	// Validate raw payload rules and drop invalid entries.
 	cfg.SanitizePayloadRules()
 
@@ -832,6 +845,33 @@ func (cfg *Config) SanitizeOAuthModelAlias() {
 		}
 	}
 	cfg.OAuthModelAlias = out
+}
+
+// SanitizeVirtualModels normalizes and deduplicates global virtual model definitions.
+// It trims whitespace, drops empty entries, and ensures virtual model names are unique globally.
+func (cfg *Config) SanitizeVirtualModels() {
+	if cfg == nil || len(cfg.VirtualModels) == 0 {
+		return
+	}
+	seenName := make(map[string]struct{}, len(cfg.VirtualModels))
+	clean := make([]VirtualModel, 0, len(cfg.VirtualModels))
+	for _, vm := range cfg.VirtualModels {
+		name := strings.TrimSpace(vm.Name)
+		model := strings.TrimSpace(vm.Model)
+		if name == "" || model == "" {
+			continue
+		}
+		nameKey := strings.ToLower(name)
+		if _, ok := seenName[nameKey]; ok {
+			continue
+		}
+		seenName[nameKey] = struct{}{}
+		clean = append(clean, VirtualModel{
+			Name:  name,
+			Model: model,
+		})
+	}
+	cfg.VirtualModels = clean
 }
 
 // SanitizeOpenAICompatibility removes OpenAI-compatibility provider entries that are

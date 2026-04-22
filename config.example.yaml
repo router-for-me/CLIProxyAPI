@@ -340,6 +340,14 @@ nonstream-keepalive-interval: 0
 #     - name: "kimi-k2.5"
 #       alias: "k2.5"
 
+# Global virtual models (works across all auth types)
+# The provider is determined automatically from the model name via the alias mechanism.
+# virtual-models:
+#   - name: "fast"                 # client-facing model name used in requests
+#     model: "gpt-5-codex-mini"    # upstream model identifier
+#   - name: "quality"
+#     model: "claude-opus-4-5-20251101"
+
 # OAuth provider excluded models
 # oauth-excluded-models:
 #   gemini-cli:
