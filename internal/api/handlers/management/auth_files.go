@@ -28,6 +28,7 @@ import (
 	geminiAuth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/gemini"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kimi"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
+	executor "github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
@@ -1107,6 +1108,21 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 	} else {
 		targetAuth.Status = coreauth.StatusActive
 		targetAuth.StatusMessage = ""
+		targetAuth.QuotaExhaustedPermanent = false
+		targetAuth.Unavailable = false
+		targetAuth.NextRetryAfter = time.Time{}
+		targetAuth.LastError = nil
+		targetAuth.Quota = coreauth.QuotaState{}
+		for _, ms := range targetAuth.ModelStates {
+			if ms != nil {
+				ms.Unavailable = false
+				ms.NextRetryAfter = time.Time{}
+				ms.LastError = nil
+				ms.Quota = coreauth.QuotaState{}
+				ms.Status = coreauth.StatusActive
+			}
+		}
+		executor.ClearAntigravityAuthState(targetAuth.ID)
 	}
 	targetAuth.UpdatedAt = time.Now()
 

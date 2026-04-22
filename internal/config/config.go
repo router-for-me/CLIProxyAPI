@@ -80,6 +80,16 @@ type Config struct {
 	// MaxRetryInterval defines the maximum wait time in seconds before retrying a cooled-down credential.
 	MaxRetryInterval int `yaml:"max-retry-interval" json:"max-retry-interval"`
 
+	// MinRetryInterval defines the minimum interval between retries in milliseconds. Default: 100.
+	MinRetryInterval int `yaml:"min-retry-interval" json:"min-retry-interval"`
+
+	// CreditsEnabled controls whether the Credits retry mechanism (GOOGLE_ONE_AI) is active. Default: true.
+	CreditsEnabled *bool `yaml:"credits-enabled,omitempty" json:"credits-enabled,omitempty"`
+
+	// MaxConcurrencyPerAuth limits the maximum number of concurrent requests per auth credential.
+	// 0 means unlimited (default).
+	MaxConcurrencyPerAuth int `yaml:"max-concurrency-per-auth" json:"max-concurrency-per-auth"`
+
 	// QuotaExceeded defines the behavior when a quota is exceeded.
 	QuotaExceeded QuotaExceeded `yaml:"quota-exceeded" json:"quota-exceeded"`
 
@@ -209,6 +219,19 @@ type QuotaExceeded struct {
 	// AntigravityCredits indicates whether to retry Antigravity quota_exhausted 429s once
 	// on the same credential with enabledCreditTypes=["GOOGLE_ONE_AI"].
 	AntigravityCredits bool `yaml:"antigravity-credits" json:"antigravity-credits"`
+}
+
+// IsCreditsEnabled returns whether the Credits retry mechanism is enabled.
+// It checks the top-level credits-enabled field first; if unset, falls back to
+// quota-exceeded.antigravity-credits for backward compatibility. Default is true.
+func (c *Config) IsCreditsEnabled() bool {
+	if c == nil {
+		return true
+	}
+	if c.CreditsEnabled != nil {
+		return *c.CreditsEnabled
+	}
+	return c.QuotaExceeded.AntigravityCredits
 }
 
 // RoutingConfig configures how credentials are selected for requests.
