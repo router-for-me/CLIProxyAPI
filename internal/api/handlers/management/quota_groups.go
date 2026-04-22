@@ -192,12 +192,17 @@ func (h *Handler) PatchAuthFileQuotaGroupsAutoClear(c *gin.Context) {
 	}
 	authID := strings.TrimSpace(body.AuthID)
 	groupID := strings.ToLower(strings.TrimSpace(body.GroupID))
-	if authID == "" || groupID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "auth_id and group_id are required"})
+	if authID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "auth_id is required"})
 		return
 	}
 
-	if next := h.authManager.ClearOAuthQuotaGroupAutoState(authID, groupID, body.UpdatedBy, time.Now().UTC()); next != nil {
+	now := time.Now().UTC()
+	if groupID != "" {
+		if next := h.authManager.ClearOAuthQuotaGroupAutoState(authID, groupID, body.UpdatedBy, now); next != nil {
+			h.cfg = next
+		}
+	} else if next, _ := h.authManager.ClearAllOAuthQuotaGroupAutoStates(authID, body.UpdatedBy, now); next != nil {
 		h.cfg = next
 	}
 	h.persist(c)

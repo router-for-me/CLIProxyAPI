@@ -270,6 +270,75 @@ func (m *Manager) ClearOAuthQuotaGroupAutoState(authID, groupID, updatedBy strin
 	return cfg
 }
 
+// ClearAllOAuthQuotaGroupAutoStates removes every auto cooldown currently
+// attached to one auth while preserving any manual suspensions. This is the
+// operational escape hatch for cases where the upstream quota resets earlier
+// than the stored AutoSuspendedUntil timestamp.
+func (m *Manager) ClearAllOAuthQuotaGroupAutoStates(authID, updatedBy string, now time.Time) (*internalconfig.Config, int) {
+	if m == nil {
+		return nil, 0
+	}
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return nil, 0
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	now = now.UTC()
+
+	var authSnapshot *Auth
+
+	m.mu.Lock()
+	cfg := m.cloneRuntimeConfigForQuotaGroups()
+	entries := internalconfig.NormalizeOAuthAccountQuotaGroupState(cfg.OAuthAccountQuotaGroupState)
+	if len(entries) == 0 {
+		m.mu.Unlock()
+		return cfg, 0
+	}
+
+	nextEntries := make([]internalconfig.OAuthAccountQuotaGroupState, 0, len(entries))
+	cleared := 0
+	for _, entry := range entries {
+		if strings.TrimSpace(entry.AuthID) != authID || entry.AutoSuspendedUntil.IsZero() {
+			nextEntries = append(nextEntries, entry)
+			continue
+		}
+
+		cleared++
+		entry.AutoSuspendedUntil = time.Time{}
+		entry.AutoReason = ""
+		entry.SourceModel = ""
+		entry.SourceProvider = ""
+		entry.ResetTimeSource = ""
+		entry.UpdatedAt = now
+		entry.UpdatedBy = strings.TrimSpace(updatedBy)
+		if entry.UpdatedBy == "" {
+			entry.UpdatedBy = "management:auto-clear-all"
+		}
+
+		if entry.ManualSuspended {
+			nextEntries = append(nextEntries, entry)
+		}
+	}
+
+	if cleared > 0 {
+		cfg.OAuthAccountQuotaGroupState = internalconfig.NormalizeOAuthAccountQuotaGroupState(nextEntries)
+		m.publishRuntimeConfigLocked(cfg)
+		if auth := m.auths[authID]; auth != nil {
+			updateAggregatedAvailability(auth, now)
+			auth.UpdatedAt = now
+			authSnapshot = auth.Clone()
+		}
+	}
+	m.mu.Unlock()
+
+	if cleared > 0 && m.scheduler != nil && authSnapshot != nil {
+		m.scheduler.upsertAuth(authSnapshot)
+	}
+	return cfg, cleared
+}
+
 // ClearExpiredOAuthQuotaGroupAutoStates removes auto cooldown state that has
 // already passed its reset time while preserving manual suspensions.
 func (m *Manager) ClearExpiredOAuthQuotaGroupAutoStates(now time.Time) bool {

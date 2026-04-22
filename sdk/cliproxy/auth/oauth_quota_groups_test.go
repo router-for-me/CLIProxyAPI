@@ -539,3 +539,104 @@ func TestManagerClearOAuthQuotaGroupAutoState_PublishesSnapshot(t *testing.T) {
 		t.Fatal("updatedAuth.Quota.Exceeded = true, want false")
 	}
 }
+
+func TestManagerClearAllOAuthQuotaGroupAutoStates_PreservesManualFlags(t *testing.T) {
+	now := time.Now().UTC()
+	manager := NewManager(nil, nil, nil)
+	cfg := testOAuthQuotaConfig()
+	cfg.OAuthAccountQuotaGroupState = []internalconfig.OAuthAccountQuotaGroupState{
+		{
+			AuthID:             "bulk-clear-auth",
+			GroupID:            internalconfig.OAuthQuotaGroupG3Flash,
+			AutoSuspendedUntil: now.Add(5 * time.Minute),
+			AutoReason:         "quota_exhausted",
+			SourceModel:        "gemini-3.1-flash-lite",
+			SourceProvider:     "antigravity",
+			ResetTimeSource:    "retry_after",
+		},
+		{
+			AuthID:             "bulk-clear-auth",
+			GroupID:            internalconfig.OAuthQuotaGroupG25Pro,
+			ManualSuspended:    true,
+			ManualReason:       "operator_freeze",
+			AutoSuspendedUntil: now.Add(10 * time.Minute),
+			AutoReason:         "quota_exhausted",
+			SourceModel:        "gemini-2.5-pro",
+			SourceProvider:     "antigravity",
+			ResetTimeSource:    "retry_after",
+		},
+	}
+	manager.SetConfig(cfg)
+	t.Cleanup(func() {
+		manager.SetConfig(&internalconfig.Config{})
+	})
+
+	auth := &Auth{
+		ID:       "bulk-clear-auth",
+		Provider: "antigravity",
+		Status:   StatusActive,
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{
+		{ID: "gemini-3.1-flash-lite"},
+		{ID: "gemini-2.5-pro"},
+	})
+	t.Cleanup(func() {
+		reg.UnregisterClient(auth.ID)
+	})
+
+	next, cleared := manager.ClearAllOAuthQuotaGroupAutoStates(auth.ID, "bulk-test", now)
+	if next == nil {
+		t.Fatal("ClearAllOAuthQuotaGroupAutoStates returned nil config")
+	}
+	if cleared != 2 {
+		t.Fatalf("cleared = %d, want 2", cleared)
+	}
+
+	runtimeCfg, _ := manager.runtimeConfig.Load().(*internalconfig.Config)
+	if runtimeCfg == nil {
+		t.Fatal("runtime config = nil")
+	}
+
+	stateFlash, ok := findOAuthQuotaGroupState(runtimeCfg.OAuthAccountQuotaGroupState, auth.ID, internalconfig.OAuthQuotaGroupG3Flash)
+	if ok {
+		t.Fatalf("flash auto-only state still present after bulk clear: %+v", stateFlash)
+	}
+
+	statePro, ok := findOAuthQuotaGroupState(runtimeCfg.OAuthAccountQuotaGroupState, auth.ID, internalconfig.OAuthQuotaGroupG25Pro)
+	if !ok {
+		t.Fatal("manual state missing after bulk clear")
+	}
+	if !statePro.ManualSuspended {
+		t.Fatal("manual suspension lost after bulk clear")
+	}
+	if !statePro.AutoSuspendedUntil.IsZero() {
+		t.Fatalf("manual state auto cooldown still present: %v", statePro.AutoSuspendedUntil)
+	}
+	if statePro.UpdatedBy != "bulk-test" {
+		t.Fatalf("manual state UpdatedBy = %q, want %q", statePro.UpdatedBy, "bulk-test")
+	}
+
+	updatedAuth, ok := manager.GetByID(auth.ID)
+	if !ok || updatedAuth == nil {
+		t.Fatal("updated auth missing")
+	}
+	blockedFlash, reasonFlash, nextFlash := isAuthBlockedForModel(updatedAuth, "gemini-3.1-flash-lite", now)
+	if blockedFlash {
+		t.Fatalf("flash model still blocked after bulk clear: reason=%v next=%v", reasonFlash, nextFlash)
+	}
+	blockedPro, reasonPro, nextPro := isAuthBlockedForModel(updatedAuth, "gemini-2.5-pro", now)
+	if !blockedPro {
+		t.Fatal("manual-suspended model unexpectedly unblocked after bulk clear")
+	}
+	if reasonPro != blockReasonDisabled {
+		t.Fatalf("manual-suspended reason = %v, want %v", reasonPro, blockReasonDisabled)
+	}
+	if !nextPro.IsZero() {
+		t.Fatalf("manual-suspended next retry = %v, want zero", nextPro)
+	}
+}
