@@ -116,6 +116,9 @@ type Config struct {
 	// OpenAICompatibility defines OpenAI API compatibility configurations for external providers.
 	OpenAICompatibility []OpenAICompatibility `yaml:"openai-compatibility" json:"openai-compatibility"`
 
+	// MiniMaxKey defines a list of MiniMax API key configurations as specified in the YAML configuration file.
+	MiniMaxKey []MiniMaxKey `yaml:"minimax-api-key" json:"minimax-api-key"`
+
 	// VertexCompatAPIKey defines Vertex AI-compatible API key configurations for third-party providers.
 	// Used for services that use Vertex AI-style paths but with simple API key authentication.
 	VertexCompatAPIKey []VertexCompatKey `yaml:"vertex-api-key" json:"vertex-api-key"`
@@ -560,6 +563,51 @@ type OpenAICompatibilityModel struct {
 func (m OpenAICompatibilityModel) GetName() string  { return m.Name }
 func (m OpenAICompatibilityModel) GetAlias() string { return m.Alias }
 
+// MiniMaxKey represents the configuration for a MiniMax API key,
+// including optional overrides for the API endpoint, proxy routing, headers, and model aliases.
+type MiniMaxKey struct {
+	// APIKey is the authentication key for accessing MiniMax API services.
+	APIKey string `yaml:"api-key" json:"api-key"`
+
+	// Priority controls selection preference when multiple credentials match.
+	// Higher values are preferred; defaults to 0.
+	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
+
+	// Prefix optionally namespaces models for this credential (e.g., "teamA/MiniMax-M2.7").
+	Prefix string `yaml:"prefix,omitempty" json:"prefix,omitempty"`
+
+	// BaseURL is the base URL for the MiniMax API endpoint.
+	// If empty, defaults to https://api.minimax.io/v1.
+	BaseURL string `yaml:"base-url,omitempty" json:"base-url,omitempty"`
+
+	// ProxyURL overrides the global proxy setting for this API key if provided.
+	ProxyURL string `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`
+
+	// Models defines upstream model names and aliases for request routing.
+	Models []MiniMaxModel `yaml:"models,omitempty" json:"models,omitempty"`
+
+	// Headers optionally adds extra HTTP headers for requests sent with this key.
+	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
+
+	// ExcludedModels lists model IDs that should be excluded for this provider.
+	ExcludedModels []string `yaml:"excluded-models,omitempty" json:"excluded-models,omitempty"`
+}
+
+func (k MiniMaxKey) GetAPIKey() string  { return k.APIKey }
+func (k MiniMaxKey) GetBaseURL() string { return k.BaseURL }
+
+// MiniMaxModel describes a mapping between an alias and the actual upstream MiniMax model name.
+type MiniMaxModel struct {
+	// Name is the upstream model identifier used when issuing requests.
+	Name string `yaml:"name" json:"name"`
+
+	// Alias is the client-facing model name that maps to Name.
+	Alias string `yaml:"alias" json:"alias"`
+}
+
+func (m MiniMaxModel) GetName() string  { return m.Name }
+func (m MiniMaxModel) GetAlias() string { return m.Alias }
+
 // LoadConfig reads a YAML configuration file from the given path,
 // unmarshals it into a Config struct, applies environment variable overrides,
 // and returns it.
@@ -688,6 +736,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	// Sanitize OpenAI compatibility providers: drop entries without base-url
 	cfg.SanitizeOpenAICompatibility()
+
+	// Sanitize MiniMax keys: drop entries without api-key
+	cfg.SanitizeMiniMaxKeys()
 
 	// Normalize OAuth provider model exclusion map.
 	cfg.OAuthExcludedModels = NormalizeOAuthExcludedModels(cfg.OAuthExcludedModels)
@@ -889,6 +940,27 @@ func (cfg *Config) SanitizeClaudeKeys() {
 		entry.Headers = NormalizeHeaders(entry.Headers)
 		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
 	}
+}
+
+// SanitizeMiniMaxKeys normalizes headers and removes MiniMax API key entries missing an API key.
+func (cfg *Config) SanitizeMiniMaxKeys() {
+	if cfg == nil || len(cfg.MiniMaxKey) == 0 {
+		return
+	}
+	out := make([]MiniMaxKey, 0, len(cfg.MiniMaxKey))
+	for i := range cfg.MiniMaxKey {
+		e := cfg.MiniMaxKey[i]
+		e.APIKey = strings.TrimSpace(e.APIKey)
+		e.Prefix = normalizeModelPrefix(e.Prefix)
+		e.BaseURL = strings.TrimSpace(e.BaseURL)
+		e.Headers = NormalizeHeaders(e.Headers)
+		e.ExcludedModels = NormalizeExcludedModels(e.ExcludedModels)
+		if e.APIKey == "" {
+			continue
+		}
+		out = append(out, e)
+	}
+	cfg.MiniMaxKey = out
 }
 
 // SanitizeGeminiKeys deduplicates and normalizes Gemini credentials.

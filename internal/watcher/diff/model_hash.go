@@ -106,6 +106,21 @@ func ComputeExcludedModelsHash(excluded []string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// ComputeMiniMaxModelsHash returns a stable hash for MiniMax model aliases.
+func ComputeMiniMaxModelsHash(models []config.MiniMaxModel) string {
+	keys := normalizeModelPairs(func(out func(key string)) {
+		for _, model := range models {
+			name := strings.TrimSpace(model.Name)
+			alias := strings.TrimSpace(model.Alias)
+			if name == "" && alias == "" {
+				continue
+			}
+			out(strings.ToLower(name) + "|" + strings.ToLower(alias))
+		}
+	})
+	return hashJoined(keys)
+}
+
 func normalizeModelPairs(collect func(out func(key string))) []string {
 	seen := make(map[string]struct{})
 	keys := make([]string, 0)

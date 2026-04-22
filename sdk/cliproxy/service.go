@@ -424,6 +424,8 @@ func (s *Service) ensureExecutorsForAuthWithMode(a *coreauth.Auth, forceReplace 
 		s.coreManager.RegisterExecutor(executor.NewClaudeExecutor(s.cfg))
 	case "kimi":
 		s.coreManager.RegisterExecutor(executor.NewKimiExecutor(s.cfg))
+	case "minimax":
+		s.coreManager.RegisterExecutor(executor.NewOpenAICompatExecutor("minimax", s.cfg))
 	default:
 		providerKey := strings.ToLower(strings.TrimSpace(a.Provider))
 		if providerKey == "" {
@@ -927,6 +929,17 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 	case "kimi":
 		models = registry.GetKimiModels()
 		models = applyExcludedModels(models, excluded)
+	case "minimax":
+		models = registry.GetMiniMaxModels()
+		if entry := s.resolveConfigMiniMaxKey(a); entry != nil {
+			if len(entry.Models) > 0 {
+				models = buildMiniMaxConfigModels(entry)
+			}
+			if authKind == "apikey" {
+				excluded = entry.ExcludedModels
+			}
+		}
+		models = applyExcludedModels(models, excluded)
 	default:
 		// Handle OpenAI-compatibility providers by name using config
 		if s.cfg != nil {
@@ -1214,6 +1227,32 @@ func (s *Service) oauthExcludedModels(provider, authKind string) []string {
 	return cfg.OAuthExcludedModels[providerKey]
 }
 
+func (s *Service) resolveConfigMiniMaxKey(auth *coreauth.Auth) *config.MiniMaxKey {
+	if auth == nil || s.cfg == nil {
+		return nil
+	}
+	var attrKey, attrBase string
+	if auth.Attributes != nil {
+		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
+		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
+	}
+	for i := range s.cfg.MiniMaxKey {
+		entry := &s.cfg.MiniMaxKey[i]
+		cfgKey := strings.TrimSpace(entry.APIKey)
+		cfgBase := strings.TrimSpace(entry.BaseURL)
+		if attrKey != "" && strings.EqualFold(cfgKey, attrKey) {
+			if cfgBase == "" || strings.EqualFold(cfgBase, attrBase) {
+				return entry
+			}
+			continue
+		}
+		if attrKey == "" && attrBase != "" && strings.EqualFold(cfgBase, attrBase) {
+			return entry
+		}
+	}
+	return nil
+}
+
 func applyExcludedModels(models []*ModelInfo, excluded []string) []*ModelInfo {
 	if len(models) == 0 || len(excluded) == 0 {
 		return models
@@ -1411,6 +1450,13 @@ func buildCodexConfigModels(entry *config.CodexKey) []*ModelInfo {
 		return nil
 	}
 	return buildConfigModels(entry.Models, "openai", "openai")
+}
+
+func buildMiniMaxConfigModels(entry *config.MiniMaxKey) []*ModelInfo {
+	if entry == nil {
+		return nil
+	}
+	return buildConfigModels(entry.Models, "minimax", "minimax")
 }
 
 func rewriteModelInfoName(name, oldID, newID string) string {
