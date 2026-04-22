@@ -383,9 +383,11 @@ func (h *OpenAIAPIHandler) imagesEditsFromMultipart(c *gin.Context) {
 	if v := strings.TrimSpace(c.PostForm("partial_images")); v != "" {
 		tool, _ = sjson.SetBytes(tool, "partial_images", parseIntField(v, 0))
 	}
-	if v := strings.TrimSpace(c.PostForm("n")); v != "" {
-		tool, _ = sjson.SetBytes(tool, "n", parseIntField(v, 0))
-	}
+
+	// Unsupported parameter
+	// if v := strings.TrimSpace(c.PostForm("n")); v != "" {
+	// 	tool, _ = sjson.SetBytes(tool, "n", parseIntField(v, 0))
+	// }
 
 	if maskDataURL != nil && strings.TrimSpace(*maskDataURL) != "" {
 		tool, _ = sjson.SetBytes(tool, "input_image_mask.image_url", strings.TrimSpace(*maskDataURL))
