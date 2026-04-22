@@ -240,11 +240,6 @@ func (h *OpenAIAPIHandler) ImagesGenerations(c *gin.Context) {
 			tool, _ = sjson.SetBytes(tool, "partial_images", v.Int())
 		}
 	}
-	if v := gjson.GetBytes(rawJSON, "n"); v.Exists() {
-		if v.Type == gjson.Number {
-			tool, _ = sjson.SetBytes(tool, "n", v.Int())
-		}
-	}
 	if v := strings.TrimSpace(gjson.GetBytes(rawJSON, "moderation").String()); v != "" {
 		tool, _ = sjson.SetBytes(tool, "moderation", v)
 	}
@@ -384,11 +379,6 @@ func (h *OpenAIAPIHandler) imagesEditsFromMultipart(c *gin.Context) {
 		tool, _ = sjson.SetBytes(tool, "partial_images", parseIntField(v, 0))
 	}
 
-	// Unsupported parameter
-	// if v := strings.TrimSpace(c.PostForm("n")); v != "" {
-	// 	tool, _ = sjson.SetBytes(tool, "n", parseIntField(v, 0))
-	// }
-
 	if maskDataURL != nil && strings.TrimSpace(*maskDataURL) != "" {
 		tool, _ = sjson.SetBytes(tool, "input_image_mask.image_url", strings.TrimSpace(*maskDataURL))
 	}
@@ -489,7 +479,7 @@ func (h *OpenAIAPIHandler) imagesEditsFromJSON(c *gin.Context) {
 		}
 	}
 
-	for _, field := range []string{"output_compression", "partial_images", "n"} {
+	for _, field := range []string{"output_compression", "partial_images"} {
 		if v := gjson.GetBytes(rawJSON, field); v.Exists() && v.Type == gjson.Number {
 			tool, _ = sjson.SetBytes(tool, field, v.Int())
 		}
