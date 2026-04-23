@@ -2910,7 +2910,8 @@ func (m *Manager) findAllAntigravityCreditsCandidateAuths(routeModel string, opt
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	var candidates []creditsCandidateEntry
+	var known []creditsCandidateEntry
+	var unknown []creditsCandidateEntry
 	for _, auth := range m.auths {
 		if auth == nil || auth.Disabled || auth.Status == StatusDisabled {
 			continue
@@ -2918,7 +2919,10 @@ func (m *Manager) findAllAntigravityCreditsCandidateAuths(routeModel string, opt
 		if pinnedAuthID != "" && auth.ID != pinnedAuthID {
 			continue
 		}
-		if !antigravityCreditsAvailableForModel(auth, routeModel) {
+		if !strings.EqualFold(strings.TrimSpace(auth.Provider), "antigravity") {
+			continue
+		}
+		if !strings.Contains(strings.ToLower(strings.TrimSpace(routeModel)), "claude") {
 			continue
 		}
 		providerKey := strings.TrimSpace(strings.ToLower(auth.Provider))
@@ -2926,16 +2930,32 @@ func (m *Manager) findAllAntigravityCreditsCandidateAuths(routeModel string, opt
 		if !ok {
 			continue
 		}
-		candidates = append(candidates, creditsCandidateEntry{
+
+		hint, okHint := GetAntigravityCreditsHint(auth.ID)
+		if okHint && hint.Known {
+			if !hint.Available {
+				continue
+			}
+			known = append(known, creditsCandidateEntry{
+				auth:     auth.Clone(),
+				executor: executor,
+				provider: providerKey,
+			})
+			continue
+		}
+		unknown = append(unknown, creditsCandidateEntry{
 			auth:     auth.Clone(),
 			executor: executor,
 			provider: providerKey,
 		})
 	}
-	sort.Slice(candidates, func(i, j int) bool {
-		return candidates[i].auth.ID < candidates[j].auth.ID
+	sort.Slice(known, func(i, j int) bool {
+		return known[i].auth.ID < known[j].auth.ID
 	})
-	return candidates
+	sort.Slice(unknown, func(i, j int) bool {
+		return unknown[i].auth.ID < unknown[j].auth.ID
+	})
+	return append(known, unknown...)
 }
 
 type creditsCandidateEntry struct {
