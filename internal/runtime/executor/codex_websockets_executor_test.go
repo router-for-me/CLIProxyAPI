@@ -299,14 +299,54 @@ func TestReadCodexWebsocketMessageReturnsWhenReadChannelClosed(t *testing.T) {
 	sess := &codexWebsocketSession{}
 	conn := &websocket.Conn{}
 	readCh := make(chan codexWebsocketRead)
+	activeCtx, activeCancel := context.WithCancel(context.Background())
+	defer activeCancel()
 	close(readCh)
 
-	_, _, err := readCodexWebsocketMessage(context.Background(), sess, conn, readCh)
+	_, _, err := readCodexWebsocketMessage(context.Background(), sess, conn, readCh, activeCtx.Done())
 	if err == nil {
 		t.Fatal("expected error when session read channel is closed")
 	}
 	if !strings.Contains(err.Error(), "session read channel closed") {
 		t.Fatalf("error = %v, want contains session read channel closed", err)
+	}
+}
+
+func TestTrySendCodexWebsocketReadWaitsForBufferDrain(t *testing.T) {
+	t.Parallel()
+
+	activeCtx, activeCancel := context.WithCancel(context.Background())
+	defer activeCancel()
+
+	readCh := make(chan codexWebsocketRead, 1)
+	readCh <- codexWebsocketRead{msgType: websocket.TextMessage, payload: []byte("first")}
+
+	sendDone := make(chan struct{})
+	go func() {
+		trySendCodexWebsocketRead(readCh, activeCtx.Done(), codexWebsocketRead{msgType: websocket.TextMessage, payload: []byte("second")})
+		close(sendDone)
+	}()
+
+	select {
+	case <-sendDone:
+		t.Fatal("trySendCodexWebsocketRead returned before buffer drained")
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	first := <-readCh
+	if string(first.payload) != "first" {
+		t.Fatalf("first payload = %q, want first", string(first.payload))
+	}
+
+	select {
+	case <-sendDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("trySendCodexWebsocketRead did not complete after buffer drain")
+	}
+
+	second := <-readCh
+	if string(second.payload) != "second" {
+		t.Fatalf("second payload = %q, want second", string(second.payload))
 	}
 }
 
@@ -345,7 +385,7 @@ func TestCloseExecutionSessionUnblocksActiveRead(t *testing.T) {
 		readerConn: serverConn,
 	}
 	readCh := make(chan codexWebsocketRead, 4)
-	sess.setActive(readCh)
+	activeDone := sess.setActive(readCh)
 
 	executor := NewCodexWebsocketsExecutor(&config.Config{})
 	executor.store.sessions["session-close"] = sess
@@ -354,7 +394,7 @@ func TestCloseExecutionSessionUnblocksActiveRead(t *testing.T) {
 	defer cancel()
 	readErrCh := make(chan error, 1)
 	go func() {
-		_, _, err := readCodexWebsocketMessage(ctx, sess, serverConn, readCh)
+		_, _, err := readCodexWebsocketMessage(ctx, sess, serverConn, readCh, activeDone)
 		readErrCh <- err
 	}()
 

@@ -96,33 +96,15 @@ func trySendCodexWebsocketRead(ch chan codexWebsocketRead, done <-chan struct{},
 	if ch == nil {
 		return
 	}
-	defer func() {
-		if r := recover(); r != nil {
-			log.Debugf("codex websockets executor: recover trySendCodexWebsocketRead panic=%v", r)
-		}
-	}()
 	select {
 	case ch <- ev:
 	case <-done:
-	default:
 	}
 }
 
-func tryCloseCodexWebsocketRead(ch chan codexWebsocketRead) {
-	if ch == nil {
-		return
-	}
-	defer func() {
-		if r := recover(); r != nil {
-			log.Debugf("codex websockets executor: recover tryCloseCodexWebsocketRead panic=%v", r)
-		}
-	}()
-	close(ch)
-}
-
-func (s *codexWebsocketSession) setActive(ch chan codexWebsocketRead) {
+func (s *codexWebsocketSession) setActive(ch chan codexWebsocketRead) <-chan struct{} {
 	if s == nil {
-		return
+		return nil
 	}
 	// 该方法仅持有 activeMu 调用避免与 connMu->activeMu 锁序冲突
 	// 不要在持有 connMu 时调用避免未来引入反向锁序
@@ -138,7 +120,9 @@ func (s *codexWebsocketSession) setActive(ch chan codexWebsocketRead) {
 		s.activeDone = activeCtx.Done()
 		s.activeCancel = activeCancel
 	}
+	done := s.activeDone
 	s.activeMu.Unlock()
+	return done
 }
 
 func (s *codexWebsocketSession) clearActive(ch chan codexWebsocketRead) {
@@ -185,33 +169,6 @@ func (s *codexWebsocketSession) activeSnapshotForCurrentConn(conn *websocket.Con
 	s.activeMu.Unlock()
 	s.connMu.Unlock()
 	return ch, done, true
-}
-
-func (s *codexWebsocketSession) clearActiveForCurrentConn(conn *websocket.Conn, ch chan codexWebsocketRead) bool {
-	if s == nil || conn == nil || ch == nil {
-		return false
-	}
-	// 锁顺序固定为 connMu -> activeMu
-	s.connMu.Lock()
-	if s.conn != conn {
-		s.connMu.Unlock()
-		return false
-	}
-	s.activeMu.Lock()
-	if s.activeCh != ch {
-		s.activeMu.Unlock()
-		s.connMu.Unlock()
-		return false
-	}
-	s.activeCh = nil
-	if s.activeCancel != nil {
-		s.activeCancel()
-	}
-	s.activeCancel = nil
-	s.activeDone = nil
-	s.activeMu.Unlock()
-	s.connMu.Unlock()
-	return true
 }
 
 func (s *codexWebsocketSession) writeMessage(conn *websocket.Conn, msgType int, payload []byte) error {
@@ -350,9 +307,10 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	}
 
 	var readCh chan codexWebsocketRead
+	var activeDone <-chan struct{}
 	if sess != nil {
 		readCh = make(chan codexWebsocketRead, 4096)
-		sess.setActive(readCh)
+		activeDone = sess.setActive(readCh)
 		defer sess.clearActive(readCh)
 	}
 
@@ -401,7 +359,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		if ctx != nil && ctx.Err() != nil {
 			return resp, ctx.Err()
 		}
-		msgType, payload, errRead := readCodexWebsocketMessage(ctx, sess, conn, readCh)
+		msgType, payload, errRead := readCodexWebsocketMessage(ctx, sess, conn, readCh, activeDone)
 		if errRead != nil {
 			helps.RecordAPIWebsocketError(ctx, e.cfg, "read", errRead)
 			return resp, errRead
@@ -542,9 +500,10 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	}
 
 	var readCh chan codexWebsocketRead
+	var activeDone <-chan struct{}
 	if sess != nil {
 		readCh = make(chan codexWebsocketRead, 4096)
-		sess.setActive(readCh)
+		activeDone = sess.setActive(readCh)
 	}
 
 	if errSend := writeCodexWebsocketMessage(sess, conn, wsReqBody); errSend != nil {
@@ -631,7 +590,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				_ = send(cliproxyexecutor.StreamChunk{Err: ctx.Err()})
 				return
 			}
-			msgType, payload, errRead := readCodexWebsocketMessage(ctx, sess, conn, readCh)
+			msgType, payload, errRead := readCodexWebsocketMessage(ctx, sess, conn, readCh, activeDone)
 			if errRead != nil {
 				if sess != nil && ctx != nil && ctx.Err() != nil {
 					terminateReason = "context_done"
@@ -749,7 +708,7 @@ func buildCodexWebsocketRequestBody(body []byte) []byte {
 	return fallback
 }
 
-func readCodexWebsocketMessage(ctx context.Context, sess *codexWebsocketSession, conn *websocket.Conn, readCh chan codexWebsocketRead) (int, []byte, error) {
+func readCodexWebsocketMessage(ctx context.Context, sess *codexWebsocketSession, conn *websocket.Conn, readCh chan codexWebsocketRead, activeDone <-chan struct{}) (int, []byte, error) {
 	if sess == nil {
 		if conn == nil {
 			return 0, nil, fmt.Errorf("codex websockets executor: websocket conn is nil")
@@ -764,10 +723,29 @@ func readCodexWebsocketMessage(ctx context.Context, sess *codexWebsocketSession,
 	if readCh == nil {
 		return 0, nil, fmt.Errorf("codex websockets executor: session read channel is nil")
 	}
+	if activeDone == nil {
+		return 0, nil, fmt.Errorf("codex websockets executor: session read signal is nil")
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			return 0, nil, ctx.Err()
+		case <-activeDone:
+			select {
+			case ev, ok := <-readCh:
+				if !ok {
+					return 0, nil, fmt.Errorf("codex websockets executor: session read channel closed")
+				}
+				if ev.conn != conn {
+					return 0, nil, fmt.Errorf("codex websockets executor: execution session closed")
+				}
+				if ev.err != nil {
+					return 0, nil, ev.err
+				}
+				return ev.msgType, ev.payload, nil
+			default:
+			}
+			return 0, nil, fmt.Errorf("codex websockets executor: execution session closed")
 		case ev, ok := <-readCh:
 			if !ok {
 				return 0, nil, fmt.Errorf("codex websockets executor: session read channel closed")
@@ -1276,9 +1254,6 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 			}
 			if ch != nil {
 				trySendCodexWebsocketRead(ch, done, codexWebsocketRead{conn: conn, err: errRead})
-				if sess.clearActiveForCurrentConn(conn, ch) {
-					tryCloseCodexWebsocketRead(ch)
-				}
 			}
 			e.invalidateUpstreamConn(sess, conn, "upstream_disconnected", errRead)
 			return
@@ -1295,9 +1270,6 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 				}
 				if ch != nil {
 					trySendCodexWebsocketRead(ch, done, codexWebsocketRead{conn: conn, err: errBinary})
-					if sess.clearActiveForCurrentConn(conn, ch) {
-						tryCloseCodexWebsocketRead(ch)
-					}
 				}
 				e.invalidateUpstreamConn(sess, conn, "unexpected_binary", errBinary)
 				return
@@ -1421,8 +1393,6 @@ func closeCodexWebsocketSession(sess *codexWebsocketSession, reason string) {
 		sess.readerConn = nil
 	}
 	sess.activeMu.Lock()
-	ch := sess.activeCh
-	done := sess.activeDone
 	if sess.activeCancel != nil {
 		sess.activeCancel()
 	}
@@ -1431,12 +1401,6 @@ func closeCodexWebsocketSession(sess *codexWebsocketSession, reason string) {
 	sess.activeDone = nil
 	sess.activeMu.Unlock()
 	sess.connMu.Unlock()
-
-	if ch != nil {
-		// 会话关闭时允许主动 fail active 唤醒在途 readCodexWebsocketMessage
-		trySendCodexWebsocketRead(ch, done, codexWebsocketRead{conn: conn, err: fmt.Errorf("codex websockets executor: execution session closed")})
-		tryCloseCodexWebsocketRead(ch)
-	}
 
 	if conn == nil {
 		return
