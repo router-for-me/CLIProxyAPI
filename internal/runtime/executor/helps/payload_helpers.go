@@ -1,7 +1,6 @@
 package helps
 
 import (
-	"bytes"
 	"encoding/json"
 	"strings"
 
@@ -32,25 +31,25 @@ func ApplyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string
 	candidates := payloadModelCandidates(model, requestedModel)
 	out := payload
 	source := original
-	if len(source) == 0 && (len(rules.Default) > 0 || len(rules.DefaultRaw) > 0) {
-		source = bytes.Clone(payload)
-	}
 	if len(source) == 0 {
 		source = payload
 	}
+	matchedDefaults := matchingPayloadRules(rules.Default, protocol, candidates)
+	matchedDefaultRaws := matchingPayloadRules(rules.DefaultRaw, protocol, candidates)
+	matchedOverrides := matchingPayloadRules(rules.Override, protocol, candidates)
+	matchedOverrideRaws := matchingPayloadRules(rules.OverrideRaw, protocol, candidates)
+	matchedFilters := matchingPayloadFilterRules(rules.Filter, protocol, candidates)
+	defaultPresence := payloadPathPresenceIndex(source, root, matchedDefaults, matchedDefaultRaws)
 	appliedDefaults := make(map[string]struct{})
 	// Apply default rules: first write wins per field across all matching rules.
-	for i := range rules.Default {
-		rule := &rules.Default[i]
-		if !payloadModelRulesMatch(rule.Models, protocol, candidates) {
-			continue
-		}
+	for i := range matchedDefaults {
+		rule := &matchedDefaults[i]
 		for path, value := range rule.Params {
 			fullPath := buildPayloadPath(root, path)
 			if fullPath == "" {
 				continue
 			}
-			if gjson.GetBytes(source, fullPath).Exists() {
+			if payloadPathExists(defaultPresence, fullPath) {
 				continue
 			}
 			if _, ok := appliedDefaults[fullPath]; ok {
@@ -65,17 +64,14 @@ func ApplyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string
 		}
 	}
 	// Apply default raw rules: first write wins per field across all matching rules.
-	for i := range rules.DefaultRaw {
-		rule := &rules.DefaultRaw[i]
-		if !payloadModelRulesMatch(rule.Models, protocol, candidates) {
-			continue
-		}
+	for i := range matchedDefaultRaws {
+		rule := &matchedDefaultRaws[i]
 		for path, value := range rule.Params {
 			fullPath := buildPayloadPath(root, path)
 			if fullPath == "" {
 				continue
 			}
-			if gjson.GetBytes(source, fullPath).Exists() {
+			if payloadPathExists(defaultPresence, fullPath) {
 				continue
 			}
 			if _, ok := appliedDefaults[fullPath]; ok {
@@ -94,11 +90,8 @@ func ApplyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string
 		}
 	}
 	// Apply override rules: last write wins per field across all matching rules.
-	for i := range rules.Override {
-		rule := &rules.Override[i]
-		if !payloadModelRulesMatch(rule.Models, protocol, candidates) {
-			continue
-		}
+	for i := range matchedOverrides {
+		rule := &matchedOverrides[i]
 		for path, value := range rule.Params {
 			fullPath := buildPayloadPath(root, path)
 			if fullPath == "" {
@@ -112,11 +105,8 @@ func ApplyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string
 		}
 	}
 	// Apply override raw rules: last write wins per field across all matching rules.
-	for i := range rules.OverrideRaw {
-		rule := &rules.OverrideRaw[i]
-		if !payloadModelRulesMatch(rule.Models, protocol, candidates) {
-			continue
-		}
+	for i := range matchedOverrideRaws {
+		rule := &matchedOverrideRaws[i]
 		for path, value := range rule.Params {
 			fullPath := buildPayloadPath(root, path)
 			if fullPath == "" {
@@ -134,11 +124,8 @@ func ApplyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string
 		}
 	}
 	// Apply filter rules: remove matching paths from payload.
-	for i := range rules.Filter {
-		rule := &rules.Filter[i]
-		if !payloadModelRulesMatch(rule.Models, protocol, candidates) {
-			continue
-		}
+	for i := range matchedFilters {
+		rule := &matchedFilters[i]
 		for _, path := range rule.Params {
 			fullPath := buildPayloadPath(root, path)
 			if fullPath == "" {
@@ -152,6 +139,66 @@ func ApplyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string
 		}
 	}
 	return out
+}
+
+func matchingPayloadRules(rules []config.PayloadRule, protocol string, models []string) []config.PayloadRule {
+	if len(rules) == 0 || len(models) == 0 {
+		return nil
+	}
+	matched := make([]config.PayloadRule, 0, len(rules))
+	for i := range rules {
+		if payloadModelRulesMatch(rules[i].Models, protocol, models) {
+			matched = append(matched, rules[i])
+		}
+	}
+	return matched
+}
+
+func matchingPayloadFilterRules(rules []config.PayloadFilterRule, protocol string, models []string) []config.PayloadFilterRule {
+	if len(rules) == 0 || len(models) == 0 {
+		return nil
+	}
+	matched := make([]config.PayloadFilterRule, 0, len(rules))
+	for i := range rules {
+		if payloadModelRulesMatch(rules[i].Models, protocol, models) {
+			matched = append(matched, rules[i])
+		}
+	}
+	return matched
+}
+
+func payloadPathPresenceIndex(source []byte, root string, defaults, defaultRaws []config.PayloadRule) map[string]bool {
+	if len(source) == 0 || (len(defaults) == 0 && len(defaultRaws) == 0) {
+		return nil
+	}
+	paths := make(map[string]struct{})
+	collectRulePaths := func(rules []config.PayloadRule) {
+		for i := range rules {
+			for path := range rules[i].Params {
+				fullPath := buildPayloadPath(root, path)
+				if fullPath != "" {
+					paths[fullPath] = struct{}{}
+				}
+			}
+		}
+	}
+	collectRulePaths(defaults)
+	collectRulePaths(defaultRaws)
+	if len(paths) == 0 {
+		return nil
+	}
+	index := make(map[string]bool, len(paths))
+	for path := range paths {
+		index[path] = gjson.GetBytes(source, path).Exists()
+	}
+	return index
+}
+
+func payloadPathExists(index map[string]bool, path string) bool {
+	if len(index) == 0 || path == "" {
+		return false
+	}
+	return index[path]
 }
 
 func payloadRulesConfigured(cfg *config.Config) bool {

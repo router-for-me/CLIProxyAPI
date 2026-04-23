@@ -111,10 +111,10 @@ quota-exceeded:
 
 # Routing strategy for selecting credentials when multiple match.
 routing:
-  strategy: "round-robin" # round-robin (default), fill-first
+  strategy: "fill-first" # round-robin (default), fill-first
   # Enable universal session-sticky routing for all clients.
-  # Session IDs are extracted from: X-Session-ID header, Idempotency-Key,
-  # metadata.user_id, conversation_id, or first few messages hash.
+  # Session IDs are extracted from: X-Session-ID / Session_id / Conversation_id
+  # header, metadata.user_id, prompt_cache_key, conversation_id, or message hash.
   # Automatic failover is always enabled when bound auth becomes unavailable.
   session-affinity: false # default: false
   # How long session-to-auth bindings are retained. Default: 1h

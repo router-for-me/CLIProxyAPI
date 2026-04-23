@@ -40,7 +40,7 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 		loggerEnabled := logger.IsEnabled()
 
 		// Capture request information
-		requestInfo, bodyCapture := captureRequestInfo(c, shouldCaptureRequestBody(loggerEnabled, c.Request))
+		requestInfo, bodyCapture := captureRequestInfo(c, shouldCaptureRequestBody(loggerEnabled, c.Request), loggerEnabled)
 
 		// Create response writer wrapper
 		wrapper := NewResponseWriterWrapper(c.Writer, logger, requestInfo)
@@ -104,7 +104,7 @@ func shouldCaptureRequestBody(loggerEnabled bool, req *http.Request) bool {
 // captureRequestInfo extracts relevant information from the incoming HTTP request.
 // When body capture is enabled, it wraps Request.Body so payload bytes are captured
 // incrementally as downstream handlers read them.
-func captureRequestInfo(c *gin.Context, captureBody bool) (*RequestInfo, *capturedRequestBody) {
+func captureRequestInfo(c *gin.Context, captureBody bool, captureHeaders bool) (*RequestInfo, *capturedRequestBody) {
 	// Capture URL with sensitive query parameters masked
 	maskedQuery := util.MaskSensitiveQuery(c.Request.URL.RawQuery)
 	url := c.Request.URL.Path
@@ -115,10 +115,9 @@ func captureRequestInfo(c *gin.Context, captureBody bool) (*RequestInfo, *captur
 	// Capture method
 	method := c.Request.Method
 
-	// Capture headers
-	headers := make(map[string][]string)
-	for key, values := range c.Request.Header {
-		headers[key] = values
+	var headers map[string][]string
+	if captureHeaders {
+		headers = cloneHeaderValues(c.Request.Header)
 	}
 
 	requestInfo := &RequestInfo{
@@ -134,6 +133,17 @@ func captureRequestInfo(c *gin.Context, captureBody bool) (*RequestInfo, *captur
 	}
 
 	return requestInfo, newCapturedRequestBody(c, requestInfo, maxLoggedRequestBodyBytes)
+}
+
+func cloneHeaderValues(src http.Header) map[string][]string {
+	if len(src) == 0 {
+		return nil
+	}
+	headers := make(map[string][]string, len(src))
+	for key, values := range src {
+		headers[key] = append([]string(nil), values...)
+	}
+	return headers
 }
 
 // shouldLogRequest determines whether the request should be logged.

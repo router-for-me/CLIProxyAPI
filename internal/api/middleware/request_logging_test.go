@@ -156,7 +156,7 @@ func TestCaptureRequestInfoPreservesBodyForDownstream(t *testing.T) {
 	req.ContentLength = int64(len(payload))
 	c.Request = req
 
-	requestInfo, bodyCapture := captureRequestInfo(c, true)
+	requestInfo, bodyCapture := captureRequestInfo(c, true, true)
 	if bodyCapture == nil {
 		t.Fatal("expected request body capture")
 	}
@@ -190,7 +190,7 @@ func TestCaptureRequestInfoSummarizesLargeBody(t *testing.T) {
 	req.ContentLength = int64(len(payload))
 	c.Request = req
 
-	requestInfo, bodyCapture := captureRequestInfo(c, true)
+	requestInfo, bodyCapture := captureRequestInfo(c, true, true)
 	if bodyCapture == nil {
 		t.Fatal("expected request body capture")
 	}
@@ -260,6 +260,26 @@ func TestRequestLoggingMiddlewareSummarizesLargeRequestBody(t *testing.T) {
 	}
 	if strings.Contains(string(logger.lastRequestBody), payload[:64]) {
 		t.Fatalf("logged request body should not contain raw payload prefix")
+	}
+}
+
+func TestCaptureRequestInfoSkipsHeadersWhenDisabled(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Test", "value")
+	req.ContentLength = 2
+	c.Request = req
+
+	requestInfo, bodyCapture := captureRequestInfo(c, false, false)
+	if bodyCapture != nil {
+		t.Fatal("expected no body capture")
+	}
+	if requestInfo.Headers != nil {
+		t.Fatalf("headers = %#v, want nil", requestInfo.Headers)
 	}
 }
 

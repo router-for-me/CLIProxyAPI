@@ -11,16 +11,17 @@ func TestCodexWebsocketsExecutor_SessionStoreSurvivesExecutorReplacement(t *test
 
 	globalCodexWebsocketSessionStore.mu.Lock()
 	delete(globalCodexWebsocketSessionStore.sessions, sessionID)
+	delete(globalCodexWebsocketSessionStore.parked, sessionID)
 	globalCodexWebsocketSessionStore.mu.Unlock()
 
 	exec1 := NewCodexWebsocketsExecutor(nil)
-	sess1 := exec1.getOrCreateSession(sessionID)
+	sess1 := exec1.getOrCreateSession(sessionID, "")
 	if sess1 == nil {
 		t.Fatalf("expected session to be created")
 	}
 
 	exec2 := NewCodexWebsocketsExecutor(nil)
-	sess2 := exec2.getOrCreateSession(sessionID)
+	sess2 := exec2.getOrCreateSession(sessionID, "")
 	if sess2 == nil {
 		t.Fatalf("expected session to be available across executors")
 	}

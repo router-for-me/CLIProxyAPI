@@ -133,29 +133,30 @@ func (m *Manager) Flush(ctx context.Context) error {
 	// Ensure the worker is running even when Flush is called before the first Publish.
 	m.Start(context.Background())
 
-	ticker := time.NewTicker(2 * time.Millisecond)
-	defer ticker.Stop()
+	if ctx != nil {
+		done := make(chan struct{})
+		go func() {
+			select {
+			case <-ctx.Done():
+				m.cond.Broadcast()
+			case <-done:
+			}
+		}()
+		defer close(done)
+	}
 
-	for {
-		m.mu.Lock()
-		idle := len(m.queue) == 0 && m.processing == 0
-		closed := m.closed
-		m.mu.Unlock()
-
-		if idle || closed {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for len(m.queue) > 0 || m.processing > 0 {
+		if m.closed {
 			return nil
 		}
-		if ctx == nil {
-			<-ticker.C
-			continue
-		}
-
-		select {
-		case <-ctx.Done():
+		if ctx != nil && ctx.Err() != nil {
 			return ctx.Err()
-		case <-ticker.C:
 		}
+		m.cond.Wait()
 	}
+	return nil
 }
 
 func (m *Manager) run(ctx context.Context) {

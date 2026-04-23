@@ -776,6 +776,52 @@ func TestExtractSessionID_Headers(t *testing.T) {
 	}
 }
 
+func TestExtractSessionID_CodexHeaders(t *testing.T) {
+	t.Parallel()
+
+	headers := make(http.Header)
+	headers.Set("Session_id", "codex-session")
+
+	got := ExtractSessionID(headers, nil, nil)
+	want := "header:codex-session"
+	if got != want {
+		t.Errorf("ExtractSessionID() with Session_id = %q, want %q", got, want)
+	}
+
+	headers.Del("Session_id")
+	headers.Set("Conversation_id", "conv-123")
+
+	got = ExtractSessionID(headers, nil, nil)
+	want = "conv:conv-123"
+	if got != want {
+		t.Errorf("ExtractSessionID() with Conversation_id = %q, want %q", got, want)
+	}
+}
+
+func TestExtractSessionID_PromptCacheKey(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte(`{"prompt_cache_key":"cache-123","conversation_id":"conv-456"}`)
+
+	got := ExtractSessionID(nil, payload, nil)
+	want := "cache:cache-123"
+	if got != want {
+		t.Errorf("ExtractSessionID() with prompt_cache_key = %q, want %q", got, want)
+	}
+}
+
+func TestExtractSessionID_ClaudeCodePriorityOverPromptCacheKey(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte(`{"metadata":{"user_id":"user_xxx_account__session_ac980658-63bd-4fb3-97ba-8da64cb1e344","prompt_cache_key":"cache-123"},"prompt_cache_key":"cache-top-level"}`)
+
+	got := ExtractSessionID(nil, payload, nil)
+	want := "claude:ac980658-63bd-4fb3-97ba-8da64cb1e344"
+	if got != want {
+		t.Errorf("ExtractSessionID() = %q, want %q (Claude Code should have highest priority over prompt_cache_key)", got, want)
+	}
+}
+
 // TestExtractSessionID_IdempotencyKey verifies that idempotency_key is intentionally
 // ignored for session affinity (it's auto-generated per-request, causing cache misses).
 func TestExtractSessionID_IdempotencyKey(t *testing.T) {
@@ -787,6 +833,39 @@ func TestExtractSessionID_IdempotencyKey(t *testing.T) {
 	// idempotency_key is disabled - should return empty (no payload to hash)
 	if got != "" {
 		t.Errorf("ExtractSessionID() with idempotency_key = %q, want empty (idempotency_key is disabled)", got)
+	}
+}
+
+func TestSessionAffinitySelector_PromptCacheKeySticky(t *testing.T) {
+	t.Parallel()
+
+	fallback := &RoundRobinSelector{}
+	selector := NewSessionAffinitySelector(fallback)
+
+	auths := []*Auth{
+		{ID: "auth-a"},
+		{ID: "auth-b"},
+		{ID: "auth-c"},
+	}
+
+	opts := cliproxyexecutor.Options{OriginalRequest: []byte(`{"prompt_cache_key":"cache-123","input":[{"role":"user","content":"hi"}]}`)}
+
+	first, err := selector.Pick(context.Background(), "codex", "gpt-5-codex", opts, auths)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if first == nil {
+		t.Fatal("Pick() returned nil")
+	}
+
+	for i := 0; i < 5; i++ {
+		got, err := selector.Pick(context.Background(), "codex", "gpt-5-codex", opts, auths)
+		if err != nil {
+			t.Fatalf("Pick() #%d error = %v", i, err)
+		}
+		if got.ID != first.ID {
+			t.Fatalf("Pick() #%d auth.ID = %q, want %q (same prompt_cache_key should pick same auth)", i, got.ID, first.ID)
+		}
 	}
 }
 

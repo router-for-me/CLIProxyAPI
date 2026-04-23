@@ -348,7 +348,12 @@ func hasThinkingConfig(config ThinkingConfig) bool {
 // When type="enabled" without budget_tokens, returns ModeAuto to indicate
 // the user wants thinking enabled but didn't specify a budget.
 func extractClaudeConfig(body []byte) ThinkingConfig {
-	thinkingType := gjson.GetBytes(body, "thinking.type").String()
+	results := gjson.GetManyBytes(body,
+		"thinking.type",
+		"output_config.effort",
+		"thinking.budget_tokens",
+	)
+	thinkingType := results[0].String()
 	if thinkingType == "disabled" {
 		return ThinkingConfig{Mode: ModeNone, Budget: 0}
 	}
@@ -356,7 +361,7 @@ func extractClaudeConfig(body []byte) ThinkingConfig {
 		// Claude adaptive thinking uses output_config.effort (low/medium/high/max).
 		// We only treat it as a thinking config when effort is explicitly present;
 		// otherwise we passthrough and let upstream defaults apply.
-		if effort := gjson.GetBytes(body, "output_config.effort"); effort.Exists() && effort.Type == gjson.String {
+		if effort := results[1]; effort.Exists() && effort.Type == gjson.String {
 			value := strings.ToLower(strings.TrimSpace(effort.String()))
 			if value == "" {
 				return ThinkingConfig{}
@@ -374,7 +379,7 @@ func extractClaudeConfig(body []byte) ThinkingConfig {
 	}
 
 	// Check budget_tokens
-	if budget := gjson.GetBytes(body, "thinking.budget_tokens"); budget.Exists() {
+	if budget := results[2]; budget.Exists() {
 		value := int(budget.Int())
 		switch value {
 		case 0:
@@ -409,12 +414,18 @@ func extractGeminiConfig(body []byte, provider string) ThinkingConfig {
 	if provider == "gemini-cli" || provider == "antigravity" {
 		prefix = "request.generationConfig.thinkingConfig"
 	}
+	results := gjson.GetManyBytes(body,
+		prefix+".thinkingLevel",
+		prefix+".thinking_level",
+		prefix+".thinkingBudget",
+		prefix+".thinking_budget",
+	)
 
 	// Check thinkingLevel first (Gemini 3 format takes precedence)
-	level := gjson.GetBytes(body, prefix+".thinkingLevel")
+	level := results[0]
 	if !level.Exists() {
 		// Google official Gemini Python SDK sends snake_case field names
-		level = gjson.GetBytes(body, prefix+".thinking_level")
+		level = results[1]
 	}
 	if level.Exists() {
 		value := level.String()
@@ -429,10 +440,10 @@ func extractGeminiConfig(body []byte, provider string) ThinkingConfig {
 	}
 
 	// Check thinkingBudget (Gemini 2.5 format)
-	budget := gjson.GetBytes(body, prefix+".thinkingBudget")
+	budget := results[2]
 	if !budget.Exists() {
 		// Google official Gemini Python SDK sends snake_case field names
-		budget = gjson.GetBytes(body, prefix+".thinking_budget")
+		budget = results[3]
 	}
 	if budget.Exists() {
 		value := int(budget.Int())

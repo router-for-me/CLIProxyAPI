@@ -20,7 +20,6 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
 )
 
 // GeminiCLIAPIHandler contains the handlers for Gemini CLI API endpoints.
@@ -79,10 +78,13 @@ func (h *GeminiCLIAPIHandler) CLIHandler(c *gin.Context) {
 	rawJSON, _ := c.GetRawData()
 	requestRawURI := c.Request.URL.Path
 
-	if requestRawURI == "/v1internal:generateContent" {
-		h.handleInternalGenerateContent(c, rawJSON)
-	} else if requestRawURI == "/v1internal:streamGenerateContent" {
-		h.handleInternalStreamGenerateContent(c, rawJSON)
+	if requestRawURI == "/v1internal:generateContent" || requestRawURI == "/v1internal:streamGenerateContent" {
+		requestDetails := handlers.ParseRequestBodyDetails(rawJSON)
+		if requestRawURI == "/v1internal:generateContent" {
+			h.handleInternalGenerateContent(c, requestDetails.Model, rawJSON)
+		} else {
+			h.handleInternalStreamGenerateContent(c, requestDetails.Model, rawJSON)
+		}
 	} else {
 		reqBody := bytes.NewBuffer(rawJSON)
 		req, err := http.NewRequest("POST", fmt.Sprintf("https://cloudcode-pa.googleapis.com%s", c.Request.URL.RequestURI()), reqBody)
@@ -150,7 +152,7 @@ func (h *GeminiCLIAPIHandler) CLIHandler(c *gin.Context) {
 // handleInternalStreamGenerateContent handles streaming content generation requests.
 // It sets up a server-sent event stream and forwards the request to the backend client.
 // The function continuously proxies response chunks from the backend to the client.
-func (h *GeminiCLIAPIHandler) handleInternalStreamGenerateContent(c *gin.Context, rawJSON []byte) {
+func (h *GeminiCLIAPIHandler) handleInternalStreamGenerateContent(c *gin.Context, modelName string, rawJSON []byte) {
 	alt := h.GetAlt(c)
 
 	if alt == "" {
@@ -172,9 +174,6 @@ func (h *GeminiCLIAPIHandler) handleInternalStreamGenerateContent(c *gin.Context
 		return
 	}
 
-	modelResult := gjson.GetBytes(rawJSON, "model")
-	modelName := modelResult.String()
-
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "")
 	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
@@ -184,10 +183,8 @@ func (h *GeminiCLIAPIHandler) handleInternalStreamGenerateContent(c *gin.Context
 
 // handleInternalGenerateContent handles non-streaming content generation requests.
 // It sends a request to the backend client and proxies the entire response back to the client at once.
-func (h *GeminiCLIAPIHandler) handleInternalGenerateContent(c *gin.Context, rawJSON []byte) {
+func (h *GeminiCLIAPIHandler) handleInternalGenerateContent(c *gin.Context, modelName string, rawJSON []byte) {
 	c.Header("Content-Type", "application/json")
-	modelResult := gjson.GetBytes(rawJSON, "model")
-	modelName := modelResult.String()
 
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "")

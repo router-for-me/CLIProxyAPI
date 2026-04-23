@@ -476,10 +476,11 @@ func NewSessionAffinitySelectorWithConfig(cfg SessionAffinityConfig) *SessionAff
 // Pick selects an auth with session affinity when possible.
 // Priority for session ID extraction:
 //  1. metadata.user_id (Claude Code format) - highest priority
-//  2. X-Session-ID header
+//  2. X-Session-ID / Session_id / Conversation_id header
 //  3. metadata.user_id (non-Claude Code format)
-//  4. conversation_id field
-//  5. Hash-based fallback from messages
+//  4. prompt_cache_key / metadata.prompt_cache_key
+//  5. conversation_id field
+//  6. Hash-based fallback from messages
 //
 // Note: The cache key includes provider, session ID, and model to handle cases where
 // a session uses multiple models (e.g., gemini-2.5-pro and gemini-3-flash-preview)
@@ -594,10 +595,11 @@ func (s *SessionAffinitySelector) InvalidateAuth(authID string) {
 // ExtractSessionID extracts session identifier from multiple sources.
 // Priority order:
 //  1. metadata.user_id (Claude Code format with _session_{uuid}) - highest priority for Claude Code clients
-//  2. X-Session-ID header
+//  2. X-Session-ID / Session_id / Conversation_id header
 //  3. metadata.user_id (non-Claude Code format)
-//  4. conversation_id field in request body
-//  5. Stable hash from first few messages content (fallback)
+//  4. prompt_cache_key / metadata.prompt_cache_key in request body
+//  5. conversation_id field in request body
+//  6. Stable hash from first few messages content (fallback)
 func ExtractSessionID(headers http.Header, payload []byte, metadata map[string]any) string {
 	primary, _ := extractSessionIDs(headers, payload, metadata)
 	return primary
@@ -626,10 +628,16 @@ func extractSessionIDs(headers http.Header, payload []byte, metadata map[string]
 		}
 	}
 
-	// 2. X-Session-ID header
+	// 2. X-Session-ID / Session_id / Conversation_id header
 	if headers != nil {
 		if sid := headers.Get("X-Session-ID"); sid != "" {
 			return "header:" + sid, ""
+		}
+		if sid := headers.Get("Session_id"); sid != "" {
+			return "header:" + sid, ""
+		}
+		if convID := headers.Get("Conversation_id"); convID != "" {
+			return "conv:" + convID, ""
 		}
 	}
 
@@ -643,12 +651,20 @@ func extractSessionIDs(headers http.Header, payload []byte, metadata map[string]
 		return "user:" + userID, ""
 	}
 
-	// 4. conversation_id field
+	// 4. prompt_cache_key / metadata.prompt_cache_key
+	if promptCacheKey := gjson.GetBytes(payload, "prompt_cache_key").String(); promptCacheKey != "" {
+		return "cache:" + promptCacheKey, ""
+	}
+	if promptCacheKey := gjson.GetBytes(payload, "metadata.prompt_cache_key").String(); promptCacheKey != "" {
+		return "cache:" + promptCacheKey, ""
+	}
+
+	// 5. conversation_id field
 	if convID := gjson.GetBytes(payload, "conversation_id").String(); convID != "" {
 		return "conv:" + convID, ""
 	}
 
-	// 5. Hash-based fallback from message content
+	// 6. Hash-based fallback from message content
 	return extractMessageHashIDs(payload)
 }
 

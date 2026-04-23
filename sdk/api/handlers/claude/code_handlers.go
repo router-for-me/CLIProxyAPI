@@ -21,7 +21,6 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
 )
 
 // ClaudeCodeAPIHandler contains the handlers for Claude API endpoints.
@@ -76,12 +75,11 @@ func (h *ClaudeCodeAPIHandler) ClaudeMessages(c *gin.Context) {
 		return
 	}
 
-	// Check if the client requested a streaming response.
-	streamResult := gjson.GetBytes(rawJSON, "stream")
-	if !streamResult.Exists() || streamResult.Type == gjson.False {
-		h.handleNonStreamingResponse(c, rawJSON)
+	requestDetails := handlers.ParseRequestBodyDetails(rawJSON)
+	if !requestDetails.HasStream || !requestDetails.Stream {
+		h.handleNonStreamingResponse(c, requestDetails.Model, rawJSON)
 	} else {
-		h.handleStreamingResponse(c, rawJSON)
+		h.handleStreamingResponse(c, requestDetails.Model, rawJSON)
 	}
 }
 
@@ -109,10 +107,9 @@ func (h *ClaudeCodeAPIHandler) ClaudeCountTokens(c *gin.Context) {
 
 	alt := h.GetAlt(c)
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	requestDetails := handlers.ParseRequestBodyDetails(rawJSON)
 
-	modelName := gjson.GetBytes(rawJSON, "model").String()
-
-	resp, upstreamHeaders, errMsg := h.ExecuteCountWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, alt)
+	resp, upstreamHeaders, errMsg := h.ExecuteCountWithAuthManager(cliCtx, h.HandlerType(), requestDetails.Model, rawJSON, alt)
 	if errMsg != nil {
 		h.WriteErrorResponse(c, errMsg)
 		cliCancel(errMsg.Error)
@@ -156,15 +153,13 @@ func (h *ClaudeCodeAPIHandler) ClaudeModels(c *gin.Context) {
 //
 // Parameters:
 //   - c: The Gin context for the request
-//   - modelName: The name of the Gemini model to use for content generation
+//   - modelName: The model name declared in the request
 //   - rawJSON: The raw JSON request body containing generation parameters and content
-func (h *ClaudeCodeAPIHandler) handleNonStreamingResponse(c *gin.Context, rawJSON []byte) {
+func (h *ClaudeCodeAPIHandler) handleNonStreamingResponse(c *gin.Context, modelName string, rawJSON []byte) {
 	c.Header("Content-Type", "application/json")
 	alt := h.GetAlt(c)
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
-
-	modelName := gjson.GetBytes(rawJSON, "model").String()
 
 	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, alt)
 	stopKeepAlive()
@@ -206,8 +201,9 @@ func (h *ClaudeCodeAPIHandler) handleNonStreamingResponse(c *gin.Context, rawJSO
 //
 // Parameters:
 //   - c: The Gin context for the request.
+//   - modelName: The model name declared in the request.
 //   - rawJSON: The raw JSON request body.
-func (h *ClaudeCodeAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON []byte) {
+func (h *ClaudeCodeAPIHandler) handleStreamingResponse(c *gin.Context, modelName string, rawJSON []byte) {
 	// Get the http.Flusher interface to manually flush the response.
 	// This is crucial for streaming as it allows immediate sending of data chunks
 	flusher, ok := c.Writer.(http.Flusher)
@@ -220,8 +216,6 @@ func (h *ClaudeCodeAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON [
 		})
 		return
 	}
-
-	modelName := gjson.GetBytes(rawJSON, "model").String()
 
 	// Create a cancellable context for the backend client request
 	// This allows proper cleanup and cancellation of ongoing requests

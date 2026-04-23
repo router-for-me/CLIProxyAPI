@@ -108,39 +108,22 @@ func (h *OpenAIAPIHandler) ChatCompletions(c *gin.Context) {
 		return
 	}
 
-	// Check if the client requested a streaming response.
-	streamResult := gjson.GetBytes(rawJSON, "stream")
-	stream := streamResult.Type == gjson.True
+	requestDetails := handlers.ParseOpenAIChatRequestBodyDetails(rawJSON)
+	stream := requestDetails.Stream
+	modelName := requestDetails.Model
 
 	// Some clients send OpenAI Responses-format payloads to /v1/chat/completions.
 	// Convert them to Chat Completions so downstream translators preserve tool metadata.
-	if shouldTreatAsResponsesFormat(rawJSON) {
-		modelName := gjson.GetBytes(rawJSON, "model").String()
+	if requestDetails.UsesResponsesFormat() {
 		rawJSON = responsesconverter.ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName, rawJSON, stream)
-		stream = gjson.GetBytes(rawJSON, "stream").Bool()
 	}
 
 	if stream {
-		h.handleStreamingResponse(c, rawJSON)
+		h.handleStreamingResponse(c, modelName, rawJSON)
 	} else {
-		h.handleNonStreamingResponse(c, rawJSON)
+		h.handleNonStreamingResponse(c, modelName, rawJSON)
 	}
 
-}
-
-// shouldTreatAsResponsesFormat detects OpenAI Responses-style payloads that are
-// accidentally sent to the Chat Completions endpoint.
-func shouldTreatAsResponsesFormat(rawJSON []byte) bool {
-	if gjson.GetBytes(rawJSON, "messages").Exists() {
-		return false
-	}
-	if gjson.GetBytes(rawJSON, "input").Exists() {
-		return true
-	}
-	if gjson.GetBytes(rawJSON, "instructions").Exists() {
-		return true
-	}
-	return false
 }
 
 // Completions handles the /v1/completions endpoint.
@@ -163,12 +146,11 @@ func (h *OpenAIAPIHandler) Completions(c *gin.Context) {
 		return
 	}
 
-	// Check if the client requested a streaming response.
-	streamResult := gjson.GetBytes(rawJSON, "stream")
-	if streamResult.Type == gjson.True {
-		h.handleCompletionsStreamingResponse(c, rawJSON)
+	requestDetails := handlers.ParseRequestBodyDetails(rawJSON)
+	if requestDetails.Stream {
+		h.handleCompletionsStreamingResponse(c, requestDetails.Model, rawJSON)
 	} else {
-		h.handleCompletionsNonStreamingResponse(c, rawJSON)
+		h.handleCompletionsNonStreamingResponse(c, requestDetails.Model, rawJSON)
 	}
 
 }
@@ -425,11 +407,11 @@ func convertChatCompletionsStreamChunkToCompletions(chunkData []byte) []byte {
 //
 // Parameters:
 //   - c: The Gin context containing the HTTP request and response
+//   - modelName: The model name declared in the request
 //   - rawJSON: The raw JSON bytes of the OpenAI-compatible request
-func (h *OpenAIAPIHandler) handleNonStreamingResponse(c *gin.Context, rawJSON []byte) {
+func (h *OpenAIAPIHandler) handleNonStreamingResponse(c *gin.Context, modelName string, rawJSON []byte) {
 	c.Header("Content-Type", "application/json")
 
-	modelName := gjson.GetBytes(rawJSON, "model").String()
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, h.GetAlt(c))
 	if errMsg != nil {
@@ -448,8 +430,9 @@ func (h *OpenAIAPIHandler) handleNonStreamingResponse(c *gin.Context, rawJSON []
 //
 // Parameters:
 //   - c: The Gin context containing the HTTP request and response
+//   - modelName: The model name declared in the request
 //   - rawJSON: The raw JSON bytes of the OpenAI-compatible request
-func (h *OpenAIAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON []byte) {
+func (h *OpenAIAPIHandler) handleStreamingResponse(c *gin.Context, modelName string, rawJSON []byte) {
 	// Get the http.Flusher interface to manually flush the response.
 	flusher, ok := c.Writer.(http.Flusher)
 	if !ok {
@@ -462,7 +445,6 @@ func (h *OpenAIAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON []byt
 		return
 	}
 
-	modelName := gjson.GetBytes(rawJSON, "model").String()
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, h.GetAlt(c))
 
@@ -524,14 +506,14 @@ func (h *OpenAIAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON []byt
 //
 // Parameters:
 //   - c: The Gin context containing the HTTP request and response
+//   - modelName: The model name declared in the request
 //   - rawJSON: The raw JSON bytes of the OpenAI-compatible completions request
-func (h *OpenAIAPIHandler) handleCompletionsNonStreamingResponse(c *gin.Context, rawJSON []byte) {
+func (h *OpenAIAPIHandler) handleCompletionsNonStreamingResponse(c *gin.Context, modelName string, rawJSON []byte) {
 	c.Header("Content-Type", "application/json")
 
 	// Convert completions request to chat completions format
 	chatCompletionsJSON := convertCompletionsRequestToChatCompletions(rawJSON)
 
-	modelName := gjson.GetBytes(chatCompletionsJSON, "model").String()
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
 	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, h.HandlerType(), modelName, chatCompletionsJSON, "")
@@ -553,8 +535,9 @@ func (h *OpenAIAPIHandler) handleCompletionsNonStreamingResponse(c *gin.Context,
 //
 // Parameters:
 //   - c: The Gin context containing the HTTP request and response
+//   - modelName: The model name declared in the request
 //   - rawJSON: The raw JSON bytes of the OpenAI-compatible completions request
-func (h *OpenAIAPIHandler) handleCompletionsStreamingResponse(c *gin.Context, rawJSON []byte) {
+func (h *OpenAIAPIHandler) handleCompletionsStreamingResponse(c *gin.Context, modelName string, rawJSON []byte) {
 	// Get the http.Flusher interface to manually flush the response.
 	flusher, ok := c.Writer.(http.Flusher)
 	if !ok {
@@ -570,7 +553,6 @@ func (h *OpenAIAPIHandler) handleCompletionsStreamingResponse(c *gin.Context, ra
 	// Convert completions request to chat completions format
 	chatCompletionsJSON := convertCompletionsRequestToChatCompletions(rawJSON)
 
-	modelName := gjson.GetBytes(chatCompletionsJSON, "model").String()
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, chatCompletionsJSON, "")
 

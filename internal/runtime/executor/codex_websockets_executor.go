@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -37,7 +38,11 @@ const (
 	codexResponsesWebsocketBetaHeaderValue = "responses_websockets=2026-02-06"
 	codexResponsesWebsocketIdleTimeout     = 5 * time.Minute
 	codexResponsesWebsocketHandshakeTO     = 30 * time.Second
+	codexResponsesWebsocketProbeIdle       = 45 * time.Second
+	codexResponsesWebsocketProbeWriteTO    = 10 * time.Second
 )
+
+var codexResponsesWebsocketParkTTL = 30 * time.Second
 
 // CodexWebsocketsExecutor executes Codex Responses requests using a WebSocket transport.
 //
@@ -52,10 +57,12 @@ type CodexWebsocketsExecutor struct {
 type codexWebsocketSessionStore struct {
 	mu       sync.Mutex
 	sessions map[string]*codexWebsocketSession
+	parked   map[string]*codexWebsocketSession
 }
 
 var globalCodexWebsocketSessionStore = &codexWebsocketSessionStore{
 	sessions: make(map[string]*codexWebsocketSession),
+	parked:   make(map[string]*codexWebsocketSession),
 }
 
 type codexWebsocketSession struct {
@@ -76,6 +83,11 @@ type codexWebsocketSession struct {
 	activeCancel context.CancelFunc
 
 	readerConn *websocket.Conn
+
+	lastActivityUnixNano atomic.Int64
+
+	reuseKey  string
+	parkTimer *time.Timer
 }
 
 func NewCodexWebsocketsExecutor(cfg *config.Config) *CodexWebsocketsExecutor {
@@ -102,6 +114,7 @@ type codexPreparedWebsocketRequest struct {
 	executionSessionID string
 	sess               *codexWebsocketSession
 	sessionLocked      bool
+	reuseKey           string
 }
 
 func (r *codexPreparedWebsocketRequest) unlockSession() {
@@ -156,19 +169,56 @@ func (s *codexWebsocketSession) writeMessage(conn *websocket.Conn, msgType int, 
 	}
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
-	return conn.WriteMessage(msgType, payload)
+	if err := conn.WriteMessage(msgType, payload); err != nil {
+		return err
+	}
+	s.touchActivity()
+	return nil
 }
 
 func (s *codexWebsocketSession) configureConn(conn *websocket.Conn) {
 	if s == nil || conn == nil {
 		return
 	}
+	s.touchActivity()
 	conn.SetPingHandler(func(appData string) error {
+		s.touchActivity()
 		s.writeMu.Lock()
 		defer s.writeMu.Unlock()
 		// Reply pongs from the same write lock to avoid concurrent writes.
-		return conn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(10*time.Second))
+		if err := conn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(10*time.Second)); err != nil {
+			return err
+		}
+		s.touchActivity()
+		return nil
 	})
+	conn.SetPongHandler(func(string) error {
+		s.touchActivity()
+		return nil
+	})
+}
+
+func (s *codexWebsocketSession) touchActivity() {
+	if s == nil {
+		return
+	}
+	s.lastActivityUnixNano.Store(time.Now().UnixNano())
+}
+
+func (s *codexWebsocketSession) probeConn(conn *websocket.Conn) error {
+	if s == nil {
+		return fmt.Errorf("codex websockets executor: session is nil")
+	}
+	if conn == nil {
+		return fmt.Errorf("codex websockets executor: websocket conn is nil")
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	if err := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(codexResponsesWebsocketProbeWriteTO)); err != nil {
+		return err
+	}
+	s.touchActivity()
+	return nil
 }
 
 func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
@@ -568,15 +618,17 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketRequest(
 		authType, authValue = auth.AccountInfo()
 	}
 
+	reuseKey := codexWebsocketReusableKey(opts.SourceFormat, authID, wsURL, body)
 	prepared := &codexPreparedWebsocketRequest{
 		body:               body,
 		wsURL:              wsURL,
 		wsHeaders:          wsHeaders,
 		authID:             authID,
 		executionSessionID: executionSessionIDFromOptions(opts),
+		reuseKey:           reuseKey,
 	}
 	if prepared.executionSessionID != "" {
-		prepared.sess = e.getOrCreateSession(prepared.executionSessionID)
+		prepared.sess = e.getOrCreateSession(prepared.executionSessionID, prepared.reuseKey)
 		if prepared.sess != nil {
 			prepared.sess.reqMu.Lock()
 			prepared.sessionLocked = true
@@ -596,6 +648,22 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketRequest(
 		AuthValue: authValue,
 	}
 	return prepared, nil
+}
+
+func codexWebsocketReusableKey(from sdktranslator.Format, authID string, wsURL string, body []byte) string {
+	if from != "openai-response" {
+		return ""
+	}
+	promptCacheID := strings.TrimSpace(gjson.GetBytes(body, "prompt_cache_key").String())
+	if promptCacheID == "" {
+		return ""
+	}
+	authID = strings.TrimSpace(authID)
+	wsURL = strings.TrimSpace(wsURL)
+	if authID == "" || wsURL == "" {
+		return ""
+	}
+	return authID + "|" + wsURL + "|" + promptCacheID
 }
 
 func (e *CodexWebsocketsExecutor) retrySessionWebsocketRequest(
@@ -1117,7 +1185,7 @@ func executionSessionIDFromOptions(opts cliproxyexecutor.Options) string {
 	}
 }
 
-func (e *CodexWebsocketsExecutor) getOrCreateSession(sessionID string) *codexWebsocketSession {
+func (e *CodexWebsocketsExecutor) getOrCreateSession(sessionID string, reuseKey string) *codexWebsocketSession {
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
 		return nil
@@ -1134,10 +1202,30 @@ func (e *CodexWebsocketsExecutor) getOrCreateSession(sessionID string) *codexWeb
 	if store.sessions == nil {
 		store.sessions = make(map[string]*codexWebsocketSession)
 	}
+	if store.parked == nil {
+		store.parked = make(map[string]*codexWebsocketSession)
+	}
 	if sess, ok := store.sessions[sessionID]; ok && sess != nil {
+		if resolvedReuseKey := strings.TrimSpace(reuseKey); resolvedReuseKey != "" {
+			sess.reuseKey = resolvedReuseKey
+		}
 		return sess
 	}
-	sess := &codexWebsocketSession{sessionID: sessionID}
+	reuseKey = strings.TrimSpace(reuseKey)
+	if reuseKey != "" {
+		if sess, ok := store.parked[reuseKey]; ok && sess != nil {
+			delete(store.parked, reuseKey)
+			if sess.parkTimer != nil {
+				sess.parkTimer.Stop()
+				sess.parkTimer = nil
+			}
+			sess.sessionID = sessionID
+			sess.reuseKey = reuseKey
+			store.sessions[sessionID] = sess
+			return sess
+		}
+	}
+	sess := &codexWebsocketSession{sessionID: sessionID, reuseKey: reuseKey}
 	store.sessions[sessionID] = sess
 	return sess
 }
@@ -1151,6 +1239,16 @@ func (e *CodexWebsocketsExecutor) ensureUpstreamConn(ctx context.Context, auth *
 	conn := sess.conn
 	readerConn := sess.readerConn
 	sess.connMu.Unlock()
+	if conn != nil {
+		// Validate every reused session connection before sending a new request.
+		// Proxy failures can leave a recently-active websocket in a broken state,
+		// and waiting for the idle threshold keeps the same execution session stuck.
+		if errProbe := sess.probeConn(conn); errProbe != nil {
+			e.invalidateUpstreamConn(sess, conn, "probe_failed", errProbe)
+			conn = nil
+			readerConn = nil
+		}
+	}
 	if conn != nil {
 		if readerConn != conn {
 			sess.connMu.Lock()
@@ -1234,6 +1332,7 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 			}
 			continue
 		}
+		sess.touchActivity()
 
 		sess.activeMu.Lock()
 		ch := sess.activeCh
@@ -1299,7 +1398,9 @@ func (e *CodexWebsocketsExecutor) CloseExecutionSession(sessionID string) {
 	delete(store.sessions, sessionID)
 	store.mu.Unlock()
 
-	e.closeExecutionSession(sess, "session_closed")
+	if !e.parkExecutionSession(sess) {
+		e.closeExecutionSession(sess, "session_closed")
+	}
 }
 
 func (e *CodexWebsocketsExecutor) closeAllExecutionSessions(reason string) {
@@ -1319,6 +1420,16 @@ func (e *CodexWebsocketsExecutor) closeAllExecutionSessions(reason string) {
 			sessions = append(sessions, sess)
 		}
 	}
+	for reuseKey, sess := range store.parked {
+		delete(store.parked, reuseKey)
+		if sess != nil {
+			if sess.parkTimer != nil {
+				sess.parkTimer.Stop()
+				sess.parkTimer = nil
+			}
+			sessions = append(sessions, sess)
+		}
+	}
 	store.mu.Unlock()
 
 	for i := range sessions {
@@ -1330,6 +1441,54 @@ func (e *CodexWebsocketsExecutor) closeExecutionSession(sess *codexWebsocketSess
 	closeCodexWebsocketSession(sess, reason)
 }
 
+func (e *CodexWebsocketsExecutor) parkExecutionSession(sess *codexWebsocketSession) bool {
+	if sess == nil {
+		return false
+	}
+	reuseKey := strings.TrimSpace(sess.reuseKey)
+	if reuseKey == "" {
+		return false
+	}
+
+	store := e.store
+	if store == nil {
+		store = globalCodexWebsocketSessionStore
+	}
+	if store == nil {
+		return false
+	}
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.parked == nil {
+		store.parked = make(map[string]*codexWebsocketSession)
+	}
+	if existing, ok := store.parked[reuseKey]; ok && existing != nil && existing != sess {
+		if existing.parkTimer != nil {
+			existing.parkTimer.Stop()
+			existing.parkTimer = nil
+		}
+		go closeCodexWebsocketSession(existing, "parked_replaced")
+	}
+	if sess.parkTimer != nil {
+		sess.parkTimer.Stop()
+	}
+	store.parked[reuseKey] = sess
+	sess.parkTimer = time.AfterFunc(codexResponsesWebsocketParkTTL, func() {
+		store.mu.Lock()
+		current := store.parked[reuseKey]
+		if current == sess {
+			delete(store.parked, reuseKey)
+			sess.parkTimer = nil
+		}
+		store.mu.Unlock()
+		if current == sess {
+			closeCodexWebsocketSession(sess, "parked_ttl_expired")
+		}
+	})
+	return true
+}
+
 func closeCodexWebsocketSession(sess *codexWebsocketSession, reason string) {
 	if sess == nil {
 		return
@@ -1337,6 +1496,10 @@ func closeCodexWebsocketSession(sess *codexWebsocketSession, reason string) {
 	reason = strings.TrimSpace(reason)
 	if reason == "" {
 		reason = "session_closed"
+	}
+	if sess.parkTimer != nil {
+		sess.parkTimer.Stop()
+		sess.parkTimer = nil
 	}
 
 	sess.connMu.Lock()
@@ -1398,6 +1561,9 @@ func CloseCodexWebsocketSessionsForAuthID(authID string, reason string) {
 	for sessionID, sess := range store.sessions {
 		items = append(items, sessionItem{sessionID: sessionID, sess: sess})
 	}
+	for sessionID, sess := range store.parked {
+		items = append(items, sessionItem{sessionID: sessionID, sess: sess})
+	}
 	store.mu.Unlock()
 
 	matches := make([]sessionItem, 0)
@@ -1421,10 +1587,20 @@ func CloseCodexWebsocketSessionsForAuthID(authID string, reason string) {
 	store.mu.Lock()
 	for i := range matches {
 		current, ok := store.sessions[matches[i].sessionID]
+		if ok && current != nil && current == matches[i].sess {
+			delete(store.sessions, matches[i].sessionID)
+			toClose = append(toClose, current)
+			continue
+		}
+		current, ok = store.parked[matches[i].sessionID]
 		if !ok || current == nil || current != matches[i].sess {
 			continue
 		}
-		delete(store.sessions, matches[i].sessionID)
+		delete(store.parked, matches[i].sessionID)
+		if current.parkTimer != nil {
+			current.parkTimer.Stop()
+			current.parkTimer = nil
+		}
 		toClose = append(toClose, current)
 	}
 	store.mu.Unlock()

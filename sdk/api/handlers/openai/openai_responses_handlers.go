@@ -19,7 +19,6 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
-	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
@@ -278,12 +277,11 @@ func (h *OpenAIResponsesAPIHandler) Responses(c *gin.Context) {
 		return
 	}
 
-	// Check if the client requested a streaming response.
-	streamResult := gjson.GetBytes(rawJSON, "stream")
-	if streamResult.Type == gjson.True {
-		h.handleStreamingResponse(c, rawJSON)
+	requestDetails := handlers.ParseRequestBodyDetails(rawJSON)
+	if requestDetails.Stream {
+		h.handleStreamingResponse(c, requestDetails.Model, rawJSON)
 	} else {
-		h.handleNonStreamingResponse(c, rawJSON)
+		h.handleNonStreamingResponse(c, requestDetails.Model, rawJSON)
 	}
 
 }
@@ -300,8 +298,8 @@ func (h *OpenAIResponsesAPIHandler) Compact(c *gin.Context) {
 		return
 	}
 
-	streamResult := gjson.GetBytes(rawJSON, "stream")
-	if streamResult.Type == gjson.True {
+	requestDetails := handlers.ParseRequestBodyDetails(rawJSON)
+	if requestDetails.Stream {
 		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
 			Error: handlers.ErrorDetail{
 				Message: "Streaming not supported for compact responses",
@@ -310,17 +308,16 @@ func (h *OpenAIResponsesAPIHandler) Compact(c *gin.Context) {
 		})
 		return
 	}
-	if streamResult.Exists() {
+	if requestDetails.HasStream {
 		if updated, err := sjson.DeleteBytes(rawJSON, "stream"); err == nil {
 			rawJSON = updated
 		}
 	}
 
 	c.Header("Content-Type", "application/json")
-	modelName := gjson.GetBytes(rawJSON, "model").String()
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
-	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "responses/compact")
+	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, h.HandlerType(), requestDetails.Model, rawJSON, "responses/compact")
 	stopKeepAlive()
 	if errMsg != nil {
 		h.WriteErrorResponse(c, errMsg)
@@ -339,11 +336,11 @@ func (h *OpenAIResponsesAPIHandler) Compact(c *gin.Context) {
 //
 // Parameters:
 //   - c: The Gin context containing the HTTP request and response
+//   - modelName: The model name declared in the request
 //   - rawJSON: The raw JSON bytes of the OpenAIResponses-compatible request
-func (h *OpenAIResponsesAPIHandler) handleNonStreamingResponse(c *gin.Context, rawJSON []byte) {
+func (h *OpenAIResponsesAPIHandler) handleNonStreamingResponse(c *gin.Context, modelName string, rawJSON []byte) {
 	c.Header("Content-Type", "application/json")
 
-	modelName := gjson.GetBytes(rawJSON, "model").String()
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
 
@@ -366,8 +363,9 @@ func (h *OpenAIResponsesAPIHandler) handleNonStreamingResponse(c *gin.Context, r
 //
 // Parameters:
 //   - c: The Gin context containing the HTTP request and response
+//   - modelName: The model name declared in the request
 //   - rawJSON: The raw JSON bytes of the OpenAIResponses-compatible request
-func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON []byte) {
+func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, modelName string, rawJSON []byte) {
 	// Get the http.Flusher interface to manually flush the response.
 	flusher, ok := c.Writer.(http.Flusher)
 	if !ok {
@@ -381,7 +379,6 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 	}
 
 	// New core execution path
-	modelName := gjson.GetBytes(rawJSON, "model").String()
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "")
 
