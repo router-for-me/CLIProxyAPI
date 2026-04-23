@@ -155,9 +155,10 @@ func (h *Handler) PatchGeminiKey(c *gin.Context) {
 		ExcludedModels *[]string          `json:"excluded-models"`
 	}
 	var body struct {
-		Index *int            `json:"index"`
-		Match *string         `json:"match"`
-		Value *geminiKeyPatch `json:"value"`
+		Index   *int            `json:"index"`
+		Match   *string         `json:"match"`
+		BaseURL *string         `json:"base-url"`
+		Value   *geminiKeyPatch `json:"value"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil || body.Value == nil {
 		c.JSON(400, gin.H{"error": "invalid body"})
@@ -173,11 +174,24 @@ func (h *Handler) PatchGeminiKey(c *gin.Context) {
 	if targetIndex == -1 && body.Match != nil {
 		match := strings.TrimSpace(*body.Match)
 		if match != "" {
+			baseURL := ""
+			hasBaseURL := body.BaseURL != nil
+			if hasBaseURL {
+				baseURL = strings.TrimSpace(*body.BaseURL)
+			}
+			matchCount := 0
 			for i := range h.cfg.GeminiKey {
-				if h.cfg.GeminiKey[i].APIKey == match {
-					targetIndex = i
-					break
+				if strings.TrimSpace(h.cfg.GeminiKey[i].APIKey) != match {
+					continue
 				}
+				matchCount++
+				if !hasBaseURL || strings.TrimSpace(h.cfg.GeminiKey[i].BaseURL) == baseURL {
+					targetIndex = i
+				}
+			}
+			if matchCount > 1 && !hasBaseURL {
+				c.JSON(400, gin.H{"error": "multiple items match api-key; base-url is required"})
+				return
 			}
 		}
 	}
@@ -316,9 +330,10 @@ func (h *Handler) PatchClaudeKey(c *gin.Context) {
 		ExcludedModels *[]string             `json:"excluded-models"`
 	}
 	var body struct {
-		Index *int            `json:"index"`
-		Match *string         `json:"match"`
-		Value *claudeKeyPatch `json:"value"`
+		Index   *int            `json:"index"`
+		Match   *string         `json:"match"`
+		BaseURL *string         `json:"base-url"`
+		Value   *claudeKeyPatch `json:"value"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil || body.Value == nil {
 		c.JSON(400, gin.H{"error": "invalid body"})
@@ -333,10 +348,25 @@ func (h *Handler) PatchClaudeKey(c *gin.Context) {
 	}
 	if targetIndex == -1 && body.Match != nil {
 		match := strings.TrimSpace(*body.Match)
-		for i := range h.cfg.ClaudeKey {
-			if h.cfg.ClaudeKey[i].APIKey == match {
-				targetIndex = i
-				break
+		if match != "" {
+			baseURL := ""
+			hasBaseURL := body.BaseURL != nil
+			if hasBaseURL {
+				baseURL = strings.TrimSpace(*body.BaseURL)
+			}
+			matchCount := 0
+			for i := range h.cfg.ClaudeKey {
+				if strings.TrimSpace(h.cfg.ClaudeKey[i].APIKey) != match {
+					continue
+				}
+				matchCount++
+				if !hasBaseURL || strings.TrimSpace(h.cfg.ClaudeKey[i].BaseURL) == baseURL {
+					targetIndex = i
+				}
+			}
+			if matchCount > 1 && !hasBaseURL {
+				c.JSON(400, gin.H{"error": "multiple items match api-key; base-url is required"})
+				return
 			}
 		}
 	}
@@ -536,10 +566,17 @@ func (h *Handler) DeleteOpenAICompat(c *gin.Context) {
 	defer h.mu.Unlock()
 	if name := c.Query("name"); name != "" {
 		out := make([]config.OpenAICompatibility, 0, len(h.cfg.OpenAICompatibility))
+		removed := false
 		for _, v := range h.cfg.OpenAICompatibility {
-			if v.Name != name {
-				out = append(out, v)
+			if v.Name == name {
+				removed = true
+				continue
 			}
+			out = append(out, v)
+		}
+		if !removed {
+			c.JSON(404, gin.H{"error": "item not found"})
+			return
 		}
 		h.cfg.OpenAICompatibility = out
 		h.cfg.SanitizeOpenAICompatibility()
@@ -604,9 +641,10 @@ func (h *Handler) PatchVertexCompatKey(c *gin.Context) {
 		ExcludedModels *[]string                   `json:"excluded-models"`
 	}
 	var body struct {
-		Index *int               `json:"index"`
-		Match *string            `json:"match"`
-		Value *vertexCompatPatch `json:"value"`
+		Index   *int               `json:"index"`
+		Match   *string            `json:"match"`
+		BaseURL *string            `json:"base-url"`
+		Value   *vertexCompatPatch `json:"value"`
 	}
 	if errBindJSON := c.ShouldBindJSON(&body); errBindJSON != nil || body.Value == nil {
 		c.JSON(400, gin.H{"error": "invalid body"})
@@ -622,11 +660,24 @@ func (h *Handler) PatchVertexCompatKey(c *gin.Context) {
 	if targetIndex == -1 && body.Match != nil {
 		match := strings.TrimSpace(*body.Match)
 		if match != "" {
+			baseURL := ""
+			hasBaseURL := body.BaseURL != nil
+			if hasBaseURL {
+				baseURL = strings.TrimSpace(*body.BaseURL)
+			}
+			matchCount := 0
 			for i := range h.cfg.VertexCompatAPIKey {
-				if h.cfg.VertexCompatAPIKey[i].APIKey == match {
-					targetIndex = i
-					break
+				if strings.TrimSpace(h.cfg.VertexCompatAPIKey[i].APIKey) != match {
+					continue
 				}
+				matchCount++
+				if !hasBaseURL || strings.TrimSpace(h.cfg.VertexCompatAPIKey[i].BaseURL) == baseURL {
+					targetIndex = i
+				}
+			}
+			if matchCount > 1 && !hasBaseURL {
+				c.JSON(400, gin.H{"error": "multiple items match api-key; base-url is required"})
+				return
 			}
 		}
 	}
