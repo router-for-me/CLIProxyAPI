@@ -126,6 +126,16 @@ func (f *responsesNoticeFilter) FilterSSEFrame(frame []byte) []byte {
 	return append(bytes.Join(out, []byte("\n")), []byte("\n\n")...)
 }
 
+func (f *responsesNoticeFilter) CanBypassSSEChunk(chunk []byte) bool {
+	if f == nil {
+		return true
+	}
+	if len(f.suppressedItemIDs) != 0 {
+		return false
+	}
+	return !responsesNoticeMayNeedFiltering(chunk)
+}
+
 func (f *responsesNoticeFilter) markSuppressedItem(itemID string) {
 	if f == nil {
 		return
@@ -207,4 +217,21 @@ func responsesUsageWarningText(text string) bool {
 		return false
 	}
 	return true
+}
+
+func responsesNoticeMayNeedFiltering(chunk []byte) bool {
+	if len(chunk) == 0 {
+		return false
+	}
+	for _, marker := range [][]byte{
+		[]byte("weekly"),
+		[]byte("Weekly"),
+		[]byte("/status"),
+		[]byte("/STATUS"),
+	} {
+		if bytes.Contains(chunk, marker) {
+			return true
+		}
+	}
+	return false
 }

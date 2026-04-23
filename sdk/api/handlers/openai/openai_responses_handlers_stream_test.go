@@ -1,6 +1,7 @@
 package openai
 
 import (
+	"bytes"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -138,5 +139,38 @@ func TestForwardResponsesStreamDropsIncompleteTrailingDataChunkOnFlush(t *testin
 
 	if got := recorder.Body.String(); got != "\n" {
 		t.Fatalf("expected incomplete trailing data to be dropped on flush.\nGot: %q", got)
+	}
+}
+
+func TestResponsesSSEFramerTrustedDataPassesThroughCompleteFrames(t *testing.T) {
+	var out bytes.Buffer
+	framer := &responsesSSEFramer{
+		noticeFilter: newResponsesNoticeFilter(),
+		trustedData:  true,
+	}
+	chunk := []byte("event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-1\"}}\n\n")
+
+	framer.WriteChunk(&out, chunk)
+
+	if got := out.String(); got != string(chunk) {
+		t.Fatalf("trusted framer should preserve complete frame.\nGot:  %q\nWant: %q", got, string(chunk))
+	}
+}
+
+func TestResponsesSSEFramerTrustedDataStillFiltersUsageWarnings(t *testing.T) {
+	var out bytes.Buffer
+	framer := &responsesSSEFramer{
+		noticeFilter: newResponsesNoticeFilter(),
+		trustedData:  true,
+	}
+
+	framer.WriteChunk(&out, []byte("event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg-1\",\"delta\":\"Heads up, you have less than 5% of your weekly limit left. Run /status for a breakdown\"}\n\n"))
+	framer.WriteChunk(&out, []byte("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"id\":\"msg-2\",\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"real output\"}]}]}}\n\n"))
+
+	if bytes.Contains(out.Bytes(), []byte("weekly limit left")) {
+		t.Fatalf("usage warning should still be filtered in trusted mode")
+	}
+	if !bytes.Contains(out.Bytes(), []byte("real output")) {
+		t.Fatalf("normal payload should remain in trusted mode")
 	}
 }

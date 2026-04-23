@@ -166,8 +166,8 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		}
 
 		requestJSON = repairResponsesWebsocketToolCalls(downstreamSessionKey, requestJSON)
-		updatedLastRequest = bytes.Clone(requestJSON)
-		lastRequest = updatedLastRequest
+		updatedLastRequest = requestJSON
+		lastRequest = requestJSON
 
 		modelName := gjson.GetBytes(requestJSON, "model").String()
 		cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
@@ -269,7 +269,7 @@ func normalizeResponsesWebsocketRequestWithMode(rawJSON []byte, lastRequest []by
 func normalizeResponseCreateRequest(rawJSON []byte) ([]byte, []byte, *interfaces.ErrorMessage) {
 	normalized, errDelete := sjson.DeleteBytes(rawJSON, "type")
 	if errDelete != nil {
-		normalized = bytes.Clone(rawJSON)
+		normalized = rawJSON
 	}
 	normalized, _ = sjson.SetBytes(normalized, "stream", true)
 	if !gjson.GetBytes(normalized, "input").Exists() {
@@ -283,7 +283,7 @@ func normalizeResponseCreateRequest(rawJSON []byte) ([]byte, []byte, *interfaces
 			Error:      fmt.Errorf("missing model in response.create request"),
 		}
 	}
-	return normalized, bytes.Clone(normalized), nil
+	return normalized, normalized, nil
 }
 
 func normalizeResponseSubsequentRequest(rawJSON []byte, lastRequest []byte, lastResponseOutput []byte, allowIncrementalInputWithPreviousResponseID bool) ([]byte, []byte, *interfaces.ErrorMessage) {
@@ -308,7 +308,7 @@ func normalizeResponseSubsequentRequest(rawJSON []byte, lastRequest []byte, last
 	// duplicates stale turn-state and can leave late orphaned function_call items.
 	if shouldReplaceWebsocketTranscript(rawJSON, nextInput) {
 		normalized := normalizeResponseTranscriptReplacement(rawJSON, lastRequest)
-		return normalized, bytes.Clone(normalized), nil
+		return normalized, normalized, nil
 	}
 
 	// Websocket v2 mode uses response.create with previous_response_id + incremental input.
@@ -317,7 +317,7 @@ func normalizeResponseSubsequentRequest(rawJSON []byte, lastRequest []byte, last
 		if prev := strings.TrimSpace(gjson.GetBytes(rawJSON, "previous_response_id").String()); prev != "" {
 			normalized, errDelete := sjson.DeleteBytes(rawJSON, "type")
 			if errDelete != nil {
-				normalized = bytes.Clone(rawJSON)
+				normalized = rawJSON
 			}
 			if !gjson.GetBytes(normalized, "model").Exists() {
 				modelName := strings.TrimSpace(gjson.GetBytes(lastRequest, "model").String())
@@ -332,7 +332,7 @@ func normalizeResponseSubsequentRequest(rawJSON []byte, lastRequest []byte, last
 				}
 			}
 			normalized, _ = sjson.SetBytes(normalized, "stream", true)
-			return normalized, bytes.Clone(normalized), nil
+			return normalized, normalized, nil
 		}
 	}
 
@@ -359,7 +359,7 @@ func normalizeResponseSubsequentRequest(rawJSON []byte, lastRequest []byte, last
 
 	normalized, errDelete := sjson.DeleteBytes(rawJSON, "type")
 	if errDelete != nil {
-		normalized = bytes.Clone(rawJSON)
+		normalized = rawJSON
 	}
 	normalized, _ = sjson.DeleteBytes(normalized, "previous_response_id")
 	var errSet error
@@ -383,7 +383,7 @@ func normalizeResponseSubsequentRequest(rawJSON []byte, lastRequest []byte, last
 		}
 	}
 	normalized, _ = sjson.SetBytes(normalized, "stream", true)
-	return normalized, bytes.Clone(normalized), nil
+	return normalized, normalized, nil
 }
 
 func shouldReplaceWebsocketTranscript(rawJSON []byte, nextInput gjson.Result) bool {
@@ -416,7 +416,7 @@ func shouldReplaceWebsocketTranscript(rawJSON []byte, nextInput gjson.Result) bo
 func normalizeResponseTranscriptReplacement(rawJSON []byte, lastRequest []byte) []byte {
 	normalized, errDelete := sjson.DeleteBytes(rawJSON, "type")
 	if errDelete != nil {
-		normalized = bytes.Clone(rawJSON)
+		normalized = rawJSON
 	}
 	normalized, _ = sjson.DeleteBytes(normalized, "previous_response_id")
 	if !gjson.GetBytes(normalized, "model").Exists() {
@@ -432,7 +432,7 @@ func normalizeResponseTranscriptReplacement(rawJSON []byte, lastRequest []byte) 
 		}
 	}
 	normalized, _ = sjson.SetBytes(normalized, "stream", true)
-	return bytes.Clone(normalized)
+	return normalized
 }
 
 func dedupeFunctionCallsByCallID(rawArray string) (string, error) {

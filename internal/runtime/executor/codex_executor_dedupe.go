@@ -47,8 +47,9 @@ type codexNonStreamHTTPResult struct {
 
 func (e *CodexExecutor) prepareCodexRequest(ctx context.Context, from sdktranslator.Format, url string, req cliproxyexecutor.Request, rawJSON []byte) (codexPreparedRequest, error) {
 	cache := e.resolvePromptCache(ctx, from, req)
-	body := bytes.Clone(rawJSON)
+	body := rawJSON
 	if cache.ID != "" {
+		body = bytes.Clone(rawJSON)
 		body, _ = helps.SetJSONBytes(body, "prompt_cache_key", cache.ID)
 	}
 
@@ -349,7 +350,7 @@ func (e *CodexExecutor) codexResponseDedupeKey(auth *cliproxyauth.Auth, url stri
 		http.MethodPost,
 		url,
 		prepared.promptCacheID,
-		shortHashString(string(prepared.body)),
+		shortHashBytes(prepared.body),
 		hashCodexDedupeHeaders(prepared.httpReq.Header),
 	}, "|")
 }
@@ -425,7 +426,7 @@ func collectCodexResponseAggregate(body io.Reader, captureBody bool) (codexNonSt
 			log.Warnf("codex aggregate terminated with response.failed: %s", message)
 		}
 		if completed, isCompleted := streamState.processEventDataWithType(eventType, eventData, true); isCompleted {
-			result.completedData = bytes.Clone(completed.data)
+			result.completedData = completed.data
 		}
 		return nil
 	})
@@ -446,23 +447,33 @@ func hashCodexDedupeHeaders(headers http.Header) string {
 		keys = append(keys, canonical)
 	}
 	sort.Strings(keys)
+	if len(keys) == 0 {
+		return "none"
+	}
 
-	var builder strings.Builder
+	hasher := sha256.New()
 	for _, key := range keys {
 		values := append([]string(nil), headers.Values(key)...)
 		sort.Strings(values)
-		builder.WriteString(key)
-		builder.WriteByte('=')
-		builder.WriteString(strings.Join(values, "\x00"))
-		builder.WriteByte('\n')
+		_, _ = hasher.Write([]byte(key))
+		_, _ = hasher.Write([]byte{'='})
+		for i := range values {
+			if i > 0 {
+				_, _ = hasher.Write([]byte{0})
+			}
+			_, _ = hasher.Write([]byte(values[i]))
+		}
+		_, _ = hasher.Write([]byte{'\n'})
 	}
-	if builder.Len() == 0 {
-		return "none"
-	}
-	return shortHashString(builder.String())
+	return hex.EncodeToString(hasher.Sum(nil))[:codexResponseDedupeHashLen]
 }
 
 func shortHashString(value string) string {
 	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:])[:codexResponseDedupeHashLen]
+}
+
+func shortHashBytes(value []byte) string {
+	sum := sha256.Sum256(value)
 	return hex.EncodeToString(sum[:])[:codexResponseDedupeHashLen]
 }

@@ -209,10 +209,10 @@ func (h *GeminiCLIAPIHandler) forwardCLIStream(c *gin.Context, flusher http.Flus
 
 	h.ForwardStream(c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
 		KeepAliveInterval: keepAliveInterval,
-		WriteChunk: func(chunk []byte) {
+		WriteChunk: func(chunk []byte) bool {
 			if alt == "" {
 				if bytes.Equal(chunk, []byte("data: [DONE]")) || bytes.Equal(chunk, []byte("[DONE]")) {
-					return
+					return false
 				}
 
 				if !bytes.HasPrefix(chunk, []byte("data:")) {
@@ -224,6 +224,7 @@ func (h *GeminiCLIAPIHandler) forwardCLIStream(c *gin.Context, flusher http.Flus
 			} else {
 				_, _ = c.Writer.Write(chunk)
 			}
+			return len(chunk) > 0 || alt == ""
 		},
 		WriteTerminalError: func(errMsg *interfaces.ErrorMessage) {
 			if errMsg == nil {
@@ -239,7 +240,7 @@ func (h *GeminiCLIAPIHandler) forwardCLIStream(c *gin.Context, flusher http.Flus
 			}
 			body := handlers.BuildErrorResponseBody(status, errText)
 			if alt == "" {
-				_, _ = fmt.Fprintf(c.Writer, "event: error\ndata: %s\n\n", string(body))
+				handlers.WriteSSEEventDataFrame(c.Writer, "error", body)
 			} else {
 				_, _ = c.Writer.Write(body)
 			}

@@ -270,6 +270,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			}
 		}()
 		var param any
+		passthroughOpenAI := from == to
 		errRead := helps.ReadStreamLines(httpResp.Body, func(line []byte) error {
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			if detail, ok := helps.ParseOpenAIStreamUsage(line); ok {
@@ -280,6 +281,14 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			}
 
 			if !bytes.HasPrefix(line, []byte("data:")) {
+				return nil
+			}
+			if passthroughOpenAI {
+				payload := bytes.TrimSpace(line[5:])
+				if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) {
+					return nil
+				}
+				out <- cliproxyexecutor.StreamChunk{Payload: payload}
 				return nil
 			}
 
@@ -295,7 +304,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			helps.RecordAPIResponseError(ctx, e.cfg, errRead)
 			reporter.PublishFailure(ctx)
 			out <- cliproxyexecutor.StreamChunk{Err: errRead}
-		} else {
+		} else if !passthroughOpenAI {
 			// In case the upstream close the stream without a terminal [DONE] marker.
 			// Feed a synthetic done marker through the translator so pending
 			// response.completed events are still emitted exactly once.

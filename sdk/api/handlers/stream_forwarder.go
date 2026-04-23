@@ -14,7 +14,8 @@ type StreamForwardOptions struct {
 	KeepAliveInterval *time.Duration
 
 	// WriteChunk writes a single data chunk to the response body. It should not flush.
-	WriteChunk func(chunk []byte)
+	// It returns true when bytes were actually written to the response body.
+	WriteChunk func(chunk []byte) bool
 
 	// WriteTerminalError writes an error payload to the response body when streaming fails
 	// after headers have already been committed. It should not flush.
@@ -39,7 +40,7 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 
 	writeChunk := opts.WriteChunk
 	if writeChunk == nil {
-		writeChunk = func([]byte) {}
+		writeChunk = func([]byte) bool { return false }
 	}
 
 	writeKeepAlive := opts.WriteKeepAlive
@@ -94,8 +95,9 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 				cancel(nil)
 				return
 			}
-			writeChunk(chunk)
-			flusher.Flush()
+			if writeChunk(chunk) {
+				flusher.Flush()
+			}
 		case errMsg, ok := <-errs:
 			if !ok {
 				continue

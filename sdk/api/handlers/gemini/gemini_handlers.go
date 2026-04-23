@@ -237,9 +237,7 @@ func (h *GeminiAPIHandler) handleStreamGenerateContent(c *gin.Context, modelName
 
 			// Write first chunk
 			if alt == "" {
-				_, _ = c.Writer.Write([]byte("data: "))
-				_, _ = c.Writer.Write(chunk)
-				_, _ = c.Writer.Write([]byte("\n\n"))
+				handlers.WriteSSEDataFrame(c.Writer, chunk)
 			} else {
 				_, _ = c.Writer.Write(chunk)
 			}
@@ -309,13 +307,12 @@ func (h *GeminiAPIHandler) forwardGeminiStream(c *gin.Context, flusher http.Flus
 
 	h.ForwardStream(c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
 		KeepAliveInterval: keepAliveInterval,
-		WriteChunk: func(chunk []byte) {
+		WriteChunk: func(chunk []byte) bool {
 			if alt == "" {
-				_, _ = c.Writer.Write([]byte("data: "))
-				_, _ = c.Writer.Write(chunk)
-				_, _ = c.Writer.Write([]byte("\n\n"))
+				return handlers.WriteSSEDataFrame(c.Writer, chunk)
 			} else {
 				_, _ = c.Writer.Write(chunk)
+				return len(chunk) > 0
 			}
 		},
 		WriteTerminalError: func(errMsg *interfaces.ErrorMessage) {
@@ -332,7 +329,7 @@ func (h *GeminiAPIHandler) forwardGeminiStream(c *gin.Context, flusher http.Flus
 			}
 			body := handlers.BuildErrorResponseBody(status, errText)
 			if alt == "" {
-				_, _ = fmt.Fprintf(c.Writer, "event: error\ndata: %s\n\n", string(body))
+				handlers.WriteSSEEventDataFrame(c.Writer, "error", body)
 			} else {
 				_, _ = c.Writer.Write(body)
 			}
