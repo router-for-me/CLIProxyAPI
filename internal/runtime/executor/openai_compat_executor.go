@@ -31,6 +31,8 @@ type OpenAICompatExecutor struct {
 	cfg      *config.Config
 }
 
+const defaultOpenAICompatCircuitBreakerRecoveryTimeoutSec = 60
+
 // NewOpenAICompatExecutor creates an executor bound to a provider key (e.g., "openrouter").
 func NewOpenAICompatExecutor(provider string, cfg *config.Config) *OpenAICompatExecutor {
 	return &OpenAICompatExecutor{provider: provider, cfg: cfg}
@@ -120,7 +122,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 			if !ok {
 				err = statusErr{
 					code: http.StatusBadRequest,
-					msg: fmt.Sprintf("chat-only fallback mode: previous_response_id %q not found or expired; incremental tool turns require prior response state", prevID),
+					msg:  fmt.Sprintf("chat-only fallback mode: previous_response_id %q not found or expired; incremental tool turns require prior response state", prevID),
 				}
 				return
 			}
@@ -191,18 +193,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
 		recordAPIResponseError(ctx, e.cfg, err)
-		if auth != nil {
-			compatCfg := e.resolveCompatConfig(auth)
-			threshold := registry.DefaultCircuitBreakerFailureThreshold
-			timeoutSec := registry.DefaultCircuitBreakerRecoveryTimeoutSec
-			if compatCfg != nil && compatCfg.CircuitBreakerFailureThreshold > 0 {
-				threshold = compatCfg.CircuitBreakerFailureThreshold
-			}
-			if compatCfg != nil && compatCfg.CircuitBreakerRecoveryTimeout > 0 {
-				timeoutSec = compatCfg.CircuitBreakerRecoveryTimeout
-			}
-			registry.GetGlobalRegistry().RecordFailure(auth.ID, circuitModel, threshold, timeoutSec)
-		}
+		e.recordOpenAICompatFailure(auth, circuitModel)
 		return resp, err
 	}
 	defer func() {
@@ -226,18 +217,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 
 		// Record circuit breaker failure only for non-capability errors.
 		if !(isResponseFormat && responsesMode == ResponsesModeUnknown && isCapabilityError(httpResp.StatusCode, b)) {
-			if auth != nil {
-				compatCfg := e.resolveCompatConfig(auth)
-				threshold := registry.DefaultCircuitBreakerFailureThreshold
-				timeoutSec := registry.DefaultCircuitBreakerRecoveryTimeoutSec
-				if compatCfg != nil && compatCfg.CircuitBreakerFailureThreshold > 0 {
-					threshold = compatCfg.CircuitBreakerFailureThreshold
-				}
-				if compatCfg != nil && compatCfg.CircuitBreakerRecoveryTimeout > 0 {
-					timeoutSec = compatCfg.CircuitBreakerRecoveryTimeout
-				}
-				registry.GetGlobalRegistry().RecordFailure(auth.ID, circuitModel, threshold, timeoutSec)
-			}
+			e.recordOpenAICompatFailure(auth, circuitModel)
 		}
 
 		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
@@ -278,9 +258,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		}
 	}
 
-	if auth != nil {
-		registry.GetGlobalRegistry().RecordSuccess(auth.ID, circuitModel)
-	}
+	e.recordOpenAICompatSuccess(auth, circuitModel)
 	return resp, nil
 }
 
@@ -333,7 +311,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			if !ok {
 				err = statusErr{
 					code: http.StatusBadRequest,
-					msg: fmt.Sprintf("chat-only fallback mode: previous_response_id %q not found or expired; incremental tool turns require prior response state", prevID),
+					msg:  fmt.Sprintf("chat-only fallback mode: previous_response_id %q not found or expired; incremental tool turns require prior response state", prevID),
 				}
 				return nil, err
 			}
@@ -406,18 +384,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
 		recordAPIResponseError(ctx, e.cfg, err)
-		if auth != nil {
-			compatCfg := e.resolveCompatConfig(auth)
-			threshold := registry.DefaultCircuitBreakerFailureThreshold
-			timeoutSec := registry.DefaultCircuitBreakerRecoveryTimeoutSec
-			if compatCfg != nil && compatCfg.CircuitBreakerFailureThreshold > 0 {
-				threshold = compatCfg.CircuitBreakerFailureThreshold
-			}
-			if compatCfg != nil && compatCfg.CircuitBreakerRecoveryTimeout > 0 {
-				timeoutSec = compatCfg.CircuitBreakerRecoveryTimeout
-			}
-			registry.GetGlobalRegistry().RecordFailure(auth.ID, circuitModel, threshold, timeoutSec)
-		}
+		e.recordOpenAICompatFailure(auth, circuitModel)
 		return nil, err
 	}
 	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
@@ -439,18 +406,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("openai compat executor stream: close response body error: %v", errClose)
 		}
-		if auth != nil {
-			compatCfg := e.resolveCompatConfig(auth)
-			threshold := registry.DefaultCircuitBreakerFailureThreshold
-			timeoutSec := registry.DefaultCircuitBreakerRecoveryTimeoutSec
-			if compatCfg != nil && compatCfg.CircuitBreakerFailureThreshold > 0 {
-				threshold = compatCfg.CircuitBreakerFailureThreshold
-			}
-			if compatCfg != nil && compatCfg.CircuitBreakerRecoveryTimeout > 0 {
-				timeoutSec = compatCfg.CircuitBreakerRecoveryTimeout
-			}
-			registry.GetGlobalRegistry().RecordFailure(auth.ID, circuitModel, threshold, timeoutSec)
-		}
+		e.recordOpenAICompatFailure(auth, circuitModel)
 		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
 		return nil, err
 	}
@@ -513,6 +469,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 					break
 				}
 				recordAPIResponseError(ctx, e.cfg, errRead)
+				e.recordOpenAICompatFailure(auth, circuitModel)
 				reporter.publishFailure(ctx)
 				out <- cliproxyexecutor.StreamChunk{Err: errRead}
 				return
@@ -541,6 +498,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			}
 			if errScan := scanner.Err(); errScan != nil {
 				recordAPIResponseError(ctx, e.cfg, errScan)
+				e.recordOpenAICompatFailure(auth, circuitModel)
 				reporter.publishFailure(ctx)
 				out <- cliproxyexecutor.StreamChunk{Err: errScan}
 				return
@@ -572,9 +530,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 
 		// Ensure we record the request if no usage chunk was ever seen
 		reporter.ensurePublished(ctx)
-		if auth != nil {
-			registry.GetGlobalRegistry().RecordSuccess(auth.ID, circuitModel)
-		}
+		e.recordOpenAICompatSuccess(auth, circuitModel)
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
 }
@@ -676,6 +632,35 @@ func (e *OpenAICompatExecutor) resolveCompatConfig(auth *cliproxyauth.Auth) *con
 	return nil
 }
 
+func (e *OpenAICompatExecutor) openAICompatCircuitBreakerSettings(auth *cliproxyauth.Auth) (int, int) {
+	threshold := registry.DefaultCircuitBreakerFailureThreshold
+	timeoutSec := defaultOpenAICompatCircuitBreakerRecoveryTimeoutSec
+	if cfg := e.resolveCompatConfig(auth); cfg != nil {
+		if cfg.CircuitBreakerFailureThreshold > 0 {
+			threshold = cfg.CircuitBreakerFailureThreshold
+		}
+		if cfg.CircuitBreakerRecoveryTimeout > 0 {
+			timeoutSec = cfg.CircuitBreakerRecoveryTimeout
+		}
+	}
+	return threshold, timeoutSec
+}
+
+func (e *OpenAICompatExecutor) recordOpenAICompatFailure(auth *cliproxyauth.Auth, model string) {
+	if auth == nil || auth.ID == "" || strings.TrimSpace(model) == "" {
+		return
+	}
+	threshold, timeoutSec := e.openAICompatCircuitBreakerSettings(auth)
+	registry.GetGlobalRegistry().RecordFailure(auth.ID, model, threshold, timeoutSec)
+}
+
+func (e *OpenAICompatExecutor) recordOpenAICompatSuccess(auth *cliproxyauth.Auth, model string) {
+	if auth == nil || auth.ID == "" || strings.TrimSpace(model) == "" {
+		return
+	}
+	registry.GetGlobalRegistry().RecordSuccess(auth.ID, model)
+}
+
 func (e *OpenAICompatExecutor) overrideModel(payload []byte, model string) []byte {
 	if len(payload) == 0 || model == "" {
 		return payload
@@ -693,8 +678,10 @@ func hasOpenAIResponsesCompletedEvent(chunk []byte) bool {
 }
 
 // extractSSEDataPayload extracts the JSON payload from an SSE frame like:
-//   event: response.completed\n
-//   data: {"type":"response.completed",...}\n
+//
+//	event: response.completed\n
+//	data: {"type":"response.completed",...}\n
+//
 // It returns just the JSON object after "data: ".
 func extractSSEDataPayload(sseFrame []byte) []byte {
 	lines := bytes.Split(sseFrame, []byte("\n"))

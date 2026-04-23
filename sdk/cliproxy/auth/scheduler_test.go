@@ -334,6 +334,75 @@ func TestManagerCustomSelector_FallsBackToLegacyPath(t *testing.T) {
 	}
 }
 
+func TestManagerCustomSelector_LegacyPathSkipsOpenCircuitAuth(t *testing.T) {
+	t.Parallel()
+
+	const model = "legacy-circuit-model"
+	selector := &trackingSelector{}
+	manager := NewManager(nil, selector, nil)
+	manager.executors["gemini"] = schedulerTestExecutor{}
+	manager.auths["legacy-auth-a"] = &Auth{ID: "legacy-auth-a", Provider: "gemini"}
+	manager.auths["legacy-auth-b"] = &Auth{ID: "legacy-auth-b", Provider: "gemini"}
+
+	registerSchedulerModels(t, "gemini", model, "legacy-auth-a", "legacy-auth-b")
+	reg := registry.GetGlobalRegistry()
+	reg.ForceOpenCircuitBreaker("legacy-auth-b", model)
+	t.Cleanup(func() {
+		reg.ResetCircuitBreaker("legacy-auth-b", model)
+	})
+
+	got, _, errPick := manager.pickNext(context.Background(), "gemini", model, cliproxyexecutor.Options{}, map[string]struct{}{})
+	if errPick != nil {
+		t.Fatalf("pickNext() error = %v", errPick)
+	}
+	if got == nil {
+		t.Fatal("pickNext() auth = nil")
+	}
+	if got.ID != "legacy-auth-a" {
+		t.Fatalf("pickNext() auth.ID = %q, want %q", got.ID, "legacy-auth-a")
+	}
+	if len(selector.lastAuthID) != 1 || selector.lastAuthID[0] != "legacy-auth-a" {
+		t.Fatalf("selector candidates = %v, want [legacy-auth-a]", selector.lastAuthID)
+	}
+}
+
+func TestManagerCustomSelector_LegacyMixedPathSkipsOpenCircuitAuth(t *testing.T) {
+	t.Parallel()
+
+	const model = "legacy-mixed-circuit-model"
+	selector := &trackingSelector{}
+	manager := NewManager(nil, selector, nil)
+	manager.executors["gemini"] = schedulerTestExecutor{}
+	manager.executors["claude"] = schedulerTestExecutor{}
+	manager.auths["auth-gemini"] = &Auth{ID: "auth-gemini", Provider: "gemini"}
+	manager.auths["auth-claude"] = &Auth{ID: "auth-claude", Provider: "claude"}
+
+	registerSchedulerModels(t, "gemini", model, "auth-gemini")
+	registerSchedulerModels(t, "claude", model, "auth-claude")
+	reg := registry.GetGlobalRegistry()
+	reg.ForceOpenCircuitBreaker("auth-claude", model)
+	t.Cleanup(func() {
+		reg.ResetCircuitBreaker("auth-claude", model)
+	})
+
+	got, _, provider, errPick := manager.pickNextMixed(context.Background(), []string{"gemini", "claude"}, model, cliproxyexecutor.Options{}, map[string]struct{}{})
+	if errPick != nil {
+		t.Fatalf("pickNextMixed() error = %v", errPick)
+	}
+	if got == nil {
+		t.Fatal("pickNextMixed() auth = nil")
+	}
+	if provider != "gemini" {
+		t.Fatalf("pickNextMixed() provider = %q, want %q", provider, "gemini")
+	}
+	if got.ID != "auth-gemini" {
+		t.Fatalf("pickNextMixed() auth.ID = %q, want %q", got.ID, "auth-gemini")
+	}
+	if len(selector.lastAuthID) != 1 || selector.lastAuthID[0] != "auth-gemini" {
+		t.Fatalf("selector candidates = %v, want [auth-gemini]", selector.lastAuthID)
+	}
+}
+
 func TestManager_InitializesSchedulerForBuiltInSelector(t *testing.T) {
 	t.Parallel()
 

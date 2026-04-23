@@ -234,6 +234,9 @@ func TestServiceRun_DoesNotPrintStartedMessageWhenServerStartFailsImmediately(t 
 			Host:    "127.0.0.1",
 			Port:    port,
 			AuthDir: authDir,
+			CircuitBreakerAutoRemoval: config.CircuitBreakerAutoRemovalConfig{
+				Enabled: func() *bool { v := false; return &v }(),
+			},
 		},
 		configPath:     configPath,
 		tokenProvider:  tokenProviderStub{},

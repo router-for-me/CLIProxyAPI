@@ -943,6 +943,9 @@ func (v *readyView) pickFirstWithCircuitBreaker(model string, predicate func(*sc
 
 // pickRoundRobinWithCircuitBreaker returns the next ready entry that is not circuit-broken.
 func (v *readyView) pickRoundRobinWithCircuitBreaker(model string, predicate func(*scheduledAuth) bool) *scheduledAuth {
+	if len(v.parentOrder) > 1 && len(v.children) > 0 {
+		return v.pickGroupedRoundRobinWithCircuitBreaker(model, predicate)
+	}
 	reg := registry.GetGlobalRegistry()
 	if len(v.flat) == 0 {
 		return nil
@@ -962,6 +965,40 @@ func (v *readyView) pickRoundRobinWithCircuitBreaker(model string, predicate fun
 		}
 		v.cursor = index + 1
 		return entry
+	}
+	return nil
+}
+
+func (v *readyView) pickGroupedRoundRobinWithCircuitBreaker(model string, predicate func(*scheduledAuth) bool) *scheduledAuth {
+	reg := registry.GetGlobalRegistry()
+	start := 0
+	if len(v.parentOrder) > 0 {
+		start = v.parentCursor % len(v.parentOrder)
+	}
+	for offset := 0; offset < len(v.parentOrder); offset++ {
+		parentIndex := (start + offset) % len(v.parentOrder)
+		parent := v.parentOrder[parentIndex]
+		child := v.children[parent]
+		if child == nil || len(child.items) == 0 {
+			continue
+		}
+		itemStart := child.cursor % len(child.items)
+		for itemOffset := 0; itemOffset < len(child.items); itemOffset++ {
+			itemIndex := (itemStart + itemOffset) % len(child.items)
+			entry := child.items[itemIndex]
+			if entry == nil || entry.auth == nil {
+				continue
+			}
+			if predicate != nil && !predicate(entry) {
+				continue
+			}
+			if reg != nil && reg.IsCircuitOpen(entry.auth.ID, model) {
+				continue
+			}
+			child.cursor = itemIndex + 1
+			v.parentCursor = parentIndex + 1
+			return entry
+		}
 	}
 	return nil
 }

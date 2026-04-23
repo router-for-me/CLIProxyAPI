@@ -26,6 +26,8 @@ func openAIResponsesStreamErrorCode(status int) string {
 		return "model_not_found"
 	case http.StatusRequestTimeout:
 		return "request_timeout"
+	case http.StatusGatewayTimeout:
+		return "upstream_timeout"
 	default:
 		if status >= http.StatusInternalServerError {
 			return "internal_server_error"

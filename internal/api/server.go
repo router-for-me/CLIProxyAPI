@@ -531,6 +531,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PATCH("/quota-exceeded/switch-preview-model", s.mgmt.PutSwitchPreviewModel)
 
 		mgmt.GET("/circuit-breaker", s.mgmt.GetCircuitBreaker)
+		mgmt.GET("/circuit-breaker/deletions", s.mgmt.GetCircuitBreakerDeletions)
 		mgmt.DELETE("/circuit-breaker", s.mgmt.DeleteCircuitBreaker)
 		mgmt.PUT("/circuit-breaker", s.mgmt.PutCircuitBreaker)
 

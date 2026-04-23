@@ -99,14 +99,17 @@ type failureTracker struct {
 	State        CircuitBreakerState `json:"state"`
 	RecoveryAt   time.Time           `json:"recoveryAt"`
 	FailureCount int                 `json:"failureCount"`
+	OpenCycles   int                 `json:"openCycles"`
 }
 
 // CircuitBreakerStatus describes the current circuit breaker state for a client-model pair.
 type CircuitBreakerStatus struct {
-	State        CircuitBreakerState `json:"state"`
-	FailureCount int                 `json:"failureCount"`
-	LastFailure  time.Time           `json:"lastFailure"`
-	RecoveryAt   time.Time           `json:"recoveryAt,omitempty"`
+	State               CircuitBreakerState `json:"state"`
+	FailureCount        int                 `json:"failureCount"`
+	ConsecutiveFailures int                 `json:"consecutiveFailures"`
+	OpenCycles          int                 `json:"openCycles"`
+	LastFailure         time.Time           `json:"lastFailure"`
+	RecoveryAt          time.Time           `json:"recoveryAt,omitempty"`
 }
 
 // CircuitBreakerPersistStatus captures the full internal tracker state for persistence.
@@ -116,8 +119,27 @@ type CircuitBreakerPersistStatus struct {
 	State        CircuitBreakerState `json:"state" bson:"state"`
 	Count        int                 `json:"count" bson:"count"`
 	FailureCount int                 `json:"failureCount" bson:"failure_count"`
+	OpenCycles   int                 `json:"openCycles" bson:"open_cycles"`
 	LastFailure  time.Time           `json:"lastFailure" bson:"last_failure"`
 	RecoveryAt   time.Time           `json:"recoveryAt" bson:"recovery_at"`
+}
+
+// CircuitBreakerOpenEvent describes one CLOSED->OPEN or HALF-OPEN->OPEN transition.
+type CircuitBreakerOpenEvent struct {
+	ClientID            string    `json:"clientId"`
+	Provider            string    `json:"provider,omitempty"`
+	ModelID             string    `json:"modelId"`
+	OpenCycles          int       `json:"openCycles"`
+	FailureCount        int       `json:"failureCount"`
+	ConsecutiveFailures int       `json:"consecutiveFailures"`
+	LastFailure         time.Time `json:"lastFailure"`
+	RecoveryAt          time.Time `json:"recoveryAt"`
+	OpenedAt            time.Time `json:"openedAt"`
+}
+
+// CircuitBreakerOpenHook receives circuit breaker OPEN transition events.
+type CircuitBreakerOpenHook interface {
+	OnCircuitBreakerOpened(ctx context.Context, event CircuitBreakerOpenEvent)
 }
 
 // ModelRegistration tracks a model's availability
@@ -164,6 +186,8 @@ type ModelRegistry struct {
 	availableModelsCache map[string]availableModelsCacheEntry
 	// hook is an optional callback sink for model registration changes
 	hook ModelRegistryHook
+	// circuitBreakerOpenHook receives OPEN transition events.
+	circuitBreakerOpenHook CircuitBreakerOpenHook
 }
 
 // Global model registry instance
@@ -225,6 +249,16 @@ func (r *ModelRegistry) SetHook(hook ModelRegistryHook) {
 	r.hook = hook
 }
 
+// SetCircuitBreakerOpenHook sets an optional callback for OPEN transition events.
+func (r *ModelRegistry) SetCircuitBreakerOpenHook(hook CircuitBreakerOpenHook) {
+	if r == nil {
+		return
+	}
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+	r.circuitBreakerOpenHook = hook
+}
+
 const defaultModelRegistryHookTimeout = 5 * time.Second
 const modelQuotaExceededWindow = 5 * time.Minute
 
@@ -260,6 +294,23 @@ func (r *ModelRegistry) triggerModelsUnregistered(provider, clientID string) {
 		ctx, cancel := context.WithTimeout(context.Background(), defaultModelRegistryHookTimeout)
 		defer cancel()
 		hook.OnModelsUnregistered(ctx, provider, clientID)
+	}()
+}
+
+func (r *ModelRegistry) triggerCircuitBreakerOpened(event CircuitBreakerOpenEvent) {
+	hook := r.circuitBreakerOpenHook
+	if hook == nil {
+		return
+	}
+	go func() {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				log.Errorf("model registry hook OnCircuitBreakerOpened panic: %v", recovered)
+			}
+		}()
+		ctx, cancel := context.WithTimeout(context.Background(), defaultModelRegistryHookTimeout)
+		defer cancel()
+		hook.OnCircuitBreakerOpened(ctx, event)
 	}()
 }
 
@@ -537,6 +588,9 @@ func (r *ModelRegistry) removeModelRegistration(clientID, modelID, provider stri
 	if registration.SuspendedClients != nil {
 		delete(registration.SuspendedClients, clientID)
 	}
+	if registration.CircuitBreakerClients != nil {
+		delete(registration.CircuitBreakerClients, clientID)
+	}
 	if registration.Count < 0 {
 		registration.Count = 0
 	}
@@ -636,6 +690,9 @@ func (r *ModelRegistry) unregisterClientInternal(clientID string) {
 			delete(registration.QuotaExceededClients, clientID)
 			if registration.SuspendedClients != nil {
 				delete(registration.SuspendedClients, clientID)
+			}
+			if registration.CircuitBreakerClients != nil {
+				delete(registration.CircuitBreakerClients, clientID)
 			}
 
 			if hasProvider && registration.Providers != nil {
@@ -822,8 +879,23 @@ func (r *ModelRegistry) RecordFailure(clientID, modelID string, threshold int, r
 		if tracker.Count >= threshold {
 			tracker.State = CircuitOpen
 			tracker.FailureCount = 1
+			if tracker.OpenCycles < 0 {
+				tracker.OpenCycles = 0
+			}
+			tracker.OpenCycles++
 			tracker.RecoveryAt = now.Add(computeCircuitBreakerRecoveryDuration(baseTimeoutSec, tracker.FailureCount))
 			r.invalidateAvailableModelsCacheLocked()
+			r.triggerCircuitBreakerOpened(CircuitBreakerOpenEvent{
+				ClientID:            clientID,
+				Provider:            r.clientProviders[clientID],
+				ModelID:             modelID,
+				OpenCycles:          tracker.OpenCycles,
+				FailureCount:        tracker.FailureCount,
+				ConsecutiveFailures: tracker.Count,
+				LastFailure:         tracker.LastFailure,
+				RecoveryAt:          tracker.RecoveryAt,
+				OpenedAt:            now,
+			})
 			log.Debugf("Circuit breaker OPENED for client %s, model %s (failures=%d, failureCount=%d, recoveryAt=%s)",
 				clientID, modelID, tracker.Count, tracker.FailureCount, tracker.RecoveryAt.Format(time.RFC3339))
 			return
@@ -843,9 +915,24 @@ func (r *ModelRegistry) RecordFailure(clientID, modelID string, threshold int, r
 			tracker.FailureCount = 1
 		}
 		tracker.FailureCount++
+		if tracker.OpenCycles < 0 {
+			tracker.OpenCycles = 0
+		}
+		tracker.OpenCycles++
 		tracker.State = CircuitOpen
 		tracker.RecoveryAt = now.Add(computeCircuitBreakerRecoveryDuration(baseTimeoutSec, tracker.FailureCount))
 		r.invalidateAvailableModelsCacheLocked()
+		r.triggerCircuitBreakerOpened(CircuitBreakerOpenEvent{
+			ClientID:            clientID,
+			Provider:            r.clientProviders[clientID],
+			ModelID:             modelID,
+			OpenCycles:          tracker.OpenCycles,
+			FailureCount:        tracker.FailureCount,
+			ConsecutiveFailures: tracker.Count,
+			LastFailure:         tracker.LastFailure,
+			RecoveryAt:          tracker.RecoveryAt,
+			OpenedAt:            now,
+		})
 		log.Debugf("Circuit breaker re-OPENED for client %s, model %s (failureCount=%d, recoveryAt=%s)",
 			clientID, modelID, tracker.FailureCount, tracker.RecoveryAt.Format(time.RFC3339))
 	}
@@ -875,6 +962,7 @@ func (r *ModelRegistry) RecordSuccess(clientID, modelID string) {
 		tracker.State = CircuitClosed
 		tracker.Count = 0
 		tracker.FailureCount = 0
+		tracker.OpenCycles = 0
 		tracker.RecoveryAt = time.Time{}
 		r.invalidateAvailableModelsCacheLocked()
 		log.Debugf("Circuit breaker CLOSED (recovery success) for client %s, model %s", clientID, modelID)
@@ -973,9 +1061,11 @@ func (r *ModelRegistry) GetCircuitBreakerStatus() map[string]map[string]CircuitB
 				result[clientID] = make(map[string]CircuitBreakerStatus)
 			}
 			status := CircuitBreakerStatus{
-				State:        tracker.State,
-				FailureCount: tracker.Count,
-				LastFailure:  tracker.LastFailure,
+				State:               tracker.State,
+				FailureCount:        tracker.FailureCount,
+				ConsecutiveFailures: tracker.Count,
+				OpenCycles:          tracker.OpenCycles,
+				LastFailure:         tracker.LastFailure,
 			}
 			if tracker.State == CircuitOpen {
 				status.RecoveryAt = tracker.RecoveryAt
@@ -1007,6 +1097,7 @@ func (r *ModelRegistry) SnapshotCircuitBreakersPersist() map[string]map[string]C
 				State:        tracker.State,
 				Count:        tracker.Count,
 				FailureCount: tracker.FailureCount,
+				OpenCycles:   tracker.OpenCycles,
 				LastFailure:  tracker.LastFailure,
 				RecoveryAt:   tracker.RecoveryAt,
 			}
@@ -1052,6 +1143,10 @@ func (r *ModelRegistry) RestoreCircuitBreakers(snapshot map[string]map[string]Ci
 			tracker.State = persisted.State
 			tracker.Count = persisted.Count
 			tracker.FailureCount = persisted.FailureCount
+			tracker.OpenCycles = persisted.OpenCycles
+			if tracker.OpenCycles <= 0 && tracker.FailureCount > 0 {
+				tracker.OpenCycles = tracker.FailureCount
+			}
 			tracker.LastFailure = persisted.LastFailure
 			tracker.RecoveryAt = persisted.RecoveryAt
 			applied++

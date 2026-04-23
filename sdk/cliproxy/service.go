@@ -15,6 +15,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/store/mongostate"
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/wsrelay"
@@ -104,6 +105,12 @@ type Service struct {
 
 	// wsGateway manages websocket Gemini providers.
 	wsGateway *wsrelay.Manager
+
+	// circuitBreakerDeletionStore records automatic model removal audits.
+	circuitBreakerDeletionStore *mongostate.CircuitBreakerDeletionStore
+
+	// circuitAutoRemoveMu serializes auto-removal mutation for config/runtime state.
+	circuitAutoRemoveMu sync.Mutex
 }
 
 // RegisterUsagePlugin registers a usage plugin on the global usage manager.
@@ -569,6 +576,9 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 
 	s.applyRetryConfig(s.cfg)
+	if errAutoRemove := s.initCircuitBreakerAutoRemoval(ctx); errAutoRemove != nil {
+		return fmt.Errorf("cliproxy: failed to initialize circuit breaker auto-removal: %w", errAutoRemove)
+	}
 
 	if s.coreManager != nil {
 		if errLoad := s.coreManager.Load(ctx); errLoad != nil {
@@ -846,6 +856,16 @@ func (s *Service) Shutdown(ctx context.Context) error {
 				log.Warnf("runtime state close on shutdown failed: %v", errClose)
 			}
 			closeCancel()
+		}
+		registry.GetGlobalRegistry().SetCircuitBreakerOpenHook(nil)
+		mongostate.SetGlobalCircuitBreakerDeletionStore(nil)
+		if s.circuitBreakerDeletionStore != nil {
+			closeCtx, closeCancel := context.WithTimeout(ctx, 10*time.Second)
+			if errClose := s.circuitBreakerDeletionStore.Close(closeCtx); errClose != nil {
+				log.Warnf("circuit-breaker deletion store close on shutdown failed: %v", errClose)
+			}
+			closeCancel()
+			s.circuitBreakerDeletionStore = nil
 		}
 
 		if s.server != nil {

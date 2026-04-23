@@ -1,6 +1,7 @@
 package registry
 
 import (
+	"context"
 	"testing"
 	"time"
 )
@@ -163,6 +164,43 @@ func TestCircuitBreakerHalfOpenSuccessResetsBackoffLevel(t *testing.T) {
 	assertDurationApprox(t, reopened.RecoveryAt.Sub(reopened.LastFailure), 2*time.Second, time.Second)
 }
 
+func TestGetCircuitBreakerStatusSeparatesBackoffLevelAndConsecutiveFailures(t *testing.T) {
+	r := newTestModelRegistry()
+	r.RegisterClient("client-1", "openai", []*ModelInfo{{ID: "m1"}})
+
+	r.RecordFailure("client-1", "m1", 1, 2)
+	status := r.GetCircuitBreakerStatus()
+	initial, ok := status["client-1"]["m1"]
+	if !ok {
+		t.Fatalf("missing circuit breaker status for client-1/m1")
+	}
+	if initial.FailureCount != 1 {
+		t.Fatalf("failureCount = %d, want 1 (backoff level)", initial.FailureCount)
+	}
+	if initial.ConsecutiveFailures != 1 {
+		t.Fatalf("consecutiveFailures = %d, want 1 (continuous failures)", initial.ConsecutiveFailures)
+	}
+
+	setCircuitBreakerTrackerState(t, r, "client-1", "m1", func(tracker *failureTracker) {
+		tracker.State = CircuitHalfOpen
+		tracker.Count = 0
+		tracker.FailureCount = 1
+	})
+	r.RecordFailure("client-1", "m1", 99, 2)
+
+	status = r.GetCircuitBreakerStatus()
+	reopened, ok := status["client-1"]["m1"]
+	if !ok {
+		t.Fatalf("missing reopened circuit breaker status for client-1/m1")
+	}
+	if reopened.FailureCount != 2 {
+		t.Fatalf("failureCount = %d, want 2 after half-open failure", reopened.FailureCount)
+	}
+	if reopened.ConsecutiveFailures != 1 {
+		t.Fatalf("consecutiveFailures = %d, want 1 after half-open failure", reopened.ConsecutiveFailures)
+	}
+}
+
 func TestCircuitBreakerHalfOpenFailureOverflowSaturates(t *testing.T) {
 	r := newTestModelRegistry()
 	r.RegisterClient("client-1", "openai", []*ModelInfo{{ID: "m1"}})
@@ -220,11 +258,65 @@ func TestRestoreCircuitBreakersCreatesMissingTrackerForRegisteredClient(t *testi
 	if tracker.FailureCount != 2 {
 		t.Fatalf("expected restored failureCount 2, got %d", tracker.FailureCount)
 	}
+	if tracker.OpenCycles != 2 {
+		t.Fatalf("expected restored openCycles 2, got %d", tracker.OpenCycles)
+	}
 	if !tracker.LastFailure.Equal(lastFailure) {
 		t.Fatalf("expected restored lastFailure %v, got %v", lastFailure, tracker.LastFailure)
 	}
 	if !tracker.RecoveryAt.Equal(recoveryAt) {
 		t.Fatalf("expected restored recoveryAt %v, got %v", recoveryAt, tracker.RecoveryAt)
+	}
+}
+
+type capturingCircuitBreakerOpenHook struct {
+	ch chan CircuitBreakerOpenEvent
+}
+
+func (h *capturingCircuitBreakerOpenHook) OnCircuitBreakerOpened(_ context.Context, event CircuitBreakerOpenEvent) {
+	if h == nil || h.ch == nil {
+		return
+	}
+	select {
+	case h.ch <- event:
+	default:
+	}
+}
+
+func TestCircuitBreakerOpenHookEmitsOpenCycles(t *testing.T) {
+	r := newTestModelRegistry()
+	r.RegisterClient("client-1", "openai", []*ModelInfo{{ID: "m1"}})
+
+	hook := &capturingCircuitBreakerOpenHook{ch: make(chan CircuitBreakerOpenEvent, 2)}
+	r.SetCircuitBreakerOpenHook(hook)
+
+	r.RecordFailure("client-1", "m1", 1, 2)
+	var first CircuitBreakerOpenEvent
+	select {
+	case first = <-hook.ch:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting first open hook event")
+	}
+	if first.OpenCycles != 1 {
+		t.Fatalf("first open cycles = %d, want 1", first.OpenCycles)
+	}
+	if first.Provider != "openai" {
+		t.Fatalf("provider = %q, want %q", first.Provider, "openai")
+	}
+
+	setCircuitBreakerTrackerState(t, r, "client-1", "m1", func(tracker *failureTracker) {
+		tracker.State = CircuitHalfOpen
+		tracker.Count = 0
+	})
+	r.RecordFailure("client-1", "m1", 1, 2)
+	var second CircuitBreakerOpenEvent
+	select {
+	case second = <-hook.ch:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting second open hook event")
+	}
+	if second.OpenCycles != 2 {
+		t.Fatalf("second open cycles = %d, want 2", second.OpenCycles)
 	}
 }
 
@@ -316,5 +408,49 @@ func TestRestoreCircuitBreakersContinuesStateMachineOnNextSuccess(t *testing.T) 
 	}
 	if !tracker.RecoveryAt.IsZero() {
 		t.Fatalf("expected recoveryAt reset after restored half-open success, got %s", tracker.RecoveryAt.Format(time.RFC3339))
+	}
+}
+
+func TestRegisterClientRemovesCircuitTrackersForRemovedModels(t *testing.T) {
+	r := newTestModelRegistry()
+	r.RegisterClient("client-1", "openai", []*ModelInfo{{ID: "m1"}, {ID: "m2"}})
+
+	r.RecordFailure("client-1", "m1", 1, 2)
+	r.RecordFailure("client-1", "m2", 1, 2)
+
+	// Remove m1 from the client model list; its circuit tracker should be removed too.
+	r.RegisterClient("client-1", "openai", []*ModelInfo{{ID: "m2"}})
+
+	snapshot := r.SnapshotCircuitBreakersPersist()
+	if modelStatus, ok := snapshot["m1"]; ok {
+		if _, exists := modelStatus["client-1"]; exists {
+			t.Fatalf("expected m1 tracker to be removed after model unbind")
+		}
+	}
+	if modelStatus, ok := snapshot["m2"]; !ok || modelStatus["client-1"].State == "" {
+		t.Fatalf("expected m2 tracker to remain after model update")
+	}
+}
+
+func TestUnregisterClientRemovesCircuitTrackersFromSharedModel(t *testing.T) {
+	r := newTestModelRegistry()
+	r.RegisterClient("client-1", "openai", []*ModelInfo{{ID: "shared-model"}})
+	r.RegisterClient("client-2", "openai", []*ModelInfo{{ID: "shared-model"}})
+
+	r.RecordFailure("client-1", "shared-model", 1, 2)
+	r.RecordFailure("client-2", "shared-model", 1, 2)
+
+	r.UnregisterClient("client-1")
+
+	snapshot := r.SnapshotCircuitBreakersPersist()
+	sharedStatus, ok := snapshot["shared-model"]
+	if !ok {
+		t.Fatalf("expected shared-model status to remain for client-2")
+	}
+	if _, exists := sharedStatus["client-1"]; exists {
+		t.Fatalf("expected client-1 tracker to be removed on unregister")
+	}
+	if _, exists := sharedStatus["client-2"]; !exists {
+		t.Fatalf("expected client-2 tracker to remain on unregister of client-1")
 	}
 }

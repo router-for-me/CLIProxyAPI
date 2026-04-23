@@ -206,6 +206,67 @@ func TestManagerExecuteStream_RequestBudgetRemainsActiveUntilStreamCloses(t *tes
 	}
 }
 
+func TestManagerExecuteStream_RequestBudgetExceededAfterInitialChunkEmitsStreamError(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	manager.SetRetryConfig(0, 0, 0)
+	manager.SetRequestBudget(40 * time.Millisecond)
+
+	executor := &budgetStreamingExecutor{id: "claude"}
+	manager.RegisterExecutor(executor)
+
+	auth := &Auth{ID: "budget-stream-timeout-auth", Provider: "claude", Status: StatusActive}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth.ID, "claude", []*registry.ModelInfo{{ID: "budget-model"}})
+	manager.RefreshSchedulerEntry(auth.ID)
+	t.Cleanup(func() {
+		reg.UnregisterClient(auth.ID)
+		if executor.streamCh != nil {
+			close(executor.streamCh)
+		}
+	})
+
+	result, err := manager.ExecuteStream(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: "budget-model"}, cliproxyexecutor.Options{})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+	if result == nil || result.Chunks == nil {
+		t.Fatal("expected non-nil stream result")
+	}
+
+	first, ok := <-result.Chunks
+	if !ok {
+		t.Fatal("expected initial stream chunk")
+	}
+	if first.Err != nil {
+		t.Fatalf("unexpected initial stream error: %v", first.Err)
+	}
+	if string(first.Payload) != "initial" {
+		t.Fatalf("first payload = %q, want %q", string(first.Payload), "initial")
+	}
+
+	second, ok := <-result.Chunks
+	if !ok {
+		t.Fatal("expected timeout error chunk")
+	}
+	if second.Err == nil {
+		t.Fatalf("expected timeout error chunk, got payload %q", string(second.Payload))
+	}
+	authErr, ok := second.Err.(*Error)
+	if !ok {
+		t.Fatalf("expected *Error, got %T (%v)", second.Err, second.Err)
+	}
+	if authErr.Code != "upstream_timeout" {
+		t.Fatalf("code=%q want=%q", authErr.Code, "upstream_timeout")
+	}
+	if authErr.HTTPStatus != http.StatusGatewayTimeout {
+		t.Fatalf("status=%d want=%d", authErr.HTTPStatus, http.StatusGatewayTimeout)
+	}
+}
+
 func TestManagerShouldRetryAfterError_SkipCooldownWhenRemainingBudgetInsufficient(t *testing.T) {
 	manager := NewManager(nil, nil, nil)
 	manager.SetRetryConfig(3, 30*time.Second, 0)

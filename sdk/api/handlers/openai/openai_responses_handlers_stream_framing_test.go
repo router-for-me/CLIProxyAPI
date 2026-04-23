@@ -9,13 +9,14 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
-	innerconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api/middleware"
+	innerconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
-	runtimeexecutor "github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+	runtimeexecutor "github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
@@ -24,9 +25,19 @@ import (
 
 type framedResponsesStreamExecutor struct{}
 
+type timedOutResponsesStreamExecutor struct {
+	streamCh chan coreexecutor.StreamChunk
+}
+
 func (e *framedResponsesStreamExecutor) Identifier() string { return "test-provider" }
 
+func (e *timedOutResponsesStreamExecutor) Identifier() string { return "test-provider" }
+
 func (e *framedResponsesStreamExecutor) Execute(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, errors.New("not implemented")
+}
+
+func (e *timedOutResponsesStreamExecutor) Execute(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
 	return coreexecutor.Response{}, errors.New("not implemented")
 }
 
@@ -38,7 +49,19 @@ func (e *framedResponsesStreamExecutor) ExecuteStream(context.Context, *coreauth
 	return &coreexecutor.StreamResult{Chunks: ch}, nil
 }
 
+func (e *timedOutResponsesStreamExecutor) ExecuteStream(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+	ch := make(chan coreexecutor.StreamChunk, 2)
+	ch <- coreexecutor.StreamChunk{Payload: []byte("event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_timeout\",\"status\":\"in_progress\"}}\n\n")}
+	ch <- coreexecutor.StreamChunk{Payload: []byte("event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n")}
+	e.streamCh = ch
+	return &coreexecutor.StreamResult{Chunks: ch}, nil
+}
+
 func (e *framedResponsesStreamExecutor) Refresh(ctx context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+	return auth, nil
+}
+
+func (e *timedOutResponsesStreamExecutor) Refresh(ctx context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
 	return auth, nil
 }
 
@@ -46,7 +69,15 @@ func (e *framedResponsesStreamExecutor) CountTokens(context.Context, *coreauth.A
 	return coreexecutor.Response{}, errors.New("not implemented")
 }
 
+func (e *timedOutResponsesStreamExecutor) CountTokens(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, errors.New("not implemented")
+}
+
 func (e *framedResponsesStreamExecutor) HttpRequest(context.Context, *coreauth.Auth, *http.Request) (*http.Response, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (e *timedOutResponsesStreamExecutor) HttpRequest(context.Context, *coreauth.Auth, *http.Request) (*http.Response, error) {
 	return nil, errors.New("not implemented")
 }
 
@@ -95,6 +126,53 @@ func TestOpenAIResponsesStreamingWritesCompleteSSEFrames(t *testing.T) {
 	}
 	if !strings.HasSuffix(body, "\n\n") {
 		t.Fatalf("response body should end with SSE frame delimiter, got %q", body)
+	}
+}
+
+func TestOpenAIResponsesStreamingBudgetTimeoutWritesErrorEventInsteadOfSyntheticCompleted(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	executor := &timedOutResponsesStreamExecutor{}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.SetRetryConfig(0, 0, 0)
+	manager.SetRequestBudget(40 * time.Millisecond)
+	manager.RegisterExecutor(executor)
+
+	auth := &coreauth.Auth{ID: "auth-timeout", Provider: executor.Identifier(), Status: coreauth.StatusActive}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "test-model"}})
+	manager.RefreshSchedulerEntry(auth.ID)
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+		if executor.streamCh != nil {
+			close(executor.streamCh)
+		}
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	h := NewOpenAIResponsesAPIHandler(base)
+	router := gin.New()
+	router.POST("/v1/responses", h.Responses)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"test-model","input":"hello","stream":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%q", resp.Code, http.StatusOK, resp.Body.String())
+	}
+
+	body := resp.Body.String()
+	if !strings.Contains(body, "event: response.output_text.delta") {
+		t.Fatalf("response body missing streamed delta before timeout: %q", body)
+	}
+	if !strings.Contains(body, "event: error\ndata: {\"type\":\"error\",\"code\":\"upstream_timeout\",\"message\":\"upstream_timeout: upstream request budget exceeded\"") {
+		t.Fatalf("response body missing timeout error event: %q", body)
+	}
+	if strings.Contains(body, "event: response.completed") {
+		t.Fatalf("response body should not synthesize response.completed on budget timeout: %q", body)
 	}
 }
 

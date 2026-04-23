@@ -505,7 +505,8 @@ func enrichCodexCompletedPayloadWithText(payload []byte, text string) []byte {
 	if gjson.GetBytes(payload, "type").String() != "response.completed" {
 		return payload
 	}
-	if gjson.GetBytes(payload, "response.output.#").Int() > 0 {
+	outputResult := gjson.GetBytes(payload, "response.output")
+	if outputResult.Exists() && outputResult.IsArray() && len(outputResult.Array()) > 0 {
 		return payload
 	}
 
@@ -518,13 +519,20 @@ func enrichCodexCompletedPayloadWithText(payload []byte, text string) []byte {
 	item, _ = sjson.SetBytes(item, "id", itemID)
 	item, _ = sjson.SetBytes(item, "content.0.text", text)
 
-	outputsWrapper := []byte(`{"arr":[]}`)
-	outputsWrapper, _ = sjson.SetRawBytes(outputsWrapper, "arr.-1", item)
-	enriched, err := sjson.SetRawBytes(payload, "response.output", []byte(gjson.GetBytes(outputsWrapper, "arr").Raw))
+	enriched := payload
+	if !outputResult.Exists() || !outputResult.IsArray() {
+		updated, err := sjson.SetRawBytes(enriched, "response.output", []byte("[]"))
+		if err != nil {
+			return payload
+		}
+		enriched = updated
+	}
+
+	updated, err := sjson.SetRawBytes(enriched, "response.output.-1", item)
 	if err != nil {
 		return payload
 	}
-	return enriched
+	return updated
 }
 
 func (e *CodexExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {

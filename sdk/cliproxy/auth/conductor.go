@@ -700,7 +700,7 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 	return &cliproxyexecutor.StreamResult{Headers: headers, Chunks: out}
 }
 
-func wrapStreamResultWithCancel(ctx context.Context, result *cliproxyexecutor.StreamResult, cancel context.CancelFunc) *cliproxyexecutor.StreamResult {
+func wrapStreamResultWithCancel(ctx context.Context, result *cliproxyexecutor.StreamResult, cancel context.CancelFunc, budgetEnabled bool) *cliproxyexecutor.StreamResult {
 	if cancel == nil {
 		return result
 	}
@@ -709,10 +709,16 @@ func wrapStreamResultWithCancel(ctx context.Context, result *cliproxyexecutor.St
 		return result
 	}
 
-	out := make(chan cliproxyexecutor.StreamChunk)
+	out := make(chan cliproxyexecutor.StreamChunk, 1)
 	go func() {
 		defer close(out)
 		defer cancel()
+		emitContextError := func() {
+			if ctx == nil || ctx.Err() == nil {
+				return
+			}
+			out <- cliproxyexecutor.StreamChunk{Err: mapRequestBudgetError(ctx, budgetEnabled, ctx.Err())}
+		}
 		for {
 			var (
 				chunk cliproxyexecutor.StreamChunk
@@ -721,6 +727,7 @@ func wrapStreamResultWithCancel(ctx context.Context, result *cliproxyexecutor.St
 			if ctx != nil {
 				select {
 				case <-ctx.Done():
+					emitContextError()
 					discardStreamChunks(result.Chunks)
 					return
 				case chunk, ok = <-result.Chunks:
@@ -737,6 +744,7 @@ func wrapStreamResultWithCancel(ctx context.Context, result *cliproxyexecutor.St
 			}
 			select {
 			case <-ctx.Done():
+				emitContextError()
 				discardStreamChunks(result.Chunks)
 				return
 			case out <- chunk:
@@ -1200,7 +1208,7 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 	for attempt := 0; ; attempt++ {
 		result, errStream := m.executeStreamMixedOnce(execCtx, normalized, req, opts, maxRetryCredentials)
 		if errStream == nil {
-			return wrapStreamResultWithCancel(execCtx, result, cancel), nil
+			return wrapStreamResultWithCancel(execCtx, result, cancel, budgetEnabled), nil
 		}
 		mappedErr := mapRequestBudgetError(execCtx, budgetEnabled, errStream)
 		lastErr = mappedErr
@@ -2062,8 +2070,59 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	} else if shouldSuspendModel {
 		registry.GetGlobalRegistry().SuspendClientModel(result.AuthID, result.Model, suspendReason)
 	}
+	if authSnapshot != nil {
+		m.recordCircuitBreakerFromResult(authSnapshot, result)
+	}
 
 	m.hook.OnResult(ctx, result)
+}
+
+func normalizeCircuitBreakerModelID(model string) string {
+	trimmed := strings.TrimSpace(model)
+	if trimmed == "" {
+		return ""
+	}
+	parsed := thinking.ParseSuffix(trimmed)
+	if base := strings.TrimSpace(parsed.ModelName); base != "" {
+		return base
+	}
+	return trimmed
+}
+
+func shouldSkipConductorCircuitBreakerReport(auth *Auth) bool {
+	if auth == nil {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(auth.Provider)) {
+	case "codex", "openai-compatibility":
+		// codex/openai-compat executors already report circuit breaker outcomes.
+		return true
+	default:
+		return false
+	}
+}
+
+func (m *Manager) recordCircuitBreakerFromResult(auth *Auth, result Result) {
+	if m == nil || auth == nil || strings.TrimSpace(result.AuthID) == "" {
+		return
+	}
+	if shouldSkipConductorCircuitBreakerReport(auth) {
+		return
+	}
+	modelID := normalizeCircuitBreakerModelID(result.Model)
+	if modelID == "" {
+		return
+	}
+	if result.Success {
+		registry.GetGlobalRegistry().RecordSuccess(result.AuthID, modelID)
+		return
+	}
+	registry.GetGlobalRegistry().RecordFailure(
+		result.AuthID,
+		modelID,
+		registry.DefaultCircuitBreakerFailureThreshold,
+		registry.DefaultCircuitBreakerRecoveryTimeoutSec,
+	)
 }
 
 func ensureModelState(auth *Auth, model string) *ModelState {
@@ -2530,6 +2589,9 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 		if modelKey != "" && registryRef != nil && !registryRef.ClientSupportsModel(candidate.ID, modelKey) {
 			continue
 		}
+		if modelKey != "" && registryRef != nil && registryRef.IsCircuitOpen(candidate.ID, modelKey) {
+			continue
+		}
 		candidates = append(candidates, candidate)
 	}
 	if len(candidates) == 0 {
@@ -2636,6 +2698,9 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 			continue
 		}
 		if modelKey != "" && registryRef != nil && !registryRef.ClientSupportsModel(candidate.ID, modelKey) {
+			continue
+		}
+		if modelKey != "" && registryRef != nil && registryRef.IsCircuitOpen(candidate.ID, modelKey) {
 			continue
 		}
 		candidates = append(candidates, candidate)

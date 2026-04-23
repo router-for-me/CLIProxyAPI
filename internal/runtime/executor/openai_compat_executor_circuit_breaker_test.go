@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
@@ -135,5 +137,146 @@ func TestOpenAICompatExecutorCircuitBreakerUsesRequestedModel(t *testing.T) {
 	}
 	if reg.IsCircuitOpen(authID, upstreamModel) {
 		t.Fatalf("did not expect circuit to open for upstream model %q", upstreamModel)
+	}
+}
+
+func TestOpenAICompatExecutorCircuitBreakerDefaultRecoveryTimeoutIs60Seconds(t *testing.T) {
+	const (
+		providerName = "cb-openai-compat-default-timeout"
+		authID       = "cb-openai-compat-default-timeout-auth"
+		modelID      = "cb-default-timeout-model"
+	)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte(`{"error":{"message":"temporary upstream error"}}`))
+	}))
+	defer upstream.Close()
+
+	executor := NewOpenAICompatExecutor(providerName, &config.Config{
+		OpenAICompatibility: []config.OpenAICompatibility{{
+			Name:                           providerName,
+			CircuitBreakerFailureThreshold: 1,
+		}},
+	})
+	auth := &cliproxyauth.Auth{
+		ID:       authID,
+		Provider: providerName,
+		Attributes: map[string]string{
+			"base_url":     upstream.URL + "/v1",
+			"api_key":      "test-key",
+			"compat_name":  providerName,
+			"provider_key": providerName,
+		},
+	}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(authID, providerName, []*registry.ModelInfo{{ID: modelID}})
+	t.Cleanup(func() {
+		reg.ResetCircuitBreaker(authID, modelID)
+		reg.UnregisterClient(authID)
+	})
+
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   modelID,
+		Payload: []byte(fmt.Sprintf(`{"model":"%s","messages":[{"role":"user","content":"hi"}]}`, modelID)),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAI,
+	})
+	if err == nil {
+		t.Fatal("expected upstream error")
+	}
+
+	if !reg.IsCircuitOpen(authID, modelID) {
+		t.Fatalf("expected circuit to open for model %q", modelID)
+	}
+	snapshot := reg.SnapshotCircuitBreakersPersist()
+	modelSnapshot, ok := snapshot[modelID]
+	if !ok {
+		t.Fatalf("missing circuit breaker snapshot for model %q", modelID)
+	}
+	status, ok := modelSnapshot[authID]
+	if !ok {
+		t.Fatalf("missing circuit breaker snapshot for auth %q", authID)
+	}
+	got := status.RecoveryAt.Sub(status.LastFailure)
+	if got < 58*time.Second || got > 62*time.Second {
+		t.Fatalf("recovery timeout = %v, want around 60s", got)
+	}
+}
+
+func TestOpenAICompatExecutorExecuteStream_MidStreamReadFailureRecordsCircuitBreaker(t *testing.T) {
+	const (
+		providerName = "cb-openai-compat-stream-failure"
+		authID       = "cb-openai-compat-stream-failure-auth"
+		modelID      = "cb-stream-failure-model"
+	)
+
+	oversizedLine := "data: " + strings.Repeat("x", 52_430_000) + "\n\n"
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(oversizedLine))
+	}))
+	defer upstream.Close()
+
+	executor := NewOpenAICompatExecutor(providerName, &config.Config{
+		OpenAICompatibility: []config.OpenAICompatibility{{
+			Name:                           providerName,
+			CircuitBreakerFailureThreshold: 1,
+		}},
+	})
+	auth := &cliproxyauth.Auth{
+		ID:       authID,
+		Provider: providerName,
+		Attributes: map[string]string{
+			"base_url":     upstream.URL + "/v1",
+			"api_key":      "test-key",
+			"compat_name":  providerName,
+			"provider_key": providerName,
+		},
+	}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(authID, providerName, []*registry.ModelInfo{{ID: modelID}})
+	t.Cleanup(func() {
+		reg.ResetCircuitBreaker(authID, modelID)
+		reg.UnregisterClient(authID)
+	})
+
+	stream, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   modelID,
+		Payload: []byte(fmt.Sprintf(`{"model":"%s","messages":[{"role":"user","content":"hi"}],"stream":true}`, modelID)),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAI,
+		Stream:       true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+	if stream == nil {
+		t.Fatal("expected stream result")
+	}
+
+	var gotChunkErr error
+	for chunk := range stream.Chunks {
+		if chunk.Err != nil {
+			gotChunkErr = chunk.Err
+			break
+		}
+	}
+	if gotChunkErr == nil {
+		t.Fatal("expected stream chunk error from oversized SSE line")
+	}
+	if !reg.IsCircuitOpen(authID, modelID) {
+		t.Fatalf("expected circuit to open after mid-stream read failure (model=%q)", modelID)
 	}
 }

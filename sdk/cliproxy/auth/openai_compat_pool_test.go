@@ -189,6 +189,7 @@ func newOpenAICompatPoolTestManager(t *testing.T, alias string, models []interna
 
 	reg := registry.GetGlobalRegistry()
 	reg.RegisterClient(auth.ID, "pool", []*registry.ModelInfo{{ID: alias}})
+	m.RefreshSchedulerEntry(auth.ID)
 	t.Cleanup(func() {
 		reg.UnregisterClient(auth.ID)
 	})
@@ -692,6 +693,8 @@ func TestManagerExecute_OpenAICompatAliasPoolBlockedAuthDoesNotConsumeRetryBudge
 	reg := registry.GetGlobalRegistry()
 	reg.RegisterClient(badAuth.ID, "pool", []*registry.ModelInfo{{ID: alias}})
 	reg.RegisterClient(goodAuth.ID, "pool", []*registry.ModelInfo{{ID: alias}})
+	m.RefreshSchedulerEntry(badAuth.ID)
+	m.RefreshSchedulerEntry(goodAuth.ID)
 	t.Cleanup(func() {
 		reg.UnregisterClient(badAuth.ID)
 		reg.UnregisterClient(goodAuth.ID)
