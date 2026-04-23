@@ -354,6 +354,10 @@ func openAICompatInfoFromAuth(a *coreauth.Auth) (providerKey string, compatName 
 		return "", "", false
 	}
 	if len(a.Attributes) > 0 {
+		// Anthropic-compat entries share compat_name/provider_key attrs but are NOT OpenAI-compat.
+		if a.Attributes["anthropic_compat"] == "true" {
+			return "", "", false
+		}
 		providerKey = strings.TrimSpace(a.Attributes["provider_key"])
 		compatName = strings.TrimSpace(a.Attributes["compat_name"])
 		if compatName != "" {
@@ -888,13 +892,24 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		models = registry.GetAntigravityModels()
 		models = applyExcludedModels(models, excluded)
 	case "claude":
-		models = registry.GetClaudeModels()
-		if entry := s.resolveConfigClaudeKey(a); entry != nil {
-			if len(entry.Models) > 0 {
-				models = buildClaudeConfigModels(entry)
+		// Anthropic-compatible providers route through the Claude executor but have
+		// their own model list derived from the anthropic-compatibility config entry.
+		if a.Attributes != nil && a.Attributes["anthropic_compat"] == "true" {
+			if entry := s.resolveConfigAnthropicCompatEntry(a); entry != nil {
+				models = buildAnthropicCompatConfigModels(entry)
+				if authKind == "apikey" {
+					excluded = entry.ExcludedModels
+				}
 			}
-			if authKind == "apikey" {
-				excluded = entry.ExcludedModels
+		} else {
+			models = registry.GetClaudeModels()
+			if entry := s.resolveConfigClaudeKey(a); entry != nil {
+				if len(entry.Models) > 0 {
+					models = buildClaudeConfigModels(entry)
+				}
+				if authKind == "apikey" {
+					excluded = entry.ExcludedModels
+				}
 			}
 		}
 		models = applyExcludedModels(models, excluded)
@@ -1108,6 +1123,34 @@ func (s *Service) resolveConfigClaudeKey(auth *coreauth.Auth) *config.ClaudeKey 
 		for i := range s.cfg.ClaudeKey {
 			entry := &s.cfg.ClaudeKey[i]
 			if strings.EqualFold(strings.TrimSpace(entry.APIKey), attrKey) {
+				return entry
+			}
+		}
+	}
+	return nil
+}
+
+func (s *Service) resolveConfigAnthropicCompatEntry(auth *coreauth.Auth) *config.AnthropicCompatibility {
+	if auth == nil || s.cfg == nil {
+		return nil
+	}
+	var attrKey, attrBase, compatName string
+	if auth.Attributes != nil {
+		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
+		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
+		compatName = strings.TrimSpace(auth.Attributes["compat_name"])
+	}
+	for i := range s.cfg.AnthropicCompatibility {
+		entry := &s.cfg.AnthropicCompatibility[i]
+		if compatName != "" && strings.EqualFold(entry.Name, compatName) {
+			return entry
+		}
+		cfgBase := strings.TrimSpace(entry.BaseURL)
+		if attrBase != "" && strings.EqualFold(cfgBase, attrBase) {
+			return entry
+		}
+		for j := range entry.APIKeyEntries {
+			if attrKey != "" && strings.EqualFold(strings.TrimSpace(entry.APIKeyEntries[j].APIKey), attrKey) {
 				return entry
 			}
 		}
@@ -1404,6 +1447,17 @@ func buildClaudeConfigModels(entry *config.ClaudeKey) []*ModelInfo {
 		return nil
 	}
 	return buildConfigModels(entry.Models, "anthropic", "claude")
+}
+
+func buildAnthropicCompatConfigModels(entry *config.AnthropicCompatibility) []*ModelInfo {
+	if entry == nil {
+		return nil
+	}
+	ownedBy := strings.ToLower(strings.TrimSpace(entry.Name))
+	if ownedBy == "" {
+		ownedBy = "anthropic-compat"
+	}
+	return buildConfigModels(entry.Models, ownedBy, "claude")
 }
 
 func buildCodexConfigModels(entry *config.CodexKey) []*ModelInfo {
