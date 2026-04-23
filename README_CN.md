@@ -77,6 +77,7 @@ cp config.example.yaml config.yaml
 
 - 仓库仅提供 `state-store.example.ini` 模板，真实状态配置文件需要在本地和生产环境分别维护。
 - 解析规则：`config.yaml` 读取 `state-store.local.ini`，`config-277.yaml` 读取 `state-store.277.ini`。
+- 该 Mongo 配置同时用于熔断强一致失败状态：`circuit_breaker_failure_states` 和 `circuit_breaker_failure_events`。
 
 - **本地开发（推荐）**：`./bin/air`（由 `.air.toml` 管理，等价于使用 `-config config.yaml` 启动）
 - **本地回退启动**：`go run ./cmd/server`

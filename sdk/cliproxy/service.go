@@ -109,6 +109,9 @@ type Service struct {
 	// circuitBreakerDeletionStore records automatic model removal audits.
 	circuitBreakerDeletionStore *mongostate.CircuitBreakerDeletionStore
 
+	// circuitBreakerFailureStore records auth+model failure counts used by routing.
+	circuitBreakerFailureStore *mongostate.CircuitBreakerFailureStore
+
 	// circuitAutoRemoveMu serializes auto-removal mutation for config/runtime state.
 	circuitAutoRemoveMu sync.Mutex
 }
@@ -576,6 +579,9 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 
 	s.applyRetryConfig(s.cfg)
+	if errFailureStore := s.initCircuitBreakerFailureStore(ctx); errFailureStore != nil {
+		return fmt.Errorf("cliproxy: failed to initialize circuit breaker failure store: %w", errFailureStore)
+	}
 	if errAutoRemove := s.initCircuitBreakerAutoRemoval(ctx); errAutoRemove != nil {
 		return fmt.Errorf("cliproxy: failed to initialize circuit breaker auto-removal: %w", errAutoRemove)
 	}
@@ -859,6 +865,17 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		}
 		registry.GetGlobalRegistry().SetCircuitBreakerOpenHook(nil)
 		mongostate.SetGlobalCircuitBreakerDeletionStore(nil)
+		if s.coreManager != nil {
+			s.coreManager.SetCircuitBreakerFailureStore(nil)
+		}
+		if s.circuitBreakerFailureStore != nil {
+			closeCtx, closeCancel := context.WithTimeout(ctx, 10*time.Second)
+			if errClose := s.circuitBreakerFailureStore.Close(closeCtx); errClose != nil {
+				log.Warnf("circuit-breaker failure store close on shutdown failed: %v", errClose)
+			}
+			closeCancel()
+			s.circuitBreakerFailureStore = nil
+		}
 		if s.circuitBreakerDeletionStore != nil {
 			closeCtx, closeCancel := context.WithTimeout(ctx, 10*time.Second)
 			if errClose := s.circuitBreakerDeletionStore.Close(closeCtx); errClose != nil {

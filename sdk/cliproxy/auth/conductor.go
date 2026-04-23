@@ -159,6 +159,9 @@ type Manager struct {
 	// It is initialized in NewManager; never Load() before first Store().
 	runtimeConfig atomic.Value
 
+	// circuitFailureStore is the strong-consistency source for auth+model failure counts.
+	circuitFailureStore CircuitBreakerFailureStore
+
 	// Optional HTTP RoundTripper provider injected by host.
 	rtProvider RoundTripperProvider
 
@@ -199,6 +202,25 @@ func isBuiltInSelector(selector Selector) bool {
 	default:
 		return false
 	}
+}
+
+// SetCircuitBreakerFailureStore attaches the Mongo-backed failure store used by routing.
+func (m *Manager) SetCircuitBreakerFailureStore(store CircuitBreakerFailureStore) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.circuitFailureStore = store
+}
+
+func (m *Manager) getCircuitBreakerFailureStore() CircuitBreakerFailureStore {
+	if m == nil {
+		return nil
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.circuitFailureStore
 }
 
 func (m *Manager) syncSchedulerFromSnapshot(auths []*Auth) {
@@ -664,7 +686,9 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 				if se, ok := errors.AsType[cliproxyexecutor.StatusError](chunk.Err); ok && se != nil {
 					rerr.HTTPStatus = se.StatusCode()
 				}
-				m.MarkResult(ctx, Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr})
+				if errRecord := m.markResult(ctx, Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}); errRecord != nil {
+					chunk = cliproxyexecutor.StreamChunk{Err: errRecord}
+				}
 			}
 			if !forward {
 				return false
@@ -694,7 +718,9 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 			}
 		}
 		if !failed {
-			m.MarkResult(ctx, Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: true})
+			if errRecord := m.markResult(ctx, Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: true}); errRecord != nil {
+				out <- cliproxyexecutor.StreamChunk{Err: errRecord}
+			}
 		}
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: headers, Chunks: out}
@@ -772,13 +798,18 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			if errCtx := ctx.Err(); errCtx != nil {
 				return nil, errCtx
 			}
+			if isRequestInvalidError(errStream) {
+				return nil, errStream
+			}
 			rerr := &Error{Message: errStream.Error()}
 			if se, ok := errors.AsType[cliproxyexecutor.StatusError](errStream); ok && se != nil {
 				rerr.HTTPStatus = se.StatusCode()
 			}
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
 			result.RetryAfter = retryAfterFromError(errStream)
-			m.MarkResult(ctx, result)
+			if errRecord := m.markResult(ctx, result); errRecord != nil {
+				return nil, errRecord
+			}
 			if isRequestInvalidError(errStream) {
 				return nil, errStream
 			}
@@ -793,13 +824,6 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				return nil, errCtx
 			}
 			if isRequestInvalidError(bootstrapErr) {
-				rerr := &Error{Message: bootstrapErr.Error()}
-				if se, ok := errors.AsType[cliproxyexecutor.StatusError](bootstrapErr); ok && se != nil {
-					rerr.HTTPStatus = se.StatusCode()
-				}
-				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
-				result.RetryAfter = retryAfterFromError(bootstrapErr)
-				m.MarkResult(ctx, result)
 				discardStreamChunks(streamResult.Chunks)
 				return nil, bootstrapErr
 			}
@@ -810,7 +834,10 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				}
 				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
 				result.RetryAfter = retryAfterFromError(bootstrapErr)
-				m.MarkResult(ctx, result)
+				if errRecord := m.markResult(ctx, result); errRecord != nil {
+					discardStreamChunks(streamResult.Chunks)
+					return nil, errRecord
+				}
 				discardStreamChunks(streamResult.Chunks)
 				lastErr = bootstrapErr
 				continue
@@ -821,7 +848,10 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			}
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
 			result.RetryAfter = retryAfterFromError(bootstrapErr)
-			m.MarkResult(ctx, result)
+			if errRecord := m.markResult(ctx, result); errRecord != nil {
+				discardStreamChunks(streamResult.Chunks)
+				return nil, errRecord
+			}
 			discardStreamChunks(streamResult.Chunks)
 			return nil, newStreamBootstrapError(bootstrapErr, streamResult.Headers)
 		}
@@ -829,7 +859,9 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		if closed && !streamBootstrapBufferedStarted(opts, buffered) {
 			emptyErr := &Error{Code: "empty_stream", Message: "upstream stream closed before first payload", Retryable: true}
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: emptyErr}
-			m.MarkResult(ctx, result)
+			if errRecord := m.markResult(ctx, result); errRecord != nil {
+				return nil, errRecord
+			}
 			if idx < len(execModels)-1 {
 				lastErr = emptyErr
 				continue
@@ -1292,14 +1324,18 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				if ra := retryAfterFromError(errExec); ra != nil {
 					result.RetryAfter = ra
 				}
-				m.MarkResult(execCtx, result)
 				if isRequestInvalidError(errExec) {
 					return cliproxyexecutor.Response{}, errExec
+				}
+				if errRecord := m.markResult(execCtx, result); errRecord != nil {
+					return cliproxyexecutor.Response{}, errRecord
 				}
 				authErr = errExec
 				continue
 			}
-			m.MarkResult(execCtx, result)
+			if errRecord := m.markResult(execCtx, result); errRecord != nil {
+				return cliproxyexecutor.Response{}, errRecord
+			}
 			return resp, nil
 		}
 		if authErr != nil {
@@ -1370,14 +1406,18 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				if ra := retryAfterFromError(errExec); ra != nil {
 					result.RetryAfter = ra
 				}
-				m.MarkResult(execCtx, result)
 				if isRequestInvalidError(errExec) {
 					return cliproxyexecutor.Response{}, errExec
+				}
+				if errRecord := m.markResult(execCtx, result); errRecord != nil {
+					return cliproxyexecutor.Response{}, errRecord
 				}
 				authErr = errExec
 				continue
 			}
-			m.MarkResult(execCtx, result)
+			if errRecord := m.markResult(execCtx, result); errRecord != nil {
+				return cliproxyexecutor.Response{}, errRecord
+			}
 			return resp, nil
 		}
 		if authErr != nil {
@@ -1938,10 +1978,52 @@ func waitForCooldown(ctx context.Context, wait time.Duration) error {
 	}
 }
 
-// MarkResult records an execution result and notifies hooks.
-func (m *Manager) MarkResult(ctx context.Context, result Result) {
+func (m *Manager) recordCircuitBreakerFailureStoreResult(ctx context.Context, result Result) error {
+	store := m.getCircuitBreakerFailureStore()
+	if store == nil || strings.TrimSpace(result.AuthID) == "" || strings.TrimSpace(result.Model) == "" {
+		return nil
+	}
+	model := normalizeCircuitBreakerModelID(result.Model)
+	if model == "" {
+		return nil
+	}
+	if result.Success {
+		if err := store.ResetFailure(ctx, result.Provider, result.AuthID, model); err != nil {
+			return circuitBreakerFailureStoreError("reset", err)
+		}
+		return nil
+	}
+	if isRequestInvalidError(result.Error) {
+		return nil
+	}
+	reason := ""
+	status := 0
+	if result.Error != nil {
+		reason = result.Error.Message
+		status = statusCodeFromResult(result.Error)
+	}
+	event := CircuitBreakerFailureEvent{
+		RequestID:       logging.GetRequestID(ctx),
+		Provider:        result.Provider,
+		AuthID:          result.AuthID,
+		Model:           model,
+		NormalizedModel: model,
+		Reason:          reason,
+		HTTPStatus:      status,
+		CreatedAt:       time.Now().UTC(),
+	}
+	if _, err := store.RecordFailure(ctx, event); err != nil {
+		return circuitBreakerFailureStoreError("record", err)
+	}
+	return nil
+}
+
+func (m *Manager) markResult(ctx context.Context, result Result) error {
 	if result.AuthID == "" {
-		return
+		return nil
+	}
+	if err := m.recordCircuitBreakerFailureStoreResult(ctx, result); err != nil {
+		return err
 	}
 
 	shouldResumeModel := false
@@ -2075,6 +2157,14 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	}
 
 	m.hook.OnResult(ctx, result)
+	return nil
+}
+
+// MarkResult records an execution result and notifies hooks.
+func (m *Manager) MarkResult(ctx context.Context, result Result) {
+	if err := m.markResult(ctx, result); err != nil {
+		log.Warnf("mark result skipped after circuit breaker failure store error: %v", err)
+	}
 }
 
 func normalizeCircuitBreakerModelID(model string) string {
@@ -2557,6 +2647,54 @@ func shouldRetrySchedulerPick(err error) bool {
 	return false
 }
 
+func mergeTriedAuths(tried map[string]struct{}, extra map[string]struct{}) map[string]struct{} {
+	if len(extra) == 0 {
+		return tried
+	}
+	merged := make(map[string]struct{}, len(tried)+len(extra))
+	for key := range tried {
+		merged[key] = struct{}{}
+	}
+	for key := range extra {
+		merged[key] = struct{}{}
+	}
+	return merged
+}
+
+func (m *Manager) deferredCircuitBreakerFailureAuths(ctx context.Context, model string) (map[string]struct{}, error) {
+	store := m.getCircuitBreakerFailureStore()
+	if store == nil {
+		return nil, nil
+	}
+	modelKey := normalizeCircuitBreakerModelID(model)
+	if modelKey == "" {
+		return nil, nil
+	}
+	counts, err := store.GetFailureCounts(ctx, modelKey)
+	if err != nil {
+		return nil, circuitBreakerFailureStoreError("read", err)
+	}
+	if len(counts) == 0 {
+		return nil, nil
+	}
+	deferAt := registry.DefaultCircuitBreakerFailureThreshold - 1
+	if deferAt < 1 {
+		deferAt = 1
+	}
+	deferred := make(map[string]struct{})
+	for authID, count := range counts {
+		authID = strings.TrimSpace(authID)
+		if authID == "" || count < deferAt {
+			continue
+		}
+		deferred[authID] = struct{}{}
+	}
+	if len(deferred) == 0 {
+		return nil, nil
+	}
+	return deferred, nil
+}
+
 func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, error) {
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
 
@@ -2652,6 +2790,19 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 }
 
 func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
+	deferredAuths, errDeferred := m.deferredCircuitBreakerFailureAuths(ctx, model)
+	if errDeferred != nil {
+		return nil, nil, "", errDeferred
+	}
+	if len(deferredAuths) > 0 {
+		if auth, executor, provider, errPick := m.pickNextMixedLegacyOnce(ctx, providers, model, opts, mergeTriedAuths(tried, deferredAuths)); errPick == nil {
+			return auth, executor, provider, nil
+		}
+	}
+	return m.pickNextMixedLegacyOnce(ctx, providers, model, opts, tried)
+}
+
+func (m *Manager) pickNextMixedLegacyOnce(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
 
 	providerSet := make(map[string]struct{}, len(providers))
@@ -2760,6 +2911,35 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 	}
 	if len(eligibleProviders) == 0 {
 		return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
+	}
+
+	deferredAuths, errDeferred := m.deferredCircuitBreakerFailureAuths(ctx, model)
+	if errDeferred != nil {
+		return nil, nil, "", errDeferred
+	}
+	if len(deferredAuths) > 0 {
+		preferredTried := mergeTriedAuths(tried, deferredAuths)
+		selected, providerKey, errPick := m.scheduler.pickMixed(ctx, eligibleProviders, model, opts, preferredTried)
+		if errPick != nil && model != "" && shouldRetrySchedulerPick(errPick) {
+			m.syncScheduler()
+			selected, providerKey, errPick = m.scheduler.pickMixed(ctx, eligibleProviders, model, opts, preferredTried)
+		}
+		if errPick == nil && selected != nil {
+			executor, okExecutor := m.Executor(providerKey)
+			if !okExecutor {
+				return nil, nil, "", &Error{Code: "executor_not_found", Message: "executor not registered"}
+			}
+			authCopy := selected.Clone()
+			if !selected.indexAssigned {
+				m.mu.Lock()
+				if current := m.auths[authCopy.ID]; current != nil && !current.indexAssigned {
+					current.EnsureIndex()
+					authCopy = current.Clone()
+				}
+				m.mu.Unlock()
+			}
+			return authCopy, executor, providerKey, nil
+		}
 	}
 
 	selected, providerKey, errPick := m.scheduler.pickMixed(ctx, eligibleProviders, model, opts, tried)

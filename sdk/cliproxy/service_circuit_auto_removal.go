@@ -141,6 +141,12 @@ func normalizeModelForAutoRemoval(auth *coreauth.Auth, modelID string) string {
 			}
 		}
 	}
+	if idx := strings.LastIndex(model, ":"); idx > 0 {
+		switch strings.ToLower(strings.TrimSpace(model[idx+1:])) {
+		case "low", "medium", "high", "xhigh":
+			model = strings.TrimSpace(model[:idx])
+		}
+	}
 	return strings.TrimSpace(model)
 }
 
