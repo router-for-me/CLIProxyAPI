@@ -85,6 +85,10 @@ type Config struct {
 	// Routing controls credential selection behavior.
 	Routing RoutingConfig `yaml:"routing" json:"routing"`
 
+	// CircuitBreakerAutoRemoval controls automatic model removal after repeated
+	// circuit breaker OPEN transitions on the same auth+model pair.
+	CircuitBreakerAutoRemoval CircuitBreakerAutoRemovalConfig `yaml:"circuit-breaker-auto-removal" json:"circuit-breaker-auto-removal"`
+
 	// WebsocketAuth enables or disables authentication for the WebSocket API.
 	WebsocketAuth bool `yaml:"ws-auth" json:"ws-auth"`
 
@@ -204,6 +208,35 @@ type RoutingConfig struct {
 	// Strategy selects the credential selection strategy.
 	// Supported values: "round-robin" (default), "fill-first".
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
+}
+
+// CircuitBreakerAutoRemovalConfig controls automatic model removal after
+// repeated circuit-breaker OPEN transitions.
+type CircuitBreakerAutoRemovalConfig struct {
+	// Enabled toggles automatic model removal.
+	// Default is true when omitted.
+	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	// AutoRemoveThreshold defines how many OPEN cycles are required before
+	// automatic model removal is triggered. Values <= 0 use runtime default.
+	AutoRemoveThreshold int `yaml:"auto-remove-threshold,omitempty" json:"auto-remove-threshold,omitempty"`
+}
+
+const DefaultCircuitBreakerAutoRemoveThreshold = 3
+
+// EnabledOrDefault returns whether automatic model removal is enabled.
+func (c CircuitBreakerAutoRemovalConfig) EnabledOrDefault() bool {
+	if c.Enabled == nil {
+		return true
+	}
+	return *c.Enabled
+}
+
+// ThresholdOrDefault returns the configured OPEN-cycle threshold, or default.
+func (c CircuitBreakerAutoRemovalConfig) ThresholdOrDefault() int {
+	if c.AutoRemoveThreshold <= 0 {
+		return DefaultCircuitBreakerAutoRemoveThreshold
+	}
+	return c.AutoRemoveThreshold
 }
 
 // OAuthModelAlias defines a model ID alias for a specific channel.
@@ -510,12 +543,12 @@ type OpenAICompatibility struct {
 	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
 
 	// CircuitBreakerFailureThreshold sets the number of consecutive failures required to open
-	// the circuit breaker for a credential-model pair. A value of 0 disables circuit breaking.
+	// the circuit breaker for a credential-model pair. A value of 0 uses the runtime default.
 	CircuitBreakerFailureThreshold int `yaml:"circuit-breaker-failure-threshold,omitempty" json:"circuit-breaker-failure-threshold,omitempty"`
 
 	// CircuitBreakerRecoveryTimeout specifies the base wait time in seconds before transitioning
 	// from OPEN to HALF-OPEN state. Subsequent re-openings use exponential backoff (timeout * 2^n).
-	// Defaults to 60 seconds.
+	// Defaults to 60 seconds when omitted or <= 0.
 	CircuitBreakerRecoveryTimeout int `yaml:"circuit-breaker-recovery-timeout,omitempty" json:"circuit-breaker-recovery-timeout,omitempty"`
 }
 

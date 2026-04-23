@@ -19,10 +19,14 @@ type PayloadConfig = internalconfig.PayloadConfig
 type PayloadRule = internalconfig.PayloadRule
 type PayloadFilterRule = internalconfig.PayloadFilterRule
 type PayloadModelRule = internalconfig.PayloadModelRule
+type CircuitBreakerAutoRemovalConfig = internalconfig.CircuitBreakerAutoRemovalConfig
 
 type GeminiKey = internalconfig.GeminiKey
+type GeminiModel = internalconfig.GeminiModel
 type CodexKey = internalconfig.CodexKey
+type CodexModel = internalconfig.CodexModel
 type ClaudeKey = internalconfig.ClaudeKey
+type ClaudeModel = internalconfig.ClaudeModel
 type VertexCompatKey = internalconfig.VertexCompatKey
 type VertexCompatModel = internalconfig.VertexCompatModel
 type OpenAICompatibility = internalconfig.OpenAICompatibility
