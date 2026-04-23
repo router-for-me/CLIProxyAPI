@@ -384,6 +384,64 @@ func TestToolCallOutputWithFileContent(t *testing.T) {
 	}
 }
 
+func TestToolCallOutputWithFilenameOnlyFileFallsBackToText(t *testing.T) {
+	input := []byte(`{
+		"model": "gpt-4o",
+		"messages": [
+			{"role": "user", "content": "Process this file"},
+			{
+				"role": "assistant",
+				"content": null,
+				"tool_calls": [
+					{
+						"id": "call_file_2",
+						"type": "function",
+						"function": {"name": "process_files", "arguments": "{}"}
+					}
+				]
+			},
+			{
+				"role": "tool",
+				"tool_call_id": "call_file_2",
+				"content": [
+					{"type": "file", "file": {"filename": "orphan.txt"}}
+				]
+			}
+		],
+		"tools": [
+			{
+				"type": "function",
+				"function": {"name": "process_files", "description": "Process", "parameters": {"type": "object", "properties": {}}}
+			}
+		]
+	}`)
+
+	out := ConvertOpenAIRequestToCodex("gpt-4o", input, true)
+	result := string(out)
+
+	items := gjson.Get(result, "input").Array()
+	if len(items) != 3 {
+		t.Fatalf("expected 3 input items, got %d: %s", len(items), gjson.Get(result, "input").Raw)
+	}
+
+	output := items[2].Get("output")
+	if !output.IsArray() {
+		t.Fatalf("expected tool output to be an array, got: %s", output.Raw)
+	}
+
+	parts := output.Array()
+	if len(parts) != 1 {
+		t.Fatalf("expected 1 output part, got %d: %s", len(parts), output.Raw)
+	}
+
+	if parts[0].Get("type").String() != "input_text" {
+		t.Errorf("part 0: expected input_text, got %s", parts[0].Get("type").String())
+	}
+	if parts[0].Get("text").String() != `{"type": "file", "file": {"filename": "orphan.txt"}}` {
+		t.Errorf("part 0: unexpected fallback text %s", parts[0].Get("text").String())
+	}
+}
+
 func TestToolCallOutputWithNullContent(t *testing.T) {
 	input := []byte(`{
 		"model": "gpt-4o",
