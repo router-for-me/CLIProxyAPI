@@ -60,6 +60,11 @@ type ModelInfo struct {
 	// array (e.g., openai-compatibility.*.models[], *-api-key.models[]).
 	// UserDefined models have thinking configuration passed through without validation.
 	UserDefined bool `json:"-"`
+
+	// RouteTarget optionally overrides the actual invocation target for this model.
+	// When set, it is used instead of Name when constructing the upstream request URL.
+	// Currently used for AWS Bedrock inference profile ARNs.
+	RouteTarget string `json:"-"`
 }
 
 type availableModelsCacheEntry struct {

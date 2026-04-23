@@ -1568,6 +1568,7 @@ func buildAWSBedrockConfigModels(entry *config.AWSBedrockKey) []*ModelInfo {
 			DisplayName: display,
 			UserDefined: true,
 			Thinking:    thinkingSupport,
+			RouteTarget: strings.TrimSpace(model.ID),
 		}
 		out = append(out, info)
 	}

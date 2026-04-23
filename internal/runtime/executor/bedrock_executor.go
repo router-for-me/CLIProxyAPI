@@ -306,7 +306,11 @@ func (e *BedrockExecutor) prepareBedrockRequest(auth *cliproxyauth.Auth, req cli
 	var modelInfo *registry.ModelInfo
 	if info := registry.GetGlobalRegistry().GetModelInfo(req.Model, provider); info != nil {
 		modelInfo = info
-		if info.Name != "" {
+		// RouteTarget (e.g., inference profile ARN) takes precedence over Name
+		// when constructing the upstream Bedrock request URL.
+		if info.RouteTarget != "" {
+			modelID = info.RouteTarget
+		} else if info.Name != "" {
 			modelID = info.Name
 		}
 	}
