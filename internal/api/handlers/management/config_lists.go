@@ -180,17 +180,25 @@ func (h *Handler) PatchGeminiKey(c *gin.Context) {
 				baseURL = strings.TrimSpace(*body.BaseURL)
 			}
 			matchCount := 0
+			filteredCount := 0
 			for i := range h.cfg.GeminiKey {
 				if strings.TrimSpace(h.cfg.GeminiKey[i].APIKey) != match {
 					continue
 				}
 				matchCount++
 				if !hasBaseURL || strings.TrimSpace(h.cfg.GeminiKey[i].BaseURL) == baseURL {
-					targetIndex = i
+					filteredCount++
+					if targetIndex == -1 {
+						targetIndex = i
+					}
 				}
 			}
 			if matchCount > 1 && !hasBaseURL {
 				c.JSON(400, gin.H{"error": "multiple items match api-key; base-url is required"})
+				return
+			}
+			if hasBaseURL && filteredCount > 1 {
+				c.JSON(400, gin.H{"error": "multiple items match api-key and base-url"})
 				return
 			}
 		}
@@ -355,17 +363,25 @@ func (h *Handler) PatchClaudeKey(c *gin.Context) {
 				baseURL = strings.TrimSpace(*body.BaseURL)
 			}
 			matchCount := 0
+			filteredCount := 0
 			for i := range h.cfg.ClaudeKey {
 				if strings.TrimSpace(h.cfg.ClaudeKey[i].APIKey) != match {
 					continue
 				}
 				matchCount++
 				if !hasBaseURL || strings.TrimSpace(h.cfg.ClaudeKey[i].BaseURL) == baseURL {
-					targetIndex = i
+					filteredCount++
+					if targetIndex == -1 {
+						targetIndex = i
+					}
 				}
 			}
 			if matchCount > 1 && !hasBaseURL {
 				c.JSON(400, gin.H{"error": "multiple items match api-key; base-url is required"})
+				return
+			}
+			if hasBaseURL && filteredCount > 1 {
+				c.JSON(400, gin.H{"error": "multiple items match api-key and base-url"})
 				return
 			}
 		}
@@ -564,7 +580,7 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 func (h *Handler) DeleteOpenAICompat(c *gin.Context) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if name := c.Query("name"); name != "" {
+	if name := strings.TrimSpace(c.Query("name")); name != "" {
 		out := make([]config.OpenAICompatibility, 0, len(h.cfg.OpenAICompatibility))
 		removed := false
 		for _, v := range h.cfg.OpenAICompatibility {
@@ -666,17 +682,25 @@ func (h *Handler) PatchVertexCompatKey(c *gin.Context) {
 				baseURL = strings.TrimSpace(*body.BaseURL)
 			}
 			matchCount := 0
+			filteredCount := 0
 			for i := range h.cfg.VertexCompatAPIKey {
 				if strings.TrimSpace(h.cfg.VertexCompatAPIKey[i].APIKey) != match {
 					continue
 				}
 				matchCount++
 				if !hasBaseURL || strings.TrimSpace(h.cfg.VertexCompatAPIKey[i].BaseURL) == baseURL {
-					targetIndex = i
+					filteredCount++
+					if targetIndex == -1 {
+						targetIndex = i
+					}
 				}
 			}
 			if matchCount > 1 && !hasBaseURL {
 				c.JSON(400, gin.H{"error": "multiple items match api-key; base-url is required"})
+				return
+			}
+			if hasBaseURL && filteredCount > 1 {
+				c.JSON(400, gin.H{"error": "multiple items match api-key and base-url"})
 				return
 			}
 		}
