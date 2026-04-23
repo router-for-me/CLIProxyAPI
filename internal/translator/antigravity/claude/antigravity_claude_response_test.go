@@ -1,6 +1,7 @@
 package claude
 
 import (
+	"bytes"
 	"context"
 	"strings"
 	"testing"
@@ -242,5 +243,107 @@ func TestConvertAntigravityResponseToClaude_MultipleThinkingBlocks(t *testing.T)
 	// Verify second signature cached
 	if cache.GetCachedSignature("claude-sonnet-4-5-thinking", secondThinkingText) != validSig2 {
 		t.Error("Second thinking block signature should be cached")
+	}
+}
+
+func TestConvertAntigravityResponseToClaude_TextAndSignatureInSameChunk(t *testing.T) {
+	cache.ClearSignatureCache("")
+
+	requestJSON := []byte(`{
+		"model": "claude-sonnet-4-5-thinking",
+		"messages": [{"role": "user", "content": [{"type": "text", "text": "Test"}]}]
+	}`)
+
+	validSignature := "RtestSig1234567890123456789012345678901234567890123456789"
+
+	// Chunk 1: thinking text only (no signature)
+	chunk1 := []byte(`{
+		"response": {
+			"candidates": [{
+				"content": {
+					"parts": [{"text": "First part.", "thought": true}]
+				}
+			}]
+		}
+	}`)
+
+	// Chunk 2: thinking text AND signature in the same part
+	chunk2 := []byte(`{
+		"response": {
+			"candidates": [{
+				"content": {
+					"parts": [{"text": " Second part.", "thought": true, "thoughtSignature": "` + validSignature + `"}]
+				}
+			}]
+		}
+	}`)
+
+	var param any
+	ctx := context.Background()
+
+	result1 := ConvertAntigravityResponseToClaude(ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, chunk1, &param)
+	result2 := ConvertAntigravityResponseToClaude(ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, chunk2, &param)
+
+	allOutput := string(bytes.Join(result1, nil)) + string(bytes.Join(result2, nil))
+
+	// The text " Second part." must appear as a thinking_delta, not be silently dropped
+	if !strings.Contains(allOutput, "Second part.") {
+		t.Error("Text co-located with signature must be emitted as thinking_delta before the signature")
+	}
+
+	// The signature must also be emitted
+	if !strings.Contains(allOutput, "signature_delta") {
+		t.Error("Signature delta must still be emitted")
+	}
+
+	// Verify the cached signature covers the FULL text (both parts)
+	fullText := "First part. Second part."
+	cachedSig := cache.GetCachedSignature("claude-sonnet-4-5-thinking", fullText)
+	if cachedSig != validSignature {
+		t.Errorf("Cached signature should cover full text %q, got sig=%q", fullText, cachedSig)
+	}
+}
+
+func TestConvertAntigravityResponseToClaude_SignatureOnlyChunk(t *testing.T) {
+	cache.ClearSignatureCache("")
+
+	requestJSON := []byte(`{
+		"model": "claude-sonnet-4-5-thinking",
+		"messages": [{"role": "user", "content": [{"type": "text", "text": "Test"}]}]
+	}`)
+
+	validSignature := "RtestSig1234567890123456789012345678901234567890123456789"
+
+	// Chunk 1: thinking text
+	chunk1 := []byte(`{
+		"response": {
+			"candidates": [{
+				"content": {
+					"parts": [{"text": "Full thinking text.", "thought": true}]
+				}
+			}]
+		}
+	}`)
+
+	// Chunk 2: signature only (empty text) — the normal case
+	chunk2 := []byte(`{
+		"response": {
+			"candidates": [{
+				"content": {
+					"parts": [{"text": "", "thought": true, "thoughtSignature": "` + validSignature + `"}]
+				}
+			}]
+		}
+	}`)
+
+	var param any
+	ctx := context.Background()
+
+	ConvertAntigravityResponseToClaude(ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, chunk1, &param)
+	ConvertAntigravityResponseToClaude(ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, chunk2, &param)
+
+	cachedSig := cache.GetCachedSignature("claude-sonnet-4-5-thinking", "Full thinking text.")
+	if cachedSig != validSignature {
+		t.Errorf("Signature-only chunk should still cache correctly, got %q", cachedSig)
 	}
 }

@@ -32,7 +32,7 @@ func TestForwardResponsesStreamTerminalErrorUsesResponsesErrorChunk(t *testing.T
 	errs <- &interfaces.ErrorMessage{StatusCode: http.StatusInternalServerError, Error: errors.New("unexpected EOF")}
 	close(errs)
 
-	h.forwardResponsesStream(c, flusher, func(error) {}, data, errs)
+	h.forwardResponsesStream(c, flusher, func(error) {}, data, errs, nil)
 	body := recorder.Body.String()
 	if !strings.Contains(body, `"type":"error"`) {
 		t.Fatalf("expected responses error chunk, got: %q", body)

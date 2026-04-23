@@ -165,29 +165,22 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 	// Process messages and transform them to Claude Code format
 	if messages := root.Get("messages"); messages.Exists() && messages.IsArray() {
 		messageIndex := 0
-		systemMessageIndex := -1
 		messages.ForEach(func(_, message gjson.Result) bool {
 			role := message.Get("role").String()
 			contentResult := message.Get("content")
 
 			switch role {
 			case "system":
-				if systemMessageIndex == -1 {
-					systemMsg := []byte(`{"role":"user","content":[]}`)
-					out, _ = sjson.SetRawBytes(out, "messages.-1", systemMsg)
-					systemMessageIndex = messageIndex
-					messageIndex++
-				}
 				if contentResult.Exists() && contentResult.Type == gjson.String && contentResult.String() != "" {
 					textPart := []byte(`{"type":"text","text":""}`)
 					textPart, _ = sjson.SetBytes(textPart, "text", contentResult.String())
-					out, _ = sjson.SetRawBytes(out, fmt.Sprintf("messages.%d.content.-1", systemMessageIndex), textPart)
+					out, _ = sjson.SetRawBytes(out, "system.-1", textPart)
 				} else if contentResult.Exists() && contentResult.IsArray() {
 					contentResult.ForEach(func(_, part gjson.Result) bool {
 						if part.Get("type").String() == "text" {
 							textPart := []byte(`{"type":"text","text":""}`)
 							textPart, _ = sjson.SetBytes(textPart, "text", part.Get("text").String())
-							out, _ = sjson.SetRawBytes(out, fmt.Sprintf("messages.%d.content.-1", systemMessageIndex), textPart)
+							out, _ = sjson.SetRawBytes(out, "system.-1", textPart)
 						}
 						return true
 					})
@@ -269,6 +262,16 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 			}
 			return true
 		})
+
+		// Preserve a minimal conversational turn for system-only inputs.
+		// Claude payloads with top-level system instructions but no messages are risky for downstream validation.
+		if messageIndex == 0 {
+			system := gjson.GetBytes(out, "system")
+			if system.Exists() && system.IsArray() && len(system.Array()) > 0 {
+				fallbackMsg := []byte(`{"role":"user","content":[{"type":"text","text":""}]}`)
+				out, _ = sjson.SetRawBytes(out, "messages.-1", fallbackMsg)
+			}
+		}
 	}
 
 	// Tools mapping: OpenAI tools -> Claude Code tools

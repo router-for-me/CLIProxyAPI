@@ -1,0 +1,7 @@
+{
+  "type": "system",
+  "subtype": "session_state_changed",
+  "state": "requires_action",
+  "uuid": "22222222-2222-4222-8222-222222222222",
+  "session_id": "sess_123"
+}
