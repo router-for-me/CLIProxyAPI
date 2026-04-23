@@ -2903,15 +2903,19 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 	return authCopy, executor, providerKey, nil
 }
 
-func (m *Manager) findAllAntigravityCreditsCandidateAuths(routeModel string) []creditsCandidateEntry {
+func (m *Manager) findAllAntigravityCreditsCandidateAuths(routeModel string, opts cliproxyexecutor.Options) []creditsCandidateEntry {
 	if m == nil {
 		return nil
 	}
+	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	var candidates []creditsCandidateEntry
 	for _, auth := range m.auths {
 		if auth == nil || auth.Disabled || auth.Status == StatusDisabled {
+			continue
+		}
+		if pinnedAuthID != "" && auth.ID != pinnedAuthID {
 			continue
 		}
 		if !antigravityCreditsAvailableForModel(auth, routeModel) {
@@ -2981,7 +2985,7 @@ func shouldAttemptAntigravityCreditsFallback(m *Manager, lastErr error, provider
 
 func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, bool) {
 	routeModel := req.Model
-	candidates := m.findAllAntigravityCreditsCandidateAuths(routeModel)
+	candidates := m.findAllAntigravityCreditsCandidateAuths(routeModel, opts)
 	for _, c := range candidates {
 		if ctx.Err() != nil {
 			return cliproxyexecutor.Response{}, false
@@ -3023,7 +3027,7 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 
 func (m *Manager) tryAntigravityCreditsExecuteStream(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, bool) {
 	routeModel := req.Model
-	candidates := m.findAllAntigravityCreditsCandidateAuths(routeModel)
+	candidates := m.findAllAntigravityCreditsCandidateAuths(routeModel, opts)
 	for _, c := range candidates {
 		if ctx.Err() != nil {
 			return nil, false

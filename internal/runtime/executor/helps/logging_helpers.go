@@ -134,6 +134,10 @@ func RecordAPIResponseMetadata(ctx context.Context, cfg *config.Config, status i
 	// Success responses (2xx) skip this — their deferred body is dropped with gin context.
 	if status >= http.StatusBadRequest {
 		materializeDeferredBodies(ginCtx, attempts)
+	} else {
+		for _, a := range attempts {
+			a.deferredBody = nil
+		}
 	}
 
 	ensureResponseIntro(attempt)
