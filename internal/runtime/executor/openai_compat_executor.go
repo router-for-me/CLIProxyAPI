@@ -104,7 +104,10 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		}
 	}
 
-	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
+	// Use requestedModel (client-visible name before alias resolution) for thinking
+	// registry lookups. req.Model has already been rewritten to the upstream name,
+	// which would miss user-defined levels configured under the alias.
+	translated, err = thinking.ApplyThinking(translated, requestedModel, from.String(), to.String(), e.Identifier())
 	if err != nil {
 		return resp, err
 	}
@@ -201,7 +204,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	translated = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", translated, originalTranslated, requestedModel)
 
-	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
+	translated, err = thinking.ApplyThinking(translated, requestedModel, from.String(), to.String(), e.Identifier())
 	if err != nil {
 		return nil, err
 	}
@@ -322,7 +325,8 @@ func (e *OpenAICompatExecutor) CountTokens(ctx context.Context, auth *cliproxyau
 
 	modelForCounting := baseModel
 
-	translated, err := thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
+	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
+	translated, err := thinking.ApplyThinking(translated, requestedModel, from.String(), to.String(), e.Identifier())
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
