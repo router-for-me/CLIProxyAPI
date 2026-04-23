@@ -106,8 +106,9 @@ func (s *codexWebsocketSession) setActive(ch chan codexWebsocketRead) <-chan str
 	if s == nil {
 		return nil
 	}
-	// 该方法仅持有 activeMu 调用避免与 connMu->activeMu 锁序冲突
-	// 不要在持有 connMu 时调用避免未来引入反向锁序
+	// This helper only takes activeMu to avoid conflicting with the
+	// connMu -> activeMu lock ordering used elsewhere.
+	// Do not call it while holding connMu to avoid future lock inversion.
 	s.activeMu.Lock()
 	if s.activeCancel != nil {
 		s.activeCancel()
@@ -129,8 +130,9 @@ func (s *codexWebsocketSession) clearActive(ch chan codexWebsocketRead) {
 	if s == nil {
 		return
 	}
-	// 该方法仅持有 activeMu 调用避免与 connMu->activeMu 锁序冲突
-	// 不要在持有 connMu 时调用避免未来引入反向锁序
+	// This helper only takes activeMu to avoid conflicting with the
+	// connMu -> activeMu lock ordering used elsewhere.
+	// Do not call it while holding connMu to avoid future lock inversion.
 	s.activeMu.Lock()
 	if s.activeCh == ch {
 		s.activeCh = nil
@@ -157,7 +159,7 @@ func (s *codexWebsocketSession) activeSnapshotForCurrentConn(conn *websocket.Con
 	if s == nil || conn == nil {
 		return nil, nil, false
 	}
-	// 锁顺序固定为 connMu -> activeMu
+	// Keep the lock order fixed as connMu -> activeMu.
 	s.connMu.Lock()
 	if s.conn != conn {
 		s.connMu.Unlock()
@@ -1191,13 +1193,15 @@ func (e *CodexWebsocketsExecutor) ensureUpstreamConn(ctx context.Context, auth *
 	currentAuthID := strings.TrimSpace(sess.authID)
 	sess.connMu.Unlock()
 	if conn != nil && currentAuthID != authID {
-		// 账号切换时先断开旧连接避免继续复用旧账号
+		// Drop the old upstream connection before switching auths so the next
+		// request cannot keep using the previous auth.
 		e.invalidateUpstreamConn(sess, conn, "auth_switched", nil)
 		conn = nil
 		readerConn = nil
 	}
 	if conn != nil {
-		// 账号未变化时复用连接减少不必要重连
+		// Reuse the existing connection when the auth is unchanged to avoid
+		// unnecessary reconnects.
 		if readerConn != conn {
 			sess.connMu.Lock()
 			sess.readerConn = conn
@@ -1240,16 +1244,19 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 	}
 	for {
 		if !sess.isCurrentConn(conn) {
-			// 旧连接读循环直接退出避免误伤新请求通道
+			// Stop stale reader loops immediately so they cannot interfere with
+			// the current request channel.
 			return
 		}
 		_ = conn.SetReadDeadline(time.Now().Add(codexResponsesWebsocketIdleTimeout))
 		msgType, payload, errRead := conn.ReadMessage()
 		if errRead != nil {
-			// 在同一临界区做归属校验和通道快照避免检查后竞态
+			// Snapshot ownership and the active channel inside one critical
+			// section to avoid check-then-use races.
 			ch, done, current := sess.activeSnapshotForCurrentConn(conn)
 			if !current {
-				// 旧连接读错时不触碰当前活跃通道
+				// A stale connection read error must not touch the current
+				// active request channel.
 				return
 			}
 			if ch != nil {
@@ -1262,10 +1269,12 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 		if msgType != websocket.TextMessage {
 			if msgType == websocket.BinaryMessage {
 				errBinary := fmt.Errorf("codex websockets executor: unexpected binary message")
-				// 在同一临界区做归属校验和通道快照避免检查后竞态
+				// Snapshot ownership and the active channel inside one critical
+				// section to avoid check-then-use races.
 				ch, done, current := sess.activeSnapshotForCurrentConn(conn)
 				if !current {
-					// 旧连接二进制异常时不触碰当前活跃通道
+					// A stale connection binary error must not touch the current
+					// active request channel.
 					return
 				}
 				if ch != nil {
@@ -1276,10 +1285,11 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 			}
 			continue
 		}
-		// 在同一临界区做归属校验和通道快照避免检查后竞态
+		// Snapshot ownership and the active channel inside one critical
+		// section to avoid check-then-use races.
 		ch, done, current := sess.activeSnapshotForCurrentConn(conn)
 		if !current {
-			// 旧连接消息不再分发给新连接请求
+			// Do not forward stale connection messages to the current request.
 			return
 		}
 		if ch == nil {
@@ -1382,7 +1392,7 @@ func closeCodexWebsocketSession(sess *codexWebsocketSession, reason string) {
 		reason = "session_closed"
 	}
 
-	// 锁顺序固定为 connMu -> activeMu
+	// Keep the lock order fixed as connMu -> activeMu.
 	sess.connMu.Lock()
 	conn := sess.conn
 	authID := sess.authID
