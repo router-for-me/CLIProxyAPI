@@ -127,7 +127,6 @@ func TestAntigravityShouldRetryNoCapacity_Standard503(t *testing.T) {
 	}
 }
 
-
 func TestInjectEnabledCreditTypes(t *testing.T) {
 	body := []byte(`{"model":"claude-sonnet-4-6","request":{}}`)
 	got := injectEnabledCreditTypes(body)
@@ -157,7 +156,6 @@ func TestParseRetryDelay_HumanReadableDuration(t *testing.T) {
 		t.Fatalf("parseRetryDelay() = %v, want %v", *retryAfter, want)
 	}
 }
-
 
 func TestAntigravityExecute_RetriesTransient429ResourceExhausted(t *testing.T) {
 	resetAntigravityCreditsRetryState()
