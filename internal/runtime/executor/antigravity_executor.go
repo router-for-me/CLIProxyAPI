@@ -586,7 +586,19 @@ func clearAntigravityCreditsPermanentlyDisabled(auth *cliproxyauth.Auth) {
 	if auth == nil || strings.TrimSpace(auth.ID) == "" {
 		return
 	}
-	antigravityCreditsFailureByAuth.Delete(strings.TrimSpace(auth.ID))
+	authID := strings.TrimSpace(auth.ID)
+	val, ok := antigravityCreditsFailureByAuth.Load(authID)
+	if !ok {
+		return
+	}
+	state, valid := val.(antigravityCreditsFailureState)
+	if !valid {
+		antigravityCreditsFailureByAuth.Delete(authID)
+		return
+	}
+	if state.PermanentlyDisabled || state.ExplicitBalanceExhausted {
+		antigravityCreditsFailureByAuth.Delete(authID)
+	}
 }
 
 func antigravityHasExplicitCreditsBalanceExhaustedReason(body []byte) bool {
