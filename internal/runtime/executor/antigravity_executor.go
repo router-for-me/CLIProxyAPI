@@ -52,6 +52,8 @@ const (
 	defaultAntigravityAgent                = "antigravity/1.21.9 darwin/arm64" // fallback only; overridden at runtime by misc.AntigravityUserAgent()
 	antigravityAuthType                    = "antigravity"
 	refreshSkew                            = 3000 * time.Second
+	antigravityCreditsHintRefreshInterval  = 10 * time.Minute
+	antigravityCreditsHintRefreshTimeout   = 5 * time.Second
 	antigravityShortQuotaCooldownThreshold = 5 * time.Minute
 	antigravityInstantRetryThreshold       = 3 * time.Second
 	// systemInstruction              = "You are Antigravity, a powerful agentic AI coding assistant designed by the Google Deepmind team working on Advanced Agentic Coding.You are pair programming with a USER to solve their coding task. The task may require creating a new codebase, modifying or debugging an existing codebase, or simply answering a question.**Absolute paths only****Proactiveness**"
@@ -89,6 +91,7 @@ var (
 	antigravityCreditsFailureByAuth   sync.Map
 	antigravityShortCooldownByAuth    sync.Map
 	antigravityCreditsBalanceByAuth   sync.Map // auth.ID → antigravityCreditsBalance
+	antigravityCreditsHintRefreshByID sync.Map // auth.ID → *antigravityCreditsHintRefreshState
 	antigravityQuotaExhaustedKeywords = []string{
 		"quota_exhausted",
 		"quota exhausted",
@@ -100,6 +103,11 @@ type antigravityCreditsBalance struct {
 	MinCreditAmount float64
 	PaidTierID      string
 	Known           bool
+}
+
+type antigravityCreditsHintRefreshState struct {
+	mu          sync.Mutex
+	lastAttempt time.Time
 }
 
 func antigravityAuthHasCredits(auth *cliproxyauth.Auth) bool {
@@ -1558,9 +1566,7 @@ func (e *AntigravityExecutor) ensureAccessToken(ctx context.Context, auth *clipr
 	accessToken := metaStringValue(auth.Metadata, "access_token")
 	expiry := tokenExpiry(auth.Metadata)
 	if accessToken != "" && expiry.After(time.Now().Add(refreshSkew)) {
-		if !cliproxyauth.HasKnownAntigravityCreditsHint(auth.ID) {
-			e.updateAntigravityCreditsBalance(ctx, auth, accessToken)
-		}
+		e.maybeRefreshAntigravityCreditsHint(ctx, auth, accessToken)
 		return accessToken, nil, nil
 	}
 	refreshCtx := context.Background()
@@ -1574,6 +1580,63 @@ func (e *AntigravityExecutor) ensureAccessToken(ctx context.Context, auth *clipr
 		return "", nil, errRefresh
 	}
 	return metaStringValue(updated.Metadata, "access_token"), updated, nil
+}
+
+func (e *AntigravityExecutor) maybeRefreshAntigravityCreditsHint(ctx context.Context, auth *cliproxyauth.Auth, accessToken string) {
+	if e == nil || auth == nil || !antigravityCreditsRetryEnabled(e.cfg) {
+		return
+	}
+	if ctx != nil && ctx.Err() != nil {
+		return
+	}
+	authID := strings.TrimSpace(auth.ID)
+	if authID == "" {
+		return
+	}
+	if hint, ok := cliproxyauth.GetAntigravityCreditsHint(authID); ok && hint.Known {
+		return
+	}
+	if strings.TrimSpace(accessToken) == "" {
+		accessToken = metaStringValue(auth.Metadata, "access_token")
+	}
+	if strings.TrimSpace(accessToken) == "" {
+		return
+	}
+
+	state := &antigravityCreditsHintRefreshState{}
+	if existing, loaded := antigravityCreditsHintRefreshByID.LoadOrStore(authID, state); loaded {
+		if cast, ok := existing.(*antigravityCreditsHintRefreshState); ok && cast != nil {
+			state = cast
+		} else {
+			antigravityCreditsHintRefreshByID.Delete(authID)
+			antigravityCreditsHintRefreshByID.Store(authID, state)
+		}
+	}
+
+	now := time.Now()
+	if !state.mu.TryLock() {
+		return
+	}
+	if !state.lastAttempt.IsZero() && now.Sub(state.lastAttempt) < antigravityCreditsHintRefreshInterval {
+		state.mu.Unlock()
+		return
+	}
+	state.lastAttempt = now
+
+	refreshCtx := context.Background()
+	if ctx != nil {
+		if rt, ok := ctx.Value("cliproxy.roundtripper").(http.RoundTripper); ok && rt != nil {
+			refreshCtx = context.WithValue(refreshCtx, "cliproxy.roundtripper", rt)
+		}
+	}
+	refreshCtx, cancel := context.WithTimeout(refreshCtx, antigravityCreditsHintRefreshTimeout)
+	authCopy := auth.Clone()
+
+	go func(state *antigravityCreditsHintRefreshState, auth *cliproxyauth.Auth, token string) {
+		defer cancel()
+		defer state.mu.Unlock()
+		e.updateAntigravityCreditsBalance(refreshCtx, auth, token)
+	}(state, authCopy, accessToken)
 }
 
 func (e *AntigravityExecutor) refreshToken(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {

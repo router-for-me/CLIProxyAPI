@@ -20,6 +20,7 @@ func resetAntigravityCreditsRetryState() {
 	antigravityCreditsFailureByAuth = sync.Map{}
 	antigravityShortCooldownByAuth = sync.Map{}
 	antigravityCreditsBalanceByAuth = sync.Map{}
+	antigravityCreditsHintRefreshByID = sync.Map{}
 }
 
 func TestClassifyAntigravity429(t *testing.T) {
@@ -378,7 +379,9 @@ func TestEnsureAccessToken_WarmTokenLoadsCreditsHint(t *testing.T) {
 	resetAntigravityCreditsRetryState()
 	t.Cleanup(resetAntigravityCreditsRetryState)
 
-	exec := NewAntigravityExecutor(&config.Config{})
+	exec := NewAntigravityExecutor(&config.Config{
+		QuotaExceeded: config.QuotaExceeded{AntigravityCredits: true},
+	})
 	auth := &cliproxyauth.Auth{
 		ID: "auth-warm-token-credits",
 		Metadata: map[string]any{
@@ -406,6 +409,10 @@ func TestEnsureAccessToken_WarmTokenLoadsCreditsHint(t *testing.T) {
 	}
 	if updatedAuth != nil {
 		t.Fatalf("ensureAccessToken() updatedAuth = %v, want nil", updatedAuth)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && !cliproxyauth.HasKnownAntigravityCreditsHint(auth.ID) {
+		time.Sleep(10 * time.Millisecond)
 	}
 	if !cliproxyauth.HasKnownAntigravityCreditsHint(auth.ID) {
 		t.Fatal("expected credits hint to be populated for warm token auth")
