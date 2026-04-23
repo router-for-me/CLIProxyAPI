@@ -17,6 +17,42 @@ type oauthModelAliasTable struct {
 	reverse map[string]map[string]string
 }
 
+func defaultOAuthModelAliases() map[string][]internalconfig.OAuthModelAlias {
+	return map[string][]internalconfig.OAuthModelAlias{
+		"codex": {
+			{Name: "gpt-5.4", Alias: "gpt-image-2", Fork: true},
+		},
+	}
+}
+
+func defaultOAuthModelAliasTable() *oauthModelAliasTable {
+	return compileOAuthModelAliasTable(defaultOAuthModelAliases())
+}
+
+func MergeWithDefaultOAuthModelAliases(aliases map[string][]internalconfig.OAuthModelAlias) map[string][]internalconfig.OAuthModelAlias {
+	defaults := defaultOAuthModelAliases()
+	if len(aliases) == 0 {
+		return defaults
+	}
+	out := make(map[string][]internalconfig.OAuthModelAlias, len(aliases)+len(defaults))
+	for channel, entries := range aliases {
+		key := strings.ToLower(strings.TrimSpace(channel))
+		if key == "" {
+			continue
+		}
+		if len(entries) > 0 {
+			out[key] = append([]internalconfig.OAuthModelAlias(nil), entries...)
+		}
+	}
+	for channel, entries := range defaults {
+		if len(entries) == 0 {
+			continue
+		}
+		out[channel] = append(out[channel], entries...)
+	}
+	return out
+}
+
 func compileOAuthModelAliasTable(aliases map[string][]internalconfig.OAuthModelAlias) *oauthModelAliasTable {
 	if len(aliases) == 0 {
 		return &oauthModelAliasTable{}
@@ -62,7 +98,7 @@ func (m *Manager) SetOAuthModelAlias(aliases map[string][]internalconfig.OAuthMo
 	if m == nil {
 		return
 	}
-	table := compileOAuthModelAliasTable(aliases)
+	table := compileOAuthModelAliasTable(MergeWithDefaultOAuthModelAliases(aliases))
 	// atomic.Value requires non-nil store values.
 	if table == nil {
 		table = &oauthModelAliasTable{}

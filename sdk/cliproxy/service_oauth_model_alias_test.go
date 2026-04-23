@@ -90,3 +90,39 @@ func TestApplyOAuthModelAlias_ForkAddsMultipleAliases(t *testing.T) {
 		t.Fatalf("expected forked model name %q, got %q", "models/g5-2", out[2].Name)
 	}
 }
+
+func TestApplyOAuthModelAlias_CodexImageAlias(t *testing.T) {
+	cfg := &config.Config{
+		OAuthModelAlias: map[string][]config.OAuthModelAlias{
+			"codex": {
+				{Name: "gpt-5", Alias: "codex/gpt-image", Fork: true},
+			},
+		},
+	}
+	models := []*ModelInfo{{ID: "gpt-5", Name: "models/gpt-5"}}
+	out := applyOAuthModelAlias(cfg, "codex", "oauth", models)
+	if len(out) != 2 {
+		t.Fatalf("expected original plus image alias, got %d", len(out))
+	}
+	if out[1].ID != "codex/gpt-image" || out[1].Name != "models/codex/gpt-image" {
+		t.Fatalf("unexpected alias model: id=%q name=%q", out[1].ID, out[1].Name)
+	}
+}
+
+func TestApplyOAuthModelAlias_CodexImage2Alias(t *testing.T) {
+	cfg := &config.Config{
+		OAuthModelAlias: map[string][]config.OAuthModelAlias{
+			"codex": {
+				{Name: "gpt-5.4", Alias: "gpt-image-2", Fork: true},
+			},
+		},
+	}
+	models := []*ModelInfo{{ID: "gpt-5.4", Name: "models/gpt-5.4"}}
+	out := applyOAuthModelAlias(cfg, "codex", "oauth", models)
+	if len(out) != 2 {
+		t.Fatalf("expected original plus image alias, got %d", len(out))
+	}
+	if out[1].ID != "gpt-image-2" || out[1].Name != "models/gpt-image-2" {
+		t.Fatalf("unexpected alias model: id=%q name=%q", out[1].ID, out[1].Name)
+	}
+}

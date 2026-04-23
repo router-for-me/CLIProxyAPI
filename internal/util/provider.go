@@ -207,7 +207,12 @@ func MaskSensitiveHeaderValue(key, value string) string {
 	case strings.Contains(lowerKey, "api-key"),
 		strings.Contains(lowerKey, "apikey"),
 		strings.Contains(lowerKey, "token"),
-		strings.Contains(lowerKey, "secret"):
+		strings.Contains(lowerKey, "secret"),
+		strings.Contains(lowerKey, "chatgpt-account-id"),
+		strings.Contains(lowerKey, "account-id"),
+		strings.Contains(lowerKey, "session_id"),
+		strings.Contains(lowerKey, "session-id"),
+		strings.Contains(lowerKey, "installation-id"):
 		return HideAPIKey(value)
 	default:
 		return value

@@ -7,6 +7,7 @@ import (
 	"html"
 	"net/http"
 	"net/url"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -37,6 +38,19 @@ type UpstreamRequestLog struct {
 	AuthLabel string
 	AuthType  string
 	AuthValue string
+}
+
+var sensitiveJSONStringFieldPattern = regexp.MustCompile(`(?i)("(?:b64_json|partial_image_b64|image_url|result|session_id|x-codex-installation-id|chatgpt-account-id|account_id|installation_id)"\s*:\s*")([^"\\]*(?:\\.[^"\\]*)*)(")`)
+var dataURLPattern = regexp.MustCompile(`data:image/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=_-]+`)
+
+// SanitizeLoggedPayload redacts image payloads and client/session identifiers before request logging.
+func SanitizeLoggedPayload(payload []byte) []byte {
+	if len(payload) == 0 {
+		return payload
+	}
+	sanitized := sensitiveJSONStringFieldPattern.ReplaceAllString(string(payload), `${1}<redacted>${3}`)
+	sanitized = dataURLPattern.ReplaceAllString(sanitized, `data:image/<redacted>;base64,<redacted>`)
+	return []byte(sanitized)
 }
 
 type upstreamAttempt struct {
@@ -83,7 +97,7 @@ func RecordAPIRequest(ctx context.Context, cfg *config.Config, info UpstreamRequ
 	writeHeaders(builder, info.Headers)
 	builder.WriteString("\nBody:\n")
 	if len(info.Body) > 0 {
-		builder.WriteString(string(info.Body))
+		builder.Write(SanitizeLoggedPayload(info.Body))
 	} else {
 		builder.WriteString("<empty>")
 	}
@@ -185,7 +199,7 @@ func AppendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byt
 		}
 		attempt.response.WriteString(separator)
 	}
-	attempt.response.WriteString(string(data))
+	attempt.response.Write(SanitizeLoggedPayload(data))
 	attempt.bodyHasContent = true
 	attempt.prevWasSSEEvent = currentChunkIsSSEEvent
 
@@ -215,7 +229,7 @@ func RecordAPIWebsocketRequest(ctx context.Context, cfg *config.Config, info Ups
 	writeHeaders(builder, info.Headers)
 	builder.WriteString("\nBody:\n")
 	if len(info.Body) > 0 {
-		builder.Write(info.Body)
+		builder.Write(SanitizeLoggedPayload(info.Body))
 	} else {
 		builder.WriteString("<empty>")
 	}
@@ -299,7 +313,7 @@ func AppendAPIWebsocketResponse(ctx context.Context, cfg *config.Config, payload
 	builder := &strings.Builder{}
 	builder.WriteString(fmt.Sprintf("Timestamp: %s\n", time.Now().Format(time.RFC3339Nano)))
 	builder.WriteString("Event: api.websocket.response\n")
-	builder.Write(data)
+	builder.Write(SanitizeLoggedPayload(data))
 	builder.WriteString("\n")
 
 	appendAPIWebsocketTimeline(ginCtx, []byte(builder.String()))

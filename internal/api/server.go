@@ -332,6 +332,7 @@ func (s *Server) setupRoutes() {
 
 	s.engine.GET("/management.html", s.serveManagementControlPanel)
 	openaiHandlers := openai.NewOpenAIAPIHandler(s.handlers)
+	openaiImagesHandlers := openai.NewOpenAIImagesAPIHandler(s.handlers)
 	geminiHandlers := gemini.NewGeminiAPIHandler(s.handlers)
 	geminiCLIHandlers := gemini.NewGeminiCLIAPIHandler(s.handlers)
 	claudeCodeHandlers := claude.NewClaudeCodeAPIHandler(s.handlers)
@@ -344,7 +345,7 @@ func (s *Server) setupRoutes() {
 		v1.GET("/models", s.unifiedModelsHandler(openaiHandlers, claudeCodeHandlers))
 		v1.POST("/chat/completions", openaiHandlers.ChatCompletions)
 		v1.POST("/completions", openaiHandlers.Completions)
-		v1.POST("/images/generations", openaiHandlers.ImagesGenerations)
+		v1.POST("/images/generations", openaiImagesHandlers.ImagesGenerations)
 		v1.POST("/images/edits", openaiHandlers.ImagesEdits)
 		v1.POST("/messages", claudeCodeHandlers.ClaudeMessages)
 		v1.POST("/messages/count_tokens", claudeCodeHandlers.ClaudeCountTokens)

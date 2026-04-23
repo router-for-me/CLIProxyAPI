@@ -22,13 +22,24 @@ type Record struct {
 	Detail      Detail
 }
 
-// Detail holds the token usage breakdown.
+// Detail holds the token usage breakdown and optional non-token usage details.
 type Detail struct {
 	InputTokens     int64
 	OutputTokens    int64
 	ReasoningTokens int64
 	CachedTokens    int64
 	TotalTokens     int64
+	Image           *ImageDetail
+}
+
+// ImageDetail holds image-specific usage for image generation requests.
+type ImageDetail struct {
+	GeneratedImages int64
+	InputImages     int64
+	PartialImages   int64
+	Size            string
+	Quality         string
+	OutputFormat    string
 }
 
 // Plugin consumes usage records emitted by the proxy runtime.

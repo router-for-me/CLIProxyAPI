@@ -1,3 +1,4 @@
+// Package openai provides HTTP handlers for OpenAI API endpoints.
 package openai
 
 import (
@@ -14,7 +15,10 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	. "github.com/router-for-me/CLIProxyAPI/v6/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
@@ -543,6 +547,7 @@ func (h *OpenAIAPIHandler) collectImagesFromResponses(c *gin.Context, responsesR
 		return
 	}
 	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+	handlers.SetResponseBodyOverride(c, helps.SanitizeLoggedPayload(out))
 	_, _ = c.Writer.Write(out)
 	cliCancel()
 }
@@ -893,4 +898,94 @@ func (h *OpenAIAPIHandler) forwardImagesStream(ctx context.Context, c *gin.Conte
 			}
 		}
 	}
+}
+
+// OpenAIImagesAPIHandler contains the handlers for OpenAI image endpoints.
+type OpenAIImagesAPIHandler struct {
+	*handlers.BaseAPIHandler
+}
+
+// NewOpenAIImagesAPIHandler creates a new OpenAI images handler.
+func NewOpenAIImagesAPIHandler(apiHandlers *handlers.BaseAPIHandler) *OpenAIImagesAPIHandler {
+	return &OpenAIImagesAPIHandler{BaseAPIHandler: apiHandlers}
+}
+
+// HandlerType returns the identifier for this handler implementation.
+func (h *OpenAIImagesAPIHandler) HandlerType() string { return OpenAI }
+
+// Models returns the OpenAI-compatible model metadata supported by this handler.
+func (h *OpenAIImagesAPIHandler) Models() []map[string]any {
+	return registry.GetGlobalRegistry().GetAvailableModels("openai")
+}
+
+// ImagesGenerations handles POST /v1/images/generations.
+func (h *OpenAIImagesAPIHandler) ImagesGenerations(c *gin.Context) {
+	rawJSON, err := c.GetRawData()
+	if err != nil {
+		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{Error: handlers.ErrorDetail{Message: fmt.Sprintf("Invalid request: %v", err), Type: "invalid_request_error"}})
+		return
+	}
+	if !json.Valid(rawJSON) {
+		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{Error: handlers.ErrorDetail{Message: "Invalid request: body must be valid JSON", Type: "invalid_request_error"}})
+		return
+	}
+	prompt := strings.TrimSpace(gjson.GetBytes(rawJSON, "prompt").String())
+	if prompt == "" {
+		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{Error: handlers.ErrorDetail{Message: "Invalid request: prompt is required", Type: "invalid_request_error"}})
+		return
+	}
+	modelName := strings.TrimSpace(gjson.GetBytes(rawJSON, "model").String())
+	if modelName == "" {
+		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{Error: handlers.ErrorDetail{Message: "Missing required field: model", Type: "invalid_request_error"}})
+		return
+	}
+	if parsed := registry.LookupStaticModelInfo(strings.TrimSpace(strings.SplitN(modelName, "(", 2)[0])); parsed != nil {
+		hasImageOutput := false
+		for _, modality := range parsed.SupportedOutputModalities {
+			if strings.EqualFold(strings.TrimSpace(modality), "IMAGE") {
+				hasImageOutput = true
+				break
+			}
+		}
+		if !hasImageOutput {
+			msg := fmt.Sprintf("Model %q does not support image generation; use gpt-image-2", parsed.ID)
+			c.JSON(http.StatusBadRequest, handlers.ErrorResponse{Error: handlers.ErrorDetail{Message: msg, Type: "invalid_request_error"}})
+			return
+		}
+	}
+	if stream := gjson.GetBytes(rawJSON, "stream"); stream.Type == gjson.True {
+		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{Error: handlers.ErrorDetail{Message: "Streaming not supported for image generations", Type: "invalid_request_error"}})
+		return
+	}
+	if n := gjson.GetBytes(rawJSON, "n"); n.Exists() && n.Int() != 1 {
+		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{Error: handlers.ErrorDetail{Message: "Only n=1 is currently supported", Type: "invalid_request_error"}})
+		return
+	}
+	if responseFormat := strings.TrimSpace(gjson.GetBytes(rawJSON, "response_format").String()); responseFormat != "" && !strings.EqualFold(responseFormat, "b64_json") {
+		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{Error: handlers.ErrorDetail{Message: "Only response_format=b64_json is currently supported", Type: "invalid_request_error"}})
+		return
+	}
+	if gjson.GetBytes(rawJSON, "image").Exists() || gjson.GetBytes(rawJSON, "mask").Exists() {
+		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{Error: handlers.ErrorDetail{Message: "Use /v1/images/edits for image inputs; only prompt-based generations are supported", Type: "invalid_request_error"}})
+		return
+	}
+	if gjson.GetBytes(rawJSON, "stream").Exists() {
+		if updated, errDelete := sjson.DeleteBytes(rawJSON, "stream"); errDelete == nil {
+			rawJSON = updated
+		}
+	}
+	c.Header("Content-Type", "application/json")
+	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
+	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "images/generations")
+	stopKeepAlive()
+	if errMsg != nil {
+		h.WriteErrorResponse(c, errMsg)
+		cliCancel(errMsg.Error)
+		return
+	}
+	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+	handlers.SetResponseBodyOverride(c, helps.SanitizeLoggedPayload(resp))
+	_, _ = c.Writer.Write(resp)
+	cliCancel()
 }

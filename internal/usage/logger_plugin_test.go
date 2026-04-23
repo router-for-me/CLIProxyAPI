@@ -94,3 +94,34 @@ func TestRequestStatisticsMergeSnapshotDedupIgnoresLatency(t *testing.T) {
 		t.Fatalf("details len = %d, want 1", len(details))
 	}
 }
+
+func TestRequestStatisticsRecordImageUsageSeparatelyFromTokens(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Record(context.Background(), coreusage.Record{
+		APIKey:      "image-key",
+		Model:       "codex/gpt-image",
+		RequestedAt: time.Date(2026, 4, 23, 5, 0, 0, 0, time.UTC),
+		Detail: coreusage.Detail{Image: &coreusage.ImageDetail{
+			GeneratedImages: 1,
+			PartialImages:   2,
+			Size:            "1024x1024",
+			Quality:         "high",
+			OutputFormat:    "png",
+		}},
+	})
+
+	snapshot := stats.Snapshot()
+	if snapshot.TotalTokens != 0 {
+		t.Fatalf("total tokens = %d, want 0", snapshot.TotalTokens)
+	}
+	if snapshot.TotalImages != 1 {
+		t.Fatalf("total images = %d, want 1", snapshot.TotalImages)
+	}
+	model := snapshot.APIs["image-key"].Models["codex/gpt-image"]
+	if model.TotalImages != 1 || model.TotalTokens != 0 {
+		t.Fatalf("model totals = images:%d tokens:%d", model.TotalImages, model.TotalTokens)
+	}
+	if got := model.Details[0].Images.PartialImages; got != 2 {
+		t.Fatalf("partial images = %d, want 2", got)
+	}
+}

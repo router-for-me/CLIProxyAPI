@@ -1271,6 +1271,26 @@
       }
     },
     {
+      "id": "gpt-image-2",
+      "object": "model",
+      "created": 1772668800,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT Image 2",
+      "version": "gpt-image-2",
+      "description": "Codex image-generation compatibility model backed by the Codex Responses image_generation tool.",
+      "supported_parameters": [
+        "tools"
+      ],
+      "supportedInputModalities": [
+        "TEXT",
+        "IMAGE"
+      ],
+      "supportedOutputModalities": [
+        "IMAGE"
+      ]
+    },
+    {
       "id": "gpt-5.4-mini",
       "object": "model",
       "created": 1773705600,
@@ -1364,6 +1384,26 @@
           "xhigh"
         ]
       }
+    },
+    {
+      "id": "gpt-image-2",
+      "object": "model",
+      "created": 1772668800,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT Image 2",
+      "version": "gpt-image-2",
+      "description": "Codex image-generation compatibility model backed by the Codex Responses image_generation tool.",
+      "supported_parameters": [
+        "tools"
+      ],
+      "supportedInputModalities": [
+        "TEXT",
+        "IMAGE"
+      ],
+      "supportedOutputModalities": [
+        "IMAGE"
+      ]
     },
     {
       "id": "gpt-5.4-mini",
@@ -1484,6 +1524,26 @@
       }
     },
     {
+      "id": "gpt-image-2",
+      "object": "model",
+      "created": 1772668800,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT Image 2",
+      "version": "gpt-image-2",
+      "description": "Codex image-generation compatibility model backed by the Codex Responses image_generation tool.",
+      "supported_parameters": [
+        "tools"
+      ],
+      "supportedInputModalities": [
+        "TEXT",
+        "IMAGE"
+      ],
+      "supportedOutputModalities": [
+        "IMAGE"
+      ]
+    },
+    {
       "id": "gpt-5.4-mini",
       "object": "model",
       "created": 1773705600,
@@ -1600,6 +1660,26 @@
           "xhigh"
         ]
       }
+    },
+    {
+      "id": "gpt-image-2",
+      "object": "model",
+      "created": 1772668800,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT Image 2",
+      "version": "gpt-image-2",
+      "description": "Codex image-generation compatibility model backed by the Codex Responses image_generation tool.",
+      "supported_parameters": [
+        "tools"
+      ],
+      "supportedInputModalities": [
+        "TEXT",
+        "IMAGE"
+      ],
+      "supportedOutputModalities": [
+        "IMAGE"
+      ]
     },
     {
       "id": "gpt-5.4-mini",

@@ -64,6 +64,7 @@ type RequestStatistics struct {
 	successCount  int64
 	failureCount  int64
 	totalTokens   int64
+	totalImages   int64
 
 	apis map[string]*apiStats
 
@@ -71,12 +72,15 @@ type RequestStatistics struct {
 	requestsByHour map[int]int64
 	tokensByDay    map[string]int64
 	tokensByHour   map[int]int64
+	imagesByDay    map[string]int64
+	imagesByHour   map[int]int64
 }
 
 // apiStats holds aggregated metrics for a single API key.
 type apiStats struct {
 	TotalRequests int64
 	TotalTokens   int64
+	TotalImages   int64
 	Models        map[string]*modelStats
 }
 
@@ -84,6 +88,7 @@ type apiStats struct {
 type modelStats struct {
 	TotalRequests int64
 	TotalTokens   int64
+	TotalImages   int64
 	Details       []RequestDetail
 }
 
@@ -94,7 +99,18 @@ type RequestDetail struct {
 	Source    string     `json:"source"`
 	AuthIndex string     `json:"auth_index"`
 	Tokens    TokenStats `json:"tokens"`
+	Images    ImageStats `json:"images,omitempty"`
 	Failed    bool       `json:"failed"`
+}
+
+// ImageStats captures image usage for a request.
+type ImageStats struct {
+	GeneratedImages int64  `json:"generated_images,omitempty"`
+	InputImages     int64  `json:"input_images,omitempty"`
+	PartialImages   int64  `json:"partial_images,omitempty"`
+	Size            string `json:"size,omitempty"`
+	Quality         string `json:"quality,omitempty"`
+	OutputFormat    string `json:"output_format,omitempty"`
 }
 
 // TokenStats captures the token usage breakdown for a request.
@@ -112,6 +128,7 @@ type StatisticsSnapshot struct {
 	SuccessCount  int64 `json:"success_count"`
 	FailureCount  int64 `json:"failure_count"`
 	TotalTokens   int64 `json:"total_tokens"`
+	TotalImages   int64 `json:"total_images,omitempty"`
 
 	APIs map[string]APISnapshot `json:"apis"`
 
@@ -119,12 +136,15 @@ type StatisticsSnapshot struct {
 	RequestsByHour map[string]int64 `json:"requests_by_hour"`
 	TokensByDay    map[string]int64 `json:"tokens_by_day"`
 	TokensByHour   map[string]int64 `json:"tokens_by_hour"`
+	ImagesByDay    map[string]int64 `json:"images_by_day,omitempty"`
+	ImagesByHour   map[string]int64 `json:"images_by_hour,omitempty"`
 }
 
 // APISnapshot summarises metrics for a single API key.
 type APISnapshot struct {
 	TotalRequests int64                    `json:"total_requests"`
 	TotalTokens   int64                    `json:"total_tokens"`
+	TotalImages   int64                    `json:"total_images,omitempty"`
 	Models        map[string]ModelSnapshot `json:"models"`
 }
 
@@ -132,6 +152,7 @@ type APISnapshot struct {
 type ModelSnapshot struct {
 	TotalRequests int64           `json:"total_requests"`
 	TotalTokens   int64           `json:"total_tokens"`
+	TotalImages   int64           `json:"total_images,omitempty"`
 	Details       []RequestDetail `json:"details"`
 }
 
@@ -148,6 +169,8 @@ func NewRequestStatistics() *RequestStatistics {
 		requestsByHour: make(map[int]int64),
 		tokensByDay:    make(map[string]int64),
 		tokensByHour:   make(map[int]int64),
+		imagesByDay:    make(map[string]int64),
+		imagesByHour:   make(map[int]int64),
 	}
 }
 
@@ -164,7 +187,9 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 		timestamp = time.Now()
 	}
 	detail := normaliseDetail(record.Detail)
+	images := normaliseImageDetail(record.Detail)
 	totalTokens := detail.TotalTokens
+	totalImages := images.GeneratedImages
 	statsKey := record.APIKey
 	if statsKey == "" {
 		statsKey = resolveAPIIdentifier(ctx, record)
@@ -191,6 +216,7 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 		s.failureCount++
 	}
 	s.totalTokens += totalTokens
+	s.totalImages += totalImages
 
 	stats, ok := s.apis[statsKey]
 	if !ok {
@@ -203,6 +229,7 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 		Source:    record.Source,
 		AuthIndex: record.AuthIndex,
 		Tokens:    detail,
+		Images:    images,
 		Failed:    failed,
 	})
 
@@ -210,11 +237,14 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 	s.requestsByHour[hourKey]++
 	s.tokensByDay[dayKey] += totalTokens
 	s.tokensByHour[hourKey] += totalTokens
+	s.imagesByDay[dayKey] += totalImages
+	s.imagesByHour[hourKey] += totalImages
 }
 
 func (s *RequestStatistics) updateAPIStats(stats *apiStats, model string, detail RequestDetail) {
 	stats.TotalRequests++
 	stats.TotalTokens += detail.Tokens.TotalTokens
+	stats.TotalImages += detail.Images.GeneratedImages
 	modelStatsValue, ok := stats.Models[model]
 	if !ok {
 		modelStatsValue = &modelStats{}
@@ -222,6 +252,7 @@ func (s *RequestStatistics) updateAPIStats(stats *apiStats, model string, detail
 	}
 	modelStatsValue.TotalRequests++
 	modelStatsValue.TotalTokens += detail.Tokens.TotalTokens
+	modelStatsValue.TotalImages += detail.Images.GeneratedImages
 	modelStatsValue.Details = append(modelStatsValue.Details, detail)
 }
 
@@ -239,12 +270,14 @@ func (s *RequestStatistics) Snapshot() StatisticsSnapshot {
 	result.SuccessCount = s.successCount
 	result.FailureCount = s.failureCount
 	result.TotalTokens = s.totalTokens
+	result.TotalImages = s.totalImages
 
 	result.APIs = make(map[string]APISnapshot, len(s.apis))
 	for apiName, stats := range s.apis {
 		apiSnapshot := APISnapshot{
 			TotalRequests: stats.TotalRequests,
 			TotalTokens:   stats.TotalTokens,
+			TotalImages:   stats.TotalImages,
 			Models:        make(map[string]ModelSnapshot, len(stats.Models)),
 		}
 		for modelName, modelStatsValue := range stats.Models {
@@ -253,6 +286,7 @@ func (s *RequestStatistics) Snapshot() StatisticsSnapshot {
 			apiSnapshot.Models[modelName] = ModelSnapshot{
 				TotalRequests: modelStatsValue.TotalRequests,
 				TotalTokens:   modelStatsValue.TotalTokens,
+				TotalImages:   modelStatsValue.TotalImages,
 				Details:       requestDetails,
 			}
 		}
@@ -279,6 +313,17 @@ func (s *RequestStatistics) Snapshot() StatisticsSnapshot {
 	for hour, v := range s.tokensByHour {
 		key := formatHour(hour)
 		result.TokensByHour[key] = v
+	}
+
+	result.ImagesByDay = make(map[string]int64, len(s.imagesByDay))
+	for k, v := range s.imagesByDay {
+		result.ImagesByDay[k] = v
+	}
+
+	result.ImagesByHour = make(map[string]int64, len(s.imagesByHour))
+	for hour, v := range s.imagesByHour {
+		key := formatHour(hour)
+		result.ImagesByHour[key] = v
 	}
 
 	return result
@@ -334,6 +379,7 @@ func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot) MergeResu
 			}
 			for _, detail := range modelSnapshot.Details {
 				detail.Tokens = normaliseTokenStats(detail.Tokens)
+				detail.Images = normaliseImageStats(detail.Images)
 				if detail.LatencyMs < 0 {
 					detail.LatencyMs = 0
 				}
@@ -360,6 +406,10 @@ func (s *RequestStatistics) recordImported(apiName, modelName string, stats *api
 	if totalTokens < 0 {
 		totalTokens = 0
 	}
+	totalImages := detail.Images.GeneratedImages
+	if totalImages < 0 {
+		totalImages = 0
+	}
 
 	s.totalRequests++
 	if detail.Failed {
@@ -368,6 +418,7 @@ func (s *RequestStatistics) recordImported(apiName, modelName string, stats *api
 		s.successCount++
 	}
 	s.totalTokens += totalTokens
+	s.totalImages += totalImages
 
 	s.updateAPIStats(stats, modelName, detail)
 
@@ -378,13 +429,16 @@ func (s *RequestStatistics) recordImported(apiName, modelName string, stats *api
 	s.requestsByHour[hourKey]++
 	s.tokensByDay[dayKey] += totalTokens
 	s.tokensByHour[hourKey] += totalTokens
+	s.imagesByDay[dayKey] += totalImages
+	s.imagesByHour[hourKey] += totalImages
 }
 
 func dedupKey(apiName, modelName string, detail RequestDetail) string {
 	timestamp := detail.Timestamp.UTC().Format(time.RFC3339Nano)
 	tokens := normaliseTokenStats(detail.Tokens)
+	images := normaliseImageStats(detail.Images)
 	return fmt.Sprintf(
-		"%s|%s|%s|%s|%s|%t|%d|%d|%d|%d|%d",
+		"%s|%s|%s|%s|%s|%t|%d|%d|%d|%d|%d|%d|%d|%d|%s|%s|%s",
 		apiName,
 		modelName,
 		timestamp,
@@ -396,6 +450,12 @@ func dedupKey(apiName, modelName string, detail RequestDetail) string {
 		tokens.ReasoningTokens,
 		tokens.CachedTokens,
 		tokens.TotalTokens,
+		images.GeneratedImages,
+		images.InputImages,
+		images.PartialImages,
+		images.Size,
+		images.Quality,
+		images.OutputFormat,
 	)
 }
 
@@ -456,6 +516,36 @@ func normaliseDetail(detail coreusage.Detail) TokenStats {
 		tokens.TotalTokens = detail.InputTokens + detail.OutputTokens + detail.ReasoningTokens + detail.CachedTokens
 	}
 	return tokens
+}
+
+func normaliseImageDetail(detail coreusage.Detail) ImageStats {
+	if detail.Image == nil {
+		return ImageStats{}
+	}
+	return normaliseImageStats(ImageStats{
+		GeneratedImages: detail.Image.GeneratedImages,
+		InputImages:     detail.Image.InputImages,
+		PartialImages:   detail.Image.PartialImages,
+		Size:            strings.TrimSpace(detail.Image.Size),
+		Quality:         strings.TrimSpace(detail.Image.Quality),
+		OutputFormat:    strings.TrimSpace(detail.Image.OutputFormat),
+	})
+}
+
+func normaliseImageStats(images ImageStats) ImageStats {
+	if images.GeneratedImages < 0 {
+		images.GeneratedImages = 0
+	}
+	if images.InputImages < 0 {
+		images.InputImages = 0
+	}
+	if images.PartialImages < 0 {
+		images.PartialImages = 0
+	}
+	images.Size = strings.TrimSpace(images.Size)
+	images.Quality = strings.TrimSpace(images.Quality)
+	images.OutputFormat = strings.TrimSpace(images.OutputFormat)
+	return images
 }
 
 func normaliseTokenStats(tokens TokenStats) TokenStats {

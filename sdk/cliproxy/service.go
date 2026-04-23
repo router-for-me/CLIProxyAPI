@@ -1494,14 +1494,18 @@ func rewriteModelInfoName(name, oldID, newID string) string {
 }
 
 func applyOAuthModelAlias(cfg *config.Config, provider, authKind string, models []*ModelInfo) []*ModelInfo {
-	if cfg == nil || len(models) == 0 {
+	if len(models) == 0 {
 		return models
 	}
 	channel := coreauth.OAuthModelAliasChannel(provider, authKind)
-	if channel == "" || len(cfg.OAuthModelAlias) == 0 {
+	if channel == "" {
 		return models
 	}
-	aliases := cfg.OAuthModelAlias[channel]
+	aliasesByChannel := coreauth.MergeWithDefaultOAuthModelAliases(nil)
+	if cfg != nil && len(cfg.OAuthModelAlias) > 0 {
+		aliasesByChannel = coreauth.MergeWithDefaultOAuthModelAliases(cfg.OAuthModelAlias)
+	}
+	aliases := aliasesByChannel[channel]
 	if len(aliases) == 0 {
 		return models
 	}

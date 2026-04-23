@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -19,6 +20,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
@@ -143,6 +145,9 @@ func (e *CodexExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth
 }
 
 func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
+	if opts.Alt == "images/generations" {
+		return e.executeImageGeneration(ctx, auth, req, opts)
+	}
 	if opts.Alt == "responses/compact" {
 		return e.executeCompact(ctx, auth, req, opts)
 	}
@@ -293,6 +298,295 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	}
 	err = statusErr{code: 408, msg: "stream error: stream disconnected before completion: stream closed before response.completed"}
 	return resp, err
+}
+
+type codexImageGenerationRequest struct {
+	Model          string `json:"model"`
+	Prompt         string `json:"prompt"`
+	Size           string `json:"size"`
+	Quality        string `json:"quality"`
+	OutputFormat   string `json:"output_format"`
+	ResponseFormat string `json:"response_format"`
+	N              int64  `json:"n"`
+	Created        int64  `json:"created"`
+}
+
+type codexImageGenerationResult struct {
+	B64JSON       string
+	RevisedPrompt string
+	ResponseID    string
+	PartialImages int64
+	Usage         usage.Detail
+}
+
+func (e *CodexExecutor) executeImageGeneration(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
+	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
+	reporterModel := strings.TrimSpace(requestedModel)
+	if reporterModel == "" {
+		reporterModel = baseModel
+	}
+	apiKey, baseURL := codexCreds(auth)
+	if baseURL == "" {
+		baseURL = "https://chatgpt.com/backend-api/codex"
+	}
+
+	imageReq, err := parseCodexImageGenerationRequest(req.Payload)
+	if err != nil {
+		return resp, err
+	}
+	if imageReq.N == 0 {
+		imageReq.N = 1
+	}
+	if imageReq.N != 1 {
+		return resp, statusErr{code: http.StatusBadRequest, msg: "codex image generation supports only n=1"}
+	}
+	if imageReq.Created == 0 {
+		imageReq.Created = time.Now().Unix()
+	}
+
+	reporter := helps.NewUsageReporter(ctx, e.Identifier(), reporterModel, auth)
+	defer reporter.TrackFailure(ctx, &err)
+
+	body, err := buildCodexImageGenerationBody(baseModel, imageReq)
+	if err != nil {
+		return resp, err
+	}
+	url := strings.TrimSuffix(baseURL, "/") + "/responses"
+	httpReq, err := e.cacheHelper(ctx, opts.SourceFormat, url, req, body)
+	if err != nil {
+		return resp, err
+	}
+	applyCodexHeaders(httpReq, auth, apiKey, true, e.cfg)
+	var authID, authLabel, authType, authValue string
+	if auth != nil {
+		authID = auth.ID
+		authLabel = auth.Label
+		authType, authValue = auth.AccountInfo()
+	}
+	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
+		URL:       url,
+		Method:    http.MethodPost,
+		Headers:   httpReq.Header.Clone(),
+		Body:      body,
+		Provider:  e.Identifier(),
+		AuthID:    authID,
+		AuthLabel: authLabel,
+		AuthType:  authType,
+		AuthValue: authValue,
+	})
+
+	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpResp, err := httpClient.Do(httpReq)
+	if err != nil {
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
+		return resp, err
+	}
+	defer func() {
+		if errClose := httpResp.Body.Close(); errClose != nil {
+			log.Errorf("codex executor: close response body error: %v", errClose)
+		}
+	}()
+	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	data, readErr := io.ReadAll(httpResp.Body)
+	if readErr != nil {
+		helps.RecordAPIResponseError(ctx, e.cfg, readErr)
+		return resp, readErr
+	}
+	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
+	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
+		err = newCodexStatusErr(httpResp.StatusCode, data)
+		return resp, err
+	}
+
+	parsed, err := parseCodexImageGenerationResponse(data)
+	if err != nil {
+		return resp, err
+	}
+	imageDetail := &usage.ImageDetail{
+		GeneratedImages: 1,
+		Size:            imageReq.Size,
+		Quality:         imageReq.Quality,
+		OutputFormat:    imageReq.OutputFormat,
+		PartialImages:   parsed.PartialImages,
+	}
+	usageDetail := parsed.Usage
+	usageDetail.Image = imageDetail
+	reporter.Publish(ctx, usageDetail)
+	reporter.EnsurePublished(ctx)
+
+	out, err := buildOpenAIImageGenerationResponse(imageReq, requestedModel, parsed, usageDetail)
+	if err != nil {
+		return resp, err
+	}
+	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
+	return resp, nil
+}
+
+func parseCodexImageGenerationRequest(payload []byte) (codexImageGenerationRequest, error) {
+	var req codexImageGenerationRequest
+	if len(bytes.TrimSpace(payload)) == 0 {
+		return req, statusErr{code: http.StatusBadRequest, msg: "empty image generation request"}
+	}
+	if err := json.Unmarshal(payload, &req); err != nil {
+		return req, statusErr{code: http.StatusBadRequest, msg: "invalid image generation request JSON: " + err.Error()}
+	}
+	req.Model = strings.TrimSpace(req.Model)
+	req.Prompt = strings.TrimSpace(req.Prompt)
+	req.Size = strings.TrimSpace(req.Size)
+	req.Quality = strings.TrimSpace(req.Quality)
+	req.OutputFormat = strings.TrimSpace(req.OutputFormat)
+	req.ResponseFormat = strings.TrimSpace(req.ResponseFormat)
+	if req.Prompt == "" {
+		return req, statusErr{code: http.StatusBadRequest, msg: "missing required image prompt"}
+	}
+	if req.OutputFormat == "" {
+		req.OutputFormat = "png"
+	}
+	if req.ResponseFormat == "" {
+		req.ResponseFormat = "b64_json"
+	}
+	if !strings.EqualFold(req.ResponseFormat, "b64_json") {
+		return req, statusErr{code: http.StatusBadRequest, msg: "codex image generation supports only response_format=b64_json"}
+	}
+	return req, nil
+}
+
+func buildCodexImageGenerationBody(model string, req codexImageGenerationRequest) ([]byte, error) {
+	tool := map[string]any{"type": "image_generation", "output_format": req.OutputFormat}
+	if req.Size != "" {
+		tool["size"] = req.Size
+	}
+	if req.Quality != "" {
+		tool["quality"] = req.Quality
+	}
+	body := map[string]any{
+		"model":               model,
+		"input":               []any{map[string]any{"type": "message", "role": "user", "content": []any{map[string]any{"type": "input_text", "text": req.Prompt}}}},
+		"tools":               []any{tool},
+		"tool_choice":         "auto",
+		"parallel_tool_calls": false,
+		"stream":              true,
+		"store":               false,
+		"instructions":        "",
+	}
+	return json.Marshal(body)
+}
+
+func parseCodexImageGenerationResponse(data []byte) (codexImageGenerationResult, error) {
+	var result codexImageGenerationResult
+	if len(bytes.TrimSpace(data)) == 0 {
+		return result, statusErr{code: http.StatusBadGateway, msg: "empty Codex image response"}
+	}
+	lines := bytes.Split(data, []byte("\n"))
+	for _, line := range lines {
+		line = bytes.TrimSpace(line)
+		if len(line) == 0 {
+			continue
+		}
+		if bytes.HasPrefix(line, dataTag) {
+			line = bytes.TrimSpace(line[len(dataTag):])
+		}
+		if bytes.Equal(line, []byte("[DONE]")) || !gjson.ValidBytes(line) {
+			continue
+		}
+		consumeCodexImageEvent(line, &result)
+	}
+	if result.B64JSON == "" && gjson.ValidBytes(data) {
+		consumeCodexImageEvent(bytes.TrimSpace(data), &result)
+	}
+	if result.B64JSON == "" {
+		return result, statusErr{code: http.StatusBadGateway, msg: "Codex image response did not include image_generation_call.result"}
+	}
+	return result, nil
+}
+
+func consumeCodexImageEvent(data []byte, result *codexImageGenerationResult) {
+	if result == nil {
+		return
+	}
+	if detail, ok := helps.ParseCodexUsage(data); ok {
+		result.Usage = detail
+	}
+	eventType := gjson.GetBytes(data, "type").String()
+	if eventType == "response.image_generation_call.partial_image" {
+		result.PartialImages++
+		if b64 := strings.TrimSpace(gjson.GetBytes(data, "partial_image_b64").String()); b64 != "" {
+			result.B64JSON = b64
+		}
+	}
+	if id := strings.TrimSpace(gjson.GetBytes(data, "response.id").String()); id != "" {
+		result.ResponseID = id
+	}
+	candidates := []gjson.Result{gjson.GetBytes(data, "item"), gjson.GetBytes(data, "response")}
+	for _, candidate := range candidates {
+		consumeCodexImageOutput(candidate, result)
+	}
+}
+
+func consumeCodexImageOutput(node gjson.Result, result *codexImageGenerationResult) {
+	if !node.Exists() {
+		return
+	}
+	if node.Get("type").String() == "image_generation_call" {
+		if b64 := strings.TrimSpace(node.Get("result").String()); b64 != "" {
+			result.B64JSON = b64
+		}
+		if revised := strings.TrimSpace(node.Get("revised_prompt").String()); revised != "" {
+			result.RevisedPrompt = revised
+		}
+	}
+	output := node.Get("output")
+	if output.IsArray() {
+		for _, item := range output.Array() {
+			consumeCodexImageOutput(item, result)
+		}
+	}
+}
+
+func buildOpenAIImageGenerationResponse(req codexImageGenerationRequest, requestedModel string, result codexImageGenerationResult, detail usage.Detail) ([]byte, error) {
+	item := map[string]any{"b64_json": result.B64JSON}
+	if result.RevisedPrompt != "" {
+		item["revised_prompt"] = result.RevisedPrompt
+	}
+	out := map[string]any{
+		"created": req.Created,
+		"data":    []any{item},
+	}
+	if strings.TrimSpace(requestedModel) != "" {
+		out["model"] = strings.TrimSpace(requestedModel)
+	}
+	if req.OutputFormat != "" {
+		out["output_format"] = req.OutputFormat
+	}
+	if req.Size != "" {
+		out["size"] = req.Size
+	}
+	if req.Quality != "" {
+		out["quality"] = req.Quality
+	}
+	if result.ResponseID != "" {
+		out["id"] = result.ResponseID
+	}
+	usageValue := map[string]any{}
+	if detail.InputTokens != 0 {
+		usageValue["input_tokens"] = detail.InputTokens
+	}
+	if detail.OutputTokens != 0 {
+		usageValue["output_tokens"] = detail.OutputTokens
+	}
+	if detail.TotalTokens != 0 {
+		usageValue["total_tokens"] = detail.TotalTokens
+	}
+	if detail.Image != nil {
+		usageValue["generated_images"] = detail.Image.GeneratedImages
+		if detail.Image.PartialImages != 0 {
+			usageValue["partial_images"] = detail.Image.PartialImages
+		}
+	}
+	out["usage"] = usageValue
+	return json.Marshal(out)
 }
 
 func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {

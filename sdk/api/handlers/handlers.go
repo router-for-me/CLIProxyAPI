@@ -466,10 +466,20 @@ func appendAPIResponse(c *gin.Context, data []byte) {
 	c.Set("API_RESPONSE", bytes.Clone(data))
 }
 
+const responseBodyOverrideContextKey = "RESPONSE_BODY_OVERRIDE"
+
+// SetResponseBodyOverride replaces the logged downstream response body for the current request.
+func SetResponseBodyOverride(c *gin.Context, body []byte) {
+	if c == nil || len(body) == 0 {
+		return
+	}
+	c.Set(responseBodyOverrideContextKey, append([]byte(nil), body...))
+}
+
 // ExecuteWithAuthManager executes a non-streaming request via the core auth manager.
 // This path is the only supported execution route.
 func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) ([]byte, http.Header, *interfaces.ErrorMessage) {
-	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
+	providers, normalizedModel, errMsg := h.getRequestDetailsForAlt(modelName, alt)
 	if errMsg != nil {
 		return nil, nil, errMsg
 	}
@@ -516,7 +526,7 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 // ExecuteCountWithAuthManager executes a non-streaming request via the core auth manager.
 // This path is the only supported execution route.
 func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) ([]byte, http.Header, *interfaces.ErrorMessage) {
-	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
+	providers, normalizedModel, errMsg := h.getRequestDetailsForAlt(modelName, alt)
 	if errMsg != nil {
 		return nil, nil, errMsg
 	}
@@ -564,7 +574,7 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 // This path is the only supported execution route.
 // The returned http.Header carries upstream response headers captured before streaming begins.
 func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage) {
-	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
+	providers, normalizedModel, errMsg := h.getRequestDetailsForAlt(modelName, alt)
 	if errMsg != nil {
 		errChan := make(chan *interfaces.ErrorMessage, 1)
 		errChan <- errMsg
@@ -779,6 +789,10 @@ func statusFromError(err error) int {
 }
 
 func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string, normalizedModel string, err *interfaces.ErrorMessage) {
+	return h.getRequestDetailsForAlt(modelName, "")
+}
+
+func (h *BaseAPIHandler) getRequestDetailsForAlt(modelName, alt string) (providers []string, normalizedModel string, err *interfaces.ErrorMessage) {
 	resolvedModelName := modelName
 	initialSuffix := thinking.ParseSuffix(modelName)
 	if initialSuffix.ModelName == "auto" {
@@ -795,7 +809,8 @@ func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string
 	parsed := thinking.ParseSuffix(resolvedModelName)
 	baseModel := strings.TrimSpace(parsed.ModelName)
 
-	if strings.EqualFold(baseModel, "gpt-image-2") {
+	allowImageRouteModel := alt == "images/generations" || alt == "images/edits"
+	if strings.EqualFold(baseModel, "gpt-image-2") && !allowImageRouteModel {
 		return nil, "", &interfaces.ErrorMessage{
 			StatusCode: http.StatusServiceUnavailable,
 			Error:      fmt.Errorf("model %s is only supported on /v1/images/generations and /v1/images/edits", baseModel),
