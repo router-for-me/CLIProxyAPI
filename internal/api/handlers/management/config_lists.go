@@ -580,19 +580,12 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 func (h *Handler) DeleteOpenAICompat(c *gin.Context) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if name := strings.TrimSpace(c.Query("name")); name != "" {
+	if name := c.Query("name"); name != "" {
 		out := make([]config.OpenAICompatibility, 0, len(h.cfg.OpenAICompatibility))
-		removed := false
 		for _, v := range h.cfg.OpenAICompatibility {
-			if v.Name == name {
-				removed = true
-				continue
+			if v.Name != name {
+				out = append(out, v)
 			}
-			out = append(out, v)
-		}
-		if !removed {
-			c.JSON(404, gin.H{"error": "item not found"})
-			return
 		}
 		h.cfg.OpenAICompatibility = out
 		h.cfg.SanitizeOpenAICompatibility()

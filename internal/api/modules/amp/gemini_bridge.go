@@ -40,13 +40,6 @@ func createGeminiBridgeHandler(handler gin.HandlerFunc) gin.HandlerFunc {
 				}
 			}
 
-			if colonIdx := strings.Index(actionPart, ":"); colonIdx <= 0 || colonIdx == len(actionPart)-1 {
-				c.JSON(400, gin.H{
-					"error": "Invalid Gemini API path format",
-				})
-				return
-			}
-
 			// Set this as the :action parameter that the Gemini handler expects
 			c.Params = append(c.Params, gin.Param{
 				Key:   "action",

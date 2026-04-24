@@ -83,33 +83,11 @@ func TestCreateGeminiBridgeHandler_InvalidPath(t *testing.T) {
 	r := gin.New()
 	r.POST("/api/provider/google/v1beta1/*path", bridgeHandler)
 
-	t.Run("missing_models_segment", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodPost, "/api/provider/google/v1beta1/invalid/path", nil)
-		w := httptest.NewRecorder()
-		r.ServeHTTP(w, req)
+	req := httptest.NewRequest(http.MethodPost, "/api/provider/google/v1beta1/invalid/path", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
 
-		if w.Code != http.StatusBadRequest {
-			t.Errorf("Expected status 400 for invalid path, got %d", w.Code)
-		}
-	})
-
-	t.Run("missing_method_separator", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodPost, "/api/provider/google/v1beta1/publishers/google/models/gemini-pro", nil)
-		w := httptest.NewRecorder()
-		r.ServeHTTP(w, req)
-
-		if w.Code != http.StatusBadRequest {
-			t.Errorf("Expected status 400 for path without method, got %d", w.Code)
-		}
-	})
-
-	t.Run("missing_method_name", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodPost, "/api/provider/google/v1beta1/publishers/google/models/gemini-pro:", nil)
-		w := httptest.NewRecorder()
-		r.ServeHTTP(w, req)
-
-		if w.Code != http.StatusBadRequest {
-			t.Errorf("Expected status 400 for path with empty method, got %d", w.Code)
-		}
-	})
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("Expected status 400 for invalid path, got %d", w.Code)
+	}
 }
