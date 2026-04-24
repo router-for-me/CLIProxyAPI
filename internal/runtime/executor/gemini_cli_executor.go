@@ -423,6 +423,7 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 					reporter.PublishFailure(ctx)
 					out <- cliproxyexecutor.StreamChunk{Err: errScan}
 				}
+				reporter.EnsurePublished(ctx)
 				return
 			}
 

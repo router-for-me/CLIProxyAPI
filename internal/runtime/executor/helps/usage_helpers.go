@@ -318,6 +318,12 @@ func ParseGeminiCLIUsage(data []byte) usage.Detail {
 		node = usageNode.Get("response.usage_metadata")
 	}
 	if !node.Exists() {
+		node = usageNode.Get("usageMetadata")
+	}
+	if !node.Exists() {
+		node = usageNode.Get("usage_metadata")
+	}
+	if !node.Exists() {
 		return usage.Detail{}
 	}
 	return parseGeminiFamilyUsageDetail(node)
@@ -356,6 +362,12 @@ func ParseGeminiCLIStreamUsage(line []byte) (usage.Detail, bool) {
 		return usage.Detail{}, false
 	}
 	node := gjson.GetBytes(payload, "response.usageMetadata")
+	if !node.Exists() {
+		node = gjson.GetBytes(payload, "response.usage_metadata")
+	}
+	if !node.Exists() {
+		node = gjson.GetBytes(payload, "usageMetadata")
+	}
 	if !node.Exists() {
 		node = gjson.GetBytes(payload, "usage_metadata")
 	}
