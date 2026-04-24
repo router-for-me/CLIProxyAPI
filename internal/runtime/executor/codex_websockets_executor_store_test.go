@@ -47,3 +47,32 @@ func TestCodexWebsocketsExecutor_SessionStoreSurvivesExecutorReplacement(t *test
 		t.Fatalf("expected session to be removed after explicit close")
 	}
 }
+
+func TestCloseCodexWebsocketSessionsForAuthIDClosesParkedSession(t *testing.T) {
+	previousStore := globalCodexWebsocketSessionStore
+	t.Cleanup(func() { globalCodexWebsocketSessionStore = previousStore })
+
+	store := &codexWebsocketSessionStore{
+		sessions: make(map[string]*codexWebsocketSession),
+		parked:   make(map[string]*codexWebsocketSession),
+	}
+	globalCodexWebsocketSessionStore = store
+
+	const reuseKey = "auth-parked|wss://example.test/responses|cache-1"
+	sess := &codexWebsocketSession{
+		sessionID: "exec-parked",
+		reuseKey:  reuseKey,
+		authID:    "auth-parked",
+		wsURL:     "wss://example.test/responses",
+	}
+	store.parked[reuseKey] = sess
+
+	CloseCodexWebsocketSessionsForAuthID("auth-parked", "test_cleanup")
+
+	store.mu.Lock()
+	_, stillParked := store.parked[reuseKey]
+	store.mu.Unlock()
+	if stillParked {
+		t.Fatalf("expected parked session to be removed for auth")
+	}
+}

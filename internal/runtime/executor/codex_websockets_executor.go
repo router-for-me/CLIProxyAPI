@@ -40,6 +40,7 @@ const (
 	codexResponsesWebsocketHandshakeTO     = 30 * time.Second
 	codexResponsesWebsocketProbeIdle       = 45 * time.Second
 	codexResponsesWebsocketProbeWriteTO    = 10 * time.Second
+	codexResponsesWebsocketReadBuffer      = 256
 )
 
 var codexResponsesWebsocketParkTTL = 30 * time.Second
@@ -314,7 +315,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 
 	var readCh chan codexWebsocketRead
 	if sess != nil {
-		readCh = make(chan codexWebsocketRead, 4096)
+		readCh = make(chan codexWebsocketRead, codexResponsesWebsocketReadBuffer)
 		sess.setActive(readCh)
 		defer sess.clearActive(readCh)
 	}
@@ -456,7 +457,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 
 	var readCh chan codexWebsocketRead
 	if sess != nil {
-		readCh = make(chan codexWebsocketRead, 4096)
+		readCh = make(chan codexWebsocketRead, codexResponsesWebsocketReadBuffer)
 		sess.setActive(readCh)
 	}
 
