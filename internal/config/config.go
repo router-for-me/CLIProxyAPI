@@ -393,10 +393,12 @@ type ClaudeKey struct {
 	// ExcludedModels lists model IDs that should be excluded for this provider.
 	ExcludedModels []string `yaml:"excluded-models,omitempty" json:"excluded-models,omitempty"`
 
-	// Protocol specifies the API protocol to use for this Codex provider.
-	// "codex" (default): native Responses API support.
-	// "openai-chat": use Chat Completions API with automatic conversion.
-	Protocol string `yaml:"protocol,omitempty" json:"protocol,omitempty"`
+	// Cloak configures request cloaking for non-Claude-Code clients.
+	// When set, requests are disguised to appear as originating from the official Claude Code CLI.
+	Cloak *CloakConfig `yaml:"cloak,omitempty" json:"cloak,omitempty"`
+
+	// ExperimentalCCHSigning enables experimental CCH request signing for Claude API requests.
+	ExperimentalCCHSigning bool `yaml:"experimental-cch-signing,omitempty" json:"experimental-cch-signing,omitempty"`
 }
 
 func (k ClaudeKey) GetAPIKey() string  { return k.APIKey }
@@ -445,6 +447,11 @@ type CodexKey struct {
 
 	// ExcludedModels lists model IDs that should be excluded for this provider.
 	ExcludedModels []string `yaml:"excluded-models,omitempty" json:"excluded-models,omitempty"`
+
+	// Protocol specifies the API protocol to use for this Codex provider.
+	// "codex" (default): native Responses API support.
+	// "openai-chat": use Chat Completions API with automatic conversion.
+	Protocol string `yaml:"protocol,omitempty" json:"protocol,omitempty"`
 }
 
 func (k CodexKey) GetAPIKey() string  { return k.APIKey }
@@ -486,9 +493,9 @@ type GeminiKey struct {
 
 	// Headers optionally adds extra HTTP headers for requests sent with this key.
 	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
-
 	// ExcludedModels lists model IDs that should be excluded for this provider.
 	ExcludedModels []string `yaml:"excluded-models,omitempty" json:"excluded-models,omitempty"`
+
 }
 
 func (k GeminiKey) GetAPIKey() string  { return k.APIKey }

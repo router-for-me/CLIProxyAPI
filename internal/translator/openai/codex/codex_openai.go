@@ -51,6 +51,17 @@ func ConvertCodexRequestToOpenAI(modelName string, inputRawJSON []byte, stream b
 			item := inputArray[i]
 			itemType := item.Get("type").String()
 
+			// Infer type if not explicitly set
+			if itemType == "" {
+				if item.Get("role").Exists() {
+					itemType = "message"
+				} else if item.Get("call_id").Exists() && item.Get("output").Exists() {
+					itemType = "function_call_output"
+				} else if item.Get("call_id").Exists() && item.Get("name").Exists() {
+					itemType = "function_call"
+				}
+			}
+
 			switch itemType {
 			case "message":
 				msg := []byte(`{}`)
@@ -316,7 +327,6 @@ func ConvertOpenAIResponseToCodex(_ context.Context, modelName string, originalR
 	}
 
 	var events [][]byte
-	role := choice.Get("delta.role").String()
 	content := choice.Get("delta.content").String()
 	finishReason := choice.Get("finish_reason").String()
 
