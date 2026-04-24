@@ -15,6 +15,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/wsrelay"
@@ -1516,6 +1517,7 @@ func applyOAuthModelAlias(cfg *config.Config, provider, authKind string, models 
 	}
 
 	forward := make(map[string][]aliasEntry, len(aliases))
+	seenAlias := make(map[string]struct{}, len(aliases))
 	for i := range aliases {
 		name := strings.TrimSpace(aliases[i].Name)
 		alias := strings.TrimSpace(aliases[i].Alias)
@@ -1525,7 +1527,15 @@ func applyOAuthModelAlias(cfg *config.Config, provider, authKind string, models 
 		if strings.EqualFold(name, alias) {
 			continue
 		}
-		key := strings.ToLower(name)
+		aliasKey := strings.ToLower(alias)
+		if _, exists := seenAlias[aliasKey]; exists {
+			continue
+		}
+		seenAlias[aliasKey] = struct{}{}
+		key := strings.ToLower(strings.TrimSpace(thinking.ParseSuffix(name).ModelName))
+		if key == "" {
+			key = strings.ToLower(name)
+		}
 		forward[key] = append(forward[key], aliasEntry{alias: alias, fork: aliases[i].Fork})
 	}
 	if len(forward) == 0 {

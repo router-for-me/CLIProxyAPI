@@ -1271,6 +1271,29 @@
       }
     },
     {
+      "id": "gpt-5.5",
+      "object": "model",
+      "created": 1774915200,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 5.5",
+      "version": "gpt-5.5",
+      "description": "Stable version of GPT 5.5",
+      "context_length": 1050000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      }
+    },
+    {
       "id": "gpt-image-2",
       "object": "model",
       "created": 1772668800,
@@ -1371,6 +1394,29 @@
       "display_name": "GPT 5.4",
       "version": "gpt-5.4",
       "description": "Stable version of GPT 5.4",
+      "context_length": 1050000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      }
+    },
+    {
+      "id": "gpt-5.5",
+      "object": "model",
+      "created": 1774915200,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 5.5",
+      "version": "gpt-5.5",
+      "description": "Stable version of GPT 5.5",
       "context_length": 1050000,
       "max_completion_tokens": 128000,
       "supported_parameters": [
@@ -1524,6 +1570,29 @@
       }
     },
     {
+      "id": "gpt-5.5",
+      "object": "model",
+      "created": 1774915200,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 5.5",
+      "version": "gpt-5.5",
+      "description": "Stable version of GPT 5.5",
+      "context_length": 1050000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      }
+    },
+    {
       "id": "gpt-image-2",
       "object": "model",
       "created": 1772668800,
@@ -1647,6 +1716,29 @@
       "display_name": "GPT 5.4",
       "version": "gpt-5.4",
       "description": "Stable version of GPT 5.4",
+      "context_length": 1050000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      }
+    },
+    {
+      "id": "gpt-5.5",
+      "object": "model",
+      "created": 1774915200,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 5.5",
+      "version": "gpt-5.5",
+      "description": "Stable version of GPT 5.5",
       "context_length": 1050000,
       "max_completion_tokens": 128000,
       "supported_parameters": [

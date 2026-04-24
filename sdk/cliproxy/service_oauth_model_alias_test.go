@@ -119,10 +119,84 @@ func TestApplyOAuthModelAlias_CodexImage2Alias(t *testing.T) {
 	}
 	models := []*ModelInfo{{ID: "gpt-5.4", Name: "models/gpt-5.4"}}
 	out := applyOAuthModelAlias(cfg, "codex", "oauth", models)
-	if len(out) != 2 {
-		t.Fatalf("expected original plus image alias, got %d", len(out))
+	if !hasModelInfoIDName(out, "gpt-image-2", "models/gpt-image-2") {
+		t.Fatalf("expected image alias in model list, got %#v", modelInfoIDs(out))
 	}
-	if out[1].ID != "gpt-image-2" || out[1].Name != "models/gpt-image-2" {
-		t.Fatalf("unexpected alias model: id=%q name=%q", out[1].ID, out[1].Name)
+}
+
+func TestApplyOAuthModelAlias_ForkAddsSuffixedReasoningAlias(t *testing.T) {
+	cfg := &config.Config{
+		OAuthModelAlias: map[string][]config.OAuthModelAlias{
+			"codex": {
+				{Name: "gpt-5.5(high)", Alias: "gpt-5.5-high", Fork: true},
+			},
+		},
 	}
+	models := []*ModelInfo{{ID: "gpt-5.5", Name: "models/gpt-5.5"}}
+	out := applyOAuthModelAlias(cfg, "codex", "oauth", models)
+	if !hasModelInfoIDName(out, "gpt-5.5", "models/gpt-5.5") {
+		t.Fatalf("expected original model in list, got %#v", modelInfoIDs(out))
+	}
+	if !hasModelInfoIDName(out, "gpt-5.5-high", "models/gpt-5.5-high") {
+		t.Fatalf("expected reasoning alias in model list, got %#v", modelInfoIDs(out))
+	}
+}
+
+func hasModelInfoIDName(models []*ModelInfo, id, name string) bool {
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		if model.ID == id && model.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func modelInfoIDs(models []*ModelInfo) []string {
+	out := make([]string, 0, len(models))
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		out = append(out, model.ID)
+	}
+	return out
+}
+
+func TestApplyOAuthModelAlias_UserReasoningAliasOverridesDefaultInListings(t *testing.T) {
+	cfg := &config.Config{
+		OAuthModelAlias: map[string][]config.OAuthModelAlias{
+			"codex": {
+				{Name: "gpt-5.4(low)", Alias: "gpt-5.5-low", Fork: true},
+			},
+		},
+	}
+	models := []*ModelInfo{
+		{ID: "gpt-5.5", Name: "models/gpt-5.5", DisplayName: "GPT 5.5"},
+		{ID: "gpt-5.4", Name: "models/gpt-5.4", DisplayName: "GPT 5.4"},
+	}
+	out := applyOAuthModelAlias(cfg, "codex", "oauth", models)
+
+	aliasModels := matchingModelInfos(out, "gpt-5.5-low")
+	if len(aliasModels) != 1 {
+		t.Fatalf("expected exactly one gpt-5.5-low alias, got %d in %#v", len(aliasModels), modelInfoIDs(out))
+	}
+	if aliasModels[0].DisplayName != "GPT 5.4" {
+		t.Fatalf("expected user override alias to be cloned from GPT 5.4, got display name %q", aliasModels[0].DisplayName)
+	}
+}
+
+func matchingModelInfos(models []*ModelInfo, id string) []*ModelInfo {
+	out := make([]*ModelInfo, 0)
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		if model.ID == id {
+			out = append(out, model)
+		}
+	}
+	return out
 }

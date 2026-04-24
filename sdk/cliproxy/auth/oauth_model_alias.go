@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 )
 
@@ -18,11 +19,59 @@ type oauthModelAliasTable struct {
 }
 
 func defaultOAuthModelAliases() map[string][]internalconfig.OAuthModelAlias {
-	return map[string][]internalconfig.OAuthModelAlias{
+	aliases := map[string][]internalconfig.OAuthModelAlias{
 		"codex": {
 			{Name: "gpt-5.4", Alias: "gpt-image-2", Fork: true},
 		},
 	}
+	appendReasoningAliasesForChannel(aliases, "codex")
+	appendReasoningAliasesForChannel(aliases, "claude")
+	return aliases
+}
+
+func appendReasoningAliasesForChannel(aliases map[string][]internalconfig.OAuthModelAlias, channel string) {
+	for _, model := range registry.GetStaticModelDefinitionsByChannel(channel) {
+		if model == nil || model.Thinking == nil {
+			continue
+		}
+		base := strings.TrimSpace(model.ID)
+		if base == "" {
+			continue
+		}
+		for _, level := range defaultReasoningAliasLevels(model.Thinking) {
+			aliases[channel] = append(aliases[channel], internalconfig.OAuthModelAlias{
+				Name:  base + "(" + level + ")",
+				Alias: base + "-" + level,
+				Fork:  true,
+			})
+		}
+	}
+}
+
+func defaultReasoningAliasLevels(support *registry.ThinkingSupport) []string {
+	if support == nil {
+		return nil
+	}
+	levels := support.Levels
+	if len(levels) == 0 {
+		levels = []string{"low", "medium", "high", "xhigh"}
+	}
+	out := make([]string, 0, len(levels))
+	seen := make(map[string]struct{}, len(levels))
+	for _, level := range levels {
+		level = strings.ToLower(strings.TrimSpace(level))
+		switch level {
+		case "low", "medium", "high", "xhigh", "max":
+		default:
+			continue
+		}
+		if _, exists := seen[level]; exists {
+			continue
+		}
+		seen[level] = struct{}{}
+		out = append(out, level)
+	}
+	return out
 }
 
 func defaultOAuthModelAliasTable() *oauthModelAliasTable {
