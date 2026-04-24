@@ -94,6 +94,52 @@ func TestServiceAuthHookIgnoresTokenOnlyUpdates(t *testing.T) {
 	}
 }
 
+func TestServiceAuthHookIgnoresInvalidIDTokenWhenPlanUnchanged(t *testing.T) {
+	manager := coreauth.NewManager(nil, nil, nil)
+	service := &Service{
+		cfg:         &config.Config{},
+		coreManager: manager,
+	}
+	manager.SetHook(serviceAuthHook{service: service, next: manager.Hook()})
+
+	auth := &coreauth.Auth{
+		ID:       "codex-invalid-id-token-test",
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"plan_type": "plus",
+		},
+		Metadata: map[string]any{"type": "codex", "id_token": "valid-old-token"},
+	}
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+	state := &coreauth.ModelState{
+		NextRetryAfter: time.Now().Add(time.Hour),
+	}
+	auth.ModelStates = map[string]*coreauth.ModelState{"gpt-5.5": state}
+	auth.Metadata["id_token"] = "invalid-refreshed-token"
+	if _, err := manager.Update(context.Background(), auth); err != nil {
+		t.Fatalf("update auth: %v", err)
+	}
+
+	updated, ok := manager.GetByID(auth.ID)
+	if !ok {
+		t.Fatal("expected auth to remain registered")
+	}
+	if got := updated.Attributes["plan_type"]; got != "plus" {
+		t.Fatalf("expected plan_type to remain plus, got %q", got)
+	}
+	updatedState := updated.ModelStates["gpt-5.5"]
+	if updatedState == nil || updatedState.NextRetryAfter.IsZero() {
+		t.Fatal("expected invalid id_token update to preserve model cooldown state")
+	}
+}
+
 func TestRegisterModelsForAuthSkipsStatusDisabledAuth(t *testing.T) {
 	service := &Service{cfg: &config.Config{}}
 	auth := &coreauth.Auth{

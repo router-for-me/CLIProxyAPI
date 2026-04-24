@@ -700,8 +700,6 @@ func (e *CodexExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*
 	auth.Metadata["id_token"] = td.IDToken
 	if planType := codexauth.PlanTypeFromIDToken(td.IDToken); planType != "" {
 		auth.Attributes["plan_type"] = planType
-	} else {
-		delete(auth.Attributes, "plan_type")
 	}
 	auth.Metadata["access_token"] = td.AccessToken
 	if td.RefreshToken != "" {
