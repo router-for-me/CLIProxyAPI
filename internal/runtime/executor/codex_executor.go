@@ -827,13 +827,12 @@ func codexInputLooksLikeFullTranscript(input gjson.Result) bool {
 		return false
 	}
 	for _, item := range input.Array() {
+		if strings.TrimSpace(item.Get("role").String()) == "assistant" {
+			return true
+		}
 		switch strings.TrimSpace(item.Get("type").String()) {
 		case "function_call", "custom_tool_call":
 			return true
-		case "message":
-			if strings.TrimSpace(item.Get("role").String()) == "assistant" {
-				return true
-			}
 		}
 	}
 	return false
@@ -857,7 +856,7 @@ func normalizeCodexDeveloperCurrentTimeForPromptCache(_ context.Context, from sd
 	if content.Type != gjson.String {
 		return rawJSON
 	}
-	normalized, changed := normalizeCodexCurrentTimeLine(content.String())
+	normalized, changed := normalizeCodexOpenCodeEnvCurrentTime(content.String())
 	if !changed {
 		return rawJSON
 	}
@@ -868,7 +867,59 @@ func normalizeCodexDeveloperCurrentTimeForPromptCache(_ context.Context, from sd
 	return updated
 }
 
-func normalizeCodexCurrentTimeLine(content string) (string, bool) {
+func normalizeCodexOpenCodeEnvCurrentTime(content string) (string, bool) {
+	const envStartMarker = "<env>"
+	const envEndMarker = "</env>"
+
+	searchStart := 0
+	for {
+		envStart := strings.Index(content[searchStart:], envStartMarker)
+		if envStart < 0 {
+			return content, false
+		}
+		envStart += searchStart
+		blockStart := envStart + len(envStartMarker)
+		envEnd := strings.Index(content[blockStart:], envEndMarker)
+		if envEnd < 0 {
+			return content, false
+		}
+		blockEnd := blockStart + envEnd
+		block := content[blockStart:blockEnd]
+		if !looksLikeOpenCodeEnvBlock(block) {
+			searchStart = blockEnd + len(envEndMarker)
+			continue
+		}
+
+		normalizedBlock, changed := normalizeCodexCurrentTimeLineInBlock(block)
+		if !changed {
+			searchStart = blockEnd + len(envEndMarker)
+			continue
+		}
+		return content[:blockStart] + normalizedBlock + content[blockEnd:], true
+	}
+}
+
+func looksLikeOpenCodeEnvBlock(block string) bool {
+	required := strings.Contains(block, "Working directory:")
+	if !required {
+		return false
+	}
+
+	markerCount := 0
+	for _, marker := range []string{
+		"Workspace root folder:",
+		"Is directory a git repo:",
+		"Platform:",
+		"Today's date:",
+	} {
+		if strings.Contains(block, marker) {
+			markerCount++
+		}
+	}
+	return markerCount >= 2
+}
+
+func normalizeCodexCurrentTimeLineInBlock(content string) (string, bool) {
 	const label = "Current time: "
 	index := strings.Index(content, label)
 	if index < 0 {
