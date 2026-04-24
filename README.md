@@ -21,6 +21,7 @@ A proxy server that provides OpenAI/Gemini/Claude/Codex compatible API interface
 ### Multi-Account Management
 - Multiple accounts with round-robin load balancing
 - Gemini multi-account (AI Studio Build, Gemini CLI)
+- Gemini CLI now discovers models dynamically per `auth + project`: it reads `retrieveUserQuota`, probes each candidate with a minimal `generateContent` request, and only registers probe-success models in `/v1/models`
 - OpenAI Codex multi-account
 - Claude Code multi-account
 - Qwen Code multi-account

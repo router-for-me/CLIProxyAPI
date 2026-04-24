@@ -21,6 +21,7 @@
 ### 多账户管理
 - 多账户支持与轮询负载均衡
 - Gemini 多账户（AI Studio Build、Gemini CLI）
+- Gemini CLI 现在按当前 `auth + project` 动态发现可用模型：先读 `retrieveUserQuota`，再对候选模型做最小 `generateContent` 探活，只对探活成功的模型注册 `/v1/models`
 - OpenAI Codex 多账户
 - Claude Code 多账户
 - Qwen Code 多账户
@@ -78,6 +79,8 @@ cp config.example.yaml config.yaml
 - 仓库仅提供 `state-store.example.ini` 模板，真实状态配置文件需要在本地和生产环境分别维护。
 - 解析规则：`config.yaml` 读取 `state-store.local.ini`，`config-277.yaml` 读取 `state-store.277.ini`。
 - 该 Mongo 配置同时用于熔断强一致失败状态：`circuit_breaker_failure_states` 和 `circuit_breaker_failure_events`。
+- `openai-compat-network-retry` / `openai-compat-network-retry-backoff-ms` 仅用于 `openai-compatible` executor 在“尚未收到上游响应”时吸收 `EOF`、`TLS handshake timeout` 等瞬时网络抖动。
+- `request-retry` 仍保留为更外层的 auth/credential 级兜底；它不负责已选定同一上游节点的短抖动吸收，两者职责边界分离。
 
 - **本地开发（推荐）**：`./bin/air`（由 `.air.toml` 管理，等价于使用 `-config config.yaml` 启动）
 - **本地回退启动**：`go run ./cmd/server`

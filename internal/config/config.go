@@ -78,6 +78,13 @@ type Config struct {
 	// RequestBudgetSeconds defines per-request total timeout budget in seconds across retries.
 	// Set to 0 to disable budget enforcement.
 	RequestBudgetSeconds int `yaml:"request-budget-seconds" json:"request-budget-seconds"`
+	// OpenAICompatNetworkRetry defines extra same-upstream retries for transient
+	// network errors before any HTTP response is received from openai-compatible providers.
+	OpenAICompatNetworkRetry int `yaml:"openai-compat-network-retry" json:"openai-compat-network-retry"`
+	// OpenAICompatNetworkRetryBackoffMS defines the base backoff in milliseconds
+	// before retrying openai-compatible transient network errors. Subsequent
+	// retries use exponential backoff.
+	OpenAICompatNetworkRetryBackoffMS int `yaml:"openai-compat-network-retry-backoff-ms" json:"openai-compat-network-retry-backoff-ms"`
 
 	// QuotaExceeded defines the behavior when a quota is exceeded.
 	QuotaExceeded QuotaExceeded `yaml:"quota-exceeded" json:"quota-exceeded"`
@@ -624,6 +631,8 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.UsageStatisticsEnabled = false
 	cfg.DisableCooling = false
 	cfg.RequestBudgetSeconds = 45
+	cfg.OpenAICompatNetworkRetry = 1
+	cfg.OpenAICompatNetworkRetryBackoffMS = 500
 	cfg.Pprof.Enable = false
 	cfg.Pprof.Addr = DefaultPprofAddr
 	cfg.AmpCode.RestrictManagementToLocalhost = false // Default to false: API key auth is sufficient
@@ -688,6 +697,12 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	}
 	if cfg.RequestBudgetSeconds < 0 {
 		cfg.RequestBudgetSeconds = 0
+	}
+	if cfg.OpenAICompatNetworkRetry < 0 {
+		cfg.OpenAICompatNetworkRetry = 0
+	}
+	if cfg.OpenAICompatNetworkRetryBackoffMS < 0 {
+		cfg.OpenAICompatNetworkRetryBackoffMS = 0
 	}
 
 	// Sanitize Gemini API key configuration and migrate legacy entries.
@@ -1369,6 +1384,10 @@ func isKnownDefaultValue(path []string, node *yaml.Node) bool {
 			return node.Value == "10"
 		case "request-budget-seconds":
 			return node.Value == "45"
+		case "openai-compat-network-retry":
+			return node.Value == "1"
+		case "openai-compat-network-retry-backoff-ms":
+			return node.Value == "500"
 		}
 	}
 

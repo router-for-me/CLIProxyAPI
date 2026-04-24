@@ -5,10 +5,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
@@ -32,6 +35,13 @@ type OpenAICompatExecutor struct {
 }
 
 const defaultOpenAICompatCircuitBreakerRecoveryTimeoutSec = 60
+
+type openAICompatUpstreamRequest struct {
+	URL     string
+	Method  string
+	Headers http.Header
+	Body    []byte
+}
 
 // NewOpenAICompatExecutor creates an executor bound to a provider key (e.g., "openrouter").
 func NewOpenAICompatExecutor(provider string, cfg *config.Config) *OpenAICompatExecutor {
@@ -72,6 +82,140 @@ func (e *OpenAICompatExecutor) HttpRequest(ctx context.Context, auth *cliproxyau
 	}
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	return httpClient.Do(httpReq)
+}
+
+func (e *OpenAICompatExecutor) doRequestWithNetworkRetry(ctx context.Context, auth *cliproxyauth.Auth, req openAICompatUpstreamRequest) (*http.Response, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	retries := 0
+	baseBackoff := 500 * time.Millisecond
+	if e.cfg != nil {
+		retries = e.cfg.OpenAICompatNetworkRetry
+		if retries < 0 {
+			retries = 0
+		}
+		if e.cfg.OpenAICompatNetworkRetryBackoffMS >= 0 {
+			baseBackoff = time.Duration(e.cfg.OpenAICompatNetworkRetryBackoffMS) * time.Millisecond
+		}
+	}
+	attempts := retries + 1
+
+	var authID, authLabel, authType, authValue string
+	if auth != nil {
+		authID = auth.ID
+		authLabel = auth.Label
+		authType, authValue = auth.AccountInfo()
+	}
+
+	var lastErr error
+	for attempt := 0; attempt < attempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+
+		httpReq, err := http.NewRequestWithContext(ctx, req.Method, req.URL, bytes.NewReader(req.Body))
+		if err != nil {
+			return nil, err
+		}
+		httpReq.Header = req.Headers.Clone()
+
+		recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
+			URL:       req.URL,
+			Method:    req.Method,
+			Headers:   httpReq.Header.Clone(),
+			Body:      req.Body,
+			Provider:  e.Identifier(),
+			AuthID:    authID,
+			AuthLabel: authLabel,
+			AuthType:  authType,
+			AuthValue: authValue,
+		})
+
+		httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+		httpResp, err := httpClient.Do(httpReq)
+		if err == nil {
+			return httpResp, nil
+		}
+
+		lastErr = err
+		recordAPIResponseError(ctx, e.cfg, err)
+		if attempt >= retries || !isOpenAICompatRetryableNetworkError(err) {
+			return nil, err
+		}
+
+		delay := openAICompatNetworkRetryDelay(baseBackoff, attempt)
+		logWithRequestID(ctx).Warnf("openai compat executor: transient upstream network error on attempt %d/%d: %v; retrying in %s", attempt+1, attempts, err, delay)
+		if err := waitOpenAICompatRetryBackoff(ctx, delay); err != nil {
+			return nil, err
+		}
+	}
+
+	return nil, lastErr
+}
+
+func openAICompatNetworkRetryDelay(base time.Duration, attempt int) time.Duration {
+	if base <= 0 {
+		return 0
+	}
+	if attempt < 0 {
+		attempt = 0
+	}
+	return base * time.Duration(1<<attempt)
+}
+
+func waitOpenAICompatRetryBackoff(ctx context.Context, delay time.Duration) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if delay <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func isOpenAICompatRetryableNetworkError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	for _, target := range []error{syscall.ECONNRESET, syscall.ECONNABORTED, syscall.EPIPE} {
+		if errors.Is(err, target) {
+			return true
+		}
+	}
+
+	msg := strings.ToLower(err.Error())
+	for _, needle := range []string{
+		"tls handshake timeout",
+		"unexpected eof",
+		"connection reset by peer",
+		"connection reset",
+		"connection closed",
+		"use of closed network connection",
+		"server closed idle connection",
+		"broken pipe",
+		"connection aborted",
+	} {
+		if strings.Contains(msg, needle) {
+			return true
+		}
+	}
+	return false
 }
 
 func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
@@ -171,28 +315,17 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
-	var authID, authLabel, authType, authValue string
+	var authID string
 	if auth != nil {
 		authID = auth.ID
-		authLabel = auth.Label
-		authType, authValue = auth.AccountInfo()
 	}
-	recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
-		URL:       url,
-		Method:    http.MethodPost,
-		Headers:   httpReq.Header.Clone(),
-		Body:      translated,
-		Provider:  e.Identifier(),
-		AuthID:    authID,
-		AuthLabel: authLabel,
-		AuthType:  authType,
-		AuthValue: authValue,
+	httpResp, err := e.doRequestWithNetworkRetry(ctx, auth, openAICompatUpstreamRequest{
+		URL:     url,
+		Method:  http.MethodPost,
+		Headers: httpReq.Header.Clone(),
+		Body:    translated,
 	})
-
-	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
-		recordAPIResponseError(ctx, e.cfg, err)
 		e.recordOpenAICompatFailure(auth, circuitModel)
 		return resp, err
 	}
@@ -362,28 +495,17 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
 	httpReq.Header.Set("Accept", "text/event-stream")
 	httpReq.Header.Set("Cache-Control", "no-cache")
-	var authID, authLabel, authType, authValue string
+	var authID string
 	if auth != nil {
 		authID = auth.ID
-		authLabel = auth.Label
-		authType, authValue = auth.AccountInfo()
 	}
-	recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
-		URL:       url,
-		Method:    http.MethodPost,
-		Headers:   httpReq.Header.Clone(),
-		Body:      translated,
-		Provider:  e.Identifier(),
-		AuthID:    authID,
-		AuthLabel: authLabel,
-		AuthType:  authType,
-		AuthValue: authValue,
+	httpResp, err := e.doRequestWithNetworkRetry(ctx, auth, openAICompatUpstreamRequest{
+		URL:     url,
+		Method:  http.MethodPost,
+		Headers: httpReq.Header.Clone(),
+		Body:    translated,
 	})
-
-	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
-		recordAPIResponseError(ctx, e.cfg, err)
 		e.recordOpenAICompatFailure(auth, circuitModel)
 		return nil, err
 	}

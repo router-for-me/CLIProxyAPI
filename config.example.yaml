@@ -89,6 +89,15 @@ max-retry-interval: 30
 # 单个请求（含重试/冷却等待）的总预算秒数。默认 45，设为 0 禁用预算。
 request-budget-seconds: 45
 
+# openai-compatible 同节点短重试次数。
+# 仅覆盖“尚未收到 HTTP 响应”的瞬时网络错误，例如 EOF、TLS handshake timeout。
+# 该重试先于 request-retry 执行；request-retry 仍负责更外层的 credential/provider 级兜底。
+openai-compat-network-retry: 1
+
+# openai-compatible 同节点短重试的基础退避毫秒数。
+# 第一次重试等待该时长，后续按 2 倍递增。设为 0 表示不等待直接重试。
+openai-compat-network-retry-backoff-ms: 500
+
 # 配额超出行为
 quota-exceeded:
   switch-project: true  # 配额超时时是否自动切换到其他项目
