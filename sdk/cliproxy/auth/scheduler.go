@@ -352,7 +352,7 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 func (s *authScheduler) mixedUnavailableErrorLocked(providers []string, model string, tried map[string]struct{}) error {
 	now := time.Now()
 	total := 0
-	cooldownCount := 0
+	blockedCount := 0
 	earliest := time.Time{}
 	for _, providerKey := range providers {
 		providerState := s.providers[providerKey]
@@ -363,9 +363,9 @@ func (s *authScheduler) mixedUnavailableErrorLocked(providers []string, model st
 		if shard == nil {
 			continue
 		}
-		localTotal, localCooldownCount, localEarliest := shard.availabilitySummaryLocked(triedPredicate(tried))
+		localTotal, localBlockedCount, localEarliest := shard.blockingSummaryLocked(model, triedPredicate(tried))
 		total += localTotal
-		cooldownCount += localCooldownCount
+		blockedCount += localBlockedCount
 		if !localEarliest.IsZero() && (earliest.IsZero() || localEarliest.Before(earliest)) {
 			earliest = localEarliest
 		}
@@ -373,10 +373,13 @@ func (s *authScheduler) mixedUnavailableErrorLocked(providers []string, model st
 	if total == 0 {
 		return &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
-	if cooldownCount == total && !earliest.IsZero() {
-		resetIn := earliest.Sub(now)
-		if resetIn < 0 {
-			resetIn = 0
+	if blockedCount == total {
+		resetIn := time.Duration(0)
+		if !earliest.IsZero() {
+			resetIn = earliest.Sub(now)
+			if resetIn < 0 {
+				resetIn = 0
+			}
 		}
 		return newModelCooldownError(model, "", resetIn)
 	}
@@ -755,31 +758,38 @@ func (m *modelScheduler) readyCountAtPriorityLocked(preferWebsocket bool, priori
 // unavailableErrorLocked returns the correct unavailable or cooldown error for the shard.
 func (m *modelScheduler) unavailableErrorLocked(provider, model string, predicate func(*scheduledAuth) bool) error {
 	now := time.Now()
-	total, cooldownCount, earliest := m.availabilitySummaryLocked(predicate)
+	total, blockedCount, earliest := m.blockingSummaryLocked(model, predicate)
 	if total == 0 {
 		return &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
-	if cooldownCount == total && !earliest.IsZero() {
+	if blockedCount == total {
 		providerForError := provider
 		if providerForError == "mixed" {
 			providerForError = ""
 		}
-		resetIn := earliest.Sub(now)
-		if resetIn < 0 {
-			resetIn = 0
+		resetIn := time.Duration(0)
+		if !earliest.IsZero() {
+			resetIn = earliest.Sub(now)
+			if resetIn < 0 {
+				resetIn = 0
+			}
 		}
 		return newModelCooldownError(model, providerForError, resetIn)
 	}
 	return &Error{Code: "auth_unavailable", Message: "no auth available"}
 }
 
-// availabilitySummaryLocked summarizes total candidates, cooldown count, and earliest retry time.
-func (m *modelScheduler) availabilitySummaryLocked(predicate func(*scheduledAuth) bool) (int, int, time.Time) {
+// blockingSummaryLocked summarizes total candidates, blocked candidates (cooldown or circuit-open), and earliest retry time.
+func (m *modelScheduler) blockingSummaryLocked(model string, predicate func(*scheduledAuth) bool) (int, int, time.Time) {
 	if m == nil {
 		return 0, 0, time.Time{}
 	}
+	now := time.Now()
+	modelKey := canonicalModelKey(model)
+	reg := registry.GetGlobalRegistry()
+	statusByAuth := circuitBreakerStatusByAuthForModel(reg, modelKey)
 	total := 0
-	cooldownCount := 0
+	blockedCount := 0
 	earliest := time.Time{}
 	for _, entry := range m.entries {
 		if predicate != nil && !predicate(entry) {
@@ -789,15 +799,70 @@ func (m *modelScheduler) availabilitySummaryLocked(predicate func(*scheduledAuth
 		if entry == nil || entry.auth == nil {
 			continue
 		}
-		if entry.state != scheduledStateCooldown {
-			continue
+		blocked := false
+		if entry.state == scheduledStateCooldown {
+			blocked = true
+			if !entry.nextRetryAt.IsZero() && (earliest.IsZero() || entry.nextRetryAt.Before(earliest)) {
+				earliest = entry.nextRetryAt
+			}
 		}
-		cooldownCount++
-		if !entry.nextRetryAt.IsZero() && (earliest.IsZero() || entry.nextRetryAt.Before(earliest)) {
-			earliest = entry.nextRetryAt
+		if open, recoveryAt := circuitOpenRecoveryAt(reg, statusByAuth, entry.auth.ID, modelKey, now); open {
+			blocked = true
+			if !recoveryAt.IsZero() && (earliest.IsZero() || recoveryAt.Before(earliest)) {
+				earliest = recoveryAt
+			}
+		}
+		if blocked {
+			blockedCount++
 		}
 	}
-	return total, cooldownCount, earliest
+	return total, blockedCount, earliest
+}
+
+func circuitBreakerStatusByAuthForModel(reg *registry.ModelRegistry, model string) map[string]registry.CircuitBreakerStatus {
+	model = canonicalModelKey(model)
+	if reg == nil || model == "" {
+		return nil
+	}
+	snapshot := reg.GetCircuitBreakerStatus()
+	if len(snapshot) == 0 {
+		return nil
+	}
+	statusByAuth := make(map[string]registry.CircuitBreakerStatus)
+	for authID, perModel := range snapshot {
+		if len(perModel) == 0 {
+			continue
+		}
+		for modelID, status := range perModel {
+			if strings.EqualFold(strings.TrimSpace(modelID), model) {
+				statusByAuth[authID] = status
+				break
+			}
+		}
+	}
+	if len(statusByAuth) == 0 {
+		return nil
+	}
+	return statusByAuth
+}
+
+func circuitOpenRecoveryAt(reg *registry.ModelRegistry, statusByAuth map[string]registry.CircuitBreakerStatus, authID, model string, now time.Time) (bool, time.Time) {
+	authID = strings.TrimSpace(authID)
+	model = canonicalModelKey(model)
+	if reg == nil || authID == "" || model == "" {
+		return false, time.Time{}
+	}
+	if !reg.IsCircuitOpen(authID, model) {
+		return false, time.Time{}
+	}
+	recoveryAt := now
+	if status, ok := statusByAuth[authID]; ok && status.State == registry.CircuitOpen && !status.RecoveryAt.IsZero() {
+		recoveryAt = status.RecoveryAt
+		if recoveryAt.Before(now) {
+			recoveryAt = now
+		}
+	}
+	return true, recoveryAt
 }
 
 // rebuildIndexesLocked reconstructs ready and blocked views from the current entry map.

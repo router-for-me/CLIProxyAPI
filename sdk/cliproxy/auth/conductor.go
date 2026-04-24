@@ -2714,6 +2714,11 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 		}
 	}
 	registryRef := registry.GetGlobalRegistry()
+	now := time.Now()
+	statusByAuth := circuitBreakerStatusByAuthForModel(registryRef, modelKey)
+	eligibleBeforeCircuit := 0
+	circuitBlocked := 0
+	earliestCircuitRecovery := time.Time{}
 	for _, candidate := range m.auths {
 		if candidate.Provider != provider || candidate.Disabled {
 			continue
@@ -2727,13 +2732,28 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 		if modelKey != "" && registryRef != nil && !registryRef.ClientSupportsModel(candidate.ID, modelKey) {
 			continue
 		}
-		if modelKey != "" && registryRef != nil && registryRef.IsCircuitOpen(candidate.ID, modelKey) {
+		eligibleBeforeCircuit++
+		if open, recoveryAt := circuitOpenRecoveryAt(registryRef, statusByAuth, candidate.ID, modelKey, now); open {
+			circuitBlocked++
+			if !recoveryAt.IsZero() && (earliestCircuitRecovery.IsZero() || recoveryAt.Before(earliestCircuitRecovery)) {
+				earliestCircuitRecovery = recoveryAt
+			}
 			continue
 		}
 		candidates = append(candidates, candidate)
 	}
 	if len(candidates) == 0 {
 		m.mu.RUnlock()
+		if eligibleBeforeCircuit > 0 && circuitBlocked == eligibleBeforeCircuit {
+			resetIn := time.Duration(0)
+			if !earliestCircuitRecovery.IsZero() {
+				resetIn = earliestCircuitRecovery.Sub(now)
+				if resetIn < 0 {
+					resetIn = 0
+				}
+			}
+			return nil, nil, newModelCooldownError(model, provider, resetIn)
+		}
 		return nil, nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
 	selected, errPick := m.selector.Pick(ctx, provider, model, opts, candidates)
@@ -2828,6 +2848,11 @@ func (m *Manager) pickNextMixedLegacyOnce(ctx context.Context, providers []strin
 		}
 	}
 	registryRef := registry.GetGlobalRegistry()
+	now := time.Now()
+	statusByAuth := circuitBreakerStatusByAuthForModel(registryRef, modelKey)
+	eligibleBeforeCircuit := 0
+	circuitBlocked := 0
+	earliestCircuitRecovery := time.Time{}
 	for _, candidate := range m.auths {
 		if candidate == nil || candidate.Disabled {
 			continue
@@ -2851,13 +2876,28 @@ func (m *Manager) pickNextMixedLegacyOnce(ctx context.Context, providers []strin
 		if modelKey != "" && registryRef != nil && !registryRef.ClientSupportsModel(candidate.ID, modelKey) {
 			continue
 		}
-		if modelKey != "" && registryRef != nil && registryRef.IsCircuitOpen(candidate.ID, modelKey) {
+		eligibleBeforeCircuit++
+		if open, recoveryAt := circuitOpenRecoveryAt(registryRef, statusByAuth, candidate.ID, modelKey, now); open {
+			circuitBlocked++
+			if !recoveryAt.IsZero() && (earliestCircuitRecovery.IsZero() || recoveryAt.Before(earliestCircuitRecovery)) {
+				earliestCircuitRecovery = recoveryAt
+			}
 			continue
 		}
 		candidates = append(candidates, candidate)
 	}
 	if len(candidates) == 0 {
 		m.mu.RUnlock()
+		if eligibleBeforeCircuit > 0 && circuitBlocked == eligibleBeforeCircuit {
+			resetIn := time.Duration(0)
+			if !earliestCircuitRecovery.IsZero() {
+				resetIn = earliestCircuitRecovery.Sub(now)
+				if resetIn < 0 {
+					resetIn = 0
+				}
+			}
+			return nil, nil, "", newModelCooldownError(model, "", resetIn)
+		}
 		return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
 	selected, errPick := m.selector.Pick(ctx, "mixed", model, opts, candidates)

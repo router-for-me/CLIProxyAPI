@@ -2,7 +2,9 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"net/http"
+	"strconv"
 	"testing"
 	"time"
 
@@ -68,6 +70,31 @@ func registerSchedulerModels(t *testing.T, provider string, model string, authID
 			reg.UnregisterClient(authID)
 		}
 	})
+}
+
+func assertModelCooldownError(t *testing.T, err error) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("expected model_cooldown error, got nil")
+	}
+	var cooldownErr *modelCooldownError
+	if !errors.As(err, &cooldownErr) {
+		t.Fatalf("expected *modelCooldownError, got %T (%v)", err, err)
+	}
+	if status := cooldownErr.StatusCode(); status != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want %d", status, http.StatusTooManyRequests)
+	}
+	retryAfter := cooldownErr.Headers().Get("Retry-After")
+	if retryAfter == "" {
+		t.Fatal("expected Retry-After header")
+	}
+	seconds, errParse := strconv.Atoi(retryAfter)
+	if errParse != nil {
+		t.Fatalf("Retry-After parse failed: %v", errParse)
+	}
+	if seconds < 0 {
+		t.Fatalf("Retry-After = %d, want >= 0", seconds)
+	}
 }
 
 func TestSchedulerPick_RoundRobinHighestPriority(t *testing.T) {
@@ -272,6 +299,62 @@ func TestSchedulerPick_MixedProvidersPrefersHighestPriorityTier(t *testing.T) {
 	}
 }
 
+func TestSchedulerPick_SingleProviderAllCircuitOpenReturnsModelCooldown(t *testing.T) {
+	t.Parallel()
+
+	const model = "single-provider-circuit-open-model"
+	registerSchedulerModels(t, "gemini", model, "single-open-a", "single-open-b")
+	scheduler := newSchedulerForTest(
+		&RoundRobinSelector{},
+		&Auth{ID: "single-open-a", Provider: "gemini"},
+		&Auth{ID: "single-open-b", Provider: "gemini"},
+	)
+
+	reg := registry.GetGlobalRegistry()
+	reg.ForceOpenCircuitBreaker("single-open-a", model)
+	reg.ForceOpenCircuitBreaker("single-open-b", model)
+	t.Cleanup(func() {
+		reg.ResetCircuitBreaker("single-open-a", model)
+		reg.ResetCircuitBreaker("single-open-b", model)
+	})
+
+	got, errPick := scheduler.pickSingle(context.Background(), "gemini", model, cliproxyexecutor.Options{}, nil)
+	if got != nil {
+		t.Fatalf("pickSingle() auth = %v, want nil", got)
+	}
+	assertModelCooldownError(t, errPick)
+}
+
+func TestSchedulerPick_MixedProvidersAllCircuitOpenReturnsModelCooldown(t *testing.T) {
+	t.Parallel()
+
+	const model = "mixed-provider-circuit-open-model"
+	registerSchedulerModels(t, "gemini", model, "mixed-open-gemini")
+	registerSchedulerModels(t, "claude", model, "mixed-open-claude")
+	scheduler := newSchedulerForTest(
+		&RoundRobinSelector{},
+		&Auth{ID: "mixed-open-gemini", Provider: "gemini"},
+		&Auth{ID: "mixed-open-claude", Provider: "claude"},
+	)
+
+	reg := registry.GetGlobalRegistry()
+	reg.ForceOpenCircuitBreaker("mixed-open-gemini", model)
+	reg.ForceOpenCircuitBreaker("mixed-open-claude", model)
+	t.Cleanup(func() {
+		reg.ResetCircuitBreaker("mixed-open-gemini", model)
+		reg.ResetCircuitBreaker("mixed-open-claude", model)
+	})
+
+	got, provider, errPick := scheduler.pickMixed(context.Background(), []string{"gemini", "claude"}, model, cliproxyexecutor.Options{}, nil)
+	if got != nil {
+		t.Fatalf("pickMixed() auth = %v, want nil", got)
+	}
+	if provider != "" {
+		t.Fatalf("pickMixed() provider = %q, want empty", provider)
+	}
+	assertModelCooldownError(t, errPick)
+}
+
 func TestManager_PickNextMixed_UsesWeightedProviderRotationBeforeCredentialRotation(t *testing.T) {
 	t.Parallel()
 
@@ -401,6 +484,63 @@ func TestManagerCustomSelector_LegacyMixedPathSkipsOpenCircuitAuth(t *testing.T)
 	if len(selector.lastAuthID) != 1 || selector.lastAuthID[0] != "auth-gemini" {
 		t.Fatalf("selector candidates = %v, want [auth-gemini]", selector.lastAuthID)
 	}
+}
+
+func TestManagerCustomSelector_LegacyPathAllCircuitOpenReturnsModelCooldown(t *testing.T) {
+	t.Parallel()
+
+	const model = "legacy-all-open-model"
+	selector := &trackingSelector{}
+	manager := NewManager(nil, selector, nil)
+	manager.executors["gemini"] = schedulerTestExecutor{}
+	manager.auths["legacy-open-a"] = &Auth{ID: "legacy-open-a", Provider: "gemini"}
+	manager.auths["legacy-open-b"] = &Auth{ID: "legacy-open-b", Provider: "gemini"}
+
+	registerSchedulerModels(t, "gemini", model, "legacy-open-a", "legacy-open-b")
+	reg := registry.GetGlobalRegistry()
+	reg.ForceOpenCircuitBreaker("legacy-open-a", model)
+	reg.ForceOpenCircuitBreaker("legacy-open-b", model)
+	t.Cleanup(func() {
+		reg.ResetCircuitBreaker("legacy-open-a", model)
+		reg.ResetCircuitBreaker("legacy-open-b", model)
+	})
+
+	got, _, errPick := manager.pickNext(context.Background(), "gemini", model, cliproxyexecutor.Options{}, map[string]struct{}{})
+	if got != nil {
+		t.Fatalf("pickNext() auth = %v, want nil", got)
+	}
+	assertModelCooldownError(t, errPick)
+}
+
+func TestManagerCustomSelector_LegacyMixedPathAllCircuitOpenReturnsModelCooldown(t *testing.T) {
+	t.Parallel()
+
+	const model = "legacy-mixed-all-open-model"
+	selector := &trackingSelector{}
+	manager := NewManager(nil, selector, nil)
+	manager.executors["gemini"] = schedulerTestExecutor{}
+	manager.executors["claude"] = schedulerTestExecutor{}
+	manager.auths["legacy-mixed-open-gemini"] = &Auth{ID: "legacy-mixed-open-gemini", Provider: "gemini"}
+	manager.auths["legacy-mixed-open-claude"] = &Auth{ID: "legacy-mixed-open-claude", Provider: "claude"}
+
+	registerSchedulerModels(t, "gemini", model, "legacy-mixed-open-gemini")
+	registerSchedulerModels(t, "claude", model, "legacy-mixed-open-claude")
+	reg := registry.GetGlobalRegistry()
+	reg.ForceOpenCircuitBreaker("legacy-mixed-open-gemini", model)
+	reg.ForceOpenCircuitBreaker("legacy-mixed-open-claude", model)
+	t.Cleanup(func() {
+		reg.ResetCircuitBreaker("legacy-mixed-open-gemini", model)
+		reg.ResetCircuitBreaker("legacy-mixed-open-claude", model)
+	})
+
+	got, _, provider, errPick := manager.pickNextMixed(context.Background(), []string{"gemini", "claude"}, model, cliproxyexecutor.Options{}, map[string]struct{}{})
+	if got != nil {
+		t.Fatalf("pickNextMixed() auth = %v, want nil", got)
+	}
+	if provider != "" {
+		t.Fatalf("pickNextMixed() provider = %q, want empty", provider)
+	}
+	assertModelCooldownError(t, errPick)
 }
 
 func TestManager_InitializesSchedulerForBuiltInSelector(t *testing.T) {
