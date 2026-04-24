@@ -182,6 +182,10 @@ CLIProxyAPIをネイティブGUIでラップしたクロスプラットフォー
 
 CLIProxyAPI向けのすぐに使えるクロスプラットフォームのクォータ確認ツール。アカウントごとの codex 5h/7d クォータ表示、プラン別ソート、ステータス色分け、複数アカウントの集計分析に対応。
 
+### [CPA Usage Keeper](https://github.com/Willxup/cpa-usage-keeper)
+
+CLIProxyAPI向けの独立した使用量永続化・可視化サービス。CPAデータを定期的に取得し、正規化されたイベントをSQLiteに保存、集計APIを提供し、使用量、料金、リクエスト健全性、モデル/API統計を確認できる組み込みWebダッシュボードを備えています。
+
 > [!NOTE]
 > CLIProxyAPIをベースにプロジェクトを開発した場合は、PRを送ってこのリストに追加してください。
 
