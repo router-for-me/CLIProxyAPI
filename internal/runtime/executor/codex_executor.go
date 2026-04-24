@@ -476,6 +476,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		helps.DeleteJSONEdit("stream_options"),
 	)
 	body = normalizeCodexInstructions(body)
+	body = ensureImageGenerationTool(body, baseModel)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
 	call, err := e.prepareCodexHTTPCall(ctx, auth, from, url, req, body, apiKey, true)
@@ -543,6 +544,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 		helps.DeleteJSONEdit("stream"),
 	)
 	body = normalizeCodexInstructions(body)
+	body = ensureImageGenerationTool(body, baseModel)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses/compact"
 	call, err := e.prepareCodexHTTPCall(ctx, auth, from, url, req, body, apiKey, false)
@@ -610,6 +612,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		helps.SetJSONEdit("model", baseModel),
 	)
 	body = normalizeCodexInstructions(body)
+	body = ensureImageGenerationTool(body, baseModel)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
 	call, err := e.prepareCodexHTTPCall(ctx, auth, from, url, req, body, apiKey, true)
@@ -1068,6 +1071,28 @@ func normalizeCodexInstructions(body []byte) []byte {
 	if !instructions.Exists() || instructions.Type == gjson.Null {
 		body, _ = helps.SetJSONBytes(body, "instructions", "")
 	}
+	return body
+}
+
+var imageGenToolJSON = []byte(`{"type":"image_generation","output_format":"png"}`)
+var imageGenToolArrayJSON = []byte(`[{"type":"image_generation","output_format":"png"}]`)
+
+func ensureImageGenerationTool(body []byte, baseModel string) []byte {
+	if strings.HasSuffix(baseModel, "spark") {
+		return body
+	}
+
+	tools := gjson.GetBytes(body, "tools")
+	if !tools.Exists() || !tools.IsArray() {
+		body, _ = sjson.SetRawBytes(body, "tools", imageGenToolArrayJSON)
+		return body
+	}
+	for _, t := range tools.Array() {
+		if t.Get("type").String() == "image_generation" {
+			return body
+		}
+	}
+	body, _ = sjson.SetRawBytes(body, "tools.-1", imageGenToolJSON)
 	return body
 }
 

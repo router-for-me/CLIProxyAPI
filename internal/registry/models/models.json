@@ -1387,6 +1387,29 @@
           "xhigh"
         ]
       }
+    },
+    {
+      "id": "gpt-5.5",
+      "object": "model",
+      "created": 1776902400,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 5.5",
+      "version": "gpt-5.5",
+      "description": "Frontier model for complex coding, research, and real-world work.",
+      "context_length": 272000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      }
     }
   ],
   "codex-plus": [
@@ -1493,6 +1516,29 @@
       "version": "gpt-5.4-mini",
       "description": "GPT-5.4 mini brings the strengths of GPT-5.4 to a faster, more efficient model designed for high-volume workloads.",
       "context_length": 400000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      }
+    },
+    {
+      "id": "gpt-5.5",
+      "object": "model",
+      "created": 1776902400,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 5.5",
+      "version": "gpt-5.5",
+      "description": "Frontier model for complex coding, research, and real-world work.",
+      "context_length": 272000,
       "max_completion_tokens": 128000,
       "supported_parameters": [
         "tools"
@@ -1623,6 +1669,29 @@
           "xhigh"
         ]
       }
+    },
+    {
+      "id": "gpt-5.5",
+      "object": "model",
+      "created": 1776902400,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 5.5",
+      "version": "gpt-5.5",
+      "description": "Frontier model for complex coding, research, and real-world work.",
+      "context_length": 272000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      }
     }
   ],
   "kimi": [
@@ -1664,6 +1733,23 @@
       "description": "Kimi K2.5 - Latest Moonshot AI coding model with improved capabilities",
       "context_length": 131072,
       "max_completion_tokens": 32768,
+      "thinking": {
+        "min": 1024,
+        "max": 32000,
+        "zero_allowed": true,
+        "dynamic_allowed": true
+      }
+    },
+    {
+      "id": "kimi-k2.6",
+      "object": "model",
+      "created": 1776729600,
+      "owned_by": "moonshot",
+      "type": "kimi",
+      "display_name": "Kimi K2.6",
+      "description": "Kimi K2.6 - Latest Moonshot AI coding model with improved capabilities",
+      "context_length": 262144,
+      "max_completion_tokens": 65536,
       "thinking": {
         "min": 1024,
         "max": 32000,
