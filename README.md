@@ -189,7 +189,7 @@ Ready-to-use cross-platform quota inspector for CLIProxyAPI, supporting per-acco
 
 ### [CPA Usage Keeper](https://github.com/Willxup/cpa-usage-keeper)
 
-Standalone usage persistence and visualization service for CLIProxyAPI. Periodically pulls CPA data, stores normalized events in SQLite, exposes aggregate APIs, and includes a built-in web dashboard for usage, pricing, request health, and model/API statistics.
+Standalone persistence and visualization service for CLIProxyAPI, with periodic data sync, SQLite storage, aggregate APIs, and a built-in dashboard for usage and statistics.
 
 > [!NOTE]  
 > If you developed a project based on CLIProxyAPI, please open a PR to add it to this list.

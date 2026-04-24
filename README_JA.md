@@ -184,7 +184,7 @@ CLIProxyAPI向けのすぐに使えるクロスプラットフォームのクォ
 
 ### [CPA Usage Keeper](https://github.com/Willxup/cpa-usage-keeper)
 
-CLIProxyAPI向けの独立した使用量永続化・可視化サービス。CPAデータを定期的に取得し、正規化されたイベントをSQLiteに保存、集計APIを提供し、使用量、料金、リクエスト健全性、モデル/API統計を確認できる組み込みWebダッシュボードを備えています。
+CLIProxyAPI向けの独立した使用量永続化・可視化サービス。CPAデータを定期同期してSQLiteに保存し、集計APIと、使用量や各種統計を確認できる組み込みダッシュボードを提供します。
 
 > [!NOTE]
 > CLIProxyAPIをベースにプロジェクトを開発した場合は、PRを送ってこのリストに追加してください。
