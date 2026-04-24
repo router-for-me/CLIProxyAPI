@@ -654,7 +654,22 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		var param any
 		streamState := newCodexStreamCompletionState()
 		terminalFailure := false
+		send := func(chunk cliproxyexecutor.StreamChunk) bool {
+			if ctx == nil {
+				out <- chunk
+				return true
+			}
+			select {
+			case out <- chunk:
+				return true
+			case <-ctx.Done():
+				return false
+			}
+		}
 		errRead := helps.ReadStreamLines(httpResp.Body, func(line []byte) error {
+			if ctx != nil && ctx.Err() != nil {
+				return ctx.Err()
+			}
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 
 			if eventData, ok := codexEventData(line); ok {
@@ -697,14 +712,16 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 
 			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, originalPayload, body, line, &param)
 			for i := range chunks {
-				out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}
+				if !send(cliproxyexecutor.StreamChunk{Payload: chunks[i]}) {
+					return ctx.Err()
+				}
 			}
 			return nil
 		})
 		if errRead != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, errRead)
 			reporter.PublishFailure(ctx)
-			out <- cliproxyexecutor.StreamChunk{Err: errRead}
+			_ = send(cliproxyexecutor.StreamChunk{Err: errRead})
 		} else if terminalFailure {
 			reporter.PublishFailure(ctx)
 		}
