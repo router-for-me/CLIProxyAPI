@@ -1,0 +1,17 @@
+port: 8317
+
+remote-management:
+  allow-remote: true
+  secret-key: "qaz13575254967"
+  disable-control-panel: false
+
+auth-dir: "~/.cli-proxy-api"
+
+request-retry: 3
+
+quota-exceeded:
+  switch-project: true
+  switch-preview-model: true
+
+api-keys:
+  - "sk-cliproxyapi-key-2024"
