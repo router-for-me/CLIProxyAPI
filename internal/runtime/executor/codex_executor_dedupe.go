@@ -402,10 +402,15 @@ func collectCodexResponseAggregate(body io.Reader, captureBody bool) (codexNonSt
 }
 
 func collectCodexResponseAggregateWithIdleTimeout(body io.Reader, captureBody bool, idleTimeout time.Duration) (codexNonStreamHTTPResult, error) {
+	var idleReader *idleTimeoutReadCloser
 	if idleTimeout > 0 {
 		if readCloser, ok := body.(io.ReadCloser); ok {
-			body = newIdleTimeoutReadCloser(readCloser, idleTimeout)
+			idleReader = newIdleTimeoutReadCloser(readCloser, idleTimeout)
+			body = idleReader
 		}
+	}
+	if idleReader != nil {
+		defer idleReader.StopTimer()
 	}
 
 	result := codexNonStreamHTTPResult{}
@@ -477,10 +482,17 @@ func (r *idleTimeoutReadCloser) Close() error {
 	if r == nil || r.ReadCloser == nil {
 		return nil
 	}
+	r.StopTimer()
+	return r.ReadCloser.Close()
+}
+
+func (r *idleTimeoutReadCloser) StopTimer() {
+	if r == nil {
+		return
+	}
 	if r.timer != nil {
 		r.timer.Stop()
 	}
-	return r.ReadCloser.Close()
 }
 
 func hashCodexDedupeHeaders(headers http.Header) string {

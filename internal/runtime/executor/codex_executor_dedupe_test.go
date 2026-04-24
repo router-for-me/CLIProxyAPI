@@ -205,6 +205,36 @@ func TestCollectCodexResponseAggregateIdleTimeoutClosesReader(t *testing.T) {
 	}
 }
 
+func TestCollectCodexResponseAggregateIdleTimerStopsAfterSuccess(t *testing.T) {
+	reader := &trackingReadCloser{Reader: strings.NewReader("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\"}}\n\n")}
+
+	got, err := collectCodexResponseAggregateWithIdleTimeout(reader, false, 20*time.Millisecond)
+	if err != nil {
+		t.Fatalf("collectCodexResponseAggregateWithIdleTimeout error: %v", err)
+	}
+	if len(got.completedData) == 0 {
+		t.Fatal("expected completedData")
+	}
+	time.Sleep(50 * time.Millisecond)
+	if reader.closed() {
+		t.Fatal("reader was closed after successful aggregate read")
+	}
+}
+
+type trackingReadCloser struct {
+	*strings.Reader
+	closedFlag atomic.Bool
+}
+
+func (r *trackingReadCloser) Close() error {
+	r.closedFlag.Store(true)
+	return nil
+}
+
+func (r *trackingReadCloser) closed() bool {
+	return r.closedFlag.Load()
+}
+
 type blockingReadCloser struct {
 	closeOnce sync.Once
 	closeCh   chan struct{}
