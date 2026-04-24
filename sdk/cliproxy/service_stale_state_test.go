@@ -53,8 +53,24 @@ func TestServiceApplyCoreAuthAddOrUpdate_DeleteReAddDoesNotInheritStaleRuntimeSt
 	if disabled.NextRefreshAfter.IsZero() {
 		t.Fatalf("expected disabled auth to still carry prior NextRefreshAfter for regression setup")
 	}
+
+	// Reconcile prunes unsupported model state during registration, so seed the
+	// disabled snapshot explicitly before exercising delete -> re-add behavior.
+	disabled.ModelStates = map[string]*coreauth.ModelState{
+		modelID: {
+			Quota: coreauth.QuotaState{BackoffLevel: 7},
+		},
+	}
+	if _, err := service.coreManager.Update(context.Background(), disabled); err != nil {
+		t.Fatalf("seed disabled auth stale ModelStates: %v", err)
+	}
+
+	disabled, ok = service.coreManager.GetByID(authID)
+	if !ok || disabled == nil {
+		t.Fatalf("expected disabled auth after stale state seeding")
+	}
 	if len(disabled.ModelStates) == 0 {
-		t.Fatalf("expected disabled auth to still carry prior ModelStates for regression setup")
+		t.Fatalf("expected disabled auth to carry seeded ModelStates for regression setup")
 	}
 
 	service.applyCoreAuthAddOrUpdate(context.Background(), &coreauth.Auth{

@@ -5,6 +5,18 @@ import (
 	"strings"
 )
 
+// gatewayHeaderPrefixes lists header name prefixes injected by known AI gateway
+// proxies. Claude Code's client-side telemetry detects these and reports the
+// gateway type, so we strip them from upstream responses to avoid detection.
+var gatewayHeaderPrefixes = []string{
+	"x-litellm-",
+	"helicone-",
+	"x-portkey-",
+	"cf-aig-",
+	"x-kong-",
+	"x-bt-",
+}
+
 // hopByHopHeaders lists RFC 7230 Section 6.1 hop-by-hop headers that MUST NOT
 // be forwarded by proxies, plus security-sensitive headers that should not leak.
 var hopByHopHeaders = map[string]struct{}{
@@ -38,6 +50,19 @@ func FilterUpstreamHeaders(src http.Header) http.Header {
 			continue
 		}
 		if _, scoped := connectionScoped[canonicalKey]; scoped {
+			continue
+		}
+		// Strip headers injected by known AI gateway proxies to avoid
+		// Claude Code client-side gateway detection.
+		lowerKey := strings.ToLower(key)
+		gatewayMatch := false
+		for _, prefix := range gatewayHeaderPrefixes {
+			if strings.HasPrefix(lowerKey, prefix) {
+				gatewayMatch = true
+				break
+			}
+		}
+		if gatewayMatch {
 			continue
 		}
 		dst[key] = values

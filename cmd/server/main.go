@@ -61,15 +61,13 @@ func main() {
 	var codexLogin bool
 	var codexDeviceLogin bool
 	var claudeLogin bool
-	var qwenLogin bool
-	var iflowLogin bool
-	var iflowCookie bool
 	var noBrowser bool
 	var oauthCallbackPort int
 	var antigravityLogin bool
 	var kimiLogin bool
 	var projectID string
 	var vertexImport string
+	var vertexImportPrefix string
 	var configPath string
 	var password string
 	var tuiMode bool
@@ -81,9 +79,6 @@ func main() {
 	flag.BoolVar(&codexLogin, "codex-login", false, "Login to Codex using OAuth")
 	flag.BoolVar(&codexDeviceLogin, "codex-device-login", false, "Login to Codex using device code flow")
 	flag.BoolVar(&claudeLogin, "claude-login", false, "Login to Claude using OAuth")
-	flag.BoolVar(&qwenLogin, "qwen-login", false, "Login to Qwen using OAuth")
-	flag.BoolVar(&iflowLogin, "iflow-login", false, "Login to iFlow using OAuth")
-	flag.BoolVar(&iflowCookie, "iflow-cookie", false, "Login to iFlow using Cookie")
 	flag.BoolVar(&noBrowser, "no-browser", false, "Don't open browser automatically for OAuth")
 	flag.IntVar(&oauthCallbackPort, "oauth-callback-port", 0, "Override OAuth callback port (defaults to provider-specific port)")
 	flag.BoolVar(&antigravityLogin, "antigravity-login", false, "Login to Antigravity using OAuth")
@@ -91,6 +86,7 @@ func main() {
 	flag.StringVar(&projectID, "project_id", "", "Project ID (Gemini only, not required)")
 	flag.StringVar(&configPath, "config", DefaultConfigPath, "Configure File Path")
 	flag.StringVar(&vertexImport, "vertex-import", "", "Import Vertex service account key JSON file")
+	flag.StringVar(&vertexImportPrefix, "vertex-import-prefix", "", "Prefix for Vertex model namespacing (use with -vertex-import)")
 	flag.StringVar(&password, "password", "", "")
 	flag.BoolVar(&tuiMode, "tui", false, "Start with terminal management UI")
 	flag.BoolVar(&standalone, "standalone", false, "In TUI mode, start an embedded local server")
@@ -140,6 +136,7 @@ func main() {
 		gitStoreRemoteURL    string
 		gitStoreUser         string
 		gitStorePassword     string
+		gitStoreBranch       string
 		gitStoreLocalPath    string
 		gitStoreInst         *store.GitTokenStore
 		gitStoreRoot         string
@@ -208,6 +205,9 @@ func main() {
 	}
 	if value, ok := lookupEnv("GITSTORE_LOCAL_PATH", "gitstore_local_path"); ok {
 		gitStoreLocalPath = value
+	}
+	if value, ok := lookupEnv("GITSTORE_GIT_BRANCH", "gitstore_git_branch"); ok {
+		gitStoreBranch = value
 	}
 	if value, ok := lookupEnv("OBJECTSTORE_ENDPOINT", "objectstore_endpoint"); ok {
 		useObjectStore = true
@@ -343,7 +343,7 @@ func main() {
 		}
 		gitStoreRoot = filepath.Join(gitStoreLocalPath, "gitstore")
 		authDir := filepath.Join(gitStoreRoot, "auths")
-		gitStoreInst = store.NewGitTokenStore(gitStoreRemoteURL, gitStoreUser, gitStorePassword)
+		gitStoreInst = store.NewGitTokenStore(gitStoreRemoteURL, gitStoreUser, gitStorePassword, gitStoreBranch)
 		gitStoreInst.SetBaseDir(authDir)
 		if errRepo := gitStoreInst.EnsureRepository(); errRepo != nil {
 			log.Errorf("failed to prepare git token store: %v", errRepo)
@@ -462,7 +462,7 @@ func main() {
 
 	if vertexImport != "" {
 		// Handle Vertex service account import
-		cmd.DoVertexImport(cfg, vertexImport)
+		cmd.DoVertexImport(cfg, vertexImport, vertexImportPrefix)
 	} else if login {
 		// Handle Google/Gemini login
 		cmd.DoLogin(cfg, projectID, options)
@@ -478,12 +478,6 @@ func main() {
 	} else if claudeLogin {
 		// Handle Claude login
 		cmd.DoClaudeLogin(cfg, options)
-	} else if qwenLogin {
-		cmd.DoQwenLogin(cfg, options)
-	} else if iflowLogin {
-		cmd.DoIFlowLogin(cfg, options)
-	} else if iflowCookie {
-		cmd.DoIFlowCookieAuth(cfg, options)
 	} else if kimiLogin {
 		cmd.DoKimiLogin(cfg, options)
 	} else {
@@ -500,6 +494,7 @@ func main() {
 			if standalone {
 				// Standalone mode: start an embedded local server and connect TUI client to it.
 				managementasset.StartAutoUpdater(context.Background(), configFilePath)
+				misc.StartAntigravityVersionUpdater(context.Background())
 				if !localModel {
 					registry.StartModelsUpdater(context.Background())
 				}
@@ -575,6 +570,7 @@ func main() {
 		} else {
 			// Start the main proxy service
 			managementasset.StartAutoUpdater(context.Background(), configFilePath)
+			misc.StartAntigravityVersionUpdater(context.Background())
 			if !localModel {
 				registry.StartModelsUpdater(context.Background())
 			}

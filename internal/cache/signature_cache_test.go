@@ -1,8 +1,12 @@
 package cache
 
 import (
+	"bytes"
+	"strings"
 	"testing"
 	"time"
+
+	log "github.com/sirupsen/logrus"
 )
 
 const testModelName = "claude-sonnet-4-5"
@@ -207,4 +211,91 @@ func TestCacheSignature_ExpirationLogic(t *testing.T) {
 	// We can't easily test actual expiration without time mocking
 	// but the logic is verified by the implementation
 	_ = time.Now() // Acknowledge we're not testing time passage
+}
+
+func TestSignatureModeSetters_LogAtInfoLevel(t *testing.T) {
+	logger := log.StandardLogger()
+	previousOutput := logger.Out
+	previousLevel := logger.Level
+	previousCache := SignatureCacheEnabled()
+	previousStrict := SignatureBypassStrictMode()
+	SetSignatureCacheEnabled(true)
+	SetSignatureBypassStrictMode(false)
+	buffer := &bytes.Buffer{}
+	log.SetOutput(buffer)
+	log.SetLevel(log.InfoLevel)
+	t.Cleanup(func() {
+		log.SetOutput(previousOutput)
+		log.SetLevel(previousLevel)
+		SetSignatureCacheEnabled(previousCache)
+		SetSignatureBypassStrictMode(previousStrict)
+	})
+
+	SetSignatureCacheEnabled(false)
+	SetSignatureBypassStrictMode(true)
+	SetSignatureBypassStrictMode(false)
+
+	output := buffer.String()
+	if !strings.Contains(output, "antigravity signature cache DISABLED") {
+		t.Fatalf("expected info output for disabling signature cache, got: %q", output)
+	}
+	if strings.Contains(output, "strict mode (protobuf tree)") {
+		t.Fatalf("expected strict bypass mode log to stay below info level, got: %q", output)
+	}
+	if strings.Contains(output, "basic mode (R/E + 0x12)") {
+		t.Fatalf("expected basic bypass mode log to stay below info level, got: %q", output)
+	}
+}
+
+func TestSignatureModeSetters_DoNotRepeatSameStateLogs(t *testing.T) {
+	logger := log.StandardLogger()
+	previousOutput := logger.Out
+	previousLevel := logger.Level
+	previousCache := SignatureCacheEnabled()
+	previousStrict := SignatureBypassStrictMode()
+	SetSignatureCacheEnabled(false)
+	SetSignatureBypassStrictMode(true)
+	buffer := &bytes.Buffer{}
+	log.SetOutput(buffer)
+	log.SetLevel(log.InfoLevel)
+	t.Cleanup(func() {
+		log.SetOutput(previousOutput)
+		log.SetLevel(previousLevel)
+		SetSignatureCacheEnabled(previousCache)
+		SetSignatureBypassStrictMode(previousStrict)
+	})
+
+	SetSignatureCacheEnabled(false)
+	SetSignatureBypassStrictMode(true)
+
+	if buffer.Len() != 0 {
+		t.Fatalf("expected repeated setter calls with unchanged state to stay silent, got: %q", buffer.String())
+	}
+}
+
+func TestSignatureBypassStrictMode_LogsAtDebugLevel(t *testing.T) {
+	logger := log.StandardLogger()
+	previousOutput := logger.Out
+	previousLevel := logger.Level
+	previousStrict := SignatureBypassStrictMode()
+	SetSignatureBypassStrictMode(false)
+	buffer := &bytes.Buffer{}
+	log.SetOutput(buffer)
+	log.SetLevel(log.DebugLevel)
+	t.Cleanup(func() {
+		log.SetOutput(previousOutput)
+		log.SetLevel(previousLevel)
+		SetSignatureBypassStrictMode(previousStrict)
+	})
+
+	SetSignatureBypassStrictMode(true)
+	SetSignatureBypassStrictMode(false)
+
+	output := buffer.String()
+	if !strings.Contains(output, "strict mode (protobuf tree)") {
+		t.Fatalf("expected debug output for strict bypass mode, got: %q", output)
+	}
+	if !strings.Contains(output, "basic mode (R/E + 0x12)") {
+		t.Fatalf("expected debug output for basic bypass mode, got: %q", output)
+	}
 }
