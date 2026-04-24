@@ -127,6 +127,11 @@ type Hook interface {
 	OnResult(ctx context.Context, result Result)
 }
 
+// AuthChangeHook can be implemented by hooks that need the previous auth state.
+type AuthChangeHook interface {
+	OnAuthChanged(ctx context.Context, previous *Auth, current *Auth)
+}
+
 // NoopHook provides optional hook defaults.
 type NoopHook struct{}
 
@@ -1147,8 +1152,10 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	if auth == nil || auth.ID == "" {
 		return nil, nil
 	}
+	var previous *Auth
 	m.mu.Lock()
 	if existing, ok := m.auths[auth.ID]; ok && existing != nil {
+		previous = existing.Clone()
 		if !auth.indexAssigned && auth.Index == "" {
 			auth.Index = existing.Index
 			auth.indexAssigned = existing.indexAssigned
@@ -1169,7 +1176,12 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	}
 	m.queueRefreshReschedule(auth.ID)
 	_ = m.persist(ctx, auth)
-	m.hook.OnAuthUpdated(ctx, auth.Clone())
+	updated := auth.Clone()
+	if changeHook, ok := m.hook.(AuthChangeHook); ok {
+		changeHook.OnAuthChanged(ctx, previous, updated)
+	} else {
+		m.hook.OnAuthUpdated(ctx, updated)
+	}
 	return auth.Clone(), nil
 }
 

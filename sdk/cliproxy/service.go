@@ -816,7 +816,7 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 	if a == nil || a.ID == "" {
 		return
 	}
-	if a.Disabled {
+	if authDisabledForModelRegistration(a) {
 		GlobalModelRegistry().UnregisterClient(a.ID)
 		return
 	}
@@ -1039,14 +1039,14 @@ func (s *Service) refreshModelRegistrationForAuth(current *coreauth.Auth) bool {
 		return false
 	}
 
-	if !current.Disabled {
+	if !authDisabledForModelRegistration(current) {
 		s.ensureExecutorsForAuth(current)
 	}
 	s.registerModelsForAuth(current)
 	s.coreManager.ReconcileRegistryModelStates(context.Background(), current.ID)
 
 	latest, ok := s.latestAuthForModelRegistration(current.ID)
-	if !ok || latest.Disabled {
+	if !ok || authDisabledForModelRegistration(latest) {
 		GlobalModelRegistry().UnregisterClient(current.ID)
 		s.coreManager.RefreshSchedulerEntry(current.ID)
 		return false
@@ -1078,7 +1078,20 @@ func (h serviceAuthHook) OnAuthUpdated(ctx context.Context, auth *coreauth.Auth)
 	if h.next != nil {
 		h.next.OnAuthUpdated(ctx, auth)
 	}
-	h.refreshModels(ctx, auth)
+}
+
+func (h serviceAuthHook) OnAuthChanged(ctx context.Context, previous *coreauth.Auth, current *coreauth.Auth) {
+	if h.next != nil {
+		if changeHook, ok := h.next.(coreauth.AuthChangeHook); ok {
+			changeHook.OnAuthChanged(ctx, previous, current)
+		} else {
+			h.next.OnAuthUpdated(ctx, current)
+		}
+	}
+	if !authModelRegistrationChanged(previous, current) {
+		return
+	}
+	h.refreshModels(ctx, current)
 }
 
 func (h serviceAuthHook) OnResult(ctx context.Context, result coreauth.Result) {
@@ -1094,7 +1107,7 @@ func (h serviceAuthHook) refreshModels(ctx context.Context, auth *coreauth.Auth)
 	if coreauth.IsSkipPersist(ctx) {
 		return
 	}
-	if auth.Disabled || auth.Status == coreauth.StatusDisabled {
+	if authDisabledForModelRegistration(auth) {
 		GlobalModelRegistry().UnregisterClient(auth.ID)
 		if h.service.coreManager != nil {
 			h.service.coreManager.RefreshSchedulerEntry(auth.ID)
@@ -1102,6 +1115,33 @@ func (h serviceAuthHook) refreshModels(ctx context.Context, auth *coreauth.Auth)
 		return
 	}
 	h.service.refreshModelRegistrationForAuth(auth)
+}
+
+func authDisabledForModelRegistration(auth *coreauth.Auth) bool {
+	return auth != nil && (auth.Disabled || auth.Status == coreauth.StatusDisabled)
+}
+
+func authModelRegistrationChanged(previous *coreauth.Auth, current *coreauth.Auth) bool {
+	if previous == nil || current == nil {
+		return true
+	}
+	if previous.Provider != current.Provider || previous.Prefix != current.Prefix {
+		return true
+	}
+	if authDisabledForModelRegistration(previous) != authDisabledForModelRegistration(current) {
+		return true
+	}
+	return !modelRegistrationAttributesEqual(previous.Attributes, current.Attributes)
+}
+
+func modelRegistrationAttributesEqual(a, b map[string]string) bool {
+	keys := []string{"auth_kind", "excluded_models", "gemini_virtual_primary", "plan_type", "api_key", "base_url", "compat_name", "provider_key"}
+	for _, key := range keys {
+		if strings.TrimSpace(a[key]) != strings.TrimSpace(b[key]) {
+			return false
+		}
+	}
+	return true
 }
 
 // latestAuthForModelRegistration returns the latest auth snapshot regardless of
