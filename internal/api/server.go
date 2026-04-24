@@ -369,6 +369,8 @@ func (s *Server) setupRoutes() {
 		v1beta.GET("/models", geminiHandlers.GeminiModels)
 		v1beta.POST("/models/*action", geminiHandlers.GeminiHandler)
 		v1beta.GET("/models/*action", geminiHandlers.GeminiGetHandler)
+		v1beta.Any("/cachedContents", geminiHandlers.GeminiCachedContentsHandler)
+		v1beta.Any("/cachedContents/*name", geminiHandlers.GeminiCachedContentsHandler)
 	}
 
 	// Root endpoint
