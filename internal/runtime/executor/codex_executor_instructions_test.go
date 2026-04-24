@@ -121,3 +121,22 @@ func TestCodexExecutorCountTokensTreatsNullInstructionsAsEmpty(t *testing.T) {
 		t.Fatalf("token count payload mismatch:\nnull=%s\nempty=%s", string(nullResp.Payload), string(emptyResp.Payload))
 	}
 }
+
+func TestCodexTokenizerKeyNormalizesModelFamilies(t *testing.T) {
+	cases := map[string]string{
+		"":                        "cl100k_base",
+		"gpt-5.4-mini":            "gpt-5",
+		"GPT-5.3-CODEX":           "gpt-5",
+		"gpt-4.1-mini":            "gpt-4.1",
+		"gpt-4o-mini":             "gpt-4o",
+		"gpt-4-turbo":             "gpt-4",
+		"gpt-3.5-turbo":           "gpt-3.5",
+		"unknown-model-for-codex": "cl100k_base",
+	}
+
+	for model, want := range cases {
+		if got := codexTokenizerKey(model); got != want {
+			t.Fatalf("codexTokenizerKey(%q) = %q, want %q", model, got, want)
+		}
+	}
+}

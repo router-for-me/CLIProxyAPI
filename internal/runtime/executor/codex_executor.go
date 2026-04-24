@@ -37,7 +37,11 @@ var codexUserAgent = misc.CodexCLIUserAgent
 
 const codexOriginator = misc.CodexCLIOriginator
 
-var dataTag = []byte("data:")
+var (
+	dataTag                  = []byte("data:")
+	codexTokenizerCache      sync.Map
+	codexTokenizerCacheGroup helps.InFlightGroup[tokenizer.Codec]
+)
 
 type codexStreamFunctionCallState struct {
 	ItemID      string
@@ -768,19 +772,55 @@ func (e *CodexExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth
 }
 
 func tokenizerForCodexModel(model string) (tokenizer.Codec, error) {
+	key := codexTokenizerKey(model)
+	if cached, ok := codexTokenizerCache.Load(key); ok {
+		if enc, okEnc := cached.(tokenizer.Codec); okEnc {
+			return enc, nil
+		}
+		codexTokenizerCache.Delete(key)
+	}
+
+	enc, _, _, err := codexTokenizerCacheGroup.Do(context.Background(), key, func() (tokenizer.Codec, error) {
+		return loadCodexTokenizer(key)
+	})
+	if err != nil {
+		return nil, err
+	}
+	codexTokenizerCache.Store(key, enc)
+	return enc, nil
+}
+
+func codexTokenizerKey(model string) string {
 	sanitized := strings.ToLower(strings.TrimSpace(model))
 	switch {
 	case sanitized == "":
-		return tokenizer.Get(tokenizer.Cl100kBase)
+		return "cl100k_base"
 	case strings.HasPrefix(sanitized, "gpt-5"):
-		return tokenizer.ForModel(tokenizer.GPT5)
+		return "gpt-5"
 	case strings.HasPrefix(sanitized, "gpt-4.1"):
-		return tokenizer.ForModel(tokenizer.GPT41)
+		return "gpt-4.1"
 	case strings.HasPrefix(sanitized, "gpt-4o"):
-		return tokenizer.ForModel(tokenizer.GPT4o)
+		return "gpt-4o"
 	case strings.HasPrefix(sanitized, "gpt-4"):
-		return tokenizer.ForModel(tokenizer.GPT4)
+		return "gpt-4"
 	case strings.HasPrefix(sanitized, "gpt-3.5"), strings.HasPrefix(sanitized, "gpt-3"):
+		return "gpt-3.5"
+	default:
+		return "cl100k_base"
+	}
+}
+
+func loadCodexTokenizer(key string) (tokenizer.Codec, error) {
+	switch key {
+	case "gpt-5":
+		return tokenizer.ForModel(tokenizer.GPT5)
+	case "gpt-4.1":
+		return tokenizer.ForModel(tokenizer.GPT41)
+	case "gpt-4o":
+		return tokenizer.ForModel(tokenizer.GPT4o)
+	case "gpt-4":
+		return tokenizer.ForModel(tokenizer.GPT4)
+	case "gpt-3.5":
 		return tokenizer.ForModel(tokenizer.GPT35Turbo)
 	default:
 		return tokenizer.Get(tokenizer.Cl100kBase)
