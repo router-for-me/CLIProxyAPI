@@ -70,6 +70,24 @@ VisionCoder is also offering our users a limited-time <a href="https://coder.vis
 
 CLIProxyAPI Guides: [https://help.router-for.me/](https://help.router-for.me/)
 
+## Local Update
+
+If you run `cliproxy` from a local source checkout, use the following commands in the project root to update to the latest version:
+
+```bash
+git pull --ff-only origin main
+go build -ldflags "-X main.Version=$(git describe --tags --always) -X main.Commit=$(git rev-parse --short HEAD) -X main.BuildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)" -o cliproxy ./cmd/server
+```
+
+If an older `cliproxy` process is already running, rebuilding alone is not enough. Restart the service so the new binary actually takes effect. For example:
+
+```bash
+pkill -f '/cliproxy'
+nohup ./cliproxy -config ./config.yaml -no-browser > ~/.cli-proxy-api/logs/cliproxy-stdout.log 2>&1 &
+```
+
+If your working tree contains uncommitted local changes, `git pull --ff-only origin main` may fail. In that case, commit, stash, or manually resolve conflicts before updating.
+
 ## Management API
 
 see [MANAGEMENT_API.md](https://help.router-for.me/management/api)

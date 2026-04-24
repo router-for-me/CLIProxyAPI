@@ -70,6 +70,24 @@ VisionCoder 还为我们的用户提供 <a href="https://coder.visioncoder.cn" t
 
 CLIProxyAPI 用户手册： [https://help.router-for.me/](https://help.router-for.me/cn/)
 
+## 本地更新
+
+如果你是通过源码目录本地运行 `cliproxy`，可以在项目根目录执行下面的命令更新到最新版本：
+
+```bash
+git pull --ff-only origin main
+go build -ldflags "-X main.Version=$(git describe --tags --always) -X main.Commit=$(git rev-parse --short HEAD) -X main.BuildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)" -o cliproxy ./cmd/server
+```
+
+如果你当前已经有一个旧的 `cliproxy` 进程在运行，更新后二进制不会自动生效，需要重启服务。例如：
+
+```bash
+pkill -f '/cliproxy'
+nohup ./cliproxy -config ./config.yaml -no-browser > ~/.cli-proxy-api/logs/cliproxy-stdout.log 2>&1 &
+```
+
+如果你的工作区里有未提交的本地改动，`git pull --ff-only origin main` 可能会失败。这种情况下请先提交、暂存，或手动处理冲突后再更新。
+
 ## 管理 API 文档
 
 请参见 [MANAGEMENT_API_CN.md](https://help.router-for.me/cn/management/api)

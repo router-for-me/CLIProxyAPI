@@ -6,11 +6,13 @@ package cmd
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os/signal"
 	"syscall"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/browser"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy"
 	log "github.com/sirupsen/logrus"
@@ -48,6 +50,27 @@ func StartService(cfg *config.Config, configPath string, localPassword string) {
 		log.Errorf("failed to build proxy service: %v", err)
 		return
 	}
+
+	go func() {
+		// Wait briefly for the server to be up
+		time.Sleep(1 * time.Second)
+		host := cfg.Host
+		if host == "" || host == "0.0.0.0" {
+			host = "127.0.0.1"
+		}
+		port := cfg.Port
+		if port == 0 {
+			port = 8080 // Default proxy port
+		}
+		scheme := "http"
+		if cfg.TLS.Enable {
+			scheme = "https"
+		}
+
+		url := fmt.Sprintf("%s://%s:%d/management.html", scheme, host, port)
+		log.Infof("Opening management dashboard: %s", url)
+		_ = browser.OpenURL(url)
+	}()
 
 	err = service.Run(runCtx)
 	if err != nil && !errors.Is(err, context.Canceled) {
