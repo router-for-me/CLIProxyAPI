@@ -3,6 +3,7 @@ package executor
 import (
 	"bytes"
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -185,5 +186,49 @@ func TestCollectCodexResponseAggregateDoesNotCaptureFailedAsCompleted(t *testing
 	}
 	if len(got.completedData) != 0 {
 		t.Fatalf("completedData must be empty on response.failed; got %q", string(got.completedData))
+	}
+}
+
+func TestCollectCodexResponseAggregateIdleTimeoutClosesReader(t *testing.T) {
+	reader := newBlockingReadCloser()
+	start := time.Now()
+
+	_, err := collectCodexResponseAggregateWithIdleTimeout(reader, false, 20*time.Millisecond)
+	if err == nil {
+		t.Fatal("collectCodexResponseAggregateWithIdleTimeout error = nil, want timeout close error")
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("idle timeout took %s, want under 1s", elapsed)
+	}
+	if !reader.closed() {
+		t.Fatal("expected idle timeout to close reader")
+	}
+}
+
+type blockingReadCloser struct {
+	closeOnce sync.Once
+	closeCh   chan struct{}
+}
+
+func newBlockingReadCloser() *blockingReadCloser {
+	return &blockingReadCloser{closeCh: make(chan struct{})}
+}
+
+func (r *blockingReadCloser) Read([]byte) (int, error) {
+	<-r.closeCh
+	return 0, io.ErrClosedPipe
+}
+
+func (r *blockingReadCloser) Close() error {
+	r.closeOnce.Do(func() { close(r.closeCh) })
+	return nil
+}
+
+func (r *blockingReadCloser) closed() bool {
+	select {
+	case <-r.closeCh:
+		return true
+	default:
+		return false
 	}
 }

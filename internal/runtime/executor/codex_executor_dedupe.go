@@ -23,6 +23,8 @@ import (
 
 const codexResponseDedupeHashLen = 16
 
+const codexResponsesAggregateIdleTimeout = 10 * time.Minute
+
 var codexDedupeIgnoredHeaders = map[string]struct{}{
 	"Authorization":                         {},
 	"X-Codex-Turn-Metadata":                 {},
@@ -316,7 +318,7 @@ func (e *CodexExecutor) fetchCodexResponsesAggregate(ctx context.Context, auth *
 			}, nil
 		}
 
-		aggregate, errRead := collectCodexResponseAggregate(httpResp.Body, captureBody)
+		aggregate, errRead := collectCodexResponseAggregateWithIdleTimeout(httpResp.Body, captureBody, codexResponsesAggregateIdleTimeout)
 		if errRead != nil {
 			return codexNonStreamHTTPResult{}, errRead
 		}
@@ -396,6 +398,16 @@ func (result codexNonStreamHTTPResult) clone() codexNonStreamHTTPResult {
 }
 
 func collectCodexResponseAggregate(body io.Reader, captureBody bool) (codexNonStreamHTTPResult, error) {
+	return collectCodexResponseAggregateWithIdleTimeout(body, captureBody, 0)
+}
+
+func collectCodexResponseAggregateWithIdleTimeout(body io.Reader, captureBody bool, idleTimeout time.Duration) (codexNonStreamHTTPResult, error) {
+	if idleTimeout > 0 {
+		if readCloser, ok := body.(io.ReadCloser); ok {
+			body = newIdleTimeoutReadCloser(readCloser, idleTimeout)
+		}
+	}
+
 	result := codexNonStreamHTTPResult{}
 	streamState := newCodexStreamCompletionState()
 	if captureBody {
@@ -431,6 +443,44 @@ func collectCodexResponseAggregate(body io.Reader, captureBody bool) (codexNonSt
 		return nil
 	})
 	return result, err
+}
+
+type idleTimeoutReadCloser struct {
+	io.ReadCloser
+	idleTimeout time.Duration
+	timer       *time.Timer
+}
+
+func newIdleTimeoutReadCloser(body io.ReadCloser, idleTimeout time.Duration) *idleTimeoutReadCloser {
+	reader := &idleTimeoutReadCloser{
+		ReadCloser:  body,
+		idleTimeout: idleTimeout,
+	}
+	reader.timer = time.AfterFunc(idleTimeout, func() {
+		_ = body.Close()
+	})
+	return reader
+}
+
+func (r *idleTimeoutReadCloser) Read(p []byte) (int, error) {
+	if r == nil || r.ReadCloser == nil {
+		return 0, io.ErrClosedPipe
+	}
+	n, err := r.ReadCloser.Read(p)
+	if err == nil && n > 0 && r.timer != nil {
+		r.timer.Reset(r.idleTimeout)
+	}
+	return n, err
+}
+
+func (r *idleTimeoutReadCloser) Close() error {
+	if r == nil || r.ReadCloser == nil {
+		return nil
+	}
+	if r.timer != nil {
+		r.timer.Stop()
+	}
+	return r.ReadCloser.Close()
 }
 
 func hashCodexDedupeHeaders(headers http.Header) string {
