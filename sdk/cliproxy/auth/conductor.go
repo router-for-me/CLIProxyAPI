@@ -199,6 +199,7 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 	// atomic.Value requires non-nil initial value.
 	manager.runtimeConfig.Store(&internalconfig.Config{})
 	manager.apiKeyModelAlias.Store(apiKeyModelAliasTable(nil))
+	manager.oauthModelAlias.Store(defaultOAuthModelAliasTable())
 	manager.scheduler = newAuthScheduler(selector)
 	return manager
 }
