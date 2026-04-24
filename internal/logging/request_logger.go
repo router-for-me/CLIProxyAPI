@@ -611,7 +611,6 @@ func writeRequestInfoWithBody(
 			return errWrite
 		}
 	}
-	if _, errWrite := io.WriteString(w, fmt.Sprintf("Timestamp: %s\n", timestamp.Format(time.RFC3339Nano))); errWrite != nil {
 	if _, errWrite := io.WriteString(w, fmt.Sprintf("Timestamp: %s\n", timestamp.UTC().Format(time.RFC3339Nano))); errWrite != nil {
 		return errWrite
 	}
