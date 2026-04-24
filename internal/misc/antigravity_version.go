@@ -20,6 +20,7 @@ const (
 	antigravityVersionCacheTTL = 6 * time.Hour
 	antigravityFetchTimeout    = 10 * time.Second
 	AntigravityNodeAPIClientUA = "google-api-nodejs-client/10.3.0"
+	AntigravityGoogAPIClientUA = "gl-node/22.21.1"
 )
 
 type antigravityRelease struct {

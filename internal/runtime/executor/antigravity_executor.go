@@ -1785,7 +1785,7 @@ func (e *AntigravityExecutor) updateAntigravityCreditsBalance(ctx context.Contex
 	httpReq.Header.Set("Authorization", "Bearer "+token)
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("User-Agent", userAgent)
-	httpReq.Header.Set("X-Goog-Api-Client", "gl-node/22.21.1")
+	httpReq.Header.Set("X-Goog-Api-Client", misc.AntigravityGoogAPIClientUA)
 
 	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
 	httpResp, errDo := httpClient.Do(httpReq)
