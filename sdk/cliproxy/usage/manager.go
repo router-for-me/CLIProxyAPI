@@ -21,6 +21,7 @@ type Record struct {
 	Latency     time.Duration
 	Failed      bool
 	Detail      Detail
+	Thinking    *Thinking
 }
 
 // Detail holds the token usage breakdown.
@@ -30,6 +31,14 @@ type Detail struct {
 	ReasoningTokens int64
 	CachedTokens    int64
 	TotalTokens     int64
+}
+
+// Thinking captures the request's configured thinking/reasoning intensity.
+type Thinking struct {
+	Intensity string `json:"intensity,omitempty"`
+	Mode      string `json:"mode,omitempty"`
+	Level     string `json:"level,omitempty"`
+	Budget    int    `json:"budget,omitempty"`
 }
 
 // Plugin consumes usage records emitted by the proxy runtime.
