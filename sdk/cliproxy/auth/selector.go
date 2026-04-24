@@ -437,12 +437,16 @@ var sessionPattern = regexp.MustCompile(`_session_([a-f0-9-]+)$`)
 type SessionAffinitySelector struct {
 	fallback Selector
 	cache    *SessionCache
+
+	codexWebsocketStrictAffinity bool
 }
 
 // SessionAffinityConfig configures the session affinity selector.
 type SessionAffinityConfig struct {
 	Fallback Selector
 	TTL      time.Duration
+
+	CodexWebsocketStrictAffinity bool
 }
 
 // NewSessionAffinitySelector creates a new session-aware selector.
@@ -462,9 +466,38 @@ func NewSessionAffinitySelectorWithConfig(cfg SessionAffinityConfig) *SessionAff
 		cfg.TTL = time.Hour
 	}
 	return &SessionAffinitySelector{
-		fallback: cfg.Fallback,
-		cache:    NewSessionCache(cfg.TTL),
+		fallback:                     cfg.Fallback,
+		cache:                        NewSessionCache(cfg.TTL),
+		codexWebsocketStrictAffinity: cfg.CodexWebsocketStrictAffinity,
 	}
+}
+
+func (s *SessionAffinitySelector) strictCodexWebsocketAffinity(ctx context.Context, provider string) bool {
+	if s == nil || !s.codexWebsocketStrictAffinity {
+		return false
+	}
+	if !cliproxyexecutor.DownstreamWebsocket(ctx) {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(provider), "codex")
+}
+
+func boundAuthUnavailableError(auths []*Auth, authID, provider, model string, now time.Time) error {
+	providerForError := strings.TrimSpace(provider)
+	for _, auth := range auths {
+		if auth == nil || auth.ID != authID {
+			continue
+		}
+		blocked, reason, next := isAuthBlockedForModel(auth, model, now)
+		if !blocked {
+			break
+		}
+		if reason == blockReasonCooldown {
+			return newModelCooldownError(model, providerForError, next.Sub(now))
+		}
+		break
+	}
+	return &Error{Code: "auth_unavailable", Message: "no auth available"}
 }
 
 // Pick selects an auth with session affinity when possible.
@@ -501,6 +534,10 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 				return auth, nil
 			}
 		}
+		if s.strictCodexWebsocketAffinity(ctx, provider) {
+			entry.Infof("session-affinity: cache hit but bound auth unavailable; strict codex websocket affinity blocks failover | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), cachedAuthID, provider, model)
+			return nil, boundAuthUnavailableError(auths, cachedAuthID, provider, model, now)
+		}
 		// Cached auth not available, reselect via fallback selector for even distribution
 		auth, err := s.fallback.Pick(ctx, provider, model, opts, auths)
 		if err != nil {
@@ -520,6 +557,10 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 					entry.Infof("session-affinity: fallback cache hit | session=%s fallback=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), auth.ID, provider, model)
 					return auth, nil
 				}
+			}
+			if s.strictCodexWebsocketAffinity(ctx, provider) {
+				entry.Infof("session-affinity: fallback cache hit but bound auth unavailable; strict codex websocket affinity blocks failover | session=%s fallback=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), cachedAuthID, provider, model)
+				return nil, boundAuthUnavailableError(auths, cachedAuthID, provider, model, now)
 			}
 		}
 	}

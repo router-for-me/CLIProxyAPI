@@ -233,6 +233,12 @@ type RoutingConfig struct {
 	// SessionAffinityTTL specifies how long session-to-auth bindings are retained.
 	// Default: 1h. Accepts duration strings like "30m", "1h", "2h30m".
 	SessionAffinityTTL string `yaml:"session-affinity-ttl,omitempty" json:"session-affinity-ttl,omitempty"`
+
+	// CodexWebsocketStrictAffinity disables automatic cross-auth failover for bound
+	// Codex downstream websocket sessions. When enabled, a bound Codex websocket
+	// session returns the bound auth's unavailability error instead of switching to
+	// another auth and continuing with the old previous_response_id.
+	CodexWebsocketStrictAffinity bool `yaml:"codex-websocket-strict-affinity,omitempty" json:"codex-websocket-strict-affinity,omitempty"`
 }
 
 // OAuthModelAlias defines a model ID alias for a specific channel.

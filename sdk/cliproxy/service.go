@@ -612,11 +612,13 @@ func (s *Service) Run(ctx context.Context) error {
 		previousStrategy := ""
 		var previousSessionAffinity bool
 		var previousSessionAffinityTTL string
+		var previousCodexWebsocketStrictAffinity bool
 		s.cfgMu.RLock()
 		if s.cfg != nil {
 			previousStrategy = strings.ToLower(strings.TrimSpace(s.cfg.Routing.Strategy))
 			previousSessionAffinity = s.cfg.Routing.ClaudeCodeSessionAffinity || s.cfg.Routing.SessionAffinity
 			previousSessionAffinityTTL = s.cfg.Routing.SessionAffinityTTL
+			previousCodexWebsocketStrictAffinity = s.cfg.Routing.CodexWebsocketStrictAffinity
 		}
 		s.cfgMu.RUnlock()
 
@@ -643,10 +645,12 @@ func (s *Service) Run(ctx context.Context) error {
 
 		nextSessionAffinity := newCfg.Routing.ClaudeCodeSessionAffinity || newCfg.Routing.SessionAffinity
 		nextSessionAffinityTTL := newCfg.Routing.SessionAffinityTTL
+		nextCodexWebsocketStrictAffinity := newCfg.Routing.CodexWebsocketStrictAffinity
 
 		selectorChanged := previousStrategy != nextStrategy ||
 			previousSessionAffinity != nextSessionAffinity ||
-			previousSessionAffinityTTL != nextSessionAffinityTTL
+			previousSessionAffinityTTL != nextSessionAffinityTTL ||
+			previousCodexWebsocketStrictAffinity != nextCodexWebsocketStrictAffinity
 
 		if s.coreManager != nil && selectorChanged {
 			var selector coreauth.Selector
@@ -665,8 +669,9 @@ func (s *Service) Run(ctx context.Context) error {
 					}
 				}
 				selector = coreauth.NewSessionAffinitySelectorWithConfig(coreauth.SessionAffinityConfig{
-					Fallback: selector,
-					TTL:      ttl,
+					Fallback:                     selector,
+					TTL:                          ttl,
+					CodexWebsocketStrictAffinity: nextCodexWebsocketStrictAffinity,
 				})
 			}
 
