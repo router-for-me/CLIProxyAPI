@@ -244,12 +244,13 @@ func (h *OpenAIAPIHandler) ImagesGenerations(c *gin.Context) {
 		tool, _ = sjson.SetBytes(tool, "moderation", v)
 	}
 
-	responsesReq := buildImagesResponsesRequest(prompt, nil, tool)
+	mainModel := imagesMainModel(imageModel)
+	responsesReq := buildImagesResponsesRequest(prompt, nil, tool, mainModel)
 	if stream {
-		h.streamImagesFromResponses(c, responsesReq, responseFormat, "image_generation")
+		h.streamImagesFromResponses(c, responsesReq, responseFormat, "image_generation", mainModel)
 		return
 	}
-	h.collectImagesFromResponses(c, responsesReq, responseFormat)
+	h.collectImagesFromResponses(c, responsesReq, responseFormat, mainModel)
 }
 
 func (h *OpenAIAPIHandler) ImagesEdits(c *gin.Context) {
@@ -383,12 +384,13 @@ func (h *OpenAIAPIHandler) imagesEditsFromMultipart(c *gin.Context) {
 		tool, _ = sjson.SetBytes(tool, "input_image_mask.image_url", strings.TrimSpace(*maskDataURL))
 	}
 
-	responsesReq := buildImagesResponsesRequest(prompt, images, tool)
+	mainModel := imagesMainModel(imageModel)
+	responsesReq := buildImagesResponsesRequest(prompt, images, tool, mainModel)
 	if stream {
-		h.streamImagesFromResponses(c, responsesReq, responseFormat, "image_edit")
+		h.streamImagesFromResponses(c, responsesReq, responseFormat, "image_edit", mainModel)
 		return
 	}
-	h.collectImagesFromResponses(c, responsesReq, responseFormat)
+	h.collectImagesFromResponses(c, responsesReq, responseFormat, mainModel)
 }
 
 func (h *OpenAIAPIHandler) imagesEditsFromJSON(c *gin.Context) {
@@ -489,17 +491,29 @@ func (h *OpenAIAPIHandler) imagesEditsFromJSON(c *gin.Context) {
 		tool, _ = sjson.SetBytes(tool, "input_image_mask.image_url", strings.TrimSpace(*maskDataURL))
 	}
 
-	responsesReq := buildImagesResponsesRequest(prompt, images, tool)
+	mainModel := imagesMainModel(imageModel)
+	responsesReq := buildImagesResponsesRequest(prompt, images, tool, mainModel)
 	if stream {
-		h.streamImagesFromResponses(c, responsesReq, responseFormat, "image_edit")
+		h.streamImagesFromResponses(c, responsesReq, responseFormat, "image_edit", mainModel)
 		return
 	}
-	h.collectImagesFromResponses(c, responsesReq, responseFormat)
+	h.collectImagesFromResponses(c, responsesReq, responseFormat, mainModel)
 }
 
-func buildImagesResponsesRequest(prompt string, images []string, toolJSON []byte) []byte {
+// imagesMainModel derives the main model ID used internally for image generation
+// from the user-supplied image tool model. If the tool model has a provider prefix
+// (e.g. "codex/gpt-image-2"), the same prefix is applied to the default main model
+// so that force-model-prefix routing resolves correctly.
+func imagesMainModel(imageModel string) string {
+	if idx := strings.Index(imageModel, "/"); idx >= 0 {
+		return imageModel[:idx+1] + defaultImagesMainModel
+	}
+	return defaultImagesMainModel
+}
+
+func buildImagesResponsesRequest(prompt string, images []string, toolJSON []byte, mainModel string) []byte {
 	req := []byte(`{"instructions":"","stream":true,"reasoning":{"effort":"medium","summary":"auto"},"parallel_tool_calls":true,"include":["reasoning.encrypted_content"],"model":"","store":false,"tool_choice":{"type":"image_generation"}}`)
-	req, _ = sjson.SetBytes(req, "model", defaultImagesMainModel)
+	req, _ = sjson.SetBytes(req, "model", mainModel)
 
 	input := []byte(`[{"type":"message","role":"user","content":[{"type":"input_text","text":""}]}]`)
 	input, _ = sjson.SetBytes(input, "0.content.0.text", prompt)
@@ -523,13 +537,13 @@ func buildImagesResponsesRequest(prompt string, images []string, toolJSON []byte
 	return req
 }
 
-func (h *OpenAIAPIHandler) collectImagesFromResponses(c *gin.Context, responsesReq []byte, responseFormat string) {
+func (h *OpenAIAPIHandler) collectImagesFromResponses(c *gin.Context, responsesReq []byte, responseFormat string, mainModel string) {
 	c.Header("Content-Type", "application/json")
 
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
 
-	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, "openai-response", defaultImagesMainModel, responsesReq, "")
+	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, "openai-response", mainModel, responsesReq, "")
 
 	out, errMsg := collectImagesFromResponsesStream(cliCtx, dataChan, errChan, responseFormat)
 	stopKeepAlive()
@@ -703,7 +717,7 @@ func buildImagesAPIResponse(results []imageCallResult, createdAt int64, usageRaw
 	return out, nil
 }
 
-func (h *OpenAIAPIHandler) streamImagesFromResponses(c *gin.Context, responsesReq []byte, responseFormat string, streamPrefix string) {
+func (h *OpenAIAPIHandler) streamImagesFromResponses(c *gin.Context, responsesReq []byte, responseFormat string, streamPrefix string, mainModel string) {
 	flusher, ok := c.Writer.(http.Flusher)
 	if !ok {
 		c.JSON(http.StatusInternalServerError, handlers.ErrorResponse{
@@ -716,7 +730,7 @@ func (h *OpenAIAPIHandler) streamImagesFromResponses(c *gin.Context, responsesRe
 	}
 
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
-	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, "openai-response", defaultImagesMainModel, responsesReq, "")
+	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, "openai-response", mainModel, responsesReq, "")
 
 	setSSEHeaders := func() {
 		c.Header("Content-Type", "text/event-stream")
