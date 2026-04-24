@@ -64,7 +64,7 @@ func (a *sseFrameAccumulator) AddChunk(chunk []byte) [][]byte {
 		a.pending = a.pending[:0]
 		return frames
 	}
-	if len(a.pending) == 0 || !responsesSSECanEmitWithoutDelimiter(a.pending) {
+	if len(a.pending) == 0 || !responsesSSECanEmitWithoutDelimiter(a.pending, false) {
 		return frames
 	}
 	frames = append(frames, a.pending)
@@ -92,7 +92,7 @@ func (a *sseFrameAccumulator) Flush() [][]byte {
 		a.pending = nil
 		return frames
 	}
-	if responsesSSECanEmitWithoutDelimiter(a.pending) {
+	if responsesSSECanEmitWithoutDelimiter(a.pending, false) {
 		frames = append(frames, a.pending)
 	}
 	a.pending = nil
