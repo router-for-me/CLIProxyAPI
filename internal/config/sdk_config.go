@@ -9,6 +9,14 @@ type SDKConfig struct {
 	// ProxyURL is the URL of an optional proxy server to use for outbound requests.
 	ProxyURL string `yaml:"proxy-url" json:"proxy-url"`
 
+	// CodexOAuthBaseURL overrides the upstream base URL for file-backed/OAuth Codex model requests.
+	// It only affects post-auth conversation traffic and does not change OAuth authorize endpoints.
+	CodexOAuthBaseURL string `yaml:"codex-oauth-base-url" json:"codex-oauth-base-url"`
+
+	// CodexOAuthTokenURL overrides the token exchange/refresh URL for Codex OAuth flows.
+	// It affects authorization-code exchange and refresh, but not the browser authorize URL.
+	CodexOAuthTokenURL string `yaml:"codex-oauth-token-url" json:"codex-oauth-token-url"`
+
 	// EnableGeminiCLIEndpoint controls whether Gemini CLI internal endpoints (/v1internal:*) are enabled.
 	// Default is false for safety; when false, /v1internal:* requests are rejected.
 	EnableGeminiCLIEndpoint bool `yaml:"enable-gemini-cli-endpoint" json:"enable-gemini-cli-endpoint"`

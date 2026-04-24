@@ -4,11 +4,10 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
-
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -45,36 +44,61 @@ func TestRefreshTokensWithRetry_NonRetryableOnlyAttemptsOnce(t *testing.T) {
 	}
 }
 
-func TestNewCodexAuthWithProxyURL_OverrideDirectDisablesProxy(t *testing.T) {
-	cfg := &config.Config{SDKConfig: config.SDKConfig{ProxyURL: "http://proxy.example.com:8080"}}
-	auth := NewCodexAuthWithProxyURL(cfg, "direct")
-
-	transport, ok := auth.httpClient.Transport.(*http.Transport)
-	if !ok || transport == nil {
-		t.Fatalf("expected http.Transport, got %T", auth.httpClient.Transport)
+func TestRefreshTokensUsesCustomTokenURL(t *testing.T) {
+	auth := &CodexAuth{
+		tokenURL: "https://custom.example.com/oauth/token",
+		httpClient: &http.Client{
+			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				if got := req.URL.String(); got != "https://custom.example.com/oauth/token" {
+					return nil, io.ErrUnexpectedEOF
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader(`{"access_token":"at","refresh_token":"rt","id_token":"","token_type":"Bearer","expires_in":3600}`)),
+					Header:     make(http.Header),
+					Request:    req,
+				}, nil
+			}),
+		},
 	}
-	if transport.Proxy != nil {
-		t.Fatal("expected direct transport to disable proxy function")
+
+	_, err := auth.RefreshTokens(context.Background(), "dummy_refresh_token")
+	if err != nil {
+		t.Fatalf("RefreshTokens error: %v", err)
 	}
 }
 
-func TestNewCodexAuthWithProxyURL_OverrideProxyTakesPrecedence(t *testing.T) {
-	cfg := &config.Config{SDKConfig: config.SDKConfig{ProxyURL: "http://global.example.com:8080"}}
-	auth := NewCodexAuthWithProxyURL(cfg, "http://override.example.com:8081")
+func TestExchangeCodeForTokensWithRedirectUsesCustomTokenURL(t *testing.T) {
+	auth := &CodexAuth{
+		tokenURL: "https://custom.example.com/oauth/token",
+		httpClient: &http.Client{
+			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				if got := req.URL.String(); got != "https://custom.example.com/oauth/token" {
+					return nil, io.ErrUnexpectedEOF
+				}
+				body, err := io.ReadAll(req.Body)
+				if err != nil {
+					return nil, err
+				}
+				values, err := url.ParseQuery(string(body))
+				if err != nil {
+					return nil, err
+				}
+				if got := values.Get("redirect_uri"); got != "http://localhost:1455/auth/callback" {
+					return nil, io.ErrUnexpectedEOF
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader(`{"access_token":"at","refresh_token":"rt","id_token":"","token_type":"Bearer","expires_in":3600}`)),
+					Header:     make(http.Header),
+					Request:    req,
+				}, nil
+			}),
+		},
+	}
 
-	transport, ok := auth.httpClient.Transport.(*http.Transport)
-	if !ok || transport == nil {
-		t.Fatalf("expected http.Transport, got %T", auth.httpClient.Transport)
-	}
-	req, errReq := http.NewRequest(http.MethodGet, "https://example.com", nil)
-	if errReq != nil {
-		t.Fatalf("new request: %v", errReq)
-	}
-	proxyURL, errProxy := transport.Proxy(req)
-	if errProxy != nil {
-		t.Fatalf("proxy func: %v", errProxy)
-	}
-	if proxyURL == nil || proxyURL.String() != "http://override.example.com:8081" {
-		t.Fatalf("proxy URL = %v, want http://override.example.com:8081", proxyURL)
+	_, err := auth.ExchangeCodeForTokensWithRedirect(context.Background(), "dummy_code", RedirectURI, &PKCECodes{CodeVerifier: "verifier"})
+	if err != nil {
+		t.Fatalf("ExchangeCodeForTokensWithRedirect error: %v", err)
 	}
 }

@@ -150,7 +150,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 
 	apiKey, baseURL := codexCreds(auth)
 	if baseURL == "" {
-		baseURL = "https://chatgpt.com/backend-api/codex"
+		baseURL = resolveCodexBaseURL(e.cfg, auth)
 	}
 
 	reporter := helps.NewUsageReporter(ctx, e.Identifier(), baseModel, auth)
@@ -301,7 +301,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 
 	apiKey, baseURL := codexCreds(auth)
 	if baseURL == "" {
-		baseURL = "https://chatgpt.com/backend-api/codex"
+		baseURL = resolveCodexBaseURL(e.cfg, auth)
 	}
 
 	reporter := helps.NewUsageReporter(ctx, e.Identifier(), baseModel, auth)
@@ -393,7 +393,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 
 	apiKey, baseURL := codexCreds(auth)
 	if baseURL == "" {
-		baseURL = "https://chatgpt.com/backend-api/codex"
+		baseURL = resolveCodexBaseURL(e.cfg, auth)
 	}
 
 	reporter := helps.NewUsageReporter(ctx, e.Identifier(), baseModel, auth)
@@ -903,6 +903,20 @@ func codexCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
 		}
 	}
 	return
+}
+
+func resolveCodexBaseURL(cfg *config.Config, auth *cliproxyauth.Auth) string {
+	if auth != nil && auth.Attributes != nil {
+		if custom := strings.TrimSpace(auth.Attributes["base_url"]); custom != "" {
+			return strings.TrimSuffix(custom, "/")
+		}
+	}
+	if cfg != nil {
+		if custom := strings.TrimSpace(cfg.CodexOAuthBaseURL); custom != "" {
+			return strings.TrimSuffix(custom, "/")
+		}
+	}
+	return "https://chatgpt.com/backend-api/codex"
 }
 
 func (e *CodexExecutor) resolveCodexConfig(auth *cliproxyauth.Auth) *config.CodexKey {

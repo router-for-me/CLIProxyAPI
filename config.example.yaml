@@ -70,6 +70,14 @@ usage-statistics-enabled: false
 # Per-entry proxy-url also supports "direct" or "none" to bypass both the global proxy-url and environment proxies explicitly.
 proxy-url: ""
 
+# Override the upstream base URL for file-backed/OAuth Codex conversation requests.
+# This only affects post-auth API traffic and does NOT change the browser authorize endpoint.
+# codex-oauth-base-url: "https://your-vercel-domain.example.com/backend-api/codex"
+
+# Override the token exchange/refresh URL for Codex OAuth flows.
+# This affects authorization-code exchange and refresh, but not the browser authorize endpoint.
+# codex-oauth-token-url: "https://your-vercel-domain.example.com/oauth/token"
+
 # When true, unprefixed model requests only use credentials without a prefix (except when prefix == model name).
 force-model-prefix: false
 

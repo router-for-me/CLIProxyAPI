@@ -77,3 +77,31 @@ func TestCodexExecutorCompactAddsDefaultInstructions(t *testing.T) {
 		})
 	}
 }
+
+func TestCodexExecutorCompactUsesGlobalCodexOAuthBaseURL(t *testing.T) {
+	var gotPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp_1","object":"response.compaction","usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}`))
+	}))
+	defer server.Close()
+
+	executor := NewCodexExecutor(&config.Config{SDKConfig: config.SDKConfig{CodexOAuthBaseURL: server.URL}})
+	auth := &cliproxyauth.Auth{Metadata: map[string]any{"access_token": "oauth-token"}}
+
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.4",
+		Payload: []byte(`{"model":"gpt-5.4","input":"hello"}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+		Alt:          "responses/compact",
+		Stream:       false,
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if gotPath != "/responses/compact" {
+		t.Fatalf("path = %q, want %q", gotPath, "/responses/compact")
+	}
+}

@@ -32,14 +32,28 @@ const (
 // exchanging authorization codes for tokens, and refreshing access tokens.
 type CodexAuth struct {
 	httpClient *http.Client
+	tokenURL   string
 }
 
 // NewCodexAuth creates a new CodexAuth service instance.
 // It initializes an HTTP client with proxy settings from the provided configuration.
 func NewCodexAuth(cfg *config.Config) *CodexAuth {
-	return NewCodexAuthWithProxyURL(cfg, "")
+	auth := &CodexAuth{}
+	if cfg != nil {
+		auth.httpClient = util.SetProxy(&cfg.SDKConfig, &http.Client{})
+		auth.tokenURL = strings.TrimSpace(cfg.CodexOAuthTokenURL)
+	} else {
+		auth.httpClient = &http.Client{}
+	}
+	return auth
 }
 
+func (o *CodexAuth) resolvedTokenURL() string {
+	if custom := strings.TrimSpace(o.tokenURL); custom != "" {
+		return custom
+	}
+	return TokenURL
+}
 // NewCodexAuthWithProxyURL creates a new CodexAuth service instance.
 // proxyURL takes precedence over cfg.ProxyURL when non-empty.
 func NewCodexAuthWithProxyURL(cfg *config.Config, proxyURL string) *CodexAuth {
@@ -49,7 +63,7 @@ func NewCodexAuthWithProxyURL(cfg *config.Config, proxyURL string) *CodexAuth {
 		sdkCfg = cfg.SDKConfig
 		if effectiveProxyURL == "" {
 			effectiveProxyURL = strings.TrimSpace(cfg.ProxyURL)
-		}
+	}
 	}
 	sdkCfg.ProxyURL = effectiveProxyURL
 	return &CodexAuth{
@@ -109,7 +123,7 @@ func (o *CodexAuth) ExchangeCodeForTokensWithRedirect(ctx context.Context, code,
 		"code_verifier": {pkceCodes.CodeVerifier},
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", TokenURL, strings.NewReader(data.Encode()))
+	req, err := http.NewRequestWithContext(ctx, "POST", o.resolvedTokenURL(), strings.NewReader(data.Encode()))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create token request: %w", err)
 	}
@@ -195,7 +209,7 @@ func (o *CodexAuth) RefreshTokens(ctx context.Context, refreshToken string) (*Co
 		"scope":         {"openid profile email"},
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", TokenURL, strings.NewReader(data.Encode()))
+	req, err := http.NewRequestWithContext(ctx, "POST", o.resolvedTokenURL(), strings.NewReader(data.Encode()))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create refresh request: %w", err)
 	}
