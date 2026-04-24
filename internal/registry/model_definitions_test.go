@@ -4,7 +4,6 @@ import "testing"
 
 func TestCodexStaticModelsIncludeGPT55(t *testing.T) {
 	tierModels := map[string][]*ModelInfo{
-		"free": GetCodexFreeModels(),
 		"team": GetCodexTeamModels(),
 		"plus": GetCodexPlusModels(),
 		"pro":  GetCodexProModels(),
@@ -84,5 +83,11 @@ func assertGPT55ModelInfo(t *testing.T, source string, model *ModelInfo) {
 		if model.Thinking.Levels[i] != level {
 			t.Fatalf("%s thinking level %d mismatch: got %q, want %q", source, i, model.Thinking.Levels[i], level)
 		}
+	}
+}
+
+func TestCodexFreeStaticModelsExcludeGPT55(t *testing.T) {
+	if model := findModelInfo(GetCodexFreeModels(), "gpt-5.5"); model != nil {
+		t.Fatal("expected codex free tier to exclude gpt-5.5")
 	}
 }

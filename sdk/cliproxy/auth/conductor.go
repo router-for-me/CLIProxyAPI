@@ -202,6 +202,33 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 	return manager
 }
 
+// SetHook replaces the lifecycle hook used for subsequent manager events.
+func (m *Manager) SetHook(hook Hook) {
+	if m == nil {
+		return
+	}
+	if hook == nil {
+		hook = NoopHook{}
+	}
+	m.mu.Lock()
+	m.hook = hook
+	m.mu.Unlock()
+}
+
+// Hook returns the currently installed lifecycle hook.
+func (m *Manager) Hook() Hook {
+	if m == nil {
+		return NoopHook{}
+	}
+	m.mu.RLock()
+	hook := m.hook
+	m.mu.RUnlock()
+	if hook == nil {
+		return NoopHook{}
+	}
+	return hook
+}
+
 func isBuiltInSelector(selector Selector) bool {
 	switch selector.(type) {
 	case *RoundRobinSelector, *FillFirstSelector:

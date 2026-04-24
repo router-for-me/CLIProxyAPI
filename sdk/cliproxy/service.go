@@ -1062,6 +1062,48 @@ func (s *Service) refreshModelRegistrationForAuth(current *coreauth.Auth) bool {
 	return true
 }
 
+type serviceAuthHook struct {
+	service *Service
+	next    coreauth.Hook
+}
+
+func (h serviceAuthHook) OnAuthRegistered(ctx context.Context, auth *coreauth.Auth) {
+	if h.next != nil {
+		h.next.OnAuthRegistered(ctx, auth)
+	}
+	h.refreshModels(ctx, auth)
+}
+
+func (h serviceAuthHook) OnAuthUpdated(ctx context.Context, auth *coreauth.Auth) {
+	if h.next != nil {
+		h.next.OnAuthUpdated(ctx, auth)
+	}
+	h.refreshModels(ctx, auth)
+}
+
+func (h serviceAuthHook) OnResult(ctx context.Context, result coreauth.Result) {
+	if h.next != nil {
+		h.next.OnResult(ctx, result)
+	}
+}
+
+func (h serviceAuthHook) refreshModels(ctx context.Context, auth *coreauth.Auth) {
+	if h.service == nil || auth == nil || auth.ID == "" {
+		return
+	}
+	if coreauth.IsSkipPersist(ctx) {
+		return
+	}
+	if auth.Disabled || auth.Status == coreauth.StatusDisabled {
+		GlobalModelRegistry().UnregisterClient(auth.ID)
+		if h.service.coreManager != nil {
+			h.service.coreManager.RefreshSchedulerEntry(auth.ID)
+		}
+		return
+	}
+	h.service.refreshModelRegistrationForAuth(auth)
+}
+
 // latestAuthForModelRegistration returns the latest auth snapshot regardless of
 // provider membership. Callers use this after a registration attempt to restore
 // whichever state currently owns the client ID in the global registry.
