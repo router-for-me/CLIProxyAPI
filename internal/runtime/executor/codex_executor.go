@@ -725,11 +725,11 @@ func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Form
 			}
 		}
 	} else if from == "openai-response" {
-		if promptCacheKey, _ := codexPromptCacheKeyFromClient(ctx, req, rawJSON); promptCacheKey != "" {
+		if promptCacheKey := codexPromptCacheKeyFromClient(ctx, req, rawJSON); promptCacheKey != "" {
 			cache.ID = promptCacheKey
 		}
 	} else if from == "openai" {
-		if promptCacheKey, _ := codexPromptCacheKeyFromClient(ctx, req, rawJSON); promptCacheKey != "" {
+		if promptCacheKey := codexPromptCacheKeyFromClient(ctx, req, rawJSON); promptCacheKey != "" {
 			cache.ID = promptCacheKey
 		} else if apiKey := strings.TrimSpace(helps.APIKeyFromContext(ctx)); apiKey != "" {
 			cache.ID = uuid.NewSHA1(uuid.NameSpaceOID, []byte("cli-proxy-api:codex:prompt-cache:"+apiKey)).String()
@@ -751,19 +751,19 @@ func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Form
 	return httpReq, nil
 }
 
-func codexPromptCacheKeyFromClient(ctx context.Context, req cliproxyexecutor.Request, rawJSON []byte) (string, string) {
-	if key, source := codexPromptCacheKeyFromJSON(req.Payload, "payload"); key != "" {
-		return key, source
+func codexPromptCacheKeyFromClient(ctx context.Context, req cliproxyexecutor.Request, rawJSON []byte) string {
+	if key := codexPromptCacheKeyFromJSON(req.Payload); key != "" {
+		return key
 	}
-	if key, source := codexPromptCacheKeyFromJSON(rawJSON, "body"); key != "" {
-		return key, source
+	if key := codexPromptCacheKeyFromJSON(rawJSON); key != "" {
+		return key
 	}
 	return codexPromptCacheKeyFromHeaders(ctx)
 }
 
-func codexPromptCacheKeyFromJSON(payload []byte, prefix string) (string, string) {
+func codexPromptCacheKeyFromJSON(payload []byte) string {
 	if len(payload) == 0 {
-		return "", ""
+		return ""
 	}
 	for _, path := range []string{
 		"prompt_cache_key",
@@ -773,30 +773,30 @@ func codexPromptCacheKeyFromJSON(payload []byte, prefix string) (string, string)
 		"provider_options.openai.promptCacheKey",
 	} {
 		if value := strings.TrimSpace(gjson.GetBytes(payload, path).String()); value != "" {
-			return value, prefix + "." + path
+			return value
 		}
 	}
-	return "", ""
+	return ""
 }
 
-func codexPromptCacheKeyFromHeaders(ctx context.Context) (string, string) {
+func codexPromptCacheKeyFromHeaders(ctx context.Context) string {
 	if ctx == nil {
-		return "", ""
+		return ""
 	}
 	ginCtx, ok := ctx.Value("gin").(*gin.Context)
 	if !ok || ginCtx == nil || ginCtx.Request == nil {
-		return "", ""
+		return ""
 	}
 	return codexPromptCacheKeyFromHeader(ginCtx.Request.Header)
 }
 
-func codexPromptCacheKeyFromHeader(headers http.Header) (string, string) {
-	for _, name := range []string{"X-Session-ID", "Session_id", "session_id", "Conversation_id", "conversation_id"} {
+func codexPromptCacheKeyFromHeader(headers http.Header) string {
+	for _, name := range []string{"X-Session-ID", "Session_id", "Conversation_id"} {
 		if value := strings.TrimSpace(headers.Get(name)); value != "" {
-			return value, "header." + name
+			return value
 		}
 	}
-	return "", ""
+	return ""
 }
 
 func normalizeCodexPreviousResponseIDForPromptCache(_ context.Context, from sdktranslator.Format, rawJSON []byte) []byte {
@@ -852,6 +852,9 @@ func normalizeCodexDeveloperCurrentTimeForPromptCache(_ context.Context, from sd
 
 	content := gjson.GetBytes(rawJSON, "input.0.content")
 	if !content.Exists() {
+		return rawJSON
+	}
+	if content.Type != gjson.String {
 		return rawJSON
 	}
 	normalized, changed := normalizeCodexCurrentTimeLine(content.String())

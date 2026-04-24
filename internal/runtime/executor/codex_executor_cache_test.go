@@ -186,3 +186,31 @@ func TestCodexExecutorCacheHelper_OpenAIResponses_NormalizesDeveloperCurrentTime
 		t.Fatalf("developer current time = %q, want normalized day timestamp", content)
 	}
 }
+
+func TestCodexExecutorCacheHelper_OpenAIResponses_DoesNotNormalizeStructuredDeveloperContent(t *testing.T) {
+	ctx := newCodexCacheHelperContext("", nil)
+	executor := &CodexExecutor{}
+	rawJSON := []byte(`{"model":"gpt-5.5","stream":true,"prompt_cache_key":"cpa:session","input":[{"role":"developer","content":[{"type":"input_text","text":"prefix\n  Current time: 2026-04-24T05:55:01.054Z\nsuffix"}]},{"role":"user","content":"hello"}]}`)
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5.5",
+		Payload: []byte(`{"model":"gpt-5.5","prompt_cache_key":"cpa:session","input":[]}`),
+	}
+	url := "https://example.com/responses"
+
+	httpReq, err := executor.cacheHelper(ctx, sdktranslator.FromString("openai-response"), url, req, rawJSON)
+	if err != nil {
+		t.Fatalf("cacheHelper error: %v", err)
+	}
+
+	body, errRead := io.ReadAll(httpReq.Body)
+	if errRead != nil {
+		t.Fatalf("read request body: %v", errRead)
+	}
+	content := gjson.GetBytes(body, "input.0.content")
+	if !content.IsArray() {
+		t.Fatalf("developer content type changed: %s", string(body))
+	}
+	if gotText := content.Get("0.text").String(); !strings.Contains(gotText, "2026-04-24T05:55:01.054Z") {
+		t.Fatalf("structured developer content was unexpectedly normalized: %q", gotText)
+	}
+}
