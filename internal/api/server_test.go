@@ -1,7 +1,10 @@
 package api
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,8 +18,53 @@ import (
 	internallogging "github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 )
+
+type cachedContentsCaptureExecutor struct {
+	provider string
+	url      string
+	method   string
+	body     string
+}
+
+func (e *cachedContentsCaptureExecutor) Identifier() string {
+	if e.provider != "" {
+		return e.provider
+	}
+	return "gemini"
+}
+
+func (e *cachedContentsCaptureExecutor) Execute(context.Context, *auth.Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, &auth.Error{HTTPStatus: http.StatusNotImplemented, Message: "not implemented"}
+}
+
+func (e *cachedContentsCaptureExecutor) ExecuteStream(context.Context, *auth.Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	return nil, &auth.Error{HTTPStatus: http.StatusNotImplemented, Message: "not implemented"}
+}
+
+func (e *cachedContentsCaptureExecutor) Refresh(_ context.Context, a *auth.Auth) (*auth.Auth, error) {
+	return a, nil
+}
+
+func (e *cachedContentsCaptureExecutor) CountTokens(context.Context, *auth.Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, &auth.Error{HTTPStatus: http.StatusNotImplemented, Message: "not implemented"}
+}
+
+func (e *cachedContentsCaptureExecutor) HttpRequest(_ context.Context, _ *auth.Auth, req *http.Request) (*http.Response, error) {
+	e.url = req.URL.String()
+	e.method = req.Method
+	if req.Body != nil {
+		data, _ := io.ReadAll(req.Body)
+		e.body = string(data)
+	}
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(bytes.NewBufferString(`{"name":"cachedContents/test-cache"}`)),
+	}, nil
+}
 
 func newTestServer(t *testing.T) *Server {
 	t.Helper()
@@ -147,6 +195,53 @@ func TestAmpProviderModelRoutes(t *testing.T) {
 				t.Fatalf("response body for %s missing %q: %s", tc.path, tc.wantContains, body)
 			}
 		})
+	}
+}
+
+func TestVertexCachedContentsRoutesProxyToVertexUpstream(t *testing.T) {
+	server := newTestServer(t)
+	exec := &cachedContentsCaptureExecutor{provider: "vertex"}
+	server.handlers.AuthManager.RegisterExecutor(exec)
+	if _, err := server.handlers.AuthManager.Register(context.Background(), &auth.Auth{
+		ID:       "vertex-test",
+		Provider: "vertex",
+		Status:   auth.StatusActive,
+		Metadata: map[string]any{
+			"project_id":      "test-project",
+			"location":        "global",
+			"service_account": map[string]any{"project_id": "test-project", "client_email": "test@example.com", "private_key": "unused"},
+		},
+	}); err != nil {
+		t.Fatalf("register vertex auth: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1beta/cachedContents", strings.NewReader(`{"model":"models/gemini-3-flash-preview","contents":[]}`))
+	req.Header.Set("Authorization", "Bearer test-key")
+	req.Header.Set("Content-Type", "application/json")
+
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("unexpected status: got %d want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	if exec.url != "https://aiplatform.googleapis.com/v1/projects/test-project/locations/global/cachedContents" {
+		t.Fatalf("upstream url = %q", exec.url)
+	}
+	if !strings.Contains(exec.body, `"model":"projects/test-project/locations/global/publishers/google/models/gemini-3-flash-preview"`) {
+		t.Fatalf("upstream body missing vertex model resource: %s", exec.body)
+	}
+
+	reqGet := httptest.NewRequest(http.MethodGet, "/v1beta/cachedContents/test-cache", nil)
+	reqGet.Header.Set("Authorization", "Bearer test-key")
+	rrGet := httptest.NewRecorder()
+	server.engine.ServeHTTP(rrGet, reqGet)
+
+	if rrGet.Code != http.StatusOK {
+		t.Fatalf("GET status: got %d want %d; body=%s", rrGet.Code, http.StatusOK, rrGet.Body.String())
+	}
+	if exec.url != "https://aiplatform.googleapis.com/v1/projects/test-project/locations/global/cachedContents/test-cache" {
+		t.Fatalf("GET upstream url = %q", exec.url)
 	}
 }
 

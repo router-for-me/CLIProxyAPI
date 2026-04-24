@@ -91,6 +91,35 @@ func TestParseGeminiCLIStreamUsage_IgnoresTrafficTypeOnlyUsageMetadata(t *testin
 	}
 }
 
+func TestParseVertexGeminiStreamUsageIgnoresEmptyMetadata(t *testing.T) {
+	if detail, ok := ParseVertexGeminiStreamUsage([]byte(`data: {"usageMetadata":{"trafficType":"ON_DEMAND"}}`)); ok {
+		t.Fatalf("ParseVertexGeminiStreamUsage returned %#v, want no usage", detail)
+	}
+}
+
+func TestParseVertexGeminiStreamUsageWrappedMetadata(t *testing.T) {
+	line := []byte(`data: {"response":{"usageMetadata":{"promptTokenCount":11,"candidatesTokenCount":2,"thoughtsTokenCount":3,"totalTokenCount":16,"cachedContentTokenCount":7}}}`)
+	detail, ok := ParseVertexGeminiStreamUsage(line)
+	if !ok {
+		t.Fatal("ParseVertexGeminiStreamUsage returned ok=false")
+	}
+	if detail.InputTokens != 11 {
+		t.Fatalf("input tokens = %d, want %d", detail.InputTokens, 11)
+	}
+	if detail.OutputTokens != 2 {
+		t.Fatalf("output tokens = %d, want %d", detail.OutputTokens, 2)
+	}
+	if detail.ReasoningTokens != 3 {
+		t.Fatalf("reasoning tokens = %d, want %d", detail.ReasoningTokens, 3)
+	}
+	if detail.TotalTokens != 16 {
+		t.Fatalf("total tokens = %d, want %d", detail.TotalTokens, 16)
+	}
+	if detail.CachedTokens != 7 {
+		t.Fatalf("cached tokens = %d, want %d", detail.CachedTokens, 7)
+	}
+}
+
 func TestUsageReporterBuildRecordIncludesLatency(t *testing.T) {
 	reporter := &UsageReporter{
 		provider:    "openai",

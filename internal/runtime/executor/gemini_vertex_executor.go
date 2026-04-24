@@ -7,11 +7,13 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	vertexauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/vertex"
@@ -31,8 +33,129 @@ import (
 
 const (
 	// vertexAPIVersion aligns with current public Vertex Generative AI API.
-	vertexAPIVersion = "v1"
+	vertexAPIVersion           = "v1"
+	vertexTranslatorContextKey = "cliproxy:upstream_provider"
+	vertexTranslatorProvider   = "vertex"
 )
+
+type vertexPromptCacheEntry struct {
+	name      string
+	expiresAt time.Time
+}
+
+var vertexPromptCaches sync.Map
+
+func vertexCacheModelResource(projectID, location, model string) string {
+	return fmt.Sprintf("projects/%s/locations/%s/publishers/google/models/%s", projectID, location, model)
+}
+
+func vertexPromptCacheKey(auth *cliproxyauth.Auth, projectID, location, model string, createBody []byte) string {
+	h := sha256.New()
+	_, _ = h.Write([]byte(projectID))
+	_, _ = h.Write([]byte{0})
+	_, _ = h.Write([]byte(location))
+	_, _ = h.Write([]byte{0})
+	_, _ = h.Write([]byte(model))
+	_, _ = h.Write([]byte{0})
+	if auth != nil {
+		_, _ = h.Write([]byte(auth.ID))
+		_, _ = h.Write([]byte{0})
+	}
+	_, _ = h.Write(createBody)
+	return fmt.Sprintf("%s/%s/%s/%x", projectID, location, model, h.Sum(nil))
+}
+
+func vertexCacheCreateBody(projectID, location, model string, body []byte) ([]byte, bool) {
+	out := []byte(`{"ttl":"3600s"}`)
+	out, _ = sjson.SetBytes(out, "model", vertexCacheModelResource(projectID, location, model))
+	hasCacheable := false
+	if v := gjson.GetBytes(body, "system_instruction"); v.Exists() {
+		out, _ = sjson.SetRawBytes(out, "systemInstruction", []byte(v.Raw))
+		hasCacheable = true
+	}
+	if v := gjson.GetBytes(body, "tools"); v.Exists() {
+		out, _ = sjson.SetRawBytes(out, "tools", []byte(v.Raw))
+		hasCacheable = true
+	}
+	if v := gjson.GetBytes(body, "toolConfig"); v.Exists() {
+		out, _ = sjson.SetRawBytes(out, "toolConfig", []byte(v.Raw))
+		hasCacheable = true
+	}
+	return out, hasCacheable
+}
+
+func applyVertexCachedContent(body []byte, cacheName string) []byte {
+	if strings.TrimSpace(cacheName) == "" {
+		return body
+	}
+	body, _ = sjson.SetBytes(body, "cachedContent", cacheName)
+	body, _ = sjson.DeleteBytes(body, "system_instruction")
+	body, _ = sjson.DeleteBytes(body, "tools")
+	body, _ = sjson.DeleteBytes(body, "toolConfig")
+	return body
+}
+
+func (e *GeminiVertexExecutor) maybeApplyNativePromptCache(ctx context.Context, auth *cliproxyauth.Auth, body []byte, source sdktranslator.Format, projectID, location, model, token string) []byte {
+	if source.String() != "claude" || isImagenModel(model) || gjson.GetBytes(body, "cachedContent").Exists() {
+		return body
+	}
+	createBody, ok := vertexCacheCreateBody(projectID, location, model, body)
+	if !ok {
+		return body
+	}
+	key := vertexPromptCacheKey(auth, projectID, location, model, createBody)
+	if cached, ok := vertexPromptCaches.Load(key); ok {
+		if entry, okEntry := cached.(vertexPromptCacheEntry); okEntry && entry.name != "" && time.Now().Before(entry.expiresAt) {
+			return applyVertexCachedContent(body, entry.name)
+		}
+		vertexPromptCaches.Delete(key)
+	}
+	if strings.TrimSpace(token) == "" {
+		return body
+	}
+
+	url := fmt.Sprintf("%s/%s/projects/%s/locations/%s/cachedContents", vertexBaseURL(location), vertexAPIVersion, projectID, location)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(createBody))
+	if err != nil {
+		helps.LogWithRequestID(ctx).Debugf("vertex native cache: create request error: %v", err)
+		return body
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+token)
+	applyGeminiHeaders(httpReq, auth)
+	var attrs map[string]string
+	if auth != nil {
+		attrs = auth.Attributes
+	}
+	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
+
+	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpResp, err := httpClient.Do(httpReq)
+	if err != nil {
+		helps.LogWithRequestID(ctx).Debugf("vertex native cache: create error: %v", err)
+		return body
+	}
+	defer func() {
+		if errClose := httpResp.Body.Close(); errClose != nil {
+			log.Errorf("vertex native cache: close response body error: %v", errClose)
+		}
+	}()
+	data, errRead := io.ReadAll(httpResp.Body)
+	if errRead != nil {
+		helps.LogWithRequestID(ctx).Debugf("vertex native cache: read response error: %v", errRead)
+		return body
+	}
+	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		helps.LogWithRequestID(ctx).Debugf("vertex native cache: create skipped, status=%d body=%s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
+		return body
+	}
+	name := strings.TrimSpace(gjson.GetBytes(data, "name").String())
+	if name == "" {
+		return body
+	}
+	vertexPromptCaches.Store(key, vertexPromptCacheEntry{name: name, expiresAt: time.Now().Add(55 * time.Minute)})
+	return applyVertexCachedContent(body, name)
+}
 
 // isImagenModel checks if the model name is an Imagen image generation model.
 // Imagen models use the :predict action instead of :generateContent.
@@ -307,6 +430,7 @@ func (e *GeminiVertexExecutor) executeWithServiceAccount(ctx context.Context, au
 	defer reporter.TrackFailure(ctx, &err)
 
 	var body []byte
+	sourceFormat := opts.SourceFormat
 
 	// Handle Imagen models with special request format
 	if isImagenModel(baseModel) {
@@ -317,7 +441,7 @@ func (e *GeminiVertexExecutor) executeWithServiceAccount(ctx context.Context, au
 		body = imagenBody
 	} else {
 		// Standard Gemini translation flow
-		from := opts.SourceFormat
+		from := sourceFormat
 		to := sdktranslator.FromString("gemini")
 
 		originalPayloadSource := req.Payload
@@ -346,6 +470,16 @@ func (e *GeminiVertexExecutor) executeWithServiceAccount(ctx context.Context, au
 			action = "countTokens"
 		}
 	}
+	token := ""
+	if tokenValue, errTok := vertexAccessToken(ctx, e.cfg, auth, saJSON); errTok == nil && tokenValue != "" {
+		token = tokenValue
+	} else if errTok != nil {
+		log.Errorf("vertex executor: access token error: %v", errTok)
+		return resp, statusErr{code: 500, msg: "internal server error"}
+	}
+	if action == "generateContent" {
+		body = e.maybeApplyNativePromptCache(ctx, auth, body, sourceFormat, projectID, location, baseModel, token)
+	}
 	baseURL := vertexBaseURL(location)
 	url := fmt.Sprintf("%s/%s/projects/%s/locations/%s/publishers/google/models/%s:%s", baseURL, vertexAPIVersion, projectID, location, baseModel, action)
 	if opts.Alt != "" && action != "countTokens" {
@@ -358,11 +492,8 @@ func (e *GeminiVertexExecutor) executeWithServiceAccount(ctx context.Context, au
 		return resp, errNewReq
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	if token, errTok := vertexAccessToken(ctx, e.cfg, auth, saJSON); errTok == nil && token != "" {
+	if token != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+token)
-	} else if errTok != nil {
-		log.Errorf("vertex executor: access token error: %v", errTok)
-		return resp, statusErr{code: 500, msg: "internal server error"}
 	}
 	applyGeminiHeaders(httpReq, auth)
 	var attrs map[string]string
@@ -426,7 +557,8 @@ func (e *GeminiVertexExecutor) executeWithServiceAccount(ctx context.Context, au
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("gemini")
 	var param any
-	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, opts.OriginalRequest, body, data, &param)
+	translateCtx := context.WithValue(ctx, vertexTranslatorContextKey, vertexTranslatorProvider)
+	out := sdktranslator.TranslateNonStream(translateCtx, to, from, req.Model, opts.OriginalRequest, body, data, &param)
 	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
 	return resp, nil
 }
@@ -537,7 +669,8 @@ func (e *GeminiVertexExecutor) executeWithAPIKey(ctx context.Context, auth *clip
 	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 	reporter.Publish(ctx, helps.ParseGeminiUsage(data))
 	var param any
-	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, opts.OriginalRequest, body, data, &param)
+	translateCtx := context.WithValue(ctx, vertexTranslatorContextKey, vertexTranslatorProvider)
+	out := sdktranslator.TranslateNonStream(translateCtx, to, from, req.Model, opts.OriginalRequest, body, data, &param)
 	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
 	return resp, nil
 }
@@ -572,6 +705,14 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Conte
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 
 	action := getVertexAction(baseModel, true)
+	token := ""
+	if tokenValue, errTok := vertexAccessToken(ctx, e.cfg, auth, saJSON); errTok == nil && tokenValue != "" {
+		token = tokenValue
+	} else if errTok != nil {
+		log.Errorf("vertex executor: access token error: %v", errTok)
+		return nil, statusErr{code: 500, msg: "internal server error"}
+	}
+	body = e.maybeApplyNativePromptCache(ctx, auth, body, from, projectID, location, baseModel, token)
 	baseURL := vertexBaseURL(location)
 	url := fmt.Sprintf("%s/%s/projects/%s/locations/%s/publishers/google/models/%s:%s", baseURL, vertexAPIVersion, projectID, location, baseModel, action)
 	// Imagen models don't support streaming, skip SSE params
@@ -589,11 +730,8 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Conte
 		return nil, errNewReq
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	if token, errTok := vertexAccessToken(ctx, e.cfg, auth, saJSON); errTok == nil && token != "" {
+	if token != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+token)
-	} else if errTok != nil {
-		log.Errorf("vertex executor: access token error: %v", errTok)
-		return nil, statusErr{code: 500, msg: "internal server error"}
 	}
 	applyGeminiHeaders(httpReq, auth)
 	var attrs map[string]string
@@ -651,15 +789,18 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Conte
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
-			if detail, ok := helps.ParseGeminiStreamUsage(line); ok {
+			filtered := helps.FilterSSEUsageMetadata(line)
+			if detail, ok := helps.ParseVertexGeminiStreamUsage(filtered); ok {
 				reporter.Publish(ctx, detail)
 			}
-			lines := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, body, bytes.Clone(line), &param)
+			translateCtx := context.WithValue(ctx, vertexTranslatorContextKey, vertexTranslatorProvider)
+			lines := sdktranslator.TranslateStream(translateCtx, to, from, req.Model, opts.OriginalRequest, body, bytes.Clone(filtered), &param)
 			for i := range lines {
 				out <- cliproxyexecutor.StreamChunk{Payload: lines[i]}
 			}
 		}
-		lines := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, body, []byte("[DONE]"), &param)
+		translateCtx := context.WithValue(ctx, vertexTranslatorContextKey, vertexTranslatorProvider)
+		lines := sdktranslator.TranslateStream(translateCtx, to, from, req.Model, opts.OriginalRequest, body, []byte("[DONE]"), &param)
 		for i := range lines {
 			out <- cliproxyexecutor.StreamChunk{Payload: lines[i]}
 		}
@@ -668,6 +809,7 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Conte
 			reporter.PublishFailure(ctx)
 			out <- cliproxyexecutor.StreamChunk{Err: errScan}
 		}
+		reporter.EnsurePublished(ctx)
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
 }
@@ -781,15 +923,18 @@ func (e *GeminiVertexExecutor) executeStreamWithAPIKey(ctx context.Context, auth
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
-			if detail, ok := helps.ParseGeminiStreamUsage(line); ok {
+			filtered := helps.FilterSSEUsageMetadata(line)
+			if detail, ok := helps.ParseVertexGeminiStreamUsage(filtered); ok {
 				reporter.Publish(ctx, detail)
 			}
-			lines := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, body, bytes.Clone(line), &param)
+			translateCtx := context.WithValue(ctx, vertexTranslatorContextKey, vertexTranslatorProvider)
+			lines := sdktranslator.TranslateStream(translateCtx, to, from, req.Model, opts.OriginalRequest, body, bytes.Clone(filtered), &param)
 			for i := range lines {
 				out <- cliproxyexecutor.StreamChunk{Payload: lines[i]}
 			}
 		}
-		lines := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, body, []byte("[DONE]"), &param)
+		translateCtx := context.WithValue(ctx, vertexTranslatorContextKey, vertexTranslatorProvider)
+		lines := sdktranslator.TranslateStream(translateCtx, to, from, req.Model, opts.OriginalRequest, body, []byte("[DONE]"), &param)
 		for i := range lines {
 			out <- cliproxyexecutor.StreamChunk{Payload: lines[i]}
 		}
@@ -798,6 +943,7 @@ func (e *GeminiVertexExecutor) executeStreamWithAPIKey(ctx context.Context, auth
 			reporter.PublishFailure(ctx)
 			out <- cliproxyexecutor.StreamChunk{Err: errScan}
 		}
+		reporter.EnsurePublished(ctx)
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
 }
