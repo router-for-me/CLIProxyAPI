@@ -1273,6 +1273,10 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 				return result, nil
 			}
 		}
+		var bootstrapErr *streamBootstrapError
+		if errors.As(lastErr, &bootstrapErr) && bootstrapErr != nil {
+			return streamErrorResult(bootstrapErr.Headers(), bootstrapErr.cause), nil
+		}
 		return nil, lastErr
 	}
 	return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
@@ -1446,10 +1450,6 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	for {
 		if maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials {
 			if lastErr != nil {
-				var bootstrapErr *streamBootstrapError
-				if errors.As(lastErr, &bootstrapErr) && bootstrapErr != nil {
-					return streamErrorResult(bootstrapErr.Headers(), bootstrapErr.cause), nil
-				}
 				return nil, lastErr
 			}
 			return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
@@ -1457,10 +1457,6 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, opts, tried)
 		if errPick != nil {
 			if lastErr != nil {
-				var bootstrapErr *streamBootstrapError
-				if errors.As(lastErr, &bootstrapErr) && bootstrapErr != nil {
-					return streamErrorResult(bootstrapErr.Headers(), bootstrapErr.cause), nil
-				}
 				return nil, lastErr
 			}
 			return nil, errPick
@@ -2299,6 +2295,13 @@ func cloneError(err *Error) *Error {
 	}
 }
 
+func errorString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
 func statusCodeFromError(err error) int {
 	if err == nil {
 		return 0
@@ -2965,6 +2968,12 @@ type creditsCandidateEntry struct {
 }
 
 func shouldAttemptAntigravityCreditsFallback(m *Manager, lastErr error, providers []string) bool {
+	status := statusCodeFromError(lastErr)
+	log.WithFields(log.Fields{
+		"lastErr":   errorString(lastErr),
+		"status":    status,
+		"providers": providers,
+	}).Debug("shouldAttemptAntigravityCreditsFallback")
 	if m == nil || lastErr == nil {
 		return false
 	}
@@ -2984,7 +2993,6 @@ func shouldAttemptAntigravityCreditsFallback(m *Manager, lastErr error, provider
 	if cfg == nil || !cfg.QuotaExceeded.AntigravityCredits {
 		return false
 	}
-	status := statusCodeFromError(lastErr)
 	switch status {
 	case http.StatusTooManyRequests, http.StatusServiceUnavailable:
 		return true
