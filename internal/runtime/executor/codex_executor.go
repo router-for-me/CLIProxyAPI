@@ -157,7 +157,22 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	defer reporter.TrackFailure(ctx, &err)
 
 	from := opts.SourceFormat
-	to := sdktranslator.FromString("codex")
+
+	// Check if provider is configured to use OpenAI Chat Completions API
+	// instead of native Codex Responses API (e.g., for Kimi Coding).
+	codexCfg := e.resolveCodexConfig(auth)
+	useOpenAIChat := codexCfg != nil && codexCfg.Protocol == "openai-chat"
+
+	var to sdktranslator.Format
+	var endpointPath string
+	if useOpenAIChat {
+		to = sdktranslator.FromString("openai")
+		endpointPath = "/chat/completions"
+	} else {
+		to = sdktranslator.FromString("codex")
+		endpointPath = "/responses"
+	}
+
 	originalPayloadSource := req.Payload
 	if len(opts.OriginalRequest) > 0 {
 		originalPayloadSource = opts.OriginalRequest
@@ -179,10 +194,12 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
 	body, _ = sjson.DeleteBytes(body, "safety_identifier")
 	body, _ = sjson.DeleteBytes(body, "stream_options")
-	body = normalizeCodexInstructions(body)
-	body = ensureImageGenerationTool(body, baseModel)
+	if !useOpenAIChat {
+		body = normalizeCodexInstructions(body)
+		body = ensureImageGenerationTool(body, baseModel)
+	}
 
-	url := strings.TrimSuffix(baseURL, "/") + "/responses"
+	url := strings.TrimSuffix(baseURL, "/") + endpointPath
 	httpReq, err := e.cacheHelper(ctx, from, url, req, body)
 	if err != nil {
 		return resp, err
@@ -400,7 +417,21 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	defer reporter.TrackFailure(ctx, &err)
 
 	from := opts.SourceFormat
-	to := sdktranslator.FromString("codex")
+
+	// Check if provider is configured to use OpenAI Chat Completions API
+	codexCfg := e.resolveCodexConfig(auth)
+	useOpenAIChat := codexCfg != nil && codexCfg.Protocol == "openai-chat"
+
+	var to sdktranslator.Format
+	var endpointPath string
+	if useOpenAIChat {
+		to = sdktranslator.FromString("openai")
+		endpointPath = "/chat/completions"
+	} else {
+		to = sdktranslator.FromString("codex")
+		endpointPath = "/responses"
+	}
+
 	originalPayloadSource := req.Payload
 	if len(opts.OriginalRequest) > 0 {
 		originalPayloadSource = opts.OriginalRequest
@@ -421,10 +452,12 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	body, _ = sjson.DeleteBytes(body, "safety_identifier")
 	body, _ = sjson.DeleteBytes(body, "stream_options")
 	body, _ = sjson.SetBytes(body, "model", baseModel)
-	body = normalizeCodexInstructions(body)
-	body = ensureImageGenerationTool(body, baseModel)
+	if !useOpenAIChat {
+		body = normalizeCodexInstructions(body)
+		body = ensureImageGenerationTool(body, baseModel)
+	}
 
-	url := strings.TrimSuffix(baseURL, "/") + "/responses"
+	url := strings.TrimSuffix(baseURL, "/") + endpointPath
 	httpReq, err := e.cacheHelper(ctx, from, url, req, body)
 	if err != nil {
 		return nil, err
@@ -519,7 +552,18 @@ func (e *CodexExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	from := opts.SourceFormat
-	to := sdktranslator.FromString("codex")
+
+	// Check if provider is configured to use OpenAI Chat Completions API
+	codexCfg := e.resolveCodexConfig(auth)
+	useOpenAIChat := codexCfg != nil && codexCfg.Protocol == "openai-chat"
+
+	var to sdktranslator.Format
+	if useOpenAIChat {
+		to = sdktranslator.FromString("openai")
+	} else {
+		to = sdktranslator.FromString("codex")
+	}
+
 	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
 
 	body, err := thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
@@ -533,7 +577,9 @@ func (e *CodexExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth
 	body, _ = sjson.DeleteBytes(body, "safety_identifier")
 	body, _ = sjson.DeleteBytes(body, "stream_options")
 	body, _ = sjson.SetBytes(body, "stream", false)
-	body = normalizeCodexInstructions(body)
+	if !useOpenAIChat {
+		body = normalizeCodexInstructions(body)
+	}
 
 	enc, err := tokenizerForCodexModel(baseModel)
 	if err != nil {

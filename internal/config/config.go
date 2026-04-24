@@ -393,13 +393,10 @@ type ClaudeKey struct {
 	// ExcludedModels lists model IDs that should be excluded for this provider.
 	ExcludedModels []string `yaml:"excluded-models,omitempty" json:"excluded-models,omitempty"`
 
-	// Cloak configures request cloaking for non-Claude-Code clients.
-	Cloak *CloakConfig `yaml:"cloak,omitempty" json:"cloak,omitempty"`
-
-	// ExperimentalCCHSigning enables opt-in final-body cch signing for cloaked
-	// Claude /v1/messages requests. It is disabled by default so upstream seed
-	// changes do not alter the proxy's legacy behavior.
-	ExperimentalCCHSigning bool `yaml:"experimental-cch-signing,omitempty" json:"experimental-cch-signing,omitempty"`
+	// Protocol specifies the API protocol to use for this Codex provider.
+	// "codex" (default): native Responses API support.
+	// "openai-chat": use Chat Completions API with automatic conversion.
+	Protocol string `yaml:"protocol,omitempty" json:"protocol,omitempty"`
 }
 
 func (k ClaudeKey) GetAPIKey() string  { return k.APIKey }
