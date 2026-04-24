@@ -2,6 +2,8 @@ package helps
 
 import (
 	"context"
+	"crypto/x509"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -26,11 +28,17 @@ type clientCacheKey struct {
 	transportKey string
 }
 
+type customCATransportCacheKey struct {
+	transportKey string
+	pool         string
+}
+
 var (
-	defaultTransport     http.RoundTripper
-	defaultTransportOnce sync.Once
-	httpClientCache      sync.Map
-	proxyTransportCache  sync.Map
+	defaultTransport       http.RoundTripper
+	defaultTransportOnce   sync.Once
+	httpClientCache        sync.Map
+	proxyTransportCache    sync.Map
+	customCATransportCache sync.Map
 )
 
 // NewProxyAwareHTTPClient creates an HTTP client with pooled transport reuse.
@@ -68,8 +76,8 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 		transport := cachedProxyTransport(proxyURL)
 		if transport != nil {
 			if pool != nil {
-				transport = misc.RoundTripperWithCustomRootCAs(transport, pool)
-				return newHTTPClient(transport, timeout)
+				transport = cachedCustomCATransport("proxy:"+proxyURL, transport, pool)
+				return cachedHTTPClient("proxy-ca:"+proxyURL+":"+customRootCAPoolKey(pool), transport, timeout)
 			}
 			return cachedHTTPClient("proxy:"+proxyURL, transport, timeout)
 		}
@@ -84,9 +92,33 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 	}
 
 	if pool != nil {
-		return newHTTPClient(misc.RoundTripperWithCustomRootCAs(cachedDefaultTransport(), pool), timeout)
+		transport := cachedCustomCATransport(defaultClientCacheKey, cachedDefaultTransport(), pool)
+		return cachedHTTPClient("default-ca:"+customRootCAPoolKey(pool), transport, timeout)
 	}
 	return cachedHTTPClient(defaultClientCacheKey, cachedDefaultTransport(), timeout)
+}
+
+func cachedCustomCATransport(transportKey string, transport http.RoundTripper, pool *x509.CertPool) http.RoundTripper {
+	if transport == nil || pool == nil {
+		return transport
+	}
+	key := customCATransportCacheKey{transportKey: transportKey, pool: customRootCAPoolKey(pool)}
+	if cached, ok := customCATransportCache.Load(key); ok {
+		if cachedTransport, okTransport := cached.(http.RoundTripper); okTransport {
+			return cachedTransport
+		}
+	}
+
+	wrapped := misc.RoundTripperWithCustomRootCAs(transport, pool)
+	actual, _ := customCATransportCache.LoadOrStore(key, wrapped)
+	if cached, ok := actual.(http.RoundTripper); ok {
+		return cached
+	}
+	return wrapped
+}
+
+func customRootCAPoolKey(pool *x509.CertPool) string {
+	return strings.TrimPrefix(strings.TrimSuffix(strings.TrimSpace(fmt.Sprintf("%p", pool)), ">"), "&")
 }
 
 func cachedProxyTransport(proxyURL string) http.RoundTripper {

@@ -2,6 +2,12 @@ package helps
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"math/big"
 	"net/http"
 	"testing"
 	"time"
@@ -123,8 +129,46 @@ func TestNewProxyAwareHTTPClientSeparatesClientCacheByTimeout(t *testing.T) {
 	}
 }
 
+func TestNewProxyAwareHTTPClientReusesCustomCATransport(t *testing.T) {
+	t.Setenv("CODEX_CA_CERTIFICATE", mustCreateProxyHelperTestCertificatePEM(t))
+	t.Setenv("SSL_CERT_FILE", "")
+
+	first := NewProxyAwareHTTPClient(context.Background(), &config.Config{}, nil, 0)
+	second := NewProxyAwareHTTPClient(context.Background(), &config.Config{}, nil, 0)
+
+	if first != second {
+		t.Fatal("expected custom-CA client to be reused")
+	}
+	if first.Transport == nil || first.Transport != second.Transport {
+		t.Fatal("expected custom-CA transport to be reused")
+	}
+}
+
 type roundTripperSpy struct{}
 
 func (spy *roundTripperSpy) RoundTrip(*http.Request) (*http.Response, error) {
 	return nil, nil
+}
+
+func mustCreateProxyHelperTestCertificatePEM(t *testing.T) string {
+	t.Helper()
+
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("rsa.GenerateKey() error = %v", err)
+	}
+	template := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "CLIProxyAPI Proxy Helper Test CA"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		IsCA:                  true,
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
+		BasicConstraintsValid: true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &privateKey.PublicKey, privateKey)
+	if err != nil {
+		t.Fatalf("x509.CreateCertificate() error = %v", err)
+	}
+	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
 }
