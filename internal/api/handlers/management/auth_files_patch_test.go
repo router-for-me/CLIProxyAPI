@@ -103,3 +103,21 @@ func TestBuildAuthFileEntryExposesUserAgent(t *testing.T) {
 		t.Fatalf("entry[user_agent] = %q, want %q", got, "codex-cli-test/1.0")
 	}
 }
+
+func TestBuildAuthFileEntryExposesWebsockets(t *testing.T) {
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, nil)
+	auth := &coreauth.Auth{
+		ID:       "codex-auth.json",
+		FileName: "codex-auth.json",
+		Provider: "codex",
+		Attributes: map[string]string{
+			"path":       "/tmp/codex-auth.json",
+			"websockets": "true",
+		},
+	}
+
+	entry := h.buildAuthFileEntry(auth)
+	if got, ok := entry["websockets"].(bool); !ok || !got {
+		t.Fatalf("entry[websockets] = %#v, want true", entry["websockets"])
+	}
+}

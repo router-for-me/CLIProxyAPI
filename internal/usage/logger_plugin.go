@@ -83,9 +83,11 @@ type apiStats struct {
 
 // modelStats holds aggregated metrics for a specific model within an API.
 type modelStats struct {
-	TotalRequests int64
-	TotalTokens   int64
-	Details       []RequestDetail
+	TotalRequests  int64
+	TotalTokens    int64
+	TokenBreakdown TokenStats
+	Latency        LatencyStats
+	Details        []RequestDetail
 }
 
 // RequestDetail stores the timestamp, latency, and token usage for a single request.
@@ -106,6 +108,14 @@ type TokenStats struct {
 	ReasoningTokens int64 `json:"reasoning_tokens"`
 	CachedTokens    int64 `json:"cached_tokens"`
 	TotalTokens     int64 `json:"total_tokens"`
+}
+
+// LatencyStats captures aggregated latency information for a model.
+type LatencyStats struct {
+	Count   int64 `json:"count"`
+	TotalMs int64 `json:"total_ms"`
+	MinMs   int64 `json:"min_ms"`
+	MaxMs   int64 `json:"max_ms"`
 }
 
 // StatisticsSnapshot represents an immutable view of the aggregated metrics.
@@ -132,9 +142,11 @@ type APISnapshot struct {
 
 // ModelSnapshot summarises metrics for a specific model.
 type ModelSnapshot struct {
-	TotalRequests int64           `json:"total_requests"`
-	TotalTokens   int64           `json:"total_tokens"`
-	Details       []RequestDetail `json:"details"`
+	TotalRequests  int64           `json:"total_requests"`
+	TotalTokens    int64           `json:"total_tokens"`
+	TokenBreakdown TokenStats      `json:"token_breakdown"`
+	Latency        LatencyStats    `json:"latency"`
+	Details        []RequestDetail `json:"details,omitempty"`
 }
 
 var defaultRequestStatistics = NewRequestStatistics()
@@ -216,6 +228,8 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 }
 
 func (s *RequestStatistics) updateAPIStats(stats *apiStats, model string, detail RequestDetail) {
+	detail.Tokens = normaliseTokenStats(detail.Tokens)
+
 	stats.TotalRequests++
 	stats.TotalTokens += detail.Tokens.TotalTokens
 	modelStatsValue, ok := stats.Models[model]
@@ -225,6 +239,8 @@ func (s *RequestStatistics) updateAPIStats(stats *apiStats, model string, detail
 	}
 	modelStatsValue.TotalRequests++
 	modelStatsValue.TotalTokens += detail.Tokens.TotalTokens
+	mergeTokenStats(&modelStatsValue.TokenBreakdown, detail.Tokens)
+	addLatencySample(&modelStatsValue.Latency, detail.LatencyMs)
 	modelStatsValue.Details = append(modelStatsValue.Details, detail)
 }
 
@@ -261,8 +277,10 @@ func (s *RequestStatistics) snapshotWithDetails(includeDetails bool) StatisticsS
 		}
 		for modelName, modelStatsValue := range stats.Models {
 			modelSnapshot := ModelSnapshot{
-				TotalRequests: modelStatsValue.TotalRequests,
-				TotalTokens:   modelStatsValue.TotalTokens,
+				TotalRequests:  modelStatsValue.TotalRequests,
+				TotalTokens:    modelStatsValue.TotalTokens,
+				TokenBreakdown: modelStatsValue.TokenBreakdown,
+				Latency:        modelStatsValue.Latency,
 			}
 			if includeDetails && len(modelStatsValue.Details) > 0 {
 				requestDetails := make([]RequestDetail, len(modelStatsValue.Details))
@@ -463,6 +481,8 @@ func (s *RequestStatistics) mergeSummarySnapshot(snapshot StatisticsSnapshot) Me
 			}
 			modelStatsValue.TotalRequests += modelSnapshot.TotalRequests
 			modelStatsValue.TotalTokens += modelSnapshot.TotalTokens
+			mergeTokenStats(&modelStatsValue.TokenBreakdown, modelSnapshot.TokenBreakdown)
+			mergeLatencyStats(&modelStatsValue.Latency, modelSnapshot.Latency)
 		}
 	}
 
@@ -613,6 +633,56 @@ func normaliseTokenStats(tokens TokenStats) TokenStats {
 		tokens.TotalTokens = tokens.InputTokens + tokens.OutputTokens + tokens.ReasoningTokens + tokens.CachedTokens
 	}
 	return tokens
+}
+
+func mergeTokenStats(dst *TokenStats, src TokenStats) {
+	if dst == nil {
+		return
+	}
+	src = normaliseTokenStats(src)
+	dst.InputTokens += src.InputTokens
+	dst.OutputTokens += src.OutputTokens
+	dst.ReasoningTokens += src.ReasoningTokens
+	dst.CachedTokens += src.CachedTokens
+	dst.TotalTokens += src.TotalTokens
+}
+
+func addLatencySample(dst *LatencyStats, latencyMs int64) {
+	if dst == nil || latencyMs <= 0 {
+		return
+	}
+	if dst.Count == 0 {
+		dst.MinMs = latencyMs
+		dst.MaxMs = latencyMs
+	} else {
+		if dst.MinMs == 0 || latencyMs < dst.MinMs {
+			dst.MinMs = latencyMs
+		}
+		if latencyMs > dst.MaxMs {
+			dst.MaxMs = latencyMs
+		}
+	}
+	dst.Count++
+	dst.TotalMs += latencyMs
+}
+
+func mergeLatencyStats(dst *LatencyStats, src LatencyStats) {
+	if dst == nil || src.Count <= 0 {
+		return
+	}
+	if dst.Count == 0 {
+		dst.MinMs = src.MinMs
+		dst.MaxMs = src.MaxMs
+	} else {
+		if dst.MinMs == 0 || (src.MinMs > 0 && src.MinMs < dst.MinMs) {
+			dst.MinMs = src.MinMs
+		}
+		if src.MaxMs > dst.MaxMs {
+			dst.MaxMs = src.MaxMs
+		}
+	}
+	dst.Count += src.Count
+	dst.TotalMs += src.TotalMs
 }
 
 func normaliseLatency(latency time.Duration) int64 {

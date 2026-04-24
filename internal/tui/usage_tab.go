@@ -262,31 +262,38 @@ func (m usageTabModel) renderContent() string {
 	return sb.String()
 }
 
-// renderTokenBreakdown aggregates input/output/cached/reasoning tokens from model details.
+// renderTokenBreakdown renders aggregated token data and falls back to request details for older payloads.
 func (m usageTabModel) renderTokenBreakdown(modelStats map[string]any) string {
-	details, ok := modelStats["details"]
-	if !ok {
-		return ""
-	}
-	detailList, ok := details.([]any)
-	if !ok || len(detailList) == 0 {
-		return ""
-	}
-
 	var inputTotal, outputTotal, cachedTotal, reasoningTotal int64
-	for _, d := range detailList {
-		dm, ok := d.(map[string]any)
+
+	if tokens, ok := modelStats["token_breakdown"].(map[string]any); ok && len(tokens) > 0 {
+		inputTotal = int64(getFloat(tokens, "input_tokens"))
+		outputTotal = int64(getFloat(tokens, "output_tokens"))
+		cachedTotal = int64(getFloat(tokens, "cached_tokens"))
+		reasoningTotal = int64(getFloat(tokens, "reasoning_tokens"))
+	} else {
+		details, ok := modelStats["details"]
 		if !ok {
-			continue
+			return ""
 		}
-		tokens, ok := dm["tokens"].(map[string]any)
-		if !ok {
-			continue
+		detailList, ok := details.([]any)
+		if !ok || len(detailList) == 0 {
+			return ""
 		}
-		inputTotal += int64(getFloat(tokens, "input_tokens"))
-		outputTotal += int64(getFloat(tokens, "output_tokens"))
-		cachedTotal += int64(getFloat(tokens, "cached_tokens"))
-		reasoningTotal += int64(getFloat(tokens, "reasoning_tokens"))
+		for _, d := range detailList {
+			dm, ok := d.(map[string]any)
+			if !ok {
+				continue
+			}
+			tokens, ok := dm["tokens"].(map[string]any)
+			if !ok {
+				continue
+			}
+			inputTotal += int64(getFloat(tokens, "input_tokens"))
+			outputTotal += int64(getFloat(tokens, "output_tokens"))
+			cachedTotal += int64(getFloat(tokens, "cached_tokens"))
+			reasoningTotal += int64(getFloat(tokens, "reasoning_tokens"))
+		}
 	}
 
 	if inputTotal == 0 && outputTotal == 0 && cachedTotal == 0 && reasoningTotal == 0 {
@@ -311,8 +318,21 @@ func (m usageTabModel) renderTokenBreakdown(modelStats map[string]any) string {
 		lipgloss.NewStyle().Foreground(colorMuted).Render(strings.Join(parts, "  ")))
 }
 
-// renderLatencyBreakdown aggregates latency_ms from model details and displays avg/min/max.
+// renderLatencyBreakdown renders aggregated latency data and falls back to request details for older payloads.
 func (m usageTabModel) renderLatencyBreakdown(modelStats map[string]any) string {
+	if latency, ok := modelStats["latency"].(map[string]any); ok && len(latency) > 0 {
+		count := int64(getFloat(latency, "count"))
+		if count > 0 {
+			totalLatency := int64(getFloat(latency, "total_ms"))
+			minLatency := int64(getFloat(latency, "min_ms"))
+			maxLatency := int64(getFloat(latency, "max_ms"))
+			avgLatency := totalLatency / count
+			return fmt.Sprintf("    │  %s: avg %dms  min %dms  max %dms\n",
+				lipgloss.NewStyle().Foreground(colorMuted).Render(T("usage_time")),
+				avgLatency, minLatency, maxLatency)
+		}
+	}
+
 	details, ok := modelStats["details"]
 	if !ok {
 		return ""
@@ -323,7 +343,7 @@ func (m usageTabModel) renderLatencyBreakdown(modelStats map[string]any) string 
 	}
 
 	var totalLatency int64
-	var count int
+	var count int64
 	var minLatency, maxLatency int64
 	first := true
 
@@ -356,7 +376,7 @@ func (m usageTabModel) renderLatencyBreakdown(modelStats map[string]any) string 
 		return ""
 	}
 
-	avgLatency := totalLatency / int64(count)
+	avgLatency := totalLatency / count
 	return fmt.Sprintf("    │  %s: avg %dms  min %dms  max %dms\n",
 		lipgloss.NewStyle().Foreground(colorMuted).Render(T("usage_time")),
 		avgLatency, minLatency, maxLatency)

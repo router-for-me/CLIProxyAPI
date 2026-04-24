@@ -508,7 +508,10 @@ func (s *Server) registerManagementRoutes() {
 	mgmt.Use(s.managementAvailabilityMiddleware(), s.mgmt.Middleware())
 	{
 		mgmt.GET("/usage", s.mgmt.GetUsageStatistics)
+		mgmt.GET("/usage/details", s.mgmt.GetDetailedUsageStatistics)
+		mgmt.GET("/usage/aggregated", s.mgmt.GetAggregatedUsageStatistics)
 		mgmt.GET("/usage/export", s.mgmt.ExportUsageStatistics)
+		mgmt.GET("/usage/export/details", s.mgmt.ExportDetailedUsageStatistics)
 		mgmt.POST("/usage/import", s.mgmt.ImportUsageStatistics)
 		mgmt.GET("/config", s.mgmt.GetConfig)
 		mgmt.GET("/config.yaml", s.mgmt.GetConfigYAML)

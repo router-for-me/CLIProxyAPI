@@ -5,6 +5,76 @@ import (
 	"testing"
 )
 
+func TestRenderTokenBreakdown(t *testing.T) {
+	tests := []struct {
+		name         string
+		modelStats   map[string]any
+		wantEmpty    bool
+		wantContains string
+	}{
+		{
+			name:       "no summary or details",
+			modelStats: map[string]any{},
+			wantEmpty:  true,
+		},
+		{
+			name: "aggregated token breakdown",
+			modelStats: map[string]any{
+				"token_breakdown": map[string]any{
+					"input_tokens":     float64(10),
+					"output_tokens":    float64(20),
+					"cached_tokens":    float64(3),
+					"reasoning_tokens": float64(4),
+				},
+			},
+			wantContains: "Input:10  Output:20  Cached:3  Reasoning:4",
+		},
+		{
+			name: "fallback to request details",
+			modelStats: map[string]any{
+				"details": []any{
+					map[string]any{
+						"tokens": map[string]any{
+							"input_tokens":     float64(7),
+							"output_tokens":    float64(9),
+							"cached_tokens":    float64(1),
+							"reasoning_tokens": float64(2),
+						},
+					},
+				},
+			},
+			wantContains: "Input:7  Output:9  Cached:1  Reasoning:2",
+		},
+	}
+
+	prevLocale := CurrentLocale()
+	SetLocale("en")
+	t.Cleanup(func() {
+		SetLocale(prevLocale)
+	})
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := usageTabModel{}
+			result := m.renderTokenBreakdown(tt.modelStats)
+
+			if tt.wantEmpty {
+				if result != "" {
+					t.Fatalf("renderTokenBreakdown() = %q, want empty string", result)
+				}
+				return
+			}
+
+			if result == "" {
+				t.Fatal("renderTokenBreakdown() = empty, want non-empty string")
+			}
+			if tt.wantContains != "" && !strings.Contains(result, tt.wantContains) {
+				t.Fatalf("renderTokenBreakdown() = %q, want to contain %q", result, tt.wantContains)
+			}
+		})
+	}
+}
+
 func TestRenderLatencyBreakdown(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -13,9 +83,22 @@ func TestRenderLatencyBreakdown(t *testing.T) {
 		wantContains string
 	}{
 		{
-			name:       "no details",
+			name:       "no summary or details",
 			modelStats: map[string]any{},
 			wantEmpty:  true,
+		},
+		{
+			name: "aggregated latency summary",
+			modelStats: map[string]any{
+				"latency": map[string]any{
+					"count":    float64(3),
+					"total_ms": float64(900),
+					"min_ms":   float64(200),
+					"max_ms":   float64(400),
+				},
+			},
+			wantEmpty:    false,
+			wantContains: "avg 300ms  min 200ms  max 400ms",
 		},
 		{
 			name: "empty details",

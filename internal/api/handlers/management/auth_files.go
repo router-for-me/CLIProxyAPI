@@ -31,6 +31,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher/synthesizer"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
@@ -484,6 +485,9 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 	if userAgent := authFileUserAgent(auth); userAgent != "" {
 		entry["user_agent"] = userAgent
 	}
+	if websockets, ok := authFileWebsockets(auth); ok {
+		entry["websockets"] = websockets
+	}
 	return entry
 }
 
@@ -516,6 +520,43 @@ func authFileUserAgent(auth *coreauth.Auth) string {
 		}
 	}
 	return ""
+}
+
+func authFileWebsockets(auth *coreauth.Auth) (bool, bool) {
+	if auth == nil {
+		return false, false
+	}
+	if auth.Attributes != nil {
+		if raw := strings.TrimSpace(auth.Attributes["websockets"]); raw != "" {
+			if value, err := strconv.ParseBool(raw); err == nil {
+				return value, true
+			}
+		}
+	}
+	if auth.Metadata == nil {
+		return false, false
+	}
+	if raw, ok := auth.Metadata["websockets"]; ok {
+		switch value := raw.(type) {
+		case bool:
+			return value, true
+		case string:
+			if parsed, err := strconv.ParseBool(strings.TrimSpace(value)); err == nil {
+				return parsed, true
+			}
+		}
+	}
+	if raw, ok := auth.Metadata["websocket"]; ok {
+		switch value := raw.(type) {
+		case bool:
+			return value, true
+		case string:
+			if parsed, err := strconv.ParseBool(strings.TrimSpace(value)); err == nil {
+				return parsed, true
+			}
+		}
+	}
+	return false, false
 }
 
 func extractCodexIDTokenClaims(auth *coreauth.Auth) gin.H {
@@ -1105,6 +1146,204 @@ func (h *Handler) upsertAuthRecord(ctx context.Context, auth *coreauth.Auth) err
 	return err
 }
 
+type patchAuthFileFieldsRequest struct {
+	Name           string            `json:"name"`
+	Prefix         *string           `json:"prefix"`
+	ProxyURL       *string           `json:"proxy_url"`
+	Headers        map[string]string `json:"headers"`
+	Priority       json.RawMessage   `json:"priority"`
+	Note           *string           `json:"note"`
+	UserAgent      *string           `json:"user_agent"`
+	ExcludedModels *[]string         `json:"excluded_models"`
+	DisableCooling json.RawMessage   `json:"disable_cooling"`
+	Websockets     *bool             `json:"websockets"`
+}
+
+func resolvePatchAuthFilePath(targetAuth *coreauth.Auth, authDir, fallbackName string) string {
+	candidates := make([]string, 0, 2)
+	if path := strings.TrimSpace(authAttribute(targetAuth, "path")); path != "" {
+		candidates = append(candidates, path)
+	}
+	if strings.TrimSpace(authDir) != "" && !isUnsafeAuthFileName(fallbackName) {
+		candidates = append(candidates, filepath.Join(authDir, filepath.Base(fallbackName)))
+	}
+
+	for _, candidate := range candidates {
+		if candidate == "" {
+			continue
+		}
+		if !filepath.IsAbs(candidate) {
+			if abs, err := filepath.Abs(candidate); err == nil {
+				candidate = abs
+			}
+		}
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+	}
+
+	return ""
+}
+
+func applyPatchAuthFileDocument(
+	doc map[string]any,
+	req patchAuthFileFieldsRequest,
+	priorityPresent bool,
+	prioritySet bool,
+	priorityValue int,
+	disableCoolingPresent bool,
+	disableCoolingSet bool,
+	disableCoolingValue bool,
+) {
+	if doc == nil {
+		return
+	}
+
+	if req.Prefix != nil {
+		prefix := strings.TrimSpace(*req.Prefix)
+		if prefix == "" {
+			delete(doc, "prefix")
+		} else {
+			doc["prefix"] = prefix
+		}
+	}
+	if req.ProxyURL != nil {
+		proxyURL := strings.TrimSpace(*req.ProxyURL)
+		if proxyURL == "" {
+			delete(doc, "proxy_url")
+		} else {
+			doc["proxy_url"] = proxyURL
+		}
+	}
+	if len(req.Headers) > 0 {
+		nextHeaders := coreauth.ExtractCustomHeadersFromMetadata(doc)
+		if nextHeaders == nil {
+			nextHeaders = make(map[string]string)
+		}
+		for key, value := range req.Headers {
+			name := strings.TrimSpace(key)
+			if name == "" {
+				continue
+			}
+			val := strings.TrimSpace(value)
+			if val == "" {
+				delete(nextHeaders, name)
+				continue
+			}
+			nextHeaders[name] = val
+		}
+		if len(nextHeaders) == 0 {
+			delete(doc, "headers")
+		} else {
+			doc["headers"] = nextHeaders
+		}
+	}
+	if priorityPresent {
+		if !prioritySet {
+			delete(doc, "priority")
+		} else {
+			doc["priority"] = priorityValue
+		}
+	}
+	if req.Note != nil {
+		note := strings.TrimSpace(*req.Note)
+		if note == "" {
+			delete(doc, "note")
+		} else {
+			doc["note"] = note
+		}
+	}
+	if req.UserAgent != nil {
+		userAgent := strings.TrimSpace(*req.UserAgent)
+		delete(doc, "user-agent")
+		if userAgent == "" {
+			delete(doc, "user_agent")
+		} else {
+			doc["user_agent"] = userAgent
+		}
+	}
+	if req.ExcludedModels != nil {
+		models := normalizeExcludedModelsInput(*req.ExcludedModels)
+		delete(doc, "excluded-models")
+		if len(models) == 0 {
+			delete(doc, "excluded_models")
+		} else {
+			doc["excluded_models"] = models
+		}
+	}
+	if disableCoolingPresent {
+		delete(doc, "disable-cooling")
+		if !disableCoolingSet {
+			delete(doc, "disable_cooling")
+		} else {
+			doc["disable_cooling"] = disableCoolingValue
+		}
+	}
+	if req.Websockets != nil {
+		delete(doc, "websocket")
+		doc["websockets"] = *req.Websockets
+	}
+}
+
+func (h *Handler) persistPatchedAuthFile(
+	targetAuth *coreauth.Auth,
+	req patchAuthFileFieldsRequest,
+	priorityPresent bool,
+	prioritySet bool,
+	priorityValue int,
+	disableCoolingPresent bool,
+	disableCoolingSet bool,
+	disableCoolingValue bool,
+) error {
+	if h == nil || targetAuth == nil {
+		return nil
+	}
+
+	authDir := ""
+	if h.cfg != nil {
+		authDir = h.cfg.AuthDir
+	}
+	path := resolvePatchAuthFilePath(targetAuth, authDir, req.Name)
+	if path == "" {
+		return nil
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to read auth file: %w", err)
+	}
+
+	doc := make(map[string]any)
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return fmt.Errorf("invalid auth file: %w", err)
+	}
+
+	applyPatchAuthFileDocument(
+		doc,
+		req,
+		priorityPresent,
+		prioritySet,
+		priorityValue,
+		disableCoolingPresent,
+		disableCoolingSet,
+		disableCoolingValue,
+	)
+
+	updated, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to encode auth file: %w", err)
+	}
+	updated = append(updated, '\n')
+
+	if err := os.WriteFile(path, updated, 0o600); err != nil {
+		return fmt.Errorf("failed to write auth file: %w", err)
+	}
+	return nil
+}
+
 // PatchAuthFileStatus toggles the disabled state of an auth file
 func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 	if h.authManager == nil {
@@ -1171,22 +1410,14 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "disabled": *req.Disabled})
 }
 
-// PatchAuthFileFields updates editable fields (prefix, proxy_url, headers, priority, note, user_agent) of an auth file.
+// PatchAuthFileFields updates editable fields on an auth file without re-uploading the whole JSON file.
 func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 	if h.authManager == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
 		return
 	}
 
-	var req struct {
-		Name      string            `json:"name"`
-		Prefix    *string           `json:"prefix"`
-		ProxyURL  *string           `json:"proxy_url"`
-		Headers   map[string]string `json:"headers"`
-		Priority  *int              `json:"priority"`
-		Note      *string           `json:"note"`
-		UserAgent *string           `json:"user_agent"`
-	}
+	var req patchAuthFileFieldsRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
 		return
@@ -1216,6 +1447,17 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 
 	if targetAuth == nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "auth file not found"})
+		return
+	}
+
+	priorityPresent, prioritySet, priorityValue, err := parseOptionalJSONIntField(req.Priority)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	disableCoolingPresent, disableCoolingSet, disableCoolingValue, err := parseOptionalJSONBoolField(req.DisableCooling)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
@@ -1322,7 +1564,7 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 			changed = true
 		}
 	}
-	if req.Priority != nil || req.Note != nil || req.UserAgent != nil {
+	if priorityPresent || req.Note != nil || req.UserAgent != nil || disableCoolingPresent || req.Websockets != nil {
 		if targetAuth.Metadata == nil {
 			targetAuth.Metadata = make(map[string]any)
 		}
@@ -1330,13 +1572,13 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 			targetAuth.Attributes = make(map[string]string)
 		}
 
-		if req.Priority != nil {
-			if *req.Priority == 0 {
+		if priorityPresent {
+			if !prioritySet {
 				delete(targetAuth.Metadata, "priority")
 				delete(targetAuth.Attributes, "priority")
 			} else {
-				targetAuth.Metadata["priority"] = *req.Priority
-				targetAuth.Attributes["priority"] = strconv.Itoa(*req.Priority)
+				targetAuth.Metadata["priority"] = priorityValue
+				targetAuth.Attributes["priority"] = strconv.Itoa(priorityValue)
 			}
 		}
 		if req.Note != nil {
@@ -1365,6 +1607,34 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 				delete(targetAuth.Attributes, "user-agent")
 			}
 		}
+		if disableCoolingPresent {
+			delete(targetAuth.Metadata, "disable-cooling")
+			if disableCoolingSet {
+				targetAuth.Metadata["disable_cooling"] = disableCoolingValue
+			} else {
+				delete(targetAuth.Metadata, "disable_cooling")
+			}
+		}
+		if req.Websockets != nil {
+			delete(targetAuth.Metadata, "websocket")
+			targetAuth.Metadata["websockets"] = *req.Websockets
+			targetAuth.Attributes["websockets"] = strconv.FormatBool(*req.Websockets)
+		}
+		changed = true
+	}
+	if req.ExcludedModels != nil {
+		if targetAuth.Metadata == nil {
+			targetAuth.Metadata = make(map[string]any)
+		}
+		normalizedExcludedModels := normalizeExcludedModelsInput(*req.ExcludedModels)
+		delete(targetAuth.Metadata, "excluded-models")
+		if len(normalizedExcludedModels) == 0 {
+			delete(targetAuth.Metadata, "excluded_models")
+		} else {
+			targetAuth.Metadata["excluded_models"] = normalizedExcludedModels
+		}
+		resetExcludedModelsAttributes(targetAuth)
+		synthesizer.ApplyAuthExcludedModelsMeta(targetAuth, h.cfg, extractExcludedModelsFromMetadata(targetAuth.Metadata), "oauth")
 		changed = true
 	}
 
@@ -1372,15 +1642,210 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "no fields to update"})
 		return
 	}
-
-	targetAuth.UpdatedAt = time.Now()
-
-	if _, err := h.authManager.Update(ctx, targetAuth); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to update auth: %v", err)})
+	if err := h.persistPatchedAuthFile(
+		targetAuth,
+		req,
+		priorityPresent,
+		prioritySet,
+		priorityValue,
+		disableCoolingPresent,
+		disableCoolingSet,
+		disableCoolingValue,
+	); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	targetAuth.UpdatedAt = time.Now()
+
+	updatedAuth, err := h.authManager.Update(ctx, targetAuth)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to update auth: %v", err)})
+		return
+	}
+	h.syncVirtualAuthChildren(ctx, updatedAuth)
+
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "file": h.buildAuthFileEntry(updatedAuth)})
+}
+
+func parseOptionalJSONIntField(raw json.RawMessage) (present bool, set bool, value int, err error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
+		return false, false, 0, nil
+	}
+	present = true
+	if bytes.Equal(trimmed, []byte("null")) {
+		return true, false, 0, nil
+	}
+
+	var parsedInt int
+	if err = json.Unmarshal(trimmed, &parsedInt); err == nil {
+		return true, true, parsedInt, nil
+	}
+
+	var parsedText string
+	if err = json.Unmarshal(trimmed, &parsedText); err != nil {
+		return true, false, 0, fmt.Errorf("priority must be an integer")
+	}
+	parsedText = strings.TrimSpace(parsedText)
+	if parsedText == "" {
+		return true, false, 0, nil
+	}
+	parsedInt, err = strconv.Atoi(parsedText)
+	if err != nil {
+		return true, false, 0, fmt.Errorf("priority must be an integer")
+	}
+	return true, true, parsedInt, nil
+}
+
+func parseOptionalJSONBoolField(raw json.RawMessage) (present bool, set bool, value bool, err error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
+		return false, false, false, nil
+	}
+	present = true
+	if bytes.Equal(trimmed, []byte("null")) {
+		return true, false, false, nil
+	}
+
+	if err = json.Unmarshal(trimmed, &value); err == nil {
+		return true, true, value, nil
+	}
+
+	var parsedText string
+	if err = json.Unmarshal(trimmed, &parsedText); err != nil {
+		return true, false, false, fmt.Errorf("disable_cooling must be true, false, or empty")
+	}
+	parsedText = strings.TrimSpace(parsedText)
+	if parsedText == "" {
+		return true, false, false, nil
+	}
+	value, err = strconv.ParseBool(parsedText)
+	if err != nil {
+		return true, false, false, fmt.Errorf("disable_cooling must be true, false, or empty")
+	}
+	return true, true, value, nil
+}
+
+func normalizeExcludedModelsInput(models []string) []string {
+	if len(models) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(models))
+	normalized := make([]string, 0, len(models))
+	for _, model := range models {
+		key := strings.ToLower(strings.TrimSpace(model))
+		if key == "" {
+			continue
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		normalized = append(normalized, key)
+	}
+	sort.Strings(normalized)
+	return normalized
+}
+
+func extractExcludedModelsFromMetadata(metadata map[string]any) []string {
+	if metadata == nil {
+		return nil
+	}
+
+	var raw any
+	switch {
+	case metadata["excluded_models"] != nil:
+		raw = metadata["excluded_models"]
+	case metadata["excluded-models"] != nil:
+		raw = metadata["excluded-models"]
+	default:
+		return nil
+	}
+
+	switch values := raw.(type) {
+	case []string:
+		return normalizeExcludedModelsInput(values)
+	case []any:
+		items := make([]string, 0, len(values))
+		for _, value := range values {
+			items = append(items, fmt.Sprintf("%v", value))
+		}
+		return normalizeExcludedModelsInput(items)
+	case string:
+		return normalizeExcludedModelsInput(strings.Split(values, ","))
+	default:
+		return nil
+	}
+}
+
+func resetExcludedModelsAttributes(auth *coreauth.Auth) {
+	if auth == nil || auth.Attributes == nil {
+		return
+	}
+	delete(auth.Attributes, "excluded_models")
+	delete(auth.Attributes, "excluded_models_hash")
+}
+
+func (h *Handler) syncVirtualAuthChildren(ctx context.Context, primary *coreauth.Auth) {
+	if h == nil || h.authManager == nil || primary == nil {
+		return
+	}
+	if strings.TrimSpace(primary.Attributes["gemini_virtual_primary"]) == "" {
+		return
+	}
+
+	perAccountExcluded := extractExcludedModelsFromMetadata(primary.Metadata)
+	for _, auth := range h.authManager.List() {
+		if auth == nil {
+			continue
+		}
+		if strings.TrimSpace(auth.Attributes["gemini_virtual_parent"]) != primary.ID {
+			continue
+		}
+		auth.Prefix = primary.Prefix
+		auth.ProxyURL = primary.ProxyURL
+		auth.UpdatedAt = primary.UpdatedAt
+		if auth.Attributes == nil {
+			auth.Attributes = make(map[string]string)
+		}
+		if auth.Metadata == nil {
+			auth.Metadata = make(map[string]any)
+		}
+
+		if priority := strings.TrimSpace(primary.Attributes["priority"]); priority != "" {
+			auth.Attributes["priority"] = priority
+		} else {
+			delete(auth.Attributes, "priority")
+		}
+		if note := strings.TrimSpace(primary.Attributes["note"]); note != "" {
+			auth.Attributes["note"] = note
+		} else {
+			delete(auth.Attributes, "note")
+		}
+
+		for key := range auth.Attributes {
+			if strings.HasPrefix(key, "header:") {
+				delete(auth.Attributes, key)
+			}
+		}
+		for key, value := range primary.Attributes {
+			if strings.HasPrefix(key, "header:") && strings.TrimSpace(value) != "" {
+				auth.Attributes[key] = value
+			}
+		}
+
+		delete(auth.Metadata, "disable-cooling")
+		if value, ok := primary.Metadata["disable_cooling"]; ok {
+			auth.Metadata["disable_cooling"] = value
+		} else {
+			delete(auth.Metadata, "disable_cooling")
+		}
+
+		resetExcludedModelsAttributes(auth)
+		synthesizer.ApplyAuthExcludedModelsMeta(auth, h.cfg, perAccountExcluded, "oauth")
+		_, _ = h.authManager.Update(ctx, auth)
+	}
 }
 
 func (h *Handler) disableAuth(ctx context.Context, id string) {

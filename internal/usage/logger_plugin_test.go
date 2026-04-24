@@ -30,6 +30,14 @@ func TestRequestStatisticsRecordIncludesLatency(t *testing.T) {
 	if details[0].LatencyMs != 1500 {
 		t.Fatalf("latency_ms = %d, want 1500", details[0].LatencyMs)
 	}
+
+	model := snapshot.APIs["test-key"].Models["gpt-5.4"]
+	if model.TokenBreakdown.InputTokens != 10 || model.TokenBreakdown.OutputTokens != 20 || model.TokenBreakdown.TotalTokens != 30 {
+		t.Fatalf("token breakdown = %+v, want input=10 output=20 total=30", model.TokenBreakdown)
+	}
+	if model.Latency.Count != 1 || model.Latency.TotalMs != 1500 || model.Latency.MinMs != 1500 || model.Latency.MaxMs != 1500 {
+		t.Fatalf("latency summary = %+v, want count=1 total=min=max=1500", model.Latency)
+	}
 }
 
 func TestRequestStatisticsMergeSnapshotDedupIgnoresLatency(t *testing.T) {
@@ -145,8 +153,10 @@ func TestRequestStatisticsMergeSnapshotSummaryOnly(t *testing.T) {
 				TotalTokens:   500,
 				Models: map[string]ModelSnapshot{
 					"gpt-5.4": {
-						TotalRequests: 5,
-						TotalTokens:   500,
+						TotalRequests:  5,
+						TotalTokens:    500,
+						TokenBreakdown: TokenStats{InputTokens: 200, OutputTokens: 250, ReasoningTokens: 50, TotalTokens: 500},
+						Latency:        LatencyStats{Count: 4, TotalMs: 1600, MinMs: 250, MaxMs: 550},
 					},
 				},
 			},
@@ -192,6 +202,12 @@ func TestRequestStatisticsMergeSnapshotSummaryOnly(t *testing.T) {
 	if model.TotalRequests != 5 || model.TotalTokens != 500 {
 		t.Fatalf("model totals = %+v, want requests=5 tokens=500", model)
 	}
+	if model.TokenBreakdown.InputTokens != 200 || model.TokenBreakdown.OutputTokens != 250 || model.TokenBreakdown.ReasoningTokens != 50 || model.TokenBreakdown.TotalTokens != 500 {
+		t.Fatalf("token breakdown = %+v, want input=200 output=250 reasoning=50 total=500", model.TokenBreakdown)
+	}
+	if model.Latency.Count != 4 || model.Latency.TotalMs != 1600 || model.Latency.MinMs != 250 || model.Latency.MaxMs != 550 {
+		t.Fatalf("latency summary = %+v, want count=4 total=1600 min=250 max=550", model.Latency)
+	}
 	if len(model.Details) != 0 {
 		t.Fatalf("details len = %d, want 0", len(model.Details))
 	}
@@ -207,5 +223,46 @@ func TestRequestStatisticsMergeSnapshotSummaryOnly(t *testing.T) {
 	}
 	if got := snapshot.TokensByHour["13"]; got != 500 {
 		t.Fatalf("tokens_by_hour[13] = %d, want 500", got)
+	}
+}
+
+func TestSnapshotSummaryOmitsDetailsButPreservesAggregates(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Record(context.Background(), coreusage.Record{
+		APIKey:      "summary-test",
+		Model:       "gpt-5.4",
+		RequestedAt: time.Date(2026, 4, 10, 13, 0, 0, 0, time.UTC),
+		Latency:     1200 * time.Millisecond,
+		Detail: coreusage.Detail{
+			InputTokens:     10,
+			OutputTokens:    20,
+			ReasoningTokens: 5,
+			CachedTokens:    2,
+			TotalTokens:     35,
+		},
+	})
+	stats.Record(context.Background(), coreusage.Record{
+		APIKey:      "summary-test",
+		Model:       "gpt-5.4",
+		RequestedAt: time.Date(2026, 4, 10, 13, 1, 0, 0, time.UTC),
+		Latency:     800 * time.Millisecond,
+		Detail: coreusage.Detail{
+			InputTokens:  3,
+			OutputTokens: 7,
+			TotalTokens:  10,
+		},
+	})
+
+	snapshot := stats.SnapshotSummary()
+	model := snapshot.APIs["summary-test"].Models["gpt-5.4"]
+
+	if len(model.Details) != 0 {
+		t.Fatalf("details len = %d, want 0", len(model.Details))
+	}
+	if model.TokenBreakdown.InputTokens != 13 || model.TokenBreakdown.OutputTokens != 27 || model.TokenBreakdown.ReasoningTokens != 5 || model.TokenBreakdown.CachedTokens != 2 || model.TokenBreakdown.TotalTokens != 45 {
+		t.Fatalf("token breakdown = %+v, want input=13 output=27 reasoning=5 cached=2 total=45", model.TokenBreakdown)
+	}
+	if model.Latency.Count != 2 || model.Latency.TotalMs != 2000 || model.Latency.MinMs != 800 || model.Latency.MaxMs != 1200 {
+		t.Fatalf("latency summary = %+v, want count=2 total=2000 min=800 max=1200", model.Latency)
 	}
 }
