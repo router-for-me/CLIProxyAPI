@@ -35,6 +35,8 @@ type RoundRobinSelector struct {
 // rolling-window subscription caps (e.g. chat message limits).
 type FillFirstSelector struct{}
 
+var authPriorityParseCache sync.Map
+
 type blockReason int
 
 const (
@@ -121,10 +123,18 @@ func authPriority(auth *Auth) int {
 	if raw == "" {
 		return 0
 	}
+	if cached, ok := authPriorityParseCache.Load(raw); ok {
+		if priority, okPriority := cached.(int); okPriority {
+			return priority
+		}
+		authPriorityParseCache.Delete(raw)
+	}
 	parsed, err := strconv.Atoi(raw)
 	if err != nil {
+		authPriorityParseCache.Store(raw, 0)
 		return 0
 	}
+	authPriorityParseCache.Store(raw, parsed)
 	return parsed
 }
 

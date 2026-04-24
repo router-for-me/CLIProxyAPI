@@ -89,6 +89,21 @@ func TestRoundRobinSelectorPick_PriorityBuckets(t *testing.T) {
 	}
 }
 
+func TestAuthPriorityCachesTrimmedValues(t *testing.T) {
+	authPriorityParseCache = sync.Map{}
+
+	if got := authPriority(&Auth{Attributes: map[string]string{"priority": " 10 "}}); got != 10 {
+		t.Fatalf("authPriority(trimmed) = %d, want 10", got)
+	}
+	if got := authPriority(&Auth{Attributes: map[string]string{"priority": "bad"}}); got != 0 {
+		t.Fatalf("authPriority(invalid) = %d, want 0", got)
+	}
+	authPriorityParseCache.Store("10", "corrupt")
+	if got := authPriority(&Auth{Attributes: map[string]string{"priority": "10"}}); got != 10 {
+		t.Fatalf("authPriority(corrupt cache) = %d, want 10", got)
+	}
+}
+
 func TestFillFirstSelectorPick_PriorityFallbackCooldown(t *testing.T) {
 	t.Parallel()
 
