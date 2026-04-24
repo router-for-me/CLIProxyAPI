@@ -1,9 +1,12 @@
 package cliproxy
 
 import (
+	"context"
 	"strings"
 	"testing"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 )
@@ -14,6 +17,14 @@ func TestRegisterModelsForAuth_UsesPreMergedExcludedModelsAttribute(t *testing.T
 			OAuthExcludedModels: map[string][]string{
 				"gemini-cli": {"gemini-2.5-pro"},
 			},
+		},
+		geminiCLIModelDiscoverer: func(context.Context, *coreauth.Auth) (*executor.GeminiCLIDiscoveryResult, error) {
+			return &executor.GeminiCLIDiscoveryResult{
+				AvailableModels: []*registry.ModelInfo{
+					{ID: "gemini-2.5-pro", Object: "model", OwnedBy: "gemini-cli", Type: "gemini-cli"},
+					{ID: "gemini-2.5-flash", Object: "model", OwnedBy: "gemini-cli", Type: "gemini-cli"},
+				},
+			}, nil
 		},
 	}
 	auth := &coreauth.Auth{

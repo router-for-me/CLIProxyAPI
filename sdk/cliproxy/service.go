@@ -114,6 +114,9 @@ type Service struct {
 
 	// circuitAutoRemoveMu serializes auto-removal mutation for config/runtime state.
 	circuitAutoRemoveMu sync.Mutex
+
+	// geminiCLIModelDiscoverer resolves live Gemini CLI models for one auth/project.
+	geminiCLIModelDiscoverer func(context.Context, *coreauth.Auth) (*executor.GeminiCLIDiscoveryResult, error)
 }
 
 // RegisterUsagePlugin registers a usage plugin on the global usage manager.
@@ -987,7 +990,17 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		}
 		models = applyExcludedModels(models, excluded)
 	case "gemini-cli":
-		models = registry.GetGeminiCLIModels()
+		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+		discovery, err := s.discoverGeminiCLIModels(ctx, a)
+		cancel()
+		if err != nil {
+			log.Warnf("cliproxy: gemini-cli discovery failed for auth %s: %v", a.ID, err)
+			break
+		}
+		models = discovery.AvailableModels
+		if len(models) == 0 {
+			log.Infof("cliproxy: gemini-cli discovery found no available models for auth %s project %s", a.ID, discovery.ProjectID)
+		}
 		models = applyExcludedModels(models, excluded)
 	case "aistudio":
 		models = registry.GetAIStudioModels()
@@ -1143,6 +1156,13 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 	}
 
 	GlobalModelRegistry().UnregisterClient(a.ID)
+}
+
+func (s *Service) discoverGeminiCLIModels(ctx context.Context, auth *coreauth.Auth) (*executor.GeminiCLIDiscoveryResult, error) {
+	if s != nil && s.geminiCLIModelDiscoverer != nil {
+		return s.geminiCLIModelDiscoverer(ctx, auth)
+	}
+	return executor.DiscoverGeminiCLIModels(ctx, s.cfg, auth)
 }
 
 // refreshModelRegistrationForAuth re-applies the latest model registration for
