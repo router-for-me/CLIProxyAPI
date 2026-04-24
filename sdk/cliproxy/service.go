@@ -5,9 +5,13 @@ package cliproxy
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -16,6 +20,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/wsrelay"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
@@ -899,11 +904,14 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		}
 		models = applyExcludedModels(models, excluded)
 	case "codex":
-		codexPlanType := ""
-		if a.Attributes != nil {
-			codexPlanType = strings.TrimSpace(a.Attributes["plan_type"])
+		codexAttrs := a.Attributes
+		if _, ok := codexQuotaWindowCount(codexAttrs); !ok && !isAPIKeyAuthKind(authKind) {
+			if liveAttrs := s.codexUsageEntitlementAttributes(a); len(liveAttrs) > 0 {
+				codexAttrs = mergeStringAttrs(codexAttrs, liveAttrs)
+			}
 		}
-		switch strings.ToLower(codexPlanType) {
+		codexPlanType := effectiveCodexPlanType(authKind, codexAttrs)
+		switch codexPlanType {
 		case "pro":
 			models = registry.GetCodexProModels()
 		case "plus":
@@ -913,7 +921,11 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		case "free":
 			models = registry.GetCodexFreeModels()
 		default:
-			models = registry.GetCodexProModels()
+			if isAPIKeyAuthKind(authKind) {
+				models = registry.GetCodexProModels()
+			} else {
+				models = registry.GetCodexFreeModels()
+			}
 		}
 		if entry := s.resolveConfigCodexKey(a); entry != nil {
 			if len(entry.Models) > 0 {
@@ -1199,6 +1211,230 @@ func (s *Service) resolveConfigCodexKey(auth *coreauth.Auth) *config.CodexKey {
 		}
 	}
 	return nil
+}
+
+const (
+	codexUsageURL          = "https://chatgpt.com/backend-api/wham/usage"
+	codexUsageProbeTimeout = 3 * time.Second
+)
+
+func (s *Service) codexUsageEntitlementAttributes(auth *coreauth.Auth) map[string]string {
+	accessToken := codexAccessToken(auth)
+	if accessToken == "" {
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), codexUsageProbeTimeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, codexUsageURL, nil)
+	if err != nil {
+		return nil
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("User-Agent", "CLIProxyAPI")
+
+	httpClient := &http.Client{Timeout: codexUsageProbeTimeout}
+	s.applyProxyToHTTPClient(httpClient, auth)
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil
+	}
+	return codexUsageEntitlementAttrsFromJSON(body)
+}
+
+func (s *Service) applyProxyToHTTPClient(httpClient *http.Client, auth *coreauth.Auth) {
+	if httpClient == nil {
+		return
+	}
+	var sdkCfg config.SDKConfig
+	if s != nil && s.cfg != nil {
+		sdkCfg = s.cfg.SDKConfig
+	}
+	if auth != nil && strings.TrimSpace(auth.ProxyURL) != "" {
+		sdkCfg.ProxyURL = strings.TrimSpace(auth.ProxyURL)
+	}
+	_ = util.SetProxy(&sdkCfg, httpClient)
+}
+
+func codexAccessToken(auth *coreauth.Auth) string {
+	if auth == nil || auth.Metadata == nil {
+		return ""
+	}
+	token, _ := auth.Metadata["access_token"].(string)
+	return strings.TrimSpace(token)
+}
+
+func codexUsageEntitlementAttrsFromJSON(body []byte) map[string]string {
+	var payload struct {
+		PlanType  string `json:"plan_type"`
+		RateLimit struct {
+			PrimaryWindow   json.RawMessage `json:"primary_window"`
+			SecondaryWindow json.RawMessage `json:"secondary_window"`
+		} `json:"rate_limit"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil
+	}
+
+	attrs := make(map[string]string, 2)
+	if planType := strings.ToLower(strings.TrimSpace(payload.PlanType)); planType != "" {
+		attrs["plan_type"] = planType
+	}
+	windowCount := 0
+	if rawJSONHasValue(payload.RateLimit.PrimaryWindow) {
+		windowCount++
+	}
+	if rawJSONHasValue(payload.RateLimit.SecondaryWindow) {
+		windowCount++
+	}
+	if windowCount > 0 {
+		attrs["codex_quota_window_count"] = strconv.Itoa(windowCount)
+	}
+	if len(attrs) == 0 {
+		return nil
+	}
+	return attrs
+}
+
+func rawJSONHasValue(raw json.RawMessage) bool {
+	value := strings.TrimSpace(string(raw))
+	return value != "" && value != "null" && value != "{}" && value != "[]"
+}
+
+func mergeStringAttrs(base map[string]string, overlay map[string]string) map[string]string {
+	if len(overlay) == 0 {
+		return base
+	}
+	merged := make(map[string]string, len(base)+len(overlay))
+	for key, value := range base {
+		merged[key] = value
+	}
+	for key, value := range overlay {
+		if strings.TrimSpace(value) != "" {
+			merged[key] = value
+		}
+	}
+	return merged
+}
+
+func effectiveCodexPlanType(authKind string, attrs map[string]string) string {
+	planType := ""
+	if attrs != nil {
+		planType = strings.ToLower(strings.TrimSpace(attrs["plan_type"]))
+	}
+
+	if windowCount, ok := codexQuotaWindowCount(attrs); ok {
+		if windowCount <= 1 {
+			return "free"
+		}
+		if windowCount >= 2 && (planType == "" || planType == "free") {
+			// Two quota windows (short-term + weekly) are the stable paid-entitlement signal.
+			return "plus"
+		}
+	}
+
+	if planType != "" {
+		return planType
+	}
+	if isAPIKeyAuthKind(authKind) {
+		return "pro"
+	}
+	return "free"
+}
+
+func isAPIKeyAuthKind(authKind string) bool {
+	key := strings.ToLower(strings.TrimSpace(authKind))
+	key = strings.ReplaceAll(key, "_", "")
+	key = strings.ReplaceAll(key, "-", "")
+	return key == "apikey"
+}
+
+func codexQuotaWindowCount(attrs map[string]string) (int, bool) {
+	if len(attrs) == 0 {
+		return 0, false
+	}
+
+	for _, key := range []string{"codex_quota_window_count", "quota_window_count"} {
+		if count, ok := parseCodexQuotaWindowCount(attrs[key]); ok {
+			return count, true
+		}
+	}
+	for _, key := range []string{"codex_quota_windows", "quota_windows"} {
+		if count := countCodexQuotaWindowList(attrs[key]); count > 0 {
+			return count, true
+		}
+	}
+
+	primary := hasAnyCodexQuotaWindow(attrs, "codex_quota_primary_window", "quota_primary_window", "primary_window")
+	secondary := hasAnyCodexQuotaWindow(attrs, "codex_quota_secondary_window", "quota_secondary_window", "secondary_window")
+	if primary || secondary {
+		count := 0
+		if primary {
+			count++
+		}
+		if secondary {
+			count++
+		}
+		return count, true
+	}
+	return 0, false
+}
+
+func parseCodexQuotaWindowCount(value string) (int, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, false
+	}
+	if count, err := strconv.Atoi(value); err == nil && count > 0 {
+		return count, true
+	}
+	if count := countCodexQuotaWindowList(value); count > 0 {
+		return count, true
+	}
+	return 0, false
+}
+
+func countCodexQuotaWindowList(value string) int {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0
+	}
+	parts := strings.FieldsFunc(value, func(r rune) bool {
+		return r == ',' || r == ';' || r == '|'
+	})
+	if len(parts) == 0 {
+		return 0
+	}
+	count := 0
+	for _, part := range parts {
+		item := strings.Trim(part, " \t\r\n[]\"'")
+		if item != "" {
+			count++
+		}
+	}
+	return count
+}
+
+func hasAnyCodexQuotaWindow(attrs map[string]string, keys ...string) bool {
+	for _, key := range keys {
+		if strings.TrimSpace(attrs[key]) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Service) oauthExcludedModels(provider, authKind string) []string {

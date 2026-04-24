@@ -168,6 +168,7 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 				}
 			}
 		}
+		applyCodexEntitlementMetadataAttrs(a, metadata)
 	}
 	if provider == "gemini-cli" {
 		if virtuals := SynthesizeGeminiVirtualAuths(a, metadata, now); len(virtuals) > 0 {
@@ -181,6 +182,109 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 		}
 	}
 	return []*coreauth.Auth{a}
+}
+
+// applyCodexEntitlementMetadataAttrs copies active Codex quota/plan signals from
+// auth file metadata into attributes used for model registration.
+func applyCodexEntitlementMetadataAttrs(a *coreauth.Auth, metadata map[string]any) {
+	if a == nil || metadata == nil {
+		return
+	}
+	if a.Attributes == nil {
+		a.Attributes = make(map[string]string)
+	}
+
+	if planType := metadataAttrString(metadata["plan_type"]); planType != "" {
+		a.Attributes["plan_type"] = strings.ToLower(planType)
+	}
+
+	for _, key := range []string{
+		"codex_quota_window_count",
+		"quota_window_count",
+		"codex_quota_windows",
+		"quota_windows",
+		"codex_quota_primary_window",
+		"quota_primary_window",
+		"primary_window",
+		"codex_quota_secondary_window",
+		"quota_secondary_window",
+		"secondary_window",
+	} {
+		if value := metadataAttrString(metadata[key]); value != "" {
+			a.Attributes[key] = value
+		}
+	}
+
+	if count, ok := codexRateLimitWindowCount(metadata["rate_limit"]); ok {
+		a.Attributes["codex_quota_window_count"] = strconv.Itoa(count)
+	}
+}
+
+func codexRateLimitWindowCount(raw any) (int, bool) {
+	rateLimit, ok := raw.(map[string]any)
+	if !ok || len(rateLimit) == 0 {
+		return 0, false
+	}
+	count := 0
+	if metadataAttrString(rateLimit["primary_window"]) != "" {
+		count++
+	}
+	if metadataAttrString(rateLimit["secondary_window"]) != "" {
+		count++
+	}
+	if count == 0 {
+		return 0, false
+	}
+	return count, true
+}
+
+func metadataAttrString(raw any) string {
+	switch v := raw.(type) {
+	case nil:
+		return ""
+	case string:
+		return strings.TrimSpace(v)
+	case bool:
+		return strconv.FormatBool(v)
+	case float64:
+		if v == float64(int64(v)) {
+			return strconv.FormatInt(int64(v), 10)
+		}
+		return strconv.FormatFloat(v, 'f', -1, 64)
+	case float32:
+		return strconv.FormatFloat(float64(v), 'f', -1, 32)
+	case int:
+		return strconv.Itoa(v)
+	case int64:
+		return strconv.FormatInt(v, 10)
+	case []any:
+		parts := make([]string, 0, len(v))
+		for _, item := range v {
+			if text := metadataAttrString(item); text != "" {
+				parts = append(parts, text)
+			}
+		}
+		return strings.Join(parts, ",")
+	case []string:
+		parts := make([]string, 0, len(v))
+		for _, item := range v {
+			if text := strings.TrimSpace(item); text != "" {
+				parts = append(parts, text)
+			}
+		}
+		return strings.Join(parts, ",")
+	case map[string]any:
+		if len(v) == 0 {
+			return ""
+		}
+		data, err := json.Marshal(v)
+		if err != nil {
+			return "present"
+		}
+		return string(data)
+	default:
+		return strings.TrimSpace(fmt.Sprint(v))
+	}
 }
 
 // SynthesizeGeminiVirtualAuths creates virtual Auth entries for multi-project Gemini credentials.

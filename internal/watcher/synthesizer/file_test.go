@@ -906,6 +906,56 @@ func TestFileSynthesizer_Synthesize_NoteParsing(t *testing.T) {
 	}
 }
 
+func TestFileSynthesizer_Synthesize_CodexCopiesQuotaWindowSignals(t *testing.T) {
+	tempDir := t.TempDir()
+
+	authData := map[string]any{
+		"type":      "codex",
+		"email":     "codex@example.com",
+		"plan_type": "free",
+		"rate_limit": map[string]any{
+			"primary_window": map[string]any{
+				"limit_window_seconds": 604800,
+			},
+			"secondary_window": map[string]any{
+				"limit_window_seconds": 18000,
+			},
+		},
+	}
+	data, _ := json.Marshal(authData)
+	err := os.WriteFile(filepath.Join(tempDir, "codex-auth.json"), data, 0644)
+	if err != nil {
+		t.Fatalf("failed to write auth file: %v", err)
+	}
+
+	synth := NewFileSynthesizer()
+	ctx := &SynthesisContext{
+		Config:      &config.Config{},
+		AuthDir:     tempDir,
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("expected 1 auth, got %d", len(auths))
+	}
+
+	auth := auths[0]
+	if auth.Provider != "codex" {
+		t.Fatalf("expected codex provider, got %q", auth.Provider)
+	}
+	if got := auth.Attributes["plan_type"]; got != "free" {
+		t.Fatalf("expected plan_type free, got %q", got)
+	}
+	if got := auth.Attributes["codex_quota_window_count"]; got != "2" {
+		t.Fatalf("expected codex_quota_window_count 2, got %q", got)
+	}
+}
+
 func TestFileSynthesizer_Synthesize_MultiProjectGeminiWithNote(t *testing.T) {
 	tempDir := t.TempDir()
 
