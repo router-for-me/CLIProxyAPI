@@ -36,6 +36,14 @@ type runtimeStateManager interface {
 	Close(ctx context.Context) error
 }
 
+type circuitBreakerDeletionStore interface {
+	Insert(ctx context.Context, record *mongostate.CircuitBreakerDeletionRecord) error
+	UpsertPending(ctx context.Context, record *mongostate.CircuitBreakerDeletionRecord) (mongostate.CircuitBreakerDeletionRecord, error)
+	GetByID(ctx context.Context, id string) (mongostate.CircuitBreakerDeletionRecord, error)
+	ApplyAction(ctx context.Context, id string, action mongostate.CircuitBreakerDeletionAction) (mongostate.CircuitBreakerDeletionRecord, error)
+	Close(ctx context.Context) error
+}
+
 // Service wraps the proxy server lifecycle so external programs can embed the CLI proxy.
 // It manages the complete lifecycle including authentication, file watching, HTTP server,
 // and integration with various AI service providers.
@@ -106,8 +114,8 @@ type Service struct {
 	// wsGateway manages websocket Gemini providers.
 	wsGateway *wsrelay.Manager
 
-	// circuitBreakerDeletionStore records automatic model removal audits.
-	circuitBreakerDeletionStore *mongostate.CircuitBreakerDeletionStore
+	// circuitBreakerDeletionStore records pending/terminal circuit-breaker deletion audits.
+	circuitBreakerDeletionStore circuitBreakerDeletionStore
 
 	// circuitBreakerFailureStore records auth+model failure counts used by routing.
 	circuitBreakerFailureStore *mongostate.CircuitBreakerFailureStore
@@ -615,6 +623,9 @@ func (s *Service) Run(ctx context.Context) error {
 
 	// handlers no longer depend on legacy clients; pass nil slice initially
 	s.server = api.NewServer(s.cfg, s.coreManager, s.accessManager, s.configPath, s.serverOptions...)
+	if s.server != nil {
+		s.server.SetCircuitBreakerDeletionActionHandler(s)
+	}
 
 	if s.authManager == nil {
 		s.authManager = newDefaultAuthManager()

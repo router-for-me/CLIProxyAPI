@@ -2,6 +2,7 @@ package mongostate
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -16,7 +17,15 @@ import (
 const (
 	DefaultCircuitBreakerDeletionCollection = "circuit_breaker_model_deletions"
 	DefaultCircuitBreakerDeletionTTLDays    = 30
+
+	CircuitBreakerDeletionStatusPending   = "pending"
+	CircuitBreakerDeletionStatusDeleted   = "deleted"
+	CircuitBreakerDeletionStatusFailed    = "failed"
+	CircuitBreakerDeletionStatusDismissed = "dismissed"
 )
+
+var ErrCircuitBreakerDeletionNotFound = errors.New("circuit breaker deletion record not found")
+var ErrCircuitBreakerDeletionConflict = errors.New("circuit breaker deletion record is not actionable")
 
 // CircuitBreakerDeletionRecord captures one automatic model-removal action
 // triggered by circuit breaker OPEN cycles.
@@ -26,15 +35,21 @@ type CircuitBreakerDeletionRecord struct {
 	Provider            string             `bson:"provider"`
 	Model               string             `bson:"model"`
 	NormalizedModel     string             `bson:"normalized_model"`
+	DedupeKey           string             `bson:"dedupe_key,omitempty"`
+	Status              string             `bson:"status"`
 	OpenCycles          int                `bson:"open_cycles"`
 	FailureCount        int                `bson:"failure_count"`
 	ConsecutiveFailures int                `bson:"consecutive_failures"`
 	OpenedAt            time.Time          `bson:"opened_at"`
 	RecoveryAt          *time.Time         `bson:"recovery_at,omitempty"`
+	ActionAt            *time.Time         `bson:"action_at,omitempty"`
+	ActionBy            string             `bson:"action_by,omitempty"`
+	ActionError         string             `bson:"action_error,omitempty"`
 	Persisted           bool               `bson:"persisted"`
 	AlreadyRemoved      bool               `bson:"already_removed"`
 	RuntimeSuspended    bool               `bson:"runtime_suspended"`
 	PersistError        string             `bson:"persist_error,omitempty"`
+	UpdatedAt           time.Time          `bson:"updated_at"`
 	CreatedAt           time.Time          `bson:"created_at"`
 }
 
@@ -45,27 +60,44 @@ type CircuitBreakerDeletionItem struct {
 	Provider            string     `json:"provider"`
 	Model               string     `json:"model"`
 	NormalizedModel     string     `json:"normalized_model"`
+	DedupeKey           string     `json:"dedupe_key,omitempty"`
+	Status              string     `json:"status"`
 	OpenCycles          int        `json:"open_cycles"`
 	FailureCount        int        `json:"failure_count"`
 	ConsecutiveFailures int        `json:"consecutive_failures"`
 	OpenedAt            time.Time  `json:"opened_at"`
 	RecoveryAt          *time.Time `json:"recovery_at,omitempty"`
+	ActionAt            *time.Time `json:"action_at,omitempty"`
+	ActionBy            string     `json:"action_by,omitempty"`
+	ActionError         string     `json:"action_error,omitempty"`
 	Persisted           bool       `json:"persisted"`
 	AlreadyRemoved      bool       `json:"already_removed"`
 	RuntimeSuspended    bool       `json:"runtime_suspended"`
 	PersistError        string     `json:"persist_error,omitempty"`
+	UpdatedAt           time.Time  `json:"updated_at"`
 	CreatedAt           time.Time  `json:"created_at"`
 }
 
 // CircuitBreakerDeletionQuery defines filters and pagination for audit query.
 type CircuitBreakerDeletionQuery struct {
+	ID       string
 	Provider string
 	AuthID   string
 	Model    string
+	Status   string
 	Start    time.Time
 	End      time.Time
 	Page     int
 	PageSize int
+}
+
+type CircuitBreakerDeletionAction struct {
+	Status           string
+	ActionBy         string
+	ActionError      string
+	Persisted        bool
+	AlreadyRemoved   bool
+	RuntimeSuspended bool
 }
 
 // CircuitBreakerDeletionQueryResult is the paged query result.
@@ -86,6 +118,44 @@ type CircuitBreakerDeletionStore struct {
 // CircuitBreakerDeletionQuerier describes the query capability required by management APIs.
 type CircuitBreakerDeletionQuerier interface {
 	Query(ctx context.Context, query CircuitBreakerDeletionQuery) (CircuitBreakerDeletionQueryResult, error)
+	GetByID(ctx context.Context, id string) (CircuitBreakerDeletionRecord, error)
+	ApplyAction(ctx context.Context, id string, action CircuitBreakerDeletionAction) (CircuitBreakerDeletionRecord, error)
+}
+
+// BuildCircuitBreakerDeletionDedupeKey returns the unique pending key for one provider/auth/model triplet.
+func BuildCircuitBreakerDeletionDedupeKey(provider string, authID string, normalizedModel string) string {
+	return strings.Join([]string{
+		strings.ToLower(strings.TrimSpace(provider)),
+		strings.TrimSpace(authID),
+		strings.ToLower(strings.TrimSpace(normalizedModel)),
+	}, "|")
+}
+
+// CircuitBreakerDeletionItemFromRecord converts a persisted record to its API shape.
+func CircuitBreakerDeletionItemFromRecord(doc CircuitBreakerDeletionRecord) CircuitBreakerDeletionItem {
+	return CircuitBreakerDeletionItem{
+		ID:                  doc.ID.Hex(),
+		AuthID:              doc.AuthID,
+		Provider:            doc.Provider,
+		Model:               doc.Model,
+		NormalizedModel:     doc.NormalizedModel,
+		DedupeKey:           doc.DedupeKey,
+		Status:              doc.Status,
+		OpenCycles:          doc.OpenCycles,
+		FailureCount:        doc.FailureCount,
+		ConsecutiveFailures: doc.ConsecutiveFailures,
+		OpenedAt:            doc.OpenedAt,
+		RecoveryAt:          doc.RecoveryAt,
+		ActionAt:            doc.ActionAt,
+		ActionBy:            doc.ActionBy,
+		ActionError:         doc.ActionError,
+		Persisted:           doc.Persisted,
+		AlreadyRemoved:      doc.AlreadyRemoved,
+		RuntimeSuspended:    doc.RuntimeSuspended,
+		PersistError:        doc.PersistError,
+		UpdatedAt:           doc.UpdatedAt,
+		CreatedAt:           doc.CreatedAt,
+	}
 }
 
 var (
@@ -175,6 +245,17 @@ func (s *CircuitBreakerDeletionStore) ensureIndexes(ctx context.Context, ttlDays
 			Keys:    bson.D{{Key: "provider", Value: 1}, {Key: "auth_id", Value: 1}, {Key: "model", Value: 1}, {Key: "created_at", Value: -1}},
 			Options: options.Index().SetName("query_provider_auth_model_created"),
 		},
+		{
+			Keys:    bson.D{{Key: "status", Value: 1}, {Key: "created_at", Value: -1}},
+			Options: options.Index().SetName("query_status_created"),
+		},
+		{
+			Keys: bson.D{{Key: "status", Value: 1}, {Key: "dedupe_key", Value: 1}},
+			Options: options.Index().
+				SetName("unique_pending_dedupe").
+				SetUnique(true).
+				SetPartialFilterExpression(bson.M{"status": CircuitBreakerDeletionStatusPending}),
+		},
 	}
 	if _, err := s.collection.Indexes().CreateMany(opCtx, models); err != nil {
 		return fmt.Errorf("mongostate: ensure deletion indexes: %w", err)
@@ -190,8 +271,18 @@ func (s *CircuitBreakerDeletionStore) Insert(ctx context.Context, record *Circui
 	if record == nil {
 		return fmt.Errorf("mongostate: deletion record is nil")
 	}
+	now := time.Now().UTC()
 	if record.CreatedAt.IsZero() {
-		record.CreatedAt = time.Now().UTC()
+		record.CreatedAt = now
+	}
+	if record.UpdatedAt.IsZero() {
+		record.UpdatedAt = record.CreatedAt
+	}
+	if strings.TrimSpace(record.Status) == "" {
+		record.Status = CircuitBreakerDeletionStatusPending
+	}
+	if strings.TrimSpace(record.DedupeKey) == "" && strings.TrimSpace(record.NormalizedModel) != "" {
+		record.DedupeKey = BuildCircuitBreakerDeletionDedupeKey(record.Provider, record.AuthID, record.NormalizedModel)
 	}
 
 	opCtx, cancel := context.WithTimeout(ctx, time.Duration(s.operationTimeoutSec)*time.Second)
@@ -202,6 +293,78 @@ func (s *CircuitBreakerDeletionStore) Insert(ctx context.Context, record *Circui
 		return fmt.Errorf("mongostate: insert deletion record: %w", err)
 	}
 	return nil
+}
+
+// UpsertPending inserts or refreshes one pending deletion candidate keyed by dedupe_key.
+func (s *CircuitBreakerDeletionStore) UpsertPending(ctx context.Context, record *CircuitBreakerDeletionRecord) (CircuitBreakerDeletionRecord, error) {
+	if s == nil || s.collection == nil {
+		return CircuitBreakerDeletionRecord{}, fmt.Errorf("mongostate: deletion store not initialized")
+	}
+	if record == nil {
+		return CircuitBreakerDeletionRecord{}, fmt.Errorf("mongostate: deletion record is nil")
+	}
+
+	now := time.Now().UTC()
+	if record.CreatedAt.IsZero() {
+		record.CreatedAt = now
+	}
+	record.UpdatedAt = now
+	record.Status = CircuitBreakerDeletionStatusPending
+	record.ActionAt = nil
+	record.ActionBy = ""
+	record.ActionError = ""
+	record.Persisted = false
+	record.AlreadyRemoved = false
+	record.RuntimeSuspended = false
+	record.PersistError = ""
+	if strings.TrimSpace(record.DedupeKey) == "" {
+		record.DedupeKey = BuildCircuitBreakerDeletionDedupeKey(record.Provider, record.AuthID, record.NormalizedModel)
+	}
+
+	filter := bson.M{
+		"status":     CircuitBreakerDeletionStatusPending,
+		"dedupe_key": record.DedupeKey,
+	}
+	update := bson.M{
+		"$set": bson.M{
+			"auth_id":              record.AuthID,
+			"provider":             record.Provider,
+			"model":                record.Model,
+			"normalized_model":     record.NormalizedModel,
+			"dedupe_key":           record.DedupeKey,
+			"status":               record.Status,
+			"open_cycles":          record.OpenCycles,
+			"failure_count":        record.FailureCount,
+			"consecutive_failures": record.ConsecutiveFailures,
+			"opened_at":            record.OpenedAt,
+			"recovery_at":          record.RecoveryAt,
+			"action_at":            record.ActionAt,
+			"action_by":            record.ActionBy,
+			"action_error":         record.ActionError,
+			"persisted":            record.Persisted,
+			"already_removed":      record.AlreadyRemoved,
+			"runtime_suspended":    record.RuntimeSuspended,
+			"persist_error":        record.PersistError,
+			"updated_at":           record.UpdatedAt,
+		},
+		"$setOnInsert": bson.M{
+			"created_at": record.CreatedAt,
+		},
+	}
+
+	opCtx, cancel := context.WithTimeout(ctx, time.Duration(s.operationTimeoutSec)*time.Second)
+	defer cancel()
+
+	var updated CircuitBreakerDeletionRecord
+	if err := s.collection.FindOneAndUpdate(
+		opCtx,
+		filter,
+		update,
+		options.FindOneAndUpdate().SetUpsert(true).SetReturnDocument(options.After),
+	).Decode(&updated); err != nil {
+		return CircuitBreakerDeletionRecord{}, fmt.Errorf("mongostate: upsert pending deletion record: %w", err)
+	}
+	return updated, nil
 }
 
 // Query lists deletion audit records with filters and pagination.
@@ -222,6 +385,13 @@ func (s *CircuitBreakerDeletionStore) Query(ctx context.Context, query CircuitBr
 	}
 
 	filter := bson.M{}
+	if v := strings.TrimSpace(query.ID); v != "" {
+		objectID, err := primitive.ObjectIDFromHex(v)
+		if err != nil {
+			return result, nil
+		}
+		filter["_id"] = objectID
+	}
 	if v := strings.TrimSpace(query.Provider); v != "" {
 		filter["provider"] = strings.ToLower(v)
 	}
@@ -230,6 +400,9 @@ func (s *CircuitBreakerDeletionStore) Query(ctx context.Context, query CircuitBr
 	}
 	if v := strings.TrimSpace(query.Model); v != "" {
 		filter["model"] = v
+	}
+	if v := strings.ToLower(strings.TrimSpace(query.Status)); v != "" {
+		filter["status"] = v
 	}
 	if !query.Start.IsZero() || !query.End.IsZero() {
 		timeFilter := bson.M{}
@@ -268,24 +441,7 @@ func (s *CircuitBreakerDeletionStore) Query(ctx context.Context, query CircuitBr
 		if err := cursor.Decode(&doc); err != nil {
 			return result, fmt.Errorf("mongostate: decode deletion record: %w", err)
 		}
-		item := CircuitBreakerDeletionItem{
-			ID:                  doc.ID.Hex(),
-			AuthID:              doc.AuthID,
-			Provider:            doc.Provider,
-			Model:               doc.Model,
-			NormalizedModel:     doc.NormalizedModel,
-			OpenCycles:          doc.OpenCycles,
-			FailureCount:        doc.FailureCount,
-			ConsecutiveFailures: doc.ConsecutiveFailures,
-			OpenedAt:            doc.OpenedAt,
-			RecoveryAt:          doc.RecoveryAt,
-			Persisted:           doc.Persisted,
-			AlreadyRemoved:      doc.AlreadyRemoved,
-			RuntimeSuspended:    doc.RuntimeSuspended,
-			PersistError:        doc.PersistError,
-			CreatedAt:           doc.CreatedAt,
-		}
-		items = append(items, item)
+		items = append(items, CircuitBreakerDeletionItemFromRecord(doc))
 	}
 	if err := cursor.Err(); err != nil {
 		return result, fmt.Errorf("mongostate: iterate deletion records: %w", err)
@@ -296,6 +452,73 @@ func (s *CircuitBreakerDeletionStore) Query(ctx context.Context, query CircuitBr
 	result.Page = query.Page
 	result.PageSize = query.PageSize
 	return result, nil
+}
+
+// GetByID loads one deletion record by Mongo object ID hex.
+func (s *CircuitBreakerDeletionStore) GetByID(ctx context.Context, id string) (CircuitBreakerDeletionRecord, error) {
+	if s == nil || s.collection == nil {
+		return CircuitBreakerDeletionRecord{}, fmt.Errorf("mongostate: deletion store not initialized")
+	}
+
+	objectID, err := primitive.ObjectIDFromHex(strings.TrimSpace(id))
+	if err != nil {
+		return CircuitBreakerDeletionRecord{}, ErrCircuitBreakerDeletionNotFound
+	}
+
+	opCtx, cancel := context.WithTimeout(ctx, time.Duration(s.operationTimeoutSec)*time.Second)
+	defer cancel()
+
+	var record CircuitBreakerDeletionRecord
+	if err := s.collection.FindOne(opCtx, bson.M{"_id": objectID}).Decode(&record); err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return CircuitBreakerDeletionRecord{}, ErrCircuitBreakerDeletionNotFound
+		}
+		return CircuitBreakerDeletionRecord{}, fmt.Errorf("mongostate: find deletion record by id: %w", err)
+	}
+	return record, nil
+}
+
+// ApplyAction persists one terminal action onto an existing deletion record.
+func (s *CircuitBreakerDeletionStore) ApplyAction(ctx context.Context, id string, action CircuitBreakerDeletionAction) (CircuitBreakerDeletionRecord, error) {
+	if s == nil || s.collection == nil {
+		return CircuitBreakerDeletionRecord{}, fmt.Errorf("mongostate: deletion store not initialized")
+	}
+
+	objectID, err := primitive.ObjectIDFromHex(strings.TrimSpace(id))
+	if err != nil {
+		return CircuitBreakerDeletionRecord{}, ErrCircuitBreakerDeletionNotFound
+	}
+
+	now := time.Now().UTC()
+	update := bson.M{
+		"$set": bson.M{
+			"status":            strings.TrimSpace(action.Status),
+			"action_at":         now,
+			"action_by":         strings.TrimSpace(action.ActionBy),
+			"action_error":      strings.TrimSpace(action.ActionError),
+			"persisted":         action.Persisted,
+			"already_removed":   action.AlreadyRemoved,
+			"runtime_suspended": action.RuntimeSuspended,
+			"updated_at":        now,
+		},
+	}
+
+	opCtx, cancel := context.WithTimeout(ctx, time.Duration(s.operationTimeoutSec)*time.Second)
+	defer cancel()
+
+	var updated CircuitBreakerDeletionRecord
+	if err := s.collection.FindOneAndUpdate(
+		opCtx,
+		bson.M{"_id": objectID},
+		update,
+		options.FindOneAndUpdate().SetReturnDocument(options.After),
+	).Decode(&updated); err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return CircuitBreakerDeletionRecord{}, ErrCircuitBreakerDeletionNotFound
+		}
+		return CircuitBreakerDeletionRecord{}, fmt.Errorf("mongostate: apply deletion action: %w", err)
+	}
+	return updated, nil
 }
 
 // Close disconnects the Mongo client.

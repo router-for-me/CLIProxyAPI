@@ -82,45 +82,127 @@ func (s *Service) OnCircuitBreakerOpened(ctx context.Context, event registry.Cir
 	}
 
 	normalizedModel := normalizeModelForAutoRemoval(auth, event.ModelID)
-	runtimeSuspended := false
-	if strings.TrimSpace(event.ModelID) != "" {
-		registry.GetGlobalRegistry().SuspendClientModel(auth.ID, event.ModelID, "circuit_auto_removed")
-		runtimeSuspended = true
-	}
-
-	persisted, alreadyRemoved, persistErr := s.persistCircuitBreakerAutoRemoval(auth, normalizedModel)
-	if persistErr == nil {
-		s.refreshModelRegistrationForAuth(auth)
-	}
-
 	record := &mongostate.CircuitBreakerDeletionRecord{
 		AuthID:              auth.ID,
 		Provider:            strings.ToLower(strings.TrimSpace(auth.Provider)),
 		Model:               strings.TrimSpace(event.ModelID),
 		NormalizedModel:     normalizedModel,
+		DedupeKey:           mongostate.BuildCircuitBreakerDeletionDedupeKey(auth.Provider, auth.ID, normalizedModel),
+		Status:              mongostate.CircuitBreakerDeletionStatusPending,
 		OpenCycles:          event.OpenCycles,
 		FailureCount:        event.FailureCount,
 		ConsecutiveFailures: event.ConsecutiveFailures,
 		OpenedAt:            event.OpenedAt,
-		Persisted:           persisted,
-		AlreadyRemoved:      alreadyRemoved,
-		RuntimeSuspended:    runtimeSuspended,
+		Persisted:           false,
+		AlreadyRemoved:      false,
+		RuntimeSuspended:    false,
+		UpdatedAt:           time.Now().UTC(),
 		CreatedAt:           time.Now().UTC(),
 	}
 	if !event.RecoveryAt.IsZero() {
 		recoveryAt := event.RecoveryAt.UTC()
 		record.RecoveryAt = &recoveryAt
 	}
-	if persistErr != nil {
-		record.PersistError = persistErr.Error()
-		log.Warnf("circuit auto-removal persist failed (auth=%s model=%s normalized=%s): %v", auth.ID, event.ModelID, normalizedModel, persistErr)
-	}
 
 	if s.circuitBreakerDeletionStore != nil {
-		if err := s.circuitBreakerDeletionStore.Insert(ctx, record); err != nil {
-			log.Warnf("failed to insert circuit-breaker deletion audit (auth=%s model=%s): %v", auth.ID, event.ModelID, err)
+		if _, err := s.circuitBreakerDeletionStore.UpsertPending(ctx, record); err != nil {
+			log.Warnf("failed to upsert circuit-breaker deletion candidate (auth=%s model=%s): %v", auth.ID, event.ModelID, err)
 		}
 	}
+}
+
+func (s *Service) DeleteCircuitBreakerDeletion(ctx context.Context, id string, actionBy string) (mongostate.CircuitBreakerDeletionItem, error) {
+	if s == nil || s.circuitBreakerDeletionStore == nil {
+		return mongostate.CircuitBreakerDeletionItem{}, fmt.Errorf("circuit breaker deletion store unavailable")
+	}
+
+	s.circuitAutoRemoveMu.Lock()
+	defer s.circuitAutoRemoveMu.Unlock()
+
+	record, err := s.circuitBreakerDeletionStore.GetByID(ctx, id)
+	if err != nil {
+		return mongostate.CircuitBreakerDeletionItem{}, err
+	}
+	switch record.Status {
+	case mongostate.CircuitBreakerDeletionStatusDeleted:
+		return mongostate.CircuitBreakerDeletionItemFromRecord(record), nil
+	case mongostate.CircuitBreakerDeletionStatusPending:
+		// continue
+	default:
+		return mongostate.CircuitBreakerDeletionItemFromRecord(record), mongostate.ErrCircuitBreakerDeletionConflict
+	}
+
+	auth, ok := s.latestAuthForModelRegistration(record.AuthID)
+	if !ok || auth == nil {
+		return s.markCircuitBreakerDeletionFailed(ctx, id, actionBy, fmt.Errorf("auth %s not found", record.AuthID))
+	}
+
+	persisted, alreadyRemoved, persistErr := s.persistCircuitBreakerAutoRemoval(auth, record.NormalizedModel)
+	if persistErr != nil {
+		return s.markCircuitBreakerDeletionFailed(ctx, id, actionBy, persistErr)
+	}
+	s.refreshModelRegistrationForAuth(auth)
+
+	updated, err := s.circuitBreakerDeletionStore.ApplyAction(ctx, id, mongostate.CircuitBreakerDeletionAction{
+		Status:           mongostate.CircuitBreakerDeletionStatusDeleted,
+		ActionBy:         strings.TrimSpace(actionBy),
+		Persisted:        persisted,
+		AlreadyRemoved:   alreadyRemoved,
+		RuntimeSuspended: false,
+	})
+	if err != nil {
+		return mongostate.CircuitBreakerDeletionItem{}, err
+	}
+	return mongostate.CircuitBreakerDeletionItemFromRecord(updated), nil
+}
+
+func (s *Service) DismissCircuitBreakerDeletion(ctx context.Context, id string, actionBy string) (mongostate.CircuitBreakerDeletionItem, error) {
+	if s == nil || s.circuitBreakerDeletionStore == nil {
+		return mongostate.CircuitBreakerDeletionItem{}, fmt.Errorf("circuit breaker deletion store unavailable")
+	}
+
+	s.circuitAutoRemoveMu.Lock()
+	defer s.circuitAutoRemoveMu.Unlock()
+
+	record, err := s.circuitBreakerDeletionStore.GetByID(ctx, id)
+	if err != nil {
+		return mongostate.CircuitBreakerDeletionItem{}, err
+	}
+	switch record.Status {
+	case mongostate.CircuitBreakerDeletionStatusDismissed:
+		return mongostate.CircuitBreakerDeletionItemFromRecord(record), nil
+	case mongostate.CircuitBreakerDeletionStatusPending:
+		// continue
+	default:
+		return mongostate.CircuitBreakerDeletionItemFromRecord(record), mongostate.ErrCircuitBreakerDeletionConflict
+	}
+
+	updated, err := s.circuitBreakerDeletionStore.ApplyAction(ctx, id, mongostate.CircuitBreakerDeletionAction{
+		Status:           mongostate.CircuitBreakerDeletionStatusDismissed,
+		ActionBy:         strings.TrimSpace(actionBy),
+		Persisted:        false,
+		AlreadyRemoved:   false,
+		RuntimeSuspended: false,
+	})
+	if err != nil {
+		return mongostate.CircuitBreakerDeletionItem{}, err
+	}
+	return mongostate.CircuitBreakerDeletionItemFromRecord(updated), nil
+}
+
+func (s *Service) markCircuitBreakerDeletionFailed(ctx context.Context, id string, actionBy string, actionErr error) (mongostate.CircuitBreakerDeletionItem, error) {
+	updated, err := s.circuitBreakerDeletionStore.ApplyAction(ctx, id, mongostate.CircuitBreakerDeletionAction{
+		Status:           mongostate.CircuitBreakerDeletionStatusFailed,
+		ActionBy:         strings.TrimSpace(actionBy),
+		ActionError:      strings.TrimSpace(actionErr.Error()),
+		Persisted:        false,
+		AlreadyRemoved:   false,
+		RuntimeSuspended: false,
+	})
+	if err != nil {
+		return mongostate.CircuitBreakerDeletionItem{}, err
+	}
+	return mongostate.CircuitBreakerDeletionItemFromRecord(updated), actionErr
 }
 
 func normalizeModelForAutoRemoval(auth *coreauth.Auth, modelID string) string {
