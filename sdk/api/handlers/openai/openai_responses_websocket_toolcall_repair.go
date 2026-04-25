@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -507,8 +508,7 @@ func reorderResponsesToolCallsNoCache(rawArray string) string {
 		}
 	}
 
-	// Iterate in original order: add calls + their outputs, skip lone outputs
-	// (they will be re-added at the end as orphaned).
+	// Iterate: add non-outputs as-is, add calls + their outputs.
 	result := make([]json.RawMessage, 0, len(items))
 	for _, item := range items {
 		if len(item) == 0 {
@@ -516,31 +516,34 @@ func reorderResponsesToolCallsNoCache(rawArray string) string {
 		}
 		itemType := strings.TrimSpace(gjson.GetBytes(item, "type").String())
 		if isResponsesToolCallOutputType(itemType) {
-			// Skip lone outputs here; they will be added as orphaned at the end.
-			continue
+			continue // outputs handled when we hit their call
 		}
 		if isResponsesToolCallType(itemType) {
 			callID := strings.TrimSpace(gjson.GetBytes(item, "call_id").String())
-			result = append(result, item)
-			if callID != "" {
-				outputs := outputsByCallID[callID]
-				for i := range outputs {
-					result = append(result, outputs[i])
-				}
-				// Remove so these outputs are not appended again as orphaned.
-				delete(outputsByCallID, callID)
+			if callID == "" {
+				// Drop tool calls without call_id (upstream rejects them).
+				continue
 			}
+			result = append(result, item)
+			outputs := outputsByCallID[callID]
+			for i := range outputs {
+				result = append(result, outputs[i])
+			}
+			delete(outputsByCallID, callID)
 			continue
 		}
 		// Non-tool items: add as-is.
 		result = append(result, item)
 	}
 
-	// Append orphaned outputs at the end.
-	for _, outputs := range outputsByCallID {
-		for i := range outputs {
-			result = append(result, outputs[i])
-		}
+	// Append orphaned outputs in sorted order for stable output.
+	orphanOrder := make([]string, 0, len(outputsByCallID))
+	for callID := range outputsByCallID {
+		orphanOrder = append(orphanOrder, callID)
+	}
+	sort.Strings(orphanOrder)
+	for _, callID := range orphanOrder {
+		result = append(result, outputsByCallID[callID]...)
 	}
 
 	out, err := json.Marshal(result)
