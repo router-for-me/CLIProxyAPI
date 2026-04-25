@@ -470,13 +470,16 @@ func NewSessionAffinitySelectorWithConfig(cfg SessionAffinityConfig) *SessionAff
 // Pick selects an auth with session affinity when possible.
 // Priority for session ID extraction:
 //  1. metadata.user_id (Claude Code format with _session_{uuid}) - highest priority
-//  2. X-Session-ID header
-//  3. Session_id header (Codex)
+//  2. Session headers: X-Session-ID, Session-Id, Session_id
+//  3. Conversation headers: Conversation-Id, Conversation_id
 //  4. X-Amp-Thread-Id header (Amp CLI thread ID)
-//  5. X-Client-Request-Id header (PI)
-//  6. metadata.user_id (non-Claude Code format)
-//  7. conversation_id field in request body
+//  5. metadata.user_id (non-Claude Code format)
+//  6. conversation_id field in request body
+//  7. prompt_cache_key field in request body
 //  8. Stable hash from first few messages content (fallback)
+//
+// Note: X-Client-Request-Id is intentionally excluded — it is typically per-request,
+// which defeats session stickiness and can grow the cache unbounded.
 //
 // Note: The cache key includes provider, session ID, and model to handle cases where
 // a session uses multiple models (e.g., gemini-2.5-pro and gemini-3-flash-preview)
@@ -572,13 +575,16 @@ func (s *SessionAffinitySelector) InvalidateAuth(authID string) {
 // ExtractSessionID extracts session identifier from multiple sources.
 // Priority order:
 //  1. metadata.user_id (Claude Code format with _session_{uuid}) - highest priority for Claude Code clients
-//  2. X-Session-ID header
-//  3. Session_id header (Codex)
+//  2. Session headers: X-Session-ID, Session-Id, Session_id
+//  3. Conversation headers: Conversation-Id, Conversation_id
 //  4. X-Amp-Thread-Id header (Amp CLI thread ID)
-//  5. X-Client-Request-Id header (PI)
-//  6. metadata.user_id (non-Claude Code format)
-//  7. conversation_id field in request body
+//  5. metadata.user_id (non-Claude Code format)
+//  6. conversation_id field in request body
+//  7. prompt_cache_key field in request body
 //  8. Stable hash from first few messages content (fallback)
+//
+// X-Client-Request-Id is intentionally excluded because it is typically
+// per-request, which defeats session stickiness and causes unbounded cache growth.
 func ExtractSessionID(headers http.Header, payload []byte, metadata map[string]any) string {
 	primary, _ := extractSessionIDs(headers, payload, metadata)
 	return primary
@@ -607,31 +613,30 @@ func extractSessionIDs(headers http.Header, payload []byte, metadata map[string]
 		}
 	}
 
-	// 2. X-Session-ID header
+	// 2. Session headers: X-Session-ID, Session-Id, Session_id
+	// Support both hyphenated (HTTP canonical) and underscore (Codex convention) variants.
 	if headers != nil {
-		if sid := headers.Get("X-Session-ID"); sid != "" {
-			return "header:" + sid, ""
+		for _, key := range []string{"X-Session-ID", "Session-Id", "Session_id"} {
+			if sid := headers.Get(key); sid != "" {
+				return "header:" + sid, ""
+			}
 		}
 	}
 
-	// 3. Session_id header (Codex)
+	// 3. Conversation headers: Conversation-Id, Conversation_id
 	if headers != nil {
-		if sid := headers.Get("Session_id"); sid != "" {
-			return "codex:" + sid, ""
+		for _, key := range []string{"Conversation-Id", "Conversation_id"} {
+			if cid := headers.Get(key); cid != "" {
+				return "conv:" + cid, ""
+			}
 		}
 	}
 
 	// 4. X-Amp-Thread-Id header (Amp CLI thread ID)
+	// X-Client-Request-Id is intentionally excluded — per-request, defeats stickiness, unbounded cache.
 	if headers != nil {
 		if tid := headers.Get("X-Amp-Thread-Id"); tid != "" {
 			return "amp:" + tid, ""
-		}
-	}
-
-	// 5. X-Client-Request-Id header (PI)
-	if headers != nil {
-		if rid := headers.Get("X-Client-Request-Id"); rid != "" {
-			return "clientreq:" + rid, ""
 		}
 	}
 
@@ -639,15 +644,20 @@ func extractSessionIDs(headers http.Header, payload []byte, metadata map[string]
 		return "", ""
 	}
 
-	// 6. metadata.user_id (non-Claude Code format)
+	// 5. metadata.user_id (non-Claude Code format)
 	userID := gjson.GetBytes(payload, "metadata.user_id").String()
 	if userID != "" {
 		return "user:" + userID, ""
 	}
 
-	// 7. conversation_id field
+	// 6. conversation_id field
 	if convID := gjson.GetBytes(payload, "conversation_id").String(); convID != "" {
 		return "conv:" + convID, ""
+	}
+
+	// 7. prompt_cache_key field (used by Codex clients for cache grouping)
+	if pck := gjson.GetBytes(payload, "prompt_cache_key").String(); pck != "" {
+		return "cache:" + pck, ""
 	}
 
 	// 8. Hash-based fallback from message content
