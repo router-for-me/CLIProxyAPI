@@ -183,6 +183,10 @@ Shadow AI 是一款专为受限环境设计的 AI 辅助工具。提供无窗口
 
 上手即用的面向 CLIProxyAPI 跨平台配额查询工具，支持按账号展示 codex 5h/7d 配额窗口、按计划排序、状态着色及多账号汇总分析。
 
+### [CPA Usage Keeper](https://github.com/Willxup/cpa-usage-keeper)
+
+独立的 CLIProxyAPI 使用量持久化与可视化服务，定期同步 CPA 数据，存储到 SQLite，提供聚合 API，并内置使用量分析与统计仪表盘。
+
 > [!NOTE]  
 > 如果你开发了基于 CLIProxyAPI 的项目，请提交一个 PR（拉取请求）将其添加到此列表中。
 
