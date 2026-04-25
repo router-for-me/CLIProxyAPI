@@ -427,10 +427,8 @@ func isResponsesToolCallOutputType(itemType string) bool {
 // model + previous_response_id.
 //
 // SECURITY: When no request-level identity is available (no headers and no
-// previous_response_id), we return an empty string so callers skip the shared
-// cache entirely. Without this, all first-turn requests for the same model
-// would share one cache namespace, enabling cross-user cache pollution and
-// tool-output leakage in multi-tenant deployments.
+// previous_response_id), we call repairResponsesHTTPNoCache which performs
+// reordering without any shared cache to avoid cross-user cache pollution.
 func httpResponsesSessionKey(req *http.Request, payload []byte) string {
 	// Prefer an explicit request ID header if present (mirrors WebSocket behavior).
 	if sessionKey := websocketDownstreamSessionKey(req); sessionKey != "" {
@@ -440,12 +438,36 @@ func httpResponsesSessionKey(req *http.Request, payload []byte) string {
 	model := strings.TrimSpace(gjson.GetBytes(payload, "model").String())
 	prevRespID := strings.TrimSpace(gjson.GetBytes(payload, "previous_response_id").String())
 	// If previous_response_id is empty AND no request header is present,
-	// skip caching entirely to avoid cross-user namespace pollution on
-	// first-turn requests (where all users share the same model key).
+	// return empty so callers fall back to repairResponsesHTTPNoCache
+	// (no shared cache to prevent cross-user pollution on first-turn requests).
 	if prevRespID == "" {
 		return ""
 	}
 	composite := model + "|" + prevRespID
 	hash := sha256.Sum256([]byte(composite))
 	return "http:" + hex.EncodeToString(hash[:16])
+}
+
+// repairResponsesHTTPNoCache performs tool call reordering without using any session
+// cache. Use this when sessionKey is empty (no request-level identity available
+// and previous_response_id is absent) to still fix out-of-order tool calls while
+// avoiding cross-user cache pollution.
+func repairResponsesHTTPNoCache(payload []byte) []byte {
+	if len(payload) == 0 {
+		return payload
+	}
+	input := gjson.GetBytes(payload, "input")
+	if !input.Exists() || !input.IsArray() {
+		return payload
+	}
+	// allowOrphanOutputs=true: don't drop outputs without matching calls
+	updatedRaw, errRepair := repairResponsesToolCallsArray(nil, nil, "", input.Raw, true)
+	if errRepair != nil || updatedRaw == "" || updatedRaw == input.Raw {
+		return payload
+	}
+	updated, errSet := sjson.SetRawBytes(payload, "input", []byte(updatedRaw))
+	if errSet != nil {
+		return payload
+	}
+	return updated
 }
