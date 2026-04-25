@@ -7,8 +7,6 @@
 package codex
 
 import (
-	"strings"
-
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/registry"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/thinking"
 	"github.com/tidwall/gjson"

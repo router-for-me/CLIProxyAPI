@@ -42,7 +42,7 @@ func SanitizeOpenAIInputForGemini(raw string) string {
 // NormalizeOpenAIFunctionSchemaForGemini builds a Gemini-safe parametersJsonSchema
 // from OpenAI function schema inputs and enforces a deterministic root shape.
 func NormalizeOpenAIFunctionSchemaForGemini(params gjson.Result, strict bool) string {
-	out := `{"type":"OBJECT","properties":{}}`
+	out := []byte(`{"type":"OBJECT","properties":{}}`)
 	if params.Exists() {
 		raw := strings.TrimSpace(params.Raw)
 		if params.Type == gjson.String {
@@ -52,12 +52,12 @@ func NormalizeOpenAIFunctionSchemaForGemini(params gjson.Result, strict bool) st
 			out = SanitizeParametersJSONSchemaForGemini(raw)
 		}
 	}
-	out, _ = sjson.SetBytesM(out, "type", "OBJECT")
-	if !gjson.Get(out, "properties").Exists() {
-		out, _ = sjson.SetRaw(out, "properties", `{}`)
+	out, _ = sjson.SetBytes(out, "type", "OBJECT")
+	if !gjson.GetBytes(out, "properties").Exists() {
+		out, _ = sjson.SetRawBytes(out, "properties", `{}`)
 	}
 	if strict {
-		out, _ = sjson.SetBytesM(out, "additionalProperties", false)
+		out, _ = sjson.SetBytes(out, "additionalProperties", false)
 	}
 	return out
 }

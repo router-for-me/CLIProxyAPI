@@ -234,7 +234,7 @@ func ConvertOpenAIResponseToGemini(_ context.Context, _ string, originalRequestR
 					for i, a := range anns {
 						citations[i] = a
 					}
-					template, _ = sjson.SetBytesM(template, "candidates.0.groundingMetadata.citations", citations)
+					template, _ = sjson.SetBytes(template, "candidates.0.groundingMetadata.citations", citations)
 				}
 
 				// Add groundingMetadata if annotations were accumulated
@@ -243,7 +243,7 @@ func ConvertOpenAIResponseToGemini(_ context.Context, _ string, originalRequestR
 					for i, a := range anns {
 						citations[i] = a
 					}
-					template, _ = sjson.SetBytesM(template, "candidates.0.groundingMetadata.citations", citations)
+					template, _ = sjson.SetBytes(template, "candidates.0.groundingMetadata.citations", citations)
 				}
 
 				// If we have accumulated tool calls, output them now
@@ -653,7 +653,7 @@ func ConvertOpenAIResponseToGeminiNonStream(_ context.Context, _ string, origina
 					return true
 				})
 				if len(citations) > 0 {
-					out, _ = sjson.SetBytesM(out, "candidates.0.groundingMetadata.citations", citations)
+					out, _ = sjson.SetBytes(out, "candidates.0.groundingMetadata.citations", citations)
 				}
 			}
 
@@ -671,7 +671,7 @@ func ConvertOpenAIResponseToGeminiNonStream(_ context.Context, _ string, origina
 					return true
 				})
 				if len(citations) > 0 {
-					out, _ = sjson.SetBytesM(out, "candidates.0.groundingMetadata.citations", citations)
+					out, _ = sjson.SetBytes(out, "candidates.0.groundingMetadata.citations", citations)
 				}
 			}
 

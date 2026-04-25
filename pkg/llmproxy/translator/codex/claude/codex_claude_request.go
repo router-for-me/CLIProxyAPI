@@ -261,7 +261,7 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 				}
 				minimalTool := fmt.Sprintf(`{"type":"function","name":"%s","description":"%s","parameters":{"type":"object","properties":{}}}`,
 					toolName, toolDesc)
-				template, _ = sjson.SetRaw(template, "tools.-1", minimalTool)
+				template, _ = sjson.SetRawBytes(template, "tools.-1", []byte(minimalTool))
 				continue
 			}
 			// Special handling: Codex sends "custom" type tools (e.g., apply_patch with Lark grammar)
@@ -275,11 +275,11 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 				}
 				minimalTool := fmt.Sprintf(`{"type":"function","name":"%s","description":"%s","parameters":{"type":"object","properties":{}}}`,
 					toolName, toolDesc)
-				template, _ = sjson.SetRaw(template, "tools.-1", minimalTool)
+				template, _ = sjson.SetRawBytes(template, "tools.-1", []byte(minimalTool))
 				continue
 			}
-			tool := toolResult.Raw
-			tool, _ = sjson.SetBytesM(tool, "type", "function")
+			tool := []byte(toolResult.Raw)
+			tool, _ = sjson.SetBytes(tool, "type", "function")
 			// Apply shortened name if needed
 			if v := toolResult.Get("name"); v.Exists() {
 				name := v.String()

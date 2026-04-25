@@ -200,6 +200,9 @@ type RemoteManagement struct {
 	SecretKey string `yaml:"secret-key"`
 	// DisableControlPanel skips serving and syncing the bundled management UI when true.
 	DisableControlPanel bool `yaml:"disable-control-panel"`
+	// DisableAutoUpdatePanel skips the periodic auto-update of the bundled
+	// management UI asset while still serving the control panel itself.
+	DisableAutoUpdatePanel bool `yaml:"disable-auto-update-panel"`
 	// PanelGitHubRepository overrides the GitHub repository used to fetch the management panel asset.
 	// Accepts either a repository URL (https://github.com/org/repo) or an API releases endpoint.
 	PanelGitHubRepository string `yaml:"panel-github-repository"`

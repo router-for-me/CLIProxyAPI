@@ -40,7 +40,7 @@ func ConvertClaudeRequestToCLI(modelName string, inputRawJSON []byte, _ bool) []
 
 	// Build output Gemini CLI request JSON
 	out := `{"model":"","request":{"contents":[]}}`
-	out, _ = sjson.SetBytesM(out, "model", modelName)
+	out, _ = sjson.SetBytes(out, "model", modelName)
 
 	// system instruction
 	if systemResult := gjson.GetBytes(rawJSON, "system"); systemResult.IsArray() {
@@ -51,7 +51,7 @@ func ConvertClaudeRequestToCLI(modelName string, inputRawJSON []byte, _ bool) []
 				textResult := systemPromptResult.Get("text")
 				if textResult.Type == gjson.String {
 					part := `{"text":""}`
-					part, _ = sjson.SetBytesM(part, "text", textResult.String())
+					part, _ = sjson.SetBytes(part, "text", textResult.String())
 					systemInstruction, _ = sjson.SetRaw(systemInstruction, "parts.-1", part)
 					hasSystemParts = true
 				}
@@ -62,7 +62,7 @@ func ConvertClaudeRequestToCLI(modelName string, inputRawJSON []byte, _ bool) []
 			out, _ = sjson.SetRaw(out, "request.systemInstruction", systemInstruction)
 		}
 	} else if systemResult.Type == gjson.String {
-		out, _ = sjson.SetBytesM(out, "request.systemInstruction.parts.-1.text", systemResult.String())
+		out, _ = sjson.SetBytes(out, "request.systemInstruction.parts.-1.text", systemResult.String())
 	}
 
 	// contents
@@ -78,7 +78,7 @@ func ConvertClaudeRequestToCLI(modelName string, inputRawJSON []byte, _ bool) []
 			}
 
 			contentJSON := `{"role":"","parts":[]}`
-			contentJSON, _ = sjson.SetBytesM(contentJSON, "role", role)
+			contentJSON, _ = sjson.SetBytes(contentJSON, "role", role)
 
 			contentsResult := messageResult.Get("content")
 			if contentsResult.IsArray() {
@@ -86,7 +86,7 @@ func ConvertClaudeRequestToCLI(modelName string, inputRawJSON []byte, _ bool) []
 					switch contentResult.Get("type").String() {
 					case "text":
 						part := `{"text":""}`
-						part, _ = sjson.SetBytesM(part, "text", contentResult.Get("text").String())
+						part, _ = sjson.SetBytes(part, "text", contentResult.Get("text").String())
 						contentJSON, _ = sjson.SetRaw(contentJSON, "parts.-1", part)
 
 					case "tool_use":
@@ -101,8 +101,8 @@ func ConvertClaudeRequestToCLI(modelName string, inputRawJSON []byte, _ bool) []
 								sanitizedArgs = functionArgs
 							}
 							part := `{"thoughtSignature":"","functionCall":{"name":"","args":{}}}`
-							part, _ = sjson.SetBytesM(part, "thoughtSignature", geminiCLIClaudeThoughtSignature)
-							part, _ = sjson.SetBytesM(part, "functionCall.name", functionName)
+							part, _ = sjson.SetBytes(part, "thoughtSignature", geminiCLIClaudeThoughtSignature)
+							part, _ = sjson.SetBytes(part, "functionCall.name", functionName)
 							part, _ = sjson.SetRaw(part, "functionCall.args", sanitizedArgs)
 							contentJSON, _ = sjson.SetRaw(contentJSON, "parts.-1", part)
 						}
@@ -119,8 +119,8 @@ func ConvertClaudeRequestToCLI(modelName string, inputRawJSON []byte, _ bool) []
 						}
 						responseData := contentResult.Get("content").Raw
 						part := `{"functionResponse":{"name":"","response":{"result":""}}}`
-						part, _ = sjson.SetBytesM(part, "functionResponse.name", funcName)
-						part, _ = sjson.SetBytesM(part, "functionResponse.response.result", responseData)
+						part, _ = sjson.SetBytes(part, "functionResponse.name", funcName)
+						part, _ = sjson.SetBytes(part, "functionResponse.response.result", responseData)
 						contentJSON, _ = sjson.SetRaw(contentJSON, "parts.-1", part)
 
 					case "image":
@@ -130,8 +130,8 @@ func ConvertClaudeRequestToCLI(modelName string, inputRawJSON []byte, _ bool) []
 							data := source.Get("data").String()
 							if mimeType != "" && data != "" {
 								part := `{"inlineData":{"mime_type":"","data":""}}`
-								part, _ = sjson.SetBytesM(part, "inlineData.mime_type", mimeType)
-								part, _ = sjson.SetBytesM(part, "inlineData.data", data)
+								part, _ = sjson.SetBytes(part, "inlineData.mime_type", mimeType)
+								part, _ = sjson.SetBytes(part, "inlineData.data", data)
 								contentJSON, _ = sjson.SetRaw(contentJSON, "parts.-1", part)
 							}
 						}
@@ -141,7 +141,7 @@ func ConvertClaudeRequestToCLI(modelName string, inputRawJSON []byte, _ bool) []
 				out, _ = sjson.SetRaw(out, "request.contents.-1", contentJSON)
 			} else if contentsResult.Type == gjson.String {
 				part := `{"text":""}`
-				part, _ = sjson.SetBytesM(part, "text", contentsResult.String())
+				part, _ = sjson.SetBytes(part, "text", contentsResult.String())
 				contentJSON, _ = sjson.SetRaw(contentJSON, "parts.-1", part)
 				out, _ = sjson.SetRaw(out, "request.contents.-1", contentJSON)
 			}
@@ -183,24 +183,24 @@ func ConvertClaudeRequestToCLI(modelName string, inputRawJSON []byte, _ bool) []
 		case "enabled":
 			if b := t.Get("budget_tokens"); b.Exists() && b.Type == gjson.Number {
 				budget := int(b.Int())
-				out, _ = sjson.SetBytesM(out, "request.generationConfig.thinkingConfig.thinkingBudget", budget)
-				out, _ = sjson.SetBytesM(out, "request.generationConfig.thinkingConfig.includeThoughts", true)
+				out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.thinkingBudget", budget)
+				out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.includeThoughts", true)
 			}
 		case "adaptive":
 			// Keep adaptive as a high level sentinel; ApplyThinking resolves it
 			// to model-specific max capability.
-			out, _ = sjson.SetBytesM(out, "request.generationConfig.thinkingConfig.thinkingLevel", "high")
-			out, _ = sjson.SetBytesM(out, "request.generationConfig.thinkingConfig.includeThoughts", true)
+			out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.thinkingLevel", "high")
+			out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.includeThoughts", true)
 		}
 	}
 	if v := gjson.GetBytes(rawJSON, "temperature"); v.Exists() && v.Type == gjson.Number {
-		out, _ = sjson.SetBytesM(out, "request.generationConfig.temperature", v.Num)
+		out, _ = sjson.SetBytes(out, "request.generationConfig.temperature", v.Num)
 	}
 	if v := gjson.GetBytes(rawJSON, "top_p"); v.Exists() && v.Type == gjson.Number {
-		out, _ = sjson.SetBytesM(out, "request.generationConfig.topP", v.Num)
+		out, _ = sjson.SetBytes(out, "request.generationConfig.topP", v.Num)
 	}
 	if v := gjson.GetBytes(rawJSON, "top_k"); v.Exists() && v.Type == gjson.Number {
-		out, _ = sjson.SetBytesM(out, "request.generationConfig.topK", v.Num)
+		out, _ = sjson.SetBytes(out, "request.generationConfig.topK", v.Num)
 	}
 
 	outBytes := []byte(out)

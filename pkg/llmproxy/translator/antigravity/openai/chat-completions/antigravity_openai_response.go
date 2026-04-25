@@ -103,7 +103,7 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 		}
 		promptTokenCount := usageResult.Get("promptTokenCount").Int() - cachedTokenCount
 		thoughtsTokenCount := usageResult.Get("thoughtsTokenCount").Int()
-		template, _ = sjson.SetBytesM(template, "usage.prompt_tokens", promptTokenCount+thoughtsTokenCount)
+		template, _ = sjson.SetBytes(template, "usage.prompt_tokens", promptTokenCount+thoughtsTokenCount)
 		if thoughtsTokenCount > 0 {
 			template, _ = sjson.SetBytes(template, "usage.completion_tokens_details.reasoning_tokens", thoughtsTokenCount)
 		}
