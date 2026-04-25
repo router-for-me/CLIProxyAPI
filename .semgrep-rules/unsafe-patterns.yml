@@ -1,0 +1,26 @@
+rules:
+  - id: shell-command-with-shell
+    patterns:
+      - pattern-either:
+          - pattern: exec.Command("sh", "-c", ...)
+          - pattern: exec.Command("bash", "-c", ...)
+    message: Avoid shell evaluation in exec.Command. Pass explicit argv slices instead.
+    languages: [go]
+    severity: CRITICAL
+
+  - id: sql-query-built-with-sprintf
+    patterns:
+      - pattern: fmt.Sprintf($QUERY, ...)
+      - metavariable-regex:
+          metavariable: $QUERY
+          regex: (?i).*(select|insert|update|delete|from|where).*
+    message: SQL assembled with fmt.Sprintf is injection-prone. Use parameter binding instead.
+    languages: [go]
+    severity: CRITICAL
+
+  - id: direct-http-get-without-timeout
+    patterns:
+      - pattern: http.Get(...)
+    message: http.Get uses the default client without an explicit timeout. Prefer a configured http.Client.
+    languages: [go]
+    severity: LOW

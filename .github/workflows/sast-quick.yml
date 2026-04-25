@@ -1,0 +1,86 @@
+name: SAST Quick Check
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  semgrep:
+    name: Semgrep Scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Tier 3: Advisory - security enrichment only
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Semgrep
+        run: python -m pip install --disable-pip-version-check semgrep==1.157.0
+      - name: Run Semgrep
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          semgrep scan --sarif --sarif-output=semgrep.sarif --max-target-bytes 1000000 --quiet --config=auto || true
+      - name: Upload SARIF
+        uses: github/codeql-action/upload-sarif@v4
+        if: always()
+        with:
+          sarif_file: semgrep.sarif
+
+  # License Compliance - Tier 3: Advisory
+  license-compliance:
+    name: License Compliance
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Tier 3: Advisory - security enrichment only
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Analyze licenses
+        uses: fsfe/reuse-action@v4
+        continue-on-error: true  # Allow findings but don't fail
+      - name: Check for non-reusable licenses
+        run: |
+          # Check for problematic licenses
+          grep -r "GPL\|AGPL" --include="*.toml" --include="*.json" . || true
+      - name: Check license compliance
+        uses: fsfe/reuse-action@v4
+        continue-on-error: true
+
+  # Secret Scanning - Tier 2: Important (runs in parallel)
+  secrets:
+    name: Secret Scanning
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          args: --verbose --redact
+      - name: Run Trivy Secret Scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: repo
+          exit-code: 0
+          format: sarif
+          output: trivy-results.sarif
+        continue-on-error: true
+      - name: Upload Trivy results
+        uses: github/codeql-action/upload-sarif@v4
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'

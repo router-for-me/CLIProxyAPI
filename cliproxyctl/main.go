@@ -13,7 +13,7 @@ import (
 	"time"
 
 	cliproxycmd "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/cmd"
-	"github.com/kooshapari/CLIProxyAPI/v7/internal/config"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
 )
 
 const responseSchemaVersion = "cliproxyctl.response.v1"

@@ -1,4 +1,13 @@
 # workflow_file|job_name
+policy-gate.yml|enforce
+pr-path-guard.yml|ensure-no-translator-changes
+quality-gate.yml|verify
+required-check-names-guard.yml|verify-required-check-names
+security-guard.yml|ggshield-scan
+sast-quick.yml|semgrep
+sast-quick.yml|secrets
+sast-quick.yml|go-quality
+sast-quick.yml|license-check
 pr-test-build.yml|go-ci
 pr-test-build.yml|quality-ci
 pr-test-build.yml|quality-staged-check

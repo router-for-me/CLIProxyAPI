@@ -3,7 +3,7 @@ package diff
 import (
 	"testing"
 
-	"github.com/kooshapari/CLIProxyAPI/v7/internal/config"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
 	sdkconfig "github.com/kooshapari/CLIProxyAPI/v7/sdk/config"
 )
 

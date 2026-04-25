@@ -164,8 +164,8 @@ func TestApplyPayloadConfigWithRoot_UnconditionalRules(t *testing.T) {
 			Default: []config.PayloadRule{
 				{
 					// Unconditional rule - no models specified
-					Models:  []config.PayloadModelRule{},
-					Params:  map[string]any{"maxTokens": 1000},
+					Models: []config.PayloadModelRule{},
+					Params: map[string]any{"maxTokens": 1000},
 				},
 			},
 			Override: []config.PayloadRule{

@@ -4,11 +4,11 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"errors"
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -17,27 +17,27 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	cursorauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/cursor"
-	cursorproto "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/cursor/proto"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
+	cursorauth "github.com/kooshapari/CLIProxyAPI/v7/internal/auth/cursor"
+	cursorproto "github.com/kooshapari/CLIProxyAPI/v7/internal/auth/cursor/proto"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/registry"
+	cliproxyauth "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	sdktranslator "github.com/kooshapari/CLIProxyAPI/v7/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"golang.org/x/net/http2"
 )
 
 const (
-	cursorAPIURL        = "https://api2.cursor.sh"
-	cursorRunPath       = "/agent.v1.AgentService/Run"
-	cursorModelsPath    = "/agent.v1.AgentService/GetUsableModels"
-	cursorClientVersion = "cli-2026.02.13-41ac335"
-	cursorAuthType      = "cursor"
+	cursorAPIURL            = "https://api2.cursor.sh"
+	cursorRunPath           = "/agent.v1.AgentService/Run"
+	cursorModelsPath        = "/agent.v1.AgentService/GetUsableModels"
+	cursorClientVersion     = "cli-2026.02.13-41ac335"
+	cursorAuthType          = "cursor"
 	cursorHeartbeatInterval = 5 * time.Second
-	cursorSessionTTL      = 5 * time.Minute
-	cursorCheckpointTTL   = 30 * time.Minute
+	cursorSessionTTL        = 5 * time.Minute
+	cursorCheckpointTTL     = 30 * time.Minute
 )
 
 // CursorExecutor handles requests to the Cursor API via Connect+Protobuf protocol.
@@ -63,9 +63,9 @@ type cursorSession struct {
 	pending      []pendingMcpExec
 	cancel       context.CancelFunc // cancels the session-scoped heartbeat (NOT tied to HTTP request)
 	createdAt    time.Time
-	authID       string // auth file ID that created this session (for multi-account isolation)
-	toolResultCh chan []toolResultInfo                // receives tool results from the next HTTP request
-	resumeOutCh  chan cliproxyexecutor.StreamChunk    // output channel for resumed response
+	authID       string                                     // auth file ID that created this session (for multi-account isolation)
+	toolResultCh chan []toolResultInfo                      // receives tool results from the next HTTP request
+	resumeOutCh  chan cliproxyexecutor.StreamChunk          // output channel for resumed response
 	switchOutput func(ch chan cliproxyexecutor.StreamChunk) // callback to switch output channel
 }
 
@@ -148,7 +148,7 @@ type cursorStatusErr struct {
 	msg  string
 }
 
-func (e cursorStatusErr) Error() string             { return e.msg }
+func (e cursorStatusErr) Error() string              { return e.msg }
 func (e cursorStatusErr) StatusCode() int            { return e.code }
 func (e cursorStatusErr) RetryAfter() *time.Duration { return nil } // no retry-after info from Cursor; conductor uses exponential backoff
 
@@ -786,7 +786,7 @@ func (e *CursorExecutor) resumeWithToolResults(
 func openCursorH2Stream(accessToken string) (*cursorproto.H2Stream, error) {
 	headers := map[string]string{
 		":path":                    cursorRunPath,
-		"content-type":            "application/connect+proto",
+		"content-type":             "application/connect+proto",
 		"connect-protocol-version": "1",
 		"te":                       "trailers",
 		"authorization":            "Bearer " + accessToken,
@@ -876,21 +876,21 @@ func processH2SessionFrames(
 			buf.Write(data)
 			log.Debugf("cursor: processH2SessionFrames[%s]: buf total=%d", stream.ID(), buf.Len())
 
-		// Process all complete frames
-		for {
-			currentBuf := buf.Bytes()
-			if len(currentBuf) == 0 {
-				break
-			}
-			flags, payload, consumed, ok := cursorproto.ParseConnectFrame(currentBuf)
-			if !ok {
-				// Log detailed info about why parsing failed
-				previewLen := min(20, len(currentBuf))
-				log.Debugf("cursor: incomplete frame in buffer, waiting for more data (buf=%d bytes, first bytes: %x = %q)", len(currentBuf), currentBuf[:previewLen], string(currentBuf[:previewLen]))
-				break
-			}
-			buf.Next(consumed)
-			log.Debugf("cursor: parsed Connect frame flags=0x%02x payload=%d bytes consumed=%d", flags, len(payload), consumed)
+			// Process all complete frames
+			for {
+				currentBuf := buf.Bytes()
+				if len(currentBuf) == 0 {
+					break
+				}
+				flags, payload, consumed, ok := cursorproto.ParseConnectFrame(currentBuf)
+				if !ok {
+					// Log detailed info about why parsing failed
+					previewLen := min(20, len(currentBuf))
+					log.Debugf("cursor: incomplete frame in buffer, waiting for more data (buf=%d bytes, first bytes: %x = %q)", len(currentBuf), currentBuf[:previewLen], string(currentBuf[:previewLen]))
+					break
+				}
+				buf.Next(consumed)
+				log.Debugf("cursor: parsed Connect frame flags=0x%02x payload=%d bytes consumed=%d", flags, len(payload), consumed)
 
 				if flags&cursorproto.ConnectEndStreamFlag != 0 {
 					if err := cursorproto.ParseConnectEndStream(payload); err != nil {
@@ -1080,15 +1080,15 @@ func processH2SessionFrames(
 // --- OpenAI request parsing ---
 
 type parsedOpenAIRequest struct {
-	Model       string
-	Messages    []gjson.Result
-	Tools       []gjson.Result
-	Stream      bool
+	Model        string
+	Messages     []gjson.Result
+	Tools        []gjson.Result
+	Stream       bool
 	SystemPrompt string
-	UserText    string
-	Images      []cursorproto.ImageData
-	Turns       []cursorproto.TurnData
-	ToolResults []toolResultInfo
+	UserText     string
+	Images       []cursorproto.ImageData
+	Turns        []cursorproto.TurnData
+	ToolResults  []toolResultInfo
 }
 
 type toolResultInfo struct {
@@ -1350,7 +1350,7 @@ func applyCursorHeaders(req *http.Request, accessToken string) {
 func newH2Client() *http.Client {
 	return &http.Client{
 		Transport: &http2.Transport{
-			TLSClientConfig: &tls.Config{},
+			TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS13},
 		},
 	}
 }
@@ -1464,10 +1464,9 @@ func decodeMcpArgsToJSON(args map[string][]byte) string {
 		if decoded, err := cursorproto.ProtobufValueBytesToJSON(v); err == nil {
 			result[k] = decoded
 		} else {
-			// Fallback: try raw JSON
-			var jsonVal interface{}
-			if err := json.Unmarshal(v, &jsonVal); err == nil {
-				result[k] = jsonVal
+			// Preserve valid JSON payloads without deserializing into arbitrary interface values.
+			if json.Valid(v) {
+				result[k] = json.RawMessage(append([]byte(nil), v...))
 			} else {
 				result[k] = string(v)
 			}

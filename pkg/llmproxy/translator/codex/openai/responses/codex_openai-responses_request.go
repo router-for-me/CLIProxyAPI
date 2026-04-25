@@ -34,7 +34,7 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 
 	inputResult := gjson.GetBytes(rawJSON, "input")
 	if inputResult.Type == gjson.String {
-		input, _ := sjson.Set(`[{"type":"message","role":"user","content":[{"type":"input_text","text":""}]}]`, "0.content.0.text", inputResult.String())
+		input, _ := sjson.SetBytesM(`[{"type":"message","role":"user","content":[{"type":"input_text","text":""}]}]`, "0.content.0.text", inputResult.String())
 		rawJSON, _ = sjson.SetRawBytes(rawJSON, "input", []byte(input))
 	}
 
@@ -198,9 +198,9 @@ func normalizeResponseTools(rawJSON []byte, nameMap map[string]string) []byte {
 		if name != fn.Get("name").String() {
 			changed = true
 			fnRaw := fn.Raw
-			fnRaw, _ = sjson.Set(fnRaw, "name", name)
+			fnRaw, _ = sjson.SetBytesM(fnRaw, "name", name)
 			item := `{}`
-			item, _ = sjson.Set(item, "type", "function")
+			item, _ = sjson.SetBytesM(item, "type", "function")
 			item, _ = sjson.SetRaw(item, "function", fnRaw)
 			result = append(result, item)
 		} else {
@@ -246,7 +246,7 @@ func normalizeResponseToolChoice(rawJSON []byte, nameMap map[string]string) []by
 		return rawJSON
 	}
 
-	updated, _ := sjson.Set(tc.Raw, "function.name", name)
+	updated, _ := sjson.SetBytesM(tc.Raw, "function.name", name)
 	rawJSON, _ = sjson.SetRawBytes(rawJSON, "tool_choice", []byte(updated))
 	return rawJSON
 }

@@ -49,13 +49,13 @@ func TestConvertOpenAIRequestToCodex(t *testing.T) {
 	}
 
 	inputArray2 := res2.Get("input").Array()
-	// user message + assistant message (empty content) + function_call message
-	if len(inputArray2) != 3 {
-		t.Fatalf("expected 3 input items, got %d", len(inputArray2))
+	// user message + function_call message; empty assistant shells are skipped.
+	if len(inputArray2) != 2 {
+		t.Fatalf("expected 2 input items, got %d", len(inputArray2))
 	}
 
-	if inputArray2[2].Get("type").String() != "function_call" {
-		t.Errorf("expected third input item to be function_call, got %s", inputArray2[2].Get("type").String())
+	if inputArray2[1].Get("type").String() != "function_call" {
+		t.Errorf("expected second input item to be function_call, got %s", inputArray2[1].Get("type").String())
 	}
 }
 
@@ -121,7 +121,7 @@ func TestConvertOpenAIRequestToCodex_NormalizesProxyPrefixedAssistantToolCall(t 
 	got := ConvertOpenAIRequestToCodex("gpt-4o", input, false)
 	res := gjson.ParseBytes(got)
 
-	if callName := res.Get("input.2.name").String(); callName != "search_docs" {
+	if callName := res.Get("input.1.name").String(); callName != "search_docs" {
 		t.Fatalf("expected function_call name search_docs, got %s", callName)
 	}
 }

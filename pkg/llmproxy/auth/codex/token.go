@@ -6,7 +6,7 @@ package codex
 import (
 	"fmt"
 
-	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/misc"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/auth/base"
 )
 
 // CodexTokenStorage stores OAuth2 token information for OpenAI Codex API authentication.

@@ -18,7 +18,7 @@ func TestConvertClaudeResponseToOpenAI(t *testing.T) {
 	if len(got) != 1 {
 		t.Errorf("expected 1 chunk, got %d", len(got))
 	}
-	res := gjson.Parse(got[0])
+	res := gjson.ParseBytes(got[0])
 	if res.Get("id").String() != "msg_123" || res.Get("choices.0.delta.role").String() != "assistant" {
 		t.Errorf("unexpected message_start output: %s", got[0])
 	}
@@ -29,7 +29,7 @@ func TestConvertClaudeResponseToOpenAI(t *testing.T) {
 	if len(got) != 1 {
 		t.Errorf("expected 1 chunk, got %d", len(got))
 	}
-	res = gjson.Parse(got[0])
+	res = gjson.ParseBytes(got[0])
 	if res.Get("choices.0.delta.content").String() != "hello" {
 		t.Errorf("unexpected content_block_delta output: %s", got[0])
 	}
@@ -40,7 +40,7 @@ func TestConvertClaudeResponseToOpenAI(t *testing.T) {
 	if len(got) != 1 {
 		t.Errorf("expected 1 chunk, got %d", len(got))
 	}
-	res = gjson.Parse(got[0])
+	res = gjson.ParseBytes(got[0])
 	if res.Get("usage.total_tokens").Int() != 15 {
 		t.Errorf("unexpected usage output: %s", got[0])
 	}
@@ -53,7 +53,7 @@ data: {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta"
 data: {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"input_tokens": 10, "output_tokens": 5}}`)
 
 	got := ConvertClaudeResponseToOpenAINonStream(context.Background(), "gpt-4o", nil, nil, raw, nil)
-	res := gjson.Parse(got)
+	res := gjson.ParseBytes(got)
 	if res.Get("choices.0.message.content").String() != "hello world" {
 		t.Errorf("unexpected content: %s", got)
 	}

@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/auth/diff"
-	"github.com/kooshapari/CLIProxyAPI/v7/internal/config"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
 	coreauth "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 

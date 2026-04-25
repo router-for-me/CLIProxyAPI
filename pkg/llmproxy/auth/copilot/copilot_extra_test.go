@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kooshapari/CLIProxyAPI/v7/internal/config"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
 )
 
 func TestNewCopilotAuth(t *testing.T) {

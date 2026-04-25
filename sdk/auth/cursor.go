@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"time"
 
-	cursorauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/cursor"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/browser"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	cursorauth "github.com/kooshapari/CLIProxyAPI/v7/internal/auth/cursor"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/browser"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
+	coreauth "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -38,6 +38,9 @@ func (a CursorAuthenticator) Login(ctx context.Context, cfg *config.Config, opts
 	}
 	if opts == nil {
 		opts = &LoginOptions{}
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 
 	// Generate PKCE auth parameters

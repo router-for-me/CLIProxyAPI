@@ -9,7 +9,7 @@ import (
 	"context"
 	"time"
 
-	translatorcommon "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/common"
+	translatorcommon "github.com/kooshapari/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -110,22 +110,22 @@ func ConvertCodexResponseToGemini(_ context.Context, modelName string, originalR
 
 	switch typeStr {
 	case "response.created": // Handle response creation - set model and response ID
-		template, _ = sjson.Set(template, "modelVersion", rootResult.Get("response.model").String())
-		template, _ = sjson.Set(template, "responseId", rootResult.Get("response.id").String())
+		template, _ = sjson.SetBytesM(template, "modelVersion", rootResult.Get("response.model").String())
+		template, _ = sjson.SetBytesM(template, "responseId", rootResult.Get("response.id").String())
 		(*param).(*ConvertCodexResponseToGeminiParams).ResponseID = rootResult.Get("response.id").String()
 	case "response.reasoning_summary_text.delta": // Handle reasoning/thinking content delta
 		part := `{"thought":true,"text":""}`
-		part, _ = sjson.Set(part, "text", rootResult.Get("delta").String())
+		part, _ = sjson.SetBytesM(part, "text", rootResult.Get("delta").String())
 		template, _ = sjson.SetRaw(template, "candidates.0.content.parts.-1", part)
 	case "response.output_text.delta": // Handle regular text content delta
 		part := `{"text":""}`
-		part, _ = sjson.Set(part, "text", rootResult.Get("delta").String())
+		part, _ = sjson.SetBytesM(part, "text", rootResult.Get("delta").String())
 		template, _ = sjson.SetRaw(template, "candidates.0.content.parts.-1", part)
 	case "response.completed": // Handle response completion with usage metadata
-		template, _ = sjson.Set(template, "usageMetadata.promptTokenCount", rootResult.Get("response.usage.input_tokens").Int())
-		template, _ = sjson.Set(template, "usageMetadata.candidatesTokenCount", rootResult.Get("response.usage.output_tokens").Int())
+		template, _ = sjson.SetBytesM(template, "usageMetadata.promptTokenCount", rootResult.Get("response.usage.input_tokens").Int())
+		template, _ = sjson.SetBytesM(template, "usageMetadata.candidatesTokenCount", rootResult.Get("response.usage.output_tokens").Int())
 		totalTokens := rootResult.Get("response.usage.input_tokens").Int() + rootResult.Get("response.usage.output_tokens").Int()
-		template, _ = sjson.Set(template, "usageMetadata.totalTokenCount", totalTokens)
+		template, _ = sjson.SetBytesM(template, "usageMetadata.totalTokenCount", totalTokens)
 	default:
 		return []string{}
 	}

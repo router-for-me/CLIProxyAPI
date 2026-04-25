@@ -7,12 +7,12 @@ import (
 	"strings"
 	"time"
 
-	gitlabauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/gitlab"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/browser"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	gitlabauth "github.com/kooshapari/CLIProxyAPI/v7/internal/auth/gitlab"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/browser"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/misc"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/util"
+	coreauth "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
 

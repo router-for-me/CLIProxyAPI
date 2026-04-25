@@ -6,7 +6,7 @@ package copilot
 import (
 	"fmt"
 
-	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/misc"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/auth/base"
 )
 
 // CopilotTokenStorage stores OAuth2 token information for GitHub Copilot API authentication.

@@ -217,13 +217,13 @@ func (ts *BaseTokenStorage) IsExpired() bool {
 // merging in any metadata.
 func (ts *BaseTokenStorage) toJSONMap() map[string]any {
 	result := map[string]any{
-		"id_token":     ts.IDToken,
-		"access_token": ts.AccessToken,
+		"id_token":      ts.IDToken,
+		"access_token":  ts.AccessToken,
 		"refresh_token": ts.RefreshToken,
-		"last_refresh": ts.LastRefresh,
-		"email":        ts.Email,
-		"type":         ts.Type,
-		"expired":      ts.Expire,
+		"last_refresh":  ts.LastRefresh,
+		"email":         ts.Email,
+		"type":          ts.Type,
+		"expired":       ts.Expire,
 	}
 
 	// Merge metadata into the result

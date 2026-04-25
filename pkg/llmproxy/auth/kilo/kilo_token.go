@@ -5,8 +5,7 @@ package kilo
 import (
 	"fmt"
 
-	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/misc"
-	log "github.com/sirupsen/logrus"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/auth/base"
 )
 
 // KiloTokenStorage stores token information for Kilo AI authentication.

@@ -42,7 +42,7 @@ func ConvertCodexResponseToOpenAIResponsesNonStream(_ context.Context, modelName
 	template := responseResult.Raw
 	if responseResult.Get("instructions").Exists() {
 		instructions := gjson.GetBytes(originalRequestRawJSON, "instructions").String()
-		template, _ = sjson.Set(template, "instructions", instructions)
+		template, _ = sjson.SetBytesM(template, "instructions", instructions)
 	}
 	return template
 }

@@ -3,9 +3,9 @@ package thinking_test
 import (
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
-	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/thinking/provider/claude"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/registry"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/thinking"
+	_ "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/thinking/provider/claude"
 	"github.com/tidwall/gjson"
 )
 

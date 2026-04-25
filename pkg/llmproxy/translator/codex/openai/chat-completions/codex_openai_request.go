@@ -55,15 +55,15 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 
 	// Map reasoning effort; support flat legacy field and variant fallback.
 	if v := gjson.GetBytes(rawJSON, "reasoning_effort"); v.Exists() {
-		out, _ = sjson.Set(out, "reasoning.effort", v.Value())
+		out, _ = sjson.SetBytes(out, "reasoning.effort", v.Value())
 	} else if v := gjson.GetBytes(rawJSON, `reasoning\.effort`); v.Exists() {
-		out, _ = sjson.Set(out, "reasoning.effort", v.Value())
+		out, _ = sjson.SetBytes(out, "reasoning.effort", v.Value())
 	} else if v := gjson.GetBytes(rawJSON, "variant"); v.Exists() {
 		effort := strings.ToLower(strings.TrimSpace(v.String()))
 		if effort == "" {
-			out, _ = sjson.Set(out, "reasoning.effort", "medium")
+			out, _ = sjson.SetBytes(out, "reasoning.effort", "medium")
 		} else {
-			out, _ = sjson.Set(out, "reasoning.effort", effort)
+			out, _ = sjson.SetBytes(out, "reasoning.effort", effort)
 		}
 	} else {
 		out, _ = sjson.SetBytes(out, "reasoning.effort", "medium")

@@ -1,0 +1,28 @@
+rules:
+  - id: no-dot-imports
+    pattern: import . "$PKG"
+    message: Dot imports hide call sites and make ownership harder to trace. Use explicit package names.
+    languages: [go]
+    severity: MEDIUM
+
+  - id: no-blank-imports-outside-entrypoints
+    patterns:
+      - pattern: import _ "$PKG"
+    message: Blank imports belong in explicit wiring points only. Move them out of library packages.
+    languages: [go]
+    severity: MEDIUM
+    paths:
+      exclude:
+        - "cmd/**"
+        - "**/*_test.go"
+
+  - id: getenv-in-http-handler
+    patterns:
+      - pattern-inside: |
+          func $HANDLER($W http.ResponseWriter, $R *http.Request) {
+            ...
+          }
+      - pattern: os.Getenv(...)
+    message: Avoid reading process environment directly inside request handlers. Inject configuration instead.
+    languages: [go]
+    severity: LOW

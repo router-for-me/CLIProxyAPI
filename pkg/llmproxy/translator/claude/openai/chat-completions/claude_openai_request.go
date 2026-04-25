@@ -72,13 +72,13 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 			if ok {
 				switch budget {
 				case 0:
-					out, _ = sjson.Set(out, "thinking.type", "disabled")
+					out, _ = sjson.SetBytesM(out, "thinking.type", "disabled")
 				case -1:
-					out, _ = sjson.Set(out, "thinking.type", "enabled")
+					out, _ = sjson.SetBytesM(out, "thinking.type", "enabled")
 				default:
 					if budget > 0 {
-						out, _ = sjson.Set(out, "thinking.type", "enabled")
-						out, _ = sjson.Set(out, "thinking.budget_tokens", budget)
+						out, _ = sjson.SetBytesM(out, "thinking.type", "enabled")
+						out, _ = sjson.SetBytesM(out, "thinking.budget_tokens", budget)
 					}
 				}
 			}
@@ -99,19 +99,19 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 	}
 
 	// Model mapping to specify which Claude Code model to use
-	out, _ = sjson.Set(out, "model", modelName)
+	out, _ = sjson.SetBytesM(out, "model", modelName)
 
 	// Max tokens configuration with fallback to default value
 	if maxTokens := root.Get("max_tokens"); maxTokens.Exists() {
-		out, _ = sjson.Set(out, "max_tokens", maxTokens.Int())
+		out, _ = sjson.SetBytesM(out, "max_tokens", maxTokens.Int())
 	}
 
 	// Temperature setting for controlling response randomness
 	if temp := root.Get("temperature"); temp.Exists() {
-		out, _ = sjson.Set(out, "temperature", temp.Float())
+		out, _ = sjson.SetBytesM(out, "temperature", temp.Float())
 	} else if topP := root.Get("top_p"); topP.Exists() {
 		// Top P setting for nucleus sampling (filtered out if temperature is set)
-		out, _ = sjson.Set(out, "top_p", topP.Float())
+		out, _ = sjson.SetBytesM(out, "top_p", topP.Float())
 	}
 
 	// Stop sequences configuration for custom termination conditions
@@ -123,15 +123,15 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 				return true
 			})
 			if len(stopSequences) > 0 {
-				out, _ = sjson.Set(out, "stop_sequences", stopSequences)
+				out, _ = sjson.SetBytesM(out, "stop_sequences", stopSequences)
 			}
 		} else {
-			out, _ = sjson.Set(out, "stop_sequences", []string{stop.String()})
+			out, _ = sjson.SetBytesM(out, "stop_sequences", []string{stop.String()})
 		}
 	}
 
 	// Stream configuration to enable or disable streaming responses
-	out, _ = sjson.Set(out, "stream", stream)
+	out, _ = sjson.SetBytesM(out, "stream", stream)
 
 	// Process messages and transform them to Claude Code format
 	if messages := root.Get("messages"); messages.Exists() && messages.IsArray() {
@@ -151,13 +151,13 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 				}
 				if contentResult.Exists() && contentResult.Type == gjson.String && contentResult.String() != "" {
 					textPart := `{"type":"text","text":""}`
-					textPart, _ = sjson.Set(textPart, "text", contentResult.String())
+					textPart, _ = sjson.SetBytesM(textPart, "text", contentResult.String())
 					out, _ = sjson.SetRaw(out, fmt.Sprintf("messages.%d.content.-1", systemMessageIndex), textPart)
 				} else if contentResult.Exists() && contentResult.IsArray() {
 					contentResult.ForEach(func(_, part gjson.Result) bool {
 						if part.Get("type").String() == "text" {
 							textPart := `{"type":"text","text":""}`
-							textPart, _ = sjson.Set(textPart, "text", part.Get("text").String())
+							textPart, _ = sjson.SetBytesM(textPart, "text", part.Get("text").String())
 							out, _ = sjson.SetRaw(out, fmt.Sprintf("messages.%d.content.-1", systemMessageIndex), textPart)
 						}
 						return true
@@ -165,12 +165,12 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 				}
 			case "user", "assistant":
 				msg := `{"role":"","content":[]}`
-				msg, _ = sjson.Set(msg, "role", role)
+				msg, _ = sjson.SetBytesM(msg, "role", role)
 
 				// Handle content based on its type (string or array)
 				if contentResult.Exists() && contentResult.Type == gjson.String && contentResult.String() != "" {
 					part := `{"type":"text","text":""}`
-					part, _ = sjson.Set(part, "text", contentResult.String())
+					part, _ = sjson.SetBytesM(part, "text", contentResult.String())
 					msg, _ = sjson.SetRaw(msg, "content.-1", part)
 				} else if contentResult.Exists() && contentResult.IsArray() {
 					contentResult.ForEach(func(_, part gjson.Result) bool {
@@ -179,7 +179,7 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 						switch partType {
 						case "text":
 							textPart := `{"type":"text","text":""}`
-							textPart, _ = sjson.Set(textPart, "text", part.Get("text").String())
+							textPart, _ = sjson.SetBytesM(textPart, "text", part.Get("text").String())
 							msg, _ = sjson.SetRaw(msg, "content.-1", textPart)
 
 						case "image_url":
@@ -194,8 +194,8 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 									data := parts[1]
 
 									imagePart := `{"type":"image","source":{"type":"base64","media_type":"","data":""}}`
-									imagePart, _ = sjson.Set(imagePart, "source.media_type", mediaType)
-									imagePart, _ = sjson.Set(imagePart, "source.data", data)
+									imagePart, _ = sjson.SetBytesM(imagePart, "source.media_type", mediaType)
+									imagePart, _ = sjson.SetBytesM(imagePart, "source.data", data)
 									msg, _ = sjson.SetRaw(msg, "content.-1", imagePart)
 								}
 							}
@@ -215,8 +215,8 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 
 							function := toolCall.Get("function")
 							toolUse := `{"type":"tool_use","id":"","name":"","input":{}}`
-							toolUse, _ = sjson.Set(toolUse, "id", toolCallID)
-							toolUse, _ = sjson.Set(toolUse, "name", function.Get("name").String())
+							toolUse, _ = sjson.SetBytesM(toolUse, "id", toolCallID)
+							toolUse, _ = sjson.SetBytesM(toolUse, "name", function.Get("name").String())
 
 							// Parse arguments for the tool call
 							if args := function.Get("arguments"); args.Exists() {
@@ -250,8 +250,8 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 				content := message.Get("content").String()
 
 				msg := `{"role":"user","content":[{"type":"tool_result","tool_use_id":"","content":""}]}`
-				msg, _ = sjson.Set(msg, "content.0.tool_use_id", toolCallID)
-				msg, _ = sjson.Set(msg, "content.0.content", content)
+				msg, _ = sjson.SetBytesM(msg, "content.0.tool_use_id", toolCallID)
+				msg, _ = sjson.SetBytesM(msg, "content.0.content", content)
 				out, _ = sjson.SetRaw(out, "messages.-1", msg)
 				messageIndex++
 			}
@@ -266,8 +266,8 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 			if tool.Get("type").String() == "function" {
 				function := tool.Get("function")
 				anthropicTool := `{"name":"","description":""}`
-				anthropicTool, _ = sjson.Set(anthropicTool, "name", function.Get("name").String())
-				anthropicTool, _ = sjson.Set(anthropicTool, "description", function.Get("description").String())
+				anthropicTool, _ = sjson.SetBytesM(anthropicTool, "name", function.Get("name").String())
+				anthropicTool, _ = sjson.SetBytesM(anthropicTool, "description", function.Get("description").String())
 
 				// Convert parameters schema for the tool
 				if parameters := function.Get("parameters"); parameters.Exists() {
@@ -305,7 +305,7 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 			if toolChoice.Get("type").String() == "function" {
 				functionName := toolChoice.Get("function.name").String()
 				toolChoiceJSON := `{"type":"tool","name":""}`
-				toolChoiceJSON, _ = sjson.Set(toolChoiceJSON, "name", functionName)
+				toolChoiceJSON, _ = sjson.SetBytesM(toolChoiceJSON, "name", functionName)
 				out, _ = sjson.SetRaw(out, "tool_choice", toolChoiceJSON)
 			}
 		default:

@@ -3,7 +3,7 @@ package main
 import (
 	"fmt"
 
-	cursorproto "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/cursor/proto"
+	cursorproto "github.com/kooshapari/CLIProxyAPI/v7/internal/auth/cursor/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 )
 

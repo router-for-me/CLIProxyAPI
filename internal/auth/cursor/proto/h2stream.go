@@ -33,10 +33,10 @@ type H2Stream struct {
 	err    error
 
 	// Send-side flow control
-	sendWindow   int32      // available bytes we can send on this stream
-	connWindow   int32      // available bytes on the connection level
-	windowCond   *sync.Cond // signaled when window is updated
-	windowMu     sync.Mutex // protects sendWindow, connWindow
+	sendWindow int32      // available bytes we can send on this stream
+	connWindow int32      // available bytes on the connection level
+	windowCond *sync.Cond // signaled when window is updated
+	windowMu   sync.Mutex // protects sendWindow, connWindow
 }
 
 // ID returns the unique identifier for this stream (for logging).
@@ -53,6 +53,7 @@ func (s *H2Stream) FrameNum() int64 {
 func DialH2Stream(host string, headers map[string]string) (*H2Stream, error) {
 	tlsConn, err := tls.Dial("tcp", host+":443", &tls.Config{
 		NextProtos: []string{"h2"},
+		MinVersion: tls.VersionTLS13,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("h2: TLS dial failed: %w", err)

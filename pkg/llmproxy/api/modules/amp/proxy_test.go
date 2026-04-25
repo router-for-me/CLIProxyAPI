@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/kooshapari/CLIProxyAPI/v7/internal/config"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
 )
 
 // Helper: compress data with gzip

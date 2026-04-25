@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"testing"
 
-	kiroauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kiro"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	kiroauth "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/auth/kiro"
+	cliproxyauth "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
 func TestBuildKiroEndpointConfigs(t *testing.T) {
@@ -281,8 +281,8 @@ func TestGetAuthValue(t *testing.T) {
 			expected: "attribute_value",
 		},
 		{
-			name: "Both nil",
-			auth: &cliproxyauth.Auth{},
+			name:     "Both nil",
+			auth:     &cliproxyauth.Auth{},
 			key:      "test_key",
 			expected: "",
 		},
@@ -326,9 +326,9 @@ func TestGetAuthValue(t *testing.T) {
 
 func TestGetAccountKey(t *testing.T) {
 	tests := []struct {
-		name     string
-		auth     *cliproxyauth.Auth
-		checkFn  func(t *testing.T, result string)
+		name    string
+		auth    *cliproxyauth.Auth
+		checkFn func(t *testing.T, result string)
 	}{
 		{
 			name: "From client_id",

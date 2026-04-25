@@ -56,7 +56,7 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 					continue
 				}
 				partJSON := `{}`
-				partJSON, _ = sjson.Set(partJSON, "text", systemPrompt)
+				partJSON, _ = sjson.SetBytesM(partJSON, "text", systemPrompt)
 				systemInstructionJSON, _ = sjson.SetRaw(systemInstructionJSON, "parts.-1", partJSON)
 				hasSystemInstruction = true
 			}
@@ -65,7 +65,7 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 		systemPrompt := strings.TrimSpace(systemResult.String())
 		if systemPrompt != "" {
 			systemInstructionJSON = `{"role":"user","parts":[{"text":""}]}`
-			systemInstructionJSON, _ = sjson.Set(systemInstructionJSON, "parts.0.text", systemPrompt)
+			systemInstructionJSON, _ = sjson.SetBytesM(systemInstructionJSON, "parts.0.text", systemPrompt)
 			hasSystemInstruction = true
 		}
 	}
@@ -380,7 +380,7 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 					continue
 				}
 				partJSON := `{}`
-				partJSON, _ = sjson.Set(partJSON, "text", prompt)
+				partJSON, _ = sjson.SetBytesM(partJSON, "text", prompt)
 				clientContentJSON, _ = sjson.SetRaw(clientContentJSON, "parts.-1", partJSON)
 				contentsJSON, _ = sjson.SetRaw(contentsJSON, "-1", clientContentJSON)
 				hasContents = true
@@ -526,7 +526,7 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 				maxTokens = limit
 			}
 		}
-		out, _ = sjson.Set(out, "request.generationConfig.maxOutputTokens", maxTokens)
+		out, _ = sjson.SetBytesM(out, "request.generationConfig.maxOutputTokens", maxTokens)
 	}
 
 	out = common.AttachDefaultSafetySettings(out, "request.safetySettings")

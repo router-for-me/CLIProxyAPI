@@ -1,0 +1,24 @@
+rules:
+  - id: no-debug-prints-in-library-code
+    message: Replace temporary fmt.Print* debugging with structured logging before merge.
+    languages: [go]
+    severity: INFO
+    patterns:
+      - pattern-either:
+          - pattern: fmt.Println(...)
+          - pattern: fmt.Printf(...)
+    paths:
+      exclude:
+        - cmd/**
+        - "**/*_test.go"
+paths:
+  exclude:
+    - ".git/"
+    - "target/"
+    - ".archive/"
+    - "node_modules/"
+    - "dist/"
+    - "build/"
+    - "docsets/"
+    - "reports/"
+    - "**/*_test.go"

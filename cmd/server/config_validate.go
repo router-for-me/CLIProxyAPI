@@ -6,7 +6,7 @@ import (
 	"io"
 	"os"
 
-	"github.com/kooshapari/CLIProxyAPI/v7/internal/config"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
 	"gopkg.in/yaml.v3"
 )
 

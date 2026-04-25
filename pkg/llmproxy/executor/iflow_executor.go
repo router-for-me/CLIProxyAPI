@@ -42,8 +42,8 @@ func NewIFlowExecutor(cfg *config.Config) *IFlowExecutor { return &IFlowExecutor
 func (e *IFlowExecutor) Identifier() string { return "iflow" }
 
 type iflowProviderError struct {
-	Code       string
-	Message    string
+	Code        string
+	Message     string
 	Refreshable bool
 }
 

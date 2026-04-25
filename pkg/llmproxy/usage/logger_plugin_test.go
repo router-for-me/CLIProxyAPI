@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
+	coreusage "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/usage"
 )
 
 func TestRequestStatisticsRecordIncludesLatency(t *testing.T) {

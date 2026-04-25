@@ -700,6 +700,7 @@ func (r *ModelRegistry) SuspendClientModel(clientID, modelID, reason string) {
 	}
 	registration.SuspendedClients[clientID] = reason
 	registration.LastUpdated = time.Now()
+	r.invalidateAvailableModelsCacheLocked()
 	safeClient := redactClientID(clientID)
 	if reason != "" {
 		log.Debugf("Suspended client %s for model %s: %s", safeClient, modelID, reason)
@@ -729,6 +730,7 @@ func (r *ModelRegistry) ResumeClientModel(clientID, modelID string) {
 	}
 	delete(registration.SuspendedClients, clientID)
 	registration.LastUpdated = time.Now()
+	r.invalidateAvailableModelsCacheLocked()
 	safeClient := redactClientID(clientID)
 	log.Debugf("Resumed client %s for model %s", safeClient, modelID)
 }

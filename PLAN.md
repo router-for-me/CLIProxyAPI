@@ -37,3 +37,18 @@
 |------|-------------|------------|--------|
 | P4.1 | Docker image build | P1.1 | Done |
 | P4.2 | docker-compose configuration | P4.1 | Done |
+
+## Stabilization Snapshot
+
+The feature plan is complete. Treat this repo as maintenance-only until a new bugfix or
+expansion phase is explicitly created.
+
+### Current Focus
+- Keep the HTTP surface and auth flows stable.
+- Prefer regression fixes over new endpoints.
+- Re-run deployment and smoke checks only when behavior changes.
+
+### Next Executable Actions
+1. Verify the current `main` branch remains clean after any dependency or runtime update.
+2. Capture any newly discovered regressions as a dedicated bugfix lane instead of extending this plan.
+3. Add a new phase only if the repo needs another cohesive feature wave.

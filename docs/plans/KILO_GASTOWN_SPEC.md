@@ -1,13 +1,14 @@
-# Kilo Gastown Methodology Specification for cliproxyapi++
+# Kilo Gastown Methodology Specification
 
-**Rig ID:** `1f1669fc-c16a-40de-869c-107f631a9935`  
-**Town:** `78a8d430-a206-4a25-96c0-5cd9f5caf984`
+**Rig:** `1f1669fc-c16a-40de-869c-107f631a9935`  
+**Town:** `78a8d430-a206-4a25-96c0-5cd9f5caf984`  
+**Repository:** cliproxyapi++ (LLM Proxy with Multi-Provider Support)
 
 ---
 
 ## Overview
 
-Kilo Gastown is the agent orchestration methodology used in the Kush multi-repo ecosystem. This document explains how Kilo mechanics apply to `cliproxyapi++`, the LLM proxy layer with multi-provider support.
+Kilo Gastown is an agent orchestration methodology that coordinates distributed AI agents across a rig to accomplish complex, multi-repo software engineering tasks. This document explains how Kilo mechanics apply to the cliproxyapi++ codebase.
 
 ---
 
@@ -15,63 +16,119 @@ Kilo Gastown is the agent orchestration methodology used in the Kush multi-repo 
 
 ### Convoys
 
-Convoys are logical grouping mechanisms for related work items (beads) that need to ship together across repos. A convoy ensures atomic delivery of coordinated changes.
+A **convoy** is a grouping mechanism for related work across repos. Convoys enable parallel feature development while maintaining semantic relationships between beads (work items).
 
-**In cliproxyapi++:**
-- Convoys coordinate multi-repo changes such as API contract updates, provider additions, or shared protocol changes
-- Each convoy has a `feature_branch` metadata field tracking the coordinated branch across repos
-- Convoys are tracked via `gt_list_convoys` for progress visibility
-
-**Convoy lifecycle:**
 ```
-open → in_progress → (ready_to_land) → merged
+Convoy: "AgilePlus + Kilo Specs: cliproxyapi++"
+├── Bead: Add Kilo Gastown methodology spec (this work)
+├── Bead: Add methodology artifacts to thegent
+├── Bead: Add methodology artifacts to agentapi++
+└── ...
 ```
 
-| Status | Meaning |
-|--------|---------|
-| `open` | Work not yet started |
-| `in_progress` | Work underway |
-| `ready_to_land` | CI gates passed, awaiting merge |
-| `merged` | Changes landed on target branch |
+**Characteristics:**
+- Convoys have a `feature_branch` metadata field for the shared branch name
+- All repo worktrees join the same convoy branch
+- Progress tracked via `gt_list_convoys`
 
 ### Beads
 
-Beads are the atomic work items in the Kilo system. Each bead represents a unit of work that can be assigned to an agent.
+**Beads** are the fundamental work unit in Kilo Gastown. Each bead represents a discrete task assigned to an agent.
 
-**Bead types:**
-- `issue` — Feature, bug fix, or task
-- `convoy` — Coordinator bead for multi-repo work
-- `triage` — Routing or escalation request
+| Field | Purpose |
+|-------|---------|
+| `bead_id` | Unique identifier (UUID) |
+| `type` | `issue`, `convoy`, `task`, `triage` |
+| `status` | `open`, `in_progress`, `in_review`, `closed` |
+| `assignee_agent_bead_id` | Which polecat is working this bead |
+| `parent_bead_id` | Hierarchical grouping |
+| `metadata` | Key-value pairs (convoy_id, feature_branch, etc.) |
 
-**In cliproxyapi++:**
-- Issue beads track individual features (e.g., "Add Anthropic streaming support")
-- Each bead has a `bead_id`, `status`, `priority`, and optional `parent_bead_id`
-- Beads are assigned via `assignee_agent_bead_id`
-
-**Bead lifecycle:**
+**Bead Lifecycle:**
 ```
 open → in_progress → in_review → closed
+         ↑_____________↓ (rework loop)
 ```
 
-| Status | Meaning |
-|--------|---------|
-| `open` | Queued, not yet started |
-| `in_progress` | Agent is working on it |
-| `in_review` | Submitted for review/merge |
-| `closed` | Completed or rejected |
+### Polecats
 
-### Delegation: gt_sling and gt_sling_batch
+**Polecats** are the working agents in a rig. Each polecat:
+- Has a unique identity (e.g., `Polecat-27-polecat-1f1669fc@78a8d430`)
+- Is assigned one or more beads via `current_hook_bead_id`
+- Operates within a worktree (`.worktrees/` directory)
+- Calls `gt_done` when a bead transitions to `in_review`
 
-**gt_sling** — Delegates a single bead to another agent.
+### Rigs
 
-**gt_sling_batch** — Delegates multiple beads to another agent in a single operation.
+A **rig** is a coordinated group of agents working together on shared objectives:
+- Rig ID: `1f1669fc-c16a-40de-869c-107f631a9935`
+- Contains multiple polecats and towns
+- Manages convoy lifecycle and agent dispatch
 
-**In cliproxyapi++:**
-- Used by orchestrating agents (e.g., TownDO or lead agents) to route work to specialized polecat agents
-- Example: A "provider expansion" bead gets slung to an agent with relevant provider expertise
-- Batch sling used when multiple related beads (e.g., provider + tests + docs) go to the same agent
+### Towns
 
-### Merge Modes
+A **town** is a logical subdivision within a rig:
+- Town ID: `78a8d430-a206-4a25-96c0-5cd9f5caf984`
+- Provides namespace isolation for agents and beads
+
+---
+
+## Delegation Mechanisms
+
+### gt_sling / gt_sling_batch
+
+Used to delegate work to other agents:
+
+- `gt_sling`: Assigns a single bead to another agent
+- `gt_sling_batch`: Assigns multiple beads in one operation
+
+**Usage in cliproxyapi++:**
+```bash
+# Delegate a bead to another polecat
+gt_sling --to-agent <agent_id> --bead <bead_id>
+```
+
+### gt_prime
+
+Called at session start to retrieve:
+- Agent identity and status
+- Hooked (current) bead
+- Undelivered mail
+- All open beads in the rig
+
+**Pattern:**
+```bash
+gt_prime  # Auto-injected on first message, refresh with explicit call
+```
+
+---
+
+## Bead Coordination
+
+### gt_bead_status
+
+Inspect any bead's current state by ID:
+```bash
+gt_bead_status --bead-id <bead_id>
+```
+
+### gt_bead_close
+
+Mark a bead as completed (after all work is done and merged):
+```bash
+gt_bead_close --bead-id <bead_id>
+```
+
+### gt_list_convoys
+
+Track convoy progress across repos. Shows:
+- Open convoys with their feature branches
+- Bead counts per convoy
+- `ready_to_land` flag when all beads are in_review/closed
+
+---
+
+## Merge Modes
 
 Kilo supports different merge strategies for integrating bead work:
 
@@ -80,24 +137,10 @@ Kilo supports different merge strategies for integrating bead work:
 | `squash` | All commits squashed into one (clean history) |
 | `rebase` | Commits replayed on target (linear history) |
 | `merge` | Full commit history preserved |
+| `in_review` | Work submitted to review queue; refinery handles merge |
+| `closed` | Work fully completed and merged |
 
-**In cliproxyapi++:**
-- Default: `squash` for feature branches (clean main history)
-- Exception: `rebase` for hotfixes requiring full audit trail
-- Merge mode determined at convoy creation based on change type
-
-### gt_list_convoys
-
-The `gt_list_convoys` command provides progress visibility across all active convoys in the rig.
-
-**Output includes:**
-- Convoy ID and title
-- Status (open, in_progress, ready_to_land)
-- Child beads and their statuses
-- Feature branch name
-
-**In cliproxyapi++:**
-- Use `gt_list_convoys` to track cross-cutting initiatives like "Add AWS Bedrock support" which may touch provider adapters, auth handlers, and routing logic simultaneously
+**Important:** Agents do NOT merge directly. They push their branch and call `gt_done`, which transitions the bead to `in_review` and submits to the refinery queue.
 
 ---
 
@@ -109,13 +152,37 @@ The `gt_list_convoys` command provides progress visibility across all active con
 | **Polecat** | Worker agent; implements beads assigned to it | gt_done, gt_bead_close, gt_checkpoint |
 | **Refinery** | Merge gate; validates and lands approved changes | gt_list_convoys, gt_bead_status |
 
-### Polecat Workflow (cliproxyapi++)
+---
 
-1. **Prime** — Call `gt_prime` to get hooked bead and context
-2. **Work** — Implement the bead requirement
-3. **Checkpoint** — Call `gt_checkpoint` after significant milestones
-4. **Verify** — Run lint/typecheck/tests before submission
-5. **Done** — Push branch, call `gt_done` to submit for review
+## Agent Workflow for cliproxyapi++
+
+### Starting Work
+
+1. Receive bead assignment (hooked via `current_hook_bead_id`)
+2. Call `gt_prime` if needing context refresh
+3. Review bead requirements
+4. Create/checkout appropriate worktree
+
+### During Work
+
+1. Implement the feature or fix
+2. Run quality gates: `task quality`
+3. Commit frequently with descriptive messages
+4. Push after each commit (worktree disk is ephemeral)
+5. Call `gt_checkpoint` after significant milestones
+
+### Completing Work
+
+1. Verify all pre-submission gates pass
+2. Push branch
+3. Call `gt_done --branch <branch_name>`
+4. Bead transitions to `in_review`
+
+### Error Handling
+
+- If stuck after multiple attempts: `gt_escalate` with problem description
+- If blocked: use `gt_mail_send` to coordinate with other agents
+- If container restarts: recover from last `gt_checkpoint`
 
 ### GUPP Principle
 
@@ -139,43 +206,55 @@ Worktrees isolate feature branches from the main checkout:
 
 ---
 
-## Applying Kilo to cliproxyapi++ Development
+## Gastown Tool Reference
 
-### Feature Development Flow
+| Tool | Purpose |
+|------|---------|
+| `gt_prime` | Get full context at session start |
+| `gt_bead_status` | Inspect bead state |
+| `gt_bead_close` | Close a completed bead |
+| `gt_done` | Push branch and transition bead to in_review |
+| `gt_mail_send` | Send message to another agent |
+| `gt_mail_check` | Read pending mail |
+| `gt_escalate` | Create escalation bead for blockers |
+| `gt_checkpoint` | Write crash-recovery data |
+| `gt_status` | Emit dashboard status update |
+| `gt_nudge` | Send real-time nudge to agent |
+| `gt_mol_current` | Get current molecule step |
+| `gt_mol_advance` | Complete molecule step and advance |
+| `gt_triage_resolve` | Resolve a triage request |
+
+---
+
+## cliproxyapi++ Integration
+
+### Repository Role
+
+cliproxyapi++ is the LLM proxy component in the Kush ecosystem:
 
 ```
-TownDO creates bead
-    ↓
-Bead hooked to Polecat
-    ↓
-Polecat implements on feature branch
-    ↓
-Push + gt_done → in_review
-    ↓
-Refinery validates
-    ↓
-Merge to main
+kush/
+├── thegent/         # Agent orchestration
+├── agentapi++/      # HTTP API for coding agents
+├── cliproxy++/      # LLM proxy with multi-provider support (this repo)
+├── tokenledger/     # Token and cost tracking
+└── ...
 ```
 
-### Multi-Repo Coordinated Changes
+### Methodology Application
 
-For changes affecting multiple Kush repos (e.g., adding a new provider that also requires SDK updates):
+1. **Convoy Participation**: cliproxyapi++ joins convoys like "AgilePlus + Kilo Specs" to implement cross-repo features
 
-```
-TownDO creates convoy bead
-    ↓
-Child beads created for each repo (cliproxyapi++, thegent, agentapi++, etc.)
-    ↓
-All child beads slung to respective polecats
-    ↓
-Each polecat works independently on their feature branch
-    ↓
-All beads reach ready_to_land
-    ↓
-Refinery merges convoy atomically
-```
+2. **Worktree Discipline**: 
+   - All feature work happens in `.worktrees/convoy__*-<bead_id>/`
+   - Primary checkout remains on `main`
 
-### Bot Review Retrigger Governance
+3. **Phenotype Governance**:
+   - TDD + BDD + SDD for all feature changes
+   - Hexagonal + Clean + SOLID architecture boundaries
+   - Explicit failures over silent degradation
+
+### Bot Review Governance
 
 When requesting bot reviews (CodeRabbit, Gemini Code Assist):
 
@@ -276,13 +355,20 @@ kush/
 └── pheno-sdk/      # Python SDK
 ```
 
+Alternative quality task:
+```bash
+task quality
+```
+
 ---
 
-## Related Documentation
+## References & Related Documentation
 
-- [cliproxyapi++ SPEC.md](./SPEC.md) — Technical architecture
-- [cliproxyapi++ FEATURE_CHANGES_PLUSPLUS.md](./FEATURE_CHANGES_PLUSPLUS.md) — ++ vs baseline changes
-- [Kush AGENTS.md](../AGENTS.md) — Full Kilo Gastown methodology reference
+- [cliproxyapi++ SPEC.html](../../SPEC.html) — Technical architecture
+- [cliproxyapi++ FEATURE_CHANGES_PLUSPLUS.html](../../FEATURE_CHANGES_PLUSPLUS.html) — ++ vs baseline changes
+- [AGENTS.md: Agent guidance for this repository](../../AGENTS.md)
+- [Repos shelf AGENTS.md](../../../AGENTS.md) — Shelf-level governance and Kilo Gastown reference
+- [Kush Ecosystem: Multi-repo system overview](../../README.md)
 
 ---
 

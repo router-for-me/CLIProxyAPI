@@ -1,9 +1,23 @@
-name: security-guard
-on: [workflow_dispatch]
+name: Security Guard
+
+on:
+  workflow_call:
+    secrets:
+      GITGUARDIAN_API_KEY:
+        required: true
+  workflow_dispatch:
+
 jobs:
-  audit:
+  ggshield-scan:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
-      - name: Run security audit
-        run: echo "Security audit placeholder - no script available yet"
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+      - name: Install ggshield
+        run: pip install ggshield==1.38.0
+      - name: Run ggshield secret scan
+        env:
+          GITGUARDIAN_API_KEY: ${{ secrets.GITGUARDIAN_API_KEY }}
+        run: ggshield secret scan path . --recursive

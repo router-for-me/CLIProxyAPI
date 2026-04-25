@@ -331,3 +331,17 @@ func (k *KiroAuth) UpdateTokenStorage(storage *KiroTokenStorage, tokenData *Kiro
 		storage.Email = tokenData.Email
 	}
 }
+
+// GetKiroAPIEndpointFromProfileArn returns the Kiro API endpoint based on profile ARN region.
+// Defaults to us-east-1 if profileArn is empty or region cannot be parsed.
+func GetKiroAPIEndpointFromProfileArn(profileArn string) string {
+	// Extract region from ARN if provided
+	// ARN format: arn:aws:codewhisperer:<region>:<account>:profile/<profile-id>
+	if profileArn != "" {
+		parts := strings.Split(profileArn, ":")
+		if len(parts) >= 4 {
+			return fmt.Sprintf("https://codewhisperer.%s.amazonaws.com", parts[3])
+		}
+	}
+	return "https://codewhisperer.us-east-1.amazonaws.com"
+}

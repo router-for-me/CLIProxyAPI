@@ -1,25 +1,56 @@
 name: CI
+
 on:
   push:
-    branches: [main]
+    branches: [main, feature/*, bugfix/*, docs/*, release/*, hotfix/*]
   pull_request:
     branches: [main]
+
 jobs:
-  ci:
+  test:
     runs-on: ubuntu-latest
+    
+    strategy:
+      matrix:
+        go-version: ['1.21', '1.22']
+    
     steps:
       - uses: actions/checkout@v4
+
       - name: Refresh models catalog
         run: |
           git fetch --depth 1 https://github.com/router-for-me/models.git main
-          git show FETCH_HEAD:models.json > internal/registry/models/models.json
-      - uses: actions/setup-go@v5
+          mkdir -p pkg/llmproxy/registry/models
+          git show FETCH_HEAD:models.json > pkg/llmproxy/registry/models/models.json
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
-          cache: true
-      - name: Vet
-        run: go vet ./...
+          go-version: ${{ matrix.go-version }}
+
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+
+      - name: Download dependencies
+        run: go mod download
+
       - name: Build
         run: go build ./...
-      - name: Test
-        run: go test ./...
+
+      - name: Run tests
+        run: go test ./... -v -race -coverprofile=coverage.out
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v3
+        with:
+          files: ./coverage.out
+      
+
+  phenotype-validate:
+    runs-on: ubuntu-latest
+    uses: KooshaPari/phenotypeActions/.github/workflows/validate-governance.yml@main

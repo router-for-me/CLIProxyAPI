@@ -39,7 +39,8 @@ func TestConvertClaudeResponseToOpenAIResponses(t *testing.T) {
 	if len(got) != 1 {
 		t.Errorf("expected 1 chunk, got %d", len(got))
 	}
-	res := gjson.Parse(got[0][strings.Index(got[0], "data: ")+6:])
+	line := got[0]
+	res := gjson.ParseBytes(line[strings.Index(string(line), "data: ")+6:])
 	if res.Get("type").String() != "response.completed" {
 		t.Errorf("expected response.completed, got %s", res.Get("type").String())
 	}
@@ -53,7 +54,7 @@ data: {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta"
 data: {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"input_tokens": 10, "output_tokens": 5}}`)
 
 	got := ConvertClaudeResponseToOpenAIResponsesNonStream(context.Background(), "gpt-4o", nil, nil, raw, nil)
-	res := gjson.Parse(got)
+	res := gjson.ParseBytes(got)
 	if res.Get("status").String() != "completed" {
 		t.Errorf("expected completed, got %s", res.Get("status").String())
 	}

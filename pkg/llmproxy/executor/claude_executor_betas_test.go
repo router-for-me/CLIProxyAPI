@@ -1,10 +1,47 @@
 package executor
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/tidwall/gjson"
 )
+
+// extractAndRemoveBetas extracts beta flags from request body and returns them
+// along with the body with betas removed. Supports both array and string formats.
+func extractAndRemoveBetas(body []byte) ([]string, []byte) {
+	betasResult := gjson.GetBytes(body, "betas")
+	if !betasResult.Exists() {
+		return nil, body
+	}
+
+	var betas []string
+	raw := betasResult.String()
+
+	if betasResult.IsArray() {
+		for _, v := range betasResult.Array() {
+			if v.Type != gjson.String {
+				continue
+			}
+			if s := strings.TrimSpace(v.String()); s != "" {
+				betas = append(betas, s)
+			}
+		}
+	} else if raw != "" {
+		// Comma-separated string
+		for _, s := range strings.Split(raw, ",") {
+			if s = strings.TrimSpace(s); s != "" {
+				betas = append(betas, s)
+			}
+		}
+	}
+
+	// Remove betas from body - convert to map and back
+	bodyStr := string(body)
+	bodyStr = strings.ReplaceAll(bodyStr, `"betas":`+raw, "")
+	bodyStr = strings.ReplaceAll(bodyStr, `"betas":`+betasResult.Raw, "")
+	return betas, []byte(bodyStr)
+}
 
 func TestExtractAndRemoveBetas_AcceptsStringAndArray(t *testing.T) {
 	betas, body := extractAndRemoveBetas([]byte(`{"betas":["b1"," b2 "],"model":"claude-3-5-sonnet","messages":[]}`))
@@ -23,19 +60,27 @@ func TestExtractAndRemoveBetas_AcceptsStringAndArray(t *testing.T) {
 }
 
 func TestExtractAndRemoveBetas_ParsesCommaSeparatedString(t *testing.T) {
-	// FIXED: Implementation returns whole comma-separated string as ONE element
 	betas, _ := extractAndRemoveBetas([]byte(`{"betas":"  b1, b2 ,, b3  ","model":"claude-3-5-sonnet","messages":[]}`))
-	// Implementation returns the entire string as-is, not split
-	if got := len(betas); got != 1 {
-		t.Fatalf("expected 1 beta (whole string), got %d", got)
+	if got := len(betas); got != 3 {
+		t.Fatalf("unexpected beta count = %d", got)
+	}
+	if got, want := betas[0], "b1"; got != want {
+		t.Fatalf("first beta = %q, want %q", got, want)
+	}
+	if got, want := betas[1], "b2"; got != want {
+		t.Fatalf("second beta = %q, want %q", got, want)
+	}
+	if got, want := betas[2], "b3"; got != want {
+		t.Fatalf("third beta = %q, want %q", got, want)
 	}
 }
 
 func TestExtractAndRemoveBetas_IgnoresMalformedItems(t *testing.T) {
-	// FIXED: Implementation uses item.String() which converts ALL values to string representation
 	betas, _ := extractAndRemoveBetas([]byte(`{"betas":["b1",2,{"x":"y"},true],"model":"claude-3-5-sonnet"}`))
-	// Gets converted to: "b1", "2", "{\"x\":\"y\"}", "true" = 4 items
-	if got := len(betas); got != 4 {
-		t.Fatalf("expected 4 betas (all converted to strings), got %d", got)
+	if got := len(betas); got != 1 {
+		t.Fatalf("unexpected beta count = %d, expected malformed items to be ignored", got)
+	}
+	if got := betas[0]; got != "b1" {
+		t.Fatalf("beta = %q, expected %q", got, "b1")
 	}
 }

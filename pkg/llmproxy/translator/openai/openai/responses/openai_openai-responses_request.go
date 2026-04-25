@@ -41,7 +41,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 
 	// Map generation parameters from responses format to chat completions format
 	if maxTokens := root.Get("max_output_tokens"); maxTokens.Exists() {
-		out, _ = sjson.Set(out, "max_completion_tokens", maxTokens.Int())
+		out, _ = sjson.SetBytes(out, "max_completion_tokens", maxTokens.Int())
 	}
 
 	if parallelToolCalls := root.Get("parallel_tool_calls"); parallelToolCalls.Exists() {
@@ -212,22 +212,22 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 	} else if reasoningEffort := root.Get(`reasoning\.effort`); reasoningEffort.Exists() {
 		effort := strings.ToLower(strings.TrimSpace(reasoningEffort.String()))
 		if effort != "" {
-			out, _ = sjson.Set(out, "reasoning_effort", effort)
+			out, _ = sjson.SetBytes(out, "reasoning_effort", effort)
 		}
 	} else if variant := root.Get("variant"); variant.Exists() && variant.Type == gjson.String {
 		effort := strings.ToLower(strings.TrimSpace(variant.String()))
 		if effort != "" {
-			out, _ = sjson.Set(out, "reasoning_effort", effort)
+			out, _ = sjson.SetBytes(out, "reasoning_effort", effort)
 		}
 	} else if reasoningEffort := root.Get(`reasoning\.effort`); reasoningEffort.Exists() {
 		effort := strings.ToLower(strings.TrimSpace(reasoningEffort.String()))
 		if effort != "" {
-			out, _ = sjson.Set(out, "reasoning_effort", effort)
+			out, _ = sjson.SetBytes(out, "reasoning_effort", effort)
 		}
 	} else if variant := root.Get("variant"); variant.Exists() && variant.Type == gjson.String {
 		effort := strings.ToLower(strings.TrimSpace(variant.String()))
 		if effort != "" {
-			out, _ = sjson.Set(out, "reasoning_effort", effort)
+			out, _ = sjson.SetBytes(out, "reasoning_effort", effort)
 		}
 	}
 
@@ -235,9 +235,9 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 	if toolChoice := root.Get("tool_choice"); toolChoice.Exists() {
 		switch toolChoice.Type {
 		case gjson.JSON:
-			out, _ = sjson.SetRaw(out, "tool_choice", toolChoice.Raw)
+			out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(toolChoice.Raw))
 		default:
-			out, _ = sjson.Set(out, "tool_choice", toolChoice.Value())
+			out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(toolChoice.Raw))
 		}
 	}
 

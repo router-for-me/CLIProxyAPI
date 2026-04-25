@@ -279,7 +279,7 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 				continue
 			}
 			tool := toolResult.Raw
-			tool, _ = sjson.Set(tool, "type", "function")
+			tool, _ = sjson.SetBytesM(tool, "type", "function")
 			// Apply shortened name if needed
 			if v := toolResult.Get("name"); v.Exists() {
 				name := v.String()

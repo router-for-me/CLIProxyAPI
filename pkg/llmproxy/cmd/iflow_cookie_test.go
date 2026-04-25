@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/kooshapari/CLIProxyAPI/v7/internal/config"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
 )
 
 func TestGetAuthFilePath_UsesDefaultAuthDirAndFallbackName(t *testing.T) {

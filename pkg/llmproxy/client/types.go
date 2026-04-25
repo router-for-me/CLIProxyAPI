@@ -113,9 +113,9 @@ func (e *APIError) Error() string {
 type Option func(*clientConfig)
 
 type clientConfig struct {
-	baseURL    string
-	apiKey     string
-	secretKey  string
+	baseURL     string
+	apiKey      string
+	secretKey   string
 	httpTimeout time.Duration
 }
 

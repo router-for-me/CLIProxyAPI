@@ -24,7 +24,7 @@ func TestConvertCodexResponseToOpenAI(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("expected 1 chunk, got %d", len(got))
 	}
-	res := gjson.Parse(got[0])
+	res := gjson.ParseBytes(got[0])
 	if res.Get("id").String() != "resp_123" || res.Get("choices.0.delta.content").String() != "hello" {
 		t.Errorf("unexpected output: %s", got[0])
 	}
@@ -35,7 +35,7 @@ func TestConvertCodexResponseToOpenAI(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("expected 1 chunk for reasoning, got %d", len(got))
 	}
-	res = gjson.Parse(got[0])
+	res = gjson.ParseBytes(got[0])
 	if res.Get("choices.0.delta.reasoning_content").String() != "Thinking..." {
 		t.Errorf("expected reasoning_content Thinking..., got %s", res.Get("choices.0.delta.reasoning_content").String())
 	}
@@ -46,7 +46,7 @@ func TestConvertCodexResponseToOpenAI(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("expected 1 chunk for tool call, got %d", len(got))
 	}
-	res = gjson.Parse(got[0])
+	res = gjson.ParseBytes(got[0])
 	if res.Get("choices.0.delta.tool_calls.0.function.name").String() != "f1" {
 		t.Errorf("expected function name f1, got %s", res.Get("choices.0.delta.tool_calls.0.function.name").String())
 	}
@@ -67,7 +67,7 @@ func TestConvertCodexResponseToOpenAINonStream(t *testing.T) {
 	}}`)
 
 	got := ConvertCodexResponseToOpenAINonStream(context.Background(), "gpt-4o", nil, nil, raw, nil)
-	res := gjson.Parse(got)
+	res := gjson.ParseBytes(got)
 	if res.Get("id").String() != "resp_123" {
 		t.Errorf("expected id resp_123, got %s", res.Get("id").String())
 	}
@@ -107,7 +107,7 @@ func TestConvertCodexResponseToOpenAINonStream_Full(t *testing.T) {
 	}}`)
 
 	got := ConvertCodexResponseToOpenAINonStream(context.Background(), "gpt-4o", nil, nil, raw, nil)
-	res := gjson.Parse(got)
+	res := gjson.ParseBytes(got)
 
 	if res.Get("choices.0.message.reasoning_content").String() != "thought" {
 		t.Errorf("expected reasoning_content thought, got %s", res.Get("choices.0.message.reasoning_content").String())

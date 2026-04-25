@@ -204,7 +204,7 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 								textValue := text.String()
 								if strings.TrimSpace(textValue) != "" {
 									partJSON = `{"text":""}`
-									partJSON, _ = sjson.Set(partJSON, "text", textValue)
+									partJSON, _ = sjson.SetBytesM(partJSON, "text", textValue)
 								}
 							}
 						case "input_image":
@@ -291,8 +291,8 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 					}
 
 					one := `{"role":"","parts":[{"text":""}]}`
-					one, _ = sjson.Set(one, "role", effRole)
-					one, _ = sjson.Set(one, "parts.0.text", contentText)
+					one, _ = sjson.SetBytesM(one, "role", effRole)
+					one, _ = sjson.SetBytesM(one, "parts.0.text", contentText)
 					out, _ = sjson.SetRaw(out, "contents.-1", one)
 				}
 

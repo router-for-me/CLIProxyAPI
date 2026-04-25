@@ -255,7 +255,7 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 						}
 						msgJSON, _ = sjson.SetRawBytes(msgJSON, "content", contentArrayJSON)
 
-						messagesJSON, _ = sjson.Set(messagesJSON, "-1", gjson.Parse(msgJSON).Value())
+						messagesJSON, _ = sjson.SetBytesM(messagesJSON, "-1", gjson.Parse(msgJSON).Value())
 					}
 				}
 
