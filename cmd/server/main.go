@@ -489,14 +489,7 @@ func main() {
 		cmd.DoKimiLogin(cfg, options)
 	} else {
 		if background {
-			filteredArgs := make([]string, 0, len(os.Args)-1)
-			for _, arg := range os.Args[1:] {
-				if arg == "--background" || arg == "-background" ||
-					strings.HasPrefix(arg, "--background=") || strings.HasPrefix(arg, "-background=") {
-					continue
-				}
-				filteredArgs = append(filteredArgs, arg)
-			}
+			filteredArgs := filterBackgroundArgs(os.Args[1:])
 			exited, errStartDetached := cmd.StartDetachedIfRequested(true, filteredArgs)
 			if errStartDetached != nil {
 				log.Errorf("failed to start detached background process: %v", errStartDetached)
@@ -601,5 +594,32 @@ func main() {
 			}
 			cmd.StartService(cfg, configFilePath, password)
 		}
+	}
+}
+
+func filterBackgroundArgs(args []string) []string {
+	filtered := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--background" || arg == "-background" {
+			if i+1 < len(args) && isBoolLikeFlagValue(args[i+1]) {
+				i++
+			}
+			continue
+		}
+		if strings.HasPrefix(arg, "--background=") || strings.HasPrefix(arg, "-background=") {
+			continue
+		}
+		filtered = append(filtered, arg)
+	}
+	return filtered
+}
+
+func isBoolLikeFlagValue(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "0", "t", "f", "true", "false":
+		return true
+	default:
+		return false
 	}
 }
