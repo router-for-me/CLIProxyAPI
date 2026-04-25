@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	auth "github.com/KooshaPari/phenotype-go-auth"
 )
 
 type rewriteTransport struct {
@@ -152,7 +154,7 @@ func TestPollForTokenUsesInjectedHTTPClient(t *testing.T) {
 func TestQwenTokenStorageSaveTokenToFileRejectsTraversalPath(t *testing.T) {
 	t.Parallel()
 
-	ts := &QwenTokenStorage{BaseTokenStorage: &BaseTokenStorage{AccessToken: "token"}}
+	ts := &QwenTokenStorage{BaseTokenStorage: &auth.BaseTokenStorage{AccessToken: "token"}}
 	err := ts.SaveTokenToFile("../qwen.json")
 	if err == nil {
 		t.Fatal("expected error for traversal path")

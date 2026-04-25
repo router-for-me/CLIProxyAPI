@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	auth "github.com/KooshaPari/phenotype-go-auth"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/util"
 	log "github.com/sirupsen/logrus"
@@ -349,7 +350,7 @@ func (o *QwenAuth) RefreshTokensWithRetry(ctx context.Context, refreshToken stri
 // CreateTokenStorage creates a QwenTokenStorage object from a QwenTokenData object.
 func (o *QwenAuth) CreateTokenStorage(tokenData *QwenTokenData) *QwenTokenStorage {
 	storage := &QwenTokenStorage{
-		BaseTokenStorage: &BaseTokenStorage{
+		BaseTokenStorage: &auth.BaseTokenStorage{
 			AccessToken:  tokenData.AccessToken,
 			RefreshToken: tokenData.RefreshToken,
 			LastRefresh:  time.Now().Format(time.RFC3339),

@@ -9,8 +9,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"time"
+
+	"golang.org/x/net/proxy"
 
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/auth/base"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/auth/codex"
@@ -107,8 +111,6 @@ func (g *GeminiAuth) GetAuthenticatedClient(ctx context.Context, ts *GeminiToken
 			ctx = context.WithValue(ctx, oauth2.HTTPClient, proxyClient)
 		}
 	}
-
-	var err error
 
 	// Configure the OAuth2 client.
 	conf := &oauth2.Config{

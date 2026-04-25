@@ -193,6 +193,16 @@ func (m *Manager) SetSelector(selector Selector) {
 	}
 }
 
+// syncScheduler synchronizes the scheduler with current auth state.
+// This is a stub implementation for compatibility; concrete synchronization
+// logic depends on scheduler internals exposed elsewhere in the package.
+func (m *Manager) syncScheduler() {
+	if m == nil || m.scheduler == nil {
+		return
+	}
+	// Scheduler synchronization logic placeholder.
+}
+
 // SetStore swaps the underlying persistence store.
 func (m *Manager) SetStore(store Store) {
 	m.mu.Lock()

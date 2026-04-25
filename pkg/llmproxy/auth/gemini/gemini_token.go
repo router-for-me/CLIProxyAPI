@@ -7,8 +7,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/misc"
-	log "github.com/sirupsen/logrus"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/auth/base"
 )
 
 // GeminiTokenStorage stores OAuth2 token information for Google Gemini API authentication.
