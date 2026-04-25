@@ -207,84 +207,42 @@ func (h *Handler) AuthenticateManagementKey(clientIP string, localClient bool, p
 	}
 	envSecret := h.envSecret
 
-	fail := func() {}
-	if !localClient {
+	now := time.Now()
+	h.attemptsMu.Lock()
+	ai := h.failedAttempts[clientIP]
+	if ai != nil && !ai.blockedUntil.IsZero() {
+		if now.Before(ai.blockedUntil) {
+			remaining := ai.blockedUntil.Sub(now).Round(time.Second)
+			h.attemptsMu.Unlock()
+			return false, http.StatusForbidden, fmt.Sprintf("IP banned due to too many failed attempts. Try again in %s", remaining)
+		}
+		// Ban expired, reset state
+		ai.blockedUntil = time.Time{}
+		ai.count = 0
+	}
+	h.attemptsMu.Unlock()
+
+	if !localClient && !allowRemote {
+		return false, http.StatusForbidden, "remote management disabled"
+	}
+
+	fail := func() {
 		h.attemptsMu.Lock()
-		ai := h.failedAttempts[clientIP]
-		if ai != nil {
-			if !ai.blockedUntil.IsZero() {
-				if time.Now().Before(ai.blockedUntil) {
-					remaining := time.Until(ai.blockedUntil).Round(time.Second)
-					h.attemptsMu.Unlock()
-					return false, http.StatusForbidden, fmt.Sprintf("IP banned due to too many failed attempts. Try again in %s", remaining)
-				}
-				// Ban expired, reset state
-				ai.blockedUntil = time.Time{}
-				ai.count = 0
-			}
+		aip := h.failedAttempts[clientIP]
+		if aip == nil {
+			aip = &attemptInfo{}
+			h.failedAttempts[clientIP] = aip
+		}
+		aip.count++
+		aip.lastActivity = time.Now()
+		if aip.count >= maxFailures {
+			aip.blockedUntil = time.Now().Add(banDuration)
+			aip.count = 0
 		}
 		h.attemptsMu.Unlock()
-
-		if !allowRemote {
-			return false, http.StatusForbidden, "remote management disabled"
-		}
-
-		fail = func() {
-			h.attemptsMu.Lock()
-			aip := h.failedAttempts[clientIP]
-			if aip == nil {
-				aip = &attemptInfo{}
-				h.failedAttempts[clientIP] = aip
-			}
-			aip.count++
-			aip.lastActivity = time.Now()
-			if aip.count >= maxFailures {
-				aip.blockedUntil = time.Now().Add(banDuration)
-				aip.count = 0
-			}
-			h.attemptsMu.Unlock()
-		}
 	}
 
-	if secretHash == "" && envSecret == "" {
-		return false, http.StatusForbidden, "remote management key not set"
-	}
-
-	if provided == "" {
-		if !localClient {
-			fail()
-		}
-		return false, http.StatusUnauthorized, "missing management key"
-	}
-
-	if localClient {
-		if lp := h.localPassword; lp != "" {
-			if subtle.ConstantTimeCompare([]byte(provided), []byte(lp)) == 1 {
-				return true, 0, ""
-			}
-		}
-	}
-
-	if envSecret != "" && subtle.ConstantTimeCompare([]byte(provided), []byte(envSecret)) == 1 {
-		if !localClient {
-			h.attemptsMu.Lock()
-			if ai := h.failedAttempts[clientIP]; ai != nil {
-				ai.count = 0
-				ai.blockedUntil = time.Time{}
-			}
-			h.attemptsMu.Unlock()
-		}
-		return true, 0, ""
-	}
-
-	if secretHash == "" || bcrypt.CompareHashAndPassword([]byte(secretHash), []byte(provided)) != nil {
-		if !localClient {
-			fail()
-		}
-		return false, http.StatusUnauthorized, "invalid management key"
-	}
-
-	if !localClient {
+	reset := func() {
 		h.attemptsMu.Lock()
 		if ai := h.failedAttempts[clientIP]; ai != nil {
 			ai.count = 0
@@ -292,6 +250,36 @@ func (h *Handler) AuthenticateManagementKey(clientIP string, localClient bool, p
 		}
 		h.attemptsMu.Unlock()
 	}
+
+	if secretHash == "" && envSecret == "" {
+		return false, http.StatusForbidden, "remote management key not set"
+	}
+
+	if provided == "" {
+		fail()
+		return false, http.StatusUnauthorized, "missing management key"
+	}
+
+	if localClient {
+		if lp := h.localPassword; lp != "" {
+			if subtle.ConstantTimeCompare([]byte(provided), []byte(lp)) == 1 {
+				reset()
+				return true, 0, ""
+			}
+		}
+	}
+
+	if envSecret != "" && subtle.ConstantTimeCompare([]byte(provided), []byte(envSecret)) == 1 {
+		reset()
+		return true, 0, ""
+	}
+
+	if secretHash == "" || bcrypt.CompareHashAndPassword([]byte(secretHash), []byte(provided)) != nil {
+		fail()
+		return false, http.StatusUnauthorized, "invalid management key"
+	}
+
+	reset()
 
 	return true, 0, ""
 }
