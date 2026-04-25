@@ -6,7 +6,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -611,6 +610,7 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketRequest(
 
 	body, wsHeaders := applyCodexPromptCacheHeaders(opts.SourceFormat, req, body)
 	wsHeaders = applyCodexWebsocketHeaders(ctx, wsHeaders, auth, apiKey, e.cfg)
+	body = codexApplyWebsocketClientMetadata(ctx, body, wsHeaders, auth, e.cfg)
 
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
@@ -942,6 +942,7 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 	identity := codexResolvedIdentity(headers, ginHeaders, auth, cfg)
 	headers.Set("User-Agent", identity.userAgent)
 	codexEnsureSessionHeaders(headers, ginHeaders, auth)
+	codexEnsureResponsesIdentityHeaders(headers, ginHeaders)
 	headers.Set("Originator", identity.originator)
 	if !codexIsAPIKeyAuth(auth) {
 		if auth != nil && auth.Metadata != nil {
@@ -970,13 +971,8 @@ func codexHeaderDefaults(cfg *config.Config, auth *cliproxyauth.Auth) (string, s
 		return "", ""
 	}
 	userAgent := strings.TrimSpace(cfg.CodexHeaderDefaults.UserAgent)
-	if auth == nil {
+	if codexIsAPIKeyAuth(auth) {
 		return userAgent, ""
-	}
-	if auth.Attributes != nil {
-		if v := strings.TrimSpace(auth.Attributes["api_key"]); v != "" {
-			return userAgent, ""
-		}
 	}
 	return userAgent, strings.TrimSpace(cfg.CodexHeaderDefaults.BetaFeatures)
 }
@@ -1151,7 +1147,7 @@ func websocketHandshakeBody(resp *http.Response) []byte {
 	if resp == nil || resp.Body == nil {
 		return nil
 	}
-	body, _ := io.ReadAll(resp.Body)
+	body, _ := helps.ReadErrorResponseBody(resp.Body)
 	closeHTTPResponseBody(resp, "codex websockets executor: close handshake response body error")
 	if len(body) == 0 {
 		return nil

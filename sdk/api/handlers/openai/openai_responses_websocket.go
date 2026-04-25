@@ -32,7 +32,11 @@ const (
 	wsDoneMarker         = "[DONE]"
 	wsTurnStateHeader    = "x-codex-turn-state"
 	wsTimelineBodyKey    = "WEBSOCKET_TIMELINE_OVERRIDE"
+
+	maxResponsesWebsocketTimelineBytes = 4 << 20
 )
+
+const responsesWebsocketTimelineTruncatedMarker = "\n...[websocket timeline truncated]...\n"
 
 var responsesWebsocketUpgrader = websocket.Upgrader{
 	ReadBufferSize:  4096,
@@ -398,19 +402,23 @@ func shouldReplaceWebsocketTranscript(rawJSON []byte, nextInput gjson.Result) bo
 		return false
 	}
 
-	for _, item := range nextInput.Array() {
+	replace := false
+	nextInput.ForEach(func(_, item gjson.Result) bool {
 		switch strings.TrimSpace(item.Get("type").String()) {
 		case "function_call", "custom_tool_call":
-			return true
+			replace = true
+			return false
 		case "message":
 			role := strings.TrimSpace(item.Get("role").String())
 			if role == "assistant" {
-				return true
+				replace = true
+				return false
 			}
 		}
-	}
+		return true
+	})
 
-	return false
+	return replace
 }
 
 func normalizeResponseTranscriptReplacement(rawJSON []byte, lastRequest []byte) []byte {
@@ -436,39 +444,43 @@ func normalizeResponseTranscriptReplacement(rawJSON []byte, lastRequest []byte) 
 }
 
 func dedupeFunctionCallsByCallID(rawArray string) (string, error) {
-	rawArray = strings.TrimSpace(rawArray)
-	if rawArray == "" {
-		return "[]", nil
-	}
-	var items []json.RawMessage
-	if errUnmarshal := json.Unmarshal([]byte(rawArray), &items); errUnmarshal != nil {
-		return "", errUnmarshal
+	rawArray, err := validatedJSONArrayRawString(rawArray)
+	if err != nil {
+		return "", err
 	}
 
-	seenCallIDs := make(map[string]struct{}, len(items))
-	filtered := make([]json.RawMessage, 0, len(items))
-	for _, item := range items {
-		if len(item) == 0 {
-			continue
+	result := gjson.Parse(rawArray)
+	itemCount := int(result.Get("#").Int())
+	var seenCallIDs map[string]struct{}
+	filtered := make([]string, 0, itemCount)
+	duplicated := false
+	result.ForEach(func(_, item gjson.Result) bool {
+		itemRaw := strings.TrimSpace(item.Raw)
+		if itemRaw == "" {
+			return true
 		}
-		itemType := strings.TrimSpace(gjson.GetBytes(item, "type").String())
+		itemType := strings.TrimSpace(item.Get("type").String())
 		if isResponsesToolCallType(itemType) {
-			callID := strings.TrimSpace(gjson.GetBytes(item, "call_id").String())
+			callID := strings.TrimSpace(item.Get("call_id").String())
 			if callID != "" {
+				if seenCallIDs == nil {
+					seenCallIDs = make(map[string]struct{}, itemCount)
+				}
 				if _, ok := seenCallIDs[callID]; ok {
-					continue
+					duplicated = true
+					return true
 				}
 				seenCallIDs[callID] = struct{}{}
 			}
 		}
-		filtered = append(filtered, item)
+		filtered = append(filtered, itemRaw)
+		return true
+	})
+	if !duplicated {
+		return rawArray, nil
 	}
 
-	out, errMarshal := json.Marshal(filtered)
-	if errMarshal != nil {
-		return "", errMarshal
-	}
-	return string(out), nil
+	return joinJSONArrayRaw(filtered), nil
 }
 
 func websocketUpstreamSupportsIncrementalInput(attributes map[string]string, metadata map[string]any) bool {
@@ -623,42 +635,87 @@ func syntheticResponsesWebsocketPrewarmPayloads(requestJSON []byte) ([][]byte, e
 }
 
 func mergeJSONArrayRaw(existingRaw, appendRaw string) (string, error) {
-	existingRaw = strings.TrimSpace(existingRaw)
-	appendRaw = strings.TrimSpace(appendRaw)
-	if existingRaw == "" {
-		existingRaw = "[]"
-	}
-	if appendRaw == "" {
-		appendRaw = "[]"
-	}
-
-	var existing []json.RawMessage
-	if err := json.Unmarshal([]byte(existingRaw), &existing); err != nil {
-		return "", err
-	}
-	var appendItems []json.RawMessage
-	if err := json.Unmarshal([]byte(appendRaw), &appendItems); err != nil {
-		return "", err
-	}
-
-	merged := append(existing, appendItems...)
-	out, err := json.Marshal(merged)
+	existingRaw, err := validatedJSONArrayRawString(existingRaw)
 	if err != nil {
 		return "", err
 	}
-	return string(out), nil
+	appendRaw, err = validatedJSONArrayRawString(appendRaw)
+	if err != nil {
+		return "", err
+	}
+	if existingRaw == "[]" {
+		return appendRaw, nil
+	}
+	if appendRaw == "[]" {
+		return existingRaw, nil
+	}
+
+	existingBody := strings.TrimSpace(existingRaw[1 : len(existingRaw)-1])
+	appendBody := strings.TrimSpace(appendRaw[1 : len(appendRaw)-1])
+	if existingBody == "" {
+		return appendRaw, nil
+	}
+	if appendBody == "" {
+		return existingRaw, nil
+	}
+
+	var builder strings.Builder
+	builder.Grow(len(existingBody) + len(appendBody) + 3)
+	builder.WriteByte('[')
+	builder.WriteString(existingBody)
+	builder.WriteByte(',')
+	builder.WriteString(appendBody)
+	builder.WriteByte(']')
+	return builder.String(), nil
 }
 
 func normalizeJSONArrayRaw(raw []byte) string {
-	trimmed := strings.TrimSpace(string(raw))
-	if trimmed == "" {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
 		return "[]"
 	}
-	result := gjson.Parse(trimmed)
-	if result.Type == gjson.JSON && result.IsArray() {
-		return trimmed
+	if trimmed[0] != '[' || trimmed[len(trimmed)-1] != ']' {
+		return "[]"
 	}
-	return "[]"
+	if !gjson.ValidBytes(trimmed) {
+		return "[]"
+	}
+	return string(trimmed)
+}
+
+func validatedJSONArrayRawString(raw string) (string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "[]", nil
+	}
+	if trimmed[0] != '[' || trimmed[len(trimmed)-1] != ']' {
+		return "", fmt.Errorf("expected JSON array")
+	}
+	if !gjson.Valid(trimmed) {
+		return "", fmt.Errorf("invalid JSON array")
+	}
+	return trimmed, nil
+}
+
+func joinJSONArrayRaw(items []string) string {
+	if len(items) == 0 {
+		return "[]"
+	}
+	size := 2
+	for _, item := range items {
+		size += len(item) + 1
+	}
+	var builder strings.Builder
+	builder.Grow(size)
+	builder.WriteByte('[')
+	for i, item := range items {
+		if i > 0 {
+			builder.WriteByte(',')
+		}
+		builder.WriteString(item)
+	}
+	builder.WriteByte(']')
+	return builder.String()
 }
 
 func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
@@ -910,14 +967,17 @@ func appendWebsocketEvent(builder *strings.Builder, eventType string, payload []
 	if len(trimmedPayload) == 0 {
 		return
 	}
-	if builder.Len() > 0 {
-		builder.WriteString("\n")
+	if websocketTimelineTruncated(builder) {
+		return
 	}
-	builder.WriteString("websocket.")
-	builder.WriteString(eventType)
-	builder.WriteString("\n")
-	builder.Write(trimmedPayload)
-	builder.WriteString("\n")
+	if builder.Len() > 0 {
+		appendWebsocketTimelineText(builder, "\n")
+	}
+	appendWebsocketTimelineText(builder, "websocket.")
+	appendWebsocketTimelineText(builder, eventType)
+	appendWebsocketTimelineText(builder, "\n")
+	appendWebsocketTimelineBytes(builder, trimmedPayload)
+	appendWebsocketTimelineText(builder, "\n")
 }
 
 func websocketPayloadEventType(payload []byte) string {
@@ -973,17 +1033,61 @@ func appendWebsocketTimelineEvent(builder *strings.Builder, eventType string, pa
 	if len(trimmedPayload) == 0 {
 		return
 	}
-	if builder.Len() > 0 {
-		builder.WriteString("\n")
+	if websocketTimelineTruncated(builder) {
+		return
 	}
-	builder.WriteString("Timestamp: ")
-	builder.WriteString(timestamp.Format(time.RFC3339Nano))
-	builder.WriteString("\n")
-	builder.WriteString("Event: websocket.")
-	builder.WriteString(eventType)
-	builder.WriteString("\n")
-	builder.Write(trimmedPayload)
-	builder.WriteString("\n")
+	if builder.Len() > 0 {
+		appendWebsocketTimelineText(builder, "\n")
+	}
+	appendWebsocketTimelineText(builder, "Timestamp: ")
+	appendWebsocketTimelineText(builder, timestamp.Format(time.RFC3339Nano))
+	appendWebsocketTimelineText(builder, "\n")
+	appendWebsocketTimelineText(builder, "Event: websocket.")
+	appendWebsocketTimelineText(builder, eventType)
+	appendWebsocketTimelineText(builder, "\n")
+	appendWebsocketTimelineBytes(builder, trimmedPayload)
+	appendWebsocketTimelineText(builder, "\n")
+}
+
+func appendWebsocketTimelineText(builder *strings.Builder, text string) {
+	if builder == nil || text == "" || websocketTimelineTruncated(builder) {
+		return
+	}
+	remaining := maxResponsesWebsocketTimelineBytes - builder.Len()
+	if remaining <= 0 {
+		builder.WriteString(responsesWebsocketTimelineTruncatedMarker)
+		return
+	}
+	if len(text) <= remaining {
+		builder.WriteString(text)
+		return
+	}
+	builder.WriteString(text[:remaining])
+	builder.WriteString(responsesWebsocketTimelineTruncatedMarker)
+}
+
+func appendWebsocketTimelineBytes(builder *strings.Builder, data []byte) {
+	if builder == nil || len(data) == 0 || websocketTimelineTruncated(builder) {
+		return
+	}
+	remaining := maxResponsesWebsocketTimelineBytes - builder.Len()
+	if remaining <= 0 {
+		builder.WriteString(responsesWebsocketTimelineTruncatedMarker)
+		return
+	}
+	if len(data) <= remaining {
+		builder.Write(data)
+		return
+	}
+	builder.Write(data[:remaining])
+	builder.WriteString(responsesWebsocketTimelineTruncatedMarker)
+}
+
+func websocketTimelineTruncated(builder *strings.Builder) bool {
+	if builder == nil {
+		return false
+	}
+	return builder.Len() > maxResponsesWebsocketTimelineBytes
 }
 
 func markAPIResponseTimestamp(c *gin.Context) {

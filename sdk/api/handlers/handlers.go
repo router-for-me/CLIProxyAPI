@@ -50,6 +50,14 @@ const idempotencyKeyMetadataKey = "idempotency_key"
 const (
 	defaultStreamingKeepAliveSeconds = 0
 	defaultStreamingBootstrapRetries = 0
+	maxLoggedHandlerAPIResponseBytes = 4 << 20
+)
+
+const (
+	apiResponseContextKey          = "API_RESPONSE"
+	apiResponseTimestampContextKey = "API_RESPONSE_TIMESTAMP"
+	apiResponseTruncatedContextKey = "API_RESPONSE_TRUNCATED"
+	apiResponseLogTruncatedMarker  = "\n...[api response log truncated]...\n"
 )
 
 type pinnedAuthContextKey struct{}
@@ -204,7 +212,7 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 		}
 	}
 
-	meta := make(map[string]any)
+	meta := make(map[string]any, 4)
 	if key != "" {
 		meta[idempotencyKeyMetadataKey] = key
 	}
@@ -454,6 +462,11 @@ func (h *BaseAPIHandler) StartNonStreamingKeepAlive(c *gin.Context, ctx context.
 	}
 }
 
+// AppendAPIResponseLog preserves any previously captured API response and appends new data.
+func AppendAPIResponseLog(c *gin.Context, data []byte) {
+	appendAPIResponse(c, data)
+}
+
 // appendAPIResponse preserves any previously captured API response and appends new data.
 func appendAPIResponse(c *gin.Context, data []byte) {
 	if c == nil || len(data) == 0 {
@@ -461,54 +474,138 @@ func appendAPIResponse(c *gin.Context, data []byte) {
 	}
 
 	// Capture timestamp on first API response
-	if _, exists := c.Get("API_RESPONSE_TIMESTAMP"); !exists {
-		c.Set("API_RESPONSE_TIMESTAMP", time.Now())
+	if _, exists := c.Get(apiResponseTimestampContextKey); !exists {
+		c.Set(apiResponseTimestampContextKey, time.Now())
 	}
 
-	if existing, exists := c.Get("API_RESPONSE"); exists {
+	if existing, exists := c.Get(apiResponseContextKey); exists {
 		switch value := existing.(type) {
 		case *strings.Builder:
 			if value != nil {
-				if text := value.String(); len(text) > 0 && text[len(text)-1] != '\n' {
-					_ = value.WriteByte('\n')
-				}
-				_, _ = value.Write(data)
+				appendLimitedAPIResponseBytes(c, value, data)
 				return
 			}
 		case []byte:
 			builder := &strings.Builder{}
-			builder.Grow(len(value) + len(data) + 1)
-			_, _ = builder.Write(value)
-			if len(value) > 0 && value[len(value)-1] != '\n' {
-				_ = builder.WriteByte('\n')
-			}
-			_, _ = builder.Write(data)
-			c.Set("API_RESPONSE", builder)
+			appendLimitedAPIResponseBytes(c, builder, value)
+			appendLimitedAPIResponseBytes(c, builder, data)
+			c.Set(apiResponseContextKey, builder)
 			return
 		case string:
 			builder := &strings.Builder{}
-			builder.Grow(len(value) + len(data) + 1)
-			_, _ = builder.WriteString(value)
-			if len(value) > 0 && value[len(value)-1] != '\n' {
-				_ = builder.WriteByte('\n')
-			}
-			_, _ = builder.Write(data)
-			c.Set("API_RESPONSE", builder)
+			appendLimitedAPIResponseString(c, builder, value)
+			appendLimitedAPIResponseBytes(c, builder, data)
+			c.Set(apiResponseContextKey, builder)
 			return
 		}
 	}
 
 	builder := &strings.Builder{}
-	builder.Grow(len(data))
-	_, _ = builder.Write(data)
-	c.Set("API_RESPONSE", builder)
+	appendLimitedAPIResponseBytes(c, builder, data)
+	c.Set(apiResponseContextKey, builder)
+}
+
+func appendLimitedAPIResponseBytes(c *gin.Context, builder *strings.Builder, data []byte) {
+	if c == nil || builder == nil || len(data) == 0 {
+		return
+	}
+	truncated := ginContextBool(c, apiResponseTruncatedContextKey)
+	if truncated {
+		return
+	}
+	if builder.Len() > 0 {
+		text := builder.String()
+		if text[len(text)-1] != '\n' {
+			truncated = appendLimitedAPIResponseText(builder, "\n", truncated)
+		}
+	}
+	truncated = appendLimitedAPIResponseBytesToBuilder(builder, data, truncated)
+	if truncated {
+		c.Set(apiResponseTruncatedContextKey, true)
+	}
+}
+
+func appendLimitedAPIResponseString(c *gin.Context, builder *strings.Builder, data string) {
+	if c == nil || builder == nil || data == "" {
+		return
+	}
+	truncated := ginContextBool(c, apiResponseTruncatedContextKey)
+	if truncated {
+		return
+	}
+	if builder.Len() > 0 {
+		text := builder.String()
+		if text[len(text)-1] != '\n' {
+			truncated = appendLimitedAPIResponseText(builder, "\n", truncated)
+		}
+	}
+	truncated = appendLimitedAPIResponseText(builder, data, truncated)
+	if truncated {
+		c.Set(apiResponseTruncatedContextKey, true)
+	}
+}
+
+func appendLimitedAPIResponseBytesToBuilder(builder *strings.Builder, data []byte, truncated bool) bool {
+	if builder == nil || len(data) == 0 {
+		return truncated
+	}
+	remaining := maxLoggedHandlerAPIResponseBytes - builder.Len()
+	if remaining <= 0 {
+		if !truncated {
+			builder.WriteString(apiResponseLogTruncatedMarker)
+		}
+		return true
+	}
+	if len(data) <= remaining {
+		builder.Write(data)
+		return truncated
+	}
+	builder.Write(data[:remaining])
+	if !truncated {
+		builder.WriteString(apiResponseLogTruncatedMarker)
+	}
+	return true
+}
+
+func appendLimitedAPIResponseText(builder *strings.Builder, text string, truncated bool) bool {
+	if builder == nil || text == "" {
+		return truncated
+	}
+	remaining := maxLoggedHandlerAPIResponseBytes - builder.Len()
+	if remaining <= 0 {
+		if !truncated {
+			builder.WriteString(apiResponseLogTruncatedMarker)
+		}
+		return true
+	}
+	if len(text) <= remaining {
+		builder.WriteString(text)
+		return truncated
+	}
+	builder.WriteString(text[:remaining])
+	if !truncated {
+		builder.WriteString(apiResponseLogTruncatedMarker)
+	}
+	return true
+}
+
+func ginContextBool(c *gin.Context, key string) bool {
+	if c == nil {
+		return false
+	}
+	value, exists := c.Get(key)
+	if !exists {
+		return false
+	}
+	typed, _ := value.(bool)
+	return typed
 }
 
 func currentAPIResponseText(c *gin.Context) string {
 	if c == nil {
 		return ""
 	}
-	existing, exists := c.Get("API_RESPONSE")
+	existing, exists := c.Get(apiResponseContextKey)
 	if !exists {
 		return ""
 	}
@@ -800,8 +897,17 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 	return dataChan, upstreamHeaders, errChan
 }
 
+var sseDoneMarkerBytes = []byte("[DONE]")
+
 func validateSSEDataJSON(chunk []byte) error {
-	for _, line := range bytes.Split(chunk, []byte("\n")) {
+	for len(chunk) > 0 {
+		line := chunk
+		if idx := bytes.IndexByte(chunk, '\n'); idx >= 0 {
+			line = chunk[:idx]
+			chunk = chunk[idx+1:]
+		} else {
+			chunk = nil
+		}
 		line = bytes.TrimSpace(line)
 		if len(line) == 0 {
 			continue
@@ -813,7 +919,7 @@ func validateSSEDataJSON(chunk []byte) error {
 		if len(data) == 0 {
 			continue
 		}
-		if bytes.Equal(data, []byte("[DONE]")) {
+		if bytes.Equal(data, sseDoneMarkerBytes) {
 			continue
 		}
 		if json.Valid(data) {
@@ -995,7 +1101,7 @@ func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.Erro
 	if previous != "" {
 		if (trimmedErrText != "" && strings.Contains(previous, trimmedErrText)) ||
 			(trimmedBody != "" && strings.Contains(previous, trimmedBody)) {
-			c.Set("API_RESPONSE", []byte(previous))
+			c.Set(apiResponseContextKey, []byte(previous))
 		}
 	}
 

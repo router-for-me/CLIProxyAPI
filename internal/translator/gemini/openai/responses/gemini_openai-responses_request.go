@@ -12,6 +12,28 @@ import (
 
 const geminiResponsesThoughtSignature = "skip_thought_signature_validator"
 
+var openAIResponsesInputAudioMimeTypes = map[string]string{
+	"mp3":       "audio/mpeg",
+	"wav":       "audio/wav",
+	"ogg":       "audio/ogg",
+	"flac":      "audio/flac",
+	"aac":       "audio/aac",
+	"webm":      "audio/webm",
+	"pcm16":     "audio/pcm",
+	"g711_ulaw": "audio/basic",
+	"g711_alaw": "audio/basic",
+}
+
+func openAIResponsesInputAudioMimeType(format string) string {
+	if format == "" {
+		return "audio/wav"
+	}
+	if mapped, ok := openAIResponsesInputAudioMimeTypes[format]; ok {
+		return mapped
+	}
+	return "audio/" + format
+}
+
 func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte, stream bool) []byte {
 	rawJSON := inputRawJSON
 
@@ -107,6 +129,21 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 
 			normalized = append(normalized, item)
 			i++
+		}
+
+		functionNamesByCallID := make(map[string]string)
+		for _, item := range items {
+			if item.Get("type").String() != "function_call" {
+				continue
+			}
+			callID := item.Get("call_id").String()
+			if callID == "" {
+				continue
+			}
+			if _, exists := functionNamesByCallID[callID]; exists {
+				continue
+			}
+			functionNamesByCallID[callID] = item.Get("name").String()
 		}
 
 		for _, item := range normalized {
@@ -241,25 +278,7 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 							audioData := contentItem.Get("data").String()
 							audioFormat := contentItem.Get("format").String()
 							if audioData != "" {
-								audioMimeMap := map[string]string{
-									"mp3":       "audio/mpeg",
-									"wav":       "audio/wav",
-									"ogg":       "audio/ogg",
-									"flac":      "audio/flac",
-									"aac":       "audio/aac",
-									"webm":      "audio/webm",
-									"pcm16":     "audio/pcm",
-									"g711_ulaw": "audio/basic",
-									"g711_alaw": "audio/basic",
-								}
-								mimeType := "audio/wav"
-								if audioFormat != "" {
-									if mapped, ok := audioMimeMap[audioFormat]; ok {
-										mimeType = mapped
-									} else {
-										mimeType = "audio/" + audioFormat
-									}
-								}
+								mimeType := openAIResponsesInputAudioMimeType(audioFormat)
 								partJSON = []byte(`{"inline_data":{"mime_type":"","data":""}}`)
 								partJSON, _ = sjson.SetBytes(partJSON, "inline_data.mime_type", mimeType)
 								partJSON, _ = sjson.SetBytes(partJSON, "inline_data.data", audioData)
@@ -323,16 +342,8 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 				// For now, we'll use a placeholder or extract from context if available
 				functionName := "unknown" // This should ideally be matched with the corresponding function_call
 
-				// Find the corresponding function call name by matching call_id
-				// We need to look back through the input array to find the matching call
-				if inputArray := root.Get("input"); inputArray.Exists() && inputArray.IsArray() {
-					inputArray.ForEach(func(_, prevItem gjson.Result) bool {
-						if prevItem.Get("type").String() == "function_call" && prevItem.Get("call_id").String() == callID {
-							functionName = prevItem.Get("name").String()
-							return false // Stop iteration
-						}
-						return true
-					})
+				if name := functionNamesByCallID[callID]; name != "" {
+					functionName = name
 				}
 				functionName = util.SanitizeFunctionName(functionName)
 
@@ -392,7 +403,7 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 		})
 
 		// Only add tools if there are function declarations
-		if funcDecls := gjson.GetBytes(geminiTools, "0.functionDeclarations"); funcDecls.Exists() && len(funcDecls.Array()) > 0 {
+		if funcDecls := gjson.GetBytes(geminiTools, "0.functionDeclarations"); funcDecls.Exists() && funcDecls.Get("#").Int() > 0 {
 			out, _ = sjson.SetRawBytes(out, "tools", geminiTools)
 		}
 	}

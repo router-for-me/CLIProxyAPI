@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"net/http"
 	"sort"
 	"strings"
@@ -210,7 +209,7 @@ func (s *codexStreamCompletionState) patchCompletedOutputIfEmpty(completedData [
 	}
 
 	outputResult := gjson.GetBytes(completedData, "response.output")
-	if outputResult.Exists() && outputResult.IsArray() && len(outputResult.Array()) > 0 {
+	if outputResult.Exists() && outputResult.IsArray() && outputResult.Get("#").Int() > 0 {
 		return completedData, 0
 	}
 
@@ -396,6 +395,10 @@ func (e *CodexExecutor) prepareCodexHTTPCall(
 		return codexPreparedHTTPCall{}, err
 	}
 	applyCodexHeaders(prepared.httpReq, auth, token, stream, e.cfg)
+	if bodyWithMetadata := codexApplyHTTPClientMetadata(prepared.body, prepared.httpReq, auth, e.cfg); !bytes.Equal(bodyWithMetadata, prepared.body) {
+		prepared.body = bodyWithMetadata
+		codexResetRequestBody(prepared.httpReq, prepared.body)
+	}
 	if err := maybeEnableCodexRequestCompression(prepared.httpReq, auth); err != nil {
 		return codexPreparedHTTPCall{}, fmt.Errorf("codex executor: request compression failed: %w", err)
 	}
@@ -634,7 +637,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header)
 	captureCodexSessionHeaders(codexSessionKey(auth, call.prepared.promptCacheID), call.prepared.promptCacheID, httpResp.Header)
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		data, readErr := io.ReadAll(httpResp.Body)
+		data, readErr := helps.ReadErrorResponseBody(httpResp.Body)
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("codex executor: close response body error: %v", errClose)
 		}
@@ -836,88 +839,7 @@ func countCodexInputTokens(enc tokenizer.Codec, body []byte) (int64, error) {
 	}
 
 	root := gjson.ParseBytes(body)
-	var segments []string
-
-	if inst := strings.TrimSpace(root.Get("instructions").String()); inst != "" {
-		segments = append(segments, inst)
-	}
-
-	inputItems := root.Get("input")
-	if inputItems.IsArray() {
-		arr := inputItems.Array()
-		for i := range arr {
-			item := arr[i]
-			switch item.Get("type").String() {
-			case "message":
-				content := item.Get("content")
-				if content.IsArray() {
-					parts := content.Array()
-					for j := range parts {
-						part := parts[j]
-						if text := strings.TrimSpace(part.Get("text").String()); text != "" {
-							segments = append(segments, text)
-						}
-					}
-				}
-			case "function_call":
-				if name := strings.TrimSpace(item.Get("name").String()); name != "" {
-					segments = append(segments, name)
-				}
-				if args := strings.TrimSpace(item.Get("arguments").String()); args != "" {
-					segments = append(segments, args)
-				}
-			case "function_call_output":
-				if out := strings.TrimSpace(item.Get("output").String()); out != "" {
-					segments = append(segments, out)
-				}
-			default:
-				if text := strings.TrimSpace(item.Get("text").String()); text != "" {
-					segments = append(segments, text)
-				}
-			}
-		}
-	}
-
-	tools := root.Get("tools")
-	if tools.IsArray() {
-		tarr := tools.Array()
-		for i := range tarr {
-			tool := tarr[i]
-			if name := strings.TrimSpace(tool.Get("name").String()); name != "" {
-				segments = append(segments, name)
-			}
-			if desc := strings.TrimSpace(tool.Get("description").String()); desc != "" {
-				segments = append(segments, desc)
-			}
-			if params := tool.Get("parameters"); params.Exists() {
-				val := params.Raw
-				if params.Type == gjson.String {
-					val = params.String()
-				}
-				if trimmed := strings.TrimSpace(val); trimmed != "" {
-					segments = append(segments, trimmed)
-				}
-			}
-		}
-	}
-
-	textFormat := root.Get("text.format")
-	if textFormat.Exists() {
-		if name := strings.TrimSpace(textFormat.Get("name").String()); name != "" {
-			segments = append(segments, name)
-		}
-		if schema := textFormat.Get("schema"); schema.Exists() {
-			val := schema.Raw
-			if schema.Type == gjson.String {
-				val = schema.String()
-			}
-			if trimmed := strings.TrimSpace(val); trimmed != "" {
-				segments = append(segments, trimmed)
-			}
-		}
-	}
-
-	text := strings.Join(segments, "\n")
+	text := buildCodexTokenCountText(root, len(body))
 	if text == "" {
 		return 0, nil
 	}
@@ -927,6 +849,90 @@ func countCodexInputTokens(enc tokenizer.Codec, body []byte) (int64, error) {
 		return 0, err
 	}
 	return int64(count), nil
+}
+
+func buildCodexTokenCountText(root gjson.Result, estimatedSize int) string {
+	var builder strings.Builder
+	if estimatedSize > 0 {
+		builder.Grow(estimatedSize)
+	}
+
+	appendCodexTokenCountSegment(&builder, root.Get("instructions").String())
+
+	inputItems := root.Get("input")
+	if inputItems.IsArray() {
+		inputItems.ForEach(func(_, item gjson.Result) bool {
+			appendCodexTokenCountInputItem(&builder, item)
+			return true
+		})
+	}
+
+	tools := root.Get("tools")
+	if tools.IsArray() {
+		tools.ForEach(func(_, tool gjson.Result) bool {
+			appendCodexTokenCountTool(&builder, tool)
+			return true
+		})
+	}
+
+	textFormat := root.Get("text.format")
+	if textFormat.Exists() {
+		appendCodexTokenCountSegment(&builder, textFormat.Get("name").String())
+		appendCodexTokenCountJSONResult(&builder, textFormat.Get("schema"))
+	}
+
+	return builder.String()
+}
+
+func appendCodexTokenCountInputItem(builder *strings.Builder, item gjson.Result) {
+	switch item.Get("type").String() {
+	case "message":
+		content := item.Get("content")
+		if content.IsArray() {
+			content.ForEach(func(_, part gjson.Result) bool {
+				appendCodexTokenCountSegment(builder, part.Get("text").String())
+				return true
+			})
+		}
+	case "function_call":
+		appendCodexTokenCountSegment(builder, item.Get("name").String())
+		appendCodexTokenCountSegment(builder, item.Get("arguments").String())
+	case "function_call_output":
+		appendCodexTokenCountSegment(builder, item.Get("output").String())
+	default:
+		appendCodexTokenCountSegment(builder, item.Get("text").String())
+	}
+}
+
+func appendCodexTokenCountTool(builder *strings.Builder, tool gjson.Result) {
+	appendCodexTokenCountSegment(builder, tool.Get("name").String())
+	appendCodexTokenCountSegment(builder, tool.Get("description").String())
+	appendCodexTokenCountJSONResult(builder, tool.Get("parameters"))
+}
+
+func appendCodexTokenCountJSONResult(builder *strings.Builder, result gjson.Result) {
+	if !result.Exists() {
+		return
+	}
+	value := result.Raw
+	if result.Type == gjson.String {
+		value = result.String()
+	}
+	appendCodexTokenCountSegment(builder, value)
+}
+
+func appendCodexTokenCountSegment(builder *strings.Builder, value string) {
+	if builder == nil {
+		return
+	}
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return
+	}
+	if builder.Len() > 0 {
+		builder.WriteByte('\n')
+	}
+	builder.WriteString(trimmed)
 }
 
 func (e *CodexExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
@@ -999,6 +1005,7 @@ func (e *CodexExecutor) codexAuthProxyURL(auth *cliproxyauth.Auth) string {
 func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, stream bool, cfg *config.Config) {
 	r.Header.Set("Content-Type", "application/json")
 	r.Header.Set("Authorization", "Bearer "+token)
+	apiKeyAuth := codexIsAPIKeyAuth(auth)
 
 	var ginHeaders http.Header
 	if ginCtx, ok := r.Context().Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
@@ -1013,9 +1020,8 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 		_ = injectCodexSessionHeaders(r.Header, codexSessionKey(auth, promptCacheID))
 	}
 
-	if ginHeaders.Get("X-Codex-Beta-Features") != "" {
-		r.Header.Set("X-Codex-Beta-Features", ginHeaders.Get("X-Codex-Beta-Features"))
-	}
+	_, cfgBetaFeatures := codexHeaderDefaults(cfg, auth)
+	ensureHeaderWithPriority(r.Header, ginHeaders, "X-Codex-Beta-Features", cfgBetaFeatures, "")
 	misc.EnsureHeader(r.Header, ginHeaders, "Version", "")
 	codexEnsureTurnMetadataHeader(r.Header, ginHeaders)
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Codex-Turn-State", "")
@@ -1025,6 +1031,7 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 	identity := codexResolvedIdentity(r.Header, ginHeaders, auth, cfg)
 	r.Header.Set("User-Agent", identity.userAgent)
 	codexEnsureSessionHeaders(r.Header, ginHeaders, auth)
+	codexEnsureResponsesIdentityHeaders(r.Header, ginHeaders)
 
 	if stream {
 		r.Header.Set("Accept", "text/event-stream")
@@ -1035,17 +1042,17 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 
 	if originator := firstNonEmptyHeaderValue(r.Header, ginHeaders, "Originator"); originator != "" {
 		r.Header.Set("Originator", originator)
-	} else if !codexIsAPIKeyAuth(auth) {
+	} else if !apiKeyAuth {
 		r.Header.Set("Originator", codexOriginatorFor(cfg))
 	}
 	if residency := strings.TrimSpace(ginHeaders.Get(misc.CodexResidencyHeader)); residency != "" {
 		r.Header.Set(misc.CodexResidencyHeader, residency)
-	} else if !codexIsAPIKeyAuth(auth) {
+	} else if !apiKeyAuth {
 		if residency := codexResidencyFor(cfg); residency != "" && strings.TrimSpace(r.Header.Get(misc.CodexResidencyHeader)) == "" {
 			r.Header.Set(misc.CodexResidencyHeader, residency)
 		}
 	}
-	if !codexIsAPIKeyAuth(auth) {
+	if !apiKeyAuth {
 		if auth != nil && auth.Metadata != nil {
 			if accountID, ok := auth.Metadata["account_id"].(string); ok {
 				if trimmed := strings.TrimSpace(accountID); trimmed != "" {

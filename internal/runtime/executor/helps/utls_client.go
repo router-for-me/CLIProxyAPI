@@ -163,12 +163,12 @@ func NewUtlsHTTPClient(cfg *config.Config, auth *cliproxyauth.Auth, timeout time
 
 	utlsRT := newUtlsRoundTripper(proxyURL)
 
-	var standardTransport http.RoundTripper = &http.Transport{
+	var standardTransport http.RoundTripper = proxyutil.ApplyHTTPTransportPoolSettings(&http.Transport{
 		DialContext: (&net.Dialer{
 			Timeout:   30 * time.Second,
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
-	}
+	})
 	if proxyURL != "" {
 		if transport := buildProxyTransport(proxyURL); transport != nil {
 			standardTransport = transport

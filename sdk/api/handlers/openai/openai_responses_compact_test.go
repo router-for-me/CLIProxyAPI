@@ -14,6 +14,7 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
+	"github.com/tidwall/gjson"
 )
 
 type compactCaptureExecutor struct {
@@ -116,5 +117,70 @@ func TestOpenAIResponsesCompactExecute(t *testing.T) {
 	}
 	if strings.TrimSpace(resp.Body.String()) != `{"ok":true}` {
 		t.Fatalf("body = %s", resp.Body.String())
+	}
+}
+
+func TestOpenAIResponsesModelsUsesCompactShape(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	const (
+		authID  = "auth-models-compact"
+		modelID = "test-model-compact"
+	)
+
+	registry.GetGlobalRegistry().RegisterClient(authID, "openai", []*registry.ModelInfo{{
+		ID:            modelID,
+		Created:       123,
+		OwnedBy:       "team-a",
+		DisplayName:   "Should Be Hidden",
+		ContextLength: 8192,
+	}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(authID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil)
+	h := NewOpenAIResponsesAPIHandler(base)
+
+	var found map[string]any
+	for _, model := range h.Models() {
+		if id, _ := model["id"].(string); id == modelID {
+			found = model
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("expected model %q in Models()", modelID)
+	}
+	if _, ok := found["display_name"]; ok {
+		t.Fatalf("expected compact shape without display_name, got %#v", found)
+	}
+	if _, ok := found["context_length"]; ok {
+		t.Fatalf("expected compact shape without context_length, got %#v", found)
+	}
+	if got := found["owned_by"]; got != "team-a" {
+		t.Fatalf("owned_by = %v, want %q", got, "team-a")
+	}
+
+	router := gin.New()
+	router.GET("/v1/models", h.OpenAIResponsesModels)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.Code, http.StatusOK)
+	}
+
+	item := gjson.Get(resp.Body.String(), `data.#(id=="`+modelID+`")`)
+	if !item.Exists() {
+		t.Fatalf("expected model %q in response body: %s", modelID, resp.Body.String())
+	}
+	if item.Get("display_name").Exists() {
+		t.Fatalf("expected response body to omit display_name: %s", item.Raw)
+	}
+	if item.Get("context_length").Exists() {
+		t.Fatalf("expected response body to omit context_length: %s", item.Raw)
 	}
 }

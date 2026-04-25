@@ -48,13 +48,14 @@ func (r *Registry) Register(from, to Format, request RequestTransform, response 
 // client-side prefixes (e.g. "copilot/gpt-5-mini") are not leaked upstream.
 func (r *Registry) TranslateRequest(from, to Format, model string, rawJSON []byte, stream bool) []byte {
 	r.mu.RLock()
-	defer r.mu.RUnlock()
-
 	if byTarget, ok := r.requests[from]; ok {
 		if fn, isOk := byTarget[to]; isOk && fn != nil {
+			r.mu.RUnlock()
 			return fn(model, rawJSON, stream)
 		}
 	}
+	r.mu.RUnlock()
+
 	if model != "" && gjson.GetBytes(rawJSON, "model").String() != model {
 		if updated, err := sjson.SetBytes(rawJSON, "model", model); err != nil {
 			log.Warnf("translator: failed to normalize model in request fallback: %v", err)
@@ -81,12 +82,14 @@ func (r *Registry) HasResponseTransformer(from, to Format) bool {
 // TranslateStream applies the registered streaming response translator.
 func (r *Registry) TranslateStream(ctx context.Context, from, to Format, model string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) [][]byte {
 	r.mu.RLock()
-	defer r.mu.RUnlock()
-
+	var fn ResponseTransform
 	if byTarget, ok := r.responses[to]; ok {
-		if fn, isOk := byTarget[from]; isOk && fn.Stream != nil {
-			return fn.Stream(ctx, model, originalRequestRawJSON, requestRawJSON, rawJSON, param)
-		}
+		fn = byTarget[from]
+	}
+	r.mu.RUnlock()
+
+	if fn.Stream != nil {
+		return fn.Stream(ctx, model, originalRequestRawJSON, requestRawJSON, rawJSON, param)
 	}
 	return [][]byte{rawJSON}
 }
@@ -94,12 +97,14 @@ func (r *Registry) TranslateStream(ctx context.Context, from, to Format, model s
 // TranslateNonStream applies the registered non-stream response translator.
 func (r *Registry) TranslateNonStream(ctx context.Context, from, to Format, model string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) []byte {
 	r.mu.RLock()
-	defer r.mu.RUnlock()
-
+	var fn ResponseTransform
 	if byTarget, ok := r.responses[to]; ok {
-		if fn, isOk := byTarget[from]; isOk && fn.NonStream != nil {
-			return fn.NonStream(ctx, model, originalRequestRawJSON, requestRawJSON, rawJSON, param)
-		}
+		fn = byTarget[from]
+	}
+	r.mu.RUnlock()
+
+	if fn.NonStream != nil {
+		return fn.NonStream(ctx, model, originalRequestRawJSON, requestRawJSON, rawJSON, param)
 	}
 	return rawJSON
 }
@@ -107,12 +112,14 @@ func (r *Registry) TranslateNonStream(ctx context.Context, from, to Format, mode
 // TranslateTokenCount applies the registered token count response translator.
 func (r *Registry) TranslateTokenCount(ctx context.Context, from, to Format, count int64, rawJSON []byte) []byte {
 	r.mu.RLock()
-	defer r.mu.RUnlock()
-
+	var fn ResponseTransform
 	if byTarget, ok := r.responses[to]; ok {
-		if fn, isOk := byTarget[from]; isOk && fn.TokenCount != nil {
-			return fn.TokenCount(ctx, count)
-		}
+		fn = byTarget[from]
+	}
+	r.mu.RUnlock()
+
+	if fn.TokenCount != nil {
+		return fn.TokenCount(ctx, count)
 	}
 	return rawJSON
 }

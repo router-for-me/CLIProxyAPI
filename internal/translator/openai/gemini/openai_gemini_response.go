@@ -74,7 +74,7 @@ func ConvertOpenAIResponseToGemini(_ context.Context, _ string, originalRequestR
 	// Process choices
 	if choices := root.Get("choices"); choices.Exists() && choices.IsArray() {
 		// Handle empty choices array (usage-only chunk)
-		if len(choices.Array()) == 0 {
+		if choices.Get("#").Int() == 0 {
 			// This is a usage-only chunk, handle usage and return
 			if usage := root.Get("usage"); usage.Exists() {
 				template := []byte(`{"candidates":[],"usageMetadata":{}}`)

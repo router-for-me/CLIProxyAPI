@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -30,6 +31,8 @@ var (
 	antigravityVersionMu     sync.RWMutex
 	antigravityVersionExpiry time.Time
 	antigravityUpdaterOnce   sync.Once
+	antigravityFetchClient   *http.Client
+	antigravityFetchOnce     sync.Once
 )
 
 // StartAntigravityVersionUpdater starts a background goroutine that periodically refreshes the cached antigravity version.
@@ -112,7 +115,7 @@ func fetchAntigravityLatestVersion(ctx context.Context) (string, error) {
 		ctx = context.Background()
 	}
 
-	client := &http.Client{Timeout: antigravityFetchTimeout}
+	client := getAntigravityFetchClient()
 
 	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodGet, antigravityReleasesURL, nil)
 	if errReq != nil {
@@ -148,4 +151,14 @@ func fetchAntigravityLatestVersion(ctx context.Context) (string, error) {
 	}
 
 	return version, nil
+}
+
+func getAntigravityFetchClient() *http.Client {
+	antigravityFetchOnce.Do(func() {
+		antigravityFetchClient = &http.Client{
+			Timeout:   antigravityFetchTimeout,
+			Transport: proxyutil.NewPooledDefaultTransport(),
+		}
+	})
+	return antigravityFetchClient
 }

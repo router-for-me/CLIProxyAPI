@@ -33,6 +33,7 @@ import (
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v6/sdk/proxyutil"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
@@ -221,7 +222,7 @@ func initAntigravityTransport() {
 	if !ok {
 		base = &http.Transport{}
 	}
-	antigravityTransport = cloneTransportWithHTTP11(base)
+	antigravityTransport = cloneTransportWithHTTP11(proxyutil.ApplyHTTPTransportPoolSettings(base.Clone()))
 }
 
 // newAntigravityHTTPClient creates an HTTP client specifically for Antigravity,

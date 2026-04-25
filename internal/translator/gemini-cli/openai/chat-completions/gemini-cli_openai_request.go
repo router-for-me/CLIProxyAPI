@@ -289,7 +289,7 @@ func ConvertOpenAIRequestToGeminiCLI(modelName string, inputRawJSON []byte, _ bo
 
 	// tools -> request.tools[].functionDeclarations + request.tools[].googleSearch/codeExecution/urlContext passthrough
 	tools := gjson.GetBytes(rawJSON, "tools")
-	if tools.IsArray() && len(tools.Array()) > 0 {
+	if tools.IsArray() && tools.Get("#").Int() > 0 {
 		functionToolNode := []byte(`{}`)
 		hasFunction := false
 		googleSearchNodes := make([][]byte, 0)

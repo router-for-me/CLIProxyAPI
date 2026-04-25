@@ -394,53 +394,53 @@ func convertOpenAINonStreamingToAnthropic(rawJSON []byte) [][]byte {
 	out, _ = sjson.SetBytes(out, "model", root.Get("model").String())
 
 	// Process message content and tool calls
-	if choices := root.Get("choices"); choices.Exists() && choices.IsArray() && len(choices.Array()) > 0 {
-		choice := choices.Array()[0] // Take first choice
-
-		reasoningNode := choice.Get("message.reasoning_content")
-		for _, reasoningText := range collectOpenAIReasoningTexts(reasoningNode) {
-			if reasoningText == "" {
-				continue
+	if choices := root.Get("choices"); choices.Exists() && choices.IsArray() {
+		if choice := choices.Get("0"); choice.Exists() {
+			reasoningNode := choice.Get("message.reasoning_content")
+			for _, reasoningText := range collectOpenAIReasoningTexts(reasoningNode) {
+				if reasoningText == "" {
+					continue
+				}
+				block := []byte(`{"type":"thinking","thinking":""}`)
+				block, _ = sjson.SetBytes(block, "thinking", reasoningText)
+				out, _ = sjson.SetRawBytes(out, "content.-1", block)
 			}
-			block := []byte(`{"type":"thinking","thinking":""}`)
-			block, _ = sjson.SetBytes(block, "thinking", reasoningText)
-			out, _ = sjson.SetRawBytes(out, "content.-1", block)
-		}
 
-		// Handle text content
-		if content := choice.Get("message.content"); content.Exists() && content.String() != "" {
-			block := []byte(`{"type":"text","text":""}`)
-			block, _ = sjson.SetBytes(block, "text", content.String())
-			out, _ = sjson.SetRawBytes(out, "content.-1", block)
-		}
+			// Handle text content
+			if content := choice.Get("message.content"); content.Exists() && content.String() != "" {
+				block := []byte(`{"type":"text","text":""}`)
+				block, _ = sjson.SetBytes(block, "text", content.String())
+				out, _ = sjson.SetRawBytes(out, "content.-1", block)
+			}
 
-		// Handle tool calls
-		if toolCalls := choice.Get("message.tool_calls"); toolCalls.Exists() && toolCalls.IsArray() {
-			toolCalls.ForEach(func(_, toolCall gjson.Result) bool {
-				toolUseBlock := []byte(`{"type":"tool_use","id":"","name":"","input":{}}`)
-				toolUseBlock, _ = sjson.SetBytes(toolUseBlock, "id", util.SanitizeClaudeToolID(toolCall.Get("id").String()))
-				toolUseBlock, _ = sjson.SetBytes(toolUseBlock, "name", toolCall.Get("function.name").String())
+			// Handle tool calls
+			if toolCalls := choice.Get("message.tool_calls"); toolCalls.Exists() && toolCalls.IsArray() {
+				toolCalls.ForEach(func(_, toolCall gjson.Result) bool {
+					toolUseBlock := []byte(`{"type":"tool_use","id":"","name":"","input":{}}`)
+					toolUseBlock, _ = sjson.SetBytes(toolUseBlock, "id", util.SanitizeClaudeToolID(toolCall.Get("id").String()))
+					toolUseBlock, _ = sjson.SetBytes(toolUseBlock, "name", toolCall.Get("function.name").String())
 
-				argsStr := util.FixJSON(toolCall.Get("function.arguments").String())
-				if argsStr != "" && gjson.Valid(argsStr) {
-					argsJSON := gjson.Parse(argsStr)
-					if argsJSON.IsObject() {
-						toolUseBlock, _ = sjson.SetRawBytes(toolUseBlock, "input", []byte(argsJSON.Raw))
+					argsStr := util.FixJSON(toolCall.Get("function.arguments").String())
+					if argsStr != "" && gjson.Valid(argsStr) {
+						argsJSON := gjson.Parse(argsStr)
+						if argsJSON.IsObject() {
+							toolUseBlock, _ = sjson.SetRawBytes(toolUseBlock, "input", []byte(argsJSON.Raw))
+						} else {
+							toolUseBlock, _ = sjson.SetRawBytes(toolUseBlock, "input", []byte(`{}`))
+						}
 					} else {
 						toolUseBlock, _ = sjson.SetRawBytes(toolUseBlock, "input", []byte(`{}`))
 					}
-				} else {
-					toolUseBlock, _ = sjson.SetRawBytes(toolUseBlock, "input", []byte(`{}`))
-				}
 
-				out, _ = sjson.SetRawBytes(out, "content.-1", toolUseBlock)
-				return true
-			})
-		}
+					out, _ = sjson.SetRawBytes(out, "content.-1", toolUseBlock)
+					return true
+				})
+			}
 
-		// Set stop reason
-		if finishReason := choice.Get("finish_reason"); finishReason.Exists() {
-			out, _ = sjson.SetBytes(out, "stop_reason", mapOpenAIFinishReasonToAnthropic(finishReason.String()))
+			// Set stop reason
+			if finishReason := choice.Get("finish_reason"); finishReason.Exists() {
+				out, _ = sjson.SetBytes(out, "stop_reason", mapOpenAIFinishReasonToAnthropic(finishReason.String()))
+			}
 		}
 	}
 
@@ -569,128 +569,128 @@ func ConvertOpenAIResponseToClaudeNonStream(_ context.Context, _ string, origina
 	hasToolCall := false
 	stopReasonSet := false
 
-	if choices := root.Get("choices"); choices.Exists() && choices.IsArray() && len(choices.Array()) > 0 {
-		choice := choices.Array()[0]
+	if choices := root.Get("choices"); choices.Exists() && choices.IsArray() {
+		if choice := choices.Get("0"); choice.Exists() {
+			if finishReason := choice.Get("finish_reason"); finishReason.Exists() {
+				out, _ = sjson.SetBytes(out, "stop_reason", mapOpenAIFinishReasonToAnthropic(finishReason.String()))
+				stopReasonSet = true
+			}
 
-		if finishReason := choice.Get("finish_reason"); finishReason.Exists() {
-			out, _ = sjson.SetBytes(out, "stop_reason", mapOpenAIFinishReasonToAnthropic(finishReason.String()))
-			stopReasonSet = true
-		}
+			if message := choice.Get("message"); message.Exists() {
+				if contentResult := message.Get("content"); contentResult.Exists() {
+					if contentResult.IsArray() {
+						var textBuilder strings.Builder
+						var thinkingBuilder strings.Builder
 
-		if message := choice.Get("message"); message.Exists() {
-			if contentResult := message.Get("content"); contentResult.Exists() {
-				if contentResult.IsArray() {
-					var textBuilder strings.Builder
-					var thinkingBuilder strings.Builder
-
-					flushText := func() {
-						if textBuilder.Len() == 0 {
-							return
+						flushText := func() {
+							if textBuilder.Len() == 0 {
+								return
+							}
+							block := []byte(`{"type":"text","text":""}`)
+							block, _ = sjson.SetBytes(block, "text", textBuilder.String())
+							out, _ = sjson.SetRawBytes(out, "content.-1", block)
+							textBuilder.Reset()
 						}
-						block := []byte(`{"type":"text","text":""}`)
-						block, _ = sjson.SetBytes(block, "text", textBuilder.String())
-						out, _ = sjson.SetRawBytes(out, "content.-1", block)
-						textBuilder.Reset()
-					}
 
-					flushThinking := func() {
-						if thinkingBuilder.Len() == 0 {
-							return
+						flushThinking := func() {
+							if thinkingBuilder.Len() == 0 {
+								return
+							}
+							block := []byte(`{"type":"thinking","thinking":""}`)
+							block, _ = sjson.SetBytes(block, "thinking", thinkingBuilder.String())
+							out, _ = sjson.SetRawBytes(out, "content.-1", block)
+							thinkingBuilder.Reset()
 						}
-						block := []byte(`{"type":"thinking","thinking":""}`)
-						block, _ = sjson.SetBytes(block, "thinking", thinkingBuilder.String())
-						out, _ = sjson.SetRawBytes(out, "content.-1", block)
-						thinkingBuilder.Reset()
-					}
 
-					for _, item := range contentResult.Array() {
-						switch item.Get("type").String() {
-						case "text":
-							flushThinking()
-							textBuilder.WriteString(item.Get("text").String())
-						case "tool_calls":
-							flushThinking()
-							flushText()
-							toolCalls := item.Get("tool_calls")
-							if toolCalls.IsArray() {
-								toolCalls.ForEach(func(_, tc gjson.Result) bool {
-									hasToolCall = true
-									toolUse := []byte(`{"type":"tool_use","id":"","name":"","input":{}}`)
-									toolUse, _ = sjson.SetBytes(toolUse, "id", util.SanitizeClaudeToolID(tc.Get("id").String()))
-									toolUse, _ = sjson.SetBytes(toolUse, "name", util.MapToolName(toolNameMap, tc.Get("function.name").String()))
+						for _, item := range contentResult.Array() {
+							switch item.Get("type").String() {
+							case "text":
+								flushThinking()
+								textBuilder.WriteString(item.Get("text").String())
+							case "tool_calls":
+								flushThinking()
+								flushText()
+								toolCalls := item.Get("tool_calls")
+								if toolCalls.IsArray() {
+									toolCalls.ForEach(func(_, tc gjson.Result) bool {
+										hasToolCall = true
+										toolUse := []byte(`{"type":"tool_use","id":"","name":"","input":{}}`)
+										toolUse, _ = sjson.SetBytes(toolUse, "id", util.SanitizeClaudeToolID(tc.Get("id").String()))
+										toolUse, _ = sjson.SetBytes(toolUse, "name", util.MapToolName(toolNameMap, tc.Get("function.name").String()))
 
-									argsStr := util.FixJSON(tc.Get("function.arguments").String())
-									if argsStr != "" && gjson.Valid(argsStr) {
-										argsJSON := gjson.Parse(argsStr)
-										if argsJSON.IsObject() {
-											toolUse, _ = sjson.SetRawBytes(toolUse, "input", []byte(argsJSON.Raw))
+										argsStr := util.FixJSON(tc.Get("function.arguments").String())
+										if argsStr != "" && gjson.Valid(argsStr) {
+											argsJSON := gjson.Parse(argsStr)
+											if argsJSON.IsObject() {
+												toolUse, _ = sjson.SetRawBytes(toolUse, "input", []byte(argsJSON.Raw))
+											} else {
+												toolUse, _ = sjson.SetRawBytes(toolUse, "input", []byte(`{}`))
+											}
 										} else {
 											toolUse, _ = sjson.SetRawBytes(toolUse, "input", []byte(`{}`))
 										}
-									} else {
-										toolUse, _ = sjson.SetRawBytes(toolUse, "input", []byte(`{}`))
-									}
 
-									out, _ = sjson.SetRawBytes(out, "content.-1", toolUse)
-									return true
-								})
+										out, _ = sjson.SetRawBytes(out, "content.-1", toolUse)
+										return true
+									})
+								}
+							case "reasoning":
+								flushText()
+								if thinking := item.Get("text"); thinking.Exists() {
+									thinkingBuilder.WriteString(thinking.String())
+								}
+							default:
+								flushThinking()
+								flushText()
 							}
-						case "reasoning":
-							flushText()
-							if thinking := item.Get("text"); thinking.Exists() {
-								thinkingBuilder.WriteString(thinking.String())
-							}
-						default:
-							flushThinking()
-							flushText()
+						}
+
+						flushThinking()
+						flushText()
+					} else if contentResult.Type == gjson.String {
+						textContent := contentResult.String()
+						if textContent != "" {
+							block := []byte(`{"type":"text","text":""}`)
+							block, _ = sjson.SetBytes(block, "text", textContent)
+							out, _ = sjson.SetRawBytes(out, "content.-1", block)
 						}
 					}
+				}
 
-					flushThinking()
-					flushText()
-				} else if contentResult.Type == gjson.String {
-					textContent := contentResult.String()
-					if textContent != "" {
-						block := []byte(`{"type":"text","text":""}`)
-						block, _ = sjson.SetBytes(block, "text", textContent)
+				if reasoning := message.Get("reasoning_content"); reasoning.Exists() {
+					for _, reasoningText := range collectOpenAIReasoningTexts(reasoning) {
+						if reasoningText == "" {
+							continue
+						}
+						block := []byte(`{"type":"thinking","thinking":""}`)
+						block, _ = sjson.SetBytes(block, "thinking", reasoningText)
 						out, _ = sjson.SetRawBytes(out, "content.-1", block)
 					}
 				}
-			}
 
-			if reasoning := message.Get("reasoning_content"); reasoning.Exists() {
-				for _, reasoningText := range collectOpenAIReasoningTexts(reasoning) {
-					if reasoningText == "" {
-						continue
-					}
-					block := []byte(`{"type":"thinking","thinking":""}`)
-					block, _ = sjson.SetBytes(block, "thinking", reasoningText)
-					out, _ = sjson.SetRawBytes(out, "content.-1", block)
-				}
-			}
+				if toolCalls := message.Get("tool_calls"); toolCalls.Exists() && toolCalls.IsArray() {
+					toolCalls.ForEach(func(_, toolCall gjson.Result) bool {
+						hasToolCall = true
+						toolUseBlock := []byte(`{"type":"tool_use","id":"","name":"","input":{}}`)
+						toolUseBlock, _ = sjson.SetBytes(toolUseBlock, "id", util.SanitizeClaudeToolID(toolCall.Get("id").String()))
+						toolUseBlock, _ = sjson.SetBytes(toolUseBlock, "name", util.MapToolName(toolNameMap, toolCall.Get("function.name").String()))
 
-			if toolCalls := message.Get("tool_calls"); toolCalls.Exists() && toolCalls.IsArray() {
-				toolCalls.ForEach(func(_, toolCall gjson.Result) bool {
-					hasToolCall = true
-					toolUseBlock := []byte(`{"type":"tool_use","id":"","name":"","input":{}}`)
-					toolUseBlock, _ = sjson.SetBytes(toolUseBlock, "id", util.SanitizeClaudeToolID(toolCall.Get("id").String()))
-					toolUseBlock, _ = sjson.SetBytes(toolUseBlock, "name", util.MapToolName(toolNameMap, toolCall.Get("function.name").String()))
-
-					argsStr := util.FixJSON(toolCall.Get("function.arguments").String())
-					if argsStr != "" && gjson.Valid(argsStr) {
-						argsJSON := gjson.Parse(argsStr)
-						if argsJSON.IsObject() {
-							toolUseBlock, _ = sjson.SetRawBytes(toolUseBlock, "input", []byte(argsJSON.Raw))
+						argsStr := util.FixJSON(toolCall.Get("function.arguments").String())
+						if argsStr != "" && gjson.Valid(argsStr) {
+							argsJSON := gjson.Parse(argsStr)
+							if argsJSON.IsObject() {
+								toolUseBlock, _ = sjson.SetRawBytes(toolUseBlock, "input", []byte(argsJSON.Raw))
+							} else {
+								toolUseBlock, _ = sjson.SetRawBytes(toolUseBlock, "input", []byte(`{}`))
+							}
 						} else {
 							toolUseBlock, _ = sjson.SetRawBytes(toolUseBlock, "input", []byte(`{}`))
 						}
-					} else {
-						toolUseBlock, _ = sjson.SetRawBytes(toolUseBlock, "input", []byte(`{}`))
-					}
 
-					out, _ = sjson.SetRawBytes(out, "content.-1", toolUseBlock)
-					return true
-				})
+						out, _ = sjson.SetRawBytes(out, "content.-1", toolUseBlock)
+						return true
+					})
+				}
 			}
 		}
 	}

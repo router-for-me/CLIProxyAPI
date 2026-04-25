@@ -7,8 +7,18 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"golang.org/x/net/proxy"
+)
+
+const (
+	// DefaultMaxIdleConns keeps more upstream connections warm across auths and models.
+	DefaultMaxIdleConns = 512
+	// DefaultMaxIdleConnsPerHost raises Go's default of 2, which is too low for a proxy service.
+	DefaultMaxIdleConnsPerHost = 64
+	// DefaultIdleConnTimeout matches Go's default while documenting the shared pool policy.
+	DefaultIdleConnTimeout = 90 * time.Second
 )
 
 // Mode describes how a proxy setting should be interpreted.
@@ -75,11 +85,29 @@ func cloneDefaultTransport() *http.Transport {
 	return &http.Transport{}
 }
 
+// ApplyHTTPTransportPoolSettings tunes a transport for proxy-server fan-out.
+func ApplyHTTPTransportPoolSettings(transport *http.Transport) *http.Transport {
+	if transport == nil {
+		transport = &http.Transport{}
+	}
+	transport.MaxIdleConns = DefaultMaxIdleConns
+	transport.MaxIdleConnsPerHost = DefaultMaxIdleConnsPerHost
+	transport.MaxConnsPerHost = 0
+	transport.IdleConnTimeout = DefaultIdleConnTimeout
+	transport.ForceAttemptHTTP2 = true
+	return transport
+}
+
+// NewPooledDefaultTransport clones http.DefaultTransport and applies proxy-server pool settings.
+func NewPooledDefaultTransport() *http.Transport {
+	return ApplyHTTPTransportPoolSettings(cloneDefaultTransport())
+}
+
 // NewDirectTransport returns a transport that bypasses environment proxies.
 func NewDirectTransport() *http.Transport {
 	clone := cloneDefaultTransport()
 	clone.Proxy = nil
-	return clone
+	return ApplyHTTPTransportPoolSettings(clone)
 }
 
 // BuildHTTPTransport constructs an HTTP transport for the provided proxy setting.
@@ -111,11 +139,11 @@ func BuildHTTPTransport(raw string) (*http.Transport, Mode, error) {
 			transport.DialContext = func(_ context.Context, network, addr string) (net.Conn, error) {
 				return dialer.Dial(network, addr)
 			}
-			return transport, setting.Mode, nil
+			return ApplyHTTPTransportPoolSettings(transport), setting.Mode, nil
 		}
 		transport := cloneDefaultTransport()
 		transport.Proxy = http.ProxyURL(setting.URL)
-		return transport, setting.Mode, nil
+		return ApplyHTTPTransportPoolSettings(transport), setting.Mode, nil
 	default:
 		return nil, setting.Mode, nil
 	}

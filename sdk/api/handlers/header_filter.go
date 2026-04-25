@@ -43,14 +43,16 @@ func FilterUpstreamHeaders(src http.Header) http.Header {
 		return nil
 	}
 	connectionScoped := connectionScopedHeaders(src)
-	dst := make(http.Header)
+	dst := make(http.Header, len(src))
 	for key, values := range src {
 		canonicalKey := http.CanonicalHeaderKey(key)
 		if _, blocked := hopByHopHeaders[canonicalKey]; blocked {
 			continue
 		}
-		if _, scoped := connectionScoped[canonicalKey]; scoped {
-			continue
+		if connectionScoped != nil {
+			if _, scoped := connectionScoped[canonicalKey]; scoped {
+				continue
+			}
 		}
 		// Strip headers injected by known AI gateway proxies to avoid
 		// Claude Code client-side gateway detection.
@@ -74,12 +76,19 @@ func FilterUpstreamHeaders(src http.Header) http.Header {
 }
 
 func connectionScopedHeaders(src http.Header) map[string]struct{} {
-	scoped := make(map[string]struct{})
-	for _, rawValue := range src.Values("Connection") {
+	values := src.Values("Connection")
+	if len(values) == 0 {
+		return nil
+	}
+	var scoped map[string]struct{}
+	for _, rawValue := range values {
 		for _, token := range strings.Split(rawValue, ",") {
 			headerName := strings.TrimSpace(token)
 			if headerName == "" {
 				continue
+			}
+			if scoped == nil {
+				scoped = make(map[string]struct{})
 			}
 			scoped[http.CanonicalHeaderKey(headerName)] = struct{}{}
 		}

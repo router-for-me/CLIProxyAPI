@@ -2,6 +2,7 @@ package translator
 
 import (
 	"testing"
+	"time"
 
 	"github.com/tidwall/gjson"
 )
@@ -88,5 +89,51 @@ func TestTranslateRequest_RegisteredTransformTakesPrecedence(t *testing.T) {
 	gotModel := gjson.GetBytes(got, "model").String()
 	if gotModel != "from-transform" {
 		t.Errorf("expected registered transform to take precedence, got model = %q", gotModel)
+	}
+}
+
+func TestTranslateRequest_DoesNotHoldRegistryLockDuringTransform(t *testing.T) {
+	r := NewRegistry()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	translateDone := make(chan struct{})
+
+	r.Register(Format("a"), Format("b"), func(model string, rawJSON []byte, stream bool) []byte {
+		close(started)
+		<-release
+		return rawJSON
+	}, ResponseTransform{})
+
+	go func() {
+		defer close(translateDone)
+		_ = r.TranslateRequest(Format("a"), Format("b"), "model", []byte(`{"model":"model"}`), false)
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("transform did not start")
+	}
+
+	registerDone := make(chan struct{})
+	go func() {
+		defer close(registerDone)
+		r.Register(Format("c"), Format("d"), func(model string, rawJSON []byte, stream bool) []byte {
+			return rawJSON
+		}, ResponseTransform{})
+	}()
+
+	select {
+	case <-registerDone:
+	case <-time.After(200 * time.Millisecond):
+		close(release)
+		t.Fatal("Register blocked while a transform was running")
+	}
+
+	close(release)
+	select {
+	case <-translateDone:
+	case <-time.After(time.Second):
+		t.Fatal("transform did not finish")
 	}
 }

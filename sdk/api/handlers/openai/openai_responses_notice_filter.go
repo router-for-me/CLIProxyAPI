@@ -13,6 +13,13 @@ type responsesNoticeFilter struct {
 	suppressedItemIDs map[string]struct{}
 }
 
+var responsesNoticeFilterMarkers = [][]byte{
+	[]byte("weekly"),
+	[]byte("Weekly"),
+	[]byte("/status"),
+	[]byte("/STATUS"),
+}
+
 func newResponsesNoticeFilter() *responsesNoticeFilter {
 	return &responsesNoticeFilter{
 		suppressedItemIDs: make(map[string]struct{}),
@@ -153,20 +160,21 @@ func (f *responsesNoticeFilter) filterOutputPayload(payload []byte, path string)
 		return payload
 	}
 
-	filteredItems := make([]json.RawMessage, 0, len(output.Array()))
-	for _, item := range output.Array() {
+	filteredItems := make([]json.RawMessage, 0)
+	output.ForEach(func(_, item gjson.Result) bool {
 		itemID := strings.TrimSpace(item.Get("id").String())
 		if itemID != "" {
 			if _, ok := f.suppressedItemIDs[itemID]; ok {
-				continue
+				return true
 			}
 		}
 		if responsesUsageWarningItem(item) {
 			f.markSuppressedItem(itemID)
-			continue
+			return true
 		}
 		filteredItems = append(filteredItems, json.RawMessage(item.Raw))
-	}
+		return true
+	})
 
 	filteredJSON, err := json.Marshal(filteredItems)
 	if err != nil {
@@ -190,12 +198,15 @@ func responsesUsageWarningItem(item gjson.Result) bool {
 	if !content.Exists() || !content.IsArray() {
 		return false
 	}
-	for _, part := range content.Array() {
+	warning := false
+	content.ForEach(func(_, part gjson.Result) bool {
 		if responsesUsageWarningPart(part) {
-			return true
+			warning = true
+			return false
 		}
-	}
-	return false
+		return true
+	})
+	return warning
 }
 
 func responsesUsageWarningPart(part gjson.Result) bool {
@@ -223,12 +234,7 @@ func responsesNoticeMayNeedFiltering(chunk []byte) bool {
 	if len(chunk) == 0 {
 		return false
 	}
-	for _, marker := range [][]byte{
-		[]byte("weekly"),
-		[]byte("Weekly"),
-		[]byte("/status"),
-		[]byte("/STATUS"),
-	} {
+	for _, marker := range responsesNoticeFilterMarkers {
 		if bytes.Contains(chunk, marker) {
 			return true
 		}

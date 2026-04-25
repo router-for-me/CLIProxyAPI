@@ -158,10 +158,13 @@ type ClaudeHeaderDefaults struct {
 // CodexHeaderDefaults configures default header values injected into Codex
 // requests. UserAgent applies to both auth-file and codex-api-key HTTP/websocket
 // requests and overrides generated or credential-provided defaults when set.
-// BetaFeatures only applies to websocket requests for auth-file/OAuth Codex sessions.
+// BetaFeatures applies to non-api-key Codex HTTP and websocket requests when
+// configured. API-key requests only forward caller-supplied beta headers to
+// preserve compatibility with OpenAI-compatible endpoints.
 type CodexHeaderDefaults struct {
-	UserAgent    string `yaml:"user-agent" json:"user-agent"`
-	BetaFeatures string `yaml:"beta-features" json:"beta-features"`
+	UserAgent      string `yaml:"user-agent" json:"user-agent"`
+	BetaFeatures   string `yaml:"beta-features" json:"beta-features"`
+	InstallationID string `yaml:"installation-id,omitempty" json:"installation-id,omitempty"`
 	// Originator overrides the default originator value sent in the
 	// "Originator" header for OAuth/ChatGPT Codex requests. When empty the
 	// proxy falls back to the CODEX_INTERNAL_ORIGINATOR_OVERRIDE environment
@@ -793,6 +796,7 @@ func (cfg *Config) SanitizeCodexHeaderDefaults() {
 	}
 	cfg.CodexHeaderDefaults.UserAgent = strings.TrimSpace(cfg.CodexHeaderDefaults.UserAgent)
 	cfg.CodexHeaderDefaults.BetaFeatures = strings.TrimSpace(cfg.CodexHeaderDefaults.BetaFeatures)
+	cfg.CodexHeaderDefaults.InstallationID = strings.TrimSpace(cfg.CodexHeaderDefaults.InstallationID)
 	cfg.CodexHeaderDefaults.Originator = strings.TrimSpace(cfg.CodexHeaderDefaults.Originator)
 	cfg.CodexHeaderDefaults.Residency = strings.TrimSpace(cfg.CodexHeaderDefaults.Residency)
 }

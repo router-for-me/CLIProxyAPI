@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -39,6 +40,8 @@ const (
 )
 
 var antigravityOAuthTokenURL = "https://oauth2.googleapis.com/token"
+
+var apiCallTransportCache sync.Map
 
 type apiCallRequest struct {
 	AuthIndexSnake  *string           `json:"auth_index"`
@@ -707,18 +710,56 @@ func (h *Handler) apiCallTransport(auth *coreauth.Auth) http.RoundTripper {
 	}
 
 	for _, proxyStr := range proxyCandidates {
-		if transport := buildProxyTransport(proxyStr); transport != nil {
+		if transport := cachedAPICallTransport(proxyStr); transport != nil {
+			return transport
+		}
+	}
+
+	if cached, ok := apiCallTransportCache.Load("direct"); ok {
+		if transport, okTransport := cached.(http.RoundTripper); okTransport && transport != nil {
 			return transport
 		}
 	}
 
 	transport, ok := http.DefaultTransport.(*http.Transport)
 	if !ok || transport == nil {
-		return &http.Transport{Proxy: nil}
+		direct := proxyutil.ApplyHTTPTransportPoolSettings(&http.Transport{Proxy: nil})
+		actual, _ := apiCallTransportCache.LoadOrStore("direct", direct)
+		if cached, okTransport := actual.(http.RoundTripper); okTransport && cached != nil {
+			return cached
+		}
+		return direct
 	}
 	clone := transport.Clone()
 	clone.Proxy = nil
-	return clone
+	direct := proxyutil.ApplyHTTPTransportPoolSettings(clone)
+	actual, _ := apiCallTransportCache.LoadOrStore("direct", direct)
+	if cached, okTransport := actual.(http.RoundTripper); okTransport && cached != nil {
+		return cached
+	}
+	return direct
+}
+
+func cachedAPICallTransport(proxyStr string) http.RoundTripper {
+	proxyStr = strings.TrimSpace(proxyStr)
+	if proxyStr == "" {
+		return nil
+	}
+	cacheKey := "proxy:" + proxyStr
+	if cached, ok := apiCallTransportCache.Load(cacheKey); ok {
+		if transport, okTransport := cached.(http.RoundTripper); okTransport && transport != nil {
+			return transport
+		}
+	}
+	transport := buildProxyTransport(proxyStr)
+	if transport == nil {
+		return nil
+	}
+	actual, _ := apiCallTransportCache.LoadOrStore(cacheKey, transport)
+	if cached, okTransport := actual.(http.RoundTripper); okTransport && cached != nil {
+		return cached
+	}
+	return transport
 }
 
 type apiKeyConfigEntry interface {

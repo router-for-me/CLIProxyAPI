@@ -17,6 +17,9 @@ import (
 const requestBodyOverrideContextKey = "REQUEST_BODY_OVERRIDE"
 const responseBodyOverrideContextKey = "RESPONSE_BODY_OVERRIDE"
 const websocketTimelineOverrideContextKey = "WEBSOCKET_TIMELINE_OVERRIDE"
+const maxLoggedResponseBodyBytes = 4 << 20 // 4 MiB
+
+var truncatedResponseBodyMarker = []byte("\n...[response body truncated]...\n")
 
 // RequestInfo holds essential details of an incoming HTTP request for logging purposes.
 type RequestInfo struct {
@@ -44,6 +47,7 @@ type ResponseWriterWrapper struct {
 	streamStatePrepared bool                       // streamStatePrepared indicates whether streaming detection/init already ran.
 	logOnErrorOnly      bool                       // logOnErrorOnly enables logging only when an error response is detected.
 	firstChunkTimestamp time.Time                  // firstChunkTimestamp captures TTFB for streaming responses.
+	bodyTruncated       bool                       // bodyTruncated indicates response body capture hit its memory cap.
 }
 
 // NewResponseWriterWrapper creates and initializes a new ResponseWriterWrapper.
@@ -61,7 +65,6 @@ func NewResponseWriterWrapper(w gin.ResponseWriter, logger logging.RequestLogger
 		ResponseWriter: w,
 		logger:         logger,
 		requestInfo:    requestInfo,
-		headers:        make(map[string][]string),
 	}
 }
 
@@ -87,7 +90,7 @@ func (w *ResponseWriterWrapper) Write(data []byte) (int, error) {
 	}
 
 	if w.shouldBufferResponseBody() {
-		_, _ = w.body.Write(data)
+		w.captureResponseBody(data)
 	}
 
 	return n, err
@@ -131,9 +134,51 @@ func (w *ResponseWriterWrapper) WriteString(data string) (int, error) {
 	}
 
 	if w.shouldBufferResponseBody() {
-		_, _ = w.body.WriteString(data)
+		w.captureResponseString(data)
 	}
 	return n, err
+}
+
+func (w *ResponseWriterWrapper) captureResponseBody(data []byte) {
+	if len(data) == 0 || w.bodyTruncated {
+		return
+	}
+	remaining := maxLoggedResponseBodyBytes - w.body.Len()
+	if remaining <= 0 {
+		w.markResponseBodyTruncated()
+		return
+	}
+	if len(data) > remaining {
+		_, _ = w.body.Write(data[:remaining])
+		w.markResponseBodyTruncated()
+		return
+	}
+	_, _ = w.body.Write(data)
+}
+
+func (w *ResponseWriterWrapper) captureResponseString(data string) {
+	if len(data) == 0 || w.bodyTruncated {
+		return
+	}
+	remaining := maxLoggedResponseBodyBytes - w.body.Len()
+	if remaining <= 0 {
+		w.markResponseBodyTruncated()
+		return
+	}
+	if len(data) > remaining {
+		_, _ = w.body.WriteString(data[:remaining])
+		w.markResponseBodyTruncated()
+		return
+	}
+	_, _ = w.body.WriteString(data)
+}
+
+func (w *ResponseWriterWrapper) markResponseBodyTruncated() {
+	if w.bodyTruncated {
+		return
+	}
+	w.bodyTruncated = true
+	_, _ = w.body.Write(truncatedResponseBodyMarker)
 }
 
 // WriteHeader wraps the underlying ResponseWriter's WriteHeader method.

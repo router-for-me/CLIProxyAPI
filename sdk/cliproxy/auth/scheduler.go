@@ -543,6 +543,7 @@ func makeMixedCursorKey(providers []string, modelKey string) (mixedCursorKey, bo
 // mixedUnavailableError synthesizes the mixed-provider cooldown or unavailable error.
 func (s *authScheduler) mixedUnavailableError(providers []string, model string, filter authFilter) error {
 	now := time.Now()
+	modelKey := canonicalModelKey(model)
 	total := 0
 	cooldownCount := 0
 	earliest := time.Time{}
@@ -551,7 +552,7 @@ func (s *authScheduler) mixedUnavailableError(providers []string, model string, 
 		if providerState == nil {
 			continue
 		}
-		shard := providerState.ensureModel(canonicalModelKey(model), now)
+		shard := providerState.ensureModel(modelKey, now)
 		if shard == nil {
 			continue
 		}
@@ -582,26 +583,38 @@ func normalizeProviderKeys(providers []string) []string {
 		return nil
 	}
 	normalized := true
+	var seen map[string]struct{}
 	for idx, provider := range providers {
 		providerKey := strings.ToLower(strings.TrimSpace(provider))
 		if providerKey == "" || providerKey != provider {
 			normalized = false
 			break
 		}
-		for prev := 0; prev < idx; prev++ {
-			if providers[prev] == providerKey {
+		if len(providers) > 4 {
+			if seen == nil {
+				seen = make(map[string]struct{}, len(providers))
+			}
+			if _, exists := seen[providerKey]; exists {
 				normalized = false
 				break
 			}
-		}
-		if !normalized {
-			break
+			seen[providerKey] = struct{}{}
+		} else {
+			for prev := 0; prev < idx; prev++ {
+				if providers[prev] == providerKey {
+					normalized = false
+					break
+				}
+			}
+			if !normalized {
+				break
+			}
 		}
 	}
 	if normalized {
 		return providers
 	}
-	seen := make(map[string]struct{}, len(providers))
+	seen = make(map[string]struct{}, len(providers))
 	out := make([]string, 0, len(providers))
 	for _, provider := range providers {
 		providerKey := strings.ToLower(strings.TrimSpace(provider))

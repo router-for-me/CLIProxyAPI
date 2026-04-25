@@ -20,12 +20,20 @@ import (
 )
 
 const (
-	apiAttemptsKey          = "API_UPSTREAM_ATTEMPTS"
-	apiRequestKey           = "API_REQUEST"
-	apiResponseKey          = "API_RESPONSE"
-	apiWebsocketTimelineKey = "API_WEBSOCKET_TIMELINE"
-	creditsUsedKey          = "__antigravity_credits_used__"
+	apiAttemptsKey           = "API_UPSTREAM_ATTEMPTS"
+	apiRequestKey            = "API_REQUEST"
+	apiResponseKey           = "API_RESPONSE"
+	apiWebsocketTimelineKey  = "API_WEBSOCKET_TIMELINE"
+	apiResponseTruncatedKey  = "API_RESPONSE_TRUNCATED"
+	apiWebsocketTruncatedKey = "API_WEBSOCKET_TIMELINE_TRUNCATED"
+	creditsUsedKey           = "__antigravity_credits_used__"
+
+	maxLoggedAPIRequestBytes           = 1 << 20
+	maxLoggedAPIResponseBytes          = 4 << 20
+	maxLoggedAPIWebsocketTimelineBytes = 4 << 20
 )
+
+const apiLogTruncatedMarker = "\n...[api log truncated]...\n"
 
 // UpstreamRequestLog captures the outbound upstream request details for logging.
 // Headers are formatted synchronously and are not retained after the helper returns.
@@ -52,6 +60,7 @@ type upstreamAttempt struct {
 	bodyHasContent       bool
 	prevWasSSEEvent      bool
 	errorWritten         bool
+	responseTruncated    bool
 }
 
 func appendAttemptResponseText(ginCtx *gin.Context, attempt *upstreamAttempt, text string) {
@@ -59,16 +68,12 @@ func appendAttemptResponseText(ginCtx *gin.Context, attempt *upstreamAttempt, te
 		return
 	}
 	if attempt != nil && attempt.response != nil {
-		attempt.response.WriteString(text)
+		attempt.responseTruncated = appendLimitedString(attempt.response, text, maxLoggedAPIResponseBytes, attempt.responseTruncated)
 	}
 	if ginCtx == nil {
 		return
 	}
-	builder := aggregatedResponseBuilder(ginCtx)
-	if builder == nil {
-		return
-	}
-	builder.WriteString(text)
+	appendAggregatedResponseText(ginCtx, text)
 }
 
 // RecordAPIRequest stores the upstream request metadata in Gin context for request logging.
@@ -102,7 +107,7 @@ func RecordAPIRequest(ctx context.Context, cfg *config.Config, info UpstreamRequ
 	writeHeaders(builder, info.Headers)
 	builder.WriteString("\nBody:\n")
 	if len(info.Body) > 0 {
-		builder.WriteString(string(info.Body))
+		writeLimitedBytes(builder, info.Body, maxLoggedAPIRequestBytes)
 	} else {
 		builder.WriteString("<empty>")
 	}
@@ -136,10 +141,7 @@ func RecordAPIResponseMetadata(ctx context.Context, cfg *config.Config, status i
 	}
 	if !attempt.headersWritten {
 		appendAttemptResponseText(ginCtx, attempt, "Headers:\n")
-		writeHeaders(attempt.response, headers)
-		if builder := aggregatedResponseBuilder(ginCtx); builder != nil {
-			writeHeaders(builder, headers)
-		}
+		appendAttemptResponseHeaders(ginCtx, attempt, headers)
 		attempt.headersWritten = true
 		appendAttemptResponseText(ginCtx, attempt, "\n")
 	}
@@ -186,10 +188,7 @@ func AppendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byt
 
 	if !attempt.headersWritten {
 		appendAttemptResponseText(ginCtx, attempt, "Headers:\n")
-		writeHeaders(attempt.response, nil)
-		if builder := aggregatedResponseBuilder(ginCtx); builder != nil {
-			writeHeaders(builder, nil)
-		}
+		appendAttemptResponseHeaders(ginCtx, attempt, nil)
 		attempt.headersWritten = true
 		appendAttemptResponseText(ginCtx, attempt, "\n")
 	}
@@ -234,7 +233,7 @@ func RecordAPIWebsocketRequest(ctx context.Context, cfg *config.Config, info Ups
 	writeHeaders(builder, info.Headers)
 	builder.WriteString("\nBody:\n")
 	if len(info.Body) > 0 {
-		builder.Write(info.Body)
+		writeLimitedBytes(builder, info.Body, maxLoggedAPIRequestBytes)
 	} else {
 		builder.WriteString("<empty>")
 	}
@@ -318,7 +317,7 @@ func AppendAPIWebsocketResponse(ctx context.Context, cfg *config.Config, payload
 	builder := &strings.Builder{}
 	builder.WriteString(fmt.Sprintf("Timestamp: %s\n", time.Now().Format(time.RFC3339Nano)))
 	builder.WriteString("Event: api.websocket.response\n")
-	builder.Write(data)
+	writeLimitedBytes(builder, data, maxLoggedAPIWebsocketTimelineBytes)
 	builder.WriteString("\n")
 
 	appendAPIWebsocketTimeline(ginCtx, []byte(builder.String()))
@@ -413,6 +412,18 @@ func aggregatedResponseBuilder(ginCtx *gin.Context) *strings.Builder {
 	return builder
 }
 
+func appendAggregatedResponseText(ginCtx *gin.Context, text string) {
+	builder := aggregatedResponseBuilder(ginCtx)
+	if builder == nil {
+		return
+	}
+	truncated := ginContextBool(ginCtx, apiResponseTruncatedKey)
+	truncated = appendLimitedString(builder, text, maxLoggedAPIResponseBytes, truncated)
+	if truncated {
+		ginCtx.Set(apiResponseTruncatedKey, true)
+	}
+}
+
 func updateAggregatedRequest(ginCtx *gin.Context, attempts []*upstreamAttempt) {
 	if ginCtx == nil {
 		return
@@ -461,20 +472,105 @@ func appendAPIWebsocketTimeline(ginCtx *gin.Context, chunk []byte) {
 	if len(data) == 0 {
 		return
 	}
+	if ginContextBool(ginCtx, apiWebsocketTruncatedKey) {
+		return
+	}
+	var existingBytes []byte
 	if existing, exists := ginCtx.Get(apiWebsocketTimelineKey); exists {
-		if existingBytes, ok := existing.([]byte); ok && len(existingBytes) > 0 {
-			combined := make([]byte, 0, len(existingBytes)+len(data)+2)
-			combined = append(combined, existingBytes...)
-			if !bytes.HasSuffix(existingBytes, []byte("\n")) {
-				combined = append(combined, '\n')
-			}
-			combined = append(combined, '\n')
-			combined = append(combined, data...)
-			ginCtx.Set(apiWebsocketTimelineKey, combined)
-			return
+		if value, ok := existing.([]byte); ok && len(value) > 0 {
+			existingBytes = value
 		}
 	}
-	ginCtx.Set(apiWebsocketTimelineKey, bytes.Clone(data))
+
+	nextLen := len(data)
+	separator := []byte(nil)
+	if len(existingBytes) > 0 {
+		if !bytes.HasSuffix(existingBytes, []byte("\n")) {
+			separator = append(separator, '\n')
+		}
+		separator = append(separator, '\n')
+		nextLen += len(separator)
+	}
+	if len(existingBytes)+nextLen <= maxLoggedAPIWebsocketTimelineBytes {
+		combined := make([]byte, 0, len(existingBytes)+nextLen)
+		combined = append(combined, existingBytes...)
+		combined = append(combined, separator...)
+		combined = append(combined, data...)
+		ginCtx.Set(apiWebsocketTimelineKey, combined)
+		return
+	}
+
+	combined := make([]byte, 0, maxLoggedAPIWebsocketTimelineBytes+len(apiLogTruncatedMarker))
+	combined = append(combined, existingBytes...)
+	remaining := maxLoggedAPIWebsocketTimelineBytes - len(combined)
+	if remaining > 0 {
+		pending := make([]byte, 0, len(separator)+len(data))
+		pending = append(pending, separator...)
+		pending = append(pending, data...)
+		if len(pending) > remaining {
+			pending = pending[:remaining]
+		}
+		combined = append(combined, pending...)
+	}
+	combined = append(combined, apiLogTruncatedMarker...)
+	ginCtx.Set(apiWebsocketTimelineKey, combined)
+	ginCtx.Set(apiWebsocketTruncatedKey, true)
+}
+
+func appendLimitedString(builder *strings.Builder, text string, maxBytes int, truncated bool) bool {
+	if builder == nil || text == "" {
+		return truncated
+	}
+	if maxBytes <= 0 {
+		if !truncated {
+			builder.WriteString(apiLogTruncatedMarker)
+		}
+		return true
+	}
+	remaining := maxBytes - builder.Len()
+	if remaining <= 0 {
+		if !truncated {
+			builder.WriteString(apiLogTruncatedMarker)
+		}
+		return true
+	}
+	if len(text) <= remaining {
+		builder.WriteString(text)
+		return truncated
+	}
+	builder.WriteString(text[:remaining])
+	if !truncated {
+		builder.WriteString(apiLogTruncatedMarker)
+	}
+	return true
+}
+
+func writeLimitedBytes(builder *strings.Builder, data []byte, maxBytes int) {
+	if builder == nil || len(data) == 0 {
+		return
+	}
+	if maxBytes <= 0 {
+		builder.WriteString(apiLogTruncatedMarker)
+		return
+	}
+	if len(data) <= maxBytes {
+		builder.Write(data)
+		return
+	}
+	builder.Write(data[:maxBytes])
+	builder.WriteString(apiLogTruncatedMarker)
+}
+
+func ginContextBool(ginCtx *gin.Context, key string) bool {
+	if ginCtx == nil {
+		return false
+	}
+	value, exists := ginCtx.Get(key)
+	if !exists {
+		return false
+	}
+	typed, _ := value.(bool)
+	return typed
 }
 
 func markAPIResponseTimestamp(ginCtx *gin.Context) {
@@ -509,6 +605,30 @@ func writeHeaders(builder *strings.Builder, headers http.Header) {
 		for _, value := range values {
 			masked := util.MaskSensitiveHeaderValue(key, value)
 			builder.WriteString(fmt.Sprintf("%s: %s\n", key, masked))
+		}
+	}
+}
+
+func appendAttemptResponseHeaders(ginCtx *gin.Context, attempt *upstreamAttempt, headers http.Header) {
+	if len(headers) == 0 {
+		appendAttemptResponseText(ginCtx, attempt, "<none>\n")
+		return
+	}
+
+	keys := make([]string, 0, len(headers))
+	for key := range headers {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		values := headers[key]
+		if len(values) == 0 {
+			appendAttemptResponseText(ginCtx, attempt, fmt.Sprintf("%s:\n", key))
+			continue
+		}
+		for _, value := range values {
+			masked := util.MaskSensitiveHeaderValue(key, value)
+			appendAttemptResponseText(ginCtx, attempt, fmt.Sprintf("%s: %s\n", key, masked))
 		}
 	}
 }

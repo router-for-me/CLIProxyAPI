@@ -307,7 +307,7 @@ func (e *CodexExecutor) fetchCodexResponsesAggregate(ctx context.Context, auth *
 		}()
 
 		if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-			data, errRead := io.ReadAll(httpResp.Body)
+			data, errRead := helps.ReadErrorResponseBody(httpResp.Body)
 			if errRead != nil {
 				return codexNonStreamHTTPResult{}, errRead
 			}

@@ -408,8 +408,8 @@ func TestApplyCodexHeadersUsesConfigUserAgentForOAuth(t *testing.T) {
 	if got := req.Header.Get("User-Agent"); got != "config-ua" {
 		t.Fatalf("User-Agent = %s, want %s", got, "config-ua")
 	}
-	if got := req.Header.Get("x-codex-beta-features"); got != "" {
-		t.Fatalf("x-codex-beta-features = %q, want empty", got)
+	if got := req.Header.Get("x-codex-beta-features"); got != "config-beta" {
+		t.Fatalf("x-codex-beta-features = %q, want config-beta", got)
 	}
 }
 
@@ -488,7 +488,8 @@ func TestApplyCodexHeadersConfigUserAgentOverridesAuthFileAndClient(t *testing.T
 
 	cfg := &config.Config{
 		CodexHeaderDefaults: config.CodexHeaderDefaults{
-			UserAgent: "config-ua",
+			UserAgent:    "config-ua",
+			BetaFeatures: "config-beta",
 		},
 	}
 	auth := &cliproxyauth.Auth{
@@ -507,6 +508,9 @@ func TestApplyCodexHeadersConfigUserAgentOverridesAuthFileAndClient(t *testing.T
 	if got := req.Header.Get("User-Agent"); got != "config-ua" {
 		t.Fatalf("User-Agent = %s, want %s", got, "config-ua")
 	}
+	if got := req.Header.Get("x-codex-beta-features"); got != "config-beta" {
+		t.Fatalf("x-codex-beta-features = %q, want config-beta", got)
+	}
 }
 
 func TestApplyCodexHeadersUsesConfigUserAgentForAPIKeyAuth(t *testing.T) {
@@ -517,7 +521,8 @@ func TestApplyCodexHeadersUsesConfigUserAgentForAPIKeyAuth(t *testing.T) {
 
 	cfg := &config.Config{
 		CodexHeaderDefaults: config.CodexHeaderDefaults{
-			UserAgent: "config-ua",
+			UserAgent:    "config-ua",
+			BetaFeatures: "config-beta",
 		},
 	}
 	auth := &cliproxyauth.Auth{
@@ -531,6 +536,9 @@ func TestApplyCodexHeadersUsesConfigUserAgentForAPIKeyAuth(t *testing.T) {
 
 	if got := req.Header.Get("User-Agent"); got != "config-ua" {
 		t.Fatalf("User-Agent = %s, want %s", got, "config-ua")
+	}
+	if got := req.Header.Get("x-codex-beta-features"); got != "" {
+		t.Fatalf("x-codex-beta-features = %q, want empty", got)
 	}
 }
 

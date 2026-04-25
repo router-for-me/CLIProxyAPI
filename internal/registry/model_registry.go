@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	misc "github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
@@ -67,6 +68,19 @@ type availableModelsCacheEntry struct {
 	expiresAt time.Time
 }
 
+type openAIModelSummariesCacheEntry struct {
+	models    []OpenAIModelSummary
+	expiresAt time.Time
+}
+
+// OpenAIModelSummary is the compact model shape returned by /v1/models.
+type OpenAIModelSummary struct {
+	ID      string `json:"id"`
+	Object  string `json:"object"`
+	Created int64  `json:"created,omitempty"`
+	OwnedBy string `json:"owned_by"`
+}
+
 // ThinkingSupport describes a model family's supported internal reasoning budget range.
 // Values are interpreted in provider-native token units.
 type ThinkingSupport struct {
@@ -123,6 +137,8 @@ type ModelRegistry struct {
 	mutex *sync.RWMutex
 	// availableModelsCache stores per-handler snapshots for GetAvailableModels.
 	availableModelsCache map[string]availableModelsCacheEntry
+	// availableOpenAIModelSummaries stores the compact /v1/models snapshot.
+	availableOpenAIModelSummaries atomic.Value // stores *openAIModelSummariesCacheEntry
 	// hook is an optional callback sink for model registration changes
 	hook ModelRegistryHook
 }
@@ -152,10 +168,10 @@ func (r *ModelRegistry) ensureAvailableModelsCacheLocked() {
 }
 
 func (r *ModelRegistry) invalidateAvailableModelsCacheLocked() {
-	if len(r.availableModelsCache) == 0 {
-		return
+	if len(r.availableModelsCache) > 0 {
+		clear(r.availableModelsCache)
 	}
-	clear(r.availableModelsCache)
+	r.publishOpenAIModelSummariesSnapshotLocked(time.Now())
 }
 
 // LookupModelInfo searches dynamic registry (provider-specific > global) then static definitions.
@@ -788,40 +804,11 @@ func (r *ModelRegistry) buildAvailableModelsLocked(handlerType string, now time.
 	var expiresAt time.Time
 
 	for _, registration := range r.models {
-		availableClients := registration.Count
-
-		expiredClients := 0
-		for _, quotaTime := range registration.QuotaExceededClients {
-			if quotaTime == nil {
-				continue
-			}
-			recoveryAt := quotaTime.Add(modelQuotaExceededWindow)
-			if now.Before(recoveryAt) {
-				expiredClients++
-				if expiresAt.IsZero() || recoveryAt.Before(expiresAt) {
-					expiresAt = recoveryAt
-				}
-			}
+		available, registrationExpiresAt := modelRegistrationAvailable(registration, now)
+		if !registrationExpiresAt.IsZero() && (expiresAt.IsZero() || registrationExpiresAt.Before(expiresAt)) {
+			expiresAt = registrationExpiresAt
 		}
-
-		cooldownSuspended := 0
-		otherSuspended := 0
-		if registration.SuspendedClients != nil {
-			for _, reason := range registration.SuspendedClients {
-				if strings.EqualFold(reason, "quota") {
-					cooldownSuspended++
-					continue
-				}
-				otherSuspended++
-			}
-		}
-
-		effectiveClients := availableClients - expiredClients - otherSuspended
-		if effectiveClients < 0 {
-			effectiveClients = 0
-		}
-
-		if effectiveClients > 0 || (availableClients > 0 && (expiredClients > 0 || cooldownSuspended > 0) && otherSuspended == 0) {
+		if available {
 			model := r.convertModelToMap(registration.Info, handlerType)
 			if model != nil {
 				models = append(models, model)
@@ -830,6 +817,125 @@ func (r *ModelRegistry) buildAvailableModelsLocked(handlerType string, now time.
 	}
 
 	return models, expiresAt
+}
+
+func modelRegistrationAvailable(registration *ModelRegistration, now time.Time) (bool, time.Time) {
+	if registration == nil {
+		return false, time.Time{}
+	}
+
+	availableClients := registration.Count
+	expiredClients := 0
+	var expiresAt time.Time
+	for _, quotaTime := range registration.QuotaExceededClients {
+		if quotaTime == nil {
+			continue
+		}
+		recoveryAt := quotaTime.Add(modelQuotaExceededWindow)
+		if now.Before(recoveryAt) {
+			expiredClients++
+			if expiresAt.IsZero() || recoveryAt.Before(expiresAt) {
+				expiresAt = recoveryAt
+			}
+		}
+	}
+
+	cooldownSuspended := 0
+	otherSuspended := 0
+	if registration.SuspendedClients != nil {
+		for _, reason := range registration.SuspendedClients {
+			if strings.EqualFold(reason, "quota") {
+				cooldownSuspended++
+				continue
+			}
+			otherSuspended++
+		}
+	}
+
+	effectiveClients := availableClients - expiredClients - otherSuspended
+	if effectiveClients < 0 {
+		effectiveClients = 0
+	}
+
+	available := effectiveClients > 0 || (availableClients > 0 && (expiredClients > 0 || cooldownSuspended > 0) && otherSuspended == 0)
+	return available, expiresAt
+}
+
+// GetAvailableOpenAIModelSummaries returns the compact /v1/models payload without
+// cloning full model capability maps that the endpoint does not expose.
+func (r *ModelRegistry) GetAvailableOpenAIModelSummaries() []OpenAIModelSummary {
+	now := time.Now()
+
+	if snapshot := r.loadOpenAIModelSummariesSnapshot(); snapshot != nil && snapshot.validAt(now) {
+		return cloneOpenAIModelSummaries(snapshot.models)
+	}
+
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+
+	if snapshot := r.loadOpenAIModelSummariesSnapshot(); snapshot != nil && snapshot.validAt(now) {
+		return cloneOpenAIModelSummaries(snapshot.models)
+	}
+
+	snapshot := r.publishOpenAIModelSummariesSnapshotLocked(now)
+	return cloneOpenAIModelSummaries(snapshot.models)
+}
+
+func (r *ModelRegistry) loadOpenAIModelSummariesSnapshot() *openAIModelSummariesCacheEntry {
+	raw := r.availableOpenAIModelSummaries.Load()
+	if raw == nil {
+		return nil
+	}
+	snapshot, _ := raw.(*openAIModelSummariesCacheEntry)
+	return snapshot
+}
+
+func (e *openAIModelSummariesCacheEntry) validAt(now time.Time) bool {
+	if e == nil {
+		return false
+	}
+	return e.expiresAt.IsZero() || now.Before(e.expiresAt)
+}
+
+func (r *ModelRegistry) publishOpenAIModelSummariesSnapshotLocked(now time.Time) *openAIModelSummariesCacheEntry {
+	models, expiresAt := r.buildOpenAIModelSummariesLocked(now)
+	snapshot := &openAIModelSummariesCacheEntry{
+		models:    cloneOpenAIModelSummaries(models),
+		expiresAt: expiresAt,
+	}
+	r.availableOpenAIModelSummaries.Store(snapshot)
+	return snapshot
+}
+
+func (r *ModelRegistry) buildOpenAIModelSummariesLocked(now time.Time) ([]OpenAIModelSummary, time.Time) {
+	models := make([]OpenAIModelSummary, 0, len(r.models))
+	var expiresAt time.Time
+	for _, registration := range r.models {
+		available, registrationExpiresAt := modelRegistrationAvailable(registration, now)
+		if !registrationExpiresAt.IsZero() && (expiresAt.IsZero() || registrationExpiresAt.Before(expiresAt)) {
+			expiresAt = registrationExpiresAt
+		}
+		if !available || registration.Info == nil {
+			continue
+		}
+		models = append(models, openAIModelSummary(registration.Info))
+	}
+	return models, expiresAt
+}
+
+func openAIModelSummary(model *ModelInfo) OpenAIModelSummary {
+	return OpenAIModelSummary{
+		ID:      model.ID,
+		Object:  "model",
+		Created: model.Created,
+		OwnedBy: model.OwnedBy,
+	}
+}
+
+func cloneOpenAIModelSummaries(models []OpenAIModelSummary) []OpenAIModelSummary {
+	cloned := make([]OpenAIModelSummary, len(models))
+	copy(cloned, models)
+	return cloned
 }
 
 func cloneModelMaps(models []map[string]any) []map[string]any {
@@ -1004,26 +1110,30 @@ func (r *ModelRegistry) GetModelCount(modelID string) int {
 	defer r.mutex.RUnlock()
 
 	if registration, exists := r.models[modelID]; exists {
-		now := time.Now()
-
-		// Count clients that have exceeded quota but haven't recovered yet
-		expiredClients := 0
-		for _, quotaTime := range registration.QuotaExceededClients {
-			if quotaTime != nil && now.Sub(*quotaTime) < modelQuotaExceededWindow {
-				expiredClients++
-			}
-		}
-		suspendedClients := 0
-		if registration.SuspendedClients != nil {
-			suspendedClients = len(registration.SuspendedClients)
-		}
-		result := registration.Count - expiredClients - suspendedClients
-		if result < 0 {
-			return 0
-		}
-		return result
+		return effectiveModelCount(registration, time.Now())
 	}
 	return 0
+}
+
+func effectiveModelCount(registration *ModelRegistration, now time.Time) int {
+	if registration == nil {
+		return 0
+	}
+	expiredClients := 0
+	for _, quotaTime := range registration.QuotaExceededClients {
+		if quotaTime != nil && now.Sub(*quotaTime) < modelQuotaExceededWindow {
+			expiredClients++
+		}
+	}
+	suspendedClients := 0
+	if registration.SuspendedClients != nil {
+		suspendedClients = len(registration.SuspendedClients)
+	}
+	result := registration.Count - expiredClients - suspendedClients
+	if result < 0 {
+		return 0
+	}
+	return result
 }
 
 // GetModelProviders returns provider identifiers that currently supply the given model
@@ -1038,6 +1148,15 @@ func (r *ModelRegistry) GetModelProviders(modelID string) []string {
 
 	registration, exists := r.models[modelID]
 	if !exists || registration == nil || len(registration.Providers) == 0 {
+		return nil
+	}
+
+	if len(registration.Providers) == 1 {
+		for name, count := range registration.Providers {
+			if count > 0 {
+				return []string{name}
+			}
+		}
 		return nil
 	}
 
@@ -1245,31 +1364,30 @@ func (r *ModelRegistry) CleanupExpiredQuotas() {
 //   - string: The model ID of the first available model, or empty string if none available
 //   - error: An error if no models are available
 func (r *ModelRegistry) GetFirstAvailableModel(handlerType string) (string, error) {
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
 
-	// Get all available models for this handler type
-	models := r.GetAvailableModels(handlerType)
-	if len(models) == 0 {
-		return "", fmt.Errorf("no models available for handler type: %s", handlerType)
+	now := time.Now()
+	bestModelID := ""
+	var bestCreated int64
+	for modelID, registration := range r.models {
+		if registration == nil || registration.Info == nil {
+			continue
+		}
+		if effectiveModelCount(registration, now) <= 0 {
+			continue
+		}
+		if r.convertModelToMap(registration.Info, handlerType) == nil {
+			continue
+		}
+		created := registration.Info.Created
+		if bestModelID == "" || created > bestCreated {
+			bestModelID = modelID
+			bestCreated = created
+		}
 	}
-
-	// Sort models by creation timestamp (newest first)
-	sort.Slice(models, func(i, j int) bool {
-		// Extract created timestamps from map
-		createdI, okI := models[i]["created"].(int64)
-		createdJ, okJ := models[j]["created"].(int64)
-		if !okI || !okJ {
-			return false
-		}
-		return createdI > createdJ
-	})
-
-	// Find the first model with available clients
-	for _, model := range models {
-		if modelID, ok := model["id"].(string); ok {
-			if count := r.GetModelCount(modelID); count > 0 {
-				return modelID, nil
-			}
-		}
+	if bestModelID != "" {
+		return bestModelID, nil
 	}
 
 	return "", fmt.Errorf("no available clients for any model in handler type: %s", handlerType)

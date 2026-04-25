@@ -17,9 +17,9 @@ import (
 )
 
 const (
-	pooledTransportMaxIdleConns        = 512
-	pooledTransportMaxIdleConnsPerHost = 64
-	pooledTransportIdleConnTimeout     = 90 * time.Second
+	pooledTransportMaxIdleConns        = proxyutil.DefaultMaxIdleConns
+	pooledTransportMaxIdleConnsPerHost = proxyutil.DefaultMaxIdleConnsPerHost
+	pooledTransportIdleConnTimeout     = proxyutil.DefaultIdleConnTimeout
 	defaultClientCacheKey              = "default"
 )
 
@@ -229,10 +229,5 @@ func buildPooledTransport(base *http.Transport) *http.Transport {
 	}
 
 	transport := base.Clone()
-	transport.MaxIdleConns = pooledTransportMaxIdleConns
-	transport.MaxIdleConnsPerHost = pooledTransportMaxIdleConnsPerHost
-	transport.MaxConnsPerHost = 0
-	transport.IdleConnTimeout = pooledTransportIdleConnTimeout
-	transport.ForceAttemptHTTP2 = true
-	return transport
+	return proxyutil.ApplyHTTPTransportPoolSettings(transport)
 }

@@ -486,7 +486,7 @@ func ConvertCodexResponseToOpenAINonStream(_ context.Context, _ string, original
 func buildReverseMapFromOriginalOpenAI(original []byte) map[string]string {
 	tools := gjson.GetBytes(original, "tools")
 	rev := map[string]string{}
-	if tools.IsArray() && len(tools.Array()) > 0 {
+	if tools.IsArray() && tools.Get("#").Int() > 0 {
 		var names []string
 		arr := tools.Array()
 		for i := 0; i < len(arr); i++ {

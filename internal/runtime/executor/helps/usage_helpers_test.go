@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 )
 
@@ -130,5 +131,41 @@ func TestUsageReporterBuildRecordIncludesLatency(t *testing.T) {
 	}
 	if record.Latency > 3*time.Second {
 		t.Fatalf("latency = %v, want <= 3s", record.Latency)
+	}
+}
+
+func TestResolveUsageAPIKeyPrefersClientAPIKeyWhenPresent(t *testing.T) {
+	auth := &cliproxyauth.Auth{
+		Provider:   "gemini",
+		Attributes: map[string]string{"api_key": "upstream-key"},
+	}
+
+	apiKey := resolveUsageAPIKey(auth, "client-key")
+	if apiKey != "client-key" {
+		t.Fatalf("api key = %q, want client-key", apiKey)
+	}
+}
+
+func TestResolveUsageAPIKeyFallsBackToUpstreamAPIKeyAuth(t *testing.T) {
+	auth := &cliproxyauth.Auth{
+		Provider:   "gemini",
+		Attributes: map[string]string{"api_key": "upstream-key"},
+	}
+
+	apiKey := resolveUsageAPIKey(auth, "")
+	if apiKey != "upstream-key" {
+		t.Fatalf("api key = %q, want upstream-key", apiKey)
+	}
+}
+
+func TestResolveUsageAPIKeyFallsBackToContextForOAuth(t *testing.T) {
+	auth := &cliproxyauth.Auth{
+		Provider: "gemini-cli",
+		Metadata: map[string]any{"email": "user@example.com"},
+	}
+
+	apiKey := resolveUsageAPIKey(auth, "client-key")
+	if apiKey != "client-key" {
+		t.Fatalf("api key = %q, want client-key", apiKey)
 	}
 }

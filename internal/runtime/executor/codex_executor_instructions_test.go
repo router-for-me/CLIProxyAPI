@@ -122,6 +122,28 @@ func TestCodexExecutorCountTokensTreatsNullInstructionsAsEmpty(t *testing.T) {
 	}
 }
 
+func TestBuildCodexTokenCountTextCollectsRelevantSegments(t *testing.T) {
+	body := []byte(`{
+		"instructions":"be helpful",
+		"input":[
+			{"type":"message","content":[{"text":"hello"},{"text":" world "}]},
+			{"type":"function_call","name":"tool","arguments":"{\"x\":1}"},
+			{"type":"function_call_output","output":"ok"},
+			{"type":"unknown","text":"fallback"}
+		],
+		"tools":[
+			{"name":"tool","description":"desc","parameters":{"type":"object","properties":{"x":{"type":"string"}}}}
+		],
+		"text":{"format":{"name":"schema_name","schema":{"type":"object"}}}
+	}`)
+
+	got := buildCodexTokenCountText(gjson.ParseBytes(body), len(body))
+	want := "be helpful\nhello\nworld\ntool\n{\"x\":1}\nok\nfallback\ntool\ndesc\n{\"type\":\"object\",\"properties\":{\"x\":{\"type\":\"string\"}}}\nschema_name\n{\"type\":\"object\"}"
+	if got != want {
+		t.Fatalf("token count text mismatch:\n got: %q\nwant: %q", got, want)
+	}
+}
+
 func TestCodexTokenizerKeyNormalizesModelFamilies(t *testing.T) {
 	cases := map[string]string{
 		"":                        "cl100k_base",

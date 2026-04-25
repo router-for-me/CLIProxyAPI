@@ -52,3 +52,23 @@ func TestGetAvailableModelsInvalidatesCacheOnRegistryChanges(t *testing.T) {
 		t.Fatalf("expected model to reappear after resume, got %d", len(models))
 	}
 }
+
+func TestGetAvailableOpenAIModelSummariesReturnsEmptySnapshot(t *testing.T) {
+	r := newTestModelRegistry()
+
+	first := r.GetAvailableOpenAIModelSummaries()
+	if first == nil {
+		t.Fatal("expected empty snapshot, got nil")
+	}
+	if len(first) != 0 {
+		t.Fatalf("expected empty snapshot, got %d models", len(first))
+	}
+
+	second := r.GetAvailableOpenAIModelSummaries()
+	if second == nil {
+		t.Fatal("expected cached empty snapshot, got nil")
+	}
+	if len(second) != 0 {
+		t.Fatalf("expected cached empty snapshot, got %d models", len(second))
+	}
+}

@@ -340,6 +340,58 @@ func TestNormalizeResponsesWebsocketRequestAppendWithoutCreate(t *testing.T) {
 	}
 }
 
+func TestMergeJSONArrayRawPreservesOrder(t *testing.T) {
+	merged, err := mergeJSONArrayRaw(
+		`[{"type":"message","id":"msg-1"}]`,
+		`[{"type":"function_call","call_id":"call-1"},{"type":"message","id":"msg-2"}]`,
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	items := gjson.Parse(merged).Array()
+	if len(items) != 3 {
+		t.Fatalf("merged len = %d, want 3", len(items))
+	}
+	if items[0].Get("id").String() != "msg-1" {
+		t.Fatalf("unexpected first item: %s", items[0].Raw)
+	}
+	if items[1].Get("call_id").String() != "call-1" {
+		t.Fatalf("unexpected second item: %s", items[1].Raw)
+	}
+	if items[2].Get("id").String() != "msg-2" {
+		t.Fatalf("unexpected third item: %s", items[2].Raw)
+	}
+}
+
+func TestDedupeFunctionCallsByCallIDRemovesDuplicateCalls(t *testing.T) {
+	deduped, err := dedupeFunctionCallsByCallID(
+		`[
+			{"type":"message","id":"msg-1"},
+			{"type":"function_call","call_id":"call-1","id":"fc-1"},
+			{"type":"function_call","call_id":"call-1","id":"fc-dup"},
+			{"type":"message","id":"msg-2"}
+		]`,
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	items := gjson.Parse(deduped).Array()
+	if len(items) != 3 {
+		t.Fatalf("deduped len = %d, want 3", len(items))
+	}
+	if items[0].Get("id").String() != "msg-1" {
+		t.Fatalf("unexpected first item: %s", items[0].Raw)
+	}
+	if items[1].Get("id").String() != "fc-1" {
+		t.Fatalf("unexpected retained function call: %s", items[1].Raw)
+	}
+	if items[2].Get("id").String() != "msg-2" {
+		t.Fatalf("unexpected trailing item: %s", items[2].Raw)
+	}
+}
+
 func TestWebsocketJSONPayloadsFromChunk(t *testing.T) {
 	chunk := []byte("event: response.created\n\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-1\"}}\n\ndata: [DONE]\n")
 
@@ -407,6 +459,27 @@ func TestAppendWebsocketTimelineEvent(t *testing.T) {
 	}
 	if !strings.Contains(got, "{\"type\":\"response.create\"}") {
 		t.Fatalf("timeline payload not found: %s", got)
+	}
+}
+
+func TestAppendWebsocketTimelineEventTruncatesOnce(t *testing.T) {
+	var builder strings.Builder
+	ts := time.Date(2026, time.April, 1, 12, 34, 56, 789000000, time.UTC)
+	payload := bytes.Repeat([]byte("x"), maxResponsesWebsocketTimelineBytes)
+
+	appendWebsocketTimelineEvent(&builder, "request", payload, ts)
+	first := builder.String()
+	if !strings.Contains(first, responsesWebsocketTimelineTruncatedMarker) {
+		t.Fatalf("expected truncated marker in first payload")
+	}
+
+	appendWebsocketTimelineEvent(&builder, "response", []byte(`{"type":"response.created"}`), ts)
+	second := builder.String()
+	if second != first {
+		t.Fatalf("expected timeline to stop growing after truncation")
+	}
+	if strings.Count(second, responsesWebsocketTimelineTruncatedMarker) != 1 {
+		t.Fatalf("expected exactly one truncated marker, got %d", strings.Count(second, responsesWebsocketTimelineTruncatedMarker))
 	}
 }
 

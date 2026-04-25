@@ -211,16 +211,16 @@ func TestConvertOpenAIResponsesRequestToCodex_OriginalIssue(t *testing.T) {
 		t.Error("parallel_tool_calls should be true")
 	}
 
-	// Align with codex-rs: without a reasoning block, include MUST NOT be set.
+	// Align with codex-rs: without a reasoning block, include is an empty array.
 	include := gjson.Get(outputStr, "include")
-	if include.Exists() {
-		t.Errorf("include should not be set when reasoning is absent, got: %s", include.Raw)
+	if !include.IsArray() || len(include.Array()) != 0 {
+		t.Errorf("include should be an empty array when reasoning is absent, got: %s", include.Raw)
 	}
 }
 
 // TestConvertOpenAIResponsesRequestToCodex_IncludeOnlyWithReasoning verifies
-// that include=["reasoning.encrypted_content"] is injected when (and only when)
-// the request carries a reasoning block, matching codex-rs client behavior.
+// that include=["reasoning.encrypted_content"] is injected when the request
+// carries a reasoning block and include=[] otherwise.
 func TestConvertOpenAIResponsesRequestToCodex_IncludeOnlyWithReasoning(t *testing.T) {
 	withReasoning := []byte(`{
 		"model": "gpt-5.2",
@@ -238,8 +238,9 @@ func TestConvertOpenAIResponsesRequestToCodex_IncludeOnlyWithReasoning(t *testin
 		"input": [{"role":"user","content":"hi"}]
 	}`)
 	out = ConvertOpenAIResponsesRequestToCodex("gpt-5.2", withoutReasoning, false)
-	if gjson.GetBytes(out, "include").Exists() {
-		t.Fatalf("include should be absent when reasoning is missing, got: %s", string(out))
+	include = gjson.GetBytes(out, "include")
+	if !include.IsArray() || len(include.Array()) != 0 {
+		t.Fatalf("include should be empty when reasoning is missing, got: %s", string(out))
 	}
 
 	// Caller-provided include must be preserved verbatim when reasoning exists.

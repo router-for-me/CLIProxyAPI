@@ -16,6 +16,28 @@ import (
 
 const geminiCLIFunctionThoughtSignature = "skip_thought_signature_validator"
 
+var openAIInputAudioMimeTypes = map[string]string{
+	"mp3":       "audio/mpeg",
+	"wav":       "audio/wav",
+	"ogg":       "audio/ogg",
+	"flac":      "audio/flac",
+	"aac":       "audio/aac",
+	"webm":      "audio/webm",
+	"pcm16":     "audio/pcm",
+	"g711_ulaw": "audio/basic",
+	"g711_alaw": "audio/basic",
+}
+
+func openAIInputAudioMimeType(format string) string {
+	if format == "" {
+		return "audio/wav"
+	}
+	if mapped, ok := openAIInputAudioMimeTypes[format]; ok {
+		return mapped
+	}
+	return "audio/" + format
+}
+
 // ConvertOpenAIRequestToAntigravity converts an OpenAI Chat Completions request (raw JSON)
 // into a complete Gemini CLI request JSON. All JSON construction uses sjson and lookups use gjson.
 //
@@ -81,14 +103,15 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	// e.g. "modalities": ["image", "text"] -> ["IMAGE", "TEXT"]
 	if mods := gjson.GetBytes(rawJSON, "modalities"); mods.Exists() && mods.IsArray() {
 		var responseMods []string
-		for _, m := range mods.Array() {
+		mods.ForEach(func(_, m gjson.Result) bool {
 			switch strings.ToLower(m.String()) {
 			case "text":
 				responseMods = append(responseMods, "TEXT")
 			case "image":
 				responseMods = append(responseMods, "IMAGE")
 			}
-		}
+			return true
+		})
 		if len(responseMods) > 0 {
 			out, _ = sjson.SetBytes(out, "request.generationConfig.responseModalities", responseMods)
 		}
@@ -110,7 +133,7 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	if messages.IsArray() {
 		arr := messages.Array()
 		// First pass: assistant tool_calls id->name map
-		tcID2Name := map[string]string{}
+		var tcID2Name map[string]string
 		for i := 0; i < len(arr); i++ {
 			m := arr[i]
 			if m.Get("role").String() == "assistant" {
@@ -121,6 +144,9 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 							id := tc.Get("id").String()
 							name := tc.Get("function.name").String()
 							if id != "" && name != "" {
+								if tcID2Name == nil {
+									tcID2Name = make(map[string]string)
+								}
 								tcID2Name[id] = name
 							}
 						}
@@ -130,7 +156,7 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 		}
 
 		// Second pass build systemInstruction/tool responses cache
-		toolResponses := map[string]string{} // tool_call_id -> response text
+		var toolResponses map[string]string // tool_call_id -> response text
 		for i := 0; i < len(arr); i++ {
 			m := arr[i]
 			role := m.Get("role").String()
@@ -138,6 +164,9 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 				toolCallID := m.Get("tool_call_id").String()
 				if toolCallID != "" {
 					c := m.Get("content")
+					if toolResponses == nil {
+						toolResponses = make(map[string]string)
+					}
 					toolResponses[toolCallID] = c.Raw
 				}
 			}
@@ -216,25 +245,7 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 							audioData := item.Get("input_audio.data").String()
 							audioFormat := item.Get("input_audio.format").String()
 							if audioData != "" {
-								audioMimeMap := map[string]string{
-									"mp3":       "audio/mpeg",
-									"wav":       "audio/wav",
-									"ogg":       "audio/ogg",
-									"flac":      "audio/flac",
-									"aac":       "audio/aac",
-									"webm":      "audio/webm",
-									"pcm16":     "audio/pcm",
-									"g711_ulaw": "audio/basic",
-									"g711_alaw": "audio/basic",
-								}
-								mimeType := "audio/wav"
-								if audioFormat != "" {
-									if mapped, ok := audioMimeMap[audioFormat]; ok {
-										mimeType = mapped
-									} else {
-										mimeType = "audio/" + audioFormat
-									}
-								}
+								mimeType := openAIInputAudioMimeType(audioFormat)
 								node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".inlineData.mime_type", mimeType)
 								node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".inlineData.data", audioData)
 								p++
@@ -338,13 +349,13 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 
 	// tools -> request.tools[].functionDeclarations + request.tools[].googleSearch/codeExecution/urlContext passthrough
 	tools := gjson.GetBytes(rawJSON, "tools")
-	if tools.IsArray() && len(tools.Array()) > 0 {
+	if tools.IsArray() && tools.Get("#").Int() > 0 {
 		functionToolNode := []byte(`{}`)
 		hasFunction := false
 		googleSearchNodes := make([][]byte, 0)
 		codeExecutionNodes := make([][]byte, 0)
 		urlContextNodes := make([][]byte, 0)
-		for _, t := range tools.Array() {
+		tools.ForEach(func(_, t gjson.Result) bool {
 			if t.Get("type").String() == "function" {
 				fn := t.Get("function")
 				if fn.Exists() && fn.IsObject() {
@@ -357,13 +368,13 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 							fnRawBytes, errSet := sjson.SetBytes([]byte(fnRaw), "parametersJsonSchema.type", "object")
 							if errSet != nil {
 								log.Warnf("Failed to set default schema type for tool '%s': %v", fn.Get("name").String(), errSet)
-								continue
+								return true
 							}
 							fnRaw = string(fnRawBytes)
 							fnRawBytes, errSet = sjson.SetRawBytes([]byte(fnRaw), "parametersJsonSchema.properties", []byte(`{}`))
 							if errSet != nil {
 								log.Warnf("Failed to set default schema properties for tool '%s': %v", fn.Get("name").String(), errSet)
-								continue
+								return true
 							}
 							fnRaw = string(fnRawBytes)
 						} else {
@@ -374,13 +385,13 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 						fnRawBytes, errSet := sjson.SetBytes([]byte(fnRaw), "parametersJsonSchema.type", "object")
 						if errSet != nil {
 							log.Warnf("Failed to set default schema type for tool '%s': %v", fn.Get("name").String(), errSet)
-							continue
+							return true
 						}
 						fnRaw = string(fnRawBytes)
 						fnRawBytes, errSet = sjson.SetRawBytes([]byte(fnRaw), "parametersJsonSchema.properties", []byte(`{}`))
 						if errSet != nil {
 							log.Warnf("Failed to set default schema properties for tool '%s': %v", fn.Get("name").String(), errSet)
-							continue
+							return true
 						}
 						fnRaw = string(fnRawBytes)
 					}
@@ -393,7 +404,7 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 					tmp, errSet := sjson.SetRawBytes(functionToolNode, "functionDeclarations.-1", []byte(fnRaw))
 					if errSet != nil {
 						log.Warnf("Failed to append tool declaration for '%s': %v", fn.Get("name").String(), errSet)
-						continue
+						return true
 					}
 					functionToolNode = tmp
 					hasFunction = true
@@ -405,7 +416,7 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 				googleToolNode, errSet = sjson.SetRawBytes(googleToolNode, "googleSearch", []byte(gs.Raw))
 				if errSet != nil {
 					log.Warnf("Failed to set googleSearch tool: %v", errSet)
-					continue
+					return true
 				}
 				googleSearchNodes = append(googleSearchNodes, googleToolNode)
 			}
@@ -415,7 +426,7 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 				codeToolNode, errSet = sjson.SetRawBytes(codeToolNode, "codeExecution", []byte(ce.Raw))
 				if errSet != nil {
 					log.Warnf("Failed to set codeExecution tool: %v", errSet)
-					continue
+					return true
 				}
 				codeExecutionNodes = append(codeExecutionNodes, codeToolNode)
 			}
@@ -425,11 +436,12 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 				urlToolNode, errSet = sjson.SetRawBytes(urlToolNode, "urlContext", []byte(uc.Raw))
 				if errSet != nil {
 					log.Warnf("Failed to set urlContext tool: %v", errSet)
-					continue
+					return true
 				}
 				urlContextNodes = append(urlContextNodes, urlToolNode)
 			}
-		}
+			return true
+		})
 		if hasFunction || len(googleSearchNodes) > 0 || len(codeExecutionNodes) > 0 || len(urlContextNodes) > 0 {
 			toolsNode := []byte("[]")
 			if hasFunction {

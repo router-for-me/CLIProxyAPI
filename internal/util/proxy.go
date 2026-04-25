@@ -5,11 +5,17 @@ package util
 
 import (
 	"net/http"
+	"sync"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
+)
+
+var (
+	pooledDefaultTransport     *http.Transport
+	pooledDefaultTransportOnce sync.Once
 )
 
 // SetProxy configures the provided HTTP client with proxy settings from the configuration.
@@ -31,11 +37,18 @@ func SetProxy(cfg *config.SDKConfig, httpClient *http.Client) *http.Client {
 		pool = nil
 	}
 
-	if transport == nil && pool == nil {
-		return httpClient
+	if transport == nil {
+		if existing, ok := httpClient.Transport.(*http.Transport); ok && existing != nil {
+			if pool == nil {
+				return httpClient
+			}
+			transport = existing
+		} else if httpClient.Transport != nil {
+			return httpClient
+		}
 	}
 	if transport == nil {
-		transport = cloneDefaultTransport()
+		transport = defaultPooledTransport()
 	}
 	if pool != nil {
 		if customTransport, ok := misc.RoundTripperWithCustomRootCAs(transport, pool).(*http.Transport); ok && customTransport != nil {
@@ -46,9 +59,9 @@ func SetProxy(cfg *config.SDKConfig, httpClient *http.Client) *http.Client {
 	return httpClient
 }
 
-func cloneDefaultTransport() *http.Transport {
-	if transport, ok := http.DefaultTransport.(*http.Transport); ok && transport != nil {
-		return transport.Clone()
-	}
-	return &http.Transport{}
+func defaultPooledTransport() *http.Transport {
+	pooledDefaultTransportOnce.Do(func() {
+		pooledDefaultTransport = proxyutil.NewPooledDefaultTransport()
+	})
+	return pooledDefaultTransport
 }

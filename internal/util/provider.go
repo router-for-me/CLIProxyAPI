@@ -34,28 +34,29 @@ func GetProviderName(modelName string) []string {
 		return nil
 	}
 
-	providers := make([]string, 0, 4)
-	seen := make(map[string]struct{})
-
-	appendProvider := func(name string) {
-		if name == "" {
-			return
+	registryProviders := registry.GetGlobalRegistry().GetModelProviders(modelName)
+	switch len(registryProviders) {
+	case 0:
+		return nil
+	case 1:
+		if registryProviders[0] == "" {
+			return nil
 		}
-		if _, exists := seen[name]; exists {
-			return
+		return registryProviders
+	}
+
+	providers := make([]string, 0, len(registryProviders))
+	seen := make(map[string]struct{}, len(registryProviders))
+	for _, provider := range registryProviders {
+		if provider == "" {
+			continue
 		}
-		seen[name] = struct{}{}
-		providers = append(providers, name)
+		if _, exists := seen[provider]; exists {
+			continue
+		}
+		seen[provider] = struct{}{}
+		providers = append(providers, provider)
 	}
-
-	for _, provider := range registry.GetGlobalRegistry().GetModelProviders(modelName) {
-		appendProvider(provider)
-	}
-
-	if len(providers) > 0 {
-		return providers
-	}
-
 	return providers
 }
 

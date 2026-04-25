@@ -155,7 +155,7 @@ func (e *KimiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	}()
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header)
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b, _ := io.ReadAll(httpResp.Body)
+		b, _ := helps.ReadErrorResponseBody(httpResp.Body)
 		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
 		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
@@ -259,7 +259,7 @@ func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 	}
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header)
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b, _ := io.ReadAll(httpResp.Body)
+		b, _ := helps.ReadErrorResponseBody(httpResp.Body)
 		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
 		if errClose := httpResp.Body.Close(); errClose != nil {
@@ -318,21 +318,61 @@ func normalizeKimiToolMessageLinks(body []byte) ([]byte, error) {
 	}
 
 	out := body
-	pending := make([]string, 0)
+	pendingOrder := make([]string, 0)
+	pendingSet := make(map[string]struct{})
+	pendingCount := 0
+	pendingSingle := ""
 	patched := 0
 	patchedReasoning := 0
 	ambiguous := 0
 	latestReasoning := ""
 	hasLatestReasoning := false
 
-	removePending := func(id string) {
-		for idx := range pending {
-			if pending[idx] != id {
-				continue
-			}
-			pending = append(pending[:idx], pending[idx+1:]...)
+	addPending := func(id string) {
+		if id == "" {
 			return
 		}
+		if _, exists := pendingSet[id]; exists {
+			return
+		}
+		pendingSet[id] = struct{}{}
+		pendingOrder = append(pendingOrder, id)
+		pendingCount++
+		if pendingCount == 1 {
+			pendingSingle = id
+		} else {
+			pendingSingle = ""
+		}
+	}
+
+	findPendingSingle := func() string {
+		for _, id := range pendingOrder {
+			if _, exists := pendingSet[id]; exists {
+				return id
+			}
+		}
+		return ""
+	}
+
+	removePending := func(id string) {
+		if id == "" {
+			return
+		}
+		if _, exists := pendingSet[id]; !exists {
+			return
+		}
+		delete(pendingSet, id)
+		pendingCount--
+		if pendingCount <= 0 {
+			pendingCount = 0
+			pendingSingle = ""
+			return
+		}
+		if pendingCount == 1 {
+			pendingSingle = findPendingSingle()
+			return
+		}
+		pendingSingle = ""
 	}
 
 	msgs := messages.Array()
@@ -351,7 +391,7 @@ func normalizeKimiToolMessageLinks(body []byte) ([]byte, error) {
 			}
 
 			toolCalls := msg.Get("tool_calls")
-			if !toolCalls.Exists() || !toolCalls.IsArray() || len(toolCalls.Array()) == 0 {
+			if !toolCalls.Exists() || !toolCalls.IsArray() || toolCalls.Get("#").Int() == 0 {
 				continue
 			}
 
@@ -371,7 +411,7 @@ func normalizeKimiToolMessageLinks(body []byte) ([]byte, error) {
 				if id == "" {
 					continue
 				}
-				pending = append(pending, id)
+				addPending(id)
 			}
 		case "tool":
 			toolCallID := strings.TrimSpace(msg.Get("tool_call_id").String())
@@ -388,8 +428,8 @@ func normalizeKimiToolMessageLinks(body []byte) ([]byte, error) {
 				}
 			}
 			if toolCallID == "" {
-				if len(pending) == 1 {
-					toolCallID = pending[0]
+				if pendingCount == 1 {
+					toolCallID = pendingSingle
 					path := fmt.Sprintf("messages.%d.tool_call_id", msgIdx)
 					next, err := sjson.SetBytes(out, path, toolCallID)
 					if err != nil {
@@ -397,7 +437,7 @@ func normalizeKimiToolMessageLinks(body []byte) ([]byte, error) {
 					}
 					out = next
 					patched++
-				} else if len(pending) > 1 {
+				} else if pendingCount > 1 {
 					ambiguous++
 				}
 			}
@@ -416,7 +456,7 @@ func normalizeKimiToolMessageLinks(body []byte) ([]byte, error) {
 	if ambiguous > 0 {
 		log.WithFields(log.Fields{
 			"ambiguous_tool_messages": ambiguous,
-			"pending_tool_calls":      len(pending),
+			"pending_tool_calls":      pendingCount,
 		}).Warn("kimi executor: tool messages missing tool_call_id with ambiguous candidates")
 	}
 

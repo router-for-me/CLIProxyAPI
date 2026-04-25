@@ -426,13 +426,14 @@ func (h *OpenAIAPIHandler) imagesEditsFromJSON(c *gin.Context) {
 	var images []string
 	imagesResult := gjson.GetBytes(rawJSON, "images")
 	if imagesResult.IsArray() {
-		for _, img := range imagesResult.Array() {
+		imagesResult.ForEach(func(_, img gjson.Result) bool {
 			url := strings.TrimSpace(img.Get("image_url").String())
 			if url == "" {
-				continue
+				return true
 			}
 			images = append(images, url)
-		}
+			return true
+		})
 	}
 	if len(images) == 0 {
 		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
@@ -631,13 +632,13 @@ func extractImagesFromResponsesCompleted(payload []byte) (results []imageCallRes
 
 	output := gjson.GetBytes(payload, "response.output")
 	if output.IsArray() {
-		for _, item := range output.Array() {
+		output.ForEach(func(_, item gjson.Result) bool {
 			if item.Get("type").String() != "image_generation_call" {
-				continue
+				return true
 			}
 			res := strings.TrimSpace(item.Get("result").String())
 			if res == "" {
-				continue
+				return true
 			}
 			entry := imageCallResult{
 				Result:        res,
@@ -651,7 +652,8 @@ func extractImagesFromResponsesCompleted(payload []byte) (results []imageCallRes
 				firstMeta = entry
 			}
 			results = append(results, entry)
-		}
+			return true
+		})
 	}
 
 	if usage := gjson.GetBytes(payload, "response.tool_usage.image_gen"); usage.Exists() && usage.IsObject() {

@@ -249,7 +249,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 			helps.LogWithRequestID(ctx).Warn(msg)
 			return resp, statusErr{code: httpResp.StatusCode, msg: msg}
 		}
-		b, readErr := io.ReadAll(errBody)
+		b, readErr := helps.ReadErrorResponseBody(errBody)
 		if readErr != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, readErr)
 			msg := fmt.Sprintf("failed to read error response body: %v", readErr)
@@ -430,7 +430,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			helps.LogWithRequestID(ctx).Warn(msg)
 			return nil, statusErr{code: httpResp.StatusCode, msg: msg}
 		}
-		b, readErr := io.ReadAll(errBody)
+		b, readErr := helps.ReadErrorResponseBody(errBody)
 		if readErr != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, readErr)
 			msg := fmt.Sprintf("failed to read error response body: %v", readErr)
@@ -601,7 +601,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 			helps.LogWithRequestID(ctx).Warn(msg)
 			return cliproxyexecutor.Response{}, statusErr{code: resp.StatusCode, msg: msg}
 		}
-		b, readErr := io.ReadAll(errBody)
+		b, readErr := helps.ReadErrorResponseBody(errBody)
 		if readErr != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, readErr)
 			msg := fmt.Sprintf("failed to read error response body: %v", readErr)

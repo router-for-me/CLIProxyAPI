@@ -4,9 +4,21 @@ package registry
 
 import (
 	"strings"
+	"sync"
+	"sync/atomic"
 )
 
 const codexBuiltinImageModelID = "gpt-image-2"
+
+type staticModelLookupSnapshot struct {
+	data *staticModelsJSON
+	byID map[string]*ModelInfo
+}
+
+var (
+	staticModelLookupCache atomic.Value // stores *staticModelLookupSnapshot
+	staticModelLookupMu    sync.Mutex
+)
 
 // staticModelsJSON mirrors the top-level structure of models.json.
 type staticModelsJSON struct {
@@ -199,6 +211,42 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 	}
 
 	data := getModels()
+	if data == nil {
+		return nil
+	}
+	snapshot := staticModelLookupSnapshotFor(data)
+	if snapshot == nil {
+		return nil
+	}
+	return cloneModelInfo(snapshot.byID[modelID])
+}
+
+func staticModelLookupSnapshotFor(data *staticModelsJSON) *staticModelLookupSnapshot {
+	if data == nil {
+		return nil
+	}
+	if cached, ok := staticModelLookupCache.Load().(*staticModelLookupSnapshot); ok && cached != nil && cached.data == data {
+		return cached
+	}
+
+	staticModelLookupMu.Lock()
+	defer staticModelLookupMu.Unlock()
+	if cached, ok := staticModelLookupCache.Load().(*staticModelLookupSnapshot); ok && cached != nil && cached.data == data {
+		return cached
+	}
+
+	snapshot := &staticModelLookupSnapshot{
+		data: data,
+		byID: buildStaticModelLookup(data),
+	}
+	staticModelLookupCache.Store(snapshot)
+	return snapshot
+}
+
+func buildStaticModelLookup(data *staticModelsJSON) map[string]*ModelInfo {
+	if data == nil {
+		return nil
+	}
 	allModels := [][]*ModelInfo{
 		data.Claude,
 		data.Gemini,
@@ -209,13 +257,21 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		data.Kimi,
 		data.Antigravity,
 	}
+	total := 0
+	for _, models := range allModels {
+		total += len(models)
+	}
+	byID := make(map[string]*ModelInfo, total)
 	for _, models := range allModels {
 		for _, m := range models {
-			if m != nil && m.ID == modelID {
-				return cloneModelInfo(m)
+			if m == nil || m.ID == "" {
+				continue
 			}
+			if _, exists := byID[m.ID]; exists {
+				continue
+			}
+			byID[m.ID] = m
 		}
 	}
-
-	return nil
+	return byID
 }

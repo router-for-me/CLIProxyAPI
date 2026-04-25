@@ -78,14 +78,15 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 	// e.g. "modalities": ["image", "text"] -> ["IMAGE", "TEXT"]
 	if mods := gjson.GetBytes(rawJSON, "modalities"); mods.Exists() && mods.IsArray() {
 		var responseMods []string
-		for _, m := range mods.Array() {
+		mods.ForEach(func(_, m gjson.Result) bool {
 			switch strings.ToLower(m.String()) {
 			case "text":
 				responseMods = append(responseMods, "TEXT")
 			case "image":
 				responseMods = append(responseMods, "IMAGE")
 			}
-		}
+			return true
+		})
 		if len(responseMods) > 0 {
 			out, _ = sjson.SetBytes(out, "generationConfig.responseModalities", responseMods)
 		}
@@ -107,7 +108,7 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 	if messages.IsArray() {
 		arr := messages.Array()
 		// First pass: assistant tool_calls id->name map
-		tcID2Name := map[string]string{}
+		var tcID2Name map[string]string
 		for i := 0; i < len(arr); i++ {
 			m := arr[i]
 			if m.Get("role").String() == "assistant" {
@@ -118,6 +119,9 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 							id := tc.Get("id").String()
 							name := tc.Get("function.name").String()
 							if id != "" && name != "" {
+								if tcID2Name == nil {
+									tcID2Name = make(map[string]string)
+								}
 								tcID2Name[id] = name
 							}
 						}
@@ -127,7 +131,7 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 		}
 
 		// Second pass build systemInstruction/tool responses cache
-		toolResponses := map[string]string{} // tool_call_id -> response text
+		var toolResponses map[string]string // tool_call_id -> response text
 		for i := 0; i < len(arr); i++ {
 			m := arr[i]
 			role := m.Get("role").String()
@@ -135,6 +139,9 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 				toolCallID := m.Get("tool_call_id").String()
 				if toolCallID != "" {
 					c := m.Get("content")
+					if toolResponses == nil {
+						toolResponses = make(map[string]string)
+					}
 					toolResponses[toolCallID] = c.Raw
 				}
 			}
@@ -295,13 +302,13 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 
 	// tools -> tools[].functionDeclarations + tools[].googleSearch/codeExecution/urlContext passthrough
 	tools := gjson.GetBytes(rawJSON, "tools")
-	if tools.IsArray() && len(tools.Array()) > 0 {
+	if tools.IsArray() && tools.Get("#").Int() > 0 {
 		functionToolNode := []byte(`{}`)
 		hasFunction := false
 		googleSearchNodes := make([][]byte, 0)
 		codeExecutionNodes := make([][]byte, 0)
 		urlContextNodes := make([][]byte, 0)
-		for _, t := range tools.Array() {
+		tools.ForEach(func(_, t gjson.Result) bool {
 			if t.Get("type").String() == "function" {
 				fn := t.Get("function")
 				if fn.Exists() && fn.IsObject() {
@@ -315,12 +322,12 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 							fnRawBytes, errSet = sjson.SetBytes(fnRawBytes, "parametersJsonSchema.type", "object")
 							if errSet != nil {
 								log.Warnf("Failed to set default schema type for tool '%s': %v", fn.Get("name").String(), errSet)
-								continue
+								return true
 							}
 							fnRawBytes, errSet = sjson.SetRawBytes(fnRawBytes, "parametersJsonSchema.properties", []byte(`{}`))
 							if errSet != nil {
 								log.Warnf("Failed to set default schema properties for tool '%s': %v", fn.Get("name").String(), errSet)
-								continue
+								return true
 							}
 							fnRaw = string(fnRawBytes)
 						} else {
@@ -332,12 +339,12 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 						fnRawBytes, errSet = sjson.SetBytes(fnRawBytes, "parametersJsonSchema.type", "object")
 						if errSet != nil {
 							log.Warnf("Failed to set default schema type for tool '%s': %v", fn.Get("name").String(), errSet)
-							continue
+							return true
 						}
 						fnRawBytes, errSet = sjson.SetRawBytes(fnRawBytes, "parametersJsonSchema.properties", []byte(`{}`))
 						if errSet != nil {
 							log.Warnf("Failed to set default schema properties for tool '%s': %v", fn.Get("name").String(), errSet)
-							continue
+							return true
 						}
 						fnRaw = string(fnRawBytes)
 					}
@@ -351,7 +358,7 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 					tmp, errSet := sjson.SetRawBytes(functionToolNode, "functionDeclarations.-1", []byte(fnRaw))
 					if errSet != nil {
 						log.Warnf("Failed to append tool declaration for '%s': %v", fn.Get("name").String(), errSet)
-						continue
+						return true
 					}
 					functionToolNode = tmp
 					hasFunction = true
@@ -363,7 +370,7 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 				googleToolNode, errSet = sjson.SetRawBytes(googleToolNode, "googleSearch", []byte(gs.Raw))
 				if errSet != nil {
 					log.Warnf("Failed to set googleSearch tool: %v", errSet)
-					continue
+					return true
 				}
 				googleSearchNodes = append(googleSearchNodes, googleToolNode)
 			}
@@ -373,7 +380,7 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 				codeToolNode, errSet = sjson.SetRawBytes(codeToolNode, "codeExecution", []byte(ce.Raw))
 				if errSet != nil {
 					log.Warnf("Failed to set codeExecution tool: %v", errSet)
-					continue
+					return true
 				}
 				codeExecutionNodes = append(codeExecutionNodes, codeToolNode)
 			}
@@ -383,11 +390,12 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 				urlToolNode, errSet = sjson.SetRawBytes(urlToolNode, "urlContext", []byte(uc.Raw))
 				if errSet != nil {
 					log.Warnf("Failed to set urlContext tool: %v", errSet)
-					continue
+					return true
 				}
 				urlContextNodes = append(urlContextNodes, urlToolNode)
 			}
-		}
+			return true
+		})
 		if hasFunction || len(googleSearchNodes) > 0 || len(codeExecutionNodes) > 0 || len(urlContextNodes) > 0 {
 			toolsNode := []byte("[]")
 			if hasFunction {

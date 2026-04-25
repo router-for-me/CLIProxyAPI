@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"sync"
 
 	"github.com/gin-gonic/gin"
 	. "github.com/router-for-me/CLIProxyAPI/v6/internal/constant"
@@ -50,7 +49,6 @@ func (h *OpenAIAPIHandler) HandlerType() string {
 
 // Models returns the OpenAI-compatible model metadata supported by this handler.
 func (h *OpenAIAPIHandler) Models() []map[string]any {
-	// Get dynamic models from the global registry
 	modelRegistry := registry.GetGlobalRegistry()
 	return modelRegistry.GetAvailableModels("openai")
 }
@@ -59,33 +57,12 @@ func (h *OpenAIAPIHandler) Models() []map[string]any {
 // It returns a list of available AI models with their capabilities
 // and specifications in OpenAI-compatible format.
 func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
-	// Get all available models
-	allModels := h.Models()
-
-	// Filter to only include the 4 required fields: id, object, created, owned_by
-	filteredModels := make([]map[string]any, len(allModels))
-	for i, model := range allModels {
-		filteredModel := map[string]any{
-			"id":     model["id"],
-			"object": model["object"],
-		}
-
-		// Add created field if it exists
-		if created, exists := model["created"]; exists {
-			filteredModel["created"] = created
-		}
-
-		// Add owned_by field if it exists
-		if ownedBy, exists := model["owned_by"]; exists {
-			filteredModel["owned_by"] = ownedBy
-		}
-
-		filteredModels[i] = filteredModel
-	}
+	modelRegistry := registry.GetGlobalRegistry()
+	models := modelRegistry.GetAvailableOpenAIModelSummaries()
 
 	c.JSON(http.StatusOK, gin.H{
 		"object": "list",
-		"data":   filteredModels,
+		"data":   models,
 	})
 }
 
@@ -312,23 +289,44 @@ func convertChatCompletionsResponseToCompletions(rawJSON []byte) []byte {
 func convertChatCompletionsStreamChunkToCompletions(chunkData []byte) []byte {
 	root := gjson.ParseBytes(chunkData)
 
-	// Check if this chunk has any meaningful content
-	hasContent := false
 	hasUsage := root.Get("usage").Exists()
+
+	// Convert choices from chat completions delta to completions format
+	var choices []interface{}
+	hasContent := false
 	if chatChoices := root.Get("choices"); chatChoices.Exists() && chatChoices.IsArray() {
+		if count := chatChoices.Get("#").Int(); count > 0 {
+			choices = make([]interface{}, 0, int(count))
+		}
 		chatChoices.ForEach(func(_, choice gjson.Result) bool {
-			// Check if delta has content or finish_reason
+			completionsChoice := map[string]interface{}{
+				"index": choice.Get("index").Int(),
+				"text":  "",
+			}
+
+			// Extract text content from delta.content
 			if delta := choice.Get("delta"); delta.Exists() {
 				if content := delta.Get("content"); content.Exists() && content.String() != "" {
+					text := content.String()
+					completionsChoice["text"] = text
 					hasContent = true
-					return false // Break out of forEach
 				}
 			}
-			// Also check for finish_reason to ensure we don't skip final chunks
-			if finishReason := choice.Get("finish_reason"); finishReason.Exists() && finishReason.String() != "" && finishReason.String() != "null" {
-				hasContent = true
-				return false // Break out of forEach
+
+			// Copy finish_reason
+			if finishReason := choice.Get("finish_reason"); finishReason.Exists() {
+				if value := finishReason.String(); value != "" && value != "null" {
+					completionsChoice["finish_reason"] = value
+					hasContent = true
+				}
 			}
+
+			// Copy logprobs if present
+			if logprobs := choice.Get("logprobs"); logprobs.Exists() {
+				completionsChoice["logprobs"] = logprobs.Value()
+			}
+
+			choices = append(choices, completionsChoice)
 			return true
 		})
 	}
@@ -352,40 +350,6 @@ func convertChatCompletionsStreamChunkToCompletions(chunkData []byte) []byte {
 
 	if model := root.Get("model"); model.Exists() {
 		out, _ = sjson.SetBytes(out, "model", model.String())
-	}
-
-	// Convert choices from chat completions delta to completions format
-	var choices []interface{}
-	if chatChoices := root.Get("choices"); chatChoices.Exists() && chatChoices.IsArray() {
-		chatChoices.ForEach(func(_, choice gjson.Result) bool {
-			completionsChoice := map[string]interface{}{
-				"index": choice.Get("index").Int(),
-			}
-
-			// Extract text content from delta.content
-			if delta := choice.Get("delta"); delta.Exists() {
-				if content := delta.Get("content"); content.Exists() && content.String() != "" {
-					completionsChoice["text"] = content.String()
-				} else {
-					completionsChoice["text"] = ""
-				}
-			} else {
-				completionsChoice["text"] = ""
-			}
-
-			// Copy finish_reason
-			if finishReason := choice.Get("finish_reason"); finishReason.Exists() && finishReason.String() != "null" {
-				completionsChoice["finish_reason"] = finishReason.String()
-			}
-
-			// Copy logprobs if present
-			if logprobs := choice.Get("logprobs"); logprobs.Exists() {
-				completionsChoice["logprobs"] = logprobs.Value()
-			}
-
-			choices = append(choices, completionsChoice)
-			return true
-		})
 	}
 
 	if len(choices) > 0 {
@@ -603,45 +567,27 @@ func (h *OpenAIAPIHandler) handleCompletionsStreamingResponse(c *gin.Context, mo
 				flusher.Flush()
 			}
 
-			done := make(chan struct{})
-			var doneOnce sync.Once
-			stop := func() { doneOnce.Do(func() { close(done) }) }
-
-			convertedChan := make(chan []byte)
-			go func() {
-				defer close(convertedChan)
-				for {
-					select {
-					case <-done:
-						return
-					case chunk, ok := <-dataChan:
-						if !ok {
-							return
-						}
-						converted := convertChatCompletionsStreamChunkToCompletions(chunk)
-						if converted == nil {
-							continue
-						}
-						select {
-						case <-done:
-							return
-						case convertedChan <- converted:
-						}
-					}
-				}
-			}()
-
 			h.handleStreamResult(c, flusher, func(err error) {
-				stop()
 				cliCancel(err)
-			}, convertedChan, errChan)
+			}, dataChan, errChan, convertChatCompletionsStreamChunkToCompletions)
 			return
 		}
 	}
 }
-func (h *OpenAIAPIHandler) handleStreamResult(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage) {
+
+func (h *OpenAIAPIHandler) handleStreamResult(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage, transforms ...func([]byte) []byte) {
+	var transform func([]byte) []byte
+	if len(transforms) > 0 {
+		transform = transforms[0]
+	}
 	h.ForwardStream(c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
 		WriteChunk: func(chunk []byte) bool {
+			if transform != nil {
+				chunk = transform(chunk)
+				if len(chunk) == 0 {
+					return false
+				}
+			}
 			return handlers.WriteSSEDataFrame(c.Writer, chunk)
 		},
 		WriteTerminalError: func(errMsg *interfaces.ErrorMessage) {

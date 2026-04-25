@@ -29,6 +29,11 @@ import (
 
 var requestLogID atomic.Uint64
 
+const (
+	maxDecompressedLogBodyBytes    = 4 << 20
+	decompressedLogTruncatedMarker = "\n...[decompressed log body truncated]...\n"
+)
+
 var (
 	filenameUnsafeCharPattern = regexp.MustCompile(`[<>:"|?*\s]`)
 	filenameMultiDashPattern  = regexp.MustCompile(`-+`)
@@ -1051,7 +1056,7 @@ func (l *FileRequestLogger) decompressGzip(data []byte) ([]byte, error) {
 		}
 	}()
 
-	decompressed, err := io.ReadAll(reader)
+	decompressed, err := readLimitedDecompressed(reader)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decompress gzip data: %w", err)
 	}
@@ -1075,7 +1080,7 @@ func (l *FileRequestLogger) decompressDeflate(data []byte) ([]byte, error) {
 		}
 	}()
 
-	decompressed, err := io.ReadAll(reader)
+	decompressed, err := readLimitedDecompressed(reader)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decompress deflate data: %w", err)
 	}
@@ -1094,7 +1099,7 @@ func (l *FileRequestLogger) decompressDeflate(data []byte) ([]byte, error) {
 func (l *FileRequestLogger) decompressBrotli(data []byte) ([]byte, error) {
 	reader := brotli.NewReader(bytes.NewReader(data))
 
-	decompressed, err := io.ReadAll(reader)
+	decompressed, err := readLimitedDecompressed(reader)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decompress brotli data: %w", err)
 	}
@@ -1117,12 +1122,28 @@ func (l *FileRequestLogger) decompressZstd(data []byte) ([]byte, error) {
 	}
 	defer decoder.Close()
 
-	decompressed, err := io.ReadAll(decoder)
+	decompressed, err := readLimitedDecompressed(decoder)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decompress zstd data: %w", err)
 	}
 
 	return decompressed, nil
+}
+
+func readLimitedDecompressed(reader io.Reader) ([]byte, error) {
+	if reader == nil {
+		return nil, nil
+	}
+	data, err := io.ReadAll(io.LimitReader(reader, maxDecompressedLogBodyBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) <= maxDecompressedLogBodyBytes {
+		return data, nil
+	}
+	data = data[:maxDecompressedLogBodyBytes]
+	data = append(data, decompressedLogTruncatedMarker...)
+	return data, nil
 }
 
 // formatRequestInfo creates the request information section of the log.

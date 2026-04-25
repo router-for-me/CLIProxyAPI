@@ -8,13 +8,15 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
+	"golang.org/x/sync/singleflight"
 )
 
 // defaultRoundTripperProvider returns a per-auth HTTP RoundTripper based on
 // the Auth.ProxyURL value. It caches transports per proxy URL string.
 type defaultRoundTripperProvider struct {
-	mu    sync.RWMutex
-	cache map[string]http.RoundTripper
+	mu     sync.RWMutex
+	cache  map[string]http.RoundTripper
+	builds singleflight.Group
 }
 
 func newDefaultRoundTripperProvider() *defaultRoundTripperProvider {
@@ -36,16 +38,33 @@ func (p *defaultRoundTripperProvider) RoundTripperFor(auth *coreauth.Auth) http.
 	if rt != nil {
 		return rt
 	}
-	transport, _, errBuild := proxyutil.BuildHTTPTransport(proxyStr)
+
+	result, errBuild, _ := p.builds.Do(proxyStr, func() (any, error) {
+		p.mu.RLock()
+		rt := p.cache[proxyStr]
+		p.mu.RUnlock()
+		if rt != nil {
+			return rt, nil
+		}
+
+		transport, _, err := proxyutil.BuildHTTPTransport(proxyStr)
+		if err != nil || transport == nil {
+			return transport, err
+		}
+
+		p.mu.Lock()
+		if existing := p.cache[proxyStr]; existing != nil {
+			p.mu.Unlock()
+			return existing, nil
+		}
+		p.cache[proxyStr] = transport
+		p.mu.Unlock()
+		return transport, nil
+	})
 	if errBuild != nil {
 		log.Errorf("%v", errBuild)
 		return nil
 	}
-	if transport == nil {
-		return nil
-	}
-	p.mu.Lock()
-	p.cache[proxyStr] = transport
-	p.mu.Unlock()
-	return transport
+	rt, _ = result.(http.RoundTripper)
+	return rt
 }

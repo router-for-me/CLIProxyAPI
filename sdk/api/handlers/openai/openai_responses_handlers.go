@@ -243,18 +243,20 @@ func (h *OpenAIResponsesAPIHandler) HandlerType() string {
 
 // Models returns the OpenAIResponses-compatible model metadata supported by this handler.
 func (h *OpenAIResponsesAPIHandler) Models() []map[string]any {
-	// Get dynamic models from the global registry
 	modelRegistry := registry.GetGlobalRegistry()
-	return modelRegistry.GetAvailableModels("openai")
+	return compactOpenAIModelMaps(modelRegistry.GetAvailableOpenAIModelSummaries())
 }
 
 // OpenAIResponsesModels handles the /v1/models endpoint.
 // It returns a list of available AI models with their capabilities
 // and specifications in OpenAIResponses-compatible format.
 func (h *OpenAIResponsesAPIHandler) OpenAIResponsesModels(c *gin.Context) {
+	modelRegistry := registry.GetGlobalRegistry()
+	models := modelRegistry.GetAvailableOpenAIModelSummaries()
+
 	c.JSON(http.StatusOK, gin.H{
 		"object": "list",
-		"data":   h.Models(),
+		"data":   models,
 	})
 }
 

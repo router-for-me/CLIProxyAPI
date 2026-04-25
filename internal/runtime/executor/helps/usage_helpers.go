@@ -29,13 +29,13 @@ type UsageReporter struct {
 }
 
 func NewUsageReporter(ctx context.Context, provider, model string, auth *cliproxyauth.Auth) *UsageReporter {
-	apiKey := APIKeyFromContext(ctx)
+	ctxAPIKey := APIKeyFromContext(ctx)
 	reporter := &UsageReporter{
 		provider:    provider,
 		model:       model,
 		requestedAt: time.Now(),
-		apiKey:      apiKey,
-		source:      resolveUsageSource(auth, apiKey),
+		apiKey:      resolveUsageAPIKey(auth, ctxAPIKey),
+		source:      resolveUsageSource(auth, ctxAPIKey),
 	}
 	if suffix := strings.TrimSpace(thinking.ParseSuffix(model).RawSuffix); suffix != "" {
 		reporter.modelReasoningEffort = normalizeReasoningEffortValue(suffix)
@@ -191,6 +191,25 @@ func APIKeyFromContext(ctx context.Context) string {
 			return value.String()
 		default:
 			return fmt.Sprintf("%v", value)
+		}
+	}
+	return ""
+}
+
+func resolveUsageAPIKey(auth *cliproxyauth.Auth, ctxAPIKey string) string {
+	if trimmed := strings.TrimSpace(ctxAPIKey); trimmed != "" {
+		return trimmed
+	}
+	if auth != nil {
+		if kind, value := auth.AccountInfo(); strings.EqualFold(strings.TrimSpace(kind), "api_key") {
+			if trimmed := strings.TrimSpace(value); trimmed != "" {
+				return trimmed
+			}
+		}
+		if auth.Attributes != nil {
+			if key := strings.TrimSpace(auth.Attributes["api_key"]); key != "" {
+				return key
+			}
 		}
 	}
 	return ""

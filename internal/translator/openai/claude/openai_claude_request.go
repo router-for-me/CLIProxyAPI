@@ -274,7 +274,7 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 	}
 
 	// Set messages
-	if msgs := gjson.ParseBytes(messagesJSON); msgs.IsArray() && len(msgs.Array()) > 0 {
+	if msgs := gjson.ParseBytes(messagesJSON); msgs.IsArray() && msgs.Get("#").Int() > 0 {
 		out, _ = sjson.SetRawBytes(out, "messages", messagesJSON)
 	}
 
@@ -296,7 +296,7 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 			return true
 		})
 
-		if parsed := gjson.ParseBytes(toolsJSON); parsed.IsArray() && len(parsed.Array()) > 0 {
+		if parsed := gjson.ParseBytes(toolsJSON); parsed.IsArray() && parsed.Get("#").Int() > 0 {
 			out, _ = sjson.SetRawBytes(out, "tools", toolsJSON)
 		}
 	}

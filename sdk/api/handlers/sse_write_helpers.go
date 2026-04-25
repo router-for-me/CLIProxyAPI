@@ -15,16 +15,17 @@ func WriteRawSSEChunk(w io.Writer, chunk []byte) bool {
 	if w == nil || len(chunk) == 0 {
 		return false
 	}
+	if len(chunk) >= 2 && chunk[len(chunk)-2] == '\n' && chunk[len(chunk)-1] == '\n' {
+		return writeSSEFrameBuffer(w, chunk)
+	}
+	if len(chunk) >= 4 && chunk[len(chunk)-4] == '\r' && chunk[len(chunk)-3] == '\n' && chunk[len(chunk)-2] == '\r' && chunk[len(chunk)-1] == '\n' {
+		return writeSSEFrameBuffer(w, chunk)
+	}
+
 	buf := getSSEFrameBuffer(len(chunk) + 2)
 	defer putSSEFrameBuffer(buf)
 
 	buf = append(buf, chunk...)
-	if len(chunk) >= 2 && chunk[len(chunk)-2] == '\n' && chunk[len(chunk)-1] == '\n' {
-		return writeSSEFrameBuffer(w, buf)
-	}
-	if len(chunk) >= 4 && chunk[len(chunk)-4] == '\r' && chunk[len(chunk)-3] == '\n' && chunk[len(chunk)-2] == '\r' && chunk[len(chunk)-1] == '\n' {
-		return writeSSEFrameBuffer(w, buf)
-	}
 	if len(chunk) > 1 && chunk[len(chunk)-2] == '\r' && chunk[len(chunk)-1] == '\n' {
 		buf = append(buf, '\r', '\n')
 	} else if len(chunk) > 0 && chunk[len(chunk)-1] == '\n' {

@@ -190,7 +190,7 @@ func TestApplyCodexHeaders_OriginatorFromEnv(t *testing.T) {
 func TestApplyCodexHeaders_OriginatorAPIKeySkipped(t *testing.T) {
 	t.Setenv(misc.CodexOriginatorEnvVar, "codex_vscode")
 	// API-key auths must not gain an Originator header unless the caller explicitly sent one,
-	// matching the pre-Phase-3 behaviour for non-OAuth flows.
+	// preserving compatibility with OpenAI-compatible/custom base_url endpoints.
 	auth := &cliproxyauth.Auth{ID: "auth-apikey", Attributes: map[string]string{"api_key": "sk-..."}}
 	req, err := http.NewRequest(http.MethodPost, "https://example.com/responses", nil)
 	if err != nil {
@@ -206,7 +206,7 @@ func TestApplyCodexHeaders_ResidencyFromConfigAndClientPassthrough(t *testing.T)
 	t.Setenv(misc.CodexResidencyEnvVar, "")
 	auth := &cliproxyauth.Auth{ID: "auth-residency"}
 
-	// 1. config-provided residency applied for OAuth flow.
+	// 1. config-provided residency applied when configured.
 	cfg := &config.Config{}
 	cfg.CodexHeaderDefaults.Residency = "eu-west"
 	req, err := http.NewRequest(http.MethodPost, "https://example.com/responses", nil)

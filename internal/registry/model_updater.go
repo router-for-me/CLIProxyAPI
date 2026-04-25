@@ -11,12 +11,14 @@ import (
 	"sync"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
 )
 
 const (
-	modelsFetchTimeout    = 30 * time.Second
-	modelsRefreshInterval = 3 * time.Hour
+	modelsFetchTimeout          = 30 * time.Second
+	modelsRefreshInterval       = 3 * time.Hour
+	maxRemoteModelsCatalogBytes = 8 << 20
 )
 
 var modelsURLs = []string{
@@ -33,6 +35,11 @@ type modelStore struct {
 }
 
 var modelsCatalogStore = &modelStore{}
+
+var (
+	modelsFetchClient     *http.Client
+	modelsFetchClientOnce sync.Once
+)
 
 var updaterOnce sync.Once
 
@@ -141,7 +148,7 @@ func tryRefreshModels(ctx context.Context, label string) {
 // fetchModelsFromRemote tries all remote URLs and returns the parsed model catalog
 // along with the URL it was fetched from. Returns (nil, "") if all fetches fail.
 func fetchModelsFromRemote(ctx context.Context) (*staticModelsJSON, string) {
-	client := &http.Client{Timeout: modelsFetchTimeout}
+	client := getModelsFetchClient()
 	for _, url := range modelsURLs {
 		reqCtx, cancel := context.WithTimeout(ctx, modelsFetchTimeout)
 		req, err := http.NewRequestWithContext(reqCtx, "GET", url, nil)
@@ -165,12 +172,16 @@ func fetchModelsFromRemote(ctx context.Context) (*staticModelsJSON, string) {
 			continue
 		}
 
-		data, err := io.ReadAll(resp.Body)
+		data, err := io.ReadAll(io.LimitReader(resp.Body, maxRemoteModelsCatalogBytes+1))
 		resp.Body.Close()
 		cancel()
 
 		if err != nil {
 			log.Debugf("models fetch read error from %s: %v", url, err)
+			continue
+		}
+		if len(data) > maxRemoteModelsCatalogBytes {
+			log.Warnf("models fetch from %s exceeded %d bytes", url, maxRemoteModelsCatalogBytes)
 			continue
 		}
 
@@ -187,6 +198,16 @@ func fetchModelsFromRemote(ctx context.Context) (*staticModelsJSON, string) {
 		return &parsed, url
 	}
 	return nil, ""
+}
+
+func getModelsFetchClient() *http.Client {
+	modelsFetchClientOnce.Do(func() {
+		modelsFetchClient = &http.Client{
+			Timeout:   modelsFetchTimeout,
+			Transport: proxyutil.NewPooledDefaultTransport(),
+		}
+	})
+	return modelsFetchClient
 }
 
 // detectChangedProviders compares two model catalogs and returns provider names

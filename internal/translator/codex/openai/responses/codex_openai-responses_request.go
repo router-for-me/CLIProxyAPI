@@ -19,10 +19,14 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 
 	rawJSON, _ = sjson.SetBytes(rawJSON, "stream", true)
 	rawJSON, _ = sjson.SetBytes(rawJSON, "store", false)
-	rawJSON, _ = sjson.SetBytes(rawJSON, "parallel_tool_calls", true)
-	// Align with codex-rs: include "reasoning.encrypted_content" ONLY when the
-	// request actually carries a reasoning block. Otherwise leave include empty
-	// so the request fingerprint matches the original CLI behavior.
+	if parallelToolCalls := gjson.GetBytes(rawJSON, "parallel_tool_calls"); !parallelToolCalls.Exists() || parallelToolCalls.Type == gjson.Null {
+		rawJSON, _ = sjson.SetBytes(rawJSON, "parallel_tool_calls", true)
+	}
+	if toolChoice := gjson.GetBytes(rawJSON, "tool_choice"); !toolChoice.Exists() || toolChoice.Type == gjson.Null {
+		rawJSON, _ = sjson.SetBytes(rawJSON, "tool_choice", "auto")
+	}
+	// Align with codex-rs: include "reasoning.encrypted_content" when the
+	// request carries a reasoning block; otherwise send an empty include array.
 	rawJSON = applyCodexIncludeField(rawJSON)
 	// Codex Responses rejects token limit fields, so strip them out before forwarding.
 	rawJSON, _ = sjson.DeleteBytes(rawJSON, "max_output_tokens")
@@ -43,11 +47,9 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 	return rawJSON
 }
 
-// applyCodexIncludeField mirrors codex-rs behavior: the upstream client only
-// sets include=["reasoning.encrypted_content"] when the request has a
-// reasoning block. When there is no reasoning, include is left empty (and we
-// remove any stale value the caller injected). This keeps the proxied request
-// body byte-for-byte closer to what the native Codex CLI emits.
+// applyCodexIncludeField mirrors codex-rs behavior: the upstream client sends
+// include=["reasoning.encrypted_content"] when the request has a reasoning
+// block and include=[] otherwise.
 func applyCodexIncludeField(rawJSON []byte) []byte {
 	hasReasoning := gjson.GetBytes(rawJSON, "reasoning").Exists()
 
@@ -63,11 +65,8 @@ func applyCodexIncludeField(rawJSON []byte) []byte {
 		return updated
 	}
 
-	// No reasoning block: drop any include field to match codex-rs.
-	if existing.Exists() {
-		rawJSON, _ = sjson.DeleteBytes(rawJSON, "include")
-	}
-	return rawJSON
+	updated, _ := sjson.SetRawBytes(rawJSON, "include", []byte("[]"))
+	return updated
 }
 
 // applyResponsesCompactionCompatibility handles OpenAI Responses context_management.compaction

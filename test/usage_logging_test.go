@@ -59,7 +59,7 @@ func TestGeminiExecutorRecordsSuccessfulZeroUsageInStatistics(t *testing.T) {
 		t.Fatalf("Execute error: %v", err)
 	}
 
-	detail := waitForStatisticsDetail(t, "gemini", model, source)
+	detail := waitForStatisticsDetail(t, "test-upstream-key", model, source)
 	if detail.Failed {
 		t.Fatalf("detail failed = true, want false")
 	}
