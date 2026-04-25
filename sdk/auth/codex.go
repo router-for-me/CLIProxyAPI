@@ -27,6 +27,28 @@ func NewCodexAuthenticator() *CodexAuthenticator {
 	return &CodexAuthenticator{CallbackPort: 1455}
 }
 
+func CodexWebsocketsAttributeValue(metadata map[string]any) (string, bool) {
+	if metadata == nil {
+		return "true", true
+	}
+	raw, ok := metadata["websockets"]
+	if !ok || raw == nil {
+		return "true", true
+	}
+	switch v := raw.(type) {
+	case bool:
+		if v {
+			return "true", true
+		}
+		return "false", true
+	case string:
+		if trimmed := strings.TrimSpace(v); trimmed != "" {
+			return trimmed, true
+		}
+	}
+	return "", false
+}
+
 func (a *CodexAuthenticator) Provider() string {
 	return "codex"
 }

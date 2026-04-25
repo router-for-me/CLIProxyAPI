@@ -31,7 +31,7 @@ import (
 
 const (
 	codexUserAgent  = "codex-tui/0.118.0 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9 (codex-tui; 0.118.0)"
-	codexOriginator = "codex-tui"
+	codexOriginator = "codex-toy-app-server"
 )
 
 var dataTag = []byte("data:")
