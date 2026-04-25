@@ -195,3 +195,46 @@ func (fp *Fingerprint) BuildAmzUserAgent() string {
 		fp.KiroHash,
 	)
 }
+
+// FingerprintConfig defines configurable Kiro fingerprint identity overrides
+// loaded from application config. Empty fields fall back to the randomized
+// defaults produced by FingerprintManager.generateFingerprint.
+type FingerprintConfig struct {
+	OIDCSDKVersion      string
+	RuntimeSDKVersion   string
+	StreamingSDKVersion string
+	OSType              string
+	OSVersion           string
+	NodeVersion         string
+	KiroVersion         string
+	KiroHash            string
+}
+
+var (
+	globalFingerprintConfig   *FingerprintConfig
+	globalFingerprintConfigMu sync.RWMutex
+)
+
+// SetGlobalFingerprintConfig stores process-wide fingerprint overrides.
+// Subsequent fingerprint generation will apply non-empty fields from cfg
+// on top of the randomized defaults.
+func SetGlobalFingerprintConfig(cfg *FingerprintConfig) {
+	globalFingerprintConfigMu.Lock()
+	defer globalFingerprintConfigMu.Unlock()
+	globalFingerprintConfig = cfg
+}
+
+// GetGlobalFingerprintConfig returns the current process-wide fingerprint
+// override config, or nil if none has been set.
+func GetGlobalFingerprintConfig() *FingerprintConfig {
+	globalFingerprintConfigMu.RLock()
+	defer globalFingerprintConfigMu.RUnlock()
+	return globalFingerprintConfig
+}
+
+// GlobalFingerprintManager is a function-form alias for the process-wide
+// FingerprintManager singleton, kept for callers that use the
+// `kiro.GlobalFingerprintManager()` spelling instead of GetGlobalFingerprintManager.
+func GlobalFingerprintManager() *FingerprintManager {
+	return GetGlobalFingerprintManager()
+}

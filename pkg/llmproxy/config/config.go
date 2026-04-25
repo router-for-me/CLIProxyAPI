@@ -154,6 +154,24 @@ type Config struct {
 	// ResponsesCompactEnabled controls whether OpenAI Responses API compact mode is active.
 	// Default (nil) is treated as enabled.
 	ResponsesCompactEnabled *bool `yaml:"responses-compact-enabled,omitempty" json:"responses-compact-enabled,omitempty"`
+
+	// KiroFingerprint configures the Kiro/CodeWhisperer fingerprint manager.
+	// When nil, fingerprint defaults from kiro.NewFingerprintManager are used.
+	KiroFingerprint *KiroFingerprintConfig `yaml:"kiro-fingerprint,omitempty" json:"kiro-fingerprint,omitempty"`
+}
+
+// KiroFingerprintConfig defines configurable Kiro fingerprint identity fields.
+// All fields are optional; empty fields fall back to the randomized defaults
+// produced by the kiro FingerprintManager.
+type KiroFingerprintConfig struct {
+	OIDCSDKVersion      string `yaml:"oidc-sdk-version,omitempty" json:"oidc-sdk-version,omitempty"`
+	RuntimeSDKVersion   string `yaml:"runtime-sdk-version,omitempty" json:"runtime-sdk-version,omitempty"`
+	StreamingSDKVersion string `yaml:"streaming-sdk-version,omitempty" json:"streaming-sdk-version,omitempty"`
+	OSType              string `yaml:"os-type,omitempty" json:"os-type,omitempty"`
+	OSVersion           string `yaml:"os-version,omitempty" json:"os-version,omitempty"`
+	NodeVersion         string `yaml:"node-version,omitempty" json:"node-version,omitempty"`
+	KiroVersion         string `yaml:"kiro-version,omitempty" json:"kiro-version,omitempty"`
+	KiroHash            string `yaml:"kiro-hash,omitempty" json:"kiro-hash,omitempty"`
 }
 
 // IsResponsesCompactEnabled returns whether responses compact mode is enabled.

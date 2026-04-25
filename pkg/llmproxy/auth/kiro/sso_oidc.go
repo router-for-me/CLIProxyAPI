@@ -614,7 +614,7 @@ func (c *SSOOIDCClient) LoginWithIDC(ctx context.Context, startURL, region strin
 			profileArn := c.fetchProfileArn(ctx, tokenResp.AccessToken)
 
 			// Fetch user email
-			email := FetchUserEmailWithFallback(ctx, c.cfg, tokenResp.AccessToken)
+			email := FetchUserEmailWithFallback(ctx, c.cfg, tokenResp.AccessToken, regResp.ClientID, tokenResp.RefreshToken)
 			if email != "" {
 				fmt.Printf("  Logged in as: %s\n", email)
 			}
@@ -1005,7 +1005,7 @@ func (c *SSOOIDCClient) LoginWithBuilderID(ctx context.Context) (*KiroTokenData,
 			profileArn := c.fetchProfileArn(ctx, tokenResp.AccessToken)
 
 			// Fetch user email (tries CodeWhisperer API first, then userinfo endpoint, then JWT parsing)
-			email := FetchUserEmailWithFallback(ctx, c.cfg, tokenResp.AccessToken)
+			email := FetchUserEmailWithFallback(ctx, c.cfg, tokenResp.AccessToken, regResp.ClientID, tokenResp.RefreshToken)
 			if email != "" {
 				fmt.Printf("  Logged in as: %s\n", email)
 			}
@@ -1542,7 +1542,7 @@ func (c *SSOOIDCClient) LoginWithBuilderIDAuthCode(ctx context.Context) (*KiroTo
 		profileArn := c.fetchProfileArn(ctx, tokenResp.AccessToken)
 
 		// Fetch user email (tries CodeWhisperer API first, then userinfo endpoint, then JWT parsing)
-		email := FetchUserEmailWithFallback(ctx, c.cfg, tokenResp.AccessToken)
+		email := FetchUserEmailWithFallback(ctx, c.cfg, tokenResp.AccessToken, regResp.ClientID, tokenResp.RefreshToken)
 		if email != "" {
 			fmt.Printf("  Logged in as: %s\n", email)
 		}

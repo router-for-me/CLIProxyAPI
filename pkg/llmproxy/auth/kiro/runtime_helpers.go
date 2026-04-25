@@ -152,13 +152,20 @@ func setRuntimeHeaders(req *http.Request, accessToken string, accountKey string)
 }
 
 // FetchProfileArn is the exported wrapper around the internal sso_oidc.go
-// fetchProfileArn helper. It delegates to the unexported method so callers
-// outside this file (such as oauth_web.go) can resolve a profile ARN
-// without exposing transport details. clientID and refreshToken are
-// accepted for forward compatibility (per-account fingerprinting) but
-// the underlying API call only requires the access token.
+// fetchProfileArn helper. It resolves a profile ARN for a given account.
+//
+// clientID and refreshToken are used to derive a deterministic per-account
+// key so the global FingerprintManager warms (or reuses) a stable
+// fingerprint for this account before the underlying request runs. The
+// internal fetchProfileArn call itself only needs the access token, but
+// warming the fingerprint here keeps subsequent runtime calls (which use
+// setRuntimeHeaders with the same account key) consistent with what was
+// used during ARN resolution.
 func (c *SSOOIDCClient) FetchProfileArn(ctx context.Context, accessToken, clientID, refreshToken string) string {
-	_ = clientID
-	_ = refreshToken
+	// Warm/establish the per-account fingerprint. GetAccountKey is
+	// deterministic, so later setRuntimeHeaders calls with the same
+	// (clientID, refreshToken) pair will retrieve the same fingerprint.
+	accountKey := GetAccountKey(clientID, refreshToken)
+	_ = GetGlobalFingerprintManager().GetFingerprint(accountKey)
 	return c.fetchProfileArn(ctx, accessToken)
 }

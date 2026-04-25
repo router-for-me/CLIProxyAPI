@@ -3,8 +3,6 @@ package kiro
 import (
 	"encoding/json"
 	"fmt"
-
-	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/auth/base"
 	"os"
 	"path/filepath"
 	"strings"
