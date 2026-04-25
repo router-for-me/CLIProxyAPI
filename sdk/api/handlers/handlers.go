@@ -367,6 +367,12 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 				cancel()
 			case <-cancelCtx.Done():
 			}
+	// 补丁：从 request context 传递 pinnedAuthID（强制锁号测试用）
+	if requestCtx != nil {
+		if pinnedID := pinnedAuthIDFromContext(requestCtx); pinnedID != "" {
+			newCtx = WithPinnedAuthID(newCtx, pinnedID)
+		}
+	}
 		}()
 	}
 	newCtx = context.WithValue(newCtx, "gin", c)

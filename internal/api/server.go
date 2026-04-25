@@ -341,6 +341,9 @@ func (s *Server) setupRoutes() {
 	s.engine.GET("/healthz", healthzHandler)
 	s.engine.HEAD("/healthz", healthzHandler)
 
+	// 补丁：添加静态文件服务供健康检测页面使用
+	s.engine.Static("/static", managementasset.StaticDir(s.configFilePath))
+
 	s.engine.GET("/management.html", s.serveManagementControlPanel)
 	openaiHandlers := openai.NewOpenAIAPIHandler(s.handlers)
 	geminiHandlers := gemini.NewGeminiAPIHandler(s.handlers)
@@ -384,6 +387,12 @@ func (s *Server) setupRoutes() {
 
 	// Root endpoint
 	s.engine.GET("/", func(c *gin.Context) {
+		// 如果浏览器访问，返回带导航的 HTML
+		if strings.Contains(c.GetHeader("Accept"), "text/html") {
+			c.Header("Content-Type", "text/html; charset=utf-8")
+			c.String(http.StatusOK, `<!DOCTYPE html><html><head><title>CPA 控制台</title><meta charset="utf-8"><style>body{font-family:system-ui;max-width:600px;margin:50px auto;padding:20px}a{display:block;padding:15px 20px;margin:10px 0;background:#2c3e50;color:#fff;text-decoration:none;border-radius:8px}a:hover{background:#34495e}</style></head><body><h1>🚀 CLI Proxy API</h1><a href="/management.html">📊 管理控制台</a><a href="/static/cpa_health_check.html">🏥 账户健康检测</a></body></html>`)
+			return
+		}
 		c.JSON(http.StatusOK, gin.H{
 			"message": "CLI Proxy API Server",
 			"endpoints": []string{
@@ -1142,6 +1151,10 @@ func AuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc {
 				if len(result.Metadata) > 0 {
 					c.Set("accessMetadata", result.Metadata)
 				}
+			}
+			// 补丁：支持强制指定账户ID进行测试
+			if forceID := strings.TrimSpace(c.GetHeader("X-CPA-Force-Auth-ID")); forceID != "" {
+				c.Request = c.Request.WithContext(handlers.WithPinnedAuthID(c.Request.Context(), forceID))
 			}
 			c.Next()
 			return
