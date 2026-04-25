@@ -9,6 +9,11 @@ type SDKConfig struct {
 	// ProxyURL is the URL of an optional proxy server to use for outbound requests.
 	ProxyURL string `yaml:"proxy-url" json:"proxy-url"`
 
+	// DefaultReasoningOnIngressByFormat defines ingress-layer default thinking
+	// settings keyed by protocol family (openai/claude/gemini).
+	// These rules apply before provider routing/translation.
+	DefaultReasoningOnIngressByFormat map[string]ReasoningIngressDefault `yaml:"default-reasoning-on-ingress-by-format,omitempty" json:"default-reasoning-on-ingress-by-format,omitempty"`
+
 	// ForceModelPrefix requires explicit model prefixes (e.g., "teamA/gemini-3-pro-preview")
 	// to target prefixed credentials. When false, unprefixed model requests may use prefixed
 	// credentials as well.
@@ -42,4 +47,11 @@ type StreamingConfig struct {
 	// to allow auth rotation / transient recovery.
 	// <= 0 disables bootstrap retries. Default is 0.
 	BootstrapRetries int `yaml:"bootstrap-retries,omitempty" json:"bootstrap-retries,omitempty"`
+}
+
+// ReasoningIngressDefault represents one ingress default rule for a protocol family.
+type ReasoningIngressDefault struct {
+	Policy string `yaml:"policy" json:"policy"`
+	Mode   string `yaml:"mode" json:"mode"`
+	Value  string `yaml:"value" json:"value"`
 }

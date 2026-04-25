@@ -600,6 +600,24 @@ func LoadConfig(configFile string) (*Config, error) {
 	return LoadConfigOptional(configFile, false)
 }
 
+func hasLegacyDefaultReasoningEffortKey(data []byte) bool {
+	var topLevel map[string]any
+	if err := yaml.Unmarshal(data, &topLevel); err != nil {
+		return false
+	}
+	_, ok := topLevel["default-reasoning-effort-on-missing"]
+	return ok
+}
+
+func hasDeprecatedReasoningOnMissingByProviderKey(data []byte) bool {
+	var topLevel map[string]any
+	if err := yaml.Unmarshal(data, &topLevel); err != nil {
+		return false
+	}
+	_, ok := topLevel["default-reasoning-on-missing-by-provider"]
+	return ok
+}
+
 // LoadConfigOptional reads YAML from configFile.
 // If optional is true and the file is missing, it returns an empty Config.
 // If optional is true and the file is empty or invalid, it returns an empty Config.
@@ -619,6 +637,20 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// In cloud deploy mode (optional=true), if file is empty or contains only whitespace, return empty config.
 	if optional && len(data) == 0 {
 		return &Config{}, nil
+	}
+	if hasLegacyDefaultReasoningEffortKey(data) {
+		return nil, fmt.Errorf(
+			"config key %q is no longer supported, use %q",
+			"default-reasoning-effort-on-missing",
+			"default-reasoning-on-ingress-by-format",
+		)
+	}
+	if hasDeprecatedReasoningOnMissingByProviderKey(data) {
+		return nil, fmt.Errorf(
+			"config key %q is no longer supported, use %q",
+			"default-reasoning-on-missing-by-provider",
+			"default-reasoning-on-ingress-by-format",
+		)
 	}
 
 	// Unmarshal the YAML data into the Config struct.
@@ -704,6 +736,11 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	if cfg.OpenAICompatNetworkRetryBackoffMS < 0 {
 		cfg.OpenAICompatNetworkRetryBackoffMS = 0
 	}
+	normalizedDefaults, errDefaults := NormalizeReasoningOnIngressByFormat(cfg.DefaultReasoningOnIngressByFormat)
+	if errDefaults != nil {
+		return nil, fmt.Errorf("invalid default-reasoning-on-ingress-by-format: %w", errDefaults)
+	}
+	cfg.DefaultReasoningOnIngressByFormat = normalizedDefaults
 
 	// Sanitize Gemini API key configuration and migrate legacy entries.
 	cfg.SanitizeGeminiKeys()

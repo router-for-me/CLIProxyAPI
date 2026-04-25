@@ -98,6 +98,23 @@ openai-compat-network-retry: 1
 # 第一次重试等待该时长，后续按 2 倍递增。设为 0 表示不等待直接重试。
 openai-compat-network-retry-backoff-ms: 500
 
+# 入口层缺省思考深度策略（仅针对标准入口协议）
+# 可通过管理 API 实时更新并写回当前运行配置。
+# format/policy/mode/value 取值请以 /v0/management/reasoning-ingress-options 返回为准。
+default-reasoning-on-ingress-by-format:
+  openai:
+    policy: "missing_only" # missing_only | force_override
+    mode: "effort"
+    value: "xhigh"
+  claude:
+    policy: "missing_only"
+    mode: "adaptive_effort"
+    value: "high"
+  gemini:
+    policy: "missing_only"
+    mode: "level"
+    value: "medium"
+
 # 配额超出行为
 quota-exceeded:
   switch-project: true  # 配额超时时是否自动切换到其他项目
