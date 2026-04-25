@@ -23,6 +23,7 @@ import (
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/browser"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/util"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/util/urlguard"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -59,6 +60,14 @@ var (
 	ErrSlowDown             = errors.New("slow_down")
 	awsRegionPattern        = regexp.MustCompile(`^[a-z]{2}(?:-[a-z0-9]+)+-\d+$`)
 )
+
+// guardURL validates a constructed outbound URL against the urlguard
+// allowlist before it is handed to net/http. Centralizing this here lets
+// every call site in this file participate in CodeQL go/request-forgery
+// remediation without duplicating the import + check pattern.
+func guardURL(rawURL string) (string, error) {
+	return urlguard.ValidateOutboundURL(rawURL)
+}
 
 // SSOOIDCClient handles AWS SSO OIDC authentication.
 type SSOOIDCClient struct {
@@ -274,7 +283,11 @@ func (c *SSOOIDCClient) RegisterClientWithRegion(ctx context.Context, region str
 		return nil, err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint+"/client/register", strings.NewReader(string(body)))
+	guardedURL, gerr := guardURL(endpoint + "/client/register")
+	if gerr != nil {
+		return nil, gerr
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, guardedURL, strings.NewReader(string(body)))
 	if err != nil {
 		return nil, err
 	}
@@ -327,7 +340,11 @@ func (c *SSOOIDCClient) StartDeviceAuthorizationWithIDC(ctx context.Context, cli
 		return nil, err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint+"/device_authorization", strings.NewReader(string(body)))
+	guardedURL, gerr := guardURL(endpoint + "/device_authorization")
+	if gerr != nil {
+		return nil, gerr
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, guardedURL, strings.NewReader(string(body)))
 	if err != nil {
 		return nil, err
 	}
@@ -378,7 +395,11 @@ func (c *SSOOIDCClient) CreateTokenWithRegion(ctx context.Context, clientID, cli
 		return nil, err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint+"/token", strings.NewReader(string(body)))
+	guardedURL, gerr := guardURL(endpoint + "/token")
+	if gerr != nil {
+		return nil, gerr
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, guardedURL, strings.NewReader(string(body)))
 	if err != nil {
 		return nil, err
 	}
@@ -447,7 +468,11 @@ func (c *SSOOIDCClient) RefreshTokenWithRegion(ctx context.Context, clientID, cl
 		return nil, err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint+"/token", strings.NewReader(string(body)))
+	guardedURL, gerr := guardURL(endpoint + "/token")
+	if gerr != nil {
+		return nil, gerr
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, guardedURL, strings.NewReader(string(body)))
 	if err != nil {
 		return nil, err
 	}
@@ -663,7 +688,11 @@ func (c *SSOOIDCClient) RegisterClient(ctx context.Context) (*RegisterClientResp
 		return nil, err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, ssoOIDCEndpoint+"/client/register", strings.NewReader(string(body)))
+	guardedURL, gerr := guardURL(ssoOIDCEndpoint + "/client/register")
+	if gerr != nil {
+		return nil, gerr
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, guardedURL, strings.NewReader(string(body)))
 	if err != nil {
 		return nil, err
 	}
@@ -707,7 +736,11 @@ func (c *SSOOIDCClient) StartDeviceAuthorization(ctx context.Context, clientID, 
 		return nil, err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, ssoOIDCEndpoint+"/device_authorization", strings.NewReader(string(body)))
+	guardedURL, gerr := guardURL(ssoOIDCEndpoint + "/device_authorization")
+	if gerr != nil {
+		return nil, gerr
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, guardedURL, strings.NewReader(string(body)))
 	if err != nil {
 		return nil, err
 	}
@@ -752,7 +785,11 @@ func (c *SSOOIDCClient) CreateToken(ctx context.Context, clientID, clientSecret,
 		return nil, err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, ssoOIDCEndpoint+"/token", strings.NewReader(string(body)))
+	guardedURL, gerr := guardURL(ssoOIDCEndpoint + "/token")
+	if gerr != nil {
+		return nil, gerr
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, guardedURL, strings.NewReader(string(body)))
 	if err != nil {
 		return nil, err
 	}
@@ -810,7 +847,11 @@ func (c *SSOOIDCClient) RefreshToken(ctx context.Context, clientID, clientSecret
 		return nil, err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, ssoOIDCEndpoint+"/token", strings.NewReader(string(body)))
+	guardedURL, gerr := guardURL(ssoOIDCEndpoint + "/token")
+	if gerr != nil {
+		return nil, gerr
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, guardedURL, strings.NewReader(string(body)))
 	if err != nil {
 		return nil, err
 	}
@@ -1008,7 +1049,11 @@ func (c *SSOOIDCClient) FetchUserEmail(ctx context.Context, accessToken string) 
 
 // tryUserInfoEndpoint attempts to get user info from AWS SSO OIDC userinfo endpoint.
 func (c *SSOOIDCClient) tryUserInfoEndpoint(ctx context.Context, accessToken string) string {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ssoOIDCEndpoint+"/userinfo", nil)
+	guardedURL, gerr := guardURL(ssoOIDCEndpoint + "/userinfo")
+	if gerr != nil {
+		return ""
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, guardedURL, nil)
 	if err != nil {
 		return ""
 	}
@@ -1078,7 +1123,11 @@ func (c *SSOOIDCClient) tryListProfiles(ctx context.Context, accessToken string)
 		return ""
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://codewhisperer.us-east-1.amazonaws.com", strings.NewReader(string(body)))
+	guardedURL, gerr := guardURL("https://codewhisperer.us-east-1.amazonaws.com")
+	if gerr != nil {
+		return ""
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, guardedURL, strings.NewReader(string(body)))
 	if err != nil {
 		return ""
 	}
@@ -1135,7 +1184,11 @@ func (c *SSOOIDCClient) tryListCustomizations(ctx context.Context, accessToken s
 		return ""
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://codewhisperer.us-east-1.amazonaws.com", strings.NewReader(string(body)))
+	guardedURL, gerr := guardURL("https://codewhisperer.us-east-1.amazonaws.com")
+	if gerr != nil {
+		return ""
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, guardedURL, strings.NewReader(string(body)))
 	if err != nil {
 		return ""
 	}
@@ -1198,7 +1251,11 @@ func (c *SSOOIDCClient) RegisterClientForAuthCode(ctx context.Context, redirectU
 		return nil, err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, ssoOIDCEndpoint+"/client/register", strings.NewReader(string(body)))
+	guardedURL, gerr := guardURL(ssoOIDCEndpoint + "/client/register")
+	if gerr != nil {
+		return nil, gerr
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, guardedURL, strings.NewReader(string(body)))
 	if err != nil {
 		return nil, err
 	}
@@ -1347,7 +1404,11 @@ func (c *SSOOIDCClient) CreateTokenWithAuthCode(ctx context.Context, clientID, c
 		return nil, err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, ssoOIDCEndpoint+"/token", strings.NewReader(string(body)))
+	guardedURL, gerr := guardURL(ssoOIDCEndpoint + "/token")
+	if gerr != nil {
+		return nil, gerr
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, guardedURL, strings.NewReader(string(body)))
 	if err != nil {
 		return nil, err
 	}

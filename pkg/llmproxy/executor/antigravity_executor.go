@@ -30,6 +30,7 @@ import (
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/registry"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/thinking"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/util"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/util/urlguard"
 	sdkAuth "github.com/kooshapari/CLIProxyAPI/v7/sdk/auth"
 	cliproxyauth "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -1017,7 +1018,11 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 			requestURL.WriteString(url.QueryEscape(opts.Alt))
 		}
 
-		httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, requestURL.String(), bytes.NewReader(payload))
+		guardedURL, gerr := urlguard.ValidateOutboundURL(requestURL.String())
+		if gerr != nil {
+			return cliproxyexecutor.Response{}, gerr
+		}
+		httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, guardedURL, bytes.NewReader(payload))
 		if errReq != nil {
 			return cliproxyexecutor.Response{}, errReq
 		}
@@ -1134,7 +1139,13 @@ func FetchAntigravityModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 
 	for idx, baseURL := range baseURLs {
 		modelsURL := baseURL + antigravityModelsPath
-		httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, modelsURL, bytes.NewReader([]byte(`{}`)))
+		guardedModelsURL, gerr := urlguard.ValidateOutboundURL(modelsURL)
+		if gerr != nil {
+			log.Warnf("antigravity executor: fetch models rejected by urlguard: %v", gerr)
+			lastErr = gerr
+			continue
+		}
+		httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, guardedModelsURL, bytes.NewReader([]byte(`{}`)))
 		if errReq != nil {
 			log.Warnf("antigravity executor: fetch models failed for %s: create request error: %v", auth.ID, errReq)
 			lastErr = errReq
@@ -1350,7 +1361,11 @@ func (e *AntigravityExecutor) refreshToken(ctx context.Context, auth *cliproxyau
 	form.Set("grant_type", "refresh_token")
 	form.Set("refresh_token", refreshToken)
 
-	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, "https://oauth2.googleapis.com/token", strings.NewReader(form.Encode()))
+	guardedTokenURL, gerr := urlguard.ValidateOutboundURL("https://oauth2.googleapis.com/token")
+	if gerr != nil {
+		return auth, gerr
+	}
+	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, guardedTokenURL, strings.NewReader(form.Encode()))
 	if errReq != nil {
 		return auth, errReq
 	}
@@ -1519,7 +1534,11 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 		payloadStr, _ = sjson.Delete(payloadStr, "request.generationConfig.maxOutputTokens")
 	}
 
-	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, requestURL.String(), strings.NewReader(payloadStr))
+	guardedReqURL, gerr := urlguard.ValidateOutboundURL(requestURL.String())
+	if gerr != nil {
+		return nil, gerr
+	}
+	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, guardedReqURL, strings.NewReader(payloadStr))
 	if errReq != nil {
 		return nil, errReq
 	}
