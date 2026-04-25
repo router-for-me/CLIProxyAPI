@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/kooshapari/CLIProxyAPI/v7/internal/pathsafe"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/misc"
 )
 
@@ -46,11 +47,21 @@ type CodeBuddyTokenStorage struct {
 func (s *CodeBuddyTokenStorage) SaveTokenToFile(authFilePath string) error {
 	misc.LogSavingCredentials(authFilePath)
 	s.Type = "codebuddy"
-	if err := os.MkdirAll(filepath.Dir(authFilePath), 0700); err != nil {
+
+	// Defend against go/path-injection (CodeQL alerts #782/#783): constrain
+	// the credential file to its parent directory using pathsafe.SafeContain
+	// so any traversal segment in authFilePath is rejected before it reaches
+	// MkdirAll/OpenFile.
+	parentDir := filepath.Dir(authFilePath)
+	safePath, err := pathsafe.SafeContain(parentDir, authFilePath)
+	if err != nil {
+		return fmt.Errorf("invalid token file path: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(safePath), 0700); err != nil {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
 
-	f, err := os.OpenFile(authFilePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	f, err := os.OpenFile(safePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
 	if err != nil {
 		return fmt.Errorf("failed to create token file: %w", err)
 	}
