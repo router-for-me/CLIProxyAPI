@@ -552,13 +552,16 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		sawUpstreamDone := false
 		upstreamChunkCount := 0
 		upstreamBytes := 0
+		lastUpstreamEvent := ""
 		toleratedTransientTermination := false
+		transientTerminationErr := error(nil)
 
 		markRetryableTermination := func(readErr error) bool {
 			if !isOpenAICompatRetryableNetworkError(readErr) {
 				return false
 			}
 			toleratedTransientTermination = true
+			transientTerminationErr = readErr
 			wrappedErr := fmt.Errorf("openai compat executor stream: tolerated transient upstream termination after %d chunks (%d bytes): %w", upstreamChunkCount, upstreamBytes, readErr)
 			recordAPIResponseError(ctx, e.cfg, wrappedErr)
 			logWithRequestID(ctx).Warnf("openai compat executor stream: tolerated transient upstream termination after %d chunks (%d bytes): %v", upstreamChunkCount, upstreamBytes, readErr)
@@ -594,6 +597,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 				if len(frame) > 0 {
 					upstreamChunkCount++
 					upstreamBytes += len(frame)
+					lastUpstreamEvent = openAICompatStreamEventLabel(frame)
 					if payload := codexSSEPayload(frame); bytes.Equal(payload, []byte("[DONE]")) {
 						sawUpstreamDone = true
 					}
@@ -627,6 +631,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 				if len(line) > 0 {
 					upstreamChunkCount++
 					upstreamBytes += len(line)
+					lastUpstreamEvent = openAICompatStreamEventLabel(line)
 				}
 				appendAPIResponseChunk(ctx, e.cfg, line)
 				if detail, ok := parseOpenAIStreamUsage(line); ok {
@@ -661,6 +666,17 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 					return
 				}
 			}
+		}
+		if upstreamChunkCount == 0 && !sawUpstreamDone {
+			if transientTerminationErr == nil {
+				transientTerminationErr = io.ErrUnexpectedEOF
+			}
+			truncationErr := buildOpenAICompatStreamTruncationError(httpResp.Header, upstreamChunkCount, upstreamBytes, sawUpstreamDone, lastUpstreamEvent, transientTerminationErr)
+			recordAPIResponseError(ctx, e.cfg, truncationErr)
+			e.recordOpenAICompatFailure(auth, circuitModel)
+			reporter.publishFailure(ctx)
+			out <- cliproxyexecutor.StreamChunk{Err: truncationErr}
+			return
 		}
 		if !responsesOutput && toleratedTransientTermination && !sawUpstreamDone {
 			// Best-effort terminal marker for OpenAI chat streams when upstream disconnected
@@ -897,6 +913,64 @@ func hasOpenAIResponsesEventType(chunk []byte, eventType string) bool {
 		return true
 	}
 	return false
+}
+
+func openAICompatStreamEventLabel(chunk []byte) string {
+	trimmed := bytes.TrimSpace(chunk)
+	if len(trimmed) == 0 {
+		return ""
+	}
+	lines := bytes.Split(trimmed, []byte("\n"))
+	for _, line := range lines {
+		line = bytes.TrimSpace(line)
+		if bytes.HasPrefix(line, []byte("event:")) {
+			return strings.TrimSpace(string(bytes.TrimSpace(line[len("event:"):])))
+		}
+	}
+	payload := extractSSEDataPayload(trimmed)
+	if len(payload) == 0 {
+		return "data"
+	}
+	if bytes.Equal(bytes.TrimSpace(payload), []byte("[DONE]")) {
+		return "[DONE]"
+	}
+	if eventType := strings.TrimSpace(gjson.GetBytes(payload, "type").String()); eventType != "" {
+		return eventType
+	}
+	if objectType := strings.TrimSpace(gjson.GetBytes(payload, "object").String()); objectType != "" {
+		return objectType
+	}
+	return "data"
+}
+
+func openAICompatStreamRequestID(headers http.Header) string {
+	if headers == nil {
+		return ""
+	}
+	for _, key := range []string{"nvcf-reqid", "x-request-id", "request-id", "x-amzn-requestid"} {
+		if value := strings.TrimSpace(headers.Get(key)); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func buildOpenAICompatStreamTruncationError(headers http.Header, chunkCount int, totalBytes int, sawDone bool, lastEvent string, cause error) statusErr {
+	if cause == nil {
+		cause = io.ErrUnexpectedEOF
+	}
+	return statusErr{
+		code: http.StatusBadGateway,
+		msg: fmt.Sprintf(
+			"upstream stream truncated before first chunk: %v (request_id=%s, chunks=%d, bytes=%d, last_event=%s, saw_done=%t)",
+			cause,
+			openAICompatStreamRequestID(headers),
+			chunkCount,
+			totalBytes,
+			strings.TrimSpace(lastEvent),
+			sawDone,
+		),
+	}
 }
 
 func synthesizeOpenAIResponsesCompletion(modelName string) [][]byte {

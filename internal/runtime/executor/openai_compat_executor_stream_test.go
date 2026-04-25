@@ -144,7 +144,7 @@ func TestOpenAICompatExecutorExecuteStream_NativeResponsesPreservesFullSSEFrames
 	}
 }
 
-func TestOpenAICompatExecutorExecuteStream_ResponsesEmptyUpstreamSynthesizesCompletion(t *testing.T) {
+func TestOpenAICompatExecutorExecuteStream_ResponsesEmptyUpstreamReturnsTruncationError(t *testing.T) {
 	// Ensure clean capability resolver state for the empty auth ID used by this test.
 	globalResponsesCapabilityResolver.Invalidate("")
 	defer globalResponsesCapabilityResolver.Invalidate("")
@@ -180,25 +180,26 @@ func TestOpenAICompatExecutorExecuteStream_ResponsesEmptyUpstreamSynthesizesComp
 		t.Fatal("stream result is nil")
 	}
 
-	var gotCreated bool
-	var gotCompleted bool
+	var gotErr error
 	for chunk := range stream.Chunks {
 		if chunk.Err != nil {
-			t.Fatalf("unexpected stream chunk error: %v", chunk.Err)
-		}
-		if hasOpenAIResponsesCompletedEvent(chunk.Payload) {
-			gotCompleted = true
-		}
-		if hasOpenAIResponsesCreatedEvent(chunk.Payload) {
-			gotCreated = true
+			gotErr = chunk.Err
+			break
 		}
 	}
 
-	if !gotCreated {
-		t.Fatal("expected synthetic response.created event")
+	if gotErr == nil {
+		t.Fatal("expected truncation error for empty upstream responses stream")
 	}
-	if !gotCompleted {
-		t.Fatal("expected synthetic response.completed event")
+	if !strings.Contains(strings.ToLower(gotErr.Error()), "truncated before first chunk") {
+		t.Fatalf("error = %v, want truncation classification", gotErr)
+	}
+	statusCoder, ok := gotErr.(interface{ StatusCode() int })
+	if !ok {
+		t.Fatalf("error type %T does not expose StatusCode()", gotErr)
+	}
+	if statusCoder.StatusCode() != http.StatusBadGateway {
+		t.Fatalf("status code = %d, want %d", statusCoder.StatusCode(), http.StatusBadGateway)
 	}
 }
 
@@ -214,7 +215,7 @@ func TestSynthesizeOpenAIResponsesCompletion_UsesValidSSEDelimiter(t *testing.T)
 	}
 }
 
-func TestOpenAICompatExecutorExecuteStream_OpenAISourceNoSynthesis(t *testing.T) {
+func TestOpenAICompatExecutorExecuteStream_OpenAISourceEmptyUpstreamReturnsTruncationError(t *testing.T) {
 	// Ensure clean capability resolver state for the empty auth ID used by this test.
 	globalResponsesCapabilityResolver.Invalidate("")
 	defer globalResponsesCapabilityResolver.Invalidate("")
@@ -250,15 +251,18 @@ func TestOpenAICompatExecutorExecuteStream_OpenAISourceNoSynthesis(t *testing.T)
 		t.Fatal("stream result is nil")
 	}
 
-	chunkCount := 0
+	var gotErr error
 	for chunk := range stream.Chunks {
 		if chunk.Err != nil {
-			t.Fatalf("unexpected stream chunk error: %v", chunk.Err)
+			gotErr = chunk.Err
+			break
 		}
-		chunkCount++
 	}
-	if chunkCount != 0 {
-		t.Fatalf("expected no synthetic chunks for openai source format, got %d", chunkCount)
+	if gotErr == nil {
+		t.Fatal("expected truncation error for empty upstream chat stream")
+	}
+	if !strings.Contains(strings.ToLower(gotErr.Error()), "truncated before first chunk") {
+		t.Fatalf("error = %v, want truncation classification", gotErr)
 	}
 }
 
