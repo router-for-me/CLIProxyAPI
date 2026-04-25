@@ -181,7 +181,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	body, _ = sjson.DeleteBytes(body, "safety_identifier")
 	body, _ = sjson.DeleteBytes(body, "stream_options")
 	body = normalizeCodexInstructions(body)
-	body = ensureImageGenerationTool(body, baseModel, auth)
+	body = maybeEnsureImageGenerationTool(body, baseModel, auth)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
 	httpReq, err := e.cacheHelper(ctx, from, url, req, body)
@@ -329,7 +329,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 	body, _ = sjson.DeleteBytes(body, "stream")
 	body = normalizeCodexInstructions(body)
-	body = ensureImageGenerationTool(body, baseModel, auth)
+	body = maybeEnsureImageGenerationTool(body, baseModel, auth)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses/compact"
 	httpReq, err := e.cacheHelper(ctx, from, url, req, body)
@@ -424,7 +424,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	body, _ = sjson.DeleteBytes(body, "stream_options")
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 	body = normalizeCodexInstructions(body)
-	body = ensureImageGenerationTool(body, baseModel, auth)
+	body = maybeEnsureImageGenerationTool(body, baseModel, auth)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
 	httpReq, err := e.cacheHelper(ctx, from, url, req, body)
@@ -887,6 +887,46 @@ func isCodexFreePlanAuth(auth *cliproxyauth.Auth) bool {
 	return strings.EqualFold(strings.TrimSpace(auth.Attributes["plan_type"]), "free")
 }
 
+func maybeEnsureImageGenerationTool(body []byte, baseModel string, auth *cliproxyauth.Auth) []byte {
+	if !shouldEnsureImageGenerationTool(body, baseModel, auth) {
+		return body
+	}
+	return ensureImageGenerationTool(body, baseModel, auth)
+}
+
+func shouldEnsureImageGenerationTool(body []byte, baseModel string, auth *cliproxyauth.Auth) bool {
+	if strings.HasSuffix(baseModel, "spark") || isCodexFreePlanAuth(auth) {
+		return false
+	}
+	if hasImageGenerationTool(body) {
+		return false
+	}
+	if explicitlyChoosesImageGeneration(body) {
+		return true
+	}
+	return false
+}
+
+func explicitlyChoosesImageGeneration(body []byte) bool {
+	toolChoice := gjson.GetBytes(body, "tool_choice")
+	if toolChoice.Get("type").String() == "image_generation" {
+		return true
+	}
+	return toolsIncludeImageGeneration(toolChoice.Get("tools"))
+}
+
+func toolsIncludeImageGeneration(tools gjson.Result) bool {
+	if !tools.IsArray() {
+		return false
+	}
+	for _, tool := range tools.Array() {
+		if tool.Get("type").String() == "image_generation" {
+			return true
+		}
+	}
+	return false
+}
+
 func ensureImageGenerationTool(body []byte, baseModel string, auth *cliproxyauth.Auth) []byte {
 	if strings.HasSuffix(baseModel, "spark") {
 		return body
@@ -900,10 +940,8 @@ func ensureImageGenerationTool(body []byte, baseModel string, auth *cliproxyauth
 		body, _ = sjson.SetRawBytes(body, "tools", imageGenToolArrayJSON)
 		return body
 	}
-	for _, t := range tools.Array() {
-		if t.Get("type").String() == "image_generation" {
-			return body
-		}
+	if toolsIncludeImageGeneration(tools) {
+		return body
 	}
 	body, _ = sjson.SetRawBytes(body, "tools.-1", imageGenToolJSON)
 	return body
@@ -932,6 +970,10 @@ func codexImageGenerationToolModel(body []byte) string {
 		}
 	}
 	return codexDefaultImageToolModel
+}
+
+func hasImageGenerationTool(body []byte) bool {
+	return toolsIncludeImageGeneration(gjson.GetBytes(body, "tools"))
 }
 
 func isCodexModelCapacityError(errorBody []byte) bool {

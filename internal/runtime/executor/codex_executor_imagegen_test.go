@@ -116,3 +116,71 @@ func TestEnsureImageGenerationTool_FreeCodexAuthDoesNotInjectTool(t *testing.T) 
 		t.Fatalf("expected no tools for free codex auth, got %s", gjson.GetBytes(result, "tools").Raw)
 	}
 }
+
+func TestMaybeEnsureImageGenerationTool_SkipsGenericClient(t *testing.T) {
+	body := []byte(`{"model":"gpt-5.4","tools":[{"type":"web_search"}]}`)
+	result := maybeEnsureImageGenerationTool(body, "gpt-5.4", nil)
+
+	if string(result) != string(body) {
+		t.Fatalf("expected generic client body unchanged, got %s", string(result))
+	}
+	if hasImageGenerationTool(result) {
+		t.Fatalf("expected no image_generation tool for generic client, got %s", string(result))
+	}
+}
+
+func TestMaybeEnsureImageGenerationTool_AddsForImageGenerationToolChoice(t *testing.T) {
+	body := []byte(`{"model":"gpt-5.4","tool_choice":{"type":"image_generation"}}`)
+	result := maybeEnsureImageGenerationTool(body, "gpt-5.4", nil)
+
+	if !hasImageGenerationTool(result) {
+		t.Fatalf("expected image_generation tool for explicit tool_choice, got %s", string(result))
+	}
+}
+
+func TestMaybeEnsureImageGenerationTool_AppendsForImageGenerationToolChoice(t *testing.T) {
+	body := []byte(`{"model":"gpt-5.4","tools":[{"type":"web_search"}],"tool_choice":{"type":"image_generation"}}`)
+	result := maybeEnsureImageGenerationTool(body, "gpt-5.4", nil)
+
+	if !hasImageGenerationTool(result) {
+		t.Fatalf("expected image_generation tool for explicit tool_choice, got %s", string(result))
+	}
+	tools := gjson.GetBytes(result, "tools").Array()
+	if len(tools) != 2 {
+		t.Fatalf("expected web_search plus image_generation tools, got %s", gjson.GetBytes(result, "tools").Raw)
+	}
+}
+
+func TestMaybeEnsureImageGenerationTool_AddsForAllowedToolsImageGenerationToolChoice(t *testing.T) {
+	body := []byte(`{"model":"gpt-5.4","tool_choice":{"type":"allowed_tools","tools":[{"type":"image_generation"}]}}`)
+	result := maybeEnsureImageGenerationTool(body, "gpt-5.4", nil)
+
+	if !hasImageGenerationTool(result) {
+		t.Fatalf("expected image_generation tool for allowed_tools tool_choice, got %s", string(result))
+	}
+}
+
+func TestMaybeEnsureImageGenerationTool_SkipsWhenImageGenerationToolAlreadyPresent(t *testing.T) {
+	body := []byte(`{"model":"gpt-5.4","tools":[{"type":"image_generation","output_format":"webp"}],"tool_choice":{"type":"image_generation"}}`)
+	result := maybeEnsureImageGenerationTool(body, "gpt-5.4", nil)
+
+	if string(result) != string(body) {
+		t.Fatalf("expected existing image_generation body unchanged, got %s", string(result))
+	}
+}
+
+func TestMaybeEnsureImageGenerationTool_FreeCodexAuthSkipsEvenWithToolChoice(t *testing.T) {
+	body := []byte(`{"model":"gpt-5.4","tool_choice":{"type":"image_generation"}}`)
+	freeAuth := &cliproxyauth.Auth{
+		Provider:   "codex",
+		Attributes: map[string]string{"plan_type": "free"},
+	}
+	result := maybeEnsureImageGenerationTool(body, "gpt-5.4", freeAuth)
+
+	if string(result) != string(body) {
+		t.Fatalf("expected free auth body unchanged, got %s", string(result))
+	}
+	if hasImageGenerationTool(result) {
+		t.Fatalf("expected no image_generation tool for free auth, got %s", string(result))
+	}
+}
