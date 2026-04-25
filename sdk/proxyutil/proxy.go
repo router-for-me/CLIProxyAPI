@@ -1,7 +1,10 @@
 package proxyutil
 
 import (
+	"bufio"
 	"context"
+	"crypto/tls"
+	"encoding/base64"
 	"fmt"
 	"net"
 	"net/http"
@@ -124,13 +127,7 @@ func BuildHTTPTransport(raw string) (*http.Transport, Mode, error) {
 		return NewDirectTransport(), setting.Mode, nil
 	case ModeProxy:
 		if setting.URL.Scheme == "socks5" || setting.URL.Scheme == "socks5h" {
-			var proxyAuth *proxy.Auth
-			if setting.URL.User != nil {
-				username := setting.URL.User.Username()
-				password, _ := setting.URL.User.Password()
-				proxyAuth = &proxy.Auth{User: username, Password: password}
-			}
-			dialer, errSOCKS5 := proxy.SOCKS5("tcp", setting.URL.Host, proxyAuth, proxy.Direct)
+			dialer, errSOCKS5 := proxy.SOCKS5("tcp", setting.URL.Host, proxyAuthFromURL(setting.URL), proxy.Direct)
 			if errSOCKS5 != nil {
 				return nil, setting.Mode, fmt.Errorf("create SOCKS5 dialer failed: %w", errSOCKS5)
 			}
@@ -163,11 +160,83 @@ func BuildDialer(raw string) (proxy.Dialer, Mode, error) {
 		return proxy.Direct, setting.Mode, nil
 	case ModeProxy:
 		dialer, errDialer := proxy.FromURL(setting.URL, proxy.Direct)
-		if errDialer != nil {
+		if errDialer == nil {
+			return dialer, setting.Mode, nil
+		}
+		switch setting.URL.Scheme {
+		case "http", "https":
+			return &connectProxyDialer{proxyURL: setting.URL}, setting.Mode, nil
+		default:
 			return nil, setting.Mode, fmt.Errorf("create proxy dialer failed: %w", errDialer)
 		}
-		return dialer, setting.Mode, nil
 	default:
 		return nil, setting.Mode, nil
 	}
+}
+
+type connectProxyDialer struct {
+	proxyURL *url.URL
+}
+
+func (d *connectProxyDialer) Dial(network, addr string) (net.Conn, error) {
+	if d == nil || d.proxyURL == nil {
+		return nil, fmt.Errorf("proxy dialer is not configured")
+	}
+	baseDialer := &net.Dialer{Timeout: 30 * time.Second}
+	var conn net.Conn
+	var err error
+	switch d.proxyURL.Scheme {
+	case "https":
+		conn, err = tls.DialWithDialer(baseDialer, network, d.proxyURL.Host, &tls.Config{ServerName: d.proxyURL.Hostname()})
+	default:
+		conn, err = baseDialer.Dial(network, d.proxyURL.Host)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	if _, err = fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n", addr, addr); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	if auth := proxyAuthorizationHeader(d.proxyURL); auth != "" {
+		if _, err = fmt.Fprintf(conn, "Proxy-Authorization: %s\r\n", auth); err != nil {
+			conn.Close()
+			return nil, err
+		}
+	}
+	if _, err = fmt.Fprint(conn, "\r\n"); err != nil {
+		conn.Close()
+		return nil, err
+	}
+
+	resp, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: http.MethodConnect})
+	if err != nil {
+		conn.Close()
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		conn.Close()
+		return nil, fmt.Errorf("proxy CONNECT failed: %s", resp.Status)
+	}
+	return conn, nil
+}
+
+func proxyAuthorizationHeader(proxyURL *url.URL) string {
+	auth := proxyAuthFromURL(proxyURL)
+	if auth == nil {
+		return ""
+	}
+	token := base64.StdEncoding.EncodeToString([]byte(auth.User + ":" + auth.Password))
+	return "Basic " + token
+}
+
+func proxyAuthFromURL(proxyURL *url.URL) *proxy.Auth {
+	if proxyURL == nil || proxyURL.User == nil {
+		return nil
+	}
+	username := proxyURL.User.Username()
+	password, _ := proxyURL.User.Password()
+	return &proxy.Auth{User: username, Password: password}
 }

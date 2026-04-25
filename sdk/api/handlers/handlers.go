@@ -22,6 +22,7 @@ import (
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
+	"github.com/tidwall/gjson"
 	"golang.org/x/net/context"
 )
 
@@ -487,15 +488,17 @@ func appendAPIResponse(c *gin.Context, data []byte) {
 			}
 		case []byte:
 			builder := &strings.Builder{}
-			appendLimitedAPIResponseBytes(c, builder, value)
-			appendLimitedAPIResponseBytes(c, builder, data)
+			builder.Grow(len(value))
+			_, _ = builder.Write(value)
 			c.Set(apiResponseContextKey, builder)
+			appendLimitedAPIResponseBytes(c, builder, data)
 			return
 		case string:
 			builder := &strings.Builder{}
-			appendLimitedAPIResponseString(c, builder, value)
-			appendLimitedAPIResponseBytes(c, builder, data)
+			builder.Grow(len(value))
+			_, _ = builder.WriteString(value)
 			c.Set(apiResponseContextKey, builder)
+			appendLimitedAPIResponseBytes(c, builder, data)
 			return
 		}
 	}
@@ -787,6 +790,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 		sentPayload := false
 		bootstrapRetries := 0
 		maxBootstrapRetries := StreamingBootstrapRetries(h.Cfg)
+		var bufferedBootstrap [][]byte
 
 		sendErr := func(msg *interfaces.ErrorMessage) bool {
 			if ctx == nil {
@@ -812,6 +816,16 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 			case dataChan <- chunk:
 				return true
 			}
+		}
+
+		flushBufferedBootstrap := func() bool {
+			for _, buffered := range bufferedBootstrap {
+				if okSendData := sendData(buffered); !okSendData {
+					return false
+				}
+			}
+			bufferedBootstrap = nil
+			return true
 		}
 
 		bootstrapEligible := func(err error) bool {
@@ -857,6 +871,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 								if passthroughHeadersEnabled {
 									replaceHeader(upstreamHeaders, FilterUpstreamHeaders(retryResult.Headers))
 								}
+								bufferedBootstrap = nil
 								chunks = retryResult.Chunks
 								continue outer
 							}
@@ -885,6 +900,15 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 							_ = sendErr(&interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: err})
 							return
 						}
+						if !sentPayload && isOpenAIResponsesBootstrapChunk(chunk.Payload) {
+							bufferedBootstrap = append(bufferedBootstrap, cloneBytes(chunk.Payload))
+							continue
+						}
+					}
+					if !sentPayload && len(bufferedBootstrap) > 0 {
+						if okSendData := flushBufferedBootstrap(); !okSendData {
+							return
+						}
 					}
 					sentPayload = true
 					if okSendData := sendData(cloneBytes(chunk.Payload)); !okSendData {
@@ -898,6 +922,11 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 }
 
 var sseDoneMarkerBytes = []byte("[DONE]")
+var openAIResponsesBootstrapEventTypes = map[string]struct{}{
+	"response.created":     {},
+	"response.in_progress": {},
+	"response.queued":      {},
+}
 
 func validateSSEDataJSON(chunk []byte) error {
 	for len(chunk) > 0 {
@@ -933,6 +962,32 @@ func validateSSEDataJSON(chunk []byte) error {
 		return fmt.Errorf("invalid SSE data JSON (len=%d): %q", len(data), preview)
 	}
 	return nil
+}
+
+func isOpenAIResponsesBootstrapChunk(chunk []byte) bool {
+	sawData := false
+	for len(chunk) > 0 {
+		line := chunk
+		if idx := bytes.IndexByte(chunk, '\n'); idx >= 0 {
+			line = chunk[:idx]
+			chunk = chunk[idx+1:]
+		} else {
+			chunk = nil
+		}
+		line = bytes.TrimSpace(line)
+		if len(line) == 0 || !bytes.HasPrefix(line, []byte("data:")) {
+			continue
+		}
+		data := bytes.TrimSpace(line[5:])
+		if len(data) == 0 || bytes.Equal(data, sseDoneMarkerBytes) || !json.Valid(data) {
+			continue
+		}
+		sawData = true
+		if _, ok := openAIResponsesBootstrapEventTypes[gjson.GetBytes(data, "type").String()]; !ok {
+			return false
+		}
+	}
+	return sawData
 }
 
 func statusFromError(err error) int {

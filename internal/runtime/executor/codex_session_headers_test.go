@@ -187,18 +187,16 @@ func TestApplyCodexHeaders_OriginatorFromEnv(t *testing.T) {
 	}
 }
 
-func TestApplyCodexHeaders_OriginatorAPIKeySkipped(t *testing.T) {
+func TestApplyCodexHeaders_OriginatorAPIKeyMatchesCodexClientDefault(t *testing.T) {
 	t.Setenv(misc.CodexOriginatorEnvVar, "codex_vscode")
-	// API-key auths must not gain an Originator header unless the caller explicitly sent one,
-	// preserving compatibility with OpenAI-compatible/custom base_url endpoints.
 	auth := &cliproxyauth.Auth{ID: "auth-apikey", Attributes: map[string]string{"api_key": "sk-..."}}
 	req, err := http.NewRequest(http.MethodPost, "https://example.com/responses", nil)
 	if err != nil {
 		t.Fatalf("NewRequest: %v", err)
 	}
 	applyCodexHeaders(req, auth, "tok", true, nil)
-	if got := req.Header.Get("Originator"); got != "" {
-		t.Fatalf("API-key path must not set Originator, got %q", got)
+	if got := req.Header.Get("Originator"); got != "codex_vscode" {
+		t.Fatalf("Originator = %q, want codex_vscode", got)
 	}
 }
 

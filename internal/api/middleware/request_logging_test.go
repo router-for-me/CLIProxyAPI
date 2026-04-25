@@ -156,7 +156,7 @@ func TestCaptureRequestInfoPreservesBodyForDownstream(t *testing.T) {
 	req.ContentLength = int64(len(payload))
 	c.Request = req
 
-	requestInfo, bodyCapture := captureRequestInfo(c, true, true)
+	requestInfo, bodyCapture := captureRequestInfo(c, true, true, true)
 	if bodyCapture == nil {
 		t.Fatal("expected request body capture")
 	}
@@ -190,7 +190,7 @@ func TestCaptureRequestInfoSummarizesLargeBody(t *testing.T) {
 	req.ContentLength = int64(len(payload))
 	c.Request = req
 
-	requestInfo, bodyCapture := captureRequestInfo(c, true, true)
+	requestInfo, bodyCapture := captureRequestInfo(c, true, true, true)
 	if bodyCapture == nil {
 		t.Fatal("expected request body capture")
 	}
@@ -274,12 +274,41 @@ func TestCaptureRequestInfoSkipsHeadersWhenDisabled(t *testing.T) {
 	req.ContentLength = 2
 	c.Request = req
 
-	requestInfo, bodyCapture := captureRequestInfo(c, false, false)
+	requestInfo, bodyCapture := captureRequestInfo(c, false, false, false)
 	if bodyCapture != nil {
 		t.Fatal("expected no body capture")
 	}
 	if requestInfo.Headers != nil {
 		t.Fatalf("headers = %#v, want nil", requestInfo.Headers)
+	}
+}
+
+func TestCaptureRequestInfoErrorOnlySkipsBodyHashing(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+
+	payload := strings.Repeat("x", int(maxLoggedRequestBodyBytes)+128)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	req.ContentLength = int64(len(payload))
+	c.Request = req
+
+	_, bodyCapture := captureRequestInfo(c, true, false, false)
+	if bodyCapture == nil {
+		t.Fatal("expected request body capture")
+	}
+
+	if _, err := io.ReadAll(c.Request.Body); err != nil {
+		t.Fatalf("ReadAll error: %v", err)
+	}
+	if err := c.Request.Body.Close(); err != nil {
+		t.Fatalf("Close error: %v", err)
+	}
+
+	override := string(bodyCapture.logBody())
+	if strings.Contains(override, "observed_sha256=") {
+		t.Fatalf("override = %q, did not expect observed hash in error-only mode", override)
 	}
 }
 

@@ -72,6 +72,8 @@ type RequestStatistics struct {
 	requestsByHour map[int]int64
 	tokensByDay    map[string]int64
 	tokensByHour   map[int]int64
+
+	importedAggregated *AggregatedUsageSnapshot
 }
 
 // apiStats holds aggregated metrics for a single API key.
@@ -389,6 +391,24 @@ func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot) MergeResu
 	}
 
 	return result
+}
+
+func (s *RequestStatistics) MergeImportedAggregatedSnapshot(snapshot AggregatedUsageSnapshot) {
+	if s == nil || len(snapshot.Windows) == 0 {
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	cloned := cloneAggregatedUsageSnapshot(snapshot)
+	if s.importedAggregated == nil {
+		s.importedAggregated = &cloned
+		return
+	}
+
+	merged := mergeAggregatedUsageSnapshot(*s.importedAggregated, cloned)
+	s.importedAggregated = &merged
 }
 
 func snapshotContainsDetails(snapshot StatisticsSnapshot) bool {

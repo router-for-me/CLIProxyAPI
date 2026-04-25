@@ -246,8 +246,11 @@ func TestPrepareCodexHTTPCallAppliesHeadersAndPreservesLogBody(t *testing.T) {
 	if got := call.prepared.httpReq.Header.Get("Content-Encoding"); got != "zstd" {
 		t.Fatalf("Content-Encoding = %q, want %q", got, "zstd")
 	}
-	if !bytes.Equal(call.requestLog.Body, rawJSON) {
-		t.Fatalf("requestLog.Body = %q, want %q", string(call.requestLog.Body), string(rawJSON))
+	if !bytes.Equal(call.requestLog.Body, call.prepared.body) {
+		t.Fatalf("requestLog.Body = %q, want prepared body %q", string(call.requestLog.Body), string(call.prepared.body))
+	}
+	if id := gjson.GetBytes(call.prepared.body, "client_metadata.x-codex-installation-id").String(); id == "" {
+		t.Fatalf("prepared body should include client_metadata.x-codex-installation-id, got %s", call.prepared.body)
 	}
 	if got := call.requestLog.URL; got != "https://example.com/responses" {
 		t.Fatalf("requestLog.URL = %q, want %q", got, "https://example.com/responses")

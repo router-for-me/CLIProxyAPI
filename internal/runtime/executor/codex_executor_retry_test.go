@@ -58,6 +58,19 @@ func TestParseCodexRetryAfter(t *testing.T) {
 			t.Fatalf("expected nil for non-usage_limit_reached, got %v", *got)
 		}
 	})
+
+	t.Run("usage limit message try again at", func(t *testing.T) {
+		loc := time.FixedZone("UTC+8", 8*60*60)
+		now := time.Date(2026, time.May, 1, 19, 0, 0, 0, loc)
+		body := []byte(`{"error":{"message":"You've hit your usage limit. Upgrade to Plus to continue using Codex (https://chatgpt.com/explore/plus), or try again at May 1st, 2026 7:42 PM."}}`)
+		retryAfter := parseCodexRetryAfter(http.StatusTooManyRequests, body, now)
+		if retryAfter == nil {
+			t.Fatalf("expected retryAfter, got nil")
+		}
+		if *retryAfter != 42*time.Minute {
+			t.Fatalf("retryAfter = %v, want %v", *retryAfter, 42*time.Minute)
+		}
+	})
 }
 
 func TestNewCodexStatusErrTreatsCapacityAsRetryableRateLimit(t *testing.T) {
@@ -70,6 +83,26 @@ func TestNewCodexStatusErrTreatsCapacityAsRetryableRateLimit(t *testing.T) {
 	}
 	if err.RetryAfter() != nil {
 		t.Fatalf("expected nil explicit retryAfter for capacity fallback, got %v", *err.RetryAfter())
+	}
+}
+
+func TestParseCodexWebsocketErrorInfersUsageLimitStatus(t *testing.T) {
+	payload := []byte(`{"type":"error","error":{"message":"You've hit your usage limit. Upgrade to Plus to continue using Codex.","resets_in_seconds":30}}`)
+
+	err, ok := parseCodexWebsocketError(payload)
+	if !ok {
+		t.Fatalf("expected websocket error to be detected")
+	}
+
+	statusProvider, ok := err.(interface{ StatusCode() int })
+	if !ok {
+		t.Fatalf("expected status provider")
+	}
+	if got := statusProvider.StatusCode(); got != http.StatusTooManyRequests {
+		t.Fatalf("status code = %d, want %d", got, http.StatusTooManyRequests)
+	}
+	if rap, ok := err.(interface{ RetryAfter() *time.Duration }); !ok || rap.RetryAfter() == nil {
+		t.Fatalf("expected retryAfter to be inferred")
 	}
 }
 

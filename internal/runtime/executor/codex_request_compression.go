@@ -14,7 +14,11 @@ import (
 const codexCompressionEnv = "CODEX_ENABLE_ZSTD_REQUEST_COMPRESSION"
 
 func maybeEnableCodexRequestCompression(req *http.Request, auth *cliproxyauth.Auth) error {
-	if req == nil || req.Body == nil || codexIsAPIKeyAuth(auth) || !codexRequestCompressionEnabled() {
+	return maybeEnableCodexRequestCompressionWithBody(req, auth, nil)
+}
+
+func maybeEnableCodexRequestCompressionWithBody(req *http.Request, auth *cliproxyauth.Auth, body []byte) error {
+	if req == nil || codexIsAPIKeyAuth(auth) || !codexRequestCompressionEnabled() {
 		return nil
 	}
 	if encoding := strings.TrimSpace(req.Header.Get("Content-Encoding")); encoding != "" {
@@ -24,55 +28,50 @@ func maybeEnableCodexRequestCompression(req *http.Request, auth *cliproxyauth.Au
 		return nil
 	}
 
-	body, err := io.ReadAll(req.Body)
-	if err != nil {
-		return err
-	}
-	if errClose := req.Body.Close(); errClose != nil {
-		return errClose
-	}
-
-	var payload []byte
-	if len(body) == 0 {
-		payload = body
-	} else {
-		var compressed bytes.Buffer
-		encoder, errEncoder := zstd.NewWriter(&compressed, zstd.WithEncoderLevel(zstd.SpeedFastest))
-		if errEncoder != nil {
-			req.Body = io.NopCloser(bytes.NewReader(body))
-			req.ContentLength = int64(len(body))
-			req.GetBody = func() (io.ReadCloser, error) {
-				return io.NopCloser(bytes.NewReader(body)), nil
-			}
-			return errEncoder
+	payload := body
+	if payload == nil {
+		if req.Body == nil {
+			return nil
 		}
-		if _, errWrite := encoder.Write(body); errWrite != nil {
-			_ = encoder.Close()
-			req.Body = io.NopCloser(bytes.NewReader(body))
-			req.ContentLength = int64(len(body))
-			req.GetBody = func() (io.ReadCloser, error) {
-				return io.NopCloser(bytes.NewReader(body)), nil
-			}
-			return errWrite
+		readBody, err := io.ReadAll(req.Body)
+		if err != nil {
+			return err
 		}
-		if errClose := encoder.Close(); errClose != nil {
-			req.Body = io.NopCloser(bytes.NewReader(body))
-			req.ContentLength = int64(len(body))
-			req.GetBody = func() (io.ReadCloser, error) {
-				return io.NopCloser(bytes.NewReader(body)), nil
-			}
+		if errClose := req.Body.Close(); errClose != nil {
 			return errClose
 		}
-		payload = compressed.Bytes()
-		req.Header.Set("Content-Encoding", "zstd")
+		payload = readBody
 	}
 
-	req.Body = io.NopCloser(bytes.NewReader(payload))
-	req.ContentLength = int64(len(payload))
-	req.GetBody = func() (io.ReadCloser, error) {
-		return io.NopCloser(bytes.NewReader(payload)), nil
+	if len(payload) == 0 {
+		codexResetRequestBody(req, payload)
+		return nil
 	}
+
+	compressed, err := compressCodexRequestBody(payload)
+	if err != nil {
+		codexResetRequestBody(req, payload)
+		return err
+	}
+	req.Header.Set("Content-Encoding", "zstd")
+	codexResetRequestBody(req, compressed)
 	return nil
+}
+
+func compressCodexRequestBody(body []byte) ([]byte, error) {
+	var compressed bytes.Buffer
+	encoder, err := zstd.NewWriter(&compressed, zstd.WithEncoderLevel(zstd.SpeedFastest))
+	if err != nil {
+		return nil, err
+	}
+	if _, errWrite := encoder.Write(body); errWrite != nil {
+		_ = encoder.Close()
+		return nil, errWrite
+	}
+	if errClose := encoder.Close(); errClose != nil {
+		return nil, errClose
+	}
+	return compressed.Bytes(), nil
 }
 
 func codexRequestCompressionEnabled() bool {

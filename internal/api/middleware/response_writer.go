@@ -85,7 +85,8 @@ func (w *ResponseWriterWrapper) Write(data []byte) (int, error) {
 		if w.firstChunkTimestamp.IsZero() {
 			w.firstChunkTimestamp = time.Now()
 		}
-		w.streamWriter.WriteChunkAsync(bytes.Clone(data))
+		// The async writer copies chunks before queueing, so avoid a second clone here.
+		w.streamWriter.WriteChunkAsync(data)
 		return n, err
 	}
 

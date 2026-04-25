@@ -5,7 +5,7 @@ This guide explains how to extend the embedded proxy with custom providers and s
 - Register request/response translators for schema conversion
 - Register models so they appear in `/v1/models`
 
-The examples use Go 1.24+ and the v6 module path.
+The examples use Go 1.26+ and the v6 module path.
 
 ## Concepts
 
@@ -135,4 +135,3 @@ The embedded server calls this automatically for built‑in providers; for custo
 - Enable request logging: Management API GET/PUT `/v0/management/request-log`
 - Toggle debug logs: Management API GET/PUT `/v0/management/debug`
 - Hot reload changes in `config.yaml` and `auths/` are picked up automatically by the watcher
-

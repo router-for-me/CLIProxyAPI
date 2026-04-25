@@ -292,7 +292,10 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 			return e.CodexExecutor.Execute(ctx, auth, req, opts)
 		}
 		if respHS != nil && respHS.StatusCode > 0 {
-			return resp, statusErr{code: respHS.StatusCode, msg: string(bodyErr)}
+			return resp, statusErrWithHeaders{
+				statusErr: newCodexStatusErr(respHS.StatusCode, bodyErr),
+				headers:   respHS.Header.Clone(),
+			}
 		}
 		helps.RecordAPIWebsocketError(ctx, e.cfg, "dial", errDial)
 		return resp, errDial
@@ -442,7 +445,10 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			return e.CodexExecutor.ExecuteStream(ctx, auth, req, opts)
 		}
 		if respHS != nil && respHS.StatusCode > 0 {
-			return nil, statusErr{code: respHS.StatusCode, msg: string(bodyErr)}
+			return nil, statusErrWithHeaders{
+				statusErr: newCodexStatusErr(respHS.StatusCode, bodyErr),
+				headers:   respHS.Header.Clone(),
+			}
 		}
 		helps.RecordAPIWebsocketError(ctx, e.cfg, "dial", errDial)
 		prepared.unlockSession()
@@ -926,7 +932,7 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 	misc.EnsureHeader(headers, ginHeaders, "x-codex-turn-state", "")
 	codexEnsureTurnMetadataHeader(headers, ginHeaders)
 	misc.EnsureHeader(headers, ginHeaders, "x-responsesapi-include-timing-metrics", "")
-	misc.EnsureHeader(headers, ginHeaders, "Version", "")
+	misc.EnsureHeader(headers, ginHeaders, "Version", codexDefaultVersionHeader())
 	misc.EnsureHeader(headers, ginHeaders, "x-openai-subagent", "")
 	misc.EnsureHeader(headers, ginHeaders, "traceparent", "")
 	misc.EnsureHeader(headers, ginHeaders, "tracestate", "")
@@ -971,9 +977,6 @@ func codexHeaderDefaults(cfg *config.Config, auth *cliproxyauth.Auth) (string, s
 		return "", ""
 	}
 	userAgent := strings.TrimSpace(cfg.CodexHeaderDefaults.UserAgent)
-	if codexIsAPIKeyAuth(auth) {
-		return userAgent, ""
-	}
 	return userAgent, strings.TrimSpace(cfg.CodexHeaderDefaults.BetaFeatures)
 }
 
@@ -1040,31 +1043,67 @@ func parseCodexWebsocketError(payload []byte) (error, bool) {
 	if strings.TrimSpace(gjson.GetBytes(payload, "type").String()) != "error" {
 		return nil, false
 	}
-	status := int(gjson.GetBytes(payload, "status").Int())
-	if status == 0 {
-		status = int(gjson.GetBytes(payload, "status_code").Int())
-	}
+	out := normalizeCodexWebsocketErrorBody(payload)
+	status := parseCodexWebsocketErrorStatus(payload, out)
 	if status <= 0 {
-		return nil, false
-	}
-
-	out := []byte(`{}`)
-	if errNode := gjson.GetBytes(payload, "error"); errNode.Exists() {
-		raw := errNode.Raw
-		if errNode.Type == gjson.String {
-			raw = errNode.Raw
-		}
-		out, _ = sjson.SetRawBytes(out, "error", []byte(raw))
-	} else {
-		out, _ = sjson.SetBytes(out, "error.type", "server_error")
-		out, _ = sjson.SetBytes(out, "error.message", http.StatusText(status))
+		status = http.StatusInternalServerError
 	}
 
 	headers := parseCodexWebsocketErrorHeaders(payload)
+	err := newCodexStatusErr(status, out)
 	return statusErrWithHeaders{
-		statusErr: statusErr{code: status, msg: string(out)},
+		statusErr: err,
 		headers:   headers,
 	}, true
+}
+
+func normalizeCodexWebsocketErrorBody(payload []byte) []byte {
+	out := []byte(`{}`)
+	errNode := gjson.GetBytes(payload, "error")
+	switch {
+	case errNode.Exists() && errNode.IsObject():
+		out, _ = sjson.SetRawBytes(out, "error", []byte(errNode.Raw))
+	case errNode.Exists() && errNode.Type == gjson.String:
+		out, _ = sjson.SetBytes(out, "error.message", strings.TrimSpace(errNode.String()))
+	case errNode.Exists():
+		out, _ = sjson.SetBytes(out, "error.message", strings.TrimSpace(errNode.Raw))
+	}
+
+	if message := strings.TrimSpace(gjson.GetBytes(payload, "message").String()); message != "" &&
+		strings.TrimSpace(gjson.GetBytes(out, "error.message").String()) == "" {
+		out, _ = sjson.SetBytes(out, "error.message", message)
+	}
+
+	if errType := strings.TrimSpace(gjson.GetBytes(payload, "error_type").String()); errType != "" &&
+		strings.TrimSpace(gjson.GetBytes(out, "error.type").String()) == "" {
+		out, _ = sjson.SetBytes(out, "error.type", errType)
+	}
+
+	if strings.TrimSpace(gjson.GetBytes(out, "error.type").String()) == "" {
+		switch {
+		case isCodexUsageLimitError(out):
+			out, _ = sjson.SetBytes(out, "error.type", "usage_limit_reached")
+		default:
+			out, _ = sjson.SetBytes(out, "error.type", "server_error")
+		}
+	}
+	if strings.TrimSpace(gjson.GetBytes(out, "error.message").String()) == "" {
+		status := parseCodexWebsocketErrorStatus(payload, out)
+		if status <= 0 {
+			status = http.StatusInternalServerError
+		}
+		out, _ = sjson.SetBytes(out, "error.message", http.StatusText(status))
+	}
+	return out
+}
+
+func parseCodexWebsocketErrorStatus(payload []byte, normalizedBody []byte) int {
+	for _, path := range []string{"status", "status_code", "error.status", "error.status_code"} {
+		if status := int(gjson.GetBytes(payload, path).Int()); status > 0 {
+			return codexStatusCode(status, normalizedBody)
+		}
+	}
+	return codexStatusCode(0, normalizedBody)
 }
 
 func parseCodexWebsocketErrorHeaders(payload []byte) http.Header {

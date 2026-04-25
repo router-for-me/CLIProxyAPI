@@ -14,6 +14,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -176,8 +177,8 @@ func TestApplyCodexWebsocketHeadersDefaultsToCurrentResponsesBeta(t *testing.T) 
 	if got := headers.Get("User-Agent"); got != misc.CodexCLIUserAgent {
 		t.Fatalf("User-Agent = %s, want %s", got, misc.CodexCLIUserAgent)
 	}
-	if got := headers.Get("Version"); got != "" {
-		t.Fatalf("Version = %q, want empty", got)
+	if got := headers.Get("Version"); got != buildinfo.Version {
+		t.Fatalf("Version = %q, want %q", got, buildinfo.Version)
 	}
 	if got := headers.Get("x-codex-beta-features"); got != "" {
 		t.Fatalf("x-codex-beta-features = %q, want empty", got)
@@ -376,8 +377,8 @@ func TestApplyCodexWebsocketHeadersUsesConfigUserAgentForAPIKeyAuth(t *testing.T
 	if got := headers.Get("User-Agent"); got != "config-ua" {
 		t.Fatalf("User-Agent = %s, want %s", got, "config-ua")
 	}
-	if got := headers.Get("x-codex-beta-features"); got != "" {
-		t.Fatalf("x-codex-beta-features = %q, want empty", got)
+	if got := headers.Get("x-codex-beta-features"); got != "config-beta" {
+		t.Fatalf("x-codex-beta-features = %q, want config-beta", got)
 	}
 	if got := headers.Get("Originator"); got != codexOriginator {
 		t.Fatalf("Originator = %s, want %s", got, codexOriginator)
@@ -537,8 +538,17 @@ func TestApplyCodexHeadersUsesConfigUserAgentForAPIKeyAuth(t *testing.T) {
 	if got := req.Header.Get("User-Agent"); got != "config-ua" {
 		t.Fatalf("User-Agent = %s, want %s", got, "config-ua")
 	}
-	if got := req.Header.Get("x-codex-beta-features"); got != "" {
-		t.Fatalf("x-codex-beta-features = %q, want empty", got)
+	if got := req.Header.Get("x-codex-beta-features"); got != "config-beta" {
+		t.Fatalf("x-codex-beta-features = %q, want config-beta", got)
+	}
+	if got := req.Header.Get("Originator"); got != codexOriginator {
+		t.Fatalf("Originator = %q, want %q", got, codexOriginator)
+	}
+	if got := req.Header.Get("Version"); got != buildinfo.Version {
+		t.Fatalf("Version = %q, want %q", got, buildinfo.Version)
+	}
+	if got := req.Header.Get("Connection"); got != "" {
+		t.Fatalf("Connection = %q, want empty", got)
 	}
 }
 
@@ -556,8 +566,8 @@ func TestApplyCodexHeadersDoesNotInjectClientOnlyHeadersByDefault(t *testing.T) 
 	if got := req.Header.Get("Originator"); got != codexOriginator {
 		t.Fatalf("Originator = %q, want %q", got, codexOriginator)
 	}
-	if got := req.Header.Get("Version"); got != "" {
-		t.Fatalf("Version = %q, want empty", got)
+	if got := req.Header.Get("Version"); got != buildinfo.Version {
+		t.Fatalf("Version = %q, want %q", got, buildinfo.Version)
 	}
 	assertGeneratedCodexTurnMetadata(t, req.Header.Get("X-Codex-Turn-Metadata"))
 	if got := req.Header.Get("Session_id"); got == "" {

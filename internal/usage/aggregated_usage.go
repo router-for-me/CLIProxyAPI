@@ -77,6 +77,7 @@ type AggregatedUsageLatencySeriesSet struct {
 type AggregatedUsageLatencySeries struct {
 	Timestamps []time.Time `json:"timestamps"`
 	Values     []*float64  `json:"values"`
+	Counts     []int64     `json:"counts,omitempty"`
 }
 
 type AggregatedUsageCostBasisSeriesSet struct {
@@ -290,6 +291,10 @@ func (s *RequestStatistics) AggregatedUsageSnapshot(now time.Time) AggregatedUsa
 		if acc := accumulators[cfg.key]; acc != nil {
 			result.Windows[cfg.key] = acc.build()
 		}
+	}
+
+	if s.importedAggregated != nil {
+		result = mergeAggregatedUsageSnapshot(result, *s.importedAggregated)
 	}
 
 	return result
@@ -691,6 +696,7 @@ func (a *aggregatedUsageWindowAccumulator) buildDayTokenBreakdownSeries(source m
 func (a *aggregatedUsageWindowAccumulator) buildBoundedLatencySeries(source map[time.Time]LatencyStats, start time.Time, step time.Duration, count int) AggregatedUsageLatencySeries {
 	timestamps := buildBoundedTimestamps(start, step, count)
 	values := make([]*float64, len(timestamps))
+	counts := make([]int64, len(timestamps))
 	for idx, ts := range timestamps {
 		stats := source[ts]
 		if stats.Count <= 0 {
@@ -698,16 +704,19 @@ func (a *aggregatedUsageWindowAccumulator) buildBoundedLatencySeries(source map[
 		}
 		avg := float64(stats.TotalMs) / float64(stats.Count)
 		values[idx] = &avg
+		counts[idx] = stats.Count
 	}
 	return AggregatedUsageLatencySeries{
 		Timestamps: timestamps,
 		Values:     values,
+		Counts:     counts,
 	}
 }
 
 func (a *aggregatedUsageWindowAccumulator) buildDayLatencySeries(source map[time.Time]LatencyStats) AggregatedUsageLatencySeries {
 	timestamps := a.buildDayTimestamps()
 	values := make([]*float64, len(timestamps))
+	counts := make([]int64, len(timestamps))
 	for idx, ts := range timestamps {
 		stats := source[ts]
 		if stats.Count <= 0 {
@@ -715,10 +724,12 @@ func (a *aggregatedUsageWindowAccumulator) buildDayLatencySeries(source map[time
 		}
 		avg := float64(stats.TotalMs) / float64(stats.Count)
 		values[idx] = &avg
+		counts[idx] = stats.Count
 	}
 	return AggregatedUsageLatencySeries{
 		Timestamps: timestamps,
 		Values:     values,
+		Counts:     counts,
 	}
 }
 

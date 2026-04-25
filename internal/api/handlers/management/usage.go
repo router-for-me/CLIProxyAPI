@@ -21,8 +21,9 @@ type usageExportPayload struct {
 }
 
 type usageImportPayload struct {
-	Version int                      `json:"version"`
-	Usage   usage.StatisticsSnapshot `json:"usage"`
+	Version    int                            `json:"version"`
+	Usage      usage.StatisticsSnapshot       `json:"usage"`
+	Aggregated *usage.AggregatedUsageSnapshot `json:"aggregated,omitempty"`
 }
 
 // GetUsageStatistics returns a lightweight in-memory statistics snapshot for dashboards.
@@ -134,6 +135,9 @@ func (h *Handler) ImportUsageStatistics(c *gin.Context) {
 	}
 
 	result := h.usageStats.MergeSnapshot(payload.Usage)
+	if payload.Aggregated != nil {
+		h.usageStats.MergeImportedAggregatedSnapshot(*payload.Aggregated)
+	}
 	snapshot := h.usageStats.SnapshotSummary()
 	c.JSON(http.StatusOK, gin.H{
 		"added":           result.Added,

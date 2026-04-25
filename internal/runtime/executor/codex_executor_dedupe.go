@@ -45,6 +45,8 @@ type codexNonStreamHTTPResult struct {
 	headers       http.Header
 	body          []byte
 	completedData []byte
+	errorStatus   int
+	errorBody     []byte
 }
 
 func (e *CodexExecutor) prepareCodexRequest(ctx context.Context, from sdktranslator.Format, url string, req cliproxyexecutor.Request, rawJSON []byte) (codexPreparedRequest, error) {
@@ -256,7 +258,7 @@ func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Form
 func (e *CodexExecutor) fetchCodexNonStreamResponse(ctx context.Context, auth *cliproxyauth.Auth, url string, prepared codexPreparedRequest) (codexNonStreamHTTPResult, bool, error) {
 	key := e.codexResponseDedupeKey(auth, url, prepared)
 	result, executed, shared, err := e.responseDedupe.Do(ctx, key, func() (codexNonStreamHTTPResult, error) {
-		httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+		httpClient := helps.NewCodexFingerprintHTTPClient(ctx, e.cfg, auth, 0)
 		httpResp, errDo := httpClient.Do(prepared.httpReq)
 		if errDo != nil {
 			return codexNonStreamHTTPResult{}, errDo
@@ -295,7 +297,7 @@ func (e *CodexExecutor) fetchCodexResponsesAggregate(ctx context.Context, auth *
 	key := e.codexResponseDedupeKey(auth, url, prepared)
 	captureBody := e.cfg != nil && e.cfg.RequestLog
 	result, executed, shared, err := e.responseDedupe.Do(ctx, key, func() (codexNonStreamHTTPResult, error) {
-		httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+		httpClient := helps.NewCodexFingerprintHTTPClient(ctx, e.cfg, auth, 0)
 		httpResp, errDo := httpClient.Do(prepared.httpReq)
 		if errDo != nil {
 			return codexNonStreamHTTPResult{}, errDo
@@ -385,14 +387,18 @@ func (e *CodexExecutor) codexResponseDedupeScope(auth *cliproxyauth.Auth) string
 
 func (result codexNonStreamHTTPResult) clone() codexNonStreamHTTPResult {
 	cloned := codexNonStreamHTTPResult{
-		statusCode: result.statusCode,
-		headers:    result.headers.Clone(),
+		statusCode:  result.statusCode,
+		headers:     result.headers.Clone(),
+		errorStatus: result.errorStatus,
 	}
 	if len(result.body) > 0 {
 		cloned.body = bytes.Clone(result.body)
 	}
 	if len(result.completedData) > 0 {
 		cloned.completedData = bytes.Clone(result.completedData)
+	}
+	if len(result.errorBody) > 0 {
+		cloned.errorBody = bytes.Clone(result.errorBody)
 	}
 	return cloned
 }
@@ -428,6 +434,10 @@ func collectCodexResponseAggregateWithIdleTimeout(body io.Reader, captureBody bo
 			return nil
 		}
 		eventType := codexEventType(eventData)
+		if terminalErr, ok := parseCodexStreamTerminalError(eventType, eventData); ok {
+			result.errorStatus = terminalErr.code
+			result.errorBody = []byte(terminalErr.msg)
+		}
 		switch eventType {
 		case "response.incomplete":
 			reason := gjson.GetBytes(eventData, "response.incomplete_details.reason").String()

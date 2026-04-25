@@ -10,7 +10,7 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-func TestCodexApplyHTTPClientMetadataSkipsAPIKeyByDefault(t *testing.T) {
+func TestCodexApplyHTTPClientMetadataIncludesAPIKeyDefault(t *testing.T) {
 	body := []byte(`{"model":"gpt-5-codex","input":[]}`)
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, "https://example.com/responses", bytes.NewReader(body))
 	if err != nil {
@@ -20,8 +20,8 @@ func TestCodexApplyHTTPClientMetadataSkipsAPIKeyByDefault(t *testing.T) {
 
 	got := codexApplyHTTPClientMetadata(body, req, auth, nil)
 
-	if !bytes.Equal(got, body) {
-		t.Fatalf("API-key request body changed by default: got %s", got)
+	if id := gjson.GetBytes(got, "client_metadata.x-codex-installation-id").String(); id == "" {
+		t.Fatalf("API-key request should include client_metadata.x-codex-installation-id, got %s", got)
 	}
 }
 
@@ -55,7 +55,7 @@ func TestCodexApplyHTTPClientMetadataHonorsExistingAPIKeyClientMetadata(t *testi
 	}
 }
 
-func TestCodexApplyWebsocketClientMetadataSkipsGeneratedAPIKeyHeadersByDefault(t *testing.T) {
+func TestCodexApplyWebsocketClientMetadataIncludesAPIKeyDefault(t *testing.T) {
 	body := []byte(`{"model":"gpt-5-codex","input":[]}`)
 	headers := http.Header{}
 	headers.Set("Session_id", "session-1")
@@ -64,8 +64,11 @@ func TestCodexApplyWebsocketClientMetadataSkipsGeneratedAPIKeyHeadersByDefault(t
 
 	got := codexApplyWebsocketClientMetadata(context.Background(), body, headers, auth, nil)
 
-	if !bytes.Equal(got, body) {
-		t.Fatalf("API-key websocket body changed from generated headers: got %s", got)
+	if id := gjson.GetBytes(got, "client_metadata.x-codex-installation-id").String(); id == "" {
+		t.Fatalf("API-key websocket body should include installation metadata, got %s", got)
+	}
+	if windowID := gjson.GetBytes(got, "client_metadata.x-codex-window-id").String(); windowID != "session-1:0" {
+		t.Fatalf("client_metadata.x-codex-window-id = %q, want session-1:0; body=%s", windowID, got)
 	}
 }
 

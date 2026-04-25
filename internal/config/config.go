@@ -158,9 +158,8 @@ type ClaudeHeaderDefaults struct {
 // CodexHeaderDefaults configures default header values injected into Codex
 // requests. UserAgent applies to both auth-file and codex-api-key HTTP/websocket
 // requests and overrides generated or credential-provided defaults when set.
-// BetaFeatures applies to non-api-key Codex HTTP and websocket requests when
-// configured. API-key requests only forward caller-supplied beta headers to
-// preserve compatibility with OpenAI-compatible endpoints.
+// BetaFeatures applies to both auth-file and codex-api-key Codex HTTP/websocket
+// requests when configured.
 type CodexHeaderDefaults struct {
 	UserAgent      string `yaml:"user-agent" json:"user-agent"`
 	BetaFeatures   string `yaml:"beta-features" json:"beta-features"`

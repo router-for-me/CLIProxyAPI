@@ -53,9 +53,6 @@ func codexApplyHTTPClientMetadata(body []byte, req *http.Request, auth *cliproxy
 		return body
 	}
 	source := codexGinHeadersFromContext(req.Context())
-	if !codexShouldApplyClientMetadata(body, source, auth, cfg) {
-		return body
-	}
 	return codexSetClientMetadataString(
 		body,
 		codexClientMetadataInstallationID,
@@ -70,9 +67,6 @@ func codexApplyWebsocketClientMetadata(ctx context.Context, body []byte, headers
 	}
 
 	source := codexGinHeadersFromContext(ctx)
-	if !codexShouldApplyClientMetadata(body, source, auth, cfg) {
-		return body
-	}
 	body = codexSetClientMetadataString(body, codexClientMetadataInstallationID, codexResolvedInstallationID(headers, source, auth, cfg), false)
 	body = codexSetClientMetadataString(body, codexClientMetadataWindowID, firstNonEmptyHeaderValue(headers, source, codexHeaderWindowID), false)
 	body = codexSetClientMetadataString(body, codexClientMetadataSubagent, firstNonEmptyHeaderValue(headers, source, "X-OpenAI-Subagent"), false)
@@ -89,48 +83,6 @@ func codexApplyWebsocketClientMetadata(ctx context.Context, body []byte, headers
 		}
 	}
 	return body
-}
-
-func codexShouldApplyClientMetadata(body []byte, source http.Header, auth *cliproxyauth.Auth, cfg *config.Config) bool {
-	if !codexIsAPIKeyAuth(auth) {
-		return true
-	}
-	metadata := gjson.GetBytes(body, "client_metadata")
-	if metadata.Exists() && metadata.IsObject() {
-		return true
-	}
-	return codexExplicitClientMetadataRequested(source, auth, cfg)
-}
-
-func codexExplicitClientMetadataRequested(source http.Header, auth *cliproxyauth.Auth, cfg *config.Config) bool {
-	for _, header := range []string{
-		codexHeaderInstallationID,
-		codexHeaderWindowID,
-		codexHeaderParentThreadID,
-		codexHeaderMemgenRequest,
-		codexHeaderTurnMetadata,
-		"X-OpenAI-Subagent",
-		"Traceparent",
-		"Tracestate",
-	} {
-		if source != nil && strings.TrimSpace(source.Get(header)) != "" {
-			return true
-		}
-		if codexAuthStringValue(auth, []string{"header:" + header, "header:" + strings.ToLower(header)}) != "" {
-			return true
-		}
-	}
-	if cfg != nil && strings.TrimSpace(cfg.CodexHeaderDefaults.InstallationID) != "" {
-		return true
-	}
-	if codexAuthStringValue(auth, []string{
-		"x-codex-installation-id",
-		"installation_id",
-		"codex_installation_id",
-	}) != "" {
-		return true
-	}
-	return strings.TrimSpace(os.Getenv("CODEX_INSTALLATION_ID")) != ""
 }
 
 func codexEnsureResponsesIdentityHeaders(target http.Header, source http.Header) {

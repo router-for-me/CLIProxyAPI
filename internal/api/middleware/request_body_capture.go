@@ -24,7 +24,7 @@ type capturedRequestBody struct {
 	complete      bool
 }
 
-func newCapturedRequestBody(c *gin.Context, info *RequestInfo, limit int64) *capturedRequestBody {
+func newCapturedRequestBody(c *gin.Context, info *RequestInfo, limit int64, hashBody bool) *capturedRequestBody {
 	if c == nil || c.Request == nil || c.Request.Body == nil || info == nil {
 		return nil
 	}
@@ -34,7 +34,9 @@ func newCapturedRequestBody(c *gin.Context, info *RequestInfo, limit int64) *cap
 		info:          info,
 		limit:         limit,
 		declaredBytes: c.Request.ContentLength,
-		hasher:        sha256.New(),
+	}
+	if hashBody {
+		capture.hasher = sha256.New()
 	}
 	c.Request.Body = &capturedRequestReadCloser{
 		reader:  io.TeeReader(body, capture),
@@ -50,8 +52,10 @@ func (c *capturedRequestBody) Write(p []byte) (int, error) {
 	}
 
 	c.observedBytes += int64(len(p))
-	if _, err := c.hasher.Write(p); err != nil {
-		return 0, err
+	if c.hasher != nil {
+		if _, err := c.hasher.Write(p); err != nil {
+			return 0, err
+		}
 	}
 
 	c.capturePreview(p)
@@ -124,7 +128,10 @@ func (c *capturedRequestBody) summary() string {
 	if c.declaredBytes >= 0 {
 		summary += fmt.Sprintf(" declared_bytes=%d", c.declaredBytes)
 	}
-	return summary + " observed_sha256=" + hex.EncodeToString(c.hasher.Sum(nil))
+	if c.hasher != nil {
+		summary += " observed_sha256=" + hex.EncodeToString(c.hasher.Sum(nil))
+	}
+	return summary
 }
 
 type capturedRequestReadCloser struct {

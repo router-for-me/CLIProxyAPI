@@ -40,7 +40,7 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 		loggerEnabled := logger.IsEnabled()
 
 		// Capture request information
-		requestInfo, bodyCapture := captureRequestInfo(c, shouldCaptureRequestBody(loggerEnabled, c.Request), loggerEnabled)
+		requestInfo, bodyCapture := captureRequestInfo(c, shouldCaptureRequestBody(loggerEnabled, c.Request), loggerEnabled, loggerEnabled)
 
 		// Create response writer wrapper
 		wrapper := NewResponseWriterWrapper(c.Writer, logger, requestInfo)
@@ -104,7 +104,7 @@ func shouldCaptureRequestBody(loggerEnabled bool, req *http.Request) bool {
 // captureRequestInfo extracts relevant information from the incoming HTTP request.
 // When body capture is enabled, it wraps Request.Body so payload bytes are captured
 // incrementally as downstream handlers read them.
-func captureRequestInfo(c *gin.Context, captureBody bool, captureHeaders bool) (*RequestInfo, *capturedRequestBody) {
+func captureRequestInfo(c *gin.Context, captureBody bool, captureHeaders bool, hashBody bool) (*RequestInfo, *capturedRequestBody) {
 	// Capture URL with sensitive query parameters masked
 	maskedQuery := util.MaskSensitiveQuery(c.Request.URL.RawQuery)
 	url := c.Request.URL.Path
@@ -132,7 +132,7 @@ func captureRequestInfo(c *gin.Context, captureBody bool, captureHeaders bool) (
 		return requestInfo, nil
 	}
 
-	return requestInfo, newCapturedRequestBody(c, requestInfo, maxLoggedRequestBodyBytes)
+	return requestInfo, newCapturedRequestBody(c, requestInfo, maxLoggedRequestBodyBytes, hashBody)
 }
 
 func cloneHeaderValues(src http.Header) map[string][]string {

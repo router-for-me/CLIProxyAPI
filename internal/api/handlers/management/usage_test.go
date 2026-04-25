@@ -358,3 +358,73 @@ func TestExportDetailedUsageStatisticsIncludesDetails(t *testing.T) {
 		t.Fatalf("details len = %d, want 1", got)
 	}
 }
+
+func TestImportUsageStatisticsPreservesAggregatedSnapshot(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	sourceStats := usage.NewRequestStatistics()
+	now := time.Now().UTC()
+	sourceStats.Record(context.Background(), coreusage.Record{
+		APIKey:      "import-aggregate-test",
+		Model:       "gpt-5.4",
+		RequestedAt: now.Add(-20 * time.Minute),
+		Latency:     900 * time.Millisecond,
+		Detail: coreusage.Detail{
+			InputTokens:     11,
+			OutputTokens:    29,
+			ReasoningTokens: 3,
+			CachedTokens:    2,
+			TotalTokens:     45,
+		},
+	})
+
+	exportHandler := &Handler{usageStats: sourceStats}
+	exportRec := httptest.NewRecorder()
+	exportCtx, _ := gin.CreateTestContext(exportRec)
+	exportCtx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/usage/export", nil)
+	exportHandler.ExportUsageStatistics(exportCtx)
+
+	if exportRec.Code != http.StatusOK {
+		t.Fatalf("export status = %d, want %d, body=%s", exportRec.Code, http.StatusOK, exportRec.Body.String())
+	}
+
+	importStats := usage.NewRequestStatistics()
+	importHandler := &Handler{usageStats: importStats}
+	importRec := httptest.NewRecorder()
+	importCtx, _ := gin.CreateTestContext(importRec)
+	importCtx.Request = httptest.NewRequest(http.MethodPost, "/v0/management/usage/import", exportRec.Body)
+	importHandler.ImportUsageStatistics(importCtx)
+
+	if importRec.Code != http.StatusOK {
+		t.Fatalf("import status = %d, want %d, body=%s", importRec.Code, http.StatusOK, importRec.Body.String())
+	}
+
+	aggregatedRec := httptest.NewRecorder()
+	aggregatedCtx, _ := gin.CreateTestContext(aggregatedRec)
+	aggregatedCtx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/usage/aggregated", nil)
+	importHandler.GetAggregatedUsageStatistics(aggregatedCtx)
+
+	if aggregatedRec.Code != http.StatusOK {
+		t.Fatalf("aggregated status = %d, want %d, body=%s", aggregatedRec.Code, http.StatusOK, aggregatedRec.Body.String())
+	}
+
+	var payload struct {
+		Usage usage.AggregatedUsageSnapshot `json:"usage"`
+	}
+	if err := json.Unmarshal(aggregatedRec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal aggregated response: %v", err)
+	}
+
+	if got := payload.Usage.Windows["1h"].TotalRequests; got != 1 {
+		t.Fatalf("1h total_requests = %d, want 1", got)
+	}
+	if got := payload.Usage.Windows["all"].TotalRequests; got != 1 {
+		t.Fatalf("all total_requests = %d, want 1", got)
+	}
+	if got := payload.Usage.Windows["all"].TotalTokens; got != 45 {
+		t.Fatalf("all total_tokens = %d, want 45", got)
+	}
+	if got := payload.Usage.Windows["all"].Latency.Count; got != 1 {
+		t.Fatalf("all latency count = %d, want 1", got)
+	}
+}

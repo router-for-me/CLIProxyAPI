@@ -145,6 +145,78 @@ func TestCodexExecutorExecuteStreamStopsWhenContextCancelledWithoutDraining(t *t
 	}
 }
 
+func TestCodexExecutorExecuteStream_ResponseFailedBeforePayloadReturnsStatusErrorChunk(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"response.failed\",\"response\":{\"id\":\"resp_1\",\"error\":{\"type\":\"usage_limit_reached\",\"message\":\"You've hit your usage limit. Upgrade to Plus to continue using Codex.\",\"resets_in_seconds\":30}}}\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL,
+		"api_key":  "test",
+	}}
+
+	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.4-mini",
+		Payload: []byte(`{"model":"gpt-5.4-mini","input":"Say ok"}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+		Stream:       true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+
+	chunk, ok := <-result.Chunks
+	if !ok {
+		t.Fatal("expected first chunk")
+	}
+	if chunk.Err == nil {
+		t.Fatalf("expected error chunk, got payload=%q", string(chunk.Payload))
+	}
+	statusProvider, ok := chunk.Err.(interface{ StatusCode() int })
+	if !ok {
+		t.Fatalf("expected status provider, got %T", chunk.Err)
+	}
+	if got := statusProvider.StatusCode(); got != http.StatusTooManyRequests {
+		t.Fatalf("status code = %d, want %d", got, http.StatusTooManyRequests)
+	}
+}
+
+func TestCodexExecutorExecute_ResponseFailedAggregateReturnsStatusError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"response.failed\",\"response\":{\"id\":\"resp_1\",\"error\":{\"message\":\"You've hit your usage limit. Upgrade to Plus to continue using Codex.\",\"resets_in_seconds\":30}}}\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL,
+		"api_key":  "test",
+	}}
+
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.4-mini",
+		Payload: []byte(`{"model":"gpt-5.4-mini","messages":[{"role":"user","content":"Say ok"}]}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+	})
+	if err == nil {
+		t.Fatal("expected Execute error")
+	}
+
+	statusProvider, ok := err.(interface{ StatusCode() int })
+	if !ok {
+		t.Fatalf("expected status provider, got %T", err)
+	}
+	if got := statusProvider.StatusCode(); got != http.StatusTooManyRequests {
+		t.Fatalf("status code = %d, want %d", got, http.StatusTooManyRequests)
+	}
+}
+
 func TestPatchCodexCompletedOutputRecoversFunctionCall(t *testing.T) {
 	streamState := newCodexStreamCompletionState()
 	streamState.recordEvent([]byte(`{"type":"response.output_item.added","output_index":0,"item":{"id":"fc_item_1","type":"function_call","call_id":"call_1","name":"search"}}`))

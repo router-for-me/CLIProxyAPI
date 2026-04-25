@@ -80,3 +80,44 @@ func TestMaybeEnableCodexRequestCompression_SkipsAPIKeyAuth(t *testing.T) {
 		t.Fatalf("request body = %q, want %q", string(gotBody), string(body))
 	}
 }
+
+func TestMaybeEnableCodexRequestCompressionWithBody_UsesProvidedBody(t *testing.T) {
+	t.Setenv(codexCompressionEnv, "1")
+
+	body := []byte(`{"model":"gpt-5-codex","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"compress the prepared payload"}]}]}`)
+	req, err := http.NewRequest(http.MethodPost, "https://example.com/responses", bytes.NewReader([]byte(`{"stale":true}`)))
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	auth := &cliproxyauth.Auth{
+		Provider: "codex",
+		Metadata: map[string]any{"account_id": "acct_123"},
+	}
+
+	if err := maybeEnableCodexRequestCompressionWithBody(req, auth, body); err != nil {
+		t.Fatalf("maybeEnableCodexRequestCompressionWithBody() error = %v", err)
+	}
+	if got := req.Header.Get("Content-Encoding"); got != "zstd" {
+		t.Fatalf("Content-Encoding = %q, want zstd", got)
+	}
+
+	compressed, err := io.ReadAll(req.Body)
+	if err != nil {
+		t.Fatalf("ReadAll(req.Body) error = %v", err)
+	}
+	decoder, err := zstd.NewReader(bytes.NewReader(compressed))
+	if err != nil {
+		t.Fatalf("zstd.NewReader() error = %v", err)
+	}
+	defer decoder.Close()
+
+	decompressed, err := io.ReadAll(decoder)
+	if err != nil {
+		t.Fatalf("ReadAll(decoder) error = %v", err)
+	}
+	if string(decompressed) != string(body) {
+		t.Fatalf("decompressed body = %q, want %q", string(decompressed), string(body))
+	}
+}

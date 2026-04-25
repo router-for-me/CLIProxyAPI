@@ -5,7 +5,7 @@
 - 注册请求/响应翻译器进行协议转换
 - 注册模型以出现在 `/v1/models`
 
-示例基于 Go 1.24+ 与 v6 模块路径。
+示例基于 Go 1.26+ 与 v6 模块路径。
 
 ## 概念
 
@@ -128,4 +128,3 @@ cliproxy.GlobalModelRegistry().RegisterClient(authID, "myprov", models)
 - 启用请求日志：管理 API GET/PUT `/v0/management/request-log`
 - 切换调试日志：管理 API GET/PUT `/v0/management/debug`
 - 热更新：`config.yaml` 与 `auths/` 变化会自动被侦测并应用
-
