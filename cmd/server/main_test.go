@@ -19,14 +19,14 @@ func TestFilterBackgroundArgs(t *testing.T) {
 			want: []string{"--config", "config.yaml"},
 		},
 		{
-			name: "remove background value true",
+			name: "do not consume split bool token",
 			args: []string{"--background", "true", "--config", "config.yaml"},
-			want: []string{"--config", "config.yaml"},
+			want: []string{"true", "--config", "config.yaml"},
 		},
 		{
-			name: "remove background value false short form",
+			name: "do not consume split bool token short form",
 			args: []string{"-background", "f", "--config", "config.yaml"},
-			want: []string{"--config", "config.yaml"},
+			want: []string{"f", "--config", "config.yaml"},
 		},
 		{
 			name: "remove background equals syntax",
@@ -52,6 +52,53 @@ func TestFilterBackgroundArgs(t *testing.T) {
 			got := filterBackgroundArgs(tt.args)
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Fatalf("filterBackgroundArgs() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestHasSplitBackgroundBoolValue(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{
+			name: "detect split true",
+			args: []string{"--background", "true", "--config", "config.yaml"},
+			want: true,
+		},
+		{
+			name: "detect split short false",
+			args: []string{"-background", "f"},
+			want: true,
+		},
+		{
+			name: "no split when equals syntax",
+			args: []string{"--background=true", "--config", "config.yaml"},
+			want: false,
+		},
+		{
+			name: "no split when standalone flag",
+			args: []string{"--background", "--config", "config.yaml"},
+			want: false,
+		},
+		{
+			name: "no background",
+			args: []string{"--config", "config.yaml"},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := hasSplitBackgroundBoolValue(tt.args)
+			if got != tt.want {
+				t.Fatalf("hasSplitBackgroundBoolValue() = %v, want %v", got, tt.want)
 			}
 		})
 	}

@@ -56,6 +56,11 @@ func init() {
 func main() {
 	fmt.Printf("CLIProxyAPI Version: %s, Commit: %s, BuiltAt: %s\n", buildinfo.Version, buildinfo.Commit, buildinfo.BuildDate)
 
+	if hasSplitBackgroundBoolValue(os.Args[1:]) {
+		log.Error("invalid --background usage: split bool form is not supported, use --background or --background=true/false")
+		return
+	}
+
 	// Command-line flags to control the application's behavior.
 	var login bool
 	var codexLogin bool
@@ -602,9 +607,6 @@ func filterBackgroundArgs(args []string) []string {
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		if arg == "--background" || arg == "-background" {
-			if i+1 < len(args) && isBoolLikeFlagValue(args[i+1]) {
-				i++
-			}
 			continue
 		}
 		if strings.HasPrefix(arg, "--background=") || strings.HasPrefix(arg, "-background=") {
@@ -622,4 +624,15 @@ func isBoolLikeFlagValue(v string) bool {
 	default:
 		return false
 	}
+}
+
+func hasSplitBackgroundBoolValue(args []string) bool {
+	for i := 0; i < len(args)-1; i++ {
+		if args[i] == "--background" || args[i] == "-background" {
+			if isBoolLikeFlagValue(args[i+1]) {
+				return true
+			}
+		}
+	}
+	return false
 }
