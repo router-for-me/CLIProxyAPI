@@ -148,9 +148,12 @@ func responsesSSEFrameWithData(frame, payload []byte) []byte {
 		out.Write(line)
 		out.WriteByte('\n')
 	}
-	out.WriteString("data: ")
-	out.Write(payload)
-	out.WriteString("\n\n")
+	for _, line := range bytes.Split(payload, []byte("\n")) {
+		out.WriteString("data: ")
+		out.Write(line)
+		out.WriteByte('\n')
+	}
+	out.WriteByte('\n')
 	return out.Bytes()
 }
 
