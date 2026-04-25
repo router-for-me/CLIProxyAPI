@@ -199,6 +199,9 @@ func TestGetCircuitBreakerStatusSeparatesBackoffLevelAndConsecutiveFailures(t *t
 	if reopened.ConsecutiveFailures != 1 {
 		t.Fatalf("consecutiveFailures = %d, want 1 after half-open failure", reopened.ConsecutiveFailures)
 	}
+	if reopened.Provider != "openai" {
+		t.Fatalf("provider = %q, want %q", reopened.Provider, "openai")
+	}
 }
 
 func TestCircuitBreakerHalfOpenFailureOverflowSaturates(t *testing.T) {

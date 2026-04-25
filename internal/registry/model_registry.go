@@ -104,6 +104,7 @@ type failureTracker struct {
 
 // CircuitBreakerStatus describes the current circuit breaker state for a client-model pair.
 type CircuitBreakerStatus struct {
+	Provider            string              `json:"provider,omitempty"`
 	State               CircuitBreakerState `json:"state"`
 	FailureCount        int                 `json:"failureCount"`
 	ConsecutiveFailures int                 `json:"consecutiveFailures"`
@@ -1061,6 +1062,7 @@ func (r *ModelRegistry) GetCircuitBreakerStatus() map[string]map[string]CircuitB
 				result[clientID] = make(map[string]CircuitBreakerStatus)
 			}
 			status := CircuitBreakerStatus{
+				Provider:            r.clientProviders[clientID],
 				State:               tracker.State,
 				FailureCount:        tracker.FailureCount,
 				ConsecutiveFailures: tracker.Count,
