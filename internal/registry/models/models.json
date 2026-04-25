@@ -31,6 +31,48 @@
       }
     },
     {
+      "id": "claude-opus-4-7",
+      "object": "model",
+      "created": 1776988800,
+      "owned_by": "anthropic",
+      "type": "claude",
+      "display_name": "Claude 4.7 Opus",
+      "description": "Most capable Claude model with maximum intelligence and extended context",
+      "context_length": 1000000,
+      "max_completion_tokens": 128000,
+      "thinking": {
+        "min": 1024,
+        "max": 128000,
+        "zero_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "max"
+        ]
+      }
+    },
+    {
+      "id": "claude-sonnet-4-7",
+      "object": "model",
+      "created": 1776988800,
+      "owned_by": "anthropic",
+      "type": "claude",
+      "display_name": "Claude 4.7 Sonnet",
+      "context_length": 200000,
+      "max_completion_tokens": 64000,
+      "thinking": {
+        "min": 1024,
+        "max": 128000,
+        "zero_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    },
+    {
       "id": "claude-sonnet-4-6",
       "object": "model",
       "created": 1771372800,
@@ -1269,6 +1311,52 @@
           "xhigh"
         ]
       }
+    },
+    {
+      "id": "gpt-5.5",
+      "object": "model",
+      "created": 1776297600,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 5.5",
+      "version": "gpt-5.5",
+      "description": "Stable version of GPT 5.5, the latest frontier model.",
+      "context_length": 1050000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      }
+    },
+    {
+      "id": "gpt-5.5-codex",
+      "object": "model",
+      "created": 1776297600,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 5.5 Codex",
+      "version": "gpt-5.5",
+      "description": "GPT 5.5 Codex, optimized for coding and agentic tasks.",
+      "context_length": 1050000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      }
     }
   ],
   "codex-team": [
@@ -1352,6 +1440,52 @@
       "version": "gpt-5.4-mini",
       "description": "GPT-5.4 mini brings the strengths of GPT-5.4 to a faster, more efficient model designed for high-volume workloads.",
       "context_length": 400000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      }
+    },
+    {
+      "id": "gpt-5.5",
+      "object": "model",
+      "created": 1776297600,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 5.5",
+      "version": "gpt-5.5",
+      "description": "Stable version of GPT 5.5, the latest frontier model.",
+      "context_length": 1050000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      }
+    },
+    {
+      "id": "gpt-5.5-codex",
+      "object": "model",
+      "created": 1776297600,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 5.5 Codex",
+      "version": "gpt-5.5",
+      "description": "GPT 5.5 Codex, optimized for coding and agentic tasks.",
+      "context_length": 1050000,
       "max_completion_tokens": 128000,
       "supported_parameters": [
         "tools"
@@ -1482,6 +1616,52 @@
           "xhigh"
         ]
       }
+    },
+    {
+      "id": "gpt-5.5",
+      "object": "model",
+      "created": 1776297600,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 5.5",
+      "version": "gpt-5.5",
+      "description": "Stable version of GPT 5.5, the latest frontier model.",
+      "context_length": 1050000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      }
+    },
+    {
+      "id": "gpt-5.5-codex",
+      "object": "model",
+      "created": 1776297600,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 5.5 Codex",
+      "version": "gpt-5.5",
+      "description": "GPT 5.5 Codex, optimized for coding and agentic tasks.",
+      "context_length": 1050000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      }
     }
   ],
   "codex-pro": [
@@ -1588,6 +1768,52 @@
       "version": "gpt-5.4-mini",
       "description": "GPT-5.4 mini brings the strengths of GPT-5.4 to a faster, more efficient model designed for high-volume workloads.",
       "context_length": 400000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      }
+    },
+    {
+      "id": "gpt-5.5",
+      "object": "model",
+      "created": 1776297600,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 5.5",
+      "version": "gpt-5.5",
+      "description": "Stable version of GPT 5.5, the latest frontier model.",
+      "context_length": 1050000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      }
+    },
+    {
+      "id": "gpt-5.5-codex",
+      "object": "model",
+      "created": 1776297600,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 5.5 Codex",
+      "version": "gpt-5.5",
+      "description": "GPT 5.5 Codex, optimized for coding and agentic tasks.",
+      "context_length": 1050000,
       "max_completion_tokens": 128000,
       "supported_parameters": [
         "tools"
@@ -2020,6 +2246,53 @@
           "high"
         ]
       }
+    }
+  ],
+  "deepseek": [
+    {
+      "id": "deepseek-chat",
+      "object": "model",
+      "created": 1776297600,
+      "owned_by": "deepseek",
+      "type": "deepseek",
+      "display_name": "DeepSeek Chat",
+      "version": "v3",
+      "description": "DeepSeek V3, high-performance general-purpose model.",
+      "context_length": 1000000,
+      "max_completion_tokens": 32768,
+      "supported_parameters": [
+        "tools"
+      ]
+    },
+    {
+      "id": "deepseek-v4-flash",
+      "object": "model",
+      "created": 1776297600,
+      "owned_by": "deepseek",
+      "type": "deepseek",
+      "display_name": "DeepSeek V4 Flash",
+      "version": "v4-flash",
+      "description": "DeepSeek V4 Flash, fast and cost-effective for high-throughput tasks.",
+      "context_length": 1000000,
+      "max_completion_tokens": 32768,
+      "supported_parameters": [
+        "tools"
+      ]
+    },
+    {
+      "id": "deepseek-v4-pro",
+      "object": "model",
+      "created": 1776297600,
+      "owned_by": "deepseek",
+      "type": "deepseek",
+      "display_name": "DeepSeek V4 Pro",
+      "version": "v4-pro",
+      "description": "DeepSeek V4 Pro, latest generation flagship model.",
+      "context_length": 1000000,
+      "max_completion_tokens": 32768,
+      "supported_parameters": [
+        "tools"
+      ]
     }
   ]
 }

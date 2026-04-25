@@ -20,6 +20,7 @@ type staticModelsJSON struct {
 	IFlow       []*ModelInfo `json:"iflow"`
 	Kimi        []*ModelInfo `json:"kimi"`
 	Antigravity []*ModelInfo `json:"antigravity"`
+	DeepSeek    []*ModelInfo `json:"deepseek"`
 }
 
 // GetClaudeModels returns the standard Claude model definitions.
@@ -82,6 +83,11 @@ func GetAntigravityModels() []*ModelInfo {
 	return cloneModelInfos(getModels().Antigravity)
 }
 
+// GetDeepSeekModels returns the standard DeepSeek model definitions.
+func GetDeepSeekModels() []*ModelInfo {
+	return cloneModelInfos(getModels().DeepSeek)
+}
+
 // cloneModelInfos returns a shallow copy of the slice with each element deep-cloned.
 func cloneModelInfos(models []*ModelInfo) []*ModelInfo {
 	if len(models) == 0 {
@@ -128,6 +134,8 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetKimiModels()
 	case "antigravity":
 		return GetAntigravityModels()
+	case "deepseek":
+		return GetDeepSeekModels()
 	default:
 		return nil
 	}
@@ -151,6 +159,7 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		data.IFlow,
 		data.Kimi,
 		data.Antigravity,
+		data.DeepSeek,
 	}
 	for _, models := range allModels {
 		for _, m := range models {

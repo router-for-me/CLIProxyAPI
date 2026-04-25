@@ -12,6 +12,7 @@ import (
 	"os"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	log "github.com/sirupsen/logrus"
@@ -88,6 +89,9 @@ type Config struct {
 
 	// WebsocketAuth enables or disables authentication for the WebSocket API.
 	WebsocketAuth bool `yaml:"ws-auth" json:"ws-auth"`
+
+	// UnauthorizedBackup controls auto-backup of auth files that receive 401 errors.
+	UnauthorizedBackup UnauthorizedBackupConfig `yaml:"unauthorized-backup" json:"unauthorized-backup"`
 
 	// AntigravitySignatureCacheEnabled controls whether signature cache validation is enabled for thinking blocks.
 	// When true (default), cached signatures are preferred and validated.
@@ -209,6 +213,35 @@ type QuotaExceeded struct {
 	// AntigravityCredits indicates whether to retry Antigravity quota_exhausted 429s once
 	// on the same credential with enabledCreditTypes=["GOOGLE_ONE_AI"].
 	AntigravityCredits bool `yaml:"antigravity-credits" json:"antigravity-credits"`
+}
+
+// UnauthorizedBackupConfig controls automatic backup of auth files that receive 401 errors.
+type UnauthorizedBackupConfig struct {
+	// Enabled toggles the 401-bak auto-backup feature. Default: true.
+	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	// ScanInterval specifies how often to scan for unauthorized auth files.
+	// Default: "10m". Accepts duration strings like "5m", "30m", "1h".
+	ScanInterval string `yaml:"scan-interval,omitempty" json:"scan-interval,omitempty"`
+}
+
+// IsEnabled returns whether unauthorized backup is enabled (defaults to true).
+func (c UnauthorizedBackupConfig) IsEnabled() bool {
+	if c.Enabled == nil {
+		return true
+	}
+	return *c.Enabled
+}
+
+// GetScanInterval parses ScanInterval or returns the default of 10 minutes.
+func (c UnauthorizedBackupConfig) GetScanInterval() time.Duration {
+	if c.ScanInterval == "" {
+		return 10 * time.Minute
+	}
+	d, err := time.ParseDuration(c.ScanInterval)
+	if err != nil || d <= 0 {
+		return 10 * time.Minute
+	}
+	return d
 }
 
 // RoutingConfig configures how credentials are selected for requests.

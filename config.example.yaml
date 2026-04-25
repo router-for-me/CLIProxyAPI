@@ -114,6 +114,14 @@ routing:
 # When true, enable authentication for the WebSocket API (/v1/ws).
 ws-auth: false
 
+# Unauthorized (401) auth file auto-backup
+# When enabled, auth files that receive 401 errors are automatically moved
+# to a "401-bak" subdirectory under auth-dir.
+# A periodic scan also archives any lingering unauthorized entries.
+# unauthorized-backup:
+#   enabled: true           # default: true
+#   scan-interval: "10m"    # default: "10m"
+
 # When true, enable Gemini CLI internal endpoints (/v1internal:*).
 # Default is false for safety.
 enable-gemini-cli-endpoint: false
@@ -254,6 +262,22 @@ nonstream-keepalive-interval: 0
 #         alias: "claude-opus-4.66"
 #       - name: "kimi-k2.5"
 #         alias: "claude-opus-4.66"
+#
+#   # DeepSeek integration example — uses the OpenAI-compatible API format.
+#   # DeepSeek API is fully compatible with the OpenAI chat/completions endpoint.
+#   # Streaming, tool calling, and reasoning effort are supported natively.
+#   - name: "deepseek"
+#     base-url: "https://api.deepseek.com/v1"
+#     api-key-entries:
+#       - api-key: "sk-..."
+#     models:
+#       - name: "deepseek-chat"
+#         alias: "deepseek-v3"
+#       - name: "deepseek-reasoner"
+#         alias: "deepseek-r1"
+#         thinking:
+#           min: 1
+#           max: 131072
 
 # Vertex API keys (Vertex-compatible endpoints, base-url is optional)
 # vertex-api-key:
