@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	. "github.com/router-for-me/CLIProxyAPI/v6/internal/constant"
@@ -228,6 +229,7 @@ func (h *ClaudeCodeAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON [
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 
 	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "")
+	lifecycle := newClaudeStreamLifecycle()
 	setSSEHeaders := func() {
 		c.Header("Content-Type", "text/event-stream")
 		c.Header("Cache-Control", "no-cache")
@@ -247,8 +249,9 @@ func (h *ClaudeCodeAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON [
 				errChan = nil
 				continue
 			}
-			// Upstream failed immediately. Return proper error status and JSON.
-			h.WriteErrorResponse(c, errMsg)
+			// Upstream failed before the first chunk. Claude clients expect
+			// Anthropic-style JSON errors here, not the generic OpenAI shape.
+			h.writeClaudeBootstrapErrorResponse(c, errMsg)
 			if errMsg != nil {
 				cliCancel(errMsg.Error)
 			} else {
@@ -271,26 +274,71 @@ func (h *ClaudeCodeAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON [
 
 			// Write the first chunk
 			if len(chunk) > 0 {
+				lifecycle.ObserveChunk(chunk)
 				_, _ = c.Writer.Write(chunk)
 				flusher.Flush()
 			}
 
 			// Continue streaming the rest
-			h.forwardClaudeStream(c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan)
+			h.forwardClaudeStream(c, flusher, func(err error) { cliCancel(err) }, lifecycle, dataChan, errChan)
 			return
 		}
 	}
 }
 
-func (h *ClaudeCodeAPIHandler) forwardClaudeStream(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage) {
+func (h *ClaudeCodeAPIHandler) writeClaudeBootstrapErrorResponse(c *gin.Context, msg *interfaces.ErrorMessage) {
+	status := http.StatusInternalServerError
+	if msg != nil && msg.StatusCode > 0 {
+		status = msg.StatusCode
+	}
+	if msg != nil && msg.Addon != nil && handlers.PassthroughHeadersEnabled(h.Cfg) {
+		for key, values := range msg.Addon {
+			if len(values) == 0 {
+				continue
+			}
+			c.Writer.Header().Del(key)
+			for _, value := range values {
+				c.Writer.Header().Add(key, value)
+			}
+		}
+	}
+
+	errText := http.StatusText(status)
+	if msg != nil && msg.Error != nil {
+		if v := strings.TrimSpace(msg.Error.Error()); v != "" {
+			errText = v
+		}
+	}
+	body, err := json.Marshal(claudeErrorResponse{
+		Type: "error",
+		Error: claudeErrorDetail{
+			Type:    "api_error",
+			Message: errText,
+		},
+	})
+	if err != nil {
+		body = []byte(`{"type":"error","error":{"type":"api_error","message":"` + http.StatusText(status) + `"}}`)
+	}
+	c.Set("API_RESPONSE", body)
+	if !c.Writer.Written() {
+		c.Writer.Header().Set("Content-Type", "application/json")
+	}
+	c.Status(status)
+	_, _ = c.Writer.Write(body)
+}
+
+func (h *ClaudeCodeAPIHandler) forwardClaudeStream(c *gin.Context, flusher http.Flusher, cancel func(error), lifecycle *claudeStreamLifecycle, data <-chan []byte, errs <-chan *interfaces.ErrorMessage) {
 	h.ForwardStream(c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
+		ObserveChunk: func(chunk []byte) {
+			lifecycle.ObserveChunk(chunk)
+		},
 		WriteChunk: func(chunk []byte) {
 			if len(chunk) == 0 {
 				return
 			}
 			_, _ = c.Writer.Write(chunk)
 		},
-		WriteTerminalError: func(errMsg *interfaces.ErrorMessage) {
+		WriteTerminalError: func(errMsg *interfaces.ErrorMessage, _ handlers.StreamForwardState) {
 			if errMsg == nil {
 				return
 			}
@@ -300,8 +348,7 @@ func (h *ClaudeCodeAPIHandler) forwardClaudeStream(c *gin.Context, flusher http.
 			}
 			c.Status(status)
 
-			errorBytes, _ := json.Marshal(h.toClaudeError(errMsg))
-			_, _ = fmt.Fprintf(c.Writer, "event: error\ndata: %s\n\n", errorBytes)
+			_, _ = c.Writer.Write(lifecycle.BuildTerminalErrorFrames(h.toClaudeError(errMsg)))
 		},
 	})
 }

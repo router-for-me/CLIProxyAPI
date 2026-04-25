@@ -16,9 +16,12 @@ type StreamForwardOptions struct {
 	// WriteChunk writes a single data chunk to the response body. It should not flush.
 	WriteChunk func(chunk []byte)
 
+	// ObserveChunk receives each downstream chunk before it is written.
+	ObserveChunk func(chunk []byte)
+
 	// WriteTerminalError writes an error payload to the response body when streaming fails
 	// after headers have already been committed. It should not flush.
-	WriteTerminalError func(errMsg *interfaces.ErrorMessage)
+	WriteTerminalError func(errMsg *interfaces.ErrorMessage, state StreamForwardState)
 
 	// WriteDone optionally writes a terminal marker when the upstream data channel closes
 	// without an error (e.g. OpenAI's `[DONE]`). It should not flush.
@@ -27,6 +30,10 @@ type StreamForwardOptions struct {
 	// WriteKeepAlive optionally writes a keep-alive heartbeat. It should not flush.
 	// When nil, a standard SSE comment heartbeat is used.
 	WriteKeepAlive func()
+}
+
+type StreamForwardState struct {
+	ChunksWritten int
 }
 
 func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage, opts StreamForwardOptions) {
@@ -49,6 +56,8 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 		}
 	}
 
+	observeChunk := opts.ObserveChunk
+
 	keepAliveInterval := StreamingKeepAliveInterval(h.Cfg)
 	if opts.KeepAliveInterval != nil {
 		keepAliveInterval = *opts.KeepAliveInterval
@@ -62,6 +71,7 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 	}
 
 	var terminalErr *interfaces.ErrorMessage
+	var state StreamForwardState
 	for {
 		select {
 		case <-c.Request.Context().Done():
@@ -81,7 +91,7 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 				}
 				if terminalErr != nil {
 					if opts.WriteTerminalError != nil {
-						opts.WriteTerminalError(terminalErr)
+						opts.WriteTerminalError(terminalErr, state)
 					}
 					flusher.Flush()
 					cancel(terminalErr.Error)
@@ -94,7 +104,13 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 				cancel(nil)
 				return
 			}
+			if observeChunk != nil {
+				observeChunk(chunk)
+			}
 			writeChunk(chunk)
+			if len(chunk) > 0 {
+				state.ChunksWritten++
+			}
 			flusher.Flush()
 		case errMsg, ok := <-errs:
 			if !ok {
@@ -103,7 +119,7 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 			if errMsg != nil {
 				terminalErr = errMsg
 				if opts.WriteTerminalError != nil {
-					opts.WriteTerminalError(errMsg)
+					opts.WriteTerminalError(errMsg, state)
 					flusher.Flush()
 				}
 			}

@@ -662,7 +662,7 @@ func (h *OpenAIAPIHandler) handleStreamResult(c *gin.Context, flusher http.Flush
 		WriteChunk: func(chunk []byte) {
 			_, _ = fmt.Fprintf(c.Writer, "data: %s\n\n", string(chunk))
 		},
-		WriteTerminalError: func(errMsg *interfaces.ErrorMessage) {
+		WriteTerminalError: func(errMsg *interfaces.ErrorMessage, _ handlers.StreamForwardState) {
 			if errMsg == nil {
 				return
 			}

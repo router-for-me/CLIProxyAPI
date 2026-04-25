@@ -208,7 +208,7 @@ func (h *GeminiCLIAPIHandler) forwardCLIStream(c *gin.Context, flusher http.Flus
 				_, _ = c.Writer.Write(chunk)
 			}
 		},
-		WriteTerminalError: func(errMsg *interfaces.ErrorMessage) {
+		WriteTerminalError: func(errMsg *interfaces.ErrorMessage, _ handlers.StreamForwardState) {
 			if errMsg == nil {
 				return
 			}

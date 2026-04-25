@@ -255,7 +255,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flush
 		WriteChunk: func(chunk []byte) {
 			writeResponsesSSEChunk(c.Writer, chunk)
 		},
-		WriteTerminalError: func(errMsg *interfaces.ErrorMessage) {
+		WriteTerminalError: func(errMsg *interfaces.ErrorMessage, _ handlers.StreamForwardState) {
 			if errMsg == nil {
 				return
 			}
