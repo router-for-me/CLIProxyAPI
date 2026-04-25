@@ -126,7 +126,7 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, false)
 	basePayload := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
 
-	basePayload, err = thinking.ApplyThinking(basePayload, req.Model, from.String(), to.String(), e.Identifier())
+	basePayload, err = thinking.ApplyThinking(basePayload, req.Model, from.String(), to.String(), e.Identifier(), defaultReasoningEffortOnMissing(e.cfg, e.Identifier(), to.String()))
 	if err != nil {
 		return resp, err
 	}
@@ -280,7 +280,7 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
 	basePayload := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
 
-	basePayload, err = thinking.ApplyThinking(basePayload, req.Model, from.String(), to.String(), e.Identifier())
+	basePayload, err = thinking.ApplyThinking(basePayload, req.Model, from.String(), to.String(), e.Identifier(), defaultReasoningEffortOnMissing(e.cfg, e.Identifier(), to.String()))
 	if err != nil {
 		return nil, err
 	}
@@ -487,7 +487,7 @@ func (e *GeminiCLIExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.
 	for range models {
 		payload := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
 
-		payload, err = thinking.ApplyThinking(payload, req.Model, from.String(), to.String(), e.Identifier())
+		payload, err = thinking.ApplyThinking(payload, req.Model, from.String(), to.String(), e.Identifier(), defaultReasoningEffortOnMissing(e.cfg, e.Identifier(), to.String()))
 		if err != nil {
 			return cliproxyexecutor.Response{}, err
 		}

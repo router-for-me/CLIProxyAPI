@@ -295,7 +295,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		}
 	}
 
-	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
+	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier(), defaultReasoningEffortOnMissing(e.cfg, e.Identifier(), to.String()))
 	if err != nil {
 		return resp, err
 	}
@@ -467,7 +467,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	requestedModel := payloadRequestedModel(opts, req.Model)
 	translated = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", translated, originalTranslated, requestedModel)
 
-	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
+	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier(), defaultReasoningEffortOnMissing(e.cfg, e.Identifier(), to.String()))
 	if err != nil {
 		return nil, err
 	}
@@ -549,6 +549,21 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		var param any
 		responsesOutput := from == sdktranslator.FormatOpenAIResponse
 		emittedCompleted := false
+		sawUpstreamDone := false
+		upstreamChunkCount := 0
+		upstreamBytes := 0
+		toleratedTransientTermination := false
+
+		markRetryableTermination := func(readErr error) bool {
+			if !isOpenAICompatRetryableNetworkError(readErr) {
+				return false
+			}
+			toleratedTransientTermination = true
+			wrappedErr := fmt.Errorf("openai compat executor stream: tolerated transient upstream termination after %d chunks (%d bytes): %w", upstreamChunkCount, upstreamBytes, readErr)
+			recordAPIResponseError(ctx, e.cfg, wrappedErr)
+			logWithRequestID(ctx).Warnf("openai compat executor stream: tolerated transient upstream termination after %d chunks (%d bytes): %v", upstreamChunkCount, upstreamBytes, readErr)
+			return true
+		}
 
 		// State capture for chat_fallback mode: intercept response.completed to store snapshot.
 		var capturedCompletedPayload []byte
@@ -577,6 +592,11 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			for {
 				frame, errRead := readCodexSSEFrame(reader)
 				if len(frame) > 0 {
+					upstreamChunkCount++
+					upstreamBytes += len(frame)
+					if payload := codexSSEPayload(frame); bytes.Equal(payload, []byte("[DONE]")) {
+						sawUpstreamDone = true
+					}
 					appendAPIResponseChunk(ctx, e.cfg, frame)
 					if detail, ok := parseOpenAIStreamUsage(frame); ok {
 						reporter.publish(ctx, detail)
@@ -590,6 +610,9 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 				if errRead == io.EOF {
 					break
 				}
+				if markRetryableTermination(errRead) {
+					break
+				}
 				recordAPIResponseError(ctx, e.cfg, errRead)
 				e.recordOpenAICompatFailure(auth, circuitModel)
 				reporter.publishFailure(ctx)
@@ -601,6 +624,10 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			scanner.Buffer(nil, 52_428_800) // 50MB
 			for scanner.Scan() {
 				line := scanner.Bytes()
+				if len(line) > 0 {
+					upstreamChunkCount++
+					upstreamBytes += len(line)
+				}
 				appendAPIResponseChunk(ctx, e.cfg, line)
 				if detail, ok := parseOpenAIStreamUsage(line); ok {
 					reporter.publish(ctx, detail)
@@ -612,6 +639,10 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 				if !bytes.HasPrefix(line, []byte("data:")) {
 					continue
 				}
+				payload := bytes.TrimSpace(line[len("data:"):])
+				if bytes.Equal(payload, []byte("[DONE]")) {
+					sawUpstreamDone = true
+				}
 
 				// OpenAI-compatible streams are SSE: lines typically prefixed with "data: ".
 				// Pass through translator; it yields one or more chunks for the target schema.
@@ -619,12 +650,23 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 				emitChunks(chunks)
 			}
 			if errScan := scanner.Err(); errScan != nil {
-				recordAPIResponseError(ctx, e.cfg, errScan)
-				e.recordOpenAICompatFailure(auth, circuitModel)
-				reporter.publishFailure(ctx)
-				out <- cliproxyexecutor.StreamChunk{Err: errScan}
-				return
+				if markRetryableTermination(errScan) {
+					// Treat transient upstream disconnects as graceful stream end to avoid
+					// surfacing unnecessary 500s to clients after partial output was delivered.
+				} else {
+					recordAPIResponseError(ctx, e.cfg, errScan)
+					e.recordOpenAICompatFailure(auth, circuitModel)
+					reporter.publishFailure(ctx)
+					out <- cliproxyexecutor.StreamChunk{Err: errScan}
+					return
+				}
 			}
+		}
+		if !responsesOutput && toleratedTransientTermination && !sawUpstreamDone {
+			// Best-effort terminal marker for OpenAI chat streams when upstream disconnected
+			// after partial output. This helps downstream clients close cleanly.
+			doneChunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, []byte("data: [DONE]"), &param)
+			emitChunks(doneChunks)
 		}
 		if responsesOutput && !emittedCompleted {
 			// EOF can happen before a finish_reason chunk. Flush DONE to force a terminal
@@ -689,7 +731,7 @@ func (e *OpenAICompatExecutor) CountTokens(ctx context.Context, auth *cliproxyau
 
 	modelForCounting := baseModel
 
-	translated, err := thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
+	translated, err := thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier(), defaultReasoningEffortOnMissing(e.cfg, e.Identifier(), to.String()))
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}

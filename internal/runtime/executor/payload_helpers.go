@@ -273,6 +273,10 @@ func payloadRequestedModel(opts cliproxyexecutor.Options, fallback string) strin
 	}
 }
 
+func defaultReasoningEffortOnMissing(cfg *config.Config, providerKey, toFormat string) string {
+	return ""
+}
+
 // matchModelPattern performs simple wildcard matching where '*' matches zero or more characters.
 // Examples:
 //

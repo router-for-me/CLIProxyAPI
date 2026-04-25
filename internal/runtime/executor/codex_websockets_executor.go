@@ -169,7 +169,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, false)
 	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
 
-	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
+	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier(), defaultReasoningEffortOnMissing(e.cfg, e.Identifier(), to.String()))
 	if err != nil {
 		return resp, err
 	}
@@ -382,7 +382,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	to := sdktranslator.FromString("codex")
 	body := req.Payload
 
-	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
+	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier(), defaultReasoningEffortOnMissing(e.cfg, e.Identifier(), to.String()))
 	if err != nil {
 		return nil, err
 	}
