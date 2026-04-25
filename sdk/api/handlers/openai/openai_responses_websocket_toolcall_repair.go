@@ -424,9 +424,13 @@ func isResponsesToolCallOutputType(itemType string) bool {
 // httpResponsesSessionKey derives a session key for HTTP requests.
 // It mirrors the WebSocket session key derivation by preferring request-level
 // identity headers (X-Client-Request-Id), then falling back to a hash of
-// model + previous_response_id. Using only the payload fields would cause
-// cache collisions between different users on first-turn requests (where
-// previous_response_id is empty).
+// model + previous_response_id.
+//
+// SECURITY: When no request-level identity is available (no headers and no
+// previous_response_id), we return an empty string so callers skip the shared
+// cache entirely. Without this, all first-turn requests for the same model
+// would share one cache namespace, enabling cross-user cache pollution and
+// tool-output leakage in multi-tenant deployments.
 func httpResponsesSessionKey(req *http.Request, payload []byte) string {
 	// Prefer an explicit request ID header if present (mirrors WebSocket behavior).
 	if sessionKey := websocketDownstreamSessionKey(req); sessionKey != "" {
@@ -435,6 +439,12 @@ func httpResponsesSessionKey(req *http.Request, payload []byte) string {
 	// Fall back to a hash of model + previous_response_id.
 	model := strings.TrimSpace(gjson.GetBytes(payload, "model").String())
 	prevRespID := strings.TrimSpace(gjson.GetBytes(payload, "previous_response_id").String())
+	// If previous_response_id is empty AND no request header is present,
+	// skip caching entirely to avoid cross-user namespace pollution on
+	// first-turn requests (where all users share the same model key).
+	if prevRespID == "" {
+		return ""
+	}
 	composite := model + "|" + prevRespID
 	hash := sha256.Sum256([]byte(composite))
 	return "http:" + hex.EncodeToString(hash[:16])
