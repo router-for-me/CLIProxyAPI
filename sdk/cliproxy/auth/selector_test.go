@@ -1359,3 +1359,314 @@ func TestSessionAffinitySelector_Concurrent(t *testing.T) {
 	default:
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Tests for prompt_cache_key, header variants, and priority ordering
+// ---------------------------------------------------------------------------
+
+func TestExtractSessionID_PromptCacheKey(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte(`{"prompt_cache_key":"pck-abc-123"}`)
+
+	got := ExtractSessionID(nil, payload, nil)
+	want := "cache:pck-abc-123"
+	if got != want {
+		t.Errorf("ExtractSessionID() = %q, want %q", got, want)
+	}
+}
+
+func TestExtractSessionID_PromptCacheKeyPrecedenceVsConversationID(t *testing.T) {
+	t.Parallel()
+
+	// conversation_id should win over prompt_cache_key (priority 5 vs 6)
+	payload := []byte(`{"conversation_id":"conv-999","prompt_cache_key":"pck-111"}`)
+
+	got := ExtractSessionID(nil, payload, nil)
+	want := "conv:conv-999"
+	if got != want {
+		t.Errorf("ExtractSessionID() = %q, want %q (conversation_id should beat prompt_cache_key)", got, want)
+	}
+}
+
+func TestExtractSessionID_PromptCacheKeyNotShadowedByEmpty(t *testing.T) {
+	t.Parallel()
+
+	// prompt_cache_key is present, conversation_id is empty string
+	payload := []byte(`{"conversation_id":"","prompt_cache_key":"pck-222"}`)
+
+	got := ExtractSessionID(nil, payload, nil)
+	want := "cache:pck-222"
+	if got != want {
+		t.Errorf("ExtractSessionID() = %q, want %q (prompt_cache_key should be used when conversation_id is empty)", got, want)
+	}
+}
+
+func TestExtractSessionID_SessionHeaderHyphenated(t *testing.T) {
+	t.Parallel()
+
+	headers := make(http.Header)
+	headers.Set("Session-Id", "sess-hyphen-123")
+
+	got := ExtractSessionID(headers, nil, nil)
+	want := "header:sess-hyphen-123"
+	if got != want {
+		t.Errorf("ExtractSessionID() with Session-Id header = %q, want %q", got, want)
+	}
+}
+
+func TestExtractSessionID_SessionHeaderUnderscore(t *testing.T) {
+	t.Parallel()
+
+	headers := make(http.Header)
+	headers.Set("Session_id", "sess-under-456")
+
+	got := ExtractSessionID(headers, nil, nil)
+	want := "header:sess-under-456"
+	if got != want {
+		t.Errorf("ExtractSessionID() with Session_id header = %q, want %q", got, want)
+	}
+}
+
+func TestExtractSessionID_ConversationHeaderHyphenated(t *testing.T) {
+	t.Parallel()
+
+	headers := make(http.Header)
+	headers.Set("Conversation-Id", "conv-hyphen-789")
+
+	got := ExtractSessionID(headers, nil, nil)
+	want := "conv:conv-hyphen-789"
+	if got != want {
+		t.Errorf("ExtractSessionID() with Conversation-Id header = %q, want %q", got, want)
+	}
+}
+
+func TestExtractSessionID_ConversationHeaderUnderscore(t *testing.T) {
+	t.Parallel()
+
+	headers := make(http.Header)
+	headers.Set("Conversation_id", "conv-under-101")
+
+	got := ExtractSessionID(headers, nil, nil)
+	want := "conv:conv-under-101"
+	if got != want {
+		t.Errorf("ExtractSessionID() with Conversation_id header = %q, want %q", got, want)
+	}
+}
+
+func TestExtractSessionID_XSessionIDWinsOverSessionId(t *testing.T) {
+	t.Parallel()
+
+	// X-Session-ID is checked first among session headers
+	headers := make(http.Header)
+	headers.Set("X-Session-ID", "x-session-first")
+	headers.Set("Session-Id", "session-id-second")
+
+	got := ExtractSessionID(headers, nil, nil)
+	want := "header:x-session-first"
+	if got != want {
+		t.Errorf("ExtractSessionID() = %q, want %q (X-Session-ID should win over Session-Id)", got, want)
+	}
+}
+
+func TestExtractSessionID_SessionHeaderWinsOverConversationHeader(t *testing.T) {
+	t.Parallel()
+
+	// Session headers (priority 2) beat conversation headers (priority 3)
+	headers := make(http.Header)
+	headers.Set("Session_id", "sess-id-value")
+	headers.Set("Conversation_id", "conv-id-value")
+
+	got := ExtractSessionID(headers, nil, nil)
+	want := "header:sess-id-value"
+	if got != want {
+		t.Errorf("ExtractSessionID() = %q, want %q (session header should beat conversation header)", got, want)
+	}
+}
+
+func TestExtractSessionID_ConversationHeaderWinsOverBodyConversationID(t *testing.T) {
+	t.Parallel()
+
+	// Conversation header (priority 3) beats conversation_id body field (priority 5)
+	headers := make(http.Header)
+	headers.Set("Conversation-Id", "conv-header-value")
+
+	payload := []byte(`{"conversation_id":"conv-body-value"}`)
+
+	got := ExtractSessionID(headers, payload, nil)
+	want := "conv:conv-header-value"
+	if got != want {
+		t.Errorf("ExtractSessionID() = %q, want %q (conversation header should beat body conversation_id)", got, want)
+	}
+}
+
+func TestExtractSessionID_ClaudeCodeWinsOverAllHeaders(t *testing.T) {
+	t.Parallel()
+
+	// Claude Code metadata.user_id (priority 1) wins over all headers and body fields
+	headers := make(http.Header)
+	headers.Set("X-Session-ID", "header-session")
+	headers.Set("Session_id", "codex-session")
+	headers.Set("Conversation_id", "codex-conv")
+
+	payload := []byte(`{
+		"metadata":{"user_id":"user_xxx_account__session_11111111-1111-1111-1111-111111111111"},
+		"conversation_id":"body-conv",
+		"prompt_cache_key":"pck-value"
+	}`)
+
+	got := ExtractSessionID(headers, payload, nil)
+	want := "claude:11111111-1111-1111-1111-111111111111"
+	if got != want {
+		t.Errorf("ExtractSessionID() = %q, want %q (Claude Code should win over all other identifiers)", got, want)
+	}
+}
+
+func TestExtractSessionID_SessionHeaderWinsOverPromptCacheKey(t *testing.T) {
+	t.Parallel()
+
+	// Session headers (priority 2) beat prompt_cache_key (priority 6)
+	headers := make(http.Header)
+	headers.Set("Session_id", "codex-session-value")
+
+	payload := []byte(`{"prompt_cache_key":"pck-value"}`)
+
+	got := ExtractSessionID(headers, payload, nil)
+	want := "header:codex-session-value"
+	if got != want {
+		t.Errorf("ExtractSessionID() = %q, want %q (session header should beat prompt_cache_key)", got, want)
+	}
+}
+
+func TestExtractSessionID_BodyConversationIDWinsOverPromptCacheKey(t *testing.T) {
+	t.Parallel()
+
+	// Body conversation_id (priority 5) beats prompt_cache_key (priority 6)
+	payload := []byte(`{"conversation_id":"conv-body","prompt_cache_key":"pck-value"}`)
+
+	got := ExtractSessionID(nil, payload, nil)
+	want := "conv:conv-body"
+	if got != want {
+		t.Errorf("ExtractSessionID() = %q, want %q (body conversation_id should beat prompt_cache_key)", got, want)
+	}
+}
+
+func TestExtractSessionID_PromptCacheKeyWinsOverMessageHash(t *testing.T) {
+	t.Parallel()
+
+	// prompt_cache_key (priority 6) beats message hash fallback (priority 7)
+	payload := []byte(`{
+		"prompt_cache_key":"pck-stable",
+		"messages":[{"role":"user","content":"Hello"}]
+	}`)
+
+	got := ExtractSessionID(nil, payload, nil)
+	want := "cache:pck-stable"
+	if got != want {
+		t.Errorf("ExtractSessionID() = %q, want %q (prompt_cache_key should beat message hash fallback)", got, want)
+	}
+}
+
+func TestExtractSessionID_XClientRequestIdExcluded(t *testing.T) {
+	t.Parallel()
+
+	// X-Client-Request-Id should NOT be used for session affinity
+	headers := make(http.Header)
+	headers.Set("X-Client-Request-Id", "req-12345")
+
+	got := ExtractSessionID(headers, nil, nil)
+	if got != "" {
+		t.Errorf("ExtractSessionID() with only X-Client-Request-Id = %q, want empty (should be excluded from session affinity)", got)
+	}
+}
+
+func TestExtractSessionID_AllPriorityLevels(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		headers http.Header
+		payload string
+		want    string
+		desc    string
+	}{
+		{
+			name:    "priority_1_claude_code",
+			payload: `{"metadata":{"user_id":"user_xxx_account__session_aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"}}`,
+			want:    "claude:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+			desc:    "Claude Code user_id with session pattern",
+		},
+		{
+			name:    "priority_2_x_session_id",
+			headers: func() http.Header { h := make(http.Header); h.Set("X-Session-ID", "xsid"); return h }(),
+			want:    "header:xsid",
+			desc:    "X-Session-ID header",
+		},
+		{
+			name:    "priority_2_session_id_hyphen",
+			headers: func() http.Header { h := make(http.Header); h.Set("Session-Id", "shid"); return h }(),
+			want:    "header:shid",
+			desc:    "Session-Id header (hyphenated)",
+		},
+		{
+			name:    "priority_2_session_id_underscore",
+			headers: func() http.Header { h := make(http.Header); h.Set("Session_id", "suid"); return h }(),
+			want:    "header:suid",
+			desc:    "Session_id header (underscore, Codex convention)",
+		},
+		{
+			name:    "priority_3_conversation_id_hyphen",
+			headers: func() http.Header { h := make(http.Header); h.Set("Conversation-Id", "chid"); return h }(),
+			want:    "conv:chid",
+			desc:    "Conversation-Id header (hyphenated)",
+		},
+		{
+			name:    "priority_3_conversation_id_underscore",
+			headers: func() http.Header { h := make(http.Header); h.Set("Conversation_id", "cuid"); return h }(),
+			want:    "conv:cuid",
+			desc:    "Conversation_id header (underscore, Codex convention)",
+		},
+		{
+			name:    "priority_4_user_id_non_claude",
+			payload: `{"metadata":{"user_id":"generic-user-123"}}`,
+			want:    "user:generic-user-123",
+			desc:    "Non-Claude Code user_id",
+		},
+		{
+			name:    "priority_5_body_conversation_id",
+			payload: `{"conversation_id":"conv-body-val"}`,
+			want:    "conv:conv-body-val",
+			desc:    "Body conversation_id field",
+		},
+		{
+			name:    "priority_6_prompt_cache_key",
+			payload: `{"prompt_cache_key":"pck-val"}`,
+			want:    "cache:pck-val",
+			desc:    "Body prompt_cache_key field",
+		},
+		{
+			name:    "priority_7_message_hash",
+			payload: `{"messages":[{"role":"user","content":"hash test"}]}`,
+			want:    "msg:",
+			desc:    "Message hash fallback (prefix only)",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := ExtractSessionID(tt.headers, []byte(tt.payload), nil)
+			if tt.name == "priority_7_message_hash" {
+				// For hash fallback, just check the prefix
+				if !strings.HasPrefix(got, tt.want) {
+					t.Errorf("ExtractSessionID() = %q, want prefix %q (%s)", got, tt.want, tt.desc)
+				}
+			} else {
+				if got != tt.want {
+					t.Errorf("ExtractSessionID() = %q, want %q (%s)", got, tt.want, tt.desc)
+				}
+			}
+		})
+	}
+}
