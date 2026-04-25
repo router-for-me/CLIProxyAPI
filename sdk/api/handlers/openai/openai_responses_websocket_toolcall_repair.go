@@ -460,9 +460,8 @@ func repairResponsesHTTPNoCache(payload []byte) []byte {
 	if !input.Exists() || !input.IsArray() {
 		return payload
 	}
-	// allowOrphanOutputs=true: don't drop outputs without matching calls
-	updatedRaw, errRepair := repairResponsesToolCallsArray(nil, nil, "", input.Raw, true)
-	if errRepair != nil || updatedRaw == "" || updatedRaw == input.Raw {
+	updatedRaw := reorderResponsesToolCallsNoCache(input.Raw)
+	if updatedRaw == "" || updatedRaw == input.Raw {
 		return payload
 	}
 	updated, errSet := sjson.SetRawBytes(payload, "input", []byte(updatedRaw))
@@ -470,4 +469,83 @@ func repairResponsesHTTPNoCache(payload []byte) []byte {
 		return payload
 	}
 	return updated
+}
+
+// reorderResponsesToolCallsNoCache reorders function_call / function_call_output items
+// so that each output immediately follows its corresponding call, without using any
+// shared session cache.
+// Algorithm:
+//  1. Collect all output items keyed by call_id.
+//  2. Iterate original items in order; add non-output items directly.
+//     For each call, add the call then immediately append its outputs from the map.
+//     Remove appended outputs from the map so they are not processed again.
+//  3. Append any orphaned outputs (those whose call_id was not found) at the end.
+//
+// This handles both correct-order and reversed-order (output before call) cases.
+func reorderResponsesToolCallsNoCache(rawArray string) string {
+	rawArray = strings.TrimSpace(rawArray)
+	if rawArray == "" {
+		return "[]"
+	}
+	var items []json.RawMessage
+	if err := json.Unmarshal([]byte(rawArray), &items); err != nil {
+		return ""
+	}
+
+	// Collect all output items keyed by call_id.
+	outputsByCallID := make(map[string][]json.RawMessage, len(items))
+	for _, item := range items {
+		if len(item) == 0 {
+			continue
+		}
+		itemType := strings.TrimSpace(gjson.GetBytes(item, "type").String())
+		if isResponsesToolCallOutputType(itemType) {
+			callID := strings.TrimSpace(gjson.GetBytes(item, "call_id").String())
+			if callID != "" {
+				outputsByCallID[callID] = append(outputsByCallID[callID], item)
+			}
+		}
+	}
+
+	// Iterate in original order: add calls + their outputs, skip lone outputs
+	// (they will be re-added at the end as orphaned).
+	result := make([]json.RawMessage, 0, len(items))
+	for _, item := range items {
+		if len(item) == 0 {
+			continue
+		}
+		itemType := strings.TrimSpace(gjson.GetBytes(item, "type").String())
+		if isResponsesToolCallOutputType(itemType) {
+			// Skip lone outputs here; they will be added as orphaned at the end.
+			continue
+		}
+		if isResponsesToolCallType(itemType) {
+			callID := strings.TrimSpace(gjson.GetBytes(item, "call_id").String())
+			result = append(result, item)
+			if callID != "" {
+				outputs := outputsByCallID[callID]
+				for i := range outputs {
+					result = append(result, outputs[i])
+				}
+				// Remove so these outputs are not appended again as orphaned.
+				delete(outputsByCallID, callID)
+			}
+			continue
+		}
+		// Non-tool items: add as-is.
+		result = append(result, item)
+	}
+
+	// Append orphaned outputs at the end.
+	for _, outputs := range outputsByCallID {
+		for i := range outputs {
+			result = append(result, outputs[i])
+		}
+	}
+
+	out, err := json.Marshal(result)
+	if err != nil {
+		return ""
+	}
+	return string(out)
 }
