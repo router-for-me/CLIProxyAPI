@@ -47,9 +47,10 @@ func writeResponsesSSEChunk(w io.Writer, chunk []byte) {
 }
 
 type responsesSSEFramer struct {
-	pending     []byte
-	outputItems map[int][]byte
-	outputOrder []int
+	pending              []byte
+	outputItems          map[int][]byte
+	outputOrder          []int
+	unindexedOutputItems [][]byte
 }
 
 func (f *responsesSSEFramer) WriteChunk(w io.Writer, chunk []byte) {
@@ -160,21 +161,23 @@ func (f *responsesSSEFramer) recordOutputItem(payload []byte) {
 		return
 	}
 
-	index := len(f.outputOrder)
 	if outputIndex := gjson.GetBytes(payload, "output_index"); outputIndex.Exists() {
-		index = int(outputIndex.Int())
+		index := int(outputIndex.Int())
+		if f.outputItems == nil {
+			f.outputItems = make(map[int][]byte)
+		}
+		if _, exists := f.outputItems[index]; !exists {
+			f.outputOrder = append(f.outputOrder, index)
+		}
+		f.outputItems[index] = append([]byte(nil), item.Raw...)
+		return
 	}
-	if f.outputItems == nil {
-		f.outputItems = make(map[int][]byte)
-	}
-	if _, exists := f.outputItems[index]; !exists {
-		f.outputOrder = append(f.outputOrder, index)
-	}
-	f.outputItems[index] = append([]byte(nil), item.Raw...)
+
+	f.unindexedOutputItems = append(f.unindexedOutputItems, append([]byte(nil), item.Raw...))
 }
 
 func (f *responsesSSEFramer) repairCompletedPayload(payload []byte) []byte {
-	if len(f.outputOrder) == 0 {
+	if len(f.outputOrder) == 0 && len(f.unindexedOutputItems) == 0 {
 		return payload
 	}
 	output := gjson.GetBytes(payload, "response.output")
@@ -192,6 +195,13 @@ func (f *responsesSSEFramer) repairCompletedPayload(payload []byte) []byte {
 		if !ok {
 			continue
 		}
+		if written > 0 {
+			outputJSON.WriteByte(',')
+		}
+		outputJSON.Write(item)
+		written++
+	}
+	for _, item := range f.unindexedOutputItems {
 		if written > 0 {
 			outputJSON.WriteByte(',')
 		}
