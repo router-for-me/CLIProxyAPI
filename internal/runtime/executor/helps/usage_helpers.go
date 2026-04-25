@@ -20,6 +20,7 @@ type UsageReporter struct {
 	model       string
 	authID      string
 	authIndex   string
+	authType    string
 	apiKey      string
 	source      string
 	requestedAt time.Time
@@ -34,6 +35,7 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 		requestedAt: time.Now(),
 		apiKey:      apiKey,
 		source:      resolveUsageSource(auth, apiKey),
+		authType:    resolveUsageAuthType(auth),
 	}
 	if auth != nil {
 		reporter.authID = auth.ID
@@ -98,6 +100,7 @@ func (r *UsageReporter) buildRecord(detail usage.Detail, failed bool) usage.Reco
 		APIKey:      r.apiKey,
 		AuthID:      r.authID,
 		AuthIndex:   r.authIndex,
+		AuthType:    r.authType,
 		RequestedAt: r.requestedAt,
 		Latency:     r.latency(),
 		Failed:      failed,
@@ -179,6 +182,18 @@ func resolveUsageSource(auth *cliproxyauth.Auth, ctxAPIKey string) string {
 		return trimmed
 	}
 	return ""
+}
+
+func resolveUsageAuthType(auth *cliproxyauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	kind, _ := auth.AccountInfo()
+	kind = strings.TrimSpace(kind)
+	if kind == "api_key" {
+		return "apikey"
+	}
+	return kind
 }
 
 func ParseCodexUsage(data []byte) (usage.Detail, bool) {
