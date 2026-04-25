@@ -298,18 +298,19 @@ func normalizeKimiToolMessageLinks(body []byte) ([]byte, error) {
 		return body, nil
 	}
 
-	messages := gjson.GetBytes(body, "messages")
-	if !messages.Exists() || !messages.IsArray() {
-		return body, nil
+	out, patchedReasoning, err := normalizeAssistantToolCallReasoningContent(body, false)
+	if err != nil {
+		return body, fmt.Errorf("kimi executor: failed to normalize assistant reasoning_content: %w", err)
 	}
 
-	out := body
+	messages := gjson.GetBytes(out, "messages")
+	if !messages.Exists() || !messages.IsArray() {
+		return out, nil
+	}
+
 	pending := make([]string, 0)
 	patched := 0
-	patchedReasoning := 0
 	ambiguous := 0
-	latestReasoning := ""
-	hasLatestReasoning := false
 
 	removePending := func(id string) {
 		for idx := range pending {
@@ -327,29 +328,9 @@ func normalizeKimiToolMessageLinks(body []byte) ([]byte, error) {
 		role := strings.TrimSpace(msg.Get("role").String())
 		switch role {
 		case "assistant":
-			reasoning := msg.Get("reasoning_content")
-			if reasoning.Exists() {
-				reasoningText := reasoning.String()
-				if strings.TrimSpace(reasoningText) != "" {
-					latestReasoning = reasoningText
-					hasLatestReasoning = true
-				}
-			}
-
 			toolCalls := msg.Get("tool_calls")
 			if !toolCalls.Exists() || !toolCalls.IsArray() || len(toolCalls.Array()) == 0 {
 				continue
-			}
-
-			if !reasoning.Exists() || strings.TrimSpace(reasoning.String()) == "" {
-				reasoningText := fallbackAssistantReasoning(msg, hasLatestReasoning, latestReasoning)
-				path := fmt.Sprintf("messages.%d.reasoning_content", msgIdx)
-				next, err := sjson.SetBytes(out, path, reasoningText)
-				if err != nil {
-					return body, fmt.Errorf("kimi executor: failed to set assistant reasoning_content: %w", err)
-				}
-				out = next
-				patchedReasoning++
 			}
 
 			for _, tc := range toolCalls.Array() {

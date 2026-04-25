@@ -299,6 +299,12 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	if err != nil {
 		return resp, err
 	}
+	if endpoint == "/chat/completions" {
+		translated, _, err = normalizeAssistantToolCallReasoningContent(translated, true)
+		if err != nil {
+			return resp, fmt.Errorf("openai compat executor: failed to normalize assistant reasoning_content: %w", err)
+		}
+	}
 
 	url := strings.TrimSuffix(baseURL, "/") + endpoint
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
@@ -470,6 +476,12 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier(), defaultReasoningEffortOnMissing(e.cfg, e.Identifier(), to.String()))
 	if err != nil {
 		return nil, err
+	}
+	if endpoint == "/chat/completions" {
+		translated, _, err = normalizeAssistantToolCallReasoningContent(translated, true)
+		if err != nil {
+			return nil, fmt.Errorf("openai compat executor: failed to normalize assistant reasoning_content: %w", err)
+		}
 	}
 
 	// Request usage data in the final streaming chunk so that token statistics
