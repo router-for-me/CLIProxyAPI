@@ -43,11 +43,12 @@ type upstreamAttempt struct {
 	response             *strings.Builder
 	statusCode           int
 	upstreamRequestIDs   []string
+	responseChunkCount   int
+	responseChunkBytes   int
 	responseIntroWritten bool
 	statusWritten        bool
 	headersWritten       bool
-	bodyStarted          bool
-	bodyHasContent       bool
+	bodySummaryWritten   bool
 	errorWritten         bool
 }
 
@@ -80,12 +81,8 @@ func recordAPIRequest(ctx context.Context, cfg *config.Config, info upstreamRequ
 	}
 	builder.WriteString("\nHeaders:\n")
 	writeHeaders(builder, info.Headers)
-	builder.WriteString("\nBody:\n")
-	if len(info.Body) > 0 {
-		builder.WriteString(string(info.Body))
-	} else {
-		builder.WriteString("<empty>")
-	}
+	builder.WriteString("\nBody: <filtered>\n")
+	builder.WriteString(fmt.Sprintf("Body Bytes: %d\n", len(info.Body)))
 	builder.WriteString("\n\n")
 
 	attempt := &upstreamAttempt{
@@ -138,10 +135,6 @@ func recordAPIResponseError(ctx context.Context, cfg *config.Config, err error) 
 	attempts, attempt := ensureAttempt(ginCtx)
 	ensureResponseIntro(attempt)
 
-	if attempt.bodyStarted && !attempt.bodyHasContent {
-		// Ensure body does not stay empty marker if error arrives first.
-		attempt.bodyStarted = false
-	}
 	if attempt.errorWritten {
 		attempt.response.WriteString("\n")
 	}
@@ -156,8 +149,7 @@ func appendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byt
 	if cfg == nil || !cfg.RequestLog {
 		return
 	}
-	data := bytes.TrimSpace(chunk)
-	if len(data) == 0 {
+	if len(chunk) == 0 {
 		return
 	}
 	ginCtx := ginContextFrom(ctx)
@@ -173,15 +165,14 @@ func appendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byt
 		attempt.headersWritten = true
 		attempt.response.WriteString("\n")
 	}
-	if !attempt.bodyStarted {
-		attempt.response.WriteString("Body:\n")
-		attempt.bodyStarted = true
+	attempt.responseChunkCount++
+	attempt.responseChunkBytes += len(chunk)
+	if !attempt.bodySummaryWritten {
+		attempt.response.WriteString("Body: <filtered>\n")
+		attempt.bodySummaryWritten = true
 	}
-	if attempt.bodyHasContent {
-		attempt.response.WriteString("\n\n")
-	}
-	attempt.response.WriteString(string(data))
-	attempt.bodyHasContent = true
+	attempt.response.WriteString(fmt.Sprintf("Body Chunks: %d\n", attempt.responseChunkCount))
+	attempt.response.WriteString(fmt.Sprintf("Body Bytes: %d\n", attempt.responseChunkBytes))
 
 	updateAggregatedResponse(ginCtx, attempts)
 }

@@ -176,7 +176,7 @@ func TestOpenAIResponsesStreamingBudgetTimeoutWritesErrorEventInsteadOfSynthetic
 	}
 }
 
-func TestOpenAIResponsesRequestLogKeepsEventLines(t *testing.T) {
+func TestOpenAIResponsesRequestLogFiltersResponseBody(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -263,10 +263,10 @@ func TestOpenAIResponsesRequestLogKeepsEventLines(t *testing.T) {
 	if !strings.Contains(logText, "=== RESPONSE ===") {
 		t.Fatalf("request log missing response section: %q", logText)
 	}
-	if !strings.Contains(logText, "event: response.created") {
-		t.Fatalf("request log response section lost created event line: %q", logText)
+	if !strings.Contains(logText, "Response Body: <filtered>") {
+		t.Fatalf("request log response body should be filtered: %q", logText)
 	}
-	if !strings.Contains(logText, "event: response.completed") {
-		t.Fatalf("request log response section lost completed event line: %q", logText)
+	if strings.Contains(logText, "event: response.created") || strings.Contains(logText, "event: response.completed") {
+		t.Fatalf("request log should not contain streaming response body payload: %q", logText)
 	}
 }

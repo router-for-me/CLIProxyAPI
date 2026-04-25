@@ -239,18 +239,6 @@ func (l *FileRequestLogger) logRequest(url, method string, requestHeaders map[st
 		recordType = requestLogTypeError
 	}
 
-	requestBodyPath, errTemp := l.writeRequestBodyTempFile(body)
-	if errTemp != nil {
-		log.WithError(errTemp).Warn("failed to create request body temp file, falling back to direct write")
-	}
-	if requestBodyPath != "" {
-		defer func() {
-			if errRemove := os.Remove(requestBodyPath); errRemove != nil {
-				log.WithError(errRemove).Warn("failed to remove request body temp file")
-			}
-		}()
-	}
-
 	responseToWrite, decompressErr := l.decompressResponse(responseHeaders, response)
 	if decompressErr != nil {
 		// If decompression fails, continue with original response and annotate the log output.
@@ -271,7 +259,7 @@ func (l *FileRequestLogger) logRequest(url, method string, requestHeaders map[st
 			method,
 			requestHeaders,
 			body,
-			requestBodyPath,
+			"",
 			apiRequest,
 			apiResponse,
 			apiResponseErrors,
@@ -330,37 +318,16 @@ func (l *FileRequestLogger) LogStreamingRequest(url, method string, headers map[
 		requestHeaders[key] = headerValues
 	}
 
-	requestBodyPath, errTemp := l.writeRequestBodyTempFile(body)
-	if errTemp != nil {
-		return nil, fmt.Errorf("failed to create request body temp file: %w", errTemp)
-	}
-
-	responseBodyFile, errCreate := os.CreateTemp(l.logsDir, "response-body-*.tmp")
-	if errCreate != nil {
-		_ = os.Remove(requestBodyPath)
-		return nil, fmt.Errorf("failed to create response body temp file: %w", errCreate)
-	}
-	responseBodyPath := responseBodyFile.Name()
-
 	// Create streaming writer
 	writer := &FileStreamingLogWriter{
-		logger:           l,
-		recordType:       requestLogTypeNormal,
-		requestID:        requestID,
-		url:              url,
-		method:           method,
-		timestamp:        time.Now(),
-		requestHeaders:   requestHeaders,
-		requestBodyPath:  requestBodyPath,
-		responseBodyPath: responseBodyPath,
-		responseBodyFile: responseBodyFile,
-		chunkChan:        make(chan []byte, 100), // Buffered channel for async writes
-		closeChan:        make(chan struct{}),
-		errorChan:        make(chan error, 1),
+		logger:         l,
+		recordType:     requestLogTypeNormal,
+		requestID:      requestID,
+		url:            url,
+		method:         method,
+		timestamp:      time.Now(),
+		requestHeaders: requestHeaders,
 	}
-
-	// Start async writer goroutine
-	go writer.asyncWriter()
 
 	return writer, nil
 }
@@ -498,37 +465,18 @@ func (l *FileRequestLogger) cleanupOldErrorLogs() error {
 	return nil
 }
 
-func (l *FileRequestLogger) writeRequestBodyTempFile(body []byte) (string, error) {
-	tmpFile, errCreate := os.CreateTemp(l.logsDir, "request-body-*.tmp")
-	if errCreate != nil {
-		return "", errCreate
-	}
-	tmpPath := tmpFile.Name()
-
-	if _, errCopy := io.Copy(tmpFile, bytes.NewReader(body)); errCopy != nil {
-		_ = tmpFile.Close()
-		_ = os.Remove(tmpPath)
-		return "", errCopy
-	}
-	if errClose := tmpFile.Close(); errClose != nil {
-		_ = os.Remove(tmpPath)
-		return "", errClose
-	}
-	return tmpPath, nil
-}
-
 func (l *FileRequestLogger) writeNonStreamingLog(
 	w io.Writer,
 	url, method string,
 	requestHeaders map[string][]string,
-	requestBody []byte,
-	requestBodyPath string,
+	_ []byte,
+	_ string,
 	apiRequest []byte,
 	apiResponse []byte,
 	apiResponseErrors []*interfaces.ErrorMessage,
 	statusCode int,
 	responseHeaders map[string][]string,
-	response []byte,
+	_ []byte,
 	decompressErr error,
 	requestTimestamp time.Time,
 	apiResponseTimestamp time.Time,
@@ -536,7 +484,7 @@ func (l *FileRequestLogger) writeNonStreamingLog(
 	if requestTimestamp.IsZero() {
 		requestTimestamp = time.Now()
 	}
-	if errWrite := writeRequestInfoWithBody(w, url, method, requestHeaders, requestBody, requestBodyPath, requestTimestamp); errWrite != nil {
+	if errWrite := writeRequestInfoWithBody(w, url, method, requestHeaders, nil, "", requestTimestamp); errWrite != nil {
 		return errWrite
 	}
 	if errWrite := writeAPISection(w, "=== API REQUEST ===\n", "=== API REQUEST", apiRequest, time.Time{}); errWrite != nil {
@@ -548,15 +496,15 @@ func (l *FileRequestLogger) writeNonStreamingLog(
 	if errWrite := writeAPISection(w, "=== API RESPONSE ===\n", "=== API RESPONSE", apiResponse, apiResponseTimestamp); errWrite != nil {
 		return errWrite
 	}
-	return writeResponseSection(w, statusCode, true, responseHeaders, bytes.NewReader(response), decompressErr, true)
+	return writeResponseSection(w, statusCode, true, responseHeaders, nil, decompressErr, true)
 }
 
 func writeRequestInfoWithBody(
 	w io.Writer,
 	url, method string,
 	headers map[string][]string,
-	body []byte,
-	bodyPath string,
+	_ []byte,
+	_ string,
 	timestamp time.Time,
 ) error {
 	if _, errWrite := io.WriteString(w, "=== REQUEST INFO ===\n"); errWrite != nil {
@@ -592,28 +540,7 @@ func writeRequestInfoWithBody(
 	if _, errWrite := io.WriteString(w, "\n"); errWrite != nil {
 		return errWrite
 	}
-
-	if _, errWrite := io.WriteString(w, "=== REQUEST BODY ===\n"); errWrite != nil {
-		return errWrite
-	}
-
-	if bodyPath != "" {
-		bodyFile, errOpen := os.Open(bodyPath)
-		if errOpen != nil {
-			return errOpen
-		}
-		if _, errCopy := io.Copy(w, bodyFile); errCopy != nil {
-			_ = bodyFile.Close()
-			return errCopy
-		}
-		if errClose := bodyFile.Close(); errClose != nil {
-			log.WithError(errClose).Warn("failed to close request body temp file")
-		}
-	} else if _, errWrite := w.Write(body); errWrite != nil {
-		return errWrite
-	}
-
-	if _, errWrite := io.WriteString(w, "\n\n"); errWrite != nil {
+	if _, errWrite := io.WriteString(w, "Request Body: <filtered>\n\n"); errWrite != nil {
 		return errWrite
 	}
 	return nil
@@ -679,7 +606,7 @@ func writeAPIErrorResponses(w io.Writer, apiResponseErrors []*interfaces.ErrorMe
 	return nil
 }
 
-func writeResponseSection(w io.Writer, statusCode int, statusWritten bool, responseHeaders map[string][]string, responseReader io.Reader, decompressErr error, trailingNewline bool) error {
+func writeResponseSection(w io.Writer, statusCode int, statusWritten bool, responseHeaders map[string][]string, _ io.Reader, decompressErr error, trailingNewline bool) error {
 	if _, errWrite := io.WriteString(w, "=== RESPONSE ===\n"); errWrite != nil {
 		return errWrite
 	}
@@ -702,11 +629,8 @@ func writeResponseSection(w io.Writer, statusCode int, statusWritten bool, respo
 	if _, errWrite := io.WriteString(w, "\n"); errWrite != nil {
 		return errWrite
 	}
-
-	if responseReader != nil {
-		if _, errCopy := io.Copy(w, responseReader); errCopy != nil {
-			return errCopy
-		}
+	if _, errWrite := io.WriteString(w, "Response Body: <filtered>"); errWrite != nil {
+		return errWrite
 	}
 	if decompressErr != nil {
 		if _, errWrite := io.WriteString(w, fmt.Sprintf("\n[DECOMPRESSION ERROR: %v]", decompressErr)); errWrite != nil {
@@ -737,7 +661,7 @@ func writeResponseSection(w io.Writer, statusCode int, statusWritten bool, respo
 //
 // Returns:
 //   - string: The formatted log content
-func (l *FileRequestLogger) formatLogContent(url, method string, headers map[string][]string, body, apiRequest, apiResponse, response []byte, status int, responseHeaders map[string][]string, apiResponseErrors []*interfaces.ErrorMessage) string {
+func (l *FileRequestLogger) formatLogContent(url, method string, headers map[string][]string, body, apiRequest, apiResponse, _ []byte, status int, responseHeaders map[string][]string, apiResponseErrors []*interfaces.ErrorMessage) string {
 	var content strings.Builder
 
 	// Request info
@@ -791,7 +715,7 @@ func (l *FileRequestLogger) formatLogContent(url, method string, headers map[str
 	}
 
 	content.WriteString("\n")
-	content.Write(response)
+	content.WriteString("Response Body: <filtered>")
 	content.WriteString("\n")
 
 	return content.String()
@@ -938,7 +862,7 @@ func (l *FileRequestLogger) decompressZstd(data []byte) ([]byte, error) {
 //
 // Returns:
 //   - string: The formatted request information
-func (l *FileRequestLogger) formatRequestInfo(url, method string, headers map[string][]string, body []byte) string {
+func (l *FileRequestLogger) formatRequestInfo(url, method string, headers map[string][]string, _ []byte) string {
 	var content strings.Builder
 
 	content.WriteString("=== REQUEST INFO ===\n")
@@ -957,16 +881,15 @@ func (l *FileRequestLogger) formatRequestInfo(url, method string, headers map[st
 	}
 	content.WriteString("\n")
 
-	content.WriteString("=== REQUEST BODY ===\n")
-	content.Write(body)
+	content.WriteString("Request Body: <filtered>")
 	content.WriteString("\n\n")
 
 	return content.String()
 }
 
 // FileStreamingLogWriter implements StreamingLogWriter for file-based streaming logs.
-// It spools streaming response chunks to a temporary file to avoid retaining large responses in memory.
-// The final log file is assembled when Close is called.
+// Streaming response payloads are intentionally filtered from request logs.
+// The final log file is assembled with request/response metadata when Close is called.
 type FileStreamingLogWriter struct {
 	logger *FileRequestLogger
 
@@ -984,24 +907,6 @@ type FileStreamingLogWriter struct {
 
 	// requestHeaders stores the request headers.
 	requestHeaders map[string][]string
-
-	// requestBodyPath is a temporary file path holding the request body.
-	requestBodyPath string
-
-	// responseBodyPath is a temporary file path holding the streaming response body.
-	responseBodyPath string
-
-	// responseBodyFile is the temp file where chunks are appended by the async writer.
-	responseBodyFile *os.File
-
-	// chunkChan is a channel for receiving response chunks to spool.
-	chunkChan chan []byte
-
-	// closeChan is a channel for signaling when the writer is closed.
-	closeChan chan struct{}
-
-	// errorChan is a channel for reporting errors during writing.
-	errorChan chan error
 
 	// responseStatus stores the HTTP status code.
 	responseStatus int
@@ -1022,25 +927,12 @@ type FileStreamingLogWriter struct {
 	apiResponseTimestamp time.Time
 }
 
-// WriteChunkAsync writes a response chunk asynchronously (non-blocking).
+// WriteChunkAsync intentionally ignores payload chunks.
 //
 // Parameters:
-//   - chunk: The response chunk to write
+//   - chunk: The response chunk (filtered from logs)
 func (w *FileStreamingLogWriter) WriteChunkAsync(chunk []byte) {
-	if w.chunkChan == nil {
-		return
-	}
-
-	// Make a copy of the chunk to avoid data races
-	chunkCopy := make([]byte, len(chunk))
-	copy(chunkCopy, chunk)
-
-	// Non-blocking send
-	select {
-	case w.chunkChan <- chunkCopy:
-	default:
-		// Channel is full, skip this chunk to avoid blocking
-	}
+	_ = chunk
 }
 
 // WriteStatus buffers the response status and headers for later writing.
@@ -1107,88 +999,23 @@ func (w *FileStreamingLogWriter) SetFirstChunkTimestamp(timestamp time.Time) {
 
 // Close finalizes the log file and cleans up resources.
 // It writes all buffered data to the file in the correct order:
-// API REQUEST -> API RESPONSE -> RESPONSE (status, headers, body chunks)
+// API REQUEST -> API RESPONSE -> RESPONSE (status, headers, filtered body)
 //
 // Returns:
 //   - error: An error if closing fails, nil otherwise
 func (w *FileStreamingLogWriter) Close() error {
-	if w.chunkChan != nil {
-		close(w.chunkChan)
-	}
-
-	// Wait for async writer to finish spooling chunks
-	if w.closeChan != nil {
-		<-w.closeChan
-		w.chunkChan = nil
-	}
-
-	select {
-	case errWrite := <-w.errorChan:
-		w.cleanupTempFiles()
-		return errWrite
-	default:
-	}
-
 	if w.logger == nil {
-		w.cleanupTempFiles()
 		return nil
 	}
 
 	record, errRecord := w.writeFinalLog()
-	w.cleanupTempFiles()
 	if errRecord != nil {
 		return errRecord
 	}
 	return w.logger.appendAggregatedRecord(w.logger.recordFilePath(w.recordType, w.timestamp), record)
 }
 
-// asyncWriter runs in a goroutine to buffer chunks from the channel.
-// It continuously reads chunks from the channel and appends them to a temp file for later assembly.
-func (w *FileStreamingLogWriter) asyncWriter() {
-	defer close(w.closeChan)
-
-	for chunk := range w.chunkChan {
-		if w.responseBodyFile == nil {
-			continue
-		}
-		if _, errWrite := w.responseBodyFile.Write(chunk); errWrite != nil {
-			select {
-			case w.errorChan <- errWrite:
-			default:
-			}
-			if errClose := w.responseBodyFile.Close(); errClose != nil {
-				select {
-				case w.errorChan <- errClose:
-				default:
-				}
-			}
-			w.responseBodyFile = nil
-		}
-	}
-
-	if w.responseBodyFile == nil {
-		return
-	}
-	if errClose := w.responseBodyFile.Close(); errClose != nil {
-		select {
-		case w.errorChan <- errClose:
-		default:
-		}
-	}
-	w.responseBodyFile = nil
-}
-
 func (w *FileStreamingLogWriter) writeFinalLog() ([]byte, error) {
-	responseBodyFile, errOpen := os.Open(w.responseBodyPath)
-	if errOpen != nil {
-		return nil, errOpen
-	}
-	defer func() {
-		if errClose := responseBodyFile.Close(); errClose != nil {
-			log.WithError(errClose).Warn("failed to close response body temp file")
-		}
-	}()
-
 	return newRequestRecordBuffer(requestRecordMeta{
 		RequestID:  w.requestID,
 		Timestamp:  w.timestamp,
@@ -1197,7 +1024,7 @@ func (w *FileStreamingLogWriter) writeFinalLog() ([]byte, error) {
 		StatusCode: w.responseStatus,
 		RecordType: w.recordType,
 	}, func(dst io.Writer) error {
-		if errWrite := writeRequestInfoWithBody(dst, w.url, w.method, w.requestHeaders, nil, w.requestBodyPath, w.timestamp); errWrite != nil {
+		if errWrite := writeRequestInfoWithBody(dst, w.url, w.method, w.requestHeaders, nil, "", w.timestamp); errWrite != nil {
 			return errWrite
 		}
 		if errWrite := writeAPISection(dst, "=== API REQUEST ===\n", "=== API REQUEST", w.apiRequest, time.Time{}); errWrite != nil {
@@ -1206,24 +1033,8 @@ func (w *FileStreamingLogWriter) writeFinalLog() ([]byte, error) {
 		if errWrite := writeAPISection(dst, "=== API RESPONSE ===\n", "=== API RESPONSE", w.apiResponse, w.apiResponseTimestamp); errWrite != nil {
 			return errWrite
 		}
-		return writeResponseSection(dst, w.responseStatus, w.statusWritten, w.responseHeaders, responseBodyFile, nil, false)
+		return writeResponseSection(dst, w.responseStatus, w.statusWritten, w.responseHeaders, nil, nil, false)
 	})
-}
-
-func (w *FileStreamingLogWriter) cleanupTempFiles() {
-	if w.requestBodyPath != "" {
-		if errRemove := os.Remove(w.requestBodyPath); errRemove != nil {
-			log.WithError(errRemove).Warn("failed to remove request body temp file")
-		}
-		w.requestBodyPath = ""
-	}
-
-	if w.responseBodyPath != "" {
-		if errRemove := os.Remove(w.responseBodyPath); errRemove != nil {
-			log.WithError(errRemove).Warn("failed to remove response body temp file")
-		}
-		w.responseBodyPath = ""
-	}
 }
 
 // NoOpStreamingLogWriter is a no-operation implementation for when logging is disabled.
