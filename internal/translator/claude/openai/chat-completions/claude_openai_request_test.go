@@ -243,3 +243,171 @@ func TestConvertOpenAIRequestToClaude_SystemOnlyInputKeepsFallbackUserMessage(t 
 		t.Fatalf("Expected fallback text %q, got %q", "", got)
 	}
 }
+
+func TestConvertOpenAIRequestToClaude_AssistantToolCallsPreserveReasoningContent(t *testing.T) {
+	inputJSON := `{
+		"model": "Kimi-K2.6",
+		"reasoning_effort": "high",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": "",
+				"reasoning_content": "tool planning reasoning",
+				"tool_calls": [
+					{
+						"id": "call_1",
+						"type": "function",
+						"function": {
+							"name": "Skill",
+							"arguments": "{}"
+						}
+					}
+				]
+			},
+			{"role": "tool", "tool_call_id": "call_1", "content": "ok"}
+		]
+	}`
+
+	result := ConvertOpenAIRequestToClaude("K2.6", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+	messages := resultJSON.Get("messages").Array()
+
+	if len(messages) != 2 {
+		t.Fatalf("Expected 2 messages, got %d. Messages: %s", len(messages), resultJSON.Get("messages").Raw)
+	}
+	if got := messages[0].Get("role").String(); got != "assistant" {
+		t.Fatalf("Expected first message role %q, got %q", "assistant", got)
+	}
+	if got := messages[0].Get("content.0.type").String(); got != "text" {
+		t.Fatalf("Expected first content type %q, got %q", "text", got)
+	}
+	if got := messages[0].Get("content.0.text").String(); got != "tool planning reasoning" {
+		t.Fatalf("Expected reasoning prefix %q, got %q", "tool planning reasoning", got)
+	}
+	if got := messages[0].Get("content.1.type").String(); got != "tool_use" {
+		t.Fatalf("Expected second content type %q, got %q", "tool_use", got)
+	}
+}
+
+func TestConvertOpenAIRequestToClaude_AssistantToolCallsFallbackToCurrentReadableText(t *testing.T) {
+	inputJSON := `{
+		"model": "Kimi-K2.6",
+		"reasoning_effort": "high",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": "assistant summary",
+				"tool_calls": [
+					{
+						"id": "call_1",
+						"type": "function",
+						"function": {
+							"name": "Read",
+							"arguments": "{}"
+						}
+					}
+				]
+			}
+		]
+	}`
+
+	result := ConvertOpenAIRequestToClaude("K2.6", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+	messages := resultJSON.Get("messages").Array()
+
+	if len(messages) != 1 {
+		t.Fatalf("Expected 1 message, got %d. Messages: %s", len(messages), resultJSON.Get("messages").Raw)
+	}
+	if got := messages[0].Get("content.0.type").String(); got != "text" {
+		t.Fatalf("Expected first content type %q, got %q", "text", got)
+	}
+	if got := messages[0].Get("content.0.text").String(); got != "assistant summary" {
+		t.Fatalf("Expected reasoning fallback text %q, got %q", "assistant summary", got)
+	}
+	if got := messages[0].Get("content.1.type").String(); got != "tool_use" {
+		t.Fatalf("Expected second content type %q, got %q", "tool_use", got)
+	}
+}
+
+func TestConvertOpenAIRequestToClaude_AssistantToolCallsFallbackToLatestAssistantReasoning(t *testing.T) {
+	inputJSON := `{
+		"model": "Kimi-K2.6",
+		"reasoning_effort": "high",
+		"messages": [
+			{"role": "assistant", "content": "first answer", "reasoning_content": "r1"},
+			{
+				"role": "assistant",
+				"content": "",
+				"tool_calls": [
+					{
+						"id": "call_2",
+						"type": "function",
+						"function": {
+							"name": "Skill",
+							"arguments": "{}"
+						}
+					}
+				]
+			}
+		]
+	}`
+
+	result := ConvertOpenAIRequestToClaude("K2.6", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+	messages := resultJSON.Get("messages").Array()
+
+	if len(messages) != 2 {
+		t.Fatalf("Expected 2 messages, got %d. Messages: %s", len(messages), resultJSON.Get("messages").Raw)
+	}
+	if got := messages[1].Get("content.0.text").String(); got != "r1" {
+		t.Fatalf("Expected latest reasoning fallback %q, got %q", "r1", got)
+	}
+	if got := messages[1].Get("content.1.type").String(); got != "tool_use" {
+		t.Fatalf("Expected second message second content type %q, got %q", "tool_use", got)
+	}
+}
+
+func TestConvertOpenAIRequestToClaude_AssistantToolCallsReplaySampleUsesPlaceholderWhenNoFallback(t *testing.T) {
+	inputJSON := `{
+		"model": "Kimi-K2.6",
+		"reasoning_effort": "high",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": null,
+				"tool_calls": [
+					{
+						"id": "call_tc_1",
+						"type": "function",
+						"function": {
+							"name": "Skill",
+							"arguments": "{\"skill\":\"using-superpowers\"}"
+						}
+					}
+				]
+			},
+			{
+				"role": "tool",
+				"tool_call_id": "call_tc_1",
+				"content": "ok"
+			}
+		]
+	}`
+
+	result := ConvertOpenAIRequestToClaude("K2.6", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+	messages := resultJSON.Get("messages").Array()
+
+	if len(messages) != 2 {
+		t.Fatalf("Expected 2 messages, got %d. Messages: %s", len(messages), resultJSON.Get("messages").Raw)
+	}
+	if got := messages[0].Get("content.0.type").String(); got != "text" {
+		t.Fatalf("Expected first content type %q, got %q", "text", got)
+	}
+	if got := messages[0].Get("content.0.text").String(); got != "[reasoning unavailable]" {
+		t.Fatalf("Expected placeholder reasoning %q, got %q", "[reasoning unavailable]", got)
+	}
+	if got := messages[0].Get("content.1.type").String(); got != "tool_use" {
+		t.Fatalf("Expected second content type %q, got %q", "tool_use", got)
+	}
+}

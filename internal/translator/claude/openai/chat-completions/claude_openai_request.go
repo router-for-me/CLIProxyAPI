@@ -26,6 +26,8 @@ var (
 	session = ""
 )
 
+const assistantToolCallReasoningPlaceholder = "[reasoning unavailable]"
+
 // ConvertOpenAIRequestToClaude parses and transforms an OpenAI Chat Completions API request into Claude Code API format.
 // It extracts the model name, system instruction, message contents, and tool declarations
 // from the raw JSON request and returns them in the format expected by the Claude Code API.
@@ -165,6 +167,7 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 	// Process messages and transform them to Claude Code format
 	if messages := root.Get("messages"); messages.Exists() && messages.IsArray() {
 		messageIndex := 0
+		latestAssistantReasoning := ""
 		messages.ForEach(func(_, message gjson.Result) bool {
 			role := message.Get("role").String()
 			contentResult := message.Get("content")
@@ -188,6 +191,14 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 			case "user", "assistant":
 				msg := []byte(`{"role":"","content":[]}`)
 				msg, _ = sjson.SetBytes(msg, "role", role)
+				messageReasoning := strings.TrimSpace(message.Get("reasoning_content").String())
+				currentAssistantReadableText := ""
+				if role == "assistant" {
+					currentAssistantReadableText = extractOpenAIAssistantReadableText(contentResult)
+					if messageReasoning != "" {
+						latestAssistantReasoning = messageReasoning
+					}
+				}
 
 				// Handle content based on its type (string or array)
 				if contentResult.Exists() && contentResult.Type == gjson.String && contentResult.String() != "" {
@@ -206,6 +217,19 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 
 				// Handle tool calls (for assistant messages)
 				if toolCalls := message.Get("tool_calls"); toolCalls.Exists() && toolCalls.IsArray() && role == "assistant" {
+					reasoningText := messageReasoning
+					if reasoningText == "" {
+						reasoningText = strings.TrimSpace(currentAssistantReadableText)
+					}
+					if reasoningText == "" {
+						reasoningText = strings.TrimSpace(latestAssistantReasoning)
+					}
+					if reasoningText == "" {
+						reasoningText = assistantToolCallReasoningPlaceholder
+					}
+					msg = ensureAssistantReasoningPrefix(msg, reasoningText)
+					latestAssistantReasoning = reasoningText
+
 					toolCalls.ForEach(func(_, toolCall gjson.Result) bool {
 						if toolCall.Get("type").String() == "function" {
 							toolCallID := toolCall.Get("id").String()
@@ -385,6 +409,63 @@ func convertOpenAIImageURLToClaudePart(imageURL string) string {
 	imagePart := []byte(`{"type":"image","source":{"type":"url","url":""}}`)
 	imagePart, _ = sjson.SetBytes(imagePart, "source.url", imageURL)
 	return string(imagePart)
+}
+
+func extractOpenAIAssistantReadableText(contentResult gjson.Result) string {
+	if !contentResult.Exists() {
+		return ""
+	}
+	if contentResult.Type == gjson.String {
+		return strings.TrimSpace(contentResult.String())
+	}
+	if !contentResult.IsArray() {
+		return ""
+	}
+
+	parts := make([]string, 0, len(contentResult.Array()))
+	contentResult.ForEach(func(_, part gjson.Result) bool {
+		partType := part.Get("type").String()
+		if partType == "text" {
+			text := strings.TrimSpace(part.Get("text").String())
+			if text != "" {
+				parts = append(parts, text)
+			}
+		}
+		return true
+	})
+	return strings.Join(parts, "\n")
+}
+
+func ensureAssistantReasoningPrefix(msg []byte, reasoningText string) []byte {
+	reasoningText = strings.TrimSpace(reasoningText)
+	if reasoningText == "" {
+		return msg
+	}
+
+	current := gjson.GetBytes(msg, "content")
+	if current.Exists() && current.IsArray() {
+		items := current.Array()
+		if len(items) > 0 {
+			first := items[0]
+			if first.Get("type").String() == "text" && first.Get("text").String() == reasoningText {
+				return msg
+			}
+		}
+	}
+
+	reasoningPart := []byte(`{"type":"text","text":""}`)
+	reasoningPart, _ = sjson.SetBytes(reasoningPart, "text", reasoningText)
+
+	newContent := []byte(`[]`)
+	newContent, _ = sjson.SetRawBytes(newContent, "-1", reasoningPart)
+	if current.Exists() && current.IsArray() {
+		current.ForEach(func(_, item gjson.Result) bool {
+			newContent, _ = sjson.SetRawBytes(newContent, "-1", []byte(item.Raw))
+			return true
+		})
+	}
+	msg, _ = sjson.SetRawBytes(msg, "content", newContent)
+	return msg
 }
 
 func convertOpenAIToolResultContent(content gjson.Result) (string, bool) {
