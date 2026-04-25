@@ -37,7 +37,7 @@ func TestApplyThinking_UserDefinedClaudePreservesAdaptiveLevel(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			out, err := thinking.ApplyThinking(tt.body, tt.model, "openai", "claude", "claude")
+			out, err := thinking.ApplyThinking(tt.body, tt.model, "openai", "claude", "claude", "")
 			if err != nil {
 				t.Fatalf("ApplyThinking() error = %v", err)
 			}

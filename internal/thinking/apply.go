@@ -81,13 +81,14 @@ func IsUserDefinedModel(modelInfo *registry.ModelInfo) bool {
 // Example:
 //
 //	// With suffix - suffix config takes priority
-//	result, err := thinking.ApplyThinking(body, "gemini-2.5-pro(8192)", "gemini", "gemini", "gemini")
+//	result, err := thinking.ApplyThinking(body, "gemini-2.5-pro(8192)", "gemini", "gemini", "gemini", "")
 //
 //	// Without suffix - uses body config
-//	result, err := thinking.ApplyThinking(body, "gemini-2.5-pro", "gemini", "gemini", "gemini")
-func ApplyThinking(body []byte, model string, fromFormat string, toFormat string, providerKey string) ([]byte, error) {
+//	result, err := thinking.ApplyThinking(body, "gemini-2.5-pro", "gemini", "gemini", "gemini", "high")
+func ApplyThinking(body []byte, model string, fromFormat string, toFormat string, providerKey string, defaultEffort string) ([]byte, error) {
 	providerFormat := strings.ToLower(strings.TrimSpace(toFormat))
 	providerKey = strings.ToLower(strings.TrimSpace(providerKey))
+	defaultEffort = normalizeDefaultReasoningEffort(defaultEffort)
 	if providerKey == "" {
 		providerKey = providerFormat
 	}
@@ -115,7 +116,7 @@ func ApplyThinking(body []byte, model string, fromFormat string, toFormat string
 	// Unknown models are treated as user-defined so thinking config can still be applied.
 	// The upstream service is responsible for validating the configuration.
 	if IsUserDefinedModel(modelInfo) {
-		return applyUserDefinedModel(body, modelInfo, fromFormat, providerFormat, suffixResult)
+		return applyUserDefinedModel(body, modelInfo, fromFormat, providerFormat, suffixResult, defaultEffort)
 	}
 	if modelInfo.Thinking == nil {
 		config := extractThinkingConfig(body, providerFormat)
@@ -154,6 +155,20 @@ func ApplyThinking(body []byte, model string, fromFormat string, toFormat string
 				"budget":   config.Budget,
 				"level":    config.Level,
 			}).Debug("thinking: original config from request |")
+		}
+	}
+
+	if !hasThinkingConfig(config) && defaultEffort != "" {
+		config = parseSuffixToConfig(defaultEffort, providerFormat, model)
+		if hasThinkingConfig(config) {
+			log.WithFields(log.Fields{
+				"provider":       providerFormat,
+				"model":          modelInfo.ID,
+				"default_effort": defaultEffort,
+				"mode":           config.Mode,
+				"budget":         config.Budget,
+				"level":          config.Level,
+			}).Debug("thinking: config from default effort parameter |")
 		}
 	}
 
@@ -243,7 +258,7 @@ func parseSuffixToConfig(rawSuffix, provider, model string) ThinkingConfig {
 
 // applyUserDefinedModel applies thinking configuration for user-defined models
 // without ThinkingSupport validation.
-func applyUserDefinedModel(body []byte, modelInfo *registry.ModelInfo, fromFormat, toFormat string, suffixResult SuffixResult) ([]byte, error) {
+func applyUserDefinedModel(body []byte, modelInfo *registry.ModelInfo, fromFormat, toFormat string, suffixResult SuffixResult, defaultEffort string) ([]byte, error) {
 	// Get model ID for logging
 	modelID := ""
 	if modelInfo != nil {
@@ -260,6 +275,9 @@ func applyUserDefinedModel(body []byte, modelInfo *registry.ModelInfo, fromForma
 		config = extractThinkingConfig(body, fromFormat)
 		if !hasThinkingConfig(config) && fromFormat != toFormat {
 			config = extractThinkingConfig(body, toFormat)
+		}
+		if !hasThinkingConfig(config) && defaultEffort != "" {
+			config = parseSuffixToConfig(defaultEffort, toFormat, modelID)
 		}
 	}
 
@@ -345,6 +363,16 @@ func hasThinkingConfig(config ThinkingConfig) bool {
 	return config.Mode != ModeBudget || config.Budget != 0 || config.Level != ""
 }
 
+func normalizeDefaultReasoningEffort(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	switch value {
+	case "", "none", "auto", "minimal", "low", "medium", "high", "xhigh", "max":
+		return value
+	default:
+		return ""
+	}
+}
+
 // extractClaudeConfig extracts thinking configuration from Claude format request body.
 //
 // Claude API format:
@@ -355,7 +383,7 @@ func hasThinkingConfig(config ThinkingConfig) bool {
 // When type="enabled" without budget_tokens, returns ModeAuto to indicate
 // the user wants thinking enabled but didn't specify a budget.
 func extractClaudeConfig(body []byte) ThinkingConfig {
-	thinkingType := gjson.GetBytes(body, "thinking.type").String()
+	thinkingType := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "thinking.type").String()))
 	if thinkingType == "disabled" {
 		return ThinkingConfig{Mode: ModeNone, Budget: 0}
 	}
@@ -424,7 +452,10 @@ func extractGeminiConfig(body []byte, provider string) ThinkingConfig {
 		level = gjson.GetBytes(body, prefix+".thinking_level")
 	}
 	if level.Exists() {
-		value := level.String()
+		value := strings.ToLower(strings.TrimSpace(level.String()))
+		if value == "" {
+			return ThinkingConfig{}
+		}
 		switch value {
 		case "none":
 			return ThinkingConfig{Mode: ModeNone, Budget: 0}
@@ -466,7 +497,10 @@ func extractGeminiConfig(body []byte, provider string) ThinkingConfig {
 func extractOpenAIConfig(body []byte) ThinkingConfig {
 	// Check reasoning_effort (OpenAI Chat Completions format)
 	if effort := gjson.GetBytes(body, "reasoning_effort"); effort.Exists() {
-		value := effort.String()
+		value := strings.ToLower(strings.TrimSpace(effort.String()))
+		if value == "" {
+			return ThinkingConfig{}
+		}
 		if value == "none" {
 			return ThinkingConfig{Mode: ModeNone, Budget: 0}
 		}
@@ -485,7 +519,10 @@ func extractOpenAIConfig(body []byte) ThinkingConfig {
 func extractCodexConfig(body []byte) ThinkingConfig {
 	// Check reasoning.effort (Codex / OpenAI Responses API format)
 	if effort := gjson.GetBytes(body, "reasoning.effort"); effort.Exists() {
-		value := effort.String()
+		value := strings.ToLower(strings.TrimSpace(effort.String()))
+		if value == "" {
+			return ThinkingConfig{}
+		}
 		if value == "none" {
 			return ThinkingConfig{Mode: ModeNone, Budget: 0}
 		}
