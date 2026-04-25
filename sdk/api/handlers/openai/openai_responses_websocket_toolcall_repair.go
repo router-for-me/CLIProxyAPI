@@ -1,7 +1,9 @@
 package openai
 
 import (
+	"crypto/sha256"
 	"encoding/json"
+	"encoding/hex"
 	"net/http"
 	"strings"
 	"sync"
@@ -417,4 +419,17 @@ func isResponsesToolCallOutputType(itemType string) bool {
 	default:
 		return false
 	}
+}
+
+// httpResponsesSessionKey derives a deterministic session key from the HTTP request payload
+// for tool call cache lookups. Mirrors the WebSocket session key derivation logic.
+func httpResponsesSessionKey(payload []byte) string {
+	model := strings.TrimSpace(gjson.GetBytes(payload, "model").String())
+	prevRespID := strings.TrimSpace(gjson.GetBytes(payload, "previous_response_id").String())
+	// Build a composite key from model + previous_response_id.
+	// This is deterministic per request, matching the WebSocket behavior where
+	// the same session sees cached tool calls across multiple message exchanges.
+	composite := model + "|" + prevRespID
+	hash := sha256.Sum256([]byte(composite))
+	return "http:" + hex.EncodeToString(hash[:16])
 }

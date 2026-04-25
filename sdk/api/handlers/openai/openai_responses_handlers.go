@@ -255,6 +255,11 @@ func (h *OpenAIResponsesAPIHandler) Responses(c *gin.Context) {
 		return
 	}
 
+	// Repair tool call ordering before sending to upstream (mirrors WebSocket behavior).
+	// This fixes 2013 errors from MiniMax上游 which rejects out-of-order function_call / function_call_output.
+	rpcSessionKey := httpResponsesSessionKey(rawJSON)
+	rawJSON = repairResponsesWebsocketToolCalls(rpcSessionKey, rawJSON)
+
 	// Check if the client requested a streaming response.
 	streamResult := gjson.GetBytes(rawJSON, "stream")
 	if streamResult.Type == gjson.True {
@@ -292,6 +297,10 @@ func (h *OpenAIResponsesAPIHandler) Compact(c *gin.Context) {
 			rawJSON = updated
 		}
 	}
+
+	// Repair tool call ordering before sending to upstream (mirrors WebSocket behavior).
+	rpcSessionKey := httpResponsesSessionKey(rawJSON)
+	rawJSON = repairResponsesWebsocketToolCalls(rpcSessionKey, rawJSON)
 
 	c.Header("Content-Type", "application/json")
 	modelName := gjson.GetBytes(rawJSON, "model").String()
