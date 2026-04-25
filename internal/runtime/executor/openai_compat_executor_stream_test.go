@@ -261,3 +261,134 @@ func TestOpenAICompatExecutorExecuteStream_OpenAISourceNoSynthesis(t *testing.T)
 		t.Fatalf("expected no synthetic chunks for openai source format, got %d", chunkCount)
 	}
 }
+
+func TestOpenAICompatExecutorExecuteStream_OpenAISourceTruncatedChunkedBodySynthesizesDone(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			t.Fatal("response writer does not support hijacking")
+		}
+		conn, rw, err := hj.Hijack()
+		if err != nil {
+			t.Fatalf("Hijack() error = %v", err)
+		}
+		defer conn.Close()
+
+		_, _ = rw.WriteString("HTTP/1.1 200 OK\r\n")
+		_, _ = rw.WriteString("Content-Type: text/event-stream\r\n")
+		_, _ = rw.WriteString("Transfer-Encoding: chunked\r\n")
+		_, _ = rw.WriteString("\r\n")
+		frame := "data: {\"id\":\"chatcmpl_partial\",\"object\":\"chat.completion.chunk\",\"created\":1775540000,\"model\":\"glm-4.7\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n\n"
+		_, _ = rw.WriteString(fmt.Sprintf("%x\r\n%s\r\n", len(frame), frame))
+		_, _ = rw.WriteString("10\r\npartial")
+		_ = rw.Flush()
+	}))
+	defer upstream.Close()
+
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{})
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{
+			"base_url": upstream.URL + "/v1",
+			"api_key":  "test",
+		},
+	}
+	stream, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "glm-4.7",
+		Payload: []byte(`{"model":"glm-4.7","messages":[{"role":"user","content":"hi"}],"stream":true}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAI,
+		Stream:       true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+	if stream == nil {
+		t.Fatal("stream result is nil")
+	}
+
+	var gotChunkErr error
+	var chunkCount int
+	for chunk := range stream.Chunks {
+		if chunk.Err != nil {
+			gotChunkErr = chunk.Err
+			break
+		}
+		chunkCount++
+	}
+	if gotChunkErr != nil {
+		t.Fatalf("expected tolerated truncated chunked stream, got chunk err: %v", gotChunkErr)
+	}
+	if chunkCount == 0 {
+		t.Fatal("expected partial stream payloads after tolerated stream truncation")
+	}
+}
+
+func TestOpenAICompatExecutorExecuteStream_ResponsesTruncatedChunkedBodyStillCompletes(t *testing.T) {
+	const authID = "test-native-truncated-responses"
+	globalResponsesCapabilityResolver.Set(authID, ResponsesModeNative)
+	defer globalResponsesCapabilityResolver.Invalidate(authID)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/responses" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			t.Fatal("response writer does not support hijacking")
+		}
+		conn, rw, err := hj.Hijack()
+		if err != nil {
+			t.Fatalf("Hijack() error = %v", err)
+		}
+		defer conn.Close()
+
+		_, _ = rw.WriteString("HTTP/1.1 200 OK\r\n")
+		_, _ = rw.WriteString("Content-Type: text/event-stream\r\n")
+		_, _ = rw.WriteString("Transfer-Encoding: chunked\r\n")
+		_, _ = rw.WriteString("\r\n")
+		frame := "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_partial\",\"created_at\":1775540000,\"model\":\"glm-4.7\",\"status\":\"in_progress\",\"output\":[]}}\n\n"
+		_, _ = rw.WriteString(fmt.Sprintf("%x\r\n%s\r\n", len(frame), frame))
+		_, _ = rw.WriteString("10\r\npartial")
+		_ = rw.Flush()
+	}))
+	defer upstream.Close()
+
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{})
+	auth := testAuthForServer(upstream.URL, authID)
+	stream, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "glm-4.7",
+		Payload: []byte(`{"model":"glm-4.7","input":"hi","stream":true}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+		Stream:       true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+	if stream == nil {
+		t.Fatal("stream result is nil")
+	}
+
+	var gotChunkErr error
+	var gotCompleted bool
+	for chunk := range stream.Chunks {
+		if chunk.Err != nil {
+			gotChunkErr = chunk.Err
+			break
+		}
+		if hasOpenAIResponsesCompletedEvent(chunk.Payload) {
+			gotCompleted = true
+		}
+	}
+	if gotChunkErr != nil {
+		t.Fatalf("expected tolerated truncated chunked responses stream, got chunk err: %v", gotChunkErr)
+	}
+	if !gotCompleted {
+		t.Fatal("expected response.completed event after tolerated stream truncation")
+	}
+}
