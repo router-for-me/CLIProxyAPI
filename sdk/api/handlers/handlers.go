@@ -15,6 +15,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
@@ -655,12 +656,243 @@ func downgradeRequestThinkingEffort(ctx context.Context, providers []string, req
 	return newReq, newOpts, true
 }
 
+type ingressReasoningScope int
+
+const (
+	ingressReasoningScopeUnknown ingressReasoningScope = iota
+	ingressReasoningScopeOpenAIChat
+	ingressReasoningScopeOpenAIResponses
+	ingressReasoningScopeClaudeMessages
+	ingressReasoningScopeGeminiGenerateContent
+)
+
+func requestMethodAndPath(ctx context.Context) (string, string) {
+	if ctx == nil {
+		return "", ""
+	}
+	ginCtx, ok := ctx.Value("gin").(*gin.Context)
+	if !ok || ginCtx == nil || ginCtx.Request == nil || ginCtx.Request.URL == nil {
+		return "", ""
+	}
+	return strings.ToUpper(strings.TrimSpace(ginCtx.Request.Method)), strings.TrimSpace(ginCtx.Request.URL.Path)
+}
+
+func resolveIngressReasoningScope(ctx context.Context, handlerType string) ingressReasoningScope {
+	method, path := requestMethodAndPath(ctx)
+	if method == "" || path == "" {
+		return ingressReasoningScopeUnknown
+	}
+
+	switch strings.ToLower(strings.TrimSpace(handlerType)) {
+	case "openai":
+		if method == http.MethodPost && path == "/v1/chat/completions" {
+			return ingressReasoningScopeOpenAIChat
+		}
+	case "openai-response":
+		if method == http.MethodPost && (path == "/v1/responses" || path == "/v1/responses/compact") {
+			return ingressReasoningScopeOpenAIResponses
+		}
+		if method == http.MethodGet && path == "/v1/responses/ws" {
+			return ingressReasoningScopeOpenAIResponses
+		}
+	case "claude":
+		if method == http.MethodPost && path == "/v1/messages" {
+			return ingressReasoningScopeClaudeMessages
+		}
+	case "gemini":
+		if method == http.MethodPost &&
+			strings.HasPrefix(path, "/v1beta/models/") &&
+			(strings.HasSuffix(path, ":generateContent") || strings.HasSuffix(path, ":streamGenerateContent")) {
+			return ingressReasoningScopeGeminiGenerateContent
+		}
+	}
+
+	return ingressReasoningScopeUnknown
+}
+
+func hasNonEmptyJSONValue(payload []byte, path string) bool {
+	if len(payload) == 0 {
+		return false
+	}
+	value := gjson.GetBytes(payload, path)
+	if !value.Exists() {
+		return false
+	}
+	switch value.Type {
+	case gjson.Null:
+		return false
+	case gjson.String:
+		return strings.TrimSpace(value.String()) != ""
+	default:
+		return strings.TrimSpace(value.Raw) != ""
+	}
+}
+
+func setJSONPathString(payload []byte, path string, value string) ([]byte, bool) {
+	updated, err := sjson.SetBytes(payload, path, value)
+	if err != nil {
+		return payload, false
+	}
+	return updated, true
+}
+
+func deleteJSONPath(payload []byte, path string) []byte {
+	updated, err := sjson.DeleteBytes(payload, path)
+	if err != nil {
+		return payload
+	}
+	return updated
+}
+
+func shouldApplyIngressReasoningPolicy(policy string, explicit bool) bool {
+	switch policy {
+	case internalconfig.ReasoningIngressPolicyForceOverride:
+		return true
+	case internalconfig.ReasoningIngressPolicyMissingOnly:
+		return !explicit
+	default:
+		return false
+	}
+}
+
+func applyIngressOpenAIReasoning(payload []byte, entry internalconfig.ReasoningIngressDefault) ([]byte, bool) {
+	explicit := hasNonEmptyJSONValue(payload, "reasoning_effort") || hasNonEmptyJSONValue(payload, "reasoning.effort")
+	if !shouldApplyIngressReasoningPolicy(entry.Policy, explicit) {
+		return payload, false
+	}
+
+	out := bytes.Clone(payload)
+	changed := false
+	if updated, ok := setJSONPathString(out, "reasoning_effort", entry.Value); ok {
+		out = updated
+		changed = true
+	}
+	if updated, ok := setJSONPathString(out, "reasoning.effort", entry.Value); ok {
+		out = updated
+		changed = true
+	}
+	return out, changed
+}
+
+func applyIngressClaudeReasoning(payload []byte, entry internalconfig.ReasoningIngressDefault) ([]byte, bool) {
+	explicit := hasNonEmptyJSONValue(payload, "thinking.type") || hasNonEmptyJSONValue(payload, "output_config.effort")
+	if !shouldApplyIngressReasoningPolicy(entry.Policy, explicit) {
+		return payload, false
+	}
+
+	out := bytes.Clone(payload)
+	changed := false
+	switch entry.Mode {
+	case internalconfig.ReasoningModeAdaptiveEffort:
+		if updated, ok := setJSONPathString(out, "thinking.type", "adaptive"); ok {
+			out = updated
+			changed = true
+		}
+		if updated, ok := setJSONPathString(out, "output_config.effort", entry.Value); ok {
+			out = updated
+			changed = true
+		}
+		next := deleteJSONPath(out, "thinking.budget_tokens")
+		if !bytes.Equal(next, out) {
+			out = next
+			changed = true
+		}
+	case internalconfig.ReasoningModeDisabled:
+		if updated, ok := setJSONPathString(out, "thinking.type", "disabled"); ok {
+			out = updated
+			changed = true
+		}
+		next := deleteJSONPath(out, "output_config.effort")
+		if !bytes.Equal(next, out) {
+			out = next
+			changed = true
+		}
+		next = deleteJSONPath(out, "thinking.budget_tokens")
+		if !bytes.Equal(next, out) {
+			out = next
+			changed = true
+		}
+	}
+	return out, changed
+}
+
+func applyIngressGeminiReasoning(payload []byte, entry internalconfig.ReasoningIngressDefault) ([]byte, bool) {
+	explicit := hasNonEmptyJSONValue(payload, "generationConfig.thinkingConfig.thinkingLevel")
+	if !shouldApplyIngressReasoningPolicy(entry.Policy, explicit) {
+		return payload, false
+	}
+
+	out := bytes.Clone(payload)
+	changed := false
+	if updated, ok := setJSONPathString(out, "generationConfig.thinkingConfig.thinkingLevel", entry.Value); ok {
+		out = updated
+		changed = true
+	}
+	for _, path := range []string{
+		"generationConfig.thinkingConfig.thinkingBudget",
+		"generationConfig.thinkingConfig.thinking_budget",
+	} {
+		next := deleteJSONPath(out, path)
+		if !bytes.Equal(next, out) {
+			out = next
+			changed = true
+		}
+	}
+	return out, changed
+}
+
+func applyIngressReasoningDefaults(ctx context.Context, cfg *config.SDKConfig, handlerType string, rawJSON []byte) ([]byte, bool) {
+	if cfg == nil || len(rawJSON) == 0 || !gjson.ValidBytes(rawJSON) {
+		return rawJSON, false
+	}
+
+	scope := resolveIngressReasoningScope(ctx, handlerType)
+	if scope == ingressReasoningScopeUnknown {
+		return rawJSON, false
+	}
+
+	var (
+		format string
+		entry  internalconfig.ReasoningIngressDefault
+		ok     bool
+	)
+	switch scope {
+	case ingressReasoningScopeOpenAIChat, ingressReasoningScopeOpenAIResponses:
+		format = internalconfig.ReasoningIngressFormatOpenAI
+	case ingressReasoningScopeClaudeMessages:
+		format = internalconfig.ReasoningIngressFormatClaude
+	case ingressReasoningScopeGeminiGenerateContent:
+		format = internalconfig.ReasoningIngressFormatGemini
+	default:
+		return rawJSON, false
+	}
+
+	entry, ok = internalconfig.ResolveReasoningOnIngressEntry(cfg.DefaultReasoningOnIngressByFormat, format)
+	if !ok {
+		return rawJSON, false
+	}
+
+	switch format {
+	case internalconfig.ReasoningIngressFormatOpenAI:
+		return applyIngressOpenAIReasoning(rawJSON, entry)
+	case internalconfig.ReasoningIngressFormatClaude:
+		return applyIngressClaudeReasoning(rawJSON, entry)
+	case internalconfig.ReasoningIngressFormatGemini:
+		return applyIngressGeminiReasoning(rawJSON, entry)
+	default:
+		return rawJSON, false
+	}
+}
+
 // ExecuteWithAuthManager executes a non-streaming request via the core auth manager.
 // This path is the only supported execution route.
 func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) ([]byte, http.Header, *interfaces.ErrorMessage) {
 	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
 	if errMsg != nil {
 		return nil, nil, errMsg
+	}
+	if updatedRawJSON, changed := applyIngressReasoningDefaults(ctx, h.Cfg, handlerType, rawJSON); changed {
+		rawJSON = updatedRawJSON
 	}
 	reqMeta := requestExecutionMetadata(ctx)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
@@ -727,6 +959,9 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 	if errMsg != nil {
 		return nil, nil, errMsg
 	}
+	if updatedRawJSON, changed := applyIngressReasoningDefaults(ctx, h.Cfg, handlerType, rawJSON); changed {
+		rawJSON = updatedRawJSON
+	}
 	reqMeta := requestExecutionMetadata(ctx)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
 	payload := rawJSON
@@ -776,6 +1011,9 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 		errChan <- errMsg
 		close(errChan)
 		return nil, nil, errChan
+	}
+	if updatedRawJSON, changed := applyIngressReasoningDefaults(ctx, h.Cfg, handlerType, rawJSON); changed {
+		rawJSON = updatedRawJSON
 	}
 	reqMeta := requestExecutionMetadata(ctx)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
