@@ -35,19 +35,21 @@ const attemptMaxIdleTime = 2 * time.Hour
 
 // Handler aggregates config reference, persistence path and helpers.
 type Handler struct {
-	cfg                 *config.Config
-	configFilePath      string
-	mu                  sync.Mutex
-	attemptsMu          sync.Mutex
-	failedAttempts      map[string]*attemptInfo // keyed by client IP
-	authManager         *coreauth.Manager
-	usageStats          *usage.RequestStatistics
-	tokenStore          coreauth.Store
-	localPassword       string
-	allowRemoteOverride bool
-	envSecret           string
-	logDir              string
-	postAuthHook        coreauth.PostAuthHook
+	cfg                                 *config.Config
+	configFilePath                      string
+	mu                                  sync.Mutex
+	attemptsMu                          sync.Mutex
+	failedAttempts                      map[string]*attemptInfo // keyed by client IP
+	authManager                         *coreauth.Manager
+	usageStats                          *usage.RequestStatistics
+	requestEventHub                     *usage.RequestEventHub
+	tokenStore                          coreauth.Store
+	localPassword                       string
+	allowRemoteOverride                 bool
+	envSecret                           string
+	logDir                              string
+	postAuthHook                        coreauth.PostAuthHook
+	circuitBreakerDeletionActionHandler CircuitBreakerDeletionActionHandler
 }
 
 // NewHandler creates a new management handler instance.
@@ -61,6 +63,7 @@ func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Man
 		failedAttempts:      make(map[string]*attemptInfo),
 		authManager:         manager,
 		usageStats:          usage.GetRequestStatistics(),
+		requestEventHub:     usage.GetRequestEventHub(),
 		tokenStore:          sdkAuth.GetTokenStore(),
 		allowRemoteOverride: envSecret != "",
 		envSecret:           envSecret,
@@ -113,6 +116,9 @@ func (h *Handler) SetAuthManager(manager *coreauth.Manager) { h.authManager = ma
 // SetUsageStatistics allows replacing the usage statistics reference.
 func (h *Handler) SetUsageStatistics(stats *usage.RequestStatistics) { h.usageStats = stats }
 
+// SetRequestEventHub allows replacing the request event stream hub reference.
+func (h *Handler) SetRequestEventHub(hub *usage.RequestEventHub) { h.requestEventHub = hub }
+
 // SetLocalPassword configures the runtime-local password accepted for localhost requests.
 func (h *Handler) SetLocalPassword(password string) { h.localPassword = password }
 
@@ -132,6 +138,11 @@ func (h *Handler) SetLogDirectory(dir string) {
 // SetPostAuthHook registers a hook to be called after auth record creation but before persistence.
 func (h *Handler) SetPostAuthHook(hook coreauth.PostAuthHook) {
 	h.postAuthHook = hook
+}
+
+// SetCircuitBreakerDeletionActionHandler injects the executor used by delete/dismiss APIs.
+func (h *Handler) SetCircuitBreakerDeletionActionHandler(handler CircuitBreakerDeletionActionHandler) {
+	h.circuitBreakerDeletionActionHandler = handler
 }
 
 // Middleware enforces access control for management endpoints.

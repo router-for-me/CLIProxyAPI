@@ -1,6 +1,8 @@
 package management
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -9,6 +11,11 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/store/mongostate"
 )
+
+type CircuitBreakerDeletionActionHandler interface {
+	DeleteCircuitBreakerDeletion(ctx context.Context, id string, actionBy string) (mongostate.CircuitBreakerDeletionItem, error)
+	DismissCircuitBreakerDeletion(ctx context.Context, id string, actionBy string) (mongostate.CircuitBreakerDeletionItem, error)
+}
 
 func parseRFC3339QueryTime(raw string) (time.Time, error) {
 	value := strings.TrimSpace(raw)
@@ -53,6 +60,7 @@ func (h *Handler) GetCircuitBreakerDeletions(c *gin.Context) {
 		Provider: strings.ToLower(strings.TrimSpace(c.Query("provider"))),
 		AuthID:   strings.TrimSpace(c.Query("auth_id")),
 		Model:    strings.TrimSpace(c.Query("model")),
+		Status:   strings.ToLower(strings.TrimSpace(c.Query("status"))),
 		Start:    start,
 		End:      end,
 		Page:     parsePositiveIntQuery(c.Query("page"), 1),
@@ -65,4 +73,41 @@ func (h *Handler) GetCircuitBreakerDeletions(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, result)
+}
+
+func (h *Handler) DeleteCircuitBreakerDeletion(c *gin.Context) {
+	if h == nil || h.circuitBreakerDeletionActionHandler == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "circuit breaker deletion action handler unavailable"})
+		return
+	}
+
+	item, err := h.circuitBreakerDeletionActionHandler.DeleteCircuitBreakerDeletion(c.Request.Context(), c.Param("id"), "management_api")
+	h.respondCircuitBreakerDeletionAction(c, item, err)
+}
+
+func (h *Handler) DismissCircuitBreakerDeletion(c *gin.Context) {
+	if h == nil || h.circuitBreakerDeletionActionHandler == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "circuit breaker deletion action handler unavailable"})
+		return
+	}
+
+	item, err := h.circuitBreakerDeletionActionHandler.DismissCircuitBreakerDeletion(c.Request.Context(), c.Param("id"), "management_api")
+	h.respondCircuitBreakerDeletionAction(c, item, err)
+}
+
+func (h *Handler) respondCircuitBreakerDeletionAction(c *gin.Context, item mongostate.CircuitBreakerDeletionItem, err error) {
+	switch {
+	case err == nil:
+		c.JSON(http.StatusOK, item)
+	case errors.Is(err, mongostate.ErrCircuitBreakerDeletionNotFound):
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+	case errors.Is(err, mongostate.ErrCircuitBreakerDeletionConflict):
+		c.JSON(http.StatusConflict, gin.H{"error": err.Error(), "item": item})
+	default:
+		if item.ID == "" {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error(), "item": item})
+	}
 }

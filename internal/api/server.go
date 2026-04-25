@@ -315,6 +315,13 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	return s
 }
 
+func (s *Server) SetCircuitBreakerDeletionActionHandler(handler managementHandlers.CircuitBreakerDeletionActionHandler) {
+	if s == nil || s.mgmt == nil {
+		return
+	}
+	s.mgmt.SetCircuitBreakerDeletionActionHandler(handler)
+}
+
 // setupRoutes configures the API routes for the server.
 // It defines the endpoints and associates them with their respective handlers.
 func (s *Server) setupRoutes() {
@@ -488,6 +495,8 @@ func (s *Server) registerManagementRoutes() {
 	mgmt.Use(s.managementAvailabilityMiddleware(), s.mgmt.Middleware())
 	{
 		mgmt.GET("/usage", s.mgmt.GetUsageStatistics)
+		mgmt.GET("/usage/request-events", s.mgmt.ListUsageRequestEvents)
+		mgmt.GET("/usage/request-events/stream", s.mgmt.StreamUsageRequestEvents)
 		mgmt.GET("/usage/export", s.mgmt.ExportUsageStatistics)
 		mgmt.POST("/usage/import", s.mgmt.ImportUsageStatistics)
 		mgmt.GET("/config", s.mgmt.GetConfig)
@@ -532,6 +541,8 @@ func (s *Server) registerManagementRoutes() {
 
 		mgmt.GET("/circuit-breaker", s.mgmt.GetCircuitBreaker)
 		mgmt.GET("/circuit-breaker/deletions", s.mgmt.GetCircuitBreakerDeletions)
+		mgmt.DELETE("/circuit-breaker/deletions/:id", s.mgmt.DeleteCircuitBreakerDeletion)
+		mgmt.POST("/circuit-breaker/deletions/:id/dismiss", s.mgmt.DismissCircuitBreakerDeletion)
 		mgmt.DELETE("/circuit-breaker", s.mgmt.DeleteCircuitBreaker)
 		mgmt.PUT("/circuit-breaker", s.mgmt.PutCircuitBreaker)
 
