@@ -1,11 +1,59 @@
 package helps
 
 import (
+	"context"
+	"fmt"
 	"testing"
 	"time"
 
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 )
+
+type usageReporterCapturePlugin struct {
+	provider string
+	records  chan usage.Record
+}
+
+func (p *usageReporterCapturePlugin) HandleUsage(_ context.Context, record usage.Record) {
+	if record.Provider != p.provider {
+		return
+	}
+	select {
+	case p.records <- record:
+	default:
+	}
+}
+
+func installUsageReporterCapturePlugin(t *testing.T) *usageReporterCapturePlugin {
+	t.Helper()
+	plugin := &usageReporterCapturePlugin{
+		provider: fmt.Sprintf("usage-reporter-test-%d", time.Now().UnixNano()),
+		records:  make(chan usage.Record, 4),
+	}
+	usage.RegisterPlugin(plugin)
+	return plugin
+}
+
+func readUsageReporterRecord(t *testing.T, plugin *usageReporterCapturePlugin) usage.Record {
+	t.Helper()
+	select {
+	case record := <-plugin.records:
+		return record
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for usage record")
+	}
+	return usage.Record{}
+}
+
+func assertNoUsageReporterRecord(t *testing.T, plugin *usageReporterCapturePlugin) {
+	t.Helper()
+	select {
+	case record := <-plugin.records:
+		t.Fatalf("unexpected usage record: %+v", record)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
 
 func TestParseOpenAIUsageChatCompletions(t *testing.T) {
 	data := []byte(`{"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3,"prompt_tokens_details":{"cached_tokens":4},"completion_tokens_details":{"reasoning_tokens":5}}}`)
@@ -61,4 +109,67 @@ func TestUsageReporterBuildRecordIncludesLatency(t *testing.T) {
 	if record.Latency > 3*time.Second {
 		t.Fatalf("latency = %v, want <= 3s", record.Latency)
 	}
+}
+
+func TestUsageReporterPublishesFailureWithoutDeferral(t *testing.T) {
+	plugin := installUsageReporterCapturePlugin(t)
+	reporter := NewUsageReporter(context.Background(), plugin.provider, "test-model", nil)
+
+	reporter.PublishFailure(context.Background())
+
+	record := readUsageReporterRecord(t, plugin)
+	if !record.Failed {
+		t.Fatalf("expected failed usage record, got success: %+v", record)
+	}
+	if record.Provider != plugin.provider {
+		t.Fatalf("provider = %q, want %q", record.Provider, plugin.provider)
+	}
+}
+
+func TestUsageReporterDefersFailureUntilFlush(t *testing.T) {
+	plugin := installUsageReporterCapturePlugin(t)
+	ctx, deferred := cliproxyexecutor.WithDeferredFailure(context.Background())
+	reporter := NewUsageReporter(ctx, plugin.provider, "test-model", nil)
+
+	reporter.PublishFailure(ctx)
+	assertNoUsageReporterRecord(t, plugin)
+
+	deferred.Flush(ctx)
+	record := readUsageReporterRecord(t, plugin)
+	if !record.Failed {
+		t.Fatalf("expected failed usage record, got success: %+v", record)
+	}
+}
+
+func TestUsageReporterDiscardedDeferredFailureIsNotPublished(t *testing.T) {
+	plugin := installUsageReporterCapturePlugin(t)
+	ctx, deferred := cliproxyexecutor.WithDeferredFailure(context.Background())
+	reporter := NewUsageReporter(ctx, plugin.provider, "test-model", nil)
+
+	reporter.PublishFailure(ctx)
+	deferred.Discard()
+	deferred.Flush(ctx)
+
+	assertNoUsageReporterRecord(t, plugin)
+}
+
+func TestUsageReporterSuccessClosesDeferredFailureScope(t *testing.T) {
+	plugin := installUsageReporterCapturePlugin(t)
+	ctx, deferred := cliproxyexecutor.WithDeferredFailure(context.Background())
+	failureReporter := NewUsageReporter(ctx, plugin.provider, "test-model", nil)
+	successReporter := NewUsageReporter(ctx, plugin.provider, "test-model", nil)
+
+	failureReporter.PublishFailure(ctx)
+	successReporter.Publish(ctx, usage.Detail{TotalTokens: 7})
+	deferred.Discard()
+	deferred.Flush(ctx)
+
+	record := readUsageReporterRecord(t, plugin)
+	if record.Failed {
+		t.Fatalf("expected successful usage record, got failed: %+v", record)
+	}
+	if record.Detail.TotalTokens != 7 {
+		t.Fatalf("total tokens = %d, want 7", record.Detail.TotalTokens)
+	}
+	assertNoUsageReporterRecord(t, plugin)
 }

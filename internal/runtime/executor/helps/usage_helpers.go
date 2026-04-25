@@ -10,6 +10,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -72,7 +73,13 @@ func (r *UsageReporter) publishWithOutcome(ctx context.Context, detail usage.Det
 		}
 	}
 	r.once.Do(func() {
-		usage.PublishRecord(ctx, r.buildRecord(detail, failed))
+		record := r.buildRecord(detail, failed)
+		if failed && cliproxyexecutor.DeferFailure(ctx, func(ctx context.Context) {
+			usage.PublishRecord(ctx, record)
+		}) {
+			return
+		}
+		usage.PublishRecord(ctx, record)
 	})
 }
 

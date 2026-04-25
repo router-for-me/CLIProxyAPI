@@ -1183,6 +1183,8 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 	if len(normalized) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
+	ctx, deferredFailure := cliproxyexecutor.WithDeferredFailure(ctx)
+	defer deferredFailure.Flush(ctx)
 
 	_, maxRetryCredentials, maxWait := m.retrySettings()
 
@@ -1190,6 +1192,7 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 	for attempt := 0; ; attempt++ {
 		resp, errExec := m.executeMixedOnce(ctx, normalized, req, opts, maxRetryCredentials)
 		if errExec == nil {
+			deferredFailure.Discard()
 			return resp, nil
 		}
 		lastErr = errExec
@@ -1204,6 +1207,7 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 	if lastErr != nil {
 		if shouldAttemptAntigravityCreditsFallback(m, lastErr, normalized) {
 			if resp, ok := m.tryAntigravityCreditsExecute(ctx, req, opts); ok {
+				deferredFailure.Discard()
 				return resp, nil
 			}
 		}
@@ -1249,6 +1253,8 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 	if len(normalized) == 0 {
 		return nil, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
+	ctx, deferredFailure := cliproxyexecutor.WithDeferredFailure(ctx)
+	defer deferredFailure.Flush(ctx)
 
 	_, maxRetryCredentials, maxWait := m.retrySettings()
 
@@ -1256,6 +1262,7 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 	for attempt := 0; ; attempt++ {
 		result, errStream := m.executeStreamMixedOnce(ctx, normalized, req, opts, maxRetryCredentials)
 		if errStream == nil {
+			deferredFailure.Discard()
 			return result, nil
 		}
 		lastErr = errStream
@@ -1270,6 +1277,7 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 	if lastErr != nil {
 		if shouldAttemptAntigravityCreditsFallback(m, lastErr, normalized) {
 			if result, ok := m.tryAntigravityCreditsExecuteStream(ctx, req, opts); ok {
+				deferredFailure.Discard()
 				return result, nil
 			}
 		}
