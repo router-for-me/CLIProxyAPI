@@ -209,6 +209,20 @@ func (h *OpenAIAPIHandler) ImagesGenerations(c *gin.Context) {
 	if imageModel == "" {
 		imageModel = defaultImagesToolModel
 	}
+	if h.HasNativeImagesProvider(imageModel, "images/generations") {
+		h.collectImagesFromNative(c, rawJSON, imageModel, "images/generations")
+		return
+	}
+	if !strings.EqualFold(imageModel, defaultImagesToolModel) {
+		c.JSON(http.StatusBadGateway, handlers.ErrorResponse{
+			Error: handlers.ErrorDetail{
+				Message: fmt.Sprintf("no native image provider for model %s", imageModel),
+				Type:    "invalid_request_error",
+			},
+		})
+		return
+	}
+
 	responseFormat := strings.TrimSpace(gjson.GetBytes(rawJSON, "response_format").String())
 	if responseFormat == "" {
 		responseFormat = "b64_json"
@@ -383,6 +397,16 @@ func (h *OpenAIAPIHandler) imagesEditsFromMultipart(c *gin.Context) {
 		tool, _ = sjson.SetBytes(tool, "input_image_mask.image_url", strings.TrimSpace(*maskDataURL))
 	}
 
+	if !strings.EqualFold(imageModel, defaultImagesToolModel) {
+		c.JSON(http.StatusBadGateway, handlers.ErrorResponse{
+			Error: handlers.ErrorDetail{
+				Message: fmt.Sprintf("no native image edit provider for model %s", imageModel),
+				Type:    "invalid_request_error",
+			},
+		})
+		return
+	}
+
 	responsesReq := buildImagesResponsesRequest(prompt, images, tool)
 	if stream {
 		h.streamImagesFromResponses(c, responsesReq, responseFormat, "image_edit")
@@ -489,6 +513,16 @@ func (h *OpenAIAPIHandler) imagesEditsFromJSON(c *gin.Context) {
 		tool, _ = sjson.SetBytes(tool, "input_image_mask.image_url", strings.TrimSpace(*maskDataURL))
 	}
 
+	if !strings.EqualFold(imageModel, defaultImagesToolModel) {
+		c.JSON(http.StatusBadGateway, handlers.ErrorResponse{
+			Error: handlers.ErrorDetail{
+				Message: fmt.Sprintf("no native image edit provider for model %s", imageModel),
+				Type:    "invalid_request_error",
+			},
+		})
+		return
+	}
+
 	responsesReq := buildImagesResponsesRequest(prompt, images, tool)
 	if stream {
 		h.streamImagesFromResponses(c, responsesReq, responseFormat, "image_edit")
@@ -547,6 +581,27 @@ func (h *OpenAIAPIHandler) collectImagesFromResponses(c *gin.Context, responsesR
 	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, "openai-response", mainModel, responsesReq, "")
 
 	out, errMsg := collectImagesFromResponsesStream(cliCtx, dataChan, errChan, responseFormat)
+	stopKeepAlive()
+	if errMsg != nil {
+		h.WriteErrorResponse(c, errMsg)
+		if errMsg.Error != nil {
+			cliCancel(errMsg.Error)
+		} else {
+			cliCancel(nil)
+		}
+		return
+	}
+	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+	_, _ = c.Writer.Write(out)
+	cliCancel()
+}
+
+func (h *OpenAIAPIHandler) collectImagesFromNative(c *gin.Context, rawJSON []byte, modelName string, endpoint string) {
+	c.Header("Content-Type", "application/json")
+
+	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
+	out, upstreamHeaders, errMsg := h.ExecuteImagesWithAuthManager(cliCtx, modelName, rawJSON, endpoint)
 	stopKeepAlive()
 	if errMsg != nil {
 		h.WriteErrorResponse(c, errMsg)

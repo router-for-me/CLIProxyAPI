@@ -137,3 +137,24 @@ func TestGetRequestDetails_ImageModelReturns503(t *testing.T) {
 		t.Fatalf("unexpected error message: %q", msg)
 	}
 }
+
+func TestGetImagesRequestDetails_AllowsImageModel(t *testing.T) {
+	modelRegistry := registry.GetGlobalRegistry()
+	modelRegistry.RegisterClient("test-images-request-details", "openai-compatibility", []*registry.ModelInfo{{ID: "gpt-image-2"}})
+	t.Cleanup(func() {
+		modelRegistry.UnregisterClient("test-images-request-details")
+	})
+
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, coreauth.NewManager(nil, nil, nil))
+
+	providers, model, errMsg := handler.getImagesRequestDetails("gpt-image-2")
+	if errMsg != nil {
+		t.Fatalf("getImagesRequestDetails() error = %v, want nil", errMsg)
+	}
+	if !reflect.DeepEqual(providers, []string{"openai-compatibility"}) {
+		t.Fatalf("providers = %v, want [openai-compatibility]", providers)
+	}
+	if model != "gpt-image-2" {
+		t.Fatalf("model = %q, want gpt-image-2", model)
+	}
+}

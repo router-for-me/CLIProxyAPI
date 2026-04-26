@@ -506,6 +506,28 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 	if errMsg != nil {
 		return nil, nil, errMsg
 	}
+	return h.executeNonStreamWithAuthManager(ctx, providers, normalizedModel, rawJSON, alt, handlerType, h.AuthManager.Execute)
+}
+
+// ExecuteImagesWithAuthManager executes an OpenAI-compatible Images API request
+// against providers whose executor explicitly supports the native Images API.
+// Codex is intentionally excluded because Codex image generation is implemented
+// through the Responses image_generation tool.
+func (h *BaseAPIHandler) ExecuteImagesWithAuthManager(ctx context.Context, modelName string, rawJSON []byte, endpoint string) ([]byte, http.Header, *interfaces.ErrorMessage) {
+	providers, normalizedModel, errMsg := h.getImagesRequestDetails(modelName)
+	if errMsg != nil {
+		return nil, nil, errMsg
+	}
+	providers = h.nativeImagesProviders(providers, endpoint)
+	if len(providers) == 0 {
+		return nil, nil, &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: fmt.Errorf("no native image provider for model %s", modelName)}
+	}
+	return h.executeNonStreamWithAuthManager(ctx, providers, normalizedModel, rawJSON, endpoint, "openai", h.AuthManager.Execute)
+}
+
+type nonStreamAuthExecutor func(context.Context, []string, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error)
+
+func (h *BaseAPIHandler) executeNonStreamWithAuthManager(ctx context.Context, providers []string, normalizedModel string, rawJSON []byte, alt string, sourceFormat string, execute nonStreamAuthExecutor) ([]byte, http.Header, *interfaces.ErrorMessage) {
 	reqMeta := requestExecutionMetadata(ctx)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
 	payload := rawJSON
@@ -520,31 +542,28 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 		Stream:          false,
 		Alt:             alt,
 		OriginalRequest: rawJSON,
-		SourceFormat:    sdktranslator.FromString(handlerType),
+		SourceFormat:    sdktranslator.FromString(sourceFormat),
 		Headers:         headersFromContext(ctx),
 	}
 	opts.Metadata = reqMeta
-	resp, err := h.AuthManager.Execute(ctx, providers, req, opts)
+	resp, err := execute(ctx, providers, req, opts)
 	if err != nil {
-		err = enrichAuthSelectionError(err, providers, normalizedModel)
-		status := http.StatusInternalServerError
-		if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
-			if code := se.StatusCode(); code > 0 {
-				status = code
-			}
-		}
-		var addon http.Header
-		if he, ok := err.(interface{ Headers() http.Header }); ok && he != nil {
-			if hdr := he.Headers(); hdr != nil {
-				addon = hdr.Clone()
-			}
-		}
-		return nil, nil, &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
+		return nil, nil, authExecutionErrorMessage(err, providers, normalizedModel)
 	}
 	if !PassthroughHeadersEnabled(h.Cfg) {
 		return resp.Payload, nil, nil
 	}
 	return resp.Payload, FilterUpstreamHeaders(resp.Headers), nil
+}
+
+// HasNativeImagesProvider reports whether a model is backed by a provider whose
+// executor can receive the requested native OpenAI-compatible Images API call.
+func (h *BaseAPIHandler) HasNativeImagesProvider(modelName string, endpoint string) bool {
+	providers, _, errMsg := h.getImagesRequestDetails(modelName)
+	if errMsg != nil {
+		return false
+	}
+	return len(h.nativeImagesProviders(providers, endpoint)) > 0
 }
 
 // ExecuteCountWithAuthManager executes a non-streaming request via the core auth manager.
@@ -554,45 +573,7 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 	if errMsg != nil {
 		return nil, nil, errMsg
 	}
-	reqMeta := requestExecutionMetadata(ctx)
-	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
-	payload := rawJSON
-	if len(payload) == 0 {
-		payload = nil
-	}
-	req := coreexecutor.Request{
-		Model:   normalizedModel,
-		Payload: payload,
-	}
-	opts := coreexecutor.Options{
-		Stream:          false,
-		Alt:             alt,
-		OriginalRequest: rawJSON,
-		SourceFormat:    sdktranslator.FromString(handlerType),
-		Headers:         headersFromContext(ctx),
-	}
-	opts.Metadata = reqMeta
-	resp, err := h.AuthManager.ExecuteCount(ctx, providers, req, opts)
-	if err != nil {
-		err = enrichAuthSelectionError(err, providers, normalizedModel)
-		status := http.StatusInternalServerError
-		if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
-			if code := se.StatusCode(); code > 0 {
-				status = code
-			}
-		}
-		var addon http.Header
-		if he, ok := err.(interface{ Headers() http.Header }); ok && he != nil {
-			if hdr := he.Headers(); hdr != nil {
-				addon = hdr.Clone()
-			}
-		}
-		return nil, nil, &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
-	}
-	if !PassthroughHeadersEnabled(h.Cfg) {
-		return resp.Payload, nil, nil
-	}
-	return resp.Payload, FilterUpstreamHeaders(resp.Headers), nil
+	return h.executeNonStreamWithAuthManager(ctx, providers, normalizedModel, rawJSON, alt, handlerType, h.AuthManager.ExecuteCount)
 }
 
 // ExecuteStreamWithAuthManager executes a streaming request via the core auth manager.
@@ -626,21 +607,8 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 	opts.Metadata = reqMeta
 	streamResult, err := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
 	if err != nil {
-		err = enrichAuthSelectionError(err, providers, normalizedModel)
 		errChan := make(chan *interfaces.ErrorMessage, 1)
-		status := http.StatusInternalServerError
-		if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
-			if code := se.StatusCode(); code > 0 {
-				status = code
-			}
-		}
-		var addon http.Header
-		if he, ok := err.(interface{ Headers() http.Header }); ok && he != nil {
-			if hdr := he.Headers(); hdr != nil {
-				addon = hdr.Clone()
-			}
-		}
-		errChan <- &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
+		errChan <- authExecutionErrorMessage(err, providers, normalizedModel)
 		close(errChan)
 		return nil, nil, errChan
 	}
@@ -740,19 +708,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 						}
 					}
 
-					status := http.StatusInternalServerError
-					if se, ok := streamErr.(interface{ StatusCode() int }); ok && se != nil {
-						if code := se.StatusCode(); code > 0 {
-							status = code
-						}
-					}
-					var addon http.Header
-					if he, ok := streamErr.(interface{ Headers() http.Header }); ok && he != nil {
-						if hdr := he.Headers(); hdr != nil {
-							addon = hdr.Clone()
-						}
-					}
-					_ = sendErr(&interfaces.ErrorMessage{StatusCode: status, Error: streamErr, Addon: addon})
+					_ = sendErr(authExecutionErrorMessage(streamErr, providers, normalizedModel))
 					return
 				}
 				if len(chunk.Payload) > 0 {
@@ -815,6 +771,14 @@ func statusFromError(err error) int {
 }
 
 func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string, normalizedModel string, err *interfaces.ErrorMessage) {
+	return h.getRequestDetailsForModel(modelName, false)
+}
+
+func (h *BaseAPIHandler) getImagesRequestDetails(modelName string) (providers []string, normalizedModel string, err *interfaces.ErrorMessage) {
+	return h.getRequestDetailsForModel(modelName, true)
+}
+
+func (h *BaseAPIHandler) getRequestDetailsForModel(modelName string, allowImageModel bool) (providers []string, normalizedModel string, err *interfaces.ErrorMessage) {
 	resolvedModelName := modelName
 	initialSuffix := thinking.ParseSuffix(modelName)
 	if initialSuffix.ModelName == "auto" {
@@ -831,7 +795,7 @@ func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string
 	parsed := thinking.ParseSuffix(resolvedModelName)
 	baseModel := strings.TrimSpace(parsed.ModelName)
 
-	if strings.EqualFold(baseModel, "gpt-image-2") {
+	if !allowImageModel && strings.EqualFold(baseModel, "gpt-image-2") {
 		return nil, "", &interfaces.ErrorMessage{
 			StatusCode: http.StatusServiceUnavailable,
 			Error:      fmt.Errorf("model %s is only supported on /v1/images/generations and /v1/images/edits", baseModel),
@@ -855,6 +819,32 @@ func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string
 	// The thinking suffix is preserved in the model name itself, so no
 	// metadata-based configuration passing is needed.
 	return providers, resolvedModelName, nil
+}
+
+func (h *BaseAPIHandler) nativeImagesProviders(providers []string, endpoint string) []string {
+	if len(providers) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(providers))
+	for _, provider := range providers {
+		p := strings.TrimSpace(strings.ToLower(provider))
+		if p == "" || p == "codex" {
+			continue
+		}
+		if h == nil || h.AuthManager == nil {
+			continue
+		}
+		executor, ok := h.AuthManager.Executor(p)
+		if !ok {
+			continue
+		}
+		nativeExecutor, ok := executor.(coreexecutor.NativeImagesEndpointExecutor)
+		if !ok || !nativeExecutor.SupportsNativeImagesEndpoint(endpoint) {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
 }
 
 func cloneBytes(src []byte) []byte {
@@ -884,6 +874,23 @@ func replaceHeader(dst http.Header, src http.Header) {
 	for key, values := range src {
 		dst[key] = append([]string(nil), values...)
 	}
+}
+
+func authExecutionErrorMessage(err error, providers []string, model string) *interfaces.ErrorMessage {
+	err = enrichAuthSelectionError(err, providers, model)
+	status := http.StatusInternalServerError
+	if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
+		if code := se.StatusCode(); code > 0 {
+			status = code
+		}
+	}
+	var addon http.Header
+	if he, ok := err.(interface{ Headers() http.Header }); ok && he != nil {
+		if hdr := he.Headers(); hdr != nil {
+			addon = hdr.Clone()
+		}
+	}
+	return &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
 }
 
 func enrichAuthSelectionError(err error, providers []string, model string) error {

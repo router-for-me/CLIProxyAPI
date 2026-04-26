@@ -88,3 +88,9 @@ type StatusError interface {
 	error
 	StatusCode() int
 }
+
+// NativeImagesEndpointExecutor is an optional executor capability for providers
+// that can receive OpenAI-compatible Images API requests without translation.
+type NativeImagesEndpointExecutor interface {
+	SupportsNativeImagesEndpoint(endpoint string) bool
+}
