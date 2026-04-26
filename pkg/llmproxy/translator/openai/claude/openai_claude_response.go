@@ -452,7 +452,7 @@ func convertOpenAINonStreamingToAnthropic(rawJSON []byte) []string {
 		// Handle tool calls
 		if toolCalls := choice.Get("message.tool_calls"); toolCalls.Exists() && toolCalls.IsArray() {
 			toolCalls.ForEach(func(_, toolCall gjson.Result) bool {
-				toolUseBlock := `{"type":"tool_use","id":"","name":"","input":{}}`
+				toolUseBlock := []byte(`{"type":"tool_use","id":"","name":"","input":{}}`)
 				toolUseBlock, _ = sjson.SetBytes(toolUseBlock, "id", toolCall.Get("id").String())
 				toolUseBlock, _ = sjson.SetBytes(toolUseBlock, "name", toolCall.Get("function.name").String())
 
@@ -460,12 +460,12 @@ func convertOpenAINonStreamingToAnthropic(rawJSON []byte) []string {
 				if argsStr != "" && gjson.Valid(argsStr) {
 					argsJSON := gjson.Parse(argsStr)
 					if argsJSON.IsObject() {
-						toolUseBlock, _ = sjson.SetRaw(toolUseBlock, "input", argsJSON.Raw)
+						toolUseBlock, _ = sjson.SetRawBytes(toolUseBlock, "input", []byte(argsJSON.Raw))
 					} else {
-						toolUseBlock, _ = sjson.SetRaw(toolUseBlock, "input", "{}")
+						toolUseBlock, _ = sjson.SetRawBytes(toolUseBlock, "input", []byte("{}"))
 					}
 				} else {
-					toolUseBlock, _ = sjson.SetRaw(toolUseBlock, "input", "{}")
+					toolUseBlock, _ = sjson.SetRawBytes(toolUseBlock, "input", []byte("{}"))
 				}
 
 				out, _ = sjson.SetRawBytes(out, "content.-1", toolUseBlock)
@@ -489,7 +489,7 @@ func convertOpenAINonStreamingToAnthropic(rawJSON []byte) []string {
 		}
 	}
 
-	return []string{out}
+	return []string{string(out)}
 }
 
 // mapOpenAIFinishReasonToAnthropic maps OpenAI finish reasons to Anthropic equivalents
@@ -649,7 +649,7 @@ func ConvertOpenAIResponseToClaudeNonStream(_ context.Context, _ string, origina
 			if toolCalls := message.Get("tool_calls"); toolCalls.Exists() && toolCalls.IsArray() {
 				toolCalls.ForEach(func(_, toolCall gjson.Result) bool {
 					hasToolCall = true
-					toolUseBlock := `{"type":"tool_use","id":"","name":"","input":{}}`
+					toolUseBlock := []byte(`{"type":"tool_use","id":"","name":"","input":{}}`)
 					toolUseBlock, _ = sjson.SetBytes(toolUseBlock, "id", toolCall.Get("id").String())
 					toolUseBlock, _ = sjson.SetBytes(toolUseBlock, "name", toolCall.Get("function.name").String())
 
@@ -657,12 +657,12 @@ func ConvertOpenAIResponseToClaudeNonStream(_ context.Context, _ string, origina
 					if argsStr != "" && gjson.Valid(argsStr) {
 						argsJSON := gjson.Parse(argsStr)
 						if argsJSON.IsObject() {
-							toolUseBlock, _ = sjson.SetRaw(toolUseBlock, "input", argsJSON.Raw)
+							toolUseBlock, _ = sjson.SetRawBytes(toolUseBlock, "input", []byte(argsJSON.Raw))
 						} else {
-							toolUseBlock, _ = sjson.SetRaw(toolUseBlock, "input", "{}")
+							toolUseBlock, _ = sjson.SetRawBytes(toolUseBlock, "input", []byte("{}"))
 						}
 					} else {
-						toolUseBlock, _ = sjson.SetRaw(toolUseBlock, "input", "{}")
+						toolUseBlock, _ = sjson.SetRawBytes(toolUseBlock, "input", []byte("{}"))
 					}
 
 					out, _ = sjson.SetRawBytes(out, "content.-1", toolUseBlock)
@@ -709,7 +709,7 @@ func ConvertOpenAIResponseToClaudeNonStream(_ context.Context, _ string, origina
 		}
 	}
 
-	return out
+	return string(out)
 }
 
 func ClaudeTokenCount(ctx context.Context, count int64) string {
