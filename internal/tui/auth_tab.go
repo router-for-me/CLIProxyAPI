@@ -23,6 +23,17 @@ var authEditableFields = []editableField{
 	{label: "Priority", key: "priority"},
 }
 
+const (
+	authRowNameWidth          = 24
+	authRowChannelWidth       = 12
+	authRowEmailWidth         = 28
+	authRowCursorWidth        = 2
+	authRowStatusIconWidth    = 2
+	authRowStatusTextMinWidth = 8
+	authRowSummaryMinWidth    = 12
+	authRowInterColumnSpaces  = 5
+)
+
 // authTabModel displays auth credential files with interactive management.
 type authTabModel struct {
 	client   *Client
@@ -212,16 +223,16 @@ func (m authTabModel) renderContent() string {
 		}
 
 		displayName := name
-		if len(displayName) > 24 {
-			displayName = displayName[:21] + "..."
+		if len(displayName) > authRowNameWidth {
+			displayName = displayName[:authRowNameWidth-3] + "..."
 		}
 		displayEmail := email
-		if len(displayEmail) > 28 {
-			displayEmail = displayEmail[:25] + "..."
+		if len(displayEmail) > authRowEmailWidth {
+			displayEmail = displayEmail[:authRowEmailWidth-3] + "..."
 		}
 
-		row := fmt.Sprintf("%s%s %-24s %-12s %-28s %s",
-			cursor, statusIcon, displayName, channel, displayEmail, statusText)
+		row := fmt.Sprintf("%s%s %-*s %-*s %-*s %s",
+			cursor, statusIcon, authRowNameWidth, displayName, authRowChannelWidth, channel, authRowEmailWidth, displayEmail, statusText)
 		if summary := authFileRowSummary(f, m.width); summary != "" {
 			row += "  " + summary
 		}
@@ -287,12 +298,22 @@ func authFileRowSummary(f map[string]any, width int) string {
 
 	summary := strings.Join(parts, " ")
 	if width > 0 {
-		maxSummaryWidth := width - 82
-		if maxSummaryWidth >= 12 && len(summary) > maxSummaryWidth {
+		maxSummaryWidth := width - authRowPrefixWidth()
+		if maxSummaryWidth >= authRowSummaryMinWidth && len(summary) > maxSummaryWidth {
 			summary = truncate(summary, maxSummaryWidth)
 		}
 	}
 	return summary
+}
+
+func authRowPrefixWidth() int {
+	return authRowCursorWidth +
+		authRowStatusIconWidth +
+		authRowNameWidth +
+		authRowChannelWidth +
+		authRowEmailWidth +
+		authRowStatusTextMinWidth +
+		authRowInterColumnSpaces
 }
 
 func formatCodexPlanForRow(plan string) string {

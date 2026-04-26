@@ -80,3 +80,39 @@ func TestBuildAuthFileEntry_ExposesCodexPlanAndQuota(t *testing.T) {
 		t.Fatalf("quota_backoff_level = %#v, want %d", got, 2)
 	}
 }
+
+func TestBuildAuthFileEntry_PreservesCooldownWhenQuotaWindowMetadataIsPartial(t *testing.T) {
+	recoverAt := time.Now().Add(90 * time.Minute).UTC().Truncate(time.Second)
+	auth := &coreauth.Auth{
+		ID:       "codex-user.json",
+		FileName: "codex-user.json",
+		Provider: "codex",
+		Attributes: map[string]string{
+			"path":      "/tmp/codex-user.json",
+			"plan_type": "plus",
+		},
+		Metadata: map[string]any{
+			"codex_quota_5h_limit":     float64(100),
+			"codex_quota_5h_remaining": float64(0),
+		},
+		Quota: coreauth.QuotaState{
+			Exceeded:      true,
+			Reason:        "quota",
+			NextRecoverAt: recoverAt,
+		},
+	}
+
+	entry := (&Handler{}).buildAuthFileEntry(auth)
+	if got := entry["quota_5h_amount"]; got != "0 / 100 remaining" {
+		t.Fatalf("quota_5h_amount = %#v, want %q", got, "0 / 100 remaining")
+	}
+	if got := entry["quota_5h_status"]; got != "recovering" {
+		t.Fatalf("quota_5h_status = %#v, want %q", got, "recovering")
+	}
+	if got := entry["quota_5h_next_recover_at"]; got != recoverAt {
+		t.Fatalf("quota_5h_next_recover_at = %#v, want %#v", got, recoverAt)
+	}
+	if got, ok := entry["quota_5h_recover_in"].(string); !ok || got == "" {
+		t.Fatalf("quota_5h_recover_in = %#v, want non-empty string", entry["quota_5h_recover_in"])
+	}
+}

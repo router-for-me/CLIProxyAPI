@@ -428,10 +428,11 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 			log.WithError(err).Warnf("failed to stat auth file %s", path)
 		}
 	}
-	if claims := extractCodexIDTokenClaims(auth); claims != nil {
+	claims := extractCodexIDTokenClaims(auth)
+	if claims != nil {
 		entry["id_token"] = claims
 	}
-	addCodexAccountEntryFields(entry, auth)
+	addCodexAccountEntryFields(entry, auth, claims)
 	// Expose priority from Attributes (set by synthesizer from JSON "priority" field).
 	// Fall back to Metadata for auths registered via UploadAuthFile (no synthesizer).
 	if p := strings.TrimSpace(authAttribute(auth, "priority")); p != "" {
@@ -466,13 +467,13 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 	return entry
 }
 
-func addCodexAccountEntryFields(entry gin.H, auth *coreauth.Auth) {
+func addCodexAccountEntryFields(entry gin.H, auth *coreauth.Auth, claims gin.H) {
 	if entry == nil || auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
 		return
 	}
 
 	planType := strings.TrimSpace(authAttribute(auth, "plan_type"))
-	if claims := extractCodexIDTokenClaims(auth); claims != nil {
+	if claims != nil {
 		if planType == "" {
 			if v, ok := claims["plan_type"].(string); ok {
 				planType = strings.TrimSpace(v)
@@ -598,7 +599,7 @@ func addCodexQuotaWindowFromMetadata(entry gin.H, auth *coreauth.Auth, window co
 		entry[window.prefix+"_status"] = strings.ToLower(status)
 	} else if hasRecoverAt && recoverAt.After(now) {
 		entry[window.prefix+"_status"] = "recovering"
-	} else {
+	} else if hasRecoverAt {
 		entry[window.prefix+"_status"] = "available"
 	}
 	if hasRecoverAt {
@@ -612,7 +613,7 @@ func addCodexQuotaRuntimeFallback(entry gin.H, quota coreauth.QuotaState, now ti
 		return
 	}
 	prefix := codexQuotaFallbackPrefix(quota, now)
-	if _, exists := entry[prefix+"_status"]; exists {
+	if existingStatus, exists := entry[prefix+"_status"]; exists && !strings.EqualFold(strings.TrimSpace(fmt.Sprintf("%v", existingStatus)), "available") {
 		return
 	}
 	entry[prefix+"_status"] = quotaEntryStatus(quota, now)
