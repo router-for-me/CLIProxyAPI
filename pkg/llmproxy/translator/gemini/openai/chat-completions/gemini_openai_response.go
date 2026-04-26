@@ -252,8 +252,8 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 		if gjson.GetBytes(rawJSON, "usageMetadata").Exists() && len(responseStrings) == 0 {
 			// OpenAI spec: chunks with only usage should have empty choices or OMIT it.
 			// LiteLLM can fail with "missing finish_reason for choice 0" if a choice exists with null finish_reason.
-			template, _ := sjson.Delete(baseTemplate, "choices")
-			template, _ = sjson.SetRaw(template, "choices", "[]")
+			template, _ := sjson.DeleteBytes(baseTemplate, "choices")
+			template, _ = sjson.SetRawBytes(template, "choices", []byte("[]"))
 			responseStrings = append(responseStrings, template)
 		}
 	}
