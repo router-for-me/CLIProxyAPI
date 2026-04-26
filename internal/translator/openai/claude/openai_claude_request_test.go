@@ -696,3 +696,92 @@ func TestConvertClaudeRequestToOpenAI_AssistantThinkingToolUseThinkingSplit(t *t
 		t.Fatalf("Expected reasoning_content %q, got %q", "t1\n\nt2", got)
 	}
 }
+
+func TestConvertClaudeRequestToOpenAI_ThinkingEnabledAssistantToolUseFallsBackToVisibleText(t *testing.T) {
+	inputJSON := `{
+		"model": "claude-3-opus",
+		"thinking": {"type": "adaptive"},
+		"output_config": {"effort": "high"},
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "text", "text": "tool planning summary"},
+					{"type": "tool_use", "id": "call_1", "name": "do_work", "input": {"a": 1}}
+				]
+			}
+		]
+	}`
+
+	result := ConvertClaudeRequestToOpenAI("test-model", []byte(inputJSON), false)
+	assistantMsg := gjson.GetBytes(result, "messages.0")
+
+	if got := assistantMsg.Get("reasoning_content").String(); got != "tool planning summary" {
+		t.Fatalf("Expected reasoning_content %q, got %q", "tool planning summary", got)
+	}
+	if got := assistantMsg.Get("tool_calls.0.id").String(); got != "call_1" {
+		t.Fatalf("Expected tool_call id %q, got %q", "call_1", got)
+	}
+	if got := assistantMsg.Get("content.0.text").String(); got != "tool planning summary" {
+		t.Fatalf("Expected content[0].text %q, got %q", "tool planning summary", got)
+	}
+}
+
+func TestConvertClaudeRequestToOpenAI_ThinkingEnabledAssistantToolUseFallsBackToLatestReasoning(t *testing.T) {
+	inputJSON := `{
+		"model": "claude-3-opus",
+		"thinking": {"type": "adaptive"},
+		"output_config": {"effort": "high"},
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "thinking", "thinking": "previous reasoning"},
+					{"type": "text", "text": "first answer"}
+				]
+			},
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "call_2", "name": "do_work", "input": {"b": 2}}
+				]
+			}
+		]
+	}`
+
+	result := ConvertClaudeRequestToOpenAI("test-model", []byte(inputJSON), false)
+	assistantMsg := gjson.GetBytes(result, "messages.1")
+
+	if got := assistantMsg.Get("reasoning_content").String(); got != "previous reasoning" {
+		t.Fatalf("Expected reasoning_content %q, got %q", "previous reasoning", got)
+	}
+	if got := assistantMsg.Get("tool_calls.0.id").String(); got != "call_2" {
+		t.Fatalf("Expected tool_call id %q, got %q", "call_2", got)
+	}
+}
+
+func TestConvertClaudeRequestToOpenAI_ThinkingEnabledAssistantToolUseUsesPlaceholderWhenNoFallback(t *testing.T) {
+	inputJSON := `{
+		"model": "claude-3-opus",
+		"thinking": {"type": "adaptive"},
+		"output_config": {"effort": "high"},
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "call_3", "name": "do_work", "input": {"c": 3}}
+				]
+			}
+		]
+	}`
+
+	result := ConvertClaudeRequestToOpenAI("test-model", []byte(inputJSON), false)
+	assistantMsg := gjson.GetBytes(result, "messages.0")
+
+	if got := assistantMsg.Get("reasoning_content").String(); got != "[reasoning unavailable]" {
+		t.Fatalf("Expected reasoning_content %q, got %q", "[reasoning unavailable]", got)
+	}
+	if got := assistantMsg.Get("tool_calls.0.id").String(); got != "call_3" {
+		t.Fatalf("Expected tool_call id %q, got %q", "call_3", got)
+	}
+}

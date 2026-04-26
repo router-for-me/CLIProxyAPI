@@ -20,8 +20,8 @@ import (
 
 const (
 	apiAttemptsKey = "API_UPSTREAM_ATTEMPTS"
-	apiRequestKey  = "API_REQUEST"
-	apiResponseKey = "API_RESPONSE"
+	apiRequestKey  = "API_UPSTREAM_REQUEST"
+	apiResponseKey = "API_UPSTREAM_RESPONSE"
 )
 
 // upstreamRequestLog captures the outbound upstream request details for logging.

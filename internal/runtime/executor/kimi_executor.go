@@ -15,6 +15,7 @@ import (
 
 	kimiauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kimi"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/requestinvariants"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
@@ -99,6 +100,7 @@ func (e *KimiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	if err != nil {
 		return resp, err
 	}
+	body = sdktranslator.NormalizeRequestInvariants(from, to, body)
 
 	requestedModel := payloadRequestedModel(opts, req.Model)
 	body = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
@@ -199,6 +201,7 @@ func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 	if err != nil {
 		return nil, err
 	}
+	body = sdktranslator.NormalizeRequestInvariants(from, to, body)
 
 	body, err = sjson.SetBytes(body, "stream_options.include_usage", true)
 	if err != nil {
@@ -391,31 +394,7 @@ func normalizeKimiToolMessageLinks(body []byte) ([]byte, error) {
 }
 
 func fallbackAssistantReasoning(msg gjson.Result, hasLatest bool, latest string) string {
-	if hasLatest && strings.TrimSpace(latest) != "" {
-		return latest
-	}
-
-	content := msg.Get("content")
-	if content.Type == gjson.String {
-		if text := strings.TrimSpace(content.String()); text != "" {
-			return text
-		}
-	}
-	if content.IsArray() {
-		parts := make([]string, 0, len(content.Array()))
-		for _, item := range content.Array() {
-			text := strings.TrimSpace(item.Get("text").String())
-			if text == "" {
-				continue
-			}
-			parts = append(parts, text)
-		}
-		if len(parts) > 0 {
-			return strings.Join(parts, "\n")
-		}
-	}
-
-	return "[reasoning unavailable]"
+	return requestinvariants.FallbackAssistantReasoningFromOpenAIMessage(msg, hasLatest, latest)
 }
 
 // Refresh refreshes the Kimi token using the refresh token.

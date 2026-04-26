@@ -8,6 +8,7 @@ package claude
 import (
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/requestinvariants"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -22,6 +23,8 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 	out := []byte(`{"model":"","messages":[]}`)
 
 	root := gjson.ParseBytes(rawJSON)
+	thinkingEnabled := false
+	latestAssistantReasoning := ""
 
 	// Model mapping
 	out, _ = sjson.SetBytes(out, "model", modelName)
@@ -64,6 +67,7 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 		if thinkingType := thinkingConfig.Get("type"); thinkingType.Exists() {
 			switch thinkingType.String() {
 			case "enabled":
+				thinkingEnabled = true
 				if budgetTokens := thinkingConfig.Get("budget_tokens"); budgetTokens.Exists() {
 					budget := int(budgetTokens.Int())
 					if effort, ok := thinking.ConvertBudgetToLevel(budget); ok && effort != "" {
@@ -76,6 +80,7 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 					}
 				}
 			case "adaptive", "auto":
+				thinkingEnabled = true
 				// Adaptive thinking can carry an explicit effort in output_config.effort (Claude 4.6).
 				// Pass through directly; ApplyThinking handles clamping to target model's levels.
 				effort := ""
@@ -88,6 +93,7 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 					out, _ = sjson.SetBytes(out, "reasoning_effort", string(thinking.LevelXHigh))
 				}
 			case "disabled":
+				thinkingEnabled = false
 				if effort, ok := thinking.ConvertBudgetToLevel(0); ok && effort != "" {
 					out, _ = sjson.SetBytes(out, "reasoning_effort", effort)
 				}
@@ -136,6 +142,7 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 			if contentResult.Exists() && contentResult.IsArray() {
 				contentItems := make([][]byte, 0)
 				var reasoningParts []string // Accumulate thinking text for reasoning_content
+				var visibleTextParts []string
 				var toolCalls []interface{}
 				toolResults := make([][]byte, 0) // Collect tool_result messages to emit after the main message
 
@@ -160,6 +167,12 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 					case "text", "image":
 						if contentItem, ok := convertClaudeContentPart(part); ok {
 							contentItems = append(contentItems, []byte(contentItem))
+						}
+						if role == "assistant" && partType == "text" {
+							text := strings.TrimSpace(part.Get("text").String())
+							if text != "" {
+								visibleTextParts = append(visibleTextParts, text)
+							}
 						}
 
 					case "tool_use":
@@ -198,6 +211,10 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 				reasoningContent := ""
 				if len(reasoningParts) > 0 {
 					reasoningContent = strings.Join(reasoningParts, "\n\n")
+					latestAssistantReasoning = reasoningContent
+				} else if role == "assistant" && thinkingEnabled && len(toolCalls) > 0 {
+					reasoningContent = requestinvariants.FallbackAssistantReasoning(strings.Join(visibleTextParts, "\n"), latestAssistantReasoning)
+					latestAssistantReasoning = reasoningContent
 				}
 
 				hasContent := len(contentItems) > 0

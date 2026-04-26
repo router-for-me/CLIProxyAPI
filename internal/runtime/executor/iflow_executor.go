@@ -104,6 +104,7 @@ func (e *IFlowExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	if err != nil {
 		return resp, err
 	}
+	body = sdktranslator.NormalizeRequestInvariants(from, to, body)
 
 	body = preserveReasoningContentInMessages(body)
 	requestedModel := payloadRequestedModel(opts, req.Model)
@@ -207,6 +208,7 @@ func (e *IFlowExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	if err != nil {
 		return nil, err
 	}
+	body = sdktranslator.NormalizeRequestInvariants(from, to, body)
 
 	body = preserveReasoningContentInMessages(body)
 	// Ensure tools array exists to avoid provider quirks similar to Qwen's behaviour.
