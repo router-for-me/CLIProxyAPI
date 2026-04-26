@@ -1,0 +1,26 @@
+# Minimal config for first-run.
+# See config.example.yaml for the full schema (TLS, OAuth, routing, quotas, etc.).
+#
+# Start the server:
+#   go run ./cmd/server --config config.minimal.yaml
+# Or via Docker; see README "Quick Start".
+
+# Bind to all interfaces; use "127.0.0.1" to restrict to local only.
+host: ''
+port: 8317
+
+# Where provider auth tokens / OAuth state are persisted.
+auth-dir: '~/.cli-proxy-api'
+
+# Client-facing API keys. Callers must send one of these as a Bearer token.
+# Generate with: openssl rand -hex 32
+api-keys:
+  - 'replace-with-generated-key'
+
+# Static Claude (Anthropic) API key for upstream calls.
+# Get one at https://console.anthropic.com/.
+claude-api-key:
+  - api-key: 'sk-ant-REPLACE_ME'
+
+# Optional: enable verbose logs while bringing the proxy up for the first time.
+debug: true

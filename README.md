@@ -31,7 +31,31 @@ All third-party provider support is maintained by community contributors; clipro
 - Docker (optional)
 - Provider credentials for target upstreams
 
-### Quick Start
+### Quick Start (local Go)
+
+The fastest path to a running proxy on localhost. Uses the bundled minimal config.
+
+```bash
+# Clone and enter the repo
+git clone https://github.com/KooshaPari/cliproxyapi-plusplus.git
+cd cliproxyapi-plusplus
+
+# Copy the minimal first-run config and edit api-keys / claude-api-key
+cp config.minimal.yaml config.yaml
+$EDITOR config.yaml
+
+# Run the server (binds 0.0.0.0:8317)
+go run ./cmd/server --config config.yaml
+
+# Smoke test from another shell
+curl -H "Authorization: Bearer <your api-keys entry>" \
+     http://127.0.0.1:8317/v1/models
+```
+
+For the full schema (TLS, OAuth providers, routing, quotas, management API), see
+[`config.example.yaml`](./config.example.yaml). Drop fields into `config.yaml` as you need them.
+
+### Quick Start (Docker)
 
 ```bash
 # Create deployment directory
@@ -52,18 +76,21 @@ services:
     restart: unless-stopped
 EOF
 
-# Download example config
-curl -o config.yaml https://raw.githubusercontent.com/kooshapari/cliproxyapi-plusplus/main/config.example.yaml
+# Download minimal config (or grab config.example.yaml for the full schema)
+curl -o config.yaml https://raw.githubusercontent.com/KooshaPari/cliproxyapi-plusplus/main/config.minimal.yaml
 
 # Pull and start
 docker compose pull && docker compose up -d
 ```
 
-### Docker Quick Start
-
 ```bash
 docker run -p 8317:8317 eceasy/cli-proxy-api-plus:latest
 ```
+
+### Configuration
+
+- [`config.minimal.yaml`](./config.minimal.yaml) — ~25 lines, everything you need to boot the proxy with a static Claude API key. Start here.
+- [`config.example.yaml`](./config.example.yaml) — full annotated schema (~430 lines): every provider, OAuth, routing, TLS, management API, quotas. Reference only — copy fields into your `config.yaml` as needed.
 
 ## Operations and Security
 
