@@ -341,3 +341,8 @@ func (e *CodeBuddyExecutor) applyHeaders(req *http.Request, accessToken, userID,
 	req.Header.Set("X-IDE-Version", "2.63.2")
 	req.Header.Set("X-Requested-With", "XMLHttpRequest")
 }
+
+// isHTTPSuccess returns true when the status code indicates a 2xx success.
+func isHTTPSuccess(statusCode int) bool {
+	return statusCode >= 200 && statusCode < 300
+}

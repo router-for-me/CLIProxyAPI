@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 	copilotauth "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/auth/copilot"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/registry"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/thinking"
 	cliproxyauth "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/executor"
