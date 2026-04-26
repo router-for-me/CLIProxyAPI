@@ -274,3 +274,56 @@ func sortByPathDepthDesc(paths []string) {
 		return len(paths[i]) > len(paths[j])
 	})
 }
+
+// CanonicalToolName normalizes a tool name for case-insensitive matching.
+func CanonicalToolName(name string) string {
+	canonical := strings.TrimSpace(name)
+	canonical = strings.TrimLeft(canonical, "_")
+	return strings.ToLower(canonical)
+}
+
+// ToolNameMapFromClaudeRequest returns a canonical-name -> original-name map extracted from a Claude request.
+// It is used to restore exact tool name casing for clients that require strict tool name matching (e.g. Claude Code).
+func ToolNameMapFromClaudeRequest(rawJSON []byte) map[string]string {
+	if len(rawJSON) == 0 || !gjson.ValidBytes(rawJSON) {
+		return nil
+	}
+
+	tools := gjson.GetBytes(rawJSON, "tools")
+	if !tools.Exists() || !tools.IsArray() {
+		return nil
+	}
+
+	toolResults := tools.Array()
+	out := make(map[string]string, len(toolResults))
+	tools.ForEach(func(_, tool gjson.Result) bool {
+		name := strings.TrimSpace(tool.Get("name").String())
+		if name == "" {
+			return true
+		}
+		key := CanonicalToolName(name)
+		if key == "" {
+			return true
+		}
+		if _, exists := out[key]; !exists {
+			out[key] = name
+		}
+		return true
+	})
+
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// MapToolName returns the original (case-preserved) tool name for a canonical key.
+func MapToolName(toolNameMap map[string]string, name string) string {
+	if name == "" || toolNameMap == nil {
+		return name
+	}
+	if mapped, ok := toolNameMap[CanonicalToolName(name)]; ok && mapped != "" {
+		return mapped
+	}
+	return name
+}
