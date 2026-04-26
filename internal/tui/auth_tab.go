@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -196,7 +197,13 @@ func (m authTabModel) renderContent() string {
 
 		statusIcon := successStyle.Render("●")
 		statusText := T("status_active")
-		if disabled {
+		if isAccountAbnormalAuthFile(f) {
+			statusIcon = errorStyle.Render("●")
+			statusText = T("status_account_abnormal")
+			if statusCode := authFileStatusCode(f); statusCode != 0 {
+				statusText = fmt.Sprintf("%s (%d)", statusText, statusCode)
+			}
+		} else if disabled {
 			statusIcon = lipgloss.NewStyle().Foreground(colorMuted).Render("○")
 			statusText = T("status_disabled")
 		}
@@ -420,6 +427,18 @@ func (m authTabModel) handleNormalInput(msg tea.KeyMsg) (authTabModel, tea.Cmd) 
 			m.viewport.SetContent(m.renderContent())
 		}
 		return m, nil
+	case "x", "X":
+		if m.cursor < len(m.files) && isAccountAbnormalAuthFile(m.files[m.cursor]) {
+			name := getString(m.files[m.cursor], "name")
+			return m, func() tea.Msg {
+				err := m.client.DeleteAuthFile(name)
+				if err != nil {
+					return authActionMsg{err: err}
+				}
+				return authActionMsg{action: fmt.Sprintf(T("deleted"), name)}
+			}
+		}
+		return m, nil
 	case "e", "E":
 		if m.cursor < len(m.files) {
 			f := m.files[m.cursor]
@@ -452,5 +471,38 @@ func (m authTabModel) handleNormalInput(msg tea.KeyMsg) (authTabModel, tea.Cmd) 
 		var cmd tea.Cmd
 		m.viewport, cmd = m.viewport.Update(msg)
 		return m, cmd
+	}
+}
+
+func isAccountAbnormalAuthFile(f map[string]any) bool {
+	return getBool(f, "account_abnormal")
+}
+
+func authFileStatusCode(f map[string]any) int {
+	value, ok := f["status_code"]
+	if !ok {
+		return 0
+	}
+	switch v := value.(type) {
+	case int:
+		return v
+	case int64:
+		return int(v)
+	case float64:
+		return int(v)
+	case json.Number:
+		parsed, err := v.Int64()
+		if err != nil {
+			return 0
+		}
+		return int(parsed)
+	case string:
+		parsed, err := strconv.Atoi(strings.TrimSpace(v))
+		if err != nil {
+			return 0
+		}
+		return parsed
+	default:
+		return 0
 	}
 }

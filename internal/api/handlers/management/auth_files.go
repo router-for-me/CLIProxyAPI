@@ -388,6 +388,12 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 		"source":         "memory",
 		"size":           int64(0),
 	}
+	if auth.LastError != nil {
+		if auth.LastError.HTTPStatus != 0 {
+			entry["status_code"] = auth.LastError.HTTPStatus
+			entry["account_abnormal"] = isAccountAbnormalStatusCode(auth.LastError.HTTPStatus)
+		}
+	}
 	if email := authEmail(auth); email != "" {
 		entry["email"] = email
 	}
@@ -463,6 +469,10 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 		}
 	}
 	return entry
+}
+
+func isAccountAbnormalStatusCode(statusCode int) bool {
+	return statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden
 }
 
 func extractCodexIDTokenClaims(auth *coreauth.Auth) gin.H {
