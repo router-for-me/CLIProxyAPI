@@ -211,17 +211,17 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 //
 // Returns:
 //   - string: A Claude Code-compatible JSON response containing all message content and metadata
-func ConvertCodexResponseToClaudeNonStream(_ context.Context, _ string, originalRequestRawJSON, _ []byte, rawJSON []byte, _ *any) string {
+func ConvertCodexResponseToClaudeNonStream(_ context.Context, _ string, originalRequestRawJSON, _ []byte, rawJSON []byte, _ *any) []byte {
 	revNames := buildReverseMapFromClaudeOriginalShortToOriginal(originalRequestRawJSON)
 
 	rootResult := gjson.ParseBytes(rawJSON)
 	if rootResult.Get("type").String() != "response.completed" {
-		return ""
+		return nil
 	}
 
 	responseData := rootResult.Get("response")
 	if !responseData.Exists() {
-		return ""
+		return nil
 	}
 
 	out := []byte(`{"id":"","type":"message","role":"assistant","model":"","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}`)
@@ -316,7 +316,7 @@ func ConvertCodexResponseToClaudeNonStream(_ context.Context, _ string, original
 						inputRaw = argsJSON.Raw
 					}
 				}
-				toolBlock, _ = sjson.SetRawBytes(toolBlock, "input", inputRaw)
+				toolBlock, _ = sjson.SetRawBytes(toolBlock, "input", []byte(inputRaw))
 				out, _ = sjson.SetRawBytes(out, "content.-1", toolBlock)
 			}
 			return true
@@ -332,7 +332,7 @@ func ConvertCodexResponseToClaudeNonStream(_ context.Context, _ string, original
 	}
 
 	if stopSequence := responseData.Get("stop_sequence"); stopSequence.Exists() && stopSequence.String() != "" {
-		out, _ = sjson.SetRawBytes(out, "stop_sequence", stopSequence.Raw)
+		out, _ = sjson.SetRawBytes(out, "stop_sequence", []byte(stopSequence.Raw))
 	}
 
 	return out
