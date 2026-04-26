@@ -329,27 +329,11 @@ func (w *ResponseWriterWrapper) cloneHeaders() map[string][]string {
 }
 
 func (w *ResponseWriterWrapper) extractAPIRequest(c *gin.Context) []byte {
-	apiRequest, isExist := c.Get("API_REQUEST")
-	if !isExist {
-		return nil
-	}
-	data, ok := apiRequest.([]byte)
-	if !ok || len(data) == 0 {
-		return nil
-	}
-	return data
+	return extractContextBytes(c, "API_UPSTREAM_REQUEST", "API_REQUEST")
 }
 
 func (w *ResponseWriterWrapper) extractAPIResponse(c *gin.Context) []byte {
-	apiResponse, isExist := c.Get("API_RESPONSE")
-	if !isExist {
-		return nil
-	}
-	data, ok := apiResponse.([]byte)
-	if !ok || len(data) == 0 {
-		return nil
-	}
-	return data
+	return extractContextBytes(c, "API_UPSTREAM_RESPONSE", "API_RESPONSE")
 }
 
 func (w *ResponseWriterWrapper) extractAPIResponseTimestamp(c *gin.Context) time.Time {
@@ -380,6 +364,24 @@ func (w *ResponseWriterWrapper) extractRequestBody(c *gin.Context) []byte {
 	}
 	if w.requestInfo != nil && len(w.requestInfo.Body) > 0 {
 		return w.requestInfo.Body
+	}
+	return nil
+}
+
+func extractContextBytes(c *gin.Context, keys ...string) []byte {
+	if c == nil {
+		return nil
+	}
+	for _, key := range keys {
+		value, exists := c.Get(key)
+		if !exists {
+			continue
+		}
+		data, ok := value.([]byte)
+		if !ok || len(data) == 0 {
+			continue
+		}
+		return data
 	}
 	return nil
 }
