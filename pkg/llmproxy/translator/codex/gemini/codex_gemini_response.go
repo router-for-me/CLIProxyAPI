@@ -127,7 +127,7 @@ func ConvertCodexResponseToGemini(_ context.Context, modelName string, originalR
 		totalTokens := rootResult.Get("response.usage.input_tokens").Int() + rootResult.Get("response.usage.output_tokens").Int()
 		template, _ = sjson.SetBytes(template, "usageMetadata.totalTokenCount", totalTokens)
 	default:
-		return []string{}
+		return [][]byte{}
 	}
 
 	if len((*param).(*ConvertCodexResponseToGeminiParams).LastStorageOutput) > 0 {
