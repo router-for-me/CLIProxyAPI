@@ -289,6 +289,44 @@ func TestImagesGenerationsAllowsProviderQualifiedGPTImage2Fallback(t *testing.T)
 	}
 }
 
+func TestImagesGenerationsPreservesRoutableProviderQualifiedGPTImage2Fallback(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	codexExecutor := &imagesCaptureExecutor{provider: "codex"}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(codexExecutor)
+
+	codexAuth := &coreauth.Auth{ID: "images-qualified-codex-generate-auth", Provider: codexExecutor.Identifier(), Status: coreauth.StatusActive}
+	if _, err := manager.Register(context.Background(), codexAuth); err != nil {
+		t.Fatalf("Register codex auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(codexAuth.ID, codexAuth.Provider, []*registry.ModelInfo{{ID: "codex/" + defaultImagesMainModel}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(codexAuth.ID)
+	})
+
+	router := imagesTestRouter(manager)
+	req := httptest.NewRequest(http.MethodPost, "/v1/images/generations", strings.NewReader(`{"model":"codex/gpt-image-2","prompt":"draw a cat"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", resp.Code, http.StatusOK, resp.Body.String())
+	}
+	if codexExecutor.calls != 1 {
+		t.Fatalf("codex executor calls = %d, want 1", codexExecutor.calls)
+	}
+	if codexExecutor.model != "codex/"+defaultImagesMainModel {
+		t.Fatalf("model = %q, want codex/%s", codexExecutor.model, defaultImagesMainModel)
+	}
+	if got := gjson.Get(codexExecutor.payload, "model").String(); got != "codex/"+defaultImagesMainModel {
+		t.Fatalf("payload model = %q, want codex/%s; payload=%s", got, defaultImagesMainModel, codexExecutor.payload)
+	}
+	if got := gjson.Get(codexExecutor.payload, "tools.0.model").String(); got != "codex/"+defaultImagesToolModel {
+		t.Fatalf("tool model = %q, want codex/%s; payload=%s", got, defaultImagesToolModel, codexExecutor.payload)
+	}
+}
+
 func TestImagesGenerationsDoesNotFallbackToCodexForCustomImageModel(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	imageExecutor := &imagesCaptureExecutor{provider: "gemini"}
@@ -449,6 +487,44 @@ func TestImagesEditsAllowsProviderQualifiedGPTImage2Fallback(t *testing.T) {
 	}
 	if got := gjson.Get(codexExecutor.payload, "input.0.content.1.type").String(); got != "input_image" {
 		t.Fatalf("input image type = %q, want input_image; payload=%s", got, codexExecutor.payload)
+	}
+}
+
+func TestImagesEditsPreservesRoutableProviderQualifiedGPTImage2Fallback(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	codexExecutor := &imagesCaptureExecutor{provider: "codex"}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(codexExecutor)
+
+	codexAuth := &coreauth.Auth{ID: "images-qualified-codex-edit-auth", Provider: codexExecutor.Identifier(), Status: coreauth.StatusActive}
+	if _, err := manager.Register(context.Background(), codexAuth); err != nil {
+		t.Fatalf("Register codex auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(codexAuth.ID, codexAuth.Provider, []*registry.ModelInfo{{ID: "codex/" + defaultImagesMainModel}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(codexAuth.ID)
+	})
+
+	router := imagesTestRouter(manager)
+	req := httptest.NewRequest(http.MethodPost, "/v1/images/edits", strings.NewReader(`{"model":"codex/gpt-image-2","prompt":"edit a cat","images":[{"image_url":"data:image/png;base64,aW1hZ2U="}]}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", resp.Code, http.StatusOK, resp.Body.String())
+	}
+	if codexExecutor.calls != 1 {
+		t.Fatalf("codex executor calls = %d, want 1", codexExecutor.calls)
+	}
+	if codexExecutor.model != "codex/"+defaultImagesMainModel {
+		t.Fatalf("model = %q, want codex/%s", codexExecutor.model, defaultImagesMainModel)
+	}
+	if got := gjson.Get(codexExecutor.payload, "model").String(); got != "codex/"+defaultImagesMainModel {
+		t.Fatalf("payload model = %q, want codex/%s; payload=%s", got, defaultImagesMainModel, codexExecutor.payload)
+	}
+	if got := gjson.Get(codexExecutor.payload, "tools.0.model").String(); got != "codex/"+defaultImagesToolModel {
+		t.Fatalf("tool model = %q, want codex/%s; payload=%s", got, defaultImagesToolModel, codexExecutor.payload)
 	}
 }
 

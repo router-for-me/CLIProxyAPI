@@ -15,6 +15,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
@@ -244,7 +245,7 @@ func (h *OpenAIAPIHandler) ImagesGenerations(c *gin.Context) {
 	}
 
 	tool := []byte(`{"type":"image_generation","action":"generate"}`)
-	tool, _ = sjson.SetBytes(tool, "model", defaultImagesToolModel)
+	tool, _ = sjson.SetBytes(tool, "model", imagesResponsesToolModel(imageModel))
 
 	if v := strings.TrimSpace(gjson.GetBytes(rawJSON, "size").String()); v != "" {
 		tool, _ = sjson.SetBytes(tool, "size", v)
@@ -379,7 +380,7 @@ func (h *OpenAIAPIHandler) imagesEditsFromMultipart(c *gin.Context) {
 	stream := parseBoolField(c.PostForm("stream"), false)
 
 	tool := []byte(`{"type":"image_generation","action":"edit"}`)
-	tool, _ = sjson.SetBytes(tool, "model", defaultImagesToolModel)
+	tool, _ = sjson.SetBytes(tool, "model", imagesResponsesToolModel(imageModel))
 
 	if v := strings.TrimSpace(c.PostForm("size")); v != "" {
 		tool, _ = sjson.SetBytes(tool, "size", v)
@@ -509,7 +510,7 @@ func (h *OpenAIAPIHandler) imagesEditsFromJSON(c *gin.Context) {
 	stream := gjson.GetBytes(rawJSON, "stream").Bool()
 
 	tool := []byte(`{"type":"image_generation","action":"edit"}`)
-	tool, _ = sjson.SetBytes(tool, "model", defaultImagesToolModel)
+	tool, _ = sjson.SetBytes(tool, "model", imagesResponsesToolModel(imageModel))
 
 	for _, field := range []string{"size", "quality", "background", "output_format", "input_fidelity", "moderation"} {
 		if v := strings.TrimSpace(gjson.GetBytes(rawJSON, field).String()); v != "" {
@@ -547,7 +548,7 @@ func (h *OpenAIAPIHandler) imagesEditsFromJSON(c *gin.Context) {
 
 func buildImagesResponsesRequest(prompt string, images []string, toolJSON []byte) []byte {
 	req := []byte(`{"instructions":"","stream":true,"reasoning":{"effort":"medium","summary":"auto"},"parallel_tool_calls":true,"include":["reasoning.encrypted_content"],"model":"","store":false,"tool_choice":{"type":"image_generation"}}`)
-	req, _ = sjson.SetBytes(req, "model", defaultImagesMainModel)
+	req, _ = sjson.SetBytes(req, "model", imagesResponsesMainModel(toolJSON))
 
 	input := []byte(`[{"type":"message","role":"user","content":[{"type":"input_text","text":""}]}]`)
 	input, _ = sjson.SetBytes(input, "0.content.0.text", prompt)
@@ -569,6 +570,49 @@ func buildImagesResponsesRequest(prompt string, images []string, toolJSON []byte
 		req, _ = sjson.SetRawBytes(req, "tools.-1", toolJSON)
 	}
 	return req
+}
+
+func imagesResponsesToolModel(imageModel string) string {
+	imageModel = strings.TrimSpace(imageModel)
+	if imageModel == "" {
+		return defaultImagesToolModel
+	}
+	if prefixedImagesMainModel(imageModel) == "" {
+		return defaultImagesToolModel
+	}
+	return imageModel
+}
+
+func imagesResponsesMainModel(toolJSON []byte) string {
+	mainModel := defaultImagesMainModel
+	if len(toolJSON) == 0 || !json.Valid(toolJSON) {
+		return mainModel
+	}
+	toolModel := strings.TrimSpace(gjson.GetBytes(toolJSON, "model").String())
+	if prefixed := prefixedImagesMainModel(toolModel); prefixed != "" {
+		return prefixed
+	}
+	return mainModel
+}
+
+func prefixedImagesMainModel(toolModel string) string {
+	toolModel = strings.TrimSpace(toolModel)
+	if !isDefaultImagesToolModel(toolModel) {
+		return ""
+	}
+	idx := strings.LastIndex(toolModel, "/")
+	if idx <= 0 || idx >= len(toolModel)-1 {
+		return ""
+	}
+	prefix := strings.TrimSpace(toolModel[:idx])
+	if prefix == "" {
+		return ""
+	}
+	mainModel := prefix + "/" + defaultImagesMainModel
+	if len(registry.GetGlobalRegistry().GetModelProviders(mainModel)) == 0 {
+		return ""
+	}
+	return mainModel
 }
 
 func isDefaultImagesToolModel(model string) bool {
