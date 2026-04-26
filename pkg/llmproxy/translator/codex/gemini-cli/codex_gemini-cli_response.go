@@ -47,10 +47,9 @@ func ConvertCodexResponseToGeminiCLI(ctx context.Context, modelName string, orig
 //   - string: A Gemini-compatible JSON response wrapped in a response object
 func ConvertCodexResponseToGeminiCLINonStream(ctx context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) string {
 	// log.Debug(string(rawJSON))
-	strJSON := codexgemini.ConvertCodexResponseToGeminiNonStream(ctx, modelName, originalRequestRawJSON, requestRawJSON, rawJSON, param)
-	json := `{"response": {}}`
-	strJSON, _ = sjson.SetRaw(json, "response", strJSON)
-	return strJSON
+	innerJSON := codexgemini.ConvertCodexResponseToGeminiNonStream(ctx, modelName, originalRequestRawJSON, requestRawJSON, rawJSON, param)
+	out, _ := sjson.SetRaw(`{"response": {}}`, "response", string(innerJSON))
+	return out
 }
 
 func GeminiCLITokenCount(ctx context.Context, count int64) []byte {

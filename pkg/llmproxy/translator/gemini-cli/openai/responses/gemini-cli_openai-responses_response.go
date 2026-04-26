@@ -12,7 +12,12 @@ func ConvertGeminiCLIResponseToOpenAIResponses(ctx context.Context, modelName st
 	if responseResult.Exists() {
 		rawJSON = []byte(responseResult.Raw)
 	}
-	return geminiopenai.ConvertGeminiResponseToOpenAIResponses(ctx, modelName, originalRequestRawJSON, requestRawJSON, rawJSON, param)
+	out := geminiopenai.ConvertGeminiResponseToOpenAIResponses(ctx, modelName, originalRequestRawJSON, requestRawJSON, rawJSON, param)
+	res := make([][]byte, len(out))
+	for i, s := range out {
+		res[i] = []byte(s)
+	}
+	return res
 }
 
 func ConvertGeminiCLIResponseToOpenAIResponsesNonStream(ctx context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) []byte {
