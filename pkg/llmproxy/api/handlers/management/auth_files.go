@@ -25,6 +25,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/auth/antigravity"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/auth/base"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/auth/claude"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/auth/codex"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/auth/copilot"
@@ -1366,9 +1367,11 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 		ifToken["universe_domain"] = "googleapis.com"
 
 		ts := geminiAuth.GeminiTokenStorage{
+			BaseTokenStorage: base.BaseTokenStorage{
+				Email: email,
+			},
 			Token:     ifToken,
 			ProjectID: requestedProjectID,
-			Email:     email,
 			Auto:      requestedProjectID == "",
 		}
 
@@ -2075,11 +2078,13 @@ func (h *Handler) RequestGitHubToken(c *gin.Context) {
 		}
 
 		tokenStorage := &copilot.CopilotTokenStorage{
-			AccessToken: tokenData.AccessToken,
-			TokenType:   tokenData.TokenType,
-			Scope:       tokenData.Scope,
-			Username:    username,
-			Type:        "github-copilot",
+			BaseTokenStorage: base.BaseTokenStorage{
+				AccessToken: tokenData.AccessToken,
+				Type:        "github-copilot",
+			},
+			TokenType: tokenData.TokenType,
+			Scope:     tokenData.Scope,
+			Username:  username,
 		}
 
 		fileName := fmt.Sprintf("github-%s.json", username)
@@ -2984,11 +2989,13 @@ func (h *Handler) RequestKiloToken(c *gin.Context) {
 		}
 
 		ts := &kilo.KiloTokenStorage{
+			BaseTokenStorage: base.BaseTokenStorage{
+				Email: status.UserEmail,
+				Type:  "kilo",
+			},
 			Token:          status.Token,
 			OrganizationID: orgID,
 			Model:          defaults.Model,
-			Email:          status.UserEmail,
-			Type:           "kilo",
 		}
 
 		fileName := kilo.CredentialFileName(status.UserEmail)
