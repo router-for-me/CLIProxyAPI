@@ -10,7 +10,7 @@ import (
 
 	kiroclaude "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/translator/kiro/claude"
 	kiroopenai "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/translator/kiro/openai"
-	clipproxyauth "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	cliproxyauth "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	sdktranslator "github.com/kooshapari/CLIProxyAPI/v7/sdk/translator"
 	log "github.com/sirupsen/logrus"
 )
