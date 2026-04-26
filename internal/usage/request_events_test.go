@@ -44,6 +44,7 @@ func TestBuildRequestEventPageFiltersAndSorts(t *testing.T) {
 	stats.Record(context.Background(), coreusage.Record{
 		Model:       "new-model",
 		Source:      "openai-new",
+		AuthID:      "auth-new",
 		AuthIndex:   "new-auth",
 		RequestID:   "req-new",
 		RequestedAt: time.Date(2026, 4, 25, 11, 0, 0, 0, time.UTC),
@@ -63,6 +64,9 @@ func TestBuildRequestEventPageFiltersAndSorts(t *testing.T) {
 	}
 	if page.Items[0].RequestID != "req-new" {
 		t.Fatalf("request_id = %q, want %q", page.Items[0].RequestID, "req-new")
+	}
+	if page.Items[0].AuthID != "auth-new" {
+		t.Fatalf("auth_id = %q, want %q", page.Items[0].AuthID, "auth-new")
 	}
 	if page.Items[0].Tokens.TotalTokens != 46 {
 		t.Fatalf("total_tokens = %d, want 46", page.Items[0].Tokens.TotalTokens)

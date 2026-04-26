@@ -92,6 +92,7 @@ type RequestDetail struct {
 	Timestamp          time.Time  `json:"timestamp"`
 	LatencyMs          int64      `json:"latency_ms"`
 	Source             string     `json:"source"`
+	AuthID             string     `json:"auth_id,omitempty"`
 	AuthIndex          string     `json:"auth_index"`
 	RequestID          string     `json:"request_id,omitempty"`
 	RequestLogRef      string     `json:"request_log_ref,omitempty"`
@@ -209,6 +210,7 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 		Timestamp:          timestamp,
 		LatencyMs:          normaliseLatency(record.Latency),
 		Source:             record.Source,
+		AuthID:             strings.TrimSpace(record.AuthID),
 		AuthIndex:          record.AuthIndex,
 		RequestID:          strings.TrimSpace(record.RequestID),
 		RequestLogRef:      strings.TrimSpace(record.RequestLogRef),

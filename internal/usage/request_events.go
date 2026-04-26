@@ -22,6 +22,7 @@ type RequestEvent struct {
 	Timestamp          time.Time  `json:"timestamp"`
 	Model              string     `json:"model"`
 	Source             string     `json:"source"`
+	AuthID             string     `json:"auth_id,omitempty"`
 	AuthIndex          string     `json:"auth_index"`
 	Failed             bool       `json:"failed"`
 	FailureStage       string     `json:"failure_stage,omitempty"`
@@ -260,6 +261,7 @@ func BuildRequestEventPage(stats *RequestStatistics, hub *RequestEventHub, query
 					Timestamp:          detail.Timestamp.UTC(),
 					Model:              strings.TrimSpace(modelName),
 					Source:             detail.Source,
+					AuthID:             detail.AuthID,
 					AuthIndex:          detail.AuthIndex,
 					Failed:             detail.Failed,
 					FailureStage:       detail.FailureStage,
@@ -303,6 +305,7 @@ func requestEventFromRecord(id uint64, record coreusage.Record) RequestEvent {
 		Timestamp:          timestamp.UTC(),
 		Model:              strings.TrimSpace(record.Model),
 		Source:             record.Source,
+		AuthID:             strings.TrimSpace(record.AuthID),
 		AuthIndex:          record.AuthIndex,
 		Failed:             record.Failed,
 		FailureStage:       strings.TrimSpace(record.FailureStage),
