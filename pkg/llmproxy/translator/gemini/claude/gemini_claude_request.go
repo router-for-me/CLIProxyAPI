@@ -32,27 +32,27 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 	rawJSON = bytes.ReplaceAll(rawJSON, []byte(`"url":{"type":"string","format":"uri",`), []byte(`"url":{"type":"string",`))
 
 	// Build output Gemini CLI request JSON
-	out := `{"contents":[]}`
+	out := []byte(`{"contents":[]}`)
 	out, _ = sjson.SetBytes(out, "model", modelName)
 
 	// system instruction
 	if systemResult := gjson.GetBytes(rawJSON, "system"); systemResult.IsArray() {
-		systemInstruction := `{"role":"user","parts":[]}`
+		systemInstruction := []byte(`{"role":"user","parts":[]}`)
 		hasSystemParts := false
 		systemResult.ForEach(func(_, systemPromptResult gjson.Result) bool {
 			if systemPromptResult.Get("type").String() == "text" {
 				textResult := systemPromptResult.Get("text")
 				if textResult.Type == gjson.String {
-					part := `{"text":""}`
+					part := []byte(`{"text":""}`)
 					part, _ = sjson.SetBytes(part, "text", textResult.String())
-					systemInstruction, _ = sjson.SetRaw(systemInstruction, "parts.-1", part)
+					systemInstruction, _ = sjson.SetRawBytes(systemInstruction, "parts.-1", part)
 					hasSystemParts = true
 				}
 			}
 			return true
 		})
 		if hasSystemParts {
-			out, _ = sjson.SetRaw(out, "system_instruction", systemInstruction)
+			out, _ = sjson.SetRawBytes(out, "system_instruction", systemInstruction)
 		}
 	} else if systemResult.Type == gjson.String {
 		out, _ = sjson.SetBytes(out, "system_instruction.parts.-1.text", systemResult.String())
@@ -70,7 +70,7 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 				role = "model"
 			}
 
-			contentJSON := `{"role":"","parts":[]}`
+			contentJSON := []byte(`{"role":"","parts":[]}`)
 			contentJSON, _ = sjson.SetBytes(contentJSON, "role", role)
 
 			contentsResult := messageResult.Get("content")
@@ -84,9 +84,9 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 						if strings.TrimSpace(text) == "" {
 							return true
 						}
-						part := `{"text":""}`
+						part := []byte(`{"text":""}`)
 						part, _ = sjson.SetBytes(part, "text", text)
-						contentJSON, _ = sjson.SetRaw(contentJSON, "parts.-1", part)
+						contentJSON, _ = sjson.SetRawBytes(contentJSON, "parts.-1", part)
 
 					case "tool_use":
 						functionName := contentResult.Get("name").String()
@@ -95,15 +95,15 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 						if argsResult.IsObject() && gjson.Valid(functionArgs) {
 							// Claude may include thought_signature in tool args; Gemini treats this as
 							// a base64 thought signature and can reject malformed values.
-							sanitizedArgs, err := sjson.Delete(functionArgs, "thought_signature")
+							sanitizedArgs, err := sjson.DeleteBytes([]byte(functionArgs), "thought_signature")
 							if err != nil {
-								sanitizedArgs = functionArgs
+								sanitizedArgs = []byte(functionArgs)
 							}
-							part := `{"thoughtSignature":"","functionCall":{"name":"","args":{}}}`
+							part := []byte(`{"thoughtSignature":"","functionCall":{"name":"","args":{}}}`)
 							part, _ = sjson.SetBytes(part, "thoughtSignature", geminiClaudeThoughtSignature)
 							part, _ = sjson.SetBytes(part, "functionCall.name", functionName)
-							part, _ = sjson.SetRaw(part, "functionCall.args", sanitizedArgs)
-							contentJSON, _ = sjson.SetRaw(contentJSON, "parts.-1", part)
+							part, _ = sjson.SetRawBytes(part, "functionCall.args", sanitizedArgs)
+							contentJSON, _ = sjson.SetRawBytes(contentJSON, "parts.-1", part)
 						}
 
 					case "tool_result":
@@ -117,24 +117,24 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 							funcName = strings.Join(toolCallIDs[0:len(toolCallIDs)-1], "-")
 						}
 						responseData := contentResult.Get("content").Raw
-						part := `{"functionResponse":{"name":"","response":{"result":""}}}`
+						part := []byte(`{"functionResponse":{"name":"","response":{"result":""}}}`)
 						part, _ = sjson.SetBytes(part, "functionResponse.name", funcName)
 						part, _ = sjson.SetBytes(part, "functionResponse.response.result", responseData)
-						contentJSON, _ = sjson.SetRaw(contentJSON, "parts.-1", part)
+						contentJSON, _ = sjson.SetRawBytes(contentJSON, "parts.-1", part)
 					}
 					return true
 				})
-				if len(gjson.Get(contentJSON, "parts").Array()) > 0 {
-					out, _ = sjson.SetRaw(out, "contents.-1", contentJSON)
+				if len(gjson.GetBytes(contentJSON, "parts").Array()) > 0 {
+					out, _ = sjson.SetRawBytes(out, "contents.-1", contentJSON)
 				}
 			} else if contentsResult.Type == gjson.String {
 				text := strings.TrimSpace(contentsResult.String())
 				// Skip empty text parts to avoid Gemini API error
 				if strings.TrimSpace(text) != "" {
-					part := `{"text":""}`
+					part := []byte(`{"text":""}`)
 					part, _ = sjson.SetBytes(part, "text", text)
-					contentJSON, _ = sjson.SetRaw(contentJSON, "parts.-1", part)
-					out, _ = sjson.SetRaw(out, "contents.-1", contentJSON)
+					contentJSON, _ = sjson.SetRawBytes(contentJSON, "parts.-1", part)
+					out, _ = sjson.SetRawBytes(out, "contents.-1", contentJSON)
 				}
 			}
 			return true
@@ -148,24 +148,24 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 			inputSchemaResult := toolResult.Get("input_schema")
 			if inputSchemaResult.Exists() && inputSchemaResult.IsObject() {
 				inputSchema := common.SanitizeParametersJSONSchemaForGemini(inputSchemaResult.Raw)
-				tool, _ := sjson.Delete(toolResult.Raw, "input_schema")
-				tool, _ = sjson.SetRaw(tool, "parametersJsonSchema", inputSchema)
-				tool, _ = sjson.Delete(tool, "strict")
-				tool, _ = sjson.Delete(tool, "input_examples")
-				tool, _ = sjson.Delete(tool, "type")
-				tool, _ = sjson.Delete(tool, "cache_control")
-				if gjson.Valid(tool) && gjson.Parse(tool).IsObject() {
+				tool, _ := sjson.DeleteBytes([]byte(toolResult.Raw), "input_schema")
+				tool, _ = sjson.SetRawBytes(tool, "parametersJsonSchema", []byte(inputSchema))
+				tool, _ = sjson.DeleteBytes(tool, "strict")
+				tool, _ = sjson.DeleteBytes(tool, "input_examples")
+				tool, _ = sjson.DeleteBytes(tool, "type")
+				tool, _ = sjson.DeleteBytes(tool, "cache_control")
+				if gjson.ValidBytes(tool) && gjson.ParseBytes(tool).IsObject() {
 					if !hasTools {
-						out, _ = sjson.SetRaw(out, "tools", `[{"functionDeclarations":[]}]`)
+						out, _ = sjson.SetRawBytes(out, "tools", []byte(`[{"functionDeclarations":[]}]`))
 						hasTools = true
 					}
-					out, _ = sjson.SetRaw(out, "tools.0.functionDeclarations.-1", tool)
+					out, _ = sjson.SetRawBytes(out, "tools.0.functionDeclarations.-1", tool)
 				}
 			}
 			return true
 		})
 		if !hasTools {
-			out, _ = sjson.Delete(out, "tools")
+			out, _ = sjson.DeleteBytes(out, "tools")
 		}
 	}
 
