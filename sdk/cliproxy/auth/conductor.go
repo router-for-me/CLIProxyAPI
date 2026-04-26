@@ -2183,13 +2183,17 @@ func shouldSkipConductorCircuitBreakerReport(auth *Auth) bool {
 	if auth == nil {
 		return true
 	}
-	switch strings.ToLower(strings.TrimSpace(auth.Provider)) {
-	case "codex", "openai-compatibility":
+	if strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
 		// codex/openai-compat executors already report circuit breaker outcomes.
 		return true
-	default:
-		return false
 	}
+	if strings.EqualFold(strings.TrimSpace(auth.Provider), "openai-compatibility") {
+		return true
+	}
+	if auth.Attributes != nil && strings.TrimSpace(auth.Attributes["compat_name"]) != "" {
+		return true
+	}
+	return false
 }
 
 func (m *Manager) recordCircuitBreakerFromResult(auth *Auth, result Result) {
