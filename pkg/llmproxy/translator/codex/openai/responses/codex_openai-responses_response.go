@@ -39,10 +39,10 @@ func ConvertCodexResponseToOpenAIResponsesNonStream(_ context.Context, modelName
 		return ""
 	}
 	responseResult := rootResult.Get("response")
-	template := responseResult.Raw
+	template := []byte(responseResult.Raw)
 	if responseResult.Get("instructions").Exists() {
 		instructions := gjson.GetBytes(originalRequestRawJSON, "instructions").String()
 		template, _ = sjson.SetBytes(template, "instructions", instructions)
 	}
-	return template
+	return string(template)
 }

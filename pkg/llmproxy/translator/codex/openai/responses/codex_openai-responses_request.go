@@ -34,8 +34,8 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 
 	inputResult := gjson.GetBytes(rawJSON, "input")
 	if inputResult.Type == gjson.String {
-		input, _ := sjson.SetBytes(`[{"type":"message","role":"user","content":[{"type":"input_text","text":""}]}]`, "0.content.0.text", inputResult.String())
-		rawJSON, _ = sjson.SetRawBytes(rawJSON, "input", []byte(input))
+		input, _ := sjson.SetBytes([]byte(`[{"type":"message","role":"user","content":[{"type":"input_text","text":""}]}]`), "0.content.0.text", inputResult.String())
+		rawJSON, _ = sjson.SetRawBytes(rawJSON, "input", input)
 	}
 
 	// Preserve compaction fields for context management
@@ -197,12 +197,12 @@ func normalizeResponseTools(rawJSON []byte, nameMap map[string]string) []byte {
 
 		if name != fn.Get("name").String() {
 			changed = true
-			fnRaw := fn.Raw
+			fnRaw := []byte(fn.Raw)
 			fnRaw, _ = sjson.SetBytes(fnRaw, "name", name)
 			item := []byte(`{}`)
 			item, _ = sjson.SetBytes(item, "type", "function")
 			item, _ = sjson.SetRawBytes(item, "function", fnRaw)
-			result = append(result, item)
+			result = append(result, string(item))
 		} else {
 			result = append(result, t.Raw)
 		}
@@ -212,11 +212,11 @@ func normalizeResponseTools(rawJSON []byte, nameMap map[string]string) []byte {
 		return rawJSON
 	}
 
-	out := "[]"
+	out := []byte("[]")
 	for _, item := range result {
-		out, _ = sjson.SetRawBytes(out, "-1", item)
+		out, _ = sjson.SetRawBytes(out, "-1", []byte(item))
 	}
-	rawJSON, _ = sjson.SetRawBytes(rawJSON, "tools", []byte(out))
+	rawJSON, _ = sjson.SetRawBytes(rawJSON, "tools", out)
 	return rawJSON
 }
 
@@ -246,8 +246,8 @@ func normalizeResponseToolChoice(rawJSON []byte, nameMap map[string]string) []by
 		return rawJSON
 	}
 
-	updated, _ := sjson.SetBytes(tc.Raw, "function.name", name)
-	rawJSON, _ = sjson.SetRawBytes(rawJSON, "tool_choice", []byte(updated))
+	updated, _ := sjson.SetBytes([]byte(tc.Raw), "function.name", name)
+	rawJSON, _ = sjson.SetRawBytes(rawJSON, "tool_choice", updated)
 	return rawJSON
 }
 
