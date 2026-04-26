@@ -1292,6 +1292,31 @@
           "xhigh"
         ]
       }
+    },
+    {
+      "id": "gpt-5.5",
+      "object": "model",
+      "created": 1776902400,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 5.5",
+      "version": "gpt-5.5",
+      "description": "Frontier model for complex coding, research, and real-world work.",
+      "context_length": 272000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "zero_allowed": true,
+        "dynamic_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      }
     }
   ],
   "codex-team": [
@@ -1946,6 +1971,95 @@
           "low",
           "medium",
           "high"
+        ]
+      }
+    }
+  ],
+  "deepseek": [
+    {
+      "id": "deepseek-v4-flash",
+      "object": "model",
+      "created": 1777161600,
+      "owned_by": "deepseek",
+      "type": "deepseek",
+      "display_name": "DeepSeek V4 Flash",
+      "description": "DeepSeek-V4-Flash: fast DeepSeek V4 model with 1M context and thinking/non-thinking modes.",
+      "context_length": 1000000,
+      "max_completion_tokens": 384000,
+      "supported_parameters": [
+        "tools",
+        "json_mode",
+        "reasoning_effort"
+      ],
+      "thinking": {
+        "zero_allowed": true,
+        "dynamic_allowed": true,
+        "levels": [
+          "high",
+          "max"
+        ]
+      }
+    },
+    {
+      "id": "deepseek-v4-pro",
+      "object": "model",
+      "created": 1777161600,
+      "owned_by": "deepseek",
+      "type": "deepseek",
+      "display_name": "DeepSeek V4 Pro",
+      "description": "DeepSeek-V4-Pro: flagship DeepSeek V4 model with 1M context and thinking/non-thinking modes.",
+      "context_length": 1000000,
+      "max_completion_tokens": 384000,
+      "supported_parameters": [
+        "tools",
+        "json_mode",
+        "reasoning_effort"
+      ],
+      "thinking": {
+        "zero_allowed": true,
+        "dynamic_allowed": true,
+        "levels": [
+          "high",
+          "max"
+        ]
+      }
+    },
+    {
+      "id": "deepseek-chat",
+      "object": "model",
+      "created": 1777161600,
+      "owned_by": "deepseek",
+      "type": "deepseek",
+      "display_name": "DeepSeek Chat (legacy)",
+      "description": "Legacy compatibility alias for deepseek-v4-flash non-thinking mode; scheduled for DeepSeek deprecation on 2026-07-24.",
+      "context_length": 1000000,
+      "max_completion_tokens": 384000,
+      "supported_parameters": [
+        "tools",
+        "json_mode"
+      ]
+    },
+    {
+      "id": "deepseek-reasoner",
+      "object": "model",
+      "created": 1777161600,
+      "owned_by": "deepseek",
+      "type": "deepseek",
+      "display_name": "DeepSeek Reasoner (legacy)",
+      "description": "Legacy compatibility alias for deepseek-v4-flash thinking mode; scheduled for DeepSeek deprecation on 2026-07-24.",
+      "context_length": 1000000,
+      "max_completion_tokens": 384000,
+      "supported_parameters": [
+        "tools",
+        "json_mode",
+        "reasoning_effort"
+      ],
+      "thinking": {
+        "zero_allowed": true,
+        "dynamic_allowed": true,
+        "levels": [
+          "high",
+          "max"
         ]
       }
     }

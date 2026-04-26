@@ -23,6 +23,11 @@ type codexKeyWithAuthIndex struct {
 	AuthIndex string `json:"auth-index,omitempty"`
 }
 
+type deepSeekKeyWithAuthIndex struct {
+	config.DeepSeekKey
+	AuthIndex string `json:"auth-index,omitempty"`
+}
+
 type vertexCompatKeyWithAuthIndex struct {
 	config.VertexCompatKey
 	AuthIndex string `json:"auth-index,omitempty"`
@@ -158,6 +163,39 @@ func (h *Handler) codexKeysWithAuthIndex() []codexKeyWithAuthIndex {
 		out[i] = codexKeyWithAuthIndex{
 			CodexKey:  entry,
 			AuthIndex: authIndex,
+		}
+	}
+	return out
+}
+
+func (h *Handler) deepSeekKeysWithAuthIndex() []deepSeekKeyWithAuthIndex {
+	if h == nil {
+		return nil
+	}
+	liveIndexByID := h.liveAuthIndexByID()
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.cfg == nil {
+		return nil
+	}
+
+	idGen := synthesizer.NewStableIDGenerator()
+	out := make([]deepSeekKeyWithAuthIndex, len(h.cfg.DeepSeekKey))
+	for i := range h.cfg.DeepSeekKey {
+		entry := h.cfg.DeepSeekKey[i]
+		authIndex := ""
+		if key := strings.TrimSpace(entry.APIKey); key != "" {
+			base := strings.TrimSpace(entry.BaseURL)
+			if base == "" {
+				base = config.DefaultDeepSeekBaseURL
+			}
+			id, _ := idGen.Next("deepseek:apikey", key, base)
+			authIndex = liveIndexByID[id]
+		}
+		out[i] = deepSeekKeyWithAuthIndex{
+			DeepSeekKey: entry,
+			AuthIndex:   authIndex,
 		}
 	}
 	return out

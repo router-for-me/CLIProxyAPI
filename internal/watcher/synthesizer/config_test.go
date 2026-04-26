@@ -615,3 +615,40 @@ func TestConfigSynthesizer_AllProviders(t *testing.T) {
 		}
 	}
 }
+
+func TestConfigSynthesizer_DeepSeekKeys(t *testing.T) {
+	now := time.Unix(1700000000, 0)
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			DeepSeekKey: []config.DeepSeekKey{
+				{APIKey: "ds-1", BaseURL: "https://api.deepseek.com", Prefix: "team", Priority: 5, Models: []config.DeepSeekModel{{Name: "deepseek-v4-pro", Alias: "deepseek-latest"}}},
+			},
+		},
+		Now:         now,
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths := NewConfigSynthesizer().synthesizeDeepSeekKeys(ctx)
+	if len(auths) != 1 {
+		t.Fatalf("expected 1 DeepSeek auth, got %d", len(auths))
+	}
+	auth := auths[0]
+	if auth.Provider != "deepseek" {
+		t.Fatalf("provider = %q, want deepseek", auth.Provider)
+	}
+	if auth.Prefix != "team" {
+		t.Fatalf("prefix = %q, want team", auth.Prefix)
+	}
+	if got := auth.Attributes["base_url"]; got != "https://api.deepseek.com" {
+		t.Fatalf("base_url = %q", got)
+	}
+	if got := auth.Attributes["api_key"]; got != "ds-1" {
+		t.Fatalf("api_key = %q", got)
+	}
+	if got := auth.Attributes["priority"]; got != "5" {
+		t.Fatalf("priority = %q", got)
+	}
+	if got := auth.Attributes["models_hash"]; got == "" {
+		t.Fatal("expected models_hash to be set")
+	}
+}

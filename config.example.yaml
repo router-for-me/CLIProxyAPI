@@ -203,6 +203,28 @@ nonstream-keepalive-interval: 0
 #     experimental-cch-signing: false # optional: default is false; when true, sign the final /v1/messages body using the current Claude Code cch algorithm
 #                                     # keep this disabled unless you explicitly need the behavior, so upstream seed changes fall back to legacy proxy behavior
 
+# DeepSeek API keys
+# DeepSeek V4 uses the OpenAI-compatible API at https://api.deepseek.com.
+# deepseek-api-key:
+#   - api-key: "sk-..."
+#     prefix: "test" # optional: require calls like "test/deepseek-v4-pro" to target this credential
+#     # base-url defaults to https://api.deepseek.com
+#     base-url: "https://api.deepseek.com"
+#     headers:
+#       X-Custom-Header: "custom-value"
+#     proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override
+#     # proxy-url: "direct" # optional: explicit direct connect for this credential
+#     models:
+#       - name: "deepseek-v4-pro"   # upstream model name
+#         alias: "deepseek-latest"  # client alias mapped to the upstream model
+#       - name: "deepseek-v4-flash"
+#         alias: "deepseek-fast"
+#     excluded-models:
+#       - "deepseek-chat"       # exclude specific models (exact match)
+#       - "deepseek-v4-*"       # wildcard matching prefix
+#       - "*-flash"             # wildcard matching suffix
+#       - "*reasoner*"          # wildcard matching substring
+
 # Default headers for Claude API requests. Update when Claude Code releases new versions.
 # In legacy mode, user-agent/package-version/runtime-version/timeout are used as fallbacks
 # when the client omits them, while OS/arch remain runtime-derived. When

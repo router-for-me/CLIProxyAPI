@@ -23,6 +23,8 @@ type PayloadModelRule = internalconfig.PayloadModelRule
 type GeminiKey = internalconfig.GeminiKey
 type CodexKey = internalconfig.CodexKey
 type ClaudeKey = internalconfig.ClaudeKey
+type DeepSeekKey = internalconfig.DeepSeekKey
+type DeepSeekModel = internalconfig.DeepSeekModel
 type VertexCompatKey = internalconfig.VertexCompatKey
 type VertexCompatModel = internalconfig.VertexCompatModel
 type OpenAICompatibility = internalconfig.OpenAICompatibility
@@ -33,6 +35,7 @@ type TLS = internalconfig.TLSConfig
 
 const (
 	DefaultPanelGitHubRepository = internalconfig.DefaultPanelGitHubRepository
+	DefaultDeepSeekBaseURL       = internalconfig.DefaultDeepSeekBaseURL
 )
 
 func LoadConfig(configFile string) (*Config, error) { return internalconfig.LoadConfig(configFile) }

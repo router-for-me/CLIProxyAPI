@@ -18,6 +18,7 @@ var providerAppliers = map[string]ProviderApplier{
 	"codex":       nil,
 	"antigravity": nil,
 	"kimi":        nil,
+	"deepseek":    nil,
 }
 
 // GetProviderApplier returns the ProviderApplier for the given provider name.
@@ -62,7 +63,7 @@ func IsUserDefinedModel(modelInfo *registry.ModelInfo) bool {
 //   - body: Original request body JSON
 //   - model: Model name, optionally with thinking suffix (e.g., "claude-sonnet-4-5(16384)")
 //   - fromFormat: Source request format (e.g., openai, codex, gemini)
-//   - toFormat: Target provider format for the request body (gemini, gemini-cli, antigravity, claude, openai, codex, kimi)
+//   - toFormat: Target provider format for the request body (gemini, gemini-cli, antigravity, claude, openai, codex, kimi, deepseek)
 //   - providerKey: Provider identifier used for registry model lookups (may differ from toFormat, e.g., openrouter -> openai)
 //
 // Returns:
@@ -329,6 +330,8 @@ func extractThinkingConfig(body []byte, provider string) ThinkingConfig {
 	case "kimi":
 		// Kimi uses OpenAI-compatible reasoning_effort format
 		return extractOpenAIConfig(body)
+	case "deepseek":
+		return extractDeepSeekConfig(body)
 	default:
 		return ThinkingConfig{}
 	}
@@ -483,6 +486,34 @@ func extractCodexConfig(body []byte) ThinkingConfig {
 			return ThinkingConfig{Mode: ModeNone, Budget: 0}
 		}
 		return ThinkingConfig{Mode: ModeLevel, Level: ThinkingLevel(value)}
+	}
+
+	return ThinkingConfig{}
+}
+
+// extractDeepSeekConfig extracts DeepSeek thinking controls from an OpenAI-compatible request body.
+func extractDeepSeekConfig(body []byte) ThinkingConfig {
+	thinkingType := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "thinking.type").String()))
+	if thinkingType == "disabled" {
+		return ThinkingConfig{Mode: ModeNone, Budget: 0}
+	}
+
+	if effort := gjson.GetBytes(body, "reasoning_effort"); effort.Exists() {
+		value := strings.ToLower(strings.TrimSpace(effort.String()))
+		switch value {
+		case "none":
+			return ThinkingConfig{Mode: ModeNone, Budget: 0}
+		case "auto":
+			return ThinkingConfig{Mode: ModeAuto, Budget: -1}
+		case "":
+			return ThinkingConfig{}
+		default:
+			return ThinkingConfig{Mode: ModeLevel, Level: ThinkingLevel(value)}
+		}
+	}
+
+	if thinkingType == "enabled" {
+		return ThinkingConfig{Mode: ModeAuto, Budget: -1}
 	}
 
 	return ThinkingConfig{}

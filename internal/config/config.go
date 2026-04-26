@@ -21,6 +21,7 @@ import (
 
 const (
 	DefaultPanelGitHubRepository = "https://github.com/router-for-me/Cli-Proxy-API-Management-Center"
+	DefaultDeepSeekBaseURL       = "https://api.deepseek.com"
 	DefaultPprofAddr             = "127.0.0.1:8316"
 )
 
@@ -108,6 +109,9 @@ type Config struct {
 
 	// ClaudeKey defines a list of Claude API key configurations as specified in the YAML configuration file.
 	ClaudeKey []ClaudeKey `yaml:"claude-api-key" json:"claude-api-key"`
+
+	// DeepSeekKey defines DeepSeek API key configurations.
+	DeepSeekKey []DeepSeekKey `yaml:"deepseek-api-key" json:"deepseek-api-key"`
 
 	// ClaudeHeaderDefaults configures default header values for Claude API requests.
 	// These are used as fallbacks when the client does not send its own headers.
@@ -417,6 +421,50 @@ type ClaudeModel struct {
 func (m ClaudeModel) GetName() string  { return m.Name }
 func (m ClaudeModel) GetAlias() string { return m.Alias }
 
+// DeepSeekKey represents the configuration for a DeepSeek API key.
+type DeepSeekKey struct {
+	// APIKey is the authentication key for DeepSeek API services.
+	APIKey string `yaml:"api-key" json:"api-key"`
+
+	// Priority controls selection preference when multiple credentials match.
+	// Higher values are preferred; defaults to 0.
+	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
+
+	// Prefix optionally namespaces models for this credential (e.g., "teamA/deepseek-v4-pro").
+	Prefix string `yaml:"prefix,omitempty" json:"prefix,omitempty"`
+
+	// BaseURL is the base URL for the DeepSeek API endpoint.
+	// If empty, https://api.deepseek.com is used.
+	BaseURL string `yaml:"base-url,omitempty" json:"base-url,omitempty"`
+
+	// ProxyURL overrides the global proxy setting for this API key if provided.
+	ProxyURL string `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`
+
+	// Models defines upstream model names and aliases for request routing.
+	Models []DeepSeekModel `yaml:"models,omitempty" json:"models,omitempty"`
+
+	// Headers optionally adds extra HTTP headers for requests sent with this key.
+	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
+
+	// ExcludedModels lists model IDs that should be excluded for this provider.
+	ExcludedModels []string `yaml:"excluded-models,omitempty" json:"excluded-models,omitempty"`
+}
+
+func (k DeepSeekKey) GetAPIKey() string  { return k.APIKey }
+func (k DeepSeekKey) GetBaseURL() string { return k.BaseURL }
+
+// DeepSeekModel describes a mapping between an alias and the actual upstream model name.
+type DeepSeekModel struct {
+	// Name is the upstream model identifier used when issuing requests.
+	Name string `yaml:"name" json:"name"`
+
+	// Alias is the client-facing model name that maps to Name.
+	Alias string `yaml:"alias" json:"alias"`
+}
+
+func (m DeepSeekModel) GetName() string  { return m.Name }
+func (m DeepSeekModel) GetAlias() string { return m.Alias }
+
 // CodexKey represents the configuration for a Codex API key,
 // including the API key itself and an optional base URL for the API endpoint.
 type CodexKey struct {
@@ -687,6 +735,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Sanitize Claude key headers
 	cfg.SanitizeClaudeKeys()
 
+	// Sanitize DeepSeek API keys and defaults.
+	cfg.SanitizeDeepSeekKeys()
+
 	// Sanitize OpenAI compatibility providers: drop entries without base-url
 	cfg.SanitizeOpenAICompatibility()
 
@@ -890,6 +941,39 @@ func (cfg *Config) SanitizeClaudeKeys() {
 		entry.Headers = NormalizeHeaders(entry.Headers)
 		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
 	}
+}
+
+// SanitizeDeepSeekKeys deduplicates and normalizes DeepSeek credentials.
+// It defaults empty base URLs to the official DeepSeek API endpoint.
+func (cfg *Config) SanitizeDeepSeekKeys() {
+	if cfg == nil || len(cfg.DeepSeekKey) == 0 {
+		return
+	}
+
+	seen := make(map[string]struct{}, len(cfg.DeepSeekKey))
+	out := cfg.DeepSeekKey[:0]
+	for i := range cfg.DeepSeekKey {
+		entry := cfg.DeepSeekKey[i]
+		entry.APIKey = strings.TrimSpace(entry.APIKey)
+		if entry.APIKey == "" {
+			continue
+		}
+		entry.Prefix = normalizeModelPrefix(entry.Prefix)
+		entry.BaseURL = strings.TrimSpace(entry.BaseURL)
+		if entry.BaseURL == "" {
+			entry.BaseURL = DefaultDeepSeekBaseURL
+		}
+		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
+		entry.Headers = NormalizeHeaders(entry.Headers)
+		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
+		uniqueKey := entry.APIKey + "|" + entry.BaseURL
+		if _, exists := seen[uniqueKey]; exists {
+			continue
+		}
+		seen[uniqueKey] = struct{}{}
+		out = append(out, entry)
+	}
+	cfg.DeepSeekKey = out
 }
 
 // SanitizeGeminiKeys deduplicates and normalizes Gemini credentials.

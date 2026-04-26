@@ -214,6 +214,7 @@ func detectChangedProviders(oldData, newData *staticModelsJSON) []string {
 		{"codex", oldData.CodexPlus, newData.CodexPlus},
 		{"codex", oldData.CodexPro, newData.CodexPro},
 		{"kimi", oldData.Kimi, newData.Kimi},
+		{"deepseek", oldData.DeepSeek, newData.DeepSeek},
 		{"antigravity", oldData.Antigravity, newData.Antigravity},
 	}
 
@@ -334,6 +335,7 @@ func validateModelsCatalog(data *staticModelsJSON) error {
 		{name: "codex-plus", models: data.CodexPlus},
 		{name: "codex-pro", models: data.CodexPro},
 		{name: "kimi", models: data.Kimi},
+		{name: "deepseek", models: data.DeepSeek},
 		{name: "antigravity", models: data.Antigravity},
 	}
 
