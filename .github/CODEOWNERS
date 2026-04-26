@@ -1,0 +1,16 @@
+# CODEOWNERS — auto-scaffolded 2026-04-27
+# Fallback owner for everything not matched below
+* @KooshaPari
+
+# Governance / CI / docs
+/.github/ @KooshaPari
+/docs/ @KooshaPari
+
+# Go services
+/cmd/ @KooshaPari
+/internal/ @KooshaPari
+/pkg/ @KooshaPari
+/sdk/ @KooshaPari
+/api/ @KooshaPari
+go.mod @KooshaPari
+go.sum @KooshaPari
