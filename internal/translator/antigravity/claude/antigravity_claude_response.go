@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/cache"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator/claude/streamstate"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/common"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	log "github.com/sirupsen/logrus"
@@ -28,8 +29,6 @@ import (
 // proper sequencing of SSE events and transitions between different content types.
 type Params struct {
 	HasFirstResponse     bool   // Indicates if the initial message_start event has been sent
-	ResponseType         int    // Current response type: 0=none, 1=content, 2=thinking, 3=function
-	ResponseIndex        int    // Index counter for content blocks in the streaming response
 	HasFinishReason      bool   // Tracks whether a finish reason has been observed
 	FinishReason         string // The finish reason string returned by the provider
 	HasUsageMetadata     bool   // Tracks whether usage metadata has been observed
@@ -41,6 +40,8 @@ type Params struct {
 	HasSentFinalEvents   bool   // Indicates if final content/message events have been sent
 	HasToolUse           bool   // Indicates if tool use was observed in the stream
 	HasContent           bool   // Tracks whether any content (text, thinking, or tool use) has been output
+	CurrentToolKey       string
+	ToolUseCount         int
 
 	// Signature caching support
 	CurrentThinkingText strings.Builder // Accumulates thinking text for signature caching
@@ -48,6 +49,7 @@ type Params struct {
 	// Reverse map: sanitized Gemini function name → original Claude tool name.
 	// Populated lazily on the first response chunk from the original request JSON.
 	ToolNameMap map[string]string
+	Lifecycle   *streamstate.Lifecycle
 }
 
 // toolUseIDCounter provides a process-wide unique counter for tool use identifiers.
@@ -73,14 +75,16 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 	if *param == nil {
 		*param = &Params{
 			HasFirstResponse: false,
-			ResponseType:     0,
-			ResponseIndex:    0,
 			ToolNameMap:      util.SanitizedToolNameMap(originalRequestRawJSON),
+			Lifecycle:        streamstate.NewLifecycle(),
 		}
 	}
 	modelName := gjson.GetBytes(requestRawJSON, "model").String()
 
 	params := (*param).(*Params)
+	if params.Lifecycle == nil {
+		params.Lifecycle = streamstate.NewLifecycle()
+	}
 
 	if bytes.Equal(rawJSON, []byte("[DONE]")) {
 		output := make([]byte, 0, 256)
@@ -96,6 +100,11 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 	output := make([]byte, 0, 1024)
 	appendEvent := func(event, payload string) {
 		output = translatorcommon.AppendSSEEventString(output, event, payload, 3)
+	}
+	appendChunks := func(chunks [][]byte) {
+		for _, chunk := range chunks {
+			output = append(output, chunk...)
+		}
 	}
 
 	// Initialize the streaming session with a message_start event
@@ -150,66 +159,19 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 							params.CurrentThinkingText.Reset()
 						}
 
-						data, _ := sjson.SetBytes([]byte(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"signature_delta","signature":""}}`, params.ResponseIndex)), "delta.signature", fmt.Sprintf("%s#%s", cache.GetModelGroup(modelName), thoughtSignature.String()))
-						appendEvent("content_block_delta", string(data))
-						params.HasContent = true
-					} else if params.ResponseType == 2 { // Continue existing thinking block if already in thinking state
-						params.CurrentThinkingText.WriteString(partTextResult.String())
-						data, _ := sjson.SetBytes([]byte(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"thinking_delta","thinking":""}}`, params.ResponseIndex)), "delta.thinking", partTextResult.String())
-						appendEvent("content_block_delta", string(data))
+						appendChunks(params.Lifecycle.AppendThinkingSignature(fmt.Sprintf("%s#%s", cache.GetModelGroup(modelName), thoughtSignature.String())))
 						params.HasContent = true
 					} else {
-						// Transition from another state to thinking
-						// First, close any existing content block
-						if params.ResponseType != 0 {
-							if params.ResponseType == 2 {
-								// output = output + "event: content_block_delta\n"
-								// output = output + fmt.Sprintf(`data: {"type":"content_block_delta","index":%d,"delta":{"type":"signature_delta","signature":null}}`, params.ResponseIndex)
-								// output = output + "\n\n\n"
-							}
-							appendEvent("content_block_stop", fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, params.ResponseIndex))
-							params.ResponseIndex++
-						}
-
-						// Start a new thinking content block
-						appendEvent("content_block_start", fmt.Sprintf(`{"type":"content_block_start","index":%d,"content_block":{"type":"thinking","thinking":""}}`, params.ResponseIndex))
-						data, _ := sjson.SetBytes([]byte(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"thinking_delta","thinking":""}}`, params.ResponseIndex)), "delta.thinking", partTextResult.String())
-						appendEvent("content_block_delta", string(data))
-						params.ResponseType = 2 // Set state to thinking
-						params.HasContent = true
-						// Start accumulating thinking text for signature caching
-						params.CurrentThinkingText.Reset()
 						params.CurrentThinkingText.WriteString(partTextResult.String())
+						appendChunks(params.Lifecycle.AppendThinking(partTextResult.String()))
+						params.HasContent = true
 					}
 				} else {
 					finishReasonResult := gjson.GetBytes(rawJSON, "response.candidates.0.finishReason")
 					if partTextResult.String() != "" || !finishReasonResult.Exists() {
-						// Process regular text content (user-visible output)
-						// Continue existing text block if already in content state
-						if params.ResponseType == 1 {
-							data, _ := sjson.SetBytes([]byte(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"text_delta","text":""}}`, params.ResponseIndex)), "delta.text", partTextResult.String())
-							appendEvent("content_block_delta", string(data))
+						if partTextResult.String() != "" {
+							appendChunks(params.Lifecycle.AppendText(partTextResult.String()))
 							params.HasContent = true
-						} else {
-							// Transition from another state to text content
-							// First, close any existing content block
-							if params.ResponseType != 0 {
-								if params.ResponseType == 2 {
-									// output = output + "event: content_block_delta\n"
-									// output = output + fmt.Sprintf(`data: {"type":"content_block_delta","index":%d,"delta":{"type":"signature_delta","signature":null}}`, params.ResponseIndex)
-									// output = output + "\n\n\n"
-								}
-								appendEvent("content_block_stop", fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, params.ResponseIndex))
-								params.ResponseIndex++
-							}
-							if partTextResult.String() != "" {
-								// Start a new text content block
-								appendEvent("content_block_start", fmt.Sprintf(`{"type":"content_block_start","index":%d,"content_block":{"type":"text","text":""}}`, params.ResponseIndex))
-								data, _ := sjson.SetBytes([]byte(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"text_delta","text":""}}`, params.ResponseIndex)), "delta.text", partTextResult.String())
-								appendEvent("content_block_delta", string(data))
-								params.ResponseType = 1 // Set state to content
-								params.HasContent = true
-							}
 						}
 					}
 				}
@@ -218,41 +180,26 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 				// This processes tool usage requests and formats them for Claude Code API compatibility
 				params.HasToolUse = true
 				fcName := util.RestoreSanitizedToolName(params.ToolNameMap, functionCallResult.Get("name").String())
-
-				// Handle state transitions when switching to function calls
-				// Close any existing function call block first
-				if params.ResponseType == 3 {
-					appendEvent("content_block_stop", fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, params.ResponseIndex))
-					params.ResponseIndex++
-					params.ResponseType = 0
+				if fcName == "" && params.CurrentToolKey != "" {
+					if fcArgsResult := functionCallResult.Get("args"); fcArgsResult.Exists() {
+						appendChunks(params.Lifecycle.AppendToolInput(params.CurrentToolKey, fcArgsResult.Raw))
+						params.HasContent = true
+					}
+					continue
 				}
 
-				// Special handling for thinking state transition
-				if params.ResponseType == 2 {
-					// output = output + "event: content_block_delta\n"
-					// output = output + fmt.Sprintf(`data: {"type":"content_block_delta","index":%d,"delta":{"type":"signature_delta","signature":null}}`, params.ResponseIndex)
-					// output = output + "\n\n\n"
+				if params.CurrentToolKey != "" {
+					appendChunks(params.Lifecycle.CloseToolUse(params.CurrentToolKey))
 				}
 
-				// Close any other existing content block
-				if params.ResponseType != 0 {
-					appendEvent("content_block_stop", fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, params.ResponseIndex))
-					params.ResponseIndex++
-				}
-
-				// Start a new tool use content block
-				// This creates the structure for a function call in Claude Code format
-				// Create the tool use block with unique ID and function details
-				data := []byte(fmt.Sprintf(`{"type":"content_block_start","index":%d,"content_block":{"type":"tool_use","id":"","name":"","input":{}}}`, params.ResponseIndex))
-				data, _ = sjson.SetBytes(data, "content_block.id", util.SanitizeClaudeToolID(fmt.Sprintf("%s-%d-%d", fcName, time.Now().UnixNano(), atomic.AddUint64(&toolUseIDCounter, 1))))
-				data, _ = sjson.SetBytes(data, "content_block.name", fcName)
-				appendEvent("content_block_start", string(data))
+				params.ToolUseCount++
+				params.CurrentToolKey = fmt.Sprintf("tool-%d", params.ToolUseCount)
+				toolID := fmt.Sprintf("%s-%d-%d", fcName, time.Now().UnixNano(), atomic.AddUint64(&toolUseIDCounter, 1))
+				appendChunks(params.Lifecycle.EnsureToolUse(params.CurrentToolKey, toolID, fcName))
 
 				if fcArgsResult := functionCallResult.Get("args"); fcArgsResult.Exists() {
-					data, _ = sjson.SetBytes([]byte(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"input_json_delta","partial_json":""}}`, params.ResponseIndex)), "delta.partial_json", fcArgsResult.Raw)
-					appendEvent("content_block_delta", string(data))
+					appendChunks(params.Lifecycle.AppendToolInput(params.CurrentToolKey, fcArgsResult.Raw))
 				}
-				params.ResponseType = 3
 				params.HasContent = true
 			}
 		}
@@ -299,9 +246,10 @@ func appendFinalEvents(params *Params, output *[]byte, force bool) {
 		return
 	}
 
-	if params.ResponseType != 0 {
-		*output = translatorcommon.AppendSSEEventString(*output, "content_block_stop", fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, params.ResponseIndex), 3)
-		params.ResponseType = 0
+	if params.Lifecycle != nil {
+		for _, chunk := range params.Lifecycle.CloseAll() {
+			*output = append(*output, chunk...)
+		}
 	}
 
 	stopReason := resolveStopReason(params)

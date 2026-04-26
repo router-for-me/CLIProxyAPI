@@ -94,16 +94,27 @@ func TestConvertCodexResponseToClaude_AcceptsFullSSEFrameForTextDelta(t *testing
 	if len(out) != 1 {
 		t.Fatalf("expected 1 chunk, got %d", len(out))
 	}
-	if !bytes.Contains(out[0], []byte("event: content_block_delta\n")) {
-		t.Fatalf("expected content_block_delta event, got %q", string(out[0]))
+	if !bytes.Contains(out[0], []byte("event: content_block_start\n")) || !bytes.Contains(out[0], []byte("event: content_block_delta\n")) {
+		t.Fatalf("expected content_block_start + content_block_delta events, got %q", string(out[0]))
 	}
 
-	payload := firstSSEDataLine(out[0])
-	if got := gjson.GetBytes(payload, "delta.type").String(); got != "text_delta" {
-		t.Fatalf("delta.type = %q, want %q", got, "text_delta")
+	foundDelta := false
+	for _, line := range bytes.Split(out[0], []byte("\n")) {
+		line = bytes.TrimSpace(bytes.TrimRight(line, "\r"))
+		if !bytes.HasPrefix(line, []byte("data:")) {
+			continue
+		}
+		payload := bytes.TrimSpace(line[len("data:"):])
+		if gjson.GetBytes(payload, "delta.type").String() != "text_delta" {
+			continue
+		}
+		foundDelta = true
+		if got := gjson.GetBytes(payload, "delta.text").String(); got != "OK" {
+			t.Fatalf("delta.text = %q, want %q", got, "OK")
+		}
 	}
-	if got := gjson.GetBytes(payload, "delta.text").String(); got != "OK" {
-		t.Fatalf("delta.text = %q, want %q", got, "OK")
+	if !foundDelta {
+		t.Fatal("expected a text_delta payload in output chunk")
 	}
 }
 
