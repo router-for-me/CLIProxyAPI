@@ -1,10 +1,10 @@
 package responses
 
 import (
-	"encoding/json"
 	"strings"
 
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/translator/gemini/common"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -203,7 +203,7 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 							if text := contentItem.Get("text"); text.Exists() {
 								textValue := text.String()
 								if strings.TrimSpace(textValue) != "" {
-									partJSON = `{"text":""}`
+									partJSON = []byte(`{"text":""}`)
 									partJSON, _ = sjson.SetBytes(partJSON, "text", textValue)
 								}
 							}
@@ -290,10 +290,10 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 						}
 					}
 
-					one := `{"role":"","parts":[{"text":""}]}`
+					one := []byte(`{"role":"","parts":[{"text":""}]}`)
 					one, _ = sjson.SetBytes(one, "role", effRole)
 					one, _ = sjson.SetBytes(one, "parts.0.text", contentText)
-					out, _ = sjson.SetRaw(out, "contents.-1", one)
+					out, _ = sjson.SetRawBytes(out, "contents.-1", one)
 				}
 
 			case "function_call":
@@ -356,7 +356,7 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 				if outputRaw != "" && outputRaw != "null" {
 					output := gjson.Parse(outputRaw)
 					if output.Type == gjson.JSON && !containsLiteralControlChars(output.Raw) {
-						functionResponse, _ = sjson.SetRaw(functionResponse, "functionResponse.response.result", output.Raw)
+						functionResponse, _ = sjson.SetRawBytes(functionResponse, "functionResponse.response.result", []byte(output.Raw))
 					} else {
 						functionResponse, _ = sjson.SetBytes(functionResponse, "functionResponse.response.result", outputRaw)
 					}
@@ -401,7 +401,7 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 				}
 				strict := tool.Get("strict").Exists() && tool.Get("strict").Bool()
 				cleaned := common.NormalizeOpenAIFunctionSchemaForGemini(params, strict)
-				funcDecl, _ = sjson.SetRaw(funcDecl, "parametersJsonSchema", cleaned)
+				funcDecl, _ = sjson.SetRawBytes(funcDecl, "parametersJsonSchema", []byte(cleaned))
 
 				geminiTools, _ = sjson.SetRawBytes(geminiTools, "0.functionDeclarations.-1", funcDecl)
 			}
