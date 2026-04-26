@@ -14,5 +14,5 @@ func Registry() *sdktranslator.Registry {
 
 // Pipeline returns a pipeline that already contains the built-in translators.
 func Pipeline() *sdktranslator.Pipeline {
-	return sdktranslator.NewPipeline(sdktranslator.Default())
+	return sdktranslator.DefaultPipeline()
 }

@@ -118,10 +118,22 @@ func (r *Registry) TranslateTokenCount(ctx context.Context, from, to Format, cou
 }
 
 var defaultRegistry = NewRegistry()
+var (
+	defaultPipelineOnce sync.Once
+	defaultPipeline     *Pipeline
+)
 
 // Default exposes the package-level registry for shared use.
 func Default() *Registry {
 	return defaultRegistry
+}
+
+func DefaultPipeline() *Pipeline {
+	defaultPipelineOnce.Do(func() {
+		defaultPipeline = NewPipeline(defaultRegistry)
+		defaultPipeline.UseRequest(defaultRequestInvariantMiddleware)
+	})
+	return defaultPipeline
 }
 
 // Register attaches transforms to the default registry.
@@ -131,7 +143,18 @@ func Register(from, to Format, request RequestTransform, response ResponseTransf
 
 // TranslateRequest is a helper on the default registry.
 func TranslateRequest(from, to Format, model string, rawJSON []byte, stream bool) []byte {
-	return defaultRegistry.TranslateRequest(from, to, model, rawJSON, stream)
+	req := RequestEnvelope{
+		Format: from,
+		Model:  model,
+		Stream: stream,
+		Body:   rawJSON,
+	}
+	translated, err := DefaultPipeline().TranslateRequest(context.Background(), from, to, req)
+	if err != nil {
+		log.Warnf("translator: request pipeline failed, falling back to registry translation: %v", err)
+		return defaultRegistry.TranslateRequest(from, to, model, rawJSON, stream)
+	}
+	return translated.Body
 }
 
 // HasResponseTransformer inspects the default registry.
