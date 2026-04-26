@@ -43,6 +43,24 @@ type openAICompatUpstreamRequest struct {
 	Body    []byte
 }
 
+type openAICompatToolObservation struct {
+	sawToolCalls         bool
+	firstToolCallChunk   int
+	toolCallDeltaCount   int
+	lastFinishReason     string
+	finishReasonChunk    int
+	finishReasonToolCall bool
+}
+
+type openAICompatProtocolViolationDetails struct {
+	finishReason      string
+	upstreamRequestID string
+	chunkIndex        int
+	chunkCount        int
+	totalBytes        int
+	lastEvent         string
+}
+
 // NewOpenAICompatExecutor creates an executor bound to a provider key (e.g., "openrouter").
 func NewOpenAICompatExecutor(provider string, cfg *config.Config) *OpenAICompatExecutor {
 	return &OpenAICompatExecutor{provider: provider, cfg: cfg}
@@ -299,12 +317,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	if err != nil {
 		return resp, err
 	}
-	if endpoint == "/chat/completions" {
-		translated, _, err = normalizeAssistantToolCallReasoningContent(translated, true)
-		if err != nil {
-			return resp, fmt.Errorf("openai compat executor: failed to normalize assistant reasoning_content: %w", err)
-		}
-	}
+	translated = sdktranslator.NormalizeRequestInvariants(from, to, translated)
 
 	url := strings.TrimSuffix(baseURL, "/") + endpoint
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
@@ -368,6 +381,14 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		return resp, err
 	}
 	appendAPIResponseChunk(ctx, e.cfg, body)
+	if endpoint == "/chat/completions" {
+		if protocolErr := validateOpenAICompatChatCompletionResponseProtocol(e.Identifier(), baseModel, httpResp.Header, body); protocolErr != nil {
+			recordAPIResponseError(ctx, e.cfg, protocolErr)
+			e.recordOpenAICompatFailure(auth, circuitModel)
+			err = protocolErr
+			return resp, err
+		}
+	}
 	reporter.publish(ctx, parseOpenAIUsage(body))
 	// Ensure we at least record the request even if upstream doesn't return usage
 	reporter.ensurePublished(ctx)
@@ -477,12 +498,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	if err != nil {
 		return nil, err
 	}
-	if endpoint == "/chat/completions" {
-		translated, _, err = normalizeAssistantToolCallReasoningContent(translated, true)
-		if err != nil {
-			return nil, fmt.Errorf("openai compat executor: failed to normalize assistant reasoning_content: %w", err)
-		}
-	}
+	translated = sdktranslator.NormalizeRequestInvariants(from, to, translated)
 
 	// Request usage data in the final streaming chunk so that token statistics
 	// are captured even when the upstream is an OpenAI-compatible provider.
@@ -565,6 +581,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		upstreamChunkCount := 0
 		upstreamBytes := 0
 		lastUpstreamEvent := ""
+		toolObservation := &openAICompatToolObservation{}
 		toleratedTransientTermination := false
 		transientTerminationErr := error(nil)
 
@@ -610,6 +627,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 					upstreamChunkCount++
 					upstreamBytes += len(frame)
 					lastUpstreamEvent = openAICompatStreamEventLabel(frame)
+					observeOpenAICompatToolStreamChunk(frame, upstreamChunkCount, toolObservation)
 					if payload := codexSSEPayload(frame); bytes.Equal(payload, []byte("[DONE]")) {
 						sawUpstreamDone = true
 					}
@@ -644,6 +662,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 					upstreamChunkCount++
 					upstreamBytes += len(line)
 					lastUpstreamEvent = openAICompatStreamEventLabel(line)
+					observeOpenAICompatToolStreamChunk(line, upstreamChunkCount, toolObservation)
 				}
 				appendAPIResponseChunk(ctx, e.cfg, line)
 				if detail, ok := parseOpenAIStreamUsage(line); ok {
@@ -690,6 +709,23 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			out <- cliproxyexecutor.StreamChunk{Err: truncationErr}
 			return
 		}
+		if endpoint == "/chat/completions" {
+			if protocolErr := validateOpenAICompatChatCompletionStreamProtocol(
+				e.Identifier(),
+				baseModel,
+				httpResp.Header,
+				toolObservation,
+				upstreamChunkCount,
+				upstreamBytes,
+				lastUpstreamEvent,
+			); protocolErr != nil {
+				recordAPIResponseError(ctx, e.cfg, protocolErr)
+				e.recordOpenAICompatFailure(auth, circuitModel)
+				reporter.publishFailure(ctx)
+				out <- cliproxyexecutor.StreamChunk{Err: protocolErr}
+				return
+			}
+		}
 		if !responsesOutput && toleratedTransientTermination && !sawUpstreamDone {
 			// Best-effort terminal marker for OpenAI chat streams when upstream disconnected
 			// after partial output. This helps downstream clients close cleanly.
@@ -707,6 +743,16 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			// when upstream closed cleanly but never emitted terminal events.
 			emitChunks(synthesizeOpenAIResponsesCompletion(req.Model))
 		}
+		logOpenAICompatToolObservation(
+			ctx,
+			httpResp.Header,
+			upstreamChunkCount,
+			upstreamBytes,
+			sawUpstreamDone,
+			lastUpstreamEvent,
+			toolObservation,
+			toleratedTransientTermination,
+		)
 
 		// Store response state for chat_fallback mode after stream completes.
 		if shouldCaptureState && capturedResponseID != "" && len(capturedCompletedPayload) > 0 {
@@ -965,6 +1011,154 @@ func openAICompatStreamRequestID(headers http.Header) string {
 		}
 	}
 	return ""
+}
+
+func observeOpenAICompatToolStreamChunk(chunk []byte, chunkIndex int, observation *openAICompatToolObservation) {
+	if observation == nil || chunkIndex <= 0 {
+		return
+	}
+	payload := extractSSEDataPayload(chunk)
+	if len(payload) == 0 || bytes.Equal(bytes.TrimSpace(payload), []byte("[DONE]")) {
+		return
+	}
+
+	choices := gjson.GetBytes(payload, "choices")
+	if !choices.Exists() || !choices.IsArray() {
+		return
+	}
+	for _, choice := range choices.Array() {
+		if toolCalls := choice.Get("delta.tool_calls"); toolCalls.Exists() && toolCalls.IsArray() && len(toolCalls.Array()) > 0 {
+			observation.sawToolCalls = true
+			observation.toolCallDeltaCount += len(toolCalls.Array())
+			if observation.firstToolCallChunk == 0 {
+				observation.firstToolCallChunk = chunkIndex
+			}
+		}
+		if functionCall := choice.Get("delta.function_call"); functionCall.Exists() {
+			observation.sawToolCalls = true
+			observation.toolCallDeltaCount++
+			if observation.firstToolCallChunk == 0 {
+				observation.firstToolCallChunk = chunkIndex
+			}
+		}
+		if finishReason := strings.TrimSpace(choice.Get("finish_reason").String()); finishReason != "" {
+			observation.lastFinishReason = finishReason
+			observation.finishReasonChunk = chunkIndex
+			if finishReason == "tool_calls" || finishReason == "function_call" {
+				observation.finishReasonToolCall = true
+			}
+		}
+	}
+}
+
+func validateOpenAICompatChatCompletionResponseProtocol(provider, model string, headers http.Header, body []byte) error {
+	finishReason := strings.TrimSpace(gjson.GetBytes(body, "choices.0.finish_reason").String())
+	if finishReason != "tool_calls" && finishReason != "function_call" {
+		return nil
+	}
+
+	if hasOpenAIChatCompletionToolPayload(body, finishReason) {
+		return nil
+	}
+
+	return buildOpenAICompatProtocolViolation(provider, model, openAICompatProtocolViolationDetails{
+		finishReason:      finishReason,
+		upstreamRequestID: openAICompatStreamRequestID(headers),
+	})
+}
+
+func validateOpenAICompatChatCompletionStreamProtocol(
+	provider string,
+	model string,
+	headers http.Header,
+	observation *openAICompatToolObservation,
+	chunkCount int,
+	totalBytes int,
+	lastEvent string,
+) error {
+	if observation == nil || !observation.finishReasonToolCall || observation.sawToolCalls {
+		return nil
+	}
+
+	return buildOpenAICompatProtocolViolation(provider, model, openAICompatProtocolViolationDetails{
+		finishReason:      observation.lastFinishReason,
+		upstreamRequestID: openAICompatStreamRequestID(headers),
+		chunkIndex:        observation.finishReasonChunk,
+		chunkCount:        chunkCount,
+		totalBytes:        totalBytes,
+		lastEvent:         lastEvent,
+	})
+}
+
+func hasOpenAIChatCompletionToolPayload(body []byte, finishReason string) bool {
+	switch finishReason {
+	case "tool_calls":
+		toolCalls := gjson.GetBytes(body, "choices.0.message.tool_calls")
+		return toolCalls.Exists() && toolCalls.IsArray() && len(toolCalls.Array()) > 0
+	case "function_call":
+		if functionCall := gjson.GetBytes(body, "choices.0.message.function_call"); functionCall.Exists() {
+			return true
+		}
+		toolCalls := gjson.GetBytes(body, "choices.0.message.tool_calls")
+		return toolCalls.Exists() && toolCalls.IsArray() && len(toolCalls.Array()) > 0
+	default:
+		return false
+	}
+}
+
+func buildOpenAICompatProtocolViolation(provider, model string, details openAICompatProtocolViolationDetails) statusErr {
+	msg := fmt.Sprintf(
+		"upstream OpenAI-compatible protocol violation: finish_reason=%q without tool call payload (provider=%s, model=%s, request_id=%s)",
+		details.finishReason,
+		strings.TrimSpace(provider),
+		strings.TrimSpace(model),
+		strings.TrimSpace(details.upstreamRequestID),
+	)
+	if details.chunkIndex > 0 || details.chunkCount > 0 || details.totalBytes > 0 || strings.TrimSpace(details.lastEvent) != "" {
+		msg = fmt.Sprintf(
+			"%s (finish_reason_chunk=%d, chunks=%d, bytes=%d, last_event=%s)",
+			msg,
+			details.chunkIndex,
+			details.chunkCount,
+			details.totalBytes,
+			strings.TrimSpace(details.lastEvent),
+		)
+	}
+	return statusErr{
+		code: http.StatusBadGateway,
+		msg:  msg,
+	}
+}
+
+func logOpenAICompatToolObservation(
+	ctx context.Context,
+	headers http.Header,
+	chunkCount int,
+	totalBytes int,
+	sawDone bool,
+	lastEvent string,
+	observation *openAICompatToolObservation,
+	toleratedTermination bool,
+) {
+	if observation == nil || chunkCount == 0 {
+		return
+	}
+
+	logWithRequestID(ctx).Infof(
+		"openai compat executor stream summary: upstream_request_id=%s chunks=%d bytes=%d saw_done=%t last_event=%s saw_tool_calls=%t first_tool_chunk=%d tool_call_deltas=%d last_finish_reason=%s finish_reason_chunk=%d finish_reason_tool_calls=%t tolerated_termination=%t",
+		openAICompatStreamRequestID(headers),
+		chunkCount,
+		totalBytes,
+		sawDone,
+		strings.TrimSpace(lastEvent),
+		observation.sawToolCalls,
+		observation.firstToolCallChunk,
+		observation.toolCallDeltaCount,
+		observation.lastFinishReason,
+		observation.finishReasonChunk,
+		observation.finishReasonToolCall,
+		toleratedTermination,
+	)
 }
 
 func buildOpenAICompatStreamTruncationError(headers http.Header, chunkCount int, totalBytes int, sawDone bool, lastEvent string, cause error) statusErr {
