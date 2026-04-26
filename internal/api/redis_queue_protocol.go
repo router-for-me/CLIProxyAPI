@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"strconv"
 	"strings"
 
@@ -66,10 +67,38 @@ func (s *Server) handleRedisConnection(conn net.Conn, reader *bufio.Reader) {
 		}
 
 		cmd := strings.ToUpper(strings.TrimSpace(args[0]))
+
+		if cmd != "AUTH" && !authed {
+			if s.mgmt != nil {
+				_, statusCode, errMsg := s.mgmt.AuthenticateManagementKey(clientIP, localClient, "")
+				if statusCode == http.StatusForbidden && strings.HasPrefix(errMsg, "IP banned due to too many failed attempts") {
+					_ = writeRedisError(writer, "ERR "+errMsg)
+				} else {
+					_ = writeRedisError(writer, "NOAUTH Authentication required.")
+				}
+			} else {
+				_ = writeRedisError(writer, "NOAUTH Authentication required.")
+			}
+			if !flush() {
+				return
+			}
+			continue
+		}
+
 		switch cmd {
 		case "AUTH":
 			password, ok := parseAuthPassword(args)
 			if !ok {
+				if s.mgmt != nil {
+					_, statusCode, errMsg := s.mgmt.AuthenticateManagementKey(clientIP, localClient, "")
+					if statusCode == http.StatusForbidden && strings.HasPrefix(errMsg, "IP banned due to too many failed attempts") {
+						_ = writeRedisError(writer, "ERR "+errMsg)
+						if !flush() {
+							return
+						}
+						continue
+					}
+				}
 				_ = writeRedisError(writer, "ERR wrong number of arguments for 'auth' command")
 				if !flush() {
 					return
@@ -151,10 +180,35 @@ func resolveRemoteIP(addr net.Addr) (ip string, localClient bool) {
 	if addr == nil {
 		return "", false
 	}
-	host := addr.String()
-	if h, _, err := net.SplitHostPort(host); err == nil {
-		host = h
+
+	var host string
+	switch a := addr.(type) {
+	case *net.TCPAddr:
+		if a != nil && a.IP != nil {
+			if ip4 := a.IP.To4(); ip4 != nil {
+				host = ip4.String()
+			} else {
+				host = a.IP.String()
+			}
+		}
+	default:
+		host = addr.String()
+		if h, _, err := net.SplitHostPort(host); err == nil {
+			host = h
+		}
+		host = strings.TrimSpace(host)
+		if raw, _, ok := strings.Cut(host, "%"); ok {
+			host = raw
+		}
+		if parsed := net.ParseIP(host); parsed != nil {
+			if ip4 := parsed.To4(); ip4 != nil {
+				host = ip4.String()
+			} else {
+				host = parsed.String()
+			}
+		}
 	}
+
 	host = strings.TrimSpace(host)
 	localClient = host == "127.0.0.1" || host == "::1"
 	return host, localClient
