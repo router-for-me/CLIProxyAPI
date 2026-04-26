@@ -10,6 +10,9 @@ import (
 // RequestedModelMetadataKey stores the client-requested model name in Options.Metadata.
 const RequestedModelMetadataKey = "requested_model"
 
+// DisallowFreeAuthMetadataKey instructs auth selection to skip known free-tier credentials.
+const DisallowFreeAuthMetadataKey = "disallow_free_auth"
+
 const (
 	// PinnedAuthMetadataKey locks execution to a specific auth ID.
 	PinnedAuthMetadataKey = "pinned_auth_id"
