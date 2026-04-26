@@ -608,7 +608,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 						item := []byte(`{"id":"","type":"reasoning","summary":[{"type":"summary_text","text":""}]}`)
 						item, _ = sjson.SetBytes(item, "id", r.ReasoningID)
 						item, _ = sjson.SetBytes(item, "summary.0.text", r.ReasoningData)
-						outputsWrapper, _ = sjson.SetRaw(outputsWrapper, "arr.-1", item)
+						outputsWrapper, _ = sjson.SetRaw(outputsWrapper, "arr.-1", string(item))
 					}
 				}
 				// Append message items in ascending index order
@@ -632,7 +632,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 						item := []byte(`{"id":"","type":"message","status":"completed","content":[{"type":"output_text","annotations":[],"logprobs":[],"text":""}],"role":"assistant"}`)
 						item, _ = sjson.SetBytes(item, "id", fmt.Sprintf("msg_%s_%d", st.ResponseID, i))
 						item, _ = sjson.SetBytes(item, "content.0.text", txt)
-						outputsWrapper, _ = sjson.SetRaw(outputsWrapper, "arr.-1", item)
+						outputsWrapper, _ = sjson.SetRaw(outputsWrapper, "arr.-1", string(item))
 					}
 				}
 				if len(st.FuncArgsBuf) > 0 {
@@ -660,11 +660,11 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 						item, _ = sjson.SetBytes(item, "arguments", args)
 						item, _ = sjson.SetBytes(item, "call_id", callID)
 						item, _ = sjson.SetBytes(item, "name", name)
-						outputsWrapper, _ = sjson.SetRaw(outputsWrapper, "arr.-1", item)
+						outputsWrapper, _ = sjson.SetRaw(outputsWrapper, "arr.-1", string(item))
 					}
 				}
 				if gjson.Get(outputsWrapper, "arr.#").Int() > 0 {
-					completed, _ = sjson.SetRawBytes(completed, "response.output", gjson.Get(outputsWrapper, "arr").Raw)
+					completed, _ = sjson.SetRawBytes(completed, "response.output", []byte(gjson.Get(outputsWrapper, "arr").Raw))
 				}
 				if st.UsageSeen {
 					completed, _ = sjson.SetBytes(completed, "response.usage.input_tokens", st.PromptTokens)
@@ -804,7 +804,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(_ context.Co
 			reasoningItem, _ = sjson.SetBytes(reasoningItem, "summary.0.type", "summary_text")
 			reasoningItem, _ = sjson.SetBytes(reasoningItem, "summary.0.text", rcText)
 		}
-		outputsWrapper, _ = sjson.SetRaw(outputsWrapper, "arr.-1", reasoningItem)
+		outputsWrapper, _ = sjson.SetRaw(outputsWrapper, "arr.-1", string(reasoningItem))
 	}
 
 	if choices := root.Get("choices"); choices.Exists() && choices.IsArray() {
@@ -833,7 +833,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(_ context.Co
 							item, _ = sjson.SetBytes(item, "content.0.annotations", annotations)
 						}
 					}
-					outputsWrapper, _ = sjson.SetRaw(outputsWrapper, "arr.-1", item)
+					outputsWrapper, _ = sjson.SetRaw(outputsWrapper, "arr.-1", string(item))
 				}
 
 				// Function/tool calls
@@ -847,7 +847,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(_ context.Co
 						item, _ = sjson.SetBytes(item, "arguments", args)
 						item, _ = sjson.SetBytes(item, "call_id", callID)
 						item, _ = sjson.SetBytes(item, "name", name)
-						outputsWrapper, _ = sjson.SetRaw(outputsWrapper, "arr.-1", item)
+						outputsWrapper, _ = sjson.SetRaw(outputsWrapper, "arr.-1", string(item))
 						return true
 					})
 				}
@@ -856,7 +856,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(_ context.Co
 		})
 	}
 	if gjson.Get(outputsWrapper, "arr.#").Int() > 0 {
-		resp, _ = sjson.SetRawBytes(resp, "output", gjson.Get(outputsWrapper, "arr").Raw)
+		resp, _ = sjson.SetRawBytes(resp, "output", []byte(gjson.Get(outputsWrapper, "arr").Raw))
 	}
 
 	// usage mapping
@@ -879,5 +879,5 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(_ context.Co
 		}
 	}
 
-	return resp
+	return string(resp)
 }
