@@ -7,6 +7,7 @@ package geminiCLI
 import (
 	"context"
 
+	translatorcommon "github.com/kooshapari/CLIProxyAPI/v7/internal/translator/common"
 	codexgemini "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/translator/codex/gemini"
 	"github.com/tidwall/sjson"
 )
@@ -28,7 +29,7 @@ func ConvertCodexResponseToGeminiCLI(ctx context.Context, modelName string, orig
 	outputs := codexgemini.ConvertCodexResponseToGemini(ctx, modelName, originalRequestRawJSON, requestRawJSON, rawJSON, param)
 	newOutputs := make([]string, 0)
 	for i := 0; i < len(outputs); i++ {
-		newOutputs = append(newOutputs, translatorcommon.WrapGeminiCLIResponse(outputs[i]))
+		newOutputs = append(newOutputs, string(translatorcommon.WrapGeminiCLIResponse(outputs[i])))
 	}
 	return newOutputs
 }

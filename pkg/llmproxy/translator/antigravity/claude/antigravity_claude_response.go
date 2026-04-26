@@ -14,7 +14,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	translatorcommon "github.com/kooshapari/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/cache"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/util"
 	log "github.com/sirupsen/logrus"
 
 	"github.com/tidwall/gjson"
@@ -160,9 +162,9 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 						// Transition from another state to thinking
 						// First, close any existing content block
 						if params.ResponseType != 0 {
-							output = output + "event: content_block_stop\n"
-							output = output + fmt.Sprintf(`data: {"type":"content_block_stop","index":%d}`, params.ResponseIndex)
-							output = output + "\n\n\n"
+							output = append(output, "event: content_block_stop\n"...)
+							output = append(output, fmt.Sprintf(`data: {"type":"content_block_stop","index":%d}`, params.ResponseIndex)...)
+							output = append(output, "\n\n\n"...)
 							params.ResponseIndex++
 						}
 
@@ -189,9 +191,9 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 							// Transition from another state to text content
 							// First, close any existing content block
 							if params.ResponseType != 0 {
-								output = output + "event: content_block_stop\n"
-								output = output + fmt.Sprintf(`data: {"type":"content_block_stop","index":%d}`, params.ResponseIndex)
-								output = output + "\n\n\n"
+								output = append(output, "event: content_block_stop\n"...)
+								output = append(output, fmt.Sprintf(`data: {"type":"content_block_stop","index":%d}`, params.ResponseIndex)...)
+								output = append(output, "\n\n\n"...)
 								params.ResponseIndex++
 							}
 							if partTextResult.String() != "" {
