@@ -7,6 +7,5 @@ jobs:
   enforce:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - name: Enforce engineering policies
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4- name: Enforce engineering policies
         run: ./scripts/policy-gate.sh

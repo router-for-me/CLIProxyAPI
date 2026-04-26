@@ -10,16 +10,14 @@ jobs:
   goreleaser:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-        with:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4with:
           fetch-depth: 0
       - name: Refresh models catalog
         run: |
           git fetch --depth 1 https://github.com/router-for-me/models.git main
           git show FETCH_HEAD:models.json > internal/registry/models/models.json
       - run: git fetch --force --tags
-      - uses: actions/setup-go@v4
-        with:
+      - uses: actions/setup-go@7b8cf10d4e4a01d4992d18a89f4d7dc5a3e6d6f4 # v4with:
           go-version: '>=1.26.0'
           cache: true
       - name: Generate Build Metadata
@@ -27,8 +25,7 @@ jobs:
           echo "VERSION=${GITHUB_REF_NAME}" >> $GITHUB_ENV
           echo COMMIT=`git rev-parse --short HEAD` >> $GITHUB_ENV
           echo BUILD_DATE=`date -u +%Y-%m-%dT%H:%M:%SZ` >> $GITHUB_ENV
-      - uses: goreleaser/goreleaser-action@v4
-        with:
+      - uses: goreleaser/goreleaser-action@5fdedb94abba051217030cc86d4523cf3f02243d # v4with:
           distribution: goreleaser
           version: latest
           args: release --clean --skip=validate
@@ -43,8 +40,7 @@ jobs:
     runs-on: ubuntu-24.04-arm
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
-        with:
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4with:
           fetch-depth: 0
       - name: Build in Termux Container
         run: |
@@ -66,8 +62,7 @@ jobs:
               tar -czf cli-proxy-api-termux-aarch64.tar.gz cli-proxy-api LICENSE README.md README_CN.md config.example.yaml
             "
       - name: Upload to Release
-        uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2if: startsWith(github.ref, 'refs/tags/')
         with:
           files: cli-proxy-api-termux-aarch64.tar.gz
         env:

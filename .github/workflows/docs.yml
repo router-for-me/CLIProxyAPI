@@ -19,18 +19,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4- name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4with:
           node-version: "20"
           cache: "npm"
           cache-dependency-path: docs/package.json
 
       - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
-        with:
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2with:
           bun-version: latest
 
       - name: Install OXC dependencies
@@ -54,8 +50,7 @@ jobs:
         run: test -f docs/.vitepress/dist/index.html
 
       - name: Upload pages artifact
-        uses: actions/upload-pages-artifact@v3
-        with:
+        uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3with:
           path: docs/.vitepress/dist/
 
   build-skip-branch-ci-unblock:
@@ -76,8 +71,6 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Configure Pages
-        uses: actions/configure-pages@v5
-
-      - name: Deploy
+        uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5- name: Deploy
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4

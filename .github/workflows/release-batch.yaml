@@ -14,12 +14,10 @@ jobs:
   release-batch:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-        with:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4with:
           fetch-depth: 0
       - run: git fetch --force --tags
-      - uses: actions/setup-go@v5
-        with:
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5with:
           go-version: ">=1.26.0"
           cache: true
       - name: Configure git

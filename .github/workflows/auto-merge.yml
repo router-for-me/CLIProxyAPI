@@ -18,7 +18,6 @@ jobs:
         if: |
           contains(github.event.pull_request.labels.*.name, 'automerge') &&
           !contains(github.event.pull_request.labels.*.name, 'do-not-merge')
-        uses: peter-evans/enable-pull-request-automerge@v3
-        with:
+        uses: peter-evans/enable-pull-request-automerge@a660677d5469627102a1c1e11409dd063606628d # v3with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           merge-method: squash

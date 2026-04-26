@@ -13,14 +13,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
-      - name: Refresh models catalog
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4- name: Refresh models catalog
         run: |
           git fetch --depth 1 https://github.com/router-for-me/models.git main
           git show FETCH_HEAD:models.json > internal/registry/models/models.json
       - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5with:
           go-version-file: go.mod
           cache: true
       - name: Build
@@ -41,10 +39,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4- name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5with:
           go-version-file: go.mod
           cache: true
       - name: Run full tests with baseline
@@ -58,8 +54,7 @@ jobs:
           exit "${test_exit}"
       - name: Upload baseline artifact
         if: always()
-        uses: actions/upload-artifact@v4
-        with:
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4with:
           name: go-test-baseline
           path: target/test-baseline.json
           if-no-files-found: warn
@@ -69,10 +64,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4- name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5with:
           go-version-file: go.mod
           cache: true
       - name: Install golangci-lint
@@ -86,8 +79,7 @@ jobs:
             go install honnef.co/go/tools/cmd/staticcheck@latest
           fi
       - name: Install Task
-        uses: arduino/setup-task@v2
-        with:
+        uses: arduino/setup-task@{"message":"Not Found","documentation_url":"https://docs.github.com/rest/git/refs#get-a-reference","status":"404"} # v2with:
           version: 3.x
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Run CI quality gates
@@ -101,10 +93,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4- name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5with:
           go-version-file: go.mod
           cache: true
       - name: Install golangci-lint
@@ -113,8 +103,7 @@ jobs:
             go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.1.6
           fi
       - name: Install Task
-        uses: arduino/setup-task@v2
-        with:
+        uses: arduino/setup-task@{"message":"Not Found","documentation_url":"https://docs.github.com/rest/git/refs#get-a-reference","status":"404"} # v2with:
           version: 3.x
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Check staged/diff files in PR range
@@ -127,15 +116,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4- name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5with:
           go-version-file: go.mod
           cache: true
       - name: Install Task
-        uses: arduino/setup-task@v2
-        with:
+        uses: arduino/setup-task@{"message":"Not Found","documentation_url":"https://docs.github.com/rest/git/refs#get-a-reference","status":"404"} # v2with:
           version: 3.x
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Verify formatting
@@ -146,10 +132,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4- name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5with:
           go-version-file: go.mod
           cache: true
       - name: Install golangci-lint
@@ -166,10 +150,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4- name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5with:
           go-version-file: go.mod
           cache: true
       - name: Run route lifecycle tests
@@ -187,10 +169,8 @@ jobs:
       CLIPROXY_BASE_URL: "http://127.0.0.1:8317"
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4- name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5with:
           go-version-file: go.mod
           cache: true
       - name: Build cliproxy proxy
@@ -222,10 +202,8 @@ jobs:
       CLIPROXY_BASE_URL: "http://127.0.0.1:8317"
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4- name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5with:
           go-version-file: go.mod
           cache: true
       - name: Build cliproxy proxy
@@ -250,15 +228,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4- name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5with:
           go-version-file: go.mod
           cache: true
       - name: Install Task
-        uses: arduino/setup-task@v2
-        with:
+        uses: arduino/setup-task@{"message":"Not Found","documentation_url":"https://docs.github.com/rest/git/refs#get-a-reference","status":"404"} # v2with:
           version: 3.x
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Run startup and control-plane smoke tests
@@ -269,15 +244,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4- name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5with:
           go-version-file: go.mod
           cache: true
       - name: Install Task
-        uses: arduino/setup-task@v2
-        with:
+        uses: arduino/setup-task@{"message":"Not Found","documentation_url":"https://docs.github.com/rest/git/refs#get-a-reference","status":"404"} # v2with:
           version: 3.x
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Validate config compatibility path
@@ -289,10 +261,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4- name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5with:
           go-version-file: go.mod
           cache: true
       - name: Run targeted critical-path checks
@@ -303,8 +273,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
-        with:
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4with:
           fetch-depth: 0
       - name: Detect change scopes
         run: |
@@ -345,8 +314,7 @@ jobs:
           echo "scope=${scope}" >> "$GITHUB_ENV"
           echo "scope=${scope}" > target/changelog-scope.txt
       - name: Upload changelog scope artifact
-        uses: actions/upload-artifact@v4
-        with:
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4with:
           name: changelog-scope
           path: target/changelog-scope.txt
 
@@ -355,10 +323,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4- name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4with:
           node-version: "20"
           cache: "npm"
           cache-dependency-path: docs/package.json

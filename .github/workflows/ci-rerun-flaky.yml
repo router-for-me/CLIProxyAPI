@@ -15,8 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Rerun failed CI jobs and remove rerun label
-        uses: actions/github-script@v7
-        with:
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7with:
           script: |
             const label = 'ci:rerun-flaky';
             const { owner, repo } = context.repo;
