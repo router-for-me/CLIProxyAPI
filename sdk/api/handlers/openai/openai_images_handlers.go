@@ -209,9 +209,25 @@ func (h *OpenAIAPIHandler) ImagesGenerations(c *gin.Context) {
 	if imageModel == "" {
 		imageModel = defaultImagesToolModel
 	}
+	responseFormat := strings.TrimSpace(gjson.GetBytes(rawJSON, "response_format").String())
+	if responseFormat == "" {
+		responseFormat = "b64_json"
+	}
+	stream := gjson.GetBytes(rawJSON, "stream").Bool()
 	if h.HasNativeImagesProvider(imageModel, "images/generations") {
-		h.collectImagesFromNative(c, rawJSON, imageModel, "images/generations")
-		return
+		if !stream {
+			h.collectImagesFromNative(c, rawJSON, imageModel, "images/generations")
+			return
+		}
+		if !strings.EqualFold(imageModel, defaultImagesToolModel) {
+			c.JSON(http.StatusBadGateway, handlers.ErrorResponse{
+				Error: handlers.ErrorDetail{
+					Message: fmt.Sprintf("no native image streaming provider for model %s", imageModel),
+					Type:    "invalid_request_error",
+				},
+			})
+			return
+		}
 	}
 	if !strings.EqualFold(imageModel, defaultImagesToolModel) {
 		c.JSON(http.StatusBadGateway, handlers.ErrorResponse{
@@ -222,12 +238,6 @@ func (h *OpenAIAPIHandler) ImagesGenerations(c *gin.Context) {
 		})
 		return
 	}
-
-	responseFormat := strings.TrimSpace(gjson.GetBytes(rawJSON, "response_format").String())
-	if responseFormat == "" {
-		responseFormat = "b64_json"
-	}
-	stream := gjson.GetBytes(rawJSON, "stream").Bool()
 
 	tool := []byte(`{"type":"image_generation","action":"generate"}`)
 	tool, _ = sjson.SetBytes(tool, "model", imageModel)

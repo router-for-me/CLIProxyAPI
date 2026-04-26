@@ -254,6 +254,38 @@ func TestImagesGenerationsDoesNotFallbackToCodexForCustomImageModel(t *testing.T
 	}
 }
 
+func TestImagesGenerationsRejectsNativeProviderStreamWithoutStreamingSupport(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	nativeExecutor := &imagesCaptureExecutor{provider: "openai-compatibility", nativeImages: true}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(nativeExecutor)
+
+	auth := &coreauth.Auth{ID: "images-native-stream-auth", Provider: nativeExecutor.Identifier(), Status: coreauth.StatusActive}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "qwen-image-test"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	router := imagesTestRouter(manager)
+	req := httptest.NewRequest(http.MethodPost, "/v1/images/generations", strings.NewReader(`{"model":"qwen-image-test","prompt":"draw a cat","stream":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d, body=%s", resp.Code, http.StatusBadGateway, resp.Body.String())
+	}
+	if nativeExecutor.calls != 0 {
+		t.Fatalf("native executor calls = %d, want 0", nativeExecutor.calls)
+	}
+	if !strings.Contains(resp.Body.String(), "no native image streaming provider") {
+		t.Fatalf("body = %s, want native image streaming provider error", resp.Body.String())
+	}
+}
+
 func TestImagesGenerationsRejectsUnknownNonBuiltinModel(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	manager := coreauth.NewManager(nil, nil, nil)

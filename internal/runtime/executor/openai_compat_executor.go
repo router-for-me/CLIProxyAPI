@@ -29,6 +29,8 @@ type OpenAICompatExecutor struct {
 	cfg      *config.Config
 }
 
+const openAICompatUserAgent = "cli-proxy-openai-compat"
+
 // NewOpenAICompatExecutor creates an executor bound to a provider key (e.g., "openrouter").
 func NewOpenAICompatExecutor(provider string, cfg *config.Config) *OpenAICompatExecutor {
 	return &OpenAICompatExecutor{provider: provider, cfg: cfg}
@@ -127,7 +129,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	if apiKey != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
 	}
-	httpReq.Header.Set("User-Agent", "cli-proxy-openai-compat")
+	httpReq.Header.Set("User-Agent", openAICompatUserAgent)
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
@@ -191,6 +193,8 @@ func (e *OpenAICompatExecutor) executeNativeImages(ctx context.Context, auth *cl
 	if len(opts.OriginalRequest) > 0 {
 		body = opts.OriginalRequest
 	}
+	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
+	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, "openai", "", body, body, requestedModel)
 	body = e.overrideModel(body, baseModel)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/" + endpoint
@@ -202,7 +206,7 @@ func (e *OpenAICompatExecutor) executeNativeImages(ctx context.Context, auth *cl
 	if apiKey != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
 	}
-	httpReq.Header.Set("User-Agent", "cli-proxy-openai-compat")
+	httpReq.Header.Set("User-Agent", openAICompatUserAgent)
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
@@ -297,7 +301,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	if apiKey != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
 	}
-	httpReq.Header.Set("User-Agent", "cli-proxy-openai-compat")
+	httpReq.Header.Set("User-Agent", openAICompatUserAgent)
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
