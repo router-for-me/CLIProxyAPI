@@ -201,11 +201,7 @@ func (h *Handler) APICall(c *gin.Context) {
 		req.Host = hostOverride
 	}
 
-	httpClient := &http.Client{
-		Timeout: defaultAPICallTimeout,
-	}
-	httpClient.Transport = h.apiCallTransport(auth)
-
+	httpClient := h.apiCallHTTPClient(auth)
 	resp, errDo := httpClient.Do(req)
 	if errDo != nil {
 		log.WithError(errDo).Debug("management APICall request failed")

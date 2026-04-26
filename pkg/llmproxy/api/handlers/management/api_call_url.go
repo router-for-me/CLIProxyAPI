@@ -1,6 +1,7 @@
 package management
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/url"
@@ -59,23 +60,33 @@ func sanitizeAPICallURL(raw string) (string, *url.URL, error) {
 }
 
 func validateResolvedHostIPs(host string) error {
+	_, err := resolveAllowedAPICallHostIPs(host)
+	return err
+}
+
+func resolveAllowedAPICallHostIPs(host string) ([]net.IPAddr, error) {
 	trimmed := strings.TrimSpace(host)
 	if trimmed == "" {
-		return fmt.Errorf("invalid url host")
+		return nil, fmt.Errorf("invalid url host")
 	}
-	resolved, errLookup := net.LookupIP(trimmed)
+	resolved, errLookup := net.DefaultResolver.LookupIPAddr(context.Background(), trimmed)
 	if errLookup != nil {
-		return fmt.Errorf("target host resolution failed")
+		return nil, fmt.Errorf("target host resolution failed")
 	}
+	allowed := make([]net.IPAddr, 0, len(resolved))
 	for _, ip := range resolved {
-		if ip == nil {
+		if ip.IP == nil {
 			continue
 		}
-		if ip.IsLoopback() || ip.IsPrivate() || ip.IsUnspecified() || ip.IsMulticast() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
-			return fmt.Errorf("target host is not allowed")
+		if ip.IP.IsLoopback() || ip.IP.IsPrivate() || ip.IP.IsUnspecified() || ip.IP.IsMulticast() || ip.IP.IsLinkLocalUnicast() || ip.IP.IsLinkLocalMulticast() {
+			return nil, fmt.Errorf("target host is not allowed")
 		}
+		allowed = append(allowed, ip)
 	}
-	return nil
+	if len(allowed) == 0 {
+		return nil, fmt.Errorf("target host resolution failed")
+	}
+	return allowed, nil
 }
 
 func isAllowedHostOverride(parsedURL *url.URL, override string) bool {

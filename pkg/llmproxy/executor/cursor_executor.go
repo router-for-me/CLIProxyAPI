@@ -333,11 +333,13 @@ func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 
 	id := "chatcmpl-" + uuid.New().String()[:28]
 	created := time.Now().Unix()
-	openaiResp := fmt.Sprintf(`{"id":"%s","object":"chat.completion","created":%d,"model":"%s","choices":[{"index":0,"message":{"role":"assistant","content":%s},"finish_reason":"stop"}],"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}`,
-		id, created, parsed.Model, jsonString(fullText.String()))
+	openaiResp, errMarshal := cursorCompletionJSON(id, created, parsed.Model, fullText.String())
+	if errMarshal != nil {
+		return resp, fmt.Errorf("cursor: failed to encode response: %w", errMarshal)
+	}
 
 	// Translate response back to source format if needed
-	result := []byte(openaiResp)
+	result := openaiResp
 	if from.String() != "" && from.String() != "openai" {
 		var param any
 		result = sdktranslator.TranslateNonStream(ctx, to, from, req.Model, bytes.Clone(opts.OriginalRequest), payload, result, &param)
@@ -536,13 +538,13 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 
 	// Wrap sendChunk/sendDone to use emitToOut
 	sendChunkSwitchable := func(delta string, finishReason string) {
-		fr := "null"
-		if finishReason != "" {
-			fr = finishReason
+		openaiJSON, errMarshal := cursorChunkJSON(chatId, created, parsed.Model, json.RawMessage(delta), finishReason)
+		if errMarshal != nil {
+			log.Warnf("cursor: failed to encode stream chunk: %v", errMarshal)
+			return
 		}
-		openaiJSON := fmt.Sprintf(`{"id":"%s","object":"chat.completion.chunk","created":%d,"model":"%s","choices":[{"index":0,"delta":%s,"finish_reason":%s}]}`,
-			chatId, created, parsed.Model, delta, fr)
-		sseLine := []byte("data: " + openaiJSON + "\n")
+		sseLine := append([]byte("data: "), openaiJSON...)
+		sseLine = append(sseLine, '\n')
 
 		if needsTranslate {
 			translated := sdktranslator.TranslateStream(ctx, to, from, req.Model, originalPayload, payload, sseLine, &streamParam)
@@ -550,7 +552,7 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				emitToOut(cliproxyexecutor.StreamChunk{Payload: bytes.Clone(t)})
 			}
 		} else {
-			emitToOut(cliproxyexecutor.StreamChunk{Payload: []byte(openaiJSON)})
+			emitToOut(cliproxyexecutor.StreamChunk{Payload: openaiJSON})
 		}
 	}
 
@@ -595,13 +597,13 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 						thinkingActive = true
 						sendChunkSwitchable(`{"role":"assistant","content":"<think>"}`, "")
 					}
-					sendChunkSwitchable(fmt.Sprintf(`{"content":%s}`, jsonString(text)), "")
+					sendChunkSwitchable(cursorContentDeltaJSON(text), "")
 				} else {
 					if thinkingActive {
 						thinkingActive = false
 						sendChunkSwitchable(`{"content":"</think>"}`, "")
 					}
-					sendChunkSwitchable(fmt.Sprintf(`{"content":%s}`, jsonString(text)), "")
+					sendChunkSwitchable(cursorContentDeltaJSON(text), "")
 				}
 			},
 			func(exec pendingMcpExec) {
@@ -609,11 +611,10 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 					thinkingActive = false
 					sendChunkSwitchable(`{"content":"</think>"}`, "")
 				}
-				toolCallJSON := fmt.Sprintf(`{"tool_calls":[{"index":%d,"id":"%s","type":"function","function":{"name":"%s","arguments":%s}}]}`,
-					toolCallIndex, exec.ToolCallId, exec.ToolName, jsonString(exec.Args))
+				toolCallJSON := cursorToolCallDeltaJSON(toolCallIndex, exec.ToolCallId, exec.ToolName, exec.Args)
 				toolCallIndex++
 				sendChunkSwitchable(toolCallJSON, "")
-				sendChunkSwitchable(`{}`, `"tool_calls"`)
+				sendChunkSwitchable(`{}`, "tool_calls")
 				sendDoneSwitchable()
 
 				// Close current output to end the current HTTP SSE response
@@ -701,23 +702,22 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		}
 		// Include token usage in the final stop chunk
 		inputTok, outputTok := usage.get()
-		stopDelta := fmt.Sprintf(`{},"usage":{"prompt_tokens":%d,"completion_tokens":%d,"total_tokens":%d}`,
-			inputTok, outputTok, inputTok+outputTok)
-		// Build the stop chunk with usage embedded in the choices array level
-		fr := `"stop"`
-		openaiJSON := fmt.Sprintf(`{"id":"%s","object":"chat.completion.chunk","created":%d,"model":"%s","choices":[{"index":0,"delta":{},"finish_reason":%s}],"usage":{"prompt_tokens":%d,"completion_tokens":%d,"total_tokens":%d}}`,
-			chatId, created, parsed.Model, fr, inputTok, outputTok, inputTok+outputTok)
-		sseLine := []byte("data: " + openaiJSON + "\n")
+		openaiJSON, errMarshal := cursorUsageChunkJSON(chatId, created, parsed.Model, inputTok, outputTok)
+		if errMarshal != nil {
+			log.Warnf("cursor: failed to encode usage chunk: %v", errMarshal)
+			openaiJSON = []byte(`{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`)
+		}
+		sseLine := append([]byte("data: "), openaiJSON...)
+		sseLine = append(sseLine, '\n')
 		if needsTranslate {
 			translated := sdktranslator.TranslateStream(ctx, to, from, req.Model, originalPayload, payload, sseLine, &streamParam)
 			for _, t := range translated {
 				emitToOut(cliproxyexecutor.StreamChunk{Payload: bytes.Clone(t)})
 			}
 		} else {
-			emitToOut(cliproxyexecutor.StreamChunk{Payload: []byte(openaiJSON)})
+			emitToOut(cliproxyexecutor.StreamChunk{Payload: openaiJSON})
 		}
 		sendDoneSwitchable()
-		_ = stopDelta // unused
 
 		// Close whatever output channel is still active
 		outMu.Lock()
@@ -1436,16 +1436,15 @@ func deriveSessionKey(clientKey string, model string, messages []gjson.Result) s
 }
 
 func sseChunk(id string, created int64, model string, delta string, finishReason string) cliproxyexecutor.StreamChunk {
-	fr := "null"
-	if finishReason != "" {
-		fr = finishReason
-	}
 	// Note: the framework's WriteChunk adds "data: " prefix and "\n\n" suffix,
 	// so we only output the raw JSON here.
-	data := fmt.Sprintf(`{"id":"%s","object":"chat.completion.chunk","created":%d,"model":"%s","choices":[{"index":0,"delta":%s,"finish_reason":%s}]}`,
-		id, created, model, delta, fr)
+	data, err := cursorChunkJSON(id, created, model, json.RawMessage(delta), finishReason)
+	if err != nil {
+		log.Warnf("cursor: failed to encode sse chunk: %v", err)
+		data = []byte(`{"choices":[{"index":0,"delta":{},"finish_reason":null}]}`)
+	}
 	return cliproxyexecutor.StreamChunk{
-		Payload: []byte(data),
+		Payload: data,
 	}
 }
 

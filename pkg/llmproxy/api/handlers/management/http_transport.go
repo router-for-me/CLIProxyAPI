@@ -46,7 +46,21 @@ func (h *Handler) apiCallTransport(auth *coreauth.Auth) http.RoundTripper {
 	}
 	clone := transport.Clone()
 	clone.Proxy = nil
+	clone.DialContext = guardedAPICallDialContext
 	return clone
+}
+
+func (h *Handler) apiCallHTTPClient(auth *coreauth.Auth) *http.Client {
+	return &http.Client{
+		Timeout:   defaultAPICallTimeout,
+		Transport: apiCallGuardedRoundTripper{base: h.apiCallTransport(auth)},
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return fmt.Errorf("stopped after 10 redirects")
+			}
+			return validateAPICallRequestURL(req.URL)
+		},
+	}
 }
 
 func buildProxyTransportWithError(proxyStr string) (*http.Transport, error) {
