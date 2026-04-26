@@ -15,6 +15,18 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/redisqueue"
 )
 
+type remoteAddrConn struct {
+	net.Conn
+	remoteAddr net.Addr
+}
+
+func (c *remoteAddrConn) RemoteAddr() net.Addr {
+	if c == nil {
+		return nil
+	}
+	return c.remoteAddr
+}
+
 func startRedisMuxListener(t *testing.T, server *Server) (addr string, stop func()) {
 	t.Helper()
 
@@ -300,5 +312,165 @@ func TestRedisProtocol_AUTH_And_PopContracts(t *testing.T) {
 	}
 	if len(emptyItems) != 0 {
 		t.Fatalf("expected empty array for empty queue with count, got %#v", emptyItems)
+	}
+}
+
+func TestRedisProtocol_IPBan_MirrorsManagementPolicy(t *testing.T) {
+	const managementPassword = "test-management-password"
+
+	t.Setenv("MANAGEMENT_PASSWORD", managementPassword)
+	redisqueue.SetEnabled(false)
+	t.Cleanup(func() { redisqueue.SetEnabled(false) })
+
+	server := newTestServer(t)
+	if !server.managementRoutesEnabled.Load() {
+		t.Fatalf("expected managementRoutesEnabled to be true")
+	}
+
+	clientConn, serverConn := net.Pipe()
+	t.Cleanup(func() { _ = clientConn.Close() })
+	t.Cleanup(func() { _ = serverConn.Close() })
+
+	fakeRemote := &net.TCPAddr{
+		IP:   net.ParseIP("1.2.3.4"),
+		Port: 1234,
+	}
+	wrappedConn := &remoteAddrConn{Conn: serverConn, remoteAddr: fakeRemote}
+
+	go server.handleRedisConnection(wrappedConn, bufio.NewReader(wrappedConn))
+
+	reader := bufio.NewReader(clientConn)
+	_ = clientConn.SetDeadline(time.Now().Add(5 * time.Second))
+
+	for i := 0; i < 5; i++ {
+		if errWrite := writeTestRESPCommand(clientConn, "LPOP", "queue"); errWrite != nil {
+			t.Fatalf("failed to write LPOP command: %v", errWrite)
+		}
+		if msg, err := readTestRESPError(reader); err != nil {
+			t.Fatalf("failed to read LPOP NOAUTH error: %v", err)
+		} else if msg != "NOAUTH Authentication required." {
+			t.Fatalf("unexpected LPOP NOAUTH error at attempt %d: %q", i+1, msg)
+		}
+	}
+
+	if errWrite := writeTestRESPCommand(clientConn, "LPOP", "queue"); errWrite != nil {
+		t.Fatalf("failed to write LPOP command after failures: %v", errWrite)
+	}
+	msg, err := readTestRESPError(reader)
+	if err != nil {
+		t.Fatalf("failed to read LPOP banned error: %v", err)
+	}
+	if !strings.HasPrefix(msg, "ERR IP banned due to too many failed attempts. Try again in") {
+		t.Fatalf("unexpected LPOP banned error: %q", msg)
+	}
+}
+
+func TestRedisProtocol_AUTH_IPBan_BlocksCorrectPasswordDuringBan(t *testing.T) {
+	const managementPassword = "test-management-password"
+
+	t.Setenv("MANAGEMENT_PASSWORD", managementPassword)
+	redisqueue.SetEnabled(false)
+	t.Cleanup(func() { redisqueue.SetEnabled(false) })
+
+	server := newTestServer(t)
+	if !server.managementRoutesEnabled.Load() {
+		t.Fatalf("expected managementRoutesEnabled to be true")
+	}
+
+	clientConn, serverConn := net.Pipe()
+	t.Cleanup(func() { _ = clientConn.Close() })
+	t.Cleanup(func() { _ = serverConn.Close() })
+
+	fakeRemote := &net.TCPAddr{
+		IP:   net.ParseIP("1.2.3.4"),
+		Port: 1234,
+	}
+	wrappedConn := &remoteAddrConn{Conn: serverConn, remoteAddr: fakeRemote}
+
+	go server.handleRedisConnection(wrappedConn, bufio.NewReader(wrappedConn))
+
+	reader := bufio.NewReader(clientConn)
+	_ = clientConn.SetDeadline(time.Now().Add(5 * time.Second))
+
+	for i := 0; i < 5; i++ {
+		if errWrite := writeTestRESPCommand(clientConn, "AUTH", "wrong-password"); errWrite != nil {
+			t.Fatalf("failed to write AUTH command: %v", errWrite)
+		}
+		if msg, err := readTestRESPError(reader); err != nil {
+			t.Fatalf("failed to read AUTH error: %v", err)
+		} else if msg != "ERR invalid management key" {
+			t.Fatalf("unexpected AUTH error at attempt %d: %q", i+1, msg)
+		}
+	}
+
+	for i := 0; i < 2; i++ {
+		if errWrite := writeTestRESPCommand(clientConn, "AUTH", "wrong-password"); errWrite != nil {
+			t.Fatalf("failed to write AUTH command after failures: %v", errWrite)
+		}
+		msg, err := readTestRESPError(reader)
+		if err != nil {
+			t.Fatalf("failed to read AUTH banned error: %v", err)
+		}
+		if !strings.HasPrefix(msg, "ERR IP banned due to too many failed attempts. Try again in") {
+			t.Fatalf("unexpected AUTH banned error at attempt %d: %q", i+6, msg)
+		}
+	}
+
+	if errWrite := writeTestRESPCommand(clientConn, "AUTH", managementPassword); errWrite != nil {
+		t.Fatalf("failed to write AUTH command with correct password: %v", errWrite)
+	}
+	msg, err := readTestRESPError(reader)
+	if err != nil {
+		t.Fatalf("failed to read AUTH banned error for correct password: %v", err)
+	}
+	if !strings.HasPrefix(msg, "ERR IP banned due to too many failed attempts. Try again in") {
+		t.Fatalf("unexpected AUTH banned error for correct password: %q", msg)
+	}
+}
+
+func TestRedisProtocol_LOCALHOST_AUTH_IPBan_BlocksCorrectPasswordDuringBan(t *testing.T) {
+	const managementPassword = "test-management-password"
+
+	t.Setenv("MANAGEMENT_PASSWORD", managementPassword)
+	redisqueue.SetEnabled(false)
+	t.Cleanup(func() { redisqueue.SetEnabled(false) })
+
+	server := newTestServer(t)
+	if !server.managementRoutesEnabled.Load() {
+		t.Fatalf("expected managementRoutesEnabled to be true")
+	}
+
+	addr, stop := startRedisMuxListener(t, server)
+	t.Cleanup(stop)
+
+	conn, errDial := net.DialTimeout("tcp", addr, time.Second)
+	if errDial != nil {
+		t.Fatalf("failed to dial redis listener: %v", errDial)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	reader := bufio.NewReader(conn)
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+
+	for i := 0; i < 5; i++ {
+		if errWrite := writeTestRESPCommand(conn, "AUTH", "wrong-password"); errWrite != nil {
+			t.Fatalf("failed to write AUTH command: %v", errWrite)
+		}
+		if msg, err := readTestRESPError(reader); err != nil {
+			t.Fatalf("failed to read AUTH error: %v", err)
+		} else if msg != "ERR invalid management key" {
+			t.Fatalf("unexpected AUTH error at attempt %d: %q", i+1, msg)
+		}
+	}
+
+	if errWrite := writeTestRESPCommand(conn, "AUTH", managementPassword); errWrite != nil {
+		t.Fatalf("failed to write AUTH command with correct password: %v", errWrite)
+	}
+	msg, err := readTestRESPError(reader)
+	if err != nil {
+		t.Fatalf("failed to read AUTH banned error for correct password: %v", err)
+	}
+	if !strings.HasPrefix(msg, "ERR IP banned due to too many failed attempts. Try again in") {
+		t.Fatalf("unexpected AUTH banned error for correct password: %q", msg)
 	}
 }
