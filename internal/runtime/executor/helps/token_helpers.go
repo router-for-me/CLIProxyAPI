@@ -1,9 +1,11 @@
 package helps
 
 import (
+	"bytes"
 	"fmt"
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	"github.com/tidwall/gjson"
 	"github.com/tiktoken-go/tokenizer"
 )
@@ -49,6 +51,8 @@ func CountOpenAIChatTokens(enc tokenizer.Codec, payload []byte) (int64, error) {
 	root := gjson.ParseBytes(payload)
 	segments := make([]string, 0, 32)
 
+	collectOpenAIContent(root.Get("system"), &segments)
+	collectOpenAIContent(root.Get("instructions"), &segments)
 	collectOpenAIMessages(root.Get("messages"), &segments)
 	collectOpenAITools(root.Get("tools"), &segments)
 	collectOpenAIFunctions(root.Get("functions"), &segments)
@@ -67,6 +71,425 @@ func CountOpenAIChatTokens(enc tokenizer.Codec, payload []byte) (int64, error) {
 		return 0, err
 	}
 	return int64(count), nil
+}
+
+// EstimateUsage approximates request and response tokens when upstream usage is missing.
+func EstimateUsage(model string, requestBody []byte, responseBody []byte) usage.Detail {
+	enc, err := TokenizerForModel(model)
+	if err != nil {
+		return usage.Detail{}
+	}
+
+	inputTokens := estimateInputTokens(enc, requestBody)
+	outputTokens := countTextTokens(enc, ExtractOutputText(responseBody))
+	totalTokens := inputTokens + outputTokens
+	if totalTokens == 0 {
+		return usage.Detail{}
+	}
+	return usage.Detail{
+		InputTokens:  inputTokens,
+		OutputTokens: outputTokens,
+		TotalTokens:  totalTokens,
+	}
+}
+
+func estimateInputTokens(enc tokenizer.Codec, requestBody []byte) int64 {
+	if len(bytes.TrimSpace(requestBody)) == 0 {
+		return 0
+	}
+	if count, err := CountOpenAIChatTokens(enc, requestBody); err == nil && count > 0 {
+		return count
+	}
+	return countTextTokens(enc, ExtractInputText(requestBody))
+}
+
+func countTextTokens(enc tokenizer.Codec, text string) int64 {
+	if enc == nil {
+		return 0
+	}
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return 0
+	}
+	count, err := enc.Count(trimmed)
+	if err != nil {
+		return 0
+	}
+	return int64(count)
+}
+
+// ExtractInputText collects text-bearing request fields across supported provider schemas.
+func ExtractInputText(data []byte) string {
+	payloads := jsonPayloads(data)
+	if len(payloads) == 0 {
+		return ""
+	}
+	segments := make([]string, 0, 32)
+	for _, payload := range payloads {
+		collectInputText(gjson.ParseBytes(payload), &segments)
+	}
+	return strings.TrimSpace(strings.Join(segments, "\n"))
+}
+
+// ExtractOutputText collects visible response text across non-streaming and streaming schemas.
+func ExtractOutputText(data []byte) string {
+	payloads := jsonPayloads(data)
+	if len(payloads) == 0 {
+		return ""
+	}
+	options := detectOutputExtractionOptions(payloads)
+	segments := make([]string, 0, 32)
+	for _, payload := range payloads {
+		collectOutputText(gjson.ParseBytes(payload), options, &segments)
+	}
+	return strings.TrimSpace(strings.Join(segments, ""))
+}
+
+type outputExtractionOptions struct {
+	hasResponsesTextDelta     bool
+	hasResponsesFunctionDelta bool
+	hasResponsesOutputDone    bool
+}
+
+func detectOutputExtractionOptions(payloads [][]byte) outputExtractionOptions {
+	var options outputExtractionOptions
+	for _, payload := range payloads {
+		root := gjson.ParseBytes(payload)
+		if root.IsArray() {
+			root.ForEach(func(_, item gjson.Result) bool {
+				updateOutputExtractionOptions(item, &options)
+				return true
+			})
+			continue
+		}
+		updateOutputExtractionOptions(root, &options)
+	}
+	return options
+}
+
+func updateOutputExtractionOptions(root gjson.Result, options *outputExtractionOptions) {
+	if options == nil {
+		return
+	}
+	switch root.Get("type").String() {
+	case "response.output_text.delta", "response.reasoning_summary_text.delta":
+		options.hasResponsesTextDelta = true
+	case "response.function_call_arguments.delta":
+		options.hasResponsesFunctionDelta = true
+	case "response.output_item.done":
+		options.hasResponsesOutputDone = true
+	case "content_block_delta":
+		options.hasResponsesTextDelta = true
+	}
+}
+
+func jsonPayloads(data []byte) [][]byte {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 {
+		return nil
+	}
+	if gjson.ValidBytes(trimmed) {
+		return [][]byte{append([]byte(nil), trimmed...)}
+	}
+
+	lines := bytes.Split(trimmed, []byte("\n"))
+	payloads := make([][]byte, 0, len(lines))
+	for _, line := range lines {
+		payload := JSONPayload(line)
+		if len(payload) == 0 {
+			line = bytes.TrimSpace(line)
+			if !gjson.ValidBytes(line) {
+				continue
+			}
+			payload = line
+		}
+		payloads = append(payloads, append([]byte(nil), payload...))
+	}
+	return payloads
+}
+
+func collectInputText(root gjson.Result, segments *[]string) {
+	if !root.Exists() {
+		return
+	}
+	if root.IsArray() {
+		root.ForEach(func(_, item gjson.Result) bool {
+			collectInputText(item, segments)
+			return true
+		})
+		return
+	}
+
+	collectOpenAIContent(root.Get("system"), segments)
+	collectOpenAIContent(root.Get("instructions"), segments)
+	collectOpenAIMessages(root.Get("messages"), segments)
+	collectOpenAIContent(root.Get("input"), segments)
+	addIfNotEmpty(segments, root.Get("prompt").String())
+
+	collectGeminiContents(root.Get("contents"), segments)
+	collectGeminiContents(root.Get("request.contents"), segments)
+	collectGeminiContent(root.Get("systemInstruction"), segments)
+	collectGeminiContent(root.Get("request.systemInstruction"), segments)
+	collectGeminiTools(root.Get("tools"), segments)
+	collectGeminiTools(root.Get("request.tools"), segments)
+	collectOpenAITools(root.Get("request.tools"), segments)
+}
+
+func collectOutputText(root gjson.Result, options outputExtractionOptions, segments *[]string) {
+	if !root.Exists() {
+		return
+	}
+	if root.IsArray() {
+		root.ForEach(func(_, item gjson.Result) bool {
+			collectOutputText(item, options, segments)
+			return true
+		})
+		return
+	}
+
+	eventType := root.Get("type").String()
+	switch eventType {
+	case "response.output_text.delta", "response.reasoning_summary_text.delta":
+		addOutputIfNotEmpty(segments, root.Get("delta").String())
+		return
+	case "response.function_call_arguments.delta":
+		addOutputIfNotEmpty(segments, root.Get("delta").String())
+		return
+	case "response.output_text.done", "response.reasoning_summary_text.done":
+		if !options.hasResponsesTextDelta {
+			addOutputIfNotEmpty(segments, root.Get("text").String())
+		}
+		return
+	case "response.function_call_arguments.done":
+		if !options.hasResponsesFunctionDelta {
+			addOutputIfNotEmpty(segments, root.Get("arguments").String())
+		}
+		return
+	case "response.output_item.done":
+		collectResponseOutputItem(root.Get("item"), options, segments)
+		return
+	case "response.completed", "response.done":
+		if !options.hasResponsesTextDelta && !options.hasResponsesFunctionDelta && !options.hasResponsesOutputDone {
+			collectResponseOutput(root.Get("response.output"), options, segments)
+			addIfNotEmpty(segments, root.Get("response.output_text").String())
+		}
+		return
+	case "content_block_delta":
+		collectClaudeDelta(root.Get("delta"), segments)
+		return
+	case "content_block_start":
+		if !options.hasResponsesTextDelta {
+			collectClaudeContentBlock(root.Get("content_block"), segments)
+		}
+		return
+	}
+
+	collectOpenAIChoices(root.Get("choices"), segments)
+	collectResponseOutput(root.Get("output"), options, segments)
+	collectResponseOutput(root.Get("response.output"), options, segments)
+	addOutputIfNotEmpty(segments, root.Get("output_text").String())
+	addOutputIfNotEmpty(segments, root.Get("response.output_text").String())
+	collectClaudeContent(root.Get("content"), segments)
+	collectGeminiCandidates(root.Get("candidates"), segments)
+	collectGeminiCandidates(root.Get("response.candidates"), segments)
+}
+
+func collectOpenAIChoices(choices gjson.Result, segments *[]string) {
+	if !choices.Exists() || !choices.IsArray() {
+		return
+	}
+	choices.ForEach(func(_, choice gjson.Result) bool {
+		message := choice.Get("message")
+		if message.Exists() {
+			collectOutputContent(message.Get("content"), segments)
+			collectOpenAIToolCalls(message.Get("tool_calls"), segments)
+			collectOpenAIFunctionCall(message.Get("function_call"), segments)
+		}
+		delta := choice.Get("delta")
+		if delta.Exists() {
+			collectOutputContent(delta.Get("content"), segments)
+			collectOpenAIToolCalls(delta.Get("tool_calls"), segments)
+			collectOpenAIFunctionCall(delta.Get("function_call"), segments)
+		}
+		return true
+	})
+}
+
+func collectResponseOutput(output gjson.Result, options outputExtractionOptions, segments *[]string) {
+	if !output.Exists() {
+		return
+	}
+	if output.IsArray() {
+		output.ForEach(func(_, item gjson.Result) bool {
+			collectResponseOutputItem(item, options, segments)
+			return true
+		})
+		return
+	}
+	collectResponseOutputItem(output, options, segments)
+}
+
+func collectResponseOutputItem(item gjson.Result, options outputExtractionOptions, segments *[]string) {
+	if !item.Exists() {
+		return
+	}
+	switch item.Get("type").String() {
+	case "message", "":
+		if options.hasResponsesTextDelta {
+			return
+		}
+		collectOutputContent(item.Get("content"), segments)
+	case "function_call":
+		if options.hasResponsesFunctionDelta {
+			return
+		}
+		addOutputIfNotEmpty(segments, item.Get("name").String())
+		addOutputIfNotEmpty(segments, item.Get("arguments").String())
+	default:
+		collectOutputContent(item.Get("content"), segments)
+		addOutputIfNotEmpty(segments, item.Get("name").String())
+		addOutputIfNotEmpty(segments, item.Get("arguments").String())
+		addOutputIfNotEmpty(segments, item.Get("text").String())
+	}
+}
+
+func collectClaudeContent(content gjson.Result, segments *[]string) {
+	collectOutputContent(content, segments)
+}
+
+func collectClaudeDelta(delta gjson.Result, segments *[]string) {
+	if !delta.Exists() {
+		return
+	}
+	addOutputIfNotEmpty(segments, delta.Get("text").String())
+	addOutputIfNotEmpty(segments, delta.Get("partial_json").String())
+}
+
+func collectClaudeContentBlock(block gjson.Result, segments *[]string) {
+	if !block.Exists() {
+		return
+	}
+	switch block.Get("type").String() {
+	case "text":
+		addOutputIfNotEmpty(segments, block.Get("text").String())
+	case "tool_use":
+		addOutputIfNotEmpty(segments, block.Get("name").String())
+		if input := block.Get("input"); input.Exists() {
+			addOutputIfNotEmpty(segments, input.Raw)
+		}
+	}
+}
+
+func collectGeminiCandidates(candidates gjson.Result, segments *[]string) {
+	if !candidates.Exists() || !candidates.IsArray() {
+		return
+	}
+	candidates.ForEach(func(_, candidate gjson.Result) bool {
+		collectGeminiContent(candidate.Get("content"), segments)
+		return true
+	})
+}
+
+func collectGeminiContents(contents gjson.Result, segments *[]string) {
+	if !contents.Exists() {
+		return
+	}
+	if contents.IsArray() {
+		contents.ForEach(func(_, content gjson.Result) bool {
+			collectGeminiContent(content, segments)
+			return true
+		})
+		return
+	}
+	collectGeminiContent(contents, segments)
+}
+
+func collectGeminiContent(content gjson.Result, segments *[]string) {
+	if !content.Exists() {
+		return
+	}
+	parts := content.Get("parts")
+	if parts.Exists() && parts.IsArray() {
+		parts.ForEach(func(_, part gjson.Result) bool {
+			addOutputIfNotEmpty(segments, part.Get("text").String())
+			if functionCall := part.Get("functionCall"); functionCall.Exists() {
+				addOutputIfNotEmpty(segments, functionCall.Get("name").String())
+				if args := functionCall.Get("args"); args.Exists() {
+					addOutputIfNotEmpty(segments, args.Raw)
+				}
+			}
+			if functionResponse := part.Get("functionResponse"); functionResponse.Exists() {
+				addOutputIfNotEmpty(segments, functionResponse.Get("name").String())
+				if response := functionResponse.Get("response"); response.Exists() {
+					addOutputIfNotEmpty(segments, response.Raw)
+				}
+			}
+			return true
+		})
+		return
+	}
+	collectOutputContent(content, segments)
+}
+
+func collectGeminiTools(tools gjson.Result, segments *[]string) {
+	if !tools.Exists() {
+		return
+	}
+	if tools.IsArray() {
+		tools.ForEach(func(_, tool gjson.Result) bool {
+			collectGeminiTool(tool, segments)
+			return true
+		})
+		return
+	}
+	collectGeminiTool(tools, segments)
+}
+
+func collectGeminiTool(tool gjson.Result, segments *[]string) {
+	if !tool.Exists() {
+		return
+	}
+	declarations := tool.Get("functionDeclarations")
+	if declarations.Exists() && declarations.IsArray() {
+		declarations.ForEach(func(_, declaration gjson.Result) bool {
+			addIfNotEmpty(segments, declaration.Get("name").String())
+			addIfNotEmpty(segments, declaration.Get("description").String())
+			if params := declaration.Get("parameters"); params.Exists() {
+				addIfNotEmpty(segments, params.Raw)
+			}
+			return true
+		})
+	}
+}
+
+func collectOutputContent(content gjson.Result, segments *[]string) {
+	if !content.Exists() {
+		return
+	}
+	if content.Type == gjson.String {
+		addOutputIfNotEmpty(segments, content.String())
+		return
+	}
+	if content.IsArray() {
+		content.ForEach(func(_, part gjson.Result) bool {
+			collectOutputContent(part, segments)
+			return true
+		})
+		return
+	}
+	addOutputIfNotEmpty(segments, content.Get("text").String())
+	addOutputIfNotEmpty(segments, content.Get("delta").String())
+	addOutputIfNotEmpty(segments, content.Get("transcript").String())
+	if content.Get("type").String() == "tool_use" {
+		addOutputIfNotEmpty(segments, content.Get("name").String())
+		if input := content.Get("input"); input.Exists() {
+			addOutputIfNotEmpty(segments, input.Raw)
+		}
+	}
+	if content.Get("type").String() == "function_call" {
+		addOutputIfNotEmpty(segments, content.Get("name").String())
+		addOutputIfNotEmpty(segments, content.Get("arguments").String())
+	}
 }
 
 // BuildOpenAIUsageJSON returns a minimal usage structure understood by downstream translators.
@@ -232,5 +655,14 @@ func addIfNotEmpty(segments *[]string, value string) {
 	}
 	if trimmed := strings.TrimSpace(value); trimmed != "" {
 		*segments = append(*segments, trimmed)
+	}
+}
+
+func addOutputIfNotEmpty(segments *[]string, value string) {
+	if segments == nil {
+		return
+	}
+	if strings.TrimSpace(value) != "" {
+		*segments = append(*segments, value)
 	}
 }
