@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/kooshapari/CLIProxyAPI/v7/internal/browser"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/browser"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/auth/codex"
 	// legacy client removed
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
