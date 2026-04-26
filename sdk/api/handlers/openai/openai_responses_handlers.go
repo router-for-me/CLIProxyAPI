@@ -199,7 +199,7 @@ func (h *OpenAIResponsesAPIHandler) handleNonStreamingResponseViaChat(c *gin.Con
 		cliCancel(fmt.Errorf("response conversion failed"))
 		return
 	}
-	_, _ = c.Writer.Write(converted)
+	_, _ = c.Writer.Write([]byte(converted))
 	cliCancel()
 }
 
@@ -353,10 +353,11 @@ func writeChatAsResponsesChunk(c *gin.Context, ctx context.Context, modelName st
 		if len(out) == 0 {
 			continue
 		}
-		if bytes.HasPrefix(out, []byte("event:")) {
+		outBytes := []byte(out)
+		if bytes.HasPrefix(outBytes, []byte("event:")) {
 			_, _ = c.Writer.Write([]byte("\n"))
 		}
-		_, _ = c.Writer.Write(out)
+		_, _ = c.Writer.Write(outBytes)
 		_, _ = c.Writer.Write([]byte("\n"))
 	}
 }
@@ -369,10 +370,11 @@ func (h *OpenAIResponsesAPIHandler) forwardChatAsResponsesStream(c *gin.Context,
 				if len(out) == 0 {
 					continue
 				}
-				if bytes.HasPrefix(out, []byte("event:")) {
+				outBytes := []byte(out)
+				if bytes.HasPrefix(outBytes, []byte("event:")) {
 					_, _ = c.Writer.Write([]byte("\n"))
 				}
-				_, _ = c.Writer.Write(out)
+				_, _ = c.Writer.Write(outBytes)
 				_, _ = c.Writer.Write([]byte("\n"))
 			}
 		},
