@@ -776,6 +776,46 @@ func TestExtractSessionID_Headers(t *testing.T) {
 	}
 }
 
+func TestExtractSessionID_AmpThreadId(t *testing.T) {
+	t.Parallel()
+
+	headers := make(http.Header)
+	headers.Set("X-Amp-Thread-Id", "T-7873e6bd-6354-4a9a-be2c-c7702c6e1b64")
+
+	got := ExtractSessionID(headers, nil, nil)
+	want := "amp:T-7873e6bd-6354-4a9a-be2c-c7702c6e1b64"
+	if got != want {
+		t.Errorf("ExtractSessionID() with X-Amp-Thread-Id = %q, want %q", got, want)
+	}
+}
+
+// TestExtractSessionID_AmpThreadIdLowerPriority verifies X-Amp-Thread-Id is lower
+// priority than Claude Code metadata.user_id but higher than conversation_id.
+func TestExtractSessionID_AmpThreadIdPriority(t *testing.T) {
+	t.Parallel()
+
+	// X-Amp-Thread-Id should be used when no Claude Code user_id is present
+	headers := make(http.Header)
+	headers.Set("X-Amp-Thread-Id", "T-priority-test")
+
+	payload := []byte(`{"conversation_id":"conv-12345"}`)
+	got := ExtractSessionID(headers, payload, nil)
+	want := "amp:T-priority-test"
+	if got != want {
+		t.Errorf("ExtractSessionID() = %q, want %q (Amp thread ID should take priority over conversation_id)", got, want)
+	}
+
+	// Claude Code user_id should take priority over X-Amp-Thread-Id
+	headers2 := make(http.Header)
+	headers2.Set("X-Amp-Thread-Id", "T-priority-test")
+	payload2 := []byte(`{"metadata":{"user_id":"user_xxx_account__session_ac980658-63bd-4fb3-97ba-8da64cb1e344"}}`)
+	got2 := ExtractSessionID(headers2, payload2, nil)
+	want2 := "claude:ac980658-63bd-4fb3-97ba-8da64cb1e344"
+	if got2 != want2 {
+		t.Errorf("ExtractSessionID() = %q, want %q (Claude Code should take priority over Amp thread ID)", got2, want2)
+	}
+}
+
 // TestExtractSessionID_IdempotencyKey verifies that idempotency_key is intentionally
 // ignored for session affinity (it's auto-generated per-request, causing cache misses).
 func TestExtractSessionID_IdempotencyKey(t *testing.T) {
