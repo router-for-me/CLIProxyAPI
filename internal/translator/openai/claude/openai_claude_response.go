@@ -234,9 +234,13 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 
 				accumulator := param.ToolCallsAccumulator[index]
 
-				// Handle tool call ID
-				if id := toolCall.Get("id"); id.Exists() {
-					accumulator.ID = id.String()
+				// Handle tool call ID. Only accept JSON-string, non-empty
+				// values; a numeric or null id from a misbehaving upstream
+				// must not silently coerce into a content_block.id.
+				if id := toolCall.Get("id"); id.Exists() && id.Type == gjson.String {
+					if idStr := id.String(); idStr != "" {
+						accumulator.ID = idStr
+					}
 				}
 
 				// Handle function name
@@ -244,14 +248,20 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 					// Only record the name until content_block_start has been
 					// emitted. Upstreams sometimes send "name":"" or repeat the
 					// name field across chunks; reassigning after start would
-					// also risk drift from what we already announced.
+					// also risk drift from what we already announced. The
+					// type check rejects non-string names (e.g. "name": 123)
+					// that would otherwise coerce via gjson.String().
 					if !accumulator.StartEmitted {
-						if name := function.Get("name"); name.Exists() && name.String() != "" {
+						if name := function.Get("name"); name.Exists() && name.Type == gjson.String && name.String() != "" {
 							accumulator.Name = util.MapToolName(param.ToolNameMap, name.String())
 						}
 					}
 
-					if !accumulator.StartEmitted && accumulator.Name != "" {
+					// Require both name and id before emit so we never
+					// announce a fallback content_block.id (from
+					// SanitizeClaudeToolID's empty-string path) when the
+					// real id is still on its way in a later chunk.
+					if !accumulator.StartEmitted && accumulator.Name != "" && accumulator.ID != "" {
 						stopThinkingContentBlock(param, &results)
 
 						stopTextContentBlock(param, &results)
