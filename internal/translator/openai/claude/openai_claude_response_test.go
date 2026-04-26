@@ -294,6 +294,45 @@ func TestStreamingTool_StopReasonWhenIDNeverArrives(t *testing.T) {
 	}
 }
 
+// TestStreamingTool_LateIDAfterFinalization covers the Apr 26 codex P1:
+// once a finish_reason chunk has run the cleanup loop and set
+// ContentBlocksStopped, a later chunk that finally completes the
+// name+id pair must NOT emit content_block_start (it would land out of
+// order, possibly after message_stop, and strict clients reject that).
+// The deferred tool call is dropped silently — the stream stays
+// internally consistent, with stop_reason already downgraded to
+// end_turn earlier.
+func TestStreamingTool_LateIDAfterFinalization(t *testing.T) {
+	events := runStream(t, streamReq,
+		// chunk 1: name only, no id — emit deferred
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"function":{"name":"do_it"}}]}}]}`,
+		// chunk 2: finish_reason finalizes content blocks; usage in same
+		// chunk also triggers message_delta + message_stop
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`,
+		// chunk 3: id arrives LATE, after finalization — must be dropped
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_late"}]}}]}`,
+	)
+
+	if got := len(toolUseStarts(events)); got != 0 {
+		t.Fatalf("expected zero tool_use starts when id arrives post-finalization, got %d", got)
+	}
+
+	// Verify event ordering: no content_block_* event after message_stop.
+	var sawMessageStop bool
+	for _, e := range events {
+		if e.Type == "message_stop" {
+			sawMessageStop = true
+			continue
+		}
+		if sawMessageStop {
+			switch e.Type {
+			case "content_block_start", "content_block_delta", "content_block_stop":
+				t.Fatalf("event %q emitted after message_stop — invalid Anthropic ordering (events=%+v)", e.Type, events)
+			}
+		}
+	}
+}
+
 // TestStreamingTool_StopReasonMixedSuppressedAndValid verifies that the
 // stop_reason is still "tool_use" even when some tool indexes were
 // suppressed, as long as at least one valid tool block was emitted.

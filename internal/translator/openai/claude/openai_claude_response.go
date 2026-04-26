@@ -278,8 +278,12 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 				// still emit content_block_start the moment both pieces are
 				// present. Both guards remain: name+id non-empty so we never
 				// announce a fallback id from SanitizeClaudeToolID's
-				// empty-input path.
-				if !accumulator.StartEmitted && accumulator.Name != "" && accumulator.ID != "" {
+				// empty-input path. The ContentBlocksStopped guard prevents
+				// late tool fields (an id arriving after a finish_reason
+				// chunk has already finalized the stream) from emitting a
+				// content_block_start out of order — possibly even after
+				// message_stop, which strict Anthropic clients reject.
+				if !accumulator.StartEmitted && accumulator.Name != "" && accumulator.ID != "" && !param.ContentBlocksStopped {
 					stopThinkingContentBlock(param, &results)
 
 					stopTextContentBlock(param, &results)
