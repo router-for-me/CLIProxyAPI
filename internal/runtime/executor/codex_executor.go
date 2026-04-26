@@ -30,8 +30,9 @@ import (
 )
 
 const (
-	codexUserAgent  = "codex-tui/0.118.0 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9 (codex-tui; 0.118.0)"
-	codexOriginator = "codex-tui"
+	codexUserAgent             = "codex-tui/0.118.0 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9 (codex-tui; 0.118.0)"
+	codexOriginator            = "codex-tui"
+	codexDefaultImageToolModel = "gpt-image-2"
 )
 
 var dataTag = []byte("data:")
@@ -263,6 +264,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		if detail, ok := helps.ParseCodexUsage(eventData); ok {
 			reporter.Publish(ctx, detail)
 		}
+		publishCodexImageToolUsage(ctx, reporter, body, eventData)
 
 		completedData := eventData
 		outputResult := gjson.GetBytes(completedData, "response.output")
@@ -496,6 +498,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 					if detail, ok := helps.ParseCodexUsage(data); ok {
 						reporter.Publish(ctx, detail)
 					}
+					publishCodexImageToolUsage(ctx, reporter, body, data)
 					data = patchCodexCompletedOutput(data, outputItemsByIndex, outputItemsFallback)
 					translatedLine = append([]byte("data: "), data...)
 				}
@@ -857,6 +860,31 @@ func ensureImageGenerationTool(body []byte, baseModel string, auth *cliproxyauth
 	}
 	body, _ = sjson.SetRawBytes(body, "tools.-1", imageGenToolJSON)
 	return body
+}
+
+func publishCodexImageToolUsage(ctx context.Context, reporter *helps.UsageReporter, body []byte, completedData []byte) {
+	detail, ok := helps.ParseCodexImageToolUsage(completedData)
+	if !ok {
+		return
+	}
+	reporter.EnsurePublished(ctx)
+	reporter.PublishAdditionalModel(ctx, codexImageGenerationToolModel(body), detail)
+}
+
+func codexImageGenerationToolModel(body []byte) string {
+	tools := gjson.GetBytes(body, "tools")
+	if tools.IsArray() {
+		for _, tool := range tools.Array() {
+			if tool.Get("type").String() != "image_generation" {
+				continue
+			}
+			if model := strings.TrimSpace(tool.Get("model").String()); model != "" {
+				return model
+			}
+			break
+		}
+	}
+	return codexDefaultImageToolModel
 }
 
 func isCodexModelCapacityError(errorBody []byte) bool {
