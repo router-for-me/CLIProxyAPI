@@ -76,6 +76,7 @@ func prepareStartup(flags runtimeFlags) (startupState, error) {
 
 func configureRuntimeConfig(cfg *config.Config) error {
 	usage.SetStatisticsEnabled(cfg.UsageStatisticsEnabled)
+	usage.SetDetailRetentionLimit(cfg.UsageDetailRetentionLimit)
 	coreauth.SetQuotaCooldownDisabled(cfg.DisableCooling)
 
 	if err := logging.ConfigureLogOutput(cfg); err != nil {

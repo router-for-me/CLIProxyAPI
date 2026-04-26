@@ -8,7 +8,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"strings"
@@ -17,6 +16,7 @@ import (
 	"github.com/gin-gonic/gin"
 	. "github.com/router-for-me/CLIProxyAPI/v6/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 	log "github.com/sirupsen/logrus"
@@ -120,7 +120,7 @@ func (h *GeminiCLIAPIHandler) CLIHandler(c *gin.Context) {
 					log.Printf("warn: failed to close response body: %v", err)
 				}
 			}()
-			bodyBytes, _ := io.ReadAll(resp.Body)
+			bodyBytes, _ := helps.ReadErrorResponseBody(resp.Body)
 
 			c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
 				Error: handlers.ErrorDetail{
@@ -138,7 +138,7 @@ func (h *GeminiCLIAPIHandler) CLIHandler(c *gin.Context) {
 		for key, value := range resp.Header {
 			c.Header(key, value[0])
 		}
-		output, err := io.ReadAll(resp.Body)
+		output, err := helps.ReadNonStreamResponseBody(resp.Body)
 		if err != nil {
 			log.Errorf("Failed to read response body: %v", err)
 			return

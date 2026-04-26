@@ -237,6 +237,34 @@ func TestPatchCodexCompletedOutputRecoversFunctionCall(t *testing.T) {
 	}
 }
 
+func TestPatchCodexCompletedOutputRecoversFunctionCallDeltaArguments(t *testing.T) {
+	streamState := newCodexStreamCompletionState()
+	streamState.recordEvent([]byte(`{"type":"response.output_item.added","output_index":0,"item":{"id":"fc_item_1","type":"function_call","call_id":"call_1","name":"search"}}`))
+	streamState.recordEvent([]byte(`{"type":"response.function_call_arguments.delta","item_id":"fc_item_1","output_index":0,"delta":"{\"q\":"}`))
+	streamState.recordEvent([]byte(`{"type":"response.function_call_arguments.delta","item_id":"fc_item_1","output_index":0,"delta":"\"hello\"}"}`))
+
+	patched, recoveredCount := streamState.patchCompletedOutputIfEmpty([]byte(`{"response":{"output":[]}}`))
+	if recoveredCount != 1 {
+		t.Fatalf("recovered count = %d, want %d", recoveredCount, 1)
+	}
+	if got := gjson.GetBytes(patched, "response.output.0.arguments").String(); got != `{"q":"hello"}` {
+		t.Fatalf("response.output.0.arguments = %q, want %q", got, `{"q":"hello"}`)
+	}
+}
+
+func BenchmarkCodexStreamFunctionCallArgumentDeltas(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		streamState := newCodexStreamCompletionState()
+		streamState.recordEvent([]byte(`{"type":"response.output_item.added","output_index":0,"item":{"id":"fc_item_1","type":"function_call","call_id":"call_1","name":"search"}}`))
+		for j := 0; j < 512; j++ {
+			streamState.recordEvent([]byte(`{"type":"response.function_call_arguments.delta","item_id":"fc_item_1","output_index":0,"delta":"chunk"}`))
+		}
+		if got := streamState.functionCallsByItem["fc_item_1"].arguments(); len(got) == 0 {
+			b.Fatal("arguments are empty")
+		}
+	}
+}
+
 func TestCollectCodexResponseAggregatePatchesCompletedOutputButKeepsCapturedBody(t *testing.T) {
 	stream := strings.NewReader(
 		"data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]},\"output_index\":0}\n" +

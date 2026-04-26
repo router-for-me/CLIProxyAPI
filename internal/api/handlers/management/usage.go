@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -16,12 +17,14 @@ const usageFlushTimeout = 5 * time.Second
 type usageExportPayload struct {
 	Version    int                            `json:"version"`
 	ExportedAt time.Time                      `json:"exported_at"`
+	SourceID   string                         `json:"source_id,omitempty"`
 	Usage      usage.StatisticsSnapshot       `json:"usage"`
 	Aggregated *usage.AggregatedUsageSnapshot `json:"aggregated,omitempty"`
 }
 
 type usageImportPayload struct {
 	Version    int                            `json:"version"`
+	SourceID   string                         `json:"source_id,omitempty"`
 	Usage      usage.StatisticsSnapshot       `json:"usage"`
 	Aggregated *usage.AggregatedUsageSnapshot `json:"aggregated,omitempty"`
 }
@@ -83,6 +86,7 @@ func (h *Handler) ExportUsageStatistics(c *gin.Context) {
 	c.JSON(http.StatusOK, usageExportPayload{
 		Version:    3,
 		ExportedAt: now,
+		SourceID:   h.usageExportSourceID(),
 		Usage:      snapshot,
 		Aggregated: &aggregated,
 	})
@@ -97,6 +101,7 @@ func (h *Handler) ExportDetailedUsageStatistics(c *gin.Context) {
 	c.JSON(http.StatusOK, usageExportPayload{
 		Version:    3,
 		ExportedAt: time.Now().UTC(),
+		SourceID:   h.usageExportSourceID(),
 		Usage:      h.detailedUsageSnapshot(),
 	})
 }
@@ -134,17 +139,69 @@ func (h *Handler) ImportUsageStatistics(c *gin.Context) {
 		return
 	}
 
-	result := h.usageStats.MergeSnapshot(payload.Usage)
-	if payload.Aggregated != nil {
-		h.usageStats.MergeImportedAggregatedSnapshot(*payload.Aggregated)
+	sourceID := strings.TrimSpace(payload.SourceID)
+	hasDetails := usageSnapshotContainsDetails(payload.Usage)
+	var result usage.MergeResult
+	switch {
+	case sourceID != "" && hasDetails:
+		// Detailed exports with source_id must replace the prior snapshot from
+		// the same source instead of being merged into live in-memory counters.
+		result = h.usageStats.UpsertImportedDetailedSnapshot(sourceID, payload.Usage)
+	case sourceID != "" && !hasDetails:
+		result = h.usageStats.UpsertImportedSummarySnapshot(sourceID, payload.Usage)
+		if payload.Aggregated != nil {
+			h.usageStats.UpsertImportedAggregatedSnapshot(sourceID, *payload.Aggregated)
+		}
+	default:
+		result = h.usageStats.MergeSnapshot(payload.Usage)
+		if hasDetails {
+			// Detailed exports may be trimmed by retention settings, so restore
+			// any history not represented by Details via summary/all-window deltas.
+			residual := usageResidualSummarySnapshot(payload.Usage)
+			if !usageSummarySnapshotEmpty(residual) {
+				residualSourceID := usageResidualSourceID(sourceID)
+				var residualResult usage.MergeResult
+				if residualSourceID != "" {
+					residualResult = h.usageStats.UpsertImportedSummarySnapshot(residualSourceID, residual)
+				} else {
+					residualResult = h.usageStats.MergeSnapshot(residual)
+				}
+				result.Added += residualResult.Added
+				result.Skipped += residualResult.Skipped
+				result.Replaced += residualResult.Replaced
+
+				residualAggregated := aggregatedAllWindowSnapshotFromSummary(residual, time.Now().UTC())
+				if len(residualAggregated.Windows) > 0 {
+					if residualSourceID != "" {
+						h.usageStats.UpsertImportedAggregatedSnapshot(residualSourceID, residualAggregated)
+					} else {
+						h.usageStats.MergeImportedAggregatedSnapshot(residualAggregated)
+					}
+				}
+			}
+		} else if payload.Aggregated != nil {
+			h.usageStats.MergeImportedAggregatedSnapshot(*payload.Aggregated)
+		}
 	}
 	snapshot := h.usageStats.SnapshotSummary()
 	c.JSON(http.StatusOK, gin.H{
 		"added":           result.Added,
 		"skipped":         result.Skipped,
+		"replaced":        result.Replaced,
 		"total_requests":  snapshot.TotalRequests,
 		"failed_requests": snapshot.FailureCount,
 	})
+}
+
+func usageSnapshotContainsDetails(snapshot usage.StatisticsSnapshot) bool {
+	for _, apiSnapshot := range snapshot.APIs {
+		for _, modelSnapshot := range apiSnapshot.Models {
+			if len(modelSnapshot.Details) > 0 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (h *Handler) summaryUsageSnapshot() usage.StatisticsSnapshot {

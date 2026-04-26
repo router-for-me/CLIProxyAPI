@@ -922,11 +922,6 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 }
 
 var sseDoneMarkerBytes = []byte("[DONE]")
-var openAIResponsesBootstrapEventTypes = map[string]struct{}{
-	"response.created":     {},
-	"response.in_progress": {},
-	"response.queued":      {},
-}
 
 func validateSSEDataJSON(chunk []byte) error {
 	for len(chunk) > 0 {
@@ -983,11 +978,102 @@ func isOpenAIResponsesBootstrapChunk(chunk []byte) bool {
 			continue
 		}
 		sawData = true
-		if _, ok := openAIResponsesBootstrapEventTypes[gjson.GetBytes(data, "type").String()]; !ok {
+		if !isOpenAIResponsesBootstrapEvent(data) {
 			return false
 		}
 	}
 	return sawData
+}
+
+func isOpenAIResponsesBootstrapEvent(data []byte) bool {
+	switch strings.TrimSpace(gjson.GetBytes(data, "type").String()) {
+	case "response.created", "response.in_progress", "response.queued":
+		return true
+	case "response.output_item.added", "response.output_item.done":
+		return !openAIResponsesOutputItemHasMaterialContent(gjson.GetBytes(data, "item"))
+	case "response.content_part.added", "response.content_part.done",
+		"response.reasoning_summary_part.added", "response.reasoning_summary_part.done":
+		return !openAIResponsesContentPartHasMaterialContent(gjson.GetBytes(data, "part"))
+	case "response.output_text.delta":
+		return strings.TrimSpace(gjson.GetBytes(data, "delta").String()) == ""
+	case "response.output_text.done":
+		return strings.TrimSpace(gjson.GetBytes(data, "text").String()) == ""
+	case "response.reasoning_summary_text.delta":
+		return strings.TrimSpace(gjson.GetBytes(data, "delta").String()) == ""
+	case "response.reasoning_summary_text.done":
+		return strings.TrimSpace(gjson.GetBytes(data, "text").String()) == ""
+	case "response.function_call_arguments.delta":
+		return strings.TrimSpace(gjson.GetBytes(data, "delta").String()) == ""
+	case "response.function_call_arguments.done":
+		return strings.TrimSpace(gjson.GetBytes(data, "arguments").String()) == ""
+	default:
+		return false
+	}
+}
+
+func openAIResponsesOutputItemHasMaterialContent(item gjson.Result) bool {
+	if !item.Exists() {
+		return false
+	}
+	switch strings.TrimSpace(item.Get("type").String()) {
+	case "message":
+		content := item.Get("content")
+		if !content.Exists() || !content.IsArray() {
+			return false
+		}
+		for _, part := range content.Array() {
+			if openAIResponsesContentPartHasMaterialContent(part) {
+				return true
+			}
+		}
+		return false
+	case "reasoning":
+		summary := item.Get("summary")
+		if !summary.Exists() || !summary.IsArray() {
+			return false
+		}
+		for _, part := range summary.Array() {
+			if openAIResponsesContentPartHasMaterialContent(part) {
+				return true
+			}
+		}
+		return false
+	case "function_call":
+		return strings.TrimSpace(item.Get("call_id").String()) != "" ||
+			strings.TrimSpace(item.Get("name").String()) != "" ||
+			strings.TrimSpace(item.Get("arguments").String()) != ""
+	case "function_call_output":
+		return strings.TrimSpace(item.Get("call_id").String()) != "" ||
+			strings.TrimSpace(item.Get("output").String()) != ""
+	default:
+		return openAIResponsesContentPartHasMaterialContent(item)
+	}
+}
+
+func openAIResponsesContentPartHasMaterialContent(part gjson.Result) bool {
+	if !part.Exists() {
+		return false
+	}
+	for _, candidate := range []string{
+		"text",
+		"delta",
+		"refusal",
+		"arguments",
+		"summary",
+		"output",
+		"url",
+		"file_id",
+		"image_url.url",
+		"input_image.image_url",
+		"partial_image_b64",
+		"image_b64",
+		"b64_json",
+	} {
+		if strings.TrimSpace(part.Get(candidate).String()) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func statusFromError(err error) int {

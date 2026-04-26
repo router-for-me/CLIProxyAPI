@@ -168,6 +168,92 @@ func TestManagementCORSOptions_Denied(t *testing.T) {
 	}
 }
 
+func TestManagementUsageDetailRetentionLimitRoute(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if err := os.MkdirAll(authDir, 0o700); err != nil {
+		t.Fatalf("failed to create auth dir: %v", err)
+	}
+
+	cfg := &proxyconfig.Config{
+		SDKConfig: sdkconfig.SDKConfig{
+			APIKeys: []string{"test-key"},
+		},
+		AuthDir:                   authDir,
+		UsageDetailRetentionLimit: 7,
+	}
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("usage-detail-retention-limit: 7\n"), 0o644); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+	server := NewServer(
+		cfg,
+		auth.NewManager(nil, nil, nil),
+		sdkaccess.NewManager(),
+		configPath,
+		WithLocalManagementPassword("local-pass"),
+	)
+
+	getReq := httptest.NewRequest(http.MethodGet, "/v0/management/usage-detail-retention-limit", nil)
+	getReq.RemoteAddr = "127.0.0.1:12345"
+	getReq.Header.Set("Authorization", "Bearer local-pass")
+	getResp := httptest.NewRecorder()
+	server.engine.ServeHTTP(getResp, getReq)
+	if getResp.Code != http.StatusOK {
+		t.Fatalf("GET status = %d, want %d; body=%s", getResp.Code, http.StatusOK, getResp.Body.String())
+	}
+	if !strings.Contains(getResp.Body.String(), `"usage-detail-retention-limit":7`) {
+		t.Fatalf("GET body missing usage detail retention limit: %s", getResp.Body.String())
+	}
+
+	putReq := httptest.NewRequest(http.MethodPut, "/v0/management/usage-detail-retention-limit", strings.NewReader(`{"value":12}`))
+	putReq.RemoteAddr = "127.0.0.1:12345"
+	putReq.Header.Set("Authorization", "Bearer local-pass")
+	putReq.Header.Set("Content-Type", "application/json")
+	putResp := httptest.NewRecorder()
+	server.engine.ServeHTTP(putResp, putReq)
+	if putResp.Code != http.StatusOK {
+		t.Fatalf("PUT status = %d, want %d; body=%s", putResp.Code, http.StatusOK, putResp.Body.String())
+	}
+	if cfg.UsageDetailRetentionLimit != 12 {
+		t.Fatalf("UsageDetailRetentionLimit = %d, want 12", cfg.UsageDetailRetentionLimit)
+	}
+	savedConfig, errReadConfig := os.ReadFile(configPath)
+	if errReadConfig != nil {
+		t.Fatalf("failed to read saved config: %v", errReadConfig)
+	}
+	if !strings.Contains(string(savedConfig), "usage-detail-retention-limit: 12") {
+		t.Fatalf("saved config missing updated retention limit: %s", string(savedConfig))
+	}
+	server.UpdateClients(cfg)
+	if !server.managementRoutesEnabled.Load() {
+		t.Fatalf("management routes disabled after local-password config update")
+	}
+	getAfterUpdateReq := httptest.NewRequest(http.MethodGet, "/v0/management/usage-detail-retention-limit", nil)
+	getAfterUpdateReq.RemoteAddr = "127.0.0.1:12345"
+	getAfterUpdateReq.Header.Set("Authorization", "Bearer local-pass")
+	getAfterUpdateResp := httptest.NewRecorder()
+	server.engine.ServeHTTP(getAfterUpdateResp, getAfterUpdateReq)
+	if getAfterUpdateResp.Code != http.StatusOK {
+		t.Fatalf("GET after UpdateClients status = %d, want %d; body=%s", getAfterUpdateResp.Code, http.StatusOK, getAfterUpdateResp.Body.String())
+	}
+
+	patchReq := httptest.NewRequest(http.MethodPatch, "/v0/management/usage-detail-retention-limit", strings.NewReader(`{"value":-5}`))
+	patchReq.RemoteAddr = "127.0.0.1:12345"
+	patchReq.Header.Set("Authorization", "Bearer local-pass")
+	patchReq.Header.Set("Content-Type", "application/json")
+	patchResp := httptest.NewRecorder()
+	server.engine.ServeHTTP(patchResp, patchReq)
+	if patchResp.Code != http.StatusOK {
+		t.Fatalf("PATCH status = %d, want %d; body=%s", patchResp.Code, http.StatusOK, patchResp.Body.String())
+	}
+	if cfg.UsageDetailRetentionLimit != 0 {
+		t.Fatalf("negative UsageDetailRetentionLimit = %d, want 0", cfg.UsageDetailRetentionLimit)
+	}
+}
+
 func TestManagementHTMLCORSOptions_Denied(t *testing.T) {
 	server := newTestServer(t)
 

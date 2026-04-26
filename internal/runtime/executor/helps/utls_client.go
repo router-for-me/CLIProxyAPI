@@ -28,12 +28,22 @@ import (
 // fingerprint for upstreams that apply client fingerprint checks.
 type utlsRoundTripper struct {
 	mu          sync.Mutex
-	connections map[string]*http2.ClientConn
+	connections map[string][]*utlsClientConn
 	pending     map[string]*sync.Cond
 	dialer      proxy.Dialer
 	rootCAs     *x509.CertPool
 	clientHello tls.ClientHelloID
 }
+
+type utlsClientConn struct {
+	conn     *http2.ClientConn
+	lastUsed time.Time
+}
+
+const (
+	utlsMaxConnsPerHost = 2
+	utlsIdleConnTimeout = proxyutil.DefaultIdleConnTimeout
+)
 
 type fingerprintTransportCacheKey struct {
 	proxyURL       string
@@ -64,7 +74,7 @@ func newUtlsRoundTripper(proxyURL string, rootCAs *x509.CertPool, clientHello tl
 		}
 	}
 	return &utlsRoundTripper{
-		connections: make(map[string]*http2.ClientConn),
+		connections: make(map[string][]*utlsClientConn),
 		pending:     make(map[string]*sync.Cond),
 		dialer:      dialer,
 		rootCAs:     rootCAs,
@@ -74,38 +84,139 @@ func newUtlsRoundTripper(proxyURL string, rootCAs *x509.CertPool, clientHello tl
 
 func (t *utlsRoundTripper) getOrCreateConnection(host, addr string) (*http2.ClientConn, error) {
 	t.mu.Lock()
+	for {
+		now := time.Now()
+		t.pruneIdleConnectionsLocked(host, now)
 
-	if h2Conn, ok := t.connections[host]; ok && h2Conn.CanTakeNewRequest() {
-		t.mu.Unlock()
-		return h2Conn, nil
-	}
-
-	if cond, ok := t.pending[host]; ok {
-		cond.Wait()
-		if h2Conn, ok := t.connections[host]; ok && h2Conn.CanTakeNewRequest() {
+		if h2Conn := t.availableConnectionLocked(host, now); h2Conn != nil {
 			t.mu.Unlock()
 			return h2Conn, nil
 		}
+
+		if h2Conn := t.fallbackConnectionLocked(host, now); h2Conn != nil {
+			t.mu.Unlock()
+			return h2Conn, nil
+		}
+
+		if cond, ok := t.pending[host]; ok {
+			cond.Wait()
+			continue
+		}
+
+		cond := sync.NewCond(&t.mu)
+		t.pending[host] = cond
+		t.mu.Unlock()
+
+		h2Conn, err := t.createConnection(host, addr)
+
+		t.mu.Lock()
+		delete(t.pending, host)
+		cond.Broadcast()
+
+		if err != nil {
+			t.mu.Unlock()
+			return nil, err
+		}
+
+		t.connections[host] = append(t.connections[host], &utlsClientConn{conn: h2Conn, lastUsed: time.Now()})
+		t.mu.Unlock()
+		return h2Conn, nil
 	}
+}
 
-	cond := sync.NewCond(&t.mu)
-	t.pending[host] = cond
-	t.mu.Unlock()
+func (t *utlsRoundTripper) availableConnectionLocked(host string, now time.Time) *http2.ClientConn {
+	conns := t.connections[host]
+	for _, entry := range conns {
+		if entry == nil || entry.conn == nil {
+			continue
+		}
+		if entry.conn.CanTakeNewRequest() {
+			entry.lastUsed = now
+			return entry.conn
+		}
+	}
+	return nil
+}
 
-	h2Conn, err := t.createConnection(host, addr)
+func (t *utlsRoundTripper) fallbackConnectionLocked(host string, now time.Time) *http2.ClientConn {
+	conns := t.connections[host]
+	if len(conns) < utlsMaxConnsPerHost {
+		return nil
+	}
+	for _, entry := range conns {
+		if entry == nil || entry.conn == nil {
+			continue
+		}
+		state := entry.conn.State()
+		if state.Closed || state.Closing {
+			continue
+		}
+		entry.lastUsed = now
+		return entry.conn
+	}
+	return nil
+}
 
+func (t *utlsRoundTripper) pruneIdleConnectionsLocked(host string, now time.Time) {
+	conns := t.connections[host]
+	if len(conns) == 0 {
+		return
+	}
+	kept := conns[:0]
+	for _, entry := range conns {
+		if entry == nil || entry.conn == nil {
+			continue
+		}
+		state := entry.conn.State()
+		if state.Closed || state.Closing {
+			entry.conn.Close()
+			continue
+		}
+		if state.StreamsActive == 0 && state.StreamsReserved == 0 && state.StreamsPending == 0 {
+			lastIdle := entry.lastUsed
+			if !state.LastIdle.IsZero() {
+				lastIdle = state.LastIdle
+			}
+			if now.Sub(lastIdle) > utlsIdleConnTimeout {
+				entry.conn.Close()
+				continue
+			}
+		}
+		kept = append(kept, entry)
+	}
+	clear(conns[len(kept):])
+	if len(kept) == 0 {
+		delete(t.connections, host)
+		return
+	}
+	t.connections[host] = kept
+}
+
+func (t *utlsRoundTripper) removeConnection(host string, target *http2.ClientConn) {
+	if target == nil {
+		return
+	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	delete(t.pending, host)
-	cond.Broadcast()
-
-	if err != nil {
-		return nil, err
+	conns := t.connections[host]
+	kept := conns[:0]
+	for _, entry := range conns {
+		if entry == nil || entry.conn == nil {
+			continue
+		}
+		if entry.conn == target {
+			entry.conn.Close()
+			continue
+		}
+		kept = append(kept, entry)
 	}
-
-	t.connections[host] = h2Conn
-	return h2Conn, nil
+	clear(conns[len(kept):])
+	if len(kept) == 0 {
+		delete(t.connections, host)
+		return
+	}
+	t.connections[host] = kept
 }
 
 func (t *utlsRoundTripper) createConnection(host, addr string) (*http2.ClientConn, error) {
@@ -147,11 +258,7 @@ func (t *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 
 	resp, err := h2Conn.RoundTrip(req)
 	if err != nil {
-		t.mu.Lock()
-		if cached, ok := t.connections[hostname]; ok && cached == h2Conn {
-			delete(t.connections, hostname)
-		}
-		t.mu.Unlock()
+		t.removeConnection(hostname, h2Conn)
 		return nil, err
 	}
 

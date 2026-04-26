@@ -19,6 +19,13 @@ const (
 var defaultWebsocketToolOutputCache = newWebsocketToolOutputCache(0, websocketToolOutputCacheMaxPerSession)
 var defaultWebsocketToolCallCache = newWebsocketToolOutputCache(0, websocketToolOutputCacheMaxPerSession)
 var defaultWebsocketToolSessionRefs = newWebsocketToolSessionRefCounter()
+var defaultWebsocketToolCachesMu sync.RWMutex
+
+func currentDefaultWebsocketToolCaches() (*websocketToolOutputCache, *websocketToolOutputCache, *websocketToolSessionRefCounter) {
+	defaultWebsocketToolCachesMu.RLock()
+	defer defaultWebsocketToolCachesMu.RUnlock()
+	return defaultWebsocketToolOutputCache, defaultWebsocketToolCallCache, defaultWebsocketToolSessionRefs
+}
 
 type websocketToolOutputCache struct {
 	mu            sync.Mutex
@@ -193,30 +200,47 @@ func (c *websocketToolSessionRefCounter) release(sessionKey string) bool {
 }
 
 func retainResponsesWebsocketToolCaches(sessionKey string) {
-	if defaultWebsocketToolSessionRefs == nil {
+	_, _, refs := currentDefaultWebsocketToolCaches()
+	if refs == nil {
 		return
 	}
-	defaultWebsocketToolSessionRefs.acquire(sessionKey)
+	refs.acquire(sessionKey)
 }
 
 func releaseResponsesWebsocketToolCaches(sessionKey string) {
-	if defaultWebsocketToolSessionRefs == nil {
+	outputCache, callCache, refs := currentDefaultWebsocketToolCaches()
+	if refs == nil {
 		return
 	}
-	if !defaultWebsocketToolSessionRefs.release(sessionKey) {
+	if !refs.release(sessionKey) {
 		return
 	}
 
-	if defaultWebsocketToolOutputCache != nil {
-		defaultWebsocketToolOutputCache.deleteSession(sessionKey)
+	if outputCache != nil {
+		outputCache.deleteSession(sessionKey)
 	}
-	if defaultWebsocketToolCallCache != nil {
-		defaultWebsocketToolCallCache.deleteSession(sessionKey)
+	if callCache != nil {
+		callCache.deleteSession(sessionKey)
+	}
+}
+
+func resetResponsesWebsocketToolCaches(sessionKey string) {
+	sessionKey = strings.TrimSpace(sessionKey)
+	if sessionKey == "" {
+		return
+	}
+	outputCache, callCache, _ := currentDefaultWebsocketToolCaches()
+	if outputCache != nil {
+		outputCache.deleteSession(sessionKey)
+	}
+	if callCache != nil {
+		callCache.deleteSession(sessionKey)
 	}
 }
 
 func repairResponsesWebsocketToolCalls(sessionKey string, payload []byte) []byte {
-	return repairResponsesWebsocketToolCallsWithCaches(defaultWebsocketToolOutputCache, defaultWebsocketToolCallCache, sessionKey, payload)
+	outputCache, callCache, _ := currentDefaultWebsocketToolCaches()
+	return repairResponsesWebsocketToolCallsWithCaches(outputCache, callCache, sessionKey, payload)
 }
 
 func repairResponsesWebsocketToolCallsWithCache(cache *websocketToolOutputCache, sessionKey string, payload []byte) []byte {
@@ -374,7 +398,8 @@ func repairResponsesToolCallsArray(outputCache, callCache *websocketToolOutputCa
 }
 
 func recordResponsesWebsocketToolCallsFromPayload(sessionKey string, payload []byte) {
-	recordResponsesWebsocketToolCallsFromPayloadWithCache(defaultWebsocketToolCallCache, sessionKey, payload)
+	_, callCache, _ := currentDefaultWebsocketToolCaches()
+	recordResponsesWebsocketToolCallsFromPayloadWithCache(callCache, sessionKey, payload)
 }
 
 func recordResponsesWebsocketToolCallsFromPayloadWithCache(cache *websocketToolOutputCache, sessionKey string, payload []byte) {

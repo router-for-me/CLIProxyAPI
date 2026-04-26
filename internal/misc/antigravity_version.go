@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"sync"
 	"time"
@@ -136,8 +137,15 @@ func fetchAntigravityLatestVersion(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("antigravity releases API returned status %d", resp.StatusCode)
 	}
 
+	bodyBytes, errRead := io.ReadAll(io.LimitReader(resp.Body, 32<<20+1))
+	if errRead != nil {
+		return "", fmt.Errorf("read antigravity releases response: %w", errRead)
+	}
+	if len(bodyBytes) > 32<<20 {
+		return "", fmt.Errorf("antigravity releases response too large: limit=%d", 32<<20)
+	}
 	var releases []antigravityRelease
-	if errDecode := json.NewDecoder(resp.Body).Decode(&releases); errDecode != nil {
+	if errDecode := json.Unmarshal(bodyBytes, &releases); errDecode != nil {
 		return "", fmt.Errorf("decode antigravity releases response: %w", errDecode)
 	}
 

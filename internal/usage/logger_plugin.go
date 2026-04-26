@@ -17,9 +17,13 @@ import (
 )
 
 var statisticsEnabled atomic.Bool
+var detailRetentionLimit atomic.Int64
+
+const aggregateRecordRetentionWindow = 7 * 24 * time.Hour
 
 func init() {
 	statisticsEnabled.Store(true)
+	detailRetentionLimit.Store(0)
 	coreusage.RegisterPlugin(NewLoggerPlugin())
 }
 
@@ -57,6 +61,25 @@ func SetStatisticsEnabled(enabled bool) { statisticsEnabled.Store(enabled) }
 // StatisticsEnabled reports the current recording state.
 func StatisticsEnabled() bool { return statisticsEnabled.Load() }
 
+// SetDetailRetentionLimit configures how many detailed records are retained per model.
+// A limit <= 0 keeps all details for backward compatibility.
+func SetDetailRetentionLimit(limit int) {
+	if limit <= 0 {
+		detailRetentionLimit.Store(0)
+		return
+	}
+	detailRetentionLimit.Store(int64(limit))
+}
+
+// DetailRetentionLimit reports the configured per-model detailed record limit.
+func DetailRetentionLimit() int {
+	limit := detailRetentionLimit.Load()
+	if limit <= 0 {
+		return 0
+	}
+	return int(limit)
+}
+
 // RequestStatistics maintains aggregated request metrics in memory.
 type RequestStatistics struct {
 	mu sync.RWMutex
@@ -73,7 +96,17 @@ type RequestStatistics struct {
 	tokensByDay    map[string]int64
 	tokensByHour   map[int]int64
 
-	importedAggregated *AggregatedUsageSnapshot
+	aggregateRecords        []usageAggregateRecord
+	oldestAggregateRecordAt time.Time
+	newestAggregateRecordAt time.Time
+	rolledUpAggregated      *AggregatedUsageSnapshot
+	importedSummary         *StatisticsSnapshot
+	importedAggregated      *AggregatedUsageSnapshot
+	importedSummaryHashes   map[string]struct{}
+	importedAggregateHashes map[string]struct{}
+	importedSummarySources  map[string]StatisticsSnapshot
+	importedDetailedSources map[string]StatisticsSnapshot
+	importedAggregateSource map[string]AggregatedUsageSnapshot
 }
 
 // apiStats holds aggregated metrics for a single API key.
@@ -90,6 +123,12 @@ type modelStats struct {
 	TokenBreakdown TokenStats
 	Latency        LatencyStats
 	Details        []RequestDetail
+}
+
+type usageAggregateRecord struct {
+	APIName   string
+	ModelName string
+	Detail    RequestDetail
 }
 
 // RequestDetail stores the timestamp, latency, and token usage for a single request.
@@ -159,11 +198,16 @@ func GetRequestStatistics() *RequestStatistics { return defaultRequestStatistics
 // NewRequestStatistics constructs an empty statistics store.
 func NewRequestStatistics() *RequestStatistics {
 	return &RequestStatistics{
-		apis:           make(map[string]*apiStats),
-		requestsByDay:  make(map[string]int64),
-		requestsByHour: make(map[int]int64),
-		tokensByDay:    make(map[string]int64),
-		tokensByHour:   make(map[int]int64),
+		apis:                    make(map[string]*apiStats),
+		requestsByDay:           make(map[string]int64),
+		requestsByHour:          make(map[int]int64),
+		tokensByDay:             make(map[string]int64),
+		tokensByHour:            make(map[int]int64),
+		importedSummaryHashes:   make(map[string]struct{}),
+		importedAggregateHashes: make(map[string]struct{}),
+		importedSummarySources:  make(map[string]StatisticsSnapshot),
+		importedDetailedSources: make(map[string]StatisticsSnapshot),
+		importedAggregateSource: make(map[string]AggregatedUsageSnapshot),
 	}
 }
 
@@ -213,7 +257,7 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 		stats = &apiStats{Models: make(map[string]*modelStats)}
 		s.apis[statsKey] = stats
 	}
-	s.updateAPIStats(stats, modelName, RequestDetail{
+	requestDetail := RequestDetail{
 		Timestamp:            timestamp,
 		LatencyMs:            normaliseLatency(record.Latency),
 		Source:               record.Source,
@@ -221,7 +265,9 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 		ModelReasoningEffort: strings.TrimSpace(record.ModelReasoningEffort),
 		Tokens:               detail,
 		Failed:               failed,
-	})
+	}
+	s.updateAPIStats(stats, modelName, requestDetail)
+	s.appendAggregateRecord(statsKey, modelName, requestDetail)
 
 	s.requestsByDay[dayKey]++
 	s.requestsByHour[hourKey]++
@@ -244,6 +290,90 @@ func (s *RequestStatistics) updateAPIStats(stats *apiStats, model string, detail
 	mergeTokenStats(&modelStatsValue.TokenBreakdown, detail.Tokens)
 	addLatencySample(&modelStatsValue.Latency, detail.LatencyMs)
 	modelStatsValue.Details = append(modelStatsValue.Details, detail)
+	trimRequestDetails(&modelStatsValue.Details, DetailRetentionLimit())
+}
+
+func (s *RequestStatistics) appendAggregateRecord(apiName, modelName string, detail RequestDetail) {
+	if s == nil {
+		return
+	}
+	apiName = strings.TrimSpace(apiName)
+	if apiName == "" {
+		apiName = "unknown"
+	}
+	modelName = strings.TrimSpace(modelName)
+	if modelName == "" {
+		modelName = "unknown"
+	}
+	detail.Tokens = normaliseTokenStats(detail.Tokens)
+	recordTime := detail.Timestamp.UTC()
+	s.aggregateRecords = append(s.aggregateRecords, usageAggregateRecord{
+		APIName:   apiName,
+		ModelName: modelName,
+		Detail:    detail,
+	})
+	if !recordTime.IsZero() && (s.oldestAggregateRecordAt.IsZero() || recordTime.Before(s.oldestAggregateRecordAt)) {
+		s.oldestAggregateRecordAt = recordTime
+	}
+	s.pruneAggregateRecordsLocked(recordTime)
+}
+
+func (s *RequestStatistics) pruneAggregateRecordsLocked(reference time.Time) {
+	if s == nil || aggregateRecordRetentionWindow <= 0 || len(s.aggregateRecords) == 0 {
+		return
+	}
+	reference = reference.UTC()
+	if reference.IsZero() {
+		reference = time.Now().UTC()
+	}
+	if s.newestAggregateRecordAt.IsZero() || reference.After(s.newestAggregateRecordAt) {
+		s.newestAggregateRecordAt = reference
+	}
+	cutoff := s.newestAggregateRecordAt.Add(-aggregateRecordRetentionWindow)
+	if !s.oldestAggregateRecordAt.IsZero() && !s.oldestAggregateRecordAt.Before(cutoff) {
+		return
+	}
+	retained := s.aggregateRecords[:0]
+	oldestRetained := time.Time{}
+	var expired []usageAggregateRecord
+	for _, record := range s.aggregateRecords {
+		recordTime := record.Detail.Timestamp.UTC()
+		if recordTime.IsZero() || recordTime.Before(cutoff) {
+			expired = append(expired, record)
+			continue
+		}
+		if oldestRetained.IsZero() || recordTime.Before(oldestRetained) {
+			oldestRetained = recordTime
+		}
+		retained = append(retained, record)
+	}
+	s.oldestAggregateRecordAt = oldestRetained
+	if len(expired) == 0 {
+		return
+	}
+	clear(s.aggregateRecords[len(retained):])
+	s.aggregateRecords = retained
+
+	rolledUp := aggregateRecordsToAllSnapshot(expired, s.newestAggregateRecordAt)
+	if len(rolledUp.Windows) == 0 {
+		return
+	}
+	if s.rolledUpAggregated == nil {
+		s.rolledUpAggregated = &rolledUp
+		return
+	}
+	merged := mergeAggregatedUsageSnapshot(*s.rolledUpAggregated, rolledUp)
+	s.rolledUpAggregated = &merged
+}
+
+func trimRequestDetails(details *[]RequestDetail, limit int) {
+	if details == nil || limit <= 0 || len(*details) <= limit {
+		return
+	}
+	excess := len(*details) - limit
+	copy((*details)[0:], (*details)[excess:])
+	clear((*details)[limit:])
+	*details = (*details)[:limit]
 }
 
 // Snapshot returns a copy of the aggregated metrics for external consumption.
@@ -316,12 +446,27 @@ func (s *RequestStatistics) snapshotWithDetails(includeDetails bool) StatisticsS
 		result.TokensByHour[key] = v
 	}
 
+	if s.importedSummary != nil {
+		result = mergeStatisticsSnapshots(result, *s.importedSummary)
+	}
+	for _, imported := range s.importedSummarySources {
+		result = mergeStatisticsSnapshots(result, imported)
+	}
+	for _, imported := range s.importedDetailedSources {
+		if includeDetails {
+			result = mergeStatisticsSnapshots(result, imported)
+			continue
+		}
+		result = mergeStatisticsSnapshots(result, canonicalSummarySnapshotForImport(imported))
+	}
+
 	return result
 }
 
 type MergeResult struct {
-	Added   int64 `json:"added"`
-	Skipped int64 `json:"skipped"`
+	Added    int64 `json:"added"`
+	Skipped  int64 `json:"skipped"`
+	Replaced int64 `json:"replaced,omitempty"`
 }
 
 // MergeSnapshot merges an exported statistics snapshot into the current store.
@@ -401,14 +546,142 @@ func (s *RequestStatistics) MergeImportedAggregatedSnapshot(snapshot AggregatedU
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	cloned := cloneAggregatedUsageSnapshot(snapshot)
+	if s.importedAggregateHashes == nil {
+		s.importedAggregateHashes = make(map[string]struct{})
+	}
+
+	fingerprint := fingerprintImportedAggregatedSnapshot(snapshot)
+	if fingerprint != "" {
+		if _, exists := s.importedAggregateHashes[fingerprint]; exists {
+			return
+		}
+	}
+
+	cloned := filterImportedAggregatedUsageSnapshot(snapshot)
 	if s.importedAggregated == nil {
 		s.importedAggregated = &cloned
+		if fingerprint != "" {
+			s.importedAggregateHashes[fingerprint] = struct{}{}
+		}
 		return
 	}
 
 	merged := mergeAggregatedUsageSnapshot(*s.importedAggregated, cloned)
 	s.importedAggregated = &merged
+	if fingerprint != "" {
+		s.importedAggregateHashes[fingerprint] = struct{}{}
+	}
+}
+
+func (s *RequestStatistics) UpsertImportedSummarySnapshot(sourceID string, snapshot StatisticsSnapshot) MergeResult {
+	sourceID = strings.TrimSpace(sourceID)
+	if sourceID == "" {
+		return s.mergeSummarySnapshot(snapshot)
+	}
+
+	result := MergeResult{}
+	if s == nil {
+		return result
+	}
+
+	canonical := canonicalSummarySnapshotForImport(snapshot)
+	importedTotalRequests := canonical.TotalRequests
+	if importedTotalRequests == 0 {
+		for _, apiSnapshot := range canonical.APIs {
+			importedTotalRequests += apiSnapshot.TotalRequests
+		}
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.importedSummarySources == nil {
+		s.importedSummarySources = make(map[string]StatisticsSnapshot)
+	}
+
+	fingerprint := fingerprintSummarySnapshot(canonical)
+	if previous, exists := s.importedSummarySources[sourceID]; exists {
+		if fingerprint != "" && fingerprintSummarySnapshot(previous) == fingerprint {
+			result.Skipped = importedTotalRequests
+			return result
+		}
+		result.Replaced = previous.TotalRequests
+	}
+
+	s.importedSummarySources[sourceID] = canonical
+	result.Added = importedTotalRequests
+	return result
+}
+
+func (s *RequestStatistics) UpsertImportedDetailedSnapshot(sourceID string, snapshot StatisticsSnapshot) MergeResult {
+	sourceID = strings.TrimSpace(sourceID)
+	if sourceID == "" {
+		return s.MergeSnapshot(snapshot)
+	}
+
+	result := MergeResult{}
+	if s == nil {
+		return result
+	}
+
+	canonical := canonicalDetailedSnapshotForImport(snapshot)
+	importedTotalRequests := canonical.TotalRequests
+	if importedTotalRequests == 0 {
+		for _, apiSnapshot := range canonical.APIs {
+			importedTotalRequests += apiSnapshot.TotalRequests
+		}
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.importedDetailedSources == nil {
+		s.importedDetailedSources = make(map[string]StatisticsSnapshot)
+	}
+
+	fingerprint := fingerprintDetailedSnapshot(canonical)
+	if previous, exists := s.importedDetailedSources[sourceID]; exists {
+		if fingerprint != "" && fingerprintDetailedSnapshot(previous) == fingerprint {
+			result.Skipped = importedTotalRequests
+			return result
+		}
+		result.Replaced = previous.TotalRequests
+	}
+
+	s.importedDetailedSources[sourceID] = canonical
+	result.Added = importedTotalRequests
+	return result
+}
+
+func (s *RequestStatistics) UpsertImportedAggregatedSnapshot(sourceID string, snapshot AggregatedUsageSnapshot) {
+	sourceID = strings.TrimSpace(sourceID)
+	if sourceID == "" {
+		s.MergeImportedAggregatedSnapshot(snapshot)
+		return
+	}
+	if s == nil || len(snapshot.Windows) == 0 {
+		return
+	}
+
+	filtered := filterImportedAggregatedUsageSnapshot(snapshot)
+	if len(filtered.Windows) == 0 {
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.importedAggregateSource == nil {
+		s.importedAggregateSource = make(map[string]AggregatedUsageSnapshot)
+	}
+
+	fingerprint := fingerprintImportedAggregatedSnapshot(filtered)
+	if previous, exists := s.importedAggregateSource[sourceID]; exists {
+		if fingerprint != "" && fingerprintImportedAggregatedSnapshot(previous) == fingerprint {
+			return
+		}
+	}
+	s.importedAggregateSource[sourceID] = filtered
 }
 
 func snapshotContainsDetails(snapshot StatisticsSnapshot) bool {
@@ -427,104 +700,38 @@ func (s *RequestStatistics) mergeSummarySnapshot(snapshot StatisticsSnapshot) Me
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.apis == nil {
-		s.apis = make(map[string]*apiStats)
-	}
-	if s.requestsByDay == nil {
-		s.requestsByDay = make(map[string]int64)
-	}
-	if s.requestsByHour == nil {
-		s.requestsByHour = make(map[int]int64)
-	}
-	if s.tokensByDay == nil {
-		s.tokensByDay = make(map[string]int64)
-	}
-	if s.tokensByHour == nil {
-		s.tokensByHour = make(map[int]int64)
-	}
-
-	importedTotalRequests := snapshot.TotalRequests
-	importedTotalTokens := snapshot.TotalTokens
-	importedSuccessCount := snapshot.SuccessCount
-	importedFailureCount := snapshot.FailureCount
-
+	canonical := canonicalSummarySnapshotForImport(snapshot)
+	importedTotalRequests := canonical.TotalRequests
 	if importedTotalRequests == 0 {
-		importedTotalRequests = importedSuccessCount + importedFailureCount
-	}
-	if importedTotalRequests == 0 {
-		for _, apiSnapshot := range snapshot.APIs {
+		for _, apiSnapshot := range canonical.APIs {
 			importedTotalRequests += apiSnapshot.TotalRequests
 		}
 	}
 
-	if importedTotalTokens == 0 {
-		for _, apiSnapshot := range snapshot.APIs {
-			importedTotalTokens += apiSnapshot.TotalTokens
+	if s.importedSummaryHashes == nil {
+		s.importedSummaryHashes = make(map[string]struct{})
+	}
+
+	fingerprint := fingerprintSummarySnapshot(canonical)
+	if fingerprint != "" {
+		if _, exists := s.importedSummaryHashes[fingerprint]; exists {
+			result.Skipped = importedTotalRequests
+			return result
 		}
 	}
 
-	if importedSuccessCount == 0 && importedFailureCount == 0 && importedTotalRequests > 0 {
-		importedSuccessCount = importedTotalRequests
+	if s.importedSummary == nil {
+		cloned := cloneStatisticsSnapshot(canonical)
+		s.importedSummary = &cloned
+	} else {
+		merged := mergeStatisticsSnapshots(*s.importedSummary, canonical)
+		s.importedSummary = &merged
 	}
 
-	s.totalRequests += importedTotalRequests
-	s.successCount += importedSuccessCount
-	s.failureCount += importedFailureCount
-	s.totalTokens += importedTotalTokens
 	result.Added = importedTotalRequests
 
-	for apiName, apiSnapshot := range snapshot.APIs {
-		apiName = strings.TrimSpace(apiName)
-		if apiName == "" {
-			continue
-		}
-		stats, ok := s.apis[apiName]
-		if !ok || stats == nil {
-			stats = &apiStats{Models: make(map[string]*modelStats)}
-			s.apis[apiName] = stats
-		} else if stats.Models == nil {
-			stats.Models = make(map[string]*modelStats)
-		}
-
-		stats.TotalRequests += apiSnapshot.TotalRequests
-		stats.TotalTokens += apiSnapshot.TotalTokens
-
-		for modelName, modelSnapshot := range apiSnapshot.Models {
-			modelName = strings.TrimSpace(modelName)
-			if modelName == "" {
-				modelName = "unknown"
-			}
-			modelStatsValue, ok := stats.Models[modelName]
-			if !ok || modelStatsValue == nil {
-				modelStatsValue = &modelStats{}
-				stats.Models[modelName] = modelStatsValue
-			}
-			modelStatsValue.TotalRequests += modelSnapshot.TotalRequests
-			modelStatsValue.TotalTokens += modelSnapshot.TotalTokens
-			mergeTokenStats(&modelStatsValue.TokenBreakdown, modelSnapshot.TokenBreakdown)
-			mergeLatencyStats(&modelStatsValue.Latency, modelSnapshot.Latency)
-		}
-	}
-
-	for day, count := range snapshot.RequestsByDay {
-		s.requestsByDay[day] += count
-	}
-	for hourKey, count := range snapshot.RequestsByHour {
-		hour, ok := parseSnapshotHour(hourKey)
-		if !ok {
-			continue
-		}
-		s.requestsByHour[hour] += count
-	}
-	for day, count := range snapshot.TokensByDay {
-		s.tokensByDay[day] += count
-	}
-	for hourKey, count := range snapshot.TokensByHour {
-		hour, ok := parseSnapshotHour(hourKey)
-		if !ok {
-			continue
-		}
-		s.tokensByHour[hour] += count
+	if fingerprint != "" {
+		s.importedSummaryHashes[fingerprint] = struct{}{}
 	}
 
 	return result
@@ -556,6 +763,7 @@ func (s *RequestStatistics) recordImported(apiName, modelName string, stats *api
 	s.totalTokens += totalTokens
 
 	s.updateAPIStats(stats, modelName, detail)
+	s.appendAggregateRecord(apiName, modelName, detail)
 
 	dayKey := detail.Timestamp.Format("2006-01-02")
 	hourKey := detail.Timestamp.Hour()

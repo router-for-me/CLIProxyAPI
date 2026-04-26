@@ -100,8 +100,12 @@ func (o *AntigravityAuth) ExchangeCodeForTokens(ctx context.Context, code, redir
 		return nil, fmt.Errorf("antigravity token exchange: request failed: status %d: %s", resp.StatusCode, body)
 	}
 
+	bodyBytes, errRead := util.ReadResponseBody(resp.Body)
+	if errRead != nil {
+		return nil, fmt.Errorf("antigravity token exchange: read response: %w", errRead)
+	}
 	var token TokenResponse
-	if errDecode := json.NewDecoder(resp.Body).Decode(&token); errDecode != nil {
+	if errDecode := json.Unmarshal(bodyBytes, &token); errDecode != nil {
 		return nil, fmt.Errorf("antigravity token exchange: decode response: %w", errDecode)
 	}
 	return &token, nil
@@ -140,8 +144,12 @@ func (o *AntigravityAuth) FetchUserInfo(ctx context.Context, accessToken string)
 		}
 		return "", fmt.Errorf("antigravity userinfo: request failed: status %d: %s", resp.StatusCode, body)
 	}
+	bodyBytes, errRead := util.ReadResponseBody(resp.Body)
+	if errRead != nil {
+		return "", fmt.Errorf("antigravity userinfo: read response: %w", errRead)
+	}
 	var info userInfo
-	if errDecode := json.NewDecoder(resp.Body).Decode(&info); errDecode != nil {
+	if errDecode := json.Unmarshal(bodyBytes, &info); errDecode != nil {
 		return "", fmt.Errorf("antigravity userinfo: decode response: %w", errDecode)
 	}
 	email := strings.TrimSpace(info.Email)
@@ -187,7 +195,7 @@ func (o *AntigravityAuth) FetchProjectID(ctx context.Context, accessToken string
 		}
 	}()
 
-	bodyBytes, errRead := io.ReadAll(resp.Body)
+	bodyBytes, errRead := util.ReadResponseBody(resp.Body)
 	if errRead != nil {
 		return "", fmt.Errorf("read response: %w", errRead)
 	}
@@ -287,7 +295,7 @@ func (o *AntigravityAuth) OnboardUser(ctx context.Context, accessToken, tierID s
 			return "", fmt.Errorf("execute request: %w", errDo)
 		}
 
-		bodyBytes, errRead := io.ReadAll(resp.Body)
+		bodyBytes, errRead := util.ReadResponseBody(resp.Body)
 		if errClose := resp.Body.Close(); errClose != nil {
 			log.Errorf("close body error: %v", errClose)
 		}

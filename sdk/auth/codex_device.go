@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -144,7 +143,7 @@ func requestCodexDeviceUserCode(ctx context.Context, client *http.Client) (*code
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := util.ReadResponseBody(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read codex device code response: %w", err)
 	}
@@ -196,7 +195,7 @@ func pollCodexDeviceToken(ctx context.Context, client *http.Client, deviceAuthID
 			return nil, fmt.Errorf("failed to poll codex device token: %w", err)
 		}
 
-		respBody, readErr := io.ReadAll(resp.Body)
+		respBody, readErr := util.ReadResponseBody(resp.Body)
 		_ = resp.Body.Close()
 		if readErr != nil {
 			return nil, fmt.Errorf("failed to read codex device poll response: %w", readErr)

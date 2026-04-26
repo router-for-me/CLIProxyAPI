@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -17,10 +16,26 @@ import (
 )
 
 func resetAntigravityCreditsRetryState() {
-	antigravityCreditsFailureByAuth = sync.Map{}
-	antigravityShortCooldownByAuth = sync.Map{}
-	antigravityCreditsBalanceByAuth = sync.Map{}
-	antigravityCreditsHintRefreshByID = sync.Map{}
+	antigravityCreditsHintRefreshByID.Range(func(key, value any) bool {
+		if state, ok := value.(*antigravityCreditsHintRefreshState); ok && state != nil {
+			state.mu.Lock()
+			state.mu.Unlock()
+		}
+		antigravityCreditsHintRefreshByID.Delete(key)
+		return true
+	})
+	antigravityCreditsFailureByAuth.Range(func(key, _ any) bool {
+		antigravityCreditsFailureByAuth.Delete(key)
+		return true
+	})
+	antigravityShortCooldownByAuth.Range(func(key, _ any) bool {
+		antigravityShortCooldownByAuth.Delete(key)
+		return true
+	})
+	antigravityCreditsBalanceByAuth.Range(func(key, _ any) bool {
+		antigravityCreditsBalanceByAuth.Delete(key)
+		return true
+	})
 }
 
 func TestClassifyAntigravity429(t *testing.T) {

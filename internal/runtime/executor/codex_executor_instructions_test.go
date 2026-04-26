@@ -45,11 +45,8 @@ func TestCodexExecutorExecuteNormalizesNullInstructions(t *testing.T) {
 	if gotPath != "/responses" {
 		t.Fatalf("path = %q, want %q", gotPath, "/responses")
 	}
-	if gjson.GetBytes(gotBody, "instructions").Type != gjson.String {
-		t.Fatalf("instructions type = %v, want string", gjson.GetBytes(gotBody, "instructions").Type)
-	}
-	if gjson.GetBytes(gotBody, "instructions").String() != "" {
-		t.Fatalf("instructions = %q, want empty string", gjson.GetBytes(gotBody, "instructions").String())
+	if gjson.GetBytes(gotBody, "instructions").Exists() {
+		t.Fatalf("instructions should be omitted when empty, got %s", gotBody)
 	}
 }
 
@@ -86,11 +83,8 @@ func TestCodexExecutorExecuteStreamNormalizesNullInstructions(t *testing.T) {
 	if gotPath != "/responses" {
 		t.Fatalf("path = %q, want %q", gotPath, "/responses")
 	}
-	if gjson.GetBytes(gotBody, "instructions").Type != gjson.String {
-		t.Fatalf("instructions type = %v, want string", gjson.GetBytes(gotBody, "instructions").Type)
-	}
-	if gjson.GetBytes(gotBody, "instructions").String() != "" {
-		t.Fatalf("instructions = %q, want empty string", gjson.GetBytes(gotBody, "instructions").String())
+	if gjson.GetBytes(gotBody, "instructions").Exists() {
+		t.Fatalf("instructions should be omitted when empty, got %s", gotBody)
 	}
 }
 

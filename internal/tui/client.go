@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 )
 
 // Client wraps HTTP calls to the management API.
@@ -51,7 +53,7 @@ func (c *Client) doRequest(method, path string, body io.Reader) ([]byte, int, er
 		return nil, 0, err
 	}
 	defer resp.Body.Close()
-	data, err := io.ReadAll(resp.Body)
+	data, err := util.ReadResponseBody(resp.Body)
 	if err != nil {
 		return nil, resp.StatusCode, err
 	}

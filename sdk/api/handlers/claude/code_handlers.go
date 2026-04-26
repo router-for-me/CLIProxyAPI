@@ -12,13 +12,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
 	. "github.com/router-for-me/CLIProxyAPI/v6/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 	log "github.com/sirupsen/logrus"
 )
@@ -181,7 +181,7 @@ func (h *ClaudeCodeAPIHandler) handleNonStreamingResponse(c *gin.Context, modelN
 					log.Warnf("failed to close Claude gzip reader: %v", errClose)
 				}
 			}()
-			decompressed, errRead := io.ReadAll(gzReader)
+			decompressed, errRead := helps.ReadNonStreamResponseBody(gzReader)
 			if errRead != nil {
 				log.Warnf("failed to read decompressed Claude response: %v", errRead)
 			} else {

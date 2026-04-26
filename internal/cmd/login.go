@@ -21,6 +21,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
@@ -420,16 +421,25 @@ func callGeminiCLI(ctx context.Context, httpClient *http.Client, endpoint string
 	}()
 
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		bodyBytes, _ := io.ReadAll(resp.Body)
+		bodyBytes, errRead := util.ReadResponseBody(resp.Body)
+		if errRead != nil {
+			return fmt.Errorf("api request failed with status %d and unreadable body: %w", resp.StatusCode, errRead)
+		}
 		return fmt.Errorf("api request failed with status %d: %s", resp.StatusCode, strings.TrimSpace(string(bodyBytes)))
 	}
 
 	if result == nil {
-		_, _ = io.Copy(io.Discard, resp.Body)
+		if _, errRead := util.ReadResponseBody(resp.Body); errRead != nil {
+			return fmt.Errorf("read response body: %w", errRead)
+		}
 		return nil
 	}
 
-	if errDecode := json.NewDecoder(resp.Body).Decode(result); errDecode != nil {
+	bodyBytes, errRead := util.ReadResponseBody(resp.Body)
+	if errRead != nil {
+		return fmt.Errorf("read response body: %w", errRead)
+	}
+	if errDecode := json.Unmarshal(bodyBytes, result); errDecode != nil {
 		return fmt.Errorf("decode response body: %w", errDecode)
 	}
 
@@ -453,12 +463,19 @@ func fetchGCPProjects(ctx context.Context, httpClient *http.Client) ([]interface
 	}()
 
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		bodyBytes, _ := io.ReadAll(resp.Body)
+		bodyBytes, errRead := util.ReadResponseBody(resp.Body)
+		if errRead != nil {
+			return nil, fmt.Errorf("project list request failed with status %d and unreadable body: %w", resp.StatusCode, errRead)
+		}
 		return nil, fmt.Errorf("project list request failed with status %d: %s", resp.StatusCode, strings.TrimSpace(string(bodyBytes)))
 	}
 
+	bodyBytes, errRead := util.ReadResponseBody(resp.Body)
+	if errRead != nil {
+		return nil, fmt.Errorf("read project list response: %w", errRead)
+	}
 	var projects interfaces.GCPProject
-	if errDecode := json.NewDecoder(resp.Body).Decode(&projects); errDecode != nil {
+	if errDecode := json.Unmarshal(bodyBytes, &projects); errDecode != nil {
 		return nil, fmt.Errorf("failed to unmarshal project list: %w", errDecode)
 	}
 
@@ -633,7 +650,11 @@ func checkCloudAPIIsEnabled(ctx context.Context, httpClient *http.Client, projec
 		}
 
 		if resp.StatusCode == http.StatusOK {
-			bodyBytes, _ := io.ReadAll(resp.Body)
+			bodyBytes, errRead := util.ReadResponseBody(resp.Body)
+			if errRead != nil {
+				_ = resp.Body.Close()
+				return false, fmt.Errorf("failed to read service status response: %w", errRead)
+			}
 			if gjson.GetBytes(bodyBytes, "state").String() == "ENABLED" {
 				_ = resp.Body.Close()
 				continue
@@ -653,7 +674,11 @@ func checkCloudAPIIsEnabled(ctx context.Context, httpClient *http.Client, projec
 			return false, fmt.Errorf("failed to execute request: %w", errDo)
 		}
 
-		bodyBytes, _ := io.ReadAll(resp.Body)
+		bodyBytes, errRead := util.ReadResponseBody(resp.Body)
+		if errRead != nil {
+			_ = resp.Body.Close()
+			return false, fmt.Errorf("failed to read service enable response: %w", errRead)
+		}
 		errMessage := string(bodyBytes)
 		errMessageResult := gjson.GetBytes(bodyBytes, "error.message")
 		if errMessageResult.Exists() {

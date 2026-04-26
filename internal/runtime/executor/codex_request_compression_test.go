@@ -121,3 +121,19 @@ func TestMaybeEnableCodexRequestCompressionWithBody_UsesProvidedBody(t *testing.
 		t.Fatalf("decompressed body = %q, want %q", string(decompressed), string(body))
 	}
 }
+
+func BenchmarkCompressCodexRequestBody(b *testing.B) {
+	body := append([]byte(`{"model":"gpt-5-codex","input":"`), bytes.Repeat([]byte("large codex request payload "), 4096)...)
+	body = append(body, []byte(`"}`)...)
+
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		compressed, err := compressCodexRequestBody(body)
+		if err != nil {
+			b.Fatalf("compressCodexRequestBody() error = %v", err)
+		}
+		if len(compressed) == 0 {
+			b.Fatal("compressed body is empty")
+		}
+	}
+}

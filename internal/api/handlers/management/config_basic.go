@@ -73,8 +73,13 @@ func (h *Handler) GetLatestVersion(c *gin.Context) {
 		return
 	}
 
+	body, errRead := util.ReadResponseBody(resp.Body)
+	if errRead != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": "read_failed", "message": errRead.Error()})
+		return
+	}
 	var info releaseInfo
-	if errDecode := json.NewDecoder(resp.Body).Decode(&info); errDecode != nil {
+	if errDecode := json.Unmarshal(body, &info); errDecode != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": "decode_failed", "message": errDecode.Error()})
 		return
 	}
@@ -193,7 +198,20 @@ func (h *Handler) PutUsageStatisticsEnabled(c *gin.Context) {
 	h.updateBoolField(c, func(v bool) { h.cfg.UsageStatisticsEnabled = v })
 }
 
-// UsageStatisticsEnabled
+// UsageDetailRetentionLimit
+func (h *Handler) GetUsageDetailRetentionLimit(c *gin.Context) {
+	c.JSON(200, gin.H{"usage-detail-retention-limit": h.cfg.UsageDetailRetentionLimit})
+}
+func (h *Handler) PutUsageDetailRetentionLimit(c *gin.Context) {
+	h.updateIntField(c, func(v int) {
+		if v < 0 {
+			v = 0
+		}
+		h.cfg.UsageDetailRetentionLimit = v
+	})
+}
+
+// LoggingToFile
 func (h *Handler) GetLoggingToFile(c *gin.Context) {
 	c.JSON(200, gin.H{"logging-to-file": h.cfg.LoggingToFile})
 }

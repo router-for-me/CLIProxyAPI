@@ -18,7 +18,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -27,6 +26,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	sdkauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/proxyutil"
@@ -200,7 +200,7 @@ func fetchModels(ctx context.Context, auth *coreauth.Auth) []modelEntry {
 			continue
 		}
 
-		bodyBytes, errRead := io.ReadAll(httpResp.Body)
+		bodyBytes, errRead := util.ReadResponseBody(httpResp.Body)
 		httpResp.Body.Close()
 		if errRead != nil {
 			continue

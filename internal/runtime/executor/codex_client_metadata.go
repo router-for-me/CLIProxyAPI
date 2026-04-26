@@ -94,7 +94,9 @@ func codexEnsureResponsesIdentityHeaders(target http.Header, source http.Header)
 	ensureHeaderWithPriority(target, source, codexHeaderWindowID, "", "")
 	if strings.TrimSpace(target.Get(codexHeaderWindowID)) == "" {
 		if sessionID := strings.TrimSpace(target.Get(codexHeaderSessionID)); sessionID != "" {
-			target.Set(codexHeaderWindowID, sessionID+":0")
+			if windowID := codexCurrentWindowID(sessionID); windowID != "" {
+				target.Set(codexHeaderWindowID, windowID)
+			}
 		}
 	}
 }

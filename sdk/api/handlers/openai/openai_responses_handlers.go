@@ -318,6 +318,10 @@ func (h *OpenAIResponsesAPIHandler) Compact(c *gin.Context) {
 
 	c.Header("Content-Type", "application/json")
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	executionSessionID := responsesExplicitExecutionSessionID(c.Request, rawJSON)
+	if executionSessionID != "" {
+		cliCtx = handlers.WithExecutionSessionID(cliCtx, executionSessionID)
+	}
 	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
 	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, h.HandlerType(), requestDetails.Model, rawJSON, "responses/compact")
 	stopKeepAlive()
@@ -329,6 +333,9 @@ func (h *OpenAIResponsesAPIHandler) Compact(c *gin.Context) {
 	resp = newResponsesNoticeFilter().FilterResponseObject(resp)
 	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 	_, _ = c.Writer.Write(resp)
+	if executionSessionID != "" && h != nil && h.AuthManager != nil {
+		h.AuthManager.ResetExecutionSession(executionSessionID)
+	}
 	cliCancel()
 }
 
@@ -344,6 +351,9 @@ func (h *OpenAIResponsesAPIHandler) handleNonStreamingResponse(c *gin.Context, m
 	c.Header("Content-Type", "application/json")
 
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	if executionSessionID := responsesExplicitExecutionSessionID(c.Request, rawJSON); executionSessionID != "" {
+		cliCtx = handlers.WithExecutionSessionID(cliCtx, executionSessionID)
+	}
 	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
 
 	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "")
@@ -382,6 +392,9 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, mode
 
 	// New core execution path
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	if executionSessionID := responsesExplicitExecutionSessionID(c.Request, rawJSON); executionSessionID != "" {
+		cliCtx = handlers.WithExecutionSessionID(cliCtx, executionSessionID)
+	}
 	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "")
 
 	setSSEHeaders := func() {

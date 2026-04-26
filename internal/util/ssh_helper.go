@@ -6,7 +6,6 @@ package util
 import (
 	"context"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"strings"
@@ -31,30 +30,34 @@ var ipServices = []string{
 func getPublicIP() (string, error) {
 	for _, service := range ipServices {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
 		req, err := http.NewRequestWithContext(ctx, "GET", service, nil)
 		if err != nil {
+			cancel()
 			log.Debugf("Failed to create request to %s: %v", service, err)
 			continue
 		}
 
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
+			cancel()
 			log.Debugf("Failed to get public IP from %s: %v", service, err)
 			continue
 		}
-		defer func() {
-			if closeErr := resp.Body.Close(); closeErr != nil {
-				log.Warnf("Failed to close response body from %s: %v", service, closeErr)
-			}
-		}()
 
 		if resp.StatusCode != http.StatusOK {
 			log.Debugf("bad status code from %s: %d", service, resp.StatusCode)
+			if closeErr := resp.Body.Close(); closeErr != nil {
+				log.Warnf("Failed to close response body from %s: %v", service, closeErr)
+			}
+			cancel()
 			continue
 		}
 
-		ip, err := io.ReadAll(resp.Body)
+		ip, err := ReadResponseBodyLimited(resp.Body, 1<<10)
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			log.Warnf("Failed to close response body from %s: %v", service, closeErr)
+		}
+		cancel()
 		if err != nil {
 			log.Debugf("Failed to read response body from %s: %v", service, err)
 			continue

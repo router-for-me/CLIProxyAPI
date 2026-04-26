@@ -52,6 +52,7 @@ type Manager struct {
 	mu         sync.Mutex
 	cond       *sync.Cond
 	queue      []queueItem
+	maxQueue   int
 	processing int
 	closed     bool
 
@@ -61,7 +62,7 @@ type Manager struct {
 
 // NewManager constructs a manager with a buffered queue.
 func NewManager(buffer int) *Manager {
-	m := &Manager{}
+	m := &Manager{maxQueue: buffer}
 	m.cond = sync.NewCond(&m.mu)
 	return m
 }
@@ -120,6 +121,10 @@ func (m *Manager) Publish(ctx context.Context, record Record) {
 		m.mu.Unlock()
 		return
 	}
+	if m.maxQueue > 0 && len(m.queue) >= m.maxQueue {
+		clearQueueItem(&m.queue[0])
+		m.queue = m.queue[1:]
+	}
 	m.queue = append(m.queue, queueItem{ctx: ctx, record: record})
 	m.mu.Unlock()
 	m.cond.Signal()
@@ -171,6 +176,7 @@ func (m *Manager) run(ctx context.Context) {
 			return
 		}
 		item := m.queue[0]
+		clearQueueItem(&m.queue[0])
 		m.queue = m.queue[1:]
 		m.processing++
 		m.mu.Unlock()
@@ -186,6 +192,13 @@ func (m *Manager) run(ctx context.Context) {
 		}
 		m.mu.Unlock()
 	}
+}
+
+func clearQueueItem(item *queueItem) {
+	if item == nil {
+		return
+	}
+	*item = queueItem{}
 }
 
 func (m *Manager) dispatch(item queueItem) {

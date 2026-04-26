@@ -44,6 +44,14 @@ func mergeAggregatedUsageSnapshot(base, extra AggregatedUsageSnapshot) Aggregate
 	return dst
 }
 
+func mergeImportedAggregatedUsageSnapshot(base, imported AggregatedUsageSnapshot) AggregatedUsageSnapshot {
+	filtered := filterImportedAggregatedUsageSnapshot(imported)
+	if len(filtered.Windows) == 0 {
+		return cloneAggregatedUsageSnapshot(base)
+	}
+	return mergeAggregatedUsageSnapshot(base, filtered)
+}
+
 func cloneAggregatedUsageWindow(src AggregatedUsageWindow) AggregatedUsageWindow {
 	return AggregatedUsageWindow{
 		TotalRequests:        src.TotalRequests,

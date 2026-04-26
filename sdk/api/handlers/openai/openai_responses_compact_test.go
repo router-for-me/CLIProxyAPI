@@ -21,6 +21,7 @@ type compactCaptureExecutor struct {
 	alt          string
 	sourceFormat string
 	calls        int
+	resetIDs     []string
 }
 
 func (e *compactCaptureExecutor) Identifier() string { return "test-provider" }
@@ -46,6 +47,10 @@ func (e *compactCaptureExecutor) CountTokens(context.Context, *coreauth.Auth, co
 
 func (e *compactCaptureExecutor) HttpRequest(context.Context, *coreauth.Auth, *http.Request) (*http.Response, error) {
 	return nil, errors.New("not implemented")
+}
+
+func (e *compactCaptureExecutor) ResetExecutionSession(sessionID string) {
+	e.resetIDs = append(e.resetIDs, sessionID)
 }
 
 func TestOpenAIResponsesCompactRejectsStream(t *testing.T) {
@@ -117,6 +122,42 @@ func TestOpenAIResponsesCompactExecute(t *testing.T) {
 	}
 	if strings.TrimSpace(resp.Body.String()) != `{"ok":true}` {
 		t.Fatalf("body = %s", resp.Body.String())
+	}
+	if len(executor.resetIDs) != 0 {
+		t.Fatalf("unexpected reset IDs: %#v", executor.resetIDs)
+	}
+}
+
+func TestOpenAIResponsesCompactResetsExplicitExecutionSession(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	executor := &compactCaptureExecutor{}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+
+	auth := &coreauth.Auth{ID: "auth3", Provider: executor.Identifier(), Status: coreauth.StatusActive}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "test-model"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	h := NewOpenAIResponsesAPIHandler(base)
+	router := gin.New()
+	router.POST("/v1/responses/compact", h.Compact)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses/compact", strings.NewReader(`{"model":"test-model","prompt_cache_key":"conv-1","input":"hello"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.Code, http.StatusOK)
+	}
+	if len(executor.resetIDs) != 1 || executor.resetIDs[0] != "conv-1" {
+		t.Fatalf("reset IDs = %#v, want [conv-1]", executor.resetIDs)
 	}
 }
 

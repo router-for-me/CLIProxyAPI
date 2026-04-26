@@ -257,32 +257,28 @@ func (s *RequestStatistics) AggregatedUsageSnapshot(now time.Time) AggregatedUsa
 	defer s.mu.RUnlock()
 
 	globalModelNames := make(map[string]struct{})
-	for apiName, stats := range s.apis {
-		if stats == nil {
+	for _, record := range s.aggregateRecords {
+		apiName := strings.TrimSpace(record.APIName)
+		if apiName == "" {
+			apiName = "unknown"
+		}
+		modelName := strings.TrimSpace(record.ModelName)
+		if modelName == "" {
+			modelName = "unknown"
+		}
+		normalizedDetail := record.Detail
+		normalizedDetail.Timestamp = normalizedDetail.Timestamp.UTC()
+		normalizedDetail.Tokens = normaliseTokenStats(normalizedDetail.Tokens)
+		if normalizedDetail.Timestamp.IsZero() {
 			continue
 		}
-		for modelName, modelStatsValue := range stats.Models {
-			if modelStatsValue == nil {
+		globalModelNames[modelName] = struct{}{}
+		for _, cfg := range aggregatedUsageWindowConfigs {
+			acc := accumulators[cfg.key]
+			if acc == nil || !acc.includes(normalizedDetail.Timestamp) {
 				continue
 			}
-			for _, detail := range modelStatsValue.Details {
-				normalizedDetail := detail
-				normalizedDetail.Timestamp = normalizedDetail.Timestamp.UTC()
-				normalizedDetail.Tokens = normaliseTokenStats(normalizedDetail.Tokens)
-				if normalizedDetail.Timestamp.IsZero() {
-					continue
-				}
-				if strings.TrimSpace(modelName) != "" {
-					globalModelNames[modelName] = struct{}{}
-				}
-				for _, cfg := range aggregatedUsageWindowConfigs {
-					acc := accumulators[cfg.key]
-					if acc == nil || !acc.includes(normalizedDetail.Timestamp) {
-						continue
-					}
-					acc.addRecord(apiName, modelName, normalizedDetail)
-				}
-			}
+			acc.addRecord(apiName, modelName, normalizedDetail)
 		}
 	}
 
@@ -293,10 +289,70 @@ func (s *RequestStatistics) AggregatedUsageSnapshot(now time.Time) AggregatedUsa
 		}
 	}
 
-	if s.importedAggregated != nil {
-		result = mergeAggregatedUsageSnapshot(result, *s.importedAggregated)
+	if s.rolledUpAggregated != nil {
+		result = mergeImportedAggregatedUsageSnapshot(result, *s.rolledUpAggregated)
 	}
 
+	if s.importedAggregated != nil {
+		result = mergeImportedAggregatedUsageSnapshot(result, *s.importedAggregated)
+	}
+	for _, imported := range s.importedAggregateSource {
+		result = mergeImportedAggregatedUsageSnapshot(result, imported)
+	}
+	for _, imported := range s.importedDetailedSources {
+		result = mergeAggregatedUsageSnapshot(result, aggregatedUsageSnapshotFromDetailedImport(imported, now))
+	}
+
+	return result
+}
+
+func aggregateRecordsToAllSnapshot(records []usageAggregateRecord, now time.Time) AggregatedUsageSnapshot {
+	now = now.UTC()
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	result := AggregatedUsageSnapshot{
+		GeneratedAt: now,
+		Windows:     make(map[string]AggregatedUsageWindow, 1),
+	}
+	if len(records) == 0 {
+		return result
+	}
+	var allCfg aggregatedUsageWindowConfig
+	for _, cfg := range aggregatedUsageWindowConfigs {
+		if cfg.key == "all" {
+			allCfg = cfg
+			break
+		}
+	}
+	if allCfg.key == "" {
+		return result
+	}
+	acc := newAggregatedUsageWindowAccumulator(allCfg, now)
+	modelNames := make(map[string]struct{})
+	for _, record := range records {
+		apiName := strings.TrimSpace(record.APIName)
+		if apiName == "" {
+			apiName = "unknown"
+		}
+		modelName := strings.TrimSpace(record.ModelName)
+		if modelName == "" {
+			modelName = "unknown"
+		}
+		detail := record.Detail
+		detail.Timestamp = detail.Timestamp.UTC()
+		detail.Tokens = normaliseTokenStats(detail.Tokens)
+		if detail.Timestamp.IsZero() || detail.Timestamp.After(now) {
+			continue
+		}
+		modelNames[modelName] = struct{}{}
+		acc.addRecord(apiName, modelName, detail)
+	}
+	if acc.totalRequests == 0 {
+		return result
+	}
+	result.ModelNames = sortedStringKeys(modelNames)
+	result.Windows["all"] = acc.build()
 	return result
 }
 

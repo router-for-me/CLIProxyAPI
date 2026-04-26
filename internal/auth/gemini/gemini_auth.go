@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"time"
 
@@ -156,7 +155,10 @@ func (g *GeminiAuth) createTokenStorage(ctx context.Context, config *oauth2.Conf
 		}
 	}()
 
-	bodyBytes, _ := io.ReadAll(resp.Body)
+	bodyBytes, errRead := util.ReadResponseBody(resp.Body)
+	if errRead != nil {
+		return nil, fmt.Errorf("failed to read user info response: %w", errRead)
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("get user info request failed with status %d: %s", resp.StatusCode, string(bodyBytes))
 	}

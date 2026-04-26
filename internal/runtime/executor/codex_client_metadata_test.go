@@ -10,6 +10,13 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+func resetCodexWindowStateStore() {
+	globalCodexWindowStateStore.mu.Lock()
+	defer globalCodexWindowStateStore.mu.Unlock()
+	globalCodexWindowStateStore.sessions = make(map[string]codexWindowStateEntry)
+	globalCodexWindowStateStore.ops = 0
+}
+
 func TestCodexApplyHTTPClientMetadataIncludesAPIKeyDefault(t *testing.T) {
 	body := []byte(`{"model":"gpt-5-codex","input":[]}`)
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, "https://example.com/responses", bytes.NewReader(body))
@@ -56,6 +63,7 @@ func TestCodexApplyHTTPClientMetadataHonorsExistingAPIKeyClientMetadata(t *testi
 }
 
 func TestCodexApplyWebsocketClientMetadataIncludesAPIKeyDefault(t *testing.T) {
+	resetCodexWindowStateStore()
 	body := []byte(`{"model":"gpt-5-codex","input":[]}`)
 	headers := http.Header{}
 	headers.Set("Session_id", "session-1")
@@ -69,6 +77,26 @@ func TestCodexApplyWebsocketClientMetadataIncludesAPIKeyDefault(t *testing.T) {
 	}
 	if windowID := gjson.GetBytes(got, "client_metadata.x-codex-window-id").String(); windowID != "session-1:0" {
 		t.Fatalf("client_metadata.x-codex-window-id = %q, want session-1:0; body=%s", windowID, got)
+	}
+}
+
+func TestCodexEnsureResponsesIdentityHeadersTracksWindowGenerationBySession(t *testing.T) {
+	resetCodexWindowStateStore()
+
+	first := http.Header{}
+	first.Set("Session_id", "session-1")
+	codexEnsureResponsesIdentityHeaders(first, nil)
+	if got := first.Get(codexHeaderWindowID); got != "session-1:0" {
+		t.Fatalf("%s = %q, want %q", codexHeaderWindowID, got, "session-1:0")
+	}
+
+	codexAdvanceWindowGeneration("session-1")
+
+	second := http.Header{}
+	second.Set("Session_id", "session-1")
+	codexEnsureResponsesIdentityHeaders(second, nil)
+	if got := second.Get(codexHeaderWindowID); got != "session-1:1" {
+		t.Fatalf("%s = %q, want %q", codexHeaderWindowID, got, "session-1:1")
 	}
 }
 

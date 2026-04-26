@@ -3,9 +3,10 @@
 package claude
 
 import (
+	"net"
 	"net/http"
-	"strings"
 	"sync"
+	"time"
 
 	tls "github.com/refraction-networking/utls"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
@@ -21,12 +22,22 @@ type utlsRoundTripper struct {
 	// mu protects the connections map and pending map
 	mu sync.Mutex
 	// connections caches HTTP/2 client connections per host
-	connections map[string]*http2.ClientConn
+	connections map[string][]*utlsClientConn
 	// pending tracks hosts that are currently being connected to (prevents race condition)
 	pending map[string]*sync.Cond
 	// dialer is used to create network connections, supporting proxies
 	dialer proxy.Dialer
 }
+
+type utlsClientConn struct {
+	conn     *http2.ClientConn
+	lastUsed time.Time
+}
+
+const (
+	utlsMaxConnsPerHost = 2
+	utlsIdleConnTimeout = proxyutil.DefaultIdleConnTimeout
+)
 
 // newUtlsRoundTripper creates a new utls-based round tripper with optional proxy support
 func newUtlsRoundTripper(cfg *config.SDKConfig) *utlsRoundTripper {
@@ -41,7 +52,7 @@ func newUtlsRoundTripper(cfg *config.SDKConfig) *utlsRoundTripper {
 	}
 
 	return &utlsRoundTripper{
-		connections: make(map[string]*http2.ClientConn),
+		connections: make(map[string][]*utlsClientConn),
 		pending:     make(map[string]*sync.Cond),
 		dialer:      dialer,
 	}
@@ -52,47 +63,138 @@ func newUtlsRoundTripper(cfg *config.SDKConfig) *utlsRoundTripper {
 // creating connections to the same host simultaneously.
 func (t *utlsRoundTripper) getOrCreateConnection(host, addr string) (*http2.ClientConn, error) {
 	t.mu.Lock()
+	for {
+		now := time.Now()
+		t.pruneIdleConnectionsLocked(host, now)
 
-	// Check if connection exists and is usable
-	if h2Conn, ok := t.connections[host]; ok && h2Conn.CanTakeNewRequest() {
-		t.mu.Unlock()
-		return h2Conn, nil
-	}
-
-	// Check if another goroutine is already creating a connection
-	if cond, ok := t.pending[host]; ok {
-		// Wait for the other goroutine to finish
-		cond.Wait()
-		// Check if connection is now available
-		if h2Conn, ok := t.connections[host]; ok && h2Conn.CanTakeNewRequest() {
+		if h2Conn := t.availableConnectionLocked(host, now); h2Conn != nil {
 			t.mu.Unlock()
 			return h2Conn, nil
 		}
-		// Connection still not available, we'll create one
+
+		if h2Conn := t.fallbackConnectionLocked(host, now); h2Conn != nil {
+			t.mu.Unlock()
+			return h2Conn, nil
+		}
+
+		if cond, ok := t.pending[host]; ok {
+			cond.Wait()
+			continue
+		}
+
+		cond := sync.NewCond(&t.mu)
+		t.pending[host] = cond
+		t.mu.Unlock()
+
+		h2Conn, err := t.createConnection(host, addr)
+
+		t.mu.Lock()
+		delete(t.pending, host)
+		cond.Broadcast()
+
+		if err != nil {
+			t.mu.Unlock()
+			return nil, err
+		}
+
+		t.connections[host] = append(t.connections[host], &utlsClientConn{conn: h2Conn, lastUsed: time.Now()})
+		t.mu.Unlock()
+		return h2Conn, nil
 	}
+}
 
-	// Mark this host as pending
-	cond := sync.NewCond(&t.mu)
-	t.pending[host] = cond
-	t.mu.Unlock()
+func (t *utlsRoundTripper) availableConnectionLocked(host string, now time.Time) *http2.ClientConn {
+	for _, entry := range t.connections[host] {
+		if entry == nil || entry.conn == nil {
+			continue
+		}
+		if entry.conn.CanTakeNewRequest() {
+			entry.lastUsed = now
+			return entry.conn
+		}
+	}
+	return nil
+}
 
-	// Create connection outside the lock
-	h2Conn, err := t.createConnection(host, addr)
+func (t *utlsRoundTripper) fallbackConnectionLocked(host string, now time.Time) *http2.ClientConn {
+	conns := t.connections[host]
+	if len(conns) < utlsMaxConnsPerHost {
+		return nil
+	}
+	for _, entry := range conns {
+		if entry == nil || entry.conn == nil {
+			continue
+		}
+		state := entry.conn.State()
+		if state.Closed || state.Closing {
+			continue
+		}
+		entry.lastUsed = now
+		return entry.conn
+	}
+	return nil
+}
 
+func (t *utlsRoundTripper) pruneIdleConnectionsLocked(host string, now time.Time) {
+	conns := t.connections[host]
+	if len(conns) == 0 {
+		return
+	}
+	kept := conns[:0]
+	for _, entry := range conns {
+		if entry == nil || entry.conn == nil {
+			continue
+		}
+		state := entry.conn.State()
+		if state.Closed || state.Closing {
+			entry.conn.Close()
+			continue
+		}
+		if state.StreamsActive == 0 && state.StreamsReserved == 0 && state.StreamsPending == 0 {
+			lastIdle := entry.lastUsed
+			if !state.LastIdle.IsZero() {
+				lastIdle = state.LastIdle
+			}
+			if now.Sub(lastIdle) > utlsIdleConnTimeout {
+				entry.conn.Close()
+				continue
+			}
+		}
+		kept = append(kept, entry)
+	}
+	clear(conns[len(kept):])
+	if len(kept) == 0 {
+		delete(t.connections, host)
+		return
+	}
+	t.connections[host] = kept
+}
+
+func (t *utlsRoundTripper) removeConnection(host string, target *http2.ClientConn) {
+	if target == nil {
+		return
+	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	// Remove pending marker and wake up waiting goroutines
-	delete(t.pending, host)
-	cond.Broadcast()
-
-	if err != nil {
-		return nil, err
+	conns := t.connections[host]
+	kept := conns[:0]
+	for _, entry := range conns {
+		if entry == nil || entry.conn == nil {
+			continue
+		}
+		if entry.conn == target {
+			entry.conn.Close()
+			continue
+		}
+		kept = append(kept, entry)
 	}
-
-	// Store the new connection
-	t.connections[host] = h2Conn
-	return h2Conn, nil
+	clear(conns[len(kept):])
+	if len(kept) == 0 {
+		delete(t.connections, host)
+		return
+	}
+	t.connections[host] = kept
 }
 
 // createConnection creates a new HTTP/2 connection with Chrome TLS fingerprint.
@@ -124,14 +226,12 @@ func (t *utlsRoundTripper) createConnection(host, addr string) (*http2.ClientCon
 
 // RoundTrip implements http.RoundTripper
 func (t *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-	host := req.URL.Host
-	addr := host
-	if !strings.Contains(addr, ":") {
-		addr += ":443"
-	}
-
-	// Get hostname without port for TLS ServerName
 	hostname := req.URL.Hostname()
+	port := req.URL.Port()
+	if port == "" {
+		port = "443"
+	}
+	addr := net.JoinHostPort(hostname, port)
 
 	h2Conn, err := t.getOrCreateConnection(hostname, addr)
 	if err != nil {
@@ -140,12 +240,7 @@ func (t *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 
 	resp, err := h2Conn.RoundTrip(req)
 	if err != nil {
-		// Connection failed, remove it from cache
-		t.mu.Lock()
-		if cached, ok := t.connections[hostname]; ok && cached == h2Conn {
-			delete(t.connections, hostname)
-		}
-		t.mu.Unlock()
+		t.removeConnection(hostname, h2Conn)
 		return nil, err
 	}
 

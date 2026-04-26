@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -198,7 +197,7 @@ func (c *DeviceFlowClient) RequestDeviceCode(ctx context.Context) (*DeviceCodeRe
 		}
 	}()
 
-	bodyBytes, err := io.ReadAll(resp.Body)
+	bodyBytes, err := util.ReadResponseBody(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("kimi: failed to read device code response: %w", err)
 	}
@@ -286,7 +285,7 @@ func (c *DeviceFlowClient) exchangeDeviceCode(ctx context.Context, deviceCode st
 		}
 	}()
 
-	bodyBytes, err := io.ReadAll(resp.Body)
+	bodyBytes, err := util.ReadResponseBody(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("kimi: failed to read token response: %w", err), false
 	}
@@ -366,7 +365,7 @@ func (c *DeviceFlowClient) RefreshToken(ctx context.Context, refreshToken string
 		}
 	}()
 
-	bodyBytes, err := io.ReadAll(resp.Body)
+	bodyBytes, err := util.ReadResponseBody(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("kimi: failed to read refresh response: %w", err)
 	}

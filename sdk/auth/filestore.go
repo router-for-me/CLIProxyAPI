@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"io/fs"
 	"net/http"
 	"net/url"
@@ -15,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
@@ -367,7 +367,10 @@ func refreshGeminiAccessToken(tokenMap map[string]any, httpClient *http.Client) 
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body, _ := io.ReadAll(resp.Body)
+	body, errRead := util.ReadResponseBody(resp.Body)
+	if errRead != nil {
+		return "", fmt.Errorf("read refresh response: %w", errRead)
+	}
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("refresh failed: status %d", resp.StatusCode)
 	}

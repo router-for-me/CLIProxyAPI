@@ -8,6 +8,8 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 )
 
+var defaultSSEKeepAlive = []byte(": keep-alive\n\n")
+
 type StreamForwardOptions struct {
 	// KeepAliveInterval overrides the configured streaming keep-alive interval.
 	// If nil, the configured default is used. If set to <= 0, keep-alives are disabled.
@@ -46,7 +48,7 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 	writeKeepAlive := opts.WriteKeepAlive
 	if writeKeepAlive == nil {
 		writeKeepAlive = func() {
-			_, _ = c.Writer.Write([]byte(": keep-alive\n\n"))
+			_, _ = c.Writer.Write(defaultSSEKeepAlive)
 		}
 	}
 
@@ -60,6 +62,12 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 		keepAlive = time.NewTicker(keepAliveInterval)
 		defer keepAlive.Stop()
 		keepAliveC = keepAlive.C
+	}
+
+	flushNow := func() {
+		if flusher != nil {
+			flusher.Flush()
+		}
 	}
 
 	var terminalErr *interfaces.ErrorMessage
@@ -84,19 +92,19 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 					if opts.WriteTerminalError != nil {
 						opts.WriteTerminalError(terminalErr)
 					}
-					flusher.Flush()
+					flushNow()
 					cancel(terminalErr.Error)
 					return
 				}
 				if opts.WriteDone != nil {
 					opts.WriteDone()
 				}
-				flusher.Flush()
+				flushNow()
 				cancel(nil)
 				return
 			}
 			if writeChunk(chunk) {
-				flusher.Flush()
+				flushNow()
 			}
 		case errMsg, ok := <-errs:
 			if !ok {
@@ -107,7 +115,7 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 				terminalErr = errMsg
 				if opts.WriteTerminalError != nil {
 					opts.WriteTerminalError(errMsg)
-					flusher.Flush()
+					flushNow()
 				}
 			}
 			var execErr error
@@ -118,7 +126,7 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 			return
 		case <-keepAliveC:
 			writeKeepAlive()
-			flusher.Flush()
+			flushNow()
 		}
 	}
 }

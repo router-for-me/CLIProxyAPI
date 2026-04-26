@@ -642,7 +642,7 @@ func (e *AntigravityExecutor) attemptCreditsFallback(
 	}
 
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header)
-	bodyBytes, errRead := io.ReadAll(httpResp.Body)
+	bodyBytes, errRead := helps.ReadErrorResponseBody(httpResp.Body)
 	if errClose := httpResp.Body.Close(); errClose != nil {
 		log.Errorf("antigravity executor: close credits fallback response body error: %v", errClose)
 	}
@@ -802,7 +802,7 @@ attemptLoop:
 			}
 
 			helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header)
-			bodyBytes, errRead := io.ReadAll(httpResp.Body)
+			bodyBytes, errRead := helps.ReadNonStreamResponseBody(httpResp.Body)
 			if errClose := httpResp.Body.Close(); errClose != nil {
 				log.Errorf("antigravity executor: close response body error: %v", errClose)
 			}
@@ -844,7 +844,7 @@ attemptLoop:
 						creditsResp, _ := e.attemptCreditsFallback(ctx, auth, httpClient, token, baseModel, translated, false, opts.Alt, baseURL, bodyBytes)
 						if creditsResp != nil {
 							helps.RecordAPIResponseMetadata(ctx, e.cfg, creditsResp.StatusCode, creditsResp.Header)
-							creditsBody, errCreditsRead := io.ReadAll(creditsResp.Body)
+							creditsBody, errCreditsRead := helps.ReadNonStreamResponseBody(creditsResp.Body)
 							if errClose := creditsResp.Body.Close(); errClose != nil {
 								log.Errorf("antigravity executor: close credits success response body error: %v", errClose)
 							}
@@ -1027,7 +1027,7 @@ attemptLoop:
 			}
 			helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header)
 			if httpResp.StatusCode < http.StatusOK || httpResp.StatusCode >= http.StatusMultipleChoices {
-				bodyBytes, errRead := io.ReadAll(httpResp.Body)
+				bodyBytes, errRead := helps.ReadErrorResponseBody(httpResp.Body)
 				if errClose := httpResp.Body.Close(); errClose != nil {
 					log.Errorf("antigravity executor: close response body error: %v", errClose)
 				}
@@ -1500,7 +1500,7 @@ attemptLoop:
 			}
 			helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header)
 			if httpResp.StatusCode < http.StatusOK || httpResp.StatusCode >= http.StatusMultipleChoices {
-				bodyBytes, errRead := io.ReadAll(httpResp.Body)
+				bodyBytes, errRead := helps.ReadErrorResponseBody(httpResp.Body)
 				if errClose := httpResp.Body.Close(); errClose != nil {
 					log.Errorf("antigravity executor: close response body error: %v", errClose)
 				}
@@ -1800,7 +1800,7 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 		}
 
 		helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header)
-		bodyBytes, errRead := io.ReadAll(httpResp.Body)
+		bodyBytes, errRead := helps.ReadNonStreamResponseBody(httpResp.Body)
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("antigravity executor: close response body error: %v", errClose)
 		}
@@ -1963,7 +1963,7 @@ func (e *AntigravityExecutor) refreshToken(ctx context.Context, auth *cliproxyau
 		}
 	}()
 
-	bodyBytes, errRead := io.ReadAll(httpResp.Body)
+	bodyBytes, errRead := helps.ReadNonStreamResponseBody(httpResp.Body)
 	if errRead != nil {
 		return auth, errRead
 	}
@@ -2075,7 +2075,7 @@ func (e *AntigravityExecutor) updateAntigravityCreditsBalance(ctx context.Contex
 		}
 	}()
 
-	bodyBytes, errRead := io.ReadAll(httpResp.Body)
+	bodyBytes, errRead := helps.ReadNonStreamResponseBody(httpResp.Body)
 	if errRead != nil || httpResp.StatusCode < http.StatusOK || httpResp.StatusCode >= http.StatusMultipleChoices {
 		log.Debugf("antigravity executor: loadCodeAssist returned status %d, err=%v", httpResp.StatusCode, errRead)
 		return

@@ -49,6 +49,12 @@ type ExecutionSessionCloser interface {
 	CloseExecutionSession(sessionID string)
 }
 
+// ExecutionSessionResetter allows executors to invalidate per-session runtime
+// state so future requests establish a fresh upstream session.
+type ExecutionSessionResetter interface {
+	ResetExecutionSession(sessionID string)
+}
+
 const (
 	// CloseAllExecutionSessionsID asks an executor to release all active execution sessions.
 	// Executors that do not support this marker may ignore it.
@@ -2771,6 +2777,28 @@ func (m *Manager) CloseExecutionSession(sessionID string) {
 	for i := range executors {
 		if closer, ok := executors[i].(ExecutionSessionCloser); ok && closer != nil {
 			closer.CloseExecutionSession(sessionID)
+		}
+	}
+}
+
+// ResetExecutionSession asks all registered executors to invalidate the
+// supplied execution session so the next request starts fresh.
+func (m *Manager) ResetExecutionSession(sessionID string) {
+	sessionID = strings.TrimSpace(sessionID)
+	if m == nil || sessionID == "" {
+		return
+	}
+
+	m.mu.RLock()
+	executors := make([]ProviderExecutor, 0, len(m.executors))
+	for _, exec := range m.executors {
+		executors = append(executors, exec)
+	}
+	m.mu.RUnlock()
+
+	for i := range executors {
+		if resetter, ok := executors[i].(ExecutionSessionResetter); ok && resetter != nil {
+			resetter.ResetExecutionSession(sessionID)
 		}
 	}
 }

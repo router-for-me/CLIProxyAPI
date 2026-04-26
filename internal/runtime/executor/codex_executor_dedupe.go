@@ -24,6 +24,7 @@ import (
 const codexResponseDedupeHashLen = 16
 
 const codexResponsesAggregateIdleTimeout = 10 * time.Minute
+const codexAggregateCapturedBodyMaxBytes = helps.MaxNonStreamResponseBodyBytes
 
 var codexDedupeIgnoredHeaders = map[string]struct{}{
 	"Authorization":                         {},
@@ -40,6 +41,11 @@ type codexPreparedRequest struct {
 	promptCacheID string
 }
 
+type codexPromptCacheResolution struct {
+	cache            helps.CodexCache
+	headerEligibleID string
+}
+
 type codexNonStreamHTTPResult struct {
 	statusCode    int
 	headers       http.Header
@@ -49,10 +55,12 @@ type codexNonStreamHTTPResult struct {
 	errorBody     []byte
 }
 
-func (e *CodexExecutor) prepareCodexRequest(ctx context.Context, from sdktranslator.Format, url string, req cliproxyexecutor.Request, rawJSON []byte) (codexPreparedRequest, error) {
-	cache := e.resolvePromptCache(ctx, from, req)
+func (e *CodexExecutor) prepareCodexRequest(ctx context.Context, from sdktranslator.Format, executionSessionID string, url string, req cliproxyexecutor.Request, rawJSON []byte) (codexPreparedRequest, error) {
+	resolution := e.resolvePromptCacheResolution(ctx, from, executionSessionID, req)
+	cache := resolution.cache
 	body := rawJSON
-	if cache.ID != "" {
+	isCompact := strings.HasSuffix(strings.TrimSuffix(url, "/"), "/responses/compact")
+	if cache.ID != "" && !isCompact {
 		body = bytes.Clone(rawJSON)
 		body, _ = helps.SetJSONBytes(body, "prompt_cache_key", cache.ID)
 	}
@@ -61,12 +69,13 @@ func (e *CodexExecutor) prepareCodexRequest(ctx context.Context, from sdktransla
 	if err != nil {
 		return codexPreparedRequest{}, err
 	}
-	if cache.ID != "" {
-		httpReq.Header.Set("Session_id", cache.ID)
+	if cache.ID != "" && (!isCompact || resolution.headerEligibleID != "") {
+		sessionHeaderValue := cache.ID
+		if resolution.headerEligibleID != "" {
+			sessionHeaderValue = resolution.headerEligibleID
+		}
+		httpReq.Header.Set(codexHeaderSessionID, sessionHeaderValue)
 	}
-	// Injection of sticky turn-state / turn-metadata happens later in
-	// applyCodexHeaders, which has access to the authenticated identity
-	// required to build the logical-session key.
 	return codexPreparedRequest{
 		httpReq:       httpReq,
 		body:          body,
@@ -78,8 +87,7 @@ func (e *CodexExecutor) prepareCodexRequest(ctx context.Context, from sdktransla
 //
 // Goals:
 //  1. Keep requests belonging to the same logical conversation locked to a
-//     single, stable key so upstream prompt caches and our sticky-session
-//     state (turn-state / turn-metadata) actually get reused.
+//     single, stable key so upstream prompt caches actually get reused.
 //  2. Keep unrelated conversations from the same API key *separated* so the
 //     proxy doesn't accidentally stitch independent threads together (which
 //     confuses both upstream cache and any server-side routing).
@@ -91,14 +99,26 @@ func (e *CodexExecutor) prepareCodexRequest(ctx context.Context, from sdktransla
 // conversation_id as prompt_cache_key — with additional fallbacks that mine
 // conversation-scoped fields out of common client payloads.
 func (e *CodexExecutor) resolvePromptCache(ctx context.Context, from sdktranslator.Format, req cliproxyexecutor.Request) helps.CodexCache {
+	return e.resolvePromptCacheResolution(ctx, from, "", req).cache
+}
+
+func (e *CodexExecutor) resolvePromptCacheResolution(ctx context.Context, from sdktranslator.Format, executionSessionID string, req cliproxyexecutor.Request) codexPromptCacheResolution {
 	// Path 1: the caller already supplied a prompt_cache_key. Trust it; this
 	// is the codex-rs native path (prompt_cache_key == conversation_id).
 	if key := strings.TrimSpace(gjson.GetBytes(req.Payload, "prompt_cache_key").String()); key != "" {
-		return helps.CodexCache{ID: key}
+		return codexPromptCacheResolution{
+			cache:            helps.CodexCache{ID: key},
+			headerEligibleID: key,
+		}
 	}
 	if key := strings.TrimSpace(gjson.GetBytes(req.Payload, "metadata.prompt_cache_key").String()); key != "" {
-		return helps.CodexCache{ID: key}
+		return codexPromptCacheResolution{
+			cache:            helps.CodexCache{ID: key},
+			headerEligibleID: key,
+		}
 	}
+
+	scope := codexPromptCacheScope(ctx)
 
 	// Path 2: Claude path retains legacy behaviour (model + user_id) so
 	// existing deployments keep warming the same cache entry. We only fall
@@ -106,35 +126,75 @@ func (e *CodexExecutor) resolvePromptCache(ctx context.Context, from sdktranslat
 	if from == "claude" {
 		if userID := strings.TrimSpace(gjson.GetBytes(req.Payload, "metadata.user_id").String()); userID != "" {
 			key := fmt.Sprintf("%s-%s", req.Model, userID)
-			return loadOrCreateCodexCache(key)
+			return codexPromptCacheResolution{cache: loadOrCreateCodexCache(key)}
 		}
 	}
 
-	// Path 3/4: derive a conversation fingerprint from whatever
-	// conversation-scoped fields the caller happened to include. The
-	// fingerprint goes through codexCacheStore, so repeated requests with the
-	// same fingerprint map to the same stable UUID even after translator
-	// re-renders the payload.
-	if fp := conversationFingerprint(req); fp != "" {
-		scope := codexPromptCacheScope(ctx)
-		key := "fp:" + scope + ":" + req.Model + ":" + fp
-		return loadOrCreateCodexCache(key)
+	if cached, ok := globalCodexPromptResolutionMemo.get(from, req.Model, scope, executionSessionID, req.Payload); ok {
+		return cached
 	}
 
-	// Path 5 (fallback): api_key-level stable UUID. This is strictly less
-	// precise than a real conversation id but preserves backwards-compatible
-	// behaviour for callers that send neither prompt_cache_key nor any
-	// identifiable content (e.g. the upstream smoke tests that post just
-	// {"model": "..."}).
-	if from == "openai" {
-		if apiKey := strings.TrimSpace(helps.APIKeyFromContext(ctx)); apiKey != "" {
-			return helps.CodexCache{
-				ID: uuid.NewSHA1(uuid.NameSpaceOID, []byte("cli-proxy-api:codex:prompt-cache:"+apiKey)).String(),
+	flightKey := promptResolutionMemoInflightKey(from, req.Model, scope, executionSessionID, req.Payload)
+	resolution, _, _, err := globalCodexPromptResolutionGroup.Do(context.Background(), flightKey, func() (codexPromptCacheResolution, error) {
+		if cached, ok := globalCodexPromptResolutionMemo.get(from, req.Model, scope, executionSessionID, req.Payload); ok {
+			return cached, nil
+		}
+		resolution := codexPromptCacheResolution{}
+		// Path 3/4: derive a conversation fingerprint from whatever
+		// conversation-scoped fields the caller happened to include. The
+		// fingerprint goes through codexCacheStore, so repeated requests with the
+		// same fingerprint map to the same stable UUID even after translator
+		// re-renders the payload.
+		if fp := conversationIdentifierFingerprint(req); fp != "" {
+			key := "fp:" + scope + ":" + req.Model + ":" + fp
+			cache := loadOrCreateCodexCache(key)
+			resolution = codexPromptCacheResolution{
+				cache:            cache,
+				headerEligibleID: cache.ID,
+			}
+			globalCodexPromptResolutionMemo.set(from, req.Model, scope, executionSessionID, req.Payload, resolution)
+			return resolution, nil
+		}
+		if executionSessionID = strings.TrimSpace(executionSessionID); executionSessionID != "" {
+			cache := loadOrCreateCodexCache("exec:" + scope + ":" + req.Model + ":" + executionSessionID)
+			resolution = codexPromptCacheResolution{
+				cache:            cache,
+				headerEligibleID: executionSessionID,
+			}
+			globalCodexPromptResolutionMemo.set(from, req.Model, scope, executionSessionID, req.Payload, resolution)
+			return resolution, nil
+		}
+		if fp := conversationContentFingerprint(req); fp != "" {
+			key := "fp:" + scope + ":" + req.Model + ":" + fp
+			resolution = codexPromptCacheResolution{cache: loadOrCreateCodexCache(key)}
+			globalCodexPromptResolutionMemo.set(from, req.Model, scope, executionSessionID, req.Payload, resolution)
+			return resolution, nil
+		}
+
+		// Path 6 (fallback): api_key-level stable UUID. This is strictly less
+		// precise than a real conversation id but preserves backwards-compatible
+		// behaviour for callers that send neither prompt_cache_key nor any
+		// identifiable content (e.g. the upstream smoke tests that post just
+		// {"model": "..."}).
+		if from == "openai" {
+			if apiKey := strings.TrimSpace(helps.APIKeyFromContext(ctx)); apiKey != "" {
+				resolution = codexPromptCacheResolution{
+					cache: helps.CodexCache{
+						ID: uuid.NewSHA1(uuid.NameSpaceOID, []byte("cli-proxy-api:codex:prompt-cache:"+apiKey)).String(),
+					},
+				}
+				globalCodexPromptResolutionMemo.set(from, req.Model, scope, executionSessionID, req.Payload, resolution)
+				return resolution, nil
 			}
 		}
-	}
 
-	return helps.CodexCache{}
+		globalCodexPromptResolutionMemo.set(from, req.Model, scope, executionSessionID, req.Payload, resolution)
+		return resolution, nil
+	})
+	if err != nil {
+		return codexPromptCacheResolution{}
+	}
+	return resolution
 }
 
 // conversationFingerprint extracts a conversation-scoped hint out of req.Payload.
@@ -142,7 +202,7 @@ func (e *CodexExecutor) resolvePromptCache(ctx context.Context, from sdktranslat
 // provider schemas (Claude, OpenAI Chat, OpenAI Responses) and each encodes
 // conversation identity differently. Returns an empty string when no stable
 // hint can be found.
-func conversationFingerprint(req cliproxyexecutor.Request) string {
+func conversationIdentifierFingerprint(req cliproxyexecutor.Request) string {
 	payload := req.Payload
 	if len(payload) == 0 {
 		return ""
@@ -169,6 +229,14 @@ func conversationFingerprint(req cliproxyexecutor.Request) string {
 		if v := strings.TrimSpace(gjson.GetBytes(payload, field).String()); v != "" {
 			return "id:" + shortHashString(field+"="+v)
 		}
+	}
+	return ""
+}
+
+func conversationContentFingerprint(req cliproxyexecutor.Request) string {
+	payload := req.Payload
+	if len(payload) == 0 {
+		return ""
 	}
 
 	// Content-derived fingerprint: hash the first user turn. Same first user
@@ -248,7 +316,7 @@ func loadOrCreateCodexCache(key string) helps.CodexCache {
 }
 
 func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Format, url string, req cliproxyexecutor.Request, rawJSON []byte) (*http.Request, error) {
-	prepared, err := e.prepareCodexRequest(ctx, from, url, req, rawJSON)
+	prepared, err := e.prepareCodexRequest(ctx, from, "", url, req, rawJSON)
 	if err != nil {
 		return nil, err
 	}
@@ -269,7 +337,7 @@ func (e *CodexExecutor) fetchCodexNonStreamResponse(ctx context.Context, auth *c
 			}
 		}()
 
-		data, errRead := io.ReadAll(httpResp.Body)
+		data, errRead := helps.ReadNonStreamResponseBody(httpResp.Body)
 		if errRead != nil {
 			return codexNonStreamHTTPResult{}, errRead
 		}
@@ -426,6 +494,9 @@ func collectCodexResponseAggregateWithIdleTimeout(body io.Reader, captureBody bo
 	}
 	err := helps.ReadStreamLines(body, func(line []byte) error {
 		if captureBody {
+			if int64(len(result.body)+len(line)+1) > codexAggregateCapturedBodyMaxBytes {
+				return fmt.Errorf("%w: limit=%d", helps.ErrResponseBodyTooLarge, codexAggregateCapturedBodyMaxBytes)
+			}
 			result.body = append(result.body, line...)
 			result.body = append(result.body, '\n')
 		}

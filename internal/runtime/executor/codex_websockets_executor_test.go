@@ -20,6 +20,7 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	"github.com/tidwall/gjson"
 )
 
@@ -115,6 +116,12 @@ func TestPrepareCodexWebsocketRequestBuildsSharedRequestState(t *testing.T) {
 	if got := prepared.executionSessionID; got != "session-1" {
 		t.Fatalf("executionSessionID = %q, want %q", got, "session-1")
 	}
+	if got := prepared.wsHeaders.Get(codexHeaderSessionID); got != "session-1" {
+		t.Fatalf("%s = %q, want %q", codexHeaderSessionID, got, "session-1")
+	}
+	if got := prepared.wsHeaders.Get(codexHeaderWindowID); got != "session-1:0" {
+		t.Fatalf("%s = %q, want %q", codexHeaderWindowID, got, "session-1:0")
+	}
 	if prepared.sess == nil || prepared.sess.sessionID != "session-1" {
 		t.Fatalf("session = %#v, want session-1", prepared.sess)
 	}
@@ -165,6 +172,194 @@ func TestPrepareCodexWebsocketRequestBuildsReusableKeyForPromptCache(t *testing.
 	}
 	if prepared.sess.reuseKey != wantReuseKey {
 		t.Fatalf("session reuseKey = %q, want %q", prepared.sess.reuseKey, wantReuseKey)
+	}
+}
+
+func TestPrepareCodexWebsocketRequestDerivesPromptCacheForOpenAIChat(t *testing.T) {
+	executor := NewCodexWebsocketsExecutor(nil)
+	executor.store = &codexWebsocketSessionStore{
+		sessions: make(map[string]*codexWebsocketSession),
+		parked:   make(map[string]*codexWebsocketSession),
+	}
+
+	auth := &cliproxyauth.Auth{
+		ID:       "auth-1",
+		Provider: "codex",
+	}
+	payload := []byte(`{"model":"gpt-5-codex","metadata":{"conversation_id":"conv-42"},"messages":[{"role":"user","content":"hello"}]}`)
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5-codex",
+		Payload: payload,
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat: "openai",
+		Metadata: map[string]any{
+			cliproxyexecutor.ExecutionSessionMetadataKey: "session-1",
+		},
+	}
+
+	prepared, err := executor.prepareCodexWebsocketRequest(
+		ctxWithAPIKey(t, "api-key-1"),
+		auth,
+		req,
+		opts,
+		[]byte(`{"model":"gpt-5-codex","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}]}`),
+		"oauth-token",
+		"https://chatgpt.com/backend-api/codex/responses",
+	)
+	if err != nil {
+		t.Fatalf("prepareCodexWebsocketRequest() error = %v", err)
+	}
+	defer prepared.unlockSession()
+
+	promptCacheKey := gjson.GetBytes(prepared.wsReqBody, "prompt_cache_key").String()
+	if promptCacheKey == "" {
+		t.Fatalf("prompt_cache_key should be derived for OpenAI chat websocket request: %s", string(prepared.wsReqBody))
+	}
+	if got := prepared.wsHeaders.Get("Session_id"); got != promptCacheKey {
+		t.Fatalf("Session_id = %q, want prompt_cache_key %q", got, promptCacheKey)
+	}
+	if !strings.Contains(prepared.reuseKey, "|"+promptCacheKey) {
+		t.Fatalf("reuseKey = %q, want to include prompt_cache_key %q", prepared.reuseKey, promptCacheKey)
+	}
+}
+
+func TestPrepareCodexWebsocketRequestNormalizesFinalUpstreamBody(t *testing.T) {
+	executor := NewCodexWebsocketsExecutor(nil)
+	executor.store = &codexWebsocketSessionStore{
+		sessions: make(map[string]*codexWebsocketSession),
+		parked:   make(map[string]*codexWebsocketSession),
+	}
+
+	auth := &cliproxyauth.Auth{
+		ID:       "auth-1",
+		Provider: "codex",
+	}
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5-codex",
+		Payload: []byte(`{"input":"hello","store":true}`),
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat: "openai-response",
+	}
+
+	prepared, err := executor.prepareCodexWebsocketRequest(
+		context.Background(),
+		auth,
+		req,
+		opts,
+		[]byte(`{
+			"model":"wrong-model",
+			"input":"hello",
+			"store":true,
+			"stream":false,
+			"stream_options":{"include_usage":true},
+			"temperature":0.2,
+			"context_management":{"compaction":"auto"},
+			"previous_response_id":"resp_1"
+		}`),
+		"oauth-token",
+		"https://chatgpt.com/backend-api/codex/responses",
+	)
+	if err != nil {
+		t.Fatalf("prepareCodexWebsocketRequest() error = %v", err)
+	}
+	defer prepared.unlockSession()
+
+	body := prepared.body
+	if got := gjson.GetBytes(body, "model").String(); got != "gpt-5-codex" {
+		t.Fatalf("model = %q, want %q", got, "gpt-5-codex")
+	}
+	if got := gjson.GetBytes(body, "store").Bool(); got {
+		t.Fatalf("store = true, want false; body=%s", body)
+	}
+	if got := gjson.GetBytes(body, "stream").Bool(); !got {
+		t.Fatalf("stream = false, want true; body=%s", body)
+	}
+	if got := gjson.GetBytes(body, "previous_response_id").String(); got != "resp_1" {
+		t.Fatalf("previous_response_id = %q, want %q; body=%s", got, "resp_1", body)
+	}
+	for _, field := range []string{"stream_options", "temperature", "context_management"} {
+		if gjson.GetBytes(body, field).Exists() {
+			t.Fatalf("%s should be removed from final websocket body: %s", field, body)
+		}
+	}
+	if gjson.GetBytes(body, "instructions").Exists() {
+		t.Fatalf("instructions should be omitted when empty: %s", body)
+	}
+	if got := gjson.GetBytes(body, "tools").IsArray(); !got {
+		t.Fatalf("tools should default to an empty array: %s", body)
+	}
+	if got := gjson.GetBytes(body, "tools.#").Int(); got != 0 {
+		t.Fatalf("tools length = %d, want 0; body=%s", got, body)
+	}
+	if got := gjson.GetBytes(body, "tool_choice").String(); got != "auto" {
+		t.Fatalf("tool_choice = %q, want %q; body=%s", got, "auto", body)
+	}
+	if got := gjson.GetBytes(body, "parallel_tool_calls").Bool(); !got {
+		t.Fatalf("parallel_tool_calls = false, want true; body=%s", body)
+	}
+	if got := gjson.GetBytes(body, "include").IsArray(); !got {
+		t.Fatalf("include should default to an empty array: %s", body)
+	}
+	if got := gjson.GetBytes(prepared.wsReqBody, "store").Bool(); got {
+		t.Fatalf("websocket request body store = true, want false; wsReqBody=%s", prepared.wsReqBody)
+	}
+	if got := gjson.GetBytes(prepared.wsReqBody, "previous_response_id").String(); got != "resp_1" {
+		t.Fatalf("wsReqBody previous_response_id = %q, want %q", got, "resp_1")
+	}
+}
+
+func TestPrepareCodexWebsocketRequestStripsUnsupportedFinalUpstreamFields(t *testing.T) {
+	executor := NewCodexWebsocketsExecutor(nil)
+	executor.store = &codexWebsocketSessionStore{
+		sessions: make(map[string]*codexWebsocketSession),
+		parked:   make(map[string]*codexWebsocketSession),
+	}
+
+	auth := &cliproxyauth.Auth{
+		ID:       "auth-1",
+		Provider: "codex",
+	}
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5-codex",
+		Payload: []byte(`{"model":"gpt-5-codex","messages":[{"role":"user","content":"hello"}]}`),
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat: "openai",
+	}
+
+	prepared, err := executor.prepareCodexWebsocketRequest(
+		context.Background(),
+		auth,
+		req,
+		opts,
+		[]byte(`{
+			"model":"gpt-5-codex",
+			"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}],
+			"messages":[{"role":"user","content":"hello"}],
+			"metadata":{"conversation_id":"conv-1"},
+			"response_format":{"type":"json_schema"},
+			"functions":[{"name":"legacy_func"}],
+			"trace":{"traceparent":"00-test"}
+		}`),
+		"oauth-token",
+		"https://chatgpt.com/backend-api/codex/responses",
+	)
+	if err != nil {
+		t.Fatalf("prepareCodexWebsocketRequest() error = %v", err)
+	}
+	defer prepared.unlockSession()
+
+	for _, payload := range [][]byte{prepared.body, prepared.wsReqBody} {
+		for _, field := range []string{"messages", "metadata", "response_format", "functions", "trace"} {
+			if gjson.GetBytes(payload, field).Exists() {
+				t.Fatalf("%s should not reach websocket Codex upstream payload: %s", field, payload)
+			}
+		}
+		if got := gjson.GetBytes(payload, "input.0.content.0.text").String(); got != "hello" {
+			t.Fatalf("input.0.content.0.text = %q, want %q; payload=%s", got, "hello", payload)
+		}
 	}
 }
 
@@ -578,6 +773,88 @@ func TestApplyCodexHeadersDoesNotInjectClientOnlyHeadersByDefault(t *testing.T) 
 	}
 }
 
+func TestApplyCodexHeadersCompactKeepsHeadersLeanByDefault(t *testing.T) {
+	req, err := http.NewRequest(http.MethodPost, "https://example.com/responses/compact", nil)
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+
+	applyCodexHeaders(req, nil, "oauth-token", false, nil)
+
+	if got := req.Header.Get("User-Agent"); got != misc.CodexCLIUserAgent {
+		t.Fatalf("User-Agent = %q, want %q", got, misc.CodexCLIUserAgent)
+	}
+	if got := req.Header.Get("Originator"); got != codexOriginator {
+		t.Fatalf("Originator = %q, want %q", got, codexOriginator)
+	}
+	if got := req.Header.Get("Version"); got != buildinfo.Version {
+		t.Fatalf("Version = %q, want %q", got, buildinfo.Version)
+	}
+	if got := req.Header.Get(codexHeaderSessionID); got == "" {
+		t.Fatal("Session_id should be generated for compact requests")
+	}
+	if got := req.Header.Get("X-Client-Request-Id"); got != "" {
+		t.Fatalf("X-Client-Request-Id = %q, want empty", got)
+	}
+	if got := req.Header.Get(codexHeaderTurnMetadata); got != "" {
+		t.Fatalf("%s = %q, want empty", codexHeaderTurnMetadata, got)
+	}
+	if got := req.Header.Get(codexHeaderTurnState); got != "" {
+		t.Fatalf("%s = %q, want empty", codexHeaderTurnState, got)
+	}
+}
+
+func TestApplyCodexHeadersCompactPreservesExplicitTurnHeaders(t *testing.T) {
+	req, err := http.NewRequest(http.MethodPost, "https://example.com/responses/compact", nil)
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	req = req.WithContext(contextWithGinHeaders(map[string]string{
+		"X-Codex-Turn-Metadata": `{"turn_id":"turn-1"}`,
+		"X-Codex-Turn-State":    "turn-state-1",
+		"X-Client-Request-Id":   "request-1",
+	}))
+
+	applyCodexHeaders(req, nil, "oauth-token", false, nil)
+
+	if got := req.Header.Get(codexHeaderTurnMetadata); got != `{"turn_id":"turn-1"}` {
+		t.Fatalf("%s = %q, want explicit value", codexHeaderTurnMetadata, got)
+	}
+	if got := req.Header.Get(codexHeaderTurnState); got != "turn-state-1" {
+		t.Fatalf("%s = %q, want explicit value", codexHeaderTurnState, got)
+	}
+	if got := req.Header.Get("X-Client-Request-Id"); got != "request-1" {
+		t.Fatalf("X-Client-Request-Id = %q, want explicit value", got)
+	}
+}
+
+func TestApplyCodexHeadersUsesTurnMetadataSessionIDWhenMissing(t *testing.T) {
+	resetCodexWindowStateStore()
+
+	req, err := http.NewRequest(http.MethodPost, "https://example.com/responses", nil)
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	req = req.WithContext(contextWithGinHeaders(map[string]string{
+		codexHeaderTurnMetadata: `{"session_id":"turn-session-1","turn_id":"turn-1","sandbox":"none"}`,
+	}))
+
+	applyCodexHeaders(req, nil, "oauth-token", true, nil)
+
+	if got := req.Header.Get(codexHeaderSessionID); got != "turn-session-1" {
+		t.Fatalf("%s = %q, want %q", codexHeaderSessionID, got, "turn-session-1")
+	}
+	if got := req.Header.Get("X-Client-Request-Id"); got != "turn-session-1" {
+		t.Fatalf("X-Client-Request-Id = %q, want %q", got, "turn-session-1")
+	}
+	if got := req.Header.Get(codexHeaderWindowID); got != "turn-session-1:0" {
+		t.Fatalf("%s = %q, want %q", codexHeaderWindowID, got, "turn-session-1:0")
+	}
+	if got := req.Header.Get(codexHeaderTurnMetadata); got != `{"session_id":"turn-session-1","turn_id":"turn-1","sandbox":"none"}` {
+		t.Fatalf("%s = %q, want explicit value", codexHeaderTurnMetadata, got)
+	}
+}
+
 func TestEnsureUpstreamConnRedialsRecentlyActiveBrokenConnection(t *testing.T) {
 	var (
 		upgrader    = websocket.Upgrader{}
@@ -733,6 +1010,296 @@ func TestCloseExecutionSessionParksReusableSessionAndReattaches(t *testing.T) {
 	executor.closeAllExecutionSessions("test_cleanup")
 }
 
+func TestResetExecutionSessionClosesReusableSessionWithoutParking(t *testing.T) {
+	oldTTL := codexResponsesWebsocketParkTTL
+	codexResponsesWebsocketParkTTL = 5 * time.Second
+	defer func() {
+		codexResponsesWebsocketParkTTL = oldTTL
+	}()
+
+	var (
+		upgrader    = websocket.Upgrader{}
+		accepted    atomic.Int32
+		serverMu    sync.Mutex
+		serverConns []*websocket.Conn
+	)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("Upgrade() error = %v", err)
+			return
+		}
+		accepted.Add(1)
+		serverMu.Lock()
+		serverConns = append(serverConns, conn)
+		serverMu.Unlock()
+	}))
+	defer server.Close()
+	defer func() {
+		serverMu.Lock()
+		defer serverMu.Unlock()
+		for _, conn := range serverConns {
+			if conn != nil {
+				_ = conn.Close()
+			}
+		}
+	}()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("Dial() error = %v", err)
+	}
+
+	store := &codexWebsocketSessionStore{
+		sessions: make(map[string]*codexWebsocketSession),
+		parked:   make(map[string]*codexWebsocketSession),
+	}
+	executor := NewCodexWebsocketsExecutor(nil)
+	executor.store = store
+
+	reuseKey := "auth-1|" + wsURL + "|cache-1"
+	sess1 := executor.getOrCreateSession("exec-1", reuseKey)
+	if sess1 == nil {
+		t.Fatal("expected session to be created")
+	}
+	sess1.conn = conn
+	sess1.readerConn = conn
+	sess1.wsURL = wsURL
+	sess1.authID = "auth-1"
+	sess1.touchActivity()
+
+	executor.ResetExecutionSession("exec-1")
+
+	store.mu.Lock()
+	_, active := store.sessions["exec-1"]
+	parked := store.parked[reuseKey]
+	store.mu.Unlock()
+	if active {
+		t.Fatal("expected active session to be removed after reset")
+	}
+	if parked != nil {
+		t.Fatal("expected reset session not to be parked")
+	}
+
+	sess2 := executor.getOrCreateSession("exec-2", reuseKey)
+	if sess2 == sess1 {
+		t.Fatal("expected reset to force a fresh session")
+	}
+
+	reconnected, _, err := executor.ensureUpstreamConn(context.Background(), nil, sess2, "auth-1", wsURL, http.Header{})
+	if err != nil {
+		t.Fatalf("ensureUpstreamConn() error = %v", err)
+	}
+	if reconnected == conn {
+		t.Fatal("expected reset session to dial a fresh upstream conn")
+	}
+	if got := accepted.Load(); got != 2 {
+		t.Fatalf("accepted connections = %d, want 2", got)
+	}
+
+	executor.closeAllExecutionSessions("test_cleanup")
+}
+
+func TestCodexWebsocketsExecuteStreamTranslatesAndNormalizesOpenAIResponsesRequest(t *testing.T) {
+	var (
+		upgrader = websocket.Upgrader{}
+		received = make(chan []byte, 1)
+	)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/responses" {
+			http.NotFound(w, r)
+			return
+		}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("Upgrade() error = %v", err)
+			return
+		}
+		defer func() { _ = conn.Close() }()
+
+		_, payload, err := conn.ReadMessage()
+		if err != nil {
+			t.Errorf("ReadMessage() error = %v", err)
+			return
+		}
+		received <- append([]byte(nil), payload...)
+
+		if err := conn.WriteJSON(map[string]any{
+			"type": "response.completed",
+			"response": map[string]any{
+				"id":     "resp_1",
+				"object": "response",
+				"status": "completed",
+				"output": []any{},
+				"usage": map[string]any{
+					"input_tokens":  1,
+					"output_tokens": 0,
+					"total_tokens":  1,
+				},
+			},
+		}); err != nil {
+			t.Errorf("WriteJSON() error = %v", err)
+		}
+	}))
+	defer server.Close()
+
+	executor := NewCodexWebsocketsExecutor(nil)
+	auth := &cliproxyauth.Auth{
+		ID:       "auth-1",
+		Provider: "codex",
+		Attributes: map[string]string{
+			"api_key":  "sk-test",
+			"base_url": server.URL,
+		},
+	}
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5.4",
+		Payload: []byte(`{"model":"gpt-5.4","input":"hello","store":true,"stream":true}`),
+	}
+	opts := cliproxyexecutor.Options{
+		Stream:          true,
+		SourceFormat:    sdktranslator.FromString("openai-response"),
+		OriginalRequest: req.Payload,
+	}
+
+	result, err := executor.ExecuteStream(context.Background(), auth, req, opts)
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+
+	requestBody := <-received
+	if got := gjson.GetBytes(requestBody, "type").String(); got != "response.create" {
+		t.Fatalf("websocket type = %q, want response.create; body=%s", got, requestBody)
+	}
+	if got := gjson.GetBytes(requestBody, "store").Bool(); got {
+		t.Fatalf("websocket store = true, want false; body=%s", requestBody)
+	}
+	if got := gjson.GetBytes(requestBody, "stream").Bool(); !got {
+		t.Fatalf("websocket stream = false, want true; body=%s", requestBody)
+	}
+	if got := gjson.GetBytes(requestBody, "input").IsArray(); !got {
+		t.Fatalf("input should be translated to an array; body=%s", requestBody)
+	}
+	if got := gjson.GetBytes(requestBody, "input.0.type").String(); got != "message" {
+		t.Fatalf("input.0.type = %q, want %q; body=%s", got, "message", requestBody)
+	}
+	if got := gjson.GetBytes(requestBody, "input.0.content.0.text").String(); got != "hello" {
+		t.Fatalf("input.0.content.0.text = %q, want %q; body=%s", got, "hello", requestBody)
+	}
+	if gjson.GetBytes(requestBody, "messages").Exists() {
+		t.Fatalf("messages should not be forwarded to websocket upstream: %s", requestBody)
+	}
+
+	for range result.Chunks {
+	}
+}
+
+func TestCodexWebsocketsExecuteStreamTranslatesAndNormalizesOpenAIChatRequest(t *testing.T) {
+	var (
+		upgrader = websocket.Upgrader{}
+		received = make(chan []byte, 1)
+	)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/responses" {
+			http.NotFound(w, r)
+			return
+		}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("Upgrade() error = %v", err)
+			return
+		}
+		defer func() { _ = conn.Close() }()
+
+		_, payload, err := conn.ReadMessage()
+		if err != nil {
+			t.Errorf("ReadMessage() error = %v", err)
+			return
+		}
+		received <- append([]byte(nil), payload...)
+
+		if err := conn.WriteJSON(map[string]any{
+			"type": "response.completed",
+			"response": map[string]any{
+				"id":     "resp_1",
+				"object": "response",
+				"status": "completed",
+				"output": []any{},
+				"usage": map[string]any{
+					"input_tokens":  1,
+					"output_tokens": 0,
+					"total_tokens":  1,
+				},
+			},
+		}); err != nil {
+			t.Errorf("WriteJSON() error = %v", err)
+		}
+	}))
+	defer server.Close()
+
+	executor := NewCodexWebsocketsExecutor(nil)
+	auth := &cliproxyauth.Auth{
+		ID:       "auth-1",
+		Provider: "codex",
+		Attributes: map[string]string{
+			"api_key":  "sk-test",
+			"base_url": server.URL,
+		},
+	}
+	req := cliproxyexecutor.Request{
+		Model: "gpt-5.4",
+		Payload: []byte(`{
+			"model":"gpt-5.4",
+			"messages":[{"role":"user","content":"hello"}],
+			"metadata":{"conversation_id":"conv-1"},
+			"store":true
+		}`),
+	}
+	opts := cliproxyexecutor.Options{
+		Stream:          true,
+		SourceFormat:    sdktranslator.FromString("openai"),
+		OriginalRequest: req.Payload,
+	}
+
+	result, err := executor.ExecuteStream(context.Background(), auth, req, opts)
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+
+	requestBody := <-received
+	if got := gjson.GetBytes(requestBody, "type").String(); got != "response.create" {
+		t.Fatalf("websocket type = %q, want response.create; body=%s", got, requestBody)
+	}
+	if got := gjson.GetBytes(requestBody, "store").Bool(); got {
+		t.Fatalf("websocket store = true, want false; body=%s", requestBody)
+	}
+	if got := gjson.GetBytes(requestBody, "stream").Bool(); !got {
+		t.Fatalf("websocket stream = false, want true; body=%s", requestBody)
+	}
+	if gjson.GetBytes(requestBody, "messages").Exists() {
+		t.Fatalf("messages should not be forwarded to websocket upstream: %s", requestBody)
+	}
+	if gjson.GetBytes(requestBody, "metadata").Exists() {
+		t.Fatalf("metadata should not be forwarded to websocket upstream: %s", requestBody)
+	}
+	if got := gjson.GetBytes(requestBody, "input").IsArray(); !got {
+		t.Fatalf("input should be translated to an array; body=%s", requestBody)
+	}
+	if got := gjson.GetBytes(requestBody, "input.0.type").String(); got != "message" {
+		t.Fatalf("input.0.type = %q, want %q; body=%s", got, "message", requestBody)
+	}
+	if got := gjson.GetBytes(requestBody, "input.0.content.0.text").String(); got != "hello" {
+		t.Fatalf("input.0.content.0.text = %q, want %q; body=%s", got, "hello", requestBody)
+	}
+
+	for range result.Chunks {
+	}
+}
+
 func contextWithGinHeaders(headers map[string]string) context.Context {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()
@@ -760,6 +1327,13 @@ func assertGeneratedCodexTurnMetadata(t *testing.T, raw string) {
 	turnID, _ := metadata["turn_id"].(string)
 	if strings.TrimSpace(turnID) == "" {
 		t.Fatalf("turn_id = %q, want non-empty", turnID)
+	}
+	sessionID, _ := metadata["session_id"].(string)
+	if strings.TrimSpace(sessionID) == "" {
+		t.Fatalf("session_id = %q, want non-empty", sessionID)
+	}
+	if threadSource, _ := metadata["thread_source"].(string); threadSource != codexDefaultThreadSource {
+		t.Fatalf("thread_source = %q, want %q", threadSource, codexDefaultThreadSource)
 	}
 	if sandbox, _ := metadata["sandbox"].(string); sandbox != codexDefaultSandboxTag {
 		t.Fatalf("sandbox = %q, want %q", sandbox, codexDefaultSandboxTag)

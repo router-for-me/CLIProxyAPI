@@ -6,12 +6,15 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/klauspost/compress/zstd"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
 const codexCompressionEnv = "CODEX_ENABLE_ZSTD_REQUEST_COMPRESSION"
+
+var codexZstdEncoderPool sync.Pool
 
 func maybeEnableCodexRequestCompression(req *http.Request, auth *cliproxyauth.Auth) error {
 	return maybeEnableCodexRequestCompressionWithBody(req, auth, nil)
@@ -60,7 +63,7 @@ func maybeEnableCodexRequestCompressionWithBody(req *http.Request, auth *cliprox
 
 func compressCodexRequestBody(body []byte) ([]byte, error) {
 	var compressed bytes.Buffer
-	encoder, err := zstd.NewWriter(&compressed, zstd.WithEncoderLevel(zstd.SpeedFastest))
+	encoder, err := borrowCodexZstdEncoder(&compressed)
 	if err != nil {
 		return nil, err
 	}
@@ -71,7 +74,18 @@ func compressCodexRequestBody(body []byte) ([]byte, error) {
 	if errClose := encoder.Close(); errClose != nil {
 		return nil, errClose
 	}
+	codexZstdEncoderPool.Put(encoder)
 	return compressed.Bytes(), nil
+}
+
+func borrowCodexZstdEncoder(w io.Writer) (*zstd.Encoder, error) {
+	if cached := codexZstdEncoderPool.Get(); cached != nil {
+		if encoder, ok := cached.(*zstd.Encoder); ok && encoder != nil {
+			encoder.Reset(w)
+			return encoder, nil
+		}
+	}
+	return zstd.NewWriter(w, zstd.WithEncoderLevel(zstd.SpeedFastest))
 }
 
 func codexRequestCompressionEnabled() bool {

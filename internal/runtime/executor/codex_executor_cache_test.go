@@ -91,6 +91,61 @@ func assertPromptCacheKey(t *testing.T, executor *CodexExecutor, ctx context.Con
 	return gjson.GetBytes(body, "prompt_cache_key").String()
 }
 
+func assertPreparedSessionID(t *testing.T, executor *CodexExecutor, ctx context.Context, format string, url string, req cliproxyexecutor.Request, rawJSON []byte) string {
+	t.Helper()
+	httpReq, err := executor.cacheHelper(ctx, sdktranslator.FromString(format), url, req, rawJSON)
+	if err != nil {
+		t.Fatalf("cacheHelper error: %v", err)
+	}
+	return httpReq.Header.Get(codexHeaderSessionID)
+}
+
+func TestCodexFinalUpstreamBodyInflightKeyUsesDigest(t *testing.T) {
+	payload := append([]byte(`{"model":"gpt-5","input":"`), bytes.Repeat([]byte("secret-prompt-"), 512)...)
+	payload = append(payload, []byte(`"}`)...)
+	opts := codexFinalUpstreamBodyOptions{
+		requestKind: codexFinalUpstreamResponses,
+		streamMode:  codexStreamFieldTrue,
+	}
+
+	key := codexFinalUpstreamBodyInflightKey("gpt-5", opts, payload)
+	if bytes.Contains([]byte(key), []byte("secret-prompt")) {
+		t.Fatalf("inflight key contains raw payload content")
+	}
+	if len(key) >= len(payload) {
+		t.Fatalf("inflight key length = %d, want smaller than payload length %d", len(key), len(payload))
+	}
+	if keyAgain := codexFinalUpstreamBodyInflightKey("gpt-5", opts, payload); keyAgain != key {
+		t.Fatalf("same payload produced different inflight keys")
+	}
+
+	otherPayload := bytes.Clone(payload)
+	otherPayload[len(otherPayload)-3] = 'x'
+	if otherKey := codexFinalUpstreamBodyInflightKey("gpt-5", opts, otherPayload); otherKey == key {
+		t.Fatalf("different payloads produced same inflight key")
+	}
+
+	otherOpts := opts
+	otherOpts.streamMode = codexStreamFieldDelete
+	if otherKey := codexFinalUpstreamBodyInflightKey("gpt-5", otherOpts, payload); otherKey == key {
+		t.Fatalf("different options produced same inflight key")
+	}
+}
+
+func BenchmarkCodexFinalUpstreamBodyInflightKeyLargePayload(b *testing.B) {
+	payload := append([]byte(`{"model":"gpt-5","input":"`), bytes.Repeat([]byte("large-prompt-"), 4096)...)
+	payload = append(payload, []byte(`"}`)...)
+	opts := codexFinalUpstreamBodyOptions{
+		requestKind: codexFinalUpstreamResponses,
+		streamMode:  codexStreamFieldTrue,
+	}
+
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_ = codexFinalUpstreamBodyInflightKey("gpt-5", opts, payload)
+	}
+}
+
 func TestCodexExecutorCacheHelper_CallerProvidedKeyIsPassedThrough(t *testing.T) {
 	executor := &CodexExecutor{}
 	ctx := ctxWithAPIKey(t, "some-api-key")
@@ -151,6 +206,54 @@ func TestCodexExecutorCacheHelper_ConversationIDFieldPreferredOverContent(t *tes
 	k2 := assertPromptCacheKey(t, executor, ctx, "openai", cliproxyexecutor.Request{Model: "gpt-5", Payload: p2}, p2)
 	if k1 == "" || k1 != k2 {
 		t.Fatalf("explicit conversation_id must win: got %q vs %q", k1, k2)
+	}
+}
+
+func TestCodexExecutorCacheHelper_CompactUsesCallerProvidedPromptCacheKeyAsSessionID(t *testing.T) {
+	executor := &CodexExecutor{}
+	ctx := ctxWithAPIKey(t, "api-key-compact")
+
+	payload := []byte(`{"model":"gpt-5","prompt_cache_key":"caller-owned-id","input":"hello"}`)
+	req := cliproxyexecutor.Request{Model: "gpt-5", Payload: payload}
+
+	got := assertPreparedSessionID(t, executor, ctx, "openai-response", "https://example.com/responses/compact", req, payload)
+	if got != "caller-owned-id" {
+		t.Fatalf("Session_id = %q, want %q", got, "caller-owned-id")
+	}
+}
+
+func TestCodexExecutorCacheHelper_CompactUsesExplicitConversationHintSessionID(t *testing.T) {
+	executor := &CodexExecutor{}
+	ctx := ctxWithAPIKey(t, "api-key-compact")
+
+	payload := []byte(`{"model":"gpt-5","metadata":{"conversation_id":"conv-42"},"input":"hello"}`)
+	req := cliproxyexecutor.Request{Model: "gpt-5", Payload: payload}
+
+	expected := assertPromptCacheKey(t, executor, ctx, "openai-response", req, payload)
+	got := assertPreparedSessionID(t, executor, ctx, "openai-response", "https://example.com/responses/compact", req, payload)
+	if got != expected {
+		t.Fatalf("Session_id = %q, want prompt-cache-derived id %q", got, expected)
+	}
+}
+
+func TestCodexExecutorCacheHelper_ExecutionSessionMetadataShortCircuitsPayloadFingerprinting(t *testing.T) {
+	executor := &CodexExecutor{}
+	ctx := ctxWithAPIKey(t, "api-key-exec-session")
+
+	payload := []byte(`{"model":"gpt-5","messages":[{"role":"user","content":"hello"}]}`)
+	req := cliproxyexecutor.Request{Model: "gpt-5", Payload: payload}
+
+	resolutionA := executor.resolvePromptCacheResolution(ctx, "openai", "exec-session-1", req)
+	resolutionB := executor.resolvePromptCacheResolution(ctx, "openai", "exec-session-1", req)
+	resolutionC := executor.resolvePromptCacheResolution(ctx, "openai", "exec-session-2", req)
+	if resolutionA.cache.ID == "" {
+		t.Fatal("expected execution session resolution to produce a prompt cache id")
+	}
+	if resolutionA.cache.ID != resolutionB.cache.ID {
+		t.Fatalf("same execution session should reuse cache id: %q vs %q", resolutionA.cache.ID, resolutionB.cache.ID)
+	}
+	if resolutionA.cache.ID == resolutionC.cache.ID {
+		t.Fatalf("different execution sessions must not share cache id: %q", resolutionA.cache.ID)
 	}
 }
 
@@ -227,6 +330,7 @@ func TestPrepareCodexHTTPCallAppliesHeadersAndPreservesLogBody(t *testing.T) {
 		context.Background(),
 		auth,
 		sdktranslator.FromString("openai-response"),
+		"",
 		"https://example.com/responses",
 		req,
 		rawJSON,
@@ -257,5 +361,118 @@ func TestPrepareCodexHTTPCallAppliesHeadersAndPreservesLogBody(t *testing.T) {
 	}
 	if got := call.requestLog.Headers.Get("Content-Encoding"); got != "zstd" {
 		t.Fatalf("requestLog.Headers[Content-Encoding] = %q, want %q", got, "zstd")
+	}
+}
+
+func TestPrepareCodexHTTPCallNormalizesFinalUpstreamBody(t *testing.T) {
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "codex",
+	}
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5.4",
+		Payload: []byte(`{"model":"gpt-5.4","input":"hello","store":true}`),
+	}
+	rawJSON := []byte(`{
+		"model":"wrong-model",
+		"input":"hello",
+		"store":true,
+		"stream":false,
+		"stream_options":{"include_usage":true},
+		"temperature":0.2,
+		"context_management":{"compaction":"auto"},
+		"previous_response_id":"resp_1"
+	}`)
+
+	call, err := executor.prepareCodexHTTPCall(
+		context.Background(),
+		auth,
+		sdktranslator.FromString("openai-response"),
+		"",
+		"https://example.com/responses",
+		req,
+		rawJSON,
+		"oauth-token",
+		true,
+	)
+	if err != nil {
+		t.Fatalf("prepareCodexHTTPCall() error = %v", err)
+	}
+
+	body := call.prepared.body
+	if got := gjson.GetBytes(body, "model").String(); got != "gpt-5.4" {
+		t.Fatalf("model = %q, want %q", got, "gpt-5.4")
+	}
+	if got := gjson.GetBytes(body, "store").Bool(); got {
+		t.Fatalf("store = true, want false; body=%s", body)
+	}
+	if got := gjson.GetBytes(body, "stream").Bool(); !got {
+		t.Fatalf("stream = false, want true; body=%s", body)
+	}
+	for _, field := range []string{"stream_options", "temperature", "context_management", "previous_response_id"} {
+		if gjson.GetBytes(body, field).Exists() {
+			t.Fatalf("%s should be removed from final upstream body: %s", field, body)
+		}
+	}
+	if gjson.GetBytes(body, "instructions").Exists() {
+		t.Fatalf("instructions should be omitted when empty: %s", body)
+	}
+	if got := gjson.GetBytes(body, "tools").IsArray(); !got {
+		t.Fatalf("tools should default to an empty array: %s", body)
+	}
+	if got := gjson.GetBytes(body, "tools.#").Int(); got != 0 {
+		t.Fatalf("tools length = %d, want 0; body=%s", got, body)
+	}
+	if got := gjson.GetBytes(body, "tool_choice").String(); got != "auto" {
+		t.Fatalf("tool_choice = %q, want %q; body=%s", got, "auto", body)
+	}
+	if got := gjson.GetBytes(body, "parallel_tool_calls").Bool(); !got {
+		t.Fatalf("parallel_tool_calls = false, want true; body=%s", body)
+	}
+	if got := gjson.GetBytes(body, "include").IsArray(); !got {
+		t.Fatalf("include should default to an empty array: %s", body)
+	}
+}
+
+func TestPrepareCodexHTTPCallStripsUnsupportedFinalUpstreamFields(t *testing.T) {
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Provider: "codex"}
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5.4",
+		Payload: []byte(`{"model":"gpt-5.4","messages":[{"role":"user","content":"hello"}]}`),
+	}
+	rawJSON := []byte(`{
+		"model":"gpt-5.4",
+		"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}],
+		"messages":[{"role":"user","content":"hello"}],
+		"metadata":{"conversation_id":"conv-1"},
+		"response_format":{"type":"json_schema"},
+		"functions":[{"name":"legacy_func"}],
+		"trace":{"traceparent":"00-test"}
+	}`)
+
+	call, err := executor.prepareCodexHTTPCall(
+		context.Background(),
+		auth,
+		sdktranslator.FromString("openai"),
+		"",
+		"https://example.com/responses",
+		req,
+		rawJSON,
+		"oauth-token",
+		true,
+	)
+	if err != nil {
+		t.Fatalf("prepareCodexHTTPCall() error = %v", err)
+	}
+
+	body := call.prepared.body
+	for _, field := range []string{"messages", "metadata", "response_format", "functions", "trace"} {
+		if gjson.GetBytes(body, field).Exists() {
+			t.Fatalf("%s should not reach final Codex upstream body: %s", field, body)
+		}
+	}
+	if got := gjson.GetBytes(body, "input.0.content.0.text").String(); got != "hello" {
+		t.Fatalf("input.0.content.0.text = %q, want %q; body=%s", got, "hello", body)
 	}
 }

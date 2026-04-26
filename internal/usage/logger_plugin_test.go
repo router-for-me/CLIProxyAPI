@@ -140,6 +140,44 @@ func TestRequestStatisticsRetainsAllDetails(t *testing.T) {
 	}
 }
 
+func TestRequestStatisticsLimitsRetainedDetails(t *testing.T) {
+	previousLimit := DetailRetentionLimit()
+	SetDetailRetentionLimit(3)
+	t.Cleanup(func() { SetDetailRetentionLimit(previousLimit) })
+
+	stats := NewRequestStatistics()
+	start := time.Date(2026, 3, 20, 12, 0, 0, 0, time.UTC)
+
+	const count = 6
+	for i := 0; i < count; i++ {
+		stats.Record(context.Background(), coreusage.Record{
+			APIKey:      "test-key",
+			Model:       "gpt-5.4",
+			RequestedAt: start.Add(time.Duration(i) * time.Second),
+			Detail: coreusage.Detail{
+				InputTokens:  1,
+				OutputTokens: 1,
+				TotalTokens:  2,
+			},
+		})
+	}
+
+	snapshot := stats.Snapshot()
+	model := snapshot.APIs["test-key"].Models["gpt-5.4"]
+	if model.TotalRequests != count {
+		t.Fatalf("total requests = %d, want %d", model.TotalRequests, count)
+	}
+	if len(model.Details) != 3 {
+		t.Fatalf("details len = %d, want 3", len(model.Details))
+	}
+	if !model.Details[0].Timestamp.Equal(start.Add(3 * time.Second)) {
+		t.Fatalf("first retained timestamp = %s, want %s", model.Details[0].Timestamp, start.Add(3*time.Second))
+	}
+	if !model.Details[2].Timestamp.Equal(start.Add(5 * time.Second)) {
+		t.Fatalf("last retained timestamp = %s, want %s", model.Details[2].Timestamp, start.Add(5*time.Second))
+	}
+}
+
 func TestRequestStatisticsMergeSnapshotSummaryOnly(t *testing.T) {
 	stats := NewRequestStatistics()
 	summary := StatisticsSnapshot{
@@ -223,6 +261,62 @@ func TestRequestStatisticsMergeSnapshotSummaryOnly(t *testing.T) {
 	}
 	if got := snapshot.TokensByHour["13"]; got != 500 {
 		t.Fatalf("tokens_by_hour[13] = %d, want 500", got)
+	}
+}
+
+func TestRequestStatisticsMergeSnapshotSummaryOnlySkipsDuplicateImport(t *testing.T) {
+	stats := NewRequestStatistics()
+	summary := StatisticsSnapshot{
+		TotalRequests: 3,
+		SuccessCount:  2,
+		FailureCount:  1,
+		TotalTokens:   90,
+		APIs: map[string]APISnapshot{
+			"summary-api": {
+				TotalRequests: 3,
+				TotalTokens:   90,
+				Models: map[string]ModelSnapshot{
+					"gpt-5.4": {
+						TotalRequests:  3,
+						TotalTokens:    90,
+						TokenBreakdown: TokenStats{InputTokens: 40, OutputTokens: 45, ReasoningTokens: 5, TotalTokens: 90},
+						Latency:        LatencyStats{Count: 3, TotalMs: 900, MinMs: 200, MaxMs: 400},
+					},
+				},
+			},
+		},
+		RequestsByDay: map[string]int64{"2026-04-10": 3},
+		RequestsByHour: map[string]int64{
+			"13": 3,
+		},
+		TokensByDay: map[string]int64{"2026-04-10": 90},
+		TokensByHour: map[string]int64{
+			"13": 90,
+		},
+	}
+
+	result := stats.MergeSnapshot(summary)
+	if result.Added != 3 || result.Skipped != 0 {
+		t.Fatalf("first merge = %+v, want added=3 skipped=0", result)
+	}
+
+	result = stats.MergeSnapshot(summary)
+	if result.Added != 0 || result.Skipped != 3 {
+		t.Fatalf("second merge = %+v, want added=0 skipped=3", result)
+	}
+
+	snapshot := stats.Snapshot()
+	if snapshot.TotalRequests != 3 {
+		t.Fatalf("total requests = %d, want 3", snapshot.TotalRequests)
+	}
+	if snapshot.SuccessCount != 2 {
+		t.Fatalf("success count = %d, want 2", snapshot.SuccessCount)
+	}
+	if snapshot.FailureCount != 1 {
+		t.Fatalf("failure count = %d, want 1", snapshot.FailureCount)
+	}
+	if snapshot.TotalTokens != 90 {
+		t.Fatalf("total tokens = %d, want 90", snapshot.TotalTokens)
 	}
 }
 

@@ -96,14 +96,21 @@ func codexAuthOriginator(auth *cliproxyauth.Auth) string {
 	return ""
 }
 
-func codexEnsureSessionHeaders(target http.Header, source http.Header, auth *cliproxyauth.Auth) {
+type codexSessionHeaderOptions struct {
+	includeRequestID bool
+}
+
+func codexEnsureSessionHeaders(target http.Header, source http.Header, auth *cliproxyauth.Auth, opts codexSessionHeaderOptions) string {
 	if target == nil {
-		return
+		return ""
 	}
 	conversationID := firstNonEmptyHeaderValue(target, source, "Conversation_id")
 	sessionID := firstNonEmptyHeaderValue(target, source, "Session_id")
 	if sessionID == "" {
 		sessionID = conversationID
+	}
+	if sessionID == "" {
+		sessionID = codexTurnMetadataSessionID(target, source)
 	}
 	if sessionID == "" {
 		if apiKey, _ := codexCreds(auth); strings.TrimSpace(apiKey) != "" {
@@ -115,14 +122,19 @@ func codexEnsureSessionHeaders(target http.Header, source http.Header, auth *cli
 	target.Set("Session_id", sessionID)
 
 	requestID := firstNonEmptyHeaderValue(target, source, "X-Client-Request-Id")
-	if requestID == "" {
+	if opts.includeRequestID && requestID == "" {
 		requestID = conversationID
 	}
-	if requestID == "" {
+	if opts.includeRequestID && requestID == "" {
 		requestID = sessionID
 	}
-	target.Set("X-Client-Request-Id", requestID)
+	if requestID != "" {
+		target.Set("X-Client-Request-Id", requestID)
+	} else {
+		target.Del("X-Client-Request-Id")
+	}
 	target.Del("Conversation_id")
+	return sessionID
 }
 
 func firstNonEmptyHeaderValue(target http.Header, source http.Header, key string) string {

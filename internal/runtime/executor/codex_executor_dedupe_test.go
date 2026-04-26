@@ -19,6 +19,7 @@ import (
 )
 
 func TestCodexExecutorCompactDedupesConcurrentInFlightRequests(t *testing.T) {
+	resetCodexWindowStateStore()
 	var upstreamCalls atomic.Int32
 	started := make(chan struct{})
 	release := make(chan struct{})
@@ -83,6 +84,20 @@ func TestCodexExecutorCompactDedupesConcurrentInFlightRequests(t *testing.T) {
 	}
 	if string(results[0].Payload) != string(results[1].Payload) {
 		t.Fatalf("payload mismatch:\nfirst=%s\nsecond=%s", string(results[0].Payload), string(results[1].Payload))
+	}
+
+	nextReq, err := http.NewRequestWithContext(
+		contextWithGinHeaders(map[string]string{codexHeaderSessionID: "cache-key"}),
+		http.MethodPost,
+		"https://example.com/responses",
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("NewRequestWithContext() error: %v", err)
+	}
+	applyCodexHeaders(nextReq, nil, "oauth-token", true, nil)
+	if got := nextReq.Header.Get(codexHeaderWindowID); got != "cache-key:1" {
+		t.Fatalf("post-dedupe %s = %q, want %q", codexHeaderWindowID, got, "cache-key:1")
 	}
 }
 

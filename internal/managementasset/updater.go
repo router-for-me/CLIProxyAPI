@@ -361,8 +361,12 @@ func fetchLatestAsset(ctx context.Context, client *http.Client, releaseURL strin
 		return nil, "", fmt.Errorf("unexpected release status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
+	body, errRead := util.ReadResponseBody(resp.Body)
+	if errRead != nil {
+		return nil, "", fmt.Errorf("read release response: %w", errRead)
+	}
 	var release releaseResponse
-	if err = json.NewDecoder(resp.Body).Decode(&release); err != nil {
+	if err = json.Unmarshal(body, &release); err != nil {
 		return nil, "", fmt.Errorf("decode release response: %w", err)
 	}
 
