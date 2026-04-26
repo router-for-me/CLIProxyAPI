@@ -133,3 +133,48 @@ func TestConvertClaudeRequestToCodex_ParallelToolCalls(t *testing.T) {
 		})
 	}
 }
+
+func TestConvertClaudeRequestToCodex_ImageSources(t *testing.T) {
+	tests := []struct {
+		name         string
+		inputJSON    string
+		wantType     string
+		wantImageURL string
+	}{
+		{
+			name: "Base64 source",
+			inputJSON: `{
+				"model": "claude-3-opus",
+				"messages": [{"role": "user", "content": [
+					{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}}
+				]}]
+			}`,
+			wantType:     "input_image",
+			wantImageURL: "data:image/png;base64,AAAA",
+		},
+		{
+			name: "URL source (fix8317)",
+			inputJSON: `{
+				"model": "claude-3-opus",
+				"messages": [{"role": "user", "content": [
+					{"type": "image", "source": {"type": "url", "url": "https://example.com/cat.png"}}
+				]}]
+			}`,
+			wantType:     "input_image",
+			wantImageURL: "https://example.com/cat.png",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := ConvertClaudeRequestToCodex("gpt-5.4", []byte(tt.inputJSON), false)
+			part := gjson.GetBytes(result, "input.0.content.0")
+			if got := part.Get("type").String(); got != tt.wantType {
+				t.Fatalf("content.0.type = %q, want %q. Output: %s", got, tt.wantType, string(result))
+			}
+			if got := part.Get("image_url").String(); got != tt.wantImageURL {
+				t.Fatalf("content.0.image_url = %q, want %q. Output: %s", got, tt.wantImageURL, string(result))
+			}
+		})
+	}
+}
