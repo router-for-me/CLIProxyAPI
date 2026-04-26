@@ -26,6 +26,11 @@ type ConvertOpenAIResponseToAnthropicParams struct {
 	Model       string
 	CreatedAt   int64
 	ToolNameMap map[string]string
+	// SawToolCall is true once at least one tool_use content_block_start has
+	// been emitted on the wire. Used to derive the final stop_reason — set
+	// it from "raw upstream sent tool_calls" risks emitting
+	// stop_reason=tool_use with zero tool blocks (suppressed by name/id
+	// guards), which strict Anthropic clients reject.
 	SawToolCall bool
 	// Content accumulator for streaming
 	ContentAccumulator strings.Builder
@@ -224,7 +229,6 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 			}
 
 			toolCalls.ForEach(func(_, toolCall gjson.Result) bool {
-				param.SawToolCall = true
 				index := int(toolCall.Get("index").Int())
 
 				// Initialize accumulator if needed
@@ -294,6 +298,14 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 					contentBlockStartJSONBytes, _ = sjson.SetBytes(contentBlockStartJSONBytes, "content_block.name", accumulator.Name)
 					results = append(results, translatorcommon.AppendSSEEventBytes(nil, "content_block_start", contentBlockStartJSONBytes, 2))
 					accumulator.StartEmitted = true
+					// Mark the stream as having tool calls only once a start
+					// has actually been announced. Setting this on raw
+					// tool_calls presence (the previous behavior) caused the
+					// final stop_reason to map to "tool_use" even when every
+					// tool start was suppressed (e.g. all empty names),
+					// producing an Anthropic stream with stop_reason=tool_use
+					// and zero tool_use blocks.
+					param.SawToolCall = true
 				}
 
 				return true
@@ -304,9 +316,16 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 	// Handle finish_reason (but don't send message_delta/message_stop yet)
 	if finishReason := root.Get("choices.0.finish_reason"); finishReason.Exists() && finishReason.String() != "" {
 		reason := finishReason.String()
-		if param.SawToolCall {
+		switch {
+		case param.SawToolCall:
+			// We emitted at least one tool_use start; mirror that.
 			param.FinishReason = "tool_calls"
-		} else {
+		case reason == "tool_calls":
+			// Upstream claimed tool_calls, but every tool start was
+			// suppressed (e.g. all empty/null names). Downgrade so the
+			// final stop_reason isn't "tool_use" with zero tool blocks.
+			param.FinishReason = "stop"
+		default:
 			param.FinishReason = reason
 		}
 

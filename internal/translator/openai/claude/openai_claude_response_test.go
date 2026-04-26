@@ -93,11 +93,24 @@ func blockIndices(events []sseEvent) []int64 {
 	return idx
 }
 
+// lastStopReason returns the stop_reason field from the final message_delta
+// event, or "" if no message_delta was emitted.
+func lastStopReason(events []sseEvent) string {
+	for i := len(events) - 1; i >= 0; i-- {
+		if events[i].Type == "message_delta" {
+			return gjson.Get(events[i].Payload, "delta.stop_reason").String()
+		}
+	}
+	return ""
+}
+
 const streamReq = `{"stream":true}`
 
 // TestStreamingTool_EmptyNameThroughout verifies that a tool_call whose
 // function.name is "" in every chunk never produces a content_block_start —
-// and therefore must not produce delta or stop events either.
+// and therefore must not produce delta or stop events either. The final
+// message_delta must also avoid claiming stop_reason=tool_use, since no
+// tool_use block was actually announced.
 func TestStreamingTool_EmptyNameThroughout(t *testing.T) {
 	events := runStream(t, streamReq,
 		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_a","function":{"name":"","arguments":""}}]}}]}`,
@@ -113,6 +126,9 @@ func TestStreamingTool_EmptyNameThroughout(t *testing.T) {
 	}
 	if got := countByType(events, "content_block_stop"); got != 0 {
 		t.Fatalf("expected zero content_block_stop when start was suppressed, got %d", got)
+	}
+	if got := lastStopReason(events); got == "tool_use" {
+		t.Fatalf("stop_reason must not be tool_use when zero tool_use blocks were emitted; got %q", got)
 	}
 }
 
@@ -242,5 +258,34 @@ func TestStreamingTool_IDInDeltaWithoutFunction(t *testing.T) {
 	}
 	if got := countByType(events, "content_block_stop"); got != 1 {
 		t.Fatalf("expected exactly one content_block_stop, got %d", got)
+	}
+}
+
+// TestStreamingTool_StopReasonWithEmittedTool verifies the positive path:
+// when at least one tool_use block is actually announced, the final
+// stop_reason still maps to "tool_use" as Anthropic clients expect.
+func TestStreamingTool_StopReasonWithEmittedTool(t *testing.T) {
+	events := runStream(t, streamReq,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_a","function":{"name":"do_it","arguments":"{}"}}]}}]}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"},"usage":{"prompt_tokens":1,"completion_tokens":1}}]}`,
+	)
+	if got := lastStopReason(events); got != "tool_use" {
+		t.Fatalf("stop_reason = %q, want %q", got, "tool_use")
+	}
+}
+
+// TestStreamingTool_StopReasonMixedSuppressedAndValid verifies that the
+// stop_reason is still "tool_use" even when some tool indexes were
+// suppressed, as long as at least one valid tool block was emitted.
+func TestStreamingTool_StopReasonMixedSuppressedAndValid(t *testing.T) {
+	events := runStream(t, streamReq,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[
+			{"index":0,"id":"call_skip","function":{"name":"","arguments":""}},
+			{"index":1,"id":"call_real","function":{"name":"do_it","arguments":"{}"}}
+		]}}]}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+	)
+	if got := lastStopReason(events); got != "tool_use" {
+		t.Fatalf("stop_reason = %q, want %q (one valid tool was emitted)", got, "tool_use")
 	}
 }
