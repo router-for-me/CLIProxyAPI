@@ -24,6 +24,7 @@ const (
 	apiRequestKey           = "API_REQUEST"
 	apiResponseKey          = "API_RESPONSE"
 	apiWebsocketTimelineKey = "API_WEBSOCKET_TIMELINE"
+	usageReporterKey        = "USAGE_REPORTER"
 	creditsUsedKey          = "__antigravity_credits_used__"
 )
 
@@ -55,6 +56,7 @@ type upstreamAttempt struct {
 
 // RecordAPIRequest stores the upstream request metadata in Gin context for request logging.
 func RecordAPIRequest(ctx context.Context, cfg *config.Config, info UpstreamRequestLog) {
+	captureUsageRequest(ctx, info.Body)
 	if cfg == nil || !cfg.RequestLog {
 		return
 	}
@@ -153,6 +155,7 @@ func RecordAPIResponseError(ctx context.Context, cfg *config.Config, err error) 
 
 // AppendAPIResponseChunk appends an upstream response chunk to Gin context for request logging.
 func AppendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byte) {
+	captureUsageResponse(ctx, chunk)
 	if cfg == nil || !cfg.RequestLog {
 		return
 	}
@@ -195,6 +198,7 @@ func AppendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byt
 
 // RecordAPIWebsocketRequest stores an upstream websocket request event in Gin context.
 func RecordAPIWebsocketRequest(ctx context.Context, cfg *config.Config, info UpstreamRequestLog) {
+	captureUsageRequest(ctx, info.Body)
 	if cfg == nil || !cfg.RequestLog {
 		return
 	}
@@ -284,6 +288,7 @@ func WebsocketUpgradeRequestURL(rawURL string) string {
 
 // AppendAPIWebsocketResponse stores an upstream websocket response frame in Gin context.
 func AppendAPIWebsocketResponse(ctx context.Context, cfg *config.Config, payload []byte) {
+	captureUsageResponse(ctx, payload)
 	if cfg == nil || !cfg.RequestLog {
 		return
 	}
@@ -331,6 +336,42 @@ func RecordAPIWebsocketError(ctx context.Context, cfg *config.Config, stage stri
 func ginContextFrom(ctx context.Context) *gin.Context {
 	ginCtx, _ := ctx.Value("gin").(*gin.Context)
 	return ginCtx
+}
+
+func registerUsageReporter(ctx context.Context, reporter *UsageReporter) {
+	if reporter == nil {
+		return
+	}
+	ginCtx := ginContextFrom(ctx)
+	if ginCtx == nil {
+		return
+	}
+	ginCtx.Set(usageReporterKey, reporter)
+}
+
+func usageReporterFromContext(ctx context.Context) *UsageReporter {
+	ginCtx := ginContextFrom(ctx)
+	if ginCtx == nil {
+		return nil
+	}
+	value, exists := ginCtx.Get(usageReporterKey)
+	if !exists {
+		return nil
+	}
+	reporter, _ := value.(*UsageReporter)
+	return reporter
+}
+
+func captureUsageRequest(ctx context.Context, body []byte) {
+	if reporter := usageReporterFromContext(ctx); reporter != nil {
+		reporter.captureRequestBody(body)
+	}
+}
+
+func captureUsageResponse(ctx context.Context, body []byte) {
+	if reporter := usageReporterFromContext(ctx); reporter != nil {
+		reporter.captureResponseChunk(body)
+	}
 }
 
 func getAttempts(ginCtx *gin.Context) []*upstreamAttempt {

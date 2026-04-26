@@ -25,6 +25,9 @@ type UsageReporter struct {
 	source      string
 	requestedAt time.Time
 	once        sync.Once
+	bodyMu      sync.Mutex
+	requestBody []byte
+	responseBuf []byte
 }
 
 func NewUsageReporter(ctx context.Context, provider, model string, auth *cliproxyauth.Auth) *UsageReporter {
@@ -41,6 +44,7 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 		reporter.authID = auth.ID
 		reporter.authIndex = auth.EnsureIndex()
 	}
+	registerUsageReporter(ctx, reporter)
 	return reporter
 }
 
@@ -65,13 +69,8 @@ func (r *UsageReporter) publishWithOutcome(ctx context.Context, detail usage.Det
 	if r == nil {
 		return
 	}
-	if detail.TotalTokens == 0 {
-		total := detail.InputTokens + detail.OutputTokens + detail.ReasoningTokens
-		if total > 0 {
-			detail.TotalTokens = total
-		}
-	}
 	r.once.Do(func() {
+		detail = r.completeDetail(detail, failed)
 		usage.PublishRecord(ctx, r.buildRecord(detail, failed))
 	})
 }
@@ -84,9 +83,64 @@ func (r *UsageReporter) EnsurePublished(ctx context.Context) {
 	if r == nil {
 		return
 	}
-	r.once.Do(func() {
-		usage.PublishRecord(ctx, r.buildRecord(usage.Detail{}, false))
-	})
+	r.publishWithOutcome(ctx, usage.Detail{}, false)
+}
+
+func (r *UsageReporter) captureRequestBody(body []byte) {
+	if r == nil {
+		return
+	}
+	r.bodyMu.Lock()
+	defer r.bodyMu.Unlock()
+	r.requestBody = append(r.requestBody[:0], body...)
+	r.responseBuf = r.responseBuf[:0]
+}
+
+func (r *UsageReporter) captureResponseChunk(chunk []byte) {
+	if r == nil {
+		return
+	}
+	data := bytes.TrimSpace(chunk)
+	if len(data) == 0 {
+		return
+	}
+	r.bodyMu.Lock()
+	defer r.bodyMu.Unlock()
+	if len(r.responseBuf) > 0 {
+		r.responseBuf = append(r.responseBuf, '\n')
+	}
+	r.responseBuf = append(r.responseBuf, data...)
+}
+
+func (r *UsageReporter) completeDetail(detail usage.Detail, failed bool) usage.Detail {
+	if detail.TotalTokens == 0 {
+		total := detail.InputTokens + detail.OutputTokens + detail.ReasoningTokens
+		if total > 0 {
+			detail.TotalTokens = total
+		}
+	}
+	if failed || !isMissingUsageDetail(detail) {
+		return detail
+	}
+	if estimated := r.estimateUsage(); !isMissingUsageDetail(estimated) {
+		return estimated
+	}
+	return detail
+}
+
+func (r *UsageReporter) estimateUsage() usage.Detail {
+	if r == nil {
+		return usage.Detail{}
+	}
+	r.bodyMu.Lock()
+	requestBody := append([]byte(nil), r.requestBody...)
+	responseBody := append([]byte(nil), r.responseBuf...)
+	r.bodyMu.Unlock()
+	return EstimateUsage(r.model, requestBody, responseBody)
+}
+
+func isMissingUsageDetail(detail usage.Detail) bool {
+	return detail.TotalTokens == 0 && detail.InputTokens == 0 && detail.OutputTokens == 0
 }
 
 func (r *UsageReporter) buildRecord(detail usage.Detail, failed bool) usage.Record {

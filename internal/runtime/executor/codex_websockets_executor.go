@@ -351,6 +351,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 			if detail, ok := helps.ParseCodexUsage(payload); ok {
 				reporter.Publish(ctx, detail)
 			}
+			reporter.EnsurePublished(ctx)
 			var param any
 			out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, originalPayload, body, payload, &param)
 			resp = cliproxyexecutor.Response{Payload: out}
@@ -599,6 +600,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				if detail, ok := helps.ParseCodexUsage(payload); ok {
 					reporter.Publish(ctx, detail)
 				}
+				reporter.EnsurePublished(ctx)
 			}
 
 			line := encodeCodexWebsocketAsSSE(payload)
