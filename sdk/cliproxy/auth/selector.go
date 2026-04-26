@@ -470,9 +470,9 @@ func NewSessionAffinitySelectorWithConfig(cfg SessionAffinityConfig) *SessionAff
 // Pick selects an auth with session affinity when possible.
 // Priority for session ID extraction:
 //  1. metadata.user_id (Claude Code format) - highest priority
-//  2. X-Session-ID header
+//  2. X-Session-ID / X-Client-Request-Id / session_id / conversation_id headers
 //  3. metadata.user_id (non-Claude Code format)
-//  4. conversation_id field
+//  4. conversation_id or prompt_cache_key body field
 //  5. Hash-based fallback from messages
 //
 // Note: The cache key includes provider, session ID, and model to handle cases where
@@ -569,9 +569,9 @@ func (s *SessionAffinitySelector) InvalidateAuth(authID string) {
 // ExtractSessionID extracts session identifier from multiple sources.
 // Priority order:
 //  1. metadata.user_id (Claude Code format with _session_{uuid}) - highest priority for Claude Code clients
-//  2. X-Session-ID header
+//  2. X-Session-ID / X-Client-Request-Id / session_id / conversation_id headers
 //  3. metadata.user_id (non-Claude Code format)
-//  4. conversation_id field in request body
+//  4. conversation_id or prompt_cache_key body field
 //  5. Stable hash from first few messages content (fallback)
 func ExtractSessionID(headers http.Header, payload []byte, metadata map[string]any) string {
 	primary, _ := extractSessionIDs(headers, payload, metadata)
@@ -601,10 +601,12 @@ func extractSessionIDs(headers http.Header, payload []byte, metadata map[string]
 		}
 	}
 
-	// 2. X-Session-ID header
+	// 2. X-Session-ID / X-Client-Request-ID / session_id / conversation_id headers
 	if headers != nil {
-		if sid := headers.Get("X-Session-ID"); sid != "" {
-			return "header:" + sid, ""
+		for _, h := range []string{"X-Session-ID", "X-Client-Request-Id", "Session-Id", "Conversation-Id"} {
+			if sid := headers.Get(h); sid != "" {
+				return "header:" + sid, ""
+			}
 		}
 	}
 
@@ -618,9 +620,12 @@ func extractSessionIDs(headers http.Header, payload []byte, metadata map[string]
 		return "user:" + userID, ""
 	}
 
-	// 4. conversation_id field
+	// 4. conversation_id or prompt_cache_key field (OpenAI Codex stamps prompt_cache_key=sessionId)
 	if convID := gjson.GetBytes(payload, "conversation_id").String(); convID != "" {
 		return "conv:" + convID, ""
+	}
+	if pck := gjson.GetBytes(payload, "prompt_cache_key").String(); pck != "" {
+		return "pck:" + pck, ""
 	}
 
 	// 5. Hash-based fallback from message content
