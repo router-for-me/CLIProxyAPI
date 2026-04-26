@@ -274,6 +274,26 @@ func TestStreamingTool_StopReasonWithEmittedTool(t *testing.T) {
 	}
 }
 
+// TestStreamingTool_StopReasonWhenIDNeverArrives covers the scenario
+// raised in the Apr 26 codex review: function.name is present and valid,
+// but no id ever arrives, so the new id-non-empty guard suppresses every
+// tool start even though raw tool_calls deltas were observed. Upstream
+// then sends finish_reason=tool_calls. The resulting stream must not
+// claim stop_reason=tool_use (no tool blocks were announced).
+func TestStreamingTool_StopReasonWhenIDNeverArrives(t *testing.T) {
+	events := runStream(t, streamReq,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"function":{"name":"do_it","arguments":""}}]}}]}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{}"}}]}}]}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+	)
+	if got := len(toolUseStarts(events)); got != 0 {
+		t.Fatalf("expected zero tool_use starts when id never arrived, got %d", got)
+	}
+	if got := lastStopReason(events); got == "tool_use" {
+		t.Fatalf("stop_reason must not be tool_use when id never arrived; got %q", got)
+	}
+}
+
 // TestStreamingTool_StopReasonMixedSuppressedAndValid verifies that the
 // stop_reason is still "tool_use" even when some tool indexes were
 // suppressed, as long as at least one valid tool block was emitted.
