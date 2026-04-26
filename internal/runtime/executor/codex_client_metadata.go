@@ -52,11 +52,17 @@ func codexApplyHTTPClientMetadata(body []byte, req *http.Request, auth *cliproxy
 	if len(bytes.TrimSpace(body)) == 0 || req == nil {
 		return body
 	}
-	source := codexGinHeadersFromContext(req.Context())
+	return codexApplyHTTPClientMetadataWithSource(body, req.Header, codexGinHeadersFromContext(req.Context()), auth, cfg)
+}
+
+func codexApplyHTTPClientMetadataWithSource(body []byte, target http.Header, source http.Header, auth *cliproxyauth.Auth, cfg *config.Config) []byte {
+	if len(bytes.TrimSpace(body)) == 0 {
+		return body
+	}
 	return codexSetClientMetadataString(
 		body,
 		codexClientMetadataInstallationID,
-		codexResolvedInstallationID(req.Header, source, auth, cfg),
+		codexResolvedInstallationID(target, source, auth, cfg),
 		false,
 	)
 }
@@ -114,11 +120,21 @@ func codexResetRequestBody(req *http.Request, body []byte) {
 
 func codexSetClientMetadataString(body []byte, key string, value string, overwrite bool) []byte {
 	value = strings.TrimSpace(value)
-	if value == "" || key == "" || !codexCanSetClientMetadata(body) {
+	if value == "" || key == "" || len(bytes.TrimSpace(body)) == 0 {
 		return body
 	}
+
 	path := "client_metadata." + key
 	if !overwrite && gjson.GetBytes(body, path).Exists() {
+		return body
+	}
+	metadata := gjson.GetBytes(body, "client_metadata")
+	if !metadata.Exists() {
+		if updated, ok := codexAppendTopLevelSingleStringObjectField(body, "client_metadata", key, value); ok {
+			return updated
+		}
+	}
+	if metadata.Exists() && metadata.Type != gjson.Null && !metadata.IsObject() {
 		return body
 	}
 	updated, err := sjson.SetBytes(body, path, value)
@@ -126,11 +142,6 @@ func codexSetClientMetadataString(body []byte, key string, value string, overwri
 		return body
 	}
 	return updated
-}
-
-func codexCanSetClientMetadata(body []byte) bool {
-	metadata := gjson.GetBytes(body, "client_metadata")
-	return !metadata.Exists() || metadata.Type == gjson.Null || metadata.IsObject()
 }
 
 func codexResolvedInstallationID(target http.Header, source http.Header, auth *cliproxyauth.Auth, cfg *config.Config) string {

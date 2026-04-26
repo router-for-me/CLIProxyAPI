@@ -265,6 +265,39 @@ func BenchmarkCodexStreamFunctionCallArgumentDeltas(b *testing.B) {
 	}
 }
 
+func BenchmarkPatchCodexCompletedOutputIfEmptySingleOutputItem(b *testing.B) {
+	b.ReportAllocs()
+
+	streamState := newCodexStreamCompletionState()
+	streamState.recordEvent([]byte(`{"type":"response.output_item.done","item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]},"output_index":0}`))
+	completedData := []byte(`{"response":{"id":"resp_1","output":[]}}`)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		patched, recoveredCount := streamState.patchCompletedOutputIfEmpty(completedData)
+		if recoveredCount != 1 || len(patched) == 0 {
+			b.Fatalf("recoveredCount=%d len=%d", recoveredCount, len(patched))
+		}
+	}
+}
+
+func BenchmarkPatchCodexCompletedOutputIfEmptyFunctionCallRecovery(b *testing.B) {
+	b.ReportAllocs()
+
+	streamState := newCodexStreamCompletionState()
+	streamState.recordEvent([]byte(`{"type":"response.output_item.added","output_index":0,"item":{"id":"fc_item_1","type":"function_call","call_id":"call_1","name":"search"}}`))
+	streamState.recordEvent([]byte(`{"type":"response.function_call_arguments.done","item_id":"fc_item_1","output_index":0,"arguments":"{\"q\":\"hello\"}"}`))
+	completedData := []byte(`{"response":{"id":"resp_1","output":[]}}`)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		patched, recoveredCount := streamState.patchCompletedOutputIfEmpty(completedData)
+		if recoveredCount != 1 || len(patched) == 0 {
+			b.Fatalf("recoveredCount=%d len=%d", recoveredCount, len(patched))
+		}
+	}
+}
+
 func TestCollectCodexResponseAggregatePatchesCompletedOutputButKeepsCapturedBody(t *testing.T) {
 	stream := strings.NewReader(
 		"data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]},\"output_index\":0}\n" +

@@ -50,6 +50,9 @@ func TestCodexExecutorCompactDedupesConcurrentInFlightRequests(t *testing.T) {
 		SourceFormat: sdktranslator.FromString("openai-response"),
 		Alt:          "responses/compact",
 		Stream:       false,
+		Metadata: map[string]any{
+			cliproxyexecutor.NeedResponseHeadersMetadataKey: true,
+		},
 	}
 
 	results := make([]cliproxyexecutor.Response, 2)
@@ -84,6 +87,10 @@ func TestCodexExecutorCompactDedupesConcurrentInFlightRequests(t *testing.T) {
 	}
 	if string(results[0].Payload) != string(results[1].Payload) {
 		t.Fatalf("payload mismatch:\nfirst=%s\nsecond=%s", string(results[0].Payload), string(results[1].Payload))
+	}
+	results[0].Headers.Set("X-CPA-Test", "mutated")
+	if got := results[1].Headers.Get("X-CPA-Test"); got != "" {
+		t.Fatalf("deduped response headers alias unexpectedly: got %q", got)
 	}
 
 	nextReq, err := http.NewRequestWithContext(

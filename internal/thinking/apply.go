@@ -97,10 +97,12 @@ func ApplyThinking(body []byte, model string, fromFormat string, toFormat string
 	// 1. Route check: Get provider applier
 	applier := GetProviderApplier(providerFormat)
 	if applier == nil {
-		log.WithFields(log.Fields{
-			"provider": providerFormat,
-			"model":    model,
-		}).Debug("thinking: unknown provider, passthrough |")
+		if log.IsLevelEnabled(log.DebugLevel) {
+			log.WithFields(log.Fields{
+				"provider": providerFormat,
+				"model":    model,
+			}).Debug("thinking: unknown provider, passthrough |")
+		}
 		return body, nil
 	}
 
@@ -119,16 +121,20 @@ func ApplyThinking(body []byte, model string, fromFormat string, toFormat string
 	if modelInfo.Thinking == nil {
 		config := extractThinkingConfig(body, providerFormat)
 		if hasThinkingConfig(config) {
-			log.WithFields(log.Fields{
-				"model":    baseModel,
-				"provider": providerFormat,
-			}).Debug("thinking: model does not support thinking, stripping config |")
+			if log.IsLevelEnabled(log.DebugLevel) {
+				log.WithFields(log.Fields{
+					"model":    baseModel,
+					"provider": providerFormat,
+				}).Debug("thinking: model does not support thinking, stripping config |")
+			}
 			return StripThinkingConfig(body, providerFormat), nil
 		}
-		log.WithFields(log.Fields{
-			"provider": providerFormat,
-			"model":    baseModel,
-		}).Debug("thinking: model does not support thinking, passthrough |")
+		if log.IsLevelEnabled(log.DebugLevel) {
+			log.WithFields(log.Fields{
+				"provider": providerFormat,
+				"model":    baseModel,
+			}).Debug("thinking: model does not support thinking, passthrough |")
+		}
 		return body, nil
 	}
 
@@ -136,31 +142,37 @@ func ApplyThinking(body []byte, model string, fromFormat string, toFormat string
 	var config ThinkingConfig
 	if suffixResult.HasSuffix {
 		config = parseSuffixToConfig(suffixResult.RawSuffix, providerFormat, model)
-		log.WithFields(log.Fields{
-			"provider": providerFormat,
-			"model":    model,
-			"mode":     config.Mode,
-			"budget":   config.Budget,
-			"level":    config.Level,
-		}).Debug("thinking: config from model suffix |")
-	} else {
-		config = extractThinkingConfig(body, providerFormat)
-		if hasThinkingConfig(config) {
+		if log.IsLevelEnabled(log.DebugLevel) {
 			log.WithFields(log.Fields{
 				"provider": providerFormat,
-				"model":    modelInfo.ID,
+				"model":    model,
 				"mode":     config.Mode,
 				"budget":   config.Budget,
 				"level":    config.Level,
-			}).Debug("thinking: original config from request |")
+			}).Debug("thinking: config from model suffix |")
+		}
+	} else {
+		config = extractThinkingConfig(body, providerFormat)
+		if hasThinkingConfig(config) {
+			if log.IsLevelEnabled(log.DebugLevel) {
+				log.WithFields(log.Fields{
+					"provider": providerFormat,
+					"model":    modelInfo.ID,
+					"mode":     config.Mode,
+					"budget":   config.Budget,
+					"level":    config.Level,
+				}).Debug("thinking: original config from request |")
+			}
 		}
 	}
 
 	if !hasThinkingConfig(config) {
-		log.WithFields(log.Fields{
-			"provider": providerFormat,
-			"model":    modelInfo.ID,
-		}).Debug("thinking: no config found, passthrough |")
+		if log.IsLevelEnabled(log.DebugLevel) {
+			log.WithFields(log.Fields{
+				"provider": providerFormat,
+				"model":    modelInfo.ID,
+			}).Debug("thinking: no config found, passthrough |")
+		}
 		return body, nil
 	}
 
@@ -187,13 +199,15 @@ func ApplyThinking(body []byte, model string, fromFormat string, toFormat string
 		return body, nil
 	}
 
-	log.WithFields(log.Fields{
-		"provider": providerFormat,
-		"model":    modelInfo.ID,
-		"mode":     validated.Mode,
-		"budget":   validated.Budget,
-		"level":    validated.Level,
-	}).Debug("thinking: processed config to apply |")
+	if log.IsLevelEnabled(log.DebugLevel) {
+		log.WithFields(log.Fields{
+			"provider": providerFormat,
+			"model":    modelInfo.ID,
+			"mode":     validated.Mode,
+			"budget":   validated.Budget,
+			"level":    validated.Level,
+		}).Debug("thinking: processed config to apply |")
+	}
 
 	// 6. Apply configuration using provider-specific applier
 	return applier.Apply(body, *validated, modelInfo)
@@ -232,11 +246,13 @@ func parseSuffixToConfig(rawSuffix, provider, model string) ThinkingConfig {
 	}
 
 	// Unknown suffix format - return empty config
-	log.WithFields(log.Fields{
-		"provider":   provider,
-		"model":      model,
-		"raw_suffix": rawSuffix,
-	}).Debug("thinking: unknown suffix format, treating as no config |")
+	if log.IsLevelEnabled(log.DebugLevel) {
+		log.WithFields(log.Fields{
+			"provider":   provider,
+			"model":      model,
+			"raw_suffix": rawSuffix,
+		}).Debug("thinking: unknown suffix format, treating as no config |")
+	}
 	return ThinkingConfig{}
 }
 
@@ -263,29 +279,35 @@ func applyUserDefinedModel(body []byte, modelInfo *registry.ModelInfo, fromForma
 	}
 
 	if !hasThinkingConfig(config) {
-		log.WithFields(log.Fields{
-			"model":    modelID,
-			"provider": toFormat,
-		}).Debug("thinking: user-defined model, passthrough (no config) |")
+		if log.IsLevelEnabled(log.DebugLevel) {
+			log.WithFields(log.Fields{
+				"model":    modelID,
+				"provider": toFormat,
+			}).Debug("thinking: user-defined model, passthrough (no config) |")
+		}
 		return body, nil
 	}
 
 	applier := GetProviderApplier(toFormat)
 	if applier == nil {
-		log.WithFields(log.Fields{
-			"model":    modelID,
-			"provider": toFormat,
-		}).Debug("thinking: user-defined model, passthrough (unknown provider) |")
+		if log.IsLevelEnabled(log.DebugLevel) {
+			log.WithFields(log.Fields{
+				"model":    modelID,
+				"provider": toFormat,
+			}).Debug("thinking: user-defined model, passthrough (unknown provider) |")
+		}
 		return body, nil
 	}
 
-	log.WithFields(log.Fields{
-		"provider": toFormat,
-		"model":    modelID,
-		"mode":     config.Mode,
-		"budget":   config.Budget,
-		"level":    config.Level,
-	}).Debug("thinking: applying config for user-defined model (skip validation)")
+	if log.IsLevelEnabled(log.DebugLevel) {
+		log.WithFields(log.Fields{
+			"provider": toFormat,
+			"model":    modelID,
+			"mode":     config.Mode,
+			"budget":   config.Budget,
+			"level":    config.Level,
+		}).Debug("thinking: applying config for user-defined model (skip validation)")
+	}
 
 	config = normalizeUserDefinedConfig(config, fromFormat, toFormat)
 	return applier.Apply(body, config, modelInfo)

@@ -641,6 +641,28 @@ func TestApplyCodexHeadersPassesThroughClientIdentityHeaders(t *testing.T) {
 	}
 }
 
+func TestApplyCodexHeadersUsesMetadataOriginatorFallback(t *testing.T) {
+	req, err := http.NewRequest(http.MethodPost, "https://example.com/responses", nil)
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	auth := &cliproxyauth.Auth{
+		Provider: "codex",
+		Metadata: map[string]any{
+			"originator": "codex_vscode",
+		},
+	}
+
+	applyCodexHeaders(req, auth, "oauth-token", true, nil)
+
+	if got := req.Header.Get("Originator"); got != "codex_vscode" {
+		t.Fatalf("Originator = %q, want %q", got, "codex_vscode")
+	}
+	if gotUA := req.Header.Get("User-Agent"); !strings.HasPrefix(gotUA, "codex_vscode/") {
+		t.Fatalf("User-Agent = %q, want codex_vscode/ prefix", gotUA)
+	}
+}
+
 func TestApplyCodexHeadersUsesDerivedSessionHeadersWithoutForwardingConversationID(t *testing.T) {
 	req, err := http.NewRequest(http.MethodPost, "https://example.com/responses", nil)
 	if err != nil {

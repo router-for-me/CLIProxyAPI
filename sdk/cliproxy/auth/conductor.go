@@ -280,7 +280,7 @@ func (m *Manager) RefreshSchedulerEntry(authID string) {
 		m.mu.RUnlock()
 		return
 	}
-	snapshot := auth.Clone()
+	snapshot := auth.CloneForScheduler()
 	m.mu.RUnlock()
 	m.scheduler.upsertAuth(snapshot)
 }
@@ -297,13 +297,10 @@ func (m *Manager) ReconcileRegistryModelStates(ctx context.Context, authID strin
 		return
 	}
 
-	supportedModels := registry.GetGlobalRegistry().GetModelsForClient(authID)
-	supported := make(map[string]struct{}, len(supportedModels))
-	for _, model := range supportedModels {
-		if model == nil {
-			continue
-		}
-		modelKey := canonicalModelKey(model.ID)
+	supportedModelIDs := registry.GetGlobalRegistry().GetModelIDsForClient(authID)
+	supported := make(map[string]struct{}, len(supportedModelIDs))
+	for _, modelID := range supportedModelIDs {
+		modelKey := canonicalModelKey(modelID)
 		if modelKey == "" {
 			continue
 		}
@@ -353,7 +350,7 @@ func (m *Manager) ReconcileRegistryModelStates(ctx context.Context, authID strin
 			if errPersist := m.persist(ctx, auth); errPersist != nil {
 				logEntryWithRequestID(ctx).WithField("auth_id", auth.ID).Warnf("failed to persist auth changes during model state reconciliation: %v", errPersist)
 			}
-			snapshot = auth.Clone()
+			snapshot = auth.CloneForScheduler()
 		}
 	}
 	m.mu.Unlock()
@@ -660,6 +657,18 @@ func (m *Manager) preparedExecutionModels(auth *Auth, routeModel string) ([]stri
 	candidates := m.executionModelCandidates(auth, routeModel)
 	pooled := len(candidates) > 1
 	return m.filterExecutionModels(auth, routeModel, candidates, pooled), pooled
+}
+
+func cloneAuthForExecution(provider string, auth *Auth) *Auth {
+	if auth == nil {
+		return nil
+	}
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "codex":
+		return auth.CloneShallow()
+	default:
+		return auth.Clone()
+	}
 }
 
 func (m *Manager) prepareExecutionModels(auth *Auth, routeModel string) []string {
@@ -1173,7 +1182,7 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	m.clearRouteAwareCaches()
 	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
 	if m.scheduler != nil {
-		m.scheduler.upsertAuth(authClone)
+		m.scheduler.upsertAuth(authClone.CloneForScheduler())
 	}
 	m.queueRefreshReschedule(auth.ID)
 	_ = m.persist(ctx, auth)
@@ -1205,7 +1214,7 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	m.clearRouteAwareCaches()
 	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
 	if m.scheduler != nil {
-		m.scheduler.upsertAuth(authClone)
+		m.scheduler.upsertAuth(authClone.CloneForScheduler())
 	}
 	m.queueRefreshReschedule(auth.ID)
 	_ = m.persist(ctx, auth)
@@ -2120,17 +2129,20 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 
 		if result.Success {
 			if result.Model != "" {
-				state := ensureModelState(auth, result.Model)
-				resetModelState(state, now)
-				updateAggregatedAvailability(auth, now)
-				if !hasModelError(auth, now) {
-					auth.LastError = nil
-					auth.StatusMessage = ""
-					auth.Status = StatusActive
+				state := lookupModelState(auth, result.Model)
+				if !authStateIsClean(auth) || (state != nil && !modelStateIsClean(state)) {
+					state = ensureModelState(auth, result.Model)
+					resetModelState(state, now)
+					updateAggregatedAvailability(auth, now)
+					if !hasModelError(auth, now) {
+						auth.LastError = nil
+						auth.StatusMessage = ""
+						auth.Status = StatusActive
+					}
+					auth.UpdatedAt = now
+					shouldResumeModel = true
+					clearModelQuota = true
 				}
-				auth.UpdatedAt = now
-				shouldResumeModel = true
-				clearModelQuota = true
 			} else {
 				clearAuthStateOnSuccess(auth, now)
 			}
@@ -2231,7 +2243,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			}
 		}
 
-		authSnapshot = auth.Clone()
+		authSnapshot = auth.CloneForScheduler()
 	}
 	m.mu.Unlock()
 	if authSnapshot != nil {
@@ -2254,6 +2266,20 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	}
 
 	m.hook.OnResult(ctx, result)
+}
+
+func lookupModelState(auth *Auth, model string) *ModelState {
+	if auth == nil || model == "" || len(auth.ModelStates) == 0 {
+		return nil
+	}
+	if state := auth.ModelStates[model]; state != nil {
+		return state
+	}
+	baseModel := canonicalModelKey(model)
+	if baseModel == "" || baseModel == model {
+		return nil
+	}
+	return auth.ModelStates[baseModel]
 }
 
 func ensureModelState(auth *Auth, model string) *ModelState {
@@ -2295,6 +2321,22 @@ func modelStateIsClean(state *ModelState) bool {
 		return false
 	}
 	if state.Quota.Exceeded || state.Quota.Reason != "" || !state.Quota.NextRecoverAt.IsZero() || state.Quota.BackoffLevel != 0 {
+		return false
+	}
+	return true
+}
+
+func authStateIsClean(auth *Auth) bool {
+	if auth == nil {
+		return true
+	}
+	if auth.Status != StatusActive {
+		return false
+	}
+	if auth.Unavailable || auth.StatusMessage != "" || !auth.NextRetryAfter.IsZero() || auth.LastError != nil {
+		return false
+	}
+	if auth.Quota.Exceeded || auth.Quota.Reason != "" || !auth.Quota.NextRecoverAt.IsZero() || auth.Quota.BackoffLevel != 0 {
 		return false
 	}
 	return true
@@ -3162,7 +3204,7 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 			tried[selected.ID] = struct{}{}
 			continue
 		}
-		authCopy := selected.Clone()
+		authCopy := cloneAuthForExecution(provider, selected)
 		if !selected.indexAssigned {
 			m.mu.Lock()
 			if current := m.auths[authCopy.ID]; current != nil && !current.indexAssigned {
@@ -3305,7 +3347,7 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 		if !okExecutor {
 			return nil, nil, "", &Error{Code: "executor_not_found", Message: "executor not registered"}
 		}
-		authCopy := selected.Clone()
+		authCopy := cloneAuthForExecution(providerKey, selected)
 		if !selected.indexAssigned {
 			m.mu.Lock()
 			if current := m.auths[authCopy.ID]; current != nil && !current.indexAssigned {
@@ -4091,7 +4133,7 @@ func (m *Manager) refreshAuthOnce(ctx context.Context, id string) {
 			m.auths[id] = current
 			shouldReschedule = true
 			if m.scheduler != nil {
-				m.scheduler.upsertAuth(current.Clone())
+				m.scheduler.upsertAuth(current.CloneForScheduler())
 			}
 		}
 		m.mu.Unlock()

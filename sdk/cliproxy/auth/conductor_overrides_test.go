@@ -570,6 +570,44 @@ func TestManager_MarkResult_RespectsAuthDisableCoolingOverride_On403(t *testing.
 	}
 }
 
+func TestManager_MarkResult_SkipsCleanModelSuccess(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+
+	updatedAt := time.Date(2026, 4, 26, 12, 0, 0, 0, time.UTC)
+	auth := &Auth{
+		ID:        "auth-clean-success",
+		Provider:  "claude",
+		Status:    StatusActive,
+		UpdatedAt: updatedAt,
+	}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+	registered, ok := m.GetByID(auth.ID)
+	if !ok || registered == nil {
+		t.Fatalf("expected auth to be present after register")
+	}
+	updatedAt = registered.UpdatedAt
+
+	m.MarkResult(context.Background(), Result{
+		AuthID:   auth.ID,
+		Provider: auth.Provider,
+		Model:    "steady-model",
+		Success:  true,
+	})
+
+	updated, ok := m.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to be present")
+	}
+	if !updated.UpdatedAt.Equal(updatedAt) {
+		t.Fatalf("UpdatedAt = %v, want unchanged %v", updated.UpdatedAt, updatedAt)
+	}
+	if len(updated.ModelStates) != 0 {
+		t.Fatalf("ModelStates = %#v, want nil/empty for clean success", updated.ModelStates)
+	}
+}
+
 func TestManager_Execute_DisableCooling_DoesNotBlackoutAfter403(t *testing.T) {
 	prev := quotaCooldownDisabled.Load()
 	quotaCooldownDisabled.Store(false)

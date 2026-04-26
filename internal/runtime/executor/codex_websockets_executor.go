@@ -942,7 +942,7 @@ func (e *CodexWebsocketsExecutor) applyCodexPromptCacheHeaders(ctx context.Conte
 	}
 
 	if resolution.cache.ID != "" {
-		rawJSON, _ = helps.SetJSONBytes(rawJSON, "prompt_cache_key", resolution.cache.ID)
+		rawJSON = codexSetPromptCacheKey(rawJSON, resolution.cache.ID)
 		if resolution.headerEligibleID != "" {
 			headers.Set(codexHeaderSessionID, resolution.headerEligibleID)
 		} else {
@@ -963,10 +963,10 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 
 	var ginHeaders http.Header
 	if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
-		ginHeaders = ginCtx.Request.Header.Clone()
+		ginHeaders = ginCtx.Request.Header
 	}
 
-	_, cfgBetaFeatures := codexHeaderDefaults(cfg, auth)
+	cfgUserAgent, cfgBetaFeatures := codexHeaderDefaults(cfg, auth)
 	ensureHeaderWithPriority(headers, ginHeaders, "x-codex-beta-features", cfgBetaFeatures, "")
 	misc.EnsureHeader(headers, ginHeaders, "x-responsesapi-include-timing-metrics", "")
 	misc.EnsureHeader(headers, ginHeaders, "Version", codexDefaultVersionHeader())
@@ -1011,7 +1011,7 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(&http.Request{Header: headers}, attrs)
-	if cfgUserAgent := codexConfiguredUserAgent(cfg, auth); cfgUserAgent != "" {
+	if cfgUserAgent != "" {
 		headers.Set("User-Agent", cfgUserAgent)
 	}
 

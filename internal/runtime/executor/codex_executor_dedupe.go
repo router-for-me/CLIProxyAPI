@@ -8,11 +8,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"sort"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
@@ -33,6 +33,15 @@ var codexDedupeIgnoredHeaders = map[string]struct{}{
 	"Traceparent":                           {},
 	"Tracestate":                            {},
 	"X-Responsesapi-Include-Timing-Metrics": {},
+}
+
+var codexDedupeRelevantHeaders = []string{
+	"Chatgpt-Account-Id",
+	"OpenAI-Beta",
+	"Session_id",
+	"X-Codex-Beta-Features",
+	"X-Codex-Installation-Id",
+	misc.CodexResidencyHeader,
 }
 
 type codexPreparedRequest struct {
@@ -61,8 +70,7 @@ func (e *CodexExecutor) prepareCodexRequest(ctx context.Context, from sdktransla
 	body := rawJSON
 	isCompact := strings.HasSuffix(strings.TrimSuffix(url, "/"), "/responses/compact")
 	if cache.ID != "" && !isCompact {
-		body = bytes.Clone(rawJSON)
-		body, _ = helps.SetJSONBytes(body, "prompt_cache_key", cache.ID)
+		body = codexSetPromptCacheKey(body, cache.ID)
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
@@ -323,7 +331,7 @@ func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Form
 	return prepared.httpReq, nil
 }
 
-func (e *CodexExecutor) fetchCodexNonStreamResponse(ctx context.Context, auth *cliproxyauth.Auth, url string, prepared codexPreparedRequest) (codexNonStreamHTTPResult, bool, error) {
+func (e *CodexExecutor) fetchCodexNonStreamResponse(ctx context.Context, auth *cliproxyauth.Auth, url string, prepared codexPreparedRequest, needResponseHeaders bool) (codexNonStreamHTTPResult, bool, error) {
 	key := e.codexResponseDedupeKey(auth, url, prepared)
 	result, executed, shared, err := e.responseDedupe.Do(ctx, key, func() (codexNonStreamHTTPResult, error) {
 		httpClient := helps.NewCodexFingerprintHTTPClient(ctx, e.cfg, auth, 0)
@@ -343,7 +351,7 @@ func (e *CodexExecutor) fetchCodexNonStreamResponse(ctx context.Context, auth *c
 		}
 		return codexNonStreamHTTPResult{
 			statusCode: httpResp.StatusCode,
-			headers:    httpResp.Header.Clone(),
+			headers:    httpResp.Header,
 			body:       data,
 		}, nil
 	})
@@ -355,13 +363,15 @@ func (e *CodexExecutor) fetchCodexNonStreamResponse(ctx context.Context, auth *c
 		helps.LogWithRequestID(ctx).Debugf("codex executor: deduped non-stream request for %s", url)
 	}
 
-	result = result.clone()
+	if shared {
+		result = result.clone(needResponseHeaders)
+	}
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, result.statusCode, result.headers)
 	helps.AppendAPIResponseChunk(ctx, e.cfg, result.body)
 	return result, executed, nil
 }
 
-func (e *CodexExecutor) fetchCodexResponsesAggregate(ctx context.Context, auth *cliproxyauth.Auth, url string, prepared codexPreparedRequest) (codexNonStreamHTTPResult, bool, error) {
+func (e *CodexExecutor) fetchCodexResponsesAggregate(ctx context.Context, auth *cliproxyauth.Auth, url string, prepared codexPreparedRequest, needResponseHeaders bool) (codexNonStreamHTTPResult, bool, error) {
 	key := e.codexResponseDedupeKey(auth, url, prepared)
 	captureBody := e.cfg != nil && e.cfg.RequestLog
 	result, executed, shared, err := e.responseDedupe.Do(ctx, key, func() (codexNonStreamHTTPResult, error) {
@@ -383,7 +393,7 @@ func (e *CodexExecutor) fetchCodexResponsesAggregate(ctx context.Context, auth *
 			}
 			return codexNonStreamHTTPResult{
 				statusCode: httpResp.StatusCode,
-				headers:    httpResp.Header.Clone(),
+				headers:    httpResp.Header,
 				body:       data,
 			}, nil
 		}
@@ -393,7 +403,7 @@ func (e *CodexExecutor) fetchCodexResponsesAggregate(ctx context.Context, auth *
 			return codexNonStreamHTTPResult{}, errRead
 		}
 		aggregate.statusCode = httpResp.StatusCode
-		aggregate.headers = httpResp.Header.Clone()
+		aggregate.headers = httpResp.Header
 		return aggregate, nil
 	})
 	if err != nil {
@@ -404,7 +414,9 @@ func (e *CodexExecutor) fetchCodexResponsesAggregate(ctx context.Context, auth *
 		helps.LogWithRequestID(ctx).Debugf("codex executor: deduped non-stream request for %s", url)
 	}
 
-	result = result.clone()
+	if shared {
+		result = result.clone(needResponseHeaders)
+	}
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, result.statusCode, result.headers)
 	if len(result.body) > 0 {
 		helps.AppendAPIResponseChunk(ctx, e.cfg, result.body)
@@ -453,11 +465,15 @@ func (e *CodexExecutor) codexResponseDedupeScope(auth *cliproxyauth.Auth) string
 	return strings.Join(parts, ",")
 }
 
-func (result codexNonStreamHTTPResult) clone() codexNonStreamHTTPResult {
+func (result codexNonStreamHTTPResult) clone(needResponseHeaders bool) codexNonStreamHTTPResult {
 	cloned := codexNonStreamHTTPResult{
 		statusCode:  result.statusCode,
-		headers:     result.headers.Clone(),
 		errorStatus: result.errorStatus,
+	}
+	if needResponseHeaders {
+		cloned.headers = result.headers.Clone()
+	} else {
+		cloned.headers = result.headers
 	}
 	if len(result.body) > 0 {
 		cloned.body = bytes.Clone(result.body)
@@ -581,34 +597,39 @@ func hashCodexDedupeHeaders(headers http.Header) string {
 		return "none"
 	}
 
-	keys := make([]string, 0, len(headers))
-	for key := range headers {
-		canonical := http.CanonicalHeaderKey(key)
-		if _, ignored := codexDedupeIgnoredHeaders[canonical]; ignored {
-			continue
+	hasher := sha256.New()
+	wrote := false
+	for _, key := range codexDedupeRelevantHeaders {
+		if values := headers[key]; len(values) > 0 {
+			hashCodexHeaderValues(hasher, key, values)
+			wrote = true
 		}
-		keys = append(keys, canonical)
 	}
-	sort.Strings(keys)
-	if len(keys) == 0 {
+	if !wrote {
 		return "none"
 	}
-
-	hasher := sha256.New()
-	for _, key := range keys {
-		values := append([]string(nil), headers.Values(key)...)
-		sort.Strings(values)
-		_, _ = hasher.Write([]byte(key))
-		_, _ = hasher.Write([]byte{'='})
-		for i := range values {
-			if i > 0 {
-				_, _ = hasher.Write([]byte{0})
-			}
-			_, _ = hasher.Write([]byte(values[i]))
-		}
-		_, _ = hasher.Write([]byte{'\n'})
-	}
 	return hex.EncodeToString(hasher.Sum(nil))[:codexResponseDedupeHashLen]
+}
+
+func hashCodexHeaderValues(hasher io.Writer, key string, values []string) {
+	if hasher == nil || key == "" || len(values) == 0 {
+		return
+	}
+
+	_, _ = hasher.Write([]byte(key))
+	_, _ = hasher.Write([]byte{'='})
+	if len(values) == 1 {
+		_, _ = hasher.Write([]byte(values[0]))
+		_, _ = hasher.Write([]byte{'\n'})
+		return
+	}
+	for i := range values {
+		if i > 0 {
+			_, _ = hasher.Write([]byte{0})
+		}
+		_, _ = hasher.Write([]byte(values[i]))
+	}
+	_, _ = hasher.Write([]byte{'\n'})
 }
 
 func shortHashString(value string) string {

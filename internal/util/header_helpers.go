@@ -8,43 +8,22 @@ import (
 // ApplyCustomHeadersFromAttrs applies user-defined headers stored in the provided attributes map.
 // Custom headers override built-in defaults when conflicts occur.
 func ApplyCustomHeadersFromAttrs(r *http.Request, attrs map[string]string) {
-	if r == nil {
+	if r == nil || len(attrs) == 0 {
 		return
 	}
-	applyCustomHeaders(r, extractCustomHeaders(attrs))
-}
-
-func extractCustomHeaders(attrs map[string]string) map[string]string {
-	if len(attrs) == 0 {
-		return nil
+	if r.Header == nil {
+		r.Header = make(http.Header)
 	}
-	headers := make(map[string]string)
-	for k, v := range attrs {
-		if !strings.HasPrefix(k, "header:") {
+	for rawKey, rawValue := range attrs {
+		if !strings.HasPrefix(rawKey, "header:") {
 			continue
 		}
-		name := strings.TrimSpace(strings.TrimPrefix(k, "header:"))
+		name := strings.TrimSpace(strings.TrimPrefix(rawKey, "header:"))
 		if name == "" {
 			continue
 		}
-		val := strings.TrimSpace(v)
+		val := strings.TrimSpace(rawValue)
 		if val == "" {
-			continue
-		}
-		headers[name] = val
-	}
-	if len(headers) == 0 {
-		return nil
-	}
-	return headers
-}
-
-func applyCustomHeaders(r *http.Request, headers map[string]string) {
-	if r == nil || len(headers) == 0 {
-		return
-	}
-	for k, v := range headers {
-		if k == "" || v == "" {
 			continue
 		}
 		// net/http reads Host from req.Host (not req.Header) when writing
@@ -52,9 +31,9 @@ func applyCustomHeaders(r *http.Request, headers map[string]string) {
 		// synthetic requests (e.g. &http.Request{Header: ...}) and only
 		// consume r.Header afterwards, so keep the value in the header
 		// map too.
-		if http.CanonicalHeaderKey(k) == "Host" {
-			r.Host = v
+		if http.CanonicalHeaderKey(name) == "Host" {
+			r.Host = val
 		}
-		r.Header.Set(k, v)
+		r.Header.Set(name, val)
 	}
 }

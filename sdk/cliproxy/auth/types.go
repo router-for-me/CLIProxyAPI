@@ -131,18 +131,8 @@ func (a *Auth) Clone() *Auth {
 		return nil
 	}
 	copyAuth := *a
-	if len(a.Attributes) > 0 {
-		copyAuth.Attributes = make(map[string]string, len(a.Attributes))
-		for key, value := range a.Attributes {
-			copyAuth.Attributes[key] = value
-		}
-	}
-	if len(a.Metadata) > 0 {
-		copyAuth.Metadata = make(map[string]any, len(a.Metadata))
-		for key, value := range a.Metadata {
-			copyAuth.Metadata[key] = value
-		}
-	}
+	copyAuth.Attributes = cloneStringMap(a.Attributes)
+	copyAuth.Metadata = cloneAnyMap(a.Metadata)
 	if len(a.ModelStates) > 0 {
 		copyAuth.ModelStates = make(map[string]*ModelState, len(a.ModelStates))
 		for key, state := range a.ModelStates {
@@ -151,6 +141,96 @@ func (a *Auth) Clone() *Auth {
 	}
 	copyAuth.Runtime = a.Runtime
 	return &copyAuth
+}
+
+// CloneShallow copies the Auth struct while reusing nested maps and model state
+// references. It is only safe for read-only snapshots.
+func (a *Auth) CloneShallow() *Auth {
+	if a == nil {
+		return nil
+	}
+	copyAuth := *a
+	copyAuth.Runtime = a.Runtime
+	return &copyAuth
+}
+
+// CloneForScheduler copies only the fields the scheduler needs to retain.
+// Most providers keep a narrowed routing/cooldown snapshot, while codex keeps
+// full Attributes/Metadata because scheduler snapshots also back its execution
+// fast path.
+func (a *Auth) CloneForScheduler() *Auth {
+	if a == nil {
+		return nil
+	}
+	copyAuth := *a
+	copyAuth.Runtime = nil
+	copyAuth.LastError = nil
+	copyAuth.StatusMessage = ""
+	if strings.EqualFold(strings.TrimSpace(a.Provider), "codex") {
+		copyAuth.Attributes = cloneStringMap(a.Attributes)
+		copyAuth.Metadata = cloneAnyMap(a.Metadata)
+	} else {
+		copyAuth.Attributes = cloneAuthAttributesForScheduler(a.Attributes)
+		copyAuth.Metadata = cloneAuthMetadataForScheduler(a.Metadata)
+	}
+	if len(a.ModelStates) > 0 {
+		copyAuth.ModelStates = make(map[string]*ModelState, len(a.ModelStates))
+		for key, state := range a.ModelStates {
+			copyAuth.ModelStates[key] = state.CloneForScheduler()
+		}
+	} else {
+		copyAuth.ModelStates = nil
+	}
+	return &copyAuth
+}
+
+func cloneStringMap(src map[string]string) map[string]string {
+	if len(src) == 0 {
+		return nil
+	}
+	dst := make(map[string]string, len(src))
+	for key, value := range src {
+		dst[key] = value
+	}
+	return dst
+}
+
+func cloneAnyMap(src map[string]any) map[string]any {
+	if len(src) == 0 {
+		return nil
+	}
+	dst := make(map[string]any, len(src))
+	for key, value := range src {
+		dst[key] = value
+	}
+	return dst
+}
+
+func cloneAuthAttributesForScheduler(src map[string]string) map[string]string {
+	if len(src) == 0 {
+		return nil
+	}
+	var dst map[string]string
+	for _, key := range []string{"priority", "websockets", "gemini_virtual_parent"} {
+		if value := src[key]; value != "" {
+			if dst == nil {
+				dst = make(map[string]string, 3)
+			}
+			dst[key] = value
+		}
+	}
+	return dst
+}
+
+func cloneAuthMetadataForScheduler(src map[string]any) map[string]any {
+	if len(src) == 0 {
+		return nil
+	}
+	value, ok := src["websockets"]
+	if !ok {
+		return nil
+	}
+	return map[string]any{"websockets": value}
 }
 
 func stableAuthIndex(seed string) string {
@@ -250,6 +330,20 @@ func (m *ModelState) Clone() *ModelState {
 		}
 	}
 	return &copyState
+}
+
+// CloneForScheduler copies only the fields the scheduler needs for
+// availability and cooldown decisions.
+func (m *ModelState) CloneForScheduler() *ModelState {
+	if m == nil {
+		return nil
+	}
+	return &ModelState{
+		Status:         m.Status,
+		Unavailable:    m.Unavailable,
+		NextRetryAfter: m.NextRetryAfter,
+		Quota:          m.Quota,
+	}
 }
 
 func (a *Auth) ProxyInfo() string {

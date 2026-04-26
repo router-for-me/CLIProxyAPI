@@ -54,3 +54,9 @@ func TestRequestExecutionMetadataIncludesExecutionHints(t *testing.T) {
 		t.Fatalf("selected auth callback was not preserved")
 	}
 }
+
+func TestRequestExecutionMetadataEmptyReturnsNil(t *testing.T) {
+	if meta := requestExecutionMetadata(context.Background()); meta != nil {
+		t.Fatalf("requestExecutionMetadata() = %#v, want nil", meta)
+	}
+}

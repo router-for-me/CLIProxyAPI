@@ -187,7 +187,7 @@ func LookupModelInfo(modelID string, provider ...string) *ModelInfo {
 	}
 
 	if info := GetGlobalRegistry().GetModelInfo(modelID, p); info != nil {
-		return cloneModelInfo(info)
+		return info
 	}
 	return cloneModelInfo(LookupStaticModelInfo(modelID))
 }
@@ -1430,6 +1430,31 @@ func (r *ModelRegistry) GetModelsForClient(clientID string) []*ModelInfo {
 		if reg, ok := r.models[modelID]; ok && reg.Info != nil {
 			result = append(result, cloneModelInfo(reg.Info))
 		}
+	}
+	return result
+}
+
+// GetModelIDsForClient returns the unique model IDs registered for a specific client.
+func (r *ModelRegistry) GetModelIDsForClient(clientID string) []string {
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+
+	modelIDs, exists := r.clientModels[clientID]
+	if !exists || len(modelIDs) == 0 {
+		return nil
+	}
+
+	seen := make(map[string]struct{}, len(modelIDs))
+	result := make([]string, 0, len(modelIDs))
+	for _, modelID := range modelIDs {
+		if modelID == "" {
+			continue
+		}
+		if _, dup := seen[modelID]; dup {
+			continue
+		}
+		seen[modelID] = struct{}{}
+		result = append(result, modelID)
 	}
 	return result
 }

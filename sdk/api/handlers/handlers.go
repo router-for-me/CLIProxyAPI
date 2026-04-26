@@ -66,6 +66,11 @@ type selectedAuthCallbackContextKey struct{}
 type executionSessionContextKey struct{}
 type disallowFreeAuthContextKey struct{}
 
+var (
+	backgroundContext = context.Background()
+	todoContext       = context.TODO()
+)
+
 // WithPinnedAuthID returns a child context that requests execution on a specific auth ID.
 func WithPinnedAuthID(ctx context.Context, authID string) context.Context {
 	authID = strings.TrimSpace(authID)
@@ -213,21 +218,27 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 		}
 	}
 
-	meta := make(map[string]any, 4)
+	var meta map[string]any
+	appendMeta := func(key string, value any) {
+		if meta == nil {
+			meta = make(map[string]any, 5)
+		}
+		meta[key] = value
+	}
 	if key != "" {
-		meta[idempotencyKeyMetadataKey] = key
+		appendMeta(idempotencyKeyMetadataKey, key)
 	}
 	if pinnedAuthID := pinnedAuthIDFromContext(ctx); pinnedAuthID != "" {
-		meta[coreexecutor.PinnedAuthMetadataKey] = pinnedAuthID
+		appendMeta(coreexecutor.PinnedAuthMetadataKey, pinnedAuthID)
 	}
 	if selectedCallback := selectedAuthIDCallbackFromContext(ctx); selectedCallback != nil {
-		meta[coreexecutor.SelectedAuthCallbackMetadataKey] = selectedCallback
+		appendMeta(coreexecutor.SelectedAuthCallbackMetadataKey, selectedCallback)
 	}
 	if executionSessionID := executionSessionIDFromContext(ctx); executionSessionID != "" {
-		meta[coreexecutor.ExecutionSessionMetadataKey] = executionSessionID
+		appendMeta(coreexecutor.ExecutionSessionMetadataKey, executionSessionID)
 	}
 	if disallowFreeAuthFromContext(ctx) {
-		meta[coreexecutor.DisallowFreeAuthMetadataKey] = true
+		appendMeta(coreexecutor.DisallowFreeAuthMetadataKey, true)
 	}
 	return meta
 }
@@ -352,7 +363,7 @@ func (h *BaseAPIHandler) GetAlt(c *gin.Context) string {
 func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *gin.Context, ctx context.Context) (context.Context, APIHandlerCancelFunc) {
 	parentCtx := ctx
 	if parentCtx == nil {
-		parentCtx = context.Background()
+		parentCtx = backgroundContext
 	}
 
 	var requestCtx context.Context
@@ -360,16 +371,30 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 		requestCtx = c.Request.Context()
 	}
 
-	if requestCtx != nil && logging.GetRequestID(parentCtx) == "" {
-		if requestID := logging.GetRequestID(requestCtx); requestID != "" {
-			parentCtx = logging.WithRequestID(parentCtx, requestID)
-		} else if requestID := logging.GetGinRequestID(c); requestID != "" {
-			parentCtx = logging.WithRequestID(parentCtx, requestID)
+	baseCtx := parentCtx
+	bridgeRequestCancel := false
+	if requestCtx != nil {
+		switch {
+		case parentCtx == requestCtx:
+			baseCtx = requestCtx
+		case parentCtx == backgroundContext || parentCtx == todoContext:
+			baseCtx = requestCtx
+		default:
+			bridgeRequestCancel = true
 		}
 	}
-	newCtx, cancel := context.WithCancel(parentCtx)
-	cancelCtx := newCtx
-	if requestCtx != nil && requestCtx != parentCtx {
+
+	if logging.GetRequestID(baseCtx) == "" {
+		if requestID := logging.GetRequestID(requestCtx); requestID != "" {
+			baseCtx = logging.WithRequestID(baseCtx, requestID)
+		} else if requestID := logging.GetGinRequestID(c); requestID != "" {
+			baseCtx = logging.WithRequestID(baseCtx, requestID)
+		}
+	}
+
+	newCtx, cancel := context.WithCancel(baseCtx)
+	if bridgeRequestCancel {
+		cancelCtx := newCtx
 		go func() {
 			select {
 			case <-requestCtx.Done():
@@ -380,8 +405,9 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 	}
 	newCtx = context.WithValue(newCtx, "gin", c)
 	newCtx = context.WithValue(newCtx, "handler", handler)
+	requestLogEnabled := h != nil && h.Cfg != nil && h.Cfg.RequestLog
 	return newCtx, func(params ...interface{}) {
-		if h.Cfg.RequestLog && len(params) == 1 {
+		if requestLogEnabled && len(params) == 1 {
 			existingText := currentAPIResponseText(c)
 			if strings.TrimSpace(existingText) != "" {
 				switch params[0].(type) {
@@ -637,7 +663,13 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 		return nil, nil, errMsg
 	}
 	reqMeta := requestExecutionMetadata(ctx)
+	if reqMeta == nil {
+		reqMeta = make(map[string]any, 1)
+	}
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
+	if PassthroughHeadersEnabled(h.Cfg) {
+		reqMeta[coreexecutor.NeedResponseHeadersMetadataKey] = true
+	}
 	payload := rawJSON
 	if len(payload) == 0 {
 		payload = nil
@@ -684,7 +716,13 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 		return nil, nil, errMsg
 	}
 	reqMeta := requestExecutionMetadata(ctx)
+	if reqMeta == nil {
+		reqMeta = make(map[string]any, 1)
+	}
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
+	if PassthroughHeadersEnabled(h.Cfg) {
+		reqMeta[coreexecutor.NeedResponseHeadersMetadataKey] = true
+	}
 	payload := rawJSON
 	if len(payload) == 0 {
 		payload = nil
@@ -735,7 +773,13 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 		return nil, nil, errChan
 	}
 	reqMeta := requestExecutionMetadata(ctx)
+	if reqMeta == nil {
+		reqMeta = make(map[string]any, 1)
+	}
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
+	if PassthroughHeadersEnabled(h.Cfg) {
+		reqMeta[coreexecutor.NeedResponseHeadersMetadataKey] = true
+	}
 	payload := rawJSON
 	if len(payload) == 0 {
 		payload = nil

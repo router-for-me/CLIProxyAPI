@@ -5,21 +5,34 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 )
 
 const (
 	StreamChunkBufferSize  = 32
-	streamLineInitialSize  = 64 * 1024
+	streamLineInitialSize  = 4 * 1024
 	streamLineMaxSizeBytes = 8 * 1024 * 1024
 )
 
 var ErrStreamLineTooLong = errors.New("stream line exceeds configured maximum")
 
+var streamReaderPool = sync.Pool{
+	New: func() any {
+		return bufio.NewReaderSize(nil, streamLineInitialSize)
+	},
+}
+
 // ReadStreamLines reads newline-delimited records with a modest reader buffer while
 // enforcing a hard per-line size cap. The handler receives stable line slices that
 // do not alias the reader's internal buffer.
 func ReadStreamLines(r io.Reader, handler func([]byte) error) error {
-	reader := bufio.NewReaderSize(r, streamLineInitialSize)
+	reader := streamReaderPool.Get().(*bufio.Reader)
+	reader.Reset(r)
+	defer func() {
+		reader.Reset(nil)
+		streamReaderPool.Put(reader)
+	}()
+
 	for {
 		line, err := readLimitedLine(reader)
 		if err != nil {

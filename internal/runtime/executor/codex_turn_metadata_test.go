@@ -46,3 +46,10 @@ func TestCodexEnsureTurnMetadataHeaderPreservesClientHeader(t *testing.T) {
 		t.Fatalf("turn metadata = %q, want client value", got)
 	}
 }
+
+func BenchmarkCodexBuildTurnMetadataHeader(b *testing.B) {
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_ = codexBuildTurnMetadataHeader("session-1", codexDefaultThreadSource, "turn-1", codexDefaultSandboxTag)
+	}
+}

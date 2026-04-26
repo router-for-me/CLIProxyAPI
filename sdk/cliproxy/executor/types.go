@@ -22,6 +22,8 @@ const (
 	SelectedAuthCallbackMetadataKey = "selected_auth_callback"
 	// ExecutionSessionMetadataKey identifies a long-lived downstream execution session.
 	ExecutionSessionMetadataKey = "execution_session_id"
+	// NeedResponseHeadersMetadataKey requests that executors retain upstream response headers.
+	NeedResponseHeadersMetadataKey = "need_response_headers"
 )
 
 // Request encapsulates the translated payload that will be sent to a provider executor.

@@ -6,6 +6,7 @@ package logging
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"runtime/debug"
 	"strings"
@@ -39,10 +40,9 @@ const skipGinLogKey = "__gin_skip_request_logging__"
 // Returns:
 //   - gin.HandlerFunc: A middleware handler for request logging
 func GinLogrusLogger() gin.HandlerFunc {
+	logger := log.StandardLogger()
 	return func(c *gin.Context) {
-		start := time.Now()
 		path := c.Request.URL.Path
-		raw := util.MaskSensitiveQuery(c.Request.URL.RawQuery)
 
 		// Only generate request ID for AI API paths
 		var requestID string
@@ -53,12 +53,20 @@ func GinLogrusLogger() gin.HandlerFunc {
 			c.Request = c.Request.WithContext(ctx)
 		}
 
+		start := time.Now()
 		c.Next()
 
 		if shouldSkipGinRequestLogging(c) {
 			return
 		}
 
+		statusCode := c.Writer.Status()
+		level := ginRequestLogLevel(statusCode)
+		if ginRequestLogDiscarded(logger) || !logger.IsLevelEnabled(level) {
+			return
+		}
+
+		raw := util.MaskSensitiveQuery(c.Request.URL.RawQuery)
 		if raw != "" {
 			path = path + "?" + raw
 		}
@@ -70,7 +78,6 @@ func GinLogrusLogger() gin.HandlerFunc {
 			latency = latency.Truncate(time.Millisecond)
 		}
 
-		statusCode := c.Writer.Status()
 		clientIP := c.ClientIP()
 		method := c.Request.Method
 		errorMessage := c.Errors.ByType(gin.ErrorTypePrivate).String()
@@ -83,16 +90,31 @@ func GinLogrusLogger() gin.HandlerFunc {
 			logLine = logLine + " | " + errorMessage
 		}
 
-		entry := log.WithField("request_id", requestID)
+		entry := logger.WithField("request_id", requestID)
 
-		switch {
-		case statusCode >= http.StatusInternalServerError:
+		switch level {
+		case log.ErrorLevel:
 			entry.Error(logLine)
-		case statusCode >= http.StatusBadRequest:
+		case log.WarnLevel:
 			entry.Warn(logLine)
 		default:
 			entry.Info(logLine)
 		}
+	}
+}
+
+func ginRequestLogDiscarded(logger *log.Logger) bool {
+	return logger == nil || logger.Out == io.Discard
+}
+
+func ginRequestLogLevel(statusCode int) log.Level {
+	switch {
+	case statusCode >= http.StatusInternalServerError:
+		return log.ErrorLevel
+	case statusCode >= http.StatusBadRequest:
+		return log.WarnLevel
+	default:
+		return log.InfoLevel
 	}
 }
 

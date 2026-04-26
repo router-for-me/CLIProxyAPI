@@ -40,3 +40,13 @@ func TestReadStreamLinesRejectsOversizedLine(t *testing.T) {
 		t.Fatalf("ReadStreamLines error = %v, want ErrStreamLineTooLong", err)
 	}
 }
+
+func BenchmarkReadStreamLinesSmallSSE(b *testing.B) {
+	input := strings.Repeat("data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n", 8)
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		if err := ReadStreamLines(strings.NewReader(input), func([]byte) error { return nil }); err != nil {
+			b.Fatal(err)
+		}
+	}
+}

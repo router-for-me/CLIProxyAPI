@@ -11,6 +11,15 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
+// codexUserAgent is the default User-Agent string used when no explicit
+// client-, config-, or auth-file-provided value is available. It is built
+// dynamically at startup by misc.BuildCodexUserAgent so the proxy emits a
+// plausible fingerprint for the actual host OS/arch/terminal rather than a
+// hard-coded Linux string.
+var codexUserAgent = misc.CodexCLIUserAgent
+
+const codexOriginator = misc.CodexCLIOriginator
+
 type codexRequestIdentity struct {
 	userAgent  string
 	originator string

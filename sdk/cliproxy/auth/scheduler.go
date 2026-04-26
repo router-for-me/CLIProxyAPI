@@ -714,16 +714,13 @@ func supportedModelSetForAuth(authID string) map[string]struct{} {
 	if authID == "" {
 		return nil
 	}
-	models := registry.GetGlobalRegistry().GetModelsForClient(authID)
-	if len(models) == 0 {
+	modelIDs := registry.GetGlobalRegistry().GetModelIDsForClient(authID)
+	if len(modelIDs) == 0 {
 		return nil
 	}
-	set := make(map[string]struct{}, len(models))
-	for _, model := range models {
-		if model == nil {
-			continue
-		}
-		modelKey := canonicalModelKey(model.ID)
+	set := make(map[string]struct{}, len(modelIDs))
+	for _, modelID := range modelIDs {
+		modelKey := canonicalModelKey(modelID)
 		if modelKey == "" {
 			continue
 		}

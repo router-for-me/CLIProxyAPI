@@ -85,6 +85,29 @@ func TestGetModelsForClientReturnsClones(t *testing.T) {
 	}
 }
 
+func TestGetModelIDsForClientReturnsCopy(t *testing.T) {
+	r := newTestModelRegistry()
+	r.RegisterClient("client-1", "gemini", []*ModelInfo{{
+		ID: "m1",
+	}, {
+		ID: "m2",
+	}})
+
+	first := r.GetModelIDsForClient("client-1")
+	if len(first) != 2 {
+		t.Fatalf("expected two model IDs, got %+v", first)
+	}
+	first[0] = "mutated"
+
+	second := r.GetModelIDsForClient("client-1")
+	if len(second) != 2 {
+		t.Fatalf("expected two model IDs on second fetch, got %+v", second)
+	}
+	if second[0] != "m1" {
+		t.Fatalf("expected original model ID, got %q", second[0])
+	}
+}
+
 func TestGetAvailableModelsByProviderReturnsClones(t *testing.T) {
 	r := newTestModelRegistry()
 	r.RegisterClient("client-1", "gemini", []*ModelInfo{{
@@ -176,5 +199,35 @@ func TestLookupModelInfoReturnsCloneForStaticDefinitions(t *testing.T) {
 	second := LookupModelInfo(modelID)
 	if second == nil || second.Thinking == nil || len(second.Thinking.Levels) == 0 || second.Thinking.Levels[0] == "mutated" {
 		t.Fatalf("expected static lookup clone, got %+v", second)
+	}
+}
+
+func TestLookupModelInfoReturnsCloneForDynamicRegistry(t *testing.T) {
+	r := GetGlobalRegistry()
+	r.RegisterClient("lookup-client-1", "gemini", []*ModelInfo{{
+		ID:          "lookup-model-1",
+		DisplayName: "Lookup Model",
+		Thinking:    &ThinkingSupport{Levels: []string{"low", "high"}},
+	}})
+	t.Cleanup(func() {
+		r.UnregisterClient("lookup-client-1")
+	})
+
+	first := LookupModelInfo("lookup-model-1", "gemini")
+	if first == nil || first.Thinking == nil || len(first.Thinking.Levels) == 0 {
+		t.Fatalf("expected dynamic lookup model, got %+v", first)
+	}
+	first.DisplayName = "mutated"
+	first.Thinking.Levels[0] = "mutated"
+
+	second := LookupModelInfo("lookup-model-1", "gemini")
+	if second == nil {
+		t.Fatal("expected second dynamic lookup model")
+	}
+	if second.DisplayName != "Lookup Model" {
+		t.Fatalf("expected cloned dynamic display name, got %q", second.DisplayName)
+	}
+	if second.Thinking == nil || len(second.Thinking.Levels) == 0 || second.Thinking.Levels[0] != "low" {
+		t.Fatalf("expected cloned dynamic thinking levels, got %+v", second.Thinking)
 	}
 }

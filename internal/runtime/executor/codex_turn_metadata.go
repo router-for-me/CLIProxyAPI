@@ -1,8 +1,8 @@
 package executor
 
 import (
-	"encoding/json"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/google/uuid"
@@ -54,16 +54,35 @@ func codexDefaultTurnMetadataHeader(sessionID string) string {
 }
 
 func codexBuildTurnMetadataHeader(sessionID string, threadSource string, turnID string, sandbox string) string {
-	payload, err := json.Marshal(codexTurnMetadata{
-		SessionID:    strings.TrimSpace(sessionID),
-		ThreadSource: strings.TrimSpace(threadSource),
-		TurnID:       strings.TrimSpace(turnID),
-		Sandbox:      strings.TrimSpace(sandbox),
-	})
-	if err != nil {
-		return `{"thread_source":"user","sandbox":"none"}`
+	sessionID = strings.TrimSpace(sessionID)
+	threadSource = strings.TrimSpace(threadSource)
+	turnID = strings.TrimSpace(turnID)
+	sandbox = strings.TrimSpace(sandbox)
+
+	var builder strings.Builder
+	builder.Grow(len(sessionID) + len(threadSource) + len(turnID) + len(sandbox) + 64)
+	builder.WriteByte('{')
+	first := true
+	appendQuotedJSONField := func(name string, value string) {
+		if value == "" {
+			return
+		}
+		if !first {
+			builder.WriteByte(',')
+		}
+		first = false
+		builder.WriteByte('"')
+		builder.WriteString(name)
+		builder.WriteString(`":`)
+		builder.WriteString(strconv.Quote(value))
 	}
-	return string(payload)
+
+	appendQuotedJSONField("session_id", sessionID)
+	appendQuotedJSONField("thread_source", threadSource)
+	appendQuotedJSONField("turn_id", turnID)
+	appendQuotedJSONField("sandbox", sandbox)
+	builder.WriteByte('}')
+	return builder.String()
 }
 
 func codexTurnMetadataSessionID(target http.Header, source http.Header) string {

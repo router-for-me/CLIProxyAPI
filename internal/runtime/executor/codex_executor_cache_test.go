@@ -11,6 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
@@ -309,6 +310,46 @@ func TestHashCodexDedupeHeaders_IgnoresTraceAndTimingHeaders(t *testing.T) {
 	rightHash := hashCodexDedupeHeaders(right)
 	if leftHash != rightHash {
 		t.Fatalf("hashCodexDedupeHeaders() mismatch: left=%q right=%q", leftHash, rightHash)
+	}
+}
+
+func TestHashCodexDedupeHeaders_DistinguishesRelevantHeaders(t *testing.T) {
+	left := http.Header{
+		"Session_id":              []string{"session-a"},
+		"OpenAI-Beta":             []string{"responses=v1"},
+		"X-Codex-Beta-Features":   []string{"beta-a"},
+		"X-Codex-Installation-Id": []string{"installation-1"},
+		misc.CodexResidencyHeader: []string{"us"},
+	}
+	right := http.Header{
+		"Session_id":              []string{"session-b"},
+		"OpenAI-Beta":             []string{"responses=v1"},
+		"X-Codex-Beta-Features":   []string{"beta-a"},
+		"X-Codex-Installation-Id": []string{"installation-1"},
+		misc.CodexResidencyHeader: []string{"us"},
+	}
+
+	if leftHash, rightHash := hashCodexDedupeHeaders(left), hashCodexDedupeHeaders(right); leftHash == rightHash {
+		t.Fatalf("hashCodexDedupeHeaders() should differ for relevant headers: left=%q right=%q", leftHash, rightHash)
+	}
+}
+
+func BenchmarkHashCodexDedupeHeaders(b *testing.B) {
+	headers := http.Header{
+		"Accept":                  []string{"text/event-stream"},
+		"Content-Type":            []string{"application/json"},
+		"Session_id":              []string{"session-123"},
+		"OpenAI-Beta":             []string{"responses=v1"},
+		"X-Codex-Beta-Features":   []string{"beta-a"},
+		"X-Codex-Installation-Id": []string{"installation-123"},
+		misc.CodexResidencyHeader: []string{"us"},
+		"Traceparent":             []string{"00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01"},
+		"Tracestate":              []string{"vendor-a=value-a"},
+	}
+
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_ = hashCodexDedupeHeaders(headers)
 	}
 }
 
