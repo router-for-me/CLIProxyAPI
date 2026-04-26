@@ -431,6 +431,7 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 	if claims := extractCodexIDTokenClaims(auth); claims != nil {
 		entry["id_token"] = claims
 	}
+	addCodexAccountEntryFields(entry, auth)
 	// Expose priority from Attributes (set by synthesizer from JSON "priority" field).
 	// Fall back to Metadata for auths registered via UploadAuthFile (no synthesizer).
 	if p := strings.TrimSpace(authAttribute(auth, "priority")); p != "" {
@@ -463,6 +464,311 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 		}
 	}
 	return entry
+}
+
+func addCodexAccountEntryFields(entry gin.H, auth *coreauth.Auth) {
+	if entry == nil || auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		return
+	}
+
+	planType := strings.TrimSpace(authAttribute(auth, "plan_type"))
+	if claims := extractCodexIDTokenClaims(auth); claims != nil {
+		if planType == "" {
+			if v, ok := claims["plan_type"].(string); ok {
+				planType = strings.TrimSpace(v)
+			}
+		}
+		if v, ok := claims["chatgpt_subscription_active_start"]; ok {
+			entry["subscription_start"] = v
+			entry["chatgpt_subscription_active_start"] = v
+		}
+		if v, ok := claims["chatgpt_subscription_active_until"]; ok {
+			entry["subscription_until"] = v
+			entry["chatgpt_subscription_active_until"] = v
+		}
+	}
+	if planType != "" {
+		entry["plan_type"] = strings.ToLower(planType)
+	}
+
+	now := time.Now()
+	addQuotaEntryFields(entry, auth.Quota, now)
+	addCodexQuotaWindowEntryFields(entry, auth, now)
+}
+
+func addQuotaEntryFields(entry gin.H, quota coreauth.QuotaState, now time.Time) {
+	entry["quota_exceeded"] = quota.Exceeded
+	entry["quota_status"] = quotaEntryStatus(quota, now)
+	if reason := strings.TrimSpace(quota.Reason); reason != "" {
+		entry["quota_reason"] = reason
+	}
+	if !quota.NextRecoverAt.IsZero() {
+		recoverAt := quota.NextRecoverAt.UTC()
+		entry["quota_next_recover_at"] = recoverAt
+		if recoverAt.After(now) {
+			recoverAfter := recoverAt.Sub(now)
+			entry["quota_recover_after_seconds"] = int64(recoverAfter.Seconds())
+			entry["quota_recover_in"] = recoverAfter.Round(time.Second).String()
+		}
+	}
+	if quota.BackoffLevel > 0 {
+		entry["quota_backoff_level"] = quota.BackoffLevel
+	}
+}
+
+func quotaEntryStatus(quota coreauth.QuotaState, now time.Time) string {
+	if quota.Exceeded {
+		if quota.NextRecoverAt.After(now) {
+			return "recovering"
+		}
+		return "exceeded"
+	}
+	if quota.Reason != "" || !quota.NextRecoverAt.IsZero() || quota.BackoffLevel > 0 {
+		return "limited"
+	}
+	return "available"
+}
+
+type codexQuotaWindow struct {
+	prefix   string
+	aliases  []string
+	keyBases []string
+}
+
+var codexQuotaWindows = []codexQuotaWindow{
+	{
+		prefix:  "quota_5h",
+		aliases: []string{"5h", "5_hour", "5_hours", "five_hour", "five_hours", "short"},
+		keyBases: []string{
+			"codex_quota_5h",
+			"codex_quota_5_hour",
+			"codex_quota_five_hour",
+			"quota_5h",
+			"quota_5_hour",
+			"usage_5h",
+			"usage_limit_5h",
+		},
+	},
+	{
+		prefix:  "quota_weekly",
+		aliases: []string{"weekly", "week", "7d", "seven_day", "seven_days"},
+		keyBases: []string{
+			"codex_quota_weekly",
+			"codex_quota_week",
+			"quota_weekly",
+			"quota_week",
+			"usage_weekly",
+			"usage_week",
+			"usage_limit_weekly",
+		},
+	},
+}
+
+func addCodexQuotaWindowEntryFields(entry gin.H, auth *coreauth.Auth, now time.Time) {
+	for _, window := range codexQuotaWindows {
+		addCodexQuotaWindowFromMetadata(entry, auth, window, now)
+	}
+	addCodexQuotaRuntimeFallback(entry, auth.Quota, now)
+}
+
+func addCodexQuotaWindowFromMetadata(entry gin.H, auth *coreauth.Auth, window codexQuotaWindow, now time.Time) bool {
+	limit, hasLimit := codexQuotaFieldString(auth, window, "limit", "max", "total")
+	remaining, hasRemaining := codexQuotaFieldString(auth, window, "remaining", "available", "left")
+	used, hasUsed := codexQuotaFieldString(auth, window, "used", "consumed")
+	status, hasStatus := codexQuotaFieldString(auth, window, "status", "state")
+	recoverAt, hasRecoverAt := codexQuotaFieldTime(auth, window, "reset_at", "resets_at", "recover_at", "next_recover_at")
+
+	if !hasLimit && !hasRemaining && !hasUsed && !hasStatus && !hasRecoverAt {
+		return false
+	}
+
+	if hasLimit {
+		entry[window.prefix+"_limit"] = limit
+	}
+	if hasRemaining {
+		entry[window.prefix+"_remaining"] = remaining
+	}
+	if hasUsed {
+		entry[window.prefix+"_used"] = used
+	}
+	if amount := formatCodexQuotaAmount(remaining, hasRemaining, limit, hasLimit, used, hasUsed); amount != "" {
+		entry[window.prefix+"_amount"] = amount
+	}
+	if hasStatus {
+		entry[window.prefix+"_status"] = strings.ToLower(status)
+	} else if hasRecoverAt && recoverAt.After(now) {
+		entry[window.prefix+"_status"] = "recovering"
+	} else {
+		entry[window.prefix+"_status"] = "available"
+	}
+	if hasRecoverAt {
+		setQuotaRecoverFields(entry, window.prefix, recoverAt, now)
+	}
+	return true
+}
+
+func addCodexQuotaRuntimeFallback(entry gin.H, quota coreauth.QuotaState, now time.Time) {
+	if !quotaHasState(quota) {
+		return
+	}
+	prefix := codexQuotaFallbackPrefix(quota, now)
+	if _, exists := entry[prefix+"_status"]; exists {
+		return
+	}
+	entry[prefix+"_status"] = quotaEntryStatus(quota, now)
+	if !quota.NextRecoverAt.IsZero() {
+		setQuotaRecoverFields(entry, prefix, quota.NextRecoverAt.UTC(), now)
+	}
+	if quota.BackoffLevel > 0 {
+		entry[prefix+"_backoff_level"] = quota.BackoffLevel
+	}
+}
+
+func quotaHasState(quota coreauth.QuotaState) bool {
+	return quota.Exceeded || strings.TrimSpace(quota.Reason) != "" || !quota.NextRecoverAt.IsZero() || quota.BackoffLevel > 0
+}
+
+func codexQuotaFallbackPrefix(quota coreauth.QuotaState, now time.Time) string {
+	reason := strings.ToLower(strings.TrimSpace(quota.Reason))
+	if strings.Contains(reason, "week") {
+		return "quota_weekly"
+	}
+	if strings.Contains(reason, "5h") || strings.Contains(reason, "5 hour") || strings.Contains(reason, "five hour") {
+		return "quota_5h"
+	}
+	if !quota.NextRecoverAt.IsZero() && quota.NextRecoverAt.Sub(now) > 5*time.Hour {
+		return "quota_weekly"
+	}
+	return "quota_5h"
+}
+
+func setQuotaRecoverFields(entry gin.H, prefix string, recoverAt, now time.Time) {
+	recoverAt = recoverAt.UTC()
+	entry[prefix+"_next_recover_at"] = recoverAt
+	if recoverAt.After(now) {
+		recoverAfter := recoverAt.Sub(now)
+		entry[prefix+"_recover_after_seconds"] = int64(recoverAfter.Seconds())
+		entry[prefix+"_recover_in"] = recoverAfter.Round(time.Second).String()
+	}
+}
+
+func codexQuotaFieldString(auth *coreauth.Auth, window codexQuotaWindow, suffixes ...string) (string, bool) {
+	raw, ok := codexQuotaFieldValue(auth, window, suffixes...)
+	if !ok {
+		return "", false
+	}
+	return codexQuotaString(raw)
+}
+
+func codexQuotaFieldTime(auth *coreauth.Auth, window codexQuotaWindow, suffixes ...string) (time.Time, bool) {
+	raw, ok := codexQuotaFieldValue(auth, window, suffixes...)
+	if !ok {
+		return time.Time{}, false
+	}
+	return parseCodexQuotaTime(raw)
+}
+
+func codexQuotaFieldValue(auth *coreauth.Auth, window codexQuotaWindow, suffixes ...string) (any, bool) {
+	if auth == nil {
+		return nil, false
+	}
+	for _, key := range codexQuotaFlatKeys(window, suffixes...) {
+		if auth.Metadata != nil {
+			if raw, ok := auth.Metadata[key]; ok {
+				return raw, true
+			}
+		}
+		if auth.Attributes != nil {
+			if raw, ok := auth.Attributes[key]; ok {
+				return raw, true
+			}
+		}
+	}
+	if raw, ok := codexQuotaNestedValue(auth.Metadata, window, suffixes...); ok {
+		return raw, true
+	}
+	return nil, false
+}
+
+func codexQuotaFlatKeys(window codexQuotaWindow, suffixes ...string) []string {
+	keys := make([]string, 0, len(window.keyBases)*len(suffixes))
+	for _, base := range window.keyBases {
+		for _, suffix := range suffixes {
+			keys = append(keys, base+"_"+suffix)
+		}
+	}
+	return keys
+}
+
+func codexQuotaNestedValue(metadata map[string]any, window codexQuotaWindow, suffixes ...string) (any, bool) {
+	if metadata == nil {
+		return nil, false
+	}
+	containerKeys := []string{"codex_quota", "codex_quotas", "quota", "quotas", "usage_limits", "usage"}
+	for _, containerKey := range containerKeys {
+		container, ok := metadata[containerKey].(map[string]any)
+		if !ok {
+			continue
+		}
+		for _, alias := range window.aliases {
+			nested, ok := container[alias].(map[string]any)
+			if !ok {
+				continue
+			}
+			for _, suffix := range suffixes {
+				if raw, ok := nested[suffix]; ok {
+					return raw, true
+				}
+			}
+		}
+	}
+	return nil, false
+}
+
+func codexQuotaString(raw any) (string, bool) {
+	switch v := raw.(type) {
+	case string:
+		s := strings.TrimSpace(v)
+		return s, s != ""
+	case int:
+		return strconv.Itoa(v), true
+	case int64:
+		return strconv.FormatInt(v, 10), true
+	case float64:
+		return strconv.FormatFloat(v, 'f', -1, 64), true
+	case json.Number:
+		return v.String(), true
+	default:
+		if raw == nil {
+			return "", false
+		}
+		s := strings.TrimSpace(fmt.Sprintf("%v", raw))
+		return s, s != ""
+	}
+}
+
+func parseCodexQuotaTime(raw any) (time.Time, bool) {
+	if ts, ok := raw.(time.Time); ok {
+		return ts.UTC(), !ts.IsZero()
+	}
+	return parseLastRefreshValue(raw)
+}
+
+func formatCodexQuotaAmount(remaining string, hasRemaining bool, limit string, hasLimit bool, used string, hasUsed bool) string {
+	switch {
+	case hasRemaining && hasLimit:
+		return fmt.Sprintf("%s / %s remaining", remaining, limit)
+	case hasUsed && hasLimit:
+		return fmt.Sprintf("%s / %s used", used, limit)
+	case hasRemaining:
+		return remaining + " remaining"
+	case hasUsed:
+		return used + " used"
+	case hasLimit:
+		return "limit " + limit
+	default:
+		return ""
+	}
 }
 
 func extractCodexIDTokenClaims(auth *coreauth.Auth) gin.H {
@@ -1024,6 +1330,15 @@ func (h *Handler) buildAuthFromFileData(path string, data []byte) (*coreauth.Aut
 	}
 	if hasLastRefresh {
 		auth.LastRefreshedAt = lastRefresh
+	}
+	if strings.EqualFold(provider, "codex") {
+		if idTokenRaw, ok := metadata["id_token"].(string); ok && strings.TrimSpace(idTokenRaw) != "" {
+			if claims, errParse := codex.ParseJWTToken(idTokenRaw); errParse == nil && claims != nil {
+				if planType := strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType); planType != "" {
+					auth.Attributes["plan_type"] = planType
+				}
+			}
+		}
 	}
 	if h != nil && h.authManager != nil {
 		if existing, ok := h.authManager.GetByID(authID); ok {

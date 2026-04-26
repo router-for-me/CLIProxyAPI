@@ -191,6 +191,9 @@ func (m authTabModel) renderContent() string {
 	for i, f := range m.files {
 		name := getString(f, "name")
 		channel := getString(f, "channel")
+		if channel == "" {
+			channel = getString(f, "type")
+		}
 		email := getString(f, "email")
 		disabled := getBool(f, "disabled")
 
@@ -219,6 +222,9 @@ func (m authTabModel) renderContent() string {
 
 		row := fmt.Sprintf("%s%s %-24s %-12s %-28s %s",
 			cursor, statusIcon, displayName, channel, displayEmail, statusText)
+		if summary := authFileRowSummary(f, m.width); summary != "" {
+			row += "  " + summary
+		}
 		sb.WriteString(rowStyle.Render(row))
 		sb.WriteString("\n")
 
@@ -251,6 +257,95 @@ func (m authTabModel) renderContent() string {
 	return sb.String()
 }
 
+func authFileRowSummary(f map[string]any, width int) string {
+	provider := getString(f, "provider")
+	if provider == "" {
+		provider = getString(f, "type")
+	}
+	if !strings.EqualFold(provider, "codex") && getAnyString(f, "plan_type") == "" {
+		return ""
+	}
+
+	parts := make([]string, 0, 3)
+	if plan := formatCodexPlanForRow(getAnyString(f, "plan_type")); plan != "" {
+		parts = append(parts, plan)
+	}
+	if quota := compactQuotaWindowSummary(f, "quota_5h", "5h"); quota != "" {
+		parts = append(parts, quota)
+	}
+	if quota := compactQuotaWindowSummary(f, "quota_weekly", "wk"); quota != "" {
+		parts = append(parts, quota)
+	}
+	if len(parts) == 1 {
+		if quota := compactQuotaWindowSummary(f, "quota", "quota"); quota != "" {
+			parts = append(parts, quota)
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+
+	summary := strings.Join(parts, " ")
+	if width > 0 {
+		maxSummaryWidth := width - 82
+		if maxSummaryWidth >= 12 && len(summary) > maxSummaryWidth {
+			summary = truncate(summary, maxSummaryWidth)
+		}
+	}
+	return summary
+}
+
+func formatCodexPlanForRow(plan string) string {
+	plan = strings.ToLower(strings.TrimSpace(plan))
+	switch plan {
+	case "":
+		return ""
+	case "free":
+		return "Free"
+	case "plus":
+		return "Plus"
+	case "pro":
+		return "Pro"
+	default:
+		return strings.ToUpper(plan[:1]) + plan[1:]
+	}
+}
+
+func compactQuotaWindowSummary(f map[string]any, prefix, label string) string {
+	if amount := compactQuotaAmount(getAnyString(f, prefix+"_amount")); amount != "" {
+		return label + ":" + amount
+	}
+	remaining := strings.TrimSpace(getAnyString(f, prefix+"_remaining"))
+	limit := strings.TrimSpace(getAnyString(f, prefix+"_limit"))
+	if remaining != "" && limit != "" {
+		return label + ":" + remaining + "/" + limit
+	}
+	status := strings.ToLower(strings.TrimSpace(getAnyString(f, prefix+"_status")))
+	recoverIn := strings.TrimSpace(getAnyString(f, prefix+"_recover_in"))
+	if status != "" && status != "available" {
+		if recoverIn != "" {
+			return label + ":" + status + " " + recoverIn
+		}
+		return label + ":" + status
+	}
+	if recoverIn != "" {
+		return label + ":reset " + recoverIn
+	}
+	return ""
+}
+
+func compactQuotaAmount(amount string) string {
+	amount = strings.TrimSpace(amount)
+	if amount == "" {
+		return ""
+	}
+	lower := strings.ToLower(amount)
+	if strings.HasSuffix(lower, " remaining") {
+		amount = strings.TrimSpace(amount[:len(amount)-len(" remaining")])
+	}
+	return strings.ReplaceAll(amount, " ", "")
+}
+
 func (m authTabModel) renderDetail(f map[string]any) string {
 	var sb strings.Builder
 
@@ -277,6 +372,20 @@ func (m authTabModel) renderDetail(f map[string]any) string {
 		{"Status Msg", "status_message", false},
 		{"File Name", "file_name", false},
 		{"Auth Type", "auth_type", false},
+		{"Plan Type", "plan_type", false},
+		{"Subscription Until", "subscription_until", false},
+		{"Quota Status", "quota_status", false},
+		{"5h Quota", "quota_5h_amount", false},
+		{"5h Status", "quota_5h_status", false},
+		{"5h Recover", "quota_5h_recover_in", false},
+		{"5h Recover At", "quota_5h_next_recover_at", false},
+		{"Weekly Quota", "quota_weekly_amount", false},
+		{"Weekly Status", "quota_weekly_status", false},
+		{"Weekly Recover", "quota_weekly_recover_in", false},
+		{"Weekly Recover At", "quota_weekly_next_recover_at", false},
+		{"Last Recover", "quota_recover_in", false},
+		{"Recover At", "quota_next_recover_at", false},
+		{"Quota Backoff", "quota_backoff_level", false},
 		{"Prefix", "prefix", true},
 		{"Proxy URL", "proxy_url", true},
 		{"Priority", "priority", true},
