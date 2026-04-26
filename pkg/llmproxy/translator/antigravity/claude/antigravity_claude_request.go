@@ -55,16 +55,16 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 				if systemPrompt == "" {
 					continue
 				}
-				partJSON := `{}`
+				partJSON := []byte(`{}`)
 				partJSON, _ = sjson.SetBytes(partJSON, "text", systemPrompt)
-				systemInstructionJSON, _ = sjson.SetRaw(systemInstructionJSON, "parts.-1", partJSON)
+				systemInstructionJSON, _ = sjson.SetRawBytes(systemInstructionJSON, "parts.-1", partJSON)
 				hasSystemInstruction = true
 			}
 		}
 	} else if systemResult.Type == gjson.String {
 		systemPrompt := strings.TrimSpace(systemResult.String())
 		if systemPrompt != "" {
-			systemInstructionJSON = `{"role":"user","parts":[{"text":""}]}`
+			systemInstructionJSON = []byte(`{"role":"user","parts":[{"text":""}]}`)
 			systemInstructionJSON, _ = sjson.SetBytes(systemInstructionJSON, "parts.0.text", systemPrompt)
 			hasSystemInstruction = true
 		}
@@ -379,10 +379,10 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 				if prompt == "" {
 					continue
 				}
-				partJSON := `{}`
+				partJSON := []byte(`{}`)
 				partJSON, _ = sjson.SetBytes(partJSON, "text", prompt)
-				clientContentJSON, _ = sjson.SetRaw(clientContentJSON, "parts.-1", partJSON)
-				contentsJSON, _ = sjson.SetRaw(contentsJSON, "-1", clientContentJSON)
+				clientContentJSON, _ = sjson.SetRawBytes(clientContentJSON, "parts.-1", partJSON)
+				contentsJSON, _ = sjson.SetRawBytes(contentsJSON, "-1", clientContentJSON)
 				hasContents = true
 			}
 		}
