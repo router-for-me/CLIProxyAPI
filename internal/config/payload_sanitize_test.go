@@ -27,6 +27,31 @@ func TestSanitizePayloadRules_KeepsDisabledRawRuleWithInvalidJSON(t *testing.T) 
 	}
 }
 
+func TestSanitizePayloadRules_KeepsDisabledOverrideRawRuleWithInvalidJSON(t *testing.T) {
+	cfg := &Config{
+		Payload: PayloadConfig{
+			OverrideRaw: []PayloadRule{
+				{
+					Disabled: true,
+					Models:   []PayloadModelRule{{Name: "gpt-*"}},
+					Params: map[string]any{
+						"metadata": `{"enabled":`,
+					},
+				},
+			},
+		},
+	}
+
+	cfg.SanitizePayloadRules()
+
+	if len(cfg.Payload.OverrideRaw) != 1 {
+		t.Fatalf("disabled override-raw rule should be preserved during sanitize, got %d rules", len(cfg.Payload.OverrideRaw))
+	}
+	if !cfg.Payload.OverrideRaw[0].Disabled {
+		t.Fatalf("disabled override-raw rule should remain disabled after sanitize")
+	}
+}
+
 func TestSanitizePayloadRules_DropsEnabledRawRuleWithInvalidJSON(t *testing.T) {
 	cfg := &Config{
 		Payload: PayloadConfig{
