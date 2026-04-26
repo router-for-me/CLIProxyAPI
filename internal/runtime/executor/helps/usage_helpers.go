@@ -284,12 +284,13 @@ func ParseOpenAIStreamUsage(line []byte) (usage.Detail, bool) {
 	if !usageNode.Exists() {
 		return usage.Detail{}, false
 	}
-	// Only accept usage from terminal chunks (finish_reason set and non-empty).
+	// Only accept usage if it contains actual token counts.
 	// When stream_options.include_usage is enabled, providers may include a
 	// zero-value usage in every chunk; the real values arrive only in the
-	// final chunk alongside a non-null finish_reason.
-	finishReason := gjson.GetBytes(payload, "choices.0.finish_reason")
-	if !finishReason.Exists() || finishReason.String() == "" {
+	// final chunk(s). Checking for non-zero tokens ensures we capture the
+	// real usage regardless of whether it arrives in the stop chunk or a
+	// separate usage chunk (where choices may be empty).
+	if usageNode.Get("total_tokens").Int() == 0 && usageNode.Get("prompt_tokens").Int() == 0 {
 		return usage.Detail{}, false
 	}
 	detail := usage.Detail{
