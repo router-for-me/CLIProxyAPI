@@ -658,6 +658,10 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/kimi-auth-url", s.mgmt.RequestKimiToken)
 		mgmt.POST("/oauth-callback", s.mgmt.PostOAuthCallback)
 		mgmt.GET("/get-auth-status", s.mgmt.GetAuthStatus)
+
+		// Model catalog observability and manual OpenRouter enrichment refresh.
+		mgmt.GET("/models/health", s.mgmt.GetModelsHealth)
+		mgmt.POST("/models/refresh", s.mgmt.RefreshModels)
 	}
 }
 
