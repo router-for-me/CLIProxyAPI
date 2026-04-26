@@ -6,7 +6,15 @@ import (
 	"strings"
 )
 
-const codexBuiltinImageModelID = "gpt-image-2"
+const (
+	codexBuiltinImageModelID = "gpt-image-2"
+
+	deepSeekV4FlashModelID   = "deepseek-v4-flash"
+	deepSeekV4ProModelID     = "deepseek-v4-pro"
+	deepSeekChatModelID      = "deepseek-chat"
+	deepSeekReasonerModelID  = "deepseek-reasoner"
+	deepSeekModelCreatedTime = 1777161600 // 2026-04-26
+)
 
 // staticModelsJSON mirrors the top-level structure of models.json.
 type staticModelsJSON struct {
@@ -75,8 +83,12 @@ func GetKimiModels() []*ModelInfo {
 }
 
 // GetDeepSeekModels returns the standard DeepSeek model definitions.
+//
+// DeepSeek is also supplied as a built-in overlay so existing remote models.json
+// catalogs that predate the deepseek section do not erase first-class provider
+// support during startup/periodic refresh.
 func GetDeepSeekModels() []*ModelInfo {
-	return cloneModelInfos(getModels().DeepSeek)
+	return WithDeepSeekBuiltins(cloneModelInfos(getModels().DeepSeek))
 }
 
 // GetAntigravityModels returns the standard Antigravity model definitions.
@@ -91,6 +103,18 @@ func WithCodexBuiltins(models []*ModelInfo) []*ModelInfo {
 	return upsertModelInfos(models, codexBuiltinImageModelInfo())
 }
 
+// WithDeepSeekBuiltins injects hard-coded DeepSeek model definitions that should
+// not depend on remote models.json updates. Built-ins replace any matching IDs
+// already present in the provided slice.
+func WithDeepSeekBuiltins(models []*ModelInfo) []*ModelInfo {
+	return upsertModelInfos(models,
+		deepSeekV4FlashModelInfo(),
+		deepSeekV4ProModelInfo(),
+		deepSeekChatModelInfo(),
+		deepSeekReasonerModelInfo(),
+	)
+}
+
 func codexBuiltinImageModelInfo() *ModelInfo {
 	return &ModelInfo{
 		ID:          codexBuiltinImageModelID,
@@ -100,6 +124,67 @@ func codexBuiltinImageModelInfo() *ModelInfo {
 		Type:        "openai",
 		DisplayName: "GPT Image 2",
 		Version:     codexBuiltinImageModelID,
+	}
+}
+
+func deepSeekV4FlashModelInfo() *ModelInfo {
+	return deepSeekThinkingModelInfo(
+		deepSeekV4FlashModelID,
+		"DeepSeek V4 Flash",
+		"DeepSeek-V4-Flash: fast DeepSeek V4 model with 1M context and thinking/non-thinking modes.",
+	)
+}
+
+func deepSeekV4ProModelInfo() *ModelInfo {
+	return deepSeekThinkingModelInfo(
+		deepSeekV4ProModelID,
+		"DeepSeek V4 Pro",
+		"DeepSeek-V4-Pro: flagship DeepSeek V4 model with 1M context and thinking/non-thinking modes.",
+	)
+}
+
+func deepSeekChatModelInfo() *ModelInfo {
+	return &ModelInfo{
+		ID:                  deepSeekChatModelID,
+		Object:              "model",
+		Created:             deepSeekModelCreatedTime,
+		OwnedBy:             "deepseek",
+		Type:                "deepseek",
+		DisplayName:         "DeepSeek Chat (legacy)",
+		Version:             deepSeekChatModelID,
+		Description:         "Legacy compatibility alias for deepseek-v4-flash non-thinking mode; scheduled for DeepSeek deprecation on 2026-07-24.",
+		ContextLength:       1000000,
+		MaxCompletionTokens: 384000,
+		SupportedParameters: []string{"tools", "json_mode"},
+	}
+}
+
+func deepSeekReasonerModelInfo() *ModelInfo {
+	return deepSeekThinkingModelInfo(
+		deepSeekReasonerModelID,
+		"DeepSeek Reasoner (legacy)",
+		"Legacy compatibility alias for deepseek-v4-flash thinking mode; scheduled for DeepSeek deprecation on 2026-07-24.",
+	)
+}
+
+func deepSeekThinkingModelInfo(id, displayName, description string) *ModelInfo {
+	return &ModelInfo{
+		ID:                  id,
+		Object:              "model",
+		Created:             deepSeekModelCreatedTime,
+		OwnedBy:             "deepseek",
+		Type:                "deepseek",
+		DisplayName:         displayName,
+		Version:             id,
+		Description:         description,
+		ContextLength:       1000000,
+		MaxCompletionTokens: 384000,
+		SupportedParameters: []string{"tools", "json_mode", "reasoning_effort"},
+		Thinking: &ThinkingSupport{
+			ZeroAllowed:    true,
+			DynamicAllowed: true,
+			Levels:         []string{"high", "max"},
+		},
 	}
 }
 
@@ -214,9 +299,12 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		data.Vertex,
 		data.GeminiCLI,
 		data.AIStudio,
-		data.CodexPro,
+		WithCodexBuiltins(data.CodexFree),
+		WithCodexBuiltins(data.CodexTeam),
+		WithCodexBuiltins(data.CodexPlus),
+		WithCodexBuiltins(data.CodexPro),
 		data.Kimi,
-		data.DeepSeek,
+		WithDeepSeekBuiltins(data.DeepSeek),
 		data.Antigravity,
 	}
 	for _, models := range allModels {

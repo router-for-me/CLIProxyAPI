@@ -335,7 +335,9 @@ func validateModelsCatalog(data *staticModelsJSON) error {
 		{name: "codex-plus", models: data.CodexPlus},
 		{name: "codex-pro", models: data.CodexPro},
 		{name: "kimi", models: data.Kimi},
-		{name: "deepseek", models: data.DeepSeek},
+		// DeepSeek may be absent from older remote catalogs. The application
+		// supplies DeepSeek models as built-ins, so do not reject otherwise valid
+		// catalogs while the shared upstream model source catches up.
 		{name: "antigravity", models: data.Antigravity},
 	}
 
