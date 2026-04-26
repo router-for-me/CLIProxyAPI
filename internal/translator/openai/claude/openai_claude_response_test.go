@@ -274,47 +274,56 @@ func TestStreamingTool_StopReasonWithEmittedTool(t *testing.T) {
 	}
 }
 
-// TestStreamingTool_StopReasonWhenIDNeverArrives covers the scenario
-// raised in the Apr 26 codex review: function.name is present and valid,
-// but no id ever arrives, so the new id-non-empty guard suppresses every
-// tool start even though raw tool_calls deltas were observed. Upstream
-// then sends finish_reason=tool_calls. The resulting stream must not
-// claim stop_reason=tool_use (no tool blocks were announced).
+// TestStreamingTool_StopReasonWhenIDNeverArrives covers the codex
+// follow-up review: when function.name arrives valid but no id is ever
+// sent, the cleanup loop must belated-emit a tool_use block with a
+// synthetic id from SanitizeClaudeToolID rather than dropping the call.
+// Final stop_reason should be tool_use (a real tool block was emitted).
 func TestStreamingTool_StopReasonWhenIDNeverArrives(t *testing.T) {
 	events := runStream(t, streamReq,
 		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"function":{"name":"do_it","arguments":""}}]}}]}`,
 		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{}"}}]}}]}`,
 		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
 	)
-	if got := len(toolUseStarts(events)); got != 0 {
-		t.Fatalf("expected zero tool_use starts when id never arrived, got %d", got)
+
+	starts := toolUseStarts(events)
+	if len(starts) != 1 {
+		t.Fatalf("expected one tool_use start (belated, with synthetic id), got %d", len(starts))
 	}
-	if got := lastStopReason(events); got == "tool_use" {
-		t.Fatalf("stop_reason must not be tool_use when id never arrived; got %q", got)
+	id := gjson.Get(starts[0].Payload, "content_block.id").String()
+	if !strings.HasPrefix(id, "toolu_") {
+		t.Fatalf("synthetic id should match SanitizeClaudeToolID's fallback pattern (toolu_<nanos>_<n>), got %q", id)
+	}
+	if name := gjson.Get(starts[0].Payload, "content_block.name").String(); name != "do_it" {
+		t.Fatalf("announced tool name = %q, want %q", name, "do_it")
+	}
+	if got := lastStopReason(events); got != "tool_use" {
+		t.Fatalf("stop_reason = %q, want %q (a tool block was emitted)", got, "tool_use")
 	}
 }
 
-// TestStreamingTool_LateIDAfterFinalization covers the Apr 26 codex P1:
-// once a finish_reason chunk has run the cleanup loop and set
-// ContentBlocksStopped, a later chunk that finally completes the
-// name+id pair must NOT emit content_block_start (it would land out of
-// order, possibly after message_stop, and strict clients reject that).
-// The deferred tool call is dropped silently — the stream stays
-// internally consistent, with stop_reason already downgraded to
-// end_turn earlier.
+// TestStreamingTool_LateIDAfterFinalization verifies that when an id
+// arrives in a chunk *after* the finish_reason handler has already
+// finalized the stream, the late update is silently absorbed: no new
+// content_block_start, no content_block_* event after message_stop.
+// (The cleanup loop in the finalize chunk already belated-emitted with
+// a synthetic id, so the tool is addressable end-to-end.)
 func TestStreamingTool_LateIDAfterFinalization(t *testing.T) {
 	events := runStream(t, streamReq,
 		// chunk 1: name only, no id — emit deferred
 		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"function":{"name":"do_it"}}]}}]}`,
-		// chunk 2: finish_reason finalizes content blocks; usage in same
-		// chunk also triggers message_delta + message_stop
+		// chunk 2: finish_reason finalizes content blocks; cleanup runs
+		// the belated emit (synthetic id), then message_delta and
+		// message_stop ship via the same-chunk usage entry.
 		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`,
-		// chunk 3: id arrives LATE, after finalization — must be dropped
+		// chunk 3: id arrives LATE, after finalization — must be a no-op
+		// (StartEmitted is already true from the belated emit in chunk 2).
 		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_late"}]}}]}`,
 	)
 
-	if got := len(toolUseStarts(events)); got != 0 {
-		t.Fatalf("expected zero tool_use starts when id arrives post-finalization, got %d", got)
+	starts := toolUseStarts(events)
+	if len(starts) != 1 {
+		t.Fatalf("expected one tool_use start (belated emit in chunk 2), got %d", len(starts))
 	}
 
 	// Verify event ordering: no content_block_* event after message_stop.

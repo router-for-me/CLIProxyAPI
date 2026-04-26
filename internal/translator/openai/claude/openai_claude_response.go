@@ -284,32 +284,7 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 				// content_block_start out of order — possibly even after
 				// message_stop, which strict Anthropic clients reject.
 				if !accumulator.StartEmitted && accumulator.Name != "" && accumulator.ID != "" && !param.ContentBlocksStopped {
-					stopThinkingContentBlock(param, &results)
-
-					stopTextContentBlock(param, &results)
-
-					// Reserve the Anthropic block index only at emit time
-					// so suppressed tool calls (never-named) don't create
-					// gaps in the sequential index space that strict
-					// clients depend on.
-					blockIndex := param.toolContentBlockIndex(index)
-
-					// Send content_block_start for tool_use
-					contentBlockStartJSON := `{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"","name":"","input":{}}}`
-					contentBlockStartJSONBytes := []byte(contentBlockStartJSON)
-					contentBlockStartJSONBytes, _ = sjson.SetBytes(contentBlockStartJSONBytes, "index", blockIndex)
-					contentBlockStartJSONBytes, _ = sjson.SetBytes(contentBlockStartJSONBytes, "content_block.id", util.SanitizeClaudeToolID(accumulator.ID))
-					contentBlockStartJSONBytes, _ = sjson.SetBytes(contentBlockStartJSONBytes, "content_block.name", accumulator.Name)
-					results = append(results, translatorcommon.AppendSSEEventBytes(nil, "content_block_start", contentBlockStartJSONBytes, 2))
-					accumulator.StartEmitted = true
-					// Mark the stream as having tool calls only once a start
-					// has actually been announced. Setting this on raw
-					// tool_calls presence (the previous behavior) caused the
-					// final stop_reason to map to "tool_use" even when every
-					// tool start was suppressed (e.g. all empty names),
-					// producing an Anthropic stream with stop_reason=tool_use
-					// and zero tool_use blocks.
-					param.SawToolCall = true
+					emitToolUseStart(param, index, accumulator, &results)
 				}
 
 				return true
@@ -349,11 +324,18 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 		if !param.ContentBlocksStopped {
 			for index := range param.ToolCallsAccumulator {
 				accumulator := param.ToolCallsAccumulator[index]
-				// Skip tool calls whose start was never emitted (e.g. empty
-				// name throughout the stream). Emitting delta/stop for a
-				// block that has no start violates Anthropic event ordering.
 				if !accumulator.StartEmitted {
-					continue
+					// Belated emit: a stream that supplied a valid name
+					// but never sent an id (some upstreams omit it
+					// entirely) should still produce a usable tool block.
+					// SanitizeClaudeToolID synthesizes a fallback id from
+					// the empty input, keeping the call addressable on
+					// the next round-trip. If even the name is empty,
+					// the call really was malformed — drop it.
+					if accumulator.Name == "" {
+						continue
+					}
+					emitToolUseStart(param, index, accumulator, &results)
 				}
 				blockIndex := param.toolContentBlockIndex(index)
 
@@ -419,10 +401,15 @@ func convertOpenAIDoneToAnthropic(param *ConvertOpenAIResponseToAnthropicParams)
 	if !param.ContentBlocksStopped {
 		for index := range param.ToolCallsAccumulator {
 			accumulator := param.ToolCallsAccumulator[index]
-			// Same guard as in the streaming finish_reason path: never emit
-			// delta/stop for a tool block whose start was suppressed.
 			if !accumulator.StartEmitted {
-				continue
+				// Belated emit at [DONE] — same rationale as the
+				// finish_reason path: ensure name-but-no-id streams still
+				// produce a usable tool block via the synthetic-id
+				// fallback. Drop only if the call had no name at all.
+				if accumulator.Name == "" {
+					continue
+				}
+				emitToolUseStart(param, index, accumulator, &results)
 			}
 			blockIndex := param.toolContentBlockIndex(index)
 
@@ -614,6 +601,29 @@ func stopTextContentBlock(param *ConvertOpenAIResponseToAnthropicParams, results
 	*results = append(*results, translatorcommon.AppendSSEEventBytes(nil, "content_block_stop", contentBlockStopJSON, 2))
 	param.TextContentBlockStarted = false
 	param.TextContentBlockIndex = -1
+}
+
+// emitToolUseStart announces a tool_use content_block_start. Used both
+// in the streaming chunk path (when name+id are observed live) and in
+// the finalization paths (cleanup loops in the finish_reason and [DONE]
+// handlers, where it serves as a belated emit for streams that supplied
+// a valid name but never an id — SanitizeClaudeToolID's empty-input
+// fallback synthesizes a usable id so the tool call isn't silently
+// dropped). Also stops thinking/text blocks so ordering stays valid,
+// allocates the Anthropic block index lazily, and toggles SawToolCall
+// so the final stop_reason maps to "tool_use".
+func emitToolUseStart(param *ConvertOpenAIResponseToAnthropicParams, openAIToolIndex int, accumulator *ToolCallAccumulator, results *[][]byte) {
+	stopThinkingContentBlock(param, results)
+	stopTextContentBlock(param, results)
+	blockIndex := param.toolContentBlockIndex(openAIToolIndex)
+	contentBlockStartJSON := `{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"","name":"","input":{}}}`
+	contentBlockStartJSONBytes := []byte(contentBlockStartJSON)
+	contentBlockStartJSONBytes, _ = sjson.SetBytes(contentBlockStartJSONBytes, "index", blockIndex)
+	contentBlockStartJSONBytes, _ = sjson.SetBytes(contentBlockStartJSONBytes, "content_block.id", util.SanitizeClaudeToolID(accumulator.ID))
+	contentBlockStartJSONBytes, _ = sjson.SetBytes(contentBlockStartJSONBytes, "content_block.name", accumulator.Name)
+	*results = append(*results, translatorcommon.AppendSSEEventBytes(nil, "content_block_start", contentBlockStartJSONBytes, 2))
+	accumulator.StartEmitted = true
+	param.SawToolCall = true
 }
 
 // ConvertOpenAIResponseToClaudeNonStream converts a non-streaming OpenAI response to a non-streaming Anthropic response.
