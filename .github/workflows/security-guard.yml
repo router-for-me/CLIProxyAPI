@@ -7,6 +7,9 @@ on:
         required: true
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   ggshield-scan:
     runs-on: ubuntu-latest

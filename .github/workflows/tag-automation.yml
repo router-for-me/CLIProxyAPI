@@ -1,6 +1,9 @@
 name: Tag Automation
 on:
   workflow_dispatch:
+permissions:
+  contents: read
+
 jobs:
   tag:
     runs-on: ubuntu-latest

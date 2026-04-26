@@ -3,6 +3,10 @@ name: Generate SDKs
 on:
   workflow_dispatch:
 
+permissions:
+  contents: write
+  pull-requests: write
+
 jobs:
   generate-python-sdk:
     runs-on: ubuntu-latest

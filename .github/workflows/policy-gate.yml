@@ -1,5 +1,8 @@
 name: policy-gate
 on: [workflow_dispatch]
+permissions:
+  contents: read
+
 jobs:
   enforce:
     runs-on: ubuntu-latest

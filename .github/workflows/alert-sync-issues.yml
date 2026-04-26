@@ -4,6 +4,10 @@ on:
     - cron: '17 * * * *'
   workflow_dispatch:
 
+permissions:
+  contents: read
+  issues: write
+
 jobs:
   sync:
     uses: KooshaPari/phenoShared/.github/workflows/reusable/alert-sync-issues.yml@main

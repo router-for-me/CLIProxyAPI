@@ -7,6 +7,9 @@ env:
   APP_NAME: CLIProxyAPI
   DOCKERHUB_REPO: ${{ secrets.DOCKERHUB_USERNAME }}/cli-proxy-api-plus
 
+permissions:
+  contents: read
+
 jobs:
   docker_amd64:
     runs-on: ubuntu-latest

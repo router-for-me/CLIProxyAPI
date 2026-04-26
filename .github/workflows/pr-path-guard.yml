@@ -3,6 +3,9 @@ name: translator-path-guard
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   ensure-no-translator-changes:
     name: ensure-no-translator-changes
