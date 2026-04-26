@@ -216,10 +216,14 @@ func (h *OpenAIAPIHandler) ImagesGenerations(c *gin.Context) {
 	stream := gjson.GetBytes(rawJSON, "stream").Bool()
 	if h.HasNativeImagesProvider(imageModel, "images/generations") {
 		if !stream {
-			h.collectImagesFromNative(c, rawJSON, imageModel, "images/generations")
+			nativeJSON := rawJSON
+			if strings.TrimSpace(gjson.GetBytes(rawJSON, "response_format").String()) == "" {
+				nativeJSON, _ = sjson.SetBytes(nativeJSON, "response_format", responseFormat)
+			}
+			h.collectImagesFromNative(c, nativeJSON, imageModel, "images/generations")
 			return
 		}
-		if !strings.EqualFold(imageModel, defaultImagesToolModel) {
+		if !isDefaultImagesToolModel(imageModel) {
 			c.JSON(http.StatusBadGateway, handlers.ErrorResponse{
 				Error: handlers.ErrorDetail{
 					Message: fmt.Sprintf("no native image streaming provider for model %s", imageModel),
@@ -229,7 +233,7 @@ func (h *OpenAIAPIHandler) ImagesGenerations(c *gin.Context) {
 			return
 		}
 	}
-	if !strings.EqualFold(imageModel, defaultImagesToolModel) {
+	if !isDefaultImagesToolModel(imageModel) {
 		c.JSON(http.StatusBadGateway, handlers.ErrorResponse{
 			Error: handlers.ErrorDetail{
 				Message: fmt.Sprintf("no native image provider for model %s", imageModel),
@@ -240,7 +244,7 @@ func (h *OpenAIAPIHandler) ImagesGenerations(c *gin.Context) {
 	}
 
 	tool := []byte(`{"type":"image_generation","action":"generate"}`)
-	tool, _ = sjson.SetBytes(tool, "model", imageModel)
+	tool, _ = sjson.SetBytes(tool, "model", defaultImagesToolModel)
 
 	if v := strings.TrimSpace(gjson.GetBytes(rawJSON, "size").String()); v != "" {
 		tool, _ = sjson.SetBytes(tool, "size", v)
@@ -375,7 +379,7 @@ func (h *OpenAIAPIHandler) imagesEditsFromMultipart(c *gin.Context) {
 	stream := parseBoolField(c.PostForm("stream"), false)
 
 	tool := []byte(`{"type":"image_generation","action":"edit"}`)
-	tool, _ = sjson.SetBytes(tool, "model", imageModel)
+	tool, _ = sjson.SetBytes(tool, "model", defaultImagesToolModel)
 
 	if v := strings.TrimSpace(c.PostForm("size")); v != "" {
 		tool, _ = sjson.SetBytes(tool, "size", v)
@@ -407,7 +411,7 @@ func (h *OpenAIAPIHandler) imagesEditsFromMultipart(c *gin.Context) {
 		tool, _ = sjson.SetBytes(tool, "input_image_mask.image_url", strings.TrimSpace(*maskDataURL))
 	}
 
-	if !strings.EqualFold(imageModel, defaultImagesToolModel) {
+	if !isDefaultImagesToolModel(imageModel) {
 		c.JSON(http.StatusBadGateway, handlers.ErrorResponse{
 			Error: handlers.ErrorDetail{
 				Message: fmt.Sprintf("no native image edit provider for model %s", imageModel),
@@ -505,7 +509,7 @@ func (h *OpenAIAPIHandler) imagesEditsFromJSON(c *gin.Context) {
 	stream := gjson.GetBytes(rawJSON, "stream").Bool()
 
 	tool := []byte(`{"type":"image_generation","action":"edit"}`)
-	tool, _ = sjson.SetBytes(tool, "model", imageModel)
+	tool, _ = sjson.SetBytes(tool, "model", defaultImagesToolModel)
 
 	for _, field := range []string{"size", "quality", "background", "output_format", "input_fidelity", "moderation"} {
 		if v := strings.TrimSpace(gjson.GetBytes(rawJSON, field).String()); v != "" {
@@ -523,7 +527,7 @@ func (h *OpenAIAPIHandler) imagesEditsFromJSON(c *gin.Context) {
 		tool, _ = sjson.SetBytes(tool, "input_image_mask.image_url", strings.TrimSpace(*maskDataURL))
 	}
 
-	if !strings.EqualFold(imageModel, defaultImagesToolModel) {
+	if !isDefaultImagesToolModel(imageModel) {
 		c.JSON(http.StatusBadGateway, handlers.ErrorResponse{
 			Error: handlers.ErrorDetail{
 				Message: fmt.Sprintf("no native image edit provider for model %s", imageModel),
@@ -543,17 +547,7 @@ func (h *OpenAIAPIHandler) imagesEditsFromJSON(c *gin.Context) {
 
 func buildImagesResponsesRequest(prompt string, images []string, toolJSON []byte) []byte {
 	req := []byte(`{"instructions":"","stream":true,"reasoning":{"effort":"medium","summary":"auto"},"parallel_tool_calls":true,"include":["reasoning.encrypted_content"],"model":"","store":false,"tool_choice":{"type":"image_generation"}}`)
-	mainModel := defaultImagesMainModel
-	if len(toolJSON) > 0 && json.Valid(toolJSON) {
-		toolModel := strings.TrimSpace(gjson.GetBytes(toolJSON, "model").String())
-		if idx := strings.LastIndex(toolModel, "/"); idx > 0 && idx < len(toolModel)-1 {
-			prefix := strings.TrimSpace(toolModel[:idx])
-			if prefix != "" {
-				mainModel = prefix + "/" + defaultImagesMainModel
-			}
-		}
-	}
-	req, _ = sjson.SetBytes(req, "model", mainModel)
+	req, _ = sjson.SetBytes(req, "model", defaultImagesMainModel)
 
 	input := []byte(`[{"type":"message","role":"user","content":[{"type":"input_text","text":""}]}]`)
 	input, _ = sjson.SetBytes(input, "0.content.0.text", prompt)
@@ -575,6 +569,20 @@ func buildImagesResponsesRequest(prompt string, images []string, toolJSON []byte
 		req, _ = sjson.SetRawBytes(req, "tools.-1", toolJSON)
 	}
 	return req
+}
+
+func isDefaultImagesToolModel(model string) bool {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return false
+	}
+	if strings.EqualFold(model, defaultImagesToolModel) {
+		return true
+	}
+	if idx := strings.LastIndex(model, "/"); idx >= 0 && idx < len(model)-1 {
+		return strings.EqualFold(strings.TrimSpace(model[idx+1:]), defaultImagesToolModel)
+	}
+	return false
 }
 
 func (h *OpenAIAPIHandler) collectImagesFromResponses(c *gin.Context, responsesReq []byte, responseFormat string) {

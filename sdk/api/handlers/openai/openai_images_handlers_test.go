@@ -15,6 +15,7 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
+	"github.com/tidwall/gjson"
 )
 
 type imagesCaptureExecutor struct {
@@ -41,8 +42,15 @@ func (e *imagesCaptureExecutor) Execute(_ context.Context, _ *coreauth.Auth, req
 	return coreexecutor.Response{Payload: []byte(`{"created":1,"data":[{"b64_json":"native"}]}`)}, nil
 }
 
-func (e *imagesCaptureExecutor) ExecuteStream(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (*coreexecutor.StreamResult, error) {
-	return nil, errors.New("not implemented")
+func (e *imagesCaptureExecutor) ExecuteStream(_ context.Context, _ *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+	e.calls++
+	e.model = req.Model
+	e.alt = opts.Alt
+	e.payload = string(req.Payload)
+	chunks := make(chan coreexecutor.StreamChunk, 1)
+	chunks <- coreexecutor.StreamChunk{Payload: []byte(`data: {"type":"response.completed","response":{"created_at":1,"output":[{"type":"image_generation_call","result":"aW1hZ2U=","output_format":"png"}],"tool_usage":{"image_gen":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}}` + "\n\n")}
+	close(chunks)
+	return &coreexecutor.StreamResult{Chunks: chunks}, nil
 }
 
 func (e *imagesCaptureExecutor) Refresh(_ context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
@@ -92,6 +100,38 @@ func TestImagesGenerationsRoutesNativeProviderByRequestedModel(t *testing.T) {
 	}
 	if !strings.Contains(executor.payload, `"model":"qwen-image-test"`) {
 		t.Fatalf("payload = %s, want requested image model", executor.payload)
+	}
+	if !strings.Contains(executor.payload, `"response_format":"b64_json"`) {
+		t.Fatalf("payload = %s, want default response_format=b64_json", executor.payload)
+	}
+}
+
+func TestImagesGenerationsPreservesExplicitNativeResponseFormat(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	executor := &imagesCaptureExecutor{provider: "openai-compatibility", nativeImages: true}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+
+	auth := &coreauth.Auth{ID: "images-native-format-auth", Provider: executor.Identifier(), Status: coreauth.StatusActive}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "qwen-image-test"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	router := imagesTestRouter(manager)
+	req := httptest.NewRequest(http.MethodPost, "/v1/images/generations", strings.NewReader(`{"model":"qwen-image-test","prompt":"draw a cat","response_format":"url"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", resp.Code, http.StatusOK, resp.Body.String())
+	}
+	if !strings.Contains(executor.payload, `"response_format":"url"`) {
+		t.Fatalf("payload = %s, want explicit response_format=url", executor.payload)
 	}
 }
 
@@ -214,6 +254,41 @@ func TestImagesGenerationsRejectsRegisteredNonNativeProvider(t *testing.T) {
 	}
 }
 
+func TestImagesGenerationsAllowsProviderQualifiedGPTImage2Fallback(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	codexExecutor := &imagesCaptureExecutor{provider: "codex"}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(codexExecutor)
+
+	codexAuth := &coreauth.Auth{ID: "images-qualified-generate-codex-auth", Provider: codexExecutor.Identifier(), Status: coreauth.StatusActive}
+	if _, err := manager.Register(context.Background(), codexAuth); err != nil {
+		t.Fatalf("Register codex auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(codexAuth.ID, codexAuth.Provider, []*registry.ModelInfo{{ID: defaultImagesMainModel}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(codexAuth.ID)
+	})
+
+	router := imagesTestRouter(manager)
+	req := httptest.NewRequest(http.MethodPost, "/v1/images/generations", strings.NewReader(`{"model":"openai/gpt-image-2","prompt":"draw a cat"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", resp.Code, http.StatusOK, resp.Body.String())
+	}
+	if codexExecutor.calls != 1 {
+		t.Fatalf("codex executor calls = %d, want 1", codexExecutor.calls)
+	}
+	if codexExecutor.model != defaultImagesMainModel {
+		t.Fatalf("model = %q, want %s", codexExecutor.model, defaultImagesMainModel)
+	}
+	if got := gjson.Get(codexExecutor.payload, "tools.0.model").String(); got != defaultImagesToolModel {
+		t.Fatalf("tool model = %q, want %s; payload=%s", got, defaultImagesToolModel, codexExecutor.payload)
+	}
+}
+
 func TestImagesGenerationsDoesNotFallbackToCodexForCustomImageModel(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	imageExecutor := &imagesCaptureExecutor{provider: "gemini"}
@@ -330,6 +405,50 @@ func TestImagesEditsRejectsCustomImageModelWithoutNativeEditSupport(t *testing.T
 	}
 	if codexExecutor.calls != 0 {
 		t.Fatalf("codex executor calls = %d, want 0", codexExecutor.calls)
+	}
+}
+
+func TestImagesEditsAllowsProviderQualifiedGPTImage2Fallback(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	codexExecutor := &imagesCaptureExecutor{provider: "codex"}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(codexExecutor)
+
+	codexAuth := &coreauth.Auth{ID: "images-qualified-edit-codex-auth", Provider: codexExecutor.Identifier(), Status: coreauth.StatusActive}
+	if _, err := manager.Register(context.Background(), codexAuth); err != nil {
+		t.Fatalf("Register codex auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(codexAuth.ID, codexAuth.Provider, []*registry.ModelInfo{{ID: defaultImagesMainModel}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(codexAuth.ID)
+	})
+
+	router := imagesTestRouter(manager)
+	req := httptest.NewRequest(http.MethodPost, "/v1/images/edits", strings.NewReader(`{"model":"openai/gpt-image-2","prompt":"edit a cat","images":[{"image_url":"data:image/png;base64,aW1hZ2U="}]}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", resp.Code, http.StatusOK, resp.Body.String())
+	}
+	if codexExecutor.calls != 1 {
+		t.Fatalf("codex executor calls = %d, want 1", codexExecutor.calls)
+	}
+	if codexExecutor.model != defaultImagesMainModel {
+		t.Fatalf("model = %q, want %s", codexExecutor.model, defaultImagesMainModel)
+	}
+	if got := gjson.Get(codexExecutor.payload, "tools.0.type").String(); got != "image_generation" {
+		t.Fatalf("tool type = %q, want image_generation; payload=%s", got, codexExecutor.payload)
+	}
+	if got := gjson.Get(codexExecutor.payload, "tools.0.action").String(); got != "edit" {
+		t.Fatalf("tool action = %q, want edit; payload=%s", got, codexExecutor.payload)
+	}
+	if got := gjson.Get(codexExecutor.payload, "tools.0.model").String(); got != defaultImagesToolModel {
+		t.Fatalf("tool model = %q, want %s; payload=%s", got, defaultImagesToolModel, codexExecutor.payload)
+	}
+	if got := gjson.Get(codexExecutor.payload, "input.0.content.1.type").String(); got != "input_image" {
+		t.Fatalf("input image type = %q, want input_image; payload=%s", got, codexExecutor.payload)
 	}
 }
 

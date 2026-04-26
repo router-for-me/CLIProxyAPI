@@ -57,6 +57,13 @@ func TestCodexExecutorImageGenerationToolInjectionAcrossRequestPaths(t *testing.
 			wantTools: 1,
 		},
 		{
+			name:      "string image generation tool choice injects",
+			model:     "gpt-5.4",
+			payload:   []byte(`{"model":"gpt-5.4","input":"Draw a cat","tool_choice":"image_generation"}`),
+			wantImage: true,
+			wantTools: 1,
+		},
+		{
 			name:      "allowed tools image generation tool choice injects",
 			model:     "gpt-5.4",
 			payload:   []byte(`{"model":"gpt-5.4","input":"Draw a cat","tool_choice":{"type":"allowed_tools","tools":[{"type":"image_generation"}]}}`),

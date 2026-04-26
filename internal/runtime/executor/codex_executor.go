@@ -909,6 +909,9 @@ func shouldEnsureImageGenerationTool(body []byte, baseModel string, auth *clipro
 
 func explicitlyChoosesImageGeneration(body []byte) bool {
 	toolChoice := gjson.GetBytes(body, "tool_choice")
+	if toolChoice.Type == gjson.String && toolChoice.String() == "image_generation" {
+		return true
+	}
 	if toolChoice.Get("type").String() == "image_generation" {
 		return true
 	}
