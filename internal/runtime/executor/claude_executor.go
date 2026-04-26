@@ -208,31 +208,43 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	}
 
 	url := fmt.Sprintf("%s/v1/messages?beta=true", baseURL)
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyForUpstream))
-	if err != nil {
-		return resp, err
+	isKimiCompatTarget := isKimiClaudeCompatBaseURL(baseURL)
+	if isKimiCompatTarget {
+		bodyForUpstream = applyKimiClaudeCompatibility(bodyForUpstream, false)
+		bodyForTranslation = applyKimiClaudeCompatibility(bodyForTranslation, false)
 	}
-	applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
 		authLabel = auth.Label
 		authType, authValue = auth.AccountInfo()
 	}
-	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
-		URL:       url,
-		Method:    http.MethodPost,
-		Headers:   httpReq.Header.Clone(),
-		Body:      bodyForUpstream,
-		Provider:  e.Identifier(),
-		AuthID:    authID,
-		AuthLabel: authLabel,
-		AuthType:  authType,
-		AuthValue: authValue,
-	})
-
 	httpClient := helps.NewUtlsHTTPClient(e.cfg, auth, 0)
-	httpResp, err := httpClient.Do(httpReq)
+
+	sendUpstream := func(body []byte, strictKimi bool) (*http.Response, error) {
+		httpReq, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+		if reqErr != nil {
+			return nil, reqErr
+		}
+		applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg)
+		if isKimiCompatTarget {
+			applyKimiClaudeBetaHeader(httpReq, strictKimi)
+		}
+		helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
+			URL:       url,
+			Method:    http.MethodPost,
+			Headers:   httpReq.Header.Clone(),
+			Body:      body,
+			Provider:  e.Identifier(),
+			AuthID:    authID,
+			AuthLabel: authLabel,
+			AuthType:  authType,
+			AuthValue: authValue,
+		})
+		return httpClient.Do(httpReq)
+	}
+
+	httpResp, err := sendUpstream(bodyForUpstream, false)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return resp, err
@@ -258,11 +270,14 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		}
 		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
 		if errClose := errBody.Close(); errClose != nil {
 			log.Errorf("response body close error: %v", errClose)
 		}
-		return resp, err
+
+		httpResp, err = e.tryKimiCompatRetry(ctx, isKimiCompatTarget, httpResp.StatusCode, b, sendUpstream, &bodyForUpstream, &bodyForTranslation)
+		if err != nil {
+			return resp, err
+		}
 	}
 	decodedBody, err := decodeResponseBody(httpResp.Body, httpResp.Header.Get("Content-Encoding"))
 	if err != nil {
@@ -389,31 +404,43 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	}
 
 	url := fmt.Sprintf("%s/v1/messages?beta=true", baseURL)
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyForUpstream))
-	if err != nil {
-		return nil, err
+	isKimiCompatTarget := isKimiClaudeCompatBaseURL(baseURL)
+	if isKimiCompatTarget {
+		bodyForUpstream = applyKimiClaudeCompatibility(bodyForUpstream, false)
+		bodyForTranslation = applyKimiClaudeCompatibility(bodyForTranslation, false)
 	}
-	applyClaudeHeaders(httpReq, auth, apiKey, true, extraBetas, e.cfg)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
 		authLabel = auth.Label
 		authType, authValue = auth.AccountInfo()
 	}
-	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
-		URL:       url,
-		Method:    http.MethodPost,
-		Headers:   httpReq.Header.Clone(),
-		Body:      bodyForUpstream,
-		Provider:  e.Identifier(),
-		AuthID:    authID,
-		AuthLabel: authLabel,
-		AuthType:  authType,
-		AuthValue: authValue,
-	})
-
 	httpClient := helps.NewUtlsHTTPClient(e.cfg, auth, 0)
-	httpResp, err := httpClient.Do(httpReq)
+
+	sendUpstream := func(body []byte, strictKimi bool) (*http.Response, error) {
+		httpReq, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+		if reqErr != nil {
+			return nil, reqErr
+		}
+		applyClaudeHeaders(httpReq, auth, apiKey, true, extraBetas, e.cfg)
+		if isKimiCompatTarget {
+			applyKimiClaudeBetaHeader(httpReq, strictKimi)
+		}
+		helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
+			URL:       url,
+			Method:    http.MethodPost,
+			Headers:   httpReq.Header.Clone(),
+			Body:      body,
+			Provider:  e.Identifier(),
+			AuthID:    authID,
+			AuthLabel: authLabel,
+			AuthType:  authType,
+			AuthValue: authValue,
+		})
+		return httpClient.Do(httpReq)
+	}
+
+	httpResp, err := sendUpstream(bodyForUpstream, false)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return nil, err
@@ -442,8 +469,11 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		if errClose := errBody.Close(); errClose != nil {
 			log.Errorf("response body close error: %v", errClose)
 		}
-		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
-		return nil, err
+
+		httpResp, err = e.tryKimiCompatRetry(ctx, isKimiCompatTarget, httpResp.StatusCode, b, sendUpstream, &bodyForUpstream, &bodyForTranslation)
+		if err != nil {
+			return nil, err
+		}
 	}
 	decodedBody, err := decodeResponseBody(httpResp.Body, httpResp.Header.Get("Content-Encoding"))
 	if err != nil {
