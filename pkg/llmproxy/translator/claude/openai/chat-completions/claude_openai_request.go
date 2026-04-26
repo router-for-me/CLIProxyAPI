@@ -224,15 +224,15 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 								if argsStr != "" && gjson.Valid(argsStr) {
 									argsJSON := gjson.Parse(argsStr)
 									if argsJSON.IsObject() {
-										toolUse, _ = sjson.SetRawBytes(toolUse, "input", argsJSON.Raw)
+										toolUse, _ = sjson.SetRawBytes(toolUse, "input", []byte(argsJSON.Raw))
 									} else {
-										toolUse, _ = sjson.SetRawBytes(toolUse, "input", "{}")
+										toolUse, _ = sjson.SetRawBytes(toolUse, "input", []byte(`{}`))
 									}
 								} else {
-									toolUse, _ = sjson.SetRawBytes(toolUse, "input", "{}")
+									toolUse, _ = sjson.SetRawBytes(toolUse, "input", []byte(`{}`))
 								}
 							} else {
-								toolUse, _ = sjson.SetRawBytes(toolUse, "input", "{}")
+								toolUse, _ = sjson.SetRawBytes(toolUse, "input", []byte(`{}`))
 							}
 
 							msg, _ = sjson.SetRawBytes(msg, "content.-1", toolUse)
@@ -271,9 +271,9 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 
 				// Convert parameters schema for the tool
 				if parameters := function.Get("parameters"); parameters.Exists() {
-					anthropicTool, _ = sjson.SetRawBytes(anthropicTool, "input_schema", parameters.Raw)
+					anthropicTool, _ = sjson.SetRawBytes(anthropicTool, "input_schema", []byte(parameters.Raw))
 				} else if parameters := function.Get("parametersJsonSchema"); parameters.Exists() {
-					anthropicTool, _ = sjson.SetRawBytes(anthropicTool, "input_schema", parameters.Raw)
+					anthropicTool, _ = sjson.SetRawBytes(anthropicTool, "input_schema", []byte(parameters.Raw))
 				}
 
 				out, _ = sjson.SetRawBytes(out, "tools.-1", anthropicTool)
@@ -283,7 +283,7 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 		})
 
 		if !hasAnthropicTools {
-			out, _ = sjson.Delete(out, "tools")
+			out, _ = sjson.DeleteBytes(out, "tools")
 		}
 	}
 
@@ -296,15 +296,15 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 			case "none":
 				// Don't set tool_choice, Claude Code will not use tools
 			case "auto":
-				out, _ = sjson.SetRawBytes(out, "tool_choice", `{"type":"auto"}`)
+				out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(`{"type":"auto"}`))
 			case "required":
-				out, _ = sjson.SetRawBytes(out, "tool_choice", `{"type":"any"}`)
+				out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(`{"type":"any"}`))
 			}
 		case gjson.JSON:
 			// Specific tool choice mapping
 			if toolChoice.Get("type").String() == "function" {
 				functionName := toolChoice.Get("function.name").String()
-				toolChoiceJSON := `{"type":"tool","name":""}`
+				toolChoiceJSON := []byte(`{"type":"tool","name":""}`)
 				toolChoiceJSON, _ = sjson.SetBytes(toolChoiceJSON, "name", functionName)
 				out, _ = sjson.SetRawBytes(out, "tool_choice", toolChoiceJSON)
 			}
