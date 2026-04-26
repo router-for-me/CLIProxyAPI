@@ -243,7 +243,7 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 					}
 				}
 
-				// Handle function name
+				// Handle function name and arguments
 				if function := toolCall.Get("function"); function.Exists() {
 					// Only record the name until content_block_start has been
 					// emitted. Upstreams sometimes send "name":"" or repeat the
@@ -257,31 +257,6 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 						}
 					}
 
-					// Require both name and id before emit so we never
-					// announce a fallback content_block.id (from
-					// SanitizeClaudeToolID's empty-string path) when the
-					// real id is still on its way in a later chunk.
-					if !accumulator.StartEmitted && accumulator.Name != "" && accumulator.ID != "" {
-						stopThinkingContentBlock(param, &results)
-
-						stopTextContentBlock(param, &results)
-
-						// Reserve the Anthropic block index only at emit time
-						// so suppressed tool calls (never-named) don't create
-						// gaps in the sequential index space that strict
-						// clients depend on.
-						blockIndex := param.toolContentBlockIndex(index)
-
-						// Send content_block_start for tool_use
-						contentBlockStartJSON := `{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"","name":"","input":{}}}`
-						contentBlockStartJSONBytes := []byte(contentBlockStartJSON)
-						contentBlockStartJSONBytes, _ = sjson.SetBytes(contentBlockStartJSONBytes, "index", blockIndex)
-						contentBlockStartJSONBytes, _ = sjson.SetBytes(contentBlockStartJSONBytes, "content_block.id", util.SanitizeClaudeToolID(accumulator.ID))
-						contentBlockStartJSONBytes, _ = sjson.SetBytes(contentBlockStartJSONBytes, "content_block.name", accumulator.Name)
-						results = append(results, translatorcommon.AppendSSEEventBytes(nil, "content_block_start", contentBlockStartJSONBytes, 2))
-						accumulator.StartEmitted = true
-					}
-
 					// Handle function arguments
 					if args := function.Get("arguments"); args.Exists() {
 						argsText := args.String()
@@ -289,6 +264,36 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 							accumulator.Arguments.WriteString(argsText)
 						}
 					}
+				}
+
+				// Re-evaluate the emit gate on every chunk, not just chunks
+				// that carry a `function` object. Some upstreams split tool
+				// fields across chunks (e.g. function.name in one delta, then
+				// id alone in a later delta with no function field). Keeping
+				// this check outside the function.Exists() branch ensures we
+				// still emit content_block_start the moment both pieces are
+				// present. Both guards remain: name+id non-empty so we never
+				// announce a fallback id from SanitizeClaudeToolID's
+				// empty-input path.
+				if !accumulator.StartEmitted && accumulator.Name != "" && accumulator.ID != "" {
+					stopThinkingContentBlock(param, &results)
+
+					stopTextContentBlock(param, &results)
+
+					// Reserve the Anthropic block index only at emit time
+					// so suppressed tool calls (never-named) don't create
+					// gaps in the sequential index space that strict
+					// clients depend on.
+					blockIndex := param.toolContentBlockIndex(index)
+
+					// Send content_block_start for tool_use
+					contentBlockStartJSON := `{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"","name":"","input":{}}}`
+					contentBlockStartJSONBytes := []byte(contentBlockStartJSON)
+					contentBlockStartJSONBytes, _ = sjson.SetBytes(contentBlockStartJSONBytes, "index", blockIndex)
+					contentBlockStartJSONBytes, _ = sjson.SetBytes(contentBlockStartJSONBytes, "content_block.id", util.SanitizeClaudeToolID(accumulator.ID))
+					contentBlockStartJSONBytes, _ = sjson.SetBytes(contentBlockStartJSONBytes, "content_block.name", accumulator.Name)
+					results = append(results, translatorcommon.AppendSSEEventBytes(nil, "content_block_start", contentBlockStartJSONBytes, 2))
+					accumulator.StartEmitted = true
 				}
 
 				return true

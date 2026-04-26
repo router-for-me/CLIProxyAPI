@@ -215,3 +215,32 @@ func TestStreamingTool_EmptyIDDeferStart(t *testing.T) {
 		t.Fatalf("announced tool id = %q, want %q (must not be a fallback)", id, "call_real")
 	}
 }
+
+// TestStreamingTool_IDInDeltaWithoutFunction verifies that when an upstream
+// splits the tool fields across chunks — function.name in one delta, then
+// id alone in a later delta whose tool_call entry has no `function` object
+// — content_block_start still emits when id arrives. Without the emit
+// re-check living outside the function.Exists() branch, the call would be
+// silently dropped.
+func TestStreamingTool_IDInDeltaWithoutFunction(t *testing.T) {
+	events := runStream(t, streamReq,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"function":{"name":"do_it"}}]}}]}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_real"}]}}]}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{}"}}]}}]}`,
+		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+	)
+
+	starts := toolUseStarts(events)
+	if len(starts) != 1 {
+		t.Fatalf("expected exactly one tool_use start when id arrives in a function-less delta, got %d", len(starts))
+	}
+	if id := gjson.Get(starts[0].Payload, "content_block.id").String(); id != "call_real" {
+		t.Fatalf("announced tool id = %q, want %q", id, "call_real")
+	}
+	if name := gjson.Get(starts[0].Payload, "content_block.name").String(); name != "do_it" {
+		t.Fatalf("announced tool name = %q, want %q", name, "do_it")
+	}
+	if got := countByType(events, "content_block_stop"); got != 1 {
+		t.Fatalf("expected exactly one content_block_stop, got %d", got)
+	}
+}
