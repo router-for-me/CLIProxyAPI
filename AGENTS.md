@@ -47,7 +47,6 @@ go build -o test-output ./cmd/server && rm test-output # Verify compile (REQUIRE
 - For user-visible strings, keep the existing language used in that file/area
 - New Markdown docs should be in English unless the file is explicitly language-specific (e.g. `README_CN.md`)
 - As a rule, do not make standalone changes to `internal/translator/`. You may modify it only as part of broader changes elsewhere.
-- Codex thinking suffix aliases in `/v1/models` must only be generated for user-selectable GPT-family Codex models (`gpt-*`); do not expose internal/special Codex models such as `codex-auto-review` with thinking-level suffixes.
 - If a task requires changing only `internal/translator/`, run `gh repo view --json viewerPermission -q .viewerPermission` to confirm you have `WRITE`, `MAINTAIN`, or `ADMIN`. If you do, you may proceed; otherwise, file a GitHub issue including the goal, rationale, and the intended implementation code, then stop further work.
 - `internal/runtime/executor/` should contain executors and their unit tests only. Place any helper/supporting files under `internal/runtime/executor/helps/`.
 - Follow `gofmt`; keep imports goimports-style; wrap errors with context where helpful
