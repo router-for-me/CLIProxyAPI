@@ -131,7 +131,7 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 					return
 				}
 
-				reasoningItem := []byte(`{"type":"reasoning","summary":[]}`)
+				reasoningItem := []byte(`{"type":"reasoning","summary":[],"content":null}`)
 				if signature != "" {
 					reasoningItem, _ = sjson.SetBytes(reasoningItem, "encrypted_content", signature)
 				}
@@ -140,7 +140,6 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 					summary, _ = sjson.SetBytes(summary, "text", thinkingText)
 					reasoningItem, _ = sjson.SetRawBytes(reasoningItem, "summary.-1", summary)
 				}
-
 				template, _ = sjson.SetRawBytes(template, "input.-1", reasoningItem)
 			}
 
