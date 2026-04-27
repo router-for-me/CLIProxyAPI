@@ -333,6 +333,12 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context) {
 				emailValue := gjson.GetBytes(data, "email").String()
 				fileData["type"] = typeValue
 				fileData["email"] = emailValue
+				if strings.EqualFold(strings.TrimSpace(typeValue), "codex") {
+					if claims := extractCodexIDTokenClaimsFromRaw(gjson.GetBytes(data, "id_token").String()); claims != nil {
+						fileData["id_token"] = claims
+						applyCodexSubscriptionFields(fileData, claims)
+					}
+				}
 				if pv := gjson.GetBytes(data, "priority"); pv.Exists() {
 					switch pv.Type {
 					case gjson.Number:
@@ -430,6 +436,7 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 	}
 	if claims := extractCodexIDTokenClaims(auth); claims != nil {
 		entry["id_token"] = claims
+		applyCodexSubscriptionFields(entry, claims)
 	}
 	// Expose priority from Attributes (set by synthesizer from JSON "priority" field).
 	// Fall back to Metadata for auths registered via UploadAuthFile (no synthesizer).
@@ -476,6 +483,10 @@ func extractCodexIDTokenClaims(auth *coreauth.Auth) gin.H {
 	if !ok {
 		return nil
 	}
+	return extractCodexIDTokenClaimsFromRaw(idTokenRaw)
+}
+
+func extractCodexIDTokenClaimsFromRaw(idTokenRaw string) gin.H {
 	idToken := strings.TrimSpace(idTokenRaw)
 	if idToken == "" {
 		return nil
@@ -498,11 +509,40 @@ func extractCodexIDTokenClaims(auth *coreauth.Auth) gin.H {
 	if v := claims.CodexAuthInfo.ChatgptSubscriptionActiveUntil; v != nil {
 		result["chatgpt_subscription_active_until"] = v
 	}
+	if v := claims.CodexAuthInfo.ChatgptSubscriptionLastChecked; !v.IsZero() {
+		result["chatgpt_subscription_last_checked"] = v
+	}
 
 	if len(result) == 0 {
 		return nil
 	}
 	return result
+}
+
+func applyCodexSubscriptionFields(entry gin.H, claims gin.H) {
+	if entry == nil || claims == nil {
+		return
+	}
+	if v, ok := claims["plan_type"]; ok {
+		entry["plan_type"] = v
+	}
+
+	subscription := gin.H{}
+	if v, ok := claims["chatgpt_subscription_active_start"]; ok {
+		entry["subscription_active_start"] = v
+		subscription["active_start"] = v
+	}
+	if v, ok := claims["chatgpt_subscription_active_until"]; ok {
+		entry["subscription_active_until"] = v
+		subscription["active_until"] = v
+	}
+	if v, ok := claims["chatgpt_subscription_last_checked"]; ok {
+		entry["subscription_last_checked"] = v
+		subscription["last_checked"] = v
+	}
+	if len(subscription) > 0 {
+		entry["subscription"] = subscription
+	}
 }
 
 func authEmail(auth *coreauth.Auth) string {
