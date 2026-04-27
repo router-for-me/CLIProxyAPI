@@ -131,26 +131,28 @@ func assertCodexSubscriptionFields(t *testing.T, entry map[string]any) {
 	if got := entry["plan_type"]; got != "plus" {
 		t.Fatalf("plan_type = %#v, want plus", got)
 	}
-	if got := numberValue(entry["subscription_active_start"]); got != 1761955200 {
-		t.Fatalf("subscription_active_start = %#v, want 1761955200", entry["subscription_active_start"])
+	if got := entry["subscription_active_start"]; got != "2025-11-01T00:00:00Z" {
+		t.Fatalf("subscription_active_start = %#v, want 2025-11-01T00:00:00Z", got)
 	}
-	if got := numberValue(entry["subscription_active_until"]); got != 1764547200 {
-		t.Fatalf("subscription_active_until = %#v, want 1764547200", entry["subscription_active_until"])
+	if got := entry["subscription_active_until"]; got != "2025-12-01T00:00:00Z" {
+		t.Fatalf("subscription_active_until = %#v, want 2025-12-01T00:00:00Z", got)
 	}
-	if got, ok := entry["subscription_last_checked"].(string); ok {
-		if got != "2026-04-01T02:03:04Z" {
-			t.Fatalf("subscription_last_checked = %q, want 2026-04-01T02:03:04Z", got)
-		}
-	} else if got := entry["subscription_last_checked"]; got == nil {
-		t.Fatalf("expected subscription_last_checked")
+	if got := entry["subscription_last_checked"]; got != "2026-04-01T02:03:04Z" {
+		t.Fatalf("subscription_last_checked = %#v, want 2026-04-01T02:03:04Z", got)
 	}
 
 	subscription, ok := mapValue(entry["subscription"])
 	if !ok {
 		t.Fatalf("subscription = %T, want object", entry["subscription"])
 	}
-	if got := numberValue(subscription["active_until"]); got != 1764547200 {
-		t.Fatalf("subscription.active_until = %#v, want 1764547200", subscription["active_until"])
+	if got := subscription["active_start"]; got != "2025-11-01T00:00:00Z" {
+		t.Fatalf("subscription.active_start = %#v, want 2025-11-01T00:00:00Z", got)
+	}
+	if got := subscription["active_until"]; got != "2025-12-01T00:00:00Z" {
+		t.Fatalf("subscription.active_until = %#v, want 2025-12-01T00:00:00Z", got)
+	}
+	if got := subscription["last_checked"]; got != "2026-04-01T02:03:04Z" {
+		t.Fatalf("subscription.last_checked = %#v, want 2026-04-01T02:03:04Z", got)
 	}
 
 	idTokenClaims, ok := mapValue(entry["id_token"])
@@ -160,21 +162,8 @@ func assertCodexSubscriptionFields(t *testing.T, entry map[string]any) {
 	if got := idTokenClaims["plan_type"]; got != "plus" {
 		t.Fatalf("id_token.plan_type = %#v, want plus", got)
 	}
-}
-
-func numberValue(v any) int64 {
-	switch n := v.(type) {
-	case float64:
-		return int64(n)
-	case int64:
-		return n
-	case int:
-		return int64(n)
-	case json.Number:
-		out, _ := n.Int64()
-		return out
-	default:
-		return 0
+	if got := idTokenClaims["chatgpt_subscription_active_until"]; got != "2025-12-01T00:00:00Z" {
+		t.Fatalf("id_token.chatgpt_subscription_active_until = %#v, want 2025-12-01T00:00:00Z", got)
 	}
 }
 
