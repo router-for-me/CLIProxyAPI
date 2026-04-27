@@ -194,6 +194,9 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 	out := make([]*coreauth.Auth, 0)
 	for i := range cfg.OpenAICompatibility {
 		compat := &cfg.OpenAICompatibility[i]
+		if compat.Disabled {
+			continue
+		}
 		prefix := strings.TrimSpace(compat.Prefix)
 		providerName := strings.ToLower(strings.TrimSpace(compat.Name))
 		if providerName == "" {

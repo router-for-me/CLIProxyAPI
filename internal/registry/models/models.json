@@ -1292,6 +1292,29 @@
           "xhigh"
         ]
       }
+    },
+    {
+      "id": "codex-auto-review",
+      "object": "model",
+      "created": 1776902400,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "Codex Auto Review",
+      "version": "Codex Auto Review",
+      "description": "Automatic approval review model for Codex.",
+      "context_length": 272000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      }
     }
   ],
   "codex-team": [
@@ -1397,6 +1420,29 @@
       "display_name": "GPT 5.5",
       "version": "gpt-5.5",
       "description": "Frontier model for complex coding, research, and real-world work.",
+      "context_length": 272000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      }
+    },
+    {
+      "id": "codex-auto-review",
+      "object": "model",
+      "created": 1776902400,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "Codex Auto Review",
+      "version": "Codex Auto Review",
+      "description": "Automatic approval review model for Codex.",
       "context_length": 272000,
       "max_completion_tokens": 128000,
       "supported_parameters": [
@@ -1551,6 +1597,29 @@
           "xhigh"
         ]
       }
+    },
+    {
+      "id": "codex-auto-review",
+      "object": "model",
+      "created": 1776902400,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "Codex Auto Review",
+      "version": "Codex Auto Review",
+      "description": "Automatic approval review model for Codex.",
+      "context_length": 272000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      }
     }
   ],
   "codex-pro": [
@@ -1679,6 +1748,29 @@
       "display_name": "GPT 5.5",
       "version": "gpt-5.5",
       "description": "Frontier model for complex coding, research, and real-world work.",
+      "context_length": 272000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      }
+    },
+    {
+      "id": "codex-auto-review",
+      "object": "model",
+      "created": 1776902400,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "Codex Auto Review",
+      "version": "Codex Auto Review",
+      "description": "Automatic approval review model for Codex.",
       "context_length": 272000,
       "max_completion_tokens": 128000,
       "supported_parameters": [
