@@ -606,6 +606,9 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/force-model-prefix", s.mgmt.GetForceModelPrefix)
 		mgmt.PUT("/force-model-prefix", s.mgmt.PutForceModelPrefix)
 		mgmt.PATCH("/force-model-prefix", s.mgmt.PutForceModelPrefix)
+		mgmt.GET("/show-codex-thinking-models", s.mgmt.GetShowCodexThinkingModels)
+		mgmt.PUT("/show-codex-thinking-models", s.mgmt.PutShowCodexThinkingModels)
+		mgmt.PATCH("/show-codex-thinking-models", s.mgmt.PutShowCodexThinkingModels)
 
 		mgmt.GET("/routing/strategy", s.mgmt.GetRoutingStrategy)
 		mgmt.PUT("/routing/strategy", s.mgmt.PutRoutingStrategy)

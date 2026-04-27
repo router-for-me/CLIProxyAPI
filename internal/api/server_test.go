@@ -150,6 +150,33 @@ func TestAmpProviderModelRoutes(t *testing.T) {
 	}
 }
 
+func TestManagementShowCodexThinkingModelsRoute(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "test-management-key")
+	server := newTestServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/v0/management/show-codex-thinking-models", nil)
+	req.Header.Set("Authorization", "Bearer test-management-key")
+
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("unexpected status code: got %d want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+
+	var resp map[string]bool
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse response JSON: %v; body=%s", err, rr.Body.String())
+	}
+	value, ok := resp["show-codex-thinking-models"]
+	if !ok {
+		t.Fatalf("response missing show-codex-thinking-models: %#v", resp)
+	}
+	if value {
+		t.Fatalf("expected show-codex-thinking-models=false by default, got true")
+	}
+}
+
 func TestDefaultRequestLoggerFactory_UsesResolvedLogDirectory(t *testing.T) {
 	t.Setenv("WRITABLE_PATH", "")
 	t.Setenv("writable_path", "")

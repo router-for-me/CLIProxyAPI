@@ -18,6 +18,9 @@ type SDKConfig struct {
 	// credentials as well.
 	ForceModelPrefix bool `yaml:"force-model-prefix" json:"force-model-prefix"`
 
+	// ShowCodexThinkingModels adds Codex thinking-level suffix aliases to OpenAI-compatible model listings.
+	ShowCodexThinkingModels bool `yaml:"show-codex-thinking-models" json:"show-codex-thinking-models"`
+
 	// RequestLog enables or disables detailed request logging functionality.
 	RequestLog bool `yaml:"request-log" json:"request-log"`
 

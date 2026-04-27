@@ -11,12 +11,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 
 	"github.com/gin-gonic/gin"
 	. "github.com/router-for-me/CLIProxyAPI/v6/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	responsesconverter "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/openai/openai/responses"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 	"github.com/tidwall/gjson"
@@ -63,12 +65,13 @@ func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
 	allModels := h.Models()
 
 	// Filter to only include the 4 required fields: id, object, created, owned_by
-	filteredModels := make([]map[string]any, len(allModels))
-	for i, model := range allModels {
-		filteredModel := map[string]any{
+	filteredModels := make([]map[string]any, 0, len(allModels))
+	for _, model := range allModels {
+		filteredModels = append(filteredModels, map[string]any{
 			"id":     model["id"],
 			"object": model["object"],
-		}
+		})
+		filteredModel := filteredModels[len(filteredModels)-1]
 
 		// Add created field if it exists
 		if created, exists := model["created"]; exists {
@@ -79,14 +82,74 @@ func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
 		if ownedBy, exists := model["owned_by"]; exists {
 			filteredModel["owned_by"] = ownedBy
 		}
+	}
 
-		filteredModels[i] = filteredModel
+	if h.Cfg != nil && h.Cfg.ShowCodexThinkingModels {
+		filteredModels = appendCodexThinkingModels(filteredModels, registry.GetGlobalRegistry().GetAvailableModelsByProvider(Codex))
 	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"object": "list",
 		"data":   filteredModels,
 	})
+}
+
+func appendCodexThinkingModels(models []map[string]any, codexModels []*registry.ModelInfo) []map[string]any {
+	if len(codexModels) == 0 {
+		return models
+	}
+
+	seen := make(map[string]struct{}, len(models))
+	for _, model := range models {
+		if id, ok := model["id"].(string); ok {
+			id = strings.TrimSpace(id)
+			if id != "" {
+				seen[id] = struct{}{}
+			}
+		}
+	}
+
+	for _, model := range codexModels {
+		if model == nil || model.Thinking == nil || len(model.Thinking.Levels) == 0 {
+			continue
+		}
+		baseID := strings.TrimSpace(model.ID)
+		if baseID == "" || thinking.ParseSuffix(baseID).HasSuffix {
+			continue
+		}
+		if !isUserSelectableCodexThinkingModel(baseID) {
+			continue
+		}
+		for _, rawLevel := range model.Thinking.Levels {
+			level := strings.TrimSpace(rawLevel)
+			if level == "" {
+				continue
+			}
+			aliasID := fmt.Sprintf("%s(%s)", baseID, level)
+			if _, exists := seen[aliasID]; exists {
+				continue
+			}
+			seen[aliasID] = struct{}{}
+
+			alias := map[string]any{
+				"id":     aliasID,
+				"object": "model",
+			}
+			if model.Created > 0 {
+				alias["created"] = model.Created
+			}
+			if model.OwnedBy != "" {
+				alias["owned_by"] = model.OwnedBy
+			}
+			models = append(models, alias)
+		}
+	}
+
+	return models
+}
+
+func isUserSelectableCodexThinkingModel(modelID string) bool {
+	return strings.HasPrefix(modelID, "gpt-")
 }
 
 // ChatCompletions handles the /v1/chat/completions endpoint.

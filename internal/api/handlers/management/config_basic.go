@@ -279,6 +279,14 @@ func (h *Handler) PutForceModelPrefix(c *gin.Context) {
 	h.updateBoolField(c, func(v bool) { h.cfg.ForceModelPrefix = v })
 }
 
+// ShowCodexThinkingModels
+func (h *Handler) GetShowCodexThinkingModels(c *gin.Context) {
+	c.JSON(200, gin.H{"show-codex-thinking-models": h.cfg.ShowCodexThinkingModels})
+}
+func (h *Handler) PutShowCodexThinkingModels(c *gin.Context) {
+	h.updateBoolField(c, func(v bool) { h.cfg.ShowCodexThinkingModels = v })
+}
+
 func normalizeRoutingStrategy(strategy string) (string, bool) {
 	normalized := strings.ToLower(strings.TrimSpace(strategy))
 	switch normalized {
