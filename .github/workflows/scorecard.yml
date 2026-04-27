@@ -6,6 +6,11 @@ on:
   push:
     branches: [main]
 
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
 permissions: read-all
 
 jobs:
