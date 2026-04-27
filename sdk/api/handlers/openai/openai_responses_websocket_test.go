@@ -689,6 +689,8 @@ func TestForwardResponsesWebsocketPreservesCompletedEvent(t *testing.T) {
 			errCh,
 			&timelineLog,
 			"session-1",
+			"test-model",
+			[]byte(`{"model":"test-model","input":"hello","stream":true}`),
 		)
 		if err != nil {
 			serverErrCh <- err
@@ -734,6 +736,102 @@ func TestForwardResponsesWebsocketPreservesCompletedEvent(t *testing.T) {
 	}
 }
 
+func TestForwardResponsesWebsocketConvertsChatCompletionsFallback(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	serverErrCh := make(chan error, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := responsesWebsocketUpgrader.Upgrade(w, r, nil)
+		if err != nil {
+			serverErrCh <- err
+			return
+		}
+		defer func() {
+			errClose := conn.Close()
+			if errClose != nil {
+				serverErrCh <- errClose
+			}
+		}()
+
+		ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+		ctx.Request = r
+
+		data := make(chan []byte, 1)
+		errCh := make(chan *interfaces.ErrorMessage)
+		data <- []byte(`data: {"id":"chatcmpl-test","object":"chat.completion.chunk","created":123,"model":"test-model","choices":[{"index":0,"delta":{"role":"assistant","content":"websocket fallback ok"},"finish_reason":"stop"}]}`)
+		close(data)
+		close(errCh)
+
+		var timelineLog strings.Builder
+		completedOutput, err := (*OpenAIResponsesAPIHandler)(nil).forwardResponsesWebsocket(
+			ctx,
+			conn,
+			func(...interface{}) {},
+			data,
+			errCh,
+			&timelineLog,
+			"session-1",
+			"test-model",
+			[]byte(`{"model":"test-model","input":"hello","stream":true}`),
+		)
+		if err != nil {
+			serverErrCh <- err
+			return
+		}
+		if !strings.Contains(string(completedOutput), "websocket fallback ok") {
+			serverErrCh <- fmt.Errorf("completed output did not include fallback text: %s", completedOutput)
+			return
+		}
+		serverErrCh <- nil
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer func() {
+		errClose := conn.Close()
+		if errClose != nil {
+			t.Fatalf("close websocket: %v", errClose)
+		}
+	}()
+
+	seenDelta := false
+	seenCompleted := false
+	deadline := time.After(2 * time.Second)
+	for !seenCompleted {
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for converted websocket response")
+		default:
+		}
+		_, payload, errReadMessage := conn.ReadMessage()
+		if errReadMessage != nil {
+			t.Fatalf("read websocket message: %v", errReadMessage)
+		}
+		eventType := gjson.GetBytes(payload, "type").String()
+		switch eventType {
+		case "response.output_text.delta":
+			if strings.Contains(string(payload), "websocket fallback ok") {
+				seenDelta = true
+			}
+		case wsEventTypeCompleted:
+			seenCompleted = true
+		case "error":
+			t.Fatalf("unexpected websocket error payload: %s", payload)
+		}
+	}
+	if !seenDelta {
+		t.Fatal("did not receive converted output text delta")
+	}
+
+	if errServer := <-serverErrCh; errServer != nil {
+		t.Fatalf("server error: %v", errServer)
+	}
+}
+
 func TestForwardResponsesWebsocketLogsAttemptedResponseOnWriteFailure(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -768,6 +866,8 @@ func TestForwardResponsesWebsocketLogsAttemptedResponseOnWriteFailure(t *testing
 			errCh,
 			&timelineLog,
 			"session-1",
+			"test-model",
+			[]byte(`{"model":"test-model","input":"hello","stream":true}`),
 		)
 		if err == nil {
 			serverErrCh <- errors.New("expected websocket write failure")

@@ -190,7 +190,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		}
 		dataChan, _, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, requestJSON, "")
 
-		completedOutput, errForward := h.forwardResponsesWebsocket(c, conn, cliCancel, dataChan, errChan, &wsTimelineLog, passthroughSessionID)
+		completedOutput, errForward := h.forwardResponsesWebsocket(c, conn, cliCancel, dataChan, errChan, &wsTimelineLog, passthroughSessionID, modelName, requestJSON)
 		if errForward != nil {
 			wsTerminateErr = errForward
 			log.Warnf("responses websocket: forward failed id=%s error=%v", passthroughSessionID, errForward)
@@ -711,9 +711,12 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 	errs <-chan *interfaces.ErrorMessage,
 	wsTimelineLog *strings.Builder,
 	sessionID string,
+	modelName string,
+	requestJSON []byte,
 ) ([]byte, error) {
 	completed := false
 	completedOutput := []byte("[]")
+	chatCompletionsFallback := false
 	downstreamSessionKey := ""
 	if c != nil && c.Request != nil {
 		downstreamSessionKey = websocketDownstreamSessionKey(c.Request)
@@ -789,6 +792,12 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 				}
 				cancel(nil)
 				return completedOutput, nil
+			}
+
+			if !chatCompletionsFallback && isChatCompletionsStreamChunk(chunk) {
+				chatCompletionsFallback = true
+				data = convertChatCompletionsStreamToResponses(c.Request.Context(), modelName, requestJSON, chunk, data)
+				continue
 			}
 
 			payloads := websocketJSONPayloadsFromChunk(chunk)

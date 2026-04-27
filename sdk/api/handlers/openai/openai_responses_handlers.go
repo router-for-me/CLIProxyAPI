@@ -454,12 +454,20 @@ func convertChatCompletionsStreamToResponses(ctx context.Context, modelName stri
 		if !emit(firstChunk) {
 			return
 		}
-		for chunk := range data {
-			if !emit(chunk) {
+		for {
+			select {
+			case <-ctx.Done():
 				return
+			case chunk, ok := <-data:
+				if !ok {
+					_ = emit([]byte("data: [DONE]"))
+					return
+				}
+				if !emit(chunk) {
+					return
+				}
 			}
 		}
-		_ = emit([]byte("data: [DONE]"))
 	}()
 	return out
 }
