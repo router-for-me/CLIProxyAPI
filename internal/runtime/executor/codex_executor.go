@@ -38,7 +38,7 @@ const (
 var dataTag = []byte("data:")
 
 func logCodexFinalReasoningEffort(body []byte, model string) {
-	if len(body) == 0 {
+	if !log.IsLevelEnabled(log.DebugLevel) || len(body) == 0 {
 		return
 	}
 	effort := gjson.GetBytes(body, "reasoning.effort")
@@ -48,8 +48,8 @@ func logCodexFinalReasoningEffort(body []byte, model string) {
 	log.WithFields(log.Fields{
 		"provider": "codex",
 		"model":    model,
-		"level":    effort.String(),
-	}).Debug("codex: final reasoning effort after payload config |")
+		"effort":   effort.String(),
+	}).Debug("codex: final reasoning effort after payload config")
 }
 
 // Streamed Codex responses may emit response.output_item.done events while leaving
