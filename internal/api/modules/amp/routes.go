@@ -330,5 +330,7 @@ func (m *AmpModule) registerProviderAliases(engine *gin.Engine, baseHandler *han
 		v1betaAmp.GET("/models", geminiHandlers.GeminiModels)
 		v1betaAmp.POST("/models/*action", fallbackHandler.WrapHandler(geminiHandlers.GeminiHandler))
 		v1betaAmp.GET("/models/*action", geminiHandlers.GeminiGetHandler)
+		v1betaAmp.Any("/cachedContents", fallbackHandler.WrapHandler(geminiHandlers.GeminiCachedContentsHandler))
+		v1betaAmp.Any("/cachedContents/*name", fallbackHandler.WrapHandler(geminiHandlers.GeminiCachedContentsHandler))
 	}
 }

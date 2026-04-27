@@ -34,6 +34,26 @@ type Params struct {
 // toolUseIDCounter provides a process-wide unique counter for tool use identifiers.
 var toolUseIDCounter uint64
 
+func vertexCacheUsageEnabled(ctx context.Context) bool {
+	v, _ := ctx.Value("cliproxy:upstream_provider").(string)
+	return v == "vertex"
+}
+
+func claudeInputAndCacheUsage(ctx context.Context, usageResult gjson.Result) (inputTokens int64, cacheReadTokens int64) {
+	inputTokens = usageResult.Get("promptTokenCount").Int()
+	if !vertexCacheUsageEnabled(ctx) {
+		return inputTokens, 0
+	}
+	cacheReadTokens = usageResult.Get("cachedContentTokenCount").Int()
+	if cacheReadTokens > 0 {
+		inputTokens -= cacheReadTokens
+		if inputTokens < 0 {
+			inputTokens = 0
+		}
+	}
+	return inputTokens, cacheReadTokens
+}
+
 // ConvertGeminiResponseToClaude performs sophisticated streaming response format conversion.
 // This function implements a complex state machine that translates backend client responses
 // into Claude-compatible Server-Sent Events (SSE) format. It manages different response types
@@ -50,7 +70,7 @@ var toolUseIDCounter uint64
 //
 // Returns:
 //   - [][]byte: A slice of bytes, each containing a Claude-compatible SSE payload.
-func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) [][]byte {
+func ConvertGeminiResponseToClaude(ctx context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) [][]byte {
 	if *param == nil {
 		*param = &Params{
 			IsGlAPIKey:       false,
@@ -238,7 +258,11 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 
 				thoughtsTokenCount := usageResult.Get("thoughtsTokenCount").Int()
 				template, _ = sjson.SetBytes(template, "usage.output_tokens", candidatesTokenCountResult.Int()+thoughtsTokenCount)
-				template, _ = sjson.SetBytes(template, "usage.input_tokens", usageResult.Get("promptTokenCount").Int())
+				inputTokens, cacheReadTokens := claudeInputAndCacheUsage(ctx, usageResult)
+				template, _ = sjson.SetBytes(template, "usage.input_tokens", inputTokens)
+				if cacheReadTokens > 0 {
+					template, _ = sjson.SetBytes(template, "usage.cache_read_input_tokens", cacheReadTokens)
+				}
 
 				appendEvent("message_delta", string(template))
 			}
@@ -258,7 +282,7 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 //
 // Returns:
 //   - []byte: A Claude-compatible JSON response.
-func ConvertGeminiResponseToClaudeNonStream(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) []byte {
+func ConvertGeminiResponseToClaudeNonStream(ctx context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) []byte {
 	_ = requestRawJSON
 
 	root := gjson.ParseBytes(rawJSON)
@@ -269,10 +293,13 @@ func ConvertGeminiResponseToClaudeNonStream(_ context.Context, _ string, origina
 	out, _ = sjson.SetBytes(out, "id", root.Get("responseId").String())
 	out, _ = sjson.SetBytes(out, "model", root.Get("modelVersion").String())
 
-	inputTokens := root.Get("usageMetadata.promptTokenCount").Int()
+	inputTokens, cacheReadTokens := claudeInputAndCacheUsage(ctx, root.Get("usageMetadata"))
 	outputTokens := root.Get("usageMetadata.candidatesTokenCount").Int() + root.Get("usageMetadata.thoughtsTokenCount").Int()
 	out, _ = sjson.SetBytes(out, "usage.input_tokens", inputTokens)
 	out, _ = sjson.SetBytes(out, "usage.output_tokens", outputTokens)
+	if cacheReadTokens > 0 {
+		out, _ = sjson.SetBytes(out, "usage.cache_read_input_tokens", cacheReadTokens)
+	}
 
 	parts := root.Get("candidates.0.content.parts")
 	textBuilder := strings.Builder{}

@@ -211,6 +211,8 @@ func TestRegisterProviderAliases_V1BetaRoutes(t *testing.T) {
 	}{
 		{"/api/provider/google/v1beta/models", http.MethodGet},
 		{"/api/provider/google/v1beta/models/generateContent", http.MethodPost},
+		{"/api/provider/google/v1beta/cachedContents", http.MethodPost},
+		{"/api/provider/google/v1beta/cachedContents/test-cache", http.MethodGet},
 	}
 
 	for _, tc := range v1betaPaths {
