@@ -333,6 +333,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 	body, _ = sjson.DeleteBytes(body, "stream")
 	body = normalizeCodexInstructions(body)
+	body = stripCodexToolDeferLoading(body)
 	if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
 		body = ensureImageGenerationTool(body, baseModel, auth)
 	}
@@ -879,6 +880,26 @@ func normalizeCodexInstructions(body []byte) []byte {
 	instructions := gjson.GetBytes(body, "instructions")
 	if !instructions.Exists() || instructions.Type == gjson.Null {
 		body, _ = sjson.SetBytes(body, "instructions", "")
+	}
+	return body
+}
+
+func stripCodexToolDeferLoading(body []byte) []byte {
+	return stripCodexToolDeferLoadingAtPath(body, "tools")
+}
+
+func stripCodexToolDeferLoadingAtPath(body []byte, path string) []byte {
+	tools := gjson.GetBytes(body, "tools")
+	if path != "tools" {
+		tools = gjson.GetBytes(body, path)
+	}
+	if !tools.IsArray() {
+		return body
+	}
+	for i := range tools.Array() {
+		toolPath := fmt.Sprintf("%s.%d", path, i)
+		body, _ = sjson.DeleteBytes(body, toolPath+".defer_loading")
+		body = stripCodexToolDeferLoadingAtPath(body, toolPath+".tools")
 	}
 	return body
 }
