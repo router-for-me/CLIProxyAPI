@@ -343,10 +343,12 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 	if tools := root.Get("tools"); tools.Exists() && tools.IsArray() {
 		toolsJSON := []byte("[]")
 		tools.ForEach(func(_, tool gjson.Result) bool {
-			tJSON := []byte(`{"name":"","description":"","input_schema":{}}`)
-			if n := tool.Get("name"); n.Exists() {
-				tJSON, _ = sjson.SetBytes(tJSON, "name", n.String())
+			toolName := tool.Get("name").String()
+			if toolName == "" {
+				return true // skip tools without a name (e.g. Codex custom tools)
 			}
+			tJSON := []byte(`{"name":"","description":"","input_schema":{}}`)
+			tJSON, _ = sjson.SetBytes(tJSON, "name", toolName)
 			if d := tool.Get("description"); d.Exists() {
 				tJSON, _ = sjson.SetBytes(tJSON, "description", d.String())
 			}
@@ -355,6 +357,10 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 				tJSON, _ = sjson.SetRawBytes(tJSON, "input_schema", []byte(params.Raw))
 			} else if params = tool.Get("parametersJsonSchema"); params.Exists() {
 				tJSON, _ = sjson.SetRawBytes(tJSON, "input_schema", []byte(params.Raw))
+			}
+			// Claude requires input_schema.type; default to "object" when absent
+			if schema := gjson.GetBytes(tJSON, "input_schema"); !schema.Get("type").Exists() {
+				tJSON, _ = sjson.SetBytes(tJSON, "input_schema.type", "object")
 			}
 
 			toolsJSON, _ = sjson.SetRawBytes(toolsJSON, "-1", tJSON)
