@@ -83,7 +83,9 @@ func (a *QoderAuthenticator) Login(ctx context.Context, cfg *config.Config, opts
 	// Create token storage
 	tokenStorage := authSvc.CreateTokenStorage(tokenData, deviceFlow.MachineID)
 	if tokenData.UserID != "" {
-		_, _ = authSvc.SaveUserInfo(ctx, tokenData.AccessToken, tokenData.UserID, name, email)
+		updatedName, updatedEmail := authSvc.SaveUserInfo(ctx, tokenData.AccessToken, tokenData.UserID, name, email)
+		name = updatedName
+		email = updatedEmail
 	}
 
 	// Get email from options if not fetched

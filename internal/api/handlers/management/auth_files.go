@@ -2087,7 +2087,15 @@ func (h *Handler) RequestQoderToken(c *gin.Context) {
 			ID:       fileName,
 			Provider: "qoder",
 			FileName: fileName,
-			Label:    "Qoder User",
+			Label:    func() string {
+	if storage.Name != "" {
+		return storage.Name
+	}
+	if storage.Email != "" {
+		return storage.Email
+	}
+	return "Qoder User"
+}(),
 			Storage:  storage,
 			Metadata: map[string]any{"email": storage.Email},
 		}

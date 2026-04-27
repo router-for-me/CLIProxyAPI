@@ -56,6 +56,11 @@ func newProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 	// Priority 3: Use RoundTripper from context (typically from RoundTripperFor)
 	if rt, ok := ctx.Value("cliproxy.roundtripper").(http.RoundTripper); ok && rt != nil {
 		httpClient.Transport = rt
+	} else {
+		// Use default transport with preserved settings if no proxy or context transport is configured
+		if transport, ok := http.DefaultTransport.(*http.Transport); ok && transport != nil {
+			httpClient.Transport = transport.Clone()
+		}
 	}
 
 	return httpClient

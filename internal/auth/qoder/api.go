@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -285,14 +287,21 @@ func contentToString(content interface{}) string {
 // doRefreshToken performs token refresh and saves to storage
 func doRefreshToken(ctx context.Context, cfg *config.Config, storage *QoderTokenStorage) error {
 	auth := NewQoderAuth(cfg)
-	
+
 	tokenData, err := auth.RefreshTokens(ctx, storage.Token, storage.RefreshToken)
 	if err != nil {
 		return fmt.Errorf("failed to refresh token: %w", err)
 	}
 
 	auth.UpdateTokenStorage(storage, tokenData)
-	return storage.SaveTokenToFile("")
+
+	// Generate proper file path for token storage
+	if storage.Email == "" {
+		return fmt.Errorf("cannot save token: email is empty")
+	}
+	fileName := fmt.Sprintf("qoder-%s.json", storage.Email)
+	authFilePath := filepath.Join(cfg.AuthDir, fileName)
+	return storage.SaveTokenToFile(authFilePath)
 }
 
 // RefreshTokenIfNeeded checks if token needs refresh and refreshes it

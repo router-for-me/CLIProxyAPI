@@ -106,17 +106,12 @@ func NewQoderAuth(cfg *config.Config) *QoderAuth {
 
 // generateCodeVerifier generates a cryptographically random string for PKCE
 func generateCodeVerifier() (string, error) {
-	bytes := make([]byte, 32)
-	if _, err := rand.Read(bytes); err != nil {
-		return "", err
-	}
-	return base64.RawURLEncoding.EncodeToString(bytes), nil
+	return qoderauth.GenerateDeviceCodeVerifier()
 }
 
 // generateCodeChallenge creates a SHA-256 hash of the code verifier
 func generateCodeChallenge(codeVerifier string) string {
-	hash := sha256.Sum256([]byte(codeVerifier))
-	return base64.RawURLEncoding.EncodeToString(hash[:])
+	return qoderauth.GenerateDeviceCodeChallenge(codeVerifier)
 }
 
 // InitiateDeviceFlow starts the OAuth 2.0 device authorization flow

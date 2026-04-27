@@ -6,7 +6,6 @@ package qoder
 import (
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/md5"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
@@ -96,8 +95,11 @@ func encryptUserInfo(userInfo *UserInfo) (string, string, error) {
 		return "", "", fmt.Errorf("failed to generate AES key: %w", err)
 	}
 
-	// IV = key (matching JS implementation: s.slice(0,16))
-	iv := aesKey[:16]
+	// Generate random IV for AES-CBC (should be unpredictable and unique)
+	iv := make([]byte, aes.BlockSize)
+	if _, err := rand.Read(iv); err != nil {
+		return "", "", fmt.Errorf("failed to generate IV: %w", err)
+	}
 
 	// Serialize user info to JSON
 	plaintext, err := json.Marshal(userInfo)
@@ -208,10 +210,11 @@ func BuildAuthHeaders(body []byte, requestURL string, userID, authToken, name, e
 		sigPath = sigPath[5:]
 	}
 
-	// Signature: MD5(payload_b64 \n cosy_key \n timestamp \n body_str \n sigpath)
+	// Signature: SHA256(payload_b64 \n cosy_key \n timestamp \n body_str \n sigpath)
 	bodyStr := string(body)
 	sigInput := fmt.Sprintf("%s\n%s\n%s\n%s\n%s", payloadB64, cosyKeyB64, timestamp, bodyStr, sigPath)
-	sig := fmt.Sprintf("%x", md5.Sum([]byte(sigInput)))
+	hash := sha256.Sum256([]byte(sigInput))
+	sig := fmt.Sprintf("%x", hash)
 
 	return &CosyHeaders{
 		Authorization: fmt.Sprintf("Bearer COSY.%s.%s", payloadB64, sig),
