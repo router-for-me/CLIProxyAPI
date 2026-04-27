@@ -117,6 +117,13 @@ type StoppableSelector interface {
 	Stop()
 }
 
+// AuthInvalidator is implemented by selectors that keep per-auth session
+// bindings. It lets the manager drop affinity for an auth that failed this
+// request without marking the auth itself unhealthy.
+type AuthInvalidator interface {
+	InvalidateAuth(authID string)
+}
+
 // Hook captures lifecycle callbacks for observing auth changes.
 type Hook interface {
 	// OnAuthRegistered fires when a new auth is registered.
@@ -346,6 +353,18 @@ func (m *Manager) SetSelector(selector Selector) {
 	if m.scheduler != nil {
 		m.scheduler.setSelector(selector)
 		m.syncScheduler()
+	}
+}
+
+func (m *Manager) invalidateSessionAffinity(authID string) {
+	if m == nil || strings.TrimSpace(authID) == "" {
+		return
+	}
+	m.mu.RLock()
+	selector := m.selector
+	m.mu.RUnlock()
+	if invalidator, ok := selector.(AuthInvalidator); ok && invalidator != nil {
+		invalidator.InvalidateAuth(authID)
 	}
 }
 
@@ -2016,13 +2035,14 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	suspendReason := ""
 	clearModelQuota := false
 	setModelQuota := false
+	clearAffinityOnly := !result.Success && isClaudeOutOfExtraUsageResultError(result.Error)
 	var authSnapshot *Auth
 
 	m.mu.Lock()
 	if auth, ok := m.auths[result.AuthID]; ok && auth != nil {
 		now := time.Now()
+		if !clearAffinityOnly && result.Success {
 
-		if result.Success {
 			if result.Model != "" {
 				state := ensureModelState(auth, result.Model)
 				resetModelState(state, now)
@@ -2038,7 +2058,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			} else {
 				clearAuthStateOnSuccess(auth, now)
 			}
-		} else {
+		} else if !clearAffinityOnly {
 			if result.Model != "" {
 				if !isRequestScopedNotFoundResultError(result.Error) {
 					disableCooling := quotaCooldownDisabledForAuth(auth)
@@ -2135,8 +2155,10 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			}
 		}
 
-		_ = m.persist(ctx, auth)
-		authSnapshot = auth.Clone()
+		if !clearAffinityOnly {
+			_ = m.persist(ctx, auth)
+			authSnapshot = auth.Clone()
+		}
 	}
 	m.mu.Unlock()
 	if m.scheduler != nil && authSnapshot != nil {
@@ -2154,7 +2176,10 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	} else if shouldSuspendModel {
 		registry.GetGlobalRegistry().SuspendClientModel(result.AuthID, result.Model, suspendReason)
 	}
-
+	if clearAffinityOnly {
+		m.invalidateSessionAffinity(result.AuthID)
+		return
+	}
 	m.hook.OnResult(ctx, result)
 }
 
@@ -2441,6 +2466,29 @@ func isRequestScopedNotFoundResultError(err *Error) bool {
 	return isRequestScopedNotFoundMessage(err.Message)
 }
 
+func isClaudeOutOfExtraUsageMessage(message string) bool {
+	lower := strings.ToLower(strings.TrimSpace(message))
+	if lower == "" {
+		return false
+	}
+	return strings.Contains(lower, "out of extra usage") ||
+		strings.Contains(lower, "claude.ai/settings/usage")
+}
+
+func isClaudeOutOfExtraUsageError(err error) bool {
+	if err == nil || statusCodeFromError(err) != http.StatusBadRequest {
+		return false
+	}
+	return isClaudeOutOfExtraUsageMessage(err.Error())
+}
+
+func isClaudeOutOfExtraUsageResultError(err *Error) bool {
+	if err == nil || statusCodeFromResult(err) != http.StatusBadRequest {
+		return false
+	}
+	return isClaudeOutOfExtraUsageMessage(err.Message)
+}
+
 // isRequestInvalidError returns true if the error represents a client request
 // error that should not be retried. Specifically, it treats 400 responses with
 // "invalid_request_error", request-scoped 404 item misses caused by `store=false`,
@@ -2449,6 +2497,9 @@ func isRequestScopedNotFoundResultError(err *Error) bool {
 // routing can fall through to another auth or upstream.
 func isRequestInvalidError(err error) bool {
 	if err == nil {
+		return false
+	}
+	if isClaudeOutOfExtraUsageError(err) {
 		return false
 	}
 	if isModelSupportError(err) {
