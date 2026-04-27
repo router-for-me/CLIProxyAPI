@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   sync:
-    uses: KooshaPari/phenoShared/.github/workflows/alert-sync-issues.yml
+    uses: KooshaPari/phenoShared/.github/workflows/alert-sync-issues.yml@main
     with:
       auto-label: auto-alert-sync
       min_severity: high
