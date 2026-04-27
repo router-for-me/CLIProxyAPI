@@ -2498,6 +2498,9 @@ func shouldFallbackOpenAIResponsesToChatCompletions(auth *Auth, opts cliproxyexe
 	if opts.SourceFormat != sdktranslator.FormatOpenAIResponse {
 		return false
 	}
+	if strings.TrimSpace(opts.Alt) != "" {
+		return false
+	}
 	if !isOpenAICompatAPIKeyAuth(auth) {
 		return false
 	}

@@ -20,6 +20,7 @@ type compactCaptureExecutor struct {
 	alt          string
 	sourceFormat string
 	calls        int
+	err          error
 }
 
 func (e *compactCaptureExecutor) Identifier() string { return "test-provider" }
@@ -28,6 +29,9 @@ func (e *compactCaptureExecutor) Execute(ctx context.Context, auth *coreauth.Aut
 	e.calls++
 	e.alt = opts.Alt
 	e.sourceFormat = opts.SourceFormat.String()
+	if e.err != nil {
+		return coreexecutor.Response{}, e.err
+	}
 	return coreexecutor.Response{Payload: []byte(`{"ok":true}`)}, nil
 }
 
@@ -116,5 +120,53 @@ func TestOpenAIResponsesCompactExecute(t *testing.T) {
 	}
 	if strings.TrimSpace(resp.Body.String()) != `{"ok":true}` {
 		t.Fatalf("body = %s", resp.Body.String())
+	}
+}
+
+func TestOpenAIResponsesCompactDoesNotFallbackToChatCompletions(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	executor := &compactCaptureExecutor{err: statusCodeError{code: http.StatusNotFound, msg: "404 page not found"}}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+
+	auth := &coreauth.Auth{
+		ID:       "auth-compact-fallback",
+		Provider: executor.Identifier(),
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"api_key":      "test-key",
+			"compat_name":  executor.Identifier(),
+			"provider_key": executor.Identifier(),
+		},
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "test-model"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	h := NewOpenAIResponsesAPIHandler(base)
+	router := gin.New()
+	router.POST("/v1/responses/compact", h.Compact)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses/compact", strings.NewReader(`{"model":"test-model","input":"hello"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d, body: %s", resp.Code, http.StatusNotFound, resp.Body.String())
+	}
+	if executor.calls != 1 {
+		t.Fatalf("executor calls = %d, want 1", executor.calls)
+	}
+	if executor.alt != "responses/compact" {
+		t.Fatalf("alt = %q, want %q", executor.alt, "responses/compact")
+	}
+	if executor.sourceFormat != "openai-response" {
+		t.Fatalf("source format = %q, want %q", executor.sourceFormat, "openai-response")
 	}
 }
