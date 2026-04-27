@@ -7,6 +7,8 @@ package gemini
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"strings"
 	"time"
 
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/common"
@@ -20,10 +22,12 @@ var (
 
 // ConvertCodexResponseToGeminiParams holds parameters for response conversion.
 type ConvertCodexResponseToGeminiParams struct {
-	Model             string
-	CreatedAt         int64
-	ResponseID        string
-	LastStorageOutput []byte
+	Model              string
+	CreatedAt          int64
+	ResponseID         string
+	LastStorageOutput  []byte
+	HasOutputTextDelta bool
+	LastImageHashByID  map[string][32]byte
 }
 
 // ConvertCodexResponseToGemini converts Codex streaming response format to Gemini format.
@@ -42,10 +46,12 @@ type ConvertCodexResponseToGeminiParams struct {
 func ConvertCodexResponseToGemini(_ context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) [][]byte {
 	if *param == nil {
 		*param = &ConvertCodexResponseToGeminiParams{
-			Model:             modelName,
-			CreatedAt:         0,
-			ResponseID:        "",
-			LastStorageOutput: nil,
+			Model:              modelName,
+			CreatedAt:          0,
+			ResponseID:         "",
+			LastStorageOutput:  nil,
+			HasOutputTextDelta: false,
+			LastImageHashByID:  make(map[string][32]byte),
 		}
 	}
 
@@ -58,24 +64,77 @@ func ConvertCodexResponseToGemini(_ context.Context, modelName string, originalR
 	typeResult := rootResult.Get("type")
 	typeStr := typeResult.String()
 
+	params := (*param).(*ConvertCodexResponseToGeminiParams)
+
 	// Base Gemini response template
 	template := []byte(`{"candidates":[{"content":{"role":"model","parts":[]}}],"usageMetadata":{"trafficType":"PROVISIONED_THROUGHPUT"},"modelVersion":"gemini-2.5-pro","createTime":"2025-08-15T02:52:03.884209Z","responseId":"06CeaPH7NaCU48APvNXDyA4"}`)
-	if len((*param).(*ConvertCodexResponseToGeminiParams).LastStorageOutput) > 0 && typeStr == "response.output_item.done" {
-		template = append([]byte(nil), (*param).(*ConvertCodexResponseToGeminiParams).LastStorageOutput...)
-	} else {
-		template, _ = sjson.SetBytes(template, "modelVersion", (*param).(*ConvertCodexResponseToGeminiParams).Model)
+	{
+		template, _ = sjson.SetBytes(template, "modelVersion", params.Model)
 		createdAtResult := rootResult.Get("response.created_at")
 		if createdAtResult.Exists() {
-			(*param).(*ConvertCodexResponseToGeminiParams).CreatedAt = createdAtResult.Int()
-			template, _ = sjson.SetBytes(template, "createTime", time.Unix((*param).(*ConvertCodexResponseToGeminiParams).CreatedAt, 0).Format(time.RFC3339Nano))
+			params.CreatedAt = createdAtResult.Int()
+			template, _ = sjson.SetBytes(template, "createTime", time.Unix(params.CreatedAt, 0).Format(time.RFC3339Nano))
 		}
-		template, _ = sjson.SetBytes(template, "responseId", (*param).(*ConvertCodexResponseToGeminiParams).ResponseID)
+		template, _ = sjson.SetBytes(template, "responseId", params.ResponseID)
+	}
+
+	if typeStr == "response.image_generation_call.partial_image" {
+		itemID := rootResult.Get("item_id").String()
+		b64 := rootResult.Get("partial_image_b64").String()
+		if b64 == "" {
+			return [][]byte{}
+		}
+		if itemID != "" {
+			if params.LastImageHashByID == nil {
+				params.LastImageHashByID = make(map[string][32]byte)
+			}
+			hash := sha256.Sum256([]byte(b64))
+			if last, ok := params.LastImageHashByID[itemID]; ok && last == hash {
+				return [][]byte{}
+			}
+			params.LastImageHashByID[itemID] = hash
+		}
+
+		outputFormat := rootResult.Get("output_format").String()
+		mimeType := mimeTypeFromCodexOutputFormat(outputFormat)
+
+		part := []byte(`{"inlineData":{"data":"","mimeType":""}}`)
+		part, _ = sjson.SetBytes(part, "inlineData.data", b64)
+		part, _ = sjson.SetBytes(part, "inlineData.mimeType", mimeType)
+		template, _ = sjson.SetRawBytes(template, "candidates.0.content.parts.-1", part)
+		return [][]byte{template}
 	}
 
 	// Handle function call completion
 	if typeStr == "response.output_item.done" {
 		itemResult := rootResult.Get("item")
 		itemType := itemResult.Get("type").String()
+		if itemType == "image_generation_call" {
+			itemID := itemResult.Get("id").String()
+			b64 := itemResult.Get("result").String()
+			if b64 == "" {
+				return [][]byte{}
+			}
+			if itemID != "" {
+				if params.LastImageHashByID == nil {
+					params.LastImageHashByID = make(map[string][32]byte)
+				}
+				hash := sha256.Sum256([]byte(b64))
+				if last, ok := params.LastImageHashByID[itemID]; ok && last == hash {
+					return [][]byte{}
+				}
+				params.LastImageHashByID[itemID] = hash
+			}
+
+			outputFormat := itemResult.Get("output_format").String()
+			mimeType := mimeTypeFromCodexOutputFormat(outputFormat)
+
+			part := []byte(`{"inlineData":{"data":"","mimeType":""}}`)
+			part, _ = sjson.SetBytes(part, "inlineData.data", b64)
+			part, _ = sjson.SetBytes(part, "inlineData.mimeType", mimeType)
+			template, _ = sjson.SetRawBytes(template, "candidates.0.content.parts.-1", part)
+			return [][]byte{template}
+		}
 		if itemType == "function_call" {
 			// Create function call part
 			functionCall := []byte(`{"functionCall":{"name":"","args":{}}}`)
@@ -101,7 +160,7 @@ func ConvertCodexResponseToGemini(_ context.Context, modelName string, originalR
 			template, _ = sjson.SetRawBytes(template, "candidates.0.content.parts.-1", functionCall)
 			template, _ = sjson.SetBytes(template, "candidates.0.finishReason", "STOP")
 
-			(*param).(*ConvertCodexResponseToGeminiParams).LastStorageOutput = append([]byte(nil), template...)
+			params.LastStorageOutput = append([]byte(nil), template...)
 
 			// Use this return to storage message
 			return [][]byte{}
@@ -111,15 +170,45 @@ func ConvertCodexResponseToGemini(_ context.Context, modelName string, originalR
 	if typeStr == "response.created" { // Handle response creation - set model and response ID
 		template, _ = sjson.SetBytes(template, "modelVersion", rootResult.Get("response.model").String())
 		template, _ = sjson.SetBytes(template, "responseId", rootResult.Get("response.id").String())
-		(*param).(*ConvertCodexResponseToGeminiParams).ResponseID = rootResult.Get("response.id").String()
+		params.ResponseID = rootResult.Get("response.id").String()
 	} else if typeStr == "response.reasoning_summary_text.delta" { // Handle reasoning/thinking content delta
 		part := []byte(`{"thought":true,"text":""}`)
 		part, _ = sjson.SetBytes(part, "text", rootResult.Get("delta").String())
 		template, _ = sjson.SetRawBytes(template, "candidates.0.content.parts.-1", part)
 	} else if typeStr == "response.output_text.delta" { // Handle regular text content delta
+		params.HasOutputTextDelta = true
 		part := []byte(`{"text":""}`)
 		part, _ = sjson.SetBytes(part, "text", rootResult.Get("delta").String())
 		template, _ = sjson.SetRawBytes(template, "candidates.0.content.parts.-1", part)
+	} else if typeStr == "response.output_item.done" { // Fallback: emit final message text when no delta chunks were received
+		itemResult := rootResult.Get("item")
+		if itemResult.Get("type").String() != "message" || params.HasOutputTextDelta {
+			return [][]byte{}
+		}
+		contentResult := itemResult.Get("content")
+		if !contentResult.Exists() || !contentResult.IsArray() {
+			return [][]byte{}
+		}
+		wroteText := false
+		contentResult.ForEach(func(_, partResult gjson.Result) bool {
+			if partResult.Get("type").String() != "output_text" {
+				return true
+			}
+			text := partResult.Get("text").String()
+			if text == "" {
+				return true
+			}
+			part := []byte(`{"text":""}`)
+			part, _ = sjson.SetBytes(part, "text", text)
+			template, _ = sjson.SetRawBytes(template, "candidates.0.content.parts.-1", part)
+			wroteText = true
+			return true
+		})
+		if wroteText {
+			params.HasOutputTextDelta = true
+			return [][]byte{template}
+		}
+		return [][]byte{}
 	} else if typeStr == "response.completed" { // Handle response completion with usage metadata
 		template, _ = sjson.SetBytes(template, "usageMetadata.promptTokenCount", rootResult.Get("response.usage.input_tokens").Int())
 		template, _ = sjson.SetBytes(template, "usageMetadata.candidatesTokenCount", rootResult.Get("response.usage.output_tokens").Int())
@@ -129,11 +218,10 @@ func ConvertCodexResponseToGemini(_ context.Context, modelName string, originalR
 		return [][]byte{}
 	}
 
-	if len((*param).(*ConvertCodexResponseToGeminiParams).LastStorageOutput) > 0 {
-		return [][]byte{
-			append([]byte(nil), (*param).(*ConvertCodexResponseToGeminiParams).LastStorageOutput...),
-			template,
-		}
+	if len(params.LastStorageOutput) > 0 {
+		stored := append([]byte(nil), params.LastStorageOutput...)
+		params.LastStorageOutput = nil
+		return [][]byte{stored, template}
 	}
 	return [][]byte{template}
 }
@@ -239,6 +327,20 @@ func ConvertCodexResponseToGeminiNonStream(_ context.Context, modelName string, 
 						})
 					}
 
+				case "image_generation_call":
+					flushPendingFunctionCalls()
+					b64 := value.Get("result").String()
+					if b64 == "" {
+						break
+					}
+					outputFormat := value.Get("output_format").String()
+					mimeType := mimeTypeFromCodexOutputFormat(outputFormat)
+
+					part := []byte(`{"inlineData":{"data":"","mimeType":""}}`)
+					part, _ = sjson.SetBytes(part, "inlineData.data", b64)
+					part, _ = sjson.SetBytes(part, "inlineData.mimeType", mimeType)
+					template, _ = sjson.SetRawBytes(template, "candidates.0.content.parts.-1", part)
+
 				case "function_call":
 					// Collect function call for potential merging with consecutive ones
 					hasToolCall = true
@@ -310,4 +412,25 @@ func buildReverseMapFromGeminiOriginal(original []byte) map[string]string {
 
 func GeminiTokenCount(ctx context.Context, count int64) []byte {
 	return translatorcommon.GeminiTokenCountJSON(count)
+}
+
+func mimeTypeFromCodexOutputFormat(outputFormat string) string {
+	if outputFormat == "" {
+		return "image/png"
+	}
+	if strings.Contains(outputFormat, "/") {
+		return outputFormat
+	}
+	switch strings.ToLower(outputFormat) {
+	case "png":
+		return "image/png"
+	case "jpg", "jpeg":
+		return "image/jpeg"
+	case "webp":
+		return "image/webp"
+	case "gif":
+		return "image/gif"
+	default:
+		return "image/png"
+	}
 }
