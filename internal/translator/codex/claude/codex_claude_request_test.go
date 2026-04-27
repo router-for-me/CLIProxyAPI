@@ -133,3 +133,75 @@ func TestConvertClaudeRequestToCodex_ParallelToolCalls(t *testing.T) {
 		})
 	}
 }
+
+func TestConvertClaudeRequestToCodex_ThinkingSignatureToEncryptedContent(t *testing.T) {
+	result := ConvertClaudeRequestToCodex("test-model", []byte(`{
+		"model": "claude-3-opus",
+		"messages": [{
+			"role": "assistant",
+			"content": [
+				{"type": "thinking", "thinking": "Internal reasoning.", "signature": "sig_123"},
+				{"type": "text", "text": "Visible answer."}
+			]
+		}]
+	}`), false)
+	resultJSON := gjson.ParseBytes(result)
+	inputs := resultJSON.Get("input").Array()
+
+	if len(inputs) != 2 {
+		t.Fatalf("got %d input items, want 2. Output: %s", len(inputs), string(result))
+	}
+
+	reasoning := inputs[0]
+	if got := reasoning.Get("type").String(); got != "reasoning" {
+		t.Fatalf("input[0].type = %q, want %q. Output: %s", got, "reasoning", string(result))
+	}
+	if got := reasoning.Get("encrypted_content").String(); got != "sig_123" {
+		t.Fatalf("encrypted_content = %q, want %q. Output: %s", got, "sig_123", string(result))
+	}
+	if got := reasoning.Get("summary.0.type").String(); got != "summary_text" {
+		t.Fatalf("summary.0.type = %q, want %q. Output: %s", got, "summary_text", string(result))
+	}
+	if got := reasoning.Get("summary.0.text").String(); got != "Internal reasoning." {
+		t.Fatalf("summary.0.text = %q, want %q. Output: %s", got, "Internal reasoning.", string(result))
+	}
+
+	message := inputs[1]
+	if got := message.Get("type").String(); got != "message" {
+		t.Fatalf("input[1].type = %q, want %q. Output: %s", got, "message", string(result))
+	}
+	if got := message.Get("role").String(); got != "assistant" {
+		t.Fatalf("input[1].role = %q, want %q. Output: %s", got, "assistant", string(result))
+	}
+	if got := message.Get("content.0.type").String(); got != "output_text" {
+		t.Fatalf("content.0.type = %q, want %q. Output: %s", got, "output_text", string(result))
+	}
+	if got := message.Get("content.0.text").String(); got != "Visible answer." {
+		t.Fatalf("content.0.text = %q, want %q. Output: %s", got, "Visible answer.", string(result))
+	}
+}
+
+func TestConvertClaudeRequestToCodex_ThinkingSignatureWithoutText(t *testing.T) {
+	result := ConvertClaudeRequestToCodex("test-model", []byte(`{
+		"model": "claude-3-opus",
+		"messages": [{
+			"role": "assistant",
+			"content": [{"type": "thinking", "thinking": "", "signature": "sig_empty_text"}]
+		}]
+	}`), false)
+	resultJSON := gjson.ParseBytes(result)
+	inputs := resultJSON.Get("input").Array()
+
+	if len(inputs) != 1 {
+		t.Fatalf("got %d input items, want 1. Output: %s", len(inputs), string(result))
+	}
+	if got := inputs[0].Get("type").String(); got != "reasoning" {
+		t.Fatalf("input[0].type = %q, want %q. Output: %s", got, "reasoning", string(result))
+	}
+	if got := inputs[0].Get("encrypted_content").String(); got != "sig_empty_text" {
+		t.Fatalf("encrypted_content = %q, want %q. Output: %s", got, "sig_empty_text", string(result))
+	}
+	if got := len(inputs[0].Get("summary").Array()); got != 0 {
+		t.Fatalf("summary length = %d, want 0. Output: %s", got, string(result))
+	}
+}

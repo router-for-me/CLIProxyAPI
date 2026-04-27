@@ -120,6 +120,30 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 				hasContent = true
 			}
 
+			appendReasoningContent := func(part gjson.Result) {
+				if messageRole != "assistant" {
+					return
+				}
+
+				thinkingText := thinking.GetThinkingText(part)
+				signature := part.Get("signature").String()
+				if strings.TrimSpace(thinkingText) == "" && signature == "" {
+					return
+				}
+
+				reasoningItem := []byte(`{"type":"reasoning","summary":[]}`)
+				if signature != "" {
+					reasoningItem, _ = sjson.SetBytes(reasoningItem, "encrypted_content", signature)
+				}
+				if strings.TrimSpace(thinkingText) != "" {
+					summary := []byte(`{"type":"summary_text","text":""}`)
+					summary, _ = sjson.SetBytes(summary, "text", thinkingText)
+					reasoningItem, _ = sjson.SetRawBytes(reasoningItem, "summary.-1", summary)
+				}
+
+				template, _ = sjson.SetRawBytes(template, "input.-1", reasoningItem)
+			}
+
 			messageContentsResult := messageResult.Get("content")
 			if messageContentsResult.IsArray() {
 				messageContentResults := messageContentsResult.Array()
@@ -130,6 +154,9 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 					switch contentType {
 					case "text":
 						appendTextContent(messageContentResult.Get("text").String())
+					case "thinking":
+						flushMessage()
+						appendReasoningContent(messageContentResult)
 					case "image":
 						sourceResult := messageContentResult.Get("source")
 						if sourceResult.Exists() {
