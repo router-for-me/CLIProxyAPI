@@ -503,20 +503,77 @@ func extractCodexIDTokenClaimsFromRaw(idTokenRaw string) gin.H {
 	if v := strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType); v != "" {
 		result["plan_type"] = v
 	}
-	if v := claims.CodexAuthInfo.ChatgptSubscriptionActiveStart; v != nil {
+	if v, ok := codexSubscriptionTimestampValue(claims.CodexAuthInfo.ChatgptSubscriptionActiveStart); ok {
 		result["chatgpt_subscription_active_start"] = v
 	}
-	if v := claims.CodexAuthInfo.ChatgptSubscriptionActiveUntil; v != nil {
+	if v, ok := codexSubscriptionTimestampValue(claims.CodexAuthInfo.ChatgptSubscriptionActiveUntil); ok {
 		result["chatgpt_subscription_active_until"] = v
 	}
 	if v := claims.CodexAuthInfo.ChatgptSubscriptionLastChecked; !v.IsZero() {
-		result["chatgpt_subscription_last_checked"] = v
+		result["chatgpt_subscription_last_checked"] = v.UTC().Format(time.RFC3339)
 	}
 
 	if len(result) == 0 {
 		return nil
 	}
 	return result
+}
+
+func codexSubscriptionTimestampValue(v any) (string, bool) {
+	switch value := v.(type) {
+	case nil:
+		return "", false
+	case time.Time:
+		if value.IsZero() {
+			return "", false
+		}
+		return value.UTC().Format(time.RFC3339), true
+	case string:
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			return "", false
+		}
+		if numeric, err := strconv.ParseFloat(trimmed, 64); err == nil {
+			return codexUnixTimestampString(numeric)
+		}
+		if ts, err := time.Parse(time.RFC3339, trimmed); err == nil {
+			return ts.UTC().Format(time.RFC3339), true
+		}
+		if ts, err := time.Parse(time.RFC3339Nano, trimmed); err == nil {
+			return ts.UTC().Format(time.RFC3339), true
+		}
+		return trimmed, true
+	case float64:
+		return codexUnixTimestampString(value)
+	case float32:
+		return codexUnixTimestampString(float64(value))
+	case int:
+		return codexUnixTimestampString(float64(value))
+	case int64:
+		return codexUnixTimestampString(float64(value))
+	case int32:
+		return codexUnixTimestampString(float64(value))
+	case json.Number:
+		numeric, err := value.Float64()
+		if err != nil {
+			return "", false
+		}
+		return codexUnixTimestampString(numeric)
+	default:
+		return "", false
+	}
+}
+
+func codexUnixTimestampString(value float64) (string, bool) {
+	if value <= 0 {
+		return "", false
+	}
+	if value > 100000000000 {
+		value /= 1000
+	}
+	seconds := int64(value)
+	nanos := int64((value - float64(seconds)) * 1e9)
+	return time.Unix(seconds, nanos).UTC().Format(time.RFC3339), true
 }
 
 func applyCodexSubscriptionFields(entry gin.H, claims gin.H) {
