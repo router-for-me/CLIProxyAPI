@@ -18,6 +18,7 @@ import (
 	. "github.com/router-for-me/CLIProxyAPI/v6/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+	responsesconverter "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/openai/openai/responses"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -331,6 +332,9 @@ func (h *OpenAIResponsesAPIHandler) handleNonStreamingResponse(c *gin.Context, r
 		return
 	}
 	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+	if isChatCompletionsResponse(resp) {
+		resp = responsesconverter.ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(cliCtx, modelName, rawJSON, rawJSON, resp, nil)
+	}
 	_, _ = c.Writer.Write(resp)
 	cliCancel()
 }
@@ -402,6 +406,12 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 			// Success! Set headers.
 			setSSEHeaders()
 			handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+			if isChatCompletionsStreamChunk(chunk) {
+				convertedChan := convertChatCompletionsStreamToResponses(cliCtx, modelName, rawJSON, chunk, dataChan)
+				fallbackFramer := &responsesSSEFramer{}
+				h.forwardResponsesStream(c, flusher, func(err error) { cliCancel(err) }, convertedChan, errChan, fallbackFramer)
+				return
+			}
 
 			// Write first chunk logic (matching forwardResponsesStream)
 			framer.WriteChunk(c.Writer, chunk)
@@ -412,6 +422,46 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 			return
 		}
 	}
+}
+
+func isChatCompletionsResponse(rawJSON []byte) bool {
+	return gjson.GetBytes(rawJSON, "object").String() == "chat.completion"
+}
+
+func isChatCompletionsStreamChunk(rawJSON []byte) bool {
+	if bytes.HasPrefix(bytes.TrimSpace(rawJSON), []byte("data:")) {
+		rawJSON = bytes.TrimSpace(bytes.TrimSpace(rawJSON)[5:])
+	}
+	return gjson.GetBytes(rawJSON, "object").String() == "chat.completion.chunk"
+}
+
+func convertChatCompletionsStreamToResponses(ctx context.Context, modelName string, rawJSON []byte, firstChunk []byte, data <-chan []byte) <-chan []byte {
+	out := make(chan []byte)
+	go func() {
+		defer close(out)
+		var param any
+		emit := func(chunk []byte) bool {
+			converted := responsesconverter.ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx, modelName, rawJSON, rawJSON, chunk, &param)
+			for i := range converted {
+				select {
+				case <-ctx.Done():
+					return false
+				case out <- converted[i]:
+				}
+			}
+			return true
+		}
+		if !emit(firstChunk) {
+			return
+		}
+		for chunk := range data {
+			if !emit(chunk) {
+				return
+			}
+		}
+		_ = emit([]byte("data: [DONE]"))
+	}()
+	return out
 }
 
 func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage, framer *responsesSSEFramer) {

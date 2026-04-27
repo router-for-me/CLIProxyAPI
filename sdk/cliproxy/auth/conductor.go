@@ -22,6 +22,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -833,6 +834,14 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		execReq := req
 		execReq.Model = execModel
 		streamResult, errStream := executor.ExecuteStream(ctx, auth, execReq, opts)
+		if shouldFallbackOpenAIResponsesToChatCompletions(auth, opts, errStream) {
+			fallbackOpts := opts
+			fallbackOpts.SourceFormat = sdktranslator.FormatOpenAI
+			fallbackPayload := sdktranslator.TranslateRequest(sdktranslator.FormatOpenAIResponse, sdktranslator.FormatOpenAI, execModel, execReq.Payload, fallbackOpts.Stream)
+			execReq.Payload = fallbackPayload
+			fallbackOpts.OriginalRequest = fallbackPayload
+			streamResult, errStream = executor.ExecuteStream(ctx, auth, execReq, fallbackOpts)
+		}
 		if errStream != nil {
 			if errCtx := ctx.Err(); errCtx != nil {
 				return nil, errCtx
@@ -1328,6 +1337,14 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			execReq := req
 			execReq.Model = upstreamModel
 			resp, errExec := executor.Execute(execCtx, auth, execReq, opts)
+			if shouldFallbackOpenAIResponsesToChatCompletions(auth, opts, errExec) {
+				fallbackOpts := opts
+				fallbackOpts.SourceFormat = sdktranslator.FormatOpenAI
+				fallbackPayload := sdktranslator.TranslateRequest(sdktranslator.FormatOpenAIResponse, sdktranslator.FormatOpenAI, upstreamModel, execReq.Payload, fallbackOpts.Stream)
+				execReq.Payload = fallbackPayload
+				fallbackOpts.OriginalRequest = fallbackPayload
+				resp, errExec = executor.Execute(execCtx, auth, execReq, fallbackOpts)
+			}
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: errExec == nil}
 			if errExec != nil {
 				if errCtx := execCtx.Err(); errCtx != nil {
@@ -2474,6 +2491,26 @@ func isRequestInvalidError(err error) bool {
 	}
 }
 
+func shouldFallbackOpenAIResponsesToChatCompletions(auth *Auth, opts cliproxyexecutor.Options, err error) bool {
+	if err == nil {
+		return false
+	}
+	if opts.SourceFormat != sdktranslator.FormatOpenAIResponse {
+		return false
+	}
+	if !isOpenAICompatAPIKeyAuth(auth) {
+		return false
+	}
+	return statusCodeFromError(err) == http.StatusNotFound && isOpenAIResponsesEndpointNotFoundError(err)
+}
+
+func isOpenAIResponsesEndpointNotFoundError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(err.Error()), "404 page not found")
+}
+
 func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time) {
 	if auth == nil {
 		return
@@ -2886,6 +2923,9 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 
 func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
 	if !m.useSchedulerFastPath() {
+		return m.pickNextMixedLegacy(ctx, providers, model, opts, tried)
+	}
+	if pinnedAuthIDFromMetadata(opts.Metadata) != "" {
 		return m.pickNextMixedLegacy(ctx, providers, model, opts, tried)
 	}
 
