@@ -103,12 +103,46 @@ func (s *Service) OnCircuitBreakerOpened(ctx context.Context, event registry.Cir
 		recoveryAt := event.RecoveryAt.UTC()
 		record.RecoveryAt = &recoveryAt
 	}
+	s.attachLatestErrorEventEvidence(ctx, record)
 
 	if s.circuitBreakerDeletionStore != nil {
 		if _, err := s.circuitBreakerDeletionStore.UpsertPending(ctx, record); err != nil {
 			log.Warnf("failed to upsert circuit-breaker deletion candidate (auth=%s model=%s): %v", auth.ID, event.ModelID, err)
 		}
 	}
+}
+
+func (s *Service) attachLatestErrorEventEvidence(ctx context.Context, record *mongostate.CircuitBreakerDeletionRecord) {
+	if record == nil {
+		return
+	}
+	store := mongostate.GetGlobalErrorEventStore()
+	if store == nil {
+		return
+	}
+	query := mongostate.ErrorEventQuery{
+		Provider: strings.ToLower(strings.TrimSpace(record.Provider)),
+		AuthID:   strings.TrimSpace(record.AuthID),
+		Model:    strings.TrimSpace(record.NormalizedModel),
+		Page:     1,
+		PageSize: 1,
+	}
+	result, err := store.Query(ctx, query)
+	if err != nil {
+		log.Warnf("circuit auto-removal evidence lookup skipped (auth=%s model=%s): %v", record.AuthID, record.NormalizedModel, err)
+		return
+	}
+	if len(result.Items) == 0 {
+		return
+	}
+	item := result.Items[0]
+	record.LastErrorEventID = strings.TrimSpace(item.ID)
+	record.RequestID = strings.TrimSpace(item.RequestID)
+	record.RequestLogRef = strings.TrimSpace(item.RequestLogRef)
+	record.FailureStage = strings.TrimSpace(item.FailureStage)
+	record.ErrorCode = strings.TrimSpace(item.ErrorCode)
+	record.StatusCode = item.StatusCode
+	record.ErrorMessageHash = strings.TrimSpace(item.ErrorMessageHash)
 }
 
 func (s *Service) DeleteCircuitBreakerDeletion(ctx context.Context, id string, actionBy string) (mongostate.CircuitBreakerDeletionItem, error) {

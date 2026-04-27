@@ -79,10 +79,11 @@ cp config.example.yaml config.yaml
 - 仓库仅提供 `state-store.example.ini` 模板，真实状态配置文件需要在本地和生产环境分别维护。
 - 解析规则：`config.yaml` 读取 `state-store.local.ini`，`config-277.yaml` 读取 `state-store.277.ini`。
 - 该 Mongo 配置同时用于熔断强一致失败状态：`circuit_breaker_failure_states` 和 `circuit_breaker_failure_events`。
+- 错误事件采集写入 `error_events`，属于 Best Effort 观测层；初始化或写入失败不会阻断代理主链路。
 - `openai-compat-network-retry` / `openai-compat-network-retry-backoff-ms` 仅用于 `openai-compatible` executor 在“尚未收到上游响应”时吸收 `EOF`、`TLS handshake timeout` 等瞬时网络抖动。
 - 当上游已经返回 `200` 但在首个 SSE chunk 前就空流/截断时，代理现在会返回明确的 upstream truncation 错误（`502`），并附带 request-id、chunk 数、累计字节数、最后事件等诊断字段；这类错误不会被伪装成通用成功流。
 - `request-retry` 仍保留为更外层的 auth/credential 级兜底；它不负责已选定同一上游节点的短抖动吸收，两者职责边界分离。
-- 熔断“自动删模型”现已改为“候选待处理”模式：`GET /v0/management/circuit-breaker/deletions` 支持 `status` 分页过滤，`DELETE /v0/management/circuit-breaker/deletions/:id` 执行真实删除，`POST /v0/management/circuit-breaker/deletions/:id/dismiss` 用于忽略候选。
+- 熔断“自动删模型”现已改为“候选待处理”模式：`GET /v0/management/circuit-breaker/deletions` 支持 `status` 分页过滤，`DELETE /v0/management/circuit-breaker/deletions/:id` 执行真实删除，`POST /v0/management/circuit-breaker/deletions/:id/dismiss` 用于忽略候选；`pending` 候选不自动过期，终态记录保留 30 天。
 
 - **本地开发（推荐）**：`./bin/air`（由 `.air.toml` 管理，等价于使用 `-config config.yaml` 启动）
 - **本地回退启动**：`go run ./cmd/server`

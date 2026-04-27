@@ -94,7 +94,20 @@ func TestGetCircuitBreakerDeletions_Success(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	store := &fakeCircuitBreakerDeletionStore{
 		result: mongostate.CircuitBreakerDeletionQueryResult{
-			Items:    []mongostate.CircuitBreakerDeletionItem{{ID: "abc", AuthID: "a1", Provider: "gemini", Model: "m1", CreatedAt: time.Now().UTC()}},
+			Items: []mongostate.CircuitBreakerDeletionItem{{
+				ID:               "abc",
+				AuthID:           "a1",
+				Provider:         "gemini",
+				Model:            "m1",
+				RequestID:        "req-1",
+				RequestLogRef:    "req-log-1",
+				FailureStage:     "request_execution",
+				ErrorCode:        "upstream_timeout",
+				StatusCode:       504,
+				ErrorMessageHash: "hash-1",
+				LastErrorEventID: "event-1",
+				CreatedAt:        time.Now().UTC(),
+			}},
 			Total:    1,
 			Page:     2,
 			PageSize: 5,
@@ -136,6 +149,12 @@ func TestGetCircuitBreakerDeletions_Success(t *testing.T) {
 	}
 	if got.Total != 1 || len(got.Items) != 1 {
 		t.Fatalf("result mismatch: %+v", got)
+	}
+	if got.Items[0].RequestID != "req-1" || got.Items[0].RequestLogRef != "req-log-1" || got.Items[0].LastErrorEventID != "event-1" {
+		t.Fatalf("evidence IDs missing from response: %+v", got.Items[0])
+	}
+	if got.Items[0].FailureStage != "request_execution" || got.Items[0].ErrorCode != "upstream_timeout" || got.Items[0].StatusCode != 504 || got.Items[0].ErrorMessageHash != "hash-1" {
+		t.Fatalf("error evidence missing from response: %+v", got.Items[0])
 	}
 }
 

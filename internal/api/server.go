@@ -541,6 +541,8 @@ func (s *Server) registerManagementRoutes() {
 
 		mgmt.GET("/circuit-breaker", s.mgmt.GetCircuitBreaker)
 		mgmt.GET("/circuit-breaker/deletions", s.mgmt.GetCircuitBreakerDeletions)
+		mgmt.GET("/error-events", s.mgmt.ListErrorEvents)
+		mgmt.GET("/error-events/summary", s.mgmt.SummarizeErrorEvents)
 		mgmt.DELETE("/circuit-breaker/deletions/:id", s.mgmt.DeleteCircuitBreakerDeletion)
 		mgmt.POST("/circuit-breaker/deletions/:id/dismiss", s.mgmt.DismissCircuitBreakerDeletion)
 		mgmt.DELETE("/circuit-breaker", s.mgmt.DeleteCircuitBreaker)

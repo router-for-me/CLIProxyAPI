@@ -2,6 +2,7 @@ package cliproxy
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -231,6 +232,106 @@ func TestOnCircuitBreakerOpened_WritesPendingCandidateWithoutPersistingConfig(t 
 	}
 	if len(svc.cfg.CodexKey[0].ExcludedModels) != 0 {
 		t.Fatalf("excluded models = %v, want empty", svc.cfg.CodexKey[0].ExcludedModels)
+	}
+}
+
+func TestOnCircuitBreakerOpened_AttachesLatestErrorEventEvidence(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	writeBaseConfigFile(t, configPath)
+
+	store := &fakeCircuitBreakerDeletionStore{recordsByID: map[string]mongostate.CircuitBreakerDeletionRecord{}}
+	errorStore := &fakeErrorEventStore{
+		queryResult: mongostate.ErrorEventQueryResult{
+			Items: []mongostate.ErrorEventItem{{
+				ID:               "event-1",
+				RequestID:        "req-1",
+				RequestLogRef:    "req-log-1",
+				FailureStage:     "request_execution",
+				ErrorCode:        "upstream_timeout",
+				StatusCode:       504,
+				ErrorMessageHash: "hash-1",
+			}},
+		},
+	}
+	mongostate.SetGlobalErrorEventStore(errorStore)
+	t.Cleanup(func() { mongostate.SetGlobalErrorEventStore(nil) })
+
+	coreMgr := coreauth.NewManager(nil, nil, nil)
+	auth := &coreauth.Auth{ID: "auth-codex-1", Provider: "codex"}
+	if _, err := coreMgr.Update(context.Background(), auth); err != nil {
+		t.Fatalf("Update() error = %v", err)
+	}
+
+	svc := &Service{
+		cfg: &config.Config{
+			CircuitBreakerAutoRemoval: config.CircuitBreakerAutoRemovalConfig{AutoRemoveThreshold: 2},
+		},
+		configPath:                  configPath,
+		coreManager:                 coreMgr,
+		circuitBreakerDeletionStore: store,
+	}
+
+	svc.OnCircuitBreakerOpened(context.Background(), registry.CircuitBreakerOpenEvent{
+		ClientID:            auth.ID,
+		Provider:            "codex",
+		ModelID:             "gpt-5-codex",
+		OpenCycles:          2,
+		FailureCount:        2,
+		ConsecutiveFailures: 1,
+		OpenedAt:            time.Now().UTC(),
+	})
+
+	if len(store.upserted) != 1 {
+		t.Fatalf("upserted len = %d, want 1", len(store.upserted))
+	}
+	record := store.upserted[0]
+	if record.LastErrorEventID != "event-1" || record.RequestID != "req-1" || record.RequestLogRef != "req-log-1" {
+		t.Fatalf("candidate evidence IDs not attached: %+v", record)
+	}
+	if record.FailureStage != "request_execution" || record.ErrorCode != "upstream_timeout" || record.StatusCode != 504 || record.ErrorMessageHash != "hash-1" {
+		t.Fatalf("candidate error evidence not attached: %+v", record)
+	}
+	if errorStore.lastQuery.Provider != "codex" || errorStore.lastQuery.AuthID != auth.ID || errorStore.lastQuery.Model != "gpt-5-codex" {
+		t.Fatalf("error event query = %+v, want provider/auth/model filter", errorStore.lastQuery)
+	}
+}
+
+func TestOnCircuitBreakerOpened_StillWritesCandidateWhenEvidenceQueryFails(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	writeBaseConfigFile(t, configPath)
+
+	store := &fakeCircuitBreakerDeletionStore{recordsByID: map[string]mongostate.CircuitBreakerDeletionRecord{}}
+	errorStore := &fakeErrorEventStore{queryErr: errors.New("query failed")}
+	mongostate.SetGlobalErrorEventStore(errorStore)
+	t.Cleanup(func() { mongostate.SetGlobalErrorEventStore(nil) })
+
+	coreMgr := coreauth.NewManager(nil, nil, nil)
+	auth := &coreauth.Auth{ID: "auth-codex-1", Provider: "codex"}
+	if _, err := coreMgr.Update(context.Background(), auth); err != nil {
+		t.Fatalf("Update() error = %v", err)
+	}
+
+	svc := &Service{
+		cfg: &config.Config{
+			CircuitBreakerAutoRemoval: config.CircuitBreakerAutoRemovalConfig{AutoRemoveThreshold: 2},
+		},
+		configPath:                  configPath,
+		coreManager:                 coreMgr,
+		circuitBreakerDeletionStore: store,
+	}
+
+	svc.OnCircuitBreakerOpened(context.Background(), registry.CircuitBreakerOpenEvent{
+		ClientID:   auth.ID,
+		ModelID:    "gpt-5-codex",
+		OpenCycles: 2,
+		OpenedAt:   time.Now().UTC(),
+	})
+
+	if len(store.upserted) != 1 {
+		t.Fatalf("upserted len = %d, want 1", len(store.upserted))
+	}
+	if store.upserted[0].LastErrorEventID != "" {
+		t.Fatalf("LastErrorEventID = %q, want empty", store.upserted[0].LastErrorEventID)
 	}
 }
 

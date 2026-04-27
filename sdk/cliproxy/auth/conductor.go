@@ -1983,7 +1983,7 @@ func (m *Manager) recordCircuitBreakerFailureStoreResult(ctx context.Context, re
 	if store == nil || strings.TrimSpace(result.AuthID) == "" || strings.TrimSpace(result.Model) == "" {
 		return nil
 	}
-	model := normalizeCircuitBreakerModelID(result.Model)
+	model := NormalizeCircuitBreakerModelID(result.Model)
 	if model == "" {
 		return nil
 	}
@@ -2167,18 +2167,6 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	}
 }
 
-func normalizeCircuitBreakerModelID(model string) string {
-	trimmed := strings.TrimSpace(model)
-	if trimmed == "" {
-		return ""
-	}
-	parsed := thinking.ParseSuffix(trimmed)
-	if base := strings.TrimSpace(parsed.ModelName); base != "" {
-		return base
-	}
-	return trimmed
-}
-
 func shouldSkipConductorCircuitBreakerReport(auth *Auth) bool {
 	if auth == nil {
 		return true
@@ -2203,7 +2191,7 @@ func (m *Manager) recordCircuitBreakerFromResult(auth *Auth, result Result) {
 	if shouldSkipConductorCircuitBreakerReport(auth) {
 		return
 	}
-	modelID := normalizeCircuitBreakerModelID(result.Model)
+	modelID := NormalizeCircuitBreakerModelID(result.Model)
 	if modelID == "" {
 		return
 	}
@@ -2395,31 +2383,6 @@ func statusCodeFromResult(err *Error) int {
 	return err.StatusCode()
 }
 
-func isModelSupportErrorMessage(message string) bool {
-	lower := strings.ToLower(strings.TrimSpace(message))
-	if lower == "" {
-		return false
-	}
-	patterns := [...]string{
-		"model_not_supported",
-		"requested model is not supported",
-		"requested model is unsupported",
-		"requested model is unavailable",
-		"model is not supported",
-		"model not supported",
-		"unsupported model",
-		"model unavailable",
-		"not available for your plan",
-		"not available for your account",
-	}
-	for _, pattern := range patterns {
-		if strings.Contains(lower, pattern) {
-			return true
-		}
-	}
-	return false
-}
-
 func isModelSupportError(err error) bool {
 	if err == nil {
 		return false
@@ -2428,7 +2391,7 @@ func isModelSupportError(err error) bool {
 	if status != http.StatusBadRequest && status != http.StatusUnprocessableEntity {
 		return false
 	}
-	return isModelSupportErrorMessage(err.Error())
+	return IsModelSupportErrorMessage(err.Error())
 }
 
 func isModelSupportResultError(err *Error) bool {
@@ -2439,7 +2402,7 @@ func isModelSupportResultError(err *Error) bool {
 	if status != http.StatusBadRequest && status != http.StatusUnprocessableEntity {
 		return false
 	}
-	return isModelSupportErrorMessage(err.Message)
+	return IsModelSupportErrorMessage(err.Message)
 }
 
 func isRequestScopedNotFoundMessage(message string) bool {
@@ -2670,7 +2633,7 @@ func (m *Manager) deferredCircuitBreakerFailureAuths(ctx context.Context, model 
 	if store == nil {
 		return nil, nil
 	}
-	modelKey := normalizeCircuitBreakerModelID(model)
+	modelKey := NormalizeCircuitBreakerModelID(model)
 	if modelKey == "" {
 		return nil, nil
 	}
