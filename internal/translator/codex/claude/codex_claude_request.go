@@ -6,6 +6,7 @@
 package claude
 
 import (
+	"encoding/base64"
 	"fmt"
 	"strconv"
 	"strings"
@@ -125,21 +126,14 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 					return
 				}
 
-				thinkingText := thinking.GetThinkingText(part)
 				signature := part.Get("signature").String()
-				if strings.TrimSpace(thinkingText) == "" && signature == "" {
+				if !isFernetLikeReasoningSignature(signature) {
 					return
 				}
 
+				flushMessage()
 				reasoningItem := []byte(`{"type":"reasoning","summary":[],"content":null}`)
-				if signature != "" {
-					reasoningItem, _ = sjson.SetBytes(reasoningItem, "encrypted_content", signature)
-				}
-				if strings.TrimSpace(thinkingText) != "" {
-					summary := []byte(`{"type":"summary_text","text":""}`)
-					summary, _ = sjson.SetBytes(summary, "text", thinkingText)
-					reasoningItem, _ = sjson.SetRawBytes(reasoningItem, "summary.-1", summary)
-				}
+				reasoningItem, _ = sjson.SetBytes(reasoningItem, "encrypted_content", signature)
 				template, _ = sjson.SetRawBytes(template, "input.-1", reasoningItem)
 			}
 
@@ -154,7 +148,6 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 					case "text":
 						appendTextContent(messageContentResult.Get("text").String())
 					case "thinking":
-						flushMessage()
 						appendReasoningContent(messageContentResult)
 					case "image":
 						sourceResult := messageContentResult.Get("source")
@@ -342,6 +335,39 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 	template, _ = sjson.SetBytes(template, "include", []string{"reasoning.encrypted_content"})
 
 	return template
+}
+
+// isFernetLikeReasoningSignature checks only the encrypted_content envelope shape
+// observed in OpenAI reasoning signatures. It does not authenticate source or payload type.
+func isFernetLikeReasoningSignature(signature string) bool {
+	const (
+		fernetVersionLen = 1
+		fernetTimestamp  = 8
+		fernetIV         = 16
+		fernetHMAC       = 32
+		aesBlockSize     = 16
+	)
+
+	signature = strings.TrimSpace(signature)
+	if !strings.HasPrefix(signature, "gAAAA") {
+		return false
+	}
+
+	decoded, err := base64.URLEncoding.DecodeString(signature)
+	if err != nil {
+		decoded, err = base64.RawURLEncoding.DecodeString(signature)
+		if err != nil {
+			return false
+		}
+	}
+
+	minLen := fernetVersionLen + fernetTimestamp + fernetIV + aesBlockSize + fernetHMAC
+	if len(decoded) < minLen || decoded[0] != 0x80 {
+		return false
+	}
+
+	ciphertextLen := len(decoded) - fernetVersionLen - fernetTimestamp - fernetIV - fernetHMAC
+	return ciphertextLen > 0 && ciphertextLen%aesBlockSize == 0
 }
 
 // shortenNameIfNeeded applies a simple shortening rule for a single name.
