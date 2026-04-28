@@ -144,11 +144,11 @@ tasks:
       - go test -v ./...
 
   clean:
-    desc: "Remove local Go build artifacts and Task cache"
+    desc: "Remove local Go build artifacts, Go lint cache, and Task cache"
     cmds:
       - |
         rm -f cliproxyapi++ cliproxy-server coverage.out
-        rm -rf target bin .task
+        rm -rf target bin .task .cache/go-build
         echo "[OK] Removed local build artifacts"
 
   quality:fmt:
