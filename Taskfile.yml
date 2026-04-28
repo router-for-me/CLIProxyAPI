@@ -34,6 +34,11 @@ tasks:
     cmds:
       - echo "{{.REPO_LANGUAGE}}"
 
+  language:
+    desc: "Alias for primary repository language detection"
+    cmds:
+      - task: detect:language
+
   common:
     desc: "Show detected language and common task entrypoints"
     cmds:
