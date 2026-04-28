@@ -18,6 +18,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -48,13 +49,23 @@ func (e *QoderExecutor) ExecuteStream(ctx context.Context, authRecord *cliproxya
 
 	// Check if token needs refresh
 	bufferSeconds := int64(600) // 10 minutes
-	if err := qoderauth.RefreshTokenIfNeeded(ctx, e.cfg, storage, bufferSeconds); err != nil {
+	authFilePath := ""
+	if authRecord.Attributes != nil {
+		authFilePath = strings.TrimSpace(authRecord.Attributes["path"])
+	}
+	if err := qoderauth.RefreshTokenIfNeeded(ctx, e.cfg, storage, bufferSeconds, authFilePath); err != nil {
 		log.Warnf("Qoder token refresh failed: %v", err)
+	}
+
+	// Translate non-openai formats to chat completions before extracting messages
+	payload := req.Payload
+	if opts.SourceFormat != "" && opts.SourceFormat != sdktranslator.FormatOpenAI {
+		payload = sdktranslator.TranslateRequest(opts.SourceFormat, sdktranslator.FormatOpenAI, req.Model, payload, false)
 	}
 
 	// Parse request to get model and messages
 	var chatReq map[string]interface{}
-	if err := json.Unmarshal(req.Payload, &chatReq); err != nil {
+	if err := json.Unmarshal(payload, &chatReq); err != nil {
 		return nil, fmt.Errorf("failed to parse request: %w", err)
 	}
 
@@ -516,9 +527,15 @@ func (e *qoderStatusError) StatusCode() int {
 
 // CountTokens estimates token count for the request (placeholder implementation)
 func (e *QoderExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	// Translate non-openai formats before extracting messages
+	payload := req.Payload
+	if opts.SourceFormat != "" && opts.SourceFormat != sdktranslator.FormatOpenAI {
+		payload = sdktranslator.TranslateRequest(opts.SourceFormat, sdktranslator.FormatOpenAI, req.Model, payload, false)
+	}
+
 	// Simple estimation: 1 token ≈ 4 characters
 	var chatReq map[string]interface{}
-	if err := json.Unmarshal(req.Payload, &chatReq); err != nil {
+	if err := json.Unmarshal(payload, &chatReq); err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
 

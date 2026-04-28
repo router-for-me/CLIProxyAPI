@@ -337,7 +337,7 @@ func TestRefreshTokenIfNeeded_NoRefreshNeeded(t *testing.T) {
 		RefreshToken: "refresh",
 		ExpireTime:   time.Now().Add(1 * time.Hour).UnixMilli(),
 	}
-	err := RefreshTokenIfNeeded(context.Background(), &config.Config{}, storage, 600)
+	err := RefreshTokenIfNeeded(context.Background(), &config.Config{}, storage, 600, "")
 	assert.NoError(t, err)
 }
 
@@ -350,7 +350,7 @@ func TestRefreshTokenIfNeeded_RefreshFails(t *testing.T) {
 		UserID:       "user123",
 		Email:        "test@example.com",
 	}
-	err := RefreshTokenIfNeeded(context.Background(), &config.Config{}, storage, 600)
+	err := RefreshTokenIfNeeded(context.Background(), &config.Config{}, storage, 600, "")
 	assert.Error(t, err)
 }
 

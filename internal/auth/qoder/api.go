@@ -283,8 +283,9 @@ func contentToString(content interface{}) string {
 	}
 }
 
-// doRefreshToken performs token refresh and saves to storage
-func doRefreshToken(ctx context.Context, cfg *config.Config, storage *QoderTokenStorage) error {
+// doRefreshToken performs token refresh and saves to the provided file path.
+// If authFilePath is empty, it falls back to AuthDir/qoder-<email>.json.
+func doRefreshToken(ctx context.Context, cfg *config.Config, storage *QoderTokenStorage, authFilePath string) error {
 	auth := NewQoderAuth(cfg)
 
 	tokenData, err := auth.RefreshTokens(ctx, storage.Token, storage.RefreshToken)
@@ -294,17 +295,20 @@ func doRefreshToken(ctx context.Context, cfg *config.Config, storage *QoderToken
 
 	auth.UpdateTokenStorage(storage, tokenData)
 
-	// Generate proper file path for token storage
-	if storage.Email == "" {
-		return fmt.Errorf("cannot save token: email is empty")
+	if authFilePath == "" {
+		if storage.Email == "" {
+			return fmt.Errorf("cannot save token: email is empty and no file path provided")
+		}
+		fileName := fmt.Sprintf("qoder-%s.json", storage.Email)
+		authFilePath = filepath.Join(cfg.AuthDir, fileName)
 	}
-	fileName := fmt.Sprintf("qoder-%s.json", storage.Email)
-	authFilePath := filepath.Join(cfg.AuthDir, fileName)
 	return storage.SaveTokenToFile(authFilePath)
 }
 
-// RefreshTokenIfNeeded checks if token needs refresh and refreshes it
-func RefreshTokenIfNeeded(ctx context.Context, cfg *config.Config, storage *QoderTokenStorage, bufferSeconds int64) error {
+// RefreshTokenIfNeeded checks if token needs refresh and refreshes it.
+// authFilePath is the actual path of the auth record's backing file; when empty,
+// the function falls back to constructing a path from the email address.
+func RefreshTokenIfNeeded(ctx context.Context, cfg *config.Config, storage *QoderTokenStorage, bufferSeconds int64, authFilePath string) error {
 	if storage.ExpireTime == 0 {
 		return nil
 	}
@@ -313,7 +317,7 @@ func RefreshTokenIfNeeded(ctx context.Context, cfg *config.Config, storage *Qode
 	bufferMs := bufferSeconds * 1000
 
 	if storage.ExpireTime-now-bufferMs <= 0 {
-		return doRefreshToken(ctx, cfg, storage)
+		return doRefreshToken(ctx, cfg, storage, authFilePath)
 	}
 
 	return nil
