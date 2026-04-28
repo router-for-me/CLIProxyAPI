@@ -74,13 +74,6 @@ tasks:
       - mkdir -p bin {{.GO_CACHE_DIR}}
       - go build -o {{.SERVER_BINARY}} ./cmd/server
       - go build -o {{.CLI_BINARY}} ./cmd/cliproxyctl
-    sources:
-      - "**/*.go"
-      - "go.mod"
-      - "go.sum"
-    generates:
-      - "{{.SERVER_BINARY}}"
-      - "{{.CLI_BINARY}}"
 
   run:
     desc: "Run the proxy locally with default config"
