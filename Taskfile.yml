@@ -1,5 +1,5 @@
 # Taskfile for cliproxyapi++
-# Unified DX for building, testing, and managing the proxy.
+# Go-first DX with common build, test, lint, and clean entrypoints.
 
 version: '3'
 
@@ -29,6 +29,7 @@ env:
 
 tasks:
   default:
+    desc: "List available Taskfile tasks"
     cmds:
       - task --list
     silent: true
