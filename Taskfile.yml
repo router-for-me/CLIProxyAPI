@@ -21,8 +21,21 @@ vars:
       else
         echo unknown
       fi
+  REPO_LANGUAGE_SOURCE:
+    sh: |
+      if [ -f go.mod ]; then
+        echo go.mod
+      elif [ -f package.json ]; then
+        echo package.json
+      elif [ -f pyproject.toml ]; then
+        echo pyproject.toml
+      elif [ -f requirements.txt ]; then
+        echo requirements.txt
+      else
+        echo "no language manifest found"
+      fi
   GO_FILES:
-    sh: find . -name "*.go" | grep -v "vendor"
+    sh: git ls-files '*.go'
 
 env:
   GOCACHE: '{{.GO_CACHE_DIR}}'
@@ -37,7 +50,7 @@ tasks:
   detect:language:
     desc: "Print the detected primary repository language"
     cmds:
-      - echo "{{.REPO_LANGUAGE}}"
+      - echo "{{.REPO_LANGUAGE}} (from {{.REPO_LANGUAGE_SOURCE}})"
 
   language:
     desc: "Alias for primary repository language detection"
@@ -48,7 +61,7 @@ tasks:
     desc: "Show detected language and common task entrypoints"
     cmds:
       - |
-        echo "Detected language: {{.REPO_LANGUAGE}}"
+        echo "Detected language: {{.REPO_LANGUAGE}} (from {{.REPO_LANGUAGE_SOURCE}})"
         echo "Common tasks:"
         echo "  task build"
         echo "  task test"
@@ -557,7 +570,7 @@ tasks:
         echo "[INFO] golangci-lint v2 not found on PATH; running module-pinned v2"
         cache_dir="${GOCACHE:-$(pwd)/.cache/go-build}"
         mkdir -p "$cache_dir"
-        GOCACHE="$cache_dir" GOTOOLCHAIN=go1.26.0 go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest run ./...
+        GOCACHE="$cache_dir" GOTOOLCHAIN=go1.26.0 go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.1.6 run ./...
 
   tidy:
     desc: "Tidy Go modules"
