@@ -423,24 +423,16 @@ func isResponsesToolCallOutputType(itemType string) bool {
 }
 
 // httpResponsesSessionKey derives a session key for HTTP requests.
-// It mirrors the WebSocket session key derivation by preferring request-level
-// identity headers (X-Client-Request-Id), then falling back to a hash of
-// model + previous_response_id.
+// It uses model + previous_response_id hash as the session key.
 //
-// SECURITY: When no request-level identity is available (no headers and no
-// previous_response_id), we call repairResponsesHTTPNoCache which performs
-// reordering without any shared cache to avoid cross-user cache pollution.
+// SECURITY: Unlike WebSocket which uses explicit request headers (X-Client-Request-Id),
+// the HTTP path intentionally omits header-based session keys to prevent cache poisoning.
+// A client-controlled header value could collide with another user's cache entry.
+// When no previous_response_id is available, returns empty to trigger no-cache fallback
+// (repairResponsesHTTPNoCache) which performs reordering without any shared cache.
 func httpResponsesSessionKey(req *http.Request, payload []byte) string {
-	// Prefer an explicit request ID header if present (mirrors WebSocket behavior).
-	if sessionKey := websocketDownstreamSessionKey(req); sessionKey != "" {
-		return "http:" + sessionKey
-	}
-	// Fall back to a hash of model + previous_response_id.
 	model := strings.TrimSpace(gjson.GetBytes(payload, "model").String())
 	prevRespID := strings.TrimSpace(gjson.GetBytes(payload, "previous_response_id").String())
-	// If previous_response_id is empty AND no request header is present,
-	// return empty so callers fall back to repairResponsesHTTPNoCache
-	// (no shared cache to prevent cross-user pollution on first-turn requests).
 	if prevRespID == "" {
 		return ""
 	}
