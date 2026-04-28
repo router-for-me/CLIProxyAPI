@@ -4,7 +4,8 @@
 version: '3'
 
 vars:
-  BINARY_NAME: cliproxyapi++
+  SERVER_BINARY: bin/cliproxy-server
+  CLI_BINARY: bin/cliproxyctl
   DOCKER_IMAGE: kooshapari/cliproxyapi-plusplus
   TEST_REPORT_DIR: target
   QUALITY_PACKAGES: '{{default "./..." .QUALITY_PACKAGES}}'
@@ -47,21 +48,24 @@ tasks:
 
   # -- Build & Run --
   build:
-    desc: "Build the cliproxyapi++ binary"
+    desc: "Build the Go server and operational CLI"
     cmds:
-      - go build -o {{.BINARY_NAME}} ./cmd/server
+      - mkdir -p bin
+      - go build -o {{.SERVER_BINARY}} ./cmd/server
+      - go build -o {{.CLI_BINARY}} ./cmd/cliproxyctl
     sources:
       - "**/*.go"
       - "go.mod"
       - "go.sum"
     generates:
-      - "{{.BINARY_NAME}}"
+      - "{{.SERVER_BINARY}}"
+      - "{{.CLI_BINARY}}"
 
   run:
     desc: "Run the proxy locally with default config"
     deps: [build]
     cmds:
-      - ./{{.BINARY_NAME}} --config config.example.yaml
+      - ./{{.SERVER_BINARY}} --config config.example.yaml
 
   preflight:
     desc: "Fail fast if required tooling is missing"
