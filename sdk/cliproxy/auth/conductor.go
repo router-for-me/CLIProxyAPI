@@ -834,13 +834,19 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		execReq := req
 		execReq.Model = execModel
 		streamResult, errStream := executor.ExecuteStream(ctx, auth, execReq, opts)
+		fallbackAttempted := false
 		if shouldFallbackOpenAIResponsesToChatCompletions(auth, opts, errStream) {
+			fallbackAttempted = true
+			responsesErr := errStream
 			fallbackOpts := opts
 			fallbackOpts.SourceFormat = sdktranslator.FormatOpenAI
 			fallbackPayload := sdktranslator.TranslateRequest(sdktranslator.FormatOpenAIResponse, sdktranslator.FormatOpenAI, execModel, execReq.Payload, fallbackOpts.Stream)
 			execReq.Payload = fallbackPayload
 			fallbackOpts.OriginalRequest = fallbackPayload
 			streamResult, errStream = executor.ExecuteStream(ctx, auth, execReq, fallbackOpts)
+			if errStream != nil {
+				errStream = fallbackAttemptError{fallback: errStream, original: responsesErr}
+			}
 		}
 		if errStream != nil {
 			if errCtx := ctx.Err(); errCtx != nil {
@@ -853,7 +859,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
 			result.RetryAfter = retryAfterFromError(errStream)
 			m.MarkResult(ctx, result)
-			if isRequestInvalidError(errStream) {
+			if !fallbackAttempted && isRequestInvalidError(errStream) {
 				return nil, errStream
 			}
 			lastErr = errStream
@@ -1202,7 +1208,7 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 			return resp, nil
 		}
 		lastErr = errExec
-		wait, shouldRetry := m.shouldRetryAfterError(errExec, attempt, normalized, req.Model, maxWait)
+		wait, shouldRetry := m.shouldRetryAfterError(retryBasisError(errExec), attempt, normalized, req.Model, maxWait)
 		if !shouldRetry {
 			break
 		}
@@ -1268,7 +1274,7 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 			return result, nil
 		}
 		lastErr = errStream
-		wait, shouldRetry := m.shouldRetryAfterError(errStream, attempt, normalized, req.Model, maxWait)
+		wait, shouldRetry := m.shouldRetryAfterError(retryBasisError(errStream), attempt, normalized, req.Model, maxWait)
 		if !shouldRetry {
 			break
 		}
@@ -1337,13 +1343,19 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			execReq := req
 			execReq.Model = upstreamModel
 			resp, errExec := executor.Execute(execCtx, auth, execReq, opts)
+			fallbackAttempted := false
 			if shouldFallbackOpenAIResponsesToChatCompletions(auth, opts, errExec) {
+				fallbackAttempted = true
+				responsesErr := errExec
 				fallbackOpts := opts
 				fallbackOpts.SourceFormat = sdktranslator.FormatOpenAI
 				fallbackPayload := sdktranslator.TranslateRequest(sdktranslator.FormatOpenAIResponse, sdktranslator.FormatOpenAI, upstreamModel, execReq.Payload, fallbackOpts.Stream)
 				execReq.Payload = fallbackPayload
 				fallbackOpts.OriginalRequest = fallbackPayload
 				resp, errExec = executor.Execute(execCtx, auth, execReq, fallbackOpts)
+				if errExec != nil {
+					errExec = fallbackAttemptError{fallback: errExec, original: responsesErr}
+				}
 			}
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: errExec == nil}
 			if errExec != nil {
@@ -1358,7 +1370,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 					result.RetryAfter = ra
 				}
 				m.MarkResult(execCtx, result)
-				if isRequestInvalidError(errExec) {
+				if !fallbackAttempted && isRequestInvalidError(errExec) {
 					return cliproxyexecutor.Response{}, errExec
 				}
 				authErr = errExec
@@ -1368,7 +1380,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			return resp, nil
 		}
 		if authErr != nil {
-			if isRequestInvalidError(authErr) {
+			if _, isFallbackErr := authErr.(fallbackAttemptError); !isFallbackErr && isRequestInvalidError(authErr) {
 				return cliproxyexecutor.Response{}, authErr
 			}
 			lastErr = authErr
@@ -1499,7 +1511,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			if errCtx := execCtx.Err(); errCtx != nil {
 				return nil, errCtx
 			}
-			if isRequestInvalidError(errStream) {
+			if _, isFallbackErr := errStream.(fallbackAttemptError); !isFallbackErr && isRequestInvalidError(errStream) {
 				return nil, errStream
 			}
 			lastErr = errStream
@@ -2512,6 +2524,45 @@ func isOpenAIResponsesEndpointNotFoundError(err error) bool {
 		return false
 	}
 	return strings.EqualFold(strings.TrimSpace(err.Error()), "404 page not found")
+}
+
+type fallbackAttemptError struct {
+	fallback error
+	original error
+}
+
+func (e fallbackAttemptError) Error() string {
+	if e.fallback != nil {
+		return e.fallback.Error()
+	}
+	if e.original != nil {
+		return e.original.Error()
+	}
+	return ""
+}
+
+func (e fallbackAttemptError) Unwrap() error {
+	return e.fallback
+}
+
+func (e fallbackAttemptError) StatusCode() int {
+	if se, ok := e.fallback.(interface{ StatusCode() int }); ok && se != nil {
+		if code := se.StatusCode(); code > 0 {
+			return code
+		}
+	}
+	if se, ok := e.original.(interface{ StatusCode() int }); ok && se != nil {
+		return se.StatusCode()
+	}
+	return 0
+}
+
+func retryBasisError(err error) error {
+	var fallbackErr fallbackAttemptError
+	if errors.As(err, &fallbackErr) && fallbackErr.original != nil {
+		return fallbackErr.original
+	}
+	return err
 }
 
 func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time) {

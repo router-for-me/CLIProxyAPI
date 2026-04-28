@@ -158,6 +158,54 @@ func (e *authScopedOpenAICompatPoolExecutor) ExecuteCalls() []string {
 	return out
 }
 
+type responsesFallbackInvalidExecutor struct {
+	id string
+
+	mu    sync.Mutex
+	calls []string
+}
+
+func (e *responsesFallbackInvalidExecutor) Identifier() string { return e.id }
+
+func (e *responsesFallbackInvalidExecutor) Execute(_ context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	call := auth.ID + "|" + req.Model + "|" + opts.SourceFormat.String()
+	e.mu.Lock()
+	e.calls = append(e.calls, call)
+	e.mu.Unlock()
+
+	if auth.ID == "chat-only" && opts.SourceFormat.String() == "openai-response" {
+		return cliproxyexecutor.Response{}, &Error{HTTPStatus: http.StatusNotFound, Message: "404 page not found"}
+	}
+	if auth.ID == "chat-only" && opts.SourceFormat.String() == "openai" {
+		return cliproxyexecutor.Response{}, &Error{HTTPStatus: http.StatusBadRequest, Message: "invalid_request_error: malformed fallback payload"}
+	}
+	return cliproxyexecutor.Response{Payload: []byte(call)}, nil
+}
+
+func (e *responsesFallbackInvalidExecutor) ExecuteStream(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	return nil, &Error{HTTPStatus: http.StatusNotImplemented, Message: "ExecuteStream not implemented"}
+}
+
+func (e *responsesFallbackInvalidExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) {
+	return auth, nil
+}
+
+func (e *responsesFallbackInvalidExecutor) CountTokens(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, &Error{HTTPStatus: http.StatusNotImplemented, Message: "CountTokens not implemented"}
+}
+
+func (e *responsesFallbackInvalidExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
+	return nil, &Error{HTTPStatus: http.StatusNotImplemented, Message: "HttpRequest not implemented"}
+}
+
+func (e *responsesFallbackInvalidExecutor) Calls() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	out := make([]string, len(e.calls))
+	copy(out, e.calls)
+	return out
+}
+
 func newOpenAICompatPoolTestManager(t *testing.T, alias string, models []internalconfig.OpenAICompatibilityModel, executor *openAICompatPoolExecutor) *Manager {
 	t.Helper()
 	cfg := &internalconfig.Config{
@@ -208,6 +256,70 @@ func readOpenAICompatStreamPayload(t *testing.T, streamResult *cliproxyexecutor.
 		payload = append(payload, chunk.Payload...)
 	}
 	return string(payload)
+}
+
+func TestManagerExecute_ResponsesFallbackInvalidErrorTriesNextAuth(t *testing.T) {
+	provider := "responses-fallback-invalid"
+	executor := &responsesFallbackInvalidExecutor{id: provider}
+	m := NewManager(nil, &FillFirstSelector{}, nil)
+	m.RegisterExecutor(executor)
+
+	for _, auth := range []*Auth{
+		{
+			ID:       "chat-only",
+			Provider: provider,
+			Status:   StatusActive,
+			Attributes: map[string]string{
+				"api_key":      "test-key-1",
+				"compat_name":  provider,
+				"provider_key": provider,
+			},
+		},
+		{
+			ID:       "native-responses",
+			Provider: provider,
+			Status:   StatusActive,
+			Attributes: map[string]string{
+				"api_key":      "test-key-2",
+				"compat_name":  provider,
+				"provider_key": provider,
+			},
+		},
+	} {
+		if _, err := m.Register(context.Background(), auth); err != nil {
+			t.Fatalf("Register auth %s: %v", auth.ID, err)
+		}
+		registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "test-model"}})
+		defer registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	}
+
+	resp, err := m.Execute(
+		context.Background(),
+		[]string{provider},
+		cliproxyexecutor.Request{Model: "test-model", Payload: []byte(`{"model":"test-model","input":"hello"}`)},
+		cliproxyexecutor.Options{SourceFormat: "openai-response", OriginalRequest: []byte(`{"model":"test-model","input":"hello"}`)},
+	)
+	if err != nil {
+		t.Fatalf("execute error = %v, want success via next auth", err)
+	}
+	if string(resp.Payload) != "native-responses|test-model|openai-response" {
+		t.Fatalf("payload = %q, want native responses auth", string(resp.Payload))
+	}
+
+	got := executor.Calls()
+	want := []string{
+		"chat-only|test-model|openai-response",
+		"chat-only|test-model|openai",
+		"native-responses|test-model|openai-response",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("execute calls = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("execute call %d = %q, want %q (all calls: %v)", i, got[i], want[i], got)
+		}
+	}
 }
 
 func TestManagerExecuteCount_OpenAICompatAliasPoolStopsOnInvalidRequest(t *testing.T) {

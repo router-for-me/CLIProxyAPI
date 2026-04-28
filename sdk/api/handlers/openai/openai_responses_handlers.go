@@ -463,6 +463,11 @@ func convertChatCompletionsStreamToResponses(ctx context.Context, modelName stri
 					_ = emit([]byte("data: [DONE]"))
 					return
 				}
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
 				if !emit(chunk) {
 					return
 				}
