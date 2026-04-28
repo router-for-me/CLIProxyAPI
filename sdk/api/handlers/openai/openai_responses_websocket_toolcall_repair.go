@@ -422,20 +422,232 @@ func isResponsesToolCallOutputType(itemType string) bool {
 	}
 }
 
+// httpMaxSessionAge is the maximum age for an HTTP session cache entry.
+// After this duration, the session is considered stale and evicted.
+const httpMaxSessionAge = 2 * time.Minute
+
+// httpMaxSessions is the maximum number of active HTTP sessions.
+// Above this, oldest sessions are evicted to bound memory.
+const httpMaxSessions = 512
+
+var httpRepairCache = newHTTPSessionCache(httpMaxSessionAge, httpMaxSessions)
+
+type httpSessionCache struct {
+	mu          sync.Mutex
+	maxAge      time.Duration
+	maxSessions int
+	sessions    map[string]*httpSession
+	lastCleanup time.Time
+}
+
+type httpSession struct {
+	lastSeen time.Time
+	outputs  map[string]json.RawMessage
+	order    []string
+}
+
+func newHTTPSessionCache(maxAge time.Duration, maxSessions int) *httpSessionCache {
+	return &httpSessionCache{
+		maxAge:      maxAge,
+		maxSessions: maxSessions,
+		sessions:   make(map[string]*httpSession),
+	}
+}
+
+func (c *httpSessionCache) record(sessionKey, callID string, item json.RawMessage) {
+	if sessionKey == "" || callID == "" {
+		return
+	}
+	now := time.Now()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.cleanupLocked(now)
+
+	session, ok := c.sessions[sessionKey]
+	if !ok {
+		if len(c.sessions) >= c.maxSessions {
+			var oldest string
+			var oldestTime time.Time
+			for k, s := range c.sessions {
+				if oldestTime.IsZero() || s.lastSeen.Before(oldestTime) {
+					oldestTime = s.lastSeen
+					oldest = k
+				}
+			}
+			delete(c.sessions, oldest)
+		}
+		session = &httpSession{outputs: make(map[string]json.RawMessage)}
+		c.sessions[sessionKey] = session
+	}
+	session.lastSeen = now
+	if _, exists := session.outputs[callID]; !exists {
+		session.order = append(session.order, callID)
+	}
+	session.outputs[callID] = append(json.RawMessage(nil), item...)
+	if len(session.order) > 256 {
+		evict := session.order[0]
+		session.order = session.order[1:]
+		delete(session.outputs, evict)
+	}
+}
+
+func (c *httpSessionCache) get(sessionKey, callID string) (json.RawMessage, bool) {
+	if sessionKey == "" || callID == "" {
+		return nil, false
+	}
+	now := time.Now()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.cleanupLocked(now)
+
+	session, ok := c.sessions[sessionKey]
+	if !ok {
+		return nil, false
+	}
+	session.lastSeen = now
+	item, ok := session.outputs[callID]
+	if !ok {
+		return nil, false
+	}
+	return append(json.RawMessage(nil), item...), true
+}
+
+func (c *httpSessionCache) cleanupLocked(now time.Time) {
+	if len(c.sessions) > 0 && now.Sub(c.lastCleanup) > c.maxAge {
+		for key, session := range c.sessions {
+			if now.Sub(session.lastSeen) > c.maxAge {
+				delete(c.sessions, key)
+			}
+		}
+		c.lastCleanup = now
+	}
+}
+
+func (c *httpSessionCache) deleteSession(sessionKey string) {
+	if sessionKey == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.sessions, sessionKey)
+}
+
+// httpResponsesRepair performs tool call reordering for HTTP requests using a
+// dedicated HTTP session cache, isolated from the WebSocket caches.
+func httpResponsesRepair(sessionKey string, payload []byte) []byte {
+	sessionKey = strings.TrimSpace(sessionKey)
+	if sessionKey == "" || httpRepairCache == nil || len(payload) == 0 {
+		return payload
+	}
+	input := gjson.GetBytes(payload, "input")
+	if !input.Exists() || !input.IsArray() {
+		return payload
+	}
+
+	// HTTP repair: within a single request, we need to ensure function_call_output
+	// items immediately follow their corresponding function_call items.
+	// Since each previous_response_id is server-generated and globally unique,
+	// cache entries are naturally isolated per session. We use a bounded LRU cache
+	// to prevent memory growth across many concurrent sessions.
+	updatedRaw, err := repairResponsesHTTPSingle(httpRepairCache, sessionKey, input.Raw)
+	if err != nil || updatedRaw == "" || updatedRaw == input.Raw {
+		return payload
+	}
+	updated, errSet := sjson.SetRawBytes(payload, "input", []byte(updatedRaw))
+	if errSet != nil {
+		return payload
+	}
+	return updated
+}
+
+// repairResponsesHTTPSingle reorders tool calls and outputs within a single HTTP request.
+// It uses the httpSessionCache to store/retrieve output items that arrive before their call.
+func repairResponsesHTTPSingle(cache *httpSessionCache, sessionKey, rawArray string) (string, error) {
+	rawArray = strings.TrimSpace(rawArray)
+	if rawArray == "" {
+		return "[]", nil
+	}
+
+	var items []json.RawMessage
+	if err := json.Unmarshal([]byte(rawArray), &items); err != nil {
+		return "", err
+	}
+
+	// Pass 1: record outputs and calls seen in this payload.
+	outputPresent := make(map[string]struct{}, len(items))
+	callPresent := make(map[string]struct{}, len(items))
+	for _, item := range items {
+		if len(item) == 0 {
+			continue
+		}
+		itemType := strings.TrimSpace(gjson.GetBytes(item, "type").String())
+		switch {
+		case isResponsesToolCallOutputType(itemType):
+			callID := strings.TrimSpace(gjson.GetBytes(item, "call_id").String())
+			if callID == "" {
+				continue
+			}
+			outputPresent[callID] = struct{}{}
+			cache.record(sessionKey, callID, item)
+		case isResponsesToolCallType(itemType):
+			callID := strings.TrimSpace(gjson.GetBytes(item, "call_id").String())
+			if callID == "" {
+				continue
+			}
+			callPresent[callID] = struct{}{}
+		}
+	}
+
+	// Pass 2: build output in correct order (call immediately before its output).
+	filtered := make([]json.RawMessage, 0, len(items))
+	for _, item := range items {
+		if len(item) == 0 {
+			continue
+		}
+		itemType := strings.TrimSpace(gjson.GetBytes(item, "type").String())
+		if isResponsesToolCallOutputType(itemType) {
+			// Outputs are allowed to appear before their call (they'll be ordered on the call side).
+			filtered = append(filtered, item)
+			continue
+		}
+		if !isResponsesToolCallType(itemType) {
+			filtered = append(filtered, item)
+			continue
+		}
+
+		callID := strings.TrimSpace(gjson.GetBytes(item, "call_id").String())
+		if callID == "" {
+			continue
+		}
+
+		filtered = append(filtered, item)
+
+		// If an output exists for this call, append it immediately after the call.
+		if _, hasOutput := outputPresent[callID]; hasOutput {
+			if cached, ok := cache.get(sessionKey, callID); ok {
+				filtered = append(filtered, cached)
+			}
+		}
+	}
+
+	out, err := json.Marshal(filtered)
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
+}
+
 // httpResponsesSessionKey derives a session key for HTTP requests.
-// It uses model + previous_response_id hash as the session key.
-//
-// SECURITY: Unlike WebSocket which uses explicit request headers (X-Client-Request-Id),
-// the HTTP path intentionally omits header-based session keys to prevent cache poisoning.
-// A client-controlled header value could collide with another user's cache entry.
-// When no previous_response_id is available, returns empty to trigger no-cache fallback
-// (repairResponsesHTTPNoCache) which performs reordering without any shared cache.
+// Uses model + previous_response_id hash. previous_response_id is a server-generated
+// globally unique identifier per API response, providing natural isolation between
+// requests and turns. No client-controlled headers are used.
+// When no previous_response_id is available, returns empty to trigger no-cache fallback.
 func httpResponsesSessionKey(req *http.Request, payload []byte) string {
-	model := strings.TrimSpace(gjson.GetBytes(payload, "model").String())
 	prevRespID := strings.TrimSpace(gjson.GetBytes(payload, "previous_response_id").String())
 	if prevRespID == "" {
 		return ""
 	}
+	model := strings.TrimSpace(gjson.GetBytes(payload, "model").String())
 	composite := model + "|" + prevRespID
 	hash := sha256.Sum256([]byte(composite))
 	return "http:" + hex.EncodeToString(hash[:16])

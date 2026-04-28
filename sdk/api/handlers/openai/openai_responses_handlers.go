@@ -257,11 +257,11 @@ func (h *OpenAIResponsesAPIHandler) Responses(c *gin.Context) {
 
 	// Repair tool call ordering before sending to upstream (mirrors WebSocket behavior).
 	// This fixes 2013 errors from MiniMax upstream which rejects out-of-order function_call / function_call_output.
-	// If no session key is available (first-turn, no prevRespID, no header), use the no-cache
+	// If no session key is available (first-turn, no prevRespID), use the no-cache
 	// variant to still reorder without polluting a shared cache namespace.
 	rpcSessionKey := httpResponsesSessionKey(c.Request, rawJSON)
 	if rpcSessionKey != "" {
-		rawJSON = repairResponsesWebsocketToolCalls(rpcSessionKey, rawJSON)
+		rawJSON = httpResponsesRepair(rpcSessionKey, rawJSON)
 	} else {
 		rawJSON = repairResponsesHTTPNoCache(rawJSON)
 	}
@@ -308,7 +308,7 @@ func (h *OpenAIResponsesAPIHandler) Compact(c *gin.Context) {
 	// If no session key is available, use the no-cache variant.
 	rpcSessionKey := httpResponsesSessionKey(c.Request, rawJSON)
 	if rpcSessionKey != "" {
-		rawJSON = repairResponsesWebsocketToolCalls(rpcSessionKey, rawJSON)
+		rawJSON = httpResponsesRepair(rpcSessionKey, rawJSON)
 	} else {
 		rawJSON = repairResponsesHTTPNoCache(rawJSON)
 	}
