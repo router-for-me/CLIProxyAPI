@@ -8,6 +8,7 @@ vars:
   CLI_BINARY: bin/cliproxyctl
   DOCKER_IMAGE: kooshapari/cliproxyapi-plusplus
   TEST_REPORT_DIR: target
+  GO_CACHE_DIR: '{{.ROOT_DIR}}/.cache/go-build'
   QUALITY_PACKAGES: '{{default "./..." .QUALITY_PACKAGES}}'
   REPO_LANGUAGE:
     sh: |
@@ -22,6 +23,9 @@ vars:
       fi
   GO_FILES:
     sh: find . -name "*.go" | grep -v "vendor"
+
+env:
+  GOCACHE: '{{.GO_CACHE_DIR}}'
 
 tasks:
   default:
@@ -66,7 +70,7 @@ tasks:
   build:
     desc: "Build the Go server and operational CLI"
     cmds:
-      - mkdir -p bin
+      - mkdir -p bin {{.GO_CACHE_DIR}}
       - go build -o {{.SERVER_BINARY}} ./cmd/server
       - go build -o {{.CLI_BINARY}} ./cmd/cliproxyctl
     sources:
@@ -87,6 +91,7 @@ tasks:
     desc: "Fail fast if required tooling is missing"
     cmds:
       - |
+        mkdir -p "{{.GO_CACHE_DIR}}"
         command -v go >/dev/null 2>&1 || { echo "[FAIL] go is required"; exit 1; }
         command -v task >/dev/null 2>&1 || { echo "[FAIL] task is required"; exit 1; }
         command -v git >/dev/null 2>&1 || { echo "[FAIL] git is required"; exit 1; }
@@ -144,11 +149,16 @@ tasks:
       - go test -v ./...
 
   clean:
-    desc: "Remove local Go build artifacts, Go lint cache, and Task cache"
+    desc: "Remove local Go build artifacts, Go caches, Go lint cache, and Task cache"
     cmds:
       - |
+        go clean -cache -testcache || true
         rm -f cliproxyapi++ cliproxy-server coverage.out
-        rm -rf target bin .task .cache/go-build
+        for path in target bin .task .cache/go-build; do
+          if [ -e "$path" ]; then
+            rm -rf "$path" || { sleep 1; rm -rf "$path"; }
+          fi
+        done
         echo "[OK] Removed local build artifacts"
 
   quality:fmt:
