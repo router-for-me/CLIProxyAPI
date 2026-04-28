@@ -546,7 +546,9 @@ tasks:
         fi
 
         echo "[INFO] golangci-lint v2 not found on PATH; running module-pinned v2"
-        go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest run ./...
+        cache_dir="${GOCACHE:-$(pwd)/.cache/go-build}"
+        mkdir -p "$cache_dir"
+        GOCACHE="$cache_dir" GOTOOLCHAIN=go1.26.0 go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest run ./...
 
   tidy:
     desc: "Tidy Go modules"
