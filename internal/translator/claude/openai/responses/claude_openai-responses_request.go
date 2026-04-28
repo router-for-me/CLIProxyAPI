@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -306,6 +307,7 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 				if callID == "" {
 					callID = genToolCallID()
 				}
+				callID = util.SanitizeClaudeToolID(callID)
 				name := item.Get("name").String()
 				argsStr := item.Get("arguments").String()
 
@@ -326,6 +328,7 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 			case "function_call_output":
 				// Map to user tool_result
 				callID := item.Get("call_id").String()
+				callID = util.SanitizeClaudeToolID(callID)
 				outputStr := item.Get("output").String()
 				toolResult := []byte(`{"type":"tool_result","tool_use_id":"","content":""}`)
 				toolResult, _ = sjson.SetBytes(toolResult, "tool_use_id", callID)
