@@ -52,6 +52,11 @@ tasks:
     cmds:
       - echo "{{.REPO_LANGUAGE}} (from {{.REPO_LANGUAGE_SOURCE}})"
 
+  detect:language:json:
+    desc: "Print the detected primary repository language as JSON"
+    cmds:
+      - printf '{"language":"%s","source":"%s"}\n' "{{.REPO_LANGUAGE}}" "{{.REPO_LANGUAGE_SOURCE}}"
+
   language:
     desc: "Alias for primary repository language detection"
     cmds:
