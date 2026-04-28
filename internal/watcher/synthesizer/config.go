@@ -113,6 +113,12 @@ func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) []*corea
 		if base != "" {
 			attrs["base_url"] = base
 		}
+		if mp := strings.TrimSpace(ck.MessagesPath); mp != "" {
+			if !strings.HasPrefix(mp, "/") {
+				mp = "/" + mp
+			}
+			attrs["messages_path"] = strings.TrimRight(mp, "/")
+		}
 		if hash := diff.ComputeClaudeModelsHash(ck.Models); hash != "" {
 			attrs["models_hash"] = hash
 		}
