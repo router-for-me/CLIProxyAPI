@@ -68,6 +68,7 @@ VisionCoder is also offering our users a limited-time <a href="https://coder.vis
 - Claude Code multi-account load balancing
 - OpenAI Codex multi-account load balancing
 - OpenAI-compatible upstream providers via config (e.g., OpenRouter)
+- Optional Codex thinking suffix model aliases in `/v1/models` (for example `gpt-5.2(high)`), controlled by `show-codex-thinking-models`
 - Reusable Go SDK for embedding the proxy (see `docs/sdk-usage.md`)
 
 ## Getting Started
@@ -77,6 +78,26 @@ CLIProxyAPI Guides: [https://help.router-for.me/](https://help.router-for.me/)
 ## Management API
 
 see [MANAGEMENT_API.md](https://help.router-for.me/management/api)
+
+### Codex thinking suffix model aliases
+
+Set `show-codex-thinking-models: true` in `config.yaml` to make the OpenAI-compatible `GET /v1/models` endpoint include Codex thinking-level aliases such as `gpt-5.2(low)`, `gpt-5.2(medium)`, `gpt-5.2(high)`, and `gpt-5.2(xhigh)`. The default value is `false`.
+
+The base model ID, such as `gpt-5.2`, remains listed and represents the default/auto behavior. The model list does not expose `gpt-5.2(none)` or `gpt-5.2(auto)` display aliases.
+
+The setting can also be managed at runtime through the Management API:
+
+```http
+GET /v0/management/show-codex-thinking-models
+PUT /v0/management/show-codex-thinking-models
+PATCH /v0/management/show-codex-thinking-models
+```
+
+Update requests use the standard boolean payload:
+
+```json
+{ "value": true }
+```
 
 ## Amp CLI Support
 
