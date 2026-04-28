@@ -57,9 +57,7 @@ VisionCoder 还为我们的用户提供 <a href="https://coder.visioncoder.cn" t
 - 为 CLI 模型提供 OpenAI/Gemini/Claude/Codex 兼容的 API 端点
 - 新增 OpenAI Codex（GPT 系列）支持（OAuth 登录）
 - 新增 Claude Code 支持（OAuth 登录）
-- 新增 Qwen Code 支持（OAuth 登录）
 - 新增 Qoder 支持（OAuth 登录）
-- 新增 iFlow 支持（OAuth 登录）
 - 支持流式与非流式响应
 - 函数调用/工具支持
 - 多模态输入（文本、图片）
@@ -69,9 +67,7 @@ VisionCoder 还为我们的用户提供 <a href="https://coder.visioncoder.cn" t
 - 支持 AI Studio Build 多账户轮询
 - 支持 Gemini CLI 多账户轮询
 - 支持 Claude Code 多账户轮询
-- 支持 Qwen Code 多账户轮询
 - 支持 Qoder 多账户轮询
-- 支持 iFlow 多账户轮询
 - 支持 OpenAI Codex 多账户轮询
 - 通过配置接入上游 OpenAI 兼容提供商（例如 OpenRouter）
 - 可复用的 Go SDK（见 `docs/sdk-usage_CN.md`）

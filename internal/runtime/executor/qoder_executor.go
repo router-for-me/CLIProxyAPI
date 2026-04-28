@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 	qoderauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/qoder"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	log "github.com/sirupsen/logrus"
@@ -186,7 +187,7 @@ func (e *QoderExecutor) ExecuteStream(ctx context.Context, authRecord *cliproxya
 	httpReq.Header.Set("Accept", "text/event-stream")
 
 	// Send request
-	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, nil, 0)
+	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, authRecord, 0)
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
@@ -731,6 +732,6 @@ func (e *QoderExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth
 
 	// Execute request
 	req = req.WithContext(ctx)
-	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	return httpClient.Do(req)
 }

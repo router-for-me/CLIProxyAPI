@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -61,8 +60,8 @@ type ChatResponse struct {
 	Created int64  `json:"created"`
 	Model   string `json:"model"`
 	Choices []struct {
-		Index        int `json:"index"`
-		Delta        struct {
+		Index int `json:"index"`
+		Delta struct {
 			Role    string `json:"role,omitempty"`
 			Content string `json:"content,omitempty"`
 		} `json:"delta"`
@@ -72,27 +71,27 @@ type ChatResponse struct {
 
 // QoderAPI manages API calls to the Qoder cloud
 type QoderAPI struct {
-	httpClient  *http.Client
-	token       string
-	userID      string
-	name        string
-	email       string
-	machineID   string
-	cliVersion  string
-	machineOS   string
+	httpClient *http.Client
+	token      string
+	userID     string
+	name       string
+	email      string
+	machineID  string
+	cliVersion string
+	machineOS  string
 }
 
 // NewQoderAPI creates a new QoderAPI instance
 func NewQoderAPI(cfg *config.Config, token, userID, name, email, machineID string) *QoderAPI {
 	return &QoderAPI{
-		httpClient:  util.SetProxy(&cfg.SDKConfig, &http.Client{}),
-		token:       token,
-		userID:      userID,
-		name:        name,
-		email:       email,
-		machineID:   machineID,
-		cliVersion:  QoderCLIVersion,
-		machineOS:   QoderMachineOS,
+		httpClient: util.SetProxy(&cfg.SDKConfig, &http.Client{}),
+		token:      token,
+		userID:     userID,
+		name:       name,
+		email:      email,
+		machineID:  machineID,
+		cliVersion: QoderCLIVersion,
+		machineOS:  QoderMachineOS,
 	}
 }
 
@@ -124,11 +123,11 @@ func (api *QoderAPI) StreamChat(ctx context.Context, messages []ChatMessage, mod
 
 		// Build request body
 		reqBody := map[string]interface{}{
-			"question":       prompt,
-			"model":          qoderModel,
-			"stream":         true,
-			"session_id":     uuid.New().String(),
-			"request_id":     uuid.New().String(),
+			"question":   prompt,
+			"model":      qoderModel,
+			"stream":     true,
+			"session_id": uuid.New().String(),
+			"request_id": uuid.New().String(),
 		}
 
 		bodyBytes, err := json.Marshal(reqBody)
@@ -312,7 +311,7 @@ func RefreshTokenIfNeeded(ctx context.Context, cfg *config.Config, storage *Qode
 
 	now := time.Now().UnixMilli()
 	bufferMs := bufferSeconds * 1000
-	
+
 	if storage.ExpireTime-now-bufferMs <= 0 {
 		return doRefreshToken(ctx, cfg, storage)
 	}

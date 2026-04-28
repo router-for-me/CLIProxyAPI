@@ -54,9 +54,7 @@ GLM CODING PLANを10%割引で取得：https://z.ai/subscribe?ic=8JVLJQFSKB
 - CLIモデル向けのOpenAI/Gemini/Claude互換APIエンドポイント
 - OAuthログインによるOpenAI Codexサポート（GPTモデル）
 - OAuthログインによるClaude Codeサポート
-- OAuthログインによるQwen Codeサポート
 - OAuthログインによるQoderサポート
-- OAuthログインによるiFlowサポート
 - プロバイダールーティングによるAmp CLIおよびIDE拡張機能のサポート
 - ストリーミングおよび非ストリーミングレスポンス
 - 関数呼び出し/ツールのサポート
@@ -67,9 +65,7 @@ GLM CODING PLANを10%割引で取得：https://z.ai/subscribe?ic=8JVLJQFSKB
 - AI Studioビルドのマルチアカウント負荷分散
 - Gemini CLIのマルチアカウント負荷分散
 - Claude Codeのマルチアカウント負荷分散
-- Qwen Codeのマルチアカウント負荷分散
 - Qoderのマルチアカウント負荷分散
-- iFlowのマルチアカウント負荷分散
 - OpenAI Codexのマルチアカウント負荷分散
 - 設定によるOpenAI互換アップストリームプロバイダー（例：OpenRouter）
 - プロキシ埋め込み用の再利用可能なGo SDK（`docs/sdk-usage.md`を参照）

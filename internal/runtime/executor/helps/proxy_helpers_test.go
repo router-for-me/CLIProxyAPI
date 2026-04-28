@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -35,7 +36,7 @@ func TestNewProxyAwareHTTPClientDirectBypassesGlobalProxy(t *testing.T) {
 func TestNewProxyAwareHTTPClientFallbackToDefaultTransport(t *testing.T) {
 	t.Parallel()
 
-	client := newProxyAwareHTTPClient(
+	client := NewProxyAwareHTTPClient(
 		context.Background(),
 		&config.Config{}, // No proxy configured
 		nil,              // No auth
@@ -69,7 +70,7 @@ func TestNewProxyAwareHTTPClientUsesContextTransportWhenAvailable(t *testing.T) 
 		MaxIdleConns: 42,
 	})
 
-	client := newProxyAwareHTTPClient(
+	client := NewProxyAwareHTTPClient(
 		ctx,
 		&config.Config{SDKConfig: sdkconfig.SDKConfig{ProxyURL: "http://should-not-be-used.example.com:8080"}},
 		&cliproxyauth.Auth{ProxyURL: "http://auth-proxy-should-not-be-used.example.com:8080"},
@@ -91,7 +92,7 @@ func TestNewProxyAwareHTTPClientUsesContextTransportWhenAvailable(t *testing.T) 
 func TestNewProxyAwareHTTPClientWithProxyUsesProxyTransport(t *testing.T) {
 	t.Parallel()
 
-	client := newProxyAwareHTTPClient(
+	client := NewProxyAwareHTTPClient(
 		context.Background(),
 		&config.Config{SDKConfig: sdkconfig.SDKConfig{ProxyURL: "http://test-proxy.example.com:8080"}},
 		nil,
@@ -109,7 +110,7 @@ func TestNewProxyAwareHTTPClientWithTimeoutSetsClientTimeout(t *testing.T) {
 	t.Parallel()
 
 	timeout := 30 * time.Second
-	client := newProxyAwareHTTPClient(
+	client := NewProxyAwareHTTPClient(
 		context.Background(),
 		&config.Config{},
 		nil,
@@ -125,7 +126,7 @@ func TestNewProxyAwareHTTPClientWithTimeoutSetsClientTimeout(t *testing.T) {
 func TestNewProxyAwareHTTPClientDirectModeInheritance(t *testing.T) {
 	t.Parallel()
 
-	client := newProxyAwareHTTPClient(
+	client := NewProxyAwareHTTPClient(
 		context.Background(),
 		&config.Config{}, // No proxy configured
 		nil,              // No auth

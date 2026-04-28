@@ -2,9 +2,6 @@ package qoder
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -106,12 +103,12 @@ func NewQoderAuth(cfg *config.Config) *QoderAuth {
 
 // generateCodeVerifier generates a cryptographically random string for PKCE
 func generateCodeVerifier() (string, error) {
-	return qoderauth.GenerateDeviceCodeVerifier()
+	return generateDeviceCodeVerifier()
 }
 
 // generateCodeChallenge creates a SHA-256 hash of the code verifier
 func generateCodeChallenge(codeVerifier string) string {
-	return qoderauth.GenerateDeviceCodeChallenge(codeVerifier)
+	return generateDeviceCodeChallenge(codeVerifier)
 }
 
 // InitiateDeviceFlow starts the OAuth 2.0 device authorization flow

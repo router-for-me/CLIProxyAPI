@@ -6,7 +6,7 @@ import (
 
 // newAuthManager creates a new authentication manager instance with all supported
 // authenticators and a file-based token store. It initializes authenticators for
-// Gemini, Codex, Claude, Antigravity, Kimi, Qwen, and Qoder providers.
+// Gemini, Codex, Claude, Antigravity, Kimi, and Qoder providers.
 //
 // Returns:
 //   - *sdkAuth.Manager: A configured authentication manager instance
