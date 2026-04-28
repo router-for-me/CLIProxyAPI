@@ -10,6 +10,7 @@ vars:
   TEST_REPORT_DIR: target
   GO_CACHE_DIR: '{{.ROOT_DIR}}/.cache/go-build'
   QUALITY_PACKAGES: '{{default "./..." .QUALITY_PACKAGES}}'
+  COMMON_TASKS: "build test lint clean"
   REPO_LANGUAGE:
     sh: |
       if [ -f go.mod ]; then
@@ -67,7 +68,7 @@ tasks:
     cmds:
       - |
         echo "Detected language: {{.REPO_LANGUAGE}} (from {{.REPO_LANGUAGE_SOURCE}})"
-        echo "Common tasks:"
+        echo "Common tasks: {{.COMMON_TASKS}}"
         echo "  task build"
         echo "  task test"
         echo "  task lint"
