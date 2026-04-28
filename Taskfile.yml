@@ -43,8 +43,9 @@ env:
 
 tasks:
   default:
-    desc: "List available Taskfile tasks"
+    desc: "Show detected language, common tasks, and available Taskfile tasks"
     cmds:
+      - task: common
       - task --list
     silent: true
 
