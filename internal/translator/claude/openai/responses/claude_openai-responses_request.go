@@ -359,7 +359,7 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 				tJSON, _ = sjson.SetRawBytes(tJSON, "input_schema", []byte(params.Raw))
 			}
 			// Claude requires input_schema.type; default to "object" when absent
-			if schema := gjson.GetBytes(tJSON, "input_schema"); !schema.Get("type").Exists() {
+			if !gjson.GetBytes(tJSON, "input_schema.type").Exists() {
 				tJSON, _ = sjson.SetBytes(tJSON, "input_schema.type", "object")
 			}
 
