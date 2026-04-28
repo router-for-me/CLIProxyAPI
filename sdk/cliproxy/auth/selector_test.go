@@ -776,6 +776,46 @@ func TestExtractSessionID_Headers(t *testing.T) {
 	}
 }
 
+func TestExtractSessionID_CodexSessionIDHeader(t *testing.T) {
+	t.Parallel()
+
+	headers := make(http.Header)
+	headers.Set("Session_id", "codex-session-123")
+
+	got := ExtractSessionID(headers, nil, nil)
+	want := "codex:codex-session-123"
+	if got != want {
+		t.Errorf("ExtractSessionID() with Session_id = %q, want %q", got, want)
+	}
+}
+
+func TestExtractSessionID_ClientRequestIDHeader(t *testing.T) {
+	t.Parallel()
+
+	headers := make(http.Header)
+	headers.Set("X-Client-Request-Id", "pi-session-123")
+
+	got := ExtractSessionID(headers, nil, nil)
+	want := "clientreq:pi-session-123"
+	if got != want {
+		t.Errorf("ExtractSessionID() with X-Client-Request-Id = %q, want %q", got, want)
+	}
+}
+
+func TestExtractSessionID_CodexSessionIDPriorityOverClientRequestID(t *testing.T) {
+	t.Parallel()
+
+	headers := make(http.Header)
+	headers.Set("X-Client-Request-Id", "pi-session-123")
+	headers.Set("Session_id", "codex-session-456")
+
+	got := ExtractSessionID(headers, nil, nil)
+	want := "codex:codex-session-456"
+	if got != want {
+		t.Errorf("ExtractSessionID() = %q, want %q (Session_id should take priority over X-Client-Request-Id)", got, want)
+	}
+}
+
 func TestExtractSessionID_AmpThreadId(t *testing.T) {
 	t.Parallel()
 
@@ -786,6 +826,20 @@ func TestExtractSessionID_AmpThreadId(t *testing.T) {
 	want := "amp:T-7873e6bd-6354-4a9a-be2c-c7702c6e1b64"
 	if got != want {
 		t.Errorf("ExtractSessionID() with X-Amp-Thread-Id = %q, want %q", got, want)
+	}
+}
+
+func TestExtractSessionID_AmpThreadIdPriorityOverClientRequestID(t *testing.T) {
+	t.Parallel()
+
+	headers := make(http.Header)
+	headers.Set("X-Amp-Thread-Id", "T-priority-test")
+	headers.Set("X-Client-Request-Id", "pi-session-123")
+
+	got := ExtractSessionID(headers, nil, nil)
+	want := "amp:T-priority-test"
+	if got != want {
+		t.Errorf("ExtractSessionID() = %q, want %q (X-Amp-Thread-Id should take priority over X-Client-Request-Id)", got, want)
 	}
 }
 
