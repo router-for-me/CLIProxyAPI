@@ -357,6 +357,9 @@ func BuildAPIKeyClients(cfg *config.Config) (int, int, int, int, int) {
 	}
 	if len(cfg.OpenAICompatibility) > 0 {
 		for _, compatConfig := range cfg.OpenAICompatibility {
+			if compatConfig.Disabled {
+				continue
+			}
 			openAICompatCount += len(compatConfig.APIKeyEntries)
 		}
 	}

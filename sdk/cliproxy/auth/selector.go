@@ -570,9 +570,10 @@ func (s *SessionAffinitySelector) InvalidateAuth(authID string) {
 // Priority order:
 //  1. metadata.user_id (Claude Code format with _session_{uuid}) - highest priority for Claude Code clients
 //  2. X-Session-ID header
-//  3. metadata.user_id (non-Claude Code format)
-//  4. conversation_id field in request body
-//  5. Stable hash from first few messages content (fallback)
+//  3. X-Amp-Thread-Id header (Amp CLI thread ID)
+//  4. metadata.user_id (non-Claude Code format)
+//  5. conversation_id field in request body
+//  6. Stable hash from first few messages content (fallback)
 func ExtractSessionID(headers http.Header, payload []byte, metadata map[string]any) string {
 	primary, _ := extractSessionIDs(headers, payload, metadata)
 	return primary
@@ -608,22 +609,29 @@ func extractSessionIDs(headers http.Header, payload []byte, metadata map[string]
 		}
 	}
 
+	// 3. X-Amp-Thread-Id header (Amp CLI thread ID)
+	if headers != nil {
+		if tid := headers.Get("X-Amp-Thread-Id"); tid != "" {
+			return "amp:" + tid, ""
+		}
+	}
+
 	if len(payload) == 0 {
 		return "", ""
 	}
 
-	// 3. metadata.user_id (non-Claude Code format)
+	// 4. metadata.user_id (non-Claude Code format)
 	userID := gjson.GetBytes(payload, "metadata.user_id").String()
 	if userID != "" {
 		return "user:" + userID, ""
 	}
 
-	// 4. conversation_id field
+	// 5. conversation_id field
 	if convID := gjson.GetBytes(payload, "conversation_id").String(); convID != "" {
 		return "conv:" + convID, ""
 	}
 
-	// 5. Hash-based fallback from message content
+	// 6. Hash-based fallback from message content
 	return extractMessageHashIDs(payload)
 }
 
