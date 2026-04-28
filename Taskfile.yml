@@ -34,6 +34,17 @@ tasks:
     cmds:
       - echo "{{.REPO_LANGUAGE}}"
 
+  common:
+    desc: "Show detected language and common task entrypoints"
+    cmds:
+      - |
+        echo "Detected language: {{.REPO_LANGUAGE}}"
+        echo "Common tasks:"
+        echo "  task build"
+        echo "  task test"
+        echo "  task lint"
+        echo "  task clean"
+
   check:
     desc: "Canonical full-project check"
     cmds:
@@ -526,9 +537,16 @@ tasks:
         echo "[OK] Installed .git/hooks/pre-commit"
 
   lint:
-    desc: "Run golangci-lint"
+    desc: "Run golangci-lint v2"
     cmds:
-      - golangci-lint run ./...
+      - |
+        if command -v golangci-lint >/dev/null 2>&1 && golangci-lint version | rg -q 'version v2\.'; then
+          golangci-lint run ./...
+          exit 0
+        fi
+
+        echo "[INFO] golangci-lint v2 not found on PATH; running module-pinned v2"
+        go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest run ./...
 
   tidy:
     desc: "Tidy Go modules"
