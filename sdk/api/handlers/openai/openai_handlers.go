@@ -122,7 +122,7 @@ func appendCodexThinkingModels(models []map[string]any, codexModels []*registry.
 		}
 		for _, rawLevel := range model.Thinking.Levels {
 			level := strings.TrimSpace(rawLevel)
-			if level == "" {
+			if !isDisplayableCodexThinkingLevel(level) {
 				continue
 			}
 			aliasID := fmt.Sprintf("%s(%s)", baseID, level)
@@ -146,6 +146,13 @@ func appendCodexThinkingModels(models []map[string]any, codexModels []*registry.
 	}
 
 	return models
+}
+
+func isDisplayableCodexThinkingLevel(level string) bool {
+	if level == "" {
+		return false
+	}
+	return !strings.EqualFold(level, string(thinking.LevelNone)) && !strings.EqualFold(level, "auto")
 }
 
 func isUserSelectableCodexThinkingModel(modelID string) bool {

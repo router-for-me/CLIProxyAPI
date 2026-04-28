@@ -97,6 +97,36 @@ func TestAppendCodexThinkingModelsSkipsUnsupportedAndDuplicateAliases(t *testing
 	}
 }
 
+func TestAppendCodexThinkingModelsSkipsNoneAndAutoAliases(t *testing.T) {
+	const modelID = "gpt-5.2"
+	baseModels := []map[string]any{
+		{"id": modelID, "object": "model"},
+	}
+	codexModels := []*registry.ModelInfo{{
+		ID:       modelID,
+		Object:   "model",
+		OwnedBy:  "openai",
+		Thinking: &registry.ThinkingSupport{Levels: []string{"none", "auto", "low", "medium", "high", "xhigh"}},
+	}}
+
+	result := appendCodexThinkingModels(baseModels, codexModels)
+	ids := modelIDs(result)
+
+	if ids[modelID] != 1 {
+		t.Fatalf("expected base model to remain listed once, got ids=%v", ids)
+	}
+	for _, id := range []string{modelID + "(low)", modelID + "(medium)", modelID + "(high)", modelID + "(xhigh)"} {
+		if ids[id] != 1 {
+			t.Fatalf("expected %s exactly once, got ids=%v", id, ids)
+		}
+	}
+	for _, id := range []string{modelID + "(none)", modelID + "(auto)"} {
+		if ids[id] != 0 {
+			t.Fatalf("expected %s to be hidden from model listing, got ids=%v", id, ids)
+		}
+	}
+}
+
 func TestOpenAIModelsShowCodexThinkingModelsSwitch(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
