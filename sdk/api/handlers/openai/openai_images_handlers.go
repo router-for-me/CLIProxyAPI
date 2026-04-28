@@ -15,6 +15,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
@@ -242,6 +243,14 @@ func (h *OpenAIAPIHandler) ImagesGenerations(c *gin.Context) {
 		responseFormat = "b64_json"
 	}
 	stream := gjson.GetBytes(rawJSON, "stream").Bool()
+	if openAICompatibleImageModel(imageModel) {
+		nativeJSON := rawJSON
+		if strings.TrimSpace(gjson.GetBytes(rawJSON, "response_format").String()) == "" {
+			nativeJSON, _ = sjson.SetBytes(nativeJSON, "response_format", responseFormat)
+		}
+		h.collectImagesFromNative(c, nativeJSON, imageModel)
+		return
+	}
 
 	tool := []byte(`{"type":"image_generation","action":"generate"}`)
 	tool, _ = sjson.SetBytes(tool, "model", imageModel)
@@ -583,6 +592,42 @@ func (h *OpenAIAPIHandler) collectImagesFromResponses(c *gin.Context, responsesR
 	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, "openai-response", mainModel, responsesReq, "")
 
 	out, errMsg := collectImagesFromResponsesStream(cliCtx, dataChan, errChan, responseFormat)
+	stopKeepAlive()
+	if errMsg != nil {
+		h.WriteErrorResponse(c, errMsg)
+		if errMsg.Error != nil {
+			cliCancel(errMsg.Error)
+		} else {
+			cliCancel(nil)
+		}
+		return
+	}
+	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+	_, _ = c.Writer.Write(out)
+	cliCancel()
+}
+
+func openAICompatibleImageModel(modelName string) bool {
+	modelName = strings.TrimSpace(modelName)
+	if modelName == "" || !strings.Contains(modelName, "/") {
+		return false
+	}
+	registryRef := registry.GetGlobalRegistry()
+	for _, provider := range registryRef.GetModelProviders(modelName) {
+		info := registryRef.GetModelInfo(modelName, provider)
+		if info != nil && strings.EqualFold(strings.TrimSpace(info.Type), "openai-compatibility") {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *OpenAIAPIHandler) collectImagesFromNative(c *gin.Context, rawJSON []byte, modelName string) {
+	c.Header("Content-Type", "application/json")
+
+	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
+	out, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, "openai", modelName, rawJSON, "images/generations")
 	stopKeepAlive()
 	if errMsg != nil {
 		h.WriteErrorResponse(c, errMsg)
