@@ -684,6 +684,17 @@ func (e *QoderExecutor) Execute(ctx context.Context, authRecord *cliproxyauth.Au
 	}
 
 	responseBytes, _ := json.Marshal(response)
+
+	// Translate the Qoder OpenAI-format response back to the client's expected
+	// SourceFormat (mirrors the TranslateNonStream flow used by every other executor).
+	var param any
+	requestPayload := req.Payload
+	if opts.SourceFormat != "" && opts.SourceFormat != sdktranslator.FormatOpenAI {
+		requestPayload = sdktranslator.TranslateRequest(opts.SourceFormat, sdktranslator.FormatOpenAI, req.Model, req.Payload, false)
+	}
+	out := sdktranslator.TranslateNonStream(ctx, sdktranslator.FormatOpenAI, opts.SourceFormat, req.Model, opts.OriginalRequest, requestPayload, responseBytes, &param)
+	responseBytes = out
+
 	return cliproxyexecutor.Response{
 		Payload: responseBytes,
 		Headers: streamResult.Headers,
