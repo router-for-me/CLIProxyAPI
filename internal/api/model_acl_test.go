@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -493,6 +494,305 @@ func (r *blockAfterReader) Read(p []byte) (int, error) {
 	// Block indefinitely — any Read past the prefix is a bug in the ACL
 	// middleware.
 	select {}
+}
+
+// newTestRouterWithCodexAlias wires the same middleware stack as newTestRouter
+// but exposes a /backend-api/codex/responses route so tests can verify the
+// alias group is also gated by ModelACLMiddleware (not just /v1).
+func newTestRouterWithCodexAlias(cfg *config.Config, apiKey string) *gin.Engine {
+	router := gin.New()
+	router.Use(func(c *gin.Context) {
+		if apiKey != "" {
+			c.Set("apiKey", apiKey)
+		}
+		c.Next()
+	})
+	router.Use(ModelACLMiddleware(func() *config.Config { return cfg }))
+
+	router.POST("/backend-api/codex/responses", func(c *gin.Context) {
+		body, _ := io.ReadAll(c.Request.Body)
+		c.Data(http.StatusOK, "application/json", body)
+	})
+	return router
+}
+
+func TestModelACLMiddleware_CodexAliasDisallowedModelRejected(t *testing.T) {
+	// The /backend-api/codex/* alias group routes the same handlers as
+	// /v1/responses. Without ModelACLMiddleware on this group a restricted
+	// key could bypass the allowlist by calling the alias path; this test
+	// pins down that the middleware is wired (or at least that the same
+	// middleware, when installed, gates the alias correctly).
+	cfg := &config.Config{
+		SDKConfig: config.SDKConfig{
+			APIKeys: []string{"sk-narrow"},
+			APIKeyPolicies: []config.APIKeyPolicy{
+				{Key: "sk-narrow", AllowedModels: []string{"gpt-4o*"}},
+			},
+		},
+	}
+	router := newTestRouterWithCodexAlias(cfg, "sk-narrow")
+
+	body, _ := json.Marshal(map[string]any{"model": "claude-3-5-sonnet-20241022"})
+	req := httptest.NewRequest(http.MethodPost, "/backend-api/codex/responses", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 on codex alias for disallowed model, got %d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "model_not_allowed_for_key") {
+		t.Fatalf("expected error code in body, got %s", w.Body.String())
+	}
+}
+
+func TestModelACLMiddleware_CodexAliasAllowedModelPasses(t *testing.T) {
+	cfg := &config.Config{
+		SDKConfig: config.SDKConfig{
+			APIKeys: []string{"sk-narrow"},
+			APIKeyPolicies: []config.APIKeyPolicy{
+				{Key: "sk-narrow", AllowedModels: []string{"gpt-5*"}},
+			},
+		},
+	}
+	router := newTestRouterWithCodexAlias(cfg, "sk-narrow")
+
+	body, _ := json.Marshal(map[string]any{"model": "gpt-5-codex"})
+	req := httptest.NewRequest(http.MethodPost, "/backend-api/codex/responses", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 on codex alias for allowed model, got %d body=%s", w.Code, w.Body.String())
+	}
+}
+
+// newTestRouterWithMultipart adds a multipart-aware echo handler so we can
+// verify that the multipart body remains parseable downstream after the
+// middleware extracts the "model" field.
+func newTestRouterWithMultipart(cfg *config.Config, apiKey string) *gin.Engine {
+	router := gin.New()
+	router.Use(func(c *gin.Context) {
+		if apiKey != "" {
+			c.Set("apiKey", apiKey)
+		}
+		c.Next()
+	})
+	router.Use(ModelACLMiddleware(func() *config.Config { return cfg }))
+
+	router.POST("/v1/images/edits", func(c *gin.Context) {
+		// Use gin's helper which calls ParseMultipartForm; if the middleware
+		// already parsed it the call is a no-op (idempotent), and the form
+		// values must still be available.
+		form, err := c.MultipartForm()
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"model":  c.PostForm("model"),
+			"prompt": c.PostForm("prompt"),
+			"files":  len(form.File["image"]),
+		})
+	})
+	return router
+}
+
+func buildMultipartBody(t *testing.T, fields map[string]string, files map[string][]byte) (*bytes.Buffer, string) {
+	t.Helper()
+	body := &bytes.Buffer{}
+	mw := multipart.NewWriter(body)
+	for k, v := range fields {
+		if err := mw.WriteField(k, v); err != nil {
+			t.Fatalf("write field %s: %v", k, err)
+		}
+	}
+	for k, contents := range files {
+		fw, err := mw.CreateFormFile(k, k+".bin")
+		if err != nil {
+			t.Fatalf("create form file %s: %v", k, err)
+		}
+		if _, err := fw.Write(contents); err != nil {
+			t.Fatalf("write form file %s: %v", k, err)
+		}
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatalf("close multipart writer: %v", err)
+	}
+	return body, mw.FormDataContentType()
+}
+
+func TestModelACLMiddleware_MultipartFormDataDisallowedModelRejected(t *testing.T) {
+	// Image-edit-style requests carry "model" as a multipart form field,
+	// not in a JSON body. The middleware must extract it from the form and
+	// enforce the allowlist; otherwise restricted keys could bypass policy
+	// by switching to the multipart upload path.
+	cfg := &config.Config{
+		SDKConfig: config.SDKConfig{
+			APIKeys: []string{"sk-narrow"},
+			APIKeyPolicies: []config.APIKeyPolicy{
+				{Key: "sk-narrow", AllowedModels: []string{"gpt-4o*"}},
+			},
+		},
+	}
+	router := newTestRouterWithMultipart(cfg, "sk-narrow")
+
+	body, ct := buildMultipartBody(t,
+		map[string]string{"model": "dall-e-3", "prompt": "a cat"},
+		map[string][]byte{"image": bytes.Repeat([]byte{0xAB}, 4096)},
+	)
+	req := httptest.NewRequest(http.MethodPost, "/v1/images/edits", body)
+	req.Header.Set("Content-Type", ct)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for disallowed model in multipart, got %d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "dall-e-3") {
+		t.Fatalf("expected denied model name in error response, got %s", w.Body.String())
+	}
+}
+
+func TestModelACLMiddleware_MultipartFormDataAllowedModelPasses(t *testing.T) {
+	cfg := &config.Config{
+		SDKConfig: config.SDKConfig{
+			APIKeys: []string{"sk-narrow"},
+			APIKeyPolicies: []config.APIKeyPolicy{
+				{Key: "sk-narrow", AllowedModels: []string{"gpt-image-*"}},
+			},
+		},
+	}
+	router := newTestRouterWithMultipart(cfg, "sk-narrow")
+
+	body, ct := buildMultipartBody(t,
+		map[string]string{"model": "gpt-image-1", "prompt": "a cat"},
+		map[string][]byte{"image": bytes.Repeat([]byte{0xAB}, 4096)},
+	)
+	req := httptest.NewRequest(http.MethodPost, "/v1/images/edits", body)
+	req.Header.Set("Content-Type", ct)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 for allowed model in multipart, got %d body=%s", w.Code, w.Body.String())
+	}
+	// Downstream handler must still see the parsed multipart form, including
+	// the file part. ParseMultipartForm is idempotent so the second call from
+	// the handler returns the cached form.
+	if !strings.Contains(w.Body.String(), `"model":"gpt-image-1"`) {
+		t.Fatalf("downstream did not see model field: %s", w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"prompt":"a cat"`) {
+		t.Fatalf("downstream did not see prompt field: %s", w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"files":1`) {
+		t.Fatalf("downstream did not see file part: %s", w.Body.String())
+	}
+}
+
+func TestModelACLMiddleware_MultipartWithoutModelFieldAllowed(t *testing.T) {
+	// A multipart request that has no "model" field should be treated like
+	// any other "no extractable model" request: allowed through (no model =>
+	// no enforcement target). The route handler then enforces its own
+	// requirements.
+	cfg := &config.Config{
+		SDKConfig: config.SDKConfig{
+			APIKeys: []string{"sk-narrow"},
+			APIKeyPolicies: []config.APIKeyPolicy{
+				{Key: "sk-narrow", AllowedModels: []string{"gpt-4o*"}},
+			},
+		},
+	}
+	router := newTestRouterWithMultipart(cfg, "sk-narrow")
+
+	body, ct := buildMultipartBody(t,
+		map[string]string{"prompt": "no model field"},
+		nil,
+	)
+	req := httptest.NewRequest(http.MethodPost, "/v1/images/edits", body)
+	req.Header.Set("Content-Type", ct)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 when no model field present, got %d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestModelACLMiddleware_NonJSONContentTypeAllowedThrough(t *testing.T) {
+	// A POST with Content-Type: application/octet-stream (or any non-JSON,
+	// non-multipart media type) must NOT be buffered for "model" inspection.
+	// The middleware allows the request through so the route handler sees an
+	// untouched body. Without this gating, large binary uploads would be
+	// buffered up to the 10 MiB cap on every request even when there is no
+	// JSON "model" field to find.
+	cfg := &config.Config{
+		SDKConfig: config.SDKConfig{
+			APIKeys: []string{"sk-narrow"},
+			APIKeyPolicies: []config.APIKeyPolicy{
+				{Key: "sk-narrow", AllowedModels: []string{"gpt-4o*"}},
+			},
+		},
+	}
+	router := newTestRouterWithCodexAlias(cfg, "sk-narrow")
+
+	// Body is large enough that buffering would be observable; if the
+	// middleware were still buffering octet-stream, this would trip the
+	// 10 MiB cap and 413 instead of 200.
+	payload := bytes.Repeat([]byte{0x01}, int(modelACLMaxBodyBytes)+1024)
+	req := httptest.NewRequest(http.MethodPost, "/backend-api/codex/responses", bytes.NewReader(payload))
+	req.Header.Set("Content-Type", "application/octet-stream")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 for non-JSON content-type, got %d body-prefix=%q", w.Code, w.Body.String()[:min(160, w.Body.Len())])
+	}
+}
+
+func TestModelACLMiddleware_JSONWithCharsetParameterStillInspected(t *testing.T) {
+	// Content-Type "application/json; charset=utf-8" must be treated as JSON
+	// — the middleware uses mime.ParseMediaType so parameters do not defeat
+	// the dispatch. Pin this down so a tightening of the dispatch (e.g.
+	// strict equality) does not silently disable enforcement on real-world
+	// clients that include the charset param.
+	cfg := &config.Config{
+		SDKConfig: config.SDKConfig{
+			APIKeys: []string{"sk-narrow"},
+			APIKeyPolicies: []config.APIKeyPolicy{
+				{Key: "sk-narrow", AllowedModels: []string{"gpt-4o*"}},
+			},
+		},
+	}
+	router := newTestRouter(cfg, "sk-narrow")
+
+	body, _ := json.Marshal(map[string]any{"model": "claude-3-5-sonnet-20241022"})
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json; charset=utf-8")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 (model rejected) with charset-tagged JSON, got %d", w.Code)
+	}
+}
+
+func TestModelACLMiddleware_VendorJSONContentTypeInspected(t *testing.T) {
+	// application/vnd.api+json (and similar +json suffixes) must dispatch to
+	// the JSON path, not fall through to "unknown body shape => allow".
+	cfg := &config.Config{
+		SDKConfig: config.SDKConfig{
+			APIKeys: []string{"sk-narrow"},
+			APIKeyPolicies: []config.APIKeyPolicy{
+				{Key: "sk-narrow", AllowedModels: []string{"gpt-4o*"}},
+			},
+		},
+	}
+	router := newTestRouter(cfg, "sk-narrow")
+
+	body, _ := json.Marshal(map[string]any{"model": "claude-3-5-sonnet-20241022"})
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/vnd.api+json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 with +json suffix, got %d", w.Code)
+	}
 }
 
 func TestModelACLMiddleware_ListEndpointAlwaysAllowed(t *testing.T) {

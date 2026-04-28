@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"mime"
 	"net/http"
 	"strings"
 
@@ -45,6 +46,13 @@ const modelACLMaxBodyBytes int64 = 10 * 1024 * 1024 // 10 MiB
 // request — under concurrency this is the difference between a bounded
 // constant memory footprint and N*10 MiB.
 const modelACLPeekBytes int64 = 16 * 1024 // 16 KiB
+
+// modelACLMultipartMemoryCap is the in-memory portion of a multipart form
+// parse. Larger file fields spool to temporary disk (stdlib behavior), so the
+// effective per-request memory ceiling for multipart inspection stays small
+// even when the upload itself is large. Image-edit endpoints fit here without
+// triggering the 10 MiB cap that bounds JSON inspection.
+const modelACLMultipartMemoryCap int64 = 1 * 1024 * 1024 // 1 MiB
 
 // errBodyTooLarge is used as a sentinel so extractRequestedModel can
 // distinguish a client payload that exceeded the cap from an I/O failure.
@@ -146,11 +154,13 @@ func ModelACLMiddleware(cfgFn func() *config.Config) gin.HandlerFunc {
 // is returned only when reading the request body fails (including when the
 // body exceeds modelACLMaxBodyBytes — see errBodyTooLarge).
 //
-// The function intentionally consumes and restores the request body so that
-// downstream handlers see an unmodified io.Reader. To keep this cheap in
-// memory, the body is read through a LimitReader that aborts with
-// errBodyTooLarge if the client attempted to send more than
-// modelACLMaxBodyBytes, so oversized requests cannot silently bypass policy.
+// Body inspection is gated on Content-Type so that large non-JSON uploads
+// (e.g. image-edit multipart payloads) are not buffered just to look for a
+// "model" field that JSON-shaped requests carry. JSON requests follow the
+// existing peek+buffer path; multipart/form-data is parsed via the standard
+// library, which extracts the small "model" form field while spooling large
+// file parts to temporary disk; everything else is allowed through without
+// inspection.
 func extractRequestedModel(c *gin.Context) (model string, ok bool, err error) {
 	if c == nil || c.Request == nil {
 		return "", false, nil
@@ -176,7 +186,7 @@ func extractRequestedModel(c *gin.Context) (model string, ok bool, err error) {
 		}
 	}
 
-	// JSON body: "model" field. Only POST/PUT/PATCH carry bodies we care about.
+	// Only POST/PUT/PATCH carry bodies we care about.
 	method := c.Request.Method
 	if method != http.MethodPost && method != http.MethodPut && method != http.MethodPatch {
 		return "", false, nil
@@ -185,16 +195,52 @@ func extractRequestedModel(c *gin.Context) (model string, ok bool, err error) {
 		return "", false, nil
 	}
 
+	// Dispatch on Content-Type. Missing/unparseable Content-Type is treated
+	// as JSON for backward compatibility — every model-routing client we ship
+	// today either sets application/json explicitly or omits the header on
+	// JSON bodies, and falling back to JSON inspection here is what the
+	// middleware did before content-type gating.
+	mediaType := parseRequestMediaType(c.Request.Header.Get("Content-Type"))
+	switch {
+	case mediaType == "" || mediaType == "application/json" || strings.HasSuffix(mediaType, "+json"):
+		return extractModelFromJSONBody(c)
+	case mediaType == "multipart/form-data":
+		return extractModelFromMultipartBody(c)
+	default:
+		// Unknown body shape (text/plain, application/octet-stream, etc.).
+		// We do not buffer or parse; the route handler enforces its own
+		// contract. No model identified => allow through, consistent with
+		// the existing "no extractable model" path used by listing and
+		// websocket-upgrade routes.
+		return "", false, nil
+	}
+}
+
+// parseRequestMediaType returns the lowercased media type from a Content-Type
+// header, dropping parameters (charset, boundary, etc.). Returns "" when the
+// header is empty or unparseable.
+func parseRequestMediaType(header string) string {
+	if header == "" {
+		return ""
+	}
+	mt, _, err := mime.ParseMediaType(header)
+	if err != nil {
+		return ""
+	}
+	return strings.ToLower(mt)
+}
+
+// extractModelFromJSONBody peeks the first modelACLPeekBytes for a "model"
+// field. If found, the body is restored as peek+underlying for downstream
+// handlers and we avoid buffering the rest. If not found, the remainder is
+// buffered up to modelACLMaxBodyBytes; payloads larger than the cap return
+// errBodyTooLarge without draining the connection.
+func extractModelFromJSONBody(c *gin.Context) (string, bool, error) {
 	// Short-circuit the too-large case cheaply when Content-Length is known.
 	if c.Request.ContentLength > modelACLMaxBodyBytes {
 		return "", false, errBodyTooLarge
 	}
 
-	// Peek the first modelACLPeekBytes. For well-formed chat-completion-shaped
-	// payloads the "model" field lives near the top of the JSON object, so
-	// this peek almost always contains it. When it does we can skip the full
-	// body read entirely and only allocate ~16 KiB per request instead of up
-	// to modelACLMaxBodyBytes.
 	peek := make([]byte, modelACLPeekBytes)
 	peekN, peekErr := io.ReadFull(c.Request.Body, peek)
 	peek = peek[:peekN]
@@ -204,29 +250,19 @@ func extractRequestedModel(c *gin.Context) (model string, ok bool, err error) {
 	}
 
 	if bodyFullyRead {
-		// Peek consumed everything. Restore body from peek alone.
 		c.Request.Body = io.NopCloser(bytes.NewReader(peek))
 		return extractModelFromBytes(peek)
 	}
 
-	// Body is larger than the peek window. Try extracting from the peek
-	// first; gjson tolerates truncated JSON — if the "model" field appears
-	// before the truncation point it returns the value, otherwise
-	// Exists() is false and we fall back to buffering the remainder.
+	// gjson tolerates truncated JSON: if "model" appeared before the peek
+	// boundary, this returns it without buffering the rest.
 	if model, ok, _ := extractModelFromBytes(peek); ok {
-		// Found without needing the rest. Stitch peek + underlying body so
-		// downstream handlers still see the full payload.
 		c.Request.Body = io.NopCloser(io.MultiReader(bytes.NewReader(peek), c.Request.Body))
 		return model, true, nil
 	}
 
-	// "model" was not present in the peek. Read the remainder, bounded so
-	// the peek + remainder together stay under modelACLMaxBodyBytes.
 	remaining := modelACLMaxBodyBytes - int64(len(peek))
 	if remaining <= 0 {
-		// Should not happen given modelACLPeekBytes < modelACLMaxBodyBytes,
-		// but keep it explicit: if the peek alone filled the cap, no room
-		// to inspect further.
 		return "", false, errBodyTooLarge
 	}
 	limited := io.LimitReader(c.Request.Body, remaining+1)
@@ -249,6 +285,33 @@ func extractRequestedModel(c *gin.Context) (model string, ok bool, err error) {
 	c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 
 	return extractModelFromBytes(bodyBytes)
+}
+
+// extractModelFromMultipartBody parses a multipart/form-data body via the
+// standard library and returns the value of the "model" form field, if any.
+// File parts are spooled to temporary disk past modelACLMultipartMemoryCap so
+// large image uploads do not balloon resident memory. ParseMultipartForm is
+// idempotent, so downstream handlers calling c.MultipartForm() / c.PostForm()
+// see the same parsed form without re-reading the body.
+func extractModelFromMultipartBody(c *gin.Context) (string, bool, error) {
+	if err := c.Request.ParseMultipartForm(modelACLMultipartMemoryCap); err != nil {
+		// A malformed multipart body is the route's problem to surface in
+		// its own 400; from the ACL's perspective there is no model to
+		// gate on, so let it through.
+		return "", false, nil
+	}
+	if c.Request.MultipartForm == nil {
+		return "", false, nil
+	}
+	values := c.Request.MultipartForm.Value["model"]
+	if len(values) == 0 {
+		return "", false, nil
+	}
+	model := strings.TrimSpace(values[0])
+	if model == "" {
+		return "", false, nil
+	}
+	return model, true, nil
 }
 
 // extractModelFromBytes scans a (possibly truncated) JSON buffer for a

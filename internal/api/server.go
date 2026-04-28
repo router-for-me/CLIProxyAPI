@@ -356,9 +356,13 @@ func (s *Server) setupRoutes() {
 		v1.POST("/responses/compact", openaiResponsesHandlers.Compact)
 	}
 
-	// Codex CLI direct route aliases (chatgpt_base_url compatible)
+	// Codex CLI direct route aliases (chatgpt_base_url compatible).
+	// ModelACLMiddleware is required here too — without it, a key restricted
+	// by api-key-policies could bypass the allowlist by routing through this
+	// alias group instead of /v1/responses.
 	codexDirect := s.engine.Group("/backend-api/codex")
 	codexDirect.Use(AuthMiddleware(s.accessManager))
+	codexDirect.Use(ModelACLMiddleware(cfgFn))
 	{
 		codexDirect.GET("/responses", openaiResponsesHandlers.ResponsesWebsocket)
 		codexDirect.POST("/responses", openaiResponsesHandlers.Responses)

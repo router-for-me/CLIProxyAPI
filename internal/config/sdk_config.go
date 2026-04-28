@@ -24,7 +24,10 @@ type APIKeyPolicy struct {
 	Key string `yaml:"key" json:"key"`
 
 	// AllowedModels lists glob patterns of model identifiers this key may target.
-	AllowedModels []string `yaml:"allowed-models,omitempty" json:"allowed-models,omitempty"`
+	// JSON output uses camelCase to match what the dashboard sends on PUT.
+	// PutAPIKeys still accepts allowed-models / allowed_models / allowedModels on
+	// input for backward compatibility with older dashboard builds.
+	AllowedModels []string `yaml:"allowed-models,omitempty" json:"allowedModels,omitempty"`
 }
 
 // SDKConfig represents the application's configuration, loaded from a YAML file.

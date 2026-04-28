@@ -62,7 +62,7 @@ func TestParseAPIKeysPayload(t *testing.T) {
 			wantOK:       true,
 		},
 		{
-			name:   "empty plain array fails",
+			name:   "empty plain array clears keys",
 			body:   `[]`,
 			wantOK: true, // legacy plain-list path accepts empty -> clears keys
 		},
