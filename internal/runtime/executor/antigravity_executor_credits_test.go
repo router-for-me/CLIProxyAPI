@@ -216,6 +216,11 @@ func TestAntigravityExecute_CreditsInjectedWhenConductorRequests(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		_ = r.Body.Close()
+		if r.URL.Path == "/v1internal:loadCodeAssist" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"paidTier":{"id":"tier-1","availableCredits":[{"creditType":"GOOGLE_ONE_AI","creditAmount":"25000","minimumCreditAmountForUsage":"50"}]}}`))
+			return
+		}
 		requestBodies = append(requestBodies, string(body))
 
 		if !strings.Contains(string(body), `"enabledCreditTypes":["GOOGLE_ONE_AI"]`) {
@@ -269,6 +274,11 @@ func TestAntigravityExecute_NoCreditsWithoutConductorFlag(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		_ = r.Body.Close()
+		if r.URL.Path == "/v1internal:loadCodeAssist" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"paidTier":{"id":"tier-1","availableCredits":[{"creditType":"GOOGLE_ONE_AI","creditAmount":"25000","minimumCreditAmountForUsage":"50"}]}}`))
+			return
+		}
 		requestBodies = append(requestBodies, string(body))
 		w.WriteHeader(http.StatusTooManyRequests)
 		_, _ = w.Write([]byte(`{"error":{"status":"RESOURCE_EXHAUSTED","message":"QUOTA_EXHAUSTED"}}`))
@@ -427,6 +437,41 @@ func TestEnsureAccessToken_WarmTokenLoadsCreditsHint(t *testing.T) {
 	if hint.CreditAmount != 25000 || hint.MinCreditAmount != 50 {
 		t.Fatalf("hint amounts = (%v, %v), want (25000, 50)", hint.CreditAmount, hint.MinCreditAmount)
 	}
+}
+
+func TestUpdateAntigravityCreditsBalance_LoadCodeAssistUserAgent(t *testing.T) {
+	resetAntigravityCreditsRetryState()
+	t.Cleanup(resetAntigravityCreditsRetryState)
+
+	exec := NewAntigravityExecutor(&config.Config{})
+	const userAgent = "antigravity/1.23.2 windows/amd64 google-api-nodejs-client/10.3.0"
+	auth := &cliproxyauth.Auth{
+		ID:         "auth-load-code-assist-ua",
+		Attributes: map[string]string{"user_agent": userAgent},
+	}
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.String() != "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist" {
+			t.Fatalf("unexpected request url %s", req.URL.String())
+		}
+		if got := req.Header.Get("User-Agent"); got != userAgent {
+			t.Fatalf("User-Agent = %q, want %q", got, userAgent)
+		}
+		if got := req.Header.Get("X-Goog-Api-Client"); got != "gl-node/22.21.1" {
+			t.Fatalf("X-Goog-Api-Client = %q, want %q", got, "gl-node/22.21.1")
+		}
+		body, _ := io.ReadAll(req.Body)
+		_ = req.Body.Close()
+		if string(body) != `{"metadata":{"ide_name":"antigravity","ide_type":"ANTIGRAVITY","ide_version":"1.23.2"}}` {
+			t.Fatalf("loadCodeAssist body = %s", string(body))
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"paidTier":{"id":"tier-1","availableCredits":[{"creditType":"GOOGLE_ONE_AI","creditAmount":"25000","minimumCreditAmountForUsage":"50"}]}}`)),
+		}, nil
+	}))
+
+	exec.updateAntigravityCreditsBalance(ctx, auth, "token")
 }
 
 func TestParseMetaFloat(t *testing.T) {
