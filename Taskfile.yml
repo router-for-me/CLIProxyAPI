@@ -8,6 +8,17 @@ vars:
   DOCKER_IMAGE: kooshapari/cliproxyapi-plusplus
   TEST_REPORT_DIR: target
   QUALITY_PACKAGES: '{{default "./..." .QUALITY_PACKAGES}}'
+  REPO_LANGUAGE:
+    sh: |
+      if [ -f go.mod ]; then
+        echo go
+      elif [ -f package.json ]; then
+        echo node
+      elif [ -f pyproject.toml ] || [ -f requirements.txt ]; then
+        echo python
+      else
+        echo unknown
+      fi
   GO_FILES:
     sh: find . -name "*.go" | grep -v "vendor"
 
@@ -16,6 +27,11 @@ tasks:
     cmds:
       - task --list
     silent: true
+
+  detect:language:
+    desc: "Print the detected primary repository language"
+    cmds:
+      - echo "{{.REPO_LANGUAGE}}"
 
   check:
     desc: "Canonical full-project check"
@@ -538,6 +554,7 @@ tasks:
       - |
         echo "Checking Go version..."
         go version
+        echo "Detected repository language: {{.REPO_LANGUAGE}}"
         echo "Checking dependencies..."
         if [ ! -f go.mod ]; then echo "❌ go.mod missing"; exit 1; fi
         echo "Checking config template..."
