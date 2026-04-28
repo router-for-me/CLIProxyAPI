@@ -2,6 +2,8 @@
 
 Active work tracking for **cliproxyapi-plusplus** project.
 
+Canonical worklog index: [docs/worklogs/README.md](./worklogs/README.md)
+
 ---
 
 ## Current Sprint
