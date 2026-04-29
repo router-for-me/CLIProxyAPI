@@ -306,6 +306,18 @@ func (h *Handler) GetCodexThinkingModelIds(c *gin.Context) {
 		if _, exists := seen[id]; exists {
 			continue
 		}
+		// Only include models with at least one displayable level (not none/auto)
+		hasDisplayable := false
+		for _, l := range model.Thinking.Levels {
+			level := strings.TrimSpace(l)
+			if level != "" && !strings.EqualFold(level, string(thinking.LevelNone)) && !strings.EqualFold(level, "auto") {
+				hasDisplayable = true
+				break
+			}
+		}
+		if !hasDisplayable {
+			continue
+		}
 		seen[id] = struct{}{}
 		modelIDs = append(modelIDs, id)
 	}
