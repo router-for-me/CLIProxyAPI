@@ -12,6 +12,7 @@ import (
 	"mime/multipart"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -1405,6 +1406,16 @@ func (h *Handler) oauthProxyURLFromRequest(c *gin.Context) (string, error) {
 	return proxyURL, nil
 }
 
+func (h *Handler) oauthConfig(c *gin.Context) (*config.Config, bool) {
+	if h == nil || h.cfg == nil {
+		if c != nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "configuration unavailable"})
+		}
+		return nil, false
+	}
+	return h.cfg, true
+}
+
 func (h *Handler) configWithOAuthProxy(proxyURL string) *config.Config {
 	if h == nil || h.cfg == nil {
 		return &config.Config{SDKConfig: config.SDKConfig{ProxyURL: strings.TrimSpace(proxyURL)}}
@@ -1414,8 +1425,7 @@ func (h *Handler) configWithOAuthProxy(proxyURL string) *config.Config {
 		return h.cfg
 	}
 	cfgCopy := *h.cfg
-	cfgCopy.SDKConfig = h.cfg.SDKConfig
-	cfgCopy.ProxyURL = proxyURL
+	cfgCopy.SDKConfig.ProxyURL = proxyURL
 	return &cfgCopy
 }
 
@@ -1432,6 +1442,10 @@ func applyOAuthProxyToRecord(record *coreauth.Auth, proxyURL string) {
 }
 
 func (h *Handler) RequestAnthropicToken(c *gin.Context) {
+	cfg, okCfg := h.oauthConfig(c)
+	if !okCfg {
+		return
+	}
 	ctx := context.Background()
 	ctx = PopulateAuthContext(ctx, c)
 	oauthProxyURL, errProxy := h.oauthProxyURLFromRequest(c)
@@ -1459,7 +1473,7 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 	}
 
 	// Initialize Claude auth service
-	anthropicAuth := claude.NewClaudeAuthWithProxyURL(h.cfg, oauthProxyURL)
+	anthropicAuth := claude.NewClaudeAuthWithProxyURL(cfg, oauthProxyURL)
 
 	// Generate authorization URL (then override redirect_uri to reuse server port)
 	authURL, state, err := anthropicAuth.GenerateAuthURL(state, pkceCodes)
@@ -1494,7 +1508,7 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 		}
 
 		// Helper: wait for callback file
-		waitFile := filepath.Join(h.cfg.AuthDir, fmt.Sprintf(".oauth-anthropic-%s.oauth", state))
+		waitFile := filepath.Join(cfg.AuthDir, fmt.Sprintf(".oauth-anthropic-%s.oauth", state))
 		waitForFile := func(path string, timeout time.Duration) (map[string]string, error) {
 			deadline := time.Now().Add(timeout)
 			for {
@@ -1583,6 +1597,10 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 }
 
 func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
+	cfg, okCfg := h.oauthConfig(c)
+	if !okCfg {
+		return
+	}
 	ctx := context.Background()
 	ctx = PopulateAuthContext(ctx, c)
 	oauthProxyURL, errProxy := h.oauthProxyURLFromRequest(c)
@@ -1637,7 +1655,7 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 		}
 
 		// Wait for callback file written by server route
-		waitFile := filepath.Join(h.cfg.AuthDir, fmt.Sprintf(".oauth-gemini-%s.oauth", state))
+		waitFile := filepath.Join(cfg.AuthDir, fmt.Sprintf(".oauth-gemini-%s.oauth", state))
 		fmt.Println("Waiting for authentication callback...")
 		deadline := time.Now().Add(5 * time.Minute)
 		var authCode string
@@ -1849,6 +1867,10 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 }
 
 func (h *Handler) RequestCodexToken(c *gin.Context) {
+	cfg, okCfg := h.oauthConfig(c)
+	if !okCfg {
+		return
+	}
 	ctx := context.Background()
 	ctx = PopulateAuthContext(ctx, c)
 	oauthProxyURL, errProxy := h.oauthProxyURLFromRequest(c)
@@ -1876,7 +1898,7 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 	}
 
 	// Initialize Codex auth service
-	openaiAuth := codex.NewCodexAuthWithProxyURL(h.cfg, oauthProxyURL)
+	openaiAuth := codex.NewCodexAuthWithProxyURL(cfg, oauthProxyURL)
 
 	// Generate authorization URL
 	authURL, err := openaiAuth.GenerateAuthURL(state, pkceCodes)
@@ -1911,7 +1933,7 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 		}
 
 		// Wait for callback file
-		waitFile := filepath.Join(h.cfg.AuthDir, fmt.Sprintf(".oauth-codex-%s.oauth", state))
+		waitFile := filepath.Join(cfg.AuthDir, fmt.Sprintf(".oauth-codex-%s.oauth", state))
 		deadline := time.Now().Add(5 * time.Minute)
 		var code string
 		for {
@@ -2001,6 +2023,10 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 }
 
 func (h *Handler) RequestAntigravityToken(c *gin.Context) {
+	cfg, okCfg := h.oauthConfig(c)
+	if !okCfg {
+		return
+	}
 	ctx := context.Background()
 	ctx = PopulateAuthContext(ctx, c)
 	oauthProxyURL, errProxy := h.oauthProxyURLFromRequest(c)
@@ -2011,7 +2037,7 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 
 	fmt.Println("Initializing Antigravity authentication...")
 
-	authSvc := antigravity.NewAntigravityAuthWithProxyURL(h.cfg, oauthProxyURL)
+	authSvc := antigravity.NewAntigravityAuthWithProxyURL(cfg, oauthProxyURL)
 
 	state, errState := misc.GenerateRandomState()
 	if errState != nil {
@@ -2047,7 +2073,7 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 			defer stopCallbackForwarderInstance(antigravity.CallbackPort, forwarder)
 		}
 
-		waitFile := filepath.Join(h.cfg.AuthDir, fmt.Sprintf(".oauth-antigravity-%s.oauth", state))
+		waitFile := filepath.Join(cfg.AuthDir, fmt.Sprintf(".oauth-antigravity-%s.oauth", state))
 		deadline := time.Now().Add(5 * time.Minute)
 		var authCode string
 		for {
@@ -2172,6 +2198,10 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 }
 
 func (h *Handler) RequestKimiToken(c *gin.Context) {
+	cfg, okCfg := h.oauthConfig(c)
+	if !okCfg {
+		return
+	}
 	ctx := context.Background()
 	ctx = PopulateAuthContext(ctx, c)
 	oauthProxyURL, errProxy := h.oauthProxyURLFromRequest(c)
@@ -2184,7 +2214,7 @@ func (h *Handler) RequestKimiToken(c *gin.Context) {
 
 	state := fmt.Sprintf("kmi-%d", time.Now().UnixNano())
 	// Initialize Kimi auth service
-	kimiAuth := kimi.NewKimiAuthWithProxyURL(h.cfg, oauthProxyURL)
+	kimiAuth := kimi.NewKimiAuthWithProxyURL(cfg, oauthProxyURL)
 
 	// Generate authorization URL
 	deviceFlow, errStartDeviceFlow := kimiAuth.StartDeviceFlow(ctx)
@@ -2669,9 +2699,19 @@ func (h *Handler) GetAuthStatus(c *gin.Context) {
 
 // PopulateAuthContext extracts request info and adds it to the context
 func PopulateAuthContext(ctx context.Context, c *gin.Context) context.Context {
+	if c == nil || c.Request == nil {
+		return ctx
+	}
+	var query url.Values
+	if c.Request.URL != nil {
+		query = make(url.Values, len(c.Request.URL.Query()))
+		for key, values := range c.Request.URL.Query() {
+			query[key] = append([]string(nil), values...)
+		}
+	}
 	info := &coreauth.RequestInfo{
-		Query:   c.Request.URL.Query(),
-		Headers: c.Request.Header,
+		Query:   query,
+		Headers: c.Request.Header.Clone(),
 	}
 	return coreauth.WithRequestInfo(ctx, info)
 }

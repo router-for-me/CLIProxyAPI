@@ -46,15 +46,13 @@ func NewAntigravityAuth(cfg *config.Config, httpClient *http.Client) *Antigravit
 // NewAntigravityAuthWithProxyURL creates a new Antigravity auth service with a proxy override.
 // proxyURL takes precedence over cfg.ProxyURL when non-empty.
 func NewAntigravityAuthWithProxyURL(cfg *config.Config, proxyURL string) *AntigravityAuth {
-	if cfg == nil {
-		cfg = &config.Config{}
+	var sdkCfg config.SDKConfig
+	if cfg != nil {
+		sdkCfg = cfg.SDKConfig
 	}
-	effectiveProxyURL := strings.TrimSpace(proxyURL)
-	sdkCfg := cfg.SDKConfig
-	if effectiveProxyURL == "" {
-		effectiveProxyURL = strings.TrimSpace(cfg.ProxyURL)
+	if trimmedProxyURL := strings.TrimSpace(proxyURL); trimmedProxyURL != "" {
+		sdkCfg.ProxyURL = trimmedProxyURL
 	}
-	sdkCfg.ProxyURL = effectiveProxyURL
 	return &AntigravityAuth{
 		httpClient: util.SetProxy(&sdkCfg, &http.Client{}),
 	}

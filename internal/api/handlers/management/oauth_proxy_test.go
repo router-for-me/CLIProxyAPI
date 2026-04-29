@@ -1,6 +1,7 @@
 package management
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -66,6 +67,9 @@ func TestConfigWithOAuthProxyDoesNotMutateGlobalConfig(t *testing.T) {
 	if override.ProxyURL != "direct" {
 		t.Fatalf("override proxy-url = %q, want direct", override.ProxyURL)
 	}
+	if override.SDKConfig.ProxyURL != "direct" {
+		t.Fatalf("override sdk-proxy-url = %q, want direct", override.SDKConfig.ProxyURL)
+	}
 	if override.AuthDir != cfg.AuthDir {
 		t.Fatalf("auth-dir = %q, want %q", override.AuthDir, cfg.AuthDir)
 	}
@@ -107,5 +111,26 @@ func TestApplyOAuthProxyToRecordEmptyIsNoop(t *testing.T) {
 	}
 	if record.Metadata != nil {
 		t.Fatalf("metadata = %#v, want nil", record.Metadata)
+	}
+}
+
+func TestPopulateAuthContextCopiesRequestMetadata(t *testing.T) {
+	ctx := newOAuthProxyTestContext("/v0/management/codex-auth-url?source=original")
+	ctx.Request.Header.Set("X-Test", "original")
+
+	authCtx := PopulateAuthContext(context.Background(), ctx)
+
+	ctx.Request.URL.RawQuery = "source=mutated"
+	ctx.Request.Header.Set("X-Test", "mutated")
+
+	info := coreauth.GetRequestInfo(authCtx)
+	if info == nil {
+		t.Fatal("expected request info")
+	}
+	if got := info.Query.Get("source"); got != "original" {
+		t.Fatalf("query source = %q, want original", got)
+	}
+	if got := info.Headers.Get("X-Test"); got != "original" {
+		t.Fatalf("header X-Test = %q, want original", got)
 	}
 }
