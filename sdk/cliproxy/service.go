@@ -562,17 +562,17 @@ func (s *Service) Run(ctx context.Context) error {
 
 	s.applyRetryConfig(s.cfg)
 
-	// Validate OAuthProxy config if provided before loading auths.
-	if err := s.validateOAuthProxyConfig(); err != nil {
-		return err
-	}
-
 	if s.coreManager != nil {
 		if errLoad := s.coreManager.Load(ctx); errLoad != nil {
 			log.Warnf("failed to load auth store: %v", errLoad)
 		}
 		// Apply proxy assignment after loading auths.
 		s.applyOAuthProxyAssignment()
+	}
+
+	// Validate OAuthProxy config after loading auths.
+	if err := s.validateOAuthProxyConfig(); err != nil {
+		return err
 	}
 
 	tokenResult, err := s.tokenProvider.Load(ctx, s.cfg)
