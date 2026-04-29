@@ -123,6 +123,9 @@ type Config struct {
 	// AmpCode contains Amp CLI upstream configuration, management restrictions, and model mappings.
 	AmpCode AmpCode `yaml:"ampcode" json:"ampcode"`
 
+	// MCP contains Model Context Protocol forwarding configuration.
+	MCP MCPConfig `yaml:"mcp" json:"mcp"`
+
 	// OAuthExcludedModels defines per-provider global model exclusions applied to OAuth/file-backed auth entries.
 	OAuthExcludedModels map[string][]string `yaml:"oauth-excluded-models,omitempty" json:"oauth-excluded-models,omitempty"`
 
@@ -302,6 +305,16 @@ type AmpUpstreamAPIKeyEntry struct {
 
 	// APIKeys are the client API keys (from top-level api-keys) that map to this upstream key.
 	APIKeys []string `yaml:"api-keys" json:"api-keys"`
+}
+
+// MCPConfig controls forwarding requests from /mcp/* to an upstream MCP server.
+// When UpstreamURL is empty, MCP forwarding is disabled.
+type MCPConfig struct {
+	// UpstreamURL defines the upstream MCP server URL.
+	UpstreamURL string `yaml:"upstream-url" json:"upstream-url"`
+
+	// UpstreamAPIKey optionally sets upstream Authorization and X-Api-Key headers.
+	UpstreamAPIKey string `yaml:"upstream-api-key" json:"upstream-api-key"`
 }
 
 // PayloadConfig defines default and override parameter rules applied to provider payloads.
@@ -695,6 +708,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Sanitize OpenAI compatibility providers: drop entries without base-url
 	cfg.SanitizeOpenAICompatibility()
 
+	// Sanitize MCP forwarding configuration.
+	cfg.SanitizeMCP()
+
 	// Normalize OAuth provider model exclusion map.
 	cfg.OAuthExcludedModels = NormalizeOAuthExcludedModels(cfg.OAuthExcludedModels)
 
@@ -861,6 +877,15 @@ func (cfg *Config) SanitizeOpenAICompatibility() {
 		out = append(out, e)
 	}
 	cfg.OpenAICompatibility = out
+}
+
+// SanitizeMCP trims MCP forwarding settings.
+func (cfg *Config) SanitizeMCP() {
+	if cfg == nil {
+		return
+	}
+	cfg.MCP.UpstreamURL = strings.TrimSpace(cfg.MCP.UpstreamURL)
+	cfg.MCP.UpstreamAPIKey = strings.TrimSpace(cfg.MCP.UpstreamAPIKey)
 }
 
 // SanitizeCodexKeys removes Codex API key entries missing a BaseURL.
