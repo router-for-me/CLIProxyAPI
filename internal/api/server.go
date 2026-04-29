@@ -610,6 +610,8 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PUT("/show-codex-thinking-models", s.mgmt.PutShowCodexThinkingModels)
 		mgmt.PATCH("/show-codex-thinking-models", s.mgmt.PutShowCodexThinkingModels)
 
+		mgmt.GET("/codex-thinking-model-ids", s.mgmt.GetCodexThinkingModelIds)
+
 		mgmt.GET("/routing/strategy", s.mgmt.GetRoutingStrategy)
 		mgmt.PUT("/routing/strategy", s.mgmt.PutRoutingStrategy)
 		mgmt.PATCH("/routing/strategy", s.mgmt.PutRoutingStrategy)
