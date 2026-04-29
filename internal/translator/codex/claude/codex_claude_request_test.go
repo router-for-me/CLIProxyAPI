@@ -248,6 +248,28 @@ func TestConvertClaudeRequestToCodex_WebSearchToolMapping(t *testing.T) {
 	}
 }
 
+func TestConvertClaudeRequestToCodex_WebSearchToolChoiceUsesDeclaredTypedToolName(t *testing.T) {
+	inputJSON := `{
+		"model": "claude-opus-4-7",
+		"tools": [
+			{"type": "web_search_20250305", "name": "browser_search"},
+			{"name": "web_search", "description": "Local search", "input_schema": {"type":"object","properties":{}}}
+		],
+		"tool_choice": {"type":"tool","name":"web_search"},
+		"messages": [{"role": "user", "content": "hello"}]
+	}`
+
+	result := ConvertClaudeRequestToCodex("test-model", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+
+	if got := resultJSON.Get("tool_choice.type").String(); got != "function" {
+		t.Fatalf("tool_choice.type = %q, want function. Output: %s", got, string(result))
+	}
+	if got := resultJSON.Get("tool_choice.name").String(); got != "web_search" {
+		t.Fatalf("tool_choice.name = %q, want web_search. Output: %s", got, string(result))
+	}
+}
+
 func TestConvertClaudeRequestToCodex_AssistantThinkingSignatureToReasoningItem(t *testing.T) {
 	signature := validCodexReasoningSignature()
 	inputJSON := `{
