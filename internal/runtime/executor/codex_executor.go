@@ -30,8 +30,9 @@ import (
 )
 
 const (
-	codexUserAgent  = "codex-tui/0.118.0 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9 (codex-tui; 0.118.0)"
-	codexOriginator = "codex-tui"
+	codexUserAgent             = "codex-tui/0.118.0 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9 (codex-tui; 0.118.0)"
+	codexOriginator            = "codex-tui"
+	codexDefaultImageToolModel = "gpt-image-2"
 )
 
 var dataTag = []byte("data:")
@@ -263,6 +264,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		if detail, ok := helps.ParseCodexUsage(eventData); ok {
 			reporter.Publish(ctx, detail)
 		}
+		publishCodexImageToolUsage(ctx, reporter, body, eventData)
 
 		completedData := eventData
 		outputResult := gjson.GetBytes(completedData, "response.output")
@@ -496,6 +498,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 					if detail, ok := helps.ParseCodexUsage(data); ok {
 						reporter.Publish(ctx, detail)
 					}
+					publishCodexImageToolUsage(ctx, reporter, body, data)
 					data = patchCodexCompletedOutput(data, outputItemsByIndex, outputItemsFallback)
 					translatedLine = append([]byte("data: "), data...)
 				}
@@ -809,11 +812,58 @@ func newCodexStatusErr(statusCode int, body []byte) statusErr {
 	if isCodexModelCapacityError(body) {
 		errCode = http.StatusTooManyRequests
 	}
+	body = classifyCodexStatusError(errCode, body)
 	err := statusErr{code: errCode, msg: string(body)}
 	if retryAfter := parseCodexRetryAfter(errCode, body, time.Now()); retryAfter != nil {
 		err.retryAfter = retryAfter
 	}
 	return err
+}
+
+func classifyCodexStatusError(statusCode int, body []byte) []byte {
+	code, errType, ok := codexStatusErrorClassification(statusCode, body)
+	if !ok {
+		return body
+	}
+	message := gjson.GetBytes(body, "error.message").String()
+	if message == "" {
+		message = gjson.GetBytes(body, "message").String()
+	}
+	if message == "" {
+		message = strings.TrimSpace(string(body))
+	}
+	if message == "" {
+		message = http.StatusText(statusCode)
+	}
+	out := []byte(`{"error":{}}`)
+	out, _ = sjson.SetBytes(out, "error.message", message)
+	out, _ = sjson.SetBytes(out, "error.type", errType)
+	out, _ = sjson.SetBytes(out, "error.code", code)
+	return out
+}
+
+func codexStatusErrorClassification(statusCode int, body []byte) (code string, errType string, ok bool) {
+	errorMessage := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "error.message").String()))
+	if errorMessage == "" {
+		errorMessage = strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "message").String()))
+	}
+	lower := strings.ToLower(strings.TrimSpace(string(body)))
+	upstreamCode := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "error.code").String()))
+	upstreamType := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "error.type").String()))
+	isInvalidRequest := upstreamType == "" || upstreamType == "invalid_request_error"
+
+	switch {
+	case statusCode == http.StatusRequestEntityTooLarge || upstreamCode == "context_length_exceeded" || upstreamCode == "context_too_large" || isInvalidRequest && (strings.Contains(errorMessage, "context length") || strings.Contains(errorMessage, "context_length") || strings.Contains(errorMessage, "maximum context") || strings.Contains(errorMessage, "too many tokens")):
+		return "context_too_large", "invalid_request_error", true
+	case strings.Contains(lower, "invalid signature in thinking block") || strings.Contains(lower, "invalid_encrypted_content"):
+		return "thinking_signature_invalid", "invalid_request_error", true
+	case upstreamCode == "previous_response_not_found" || strings.Contains(lower, "previous_response_not_found") || strings.Contains(lower, "previous_response_id") && strings.Contains(lower, "not found"):
+		return "previous_response_not_found", "invalid_request_error", true
+	case statusCode == http.StatusUnauthorized || upstreamType == "authentication_error" || upstreamCode == "invalid_api_key" || strings.Contains(lower, "invalid or expired token") || strings.Contains(lower, "refresh_token_reused"):
+		return "auth_unavailable", "authentication_error", true
+	default:
+		return "", "", false
+	}
 }
 
 func normalizeCodexInstructions(body []byte) []byte {
@@ -857,6 +907,31 @@ func ensureImageGenerationTool(body []byte, baseModel string, auth *cliproxyauth
 	}
 	body, _ = sjson.SetRawBytes(body, "tools.-1", imageGenToolJSON)
 	return body
+}
+
+func publishCodexImageToolUsage(ctx context.Context, reporter *helps.UsageReporter, body []byte, completedData []byte) {
+	detail, ok := helps.ParseCodexImageToolUsage(completedData)
+	if !ok {
+		return
+	}
+	reporter.EnsurePublished(ctx)
+	reporter.PublishAdditionalModel(ctx, codexImageGenerationToolModel(body), detail)
+}
+
+func codexImageGenerationToolModel(body []byte) string {
+	tools := gjson.GetBytes(body, "tools")
+	if tools.IsArray() {
+		for _, tool := range tools.Array() {
+			if tool.Get("type").String() != "image_generation" {
+				continue
+			}
+			if model := strings.TrimSpace(tool.Get("model").String()); model != "" {
+				return model
+			}
+			break
+		}
+	}
+	return codexDefaultImageToolModel
 }
 
 func isCodexModelCapacityError(errorBody []byte) bool {
