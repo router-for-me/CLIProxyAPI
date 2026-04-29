@@ -20,6 +20,11 @@ type usageImportPayload struct {
 	Usage   usage.StatisticsSnapshot `json:"usage"`
 }
 
+type usageResetRequest struct {
+	Scope string `json:"scope"`
+	Value string `json:"value,omitempty"`
+}
+
 // GetUsageStatistics returns the in-memory request statistics snapshot.
 func (h *Handler) GetUsageStatistics(c *gin.Context) {
 	var snapshot usage.StatisticsSnapshot
@@ -70,10 +75,56 @@ func (h *Handler) ImportUsageStatistics(c *gin.Context) {
 
 	result := h.usageStats.MergeSnapshot(payload.Usage)
 	snapshot := h.usageStats.Snapshot()
+	if h.usageMode == "persistent" && h.snapshotStore != nil {
+		if err := h.snapshotStore.Save(snapshot); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"added":           result.Added,
 		"skipped":         result.Skipped,
 		"total_requests":  snapshot.TotalRequests,
 		"failed_requests": snapshot.FailureCount,
 	})
+}
+
+// ResetUsageStatistics clears usage data for the requested scope.
+func (h *Handler) ResetUsageStatistics(c *gin.Context) {
+	if h == nil || h.usageStats == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "usage statistics unavailable"})
+		return
+	}
+
+	var req usageResetRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	var removed int
+	switch req.Scope {
+	case "all":
+		removed = int(h.usageStats.Snapshot().TotalRequests)
+		h.usageStats.ResetAll()
+	case "provider":
+		removed = h.usageStats.ResetByProvider(req.Value)
+	case "model":
+		removed = h.usageStats.ResetByModel(req.Value)
+	case "api_key":
+		removed = h.usageStats.ResetByAPIKey(req.Value)
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid scope"})
+		return
+	}
+
+	snapshot := h.usageStats.Snapshot()
+	if h.usageMode == "persistent" && h.snapshotStore != nil {
+		if err := h.snapshotStore.Save(snapshot); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{"removed": removed, "usage": snapshot})
 }
