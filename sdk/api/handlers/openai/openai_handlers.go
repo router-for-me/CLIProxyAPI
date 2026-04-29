@@ -21,6 +21,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	responsesconverter "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/openai/openai/responses"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
+	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -85,7 +86,7 @@ func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
 	}
 
 	if h.Cfg != nil && h.Cfg.ShowCodexThinkingModels {
-		filteredModels = appendCodexThinkingModels(filteredModels, registry.GetGlobalRegistry().GetAvailableModelsByProvider(Codex))
+		filteredModels = appendCodexThinkingModels(filteredModels, registry.GetGlobalRegistry().GetAvailableModelsByProvider(Codex), h.Cfg)
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -94,7 +95,7 @@ func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
 	})
 }
 
-func appendCodexThinkingModels(models []map[string]any, codexModels []*registry.ModelInfo) []map[string]any {
+func appendCodexThinkingModels(models []map[string]any, codexModels []*registry.ModelInfo, cfg *config.SDKConfig) []map[string]any {
 	if len(codexModels) == 0 {
 		return models
 	}
@@ -123,6 +124,9 @@ func appendCodexThinkingModels(models []map[string]any, codexModels []*registry.
 		for _, rawLevel := range model.Thinking.Levels {
 			level := strings.TrimSpace(rawLevel)
 			if !isDisplayableCodexThinkingLevel(level) {
+				continue
+			}
+			if !isCodexThinkingLevelAllowed(level, baseID, cfg) {
 				continue
 			}
 			aliasID := fmt.Sprintf("%s(%s)", baseID, level)
@@ -157,6 +161,32 @@ func isDisplayableCodexThinkingLevel(level string) bool {
 
 func isUserSelectableCodexThinkingModel(modelID string) bool {
 	return strings.HasPrefix(modelID, "gpt-")
+}
+
+// isCodexThinkingLevelAllowed checks whether a thinking level should be shown
+// for a given model. Level is shown if it's in the global Levels whitelist or
+// in the model-specific overrides (additive). When Levels is empty, all levels
+// are allowed (backward compatible default).
+func isCodexThinkingLevelAllowed(level, baseID string, cfg *config.SDKConfig) bool {
+	if cfg == nil || len(cfg.CodexThinkingDisplay.Levels) == 0 {
+		return true
+	}
+	normalized := strings.TrimSpace(level)
+	for _, l := range cfg.CodexThinkingDisplay.Levels {
+		if strings.EqualFold(strings.TrimSpace(l), normalized) {
+			return true
+		}
+	}
+	if cfg.CodexThinkingDisplay.ModelOverrides != nil {
+		if overrides, ok := cfg.CodexThinkingDisplay.ModelOverrides[baseID]; ok {
+			for _, l := range overrides {
+				if strings.EqualFold(strings.TrimSpace(l), normalized) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // ChatCompletions handles the /v1/chat/completions endpoint.

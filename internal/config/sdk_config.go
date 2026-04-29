@@ -37,6 +37,10 @@ type SDKConfig struct {
 	// NonStreamKeepAliveInterval controls how often blank lines are emitted for non-streaming responses.
 	// <= 0 disables keep-alives. Value is in seconds.
 	NonStreamKeepAliveInterval int `yaml:"nonstream-keepalive-interval,omitempty" json:"nonstream-keepalive-interval,omitempty"`
+
+	// CodexThinkingDisplay controls which thinking levels are shown in model listings
+	// and allows per-model overrides. When Levels is empty, all levels are shown.
+	CodexThinkingDisplay CodexThinkingDisplayConfig `yaml:"codex-thinking-display" json:"codex-thinking-display"`
 }
 
 // StreamingConfig holds server streaming behavior configuration.
@@ -49,4 +53,11 @@ type StreamingConfig struct {
 	// to allow auth rotation / transient recovery.
 	// <= 0 disables bootstrap retries. Default is 0.
 	BootstrapRetries int `yaml:"bootstrap-retries,omitempty" json:"bootstrap-retries,omitempty"`
+}
+
+// CodexThinkingDisplayConfig controls which Codex thinking levels appear in model listings.
+// Levels is the global whitelist. ModelOverrides adds additional levels per model (additive).
+type CodexThinkingDisplayConfig struct {
+	Levels         []string            `yaml:"levels" json:"levels"`
+	ModelOverrides map[string][]string `yaml:"model_overrides" json:"model_overrides"`
 }
