@@ -198,6 +198,11 @@ func parseBoolField(raw string, fallback bool) bool {
 }
 
 func (h *OpenAIAPIHandler) ImagesGenerations(c *gin.Context) {
+	if h != nil && h.BaseAPIHandler != nil && h.BaseAPIHandler.Cfg != nil && h.BaseAPIHandler.Cfg.DisableImageGeneration {
+		c.AbortWithStatus(http.StatusNotFound)
+		return
+	}
+
 	rawJSON, err := c.GetRawData()
 	if err != nil {
 		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
@@ -281,6 +286,11 @@ func (h *OpenAIAPIHandler) ImagesGenerations(c *gin.Context) {
 }
 
 func (h *OpenAIAPIHandler) ImagesEdits(c *gin.Context) {
+	if h != nil && h.BaseAPIHandler != nil && h.BaseAPIHandler.Cfg != nil && h.BaseAPIHandler.Cfg.DisableImageGeneration {
+		c.AbortWithStatus(http.StatusNotFound)
+		return
+	}
+
 	contentType := strings.ToLower(strings.TrimSpace(c.GetHeader("Content-Type")))
 	if strings.HasPrefix(contentType, "application/json") {
 		h.imagesEditsFromJSON(c)

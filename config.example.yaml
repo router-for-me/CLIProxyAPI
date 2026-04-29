@@ -90,6 +90,10 @@ max-retry-interval: 30
 # When true, disable auth/model cooldown scheduling globally (prevents blackout windows after failure states).
 disable-cooling: false
 
+# When true, disable the built-in image_generation tool globally.
+# The server will stop injecting image_generation and will also remove it from request payload tools arrays.
+disable-image-generation: false
+
 # Core auth auto-refresh worker pool size (OAuth/file-based auth token refresh).
 # When > 0, overrides the default worker count (16).
 # auth-auto-refresh-workers: 16
