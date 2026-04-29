@@ -184,6 +184,29 @@ func (a *Applier) applyBudgetFormat(body []byte, config thinking.ThinkingConfig,
 	return result, nil
 }
 
+// NormalizeClaudeBudgetPayload applies Claude-specific numeric thinking-budget
+// constraints to an Antigravity payload. It only mutates payloads that already
+// carry a non-negative thinkingBudget.
+func NormalizeClaudeBudgetPayload(payload []byte, modelInfo *registry.ModelInfo) []byte {
+	if modelInfo == nil {
+		return payload
+	}
+
+	budgetValue := gjson.GetBytes(payload, "request.generationConfig.thinkingConfig.thinkingBudget")
+	if !budgetValue.Exists() || budgetValue.Int() < 0 {
+		return payload
+	}
+
+	a := Applier{}
+	budget, normalized := a.normalizeClaudeBudget(int(budgetValue.Int()), payload, modelInfo)
+	if budget == -2 {
+		return normalized
+	}
+
+	normalized, _ = sjson.SetBytes(normalized, "request.generationConfig.thinkingConfig.thinkingBudget", budget)
+	return normalized
+}
+
 // normalizeClaudeBudget applies Claude-specific constraints to thinking budget.
 //
 // It handles:
