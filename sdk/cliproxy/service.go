@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -350,6 +351,71 @@ func (s *Service) applyRetryConfig(cfg *config.Config) {
 	s.coreManager.SetRetryConfig(cfg.RequestRetry, maxInterval, cfg.MaxRetryCredentials)
 }
 
+func (s *Service) validateOAuthProxyConfig() error {
+	if s == nil || s.cfg == nil {
+		return nil
+	}
+	cfg := s.cfg
+	if len(cfg.OAuthProxy.Proxies) == 0 || cfg.OAuthProxy.AccountsPerProxy <= 0 {
+		return nil
+	}
+
+	auths := s.coreManager.List()
+	numAuths := len(auths)
+	numProxies := len(cfg.OAuthProxy.Proxies)
+	accountsPerProxy := cfg.OAuthProxy.AccountsPerProxy
+	expected := accountsPerProxy * numProxies
+
+	if numAuths != expected {
+		return fmt.Errorf("oauth-proxy config mismatch: have %d auth files, %d proxies * %d accounts_per_proxy = %d expected. "+
+			"Please adjust auth files or proxy configuration", numAuths, numProxies, accountsPerProxy, expected)
+	}
+	return nil
+}
+
+func (s *Service) applyOAuthProxyAssignment() {
+	if s == nil || s.coreManager == nil || s.cfg == nil {
+		return
+	}
+	cfg := s.cfg
+	if len(cfg.OAuthProxy.Proxies) == 0 || cfg.OAuthProxy.AccountsPerProxy <= 0 {
+		return
+	}
+
+	auths := s.coreManager.List()
+	if len(auths) == 0 {
+		return
+	}
+
+	sort.Slice(auths, func(i, j int) bool {
+		if auths[i] == nil {
+			return false
+		}
+		if auths[j] == nil {
+			return true
+		}
+		return strings.Compare(auths[i].ID, auths[j].ID) < 0
+	})
+
+	proxies := cfg.OAuthProxy.Proxies
+	accountsPerProxy := cfg.OAuthProxy.AccountsPerProxy
+
+	for i, auth := range auths {
+		if auth == nil {
+			continue
+		}
+		proxyIndex := i / accountsPerProxy
+		if proxyIndex >= len(proxies) {
+			proxyIndex = proxyIndex % len(proxies)
+		}
+		auth.ProxyURL = proxies[proxyIndex]
+		if _, err := s.coreManager.Update(context.Background(), auth); err != nil {
+			log.Warnf("failed to update auth %s with proxy assignment: %v", auth.ID, err)
+		}
+		log.Infof("oauth-proxy assignment: %s -> %s", auth.ID, proxies[proxyIndex])
+	}
+}
+
 func openAICompatInfoFromAuth(a *coreauth.Auth) (providerKey string, compatName string, ok bool) {
 	if a == nil {
 		return "", "", false
@@ -496,10 +562,17 @@ func (s *Service) Run(ctx context.Context) error {
 
 	s.applyRetryConfig(s.cfg)
 
+	// Validate OAuthProxy config if provided before loading auths.
+	if err := s.validateOAuthProxyConfig(); err != nil {
+		return err
+	}
+
 	if s.coreManager != nil {
 		if errLoad := s.coreManager.Load(ctx); errLoad != nil {
 			log.Warnf("failed to load auth store: %v", errLoad)
 		}
+		// Apply proxy assignment after loading auths.
+		s.applyOAuthProxyAssignment()
 	}
 
 	tokenResult, err := s.tokenProvider.Load(ctx, s.cfg)
