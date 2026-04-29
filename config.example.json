@@ -1,0 +1,12 @@
+{
+  "accounts": [
+    {
+      "email": "your-email@example.com",
+      "name": "your-email@example.com",
+      "password": "your-password"
+    }
+  ],
+  "keys": [
+    "your-api-key"
+  ]
+}
