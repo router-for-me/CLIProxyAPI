@@ -373,7 +373,7 @@ func (s *Service) validateOAuthProxyConfig() error {
 	return nil
 }
 
-func (s *Service) applyOAuthProxyAssignment() {
+func (s *Service) applyOAuthProxyAssignment(ctx context.Context) {
 	if s == nil || s.coreManager == nil || s.cfg == nil {
 		return
 	}
@@ -405,14 +405,11 @@ func (s *Service) applyOAuthProxyAssignment() {
 			continue
 		}
 		proxyIndex := i / accountsPerProxy
-		if proxyIndex >= len(proxies) {
-			proxyIndex = proxyIndex % len(proxies)
-		}
 		auth.ProxyURL = proxies[proxyIndex]
-		if _, err := s.coreManager.Update(context.Background(), auth); err != nil {
+		if _, err := s.coreManager.Update(ctx, auth); err != nil {
 			log.Warnf("failed to update auth %s with proxy assignment: %v", auth.ID, err)
 		}
-		log.Infof("oauth-proxy assignment: %s -> %s", auth.ID, proxies[proxyIndex])
+		log.Infof("oauth-proxy assignment: %s -> [redacted]", auth.ID)
 	}
 }
 
@@ -566,13 +563,12 @@ func (s *Service) Run(ctx context.Context) error {
 		if errLoad := s.coreManager.Load(ctx); errLoad != nil {
 			log.Warnf("failed to load auth store: %v", errLoad)
 		}
-		// Apply proxy assignment after loading auths.
-		s.applyOAuthProxyAssignment()
-	}
-
-	// Validate OAuthProxy config after loading auths.
-	if err := s.validateOAuthProxyConfig(); err != nil {
-		return err
+		// Validate OAuthProxy config after loading auths - fail-fast before mutation.
+		if err := s.validateOAuthProxyConfig(); err != nil {
+			return err
+		}
+		// Apply proxy assignment only after validation passes.
+		s.applyOAuthProxyAssignment(ctx)
 	}
 
 	tokenResult, err := s.tokenProvider.Load(ctx, s.cfg)
