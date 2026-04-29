@@ -99,6 +99,32 @@ Update requests use the standard boolean payload:
 { "value": true }
 ```
 
+### Codex thinking level display filter
+
+When `show-codex-thinking-models` is enabled, you can control which thinking levels appear in the model listing and override settings per model. This is configured through the `codex-thinking-display` section in `config.yaml`:
+
+```yaml
+show-codex-thinking-models: true
+codex-thinking-display:
+  levels:
+    - high
+    - xhigh
+  model_overrides:
+    gpt-5.2-codex:
+      - low
+      - xhigh
+```
+
+- **`levels`** — global whitelist for displayable thinking levels. When omitted or empty, all levels are shown. Hardcoded options: `low`, `medium`, `high`, `xhigh`.
+- **`model_overrides`** — per-model replacement of the global levels. When a model has an override, only the override levels are shown for that model (replacement semantics). An empty override (`[]`) hides all thinking suffix aliases for that model.
+- Base model IDs (without suffix) are always listed regardless of filter settings. The filter only affects the display in `/v1/models` — calling a model with any thinking suffix still works, even if the suffix is hidden from the listing.
+
+The Management API provides an endpoint to list Codex model IDs that support thinking-level aliases:
+
+```http
+GET /v0/management/codex-thinking-model-ids
+```
+
 ## Amp CLI Support
 
 CLIProxyAPI includes integrated support for [Amp CLI](https://ampcode.com) and Amp IDE extensions, enabling you to use your Google/ChatGPT/Claude OAuth subscriptions with Amp's coding tools:
