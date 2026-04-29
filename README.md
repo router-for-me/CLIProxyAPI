@@ -1,5 +1,6 @@
 # cliproxyapi-plusplus
 [![FOSSA Status](https://app.fossa.com/api/projects/git%2Bgithub.com%2FKooshaPari%2Fcliproxyapi-plusplus.svg?type=shield)](https://app.fossa.com/projects/git%2Bgithub.com%2FKooshaPari%2Fcliproxyapi-plusplus?ref=badge_shield)
+[![AI Slop Inside](https://sladge.net/badge.svg)](https://sladge.net)
 
 
 Agent-native, multi-provider OpenAI-compatible proxy for production and local model routing.
