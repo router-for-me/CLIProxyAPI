@@ -13,6 +13,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	log "github.com/sirupsen/logrus"
@@ -299,7 +300,7 @@ func (h *Handler) GetCodexThinkingModelIds(c *gin.Context) {
 			continue
 		}
 		id := strings.TrimSpace(model.ID)
-		if id == "" || !strings.HasPrefix(id, "gpt-") {
+		if id == "" || !strings.HasPrefix(id, "gpt-") || thinking.ParseSuffix(id).HasSuffix {
 			continue
 		}
 		if _, exists := seen[id]; exists {

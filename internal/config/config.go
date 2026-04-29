@@ -717,11 +717,6 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// 	}
 	// }
 
-	// Set default codex thinking display levels if not configured
-	if len(cfg.CodexThinkingDisplay.Levels) == 0 {
-		cfg.CodexThinkingDisplay.Levels = []string{"low", "medium", "high", "xhigh"}
-	}
-
 	// Return the populated configuration struct.
 	return &cfg, nil
 }

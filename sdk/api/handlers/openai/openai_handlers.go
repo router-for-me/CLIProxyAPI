@@ -168,12 +168,13 @@ func isUserSelectableCodexThinkingModel(modelID string) bool {
 // levels are shown (replacement semantics). Otherwise the global Levels whitelist
 // applies. When Levels is empty, all levels are allowed (backward compatible default).
 func isCodexThinkingLevelAllowed(level, baseID string, cfg *config.SDKConfig) bool {
-	if cfg == nil || len(cfg.CodexThinkingDisplay.Levels) == 0 {
+	if cfg == nil {
 		return true
 	}
 	normalized := strings.TrimSpace(level)
 
-	// If model has an explicit override, use only that override (replacement)
+	// If model has an explicit override, use only that override (replacement).
+	// An empty override means "hide all thinking suffixes for this model".
 	if cfg.CodexThinkingDisplay.ModelOverrides != nil {
 		if overrides, ok := cfg.CodexThinkingDisplay.ModelOverrides[baseID]; ok {
 			for _, l := range overrides {
@@ -185,7 +186,10 @@ func isCodexThinkingLevelAllowed(level, baseID string, cfg *config.SDKConfig) bo
 		}
 	}
 
-	// No model override: use global levels
+	// No model override: use global levels (empty = show all)
+	if len(cfg.CodexThinkingDisplay.Levels) == 0 {
+		return true
+	}
 	for _, l := range cfg.CodexThinkingDisplay.Levels {
 		if strings.EqualFold(strings.TrimSpace(l), normalized) {
 			return true
