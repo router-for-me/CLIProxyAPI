@@ -27,12 +27,14 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codex"
 	geminiAuth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/gemini"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kimi"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v6/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"golang.org/x/oauth2"
@@ -1386,9 +1388,57 @@ func (h *Handler) saveTokenRecord(ctx context.Context, record *coreauth.Auth) (s
 	return store.Save(ctx, record)
 }
 
+func (h *Handler) oauthProxyURLFromRequest(c *gin.Context) (string, error) {
+	if c == nil {
+		return "", nil
+	}
+	proxyURL := strings.TrimSpace(c.Query("proxy_url"))
+	if proxyURL == "" {
+		proxyURL = strings.TrimSpace(c.Query("proxy-url"))
+	}
+	if proxyURL == "" {
+		return "", nil
+	}
+	if _, err := proxyutil.Parse(proxyURL); err != nil {
+		return "", err
+	}
+	return proxyURL, nil
+}
+
+func (h *Handler) configWithOAuthProxy(proxyURL string) *config.Config {
+	if h == nil || h.cfg == nil {
+		return &config.Config{SDKConfig: config.SDKConfig{ProxyURL: strings.TrimSpace(proxyURL)}}
+	}
+	proxyURL = strings.TrimSpace(proxyURL)
+	if proxyURL == "" {
+		return h.cfg
+	}
+	cfgCopy := *h.cfg
+	cfgCopy.SDKConfig = h.cfg.SDKConfig
+	cfgCopy.ProxyURL = proxyURL
+	return &cfgCopy
+}
+
+func applyOAuthProxyToRecord(record *coreauth.Auth, proxyURL string) {
+	proxyURL = strings.TrimSpace(proxyURL)
+	if record == nil || proxyURL == "" {
+		return
+	}
+	record.ProxyURL = proxyURL
+	if record.Metadata == nil {
+		record.Metadata = make(map[string]any)
+	}
+	record.Metadata["proxy_url"] = proxyURL
+}
+
 func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 	ctx := context.Background()
 	ctx = PopulateAuthContext(ctx, c)
+	oauthProxyURL, errProxy := h.oauthProxyURLFromRequest(c)
+	if errProxy != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid proxy_url"})
+		return
+	}
 
 	fmt.Println("Initializing Claude authentication...")
 
@@ -1409,7 +1459,7 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 	}
 
 	// Initialize Claude auth service
-	anthropicAuth := claude.NewClaudeAuth(h.cfg)
+	anthropicAuth := claude.NewClaudeAuthWithProxyURL(h.cfg, oauthProxyURL)
 
 	// Generate authorization URL (then override redirect_uri to reuse server port)
 	authURL, state, err := anthropicAuth.GenerateAuthURL(state, pkceCodes)
@@ -1512,6 +1562,7 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 			Storage:  tokenStorage,
 			Metadata: map[string]any{"email": tokenStorage.Email},
 		}
+		applyOAuthProxyToRecord(record, oauthProxyURL)
 		savedPath, errSave := h.saveTokenRecord(ctx, record)
 		if errSave != nil {
 			log.Errorf("Failed to save authentication tokens: %v", errSave)
@@ -1534,7 +1585,13 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 	ctx := context.Background()
 	ctx = PopulateAuthContext(ctx, c)
-	proxyHTTPClient := util.SetProxy(&h.cfg.SDKConfig, &http.Client{})
+	oauthProxyURL, errProxy := h.oauthProxyURLFromRequest(c)
+	if errProxy != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid proxy_url"})
+		return
+	}
+	oauthCfg := h.configWithOAuthProxy(oauthProxyURL)
+	proxyHTTPClient := util.SetProxy(&oauthCfg.SDKConfig, &http.Client{})
 	ctx = context.WithValue(ctx, oauth2.HTTPClient, proxyHTTPClient)
 
 	// Optional project ID from query
@@ -1684,7 +1741,7 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 
 		// Initialize authenticated HTTP client via GeminiAuth to honor proxy settings
 		gemAuth := geminiAuth.NewGeminiAuth()
-		gemClient, errGetClient := gemAuth.GetAuthenticatedClient(ctx, &ts, h.cfg, &geminiAuth.WebLoginOptions{
+		gemClient, errGetClient := gemAuth.GetAuthenticatedClient(ctx, &ts, oauthCfg, &geminiAuth.WebLoginOptions{
 			NoBrowser: true,
 		})
 		if errGetClient != nil {
@@ -1775,6 +1832,7 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 			Storage:  &ts,
 			Metadata: recordMetadata,
 		}
+		applyOAuthProxyToRecord(record, oauthProxyURL)
 		savedPath, errSave := h.saveTokenRecord(ctx, record)
 		if errSave != nil {
 			log.Errorf("Failed to save token to file: %v", errSave)
@@ -1793,6 +1851,11 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 func (h *Handler) RequestCodexToken(c *gin.Context) {
 	ctx := context.Background()
 	ctx = PopulateAuthContext(ctx, c)
+	oauthProxyURL, errProxy := h.oauthProxyURLFromRequest(c)
+	if errProxy != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid proxy_url"})
+		return
+	}
 
 	fmt.Println("Initializing Codex authentication...")
 
@@ -1813,7 +1876,7 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 	}
 
 	// Initialize Codex auth service
-	openaiAuth := codex.NewCodexAuth(h.cfg)
+	openaiAuth := codex.NewCodexAuthWithProxyURL(h.cfg, oauthProxyURL)
 
 	// Generate authorization URL
 	authURL, err := openaiAuth.GenerateAuthURL(state, pkceCodes)
@@ -1918,6 +1981,7 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 				"account_id": tokenStorage.AccountID,
 			},
 		}
+		applyOAuthProxyToRecord(record, oauthProxyURL)
 		savedPath, errSave := h.saveTokenRecord(ctx, record)
 		if errSave != nil {
 			SetOAuthSessionError(state, "Failed to save authentication tokens")
@@ -1939,10 +2003,15 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 	ctx := context.Background()
 	ctx = PopulateAuthContext(ctx, c)
+	oauthProxyURL, errProxy := h.oauthProxyURLFromRequest(c)
+	if errProxy != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid proxy_url"})
+		return
+	}
 
 	fmt.Println("Initializing Antigravity authentication...")
 
-	authSvc := antigravity.NewAntigravityAuth(h.cfg, nil)
+	authSvc := antigravity.NewAntigravityAuthWithProxyURL(h.cfg, oauthProxyURL)
 
 	state, errState := misc.GenerateRandomState()
 	if errState != nil {
@@ -2082,6 +2151,7 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 			Label:    label,
 			Metadata: metadata,
 		}
+		applyOAuthProxyToRecord(record, oauthProxyURL)
 		savedPath, errSave := h.saveTokenRecord(ctx, record)
 		if errSave != nil {
 			log.Errorf("Failed to save token to file: %v", errSave)
@@ -2104,12 +2174,17 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 func (h *Handler) RequestKimiToken(c *gin.Context) {
 	ctx := context.Background()
 	ctx = PopulateAuthContext(ctx, c)
+	oauthProxyURL, errProxy := h.oauthProxyURLFromRequest(c)
+	if errProxy != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid proxy_url"})
+		return
+	}
 
 	fmt.Println("Initializing Kimi authentication...")
 
 	state := fmt.Sprintf("kmi-%d", time.Now().UnixNano())
 	// Initialize Kimi auth service
-	kimiAuth := kimi.NewKimiAuth(h.cfg)
+	kimiAuth := kimi.NewKimiAuthWithProxyURL(h.cfg, oauthProxyURL)
 
 	// Generate authorization URL
 	deviceFlow, errStartDeviceFlow := kimiAuth.StartDeviceFlow(ctx)
@@ -2162,6 +2237,7 @@ func (h *Handler) RequestKimiToken(c *gin.Context) {
 			Storage:  tokenStorage,
 			Metadata: metadata,
 		}
+		applyOAuthProxyToRecord(record, oauthProxyURL)
 		savedPath, errSave := h.saveTokenRecord(ctx, record)
 		if errSave != nil {
 			log.Errorf("Failed to save authentication tokens: %v", errSave)
