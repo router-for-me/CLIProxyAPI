@@ -47,6 +47,43 @@ func TestParseOpenAIUsageResponses(t *testing.T) {
 	}
 }
 
+func TestParseOpenAIStreamUsageIgnoresNullUsage(t *testing.T) {
+	line := []byte("data: {\"id\":\"chunk-1\",\"usage\":null}")
+	if _, ok := ParseOpenAIStreamUsage(line); ok {
+		t.Fatalf("expected null usage stream chunk to be ignored")
+	}
+}
+
+func TestParseOpenAIStreamUsageIgnoresZeroUsageObject(t *testing.T) {
+	line := []byte("data: {\"id\":\"chunk-1\",\"usage\":{\"prompt_tokens\":0,\"completion_tokens\":0,\"total_tokens\":0}}")
+	if _, ok := ParseOpenAIStreamUsage(line); ok {
+		t.Fatalf("expected zero-value usage stream chunk to be ignored")
+	}
+}
+
+func TestParseOpenAIStreamUsageParsesTerminalUsage(t *testing.T) {
+	line := []byte("data: {\"id\":\"chunk-2\",\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":8,\"total_tokens\":15,\"prompt_tokens_details\":{\"cached_tokens\":1},\"completion_tokens_details\":{\"reasoning_tokens\":3}}}")
+	detail, ok := ParseOpenAIStreamUsage(line)
+	if !ok {
+		t.Fatalf("expected terminal usage stream chunk to be parsed")
+	}
+	if detail.InputTokens != 7 {
+		t.Fatalf("input tokens = %d, want %d", detail.InputTokens, 7)
+	}
+	if detail.OutputTokens != 8 {
+		t.Fatalf("output tokens = %d, want %d", detail.OutputTokens, 8)
+	}
+	if detail.TotalTokens != 15 {
+		t.Fatalf("total tokens = %d, want %d", detail.TotalTokens, 15)
+	}
+	if detail.CachedTokens != 1 {
+		t.Fatalf("cached tokens = %d, want %d", detail.CachedTokens, 1)
+	}
+	if detail.ReasoningTokens != 3 {
+		t.Fatalf("reasoning tokens = %d, want %d", detail.ReasoningTokens, 3)
+	}
+}
+
 func TestUsageReporterBuildRecordIncludesLatency(t *testing.T) {
 	reporter := &UsageReporter{
 		provider:    "openai",
