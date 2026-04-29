@@ -164,19 +164,16 @@ func isUserSelectableCodexThinkingModel(modelID string) bool {
 }
 
 // isCodexThinkingLevelAllowed checks whether a thinking level should be shown
-// for a given model. Level is shown if it's in the global Levels whitelist or
-// in the model-specific overrides (additive). When Levels is empty, all levels
-// are allowed (backward compatible default).
+// for a given model. If the model has an explicit override, only the override
+// levels are shown (replacement semantics). Otherwise the global Levels whitelist
+// applies. When Levels is empty, all levels are allowed (backward compatible default).
 func isCodexThinkingLevelAllowed(level, baseID string, cfg *config.SDKConfig) bool {
 	if cfg == nil || len(cfg.CodexThinkingDisplay.Levels) == 0 {
 		return true
 	}
 	normalized := strings.TrimSpace(level)
-	for _, l := range cfg.CodexThinkingDisplay.Levels {
-		if strings.EqualFold(strings.TrimSpace(l), normalized) {
-			return true
-		}
-	}
+
+	// If model has an explicit override, use only that override (replacement)
 	if cfg.CodexThinkingDisplay.ModelOverrides != nil {
 		if overrides, ok := cfg.CodexThinkingDisplay.ModelOverrides[baseID]; ok {
 			for _, l := range overrides {
@@ -184,6 +181,14 @@ func isCodexThinkingLevelAllowed(level, baseID string, cfg *config.SDKConfig) bo
 					return true
 				}
 			}
+			return false
+		}
+	}
+
+	// No model override: use global levels
+	for _, l := range cfg.CodexThinkingDisplay.Levels {
+		if strings.EqualFold(strings.TrimSpace(l), normalized) {
+			return true
 		}
 	}
 	return false

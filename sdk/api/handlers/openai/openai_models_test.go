@@ -248,17 +248,17 @@ func TestAppendCodexThinkingModelsWithModelOverrides(t *testing.T) {
 	result := appendCodexThinkingModels(baseModels, codexModels, cfg)
 	ids := modelIDs(result)
 
-	// gpt-5.2-codex: global (high, xhigh) + override (low) = low, high, xhigh
+	// gpt-5.2-codex: override [low] replaces global -> only low shown
 	if ids["gpt-5.2-codex"] != 1 {
 		t.Fatalf("expected base model once, got ids=%v", ids)
 	}
-	for _, id := range []string{"gpt-5.2-codex(low)", "gpt-5.2-codex(high)", "gpt-5.2-codex(xhigh)"} {
-		if ids[id] != 1 {
-			t.Fatalf("expected %s exactly once (override additive), got ids=%v", id, ids)
-		}
+	if ids["gpt-5.2-codex(low)"] != 1 {
+		t.Fatalf("expected gpt-5.2-codex(low) exactly once (override replaces global), got ids=%v", ids)
 	}
-	if ids["gpt-5.2-codex(medium)"] != 0 {
-		t.Fatalf("expected gpt-5.2-codex(medium) to be hidden, got ids=%v", ids)
+	for _, id := range []string{"gpt-5.2-codex(medium)", "gpt-5.2-codex(high)", "gpt-5.2-codex(xhigh)"} {
+		if ids[id] != 0 {
+			t.Fatalf("expected %s to be hidden (override replaces global), got ids=%v", id, ids)
+		}
 	}
 
 	// gpt-5.3-codex: only global (high, xhigh)
