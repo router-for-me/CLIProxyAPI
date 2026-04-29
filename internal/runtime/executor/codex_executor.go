@@ -184,7 +184,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	body = ensureImageGenerationTool(body, baseModel, auth)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
-	httpReq, err := e.cacheHelper(ctx, from, url, req, body)
+	httpReq, err := e.cacheHelper(ctx, auth, from, url, req, opts, body)
 	if err != nil {
 		return resp, err
 	}
@@ -332,7 +332,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	body = ensureImageGenerationTool(body, baseModel, auth)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses/compact"
-	httpReq, err := e.cacheHelper(ctx, from, url, req, body)
+	httpReq, err := e.cacheHelper(ctx, auth, from, url, req, opts, body)
 	if err != nil {
 		return resp, err
 	}
@@ -427,7 +427,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	body = ensureImageGenerationTool(body, baseModel, auth)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
-	httpReq, err := e.cacheHelper(ctx, from, url, req, body)
+	httpReq, err := e.cacheHelper(ctx, auth, from, url, req, opts, body)
 	if err != nil {
 		return nil, err
 	}
@@ -714,8 +714,9 @@ func (e *CodexExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*
 	return auth, nil
 }
 
-func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Format, url string, req cliproxyexecutor.Request, rawJSON []byte) (*http.Request, error) {
+func (e *CodexExecutor) cacheHelper(ctx context.Context, auth *cliproxyauth.Auth, from sdktranslator.Format, url string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, rawJSON []byte) (*http.Request, error) {
 	var cache helps.CodexCache
+	continuity := codexContinuity{}
 	if from == "claude" {
 		userIDResult := gjson.GetBytes(req.Payload, "metadata.user_id")
 		if userIDResult.Exists() {
@@ -728,28 +729,25 @@ func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Form
 				}
 				helps.SetCodexCache(key, cache)
 			}
+			continuity = codexContinuity{Key: cache.ID}
 		}
 	} else if from == "openai-response" {
 		promptCacheKey := gjson.GetBytes(req.Payload, "prompt_cache_key")
 		if promptCacheKey.Exists() {
 			cache.ID = promptCacheKey.String()
+			continuity = codexContinuity{Key: cache.ID}
 		}
 	} else if from == "openai" {
-		if apiKey := strings.TrimSpace(helps.APIKeyFromContext(ctx)); apiKey != "" {
-			cache.ID = uuid.NewSHA1(uuid.NameSpaceOID, []byte("cli-proxy-api:codex:prompt-cache:"+apiKey)).String()
-		}
+		continuity = resolveCodexContinuity(ctx, auth, req, opts)
+		cache.ID = continuity.Key
 	}
 
-	if cache.ID != "" {
-		rawJSON, _ = sjson.SetBytes(rawJSON, "prompt_cache_key", cache.ID)
-	}
+	rawJSON = applyCodexContinuityBody(rawJSON, continuity)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(rawJSON))
 	if err != nil {
 		return nil, err
 	}
-	if cache.ID != "" {
-		httpReq.Header.Set("Session_id", cache.ID)
-	}
+	applyCodexContinuityHeaders(httpReq.Header, continuity)
 	return httpReq, nil
 }
 
@@ -771,9 +769,7 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 	cfgUserAgent, _ := codexHeaderDefaults(cfg, auth)
 	ensureHeaderWithConfigPrecedence(r.Header, ginHeaders, "User-Agent", cfgUserAgent, codexUserAgent)
 
-	if strings.Contains(r.Header.Get("User-Agent"), "Mac OS") {
-		misc.EnsureHeader(r.Header, ginHeaders, "Session_id", uuid.NewString())
-	}
+	misc.EnsureHeader(r.Header, ginHeaders, "session_id", uuid.NewString())
 
 	if stream {
 		r.Header.Set("Accept", "text/event-stream")
