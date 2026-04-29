@@ -78,6 +78,78 @@ func GetAntigravityModels() []*ModelInfo {
 	return cloneModelInfos(getModels().Antigravity)
 }
 
+// GetDeepSeekModels returns the standard DeepSeek web model definitions.
+func GetDeepSeekModels() []*ModelInfo {
+	return cloneModelInfos([]*ModelInfo{
+		{
+			ID:                  "deepseek-v4-flash",
+			Object:              "model",
+			Created:             1767225600,
+			OwnedBy:             "deepseek",
+			Type:                "deepseek",
+			DisplayName:         "DeepSeek V4 Flash",
+			ContextLength:       128000,
+			MaxCompletionTokens: 32000,
+			Thinking:            &ThinkingSupport{Levels: []string{"low", "medium", "high"}, ZeroAllowed: true},
+		},
+		{
+			ID:                  "deepseek-v4-flash-nothinking",
+			Object:              "model",
+			Created:             1767225600,
+			OwnedBy:             "deepseek",
+			Type:                "deepseek",
+			DisplayName:         "DeepSeek V4 Flash No Thinking",
+			ContextLength:       128000,
+			MaxCompletionTokens: 32000,
+			Thinking:            &ThinkingSupport{ZeroAllowed: true},
+		},
+		{
+			ID:                  "deepseek-v4-flash-search",
+			Object:              "model",
+			Created:             1767225600,
+			OwnedBy:             "deepseek",
+			Type:                "deepseek",
+			DisplayName:         "DeepSeek V4 Flash Search",
+			ContextLength:       128000,
+			MaxCompletionTokens: 32000,
+			Thinking:            &ThinkingSupport{Levels: []string{"low", "medium", "high"}, ZeroAllowed: true},
+		},
+		{
+			ID:                  "deepseek-v4-pro",
+			Object:              "model",
+			Created:             1767225600,
+			OwnedBy:             "deepseek",
+			Type:                "deepseek",
+			DisplayName:         "DeepSeek V4 Pro",
+			ContextLength:       128000,
+			MaxCompletionTokens: 32000,
+			Thinking:            &ThinkingSupport{Levels: []string{"low", "medium", "high"}, ZeroAllowed: true},
+		},
+		{
+			ID:                  "deepseek-v4-pro-nothinking",
+			Object:              "model",
+			Created:             1767225600,
+			OwnedBy:             "deepseek",
+			Type:                "deepseek",
+			DisplayName:         "DeepSeek V4 Pro No Thinking",
+			ContextLength:       128000,
+			MaxCompletionTokens: 32000,
+			Thinking:            &ThinkingSupport{ZeroAllowed: true},
+		},
+		{
+			ID:                  "deepseek-v4-pro-search",
+			Object:              "model",
+			Created:             1767225600,
+			OwnedBy:             "deepseek",
+			Type:                "deepseek",
+			DisplayName:         "DeepSeek V4 Pro Search",
+			ContextLength:       128000,
+			MaxCompletionTokens: 32000,
+			Thinking:            &ThinkingSupport{Levels: []string{"low", "medium", "high"}, ZeroAllowed: true},
+		},
+	})
+}
+
 // WithCodexBuiltins injects hard-coded Codex-only model definitions that should
 // not depend on remote models.json updates. Built-ins replace any matching IDs
 // already present in the provided slice.
@@ -167,6 +239,7 @@ func cloneModelInfos(models []*ModelInfo) []*ModelInfo {
 //   - codex
 //   - kimi
 //   - antigravity
+//   - deepseek
 func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 	key := strings.ToLower(strings.TrimSpace(channel))
 	switch key {
@@ -186,6 +259,8 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetKimiModels()
 	case "antigravity":
 		return GetAntigravityModels()
+	case "deepseek":
+		return GetDeepSeekModels()
 	default:
 		return nil
 	}
@@ -208,6 +283,7 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		data.CodexPro,
 		data.Kimi,
 		data.Antigravity,
+		GetDeepSeekModels(),
 	}
 	for _, models := range allModels {
 		for _, m := range models {
