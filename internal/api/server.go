@@ -385,7 +385,7 @@ func (s *Server) setupRoutes() {
 	v1beta.Use(AuthMiddleware(s.accessManager))
 	v1beta.Use(ModelACLMiddleware(cfgFn))
 	{
-		v1beta.GET("/models", geminiHandlers.GeminiModels)
+		v1beta.GET("/models", s.geminiModelsHandler(geminiHandlers))
 		v1beta.POST("/models/*action", geminiHandlers.GeminiHandler)
 		v1beta.GET("/models/*action", geminiHandlers.GeminiGetHandler)
 	}
@@ -789,21 +789,152 @@ func (s *Server) watchKeepAlive() {
 
 // unifiedModelsHandler creates a unified handler for the /v1/models endpoint
 // that routes to different handlers based on the User-Agent header.
-// If User-Agent starts with "claude-cli", it routes to Claude handler,
-// otherwise it routes to OpenAI handler.
+// If User-Agent starts with "claude-cli", it returns Claude-shaped metadata;
+// otherwise it returns OpenAI-shaped metadata. In both cases, model-restricted
+// api keys only see models permitted by their APIKeyPolicy.
 func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, claudeHandler *claude.ClaudeCodeAPIHandler) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		userAgent := c.GetHeader("User-Agent")
 
-		// Route to Claude handler if User-Agent starts with "claude-cli"
 		if strings.HasPrefix(userAgent, "claude-cli") {
-			// log.Debugf("Routing /v1/models to Claude handler for User-Agent: %s", userAgent)
-			claudeHandler.ClaudeModels(c)
-		} else {
-			// log.Debugf("Routing /v1/models to OpenAI handler for User-Agent: %s", userAgent)
-			openaiHandler.OpenAIModels(c)
+			models := filterModelsForAPIKey(s.cfg, apiKeyFromContext(c), claudeHandler.Models())
+			firstID, lastID := firstAndLastModelID(models)
+			c.JSON(http.StatusOK, gin.H{
+				"data":     models,
+				"has_more": false,
+				"first_id": firstID,
+				"last_id":  lastID,
+			})
+			return
+		}
+
+		models := filterModelsForAPIKey(s.cfg, apiKeyFromContext(c), openaiHandler.Models())
+		filteredModels := make([]map[string]any, len(models))
+		for i, model := range models {
+			filteredModel := map[string]any{
+				"id":     model["id"],
+				"object": model["object"],
+			}
+			if created, exists := model["created"]; exists {
+				filteredModel["created"] = created
+			}
+			if ownedBy, exists := model["owned_by"]; exists {
+				filteredModel["owned_by"] = ownedBy
+			}
+			filteredModels[i] = filteredModel
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"object": "list",
+			"data":   filteredModels,
+		})
+	}
+}
+
+// geminiModelsHandler returns Gemini-compatible model metadata, filtered by
+// the calling key's APIKeyPolicy when the key is model-restricted.
+func (s *Server) geminiModelsHandler(geminiHandler *gemini.GeminiAPIHandler) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		rawModels := filterModelsForAPIKey(s.cfg, apiKeyFromContext(c), geminiHandler.Models())
+		normalizedModels := make([]map[string]any, 0, len(rawModels))
+		defaultMethods := []string{"generateContent"}
+		for _, model := range rawModels {
+			normalizedModel := make(map[string]any, len(model))
+			for k, v := range model {
+				normalizedModel[k] = v
+			}
+			if name, ok := normalizedModel["name"].(string); ok && name != "" {
+				if !strings.HasPrefix(name, "models/") {
+					normalizedModel["name"] = "models/" + name
+				}
+				if displayName, _ := normalizedModel["displayName"].(string); displayName == "" {
+					normalizedModel["displayName"] = name
+				}
+				if description, _ := normalizedModel["description"].(string); description == "" {
+					normalizedModel["description"] = name
+				}
+			}
+			if _, ok := normalizedModel["supportedGenerationMethods"]; !ok {
+				normalizedModel["supportedGenerationMethods"] = defaultMethods
+			}
+			normalizedModels = append(normalizedModels, normalizedModel)
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"models": normalizedModels,
+		})
+	}
+}
+
+func apiKeyFromContext(c *gin.Context) string {
+	if c == nil {
+		return ""
+	}
+	raw, exists := c.Get("apiKey")
+	if !exists {
+		return ""
+	}
+	apiKey, _ := raw.(string)
+	return strings.TrimSpace(apiKey)
+}
+
+func filterModelsForAPIKey(cfg *config.Config, apiKey string, models []map[string]any) []map[string]any {
+	apiKey = strings.TrimSpace(apiKey)
+	if cfg == nil || apiKey == "" {
+		return models
+	}
+	filtered := make([]map[string]any, 0, len(models))
+	for _, model := range models {
+		modelIDs := modelPolicyIDs(model)
+		if len(modelIDs) == 0 || isAnyModelAllowedForKey(cfg, apiKey, modelIDs) {
+			filtered = append(filtered, model)
 		}
 	}
+	return filtered
+}
+
+func isAnyModelAllowedForKey(cfg *config.Config, apiKey string, modelIDs []string) bool {
+	for _, modelID := range modelIDs {
+		if cfg.IsModelAllowedForKey(apiKey, modelID) {
+			return true
+		}
+	}
+	return false
+}
+
+func modelPolicyIDs(model map[string]any) []string {
+	ids := make([]string, 0, 3)
+	add := func(value string) {
+		value = strings.TrimSpace(strings.TrimPrefix(value, "models/"))
+		if value == "" {
+			return
+		}
+		for _, existing := range ids {
+			if existing == value {
+				return
+			}
+		}
+		ids = append(ids, value)
+	}
+	for _, key := range []string{"id", "name"} {
+		if raw, ok := model[key].(string); ok {
+			add(raw)
+		}
+	}
+	return ids
+}
+
+func modelPolicyID(model map[string]any) string {
+	ids := modelPolicyIDs(model)
+	if len(ids) == 0 {
+		return ""
+	}
+	return ids[0]
+}
+
+func firstAndLastModelID(models []map[string]any) (string, string) {
+	if len(models) == 0 {
+		return "", ""
+	}
+	return modelPolicyID(models[0]), modelPolicyID(models[len(models)-1])
 }
 
 // Start begins listening for and serving HTTP or HTTPS requests.
