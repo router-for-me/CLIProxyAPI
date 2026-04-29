@@ -12,6 +12,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	log "github.com/sirupsen/logrus"
@@ -285,6 +287,44 @@ func (h *Handler) GetShowCodexThinkingModels(c *gin.Context) {
 }
 func (h *Handler) PutShowCodexThinkingModels(c *gin.Context) {
 	h.updateBoolField(c, func(v bool) { h.cfg.ShowCodexThinkingModels = v })
+}
+
+// GetCodexThinkingModelIds returns unique Codex model IDs that support thinking-level suffixes.
+// Only user-selectable models (prefix "gpt-") with non-empty thinking levels are included.
+func (h *Handler) GetCodexThinkingModelIds(c *gin.Context) {
+	codexModels := registry.GetGlobalRegistry().GetAvailableModelsByProvider("codex")
+	seen := make(map[string]struct{})
+	modelIDs := make([]string, 0)
+	for _, model := range codexModels {
+		if model == nil || model.Thinking == nil || len(model.Thinking.Levels) == 0 {
+			continue
+		}
+		id := strings.TrimSpace(model.ID)
+		if id == "" || !strings.HasPrefix(id, "gpt-") || thinking.ParseSuffix(id).HasSuffix {
+			continue
+		}
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		// Only include models with at least one displayable level (not none/auto)
+		hasDisplayable := false
+		for _, l := range model.Thinking.Levels {
+			level := strings.TrimSpace(l)
+			if level != "" && !strings.EqualFold(level, string(thinking.LevelNone)) && !strings.EqualFold(level, "auto") {
+				hasDisplayable = true
+				break
+			}
+		}
+		if !hasDisplayable {
+			continue
+		}
+		seen[id] = struct{}{}
+		modelIDs = append(modelIDs, id)
+	}
+	if len(modelIDs) == 0 {
+		modelIDs = []string{}
+	}
+	c.JSON(200, gin.H{"codex-thinking-model-ids": modelIDs})
 }
 
 func normalizeRoutingStrategy(strategy string) (string, bool) {

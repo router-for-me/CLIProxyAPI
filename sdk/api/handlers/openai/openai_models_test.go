@@ -35,7 +35,7 @@ func TestAppendCodexThinkingModels(t *testing.T) {
 		Thinking: &registry.ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh"}},
 	}}
 
-	result := appendCodexThinkingModels(baseModels, codexModels)
+	result := appendCodexThinkingModels(baseModels, codexModels, nil)
 	ids := modelIDs(result)
 
 	for _, id := range []string{"gpt-5.5", "gpt-5.5(low)", "gpt-5.5(medium)", "gpt-5.5(high)", "gpt-5.5(xhigh)"} {
@@ -77,7 +77,7 @@ func TestAppendCodexThinkingModelsSkipsUnsupportedAndDuplicateAliases(t *testing
 		},
 	}
 
-	result := appendCodexThinkingModels(baseModels, codexModels)
+	result := appendCodexThinkingModels(baseModels, codexModels, nil)
 	ids := modelIDs(result)
 
 	if ids["gpt-5.5(high)"] != 1 {
@@ -109,7 +109,7 @@ func TestAppendCodexThinkingModelsSkipsNoneAndAutoAliases(t *testing.T) {
 		Thinking: &registry.ThinkingSupport{Levels: []string{"none", "auto", "low", "medium", "high", "xhigh"}},
 	}}
 
-	result := appendCodexThinkingModels(baseModels, codexModels)
+	result := appendCodexThinkingModels(baseModels, codexModels, nil)
 	ids := modelIDs(result)
 
 	if ids[modelID] != 1 {
@@ -175,6 +175,140 @@ func TestOpenAIModelsShowCodexThinkingModelsSwitch(t *testing.T) {
 	for _, id := range []string{modelID + "(low)", modelID + "(high)"} {
 		if ids[id] != 1 {
 			t.Fatalf("expected %s exactly once with switch on, got ids=%v", id, ids)
+		}
+	}
+}
+
+func TestAppendCodexThinkingModelsWithLevelFiltering(t *testing.T) {
+	cfg := &sdkconfig.SDKConfig{
+		CodexThinkingDisplay: sdkconfig.CodexThinkingDisplayConfig{
+			Levels: []string{"high", "xhigh"},
+		},
+	}
+	baseModels := []map[string]any{
+		{"id": "gpt-5.5", "object": "model", "created": int64(1), "owned_by": "openai"},
+	}
+	codexModels := []*registry.ModelInfo{{
+		ID:       "gpt-5.5",
+		Object:   "model",
+		Created:  1,
+		OwnedBy:  "openai",
+		Thinking: &registry.ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh"}},
+	}}
+
+	result := appendCodexThinkingModels(baseModels, codexModels, cfg)
+	ids := modelIDs(result)
+
+	// Should have base model + only high and xhigh aliases
+	if ids["gpt-5.5"] != 1 {
+		t.Fatalf("expected base model once, got ids=%v", ids)
+	}
+	for _, id := range []string{"gpt-5.5(high)", "gpt-5.5(xhigh)"} {
+		if ids[id] != 1 {
+			t.Fatalf("expected %s exactly once, got ids=%v", id, ids)
+		}
+	}
+	for _, id := range []string{"gpt-5.5(low)", "gpt-5.5(medium)"} {
+		if ids[id] != 0 {
+			t.Fatalf("expected %s to be hidden, got ids=%v", id, ids)
+		}
+	}
+}
+
+func TestAppendCodexThinkingModelsWithModelOverrides(t *testing.T) {
+	cfg := &sdkconfig.SDKConfig{
+		CodexThinkingDisplay: sdkconfig.CodexThinkingDisplayConfig{
+			Levels: []string{"high", "xhigh"},
+			ModelOverrides: map[string][]string{
+				"gpt-5.2-codex": {"low"},
+			},
+		},
+	}
+	baseModels := []map[string]any{
+		{"id": "gpt-5.2-codex", "object": "model", "created": int64(1), "owned_by": "openai"},
+		{"id": "gpt-5.3-codex", "object": "model", "created": int64(2), "owned_by": "openai"},
+	}
+	codexModels := []*registry.ModelInfo{
+		{
+			ID:       "gpt-5.2-codex",
+			Object:   "model",
+			Created:  1,
+			OwnedBy:  "openai",
+			Thinking: &registry.ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh"}},
+		},
+		{
+			ID:       "gpt-5.3-codex",
+			Object:   "model",
+			Created:  2,
+			OwnedBy:  "openai",
+			Thinking: &registry.ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh"}},
+		},
+	}
+
+	result := appendCodexThinkingModels(baseModels, codexModels, cfg)
+	ids := modelIDs(result)
+
+	// gpt-5.2-codex: override [low] replaces global -> only low shown
+	if ids["gpt-5.2-codex"] != 1 {
+		t.Fatalf("expected base model once, got ids=%v", ids)
+	}
+	if ids["gpt-5.2-codex(low)"] != 1 {
+		t.Fatalf("expected gpt-5.2-codex(low) exactly once (override replaces global), got ids=%v", ids)
+	}
+	for _, id := range []string{"gpt-5.2-codex(medium)", "gpt-5.2-codex(high)", "gpt-5.2-codex(xhigh)"} {
+		if ids[id] != 0 {
+			t.Fatalf("expected %s to be hidden (override replaces global), got ids=%v", id, ids)
+		}
+	}
+
+	// gpt-5.3-codex: only global (high, xhigh)
+	if ids["gpt-5.3-codex"] != 1 {
+		t.Fatalf("expected base model once, got ids=%v", ids)
+	}
+	for _, id := range []string{"gpt-5.3-codex(high)", "gpt-5.3-codex(xhigh)"} {
+		if ids[id] != 1 {
+			t.Fatalf("expected %s exactly once (global only), got ids=%v", id, ids)
+		}
+	}
+	for _, id := range []string{"gpt-5.3-codex(low)", "gpt-5.3-codex(medium)"} {
+		if ids[id] != 0 {
+			t.Fatalf("expected %s to be hidden, got ids=%v", id, ids)
+		}
+	}
+}
+
+func TestAppendCodexThinkingModelsDefaultAllLevels(t *testing.T) {
+	baseModels := []map[string]any{
+		{"id": "gpt-5.5", "object": "model", "created": int64(1), "owned_by": "openai"},
+	}
+	codexModels := []*registry.ModelInfo{{
+		ID:       "gpt-5.5",
+		Object:   "model",
+		Created:  1,
+		OwnedBy:  "openai",
+		Thinking: &registry.ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh"}},
+	}}
+
+	// Test with empty SDKConfig (Levels empty -> default all levels)
+	result := appendCodexThinkingModels(baseModels, codexModels, &sdkconfig.SDKConfig{})
+	ids := modelIDs(result)
+
+	for _, id := range []string{"gpt-5.5(low)", "gpt-5.5(medium)", "gpt-5.5(high)", "gpt-5.5(xhigh)"} {
+		if ids[id] != 1 {
+			t.Fatalf("expected %s exactly once with empty config, got ids=%v", id, ids)
+		}
+	}
+
+	// Test with nil cfg
+	baseModels2 := []map[string]any{
+		{"id": "gpt-5.5", "object": "model", "created": int64(1), "owned_by": "openai"},
+	}
+	result2 := appendCodexThinkingModels(baseModels2, codexModels, nil)
+	ids2 := modelIDs(result2)
+
+	for _, id := range []string{"gpt-5.5(low)", "gpt-5.5(medium)", "gpt-5.5(high)", "gpt-5.5(xhigh)"} {
+		if ids2[id] != 1 {
+			t.Fatalf("expected %s exactly once with nil config, got ids=%v", id, ids2)
 		}
 	}
 }

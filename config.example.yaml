@@ -76,6 +76,20 @@ force-model-prefix: false
 # When true, add Codex thinking-level suffix aliases (for example gpt-5.5(high)) to OpenAI-compatible model listings.
 show-codex-thinking-models: false
 
+# Control which Codex thinking levels appear in /v1/models listings.
+# When omitted or empty, all levels (low, medium, high, xhigh) are shown.
+# Model overrides replace the global levels for the specified models
+# for specific model IDs.
+# codex-thinking-display:
+#   levels:
+#     - low
+#     - medium
+#     - high
+#     - xhigh
+#   model_overrides: {}
+#     # gpt-5.3-codex:
+#     #   - medium
+
 # When true, forward filtered upstream response headers to downstream clients.
 # Default is false (disabled).
 passthrough-headers: false
