@@ -56,7 +56,7 @@ type StreamingConfig struct {
 }
 
 // CodexThinkingDisplayConfig controls which Codex thinking levels appear in model listings.
-// Levels is the global whitelist. ModelOverrides adds additional levels per model (additive).
+// Levels is the global whitelist. ModelOverrides replaces the global levels for the specified model.
 type CodexThinkingDisplayConfig struct {
 	Levels         []string            `yaml:"levels" json:"levels"`
 	ModelOverrides map[string][]string `yaml:"model_overrides" json:"model_overrides"`

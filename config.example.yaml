@@ -78,7 +78,7 @@ show-codex-thinking-models: false
 
 # Control which Codex thinking levels appear in /v1/models listings.
 # When omitted or empty, all levels (low, medium, high, xhigh) are shown.
-# Model overrides are additive — they add levels on top of the global list
+# Model overrides replace the global levels for the specified models
 # for specific model IDs.
 # codex-thinking-display:
 #   levels:

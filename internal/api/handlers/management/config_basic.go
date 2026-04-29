@@ -308,7 +308,7 @@ func (h *Handler) GetCodexThinkingModelIds(c *gin.Context) {
 		seen[id] = struct{}{}
 		modelIDs = append(modelIDs, id)
 	}
-	if modelIDs == nil {
+	if len(modelIDs) == 0 {
 		modelIDs = []string{}
 	}
 	c.JSON(200, gin.H{"codex-thinking-model-ids": modelIDs})
