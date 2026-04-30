@@ -364,6 +364,12 @@ type CloakConfig struct {
 	// CacheUserID controls whether Claude user_id values are cached per API key.
 	// When false, a fresh random user_id is generated for every request.
 	CacheUserID *bool `yaml:"cache-user-id,omitempty" json:"cache-user-id,omitempty"`
+
+	// FixedDeviceID pins the device_id field to a fixed value for all requests.
+	// When set, replaces the device_id in new-format user_id JSON objects
+	// ({"device_id":"...","account_uuid":"...","session_id":"..."}) with this value.
+	// For old-format user_id strings, has no effect (whole user_id is replaced as usual).
+	FixedDeviceID string `yaml:"fixed-device-id,omitempty" json:"fixed-device-id,omitempty"`
 }
 
 // ClaudeKey represents the configuration for a Claude API key,
