@@ -121,6 +121,7 @@ nonstream-keepalive-interval: 0
 # Payload rewrite rules.
 # - disabled: true skips an entire rule without deleting it.
 # - disabled-params keeps parameters in YAML but prevents them from being applied.
+# - disabled-params may use either the rule path or the final rooted payload path.
 # payload:
 #   default:
 #     - disabled: false
@@ -132,6 +133,15 @@ nonstream-keepalive-interval: 0
 #         top_p: 0.9
 #       disabled-params:
 #         - top_p
+#   default-raw:
+#     - disabled: false
+#       models:
+#         - name: "gemini-*"
+#           protocol: "gemini"
+#       params:
+#         generationConfig.thinkingConfig.thinkingBudget: "8192"
+#       disabled-params:
+#         - request.generationConfig.thinkingConfig.thinkingBudget
 #   override:
 #     - disabled: true
 #       models:

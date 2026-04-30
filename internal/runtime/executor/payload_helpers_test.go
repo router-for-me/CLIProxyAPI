@@ -210,3 +210,26 @@ func TestApplyPayloadConfigWithRoot_SkipsDisabledParamsWithEquivalentDottedPath(
 		t.Fatalf("disabled dotted param should not be written, got %s", got)
 	}
 }
+
+func TestApplyPayloadConfigWithRoot_SkipsDisabledParamsWithRootedPath(t *testing.T) {
+	cfg := &config.Config{
+		Payload: config.PayloadConfig{
+			OverrideRaw: []config.PayloadRule{
+				{
+					Models: []config.PayloadModelRule{{Name: "gemini-*"}},
+					Params: map[string]any{
+						"generationConfig.thinkingConfig.thinkingBudget": `8192`,
+					},
+					DisabledParams: []string{"request.generationConfig.thinkingConfig.thinkingBudget"},
+				},
+			},
+		},
+	}
+
+	payload := []byte(`{"request":{"model":"gemini-2.5-pro","generationConfig":{"thinkingConfig":{}}}}`)
+	got := helps.ApplyPayloadConfigWithRoot(cfg, "gemini-2.5-pro", "gemini", "request", payload, payload, "")
+
+	if gjson.GetBytes(got, "request.generationConfig.thinkingConfig.thinkingBudget").Exists() {
+		t.Fatalf("disabled rooted param should not be written, got %s", got)
+	}
+}

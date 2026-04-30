@@ -44,7 +44,7 @@ func ApplyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string
 		}
 		disabledParams := payloadDisabledParamSet(rule.DisabledParams)
 		for path, value := range rule.Params {
-			if payloadParamDisabled(disabledParams, path) {
+			if payloadParamDisabled(disabledParams, root, path) {
 				continue
 			}
 			fullPath := buildPayloadPath(root, path)
@@ -73,7 +73,7 @@ func ApplyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string
 		}
 		disabledParams := payloadDisabledParamSet(rule.DisabledParams)
 		for path, value := range rule.Params {
-			if payloadParamDisabled(disabledParams, path) {
+			if payloadParamDisabled(disabledParams, root, path) {
 				continue
 			}
 			fullPath := buildPayloadPath(root, path)
@@ -106,7 +106,7 @@ func ApplyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string
 		}
 		disabledParams := payloadDisabledParamSet(rule.DisabledParams)
 		for path, value := range rule.Params {
-			if payloadParamDisabled(disabledParams, path) {
+			if payloadParamDisabled(disabledParams, root, path) {
 				continue
 			}
 			fullPath := buildPayloadPath(root, path)
@@ -128,7 +128,7 @@ func ApplyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string
 		}
 		disabledParams := payloadDisabledParamSet(rule.DisabledParams)
 		for path, value := range rule.Params {
-			if payloadParamDisabled(disabledParams, path) {
+			if payloadParamDisabled(disabledParams, root, path) {
 				continue
 			}
 			fullPath := buildPayloadPath(root, path)
@@ -154,7 +154,7 @@ func ApplyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string
 		}
 		disabledParams := payloadDisabledParamSet(rule.DisabledParams)
 		for _, path := range rule.Params {
-			if payloadParamDisabled(disabledParams, path) {
+			if payloadParamDisabled(disabledParams, root, path) {
 				continue
 			}
 			fullPath := buildPayloadPath(root, path)
@@ -189,11 +189,18 @@ func payloadDisabledParamSet(paths []string) map[string]struct{} {
 	return out
 }
 
-func payloadParamDisabled(disabled map[string]struct{}, path string) bool {
+func payloadParamDisabled(disabled map[string]struct{}, root, path string) bool {
 	if len(disabled) == 0 {
 		return false
 	}
-	_, ok := disabled[normalizeDisabledPayloadPath(path)]
+	if _, ok := disabled[normalizeDisabledPayloadPath(path)]; ok {
+		return true
+	}
+	fullPath := buildPayloadPath(root, path)
+	if fullPath == path {
+		return false
+	}
+	_, ok := disabled[normalizeDisabledPayloadPath(fullPath)]
 	return ok
 }
 
