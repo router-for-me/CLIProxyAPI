@@ -98,12 +98,13 @@ func (e *DeepSeekProxyExecutor) collectDeepSeekResponse(ctx context.Context, aut
 	state := deepSeekContinueState{SessionID: sessionID}
 	current := initial
 	for round := 0; ; round++ {
-		partial, err := consumeDeepSeekSSE(ctx, current.Body, request.Thinking, &state, func(line []byte) {
+		partial, err := consumeDeepSeekSSEWithToolMode(ctx, current.Body, request.Thinking, request.ToolMode, &state, func(line []byte) {
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 		})
 		_ = current.Body.Close()
 		result.Content += partial.Content
 		result.Reasoning += partial.Reasoning
+		result.ToolCalls = append(result.ToolCalls, partial.ToolCalls...)
 		if err != nil {
 			return result, err
 		}
