@@ -889,10 +889,7 @@ func stripCodexToolDeferLoading(body []byte) []byte {
 }
 
 func stripCodexToolDeferLoadingAtPath(body []byte, path string) []byte {
-	tools := gjson.GetBytes(body, "tools")
-	if path != "tools" {
-		tools = gjson.GetBytes(body, path)
-	}
+	tools := gjson.GetBytes(body, path)
 	if !tools.IsArray() {
 		return body
 	}
