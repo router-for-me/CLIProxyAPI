@@ -24,6 +24,7 @@ const (
 	apiRequestKey           = "API_REQUEST"
 	apiResponseKey          = "API_RESPONSE"
 	apiWebsocketTimelineKey = "API_WEBSOCKET_TIMELINE"
+	usageThinkingKey        = "USAGE_THINKING"
 	creditsUsedKey          = "__antigravity_credits_used__"
 )
 
@@ -55,6 +56,7 @@ type upstreamAttempt struct {
 
 // RecordAPIRequest stores the upstream request metadata in Gin context for request logging.
 func RecordAPIRequest(ctx context.Context, cfg *config.Config, info UpstreamRequestLog) {
+	CaptureUsageThinkingFromRequest(ctx, info.Body)
 	if cfg == nil || !cfg.RequestLog {
 		return
 	}
@@ -195,6 +197,7 @@ func AppendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byt
 
 // RecordAPIWebsocketRequest stores an upstream websocket request event in Gin context.
 func RecordAPIWebsocketRequest(ctx context.Context, cfg *config.Config, info UpstreamRequestLog) {
+	CaptureUsageThinkingFromRequest(ctx, info.Body)
 	if cfg == nil || !cfg.RequestLog {
 		return
 	}

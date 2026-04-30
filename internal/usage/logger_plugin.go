@@ -89,12 +89,13 @@ type modelStats struct {
 
 // RequestDetail stores the timestamp, latency, and token usage for a single request.
 type RequestDetail struct {
-	Timestamp time.Time  `json:"timestamp"`
-	LatencyMs int64      `json:"latency_ms"`
-	Source    string     `json:"source"`
-	AuthIndex string     `json:"auth_index"`
-	Tokens    TokenStats `json:"tokens"`
-	Failed    bool       `json:"failed"`
+	Timestamp time.Time           `json:"timestamp"`
+	LatencyMs int64               `json:"latency_ms"`
+	Source    string              `json:"source"`
+	AuthIndex string              `json:"auth_index"`
+	Thinking  *coreusage.Thinking `json:"thinking,omitempty"`
+	Tokens    TokenStats          `json:"tokens"`
+	Failed    bool                `json:"failed"`
 }
 
 // TokenStats captures the token usage breakdown for a request.
@@ -202,6 +203,7 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 		LatencyMs: normaliseLatency(record.Latency),
 		Source:    record.Source,
 		AuthIndex: record.AuthIndex,
+		Thinking:  cloneThinking(record.Thinking),
 		Tokens:    detail,
 		Failed:    failed,
 	})
@@ -213,6 +215,7 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 }
 
 func (s *RequestStatistics) updateAPIStats(stats *apiStats, model string, detail RequestDetail) {
+	detail = cloneRequestDetail(detail)
 	stats.TotalRequests++
 	stats.TotalTokens += detail.Tokens.TotalTokens
 	modelStatsValue, ok := stats.Models[model]
@@ -248,8 +251,7 @@ func (s *RequestStatistics) Snapshot() StatisticsSnapshot {
 			Models:        make(map[string]ModelSnapshot, len(stats.Models)),
 		}
 		for modelName, modelStatsValue := range stats.Models {
-			requestDetails := make([]RequestDetail, len(modelStatsValue.Details))
-			copy(requestDetails, modelStatsValue.Details)
+			requestDetails := cloneRequestDetails(modelStatsValue.Details)
 			apiSnapshot.Models[modelName] = ModelSnapshot{
 				TotalRequests: modelStatsValue.TotalRequests,
 				TotalTokens:   modelStatsValue.TotalTokens,
@@ -333,6 +335,7 @@ func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot) MergeResu
 				modelName = "unknown"
 			}
 			for _, detail := range modelSnapshot.Details {
+				detail = cloneRequestDetail(detail)
 				detail.Tokens = normaliseTokenStats(detail.Tokens)
 				if detail.LatencyMs < 0 {
 					detail.LatencyMs = 0
@@ -466,6 +469,39 @@ func normaliseTokenStats(tokens TokenStats) TokenStats {
 		tokens.TotalTokens = tokens.InputTokens + tokens.OutputTokens + tokens.ReasoningTokens + tokens.CachedTokens
 	}
 	return tokens
+}
+
+func normaliseThinking(thinking *coreusage.Thinking) coreusage.Thinking {
+	if thinking == nil {
+		return coreusage.Thinking{}
+	}
+	return coreusage.Thinking{
+		Intensity: strings.TrimSpace(thinking.Intensity),
+		Mode:      strings.TrimSpace(thinking.Mode),
+		Level:     strings.TrimSpace(thinking.Level),
+		Budget:    thinking.Budget,
+	}
+}
+
+func cloneThinking(thinking *coreusage.Thinking) *coreusage.Thinking {
+	normalized := normaliseThinking(thinking)
+	if normalized.Intensity == "" && normalized.Mode == "" && normalized.Level == "" && normalized.Budget == 0 {
+		return nil
+	}
+	return &normalized
+}
+
+func cloneRequestDetail(detail RequestDetail) RequestDetail {
+	detail.Thinking = cloneThinking(detail.Thinking)
+	return detail
+}
+
+func cloneRequestDetails(details []RequestDetail) []RequestDetail {
+	cloned := make([]RequestDetail, len(details))
+	for i, detail := range details {
+		cloned[i] = cloneRequestDetail(detail)
+	}
+	return cloned
 }
 
 func normaliseLatency(latency time.Duration) int64 {
