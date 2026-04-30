@@ -1452,11 +1452,14 @@ func getCloakConfigFromAuth(auth *cliproxyauth.Auth) (string, bool, []string, bo
 // Runs independently of cloaking so system prompts are never touched.
 func applyFixedDeviceID(payload []byte, fixedDeviceID string) []byte {
 	result := gjson.GetBytes(payload, "metadata.user_id")
-	if !result.Exists() || result.String() == "" {
+	if !result.Exists() {
 		return payload
 	}
 	existingUserID := result.String()
-	// sjson.Set errors on non-JSON strings (old-format user_id), leaving them unaffected.
+	// Only act on new-format JSON objects; old-format strings and empty values pass through unchanged.
+	if !gjson.Parse(existingUserID).IsObject() {
+		return payload
+	}
 	modifiedUserID, err := sjson.Set(existingUserID, "device_id", fixedDeviceID)
 	if err != nil {
 		return payload
