@@ -176,7 +176,6 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 	body, _ = sjson.SetBytes(body, "stream", true)
-	body, _ = sjson.DeleteBytes(body, "previous_response_id")
 	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
 	body, _ = sjson.DeleteBytes(body, "safety_identifier")
 	body, _ = sjson.DeleteBytes(body, "stream_options")
@@ -422,7 +421,6 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
-	body, _ = sjson.DeleteBytes(body, "previous_response_id")
 	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
 	body, _ = sjson.DeleteBytes(body, "safety_identifier")
 	body, _ = sjson.DeleteBytes(body, "stream_options")
@@ -736,12 +734,13 @@ func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Form
 			}
 		}
 	} else if from == "openai-response" {
-		promptCacheKey := gjson.GetBytes(req.Payload, "prompt_cache_key")
-		if promptCacheKey.Exists() {
-			cache.ID = promptCacheKey.String()
+		if promptCacheKey := codexPromptCacheKeyFromClient(ctx, req, rawJSON); promptCacheKey != "" {
+			cache.ID = promptCacheKey
 		}
 	} else if from == "openai" {
-		if apiKey := strings.TrimSpace(helps.APIKeyFromContext(ctx)); apiKey != "" {
+		if promptCacheKey := codexPromptCacheKeyFromClient(ctx, req, rawJSON); promptCacheKey != "" {
+			cache.ID = promptCacheKey
+		} else if apiKey := strings.TrimSpace(helps.APIKeyFromContext(ctx)); apiKey != "" {
 			cache.ID = uuid.NewSHA1(uuid.NameSpaceOID, []byte("cli-proxy-api:codex:prompt-cache:"+apiKey)).String()
 		}
 	}
@@ -749,6 +748,8 @@ func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Form
 	if cache.ID != "" {
 		rawJSON, _ = sjson.SetBytes(rawJSON, "prompt_cache_key", cache.ID)
 	}
+	rawJSON = normalizeCodexPreviousResponseIDForPromptCache(ctx, from, rawJSON)
+	rawJSON = normalizeCodexDeveloperCurrentTimeForPromptCache(ctx, from, rawJSON)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(rawJSON))
 	if err != nil {
 		return nil, err
@@ -757,6 +758,217 @@ func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Form
 		httpReq.Header.Set("Session_id", cache.ID)
 	}
 	return httpReq, nil
+}
+
+func codexPromptCacheKeyFromClient(ctx context.Context, req cliproxyexecutor.Request, rawJSON []byte) string {
+	if key := codexPromptCacheKeyFromJSON(req.Payload); key != "" {
+		return key
+	}
+	if key := codexPromptCacheKeyFromJSON(rawJSON); key != "" {
+		return key
+	}
+	return codexPromptCacheKeyFromHeaders(ctx)
+}
+
+func codexPromptCacheKeyFromJSON(payload []byte) string {
+	if len(payload) == 0 {
+		return ""
+	}
+	for _, path := range []string{
+		"prompt_cache_key",
+		"promptCacheKey",
+		"providerOptions.openai.promptCacheKey",
+		"provider_options.openai.prompt_cache_key",
+		"provider_options.openai.promptCacheKey",
+	} {
+		if value := strings.TrimSpace(gjson.GetBytes(payload, path).String()); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func codexPromptCacheKeyFromHeaders(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	ginCtx, ok := ctx.Value("gin").(*gin.Context)
+	if !ok || ginCtx == nil || ginCtx.Request == nil {
+		return ""
+	}
+	return codexPromptCacheKeyFromHeader(ginCtx.Request.Header)
+}
+
+func codexPromptCacheKeyFromHeader(headers http.Header) string {
+	for _, name := range []string{"X-Session-ID", "Session_id", "Conversation_id"} {
+		if value := strings.TrimSpace(headers.Get(name)); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func normalizeCodexPreviousResponseIDForPromptCache(_ context.Context, from sdktranslator.Format, rawJSON []byte) []byte {
+	if from != "openai-response" {
+		return rawJSON
+	}
+	if strings.TrimSpace(gjson.GetBytes(rawJSON, "previous_response_id").String()) == "" {
+		return rawJSON
+	}
+	if strings.TrimSpace(gjson.GetBytes(rawJSON, "prompt_cache_key").String()) == "" {
+		return rawJSON
+	}
+
+	input := gjson.GetBytes(rawJSON, "input")
+	if !codexInputLooksLikeFullTranscript(input) {
+		return rawJSON
+	}
+
+	updated, errDelete := sjson.DeleteBytes(rawJSON, "previous_response_id")
+	if errDelete != nil {
+		return rawJSON
+	}
+	return updated
+}
+
+func codexInputLooksLikeFullTranscript(input gjson.Result) bool {
+	if !input.Exists() || !input.IsArray() {
+		return false
+	}
+	for _, item := range input.Array() {
+		if strings.TrimSpace(item.Get("role").String()) == "assistant" {
+			return true
+		}
+		switch strings.TrimSpace(item.Get("type").String()) {
+		case "function_call", "custom_tool_call":
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeCodexDeveloperCurrentTimeForPromptCache(_ context.Context, from sdktranslator.Format, rawJSON []byte) []byte {
+	if from != "openai-response" {
+		return rawJSON
+	}
+	if strings.TrimSpace(gjson.GetBytes(rawJSON, "prompt_cache_key").String()) == "" {
+		return rawJSON
+	}
+	if strings.TrimSpace(gjson.GetBytes(rawJSON, "input.0.role").String()) != "developer" {
+		return rawJSON
+	}
+
+	content := gjson.GetBytes(rawJSON, "input.0.content")
+	if !content.Exists() {
+		return rawJSON
+	}
+	if content.Type != gjson.String {
+		return rawJSON
+	}
+	normalized, changed := normalizeCodexOpenCodeEnvCurrentTime(content.String())
+	if !changed {
+		return rawJSON
+	}
+	updated, errSet := sjson.SetBytes(rawJSON, "input.0.content", normalized)
+	if errSet != nil {
+		return rawJSON
+	}
+	return updated
+}
+
+func normalizeCodexOpenCodeEnvCurrentTime(content string) (string, bool) {
+	const envStartMarker = "<env>"
+	const envEndMarker = "</env>"
+
+	searchStart := 0
+	for {
+		envStart := strings.Index(content[searchStart:], envStartMarker)
+		if envStart < 0 {
+			return content, false
+		}
+		envStart += searchStart
+		blockStart := envStart + len(envStartMarker)
+		envEnd := strings.Index(content[blockStart:], envEndMarker)
+		if envEnd < 0 {
+			return content, false
+		}
+		blockEnd := blockStart + envEnd
+		block := content[blockStart:blockEnd]
+		if !looksLikeOpenCodeEnvBlock(block) {
+			searchStart = blockEnd + len(envEndMarker)
+			continue
+		}
+
+		normalizedBlock, changed := normalizeCodexCurrentTimeLineInBlock(block)
+		if !changed {
+			searchStart = blockEnd + len(envEndMarker)
+			continue
+		}
+		return content[:blockStart] + normalizedBlock + content[blockEnd:], true
+	}
+}
+
+func looksLikeOpenCodeEnvBlock(block string) bool {
+	required := strings.Contains(block, "Working directory:")
+	if !required {
+		return false
+	}
+
+	markerCount := 0
+	for _, marker := range []string{
+		"Workspace root folder:",
+		"Is directory a git repo:",
+		"Platform:",
+		"Today's date:",
+	} {
+		if strings.Contains(block, marker) {
+			markerCount++
+		}
+	}
+	return markerCount >= 2
+}
+
+func normalizeCodexCurrentTimeLineInBlock(content string) (string, bool) {
+	const label = "Current time: "
+	index := strings.Index(content, label)
+	if index < 0 {
+		return content, false
+	}
+
+	valueStart := index + len(label)
+	valueEnd := len(content)
+	if newlineIndex := strings.IndexByte(content[valueStart:], '\n'); newlineIndex >= 0 {
+		valueEnd = valueStart + newlineIndex
+	}
+	rawValue := strings.TrimSpace(content[valueStart:valueEnd])
+	if !looksLikeISODatePrefix(rawValue) {
+		return content, false
+	}
+
+	normalizedLine := label + rawValue[:10] + "T00:00:00.000Z"
+	if content[index:valueEnd] == normalizedLine {
+		return content, false
+	}
+	return content[:index] + normalizedLine + content[valueEnd:], true
+}
+
+func looksLikeISODatePrefix(value string) bool {
+	if len(value) < len("2006-01-02") {
+		return false
+	}
+	for index := 0; index < len("2006-01-02"); index++ {
+		switch index {
+		case 4, 7:
+			if value[index] != '-' {
+				return false
+			}
+		default:
+			if value[index] < '0' || value[index] > '9' {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, stream bool, cfg *config.Config) {
