@@ -1,7 +1,7 @@
 package responses
 
 import (
-	"strings"
+	"fmt"
 
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -57,6 +57,34 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 
 	// Convert input array to messages
 	if input := root.Get("input"); input.Exists() && input.IsArray() {
+		// Collect consecutive function_call items so they can be grouped into
+		// a single assistant message with multiple tool_calls (required by Chat
+		// Completions format: one assistant message with all tool_calls, followed
+		// by one tool message per tool_call_id).
+		var pendingFunctionCalls []gjson.Result
+
+		flushFunctionCalls := func() {
+			if len(pendingFunctionCalls) == 0 {
+				return
+			}
+			assistantMessage := []byte(`{"role":"assistant","tool_calls":[]}`)
+			for i, fc := range pendingFunctionCalls {
+				toolCall := []byte(`{"id":"","type":"function","function":{"name":"","arguments":""}}`)
+				if callId := fc.Get("call_id"); callId.Exists() {
+					toolCall, _ = sjson.SetBytes(toolCall, "id", callId.String())
+				}
+				if name := fc.Get("name"); name.Exists() {
+					toolCall, _ = sjson.SetBytes(toolCall, "function.name", name.String())
+				}
+				if arguments := fc.Get("arguments"); arguments.Exists() {
+					toolCall, _ = sjson.SetBytes(toolCall, "function.arguments", arguments.String())
+				}
+				assistantMessage, _ = sjson.SetRawBytes(assistantMessage, fmt.Sprintf("tool_calls.%d", i), toolCall)
+			}
+			out, _ = sjson.SetRawBytes(out, "messages.-1", assistantMessage)
+			pendingFunctionCalls = nil
+		}
+
 		input.ForEach(func(_, item gjson.Result) bool {
 			itemType := item.Get("type").String()
 			if itemType == "" && item.Get("role").String() != "" {
@@ -65,6 +93,9 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 
 			switch itemType {
 			case "message", "":
+				// Flush any pending function_calls before a new message
+				flushFunctionCalls()
+
 				// Handle regular message conversion
 				role := item.Get("role").String()
 				if role == "developer" {
@@ -112,27 +143,13 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 				out, _ = sjson.SetRawBytes(out, "messages.-1", message)
 
 			case "function_call":
-				// Handle function call conversion to assistant message with tool_calls
-				assistantMessage := []byte(`{"role":"assistant","tool_calls":[]}`)
-
-				toolCall := []byte(`{"id":"","type":"function","function":{"name":"","arguments":""}}`)
-
-				if callId := item.Get("call_id"); callId.Exists() {
-					toolCall, _ = sjson.SetBytes(toolCall, "id", callId.String())
-				}
-
-				if name := item.Get("name"); name.Exists() {
-					toolCall, _ = sjson.SetBytes(toolCall, "function.name", name.String())
-				}
-
-				if arguments := item.Get("arguments"); arguments.Exists() {
-					toolCall, _ = sjson.SetBytes(toolCall, "function.arguments", arguments.String())
-				}
-
-				assistantMessage, _ = sjson.SetRawBytes(assistantMessage, "tool_calls.0", toolCall)
-				out, _ = sjson.SetRawBytes(out, "messages.-1", assistantMessage)
+				// Collect consecutive function_calls into a single group
+				pendingFunctionCalls = append(pendingFunctionCalls, item)
 
 			case "function_call_output":
+				// Flush pending function_calls before a tool response
+				flushFunctionCalls()
+
 				// Handle function call output conversion to tool message
 				toolMessage := []byte(`{"role":"tool","tool_call_id":"","content":""}`)
 
@@ -149,6 +166,9 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 
 			return true
 		})
+
+		// Flush any remaining function_calls at end of array
+		flushFunctionCalls()
 	} else if input.Type == gjson.String {
 		msg := []byte(`{}`)
 		msg, _ = sjson.SetBytes(msg, "role", "user")
@@ -198,12 +218,13 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 		}
 	}
 
-	if reasoningEffort := root.Get("reasoning.effort"); reasoningEffort.Exists() {
-		effort := strings.ToLower(strings.TrimSpace(reasoningEffort.String()))
-		if effort != "" {
-			out, _ = sjson.SetBytes(out, "reasoning_effort", effort)
-		}
-	}
+	// Disable thinking mode for DeepSeek compatibility.
+	// DeepSeek's deepseek-v4-flash model defaults to thinking mode, which returns
+	// reasoning_content in responses and requires it to be echoed back in subsequent
+	// requests. The proxy doesn't support echoing reasoning_content, so we disable
+	// thinking mode entirely.
+	// See: https://api-docs.deepseek.com/guides/thinking_mode
+	out, _ = sjson.SetBytes(out, "thinking", map[string]interface{}{"type": "disabled"})
 
 	// Convert tool_choice if present
 	if toolChoice := root.Get("tool_choice"); toolChoice.Exists() {
