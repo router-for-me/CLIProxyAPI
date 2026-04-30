@@ -1037,6 +1037,10 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 		auth.SetDeleteUnauthorizedAuth(cfg.DeleteUnauthorizedAuth)
 	}
 
+	if oldCfg != nil && oldCfg.DisableImageGeneration != cfg.DisableImageGeneration {
+		log.Infof("disable-image-generation updated: %t -> %t", oldCfg.DisableImageGeneration, cfg.DisableImageGeneration)
+	}
+
 	applySignatureCacheConfig(oldCfg, cfg)
 
 	if s.handlers != nil && s.handlers.AuthManager != nil {
