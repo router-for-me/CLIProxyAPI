@@ -130,6 +130,43 @@ nonstream-keepalive-interval: 0
 #   keepalive-seconds: 15   # Default: 0 (disabled). <= 0 disables keep-alives.
 #   bootstrap-retries: 1    # Default: 0 (disabled). Retries before first byte is sent.
 
+# Payload rewrite rules.
+# - disabled: true skips an entire rule without deleting it.
+# - disabled-params keeps parameters in YAML but prevents them from being applied.
+# - disabled-params may use either the rule path or the final rooted payload path.
+# payload:
+#   default:
+#     - disabled: false
+#       models:
+#         - name: "gpt-*"
+#           protocol: "openai"
+#       params:
+#         temperature: 0.7
+#         top_p: 0.9
+#       disabled-params:
+#         - top_p
+#   default-raw:
+#     - disabled: false
+#       models:
+#         - name: "gemini-*"
+#           protocol: "gemini"
+#       params:
+#         generationConfig.thinkingConfig.thinkingBudget: "8192"
+#       disabled-params:
+#         - request.generationConfig.thinkingConfig.thinkingBudget
+#   override:
+#     - disabled: true
+#       models:
+#         - name: "gemini-*"
+#       params:
+#         candidate_count: 1
+#   filter:
+#     - disabled: false
+#       models:
+#         - name: "claude-*"
+#       params:
+#         - metadata.trace_id
+#
 # Signature cache validation for thinking blocks (Antigravity/Claude).
 # When true (default), cached signatures are preferred and validated.
 # When false, client signatures are used directly after normalization (bypass mode for testing).

@@ -37,10 +37,14 @@ func ApplyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string
 			// Apply default rules: first write wins per field across all matching rules.
 			for i := range rules.Default {
 				rule := &rules.Default[i]
-				if !payloadModelRulesMatch(rule.Models, protocol, candidates) {
+				if rule.Disabled || !payloadModelRulesMatch(rule.Models, protocol, candidates) {
 					continue
 				}
+				disabledParams := payloadDisabledParamSet(rule.DisabledParams)
 				for path, value := range rule.Params {
+					if payloadParamDisabled(disabledParams, root, path) {
+						continue
+					}
 					fullPath := buildPayloadPath(root, path)
 					if fullPath == "" {
 						continue
@@ -62,10 +66,14 @@ func ApplyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string
 			// Apply default raw rules: first write wins per field across all matching rules.
 			for i := range rules.DefaultRaw {
 				rule := &rules.DefaultRaw[i]
-				if !payloadModelRulesMatch(rule.Models, protocol, candidates) {
+				if rule.Disabled || !payloadModelRulesMatch(rule.Models, protocol, candidates) {
 					continue
 				}
+				disabledParams := payloadDisabledParamSet(rule.DisabledParams)
 				for path, value := range rule.Params {
+					if payloadParamDisabled(disabledParams, root, path) {
+						continue
+					}
 					fullPath := buildPayloadPath(root, path)
 					if fullPath == "" {
 						continue
@@ -91,10 +99,14 @@ func ApplyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string
 			// Apply override rules: last write wins per field across all matching rules.
 			for i := range rules.Override {
 				rule := &rules.Override[i]
-				if !payloadModelRulesMatch(rule.Models, protocol, candidates) {
+				if rule.Disabled || !payloadModelRulesMatch(rule.Models, protocol, candidates) {
 					continue
 				}
+				disabledParams := payloadDisabledParamSet(rule.DisabledParams)
 				for path, value := range rule.Params {
+					if payloadParamDisabled(disabledParams, root, path) {
+						continue
+					}
 					fullPath := buildPayloadPath(root, path)
 					if fullPath == "" {
 						continue
@@ -109,10 +121,14 @@ func ApplyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string
 			// Apply override raw rules: last write wins per field across all matching rules.
 			for i := range rules.OverrideRaw {
 				rule := &rules.OverrideRaw[i]
-				if !payloadModelRulesMatch(rule.Models, protocol, candidates) {
+				if rule.Disabled || !payloadModelRulesMatch(rule.Models, protocol, candidates) {
 					continue
 				}
+				disabledParams := payloadDisabledParamSet(rule.DisabledParams)
 				for path, value := range rule.Params {
+					if payloadParamDisabled(disabledParams, root, path) {
+						continue
+					}
 					fullPath := buildPayloadPath(root, path)
 					if fullPath == "" {
 						continue
@@ -131,10 +147,14 @@ func ApplyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string
 			// Apply filter rules: remove matching paths from payload.
 			for i := range rules.Filter {
 				rule := &rules.Filter[i]
-				if !payloadModelRulesMatch(rule.Models, protocol, candidates) {
+				if rule.Disabled || !payloadModelRulesMatch(rule.Models, protocol, candidates) {
 					continue
 				}
+				disabledParams := payloadDisabledParamSet(rule.DisabledParams)
 				for _, path := range rule.Params {
+					if payloadParamDisabled(disabledParams, root, path) {
+						continue
+					}
 					fullPath := buildPayloadPath(root, path)
 					if fullPath == "" {
 						continue
@@ -154,6 +174,44 @@ func ApplyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string
 		out = removeToolChoiceFromPayloadWithRoot(out, root, "image_generation")
 	}
 	return out
+}
+
+func payloadDisabledParamSet(paths []string) map[string]struct{} {
+	if len(paths) == 0 {
+		return nil
+	}
+	out := make(map[string]struct{}, len(paths))
+	for _, path := range paths {
+		normalized := normalizeDisabledPayloadPath(path)
+		if normalized == "" {
+			continue
+		}
+		out[normalized] = struct{}{}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func payloadParamDisabled(disabled map[string]struct{}, root, path string) bool {
+	if len(disabled) == 0 {
+		return false
+	}
+	if _, ok := disabled[normalizeDisabledPayloadPath(path)]; ok {
+		return true
+	}
+	fullPath := buildPayloadPath(root, path)
+	if fullPath == path {
+		return false
+	}
+	_, ok := disabled[normalizeDisabledPayloadPath(fullPath)]
+	return ok
+}
+
+func normalizeDisabledPayloadPath(path string) string {
+	trimmed := strings.TrimSpace(path)
+	return strings.TrimPrefix(trimmed, ".")
 }
 
 func payloadModelRulesMatch(rules []config.PayloadModelRule, protocol string, models []string) bool {

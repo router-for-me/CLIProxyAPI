@@ -320,19 +320,27 @@ type PayloadConfig struct {
 
 // PayloadFilterRule describes a rule to remove specific JSON paths from matching model payloads.
 type PayloadFilterRule struct {
+	// Disabled skips this rule entirely when true.
+	Disabled bool `yaml:"disabled,omitempty" json:"disabled,omitempty"`
 	// Models lists model entries with name pattern and protocol constraint.
 	Models []PayloadModelRule `yaml:"models" json:"models"`
 	// Params lists JSON paths (gjson/sjson syntax) to remove from the payload.
 	Params []string `yaml:"params" json:"params"`
+	// DisabledParams lists JSON paths that should remain visible in config but not be applied.
+	DisabledParams []string `yaml:"disabled-params,omitempty" json:"disabled-params,omitempty"`
 }
 
 // PayloadRule describes a single rule targeting a list of models with parameter updates.
 type PayloadRule struct {
+	// Disabled skips this rule entirely when true.
+	Disabled bool `yaml:"disabled,omitempty" json:"disabled,omitempty"`
 	// Models lists model entries with name pattern and protocol constraint.
 	Models []PayloadModelRule `yaml:"models" json:"models"`
 	// Params maps JSON paths (gjson/sjson syntax) to values written into the payload.
 	// For *-raw rules, values are treated as raw JSON fragments (strings are used as-is).
 	Params map[string]any `yaml:"params" json:"params"`
+	// DisabledParams lists JSON paths that should remain visible in config but not be applied.
+	DisabledParams []string `yaml:"disabled-params,omitempty" json:"disabled-params,omitempty"`
 }
 
 // PayloadModelRule ties a model name pattern to a specific translator protocol.
@@ -743,8 +751,16 @@ func sanitizePayloadRawRules(rules []PayloadRule, section string) []PayloadRule 
 		if len(rule.Params) == 0 {
 			continue
 		}
+		if rule.Disabled {
+			out = append(out, rule)
+			continue
+		}
+		disabledParams := payloadDisabledParamSet(rule.DisabledParams)
 		invalid := false
 		for path, value := range rule.Params {
+			if payloadParamDisabled(disabledParams, path) {
+				continue
+			}
 			raw, ok := payloadRawString(value)
 			if !ok {
 				continue
@@ -766,6 +782,41 @@ func sanitizePayloadRawRules(rules []PayloadRule, section string) []PayloadRule 
 		out = append(out, rule)
 	}
 	return out
+}
+
+func payloadDisabledParamSet(paths []string) map[string]struct{} {
+	if len(paths) == 0 {
+		return nil
+	}
+	out := make(map[string]struct{}, len(paths))
+	for _, path := range paths {
+		normalized := normalizeDisabledPayloadPath(path)
+		if normalized == "" {
+			continue
+		}
+		out[normalized] = struct{}{}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func payloadParamDisabled(disabled map[string]struct{}, path string) bool {
+	if len(disabled) == 0 {
+		return false
+	}
+	normalized := normalizeDisabledPayloadPath(path)
+	if _, ok := disabled[normalized]; ok {
+		return true
+	}
+	_, ok := disabled["request."+normalized]
+	return ok
+}
+
+func normalizeDisabledPayloadPath(path string) string {
+	trimmed := strings.TrimSpace(path)
+	return strings.TrimPrefix(trimmed, ".")
 }
 
 func payloadRawString(value any) ([]byte, bool) {
