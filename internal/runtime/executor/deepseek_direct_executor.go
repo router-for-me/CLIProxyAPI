@@ -66,7 +66,7 @@ func (e *DeepSeekProxyExecutor) Execute(ctx context.Context, auth *cliproxyauth.
 	if err != nil {
 		return resp, err
 	}
-	body := buildOpenAINonStreamResponse(request.RequestedModel, result.Content, result.Reasoning)
+	body := buildOpenAINonStreamResponse(request.RequestedModel, result.Content, result.Reasoning, result.ToolCalls)
 	reporter.Publish(ctx, helps.ParseOpenAIUsage(body))
 	reporter.EnsurePublished(ctx)
 	var param any
@@ -179,6 +179,25 @@ func (e *DeepSeekProxyExecutor) streamDeepSeekAsOpenAI(ctx context.Context, auth
 	state := deepSeekContinueState{SessionID: sessionID}
 	current := initial
 	sentRole := false
+	sawToolCall := false
+	toolIndex := 0
+	contentParser := newDeepSeekToolCallParserWithHold(request.ToolMode)
+	reasoningParser := newDeepSeekToolCallParser()
+	emitParsed := func(seg deepSeekSegment) bool {
+		if seg.Kind == "tool_call" && seg.ToolCall != nil {
+			chunk := buildOpenAIToolCallStreamChunk(completionID, request.RequestedModel, created, *seg.ToolCall, toolIndex, !sentRole)
+			sentRole = true
+			sawToolCall = true
+			toolIndex++
+			return emit(chunk)
+		}
+		if seg.Text == "" {
+			return true
+		}
+		chunk := buildOpenAIStreamChunk(completionID, request.RequestedModel, created, seg, !sentRole)
+		sentRole = true
+		return emit(chunk)
+	}
 	for round := 0; ; round++ {
 		err := scanDeepSeekSSE(ctx, current.Body, request.Thinking, &state, func(line []byte) {
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
@@ -186,9 +205,16 @@ func (e *DeepSeekProxyExecutor) streamDeepSeekAsOpenAI(ctx context.Context, auth
 			if seg.Text == "" {
 				return true
 			}
-			chunk := buildOpenAIStreamChunk(completionID, request.RequestedModel, created, seg, !sentRole)
-			sentRole = true
-			return emit(chunk)
+			parser := contentParser
+			if seg.Kind == "reasoning" {
+				parser = reasoningParser
+			}
+			for _, parsed := range parser.PushKind(seg.Text, seg.Kind) {
+				if !emitParsed(parsed) {
+					return false
+				}
+			}
+			return true
 		})
 		_ = current.Body.Close()
 		if err != nil {
@@ -204,7 +230,21 @@ func (e *DeepSeekProxyExecutor) streamDeepSeekAsOpenAI(ctx context.Context, auth
 		current = next
 		state.prepareNext()
 	}
-	if !emit(buildOpenAIFinishChunk(completionID, request.RequestedModel, created)) {
+	for _, parsed := range reasoningParser.Finish() {
+		if !emitParsed(parsed) {
+			return ctx.Err()
+		}
+	}
+	for _, parsed := range contentParser.Finish() {
+		if !emitParsed(parsed) {
+			return ctx.Err()
+		}
+	}
+	finishReason := "stop"
+	if sawToolCall {
+		finishReason = "tool_calls"
+	}
+	if !emit(buildOpenAIFinishChunk(completionID, request.RequestedModel, created, finishReason)) {
 		return ctx.Err()
 	}
 	if !emit([]byte("data: [DONE]\n\n")) {
@@ -213,17 +253,22 @@ func (e *DeepSeekProxyExecutor) streamDeepSeekAsOpenAI(ctx context.Context, auth
 	return nil
 }
 
-func buildOpenAINonStreamResponse(model, content, reasoning string) []byte {
+func buildOpenAINonStreamResponse(model, content, reasoning string, toolCalls []deepSeekToolCall) []byte {
 	message := map[string]any{"role": "assistant", "content": content}
 	if reasoning != "" {
 		message["reasoning_content"] = reasoning
+	}
+	finishReason := "stop"
+	if len(toolCalls) > 0 {
+		message["tool_calls"] = openAIToolCallsFromDeepSeek(toolCalls)
+		finishReason = "tool_calls"
 	}
 	body := map[string]any{
 		"id":      "chatcmpl-" + strconv.FormatInt(time.Now().UnixNano(), 36),
 		"object":  "chat.completion",
 		"created": time.Now().Unix(),
 		"model":   model,
-		"choices": []any{map[string]any{"index": 0, "message": message, "finish_reason": "stop"}},
+		"choices": []any{map[string]any{"index": 0, "message": message, "finish_reason": finishReason}},
 		"usage":   map[string]any{"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
 	}
 	b, _ := json.Marshal(body)
@@ -251,17 +296,61 @@ func buildOpenAIStreamChunk(id, model string, created int64, segment deepSeekSeg
 	return append(append([]byte("data: "), b...), []byte("\n\n")...)
 }
 
-func buildOpenAIFinishChunk(id, model string, created int64) []byte {
+func buildOpenAIToolCallStreamChunk(id, model string, created int64, toolCall deepSeekToolCall, index int, includeRole bool) []byte {
+	delta := map[string]any{
+		"tool_calls": []any{map[string]any{
+			"index": index,
+			"id":    toolCall.ID,
+			"type":  "function",
+			"function": map[string]any{
+				"name":      toolCall.Name,
+				"arguments": toolCall.Arguments,
+			},
+		}},
+	}
+	if includeRole {
+		delta["role"] = "assistant"
+	}
 	body := map[string]any{
 		"id":      id,
 		"object":  "chat.completion.chunk",
 		"created": created,
 		"model":   model,
-		"choices": []any{map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": "stop"}},
+		"choices": []any{map[string]any{"index": 0, "delta": delta, "finish_reason": nil}},
+	}
+	b, _ := json.Marshal(body)
+	return append(append([]byte("data: "), b...), []byte("\n\n")...)
+}
+
+func buildOpenAIFinishChunk(id, model string, created int64, finishReason string) []byte {
+	if finishReason == "" {
+		finishReason = "stop"
+	}
+	body := map[string]any{
+		"id":      id,
+		"object":  "chat.completion.chunk",
+		"created": created,
+		"model":   model,
+		"choices": []any{map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": finishReason}},
 		"usage":   map[string]any{"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
 	}
 	b, _ := json.Marshal(body)
 	return append(append([]byte("data: "), b...), []byte("\n\n")...)
+}
+
+func openAIToolCallsFromDeepSeek(toolCalls []deepSeekToolCall) []any {
+	out := make([]any, 0, len(toolCalls))
+	for _, toolCall := range toolCalls {
+		out = append(out, map[string]any{
+			"id":   toolCall.ID,
+			"type": "function",
+			"function": map[string]any{
+				"name":      toolCall.Name,
+				"arguments": toolCall.Arguments,
+			},
+		})
+	}
+	return out
 }
 
 func bytesHasDataPrefix(line []byte) bool {
