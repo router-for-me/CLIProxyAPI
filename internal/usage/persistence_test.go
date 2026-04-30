@@ -1,8 +1,10 @@
 package usage
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -93,11 +95,61 @@ func TestSnapshotStoreLoadSaveAndMalformedFile(t *testing.T) {
 	if err := os.WriteFile(path, []byte("{malformed"), 0o600); err != nil {
 		t.Fatalf("write malformed file: %v", err)
 	}
-	malformed, err := store.Load()
-	if err != nil {
-		t.Fatalf("Load() malformed file error = %v, want nil", err)
+	if _, err := store.Load(); err == nil {
+		t.Fatalf("Load() malformed file error = nil, want error")
+	} else if !errors.Is(err, ErrMalformedSnapshot) {
+		t.Fatalf("Load() malformed file error = %v, want ErrMalformedSnapshot", err)
 	}
-	if malformed.TotalRequests != 0 || len(malformed.APIs) != 0 {
-		t.Fatalf("malformed snapshot = %+v, want empty", malformed)
+
+	afterMalformed, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read malformed file after Load: %v", err)
+	}
+	if string(afterMalformed) != "{malformed" {
+		t.Fatalf("Load() changed malformed file to %q", string(afterMalformed))
+	}
+}
+
+type countingSnapshotWriter struct {
+	mu       sync.Mutex
+	count    int
+	snapshot StatisticsSnapshot
+}
+
+func (w *countingSnapshotWriter) Save(snapshot StatisticsSnapshot) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.count++
+	w.snapshot = snapshot
+	return nil
+}
+
+func (w *countingSnapshotWriter) state() (int, StatisticsSnapshot) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.count, w.snapshot
+}
+
+func TestSnapshotSaverCoalescesWrites(t *testing.T) {
+	writer := &countingSnapshotWriter{}
+	saver := NewSnapshotSaver(writer, 10*time.Millisecond)
+	t.Cleanup(func() {
+		if err := saver.Close(); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+	})
+
+	saver.SaveSoon(StatisticsSnapshot{TotalRequests: 1})
+	saver.SaveSoon(StatisticsSnapshot{TotalRequests: 2})
+	saver.SaveSoon(StatisticsSnapshot{TotalRequests: 3})
+
+	time.Sleep(50 * time.Millisecond)
+
+	count, snapshot := writer.state()
+	if count != 1 {
+		t.Fatalf("SaveSoon() wrote %d snapshots, want 1", count)
+	}
+	if snapshot.TotalRequests != 3 {
+		t.Fatalf("SaveSoon() saved total requests %d, want latest snapshot with 3", snapshot.TotalRequests)
 	}
 }
