@@ -20,153 +20,158 @@ func ApplyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string
 	if cfg == nil || len(payload) == 0 {
 		return payload
 	}
-	rules := cfg.Payload
-	if len(rules.Default) == 0 && len(rules.DefaultRaw) == 0 && len(rules.Override) == 0 && len(rules.OverrideRaw) == 0 && len(rules.Filter) == 0 {
-		return payload
-	}
-	model = strings.TrimSpace(model)
-	requestedModel = strings.TrimSpace(requestedModel)
-	if model == "" && requestedModel == "" {
-		return payload
-	}
-	candidates := payloadModelCandidates(model, requestedModel)
 	out := payload
-	source := original
-	if len(source) == 0 {
-		source = payload
+
+	rules := cfg.Payload
+	hasPayloadRules := len(rules.Default) != 0 || len(rules.DefaultRaw) != 0 || len(rules.Override) != 0 || len(rules.OverrideRaw) != 0 || len(rules.Filter) != 0
+	if hasPayloadRules {
+		model = strings.TrimSpace(model)
+		requestedModel = strings.TrimSpace(requestedModel)
+		if model != "" || requestedModel != "" {
+			candidates := payloadModelCandidates(model, requestedModel)
+			source := original
+			if len(source) == 0 {
+				source = payload
+			}
+			appliedDefaults := make(map[string]struct{})
+			// Apply default rules: first write wins per field across all matching rules.
+			for i := range rules.Default {
+				rule := &rules.Default[i]
+				if rule.Disabled || !payloadModelRulesMatch(rule.Models, protocol, candidates) {
+					continue
+				}
+				disabledParams := payloadDisabledParamSet(rule.DisabledParams)
+				for path, value := range rule.Params {
+					if payloadParamDisabled(disabledParams, root, path) {
+						continue
+					}
+					fullPath := buildPayloadPath(root, path)
+					if fullPath == "" {
+						continue
+					}
+					if gjson.GetBytes(source, fullPath).Exists() {
+						continue
+					}
+					if _, ok := appliedDefaults[fullPath]; ok {
+						continue
+					}
+					updated, errSet := sjson.SetBytes(out, fullPath, value)
+					if errSet != nil {
+						continue
+					}
+					out = updated
+					appliedDefaults[fullPath] = struct{}{}
+				}
+			}
+			// Apply default raw rules: first write wins per field across all matching rules.
+			for i := range rules.DefaultRaw {
+				rule := &rules.DefaultRaw[i]
+				if rule.Disabled || !payloadModelRulesMatch(rule.Models, protocol, candidates) {
+					continue
+				}
+				disabledParams := payloadDisabledParamSet(rule.DisabledParams)
+				for path, value := range rule.Params {
+					if payloadParamDisabled(disabledParams, root, path) {
+						continue
+					}
+					fullPath := buildPayloadPath(root, path)
+					if fullPath == "" {
+						continue
+					}
+					if gjson.GetBytes(source, fullPath).Exists() {
+						continue
+					}
+					if _, ok := appliedDefaults[fullPath]; ok {
+						continue
+					}
+					rawValue, ok := payloadRawValue(value)
+					if !ok {
+						continue
+					}
+					updated, errSet := sjson.SetRawBytes(out, fullPath, rawValue)
+					if errSet != nil {
+						continue
+					}
+					out = updated
+					appliedDefaults[fullPath] = struct{}{}
+				}
+			}
+			// Apply override rules: last write wins per field across all matching rules.
+			for i := range rules.Override {
+				rule := &rules.Override[i]
+				if rule.Disabled || !payloadModelRulesMatch(rule.Models, protocol, candidates) {
+					continue
+				}
+				disabledParams := payloadDisabledParamSet(rule.DisabledParams)
+				for path, value := range rule.Params {
+					if payloadParamDisabled(disabledParams, root, path) {
+						continue
+					}
+					fullPath := buildPayloadPath(root, path)
+					if fullPath == "" {
+						continue
+					}
+					updated, errSet := sjson.SetBytes(out, fullPath, value)
+					if errSet != nil {
+						continue
+					}
+					out = updated
+				}
+			}
+			// Apply override raw rules: last write wins per field across all matching rules.
+			for i := range rules.OverrideRaw {
+				rule := &rules.OverrideRaw[i]
+				if rule.Disabled || !payloadModelRulesMatch(rule.Models, protocol, candidates) {
+					continue
+				}
+				disabledParams := payloadDisabledParamSet(rule.DisabledParams)
+				for path, value := range rule.Params {
+					if payloadParamDisabled(disabledParams, root, path) {
+						continue
+					}
+					fullPath := buildPayloadPath(root, path)
+					if fullPath == "" {
+						continue
+					}
+					rawValue, ok := payloadRawValue(value)
+					if !ok {
+						continue
+					}
+					updated, errSet := sjson.SetRawBytes(out, fullPath, rawValue)
+					if errSet != nil {
+						continue
+					}
+					out = updated
+				}
+			}
+			// Apply filter rules: remove matching paths from payload.
+			for i := range rules.Filter {
+				rule := &rules.Filter[i]
+				if rule.Disabled || !payloadModelRulesMatch(rule.Models, protocol, candidates) {
+					continue
+				}
+				disabledParams := payloadDisabledParamSet(rule.DisabledParams)
+				for _, path := range rule.Params {
+					if payloadParamDisabled(disabledParams, root, path) {
+						continue
+					}
+					fullPath := buildPayloadPath(root, path)
+					if fullPath == "" {
+						continue
+					}
+					updated, errDel := sjson.DeleteBytes(out, fullPath)
+					if errDel != nil {
+						continue
+					}
+					out = updated
+				}
+			}
+		}
 	}
-	appliedDefaults := make(map[string]struct{})
-	// Apply default rules: first write wins per field across all matching rules.
-	for i := range rules.Default {
-		rule := &rules.Default[i]
-		if rule.Disabled || !payloadModelRulesMatch(rule.Models, protocol, candidates) {
-			continue
-		}
-		disabledParams := payloadDisabledParamSet(rule.DisabledParams)
-		for path, value := range rule.Params {
-			if payloadParamDisabled(disabledParams, root, path) {
-				continue
-			}
-			fullPath := buildPayloadPath(root, path)
-			if fullPath == "" {
-				continue
-			}
-			if gjson.GetBytes(source, fullPath).Exists() {
-				continue
-			}
-			if _, ok := appliedDefaults[fullPath]; ok {
-				continue
-			}
-			updated, errSet := sjson.SetBytes(out, fullPath, value)
-			if errSet != nil {
-				continue
-			}
-			out = updated
-			appliedDefaults[fullPath] = struct{}{}
-		}
-	}
-	// Apply default raw rules: first write wins per field across all matching rules.
-	for i := range rules.DefaultRaw {
-		rule := &rules.DefaultRaw[i]
-		if rule.Disabled || !payloadModelRulesMatch(rule.Models, protocol, candidates) {
-			continue
-		}
-		disabledParams := payloadDisabledParamSet(rule.DisabledParams)
-		for path, value := range rule.Params {
-			if payloadParamDisabled(disabledParams, root, path) {
-				continue
-			}
-			fullPath := buildPayloadPath(root, path)
-			if fullPath == "" {
-				continue
-			}
-			if gjson.GetBytes(source, fullPath).Exists() {
-				continue
-			}
-			if _, ok := appliedDefaults[fullPath]; ok {
-				continue
-			}
-			rawValue, ok := payloadRawValue(value)
-			if !ok {
-				continue
-			}
-			updated, errSet := sjson.SetRawBytes(out, fullPath, rawValue)
-			if errSet != nil {
-				continue
-			}
-			out = updated
-			appliedDefaults[fullPath] = struct{}{}
-		}
-	}
-	// Apply override rules: last write wins per field across all matching rules.
-	for i := range rules.Override {
-		rule := &rules.Override[i]
-		if rule.Disabled || !payloadModelRulesMatch(rule.Models, protocol, candidates) {
-			continue
-		}
-		disabledParams := payloadDisabledParamSet(rule.DisabledParams)
-		for path, value := range rule.Params {
-			if payloadParamDisabled(disabledParams, root, path) {
-				continue
-			}
-			fullPath := buildPayloadPath(root, path)
-			if fullPath == "" {
-				continue
-			}
-			updated, errSet := sjson.SetBytes(out, fullPath, value)
-			if errSet != nil {
-				continue
-			}
-			out = updated
-		}
-	}
-	// Apply override raw rules: last write wins per field across all matching rules.
-	for i := range rules.OverrideRaw {
-		rule := &rules.OverrideRaw[i]
-		if rule.Disabled || !payloadModelRulesMatch(rule.Models, protocol, candidates) {
-			continue
-		}
-		disabledParams := payloadDisabledParamSet(rule.DisabledParams)
-		for path, value := range rule.Params {
-			if payloadParamDisabled(disabledParams, root, path) {
-				continue
-			}
-			fullPath := buildPayloadPath(root, path)
-			if fullPath == "" {
-				continue
-			}
-			rawValue, ok := payloadRawValue(value)
-			if !ok {
-				continue
-			}
-			updated, errSet := sjson.SetRawBytes(out, fullPath, rawValue)
-			if errSet != nil {
-				continue
-			}
-			out = updated
-		}
-	}
-	// Apply filter rules: remove matching paths from payload.
-	for i := range rules.Filter {
-		rule := &rules.Filter[i]
-		if rule.Disabled || !payloadModelRulesMatch(rule.Models, protocol, candidates) {
-			continue
-		}
-		disabledParams := payloadDisabledParamSet(rule.DisabledParams)
-		for _, path := range rule.Params {
-			if payloadParamDisabled(disabledParams, root, path) {
-				continue
-			}
-			fullPath := buildPayloadPath(root, path)
-			if fullPath == "" {
-				continue
-			}
-			updated, errDel := sjson.DeleteBytes(out, fullPath)
-			if errDel != nil {
-				continue
-			}
-			out = updated
-		}
+
+	if cfg.DisableImageGeneration {
+		out = removeToolTypeFromPayloadWithRoot(out, root, "image_generation")
+		out = removeToolChoiceFromPayloadWithRoot(out, root, "image_generation")
 	}
 	return out
 }
@@ -282,6 +287,95 @@ func buildPayloadPath(root, path string) string {
 		p = p[1:]
 	}
 	return r + "." + p
+}
+
+func removeToolTypeFromPayloadWithRoot(payload []byte, root string, toolType string) []byte {
+	if len(payload) == 0 {
+		return payload
+	}
+	toolType = strings.TrimSpace(toolType)
+	if toolType == "" {
+		return payload
+	}
+	toolsPath := buildPayloadPath(root, "tools")
+	return removeToolTypeFromToolsArray(payload, toolsPath, toolType)
+}
+
+func removeToolChoiceFromPayloadWithRoot(payload []byte, root string, toolType string) []byte {
+	if len(payload) == 0 {
+		return payload
+	}
+	toolType = strings.TrimSpace(toolType)
+	if toolType == "" {
+		return payload
+	}
+	toolChoicePath := buildPayloadPath(root, "tool_choice")
+	return removeToolChoiceFromPayload(payload, toolChoicePath, toolType)
+}
+
+func removeToolChoiceFromPayload(payload []byte, toolChoicePath string, toolType string) []byte {
+	choice := gjson.GetBytes(payload, toolChoicePath)
+	if !choice.Exists() {
+		return payload
+	}
+	if choice.Type == gjson.String {
+		if strings.EqualFold(strings.TrimSpace(choice.String()), toolType) {
+			updated, errDel := sjson.DeleteBytes(payload, toolChoicePath)
+			if errDel == nil {
+				return updated
+			}
+		}
+		return payload
+	}
+	if choice.Type != gjson.JSON {
+		return payload
+	}
+	choiceType := strings.TrimSpace(choice.Get("type").String())
+	if strings.EqualFold(choiceType, toolType) {
+		updated, errDel := sjson.DeleteBytes(payload, toolChoicePath)
+		if errDel == nil {
+			return updated
+		}
+		return payload
+	}
+	if strings.EqualFold(choiceType, "tool") {
+		name := strings.TrimSpace(choice.Get("name").String())
+		if strings.EqualFold(name, toolType) {
+			updated, errDel := sjson.DeleteBytes(payload, toolChoicePath)
+			if errDel == nil {
+				return updated
+			}
+		}
+	}
+	return payload
+}
+
+func removeToolTypeFromToolsArray(payload []byte, toolsPath string, toolType string) []byte {
+	tools := gjson.GetBytes(payload, toolsPath)
+	if !tools.Exists() || !tools.IsArray() {
+		return payload
+	}
+	removed := false
+	filtered := []byte(`[]`)
+	for _, tool := range tools.Array() {
+		if tool.Get("type").String() == toolType {
+			removed = true
+			continue
+		}
+		updated, errSet := sjson.SetRawBytes(filtered, "-1", []byte(tool.Raw))
+		if errSet != nil {
+			continue
+		}
+		filtered = updated
+	}
+	if !removed {
+		return payload
+	}
+	updated, errSet := sjson.SetRawBytes(payload, toolsPath, filtered)
+	if errSet != nil {
+		return payload
+	}
+	return updated
 }
 
 func payloadRawValue(value any) ([]byte, bool) {
