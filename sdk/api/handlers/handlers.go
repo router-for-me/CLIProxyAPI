@@ -16,6 +16,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -56,6 +57,18 @@ type pinnedAuthContextKey struct{}
 type selectedAuthCallbackContextKey struct{}
 type executionSessionContextKey struct{}
 type disallowFreeAuthContextKey struct{}
+type requestPathContextKey struct{}
+
+// requestPathFromContext extracts the inbound HTTP request path stashed by
+// GetContextWithCancel. Used by Execute*WithAuthManager to drive endpoint-
+// scoped pre-translation rules without altering the public method signatures.
+func requestPathFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	v, _ := ctx.Value(requestPathContextKey{}).(string)
+	return v
+}
 
 // WithPinnedAuthID returns a child context that requests execution on a specific auth ID.
 func WithPinnedAuthID(ctx context.Context, authID string) context.Context {
@@ -384,6 +397,9 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 	}
 	newCtx = context.WithValue(newCtx, "gin", c)
 	newCtx = context.WithValue(newCtx, "handler", handler)
+	if c != nil && c.Request != nil && c.Request.URL != nil {
+		newCtx = context.WithValue(newCtx, requestPathContextKey{}, c.Request.URL.Path)
+	}
 	return newCtx, func(params ...interface{}) {
 		if h.Cfg.RequestLog && len(params) == 1 {
 			if existing, exists := c.Get("API_RESPONSE"); exists {
@@ -508,7 +524,14 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 	}
 	reqMeta := requestExecutionMetadata(ctx)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
+	// Apply pre-translation prompt rules (inject/strip on system + last user
+	// natural-language message) before any executor sees the request body.
+	// OriginalRequest stays the un-mutated rawJSON so payload-rule semantics
+	// (default-when-missing checks) compare against what the client sent.
 	payload := rawJSON
+	if len(payload) > 0 {
+		payload = helps.ApplyPromptRules(handlerType, normalizedModel, payload, requestPathFromContext(ctx), alt)
+	}
 	if len(payload) == 0 {
 		payload = nil
 	}
@@ -556,7 +579,14 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 	}
 	reqMeta := requestExecutionMetadata(ctx)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
+	// Apply pre-translation prompt rules (inject/strip on system + last user
+	// natural-language message) before any executor sees the request body.
+	// OriginalRequest stays the un-mutated rawJSON so payload-rule semantics
+	// (default-when-missing checks) compare against what the client sent.
 	payload := rawJSON
+	if len(payload) > 0 {
+		payload = helps.ApplyPromptRules(handlerType, normalizedModel, payload, requestPathFromContext(ctx), alt)
+	}
 	if len(payload) == 0 {
 		payload = nil
 	}
@@ -608,7 +638,14 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 	}
 	reqMeta := requestExecutionMetadata(ctx)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
+	// Apply pre-translation prompt rules (inject/strip on system + last user
+	// natural-language message) before any executor sees the request body.
+	// OriginalRequest stays the un-mutated rawJSON so payload-rule semantics
+	// (default-when-missing checks) compare against what the client sent.
 	payload := rawJSON
+	if len(payload) > 0 {
+		payload = helps.ApplyPromptRules(handlerType, normalizedModel, payload, requestPathFromContext(ctx), alt)
+	}
 	if len(payload) == 0 {
 		payload = nil
 	}

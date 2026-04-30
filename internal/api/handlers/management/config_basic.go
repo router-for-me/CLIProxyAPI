@@ -12,6 +12,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	log "github.com/sirupsen/logrus"
@@ -119,6 +120,13 @@ func (h *Handler) PutConfigYAML(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_yaml", "message": err.Error()})
 		return
 	}
+	// Strict prompt-rules validation BEFORE the temp-file LoadConfigOptional dance.
+	// SanitizePromptRules (called inside LoadConfigOptional) silently drops invalid
+	// rules — we want the API caller to receive a 400 with a reason instead.
+	if err = cfg.ValidatePromptRules(); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_prompt_rules", "message": err.Error()})
+		return
+	}
 	// Validate config using LoadConfigOptional with optional=false to enforce parsing
 	tmpDir := filepath.Dir(h.configFilePath)
 	tmpFile, err := os.CreateTemp(tmpDir, "config-validate-*.yaml")
@@ -159,6 +167,11 @@ func (h *Handler) PutConfigYAML(c *gin.Context) {
 		return
 	}
 	h.cfg = newCfg
+	// Defensive: explicitly republish the prompt-rules snapshot from the
+	// committed config so any premature update from the temp-file validation
+	// load is overridden. LoadConfig's Sanitize already calls the hook, but
+	// belt-and-suspenders here protects against future refactors.
+	helps.UpdatePromptRulesSnapshot(h.cfg.PromptRules)
 	c.JSON(http.StatusOK, gin.H{"ok": true, "changed": []string{"config"}})
 }
 
