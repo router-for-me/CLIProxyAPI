@@ -261,6 +261,41 @@ func TestNewServer_UsageStatisticsModePersistentLoadsSnapshot(t *testing.T) {
 	}
 }
 
+func TestNewServer_UsageStatisticsModePersistentKeepsMalformedSnapshot(t *testing.T) {
+	prevEnabled := usage.StatisticsEnabled()
+	usage.SetStatisticsEnabled(true)
+	t.Cleanup(func() {
+		usage.SetStatisticsEnabled(prevEnabled)
+	})
+
+	stats := usage.GetRequestStatistics()
+	stats.SetOnChange(nil)
+	stats.ResetAll()
+	t.Cleanup(func() {
+		stats.SetOnChange(nil)
+		stats.ResetAll()
+	})
+
+	dir := t.TempDir()
+	snapshotPath := filepath.Join(dir, "usage-statistics.json")
+	malformed := []byte("{malformed")
+	if err := os.WriteFile(snapshotPath, malformed, 0o600); err != nil {
+		t.Fatalf("write malformed snapshot: %v", err)
+	}
+
+	_ = newConfiguredTestServer(t, func(cfg *proxyconfig.Config) {
+		cfg.UsageStatistics.Mode = "persistent"
+	}, WithUsageStatisticsSnapshotPath(snapshotPath))
+
+	got, err := os.ReadFile(snapshotPath)
+	if err != nil {
+		t.Fatalf("read malformed snapshot after server start: %v", err)
+	}
+	if string(got) != string(malformed) {
+		t.Fatalf("server start changed malformed snapshot to %q", string(got))
+	}
+}
+
 func TestNewServer_UsageStatisticsModePersistentSavesMergedInMemorySnapshotImmediately(t *testing.T) {
 	prevEnabled := usage.StatisticsEnabled()
 	usage.SetStatisticsEnabled(true)

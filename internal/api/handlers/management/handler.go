@@ -44,6 +44,7 @@ type Handler struct {
 	usageStats          *usage.RequestStatistics
 	usageMode           string
 	snapshotStore       *usage.SnapshotStore
+	flushUsageSnapshot  func() error
 	onConfigPersisted   func(*config.Config)
 	tokenStore          coreauth.Store
 	localPassword       string
@@ -136,6 +137,9 @@ func (h *Handler) SetUsageStatisticsMode(mode string) { h.usageMode = strings.Tr
 
 // SetUsageSnapshotStore configures the persistence store used for usage mutations.
 func (h *Handler) SetUsageSnapshotStore(store *usage.SnapshotStore) { h.snapshotStore = store }
+
+// SetUsageSnapshotFlush configures the flush hook used after explicit usage mutations.
+func (h *Handler) SetUsageSnapshotFlush(callback func() error) { h.flushUsageSnapshot = callback }
 
 // SetConfigPersistedHook registers a callback fired after config persistence succeeds.
 func (h *Handler) SetConfigPersistedHook(callback func(*config.Config)) {

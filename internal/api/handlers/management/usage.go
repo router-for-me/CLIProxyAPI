@@ -7,6 +7,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
+	log "github.com/sirupsen/logrus"
 )
 
 type usageExportPayload struct {
@@ -75,9 +76,10 @@ func (h *Handler) ImportUsageStatistics(c *gin.Context) {
 
 	result := h.usageStats.MergeSnapshot(payload.Usage)
 	snapshot := h.usageStats.Snapshot()
-	if h.usageMode == "persistent" && h.snapshotStore != nil {
-		if err := h.snapshotStore.Save(snapshot); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+	if h.usageMode == "persistent" {
+		if err := h.persistUsageSnapshot(snapshot); err != nil {
+			log.WithError(err).Warn("failed to persist imported usage statistics")
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to persist usage statistics"})
 			return
 		}
 	}
@@ -119,12 +121,26 @@ func (h *Handler) ResetUsageStatistics(c *gin.Context) {
 	}
 
 	snapshot := h.usageStats.Snapshot()
-	if h.usageMode == "persistent" && h.snapshotStore != nil {
-		if err := h.snapshotStore.Save(snapshot); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+	if h.usageMode == "persistent" {
+		if err := h.persistUsageSnapshot(snapshot); err != nil {
+			log.WithError(err).Warn("failed to persist reset usage statistics")
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to persist usage statistics"})
 			return
 		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{"removed": removed, "usage": snapshot})
+}
+
+func (h *Handler) persistUsageSnapshot(snapshot usage.StatisticsSnapshot) error {
+	if h == nil {
+		return nil
+	}
+	if h.flushUsageSnapshot != nil {
+		return h.flushUsageSnapshot()
+	}
+	if h.snapshotStore == nil {
+		return nil
+	}
+	return h.snapshotStore.Save(snapshot)
 }

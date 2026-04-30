@@ -178,6 +178,7 @@ type Server struct {
 	mgmt *managementHandlers.Handler
 
 	usageSnapshotStore *usage.SnapshotStore
+	usageSnapshotSaver *usage.SnapshotSaver
 
 	// ampModule is the Amp routing module for model mapping hot-reload
 	ampModule *ampmodule.AmpModule
@@ -948,6 +949,12 @@ func (s *Server) Stop(ctx context.Context) error {
 		default:
 		}
 	}
+	if s.usageSnapshotSaver != nil {
+		if err := s.usageSnapshotSaver.Close(); err != nil {
+			log.WithError(err).Warn("failed to flush usage statistics snapshot")
+		}
+		s.usageSnapshotSaver = nil
+	}
 
 	if s.muxHTTPListener != nil {
 		_ = s.muxHTTPListener.Close()
@@ -1156,6 +1163,12 @@ func (s *Server) configureUsageStatistics(oldCfg, cfg *config.Config) {
 	mode := cfg.EffectiveUsageStatisticsMode()
 	stats := usage.GetRequestStatistics()
 	stats.SetOnChange(nil)
+	if s.usageSnapshotSaver != nil {
+		if err := s.usageSnapshotSaver.Close(); err != nil {
+			log.WithError(err).Warn("failed to flush usage statistics snapshot")
+		}
+		s.usageSnapshotSaver = nil
+	}
 	usage.SetStatisticsEnabled(mode != "off")
 
 	oldMode := ""
@@ -1176,10 +1189,10 @@ func (s *Server) configureUsageStatistics(oldCfg, cfg *config.Config) {
 				}
 			}
 		}
+		saver := usage.NewSnapshotSaver(store, time.Second)
+		s.usageSnapshotSaver = saver
 		stats.SetOnChange(func(snapshot usage.StatisticsSnapshot) {
-			if err := store.Save(snapshot); err != nil {
-				log.WithError(err).Warn("failed to save usage statistics snapshot")
-			}
+			saver.SaveSoon(snapshot)
 		})
 	}
 
@@ -1187,6 +1200,11 @@ func (s *Server) configureUsageStatistics(oldCfg, cfg *config.Config) {
 		s.mgmt.SetUsageStatistics(stats)
 		s.mgmt.SetUsageStatisticsMode(mode)
 		s.mgmt.SetUsageSnapshotStore(store)
+		if s.usageSnapshotSaver != nil {
+			s.mgmt.SetUsageSnapshotFlush(s.usageSnapshotSaver.Flush)
+		} else {
+			s.mgmt.SetUsageSnapshotFlush(nil)
+		}
 	}
 }
 
