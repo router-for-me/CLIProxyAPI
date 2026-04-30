@@ -20,6 +20,7 @@ import (
 	claudeauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/claude"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/temporal"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
@@ -1554,6 +1555,24 @@ func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, exp
 	billingText := generateBillingHeader(payload, experimentalCCHSigning, version, messageText, entrypoint, workload)
 	billingBlock := buildTextBlock(billingText, nil)
 
+	// Preserve any temporal_context text block injected by the conductor's
+	// temporal anti-drift hook. The Claude Code-shaped system array below
+	// would otherwise overwrite it, and OAuth sanitization would strip it
+	// from the forwarded user-system parts.
+	var preservedTemporal string
+	if system.IsArray() {
+		system.ForEach(func(_, part gjson.Result) bool {
+			if part.Get("type").String() == "text" {
+				txt := part.Get("text").String()
+				if strings.Contains(txt, "<temporal_context>") && temporal.IsValidTemporalBlock(txt) {
+					preservedTemporal = txt
+					return false
+				}
+			}
+			return true
+		})
+	}
+
 	// Build system blocks matching real Claude Code structure.
 	// Important: Claude Code's internal cacheScope='org' does NOT serialize to
 	// scope='org' in the API request. Only scope='global' is sent explicitly.
@@ -1568,7 +1587,11 @@ func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, exp
 	}, "\n\n")
 	staticBlock := buildTextBlock(staticPrompt, nil)
 
-	systemResult := "[" + billingBlock + "," + agentBlock + "," + staticBlock + "]"
+	systemResult := "[" + billingBlock + "," + agentBlock + "," + staticBlock
+	if preservedTemporal != "" {
+		systemResult += "," + buildTextBlock(preservedTemporal, nil)
+	}
+	systemResult += "]"
 	payload, _ = sjson.SetRawBytes(payload, "system", []byte(systemResult))
 
 	// Collect user system instructions and prepend to first user message
@@ -1578,7 +1601,9 @@ func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, exp
 			system.ForEach(func(_, part gjson.Result) bool {
 				if part.Get("type").String() == "text" {
 					txt := strings.TrimSpace(part.Get("text").String())
-					if txt != "" {
+					// Skip temporal_context: already preserved in the rebuilt
+					// system array above, avoid duplicating into user message.
+					if txt != "" && !strings.Contains(txt, "<temporal_context>") {
 						userSystemParts = append(userSystemParts, txt)
 					}
 				}

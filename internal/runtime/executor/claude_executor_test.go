@@ -1816,6 +1816,34 @@ func TestCheckSystemInstructionsWithMode_ArraySystemStillWorks(t *testing.T) {
 	}
 }
 
+func TestCheckSystemInstructionsWithSigningMode_PreservesTemporalContext(t *testing.T) {
+	temporalText := `<temporal_context><temporal day="Friday" date="2026-04-17"/></temporal_context>`
+	payload := []byte(`{"system":[{"type":"text","text":"` + strings.ReplaceAll(temporalText, `"`, `\"`) + `"},{"type":"text","text":"You are helpful."}],"messages":[{"role":"user","content":"hi"}]}`)
+
+	out := checkSystemInstructionsWithSigningMode(payload, false, false, true, "2.1.63", "", "")
+
+	system := gjson.GetBytes(out, "system")
+	if !system.IsArray() {
+		t.Fatalf("system should be array, got %s", system.Type)
+	}
+	blocks := system.Array()
+	var foundTemporal bool
+	for _, b := range blocks {
+		if strings.Contains(b.Get("text").String(), "<temporal_context>") {
+			foundTemporal = true
+			break
+		}
+	}
+	if !foundTemporal {
+		t.Fatalf("temporal_context block missing from rebuilt system: %s", string(out))
+	}
+
+	firstUserContent := gjson.GetBytes(out, "messages.0.content").String()
+	if strings.Contains(firstUserContent, "<temporal_context>") {
+		t.Fatalf("temporal duplicated into first user message: %s", firstUserContent)
+	}
+}
+
 // Test case 5: Special characters in string system prompt survive forwarding
 func TestCheckSystemInstructionsWithMode_StringWithSpecialChars(t *testing.T) {
 	payload := []byte(`{"system":"Use <xml> tags & \"quotes\" in output.","messages":[{"role":"user","content":"hi"}]}`)
