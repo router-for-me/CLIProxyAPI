@@ -23,6 +23,15 @@ func ApplyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string
 	}
 	out := payload
 
+	// Apply disable-image-generation filtering before payload rules so config payload
+	// overrides can explicitly re-enable image_generation when desired.
+	if cfg.DisableImageGeneration != config.DisableImageGenerationOff {
+		if cfg.DisableImageGeneration != config.DisableImageGenerationChat || !isImagesEndpointRequestPath(requestPath) {
+			out = removeToolTypeFromPayloadWithRoot(out, root, "image_generation")
+			out = removeToolChoiceFromPayloadWithRoot(out, root, "image_generation")
+		}
+	}
+
 	rules := cfg.Payload
 	hasPayloadRules := len(rules.Default) != 0 || len(rules.DefaultRaw) != 0 || len(rules.Override) != 0 || len(rules.OverrideRaw) != 0 || len(rules.Filter) != 0
 	if hasPayloadRules {
@@ -148,14 +157,6 @@ func ApplyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string
 				}
 			}
 		}
-	}
-
-	if cfg.DisableImageGeneration != config.DisableImageGenerationOff {
-		if cfg.DisableImageGeneration == config.DisableImageGenerationChat && isImagesEndpointRequestPath(requestPath) {
-			return out
-		}
-		out = removeToolTypeFromPayloadWithRoot(out, root, "image_generation")
-		out = removeToolChoiceFromPayloadWithRoot(out, root, "image_generation")
 	}
 	return out
 }
