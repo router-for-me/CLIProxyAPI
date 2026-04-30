@@ -267,6 +267,34 @@ type AmpModelMapping struct {
 	// expression for matching model names. When true, this mapping is evaluated
 	// after exact matches and in the order provided. Defaults to false (exact match).
 	Regex bool `yaml:"regex,omitempty" json:"regex,omitempty"`
+
+	// When optionally constrains this mapping to requests matching specific
+	// feature/tool fingerprints. When omitted, the mapping applies unconditionally
+	// (subject to From matching). Multiple entries with the same From may be
+	// declared with different When clauses; they are evaluated in declaration
+	// order and the first match wins. A trailing entry with no When acts as the
+	// fallback for that From value.
+	When *AmpMappingCondition `yaml:"when,omitempty" json:"when,omitempty"`
+}
+
+// AmpMappingCondition expresses a per-request fingerprint condition used to
+// scope an AmpModelMapping to a specific Amp feature/tool invocation. All
+// non-empty fields must match for the condition to be satisfied (logical AND).
+type AmpMappingCondition struct {
+	// Feature is a high-level semantic alias for a known Amp feature.
+	// Recognized values: "handoff", "titling", "painter", "search",
+	// "look_at" (alias of "search"), "oracle". Case-insensitive.
+	Feature string `yaml:"feature,omitempty" json:"feature,omitempty"`
+
+	// ToolChoice matches when the request forces a specific tool by name via
+	// the Anthropic/OpenAI/Gemini tool-choice mechanism (e.g.
+	// "create_handoff_context" for Amp handoff). Case-insensitive.
+	ToolChoice string `yaml:"tool_choice,omitempty" json:"tool_choice,omitempty"`
+
+	// UserSuffix matches when the last user message ends with the given
+	// substring (case-insensitive, after trimming trailing whitespace).
+	// Useful for distinguishing prompts that share a model.
+	UserSuffix string `yaml:"user_suffix,omitempty" json:"user_suffix,omitempty"`
 }
 
 // AmpCode groups Amp CLI integration settings including upstream routing,
