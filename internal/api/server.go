@@ -214,15 +214,11 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	// Create gin engine
 	engine := gin.New()
 
-	// Set trusted proxies to private IP ranges to ensure correct client IP resolution in common deployment scenarios (e.g. behind a reverse proxy or in a containerized environment).
-	engine.SetTrustedProxies([]string{
-		"127.0.0.1",
-		"::1",
-		"10.0.0.0/8",
-		"172.16.0.0/12",
-		"192.168.0.0/16",
-		"fc00::/7",
-	})
+	if cfg.TrustedProxies != nil {
+		if errTrustedProxies := engine.SetTrustedProxies(cfg.TrustedProxies); errTrustedProxies != nil {
+			log.WithError(errTrustedProxies).Warn("Failed to set trusted proxies")
+		}
+	}
 
 	if optionState.engineConfigurator != nil {
 		optionState.engineConfigurator(engine)
