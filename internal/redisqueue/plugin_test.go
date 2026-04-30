@@ -16,9 +16,10 @@ import (
 
 func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 	withEnabledQueue(t, func() {
-		ginCtx := newTestGinContext(t, http.MethodPost, "/v1/chat/completions", http.StatusOK)
-		internallogging.SetGinRequestID(ginCtx, "gin-request-id-ignored")
-		ctx := context.WithValue(internallogging.WithRequestID(context.Background(), "ctx-request-id"), "gin", ginCtx)
+		ctx := internallogging.WithRequestID(context.Background(), "ctx-request-id")
+		ctx = internallogging.WithEndpoint(ctx, "POST /v1/chat/completions")
+		ctx = internallogging.WithResponseStatusHolder(ctx)
+		internallogging.SetResponseStatus(ctx, http.StatusOK)
 
 		plugin := &usageQueuePlugin{}
 		plugin.HandleUsage(ctx, coreusage.Record{
@@ -49,9 +50,10 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 
 func TestUsageQueuePluginPayloadIncludesStableFieldsAndFailureAndGinRequestID(t *testing.T) {
 	withEnabledQueue(t, func() {
-		ginCtx := newTestGinContext(t, http.MethodGet, "/v1/responses", http.StatusInternalServerError)
-		internallogging.SetGinRequestID(ginCtx, "gin-request-id")
-		ctx := context.WithValue(context.Background(), "gin", ginCtx)
+		ctx := internallogging.WithRequestID(context.Background(), "gin-request-id")
+		ctx = internallogging.WithEndpoint(ctx, "GET /v1/responses")
+		ctx = internallogging.WithResponseStatusHolder(ctx)
+		internallogging.SetResponseStatus(ctx, http.StatusInternalServerError)
 
 		plugin := &usageQueuePlugin{}
 		plugin.HandleUsage(ctx, coreusage.Record{
@@ -76,6 +78,47 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndFailureAndGinRequestID(t 
 		requireStringField(t, payload, "endpoint", "GET /v1/responses")
 		requireStringField(t, payload, "auth_type", "apikey")
 		requireStringField(t, payload, "request_id", "gin-request-id")
+		requireBoolField(t, payload, "failed", true)
+	})
+}
+
+func TestUsageQueuePluginAsyncIgnoresRecycledGinContext(t *testing.T) {
+	withEnabledQueue(t, func() {
+		ginCtx := newTestGinContext(t, http.MethodPost, "/v1/chat/completions", http.StatusOK)
+		ctx := context.WithValue(context.Background(), "gin", ginCtx)
+		ctx = internallogging.WithRequestID(ctx, "ctx-request-id")
+		ctx = internallogging.WithEndpoint(ctx, "POST /v1/chat/completions")
+		ctx = internallogging.WithResponseStatusHolder(ctx)
+		internallogging.SetResponseStatus(ctx, http.StatusInternalServerError)
+
+		mgr := coreusage.NewManager(16)
+		defer mgr.Stop()
+
+		mgr.Register(pluginFunc(func(_ context.Context, _ coreusage.Record) {
+			ginCtx.Request = httptest.NewRequest(http.MethodGet, "http://example.com/v1/responses", nil)
+			ginCtx.Status(http.StatusOK)
+		}))
+		mgr.Register(&usageQueuePlugin{})
+
+		mgr.Publish(ctx, coreusage.Record{
+			Provider:    "openai",
+			Model:       "gpt-5.4",
+			APIKey:      "test-key",
+			AuthIndex:   "0",
+			AuthType:    "apikey",
+			Source:      "user@example.com",
+			RequestedAt: time.Date(2026, 4, 25, 0, 0, 0, 0, time.UTC),
+			Latency:     1500 * time.Millisecond,
+			Detail: coreusage.Detail{
+				InputTokens:  10,
+				OutputTokens: 20,
+				TotalTokens:  30,
+			},
+		})
+
+		payload := waitForSinglePayload(t, 2*time.Second)
+		requireStringField(t, payload, "endpoint", "POST /v1/chat/completions")
+		requireStringField(t, payload, "request_id", "ctx-request-id")
 		requireBoolField(t, payload, "failed", true)
 	})
 }
@@ -127,6 +170,29 @@ func popSinglePayload(t *testing.T) map[string]json.RawMessage {
 	return payload
 }
 
+func waitForSinglePayload(t *testing.T, timeout time.Duration) map[string]json.RawMessage {
+	t.Helper()
+
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		items := PopOldest(10)
+		if len(items) == 0 {
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+		if len(items) != 1 {
+			t.Fatalf("PopOldest() items = %d, want 1", len(items))
+		}
+		var payload map[string]json.RawMessage
+		if err := json.Unmarshal(items[0], &payload); err != nil {
+			t.Fatalf("unmarshal payload: %v", err)
+		}
+		return payload
+	}
+	t.Fatalf("timeout waiting for queued payload")
+	return nil
+}
+
 func requireStringField(t *testing.T, payload map[string]json.RawMessage, key, want string) {
 	t.Helper()
 
@@ -141,6 +207,12 @@ func requireStringField(t *testing.T, payload map[string]json.RawMessage, key, w
 	if got != want {
 		t.Fatalf("%s = %q, want %q", key, got, want)
 	}
+}
+
+type pluginFunc func(context.Context, coreusage.Record)
+
+func (fn pluginFunc) HandleUsage(ctx context.Context, record coreusage.Record) {
+	fn(ctx, record)
 }
 
 func requireBoolField(t *testing.T, payload map[string]json.RawMessage, key string, want bool) {
