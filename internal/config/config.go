@@ -806,7 +806,11 @@ func payloadParamDisabled(disabled map[string]struct{}, path string) bool {
 	if len(disabled) == 0 {
 		return false
 	}
-	_, ok := disabled[normalizeDisabledPayloadPath(path)]
+	normalized := normalizeDisabledPayloadPath(path)
+	if _, ok := disabled[normalized]; ok {
+		return true
+	}
+	_, ok := disabled["request."+normalized]
 	return ok
 }
 
