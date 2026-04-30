@@ -216,9 +216,12 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 
 	// Set trusted proxies to private IP ranges to ensure correct client IP resolution in common deployment scenarios (e.g. behind a reverse proxy or in a containerized environment).
 	engine.SetTrustedProxies([]string{
+		"127.0.0.1",
+		"::1",
+		"10.0.0.0/8",
 		"172.16.0.0/12",
 		"192.168.0.0/16",
-		"10.0.0.0/8",
+		"fc00::/7",
 	})
 
 	if optionState.engineConfigurator != nil {
