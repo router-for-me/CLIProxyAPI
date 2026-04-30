@@ -13,6 +13,10 @@ import (
 	"github.com/tidwall/sjson"
 )
 
+func isClaudeCodeBillingHeaderText(text string) bool {
+	return strings.HasPrefix(text, "x-anthropic-billing-header:")
+}
+
 // ConvertClaudeRequestToOpenAI parses and transforms an Anthropic API request into OpenAI Chat Completions API format.
 // It extracts the model name, system instruction, message contents, and tool declarations
 // from the raw JSON request and returns them in the format expected by the OpenAI API.
@@ -103,7 +107,7 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 	hasSystemContent := false
 	if system := root.Get("system"); system.Exists() {
 		if system.Type == gjson.String {
-			if system.String() != "" {
+			if system.String() != "" && !isClaudeCodeBillingHeaderText(system.String()) {
 				oldSystem := []byte(`{"type":"text","text":""}`)
 				oldSystem, _ = sjson.SetBytes(oldSystem, "text", system.String())
 				systemMsgJSON, _ = sjson.SetRawBytes(systemMsgJSON, "content.-1", oldSystem)
@@ -113,6 +117,9 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 			if system.IsArray() {
 				systemResults := system.Array()
 				for i := 0; i < len(systemResults); i++ {
+					if systemResults[i].Get("type").String() == "text" && isClaudeCodeBillingHeaderText(systemResults[i].Get("text").String()) {
+						continue
+					}
 					if contentItem, ok := convertClaudeContentPart(systemResults[i]); ok {
 						systemMsgJSON, _ = sjson.SetRawBytes(systemMsgJSON, "content.-1", []byte(contentItem))
 						hasSystemContent = true
@@ -188,6 +195,9 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 							toolResultJSON, _ = sjson.SetRawBytes(toolResultJSON, "content", []byte(toolResultContent))
 						} else {
 							toolResultJSON, _ = sjson.SetBytes(toolResultJSON, "content", toolResultContent)
+						}
+						if cacheControl := part.Get("cache_control"); cacheControl.Exists() {
+							toolResultJSON, _ = sjson.SetRawBytes(toolResultJSON, "cache_control", []byte(cacheControl.Raw))
 						}
 						toolResults = append(toolResults, toolResultJSON)
 					}
@@ -286,10 +296,13 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 			openAIToolJSON := []byte(`{"type":"function","function":{"name":"","description":""}}`)
 			openAIToolJSON, _ = sjson.SetBytes(openAIToolJSON, "function.name", tool.Get("name").String())
 			openAIToolJSON, _ = sjson.SetBytes(openAIToolJSON, "function.description", tool.Get("description").String())
+			if cacheControl := tool.Get("cache_control"); cacheControl.Exists() {
+				openAIToolJSON, _ = sjson.SetRawBytes(openAIToolJSON, "cache_control", []byte(cacheControl.Raw))
+			}
 
 			// Convert Anthropic input_schema to OpenAI function parameters
 			if inputSchema := tool.Get("input_schema"); inputSchema.Exists() {
-				openAIToolJSON, _ = sjson.SetBytes(openAIToolJSON, "function.parameters", inputSchema.Value())
+				openAIToolJSON, _ = sjson.SetBytes(openAIToolJSON, "function.parameters", normalizeObjectSchemaProperties(inputSchema.Value()))
 			}
 
 			toolsJSON, _ = sjson.SetRawBytes(toolsJSON, "-1", openAIToolJSON)
@@ -328,6 +341,28 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 	return out
 }
 
+func normalizeObjectSchemaProperties(schema any) any {
+	switch value := schema.(type) {
+	case map[string]any:
+		if value["type"] == "object" {
+			if _, ok := value["properties"]; !ok {
+				value["properties"] = map[string]any{}
+			}
+		}
+		for key, child := range value {
+			value[key] = normalizeObjectSchemaProperties(child)
+		}
+		return value
+	case []any:
+		for i, child := range value {
+			value[i] = normalizeObjectSchemaProperties(child)
+		}
+		return value
+	default:
+		return schema
+	}
+}
+
 func convertClaudeContentPart(part gjson.Result) (string, bool) {
 	partType := part.Get("type").String()
 
@@ -339,6 +374,9 @@ func convertClaudeContentPart(part gjson.Result) (string, bool) {
 		}
 		textContent := []byte(`{"type":"text","text":""}`)
 		textContent, _ = sjson.SetBytes(textContent, "text", text)
+		if cacheControl := part.Get("cache_control"); cacheControl.Exists() {
+			textContent, _ = sjson.SetRawBytes(textContent, "cache_control", []byte(cacheControl.Raw))
+		}
 		return string(textContent), true
 
 	case "image":
@@ -371,6 +409,9 @@ func convertClaudeContentPart(part gjson.Result) (string, bool) {
 
 		imageContent := []byte(`{"type":"image_url","image_url":{"url":""}}`)
 		imageContent, _ = sjson.SetBytes(imageContent, "image_url.url", imageURL)
+		if cacheControl := part.Get("cache_control"); cacheControl.Exists() {
+			imageContent, _ = sjson.SetRawBytes(imageContent, "cache_control", []byte(cacheControl.Raw))
+		}
 
 		return string(imageContent), true
 
