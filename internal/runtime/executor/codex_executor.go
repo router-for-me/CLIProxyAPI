@@ -185,6 +185,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
 		body = ensureImageGenerationTool(body, baseModel, auth)
 	}
+	body = normalizeCodexServerToolSearch(body)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
 	httpReq, err := e.cacheHelper(ctx, from, url, req, body)
@@ -336,6 +337,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
 		body = ensureImageGenerationTool(body, baseModel, auth)
 	}
+	body = normalizeCodexServerToolSearch(body)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses/compact"
 	httpReq, err := e.cacheHelper(ctx, from, url, req, body)
@@ -434,6 +436,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
 		body = ensureImageGenerationTool(body, baseModel, auth)
 	}
+	body = normalizeCodexServerToolSearch(body)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
 	httpReq, err := e.cacheHelper(ctx, from, url, req, body)
@@ -879,6 +882,33 @@ func normalizeCodexInstructions(body []byte) []byte {
 	instructions := gjson.GetBytes(body, "instructions")
 	if !instructions.Exists() || instructions.Type == gjson.Null {
 		body, _ = sjson.SetBytes(body, "instructions", "")
+	}
+	return body
+}
+
+func normalizeCodexServerToolSearch(body []byte) []byte {
+	body = normalizeCodexServerToolSearchArray(body, "tools")
+	body = normalizeCodexServerToolSearchArray(body, "tool_choice.tools")
+	return body
+}
+
+func normalizeCodexServerToolSearchArray(body []byte, path string) []byte {
+	tools := gjson.GetBytes(body, path)
+	if !tools.IsArray() {
+		return body
+	}
+
+	for i, tool := range tools.Array() {
+		if tool.Get("type").String() != "tool_search" {
+			continue
+		}
+		if tool.Get("execution").String() == "client" {
+			continue
+		}
+
+		toolPath := fmt.Sprintf("%s.%d", path, i)
+		body, _ = sjson.DeleteBytes(body, toolPath+".description")
+		body, _ = sjson.DeleteBytes(body, toolPath+".parameters")
 	}
 	return body
 }
