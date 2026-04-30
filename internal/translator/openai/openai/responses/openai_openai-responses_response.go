@@ -152,9 +152,17 @@ func buildResponsesCompletedEvent(st *oaiToResponsesState, requestRawJSON []byte
 			if b := st.MsgTextBuf[i]; b != nil {
 				txt = b.String()
 			}
-			item := []byte(`{"id":"","type":"message","status":"completed","content":[{"type":"output_text","annotations":[],"logprobs":[],"text":""}],"role":"assistant"}`)
+			item := []byte(`{"id":"","type":"message","status":"completed","content":[],"role":"assistant"}`)
 			item, _ = sjson.SetBytes(item, "id", fmt.Sprintf("msg_%s_%d", st.ResponseID, i))
-			item, _ = sjson.SetBytes(item, "content.0.text", txt)
+			// Insert reasoning_text content part at index 0 if reasoning data is available
+			if len(st.Reasonings) > 0 {
+				rp := []byte(`{"type":"reasoning_text","text":""}`)
+				rp, _ = sjson.SetBytes(rp, "text", st.Reasonings[len(st.Reasonings)-1].ReasoningData)
+				item, _ = sjson.SetRawBytes(item, "content.-1", rp)
+			}
+			op := []byte(`{"type":"output_text","annotations":[],"logprobs":[],"text":""}`)
+			op, _ = sjson.SetBytes(op, "text", txt)
+			item, _ = sjson.SetRawBytes(item, "content.-1", op)
 			outputItems = append(outputItems, completedOutputItem{index: st.MsgOutputIx[i], raw: item})
 		}
 	}
@@ -355,8 +363,9 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 			delta := choice.Get("delta")
 			if delta.Exists() {
 				if c := delta.Get("content"); c.Exists() && c.String() != "" {
-					// Ensure the message item and its first content part are announced before any text deltas
+					var reasoningText string
 					if st.ReasoningID != "" {
+						reasoningText = st.ReasoningBuf.String()
 						stopReasoning(st.ReasoningBuf.String())
 						st.ReasoningBuf.Reset()
 					}
@@ -373,11 +382,22 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 						st.MsgItemAdded[idx] = true
 					}
 					if !st.MsgContentAdded[idx] {
+						nextContentIdx := 0
+						if reasoningText != "" {
+							rp := []byte(`{"type":"response.content_part.added","sequence_number":0,"item_id":"","output_index":0,"content_index":0,"part":{"type":"reasoning_text","text":""}}`)
+							rp, _ = sjson.SetBytes(rp, "sequence_number", nextSeq())
+							rp, _ = sjson.SetBytes(rp, "item_id", fmt.Sprintf("msg_%s_%d", st.ResponseID, idx))
+							rp, _ = sjson.SetBytes(rp, "output_index", msgOutputIndex)
+							rp, _ = sjson.SetBytes(rp, "content_index", 0)
+							rp, _ = sjson.SetBytes(rp, "part.text", reasoningText)
+							out = append(out, emitRespEvent("response.content_part.added", rp))
+							nextContentIdx = 1
+						}
 						part := []byte(`{"type":"response.content_part.added","sequence_number":0,"item_id":"","output_index":0,"content_index":0,"part":{"type":"output_text","annotations":[],"logprobs":[],"text":""}}`)
 						part, _ = sjson.SetBytes(part, "sequence_number", nextSeq())
 						part, _ = sjson.SetBytes(part, "item_id", fmt.Sprintf("msg_%s_%d", st.ResponseID, idx))
 						part, _ = sjson.SetBytes(part, "output_index", msgOutputIndex)
-						part, _ = sjson.SetBytes(part, "content_index", 0)
+						part, _ = sjson.SetBytes(part, "content_index", nextContentIdx)
 						out = append(out, emitRespEvent("response.content_part.added", part))
 						st.MsgContentAdded[idx] = true
 					}
@@ -396,17 +416,41 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 					st.MsgTextBuf[idx].WriteString(c.String())
 				}
 
-				// NOTE: reasoning_content is intentionally skipped because:
-				// 1. DeepSeek returns reasoning_content for deepseek-v4-flash model
-				// 2. DeepSeek requires reasoning_content to be echoed back in subsequent requests
-				// 3. The proxy doesn't support echoing reasoning_content back to DeepSeek
-				// 4. Dropping reasoning_content from the response avoids the echo requirement
-				// See also: reasoning.effort → reasoning_effort is skipped in request translator
-				_ = delta
+				// reasoning_content — always pass through from upstream Chat Completions.
+				// All models that return reasoning_content get it converted to a
+				// reasoning output item. The text is also embedded as a reasoning_text
+				// content part in the assistant message for round-trip echo-back.
+				if rc := delta.Get("reasoning_content"); rc.Exists() && rc.String() != "" {
+					// On first appearance, add reasoning item and part
+					if st.ReasoningID == "" {
+						st.ReasoningID = fmt.Sprintf("rs_%s_%d", st.ResponseID, idx)
+						st.ReasoningIndex = allocOutputIndex()
+						item := []byte(`{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"id":"","type":"reasoning","status":"in_progress","summary":[]}}`)
+						item, _ = sjson.SetBytes(item, "sequence_number", nextSeq())
+						item, _ = sjson.SetBytes(item, "output_index", st.ReasoningIndex)
+						item, _ = sjson.SetBytes(item, "item.id", st.ReasoningID)
+						out = append(out, emitRespEvent("response.output_item.added", item))
+						part := []byte(`{"type":"response.reasoning_summary_part.added","sequence_number":0,"item_id":"","output_index":0,"summary_index":0,"part":{"type":"summary_text","text":""}}`)
+						part, _ = sjson.SetBytes(part, "sequence_number", nextSeq())
+						part, _ = sjson.SetBytes(part, "item_id", st.ReasoningID)
+						part, _ = sjson.SetBytes(part, "output_index", st.ReasoningIndex)
+						out = append(out, emitRespEvent("response.reasoning_summary_part.added", part))
+					}
+					// Append incremental text to reasoning buffer
+					st.ReasoningBuf.WriteString(rc.String())
+					msg := []byte(`{"type":"response.reasoning_summary_text.delta","sequence_number":0,"item_id":"","output_index":0,"summary_index":0,"delta":""}`)
+					msg, _ = sjson.SetBytes(msg, "sequence_number", nextSeq())
+					msg, _ = sjson.SetBytes(msg, "item_id", st.ReasoningID)
+					msg, _ = sjson.SetBytes(msg, "output_index", st.ReasoningIndex)
+					msg, _ = sjson.SetBytes(msg, "delta", rc.String())
+					out = append(out, emitRespEvent("response.reasoning_summary_text.delta", msg))
+				}
 
 				// tool calls
 				if tcs := delta.Get("tool_calls"); tcs.Exists() && tcs.IsArray() {
+					var reasoningText string
 					if st.ReasoningID != "" {
+						reasoningText = st.ReasoningBuf.String()
 						stopReasoning(st.ReasoningBuf.String())
 						st.ReasoningBuf.Reset()
 					}
@@ -434,11 +478,20 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 						partDone, _ = sjson.SetBytes(partDone, "part.text", fullText)
 						out = append(out, emitRespEvent("response.content_part.done", partDone))
 
-						itemDone := []byte(`{"type":"response.output_item.done","sequence_number":0,"output_index":0,"item":{"id":"","type":"message","status":"completed","content":[{"type":"output_text","annotations":[],"logprobs":[],"text":""}],"role":"assistant"}}`)
+						contentArr := []byte(`[]`)
+						if reasoningText != "" {
+							rp := []byte(`{"type":"reasoning_text","text":""}`)
+							rp, _ = sjson.SetBytes(rp, "text", reasoningText)
+							contentArr, _ = sjson.SetRawBytes(contentArr, "-1", rp)
+						}
+						op := []byte(`{"type":"output_text","annotations":[],"logprobs":[],"text":""}`)
+						op, _ = sjson.SetBytes(op, "text", fullText)
+						contentArr, _ = sjson.SetRawBytes(contentArr, "-1", op)
+						itemDone := []byte(`{"type":"response.output_item.done","sequence_number":0,"output_index":0,"item":{"id":"","type":"message","status":"completed","role":"assistant"}}`)
 						itemDone, _ = sjson.SetBytes(itemDone, "sequence_number", nextSeq())
 						itemDone, _ = sjson.SetBytes(itemDone, "output_index", msgOutputIndex)
 						itemDone, _ = sjson.SetBytes(itemDone, "item.id", fmt.Sprintf("msg_%s_%d", st.ResponseID, idx))
-						itemDone, _ = sjson.SetBytes(itemDone, "item.content.0.text", fullText)
+						itemDone, _ = sjson.SetRawBytes(itemDone, "item.content", contentArr)
 						out = append(out, emitRespEvent("response.output_item.done", itemDone))
 						st.MsgItemDone[idx] = true
 					}
@@ -533,11 +586,21 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 							partDone, _ = sjson.SetBytes(partDone, "part.text", fullText)
 							out = append(out, emitRespEvent("response.content_part.done", partDone))
 
-							itemDone := []byte(`{"type":"response.output_item.done","sequence_number":0,"output_index":0,"item":{"id":"","type":"message","status":"completed","content":[{"type":"output_text","annotations":[],"logprobs":[],"text":""}],"role":"assistant"}}`)
+							// Build content array with reasoning_text if available
+							contentArr := []byte(`[]`)
+							if len(st.Reasonings) > 0 {
+								rp := []byte(`{"type":"reasoning_text","text":""}`)
+								rp, _ = sjson.SetBytes(rp, "text", st.Reasonings[len(st.Reasonings)-1].ReasoningData)
+								contentArr, _ = sjson.SetRawBytes(contentArr, "-1", rp)
+							}
+							op := []byte(`{"type":"output_text","annotations":[],"logprobs":[],"text":""}`)
+							op, _ = sjson.SetBytes(op, "text", fullText)
+							contentArr, _ = sjson.SetRawBytes(contentArr, "-1", op)
+							itemDone := []byte(`{"type":"response.output_item.done","sequence_number":0,"output_index":0,"item":{"id":"","type":"message","status":"completed","role":"assistant"}}`)
 							itemDone, _ = sjson.SetBytes(itemDone, "sequence_number", nextSeq())
 							itemDone, _ = sjson.SetBytes(itemDone, "output_index", msgOutputIndex)
 							itemDone, _ = sjson.SetBytes(itemDone, "item.id", fmt.Sprintf("msg_%s_%d", st.ResponseID, i))
-							itemDone, _ = sjson.SetBytes(itemDone, "item.content.0.text", fullText)
+							itemDone, _ = sjson.SetRawBytes(itemDone, "item.content", contentArr)
 							out = append(out, emitRespEvent("response.output_item.done", itemDone))
 							st.MsgItemDone[i] = true
 						}
@@ -601,7 +664,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 
 // ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream builds a single Responses JSON
 // from a non-streaming OpenAI Chat Completions response.
-func ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) []byte {
+func ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(_ context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) []byte {
 	root := gjson.ParseBytes(rawJSON)
 
 	// Basic response scaffold
@@ -698,9 +761,26 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(_ context.Co
 
 	// Build output list from choices[...]
 	outputsWrapper := []byte(`{"arr":[]}`)
-		// NOTE: reasoning_content is intentionally skipped for DeepSeek compatibility.
-		_ = rawJSON
-		_ = requestRawJSON
+
+	// Detect reasoning_content from upstream Chat Completions response
+	rcText := gjson.GetBytes(rawJSON, "choices.0.message.reasoning_content").String()
+	includeReasoning := rcText != ""
+	if !includeReasoning && len(requestRawJSON) > 0 {
+		includeReasoning = gjson.GetBytes(requestRawJSON, "reasoning").Exists()
+	}
+	if includeReasoning {
+		rid := id
+		if strings.HasPrefix(rid, "resp_") {
+			rid = strings.TrimPrefix(rid, "resp_")
+		}
+		reasoningItem := []byte(`{"id":"","type":"reasoning","encrypted_content":"","summary":[]}`)
+		reasoningItem, _ = sjson.SetBytes(reasoningItem, "id", fmt.Sprintf("rs_%s", rid))
+		if rcText != "" {
+			reasoningItem, _ = sjson.SetBytes(reasoningItem, "summary.0.type", "summary_text")
+			reasoningItem, _ = sjson.SetBytes(reasoningItem, "summary.0.text", rcText)
+		}
+		outputsWrapper, _ = sjson.SetRawBytes(outputsWrapper, "arr.-1", reasoningItem)
+	}
 
 	if choices := root.Get("choices"); choices.Exists() && choices.IsArray() {
 		choices.ForEach(func(_, choice gjson.Result) bool {
@@ -708,9 +788,17 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(_ context.Co
 			if msg.Exists() {
 				// Text message part
 				if c := msg.Get("content"); c.Exists() && c.String() != "" {
-					item := []byte(`{"id":"","type":"message","status":"completed","content":[{"type":"output_text","annotations":[],"logprobs":[],"text":""}],"role":"assistant"}`)
+					item := []byte(`{"id":"","type":"message","status":"completed","content":[],"role":"assistant"}`)
 					item, _ = sjson.SetBytes(item, "id", fmt.Sprintf("msg_%s_%d", id, int(choice.Get("index").Int())))
-					item, _ = sjson.SetBytes(item, "content.0.text", c.String())
+					// Insert reasoning_text content part at index 0 if present
+					if rcText != "" {
+						rp := []byte(`{"type":"reasoning_text","text":""}`)
+						rp, _ = sjson.SetBytes(rp, "text", rcText)
+						item, _ = sjson.SetRawBytes(item, "content.-1", rp)
+					}
+					op := []byte(`{"type":"output_text","annotations":[],"logprobs":[],"text":""}`)
+					op, _ = sjson.SetBytes(op, "text", c.String())
+					item, _ = sjson.SetRawBytes(item, "content.-1", op)
 					outputsWrapper, _ = sjson.SetRawBytes(outputsWrapper, "arr.-1", item)
 				}
 

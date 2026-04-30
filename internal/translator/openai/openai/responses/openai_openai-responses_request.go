@@ -2,6 +2,7 @@ package responses
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -57,16 +58,28 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 
 	// Convert input array to messages
 	if input := root.Get("input"); input.Exists() && input.IsArray() {
-		// Collect consecutive function_call items so they can be grouped into
-		// a single assistant message with multiple tool_calls (required by Chat
-		// Completions format: one assistant message with all tool_calls, followed
-		// by one tool message per tool_call_id).
+		// Group-buffering approach for tool calls.
+		//
+		// In Responses API format, function_call and function_call_output items
+		// can be interleaved with messages (e.g. developer approval messages
+		// between a call and its result). Chat Completions is stricter:
+		// an assistant message with tool_calls MUST be immediately followed by
+		// the corresponding tool messages.
+		//
+		// We buffer the entire tool group and flush it in the correct order:
+		//   1. One assistant message with all tool_calls
+		//   2. All tool messages (one per function_call_output)
+		//   3. Any messages that were interleaved between calls and results
 		var pendingFunctionCalls []gjson.Result
+		var bufferedMessages []gjson.Result
+		var pendingToolOutputs []gjson.Result
+		var pendingReasoningContent string
 
-		flushFunctionCalls := func() {
+		flushToolGroup := func() {
 			if len(pendingFunctionCalls) == 0 {
 				return
 			}
+			// 1. Emit one assistant message with all accumulated tool_calls
 			assistantMessage := []byte(`{"role":"assistant","tool_calls":[]}`)
 			for i, fc := range pendingFunctionCalls {
 				toolCall := []byte(`{"id":"","type":"function","function":{"name":"","arguments":""}}`)
@@ -82,38 +95,40 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 				assistantMessage, _ = sjson.SetRawBytes(assistantMessage, fmt.Sprintf("tool_calls.%d", i), toolCall)
 			}
 			out, _ = sjson.SetRawBytes(out, "messages.-1", assistantMessage)
-			pendingFunctionCalls = nil
-		}
 
-		input.ForEach(func(_, item gjson.Result) bool {
-			itemType := item.Get("type").String()
-			if itemType == "" && item.Get("role").String() != "" {
-				itemType = "message"
+			// 2. Emit tool messages for all collected function_call_output items (in order)
+			for _, output := range pendingToolOutputs {
+				toolMessage := []byte(`{"role":"tool","tool_call_id":"","content":""}`)
+				if callId := output.Get("call_id"); callId.Exists() {
+					toolMessage, _ = sjson.SetBytes(toolMessage, "tool_call_id", callId.String())
+				}
+				if outputVal := output.Get("output"); outputVal.Exists() {
+					toolMessage, _ = sjson.SetBytes(toolMessage, "content", outputVal.String())
+				}
+				out, _ = sjson.SetRawBytes(out, "messages.-1", toolMessage)
 			}
 
-			switch itemType {
-			case "message", "":
-				// Flush any pending function_calls before a new message
-				flushFunctionCalls()
-
-				// Handle regular message conversion
-				role := item.Get("role").String()
+			// 3. Emit any messages that were interleaved between function_call
+			//    and function_call_output (e.g. developer approval messages).
+			for _, msg := range bufferedMessages {
+				role := msg.Get("role").String()
 				if role == "developer" {
 					role = "user"
 				}
 				message := []byte(`{"role":"","content":[]}`)
 				message, _ = sjson.SetBytes(message, "role", role)
 
-				if content := item.Get("content"); content.Exists() && content.IsArray() {
-					var messageContent string
-					var toolCalls []interface{}
+				if role == "assistant" && pendingReasoningContent != "" {
+					message, _ = sjson.SetBytes(message, "reasoning_content", pendingReasoningContent)
+					pendingReasoningContent = ""
+				}
 
+				if content := msg.Get("content"); content.Exists() && content.IsArray() {
 					content.ForEach(func(_, contentItem gjson.Result) bool {
 						contentType := contentItem.Get("type").String()
 						if contentType == "" {
 							contentType = "input_text"
 						}
-
 						switch contentType {
 						case "input_text", "output_text":
 							text := contentItem.Get("text").String()
@@ -125,50 +140,114 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 							contentPart := []byte(`{"type":"image_url","image_url":{"url":""}}`)
 							contentPart, _ = sjson.SetBytes(contentPart, "image_url.url", imageURL)
 							message, _ = sjson.SetRawBytes(message, "content.-1", contentPart)
+						case "reasoning_text":
+							message, _ = sjson.SetBytes(message, "reasoning_content", contentItem.Get("text").String())
 						}
 						return true
 					})
-
-					if messageContent != "" {
-						message, _ = sjson.SetBytes(message, "content", messageContent)
-					}
-
-					if len(toolCalls) > 0 {
-						message, _ = sjson.SetBytes(message, "tool_calls", toolCalls)
-					}
 				} else if content.Type == gjson.String {
 					message, _ = sjson.SetBytes(message, "content", content.String())
 				}
 
 				out, _ = sjson.SetRawBytes(out, "messages.-1", message)
+			}
+
+			// Reset all buffers
+			pendingFunctionCalls = nil
+			pendingToolOutputs = nil
+			bufferedMessages = nil
+		}
+
+		input.ForEach(func(_, item gjson.Result) bool {
+			itemType := item.Get("type").String()
+			if itemType == "" && item.Get("role").String() != "" {
+				itemType = "message"
+			}
+
+			switch itemType {
+			case "message", "":
+				if len(pendingFunctionCalls) > 0 || len(pendingToolOutputs) > 0 {
+					// We're inside an active tool group — buffer this message
+					// so it gets emitted after the tool messages in the correct order.
+					bufferedMessages = append(bufferedMessages, item)
+				} else {
+					// No tool group active, emit directly
+					role := item.Get("role").String()
+					if role == "developer" {
+						role = "user"
+					}
+					message := []byte(`{"role":"","content":[]}`)
+					message, _ = sjson.SetBytes(message, "role", role)
+
+					if role == "assistant" && pendingReasoningContent != "" {
+						message, _ = sjson.SetBytes(message, "reasoning_content", pendingReasoningContent)
+						pendingReasoningContent = ""
+					}
+
+					if content := item.Get("content"); content.Exists() && content.IsArray() {
+						content.ForEach(func(_, contentItem gjson.Result) bool {
+							contentType := contentItem.Get("type").String()
+							if contentType == "" {
+								contentType = "input_text"
+							}
+							switch contentType {
+							case "input_text", "output_text":
+								text := contentItem.Get("text").String()
+								contentPart := []byte(`{"type":"text","text":""}`)
+								contentPart, _ = sjson.SetBytes(contentPart, "text", text)
+								message, _ = sjson.SetRawBytes(message, "content.-1", contentPart)
+							case "input_image":
+								imageURL := contentItem.Get("image_url").String()
+								contentPart := []byte(`{"type":"image_url","image_url":{"url":""}}`)
+								contentPart, _ = sjson.SetBytes(contentPart, "image_url.url", imageURL)
+								message, _ = sjson.SetRawBytes(message, "content.-1", contentPart)
+							case "reasoning_text":
+								message, _ = sjson.SetBytes(message, "reasoning_content", contentItem.Get("text").String())
+							}
+							return true
+						})
+					} else if content.Type == gjson.String {
+						message, _ = sjson.SetBytes(message, "content", content.String())
+					}
+
+					out, _ = sjson.SetRawBytes(out, "messages.-1", message)
+				}
 
 			case "function_call":
-				// Collect consecutive function_calls into a single group
+				// If the previous tool group already has outputs collected,
+				// this function_call starts a *new* group flush the old one first.
+				if len(pendingToolOutputs) > 0 {
+					flushToolGroup()
+				}
 				pendingFunctionCalls = append(pendingFunctionCalls, item)
 
 			case "function_call_output":
-				// Flush pending function_calls before a tool response
-				flushFunctionCalls()
+				// Collect the output it will be emitted by flushToolGroup
+				// in the correct position (after assistant+tool_calls,
+				// before any buffered messages).
+				pendingToolOutputs = append(pendingToolOutputs, item)
 
-				// Handle function call output conversion to tool message
-				toolMessage := []byte(`{"role":"tool","tool_call_id":"","content":""}`)
-
-				if callId := item.Get("call_id"); callId.Exists() {
-					toolMessage, _ = sjson.SetBytes(toolMessage, "tool_call_id", callId.String())
+			case "reasoning":
+				// Extract summary text from standalone reasoning input items.
+				// This text will be injected as reasoning_content on the
+				// subsequent assistant message for models that require echo-back.
+				if summary := item.Get("summary"); summary.Exists() && summary.IsArray() {
+					summary.ForEach(func(_, s gjson.Result) bool {
+						if s.Get("type").String() == "summary_text" {
+							if text := s.Get("text").String(); text != "" {
+								pendingReasoningContent = text
+							}
+						}
+						return true
+					})
 				}
-
-				if output := item.Get("output"); output.Exists() {
-					toolMessage, _ = sjson.SetBytes(toolMessage, "content", output.String())
-				}
-
-				out, _ = sjson.SetRawBytes(out, "messages.-1", toolMessage)
 			}
 
 			return true
 		})
 
-		// Flush any remaining function_calls at end of array
-		flushFunctionCalls()
+		// Flush any remaining tool group at end of array
+		flushToolGroup()
 	} else if input.Type == gjson.String {
 		msg := []byte(`{}`)
 		msg, _ = sjson.SetBytes(msg, "role", "user")
@@ -218,13 +297,32 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 		}
 	}
 
-	// Disable thinking mode for DeepSeek compatibility.
-	// DeepSeek's deepseek-v4-flash model defaults to thinking mode, which returns
-	// reasoning_content in responses and requires it to be echoed back in subsequent
-	// requests. The proxy doesn't support echoing reasoning_content, so we disable
-	// thinking mode entirely.
-	// See: https://api-docs.deepseek.com/guides/thinking_mode
-	out, _ = sjson.SetBytes(out, "thinking", map[string]interface{}{"type": "disabled"})
+	// Handle reasoning configuration.
+	//
+	// When reasoning.effort is explicitly set (e.g. "low", "medium", "high"),
+	// map it to the Chat Completions reasoning_effort field — this enables
+	// thinking mode on models that support it.
+	//
+	// When reasoning is null or absent, we explicitly disable thinking mode
+	// via "thinking": {"type": "disabled"}. Without this, some providers
+	// (notably DeepSeek V4) default to thinking mode and return
+	// reasoning_content, which they then require to be echoed back on every
+	// subsequent request in the conversation. Since Codex CLI (and most
+	// clients) does not include reasoning_text in follow-up request input,
+	// the echo-back would fail with "reasoning_content must be passed back".
+	// Disabling thinking by default avoids this requirement entirely.
+	if reasoning := root.Get("reasoning"); reasoning.Exists() {
+		effort := reasoning.Get("effort").String()
+		if effort != "" {
+			out, _ = sjson.SetBytes(out, "reasoning_effort", strings.ToLower(strings.TrimSpace(effort)))
+		} else {
+			// reasoning explicitly set but without effort (null or {}).
+			out, _ = sjson.SetBytes(out, "thinking", map[string]interface{}{"type": "disabled"})
+		}
+	} else {
+		// reasoning not present — disable thinking to prevent echo-back requirement.
+		out, _ = sjson.SetBytes(out, "thinking", map[string]interface{}{"type": "disabled"})
+	}
 
 	// Convert tool_choice if present
 	if toolChoice := root.Get("tool_choice"); toolChoice.Exists() {
