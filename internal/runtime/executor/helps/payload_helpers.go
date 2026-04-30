@@ -151,6 +151,7 @@ func ApplyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string
 
 	if cfg.DisableImageGeneration {
 		out = removeToolTypeFromPayloadWithRoot(out, root, "image_generation")
+		out = removeToolChoiceFromPayloadWithRoot(out, root, "image_generation")
 	}
 	return out
 }
@@ -240,6 +241,55 @@ func removeToolTypeFromPayloadWithRoot(payload []byte, root string, toolType str
 	}
 	toolsPath := buildPayloadPath(root, "tools")
 	return removeToolTypeFromToolsArray(payload, toolsPath, toolType)
+}
+
+func removeToolChoiceFromPayloadWithRoot(payload []byte, root string, toolType string) []byte {
+	if len(payload) == 0 {
+		return payload
+	}
+	toolType = strings.TrimSpace(toolType)
+	if toolType == "" {
+		return payload
+	}
+	toolChoicePath := buildPayloadPath(root, "tool_choice")
+	return removeToolChoiceFromPayload(payload, toolChoicePath, toolType)
+}
+
+func removeToolChoiceFromPayload(payload []byte, toolChoicePath string, toolType string) []byte {
+	choice := gjson.GetBytes(payload, toolChoicePath)
+	if !choice.Exists() {
+		return payload
+	}
+	if choice.Type == gjson.String {
+		if strings.EqualFold(strings.TrimSpace(choice.String()), toolType) {
+			updated, errDel := sjson.DeleteBytes(payload, toolChoicePath)
+			if errDel == nil {
+				return updated
+			}
+		}
+		return payload
+	}
+	if choice.Type != gjson.JSON {
+		return payload
+	}
+	choiceType := strings.TrimSpace(choice.Get("type").String())
+	if strings.EqualFold(choiceType, toolType) {
+		updated, errDel := sjson.DeleteBytes(payload, toolChoicePath)
+		if errDel == nil {
+			return updated
+		}
+		return payload
+	}
+	if strings.EqualFold(choiceType, "tool") {
+		name := strings.TrimSpace(choice.Get("name").String())
+		if strings.EqualFold(name, toolType) {
+			updated, errDel := sjson.DeleteBytes(payload, toolChoicePath)
+			if errDel == nil {
+				return updated
+			}
+		}
+	}
+	return payload
 }
 
 func removeToolTypeFromToolsArray(payload []byte, toolsPath string, toolType string) []byte {

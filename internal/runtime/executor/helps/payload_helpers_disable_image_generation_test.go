@@ -48,3 +48,29 @@ func TestApplyPayloadConfigWithRoot_DisableImageGeneration_RemovesToolsEntryWith
 		t.Fatalf("expected remaining tool type=web_search, got %q", got)
 	}
 }
+
+func TestApplyPayloadConfigWithRoot_DisableImageGeneration_RemovesToolChoiceByType(t *testing.T) {
+	cfg := &config.Config{
+		SDKConfig: config.SDKConfig{DisableImageGeneration: true},
+	}
+	payload := []byte(`{"tools":[{"type":"image_generation"},{"type":"function","name":"f1"}],"tool_choice":{"type":"image_generation"}}`)
+
+	out := ApplyPayloadConfigWithRoot(cfg, "gpt-5.4", "openai-response", "", payload, nil, "")
+
+	if gjson.GetBytes(out, "tool_choice").Exists() {
+		t.Fatalf("expected tool_choice to be removed")
+	}
+}
+
+func TestApplyPayloadConfigWithRoot_DisableImageGeneration_RemovesToolChoiceByNameWithRoot(t *testing.T) {
+	cfg := &config.Config{
+		SDKConfig: config.SDKConfig{DisableImageGeneration: true},
+	}
+	payload := []byte(`{"request":{"tools":[{"type":"image_generation"},{"type":"web_search"}],"tool_choice":{"type":"tool","name":"image_generation"}}}`)
+
+	out := ApplyPayloadConfigWithRoot(cfg, "gpt-5.4", "gemini-cli", "request", payload, nil, "")
+
+	if gjson.GetBytes(out, "request.tool_choice").Exists() {
+		t.Fatalf("expected request.tool_choice to be removed")
+	}
+}
