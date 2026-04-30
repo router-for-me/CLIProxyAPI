@@ -121,3 +121,87 @@ func TestModelMapper_MapModelCtx_ConditionalOnlyNoFallback(t *testing.T) {
 		t.Errorf("got %q, want empty", got)
 	}
 }
+
+// TestModelMapper_MapModelCtx_ConditionalWinsRegardlessOfOrder verifies the
+// documented "conditional wins" semantics hold even when the unconditional
+// fallback appears before the conditional rule in config.
+func TestModelMapper_MapModelCtx_ConditionalWinsRegardlessOfOrder(t *testing.T) {
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient("test-cond3", "openai", []*registry.ModelInfo{
+		{ID: "gpt-handoff", OwnedBy: "openai", Type: "openai"},
+		{ID: "gpt-default", OwnedBy: "openai", Type: "openai"},
+	})
+	defer reg.UnregisterClient("test-cond3")
+
+	// Fallback FIRST, conditional SECOND
+	mapper := NewModelMapper([]config.AmpModelMapping{
+		{From: "gemini-3-flash-preview", To: "gpt-default"},
+		{From: "gemini-3-flash-preview", To: "gpt-handoff", When: &config.AmpMappingCondition{Feature: "handoff"}},
+	})
+
+	if got := mapper.MapModelCtx("gemini-3-flash-preview", RequestFingerprint{ToolChoice: "create_handoff_context"}); got != "gpt-handoff" {
+		t.Errorf("handoff (fallback-before-conditional): got %q want gpt-handoff", got)
+	}
+	if got := mapper.MapModelCtx("gemini-3-flash-preview", RequestFingerprint{}); got != "gpt-default" {
+		t.Errorf("default: got %q want gpt-default", got)
+	}
+}
+
+// TestModelMapper_ExactBeforeRegex verifies that exact rules win over regex
+// rules even when the regex rule is declared first.
+func TestModelMapper_ExactBeforeRegex(t *testing.T) {
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient("test-exact-regex", "anthropic", []*registry.ModelInfo{
+		{ID: "claude-sonnet-4", OwnedBy: "anthropic", Type: "claude"},
+		{ID: "claude-opus-4", OwnedBy: "anthropic", Type: "claude"},
+	})
+	defer reg.UnregisterClient("test-exact-regex")
+
+	mapper := NewModelMapper([]config.AmpModelMapping{
+		{From: "^gpt-5.*$", To: "claude-sonnet-4", Regex: true},
+		{From: "gpt-5", To: "claude-opus-4"},
+	})
+	if got := mapper.MapModel("gpt-5"); got != "claude-opus-4" {
+		t.Errorf("got %q, want claude-opus-4 (exact must beat regex)", got)
+	}
+}
+
+// TestModelMapper_DeepCopiesWhen verifies that mutating the original config
+// after UpdateMappings does not affect the mapper's internal state.
+func TestModelMapper_DeepCopiesWhen(t *testing.T) {
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient("test-deepcopy", "openai", []*registry.ModelInfo{
+		{ID: "gpt-handoff", OwnedBy: "openai", Type: "openai"},
+	})
+	defer reg.UnregisterClient("test-deepcopy")
+
+	cond := &config.AmpMappingCondition{Feature: "handoff"}
+	mappings := []config.AmpModelMapping{
+		{From: "gemini-3-flash-preview", To: "gpt-handoff", When: cond},
+	}
+	mapper := NewModelMapper(mappings)
+
+	// Mutate original condition after construction.
+	cond.Feature = "search"
+
+	// Mapper should still match the handoff fingerprint (mutation ignored).
+	if got := mapper.MapModelCtx("gemini-3-flash-preview", RequestFingerprint{ToolChoice: "create_handoff_context"}); got != "gpt-handoff" {
+		t.Errorf("got %q, want gpt-handoff (mapper must deep-copy When)", got)
+	}
+}
+
+// TestConditionMatches_TrimsConfigWhitespace verifies trailing whitespace in
+// configuration values does not break matching.
+func TestConditionMatches_TrimsConfigWhitespace(t *testing.T) {
+	fp := RequestFingerprint{
+		ToolChoice:   "create_handoff_context",
+		LastUserText: "Use the create_handoff_context tool to extract relevant information and files.",
+	}
+	cond := &config.AmpMappingCondition{
+		ToolChoice: "  create_handoff_context  ",
+		UserSuffix: "  extract relevant information and files.  ",
+	}
+	if !ConditionMatches(cond, fp) {
+		t.Error("expected match after trimming whitespace from config")
+	}
+}

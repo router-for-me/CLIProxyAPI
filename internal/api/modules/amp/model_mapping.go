@@ -32,12 +32,19 @@ type ModelMapper interface {
 
 // DefaultModelMapper implements ModelMapper with thread-safe mapping storage.
 //
-// Mappings are stored in declaration order so that conditional rules ("When")
-// can be evaluated first and an unconditional rule for the same From acts as
-// a fallback. Lookups iterate the slice in order.
+// Lookup order:
+//  1. exact rules (in declaration order)
+//  2. regex rules (in declaration order)
+//
+// Within each pass, conditional rules ("When") are evaluated first; the
+// first matching unconditional rule for the same From is remembered and
+// used as a fallback when no conditional rule matches. This guarantees the
+// conditional-wins semantics regardless of the order users write them in
+// configuration.
 type DefaultModelMapper struct {
-	mu    sync.RWMutex
-	rules []mappingRule
+	mu     sync.RWMutex
+	exacts []mappingRule
+	regexs []mappingRule
 }
 
 // mappingRule is a normalized form of a single AmpModelMapping entry.
@@ -63,7 +70,8 @@ func (m *DefaultModelMapper) MapModel(requestedModel string) string {
 
 // MapModelCtx checks if a mapping exists for the requested model and if the
 // target model has available local providers. Conditional rules (When) are
-// evaluated against fp; rules with a non-matching condition are skipped.
+// evaluated against fp; an unconditional fallback for the same From is used
+// when no conditional rule matches.
 //
 // If the requested model contains a thinking suffix (e.g., "g25p(8192)"),
 // the suffix is preserved in the returned model name (e.g., "gemini-2.5-pro(8192)").
@@ -74,33 +82,18 @@ func (m *DefaultModelMapper) MapModelCtx(requestedModel string, fp RequestFinger
 		return ""
 	}
 
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
 	// Extract thinking suffix from requested model using ParseSuffix
 	requestResult := thinking.ParseSuffix(requestedModel)
 	baseModel := requestResult.ModelName
 	normalizedBase := strings.ToLower(strings.TrimSpace(baseModel))
 
-	targetModel := ""
-	for _, r := range m.rules {
-		if r.exactFrom != "" {
-			if r.exactFrom != normalizedBase {
-				continue
-			}
-		} else if r.re != nil {
-			if !r.re.MatchString(baseModel) {
-				continue
-			}
-		} else {
-			continue
-		}
-		if !ConditionMatches(r.when, fp) {
-			continue
-		}
-		targetModel = r.to
-		break
+	m.mu.RLock()
+	targetModel := selectTarget(m.exacts, baseModel, normalizedBase, fp, false)
+	if targetModel == "" {
+		targetModel = selectTarget(m.regexs, baseModel, normalizedBase, fp, true)
 	}
+	m.mu.RUnlock()
+
 	if targetModel == "" {
 		return ""
 	}
@@ -125,16 +118,44 @@ func (m *DefaultModelMapper) MapModelCtx(requestedModel string, fp RequestFinger
 	return targetModel
 }
 
+// selectTarget scans rules of one class (exact or regex) and returns the
+// best target model name. Conditional rules win; the first matching
+// unconditional rule is remembered as a fallback. Returns "" if nothing
+// matches.
+func selectTarget(rules []mappingRule, baseModel, normalizedBase string, fp RequestFingerprint, isRegex bool) string {
+	fallback := ""
+	for _, r := range rules {
+		if isRegex {
+			if r.re == nil || !r.re.MatchString(baseModel) {
+				continue
+			}
+		} else {
+			if r.exactFrom == "" || r.exactFrom != normalizedBase {
+				continue
+			}
+		}
+		if r.when == nil {
+			if fallback == "" {
+				fallback = r.to
+			}
+			continue
+		}
+		if ConditionMatches(r.when, fp) {
+			return r.to
+		}
+	}
+	return fallback
+}
+
 // UpdateMappings refreshes the mapping configuration from config.
 // This is called during initialization and on config hot-reload.
 func (m *DefaultModelMapper) UpdateMappings(mappings []config.AmpModelMapping) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	m.rules = make([]mappingRule, 0, len(mappings))
+	m.exacts = m.exacts[:0]
+	m.regexs = m.regexs[:0]
 
-	exact := 0
-	regex := 0
 	conditional := 0
 	for _, mapping := range mappings {
 		from := strings.TrimSpace(mapping.From)
@@ -144,7 +165,14 @@ func (m *DefaultModelMapper) UpdateMappings(mappings []config.AmpModelMapping) {
 			continue
 		}
 
-		rule := mappingRule{to: to, when: mapping.When}
+		// Deep-copy When so the mapper does not share state with the
+		// caller's config object.
+		var when *config.AmpMappingCondition
+		if mapping.When != nil {
+			c := *mapping.When
+			when = &c
+		}
+		rule := mappingRule{to: to, when: when}
 
 		if mapping.Regex {
 			pattern := "(?i)" + from
@@ -154,40 +182,39 @@ func (m *DefaultModelMapper) UpdateMappings(mappings []config.AmpModelMapping) {
 				continue
 			}
 			rule.re = re
-			regex++
-			log.Debugf("amp model regex mapping registered: /%s/ -> %s (when=%v)", from, to, mapping.When)
+			m.regexs = append(m.regexs, rule)
+			log.Debugf("amp model regex mapping registered: /%s/ -> %s (when=%+v)", from, to, when)
 		} else {
 			rule.exactFrom = strings.ToLower(from)
-			exact++
-			log.Debugf("amp model mapping registered: %s -> %s (when=%v)", from, to, mapping.When)
+			m.exacts = append(m.exacts, rule)
+			log.Debugf("amp model mapping registered: %s -> %s (when=%+v)", from, to, when)
 		}
-		if mapping.When != nil {
+		if when != nil {
 			conditional++
 		}
-		m.rules = append(m.rules, rule)
 	}
 
-	if exact > 0 {
-		log.Infof("amp model mapping: loaded %d mapping(s)", exact)
+	if n := len(m.exacts); n > 0 {
+		log.Infof("amp model mapping: loaded %d mapping(s)", n)
 	}
-	if regex > 0 {
-		log.Infof("amp model mapping: loaded %d regex mapping(s)", regex)
+	if n := len(m.regexs); n > 0 {
+		log.Infof("amp model mapping: loaded %d regex mapping(s)", n)
 	}
 	if conditional > 0 {
 		log.Infof("amp model mapping: %d mapping(s) are feature-conditional", conditional)
 	}
 }
 
-// GetMappings returns a snapshot of current exact mappings (for debugging/status).
-// Conditional rules and regex rules are not included; they can be inspected via
-// configuration.
+// GetMappings returns a snapshot of current unconditional exact mappings
+// (for debugging/status). Conditional and regex rules are excluded; they
+// can be inspected via configuration.
 func (m *DefaultModelMapper) GetMappings() map[string]string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
 	result := make(map[string]string)
-	for _, r := range m.rules {
-		if r.exactFrom == "" || r.when != nil {
+	for _, r := range m.exacts {
+		if r.when != nil {
 			continue
 		}
 		// First wins; do not overwrite existing entries.

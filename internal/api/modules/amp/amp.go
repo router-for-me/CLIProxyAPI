@@ -290,37 +290,44 @@ func (m *AmpModule) enableUpstreamProxy(upstreamURL string, settings *config.Amp
 }
 
 // hasModelMappingsChanged compares old and new model mappings.
+// Order is semantically meaningful (conditional rules are matched against
+// per-request fingerprints in declaration order), so this comparison is
+// strictly positional and includes the optional When clause.
 func (m *AmpModule) hasModelMappingsChanged(old *config.AmpCode, new *config.AmpCode) bool {
 	if old == nil {
 		return len(new.ModelMappings) > 0
 	}
-
 	if len(old.ModelMappings) != len(new.ModelMappings) {
 		return true
 	}
-
-	// Build map for efficient and robust comparison
-	type mappingInfo struct {
-		to    string
-		regex bool
-	}
-	oldMap := make(map[string]mappingInfo, len(old.ModelMappings))
-	for _, mapping := range old.ModelMappings {
-		oldMap[strings.TrimSpace(mapping.From)] = mappingInfo{
-			to:    strings.TrimSpace(mapping.To),
-			regex: mapping.Regex,
-		}
-	}
-
-	for _, mapping := range new.ModelMappings {
-		from := strings.TrimSpace(mapping.From)
-		to := strings.TrimSpace(mapping.To)
-		if oldVal, exists := oldMap[from]; !exists || oldVal.to != to || oldVal.regex != mapping.Regex {
+	for i := range old.ModelMappings {
+		if !sameAmpModelMapping(old.ModelMappings[i], new.ModelMappings[i]) {
 			return true
 		}
 	}
-
 	return false
+}
+
+func sameAmpModelMapping(a, b config.AmpModelMapping) bool {
+	if strings.TrimSpace(a.From) != strings.TrimSpace(b.From) {
+		return false
+	}
+	if strings.TrimSpace(a.To) != strings.TrimSpace(b.To) {
+		return false
+	}
+	if a.Regex != b.Regex {
+		return false
+	}
+	return sameAmpMappingCondition(a.When, b.When)
+}
+
+func sameAmpMappingCondition(a, b *config.AmpMappingCondition) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return strings.TrimSpace(a.Feature) == strings.TrimSpace(b.Feature) &&
+		strings.TrimSpace(a.ToolChoice) == strings.TrimSpace(b.ToolChoice) &&
+		strings.TrimSpace(a.UserSuffix) == strings.TrimSpace(b.UserSuffix)
 }
 
 // hasAPIKeyChanged compares old and new API keys.

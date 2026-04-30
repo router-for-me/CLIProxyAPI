@@ -25,7 +25,7 @@ type RequestFingerprint struct {
 	// ToolChoice is the forced tool name extracted from the request body.
 	// Anthropic: tool_choice.name; OpenAI: tool_choice.function.name;
 	// Gemini: toolConfig.functionCallingConfig.allowedFunctionNames[0]
-	// when mode is ANY/AUTO and exactly one tool is allowed.
+	// when mode is ANY and exactly one tool is allowed.
 	ToolChoice string
 
 	// LastUserText is the trimmed text content of the final user-role message,
@@ -35,6 +35,11 @@ type RequestFingerprint struct {
 
 // Feature returns the canonical Amp feature alias inferred from the
 // fingerprint, or an empty string if no high-level feature can be deduced.
+//
+// Currently only "handoff" is inferred. Other Amp features (search,
+// look-at, oracle, painter, titling, ...) can still be matched at the
+// configuration level using ToolChoice / UserSuffix when the user knows
+// the relevant fingerprint.
 func (f RequestFingerprint) Feature() string {
 	if strings.EqualFold(f.ToolChoice, HandoffToolName) {
 		return "handoff"
@@ -78,7 +83,7 @@ func extractToolChoiceName(body []byte) string {
 		names := gjson.GetBytes(body, "toolConfig.functionCallingConfig.allowedFunctionNames")
 		if names.IsArray() {
 			arr := names.Array()
-			if len(arr) == 1 {
+			if len(arr) == 1 && arr[0].Type == gjson.String {
 				return arr[0].String()
 			}
 		}
@@ -87,8 +92,10 @@ func extractToolChoiceName(body []byte) string {
 }
 
 // extractLastUserText returns the last user-role textual content from
-// Anthropic, OpenAI, or Gemini schemas. Only the trailing text is needed
-// for suffix matching; multi-part contents are concatenated in order.
+// Anthropic, OpenAI, or Gemini schemas. For Gemini contents[], a missing
+// role is treated as user (single-turn requests sometimes omit it). Only
+// the trailing text is needed for suffix matching; multi-part contents
+// are concatenated in order.
 func extractLastUserText(body []byte) string {
 	// Anthropic / OpenAI Chat: messages[] with role+content.
 	if msgs := gjson.GetBytes(body, "messages"); msgs.IsArray() {
@@ -106,7 +113,8 @@ func extractLastUserText(body []byte) string {
 		arr := cts.Array()
 		for i := len(arr) - 1; i >= 0; i-- {
 			m := arr[i]
-			if !strings.EqualFold(m.Get("role").String(), "user") {
+			role := m.Get("role").String()
+			if role != "" && !strings.EqualFold(role, "user") {
 				continue
 			}
 			var b strings.Builder
@@ -147,16 +155,18 @@ func ConditionMatches(cond *config.AmpMappingCondition, fp RequestFingerprint) b
 	if cond == nil {
 		return true
 	}
-	if cond.ToolChoice != "" && !strings.EqualFold(cond.ToolChoice, fp.ToolChoice) {
-		return false
-	}
-	if cond.UserSuffix != "" {
-		if !strings.HasSuffix(strings.ToLower(fp.LastUserText), strings.ToLower(cond.UserSuffix)) {
+	if tc := strings.TrimSpace(cond.ToolChoice); tc != "" {
+		if !strings.EqualFold(tc, strings.TrimSpace(fp.ToolChoice)) {
 			return false
 		}
 	}
-	if cond.Feature != "" {
-		want := strings.ToLower(strings.TrimSpace(cond.Feature))
+	if suffix := strings.TrimSpace(cond.UserSuffix); suffix != "" {
+		if !strings.HasSuffix(strings.ToLower(strings.TrimSpace(fp.LastUserText)), strings.ToLower(suffix)) {
+			return false
+		}
+	}
+	if feature := strings.TrimSpace(cond.Feature); feature != "" {
+		want := strings.ToLower(feature)
 		if want == "look_at" {
 			want = "search"
 		}
