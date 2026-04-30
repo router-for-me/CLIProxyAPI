@@ -1038,7 +1038,7 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 	}
 
 	if oldCfg != nil && oldCfg.DisableImageGeneration != cfg.DisableImageGeneration {
-		log.Infof("disable-image-generation updated: %t -> %t", oldCfg.DisableImageGeneration, cfg.DisableImageGeneration)
+		log.Infof("disable-image-generation updated: %v -> %v", oldCfg.DisableImageGeneration, cfg.DisableImageGeneration)
 	}
 
 	applySignatureCacheConfig(oldCfg, cfg)

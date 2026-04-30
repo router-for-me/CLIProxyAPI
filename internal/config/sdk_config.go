@@ -12,11 +12,15 @@ type SDKConfig struct {
 	// LocalModel disables remote model catalog fetching and uses only the embedded models.json catalog.
 	LocalModel bool `yaml:"local-model" json:"local-model"`
 
-	// DisableImageGeneration disables the built-in image_generation tool when true.
-	// When enabled, the server will avoid injecting image_generation into request payloads,
-	// will remove any existing image_generation tool entries from tools arrays, and will
-	// return 404 for /v1/images/generations and /v1/images/edits.
-	DisableImageGeneration bool `yaml:"disable-image-generation" json:"disable-image-generation"`
+	// DisableImageGeneration controls whether the built-in image_generation tool is injected/allowed.
+	//
+	// Supported values:
+	//   - false (default): image_generation is enabled everywhere (normal behavior).
+	//   - true: image_generation is disabled everywhere. The server stops injecting it, removes it from request payloads,
+	//     and returns 404 for /v1/images/generations and /v1/images/edits.
+	//   - "chat": disable image_generation injection for all non-images endpoints (e.g. /v1/responses, /v1/chat/completions),
+	//     while keeping /v1/images/generations and /v1/images/edits enabled and preserving image_generation there.
+	DisableImageGeneration DisableImageGenerationMode `yaml:"disable-image-generation" json:"disable-image-generation"`
 
 	// EnableGeminiCLIEndpoint controls whether Gemini CLI internal endpoints (/v1internal:*) are enabled.
 	// Default is false for safety; when false, /v1internal:* requests are rejected.
