@@ -55,3 +55,31 @@ func TestHasModelMappingsChanged_DetectsAddedWhen(t *testing.T) {
 		t.Error("expected change when When is added")
 	}
 }
+
+// TestCloneAmpCodeSettings_IsolatesFromInPlaceMutation guards the snapshot
+// stored in lastConfig from in-place mutations of the live config slices,
+// which is exactly what management PATCH handlers do.
+func TestCloneAmpCodeSettings_IsolatesFromInPlaceMutation(t *testing.T) {
+	live := config.AmpCode{
+		ModelMappings: []config.AmpModelMapping{
+			{From: "gemini-3-flash-preview", To: "gpt-default"},
+			{From: "gemini-3-flash-preview", To: "gpt-handoff", When: &config.AmpMappingCondition{Feature: "handoff"}},
+		},
+	}
+	snapshot := cloneAmpCodeSettings(live)
+
+	// Simulate management handler doing h.cfg.AmpCode.ModelMappings[idx] = ...
+	live.ModelMappings[0] = config.AmpModelMapping{From: "gemini-3-flash-preview", To: "gpt-mutated"}
+	live.ModelMappings[1].When.Feature = "search"
+
+	mod := &AmpModule{}
+	if !mod.hasModelMappingsChanged(snapshot, &live) {
+		t.Error("snapshot must remain unchanged after in-place mutation; hot reload would otherwise miss PATCH updates")
+	}
+	if snapshot.ModelMappings[0].To != "gpt-default" {
+		t.Errorf("snapshot[0].To mutated: %q", snapshot.ModelMappings[0].To)
+	}
+	if snapshot.ModelMappings[1].When.Feature != "handoff" {
+		t.Errorf("snapshot[1].When.Feature mutated: %q", snapshot.ModelMappings[1].When.Feature)
+	}
+}

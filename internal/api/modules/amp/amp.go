@@ -126,8 +126,11 @@ func (m *AmpModule) Register(ctx modules.Context) error {
 		// Initialize model mapper from config (for routing unavailable models to alternatives)
 		m.modelMapper = NewModelMapper(settings.ModelMappings)
 
-		// Store initial config for partial reload comparison
-		m.lastConfig = new(settings)
+		// Store initial config for partial reload comparison.
+		// Deep-clone so subsequent in-place mutations of the live config
+		// (e.g. management PATCH handlers writing to ModelMappings[idx])
+		// cannot retroactively affect the stored "old" snapshot.
+		m.lastConfig = cloneAmpCodeSettings(settings)
 
 		// Initialize localhost restriction setting (hot-reloadable)
 		m.setRestrictToLocalhost(settings.RestrictManagementToLocalhost)
@@ -248,10 +251,11 @@ func (m *AmpModule) OnConfigUpdated(cfg *config.Config) error {
 
 	}
 
-	// Store current config for next comparison
+	// Store current config for next comparison.
+	// Deep-clone for the same reason as in Register: live config slices
+	// can be mutated in place by management handlers.
 	m.configMu.Lock()
-	settingsCopy := newSettings // copy struct
-	m.lastConfig = &settingsCopy
+	m.lastConfig = cloneAmpCodeSettings(newSettings)
 	m.configMu.Unlock()
 
 	return nil
@@ -328,6 +332,37 @@ func sameAmpMappingCondition(a, b *config.AmpMappingCondition) bool {
 	return strings.TrimSpace(a.Feature) == strings.TrimSpace(b.Feature) &&
 		strings.TrimSpace(a.ToolChoice) == strings.TrimSpace(b.ToolChoice) &&
 		strings.TrimSpace(a.UserSuffix) == strings.TrimSpace(b.UserSuffix)
+}
+
+// cloneAmpCodeSettings returns a deep copy of an AmpCode value suitable for
+// storing as a "previous snapshot" for hot-reload comparison. A shallow
+// copy would share slice backing arrays with the live configuration, so
+// in-place mutations performed by management handlers (e.g. assigning to
+// ModelMappings[idx]) would retroactively change the snapshot and hide
+// real changes from the diff logic.
+func cloneAmpCodeSettings(in config.AmpCode) *config.AmpCode {
+	out := in
+
+	if in.ModelMappings != nil {
+		out.ModelMappings = append([]config.AmpModelMapping(nil), in.ModelMappings...)
+		for i := range out.ModelMappings {
+			if out.ModelMappings[i].When != nil {
+				c := *out.ModelMappings[i].When
+				out.ModelMappings[i].When = &c
+			}
+		}
+	}
+
+	if in.UpstreamAPIKeys != nil {
+		out.UpstreamAPIKeys = append([]config.AmpUpstreamAPIKeyEntry(nil), in.UpstreamAPIKeys...)
+		for i := range out.UpstreamAPIKeys {
+			if in.UpstreamAPIKeys[i].APIKeys != nil {
+				out.UpstreamAPIKeys[i].APIKeys = append([]string(nil), in.UpstreamAPIKeys[i].APIKeys...)
+			}
+		}
+	}
+
+	return &out
 }
 
 // hasAPIKeyChanged compares old and new API keys.

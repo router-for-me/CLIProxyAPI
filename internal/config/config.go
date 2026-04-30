@@ -282,8 +282,10 @@ type AmpModelMapping struct {
 // non-empty fields must match for the condition to be satisfied (logical AND).
 type AmpMappingCondition struct {
 	// Feature is a high-level semantic alias for a known Amp feature.
-	// Recognized values: "handoff", "titling", "painter", "search",
-	// "look_at" (alias of "search"), "oracle". Case-insensitive.
+	// Currently only "handoff" is inferred by the proxy. Other Amp features
+	// (search, look-at, oracle, painter, titling, ...) should be matched
+	// via ToolChoice or UserSuffix when their fingerprint is known.
+	// Case-insensitive.
 	Feature string `yaml:"feature,omitempty" json:"feature,omitempty"`
 
 	// ToolChoice matches when the request forces a specific tool by name via
