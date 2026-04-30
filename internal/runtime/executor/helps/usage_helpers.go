@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	internallogging "github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	"github.com/tidwall/gjson"
@@ -44,6 +45,29 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 	return reporter
 }
 
+// ensureRequestIDOnContext promotes the active request ID onto the standard
+// context.Context before the record is published. The downstream consumer
+// (RequestStatistics.Record) runs in the usage manager's worker goroutine
+// after the request handler has returned, at which point the *gin.Context
+// embedded in the request context may have been recycled by Gin's pool.
+// Reading it from the regular context (immutable) is the only safe option in
+// the async path, so we resolve here while still in the synchronous request
+// lifetime.
+func ensureRequestIDOnContext(ctx context.Context) context.Context {
+	if ctx == nil {
+		return ctx
+	}
+	if internallogging.GetRequestID(ctx) != "" {
+		return ctx
+	}
+	if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil {
+		if id := strings.TrimSpace(internallogging.GetGinRequestID(ginCtx)); id != "" {
+			return internallogging.WithRequestID(ctx, id)
+		}
+	}
+	return ctx
+}
+
 func (r *UsageReporter) Publish(ctx context.Context, detail usage.Detail) {
 	r.publishWithOutcome(ctx, detail, false)
 }
@@ -53,7 +77,7 @@ func (r *UsageReporter) PublishAdditionalModel(ctx context.Context, model string
 	if !ok {
 		return
 	}
-	usage.PublishRecord(ctx, record)
+	usage.PublishRecord(ensureRequestIDOnContext(ctx), record)
 }
 
 func (r *UsageReporter) buildAdditionalModelRecord(model string, detail usage.Detail) (usage.Record, bool) {
@@ -89,8 +113,9 @@ func (r *UsageReporter) publishWithOutcome(ctx context.Context, detail usage.Det
 		return
 	}
 	detail = normalizeUsageDetailTotal(detail)
+	publishCtx := ensureRequestIDOnContext(ctx)
 	r.once.Do(func() {
-		usage.PublishRecord(ctx, r.buildRecord(detail, failed))
+		usage.PublishRecord(publishCtx, r.buildRecord(detail, failed))
 	})
 }
 
@@ -120,8 +145,9 @@ func (r *UsageReporter) EnsurePublished(ctx context.Context) {
 	if r == nil {
 		return
 	}
+	publishCtx := ensureRequestIDOnContext(ctx)
 	r.once.Do(func() {
-		usage.PublishRecord(ctx, r.buildRecord(usage.Detail{}, false))
+		usage.PublishRecord(publishCtx, r.buildRecord(usage.Detail{}, false))
 	})
 }
 
