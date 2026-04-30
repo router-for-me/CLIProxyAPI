@@ -359,7 +359,7 @@ func (s *GitTokenStore) List(_ context.Context) ([]*cliproxyauth.Auth, error) {
 		}
 		auth, err := s.readAuthFile(path, dir)
 		if err != nil {
-			return nil
+			return fmt.Errorf("auth gitstore: read auth file %q: %w", path, err)
 		}
 		if auth != nil {
 			entries = append(entries, auth)
