@@ -2281,3 +2281,18 @@ func ensureModelMaxTokens(body []byte, modelID string) []byte {
 
 	return body
 }
+
+// newClaudeStatusErr builds a statusErr for an Anthropic error response,
+// populating retryAfter on 429 from the response headers. Header parsing
+// lives in helps.ParseClaudeRetryAfter so it can be tested and reused
+// without coupling to executor-package types; this thin constructor wraps
+// the result into the executor's statusErr type at the call site.
+func newClaudeStatusErr(statusCode int, headers http.Header, body []byte) statusErr {
+	err := statusErr{code: statusCode, msg: string(body)}
+	if statusCode == http.StatusTooManyRequests {
+		if d := helps.ParseClaudeRetryAfter(headers, time.Now()); d != nil {
+			err.retryAfter = d
+		}
+	}
+	return err
+}
