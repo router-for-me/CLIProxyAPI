@@ -458,3 +458,207 @@ func TestConvertCodexResponseToClaude_StreamEmptyOutputUsesOutputItemDoneMessage
 		t.Fatalf("expected fallback content from response.output_item.done message; outputs=%q", outputs)
 	}
 }
+
+func TestConvertCodexResponseToClaude_StreamStopReasonMapping(t *testing.T) {
+	tests := []struct {
+		name       string
+		chunks     [][]byte
+		wantReason string
+	}{
+		{
+			name: "Stop maps to end_turn",
+			chunks: [][]byte{
+				[]byte("data: {\"type\":\"response.completed\",\"response\":{\"stop_reason\":\"stop\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}"),
+			},
+			wantReason: "end_turn",
+		},
+		{
+			name: "Incomplete max output maps to max_tokens",
+			chunks: [][]byte{
+				[]byte("data: {\"type\":\"response.incomplete\",\"response\":{\"incomplete_details\":{\"reason\":\"max_output_tokens\"},\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}"),
+			},
+			wantReason: "max_tokens",
+		},
+		{
+			name: "Tool call wins over stop",
+			chunks: [][]byte{
+				[]byte("data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"lookup\"}}"),
+				[]byte("data: {\"type\":\"response.completed\",\"response\":{\"stop_reason\":\"stop\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}"),
+			},
+			wantReason: "tool_use",
+		},
+		{
+			name: "Content filter maps to Claude refusal",
+			chunks: [][]byte{
+				[]byte("data: {\"type\":\"response.incomplete\",\"response\":{\"incomplete_details\":{\"reason\":\"content_filter\"},\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}"),
+			},
+			wantReason: "refusal",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			originalRequest := []byte(`{"tools":[{"name":"lookup","input_schema":{"type":"object","properties":{}}}]}`)
+			var param any
+			var outputs [][]byte
+
+			for _, chunk := range tt.chunks {
+				outputs = append(outputs, ConvertCodexResponseToClaude(ctx, "", originalRequest, nil, chunk, &param)...)
+			}
+
+			got, ok := findClaudeStreamStopReason(outputs)
+			if !ok {
+				t.Fatalf("did not find message_delta stop_reason; outputs=%q", outputs)
+			}
+			if got != tt.wantReason {
+				t.Fatalf("stop_reason = %q, want %q. Outputs=%q", got, tt.wantReason, outputs)
+			}
+		})
+	}
+}
+
+func TestConvertCodexResponseToClaude_StreamStopSequenceMapping(t *testing.T) {
+	ctx := context.Background()
+	originalRequest := []byte(`{"messages":[]}`)
+	var param any
+
+	outputs := ConvertCodexResponseToClaude(ctx, "", originalRequest, nil, []byte("data: {\"type\":\"response.completed\",\"response\":{\"stop_reason\":\"stop\",\"stop_sequence\":\"\\nEND\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}"), &param)
+	messageDelta, ok := findClaudeStreamMessageDelta(outputs)
+	if !ok {
+		t.Fatalf("did not find message_delta; outputs=%q", outputs)
+	}
+	if got := messageDelta.Get("delta.stop_reason").String(); got != "stop_sequence" {
+		t.Fatalf("stop_reason = %q, want stop_sequence. Outputs=%q", got, outputs)
+	}
+	if got := messageDelta.Get("delta.stop_sequence").String(); got != "\nEND" {
+		t.Fatalf("stop_sequence = %q, want newline END. Outputs=%q", got, outputs)
+	}
+}
+
+func TestConvertCodexResponseToClaudeNonStream_StopReasonMapping(t *testing.T) {
+	tests := []struct {
+		name       string
+		response   []byte
+		wantReason string
+	}{
+		{
+			name: "Stop maps to end_turn",
+			response: []byte(`{
+				"type":"response.completed",
+				"response":{
+					"id":"resp_1",
+					"model":"gpt-5",
+					"stop_reason":"stop",
+					"usage":{"input_tokens":1,"output_tokens":1},
+					"output":[]
+				}
+			}`),
+			wantReason: "end_turn",
+		},
+		{
+			name: "Incomplete max output maps to max_tokens",
+			response: []byte(`{
+				"type":"response.incomplete",
+				"response":{
+					"id":"resp_1",
+					"model":"gpt-5",
+					"incomplete_details":{"reason":"max_output_tokens"},
+					"usage":{"input_tokens":1,"output_tokens":1},
+					"output":[]
+				}
+			}`),
+			wantReason: "max_tokens",
+		},
+		{
+			name: "Tool call wins over stop",
+			response: []byte(`{
+				"type":"response.completed",
+				"response":{
+					"id":"resp_1",
+					"model":"gpt-5",
+					"stop_reason":"stop",
+					"usage":{"input_tokens":1,"output_tokens":1},
+					"output":[{"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{}"}]
+				}
+			}`),
+			wantReason: "tool_use",
+		},
+		{
+			name: "Content filter maps to Claude refusal",
+			response: []byte(`{
+				"type":"response.incomplete",
+				"response":{
+					"id":"resp_1",
+					"model":"gpt-5",
+					"incomplete_details":{"reason":"content_filter"},
+					"usage":{"input_tokens":1,"output_tokens":1},
+					"output":[]
+				}
+			}`),
+			wantReason: "refusal",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			originalRequest := []byte(`{"tools":[{"name":"lookup","input_schema":{"type":"object","properties":{}}}]}`)
+			out := ConvertCodexResponseToClaudeNonStream(ctx, "", originalRequest, nil, tt.response, nil)
+			parsed := gjson.ParseBytes(out)
+
+			if got := parsed.Get("stop_reason").String(); got != tt.wantReason {
+				t.Fatalf("stop_reason = %q, want %q. Output: %s", got, tt.wantReason, string(out))
+			}
+		})
+	}
+}
+
+func TestConvertCodexResponseToClaudeNonStream_StopSequenceMapping(t *testing.T) {
+	ctx := context.Background()
+	originalRequest := []byte(`{"messages":[]}`)
+	response := []byte(`{
+		"type":"response.completed",
+		"response":{
+			"id":"resp_1",
+			"model":"gpt-5",
+			"stop_reason":"stop",
+			"stop_sequence":"\nEND",
+			"usage":{"input_tokens":1,"output_tokens":1},
+			"output":[]
+		}
+	}`)
+
+	out := ConvertCodexResponseToClaudeNonStream(ctx, "", originalRequest, nil, response, nil)
+	parsed := gjson.ParseBytes(out)
+
+	if got := parsed.Get("stop_reason").String(); got != "stop_sequence" {
+		t.Fatalf("stop_reason = %q, want stop_sequence. Output: %s", got, string(out))
+	}
+	if got := parsed.Get("stop_sequence").String(); got != "\nEND" {
+		t.Fatalf("stop_sequence = %q, want newline END. Output: %s", got, string(out))
+	}
+}
+
+func findClaudeStreamStopReason(outputs [][]byte) (string, bool) {
+	messageDelta, ok := findClaudeStreamMessageDelta(outputs)
+	if !ok {
+		return "", false
+	}
+	return messageDelta.Get("delta.stop_reason").String(), true
+}
+
+func findClaudeStreamMessageDelta(outputs [][]byte) (gjson.Result, bool) {
+	for _, out := range outputs {
+		for _, line := range strings.Split(string(out), "\n") {
+			if !strings.HasPrefix(line, "data: ") {
+				continue
+			}
+			data := gjson.Parse(strings.TrimPrefix(line, "data: "))
+			if data.Get("type").String() == "message_delta" {
+				return data, true
+			}
+		}
+	}
+	return gjson.Result{}, false
+}
