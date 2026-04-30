@@ -182,6 +182,10 @@ CLIProxyAPI向けのすぐに使えるクロスプラットフォームのクォ
 
 CLIProxyAPI向けの独立した使用量永続化・可視化サービス。CPAデータを定期同期してSQLiteに保存し、集計APIと、使用量や各種統計を確認できる組み込みダッシュボードを提供します。
 
+### [CodexCliPlus](https://github.com/C4AL/CodexCliPlus)
+
+CLIProxyAPIを基盤にしたWindows向けのローカル優先Codex CLIデスクトップ管理プラットフォーム。ローカル設定、アカウント、実行状態の管理を簡素化し、ローカルユーザーにより包括的なCodex CLI体験を提供します。
+
 > [!NOTE]
 > CLIProxyAPIをベースにプロジェクトを開発した場合は、PRを送ってこのリストに追加してください。
 
