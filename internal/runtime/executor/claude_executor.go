@@ -1452,12 +1452,16 @@ func getCloakConfigFromAuth(auth *cliproxyauth.Auth) (string, bool, []string, bo
 // Runs independently of cloaking so system prompts are never touched.
 func applyFixedDeviceID(payload []byte, fixedDeviceID string) []byte {
 	existingUserID := gjson.GetBytes(payload, "metadata.user_id").String()
-	if len(existingUserID) > 0 && existingUserID[0] == '{' {
-		if modified, err := sjson.Set(existingUserID, "device_id", fixedDeviceID); err == nil {
-			payload, _ = sjson.SetBytes(payload, "metadata.user_id", modified)
-		}
+	// sjson.Set errors on non-JSON strings (old-format user_id), leaving them unaffected.
+	modifiedUserID, err := sjson.Set(existingUserID, "device_id", fixedDeviceID)
+	if err != nil {
+		return payload
 	}
-	return payload
+	newPayload, err := sjson.SetBytes(payload, "metadata.user_id", modifiedUserID)
+	if err != nil {
+		return payload
+	}
+	return newPayload
 }
 
 // injectFakeUserID generates and injects a fake user ID into the request metadata.
