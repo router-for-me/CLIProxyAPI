@@ -16,7 +16,8 @@ import (
 // and restricts matches to the given protocol when supplied. Defaults are checked
 // against the original payload when provided. requestedModel carries the client-visible
 // model name before alias resolution so payload rules can target aliases precisely.
-func ApplyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string, payload, original []byte, requestedModel string) []byte {
+// requestPath is the inbound HTTP request path (when available) used for endpoint-scoped gates.
+func ApplyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string, payload, original []byte, requestedModel string, requestPath string) []byte {
 	if cfg == nil || len(payload) == 0 {
 		return payload
 	}
@@ -149,11 +150,32 @@ func ApplyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string
 		}
 	}
 
-	if cfg.DisableImageGeneration {
+	if cfg.DisableImageGeneration != config.DisableImageGenerationOff {
+		if cfg.DisableImageGeneration == config.DisableImageGenerationChat && isImagesEndpointRequestPath(requestPath) {
+			return out
+		}
 		out = removeToolTypeFromPayloadWithRoot(out, root, "image_generation")
 		out = removeToolChoiceFromPayloadWithRoot(out, root, "image_generation")
 	}
 	return out
+}
+
+func isImagesEndpointRequestPath(path string) bool {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return false
+	}
+	if path == "/v1/images/generations" || path == "/v1/images/edits" {
+		return true
+	}
+	// Be tolerant of prefix routers that may report a longer matched route.
+	if strings.HasSuffix(path, "/v1/images/generations") || strings.HasSuffix(path, "/v1/images/edits") {
+		return true
+	}
+	if strings.HasSuffix(path, "/images/generations") || strings.HasSuffix(path, "/images/edits") {
+		return true
+	}
+	return false
 }
 
 func payloadModelRulesMatch(rules []config.PayloadModelRule, protocol string, models []string) bool {
@@ -364,6 +386,24 @@ func PayloadRequestedModel(opts cliproxyexecutor.Options, fallback string) strin
 		return trimmed
 	default:
 		return fallback
+	}
+}
+
+func PayloadRequestPath(opts cliproxyexecutor.Options) string {
+	if len(opts.Metadata) == 0 {
+		return ""
+	}
+	raw, ok := opts.Metadata[cliproxyexecutor.RequestPathMetadataKey]
+	if !ok || raw == nil {
+		return ""
+	}
+	switch v := raw.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	case []byte:
+		return strings.TrimSpace(string(v))
+	default:
+		return ""
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	"github.com/tidwall/gjson"
@@ -97,7 +98,7 @@ func TestImagesEditsMultipartRejectsUnsupportedModel(t *testing.T) {
 }
 
 func TestImagesGenerations_DisableImageGeneration_Returns404(t *testing.T) {
-	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{DisableImageGeneration: true}, nil)
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{DisableImageGeneration: internalconfig.DisableImageGenerationAll}, nil)
 	handler := NewOpenAIAPIHandler(base)
 	body := strings.NewReader(`{"prompt":"draw a square"}`)
 
@@ -109,7 +110,7 @@ func TestImagesGenerations_DisableImageGeneration_Returns404(t *testing.T) {
 }
 
 func TestImagesEdits_DisableImageGeneration_Returns404(t *testing.T) {
-	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{DisableImageGeneration: true}, nil)
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{DisableImageGeneration: internalconfig.DisableImageGenerationAll}, nil)
 	handler := NewOpenAIAPIHandler(base)
 	body := strings.NewReader(`{"prompt":"edit this","images":[{"image_url":"data:image/png;base64,AA=="}]}`)
 
@@ -117,5 +118,29 @@ func TestImagesEdits_DisableImageGeneration_Returns404(t *testing.T) {
 
 	if resp.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want %d: %s", resp.Code, http.StatusNotFound, resp.Body.String())
+	}
+}
+
+func TestImagesGenerations_DisableImageGenerationChat_DoesNotReturn404(t *testing.T) {
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{DisableImageGeneration: internalconfig.DisableImageGenerationChat}, nil)
+	handler := NewOpenAIAPIHandler(base)
+	body := strings.NewReader(`{"model":"gpt-5.4-mini","prompt":"draw a square"}`)
+
+	resp := performImagesEndpointRequest(t, imagesGenerationsPath, "application/json", body, handler.ImagesGenerations)
+
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d: %s", resp.Code, http.StatusBadRequest, resp.Body.String())
+	}
+}
+
+func TestImagesEdits_DisableImageGenerationChat_DoesNotReturn404(t *testing.T) {
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{DisableImageGeneration: internalconfig.DisableImageGenerationChat}, nil)
+	handler := NewOpenAIAPIHandler(base)
+	body := strings.NewReader(`{"model":"gpt-5.4-mini","prompt":"edit this","images":[{"image_url":"data:image/png;base64,AA=="}]}`)
+
+	resp := performImagesEndpointRequest(t, imagesEditsPath, "application/json", body, handler.ImagesEdits)
+
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d: %s", resp.Code, http.StatusBadRequest, resp.Body.String())
 	}
 }
