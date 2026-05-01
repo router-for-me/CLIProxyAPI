@@ -293,6 +293,16 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 		}
 	}
 
+	// Gemini/Vertex accepts assistant/model turns in history, but some model
+	// surfaces reject requests whose final turn is model-authored prefill.
+	contents := gjson.GetBytes(out, "contents")
+	if contents.Exists() && contents.IsArray() {
+		arr := contents.Array()
+		if len(arr) > 0 && arr[len(arr)-1].Get("role").String() == "model" {
+			out, _ = sjson.DeleteBytes(out, fmt.Sprintf("contents.%d", len(arr)-1))
+		}
+	}
+
 	// tools -> tools[].functionDeclarations + tools[].googleSearch/codeExecution/urlContext passthrough
 	tools := gjson.GetBytes(rawJSON, "tools")
 	if tools.IsArray() && len(tools.Array()) > 0 {
