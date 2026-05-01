@@ -238,6 +238,74 @@ func TestPromptRules_API_PutEmptyBodyClears(t *testing.T) {
 	}
 }
 
+// TestPromptRules_API_Put_RollbackOnPersistFailure regression-guards the
+// prompt-rules write path: applyPromptRulesAndPersist must restore both
+// h.cfg.PromptRules and the runtime snapshot if persistLocked fails to write
+// config.yaml, otherwise the API returns 500 but live requests are rewritten
+// by rules that were never saved
+// (Codex review pull/3178#pullrequestreview-4210925408).
+func TestPromptRules_API_Put_RollbackOnPersistFailure(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	// Make the config "file" actually a directory so SaveConfigPreserveComments
+	// fails inside persistLocked. The test handler does not pre-seed the file
+	// here, since we need the path to be a directory throughout.
+	if err := os.Mkdir(configPath, 0o755); err != nil {
+		t.Fatalf("mkdir as path: %v", err)
+	}
+
+	cfg := &config.Config{
+		PromptRules: []config.PromptRule{
+			{
+				Name: "before", Enabled: true, Target: "system", Action: "inject",
+				Content: "before-content", Position: "append",
+			},
+		},
+	}
+	cfg.NormalizePromptRules()
+	manager := coreauth.NewManager(nil, nil, nil)
+	h := NewHandler(cfg, configPath, manager)
+
+	helps.UpdatePromptRulesSnapshot(cfg.PromptRules)
+	t.Cleanup(func() { helps.UpdatePromptRulesSnapshot(nil) })
+
+	body := []config.PromptRule{
+		{
+			Name: "after", Enabled: true, Target: "system", Action: "inject",
+			Content: "after-content", Position: "append",
+		},
+	}
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = newJSONReq(t, http.MethodPut, "/v0/management/prompt-rules", body)
+	h.PutPromptRules(ctx)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 from persist failure; got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	if got := h.cfg.PromptRules; len(got) != 1 || got[0].Name != "before" {
+		t.Fatalf("h.cfg.PromptRules must be rolled back; got %+v", got)
+	}
+
+	out := helps.ApplyPromptRules(
+		"openai",
+		"gpt-5",
+		[]byte(`{"messages":[{"role":"user","content":"hi"}]}`),
+		"/v1/chat/completions",
+		"",
+	)
+	got := string(out)
+	if !strings.Contains(got, "before-content") {
+		t.Fatalf("rollback failed: pre-PUT rule should still fire; payload: %s", got)
+	}
+	if strings.Contains(got, "after-content") {
+		t.Fatalf("rollback failed: rejected body's rule fired anyway; payload: %s", got)
+	}
+}
+
 // TestPromptRules_API_PutConfigYAML_SnapshotRollbackOnWriteFailure regression
 // guards against a Codex P1 finding: PutConfigYAML's temp-file
 // LoadConfigOptional call mutates the global prompt-rules snapshot via

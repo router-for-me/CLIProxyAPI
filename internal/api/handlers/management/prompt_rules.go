@@ -38,9 +38,7 @@ func (h *Handler) PutPromptRules(c *gin.Context) {
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.cfg.PromptRules = candidate.PromptRules
-	helps.UpdatePromptRulesSnapshot(h.cfg.PromptRules)
-	h.persistLocked(c)
+	h.applyPromptRulesAndPersist(c, candidate.PromptRules)
 }
 
 // PatchPromptRule upserts a single rule. The body shape mirrors other list
@@ -87,9 +85,7 @@ func (h *Handler) PatchPromptRule(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	h.cfg.PromptRules = candidate.PromptRules
-	helps.UpdatePromptRulesSnapshot(h.cfg.PromptRules)
-	h.persistLocked(c)
+	h.applyPromptRulesAndPersist(c, candidate.PromptRules)
 }
 
 // DeletePromptRule removes a rule by ?name= or ?index=.
@@ -110,9 +106,7 @@ func (h *Handler) DeletePromptRule(c *gin.Context) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "item not found"})
 			return
 		}
-		h.cfg.PromptRules = out
-		helps.UpdatePromptRulesSnapshot(h.cfg.PromptRules)
-		h.persistLocked(c)
+		h.applyPromptRulesAndPersist(c, out)
 		return
 	}
 	if idxStr := strings.TrimSpace(c.Query("index")); idxStr != "" {
@@ -121,13 +115,31 @@ func (h *Handler) DeletePromptRule(c *gin.Context) {
 		// use the parsed index to splice the slice without further bounds
 		// checking on the raw string.
 		if idx, err := strconv.Atoi(idxStr); err == nil && idx >= 0 && idx < len(h.cfg.PromptRules) {
-			h.cfg.PromptRules = append(h.cfg.PromptRules[:idx], h.cfg.PromptRules[idx+1:]...)
-			helps.UpdatePromptRulesSnapshot(h.cfg.PromptRules)
-			h.persistLocked(c)
+			next := append([]config.PromptRule(nil), h.cfg.PromptRules[:idx]...)
+			next = append(next, h.cfg.PromptRules[idx+1:]...)
+			h.applyPromptRulesAndPersist(c, next)
 			return
 		}
 	}
 	c.JSON(http.StatusBadRequest, gin.H{"error": "missing name or index"})
+}
+
+// applyPromptRulesAndPersist installs `next` into h.cfg.PromptRules, refreshes
+// the runtime snapshot, then asks persistLocked to write config.yaml. If the
+// disk write fails, both the in-memory rules and the runtime snapshot are
+// rolled back to their pre-call state — otherwise the API returning 500 would
+// leave the runtime rewriting requests with rules that were never saved
+// (Codex review pull/3178#pullrequestreview-4210925408).
+//
+// Caller MUST already hold h.mu. persistLocked writes the response body.
+func (h *Handler) applyPromptRulesAndPersist(c *gin.Context, next []config.PromptRule) {
+	prev := append([]config.PromptRule(nil), h.cfg.PromptRules...)
+	h.cfg.PromptRules = next
+	helps.UpdatePromptRulesSnapshot(h.cfg.PromptRules)
+	if !h.persistLocked(c) {
+		h.cfg.PromptRules = prev
+		helps.UpdatePromptRulesSnapshot(prev)
+	}
 }
 
 func readPromptRulesBody(c *gin.Context) ([]config.PromptRule, bool) {
