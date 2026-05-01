@@ -149,20 +149,35 @@ func (h *Handler) PutConfigYAML(c *gin.Context) {
 	defer func() {
 		_ = os.Remove(tempFile)
 	}()
-	_, err = config.LoadConfigOptional(tempFile, false)
-	if err != nil {
+	// LoadConfigOptional below side-effects the global prompt-rules snapshot
+	// via SanitizePromptRules. If any later step (WriteConfig / LoadConfig)
+	// fails we must restore the previous snapshot, otherwise live requests
+	// would be rewritten by rules that were never persisted to disk. Hold
+	// h.mu across the entire validate -> write -> reload sequence so the
+	// captured snapshot baseline can't drift under us.
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	prevPromptRules := append([]config.PromptRule(nil), h.cfg.PromptRules...)
+	rollbackPromptRules := func() {
+		helps.UpdatePromptRulesSnapshot(prevPromptRules)
+	}
+	if _, err = config.LoadConfigOptional(tempFile, false); err != nil {
+		rollbackPromptRules()
 		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "invalid_config", "message": err.Error()})
 		return
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
 	if WriteConfig(h.configFilePath, body) != nil {
+		rollbackPromptRules()
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "write_failed", "message": "failed to write config"})
 		return
 	}
 	// Reload into handler to keep memory in sync
 	newCfg, err := config.LoadConfig(h.configFilePath)
 	if err != nil {
+		// Disk now holds the new YAML, but we couldn't reload it. Roll the
+		// snapshot back to match h.cfg (still the old in-memory rules) so the
+		// runtime is at least self-consistent until the operator investigates.
+		rollbackPromptRules()
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "reload_failed", "message": err.Error()})
 		return
 	}

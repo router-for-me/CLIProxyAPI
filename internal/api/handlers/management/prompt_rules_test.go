@@ -7,10 +7,12 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
@@ -233,5 +235,78 @@ func TestPromptRules_API_PutEmptyBodyClears(t *testing.T) {
 	}
 	if len(h.cfg.PromptRules) != 0 {
 		t.Fatalf("expected list cleared; got %+v", h.cfg.PromptRules)
+	}
+}
+
+// TestPromptRules_API_PutConfigYAML_SnapshotRollbackOnWriteFailure regression
+// guards against a Codex P1 finding: PutConfigYAML's temp-file
+// LoadConfigOptional call mutates the global prompt-rules snapshot via
+// SanitizePromptRules before the new YAML is committed to disk. If WriteConfig
+// then fails, the runtime would otherwise be rewriting requests with rules
+// that were never persisted. The handler must restore the previous snapshot
+// on every error path after the temp-file load.
+func TestPromptRules_API_PutConfigYAML_SnapshotRollbackOnWriteFailure(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	// Make the config "file" actually a directory so WriteConfig's
+	// os.OpenFile(..., O_WRONLY) fails with EISDIR. Temp-file creation in the
+	// same parent directory still works, so PutConfigYAML reaches
+	// LoadConfigOptional (which mutates the snapshot) before the failure.
+	if err := os.Mkdir(configPath, 0o755); err != nil {
+		t.Fatalf("mkdir as path: %v", err)
+	}
+
+	cfg := &config.Config{
+		PromptRules: []config.PromptRule{
+			{
+				Name: "before", Enabled: true, Target: "system", Action: "inject",
+				Content: "before-content", Position: "append",
+			},
+		},
+	}
+	cfg.NormalizePromptRules()
+	manager := coreauth.NewManager(nil, nil, nil)
+	h := NewHandler(cfg, configPath, manager)
+
+	helps.UpdatePromptRulesSnapshot(cfg.PromptRules)
+	t.Cleanup(func() { helps.UpdatePromptRulesSnapshot(nil) })
+
+	yamlBody := []byte(`port: 8080
+prompt-rules:
+  - name: after
+    enabled: true
+    target: system
+    action: inject
+    content: after-content
+    position: append
+`)
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodPut, "/v0/management/config", bytes.NewReader(yamlBody))
+	ctx.Request.Header.Set("Content-Type", "application/yaml")
+	h.PutConfigYAML(ctx)
+
+	if rec.Code == http.StatusOK {
+		t.Fatalf("expected non-200 because configPath is a directory; got 200 body=%s", rec.Body.String())
+	}
+
+	// Apply prompt rules through the public engine using the active snapshot.
+	// If the rollback worked, the OLD rule fires and the NEW rule does not.
+	out := helps.ApplyPromptRules(
+		"openai",
+		"gpt-5",
+		[]byte(`{"messages":[{"role":"user","content":"hi"}]}`),
+		"/v1/chat/completions",
+		"",
+	)
+	got := string(out)
+	if !strings.Contains(got, "before-content") {
+		t.Fatalf("rollback failed: pre-PUT rule should still fire; payload: %s", got)
+	}
+	if strings.Contains(got, "after-content") {
+		t.Fatalf("rollback failed: rejected PUT body's rule fired anyway; payload: %s", got)
 	}
 }
