@@ -208,7 +208,33 @@ func TestSchedulerPick_CodexWebsocketPrefersWebsocketEnabledSubset(t *testing.T)
 	}
 }
 
-func TestSchedulerPick_MixedProvidersUsesProviderRotationOverReadyCandidates(t *testing.T) {
+func TestSchedulerPick_CodexWebsocketPrefersWebsocketEnabledAcrossPriorities(t *testing.T) {
+	t.Parallel()
+
+	scheduler := newSchedulerForTest(
+		&RoundRobinSelector{},
+		&Auth{ID: "codex-http", Provider: "codex", Attributes: map[string]string{"priority": "10"}},
+		&Auth{ID: "codex-ws-a", Provider: "codex", Attributes: map[string]string{"priority": "0", "websockets": "true"}},
+		&Auth{ID: "codex-ws-b", Provider: "codex", Attributes: map[string]string{"priority": "0", "websockets": "true"}},
+	)
+
+	ctx := cliproxyexecutor.WithDownstreamWebsocket(context.Background())
+	want := []string{"codex-ws-a", "codex-ws-b", "codex-ws-a"}
+	for index, wantID := range want {
+		got, errPick := scheduler.pickSingle(ctx, "codex", "", cliproxyexecutor.Options{}, nil)
+		if errPick != nil {
+			t.Fatalf("pickSingle() #%d error = %v", index, errPick)
+		}
+		if got == nil {
+			t.Fatalf("pickSingle() #%d auth = nil", index)
+		}
+		if got.ID != wantID {
+			t.Fatalf("pickSingle() #%d auth.ID = %q, want %q", index, got.ID, wantID)
+		}
+	}
+}
+
+func TestSchedulerPick_MixedProvidersUsesWeightedProviderRotationOverReadyCandidates(t *testing.T) {
 	t.Parallel()
 
 	scheduler := newSchedulerForTest(
@@ -218,8 +244,8 @@ func TestSchedulerPick_MixedProvidersUsesProviderRotationOverReadyCandidates(t *
 		&Auth{ID: "claude-a", Provider: "claude"},
 	)
 
-	wantProviders := []string{"gemini", "claude", "gemini", "claude"}
-	wantIDs := []string{"gemini-a", "claude-a", "gemini-b", "claude-a"}
+	wantProviders := []string{"gemini", "gemini", "claude", "gemini"}
+	wantIDs := []string{"gemini-a", "gemini-b", "claude-a", "gemini-a"}
 	for index := range wantProviders {
 		got, provider, errPick := scheduler.pickMixed(context.Background(), []string{"gemini", "claude"}, "", cliproxyexecutor.Options{}, nil)
 		if errPick != nil {
@@ -272,7 +298,7 @@ func TestSchedulerPick_MixedProvidersPrefersHighestPriorityTier(t *testing.T) {
 	}
 }
 
-func TestManager_PickNextMixed_UsesProviderRotationBeforeCredentialRotation(t *testing.T) {
+func TestManager_PickNextMixed_UsesWeightedProviderRotationBeforeCredentialRotation(t *testing.T) {
 	t.Parallel()
 
 	manager := NewManager(nil, &RoundRobinSelector{}, nil)
@@ -288,8 +314,8 @@ func TestManager_PickNextMixed_UsesProviderRotationBeforeCredentialRotation(t *t
 		t.Fatalf("Register(claude-a) error = %v", errRegister)
 	}
 
-	wantProviders := []string{"gemini", "claude", "gemini", "claude"}
-	wantIDs := []string{"gemini-a", "claude-a", "gemini-b", "claude-a"}
+	wantProviders := []string{"gemini", "gemini", "claude", "gemini"}
+	wantIDs := []string{"gemini-a", "gemini-b", "claude-a", "gemini-a"}
 	for index := range wantProviders {
 		got, _, provider, errPick := manager.pickNextMixed(context.Background(), []string{"gemini", "claude"}, "", cliproxyexecutor.Options{}, map[string]struct{}{})
 		if errPick != nil {
@@ -304,6 +330,39 @@ func TestManager_PickNextMixed_UsesProviderRotationBeforeCredentialRotation(t *t
 		if got.ID != wantIDs[index] {
 			t.Fatalf("pickNextMixed() #%d auth.ID = %q, want %q", index, got.ID, wantIDs[index])
 		}
+	}
+}
+
+func TestManager_PickNextMixed_DisallowFreeAuthSkipsCodexFreePlan(t *testing.T) {
+	t.Parallel()
+
+	model := "gpt-5.4-mini"
+	registerSchedulerModels(t, "codex", model, "codex-a-free", "codex-b-plus")
+
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.executors["codex"] = schedulerTestExecutor{}
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: "codex-a-free", Provider: "codex", Attributes: map[string]string{"plan_type": "free"}}); errRegister != nil {
+		t.Fatalf("Register(codex-a-free) error = %v", errRegister)
+	}
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: "codex-b-plus", Provider: "codex", Attributes: map[string]string{"plan_type": "plus"}}); errRegister != nil {
+		t.Fatalf("Register(codex-b-plus) error = %v", errRegister)
+	}
+
+	opts := cliproxyexecutor.Options{
+		Metadata: map[string]any{cliproxyexecutor.DisallowFreeAuthMetadataKey: true},
+	}
+	got, _, provider, errPick := manager.pickNextMixed(context.Background(), []string{"codex"}, model, opts, map[string]struct{}{})
+	if errPick != nil {
+		t.Fatalf("pickNextMixed() error = %v", errPick)
+	}
+	if got == nil {
+		t.Fatalf("pickNextMixed() auth = nil")
+	}
+	if provider != "codex" {
+		t.Fatalf("pickNextMixed() provider = %q, want %q", provider, "codex")
+	}
+	if got.ID != "codex-b-plus" {
+		t.Fatalf("pickNextMixed() auth.ID = %q, want %q", got.ID, "codex-b-plus")
 	}
 }
 
@@ -399,8 +458,8 @@ func TestManager_PickNextMixed_UsesSchedulerRotation(t *testing.T) {
 		t.Fatalf("Register(claude-a) error = %v", errRegister)
 	}
 
-	wantProviders := []string{"gemini", "claude", "gemini", "claude"}
-	wantIDs := []string{"gemini-a", "claude-a", "gemini-b", "claude-a"}
+	wantProviders := []string{"gemini", "gemini", "claude", "gemini"}
+	wantIDs := []string{"gemini-a", "gemini-b", "claude-a", "gemini-a"}
 	for index := range wantProviders {
 		got, _, provider, errPick := manager.pickNextMixed(context.Background(), []string{"gemini", "claude"}, "", cliproxyexecutor.Options{}, nil)
 		if errPick != nil {

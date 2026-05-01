@@ -59,10 +59,30 @@ type ClaudeAuth struct {
 // Returns:
 //   - *ClaudeAuth: A new Claude authentication service instance
 func NewClaudeAuth(cfg *config.Config) *ClaudeAuth {
+	return NewClaudeAuthWithProxyURL(cfg, "")
+}
+
+// NewClaudeAuthWithProxyURL creates a new Anthropic authentication service with a proxy override.
+// proxyURL takes precedence over cfg.ProxyURL when non-empty.
+func NewClaudeAuthWithProxyURL(cfg *config.Config, proxyURL string) *ClaudeAuth {
+	effectiveProxyURL := strings.TrimSpace(proxyURL)
+	var sdkCfg *config.SDKConfig
+	if cfg != nil {
+		sdkCfgCopy := cfg.SDKConfig
+		if effectiveProxyURL == "" {
+			effectiveProxyURL = strings.TrimSpace(cfg.ProxyURL)
+		}
+		sdkCfgCopy.ProxyURL = effectiveProxyURL
+		sdkCfg = &sdkCfgCopy
+	} else if effectiveProxyURL != "" {
+		sdkCfgCopy := config.SDKConfig{ProxyURL: effectiveProxyURL}
+		sdkCfg = &sdkCfgCopy
+	}
+
 	// Use custom HTTP client with Firefox TLS fingerprint to bypass
 	// Cloudflare's bot detection on Anthropic domains
 	return &ClaudeAuth{
-		httpClient: NewAnthropicHttpClient(&cfg.SDKConfig),
+		httpClient: NewAnthropicHttpClient(sdkCfg),
 	}
 }
 
@@ -88,7 +108,7 @@ func (o *ClaudeAuth) GenerateAuthURL(state string, pkceCodes *PKCECodes) (string
 		"client_id":             {ClientID},
 		"response_type":         {"code"},
 		"redirect_uri":          {RedirectURI},
-		"scope":                 {"org:create_api_key user:profile user:inference"},
+		"scope":                 {"user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"},
 		"code_challenge":        {pkceCodes.CodeChallenge},
 		"code_challenge_method": {"S256"},
 		"state":                 {state},

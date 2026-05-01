@@ -15,6 +15,7 @@ type Record struct {
 	APIKey      string
 	AuthID      string
 	AuthIndex   string
+	AuthType    string
 	Source      string
 	RequestedAt time.Time
 	Latency     time.Duration

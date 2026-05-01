@@ -68,6 +68,10 @@ type Config struct {
 	// DisableCooling disables quota cooldown scheduling when true.
 	DisableCooling bool `yaml:"disable-cooling" json:"disable-cooling"`
 
+	// AuthAutoRefreshWorkers overrides the size of the core auth auto-refresh worker pool.
+	// When <= 0, the default worker count is used.
+	AuthAutoRefreshWorkers int `yaml:"auth-auto-refresh-workers" json:"auth-auto-refresh-workers"`
+
 	// RequestRetry defines the retry times when the request failed.
 	RequestRetry int `yaml:"request-retry" json:"request-retry"`
 	// MaxRetryCredentials defines the maximum number of credentials to try for a failed request.
@@ -84,6 +88,13 @@ type Config struct {
 
 	// WebsocketAuth enables or disables authentication for the WebSocket API.
 	WebsocketAuth bool `yaml:"ws-auth" json:"ws-auth"`
+
+	// AntigravitySignatureCacheEnabled controls whether signature cache validation is enabled for thinking blocks.
+	// When true (default), cached signatures are preferred and validated.
+	// When false, client signatures are used directly after normalization (bypass mode).
+	AntigravitySignatureCacheEnabled *bool `yaml:"antigravity-signature-cache-enabled,omitempty" json:"antigravity-signature-cache-enabled,omitempty"`
+
+	AntigravitySignatureBypassStrict *bool `yaml:"antigravity-signature-bypass-strict,omitempty" json:"antigravity-signature-bypass-strict,omitempty"`
 
 	// GeminiKey defines Gemini API key configurations with optional routing overrides.
 	GeminiKey []GeminiKey `yaml:"gemini-api-key" json:"gemini-api-key"`
@@ -105,6 +116,10 @@ type Config struct {
 	// CodexHeaderDefaults configures fallback headers for Codex OAuth model requests.
 	// These are used only when the client does not send its own headers.
 	CodexHeaderDefaults CodexHeaderDefaults `yaml:"codex-header-defaults" json:"codex-header-defaults"`
+
+	// CodexOAuth configures the browser-based Codex OAuth callback flow used by the
+	// management UI. This is primarily useful for Docker, reverse proxies, and LAN access.
+	CodexOAuth CodexOAuthConfig `yaml:"codex-oauth,omitempty" json:"codex-oauth,omitempty"`
 
 	// ClaudeKey defines a list of Claude API key configurations as specified in the YAML configuration file.
 	ClaudeKey []ClaudeKey `yaml:"claude-api-key" json:"claude-api-key"`
@@ -169,6 +184,29 @@ type CodexHeaderDefaults struct {
 	BetaFeatures string `yaml:"beta-features" json:"beta-features"`
 }
 
+// CodexOAuthConfig configures the public callback URLs used by the management UI's
+// browser-based Codex OAuth flow.
+type CodexOAuthConfig struct {
+	// PublicBaseURL overrides the externally reachable management base URL used after
+	// the browser hits the OAuth callback forwarder. Example: "http://192.168.1.10:8318".
+	// When empty, the current request host/scheme is used.
+	PublicBaseURL string `yaml:"public-base-url,omitempty" json:"public-base-url,omitempty"`
+
+	// RedirectURL overrides the public OAuth redirect URI sent to OpenAI for WebUI logins.
+	// When empty, the server derives "http://<public-host>:<public-callback-port>/auth/callback".
+	RedirectURL string `yaml:"redirect-url,omitempty" json:"redirect-url,omitempty"`
+
+	// PublicCallbackPort overrides the public port advertised in the derived WebUI callback URL.
+	// This is useful when Docker or a reverse proxy maps the internal 1455 listener to a
+	// different externally reachable port. Defaults to 1455 when unset.
+	PublicCallbackPort int `yaml:"public-callback-port,omitempty" json:"public-callback-port,omitempty"`
+
+	// BindHost overrides the interface used by the temporary local callback forwarder.
+	// Use "0.0.0.0" inside Docker/LAN mode when the callback must be reachable externally.
+	// Defaults to "127.0.0.1" when unset.
+	BindHost string `yaml:"bind-host,omitempty" json:"bind-host,omitempty"`
+}
+
 // TLSConfig holds HTTPS server settings.
 type TLSConfig struct {
 	// Enable toggles HTTPS server mode.
@@ -211,6 +249,11 @@ type QuotaExceeded struct {
 
 	// SwitchPreviewModel indicates whether to automatically switch to a preview model when a quota is exceeded.
 	SwitchPreviewModel bool `yaml:"switch-preview-model" json:"switch-preview-model"`
+
+	// AntigravityCredits enables credits-based last-resort fallback for Claude models.
+	// When all free-tier auths are exhausted (429/503), the conductor retries with
+	// an auth that has available Google One AI credits.
+	AntigravityCredits bool `yaml:"antigravity-credits" json:"antigravity-credits"`
 }
 
 // RoutingConfig configures how credentials are selected for requests.
@@ -218,6 +261,24 @@ type RoutingConfig struct {
 	// Strategy selects the credential selection strategy.
 	// Supported values: "round-robin" (default), "fill-first".
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
+
+	// ClaudeCodeSessionAffinity enables session-sticky routing for Claude Code clients.
+	// When enabled, requests with the same session ID (extracted from metadata.user_id)
+	// are routed to the same auth credential when available.
+	// Deprecated: Use SessionAffinity instead for universal session support.
+	ClaudeCodeSessionAffinity bool `yaml:"claude-code-session-affinity,omitempty" json:"claude-code-session-affinity,omitempty"`
+
+	// SessionAffinity enables universal session-sticky routing for all clients.
+	// Session IDs are extracted from multiple sources:
+	// metadata.user_id (Claude Code session format), X-Session-ID, Session_id (Codex),
+	// X-Amp-Thread-Id (Amp CLI thread), X-Client-Request-Id (PI), metadata.user_id,
+	// conversation_id, or message hash.
+	// Automatic failover is always enabled when bound auth becomes unavailable.
+	SessionAffinity bool `yaml:"session-affinity,omitempty" json:"session-affinity,omitempty"`
+
+	// SessionAffinityTTL specifies how long session-to-auth bindings are retained.
+	// Default: 1h. Accepts duration strings like "30m", "1h", "2h30m".
+	SessionAffinityTTL string `yaml:"session-affinity-ttl,omitempty" json:"session-affinity-ttl,omitempty"`
 }
 
 // OAuthModelAlias defines a model ID alias for a specific channel.
@@ -257,8 +318,8 @@ type AmpCode struct {
 	UpstreamAPIKey string `yaml:"upstream-api-key" json:"upstream-api-key"`
 
 	// UpstreamAPIKeys maps client API keys (from top-level api-keys) to upstream API keys.
-	// When a client authenticates with a key that matches an entry, that upstream key is used.
-	// If no match is found, falls back to UpstreamAPIKey (default behavior).
+	// When a request is authenticated with one of the APIKeys, the corresponding UpstreamAPIKey
+	// is used for the upstream Amp request.
 	UpstreamAPIKeys []AmpUpstreamAPIKeyEntry `yaml:"upstream-api-keys,omitempty" json:"upstream-api-keys,omitempty"`
 
 	// RestrictManagementToLocalhost restricts Amp management routes (/api/user, /api/threads, etc.)
@@ -380,6 +441,11 @@ type ClaudeKey struct {
 
 	// Cloak configures request cloaking for non-Claude-Code clients.
 	Cloak *CloakConfig `yaml:"cloak,omitempty" json:"cloak,omitempty"`
+
+	// ExperimentalCCHSigning enables opt-in final-body cch signing for cloaked
+	// Claude /v1/messages requests. It is disabled by default so upstream seed
+	// changes do not alter the proxy's legacy behavior.
+	ExperimentalCCHSigning bool `yaml:"experimental-cch-signing,omitempty" json:"experimental-cch-signing,omitempty"`
 }
 
 func (k ClaudeKey) GetAPIKey() string  { return k.APIKey }
@@ -545,6 +611,9 @@ type OpenAICompatibility struct {
 	// Higher values are preferred; defaults to 0.
 	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
 
+	// Disabled prevents this provider from being used for routing.
+	Disabled bool `yaml:"disabled,omitempty" json:"disabled,omitempty"`
+
 	// Prefix optionally namespaces model aliases for this provider (e.g., "teamA/kimi-k2").
 	Prefix string `yaml:"prefix,omitempty" json:"prefix,omitempty"`
 
@@ -631,6 +700,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.ErrorLogsMaxFiles = 10
 	cfg.UsageStatisticsEnabled = false
 	cfg.DisableCooling = false
+	cfg.DisableImageGeneration = DisableImageGenerationOff
 	cfg.Pprof.Enable = false
 	cfg.Pprof.Addr = DefaultPprofAddr
 	cfg.AmpCode.RestrictManagementToLocalhost = false // Default to false: API key auth is sufficient
@@ -972,6 +1042,7 @@ func (cfg *Config) SanitizeKiroKeys() {
 }
 
 // SanitizeGeminiKeys deduplicates and normalizes Gemini credentials.
+// It uses API key + base URL as the uniqueness key.
 func (cfg *Config) SanitizeGeminiKeys() {
 	if cfg == nil {
 		return
@@ -990,10 +1061,11 @@ func (cfg *Config) SanitizeGeminiKeys() {
 		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
 		entry.Headers = NormalizeHeaders(entry.Headers)
 		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
-		if _, exists := seen[entry.APIKey]; exists {
+		uniqueKey := entry.APIKey + "|" + entry.BaseURL
+		if _, exists := seen[uniqueKey]; exists {
 			continue
 		}
-		seen[entry.APIKey] = struct{}{}
+		seen[uniqueKey] = struct{}{}
 		out = append(out, entry)
 	}
 	cfg.GeminiKey = out

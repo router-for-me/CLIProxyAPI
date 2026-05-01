@@ -69,10 +69,14 @@ func TestFileSynthesizer_Synthesize_ValidAuthFile(t *testing.T) {
 
 	// Create a valid auth file
 	authData := map[string]any{
-		"type":            "claude",
-		"email":           "test@example.com",
-		"proxy_url":       "http://proxy.local",
-		"prefix":          "test-prefix",
+		"type":      "claude",
+		"email":     "test@example.com",
+		"proxy_url": "http://proxy.local",
+		"prefix":    "test-prefix",
+		"headers": map[string]string{
+			" X-Test ": " value ",
+			"X-Empty":  "  ",
+		},
 		"disable_cooling": true,
 		"request_retry":   2,
 	}
@@ -109,6 +113,12 @@ func TestFileSynthesizer_Synthesize_ValidAuthFile(t *testing.T) {
 	}
 	if auths[0].ProxyURL != "http://proxy.local" {
 		t.Errorf("expected proxy_url http://proxy.local, got %s", auths[0].ProxyURL)
+	}
+	if got := auths[0].Attributes["header:X-Test"]; got != "value" {
+		t.Errorf("expected header:X-Test value, got %q", got)
+	}
+	if _, ok := auths[0].Attributes["header:X-Empty"]; ok {
+		t.Errorf("expected header:X-Empty to be absent, got %q", auths[0].Attributes["header:X-Empty"])
 	}
 	if v, ok := auths[0].Metadata["disable_cooling"].(bool); !ok || !v {
 		t.Errorf("expected disable_cooling true, got %v", auths[0].Metadata["disable_cooling"])
@@ -450,8 +460,9 @@ func TestSynthesizeGeminiVirtualAuths_MultiProject(t *testing.T) {
 		Prefix:   "test-prefix",
 		ProxyURL: "http://proxy.local",
 		Attributes: map[string]string{
-			"source": "test-source",
-			"path":   "/path/to/auth",
+			"source":       "test-source",
+			"path":         "/path/to/auth",
+			"header:X-Tra": "value",
 		},
 	}
 	metadata := map[string]any{
@@ -505,6 +516,9 @@ func TestSynthesizeGeminiVirtualAuths_MultiProject(t *testing.T) {
 		}
 		if v.Attributes["runtime_only"] != "true" {
 			t.Error("expected runtime_only=true")
+		}
+		if got := v.Attributes["header:X-Tra"]; got != "value" {
+			t.Errorf("expected virtual %d header:X-Tra %q, got %q", i, "value", got)
 		}
 		if v.Attributes["gemini_virtual_parent"] != "primary-id" {
 			t.Errorf("expected gemini_virtual_parent=primary-id, got %s", v.Attributes["gemini_virtual_parent"])

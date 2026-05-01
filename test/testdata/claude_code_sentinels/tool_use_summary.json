@@ -1,0 +1,7 @@
+{
+  "type": "tool_use_summary",
+  "summary": "Searched in auth/",
+  "preceding_tool_use_ids": ["toolu_1", "toolu_2"],
+  "uuid": "33333333-3333-4333-8333-333333333333",
+  "session_id": "sess_123"
+}

@@ -109,10 +109,19 @@ wait_for_service() {
   sleep 2
 }
 
-if [[ "${1:-}" == "--with-usage" ]]; then
-  WITH_USAGE=true
-  export_stats_api_secret
-fi
+case "${1:-}" in
+  "")
+    ;;
+  "--with-usage")
+    WITH_USAGE=true
+    export_stats_api_secret
+    ;;
+  *)
+    echo "Error: unknown option '${1}'. Did you mean '--with-usage'?"
+    echo "Usage: ./docker-build.sh [--with-usage]"
+    exit 1
+    ;;
+esac
 
 # --- Step 1: Choose Environment ---
 echo "Please select an option:"

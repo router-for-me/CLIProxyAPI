@@ -21,7 +21,6 @@ import (
 //   - "gemini" for Google's Gemini family
 //   - "codex" for OpenAI GPT-compatible providers
 //   - "claude" for Anthropic models
-//   - "qwen" for Alibaba's Qwen models
 //   - "openai-compatibility" for external OpenAI-compatible providers
 //
 // Parameters:
@@ -105,6 +104,9 @@ func IsOpenAICompatibilityAlias(modelName string, cfg *config.Config) bool {
 	}
 
 	for _, compat := range cfg.OpenAICompatibility {
+		if compat.Disabled {
+			continue
+		}
 		for _, model := range compat.Models {
 			if model.Alias == modelName {
 				return true
@@ -130,6 +132,9 @@ func GetOpenAICompatibilityConfig(alias string, cfg *config.Config) (*config.Ope
 	}
 
 	for _, compat := range cfg.OpenAICompatibility {
+		if compat.Disabled {
+			continue
+		}
 		for _, model := range compat.Models {
 			if model.Alias == alias {
 				return &compat, &model
