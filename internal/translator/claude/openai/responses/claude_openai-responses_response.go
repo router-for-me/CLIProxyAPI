@@ -26,7 +26,9 @@ type claudeToResponsesState struct {
 	FuncNames   map[int]string // index -> function name
 	FuncCallIDs map[int]string // index -> call id
 	// message text aggregation
-	TextBuf strings.Builder
+	TextBuf          strings.Builder
+	TextBlockBuf     strings.Builder
+	CurrentTextIndex int
 	// reasoning state
 	ReasoningActive    bool
 	ReasoningItemID    string
@@ -86,6 +88,8 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 			st.InFuncBlock = false
 			st.CurrentMsgID = ""
 			st.CurrentFCID = ""
+			st.CurrentTextIndex = 0
+			st.TextBlockBuf.Reset()
 			st.ReasoningItemID = ""
 			st.ReasoningIndex = 0
 			st.ReasoningPartAdded = false
@@ -128,15 +132,19 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 		if typ == "text" {
 			// open message item + content part
 			st.InTextBlock = true
-			st.CurrentMsgID = fmt.Sprintf("msg_%s_0", st.ResponseID)
+			st.CurrentTextIndex = idx
+			st.TextBlockBuf.Reset()
+			st.CurrentMsgID = fmt.Sprintf("msg_%s_%d", st.ResponseID, idx)
 			item := []byte(`{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"id":"","type":"message","status":"in_progress","content":[],"role":"assistant"}}`)
 			item, _ = sjson.SetBytes(item, "sequence_number", nextSeq())
+			item, _ = sjson.SetBytes(item, "output_index", idx)
 			item, _ = sjson.SetBytes(item, "item.id", st.CurrentMsgID)
 			out = append(out, emitEvent("response.output_item.added", item))
 
 			part := []byte(`{"type":"response.content_part.added","sequence_number":0,"item_id":"","output_index":0,"content_index":0,"part":{"type":"output_text","annotations":[],"logprobs":[],"text":""}}`)
 			part, _ = sjson.SetBytes(part, "sequence_number", nextSeq())
 			part, _ = sjson.SetBytes(part, "item_id", st.CurrentMsgID)
+			part, _ = sjson.SetBytes(part, "output_index", idx)
 			out = append(out, emitEvent("response.content_part.added", part))
 		} else if typ == "tool_use" {
 			st.InFuncBlock = true
@@ -185,10 +193,12 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 				msg := []byte(`{"type":"response.output_text.delta","sequence_number":0,"item_id":"","output_index":0,"content_index":0,"delta":"","logprobs":[]}`)
 				msg, _ = sjson.SetBytes(msg, "sequence_number", nextSeq())
 				msg, _ = sjson.SetBytes(msg, "item_id", st.CurrentMsgID)
+				msg, _ = sjson.SetBytes(msg, "output_index", st.CurrentTextIndex)
 				msg, _ = sjson.SetBytes(msg, "delta", t.String())
 				out = append(out, emitEvent("response.output_text.delta", msg))
 				// aggregate text for response.output
 				st.TextBuf.WriteString(t.String())
+				st.TextBlockBuf.WriteString(t.String())
 			}
 		} else if dt == "input_json_delta" {
 			idx := int(root.Get("index").Int())
@@ -220,19 +230,22 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 	case "content_block_stop":
 		idx := int(root.Get("index").Int())
 		if st.InTextBlock {
-			text := st.TextBuf.String()
+			text := st.TextBlockBuf.String()
 			done := []byte(`{"type":"response.output_text.done","sequence_number":0,"item_id":"","output_index":0,"content_index":0,"text":"","logprobs":[]}`)
 			done, _ = sjson.SetBytes(done, "sequence_number", nextSeq())
 			done, _ = sjson.SetBytes(done, "item_id", st.CurrentMsgID)
+			done, _ = sjson.SetBytes(done, "output_index", st.CurrentTextIndex)
 			done, _ = sjson.SetBytes(done, "text", text)
 			out = append(out, emitEvent("response.output_text.done", done))
 			partDone := []byte(`{"type":"response.content_part.done","sequence_number":0,"item_id":"","output_index":0,"content_index":0,"part":{"type":"output_text","annotations":[],"logprobs":[],"text":""}}`)
 			partDone, _ = sjson.SetBytes(partDone, "sequence_number", nextSeq())
 			partDone, _ = sjson.SetBytes(partDone, "item_id", st.CurrentMsgID)
+			partDone, _ = sjson.SetBytes(partDone, "output_index", st.CurrentTextIndex)
 			partDone, _ = sjson.SetBytes(partDone, "part.text", text)
 			out = append(out, emitEvent("response.content_part.done", partDone))
 			final := []byte(`{"type":"response.output_item.done","sequence_number":0,"output_index":0,"item":{"id":"","type":"message","status":"completed","content":[{"type":"output_text","text":""}],"role":"assistant"}}`)
 			final, _ = sjson.SetBytes(final, "sequence_number", nextSeq())
+			final, _ = sjson.SetBytes(final, "output_index", st.CurrentTextIndex)
 			final, _ = sjson.SetBytes(final, "item.id", st.CurrentMsgID)
 			final, _ = sjson.SetBytes(final, "item.content.0.text", text)
 			out = append(out, emitEvent("response.output_item.done", final))
