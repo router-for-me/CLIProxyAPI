@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	"bufio"
 	"bytes"
 	"context"
@@ -85,7 +86,7 @@ type codexConversationRunConfig struct {
 	CodexBody       []byte
 	Request         cliproxyexecutor.Request
 	Options         cliproxyexecutor.Options
-	Reporter        *usageReporter
+	Reporter        *helps.UsageReporter
 }
 
 func codexUsesConversationAPI(auth *cliproxyauth.Auth) bool {
@@ -805,7 +806,6 @@ func (e *CodexExecutor) executeConversationNonStream(ctx context.Context, auth *
 	if err = ensureCodexConversationSession(ctx, httpClient, auth, httpReq, apiKey); err != nil {
 		return resp, err
 	}
-	logCodexRequestDiagnostics(ctx, auth, run.Request, run.Options, httpReq.Header, conversationBody, codexContinuity{})
 
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
@@ -813,7 +813,7 @@ func (e *CodexExecutor) executeConversationNonStream(ctx context.Context, auth *
 		authLabel = auth.Label
 		authType, authValue = auth.AccountInfo()
 	}
-	recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
+	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 		URL:       targetURL,
 		Method:    http.MethodPost,
 		Headers:   httpReq.Header.Clone(),
@@ -827,7 +827,7 @@ func (e *CodexExecutor) executeConversationNonStream(ctx context.Context, auth *
 
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
-		recordAPIResponseError(ctx, e.cfg, err)
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return resp, err
 	}
 	defer func() {
@@ -836,10 +836,10 @@ func (e *CodexExecutor) executeConversationNonStream(ctx context.Context, auth *
 		}
 	}()
 
-	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		b, _ := io.ReadAll(httpResp.Body)
-		appendAPIResponseChunk(ctx, e.cfg, b)
+		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
 		err = newCodexStatusErr(httpResp.StatusCode, b)
 		return resp, err
 	}
@@ -850,11 +850,11 @@ func (e *CodexExecutor) executeConversationNonStream(ctx context.Context, auth *
 	var completedData []byte
 	for scanner.Scan() {
 		line := bytes.Clone(scanner.Bytes())
-		appendAPIResponseChunk(ctx, e.cfg, line)
+		helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 
 		events, _, consumeErr := state.consumeLine(line)
 		if consumeErr != nil {
-			recordAPIResponseError(ctx, e.cfg, consumeErr)
+			helps.RecordAPIResponseError(ctx, e.cfg, consumeErr)
 			return resp, consumeErr
 		}
 		for i := range events {
@@ -866,13 +866,13 @@ func (e *CodexExecutor) executeConversationNonStream(ctx context.Context, auth *
 			if gjson.GetBytes(data, "type").String() == "response.completed" {
 				completedData = bytes.Clone(data)
 				if run.Reporter != nil {
-					run.Reporter.ensurePublished(ctx)
+					run.Reporter.EnsurePublished(ctx)
 				}
 			}
 		}
 	}
 	if errScan := scanner.Err(); errScan != nil {
-		recordAPIResponseError(ctx, e.cfg, errScan)
+		helps.RecordAPIResponseError(ctx, e.cfg, errScan)
 		return resp, errScan
 	}
 	if len(completedData) == 0 && state.Started {
@@ -889,7 +889,7 @@ func (e *CodexExecutor) executeConversationNonStream(ctx context.Context, auth *
 			if gjson.GetBytes(data, "type").String() == "response.completed" {
 				completedData = bytes.Clone(data)
 				if run.Reporter != nil {
-					run.Reporter.ensurePublished(ctx)
+					run.Reporter.EnsurePublished(ctx)
 				}
 				break
 			}
@@ -932,7 +932,6 @@ func (e *CodexExecutor) executeConversationStream(ctx context.Context, auth *cli
 	if err = ensureCodexConversationSession(ctx, httpClient, auth, httpReq, apiKey); err != nil {
 		return nil, err
 	}
-	logCodexRequestDiagnostics(ctx, auth, run.Request, run.Options, httpReq.Header, conversationBody, codexContinuity{})
 
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
@@ -940,7 +939,7 @@ func (e *CodexExecutor) executeConversationStream(ctx context.Context, auth *cli
 		authLabel = auth.Label
 		authType, authValue = auth.AccountInfo()
 	}
-	recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
+	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 		URL:       targetURL,
 		Method:    http.MethodPost,
 		Headers:   httpReq.Header.Clone(),
@@ -954,21 +953,21 @@ func (e *CodexExecutor) executeConversationStream(ctx context.Context, auth *cli
 
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
-		recordAPIResponseError(ctx, e.cfg, err)
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return nil, err
 	}
 
-	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		data, readErr := io.ReadAll(httpResp.Body)
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("codex conversation bridge: close response body error: %v", errClose)
 		}
 		if readErr != nil {
-			recordAPIResponseError(ctx, e.cfg, readErr)
+			helps.RecordAPIResponseError(ctx, e.cfg, readErr)
 			return nil, readErr
 		}
-		appendAPIResponseChunk(ctx, e.cfg, data)
+		helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 		return nil, newCodexStatusErr(httpResp.StatusCode, data)
 	}
 
@@ -987,13 +986,13 @@ func (e *CodexExecutor) executeConversationStream(ctx context.Context, auth *cli
 		var param any
 		for scanner.Scan() {
 			line := bytes.Clone(scanner.Bytes())
-			appendAPIResponseChunk(ctx, e.cfg, line)
+			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 
 			events, _, consumeErr := state.consumeLine(line)
 			if consumeErr != nil {
-				recordAPIResponseError(ctx, e.cfg, consumeErr)
+				helps.RecordAPIResponseError(ctx, e.cfg, consumeErr)
 				if run.Reporter != nil {
-					run.Reporter.publishFailure(ctx)
+					run.Reporter.PublishFailure(ctx)
 				}
 				out <- cliproxyexecutor.StreamChunk{Err: consumeErr}
 				return
@@ -1003,7 +1002,7 @@ func (e *CodexExecutor) executeConversationStream(ctx context.Context, auth *cli
 				if bytes.HasPrefix(event, dataTag) {
 					data := bytes.TrimSpace(event[len(dataTag):])
 					if gjson.GetBytes(data, "type").String() == "response.completed" && run.Reporter != nil {
-						run.Reporter.ensurePublished(ctx)
+						run.Reporter.EnsurePublished(ctx)
 					}
 				}
 
@@ -1015,9 +1014,9 @@ func (e *CodexExecutor) executeConversationStream(ctx context.Context, auth *cli
 		}
 
 		if errScan := scanner.Err(); errScan != nil {
-			recordAPIResponseError(ctx, e.cfg, errScan)
+			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
 			if run.Reporter != nil {
-				run.Reporter.publishFailure(ctx)
+				run.Reporter.PublishFailure(ctx)
 			}
 			out <- cliproxyexecutor.StreamChunk{Err: errScan}
 			return
@@ -1027,7 +1026,7 @@ func (e *CodexExecutor) executeConversationStream(ctx context.Context, auth *cli
 			events, completeErr := state.emitCompleted()
 			if completeErr != nil {
 				if run.Reporter != nil {
-					run.Reporter.publishFailure(ctx)
+					run.Reporter.PublishFailure(ctx)
 				}
 				out <- cliproxyexecutor.StreamChunk{Err: completeErr}
 				return
@@ -1037,7 +1036,7 @@ func (e *CodexExecutor) executeConversationStream(ctx context.Context, auth *cli
 				if bytes.HasPrefix(event, dataTag) {
 					data := bytes.TrimSpace(event[len(dataTag):])
 					if gjson.GetBytes(data, "type").String() == "response.completed" && run.Reporter != nil {
-						run.Reporter.ensurePublished(ctx)
+						run.Reporter.EnsurePublished(ctx)
 					}
 				}
 				chunks := sdktranslator.TranslateStream(ctx, run.To, run.From, run.Request.Model, run.OriginalPayload, run.CodexBody, event, &param)
@@ -1055,7 +1054,7 @@ func (e *CodexExecutor) executeConversationStream(ctx context.Context, auth *cli
 		if !state.Completed {
 			errClosed := statusErr{code: http.StatusRequestTimeout, msg: "codex conversation bridge: stream closed before assistant response"}
 			if run.Reporter != nil {
-				run.Reporter.publishFailure(ctx)
+				run.Reporter.PublishFailure(ctx)
 			}
 			out <- cliproxyexecutor.StreamChunk{Err: errClosed}
 		}

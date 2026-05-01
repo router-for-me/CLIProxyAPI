@@ -360,7 +360,6 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 			Reporter:        reporter,
 		})
 	}
-	}
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses/compact"
 	httpReq, err := e.cacheHelper(ctx, from, url, req, body)
@@ -870,7 +869,7 @@ func normalizeCodexError(statusCode int, body []byte) (int, string) {
 		return http.StatusBadGateway, "codex upstream returned a Cloudflare challenge page. This Codex OAuth credential is using the ChatGPT web endpoint and requires browser verification/cookies from the current network. Re-login Codex in a browser on this machine/network or switch to a codex-api-key or other OpenAI-compatible upstream."
 	}
 	if looksLikeHTMLDocument(body) {
-		return statusCode, summarizeErrorBody("", body)
+		return statusCode, helps.SummarizeErrorBody("", body)
 	}
 	return statusCode, string(body)
 }

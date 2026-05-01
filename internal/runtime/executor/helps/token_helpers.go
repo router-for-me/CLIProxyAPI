@@ -234,3 +234,52 @@ func addIfNotEmpty(segments *[]string, value string) {
 		*segments = append(*segments, trimmed)
 	}
 }
+
+// CountClaudeChatTokens approximates prompt tokens for Claude messages payloads.
+func CountClaudeChatTokens(enc tokenizer.Codec, payload []byte) (int64, error) {
+	if enc == nil {
+		return 0, fmt.Errorf("encoder is nil")
+	}
+	if len(payload) == 0 {
+		return 0, nil
+	}
+
+	root := gjson.ParseBytes(payload)
+	segments := make([]string, 0, 32)
+
+	if sys := root.Get("system"); sys.Exists() {
+		if sys.Type == gjson.String {
+			addIfNotEmpty(&segments, sys.String())
+		} else if sys.IsArray() {
+			sys.ForEach(func(_, item gjson.Result) bool {
+				addIfNotEmpty(&segments, item.Get("text").String())
+				return true
+			})
+		}
+	}
+
+	messages := root.Get("messages")
+	if messages.Exists() && messages.IsArray() {
+		messages.ForEach(func(_, msg gjson.Result) bool {
+			addIfNotEmpty(&segments, msg.Get("role").String())
+			collectOpenAIContent(msg.Get("content"), &segments)
+			return true
+		})
+	}
+
+	joined := strings.TrimSpace(strings.Join(segments, "\n"))
+	if joined == "" {
+		return 0, nil
+	}
+
+	count, err := enc.Count(joined)
+	if err != nil {
+		return 0, err
+	}
+	return int64(count), nil
+}
+
+// CollectOpenAIContent extracts text segments from an OpenAI-style content field.
+func CollectOpenAIContent(content gjson.Result, segments *[]string) {
+	collectOpenAIContent(content, segments)
+}

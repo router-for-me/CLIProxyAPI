@@ -17,6 +17,7 @@ import (
 	"github.com/google/uuid"
 	claudeauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/claude"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
@@ -127,18 +128,18 @@ func ensureCodexConversationSession(ctx context.Context, client *http.Client, au
 func newCodexConversationHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, rawURL string) *http.Client {
 	parsed, err := neturl.Parse(strings.TrimSpace(rawURL))
 	if err != nil || parsed == nil {
-		return newProxyAwareHTTPClient(ctx, cfg, auth, 0)
+		return helps.NewProxyAwareHTTPClient(ctx, cfg, auth, 0)
 	}
 	if !strings.EqualFold(parsed.Scheme, "https") {
-		return newProxyAwareHTTPClient(ctx, cfg, auth, 0)
+		return helps.NewProxyAwareHTTPClient(ctx, cfg, auth, 0)
 	}
 
 	host := strings.ToLower(strings.TrimSpace(parsed.Hostname()))
 	if host == "" {
-		return newProxyAwareHTTPClient(ctx, cfg, auth, 0)
+		return helps.NewProxyAwareHTTPClient(ctx, cfg, auth, 0)
 	}
 	if !strings.Contains(host, "chatgpt.com") && !strings.Contains(host, "openai.com") {
-		return newProxyAwareHTTPClient(ctx, cfg, auth, 0)
+		return helps.NewProxyAwareHTTPClient(ctx, cfg, auth, 0)
 	}
 
 	sdkCfg := &config.SDKConfig{}
@@ -237,7 +238,7 @@ func codexConversationValidateAccessToken(ctx context.Context, client *http.Clie
 	case http.StatusUnauthorized, http.StatusForbidden:
 		return false, nil
 	default:
-		return false, statusErr{code: resp.StatusCode, msg: summarizeErrorBody(resp.Header.Get("Content-Type"), body)}
+		return false, statusErr{code: resp.StatusCode, msg: helps.SummarizeErrorBody(resp.Header.Get("Content-Type"), body)}
 	}
 }
 

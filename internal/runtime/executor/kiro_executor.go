@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	"bufio"
 	"bytes"
 	"context"
@@ -298,7 +299,7 @@ func newKiroHTTPClientWithPooling(ctx context.Context, cfg *config.Config, auth 
 	// If proxy is configured, use the existing proxy-aware client (doesn't pool)
 	if proxyURL != "" {
 		log.Debugf("kiro: using proxy-aware HTTP client (proxy=%s)", proxyURL)
-		return newProxyAwareHTTPClient(ctx, cfg, auth, timeout)
+		return helps.NewProxyAwareHTTPClient(ctx, cfg, auth, timeout)
 	}
 
 	// No proxy - use pooled client for better performance
@@ -660,8 +661,8 @@ func (e *KiroExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 		return e.handleWebSearch(ctx, auth, req, opts, accessToken, profileArn)
 	}
 
-	reporter := newUsageReporter(ctx, e.Identifier(), req.Model, auth)
-	defer reporter.trackFailure(ctx, &err)
+	reporter := helps.NewUsageReporter(ctx, e.Identifier(), req.Model, auth)
+	defer reporter.TrackFailure(ctx, &err)
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("kiro")
@@ -692,7 +693,7 @@ func (e *KiroExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 // - CodeWhisperer endpoint (AI_EDITOR origin) uses Kiro IDE quota
 // Also supports multi-endpoint fallback similar to Antigravity implementation.
 // tokenKey is used for rate limiting and cooldown tracking.
-func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, accessToken, profileArn string, kiroPayload, body []byte, from, to sdktranslator.Format, reporter *usageReporter, currentOrigin, kiroModelID string, isAgentic, isChatOnly bool, tokenKey string) (cliproxyexecutor.Response, error) {
+func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, accessToken, profileArn string, kiroPayload, body []byte, from, to sdktranslator.Format, reporter *helps.UsageReporter, currentOrigin, kiroModelID string, isAgentic, isChatOnly bool, tokenKey string) (cliproxyexecutor.Response, error) {
 	var resp cliproxyexecutor.Response
 	maxRetries := 2 // Allow retries for token refresh + endpoint fallback
 	rateLimiter := kiroauth.GetGlobalRateLimiter()
@@ -756,7 +757,7 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 				authLabel = auth.Label
 				authType, authValue = auth.AccountInfo()
 			}
-			recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
+			helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 				URL:       url,
 				Method:    http.MethodPost,
 				Headers:   httpReq.Header.Clone(),
@@ -785,7 +786,7 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 					return resp, statusErr{code: http.StatusGatewayTimeout, msg: "upstream request timed out"}
 				}
 
-				recordAPIResponseError(ctx, e.cfg, err)
+				helps.RecordAPIResponseError(ctx, e.cfg, err)
 
 				// Enhanced socket retry: Check if error is retryable (network timeout, connection reset, etc.)
 				retryCfg := defaultRetryConfig()
@@ -798,14 +799,14 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 
 				return resp, err
 			}
-			recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+			helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 
 			// Handle 429 errors (quota exhausted) - try next endpoint
 			// Each endpoint has its own quota pool, so we can try different endpoints
 			if httpResp.StatusCode == 429 {
 				respBody, _ := io.ReadAll(httpResp.Body)
 				_ = httpResp.Body.Close()
-				appendAPIResponseChunk(ctx, e.cfg, respBody)
+				helps.AppendAPIResponseChunk(ctx, e.cfg, respBody)
 
 				// Record failure and set cooldown for 429
 				rateLimiter.MarkTokenFailed(tokenKey)
@@ -817,7 +818,7 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 				last429Err = statusErr{code: httpResp.StatusCode, msg: string(respBody)}
 
 				log.Warnf("kiro: %s endpoint quota exhausted (429), will try next endpoint, body: %s",
-					endpointConfig.Name, summarizeErrorBody(httpResp.Header.Get("Content-Type"), respBody))
+					endpointConfig.Name, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), respBody))
 
 				// Break inner retry loop to try next endpoint (which has different quota)
 				break
@@ -828,7 +829,7 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 			if httpResp.StatusCode >= 500 && httpResp.StatusCode < 600 {
 				respBody, _ := io.ReadAll(httpResp.Body)
 				_ = httpResp.Body.Close()
-				appendAPIResponseChunk(ctx, e.cfg, respBody)
+				helps.AppendAPIResponseChunk(ctx, e.cfg, respBody)
 
 				retryCfg := defaultRetryConfig()
 				// Check if this specific 5xx code is retryable (502, 503, 504)
@@ -856,7 +857,7 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 			if httpResp.StatusCode == 401 {
 				respBody, _ := io.ReadAll(httpResp.Body)
 				_ = httpResp.Body.Close()
-				appendAPIResponseChunk(ctx, e.cfg, respBody)
+				helps.AppendAPIResponseChunk(ctx, e.cfg, respBody)
 
 				log.Warnf("kiro: received 401 error, attempting token refresh")
 				refreshedAuth, refreshErr := e.Refresh(ctx, auth)
@@ -882,7 +883,7 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 					log.Infof("kiro: token refreshed successfully, no retries remaining")
 				}
 
-				log.Warnf("kiro request error, status: 401, body: %s", summarizeErrorBody(httpResp.Header.Get("Content-Type"), respBody))
+				log.Warnf("kiro request error, status: 401, body: %s", helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), respBody))
 				return resp, statusErr{code: httpResp.StatusCode, msg: string(respBody)}
 			}
 
@@ -890,7 +891,7 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 			if httpResp.StatusCode == 402 {
 				respBody, _ := io.ReadAll(httpResp.Body)
 				_ = httpResp.Body.Close()
-				appendAPIResponseChunk(ctx, e.cfg, respBody)
+				helps.AppendAPIResponseChunk(ctx, e.cfg, respBody)
 
 				log.Warnf("kiro: received 402 (monthly limit). Upstream body: %s", string(respBody))
 
@@ -903,10 +904,10 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 			if httpResp.StatusCode == 403 {
 				respBody, _ := io.ReadAll(httpResp.Body)
 				_ = httpResp.Body.Close()
-				appendAPIResponseChunk(ctx, e.cfg, respBody)
+				helps.AppendAPIResponseChunk(ctx, e.cfg, respBody)
 
 				// Log the 403 error details for debugging
-				log.Warnf("kiro: received 403 error (attempt %d/%d), body: %s", attempt+1, maxRetries+1, summarizeErrorBody(httpResp.Header.Get("Content-Type"), respBody))
+				log.Warnf("kiro: received 403 error (attempt %d/%d), body: %s", attempt+1, maxRetries+1, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), respBody))
 
 				respBodyStr := string(respBody)
 
@@ -955,8 +956,8 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 
 			if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 				b, _ := io.ReadAll(httpResp.Body)
-				appendAPIResponseChunk(ctx, e.cfg, b)
-				log.Debugf("kiro request error, status: %d, body: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
+				helps.AppendAPIResponseChunk(ctx, e.cfg, b)
+				log.Debugf("kiro request error, status: %d, body: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
 				err = statusErr{code: httpResp.StatusCode, msg: string(b)}
 				if errClose := httpResp.Body.Close(); errClose != nil {
 					log.Errorf("response body close error: %v", errClose)
@@ -972,7 +973,7 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 
 			content, toolUses, usageInfo, stopReason, err := e.parseEventStream(httpResp.Body)
 			if err != nil {
-				recordAPIResponseError(ctx, e.cfg, err)
+				helps.RecordAPIResponseError(ctx, e.cfg, err)
 				return resp, err
 			}
 
@@ -1007,8 +1008,8 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 			// 3. Update TotalTokens
 			usageInfo.TotalTokens = usageInfo.InputTokens + usageInfo.OutputTokens
 
-			appendAPIResponseChunk(ctx, e.cfg, []byte(content))
-			reporter.publish(ctx, usageInfo)
+			helps.AppendAPIResponseChunk(ctx, e.cfg, []byte(content))
+			reporter.Publish(ctx, usageInfo)
 
 			// Record success for rate limiting
 			rateLimiter.MarkTokenSuccess(tokenKey)
@@ -1016,7 +1017,7 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 
 			// Build response in Claude format for Kiro translator
 			// stopReason is extracted from upstream response by parseEventStream
-			requestedModel := payloadRequestedModel(opts, req.Model)
+			requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 			kiroResponse := kiroclaude.BuildClaudeResponse(content, toolUses, requestedModel, usageInfo, stopReason)
 			out := sdktranslator.TranslateNonStream(ctx, to, from, requestedModel, bytes.Clone(opts.OriginalRequest), body, kiroResponse, nil)
 			resp = cliproxyexecutor.Response{Payload: []byte(out)}
@@ -1100,8 +1101,8 @@ func (e *KiroExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 		return &cliproxyexecutor.StreamResult{Chunks: streamWebSearch}, nil
 	}
 
-	reporter := newUsageReporter(ctx, e.Identifier(), req.Model, auth)
-	defer reporter.trackFailure(ctx, &err)
+	reporter := helps.NewUsageReporter(ctx, e.Identifier(), req.Model, auth)
+	defer reporter.TrackFailure(ctx, &err)
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("kiro")
@@ -1135,7 +1136,7 @@ func (e *KiroExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 // - CodeWhisperer endpoint (AI_EDITOR origin) uses Kiro IDE quota
 // Also supports multi-endpoint fallback similar to Antigravity implementation.
 // tokenKey is used for rate limiting and cooldown tracking.
-func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, accessToken, profileArn string, kiroPayload, body []byte, from sdktranslator.Format, reporter *usageReporter, currentOrigin, kiroModelID string, isAgentic, isChatOnly bool, tokenKey string) (<-chan cliproxyexecutor.StreamChunk, error) {
+func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, accessToken, profileArn string, kiroPayload, body []byte, from sdktranslator.Format, reporter *helps.UsageReporter, currentOrigin, kiroModelID string, isAgentic, isChatOnly bool, tokenKey string) (<-chan cliproxyexecutor.StreamChunk, error) {
 	maxRetries := 2 // Allow retries for token refresh + endpoint fallback
 	rateLimiter := kiroauth.GetGlobalRateLimiter()
 	cooldownMgr := kiroauth.GetGlobalCooldownManager()
@@ -1199,7 +1200,7 @@ func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliprox
 				authLabel = auth.Label
 				authType, authValue = auth.AccountInfo()
 			}
-			recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
+			helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 				URL:       url,
 				Method:    http.MethodPost,
 				Headers:   httpReq.Header.Clone(),
@@ -1214,7 +1215,7 @@ func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliprox
 			httpClient := newKiroHTTPClientWithPooling(ctx, e.cfg, auth, 0)
 			httpResp, err := httpClient.Do(httpReq)
 			if err != nil {
-				recordAPIResponseError(ctx, e.cfg, err)
+				helps.RecordAPIResponseError(ctx, e.cfg, err)
 
 				// Enhanced socket retry for streaming: Check if error is retryable (network timeout, connection reset, etc.)
 				retryCfg := defaultRetryConfig()
@@ -1227,14 +1228,14 @@ func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliprox
 
 				return nil, err
 			}
-			recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+			helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 
 			// Handle 429 errors (quota exhausted) - try next endpoint
 			// Each endpoint has its own quota pool, so we can try different endpoints
 			if httpResp.StatusCode == 429 {
 				respBody, _ := io.ReadAll(httpResp.Body)
 				_ = httpResp.Body.Close()
-				appendAPIResponseChunk(ctx, e.cfg, respBody)
+				helps.AppendAPIResponseChunk(ctx, e.cfg, respBody)
 
 				// Record failure and set cooldown for 429
 				rateLimiter.MarkTokenFailed(tokenKey)
@@ -1246,7 +1247,7 @@ func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliprox
 				last429Err = statusErr{code: httpResp.StatusCode, msg: string(respBody)}
 
 				log.Warnf("kiro: stream %s endpoint quota exhausted (429), will try next endpoint, body: %s",
-					endpointConfig.Name, summarizeErrorBody(httpResp.Header.Get("Content-Type"), respBody))
+					endpointConfig.Name, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), respBody))
 
 				// Break inner retry loop to try next endpoint (which has different quota)
 				break
@@ -1257,7 +1258,7 @@ func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliprox
 			if httpResp.StatusCode >= 500 && httpResp.StatusCode < 600 {
 				respBody, _ := io.ReadAll(httpResp.Body)
 				_ = httpResp.Body.Close()
-				appendAPIResponseChunk(ctx, e.cfg, respBody)
+				helps.AppendAPIResponseChunk(ctx, e.cfg, respBody)
 
 				retryCfg := defaultRetryConfig()
 				// Check if this specific 5xx code is retryable (502, 503, 504)
@@ -1285,9 +1286,9 @@ func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliprox
 			if httpResp.StatusCode == 400 {
 				respBody, _ := io.ReadAll(httpResp.Body)
 				_ = httpResp.Body.Close()
-				appendAPIResponseChunk(ctx, e.cfg, respBody)
+				helps.AppendAPIResponseChunk(ctx, e.cfg, respBody)
 
-				log.Warnf("kiro: received 400 error (attempt %d/%d), body: %s", attempt+1, maxRetries+1, summarizeErrorBody(httpResp.Header.Get("Content-Type"), respBody))
+				log.Warnf("kiro: received 400 error (attempt %d/%d), body: %s", attempt+1, maxRetries+1, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), respBody))
 
 				// 400 errors indicate request validation issues - return immediately without retry
 				return nil, statusErr{code: httpResp.StatusCode, msg: string(respBody)}
@@ -1298,7 +1299,7 @@ func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliprox
 			if httpResp.StatusCode == 401 {
 				respBody, _ := io.ReadAll(httpResp.Body)
 				_ = httpResp.Body.Close()
-				appendAPIResponseChunk(ctx, e.cfg, respBody)
+				helps.AppendAPIResponseChunk(ctx, e.cfg, respBody)
 
 				log.Warnf("kiro: stream received 401 error, attempting token refresh")
 				refreshedAuth, refreshErr := e.Refresh(ctx, auth)
@@ -1332,7 +1333,7 @@ func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliprox
 			if httpResp.StatusCode == 402 {
 				respBody, _ := io.ReadAll(httpResp.Body)
 				_ = httpResp.Body.Close()
-				appendAPIResponseChunk(ctx, e.cfg, respBody)
+				helps.AppendAPIResponseChunk(ctx, e.cfg, respBody)
 
 				log.Warnf("kiro: stream received 402 (monthly limit). Upstream body: %s", string(respBody))
 
@@ -1345,7 +1346,7 @@ func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliprox
 			if httpResp.StatusCode == 403 {
 				respBody, _ := io.ReadAll(httpResp.Body)
 				_ = httpResp.Body.Close()
-				appendAPIResponseChunk(ctx, e.cfg, respBody)
+				helps.AppendAPIResponseChunk(ctx, e.cfg, respBody)
 
 				// Log the 403 error details for debugging
 				log.Warnf("kiro: stream received 403 error (attempt %d/%d), body: %s", attempt+1, maxRetries+1, string(respBody))
@@ -1397,7 +1398,7 @@ func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliprox
 
 			if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 				b, _ := io.ReadAll(httpResp.Body)
-				appendAPIResponseChunk(ctx, e.cfg, b)
+				helps.AppendAPIResponseChunk(ctx, e.cfg, b)
 				log.Debugf("kiro stream error, status: %d, body: %s", httpResp.StatusCode, string(b))
 				if errClose := httpResp.Body.Close(); errClose != nil {
 					log.Errorf("response body close error: %v", errClose)
@@ -1430,7 +1431,7 @@ func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliprox
 				// So we always enable thinking parsing for Kiro responses
 				log.Debugf("kiro: stream thinkingEnabled = %v (always true for Kiro)", thinkingEnabled)
 
-				e.streamToChannel(ctx, resp.Body, out, from, payloadRequestedModel(opts, req.Model), opts.OriginalRequest, body, reporter, thinkingEnabled)
+				e.streamToChannel(ctx, resp.Body, out, from, helps.PayloadRequestedModel(opts, req.Model), opts.OriginalRequest, body, reporter, thinkingEnabled)
 			}(httpResp, thinkingEnabled)
 
 			return out, nil
@@ -2461,7 +2462,7 @@ func (e *KiroExecutor) extractEventTypeFromBytes(headers []byte) string {
 // Implements duplicate content filtering using lastContentEvent detection (based on AIClient-2-API).
 // Extracts stop_reason from upstream events when available.
 // thinkingEnabled controls whether <thinking> tags are parsed - only parse when request enabled thinking.
-func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out chan<- cliproxyexecutor.StreamChunk, targetFormat sdktranslator.Format, model string, originalReq, claudeBody []byte, reporter *usageReporter, thinkingEnabled bool) {
+func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out chan<- cliproxyexecutor.StreamChunk, targetFormat sdktranslator.Format, model string, originalReq, claudeBody []byte, reporter *helps.UsageReporter, thinkingEnabled bool) {
 	reader := bufio.NewReaderSize(body, 20*1024*1024) // 20MB buffer to match other providers
 	var totalUsage usage.Detail
 	var hasToolUses bool          // Track if any tool uses were emitted
@@ -2541,7 +2542,7 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 
 	// Ensure usage is published even on early return
 	defer func() {
-		reporter.publish(ctx, totalUsage)
+		reporter.Publish(ctx, totalUsage)
 	}()
 
 	for {
@@ -2614,7 +2615,7 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 		if len(payload) == 0 {
 			continue
 		}
-		appendAPIResponseChunk(ctx, e.cfg, payload)
+		helps.AppendAPIResponseChunk(ctx, e.cfg, payload)
 
 		var event map[string]interface{}
 		if err := json.Unmarshal(payload, &event); err != nil {
@@ -4316,11 +4317,11 @@ func (e *KiroExecutor) handleWebSearchStream(
 	out := make(chan cliproxyexecutor.StreamChunk)
 
 	// Usage reporting: track web search requests like normal streaming requests
-	reporter := newUsageReporter(ctx, e.Identifier(), req.Model, auth)
+	reporter := helps.NewUsageReporter(ctx, e.Identifier(), req.Model, auth)
 
 	go func() {
 		var wsErr error
-		defer reporter.trackFailure(ctx, &wsErr)
+		defer reporter.TrackFailure(ctx, &wsErr)
 		defer close(out)
 
 		// Estimate input tokens using tokenizer (matching streamToChannel pattern)
@@ -4346,13 +4347,13 @@ func (e *KiroExecutor) handleWebSearchStream(
 			if accumulatedOutputLen > 0 && totalUsage.OutputTokens == 0 {
 				totalUsage.OutputTokens = 1
 			}
-			reporter.publish(ctx, totalUsage)
+			reporter.Publish(ctx, totalUsage)
 		}()
 
 		// Send message_start event to client (aligned with streamToChannel pattern)
-		// Use payloadRequestedModel to return user's original model alias
+		// Use helps.PayloadRequestedModel to return user's original model alias
 		msgStart := kiroclaude.BuildClaudeMessageStartEvent(
-			payloadRequestedModel(opts, req.Model),
+			helps.PayloadRequestedModel(opts, req.Model),
 			totalUsage.InputTokens,
 		)
 		select {
@@ -4648,9 +4649,9 @@ func (e *KiroExecutor) callKiroDirectStream(
 
 	tokenKey := getAccountKey(auth)
 
-	reporter := newUsageReporter(ctx, e.Identifier(), req.Model, auth)
+	reporter := helps.NewUsageReporter(ctx, e.Identifier(), req.Model, auth)
 	var streamErr error
-	defer reporter.trackFailure(ctx, &streamErr)
+	defer reporter.TrackFailure(ctx, &streamErr)
 
 	stream, streamErr := e.executeStreamWithRetry(
 		ctx, auth, req, opts, accessToken, effectiveProfileArn,
@@ -4697,9 +4698,9 @@ func (e *KiroExecutor) executeNonStreamFallback(
 	effectiveProfileArn := getEffectiveProfileArnWithWarning(auth, profileArn)
 	tokenKey := getAccountKey(auth)
 
-	reporter := newUsageReporter(ctx, e.Identifier(), req.Model, auth)
+	reporter := helps.NewUsageReporter(ctx, e.Identifier(), req.Model, auth)
 	var err error
-	defer reporter.trackFailure(ctx, &err)
+	defer reporter.TrackFailure(ctx, &err)
 
 	resp, err := e.executeWithRetry(ctx, auth, req, opts, accessToken, effectiveProfileArn, nil, body, from, to, reporter, "", kiroModelID, isAgentic, isChatOnly, tokenKey)
 	return resp, err

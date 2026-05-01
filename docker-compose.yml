@@ -1,5 +1,5 @@
 x-proxy-vars: &proxy-vars
-  HTTP_PROXY: ${HTTP_PROXY:-http://172.17.224.1:7890}
+  HTTP_PROXY: ${HTTP_PROXY:-}
   HTTPS_PROXY: ${HTTP_PROXY:-}
   ALL_PROXY: ${HTTP_PROXY:-}
   NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,host.docker.internal}
@@ -10,7 +10,7 @@ x-proxy-vars: &proxy-vars
 
 services:
   cli-proxy-api:
-    image: ${CLI_PROXY_IMAGE:-eceasy/cli-proxy-api-plus:latest}
+    image: ${CLI_PROXY_IMAGE:-eceasy/cli-proxy-api:latest}
     pull_policy: always
     build:
       context: .
@@ -23,7 +23,7 @@ services:
         VERSION: ${VERSION:-dev}
         COMMIT: ${COMMIT:-none}
         BUILD_DATE: ${BUILD_DATE:-unknown}
-    container_name: cli-proxy-api-plus
+    container_name: cli-proxy-api
     # env_file:
     #   - .env
     environment:

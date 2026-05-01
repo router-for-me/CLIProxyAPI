@@ -120,7 +120,6 @@ func newDefaultAuthManager() *sdkAuth.Manager {
 		sdkAuth.NewGeminiAuthenticator(),
 		sdkAuth.NewCodexAuthenticator(),
 		sdkAuth.NewClaudeAuthenticator(),
-		sdkAuth.NewQwenAuthenticator(),
 		sdkAuth.NewGitLabAuthenticator(),
 	)
 }

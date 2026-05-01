@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	"bufio"
 	"bytes"
 	"context"
@@ -75,7 +76,7 @@ func (e *CodeBuddyExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.
 	if err := e.PrepareRequest(httpReq, auth); err != nil {
 		return nil, err
 	}
-	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	return httpClient.Do(httpReq)
 }
 
@@ -83,8 +84,8 @@ func (e *CodeBuddyExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.
 func (e *CodeBuddyExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
-	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
-	defer reporter.trackFailure(ctx, &err)
+	reporter := helps.NewUsageReporter(ctx, e.Identifier(), baseModel, auth)
+	defer reporter.TrackFailure(ctx, &err)
 
 	accessToken, userID, domain := codeBuddyCredentials(auth)
 	if accessToken == "" {
@@ -100,8 +101,8 @@ func (e *CodeBuddyExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 	}
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayloadSource, false)
 	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
-	requestedModel := payloadRequestedModel(opts, req.Model)
-	translated = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", translated, originalTranslated, requestedModel)
+	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
+	translated = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", translated, originalTranslated, requestedModel, "")
 
 	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -121,7 +122,7 @@ func (e *CodeBuddyExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 		authLabel = auth.Label
 		authType, authValue = auth.AccountInfo()
 	}
-	recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
+	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 		URL:       url,
 		Method:    http.MethodPost,
 		Headers:   httpReq.Header.Clone(),
@@ -133,10 +134,10 @@ func (e *CodeBuddyExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 		AuthValue: authValue,
 	})
 
-	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
-		recordAPIResponseError(ctx, e.cfg, err)
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return resp, err
 	}
 	defer func() {
@@ -145,23 +146,23 @@ func (e *CodeBuddyExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 		}
 	}()
 
-	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if !isHTTPSuccess(httpResp.StatusCode) {
 		b, _ := io.ReadAll(httpResp.Body)
-		appendAPIResponseChunk(ctx, e.cfg, b)
-		log.Debugf("codebuddy executor: upstream error status: %d, body: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
+		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
+		log.Debugf("codebuddy executor: upstream error status: %d, body: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
 		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
 		return resp, err
 	}
 
 	body, err := io.ReadAll(httpResp.Body)
 	if err != nil {
-		recordAPIResponseError(ctx, e.cfg, err)
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return resp, err
 	}
-	appendAPIResponseChunk(ctx, e.cfg, body)
-	reporter.publish(ctx, parseOpenAIUsage(body))
-	reporter.ensurePublished(ctx)
+	helps.AppendAPIResponseChunk(ctx, e.cfg, body)
+	reporter.Publish(ctx, helps.ParseOpenAIUsage(body))
+	reporter.EnsurePublished(ctx)
 
 	var param any
 	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, body, &param)
@@ -173,8 +174,8 @@ func (e *CodeBuddyExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 func (e *CodeBuddyExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
-	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
-	defer reporter.trackFailure(ctx, &err)
+	reporter := helps.NewUsageReporter(ctx, e.Identifier(), baseModel, auth)
+	defer reporter.TrackFailure(ctx, &err)
 
 	accessToken, userID, domain := codeBuddyCredentials(auth)
 	if accessToken == "" {
@@ -190,8 +191,8 @@ func (e *CodeBuddyExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 	}
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayloadSource, true)
 	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
-	requestedModel := payloadRequestedModel(opts, req.Model)
-	translated = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", translated, originalTranslated, requestedModel)
+	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
+	translated = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", translated, originalTranslated, requestedModel, "")
 
 	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -213,7 +214,7 @@ func (e *CodeBuddyExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 		authLabel = auth.Label
 		authType, authValue = auth.AccountInfo()
 	}
-	recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
+	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 		URL:       url,
 		Method:    http.MethodPost,
 		Headers:   httpReq.Header.Clone(),
@@ -225,19 +226,19 @@ func (e *CodeBuddyExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 		AuthValue: authValue,
 	})
 
-	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
-		recordAPIResponseError(ctx, e.cfg, err)
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return nil, err
 	}
 
-	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if !isHTTPSuccess(httpResp.StatusCode) {
 		b, _ := io.ReadAll(httpResp.Body)
-		appendAPIResponseChunk(ctx, e.cfg, b)
+		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
 		httpResp.Body.Close()
-		log.Debugf("codebuddy executor: upstream error status: %d, body: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
+		log.Debugf("codebuddy executor: upstream error status: %d, body: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
 		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
 		return nil, err
 	}
@@ -256,9 +257,9 @@ func (e *CodeBuddyExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 		var param any
 		for scanner.Scan() {
 			line := scanner.Bytes()
-			appendAPIResponseChunk(ctx, e.cfg, line)
-			if detail, ok := parseOpenAIStreamUsage(line); ok {
-				reporter.publish(ctx, detail)
+			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
+			if detail, ok := helps.ParseOpenAIStreamUsage(line); ok {
+				reporter.Publish(ctx, detail)
 			}
 			if len(line) == 0 {
 				continue
@@ -272,11 +273,11 @@ func (e *CodeBuddyExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 			}
 		}
 		if errScan := scanner.Err(); errScan != nil {
-			recordAPIResponseError(ctx, e.cfg, errScan)
-			reporter.publishFailure(ctx)
+			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
+			reporter.PublishFailure(ctx)
 			out <- cliproxyexecutor.StreamChunk{Err: errScan}
 		}
-		reporter.ensurePublished(ctx)
+		reporter.EnsurePublished(ctx)
 	}()
 
 	return &cliproxyexecutor.StreamResult{

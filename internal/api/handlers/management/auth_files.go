@@ -36,7 +36,6 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kilo"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kimi"
 	kiroauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kiro"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/qwen"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
@@ -3052,6 +3051,7 @@ func (h *Handler) RequestIFlowCookieToken(c *gin.Context) {
 		"type":       tokenStorage.Type,
 	})
 
+}
 type projectSelectionRequiredError struct{}
 
 func (e *projectSelectionRequiredError) Error() string {

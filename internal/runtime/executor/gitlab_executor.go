@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	"bufio"
 	"bytes"
 	"context"
@@ -90,8 +91,8 @@ func (e *GitLabExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
-	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
-	defer reporter.trackFailure(ctx, &err)
+	reporter := helps.NewUsageReporter(ctx, e.Identifier(), baseModel, auth)
+	defer reporter.TrackFailure(ctx, &err)
 
 	translated, err := e.translateToOpenAI(req, opts)
 	if err != nil {
@@ -110,8 +111,8 @@ func (e *GitLabExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 
 	responseModel := gitLabResolvedModel(auth, req.Model)
 	openAIResponse := buildGitLabOpenAIResponse(responseModel, text, translated)
-	reporter.publish(ctx, parseOpenAIUsage(openAIResponse))
-	reporter.ensurePublished(ctx)
+	reporter.Publish(ctx, helps.ParseOpenAIUsage(openAIResponse))
+	reporter.EnsurePublished(ctx)
 
 	var param any
 	out := sdktranslator.TranslateNonStream(
@@ -133,8 +134,8 @@ func (e *GitLabExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
-	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
-	defer reporter.trackFailure(ctx, &err)
+	reporter := helps.NewUsageReporter(ctx, e.Identifier(), baseModel, auth)
+	defer reporter.TrackFailure(ctx, &err)
 
 	translated, err := e.translateToOpenAI(req, opts)
 	if err != nil {
@@ -157,8 +158,8 @@ func (e *GitLabExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	}
 	responseModel := gitLabResolvedModel(auth, req.Model)
 	openAIResponse := buildGitLabOpenAIResponse(responseModel, text, translated)
-	reporter.publish(ctx, parseOpenAIUsage(openAIResponse))
-	reporter.ensurePublished(ctx)
+	reporter.Publish(ctx, helps.ParseOpenAIUsage(openAIResponse))
+	reporter.EnsurePublished(ctx)
 
 	out := make(chan cliproxyexecutor.StreamChunk, 8)
 	go func() {
@@ -262,7 +263,7 @@ func (e *GitLabExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Aut
 	if token := gitLabPrimaryToken(auth); token != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+token)
 	}
-	return newProxyAwareHTTPClient(ctx, e.cfg, auth, 0).Do(httpReq)
+	return helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0).Do(httpReq)
 }
 
 func (e *GitLabExecutor) translateToOpenAI(req cliproxyexecutor.Request, opts cliproxyexecutor.Options) ([]byte, error) {
@@ -346,7 +347,7 @@ func (e *GitLabExecutor) requestCodeSuggestionsStream(
 	translated []byte,
 	req cliproxyexecutor.Request,
 	opts cliproxyexecutor.Options,
-	reporter *usageReporter,
+	reporter *helps.UsageReporter,
 ) (*cliproxyexecutor.StreamResult, error) {
 	contentAbove := strings.TrimSpace(prompt.ContentAboveCursor)
 	if contentAbove == "" {
@@ -375,10 +376,10 @@ func (e *GitLabExecutor) requestCodeSuggestionsStream(
 		defer func() { _ = httpResp.Body.Close() }()
 		respBody, readErr := io.ReadAll(httpResp.Body)
 		if readErr != nil {
-			recordAPIResponseError(ctx, e.cfg, readErr)
+			helps.RecordAPIResponseError(ctx, e.cfg, readErr)
 			return nil, readErr
 		}
-		appendAPIResponseChunk(ctx, e.cfg, respBody)
+		helps.AppendAPIResponseChunk(ctx, e.cfg, respBody)
 		return nil, statusErr{code: httpResp.StatusCode, msg: strings.TrimSpace(string(respBody))}
 	}
 
@@ -398,7 +399,7 @@ func (e *GitLabExecutor) requestCodeSuggestionsStream(
 		)
 		for scanner.Scan() {
 			line := bytes.Clone(scanner.Bytes())
-			appendAPIResponseChunk(ctx, e.cfg, line)
+			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			trimmed := bytes.TrimSpace(line)
 			if len(trimmed) == 0 {
 				continue
@@ -415,7 +416,7 @@ func (e *GitLabExecutor) requestCodeSuggestionsStream(
 			eventName = ""
 			for _, item := range normalized {
 				if detail, ok := parseOpenAIStreamUsage(item); ok {
-					reporter.publish(ctx, detail)
+					reporter.Publish(ctx, detail)
 				}
 				chunks := sdktranslator.TranslateStream(
 					ctx,
@@ -433,8 +434,8 @@ func (e *GitLabExecutor) requestCodeSuggestionsStream(
 			}
 		}
 		if errScan := scanner.Err(); errScan != nil {
-			recordAPIResponseError(ctx, e.cfg, errScan)
-			reporter.publishFailure(ctx)
+			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
+			reporter.PublishFailure(ctx)
 			out <- cliproxyexecutor.StreamChunk{Err: errScan}
 			return
 		}
@@ -455,7 +456,7 @@ func (e *GitLabExecutor) requestCodeSuggestionsStream(
 				}
 			}
 		}
-		reporter.ensurePublished(ctx)
+		reporter.EnsurePublished(ctx)
 	}()
 
 	return &cliproxyexecutor.StreamResult{
@@ -473,10 +474,10 @@ func (e *GitLabExecutor) doJSONTextRequest(ctx context.Context, auth *cliproxyau
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		recordAPIResponseError(ctx, e.cfg, err)
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return "", err
 	}
-	appendAPIResponseChunk(ctx, e.cfg, respBody)
+	helps.AppendAPIResponseChunk(ctx, e.cfg, respBody)
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return "", statusErr{code: resp.StatusCode, msg: strings.TrimSpace(string(respBody))}
@@ -529,7 +530,7 @@ func (e *GitLabExecutor) doJSONRequest(
 		authLabel = auth.Label
 		authType, authValue = auth.AccountInfo()
 	}
-	recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
+	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 		URL:       url,
 		Method:    http.MethodPost,
 		Headers:   req.Header.Clone(),
@@ -541,13 +542,13 @@ func (e *GitLabExecutor) doJSONRequest(
 		AuthValue: authValue,
 	})
 
-	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		recordAPIResponseError(ctx, e.cfg, err)
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return nil, body, err
 	}
-	recordAPIResponseMetadata(ctx, e.cfg, resp.StatusCode, resp.Header.Clone())
+	helps.RecordAPIResponseMetadata(ctx, e.cfg, resp.StatusCode, resp.Header.Clone())
 	return resp, body, nil
 }
 

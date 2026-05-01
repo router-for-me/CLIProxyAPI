@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
@@ -66,7 +67,7 @@ func (e *KiloExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth,
 	if err := e.PrepareRequest(httpReq, auth); err != nil {
 		return nil, err
 	}
-	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	return httpClient.Do(httpReq)
 }
 
@@ -74,8 +75,8 @@ func (e *KiloExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth,
 func (e *KiloExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
-	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
-	defer reporter.trackFailure(ctx, &err)
+	reporter := helps.NewUsageReporter(ctx, e.Identifier(), baseModel, auth)
+	defer reporter.TrackFailure(ctx, &err)
 
 	accessToken, orgID := kiloCredentials(auth)
 	if accessToken == "" {
@@ -93,8 +94,8 @@ func (e *KiloExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	originalPayload := originalPayloadSource
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, opts.Stream)
 	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, opts.Stream)
-	requestedModel := payloadRequestedModel(opts, req.Model)
-	translated = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", translated, originalTranslated, requestedModel)
+	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
+	translated = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", translated, originalTranslated, requestedModel, "")
 
 	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -124,7 +125,7 @@ func (e *KiloExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 		authLabel = auth.Label
 		authType, authValue = auth.AccountInfo()
 	}
-	recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
+	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 		URL:       url,
 		Method:    http.MethodPost,
 		Headers:   httpReq.Header.Clone(),
@@ -136,30 +137,30 @@ func (e *KiloExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 		AuthValue: authValue,
 	})
 
-	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
-		recordAPIResponseError(ctx, e.cfg, err)
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return resp, err
 	}
 	defer httpResp.Body.Close()
 
-	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		b, _ := io.ReadAll(httpResp.Body)
-		appendAPIResponseChunk(ctx, e.cfg, b)
+		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
 		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
 		return resp, err
 	}
 
 	body, err := io.ReadAll(httpResp.Body)
 	if err != nil {
-		recordAPIResponseError(ctx, e.cfg, err)
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return resp, err
 	}
-	appendAPIResponseChunk(ctx, e.cfg, body)
-	reporter.publish(ctx, parseOpenAIUsage(body))
-	reporter.ensurePublished(ctx)
+	helps.AppendAPIResponseChunk(ctx, e.cfg, body)
+	reporter.Publish(ctx, parseOpenAIUsage(body))
+	reporter.EnsurePublished(ctx)
 
 	var param any
 	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, body, &param)
@@ -171,8 +172,8 @@ func (e *KiloExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 func (e *KiloExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
-	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
-	defer reporter.trackFailure(ctx, &err)
+	reporter := helps.NewUsageReporter(ctx, e.Identifier(), baseModel, auth)
+	defer reporter.TrackFailure(ctx, &err)
 
 	accessToken, orgID := kiloCredentials(auth)
 	if accessToken == "" {
@@ -190,8 +191,8 @@ func (e *KiloExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 	originalPayload := originalPayloadSource
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
 	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
-	requestedModel := payloadRequestedModel(opts, req.Model)
-	translated = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", translated, originalTranslated, requestedModel)
+	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
+	translated = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", translated, originalTranslated, requestedModel, "")
 
 	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -224,7 +225,7 @@ func (e *KiloExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 		authLabel = auth.Label
 		authType, authValue = auth.AccountInfo()
 	}
-	recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
+	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 		URL:       url,
 		Method:    http.MethodPost,
 		Headers:   httpReq.Header.Clone(),
@@ -236,17 +237,17 @@ func (e *KiloExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 		AuthValue: authValue,
 	})
 
-	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
-		recordAPIResponseError(ctx, e.cfg, err)
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return nil, err
 	}
 
-	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		b, _ := io.ReadAll(httpResp.Body)
-		appendAPIResponseChunk(ctx, e.cfg, b)
+		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
 		httpResp.Body.Close()
 		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
 		return nil, err
@@ -262,9 +263,9 @@ func (e *KiloExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 		var param any
 		for scanner.Scan() {
 			line := scanner.Bytes()
-			appendAPIResponseChunk(ctx, e.cfg, line)
+			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			if detail, ok := parseOpenAIStreamUsage(line); ok {
-				reporter.publish(ctx, detail)
+				reporter.Publish(ctx, detail)
 			}
 			if len(line) == 0 {
 				continue
@@ -278,11 +279,11 @@ func (e *KiloExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 			}
 		}
 		if errScan := scanner.Err(); errScan != nil {
-			recordAPIResponseError(ctx, e.cfg, errScan)
-			reporter.publishFailure(ctx)
+			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
+			reporter.PublishFailure(ctx)
 			out <- cliproxyexecutor.StreamChunk{Err: errScan}
 		}
-		reporter.ensurePublished(ctx)
+		reporter.EnsurePublished(ctx)
 	}()
 
 	return &cliproxyexecutor.StreamResult{
@@ -355,7 +356,7 @@ func FetchKiloModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *config.C
 
 	log.Debugf("kilo: fetching dynamic models (orgID: %s)", orgID)
 
-	httpClient := newProxyAwareHTTPClient(ctx, cfg, auth, 0)
+	httpClient := helps.NewProxyAwareHTTPClient(ctx, cfg, auth, 0)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.kilo.ai/api/openrouter/models", nil)
 	if err != nil {
 		log.Warnf("kilo: failed to create model fetch request: %v", err)

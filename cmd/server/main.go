@@ -75,10 +75,7 @@ func main() {
 	var codexLogin bool
 	var codexDeviceLogin bool
 	var claudeLogin bool
-	var qwenLogin bool
 	var kiloLogin bool
-	var iflowLogin bool
-	var iflowCookie bool
 	var gitlabLogin bool
 	var gitlabTokenLogin bool
 	var noBrowser bool
@@ -112,10 +109,7 @@ func main() {
 	flag.BoolVar(&codexLogin, "codex-login", false, "Login to Codex using OAuth")
 	flag.BoolVar(&codexDeviceLogin, "codex-device-login", false, "Login to Codex using device code flow")
 	flag.BoolVar(&claudeLogin, "claude-login", false, "Login to Claude using OAuth")
-	flag.BoolVar(&qwenLogin, "qwen-login", false, "Login to Qwen using OAuth")
 	flag.BoolVar(&kiloLogin, "kilo-login", false, "Login to Kilo AI using device flow")
-	flag.BoolVar(&iflowLogin, "iflow-login", false, "Login to iFlow using OAuth")
-	flag.BoolVar(&iflowCookie, "iflow-cookie", false, "Login to iFlow using Cookie")
 	flag.BoolVar(&gitlabLogin, "gitlab-login", false, "Login to GitLab Duo using OAuth")
 	flag.BoolVar(&gitlabTokenLogin, "gitlab-token-login", false, "Login to GitLab Duo using a personal access token")
 	flag.BoolVar(&noBrowser, "no-browser", false, "Don't open browser automatically for OAuth")
@@ -391,7 +385,7 @@ func main() {
 		}
 		gitStoreRoot = filepath.Join(gitStoreLocalPath, "gitstore")
 		authDir := filepath.Join(gitStoreRoot, "auths")
-		gitStoreInst = store.NewGitTokenStore(gitStoreRemoteURL, gitStoreUser, gitStorePassword)
+		gitStoreInst = store.NewGitTokenStore(gitStoreRemoteURL, gitStoreUser, gitStorePassword, "")
 		gitStoreInst.SetBaseDir(authDir)
 		if errRepo := gitStoreInst.EnsureRepository(); errRepo != nil {
 			log.Errorf("failed to prepare git token store: %v", errRepo)
@@ -510,7 +504,7 @@ func main() {
 
 	if vertexImport != "" {
 		// Handle Vertex service account import
-		cmd.DoVertexImport(cfg, vertexImport)
+		cmd.DoVertexImport(cfg, vertexImport, "")
 	} else if login {
 		// Handle Google/Gemini login
 		cmd.DoLogin(cfg, projectID, options)
@@ -532,14 +526,8 @@ func main() {
 	} else if claudeLogin {
 		// Handle Claude login
 		cmd.DoClaudeLogin(cfg, options)
-	} else if qwenLogin {
-		cmd.DoQwenLogin(cfg, options)
 	} else if kiloLogin {
 		cmd.DoKiloLogin(cfg, options)
-	} else if iflowLogin {
-		cmd.DoIFlowLogin(cfg, options)
-	} else if iflowCookie {
-		cmd.DoIFlowCookieAuth(cfg, options)
 	} else if gitlabLogin {
 		cmd.DoGitLabLogin(cfg, options)
 	} else if gitlabTokenLogin {
