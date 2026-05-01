@@ -31,7 +31,8 @@ func TestGetAPIKeyUsage_GroupsByProviderAndAPIKey(t *testing.T) {
 		ID:       "codex-auth",
 		Provider: "codex",
 		Attributes: map[string]string{
-			"api_key": "codex-key",
+			"api_key":  "codex-key",
+			"base_url": "https://codex.example.com",
 		},
 	}); err != nil {
 		t.Fatalf("register codex auth: %v", err)
@@ -40,7 +41,8 @@ func TestGetAPIKeyUsage_GroupsByProviderAndAPIKey(t *testing.T) {
 		ID:       "claude-auth",
 		Provider: "claude",
 		Attributes: map[string]string{
-			"api_key": "claude-key",
+			"api_key":  "claude-key",
+			"base_url": "https://claude.example.com",
 		},
 	}); err != nil {
 		t.Fatalf("register claude auth: %v", err)
@@ -67,7 +69,7 @@ func TestGetAPIKeyUsage_GroupsByProviderAndAPIKey(t *testing.T) {
 		t.Fatalf("decode payload: %v", err)
 	}
 
-	codexBuckets := payload["codex"]["codex-key"]
+	codexBuckets := payload["codex"]["https://codex.example.com|codex-key"]
 	if len(codexBuckets) != 20 {
 		t.Fatalf("codex buckets len = %d, want 20", len(codexBuckets))
 	}
@@ -76,7 +78,7 @@ func TestGetAPIKeyUsage_GroupsByProviderAndAPIKey(t *testing.T) {
 		t.Fatalf("codex totals = %d/%d, want 1/1", codexSuccess, codexFailed)
 	}
 
-	claudeBuckets := payload["claude"]["claude-key"]
+	claudeBuckets := payload["claude"]["https://claude.example.com|claude-key"]
 	if len(claudeBuckets) != 20 {
 		t.Fatalf("claude buckets len = %d, want 20", len(claudeBuckets))
 	}
