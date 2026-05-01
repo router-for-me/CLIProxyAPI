@@ -303,24 +303,21 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 	// map it to the Chat Completions reasoning_effort field — this enables
 	// thinking mode on models that support it.
 	//
-	// The non-standard "thinking" parameter is only injected for DeepSeek
-	// models, since other providers (e.g. OpenAI) would reject it with a 400 error.
-	// When reasoning is absent and the model is DeepSeek, we disable thinking
-	// to prevent DeepSeek's default thinking mode from producing reasoning_content
-	// that would then require echo-back on subsequent requests.
+	// When reasoning is absent, disable thinking mode via the non-standard
+	// "thinking" parameter. Without this, DeepSeek (and similar providers)
+	// default to thinking mode and return reasoning_content, which they then
+	// require echoed back on every subsequent request. Codex CLI does not
+	// echo back reasoning_text, so disabling thinking by default is necessary
+	// for reliable operation. Providers that don't support "thinking" (e.g.
+	// OpenAI) will return a 400, which is caught and handled by the retry layer.
 	if reasoning := root.Get("reasoning"); reasoning.Exists() {
 		effort := reasoning.Get("effort").String()
 		if effort != "" {
 			out, _ = sjson.SetBytes(out, "reasoning_effort", strings.ToLower(strings.TrimSpace(effort)))
-		} else if strings.Contains(strings.ToLower(modelName), "deepseek") {
-			// reasoning explicitly set but without effort — disable thinking for
-			// DeepSeek to prevent default thinking mode. Other providers don't
-			// support the non-standard "thinking" field.
+		} else {
 			out, _ = sjson.SetBytes(out, "thinking", map[string]interface{}{"type": "disabled"})
 		}
-	} else if strings.Contains(strings.ToLower(modelName), "deepseek") {
-		// reasoning absent — disable thinking for DeepSeek to prevent its default
-		// thinking mode from producing reasoning_content that requires echo-back.
+	} else {
 		out, _ = sjson.SetBytes(out, "thinking", map[string]interface{}{"type": "disabled"})
 	}
 
