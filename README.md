@@ -74,6 +74,10 @@ CLIProxyAPI Guides: [https://help.router-for.me/](https://help.router-for.me/)
 
 see [MANAGEMENT_API.md](https://help.router-for.me/management/api)
 
+## Usage Backup Image
+
+`Dockerfile.stats` provides a container entrypoint that persists Management API usage statistics across restarts using PostgreSQL/Supabase, S3-compatible object storage, or a mounted local data directory. See [docs/usage-backup.md](docs/usage-backup.md).
+
 ## Amp CLI Support
 
 CLIProxyAPI includes integrated support for [Amp CLI](https://ampcode.com) and Amp IDE extensions, enabling you to use your Google/ChatGPT/Claude OAuth subscriptions with Amp's coding tools:
