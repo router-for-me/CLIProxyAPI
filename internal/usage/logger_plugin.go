@@ -99,11 +99,13 @@ type RequestDetail struct {
 
 // TokenStats captures the token usage breakdown for a request.
 type TokenStats struct {
-	InputTokens     int64 `json:"input_tokens"`
-	OutputTokens    int64 `json:"output_tokens"`
-	ReasoningTokens int64 `json:"reasoning_tokens"`
-	CachedTokens    int64 `json:"cached_tokens"`
-	TotalTokens     int64 `json:"total_tokens"`
+	InputTokens              int64 `json:"input_tokens"`
+	OutputTokens             int64 `json:"output_tokens"`
+	ReasoningTokens          int64 `json:"reasoning_tokens"`
+	CachedTokens             int64 `json:"cached_tokens"`
+	CacheReadInputTokens     int64 `json:"cache_read_input_tokens,omitempty"`
+	CacheCreationInputTokens int64 `json:"cache_creation_input_tokens,omitempty"`
+	TotalTokens              int64 `json:"total_tokens"`
 }
 
 // StatisticsSnapshot represents an immutable view of the aggregated metrics.
@@ -443,11 +445,16 @@ const httpStatusBadRequest = 400
 
 func normaliseDetail(detail coreusage.Detail) TokenStats {
 	tokens := TokenStats{
-		InputTokens:     detail.InputTokens,
-		OutputTokens:    detail.OutputTokens,
-		ReasoningTokens: detail.ReasoningTokens,
-		CachedTokens:    detail.CachedTokens,
-		TotalTokens:     detail.TotalTokens,
+		InputTokens:              detail.InputTokens,
+		OutputTokens:             detail.OutputTokens,
+		ReasoningTokens:          detail.ReasoningTokens,
+		CachedTokens:             detail.CachedTokens,
+		CacheReadInputTokens:     detail.CacheReadInputTokens,
+		CacheCreationInputTokens: detail.CacheCreationInputTokens,
+		TotalTokens:              detail.TotalTokens,
+	}
+	if tokens.CachedTokens == 0 {
+		tokens.CachedTokens = tokens.CacheReadInputTokens + tokens.CacheCreationInputTokens
 	}
 	if tokens.TotalTokens == 0 {
 		tokens.TotalTokens = detail.InputTokens + detail.OutputTokens + detail.ReasoningTokens
@@ -459,6 +466,9 @@ func normaliseDetail(detail coreusage.Detail) TokenStats {
 }
 
 func normaliseTokenStats(tokens TokenStats) TokenStats {
+	if tokens.CachedTokens == 0 {
+		tokens.CachedTokens = tokens.CacheReadInputTokens + tokens.CacheCreationInputTokens
+	}
 	if tokens.TotalTokens == 0 {
 		tokens.TotalTokens = tokens.InputTokens + tokens.OutputTokens + tokens.ReasoningTokens
 	}

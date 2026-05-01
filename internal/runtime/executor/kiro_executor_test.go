@@ -1,11 +1,18 @@
 package executor
 
 import (
+	"bytes"
+	"context"
+	"encoding/binary"
 	"fmt"
+	"strings"
 	"testing"
 
 	kiroauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kiro"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
+	"github.com/tidwall/gjson"
 )
 
 func TestBuildKiroEndpointConfigs(t *testing.T) {
@@ -231,6 +238,149 @@ func TestGetKiroEndpointConfigs_MetadataTakesPrecedenceOverAttributes(t *testing
 	}
 }
 
+func TestParseEventStream_KiroCacheUsageDoesNotDoubleCountInput(t *testing.T) {
+	var stream bytes.Buffer
+	writeKiroTestEvent(t, &stream, "messageMetadataEvent", []byte(`{
+		"messageMetadataEvent": {
+			"tokenUsage": {
+				"outputTokens": 2,
+				"totalTokens": 22,
+				"uncachedInputTokens": 10,
+				"cacheReadInputTokens": 7,
+				"cacheWriteInputTokens": 3,
+				"contextUsagePercentage": 50
+			}
+		}
+	}`))
+	// A repeated metadata event should update values without accumulating cached tokens twice.
+	writeKiroTestEvent(t, &stream, "messageMetadataEvent", []byte(`{
+		"messageMetadataEvent": {
+			"tokenUsage": {
+				"outputTokens": 2,
+				"totalTokens": 22,
+				"uncachedInputTokens": 10,
+				"cacheReadInputTokens": 7,
+				"cacheWriteInputTokens": 3,
+				"contextUsagePercentage": 50
+			}
+		}
+	}`))
+
+	executor := &KiroExecutor{}
+	_, _, usageInfo, _, err := executor.parseEventStream(bytes.NewReader(stream.Bytes()))
+	if err != nil {
+		t.Fatalf("parseEventStream() error = %v", err)
+	}
+	if usageInfo.InputTokens != 10 {
+		t.Fatalf("InputTokens = %d, want uncached input 10", usageInfo.InputTokens)
+	}
+	if usageInfo.CacheReadInputTokens != 7 {
+		t.Fatalf("CacheReadInputTokens = %d, want 7", usageInfo.CacheReadInputTokens)
+	}
+	if usageInfo.CacheCreationInputTokens != 3 {
+		t.Fatalf("CacheCreationInputTokens = %d, want 3", usageInfo.CacheCreationInputTokens)
+	}
+	if usageInfo.CachedTokens != 10 {
+		t.Fatalf("CachedTokens = %d, want read+write 10", usageInfo.CachedTokens)
+	}
+	if usageInfo.TotalTokens != 22 {
+		t.Fatalf("TotalTokens = %d, want upstream total 22", usageInfo.TotalTokens)
+	}
+}
+
+func TestStreamToChannel_KiroCacheUsagePreservesOfficialTokenUsage(t *testing.T) {
+	var stream bytes.Buffer
+	writeKiroTestEvent(t, &stream, "assistantResponseEvent", []byte(`{
+		"assistantResponseEvent": {"content": "hello"}
+	}`))
+	writeKiroTestEvent(t, &stream, "messageMetadataEvent", []byte(`{
+		"messageMetadataEvent": {
+			"tokenUsage": {
+				"outputTokens": 2,
+				"totalTokens": 22,
+				"uncachedInputTokens": 10,
+				"cacheReadInputTokens": 7,
+				"cacheWriteInputTokens": 3,
+				"contextUsagePercentage": 50
+			}
+		}
+	}`))
+
+	out := make(chan cliproxyexecutor.StreamChunk, 16)
+	executor := &KiroExecutor{}
+	executor.streamToChannel(
+		context.Background(),
+		bytes.NewReader(stream.Bytes()),
+		out,
+		sdktranslator.FromString("claude"),
+		"claude-sonnet-4",
+		nil,
+		[]byte(`{"messages":[]}`),
+		nil,
+		false,
+	)
+	close(out)
+
+	var messageDelta string
+	for chunk := range out {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error = %v", chunk.Err)
+		}
+		payload := string(chunk.Payload)
+		if strings.HasPrefix(payload, "event: message_delta\ndata: ") {
+			messageDelta = strings.TrimPrefix(payload, "event: message_delta\ndata: ")
+			messageDelta = strings.TrimSpace(messageDelta)
+		}
+	}
+	if messageDelta == "" {
+		t.Fatalf("expected message_delta event")
+	}
+	if got := gjson.Get(messageDelta, "usage.input_tokens").Int(); got != 10 {
+		t.Fatalf("usage.input_tokens = %d, want uncached input 10", got)
+	}
+	if got := gjson.Get(messageDelta, "usage.cache_read_input_tokens").Int(); got != 7 {
+		t.Fatalf("usage.cache_read_input_tokens = %d, want 7", got)
+	}
+	if got := gjson.Get(messageDelta, "usage.cache_creation_input_tokens").Int(); got != 3 {
+		t.Fatalf("usage.cache_creation_input_tokens = %d, want 3", got)
+	}
+}
+
+func writeKiroTestEvent(t *testing.T, dst *bytes.Buffer, eventType string, payload []byte) {
+	t.Helper()
+
+	var headers bytes.Buffer
+	headers.WriteByte(byte(len(":event-type")))
+	headers.WriteString(":event-type")
+	headers.WriteByte(7) // string
+	if err := binary.Write(&headers, binary.BigEndian, uint16(len(eventType))); err != nil {
+		t.Fatalf("write header length: %v", err)
+	}
+	headers.WriteString(eventType)
+
+	headersBytes := headers.Bytes()
+	totalLength := uint32(12 + len(headersBytes) + len(payload) + 4)
+
+	if err := binary.Write(dst, binary.BigEndian, totalLength); err != nil {
+		t.Fatalf("write total length: %v", err)
+	}
+	if err := binary.Write(dst, binary.BigEndian, uint32(len(headersBytes))); err != nil {
+		t.Fatalf("write headers length: %v", err)
+	}
+	if err := binary.Write(dst, binary.BigEndian, uint32(0)); err != nil {
+		t.Fatalf("write prelude crc: %v", err)
+	}
+	if _, err := dst.Write(headersBytes); err != nil {
+		t.Fatalf("write headers: %v", err)
+	}
+	if _, err := dst.Write(payload); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+	if err := binary.Write(dst, binary.BigEndian, uint32(0)); err != nil {
+		t.Fatalf("write message crc: %v", err)
+	}
+}
+
 func TestGetAuthValue(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -281,8 +431,8 @@ func TestGetAuthValue(t *testing.T) {
 			expected: "attribute_value",
 		},
 		{
-			name: "Both nil",
-			auth: &cliproxyauth.Auth{},
+			name:     "Both nil",
+			auth:     &cliproxyauth.Auth{},
 			key:      "test_key",
 			expected: "",
 		},
@@ -326,9 +476,9 @@ func TestGetAuthValue(t *testing.T) {
 
 func TestGetAccountKey(t *testing.T) {
 	tests := []struct {
-		name     string
-		auth     *cliproxyauth.Auth
-		checkFn  func(t *testing.T, result string)
+		name    string
+		auth    *cliproxyauth.Auth
+		checkFn func(t *testing.T, result string)
 	}{
 		{
 			name: "From client_id",

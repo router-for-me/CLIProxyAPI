@@ -25,11 +25,13 @@ type Record struct {
 
 // Detail holds the token usage breakdown.
 type Detail struct {
-	InputTokens     int64
-	OutputTokens    int64
-	ReasoningTokens int64
-	CachedTokens    int64
-	TotalTokens     int64
+	InputTokens              int64
+	OutputTokens             int64
+	ReasoningTokens          int64
+	CachedTokens             int64
+	CacheReadInputTokens     int64
+	CacheCreationInputTokens int64
+	TotalTokens              int64
 }
 
 // Plugin consumes usage records emitted by the proxy runtime.

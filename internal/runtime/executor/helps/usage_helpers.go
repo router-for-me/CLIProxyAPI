@@ -95,6 +95,9 @@ func (r *UsageReporter) publishWithOutcome(ctx context.Context, detail usage.Det
 }
 
 func normalizeUsageDetailTotal(detail usage.Detail) usage.Detail {
+	if detail.CachedTokens == 0 {
+		detail.CachedTokens = detail.CacheReadInputTokens + detail.CacheCreationInputTokens
+	}
 	if detail.TotalTokens == 0 {
 		total := detail.InputTokens + detail.OutputTokens + detail.ReasoningTokens
 		if total > 0 {
@@ -109,6 +112,8 @@ func hasNonZeroTokenUsage(detail usage.Detail) bool {
 		detail.OutputTokens != 0 ||
 		detail.ReasoningTokens != 0 ||
 		detail.CachedTokens != 0 ||
+		detail.CacheReadInputTokens != 0 ||
+		detail.CacheCreationInputTokens != 0 ||
 		detail.TotalTokens != 0
 }
 

@@ -111,16 +111,24 @@ func BuildClaudeThinkingBlockStopEvent(index int) []byte {
 
 // BuildClaudeMessageDeltaEvent creates the message_delta event with stop_reason and usage
 func BuildClaudeMessageDeltaEvent(stopReason string, usageInfo usage.Detail) []byte {
+	usagePayload := map[string]interface{}{
+		"input_tokens":  usageInfo.InputTokens,
+		"output_tokens": usageInfo.OutputTokens,
+	}
+	if usageInfo.CacheReadInputTokens > 0 {
+		usagePayload["cache_read_input_tokens"] = usageInfo.CacheReadInputTokens
+	}
+	if usageInfo.CacheCreationInputTokens > 0 {
+		usagePayload["cache_creation_input_tokens"] = usageInfo.CacheCreationInputTokens
+	}
+
 	deltaEvent := map[string]interface{}{
 		"type": "message_delta",
 		"delta": map[string]interface{}{
 			"stop_reason":   stopReason,
 			"stop_sequence": nil,
 		},
-		"usage": map[string]interface{}{
-			"input_tokens":  usageInfo.InputTokens,
-			"output_tokens": usageInfo.OutputTokens,
-		},
+		"usage": usagePayload,
 	}
 	deltaResult, _ := json.Marshal(deltaEvent)
 	return []byte("event: message_delta\ndata: " + string(deltaResult))

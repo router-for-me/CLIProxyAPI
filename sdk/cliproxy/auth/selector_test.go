@@ -802,6 +802,104 @@ func TestExtractSessionID_ClientRequestIDHeader(t *testing.T) {
 	}
 }
 
+func TestExtractSessionID_MetadataUserIDPriorityOverClientRequestID(t *testing.T) {
+	t.Parallel()
+
+	headers := make(http.Header)
+	headers.Set("X-Client-Request-Id", "per-request-id-1")
+
+	payload := []byte(`{"metadata":{"user_id":"sub2api-stable-session"},"messages":[{"role":"user","content":"hello"}]}`)
+
+	got := ExtractSessionID(headers, payload, nil)
+	want := "user:sub2api-stable-session"
+	if got != want {
+		t.Errorf("ExtractSessionID() = %q, want %q (metadata.user_id should beat per-request ID)", got, want)
+	}
+}
+
+func TestExtractSessionID_ConversationIDPriorityOverClientRequestID(t *testing.T) {
+	t.Parallel()
+
+	headers := make(http.Header)
+	headers.Set("X-Client-Request-Id", "per-request-id-1")
+
+	payload := []byte(`{"conversation_id":"conv-stable-123"}`)
+
+	got := ExtractSessionID(headers, payload, nil)
+	want := "conv:conv-stable-123"
+	if got != want {
+		t.Errorf("ExtractSessionID() = %q, want %q (conversation_id should beat per-request ID)", got, want)
+	}
+}
+
+func TestExtractSessionID_ClaudeCodeSessionIDHeader(t *testing.T) {
+	t.Parallel()
+
+	headers := make(http.Header)
+	headers.Set("X-Claude-Code-Session-Id", "claude-code-session-123")
+	headers.Set("X-Client-Request-Id", "per-request-id-1")
+
+	got := ExtractSessionID(headers, nil, nil)
+	want := "claude-header:claude-code-session-123"
+	if got != want {
+		t.Errorf("ExtractSessionID() = %q, want %q", got, want)
+	}
+}
+
+func TestSessionAffinitySelector_Sub2APIPassthroughIgnoresChangingClientRequestID(t *testing.T) {
+	t.Parallel()
+
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &RoundRobinSelector{},
+		TTL:      time.Minute,
+	})
+	defer selector.Stop()
+
+	auths := []*Auth{
+		{ID: "auth-a"},
+		{ID: "auth-b"},
+		{ID: "auth-c"},
+	}
+	payload := []byte(`{"metadata":{"user_id":"{\"device_id\":\"be82c3aee1e0c2d74535bacc85f9f559228f02dd8a17298cf522b71e6c375714\",\"account_uuid\":\"\",\"session_id\":\"e26d4046-0f88-4b09-bb5b-f863ab5fb24e\"}"},"messages":[{"role":"user","content":"hello"}]}`)
+
+	headers1 := make(http.Header)
+	headers1.Set("X-Client-Request-Id", "request-1")
+	first, err := selector.Pick(context.Background(), "claude", "claude-sonnet-4-5", cliproxyexecutor.Options{
+		Headers:         headers1,
+		OriginalRequest: payload,
+	}, auths)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+
+	for i := 2; i <= 5; i++ {
+		headers := make(http.Header)
+		headers.Set("X-Client-Request-Id", fmt.Sprintf("request-%d", i))
+		got, errPick := selector.Pick(context.Background(), "claude", "claude-sonnet-4-5", cliproxyexecutor.Options{
+			Headers:         headers,
+			OriginalRequest: payload,
+		}, auths)
+		if errPick != nil {
+			t.Fatalf("Pick() #%d error = %v", i, errPick)
+		}
+		if got.ID != first.ID {
+			t.Fatalf("Pick() #%d auth.ID = %q, want %q", i, got.ID, first.ID)
+		}
+	}
+}
+
+func TestExtractSessionID_ClaudeCodeJSONUserIDAllowsWhitespace(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte(`{"metadata":{"user_id":"  {\"session_id\":\"claude-session-with-space\"}"},"messages":[{"role":"user","content":"hello"}]}`)
+
+	got := ExtractSessionID(nil, payload, nil)
+	want := "claude:claude-session-with-space"
+	if got != want {
+		t.Errorf("ExtractSessionID() = %q, want %q", got, want)
+	}
+}
+
 func TestExtractSessionID_CodexSessionIDPriorityOverClientRequestID(t *testing.T) {
 	t.Parallel()
 

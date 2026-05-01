@@ -53,11 +53,16 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 	}
 
 	tokens := internalusage.TokenStats{
-		InputTokens:     record.Detail.InputTokens,
-		OutputTokens:    record.Detail.OutputTokens,
-		ReasoningTokens: record.Detail.ReasoningTokens,
-		CachedTokens:    record.Detail.CachedTokens,
-		TotalTokens:     record.Detail.TotalTokens,
+		InputTokens:              record.Detail.InputTokens,
+		OutputTokens:             record.Detail.OutputTokens,
+		ReasoningTokens:          record.Detail.ReasoningTokens,
+		CachedTokens:             record.Detail.CachedTokens,
+		CacheReadInputTokens:     record.Detail.CacheReadInputTokens,
+		CacheCreationInputTokens: record.Detail.CacheCreationInputTokens,
+		TotalTokens:              record.Detail.TotalTokens,
+	}
+	if tokens.CachedTokens == 0 {
+		tokens.CachedTokens = tokens.CacheReadInputTokens + tokens.CacheCreationInputTokens
 	}
 	if tokens.TotalTokens == 0 {
 		tokens.TotalTokens = tokens.InputTokens + tokens.OutputTokens + tokens.ReasoningTokens

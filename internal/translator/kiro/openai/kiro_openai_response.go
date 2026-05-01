@@ -72,6 +72,7 @@ func BuildOpenAIResponseWithReasoning(content, reasoningContent string, toolUses
 		log.Debugf("kiro-openai: buildOpenAIResponse using fallback finish_reason: %s", finishReason)
 	}
 
+	usagePayload := openAIUsagePayload(usageInfo)
 	response := map[string]interface{}{
 		"id":      "chatcmpl-" + uuid.New().String()[:24],
 		"object":  "chat.completion",
@@ -84,15 +85,35 @@ func BuildOpenAIResponseWithReasoning(content, reasoningContent string, toolUses
 				"finish_reason": finishReason,
 			},
 		},
-		"usage": map[string]interface{}{
-			"prompt_tokens":     usageInfo.InputTokens,
-			"completion_tokens": usageInfo.OutputTokens,
-			"total_tokens":      usageInfo.InputTokens + usageInfo.OutputTokens,
-		},
+		"usage": usagePayload,
 	}
 
 	result, _ := json.Marshal(response)
 	return result
+}
+
+func openAIUsagePayload(usageInfo usage.Detail) map[string]interface{} {
+	cachedTokens := usageInfo.CachedTokens
+	if cachedTokens == 0 {
+		cachedTokens = usageInfo.CacheReadInputTokens + usageInfo.CacheCreationInputTokens
+	}
+	promptTokens := usageInfo.InputTokens + cachedTokens
+	totalTokens := usageInfo.TotalTokens
+	if totalTokens == 0 {
+		totalTokens = promptTokens + usageInfo.OutputTokens
+	}
+
+	payload := map[string]interface{}{
+		"prompt_tokens":     promptTokens,
+		"completion_tokens": usageInfo.OutputTokens,
+		"total_tokens":      totalTokens,
+	}
+	if cachedTokens > 0 {
+		payload["prompt_tokens_details"] = map[string]interface{}{
+			"cached_tokens": cachedTokens,
+		}
+	}
+	return payload
 }
 
 // mapKiroStopReasonToOpenAI converts Kiro/Claude stop_reason to OpenAI finish_reason
@@ -252,11 +273,7 @@ func BuildOpenAIStreamUsageChunk(model string, usageInfo usage.Detail) []byte {
 		"created": time.Now().Unix(),
 		"model":   model,
 		"choices": []map[string]interface{}{},
-		"usage": map[string]interface{}{
-			"prompt_tokens":     usageInfo.InputTokens,
-			"completion_tokens": usageInfo.OutputTokens,
-			"total_tokens":      usageInfo.InputTokens + usageInfo.OutputTokens,
-		},
+		"usage":   openAIUsagePayload(usageInfo),
 	}
 
 	result, _ := json.Marshal(chunk)
