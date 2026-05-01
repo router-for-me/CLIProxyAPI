@@ -80,6 +80,12 @@ func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
 			filteredModel["owned_by"] = ownedBy
 		}
 
+		// Expose context_length when the registry has it so OpenAI-compatible
+		// clients can resolve model context windows from /v1/models.
+		if contextLength, exists := model["context_length"]; exists {
+			filteredModel["context_length"] = contextLength
+		}
+
 		filteredModels[i] = filteredModel
 	}
 
