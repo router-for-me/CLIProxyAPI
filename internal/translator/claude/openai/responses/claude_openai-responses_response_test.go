@@ -66,6 +66,28 @@ func TestConvertClaudeResponseToOpenAIResponses_TextDoneUsesCurrentBlockText(t *
 	if got := gjson.GetBytes(outputItemDone, "output_index").Int(); got != 2 {
 		t.Fatalf("second response.output_item.done output_index = %d, want 2", got)
 	}
+
+	completed := ConvertClaudeResponseToOpenAIResponses(ctx, "claude-sonnet", emptyRequest, emptyRequest, []byte(`data: {"type":"message_stop"}`), &param)
+	if len(completed) != 1 {
+		t.Fatalf("message_stop emitted %d events, want 1", len(completed))
+	}
+	completedPayload := responseEventPayload(t, completed[0])
+	outputs := gjson.GetBytes(completedPayload, "response.output").Array()
+	if len(outputs) != 2 {
+		t.Fatalf("response.completed output length = %d, want 2: %s", len(outputs), completedPayload)
+	}
+	if got := outputs[0].Get("id").String(); got != "msg_msg_456_0" {
+		t.Fatalf("response.completed output.0.id = %q, want msg_msg_456_0", got)
+	}
+	if got := outputs[0].Get("content.0.text").String(); got != "first" {
+		t.Fatalf("response.completed output.0 text = %q, want first", got)
+	}
+	if got := outputs[1].Get("id").String(); got != "msg_msg_456_2" {
+		t.Fatalf("response.completed output.1.id = %q, want msg_msg_456_2", got)
+	}
+	if got := outputs[1].Get("content.0.text").String(); got != "second" {
+		t.Fatalf("response.completed output.1 text = %q, want second", got)
+	}
 }
 
 func TestConvertClaudeResponseToOpenAIResponses_TextDoneCarriesAccumulatedText(t *testing.T) {

@@ -29,6 +29,7 @@ type claudeToResponsesState struct {
 	TextBuf          strings.Builder
 	TextBlockBuf     strings.Builder
 	CurrentTextIndex int
+	TextOutputs      map[int]claudeTextOutput
 	// reasoning state
 	ReasoningActive    bool
 	ReasoningItemID    string
@@ -39,6 +40,11 @@ type claudeToResponsesState struct {
 	InputTokens  int64
 	OutputTokens int64
 	UsageSeen    bool
+}
+
+type claudeTextOutput struct {
+	ID   string
+	Text string
 }
 
 var dataTag = []byte("data:")
@@ -60,7 +66,7 @@ func emitEvent(event string, payload []byte) []byte {
 // ConvertClaudeResponseToOpenAIResponses converts Claude SSE to OpenAI Responses SSE events.
 func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) [][]byte {
 	if *param == nil {
-		*param = &claudeToResponsesState{FuncArgsBuf: make(map[int]*strings.Builder), FuncNames: make(map[int]string), FuncCallIDs: make(map[int]string)}
+		*param = &claudeToResponsesState{FuncArgsBuf: make(map[int]*strings.Builder), FuncNames: make(map[int]string), FuncCallIDs: make(map[int]string), TextOutputs: make(map[int]claudeTextOutput)}
 	}
 	st := (*param).(*claudeToResponsesState)
 
@@ -96,6 +102,7 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 			st.FuncArgsBuf = make(map[int]*strings.Builder)
 			st.FuncNames = make(map[int]string)
 			st.FuncCallIDs = make(map[int]string)
+			st.TextOutputs = make(map[int]claudeTextOutput)
 			st.InputTokens = 0
 			st.OutputTokens = 0
 			st.UsageSeen = false
@@ -249,6 +256,10 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 			final, _ = sjson.SetBytes(final, "item.id", st.CurrentMsgID)
 			final, _ = sjson.SetBytes(final, "item.content.0.text", text)
 			out = append(out, emitEvent("response.output_item.done", final))
+			if st.TextOutputs == nil {
+				st.TextOutputs = make(map[int]claudeTextOutput)
+			}
+			st.TextOutputs[st.CurrentTextIndex] = claudeTextOutput{ID: st.CurrentMsgID, Text: text}
 			st.InTextBlock = false
 		} else if st.InFuncBlock {
 			args := "{}"
@@ -375,36 +386,36 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 
 		// Build response.output from aggregated state
 		outputsWrapper := []byte(`{"arr":[]}`)
+		outputItems := make(map[int][]byte)
 		// reasoning item (if any)
 		if st.ReasoningBuf.Len() > 0 || st.ReasoningPartAdded {
 			item := []byte(`{"id":"","type":"reasoning","summary":[{"type":"summary_text","text":""}]}`)
 			item, _ = sjson.SetBytes(item, "id", st.ReasoningItemID)
 			item, _ = sjson.SetBytes(item, "summary.0.text", st.ReasoningBuf.String())
-			outputsWrapper, _ = sjson.SetRawBytes(outputsWrapper, "arr.-1", item)
+			outputItems[st.ReasoningIndex] = item
 		}
-		// assistant message item (if any text)
-		if st.TextBuf.Len() > 0 || st.InTextBlock || st.CurrentMsgID != "" {
+		// assistant message items (if any text)
+		if len(st.TextOutputs) > 0 {
+			textIdxs := make([]int, 0, len(st.TextOutputs))
+			for idx := range st.TextOutputs {
+				textIdxs = append(textIdxs, idx)
+			}
+			for _, idx := range textIdxs {
+				textOutput := st.TextOutputs[idx]
+				item := []byte(`{"id":"","type":"message","status":"completed","content":[{"type":"output_text","annotations":[],"logprobs":[],"text":""}],"role":"assistant"}`)
+				item, _ = sjson.SetBytes(item, "id", textOutput.ID)
+				item, _ = sjson.SetBytes(item, "content.0.text", textOutput.Text)
+				outputItems[idx] = item
+			}
+		} else if st.TextBuf.Len() > 0 || st.InTextBlock || st.CurrentMsgID != "" {
 			item := []byte(`{"id":"","type":"message","status":"completed","content":[{"type":"output_text","annotations":[],"logprobs":[],"text":""}],"role":"assistant"}`)
 			item, _ = sjson.SetBytes(item, "id", st.CurrentMsgID)
 			item, _ = sjson.SetBytes(item, "content.0.text", st.TextBuf.String())
-			outputsWrapper, _ = sjson.SetRawBytes(outputsWrapper, "arr.-1", item)
+			outputItems[st.CurrentTextIndex] = item
 		}
 		// function_call items (in ascending index order for determinism)
 		if len(st.FuncArgsBuf) > 0 {
-			// collect indices
-			idxs := make([]int, 0, len(st.FuncArgsBuf))
 			for idx := range st.FuncArgsBuf {
-				idxs = append(idxs, idx)
-			}
-			// simple sort (small N), avoid adding new imports
-			for i := 0; i < len(idxs); i++ {
-				for j := i + 1; j < len(idxs); j++ {
-					if idxs[j] < idxs[i] {
-						idxs[i], idxs[j] = idxs[j], idxs[i]
-					}
-				}
-			}
-			for _, idx := range idxs {
 				args := ""
 				if b := st.FuncArgsBuf[idx]; b != nil {
 					args = b.String()
@@ -419,7 +430,24 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 				item, _ = sjson.SetBytes(item, "arguments", args)
 				item, _ = sjson.SetBytes(item, "call_id", callID)
 				item, _ = sjson.SetBytes(item, "name", name)
-				outputsWrapper, _ = sjson.SetRawBytes(outputsWrapper, "arr.-1", item)
+				outputItems[idx] = item
+			}
+		}
+		if len(outputItems) > 0 {
+			idxs := make([]int, 0, len(outputItems))
+			for idx := range outputItems {
+				idxs = append(idxs, idx)
+			}
+			// simple sort (small N), avoid adding new imports
+			for i := 0; i < len(idxs); i++ {
+				for j := i + 1; j < len(idxs); j++ {
+					if idxs[j] < idxs[i] {
+						idxs[i], idxs[j] = idxs[j], idxs[i]
+					}
+				}
+			}
+			for _, idx := range idxs {
+				outputsWrapper, _ = sjson.SetRawBytes(outputsWrapper, "arr.-1", outputItems[idx])
 			}
 		}
 		if gjson.GetBytes(outputsWrapper, "arr.#").Int() > 0 {

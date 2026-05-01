@@ -1591,9 +1591,14 @@ func normalizeClaudeToolsForAnthropicWithRestoreMap(body []byte) ([]byte, map[st
 		originalNameCounts[name]++
 	}
 
-	for _, tool := range tools.Array() {
+	for toolIndex, tool := range tools.Array() {
 		if anthroToolOriginalName(tool) == "" && !isClaudeBuiltinTool(tool) && !isClaudeExplicitNonCustomTypedTool(tool) {
-			log.Warnf("claude tool normalization: skipping tool with no name or recognized type: %s", tool.Raw)
+			log.Warnf(
+				"claude tool normalization: skipping tool with no name or recognized type (index=%d type=%q has_function_name=%t)",
+				toolIndex,
+				strings.TrimSpace(tool.Get("type").String()),
+				strings.TrimSpace(tool.Get("function.name").String()) != "",
+			)
 			continue
 		}
 
@@ -1720,7 +1725,7 @@ func normalizeAnthropicToolEntry(tool gjson.Result, usedNames map[string]struct{
 }
 
 func copyAnthropicCustomToolMetadata(normalized string, original gjson.Result) (string, error) {
-	for _, field := range []string{"cache_control", "input_examples", "strict"} {
+	for _, field := range []string{"cache_control", "input_examples"} {
 		value := original.Get(field)
 		if !value.Exists() {
 			continue

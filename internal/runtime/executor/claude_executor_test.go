@@ -2029,7 +2029,7 @@ func TestRemapOAuthToolNames_Lowercase_ReverseApplied(t *testing.T) {
 }
 
 func TestNormalizeClaudeToolsForAnthropic_CustomToolDefaultSchema(t *testing.T) {
-	body := []byte(`{"tools":[{"type":"custom","name":"apply.patch","description":"Patch edit","format":{"type":"grammar"}},{"type":"web_search_20250305","name":"web_search"}],"tool_choice":{"type":"tool","name":"apply.patch"},"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"toolu_01","name":"apply.patch","input":{}}]}]}`)
+	body := []byte(`{"tools":[{"type":"custom","name":"apply.patch","description":"Patch edit","format":{"type":"grammar"},"strict":true},{"type":"web_search_20250305","name":"web_search"}],"tool_choice":{"type":"tool","name":"apply.patch"},"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"toolu_01","name":"apply.patch","input":{}}]}]}`)
 
 	out, restoreMap, err := normalizeClaudeToolsForAnthropicWithRestoreMap(body)
 	if err != nil {
@@ -2043,6 +2043,9 @@ func TestNormalizeClaudeToolsForAnthropic_CustomToolDefaultSchema(t *testing.T) 
 	}
 	if gjson.GetBytes(out, "tools.0.format").Exists() {
 		t.Fatalf("tools.0.format should be removed for custom tools")
+	}
+	if gjson.GetBytes(out, "tools.0.strict").Exists() {
+		t.Fatalf("tools.0.strict should be removed for custom tools")
 	}
 	if got := gjson.GetBytes(out, "tools.0.input_schema.type").String(); got != "object" {
 		t.Fatalf("tools.0.input_schema.type = %q, want object", got)
