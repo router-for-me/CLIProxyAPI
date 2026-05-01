@@ -560,3 +560,137 @@ func TestManager_SchedulerTracksMarkResultCooldownAndRecovery(t *testing.T) {
 		t.Fatalf("len(seen) = %d, want %d", len(seen), 2)
 	}
 }
+
+func TestManager_SchedulerCodexUsageLimitFreezesAuthAcrossModels(t *testing.T) {
+	t.Parallel()
+
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	reg := registry.GetGlobalRegistry()
+	models := []*registry.ModelInfo{{ID: "gpt-5.4"}, {ID: "gpt-4.1"}}
+	const (
+		authAID = "codex-freeze-auth-a"
+		authBID = "codex-freeze-auth-b"
+	)
+	reg.RegisterClient(authAID, "codex", models)
+	reg.RegisterClient(authBID, "codex", models)
+	t.Cleanup(func() {
+		reg.UnregisterClient(authAID)
+		reg.UnregisterClient(authBID)
+	})
+
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: authAID, Provider: "codex"}); errRegister != nil {
+		t.Fatalf("Register(auth-a) error = %v", errRegister)
+	}
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: authBID, Provider: "codex"}); errRegister != nil {
+		t.Fatalf("Register(auth-b) error = %v", errRegister)
+	}
+
+	retryAfter := 2 * time.Hour
+	manager.MarkResult(context.Background(), Result{
+		AuthID:     authAID,
+		Provider:   "codex",
+		Model:      "gpt-5.4",
+		Success:    false,
+		RetryAfter: &retryAfter,
+		Error: &Error{
+			HTTPStatus: http.StatusTooManyRequests,
+			Message:    `{"error":{"type":"usage_limit_reached","message":"The usage limit has been reached"}}`,
+		},
+	})
+
+	updated, ok := manager.GetByID(authAID)
+	if !ok || updated == nil {
+		t.Fatalf("GetByID(auth-a) = %v, %v; want populated auth", updated, ok)
+	}
+	if !updated.Unavailable {
+		t.Fatal("updated.Unavailable = false, want true for account-wide Codex quota cooldown")
+	}
+	if updated.Status != StatusError {
+		t.Fatalf("updated.Status = %v, want %v", updated.Status, StatusError)
+	}
+	if updated.NextRetryAfter.IsZero() {
+		t.Fatal("updated.NextRetryAfter is zero, want retry gate from resets_at")
+	}
+	if delta := updated.NextRetryAfter.Sub(updated.UpdatedAt); delta < retryAfter-time.Second || delta > retryAfter+time.Second {
+		t.Fatalf("updated.NextRetryAfter - updated.UpdatedAt = %v, want about %v", delta, retryAfter)
+	}
+	if !updated.Quota.Exceeded {
+		t.Fatal("updated.Quota.Exceeded = false, want true")
+	}
+
+	got, errPick := manager.scheduler.pickSingle(context.Background(), "codex", "gpt-4.1", cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("scheduler.pickSingle() error = %v", errPick)
+	}
+	if got == nil || got.ID != authBID {
+		t.Fatalf("scheduler.pickSingle() auth = %v, want auth-b", got)
+	}
+}
+
+func TestManager_RegisterNormalizesPersistedCodexQuotaCooldownAcrossModels(t *testing.T) {
+	t.Parallel()
+
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	reg := registry.GetGlobalRegistry()
+	models := []*registry.ModelInfo{{ID: "gpt-5.4"}, {ID: "gpt-4.1"}}
+	const (
+		authAID = "codex-normalize-auth-a"
+		authBID = "codex-normalize-auth-b"
+	)
+	reg.RegisterClient(authAID, "codex", models)
+	reg.RegisterClient(authBID, "codex", models)
+	t.Cleanup(func() {
+		reg.UnregisterClient(authAID)
+		reg.UnregisterClient(authBID)
+	})
+
+	nextRetry := time.Now().UTC().Add(90 * time.Minute)
+	authA := &Auth{
+		ID:       authAID,
+		Provider: "codex",
+		Status:   StatusActive,
+		ModelStates: map[string]*ModelState{
+			"gpt-5.4": {
+				Status:         StatusError,
+				Unavailable:    true,
+				NextRetryAfter: nextRetry,
+				Quota: QuotaState{
+					Exceeded:      true,
+					Reason:        "quota",
+					NextRecoverAt: nextRetry,
+				},
+			},
+		},
+	}
+	if _, errRegister := manager.Register(context.Background(), authA); errRegister != nil {
+		t.Fatalf("Register(auth-a) error = %v", errRegister)
+	}
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: authBID, Provider: "codex"}); errRegister != nil {
+		t.Fatalf("Register(auth-b) error = %v", errRegister)
+	}
+
+	updated, ok := manager.GetByID(authAID)
+	if !ok || updated == nil {
+		t.Fatalf("GetByID(auth-a) = %v, %v; want populated auth", updated, ok)
+	}
+	if !updated.Unavailable {
+		t.Fatal("updated.Unavailable = false, want persisted Codex quota cooldown to normalize to account-wide block")
+	}
+	if updated.Status != StatusError {
+		t.Fatalf("updated.Status = %v, want %v", updated.Status, StatusError)
+	}
+	if updated.NextRetryAfter.IsZero() || !updated.NextRetryAfter.Equal(nextRetry) {
+		t.Fatalf("updated.NextRetryAfter = %v, want %v", updated.NextRetryAfter, nextRetry)
+	}
+	if !updated.Quota.Exceeded || !updated.Quota.NextRecoverAt.Equal(nextRetry) {
+		t.Fatalf("updated.Quota = %+v, want exceeded until %v", updated.Quota, nextRetry)
+	}
+
+	got, errPick := manager.scheduler.pickSingle(context.Background(), "codex", "gpt-4.1", cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("scheduler.pickSingle() error = %v", errPick)
+	}
+	if got == nil || got.ID != authBID {
+		t.Fatalf("scheduler.pickSingle() auth = %v, want auth-b", got)
+	}
+}

@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"syscall"
 
@@ -134,6 +135,12 @@ type Config struct {
 	// gemini-api-key, codex-api-key, claude-api-key, openai-compatibility, vertex-api-key, and ampcode.
 	OAuthModelAlias map[string][]OAuthModelAlias `yaml:"oauth-model-alias,omitempty" json:"oauth-model-alias,omitempty"`
 
+	// OAuthQuotaGroups defines shared quota families used for OAuth-backed Google model routing.
+	OAuthQuotaGroups []OAuthQuotaGroup `yaml:"oauth-quota-groups,omitempty" json:"oauth-quota-groups,omitempty"`
+
+	// OAuthAccountQuotaGroupState persists manual and auto suspension state for account/group pairs.
+	OAuthAccountQuotaGroupState []OAuthAccountQuotaGroupState `yaml:"oauth-account-quota-group-state,omitempty" json:"oauth-account-quota-group-state,omitempty"`
+
 	// Payload defines default and override rules for provider payload parameters.
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
 
@@ -246,6 +253,9 @@ type OAuthModelAlias struct {
 	Alias string `yaml:"alias" json:"alias"`
 	Fork  bool   `yaml:"fork,omitempty" json:"fork,omitempty"`
 }
+
+func (m OAuthModelAlias) GetName() string  { return m.Name }
+func (m OAuthModelAlias) GetAlias() string { return m.Alias }
 
 // AmpModelMapping defines a model name mapping for Amp CLI requests.
 // When Amp requests a model that isn't available locally, this mapping
@@ -702,6 +712,10 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Normalize global OAuth model name aliases.
 	cfg.SanitizeOAuthModelAlias()
 
+	// Normalize OAuth quota-group definitions and persisted quota-group runtime state.
+	cfg.OAuthQuotaGroups = NormalizeOAuthQuotaGroups(cfg.OAuthQuotaGroups)
+	cfg.OAuthAccountQuotaGroupState = NormalizeOAuthAccountQuotaGroupState(cfg.OAuthAccountQuotaGroupState)
+
 	// Validate raw payload rules and drop invalid entries.
 	cfg.SanitizePayloadRules()
 
@@ -1069,17 +1083,14 @@ func SaveConfigPreserveComments(configFile string, cfg *Config) error {
 
 	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "oauth-excluded-models")
 	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "oauth-model-alias")
+	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "oauth-account-quota-group-state")
 
 	// Merge generated into original in-place, preserving comments/order of existing nodes.
 	mergeMappingPreserve(original.Content[0], generated.Content[0])
 	normalizeCollectionNodeStyles(original.Content[0])
 
-	// Write back.
-	f, err := os.Create(configFile)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = f.Close() }()
+	// Render the merged YAML into memory first so a rendering failure never
+	// leaves the on-disk file truncated.
 	var buf bytes.Buffer
 	enc := yaml.NewEncoder(&buf)
 	enc.SetIndent(2)
@@ -1091,8 +1102,93 @@ func SaveConfigPreserveComments(configFile string, cfg *Config) error {
 		return err
 	}
 	data = NormalizeCommentIndentation(buf.Bytes())
-	_, err = f.Write(data)
-	return err
+
+	// Write atomically while preserving the current file's permission bits so
+	// a world-readable default cannot silently relax a restrictive umask on
+	// secret-bearing configs (addresses PR #2885 review feedback).
+	return writeConfigFileAtomically(configFile, data)
+}
+
+var renameFile = os.Rename
+
+// writeConfigFileAtomically writes data to configFile via a sibling temp file
+// with fsync + rename, preserving the existing file's permission bits when the
+// target already exists. When the target does not exist a restrictive 0o600
+// default is used so newly-created configs never widen access. Chmod errors
+// are propagated (not swallowed) so callers can detect failed permission
+// preservation.
+//
+// Some hosts bind-mount configFile as a single file (for example Docker
+// `source:/path/to/config.yaml`). Renaming over those mount targets can fail
+// with EBUSY even though truncating and rewriting the mounted file itself is
+// allowed. In that case fall back to an in-place overwrite after the fully
+// rendered temp file has been fsynced.
+func writeConfigFileAtomically(configFile string, data []byte) error {
+	mode := os.FileMode(0o600)
+	if info, err := os.Stat(configFile); err == nil {
+		mode = info.Mode().Perm()
+	}
+
+	dir := filepath.Dir(configFile)
+	tmp, err := os.CreateTemp(dir, ".config-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	cleanup := func() {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+	}
+
+	if err := tmp.Chmod(mode); err != nil {
+		cleanup()
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		cleanup()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		cleanup()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return err
+	}
+	if err := renameFile(tmpName, configFile); err != nil {
+		if errors.Is(err, syscall.EBUSY) {
+			fallbackErr := overwriteConfigFileInPlace(configFile, data, mode)
+			_ = os.Remove(tmpName)
+			return fallbackErr
+		}
+		_ = os.Remove(configFile)
+		if retryErr := renameFile(tmpName, configFile); retryErr != nil {
+			_ = os.Remove(tmpName)
+			return retryErr
+		}
+	}
+	return nil
+}
+
+func overwriteConfigFileInPlace(configFile string, data []byte, mode os.FileMode) error {
+	f, err := os.OpenFile(configFile, os.O_WRONLY|os.O_TRUNC, mode)
+	if err != nil {
+		return err
+	}
+	if err := f.Chmod(mode); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
 }
 
 // SaveConfigPreserveCommentsUpdateNestedScalar updates a nested scalar key path like ["a","b"]
@@ -1127,11 +1223,6 @@ func SaveConfigPreserveCommentsUpdateNestedScalar(configFile string, path []stri
 			node = next
 		}
 	}
-	f, err := os.Create(configFile)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = f.Close() }()
 	var buf bytes.Buffer
 	enc := yaml.NewEncoder(&buf)
 	enc.SetIndent(2)
@@ -1143,8 +1234,7 @@ func SaveConfigPreserveCommentsUpdateNestedScalar(configFile string, path []stri
 		return err
 	}
 	data = NormalizeCommentIndentation(buf.Bytes())
-	_, err = f.Write(data)
-	return err
+	return writeConfigFileAtomically(configFile, data)
 }
 
 // NormalizeCommentIndentation removes indentation from standalone YAML comment lines to keep them left aligned.

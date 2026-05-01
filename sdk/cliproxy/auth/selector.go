@@ -376,6 +376,20 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 		return true, blockReasonDisabled, time.Time{}
 	}
 	if model != "" {
+		if blocked, cooldown, next := oauthQuotaGroupBlock(auth, model, now); blocked {
+			if cooldown {
+				if next.Before(now) {
+					next = now
+				}
+				return true, blockReasonCooldown, next
+			}
+			return true, blockReasonDisabled, time.Time{}
+		}
+	}
+	if blocked, reason, next := codexAccountWideQuotaCooldownBlock(auth, now); blocked {
+		return true, reason, next
+	}
+	if model != "" {
 		if len(auth.ModelStates) > 0 {
 			state, ok := auth.ModelStates[model]
 			if (!ok || state == nil) && model != "" {
@@ -409,8 +423,26 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 				return false, blockReasonNone, time.Time{}
 			}
 		}
+		if blocked, reason, next := authLevelUnavailableBlock(auth, now); blocked {
+			return true, reason, next
+		}
 		return false, blockReasonNone, time.Time{}
 	}
+	return authLevelUnavailableBlock(auth, now)
+}
+
+func codexAccountWideQuotaCooldownBlock(auth *Auth, now time.Time) (bool, blockReason, time.Time) {
+	if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		return false, blockReasonNone, time.Time{}
+	}
+	blocked, reason, next := authLevelUnavailableBlock(auth, now)
+	if !blocked || reason != blockReasonCooldown {
+		return false, blockReasonNone, time.Time{}
+	}
+	return true, reason, next
+}
+
+func authLevelUnavailableBlock(auth *Auth, now time.Time) (bool, blockReason, time.Time) {
 	if auth.Unavailable && auth.NextRetryAfter.After(now) {
 		next := auth.NextRetryAfter
 		if !auth.Quota.NextRecoverAt.IsZero() && auth.Quota.NextRecoverAt.After(now) {

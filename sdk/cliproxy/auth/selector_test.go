@@ -124,6 +124,34 @@ func TestFillFirstSelectorPick_PriorityFallbackCooldown(t *testing.T) {
 	}
 }
 
+func TestRoundRobinSelectorPick_SkipsAuthLevelUnavailableForModel(t *testing.T) {
+	t.Parallel()
+
+	selector := &RoundRobinSelector{}
+	auths := []*Auth{
+		{
+			ID:              "bad",
+			Unavailable:     true,
+			NextRetryAfter:  time.Now().Add(30 * time.Minute),
+			Status:          StatusError,
+			StatusMessage:   "refresh_token_reused",
+			LastRefreshedAt: time.Now().Add(-24 * time.Hour),
+		},
+		{ID: "good"},
+	}
+
+	got, err := selector.Pick(context.Background(), "codex", "gpt-5-codex", cliproxyexecutor.Options{}, auths)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if got == nil {
+		t.Fatalf("Pick() auth = nil")
+	}
+	if got.ID != "good" {
+		t.Fatalf("Pick() auth.ID = %q, want %q", got.ID, "good")
+	}
+}
+
 func TestRoundRobinSelectorPick_Concurrent(t *testing.T) {
 	selector := &RoundRobinSelector{}
 	auths := []*Auth{
@@ -310,6 +338,40 @@ func TestIsAuthBlockedForModel_UnavailableWithoutNextRetryIsNotBlocked(t *testin
 	}
 	if !next.IsZero() {
 		t.Fatalf("next = %v, want zero", next)
+	}
+}
+
+func TestIsAuthBlockedForModel_CodexAccountWideQuotaCooldownOverridesModelState(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC()
+	nextRetry := now.Add(2 * time.Hour)
+	model := "gpt-4.1"
+	auth := &Auth{
+		ID:             "codex-account-wide-freeze",
+		Provider:       "codex",
+		Status:         StatusError,
+		Unavailable:    true,
+		NextRetryAfter: nextRetry,
+		Quota: QuotaState{
+			Exceeded:      true,
+			Reason:        "quota",
+			NextRecoverAt: nextRetry,
+		},
+		ModelStates: map[string]*ModelState{
+			model: {Status: StatusActive},
+		},
+	}
+
+	blocked, reason, next := isAuthBlockedForModel(auth, model, now)
+	if !blocked {
+		t.Fatal("blocked = false, want true for Codex account-wide quota cooldown")
+	}
+	if reason != blockReasonCooldown {
+		t.Fatalf("reason = %v, want %v", reason, blockReasonCooldown)
+	}
+	if !next.Equal(nextRetry) {
+		t.Fatalf("next = %v, want %v", next, nextRetry)
 	}
 }
 

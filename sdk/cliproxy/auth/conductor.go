@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"path/filepath"
 	"sort"
@@ -73,7 +74,10 @@ const (
 	quotaBackoffMax           = 30 * time.Minute
 )
 
-var quotaCooldownDisabled atomic.Bool
+var (
+	quotaCooldownDisabled  atomic.Bool
+	upstreamAttemptTimeout = 25 * time.Second
+)
 
 // SetQuotaCooldownDisabled toggles quota cooldown scheduling globally.
 func SetQuotaCooldownDisabled(disable bool) {
@@ -170,12 +174,23 @@ type Manager struct {
 	// It is initialized in NewManager; never Load() before first Store().
 	runtimeConfig atomic.Value
 
+	// oauthQuotaRuntime stores the manager-scoped quota-group routing snapshot.
+	oauthQuotaRuntime atomic.Value
+
+	// configFilePath stores the active config.yaml path used to persist CPA-owned runtime state.
+	configFilePath atomic.Value
+
 	// Optional HTTP RoundTripper provider injected by host.
 	rtProvider RoundTripperProvider
 
 	// Auto refresh state
 	refreshCancel context.CancelFunc
 	refreshLoop   *authAutoRefreshLoop
+
+	// quotaGroupCleanupCancel cancels the background OAuth quota-group
+	// expired-state cleanup loop. nil when no loop is running. See
+	// StartOAuthQuotaGroupCleanup.
+	quotaGroupCleanupCancel context.CancelFunc
 }
 
 // NewManager constructs a manager with optional custom selector and hook.
@@ -197,6 +212,8 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 	}
 	// atomic.Value requires non-nil initial value.
 	manager.runtimeConfig.Store(&internalconfig.Config{})
+	manager.oauthQuotaRuntime.Store(buildOAuthQuotaRuntimeSnapshot(&internalconfig.Config{}))
+	manager.configFilePath.Store("")
 	manager.apiKeyModelAlias.Store(apiKeyModelAliasTable(nil))
 	manager.scheduler = newAuthScheduler(selector)
 	return manager
@@ -349,6 +366,45 @@ func (m *Manager) SetSelector(selector Selector) {
 	}
 }
 
+func selectorForRoutingStrategy(strategy string) Selector {
+	switch strings.ToLower(strings.TrimSpace(strategy)) {
+	case "fill-first", "fillfirst", "ff":
+		return &FillFirstSelector{}
+	default:
+		return &RoundRobinSelector{}
+	}
+}
+
+func sameSelectorKind(current Selector, next Selector) bool {
+	switch current.(type) {
+	case *FillFirstSelector:
+		_, ok := next.(*FillFirstSelector)
+		return ok
+	case *RoundRobinSelector:
+		_, ok := next.(*RoundRobinSelector)
+		return ok
+	default:
+		return false
+	}
+}
+
+func (m *Manager) applyBuiltInSelectorForConfig(cfg *internalconfig.Config) {
+	if m == nil || cfg == nil {
+		return
+	}
+	m.mu.RLock()
+	current := m.selector
+	m.mu.RUnlock()
+	if !isBuiltInSelector(current) {
+		return
+	}
+	next := selectorForRoutingStrategy(cfg.Routing.Strategy)
+	if sameSelectorKind(current, next) {
+		return
+	}
+	m.SetSelector(next)
+}
+
 // SetStore swaps the underlying persistence store.
 func (m *Manager) SetStore(store Store) {
 	m.mu.Lock()
@@ -365,7 +421,7 @@ func (m *Manager) SetRoundTripperProvider(p RoundTripperProvider) {
 
 // SetConfig updates the runtime config snapshot used by request-time helpers.
 // Callers should provide the latest config on reload so per-credential alias mapping stays in sync.
-func (m *Manager) SetConfig(cfg *internalconfig.Config) {
+func (m *Manager) publishRuntimeConfigLocked(cfg *internalconfig.Config) {
 	if m == nil {
 		return
 	}
@@ -373,7 +429,35 @@ func (m *Manager) SetConfig(cfg *internalconfig.Config) {
 		cfg = &internalconfig.Config{}
 	}
 	m.runtimeConfig.Store(cfg)
-	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
+	snapshot := buildOAuthQuotaRuntimeSnapshot(cfg)
+	m.oauthQuotaRuntime.Store(snapshot)
+	for _, auth := range m.auths {
+		if auth != nil {
+			auth.quotaRuntime = snapshot
+		}
+	}
+	m.rebuildAPIKeyModelAliasLocked(cfg)
+}
+
+func (m *Manager) SetConfig(cfg *internalconfig.Config) {
+	if m == nil {
+		return
+	}
+	if cfg == nil {
+		cfg = &internalconfig.Config{}
+	}
+	m.mu.Lock()
+	m.publishRuntimeConfigLocked(cfg)
+	m.mu.Unlock()
+	m.applyBuiltInSelectorForConfig(cfg)
+}
+
+// SetConfigFilePath updates the config.yaml path used when persisting quota-group runtime state.
+func (m *Manager) SetConfigFilePath(path string) {
+	if m == nil {
+		return
+	}
+	m.configFilePath.Store(strings.TrimSpace(path))
 }
 
 func (m *Manager) lookupAPIKeyUpstreamModel(authID, requestedModel string) string {
@@ -774,10 +858,13 @@ func readStreamBootstrap(ctx context.Context, ch <-chan cliproxyexecutor.StreamC
 	}
 }
 
-func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, resultModel string, headers http.Header, buffered []cliproxyexecutor.StreamChunk, remaining <-chan cliproxyexecutor.StreamChunk) *cliproxyexecutor.StreamResult {
+func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, resultModel string, headers http.Header, buffered []cliproxyexecutor.StreamChunk, remaining <-chan cliproxyexecutor.StreamChunk, cleanup func()) *cliproxyexecutor.StreamResult {
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
 		defer close(out)
+		if cleanup != nil {
+			defer cleanup()
+		}
 		var failed bool
 		forward := true
 		emit := func(chunk cliproxyexecutor.StreamChunk) bool {
@@ -832,62 +919,68 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		resultModel := m.stateModelForExecution(auth, routeModel, execModel, pooled)
 		execReq := req
 		execReq.Model = execModel
-		streamResult, errStream := executor.ExecuteStream(ctx, auth, execReq, opts)
+		attemptCtx, stopAttemptTimer, cleanupAttempt, attemptTimedOut := newUpstreamAttemptContext(ctx)
+		streamResult, errStream := executor.ExecuteStream(attemptCtx, auth, execReq, opts)
 		if errStream != nil {
 			if errCtx := ctx.Err(); errCtx != nil {
+				cleanupAttempt()
 				return nil, errCtx
 			}
-			rerr := &Error{Message: errStream.Error()}
-			if se, ok := errors.AsType[cliproxyexecutor.StatusError](errStream); ok && se != nil {
-				rerr.HTTPStatus = se.StatusCode()
-			}
+			rerr := resultErrorFromExecution(errStream, attemptTimedOut())
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
 			result.RetryAfter = retryAfterFromError(errStream)
 			m.MarkResult(ctx, result)
+			cleanupAttempt()
 			if isRequestInvalidError(errStream) {
 				return nil, errStream
 			}
-			lastErr = errStream
+			if rerr != nil && rerr.Code == "upstream_timeout" {
+				lastErr = rerr
+			} else {
+				lastErr = errStream
+			}
 			continue
 		}
 
-		buffered, closed, bootstrapErr := readStreamBootstrap(ctx, streamResult.Chunks)
+		buffered, closed, bootstrapErr := readStreamBootstrap(attemptCtx, streamResult.Chunks)
 		if bootstrapErr != nil {
 			if errCtx := ctx.Err(); errCtx != nil {
 				discardStreamChunks(streamResult.Chunks)
+				cleanupAttempt()
 				return nil, errCtx
 			}
 			if isRequestInvalidError(bootstrapErr) {
-				rerr := &Error{Message: bootstrapErr.Error()}
-				if se, ok := errors.AsType[cliproxyexecutor.StatusError](bootstrapErr); ok && se != nil {
-					rerr.HTTPStatus = se.StatusCode()
-				}
+				rerr := resultErrorFromExecution(bootstrapErr, attemptTimedOut())
 				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
 				result.RetryAfter = retryAfterFromError(bootstrapErr)
 				m.MarkResult(ctx, result)
 				discardStreamChunks(streamResult.Chunks)
+				cleanupAttempt()
 				return nil, bootstrapErr
 			}
 			if idx < len(execModels)-1 {
-				rerr := &Error{Message: bootstrapErr.Error()}
-				if se, ok := errors.AsType[cliproxyexecutor.StatusError](bootstrapErr); ok && se != nil {
-					rerr.HTTPStatus = se.StatusCode()
-				}
+				rerr := resultErrorFromExecution(bootstrapErr, attemptTimedOut())
 				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
 				result.RetryAfter = retryAfterFromError(bootstrapErr)
 				m.MarkResult(ctx, result)
 				discardStreamChunks(streamResult.Chunks)
-				lastErr = bootstrapErr
+				cleanupAttempt()
+				if rerr != nil && rerr.Code == "upstream_timeout" {
+					lastErr = rerr
+				} else {
+					lastErr = bootstrapErr
+				}
 				continue
 			}
-			rerr := &Error{Message: bootstrapErr.Error()}
-			if se, ok := errors.AsType[cliproxyexecutor.StatusError](bootstrapErr); ok && se != nil {
-				rerr.HTTPStatus = se.StatusCode()
-			}
+			rerr := resultErrorFromExecution(bootstrapErr, attemptTimedOut())
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
 			result.RetryAfter = retryAfterFromError(bootstrapErr)
 			m.MarkResult(ctx, result)
 			discardStreamChunks(streamResult.Chunks)
+			cleanupAttempt()
+			if rerr != nil && rerr.Code == "upstream_timeout" {
+				return nil, newStreamBootstrapError(rerr, streamResult.Headers)
+			}
 			return nil, newStreamBootstrapError(bootstrapErr, streamResult.Headers)
 		}
 
@@ -895,6 +988,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			emptyErr := &Error{Code: "empty_stream", Message: "upstream stream closed before first payload", Retryable: true}
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: emptyErr}
 			m.MarkResult(ctx, result)
+			cleanupAttempt()
 			if idx < len(execModels)-1 {
 				lastErr = emptyErr
 				continue
@@ -908,7 +1002,8 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			close(closedCh)
 			remaining = closedCh
 		}
-		return m.wrapStreamResult(ctx, auth.Clone(), provider, resultModel, streamResult.Headers, buffered, remaining), nil
+		stopAttemptTimer()
+		return m.wrapStreamResult(attemptCtx, auth.Clone(), provider, resultModel, streamResult.Headers, buffered, remaining, cleanupAttempt), nil
 	}
 	if lastErr == nil {
 		lastErr = &Error{Code: "auth_not_found", Message: "no upstream model available"}
@@ -1097,11 +1192,16 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	if auth == nil {
 		return nil, nil
 	}
+	now := time.Now().UTC()
 	if auth.ID == "" {
 		auth.ID = uuid.NewString()
 	}
 	auth.EnsureIndex()
+	normalizeAccountWideQuotaCooldown(auth, now)
 	authClone := auth.Clone()
+	if snapshot, ok := m.oauthQuotaRuntime.Load().(*oauthQuotaRuntimeSnapshot); ok {
+		authClone.quotaRuntime = snapshot
+	}
 	m.mu.Lock()
 	m.auths[auth.ID] = authClone
 	m.mu.Unlock()
@@ -1120,6 +1220,7 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	if auth == nil || auth.ID == "" {
 		return nil, nil
 	}
+	now := time.Now().UTC()
 	m.mu.Lock()
 	if existing, ok := m.auths[auth.ID]; ok && existing != nil {
 		if !auth.indexAssigned && auth.Index == "" {
@@ -1131,9 +1232,14 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 				auth.ModelStates = existing.ModelStates
 			}
 		}
+		preserveCodexQuotaCooldown(existing, auth, now)
 	}
 	auth.EnsureIndex()
+	normalizeAccountWideQuotaCooldown(auth, now)
 	authClone := auth.Clone()
+	if snapshot, ok := m.oauthQuotaRuntime.Load().(*oauthQuotaRuntimeSnapshot); ok {
+		authClone.quotaRuntime = snapshot
+	}
 	m.auths[auth.ID] = authClone
 	m.mu.Unlock()
 	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
@@ -1144,6 +1250,68 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	_ = m.persist(ctx, auth)
 	m.hook.OnAuthUpdated(ctx, auth.Clone())
 	return auth.Clone(), nil
+}
+
+func preserveCodexQuotaCooldown(existing, incoming *Auth, now time.Time) {
+	if existing == nil || incoming == nil {
+		return
+	}
+	if !strings.EqualFold(strings.TrimSpace(incoming.Provider), "codex") {
+		return
+	}
+	if incoming.ModelStates == nil {
+		incoming.ModelStates = map[string]*ModelState{}
+	}
+	for model, state := range existing.ModelStates {
+		recoverAt := modelQuotaRecoverAt(state, now)
+		if recoverAt.IsZero() {
+			continue
+		}
+		current, ok := incoming.ModelStates[model]
+		if ok && current != nil {
+			currentRecover := modelQuotaRecoverAt(current, now)
+			if !currentRecover.IsZero() && (currentRecover.After(recoverAt) || currentRecover.Equal(recoverAt)) {
+				continue
+			}
+		}
+		incoming.ModelStates[model] = cloneModelState(state)
+	}
+	if existing.Quota.Exceeded && existing.Quota.NextRecoverAt.After(now) {
+		if !incoming.Quota.Exceeded || incoming.Quota.NextRecoverAt.Before(existing.Quota.NextRecoverAt) {
+			incoming.Quota = existing.Quota
+		}
+	}
+	if existing.Unavailable && existing.NextRetryAfter.After(now) {
+		if incoming.NextRetryAfter.Before(existing.NextRetryAfter) {
+			incoming.NextRetryAfter = existing.NextRetryAfter
+		}
+		incoming.Unavailable = true
+	}
+	if strings.TrimSpace(incoming.StatusMessage) == "" && strings.TrimSpace(existing.StatusMessage) != "" {
+		incoming.StatusMessage = existing.StatusMessage
+	}
+}
+
+func modelQuotaRecoverAt(state *ModelState, now time.Time) time.Time {
+	if state == nil {
+		return time.Time{}
+	}
+	if state.Quota.Exceeded && state.Quota.NextRecoverAt.After(now) {
+		return state.Quota.NextRecoverAt
+	}
+	if state.Unavailable && state.NextRetryAfter.After(now) && state.Quota.Exceeded {
+		return state.NextRetryAfter
+	}
+	return time.Time{}
+}
+
+func cloneModelState(state *ModelState) *ModelState {
+	if state == nil {
+		return nil
+	}
+	cloned := *state
+	cloned.LastError = cloneError(state.LastError)
+	return &cloned
 }
 
 // Load resets manager state from the backing store.
@@ -1158,13 +1326,19 @@ func (m *Manager) Load(ctx context.Context) error {
 		m.mu.Unlock()
 		return err
 	}
+	now := time.Now().UTC()
 	m.auths = make(map[string]*Auth, len(items))
 	for _, auth := range items {
 		if auth == nil || auth.ID == "" {
 			continue
 		}
 		auth.EnsureIndex()
-		m.auths[auth.ID] = auth.Clone()
+		normalizeAccountWideQuotaCooldown(auth, now)
+		authClone := auth.Clone()
+		if snapshot, ok := m.oauthQuotaRuntime.Load().(*oauthQuotaRuntimeSnapshot); ok {
+			authClone.quotaRuntime = snapshot
+		}
+		m.auths[auth.ID] = authClone
 	}
 	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
 	if cfg == nil {
@@ -1183,6 +1357,10 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 	if len(normalized) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
+	// Expired quota-group auto suspensions are reaped by the background loop
+	// started via StartOAuthQuotaGroupCleanup (see oauth_quota_groups_manager.go).
+	// The per-request lock-free check in oauthQuotaGroupBlock already skips
+	// entries whose AutoSuspendedUntil is in the past.
 
 	_, maxRetryCredentials, maxWait := m.retrySettings()
 
@@ -1218,6 +1396,10 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 	if len(normalized) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
+	// Expired quota-group auto suspensions are reaped by the background loop
+	// started via StartOAuthQuotaGroupCleanup (see oauth_quota_groups_manager.go).
+	// The per-request lock-free check in oauthQuotaGroupBlock already skips
+	// entries whose AutoSuspendedUntil is in the past.
 
 	_, maxRetryCredentials, maxWait := m.retrySettings()
 
@@ -1249,6 +1431,10 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 	if len(normalized) == 0 {
 		return nil, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
+	// Expired quota-group auto suspensions are reaped by the background loop
+	// started via StartOAuthQuotaGroupCleanup (see oauth_quota_groups_manager.go).
+	// The per-request lock-free check in oauthQuotaGroupBlock already skips
+	// entries whose AutoSuspendedUntil is in the past.
 
 	_, maxRetryCredentials, maxWait := m.retrySettings()
 
@@ -1327,16 +1513,15 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			resultModel := m.stateModelForExecution(auth, routeModel, upstreamModel, pooled)
 			execReq := req
 			execReq.Model = upstreamModel
-			resp, errExec := executor.Execute(execCtx, auth, execReq, opts)
+			attemptCtx, _, cleanupAttempt, attemptTimedOut := newUpstreamAttemptContext(execCtx)
+			resp, errExec := executor.Execute(attemptCtx, auth, execReq, opts)
+			cleanupAttempt()
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: errExec == nil}
 			if errExec != nil {
-				if errCtx := execCtx.Err(); errCtx != nil {
+				if errCtx := ctx.Err(); errCtx != nil {
 					return cliproxyexecutor.Response{}, errCtx
 				}
-				result.Error = &Error{Message: errExec.Error()}
-				if se, ok := errors.AsType[cliproxyexecutor.StatusError](errExec); ok && se != nil {
-					result.Error.HTTPStatus = se.StatusCode()
-				}
+				result.Error = resultErrorFromExecution(errExec, attemptTimedOut())
 				if ra := retryAfterFromError(errExec); ra != nil {
 					result.RetryAfter = ra
 				}
@@ -1344,7 +1529,11 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				if isRequestInvalidError(errExec) {
 					return cliproxyexecutor.Response{}, errExec
 				}
-				authErr = errExec
+				if result.Error != nil && result.Error.Code == "upstream_timeout" {
+					authErr = result.Error
+				} else {
+					authErr = errExec
+				}
 				continue
 			}
 			m.MarkResult(execCtx, result)
@@ -1405,24 +1594,38 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			resultModel := m.stateModelForExecution(auth, routeModel, upstreamModel, pooled)
 			execReq := req
 			execReq.Model = upstreamModel
-			resp, errExec := executor.CountTokens(execCtx, auth, execReq, opts)
+			attemptCtx, _, cleanupAttempt, attemptTimedOut := newUpstreamAttemptContext(execCtx)
+			resp, errExec := executor.CountTokens(attemptCtx, auth, execReq, opts)
+			cleanupAttempt()
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: errExec == nil}
 			if errExec != nil {
-				if errCtx := execCtx.Err(); errCtx != nil {
+				if errCtx := ctx.Err(); errCtx != nil {
 					return cliproxyexecutor.Response{}, errCtx
 				}
-				result.Error = &Error{Message: errExec.Error()}
-				if se, ok := errors.AsType[cliproxyexecutor.StatusError](errExec); ok && se != nil {
-					result.Error.HTTPStatus = se.StatusCode()
-				}
+				result.Error = resultErrorFromExecution(errExec, attemptTimedOut())
 				if ra := retryAfterFromError(errExec); ra != nil {
 					result.RetryAfter = ra
 				}
-				m.MarkResult(execCtx, result)
+				// count_tokens 404s from non-Anthropic upstreams indicate an
+				// unsupported endpoint, not a missing model. Recording them via
+				// MarkResult would incorrectly suspend the auth for 12 hours and
+				// block ALL subsequent requests for the same model.
+				if result.Error.HTTPStatus != http.StatusNotFound {
+					m.MarkResult(execCtx, result)
+				} else {
+					logEntryWithRequestID(execCtx).Debugf(
+						"skipping MarkResult for count_tokens 404 on auth=%s model=%s: %s",
+						auth.ID, upstreamModel, errExec.Error(),
+					)
+				}
 				if isRequestInvalidError(errExec) {
 					return cliproxyexecutor.Response{}, errExec
 				}
-				authErr = errExec
+				if result.Error != nil && result.Error.Code == "upstream_timeout" {
+					authErr = result.Error
+				} else {
+					authErr = errExec
+				}
 				continue
 			}
 			m.MarkResult(execCtx, result)
@@ -2005,6 +2208,60 @@ func waitForCooldown(ctx context.Context, wait time.Duration) error {
 	}
 }
 
+func newUpstreamAttemptContext(parent context.Context) (context.Context, func(), func(), func() bool) {
+	if upstreamAttemptTimeout <= 0 || parent == nil {
+		noop := func() {}
+		return parent, noop, noop, func() bool { return false }
+	}
+
+	ctx, cancel := context.WithCancel(parent)
+	var timedOut atomic.Bool
+	timer := time.AfterFunc(upstreamAttemptTimeout, func() {
+		timedOut.Store(true)
+		cancel()
+	})
+	stopTimer := func() {
+		timer.Stop()
+	}
+	cleanup := func() {
+		stopTimer()
+		cancel()
+	}
+	return ctx, stopTimer, cleanup, timedOut.Load
+}
+
+func resultErrorFromExecution(err error, attemptTimedOut bool) *Error {
+	if err == nil {
+		return nil
+	}
+	rerr := &Error{Message: err.Error()}
+	if se, ok := errors.AsType[cliproxyexecutor.StatusError](err); ok && se != nil {
+		rerr.HTTPStatus = se.StatusCode()
+	}
+	if attemptTimedOut || isTimeoutError(err) {
+		rerr.Code = "upstream_timeout"
+		rerr.Message = "upstream attempt timed out"
+		rerr.Retryable = true
+		rerr.HTTPStatus = http.StatusGatewayTimeout
+	}
+	return rerr
+}
+
+func isTimeoutError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "timeout") || strings.Contains(msg, "timed out")
+}
+
 // MarkResult records an execution result and notifies hooks.
 func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	if result.AuthID == "" {
@@ -2017,15 +2274,34 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	clearModelQuota := false
 	setModelQuota := false
 	var authSnapshot *Auth
+	var runtimeCfgToPublish *internalconfig.Config
+	var runtimeCfgToPersist *internalconfig.Config
+	persistRuntimeConfig := false
 
 	m.mu.Lock()
+	publishRuntimeConfig := func() {
+		if runtimeCfgToPublish == nil {
+			return
+		}
+		m.publishRuntimeConfigLocked(runtimeCfgToPublish)
+		if persistRuntimeConfig {
+			runtimeCfgToPersist = runtimeCfgToPublish
+		}
+		runtimeCfgToPublish = nil
+		persistRuntimeConfig = false
+	}
 	if auth, ok := m.auths[result.AuthID]; ok && auth != nil {
 		now := time.Now()
 
 		if result.Success {
 			if result.Model != "" {
+				if cfg, changed := m.clearOAuthQuotaGroupAutoStateLocked(auth, result.Model, now); changed {
+					runtimeCfgToPublish = cfg
+					persistRuntimeConfig = true
+				}
 				state := ensureModelState(auth, result.Model)
 				resetModelState(state, now)
+				publishRuntimeConfig()
 				updateAggregatedAvailability(auth, now)
 				if !hasModelError(auth, now) {
 					auth.LastError = nil
@@ -2054,6 +2330,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					}
 
 					statusCode := statusCodeFromResult(result.Error)
+					forceAccountQuotaCooldown := shouldForceAccountWideQuotaCooldown(result.Provider, result.Error, result.RetryAfter)
 					if isModelSupportResultError(result.Error) {
 						next := now.Add(12 * time.Hour)
 						state.NextRetryAfter = next
@@ -2091,6 +2368,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						case 429:
 							var next time.Time
 							backoffLevel := state.Quota.BackoffLevel
+							_, matchedQuotaGroup := resolveOAuthQuotaGroup(auth, result.Model)
 							if !disableCooling {
 								if result.RetryAfter != nil {
 									next = now.Add(*result.RetryAfter)
@@ -2102,14 +2380,28 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 									backoffLevel = nextLevel
 								}
 							}
-							state.NextRetryAfter = next
-							state.Quota = QuotaState{
-								Exceeded:      true,
-								Reason:        "quota",
-								NextRecoverAt: next,
-								BackoffLevel:  backoffLevel,
+							if matchedQuotaGroup {
+								state.Unavailable = false
+								state.NextRetryAfter = time.Time{}
+								state.Quota = QuotaState{}
 							}
-							if !disableCooling {
+							if !disableCooling && !next.IsZero() && matchedQuotaGroup {
+								resetSource := "computed_backoff"
+								if result.RetryAfter != nil {
+									resetSource = "retry_after"
+								}
+								if cfg, changed := m.setOAuthQuotaGroupAutoStateLocked(auth, result.Model, result.Provider, next, resetSource, now); changed {
+									runtimeCfgToPublish = cfg
+									persistRuntimeConfig = true
+								}
+							} else if !disableCooling && !next.IsZero() {
+								state.NextRetryAfter = next
+								state.Quota = QuotaState{
+									Exceeded:      true,
+									Reason:        "quota",
+									NextRecoverAt: next,
+									BackoffLevel:  backoffLevel,
+								}
 								suspendReason = "quota"
 								shouldSuspendModel = true
 								setModelQuota = true
@@ -2128,17 +2420,27 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 
 					auth.Status = StatusError
 					auth.UpdatedAt = now
+					publishRuntimeConfig()
 					updateAggregatedAvailability(auth, now)
+					if forceAccountQuotaCooldown {
+						applyAuthFailureState(auth, result.Error, result.RetryAfter, now)
+					}
 				}
 			} else {
 				applyAuthFailureState(auth, result.Error, result.RetryAfter, now)
 			}
 		}
 
+		publishRuntimeConfig()
 		_ = m.persist(ctx, auth)
 		authSnapshot = auth.Clone()
 	}
 	m.mu.Unlock()
+	if runtimeCfgToPersist != nil {
+		if err := m.persistRuntimeConfigSnapshot(runtimeCfgToPersist); err != nil {
+			log.WithError(err).Warn("failed to persist oauth-account-quota-group-state")
+		}
+	}
 	if m.scheduler != nil && authSnapshot != nil {
 		m.scheduler.upsertAuth(authSnapshot)
 	}
@@ -2206,16 +2508,13 @@ func updateAggregatedAvailability(auth *Auth, now time.Time) {
 	if auth == nil {
 		return
 	}
-	if len(auth.ModelStates) == 0 {
-		clearAggregatedAvailability(auth)
-		return
-	}
-	allUnavailable := true
+	hasState := false
+	modelAllUnavailable := true
 	earliestRetry := time.Time{}
 	quotaExceeded := false
 	quotaRecover := time.Time{}
+	accountWideQuotaRecover := time.Time{}
 	maxBackoffLevel := 0
-	hasState := false
 	for _, state := range auth.ModelStates {
 		if state == nil {
 			continue
@@ -2238,29 +2537,82 @@ func updateAggregatedAvailability(auth *Auth, now time.Time) {
 			}
 		}
 		if !stateUnavailable {
-			allUnavailable = false
+			modelAllUnavailable = false
 		}
 		if state.Quota.Exceeded {
 			quotaExceeded = true
 			if quotaRecover.IsZero() || (!state.Quota.NextRecoverAt.IsZero() && state.Quota.NextRecoverAt.Before(quotaRecover)) {
 				quotaRecover = state.Quota.NextRecoverAt
 			}
+			if state.Quota.NextRecoverAt.After(now) && (accountWideQuotaRecover.IsZero() || state.Quota.NextRecoverAt.After(accountWideQuotaRecover)) {
+				accountWideQuotaRecover = state.Quota.NextRecoverAt
+			}
 			if state.Quota.BackoffLevel > maxBackoffLevel {
 				maxBackoffLevel = state.Quota.BackoffLevel
 			}
 		}
 	}
-	if !hasState {
+
+	supportedModels := registry.GetGlobalRegistry().GetModelsForClient(auth.ID)
+	modelIDs := make([]string, 0, len(supportedModels))
+	for _, model := range supportedModels {
+		if model == nil {
+			continue
+		}
+		modelIDs = append(modelIDs, model.ID)
+	}
+	effectiveGroups := collectOAuthQuotaGroupsForModels(auth, modelIDs)
+	hasEffectiveGroups := len(effectiveGroups) > 0
+	groupAllUnavailable := hasEffectiveGroups
+	groupQuotaRecover := time.Time{}
+	groupQuotaExceeded := false
+	for _, group := range effectiveGroups {
+		state, ok := oauthQuotaGroupState(auth, group.ID)
+		if !ok {
+			groupAllUnavailable = false
+			continue
+		}
+		if state.ManualSuspended {
+			continue
+		}
+		if !state.AutoSuspendedUntil.IsZero() && state.AutoSuspendedUntil.After(now) {
+			groupQuotaExceeded = true
+			if groupQuotaRecover.IsZero() || state.AutoSuspendedUntil.Before(groupQuotaRecover) {
+				groupQuotaRecover = state.AutoSuspendedUntil
+			}
+			continue
+		}
+		groupAllUnavailable = false
+	}
+
+	if !hasState && !hasEffectiveGroups {
 		clearAggregatedAvailability(auth)
 		return
 	}
-	auth.Unavailable = allUnavailable
-	if allUnavailable {
+
+	forceAccountWideQuota := strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") && !accountWideQuotaRecover.IsZero()
+	auth.Unavailable = (hasState && modelAllUnavailable) || groupAllUnavailable
+	if forceAccountWideQuota {
+		auth.Unavailable = true
+	}
+	if auth.Unavailable {
+		if forceAccountWideQuota {
+			earliestRetry = accountWideQuotaRecover
+		} else if groupAllUnavailable && (!groupQuotaRecover.IsZero() && (earliestRetry.IsZero() || groupQuotaRecover.Before(earliestRetry))) {
+			earliestRetry = groupQuotaRecover
+		}
 		auth.NextRetryAfter = earliestRetry
 	} else {
 		auth.NextRetryAfter = time.Time{}
 	}
-	if quotaExceeded {
+	if forceAccountWideQuota {
+		quotaExceeded = true
+		quotaRecover = accountWideQuotaRecover
+	}
+	if groupQuotaExceeded && (quotaRecover.IsZero() || (!groupQuotaRecover.IsZero() && groupQuotaRecover.Before(quotaRecover))) {
+		quotaRecover = groupQuotaRecover
+	}
+	if quotaExceeded || groupQuotaExceeded {
 		auth.Quota.Exceeded = true
 		auth.Quota.Reason = "quota"
 		auth.Quota.NextRecoverAt = quotaRecover
@@ -2271,6 +2623,36 @@ func updateAggregatedAvailability(auth *Auth, now time.Time) {
 		auth.Quota.NextRecoverAt = time.Time{}
 		auth.Quota.BackoffLevel = 0
 	}
+}
+
+func normalizeAccountWideQuotaCooldown(auth *Auth, now time.Time) {
+	if auth == nil {
+		return
+	}
+	if !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		return
+	}
+	updateAggregatedAvailability(auth, now)
+	if auth.Disabled || auth.Status == StatusDisabled {
+		return
+	}
+	if auth.Unavailable && auth.Quota.Exceeded {
+		auth.Status = StatusError
+		if strings.TrimSpace(auth.StatusMessage) == "" {
+			auth.StatusMessage = "quota exhausted"
+		}
+	}
+}
+
+func shouldForceAccountWideQuotaCooldown(provider string, resultErr *Error, retryAfter *time.Duration) bool {
+	if retryAfter == nil || resultErr == nil || resultErr.HTTPStatus != http.StatusTooManyRequests {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(provider), "codex") {
+		return false
+	}
+	message := strings.ToLower(strings.TrimSpace(resultErr.Message))
+	return strings.Contains(message, "usage_limit_reached") || strings.Contains(message, "usage limit has been reached")
 }
 
 func clearAggregatedAvailability(auth *Auth) {
@@ -2358,8 +2740,8 @@ func retryAfterFromError(err error) *time.Duration {
 	type retryAfterProvider interface {
 		RetryAfter() *time.Duration
 	}
-	rap, ok := err.(retryAfterProvider)
-	if !ok || rap == nil {
+	var rap retryAfterProvider
+	if !errors.As(err, &rap) || rap == nil {
 		return nil
 	}
 	retryAfter := rap.RetryAfter()
@@ -3194,6 +3576,12 @@ func (m *Manager) StartAutoRefresh(parent context.Context, interval time.Duratio
 
 	loop.rebuild(time.Now())
 	go loop.run(ctx)
+
+	// Piggy-back the quota-group cleanup loop on the refresh lifecycle so hosts
+	// that already call StartAutoRefresh/StopAutoRefresh get background reaping
+	// for free. Cancelling the refresh context also cancels this one because
+	// StartOAuthQuotaGroupCleanup derives its context from the supplied parent.
+	m.StartOAuthQuotaGroupCleanup(ctx, 0)
 }
 
 // StopAutoRefresh cancels the background refresh loop, if running.
@@ -3207,6 +3595,7 @@ func (m *Manager) StopAutoRefresh() {
 	if cancel != nil {
 		cancel()
 	}
+	m.StopOAuthQuotaGroupCleanup()
 	// Stop selector if it implements StoppableSelector (e.g., SessionAffinitySelector)
 	if stoppable, ok := m.selector.(StoppableSelector); ok {
 		stoppable.Stop()
@@ -3475,17 +3864,30 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 	now := time.Now()
 	if err != nil {
 		shouldReschedule := false
+		var persistAuth *Auth
+		backoff := refreshFailureBackoffForError(err)
+		nextRefresh := now.Add(backoff)
 		m.mu.Lock()
 		if current := m.auths[id]; current != nil {
-			current.NextRefreshAfter = now.Add(refreshFailureBackoff)
+			current.NextRefreshAfter = nextRefresh
+			current.NextRetryAfter = nextRefresh
+			current.Unavailable = true
+			current.Status = StatusError
+			current.StatusMessage = err.Error()
 			current.LastError = &Error{Message: err.Error()}
 			m.auths[id] = current
 			shouldReschedule = true
+			persistAuth = current.Clone()
 			if m.scheduler != nil {
 				m.scheduler.upsertAuth(current.Clone())
 			}
 		}
 		m.mu.Unlock()
+		if persistAuth != nil {
+			if errPersist := m.persist(ctx, persistAuth); errPersist != nil {
+				log.WithError(errPersist).Warn("failed to persist auth refresh failure state")
+			}
+		}
 		if shouldReschedule {
 			m.queueRefreshReschedule(id)
 		}
@@ -3507,6 +3909,16 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 		updated.NextRefreshAfter = now.Add(refreshIneffectiveBackoff)
 	}
 	_, _ = m.Update(ctx, updated)
+}
+
+func refreshFailureBackoffForError(err error) time.Duration {
+	if err == nil {
+		return refreshFailureBackoff
+	}
+	if strings.Contains(strings.ToLower(err.Error()), "refresh_token_reused") {
+		return 12 * time.Hour
+	}
+	return refreshFailureBackoff
 }
 
 func (m *Manager) executorFor(provider string) ProviderExecutor {

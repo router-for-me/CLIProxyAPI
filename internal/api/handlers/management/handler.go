@@ -65,6 +65,10 @@ func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Man
 		allowRemoteOverride: envSecret != "",
 		envSecret:           envSecret,
 	}
+	if manager != nil {
+		manager.SetConfig(cfg)
+		manager.SetConfigFilePath(configFilePath)
+	}
 	h.startAttemptCleanup()
 	return h
 }
@@ -105,6 +109,9 @@ func NewHandlerWithoutConfigFilePath(cfg *config.Config, manager *coreauth.Manag
 }
 
 // SetConfig updates the in-memory config reference when the server hot-reloads.
+// The authManager now maintains its own runtime config snapshot (see PR #2885
+// review feedback); pushing h.cfg back into it here would overwrite that newer
+// state with stale data.
 func (h *Handler) SetConfig(cfg *config.Config) {
 	if h == nil {
 		return
@@ -115,6 +122,8 @@ func (h *Handler) SetConfig(cfg *config.Config) {
 }
 
 // SetAuthManager updates the auth manager reference used by management endpoints.
+// Do not push h.cfg back into the manager here (see PR #2885 review feedback);
+// the manager owns the authoritative runtime config snapshot.
 func (h *Handler) SetAuthManager(manager *coreauth.Manager) {
 	if h == nil {
 		return
@@ -298,6 +307,9 @@ func (h *Handler) persistLocked(c *gin.Context) bool {
 	if err := config.SaveConfigPreserveComments(h.configFilePath, h.cfg); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to save config: %v", err)})
 		return false
+	}
+	if h.authManager != nil {
+		h.authManager.SetConfigFilePath(h.configFilePath)
 	}
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	return true

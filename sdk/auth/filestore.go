@@ -18,6 +18,19 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
+var persistedAuthRuntimeMetadataKeys = []string{
+	"disabled",
+	"status",
+	"status_message",
+	"unavailable",
+	"last_error",
+	"last_refreshed_at",
+	"next_refresh_after",
+	"next_retry_after",
+	"quota",
+	"model_states",
+}
+
 // FileTokenStore persists token records and auth metadata using the filesystem as backing storage.
 type FileTokenStore struct {
 	mu      sync.Mutex
@@ -70,17 +83,18 @@ func (s *FileTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (str
 		SetMetadata(map[string]any)
 	}
 
+	persistedMetadata := persistedAuthMetadata(auth)
+
 	switch {
 	case auth.Storage != nil:
 		if setter, ok := auth.Storage.(metadataSetter); ok {
-			setter.SetMetadata(auth.Metadata)
+			setter.SetMetadata(persistedMetadata)
 		}
 		if err = auth.Storage.SaveTokenToFile(path); err != nil {
 			return "", err
 		}
-	case auth.Metadata != nil:
-		auth.Metadata["disabled"] = auth.Disabled
-		raw, errMarshal := json.Marshal(auth.Metadata)
+	case persistedMetadata != nil:
+		raw, errMarshal := json.Marshal(persistedMetadata)
 		if errMarshal != nil {
 			return "", fmt.Errorf("auth filestore: marshal metadata failed: %w", errMarshal)
 		}
@@ -251,11 +265,105 @@ func (s *FileTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth,
 		LastRefreshedAt:  time.Time{},
 		NextRefreshAfter: time.Time{},
 	}
+	restorePersistedRuntimeState(auth, metadata)
 	if email, ok := metadata["email"].(string); ok && email != "" {
 		auth.Attributes["email"] = email
 	}
 	cliproxyauth.ApplyCustomHeadersFromMetadata(auth)
 	return auth, nil
+}
+
+func persistedAuthMetadata(auth *cliproxyauth.Auth) map[string]any {
+	if auth == nil {
+		return nil
+	}
+	metadata := cloneMetadataMap(auth.Metadata)
+	for _, key := range persistedAuthRuntimeMetadataKeys {
+		delete(metadata, key)
+	}
+
+	metadata["disabled"] = auth.Disabled
+
+	if auth.Status != "" && auth.Status != cliproxyauth.StatusActive {
+		metadata["status"] = auth.Status
+	}
+	if auth.StatusMessage != "" {
+		metadata["status_message"] = auth.StatusMessage
+	}
+	if auth.Unavailable {
+		metadata["unavailable"] = true
+	}
+	if auth.LastError != nil {
+		metadata["last_error"] = auth.LastError
+	}
+	if !auth.LastRefreshedAt.IsZero() {
+		metadata["last_refreshed_at"] = auth.LastRefreshedAt.UTC()
+	}
+	if !auth.NextRefreshAfter.IsZero() {
+		metadata["next_refresh_after"] = auth.NextRefreshAfter.UTC()
+	}
+	if !auth.NextRetryAfter.IsZero() {
+		metadata["next_retry_after"] = auth.NextRetryAfter.UTC()
+	}
+	if auth.Quota.Exceeded || auth.Quota.Reason != "" || !auth.Quota.NextRecoverAt.IsZero() || auth.Quota.BackoffLevel != 0 {
+		metadata["quota"] = auth.Quota
+	}
+	if len(auth.ModelStates) > 0 {
+		metadata["model_states"] = auth.ModelStates
+	}
+	return metadata
+}
+
+func cloneMetadataMap(src map[string]any) map[string]any {
+	if len(src) == 0 {
+		return make(map[string]any)
+	}
+	dst := make(map[string]any, len(src))
+	for key, value := range src {
+		dst[key] = value
+	}
+	return dst
+}
+
+func restorePersistedRuntimeState(auth *cliproxyauth.Auth, metadata map[string]any) {
+	if auth == nil || metadata == nil {
+		return
+	}
+
+	var status cliproxyauth.Status
+	if decodeMetadataField(metadata, "status", &status) && status != "" {
+		auth.Status = status
+	}
+	_ = decodeMetadataField(metadata, "status_message", &auth.StatusMessage)
+	_ = decodeMetadataField(metadata, "unavailable", &auth.Unavailable)
+	_ = decodeMetadataField(metadata, "last_error", &auth.LastError)
+	_ = decodeMetadataField(metadata, "last_refreshed_at", &auth.LastRefreshedAt)
+	if decodeMetadataField(metadata, "next_refresh_after", &auth.NextRefreshAfter) {
+		auth.NextRefreshAfter = auth.NextRefreshAfter.UTC()
+	}
+	if decodeMetadataField(metadata, "next_retry_after", &auth.NextRetryAfter) {
+		auth.NextRetryAfter = auth.NextRetryAfter.UTC()
+	}
+	_ = decodeMetadataField(metadata, "quota", &auth.Quota)
+	_ = decodeMetadataField(metadata, "model_states", &auth.ModelStates)
+}
+
+func decodeMetadataField[T any](metadata map[string]any, key string, target *T) bool {
+	if metadata == nil || target == nil {
+		return false
+	}
+	raw, ok := metadata[key]
+	if !ok || raw == nil {
+		return false
+	}
+	encoded, err := json.Marshal(raw)
+	if err != nil {
+		return false
+	}
+	if err = json.Unmarshal(encoded, target); err != nil {
+		return false
+	}
+	return true
 }
 
 func (s *FileTokenStore) idFor(path, baseDir string) string {

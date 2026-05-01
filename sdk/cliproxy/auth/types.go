@@ -92,6 +92,9 @@ type Auth struct {
 	// Runtime carries non-serialisable data used during execution (in-memory only).
 	Runtime any `json:"-"`
 
+	// quotaRuntime carries manager-scoped OAuth quota-group routing state.
+	quotaRuntime *oauthQuotaRuntimeSnapshot
+
 	indexAssigned bool `json:"-"`
 }
 
@@ -150,6 +153,7 @@ func (a *Auth) Clone() *Auth {
 		}
 	}
 	copyAuth.Runtime = a.Runtime
+	copyAuth.quotaRuntime = a.quotaRuntime
 	return &copyAuth
 }
 
