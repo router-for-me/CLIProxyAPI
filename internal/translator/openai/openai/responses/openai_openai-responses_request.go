@@ -76,10 +76,10 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 		var pendingReasoningContent string
 
 		flushToolGroup := func() {
-			if len(pendingFunctionCalls) == 0 {
+			if len(pendingFunctionCalls) == 0 && len(pendingToolOutputs) == 0 {
 				return
 			}
-			// 1. Emit one assistant message with all accumulated tool_calls
+			// 1. Emit one assistant message with all accumulated tool_calls (only if there are function calls to emit)
 			assistantMessage := []byte(`{"role":"assistant","tool_calls":[]}`)
 			for i, fc := range pendingFunctionCalls {
 				toolCall := []byte(`{"id":"","type":"function","function":{"name":"","arguments":""}}`)
@@ -303,24 +303,24 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 	// map it to the Chat Completions reasoning_effort field — this enables
 	// thinking mode on models that support it.
 	//
-	// When reasoning is null or absent, we explicitly disable thinking mode
-	// via "thinking": {"type": "disabled"}. Without this, some providers
-	// (notably DeepSeek V4) default to thinking mode and return
-	// reasoning_content, which they then require to be echoed back on every
-	// subsequent request in the conversation. Since Codex CLI (and most
-	// clients) does not include reasoning_text in follow-up request input,
-	// the echo-back would fail with "reasoning_content must be passed back".
-	// Disabling thinking by default avoids this requirement entirely.
+	// The non-standard "thinking" parameter is only injected for DeepSeek
+	// models, since other providers (e.g. OpenAI) would reject it with a 400 error.
+	// When reasoning is absent and the model is DeepSeek, we disable thinking
+	// to prevent DeepSeek's default thinking mode from producing reasoning_content
+	// that would then require echo-back on subsequent requests.
 	if reasoning := root.Get("reasoning"); reasoning.Exists() {
 		effort := reasoning.Get("effort").String()
 		if effort != "" {
 			out, _ = sjson.SetBytes(out, "reasoning_effort", strings.ToLower(strings.TrimSpace(effort)))
-		} else {
-			// reasoning explicitly set but without effort (null or {}).
+		} else if strings.Contains(strings.ToLower(modelName), "deepseek") {
+			// reasoning explicitly set but without effort — disable thinking for
+			// DeepSeek to prevent default thinking mode. Other providers don't
+			// support the non-standard "thinking" field.
 			out, _ = sjson.SetBytes(out, "thinking", map[string]interface{}{"type": "disabled"})
 		}
-	} else {
-		// reasoning not present — disable thinking to prevent echo-back requirement.
+	} else if strings.Contains(strings.ToLower(modelName), "deepseek") {
+		// reasoning absent — disable thinking for DeepSeek to prevent its default
+		// thinking mode from producing reasoning_content that requires echo-back.
 		out, _ = sjson.SetBytes(out, "thinking", map[string]interface{}{"type": "disabled"})
 	}
 

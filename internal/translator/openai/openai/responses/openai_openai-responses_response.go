@@ -18,6 +18,7 @@ type oaiToResponsesStateReasoning struct {
 	ReasoningID   string
 	ReasoningData string
 	OutputIndex   int
+	ChoiceIndex   int
 }
 type oaiToResponsesState struct {
 	Seq               int
@@ -45,6 +46,7 @@ type oaiToResponsesState struct {
 	MsgItemDone     map[int]bool // whether message done events were emitted
 	// function item done state
 	FuncArgsDone map[string]bool
+	MsgTextContentIdx map[int]int
 	FuncItemDone map[string]bool
 	// usage aggregation
 	PromptTokens     int64
@@ -155,9 +157,9 @@ func buildResponsesCompletedEvent(st *oaiToResponsesState, requestRawJSON []byte
 			item := []byte(`{"id":"","type":"message","status":"completed","content":[],"role":"assistant"}`)
 			item, _ = sjson.SetBytes(item, "id", fmt.Sprintf("msg_%s_%d", st.ResponseID, i))
 			// Insert reasoning_text content part at index 0 if reasoning data is available
-			if len(st.Reasonings) > 0 {
+			if reasoningText := findReasoningByChoiceIndex(st.Reasonings, i); reasoningText != "" {
 				rp := []byte(`{"type":"reasoning_text","text":""}`)
-				rp, _ = sjson.SetBytes(rp, "text", st.Reasonings[len(st.Reasonings)-1].ReasoningData)
+				rp, _ = sjson.SetBytes(rp, "text", reasoningText)
 				item, _ = sjson.SetRawBytes(item, "content.-1", rp)
 			}
 			op := []byte(`{"type":"output_text","annotations":[],"logprobs":[],"text":""}`)
@@ -220,6 +222,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 			MsgContentAdded: make(map[int]bool),
 			MsgItemDone:     make(map[int]bool),
 			FuncArgsDone:    make(map[string]bool),
+			MsgTextContentIdx: make(map[int]int),
 			FuncItemDone:    make(map[string]bool),
 			Reasonings:      make([]oaiToResponsesStateReasoning, 0),
 		}
@@ -307,6 +310,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 		st.MsgContentAdded = make(map[int]bool)
 		st.MsgItemDone = make(map[int]bool)
 		st.FuncArgsDone = make(map[string]bool)
+		st.MsgTextContentIdx = make(map[int]int)
 		st.FuncItemDone = make(map[string]bool)
 		st.PromptTokens = 0
 		st.CachedTokens = 0
@@ -331,7 +335,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 		st.Started = true
 	}
 
-	stopReasoning := func(text string) {
+	stopReasoning := func(text string, choiceIndex int) {
 		// Emit reasoning done events
 		textDone := []byte(`{"type":"response.reasoning_summary_text.done","sequence_number":0,"item_id":"","output_index":0,"summary_index":0,"text":""}`)
 		textDone, _ = sjson.SetBytes(textDone, "sequence_number", nextSeq())
@@ -352,7 +356,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 		outputItemDone, _ = sjson.SetBytes(outputItemDone, "item.summary.text", text)
 		out = append(out, emitRespEvent("response.output_item.done", outputItemDone))
 
-		st.Reasonings = append(st.Reasonings, oaiToResponsesStateReasoning{ReasoningID: st.ReasoningID, ReasoningData: text, OutputIndex: st.ReasoningIndex})
+		st.Reasonings = append(st.Reasonings, oaiToResponsesStateReasoning{ReasoningID: st.ReasoningID, ReasoningData: text, OutputIndex: st.ReasoningIndex, ChoiceIndex: choiceIndex})
 		st.ReasoningID = ""
 	}
 
@@ -366,8 +370,12 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 					var reasoningText string
 					if st.ReasoningID != "" {
 						reasoningText = st.ReasoningBuf.String()
-						stopReasoning(st.ReasoningBuf.String())
+						stopReasoning(st.ReasoningBuf.String(), idx)
 						st.ReasoningBuf.Reset()
+					}
+					var outputContentIdx int
+					if reasoningText != "" {
+						outputContentIdx = 1
 					}
 					if _, exists := st.MsgOutputIx[idx]; !exists {
 						st.MsgOutputIx[idx] = allocOutputIndex()
@@ -400,13 +408,14 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 						part, _ = sjson.SetBytes(part, "content_index", nextContentIdx)
 						out = append(out, emitRespEvent("response.content_part.added", part))
 						st.MsgContentAdded[idx] = true
+						st.MsgTextContentIdx[idx] = nextContentIdx
 					}
 
 					msg := []byte(`{"type":"response.output_text.delta","sequence_number":0,"item_id":"","output_index":0,"content_index":0,"delta":"","logprobs":[]}`)
 					msg, _ = sjson.SetBytes(msg, "sequence_number", nextSeq())
 					msg, _ = sjson.SetBytes(msg, "item_id", fmt.Sprintf("msg_%s_%d", st.ResponseID, idx))
 					msg, _ = sjson.SetBytes(msg, "output_index", msgOutputIndex)
-					msg, _ = sjson.SetBytes(msg, "content_index", 0)
+					msg, _ = sjson.SetBytes(msg, "content_index", outputContentIdx)
 					msg, _ = sjson.SetBytes(msg, "delta", c.String())
 					out = append(out, emitRespEvent("response.output_text.delta", msg))
 					// aggregate for response.output
@@ -451,8 +460,12 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 					var reasoningText string
 					if st.ReasoningID != "" {
 						reasoningText = st.ReasoningBuf.String()
-						stopReasoning(st.ReasoningBuf.String())
+						stopReasoning(st.ReasoningBuf.String(), idx)
 						st.ReasoningBuf.Reset()
+					}
+					var tcsOutputContentIdx int
+					if reasoningText != "" {
+						tcsOutputContentIdx = 1
 					}
 					// Before emitting any function events, if a message is open for this index,
 					// close its text/content to match Codex expected ordering.
@@ -466,7 +479,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 						done, _ = sjson.SetBytes(done, "sequence_number", nextSeq())
 						done, _ = sjson.SetBytes(done, "item_id", fmt.Sprintf("msg_%s_%d", st.ResponseID, idx))
 						done, _ = sjson.SetBytes(done, "output_index", msgOutputIndex)
-						done, _ = sjson.SetBytes(done, "content_index", 0)
+						done, _ = sjson.SetBytes(done, "content_index", tcsOutputContentIdx)
 						done, _ = sjson.SetBytes(done, "text", fullText)
 						out = append(out, emitRespEvent("response.output_text.done", done))
 
@@ -474,7 +487,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 						partDone, _ = sjson.SetBytes(partDone, "sequence_number", nextSeq())
 						partDone, _ = sjson.SetBytes(partDone, "item_id", fmt.Sprintf("msg_%s_%d", st.ResponseID, idx))
 						partDone, _ = sjson.SetBytes(partDone, "output_index", msgOutputIndex)
-						partDone, _ = sjson.SetBytes(partDone, "content_index", 0)
+						partDone, _ = sjson.SetBytes(partDone, "content_index", tcsOutputContentIdx)
 						partDone, _ = sjson.SetBytes(partDone, "part.text", fullText)
 						out = append(out, emitRespEvent("response.content_part.done", partDone))
 
@@ -574,7 +587,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 							done, _ = sjson.SetBytes(done, "sequence_number", nextSeq())
 							done, _ = sjson.SetBytes(done, "item_id", fmt.Sprintf("msg_%s_%d", st.ResponseID, i))
 							done, _ = sjson.SetBytes(done, "output_index", msgOutputIndex)
-							done, _ = sjson.SetBytes(done, "content_index", 0)
+							done, _ = sjson.SetBytes(done, "content_index", st.MsgTextContentIdx[i])
 							done, _ = sjson.SetBytes(done, "text", fullText)
 							out = append(out, emitRespEvent("response.output_text.done", done))
 
@@ -582,15 +595,15 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 							partDone, _ = sjson.SetBytes(partDone, "sequence_number", nextSeq())
 							partDone, _ = sjson.SetBytes(partDone, "item_id", fmt.Sprintf("msg_%s_%d", st.ResponseID, i))
 							partDone, _ = sjson.SetBytes(partDone, "output_index", msgOutputIndex)
-							partDone, _ = sjson.SetBytes(partDone, "content_index", 0)
+							partDone, _ = sjson.SetBytes(partDone, "content_index", st.MsgTextContentIdx[i])
 							partDone, _ = sjson.SetBytes(partDone, "part.text", fullText)
 							out = append(out, emitRespEvent("response.content_part.done", partDone))
 
 							// Build content array with reasoning_text if available
 							contentArr := []byte(`[]`)
-							if len(st.Reasonings) > 0 {
+							if reasoningText := findReasoningByChoiceIndex(st.Reasonings, i); reasoningText != "" {
 								rp := []byte(`{"type":"reasoning_text","text":""}`)
-								rp, _ = sjson.SetBytes(rp, "text", st.Reasonings[len(st.Reasonings)-1].ReasoningData)
+								rp, _ = sjson.SetBytes(rp, "text", reasoningText)
 								contentArr, _ = sjson.SetRawBytes(contentArr, "-1", rp)
 							}
 							op := []byte(`{"type":"output_text","annotations":[],"logprobs":[],"text":""}`)
@@ -608,7 +621,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 				}
 
 				if st.ReasoningID != "" {
-					stopReasoning(st.ReasoningBuf.String())
+					stopReasoning(st.ReasoningBuf.String(), idx)
 					st.ReasoningBuf.Reset()
 				}
 
@@ -846,4 +859,14 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(_ context.Co
 	}
 
 	return resp
+}
+
+// findReasoningByChoiceIndex finds the reasoning text for a given choice index.
+func findReasoningByChoiceIndex(reasonings []oaiToResponsesStateReasoning, choiceIndex int) string {
+	for _, r := range reasonings {
+		if r.ChoiceIndex == choiceIndex {
+			return r.ReasoningData
+		}
+	}
+	return ""
 }
