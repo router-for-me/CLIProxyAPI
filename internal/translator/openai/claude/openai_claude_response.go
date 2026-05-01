@@ -236,8 +236,8 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 
 				// Handle function name
 				if function := toolCall.Get("function"); function.Exists() {
-					if name := function.Get("name"); name.Exists() {
-						accumulator.Name = util.MapToolName(param.ToolNameMap, name.String())
+					if name := function.Get("name"); name.Exists() && name.String() != "" {
+    					accumulator.Name = util.MapToolName(param.ToolNameMap, name.String())
 
 						stopThinkingContentBlock(param, &results)
 
@@ -419,7 +419,16 @@ func convertOpenAINonStreamingToAnthropic(rawJSON []byte) [][]byte {
 			toolCalls.ForEach(func(_, toolCall gjson.Result) bool {
 				toolUseBlock := []byte(`{"type":"tool_use","id":"","name":"","input":{}}`)
 				toolUseBlock, _ = sjson.SetBytes(toolUseBlock, "id", util.SanitizeClaudeToolID(toolCall.Get("id").String()))
-				toolUseBlock, _ = sjson.SetBytes(toolUseBlock, "name", toolCall.Get("function.name").String())
+				name := toolCall.Get("function.name").String()
+				if name == "" {
+					return true // 跳过这个坏的 tool_call
+				}
+
+				toolUseBlock, _ = sjson.SetBytes(
+					toolUseBlock,
+					"name",
+					name,
+				)
 
 				argsStr := util.FixJSON(toolCall.Get("function.arguments").String())
 				if argsStr != "" && gjson.Valid(argsStr) {
