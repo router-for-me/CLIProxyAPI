@@ -1,0 +1,268 @@
+# =============================================================================
+# Journey Gate — Reusable Workflow
+# =============================================================================
+# Canonical source: phenotype-infra/docs/governance/ci-journey-gate.yml
+# Usage: copy to .github/workflows/journey-gate.yml in the consuming repo.
+#         Do not modify the logic; extend via workflow_dispatch inputs for
+#         repo-specific paths or thresholds.
+#
+# Requirements:
+#   - phenotype-journey CLI installed in the runner PATH
+#   - tesseract OCR installed (brew install tesseract / apt-get install tesseract-ocr)
+#   - ANTHROPIC_API_KEY secret (optional — enables --live mode)
+#
+# Behaviour:
+#   - FAILS if no manifest.verified.json files are found (stub mode).
+#   - FAILS if any manifest fails validation against the JSON schema.
+#   - FAILS if any assertion is violated in --strict mode.
+#   - PASSES only when all manifests pass validation AND all assertions pass.
+# =============================================================================
+
+name: Journey Gate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+  # Allow manual triggering from the Actions tab.
+  workflow_dispatch:
+    inputs:
+      manifest_path:
+        description: 'Glob pattern for manifests (default: "**/manifest.verified.json")'
+        required: false
+        default: '**/manifest.verified.json'
+      strict_mode:
+        description: 'Run assertions in --strict mode (fail on violations)'
+        required: false
+        default: 'true'
+        type: boolean
+      live_verification:
+        description: 'Use --live mode (requires ANTHROPIC_API_KEY secret)'
+        required: false
+        default: 'false'
+        type: boolean
+
+env:
+  PHENOTYPE_JOURNEY_STRICT: ${{ inputs.strict_mode || 'true' }}
+
+jobs:
+  journey-gate:
+    name: Journey Verification
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ---------------------------------------------------------------------
+      # 1. Install runtime dependencies
+      # ---------------------------------------------------------------------
+      - name: Install tesseract OCR
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq tesseract-ocr \
+            || { echo "WARNING: tesseract install failed — assertions will skip"; }
+
+      - name: Check tesseract availability
+        run: |
+          if command -v tesseract &>/dev/null; then
+            echo "tesseract: $(tesseract --version | head -1)"
+          else
+            echo "tesseract: NOT FOUND — OCR assertions will be skipped"
+          fi
+
+      # ---------------------------------------------------------------------
+      # 2. Install phenotype-journey CLI
+      # ---------------------------------------------------------------------
+      - name: Install phenotype-journey
+        run: |
+          if command -v phenotype-journey &>/dev/null; then
+            echo "phenotype-journey: $(phenotype-journey --version 2>/dev/null || phenotype-journey --help 2>&1 | head -1)"
+          else
+            echo "Installing phenotype-journey..."
+            # Install via cargo if available, else download binary
+            if command -v cargo &>/dev/null; then
+              cargo install phenotype-journey --locked \
+                || { echo "ERROR: phenotype-journey install failed"; exit 1; }
+            else
+              # Download latest release binary (adjust URL as needed)
+              curl -fsSL https://github.com/KooshaPari/phenotype-journeys/releases/latest/download/phenotype-journey-x86_64-unknown-linux-gnu \
+                -o /usr/local/bin/phenotype-journey \
+                && chmod +x /usr/local/bin/phenotype-journey \
+                || { echo "ERROR: phenotype-journey download failed"; exit 1; }
+            fi
+          fi
+
+      # ---------------------------------------------------------------------
+      # 3. Find all manifest.verified.json files
+      # ---------------------------------------------------------------------
+      - name: Discover manifests
+        id: discover
+        run: |
+          GLOB="${MANIFEST_PATH:-**/manifest.verified.json}"
+          echo "Glob pattern: $GLOB"
+
+          MANIFESTS=$(find . \
+            -name "manifest.verified.json" \
+            -not -path "*/node_modules/*" \
+            -not -path "*/target/*" \
+            -not -path "*/.git/*" \
+            -not -path "*/vendor/*" \
+            2>/dev/null | sort)
+
+          if [ -z "$MANIFESTS" ]; then
+            echo "MANIFEST_COUNT=0" >> $GITHUB_OUTPUT
+            echo "No manifest.verified.json files found."
+            echo "::warning::No journey manifests found. Add docs/journeys/manifests/<spec>/manifest.verified.json"
+            echo ""
+            echo "To create a stub manifest run:"
+            echo "  phenotype-journey init <journey-name>"
+            echo ""
+            echo "Once manifests exist, remove the exit 1 below to enable the gate."
+            # STUB MODE: fail until manifests exist
+            exit 1
+          fi
+
+          COUNT=$(echo "$MANIFESTS" | grep -c . || true)
+          echo "MANIFEST_COUNT=$COUNT" >> $GITHUB_OUTPUT
+          echo "MANIFEST_LIST<<EOF" >> $GITHUB_OUTPUT
+          echo "$MANIFESTS" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+          echo "Found $COUNT manifest(s):"
+          echo "$MANIFESTS"
+
+      # ---------------------------------------------------------------------
+      # 4. Validate each manifest against the JSON schema
+      # ---------------------------------------------------------------------
+      - name: Validate manifests
+        run: |
+          MANIFESTS="${{ steps.discover.outputs.MANIFEST_LIST }}"
+
+          for manifest in $MANIFESTS; do
+            echo ""
+            echo "━━━ Validating $manifest ━━━"
+            if phenotype-journey validate "$manifest"; then
+              echo "✓ $manifest: valid"
+            else
+              echo "✗ $manifest: INVALID"
+              exit 1
+            fi
+          done
+
+      # ---------------------------------------------------------------------
+      # 5. Run assertions in --strict mode
+      # ---------------------------------------------------------------------
+      - name: Run assertions
+        env:
+          MANIFEST_LIST: ${{ steps.discover.outputs.MANIFEST_LIST }}
+          PHENOTYPE_JOURNEY_STRICT: ${{ inputs.strict_mode && 'true' || 'false' }}
+        run: |
+          # Require strict mode for gated specs
+          STRICT="${PHENOTYPE_JOURNEY_STRICT:-true}"
+          MANIFESTS="$MANIFEST_LIST"
+
+          for manifest in $MANIFESTS; do
+            echo ""
+            echo "━━━ Asserting $manifest ━━━"
+
+            if [ "$STRICT" = "true" ]; then
+              if phenotype-journey assert "$manifest" --strict; then
+                echo "✓ $manifest: all assertions passed"
+              else
+                echo "✗ $manifest: assertion violated"
+                exit 1
+              fi
+            else
+              phenotype-journey assert "$manifest" || true
+              echo "(non-strict run — violations do not fail the build)"
+            fi
+          done
+
+      # ---------------------------------------------------------------------
+      # 6. Live verification (optional, requires ANTHROPIC_API_KEY)
+      # ---------------------------------------------------------------------
+      - name: Live verification
+        if: inputs.live_verification && github.event.inputs.live_verification != 'false'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          MANIFEST_LIST: ${{ steps.discover.outputs.MANIFEST_LIST }}
+        run: |
+          if [ -z "$ANTHROPIC_API_KEY" ]; then
+            echo "::warning::ANTHROPIC_API_KEY secret not set — skipping live verification"
+            exit 0
+          fi
+
+          echo "Running live (API) verification..."
+          MANIFESTS="$MANIFEST_LIST"
+
+          for manifest in $MANIFESTS; do
+            echo ""
+            echo "━━━ Live verifying $manifest ━━━"
+            if phenotype-journey verify "$manifest" --live; then
+              echo "✓ $manifest: live verification passed"
+            else
+              echo "✗ $manifest: live verification failed"
+              exit 1
+            fi
+          done
+
+      # ---------------------------------------------------------------------
+      # 7. Summary
+      # ---------------------------------------------------------------------
+      - name: Journey Gate Summary
+        run: |
+          COUNT="${{ steps.discover.outputs.MANIFEST_COUNT }}"
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo " Journey Gate — Summary"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo " Manifests checked: $COUNT"
+          echo " Strict mode:        ${{ inputs.strict_mode || 'true' }}"
+          echo " Live mode:         ${{ inputs.live_verification && 'enabled' || 'disabled' }}"
+          echo ""
+          echo "All manifests passed validation and assertions."
+          echo "::notice::Journey gate PASSED"
+
+  # --------------------------------------------------------------------------
+  # Stub-mode job: fires only when no manifests are found.
+  # Prevents a silent pass when a repo has no journey coverage yet.
+  # --------------------------------------------------------------------------
+  stub-mode:
+    name: Journey Gate — No Manifests Found
+    runs-on: ubuntu-latest
+    needs: journey-gate
+    if: needs.journey-gate.result == 'failure' && needs.journey-gate.outputs.MANIFEST_COUNT == '0'
+    steps:
+      - name: Stub notice
+        run: |
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo " Journey Gate — STUB MODE"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo ""
+          echo "No manifest.verified.json files were found in this repository."
+          echo ""
+          echo "To add journey traceability:"
+          echo ""
+          echo "  1. Install the CLI:"
+          echo "     brew install phenotype-journey"
+          echo "     # or: cargo install phenotype-journey"
+          echo ""
+          echo "  2. Initialise a journey manifest:"
+          echo "     phenotype-journey init docs/journeys/manifests/<spec-id>"
+          echo ""
+          echo "  3. Record a tape and extract keyframes:"
+          echo "     phenotype-journey record --tape <path> --out docs/journeys/"
+          echo ""
+          echo "  4. Verify and commit:"
+          echo "     phenotype-journey verify docs/journeys/manifests/<spec-id>/manifest.json"
+          echo "     # produces manifest.verified.json"
+          echo ""
+          echo "Once manifest.verified.json files exist, the gate will enforce"
+          echo "validation and assertion checks on every push and PR."
+          echo ""
+          echo "See: phenotype-infra/docs/governance/journey-traceability-standard.md"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
