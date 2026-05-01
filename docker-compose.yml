@@ -1,21 +1,36 @@
+x-proxy-vars: &proxy-vars
+  HTTP_PROXY: ${HTTP_PROXY:-http://172.17.224.1:7890}
+  HTTPS_PROXY: ${HTTP_PROXY:-}
+  ALL_PROXY: ${HTTP_PROXY:-}
+  NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,host.docker.internal}
+  http_proxy: ${HTTP_PROXY:-}
+  https_proxy: ${HTTP_PROXY:-}
+  all_proxy: ${HTTP_PROXY:-}
+  no_proxy: ${NO_PROXY:-}
+
 services:
   cli-proxy-api:
-    image: ${CLI_PROXY_IMAGE:-eceasy/cli-proxy-api:latest}
+    image: ${CLI_PROXY_IMAGE:-eceasy/cli-proxy-api-plus:latest}
     pull_policy: always
     build:
       context: .
       dockerfile: Dockerfile
+      network: host
       args:
+        <<: *proxy-vars
+        GOPROXY: "${GOPROXY:-https://proxy.golang.org,direct}"
+        GOSUMDB: "${GOSUMDB:-sum.golang.org}"
         VERSION: ${VERSION:-dev}
         COMMIT: ${COMMIT:-none}
         BUILD_DATE: ${BUILD_DATE:-unknown}
-    container_name: cli-proxy-api
+    container_name: cli-proxy-api-plus
     # env_file:
     #   - .env
     environment:
+      <<: *proxy-vars
       DEPLOY: ${DEPLOY:-}
     ports:
-      - "8317:8317"
+      - "8318:8317"
       - "8085:8085"
       - "1455:1455"
       - "54545:54545"

@@ -63,7 +63,7 @@ const (
 	refreshCheckInterval  = 5 * time.Second
 	refreshMaxConcurrency = 16
 	refreshPendingBackoff = time.Minute
-	refreshFailureBackoff = 5 * time.Minute
+	refreshFailureBackoff = 1 * time.Minute
 	// refreshIneffectiveBackoff throttles refresh attempts when an executor returns
 	// success but the auth still evaluates as needing refresh (e.g. token expiry
 	// wasn't updated). Without this guard, the auto-refresh loop can tight-loop and
@@ -3500,7 +3500,9 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 		updated.Runtime = auth.Runtime
 	}
 	updated.LastRefreshedAt = now
-	updated.NextRefreshAfter = time.Time{}
+	// Preserve NextRefreshAfter set by the Authenticator
+	// If the Authenticator set a reasonable refresh time, it should not be overwritten
+	// If the Authenticator did not set it (zero value), shouldRefresh will use default logic
 	updated.LastError = nil
 	updated.UpdatedAt = now
 	if m.shouldRefresh(updated, now) {

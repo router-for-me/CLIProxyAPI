@@ -9,8 +9,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -21,10 +23,11 @@ import (
 
 // OAuth configuration constants for OpenAI Codex
 const (
-	AuthURL     = "https://auth.openai.com/oauth/authorize"
-	TokenURL    = "https://auth.openai.com/oauth/token"
-	ClientID    = "app_EMoamEEZ73f0CkXaXp7hrann"
-	RedirectURI = "http://localhost:1455/auth/callback"
+	AuthURL             = "https://auth.openai.com/oauth/authorize"
+	TokenURL            = "https://auth.openai.com/oauth/token"
+	ClientID            = "app_EMoamEEZ73f0CkXaXp7hrann"
+	DefaultCallbackPort = 1455
+	defaultRedirectPath = "/auth/callback"
 )
 
 // CodexAuth handles the OpenAI OAuth2 authentication flow.
@@ -57,18 +60,77 @@ func NewCodexAuthWithProxyURL(cfg *config.Config, proxyURL string) *CodexAuth {
 	}
 }
 
+// RedirectURIForPort returns the default localhost redirect URI for the given callback port.
+func RedirectURIForPort(port int) string {
+	if port <= 0 {
+		port = DefaultCallbackPort
+	}
+	return fmt.Sprintf("http://localhost:%d%s", port, defaultRedirectPath)
+}
+
+func normalizeRedirectURI(redirectURI string) (string, error) {
+	trimmed := strings.TrimSpace(redirectURI)
+	if trimmed == "" {
+		return "", fmt.Errorf("redirect URI is required")
+	}
+
+	parsed, err := url.Parse(trimmed)
+	if err != nil {
+		return "", fmt.Errorf("invalid redirect URI: %w", err)
+	}
+	if parsed.Scheme == "" || parsed.Host == "" {
+		return "", fmt.Errorf("invalid redirect URI: missing scheme or host")
+	}
+	return parsed.String(), nil
+}
+
+// RedirectURIForPublicBase derives an HTTP callback URL from a public base URL and callback port.
+// The path is always /auth/callback. If HTTPS or a different path is required, use an explicit redirect URI.
+func RedirectURIForPublicBase(publicBaseURL string, callbackPort int) (string, error) {
+	trimmed := strings.TrimSpace(publicBaseURL)
+	if trimmed == "" {
+		return "", fmt.Errorf("public base URL is required")
+	}
+	parsed, err := url.Parse(trimmed)
+	if err != nil {
+		return "", fmt.Errorf("invalid public base URL: %w", err)
+	}
+	host := strings.TrimSpace(parsed.Hostname())
+	if host == "" {
+		return "", fmt.Errorf("invalid public base URL: missing host")
+	}
+	if callbackPort <= 0 {
+		callbackPort = DefaultCallbackPort
+	}
+
+	return (&url.URL{
+		Scheme: "http",
+		Host:   net.JoinHostPort(host, strconv.Itoa(callbackPort)),
+		Path:   defaultRedirectPath,
+	}).String(), nil
+}
+
 // GenerateAuthURL creates the OAuth authorization URL with PKCE (Proof Key for Code Exchange).
 // It constructs the URL with the necessary parameters, including the client ID,
 // response type, redirect URI, scopes, and PKCE challenge.
 func (o *CodexAuth) GenerateAuthURL(state string, pkceCodes *PKCECodes) (string, error) {
+	return o.GenerateAuthURLWithRedirect(state, pkceCodes, RedirectURIForPort(DefaultCallbackPort))
+}
+
+// GenerateAuthURLWithRedirect creates the authorization URL with a caller-provided redirect URI.
+func (o *CodexAuth) GenerateAuthURLWithRedirect(state string, pkceCodes *PKCECodes, redirectURI string) (string, error) {
 	if pkceCodes == nil {
 		return "", fmt.Errorf("PKCE codes are required")
+	}
+	normalizedRedirectURI, err := normalizeRedirectURI(redirectURI)
+	if err != nil {
+		return "", err
 	}
 
 	params := url.Values{
 		"client_id":                  {ClientID},
 		"response_type":              {"code"},
-		"redirect_uri":               {RedirectURI},
+		"redirect_uri":               {normalizedRedirectURI},
 		"scope":                      {"openid email profile offline_access"},
 		"state":                      {state},
 		"code_challenge":             {pkceCodes.CodeChallenge},
@@ -86,7 +148,7 @@ func (o *CodexAuth) GenerateAuthURL(state string, pkceCodes *PKCECodes) (string,
 // It performs an HTTP POST request to the OpenAI token endpoint with the provided
 // authorization code and PKCE verifier.
 func (o *CodexAuth) ExchangeCodeForTokens(ctx context.Context, code string, pkceCodes *PKCECodes) (*CodexAuthBundle, error) {
-	return o.ExchangeCodeForTokensWithRedirect(ctx, code, RedirectURI, pkceCodes)
+	return o.ExchangeCodeForTokensWithRedirect(ctx, code, RedirectURIForPort(DefaultCallbackPort), pkceCodes)
 }
 
 // ExchangeCodeForTokensWithRedirect exchanges an authorization code for tokens using
@@ -96,8 +158,9 @@ func (o *CodexAuth) ExchangeCodeForTokensWithRedirect(ctx context.Context, code,
 	if pkceCodes == nil {
 		return nil, fmt.Errorf("PKCE codes are required for token exchange")
 	}
-	if strings.TrimSpace(redirectURI) == "" {
-		return nil, fmt.Errorf("redirect URI is required for token exchange")
+	normalizedRedirectURI, err := normalizeRedirectURI(redirectURI)
+	if err != nil {
+		return nil, err
 	}
 
 	// Prepare token exchange request
@@ -105,7 +168,7 @@ func (o *CodexAuth) ExchangeCodeForTokensWithRedirect(ctx context.Context, code,
 		"grant_type":    {"authorization_code"},
 		"client_id":     {ClientID},
 		"code":          {code},
-		"redirect_uri":  {strings.TrimSpace(redirectURI)},
+		"redirect_uri":  {normalizedRedirectURI},
 		"code_verifier": {pkceCodes.CodeVerifier},
 	}
 

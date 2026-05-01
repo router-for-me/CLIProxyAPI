@@ -1,10 +1,10 @@
-# CLI Proxy API
+# CLIProxyAPI Plus
 
-English | [中文](README_CN.md) | [日本語](README_JA.md)
+English | [Chinese](README_CN.md)
 
-A proxy server that provides OpenAI/Gemini/Claude/Codex compatible API interfaces for CLI.
+This is the Plus version of [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI), adding support for third-party providers on top of the mainline project.
 
-It now also supports OpenAI Codex (GPT models) and Claude Code via OAuth.
+All third-party provider support is maintained by community contributors; CLIProxyAPI does not provide technical support. Please contact the corresponding community maintainer if you need assistance.
 
 So you can use local or multi-account CLI access with OpenAI(include Responses)/Gemini/Claude-compatible clients and SDKs.
 
@@ -102,9 +102,11 @@ These routes help you select the protocol surface, but they do not by themselves
 - Watcher: [docs/sdk-watcher.md](docs/sdk-watcher.md)
 - Custom Provider Example: `examples/custom-provider`
 
+The Plus release stays in lockstep with the mainline features.
+
 ## Contributing
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+This project only accepts pull requests that relate to third-party provider support. Any pull requests unrelated to third-party provider support will be rejected.
 
 1. Fork the repository
 2. Create your feature branch (`git checkout -b feature/amazing-feature`)
@@ -210,6 +212,8 @@ OmniRoute is an AI gateway for multi-provider LLMs: an OpenAI-compatible endpoin
 
 > [!NOTE]  
 > If you have developed a port of CLIProxyAPI or a project inspired by it, please open a PR to add it to this list.
+
+If you need to submit any non-third-party provider changes, please open them against the [mainline](https://github.com/router-for-me/CLIProxyAPI) repository.
 
 ## License
 

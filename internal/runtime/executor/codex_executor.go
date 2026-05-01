@@ -185,6 +185,18 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
 		body = ensureImageGenerationTool(body, baseModel, auth)
 	}
+	if codexUsesConversationAPI(auth) {
+		return e.executeConversationNonStream(ctx, auth, apiKey, codexConversationRunConfig{
+			From:            from,
+			To:              to,
+			BaseModel:       baseModel,
+			OriginalPayload: originalPayload,
+			CodexBody:       body,
+			Request:         req,
+			Options:         opts,
+			Reporter:        reporter,
+		})
+	}
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
 	httpReq, err := e.cacheHelper(ctx, from, url, req, body)
@@ -336,6 +348,19 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
 		body = ensureImageGenerationTool(body, baseModel, auth)
 	}
+	if codexUsesConversationAPI(auth) {
+		return e.executeConversationNonStream(ctx, auth, apiKey, codexConversationRunConfig{
+			From:            from,
+			To:              to,
+			BaseModel:       baseModel,
+			OriginalPayload: originalPayload,
+			CodexBody:       body,
+			Request:         req,
+			Options:         opts,
+			Reporter:        reporter,
+		})
+	}
+	}
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses/compact"
 	httpReq, err := e.cacheHelper(ctx, from, url, req, body)
@@ -433,6 +458,18 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	body = normalizeCodexInstructions(body)
 	if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
 		body = ensureImageGenerationTool(body, baseModel, auth)
+	}
+	if codexUsesConversationAPI(auth) {
+		return e.executeConversationStream(ctx, auth, apiKey, codexConversationRunConfig{
+			From:            from,
+			To:              to,
+			BaseModel:       baseModel,
+			OriginalPayload: originalPayload,
+			CodexBody:       body,
+			Request:         req,
+			Options:         opts,
+			Reporter:        reporter,
+		})
 	}
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
@@ -817,16 +854,25 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 }
 
 func newCodexStatusErr(statusCode int, body []byte) statusErr {
-	errCode := statusCode
-	if isCodexModelCapacityError(body) {
-		errCode = http.StatusTooManyRequests
-	}
-	body = classifyCodexStatusError(errCode, body)
-	err := statusErr{code: errCode, msg: string(body)}
+	errCode, errMsg := normalizeCodexError(statusCode, body)
+	err := statusErr{code: errCode, msg: errMsg}
 	if retryAfter := parseCodexRetryAfter(errCode, body, time.Now()); retryAfter != nil {
 		err.retryAfter = retryAfter
 	}
 	return err
+}
+
+func normalizeCodexError(statusCode int, body []byte) (int, string) {
+	if isCodexModelCapacityError(body) {
+		return http.StatusTooManyRequests, string(body)
+	}
+	if isCodexChallengePage(body) {
+		return http.StatusBadGateway, "codex upstream returned a Cloudflare challenge page. This Codex OAuth credential is using the ChatGPT web endpoint and requires browser verification/cookies from the current network. Re-login Codex in a browser on this machine/network or switch to a codex-api-key or other OpenAI-compatible upstream."
+	}
+	if looksLikeHTMLDocument(body) {
+		return statusCode, summarizeErrorBody("", body)
+	}
+	return statusCode, string(body)
 }
 
 func classifyCodexStatusError(statusCode int, body []byte) []byte {
@@ -963,6 +1009,25 @@ func isCodexModelCapacityError(errorBody []byte) bool {
 		}
 	}
 	return false
+}
+
+func isCodexChallengePage(body []byte) bool {
+	if len(body) == 0 {
+		return false
+	}
+	lower := strings.ToLower(string(body))
+	return strings.Contains(lower, "enable javascript and cookies to continue") ||
+		strings.Contains(lower, "cf_chl_opt") ||
+		strings.Contains(lower, "/cdn-cgi/challenge-platform/") ||
+		strings.Contains(lower, "chatgpt.com/backend-api/conversation?__cf_chl")
+}
+
+func looksLikeHTMLDocument(body []byte) bool {
+	if len(body) == 0 {
+		return false
+	}
+	trimmed := strings.TrimSpace(strings.ToLower(string(body)))
+	return strings.HasPrefix(trimmed, "<!doctype html") || strings.HasPrefix(trimmed, "<html")
 }
 
 func parseCodexRetryAfter(statusCode int, errorBody []byte, now time.Time) *time.Duration {

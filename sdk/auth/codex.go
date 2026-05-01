@@ -24,7 +24,7 @@ type CodexAuthenticator struct {
 
 // NewCodexAuthenticator constructs a Codex authenticator with default settings.
 func NewCodexAuthenticator() *CodexAuthenticator {
-	return &CodexAuthenticator{CallbackPort: 1455}
+	return &CodexAuthenticator{CallbackPort: codex.DefaultCallbackPort}
 }
 
 func (a *CodexAuthenticator) Provider() string {
@@ -54,6 +54,7 @@ func (a *CodexAuthenticator) Login(ctx context.Context, cfg *config.Config, opts
 	if opts.CallbackPort > 0 {
 		callbackPort = opts.CallbackPort
 	}
+	redirectURI := codex.RedirectURIForPort(callbackPort)
 
 	pkceCodes, err := codex.GeneratePKCECodes()
 	if err != nil {
@@ -82,7 +83,7 @@ func (a *CodexAuthenticator) Login(ctx context.Context, cfg *config.Config, opts
 
 	authSvc := codex.NewCodexAuth(cfg)
 
-	authURL, err := authSvc.GenerateAuthURL(state, pkceCodes)
+	authURL, err := authSvc.GenerateAuthURLWithRedirect(state, pkceCodes, redirectURI)
 	if err != nil {
 		return nil, fmt.Errorf("codex authorization url generation failed: %w", err)
 	}
@@ -189,7 +190,7 @@ waitForCallback:
 
 	log.Debug("Codex authorization code received; exchanging for tokens")
 
-	authBundle, err := authSvc.ExchangeCodeForTokens(ctx, result.Code, pkceCodes)
+	authBundle, err := authSvc.ExchangeCodeForTokensWithRedirect(ctx, result.Code, redirectURI, pkceCodes)
 	if err != nil {
 		return nil, codex.NewAuthenticationError(codex.ErrCodeExchangeFailed, err)
 	}

@@ -1,8 +1,8 @@
-# CLI 代理 API
+# CLIProxyAPI Plus
 
 [English](README.md) | 中文 | [日本語](README_JA.md)
 
-一个为 CLI 提供 OpenAI/Gemini/Claude/Codex 兼容 API 接口的代理服务器。
+这是 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) 的 Plus 版本，在原有基础上增加了第三方供应商的支持。
 
 现已支持通过 OAuth 登录接入 OpenAI Codex（GPT 系列）和 Claude Code。
 
@@ -101,9 +101,11 @@ CLIProxyAPI 已内置对 [Amp CLI](https://ampcode.com) 和 Amp IDE 扩展的支
 - 凭据加载/更新: [docs/sdk-watcher_CN.md](docs/sdk-watcher_CN.md)
 - 自定义 Provider 示例：`examples/custom-provider`
 
+所有的第三方供应商支持都由第三方社区维护者提供，CLIProxyAPI 不提供技术支持。如需取得支持，请与对应的社区维护者联系。
+
 ## 贡献
 
-欢迎贡献！请随时提交 Pull Request。
+该项目仅接受第三方供应商支持的 Pull Request。任何非第三方供应商支持的 Pull Request 都将被拒绝。
 
 1. Fork 仓库
 2. 创建您的功能分支（`git checkout -b feature/amazing-feature`）
@@ -207,14 +209,8 @@ OmniRoute 是一个面向多供应商大语言模型的 AI 网关：它提供兼
 > [!NOTE]  
 > 如果你开发了 CLIProxyAPI 的移植或衍生项目，请提交 PR 将其添加到此列表中。
 
+如果需要提交任何非第三方供应商支持的 Pull Request，请提交到[主线](https://github.com/router-for-me/CLIProxyAPI)版本。
+
 ## 许可证
 
 此项目根据 MIT 许可证授权 - 有关详细信息，请参阅 [LICENSE](LICENSE) 文件。
-
-## 写给所有中国网友的
-
-QQ 群：188637136（满）、1081218164
-
-或
-
-Telegram 群：https://t.me/CLIProxyAPI

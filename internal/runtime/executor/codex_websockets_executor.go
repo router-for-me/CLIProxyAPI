@@ -155,6 +155,9 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if codexUsesConversationAPI(auth) {
+		return e.CodexExecutor.Execute(ctx, auth, req, opts)
+	}
 	if opts.Alt == "responses/compact" {
 		return e.CodexExecutor.executeCompact(ctx, auth, req, opts)
 	}
@@ -244,7 +247,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 			return e.CodexExecutor.Execute(ctx, auth, req, opts)
 		}
 		if respHS != nil && respHS.StatusCode > 0 {
-			return resp, statusErr{code: respHS.StatusCode, msg: string(bodyErr)}
+			return resp, newCodexStatusErr(respHS.StatusCode, bodyErr)
 		}
 		helps.RecordAPIWebsocketError(ctx, e.cfg, "dial", errDial)
 		return resp, errDial
@@ -366,6 +369,9 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if codexUsesConversationAPI(auth) {
+		return e.CodexExecutor.ExecuteStream(ctx, auth, req, opts)
+	}
 	if opts.Alt == "responses/compact" {
 		return nil, statusErr{code: http.StatusBadRequest, msg: "streaming not supported for /responses/compact"}
 	}
@@ -447,7 +453,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			return e.CodexExecutor.ExecuteStream(ctx, auth, req, opts)
 		}
 		if respHS != nil && respHS.StatusCode > 0 {
-			return nil, statusErr{code: respHS.StatusCode, msg: string(bodyErr)}
+			return nil, newCodexStatusErr(respHS.StatusCode, bodyErr)
 		}
 		helps.RecordAPIWebsocketError(ctx, e.cfg, "dial", errDial)
 		if sess != nil {
@@ -1489,6 +1495,9 @@ func (e *CodexAutoExecutor) CloseExecutionSession(sessionID string) {
 
 func codexWebsocketsEnabled(auth *cliproxyauth.Auth) bool {
 	if auth == nil {
+		return false
+	}
+	if codexUsesConversationAPI(auth) {
 		return false
 	}
 	if len(auth.Attributes) > 0 {

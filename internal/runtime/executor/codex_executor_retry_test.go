@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -74,6 +75,19 @@ func TestNewCodexStatusErrTreatsCapacityAsRetryableRateLimit(t *testing.T) {
 	}
 }
 
+func TestNewCodexStatusErrTreatsChallengePageAsBadGateway(t *testing.T) {
+	body := []byte(`<html><body><noscript>Enable JavaScript and cookies to continue</noscript><script>window._cf_chl_opt={};</script></body></html>`)
+
+	err := newCodexStatusErr(http.StatusForbidden, body)
+
+	if got := err.StatusCode(); got != http.StatusBadGateway {
+		t.Fatalf("status code = %d, want %d", got, http.StatusBadGateway)
+	}
+	if !strings.Contains(err.Error(), "Cloudflare challenge page") {
+		t.Fatalf("message = %q, want Cloudflare challenge page hint", err.Error())
+	}
+}
+
 func TestNewCodexStatusErrClassifiesKnownCodexFailures(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -139,6 +153,19 @@ func TestNewCodexStatusErrPreservesUnclassifiedErrors(t *testing.T) {
 	}
 	if got := err.Error(); got != string(body) {
 		t.Fatalf("error body = %s, want original %s", got, string(body))
+	}
+}
+
+func TestNewCodexStatusErrSummarizesPlainHTML(t *testing.T) {
+	body := []byte(`<html><head><title>403 Forbidden</title></head><body>forbidden</body></html>`)
+
+	err := newCodexStatusErr(http.StatusForbidden, body)
+
+	if got := err.StatusCode(); got != http.StatusForbidden {
+		t.Fatalf("status code = %d, want %d", got, http.StatusForbidden)
+	}
+	if err.Error() != "403 Forbidden" {
+		t.Fatalf("message = %q, want %q", err.Error(), "403 Forbidden")
 	}
 }
 
