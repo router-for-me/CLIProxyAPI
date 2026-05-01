@@ -2021,6 +2021,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	m.mu.Lock()
 	if auth, ok := m.auths[result.AuthID]; ok && auth != nil {
 		now := time.Now()
+		auth.recordRecentRequest(now, result.Success)
 
 		if result.Success {
 			if result.Model != "" {
