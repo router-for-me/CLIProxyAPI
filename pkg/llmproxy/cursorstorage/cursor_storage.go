@@ -29,7 +29,7 @@ func ReadAccessToken() (string, error) {
 	defer func() { _ = db.Close() }()
 
 	var value string
-	err = db.QueryRow("SELECT value FROM ItemTable WHERE key = ?", "cursor.accessToken").Scan(&value)
+	err = db.QueryRow("SELECT value FROM ItemTable WHERE key = ?", "cursorAuth/accessToken").Scan(&value)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return "", fmt.Errorf("access token not found in cursor database")

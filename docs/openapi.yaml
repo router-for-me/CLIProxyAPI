@@ -1,0 +1,1100 @@
+openapi: 3.1.0
+info:
+  title: CLIProxyAPI Plus REST API
+  description: |
+    Unified LLM proxy gateway that routes OpenAI, Claude, Gemini, and other
+    provider requests through a single API-compatible interface. Supports
+    authentication federation (OAuth2 callbacks), usage tracking, dynamic model
+    registry, and management endpoints.
+
+    This is a bootstrap spec covering the primary runtime endpoints.
+    Management, auth-callback, and OAuth routes are documented as operational.
+  version: 0.1.0
+  contact:
+    name: Koosha Pari
+    url: https://github.com/KooshaPari
+  license:
+    name: MIT
+servers:
+  - url: http://localhost:8317
+    description: Local development
+  - url: https://api.cliproxy.io
+    description: Production
+
+tags:
+  - name: models
+    description: Model discovery
+  - name: completions
+    description: Text completion (legacy OpenAI compat)
+  - name: chat
+    description: Chat completion (OpenAI compat)
+  - name: claude
+    description: Anthropic Claude API compat
+  - name: responses
+    description: OpenAI Responses API (beta)
+  - name: images
+    description: Image generation (OpenAI compat)
+  - name: gemini
+    description: Google Gemini API compat
+  - name: management
+    description: Server management & configuration
+  - name: routing
+    description: Request routing control
+  - name: auth
+    description: OAuth2 callback endpoints
+  - name: internal
+    description: Internal protocol endpoints
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: API key
+    ApiKeyHeader:
+      type: apiKey
+      in: header
+      name: X-API-Key
+
+  schemas:
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [message, type]
+          properties:
+            message:
+              type: string
+              description: Human-readable error message.
+            type:
+              type: string
+              description: Error type (e.g., `invalid_request_error`).
+            code:
+              type: string
+              description: Short error code.
+              nullable: true
+
+    ModelObject:
+      type: object
+      required: [id, object, owned_by]
+      properties:
+        id:
+          type: string
+          description: Model identifier string.
+        object:
+          type: string
+          enum: [model]
+        created:
+          type: integer
+          format: int64
+          nullable: true
+        owned_by:
+          type: string
+
+    ModelsListResponse:
+      type: object
+      required: [object, data]
+      properties:
+        object:
+          type: string
+          const: list
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/ModelObject'
+
+    ChatMessage:
+      type: object
+      required: [role, content]
+      properties:
+        role:
+          type: string
+          enum: [system, user, assistant, tool]
+        content:
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                type: object
+                required: [type]
+                properties:
+                  type:
+                    type: string
+                    enum: [text, image_url]
+                  text:
+                    type: string
+                  image_url:
+                    type: object
+                    properties:
+                      url:
+                        type: string
+                        format: uri
+        name:
+          type: string
+          nullable: true
+
+    ChatCompletionRequest:
+      type: object
+      required: [model, messages]
+      properties:
+        model:
+          type: string
+          description: Model ID to use for completion.
+        messages:
+          type: array
+          items:
+            $ref: '#/components/schemas/ChatMessage'
+        temperature:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 2
+          nullable: true
+        top_p:
+          type: number
+          format: float
+          nullable: true
+        n:
+          type: integer
+          nullable: true
+        stream:
+          type: boolean
+          default: false
+        stop:
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                type: string
+          nullable: true
+        max_tokens:
+          type: integer
+          nullable: true
+        presence_penalty:
+          type: number
+          nullable: true
+        frequency_penalty:
+          type: number
+          nullable: true
+        user:
+          type: string
+          nullable: true
+
+    ChatCompletionResponse:
+      type: object
+      required: [id, object, created, model, choices]
+      properties:
+        id:
+          type: string
+        object:
+          type: string
+          const: chat.completion
+        created:
+          type: integer
+          format: int64
+        model:
+          type: string
+        choices:
+          type: array
+          items:
+            type: object
+            required: [index, message, finish_reason]
+            properties:
+              index:
+                type: integer
+              message:
+                $ref: '#/components/schemas/ChatMessage'
+              finish_reason:
+                type: string
+
+    CompletionRequest:
+      type: object
+      required: [model, prompt]
+      properties:
+        model:
+          type: string
+        prompt:
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                oneOf:
+                  - type: string
+                  - type: integer
+          type: object
+        suffix:
+          type: string
+          nullable: true
+        max_tokens:
+          type: integer
+          nullable: true
+        temperature:
+          type: number
+          nullable: true
+        top_p:
+          type: number
+          nullable: true
+        n:
+          type: integer
+          nullable: true
+        stream:
+          type: boolean
+          default: false
+        logprobs:
+          type: integer
+          nullable: true
+        echo:
+          type: boolean
+          nullable: true
+        stop:
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                type: string
+          nullable: true
+
+    CompletionResponse:
+      type: object
+      required: [id, object, created, model, choices]
+      properties:
+        id:
+          type: string
+        object:
+          type: string
+          const: text_completion
+        created:
+          type: integer
+        model:
+          type: string
+        choices:
+          type: array
+          items:
+            type: object
+            required: [text, index, finish_reason]
+            properties:
+              text:
+                type: string
+              index:
+                type: integer
+              finish_reason:
+                type: string
+
+    ClaudeMessageRequest:
+      type: object
+      required: [model, messages]
+      properties:
+        model:
+          type: string
+        messages:
+          type: array
+          items:
+            $ref: '#/components/schemas/ChatMessage'
+        stream:
+          type: boolean
+          default: false
+        max_tokens:
+          type: integer
+
+    ClaudeMessageResponse:
+      type: object
+      required: [id, type, role, content]
+      properties:
+        id:
+          type: string
+        type:
+          type: string
+          const: message
+        role:
+          type: string
+          const: assistant
+        content:
+          type: array
+          items:
+            type: object
+            properties:
+              type:
+                type: string
+                enum: [text]
+              text:
+                type: string
+        model:
+          type: string
+        stop_reason:
+          type: string
+
+    ImageGenerationRequest:
+      type: object
+      required: [model, prompt]
+      properties:
+        model:
+          type: string
+          default: dall-e-3
+        prompt:
+          type: string
+        n:
+          type: integer
+          default: 1
+        quality:
+          type: string
+          enum: [standard, hd]
+          default: standard
+        response_format:
+          type: string
+          enum: [url, b64_json]
+          default: url
+        size:
+          type: string
+          enum: [1024x1024, 1024x1792, 1792x1024]
+          default: 1024x1024
+        style:
+          type: string
+          enum: [vivid, natural]
+          default: vivid
+
+    ImageGenerationResponse:
+      type: object
+      required: [created, data]
+      properties:
+        created:
+          type: integer
+        data:
+          type: array
+          items:
+            type: object
+            properties:
+              url:
+                type: string
+                format: uri
+                nullable: true
+              b64_json:
+                type: string
+                nullable: true
+              revised_prompt:
+                type: string
+                nullable: true
+
+    ResponsesRequest:
+      type: object
+      required: [model, input]
+      properties:
+        model:
+          type: string
+        input:
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                type: string
+        tools:
+          type: array
+          nullable: true
+        stream:
+          type: boolean
+          default: false
+
+paths:
+  # ─── Models ───────────────────────────────────────────────────────────────────
+
+  /v1/models:
+    get:
+      tags: [models]
+      summary: List available models
+      operationId: listModels
+      description: Returns a list of all models currently registered in the proxy.
+      responses:
+        '200':
+          description: List of model objects.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ModelsListResponse'
+        '401':
+          description: Missing or invalid API key.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ─── Chat Completions ──────────────────────────────────────────────────────────
+
+  /v1/chat/completions:
+    post:
+      tags: [chat]
+      summary: Create chat completion
+      operationId: createChatCompletion
+      description: |
+        Creates a model response for the given chat conversation.
+        Supports streaming via `stream: true`. Routes to OpenAI, Claude, Gemini,
+        or other providers based on model name and configuration.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChatCompletionRequest'
+      responses:
+        '200':
+          description: Chat completion object (or streaming chunks).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatCompletionResponse'
+            text/event-stream:
+              schema:
+                type: string
+        '400':
+          description: Invalid request payload.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Missing or invalid API key.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Upstream provider error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ─── Legacy Completions ────────────────────────────────────────────────────────
+
+  /v1/completions:
+    post:
+      tags: [completions]
+      summary: Create text completion
+      operationId: createCompletion
+      description: |
+        Creates a completion for the provided prompt and parameters.
+        Internally translated to chat completions format before forwarding.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CompletionRequest'
+      responses:
+        '200':
+          description: Completion object (or streaming chunks).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CompletionResponse'
+        '400':
+          description: Invalid request payload.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Missing or invalid API key.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ─── Claude Messages ───────────────────────────────────────────────────────────
+
+  /v1/messages:
+    post:
+      tags: [claude]
+      summary: Create Claude message
+      operationId: createClaudeMessage
+      description: |
+        Sends a message to an Anthropic Claude model via the Messages API.
+        Supports streaming. Routes to Claude Code API or native Claude endpoints.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ClaudeMessageRequest'
+      responses:
+        '200':
+          description: Claude message response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClaudeMessageResponse'
+        '400':
+          description: Invalid request payload.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Missing or invalid API key.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/messages/count_tokens:
+    post:
+      tags: [claude]
+      summary: Count tokens for Claude request
+      operationId: countClaudeTokens
+      description: Returns the token count for a given messages payload without making a completion.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ClaudeMessageRequest'
+      responses:
+        '200':
+          description: Token count result.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tokens:
+                    type: integer
+
+  # ─── OpenAI Responses API ────────────────────────────────────────────────────
+
+  /v1/responses:
+    get:
+      tags: [responses]
+      summary: List responses (WebSocket upgrade)
+      operationId: listResponsesWebsocket
+      description: WebSocket endpoint for real-time OpenAI Responses API.
+      responses:
+        '101':
+          description: Switching Protocols — WebSocket connection established.
+        '426':
+          description: Upgrade Required — use WebSocket protocol.
+
+    post:
+      tags: [responses]
+      summary: Create an OpenAI Response
+      operationId: createResponse
+      description: Creates an agentic response using the OpenAI Responses API format.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResponsesRequest'
+      responses:
+        '200':
+          description: Response object.
+        '400':
+          description: Invalid request payload.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/responses/compact:
+    post:
+      tags: [responses]
+      summary: Compact a response via chat fallback
+      operationId: compactResponse
+      description: Converts a Responses API response to a chat-compatible format.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Compacted response.
+        '400':
+          description: Invalid request payload.
+
+  # ─── Image Generation ─────────────────────────────────────────────────────────
+
+  /v1/images/generations:
+    post:
+      tags: [images]
+      summary: Generate images
+      operationId: createImageGeneration
+      description: |
+        Generates images from a text prompt using DALL-E or Gemini Imagen.
+        Supports size, quality, and style parameters.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ImageGenerationRequest'
+      responses:
+        '200':
+          description: Image generation result.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ImageGenerationResponse'
+        '400':
+          description: Invalid request payload.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ─── Gemini API ───────────────────────────────────────────────────────────────
+
+  /v1beta/models:
+    get:
+      tags: [gemini]
+      summary: List Gemini models
+      operationId: listGeminiModels
+      description: Returns a list of all available Gemini models.
+      responses:
+        '200':
+          description: List of Gemini model objects.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ModelsListResponse'
+
+  /v1beta/models/{action}:
+    get:
+      tags: [gemini]
+      summary: Gemini model action (GET)
+      operationId: geminiModelActionGet
+      parameters:
+        - in: path
+          name: action
+          required: true
+          schema:
+            type: string
+          description: Gemini model action path (e.g., `gemini-2.0-flash:generateContent`).
+      responses:
+        '200':
+          description: Gemini response object.
+        '400':
+          description: Invalid request.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    post:
+      tags: [gemini]
+      summary: Gemini model action (POST)
+      operationId: geminiModelActionPost
+      parameters:
+        - in: path
+          name: action
+          required: true
+          schema:
+            type: string
+          description: Gemini model action path.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Gemini response object.
+        '400':
+          description: Invalid request.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ─── Management ───────────────────────────────────────────────────────────────
+
+  /management.html:
+    get:
+      tags: [management]
+      summary: Management control panel UI
+      operationId: getManagementUI
+      description: Serves the browser-based management dashboard.
+      responses:
+        '200':
+          description: HTML management panel.
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /mgmt/usage:
+    get:
+      tags: [management]
+      summary: Get usage statistics
+      operationId: getUsageStatistics
+      responses:
+        '200':
+          description: Usage statistics.
+          content:
+            application/json:
+              schema:
+                type: object
+
+  /mgmt/usage/export:
+    get:
+      tags: [management]
+      summary: Export usage statistics
+      operationId: exportUsageStatistics
+      responses:
+        '200':
+          description: Exported usage data.
+          content:
+            application/json:
+              schema:
+                type: object
+
+  /mgmt/usage/import:
+    post:
+      tags: [management]
+      summary: Import usage statistics
+      operationId: importUsageStatistics
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Import result.
+
+  /mgmt/config:
+    get:
+      tags: [management]
+      summary: Get current server configuration
+      operationId: getConfig
+      responses:
+        '200':
+          description: Server configuration JSON.
+          content:
+            application/json:
+              schema:
+                type: object
+
+  /mgmt/config.yaml:
+    get:
+      tags: [management]
+      summary: Get server configuration as YAML
+      operationId: getConfigYAML
+      responses:
+        '200':
+          description: Server configuration YAML.
+          content:
+            text/plain:
+              schema:
+                type: string
+    put:
+      tags: [management]
+      summary: Replace server configuration (YAML)
+      operationId: putConfigYAML
+      requestBody:
+        required: true
+        content:
+          text/plain:
+            schema:
+              type: string
+      responses:
+        '200':
+          description: Config updated.
+        '400':
+          description: Invalid YAML.
+
+  /mgmt/debug:
+    get:
+      tags: [management]
+      summary: Get debug settings
+      operationId: getDebug
+      responses:
+        '200':
+          description: Debug configuration.
+          content:
+            application/json:
+              schema:
+                type: object
+    put:
+      tags: [management]
+      summary: Set debug settings (replace)
+      operationId: putDebug
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Debug settings updated.
+    patch:
+      tags: [management]
+      summary: Update debug settings (merge)
+      operationId: patchDebug
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Debug settings patched.
+
+  /mgmt/logging-to-file:
+    get:
+      tags: [management]
+      summary: Get logging-to-file setting
+      operationId: getLoggingToFile
+      responses:
+        '200':
+          description: Logging setting.
+          content:
+            application/json:
+              schema:
+                type: object
+    put:
+      tags: [management]
+      summary: Set logging-to-file
+      operationId: putLoggingToFile
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Logging setting updated.
+    patch:
+      tags: [management]
+      summary: Patch logging-to-file
+      operationId: patchLoggingToFile
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Logging setting patched.
+
+  /mgmt/logs-max-total-size-mb:
+    get:
+      tags: [management]
+      summary: Get max log file size
+      operationId: getLogsMaxTotalSizeMB
+      responses:
+        '200':
+          description: Max log size in MB.
+          content:
+            application/json:
+              schema:
+                type: object
+    put:
+      tags: [management]
+      summary: Set max log file size
+      operationId: putLogsMaxTotalSizeMB
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Log size updated.
+    patch:
+      tags: [management]
+      summary: Patch max log file size
+      operationId: patchLogsMaxTotalSizeMB
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Log size patched.
+
+  /mgmt/latest-version:
+    get:
+      tags: [management]
+      summary: Check latest available version
+      operationId: getLatestVersion
+      responses:
+        '200':
+          description: Latest version info.
+          content:
+            application/json:
+              schema:
+                type: object
+
+  # ─── Routing ─────────────────────────────────────────────────────────────────
+
+  /v1/routing/select:
+    post:
+      tags: [routing]
+      summary: Select routing target
+      operationId: routingSelect
+      description: Explicitly select which upstream provider/auth context to route a request through.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Routing selection confirmed.
+
+  # ─── Internal Protocol ────────────────────────────────────────────────────────
+
+  /v1internal:method:
+    post:
+      tags: [internal]
+      summary: Gemini internal protocol handler
+      operationId: geminiInternalMethod
+      description: Handles Google Gemini CLI internal RPC methods (generateContent, streamGenerateContent).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Gemini internal response.
+        '400':
+          description: Invalid method or payload.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ─── Event Logging ────────────────────────────────────────────────────────────
+
+  /api/event_logging/batch:
+    post:
+      tags: [management]
+      summary: Batch log events
+      operationId: batchEventLog
+      description: Submit a batch of structured events for logging.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                events:
+                  type: array
+                  items:
+                    type: object
+      responses:
+        '200':
+          description: Events logged.
+
+  # ─── OAuth Callbacks ──────────────────────────────────────────────────────────
+
+  /anthropic/callback:
+    get:
+      tags: [auth]
+      summary: Anthropic OAuth callback
+      operationId: anthropicCallback
+      responses:
+        '302':
+          description: Redirect to UI after auth completion.
+        '400':
+          description: Authentication failure.
+
+  /codex/callback:
+    get:
+      tags: [auth]
+      summary: GitHub Codex OAuth callback
+      operationId: codexCallback
+      responses:
+        '302':
+          description: Redirect to UI after auth completion.
+        '400':
+          description: Authentication failure.
+
+  /gitlab/callback:
+    get:
+      tags: [auth]
+      summary: GitLab OAuth callback
+      operationId: gitlabCallback
+      responses:
+        '302':
+          description: Redirect to UI after auth completion.
+        '400':
+          description: Authentication failure.
+
+  /google/callback:
+    get:
+      tags: [auth]
+      summary: Google OAuth callback
+      operationId: googleCallback
+      responses:
+        '302':
+          description: Redirect to UI after auth completion.
+        '400':
+          description: Authentication failure.
+
+  /iflow/callback:
+    get:
+      tags: [auth]
+      summary: iFlow OAuth callback
+      operationId: iflowCallback
+      responses:
+        '302':
+          description: Redirect to UI after auth completion.
+        '400':
+          description: Authentication failure.
+
+  /antigravity/callback:
+    get:
+      tags: [auth]
+      summary: Antigravity OAuth callback
+      operationId: antigravityCallback
+      responses:
+        '302':
+          description: Redirect to UI after auth completion.
+        '400':
+          description: Authentication failure.
+
+  /kiro/callback:
+    get:
+      tags: [auth]
+      summary: Kiro OAuth callback
+      operationId: kiroCallback
+      responses:
+        '302':
+          description: Redirect to UI after auth completion.
+        '400':
+          description: Authentication failure.
+
+  # ─── Health ───────────────────────────────────────────────────────────────────
+
+  /:
+    get:
+      tags: [management]
+      summary: Root endpoint
+      operationId: root
+      description: Returns basic server information.
+      responses:
+        '200':
+          description: Server info.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  version:
+                    type: string
