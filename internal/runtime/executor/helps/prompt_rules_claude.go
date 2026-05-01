@@ -26,7 +26,11 @@ func (claudePromptFmt) InjectSystem(payload []byte, content, marker, position st
 	}
 	sys := gjson.GetBytes(payload, "system")
 	if !sys.Exists() {
-		// Create as plain string to match the simplest Claude shape.
+		// Marker mode: no anchor exists, no synthesis. Boundary mode: create as
+		// plain string to match the simplest Claude shape.
+		if marker != "" {
+			return payload
+		}
 		updated, err := sjson.SetBytes(payload, "system", content)
 		if err != nil {
 			return payload
@@ -35,10 +39,11 @@ func (claudePromptFmt) InjectSystem(payload []byte, content, marker, position st
 	}
 	if sys.Type == gjson.String {
 		text := sys.String()
-		if containsMarker(text, marker) {
+		newText, mutated := injectIntoText(text, content, marker, position)
+		if !mutated {
 			return payload
 		}
-		updated, err := sjson.SetBytes(payload, "system", applyPosition(text, content, position))
+		updated, err := sjson.SetBytes(payload, "system", newText)
 		if err != nil {
 			return payload
 		}
@@ -47,24 +52,7 @@ func (claudePromptFmt) InjectSystem(payload []byte, content, marker, position st
 	if !sys.IsArray() {
 		return payload
 	}
-	// Block-array shape: skip if any text block carries the marker.
-	for _, block := range sys.Array() {
-		if block.Get("type").String() == "text" && containsMarker(block.Get("text").String(), marker) {
-			return payload
-		}
-	}
-	newBlock, err := marshalJSONNoEscape(map[string]any{"type": "text", "text": content})
-	if err != nil {
-		return payload
-	}
-	if position == "append" {
-		updated, err := sjson.SetRawBytes(payload, "system.-1", newBlock)
-		if err != nil {
-			return payload
-		}
-		return updated
-	}
-	return prependArrayElement(payload, "system", newBlock)
+	return blockArrayInject(payload, "system", isClaudeTextBlock, newClaudeTextBlock, content, marker, position)
 }
 
 func (claudePromptFmt) StripSystem(payload []byte, re *regexp.Regexp) []byte {
@@ -168,10 +156,11 @@ func claudeMutateUserContent(payload []byte, idx int, content, marker, position 
 	c := gjson.GetBytes(payload, path)
 	if c.Type == gjson.String {
 		text := c.String()
-		if containsMarker(text, marker) {
+		newText, mutated := injectIntoText(text, content, marker, position)
+		if !mutated {
 			return payload
 		}
-		updated, err := sjson.SetBytes(payload, path, applyPosition(text, content, position))
+		updated, err := sjson.SetBytes(payload, path, newText)
 		if err != nil {
 			return payload
 		}
@@ -180,23 +169,15 @@ func claudeMutateUserContent(payload []byte, idx int, content, marker, position 
 	if !c.IsArray() {
 		return payload
 	}
-	for _, block := range c.Array() {
-		if block.Get("type").String() == "text" && containsMarker(block.Get("text").String(), marker) {
-			return payload
-		}
-	}
-	newBlock, err := marshalJSONNoEscape(map[string]any{"type": "text", "text": content})
-	if err != nil {
-		return payload
-	}
-	if position == "append" {
-		updated, err := sjson.SetRawBytes(payload, path+".-1", newBlock)
-		if err != nil {
-			return payload
-		}
-		return updated
-	}
-	return prependArrayElement(payload, path, newBlock)
+	return blockArrayInject(payload, path, isClaudeTextBlock, newClaudeTextBlock, content, marker, position)
+}
+
+func isClaudeTextBlock(b gjson.Result) bool {
+	return b.Get("type").String() == "text"
+}
+
+func newClaudeTextBlock(content string) ([]byte, error) {
+	return marshalJSONNoEscape(map[string]any{"type": "text", "text": content})
 }
 
 func claudeStripUserContent(payload []byte, idx int, re *regexp.Regexp) []byte {

@@ -109,13 +109,15 @@ func TestPromptRules_API_PutWithInvalidRegexReturns400(t *testing.T) {
 	}
 }
 
-func TestPromptRules_API_PutWithMarkerNotInContentReturns400(t *testing.T) {
+func TestPromptRules_API_PutWithEmptyContentReturns400(t *testing.T) {
+	// v2: marker no longer needs to be inside content. Empty content remains
+	// invalid, so we test that path here.
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	h := newPromptRulesTestHandler(t, nil)
 
 	body := []config.PromptRule{{
 		Name: "bad", Enabled: true, Target: "system", Action: "inject",
-		Content: "no sentinel", Marker: "<!-- pr:none -->",
+		Content: "",
 	}}
 	rec := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(rec)
@@ -123,6 +125,25 @@ func TestPromptRules_API_PutWithMarkerNotInContentReturns400(t *testing.T) {
 	h.PutPromptRules(ctx)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400; got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestPromptRules_API_PutWithMarkerNotInContent_AcceptedV2(t *testing.T) {
+	// v2 codification: PUT a rule whose marker does not appear inside content
+	// must succeed (anchor semantics, not sentinel).
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	h := newPromptRulesTestHandler(t, nil)
+
+	body := []config.PromptRule{{
+		Name: "anchor", Enabled: true, Target: "system", Action: "inject",
+		Content: " (proxy)", Marker: "qwen", Position: "append",
+	}}
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = newJSONReq(t, http.MethodPut, "/v0/management/prompt-rules", body)
+	h.PutPromptRules(ctx)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 under v2; got %d body=%s", rec.Code, rec.Body.String())
 	}
 }
 

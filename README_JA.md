@@ -62,6 +62,7 @@ GLM CODING PLANを10%割引で取得：https://z.ai/subscribe?ic=8JVLJQFSKB
 - Claude Codeのマルチアカウント負荷分散
 - OpenAI Codexのマルチアカウント負荷分散
 - 設定によるOpenAI互換アップストリームプロバイダー（例：OpenRouter）
+- プロンプトルール：上流に転送する前にシステムプロンプトや最後のユーザーメッセージへ常駐の指示を注入、または不要な定型文を正規表現で除去。モデルとソース形式でスコープし、リクエスト間で冪等
 - プロキシ埋め込み用の再利用可能なGo SDK（`docs/sdk-usage.md`を参照）
 
 ## はじめに

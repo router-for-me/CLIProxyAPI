@@ -28,7 +28,12 @@ func (openaiPromptFmt) InjectSystem(payload []byte, content, marker, position st
 			return openaiMutateMessageContent(payload, idx, role, content, marker, position, false)
 		}
 	}
-	// No system or developer message — prepend a new one.
+	// No system or developer message. In marker mode there is no anchor to
+	// attach to, so the rule is a no-op. In boundary mode we synthesize a fresh
+	// system message carrying just content.
+	if marker != "" {
+		return payload
+	}
 	newMsg := map[string]any{"role": "system", "content": content}
 	raw, err := marshalJSONNoEscape(newMsg)
 	if err != nil {
@@ -143,14 +148,19 @@ func openaiLastNaturalUserIndex(messages gjson.Result) int {
 
 // openaiMutateMessageContent injects content into messages[idx].content per the
 // given position and marker. Handles string, array, null, and missing content
-// shapes. markerScopeIsThisMessage is reserved for future use.
+// shapes. role is preserved for future per-role policy.
 func openaiMutateMessageContent(payload []byte, idx int, role, content, marker, position string, _ bool) []byte {
+	_ = role
 	path := fmt.Sprintf("messages.%d.content", idx)
 	c := gjson.GetBytes(payload, path)
-	// Null or absent content: replace with the injected string. Some clients
-	// emit content==null as a placeholder for system / developer messages.
+	// Null or absent content is treated as an empty target string. Boundary
+	// mode replaces it with content; marker mode no-ops (no anchor).
 	if !c.Exists() || c.Type == gjson.Null {
-		updated, err := sjson.SetBytes(payload, path, content)
+		newText, mutated := injectIntoText("", content, marker, position)
+		if !mutated {
+			return payload
+		}
+		updated, err := sjson.SetBytes(payload, path, newText)
 		if err != nil {
 			return payload
 		}
@@ -158,44 +168,34 @@ func openaiMutateMessageContent(payload []byte, idx int, role, content, marker, 
 	}
 	if c.Type == gjson.String {
 		text := c.String()
-		if containsMarker(text, marker) {
+		newText, mutated := injectIntoText(text, content, marker, position)
+		if !mutated {
 			return payload
 		}
-		updated, err := sjson.SetBytes(payload, path, applyPosition(text, content, position))
+		updated, err := sjson.SetBytes(payload, path, newText)
 		if err != nil {
 			return payload
 		}
 		return updated
 	}
 	if c.IsArray() {
-		// Check marker presence across all text blocks first.
-		for _, block := range c.Array() {
-			t := block.Get("type").String()
-			if (t == "text" || t == "input_text") && containsMarker(block.Get("text").String(), marker) {
-				return payload
-			}
-		}
-		// We canonicalize new blocks as type="text" since OpenAI Chat
-		// Completions accepts that uniformly. Some clients use "input_text"
-		// (Responses-influenced) but mixing types in one array is also accepted
-		// by the API, and our marker-scan above handles both forms on read.
-		_ = role
-		newBlock, err := marshalJSONNoEscape(map[string]any{"type": "text", "text": content})
-		if err != nil {
-			return payload
-		}
-		if position == "append" {
-			updated, err := sjson.SetRawBytes(payload, path+".-1", newBlock)
-			if err != nil {
-				return payload
-			}
-			return updated
-		}
-		// prepend
-		return prependArrayElement(payload, path, newBlock)
+		// We canonicalize new blocks as type="text"; OpenAI Chat Completions
+		// accepts that uniformly. Mixed-type arrays remain valid because the
+		// scan in blockArrayInject treats both "text" and "input_text" as
+		// text-bearing on read.
+		return blockArrayInject(payload, path, isOpenAITextBlock, newOpenAITextBlock, content, marker, position)
 	}
 	// Unknown content shape — leave untouched.
 	return payload
+}
+
+func isOpenAITextBlock(b gjson.Result) bool {
+	t := b.Get("type").String()
+	return t == "text" || t == "input_text"
+}
+
+func newOpenAITextBlock(content string) ([]byte, error) {
+	return marshalJSONNoEscape(map[string]any{"type": "text", "text": content})
 }
 
 // openaiStripMessageContent applies the regex to the content of messages[idx],

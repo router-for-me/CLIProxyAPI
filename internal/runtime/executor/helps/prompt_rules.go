@@ -3,12 +3,14 @@ package helps
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"regexp"
 	"strings"
 	"sync/atomic"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 // marshalJSONNoEscape encodes v with HTML escaping disabled so injected text
@@ -89,9 +91,16 @@ func loadPromptRulesSnapshot() *promptRulesSnapshot {
 }
 
 // ApplyPromptRules mutates a source-format request body according to enabled
-// prompt rules. Strip rules run first, then inject. Idempotent via per-rule
-// marker substring. Endpoint-scoped: skips /v1/images/* and the responses/compact
-// alt path.
+// prompt rules. Strip rules run first, then inject. Idempotency is per
+// inject-rule mode:
+//   - Boundary mode (Marker == ""): skip the inject when the target already
+//     contains Content as a substring; otherwise insert at start (prepend) or
+//     end (append) of the target text.
+//   - Marker mode (Marker != ""): skip when Content is already directly
+//     adjacent to some marker occurrence in the configured direction; skip
+//     entirely when the marker is not present in the target.
+//
+// Endpoint-scoped: skips /v1/images/* and the responses/compact alt path.
 //
 // sourceFormat is the inbound request's protocol identifier (the value of
 // BaseAPIHandler.HandlerType()): "openai", "openai-response", "claude",
@@ -247,7 +256,7 @@ func promptHandlerForSourceFormat(sourceFormat string) promptHandler {
 }
 
 // applyPosition returns the result of inserting add into base at the configured
-// position. Used for inject mutations on string-shaped targets.
+// position. Used for inject mutations on string-shaped targets in boundary mode.
 func applyPosition(base, add, position string) string {
 	if position == config.PromptRulePositionPrepend {
 		return add + base
@@ -255,14 +264,148 @@ func applyPosition(base, add, position string) string {
 	return base + add
 }
 
-// containsMarker returns true when marker is non-empty AND appears in text.
-// An empty marker is invalid at validation time, so this returns false to err on
-// the side of injecting (which a downstream test can flag).
-func containsMarker(text, marker string) bool {
-	if marker == "" {
+// hasAdjacentContent reports whether content is immediately contiguous (per
+// position) to at least one occurrence of marker in text. Returns false when
+// marker or content is empty, or when marker is not present in text. Used by
+// marker-mode idempotency: walk all marker occurrences and skip the inject if
+// any of them already has content directly adjacent in the configured
+// direction.
+//
+// The scan advances by one byte after each match (not by len(marker)) so that
+// overlapping marker occurrences are visited. Without this, a target like
+// "aaab" with marker="aa" would only check index 0 and miss the adjacency at
+// index 1.
+func hasAdjacentContent(text, content, marker, position string) bool {
+	if marker == "" || content == "" {
 		return false
 	}
-	return strings.Contains(text, marker)
+	n := len(marker)
+	start := 0
+	for {
+		off := strings.Index(text[start:], marker)
+		if off < 0 {
+			return false
+		}
+		i := start + off
+		if position == config.PromptRulePositionPrepend {
+			if i >= len(content) && text[i-len(content):i] == content {
+				return true
+			}
+		} else {
+			after := i + n
+			if after+len(content) <= len(text) && text[after:after+len(content)] == content {
+				return true
+			}
+		}
+		start = i + 1
+		if start >= len(text) {
+			return false
+		}
+	}
+}
+
+// injectIntoText returns text with content inserted per the marker/position
+// rules. The bool is false (text unchanged) when the operation is a no-op:
+//   - content == ""
+//   - marker == "" and content already a substring of text (boundary
+//     idempotency)
+//   - marker != "" and marker not present in text (no anchor)
+//   - marker != "" and content already directly adjacent to some marker
+//     occurrence in the configured direction (marker idempotency)
+//
+// Otherwise the returned text contains content inserted at the first marker
+// occurrence (marker mode) or at the configured boundary (no-marker mode).
+func injectIntoText(text, content, marker, position string) (string, bool) {
+	if content == "" {
+		return text, false
+	}
+	if marker == "" {
+		if strings.Contains(text, content) {
+			return text, false
+		}
+		return applyPosition(text, content, position), true
+	}
+	firstIdx := strings.Index(text, marker)
+	if firstIdx < 0 {
+		return text, false
+	}
+	if hasAdjacentContent(text, content, marker, position) {
+		return text, false
+	}
+	if position == config.PromptRulePositionPrepend {
+		return text[:firstIdx] + content + text[firstIdx:], true
+	}
+	end := firstIdx + len(marker)
+	return text[:end] + content + text[end:], true
+}
+
+// blockArrayInject applies the v2 inject semantics to a JSON array of content
+// blocks at the given path inside payload. isTextBlock identifies which blocks
+// are text-bearing for this source format. newTextBlock builds the
+// format-specific JSON for a fresh text block carrying the provided content.
+//
+// Boundary mode (empty marker): skip if any text block already contains
+// content as a substring; otherwise insert a new text block at the array
+// boundary corresponding to position.
+//
+// Marker mode (non-empty marker): walk every text block. The whole rule is
+// suppressed if any marker-bearing block already has content directly
+// adjacent to one of its marker occurrences in the configured direction.
+// Otherwise the inject lands inside the first marker-bearing block.
+func blockArrayInject(payload []byte, path string, isTextBlock func(gjson.Result) bool, newTextBlock func(content string) ([]byte, error), content, marker, position string) []byte {
+	arr := gjson.GetBytes(payload, path)
+	if !arr.IsArray() {
+		return payload
+	}
+	blocks := arr.Array()
+	if marker == "" {
+		for _, b := range blocks {
+			if isTextBlock(b) && strings.Contains(b.Get("text").String(), content) {
+				return payload
+			}
+		}
+		newBlock, err := newTextBlock(content)
+		if err != nil {
+			return payload
+		}
+		if position == config.PromptRulePositionAppend {
+			updated, err := sjson.SetRawBytes(payload, path+".-1", newBlock)
+			if err != nil {
+				return payload
+			}
+			return updated
+		}
+		return prependArrayElement(payload, path, newBlock)
+	}
+	firstIdx := -1
+	for i, b := range blocks {
+		if !isTextBlock(b) {
+			continue
+		}
+		text := b.Get("text").String()
+		if !strings.Contains(text, marker) {
+			continue
+		}
+		if firstIdx < 0 {
+			firstIdx = i
+		}
+		if hasAdjacentContent(text, content, marker, position) {
+			return payload
+		}
+	}
+	if firstIdx < 0 {
+		return payload
+	}
+	text := blocks[firstIdx].Get("text").String()
+	newText, mutated := injectIntoText(text, content, marker, position)
+	if !mutated {
+		return payload
+	}
+	updated, err := sjson.SetBytes(payload, fmt.Sprintf("%s.%d.text", path, firstIdx), newText)
+	if err != nil {
+		return payload
+	}
+	return updated
 }
 
 // hasNonEmptyText returns true when the given gjson.Result has a string-typed

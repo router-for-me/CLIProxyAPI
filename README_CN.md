@@ -64,6 +64,7 @@ VisionCoder 还为我们的用户提供 <a href="https://coder.visioncoder.cn" t
 - 支持 Claude Code 多账户轮询
 - 支持 OpenAI Codex 多账户轮询
 - 通过配置接入上游 OpenAI 兼容提供商（例如 OpenRouter）
+- 提示规则：在转发到上游前向系统提示或最近的用户消息注入常驻指令，或按正则剥离不需要的样板文本；按模型与来源格式过滤，跨请求保持幂等
 - 可复用的 Go SDK（见 `docs/sdk-usage_CN.md`）
 
 ## 新手入门

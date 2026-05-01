@@ -369,13 +369,20 @@ const (
 // either the system prompt or the most recent natural-language user message of an
 // outgoing request, scoped by model glob and source format.
 //
-// Inject rules write Content into the target idempotently: the rule is skipped when
-// Marker is already present in the target. Marker must appear inside Content so a
-// freshly injected payload always carries its idempotency sentinel.
+// Inject rules write Content into the target idempotently. Marker is optional
+// and toggles between two semantics:
+//   - When Marker is empty (boundary mode), Position is relative to the target
+//     text boundaries (append = end, prepend = start) and idempotency is
+//     "skip when target already contains Content as a substring".
+//   - When Marker is non-empty (anchor mode), Position is relative to the
+//     marker (append = immediately after, prepend = immediately before),
+//     idempotency is "skip when Content is already directly adjacent to some
+//     marker occurrence in the configured direction", and the rule no-ops if
+//     the marker is not present in the target.
 //
-// Strip rules apply an RE2 regex to the target's text, replacing matches with empty
-// string. Strip rules run before inject rules within a single request so injected
-// content is never accidentally stripped on the same pass.
+// Strip rules apply an RE2 regex to the target's text, replacing matches with
+// empty string. Strip rules run before inject rules within a single request so
+// injected content is never accidentally stripped on the same pass.
 type PromptRule struct {
 	// Name uniquely identifies the rule for management API operations.
 	Name string `yaml:"name" json:"name"`
@@ -389,9 +396,12 @@ type PromptRule struct {
 	Target string `yaml:"target" json:"target"`
 	// Action is "inject" or "strip".
 	Action string `yaml:"action" json:"action"`
-	// Content is the literal text injected. Required for inject. Must contain Marker.
+	// Content is the literal text injected. Required for inject.
 	Content string `yaml:"content,omitempty" json:"content,omitempty"`
-	// Marker is the idempotency sentinel substring. Required for inject.
+	// Marker is optional. When non-empty it acts as an anchor: Position is
+	// relative to the marker and idempotency is checked by adjacency. When
+	// empty, Position is relative to the target's text boundaries and
+	// idempotency is checked by Content presence.
 	Marker string `yaml:"marker,omitempty" json:"marker,omitempty"`
 	// Position is "prepend" or "append" (default "append"). Used by inject.
 	Position string `yaml:"position,omitempty" json:"position,omitempty"`
@@ -941,12 +951,6 @@ func validatePromptRule(r *PromptRule) error {
 	case PromptRuleActionInject:
 		if r.Content == "" {
 			return errors.New("content is required for inject")
-		}
-		if r.Marker == "" {
-			return errors.New("marker is required for inject")
-		}
-		if !strings.Contains(r.Content, r.Marker) {
-			return errors.New("marker must appear inside content")
 		}
 		switch r.Position {
 		case PromptRulePositionAppend, PromptRulePositionPrepend:

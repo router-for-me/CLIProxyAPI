@@ -30,22 +30,55 @@ func TestValidatePromptRules_Valid(t *testing.T) {
 	}
 }
 
-func TestValidatePromptRules_RejectsInjectMissingMarkerInContent(t *testing.T) {
+func TestValidatePromptRules_AcceptsEmptyMarkerOnInject(t *testing.T) {
+	// v2: marker is optional. Empty marker means boundary mode.
 	cfg := &Config{
 		PromptRules: []PromptRule{{
-			Name:    "bad",
+			Name:    "boundary-inject",
 			Enabled: true,
 			Target:  "system",
 			Action:  "inject",
-			Content: "no sentinel here",
-			Marker:  "<!-- pr:none -->",
+			Content: "Always answer in JSON.",
+		}},
+	}
+	if err := cfg.ValidatePromptRules(); err != nil {
+		t.Fatalf("empty marker should be valid (boundary mode); got %v", err)
+	}
+}
+
+func TestValidatePromptRules_AcceptsMarkerNotInContent(t *testing.T) {
+	// v2: marker no longer needs to appear inside content. The marker is now
+	// an anchor against the target text, not a sentinel embedded in content.
+	cfg := &Config{
+		PromptRules: []PromptRule{{
+			Name:    "anchor-inject",
+			Enabled: true,
+			Target:  "system",
+			Action:  "inject",
+			Content: " (proxy)",
+			Marker:  "qwen",
+		}},
+	}
+	if err := cfg.ValidatePromptRules(); err != nil {
+		t.Fatalf("marker outside content should be valid; got %v", err)
+	}
+}
+
+func TestValidatePromptRules_RejectsInjectMissingContent(t *testing.T) {
+	cfg := &Config{
+		PromptRules: []PromptRule{{
+			Name:    "no-content",
+			Enabled: true,
+			Target:  "system",
+			Action:  "inject",
+			Content: "",
 		}},
 	}
 	err := cfg.ValidatePromptRules()
 	if err == nil {
-		t.Fatal("expected error when marker is not contained in content")
+		t.Fatal("expected error when content is empty")
 	}
-	if !strings.Contains(err.Error(), "marker must appear inside content") {
+	if !strings.Contains(err.Error(), "content is required") {
 		t.Fatalf("error message lacks expected reason: %v", err)
 	}
 }
@@ -168,11 +201,9 @@ func TestValidatePromptRules_RejectsBadTargetAndAction(t *testing.T) {
 func TestSanitizePromptRules_DropsInvalidAndDuplicates(t *testing.T) {
 	cfg := &Config{
 		PromptRules: []PromptRule{
-			{Name: "ok", Enabled: true, Target: "system", Action: "inject",
-				Content: "<!-- pr:o --> a", Marker: "<!-- pr:o -->"},
-			{Name: "no-marker", Enabled: true, Target: "system", Action: "inject",
-				Content: "no sentinel", Marker: "<!-- pr:x -->"}, // marker not in content
-			{Name: "ok", Enabled: true, Target: "user", Action: "strip", Pattern: "x"}, // duplicate name
+			{Name: "ok", Enabled: true, Target: "system", Action: "inject", Content: "always JSON."},
+			{Name: "no-content", Enabled: true, Target: "system", Action: "inject", Content: ""}, // missing content
+			{Name: "ok", Enabled: true, Target: "user", Action: "strip", Pattern: "x"},           // duplicate name
 			{Name: "bad-regex", Enabled: true, Target: "user", Action: "strip", Pattern: "(unclosed"},
 		},
 	}

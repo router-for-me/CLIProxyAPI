@@ -52,7 +52,11 @@ func (g *geminiPromptFmt) InjectSystem(payload []byte, content, marker, position
 	}
 	field := g.activeSystemField(payload)
 	if field == "" {
-		// Neither variant exists — create the camelCase shape under our root.
+		// Marker mode: no anchor, no synthesis. Boundary mode: create the
+		// camelCase shape under our root with a single text part.
+		if marker != "" {
+			return payload
+		}
 		instruction := map[string]any{
 			"role":  "system",
 			"parts": []map[string]any{{"text": content}},
@@ -69,7 +73,11 @@ func (g *geminiPromptFmt) InjectSystem(payload []byte, content, marker, position
 	}
 	parts := gjson.GetBytes(payload, field+".parts")
 	if !parts.IsArray() {
-		// Replace the whole field with a fresh single-part shape.
+		// Malformed shape — marker mode has no anchor here. Boundary mode
+		// replaces the field with a fresh single-part shape carrying content.
+		if marker != "" {
+			return payload
+		}
 		instruction := map[string]any{
 			"role":  "system",
 			"parts": []map[string]any{{"text": content}},
@@ -84,24 +92,7 @@ func (g *geminiPromptFmt) InjectSystem(payload []byte, content, marker, position
 		}
 		return updated
 	}
-	// Skip if any text part carries the marker.
-	for _, p := range parts.Array() {
-		if p.Get("text").Exists() && containsMarker(p.Get("text").String(), marker) {
-			return payload
-		}
-	}
-	newPart, err := marshalJSONNoEscape(map[string]any{"text": content})
-	if err != nil {
-		return payload
-	}
-	if position == "append" {
-		updated, err := sjson.SetRawBytes(payload, field+".parts.-1", newPart)
-		if err != nil {
-			return payload
-		}
-		return updated
-	}
-	return prependArrayElement(payload, field+".parts", newPart)
+	return blockArrayInject(payload, field+".parts", isGeminiTextPart, newGeminiTextPart, content, marker, position)
 }
 
 func (g *geminiPromptFmt) StripSystem(payload []byte, re *regexp.Regexp) []byte {
@@ -201,27 +192,15 @@ func geminiLastNaturalUserIndex(contents gjson.Result) int {
 
 func (g *geminiPromptFmt) mutateContentParts(payload []byte, idx int, content, marker, position string) []byte {
 	path := fmt.Sprintf("%s.%d.parts", g.prefixedPath("contents"), idx)
-	parts := gjson.GetBytes(payload, path)
-	if !parts.IsArray() {
-		return payload
-	}
-	for _, p := range parts.Array() {
-		if p.Get("text").Exists() && containsMarker(p.Get("text").String(), marker) {
-			return payload
-		}
-	}
-	newPart, err := marshalJSONNoEscape(map[string]any{"text": content})
-	if err != nil {
-		return payload
-	}
-	if position == "append" {
-		updated, err := sjson.SetRawBytes(payload, path+".-1", newPart)
-		if err != nil {
-			return payload
-		}
-		return updated
-	}
-	return prependArrayElement(payload, path, newPart)
+	return blockArrayInject(payload, path, isGeminiTextPart, newGeminiTextPart, content, marker, position)
+}
+
+func isGeminiTextPart(p gjson.Result) bool {
+	return p.Get("text").Exists()
+}
+
+func newGeminiTextPart(content string) ([]byte, error) {
+	return marshalJSONNoEscape(map[string]any{"text": content})
 }
 
 func (g *geminiPromptFmt) stripContentParts(payload []byte, idx int, re *regexp.Regexp) []byte {

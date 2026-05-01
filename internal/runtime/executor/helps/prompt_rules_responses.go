@@ -22,16 +22,20 @@ func (openaiResponsePromptFmt) InjectSystem(payload []byte, content, marker, pos
 	cur := gjson.GetBytes(payload, "instructions")
 	if cur.Exists() && cur.Type == gjson.String {
 		text := cur.String()
-		if containsMarker(text, marker) {
+		newText, mutated := injectIntoText(text, content, marker, position)
+		if !mutated {
 			return payload
 		}
-		updated, err := sjson.SetBytes(payload, "instructions", applyPosition(text, content, position))
+		updated, err := sjson.SetBytes(payload, "instructions", newText)
 		if err != nil {
 			return payload
 		}
 		return updated
 	}
-	// Field absent — create with content alone.
+	// Field absent. Marker mode no-ops; boundary mode creates with content alone.
+	if marker != "" {
+		return payload
+	}
 	updated, err := sjson.SetBytes(payload, "instructions", content)
 	if err != nil {
 		return payload
@@ -66,10 +70,11 @@ func (openaiResponsePromptFmt) InjectLastUser(payload []byte, content, marker, p
 	}
 	if input.Type == gjson.String {
 		text := input.String()
-		if containsMarker(text, marker) {
+		newText, mutated := injectIntoText(text, content, marker, position)
+		if !mutated {
 			return payload
 		}
-		updated, err := sjson.SetBytes(payload, "input", applyPosition(text, content, position))
+		updated, err := sjson.SetBytes(payload, "input", newText)
 		if err != nil {
 			return payload
 		}
@@ -150,10 +155,11 @@ func responsesMutateInputItem(payload []byte, idx int, content, marker, position
 	c := gjson.GetBytes(payload, path)
 	if c.Type == gjson.String {
 		text := c.String()
-		if containsMarker(text, marker) {
+		newText, mutated := injectIntoText(text, content, marker, position)
+		if !mutated {
 			return payload
 		}
-		updated, err := sjson.SetBytes(payload, path, applyPosition(text, content, position))
+		updated, err := sjson.SetBytes(payload, path, newText)
 		if err != nil {
 			return payload
 		}
@@ -162,24 +168,16 @@ func responsesMutateInputItem(payload []byte, idx int, content, marker, position
 	if !c.IsArray() {
 		return payload
 	}
-	for _, block := range c.Array() {
-		bt := block.Get("type").String()
-		if (bt == "input_text" || bt == "text") && containsMarker(block.Get("text").String(), marker) {
-			return payload
-		}
-	}
-	newBlock, err := marshalJSONNoEscape(map[string]any{"type": "input_text", "text": content})
-	if err != nil {
-		return payload
-	}
-	if position == "append" {
-		updated, err := sjson.SetRawBytes(payload, path+".-1", newBlock)
-		if err != nil {
-			return payload
-		}
-		return updated
-	}
-	return prependArrayElement(payload, path, newBlock)
+	return blockArrayInject(payload, path, isResponsesTextBlock, newResponsesTextBlock, content, marker, position)
+}
+
+func isResponsesTextBlock(b gjson.Result) bool {
+	t := b.Get("type").String()
+	return t == "input_text" || t == "text"
+}
+
+func newResponsesTextBlock(content string) ([]byte, error) {
+	return marshalJSONNoEscape(map[string]any{"type": "input_text", "text": content})
 }
 
 func responsesStripInputItem(payload []byte, idx int, re *regexp.Regexp) []byte {
