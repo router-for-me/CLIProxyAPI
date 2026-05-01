@@ -16,11 +16,21 @@ import (
 // and restricts matches to the given protocol when supplied. Defaults are checked
 // against the original payload when provided. requestedModel carries the client-visible
 // model name before alias resolution so payload rules can target aliases precisely.
-func ApplyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string, payload, original []byte, requestedModel string) []byte {
+// requestPath is the inbound HTTP request path (when available) used for endpoint-scoped gates.
+func ApplyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string, payload, original []byte, requestedModel string, requestPath string) []byte {
 	if cfg == nil || len(payload) == 0 {
 		return payload
 	}
 	out := payload
+
+	// Apply disable-image-generation filtering before payload rules so config payload
+	// overrides can explicitly re-enable image_generation when desired.
+	if cfg.DisableImageGeneration != config.DisableImageGenerationOff {
+		if cfg.DisableImageGeneration != config.DisableImageGenerationChat || !isImagesEndpointRequestPath(requestPath) {
+			out = removeToolTypeFromPayloadWithRoot(out, root, "image_generation")
+			out = removeToolChoiceFromPayloadWithRoot(out, root, "image_generation")
+		}
+	}
 
 	rules := cfg.Payload
 	hasPayloadRules := len(rules.Default) != 0 || len(rules.DefaultRaw) != 0 || len(rules.Override) != 0 || len(rules.OverrideRaw) != 0 || len(rules.Filter) != 0
@@ -148,11 +158,25 @@ func ApplyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string
 			}
 		}
 	}
-
-	if cfg.DisableImageGeneration {
-		out = removeToolTypeFromPayloadWithRoot(out, root, "image_generation")
-	}
 	return out
+}
+
+func isImagesEndpointRequestPath(path string) bool {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return false
+	}
+	if path == "/v1/images/generations" || path == "/v1/images/edits" {
+		return true
+	}
+	// Be tolerant of prefix routers that may report a longer matched route.
+	if strings.HasSuffix(path, "/v1/images/generations") || strings.HasSuffix(path, "/v1/images/edits") {
+		return true
+	}
+	if strings.HasSuffix(path, "/images/generations") || strings.HasSuffix(path, "/images/edits") {
+		return true
+	}
+	return false
 }
 
 func payloadModelRulesMatch(rules []config.PayloadModelRule, protocol string, models []string) bool {
@@ -242,6 +266,55 @@ func removeToolTypeFromPayloadWithRoot(payload []byte, root string, toolType str
 	return removeToolTypeFromToolsArray(payload, toolsPath, toolType)
 }
 
+func removeToolChoiceFromPayloadWithRoot(payload []byte, root string, toolType string) []byte {
+	if len(payload) == 0 {
+		return payload
+	}
+	toolType = strings.TrimSpace(toolType)
+	if toolType == "" {
+		return payload
+	}
+	toolChoicePath := buildPayloadPath(root, "tool_choice")
+	return removeToolChoiceFromPayload(payload, toolChoicePath, toolType)
+}
+
+func removeToolChoiceFromPayload(payload []byte, toolChoicePath string, toolType string) []byte {
+	choice := gjson.GetBytes(payload, toolChoicePath)
+	if !choice.Exists() {
+		return payload
+	}
+	if choice.Type == gjson.String {
+		if strings.EqualFold(strings.TrimSpace(choice.String()), toolType) {
+			updated, errDel := sjson.DeleteBytes(payload, toolChoicePath)
+			if errDel == nil {
+				return updated
+			}
+		}
+		return payload
+	}
+	if choice.Type != gjson.JSON {
+		return payload
+	}
+	choiceType := strings.TrimSpace(choice.Get("type").String())
+	if strings.EqualFold(choiceType, toolType) {
+		updated, errDel := sjson.DeleteBytes(payload, toolChoicePath)
+		if errDel == nil {
+			return updated
+		}
+		return payload
+	}
+	if strings.EqualFold(choiceType, "tool") {
+		name := strings.TrimSpace(choice.Get("name").String())
+		if strings.EqualFold(name, toolType) {
+			updated, errDel := sjson.DeleteBytes(payload, toolChoicePath)
+			if errDel == nil {
+				return updated
+			}
+		}
+	}
+	return payload
+}
+
 func removeToolTypeFromToolsArray(payload []byte, toolsPath string, toolType string) []byte {
 	tools := gjson.GetBytes(payload, toolsPath)
 	if !tools.Exists() || !tools.IsArray() {
@@ -314,6 +387,24 @@ func PayloadRequestedModel(opts cliproxyexecutor.Options, fallback string) strin
 		return trimmed
 	default:
 		return fallback
+	}
+}
+
+func PayloadRequestPath(opts cliproxyexecutor.Options) string {
+	if len(opts.Metadata) == 0 {
+		return ""
+	}
+	raw, ok := opts.Metadata[cliproxyexecutor.RequestPathMetadataKey]
+	if !ok || raw == nil {
+		return ""
+	}
+	switch v := raw.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	case []byte:
+		return strings.TrimSpace(string(v))
+	default:
+		return ""
 	}
 }
 

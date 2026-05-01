@@ -187,6 +187,10 @@ Ready-to-use cross-platform quota inspector for CLIProxyAPI, supporting per-acco
 
 Standalone persistence and visualization service for CLIProxyAPI, with periodic data sync, SQLite storage, aggregate APIs, and a built-in dashboard for usage and statistics.
 
+### [CodexCliPlus](https://github.com/C4AL/CodexCliPlus)
+
+Windows-focused, local-first desktop management platform for Codex CLI built on CLIProxyAPI, focused on simplifying local setup, account and runtime management, and providing a more complete Codex CLI experience for local users.
+
 > [!NOTE]  
 > If you developed a project based on CLIProxyAPI, please open a PR to add it to this list.
 
