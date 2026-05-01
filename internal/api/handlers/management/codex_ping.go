@@ -160,9 +160,6 @@ func (h *Handler) sendCodexPing(ctx context.Context, auth *coreauth.Auth) (codex
 			continue
 		}
 		stream.Write(chunk.Payload)
-		if !bytes.HasSuffix(chunk.Payload, []byte("\n")) {
-			stream.WriteByte('\n')
-		}
 	}
 
 	message, usage, completed := parseCodexPingStream(stream.Bytes())

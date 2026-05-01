@@ -18,6 +18,7 @@ import (
 
 type codexPingTestExecutor struct {
 	body     string
+	chunks   []string
 	err      error
 	lastAuth *coreauth.Auth
 	lastReq  cliproxyexecutor.Request
@@ -37,8 +38,14 @@ func (e *codexPingTestExecutor) ExecuteStream(_ context.Context, auth *coreauth.
 	e.lastAuth = auth
 	e.lastReq = req
 	e.lastOpts = opts
-	ch := make(chan cliproxyexecutor.StreamChunk, 1)
-	ch <- cliproxyexecutor.StreamChunk{Payload: []byte(e.body)}
+	chunks := e.chunks
+	if len(chunks) == 0 {
+		chunks = []string{e.body}
+	}
+	ch := make(chan cliproxyexecutor.StreamChunk, len(chunks))
+	for _, chunk := range chunks {
+		ch <- cliproxyexecutor.StreamChunk{Payload: []byte(chunk)}
+	}
 	close(ch)
 	return &cliproxyexecutor.StreamResult{Chunks: ch}, nil
 }
@@ -222,6 +229,36 @@ func TestParseCodexPingStreamFallbackMessageAndUsage(t *testing.T) {
 	}
 	if usage.InputTokens != 4 || usage.CachedInputTokens != 1 || usage.OutputTokens != 2 || usage.TotalTokens != 6 {
 		t.Fatalf("usage = %+v", usage)
+	}
+}
+
+func TestCodexPingPreservesSplitStreamChunks(t *testing.T) {
+	exec := &codexPingTestExecutor{chunks: []string{
+		`data: {"type":"response.output_text.delta","delta":"Po`,
+		`ng!"}` + "\n\n",
+		`data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}}` + "\n\n",
+	}}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(exec)
+	auth := &coreauth.Auth{
+		ID:         "codex.json",
+		Provider:   "codex",
+		Attributes: map[string]string{"path": "/tmp/codex.json"},
+		Metadata:   map[string]any{"access_token": "token"},
+	}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("Register() error = %v", errRegister)
+	}
+
+	response, errPing := (&Handler{authManager: manager}).sendCodexPing(context.Background(), auth)
+	if errPing != nil {
+		t.Fatalf("sendCodexPing() error = %v", errPing)
+	}
+	if response.Message != "Pong!" {
+		t.Fatalf("message = %q, want Pong!", response.Message)
+	}
+	if response.Usage.TotalTokens != 3 {
+		t.Fatalf("usage = %+v", response.Usage)
 	}
 }
 
