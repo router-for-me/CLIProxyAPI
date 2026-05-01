@@ -17,6 +17,7 @@ import (
 // Known Amp tool names used to identify features.
 const (
 	HandoffToolName = "create_handoff_context"
+	TitlingToolName = "set_title"
 )
 
 // RequestFingerprint captures the per-request features a mapping condition
@@ -36,13 +37,19 @@ type RequestFingerprint struct {
 // Feature returns the canonical Amp feature alias inferred from the
 // fingerprint, or an empty string if no high-level feature can be deduced.
 //
-// Currently only "handoff" is inferred. Other Amp features (search,
-// look-at, oracle, painter, titling, ...) can still be matched at the
-// configuration level using ToolChoice / UserSuffix when the user knows
-// the relevant fingerprint.
+// Inferred via forced tool name (the most reliable signal Amp emits):
+//   - "handoff": Amp thread handoff. Tool: create_handoff_context.
+//   - "titling": Amp thread title generation. Tool: set_title.
+//
+// Other Amp features (search subagent, look-at, oracle, painter, review,
+// ...) do not force a unique tool. Match those at the configuration level
+// using ToolChoice / UserSuffix when their fingerprint is known.
 func (f RequestFingerprint) Feature() string {
-	if strings.EqualFold(f.ToolChoice, HandoffToolName) {
+	switch {
+	case strings.EqualFold(f.ToolChoice, HandoffToolName):
 		return "handoff"
+	case strings.EqualFold(f.ToolChoice, TitlingToolName):
+		return "titling"
 	}
 	// User-suffix based detection (cheap, anchored on Amp's actual prompt).
 	lower := strings.ToLower(f.LastUserText)

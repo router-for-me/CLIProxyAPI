@@ -7,6 +7,25 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 )
 
+func TestExtractFingerprint_Titling(t *testing.T) {
+	// Real Amp titling request observed: Anthropic Claude Haiku with
+	// tool_choice forcing set_title, message wrapped in <message>...</message>.
+	body := []byte(`{
+		"model":"claude-haiku-4-5-20251001",
+		"max_tokens":60,
+		"system":"You are an assistant that generates short, descriptive titles (maximum 5 words) ...",
+		"messages":[{"role":"user","content":"<message>say hi in one word</message>"}],
+		"tool_choice":{"type":"tool","name":"set_title","disable_parallel_tool_use":true}
+	}`)
+	fp := ExtractFingerprint(body)
+	if fp.ToolChoice != "set_title" {
+		t.Fatalf("ToolChoice = %q", fp.ToolChoice)
+	}
+	if got := fp.Feature(); got != "titling" {
+		t.Fatalf("Feature = %q, want titling", got)
+	}
+}
+
 func TestExtractFingerprint_AnthropicHandoff(t *testing.T) {
 	body := []byte(`{
 		"model":"gemini-3-flash-preview",
