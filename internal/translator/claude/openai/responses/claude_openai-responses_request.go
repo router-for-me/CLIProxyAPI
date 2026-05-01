@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math/big"
+	"regexp"
 	"strings"
 
 	"github.com/google/uuid"
@@ -20,6 +21,102 @@ var (
 	account = ""
 	session = ""
 )
+
+const minEmbeddedImageDataBytes = 512
+
+var embeddedImageDataURLPattern = regexp.MustCompile(`(?i)data:(image/[a-z0-9.+-]+);base64,([A-Za-z0-9+/=_-]+)`)
+
+func makeClaudeTextPart(text string) string {
+	contentPart := []byte(`{"type":"text","text":""}`)
+	contentPart, _ = sjson.SetBytes(contentPart, "text", text)
+	return string(contentPart)
+}
+
+func makeClaudeImagePart(mediaType, data string) string {
+	contentPart := []byte(`{"type":"image","source":{"type":"base64","media_type":"","data":""}}`)
+	contentPart, _ = sjson.SetBytes(contentPart, "source.media_type", mediaType)
+	contentPart, _ = sjson.SetBytes(contentPart, "source.data", data)
+	return string(contentPart)
+}
+
+func claudeTextPartsWithEmbeddedImages(text string) ([]string, bool) {
+	if text == "" || !strings.Contains(strings.ToLower(text), "data:image/") {
+		return nil, false
+	}
+
+	var parts []string
+	cursor := 0
+	searchStart := 0
+	extractedImage := false
+	for searchStart < len(text) {
+		match := embeddedImageDataURLPattern.FindStringSubmatchIndex(text[searchStart:])
+		if match == nil {
+			break
+		}
+
+		start := searchStart + match[0]
+		end := searchStart + match[1]
+		mediaType := text[searchStart+match[2] : searchStart+match[3]]
+		data := text[searchStart+match[4] : searchStart+match[5]]
+		if !shouldExtractEmbeddedImageData(mediaType, data) {
+			searchStart = end
+			continue
+		}
+
+		textEnd := start
+		imageEnd := end
+		if wrapperStart, wrapperEnd, ok := markdownImageWrapperBounds(text, cursor, start, end); ok {
+			textEnd = wrapperStart
+			imageEnd = wrapperEnd
+		}
+
+		appendClaudeTextPart(&parts, text[cursor:textEnd])
+		parts = append(parts, makeClaudeImagePart(mediaType, data))
+		cursor = imageEnd
+		searchStart = imageEnd
+		extractedImage = true
+	}
+
+	if !extractedImage {
+		return nil, false
+	}
+	appendClaudeTextPart(&parts, text[cursor:])
+	return parts, true
+}
+
+func shouldExtractEmbeddedImageData(mediaType, data string) bool {
+	if !strings.HasPrefix(strings.ToLower(mediaType), "image/") {
+		return false
+	}
+	if len(data) < minEmbeddedImageDataBytes {
+		return false
+	}
+	return len(data)%4 != 1
+}
+
+func markdownImageWrapperBounds(text string, cursor, start, end int) (int, int, bool) {
+	prefix := text[cursor:start]
+	openRelative := strings.LastIndex(prefix, "![")
+	if openRelative < 0 {
+		return start, end, false
+	}
+	open := cursor + openRelative
+	wrapperPrefix := text[open:start]
+	if strings.ContainsAny(wrapperPrefix, "\r\n") || !strings.HasSuffix(wrapperPrefix, "](") {
+		return start, end, false
+	}
+	if end >= len(text) || text[end] != ')' {
+		return start, end, false
+	}
+	return open, end + 1, true
+}
+
+func appendClaudeTextPart(parts *[]string, text string) {
+	if text == "" {
+		return
+	}
+	*parts = append(*parts, makeClaudeTextPart(text))
+}
 
 // ConvertOpenAIResponsesRequestToClaude transforms an OpenAI Responses API request
 // into a Claude Messages API request using only gjson/sjson for JSON handling.
@@ -62,7 +159,7 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 			supportsMax := supportsAdaptive && thinking.HasLevel(mi.Thinking.Levels, string(thinking.LevelMax))
 
 			// Claude 4.6 supports adaptive thinking with output_config.effort.
-			// MapToClaudeEffort normalizes levels (e.g. minimal→low, xhigh→high) to avoid
+			// MapToClaudeEffort normalizes levels (e.g. minimal -> low, xhigh -> high) to avoid
 			// validation errors since validate treats same-provider unsupported levels as errors.
 			if supportsAdaptive {
 				switch effort {
@@ -192,10 +289,19 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 						case "input_text", "output_text":
 							if t := part.Get("text"); t.Exists() {
 								txt := t.String()
-								textAggregate.WriteString(txt)
-								contentPart := []byte(`{"type":"text","text":""}`)
-								contentPart, _ = sjson.SetBytes(contentPart, "text", txt)
-								partsJSON = append(partsJSON, string(contentPart))
+								if ptype == "input_text" {
+									textParts, extractedImage := claudeTextPartsWithEmbeddedImages(txt)
+									if extractedImage {
+										partsJSON = append(partsJSON, textParts...)
+										hasImage = true
+									} else {
+										textAggregate.WriteString(txt)
+										partsJSON = append(partsJSON, makeClaudeTextPart(txt))
+									}
+								} else {
+									textAggregate.WriteString(txt)
+									partsJSON = append(partsJSON, makeClaudeTextPart(txt))
+								}
 							}
 							if ptype == "input_text" {
 								role = "user"
@@ -265,7 +371,18 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 						return true
 					})
 				} else if parts.Type == gjson.String {
-					textAggregate.WriteString(parts.String())
+					txt := parts.String()
+					if strings.EqualFold(item.Get("role").String(), "user") {
+						textParts, extractedImage := claudeTextPartsWithEmbeddedImages(txt)
+						if extractedImage {
+							partsJSON = append(partsJSON, textParts...)
+							hasImage = true
+						} else {
+							textAggregate.WriteString(txt)
+						}
+					} else {
+						textAggregate.WriteString(txt)
+					}
 				}
 
 				// Fallback to given role if content types not decisive
@@ -327,9 +444,17 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 				// Map to user tool_result
 				callID := item.Get("call_id").String()
 				outputStr := item.Get("output").String()
+				textParts, extractedImage := claudeTextPartsWithEmbeddedImages(outputStr)
 				toolResult := []byte(`{"type":"tool_result","tool_use_id":"","content":""}`)
 				toolResult, _ = sjson.SetBytes(toolResult, "tool_use_id", callID)
-				toolResult, _ = sjson.SetBytes(toolResult, "content", outputStr)
+				if extractedImage {
+					toolResult, _ = sjson.SetRawBytes(toolResult, "content", []byte("[]"))
+					for _, textPart := range textParts {
+						toolResult, _ = sjson.SetRawBytes(toolResult, "content.-1", []byte(textPart))
+					}
+				} else {
+					toolResult, _ = sjson.SetBytes(toolResult, "content", outputStr)
+				}
 
 				usr := []byte(`{"role":"user","content":[]}`)
 				usr, _ = sjson.SetRawBytes(usr, "content.-1", toolResult)
@@ -343,17 +468,33 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 	if tools := root.Get("tools"); tools.Exists() && tools.IsArray() {
 		toolsJSON := []byte("[]")
 		tools.ForEach(func(_, tool gjson.Result) bool {
-			tJSON := []byte(`{"name":"","description":"","input_schema":{}}`)
-			if n := tool.Get("name"); n.Exists() {
-				tJSON, _ = sjson.SetBytes(tJSON, "name", n.String())
+			name := strings.TrimSpace(tool.Get("name").String())
+			if name == "" {
+				name = strings.TrimSpace(tool.Get("function.name").String())
 			}
-			if d := tool.Get("description"); d.Exists() {
-				tJSON, _ = sjson.SetBytes(tJSON, "description", d.String())
+			if name == "" {
+				return true
 			}
 
-			if params := tool.Get("parameters"); params.Exists() {
+			tJSON := []byte(`{"name":"","description":"","input_schema":{}}`)
+			tJSON, _ = sjson.SetBytes(tJSON, "name", name)
+			description := strings.TrimSpace(tool.Get("description").String())
+			if description == "" {
+				description = strings.TrimSpace(tool.Get("function.description").String())
+			}
+			if description != "" {
+				tJSON, _ = sjson.SetBytes(tJSON, "description", description)
+			}
+
+			if params := tool.Get("input_schema"); params.Exists() {
+				tJSON, _ = sjson.SetRawBytes(tJSON, "input_schema", []byte(params.Raw))
+			} else if params = tool.Get("parameters"); params.Exists() {
 				tJSON, _ = sjson.SetRawBytes(tJSON, "input_schema", []byte(params.Raw))
 			} else if params = tool.Get("parametersJsonSchema"); params.Exists() {
+				tJSON, _ = sjson.SetRawBytes(tJSON, "input_schema", []byte(params.Raw))
+			} else if params = tool.Get("function.parameters"); params.Exists() {
+				tJSON, _ = sjson.SetRawBytes(tJSON, "input_schema", []byte(params.Raw))
+			} else if params = tool.Get("function.parametersJsonSchema"); params.Exists() {
 				tJSON, _ = sjson.SetRawBytes(tJSON, "input_schema", []byte(params.Raw))
 			}
 
