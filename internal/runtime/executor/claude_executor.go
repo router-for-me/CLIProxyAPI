@@ -1855,13 +1855,13 @@ func restoreClaudeNormalizedToolNamesInResponse(body []byte, originalByNormalize
 			name := part.Get("name").String()
 			if originalName, ok := renamedToolName(name, originalByNormalized); ok {
 				path := fmt.Sprintf("content.%d.name", index.Int())
-				body, _ = sjson.SetBytes(body, path, originalName)
+				body = setClaudeRestoredToolName(body, path, originalName)
 			}
 		case "tool_reference":
 			toolName := part.Get("tool_name").String()
 			if originalName, ok := renamedToolName(toolName, originalByNormalized); ok {
 				path := fmt.Sprintf("content.%d.tool_name", index.Int())
-				body, _ = sjson.SetBytes(body, path, originalName)
+				body = setClaudeRestoredToolName(body, path, originalName)
 			}
 		case "tool_result":
 			nestedContent := part.Get("content")
@@ -1873,7 +1873,7 @@ func restoreClaudeNormalizedToolNamesInResponse(body []byte, originalByNormalize
 					nestedToolName := nestedPart.Get("tool_name").String()
 					if originalName, ok := renamedToolName(nestedToolName, originalByNormalized); ok {
 						nestedPath := fmt.Sprintf("content.%d.content.%d.tool_name", index.Int(), nestedIndex.Int())
-						body, _ = sjson.SetBytes(body, nestedPath, originalName)
+						body = setClaudeRestoredToolName(body, nestedPath, originalName)
 					}
 					return true
 				})
@@ -1882,6 +1882,15 @@ func restoreClaudeNormalizedToolNamesInResponse(body []byte, originalByNormalize
 		return true
 	})
 	return body
+}
+
+func setClaudeRestoredToolName(body []byte, path, originalName string) []byte {
+	updatedBody, err := sjson.SetBytes(body, path, originalName)
+	if err != nil {
+		log.WithError(err).WithField("path", path).Warn("failed to restore Claude tool name")
+		return body
+	}
+	return updatedBody
 }
 
 func restoreClaudeNormalizedToolNamesInStreamLine(line []byte, originalByNormalized map[string]string) []byte {
@@ -1943,7 +1952,12 @@ func restoreClaudeToolNamesInErrorBody(body []byte, prefix string, originalByNor
 		}
 		updated := restoreClaudeToolNamesInErrorText(value.String(), prefix, originalByNormalized)
 		if updated != value.String() {
-			body, _ = sjson.SetBytes(body, path, updated)
+			updatedBody, err := sjson.SetBytes(body, path, updated)
+			if err != nil {
+				log.WithError(err).WithField("path", path).Warn("failed to restore Claude tool name in error body")
+				continue
+			}
+			body = updatedBody
 		}
 	}
 	return body
