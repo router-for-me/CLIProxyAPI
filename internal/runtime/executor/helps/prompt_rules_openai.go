@@ -1,7 +1,6 @@
 package helps
 
 import (
-	"bytes"
 	"fmt"
 	"regexp"
 	"strings"
@@ -240,24 +239,3 @@ func openaiStripMessageContent(payload []byte, idx int, re *regexp.Regexp) []byt
 	return payload
 }
 
-// prependArrayElement inserts rawElement at index 0 of the JSON array at path.
-// sjson does not support insert-at-N natively, so we read+rebuild the array.
-func prependArrayElement(payload []byte, path string, rawElement []byte) []byte {
-	arr := gjson.GetBytes(payload, path)
-	if !arr.IsArray() {
-		return payload
-	}
-	var b bytes.Buffer
-	b.WriteByte('[')
-	b.Write(rawElement)
-	for _, item := range arr.Array() {
-		b.WriteByte(',')
-		b.WriteString(item.Raw)
-	}
-	b.WriteByte(']')
-	updated, err := sjson.SetRawBytes(payload, path, b.Bytes())
-	if err != nil {
-		return payload
-	}
-	return updated
-}

@@ -2,8 +2,8 @@ package management
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -116,8 +116,11 @@ func (h *Handler) DeletePromptRule(c *gin.Context) {
 		return
 	}
 	if idxStr := strings.TrimSpace(c.Query("index")); idxStr != "" {
-		var idx int
-		if _, err := fmt.Sscanf(idxStr, "%d", &idx); err == nil && idx >= 0 && idx < len(h.cfg.PromptRules) {
+		// strconv.Atoi rejects trailing non-digit junk ("123foo") which
+		// fmt.Sscanf silently accepts as 123 — important here because we
+		// use the parsed index to splice the slice without further bounds
+		// checking on the raw string.
+		if idx, err := strconv.Atoi(idxStr); err == nil && idx >= 0 && idx < len(h.cfg.PromptRules) {
 			h.cfg.PromptRules = append(h.cfg.PromptRules[:idx], h.cfg.PromptRules[idx+1:]...)
 			helps.UpdatePromptRulesSnapshot(h.cfg.PromptRules)
 			h.persistLocked(c)

@@ -408,6 +408,29 @@ func blockArrayInject(payload []byte, path string, isTextBlock func(gjson.Result
 	return updated
 }
 
+// prependArrayElement inserts rawElement at index 0 of the JSON array at path.
+// sjson does not support insert-at-N natively, so we read+rebuild the array.
+// Shared across per-format handlers and blockArrayInject in this file.
+func prependArrayElement(payload []byte, path string, rawElement []byte) []byte {
+	arr := gjson.GetBytes(payload, path)
+	if !arr.IsArray() {
+		return payload
+	}
+	var b bytes.Buffer
+	b.WriteByte('[')
+	b.Write(rawElement)
+	for _, item := range arr.Array() {
+		b.WriteByte(',')
+		b.WriteString(item.Raw)
+	}
+	b.WriteByte(']')
+	updated, err := sjson.SetRawBytes(payload, path, b.Bytes())
+	if err != nil {
+		return payload
+	}
+	return updated
+}
+
 // hasNonEmptyText returns true when the given gjson.Result has a string-typed
 // child at field whose trimmed value is non-empty. Used by per-format locators
 // to decide whether a content block / part counts as natural-language text.
