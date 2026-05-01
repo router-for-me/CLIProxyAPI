@@ -390,6 +390,47 @@ func TestConvertClaudeRequestToOpenAI_SystemMessageScenarios(t *testing.T) {
 	}
 }
 
+func TestConvertClaudeRequestToOpenAI_ToolSchemaAddsMissingObjectProperties(t *testing.T) {
+	inputJSON := `{
+		"model": "claude-3-opus",
+		"tools": [
+			{
+				"name": "empty_params",
+				"description": "No args",
+				"input_schema": {"type": "object"}
+			},
+			{
+				"name": "nested_params",
+				"description": "Nested args",
+				"input_schema": {
+					"type": "object",
+					"properties": {
+						"nested": {"type": "object"},
+						"items": {
+							"type": "array",
+							"items": {"type": "object"}
+						}
+					}
+				}
+			}
+		],
+		"messages": [{"role": "user", "content": "hello"}]
+	}`
+
+	result := ConvertClaudeRequestToOpenAI("test-model", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+
+	if got := resultJSON.Get("tools.0.function.parameters.properties"); !got.Exists() || !got.IsObject() {
+		t.Fatalf("root object properties missing or invalid: %s", resultJSON.Get("tools.0.function.parameters").Raw)
+	}
+	if got := resultJSON.Get("tools.1.function.parameters.properties.nested.properties"); !got.Exists() || !got.IsObject() {
+		t.Fatalf("nested object properties missing or invalid: %s", resultJSON.Get("tools.1.function.parameters").Raw)
+	}
+	if got := resultJSON.Get("tools.1.function.parameters.properties.items.items.properties"); !got.Exists() || !got.IsObject() {
+		t.Fatalf("array item object properties missing or invalid: %s", resultJSON.Get("tools.1.function.parameters").Raw)
+	}
+}
+
 func TestConvertClaudeRequestToOpenAI_ToolResultOrderAndContent(t *testing.T) {
 	inputJSON := `{
 		"model": "claude-3-opus",
@@ -694,5 +735,74 @@ func TestConvertClaudeRequestToOpenAI_AssistantThinkingToolUseThinkingSplit(t *t
 	// Should have combined reasoning_content from both thinking blocks
 	if got := assistantMsg.Get("reasoning_content").String(); got != "t1\n\nt2" {
 		t.Fatalf("Expected reasoning_content %q, got %q", "t1\n\nt2", got)
+	}
+}
+
+func TestConvertClaudeRequestToOpenAI_PreservesToolResultCacheControl(t *testing.T) {
+	input := []byte(`{
+		"model":"claude-3-opus",
+		"messages":[
+			{"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"do_work","input":{}}]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":"tool output","cache_control":{"type":"ephemeral","ttl":"1h"}}]}
+		]
+	}`)
+
+	out := ConvertClaudeRequestToOpenAI("gpt-test", input, false)
+
+	if got := gjson.GetBytes(out, "messages.1.cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("tool_result cache_control.type = %q, want ephemeral; output=%s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "messages.1.cache_control.ttl").String(); got != "1h" {
+		t.Fatalf("tool_result cache_control.ttl = %q, want 1h; output=%s", got, string(out))
+	}
+}
+
+func TestConvertClaudeRequestToOpenAI_PreservesCacheControl(t *testing.T) {
+	input := []byte(`{
+		"model":"claude-3-opus",
+		"system":[{"type":"text","text":"stable system","cache_control":{"type":"ephemeral","ttl":"1h"}}],
+		"messages":[{"role":"user","content":[{"type":"text","text":"hello","cache_control":{"type":"ephemeral"}}]}],
+		"tools":[{"name":"probe_tool","description":"probe","input_schema":{"type":"object"},"cache_control":{"type":"ephemeral","ttl":"1h"}}]
+	}`)
+
+	out := ConvertClaudeRequestToOpenAI("gpt-test", input, false)
+
+	if got := gjson.GetBytes(out, "messages.0.content.0.cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("system cache_control.type = %q, want ephemeral; output=%s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.0.cache_control.ttl").String(); got != "1h" {
+		t.Fatalf("system cache_control.ttl = %q, want 1h; output=%s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "messages.1.content.0.cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("message cache_control.type = %q, want ephemeral; output=%s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "tools.0.cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("tool cache_control.type = %q, want ephemeral; output=%s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "tools.0.cache_control.ttl").String(); got != "1h" {
+		t.Fatalf("tool cache_control.ttl = %q, want 1h; output=%s", got, string(out))
+	}
+}
+
+func TestConvertClaudeRequestToOpenAI_SkipsBillingHeaderSystemBlock(t *testing.T) {
+	input := []byte(`{
+		"model":"claude-3-opus",
+		"system":[
+			{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.114.e2a; cc_entrypoint=cli; cch=abcde;"},
+			{"type":"text","text":"stable instructions","cache_control":{"type":"ephemeral","ttl":"1h"}}
+		],
+		"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]
+	}`)
+
+	out := ConvertClaudeRequestToOpenAI("gpt-test", input, false)
+
+	if got := gjson.GetBytes(out, "messages.0.content.#").Int(); got != 1 {
+		t.Fatalf("system content count = %d, want 1; output=%s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.0.text").String(); got != "stable instructions" {
+		t.Fatalf("system content text = %q, want stable instructions; output=%s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.0.cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("system cache_control.type = %q, want ephemeral; output=%s", got, string(out))
 	}
 }
