@@ -276,19 +276,6 @@ func hasNonEmptyText(r gjson.Result, field string) bool {
 	return strings.TrimSpace(t.String()) != ""
 }
 
-// isImagesEndpointRequestPath reports whether the inbound HTTP path targets the
-// image generation/edit endpoints. Those endpoints synthesize multimodal
-// payloads internally and are excluded from prompt-rule mutations by default.
-//
-// This is a local helper to avoid coupling to the disable-image-generation
-// feature on feat/logging which is not yet on main.
-func isImagesEndpointRequestPath(path string) bool {
-	p := strings.TrimSpace(path)
-	if p == "" {
-		return false
-	}
-	return strings.HasSuffix(p, "/v1/images/generations") ||
-		strings.HasSuffix(p, "/v1/images/edits") ||
-		strings.HasSuffix(p, "/images/generations") ||
-		strings.HasSuffix(p, "/images/edits")
-}
+// isImagesEndpointRequestPath is provided by payload_helpers.go (in this same
+// package) as part of the disable-image-generation tri-state feature. We share
+// that helper rather than re-declaring it locally.
