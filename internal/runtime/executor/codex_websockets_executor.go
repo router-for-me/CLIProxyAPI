@@ -92,10 +92,23 @@ type codexWebsocketRead struct {
 	err     error
 }
 
-func (s *codexWebsocketSession) setActive(ch chan codexWebsocketRead) {
-	if s == nil {
+func trySendCodexWebsocketRead(ch chan codexWebsocketRead, done <-chan struct{}, ev codexWebsocketRead) {
+	if ch == nil {
 		return
 	}
+	select {
+	case ch <- ev:
+	case <-done:
+	}
+}
+
+func (s *codexWebsocketSession) setActive(ch chan codexWebsocketRead) <-chan struct{} {
+	if s == nil {
+		return nil
+	}
+	// This helper only takes activeMu to avoid conflicting with the
+	// connMu -> activeMu lock ordering used elsewhere.
+	// Do not call it while holding connMu to avoid future lock inversion.
 	s.activeMu.Lock()
 	if s.activeCancel != nil {
 		s.activeCancel()
@@ -108,13 +121,18 @@ func (s *codexWebsocketSession) setActive(ch chan codexWebsocketRead) {
 		s.activeDone = activeCtx.Done()
 		s.activeCancel = activeCancel
 	}
+	done := s.activeDone
 	s.activeMu.Unlock()
+	return done
 }
 
 func (s *codexWebsocketSession) clearActive(ch chan codexWebsocketRead) {
 	if s == nil {
 		return
 	}
+	// This helper only takes activeMu to avoid conflicting with the
+	// connMu -> activeMu lock ordering used elsewhere.
+	// Do not call it while holding connMu to avoid future lock inversion.
 	s.activeMu.Lock()
 	if s.activeCh == ch {
 		s.activeCh = nil
@@ -125,6 +143,34 @@ func (s *codexWebsocketSession) clearActive(ch chan codexWebsocketRead) {
 		s.activeDone = nil
 	}
 	s.activeMu.Unlock()
+}
+
+func (s *codexWebsocketSession) isCurrentConn(conn *websocket.Conn) bool {
+	if s == nil || conn == nil {
+		return false
+	}
+	s.connMu.Lock()
+	current := s.conn
+	s.connMu.Unlock()
+	return current == conn
+}
+
+func (s *codexWebsocketSession) activeSnapshotForCurrentConn(conn *websocket.Conn) (chan codexWebsocketRead, <-chan struct{}, bool) {
+	if s == nil || conn == nil {
+		return nil, nil, false
+	}
+	// Keep the lock order fixed as connMu -> activeMu.
+	s.connMu.Lock()
+	if s.conn != conn {
+		s.connMu.Unlock()
+		return nil, nil, false
+	}
+	s.activeMu.Lock()
+	ch := s.activeCh
+	done := s.activeDone
+	s.activeMu.Unlock()
+	s.connMu.Unlock()
+	return ch, done, true
 }
 
 func (s *codexWebsocketSession) writeMessage(conn *websocket.Conn, msgType int, payload []byte) error {
@@ -265,9 +311,10 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	}
 
 	var readCh chan codexWebsocketRead
+	var activeDone <-chan struct{}
 	if sess != nil {
 		readCh = make(chan codexWebsocketRead, 4096)
-		sess.setActive(readCh)
+		activeDone = sess.setActive(readCh)
 		defer sess.clearActive(readCh)
 	}
 
@@ -316,7 +363,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		if ctx != nil && ctx.Err() != nil {
 			return resp, ctx.Err()
 		}
-		msgType, payload, errRead := readCodexWebsocketMessage(ctx, sess, conn, readCh)
+		msgType, payload, errRead := readCodexWebsocketMessage(ctx, sess, conn, readCh, activeDone)
 		if errRead != nil {
 			helps.RecordAPIWebsocketError(ctx, e.cfg, "read", errRead)
 			return resp, errRead
@@ -462,9 +509,10 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	}
 
 	var readCh chan codexWebsocketRead
+	var activeDone <-chan struct{}
 	if sess != nil {
 		readCh = make(chan codexWebsocketRead, 4096)
-		sess.setActive(readCh)
+		activeDone = sess.setActive(readCh)
 	}
 
 	if errSend := writeCodexWebsocketMessage(sess, conn, wsReqBody); errSend != nil {
@@ -551,7 +599,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				_ = send(cliproxyexecutor.StreamChunk{Err: ctx.Err()})
 				return
 			}
-			msgType, payload, errRead := readCodexWebsocketMessage(ctx, sess, conn, readCh)
+			msgType, payload, errRead := readCodexWebsocketMessage(ctx, sess, conn, readCh, activeDone)
 			if errRead != nil {
 				if sess != nil && ctx != nil && ctx.Err() != nil {
 					terminateReason = "context_done"
@@ -669,7 +717,7 @@ func buildCodexWebsocketRequestBody(body []byte) []byte {
 	return fallback
 }
 
-func readCodexWebsocketMessage(ctx context.Context, sess *codexWebsocketSession, conn *websocket.Conn, readCh chan codexWebsocketRead) (int, []byte, error) {
+func readCodexWebsocketMessage(ctx context.Context, sess *codexWebsocketSession, conn *websocket.Conn, readCh chan codexWebsocketRead, activeDone <-chan struct{}) (int, []byte, error) {
 	if sess == nil {
 		if conn == nil {
 			return 0, nil, fmt.Errorf("codex websockets executor: websocket conn is nil")
@@ -684,10 +732,29 @@ func readCodexWebsocketMessage(ctx context.Context, sess *codexWebsocketSession,
 	if readCh == nil {
 		return 0, nil, fmt.Errorf("codex websockets executor: session read channel is nil")
 	}
+	if activeDone == nil {
+		return 0, nil, fmt.Errorf("codex websockets executor: session read signal is nil")
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			return 0, nil, ctx.Err()
+		case <-activeDone:
+			select {
+			case ev, ok := <-readCh:
+				if !ok {
+					return 0, nil, fmt.Errorf("codex websockets executor: session read channel closed")
+				}
+				if ev.conn != conn {
+					return 0, nil, fmt.Errorf("codex websockets executor: execution session closed")
+				}
+				if ev.err != nil {
+					return 0, nil, ev.err
+				}
+				return ev.msgType, ev.payload, nil
+			default:
+			}
+			return 0, nil, fmt.Errorf("codex websockets executor: execution session closed")
 		case ev, ok := <-readCh:
 			if !ok {
 				return 0, nil, fmt.Errorf("codex websockets executor: session read channel closed")
@@ -1125,12 +1192,23 @@ func (e *CodexWebsocketsExecutor) ensureUpstreamConn(ctx context.Context, auth *
 	if sess == nil {
 		return e.dialCodexWebsocket(ctx, auth, wsURL, headers)
 	}
+	authID = strings.TrimSpace(authID)
 
 	sess.connMu.Lock()
 	conn := sess.conn
 	readerConn := sess.readerConn
+	currentAuthID := strings.TrimSpace(sess.authID)
 	sess.connMu.Unlock()
+	if conn != nil && currentAuthID != authID {
+		// Drop the old upstream connection before switching auths so the next
+		// request cannot keep using the previous auth.
+		e.invalidateUpstreamConn(sess, conn, "auth_switched", nil)
+		conn = nil
+		readerConn = nil
+	}
 	if conn != nil {
+		// Reuse the existing connection when the auth is unchanged to avoid
+		// unnecessary reconnects.
 		if readerConn != conn {
 			sess.connMu.Lock()
 			sess.readerConn = conn
@@ -1172,21 +1250,24 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 		return
 	}
 	for {
+		if !sess.isCurrentConn(conn) {
+			// Stop stale reader loops immediately so they cannot interfere with
+			// the current request channel.
+			return
+		}
 		_ = conn.SetReadDeadline(time.Now().Add(codexResponsesWebsocketIdleTimeout))
 		msgType, payload, errRead := conn.ReadMessage()
 		if errRead != nil {
-			sess.activeMu.Lock()
-			ch := sess.activeCh
-			done := sess.activeDone
-			sess.activeMu.Unlock()
+			// Snapshot ownership and the active channel inside one critical
+			// section to avoid check-then-use races.
+			ch, done, current := sess.activeSnapshotForCurrentConn(conn)
+			if !current {
+				// A stale connection read error must not touch the current
+				// active request channel.
+				return
+			}
 			if ch != nil {
-				select {
-				case ch <- codexWebsocketRead{conn: conn, err: errRead}:
-				case <-done:
-				default:
-				}
-				sess.clearActive(ch)
-				close(ch)
+				trySendCodexWebsocketRead(ch, done, codexWebsocketRead{conn: conn, err: errRead})
 			}
 			e.invalidateUpstreamConn(sess, conn, "upstream_disconnected", errRead)
 			return
@@ -1195,29 +1276,29 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 		if msgType != websocket.TextMessage {
 			if msgType == websocket.BinaryMessage {
 				errBinary := fmt.Errorf("codex websockets executor: unexpected binary message")
-				sess.activeMu.Lock()
-				ch := sess.activeCh
-				done := sess.activeDone
-				sess.activeMu.Unlock()
+				// Snapshot ownership and the active channel inside one critical
+				// section to avoid check-then-use races.
+				ch, done, current := sess.activeSnapshotForCurrentConn(conn)
+				if !current {
+					// A stale connection binary error must not touch the current
+					// active request channel.
+					return
+				}
 				if ch != nil {
-					select {
-					case ch <- codexWebsocketRead{conn: conn, err: errBinary}:
-					case <-done:
-					default:
-					}
-					sess.clearActive(ch)
-					close(ch)
+					trySendCodexWebsocketRead(ch, done, codexWebsocketRead{conn: conn, err: errBinary})
 				}
 				e.invalidateUpstreamConn(sess, conn, "unexpected_binary", errBinary)
 				return
 			}
 			continue
 		}
-
-		sess.activeMu.Lock()
-		ch := sess.activeCh
-		done := sess.activeDone
-		sess.activeMu.Unlock()
+		// Snapshot ownership and the active channel inside one critical
+		// section to avoid check-then-use races.
+		ch, done, current := sess.activeSnapshotForCurrentConn(conn)
+		if !current {
+			// Do not forward stale connection messages to the current request.
+			return
+		}
 		if ch == nil {
 			continue
 		}
@@ -1318,15 +1399,24 @@ func closeCodexWebsocketSession(sess *codexWebsocketSession, reason string) {
 		reason = "session_closed"
 	}
 
+	// Keep the lock order fixed as connMu -> activeMu.
 	sess.connMu.Lock()
 	conn := sess.conn
 	authID := sess.authID
 	wsURL := sess.wsURL
+	sessionID := sess.sessionID
 	sess.conn = nil
 	if sess.readerConn == conn {
 		sess.readerConn = nil
 	}
-	sessionID := sess.sessionID
+	sess.activeMu.Lock()
+	if sess.activeCancel != nil {
+		sess.activeCancel()
+	}
+	sess.activeCh = nil
+	sess.activeCancel = nil
+	sess.activeDone = nil
+	sess.activeMu.Unlock()
 	sess.connMu.Unlock()
 
 	if conn == nil {
