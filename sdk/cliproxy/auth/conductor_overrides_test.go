@@ -851,3 +851,57 @@ func TestManager_RequestScopedNotFoundStopsRetryWithoutSuspendingAuth(t *testing
 		t.Fatalf("expected request-scoped 404 to avoid bad auth model cooldown state, got %#v", state)
 	}
 }
+
+type extraUsageInvalidatingSelector struct {
+	invalidated []string
+}
+
+func (s *extraUsageInvalidatingSelector) Pick(_ context.Context, _ string, _ string, _ cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
+	if len(auths) == 0 {
+		return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
+	}
+	return auths[0], nil
+}
+
+func (s *extraUsageInvalidatingSelector) InvalidateAuth(authID string) {
+	s.invalidated = append(s.invalidated, authID)
+}
+
+func TestMarkResult_OutOfExtraUsageClearsAffinityWithoutPoisoningAuth(t *testing.T) {
+	selector := &extraUsageInvalidatingSelector{}
+	m := NewManager(nil, selector, nil)
+	auth := &Auth{ID: "claude-auth", Provider: "claude", Status: StatusActive}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	model := "claude-opus-4-7"
+	msg := `{"type":"error","error":{"type":"invalid_request_error","message":"You're out of extra usage. Add more at claude.ai/settings/usage and keep going."}}`
+	if isRequestInvalidError(&Error{HTTPStatus: http.StatusBadRequest, Message: msg}) {
+		t.Fatal("expected out-of-extra-usage 400 to remain credential-retryable")
+	}
+	m.MarkResult(context.Background(), Result{
+		AuthID:   auth.ID,
+		Provider: auth.Provider,
+		Model:    model,
+		Success:  false,
+		Error:    &Error{HTTPStatus: http.StatusBadRequest, Message: msg},
+	})
+
+	updated, ok := m.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to remain registered")
+	}
+	if updated.Unavailable || updated.Status == StatusError {
+		t.Fatalf("expected auth to stay healthy, unavailable=%v status=%s", updated.Unavailable, updated.Status)
+	}
+	if updated.LastError != nil || updated.StatusMessage != "" {
+		t.Fatalf("expected no persisted auth error, last=%v status_message=%q", updated.LastError, updated.StatusMessage)
+	}
+	if state := updated.ModelStates[model]; state != nil {
+		t.Fatalf("expected no persisted model error, got %#v", state)
+	}
+	if len(selector.invalidated) != 1 || selector.invalidated[0] != auth.ID {
+		t.Fatalf("expected affinity invalidation for %q, got %v", auth.ID, selector.invalidated)
+	}
+}
