@@ -90,25 +90,31 @@ pgsql_upsert_usage_file() {
   fi
 
   prefix="$(pg_sql_prefix || true)"
-  json_data="$(tr -d '\r\n' < "${STATS_FILE}")"
+  tmp_sql="${STATS_FILE}.sql.$$"
 
-  if [ -n "${prefix}" ]; then
-    psql "${dsn}" -v ON_ERROR_STOP=1 -v usage_json="${json_data}" >/dev/null <<EOF
-${prefix}
+  {
+    if [ -n "${prefix}" ]; then
+      printf '%s\n' "${prefix}"
+    fi
+    cat <<EOF
 INSERT INTO usage_backup (id, data, updated_at)
-VALUES (1, :'usage_json'::jsonb, NOW())
+VALUES (1, \$cliproxyapi_usage\$
+EOF
+    cat "${STATS_FILE}"
+    cat <<'EOF'
+$cliproxyapi_usage$::jsonb, NOW())
 ON CONFLICT (id) DO UPDATE
 SET data = EXCLUDED.data, updated_at = NOW();
 EOF
-    return $?
+  } > "${tmp_sql}"
+
+  if psql "${dsn}" -v ON_ERROR_STOP=1 >/dev/null -f "${tmp_sql}"; then
+    status=0
+  else
+    status=$?
   fi
-
-  psql "${dsn}" -v ON_ERROR_STOP=1 -v usage_json="${json_data}" >/dev/null <<EOF
-INSERT INTO usage_backup (id, data, updated_at)
-VALUES (1, :'usage_json'::jsonb, NOW())
-ON CONFLICT (id) DO UPDATE
-SET data = EXCLUDED.data, updated_at = NOW();
-EOF
+  rm -f "${tmp_sql}"
+  return "${status}"
 }
 
 normalize_backend() {
@@ -217,6 +223,8 @@ setup_rclone() {
   esac
 
   mkdir -p "${RCLONE_CONFIG_DIR}"
+  touch "${RCLONE_CONFIG_FILE}"
+  chmod 600 "${RCLONE_CONFIG_FILE}"
   cat > "${RCLONE_CONFIG_FILE}" <<EOF
 [${RCLONE_REMOTE}]
 type = s3
@@ -343,15 +351,12 @@ export_usage_snapshot() {
   management_key="$2"
   tmp_file="${STATS_FILE}.tmp"
 
-  response="$(curl -s -w '\n%{http_code}' -H "X-Management-Key: ${management_key}" \
-    "http://localhost:${port}/v0/management/usage/export" 2>/dev/null || true)"
-  http_code="$(printf '%s\n' "${response}" | tail -n1)"
+  http_code="$(curl -s -o "${tmp_file}" -w '%{http_code}' -H "X-Management-Key: ${management_key}" \
+    "http://localhost:${port}/v0/management/usage/export" 2>/dev/null || echo '000')"
   if [ "${http_code}" != "200" ]; then
     rm -f "${tmp_file}"
     return 1
   fi
-
-  printf '%s\n' "${response}" | sed '$d' > "${tmp_file}"
   if [ ! -s "${tmp_file}" ]; then
     rm -f "${tmp_file}"
     return 1
@@ -369,12 +374,11 @@ import_usage_snapshot() {
     return 0
   fi
 
-  response="$(curl -s -w '\n%{http_code}' -X POST \
+  http_code="$(curl -s -o /dev/null -w '%{http_code}' -X POST \
     -H "X-Management-Key: ${management_key}" \
     -H "Content-Type: application/json" \
     -d @"${STATS_FILE}" \
-    "http://localhost:${port}/v0/management/usage/import" 2>/dev/null || true)"
-  http_code="$(printf '%s\n' "${response}" | tail -n1)"
+    "http://localhost:${port}/v0/management/usage/import" 2>/dev/null || echo '000')"
   if [ "${http_code}" = "200" ]; then
     log "Imported usage statistics into the running service."
     push_stats
