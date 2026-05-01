@@ -70,6 +70,20 @@ VisionCoder is also offering our users a limited-time <a href="https://coder.vis
 
 CLIProxyAPI Guides: [https://help.router-for.me/](https://help.router-for.me/)
 
+### Windows Background Mode
+
+When running `cli-proxy-api.exe` directly in a terminal, closing that terminal also closes the process.
+
+Use `--background` to relaunch the server as a detached process:
+
+```bash
+cli-proxy-api.exe --background
+```
+
+If startup succeeds, the command prints the detached PID and exits immediately, and the proxy keeps running after the terminal is closed.
+
+`--background` is only intended for normal service startup. Do not combine it with interactive/login/import/TUI modes (for example: `--login`, `--codex-login`, `--codex-device-login`, `--claude-login`, `--antigravity-login`, `--kimi-login`, `--vertex-import`, `--tui`).
+
 ## Management API
 
 see [MANAGEMENT_API.md](https://help.router-for.me/management/api)

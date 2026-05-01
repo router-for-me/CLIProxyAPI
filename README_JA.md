@@ -47,7 +47,7 @@ GLM CODING PLANを10%割引で取得：https://z.ai/subscribe?ic=8JVLJQFSKB
 
 ## 概要
 
-- CLIモデル向けのOpenAI/Gemini/Claude互換APIエンドポイント
+- CLIモデル向けのOpenAI/Gemini/Claude/Codex互換APIエンドポイント
 - OAuthログインによるOpenAI Codexサポート（GPTモデル）
 - OAuthログインによるClaude Codeサポート
 - プロバイダールーティングによるAmp CLIおよびIDE拡張機能のサポート
@@ -67,6 +67,20 @@ GLM CODING PLANを10%割引で取得：https://z.ai/subscribe?ic=8JVLJQFSKB
 ## はじめに
 
 CLIProxyAPIガイド：[https://help.router-for.me/](https://help.router-for.me/)
+
+### Windows バックグラウンド実行
+
+`cli-proxy-api.exe` をターミナルで直接実行すると、そのターミナルを閉じた時点でプロセスも終了します。
+
+`--background` を使うと、サーバーをターミナルから切り離したバックグラウンドプロセスとして再起動できます。
+
+```bash
+cli-proxy-api.exe --background
+```
+
+起動に成功すると、デタッチされた PID を表示してコマンドはすぐ終了します。以後はターミナルを閉じてもプロキシは動作し続けます。
+
+`--background` は通常のサービス起動専用です。対話/ログイン/インポート/TUI モード（例：`--login`、`--codex-login`、`--codex-device-login`、`--claude-login`、`--antigravity-login`、`--kimi-login`、`--vertex-import`、`--tui`）と組み合わせないでください。
 
 ## 管理API
 

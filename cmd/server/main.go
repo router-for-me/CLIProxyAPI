@@ -56,6 +56,11 @@ func init() {
 func main() {
 	fmt.Printf("CLIProxyAPI Version: %s, Commit: %s, BuiltAt: %s\n", buildinfo.Version, buildinfo.Commit, buildinfo.BuildDate)
 
+	if hasSplitBackgroundBoolValue(os.Args[1:]) {
+		log.Error("invalid --background usage: split bool form is not supported, use --background or --background=true/false")
+		return
+	}
+
 	// Command-line flags to control the application's behavior.
 	var login bool
 	var codexLogin bool
@@ -73,6 +78,7 @@ func main() {
 	var tuiMode bool
 	var standalone bool
 	var localModel bool
+	var background bool
 
 	// Define command-line flags for different operation modes.
 	flag.BoolVar(&login, "login", false, "Login Google Account")
@@ -91,6 +97,7 @@ func main() {
 	flag.BoolVar(&tuiMode, "tui", false, "Start with terminal management UI")
 	flag.BoolVar(&standalone, "standalone", false, "In TUI mode, start an embedded local server")
 	flag.BoolVar(&localModel, "local-model", false, "Use embedded model catalog only, skip remote model fetching")
+	flag.BoolVar(&background, "background", false, "Run as detached background process on Windows")
 
 	flag.CommandLine.Usage = func() {
 		out := flag.CommandLine.Output()
@@ -121,6 +128,11 @@ func main() {
 
 	// Parse the command-line flags.
 	flag.Parse()
+
+	if background && (login || codexLogin || codexDeviceLogin || claudeLogin || antigravityLogin || kimiLogin || vertexImport != "" || tuiMode) {
+		log.Error("--background cannot be combined with interactive/login/import/tui modes")
+		return
+	}
 
 	// Core application variables.
 	var err error
@@ -481,6 +493,17 @@ func main() {
 	} else if kimiLogin {
 		cmd.DoKimiLogin(cfg, options)
 	} else {
+		if background {
+			filteredArgs := filterBackgroundArgs(os.Args[1:])
+			exited, errStartDetached := cmd.StartDetachedIfRequested(true, filteredArgs)
+			if errStartDetached != nil {
+				log.Errorf("failed to start detached background process: %v", errStartDetached)
+				return
+			}
+			if exited {
+				return
+			}
+		}
 		// In cloud deploy mode without config file, just wait for shutdown signals
 		if isCloudDeploy && !configFileExists {
 			// No config file available, just wait for shutdown
@@ -577,4 +600,39 @@ func main() {
 			cmd.StartService(cfg, configFilePath, password)
 		}
 	}
+}
+
+func filterBackgroundArgs(args []string) []string {
+	filtered := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--background" || arg == "-background" {
+			continue
+		}
+		if strings.HasPrefix(arg, "--background=") || strings.HasPrefix(arg, "-background=") {
+			continue
+		}
+		filtered = append(filtered, arg)
+	}
+	return filtered
+}
+
+func isBoolLikeFlagValue(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "0", "t", "f", "true", "false":
+		return true
+	default:
+		return false
+	}
+}
+
+func hasSplitBackgroundBoolValue(args []string) bool {
+	for i := 0; i < len(args)-1; i++ {
+		if args[i] == "--background" || args[i] == "-background" {
+			if isBoolLikeFlagValue(args[i+1]) {
+				return true
+			}
+		}
+	}
+	return false
 }

@@ -70,6 +70,20 @@ VisionCoder 还为我们的用户提供 <a href="https://coder.visioncoder.cn" t
 
 CLIProxyAPI 用户手册： [https://help.router-for.me/](https://help.router-for.me/cn/)
 
+### Windows 后台运行
+
+如果直接在终端中运行 `cli-proxy-api.exe`，关闭终端时该进程会一起退出。
+
+可使用 `--background` 参数将服务重新拉起为脱离终端的后台进程：
+
+```bash
+cli-proxy-api.exe --background
+```
+
+启动成功后会打印后台进程 PID 并立即返回。之后即使关闭终端，代理服务也会继续运行。
+
+`--background` 仅用于常规服务启动，请勿与交互/登录/导入/TUI 模式组合使用（例如：`--login`、`--codex-login`、`--codex-device-login`、`--claude-login`、`--antigravity-login`、`--kimi-login`、`--vertex-import`、`--tui`）。
+
 ## 管理 API 文档
 
 请参见 [MANAGEMENT_API_CN.md](https://help.router-for.me/cn/management/api)
