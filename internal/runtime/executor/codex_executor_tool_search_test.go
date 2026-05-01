@@ -20,7 +20,9 @@ func TestNormalizeCodexServerToolSearchStripsServerOnlyFields(t *testing.T) {
 			{"type":"tool_search","description":"search local tools","parameters":{"type":"object"}},
 			{"type":"tool_search","execution":"server","description":"search server tools","parameters":{"type":"object"}},
 			{"type":"tool_search","execution":"client","description":"search client tools","parameters":{"type":"object"}},
-			{"type":"function","name":"lookup","description":"keep me","parameters":{"type":"object"}}
+			{"type":"function","name":"lookup","description":"keep me","parameters":{"type":"object"}},
+			{"type":"tool_search","execution":"server","description":null,"parameters":null},
+			{"type":"tool_search","execution":"server","name":"metadata-only"}
 		],
 		"tool_choice": {
 			"type": "allowed_tools",
@@ -55,6 +57,15 @@ func TestNormalizeCodexServerToolSearchStripsServerOnlyFields(t *testing.T) {
 	}
 	if !gjson.GetBytes(out, "tools.3.parameters").Exists() {
 		t.Fatalf("function parameters should be preserved: %s", string(out))
+	}
+	if gjson.GetBytes(out, "tools.4.description").Exists() {
+		t.Fatalf("null server tool_search description should be removed: %s", string(out))
+	}
+	if gjson.GetBytes(out, "tools.4.parameters").Exists() {
+		t.Fatalf("null server tool_search parameters should be removed: %s", string(out))
+	}
+	if got := gjson.GetBytes(out, "tools.5.name").String(); got != "metadata-only" {
+		t.Fatalf("server tool_search without removable fields name = %q, want preserved: %s", got, string(out))
 	}
 	if gjson.GetBytes(out, "tool_choice.tools.0.description").Exists() {
 		t.Fatalf("tool_choice.tools.0.description should be removed: %s", string(out))

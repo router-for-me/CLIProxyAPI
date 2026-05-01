@@ -907,8 +907,12 @@ func normalizeCodexServerToolSearchArray(body []byte, path string) []byte {
 		}
 
 		toolPath := fmt.Sprintf("%s.%d", path, i)
-		body, _ = sjson.DeleteBytes(body, toolPath+".description")
-		body, _ = sjson.DeleteBytes(body, toolPath+".parameters")
+		if tool.Get("description").Exists() {
+			body, _ = sjson.DeleteBytes(body, toolPath+".description")
+		}
+		if tool.Get("parameters").Exists() {
+			body, _ = sjson.DeleteBytes(body, toolPath+".parameters")
+		}
 	}
 	return body
 }
