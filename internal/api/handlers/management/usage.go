@@ -7,6 +7,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
+	log "github.com/sirupsen/logrus"
 )
 
 type usageExportPayload struct {
@@ -18,6 +19,11 @@ type usageExportPayload struct {
 type usageImportPayload struct {
 	Version int                      `json:"version"`
 	Usage   usage.StatisticsSnapshot `json:"usage"`
+}
+
+type usageResetRequest struct {
+	Scope string `json:"scope"`
+	Value string `json:"value,omitempty"`
 }
 
 // GetUsageStatistics returns the in-memory request statistics snapshot.
@@ -70,10 +76,71 @@ func (h *Handler) ImportUsageStatistics(c *gin.Context) {
 
 	result := h.usageStats.MergeSnapshot(payload.Usage)
 	snapshot := h.usageStats.Snapshot()
+	if h.usageMode == "persistent" {
+		if err := h.persistUsageSnapshot(snapshot); err != nil {
+			log.WithError(err).Warn("failed to persist imported usage statistics")
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to persist usage statistics"})
+			return
+		}
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"added":           result.Added,
 		"skipped":         result.Skipped,
 		"total_requests":  snapshot.TotalRequests,
 		"failed_requests": snapshot.FailureCount,
 	})
+}
+
+// ResetUsageStatistics clears usage data for the requested scope.
+func (h *Handler) ResetUsageStatistics(c *gin.Context) {
+	if h == nil || h.usageStats == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "usage statistics unavailable"})
+		return
+	}
+
+	var req usageResetRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	var removed int
+	switch req.Scope {
+	case "all":
+		removed = int(h.usageStats.Snapshot().TotalRequests)
+		h.usageStats.ResetAll()
+	case "provider":
+		removed = h.usageStats.ResetByProvider(req.Value)
+	case "model":
+		removed = h.usageStats.ResetByModel(req.Value)
+	case "api_key":
+		removed = h.usageStats.ResetByAPIKey(req.Value)
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid scope"})
+		return
+	}
+
+	snapshot := h.usageStats.Snapshot()
+	if h.usageMode == "persistent" {
+		if err := h.persistUsageSnapshot(snapshot); err != nil {
+			log.WithError(err).Warn("failed to persist reset usage statistics")
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to persist usage statistics"})
+			return
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{"removed": removed, "usage": snapshot})
+}
+
+func (h *Handler) persistUsageSnapshot(snapshot usage.StatisticsSnapshot) error {
+	if h == nil {
+		return nil
+	}
+	if h.flushUsageSnapshot != nil {
+		return h.flushUsageSnapshot()
+	}
+	if h.snapshotStore == nil {
+		return nil
+	}
+	return h.snapshotStore.Save(snapshot)
 }

@@ -187,10 +187,50 @@ func (h *Handler) PutDebug(c *gin.Context) { h.updateBoolField(c, func(v bool) {
 
 // UsageStatisticsEnabled
 func (h *Handler) GetUsageStatisticsEnabled(c *gin.Context) {
-	c.JSON(200, gin.H{"usage-statistics-enabled": h.cfg.UsageStatisticsEnabled})
+	enabled := false
+	if h != nil && h.cfg != nil {
+		enabled = h.cfg.EffectiveUsageStatisticsMode() != "off"
+	}
+	c.JSON(200, gin.H{"usage-statistics-enabled": enabled})
 }
 func (h *Handler) PutUsageStatisticsEnabled(c *gin.Context) {
-	h.updateBoolField(c, func(v bool) { h.cfg.UsageStatisticsEnabled = v })
+	h.updateBoolField(c, func(v bool) {
+		h.cfg.UsageStatisticsEnabled = v
+		if v {
+			h.cfg.UsageStatistics.Mode = "memory"
+			h.usageMode = "memory"
+			return
+		}
+		h.cfg.UsageStatistics.Mode = "off"
+		h.usageMode = "off"
+	})
+}
+
+// UsageStatisticsMode
+func (h *Handler) GetUsageStatisticsMode(c *gin.Context) {
+	if h == nil || h.cfg == nil {
+		c.JSON(http.StatusOK, gin.H{"usage-statistics-mode": "off"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"usage-statistics-mode": h.cfg.EffectiveUsageStatisticsMode()})
+}
+
+func (h *Handler) PutUsageStatisticsMode(c *gin.Context) {
+	var body struct {
+		Value *string `json:"value"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil || body.Value == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
+		return
+	}
+	mode := strings.TrimSpace(*body.Value)
+	if mode != "off" && mode != "memory" && mode != "persistent" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid mode"})
+		return
+	}
+	h.cfg.UsageStatistics.Mode = mode
+	h.usageMode = mode
+	h.persist(c)
 }
 
 // UsageStatisticsEnabled

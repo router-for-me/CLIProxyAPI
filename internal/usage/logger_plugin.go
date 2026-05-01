@@ -58,7 +58,8 @@ func StatisticsEnabled() bool { return statisticsEnabled.Load() }
 
 // RequestStatistics maintains aggregated request metrics in memory.
 type RequestStatistics struct {
-	mu sync.RWMutex
+	mu       sync.RWMutex
+	onChange func(StatisticsSnapshot)
 
 	totalRequests int64
 	successCount  int64
@@ -91,6 +92,9 @@ type modelStats struct {
 type RequestDetail struct {
 	Timestamp time.Time  `json:"timestamp"`
 	LatencyMs int64      `json:"latency_ms"`
+	Provider  string     `json:"provider,omitempty"`
+	Model     string     `json:"model,omitempty"`
+	APIKey    string     `json:"api_key,omitempty"`
 	Source    string     `json:"source"`
 	AuthIndex string     `json:"auth_index"`
 	Tokens    TokenStats `json:"tokens"`
@@ -113,12 +117,26 @@ type StatisticsSnapshot struct {
 	FailureCount  int64 `json:"failure_count"`
 	TotalTokens   int64 `json:"total_tokens"`
 
-	APIs map[string]APISnapshot `json:"apis"`
+	APIs      map[string]APISnapshot      `json:"apis"`
+	Providers map[string]ProviderSnapshot `json:"providers"`
+	Models    map[string]SummarySnapshot  `json:"models"`
 
 	RequestsByDay  map[string]int64 `json:"requests_by_day"`
 	RequestsByHour map[string]int64 `json:"requests_by_hour"`
 	TokensByDay    map[string]int64 `json:"tokens_by_day"`
 	TokensByHour   map[string]int64 `json:"tokens_by_hour"`
+}
+
+// ProviderSnapshot summarises metrics for a provider.
+type ProviderSnapshot struct {
+	TotalRequests int64 `json:"total_requests"`
+	TotalTokens   int64 `json:"total_tokens"`
+}
+
+// SummarySnapshot summarises metrics for a grouping dimension.
+type SummarySnapshot struct {
+	TotalRequests int64 `json:"total_requests"`
+	TotalTokens   int64 `json:"total_tokens"`
 }
 
 // APISnapshot summarises metrics for a single API key.
@@ -151,6 +169,16 @@ func NewRequestStatistics() *RequestStatistics {
 	}
 }
 
+// SetOnChange registers a callback invoked with a fresh snapshot after mutations.
+func (s *RequestStatistics) SetOnChange(callback func(StatisticsSnapshot)) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.onChange = callback
+	s.mu.Unlock()
+}
+
 // Record ingests a new usage record and updates the aggregates.
 func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record) {
 	if s == nil {
@@ -178,11 +206,14 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 	if modelName == "" {
 		modelName = "unknown"
 	}
+	providerName := strings.TrimSpace(record.Provider)
+	if providerName == "" {
+		providerName = "unknown"
+	}
 	dayKey := timestamp.Format("2006-01-02")
 	hourKey := timestamp.Hour()
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	s.totalRequests++
 	if success {
@@ -200,6 +231,9 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 	s.updateAPIStats(stats, modelName, RequestDetail{
 		Timestamp: timestamp,
 		LatencyMs: normaliseLatency(record.Latency),
+		Provider:  providerName,
+		Model:     modelName,
+		APIKey:    statsKey,
 		Source:    record.Source,
 		AuthIndex: record.AuthIndex,
 		Tokens:    detail,
@@ -210,6 +244,9 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 	s.requestsByHour[hourKey]++
 	s.tokensByDay[dayKey] += totalTokens
 	s.tokensByHour[hourKey] += totalTokens
+	s.mu.Unlock()
+
+	s.notifyChange()
 }
 
 func (s *RequestStatistics) updateAPIStats(stats *apiStats, model string, detail RequestDetail) {
@@ -241,6 +278,8 @@ func (s *RequestStatistics) Snapshot() StatisticsSnapshot {
 	result.TotalTokens = s.totalTokens
 
 	result.APIs = make(map[string]APISnapshot, len(s.apis))
+	result.Providers = make(map[string]ProviderSnapshot)
+	result.Models = make(map[string]SummarySnapshot)
 	for apiName, stats := range s.apis {
 		apiSnapshot := APISnapshot{
 			TotalRequests: stats.TotalRequests,
@@ -249,12 +288,22 @@ func (s *RequestStatistics) Snapshot() StatisticsSnapshot {
 		}
 		for modelName, modelStatsValue := range stats.Models {
 			requestDetails := make([]RequestDetail, len(modelStatsValue.Details))
-			copy(requestDetails, modelStatsValue.Details)
+			for i, detail := range modelStatsValue.Details {
+				requestDetails[i] = normaliseStoredDetail(apiName, modelName, detail)
+				providerSnapshot := result.Providers[requestDetails[i].Provider]
+				providerSnapshot.TotalRequests++
+				providerSnapshot.TotalTokens += requestDetails[i].Tokens.TotalTokens
+				result.Providers[requestDetails[i].Provider] = providerSnapshot
+			}
 			apiSnapshot.Models[modelName] = ModelSnapshot{
 				TotalRequests: modelStatsValue.TotalRequests,
 				TotalTokens:   modelStatsValue.TotalTokens,
 				Details:       requestDetails,
 			}
+			modelSnapshot := result.Models[modelName]
+			modelSnapshot.TotalRequests += modelStatsValue.TotalRequests
+			modelSnapshot.TotalTokens += modelStatsValue.TotalTokens
+			result.Models[modelName] = modelSnapshot
 		}
 		result.APIs[apiName] = apiSnapshot
 	}
@@ -298,7 +347,6 @@ func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot) MergeResu
 	}
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	seen := make(map[string]struct{})
 	for apiName, stats := range s.apis {
@@ -340,6 +388,7 @@ func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot) MergeResu
 				if detail.Timestamp.IsZero() {
 					detail.Timestamp = time.Now()
 				}
+				detail = normaliseStoredDetail(apiName, modelName, detail)
 				key := dedupKey(apiName, modelName, detail)
 				if _, exists := seen[key]; exists {
 					result.Skipped++
@@ -352,6 +401,10 @@ func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot) MergeResu
 		}
 	}
 
+	s.mu.Unlock()
+	if result.Added > 0 {
+		s.notifyChange()
+	}
 	return result
 }
 
@@ -378,6 +431,126 @@ func (s *RequestStatistics) recordImported(apiName, modelName string, stats *api
 	s.requestsByHour[hourKey]++
 	s.tokensByDay[dayKey] += totalTokens
 	s.tokensByHour[hourKey] += totalTokens
+}
+
+// ResetAll clears all collected statistics.
+func (s *RequestStatistics) ResetAll() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.clearLocked()
+	s.mu.Unlock()
+	s.notifyChange()
+}
+
+// ResetByProvider removes request details for a provider and rebuilds totals.
+func (s *RequestStatistics) ResetByProvider(provider string) int {
+	provider = strings.TrimSpace(provider)
+	return s.resetWhere(func(detail RequestDetail, _, _ string) bool {
+		return detail.Provider == provider
+	})
+}
+
+// ResetByModel removes request details for a model and rebuilds totals.
+func (s *RequestStatistics) ResetByModel(model string) int {
+	model = strings.TrimSpace(model)
+	return s.resetWhere(func(detail RequestDetail, _, modelName string) bool {
+		return detail.Model == model || modelName == model
+	})
+}
+
+// ResetByAPIKey removes request details for an API key and rebuilds totals.
+func (s *RequestStatistics) ResetByAPIKey(apiKey string) int {
+	apiKey = strings.TrimSpace(apiKey)
+	return s.resetWhere(func(detail RequestDetail, apiName, _ string) bool {
+		return detail.APIKey == apiKey || apiName == apiKey
+	})
+}
+
+type requestEntry struct {
+	apiName   string
+	modelName string
+	detail    RequestDetail
+}
+
+func (s *RequestStatistics) resetWhere(match func(RequestDetail, string, string) bool) int {
+	if s == nil || match == nil {
+		return 0
+	}
+	s.mu.Lock()
+	remaining := make([]requestEntry, 0)
+	removed := 0
+	for apiName, stats := range s.apis {
+		if stats == nil {
+			continue
+		}
+		for modelName, modelStatsValue := range stats.Models {
+			if modelStatsValue == nil {
+				continue
+			}
+			for _, detail := range modelStatsValue.Details {
+				detail = normaliseStoredDetail(apiName, modelName, detail)
+				if match(detail, apiName, modelName) {
+					removed++
+					continue
+				}
+				remaining = append(remaining, requestEntry{apiName: apiName, modelName: modelName, detail: detail})
+			}
+		}
+	}
+	if removed > 0 {
+		s.clearLocked()
+		for _, entry := range remaining {
+			stats, ok := s.apis[entry.apiName]
+			if !ok {
+				stats = &apiStats{Models: make(map[string]*modelStats)}
+				s.apis[entry.apiName] = stats
+			}
+			s.recordImported(entry.apiName, entry.modelName, stats, entry.detail)
+		}
+	}
+	s.mu.Unlock()
+	if removed > 0 {
+		s.notifyChange()
+	}
+	return removed
+}
+
+func (s *RequestStatistics) clearLocked() {
+	s.totalRequests = 0
+	s.successCount = 0
+	s.failureCount = 0
+	s.totalTokens = 0
+	s.apis = make(map[string]*apiStats)
+	s.requestsByDay = make(map[string]int64)
+	s.requestsByHour = make(map[int]int64)
+	s.tokensByDay = make(map[string]int64)
+	s.tokensByHour = make(map[int]int64)
+}
+
+func (s *RequestStatistics) notifyChange() {
+	s.mu.RLock()
+	callback := s.onChange
+	s.mu.RUnlock()
+	if callback == nil {
+		return
+	}
+	callback(s.Snapshot())
+}
+
+func normaliseStoredDetail(apiName, modelName string, detail RequestDetail) RequestDetail {
+	detail.Tokens = normaliseTokenStats(detail.Tokens)
+	if detail.Provider == "" {
+		detail.Provider = "unknown"
+	}
+	if detail.Model == "" {
+		detail.Model = modelName
+	}
+	if detail.APIKey == "" {
+		detail.APIKey = apiName
+	}
+	return detail
 }
 
 func dedupKey(apiName, modelName string, detail RequestDetail) string {

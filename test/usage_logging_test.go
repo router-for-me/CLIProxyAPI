@@ -48,6 +48,8 @@ func TestGeminiExecutorRecordsSuccessfulZeroUsageInStatistics(t *testing.T) {
 		internalusage.SetStatisticsEnabled(prevStatsEnabled)
 	})
 
+	before := internalusage.GetRequestStatistics().Snapshot().TotalRequests
+
 	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
 		Model:   model,
 		Payload: []byte(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`),
@@ -59,6 +61,12 @@ func TestGeminiExecutorRecordsSuccessfulZeroUsageInStatistics(t *testing.T) {
 		t.Fatalf("Execute error: %v", err)
 	}
 
+	waitForStatisticsTotalRequests(t, before+1)
+	after := internalusage.GetRequestStatistics().Snapshot().TotalRequests
+	if after != before+1 {
+		t.Fatalf("expected total requests to increment by 1, got before=%d after=%d", before, after)
+	}
+
 	detail := waitForStatisticsDetail(t, "gemini", model, source)
 	if detail.Failed {
 		t.Fatalf("detail failed = true, want false")
@@ -66,6 +74,21 @@ func TestGeminiExecutorRecordsSuccessfulZeroUsageInStatistics(t *testing.T) {
 	if detail.Tokens.TotalTokens != 0 {
 		t.Fatalf("total tokens = %d, want 0", detail.Tokens.TotalTokens)
 	}
+}
+
+func waitForStatisticsTotalRequests(t *testing.T, want int64) {
+	t.Helper()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		snapshot := internalusage.GetRequestStatistics().Snapshot()
+		if snapshot.TotalRequests >= want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	t.Fatalf("timed out waiting for total request count %d", want)
 }
 
 func waitForStatisticsDetail(t *testing.T, apiName, model, source string) internalusage.RequestDetail {

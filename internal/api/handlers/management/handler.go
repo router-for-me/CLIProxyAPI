@@ -42,6 +42,10 @@ type Handler struct {
 	failedAttempts      map[string]*attemptInfo // keyed by client IP
 	authManager         *coreauth.Manager
 	usageStats          *usage.RequestStatistics
+	usageMode           string
+	snapshotStore       *usage.SnapshotStore
+	flushUsageSnapshot  func() error
+	onConfigPersisted   func(*config.Config)
 	tokenStore          coreauth.Store
 	localPassword       string
 	allowRemoteOverride bool
@@ -61,6 +65,7 @@ func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Man
 		failedAttempts:      make(map[string]*attemptInfo),
 		authManager:         manager,
 		usageStats:          usage.GetRequestStatistics(),
+		usageMode:           cfg.EffectiveUsageStatisticsMode(),
 		tokenStore:          sdkAuth.GetTokenStore(),
 		allowRemoteOverride: envSecret != "",
 		envSecret:           envSecret,
@@ -126,6 +131,20 @@ func (h *Handler) SetAuthManager(manager *coreauth.Manager) {
 
 // SetUsageStatistics allows replacing the usage statistics reference.
 func (h *Handler) SetUsageStatistics(stats *usage.RequestStatistics) { h.usageStats = stats }
+
+// SetUsageStatisticsMode updates the effective usage statistics mode.
+func (h *Handler) SetUsageStatisticsMode(mode string) { h.usageMode = strings.TrimSpace(mode) }
+
+// SetUsageSnapshotStore configures the persistence store used for usage mutations.
+func (h *Handler) SetUsageSnapshotStore(store *usage.SnapshotStore) { h.snapshotStore = store }
+
+// SetUsageSnapshotFlush configures the flush hook used after explicit usage mutations.
+func (h *Handler) SetUsageSnapshotFlush(callback func() error) { h.flushUsageSnapshot = callback }
+
+// SetConfigPersistedHook registers a callback fired after config persistence succeeds.
+func (h *Handler) SetConfigPersistedHook(callback func(*config.Config)) {
+	h.onConfigPersisted = callback
+}
 
 // SetLocalPassword configures the runtime-local password accepted for localhost requests.
 func (h *Handler) SetLocalPassword(password string) { h.localPassword = password }
@@ -226,6 +245,9 @@ func (h *Handler) AuthenticateManagementKey(clientIP string, localClient bool, p
 		return false, http.StatusForbidden, "remote management disabled"
 	}
 
+	hasLocalPassword := localClient && h.localPassword != ""
+	hasRemotePassword := secretHash != "" || envSecret != ""
+
 	fail := func() {
 		h.attemptsMu.Lock()
 		aip := h.failedAttempts[clientIP]
@@ -251,27 +273,33 @@ func (h *Handler) AuthenticateManagementKey(clientIP string, localClient bool, p
 		h.attemptsMu.Unlock()
 	}
 
-	if secretHash == "" && envSecret == "" {
-		return false, http.StatusForbidden, "remote management key not set"
-	}
-
 	if provided == "" {
+		if !hasLocalPassword && !hasRemotePassword {
+			return false, http.StatusForbidden, "remote management key not set"
+		}
 		fail()
 		return false, http.StatusUnauthorized, "missing management key"
 	}
 
-	if localClient {
-		if lp := h.localPassword; lp != "" {
-			if subtle.ConstantTimeCompare([]byte(provided), []byte(lp)) == 1 {
-				reset()
-				return true, 0, ""
-			}
+	if hasLocalPassword {
+		if subtle.ConstantTimeCompare([]byte(provided), []byte(h.localPassword)) == 1 {
+			reset()
+			return true, 0, ""
 		}
 	}
 
 	if envSecret != "" && subtle.ConstantTimeCompare([]byte(provided), []byte(envSecret)) == 1 {
 		reset()
 		return true, 0, ""
+	}
+
+	if secretHash != "" && bcrypt.CompareHashAndPassword([]byte(secretHash), []byte(provided)) == nil {
+		reset()
+		return true, 0, ""
+	}
+
+	if !hasLocalPassword && !hasRemotePassword {
+		return false, http.StatusForbidden, "remote management key not set"
 	}
 
 	if secretHash == "" || bcrypt.CompareHashAndPassword([]byte(secretHash), []byte(provided)) != nil {
@@ -287,8 +315,14 @@ func (h *Handler) AuthenticateManagementKey(clientIP string, localClient bool, p
 // persist saves the current in-memory config to disk.
 func (h *Handler) persist(c *gin.Context) bool {
 	h.mu.Lock()
-	defer h.mu.Unlock()
-	return h.persistLocked(c)
+	ok := h.persistLocked(c)
+	cfg := h.cfg
+	hook := h.onConfigPersisted
+	h.mu.Unlock()
+	if ok && hook != nil {
+		hook(cfg)
+	}
+	return ok
 }
 
 // persistLocked saves the current in-memory config to disk.

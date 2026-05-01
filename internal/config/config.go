@@ -62,8 +62,10 @@ type Config struct {
 	// When exceeded, the oldest error log files are deleted. Default is 10. Set to 0 to disable cleanup.
 	ErrorLogsMaxFiles int `yaml:"error-logs-max-files" json:"error-logs-max-files"`
 
-	// UsageStatisticsEnabled toggles in-memory usage aggregation; when false, usage data is discarded.
+	// UsageStatisticsEnabled is the legacy usage aggregation toggle. UsageStatistics.Mode overrides it when set.
 	UsageStatisticsEnabled bool `yaml:"usage-statistics-enabled" json:"usage-statistics-enabled"`
+	// UsageStatistics controls usage aggregation mode.
+	UsageStatistics UsageStatisticsConfig `yaml:"usage-statistics" json:"usage-statistics"`
 
 	// DisableCooling disables quota cooldown scheduling when true.
 	DisableCooling bool `yaml:"disable-cooling" json:"disable-cooling"`
@@ -179,6 +181,24 @@ type PprofConfig struct {
 	Enable bool `yaml:"enable" json:"enable"`
 	// Addr is the host:port address for the pprof HTTP server.
 	Addr string `yaml:"addr" json:"addr"`
+}
+
+// UsageStatisticsConfig controls usage aggregation behavior.
+type UsageStatisticsConfig struct {
+	// Mode accepts "off", "memory", or "persistent". Empty mode falls back to UsageStatisticsEnabled.
+	Mode string `yaml:"mode" json:"mode"`
+}
+
+// EffectiveUsageStatisticsMode returns the configured usage statistics mode with legacy fallback.
+func (c *Config) EffectiveUsageStatisticsMode() string {
+	mode := strings.TrimSpace(c.UsageStatistics.Mode)
+	if mode != "" {
+		return mode
+	}
+	if c.UsageStatisticsEnabled {
+		return "memory"
+	}
+	return "off"
 }
 
 // RemoteManagement holds management API configuration under 'remote-management'.
@@ -669,6 +689,15 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	if cfg.ErrorLogsMaxFiles < 0 {
 		cfg.ErrorLogsMaxFiles = 10
+	}
+
+	cfg.UsageStatistics.Mode = strings.TrimSpace(cfg.UsageStatistics.Mode)
+	if cfg.UsageStatistics.Mode != "" {
+		switch cfg.UsageStatistics.Mode {
+		case "off", "memory", "persistent":
+		default:
+			return nil, fmt.Errorf("unknown usage-statistics mode %q", cfg.UsageStatistics.Mode)
+		}
 	}
 
 	if cfg.MaxRetryCredentials < 0 {

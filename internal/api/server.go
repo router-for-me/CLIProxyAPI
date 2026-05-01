@@ -52,6 +52,7 @@ type serverOptionConfig struct {
 	engineConfigurator   func(*gin.Engine)
 	routerConfigurator   func(*gin.Engine, *handlers.BaseAPIHandler, *config.Config)
 	requestLoggerFactory func(*config.Config, string) logging.RequestLogger
+	usageSnapshotPath    string
 	localPassword        string
 	keepAliveEnabled     bool
 	keepAliveTimeout     time.Duration
@@ -115,6 +116,13 @@ func WithRequestLoggerFactory(factory func(*config.Config, string) logging.Reque
 	}
 }
 
+// WithUsageStatisticsSnapshotPath overrides the on-disk path used for persistent usage snapshots.
+func WithUsageStatisticsSnapshotPath(path string) ServerOption {
+	return func(cfg *serverOptionConfig) {
+		cfg.usageSnapshotPath = strings.TrimSpace(path)
+	}
+}
+
 // WithPostAuthHook registers a hook to be called after auth record creation.
 func WithPostAuthHook(hook auth.PostAuthHook) ServerOption {
 	return func(cfg *serverOptionConfig) {
@@ -168,6 +176,9 @@ type Server struct {
 
 	// management handler
 	mgmt *managementHandlers.Handler
+
+	usageSnapshotStore *usage.SnapshotStore
+	usageSnapshotSaver *usage.SnapshotSaver
 
 	// ampModule is the Amp routing module for model mapping hot-reload
 	ampModule *ampmodule.AmpModule
@@ -263,6 +274,11 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		envManagementSecret: envManagementSecret,
 		wsRoutes:            make(map[string]struct{}),
 	}
+	snapshotPath := optionState.usageSnapshotPath
+	if snapshotPath == "" {
+		snapshotPath = usage.DefaultSnapshotPath(configFilePath)
+	}
+	s.usageSnapshotStore = usage.NewSnapshotStore(snapshotPath)
 	s.wsAuthEnabled.Store(cfg.WebsocketAuth)
 	// Save initial YAML snapshot
 	s.oldConfigYaml, _ = yaml.Marshal(cfg)
@@ -275,6 +291,16 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	applySignatureCacheConfig(nil, cfg)
 	// Initialize management handler
 	s.mgmt = managementHandlers.NewHandler(cfg, configFilePath, authManager)
+	s.mgmt.SetConfigPersistedHook(func(updatedCfg *config.Config) {
+		var previousCfg *config.Config
+		if len(s.oldConfigYaml) > 0 {
+			_ = yaml.Unmarshal(s.oldConfigYaml, &previousCfg)
+		}
+		s.configureUsageStatistics(previousCfg, updatedCfg)
+		s.cfg = updatedCfg
+		s.oldConfigYaml, _ = yaml.Marshal(updatedCfg)
+	})
+	s.configureUsageStatistics(nil, cfg)
 	if optionState.localPassword != "" {
 		s.mgmt.SetLocalPassword(optionState.localPassword)
 	}
@@ -510,6 +536,10 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/usage", s.mgmt.GetUsageStatistics)
 		mgmt.GET("/usage/export", s.mgmt.ExportUsageStatistics)
 		mgmt.POST("/usage/import", s.mgmt.ImportUsageStatistics)
+		mgmt.POST("/usage/reset", s.mgmt.ResetUsageStatistics)
+		mgmt.GET("/usage-statistics-mode", s.mgmt.GetUsageStatisticsMode)
+		mgmt.PUT("/usage-statistics-mode", s.mgmt.PutUsageStatisticsMode)
+		mgmt.PATCH("/usage-statistics-mode", s.mgmt.PutUsageStatisticsMode)
 		mgmt.GET("/config", s.mgmt.GetConfig)
 		mgmt.GET("/config.yaml", s.mgmt.GetConfigYAML)
 		mgmt.PUT("/config.yaml", s.mgmt.PutConfigYAML)
@@ -920,6 +950,12 @@ func (s *Server) Stop(ctx context.Context) error {
 		default:
 		}
 	}
+	if s.usageSnapshotSaver != nil {
+		if err := s.usageSnapshotSaver.Close(); err != nil {
+			log.WithError(err).Warn("failed to flush usage statistics snapshot")
+		}
+		s.usageSnapshotSaver = nil
+	}
 
 	if s.muxHTTPListener != nil {
 		_ = s.muxHTTPListener.Close()
@@ -1000,9 +1036,7 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 		}
 	}
 
-	if oldCfg == nil || oldCfg.UsageStatisticsEnabled != cfg.UsageStatisticsEnabled {
-		usage.SetStatisticsEnabled(cfg.UsageStatisticsEnabled)
-	}
+	s.configureUsageStatistics(oldCfg, cfg)
 
 	if s.requestLogger != nil && (oldCfg == nil || oldCfg.ErrorLogsMaxFiles != cfg.ErrorLogsMaxFiles) {
 		if setter, ok := s.requestLogger.(interface{ SetErrorLogsMaxFiles(int) }); ok {
@@ -1121,6 +1155,58 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 		vertexAICompatCount,
 		openAICompatCount,
 	)
+}
+
+func (s *Server) configureUsageStatistics(oldCfg, cfg *config.Config) {
+	if cfg == nil {
+		return
+	}
+	mode := cfg.EffectiveUsageStatisticsMode()
+	stats := usage.GetRequestStatistics()
+	stats.SetOnChange(nil)
+	if s.usageSnapshotSaver != nil {
+		if err := s.usageSnapshotSaver.Close(); err != nil {
+			log.WithError(err).Warn("failed to flush usage statistics snapshot")
+		}
+		s.usageSnapshotSaver = nil
+	}
+	usage.SetStatisticsEnabled(mode != "off")
+
+	oldMode := ""
+	if oldCfg != nil {
+		oldMode = oldCfg.EffectiveUsageStatisticsMode()
+	}
+	shouldRestore := oldCfg == nil || oldMode != mode
+	store := s.usageSnapshotStore
+	if mode == "persistent" && store != nil {
+		if shouldRestore {
+			snapshot, err := store.Load()
+			if err != nil {
+				log.WithError(err).Warn("failed to load usage statistics snapshot")
+			} else {
+				stats.MergeSnapshot(snapshot)
+				if err := store.Save(stats.Snapshot()); err != nil {
+					log.WithError(err).Warn("failed to save merged usage statistics snapshot")
+				}
+			}
+		}
+		saver := usage.NewSnapshotSaver(store, time.Second)
+		s.usageSnapshotSaver = saver
+		stats.SetOnChange(func(snapshot usage.StatisticsSnapshot) {
+			saver.SaveSoon(snapshot)
+		})
+	}
+
+	if s.mgmt != nil {
+		s.mgmt.SetUsageStatistics(stats)
+		s.mgmt.SetUsageStatisticsMode(mode)
+		s.mgmt.SetUsageSnapshotStore(store)
+		if s.usageSnapshotSaver != nil {
+			s.mgmt.SetUsageSnapshotFlush(s.usageSnapshotSaver.Flush)
+		} else {
+			s.mgmt.SetUsageSnapshotFlush(nil)
+		}
+	}
 }
 
 func (s *Server) SetWebsocketAuthChangeHandler(fn func(bool, bool)) {

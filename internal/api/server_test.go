@@ -13,8 +13,10 @@ import (
 	gin "github.com/gin-gonic/gin"
 	proxyconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	internallogging "github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 )
 
@@ -44,7 +46,57 @@ func newTestServer(t *testing.T) *Server {
 	accessManager := sdkaccess.NewManager()
 
 	configPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("api-keys:\n  - test-key\n"), 0o644); err != nil {
+		t.Fatalf("failed to write test config: %v", err)
+	}
 	return NewServer(cfg, authManager, accessManager, configPath)
+}
+
+func newConfiguredTestServer(t *testing.T, mutate func(*proxyconfig.Config), opts ...ServerOption) *Server {
+	t.Helper()
+
+	gin.SetMode(gin.TestMode)
+
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if err := os.MkdirAll(authDir, 0o700); err != nil {
+		t.Fatalf("failed to create auth dir: %v", err)
+	}
+
+	cfg := &proxyconfig.Config{
+		SDKConfig: sdkconfig.SDKConfig{
+			APIKeys: []string{"test-key"},
+		},
+		Port:                   0,
+		AuthDir:                authDir,
+		Debug:                  true,
+		LoggingToFile:          false,
+		UsageStatisticsEnabled: false,
+	}
+	if mutate != nil {
+		mutate(cfg)
+	}
+
+	authManager := auth.NewManager(nil, nil, nil)
+	accessManager := sdkaccess.NewManager()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("api-keys:\n  - test-key\n"), 0o644); err != nil {
+		t.Fatalf("failed to write test config: %v", err)
+	}
+	return NewServer(cfg, authManager, accessManager, configPath, opts...)
+}
+
+func usageTestRecord() coreusage.Record {
+	return coreusage.Record{
+		Provider: "provider-a",
+		Model:    "model-a",
+		APIKey:   "key-a",
+		Detail: coreusage.Detail{
+			InputTokens:  10,
+			OutputTokens: 20,
+			TotalTokens:  30,
+		},
+	}
 }
 
 func TestHealthz(t *testing.T) {
@@ -147,6 +199,173 @@ func TestAmpProviderModelRoutes(t *testing.T) {
 				t.Fatalf("response body for %s missing %q: %s", tc.path, tc.wantContains, body)
 			}
 		})
+	}
+}
+
+func TestNewServer_UsageStatisticsModeOffDisablesAggregation(t *testing.T) {
+	prevEnabled := usage.StatisticsEnabled()
+	usage.SetStatisticsEnabled(true)
+	t.Cleanup(func() {
+		usage.SetStatisticsEnabled(prevEnabled)
+	})
+
+	stats := usage.GetRequestStatistics()
+	stats.SetOnChange(nil)
+	stats.ResetAll()
+	t.Cleanup(func() {
+		stats.SetOnChange(nil)
+		stats.ResetAll()
+	})
+
+	_ = newConfiguredTestServer(t, func(cfg *proxyconfig.Config) {
+		cfg.UsageStatistics.Mode = "off"
+		cfg.UsageStatisticsEnabled = true
+	})
+
+	if usage.StatisticsEnabled() {
+		t.Fatalf("expected usage aggregation to be disabled when mode is off")
+	}
+}
+
+func TestNewServer_UsageStatisticsModePersistentLoadsSnapshot(t *testing.T) {
+	prevEnabled := usage.StatisticsEnabled()
+	usage.SetStatisticsEnabled(true)
+	t.Cleanup(func() {
+		usage.SetStatisticsEnabled(prevEnabled)
+	})
+
+	stats := usage.GetRequestStatistics()
+	stats.SetOnChange(nil)
+	stats.ResetAll()
+	t.Cleanup(func() {
+		stats.SetOnChange(nil)
+		stats.ResetAll()
+	})
+
+	dir := t.TempDir()
+	snapshotPath := filepath.Join(dir, "usage-statistics.json")
+	store := usage.NewSnapshotStore(snapshotPath)
+	seed := usage.NewRequestStatistics()
+	seed.Record(nil, usageTestRecord())
+	if err := store.Save(seed.Snapshot()); err != nil {
+		t.Fatalf("seed snapshot: %v", err)
+	}
+
+	_ = newConfiguredTestServer(t, func(cfg *proxyconfig.Config) {
+		cfg.UsageStatistics.Mode = "persistent"
+	}, WithUsageStatisticsSnapshotPath(snapshotPath))
+
+	snapshot := usage.GetRequestStatistics().Snapshot()
+	if snapshot.TotalRequests != 1 {
+		t.Fatalf("expected restored snapshot, got %d requests", snapshot.TotalRequests)
+	}
+}
+
+func TestNewServer_UsageStatisticsModePersistentKeepsMalformedSnapshot(t *testing.T) {
+	prevEnabled := usage.StatisticsEnabled()
+	usage.SetStatisticsEnabled(true)
+	t.Cleanup(func() {
+		usage.SetStatisticsEnabled(prevEnabled)
+	})
+
+	stats := usage.GetRequestStatistics()
+	stats.SetOnChange(nil)
+	stats.ResetAll()
+	t.Cleanup(func() {
+		stats.SetOnChange(nil)
+		stats.ResetAll()
+	})
+
+	dir := t.TempDir()
+	snapshotPath := filepath.Join(dir, "usage-statistics.json")
+	malformed := []byte("{malformed")
+	if err := os.WriteFile(snapshotPath, malformed, 0o600); err != nil {
+		t.Fatalf("write malformed snapshot: %v", err)
+	}
+
+	_ = newConfiguredTestServer(t, func(cfg *proxyconfig.Config) {
+		cfg.UsageStatistics.Mode = "persistent"
+	}, WithUsageStatisticsSnapshotPath(snapshotPath))
+
+	got, err := os.ReadFile(snapshotPath)
+	if err != nil {
+		t.Fatalf("read malformed snapshot after server start: %v", err)
+	}
+	if string(got) != string(malformed) {
+		t.Fatalf("server start changed malformed snapshot to %q", string(got))
+	}
+}
+
+func TestNewServer_UsageStatisticsModePersistentSavesMergedInMemorySnapshotImmediately(t *testing.T) {
+	prevEnabled := usage.StatisticsEnabled()
+	usage.SetStatisticsEnabled(true)
+	t.Cleanup(func() {
+		usage.SetStatisticsEnabled(prevEnabled)
+	})
+
+	stats := usage.GetRequestStatistics()
+	stats.SetOnChange(nil)
+	stats.ResetAll()
+	t.Cleanup(func() {
+		stats.SetOnChange(nil)
+		stats.ResetAll()
+	})
+
+	stats.Record(nil, coreusage.Record{
+		Provider: "provider-memory",
+		Model:    "model-memory",
+		APIKey:   "key-memory",
+		Detail: coreusage.Detail{
+			TotalTokens: 7,
+		},
+	})
+
+	dir := t.TempDir()
+	snapshotPath := filepath.Join(dir, "usage-statistics.json")
+	store := usage.NewSnapshotStore(snapshotPath)
+	seed := usage.NewRequestStatistics()
+	seed.Record(nil, usageTestRecord())
+	if err := store.Save(seed.Snapshot()); err != nil {
+		t.Fatalf("seed snapshot: %v", err)
+	}
+
+	_ = newConfiguredTestServer(t, func(cfg *proxyconfig.Config) {
+		cfg.UsageStatistics.Mode = "persistent"
+	}, WithUsageStatisticsSnapshotPath(snapshotPath))
+
+	loaded, err := store.Load()
+	if err != nil {
+		t.Fatalf("load merged snapshot: %v", err)
+	}
+	if loaded.TotalRequests != 2 {
+		t.Fatalf("expected merged snapshot to be saved with 2 requests, got %d", loaded.TotalRequests)
+	}
+}
+
+func TestUsageStatisticsModeEndpointAppliesImmediately(t *testing.T) {
+	prevEnabled := usage.StatisticsEnabled()
+	usage.SetStatisticsEnabled(false)
+	t.Cleanup(func() {
+		usage.SetStatisticsEnabled(prevEnabled)
+	})
+
+	server := newConfiguredTestServer(t, func(cfg *proxyconfig.Config) {
+		cfg.UsageStatistics.Mode = "off"
+	}, WithLocalManagementPassword("local-test-password"))
+
+	body := strings.NewReader(`{"value":"memory"}`)
+	req := httptest.NewRequest(http.MethodPut, "/v0/management/usage-statistics-mode", body)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Management-Key", "local-test-password")
+	req.RemoteAddr = "127.0.0.1:12345"
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if !usage.StatisticsEnabled() {
+		t.Fatalf("expected usage statistics mode update to apply immediately")
 	}
 }
 
