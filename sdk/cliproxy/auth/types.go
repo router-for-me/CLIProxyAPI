@@ -92,6 +92,9 @@ type Auth struct {
 	// Runtime carries non-serialisable data used during execution (in-memory only).
 	Runtime any `json:"-"`
 
+	Success int64 `json:"-"`
+	Failed  int64 `json:"-"`
+
 	recentRequests recentRequestRing `json:"-"`
 	indexAssigned  bool              `json:"-"`
 }

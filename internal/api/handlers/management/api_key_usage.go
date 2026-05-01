@@ -9,6 +9,12 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
+type apiKeyUsageEntry struct {
+	Success        int64                          `json:"success"`
+	Failed         int64                          `json:"failed"`
+	RecentRequests []coreauth.RecentRequestBucket `json:"recent_requests"`
+}
+
 func mergeRecentRequestBuckets(dst, src []coreauth.RecentRequestBucket) []coreauth.RecentRequestBucket {
 	if len(dst) == 0 {
 		return src
@@ -51,7 +57,7 @@ func (h *Handler) GetAPIKeyUsage(c *gin.Context) {
 	}
 
 	now := time.Now()
-	out := make(map[string]map[string][]coreauth.RecentRequestBucket)
+	out := make(map[string]map[string]apiKeyUsageEntry)
 	for _, auth := range manager.List() {
 		if auth == nil {
 			continue
@@ -80,14 +86,21 @@ func (h *Handler) GetAPIKeyUsage(c *gin.Context) {
 		recent := auth.RecentRequestsSnapshot(now)
 		providerBucket, ok := out[provider]
 		if !ok {
-			providerBucket = make(map[string][]coreauth.RecentRequestBucket)
+			providerBucket = make(map[string]apiKeyUsageEntry)
 			out[provider] = providerBucket
 		}
 		if existing, exists := providerBucket[compositeKey]; exists {
-			providerBucket[compositeKey] = mergeRecentRequestBuckets(existing, recent)
+			existing.Success += auth.Success
+			existing.Failed += auth.Failed
+			existing.RecentRequests = mergeRecentRequestBuckets(existing.RecentRequests, recent)
+			providerBucket[compositeKey] = existing
 			continue
 		}
-		providerBucket[compositeKey] = recent
+		providerBucket[compositeKey] = apiKeyUsageEntry{
+			Success:        auth.Success,
+			Failed:         auth.Failed,
+			RecentRequests: recent,
+		}
 	}
 
 	c.JSON(http.StatusOK, out)

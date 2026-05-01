@@ -62,6 +62,13 @@ func TestListAuthFiles_IncludesRecentRequestsBuckets(t *testing.T) {
 		t.Fatalf("expected file entry object, got %#v", filesRaw[0])
 	}
 
+	if _, ok := fileEntry["success"].(float64); !ok {
+		t.Fatalf("expected success number, got %#v", fileEntry["success"])
+	}
+	if _, ok := fileEntry["failed"].(float64); !ok {
+		t.Fatalf("expected failed number, got %#v", fileEntry["failed"])
+	}
+
 	recentRaw, ok := fileEntry["recent_requests"].([]any)
 	if !ok {
 		t.Fatalf("expected recent_requests array, got %#v", fileEntry["recent_requests"])

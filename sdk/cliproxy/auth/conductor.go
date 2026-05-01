@@ -1126,6 +1126,9 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 			auth.Index = existing.Index
 			auth.indexAssigned = existing.indexAssigned
 		}
+		auth.Success = existing.Success
+		auth.Failed = existing.Failed
+		auth.recentRequests = existing.recentRequests
 		if !existing.Disabled && existing.Status != StatusDisabled && !auth.Disabled && auth.Status != StatusDisabled {
 			if len(auth.ModelStates) == 0 && len(existing.ModelStates) > 0 {
 				auth.ModelStates = existing.ModelStates
@@ -2022,6 +2025,11 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	if auth, ok := m.auths[result.AuthID]; ok && auth != nil {
 		now := time.Now()
 		auth.recordRecentRequest(now, result.Success)
+		if result.Success {
+			auth.Success++
+		} else {
+			auth.Failed++
+		}
 
 		if result.Success {
 			if result.Model != "" {
