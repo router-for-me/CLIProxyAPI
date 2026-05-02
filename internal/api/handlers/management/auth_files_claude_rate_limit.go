@@ -80,9 +80,22 @@ func buildClaudeRateLimitEntry(auth *coreauth.Auth) gin.H {
 			if window.SurpassedThreshold != 0 {
 				windowEntry["surpassed_threshold"] = window.SurpassedThreshold
 			}
-			windows[slug] = windowEntry
+			// Skip windows where no field survived omitempty gating. A slug
+			// whose only header was malformed (e.g. `unified-5h-reset: garbage`)
+			// still seeds an entry in hint.Windows on the parser side; emitting
+			// `"5h": {}` here would fabricate structured window data that tells
+			// consumers nothing actionable and invites them to treat window
+			// presence as meaningful. The forensic signal stays in raw_headers.
+			if len(windowEntry) > 0 {
+				windows[slug] = windowEntry
+			}
 		}
-		out["windows"] = windows
+		// And drop the windows key entirely if every per-slug entry got
+		// dropped — otherwise we'd surface `"windows": {}`. Mirrors the
+		// top-level `if len(out) == 0` guard one level deeper.
+		if len(windows) > 0 {
+			out["windows"] = windows
+		}
 	}
 
 	if len(hint.RawHeaders) > 0 {

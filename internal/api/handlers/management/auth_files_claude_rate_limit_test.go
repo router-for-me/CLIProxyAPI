@@ -293,6 +293,98 @@ func TestBuildClaudeRateLimitEntry_OmitsUtilizationWhenAbsent(t *testing.T) {
 	}
 }
 
+// TestBuildClaudeRateLimitEntry_OmitsEmptyWindow asserts that a slug whose
+// fields all parsed to empty/zero (e.g. only a malformed
+// `unified-5h-reset: garbage` arrived) is dropped from structured output
+// rather than surfaced as `"5h": {}`. The forensic signal — the literal
+// header value — remains accessible via raw_headers.
+func TestBuildClaudeRateLimitEntry_OmitsEmptyWindow(t *testing.T) {
+	auth := &coreauth.Auth{
+		ID:       "claude-test-empty-window-mixed@example.com",
+		Provider: "claude",
+	}
+	resetClaudeRateLimitHint(t, auth.ID)
+
+	resetTime := time.Unix(1777500000, 0).UTC()
+	hint := coreauth.AnthropicRateLimitHint{
+		Known:      true,
+		ObservedAt: fixedObservedAt(),
+		Status:     "allowed",
+		Windows: map[string]coreauth.AnthropicQuotaWindow{
+			"5h": {
+				Status:         "allowed",
+				Reset:          resetTime,
+				Utilization:    0.4,
+				HasUtilization: true,
+			},
+			// All fields zero/empty: simulates a slug that only saw a
+			// malformed header on the parser side.
+			"7d": {},
+		},
+		RawHeaders: map[string]string{
+			"anthropic-ratelimit-unified-7d-reset": "garbage",
+		},
+	}
+	coreauth.SetAnthropicRateLimitHint(auth.ID, hint)
+
+	got := buildClaudeRateLimitEntry(auth)
+	if got == nil {
+		t.Fatal("expected non-nil entry")
+	}
+
+	windows, ok := got["windows"].(gin.H)
+	if !ok {
+		t.Fatalf("windows: expected gin.H, got %T", got["windows"])
+	}
+	if _, present := windows["7d"]; present {
+		t.Errorf("windows[7d]: empty window must not be emitted (got %v)", windows["7d"])
+	}
+	if _, present := windows["5h"]; !present {
+		t.Error("windows[5h]: expected populated window to survive")
+	}
+
+	rawHeaders, ok := got["raw_headers"].(map[string]string)
+	if !ok {
+		t.Fatalf("raw_headers: expected map[string]string, got %T", got["raw_headers"])
+	}
+	if rawHeaders["anthropic-ratelimit-unified-7d-reset"] != "garbage" {
+		t.Error("raw_headers must preserve the malformed header for forensic visibility")
+	}
+}
+
+// TestBuildClaudeRateLimitEntry_OmitsWindowsKeyWhenAllEmpty asserts that
+// `windows` is dropped entirely (not emitted as `{}`) when every slug got
+// gated out. Top-level fields still surface.
+func TestBuildClaudeRateLimitEntry_OmitsWindowsKeyWhenAllEmpty(t *testing.T) {
+	auth := &coreauth.Auth{
+		ID:       "claude-test-empty-window-all@example.com",
+		Provider: "claude",
+	}
+	resetClaudeRateLimitHint(t, auth.ID)
+
+	hint := coreauth.AnthropicRateLimitHint{
+		Known:      true,
+		ObservedAt: fixedObservedAt(),
+		Status:     "allowed",
+		Windows: map[string]coreauth.AnthropicQuotaWindow{
+			"5h": {},
+			"7d": {},
+		},
+	}
+	coreauth.SetAnthropicRateLimitHint(auth.ID, hint)
+
+	got := buildClaudeRateLimitEntry(auth)
+	if got == nil {
+		t.Fatal("expected non-nil entry (top-level status should survive)")
+	}
+	if _, present := got["windows"]; present {
+		t.Errorf("windows: expected key to be omitted entirely when all slugs are empty, got %v", got["windows"])
+	}
+	if got["status"] != "allowed" {
+		t.Errorf("status = %v want allowed", got["status"])
+	}
+}
+
 func TestBuildClaudeRateLimitEntry_ProviderCasingIsTolerant(t *testing.T) {
 	for _, providerCasing := range []string{"claude", "Claude", "CLAUDE", "  claude  "} {
 		auth := &coreauth.Auth{
