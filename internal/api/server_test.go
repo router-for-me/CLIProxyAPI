@@ -13,6 +13,8 @@ import (
 	gin "github.com/gin-gonic/gin"
 	proxyconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	internallogging "github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/redisqueue"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
@@ -44,7 +46,36 @@ func newTestServer(t *testing.T) *Server {
 	accessManager := sdkaccess.NewManager()
 
 	configPath := filepath.Join(tmpDir, "config.yaml")
-	return NewServer(cfg, authManager, accessManager, configPath)
+	server := NewServer(cfg, authManager, accessManager, configPath)
+	t.Cleanup(func() {
+		if err := usage.CloseDefaultStore(); err != nil {
+			t.Errorf("failed to close usage store: %v", err)
+		}
+	})
+	return server
+}
+
+func TestNewServerAppliesInitialUsageStatisticsToggles(t *testing.T) {
+	previousUsageEnabled := usage.StatisticsEnabled()
+	previousRedisQueueUsageEnabled := redisqueue.UsageStatisticsEnabled()
+	t.Cleanup(func() {
+		usage.SetStatisticsEnabled(previousUsageEnabled)
+		redisqueue.SetUsageStatisticsEnabled(previousRedisQueueUsageEnabled)
+	})
+
+	usage.SetStatisticsEnabled(true)
+	redisqueue.SetUsageStatisticsEnabled(true)
+
+	server := newTestServer(t)
+	if server == nil {
+		t.Fatal("NewServer returned nil")
+	}
+	if usage.StatisticsEnabled() {
+		t.Fatal("expected NewServer to disable internal usage statistics from config")
+	}
+	if redisqueue.UsageStatisticsEnabled() {
+		t.Fatal("expected NewServer to disable redisqueue usage statistics from config")
+	}
 }
 
 func TestHealthz(t *testing.T) {

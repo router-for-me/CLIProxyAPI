@@ -102,10 +102,11 @@ func RecordAPIRequest(ctx context.Context, cfg *config.Config, info UpstreamRequ
 
 // RecordAPIResponseMetadata captures upstream response status/header information for the latest attempt.
 func RecordAPIResponseMetadata(ctx context.Context, cfg *config.Config, status int, headers http.Header) {
+	ginCtx := ginContextFrom(ctx)
+	markAPIResponseTimestamp(ginCtx)
 	if cfg == nil || !cfg.RequestLog {
 		return
 	}
-	ginCtx := ginContextFrom(ctx)
 	if ginCtx == nil {
 		return
 	}
@@ -153,14 +154,15 @@ func RecordAPIResponseError(ctx context.Context, cfg *config.Config, err error) 
 
 // AppendAPIResponseChunk appends an upstream response chunk to Gin context for request logging.
 func AppendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byte) {
-	if cfg == nil || !cfg.RequestLog {
-		return
-	}
 	data := bytes.TrimSpace(chunk)
 	if len(data) == 0 {
 		return
 	}
 	ginCtx := ginContextFrom(ctx)
+	markAPIResponseTimestamp(ginCtx)
+	if cfg == nil || !cfg.RequestLog {
+		return
+	}
 	if ginCtx == nil {
 		return
 	}
@@ -227,10 +229,11 @@ func RecordAPIWebsocketRequest(ctx context.Context, cfg *config.Config, info Ups
 
 // RecordAPIWebsocketHandshake stores the upstream websocket handshake response metadata.
 func RecordAPIWebsocketHandshake(ctx context.Context, cfg *config.Config, status int, headers http.Header) {
+	ginCtx := ginContextFrom(ctx)
+	markAPIResponseTimestamp(ginCtx)
 	if cfg == nil || !cfg.RequestLog {
 		return
 	}
-	ginCtx := ginContextFrom(ctx)
 	if ginCtx == nil {
 		return
 	}
@@ -284,18 +287,18 @@ func WebsocketUpgradeRequestURL(rawURL string) string {
 
 // AppendAPIWebsocketResponse stores an upstream websocket response frame in Gin context.
 func AppendAPIWebsocketResponse(ctx context.Context, cfg *config.Config, payload []byte) {
-	if cfg == nil || !cfg.RequestLog {
-		return
-	}
 	data := bytes.TrimSpace(payload)
 	if len(data) == 0 {
 		return
 	}
 	ginCtx := ginContextFrom(ctx)
+	markAPIResponseTimestamp(ginCtx)
+	if cfg == nil || !cfg.RequestLog {
+		return
+	}
 	if ginCtx == nil {
 		return
 	}
-	markAPIResponseTimestamp(ginCtx)
 
 	builder := &strings.Builder{}
 	builder.WriteString(fmt.Sprintf("Timestamp: %s\n", time.Now().Format(time.RFC3339Nano)))
@@ -427,6 +430,11 @@ func appendAPIWebsocketTimeline(ginCtx *gin.Context, chunk []byte) {
 		}
 	}
 	ginCtx.Set(apiWebsocketTimelineKey, bytes.Clone(data))
+}
+
+// MarkAPIResponseTimestamp records the first API response timestamp in Gin context when available.
+func MarkAPIResponseTimestamp(ctx context.Context) {
+	markAPIResponseTimestamp(ginContextFrom(ctx))
 }
 
 func markAPIResponseTimestamp(ginCtx *gin.Context) {

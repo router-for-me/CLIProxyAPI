@@ -1,79 +1,101 @@
 package management
 
 import (
-	"encoding/json"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 )
 
-type usageExportPayload struct {
-	Version    int                      `json:"version"`
-	ExportedAt time.Time                `json:"exported_at"`
-	Usage      usage.StatisticsSnapshot `json:"usage"`
+type deleteUsageRequest struct {
+	IDs []string `json:"ids"`
 }
 
-type usageImportPayload struct {
-	Version int                      `json:"version"`
-	Usage   usage.StatisticsSnapshot `json:"usage"`
-}
-
-// GetUsageStatistics returns the in-memory request statistics snapshot.
+// GetUsageStatistics returns persisted request usage grouped by API key and model.
 func (h *Handler) GetUsageStatistics(c *gin.Context) {
-	var snapshot usage.StatisticsSnapshot
-	if h != nil && h.usageStats != nil {
-		snapshot = h.usageStats.Snapshot()
-	}
-	c.JSON(http.StatusOK, gin.H{
-		"usage":           snapshot,
-		"failed_requests": snapshot.FailureCount,
-	})
-}
-
-// ExportUsageStatistics returns a complete usage snapshot for backup/migration.
-func (h *Handler) ExportUsageStatistics(c *gin.Context) {
-	var snapshot usage.StatisticsSnapshot
-	if h != nil && h.usageStats != nil {
-		snapshot = h.usageStats.Snapshot()
-	}
-	c.JSON(http.StatusOK, usageExportPayload{
-		Version:    1,
-		ExportedAt: time.Now().UTC(),
-		Usage:      snapshot,
-	})
-}
-
-// ImportUsageStatistics merges a previously exported usage snapshot into memory.
-func (h *Handler) ImportUsageStatistics(c *gin.Context) {
-	if h == nil || h.usageStats == nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "usage statistics unavailable"})
+	rng, ok := parseUsageRange(c)
+	if !ok {
 		return
 	}
 
-	data, err := c.GetRawData()
+	store := h.currentUsageStore()
+	if store == nil {
+		c.JSON(http.StatusOK, usage.APIUsage{})
+		return
+	}
+
+	result, err := store.Query(c.Request.Context(), rng)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "failed to read request body"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to query usage"})
+		return
+	}
+	c.JSON(http.StatusOK, result)
+}
+
+// DeleteUsageRecords removes persisted usage records by record ID.
+func (h *Handler) DeleteUsageRecords(c *gin.Context) {
+	store := h.currentUsageStore()
+	if store == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "usage store unavailable"})
 		return
 	}
 
-	var payload usageImportPayload
-	if err := json.Unmarshal(data, &payload); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid json"})
-		return
-	}
-	if payload.Version != 0 && payload.Version != 1 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "unsupported version"})
+	var body deleteUsageRequest
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
 		return
 	}
 
-	result := h.usageStats.MergeSnapshot(payload.Usage)
-	snapshot := h.usageStats.Snapshot()
-	c.JSON(http.StatusOK, gin.H{
-		"added":           result.Added,
-		"skipped":         result.Skipped,
-		"total_requests":  snapshot.TotalRequests,
-		"failed_requests": snapshot.FailureCount,
-	})
+	ids := make([]string, 0, len(body.IDs))
+	seen := make(map[string]struct{}, len(body.IDs))
+	for _, id := range body.IDs {
+		trimmed := strings.TrimSpace(id)
+		if trimmed == "" {
+			continue
+		}
+		if _, exists := seen[trimmed]; exists {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		ids = append(ids, trimmed)
+	}
+	if len(ids) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "ids required"})
+		return
+	}
+
+	result, err := store.Delete(c.Request.Context(), ids)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete usage records"})
+		return
+	}
+	c.JSON(http.StatusOK, result)
+}
+
+func parseUsageRange(c *gin.Context) (usage.QueryRange, bool) {
+	var rng usage.QueryRange
+
+	if rawStart := strings.TrimSpace(c.Query("start")); rawStart != "" {
+		start, err := time.Parse(time.RFC3339, rawStart)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid start"})
+			return rng, false
+		}
+		start = start.UTC()
+		rng.Start = &start
+	}
+
+	if rawEnd := strings.TrimSpace(c.Query("end")); rawEnd != "" {
+		end, err := time.Parse(time.RFC3339, rawEnd)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid end"})
+			return rng, false
+		}
+		end = end.UTC()
+		rng.End = &end
+	}
+
+	return rng, true
 }

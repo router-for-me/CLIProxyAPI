@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	"github.com/tidwall/gjson"
@@ -16,15 +17,17 @@ import (
 )
 
 type UsageReporter struct {
-	provider    string
-	model       string
-	authID      string
-	authIndex   string
-	authType    string
-	apiKey      string
-	source      string
-	requestedAt time.Time
-	once        sync.Once
+	provider       string
+	model          string
+	authID         string
+	authIndex      string
+	authType       string
+	apiKey         string
+	source         string
+	requestedAt    time.Time
+	thinkingEffort string
+	thinkingOnce   sync.Once
+	once           sync.Once
 }
 
 func NewUsageReporter(ctx context.Context, provider, model string, auth *cliproxyauth.Auth) *UsageReporter {
@@ -48,15 +51,24 @@ func (r *UsageReporter) Publish(ctx context.Context, detail usage.Detail) {
 	r.publishWithOutcome(ctx, detail, false)
 }
 
+func (r *UsageReporter) CaptureThinkingEffort(body []byte, model, fromFormat, toFormat string) {
+	if r == nil {
+		return
+	}
+	r.thinkingOnce.Do(func() {
+		r.thinkingEffort = thinking.ExtractEffort(body, model, fromFormat, toFormat)
+	})
+}
+
 func (r *UsageReporter) PublishAdditionalModel(ctx context.Context, model string, detail usage.Detail) {
-	record, ok := r.buildAdditionalModelRecord(model, detail)
+	record, ok := r.buildAdditionalModelRecord(ctx, model, detail)
 	if !ok {
 		return
 	}
 	usage.PublishRecord(ctx, record)
 }
 
-func (r *UsageReporter) buildAdditionalModelRecord(model string, detail usage.Detail) (usage.Record, bool) {
+func (r *UsageReporter) buildAdditionalModelRecord(ctx context.Context, model string, detail usage.Detail) (usage.Record, bool) {
 	if r == nil {
 		return usage.Record{}, false
 	}
@@ -68,7 +80,7 @@ func (r *UsageReporter) buildAdditionalModelRecord(model string, detail usage.De
 	if !hasNonZeroTokenUsage(detail) {
 		return usage.Record{}, false
 	}
-	return r.buildRecordForModel(model, detail, false), true
+	return r.buildRecordForModel(ctx, model, detail, false), true
 }
 
 func (r *UsageReporter) PublishFailure(ctx context.Context) {
@@ -90,7 +102,7 @@ func (r *UsageReporter) publishWithOutcome(ctx context.Context, detail usage.Det
 	}
 	detail = normalizeUsageDetailTotal(detail)
 	r.once.Do(func() {
-		usage.PublishRecord(ctx, r.buildRecord(detail, failed))
+		usage.PublishRecord(ctx, r.buildRecord(ctx, detail, failed))
 	})
 }
 
@@ -121,33 +133,35 @@ func (r *UsageReporter) EnsurePublished(ctx context.Context) {
 		return
 	}
 	r.once.Do(func() {
-		usage.PublishRecord(ctx, r.buildRecord(usage.Detail{}, false))
+		usage.PublishRecord(ctx, r.buildRecord(ctx, usage.Detail{}, false))
 	})
 }
 
-func (r *UsageReporter) buildRecord(detail usage.Detail, failed bool) usage.Record {
+func (r *UsageReporter) buildRecord(ctx context.Context, detail usage.Detail, failed bool) usage.Record {
 	if r == nil {
 		return usage.Record{Detail: detail, Failed: failed}
 	}
-	return r.buildRecordForModel(r.model, detail, failed)
+	return r.buildRecordForModel(ctx, r.model, detail, failed)
 }
 
-func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, failed bool) usage.Record {
+func (r *UsageReporter) buildRecordForModel(ctx context.Context, model string, detail usage.Detail, failed bool) usage.Record {
 	if r == nil {
 		return usage.Record{Model: model, Detail: detail, Failed: failed}
 	}
 	return usage.Record{
-		Provider:    r.provider,
-		Model:       model,
-		Source:      r.source,
-		APIKey:      r.apiKey,
-		AuthID:      r.authID,
-		AuthIndex:   r.authIndex,
-		AuthType:    r.authType,
-		RequestedAt: r.requestedAt,
-		Latency:     r.latency(),
-		Failed:      failed,
-		Detail:      detail,
+		Provider:         r.provider,
+		Model:            model,
+		Source:           r.source,
+		APIKey:           r.apiKey,
+		AuthID:           r.authID,
+		AuthIndex:        r.authIndex,
+		AuthType:         r.authType,
+		RequestedAt:      r.requestedAt,
+		Latency:          r.latency(),
+		FirstByteLatency: r.firstByteLatency(ctx),
+		ThinkingEffort:   r.thinkingEffort,
+		Failed:           failed,
+		Detail:           detail,
 	}
 }
 
@@ -160,6 +174,25 @@ func (r *UsageReporter) latency() time.Duration {
 		return 0
 	}
 	return latency
+}
+
+func (r *UsageReporter) firstByteLatency(ctx context.Context) time.Duration {
+	if r == nil || r.requestedAt.IsZero() || ctx == nil {
+		return 0
+	}
+	ginCtx, ok := ctx.Value("gin").(*gin.Context)
+	if !ok || ginCtx == nil {
+		return 0
+	}
+	raw, exists := ginCtx.Get("API_RESPONSE_TIMESTAMP")
+	if !exists {
+		return 0
+	}
+	timestamp, ok := raw.(time.Time)
+	if !ok || timestamp.IsZero() || timestamp.Before(r.requestedAt) {
+		return 0
+	}
+	return timestamp.Sub(r.requestedAt)
 }
 
 func APIKeyFromContext(ctx context.Context) string {

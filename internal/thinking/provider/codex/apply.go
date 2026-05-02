@@ -29,7 +29,9 @@ func NewApplier() *Applier {
 }
 
 func init() {
-	thinking.RegisterProvider("codex", NewApplier())
+	applier := NewApplier()
+	thinking.RegisterProvider("codex", applier)
+	thinking.RegisterProvider("openai-response", applier)
 }
 
 // Apply applies thinking configuration to Codex request body.

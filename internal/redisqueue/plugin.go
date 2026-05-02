@@ -7,7 +7,6 @@ import (
 	"time"
 
 	internallogging "github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
-	internalusage "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 )
 
@@ -21,7 +20,7 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 	if p == nil {
 		return
 	}
-	if !Enabled() || !internalusage.StatisticsEnabled() {
+	if !Enabled() || !UsageStatisticsEnabled() {
 		return
 	}
 
@@ -45,7 +44,7 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 	apiKey := strings.TrimSpace(record.APIKey)
 	requestID := strings.TrimSpace(internallogging.GetRequestID(ctx))
 
-	tokens := internalusage.TokenStats{
+	tokens := tokenStats{
 		InputTokens:     record.Detail.InputTokens,
 		OutputTokens:    record.Detail.OutputTokens,
 		ReasoningTokens: record.Detail.ReasoningTokens,
@@ -59,22 +58,38 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 		tokens.TotalTokens = tokens.InputTokens + tokens.OutputTokens + tokens.ReasoningTokens + tokens.CachedTokens
 	}
 
+	latencyMs := record.Latency.Milliseconds()
+	firstByteLatencyMs := record.FirstByteLatency.Milliseconds()
+	if latencyMs < 0 {
+		latencyMs = 0
+	}
+	if firstByteLatencyMs < 0 {
+		firstByteLatencyMs = 0
+	}
+	generationMs := latencyMs - firstByteLatencyMs
+	if generationMs < 0 {
+		generationMs = 0
+	}
+
 	failed := record.Failed
 	if !failed {
 		failed = !resolveSuccess(ctx)
 	}
 
-	detail := internalusage.RequestDetail{
-		Timestamp: timestamp,
-		LatencyMs: record.Latency.Milliseconds(),
-		Source:    record.Source,
-		AuthIndex: record.AuthIndex,
-		Tokens:    tokens,
-		Failed:    failed,
+	detail := requestDetail{
+		Timestamp:          timestamp,
+		LatencyMs:          latencyMs,
+		FirstByteLatencyMs: firstByteLatencyMs,
+		GenerationMs:       generationMs,
+		Source:             record.Source,
+		AuthIndex:          record.AuthIndex,
+		ThinkingEffort:     record.ThinkingEffort,
+		Tokens:             tokens,
+		Failed:             failed,
 	}
 
 	payload, err := json.Marshal(queuedUsageDetail{
-		RequestDetail: detail,
+		requestDetail: detail,
 		Provider:      provider,
 		Model:         modelName,
 		Endpoint:      resolveEndpoint(ctx),
@@ -88,8 +103,29 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 	Enqueue(payload)
 }
 
+type requestDetail struct {
+	ID                 string     `json:"id"`
+	Timestamp          time.Time  `json:"timestamp"`
+	LatencyMs          int64      `json:"latency_ms"`
+	FirstByteLatencyMs int64      `json:"first_byte_latency_ms"`
+	GenerationMs       int64      `json:"generation_ms"`
+	Source             string     `json:"source"`
+	AuthIndex          string     `json:"auth_index"`
+	ThinkingEffort     string     `json:"thinking_effort"`
+	Tokens             tokenStats `json:"tokens"`
+	Failed             bool       `json:"failed"`
+}
+
+type tokenStats struct {
+	InputTokens     int64 `json:"input_tokens"`
+	OutputTokens    int64 `json:"output_tokens"`
+	ReasoningTokens int64 `json:"reasoning_tokens"`
+	CachedTokens    int64 `json:"cached_tokens"`
+	TotalTokens     int64 `json:"total_tokens"`
+}
+
 type queuedUsageDetail struct {
-	internalusage.RequestDetail
+	requestDetail
 	Provider  string `json:"provider"`
 	Model     string `json:"model"`
 	Endpoint  string `json:"endpoint"`

@@ -10,17 +10,19 @@ import (
 
 // Record contains the usage statistics captured for a single provider request.
 type Record struct {
-	Provider    string
-	Model       string
-	APIKey      string
-	AuthID      string
-	AuthIndex   string
-	AuthType    string
-	Source      string
-	RequestedAt time.Time
-	Latency     time.Duration
-	Failed      bool
-	Detail      Detail
+	Provider         string
+	Model            string
+	APIKey           string
+	AuthID           string
+	AuthIndex        string
+	AuthType         string
+	Source           string
+	RequestedAt      time.Time
+	Latency          time.Duration
+	FirstByteLatency time.Duration
+	ThinkingEffort   string
+	Failed           bool
+	Detail           Detail
 }
 
 // Detail holds the token usage breakdown.
@@ -44,9 +46,11 @@ type queueItem struct {
 
 // Manager maintains a queue of usage records and delivers them to registered plugins.
 type Manager struct {
-	once     sync.Once
-	stopOnce sync.Once
-	cancel   context.CancelFunc
+	once        sync.Once
+	stopOnce    sync.Once
+	lifecycleMu sync.Mutex
+	wg          sync.WaitGroup
+	cancel      context.CancelFunc
 
 	mu     sync.Mutex
 	cond   *sync.Cond
@@ -73,9 +77,15 @@ func (m *Manager) Start(ctx context.Context) {
 		if ctx == nil {
 			ctx = context.Background()
 		}
-		var workerCtx context.Context
-		workerCtx, m.cancel = context.WithCancel(ctx)
-		go m.run(workerCtx)
+		workerCtx, cancel := context.WithCancel(ctx)
+		m.lifecycleMu.Lock()
+		m.cancel = cancel
+		m.wg.Add(1)
+		m.lifecycleMu.Unlock()
+		go func() {
+			defer m.wg.Done()
+			m.run(workerCtx)
+		}()
 	})
 }
 
@@ -84,15 +94,24 @@ func (m *Manager) Stop() {
 	if m == nil {
 		return
 	}
+	m.lifecycleMu.Lock()
 	m.stopOnce.Do(func() {
 		if m.cancel != nil {
 			m.cancel()
 		}
-		m.mu.Lock()
-		m.closed = true
-		m.mu.Unlock()
-		m.cond.Broadcast()
+		m.closeQueue()
 	})
+	m.wg.Wait()
+	m.lifecycleMu.Unlock()
+}
+
+func (m *Manager) closeQueue() {
+	m.mu.Lock()
+	if !m.closed {
+		m.closed = true
+		m.cond.Broadcast()
+	}
+	m.mu.Unlock()
 }
 
 // Register appends a plugin to the delivery list.
@@ -124,6 +143,18 @@ func (m *Manager) Publish(ctx context.Context, record Record) {
 }
 
 func (m *Manager) run(ctx context.Context) {
+	done := make(chan struct{})
+	if ctx != nil {
+		go func() {
+			select {
+			case <-ctx.Done():
+				m.closeQueue()
+			case <-done:
+			}
+		}()
+	}
+	defer close(done)
+
 	for {
 		m.mu.Lock()
 		for !m.closed && len(m.queue) == 0 {

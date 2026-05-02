@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -30,6 +31,14 @@ func TestGeminiExecutorRecordsSuccessfulZeroUsageInStatistics(t *testing.T) {
 	}))
 	defer server.Close()
 
+	store, err := internalusage.NewSQLiteStore(filepath.Join(t.TempDir(), "usage.db"))
+	if err != nil {
+		t.Fatalf("NewSQLiteStore() error = %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	restoreStore := internalusage.SetDefaultStoreForTest(store)
+	t.Cleanup(restoreStore)
+
 	executor := runtimeexecutor.NewGeminiExecutor(&config.Config{})
 	auth := &cliproxyauth.Auth{
 		Provider: "gemini",
@@ -48,7 +57,7 @@ func TestGeminiExecutorRecordsSuccessfulZeroUsageInStatistics(t *testing.T) {
 		internalusage.SetStatisticsEnabled(prevStatsEnabled)
 	})
 
-	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+	_, err = executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
 		Model:   model,
 		Payload: []byte(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`),
 	}, cliproxyexecutor.Options{
@@ -59,7 +68,13 @@ func TestGeminiExecutorRecordsSuccessfulZeroUsageInStatistics(t *testing.T) {
 		t.Fatalf("Execute error: %v", err)
 	}
 
-	detail := waitForStatisticsDetail(t, "gemini", model, source)
+	detail := waitForStatisticsDetail(t, store, "gemini", model, source)
+	if detail.ID == "" {
+		t.Fatalf("detail ID is empty")
+	}
+	if detail.LatencyMs < 0 || detail.FirstByteLatencyMs < 0 || detail.GenerationMs < 0 {
+		t.Fatalf("latency fields must be non-negative: latency=%d first_byte=%d generation=%d", detail.LatencyMs, detail.FirstByteLatencyMs, detail.GenerationMs)
+	}
 	if detail.Failed {
 		t.Fatalf("detail failed = true, want false")
 	}
@@ -68,23 +83,16 @@ func TestGeminiExecutorRecordsSuccessfulZeroUsageInStatistics(t *testing.T) {
 	}
 }
 
-func waitForStatisticsDetail(t *testing.T, apiName, model, source string) internalusage.RequestDetail {
+func waitForStatisticsDetail(t *testing.T, store internalusage.Store, apiName, model, source string) internalusage.RequestDetail {
 	t.Helper()
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		snapshot := internalusage.GetRequestStatistics().Snapshot()
-		apiSnapshot, ok := snapshot.APIs[apiName]
-		if !ok {
-			time.Sleep(10 * time.Millisecond)
-			continue
+		usageByAPI, err := store.Query(context.Background(), internalusage.QueryRange{})
+		if err != nil {
+			t.Fatalf("Query() error = %v", err)
 		}
-		modelSnapshot, ok := apiSnapshot.Models[model]
-		if !ok {
-			time.Sleep(10 * time.Millisecond)
-			continue
-		}
-		for _, detail := range modelSnapshot.Details {
+		for _, detail := range usageByAPI[apiName][model] {
 			if detail.Source == source {
 				return detail
 			}

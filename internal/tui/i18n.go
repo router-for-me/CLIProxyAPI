@@ -50,8 +50,8 @@ var locales = map[string]map[string]string{
 // ──────────────────────────────────────────
 // Tab names
 // ──────────────────────────────────────────
-var zhTabNames = []string{"仪表盘", "配置", "认证文件", "API 密钥", "OAuth", "使用统计", "日志"}
-var enTabNames = []string{"Dashboard", "Config", "Auth Files", "API Keys", "OAuth", "Usage", "Logs"}
+var zhTabNames = []string{"仪表盘", "配置", "认证文件", "API 密钥", "OAuth", "日志"}
+var enTabNames = []string{"Dashboard", "Config", "Auth Files", "API Keys", "OAuth", "Logs"}
 
 // TabNames returns tab names in the current locale.
 func TabNames() []string {
@@ -101,10 +101,6 @@ var zhStrings = map[string]string{
 	"mgmt_keys":        "管理密钥",
 	"auth_files_label": "认证文件",
 	"active_suffix":    "活跃",
-	"total_requests":   "请求",
-	"success_label":    "成功",
-	"failure_label":    "失败",
-	"total_tokens":     "总 Tokens",
 	"current_config":   "当前配置",
 	"debug_mode":       "启用调试模式",
 	"usage_stats":      "启用使用统计",
@@ -112,10 +108,6 @@ var zhStrings = map[string]string{
 	"retry_count":      "重试次数",
 	"proxy_url":        "代理 URL",
 	"routing_strategy": "路由策略",
-	"model_stats":      "模型统计",
-	"model":            "模型",
-	"requests":         "请求数",
-	"tokens":           "Tokens",
 	"bool_yes":         "是 ✓",
 	"bool_no":          "否",
 
@@ -182,27 +174,6 @@ var zhStrings = map[string]string{
 	"oauth_submit_fail":  "✗ 提交回调失败",
 	"oauth_waiting":      "  等待认证中...",
 
-	// ── Usage ──
-	"usage_title":         "📈 使用统计",
-	"usage_help":          " [r] 刷新 • [↑↓] 滚动",
-	"usage_no_data":       "  使用数据不可用",
-	"usage_total_reqs":    "总请求数",
-	"usage_total_tokens":  "总 Token 数",
-	"usage_success":       "成功",
-	"usage_failure":       "失败",
-	"usage_total_token_l": "总Token",
-	"usage_rpm":           "RPM",
-	"usage_tpm":           "TPM",
-	"usage_req_by_hour":   "请求趋势 (按小时)",
-	"usage_tok_by_hour":   "Token 使用趋势 (按小时)",
-	"usage_req_by_day":    "请求趋势 (按天)",
-	"usage_api_detail":    "API 详细统计",
-	"usage_input":         "输入",
-	"usage_output":        "输出",
-	"usage_cached":        "缓存",
-	"usage_reasoning":     "思考",
-	"usage_time":          "时间",
-
 	// ── Logs ──
 	"logs_title":       "📋 日志",
 	"logs_auto_scroll": "● 自动滚动",
@@ -253,10 +224,6 @@ var enStrings = map[string]string{
 	"mgmt_keys":        "Mgmt Keys",
 	"auth_files_label": "Auth Files",
 	"active_suffix":    "active",
-	"total_requests":   "Requests",
-	"success_label":    "Success",
-	"failure_label":    "Failed",
-	"total_tokens":     "Total Tokens",
 	"current_config":   "Current Config",
 	"debug_mode":       "Debug Mode",
 	"usage_stats":      "Usage Statistics",
@@ -264,10 +231,6 @@ var enStrings = map[string]string{
 	"retry_count":      "Retry Count",
 	"proxy_url":        "Proxy URL",
 	"routing_strategy": "Routing Strategy",
-	"model_stats":      "Model Stats",
-	"model":            "Model",
-	"requests":         "Requests",
-	"tokens":           "Tokens",
 	"bool_yes":         "Yes ✓",
 	"bool_no":          "No",
 
@@ -333,27 +296,6 @@ var enStrings = map[string]string{
 	"oauth_submit_ok":    "✓ Callback submitted, waiting...",
 	"oauth_submit_fail":  "✗ Callback submission failed",
 	"oauth_waiting":      "  Waiting for authentication...",
-
-	// ── Usage ──
-	"usage_title":         "📈 Usage Statistics",
-	"usage_help":          " [r] Refresh • [↑↓] Scroll",
-	"usage_no_data":       "  Usage data not available",
-	"usage_total_reqs":    "Total Requests",
-	"usage_total_tokens":  "Total Tokens",
-	"usage_success":       "Success",
-	"usage_failure":       "Failed",
-	"usage_total_token_l": "Total Tokens",
-	"usage_rpm":           "RPM",
-	"usage_tpm":           "TPM",
-	"usage_req_by_hour":   "Requests by Hour",
-	"usage_tok_by_hour":   "Token Usage by Hour",
-	"usage_req_by_day":    "Requests by Day",
-	"usage_api_detail":    "API Detail Statistics",
-	"usage_input":         "Input",
-	"usage_output":        "Output",
-	"usage_cached":        "Cached",
-	"usage_reasoning":     "Reasoning",
-	"usage_time":          "Time",
 
 	// ── Logs ──
 	"logs_title":       "📋 Logs",

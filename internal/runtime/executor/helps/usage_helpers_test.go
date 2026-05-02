@@ -1,9 +1,12 @@
 package helps
 
 import (
+	"context"
+	"net/http/httptest"
 	"testing"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 )
 
@@ -98,7 +101,7 @@ func TestUsageReporterBuildRecordIncludesLatency(t *testing.T) {
 		requestedAt: time.Now().Add(-1500 * time.Millisecond),
 	}
 
-	record := reporter.buildRecord(usage.Detail{TotalTokens: 3}, false)
+	record := reporter.buildRecord(context.Background(), usage.Detail{TotalTokens: 3}, false)
 	if record.Latency < time.Second {
 		t.Fatalf("latency = %v, want >= 1s", record.Latency)
 	}
@@ -114,13 +117,45 @@ func TestUsageReporterBuildAdditionalModelRecordSkipsZeroTokens(t *testing.T) {
 		requestedAt: time.Now(),
 	}
 
-	if _, ok := reporter.buildAdditionalModelRecord("gpt-image-2", usage.Detail{}); ok {
+	if _, ok := reporter.buildAdditionalModelRecord(context.Background(), "gpt-image-2", usage.Detail{}); ok {
 		t.Fatalf("expected all-zero token usage to be skipped")
 	}
-	if _, ok := reporter.buildAdditionalModelRecord("gpt-image-2", usage.Detail{InputTokens: 2}); !ok {
+	if _, ok := reporter.buildAdditionalModelRecord(context.Background(), "gpt-image-2", usage.Detail{InputTokens: 2}); !ok {
 		t.Fatalf("expected non-zero input token usage to be recorded")
 	}
-	if _, ok := reporter.buildAdditionalModelRecord("gpt-image-2", usage.Detail{CachedTokens: 2}); !ok {
+	if _, ok := reporter.buildAdditionalModelRecord(context.Background(), "gpt-image-2", usage.Detail{CachedTokens: 2}); !ok {
 		t.Fatalf("expected non-zero cached token usage to be recorded")
+	}
+}
+
+func TestUsageReporterBuildRecordIncludesFirstByteLatencyAndThinkingEffort(t *testing.T) {
+	responseTime := time.Date(2026, 5, 2, 12, 0, 0, 250*int(time.Millisecond), time.UTC)
+	reporter := &UsageReporter{
+		provider:       "openai",
+		model:          "gpt-5.4",
+		requestedAt:    responseTime.Add(-250 * time.Millisecond),
+		thinkingEffort: "high",
+	}
+	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ginCtx.Set("API_RESPONSE_TIMESTAMP", responseTime)
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+
+	record := reporter.buildRecord(ctx, usage.Detail{TotalTokens: 3}, false)
+	if record.FirstByteLatency != 250*time.Millisecond {
+		t.Fatalf("first byte latency = %v, want 250ms", record.FirstByteLatency)
+	}
+	if record.ThinkingEffort != "high" {
+		t.Fatalf("thinking effort = %q, want high", record.ThinkingEffort)
+	}
+}
+
+func TestUsageReporterCaptureThinkingEffortOnlyRunsOnceForEmptyResult(t *testing.T) {
+	reporter := &UsageReporter{}
+
+	reporter.CaptureThinkingEffort(nil, "model", "openai", "openai")
+	reporter.CaptureThinkingEffort(nil, "gpt-5.4(high)", "openai", "openai")
+
+	if reporter.thinkingEffort != "" {
+		t.Fatalf("thinking effort = %q, want empty after first empty extraction", reporter.thinkingEffort)
 	}
 }

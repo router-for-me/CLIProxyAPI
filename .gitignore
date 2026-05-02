@@ -12,6 +12,7 @@ logs/*
 conv/*
 temp/*
 refs/*
+sandbox.cmd
 
 # Storage backends
 pgstore/*
