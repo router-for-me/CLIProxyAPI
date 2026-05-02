@@ -154,6 +154,21 @@ func TestExtractFingerprint_Painter(t *testing.T) {
 	}
 }
 
+// TestExtractFingerprint_ReviewMain captures the `amp review` main
+// analysis prompt (gemini-3.1-pro-preview). Folded into the same
+// "review" feature alias as the summary call so users can route the
+// whole review feature with one rule.
+func TestExtractFingerprint_ReviewMain(t *testing.T) {
+	body := []byte(`{
+		"contents":[{"role":"user","parts":[{"text":"diff..."}]}],
+		"systemInstruction":{"parts":[{"text":"You are an expert senior engineer with deep knowledge of software engineering best practices, security, performance, and maintainability."}]}
+	}`)
+	fp := ExtractFingerprint(body)
+	if got := fp.Feature(); got != "review" {
+		t.Fatalf("Feature = %q, want review", got)
+	}
+}
+
 // TestExtractFingerprint_Librarian uses the real Anthropic payload
 // captured from the Amp librarian tool (claude-sonnet-4-6).
 func TestExtractFingerprint_Librarian(t *testing.T) {
@@ -173,10 +188,13 @@ func TestExtractFingerprint_Librarian(t *testing.T) {
 func TestExtractFingerprint_SystemPrefixCustom(t *testing.T) {
 	body := []byte(`{
 		"contents":[{"role":"user","parts":[{"text":"hi"}]}],
-		"systemInstruction":{"parts":[{"text":"You are an expert senior engineer with deep knowledge of software engineering best practices."}]}
+		"systemInstruction":{"parts":[{"text":"You are Agg Man, Amp's platform control-plane assistant."}]}
 	}`)
 	fp := ExtractFingerprint(body)
-	cond := &config.AmpMappingCondition{SystemPrefix: "you are an expert senior engineer"}
+	if got := fp.Feature(); got != "" {
+		t.Fatalf("Feature = %q, want empty (unrecognized)", got)
+	}
+	cond := &config.AmpMappingCondition{SystemPrefix: "you are agg man"}
 	if !ConditionMatches(cond, fp) {
 		t.Fatalf("expected SystemPrefix to match")
 	}
