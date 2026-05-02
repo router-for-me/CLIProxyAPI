@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -78,6 +79,14 @@ var retryableHTTPStatusCodes = map[int]bool{
 var (
 	usageUpdateCharThreshold = 5000             // Send usage update every 5000 characters
 	usageUpdateTimeInterval  = 15 * time.Second // Or every 15 seconds, whichever comes first
+)
+
+const (
+	kiroCreditUSD = 0.04
+	// Prompt cache reads are commonly priced at 10% of base input tokens.
+	// Kiro does not always return cache token breakdowns, so this is used only
+	// for a best-effort estimate from total input/output tokens and credits.
+	kiroPromptCacheReadRatio = 0.1
 )
 
 // endpointAliases maps user preference values to canonical endpoint names.
@@ -978,7 +987,7 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 				}
 			}()
 
-			content, toolUses, usageInfo, stopReason, err := e.parseEventStream(httpResp.Body)
+			content, toolUses, usageInfo, stopReason, estimatedCacheUsage, err := e.parseEventStream(httpResp.Body, req.Model)
 			if err != nil {
 				recordAPIResponseError(ctx, e.cfg, err)
 				return resp, err
@@ -1018,7 +1027,7 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 			}
 
 			appendAPIResponseChunk(ctx, e.cfg, []byte(content))
-			reporter.publish(ctx, usageInfo)
+			reporter.publish(ctx, usageDetailForInternalStats(usageInfo, estimatedCacheUsage))
 
 			// Record success for rate limiting
 			// DISABLED: 已移除速率限制
@@ -1786,6 +1795,108 @@ func (e *KiroExecutor) mapModelToKiro(model string) string {
 	return "claude-sonnet-4.5"
 }
 
+type kiroTokenPrice struct {
+	inputPerMTok  float64
+	outputPerMTok float64
+}
+
+func kiroTokenPriceForModel(model string) kiroTokenPrice {
+	modelLower := strings.ToLower(model)
+	switch {
+	case strings.Contains(modelLower, "haiku"):
+		return kiroTokenPrice{inputPerMTok: 1.0, outputPerMTok: 5.0}
+	case strings.Contains(modelLower, "opus"):
+		return kiroTokenPrice{inputPerMTok: 15.0, outputPerMTok: 75.0}
+	default:
+		return kiroTokenPrice{inputPerMTok: 3.0, outputPerMTok: 15.0}
+	}
+}
+
+func estimateKiroCacheUsageFromCredits(model string, detail usage.Detail, creditUsage float64) (usage.Detail, bool) {
+	if creditUsage <= 0 || detail.InputTokens <= 0 {
+		return detail, false
+	}
+	if detail.CacheReadInputTokens > 0 || detail.CacheCreationInputTokens > 0 {
+		return detail, false
+	}
+	if detail.CachedTokens > 0 {
+		detail.CacheReadInputTokens = detail.CachedTokens
+		return detail, true
+	}
+
+	price := kiroTokenPriceForModel(model)
+	noCacheCredits := ((float64(detail.InputTokens)*price.inputPerMTok + float64(detail.OutputTokens)*price.outputPerMTok) / 1_000_000) / kiroCreditUSD
+	if noCacheCredits <= 0 || creditUsage >= noCacheCredits {
+		return detail, false
+	}
+
+	inputCredits := (float64(detail.InputTokens) * price.inputPerMTok / 1_000_000) / kiroCreditUSD
+	if inputCredits <= 0 {
+		return detail, false
+	}
+
+	savedCredits := noCacheCredits - creditUsage
+	maxCacheSavings := inputCredits * (1 - kiroPromptCacheReadRatio)
+	if savedCredits <= 0 || maxCacheSavings <= 0 {
+		return detail, false
+	}
+
+	cacheFraction := math.Min(savedCredits/maxCacheSavings, 1)
+	estimatedReadTokens := int64(math.Round(float64(detail.InputTokens) * cacheFraction))
+	if estimatedReadTokens <= 0 {
+		return detail, false
+	}
+	if estimatedReadTokens > detail.InputTokens {
+		estimatedReadTokens = detail.InputTokens
+	}
+
+	// CacheReadInputTokens is populated for downstream compatibility. Callers
+	// must track the returned estimated flag to distinguish this from an
+	// official upstream cache-read breakdown.
+	detail.InputTokens -= estimatedReadTokens
+	detail.CacheReadInputTokens = estimatedReadTokens
+	detail.CachedTokens = estimatedReadTokens
+	if detail.TotalTokens == 0 {
+		detail.TotalTokens = detail.InputTokens + detail.OutputTokens + detail.CachedTokens
+	}
+	log.Debugf("kiro: estimated prompt cache from credits: model=%s credits=%.4f no_cache_credits=%.4f cached_input=%d input=%d",
+		model, creditUsage, noCacheCredits, detail.CacheReadInputTokens, detail.InputTokens)
+	return detail, true
+}
+
+func inferKiroCacheUsageFromTotal(detail usage.Detail) (usage.Detail, bool) {
+	if detail.CacheReadInputTokens > 0 || detail.CacheCreationInputTokens > 0 {
+		return detail, false
+	}
+	if detail.CachedTokens > 0 {
+		detail.CacheReadInputTokens = detail.CachedTokens
+		return detail, true
+	}
+	if detail.TotalTokens <= 0 || detail.InputTokens < 0 || detail.OutputTokens < 0 {
+		return detail, false
+	}
+
+	cachedTokens := detail.TotalTokens - detail.InputTokens - detail.OutputTokens - detail.ReasoningTokens
+	if cachedTokens <= 0 {
+		return detail, false
+	}
+
+	detail.CacheReadInputTokens = cachedTokens
+	detail.CachedTokens = cachedTokens
+	return detail, true
+}
+
+func usageDetailForInternalStats(detail usage.Detail, estimatedCache bool) usage.Detail {
+	if !estimatedCache || detail.CacheReadInputTokens <= 0 {
+		return detail
+	}
+	detail.InputTokens += detail.CacheReadInputTokens
+	detail.CachedTokens = 0
+	detail.CacheReadInputTokens = 0
+	detail.CacheCreationInputTokens = 0
+	return detail
+}
+
 // EventStreamError represents an Event Stream processing error
 type EventStreamError struct {
 	Type    string // "fatal", "malformed"
@@ -1813,7 +1924,7 @@ type eventStreamMessage struct {
 // Extracts text content, tool uses, and stop_reason from the response.
 // Supports embedded [Called ...] tool calls and input buffering for toolUseEvent.
 // Returns: content, toolUses, usageInfo, stopReason, error
-func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroclaude.KiroToolUse, usage.Detail, string, error) {
+func (e *KiroExecutor) parseEventStream(body io.Reader, model string) (string, []kiroclaude.KiroToolUse, usage.Detail, string, bool, error) {
 	var content strings.Builder
 	var toolUses []kiroclaude.KiroToolUse
 	var usageInfo usage.Detail
@@ -1825,14 +1936,17 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroclaude.Ki
 	var currentToolUse *kiroclaude.ToolUseState
 
 	// Upstream usage tracking - Kiro API returns credit usage and context percentage
+	var upstreamCreditUsage float64       // Credit usage from upstream (e.g., 1.458)
 	var upstreamContextPercentage float64 // Context usage percentage from upstream (e.g., 78.56)
 	var hasOfficialTokenUsage bool        // Whether tokenUsage supplied authoritative token fields.
+	var hasOfficialCacheUsage bool        // Whether tokenUsage supplied authoritative cache fields.
+	var hasUncachedInputTokens bool       // Whether InputTokens explicitly means uncached input.
 
 	for {
 		msg, eventErr := e.readEventStreamMessage(reader)
 		if eventErr != nil {
 			log.Errorf("kiro: parseEventStream error: %v", eventErr)
-			return content.String(), toolUses, usageInfo, stopReason, eventErr
+			return content.String(), toolUses, usageInfo, stopReason, false, eventErr
 		}
 		if msg == nil {
 			// Normal end of stream (EOF)
@@ -1860,7 +1974,7 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroclaude.Ki
 				errMsg = msg
 			}
 			log.Errorf("kiro: received AWS error in event stream: type=%s, message=%s", errType, errMsg)
-			return "", nil, usageInfo, stopReason, fmt.Errorf("kiro API error: %s - %s", errType, errMsg)
+			return "", nil, usageInfo, stopReason, false, fmt.Errorf("kiro API error: %s - %s", errType, errMsg)
 		}
 		if errType, hasErrType := event["type"].(string); hasErrType && (errType == "error" || errType == "exception") {
 			// Generic error event
@@ -1873,7 +1987,7 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroclaude.Ki
 				}
 			}
 			log.Errorf("kiro: received error event in stream: type=%s, message=%s", errType, errMsg)
-			return "", nil, usageInfo, stopReason, fmt.Errorf("kiro API error: %s", errMsg)
+			return "", nil, usageInfo, stopReason, false, fmt.Errorf("kiro API error: %s", errMsg)
 		}
 
 		// Extract stop_reason from various event formats
@@ -2013,16 +2127,19 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroclaude.Ki
 				// uncachedInputTokens - input tokens not from cache
 				if uncachedInputTokens, ok := tokenUsage["uncachedInputTokens"].(float64); ok {
 					usageInfo.InputTokens = int64(uncachedInputTokens)
+					hasUncachedInputTokens = true
 					log.Infof("kiro: parseEventStream found uncachedInputTokens in tokenUsage: %d", usageInfo.InputTokens)
 				}
 				// cacheReadInputTokens - tokens read from cache
 				if cacheReadTokens, ok := tokenUsage["cacheReadInputTokens"].(float64); ok {
 					usageInfo.CacheReadInputTokens = int64(cacheReadTokens)
+					hasOfficialCacheUsage = true
 					log.Debugf("kiro: parseEventStream found cacheReadInputTokens in tokenUsage: %d", int64(cacheReadTokens))
 				}
 				// cacheWriteInputTokens - tokens written to cache
 				if cacheWriteTokens, ok := tokenUsage["cacheWriteInputTokens"].(float64); ok {
 					usageInfo.CacheCreationInputTokens = int64(cacheWriteTokens)
+					hasOfficialCacheUsage = true
 					log.Debugf("kiro: parseEventStream found cacheWriteInputTokens in tokenUsage: %d", int64(cacheWriteTokens))
 				}
 				usageInfo.CachedTokens = usageInfo.CacheReadInputTokens + usageInfo.CacheCreationInputTokens
@@ -2111,6 +2228,9 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroclaude.Ki
 				if u, ok := metering["usage"].(float64); ok {
 					usageVal = u
 				}
+				if unit == "credit" && usageVal > 0 {
+					upstreamCreditUsage += usageVal
+				}
 				log.Infof("kiro: parseEventStream received meteringEvent: usage=%.2f %s", usageVal, unit)
 				// Store metering info for potential billing/statistics purposes
 				// Note: This is separate from token counts - it's AWS billing units
@@ -2123,6 +2243,9 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroclaude.Ki
 				usageVal := 0.0
 				if u, ok := event["usage"].(float64); ok {
 					usageVal = u
+				}
+				if unit == "credit" && usageVal > 0 {
+					upstreamCreditUsage += usageVal
 				}
 				if unit != "" || usageVal > 0 {
 					log.Infof("kiro: parseEventStream received meteringEvent (direct): usage=%.2f %s", usageVal, unit)
@@ -2184,10 +2307,16 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroclaude.Ki
 
 			// For other errors, return the error
 			if errMsg != "" {
-				return "", nil, usageInfo, stopReason, fmt.Errorf("kiro API error (%s): %s", errType, errMsg)
+				return "", nil, usageInfo, stopReason, false, fmt.Errorf("kiro API error (%s): %s", errType, errMsg)
 			}
 
 		default:
+			// Format: {"unit":"credit","unitPlural":"credits","usage":1.458}
+			if unit, ok := event["unit"].(string); ok && unit == "credit" {
+				if usageVal, ok := event["usage"].(float64); ok && usageVal > 0 {
+					upstreamCreditUsage += usageVal
+				}
+			}
 			// Check for contextUsagePercentage in any event
 			if ctxPct, ok := event["contextUsagePercentage"].(float64); ok {
 				upstreamContextPercentage = ctxPct
@@ -2290,7 +2419,19 @@ func (e *KiroExecutor) parseEventStream(body io.Reader) (string, []kiroclaude.Ki
 		}
 	}
 
-	return cleanedContent, toolUses, usageInfo, stopReason, nil
+	var estimatedCacheUsage bool
+	if hasUncachedInputTokens {
+		var estimated bool
+		usageInfo, estimated = inferKiroCacheUsageFromTotal(usageInfo)
+		estimatedCacheUsage = estimatedCacheUsage || estimated
+	}
+	if upstreamCreditUsage > 0 && !hasOfficialCacheUsage {
+		var estimated bool
+		usageInfo, estimated = estimateKiroCacheUsageFromCredits(model, usageInfo, upstreamCreditUsage)
+		estimatedCacheUsage = estimatedCacheUsage || estimated
+	}
+
+	return cleanedContent, toolUses, usageInfo, stopReason, estimatedCacheUsage, nil
 }
 
 // readEventStreamMessage reads and validates a single AWS Event Stream message.
@@ -2521,6 +2662,9 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 	var upstreamContextPercentage float64 // Context usage percentage from upstream (e.g., 78.56)
 	var hasUpstreamUsage bool             // Whether we received usage from upstream
 	var hasOfficialTokenUsage bool        // Whether tokenUsage supplied authoritative token fields.
+	var hasOfficialCacheUsage bool        // Whether tokenUsage supplied authoritative cache fields.
+	var hasUncachedInputTokens bool       // Whether InputTokens explicitly means uncached input.
+	var estimatedCacheUsage bool          // Whether cache fields were estimated from totals/credits.
 
 	// Translator param for maintaining tool call state across streaming events
 	// IMPORTANT: This must persist across all TranslateStream calls
@@ -2571,7 +2715,7 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 
 	// Ensure usage is published even on early return
 	defer func() {
-		reporter.publish(ctx, totalUsage)
+		reporter.publish(ctx, usageDetailForInternalStats(totalUsage, estimatedCacheUsage))
 	}()
 
 	for {
@@ -2729,14 +2873,16 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 				if u, ok := metering["usage"].(float64); ok {
 					usageVal = u
 				}
-				upstreamCreditUsage = usageVal
+				if unit == "credit" && usageVal > 0 {
+					upstreamCreditUsage += usageVal
+				}
 				hasUpstreamUsage = true
 				log.Infof("kiro: streamToChannel received meteringEvent: usage=%.4f %s", usageVal, unit)
 			} else {
 				// Try direct fields (event is meteringEvent itself)
 				if unit, ok := event["unit"].(string); ok {
-					if usage, ok := event["usage"].(float64); ok {
-						upstreamCreditUsage = usage
+					if usage, ok := event["usage"].(float64); ok && unit == "credit" && usage > 0 {
+						upstreamCreditUsage += usage
 						hasUpstreamUsage = true
 						log.Infof("kiro: streamToChannel received meteringEvent (direct): usage=%.4f %s", usage, unit)
 					}
@@ -2807,8 +2953,8 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 			// Check for upstream usage events from Kiro API
 			// Format: {"unit":"credit","unitPlural":"credits","usage":1.458}
 			if unit, ok := event["unit"].(string); ok && unit == "credit" {
-				if usage, ok := event["usage"].(float64); ok {
-					upstreamCreditUsage = usage
+				if usage, ok := event["usage"].(float64); ok && usage > 0 {
+					upstreamCreditUsage += usage
 					hasUpstreamUsage = true
 					log.Debugf("kiro: received upstream credit usage: %.4f", upstreamCreditUsage)
 				}
@@ -3355,18 +3501,21 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 				// uncachedInputTokens - input tokens not from cache
 				if uncachedInputTokens, ok := tokenUsage["uncachedInputTokens"].(float64); ok {
 					totalUsage.InputTokens = int64(uncachedInputTokens)
+					hasUncachedInputTokens = true
 					hasUpstreamUsage = true
 					log.Infof("kiro: streamToChannel found uncachedInputTokens in tokenUsage: %d", totalUsage.InputTokens)
 				}
 				// cacheReadInputTokens - tokens read from cache
 				if cacheReadTokens, ok := tokenUsage["cacheReadInputTokens"].(float64); ok {
 					totalUsage.CacheReadInputTokens = int64(cacheReadTokens)
+					hasOfficialCacheUsage = true
 					hasUpstreamUsage = true
 					log.Debugf("kiro: streamToChannel found cacheReadInputTokens in tokenUsage: %d", int64(cacheReadTokens))
 				}
 				// cacheWriteInputTokens - tokens written to cache
 				if cacheWriteTokens, ok := tokenUsage["cacheWriteInputTokens"].(float64); ok {
 					totalUsage.CacheCreationInputTokens = int64(cacheWriteTokens)
+					hasOfficialCacheUsage = true
 					hasUpstreamUsage = true
 					log.Debugf("kiro: streamToChannel found cacheWriteInputTokens in tokenUsage: %d", int64(cacheWriteTokens))
 				}
@@ -3561,6 +3710,17 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 
 	if totalUsage.TotalTokens == 0 {
 		totalUsage.TotalTokens = totalUsage.InputTokens + totalUsage.OutputTokens
+	}
+
+	if hasUncachedInputTokens {
+		var estimated bool
+		totalUsage, estimated = inferKiroCacheUsageFromTotal(totalUsage)
+		estimatedCacheUsage = estimatedCacheUsage || estimated
+	}
+	if upstreamCreditUsage > 0 && !hasOfficialCacheUsage {
+		var estimated bool
+		totalUsage, estimated = estimateKiroCacheUsageFromCredits(model, totalUsage, upstreamCreditUsage)
+		estimatedCacheUsage = estimatedCacheUsage || estimated
 	}
 
 	// Log upstream usage information if received

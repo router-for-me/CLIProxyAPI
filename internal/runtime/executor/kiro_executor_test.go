@@ -11,6 +11,7 @@ import (
 	kiroauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kiro"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	"github.com/tidwall/gjson"
 )
@@ -267,7 +268,7 @@ func TestParseEventStream_KiroCacheUsageDoesNotDoubleCountInput(t *testing.T) {
 	}`))
 
 	executor := &KiroExecutor{}
-	_, _, usageInfo, _, err := executor.parseEventStream(bytes.NewReader(stream.Bytes()))
+	_, _, usageInfo, _, _, err := executor.parseEventStream(bytes.NewReader(stream.Bytes()), "kiro-claude-sonnet-4-5")
 	if err != nil {
 		t.Fatalf("parseEventStream() error = %v", err)
 	}
@@ -285,6 +286,177 @@ func TestParseEventStream_KiroCacheUsageDoesNotDoubleCountInput(t *testing.T) {
 	}
 	if usageInfo.TotalTokens != 22 {
 		t.Fatalf("TotalTokens = %d, want upstream total 22", usageInfo.TotalTokens)
+	}
+}
+
+func TestEstimateKiroCacheUsageFromCredits(t *testing.T) {
+	detail, estimated := estimateKiroCacheUsageFromCredits("kiro-claude-sonnet-4-5", usage.Detail{
+		InputTokens:  10000,
+		OutputTokens: 1000,
+		TotalTokens:  11000,
+	}, 0.7875)
+	if !estimated {
+		t.Fatalf("estimated = false, want true")
+	}
+
+	if detail.CacheReadInputTokens != 5000 {
+		t.Fatalf("CacheReadInputTokens = %d, want estimated read tokens 5000", detail.CacheReadInputTokens)
+	}
+	if detail.InputTokens != 5000 {
+		t.Fatalf("InputTokens = %d, want estimated uncached input 5000", detail.InputTokens)
+	}
+	if detail.CachedTokens != 5000 {
+		t.Fatalf("CachedTokens = %d, want 5000", detail.CachedTokens)
+	}
+	if detail.TotalTokens != 11000 {
+		t.Fatalf("TotalTokens = %d, want original total 11000", detail.TotalTokens)
+	}
+
+	internalDetail := usageDetailForInternalStats(detail, true)
+	if internalDetail.InputTokens != 10000 {
+		t.Fatalf("internal InputTokens = %d, want total input restored 10000", internalDetail.InputTokens)
+	}
+	if internalDetail.CachedTokens != 0 || internalDetail.CacheReadInputTokens != 0 {
+		t.Fatalf("internal cache fields = cached:%d read:%d, want cleared", internalDetail.CachedTokens, internalDetail.CacheReadInputTokens)
+	}
+}
+
+func TestEstimateKiroCacheUsageFromCredits_PreservesOfficialCacheUsage(t *testing.T) {
+	detail, estimated := estimateKiroCacheUsageFromCredits("kiro-claude-sonnet-4-5", usage.Detail{
+		InputTokens:          10000,
+		OutputTokens:         1000,
+		CacheReadInputTokens: 123,
+		CachedTokens:         123,
+		TotalTokens:          11123,
+	}, 0.7875)
+	if estimated {
+		t.Fatalf("estimated = true, want false for official cache usage")
+	}
+
+	if detail.CacheReadInputTokens != 123 {
+		t.Fatalf("CacheReadInputTokens = %d, want official value 123", detail.CacheReadInputTokens)
+	}
+	if detail.InputTokens != 10000 {
+		t.Fatalf("InputTokens = %d, want official uncached input preserved", detail.InputTokens)
+	}
+}
+
+func TestInferKiroCacheUsageFromTotal(t *testing.T) {
+	detail, estimated := inferKiroCacheUsageFromTotal(usage.Detail{
+		InputTokens:  10,
+		OutputTokens: 2,
+		TotalTokens:  22,
+	})
+	if !estimated {
+		t.Fatalf("estimated = false, want true")
+	}
+
+	if detail.CacheReadInputTokens != 10 {
+		t.Fatalf("CacheReadInputTokens = %d, want inferred read tokens 10", detail.CacheReadInputTokens)
+	}
+	if detail.CachedTokens != 10 {
+		t.Fatalf("CachedTokens = %d, want 10", detail.CachedTokens)
+	}
+	if detail.InputTokens != 10 {
+		t.Fatalf("InputTokens = %d, want original uncached input preserved", detail.InputTokens)
+	}
+}
+
+func TestInferKiroCacheUsageFromTotal_FillsReadTokensFromCachedTokens(t *testing.T) {
+	detail, estimated := inferKiroCacheUsageFromTotal(usage.Detail{
+		InputTokens:  10,
+		OutputTokens: 2,
+		CachedTokens: 7,
+		TotalTokens:  19,
+	})
+	if !estimated {
+		t.Fatalf("estimated = false, want true")
+	}
+
+	if detail.CacheReadInputTokens != 7 {
+		t.Fatalf("CacheReadInputTokens = %d, want cached token fallback 7", detail.CacheReadInputTokens)
+	}
+}
+
+func TestParseEventStream_PartialTokenUsageStillEstimatesFromCredits(t *testing.T) {
+	var stream bytes.Buffer
+	writeKiroTestEvent(t, &stream, "messageMetadataEvent", []byte(`{
+		"messageMetadataEvent": {
+			"tokenUsage": {
+				"outputTokens": 1000,
+				"totalTokens": 11000
+			}
+		}
+	}`))
+	writeKiroTestEvent(t, &stream, "usageEvent", []byte(`{
+		"inputTokens": 10000,
+		"outputTokens": 1000,
+		"totalTokens": 11000
+	}`))
+	writeKiroTestEvent(t, &stream, "meteringEvent", []byte(`{
+		"meteringEvent": {"unit": "credit", "unitPlural": "credits", "usage": 0.7875}
+	}`))
+
+	executor := &KiroExecutor{}
+	_, _, usageInfo, _, estimatedCacheUsage, err := executor.parseEventStream(bytes.NewReader(stream.Bytes()), "kiro-claude-sonnet-4-5")
+	if err != nil {
+		t.Fatalf("parseEventStream() error = %v", err)
+	}
+	if usageInfo.CachedTokens != 5000 {
+		t.Fatalf("CachedTokens = %d, want credits-estimated cache 5000", usageInfo.CachedTokens)
+	}
+	if !estimatedCacheUsage {
+		t.Fatalf("estimatedCacheUsage = false, want true")
+	}
+	if usageInfo.CacheReadInputTokens != 5000 {
+		t.Fatalf("CacheReadInputTokens = %d, want estimated read tokens 5000", usageInfo.CacheReadInputTokens)
+	}
+}
+
+func TestParseEventStream_AccumulatesMeteringEvents(t *testing.T) {
+	var stream bytes.Buffer
+	writeKiroTestEvent(t, &stream, "usageEvent", []byte(`{
+		"inputTokens": 10000,
+		"outputTokens": 1000,
+		"totalTokens": 11000
+	}`))
+	writeKiroTestEvent(t, &stream, "meteringEvent", []byte(`{
+		"meteringEvent": {"unit": "credit", "unitPlural": "credits", "usage": 0.3}
+	}`))
+	writeKiroTestEvent(t, &stream, "meteringEvent", []byte(`{
+		"meteringEvent": {"unit": "credit", "unitPlural": "credits", "usage": 0.4875}
+	}`))
+
+	executor := &KiroExecutor{}
+	_, _, usageInfo, _, _, err := executor.parseEventStream(bytes.NewReader(stream.Bytes()), "kiro-claude-sonnet-4-5")
+	if err != nil {
+		t.Fatalf("parseEventStream() error = %v", err)
+	}
+	if usageInfo.CachedTokens != 5000 {
+		t.Fatalf("CachedTokens = %d, want cache estimate based on accumulated credits", usageInfo.CachedTokens)
+	}
+}
+
+func TestParseEventStream_DoesNotInferCacheFromGenericTotalTokens(t *testing.T) {
+	var stream bytes.Buffer
+	writeKiroTestEvent(t, &stream, "messageMetadataEvent", []byte(`{
+		"messageMetadataEvent": {
+			"inputTokens": 10,
+			"outputTokens": 2,
+			"totalTokens": 22
+		}
+	}`))
+
+	executor := &KiroExecutor{}
+	_, _, usageInfo, _, _, err := executor.parseEventStream(bytes.NewReader(stream.Bytes()), "kiro-claude-sonnet-4-5")
+	if err != nil {
+		t.Fatalf("parseEventStream() error = %v", err)
+	}
+	if usageInfo.CacheReadInputTokens != 0 {
+		t.Fatalf("CacheReadInputTokens = %d, want no inference from generic totalTokens", usageInfo.CacheReadInputTokens)
+	}
+	if usageInfo.CachedTokens != 0 {
+		t.Fatalf("CachedTokens = %d, want no inference from generic totalTokens", usageInfo.CachedTokens)
 	}
 }
 
@@ -343,6 +515,53 @@ func TestStreamToChannel_KiroCacheUsagePreservesOfficialTokenUsage(t *testing.T)
 	}
 	if got := gjson.Get(messageDelta, "usage.cache_creation_input_tokens").Int(); got != 3 {
 		t.Fatalf("usage.cache_creation_input_tokens = %d, want 3", got)
+	}
+}
+
+func TestStreamToChannel_IgnoresNonCreditMeteringEvents(t *testing.T) {
+	var stream bytes.Buffer
+	writeKiroTestEvent(t, &stream, "assistantResponseEvent", []byte(`{
+		"assistantResponseEvent": {"content": "hello"}
+	}`))
+	writeKiroTestEvent(t, &stream, "usageEvent", []byte(`{
+		"inputTokens": 10000,
+		"outputTokens": 1000,
+		"totalTokens": 11000
+	}`))
+	writeKiroTestEvent(t, &stream, "meteringEvent", []byte(`{
+		"meteringEvent": {"unit": "request", "usage": 0.7875}
+	}`))
+
+	out := make(chan cliproxyexecutor.StreamChunk, 16)
+	executor := &KiroExecutor{}
+	executor.streamToChannel(
+		context.Background(),
+		bytes.NewReader(stream.Bytes()),
+		out,
+		sdktranslator.FromString("claude"),
+		"claude-sonnet-4",
+		nil,
+		[]byte(`{"messages":[]}`),
+		nil,
+		false,
+	)
+	close(out)
+
+	var messageDelta string
+	for chunk := range out {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error = %v", chunk.Err)
+		}
+		payload := string(chunk.Payload)
+		if strings.HasPrefix(payload, "event: message_delta\ndata: ") {
+			messageDelta = strings.TrimSpace(strings.TrimPrefix(payload, "event: message_delta\ndata: "))
+		}
+	}
+	if messageDelta == "" {
+		t.Fatalf("expected message_delta event")
+	}
+	if got := gjson.Get(messageDelta, "usage.cache_read_input_tokens").Int(); got != 0 {
+		t.Fatalf("usage.cache_read_input_tokens = %d, want no estimate from non-credit usage", got)
 	}
 }
 
