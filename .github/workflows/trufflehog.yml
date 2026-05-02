@@ -1,0 +1,17 @@
+name: Trufflehog Secrets Scan
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  trufflehog:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+      - uses: trufflehog/actions/setup@main
+      - run: trufflehog github --only-verified --no-update
+        env:
+          GH_TOKEN: \${{ secrets.GITHUB_TOKEN }}

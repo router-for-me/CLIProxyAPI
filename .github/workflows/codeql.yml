@@ -19,7 +19,7 @@ jobs:
         language: [go]
     steps:
       - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4- name: Initialize CodeQL
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5@11bd71901bbe5b1630ceea73d27597364c9af683 # v4- name: Initialize CodeQL
         uses: github/codeql-action/init@95e58e9a2cdfd71adc6e0353d5c52f41a045d225 # v4with:
           languages: ${{ matrix.language }}
           config-file: .github/codeql/codeql-config.yml
