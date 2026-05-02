@@ -17,6 +17,7 @@ import (
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
+	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -199,7 +200,13 @@ func parseBoolField(raw string, fallback bool) bool {
 }
 
 func (h *OpenAIAPIHandler) ImagesGenerations(c *gin.Context) {
-	if h != nil && h.BaseAPIHandler != nil && h.BaseAPIHandler.Config() != nil && h.BaseAPIHandler.Config().DisableImageGeneration == internalconfig.DisableImageGenerationAll {
+	// Snapshot config once so the two reads observe the same hot-reload
+	// generation (Codex Phase C re-review IMPORTANT #6).
+	var cfg *sdkconfig.SDKConfig
+	if h != nil && h.BaseAPIHandler != nil {
+		cfg = h.BaseAPIHandler.Config()
+	}
+	if cfg != nil && cfg.DisableImageGeneration == internalconfig.DisableImageGenerationAll {
 		c.AbortWithStatus(http.StatusNotFound)
 		return
 	}
@@ -287,7 +294,13 @@ func (h *OpenAIAPIHandler) ImagesGenerations(c *gin.Context) {
 }
 
 func (h *OpenAIAPIHandler) ImagesEdits(c *gin.Context) {
-	if h != nil && h.BaseAPIHandler != nil && h.BaseAPIHandler.Config() != nil && h.BaseAPIHandler.Config().DisableImageGeneration == internalconfig.DisableImageGenerationAll {
+	// Snapshot config once so the two reads observe the same hot-reload
+	// generation (Codex Phase C re-review IMPORTANT #6).
+	var cfg *sdkconfig.SDKConfig
+	if h != nil && h.BaseAPIHandler != nil {
+		cfg = h.BaseAPIHandler.Config()
+	}
+	if cfg != nil && cfg.DisableImageGeneration == internalconfig.DisableImageGenerationAll {
 		c.AbortWithStatus(http.StatusNotFound)
 		return
 	}

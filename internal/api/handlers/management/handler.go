@@ -4,7 +4,6 @@ package management
 
 import (
 	"crypto/subtle"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -20,6 +19,7 @@ import (
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"golang.org/x/crypto/bcrypt"
+	"gopkg.in/yaml.v3"
 )
 
 type attemptInfo struct {
@@ -125,18 +125,22 @@ func (h *Handler) SetConfigCommitter(commit func(*config.Config)) {
 	h.commit = commit
 }
 
-// cloneConfigSnapshot returns a deep copy of cur via JSON round-trip. Used by
+// cloneConfigSnapshot returns a deep copy of cur via YAML round-trip. Used by
 // applyConfigChange so mutations to the clone don't affect concurrent readers
 // holding the prior snapshot.
 //
-// JSON round-trip (vs the prior yaml round-trip) is preferred because:
-//   - JSON preserves nil-vs-empty for slices/maps with omitempty tags more
-//     predictably than yaml.v3, which canonicalised some nil maps to empty
-//     and changed JSON response shape on subsequent reads (Codex Phase C
-//     IMPORTANT #7).
-//   - On marshal/unmarshal error we now return error so applyConfigChange
-//     fails loudly with a 500 instead of silently producing an empty config
-//     and persisting it.
+// YAML round-trip is the persistence format used by SaveConfigPreserveComments,
+// so it preserves every field that survives disk persistence — critically
+// including `json:"-"` fields like Host, Port, RemoteManagement, and AuthDir.
+// A prior fix (Codex Phase C IMPORTANT #7) tried JSON round-trip to surface
+// marshal errors and avoid yaml.v3 nil-vs-empty canonicalisation, but it
+// dropped those `json:"-"` fields and would have zeroed Host/Port/auth-dir/
+// remote-management on every mgmt edit (Codex re-review BLOCKER #2). YAML
+// round-trip is the only safe choice here.
+//
+// We keep the error-return signature so applyConfigChange surfaces a 500
+// instead of silently persisting an empty config when marshal/unmarshal
+// fails — the original concern from IMPORTANT #7 still stands.
 //
 // Mgmt writes already pay disk I/O for the persist step, so the round-trip
 // cost is negligible.
@@ -144,12 +148,12 @@ func cloneConfigSnapshot(cur *config.Config) (*config.Config, error) {
 	if cur == nil {
 		return &config.Config{}, nil
 	}
-	data, err := json.Marshal(cur)
+	data, err := yaml.Marshal(cur)
 	if err != nil {
 		return nil, fmt.Errorf("clone config: marshal: %w", err)
 	}
 	var next config.Config
-	if err := json.Unmarshal(data, &next); err != nil {
+	if err := yaml.Unmarshal(data, &next); err != nil {
 		return nil, fmt.Errorf("clone config: unmarshal: %w", err)
 	}
 	return &next, nil
@@ -169,9 +173,10 @@ func (h *Handler) applyConfigChange(c *gin.Context, fn func(*config.Config)) boo
 		return false
 	}
 	h.mu.Lock()
+	defer h.mu.Unlock()
+
 	next, cloneErr := cloneConfigSnapshot(h.cfgPtr.Load())
 	if cloneErr != nil {
-		h.mu.Unlock()
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to clone config: %v", cloneErr)})
 		return false
 	}
@@ -183,26 +188,24 @@ func (h *Handler) applyConfigChange(c *gin.Context, fn func(*config.Config)) boo
 	// stale-index pre-resolution: handlers can now re-resolve inside the
 	// closure against the cloned config and short-circuit safely.
 	if c.Writer.Written() {
-		h.mu.Unlock()
 		return false
 	}
 
 	if err := config.SaveConfigPreserveComments(h.configFilePath, next); err != nil {
-		h.mu.Unlock()
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to save config: %v", err)})
 		return false
 	}
 
 	h.cfgPtr.Store(next)
-	commit := h.commit
-	h.mu.Unlock()
 
-	// Commit fan-out runs OUTSIDE h.mu so it can transitively re-enter
-	// handler methods (Server.UpdateClients calls SetAuthManager etc.)
-	// without deadlocking. Server.updateMu serializes UpdateClients itself
-	// against concurrent file-watcher reloads.
-	if commit != nil {
-		commit(next)
+	// Commit fan-out runs INSIDE h.mu (lock held through commit) so two
+	// concurrent mgmt writes A and B cannot interleave their commits and
+	// roll Server fan-out state back to A while disk holds B (Codex Phase
+	// C re-review BLOCKER #1 follow-up). This is now safe because both
+	// SetConfig and SetAuthManager are lock-free atomic stores; commit's
+	// transitive call into SetAuthManager no longer re-locks h.mu.
+	if h.commit != nil {
+		h.commit(next)
 	}
 
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})

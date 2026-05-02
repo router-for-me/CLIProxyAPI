@@ -694,7 +694,12 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 		close(errChan)
 		return nil, nil, errChan
 	}
-	passthroughHeadersEnabled := PassthroughHeadersEnabled(h.Config())
+	// Snapshot config once for the whole streaming request so a hot-reload
+	// fired between these two reads cannot make this request observe a
+	// mix of old and new settings (Codex Phase C re-review IMPORTANT #6
+	// per-request snapshot consistency).
+	cfg := h.Config()
+	passthroughHeadersEnabled := PassthroughHeadersEnabled(cfg)
 	// Capture upstream headers from the initial connection synchronously before the goroutine starts.
 	// Keep a mutable map so bootstrap retries can replace it before first payload is sent.
 	var upstreamHeaders http.Header
@@ -712,7 +717,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 		defer close(errChan)
 		sentPayload := false
 		bootstrapRetries := 0
-		maxBootstrapRetries := StreamingBootstrapRetries(h.Config())
+		maxBootstrapRetries := StreamingBootstrapRetries(cfg)
 
 		sendErr := func(msg *interfaces.ErrorMessage) bool {
 			if ctx == nil {

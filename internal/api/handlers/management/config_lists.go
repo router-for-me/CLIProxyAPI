@@ -416,13 +416,15 @@ func (h *Handler) DeleteClaudeKey(c *gin.Context) {
 					}
 				}
 			}
+			if matchCount == 0 {
+				c.JSON(404, gin.H{"error": "item not found"})
+				return
+			}
 			if matchCount > 1 {
 				c.JSON(400, gin.H{"error": "multiple items match api-key; base-url is required"})
 				return
 			}
-			if matchIndex != -1 {
-				cfg.ClaudeKey = append(cfg.ClaudeKey[:matchIndex], cfg.ClaudeKey[matchIndex+1:]...)
-			}
+			cfg.ClaudeKey = append(cfg.ClaudeKey[:matchIndex], cfg.ClaudeKey[matchIndex+1:]...)
 			cfg.SanitizeClaudeKeys()
 		})
 		return
@@ -718,13 +720,15 @@ func (h *Handler) DeleteVertexCompatKey(c *gin.Context) {
 					}
 				}
 			}
+			if matchCount == 0 {
+				c.JSON(404, gin.H{"error": "item not found"})
+				return
+			}
 			if matchCount > 1 {
 				c.JSON(400, gin.H{"error": "multiple items match api-key; base-url is required"})
 				return
 			}
-			if matchIndex != -1 {
-				cfg.VertexCompatAPIKey = append(cfg.VertexCompatAPIKey[:matchIndex], cfg.VertexCompatAPIKey[matchIndex+1:]...)
-			}
+			cfg.VertexCompatAPIKey = append(cfg.VertexCompatAPIKey[:matchIndex], cfg.VertexCompatAPIKey[matchIndex+1:]...)
 			cfg.SanitizeVertexCompatKeys()
 		})
 		return
@@ -1072,13 +1076,15 @@ func (h *Handler) DeleteCodexKey(c *gin.Context) {
 					}
 				}
 			}
+			if matchCount == 0 {
+				c.JSON(404, gin.H{"error": "item not found"})
+				return
+			}
 			if matchCount > 1 {
 				c.JSON(400, gin.H{"error": "multiple items match api-key; base-url is required"})
 				return
 			}
-			if matchIndex != -1 {
-				cfg.CodexKey = append(cfg.CodexKey[:matchIndex], cfg.CodexKey[matchIndex+1:]...)
-			}
+			cfg.CodexKey = append(cfg.CodexKey[:matchIndex], cfg.CodexKey[matchIndex+1:]...)
 			cfg.SanitizeCodexKeys()
 		})
 		return

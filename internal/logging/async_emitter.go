@@ -61,13 +61,16 @@ type asyncEmitter struct {
 	startOnce sync.Once
 	closeOnce sync.Once
 	dropped   atomic.Uint64
-	// closed is set BEFORE close(closeCh) signals the worker to stop. enqueue
-	// observes this flag to honor the "forced error logs never drop"
-	// invariant after close: a force task that arrives post-close still
-	// returns syncFallback=true so the caller writes synchronously instead
-	// of stuffing the task into a buffered channel that no worker is going
-	// to drain. (Codex Phase C review BLOCKER #3.)
-	closed atomic.Bool
+	// closeMu serialises the closed-flag transition against in-flight
+	// enqueue check+send. Without it, an enqueue that observed closed=false
+	// could be preempted before its channel send while close() ran to
+	// completion, leaving a forced task buffered in priority with no worker
+	// to drain it (Codex Phase C re-review BLOCKER #3 follow-up).
+	//
+	// Held only for the brief check+send window in enqueue and the flag
+	// transition in close(); contention is bounded by enqueue rate.
+	closeMu sync.Mutex
+	closed  bool
 }
 
 func newAsyncEmitter(logger *FileRequestLogger) *asyncEmitter {
@@ -138,25 +141,30 @@ func (e *asyncEmitter) execute(t asyncTask) {
 // enqueue routes a task. Returns true when the caller should fall back to a
 // synchronous write — happens for forced-error logs when the priority queue
 // is full or the emitter is closed (since those must never drop).
+//
+// The closeMu critical section pins the closed-flag check and the channel
+// send into one atomic step against close(). Without that, a forced task
+// could pass the closed=false check, get preempted while close() drains
+// and exits the worker, and then send into priority where no consumer is
+// left.
 func (e *asyncEmitter) enqueue(t asyncTask) (syncFallback bool) {
-	if t.force {
-		// After close, the worker has exited; channel sends would queue
-		// into a buffer that no consumer drains. Honor the never-drop
-		// invariant by demanding a sync fallback.
-		if e.closed.Load() {
+	e.closeMu.Lock()
+	defer e.closeMu.Unlock()
+
+	if e.closed {
+		if t.force {
 			return true
 		}
+		e.dropped.Add(1)
+		return false
+	}
+	if t.force {
 		select {
 		case e.priority <- t:
 			return false
 		default:
 			return true
 		}
-	}
-	if e.closed.Load() {
-		// Normal path post-close: drop. Caller does not retry sync.
-		e.dropped.Add(1)
-		return false
 	}
 	select {
 	case e.normal <- t:
@@ -169,11 +177,15 @@ func (e *asyncEmitter) enqueue(t asyncTask) (syncFallback bool) {
 
 func (e *asyncEmitter) close() {
 	e.closeOnce.Do(func() {
-		// Set closed BEFORE close(closeCh) so enqueue observes the
-		// transition before the worker has a chance to exit. After this
-		// point new force tasks short-circuit to sync via enqueue.
-		e.closed.Store(true)
+		// Hold closeMu across the flag transition AND the close(closeCh)
+		// signal so enqueue cannot observe closed=false after we've
+		// committed to shutdown. Once the lock is released, all
+		// subsequent enqueue calls see closed=true and either short
+		// circuit to sync (force) or drop (normal).
+		e.closeMu.Lock()
+		e.closed = true
 		close(e.closeCh)
+		e.closeMu.Unlock()
 	})
 	<-e.doneCh
 }
