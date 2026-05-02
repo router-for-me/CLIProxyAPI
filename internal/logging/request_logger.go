@@ -140,14 +140,20 @@ type StreamingLogWriter interface {
 // FileRequestLogger implements RequestLogger using file-based storage.
 // It provides file-based logging functionality for HTTP requests and responses.
 type FileRequestLogger struct {
-	// enabled indicates whether request logging is currently enabled.
-	enabled bool
+	// enabled is the atomic toggle for normal request logging. Forced
+	// error logs (force=true) are written regardless of this flag.
+	enabled atomic.Bool
 
 	// logsDir is the directory where log files are stored.
 	logsDir string
 
 	// errorLogsMaxFiles limits the number of error log files retained.
 	errorLogsMaxFiles int
+
+	// async (when non-nil) routes LogRequest writes through a worker
+	// goroutine so the request handler does not block on file I/O. Forced
+	// error logs go through a separate priority lane so they never drop.
+	async *asyncEmitter
 }
 
 // NewFileRequestLogger creates a new file-based request logger.
@@ -169,11 +175,14 @@ func NewFileRequestLogger(enabled bool, logsDir string, configDir string, errorL
 			logsDir = filepath.Join(configDir, logsDir)
 		}
 	}
-	return &FileRequestLogger{
-		enabled:           enabled,
+	l := &FileRequestLogger{
 		logsDir:           logsDir,
 		errorLogsMaxFiles: errorLogsMaxFiles,
 	}
+	l.enabled.Store(enabled)
+	l.async = newAsyncEmitter(l)
+	l.async.start()
+	return l
 }
 
 // IsEnabled returns whether request logging is currently enabled.
@@ -181,16 +190,46 @@ func NewFileRequestLogger(enabled bool, logsDir string, configDir string, errorL
 // Returns:
 //   - bool: True if logging is enabled, false otherwise
 func (l *FileRequestLogger) IsEnabled() bool {
-	return l.enabled
+	return l.enabled.Load()
 }
 
 // SetEnabled updates the request logging enabled state.
 // This method allows dynamic enabling/disabling of request logging.
+// Atomic store; safe to call from any goroutine concurrently with logging.
 //
 // Parameters:
 //   - enabled: Whether request logging should be enabled
 func (l *FileRequestLogger) SetEnabled(enabled bool) {
-	l.enabled = enabled
+	l.enabled.Store(enabled)
+}
+
+// DroppedLogs returns the cumulative count of normal-priority logs dropped
+// because the async queue was full. Forced-error logs are never counted
+// here — they either enqueue to the priority lane or fall back to a
+// synchronous write.
+func (l *FileRequestLogger) DroppedLogs() uint64 {
+	if l.async == nil {
+		return 0
+	}
+	return l.async.droppedCount()
+}
+
+// Flush blocks until queued log writes have completed. Useful from tests
+// and graceful-shutdown code paths. Callers must externally ensure no
+// further LogRequest calls fire during the flush window.
+func (l *FileRequestLogger) Flush() {
+	if l.async != nil {
+		l.async.flush()
+	}
+}
+
+// Close stops the async worker, draining any queued tasks first. Safe to
+// call multiple times. After Close, LogRequest falls back to synchronous
+// writes (preserving the no-drop guarantee for forced-error logs).
+func (l *FileRequestLogger) Close() {
+	if l.async != nil {
+		l.async.close()
+	}
 }
 
 // SetErrorLogsMaxFiles updates the maximum number of error log files to retain.
@@ -199,6 +238,10 @@ func (l *FileRequestLogger) SetErrorLogsMaxFiles(maxFiles int) {
 }
 
 // LogRequest logs a complete non-streaming request/response cycle to a file.
+//
+// The write is dispatched to the async emitter (off the request path).
+// Returns nil immediately on enqueue; the caller does not see file-I/O
+// errors. Drops on queue overflow are counted in DroppedLogs().
 //
 // Parameters:
 //   - url: The request URL
@@ -215,19 +258,79 @@ func (l *FileRequestLogger) SetErrorLogsMaxFiles(maxFiles int) {
 //   - apiResponseTimestamp: When the API response was received
 //
 // Returns:
-//   - error: An error if logging fails, nil otherwise
+//   - error: An error if a synchronous fallback write fails, nil otherwise
 func (l *FileRequestLogger) LogRequest(url, method string, requestHeaders map[string][]string, body []byte, statusCode int, responseHeaders map[string][]string, response, websocketTimeline, apiRequest, apiResponse, apiWebsocketTimeline []byte, apiResponseErrors []*interfaces.ErrorMessage, requestID string, requestTimestamp, apiResponseTimestamp time.Time) error {
-	return l.logRequest(url, method, requestHeaders, body, statusCode, responseHeaders, response, websocketTimeline, apiRequest, apiResponse, apiWebsocketTimeline, apiResponseErrors, false, requestID, requestTimestamp, apiResponseTimestamp)
+	return l.dispatchLogRequest(asyncLogArgs{
+		url:                  url,
+		method:               method,
+		requestHeaders:       requestHeaders,
+		body:                 body,
+		statusCode:           statusCode,
+		responseHeaders:      responseHeaders,
+		response:             response,
+		websocketTimeline:    websocketTimeline,
+		apiRequest:           apiRequest,
+		apiResponse:          apiResponse,
+		apiWebsocketTimeline: apiWebsocketTimeline,
+		apiResponseErrors:    apiResponseErrors,
+		requestID:            requestID,
+		requestTimestamp:     requestTimestamp,
+		apiResponseTimestamp: apiResponseTimestamp,
+	}, false)
 }
 
 // LogRequestWithOptions logs a request with optional forced logging behavior.
 // The force flag allows writing error logs even when regular request logging is disabled.
+// Forced logs ride a priority lane and never drop — if the priority queue is
+// full, the call falls back to a synchronous write so observability is preserved.
 func (l *FileRequestLogger) LogRequestWithOptions(url, method string, requestHeaders map[string][]string, body []byte, statusCode int, responseHeaders map[string][]string, response, websocketTimeline, apiRequest, apiResponse, apiWebsocketTimeline []byte, apiResponseErrors []*interfaces.ErrorMessage, force bool, requestID string, requestTimestamp, apiResponseTimestamp time.Time) error {
-	return l.logRequest(url, method, requestHeaders, body, statusCode, responseHeaders, response, websocketTimeline, apiRequest, apiResponse, apiWebsocketTimeline, apiResponseErrors, force, requestID, requestTimestamp, apiResponseTimestamp)
+	return l.dispatchLogRequest(asyncLogArgs{
+		url:                  url,
+		method:               method,
+		requestHeaders:       requestHeaders,
+		body:                 body,
+		statusCode:           statusCode,
+		responseHeaders:      responseHeaders,
+		response:             response,
+		websocketTimeline:    websocketTimeline,
+		apiRequest:           apiRequest,
+		apiResponse:          apiResponse,
+		apiWebsocketTimeline: apiWebsocketTimeline,
+		apiResponseErrors:    apiResponseErrors,
+		requestID:            requestID,
+		requestTimestamp:     requestTimestamp,
+		apiResponseTimestamp: apiResponseTimestamp,
+	}, force)
 }
 
-func (l *FileRequestLogger) logRequest(url, method string, requestHeaders map[string][]string, body []byte, statusCode int, responseHeaders map[string][]string, response, websocketTimeline, apiRequest, apiResponse, apiWebsocketTimeline []byte, apiResponseErrors []*interfaces.ErrorMessage, force bool, requestID string, requestTimestamp, apiResponseTimestamp time.Time) error {
-	if !l.enabled && !force {
+// dispatchLogRequest routes a write to either the async emitter or to a
+// synchronous fallback path. The fast/normal path enqueues and returns;
+// the synchronous path runs only when (a) the async emitter has been
+// closed or never started, or (b) the priority queue is full for a
+// forced-error log.
+func (l *FileRequestLogger) dispatchLogRequest(args asyncLogArgs, force bool) error {
+	if !l.enabled.Load() && !force {
+		return nil
+	}
+	if l.async == nil {
+		return l.writeLogRequest(args, force)
+	}
+	if syncFallback := l.async.enqueue(asyncTask{args: args, force: force}); syncFallback {
+		return l.writeLogRequest(args, force)
+	}
+	return nil
+}
+
+// writeLogRequest performs the actual file write. Called either from the
+// async worker or from the synchronous fallback path; never from the
+// request handler directly when the async emitter is healthy.
+func (l *FileRequestLogger) writeLogRequest(a asyncLogArgs, force bool) error {
+	return l.logRequestSync(a.url, a.method, a.requestHeaders, a.body, a.statusCode, a.responseHeaders, a.response, a.websocketTimeline, a.apiRequest, a.apiResponse, a.apiWebsocketTimeline, a.apiResponseErrors, force, a.requestID, a.requestTimestamp, a.apiResponseTimestamp)
+}
+
+func (l *FileRequestLogger) logRequestSync(url, method string, requestHeaders map[string][]string, body []byte, statusCode int, responseHeaders map[string][]string, response, websocketTimeline, apiRequest, apiResponse, apiWebsocketTimeline []byte, apiResponseErrors []*interfaces.ErrorMessage, force bool, requestID string, requestTimestamp, apiResponseTimestamp time.Time) error {
+	enabled := l.enabled.Load()
+	if !enabled && !force {
 		return nil
 	}
 
@@ -238,7 +341,7 @@ func (l *FileRequestLogger) logRequest(url, method string, requestHeaders map[st
 
 	// Generate filename with request ID
 	filename := l.generateFilename(url, requestID)
-	if force && !l.enabled {
+	if force && !enabled {
 		filename = l.generateErrorFilename(url, requestID)
 	}
 	filePath := filepath.Join(l.logsDir, filename)
@@ -295,7 +398,7 @@ func (l *FileRequestLogger) logRequest(url, method string, requestHeaders map[st
 		return fmt.Errorf("failed to write log file: %w", writeErr)
 	}
 
-	if force && !l.enabled {
+	if force && !enabled {
 		if errCleanup := l.cleanupOldErrorLogs(); errCleanup != nil {
 			log.WithError(errCleanup).Warn("failed to clean up old error logs")
 		}
@@ -317,7 +420,7 @@ func (l *FileRequestLogger) logRequest(url, method string, requestHeaders map[st
 //   - StreamingLogWriter: A writer for streaming response chunks
 //   - error: An error if logging initialization fails, nil otherwise
 func (l *FileRequestLogger) LogStreamingRequest(url, method string, headers map[string][]string, body []byte, requestID string) (StreamingLogWriter, error) {
-	if !l.enabled {
+	if !l.enabled.Load() {
 		return &NoOpStreamingLogWriter{}, nil
 	}
 
