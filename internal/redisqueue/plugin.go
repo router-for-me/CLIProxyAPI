@@ -7,6 +7,7 @@ import (
 	"time"
 
 	internallogging "github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
+	internalusage "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 )
 
@@ -20,7 +21,7 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 	if p == nil {
 		return
 	}
-	if !Enabled() || !UsageStatisticsEnabled() {
+	if !Enabled() || !internalusage.StatisticsEnabled() {
 		return
 	}
 
@@ -44,7 +45,7 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 	apiKey := strings.TrimSpace(record.APIKey)
 	requestID := strings.TrimSpace(internallogging.GetRequestID(ctx))
 
-	tokens := tokenStats{
+	tokens := internalusage.TokenStats{
 		InputTokens:     record.Detail.InputTokens,
 		OutputTokens:    record.Detail.OutputTokens,
 		ReasoningTokens: record.Detail.ReasoningTokens,
@@ -63,7 +64,7 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 		failed = !resolveSuccess(ctx)
 	}
 
-	detail := requestDetail{
+	detail := internalusage.RequestDetail{
 		Timestamp: timestamp,
 		LatencyMs: record.Latency.Milliseconds(),
 		Source:    record.Source,
@@ -73,7 +74,7 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 	}
 
 	payload, err := json.Marshal(queuedUsageDetail{
-		requestDetail: detail,
+		RequestDetail: detail,
 		Provider:      provider,
 		Model:         modelName,
 		Endpoint:      resolveEndpoint(ctx),
@@ -88,30 +89,13 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 }
 
 type queuedUsageDetail struct {
-	requestDetail
+	internalusage.RequestDetail
 	Provider  string `json:"provider"`
 	Model     string `json:"model"`
 	Endpoint  string `json:"endpoint"`
 	AuthType  string `json:"auth_type"`
 	APIKey    string `json:"api_key"`
 	RequestID string `json:"request_id"`
-}
-
-type requestDetail struct {
-	Timestamp time.Time  `json:"timestamp"`
-	LatencyMs int64      `json:"latency_ms"`
-	Source    string     `json:"source"`
-	AuthIndex string     `json:"auth_index"`
-	Tokens    tokenStats `json:"tokens"`
-	Failed    bool       `json:"failed"`
-}
-
-type tokenStats struct {
-	InputTokens     int64 `json:"input_tokens"`
-	OutputTokens    int64 `json:"output_tokens"`
-	ReasoningTokens int64 `json:"reasoning_tokens"`
-	CachedTokens    int64 `json:"cached_tokens"`
-	TotalTokens     int64 `json:"total_tokens"`
 }
 
 func resolveSuccess(ctx context.Context) bool {

@@ -10,6 +10,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	internallogging "github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
+	internalusage "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 )
 
@@ -126,16 +127,16 @@ func withEnabledQueue(t *testing.T, fn func()) {
 	t.Helper()
 
 	prevQueueEnabled := Enabled()
-	prevUsageEnabled := UsageStatisticsEnabled()
+	prevStatsEnabled := internalusage.StatisticsEnabled()
 
 	SetEnabled(false)
 	SetEnabled(true)
-	SetUsageStatisticsEnabled(true)
+	internalusage.SetStatisticsEnabled(true)
 
 	defer func() {
 		SetEnabled(false)
 		SetEnabled(prevQueueEnabled)
-		SetUsageStatisticsEnabled(prevUsageEnabled)
+		internalusage.SetStatisticsEnabled(prevStatsEnabled)
 	}()
 
 	fn()
