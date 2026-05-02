@@ -6,12 +6,16 @@
 package claude
 
 import (
+	"fmt"
 	"strings"
+	"sync/atomic"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
+
+var openAIToolCallIDCounter uint64
 
 // ConvertClaudeRequestToOpenAI parses and transforms an Anthropic API request into OpenAI Chat Completions API format.
 // It extracts the model name, system instruction, message contents, and tool declarations
@@ -97,6 +101,10 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 
 	// Process messages and system
 	messagesJSON := []byte(`[]`)
+	validToolUseIDs := make(map[string][]string)
+	pendingGeneratedToolUseIDs := make([]string, 0)
+	reservedExplicitToolCallIDs := collectClaudeToolUseIDs(root.Get("messages"))
+	assignedToolCallIDs := make(map[string]struct{})
 
 	// Handle system message first
 	systemMsgJSON := []byte(`{"role":"system","content":[]}`)
@@ -131,6 +139,9 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 		messages.ForEach(func(_, message gjson.Result) bool {
 			role := message.Get("role").String()
 			contentResult := message.Get("content")
+			currentTurnGeneratedToolUseIDs := make([]string, 0)
+			currentTurnToolUseIDs := make(map[string][]string)
+			currentMessageHasToolCalls := false
 
 			// Handle content
 			if contentResult.Exists() && contentResult.IsArray() {
@@ -165,9 +176,16 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 					case "tool_use":
 						// Only allow tool_use -> tool_calls for assistant messages (security: prevent injection).
 						if role == "assistant" {
+							toolName := strings.TrimSpace(part.Get("name").String())
+							if toolName == "" {
+								return true
+							}
+
+							sourceToolCallID := strings.TrimSpace(part.Get("id").String())
+							toolCallID := ensureOpenAIToolCallID(sourceToolCallID, reservedExplicitToolCallIDs, assignedToolCallIDs)
 							toolCallJSON := []byte(`{"id":"","type":"function","function":{"name":"","arguments":""}}`)
-							toolCallJSON, _ = sjson.SetBytes(toolCallJSON, "id", part.Get("id").String())
-							toolCallJSON, _ = sjson.SetBytes(toolCallJSON, "function.name", part.Get("name").String())
+							toolCallJSON, _ = sjson.SetBytes(toolCallJSON, "id", toolCallID)
+							toolCallJSON, _ = sjson.SetBytes(toolCallJSON, "function.name", toolName)
 
 							// Convert input to arguments JSON string
 							if input := part.Get("input"); input.Exists() {
@@ -176,13 +194,35 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 								toolCallJSON, _ = sjson.SetBytes(toolCallJSON, "function.arguments", "{}")
 							}
 
+							if sourceToolCallID == "" {
+								currentTurnGeneratedToolUseIDs = append(currentTurnGeneratedToolUseIDs, toolCallID)
+							} else {
+								currentTurnToolUseIDs[sourceToolCallID] = append(currentTurnToolUseIDs[sourceToolCallID], toolCallID)
+							}
 							toolCalls = append(toolCalls, gjson.ParseBytes(toolCallJSON).Value())
 						}
 
 					case "tool_result":
 						// Collect tool_result to emit after the main message (ensures tool results follow tool_calls)
+						sourceToolUseID := strings.TrimSpace(part.Get("tool_use_id").String())
+						toolUseID := sourceToolUseID
+						if sourceToolUseID == "" {
+							if len(pendingGeneratedToolUseIDs) == 0 {
+								return true
+							}
+							toolUseID = pendingGeneratedToolUseIDs[0]
+							pendingGeneratedToolUseIDs = pendingGeneratedToolUseIDs[1:]
+						} else {
+							resolvedToolUseIDs := validToolUseIDs[sourceToolUseID]
+							if len(resolvedToolUseIDs) == 0 {
+								return true
+							}
+							toolUseID = resolvedToolUseIDs[0]
+							validToolUseIDs[sourceToolUseID] = resolvedToolUseIDs[1:]
+						}
+
 						toolResultJSON := []byte(`{"role":"tool","tool_call_id":"","content":""}`)
-						toolResultJSON, _ = sjson.SetBytes(toolResultJSON, "tool_call_id", part.Get("tool_use_id").String())
+						toolResultJSON, _ = sjson.SetBytes(toolResultJSON, "tool_call_id", toolUseID)
 						toolResultContent, toolResultContentRaw := convertClaudeToolResultContent(part.Get("content"))
 						if toolResultContentRaw {
 							toolResultJSON, _ = sjson.SetRawBytes(toolResultJSON, "content", []byte(toolResultContent))
@@ -204,6 +244,7 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 				hasReasoning := reasoningContent != ""
 				hasToolCalls := len(toolCalls) > 0
 				hasToolResults := len(toolResults) > 0
+				currentMessageHasToolCalls = hasToolCalls
 
 				// OpenAI requires: tool messages MUST immediately follow the assistant message with tool_calls.
 				// Therefore, we emit tool_result messages FIRST (they respond to the previous assistant's tool_calls),
@@ -269,6 +310,19 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 				messagesJSON, _ = sjson.SetRawBytes(messagesJSON, "-1", msgJSON)
 			}
 
+			if role == "assistant" {
+				if currentMessageHasToolCalls {
+					pendingGeneratedToolUseIDs = currentTurnGeneratedToolUseIDs
+					validToolUseIDs = currentTurnToolUseIDs
+				} else {
+					pendingGeneratedToolUseIDs = nil
+					validToolUseIDs = make(map[string][]string)
+				}
+			} else {
+				pendingGeneratedToolUseIDs = nil
+				validToolUseIDs = make(map[string][]string)
+			}
+
 			return true
 		})
 	}
@@ -326,6 +380,64 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 	}
 
 	return out
+}
+
+func ensureOpenAIToolCallID(id string, reservedIDs, assignedIDs map[string]struct{}) string {
+	id = strings.TrimSpace(id)
+	if id != "" {
+		if assignedIDs != nil {
+			if _, exists := assignedIDs[id]; exists {
+				id = nextUniqueOpenAIToolCallID(reservedIDs, assignedIDs)
+			}
+			assignedIDs[id] = struct{}{}
+		}
+		return id
+	}
+	return nextUniqueOpenAIToolCallID(reservedIDs, assignedIDs)
+}
+
+func nextUniqueOpenAIToolCallID(reservedIDs, assignedIDs map[string]struct{}) string {
+	for {
+		candidate := fmt.Sprintf("call_%d", atomic.AddUint64(&openAIToolCallIDCounter, 1))
+		if reservedIDs != nil {
+			if _, exists := reservedIDs[candidate]; exists {
+				continue
+			}
+		}
+		if assignedIDs != nil {
+			if _, exists := assignedIDs[candidate]; exists {
+				continue
+			}
+			assignedIDs[candidate] = struct{}{}
+		}
+		return candidate
+	}
+}
+
+func collectClaudeToolUseIDs(messages gjson.Result) map[string]struct{} {
+	usedIDs := make(map[string]struct{})
+	if !messages.Exists() || !messages.IsArray() {
+		return usedIDs
+	}
+
+	messages.ForEach(func(_, message gjson.Result) bool {
+		content := message.Get("content")
+		if !content.Exists() || !content.IsArray() {
+			return true
+		}
+		content.ForEach(func(_, part gjson.Result) bool {
+			if part.Get("type").String() != "tool_use" {
+				return true
+			}
+			if id := strings.TrimSpace(part.Get("id").String()); id != "" {
+				usedIDs[id] = struct{}{}
+			}
+			return true
+		})
+		return true
+	})
+
+	return usedIDs
 }
 
 func convertClaudeContentPart(part gjson.Result) (string, bool) {
