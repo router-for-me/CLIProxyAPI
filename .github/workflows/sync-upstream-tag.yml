@@ -1,0 +1,64 @@
+name: sync-upstream-tag
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 * * * *'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-upstream-tag
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Sync latest upstream tag
+        env:
+          PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
+          UPSTREAM_REPO: https://github.com/router-for-me/CLIProxyAPI.git
+        run: |
+          set -euo pipefail
+
+          if [ -z "${PAT_TOKEN}" ]; then
+            echo "::error::PAT_TOKEN secret is required to push tags and trigger release workflows."
+            exit 1
+          fi
+
+          git remote set-url origin "https://x-access-token:${PAT_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git remote add upstream "${UPSTREAM_REPO}" 2>/dev/null || git remote set-url upstream "${UPSTREAM_REPO}"
+
+          latest_tag="$(git ls-remote --tags --refs --sort=-v:refname upstream 'v*' | awk 'NR == 1 { sub("refs/tags/", "", $2); print $2 }')"
+          if [ -z "${latest_tag}" ]; then
+            echo "::error::No upstream version tag matching v* was found."
+            exit 1
+          fi
+
+          git fetch --force --no-tags origin '+refs/heads/main:refs/remotes/origin/main'
+          git fetch --force --no-tags upstream "+refs/tags/${latest_tag}:refs/tags/upstream/${latest_tag}"
+
+          git checkout -B main origin/main
+
+          upstream_commit="$(git rev-list -n 1 "refs/tags/upstream/${latest_tag}")"
+          if git merge-base --is-ancestor "${upstream_commit}" HEAD; then
+            echo "main already contains upstream ${latest_tag} (${upstream_commit})."
+          else
+            git merge --no-edit "${upstream_commit}"
+          fi
+
+          git push origin HEAD:main
+          git tag -f "${latest_tag}" HEAD
+          git push --force origin "refs/tags/${latest_tag}:refs/tags/${latest_tag}"
