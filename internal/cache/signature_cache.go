@@ -29,6 +29,12 @@ const (
 
 	// CacheCleanupInterval controls how often stale entries are purged
 	CacheCleanupInterval = 10 * time.Minute
+
+	// SignatureGroupCapacity bounds the per-group LRU. Hash space is 64-bit, so
+	// without a bound the cache grew indefinitely with unique requests. The
+	// bound trades a hit-rate floor for a memory ceiling; eviction policy is
+	// least-recently-used (sliding TTL refresh on read also bumps recency).
+	SignatureGroupCapacity = 10_000
 )
 
 // signatureCache stores signatures by model group -> textHash -> SignatureEntry
@@ -41,10 +47,117 @@ var cacheCleanupOnce sync.Once
 // without sleeping. Production callers always see time.Now().
 var clock = time.Now
 
-// groupCache is the inner map type
+// lruEntry is one signature kept in the per-group LRU's doubly-linked list.
+type lruEntry struct {
+	textHash   string
+	signature  string
+	timestamp  time.Time
+	prev, next *lruEntry
+}
+
+// groupCache is the inner per-model-group cache: a bounded LRU keyed by
+// textHash. Sliding TTL is maintained by refreshing entry.timestamp on every
+// successful read; the linked list maintains recency order for eviction when
+// the entry count exceeds capacity.
+//
+// All operations hold mu — moveToFront on read mutates the list, so an
+// RWMutex would not give read-side concurrency anyway.
 type groupCache struct {
-	mu      sync.RWMutex
-	entries map[string]SignatureEntry
+	mu       sync.Mutex
+	entries  map[string]*lruEntry
+	head     *lruEntry // sentinel; head.next is most-recently-used
+	tail     *lruEntry // sentinel; tail.prev is least-recently-used
+	capacity int
+}
+
+func newGroupCache(capacity int) *groupCache {
+	head := &lruEntry{}
+	tail := &lruEntry{}
+	head.next = tail
+	tail.prev = head
+	return &groupCache{
+		entries:  make(map[string]*lruEntry),
+		head:     head,
+		tail:     tail,
+		capacity: capacity,
+	}
+}
+
+// link inserts e immediately after head (most-recently-used position).
+func (c *groupCache) link(e *lruEntry) {
+	e.prev = c.head
+	e.next = c.head.next
+	c.head.next.prev = e
+	c.head.next = e
+}
+
+// unlink removes e from the list.
+func (c *groupCache) unlink(e *lruEntry) {
+	e.prev.next = e.next
+	e.next.prev = e.prev
+	e.prev = nil
+	e.next = nil
+}
+
+func (c *groupCache) moveToFront(e *lruEntry) {
+	c.unlink(e)
+	c.link(e)
+}
+
+// get returns the signature and true if the entry exists and is within TTL,
+// refreshing its timestamp (sliding) and bumping it to most-recently-used.
+// Expired or missing entries return ("", false) and remove themselves.
+func (c *groupCache) get(textHash string, now time.Time, ttl time.Duration) (string, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	e, ok := c.entries[textHash]
+	if !ok {
+		return "", false
+	}
+	if now.Sub(e.timestamp) > ttl {
+		c.unlink(e)
+		delete(c.entries, textHash)
+		return "", false
+	}
+	e.timestamp = now
+	c.moveToFront(e)
+	return e.signature, true
+}
+
+// set inserts or updates an entry, evicting the LRU tail if capacity is exceeded.
+func (c *groupCache) set(textHash, signature string, now time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if e, ok := c.entries[textHash]; ok {
+		e.signature = signature
+		e.timestamp = now
+		c.moveToFront(e)
+		return
+	}
+	e := &lruEntry{textHash: textHash, signature: signature, timestamp: now}
+	c.link(e)
+	c.entries[textHash] = e
+	if len(c.entries) > c.capacity {
+		oldest := c.tail.prev
+		if oldest != c.head {
+			c.unlink(oldest)
+			delete(c.entries, oldest.textHash)
+		}
+	}
+}
+
+// purgeExpired removes entries older than ttl. Returns true if the group is
+// now empty (caller may delete the group entirely).
+func (c *groupCache) purgeExpired(now time.Time, ttl time.Duration) (empty bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for k, e := range c.entries {
+		if now.Sub(e.timestamp) > ttl {
+			c.unlink(e)
+			delete(c.entries, k)
+		}
+	}
+	return len(c.entries) == 0
 }
 
 // hashText creates a stable, Unicode-safe key from text content
@@ -61,7 +174,7 @@ func getOrCreateGroupCache(groupKey string) *groupCache {
 	if val, ok := signatureCache.Load(groupKey); ok {
 		return val.(*groupCache)
 	}
-	sc := &groupCache{entries: make(map[string]SignatureEntry)}
+	sc := newGroupCache(SignatureGroupCapacity)
 	actual, _ := signatureCache.LoadOrStore(groupKey, sc)
 	return actual.(*groupCache)
 }
@@ -83,17 +196,7 @@ func purgeExpiredCaches() {
 	now := clock()
 	signatureCache.Range(func(key, value any) bool {
 		sc := value.(*groupCache)
-		sc.mu.Lock()
-		// Remove expired entries
-		for k, entry := range sc.entries {
-			if now.Sub(entry.Timestamp) > SignatureCacheTTL {
-				delete(sc.entries, k)
-			}
-		}
-		isEmpty := len(sc.entries) == 0
-		sc.mu.Unlock()
-		// Remove cache bucket if empty
-		if isEmpty {
+		if sc.purgeExpired(now, SignatureCacheTTL) {
 			signatureCache.Delete(key)
 		}
 		return true
@@ -113,17 +216,12 @@ func CacheSignature(modelName, text, signature string) {
 	groupKey := GetModelGroup(modelName)
 	textHash := hashText(text)
 	sc := getOrCreateGroupCache(groupKey)
-	sc.mu.Lock()
-	defer sc.mu.Unlock()
-
-	sc.entries[textHash] = SignatureEntry{
-		Signature: signature,
-		Timestamp: clock(),
-	}
+	sc.set(textHash, signature, clock())
 }
 
 // GetCachedSignature retrieves a cached signature for a given model group and text.
-// Returns empty string if not found or expired.
+// Returns empty string if not found or expired. For the gemini group, returns the
+// "skip_thought_signature_validator" miss sentinel for empty/miss/expired keys.
 func GetCachedSignature(modelName, text string) string {
 	groupKey := GetModelGroup(modelName)
 
@@ -141,35 +239,16 @@ func GetCachedSignature(modelName, text string) string {
 		return ""
 	}
 	sc := val.(*groupCache)
-
 	textHash := hashText(text)
 
-	now := clock()
-
-	sc.mu.Lock()
-	entry, exists := sc.entries[textHash]
-	if !exists {
-		sc.mu.Unlock()
+	sig, hit := sc.get(textHash, clock(), SignatureCacheTTL)
+	if !hit {
 		if groupKey == "gemini" {
 			return "skip_thought_signature_validator"
 		}
 		return ""
 	}
-	if now.Sub(entry.Timestamp) > SignatureCacheTTL {
-		delete(sc.entries, textHash)
-		sc.mu.Unlock()
-		if groupKey == "gemini" {
-			return "skip_thought_signature_validator"
-		}
-		return ""
-	}
-
-	// Refresh TTL on access (sliding expiration).
-	entry.Timestamp = now
-	sc.entries[textHash] = entry
-	sc.mu.Unlock()
-
-	return entry.Signature
+	return sig
 }
 
 // ClearSignatureCache clears signature cache for a specific model group or all groups.
