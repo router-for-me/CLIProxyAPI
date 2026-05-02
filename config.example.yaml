@@ -238,6 +238,7 @@ nonstream-keepalive-interval: 0
 #     disabled: false # optional: set to true to disable this provider without removing it
 #     prefix: "test" # optional: require calls like "test/kimi-k2" to target this provider's credentials
 #     base-url: "https://openrouter.ai/api/v1" # The base URL of the provider.
+#     endpoint-mode: "auto" # optional override: leave empty to keep provider default/legacy behavior; use auto | chat-completions | responses to force routing
 #     headers:
 #       X-Custom-Header: "custom-value"
 #     api-key-entries:

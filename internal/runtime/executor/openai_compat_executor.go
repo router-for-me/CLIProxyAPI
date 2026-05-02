@@ -29,6 +29,18 @@ type OpenAICompatExecutor struct {
 	cfg      *config.Config
 }
 
+const (
+	openAICompatEndpointModeDefault         = ""
+	openAICompatEndpointModeAuto            = "auto"
+	openAICompatEndpointModeChatCompletions = "chat-completions"
+	openAICompatEndpointModeResponses       = "responses"
+)
+
+type openAICompatEndpoint struct {
+	format sdktranslator.Format
+	path   string
+}
+
 // NewOpenAICompatExecutor creates an executor bound to a provider key (e.g., "openrouter").
 func NewOpenAICompatExecutor(provider string, cfg *config.Config) *OpenAICompatExecutor {
 	return &OpenAICompatExecutor{provider: provider, cfg: cfg}
@@ -83,12 +95,9 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	}
 
 	from := opts.SourceFormat
-	to := sdktranslator.FromString("openai")
-	endpoint := "/chat/completions"
-	if opts.Alt == "responses/compact" {
-		to = sdktranslator.FromString("openai-response")
-		endpoint = "/responses/compact"
-	}
+	upstream := e.resolveUpstreamEndpoint(auth, from, opts.Alt)
+	to := upstream.format
+	endpoint := upstream.path
 	originalPayloadSource := req.Payload
 	if len(opts.OriginalRequest) > 0 {
 		originalPayloadSource = opts.OriginalRequest
@@ -191,7 +200,9 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	}
 
 	from := opts.SourceFormat
-	to := sdktranslator.FromString("openai")
+	upstream := e.resolveUpstreamEndpoint(auth, from, opts.Alt)
+	to := upstream.format
+	endpoint := upstream.path
 	originalPayloadSource := req.Payload
 	if len(opts.OriginalRequest) > 0 {
 		originalPayloadSource = opts.OriginalRequest
@@ -208,11 +219,12 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		return nil, err
 	}
 
-	// Request usage data in the final streaming chunk so that token statistics
-	// are captured even when the upstream is an OpenAI-compatible provider.
-	translated, _ = sjson.SetBytes(translated, "stream_options.include_usage", true)
+	// Request usage data in the final streaming chunk for chat completions upstreams.
+	if endpoint == "/chat/completions" {
+		translated, _ = sjson.SetBytes(translated, "stream_options.include_usage", true)
+	}
 
-	url := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
+	url := strings.TrimSuffix(baseURL, "/") + endpoint
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
 	if err != nil {
 		return nil, err
@@ -275,11 +287,28 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		scanner := bufio.NewScanner(httpResp.Body)
 		scanner.Buffer(nil, 52_428_800) // 50MB
 		var param any
+		passthroughResponses := to == sdktranslator.FormatOpenAIResponse && from == sdktranslator.FormatOpenAIResponse && endpoint == "/responses"
+		var frame []byte
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			if detail, ok := helps.ParseOpenAIStreamUsage(line); ok {
 				reporter.Publish(ctx, detail)
+			}
+			if passthroughResponses {
+				line = bytes.TrimRight(line, "\r")
+				if len(line) == 0 {
+					if len(frame) > 0 {
+						out <- cliproxyexecutor.StreamChunk{Payload: bytes.Clone(frame)}
+						frame = frame[:0]
+					}
+					continue
+				}
+				if len(frame) > 0 {
+					frame = append(frame, '\n')
+				}
+				frame = append(frame, line...)
+				continue
 			}
 			if len(line) == 0 {
 				continue
@@ -295,6 +324,9 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			for i := range chunks {
 				out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}
 			}
+		}
+		if passthroughResponses && len(frame) > 0 {
+			out <- cliproxyexecutor.StreamChunk{Payload: bytes.Clone(frame)}
 		}
 		if errScan := scanner.Err(); errScan != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
@@ -390,6 +422,61 @@ func (e *OpenAICompatExecutor) resolveCompatConfig(auth *cliproxyauth.Auth) *con
 		}
 	}
 	return nil
+}
+
+func (e *OpenAICompatExecutor) resolveUpstreamEndpoint(auth *cliproxyauth.Auth, from sdktranslator.Format, alt string) openAICompatEndpoint {
+	if alt == "responses/compact" {
+		return openAICompatEndpoint{
+			format: sdktranslator.FormatOpenAIResponse,
+			path:   "/responses/compact",
+		}
+	}
+
+	mode := openAICompatEndpointModeAuto
+	if compat := e.resolveCompatConfig(auth); compat != nil {
+		mode = normalizeOpenAICompatEndpointMode(compat.EndpointMode)
+	}
+	if mode == openAICompatEndpointModeDefault {
+		return openAICompatEndpoint{
+			format: sdktranslator.FormatOpenAI,
+			path:   "/chat/completions",
+		}
+	}
+
+	switch mode {
+	case openAICompatEndpointModeResponses:
+		return openAICompatEndpoint{
+			format: sdktranslator.FormatOpenAIResponse,
+			path:   "/responses",
+		}
+	case openAICompatEndpointModeAuto:
+		if from == sdktranslator.FormatOpenAIResponse {
+			return openAICompatEndpoint{
+				format: sdktranslator.FormatOpenAIResponse,
+				path:   "/responses",
+			}
+		}
+	}
+
+	return openAICompatEndpoint{
+		format: sdktranslator.FormatOpenAI,
+		path:   "/chat/completions",
+	}
+}
+
+func normalizeOpenAICompatEndpointMode(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "default", "legacy", "provider-default", "upstream":
+		return openAICompatEndpointModeDefault
+	case openAICompatEndpointModeAuto:
+		return openAICompatEndpointModeAuto
+	case openAICompatEndpointModeChatCompletions:
+		return openAICompatEndpointModeChatCompletions
+	case openAICompatEndpointModeResponses:
+		return openAICompatEndpointModeResponses
+	default:
+		return openAICompatEndpointModeDefault
+	}
 }
 
 func (e *OpenAICompatExecutor) overrideModel(payload []byte, model string) []byte {
