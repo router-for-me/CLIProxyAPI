@@ -993,6 +993,34 @@ func (s *Server) Config() *config.Config {
 	return s.cfgPtr.Load()
 }
 
+// SetManagementCommitter overrides the management handler's config commit
+// hook. The default hook (set in NewServer) calls Server.UpdateClients,
+// which is the appropriate scope for an embedded api.Server with no
+// higher-level service to fan out to.
+//
+// Service-level callers (sdk/cliproxy/service.go) override this to fire
+// the full reload path so management writes trigger the SAME fan-out as
+// the file watcher: coreManager.SetConfig, SetOAuthModelAlias,
+// rebindExecutors, applyRetryConfig, applyPprofConfig, etc. Without this
+// override, mgmt PUT/PATCH/DELETE responds 200 but the change does not
+// reach the executor layer until the file watcher fires (or never, in
+// embedded paths with no watcher) — see Codex Phase C round-3 review
+// BLOCKER #1.
+//
+// Pass nil to restore the default UpdateClients-only hook.
+func (s *Server) SetManagementCommitter(commit func(*config.Config)) {
+	if s == nil || s.mgmt == nil {
+		return
+	}
+	if commit == nil {
+		s.mgmt.SetConfigCommitter(func(next *config.Config) {
+			s.UpdateClients(next)
+		})
+		return
+	}
+	s.mgmt.SetConfigCommitter(commit)
+}
+
 // UpdateClients updates the server's client list and configuration.
 // This method is called when the configuration or authentication tokens change.
 //

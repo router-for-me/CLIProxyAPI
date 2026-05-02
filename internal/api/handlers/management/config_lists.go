@@ -87,11 +87,13 @@ func (h *Handler) deleteFromStringList(c *gin.Context, accessor func(*config.Con
 		if _, err := fmt.Sscanf(idxStr, "%d", &idx); err == nil {
 			h.applyConfigChange(c, func(cfg *config.Config) {
 				target := accessor(cfg)
-				if idx >= 0 && idx < len(*target) {
-					*target = append((*target)[:idx], (*target)[idx+1:]...)
-					if after != nil {
-						after(cfg)
-					}
+				if idx < 0 || idx >= len(*target) {
+					c.JSON(404, gin.H{"error": "item not found"})
+					return
+				}
+				*target = append((*target)[:idx], (*target)[idx+1:]...)
+				if after != nil {
+					after(cfg)
 				}
 			})
 			return
@@ -100,11 +102,16 @@ func (h *Handler) deleteFromStringList(c *gin.Context, accessor func(*config.Con
 	if val := strings.TrimSpace(c.Query("value")); val != "" {
 		h.applyConfigChange(c, func(cfg *config.Config) {
 			target := accessor(cfg)
-			out := make([]string, 0, len(*target))
+			before := len(*target)
+			out := make([]string, 0, before)
 			for _, v := range *target {
 				if strings.TrimSpace(v) != val {
 					out = append(out, v)
 				}
+			}
+			if len(out) == before {
+				c.JSON(404, gin.H{"error": "item not found"})
+				return
 			}
 			*target = out
 			if after != nil {
@@ -235,17 +242,20 @@ func (h *Handler) DeleteGeminiKey(c *gin.Context) {
 		if baseRaw, okBase := c.GetQuery("base-url"); okBase {
 			base := strings.TrimSpace(baseRaw)
 			h.applyConfigChange(c, func(cfg *config.Config) {
-				out := make([]config.GeminiKey, 0, len(cfg.GeminiKey))
+				before := len(cfg.GeminiKey)
+				out := make([]config.GeminiKey, 0, before)
 				for _, v := range cfg.GeminiKey {
 					if strings.TrimSpace(v.APIKey) == val && strings.TrimSpace(v.BaseURL) == base {
 						continue
 					}
 					out = append(out, v)
 				}
-				if len(out) != len(cfg.GeminiKey) {
-					cfg.GeminiKey = out
-					cfg.SanitizeGeminiKeys()
+				if len(out) == before {
+					c.JSON(404, gin.H{"error": "item not found"})
+					return
 				}
+				cfg.GeminiKey = out
+				cfg.SanitizeGeminiKeys()
 			})
 			return
 		}
@@ -281,10 +291,12 @@ func (h *Handler) DeleteGeminiKey(c *gin.Context) {
 		var idx int
 		if _, err := fmt.Sscanf(idxStr, "%d", &idx); err == nil {
 			h.applyConfigChange(c, func(cfg *config.Config) {
-				if idx >= 0 && idx < len(cfg.GeminiKey) {
-					cfg.GeminiKey = append(cfg.GeminiKey[:idx], cfg.GeminiKey[idx+1:]...)
-					cfg.SanitizeGeminiKeys()
+				if idx < 0 || idx >= len(cfg.GeminiKey) {
+					c.JSON(404, gin.H{"error": "item not found"})
+					return
 				}
+				cfg.GeminiKey = append(cfg.GeminiKey[:idx], cfg.GeminiKey[idx+1:]...)
+				cfg.SanitizeGeminiKeys()
 			})
 			return
 		}
@@ -392,12 +404,17 @@ func (h *Handler) DeleteClaudeKey(c *gin.Context) {
 		if baseRaw, okBase := c.GetQuery("base-url"); okBase {
 			base := strings.TrimSpace(baseRaw)
 			h.applyConfigChange(c, func(cfg *config.Config) {
-				out := make([]config.ClaudeKey, 0, len(cfg.ClaudeKey))
+				before := len(cfg.ClaudeKey)
+				out := make([]config.ClaudeKey, 0, before)
 				for _, v := range cfg.ClaudeKey {
 					if strings.TrimSpace(v.APIKey) == val && strings.TrimSpace(v.BaseURL) == base {
 						continue
 					}
 					out = append(out, v)
+				}
+				if len(out) == before {
+					c.JSON(404, gin.H{"error": "item not found"})
+					return
 				}
 				cfg.ClaudeKey = out
 				cfg.SanitizeClaudeKeys()
@@ -433,10 +450,12 @@ func (h *Handler) DeleteClaudeKey(c *gin.Context) {
 		var idx int
 		if _, err := fmt.Sscanf(idxStr, "%d", &idx); err == nil {
 			h.applyConfigChange(c, func(cfg *config.Config) {
-				if idx >= 0 && idx < len(cfg.ClaudeKey) {
-					cfg.ClaudeKey = append(cfg.ClaudeKey[:idx], cfg.ClaudeKey[idx+1:]...)
-					cfg.SanitizeClaudeKeys()
+				if idx < 0 || idx >= len(cfg.ClaudeKey) {
+					c.JSON(404, gin.H{"error": "item not found"})
+					return
 				}
+				cfg.ClaudeKey = append(cfg.ClaudeKey[:idx], cfg.ClaudeKey[idx+1:]...)
+				cfg.SanitizeClaudeKeys()
 			})
 			return
 		}
@@ -552,11 +571,16 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 func (h *Handler) DeleteOpenAICompat(c *gin.Context) {
 	if name := c.Query("name"); name != "" {
 		h.applyConfigChange(c, func(cfg *config.Config) {
-			out := make([]config.OpenAICompatibility, 0, len(cfg.OpenAICompatibility))
+			before := len(cfg.OpenAICompatibility)
+			out := make([]config.OpenAICompatibility, 0, before)
 			for _, v := range cfg.OpenAICompatibility {
 				if v.Name != name {
 					out = append(out, v)
 				}
+			}
+			if len(out) == before {
+				c.JSON(404, gin.H{"error": "item not found"})
+				return
 			}
 			cfg.OpenAICompatibility = out
 			cfg.SanitizeOpenAICompatibility()
@@ -567,10 +591,12 @@ func (h *Handler) DeleteOpenAICompat(c *gin.Context) {
 		var idx int
 		if _, err := fmt.Sscanf(idxStr, "%d", &idx); err == nil {
 			h.applyConfigChange(c, func(cfg *config.Config) {
-				if idx >= 0 && idx < len(cfg.OpenAICompatibility) {
-					cfg.OpenAICompatibility = append(cfg.OpenAICompatibility[:idx], cfg.OpenAICompatibility[idx+1:]...)
-					cfg.SanitizeOpenAICompatibility()
+				if idx < 0 || idx >= len(cfg.OpenAICompatibility) {
+					c.JSON(404, gin.H{"error": "item not found"})
+					return
 				}
+				cfg.OpenAICompatibility = append(cfg.OpenAICompatibility[:idx], cfg.OpenAICompatibility[idx+1:]...)
+				cfg.SanitizeOpenAICompatibility()
 			})
 			return
 		}
@@ -696,12 +722,17 @@ func (h *Handler) DeleteVertexCompatKey(c *gin.Context) {
 		if baseRaw, okBase := c.GetQuery("base-url"); okBase {
 			base := strings.TrimSpace(baseRaw)
 			h.applyConfigChange(c, func(cfg *config.Config) {
-				out := make([]config.VertexCompatKey, 0, len(cfg.VertexCompatAPIKey))
+				before := len(cfg.VertexCompatAPIKey)
+				out := make([]config.VertexCompatKey, 0, before)
 				for _, v := range cfg.VertexCompatAPIKey {
 					if strings.TrimSpace(v.APIKey) == val && strings.TrimSpace(v.BaseURL) == base {
 						continue
 					}
 					out = append(out, v)
+				}
+				if len(out) == before {
+					c.JSON(404, gin.H{"error": "item not found"})
+					return
 				}
 				cfg.VertexCompatAPIKey = out
 				cfg.SanitizeVertexCompatKeys()
@@ -737,10 +768,12 @@ func (h *Handler) DeleteVertexCompatKey(c *gin.Context) {
 		var idx int
 		if _, errScan := fmt.Sscanf(idxStr, "%d", &idx); errScan == nil {
 			h.applyConfigChange(c, func(cfg *config.Config) {
-				if idx >= 0 && idx < len(cfg.VertexCompatAPIKey) {
-					cfg.VertexCompatAPIKey = append(cfg.VertexCompatAPIKey[:idx], cfg.VertexCompatAPIKey[idx+1:]...)
-					cfg.SanitizeVertexCompatKeys()
+				if idx < 0 || idx >= len(cfg.VertexCompatAPIKey) {
+					c.JSON(404, gin.H{"error": "item not found"})
+					return
 				}
+				cfg.VertexCompatAPIKey = append(cfg.VertexCompatAPIKey[:idx], cfg.VertexCompatAPIKey[idx+1:]...)
+				cfg.SanitizeVertexCompatKeys()
 			})
 			return
 		}
@@ -1052,12 +1085,17 @@ func (h *Handler) DeleteCodexKey(c *gin.Context) {
 		if baseRaw, okBase := c.GetQuery("base-url"); okBase {
 			base := strings.TrimSpace(baseRaw)
 			h.applyConfigChange(c, func(cfg *config.Config) {
-				out := make([]config.CodexKey, 0, len(cfg.CodexKey))
+				before := len(cfg.CodexKey)
+				out := make([]config.CodexKey, 0, before)
 				for _, v := range cfg.CodexKey {
 					if strings.TrimSpace(v.APIKey) == val && strings.TrimSpace(v.BaseURL) == base {
 						continue
 					}
 					out = append(out, v)
+				}
+				if len(out) == before {
+					c.JSON(404, gin.H{"error": "item not found"})
+					return
 				}
 				cfg.CodexKey = out
 				cfg.SanitizeCodexKeys()
@@ -1093,10 +1131,12 @@ func (h *Handler) DeleteCodexKey(c *gin.Context) {
 		var idx int
 		if _, err := fmt.Sscanf(idxStr, "%d", &idx); err == nil {
 			h.applyConfigChange(c, func(cfg *config.Config) {
-				if idx >= 0 && idx < len(cfg.CodexKey) {
-					cfg.CodexKey = append(cfg.CodexKey[:idx], cfg.CodexKey[idx+1:]...)
-					cfg.SanitizeCodexKeys()
+				if idx < 0 || idx >= len(cfg.CodexKey) {
+					c.JSON(404, gin.H{"error": "item not found"})
+					return
 				}
+				cfg.CodexKey = append(cfg.CodexKey[:idx], cfg.CodexKey[idx+1:]...)
+				cfg.SanitizeCodexKeys()
 			})
 			return
 		}
@@ -1370,11 +1410,16 @@ func (h *Handler) DeleteAmpModelMappings(c *gin.Context) {
 	}
 
 	h.applyConfigChange(c, func(cfg *config.Config) {
-		newMappings := make([]config.AmpModelMapping, 0, len(cfg.AmpCode.ModelMappings))
+		before := len(cfg.AmpCode.ModelMappings)
+		newMappings := make([]config.AmpModelMapping, 0, before)
 		for _, m := range cfg.AmpCode.ModelMappings {
 			if !toRemove[strings.TrimSpace(m.From)] {
 				newMappings = append(newMappings, m)
 			}
+		}
+		if len(newMappings) == before {
+			c.JSON(404, gin.H{"error": "item not found"})
+			return
 		}
 		cfg.AmpCode.ModelMappings = newMappings
 	})
@@ -1495,11 +1540,16 @@ func (h *Handler) DeleteAmpUpstreamAPIKeys(c *gin.Context) {
 	}
 
 	h.applyConfigChange(c, func(cfg *config.Config) {
-		newEntries := make([]config.AmpUpstreamAPIKeyEntry, 0, len(cfg.AmpCode.UpstreamAPIKeys))
+		before := len(cfg.AmpCode.UpstreamAPIKeys)
+		newEntries := make([]config.AmpUpstreamAPIKeyEntry, 0, before)
 		for _, entry := range cfg.AmpCode.UpstreamAPIKeys {
 			if !toRemove[strings.TrimSpace(entry.UpstreamAPIKey)] {
 				newEntries = append(newEntries, entry)
 			}
+		}
+		if len(newEntries) == before {
+			c.JSON(404, gin.H{"error": "item not found"})
+			return
 		}
 		cfg.AmpCode.UpstreamAPIKeys = newEntries
 	})

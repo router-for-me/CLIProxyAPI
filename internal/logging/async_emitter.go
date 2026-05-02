@@ -71,6 +71,13 @@ type asyncEmitter struct {
 	// transition in close(); contention is bounded by enqueue rate.
 	closeMu sync.Mutex
 	closed  bool
+
+	// active counts tasks that have left the channel but whose
+	// writeLogRequest hasn't returned. flush() waits on both
+	// channel-empty AND active==0 so callers like benchmarks and
+	// graceful-shutdown drains see all enqueued logs hit disk before
+	// flush returns (Codex Phase C round-3 review IMPORTANT #2).
+	active atomic.Int64
 }
 
 func newAsyncEmitter(logger *FileRequestLogger) *asyncEmitter {
@@ -135,6 +142,8 @@ drainNormal:
 }
 
 func (e *asyncEmitter) execute(t asyncTask) {
+	e.active.Add(1)
+	defer e.active.Add(-1)
 	_ = e.logger.writeLogRequest(t.args, t.force)
 }
 
@@ -190,12 +199,19 @@ func (e *asyncEmitter) close() {
 	<-e.doneCh
 }
 
-// flush blocks until both queues are empty. Callers must externally ensure
-// no further tasks are enqueued during the flush window for the wait to
+// flush blocks until both queues are empty AND the worker has finished
+// any task it had already dequeued. Callers must externally ensure no
+// further tasks are enqueued during the flush window for the wait to
 // converge in finite time.
+//
+// The active>0 check covers the window between channel-receive and
+// writeLogRequest-return: without it, callers could observe both
+// channels empty while a write is still in flight and conclude the
+// emitter has flushed, then race the write against e.g. a TempDir
+// cleanup. (Codex Phase C round-3 review IMPORTANT #2.)
 func (e *asyncEmitter) flush() {
 	for {
-		if len(e.priority) == 0 && len(e.normal) == 0 {
+		if len(e.priority) == 0 && len(e.normal) == 0 && e.active.Load() == 0 {
 			return
 		}
 		time.Sleep(asyncFlushPollInterval)

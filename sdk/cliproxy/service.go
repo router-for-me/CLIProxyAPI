@@ -688,6 +688,17 @@ func (s *Service) Run(ctx context.Context) error {
 		s.rebindExecutors()
 	}
 
+	// Route management commits through the same reload path as the file
+	// watcher so PUT/PATCH/DELETE responses don't return 200 with the
+	// change only half-applied (Codex Phase C round-3 review BLOCKER #1).
+	// Without this override, mgmt commits would only call
+	// Server.UpdateClients and skip coreManager.SetConfig,
+	// SetOAuthModelAlias, and rebindExecutors — leaving executor layer
+	// stale until the watcher fires.
+	if s.server != nil {
+		s.server.SetManagementCommitter(reloadCallback)
+	}
+
 	watcherWrapper, err = s.watcherFactory(s.configPath, s.cfg.AuthDir, reloadCallback)
 	if err != nil {
 		return fmt.Errorf("cliproxy: failed to create watcher: %w", err)

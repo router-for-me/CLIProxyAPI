@@ -83,16 +83,21 @@ func (h *Handler) geminiKeysWithAuthIndex() []geminiKeyWithAuthIndex {
 	}
 	liveIndexByID := h.liveAuthIndexByID()
 
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if h.cfg() == nil {
+	// Snapshot config once so the read iterates one consistent slice. h.mu
+	// is dropped here: it serialised mgmt writes (applyConfigChange) before
+	// SetConfig was lock-free, but it never protected cfg-reads against
+	// concurrent SetConfig swaps. Multiple h.cfg() calls in the same
+	// helper observed different snapshots — see Codex Phase C round-3
+	// review BLOCKER #2.
+	cfg := h.cfg()
+	if cfg == nil {
 		return nil
 	}
 
 	idGen := synthesizer.NewStableIDGenerator()
-	out := make([]geminiKeyWithAuthIndex, len(h.cfg().GeminiKey))
-	for i := range h.cfg().GeminiKey {
-		entry := h.cfg().GeminiKey[i]
+	out := make([]geminiKeyWithAuthIndex, len(cfg.GeminiKey))
+	for i := range cfg.GeminiKey {
+		entry := cfg.GeminiKey[i]
 		authIndex := ""
 		if key := strings.TrimSpace(entry.APIKey); key != "" {
 			id, _ := idGen.Next("gemini:apikey", key, entry.BaseURL)
@@ -112,16 +117,15 @@ func (h *Handler) claudeKeysWithAuthIndex() []claudeKeyWithAuthIndex {
 	}
 	liveIndexByID := h.liveAuthIndexByID()
 
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if h.cfg() == nil {
+	cfg := h.cfg()
+	if cfg == nil {
 		return nil
 	}
 
 	idGen := synthesizer.NewStableIDGenerator()
-	out := make([]claudeKeyWithAuthIndex, len(h.cfg().ClaudeKey))
-	for i := range h.cfg().ClaudeKey {
-		entry := h.cfg().ClaudeKey[i]
+	out := make([]claudeKeyWithAuthIndex, len(cfg.ClaudeKey))
+	for i := range cfg.ClaudeKey {
+		entry := cfg.ClaudeKey[i]
 		authIndex := ""
 		if key := strings.TrimSpace(entry.APIKey); key != "" {
 			id, _ := idGen.Next("claude:apikey", key, entry.BaseURL)
@@ -141,16 +145,15 @@ func (h *Handler) codexKeysWithAuthIndex() []codexKeyWithAuthIndex {
 	}
 	liveIndexByID := h.liveAuthIndexByID()
 
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if h.cfg() == nil {
+	cfg := h.cfg()
+	if cfg == nil {
 		return nil
 	}
 
 	idGen := synthesizer.NewStableIDGenerator()
-	out := make([]codexKeyWithAuthIndex, len(h.cfg().CodexKey))
-	for i := range h.cfg().CodexKey {
-		entry := h.cfg().CodexKey[i]
+	out := make([]codexKeyWithAuthIndex, len(cfg.CodexKey))
+	for i := range cfg.CodexKey {
+		entry := cfg.CodexKey[i]
 		authIndex := ""
 		if key := strings.TrimSpace(entry.APIKey); key != "" {
 			id, _ := idGen.Next("codex:apikey", key, entry.BaseURL)
@@ -170,16 +173,15 @@ func (h *Handler) vertexCompatKeysWithAuthIndex() []vertexCompatKeyWithAuthIndex
 	}
 	liveIndexByID := h.liveAuthIndexByID()
 
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if h.cfg() == nil {
+	cfg := h.cfg()
+	if cfg == nil {
 		return nil
 	}
 
 	idGen := synthesizer.NewStableIDGenerator()
-	out := make([]vertexCompatKeyWithAuthIndex, len(h.cfg().VertexCompatAPIKey))
-	for i := range h.cfg().VertexCompatAPIKey {
-		entry := h.cfg().VertexCompatAPIKey[i]
+	out := make([]vertexCompatKeyWithAuthIndex, len(cfg.VertexCompatAPIKey))
+	for i := range cfg.VertexCompatAPIKey {
+		entry := cfg.VertexCompatAPIKey[i]
 		id, _ := idGen.Next("vertex:apikey", entry.APIKey, entry.BaseURL, entry.ProxyURL)
 		authIndex := liveIndexByID[id]
 		out[i] = vertexCompatKeyWithAuthIndex{
@@ -196,13 +198,12 @@ func (h *Handler) openAICompatibilityWithAuthIndex() []openAICompatibilityWithAu
 	}
 	liveIndexByID := h.liveAuthIndexByID()
 
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if h.cfg() == nil {
+	cfg := h.cfg()
+	if cfg == nil {
 		return nil
 	}
 
-	normalized := normalizedOpenAICompatibilityEntries(h.cfg().OpenAICompatibility)
+	normalized := normalizedOpenAICompatibilityEntries(cfg.OpenAICompatibility)
 	out := make([]openAICompatibilityWithAuthIndex, len(normalized))
 	idGen := synthesizer.NewStableIDGenerator()
 	for i := range normalized {
