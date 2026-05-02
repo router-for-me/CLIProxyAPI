@@ -1,6 +1,7 @@
 # CLIProxyAPI fork 差异说明
 
 本仓库是 `router-for-me/CLIProxyAPI` 的 fork。除下列差异外，其余功能、使用方式和配置项以 upstream 为准。
+本仓库需要搭配[前端面板](https://github.com/Fwindy/Cli-Proxy-API-Management-Center)使用
 
 ## 与 upstream 的主要差异
 
@@ -35,3 +36,11 @@
 ## 维护注意事项
 
 - 合并 upstream 时，优先保留本 fork 的 SQLite usage 模块、usage API、thinking effort 记录和首字延迟记录能力。
+
+## 友链
+
+[![友链 linux.do](https://img.shields.io/badge/LINUX--DO-Community-blue.svg)](https://linux.do/)
+
+## License
+
+MIT
