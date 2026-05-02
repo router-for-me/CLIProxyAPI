@@ -74,6 +74,14 @@ CLIProxyAPI 用户手册： [https://help.router-for.me/](https://help.router-fo
 
 请参见 [MANAGEMENT_API_CN.md](https://help.router-for.me/cn/management/api)
 
+## 使用量统计
+
+自v6.10.0版本以后，CLIProxyAPI及 [CPAMC](https://github.com/router-for-me/Cli-Proxy-API-Management-Center) 项目不再预置数据统计功能，如果有数据统计需求的请使用以下项目：
+
+### [CPA Usage Keeper](https://github.com/Willxup/cpa-usage-keeper)
+
+独立的 CLIProxyAPI 使用量持久化与可视化服务，定期同步 CLIProxyAPI 数据，存储到 SQLite，提供聚合 API，并内置使用量分析与统计仪表盘。
+
 ## Amp CLI 支持
 
 CLIProxyAPI 已内置对 [Amp CLI](https://ampcode.com) 和 Amp IDE 扩展的支持，可让你使用自己的 Google/ChatGPT/Claude OAuth 订阅来配合 Amp 编码工具：
@@ -178,10 +186,6 @@ Shadow AI 是一款专为受限环境设计的 AI 辅助工具。提供无窗口
 ### [CLIProxyAPI Quota Inspector](https://github.com/AllenReder/CLIProxyAPI-Quota-Inspector)
 
 上手即用的面向 CLIProxyAPI 跨平台配额查询工具，支持按账号展示 codex 5h/7d 配额窗口、按计划排序、状态着色及多账号汇总分析。
-
-### [CPA Usage Keeper](https://github.com/Willxup/cpa-usage-keeper)
-
-独立的 CLIProxyAPI 使用量持久化与可视化服务，定期同步 CPA 数据，存储到 SQLite，提供聚合 API，并内置使用量分析与统计仪表盘。
 
 ### [CodexCliPlus](https://github.com/C4AL/CodexCliPlus)
 

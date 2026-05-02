@@ -74,6 +74,14 @@ CLIProxyAPI Guides: [https://help.router-for.me/](https://help.router-for.me/)
 
 see [MANAGEMENT_API.md](https://help.router-for.me/management/api)
 
+## Usage Statistics
+
+Since v6.10.0, CLIProxyAPI and [CPAMC](https://github.com/router-for-me/Cli-Proxy-API-Management-Center) no longer ship built-in usage statistics. If you need usage statistics, use:
+
+### [CPA Usage Keeper](https://github.com/Willxup/cpa-usage-keeper)
+
+Standalone persistence and visualization service for CLIProxyAPI, with periodic data sync, SQLite storage, aggregate APIs, and a built-in dashboard for usage and statistics.
+
 ## Amp CLI Support
 
 CLIProxyAPI includes integrated support for [Amp CLI](https://ampcode.com) and Amp IDE extensions, enabling you to use your Google/ChatGPT/Claude OAuth subscriptions with Amp's coding tools:
@@ -182,10 +190,6 @@ Cross-platform desktop app (macOS, Windows, Linux) wrapping CLIProxyAPI with a n
 ### [CLIProxyAPI Quota Inspector](https://github.com/AllenReder/CLIProxyAPI-Quota-Inspector)
 
 Ready-to-use cross-platform quota inspector for CLIProxyAPI, supporting per-account codex 5h/7d quota windows, plan-based sorting, status coloring, and multi-account summary analytics.
-
-### [CPA Usage Keeper](https://github.com/Willxup/cpa-usage-keeper)
-
-Standalone persistence and visualization service for CLIProxyAPI, with periodic data sync, SQLite storage, aggregate APIs, and a built-in dashboard for usage and statistics.
 
 ### [CodexCliPlus](https://github.com/C4AL/CodexCliPlus)
 
