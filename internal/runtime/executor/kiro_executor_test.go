@@ -321,6 +321,31 @@ func TestEstimateKiroCacheUsageFromCredits(t *testing.T) {
 	}
 }
 
+func TestEstimateKiroCacheUsageFromCredits_AllInputCached(t *testing.T) {
+	detail, estimated := estimateKiroCacheUsageFromCredits("kiro-claude-sonnet-4-5", usage.Detail{
+		InputTokens:  10000,
+		OutputTokens: 1000,
+		TotalTokens:  11000,
+	}, 0.4125)
+	if !estimated {
+		t.Fatalf("estimated = false, want true")
+	}
+	if detail.InputTokens != 0 {
+		t.Fatalf("InputTokens = %d, want zero uncached input", detail.InputTokens)
+	}
+	if detail.CacheReadInputTokens != 10000 {
+		t.Fatalf("CacheReadInputTokens = %d, want all input cached", detail.CacheReadInputTokens)
+	}
+	if !hasKiroPromptCacheUsage(detail) {
+		t.Fatalf("hasKiroPromptCacheUsage = false, want true")
+	}
+
+	internalDetail := usageDetailForInternalStats(detail, true)
+	if internalDetail.InputTokens != 10000 {
+		t.Fatalf("internal InputTokens = %d, want restored total input", internalDetail.InputTokens)
+	}
+}
+
 func TestEstimateKiroCacheUsageFromCredits_PreservesOfficialCacheUsage(t *testing.T) {
 	detail, estimated := estimateKiroCacheUsageFromCredits("kiro-claude-sonnet-4-5", usage.Detail{
 		InputTokens:          10000,

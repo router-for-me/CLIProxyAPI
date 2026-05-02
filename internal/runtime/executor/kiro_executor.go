@@ -995,8 +995,9 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 
 			// Fallback for usage if missing from upstream
 
-			// 1. Estimate InputTokens if missing
-			if usageInfo.InputTokens == 0 {
+			// 1. Estimate InputTokens only when upstream did not provide any
+			// prompt breakdown. With prompt caching, zero uncached input is valid.
+			if usageInfo.InputTokens == 0 && !hasKiroPromptCacheUsage(usageInfo) {
 				if enc, encErr := getTokenizer(req.Model); encErr == nil {
 					if inp, countErr := countOpenAIChatTokens(enc, opts.OriginalRequest); countErr == nil {
 						usageInfo.InputTokens = inp
@@ -1895,6 +1896,10 @@ func usageDetailForInternalStats(detail usage.Detail, estimatedCache bool) usage
 	detail.CacheReadInputTokens = 0
 	detail.CacheCreationInputTokens = 0
 	return detail
+}
+
+func hasKiroPromptCacheUsage(detail usage.Detail) bool {
+	return detail.CacheReadInputTokens > 0 || detail.CacheCreationInputTokens > 0 || detail.CachedTokens > 0
 }
 
 // EventStreamError represents an Event Stream processing error
