@@ -64,6 +64,9 @@ const (
 	refreshMaxConcurrency = 16
 	refreshPendingBackoff = time.Minute
 	refreshFailureBackoff = 5 * time.Minute
+	// refreshFailureBackoffMax caps exponential growth so that a credential that
+	// has been broken for hours still gets re-attempted at least once per hour.
+	refreshFailureBackoffMax = time.Hour
 	// refreshIneffectiveBackoff throttles refresh attempts when an executor returns
 	// success but the auth still evaluates as needing refresh (e.g. token expiry
 	// wasn't updated). Without this guard, the auto-refresh loop can tight-loop and
@@ -72,6 +75,27 @@ const (
 	quotaBackoffBase          = time.Second
 	quotaBackoffMax           = 30 * time.Minute
 )
+
+// nextRefreshFailureBackoff returns the cooldown duration for a credential
+// after its consecutive refresh-failure count reaches `failures`. The first
+// failure (failures==1) yields refreshFailureBackoff; each subsequent failure
+// doubles it, capped at refreshFailureBackoffMax. failures<=0 returns the base
+// backoff so the caller need not branch on the zero case.
+func nextRefreshFailureBackoff(failures int) time.Duration {
+	if failures <= 1 {
+		return refreshFailureBackoff
+	}
+	exp := failures - 1
+	// Cap shift to avoid signed overflow on very large failure counts.
+	if exp > 16 {
+		exp = 16
+	}
+	d := refreshFailureBackoff << exp
+	if d <= 0 || d > refreshFailureBackoffMax {
+		return refreshFailureBackoffMax
+	}
+	return d
+}
 
 var quotaCooldownDisabled atomic.Bool
 
@@ -176,6 +200,13 @@ type Manager struct {
 	// Auto refresh state
 	refreshCancel context.CancelFunc
 	refreshLoop   *authAutoRefreshLoop
+
+	// refreshFailures tracks consecutive refresh failure counts per auth.ID.
+	// Mutated under m.mu; reset on a successful refresh. Used to compute an
+	// exponential backoff for NextRefreshAfter so that broken credentials are
+	// not retried at the flat 5-minute cadence indefinitely. Not persisted —
+	// rebuilds organically after a process restart.
+	refreshFailures map[string]int
 }
 
 // NewManager constructs a manager with optional custom selector and hook.
@@ -194,6 +225,7 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 		auths:            make(map[string]*Auth),
 		providerOffsets:  make(map[string]int),
 		modelPoolOffsets: make(map[string]int),
+		refreshFailures:  make(map[string]int),
 	}
 	// atomic.Value requires non-nil initial value.
 	manager.runtimeConfig.Store(&internalconfig.Config{})
@@ -3486,7 +3518,9 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 		shouldReschedule := false
 		m.mu.Lock()
 		if current := m.auths[id]; current != nil {
-			current.NextRefreshAfter = now.Add(refreshFailureBackoff)
+			m.refreshFailures[id]++
+			backoff := nextRefreshFailureBackoff(m.refreshFailures[id])
+			current.NextRefreshAfter = now.Add(backoff)
 			current.LastError = &Error{Message: err.Error()}
 			m.auths[id] = current
 			shouldReschedule = true
@@ -3515,6 +3549,11 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 	if m.shouldRefresh(updated, now) {
 		updated.NextRefreshAfter = now.Add(refreshIneffectiveBackoff)
 	}
+	// Successful refresh — reset the per-credential failure counter so a
+	// future failure starts the exponential backoff over from the base.
+	m.mu.Lock()
+	delete(m.refreshFailures, id)
+	m.mu.Unlock()
 	_, _ = m.Update(ctx, updated)
 }
 
