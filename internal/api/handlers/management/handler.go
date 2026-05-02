@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -18,6 +19,7 @@ import (
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"golang.org/x/crypto/bcrypt"
+	"gopkg.in/yaml.v3"
 )
 
 type attemptInfo struct {
@@ -33,8 +35,22 @@ const attemptCleanupInterval = 1 * time.Hour
 const attemptMaxIdleTime = 2 * time.Hour
 
 // Handler aggregates config reference, persistence path and helpers.
+//
+// Config storage uses atomic.Pointer[config.Config] so:
+//   - Get* handlers do a lock-free Load to obtain the current snapshot.
+//   - Put*/Patch*/Delete* handlers go through applyConfigChange, which
+//     clones the snapshot, applies the mutation, persists to disk, then
+//     atomic-swaps. Concurrent readers never observe a half-mutated
+//     snapshot.
+//   - SetConfig (called from Server.UpdateClients on filesystem hot-reload)
+//     atomically replaces the snapshot.
+//
+// The snapshot pointer returned from cfg() is treated as immutable by all
+// readers — any mutation MUST go through applyConfigChange so the new
+// snapshot is published as a fresh allocation.
 type Handler struct {
-	cfg                 *config.Config
+	cfgPtr              atomic.Pointer[config.Config]
+	commit              func(*config.Config) // optional Server-side fan-out hook
 	configFilePath      string
 	mu                  sync.Mutex
 	attemptsMu          sync.Mutex
@@ -54,7 +70,6 @@ func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Man
 	envSecret = strings.TrimSpace(envSecret)
 
 	h := &Handler{
-		cfg:                 cfg,
 		configFilePath:      configFilePath,
 		failedAttempts:      make(map[string]*attemptInfo),
 		authManager:         manager,
@@ -62,8 +77,88 @@ func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Man
 		allowRemoteOverride: envSecret != "",
 		envSecret:           envSecret,
 	}
+	h.cfgPtr.Store(cfg)
 	h.startAttemptCleanup()
 	return h
+}
+
+// cfg returns the current config snapshot. Returns nil if no config has been
+// loaded yet. Call once at request entry; readers should treat the returned
+// pointer as immutable for the duration of their work.
+func (h *Handler) cfg() *config.Config {
+	if h == nil {
+		return nil
+	}
+	return h.cfgPtr.Load()
+}
+
+// SetConfigCommitter wires a Server-side fan-out hook that's invoked after a
+// successful clone-modify-persist-swap. The hook receives the new snapshot
+// AFTER it has been atomically published, and is responsible for triggering
+// downstream work like log-level changes, request-logger toggle, AMP module
+// hot-reload, etc. (typically Server.UpdateClients).
+//
+// If no committer is set, applyConfigChange still publishes the snapshot
+// locally — useful for tests that want behavior-equivalent persistence
+// without a full Server.
+func (h *Handler) SetConfigCommitter(commit func(*config.Config)) {
+	if h == nil {
+		return
+	}
+	h.commit = commit
+}
+
+// cloneConfigSnapshot returns a deep copy of cur via yaml round-trip. Used by
+// applyConfigChange so mutations to the clone don't affect concurrent readers
+// holding the prior snapshot. yaml round-trip is heavier than a manual copy
+// but resilient to new fields being added to config.Config; mgmt writes
+// already perform disk I/O so the extra cost is negligible.
+func cloneConfigSnapshot(cur *config.Config) *config.Config {
+	if cur == nil {
+		return &config.Config{}
+	}
+	data, err := yaml.Marshal(cur)
+	if err != nil {
+		return &config.Config{}
+	}
+	var next config.Config
+	if err := yaml.Unmarshal(data, &next); err != nil {
+		return &config.Config{}
+	}
+	return &next
+}
+
+// applyConfigChange runs fn on a clone of the current config snapshot under
+// h.mu, persists the modified clone to disk, atomically publishes the new
+// snapshot, and invokes the optional commit hook. On success, writes a
+// 200 {"status":"ok"} response. On failure, writes a 500 error response and
+// the snapshot stays unchanged.
+//
+// Caller must NOT hold h.mu — applyConfigChange takes it internally to
+// serialize concurrent management writes against each other.
+func (h *Handler) applyConfigChange(c *gin.Context, fn func(*config.Config)) bool {
+	if h == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler not initialized"})
+		return false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	next := cloneConfigSnapshot(h.cfgPtr.Load())
+	fn(next)
+
+	if err := config.SaveConfigPreserveComments(h.configFilePath, next); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to save config: %v", err)})
+		return false
+	}
+
+	h.cfgPtr.Store(next)
+	if h.commit != nil {
+		h.commit(next)
+	}
+
+	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	return true
 }
 
 // startAttemptCleanup launches a background goroutine that periodically
@@ -101,14 +196,14 @@ func NewHandlerWithoutConfigFilePath(cfg *config.Config, manager *coreauth.Manag
 	return NewHandler(cfg, "", manager)
 }
 
-// SetConfig updates the in-memory config reference when the server hot-reloads.
+// SetConfig updates the in-memory config snapshot when the server hot-reloads.
+// Atomically publishes the new pointer; readers via cfg() see the update on
+// their next Load.
 func (h *Handler) SetConfig(cfg *config.Config) {
 	if h == nil {
 		return
 	}
-	h.mu.Lock()
-	h.cfg = cfg
-	h.mu.Unlock()
+	h.cfgPtr.Store(cfg)
 }
 
 // SetAuthManager updates the auth manager reference used by management endpoints.
@@ -187,7 +282,7 @@ func (h *Handler) AuthenticateManagementKey(clientIP string, localClient bool, p
 		return false, http.StatusForbidden, "remote management disabled"
 	}
 
-	cfg := h.cfg
+	cfg := h.cfg()
 	var (
 		allowRemote bool
 		secretHash  string
@@ -278,27 +373,10 @@ func (h *Handler) AuthenticateManagementKey(clientIP string, localClient bool, p
 	return true, 0, ""
 }
 
-// persist saves the current in-memory config to disk.
-func (h *Handler) persist(c *gin.Context) bool {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return h.persistLocked(c)
-}
+// Helper methods for simple types. Each mutator receives the cloned config
+// and applies the field write; applyConfigChange persists + publishes.
 
-// persistLocked saves the current in-memory config to disk.
-// It expects the caller to hold h.mu.
-func (h *Handler) persistLocked(c *gin.Context) bool {
-	// Preserve comments when writing
-	if err := config.SaveConfigPreserveComments(h.configFilePath, h.cfg); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to save config: %v", err)})
-		return false
-	}
-	c.JSON(http.StatusOK, gin.H{"status": "ok"})
-	return true
-}
-
-// Helper methods for simple types
-func (h *Handler) updateBoolField(c *gin.Context, set func(bool)) {
+func (h *Handler) updateBoolField(c *gin.Context, set func(*config.Config, bool)) {
 	var body struct {
 		Value *bool `json:"value"`
 	}
@@ -306,11 +384,12 @@ func (h *Handler) updateBoolField(c *gin.Context, set func(bool)) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
 		return
 	}
-	set(*body.Value)
-	h.persist(c)
+	h.applyConfigChange(c, func(cfg *config.Config) {
+		set(cfg, *body.Value)
+	})
 }
 
-func (h *Handler) updateIntField(c *gin.Context, set func(int)) {
+func (h *Handler) updateIntField(c *gin.Context, set func(*config.Config, int)) {
 	var body struct {
 		Value *int `json:"value"`
 	}
@@ -318,11 +397,12 @@ func (h *Handler) updateIntField(c *gin.Context, set func(int)) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
 		return
 	}
-	set(*body.Value)
-	h.persist(c)
+	h.applyConfigChange(c, func(cfg *config.Config) {
+		set(cfg, *body.Value)
+	})
 }
 
-func (h *Handler) updateStringField(c *gin.Context, set func(string)) {
+func (h *Handler) updateStringField(c *gin.Context, set func(*config.Config, string)) {
 	var body struct {
 		Value *string `json:"value"`
 	}
@@ -330,6 +410,7 @@ func (h *Handler) updateStringField(c *gin.Context, set func(string)) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
 		return
 	}
-	set(*body.Value)
-	h.persist(c)
+	h.applyConfigChange(c, func(cfg *config.Config) {
+		set(cfg, *body.Value)
+	})
 }

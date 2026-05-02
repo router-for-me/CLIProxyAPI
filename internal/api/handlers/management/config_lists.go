@@ -9,8 +9,9 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 )
 
-// Generic helpers for list[string]
-func (h *Handler) putStringList(c *gin.Context, set func([]string), after func()) {
+// Generic helpers for list[string] — clone-modify-persist-swap via applyConfigChange.
+
+func (h *Handler) putStringList(c *gin.Context, set func(*config.Config, []string), after func(*config.Config)) {
 	data, err := c.GetRawData()
 	if err != nil {
 		c.JSON(400, gin.H{"error": "failed to read body"})
@@ -27,14 +28,15 @@ func (h *Handler) putStringList(c *gin.Context, set func([]string), after func()
 		}
 		arr = obj.Items
 	}
-	set(arr)
-	if after != nil {
-		after()
-	}
-	h.persist(c)
+	h.applyConfigChange(c, func(cfg *config.Config) {
+		set(cfg, arr)
+		if after != nil {
+			after(cfg)
+		}
+	})
 }
 
-func (h *Handler) patchStringList(c *gin.Context, target *[]string, after func()) {
+func (h *Handler) patchStringList(c *gin.Context, accessor func(*config.Config) *[]string, after func(*config.Config)) {
 	var body struct {
 		Old   *string `json:"old"`
 		New   *string `json:"new"`
@@ -45,77 +47,87 @@ func (h *Handler) patchStringList(c *gin.Context, target *[]string, after func()
 		c.JSON(400, gin.H{"error": "invalid body"})
 		return
 	}
-	if body.Index != nil && body.Value != nil && *body.Index >= 0 && *body.Index < len(*target) {
-		(*target)[*body.Index] = *body.Value
-		if after != nil {
-			after()
-		}
-		h.persist(c)
+	if body.Index != nil && body.Value != nil {
+		h.applyConfigChange(c, func(cfg *config.Config) {
+			target := accessor(cfg)
+			if *body.Index >= 0 && *body.Index < len(*target) {
+				(*target)[*body.Index] = *body.Value
+				if after != nil {
+					after(cfg)
+				}
+			}
+		})
 		return
 	}
 	if body.Old != nil && body.New != nil {
-		for i := range *target {
-			if (*target)[i] == *body.Old {
-				(*target)[i] = *body.New
-				if after != nil {
-					after()
+		h.applyConfigChange(c, func(cfg *config.Config) {
+			target := accessor(cfg)
+			for i := range *target {
+				if (*target)[i] == *body.Old {
+					(*target)[i] = *body.New
+					if after != nil {
+						after(cfg)
+					}
+					return
 				}
-				h.persist(c)
-				return
 			}
-		}
-		*target = append(*target, *body.New)
-		if after != nil {
-			after()
-		}
-		h.persist(c)
+			*target = append(*target, *body.New)
+			if after != nil {
+				after(cfg)
+			}
+		})
 		return
 	}
 	c.JSON(400, gin.H{"error": "missing fields"})
 }
 
-func (h *Handler) deleteFromStringList(c *gin.Context, target *[]string, after func()) {
+func (h *Handler) deleteFromStringList(c *gin.Context, accessor func(*config.Config) *[]string, after func(*config.Config)) {
 	if idxStr := c.Query("index"); idxStr != "" {
 		var idx int
-		_, err := fmt.Sscanf(idxStr, "%d", &idx)
-		if err == nil && idx >= 0 && idx < len(*target) {
-			*target = append((*target)[:idx], (*target)[idx+1:]...)
-			if after != nil {
-				after()
-			}
-			h.persist(c)
+		if _, err := fmt.Sscanf(idxStr, "%d", &idx); err == nil {
+			h.applyConfigChange(c, func(cfg *config.Config) {
+				target := accessor(cfg)
+				if idx >= 0 && idx < len(*target) {
+					*target = append((*target)[:idx], (*target)[idx+1:]...)
+					if after != nil {
+						after(cfg)
+					}
+				}
+			})
 			return
 		}
 	}
 	if val := strings.TrimSpace(c.Query("value")); val != "" {
-		out := make([]string, 0, len(*target))
-		for _, v := range *target {
-			if strings.TrimSpace(v) != val {
-				out = append(out, v)
+		h.applyConfigChange(c, func(cfg *config.Config) {
+			target := accessor(cfg)
+			out := make([]string, 0, len(*target))
+			for _, v := range *target {
+				if strings.TrimSpace(v) != val {
+					out = append(out, v)
+				}
 			}
-		}
-		*target = out
-		if after != nil {
-			after()
-		}
-		h.persist(c)
+			*target = out
+			if after != nil {
+				after(cfg)
+			}
+		})
 		return
 	}
 	c.JSON(400, gin.H{"error": "missing index or value"})
 }
 
 // api-keys
-func (h *Handler) GetAPIKeys(c *gin.Context) { c.JSON(200, gin.H{"api-keys": h.cfg.APIKeys}) }
+func (h *Handler) GetAPIKeys(c *gin.Context) { c.JSON(200, gin.H{"api-keys": h.cfg().APIKeys}) }
 func (h *Handler) PutAPIKeys(c *gin.Context) {
-	h.putStringList(c, func(v []string) {
-		h.cfg.APIKeys = append([]string(nil), v...)
+	h.putStringList(c, func(cfg *config.Config, v []string) {
+		cfg.APIKeys = append([]string(nil), v...)
 	}, nil)
 }
 func (h *Handler) PatchAPIKeys(c *gin.Context) {
-	h.patchStringList(c, &h.cfg.APIKeys, func() {})
+	h.patchStringList(c, func(cfg *config.Config) *[]string { return &cfg.APIKeys }, nil)
 }
 func (h *Handler) DeleteAPIKeys(c *gin.Context) {
-	h.deleteFromStringList(c, &h.cfg.APIKeys, func() {})
+	h.deleteFromStringList(c, func(cfg *config.Config) *[]string { return &cfg.APIKeys }, nil)
 }
 
 // gemini-api-key: []GeminiKey
@@ -139,11 +151,10 @@ func (h *Handler) PutGeminiKeys(c *gin.Context) {
 		}
 		arr = obj.Items
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.cfg.GeminiKey = append([]config.GeminiKey(nil), arr...)
-	h.cfg.SanitizeGeminiKeys()
-	h.persistLocked(c)
+	h.applyConfigChange(c, func(cfg *config.Config) {
+		cfg.GeminiKey = append([]config.GeminiKey(nil), arr...)
+		cfg.SanitizeGeminiKeys()
+	})
 }
 func (h *Handler) PatchGeminiKey(c *gin.Context) {
 	type geminiKeyPatch struct {
@@ -164,17 +175,21 @@ func (h *Handler) PatchGeminiKey(c *gin.Context) {
 		return
 	}
 
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	// Pre-resolve target on the current snapshot so 404 short-circuits before cloning.
+	cur := h.cfg()
+	if cur == nil {
+		c.JSON(404, gin.H{"error": "item not found"})
+		return
+	}
 	targetIndex := -1
-	if body.Index != nil && *body.Index >= 0 && *body.Index < len(h.cfg.GeminiKey) {
+	if body.Index != nil && *body.Index >= 0 && *body.Index < len(cur.GeminiKey) {
 		targetIndex = *body.Index
 	}
 	if targetIndex == -1 && body.Match != nil {
 		match := strings.TrimSpace(*body.Match)
 		if match != "" {
-			for i := range h.cfg.GeminiKey {
-				if h.cfg.GeminiKey[i].APIKey == match {
+			for i := range cur.GeminiKey {
+				if cur.GeminiKey[i].APIKey == match {
 					targetIndex = i
 					break
 				}
@@ -186,64 +201,72 @@ func (h *Handler) PatchGeminiKey(c *gin.Context) {
 		return
 	}
 
-	entry := h.cfg.GeminiKey[targetIndex]
-	if body.Value.APIKey != nil {
-		trimmed := strings.TrimSpace(*body.Value.APIKey)
-		if trimmed == "" {
-			h.cfg.GeminiKey = append(h.cfg.GeminiKey[:targetIndex], h.cfg.GeminiKey[targetIndex+1:]...)
-			h.cfg.SanitizeGeminiKeys()
-			h.persistLocked(c)
+	h.applyConfigChange(c, func(cfg *config.Config) {
+		// Re-resolve under the writer lock in case the clone differs.
+		idx := targetIndex
+		if idx >= len(cfg.GeminiKey) {
 			return
 		}
-		entry.APIKey = trimmed
-	}
-	if body.Value.Prefix != nil {
-		entry.Prefix = strings.TrimSpace(*body.Value.Prefix)
-	}
-	if body.Value.BaseURL != nil {
-		entry.BaseURL = strings.TrimSpace(*body.Value.BaseURL)
-	}
-	if body.Value.ProxyURL != nil {
-		entry.ProxyURL = strings.TrimSpace(*body.Value.ProxyURL)
-	}
-	if body.Value.Headers != nil {
-		entry.Headers = config.NormalizeHeaders(*body.Value.Headers)
-	}
-	if body.Value.ExcludedModels != nil {
-		entry.ExcludedModels = config.NormalizeExcludedModels(*body.Value.ExcludedModels)
-	}
-	h.cfg.GeminiKey[targetIndex] = entry
-	h.cfg.SanitizeGeminiKeys()
-	h.persistLocked(c)
+		entry := cfg.GeminiKey[idx]
+		if body.Value.APIKey != nil {
+			trimmed := strings.TrimSpace(*body.Value.APIKey)
+			if trimmed == "" {
+				cfg.GeminiKey = append(cfg.GeminiKey[:idx], cfg.GeminiKey[idx+1:]...)
+				cfg.SanitizeGeminiKeys()
+				return
+			}
+			entry.APIKey = trimmed
+		}
+		if body.Value.Prefix != nil {
+			entry.Prefix = strings.TrimSpace(*body.Value.Prefix)
+		}
+		if body.Value.BaseURL != nil {
+			entry.BaseURL = strings.TrimSpace(*body.Value.BaseURL)
+		}
+		if body.Value.ProxyURL != nil {
+			entry.ProxyURL = strings.TrimSpace(*body.Value.ProxyURL)
+		}
+		if body.Value.Headers != nil {
+			entry.Headers = config.NormalizeHeaders(*body.Value.Headers)
+		}
+		if body.Value.ExcludedModels != nil {
+			entry.ExcludedModels = config.NormalizeExcludedModels(*body.Value.ExcludedModels)
+		}
+		cfg.GeminiKey[idx] = entry
+		cfg.SanitizeGeminiKeys()
+	})
 }
 
 func (h *Handler) DeleteGeminiKey(c *gin.Context) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
 	if val := strings.TrimSpace(c.Query("api-key")); val != "" {
 		if baseRaw, okBase := c.GetQuery("base-url"); okBase {
 			base := strings.TrimSpace(baseRaw)
-			out := make([]config.GeminiKey, 0, len(h.cfg.GeminiKey))
-			for _, v := range h.cfg.GeminiKey {
-				if strings.TrimSpace(v.APIKey) == val && strings.TrimSpace(v.BaseURL) == base {
-					continue
+			h.applyConfigChange(c, func(cfg *config.Config) {
+				out := make([]config.GeminiKey, 0, len(cfg.GeminiKey))
+				for _, v := range cfg.GeminiKey {
+					if strings.TrimSpace(v.APIKey) == val && strings.TrimSpace(v.BaseURL) == base {
+						continue
+					}
+					out = append(out, v)
 				}
-				out = append(out, v)
-			}
-			if len(out) != len(h.cfg.GeminiKey) {
-				h.cfg.GeminiKey = out
-				h.cfg.SanitizeGeminiKeys()
-				h.persistLocked(c)
-			} else {
-				c.JSON(404, gin.H{"error": "item not found"})
-			}
+				if len(out) != len(cfg.GeminiKey) {
+					cfg.GeminiKey = out
+					cfg.SanitizeGeminiKeys()
+				}
+			})
 			return
 		}
 
+		// Resolve match on snapshot so 404/400 short-circuits before cloning.
+		cur := h.cfg()
+		if cur == nil {
+			c.JSON(404, gin.H{"error": "item not found"})
+			return
+		}
 		matchIndex := -1
 		matchCount := 0
-		for i := range h.cfg.GeminiKey {
-			if strings.TrimSpace(h.cfg.GeminiKey[i].APIKey) == val {
+		for i := range cur.GeminiKey {
+			if strings.TrimSpace(cur.GeminiKey[i].APIKey) == val {
 				matchCount++
 				if matchIndex == -1 {
 					matchIndex = i
@@ -258,17 +281,23 @@ func (h *Handler) DeleteGeminiKey(c *gin.Context) {
 			c.JSON(400, gin.H{"error": "multiple items match api-key; base-url is required"})
 			return
 		}
-		h.cfg.GeminiKey = append(h.cfg.GeminiKey[:matchIndex], h.cfg.GeminiKey[matchIndex+1:]...)
-		h.cfg.SanitizeGeminiKeys()
-		h.persistLocked(c)
+		h.applyConfigChange(c, func(cfg *config.Config) {
+			if matchIndex < len(cfg.GeminiKey) {
+				cfg.GeminiKey = append(cfg.GeminiKey[:matchIndex], cfg.GeminiKey[matchIndex+1:]...)
+				cfg.SanitizeGeminiKeys()
+			}
+		})
 		return
 	}
 	if idxStr := c.Query("index"); idxStr != "" {
 		var idx int
-		if _, err := fmt.Sscanf(idxStr, "%d", &idx); err == nil && idx >= 0 && idx < len(h.cfg.GeminiKey) {
-			h.cfg.GeminiKey = append(h.cfg.GeminiKey[:idx], h.cfg.GeminiKey[idx+1:]...)
-			h.cfg.SanitizeGeminiKeys()
-			h.persistLocked(c)
+		if _, err := fmt.Sscanf(idxStr, "%d", &idx); err == nil {
+			h.applyConfigChange(c, func(cfg *config.Config) {
+				if idx >= 0 && idx < len(cfg.GeminiKey) {
+					cfg.GeminiKey = append(cfg.GeminiKey[:idx], cfg.GeminiKey[idx+1:]...)
+					cfg.SanitizeGeminiKeys()
+				}
+			})
 			return
 		}
 	}
@@ -299,11 +328,10 @@ func (h *Handler) PutClaudeKeys(c *gin.Context) {
 	for i := range arr {
 		normalizeClaudeKey(&arr[i])
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.cfg.ClaudeKey = arr
-	h.cfg.SanitizeClaudeKeys()
-	h.persistLocked(c)
+	h.applyConfigChange(c, func(cfg *config.Config) {
+		cfg.ClaudeKey = arr
+		cfg.SanitizeClaudeKeys()
+	})
 }
 func (h *Handler) PatchClaudeKey(c *gin.Context) {
 	type claudeKeyPatch struct {
@@ -325,16 +353,19 @@ func (h *Handler) PatchClaudeKey(c *gin.Context) {
 		return
 	}
 
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	cur := h.cfg()
+	if cur == nil {
+		c.JSON(404, gin.H{"error": "item not found"})
+		return
+	}
 	targetIndex := -1
-	if body.Index != nil && *body.Index >= 0 && *body.Index < len(h.cfg.ClaudeKey) {
+	if body.Index != nil && *body.Index >= 0 && *body.Index < len(cur.ClaudeKey) {
 		targetIndex = *body.Index
 	}
 	if targetIndex == -1 && body.Match != nil {
 		match := strings.TrimSpace(*body.Match)
-		for i := range h.cfg.ClaudeKey {
-			if h.cfg.ClaudeKey[i].APIKey == match {
+		for i := range cur.ClaudeKey {
+			if cur.ClaudeKey[i].APIKey == match {
 				targetIndex = i
 				break
 			}
@@ -345,57 +376,68 @@ func (h *Handler) PatchClaudeKey(c *gin.Context) {
 		return
 	}
 
-	entry := h.cfg.ClaudeKey[targetIndex]
-	if body.Value.APIKey != nil {
-		entry.APIKey = strings.TrimSpace(*body.Value.APIKey)
-	}
-	if body.Value.Prefix != nil {
-		entry.Prefix = strings.TrimSpace(*body.Value.Prefix)
-	}
-	if body.Value.BaseURL != nil {
-		entry.BaseURL = strings.TrimSpace(*body.Value.BaseURL)
-	}
-	if body.Value.ProxyURL != nil {
-		entry.ProxyURL = strings.TrimSpace(*body.Value.ProxyURL)
-	}
-	if body.Value.Models != nil {
-		entry.Models = append([]config.ClaudeModel(nil), (*body.Value.Models)...)
-	}
-	if body.Value.Headers != nil {
-		entry.Headers = config.NormalizeHeaders(*body.Value.Headers)
-	}
-	if body.Value.ExcludedModels != nil {
-		entry.ExcludedModels = config.NormalizeExcludedModels(*body.Value.ExcludedModels)
-	}
-	normalizeClaudeKey(&entry)
-	h.cfg.ClaudeKey[targetIndex] = entry
-	h.cfg.SanitizeClaudeKeys()
-	h.persistLocked(c)
+	h.applyConfigChange(c, func(cfg *config.Config) {
+		idx := targetIndex
+		if idx >= len(cfg.ClaudeKey) {
+			return
+		}
+		entry := cfg.ClaudeKey[idx]
+		if body.Value.APIKey != nil {
+			entry.APIKey = strings.TrimSpace(*body.Value.APIKey)
+		}
+		if body.Value.Prefix != nil {
+			entry.Prefix = strings.TrimSpace(*body.Value.Prefix)
+		}
+		if body.Value.BaseURL != nil {
+			entry.BaseURL = strings.TrimSpace(*body.Value.BaseURL)
+		}
+		if body.Value.ProxyURL != nil {
+			entry.ProxyURL = strings.TrimSpace(*body.Value.ProxyURL)
+		}
+		if body.Value.Models != nil {
+			entry.Models = append([]config.ClaudeModel(nil), (*body.Value.Models)...)
+		}
+		if body.Value.Headers != nil {
+			entry.Headers = config.NormalizeHeaders(*body.Value.Headers)
+		}
+		if body.Value.ExcludedModels != nil {
+			entry.ExcludedModels = config.NormalizeExcludedModels(*body.Value.ExcludedModels)
+		}
+		normalizeClaudeKey(&entry)
+		cfg.ClaudeKey[idx] = entry
+		cfg.SanitizeClaudeKeys()
+	})
 }
 
 func (h *Handler) DeleteClaudeKey(c *gin.Context) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
 	if val := strings.TrimSpace(c.Query("api-key")); val != "" {
 		if baseRaw, okBase := c.GetQuery("base-url"); okBase {
 			base := strings.TrimSpace(baseRaw)
-			out := make([]config.ClaudeKey, 0, len(h.cfg.ClaudeKey))
-			for _, v := range h.cfg.ClaudeKey {
-				if strings.TrimSpace(v.APIKey) == val && strings.TrimSpace(v.BaseURL) == base {
-					continue
+			h.applyConfigChange(c, func(cfg *config.Config) {
+				out := make([]config.ClaudeKey, 0, len(cfg.ClaudeKey))
+				for _, v := range cfg.ClaudeKey {
+					if strings.TrimSpace(v.APIKey) == val && strings.TrimSpace(v.BaseURL) == base {
+						continue
+					}
+					out = append(out, v)
 				}
-				out = append(out, v)
-			}
-			h.cfg.ClaudeKey = out
-			h.cfg.SanitizeClaudeKeys()
-			h.persistLocked(c)
+				cfg.ClaudeKey = out
+				cfg.SanitizeClaudeKeys()
+			})
 			return
 		}
 
+		cur := h.cfg()
+		if cur == nil {
+			h.applyConfigChange(c, func(cfg *config.Config) {
+				cfg.SanitizeClaudeKeys()
+			})
+			return
+		}
 		matchIndex := -1
 		matchCount := 0
-		for i := range h.cfg.ClaudeKey {
-			if strings.TrimSpace(h.cfg.ClaudeKey[i].APIKey) == val {
+		for i := range cur.ClaudeKey {
+			if strings.TrimSpace(cur.ClaudeKey[i].APIKey) == val {
 				matchCount++
 				if matchIndex == -1 {
 					matchIndex = i
@@ -406,20 +448,23 @@ func (h *Handler) DeleteClaudeKey(c *gin.Context) {
 			c.JSON(400, gin.H{"error": "multiple items match api-key; base-url is required"})
 			return
 		}
-		if matchIndex != -1 {
-			h.cfg.ClaudeKey = append(h.cfg.ClaudeKey[:matchIndex], h.cfg.ClaudeKey[matchIndex+1:]...)
-		}
-		h.cfg.SanitizeClaudeKeys()
-		h.persistLocked(c)
+		h.applyConfigChange(c, func(cfg *config.Config) {
+			if matchIndex != -1 && matchIndex < len(cfg.ClaudeKey) {
+				cfg.ClaudeKey = append(cfg.ClaudeKey[:matchIndex], cfg.ClaudeKey[matchIndex+1:]...)
+			}
+			cfg.SanitizeClaudeKeys()
+		})
 		return
 	}
 	if idxStr := c.Query("index"); idxStr != "" {
 		var idx int
-		_, err := fmt.Sscanf(idxStr, "%d", &idx)
-		if err == nil && idx >= 0 && idx < len(h.cfg.ClaudeKey) {
-			h.cfg.ClaudeKey = append(h.cfg.ClaudeKey[:idx], h.cfg.ClaudeKey[idx+1:]...)
-			h.cfg.SanitizeClaudeKeys()
-			h.persistLocked(c)
+		if _, err := fmt.Sscanf(idxStr, "%d", &idx); err == nil {
+			h.applyConfigChange(c, func(cfg *config.Config) {
+				if idx >= 0 && idx < len(cfg.ClaudeKey) {
+					cfg.ClaudeKey = append(cfg.ClaudeKey[:idx], cfg.ClaudeKey[idx+1:]...)
+					cfg.SanitizeClaudeKeys()
+				}
+			})
 			return
 		}
 	}
@@ -454,11 +499,10 @@ func (h *Handler) PutOpenAICompat(c *gin.Context) {
 			filtered = append(filtered, arr[i])
 		}
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.cfg.OpenAICompatibility = filtered
-	h.cfg.SanitizeOpenAICompatibility()
-	h.persistLocked(c)
+	h.applyConfigChange(c, func(cfg *config.Config) {
+		cfg.OpenAICompatibility = filtered
+		cfg.SanitizeOpenAICompatibility()
+	})
 }
 func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 	type openAICompatPatch struct {
@@ -480,16 +524,19 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 		return
 	}
 
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	cur := h.cfg()
+	if cur == nil {
+		c.JSON(404, gin.H{"error": "item not found"})
+		return
+	}
 	targetIndex := -1
-	if body.Index != nil && *body.Index >= 0 && *body.Index < len(h.cfg.OpenAICompatibility) {
+	if body.Index != nil && *body.Index >= 0 && *body.Index < len(cur.OpenAICompatibility) {
 		targetIndex = *body.Index
 	}
 	if targetIndex == -1 && body.Name != nil {
 		match := strings.TrimSpace(*body.Name)
-		for i := range h.cfg.OpenAICompatibility {
-			if h.cfg.OpenAICompatibility[i].Name == match {
+		for i := range cur.OpenAICompatibility {
+			if cur.OpenAICompatibility[i].Name == match {
 				targetIndex = i
 				break
 			}
@@ -500,63 +547,68 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 		return
 	}
 
-	entry := h.cfg.OpenAICompatibility[targetIndex]
-	if body.Value.Name != nil {
-		entry.Name = strings.TrimSpace(*body.Value.Name)
-	}
-	if body.Value.Prefix != nil {
-		entry.Prefix = strings.TrimSpace(*body.Value.Prefix)
-	}
-	if body.Value.Disabled != nil {
-		entry.Disabled = *body.Value.Disabled
-	}
-	if body.Value.BaseURL != nil {
-		trimmed := strings.TrimSpace(*body.Value.BaseURL)
-		if trimmed == "" {
-			h.cfg.OpenAICompatibility = append(h.cfg.OpenAICompatibility[:targetIndex], h.cfg.OpenAICompatibility[targetIndex+1:]...)
-			h.cfg.SanitizeOpenAICompatibility()
-			h.persistLocked(c)
+	h.applyConfigChange(c, func(cfg *config.Config) {
+		idx := targetIndex
+		if idx >= len(cfg.OpenAICompatibility) {
 			return
 		}
-		entry.BaseURL = trimmed
-	}
-	if body.Value.APIKeyEntries != nil {
-		entry.APIKeyEntries = append([]config.OpenAICompatibilityAPIKey(nil), (*body.Value.APIKeyEntries)...)
-	}
-	if body.Value.Models != nil {
-		entry.Models = append([]config.OpenAICompatibilityModel(nil), (*body.Value.Models)...)
-	}
-	if body.Value.Headers != nil {
-		entry.Headers = config.NormalizeHeaders(*body.Value.Headers)
-	}
-	normalizeOpenAICompatibilityEntry(&entry)
-	h.cfg.OpenAICompatibility[targetIndex] = entry
-	h.cfg.SanitizeOpenAICompatibility()
-	h.persistLocked(c)
+		entry := cfg.OpenAICompatibility[idx]
+		if body.Value.Name != nil {
+			entry.Name = strings.TrimSpace(*body.Value.Name)
+		}
+		if body.Value.Prefix != nil {
+			entry.Prefix = strings.TrimSpace(*body.Value.Prefix)
+		}
+		if body.Value.Disabled != nil {
+			entry.Disabled = *body.Value.Disabled
+		}
+		if body.Value.BaseURL != nil {
+			trimmed := strings.TrimSpace(*body.Value.BaseURL)
+			if trimmed == "" {
+				cfg.OpenAICompatibility = append(cfg.OpenAICompatibility[:idx], cfg.OpenAICompatibility[idx+1:]...)
+				cfg.SanitizeOpenAICompatibility()
+				return
+			}
+			entry.BaseURL = trimmed
+		}
+		if body.Value.APIKeyEntries != nil {
+			entry.APIKeyEntries = append([]config.OpenAICompatibilityAPIKey(nil), (*body.Value.APIKeyEntries)...)
+		}
+		if body.Value.Models != nil {
+			entry.Models = append([]config.OpenAICompatibilityModel(nil), (*body.Value.Models)...)
+		}
+		if body.Value.Headers != nil {
+			entry.Headers = config.NormalizeHeaders(*body.Value.Headers)
+		}
+		normalizeOpenAICompatibilityEntry(&entry)
+		cfg.OpenAICompatibility[idx] = entry
+		cfg.SanitizeOpenAICompatibility()
+	})
 }
 
 func (h *Handler) DeleteOpenAICompat(c *gin.Context) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
 	if name := c.Query("name"); name != "" {
-		out := make([]config.OpenAICompatibility, 0, len(h.cfg.OpenAICompatibility))
-		for _, v := range h.cfg.OpenAICompatibility {
-			if v.Name != name {
-				out = append(out, v)
+		h.applyConfigChange(c, func(cfg *config.Config) {
+			out := make([]config.OpenAICompatibility, 0, len(cfg.OpenAICompatibility))
+			for _, v := range cfg.OpenAICompatibility {
+				if v.Name != name {
+					out = append(out, v)
+				}
 			}
-		}
-		h.cfg.OpenAICompatibility = out
-		h.cfg.SanitizeOpenAICompatibility()
-		h.persistLocked(c)
+			cfg.OpenAICompatibility = out
+			cfg.SanitizeOpenAICompatibility()
+		})
 		return
 	}
 	if idxStr := c.Query("index"); idxStr != "" {
 		var idx int
-		_, err := fmt.Sscanf(idxStr, "%d", &idx)
-		if err == nil && idx >= 0 && idx < len(h.cfg.OpenAICompatibility) {
-			h.cfg.OpenAICompatibility = append(h.cfg.OpenAICompatibility[:idx], h.cfg.OpenAICompatibility[idx+1:]...)
-			h.cfg.SanitizeOpenAICompatibility()
-			h.persistLocked(c)
+		if _, err := fmt.Sscanf(idxStr, "%d", &idx); err == nil {
+			h.applyConfigChange(c, func(cfg *config.Config) {
+				if idx >= 0 && idx < len(cfg.OpenAICompatibility) {
+					cfg.OpenAICompatibility = append(cfg.OpenAICompatibility[:idx], cfg.OpenAICompatibility[idx+1:]...)
+					cfg.SanitizeOpenAICompatibility()
+				}
+			})
 			return
 		}
 	}
@@ -591,11 +643,10 @@ func (h *Handler) PutVertexCompatKeys(c *gin.Context) {
 			return
 		}
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.cfg.VertexCompatAPIKey = append([]config.VertexCompatKey(nil), arr...)
-	h.cfg.SanitizeVertexCompatKeys()
-	h.persistLocked(c)
+	h.applyConfigChange(c, func(cfg *config.Config) {
+		cfg.VertexCompatAPIKey = append([]config.VertexCompatKey(nil), arr...)
+		cfg.SanitizeVertexCompatKeys()
+	})
 }
 func (h *Handler) PatchVertexCompatKey(c *gin.Context) {
 	type vertexCompatPatch struct {
@@ -617,17 +668,20 @@ func (h *Handler) PatchVertexCompatKey(c *gin.Context) {
 		return
 	}
 
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	cur := h.cfg()
+	if cur == nil {
+		c.JSON(404, gin.H{"error": "item not found"})
+		return
+	}
 	targetIndex := -1
-	if body.Index != nil && *body.Index >= 0 && *body.Index < len(h.cfg.VertexCompatAPIKey) {
+	if body.Index != nil && *body.Index >= 0 && *body.Index < len(cur.VertexCompatAPIKey) {
 		targetIndex = *body.Index
 	}
 	if targetIndex == -1 && body.Match != nil {
 		match := strings.TrimSpace(*body.Match)
 		if match != "" {
-			for i := range h.cfg.VertexCompatAPIKey {
-				if h.cfg.VertexCompatAPIKey[i].APIKey == match {
+			for i := range cur.VertexCompatAPIKey {
+				if cur.VertexCompatAPIKey[i].APIKey == match {
 					targetIndex = i
 					break
 				}
@@ -639,71 +693,80 @@ func (h *Handler) PatchVertexCompatKey(c *gin.Context) {
 		return
 	}
 
-	entry := h.cfg.VertexCompatAPIKey[targetIndex]
-	if body.Value.APIKey != nil {
-		trimmed := strings.TrimSpace(*body.Value.APIKey)
-		if trimmed == "" {
-			h.cfg.VertexCompatAPIKey = append(h.cfg.VertexCompatAPIKey[:targetIndex], h.cfg.VertexCompatAPIKey[targetIndex+1:]...)
-			h.cfg.SanitizeVertexCompatKeys()
-			h.persistLocked(c)
+	h.applyConfigChange(c, func(cfg *config.Config) {
+		idx := targetIndex
+		if idx >= len(cfg.VertexCompatAPIKey) {
 			return
 		}
-		entry.APIKey = trimmed
-	}
-	if body.Value.Prefix != nil {
-		entry.Prefix = strings.TrimSpace(*body.Value.Prefix)
-	}
-	if body.Value.BaseURL != nil {
-		trimmed := strings.TrimSpace(*body.Value.BaseURL)
-		if trimmed == "" {
-			h.cfg.VertexCompatAPIKey = append(h.cfg.VertexCompatAPIKey[:targetIndex], h.cfg.VertexCompatAPIKey[targetIndex+1:]...)
-			h.cfg.SanitizeVertexCompatKeys()
-			h.persistLocked(c)
-			return
+		entry := cfg.VertexCompatAPIKey[idx]
+		if body.Value.APIKey != nil {
+			trimmed := strings.TrimSpace(*body.Value.APIKey)
+			if trimmed == "" {
+				cfg.VertexCompatAPIKey = append(cfg.VertexCompatAPIKey[:idx], cfg.VertexCompatAPIKey[idx+1:]...)
+				cfg.SanitizeVertexCompatKeys()
+				return
+			}
+			entry.APIKey = trimmed
 		}
-		entry.BaseURL = trimmed
-	}
-	if body.Value.ProxyURL != nil {
-		entry.ProxyURL = strings.TrimSpace(*body.Value.ProxyURL)
-	}
-	if body.Value.Headers != nil {
-		entry.Headers = config.NormalizeHeaders(*body.Value.Headers)
-	}
-	if body.Value.Models != nil {
-		entry.Models = append([]config.VertexCompatModel(nil), (*body.Value.Models)...)
-	}
-	if body.Value.ExcludedModels != nil {
-		entry.ExcludedModels = config.NormalizeExcludedModels(*body.Value.ExcludedModels)
-	}
-	normalizeVertexCompatKey(&entry)
-	h.cfg.VertexCompatAPIKey[targetIndex] = entry
-	h.cfg.SanitizeVertexCompatKeys()
-	h.persistLocked(c)
+		if body.Value.Prefix != nil {
+			entry.Prefix = strings.TrimSpace(*body.Value.Prefix)
+		}
+		if body.Value.BaseURL != nil {
+			trimmed := strings.TrimSpace(*body.Value.BaseURL)
+			if trimmed == "" {
+				cfg.VertexCompatAPIKey = append(cfg.VertexCompatAPIKey[:idx], cfg.VertexCompatAPIKey[idx+1:]...)
+				cfg.SanitizeVertexCompatKeys()
+				return
+			}
+			entry.BaseURL = trimmed
+		}
+		if body.Value.ProxyURL != nil {
+			entry.ProxyURL = strings.TrimSpace(*body.Value.ProxyURL)
+		}
+		if body.Value.Headers != nil {
+			entry.Headers = config.NormalizeHeaders(*body.Value.Headers)
+		}
+		if body.Value.Models != nil {
+			entry.Models = append([]config.VertexCompatModel(nil), (*body.Value.Models)...)
+		}
+		if body.Value.ExcludedModels != nil {
+			entry.ExcludedModels = config.NormalizeExcludedModels(*body.Value.ExcludedModels)
+		}
+		normalizeVertexCompatKey(&entry)
+		cfg.VertexCompatAPIKey[idx] = entry
+		cfg.SanitizeVertexCompatKeys()
+	})
 }
 
 func (h *Handler) DeleteVertexCompatKey(c *gin.Context) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
 	if val := strings.TrimSpace(c.Query("api-key")); val != "" {
 		if baseRaw, okBase := c.GetQuery("base-url"); okBase {
 			base := strings.TrimSpace(baseRaw)
-			out := make([]config.VertexCompatKey, 0, len(h.cfg.VertexCompatAPIKey))
-			for _, v := range h.cfg.VertexCompatAPIKey {
-				if strings.TrimSpace(v.APIKey) == val && strings.TrimSpace(v.BaseURL) == base {
-					continue
+			h.applyConfigChange(c, func(cfg *config.Config) {
+				out := make([]config.VertexCompatKey, 0, len(cfg.VertexCompatAPIKey))
+				for _, v := range cfg.VertexCompatAPIKey {
+					if strings.TrimSpace(v.APIKey) == val && strings.TrimSpace(v.BaseURL) == base {
+						continue
+					}
+					out = append(out, v)
 				}
-				out = append(out, v)
-			}
-			h.cfg.VertexCompatAPIKey = out
-			h.cfg.SanitizeVertexCompatKeys()
-			h.persistLocked(c)
+				cfg.VertexCompatAPIKey = out
+				cfg.SanitizeVertexCompatKeys()
+			})
 			return
 		}
 
+		cur := h.cfg()
+		if cur == nil {
+			h.applyConfigChange(c, func(cfg *config.Config) {
+				cfg.SanitizeVertexCompatKeys()
+			})
+			return
+		}
 		matchIndex := -1
 		matchCount := 0
-		for i := range h.cfg.VertexCompatAPIKey {
-			if strings.TrimSpace(h.cfg.VertexCompatAPIKey[i].APIKey) == val {
+		for i := range cur.VertexCompatAPIKey {
+			if strings.TrimSpace(cur.VertexCompatAPIKey[i].APIKey) == val {
 				matchCount++
 				if matchIndex == -1 {
 					matchIndex = i
@@ -714,20 +777,23 @@ func (h *Handler) DeleteVertexCompatKey(c *gin.Context) {
 			c.JSON(400, gin.H{"error": "multiple items match api-key; base-url is required"})
 			return
 		}
-		if matchIndex != -1 {
-			h.cfg.VertexCompatAPIKey = append(h.cfg.VertexCompatAPIKey[:matchIndex], h.cfg.VertexCompatAPIKey[matchIndex+1:]...)
-		}
-		h.cfg.SanitizeVertexCompatKeys()
-		h.persistLocked(c)
+		h.applyConfigChange(c, func(cfg *config.Config) {
+			if matchIndex != -1 && matchIndex < len(cfg.VertexCompatAPIKey) {
+				cfg.VertexCompatAPIKey = append(cfg.VertexCompatAPIKey[:matchIndex], cfg.VertexCompatAPIKey[matchIndex+1:]...)
+			}
+			cfg.SanitizeVertexCompatKeys()
+		})
 		return
 	}
 	if idxStr := c.Query("index"); idxStr != "" {
 		var idx int
-		_, errScan := fmt.Sscanf(idxStr, "%d", &idx)
-		if errScan == nil && idx >= 0 && idx < len(h.cfg.VertexCompatAPIKey) {
-			h.cfg.VertexCompatAPIKey = append(h.cfg.VertexCompatAPIKey[:idx], h.cfg.VertexCompatAPIKey[idx+1:]...)
-			h.cfg.SanitizeVertexCompatKeys()
-			h.persistLocked(c)
+		if _, errScan := fmt.Sscanf(idxStr, "%d", &idx); errScan == nil {
+			h.applyConfigChange(c, func(cfg *config.Config) {
+				if idx >= 0 && idx < len(cfg.VertexCompatAPIKey) {
+					cfg.VertexCompatAPIKey = append(cfg.VertexCompatAPIKey[:idx], cfg.VertexCompatAPIKey[idx+1:]...)
+					cfg.SanitizeVertexCompatKeys()
+				}
+			})
 			return
 		}
 	}
@@ -736,7 +802,7 @@ func (h *Handler) DeleteVertexCompatKey(c *gin.Context) {
 
 // oauth-excluded-models: map[string][]string
 func (h *Handler) GetOAuthExcludedModels(c *gin.Context) {
-	c.JSON(200, gin.H{"oauth-excluded-models": config.NormalizeOAuthExcludedModels(h.cfg.OAuthExcludedModels)})
+	c.JSON(200, gin.H{"oauth-excluded-models": config.NormalizeOAuthExcludedModels(h.cfg().OAuthExcludedModels)})
 }
 
 func (h *Handler) PutOAuthExcludedModels(c *gin.Context) {
@@ -756,8 +822,9 @@ func (h *Handler) PutOAuthExcludedModels(c *gin.Context) {
 		}
 		entries = wrapper.Items
 	}
-	h.cfg.OAuthExcludedModels = config.NormalizeOAuthExcludedModels(entries)
-	h.persist(c)
+	h.applyConfigChange(c, func(cfg *config.Config) {
+		cfg.OAuthExcludedModels = config.NormalizeOAuthExcludedModels(entries)
+	})
 }
 
 func (h *Handler) PatchOAuthExcludedModels(c *gin.Context) {
@@ -776,26 +843,30 @@ func (h *Handler) PatchOAuthExcludedModels(c *gin.Context) {
 	}
 	normalized := config.NormalizeExcludedModels(body.Models)
 	if len(normalized) == 0 {
-		if h.cfg.OAuthExcludedModels == nil {
+		// Removal path: 404 short-circuits before clone.
+		cur := h.cfg()
+		if cur == nil || cur.OAuthExcludedModels == nil {
 			c.JSON(404, gin.H{"error": "provider not found"})
 			return
 		}
-		if _, ok := h.cfg.OAuthExcludedModels[provider]; !ok {
+		if _, ok := cur.OAuthExcludedModels[provider]; !ok {
 			c.JSON(404, gin.H{"error": "provider not found"})
 			return
 		}
-		delete(h.cfg.OAuthExcludedModels, provider)
-		if len(h.cfg.OAuthExcludedModels) == 0 {
-			h.cfg.OAuthExcludedModels = nil
-		}
-		h.persist(c)
+		h.applyConfigChange(c, func(cfg *config.Config) {
+			delete(cfg.OAuthExcludedModels, provider)
+			if len(cfg.OAuthExcludedModels) == 0 {
+				cfg.OAuthExcludedModels = nil
+			}
+		})
 		return
 	}
-	if h.cfg.OAuthExcludedModels == nil {
-		h.cfg.OAuthExcludedModels = make(map[string][]string)
-	}
-	h.cfg.OAuthExcludedModels[provider] = normalized
-	h.persist(c)
+	h.applyConfigChange(c, func(cfg *config.Config) {
+		if cfg.OAuthExcludedModels == nil {
+			cfg.OAuthExcludedModels = make(map[string][]string)
+		}
+		cfg.OAuthExcludedModels[provider] = normalized
+	})
 }
 
 func (h *Handler) DeleteOAuthExcludedModels(c *gin.Context) {
@@ -804,24 +875,26 @@ func (h *Handler) DeleteOAuthExcludedModels(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "missing provider"})
 		return
 	}
-	if h.cfg.OAuthExcludedModels == nil {
+	cur := h.cfg()
+	if cur == nil || cur.OAuthExcludedModels == nil {
 		c.JSON(404, gin.H{"error": "provider not found"})
 		return
 	}
-	if _, ok := h.cfg.OAuthExcludedModels[provider]; !ok {
+	if _, ok := cur.OAuthExcludedModels[provider]; !ok {
 		c.JSON(404, gin.H{"error": "provider not found"})
 		return
 	}
-	delete(h.cfg.OAuthExcludedModels, provider)
-	if len(h.cfg.OAuthExcludedModels) == 0 {
-		h.cfg.OAuthExcludedModels = nil
-	}
-	h.persist(c)
+	h.applyConfigChange(c, func(cfg *config.Config) {
+		delete(cfg.OAuthExcludedModels, provider)
+		if len(cfg.OAuthExcludedModels) == 0 {
+			cfg.OAuthExcludedModels = nil
+		}
+	})
 }
 
 // oauth-model-alias: map[string][]OAuthModelAlias
 func (h *Handler) GetOAuthModelAlias(c *gin.Context) {
-	c.JSON(200, gin.H{"oauth-model-alias": sanitizedOAuthModelAlias(h.cfg.OAuthModelAlias)})
+	c.JSON(200, gin.H{"oauth-model-alias": sanitizedOAuthModelAlias(h.cfg().OAuthModelAlias)})
 }
 
 func (h *Handler) PutOAuthModelAlias(c *gin.Context) {
@@ -841,8 +914,9 @@ func (h *Handler) PutOAuthModelAlias(c *gin.Context) {
 		}
 		entries = wrapper.Items
 	}
-	h.cfg.OAuthModelAlias = sanitizedOAuthModelAlias(entries)
-	h.persist(c)
+	h.applyConfigChange(c, func(cfg *config.Config) {
+		cfg.OAuthModelAlias = sanitizedOAuthModelAlias(entries)
+	})
 }
 
 func (h *Handler) PatchOAuthModelAlias(c *gin.Context) {
@@ -870,26 +944,29 @@ func (h *Handler) PatchOAuthModelAlias(c *gin.Context) {
 	normalizedMap := sanitizedOAuthModelAlias(map[string][]config.OAuthModelAlias{channel: body.Aliases})
 	normalized := normalizedMap[channel]
 	if len(normalized) == 0 {
-		if h.cfg.OAuthModelAlias == nil {
+		cur := h.cfg()
+		if cur == nil || cur.OAuthModelAlias == nil {
 			c.JSON(404, gin.H{"error": "channel not found"})
 			return
 		}
-		if _, ok := h.cfg.OAuthModelAlias[channel]; !ok {
+		if _, ok := cur.OAuthModelAlias[channel]; !ok {
 			c.JSON(404, gin.H{"error": "channel not found"})
 			return
 		}
-		delete(h.cfg.OAuthModelAlias, channel)
-		if len(h.cfg.OAuthModelAlias) == 0 {
-			h.cfg.OAuthModelAlias = nil
-		}
-		h.persist(c)
+		h.applyConfigChange(c, func(cfg *config.Config) {
+			delete(cfg.OAuthModelAlias, channel)
+			if len(cfg.OAuthModelAlias) == 0 {
+				cfg.OAuthModelAlias = nil
+			}
+		})
 		return
 	}
-	if h.cfg.OAuthModelAlias == nil {
-		h.cfg.OAuthModelAlias = make(map[string][]config.OAuthModelAlias)
-	}
-	h.cfg.OAuthModelAlias[channel] = normalized
-	h.persist(c)
+	h.applyConfigChange(c, func(cfg *config.Config) {
+		if cfg.OAuthModelAlias == nil {
+			cfg.OAuthModelAlias = make(map[string][]config.OAuthModelAlias)
+		}
+		cfg.OAuthModelAlias[channel] = normalized
+	})
 }
 
 func (h *Handler) DeleteOAuthModelAlias(c *gin.Context) {
@@ -901,19 +978,21 @@ func (h *Handler) DeleteOAuthModelAlias(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "missing channel"})
 		return
 	}
-	if h.cfg.OAuthModelAlias == nil {
+	cur := h.cfg()
+	if cur == nil || cur.OAuthModelAlias == nil {
 		c.JSON(404, gin.H{"error": "channel not found"})
 		return
 	}
-	if _, ok := h.cfg.OAuthModelAlias[channel]; !ok {
+	if _, ok := cur.OAuthModelAlias[channel]; !ok {
 		c.JSON(404, gin.H{"error": "channel not found"})
 		return
 	}
-	delete(h.cfg.OAuthModelAlias, channel)
-	if len(h.cfg.OAuthModelAlias) == 0 {
-		h.cfg.OAuthModelAlias = nil
-	}
-	h.persist(c)
+	h.applyConfigChange(c, func(cfg *config.Config) {
+		delete(cfg.OAuthModelAlias, channel)
+		if len(cfg.OAuthModelAlias) == 0 {
+			cfg.OAuthModelAlias = nil
+		}
+	})
 }
 
 // codex-api-key: []CodexKey
@@ -947,11 +1026,10 @@ func (h *Handler) PutCodexKeys(c *gin.Context) {
 		}
 		filtered = append(filtered, entry)
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.cfg.CodexKey = filtered
-	h.cfg.SanitizeCodexKeys()
-	h.persistLocked(c)
+	h.applyConfigChange(c, func(cfg *config.Config) {
+		cfg.CodexKey = filtered
+		cfg.SanitizeCodexKeys()
+	})
 }
 func (h *Handler) PatchCodexKey(c *gin.Context) {
 	type codexKeyPatch struct {
@@ -973,16 +1051,19 @@ func (h *Handler) PatchCodexKey(c *gin.Context) {
 		return
 	}
 
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	cur := h.cfg()
+	if cur == nil {
+		c.JSON(404, gin.H{"error": "item not found"})
+		return
+	}
 	targetIndex := -1
-	if body.Index != nil && *body.Index >= 0 && *body.Index < len(h.cfg.CodexKey) {
+	if body.Index != nil && *body.Index >= 0 && *body.Index < len(cur.CodexKey) {
 		targetIndex = *body.Index
 	}
 	if targetIndex == -1 && body.Match != nil {
 		match := strings.TrimSpace(*body.Match)
-		for i := range h.cfg.CodexKey {
-			if h.cfg.CodexKey[i].APIKey == match {
+		for i := range cur.CodexKey {
+			if cur.CodexKey[i].APIKey == match {
 				targetIndex = i
 				break
 			}
@@ -993,64 +1074,74 @@ func (h *Handler) PatchCodexKey(c *gin.Context) {
 		return
 	}
 
-	entry := h.cfg.CodexKey[targetIndex]
-	if body.Value.APIKey != nil {
-		entry.APIKey = strings.TrimSpace(*body.Value.APIKey)
-	}
-	if body.Value.Prefix != nil {
-		entry.Prefix = strings.TrimSpace(*body.Value.Prefix)
-	}
-	if body.Value.BaseURL != nil {
-		trimmed := strings.TrimSpace(*body.Value.BaseURL)
-		if trimmed == "" {
-			h.cfg.CodexKey = append(h.cfg.CodexKey[:targetIndex], h.cfg.CodexKey[targetIndex+1:]...)
-			h.cfg.SanitizeCodexKeys()
-			h.persistLocked(c)
+	h.applyConfigChange(c, func(cfg *config.Config) {
+		idx := targetIndex
+		if idx >= len(cfg.CodexKey) {
 			return
 		}
-		entry.BaseURL = trimmed
-	}
-	if body.Value.ProxyURL != nil {
-		entry.ProxyURL = strings.TrimSpace(*body.Value.ProxyURL)
-	}
-	if body.Value.Models != nil {
-		entry.Models = append([]config.CodexModel(nil), (*body.Value.Models)...)
-	}
-	if body.Value.Headers != nil {
-		entry.Headers = config.NormalizeHeaders(*body.Value.Headers)
-	}
-	if body.Value.ExcludedModels != nil {
-		entry.ExcludedModels = config.NormalizeExcludedModels(*body.Value.ExcludedModels)
-	}
-	normalizeCodexKey(&entry)
-	h.cfg.CodexKey[targetIndex] = entry
-	h.cfg.SanitizeCodexKeys()
-	h.persistLocked(c)
+		entry := cfg.CodexKey[idx]
+		if body.Value.APIKey != nil {
+			entry.APIKey = strings.TrimSpace(*body.Value.APIKey)
+		}
+		if body.Value.Prefix != nil {
+			entry.Prefix = strings.TrimSpace(*body.Value.Prefix)
+		}
+		if body.Value.BaseURL != nil {
+			trimmed := strings.TrimSpace(*body.Value.BaseURL)
+			if trimmed == "" {
+				cfg.CodexKey = append(cfg.CodexKey[:idx], cfg.CodexKey[idx+1:]...)
+				cfg.SanitizeCodexKeys()
+				return
+			}
+			entry.BaseURL = trimmed
+		}
+		if body.Value.ProxyURL != nil {
+			entry.ProxyURL = strings.TrimSpace(*body.Value.ProxyURL)
+		}
+		if body.Value.Models != nil {
+			entry.Models = append([]config.CodexModel(nil), (*body.Value.Models)...)
+		}
+		if body.Value.Headers != nil {
+			entry.Headers = config.NormalizeHeaders(*body.Value.Headers)
+		}
+		if body.Value.ExcludedModels != nil {
+			entry.ExcludedModels = config.NormalizeExcludedModels(*body.Value.ExcludedModels)
+		}
+		normalizeCodexKey(&entry)
+		cfg.CodexKey[idx] = entry
+		cfg.SanitizeCodexKeys()
+	})
 }
 
 func (h *Handler) DeleteCodexKey(c *gin.Context) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
 	if val := strings.TrimSpace(c.Query("api-key")); val != "" {
 		if baseRaw, okBase := c.GetQuery("base-url"); okBase {
 			base := strings.TrimSpace(baseRaw)
-			out := make([]config.CodexKey, 0, len(h.cfg.CodexKey))
-			for _, v := range h.cfg.CodexKey {
-				if strings.TrimSpace(v.APIKey) == val && strings.TrimSpace(v.BaseURL) == base {
-					continue
+			h.applyConfigChange(c, func(cfg *config.Config) {
+				out := make([]config.CodexKey, 0, len(cfg.CodexKey))
+				for _, v := range cfg.CodexKey {
+					if strings.TrimSpace(v.APIKey) == val && strings.TrimSpace(v.BaseURL) == base {
+						continue
+					}
+					out = append(out, v)
 				}
-				out = append(out, v)
-			}
-			h.cfg.CodexKey = out
-			h.cfg.SanitizeCodexKeys()
-			h.persistLocked(c)
+				cfg.CodexKey = out
+				cfg.SanitizeCodexKeys()
+			})
 			return
 		}
 
+		cur := h.cfg()
+		if cur == nil {
+			h.applyConfigChange(c, func(cfg *config.Config) {
+				cfg.SanitizeCodexKeys()
+			})
+			return
+		}
 		matchIndex := -1
 		matchCount := 0
-		for i := range h.cfg.CodexKey {
-			if strings.TrimSpace(h.cfg.CodexKey[i].APIKey) == val {
+		for i := range cur.CodexKey {
+			if strings.TrimSpace(cur.CodexKey[i].APIKey) == val {
 				matchCount++
 				if matchIndex == -1 {
 					matchIndex = i
@@ -1061,20 +1152,23 @@ func (h *Handler) DeleteCodexKey(c *gin.Context) {
 			c.JSON(400, gin.H{"error": "multiple items match api-key; base-url is required"})
 			return
 		}
-		if matchIndex != -1 {
-			h.cfg.CodexKey = append(h.cfg.CodexKey[:matchIndex], h.cfg.CodexKey[matchIndex+1:]...)
-		}
-		h.cfg.SanitizeCodexKeys()
-		h.persistLocked(c)
+		h.applyConfigChange(c, func(cfg *config.Config) {
+			if matchIndex != -1 && matchIndex < len(cfg.CodexKey) {
+				cfg.CodexKey = append(cfg.CodexKey[:matchIndex], cfg.CodexKey[matchIndex+1:]...)
+			}
+			cfg.SanitizeCodexKeys()
+		})
 		return
 	}
 	if idxStr := c.Query("index"); idxStr != "" {
 		var idx int
-		_, err := fmt.Sscanf(idxStr, "%d", &idx)
-		if err == nil && idx >= 0 && idx < len(h.cfg.CodexKey) {
-			h.cfg.CodexKey = append(h.cfg.CodexKey[:idx], h.cfg.CodexKey[idx+1:]...)
-			h.cfg.SanitizeCodexKeys()
-			h.persistLocked(c)
+		if _, err := fmt.Sscanf(idxStr, "%d", &idx); err == nil {
+			h.applyConfigChange(c, func(cfg *config.Config) {
+				if idx >= 0 && idx < len(cfg.CodexKey) {
+					cfg.CodexKey = append(cfg.CodexKey[:idx], cfg.CodexKey[idx+1:]...)
+					cfg.SanitizeCodexKeys()
+				}
+			})
 			return
 		}
 	}
@@ -1215,74 +1309,76 @@ func sanitizedOAuthModelAlias(entries map[string][]config.OAuthModelAlias) map[s
 
 // GetAmpCode returns the complete ampcode configuration.
 func (h *Handler) GetAmpCode(c *gin.Context) {
-	if h == nil || h.cfg == nil {
+	if h == nil || h.cfg() == nil {
 		c.JSON(200, gin.H{"ampcode": config.AmpCode{}})
 		return
 	}
-	c.JSON(200, gin.H{"ampcode": h.cfg.AmpCode})
+	c.JSON(200, gin.H{"ampcode": h.cfg().AmpCode})
 }
 
 // GetAmpUpstreamURL returns the ampcode upstream URL.
 func (h *Handler) GetAmpUpstreamURL(c *gin.Context) {
-	if h == nil || h.cfg == nil {
+	if h == nil || h.cfg() == nil {
 		c.JSON(200, gin.H{"upstream-url": ""})
 		return
 	}
-	c.JSON(200, gin.H{"upstream-url": h.cfg.AmpCode.UpstreamURL})
+	c.JSON(200, gin.H{"upstream-url": h.cfg().AmpCode.UpstreamURL})
 }
 
 // PutAmpUpstreamURL updates the ampcode upstream URL.
 func (h *Handler) PutAmpUpstreamURL(c *gin.Context) {
-	h.updateStringField(c, func(v string) { h.cfg.AmpCode.UpstreamURL = strings.TrimSpace(v) })
+	h.updateStringField(c, func(cfg *config.Config, v string) { cfg.AmpCode.UpstreamURL = strings.TrimSpace(v) })
 }
 
 // DeleteAmpUpstreamURL clears the ampcode upstream URL.
 func (h *Handler) DeleteAmpUpstreamURL(c *gin.Context) {
-	h.cfg.AmpCode.UpstreamURL = ""
-	h.persist(c)
+	h.applyConfigChange(c, func(cfg *config.Config) {
+		cfg.AmpCode.UpstreamURL = ""
+	})
 }
 
 // GetAmpUpstreamAPIKey returns the ampcode upstream API key.
 func (h *Handler) GetAmpUpstreamAPIKey(c *gin.Context) {
-	if h == nil || h.cfg == nil {
+	if h == nil || h.cfg() == nil {
 		c.JSON(200, gin.H{"upstream-api-key": ""})
 		return
 	}
-	c.JSON(200, gin.H{"upstream-api-key": h.cfg.AmpCode.UpstreamAPIKey})
+	c.JSON(200, gin.H{"upstream-api-key": h.cfg().AmpCode.UpstreamAPIKey})
 }
 
 // PutAmpUpstreamAPIKey updates the ampcode upstream API key.
 func (h *Handler) PutAmpUpstreamAPIKey(c *gin.Context) {
-	h.updateStringField(c, func(v string) { h.cfg.AmpCode.UpstreamAPIKey = strings.TrimSpace(v) })
+	h.updateStringField(c, func(cfg *config.Config, v string) { cfg.AmpCode.UpstreamAPIKey = strings.TrimSpace(v) })
 }
 
 // DeleteAmpUpstreamAPIKey clears the ampcode upstream API key.
 func (h *Handler) DeleteAmpUpstreamAPIKey(c *gin.Context) {
-	h.cfg.AmpCode.UpstreamAPIKey = ""
-	h.persist(c)
+	h.applyConfigChange(c, func(cfg *config.Config) {
+		cfg.AmpCode.UpstreamAPIKey = ""
+	})
 }
 
 // GetAmpRestrictManagementToLocalhost returns the localhost restriction setting.
 func (h *Handler) GetAmpRestrictManagementToLocalhost(c *gin.Context) {
-	if h == nil || h.cfg == nil {
+	if h == nil || h.cfg() == nil {
 		c.JSON(200, gin.H{"restrict-management-to-localhost": true})
 		return
 	}
-	c.JSON(200, gin.H{"restrict-management-to-localhost": h.cfg.AmpCode.RestrictManagementToLocalhost})
+	c.JSON(200, gin.H{"restrict-management-to-localhost": h.cfg().AmpCode.RestrictManagementToLocalhost})
 }
 
 // PutAmpRestrictManagementToLocalhost updates the localhost restriction setting.
 func (h *Handler) PutAmpRestrictManagementToLocalhost(c *gin.Context) {
-	h.updateBoolField(c, func(v bool) { h.cfg.AmpCode.RestrictManagementToLocalhost = v })
+	h.updateBoolField(c, func(cfg *config.Config, v bool) { cfg.AmpCode.RestrictManagementToLocalhost = v })
 }
 
 // GetAmpModelMappings returns the ampcode model mappings.
 func (h *Handler) GetAmpModelMappings(c *gin.Context) {
-	if h == nil || h.cfg == nil {
+	if h == nil || h.cfg() == nil {
 		c.JSON(200, gin.H{"model-mappings": []config.AmpModelMapping{}})
 		return
 	}
-	c.JSON(200, gin.H{"model-mappings": h.cfg.AmpCode.ModelMappings})
+	c.JSON(200, gin.H{"model-mappings": h.cfg().AmpCode.ModelMappings})
 }
 
 // PutAmpModelMappings replaces all ampcode model mappings.
@@ -1294,8 +1390,9 @@ func (h *Handler) PutAmpModelMappings(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "invalid body"})
 		return
 	}
-	h.cfg.AmpCode.ModelMappings = body.Value
-	h.persist(c)
+	h.applyConfigChange(c, func(cfg *config.Config) {
+		cfg.AmpCode.ModelMappings = body.Value
+	})
 }
 
 // PatchAmpModelMappings adds or updates model mappings.
@@ -1308,21 +1405,22 @@ func (h *Handler) PatchAmpModelMappings(c *gin.Context) {
 		return
 	}
 
-	existing := make(map[string]int)
-	for i, m := range h.cfg.AmpCode.ModelMappings {
-		existing[strings.TrimSpace(m.From)] = i
-	}
-
-	for _, newMapping := range body.Value {
-		from := strings.TrimSpace(newMapping.From)
-		if idx, ok := existing[from]; ok {
-			h.cfg.AmpCode.ModelMappings[idx] = newMapping
-		} else {
-			h.cfg.AmpCode.ModelMappings = append(h.cfg.AmpCode.ModelMappings, newMapping)
-			existing[from] = len(h.cfg.AmpCode.ModelMappings) - 1
+	h.applyConfigChange(c, func(cfg *config.Config) {
+		existing := make(map[string]int)
+		for i, m := range cfg.AmpCode.ModelMappings {
+			existing[strings.TrimSpace(m.From)] = i
 		}
-	}
-	h.persist(c)
+
+		for _, newMapping := range body.Value {
+			from := strings.TrimSpace(newMapping.From)
+			if idx, ok := existing[from]; ok {
+				cfg.AmpCode.ModelMappings[idx] = newMapping
+			} else {
+				cfg.AmpCode.ModelMappings = append(cfg.AmpCode.ModelMappings, newMapping)
+				existing[from] = len(cfg.AmpCode.ModelMappings) - 1
+			}
+		}
+	})
 }
 
 // DeleteAmpModelMappings removes specified model mappings by "from" field.
@@ -1331,8 +1429,9 @@ func (h *Handler) DeleteAmpModelMappings(c *gin.Context) {
 		Value []string `json:"value"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil || len(body.Value) == 0 {
-		h.cfg.AmpCode.ModelMappings = nil
-		h.persist(c)
+		h.applyConfigChange(c, func(cfg *config.Config) {
+			cfg.AmpCode.ModelMappings = nil
+		})
 		return
 	}
 
@@ -1341,37 +1440,38 @@ func (h *Handler) DeleteAmpModelMappings(c *gin.Context) {
 		toRemove[strings.TrimSpace(from)] = true
 	}
 
-	newMappings := make([]config.AmpModelMapping, 0, len(h.cfg.AmpCode.ModelMappings))
-	for _, m := range h.cfg.AmpCode.ModelMappings {
-		if !toRemove[strings.TrimSpace(m.From)] {
-			newMappings = append(newMappings, m)
+	h.applyConfigChange(c, func(cfg *config.Config) {
+		newMappings := make([]config.AmpModelMapping, 0, len(cfg.AmpCode.ModelMappings))
+		for _, m := range cfg.AmpCode.ModelMappings {
+			if !toRemove[strings.TrimSpace(m.From)] {
+				newMappings = append(newMappings, m)
+			}
 		}
-	}
-	h.cfg.AmpCode.ModelMappings = newMappings
-	h.persist(c)
+		cfg.AmpCode.ModelMappings = newMappings
+	})
 }
 
 // GetAmpForceModelMappings returns whether model mappings are forced.
 func (h *Handler) GetAmpForceModelMappings(c *gin.Context) {
-	if h == nil || h.cfg == nil {
+	if h == nil || h.cfg() == nil {
 		c.JSON(200, gin.H{"force-model-mappings": false})
 		return
 	}
-	c.JSON(200, gin.H{"force-model-mappings": h.cfg.AmpCode.ForceModelMappings})
+	c.JSON(200, gin.H{"force-model-mappings": h.cfg().AmpCode.ForceModelMappings})
 }
 
 // PutAmpForceModelMappings updates the force model mappings setting.
 func (h *Handler) PutAmpForceModelMappings(c *gin.Context) {
-	h.updateBoolField(c, func(v bool) { h.cfg.AmpCode.ForceModelMappings = v })
+	h.updateBoolField(c, func(cfg *config.Config, v bool) { cfg.AmpCode.ForceModelMappings = v })
 }
 
 // GetAmpUpstreamAPIKeys returns the ampcode upstream API keys mapping.
 func (h *Handler) GetAmpUpstreamAPIKeys(c *gin.Context) {
-	if h == nil || h.cfg == nil {
+	if h == nil || h.cfg() == nil {
 		c.JSON(200, gin.H{"upstream-api-keys": []config.AmpUpstreamAPIKeyEntry{}})
 		return
 	}
-	c.JSON(200, gin.H{"upstream-api-keys": h.cfg.AmpCode.UpstreamAPIKeys})
+	c.JSON(200, gin.H{"upstream-api-keys": h.cfg().AmpCode.UpstreamAPIKeys})
 }
 
 // PutAmpUpstreamAPIKeys replaces all ampcode upstream API keys mappings.
@@ -1385,8 +1485,9 @@ func (h *Handler) PutAmpUpstreamAPIKeys(c *gin.Context) {
 	}
 	// Normalize entries: trim whitespace, filter empty
 	normalized := normalizeAmpUpstreamAPIKeyEntries(body.Value)
-	h.cfg.AmpCode.UpstreamAPIKeys = normalized
-	h.persist(c)
+	h.applyConfigChange(c, func(cfg *config.Config) {
+		cfg.AmpCode.UpstreamAPIKeys = normalized
+	})
 }
 
 // PatchAmpUpstreamAPIKeys adds or updates upstream API keys entries.
@@ -1400,28 +1501,29 @@ func (h *Handler) PatchAmpUpstreamAPIKeys(c *gin.Context) {
 		return
 	}
 
-	existing := make(map[string]int)
-	for i, entry := range h.cfg.AmpCode.UpstreamAPIKeys {
-		existing[strings.TrimSpace(entry.UpstreamAPIKey)] = i
-	}
+	h.applyConfigChange(c, func(cfg *config.Config) {
+		existing := make(map[string]int)
+		for i, entry := range cfg.AmpCode.UpstreamAPIKeys {
+			existing[strings.TrimSpace(entry.UpstreamAPIKey)] = i
+		}
 
-	for _, newEntry := range body.Value {
-		upstreamKey := strings.TrimSpace(newEntry.UpstreamAPIKey)
-		if upstreamKey == "" {
-			continue
+		for _, newEntry := range body.Value {
+			upstreamKey := strings.TrimSpace(newEntry.UpstreamAPIKey)
+			if upstreamKey == "" {
+				continue
+			}
+			normalizedEntry := config.AmpUpstreamAPIKeyEntry{
+				UpstreamAPIKey: upstreamKey,
+				APIKeys:        normalizeAPIKeysList(newEntry.APIKeys),
+			}
+			if idx, ok := existing[upstreamKey]; ok {
+				cfg.AmpCode.UpstreamAPIKeys[idx] = normalizedEntry
+			} else {
+				cfg.AmpCode.UpstreamAPIKeys = append(cfg.AmpCode.UpstreamAPIKeys, normalizedEntry)
+				existing[upstreamKey] = len(cfg.AmpCode.UpstreamAPIKeys) - 1
+			}
 		}
-		normalizedEntry := config.AmpUpstreamAPIKeyEntry{
-			UpstreamAPIKey: upstreamKey,
-			APIKeys:        normalizeAPIKeysList(newEntry.APIKeys),
-		}
-		if idx, ok := existing[upstreamKey]; ok {
-			h.cfg.AmpCode.UpstreamAPIKeys[idx] = normalizedEntry
-		} else {
-			h.cfg.AmpCode.UpstreamAPIKeys = append(h.cfg.AmpCode.UpstreamAPIKeys, normalizedEntry)
-			existing[upstreamKey] = len(h.cfg.AmpCode.UpstreamAPIKeys) - 1
-		}
-	}
-	h.persist(c)
+	})
 }
 
 // DeleteAmpUpstreamAPIKeys removes specified upstream API keys entries.
@@ -1444,8 +1546,9 @@ func (h *Handler) DeleteAmpUpstreamAPIKeys(c *gin.Context) {
 
 	// Empty array means clear all
 	if len(body.Value) == 0 {
-		h.cfg.AmpCode.UpstreamAPIKeys = nil
-		h.persist(c)
+		h.applyConfigChange(c, func(cfg *config.Config) {
+			cfg.AmpCode.UpstreamAPIKeys = nil
+		})
 		return
 	}
 
@@ -1462,14 +1565,15 @@ func (h *Handler) DeleteAmpUpstreamAPIKeys(c *gin.Context) {
 		return
 	}
 
-	newEntries := make([]config.AmpUpstreamAPIKeyEntry, 0, len(h.cfg.AmpCode.UpstreamAPIKeys))
-	for _, entry := range h.cfg.AmpCode.UpstreamAPIKeys {
-		if !toRemove[strings.TrimSpace(entry.UpstreamAPIKey)] {
-			newEntries = append(newEntries, entry)
+	h.applyConfigChange(c, func(cfg *config.Config) {
+		newEntries := make([]config.AmpUpstreamAPIKeyEntry, 0, len(cfg.AmpCode.UpstreamAPIKeys))
+		for _, entry := range cfg.AmpCode.UpstreamAPIKeys {
+			if !toRemove[strings.TrimSpace(entry.UpstreamAPIKey)] {
+				newEntries = append(newEntries, entry)
+			}
 		}
-	}
-	h.cfg.AmpCode.UpstreamAPIKeys = newEntries
-	h.persist(c)
+		cfg.AmpCode.UpstreamAPIKeys = newEntries
+	})
 }
 
 // normalizeAmpUpstreamAPIKeyEntries normalizes a list of upstream API key entries.

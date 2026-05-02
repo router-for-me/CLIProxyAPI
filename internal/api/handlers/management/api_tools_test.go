@@ -13,11 +13,10 @@ import (
 func TestAPICallTransportDirectBypassesGlobalProxy(t *testing.T) {
 	t.Parallel()
 
-	h := &Handler{
-		cfg: &config.Config{
-			SDKConfig: sdkconfig.SDKConfig{ProxyURL: "http://global-proxy.example.com:8080"},
-		},
-	}
+	h := &Handler{}
+	h.SetConfig(&config.Config{
+		SDKConfig: sdkconfig.SDKConfig{ProxyURL: "http://global-proxy.example.com:8080"},
+	})
 
 	transport := h.apiCallTransport(&coreauth.Auth{ProxyURL: "direct"})
 	httpTransport, ok := transport.(*http.Transport)
@@ -32,11 +31,10 @@ func TestAPICallTransportDirectBypassesGlobalProxy(t *testing.T) {
 func TestAPICallTransportInvalidAuthFallsBackToGlobalProxy(t *testing.T) {
 	t.Parallel()
 
-	h := &Handler{
-		cfg: &config.Config{
-			SDKConfig: sdkconfig.SDKConfig{ProxyURL: "http://global-proxy.example.com:8080"},
-		},
-	}
+	h := &Handler{}
+	h.SetConfig(&config.Config{
+		SDKConfig: sdkconfig.SDKConfig{ProxyURL: "http://global-proxy.example.com:8080"},
+	})
 
 	transport := h.apiCallTransport(&coreauth.Auth{ProxyURL: "bad-value"})
 	httpTransport, ok := transport.(*http.Transport)
@@ -61,31 +59,30 @@ func TestAPICallTransportInvalidAuthFallsBackToGlobalProxy(t *testing.T) {
 func TestAPICallTransportAPIKeyAuthFallsBackToConfigProxyURL(t *testing.T) {
 	t.Parallel()
 
-	h := &Handler{
-		cfg: &config.Config{
-			SDKConfig: sdkconfig.SDKConfig{ProxyURL: "http://global-proxy.example.com:8080"},
-			GeminiKey: []config.GeminiKey{{
-				APIKey:   "gemini-key",
-				ProxyURL: "http://gemini-proxy.example.com:8080",
+	h := &Handler{}
+	h.SetConfig(&config.Config{
+		SDKConfig: sdkconfig.SDKConfig{ProxyURL: "http://global-proxy.example.com:8080"},
+		GeminiKey: []config.GeminiKey{{
+			APIKey:   "gemini-key",
+			ProxyURL: "http://gemini-proxy.example.com:8080",
+		}},
+		ClaudeKey: []config.ClaudeKey{{
+			APIKey:   "claude-key",
+			ProxyURL: "http://claude-proxy.example.com:8080",
+		}},
+		CodexKey: []config.CodexKey{{
+			APIKey:   "codex-key",
+			ProxyURL: "http://codex-proxy.example.com:8080",
+		}},
+		OpenAICompatibility: []config.OpenAICompatibility{{
+			Name:    "bohe",
+			BaseURL: "https://bohe.example.com",
+			APIKeyEntries: []config.OpenAICompatibilityAPIKey{{
+				APIKey:   "compat-key",
+				ProxyURL: "http://compat-proxy.example.com:8080",
 			}},
-			ClaudeKey: []config.ClaudeKey{{
-				APIKey:   "claude-key",
-				ProxyURL: "http://claude-proxy.example.com:8080",
-			}},
-			CodexKey: []config.CodexKey{{
-				APIKey:   "codex-key",
-				ProxyURL: "http://codex-proxy.example.com:8080",
-			}},
-			OpenAICompatibility: []config.OpenAICompatibility{{
-				Name:    "bohe",
-				BaseURL: "https://bohe.example.com",
-				APIKeyEntries: []config.OpenAICompatibilityAPIKey{{
-					APIKey:   "compat-key",
-					ProxyURL: "http://compat-proxy.example.com:8080",
-				}},
-			}},
-		},
-	}
+		}},
+	})
 
 	cases := []struct {
 		name      string

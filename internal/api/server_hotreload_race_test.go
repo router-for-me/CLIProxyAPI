@@ -21,23 +21,21 @@ import (
 // -race this surfaces as a data race.
 //
 // After Phase C:
-//   1. internal/api.Server owns the config pointer behind atomic.Pointer.
-//   2. All readers go through Server.Config() *Config (atomic load).
-//   3. All writers (mgmt PutDebug / PutAmpUpstreamURL / PutAmpModelMappings,
-//      OnConfigUpdated, etc.) clone-modify-persist-swap.
-//   4. This test must pass cleanly under go test -race.
+//  1. internal/api.Server owns the config pointer behind atomic.Pointer.
+//  2. All readers go through Server.Config() *Config (atomic load).
+//  3. All writers (mgmt PutDebug / PutAmpUpstreamURL / PutAmpModelMappings,
+//     OnConfigUpdated, etc.) clone-modify-persist-swap.
+//  4. This test must pass cleanly under go test -race.
 //
 // Phase A pre-writes the test body so Phase C just deletes the t.Skip
 // line below and validates the refactor.
 func TestServer_ConfigHotReload_NoRaceUnderConcurrentReads(t *testing.T) {
-	t.Skip("Phase A: hot-reload race documented and reproducible under -race. Un-skip after Phase C atomic.Pointer[Config] swap.")
-
 	server := newTestServer(t)
 
-	// Reader pool: probe two real read paths that touch s.cfg today —
-	//   1. Direct field reads (mirrors patterns like s.cfg.AuthDir,
-	//      s.cfg.TLS.Enable, used at server.go:408,422,436,450,672,814).
-	//   2. /management.html serving (server.go:671 reads s.cfg directly).
+	// Reader pool: probe two real read paths that touch the server config —
+	//   1. Direct snapshot reads via Server.Config() (mirrors patterns like
+	//      s.Config().AuthDir at server.go OAuth callbacks and TLS init).
+	//   2. /management.html serving (reads via Server.Config()).
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
 
@@ -50,9 +48,12 @@ func TestServer_ConfigHotReload_NoRaceUnderConcurrentReads(t *testing.T) {
 				case <-stop:
 					return
 				default:
-					_ = server.cfg.AuthDir
-					_ = server.cfg.Debug
-					_ = server.cfg.LoggingToFile
+					cfg := server.Config()
+					if cfg != nil {
+						_ = cfg.AuthDir
+						_ = cfg.Debug
+						_ = cfg.LoggingToFile
+					}
 				}
 			}
 		}()
@@ -88,10 +89,11 @@ func TestServer_ConfigHotReload_NoRaceUnderConcurrentReads(t *testing.T) {
 				return
 			default:
 				flip = !flip
+				cur := server.Config()
 				newCfg := &proxyconfig.Config{
-					SDKConfig:              server.cfg.SDKConfig,
-					Port:                   server.cfg.Port,
-					AuthDir:                server.cfg.AuthDir,
+					SDKConfig:              cur.SDKConfig,
+					Port:                   cur.Port,
+					AuthDir:                cur.AuthDir,
 					Debug:                  flip,
 					LoggingToFile:          flip,
 					UsageStatisticsEnabled: !flip,
