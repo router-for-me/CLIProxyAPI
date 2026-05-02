@@ -421,7 +421,7 @@ func convertOpenAINonStreamingToAnthropic(rawJSON []byte) [][]byte {
 				toolUseBlock, _ = sjson.SetBytes(toolUseBlock, "id", util.SanitizeClaudeToolID(toolCall.Get("id").String()))
 				name := toolCall.Get("function.name").String()
 				if name == "" {
-					return true // 跳过这个坏的 tool_call
+					return true // Skip this invalid tool_call
 				}
 
 				toolUseBlock, _ = sjson.SetBytes(
