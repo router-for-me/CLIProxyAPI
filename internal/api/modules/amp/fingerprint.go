@@ -26,12 +26,13 @@ const (
 // change when Amp itself is upgraded. Keep prefixes long enough to avoid
 // collisions but short enough to tolerate trailing whitespace/newlines.
 const (
-	OraclePromptPrefix  = "you are the oracle - an expert ai advisor"
-	SearchPromptPrefix  = "you are a fast, parallel code search agent."
-	LookAtPromptPrefix  = "you are an ai assistant that analyzes files for a software engineer."
-	ReviewPromptPrefix  = "you are an expert software engineer reviewing code changes."
-	TitlingPromptPrefix = "you are an assistant that generates short, descriptive titles"
-	HandoffPromptPrefix = "you are an assistant tasked with creating a handoff context"
+	OraclePromptPrefix    = "you are the oracle - an expert ai advisor"
+	SearchPromptPrefix    = "you are a fast, parallel code search agent."
+	LookAtPromptPrefix    = "you are an ai assistant that analyzes files for a software engineer."
+	ReviewPromptPrefix    = "you are an expert software engineer reviewing code changes."
+	TitlingPromptPrefix   = "you are an assistant that generates short, descriptive titles"
+	HandoffPromptPrefix   = "you are an assistant tasked with creating a handoff context"
+	LibrarianPromptPrefix = "you are the librarian, a specialized codebase understanding agent"
 )
 
 // RequestFingerprint captures the per-request features a mapping condition
@@ -90,6 +91,8 @@ func (f RequestFingerprint) Feature() string {
 			return "look_at"
 		case strings.HasPrefix(sys, ReviewPromptPrefix):
 			return "review"
+		case strings.HasPrefix(sys, LibrarianPromptPrefix):
+			return "librarian"
 		case strings.HasPrefix(sys, TitlingPromptPrefix):
 			return "titling"
 		case strings.HasPrefix(sys, HandoffPromptPrefix):

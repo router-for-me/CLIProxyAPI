@@ -154,6 +154,20 @@ func TestExtractFingerprint_Painter(t *testing.T) {
 	}
 }
 
+// TestExtractFingerprint_Librarian uses the real Anthropic payload
+// captured from the Amp librarian tool (claude-sonnet-4-6).
+func TestExtractFingerprint_Librarian(t *testing.T) {
+	body := []byte(`{
+		"model":"claude-sonnet-4-6",
+		"system":"You are the Librarian, a specialized codebase understanding agent that helps users answer questions about large, complex codebases across repositories.",
+		"messages":[{"role":"user","content":"Briefly describe what the github.com/router-for-me/CLIProxyAPI repository does — its purpose, main features, and how it works."}]
+	}`)
+	fp := ExtractFingerprint(body)
+	if got := fp.Feature(); got != "librarian" {
+		t.Fatalf("Feature = %q, want librarian", got)
+	}
+}
+
 // TestExtractFingerprint_SystemPrefixCustom verifies users can match an
 // arbitrary system prompt prefix that is not encoded in Feature().
 func TestExtractFingerprint_SystemPrefixCustom(t *testing.T) {
