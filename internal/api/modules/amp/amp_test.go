@@ -34,10 +34,10 @@ func TestAmpModule_New(t *testing.T) {
 	if m.authMiddleware_ == nil {
 		t.Fatal("authMiddleware not set")
 	}
-	if m.enabled {
+	if m.snapshot().enabled {
 		t.Fatal("enabled should be false initially")
 	}
-	if m.proxy != nil {
+	if m.getProxy() != nil {
 		t.Fatal("proxy should be nil initially")
 	}
 }
@@ -67,13 +67,13 @@ func TestAmpModule_Register_WithUpstream(t *testing.T) {
 		t.Fatalf("register error: %v", err)
 	}
 
-	if !m.enabled {
+	if !m.snapshot().enabled {
 		t.Fatal("module should be enabled with upstream URL")
 	}
-	if m.proxy == nil {
+	if m.getProxy() == nil {
 		t.Fatal("proxy should be initialized")
 	}
-	if m.secretSource == nil {
+	if m.snapshot().secretSource == nil {
 		t.Fatal("secretSource should be initialized")
 	}
 }
@@ -98,10 +98,10 @@ func TestAmpModule_Register_WithoutUpstream(t *testing.T) {
 		t.Fatalf("register should not error without upstream: %v", err)
 	}
 
-	if m.enabled {
+	if m.snapshot().enabled {
 		t.Fatal("module should be disabled without upstream URL")
 	}
-	if m.proxy != nil {
+	if m.getProxy() != nil {
 		t.Fatal("proxy should not be initialized without upstream")
 	}
 
@@ -143,12 +143,15 @@ func TestAmpModule_OnConfigUpdated_CacheInvalidation(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	m := &AmpModule{enabled: true}
+	m := &AmpModule{}
 	ms := NewMultiSourceSecretWithPath("", p, time.Minute)
-	m.secretSource = ms
-	m.lastConfig = &config.AmpCode{
-		UpstreamAPIKey: "old-key",
-	}
+	m.state.Store(&routingTable{
+		enabled:      true,
+		secretSource: ms,
+		lastConfig: &config.AmpCode{
+			UpstreamAPIKey: "old-key",
+		},
+	})
 
 	// Warm the cache
 	if _, err := ms.Get(context.Background()); err != nil {
@@ -170,7 +173,8 @@ func TestAmpModule_OnConfigUpdated_CacheInvalidation(t *testing.T) {
 }
 
 func TestAmpModule_OnConfigUpdated_NotEnabled(t *testing.T) {
-	m := &AmpModule{enabled: false}
+	m := &AmpModule{}
+	m.state.Store(&routingTable{enabled: false})
 
 	// Should not error or panic when disabled
 	if err := m.OnConfigUpdated(&config.Config{}); err != nil {
@@ -179,9 +183,9 @@ func TestAmpModule_OnConfigUpdated_NotEnabled(t *testing.T) {
 }
 
 func TestAmpModule_OnConfigUpdated_URLRemoved(t *testing.T) {
-	m := &AmpModule{enabled: true}
+	m := &AmpModule{}
 	ms := NewMultiSourceSecret("", 0)
-	m.secretSource = ms
+	m.state.Store(&routingTable{enabled: true, secretSource: ms})
 
 	// Config update with empty URL - should log warning but not error
 	cfg := &config.Config{AmpCode: config.AmpCode{UpstreamURL: ""}}
@@ -193,8 +197,11 @@ func TestAmpModule_OnConfigUpdated_URLRemoved(t *testing.T) {
 
 func TestAmpModule_OnConfigUpdated_NonMultiSourceSecret(t *testing.T) {
 	// Test that OnConfigUpdated doesn't panic with StaticSecretSource
-	m := &AmpModule{enabled: true}
-	m.secretSource = NewStaticSecretSource("static-key")
+	m := &AmpModule{}
+	m.state.Store(&routingTable{
+		enabled:      true,
+		secretSource: NewStaticSecretSource("static-key"),
+	})
 
 	cfg := &config.Config{AmpCode: config.AmpCode{UpstreamURL: "http://example.com"}}
 
@@ -261,12 +268,12 @@ func TestAmpModule_SecretSource_FromConfig(t *testing.T) {
 	}
 
 	// Secret source should be MultiSourceSecret with config key
-	if m.secretSource == nil {
+	if m.snapshot().secretSource == nil {
 		t.Fatal("secretSource should be set")
 	}
 
 	// Verify it returns the config key
-	key, err := m.secretSource.Get(context.Background())
+	key, err := m.snapshot().secretSource.Get(context.Background())
 	if err != nil {
 		t.Fatalf("Get error: %v", err)
 	}

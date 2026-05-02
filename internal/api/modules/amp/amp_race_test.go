@@ -36,7 +36,9 @@ func ampStubConfig(s config.AmpCode) *config.Config {
 func newAmpForRace(t *testing.T) *AmpModule {
 	t.Helper()
 	m := New()
-	m.lastConfig = &config.AmpCode{}
+	m.updateState(func(rt *routingTable) {
+		rt.lastConfig = &config.AmpCode{}
+	})
 	m.modelMapper = NewModelMapper(nil)
 	return m
 }

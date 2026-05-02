@@ -13,10 +13,8 @@ func TestRegisterManagementRoutes(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 
-	// Create module with proxy for testing
-	m := &AmpModule{
-		restrictToLocalhost: false, // disable localhost restriction for tests
-	}
+	// Create module with proxy for testing (localhost restriction left at zero default)
+	m := &AmpModule{}
 
 	// Create a mock proxy that tracks calls
 	proxyCalled := false
@@ -251,9 +249,8 @@ func TestLocalhostOnlyMiddleware_PreventsSpoofing(t *testing.T) {
 	r := gin.New()
 
 	// Create module with localhost restriction enabled
-	m := &AmpModule{
-		restrictToLocalhost: true,
-	}
+	m := &AmpModule{}
+	m.setRestrictToLocalhost(true)
 
 	// Apply dynamic localhost-only middleware
 	r.Use(m.localhostOnlyMiddleware())
@@ -335,9 +332,8 @@ func TestLocalhostOnlyMiddleware_HotReload(t *testing.T) {
 	r := gin.New()
 
 	// Create module with localhost restriction initially enabled
-	m := &AmpModule{
-		restrictToLocalhost: true,
-	}
+	m := &AmpModule{}
+	m.setRestrictToLocalhost(true)
 
 	// Apply dynamic localhost-only middleware
 	r.Use(m.localhostOnlyMiddleware())
