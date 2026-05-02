@@ -131,3 +131,33 @@ func TestParseAPIKeysPayload_StructuredDuplicateKeyRejected(t *testing.T) {
 		t.Fatalf("expected duplicate structured rows to be rejected; got ok=true")
 	}
 }
+
+func TestParseAPIKeysPayload_StructuredWrappedDuplicateKeyRejected(t *testing.T) {
+	t.Parallel()
+
+	// Round-4 contract: duplicate structured rows are rejected. The
+	// existing test covers the bare array form; this test pins down that
+	// the wrapped {items:[...]} form goes through the same rejection,
+	// because both shapes share the same dedupe loop.
+	body := []byte("{\"items\":[{\"key\":\"sk-dup\"},{\"key\":\"sk-dup\",\"allowedModels\":[\"gpt-4o*\"]}]}")
+	_, _, ok := parseAPIKeysPayload(body)
+	if ok {
+		t.Fatalf("expected duplicate wrapped structured rows to be rejected; got ok=true")
+	}
+}
+
+func TestParseAPIKeysPayload_StructuredDuplicateKeyAfterTrimRejected(t *testing.T) {
+	t.Parallel()
+
+	// Whitespace-padded duplicates should also be rejected. The parser
+	// trims keys before deduping, so " sk-dup " and "sk-dup" map to the
+	// same canonical key and the second occurrence is a duplicate. This
+	// pins down that the trim-then-dedupe pipeline cannot be bypassed by
+	// constructing a payload where one row's key has surrounding
+	// whitespace.
+	body := []byte("[{\"key\":\"sk-dup\"},{\"key\":\"  sk-dup  \",\"allowedModels\":[\"gpt-4o*\"]}]")
+	_, _, ok := parseAPIKeysPayload(body)
+	if ok {
+		t.Fatalf("expected whitespace-padded duplicate to be rejected; got ok=true")
+	}
+}

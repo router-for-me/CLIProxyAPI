@@ -867,3 +867,85 @@ func TestModelACLMiddleware_OctetStreamWithoutModelAllowed(t *testing.T) {
 		t.Fatalf("expected 200 for opaque body without model, got %d body=%s", w.Code, w.Body.String())
 	}
 }
+
+// Adversarial / red-team coverage of the round-4 (commit 9369170b) fixes.
+// These probe edge cases that the round-4 unit tests don't already cover:
+// empty / malformed / mixed-case Content-Type values, and verify that the
+// default-to-JSON branch enforces correctly.
+
+func TestModelACLMiddleware_EmptyContentTypeWithDisallowedJSONStillEnforces(t *testing.T) {
+	// Round-4 contract: a request with no Content-Type at all but a JSON
+	// body containing a disallowed model must be rejected. The route
+	// handlers parse JSON regardless of header, so the middleware must
+	// too. This was the historic "common case" path before content-type
+	// gating shipped, so it must still enforce.
+	cfg := &config.Config{
+		SDKConfig: config.SDKConfig{
+			APIKeys: []string{"sk-narrow"},
+			APIKeyPolicies: []config.APIKeyPolicy{
+				{Key: "sk-narrow", AllowedModels: []string{"gpt-4o*"}},
+			},
+		},
+	}
+	router := newTestRouter(cfg, "sk-narrow")
+
+	body := []byte("{\"model\":\"claude-3-5-sonnet-20241022\"}")
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+	// Intentionally do not set Content-Type.
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for missing Content-Type with disallowed model, got %d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestModelACLMiddleware_UnparseableContentTypeStillEnforces(t *testing.T) {
+	// mime.ParseMediaType returns an error on malformed Content-Type
+	// values. parseRequestMediaType returns "" in that case, and the
+	// default branch must still apply JSON inspection — not fail open.
+	cfg := &config.Config{
+		SDKConfig: config.SDKConfig{
+			APIKeys: []string{"sk-narrow"},
+			APIKeyPolicies: []config.APIKeyPolicy{
+				{Key: "sk-narrow", AllowedModels: []string{"gpt-4o*"}},
+			},
+		},
+	}
+	router := newTestRouter(cfg, "sk-narrow")
+
+	body := []byte("{\"model\":\"claude-3-5-sonnet-20241022\"}")
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+	// Garbage Content-Type that mime.ParseMediaType will reject.
+	req.Header.Set("Content-Type", "not a real media type / / /")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for unparseable Content-Type, got %d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestModelACLMiddleware_MixedCaseContentTypeStillDispatches(t *testing.T) {
+	// parseRequestMediaType lowercases the parsed media type, so
+	// "APPLICATION/JSON" must dispatch through the JSON path and the
+	// disallowed model must be rejected. Pin this down so a future
+	// refactor that drops ToLower would surface as a test failure here
+	// rather than a silent ACL bypass.
+	cfg := &config.Config{
+		SDKConfig: config.SDKConfig{
+			APIKeys: []string{"sk-narrow"},
+			APIKeyPolicies: []config.APIKeyPolicy{
+				{Key: "sk-narrow", AllowedModels: []string{"gpt-4o*"}},
+			},
+		},
+	}
+	router := newTestRouter(cfg, "sk-narrow")
+
+	body := []byte("{\"model\":\"claude-3-5-sonnet-20241022\"}")
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "APPLICATION/JSON")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for mixed-case JSON Content-Type, got %d body=%s", w.Code, w.Body.String())
+	}
+}
