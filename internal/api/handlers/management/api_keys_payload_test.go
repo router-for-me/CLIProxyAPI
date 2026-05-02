@@ -118,3 +118,16 @@ func TestParseAPIKeysPayload_StructuredPolicyShape(t *testing.T) {
 		t.Fatalf("policy AllowedModels = %v, want %v", policies[0].AllowedModels, want)
 	}
 }
+
+func TestParseAPIKeysPayload_StructuredDuplicateKeyRejected(t *testing.T) {
+	t.Parallel()
+
+	// Duplicate structured rows must be rejected. The first row is
+	// unrestricted (no allowedModels) and the second row would carry a
+	// restriction; silently dropping the second row used to widen access.
+	body := []byte(`[{"key":"sk-dup"},{"key":"sk-dup","allowedModels":["gpt-4o*"]}]`)
+	_, _, ok := parseAPIKeysPayload(body)
+	if ok {
+		t.Fatalf("expected duplicate structured rows to be rejected; got ok=true")
+	}
+}
