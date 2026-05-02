@@ -37,6 +37,10 @@ var signatureCache sync.Map
 // cacheCleanupOnce ensures the background cleanup goroutine starts only once
 var cacheCleanupOnce sync.Once
 
+// clock returns the current time. Tests override it to exercise TTL passage
+// without sleeping. Production callers always see time.Now().
+var clock = time.Now
+
 // groupCache is the inner map type
 type groupCache struct {
 	mu      sync.RWMutex
@@ -76,7 +80,7 @@ func startCacheCleanup() {
 
 // purgeExpiredCaches removes caches with no valid (non-expired) entries.
 func purgeExpiredCaches() {
-	now := time.Now()
+	now := clock()
 	signatureCache.Range(func(key, value any) bool {
 		sc := value.(*groupCache)
 		sc.mu.Lock()
@@ -114,7 +118,7 @@ func CacheSignature(modelName, text, signature string) {
 
 	sc.entries[textHash] = SignatureEntry{
 		Signature: signature,
-		Timestamp: time.Now(),
+		Timestamp: clock(),
 	}
 }
 
@@ -140,7 +144,7 @@ func GetCachedSignature(modelName, text string) string {
 
 	textHash := hashText(text)
 
-	now := time.Now()
+	now := clock()
 
 	sc.mu.Lock()
 	entry, exists := sc.entries[textHash]
