@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -170,6 +171,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 
 	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
 	body = disableThinkingIfToolChoiceForced(body)
+	body = disableThinkingForCustomClaudeCompat(body, baseURL)
 	body = normalizeClaudeTemperatureForThinking(body)
 
 	// Auto-inject cache_control if missing (optimization for ClawdBot/clients without caching support)
@@ -356,6 +358,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 
 	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
 	body = disableThinkingIfToolChoiceForced(body)
+	body = disableThinkingForCustomClaudeCompat(body, baseURL)
 	body = normalizeClaudeTemperatureForThinking(body)
 
 	// Auto-inject cache_control if missing (optimization for ClawdBot/clients without caching support)
@@ -718,6 +721,84 @@ func disableThinkingIfToolChoiceForced(body []byte) []byte {
 		}
 	}
 	return body
+}
+
+// disableThinkingForCustomClaudeCompat works around Claude-compatible upstreams that
+// reject tool-use history unless every assistant tool_call message carries reasoning.
+// Real Anthropic endpoints accept native thinking blocks, so only apply this fallback
+// for non-Anthropic base URLs when the history already contains assistant tool_use
+// messages that do not start with thinking/redacted_thinking.
+func disableThinkingForCustomClaudeCompat(body []byte, baseURL string) []byte {
+	if !customClaudeCompatNeedsThinkingDisabled(body, baseURL) {
+		return body
+	}
+	body, _ = sjson.DeleteBytes(body, "thinking")
+	body, _ = sjson.DeleteBytes(body, "output_config.effort")
+	if oc := gjson.GetBytes(body, "output_config"); oc.Exists() && oc.IsObject() && len(oc.Map()) == 0 {
+		body, _ = sjson.DeleteBytes(body, "output_config")
+	}
+	return body
+}
+
+func customClaudeCompatNeedsThinkingDisabled(body []byte, baseURL string) bool {
+	if len(body) == 0 || !gjson.ValidBytes(body) || isOfficialAnthropicBaseURL(baseURL) {
+		return false
+	}
+
+	switch strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "thinking.type").String())) {
+	case "enabled", "adaptive", "auto":
+	default:
+		return false
+	}
+
+	messages := gjson.GetBytes(body, "messages")
+	if !messages.Exists() || !messages.IsArray() {
+		return false
+	}
+
+	missingThinking := false
+	messages.ForEach(func(_, msg gjson.Result) bool {
+		if msg.Get("role").String() != "assistant" {
+			return true
+		}
+		content := msg.Get("content")
+		if !content.Exists() || !content.IsArray() {
+			return true
+		}
+
+		firstType := ""
+		hasToolUse := false
+		content.ForEach(func(idx, part gjson.Result) bool {
+			partType := part.Get("type").String()
+			if idx.Int() == 0 {
+				firstType = partType
+			}
+			if partType == "tool_use" {
+				hasToolUse = true
+			}
+			return true
+		})
+
+		if hasToolUse && firstType != "thinking" && firstType != "redacted_thinking" {
+			missingThinking = true
+			return false
+		}
+		return true
+	})
+
+	return missingThinking
+}
+
+func isOfficialAnthropicBaseURL(baseURL string) bool {
+	trimmed := strings.TrimSpace(baseURL)
+	if trimmed == "" {
+		return true
+	}
+	parsed, err := url.Parse(trimmed)
+	if err == nil && parsed.Hostname() != "" {
+		return strings.EqualFold(parsed.Hostname(), "api.anthropic.com")
+	}
+	return strings.EqualFold(trimmed, "https://api.anthropic.com")
 }
 
 // normalizeClaudeTemperatureForThinking keeps Anthropic message requests valid when
