@@ -1443,7 +1443,7 @@
       "display_name": "GPT 5.5",
       "version": "gpt-5.5",
       "description": "Frontier model for complex coding, research, and real-world work.",
-      "context_length": 272000,
+      "context_length": 1050000,
       "max_completion_tokens": 128000,
       "supported_parameters": [
         "tools"
@@ -1607,7 +1607,7 @@
       "display_name": "GPT 5.5",
       "version": "gpt-5.5",
       "description": "Frontier model for complex coding, research, and real-world work.",
-      "context_length": 272000,
+      "context_length": 1050000,
       "max_completion_tokens": 128000,
       "supported_parameters": [
         "tools"
@@ -1771,7 +1771,7 @@
       "display_name": "GPT 5.5",
       "version": "gpt-5.5",
       "description": "Frontier model for complex coding, research, and real-world work.",
-      "context_length": 272000,
+      "context_length": 1050000,
       "max_completion_tokens": 128000,
       "supported_parameters": [
         "tools"
