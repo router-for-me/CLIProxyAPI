@@ -8,6 +8,10 @@ import (
 func BenchmarkFileRequestLogger_LogRequest(b *testing.B) {
 	dir := b.TempDir()
 	logger := NewFileRequestLogger(true, dir, "", 0)
+	// Close drains the async writer queue so b.TempDir cleanup doesn't race
+	// the worker still writing files. Without this the bench failed under
+	// post-async-emitter refactor with "unlinkat ... directory not empty".
+	b.Cleanup(logger.Close)
 
 	headers := map[string][]string{
 		"Content-Type":  {"application/json"},
@@ -44,6 +48,7 @@ func BenchmarkFileRequestLogger_LogRequest(b *testing.B) {
 func BenchmarkFileRequestLogger_Disabled(b *testing.B) {
 	dir := b.TempDir()
 	logger := NewFileRequestLogger(false, dir, "", 0)
+	b.Cleanup(logger.Close)
 
 	headers := map[string][]string{"Content-Type": {"application/json"}}
 	body := []byte(`{"model":"claude-sonnet-4-5"}`)
