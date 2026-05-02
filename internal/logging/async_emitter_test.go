@@ -170,6 +170,47 @@ func TestAsyncEmitter_ForcedFallsBackToSyncWhenPriorityFull(t *testing.T) {
 	emitter.close()
 }
 
+// TestAsyncEmitter_ForcedAfterCloseWritesSynchronously pins the post-close
+// forced-log invariant fixed under Codex Phase C BLOCKER #3. After close()
+// returns, any further forced LogRequestWithOptions call must still hit
+// disk via the sync fallback path — never enqueue into a buffered priority
+// channel that has no consumer left to drain it.
+func TestAsyncEmitter_ForcedAfterCloseWritesSynchronously(t *testing.T) {
+	dir := t.TempDir()
+	l := NewFileRequestLogger(true, dir, "", 0)
+
+	// Close drains the worker. Any forced enqueue after this point must
+	// fall back to sync writes.
+	l.Close()
+
+	now := time.Now()
+	headers := map[string][]string{"Content-Type": {"application/json"}}
+	if err := l.LogRequestWithOptions(
+		"/v1/forced-after-close", "POST", headers, nil, 500, headers,
+		[]byte("payload"), nil, nil, nil, nil, nil,
+		true, "after-close-id", now, now,
+	); err != nil {
+		t.Fatalf("forced log after close returned err: %v", err)
+	}
+	if l.DroppedLogs() != 0 {
+		t.Fatalf("forced logs must never drop; counter=%d", l.DroppedLogs())
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read dir: %v", err)
+	}
+	for _, e := range entries {
+		if strings.Contains(e.Name(), "after-close-id") {
+			return
+		}
+	}
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	t.Fatalf("forced log not written to disk after close; files=%v", names)
+}
+
 func TestAsyncEmitter_AtomicEnabledToggle_RaceFree(t *testing.T) {
 	l := newTestLoggerForAsync(t)
 	stop := make(chan struct{})

@@ -146,8 +146,15 @@ type Server struct {
 	// config; readers atomic.Load via Server.Config() at request entry.
 	cfgPtr atomic.Pointer[config.Config]
 
+	// updateMu serializes UpdateClients fan-out so that two concurrent
+	// hot-reload sources (file-watcher, mgmt clone-modify-persist-commit)
+	// never overlap their delta computation against oldConfigYaml. Held for
+	// the entire UpdateClients body. (Codex Phase C IMPORTANT #6.)
+	updateMu sync.Mutex
+
 	// oldConfigYaml stores a YAML snapshot of the previous configuration for change detection.
 	// This prevents issues when the config object is modified in place by Management API.
+	// Always read/written under updateMu.
 	oldConfigYaml []byte
 
 	// accessManager handles request authentication providers.
@@ -989,10 +996,16 @@ func (s *Server) Config() *config.Config {
 // UpdateClients updates the server's client list and configuration.
 // This method is called when the configuration or authentication tokens change.
 //
+// Serialized via s.updateMu so concurrent fan-outs (file-watcher reload + a
+// mgmt clone-modify-persist-commit firing in parallel) cannot interleave
+// their delta computation against oldConfigYaml.
+//
 // Parameters:
-//   - clients: The new slice of AI service clients
 //   - cfg: The new application configuration
 func (s *Server) UpdateClients(cfg *config.Config) {
+	s.updateMu.Lock()
+	defer s.updateMu.Unlock()
+
 	// Reconstruct old config from YAML snapshot to avoid reference sharing issues
 	var oldCfg *config.Config
 	if len(s.oldConfigYaml) > 0 {

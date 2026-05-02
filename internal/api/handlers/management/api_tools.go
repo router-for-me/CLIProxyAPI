@@ -426,10 +426,10 @@ func (h *Handler) refreshAntigravityOAuthAccessToken(ctx context.Context, auth *
 	}
 	auth.Metadata["type"] = "antigravity"
 
-	if h != nil && h.authManager != nil {
+	if h != nil && h.authManager() != nil {
 		auth.LastRefreshedAt = now
 		auth.UpdatedAt = now
-		_, _ = h.authManager.Update(ctx, auth)
+		_, _ = h.authManager().Update(ctx, auth)
 	}
 
 	return strings.TrimSpace(tokenResp.AccessToken), nil
@@ -615,10 +615,10 @@ func tokenValueFromMetadata(metadata map[string]any) string {
 
 func (h *Handler) authByIndex(authIndex string) *coreauth.Auth {
 	authIndex = strings.TrimSpace(authIndex)
-	if authIndex == "" || h == nil || h.authManager == nil {
+	if authIndex == "" || h == nil || h.authManager() == nil {
 		return nil
 	}
-	auths := h.authManager.List()
+	auths := h.authManager().List()
 	for _, auth := range auths {
 		if auth == nil {
 			continue

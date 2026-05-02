@@ -4,6 +4,7 @@ package management
 
 import (
 	"crypto/subtle"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -19,7 +20,6 @@ import (
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"golang.org/x/crypto/bcrypt"
-	"gopkg.in/yaml.v3"
 )
 
 type attemptInfo struct {
@@ -49,19 +49,34 @@ const attemptMaxIdleTime = 2 * time.Hour
 // readers — any mutation MUST go through applyConfigChange so the new
 // snapshot is published as a fresh allocation.
 type Handler struct {
-	cfgPtr              atomic.Pointer[config.Config]
-	commit              func(*config.Config) // optional Server-side fan-out hook
+	cfgPtr atomic.Pointer[config.Config]
+	commit func(*config.Config) // optional Server-side fan-out hook
+	// authManagerPtr holds the auth manager behind atomic.Pointer so SetAuthManager
+	// can run lock-free. The previous mutex-guarded form deadlocked when
+	// applyConfigChange held h.mu and the commit hook reached SetAuthManager
+	// transitively via Server.UpdateClients (Codex Phase C review BLOCKER #1).
+	// Reads scattered across the management package always observed an
+	// unsynchronized h.authManager(); the lock was paranoia, not correctness.
+	authManagerPtr      atomic.Pointer[coreauth.Manager]
 	configFilePath      string
 	mu                  sync.Mutex
 	attemptsMu          sync.Mutex
 	failedAttempts      map[string]*attemptInfo // keyed by client IP
-	authManager         *coreauth.Manager
 	tokenStore          coreauth.Store
 	localPassword       string
 	allowRemoteOverride bool
 	envSecret           string
 	logDir              string
 	postAuthHook        coreauth.PostAuthHook
+}
+
+// authManager returns the current auth manager snapshot. Callers must
+// nil-check the result.
+func (h *Handler) authManager() *coreauth.Manager {
+	if h == nil {
+		return nil
+	}
+	return h.authManagerPtr.Load()
 }
 
 // NewHandler creates a new management handler instance.
@@ -72,12 +87,14 @@ func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Man
 	h := &Handler{
 		configFilePath:      configFilePath,
 		failedAttempts:      make(map[string]*attemptInfo),
-		authManager:         manager,
 		tokenStore:          sdkAuth.GetTokenStore(),
 		allowRemoteOverride: envSecret != "",
 		envSecret:           envSecret,
 	}
 	h.cfgPtr.Store(cfg)
+	if manager != nil {
+		h.authManagerPtr.Store(manager)
+	}
 	h.startAttemptCleanup()
 	return h
 }
@@ -108,24 +125,34 @@ func (h *Handler) SetConfigCommitter(commit func(*config.Config)) {
 	h.commit = commit
 }
 
-// cloneConfigSnapshot returns a deep copy of cur via yaml round-trip. Used by
+// cloneConfigSnapshot returns a deep copy of cur via JSON round-trip. Used by
 // applyConfigChange so mutations to the clone don't affect concurrent readers
-// holding the prior snapshot. yaml round-trip is heavier than a manual copy
-// but resilient to new fields being added to config.Config; mgmt writes
-// already perform disk I/O so the extra cost is negligible.
-func cloneConfigSnapshot(cur *config.Config) *config.Config {
+// holding the prior snapshot.
+//
+// JSON round-trip (vs the prior yaml round-trip) is preferred because:
+//   - JSON preserves nil-vs-empty for slices/maps with omitempty tags more
+//     predictably than yaml.v3, which canonicalised some nil maps to empty
+//     and changed JSON response shape on subsequent reads (Codex Phase C
+//     IMPORTANT #7).
+//   - On marshal/unmarshal error we now return error so applyConfigChange
+//     fails loudly with a 500 instead of silently producing an empty config
+//     and persisting it.
+//
+// Mgmt writes already pay disk I/O for the persist step, so the round-trip
+// cost is negligible.
+func cloneConfigSnapshot(cur *config.Config) (*config.Config, error) {
 	if cur == nil {
-		return &config.Config{}
+		return &config.Config{}, nil
 	}
-	data, err := yaml.Marshal(cur)
+	data, err := json.Marshal(cur)
 	if err != nil {
-		return &config.Config{}
+		return nil, fmt.Errorf("clone config: marshal: %w", err)
 	}
 	var next config.Config
-	if err := yaml.Unmarshal(data, &next); err != nil {
-		return &config.Config{}
+	if err := json.Unmarshal(data, &next); err != nil {
+		return nil, fmt.Errorf("clone config: unmarshal: %w", err)
 	}
-	return &next
+	return &next, nil
 }
 
 // applyConfigChange runs fn on a clone of the current config snapshot under
@@ -142,19 +169,40 @@ func (h *Handler) applyConfigChange(c *gin.Context, fn func(*config.Config)) boo
 		return false
 	}
 	h.mu.Lock()
-	defer h.mu.Unlock()
-
-	next := cloneConfigSnapshot(h.cfgPtr.Load())
+	next, cloneErr := cloneConfigSnapshot(h.cfgPtr.Load())
+	if cloneErr != nil {
+		h.mu.Unlock()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to clone config: %v", cloneErr)})
+		return false
+	}
 	fn(next)
 
+	// If fn already wrote a response (e.g. resolved a target index against
+	// the cloned snapshot, found nothing, and emitted 404) we must NOT
+	// persist or commit. This is the fix for Codex Phase C IMPORTANT #5
+	// stale-index pre-resolution: handlers can now re-resolve inside the
+	// closure against the cloned config and short-circuit safely.
+	if c.Writer.Written() {
+		h.mu.Unlock()
+		return false
+	}
+
 	if err := config.SaveConfigPreserveComments(h.configFilePath, next); err != nil {
+		h.mu.Unlock()
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to save config: %v", err)})
 		return false
 	}
 
 	h.cfgPtr.Store(next)
-	if h.commit != nil {
-		h.commit(next)
+	commit := h.commit
+	h.mu.Unlock()
+
+	// Commit fan-out runs OUTSIDE h.mu so it can transitively re-enter
+	// handler methods (Server.UpdateClients calls SetAuthManager etc.)
+	// without deadlocking. Server.updateMu serializes UpdateClients itself
+	// against concurrent file-watcher reloads.
+	if commit != nil {
+		commit(next)
 	}
 
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
@@ -207,13 +255,17 @@ func (h *Handler) SetConfig(cfg *config.Config) {
 }
 
 // SetAuthManager updates the auth manager reference used by management endpoints.
+// Lock-free atomic store so it is safe to call while h.mu is held by an
+// in-flight applyConfigChange — see Codex Phase C BLOCKER #1.
 func (h *Handler) SetAuthManager(manager *coreauth.Manager) {
 	if h == nil {
 		return
 	}
-	h.mu.Lock()
-	h.authManager = manager
-	h.mu.Unlock()
+	if manager == nil {
+		h.authManagerPtr.Store(nil)
+		return
+	}
+	h.authManagerPtr.Store(manager)
 }
 
 // SetLocalPassword configures the runtime-local password accepted for localhost requests.

@@ -240,11 +240,11 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 		c.JSON(500, gin.H{"error": "handler not initialized"})
 		return
 	}
-	if h.authManager == nil {
+	if h.authManager() == nil {
 		h.listAuthFilesFromDisk(c)
 		return
 	}
-	auths := h.authManager.List()
+	auths := h.authManager().List()
 	files := make([]gin.H, 0, len(auths))
 	for _, auth := range auths {
 		if entry := h.buildAuthFileEntry(auth); entry != nil {
@@ -269,8 +269,8 @@ func (h *Handler) GetAuthFileModels(c *gin.Context) {
 
 	// Try to find auth ID via authManager
 	var authID string
-	if h.authManager != nil {
-		auths := h.authManager.List()
+	if h.authManager() != nil {
+		auths := h.authManager().List()
 		for _, auth := range auths {
 			if auth.FileName == name || auth.ID == name {
 				authID = auth.ID
@@ -582,7 +582,7 @@ func (h *Handler) DownloadAuthFile(c *gin.Context) {
 
 // Upload auth file: multipart or raw JSON with ?name=
 func (h *Handler) UploadAuthFile(c *gin.Context) {
-	if h.authManager == nil {
+	if h.authManager() == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
 		return
 	}
@@ -663,7 +663,7 @@ func (h *Handler) UploadAuthFile(c *gin.Context) {
 
 // Delete auth files: single by name or all
 func (h *Handler) DeleteAuthFile(c *gin.Context) {
-	if h.authManager == nil {
+	if h.authManager() == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
 		return
 	}
@@ -909,17 +909,17 @@ func (h *Handler) deleteAuthFileByName(ctx context.Context, name string) (string
 }
 
 func (h *Handler) findAuthForDelete(name string) *coreauth.Auth {
-	if h == nil || h.authManager == nil {
+	if h == nil || h.authManager() == nil {
 		return nil
 	}
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return nil
 	}
-	if auth, ok := h.authManager.GetByID(name); ok {
+	if auth, ok := h.authManager().GetByID(name); ok {
 		return auth
 	}
-	auths := h.authManager.List()
+	auths := h.authManager().List()
 	for _, auth := range auths {
 		if auth == nil {
 			continue
@@ -971,7 +971,7 @@ func (h *Handler) authIDForPath(path string) string {
 }
 
 func (h *Handler) registerAuthFromFile(ctx context.Context, path string, data []byte) error {
-	if h.authManager == nil {
+	if h.authManager() == nil {
 		return nil
 	}
 	auth, err := h.buildAuthFromFileData(path, data)
@@ -1028,8 +1028,8 @@ func (h *Handler) buildAuthFromFileData(path string, data []byte) (*coreauth.Aut
 	if hasLastRefresh {
 		auth.LastRefreshedAt = lastRefresh
 	}
-	if h != nil && h.authManager != nil {
-		if existing, ok := h.authManager.GetByID(authID); ok {
+	if h != nil && h.authManager() != nil {
+		if existing, ok := h.authManager().GetByID(authID); ok {
 			auth.CreatedAt = existing.CreatedAt
 			if !hasLastRefresh {
 				auth.LastRefreshedAt = existing.LastRefreshedAt
@@ -1043,21 +1043,21 @@ func (h *Handler) buildAuthFromFileData(path string, data []byte) (*coreauth.Aut
 }
 
 func (h *Handler) upsertAuthRecord(ctx context.Context, auth *coreauth.Auth) error {
-	if h == nil || h.authManager == nil || auth == nil {
+	if h == nil || h.authManager() == nil || auth == nil {
 		return nil
 	}
-	if existing, ok := h.authManager.GetByID(auth.ID); ok {
+	if existing, ok := h.authManager().GetByID(auth.ID); ok {
 		auth.CreatedAt = existing.CreatedAt
-		_, err := h.authManager.Update(ctx, auth)
+		_, err := h.authManager().Update(ctx, auth)
 		return err
 	}
-	_, err := h.authManager.Register(ctx, auth)
+	_, err := h.authManager().Register(ctx, auth)
 	return err
 }
 
 // PatchAuthFileStatus toggles the disabled state of an auth file
 func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
-	if h.authManager == nil {
+	if h.authManager() == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
 		return
 	}
@@ -1085,10 +1085,10 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 
 	// Find auth by name or ID
 	var targetAuth *coreauth.Auth
-	if auth, ok := h.authManager.GetByID(name); ok {
+	if auth, ok := h.authManager().GetByID(name); ok {
 		targetAuth = auth
 	} else {
-		auths := h.authManager.List()
+		auths := h.authManager().List()
 		for _, auth := range auths {
 			if auth.FileName == name {
 				targetAuth = auth
@@ -1113,7 +1113,7 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 	}
 	targetAuth.UpdatedAt = time.Now()
 
-	if _, err := h.authManager.Update(ctx, targetAuth); err != nil {
+	if _, err := h.authManager().Update(ctx, targetAuth); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to update auth: %v", err)})
 		return
 	}
@@ -1123,7 +1123,7 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 
 // PatchAuthFileFields updates editable fields (prefix, proxy_url, headers, priority, note) of an auth file.
 func (h *Handler) PatchAuthFileFields(c *gin.Context) {
-	if h.authManager == nil {
+	if h.authManager() == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
 		return
 	}
@@ -1151,10 +1151,10 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 
 	// Find auth by name or ID
 	var targetAuth *coreauth.Auth
-	if auth, ok := h.authManager.GetByID(name); ok {
+	if auth, ok := h.authManager().GetByID(name); ok {
 		targetAuth = auth
 	} else {
-		auths := h.authManager.List()
+		auths := h.authManager().List()
 		for _, auth := range auths {
 			if auth.FileName == name {
 				targetAuth = auth
@@ -1308,7 +1308,7 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 
 	targetAuth.UpdatedAt = time.Now()
 
-	if _, err := h.authManager.Update(ctx, targetAuth); err != nil {
+	if _, err := h.authManager().Update(ctx, targetAuth); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to update auth: %v", err)})
 		return
 	}
@@ -1317,31 +1317,31 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 }
 
 func (h *Handler) disableAuth(ctx context.Context, id string) {
-	if h == nil || h.authManager == nil {
+	if h == nil || h.authManager() == nil {
 		return
 	}
 	id = strings.TrimSpace(id)
 	if id == "" {
 		return
 	}
-	if auth, ok := h.authManager.GetByID(id); ok {
+	if auth, ok := h.authManager().GetByID(id); ok {
 		auth.Disabled = true
 		auth.Status = coreauth.StatusDisabled
 		auth.StatusMessage = "removed via management API"
 		auth.UpdatedAt = time.Now()
-		_, _ = h.authManager.Update(ctx, auth)
+		_, _ = h.authManager().Update(ctx, auth)
 		return
 	}
 	authID := h.authIDForPath(id)
 	if authID == "" {
 		return
 	}
-	if auth, ok := h.authManager.GetByID(authID); ok {
+	if auth, ok := h.authManager().GetByID(authID); ok {
 		auth.Disabled = true
 		auth.Status = coreauth.StatusDisabled
 		auth.StatusMessage = "removed via management API"
 		auth.UpdatedAt = time.Now()
-		_, _ = h.authManager.Update(ctx, auth)
+		_, _ = h.authManager().Update(ctx, auth)
 	}
 }
 

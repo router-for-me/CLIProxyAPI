@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
@@ -29,8 +30,13 @@ type cachedSecret struct {
 // 1. Explicit config value (highest priority)
 // 2. Environment variable AMP_API_KEY
 // 3. File-based secret (lowest priority)
+//
+// explicitKey is held behind an atomic.Pointer because Get reads it on
+// every request without taking s.mu, while UpdateExplicitKey writes it
+// during config hot-reload. The previous plain-string field raced under
+// `go test -race` (Codex Phase C BLOCKER #4).
 type MultiSourceSecret struct {
-	explicitKey string
+	explicitKey atomic.Pointer[string]
 	envKey      string
 	filePath    string
 	cacheTTL    time.Duration
@@ -48,12 +54,14 @@ func NewMultiSourceSecret(explicitKey string, cacheTTL time.Duration) *MultiSour
 	home, _ := os.UserHomeDir()
 	filePath := filepath.Join(home, ".local", "share", "amp", "secrets.json")
 
-	return &MultiSourceSecret{
-		explicitKey: strings.TrimSpace(explicitKey),
-		envKey:      "AMP_API_KEY",
-		filePath:    filePath,
-		cacheTTL:    cacheTTL,
+	s := &MultiSourceSecret{
+		envKey:   "AMP_API_KEY",
+		filePath: filePath,
+		cacheTTL: cacheTTL,
 	}
+	trimmed := strings.TrimSpace(explicitKey)
+	s.explicitKey.Store(&trimmed)
+	return s
 }
 
 // NewMultiSourceSecretWithPath creates a secret source with a custom file path (for testing)
@@ -62,20 +70,33 @@ func NewMultiSourceSecretWithPath(explicitKey string, filePath string, cacheTTL 
 		cacheTTL = 5 * time.Minute
 	}
 
-	return &MultiSourceSecret{
-		explicitKey: strings.TrimSpace(explicitKey),
-		envKey:      "AMP_API_KEY",
-		filePath:    filePath,
-		cacheTTL:    cacheTTL,
+	s := &MultiSourceSecret{
+		envKey:   "AMP_API_KEY",
+		filePath: filePath,
+		cacheTTL: cacheTTL,
 	}
+	trimmed := strings.TrimSpace(explicitKey)
+	s.explicitKey.Store(&trimmed)
+	return s
+}
+
+// loadExplicitKey returns the current explicit key, treating a nil pointer
+// (zero-value MultiSourceSecret built outside the constructors) as empty.
+func (s *MultiSourceSecret) loadExplicitKey() string {
+	p := s.explicitKey.Load()
+	if p == nil {
+		return ""
+	}
+	return *p
 }
 
 // Get retrieves the Amp API key using precedence: config > env > file
 // Results are cached for cacheTTL duration to avoid excessive file reads
 func (s *MultiSourceSecret) Get(ctx context.Context) (string, error) {
-	// Precedence 1: Explicit config key (highest priority, no caching needed)
-	if s.explicitKey != "" {
-		return s.explicitKey, nil
+	// Precedence 1: Explicit config key (highest priority, no caching needed).
+	// Lock-free atomic load; UpdateExplicitKey writes via atomic.Store.
+	if explicit := s.loadExplicitKey(); explicit != "" {
+		return explicit, nil
 	}
 
 	// Precedence 2: Environment variable
@@ -143,12 +164,16 @@ func (s *MultiSourceSecret) InvalidateCache() {
 }
 
 // UpdateExplicitKey refreshes the config-provided key and clears cache.
+// The explicit key swap is lock-free (atomic.Pointer) so concurrent Get
+// calls see a consistent value; the cache reset still uses s.mu since
+// cache writes are not on the hot path.
 func (s *MultiSourceSecret) UpdateExplicitKey(key string) {
 	if s == nil {
 		return
 	}
+	trimmed := strings.TrimSpace(key)
+	s.explicitKey.Store(&trimmed)
 	s.mu.Lock()
-	s.explicitKey = strings.TrimSpace(key)
 	s.cache = nil
 	s.mu.Unlock()
 }

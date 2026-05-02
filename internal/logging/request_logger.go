@@ -148,7 +148,10 @@ type FileRequestLogger struct {
 	logsDir string
 
 	// errorLogsMaxFiles limits the number of error log files retained.
-	errorLogsMaxFiles int
+	// atomic.Int64 because cleanupOldErrorLogs (running on the async writer
+	// goroutine) reads it concurrently with hot-reload writes via
+	// SetErrorLogsMaxFiles (Codex Phase C IMPORTANT #8).
+	errorLogsMaxFiles atomic.Int64
 
 	// async (when non-nil) routes LogRequest writes through a worker
 	// goroutine so the request handler does not block on file I/O. Forced
@@ -176,9 +179,9 @@ func NewFileRequestLogger(enabled bool, logsDir string, configDir string, errorL
 		}
 	}
 	l := &FileRequestLogger{
-		logsDir:           logsDir,
-		errorLogsMaxFiles: errorLogsMaxFiles,
+		logsDir: logsDir,
 	}
+	l.errorLogsMaxFiles.Store(int64(errorLogsMaxFiles))
 	l.enabled.Store(enabled)
 	l.async = newAsyncEmitter(l)
 	l.async.start()
@@ -233,8 +236,9 @@ func (l *FileRequestLogger) Close() {
 }
 
 // SetErrorLogsMaxFiles updates the maximum number of error log files to retain.
+// Lock-free atomic store; cleanupOldErrorLogs reads via atomic.Load.
 func (l *FileRequestLogger) SetErrorLogsMaxFiles(maxFiles int) {
-	l.errorLogsMaxFiles = maxFiles
+	l.errorLogsMaxFiles.Store(int64(maxFiles))
 }
 
 // LogRequest logs a complete non-streaming request/response cycle to a file.
@@ -563,7 +567,8 @@ func (l *FileRequestLogger) sanitizeForFilename(path string) string {
 
 // cleanupOldErrorLogs keeps only the newest errorLogsMaxFiles forced error log files.
 func (l *FileRequestLogger) cleanupOldErrorLogs() error {
-	if l.errorLogsMaxFiles <= 0 {
+	maxFiles := int(l.errorLogsMaxFiles.Load())
+	if maxFiles <= 0 {
 		return nil
 	}
 
@@ -594,7 +599,7 @@ func (l *FileRequestLogger) cleanupOldErrorLogs() error {
 		files = append(files, logFile{name: name, modTime: info.ModTime()})
 	}
 
-	if len(files) <= l.errorLogsMaxFiles {
+	if len(files) <= maxFiles {
 		return nil
 	}
 
@@ -602,7 +607,7 @@ func (l *FileRequestLogger) cleanupOldErrorLogs() error {
 		return files[i].modTime.After(files[j].modTime)
 	})
 
-	for _, file := range files[l.errorLogsMaxFiles:] {
+	for _, file := range files[maxFiles:] {
 		if errRemove := os.Remove(filepath.Join(l.logsDir, file.name)); errRemove != nil {
 			log.WithError(errRemove).Warnf("failed to remove old error log: %s", file.name)
 		}

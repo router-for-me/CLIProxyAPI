@@ -49,7 +49,7 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 		}
 	}
 
-	keepAliveInterval := StreamingKeepAliveInterval(h.Cfg)
+	keepAliveInterval := StreamingKeepAliveInterval(h.Config())
 	if opts.KeepAliveInterval != nil {
 		keepAliveInterval = *opts.KeepAliveInterval
 	}

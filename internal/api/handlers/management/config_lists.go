@@ -175,36 +175,29 @@ func (h *Handler) PatchGeminiKey(c *gin.Context) {
 		return
 	}
 
-	// Pre-resolve target on the current snapshot so 404 short-circuits before cloning.
-	cur := h.cfg()
-	if cur == nil {
-		c.JSON(404, gin.H{"error": "item not found"})
-		return
-	}
-	targetIndex := -1
-	if body.Index != nil && *body.Index >= 0 && *body.Index < len(cur.GeminiKey) {
-		targetIndex = *body.Index
-	}
-	if targetIndex == -1 && body.Match != nil {
-		match := strings.TrimSpace(*body.Match)
-		if match != "" {
-			for i := range cur.GeminiKey {
-				if cur.GeminiKey[i].APIKey == match {
-					targetIndex = i
-					break
+	// Resolve target on the cloned config inside applyConfigChange so a hot
+	// reload between request entry and clone cannot leave us pointing at a
+	// stale index (Codex Phase C IMPORTANT #5). If the item is no longer
+	// present, the closure writes 404 and applyConfigChange detects the
+	// pre-written response, skipping persist + commit + 200.
+	h.applyConfigChange(c, func(cfg *config.Config) {
+		idx := -1
+		if body.Index != nil && *body.Index >= 0 && *body.Index < len(cfg.GeminiKey) {
+			idx = *body.Index
+		}
+		if idx == -1 && body.Match != nil {
+			match := strings.TrimSpace(*body.Match)
+			if match != "" {
+				for i := range cfg.GeminiKey {
+					if cfg.GeminiKey[i].APIKey == match {
+						idx = i
+						break
+					}
 				}
 			}
 		}
-	}
-	if targetIndex == -1 {
-		c.JSON(404, gin.H{"error": "item not found"})
-		return
-	}
-
-	h.applyConfigChange(c, func(cfg *config.Config) {
-		// Re-resolve under the writer lock in case the clone differs.
-		idx := targetIndex
-		if idx >= len(cfg.GeminiKey) {
+		if idx == -1 {
+			c.JSON(404, gin.H{"error": "item not found"})
 			return
 		}
 		entry := cfg.GeminiKey[idx]
@@ -257,35 +250,30 @@ func (h *Handler) DeleteGeminiKey(c *gin.Context) {
 			return
 		}
 
-		// Resolve match on snapshot so 404/400 short-circuits before cloning.
-		cur := h.cfg()
-		if cur == nil {
-			c.JSON(404, gin.H{"error": "item not found"})
-			return
-		}
-		matchIndex := -1
-		matchCount := 0
-		for i := range cur.GeminiKey {
-			if strings.TrimSpace(cur.GeminiKey[i].APIKey) == val {
-				matchCount++
-				if matchIndex == -1 {
-					matchIndex = i
+		// Resolve inside applyConfigChange against the cloned config so a
+		// hot reload between request entry and clone cannot leave us
+		// pointing at the wrong row (Codex Phase C IMPORTANT #5).
+		h.applyConfigChange(c, func(cfg *config.Config) {
+			matchIndex := -1
+			matchCount := 0
+			for i := range cfg.GeminiKey {
+				if strings.TrimSpace(cfg.GeminiKey[i].APIKey) == val {
+					matchCount++
+					if matchIndex == -1 {
+						matchIndex = i
+					}
 				}
 			}
-		}
-		if matchCount == 0 {
-			c.JSON(404, gin.H{"error": "item not found"})
-			return
-		}
-		if matchCount > 1 {
-			c.JSON(400, gin.H{"error": "multiple items match api-key; base-url is required"})
-			return
-		}
-		h.applyConfigChange(c, func(cfg *config.Config) {
-			if matchIndex < len(cfg.GeminiKey) {
-				cfg.GeminiKey = append(cfg.GeminiKey[:matchIndex], cfg.GeminiKey[matchIndex+1:]...)
-				cfg.SanitizeGeminiKeys()
+			if matchCount == 0 {
+				c.JSON(404, gin.H{"error": "item not found"})
+				return
 			}
+			if matchCount > 1 {
+				c.JSON(400, gin.H{"error": "multiple items match api-key; base-url is required"})
+				return
+			}
+			cfg.GeminiKey = append(cfg.GeminiKey[:matchIndex], cfg.GeminiKey[matchIndex+1:]...)
+			cfg.SanitizeGeminiKeys()
 		})
 		return
 	}
@@ -353,32 +341,22 @@ func (h *Handler) PatchClaudeKey(c *gin.Context) {
 		return
 	}
 
-	cur := h.cfg()
-	if cur == nil {
-		c.JSON(404, gin.H{"error": "item not found"})
-		return
-	}
-	targetIndex := -1
-	if body.Index != nil && *body.Index >= 0 && *body.Index < len(cur.ClaudeKey) {
-		targetIndex = *body.Index
-	}
-	if targetIndex == -1 && body.Match != nil {
-		match := strings.TrimSpace(*body.Match)
-		for i := range cur.ClaudeKey {
-			if cur.ClaudeKey[i].APIKey == match {
-				targetIndex = i
-				break
+	h.applyConfigChange(c, func(cfg *config.Config) {
+		idx := -1
+		if body.Index != nil && *body.Index >= 0 && *body.Index < len(cfg.ClaudeKey) {
+			idx = *body.Index
+		}
+		if idx == -1 && body.Match != nil {
+			match := strings.TrimSpace(*body.Match)
+			for i := range cfg.ClaudeKey {
+				if cfg.ClaudeKey[i].APIKey == match {
+					idx = i
+					break
+				}
 			}
 		}
-	}
-	if targetIndex == -1 {
-		c.JSON(404, gin.H{"error": "item not found"})
-		return
-	}
-
-	h.applyConfigChange(c, func(cfg *config.Config) {
-		idx := targetIndex
-		if idx >= len(cfg.ClaudeKey) {
+		if idx == -1 {
+			c.JSON(404, gin.H{"error": "item not found"})
 			return
 		}
 		entry := cfg.ClaudeKey[idx]
@@ -427,29 +405,22 @@ func (h *Handler) DeleteClaudeKey(c *gin.Context) {
 			return
 		}
 
-		cur := h.cfg()
-		if cur == nil {
-			h.applyConfigChange(c, func(cfg *config.Config) {
-				cfg.SanitizeClaudeKeys()
-			})
-			return
-		}
-		matchIndex := -1
-		matchCount := 0
-		for i := range cur.ClaudeKey {
-			if strings.TrimSpace(cur.ClaudeKey[i].APIKey) == val {
-				matchCount++
-				if matchIndex == -1 {
-					matchIndex = i
+		h.applyConfigChange(c, func(cfg *config.Config) {
+			matchIndex := -1
+			matchCount := 0
+			for i := range cfg.ClaudeKey {
+				if strings.TrimSpace(cfg.ClaudeKey[i].APIKey) == val {
+					matchCount++
+					if matchIndex == -1 {
+						matchIndex = i
+					}
 				}
 			}
-		}
-		if matchCount > 1 {
-			c.JSON(400, gin.H{"error": "multiple items match api-key; base-url is required"})
-			return
-		}
-		h.applyConfigChange(c, func(cfg *config.Config) {
-			if matchIndex != -1 && matchIndex < len(cfg.ClaudeKey) {
+			if matchCount > 1 {
+				c.JSON(400, gin.H{"error": "multiple items match api-key; base-url is required"})
+				return
+			}
+			if matchIndex != -1 {
 				cfg.ClaudeKey = append(cfg.ClaudeKey[:matchIndex], cfg.ClaudeKey[matchIndex+1:]...)
 			}
 			cfg.SanitizeClaudeKeys()
@@ -524,32 +495,22 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 		return
 	}
 
-	cur := h.cfg()
-	if cur == nil {
-		c.JSON(404, gin.H{"error": "item not found"})
-		return
-	}
-	targetIndex := -1
-	if body.Index != nil && *body.Index >= 0 && *body.Index < len(cur.OpenAICompatibility) {
-		targetIndex = *body.Index
-	}
-	if targetIndex == -1 && body.Name != nil {
-		match := strings.TrimSpace(*body.Name)
-		for i := range cur.OpenAICompatibility {
-			if cur.OpenAICompatibility[i].Name == match {
-				targetIndex = i
-				break
+	h.applyConfigChange(c, func(cfg *config.Config) {
+		idx := -1
+		if body.Index != nil && *body.Index >= 0 && *body.Index < len(cfg.OpenAICompatibility) {
+			idx = *body.Index
+		}
+		if idx == -1 && body.Name != nil {
+			match := strings.TrimSpace(*body.Name)
+			for i := range cfg.OpenAICompatibility {
+				if cfg.OpenAICompatibility[i].Name == match {
+					idx = i
+					break
+				}
 			}
 		}
-	}
-	if targetIndex == -1 {
-		c.JSON(404, gin.H{"error": "item not found"})
-		return
-	}
-
-	h.applyConfigChange(c, func(cfg *config.Config) {
-		idx := targetIndex
-		if idx >= len(cfg.OpenAICompatibility) {
+		if idx == -1 {
+			c.JSON(404, gin.H{"error": "item not found"})
 			return
 		}
 		entry := cfg.OpenAICompatibility[idx]
@@ -668,34 +629,24 @@ func (h *Handler) PatchVertexCompatKey(c *gin.Context) {
 		return
 	}
 
-	cur := h.cfg()
-	if cur == nil {
-		c.JSON(404, gin.H{"error": "item not found"})
-		return
-	}
-	targetIndex := -1
-	if body.Index != nil && *body.Index >= 0 && *body.Index < len(cur.VertexCompatAPIKey) {
-		targetIndex = *body.Index
-	}
-	if targetIndex == -1 && body.Match != nil {
-		match := strings.TrimSpace(*body.Match)
-		if match != "" {
-			for i := range cur.VertexCompatAPIKey {
-				if cur.VertexCompatAPIKey[i].APIKey == match {
-					targetIndex = i
-					break
+	h.applyConfigChange(c, func(cfg *config.Config) {
+		idx := -1
+		if body.Index != nil && *body.Index >= 0 && *body.Index < len(cfg.VertexCompatAPIKey) {
+			idx = *body.Index
+		}
+		if idx == -1 && body.Match != nil {
+			match := strings.TrimSpace(*body.Match)
+			if match != "" {
+				for i := range cfg.VertexCompatAPIKey {
+					if cfg.VertexCompatAPIKey[i].APIKey == match {
+						idx = i
+						break
+					}
 				}
 			}
 		}
-	}
-	if targetIndex == -1 {
-		c.JSON(404, gin.H{"error": "item not found"})
-		return
-	}
-
-	h.applyConfigChange(c, func(cfg *config.Config) {
-		idx := targetIndex
-		if idx >= len(cfg.VertexCompatAPIKey) {
+		if idx == -1 {
+			c.JSON(404, gin.H{"error": "item not found"})
 			return
 		}
 		entry := cfg.VertexCompatAPIKey[idx]
@@ -756,29 +707,22 @@ func (h *Handler) DeleteVertexCompatKey(c *gin.Context) {
 			return
 		}
 
-		cur := h.cfg()
-		if cur == nil {
-			h.applyConfigChange(c, func(cfg *config.Config) {
-				cfg.SanitizeVertexCompatKeys()
-			})
-			return
-		}
-		matchIndex := -1
-		matchCount := 0
-		for i := range cur.VertexCompatAPIKey {
-			if strings.TrimSpace(cur.VertexCompatAPIKey[i].APIKey) == val {
-				matchCount++
-				if matchIndex == -1 {
-					matchIndex = i
+		h.applyConfigChange(c, func(cfg *config.Config) {
+			matchIndex := -1
+			matchCount := 0
+			for i := range cfg.VertexCompatAPIKey {
+				if strings.TrimSpace(cfg.VertexCompatAPIKey[i].APIKey) == val {
+					matchCount++
+					if matchIndex == -1 {
+						matchIndex = i
+					}
 				}
 			}
-		}
-		if matchCount > 1 {
-			c.JSON(400, gin.H{"error": "multiple items match api-key; base-url is required"})
-			return
-		}
-		h.applyConfigChange(c, func(cfg *config.Config) {
-			if matchIndex != -1 && matchIndex < len(cfg.VertexCompatAPIKey) {
+			if matchCount > 1 {
+				c.JSON(400, gin.H{"error": "multiple items match api-key; base-url is required"})
+				return
+			}
+			if matchIndex != -1 {
 				cfg.VertexCompatAPIKey = append(cfg.VertexCompatAPIKey[:matchIndex], cfg.VertexCompatAPIKey[matchIndex+1:]...)
 			}
 			cfg.SanitizeVertexCompatKeys()
@@ -843,17 +787,16 @@ func (h *Handler) PatchOAuthExcludedModels(c *gin.Context) {
 	}
 	normalized := config.NormalizeExcludedModels(body.Models)
 	if len(normalized) == 0 {
-		// Removal path: 404 short-circuits before clone.
-		cur := h.cfg()
-		if cur == nil || cur.OAuthExcludedModels == nil {
-			c.JSON(404, gin.H{"error": "provider not found"})
-			return
-		}
-		if _, ok := cur.OAuthExcludedModels[provider]; !ok {
-			c.JSON(404, gin.H{"error": "provider not found"})
-			return
-		}
+		// Removal path: resolve and 404 against the cloned snapshot.
 		h.applyConfigChange(c, func(cfg *config.Config) {
+			if cfg.OAuthExcludedModels == nil {
+				c.JSON(404, gin.H{"error": "provider not found"})
+				return
+			}
+			if _, ok := cfg.OAuthExcludedModels[provider]; !ok {
+				c.JSON(404, gin.H{"error": "provider not found"})
+				return
+			}
 			delete(cfg.OAuthExcludedModels, provider)
 			if len(cfg.OAuthExcludedModels) == 0 {
 				cfg.OAuthExcludedModels = nil
@@ -875,16 +818,15 @@ func (h *Handler) DeleteOAuthExcludedModels(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "missing provider"})
 		return
 	}
-	cur := h.cfg()
-	if cur == nil || cur.OAuthExcludedModels == nil {
-		c.JSON(404, gin.H{"error": "provider not found"})
-		return
-	}
-	if _, ok := cur.OAuthExcludedModels[provider]; !ok {
-		c.JSON(404, gin.H{"error": "provider not found"})
-		return
-	}
 	h.applyConfigChange(c, func(cfg *config.Config) {
+		if cfg.OAuthExcludedModels == nil {
+			c.JSON(404, gin.H{"error": "provider not found"})
+			return
+		}
+		if _, ok := cfg.OAuthExcludedModels[provider]; !ok {
+			c.JSON(404, gin.H{"error": "provider not found"})
+			return
+		}
 		delete(cfg.OAuthExcludedModels, provider)
 		if len(cfg.OAuthExcludedModels) == 0 {
 			cfg.OAuthExcludedModels = nil
@@ -944,16 +886,15 @@ func (h *Handler) PatchOAuthModelAlias(c *gin.Context) {
 	normalizedMap := sanitizedOAuthModelAlias(map[string][]config.OAuthModelAlias{channel: body.Aliases})
 	normalized := normalizedMap[channel]
 	if len(normalized) == 0 {
-		cur := h.cfg()
-		if cur == nil || cur.OAuthModelAlias == nil {
-			c.JSON(404, gin.H{"error": "channel not found"})
-			return
-		}
-		if _, ok := cur.OAuthModelAlias[channel]; !ok {
-			c.JSON(404, gin.H{"error": "channel not found"})
-			return
-		}
 		h.applyConfigChange(c, func(cfg *config.Config) {
+			if cfg.OAuthModelAlias == nil {
+				c.JSON(404, gin.H{"error": "channel not found"})
+				return
+			}
+			if _, ok := cfg.OAuthModelAlias[channel]; !ok {
+				c.JSON(404, gin.H{"error": "channel not found"})
+				return
+			}
 			delete(cfg.OAuthModelAlias, channel)
 			if len(cfg.OAuthModelAlias) == 0 {
 				cfg.OAuthModelAlias = nil
@@ -978,16 +919,15 @@ func (h *Handler) DeleteOAuthModelAlias(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "missing channel"})
 		return
 	}
-	cur := h.cfg()
-	if cur == nil || cur.OAuthModelAlias == nil {
-		c.JSON(404, gin.H{"error": "channel not found"})
-		return
-	}
-	if _, ok := cur.OAuthModelAlias[channel]; !ok {
-		c.JSON(404, gin.H{"error": "channel not found"})
-		return
-	}
 	h.applyConfigChange(c, func(cfg *config.Config) {
+		if cfg.OAuthModelAlias == nil {
+			c.JSON(404, gin.H{"error": "channel not found"})
+			return
+		}
+		if _, ok := cfg.OAuthModelAlias[channel]; !ok {
+			c.JSON(404, gin.H{"error": "channel not found"})
+			return
+		}
 		delete(cfg.OAuthModelAlias, channel)
 		if len(cfg.OAuthModelAlias) == 0 {
 			cfg.OAuthModelAlias = nil
@@ -1051,32 +991,22 @@ func (h *Handler) PatchCodexKey(c *gin.Context) {
 		return
 	}
 
-	cur := h.cfg()
-	if cur == nil {
-		c.JSON(404, gin.H{"error": "item not found"})
-		return
-	}
-	targetIndex := -1
-	if body.Index != nil && *body.Index >= 0 && *body.Index < len(cur.CodexKey) {
-		targetIndex = *body.Index
-	}
-	if targetIndex == -1 && body.Match != nil {
-		match := strings.TrimSpace(*body.Match)
-		for i := range cur.CodexKey {
-			if cur.CodexKey[i].APIKey == match {
-				targetIndex = i
-				break
+	h.applyConfigChange(c, func(cfg *config.Config) {
+		idx := -1
+		if body.Index != nil && *body.Index >= 0 && *body.Index < len(cfg.CodexKey) {
+			idx = *body.Index
+		}
+		if idx == -1 && body.Match != nil {
+			match := strings.TrimSpace(*body.Match)
+			for i := range cfg.CodexKey {
+				if cfg.CodexKey[i].APIKey == match {
+					idx = i
+					break
+				}
 			}
 		}
-	}
-	if targetIndex == -1 {
-		c.JSON(404, gin.H{"error": "item not found"})
-		return
-	}
-
-	h.applyConfigChange(c, func(cfg *config.Config) {
-		idx := targetIndex
-		if idx >= len(cfg.CodexKey) {
+		if idx == -1 {
+			c.JSON(404, gin.H{"error": "item not found"})
 			return
 		}
 		entry := cfg.CodexKey[idx]
@@ -1131,29 +1061,22 @@ func (h *Handler) DeleteCodexKey(c *gin.Context) {
 			return
 		}
 
-		cur := h.cfg()
-		if cur == nil {
-			h.applyConfigChange(c, func(cfg *config.Config) {
-				cfg.SanitizeCodexKeys()
-			})
-			return
-		}
-		matchIndex := -1
-		matchCount := 0
-		for i := range cur.CodexKey {
-			if strings.TrimSpace(cur.CodexKey[i].APIKey) == val {
-				matchCount++
-				if matchIndex == -1 {
-					matchIndex = i
+		h.applyConfigChange(c, func(cfg *config.Config) {
+			matchIndex := -1
+			matchCount := 0
+			for i := range cfg.CodexKey {
+				if strings.TrimSpace(cfg.CodexKey[i].APIKey) == val {
+					matchCount++
+					if matchIndex == -1 {
+						matchIndex = i
+					}
 				}
 			}
-		}
-		if matchCount > 1 {
-			c.JSON(400, gin.H{"error": "multiple items match api-key; base-url is required"})
-			return
-		}
-		h.applyConfigChange(c, func(cfg *config.Config) {
-			if matchIndex != -1 && matchIndex < len(cfg.CodexKey) {
+			if matchCount > 1 {
+				c.JSON(400, gin.H{"error": "multiple items match api-key; base-url is required"})
+				return
+			}
+			if matchIndex != -1 {
 				cfg.CodexKey = append(cfg.CodexKey[:matchIndex], cfg.CodexKey[matchIndex+1:]...)
 			}
 			cfg.SanitizeCodexKeys()

@@ -189,7 +189,8 @@ func TestAuthByIndexDistinguishesSharedAPIKeysAcrossProviders(t *testing.T) {
 		t.Fatalf("shared api key produced duplicate auth_index %q", geminiIndex)
 	}
 
-	h := &Handler{authManager: manager}
+	h := &Handler{}
+	h.authManagerPtr.Store(manager)
 
 	gotGemini := h.authByIndex(geminiIndex)
 	if gotGemini == nil {

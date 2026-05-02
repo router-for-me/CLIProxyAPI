@@ -49,7 +49,7 @@ func (h *Handler) GetAPIKeyUsage(c *gin.Context) {
 	}
 
 	h.mu.Lock()
-	manager := h.authManager
+	manager := h.authManager()
 	h.mu.Unlock()
 	if manager == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
