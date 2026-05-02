@@ -333,6 +333,64 @@ func (m *Manager) ReconcileRegistryModelStates(ctx context.Context, authID strin
 	}
 }
 
+// PruneExpiredAvailability clears quota warning state after its cooldown window has elapsed.
+// This keeps management/API status views aligned with scheduler behavior, which already
+// treats expired cooldown entries as selectable again.
+func (m *Manager) PruneExpiredAvailability(ctx context.Context, now time.Time) int {
+	if m == nil {
+		return 0
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+
+	type prunedAuth struct {
+		snapshot *Auth
+		models   []string
+	}
+	pruned := make([]prunedAuth, 0)
+
+	m.mu.Lock()
+	for _, auth := range m.auths {
+		changed, models := pruneExpiredAvailability(auth, now)
+		if !changed {
+			continue
+		}
+		auth.UpdatedAt = now
+		if errPersist := m.persist(ctx, auth); errPersist != nil {
+			logEntryWithRequestID(ctx).WithField("auth_id", auth.ID).Warnf("failed to persist auth changes during expired availability pruning: %v", errPersist)
+		}
+		pruned = append(pruned, prunedAuth{
+			snapshot: auth.Clone(),
+			models:   models,
+		})
+	}
+	m.mu.Unlock()
+
+	if len(pruned) == 0 {
+		return 0
+	}
+
+	reg := registry.GetGlobalRegistry()
+	for _, item := range pruned {
+		if item.snapshot == nil {
+			continue
+		}
+		if m.scheduler != nil {
+			m.scheduler.upsertAuth(item.snapshot)
+		}
+		for _, model := range item.models {
+			if strings.TrimSpace(model) == "" {
+				continue
+			}
+			reg.ClearModelQuotaExceeded(item.snapshot.ID, model)
+			reg.ResumeClientModel(item.snapshot.ID, model)
+		}
+	}
+
+	return len(pruned)
+}
+
 func (m *Manager) SetSelector(selector Selector) {
 	if m == nil {
 		return
@@ -2193,6 +2251,70 @@ func resetModelState(state *ModelState, now time.Time) {
 	state.LastError = nil
 	state.Quota = QuotaState{}
 	state.UpdatedAt = now
+}
+
+func pruneExpiredAvailability(auth *Auth, now time.Time) (bool, []string) {
+	if auth == nil || auth.Disabled || auth.Status == StatusDisabled {
+		return false, nil
+	}
+
+	changed := false
+	prunedModels := make([]string, 0)
+	if len(auth.ModelStates) > 0 {
+		for model, state := range auth.ModelStates {
+			if !pruneExpiredModelAvailability(state, now) {
+				continue
+			}
+			changed = true
+			if strings.TrimSpace(model) != "" {
+				prunedModels = append(prunedModels, model)
+			}
+		}
+		if changed {
+			updateAggregatedAvailability(auth, now)
+			if !hasModelError(auth, now) {
+				clearAuthStateOnSuccess(auth, now)
+			}
+		}
+	}
+
+	if expiredQuotaWarning(auth.Status, auth.Unavailable, auth.NextRetryAfter, auth.Quota, auth.LastError, auth.StatusMessage, now) && !hasModelError(auth, now) {
+		clearAuthStateOnSuccess(auth, now)
+		changed = true
+	}
+
+	return changed, prunedModels
+}
+
+func pruneExpiredModelAvailability(state *ModelState, now time.Time) bool {
+	if state == nil {
+		return false
+	}
+	if !expiredQuotaWarning(state.Status, state.Unavailable, state.NextRetryAfter, state.Quota, state.LastError, state.StatusMessage, now) {
+		return false
+	}
+	resetModelState(state, now)
+	return true
+}
+
+func expiredQuotaWarning(status Status, unavailable bool, nextRetryAfter time.Time, quota QuotaState, lastErr *Error, statusMessage string, now time.Time) bool {
+	if !nextRetryAfter.IsZero() && nextRetryAfter.After(now) {
+		return false
+	}
+	if !quota.NextRecoverAt.IsZero() && quota.NextRecoverAt.After(now) {
+		return false
+	}
+	if quota.Exceeded || strings.EqualFold(strings.TrimSpace(quota.Reason), "quota") {
+		return true
+	}
+	if statusCodeFromResult(lastErr) == http.StatusTooManyRequests {
+		return true
+	}
+	if status != StatusError && !unavailable {
+		return false
+	}
+	lower := strings.ToLower(strings.TrimSpace(statusMessage))
+	return strings.Contains(lower, "usage_limit_reached") || strings.Contains(lower, "quota")
 }
 
 func modelStateIsClean(state *ModelState) bool {

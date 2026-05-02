@@ -244,6 +244,7 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 		h.listAuthFilesFromDisk(c)
 		return
 	}
+	h.authManager.PruneExpiredAvailability(c.Request.Context(), time.Now())
 	auths := h.authManager.List()
 	files := make([]gin.H, 0, len(auths))
 	for _, auth := range auths {
