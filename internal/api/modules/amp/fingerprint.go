@@ -20,6 +20,20 @@ const (
 	TitlingToolName = "set_title"
 )
 
+// Hardcoded system-prompt prefixes used by the Amp client binary to invoke
+// specific features. These literals appear as JS string constants in the
+// bundled Amp executable, so they are stable per Amp release and only
+// change when Amp itself is upgraded. Keep prefixes long enough to avoid
+// collisions but short enough to tolerate trailing whitespace/newlines.
+const (
+	OraclePromptPrefix  = "you are the oracle - an expert ai advisor"
+	SearchPromptPrefix  = "you are a fast, parallel code search agent."
+	LookAtPromptPrefix  = "you are an ai assistant that analyzes files for a software engineer."
+	ReviewPromptPrefix  = "you are an expert software engineer reviewing code changes."
+	TitlingPromptPrefix = "you are an assistant that generates short, descriptive titles"
+	HandoffPromptPrefix = "you are an assistant tasked with creating a handoff context"
+)
+
 // RequestFingerprint captures the per-request features a mapping condition
 // can match against. All fields are optional; absent fields cannot match.
 type RequestFingerprint struct {
@@ -32,18 +46,27 @@ type RequestFingerprint struct {
 	// LastUserText is the trimmed text content of the final user-role message,
 	// used by AmpMappingCondition.UserSuffix.
 	LastUserText string
+
+	// SystemText is the concatenated text of the request's system /
+	// systemInstruction / instructions field. Used by SystemPrefix matching
+	// and by Feature() to recognize features whose system prompts are
+	// hardcoded in the Amp client binary.
+	SystemText string
+
+	// HasImageOutput indicates the request asks the upstream model to emit
+	// an image (Gemini generationConfig.responseModalities contains
+	// "IMAGE"). Used to identify the Amp painter feature.
+	HasImageOutput bool
 }
 
 // Feature returns the canonical Amp feature alias inferred from the
 // fingerprint, or an empty string if no high-level feature can be deduced.
 //
-// Inferred via forced tool name (the most reliable signal Amp emits):
-//   - "handoff": Amp thread handoff. Tool: create_handoff_context.
-//   - "titling": Amp thread title generation. Tool: set_title.
-//
-// Other Amp features (search subagent, look-at, oracle, painter, review,
-// ...) do not force a unique tool. Match those at the configuration level
-// using ToolChoice / UserSuffix when their fingerprint is known.
+// Detection order (first match wins):
+//  1. Forced tool name (most reliable; emitted by Amp's tool_choice).
+//  2. responseModalities=IMAGE (painter).
+//  3. System-prompt prefix (hardcoded literals in the Amp binary).
+//  4. User-suffix heuristic (handoff fallback).
 func (f RequestFingerprint) Feature() string {
 	switch {
 	case strings.EqualFold(f.ToolChoice, HandoffToolName):
@@ -51,6 +74,29 @@ func (f RequestFingerprint) Feature() string {
 	case strings.EqualFold(f.ToolChoice, TitlingToolName):
 		return "titling"
 	}
+
+	if f.HasImageOutput {
+		return "painter"
+	}
+
+	sys := strings.ToLower(strings.TrimSpace(f.SystemText))
+	if sys != "" {
+		switch {
+		case strings.HasPrefix(sys, OraclePromptPrefix):
+			return "oracle"
+		case strings.HasPrefix(sys, SearchPromptPrefix):
+			return "search"
+		case strings.HasPrefix(sys, LookAtPromptPrefix):
+			return "look_at"
+		case strings.HasPrefix(sys, ReviewPromptPrefix):
+			return "review"
+		case strings.HasPrefix(sys, TitlingPromptPrefix):
+			return "titling"
+		case strings.HasPrefix(sys, HandoffPromptPrefix):
+			return "handoff"
+		}
+	}
+
 	// User-suffix based detection (cheap, anchored on Amp's actual prompt).
 	lower := strings.ToLower(f.LastUserText)
 	if strings.HasSuffix(lower, "use the create_handoff_context tool to extract relevant information and files.") {
@@ -69,8 +115,10 @@ func ExtractFingerprint(body []byte) RequestFingerprint {
 	}
 
 	fp := RequestFingerprint{
-		ToolChoice:   extractToolChoiceName(body),
-		LastUserText: extractLastUserText(body),
+		ToolChoice:     extractToolChoiceName(body),
+		LastUserText:   extractLastUserText(body),
+		SystemText:     extractSystemText(body),
+		HasImageOutput: extractHasImageOutput(body),
 	}
 	return fp
 }
@@ -115,6 +163,17 @@ func extractLastUserText(body []byte) string {
 			return strings.TrimSpace(messageContentText(m.Get("content")))
 		}
 	}
+	// OpenAI Responses: input[] with role+content[].text/input_text.
+	if inp := gjson.GetBytes(body, "input"); inp.IsArray() {
+		arr := inp.Array()
+		for i := len(arr) - 1; i >= 0; i-- {
+			m := arr[i]
+			if !strings.EqualFold(m.Get("role").String(), "user") {
+				continue
+			}
+			return strings.TrimSpace(messageContentText(m.Get("content")))
+		}
+	}
 	// Gemini: contents[] with role+parts[].text
 	if cts := gjson.GetBytes(body, "contents"); cts.IsArray() {
 		arr := cts.Array()
@@ -134,6 +193,67 @@ func extractLastUserText(body []byte) string {
 		}
 	}
 	return ""
+}
+
+// extractSystemText returns the textual system / systemInstruction /
+// instructions content of the request, concatenating multiple parts in
+// order. Anthropic and OpenAI accept either a string or an array of typed
+// parts; Gemini wraps it in systemInstruction.parts[].text. OpenAI
+// Responses additionally allows a system-role entry inside input[].
+func extractSystemText(body []byte) string {
+	// Anthropic / OpenAI Chat: top-level "system" (string or array).
+	if v := gjson.GetBytes(body, "system"); v.Exists() {
+		if s := strings.TrimSpace(messageContentText(v)); s != "" {
+			return s
+		}
+	}
+	// OpenAI Responses: top-level "instructions" (string).
+	if v := gjson.GetBytes(body, "instructions"); v.Exists() && v.Type == gjson.String {
+		if s := strings.TrimSpace(v.String()); s != "" {
+			return s
+		}
+	}
+	// OpenAI Responses: input[] entries with role=system/developer.
+	if inp := gjson.GetBytes(body, "input"); inp.IsArray() {
+		for _, m := range inp.Array() {
+			role := strings.ToLower(m.Get("role").String())
+			if role != "system" && role != "developer" {
+				continue
+			}
+			if s := strings.TrimSpace(messageContentText(m.Get("content"))); s != "" {
+				return s
+			}
+		}
+	}
+	// Gemini: systemInstruction.parts[].text
+	if si := gjson.GetBytes(body, "systemInstruction"); si.Exists() {
+		var b strings.Builder
+		for _, p := range si.Get("parts").Array() {
+			if t := p.Get("text"); t.Exists() {
+				b.WriteString(t.String())
+			}
+		}
+		if s := strings.TrimSpace(b.String()); s != "" {
+			return s
+		}
+	}
+	return ""
+}
+
+// extractHasImageOutput reports whether the request asks Gemini to emit
+// an image (used by Amp's painter feature). Only Gemini exposes this hint
+// via generationConfig.responseModalities.
+func extractHasImageOutput(body []byte) bool {
+	mods := gjson.GetBytes(body, "generationConfig.responseModalities")
+	if !mods.IsArray() {
+		return false
+	}
+	for _, m := range mods.Array() {
+		if strings.EqualFold(m.String(), "IMAGE") {
+			return true
+		}
+	}
+	return false
 }
 
 // messageContentText extracts text from an Anthropic/OpenAI message.content
@@ -172,11 +292,13 @@ func ConditionMatches(cond *config.AmpMappingCondition, fp RequestFingerprint) b
 			return false
 		}
 	}
+	if prefix := strings.TrimSpace(cond.SystemPrefix); prefix != "" {
+		if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(fp.SystemText)), strings.ToLower(prefix)) {
+			return false
+		}
+	}
 	if feature := strings.TrimSpace(cond.Feature); feature != "" {
 		want := strings.ToLower(feature)
-		if want == "look_at" {
-			want = "search"
-		}
 		got := fp.Feature()
 		if got == "" || got != want {
 			return false

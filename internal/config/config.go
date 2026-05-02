@@ -282,11 +282,17 @@ type AmpModelMapping struct {
 // non-empty fields must match for the condition to be satisfied (logical AND).
 type AmpMappingCondition struct {
 	// Feature is a high-level semantic alias for a known Amp feature.
-	// Inferred via forced tool name. Currently recognized values:
+	// Inferred via forced tool name or hardcoded system-prompt prefixes
+	// observed in the Amp client binary. Currently recognized values:
 	//   - "handoff" (Amp thread handoff; tool create_handoff_context)
 	//   - "titling" (Amp thread title generation; tool set_title)
-	// Other Amp features should be matched via ToolChoice or UserSuffix
-	// when their fingerprint is known. Case-insensitive.
+	//   - "oracle"  (Amp Oracle advisor; gpt-5.4 via Responses API)
+	//   - "search"  (Amp finder/search subagent; gemini-3-flash)
+	//   - "look_at" (Amp look_at file analyzer; gemini-3-flash)
+	//   - "review"  (Amp code review summary; gemini-3-flash)
+	//   - "painter" (Amp painter image generation; gemini-3-pro-image)
+	// Other Amp features should be matched via ToolChoice / UserSuffix /
+	// SystemPrefix when their fingerprint is known. Case-insensitive.
 	Feature string `yaml:"feature,omitempty" json:"feature,omitempty"`
 
 	// ToolChoice matches when the request forces a specific tool by name via
@@ -298,6 +304,12 @@ type AmpMappingCondition struct {
 	// substring (case-insensitive, after trimming trailing whitespace).
 	// Useful for distinguishing prompts that share a model.
 	UserSuffix string `yaml:"user_suffix,omitempty" json:"user_suffix,omitempty"`
+
+	// SystemPrefix matches when the request's system / systemInstruction
+	// prompt starts with the given substring (case-insensitive, after
+	// trimming leading whitespace). Useful for identifying Amp features
+	// whose system prompts are hardcoded in the client binary.
+	SystemPrefix string `yaml:"system_prefix,omitempty" json:"system_prefix,omitempty"`
 }
 
 // AmpCode groups Amp CLI integration settings including upstream routing,

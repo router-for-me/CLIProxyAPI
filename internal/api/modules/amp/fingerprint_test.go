@@ -71,8 +71,109 @@ func TestExtractFingerprint_Empty(t *testing.T) {
 	}
 }
 
+// TestExtractFingerprint_Oracle uses a real OpenAI Responses payload
+// captured from `amp -x "use the oracle tool ..."`. Oracle has no
+// tool_choice; it is identified by its hardcoded system prompt.
+func TestExtractFingerprint_Oracle(t *testing.T) {
+	body := []byte(`{
+		"model":"gpt-5.4",
+		"input":[
+			{"role":"system","content":"You are the Oracle - an expert AI advisor with advanced reasoning capabilities.\n\nYour role is to provide high-quality technical guidance, code reviews, architectural advice, and strategic planning for software engineering tasks."},
+			{"role":"user","content":[{"type":"input_text","text":"Task: review fingerprint.go"}]}
+		],
+		"reasoning":{"effort":"high","summary":"auto"}
+	}`)
+	fp := ExtractFingerprint(body)
+	if fp.ToolChoice != "" {
+		t.Fatalf("ToolChoice = %q, want empty", fp.ToolChoice)
+	}
+	if got := fp.Feature(); got != "oracle" {
+		t.Fatalf("Feature = %q, want oracle", got)
+	}
+}
+
+// TestExtractFingerprint_SearchSubagent uses the real Gemini payload
+// captured from the Amp finder (search subagent) tool. Identified by
+// its hardcoded systemInstruction prefix.
+func TestExtractFingerprint_SearchSubagent(t *testing.T) {
+	body := []byte(`{
+		"contents":[{"role":"user","parts":[{"text":"Find OAuth callback handlers."}]}],
+		"systemInstruction":{"parts":[{"text":"You are a fast, parallel code search agent.\n\n## Task\nFind files and line ranges relevant to the user's query (provided in the first message)."}]},
+		"tools":[{"functionDeclarations":[{"name":"glob"},{"name":"Grep"},{"name":"Read"}]}]
+	}`)
+	fp := ExtractFingerprint(body)
+	if got := fp.Feature(); got != "search" {
+		t.Fatalf("Feature = %q, want search", got)
+	}
+}
+
+// TestExtractFingerprint_LookAt uses the real Gemini payload captured
+// from the Amp look_at tool. Identified by its hardcoded
+// systemInstruction prefix.
+func TestExtractFingerprint_LookAt(t *testing.T) {
+	body := []byte(`{
+		"contents":[{"role":"user","parts":[
+			{"inlineData":{"mimeType":"image/png","data":"AA=="}},
+			{"text":"User asked for a brief description of the image.\n\nAnalyze this file with the following objective:\n\nBriefly describe the contents of the image."}
+		]}],
+		"systemInstruction":{"parts":[{"text":"You are an AI assistant that analyzes files for a software engineer.\n\n# Core Principles\n\n- Be concise and direct."}]}
+	}`)
+	fp := ExtractFingerprint(body)
+	if got := fp.Feature(); got != "look_at" {
+		t.Fatalf("Feature = %q, want look_at", got)
+	}
+}
+
+// TestExtractFingerprint_Review uses the Amp review systemInstruction
+// (compiled into the Amp binary at amp.review).
+func TestExtractFingerprint_Review(t *testing.T) {
+	body := []byte(`{
+		"contents":[{"role":"user","parts":[{"text":"diff..."}]}],
+		"systemInstruction":{"parts":[{"text":"You are an expert software engineer reviewing code changes."}]}
+	}`)
+	fp := ExtractFingerprint(body)
+	if got := fp.Feature(); got != "review" {
+		t.Fatalf("Feature = %q, want review", got)
+	}
+}
+
+// TestExtractFingerprint_Painter uses the real Gemini image-generation
+// payload captured from the Amp painter tool. Identified by
+// generationConfig.responseModalities containing "IMAGE".
+func TestExtractFingerprint_Painter(t *testing.T) {
+	body := []byte(`{
+		"contents":[{"role":"user","parts":[{"text":"A small solid red circle centered on a plain white background."}]}],
+		"generationConfig":{"responseModalities":["TEXT","IMAGE"],"imageConfig":{"imageSize":"1K"}}
+	}`)
+	fp := ExtractFingerprint(body)
+	if !fp.HasImageOutput {
+		t.Fatalf("HasImageOutput = false, want true")
+	}
+	if got := fp.Feature(); got != "painter" {
+		t.Fatalf("Feature = %q, want painter", got)
+	}
+}
+
+// TestExtractFingerprint_SystemPrefixCustom verifies users can match an
+// arbitrary system prompt prefix that is not encoded in Feature().
+func TestExtractFingerprint_SystemPrefixCustom(t *testing.T) {
+	body := []byte(`{
+		"contents":[{"role":"user","parts":[{"text":"hi"}]}],
+		"systemInstruction":{"parts":[{"text":"You are an expert senior engineer with deep knowledge of software engineering best practices."}]}
+	}`)
+	fp := ExtractFingerprint(body)
+	cond := &config.AmpMappingCondition{SystemPrefix: "you are an expert senior engineer"}
+	if !ConditionMatches(cond, fp) {
+		t.Fatalf("expected SystemPrefix to match")
+	}
+}
+
 func TestConditionMatches(t *testing.T) {
-	fp := RequestFingerprint{ToolChoice: "create_handoff_context", LastUserText: "blah\nUse the create_handoff_context tool to extract relevant information and files."}
+	fp := RequestFingerprint{
+		ToolChoice:   "create_handoff_context",
+		LastUserText: "blah\nUse the create_handoff_context tool to extract relevant information and files.",
+		SystemText:   "You are an expert senior engineer with deep knowledge.",
+	}
 	cases := []struct {
 		name string
 		cond *config.AmpMappingCondition
@@ -85,6 +186,8 @@ func TestConditionMatches(t *testing.T) {
 		{"tool_choice no match", &config.AmpMappingCondition{ToolChoice: "other"}, false},
 		{"user_suffix match", &config.AmpMappingCondition{UserSuffix: "extract relevant information and files."}, true},
 		{"user_suffix no match", &config.AmpMappingCondition{UserSuffix: "nope"}, false},
+		{"system_prefix match", &config.AmpMappingCondition{SystemPrefix: "you are an expert senior engineer"}, true},
+		{"system_prefix no match", &config.AmpMappingCondition{SystemPrefix: "you are batman"}, false},
 		{"AND match", &config.AmpMappingCondition{Feature: "handoff", ToolChoice: "create_handoff_context"}, true},
 		{"AND fail", &config.AmpMappingCondition{Feature: "handoff", ToolChoice: "x"}, false},
 	}

@@ -331,7 +331,8 @@ func sameAmpMappingCondition(a, b *config.AmpMappingCondition) bool {
 	}
 	return strings.TrimSpace(a.Feature) == strings.TrimSpace(b.Feature) &&
 		strings.TrimSpace(a.ToolChoice) == strings.TrimSpace(b.ToolChoice) &&
-		strings.TrimSpace(a.UserSuffix) == strings.TrimSpace(b.UserSuffix)
+		strings.TrimSpace(a.UserSuffix) == strings.TrimSpace(b.UserSuffix) &&
+		strings.TrimSpace(a.SystemPrefix) == strings.TrimSpace(b.SystemPrefix)
 }
 
 // cloneAmpCodeSettings returns a deep copy of an AmpCode value suitable for
