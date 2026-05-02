@@ -212,6 +212,10 @@ Never stop coding. Smart routing to FREE & low-cost AI models with automatic fal
 
 OmniRoute is an AI gateway for multi-provider LLMs: an OpenAI-compatible endpoint with smart routing, load balancing, retries, and fallbacks. Add policies, rate limits, caching, and observability for reliable, cost-aware inference.
 
+### [daishuge/CLIProxyAPI](https://github.com/daishuge/CLIProxyAPI)
+
+A public CLIProxyAPI fork that keeps upstream-compatible usage while restoring built-in usage statistics, adding cache hit rate, first-byte latency, TPS tracking, a daishuge/cpa management panel source, and Docker-oriented self-hosted installation docs.
+
 > [!NOTE]  
 > If you have developed a port of CLIProxyAPI or a project inspired by it, please open a PR to add it to this list.
 
