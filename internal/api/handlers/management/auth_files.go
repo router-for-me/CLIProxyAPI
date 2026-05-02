@@ -333,6 +333,12 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context) {
 				emailValue := gjson.GetBytes(data, "email").String()
 				fileData["type"] = typeValue
 				fileData["email"] = emailValue
+				if strings.EqualFold(strings.TrimSpace(typeValue), "codex") {
+					if claims := extractCodexIDTokenClaimsFromRaw(gjson.GetBytes(data, "id_token").String()); claims != nil {
+						fileData["id_token"] = claims
+						applyCodexSubscriptionFields(fileData, claims)
+					}
+				}
 				if pv := gjson.GetBytes(data, "priority"); pv.Exists() {
 					switch pv.Type {
 					case gjson.Number:
@@ -433,6 +439,7 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 	}
 	if claims := extractCodexIDTokenClaims(auth); claims != nil {
 		entry["id_token"] = claims
+		applyCodexSubscriptionFields(entry, claims)
 	}
 	// Expose priority from Attributes (set by synthesizer from JSON "priority" field).
 	// Fall back to Metadata for auths registered via UploadAuthFile (no synthesizer).
@@ -479,6 +486,10 @@ func extractCodexIDTokenClaims(auth *coreauth.Auth) gin.H {
 	if !ok {
 		return nil
 	}
+	return extractCodexIDTokenClaimsFromRaw(idTokenRaw)
+}
+
+func extractCodexIDTokenClaimsFromRaw(idTokenRaw string) gin.H {
 	idToken := strings.TrimSpace(idTokenRaw)
 	if idToken == "" {
 		return nil
@@ -495,17 +506,103 @@ func extractCodexIDTokenClaims(auth *coreauth.Auth) gin.H {
 	if v := strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType); v != "" {
 		result["plan_type"] = v
 	}
-	if v := claims.CodexAuthInfo.ChatgptSubscriptionActiveStart; v != nil {
+	if v, ok := codexSubscriptionTimestampValue(claims.CodexAuthInfo.ChatgptSubscriptionActiveStart); ok {
 		result["chatgpt_subscription_active_start"] = v
 	}
-	if v := claims.CodexAuthInfo.ChatgptSubscriptionActiveUntil; v != nil {
+	if v, ok := codexSubscriptionTimestampValue(claims.CodexAuthInfo.ChatgptSubscriptionActiveUntil); ok {
 		result["chatgpt_subscription_active_until"] = v
+	}
+	if v := claims.CodexAuthInfo.ChatgptSubscriptionLastChecked; !v.IsZero() {
+		result["chatgpt_subscription_last_checked"] = v.UTC().Format(time.RFC3339)
 	}
 
 	if len(result) == 0 {
 		return nil
 	}
 	return result
+}
+
+func codexSubscriptionTimestampValue(v any) (string, bool) {
+	switch value := v.(type) {
+	case nil:
+		return "", false
+	case time.Time:
+		if value.IsZero() {
+			return "", false
+		}
+		return value.UTC().Format(time.RFC3339), true
+	case string:
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			return "", false
+		}
+		if numeric, err := strconv.ParseFloat(trimmed, 64); err == nil {
+			return codexUnixTimestampString(numeric)
+		}
+		if ts, err := time.Parse(time.RFC3339, trimmed); err == nil {
+			return ts.UTC().Format(time.RFC3339), true
+		}
+		if ts, err := time.Parse(time.RFC3339Nano, trimmed); err == nil {
+			return ts.UTC().Format(time.RFC3339), true
+		}
+		return trimmed, true
+	case float64:
+		return codexUnixTimestampString(value)
+	case float32:
+		return codexUnixTimestampString(float64(value))
+	case int:
+		return codexUnixTimestampString(float64(value))
+	case int64:
+		return codexUnixTimestampString(float64(value))
+	case int32:
+		return codexUnixTimestampString(float64(value))
+	case json.Number:
+		numeric, err := value.Float64()
+		if err != nil {
+			return "", false
+		}
+		return codexUnixTimestampString(numeric)
+	default:
+		return "", false
+	}
+}
+
+func codexUnixTimestampString(value float64) (string, bool) {
+	if value <= 0 {
+		return "", false
+	}
+	if value > 100000000000 {
+		value /= 1000
+	}
+	seconds := int64(value)
+	nanos := int64((value - float64(seconds)) * 1e9)
+	return time.Unix(seconds, nanos).UTC().Format(time.RFC3339), true
+}
+
+func applyCodexSubscriptionFields(entry gin.H, claims gin.H) {
+	if entry == nil || claims == nil {
+		return
+	}
+	if v, ok := claims["plan_type"]; ok {
+		entry["plan_type"] = v
+	}
+
+	subscription := gin.H{}
+	if v, ok := claims["chatgpt_subscription_active_start"]; ok {
+		entry["subscription_active_start"] = v
+		subscription["active_start"] = v
+	}
+	if v, ok := claims["chatgpt_subscription_active_until"]; ok {
+		entry["subscription_active_until"] = v
+		subscription["active_until"] = v
+	}
+	if v, ok := claims["chatgpt_subscription_last_checked"]; ok {
+		entry["subscription_last_checked"] = v
+		subscription["last_checked"] = v
+	}
+	if len(subscription) > 0 {
+		entry["subscription"] = subscription
+	}
 }
 
 func authEmail(auth *coreauth.Auth) string {
