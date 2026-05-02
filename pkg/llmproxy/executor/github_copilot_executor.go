@@ -1238,3 +1238,16 @@ func translateGitHubCopilotResponsesStreamToClaude(line []byte, param *any) [][]
 
 // CloseExecutionSession implements ProviderExecutor.
 func (e *GitHubCopilotExecutor) CloseExecutionSession(sessionID string) {}
+
+// isGitHubCopilotResponsesBuiltinTool checks if a tool type is a built-in GitHub Copilot tool
+// that should be filtered out from user-provided tools.
+func isGitHubCopilotResponsesBuiltinTool(toolType string) bool {
+	// These are built-in Copilot tools that are not user-definable
+	builtinTools := map[string]bool{
+		"web_search":  true,
+		"web_page":    true,
+		"code_search": true,
+		"file_search": true,
+	}
+	return builtinTools[toolType]
+}

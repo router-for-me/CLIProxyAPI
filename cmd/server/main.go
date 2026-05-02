@@ -25,6 +25,7 @@ import (
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/logging"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/managementasset"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/misc"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/registry"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/store"
 	_ "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/translator"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/tui"

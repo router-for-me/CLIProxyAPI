@@ -150,9 +150,9 @@ func init() {
 		constant.Codex,
 		codexclaude.ConvertClaudeRequestToCodex,
 		interfaces.TranslateResponse{
-			Stream:     codexclaude.ConvertCodexResponseToClaude,
-			NonStream:  codexclaude.ConvertCodexResponseToClaudeNonStream,
-			TokenCount: codexclaude.ClaudeTokenCount,
+			Stream:     ToResponseStreamTransform(codexclaude.ConvertCodexResponseToClaude),
+			NonStream:  ToResponseNonStreamTransformFromBytes(codexclaude.ConvertCodexResponseToClaudeNonStream),
+			TokenCount: ToResponseTokenCountTransform(codexclaude.ClaudeTokenCount),
 		},
 	)
 
@@ -174,9 +174,9 @@ func init() {
 		constant.Codex,
 		codexgeminicli.ConvertGeminiCLIRequestToCodex,
 		interfaces.TranslateResponse{
-			Stream:     codexgeminicli.ConvertCodexResponseToGeminiCLI,
-			NonStream:  codexgeminicli.ConvertCodexResponseToGeminiCLINonStream,
-			TokenCount: codexgeminicli.GeminiCLITokenCount,
+			Stream:     ToResponseStreamTransform(codexgeminicli.ConvertCodexResponseToGeminiCLI),
+			NonStream:  ToResponseNonStreamTransform(codexgeminicli.ConvertCodexResponseToGeminiCLINonStream),
+			TokenCount: ToResponseTokenCountTransformFromBytes(codexgeminicli.GeminiCLITokenCount),
 		},
 	)
 
@@ -197,8 +197,8 @@ func init() {
 		constant.Codex,
 		codexopenairesponses.ConvertOpenAIResponsesRequestToCodex,
 		interfaces.TranslateResponse{
-			Stream:    codexopenairesponses.ConvertCodexResponseToOpenAIResponses,
-			NonStream: codexopenairesponses.ConvertCodexResponseToOpenAIResponsesNonStream,
+			Stream:    ToResponseStreamTransform(codexopenairesponses.ConvertCodexResponseToOpenAIResponses),
+			NonStream: ToResponseNonStreamTransform(codexopenairesponses.ConvertCodexResponseToOpenAIResponsesNonStream),
 		},
 	)
 
@@ -255,8 +255,8 @@ func init() {
 		constant.Gemini,
 		geminiopenairesponses.ConvertOpenAIResponsesRequestToGemini,
 		interfaces.TranslateResponse{
-			Stream:    geminiopenairesponses.ConvertGeminiResponseToOpenAIResponses,
-			NonStream: geminiopenairesponses.ConvertGeminiResponseToOpenAIResponsesNonStream,
+			Stream:    ToResponseStreamTransform(geminiopenairesponses.ConvertGeminiResponseToOpenAIResponses),
+			NonStream: ToResponseNonStreamTransformFromBytes(geminiopenairesponses.ConvertGeminiResponseToOpenAIResponsesNonStream),
 		},
 	)
 
@@ -334,9 +334,9 @@ func init() {
 		constant.OpenAI,
 		openai_claude.ConvertClaudeRequestToOpenAI,
 		interfaces.TranslateResponse{
-			Stream:     openai_claude.ConvertOpenAIResponseToClaude,
-			NonStream:  openai_claude.ConvertOpenAIResponseToClaudeNonStream,
-			TokenCount: openai_claude.ClaudeTokenCount,
+			Stream:     ToResponseStreamTransform(openai_claude.ConvertOpenAIResponseToClaude),
+			NonStream:  ToResponseNonStreamTransform(openai_claude.ConvertOpenAIResponseToClaudeNonStream),
+			TokenCount: ToResponseTokenCountTransform(openai_claude.ClaudeTokenCount),
 		},
 	)
 
@@ -370,8 +370,8 @@ func init() {
 		constant.OpenAI,
 		openaiopenai.ConvertOpenAIRequestToOpenAI,
 		interfaces.TranslateResponse{
-			Stream:    openaiopenai.ConvertOpenAIResponseToOpenAI,
-			NonStream: openaiopenai.ConvertOpenAIResponseToOpenAINonStream,
+			Stream:    ToResponseStreamTransform(openaiopenai.ConvertOpenAIResponseToOpenAI),
+			NonStream: ToResponseNonStreamTransform(openaiopenai.ConvertOpenAIResponseToOpenAINonStream),
 		},
 	)
 
@@ -381,8 +381,8 @@ func init() {
 		constant.OpenAI,
 		openairesponses.ConvertOpenAIResponsesRequestToOpenAIChatCompletions,
 		interfaces.TranslateResponse{
-			Stream:    openairesponses.ConvertOpenAIChatCompletionsResponseToOpenAIResponses,
-			NonStream: openairesponses.ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream,
+			Stream:    ToResponseStreamTransform(openairesponses.ConvertOpenAIChatCompletionsResponseToOpenAIResponses),
+			NonStream: ToResponseNonStreamTransform(openairesponses.ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream),
 		},
 	)
 }

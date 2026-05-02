@@ -237,7 +237,11 @@ func (e *KiloExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 			reporter.publish(ctx, detail)
 		}
 		chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, bytes.Clone(line), &param)
-		return chunks, nil
+		result := make([]string, len(chunks))
+		for i, chunk := range chunks {
+			result[i] = string(chunk)
+		}
+		return result, nil
 	}
 
 	result := ProcessSSEStreamWithFilter(ctx, httpResp, processor, func(ctx context.Context, err error) {

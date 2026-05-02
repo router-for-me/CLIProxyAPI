@@ -357,7 +357,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			if isClaudeOAuthToken(apiKey) && !auth.ToolPrefixDisabled() {
 				line = stripClaudeToolPrefixFromStreamLine(line, claudeToolPrefix)
 			}
-			return sdktranslator.TranslateStream(
+			chunks := sdktranslator.TranslateStream(
 				ctx,
 				to,
 				from,
@@ -366,7 +366,12 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				bodyForTranslation,
 				bytes.Clone(line),
 				&param,
-			), nil
+			)
+			result := make([]string, len(chunks))
+			for i, chunk := range chunks {
+				result[i] = string(chunk)
+			}
+			return result, nil
 		}
 
 		result = ProcessSSEStream(ctx, &http.Response{

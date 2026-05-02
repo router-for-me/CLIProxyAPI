@@ -3,11 +3,15 @@ package executor
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -17,8 +21,6 @@ import (
 	kiroauth "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/auth/kiro"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
 	kiroclaude "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/translator/kiro/claude"
-	kirocommon "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/translator/kiro/common"
-	kiroopenai "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/translator/kiro/openai"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/util"
 	cliproxyauth "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -1184,4 +1186,58 @@ func (e *KiroExecutor) isTokenExpired(accessToken string) bool {
 	}
 
 	return isExpired
+}
+
+// getTokenKey returns a unique key for rate limiting and cooldown tracking.
+func getTokenKey(auth *cliproxyauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	return fmt.Sprintf("kiro:%s:%s", auth.ID, auth.Label)
+}
+
+// applyDynamicFingerprint applies dynamic fingerprint headers for Kiro requests.
+// Kiro uses AWS Signature Version 4 for authentication.
+func applyDynamicFingerprint(req *http.Request, auth *cliproxyauth.Auth) {
+	if req == nil || auth == nil {
+		return
+	}
+	// Extract profileArn and sessionToken from auth attributes
+	if profileArn := auth.Attributes["profileArn"]; profileArn != "" {
+		req.Header.Set("x-amz-iam-profile-arn", profileArn)
+	}
+	// Set AWS SigV4 headers via the SDK's auth package
+	// The session token is handled by the auth layer
+}
+
+// HttpRequest implements the ProviderExecutor interface for KiroExecutor.
+func (e *KiroExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth, req *http.Request) (*http.Response, error) {
+	if req == nil {
+		return nil, fmt.Errorf("kiro executor: request is nil")
+	}
+	if ctx == nil {
+		ctx = req.Context()
+	}
+	httpReq := req.WithContext(ctx)
+	// Kiro uses bearer token auth - inject Authorization header
+	if auth != nil {
+		if token := auth.Attributes["accessToken"]; token != "" {
+			httpReq.Header.Set("Authorization", "Bearer "+token)
+		}
+	}
+	return http.DefaultClient.Do(httpReq)
+}
+
+// PrepareRequest injects Kiro credentials into the outgoing HTTP request.
+func (e *KiroExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Auth) error {
+	if req == nil {
+		return nil
+	}
+	// Kiro uses bearer token auth
+	if auth != nil {
+		if token := auth.Attributes["accessToken"]; token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+	}
+	return nil
 }

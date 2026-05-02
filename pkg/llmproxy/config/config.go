@@ -119,6 +119,9 @@ type Config struct {
 	// These are used as fallbacks when the client does not send its own headers.
 	ClaudeHeaderDefaults ClaudeHeaderDefaults `yaml:"claude-header-defaults" json:"claude-header-defaults"`
 
+	// CodexHeaderDefaults configures default header values for Codex WebSocket connections.
+	CodexHeaderDefaults CodexHeaderDefaults `yaml:"codex-header-defaults" json:"codex-header-defaults"`
+
 	// OpenAICompatibility defines OpenAI API compatibility configurations for external providers.
 	OpenAICompatibility []OpenAICompatibility `yaml:"openai-compatibility" json:"openai-compatibility"`
 
@@ -189,10 +192,19 @@ func (c *Config) IsResponsesCompactEnabled() bool {
 // ClaudeHeaderDefaults configures default header values injected into Claude API requests
 // when the client does not send them. Update these when Claude Code releases a new version.
 type ClaudeHeaderDefaults struct {
-	UserAgent      string `yaml:"user-agent" json:"user-agent"`
-	PackageVersion string `yaml:"package-version" json:"package-version"`
-	RuntimeVersion string `yaml:"runtime-version" json:"runtime-version"`
-	Timeout        string `yaml:"timeout" json:"timeout"`
+	UserAgent               string  `yaml:"user-agent" json:"user-agent"`
+	PackageVersion          string  `yaml:"package-version" json:"package-version"`
+	RuntimeVersion          string  `yaml:"runtime-version" json:"runtime-version"`
+	Timeout                 string  `yaml:"timeout" json:"timeout"`
+	OS                      string  `yaml:"os" json:"os"`
+	Arch                    string  `yaml:"arch" json:"arch"`
+	StabilizeDeviceProfile  *bool   `yaml:"stabilize-device-profile" json:"stabilize-device-profile"`
+}
+
+// CodexHeaderDefaults configures default header values for Codex WebSocket connections.
+type CodexHeaderDefaults struct {
+	UserAgent     string `yaml:"user-agent" json:"user-agent"`
+	BetaFeatures  string `yaml:"beta-features" json:"beta-features"`
 }
 
 // TLSConfig holds HTTPS server settings.

@@ -324,7 +324,11 @@ func (e *IFlowExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			reporter.publish(ctx, detail)
 		}
 		chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, body, bytes.Clone(line), &param)
-		return chunks, nil
+		result := make([]string, len(chunks))
+		for i, chunk := range chunks {
+			result[i] = string(chunk)
+		}
+		return result, nil
 	}
 
 	result := ProcessSSEStream(ctx, httpResp, processor, func(ctx context.Context, err error) {

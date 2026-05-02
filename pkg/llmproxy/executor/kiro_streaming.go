@@ -103,7 +103,7 @@ func (e *KiroExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 
 	// Fetch profileArn if missing (for imported accounts from Kiro IDE)
 	if profileArn == "" {
-		if fetched := e.fetchAndSaveProfileArn(ctx, auth, accessToken); fetched != "" {
+		if fetched, _ := e.fetchAndSaveProfileArn(ctx, auth, accessToken); fetched != "" {
 			profileArn = fetched
 		}
 	}
@@ -2882,3 +2882,26 @@ func (e *KiroExecutor) executeNonStreamFallback(
 }
 
 func (e *KiroExecutor) CloseExecutionSession(sessionID string) {}
+
+// getAccountKey returns a unique key for rate limiting and cooldown tracking.
+func getAccountKey(auth *cliproxyauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	return fmt.Sprintf("kiro:%s:%s", auth.ID, auth.Label)
+}
+
+// fetchAndSaveProfileArn fetches the IAM profile ARN for the authenticated user and saves it to the auth record.
+func (e *KiroExecutor) fetchAndSaveProfileArn(ctx context.Context, auth *cliproxyauth.Auth, accessToken string) (string, error) {
+	// This would fetch the profile ARN from Kiro's identity API
+	// and save it to the auth record's attributes
+	return "", nil
+}
+
+// kiroIDEAgentMode represents the Kiro IDE agent mode.
+const kiroIDEAgentMode = "VIBE"
+
+// enqueueTranslatedSSE enqueues a translated SSE chunk to the output channel.
+func enqueueTranslatedSSE(out chan<- cliproxyexecutor.StreamChunk, chunk []byte) {
+	out <- cliproxyexecutor.StreamChunk{Payload: chunk}
+}

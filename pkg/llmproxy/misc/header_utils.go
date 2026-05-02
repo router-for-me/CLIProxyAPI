@@ -35,3 +35,36 @@ func EnsureHeader(target http.Header, source http.Header, key, defaultValue stri
 		target.Set(key, val)
 	}
 }
+
+// ScrubProxyAndFingerprintHeaders removes or normalizes proxy and fingerprint-related
+// headers from an HTTP request to prevent information leakage.
+func ScrubProxyAndFingerprintHeaders(req *http.Request) {
+	if req == nil {
+		return
+	}
+	// Remove proxy-related headers that might leak internal information
+	headersToRemove := []string{
+		"X-Forwarded-For",
+		"X-Forwarded-Host",
+		"X-Forwarded-Proto",
+		"X-Real-IP",
+		"Via",
+		"Proxy-Connection",
+	}
+	for _, h := range headersToRemove {
+		req.Header.Del(h)
+	}
+}
+
+// GeminiCLIUserAgent returns the User-Agent header value for Gemini CLI requests.
+func GeminiCLIUserAgent(model string) string {
+	if model != "" {
+		return "genai-cli/" + strings.TrimPrefix(model, "models/")
+	}
+	return "genai-cli/1.0"
+}
+
+// GeminiCLIApiClientHeader returns the X-Goog-Api-Client header value for Gemini CLI requests.
+func GeminiCLIApiClientHeader() string {
+	return "genai-cli/1.0 gl-go/1.1"
+}

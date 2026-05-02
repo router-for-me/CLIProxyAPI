@@ -37,6 +37,7 @@ import (
 	"github.com/kooshapari/CLIProxyAPI/v7/sdk/api/handlers/gemini"
 	"github.com/kooshapari/CLIProxyAPI/v7/sdk/api/handlers/openai"
 	sdkAuth "github.com/kooshapari/CLIProxyAPI/v7/sdk/auth"
+	sdkconfig "github.com/kooshapari/CLIProxyAPI/v7/sdk/config"
 	"github.com/kooshapari/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v3"
@@ -63,10 +64,6 @@ func defaultRequestLoggerFactory(cfg *config.Config, configPath string) logging.
 	configDir := filepath.Dir(configPath)
 	logsDir := logging.ResolveLogDirectory(cfg)
 	return logging.NewFileRequestLogger(cfg.RequestLog, logsDir, configDir, cfg.ErrorLogsMaxFiles)
-}
-
-func castToSDKConfig(cfg *config.SDKConfig) *sdkconfig.SDKConfig {
-	return (*sdkconfig.SDKConfig)(unsafe.Pointer(cfg))
 }
 
 func castToSDKConfig(cfg *config.SDKConfig) *sdkconfig.SDKConfig {
@@ -267,7 +264,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	s.oldConfigYaml, _ = yaml.Marshal(cfg)
 	s.applyAccessConfig(nil, cfg)
 	if authManager != nil {
-		authManager.SetRetryConfig(cfg.RequestRetry, time.Duration(cfg.MaxRetryInterval)*time.Second, cfg.MaxRetryCredentials)
+		authManager.SetRetryConfig(cfg.RequestRetry, time.Duration(cfg.MaxRetryInterval)*time.Second)
 	}
 	managementasset.SetCurrentConfig(cfg)
 	auth.SetQuotaCooldownDisabled(cfg.DisableCooling)
@@ -974,7 +971,7 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 	}
 
 	if s.handlers != nil && s.handlers.AuthManager != nil {
-		s.handlers.AuthManager.SetRetryConfig(cfg.RequestRetry, time.Duration(cfg.MaxRetryInterval)*time.Second, cfg.MaxRetryCredentials)
+		s.handlers.AuthManager.SetRetryConfig(cfg.RequestRetry, time.Duration(cfg.MaxRetryInterval)*time.Second)
 	}
 
 	// Update log level dynamically when debug flag changes

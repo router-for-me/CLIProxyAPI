@@ -16,7 +16,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/config"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/interfaces"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/misc"
@@ -396,7 +395,7 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 					reqHTTP, _ = http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
 					reqHTTP.Header.Set("Content-Type", "application/json")
 					reqHTTP.Header.Set("Authorization", "Bearer "+tok.AccessToken)
-					applyGeminiCLIHeaders(reqHTTP)
+					applyGeminiCLIHeaders(reqHTTP, attemptModel)
 					reqHTTP.Header.Set("Accept", "text/event-stream")
 					httpResp, errDo = httpClient.Do(reqHTTP)
 					if errDo != nil {
@@ -786,7 +785,7 @@ func stringValue(m map[string]any, key string) string {
 // so that upstream identifies the request as a native GeminiCLI client.
 func applyGeminiCLIHeaders(r *http.Request, model string) {
 	r.Header.Set("User-Agent", misc.GeminiCLIUserAgent(model))
-	r.Header.Set("X-Goog-Api-Client", misc.GeminiCLIApiClientHeader)
+	r.Header.Set("X-Goog-Api-Client", misc.GeminiCLIApiClientHeader())
 }
 
 // cliPreviewFallbackOrder returns preview model candidates for a base model.

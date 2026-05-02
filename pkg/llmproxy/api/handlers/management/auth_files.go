@@ -29,6 +29,8 @@ import (
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/auth/claude"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/auth/codex"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/auth/copilot"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/auth/cursor"
+	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/auth/gitlab"
 	geminiAuth "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/auth/gemini"
 	iflowauth "github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/auth/iflow"
 	"github.com/kooshapari/CLIProxyAPI/v7/pkg/llmproxy/auth/kilo"
@@ -3030,4 +3032,94 @@ func (h *Handler) RequestKiloToken(c *gin.Context) {
 		"user_code":        resp.Code,
 		"verification_uri": resp.VerificationURL,
 	})
+}
+
+// RequestGitLabToken handles GET /gitlab-auth-url - initiates GitLab Duo authentication.
+func (h *Handler) RequestGitLabToken(c *gin.Context) {
+	_ = context.Background()
+
+	fmt.Println("Initializing GitLab Duo authentication...")
+
+	state := fmt.Sprintf("gitlab-%d", time.Now().UnixNano())
+
+	// Initialize GitLab auth service
+	gitlabAuth := gitlab.NewGitLabAuth(h.cfg)
+
+	// Generate authorization URL
+	authURL, err := gitlabAuth.GenerateAuthURL(state)
+	if err != nil {
+		log.Errorf("Failed to generate GitLab auth URL: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate auth URL"})
+		return
+	}
+
+	RegisterOAuthSession(state, "gitlab")
+
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "url": authURL, "state": state})
+}
+
+// RequestGitLabPATToken handles POST /gitlab-auth-url - processes GitLab PAT token submission.
+func (h *Handler) RequestGitLabPATToken(c *gin.Context) {
+	var req struct {
+		Token string `json:"token" binding:"required"`
+		State string `json:"state" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+		return
+	}
+
+	ctx := context.Background()
+
+	fmt.Println("Processing GitLab PAT token...")
+
+	// Initialize GitLab auth service
+	gitlabAuth := gitlab.NewGitLabAuth(h.cfg)
+
+	// Exchange PAT for auth record
+	record, err := gitlabAuth.ExchangePAT(ctx, req.Token)
+	if err != nil {
+		log.Errorf("Failed to exchange GitLab PAT: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to authenticate with GitLab"})
+		return
+	}
+
+	// Save the auth record
+	savedPath, errSave := h.saveTokenRecord(ctx, record)
+	if errSave != nil {
+		log.Errorf("Failed to save GitLab token: %v", errSave)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save token"})
+		return
+	}
+
+	fmt.Printf("GitLab authentication successful! Token saved to %s\n", savedPath)
+
+	c.JSON(http.StatusOK, gin.H{
+		"status": "ok",
+		"path":   savedPath,
+	})
+}
+
+// RequestCursorToken handles GET /cursor-auth-url - initiates Cursor authentication.
+func (h *Handler) RequestCursorToken(c *gin.Context) {
+	_ = context.Background()
+
+	fmt.Println("Initializing Cursor authentication...")
+
+	state := fmt.Sprintf("cursor-%d", time.Now().UnixNano())
+
+	// Initialize Cursor auth service
+	cursorAuth := cursor.NewCursorAuth(h.cfg)
+
+	// Generate authorization URL
+	authURL, err := cursorAuth.GenerateAuthURL(state)
+	if err != nil {
+		log.Errorf("Failed to generate Cursor auth URL: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate auth URL"})
+		return
+	}
+
+	RegisterOAuthSession(state, "cursor")
+
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "url": authURL, "state": state})
 }
