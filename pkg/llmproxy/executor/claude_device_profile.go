@@ -381,3 +381,8 @@ func applyClaudeLegacyDeviceHeaders(r *http.Request, ginHeaders http.Header, cfg
 	}
 	r.Header.Set("User-Agent", profile.UserAgent)
 }
+
+// isClaudeCodeClient checks if the given User-Agent string indicates a Claude Code client.
+func isClaudeCodeClient(userAgent string) bool {
+	return strings.Contains(userAgent, "Claude-Cli") || strings.Contains(userAgent, "claude-code")
+}
