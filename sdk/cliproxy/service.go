@@ -105,7 +105,20 @@ func (h serviceAuthHook) OnAuthUpdated(ctx context.Context, auth *coreauth.Auth)
 	h.syncAuthState(ctx, auth)
 }
 
-func (serviceAuthHook) OnResult(context.Context, coreauth.Result) {}
+func (h serviceAuthHook) OnResult(ctx context.Context, result coreauth.Result) {
+	if h.service == nil || h.service.coreManager == nil || result.AuthID == "" || result.Success {
+		return
+	}
+	auth, ok := h.service.coreManager.GetByID(result.AuthID)
+	if !ok || auth == nil || !auth.Disabled || auth.Status != coreauth.StatusDisabled {
+		return
+	}
+	if auth.StatusMessage != "disabled due to insufficient balance" {
+		return
+	}
+	h.syncAuthState(ctx, auth)
+	h.service.persistConfigBackedAutoDisabledAuth(auth)
+}
 
 func (h serviceAuthHook) syncAuthState(_ context.Context, auth *coreauth.Auth) {
 	if h.service == nil || h.service.coreManager == nil || auth == nil || auth.ID == "" {

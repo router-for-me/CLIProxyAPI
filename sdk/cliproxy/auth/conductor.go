@@ -2945,6 +2945,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 
 	shouldResumeModel := false
 	shouldSuspendModel := false
+	shouldUnregisterAuth := false
 	suspendReason := ""
 	clearModelQuota := false
 	setModelQuota := false
@@ -2958,6 +2959,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 
 		if shouldDisableAuthForProxyFailure(auth, result) {
 			disableAuthForProxyFailure(auth, result, now)
+			shouldUnregisterAuth = true
 			cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
 			if cfg == nil {
 				cfg = &internalconfig.Config{}
@@ -2968,6 +2970,19 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				"provider": auth.Provider,
 				"model":    result.Model,
 			}).Warn("disabled auth because SOCKS5 proxy dialing failed")
+		} else if shouldDisableAuthForBalanceExhausted(result) {
+			disableAuthForBalanceExhausted(auth, result, now)
+			shouldUnregisterAuth = true
+			cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+			if cfg == nil {
+				cfg = &internalconfig.Config{}
+			}
+			m.rebuildAPIKeyModelAliasLocked(cfg)
+			logEntryWithRequestID(ctx).WithFields(log.Fields{
+				"auth_id":  auth.ID,
+				"provider": auth.Provider,
+				"model":    result.Model,
+			}).Warn("disabled auth because upstream reported insufficient balance")
 		} else if result.Success {
 			if result.Model != "" {
 				state := ensureModelState(auth, result.Model)
@@ -3126,6 +3141,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		m.scheduler.upsertAuth(authSnapshot)
 	}
 
+	if shouldUnregisterAuth {
+		registry.GetGlobalRegistry().UnregisterClient(result.AuthID)
+	}
 	if clearModelQuota && result.Model != "" {
 		registry.GetGlobalRegistry().ClearModelQuotaExceeded(result.AuthID, result.Model)
 	}
@@ -3683,6 +3701,61 @@ func isAccountQuotaExhaustedMessage(message string) bool {
 	return false
 }
 
+func shouldDisableAuthForBalanceExhausted(result Result) bool {
+	return !result.Success && isBalanceExhaustedResultError(result.Error)
+}
+
+func isBalanceExhaustedResultError(err *Error) bool {
+	if err == nil {
+		return false
+	}
+	if statusCodeFromResult(err) != http.StatusPaymentRequired {
+		return false
+	}
+	lower := strings.ToLower(strings.TrimSpace(err.Code + " " + err.Message))
+	if lower == "" {
+		return false
+	}
+	patterns := [...]string{
+		"insufficient balance",
+		"insufficient_balance",
+		"balance insufficient",
+		"balance_insufficient",
+		"balance is insufficient",
+		"account balance insufficient",
+		"not enough balance",
+		"balance not enough",
+		"balance_not_enough",
+		"insufficient credit",
+		"insufficient credits",
+		"credit balance",
+		"credits exhausted",
+		"no credit",
+		"recharge",
+		"top up",
+		"top-up",
+		"充值",
+		"余额不足",
+		"餘額不足",
+		"余额不够",
+		"餘額不夠",
+		"余额耗尽",
+		"餘額耗盡",
+		"余额已用完",
+		"餘額已用完",
+		"账户余额",
+		"帳戶餘額",
+		"欠费",
+		"欠費",
+	}
+	for _, pattern := range patterns {
+		if strings.Contains(lower, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
 func accountQuotaRetryAfter(retryAfter *time.Duration) time.Duration {
 	if retryAfter != nil && *retryAfter > 0 {
 		return *retryAfter
@@ -3884,6 +3957,36 @@ func disableAuthForProxyFailure(auth *Auth, result Result, now time.Time) {
 				state.LastError = cloneError(result.Error)
 			} else if result.Cause != nil {
 				state.LastError = &Error{Code: "proxy_dial_failed", Message: result.Cause.Error(), Retryable: true}
+			}
+		}
+	}
+}
+
+func disableAuthForBalanceExhausted(auth *Auth, result Result, now time.Time) {
+	if auth == nil {
+		return
+	}
+	auth.Disabled = true
+	auth.Unavailable = true
+	auth.Status = StatusDisabled
+	auth.StatusMessage = "disabled due to insufficient balance"
+	auth.NextRetryAfter = time.Time{}
+	auth.Quota = QuotaState{}
+	auth.UpdatedAt = now
+	if result.Error != nil {
+		auth.LastError = cloneError(result.Error)
+	}
+	if result.Model != "" {
+		state := ensureModelState(auth, result.Model)
+		if state != nil {
+			state.Status = StatusDisabled
+			state.StatusMessage = auth.StatusMessage
+			state.Unavailable = true
+			state.NextRetryAfter = time.Time{}
+			state.Quota = QuotaState{}
+			state.UpdatedAt = now
+			if result.Error != nil {
+				state.LastError = cloneError(result.Error)
 			}
 		}
 	}
