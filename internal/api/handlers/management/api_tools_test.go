@@ -351,6 +351,37 @@ func TestAPICallStreamsNDJSONEventsWhenStreamEnabled(t *testing.T) {
 	}
 }
 
+func TestAPICallStreamReturnsStatusErrorForUpstreamFailure(t *testing.T) {
+	t.Parallel()
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":{"message":"invalid api key"}}`))
+	}))
+	defer upstream.Close()
+
+	recorder := performAPICallRequest(t, &Handler{}, apiCallRequest{
+		Method: http.MethodPost,
+		URL:    upstream.URL,
+		Stream: true,
+	})
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
+	}
+	events := decodeAPICallStreamEvents(t, recorder.Body.Bytes())
+	if len(events) != 2 {
+		t.Fatalf("event count = %d, want 2; events=%+v", len(events), events)
+	}
+	if events[0].Type != "response" || events[0].StatusCode != http.StatusUnauthorized {
+		t.Fatalf("event[0] = %+v, want unauthorized response", events[0])
+	}
+	if events[1].Type != "error" || events[1].Error != "HTTP 401: invalid api key" {
+		t.Fatalf("event[1] = %+v, want status error event", events[1])
+	}
+}
+
 func TestAPICallStreamReturnsErrorEventOnReadFailure(t *testing.T) {
 	t.Parallel()
 

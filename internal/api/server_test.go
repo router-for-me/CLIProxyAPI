@@ -96,6 +96,39 @@ func TestInjectManagementConfigVersionGuardReplacesOldGuard(t *testing.T) {
 	if !strings.Contains(body, `path === "/v0/management/api-call"`) {
 		t.Fatalf("expected api-call queue detection in guard script: %s", body)
 	}
+	if !strings.Contains(body, "__cliproxySequentialMap") {
+		t.Fatalf("expected sequential key test helper in guard script: %s", body)
+	}
+}
+
+func TestInjectManagementConfigVersionGuardSerializesKeyTestBatches(t *testing.T) {
+	html := []byte(`<html><body><script type="module">
+let a=(await Promise.all(t.map(e=>I(e)))).filter(Boolean).length;
+let b=(await Promise.all(t.map(e=>we(e)))).filter(Boolean).length;
+let c=(await Promise.all(t.map(e=>P(e)))).filter(Boolean).length;
+</script></body></html>`)
+
+	out := injectManagementConfigVersionGuard(html)
+	body := string(out)
+
+	for _, fragment := range []string{
+		`Promise.all(t.map(e=>I(e)))`,
+		`Promise.all(t.map(e=>we(e)))`,
+		`Promise.all(t.map(e=>P(e)))`,
+	} {
+		if strings.Contains(body, fragment) {
+			t.Fatalf("expected parallel key test fragment %q to be patched: %s", fragment, body)
+		}
+	}
+	for _, fragment := range []string{
+		`window.__cliproxySequentialMap(t,e=>I(e))`,
+		`window.__cliproxySequentialMap(t,e=>we(e))`,
+		`window.__cliproxySequentialMap(t,e=>P(e))`,
+	} {
+		if !strings.Contains(body, fragment) {
+			t.Fatalf("expected sequential key test fragment %q in patched body: %s", fragment, body)
+		}
+	}
 }
 
 func TestUsagePersistenceEnabledHotReload(t *testing.T) {

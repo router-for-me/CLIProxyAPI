@@ -23,7 +23,10 @@ import (
 	"golang.org/x/oauth2/google"
 )
 
-const defaultAPICallTimeout = 60 * time.Second
+const (
+	defaultAPICallTimeout      = 60 * time.Second
+	maxAPICallStreamErrorBytes = 64 << 10
+)
 
 const (
 	geminiOAuthClientID     = "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com"
@@ -255,12 +258,16 @@ func safeAPICallErrorDetail(err error) string {
 	case strings.Contains(lower, "context canceled") || strings.Contains(lower, "operation was canceled") || strings.Contains(lower, "aborted"):
 		return "upstream request was canceled before a response was received"
 	}
+	return sanitizeAPICallDetail(msg, 240)
+}
+
+func sanitizeAPICallDetail(msg string, maxLen int) string {
+	msg = strings.ToValidUTF8(msg, "")
 	msg = strings.ReplaceAll(msg, "\r", " ")
 	msg = strings.ReplaceAll(msg, "\n", " ")
 	msg = strings.Join(strings.Fields(msg), " ")
-	const maxDetailLen = 240
-	if len(msg) > maxDetailLen {
-		msg = msg[:maxDetailLen] + "..."
+	if maxLen > 0 && len(msg) > maxLen {
+		msg = msg[:maxLen] + "..."
 	}
 	return msg
 }
@@ -276,6 +283,23 @@ func (h *Handler) writeAPICallStream(c *gin.Context, resp *http.Response) {
 		StatusCode: resp.StatusCode,
 		Header:     resp.Header,
 	}) {
+		return
+	}
+
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		body, errRead := io.ReadAll(io.LimitReader(resp.Body, maxAPICallStreamErrorBytes+1))
+		if errRead != nil {
+			log.WithError(errRead).Debug("management APICall stream error body read failed")
+			_ = writeAPICallStreamEvent(c, apiCallStreamEvent{
+				Type:  "error",
+				Error: fmt.Sprintf("HTTP %d: failed to read error response", resp.StatusCode),
+			})
+			return
+		}
+		_ = writeAPICallStreamEvent(c, apiCallStreamEvent{
+			Type:  "error",
+			Error: safeAPICallUpstreamStatusDetail(resp.StatusCode, body),
+		})
 		return
 	}
 
@@ -304,6 +328,74 @@ func (h *Handler) writeAPICallStream(c *gin.Context, resp *http.Response) {
 		})
 		return
 	}
+}
+
+func safeAPICallUpstreamStatusDetail(statusCode int, body []byte) string {
+	message := extractAPICallErrorMessage(body)
+	if message == "" {
+		message = strings.TrimSpace(http.StatusText(statusCode))
+	}
+	if message == "" {
+		message = "upstream request failed"
+	}
+	return fmt.Sprintf("HTTP %d: %s", statusCode, sanitizeAPICallDetail(message, 500))
+}
+
+func extractAPICallErrorMessage(body []byte) string {
+	text := strings.TrimSpace(strings.ToValidUTF8(string(body), ""))
+	if text == "" {
+		return ""
+	}
+	lower := strings.ToLower(text)
+	if strings.HasPrefix(lower, "<!doctype html") || strings.HasPrefix(lower, "<html") {
+		return "unexpected HTML response"
+	}
+
+	var decoded any
+	if errUnmarshal := json.Unmarshal([]byte(text), &decoded); errUnmarshal == nil {
+		if message := extractAPICallErrorMessageFromJSON(decoded); message != "" {
+			return message
+		}
+	}
+
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "" || payload == "[DONE]" {
+			continue
+		}
+		var decodedLine any
+		if errUnmarshal := json.Unmarshal([]byte(payload), &decodedLine); errUnmarshal == nil {
+			if message := extractAPICallErrorMessageFromJSON(decodedLine); message != "" {
+				return message
+			}
+		}
+	}
+
+	return text
+}
+
+func extractAPICallErrorMessageFromJSON(value any) string {
+	switch typed := value.(type) {
+	case map[string]any:
+		for _, key := range []string{"error", "message", "detail"} {
+			if message := extractAPICallErrorMessageFromJSON(typed[key]); message != "" {
+				return message
+			}
+		}
+	case []any:
+		for _, item := range typed {
+			if message := extractAPICallErrorMessageFromJSON(item); message != "" {
+				return message
+			}
+		}
+	case string:
+		return strings.TrimSpace(typed)
+	}
+	return ""
 }
 
 func writeAPICallStreamEvent(c *gin.Context, event apiCallStreamEvent) bool {

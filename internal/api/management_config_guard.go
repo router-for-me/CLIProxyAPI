@@ -30,6 +30,20 @@ func managementConfigVersionGuardScript(initialVersion string) []byte {
   var originalFetch = window.fetch ? window.fetch.bind(window) : null;
   if (!originalFetch) return;
   window.__cliproxyLatestConfigVersion = latestConfigVersion;
+  window.__cliproxyKeyTestDelayMs = window.__cliproxyKeyTestDelayMs || 350;
+  window.__cliproxySequentialMap = window.__cliproxySequentialMap || async function (items, mapper) {
+    var results = [];
+    var list = Array.isArray(items) ? items : [];
+    for (var i = 0; i < list.length; i += 1) {
+      results.push(await mapper(list[i], i));
+      if (i + 1 < list.length) {
+        await new Promise(function (resolve) {
+          window.setTimeout(resolve, window.__cliproxyKeyTestDelayMs);
+        });
+      }
+    }
+    return results;
+  };
 
   function setLatestConfigVersion(version) {
     version = String(version || "").trim();
@@ -247,6 +261,7 @@ func injectManagementConfigVersionGuard(data []byte, initialVersion ...string) [
 	}
 	guardScript := managementConfigVersionGuardScript(version)
 	data = removeManagementConfigVersionGuard(data)
+	data = patchManagementPanelKeyTestBatch(data)
 	lower := bytes.ToLower(data)
 	if idx := bytes.LastIndex(lower, []byte("</body>")); idx >= 0 {
 		out := make([]byte, 0, len(data)+len(guardScript))
@@ -259,6 +274,30 @@ func injectManagementConfigVersionGuard(data []byte, initialVersion ...string) [
 	out = append(out, data...)
 	out = append(out, guardScript...)
 	return out
+}
+
+func patchManagementPanelKeyTestBatch(data []byte) []byte {
+	replacements := []struct {
+		old []byte
+		new []byte
+	}{
+		{
+			old: []byte(`(await Promise.all(t.map(e=>I(e)))).filter(Boolean).length`),
+			new: []byte(`(await window.__cliproxySequentialMap(t,e=>I(e))).filter(Boolean).length`),
+		},
+		{
+			old: []byte(`(await Promise.all(t.map(e=>we(e)))).filter(Boolean).length`),
+			new: []byte(`(await window.__cliproxySequentialMap(t,e=>we(e))).filter(Boolean).length`),
+		},
+		{
+			old: []byte(`(await Promise.all(t.map(e=>P(e)))).filter(Boolean).length`),
+			new: []byte(`(await window.__cliproxySequentialMap(t,e=>P(e))).filter(Boolean).length`),
+		},
+	}
+	for _, replacement := range replacements {
+		data = bytes.ReplaceAll(data, replacement.old, replacement.new)
+	}
+	return data
 }
 
 func removeManagementConfigVersionGuard(data []byte) []byte {
