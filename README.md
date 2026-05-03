@@ -195,7 +195,7 @@ Native macOS menu bar app to use your Claude Code & ChatGPT subscriptions with A
 
 ### [Subtitle Translator](https://github.com/VjayC/SRT-Subtitle-Translator-Validator)
 
-Browser-based tool to translate SRT subtitles using your Gemini subscription via CLIProxyAPI with automatic validation/error correction - no API keys needed
+A cross-platform desktop and web app to translate and validate SRT subtitles using your existing LLM subscriptions (Gemini, ChatGPT, Claude, etc.) via CLIProxyAPI - no API keys needed.
 
 ### [CCS (Claude Code Switch)](https://github.com/kaitranntt/ccs)
 
@@ -276,6 +276,10 @@ A Next.js implementation inspired by CLIProxyAPI, easy to install and use, built
 Never stop coding. Smart routing to FREE & low-cost AI models with automatic fallback.
 
 OmniRoute is an AI gateway for multi-provider LLMs: an OpenAI-compatible endpoint with smart routing, load balancing, retries, and fallbacks. Add policies, rate limits, caching, and observability for reliable, cost-aware inference.
+
+### [Playful Proxy API Panel (PPAP)](https://github.com/daishuge/playful-proxy-api-panel)
+
+A public CLIProxyAPI-compatible fork and bundled management panel. It keeps upstream-style usage while restoring built-in usage statistics, adding cache hit rate, first-byte latency, TPS tracking, and Docker-oriented self-hosted installation docs.
 
 > [!NOTE]  
 > If you have developed a port of CLIProxyAPI or a project inspired by it, please open a PR to add it to this list.
