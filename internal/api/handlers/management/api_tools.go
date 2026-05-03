@@ -207,7 +207,10 @@ func (h *Handler) APICall(c *gin.Context) {
 	resp, errDo := httpClient.Do(req)
 	if errDo != nil {
 		log.WithError(errDo).Debug("management APICall request failed")
-		c.JSON(http.StatusBadGateway, gin.H{"error": "request failed"})
+		c.JSON(http.StatusBadGateway, gin.H{
+			"error":  "request failed",
+			"detail": safeAPICallErrorDetail(errDo),
+		})
 		return
 	}
 	defer func() {
@@ -232,6 +235,34 @@ func (h *Handler) APICall(c *gin.Context) {
 		Header:     resp.Header,
 		Body:       string(respBody),
 	})
+}
+
+func safeAPICallErrorDetail(err error) string {
+	if err == nil {
+		return ""
+	}
+	if urlErr, ok := err.(*url.Error); ok && urlErr.Err != nil {
+		err = urlErr.Err
+	}
+	msg := strings.TrimSpace(err.Error())
+	if msg == "" {
+		return "upstream request failed"
+	}
+	lower := strings.ToLower(msg)
+	switch {
+	case os.IsTimeout(err) || strings.Contains(lower, "timeout") || strings.Contains(lower, "deadline exceeded"):
+		return "upstream request timed out"
+	case strings.Contains(lower, "context canceled") || strings.Contains(lower, "operation was canceled") || strings.Contains(lower, "aborted"):
+		return "upstream request was canceled before a response was received"
+	}
+	msg = strings.ReplaceAll(msg, "\r", " ")
+	msg = strings.ReplaceAll(msg, "\n", " ")
+	msg = strings.Join(strings.Fields(msg), " ")
+	const maxDetailLen = 240
+	if len(msg) > maxDetailLen {
+		msg = msg[:maxDetailLen] + "..."
+	}
+	return msg
 }
 
 func (h *Handler) writeAPICallStream(c *gin.Context, resp *http.Response) {

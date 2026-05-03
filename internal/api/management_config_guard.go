@@ -56,6 +56,36 @@ func managementConfigVersionGuardScript(initialVersion string) []byte {
     return path.indexOf("/v0/management/") === 0;
   }
 
+  function isAPICall(method, path) {
+    return method === "POST" && path === "/v0/management/api-call";
+  }
+
+  function detachedAbortSignal() {
+    try {
+      if (!window.AbortController) return undefined;
+      return new window.AbortController().signal;
+    } catch (_) {
+      return undefined;
+    }
+  }
+
+  function detachAPICallAbortSignal(input, init) {
+    var nextInput = input;
+    var nextInit = Object.assign({}, init || {});
+    if ("signal" in nextInit) {
+      try { delete nextInit.signal; } catch (_) { nextInit.signal = undefined; }
+    }
+    try {
+      if (typeof Request !== "undefined" && input instanceof Request) {
+        var signal = detachedAbortSignal();
+        nextInput = signal ? new Request(input, { signal: signal }) : new Request(input);
+      }
+    } catch (_) {
+      nextInput = input;
+    }
+    return { input: nextInput, init: nextInit };
+  }
+
   function observeResponseVersion(response) {
     if (response && response.status === 409) return;
     var nextVersion = response && response.headers && response.headers.get("X-Config-Version");
@@ -119,6 +149,7 @@ func managementConfigVersionGuardScript(initialVersion string) []byte {
     var method = requestMethod(input, init);
     var path = requestPath(input);
     var guarded = shouldGuard(method, path);
+    var apiCall = isAPICall(method, path);
 
     var send = async function () {
       var headers = new Headers(init.headers || (input && input.headers) || {});
@@ -126,7 +157,14 @@ func managementConfigVersionGuardScript(initialVersion string) []byte {
         headers.set("If-Match", '"' + latestConfigVersion + '"');
         init = Object.assign({}, init, { headers: headers });
       }
-      var response = await originalFetch(input, init);
+      var finalInput = input;
+      var finalInit = init;
+      if (apiCall) {
+        var detached = detachAPICallAbortSignal(finalInput, finalInit);
+        finalInput = detached.input;
+        finalInit = detached.init;
+      }
+      var response = await originalFetch(finalInput, finalInit);
       observeResponseVersion(response);
       handleConflictResponse(response);
       return response;

@@ -90,6 +90,12 @@ func TestInjectManagementConfigVersionGuardReplacesOldGuard(t *testing.T) {
 	if !strings.Contains(body, "response && response.status === 409") {
 		t.Fatalf("expected guard to avoid promoting conflict versions to writable versions: %s", body)
 	}
+	if !strings.Contains(body, "detachAPICallAbortSignal") {
+		t.Fatalf("expected api-call abort signal detachment in guard script: %s", body)
+	}
+	if !strings.Contains(body, `path === "/v0/management/api-call"`) {
+		t.Fatalf("expected api-call queue detection in guard script: %s", body)
+	}
 }
 
 func TestUsagePersistenceEnabledHotReload(t *testing.T) {

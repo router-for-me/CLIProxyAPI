@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -262,6 +264,41 @@ func TestAPICallReturnsJSONResponseWhenStreamDisabled(t *testing.T) {
 	}
 	if got := response.Header["X-Upstream"]; len(got) != 1 || got[0] != "ok" {
 		t.Fatalf("header X-Upstream = %v, want [ok]", got)
+	}
+}
+
+func TestAPICallRequestFailureReturnsSafeDetail(t *testing.T) {
+	t.Parallel()
+
+	listener, errListen := net.Listen("tcp", "127.0.0.1:0")
+	if errListen != nil {
+		t.Fatalf("listen: %v", errListen)
+	}
+	addr := listener.Addr().String()
+	if errClose := listener.Close(); errClose != nil {
+		t.Fatalf("close listener: %v", errClose)
+	}
+
+	recorder := performAPICallRequest(t, &Handler{}, apiCallRequest{
+		Method: http.MethodPost,
+		URL:    "http://" + addr,
+	})
+
+	if recorder.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusBadGateway, recorder.Body.String())
+	}
+	var body map[string]string
+	if errUnmarshal := json.Unmarshal(recorder.Body.Bytes(), &body); errUnmarshal != nil {
+		t.Fatalf("unmarshal response: %v", errUnmarshal)
+	}
+	if body["error"] != "request failed" {
+		t.Fatalf("error = %q, want request failed", body["error"])
+	}
+	if strings.TrimSpace(body["detail"]) == "" {
+		t.Fatalf("expected non-empty safe detail, got %q", body["detail"])
+	}
+	if strings.Contains(body["detail"], "http://") {
+		t.Fatalf("detail should not include full request URL: %q", body["detail"])
 	}
 }
 
