@@ -78,6 +78,26 @@ var oauthToolRenameReverseMap = func() map[string]string {
 // even after remapping. Currently empty — all tools are mapped instead of removed.
 var oauthToolsToRemove = map[string]bool{}
 
+// placeholderPatterns lists known placeholder API key values that should
+// trigger an early error instead of being sent upstream.
+var placeholderPatterns = []string{
+	"your_oauth_token_here",
+	"your_api_key_here",
+	"placeholder",
+	"replace_me",
+	"changeme",
+}
+
+func isPlaceholderAPIKey(key string) bool {
+	lower := strings.ToLower(strings.TrimSpace(key))
+	for _, pattern := range placeholderPatterns {
+		if strings.Contains(lower, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
 // Anthropic-compatible upstreams may reject or even crash when Claude models
 // omit max_tokens. Prefer registered model metadata before using a fallback.
 const defaultModelMaxTokens = 1024
@@ -135,6 +155,9 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	apiKey, baseURL := claudeCreds(auth)
+	if isPlaceholderAPIKey(apiKey) {
+		return resp, statusErr{code: http.StatusUnauthorized, msg: "placeholder API key detected; configure a real Claude OAuth token or API key"}
+	}
 	if baseURL == "" {
 		baseURL = "https://api.anthropic.com"
 	}
@@ -323,6 +346,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	apiKey, baseURL := claudeCreds(auth)
+	if isPlaceholderAPIKey(apiKey) {
+		return nil, statusErr{code: http.StatusUnauthorized, msg: "placeholder API key detected; configure a real Claude OAuth token or API key"}
+	}
 	if baseURL == "" {
 		baseURL = "https://api.anthropic.com"
 	}
@@ -537,6 +563,9 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	apiKey, baseURL := claudeCreds(auth)
+	if isPlaceholderAPIKey(apiKey) {
+		return cliproxyexecutor.Response{}, statusErr{code: http.StatusUnauthorized, msg: "placeholder API key detected; configure a real Claude OAuth token or API key"}
+	}
 	if baseURL == "" {
 		baseURL = "https://api.anthropic.com"
 	}
@@ -932,12 +961,11 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	r.Header.Set("Anthropic-Beta", baseBetas)
 
 	misc.EnsureHeader(r.Header, ginHeaders, "Anthropic-Version", "2023-06-01")
-	// Only set browser access header for API key mode; real Claude Code CLI does not send it.
-	if useAPIKey {
-		misc.EnsureHeader(r.Header, ginHeaders, "Anthropic-Dangerous-Direct-Browser-Access", "true")
-	}
+	// Real Claude Code passes dangerouslyAllowBrowser:true to the SDK for all auth
+	// modes (API key and OAuth), confirmed via source (services/api/client.ts).
+	misc.EnsureHeader(r.Header, ginHeaders, "Anthropic-Dangerous-Direct-Browser-Access", "true")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-App", "cli")
-	// Values below match Claude Code 2.1.63 / @anthropic-ai/sdk 0.74.0 (updated 2026-02-28).
+	// Values below match Claude Code 2.1.87 / @anthropic-ai/sdk 0.80.0 (updated 2026-04-14).
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Retry-Count", "0")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Runtime", "node")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Lang", "js")
@@ -949,6 +977,7 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 		misc.EnsureHeader(r.Header, ginHeaders, "x-client-request-id", uuid.New().String())
 	}
 	r.Header.Set("Connection", "keep-alive")
+	misc.EnsureHeader(r.Header, ginHeaders, "Accept-Language", "*")
 	if stream {
 		r.Header.Set("Accept", "text/event-stream")
 		// SSE streams must not be compressed: the downstream scanner reads
@@ -997,7 +1026,7 @@ func claudeCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
 }
 
 func checkSystemInstructions(payload []byte) []byte {
-	return checkSystemInstructionsWithSigningMode(payload, false, false, false, "2.1.63", "", "")
+	return checkSystemInstructionsWithSigningMode(payload, false, false, false, "2.1.87", "", "")
 }
 
 func isClaudeOAuthToken(apiKey string) bool {
@@ -1516,7 +1545,7 @@ func generateBillingHeader(payload []byte, experimentalCCHSigning bool, version,
 }
 
 func checkSystemInstructionsWithMode(payload []byte, strictMode bool) []byte {
-	return checkSystemInstructionsWithSigningMode(payload, strictMode, false, false, "2.1.63", "", "")
+	return checkSystemInstructionsWithSigningMode(payload, strictMode, false, false, "2.1.87", "", "")
 }
 
 // checkSystemInstructionsWithSigningMode injects Claude Code-style system blocks:
