@@ -59,7 +59,15 @@ data race under hot-reload.
   - `TestDefaultRequestLoggerFactory_UsesResolvedLogDirectory` failure
     in `internal/api`: pre-existing on clean upstream/dev. Out of scope.
 
+## Codex review status
+
+Five Codex CLI gpt-5.5 review rounds were run against the BE diff. All
+BLOCKERs/IMPORTANTs that were addressed in rounds 1-4 are fully fixed
+and verified under `-race`. Round 5 surfaced 4 findings; 3.5 are fixed,
+1 is deferred. See `PUNCH_LIST.md` for the full deferred-items + future-
+watch list. Phase C exits with that punch list rather than a fully-clean
+review.
+
 ## Next step
 
-Run `/dev-buddy-once` Codex CLI gpt-5.5 light review on the BE diff
-`refactor/upstream-bound vs upstream/dev`. Address findings. Then Phase D.
+Phase D (week 9, targeted code quality). Then Stage 2.
