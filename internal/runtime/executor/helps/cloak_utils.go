@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 )
 
 // userIDPattern matches Claude Code format: user_[64-hex]_account_[uuid]_session_[uuid]
@@ -46,11 +47,11 @@ func ShouldCloak(cloakMode string, userAgent string) bool {
 		return false
 	default: // "auto" or empty
 		// If client is Claude Code, don't cloak
-		return !strings.HasPrefix(userAgent, "claude-cli")
+		return !misc.IsClaudeCompatibleUserAgent(userAgent)
 	}
 }
 
 // isClaudeCodeClient checks if the User-Agent indicates a Claude Code client.
 func isClaudeCodeClient(userAgent string) bool {
-	return strings.HasPrefix(userAgent, "claude-cli")
+	return misc.IsClaudeCompatibleUserAgent(userAgent)
 }

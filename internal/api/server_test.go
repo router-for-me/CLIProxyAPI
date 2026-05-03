@@ -217,6 +217,71 @@ func TestUnsupportedOpenAIAudioEndpoints(t *testing.T) {
 	}
 }
 
+func TestUnifiedModelsHandlerRoutesClaudeCompatibleClients(t *testing.T) {
+	testCases := []struct {
+		name         string
+		userAgent    string
+		anthropicVer string
+		wantClaude   bool
+	}{
+		{
+			name:       "claude cli",
+			userAgent:  "claude-cli/2.1.70 (external, cli)",
+			wantClaude: true,
+		},
+		{
+			name:       "anthropic js sdk",
+			userAgent:  "Anthropic/JS 0.91.1",
+			wantClaude: true,
+		},
+		{
+			name:         "anthropic version header",
+			userAgent:    "node",
+			anthropicVer: "2023-06-01",
+			wantClaude:   true,
+		},
+		{
+			name:       "openai client",
+			userAgent:  "curl/8.7.1",
+			wantClaude: false,
+		},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			server := newTestServer(t)
+
+			req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+			req.Header.Set("Authorization", "Bearer test-key")
+			req.Header.Set("User-Agent", tc.userAgent)
+			if tc.anthropicVer != "" {
+				req.Header.Set("Anthropic-Version", tc.anthropicVer)
+			}
+
+			rr := httptest.NewRecorder()
+			server.engine.ServeHTTP(rr, req)
+
+			if rr.Code != http.StatusOK {
+				t.Fatalf("unexpected status code: got %d want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
+			}
+
+			var resp map[string]any
+			if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("failed to parse response JSON: %v; body=%s", err, rr.Body.String())
+			}
+			_, hasMore := resp["has_more"]
+			_, hasObject := resp["object"]
+			if tc.wantClaude && (!hasMore || hasObject) {
+				t.Fatalf("expected Claude models response, got %s", rr.Body.String())
+			}
+			if !tc.wantClaude && (!hasObject || hasMore) {
+				t.Fatalf("expected OpenAI models response, got %s", rr.Body.String())
+			}
+		})
+	}
+}
+
 func TestAmpProviderModelRoutes(t *testing.T) {
 	testCases := []struct {
 		name         string

@@ -30,6 +30,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/managementasset"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
@@ -827,23 +828,28 @@ func (s *Server) watchKeepAlive() {
 	}
 }
 
-// unifiedModelsHandler creates a unified handler for the /v1/models endpoint
-// that routes to different handlers based on the User-Agent header.
-// If User-Agent starts with "claude-cli", it routes to Claude handler,
-// otherwise it routes to OpenAI handler.
+// unifiedModelsHandler creates a unified handler for the /v1/models endpoint.
+// Claude-compatible clients receive Claude model metadata; all other clients
+// receive OpenAI-compatible model metadata.
 func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, claudeHandler *claude.ClaudeCodeAPIHandler) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		userAgent := c.GetHeader("User-Agent")
-
-		// Route to Claude handler if User-Agent starts with "claude-cli"
-		if strings.HasPrefix(userAgent, "claude-cli") {
-			// log.Debugf("Routing /v1/models to Claude handler for User-Agent: %s", userAgent)
+		if isClaudeModelsRequest(c) {
 			claudeHandler.ClaudeModels(c)
 		} else {
-			// log.Debugf("Routing /v1/models to OpenAI handler for User-Agent: %s", userAgent)
 			openaiHandler.OpenAIModels(c)
 		}
 	}
+}
+
+func isClaudeModelsRequest(c *gin.Context) bool {
+	if c == nil {
+		return false
+	}
+	if misc.IsClaudeCompatibleUserAgent(c.GetHeader("User-Agent")) {
+		return true
+	}
+	return strings.TrimSpace(c.GetHeader("Anthropic-Version")) != "" ||
+		strings.TrimSpace(c.GetHeader("Anthropic-Beta")) != ""
 }
 
 // Start begins listening for and serving HTTP or HTTPS requests.
