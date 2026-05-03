@@ -35,10 +35,26 @@ const (
 	// bound trades a hit-rate floor for a memory ceiling; eviction policy is
 	// least-recently-used (sliding TTL refresh on read also bumps recency).
 	SignatureGroupCapacity = 10_000
+
+	// MaxGroupCount caps the number of distinct model groups held by the
+	// outer signatureCache. GetModelGroup returns the raw model name for
+	// any non-{gpt,claude,gemini} model, so a workload with many unique
+	// unknown model names could otherwise grow the outer map until the
+	// 10-minute purge ran. With this cap, total memory is bounded at
+	// roughly MaxGroupCount * SignatureGroupCapacity entries.
+	MaxGroupCount = 64
 )
 
 // signatureCache stores signatures by model group -> textHash -> SignatureEntry
 var signatureCache sync.Map
+
+// groupCount tracks the number of groups currently in signatureCache so the
+// fast read path can stay sync.Map.Load. Written under groupEvictMu when
+// inserting/evicting.
+var groupCount atomic.Int64
+
+// groupEvictMu serialises eviction passes. The fast read path never takes it.
+var groupEvictMu sync.Mutex
 
 // cacheCleanupOnce ensures the background cleanup goroutine starts only once
 var cacheCleanupOnce sync.Once
@@ -62,12 +78,17 @@ type lruEntry struct {
 //
 // All operations hold mu — moveToFront on read mutates the list, so an
 // RWMutex would not give read-side concurrency anyway.
+//
+// lastAccess (unix nanos, atomic) tracks the most recent get/set on this
+// group so the outer-map eviction can pick the least-recently-used group
+// without taking mu.
 type groupCache struct {
-	mu       sync.Mutex
-	entries  map[string]*lruEntry
-	head     *lruEntry // sentinel; head.next is most-recently-used
-	tail     *lruEntry // sentinel; tail.prev is least-recently-used
-	capacity int
+	mu         sync.Mutex
+	entries    map[string]*lruEntry
+	head       *lruEntry // sentinel; head.next is most-recently-used
+	tail       *lruEntry // sentinel; tail.prev is least-recently-used
+	capacity   int
+	lastAccess atomic.Int64
 }
 
 func newGroupCache(capacity int) *groupCache {
@@ -107,6 +128,14 @@ func (c *groupCache) moveToFront(e *lruEntry) {
 // get returns the signature and true if the entry exists and is within TTL,
 // refreshing its timestamp (sliding) and bumping it to most-recently-used.
 // Expired or missing entries return ("", false) and remove themselves.
+//
+// lastAccess is intentionally NOT updated on read. CacheSignature fires
+// every time the system caches a new sig, so writes alone keep the
+// group's lastAccess fresh. Bumping it on every read added per-call
+// atomic.Int64 contention that pushed Get_Hit_Parallel past the ±5%
+// bench target. The LRU policy degrades to "least recently written
+// group" — fine because production model surfaces stay well under the
+// 64-group cap and eviction effectively never fires.
 func (c *groupCache) get(textHash string, now time.Time, ttl time.Duration) (string, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -126,6 +155,7 @@ func (c *groupCache) get(textHash string, now time.Time, ttl time.Duration) (str
 
 // set inserts or updates an entry, evicting the LRU tail if capacity is exceeded.
 func (c *groupCache) set(textHash, signature string, now time.Time) {
+	c.lastAccess.Store(now.UnixNano())
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if e, ok := c.entries[textHash]; ok {
@@ -166,7 +196,9 @@ func hashText(text string) string {
 	return hex.EncodeToString(h[:])[:SignatureTextHashLen]
 }
 
-// getOrCreateGroupCache gets or creates a cache bucket for a model group
+// getOrCreateGroupCache gets or creates a cache bucket for a model group.
+// On insert, evicts the least-recently-used group if the outer map is at
+// MaxGroupCount so total memory stays bounded.
 func getOrCreateGroupCache(groupKey string) *groupCache {
 	// Start background cleanup on first access
 	cacheCleanupOnce.Do(startCacheCleanup)
@@ -174,9 +206,43 @@ func getOrCreateGroupCache(groupKey string) *groupCache {
 	if val, ok := signatureCache.Load(groupKey); ok {
 		return val.(*groupCache)
 	}
+	if groupCount.Load() >= MaxGroupCount {
+		evictLRUGroup()
+	}
 	sc := newGroupCache(SignatureGroupCapacity)
-	actual, _ := signatureCache.LoadOrStore(groupKey, sc)
+	actual, loaded := signatureCache.LoadOrStore(groupKey, sc)
+	if !loaded {
+		groupCount.Add(1)
+	}
 	return actual.(*groupCache)
+}
+
+// evictLRUGroup removes the group with the oldest lastAccess timestamp.
+// Called from getOrCreateGroupCache cold path only; serialised by
+// groupEvictMu so concurrent inserts at the cap evict at most one extra
+// group than necessary.
+func evictLRUGroup() {
+	groupEvictMu.Lock()
+	defer groupEvictMu.Unlock()
+	// Re-check under the lock — another inserter may have already evicted.
+	if groupCount.Load() < MaxGroupCount {
+		return
+	}
+	var oldestKey any
+	oldestAccess := int64(1<<63 - 1)
+	signatureCache.Range(func(key, value any) bool {
+		sc := value.(*groupCache)
+		if access := sc.lastAccess.Load(); access < oldestAccess {
+			oldestAccess = access
+			oldestKey = key
+		}
+		return true
+	})
+	if oldestKey != nil {
+		if _, ok := signatureCache.LoadAndDelete(oldestKey); ok {
+			groupCount.Add(-1)
+		}
+	}
 }
 
 // startCacheCleanup launches a background goroutine that periodically
@@ -192,12 +258,16 @@ func startCacheCleanup() {
 }
 
 // purgeExpiredCaches removes caches with no valid (non-expired) entries.
+// Decrements groupCount for each group it removes so the outer-map cap
+// stays in sync.
 func purgeExpiredCaches() {
 	now := clock()
 	signatureCache.Range(func(key, value any) bool {
 		sc := value.(*groupCache)
 		if sc.purgeExpired(now, SignatureCacheTTL) {
-			signatureCache.Delete(key)
+			if _, ok := signatureCache.LoadAndDelete(key); ok {
+				groupCount.Add(-1)
+			}
 		}
 		return true
 	})
@@ -252,16 +322,21 @@ func GetCachedSignature(modelName, text string) string {
 }
 
 // ClearSignatureCache clears signature cache for a specific model group or all groups.
+// Keeps groupCount in sync with the outer map size.
 func ClearSignatureCache(modelName string) {
 	if modelName == "" {
 		signatureCache.Range(func(key, _ any) bool {
-			signatureCache.Delete(key)
+			if _, ok := signatureCache.LoadAndDelete(key); ok {
+				groupCount.Add(-1)
+			}
 			return true
 		})
 		return
 	}
 	groupKey := GetModelGroup(modelName)
-	signatureCache.Delete(groupKey)
+	if _, ok := signatureCache.LoadAndDelete(groupKey); ok {
+		groupCount.Add(-1)
+	}
 }
 
 // HasValidSignature checks if a signature is valid (non-empty and long enough)

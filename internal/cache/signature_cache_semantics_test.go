@@ -158,6 +158,64 @@ func TestSignatureCache_FullClear_RemovesAllGroups(t *testing.T) {
 	}
 }
 
+func TestSignatureCache_OuterMapBoundedByMaxGroupCount(t *testing.T) {
+	withClockReset(t)
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	// Insert MaxGroupCount + 50 distinct unknown-model-name groups. Each
+	// unknown name resolves to its own outer-map key under GetModelGroup,
+	// so without the bound this would grow unboundedly. Stagger the clock
+	// so lastAccess timestamps differ and LRU eviction is deterministic.
+	const overflow = 50
+	for i := 0; i < MaxGroupCount+overflow; i++ {
+		setClock(base.Add(time.Duration(i) * time.Second))
+		modelName := "unknown-model-" + intToStr(i)
+		CacheSignature(modelName, "text-"+intToStr(i), validSemanticsSig)
+	}
+
+	// Cap holds: groupCount must never exceed MaxGroupCount steady-state
+	// (allow +1 for racy concurrent inserts; this test is sequential so
+	// the cap is exact).
+	if got := groupCount.Load(); got > int64(MaxGroupCount) {
+		t.Fatalf("expected groupCount <= %d, got %d", MaxGroupCount, got)
+	}
+
+	// LRU policy: the earliest-inserted (oldest lastAccess) groups should
+	// have been evicted. Verify the first-inserted group is gone and a
+	// recently-inserted group is still present.
+	setClock(base.Add(time.Duration(MaxGroupCount+overflow) * time.Second))
+	if got := GetCachedSignature("unknown-model-0", "text-0"); got != "" {
+		t.Fatalf("expected oldest group evicted, got %q", got)
+	}
+	recentIdx := MaxGroupCount + overflow - 1
+	recentName := "unknown-model-" + intToStr(recentIdx)
+	if got := GetCachedSignature(recentName, "text-"+intToStr(recentIdx)); got != validSemanticsSig {
+		t.Fatalf("expected recent group intact, got %q", got)
+	}
+}
+
+func intToStr(i int) string {
+	if i == 0 {
+		return "0"
+	}
+	var buf [20]byte
+	pos := len(buf)
+	neg := i < 0
+	if neg {
+		i = -i
+	}
+	for i > 0 {
+		pos--
+		buf[pos] = byte('0' + i%10)
+		i /= 10
+	}
+	if neg {
+		pos--
+		buf[pos] = '-'
+	}
+	return string(buf[pos:])
+}
+
 func TestSignatureCache_RefreshOnRead_PersistsTimestamp(t *testing.T) {
 	withClockReset(t)
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
