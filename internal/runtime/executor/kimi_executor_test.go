@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"strings"
 	"testing"
 
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
@@ -329,6 +330,28 @@ func TestRepairClaudeToolUseHistory_DropsOrphanToolResults(t *testing.T) {
 	}
 	if !gjson.GetBytes(out, `messages.1.content.#(tool_use_id=="call_1")`).Exists() {
 		t.Fatalf("matched tool_result should be preserved: %s", out)
+	}
+}
+
+func TestRepairClaudeToolUseHistory_DropsDelayedToolResults(t *testing.T) {
+	body := []byte(`{
+		"messages":[
+			{"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"read_file","input":{}}]},
+			{"role":"user","content":[{"type":"text","text":"not a tool result"}]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":"late"}]}
+		]
+	}`)
+
+	out, err := repairClaudeToolUseHistory(body, "test")
+	if err != nil {
+		t.Fatalf("repairClaudeToolUseHistory() error = %v", err)
+	}
+
+	if strings.Contains(string(out), `"tool_use_id":"call_1"`) {
+		t.Fatalf("delayed tool_result should be removed: %s", out)
+	}
+	if strings.Contains(string(out), `"id":"call_1"`) {
+		t.Fatalf("unanswered tool_use should be removed: %s", out)
 	}
 }
 

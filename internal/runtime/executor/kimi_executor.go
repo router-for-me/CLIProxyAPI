@@ -588,9 +588,11 @@ func dropOrphanClaudeToolResults(body []byte) ([]byte, int, error) {
 			}
 			if !contentChanged {
 				outMessages, _ = sjson.SetRawBytes(outMessages, "-1", []byte(msg.Raw))
+				pending = map[string]bool{}
 				continue
 			}
 			if keptParts == 0 {
+				pending = map[string]bool{}
 				continue
 			}
 			msgOut, err := sjson.SetRawBytes([]byte(msg.Raw), "content", contentOut)
@@ -598,6 +600,7 @@ func dropOrphanClaudeToolResults(body []byte) ([]byte, int, error) {
 				return body, 0, fmt.Errorf("failed to drop orphan Claude tool_result: %w", err)
 			}
 			outMessages, _ = sjson.SetRawBytes(outMessages, "-1", msgOut)
+			pending = map[string]bool{}
 		default:
 			pending = map[string]bool{}
 			outMessages, _ = sjson.SetRawBytes(outMessages, "-1", []byte(msg.Raw))
