@@ -1165,6 +1165,43 @@ func TestDowngradeClaudeToolSearchForCompat(t *testing.T) {
 	}
 }
 
+func TestDowngradeClaudeUnsupportedServerToolsForMiniMax(t *testing.T) {
+	payload := []byte(`{
+		"tools":[
+			{"type":"web_search_20250305","name":"web_search","max_uses":8},
+			{"name":"read_file","description":"Read files","input_schema":{"type":"object"}}
+		],
+		"tool_choice":{"type":"tool","name":"web_search"},
+		"messages":[
+			{"role":"user","content":[{"type":"text","text":"search"}]},
+			{"role":"assistant","content":[
+				{"type":"server_tool_use","id":"srvtoolu_1","name":"web_search","input":{"query":"current date"}},
+				{"type":"web_search_tool_result","tool_use_id":"srvtoolu_1","content":[]}
+			]}
+		]
+	}`)
+
+	out := downgradeClaudeToolSearchForCompat("https://api.minimax.io/anthropic", payload)
+
+	if got := len(gjson.GetBytes(out, "tools").Array()); got != 1 {
+		t.Fatalf("tools length = %d, want 1: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "read_file" {
+		t.Fatalf("remaining tool = %q, want read_file: %s", got, string(out))
+	}
+	if gjson.GetBytes(out, "tool_choice").Exists() {
+		t.Fatalf("tool_choice for removed server tool should be removed: %s", string(out))
+	}
+	for _, partType := range []string{"server_tool_use", "web_search_tool_result"} {
+		if gjson.GetBytes(out, `messages.1.content.#(type=="`+partType+`")`).Exists() {
+			t.Fatalf("%s should be downgraded away: %s", partType, string(out))
+		}
+	}
+	if err := validateClaudeUpstreamPayload("https://api.minimax.io/anthropic", out); err != nil {
+		t.Fatalf("downgraded MiniMax payload should pass validation: %v", err)
+	}
+}
+
 func TestDowngradeClaudeToolSearchForCompatSkipsOfficialAnthropic(t *testing.T) {
 	payload := []byte(`{"tools":[{"type":"tool_search_tool_regex_20251119","name":"tool_search_tool_regex"}]}`)
 	out := downgradeClaudeToolSearchForCompat("https://api.anthropic.com", payload)

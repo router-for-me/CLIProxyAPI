@@ -1105,12 +1105,14 @@ func downgradeClaudeToolSearchForCompat(baseURL string, body []byte) []byte {
 		return body
 	}
 
+	compatKind := config.InferCompatKindFromBaseURL(baseURL)
 	var root map[string]any
 	if err := json.Unmarshal(body, &root); err != nil {
 		return body
 	}
 
 	changed := false
+	removedToolNames := make(map[string]bool)
 	if tools, ok := root["tools"].([]any); ok {
 		cleanedTools := make([]any, 0, len(tools))
 		for _, rawTool := range tools {
@@ -1121,7 +1123,10 @@ func downgradeClaudeToolSearchForCompat(baseURL string, body []byte) []byte {
 			}
 			toolType := strings.TrimSpace(compatStringValue(tool["type"]))
 			toolName := strings.TrimSpace(compatStringValue(tool["name"]))
-			if isClaudeToolSearchTool(toolType, toolName) {
+			if isClaudeToolSearchTool(toolType, toolName) || isUnsupportedClaudeServerToolForCompat(compatKind, toolType, tool) {
+				if toolName != "" {
+					removedToolNames[toolName] = true
+				}
 				changed = true
 				continue
 			}
@@ -1135,6 +1140,16 @@ func downgradeClaudeToolSearchForCompat(baseURL string, body []byte) []byte {
 			delete(root, "tools")
 		} else {
 			root["tools"] = cleanedTools
+		}
+	}
+
+	if len(removedToolNames) > 0 {
+		if toolChoice, ok := root["tool_choice"].(map[string]any); ok {
+			choiceName := strings.TrimSpace(compatStringValue(toolChoice["name"]))
+			if strings.TrimSpace(compatStringValue(toolChoice["type"])) == "tool" && removedToolNames[choiceName] {
+				delete(root, "tool_choice")
+				changed = true
+			}
 		}
 	}
 
@@ -1171,12 +1186,20 @@ func downgradeClaudeToolSearchForCompat(baseURL string, body []byte) []byte {
 	if err != nil || !gjson.ValidBytes(out) {
 		return body
 	}
-	log.WithField("compat_kind", config.InferCompatKindFromBaseURL(baseURL)).Debug("downgraded Claude tool search payload for upstream compatibility")
+	log.WithField("compat_kind", compatKind).Debug("downgraded Claude tool search payload for upstream compatibility")
 	return out
 }
 
 func isClaudeToolSearchTool(toolType string, toolName string) bool {
 	return strings.HasPrefix(toolType, "tool_search_tool_") || strings.HasPrefix(toolName, "tool_search_tool_")
+}
+
+func isUnsupportedClaudeServerToolForCompat(compatKind string, toolType string, tool map[string]any) bool {
+	if compatKind != "minimax" || toolType == "" {
+		return false
+	}
+	_, hasInputSchema := tool["input_schema"]
+	return !hasInputSchema
 }
 
 func downgradeClaudeToolSearchContent(content []any) ([]any, bool) {
@@ -1199,6 +1222,9 @@ func downgradeClaudeToolSearchContent(content []any) ([]any, bool) {
 				cleaned = append(cleaned, map[string]any{"type": "text", "text": text})
 			}
 			continue
+		case isClaudeServerToolResultPart(partType):
+			changed = true
+			continue
 		case partType == "tool_reference":
 			changed = true
 			if text := claudeToolReferenceText(part); text != "" {
@@ -1215,6 +1241,10 @@ func downgradeClaudeToolSearchContent(content []any) ([]any, bool) {
 		cleaned = append(cleaned, part)
 	}
 	return cleaned, changed
+}
+
+func isClaudeServerToolResultPart(partType string) bool {
+	return partType != "" && partType != "tool_result" && strings.HasSuffix(partType, "_tool_result")
 }
 
 func downgradeClaudeToolResultReferences(part map[string]any) (map[string]any, bool) {

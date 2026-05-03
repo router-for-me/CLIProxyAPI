@@ -346,17 +346,127 @@ func repairKimiClaudeToolUseRequest(req cliproxyexecutor.Request, opts cliproxye
 }
 
 func repairClaudeToolUseHistory(body []byte, executorName string) ([]byte, error) {
-	repaired, removed, err := dropUnansweredClaudeToolUses(body)
+	repaired, merged, err := coalesceAdjacentClaudeToolResultMessages(body)
 	if err != nil {
 		return body, err
 	}
-	if removed > 0 {
+	repaired, removedToolUses, err := dropUnansweredClaudeToolUses(repaired)
+	if err != nil {
+		return body, err
+	}
+	repaired, removedToolResults, err := dropOrphanClaudeToolResults(repaired)
+	if err != nil {
+		return body, err
+	}
+	if merged > 0 || removedToolUses > 0 || removedToolResults > 0 {
 		log.WithFields(log.Fields{
-			"executor":          executorName,
-			"removed_tool_uses": removed,
+			"executor":             executorName,
+			"merged_tool_results":  merged,
+			"removed_tool_uses":    removedToolUses,
+			"removed_tool_results": removedToolResults,
 		}).Warn("dropped unanswered Claude tool_use history")
 	}
 	return repaired, nil
+}
+
+func coalesceAdjacentClaudeToolResultMessages(body []byte) ([]byte, int, error) {
+	if len(body) == 0 || !gjson.ValidBytes(body) {
+		return body, 0, nil
+	}
+
+	messages := gjson.GetBytes(body, "messages")
+	if !messages.Exists() || !messages.IsArray() {
+		return body, 0, nil
+	}
+
+	msgs := messages.Array()
+	outMessages := []byte(`[]`)
+	changed := false
+	merged := 0
+
+	for msgIdx := 0; msgIdx < len(msgs); msgIdx++ {
+		msg := msgs[msgIdx]
+		if strings.TrimSpace(msg.Get("role").String()) != "assistant" || !claudeMessageHasToolUse(msg) || msgIdx+1 >= len(msgs) {
+			outMessages, _ = sjson.SetRawBytes(outMessages, "-1", []byte(msg.Raw))
+			continue
+		}
+
+		firstResults, ok := claudeToolResultOnlyContent(msgs[msgIdx+1])
+		if !ok {
+			outMessages, _ = sjson.SetRawBytes(outMessages, "-1", []byte(msg.Raw))
+			continue
+		}
+
+		mergedContent := []byte(`[]`)
+		for _, part := range firstResults {
+			mergedContent, _ = sjson.SetRawBytes(mergedContent, "-1", []byte(part.Raw))
+		}
+
+		lastResultIdx := msgIdx + 1
+		for nextIdx := msgIdx + 2; nextIdx < len(msgs); nextIdx++ {
+			nextResults, nextOK := claudeToolResultOnlyContent(msgs[nextIdx])
+			if !nextOK {
+				break
+			}
+			for _, part := range nextResults {
+				mergedContent, _ = sjson.SetRawBytes(mergedContent, "-1", []byte(part.Raw))
+			}
+			lastResultIdx = nextIdx
+			merged++
+			changed = true
+		}
+
+		outMessages, _ = sjson.SetRawBytes(outMessages, "-1", []byte(msg.Raw))
+		firstMsg, err := sjson.SetRawBytes([]byte(msgs[msgIdx+1].Raw), "content", mergedContent)
+		if err != nil {
+			return body, 0, fmt.Errorf("failed to merge Claude tool_result messages: %w", err)
+		}
+		outMessages, _ = sjson.SetRawBytes(outMessages, "-1", firstMsg)
+		msgIdx = lastResultIdx
+	}
+
+	if !changed {
+		return body, 0, nil
+	}
+
+	out, err := sjson.SetRawBytes(body, "messages", outMessages)
+	if err != nil {
+		return body, 0, fmt.Errorf("failed to update Claude messages: %w", err)
+	}
+	return out, merged, nil
+}
+
+func claudeMessageHasToolUse(msg gjson.Result) bool {
+	content := msg.Get("content")
+	if !content.IsArray() {
+		return false
+	}
+	for _, part := range content.Array() {
+		if part.Get("type").String() == "tool_use" {
+			return true
+		}
+	}
+	return false
+}
+
+func claudeToolResultOnlyContent(msg gjson.Result) ([]gjson.Result, bool) {
+	if strings.TrimSpace(msg.Get("role").String()) != "user" {
+		return nil, false
+	}
+	content := msg.Get("content")
+	if !content.IsArray() {
+		return nil, false
+	}
+	parts := content.Array()
+	if len(parts) == 0 {
+		return nil, false
+	}
+	for _, part := range parts {
+		if part.Get("type").String() != "tool_result" {
+			return nil, false
+		}
+	}
+	return parts, true
 }
 
 func dropUnansweredClaudeToolUses(body []byte) ([]byte, int, error) {
@@ -427,6 +537,100 @@ func dropUnansweredClaudeToolUses(body []byte) ([]byte, int, error) {
 		return body, 0, fmt.Errorf("failed to update Claude messages: %w", err)
 	}
 	return out, removed, nil
+}
+
+func dropOrphanClaudeToolResults(body []byte) ([]byte, int, error) {
+	if len(body) == 0 || !gjson.ValidBytes(body) {
+		return body, 0, nil
+	}
+
+	messages := gjson.GetBytes(body, "messages")
+	if !messages.Exists() || !messages.IsArray() {
+		return body, 0, nil
+	}
+
+	msgs := messages.Array()
+	outMessages := []byte(`[]`)
+	pending := map[string]bool{}
+	changed := false
+	removed := 0
+
+	for _, msg := range msgs {
+		role := strings.TrimSpace(msg.Get("role").String())
+		switch role {
+		case "assistant":
+			pending = claudeToolUseIDsInMessage(msg)
+			outMessages, _ = sjson.SetRawBytes(outMessages, "-1", []byte(msg.Raw))
+		case "user":
+			content := msg.Get("content")
+			if !content.IsArray() {
+				pending = map[string]bool{}
+				outMessages, _ = sjson.SetRawBytes(outMessages, "-1", []byte(msg.Raw))
+				continue
+			}
+
+			contentOut := []byte(`[]`)
+			contentChanged := false
+			keptParts := 0
+			for _, part := range content.Array() {
+				if part.Get("type").String() == "tool_result" {
+					toolUseID := strings.TrimSpace(part.Get("tool_use_id").String())
+					if toolUseID == "" || !pending[toolUseID] {
+						contentChanged = true
+						changed = true
+						removed++
+						continue
+					}
+					delete(pending, toolUseID)
+				}
+				contentOut, _ = sjson.SetRawBytes(contentOut, "-1", []byte(part.Raw))
+				keptParts++
+			}
+			if !contentChanged {
+				outMessages, _ = sjson.SetRawBytes(outMessages, "-1", []byte(msg.Raw))
+				continue
+			}
+			if keptParts == 0 {
+				continue
+			}
+			msgOut, err := sjson.SetRawBytes([]byte(msg.Raw), "content", contentOut)
+			if err != nil {
+				return body, 0, fmt.Errorf("failed to drop orphan Claude tool_result: %w", err)
+			}
+			outMessages, _ = sjson.SetRawBytes(outMessages, "-1", msgOut)
+		default:
+			pending = map[string]bool{}
+			outMessages, _ = sjson.SetRawBytes(outMessages, "-1", []byte(msg.Raw))
+		}
+	}
+
+	if !changed {
+		return body, 0, nil
+	}
+
+	out, err := sjson.SetRawBytes(body, "messages", outMessages)
+	if err != nil {
+		return body, 0, fmt.Errorf("failed to update Claude messages: %w", err)
+	}
+	return out, removed, nil
+}
+
+func claudeToolUseIDsInMessage(msg gjson.Result) map[string]bool {
+	ids := make(map[string]bool)
+	content := msg.Get("content")
+	if !content.IsArray() {
+		return ids
+	}
+	for _, part := range content.Array() {
+		if part.Get("type").String() != "tool_use" {
+			continue
+		}
+		toolUseID := strings.TrimSpace(part.Get("id").String())
+		if toolUseID != "" {
+			ids[toolUseID] = true
+		}
+	}
+	return ids
 }
 
 func claudeToolResultIDsInNextUserMessage(messages []gjson.Result, assistantIdx int) map[string]bool {

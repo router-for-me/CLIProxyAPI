@@ -273,6 +273,65 @@ func TestDropUnansweredClaudeToolUses_DropsToolOnlyAssistantMessage(t *testing.T
 	}
 }
 
+func TestRepairClaudeToolUseHistory_CoalescesSplitToolResults(t *testing.T) {
+	body := []byte(`{
+		"messages":[
+			{"role":"assistant","content":[
+				{"type":"tool_use","id":"call_1","name":"read_file","input":{}},
+				{"type":"tool_use","id":"call_2","name":"search_file_content","input":{}}
+			]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":"a"}]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_2","content":"b"}]}
+		]
+	}`)
+
+	out, err := repairClaudeToolUseHistory(body, "test")
+	if err != nil {
+		t.Fatalf("repairClaudeToolUseHistory() error = %v", err)
+	}
+
+	msgs := gjson.GetBytes(out, "messages").Array()
+	if len(msgs) != 2 {
+		t.Fatalf("messages length = %d, want 2: %s", len(msgs), gjson.GetBytes(out, "messages").Raw)
+	}
+	if got := len(msgs[0].Get("content").Array()); got != 2 {
+		t.Fatalf("assistant content length = %d, want 2: %s", got, msgs[0].Raw)
+	}
+	if got := len(msgs[1].Get("content").Array()); got != 2 {
+		t.Fatalf("tool result content length = %d, want 2: %s", got, msgs[1].Raw)
+	}
+	if !gjson.GetBytes(out, `messages.0.content.#(id=="call_2")`).Exists() {
+		t.Fatalf("call_2 tool_use should be preserved: %s", out)
+	}
+	if !gjson.GetBytes(out, `messages.1.content.#(tool_use_id=="call_2")`).Exists() {
+		t.Fatalf("call_2 tool_result should be preserved: %s", out)
+	}
+}
+
+func TestRepairClaudeToolUseHistory_DropsOrphanToolResults(t *testing.T) {
+	body := []byte(`{
+		"messages":[
+			{"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"read_file","input":{}}]},
+			{"role":"user","content":[
+				{"type":"tool_result","tool_use_id":"call_1","content":"a"},
+				{"type":"tool_result","tool_use_id":"call_missing","content":"orphan"}
+			]}
+		]
+	}`)
+
+	out, err := repairClaudeToolUseHistory(body, "test")
+	if err != nil {
+		t.Fatalf("repairClaudeToolUseHistory() error = %v", err)
+	}
+
+	if gjson.GetBytes(out, `messages.1.content.#(tool_use_id=="call_missing")`).Exists() {
+		t.Fatalf("orphan tool_result should be removed: %s", out)
+	}
+	if !gjson.GetBytes(out, `messages.1.content.#(tool_use_id=="call_1")`).Exists() {
+		t.Fatalf("matched tool_result should be preserved: %s", out)
+	}
+}
+
 func TestRepairKimiClaudeToolUseRequest_RepairsPayloadAndOriginal(t *testing.T) {
 	body := []byte(`{
 		"messages":[
