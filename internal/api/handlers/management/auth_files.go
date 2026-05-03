@@ -222,17 +222,21 @@ func stopForwarderInstance(port int, forwarder *callbackForwarder) {
 }
 
 func (h *Handler) managementCallbackURL(path string) (string, error) {
-	if h == nil || h.cfg() == nil || h.cfg().Port <= 0 {
+	// Snapshot config once so a hot-reload mid-call cannot mix Port from
+	// snapshot N with TLS.Enable from snapshot N+1 (Codex Phase C round-4
+	// review BLOCKER #2).
+	cfg := h.cfg()
+	if cfg == nil || cfg.Port <= 0 {
 		return "", fmt.Errorf("server port is not configured")
 	}
 	if !strings.HasPrefix(path, "/") {
 		path = "/" + path
 	}
 	scheme := "http"
-	if h.cfg().TLS.Enable {
+	if cfg.TLS.Enable {
 		scheme = "https"
 	}
-	return fmt.Sprintf("%s://127.0.0.1:%d%s", scheme, h.cfg().Port, path), nil
+	return fmt.Sprintf("%s://127.0.0.1:%d%s", scheme, cfg.Port, path), nil
 }
 
 func (h *Handler) ListAuthFiles(c *gin.Context) {
@@ -309,7 +313,16 @@ func (h *Handler) GetAuthFileModels(c *gin.Context) {
 
 // List auth files from disk when the auth manager is unavailable.
 func (h *Handler) listAuthFilesFromDisk(c *gin.Context) {
-	entries, err := os.ReadDir(h.cfg().AuthDir)
+	// Snapshot config once so the AuthDir we list and the AuthDir we
+	// join filenames against are guaranteed to be the same (Codex Phase
+	// C round-4 review BLOCKER #2).
+	cfg := h.cfg()
+	if cfg == nil {
+		c.JSON(500, gin.H{"error": "config not initialized"})
+		return
+	}
+	authDir := cfg.AuthDir
+	entries, err := os.ReadDir(authDir)
 	if err != nil {
 		c.JSON(500, gin.H{"error": fmt.Sprintf("failed to read auth dir: %v", err)})
 		return
@@ -327,7 +340,7 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context) {
 			fileData := gin.H{"name": name, "size": info.Size(), "modtime": info.ModTime()}
 
 			// Read file to get type field
-			full := filepath.Join(h.cfg().AuthDir, name)
+			full := filepath.Join(authDir, name)
 			if data, errRead := os.ReadFile(full); errRead == nil {
 				typeValue := gjson.GetBytes(data, "type").String()
 				emailValue := gjson.GetBytes(data, "email").String()
@@ -669,7 +682,16 @@ func (h *Handler) DeleteAuthFile(c *gin.Context) {
 	}
 	ctx := c.Request.Context()
 	if all := c.Query("all"); all == "true" || all == "1" || all == "*" {
-		entries, err := os.ReadDir(h.cfg().AuthDir)
+		// Snapshot config once so we list and join from the same AuthDir
+		// even if a hot-reload swaps the path mid-loop (Codex Phase C
+		// round-4 review BLOCKER #2).
+		cfg := h.cfg()
+		if cfg == nil {
+			c.JSON(500, gin.H{"error": "config not initialized"})
+			return
+		}
+		authDir := cfg.AuthDir
+		entries, err := os.ReadDir(authDir)
 		if err != nil {
 			c.JSON(500, gin.H{"error": fmt.Sprintf("failed to read auth dir: %v", err)})
 			return
@@ -683,7 +705,7 @@ func (h *Handler) DeleteAuthFile(c *gin.Context) {
 			if !strings.HasSuffix(strings.ToLower(name), ".json") {
 				continue
 			}
-			full := filepath.Join(h.cfg().AuthDir, name)
+			full := filepath.Join(authDir, name)
 			if !filepath.IsAbs(full) {
 				if abs, errAbs := filepath.Abs(full); errAbs == nil {
 					full = abs

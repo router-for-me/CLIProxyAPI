@@ -48,9 +48,21 @@ const attemptMaxIdleTime = 2 * time.Hour
 // The snapshot pointer returned from cfg() is treated as immutable by all
 // readers — any mutation MUST go through applyConfigChange so the new
 // snapshot is published as a fresh allocation.
+// commitFn is the wrapper type stored in commitPtr so atomic.Pointer can hold
+// a `func(*config.Config)` (atomic.Pointer requires a pointer type, not a
+// raw func value).
+type commitFn struct {
+	fn func(*config.Config)
+}
+
 type Handler struct {
 	cfgPtr atomic.Pointer[config.Config]
-	commit func(*config.Config) // optional Server-side fan-out hook
+	// commitPtr holds the optional Server-side fan-out hook behind
+	// atomic.Pointer so SetConfigCommitter can run lock-free at any point
+	// in the lifecycle (including after the HTTP server has begun serving)
+	// without racing concurrent applyConfigChange reads. Codex Phase C
+	// round-4 review IMPORTANT #3.
+	commitPtr atomic.Pointer[commitFn]
 	// authManagerPtr holds the auth manager behind atomic.Pointer so SetAuthManager
 	// can run lock-free. The previous mutex-guarded form deadlocked when
 	// applyConfigChange held h.mu and the commit hook reached SetAuthManager
@@ -118,11 +130,31 @@ func (h *Handler) cfg() *config.Config {
 // If no committer is set, applyConfigChange still publishes the snapshot
 // locally — useful for tests that want behavior-equivalent persistence
 // without a full Server.
+//
+// Lock-free atomic store; safe to call at any lifecycle point including
+// after the HTTP server begins serving (Codex Phase C round-4 review
+// IMPORTANT #3).
 func (h *Handler) SetConfigCommitter(commit func(*config.Config)) {
 	if h == nil {
 		return
 	}
-	h.commit = commit
+	if commit == nil {
+		h.commitPtr.Store(nil)
+		return
+	}
+	h.commitPtr.Store(&commitFn{fn: commit})
+}
+
+// loadCommit returns the currently-registered commit hook, or nil if none.
+func (h *Handler) loadCommit() func(*config.Config) {
+	if h == nil {
+		return nil
+	}
+	c := h.commitPtr.Load()
+	if c == nil {
+		return nil
+	}
+	return c.fn
 }
 
 // cloneConfigSnapshot returns a deep copy of cur via YAML round-trip. Used by
@@ -204,8 +236,8 @@ func (h *Handler) applyConfigChange(c *gin.Context, fn func(*config.Config)) boo
 	// C re-review BLOCKER #1 follow-up). This is now safe because both
 	// SetConfig and SetAuthManager are lock-free atomic stores; commit's
 	// transitive call into SetAuthManager no longer re-locks h.mu.
-	if h.commit != nil {
-		h.commit(next)
+	if commit := h.loadCommit(); commit != nil {
+		commit(next)
 	}
 
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})

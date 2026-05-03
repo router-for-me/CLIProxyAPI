@@ -444,6 +444,105 @@ func (s *Service) registerResolvedModelsForAuth(a *coreauth.Auth, providerKey st
 	GlobalModelRegistry().RegisterClient(a.ID, providerKey, models)
 }
 
+// buildReloadCallback returns the closure that fans a fresh config out to
+// every Service-level subsystem that needs to observe it: selector
+// strategy, retry config, pprof, the api.Server, the core auth Manager,
+// OAuth alias map, and provider executors. Used by both the file watcher
+// (passed to watcherFactory) and the management committer (set on the
+// api.Server via SetManagementCommitter) so both reload sources fan out
+// identically.
+func (s *Service) buildReloadCallback() func(*config.Config) {
+	return func(newCfg *config.Config) {
+		previousStrategy := ""
+		var previousSessionAffinity bool
+		var previousSessionAffinityTTL string
+		s.cfgMu.RLock()
+		if s.cfg != nil {
+			previousStrategy = strings.ToLower(strings.TrimSpace(s.cfg.Routing.Strategy))
+			previousSessionAffinity = s.cfg.Routing.ClaudeCodeSessionAffinity || s.cfg.Routing.SessionAffinity
+			previousSessionAffinityTTL = s.cfg.Routing.SessionAffinityTTL
+		}
+		s.cfgMu.RUnlock()
+
+		if newCfg == nil {
+			s.cfgMu.RLock()
+			newCfg = s.cfg
+			s.cfgMu.RUnlock()
+		}
+		if newCfg == nil {
+			return
+		}
+
+		nextStrategy := strings.ToLower(strings.TrimSpace(newCfg.Routing.Strategy))
+		normalizeStrategy := func(strategy string) string {
+			switch strategy {
+			case "fill-first", "fillfirst", "ff":
+				return "fill-first"
+			default:
+				return "round-robin"
+			}
+		}
+		previousStrategy = normalizeStrategy(previousStrategy)
+		nextStrategy = normalizeStrategy(nextStrategy)
+
+		nextSessionAffinity := newCfg.Routing.ClaudeCodeSessionAffinity || newCfg.Routing.SessionAffinity
+		nextSessionAffinityTTL := newCfg.Routing.SessionAffinityTTL
+
+		selectorChanged := previousStrategy != nextStrategy ||
+			previousSessionAffinity != nextSessionAffinity ||
+			previousSessionAffinityTTL != nextSessionAffinityTTL
+
+		if s.coreManager != nil && selectorChanged {
+			var selector coreauth.Selector
+			switch nextStrategy {
+			case "fill-first":
+				selector = &coreauth.FillFirstSelector{}
+			default:
+				selector = &coreauth.RoundRobinSelector{}
+			}
+
+			if nextSessionAffinity {
+				ttl := time.Hour
+				if ttlStr := strings.TrimSpace(nextSessionAffinityTTL); ttlStr != "" {
+					if parsed, err := time.ParseDuration(ttlStr); err == nil && parsed > 0 {
+						ttl = parsed
+					}
+				}
+				selector = coreauth.NewSessionAffinitySelectorWithConfig(coreauth.SessionAffinityConfig{
+					Fallback: selector,
+					TTL:      ttl,
+				})
+			}
+
+			s.coreManager.SetSelector(selector)
+		}
+
+		s.applyRetryConfig(newCfg)
+		s.applyPprofConfig(newCfg)
+		if s.server != nil {
+			s.server.UpdateClients(newCfg)
+		}
+		s.cfgMu.Lock()
+		s.cfg = newCfg
+		s.cfgMu.Unlock()
+		if s.coreManager != nil {
+			s.coreManager.SetConfig(newCfg)
+			s.coreManager.SetOAuthModelAlias(newCfg.OAuthModelAlias)
+		}
+		s.rebindExecutors()
+		// Trigger watcher auth refresh so config-defined API key auths
+		// are re-synthesized and dispatched to subscribers in lockstep
+		// with the config swap (Codex Phase C round-4 review BLOCKER #1).
+		// On the file-watcher reload path this is redundant — the watcher
+		// already calls refreshAuthState after reloadCallback. On the
+		// management-commit path it's the only mechanism that re-syncs
+		// auth state after a Put/Patch/Delete to API key lists.
+		if s.watcher != nil {
+			s.watcher.RefreshAuthState(true)
+		}
+	}
+}
+
 // rebindExecutors refreshes provider executors so they observe the latest configuration.
 func (s *Service) rebindExecutors() {
 	if s == nil || s.coreManager == nil {
@@ -551,6 +650,17 @@ func (s *Service) Run(ctx context.Context) error {
 		s.hooks.OnBeforeStart(s.cfg)
 	}
 
+	// Define reloadCallback and wire the management committer BEFORE the
+	// HTTP server starts serving. Without that ordering, mgmt writes that
+	// arrive between server.Start() and SetManagementCommitter() would
+	// fire only the default partial hook (Server.UpdateClients) and skip
+	// coreManager.SetConfig/SetOAuthModelAlias/rebindExecutors (Codex
+	// Phase C round-4 review IMPORTANT #3).
+	reloadCallback := s.buildReloadCallback()
+	if s.server != nil {
+		s.server.SetManagementCommitter(reloadCallback)
+	}
+
 	// Register callback for startup and periodic model catalog refresh.
 	// When remote model definitions change, re-register models for affected providers.
 	// This intentionally rebuilds per-auth model availability from the latest catalog
@@ -608,96 +718,6 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 
 	var watcherWrapper *WatcherWrapper
-	reloadCallback := func(newCfg *config.Config) {
-		previousStrategy := ""
-		var previousSessionAffinity bool
-		var previousSessionAffinityTTL string
-		s.cfgMu.RLock()
-		if s.cfg != nil {
-			previousStrategy = strings.ToLower(strings.TrimSpace(s.cfg.Routing.Strategy))
-			previousSessionAffinity = s.cfg.Routing.ClaudeCodeSessionAffinity || s.cfg.Routing.SessionAffinity
-			previousSessionAffinityTTL = s.cfg.Routing.SessionAffinityTTL
-		}
-		s.cfgMu.RUnlock()
-
-		if newCfg == nil {
-			s.cfgMu.RLock()
-			newCfg = s.cfg
-			s.cfgMu.RUnlock()
-		}
-		if newCfg == nil {
-			return
-		}
-
-		nextStrategy := strings.ToLower(strings.TrimSpace(newCfg.Routing.Strategy))
-		normalizeStrategy := func(strategy string) string {
-			switch strategy {
-			case "fill-first", "fillfirst", "ff":
-				return "fill-first"
-			default:
-				return "round-robin"
-			}
-		}
-		previousStrategy = normalizeStrategy(previousStrategy)
-		nextStrategy = normalizeStrategy(nextStrategy)
-
-		nextSessionAffinity := newCfg.Routing.ClaudeCodeSessionAffinity || newCfg.Routing.SessionAffinity
-		nextSessionAffinityTTL := newCfg.Routing.SessionAffinityTTL
-
-		selectorChanged := previousStrategy != nextStrategy ||
-			previousSessionAffinity != nextSessionAffinity ||
-			previousSessionAffinityTTL != nextSessionAffinityTTL
-
-		if s.coreManager != nil && selectorChanged {
-			var selector coreauth.Selector
-			switch nextStrategy {
-			case "fill-first":
-				selector = &coreauth.FillFirstSelector{}
-			default:
-				selector = &coreauth.RoundRobinSelector{}
-			}
-
-			if nextSessionAffinity {
-				ttl := time.Hour
-				if ttlStr := strings.TrimSpace(nextSessionAffinityTTL); ttlStr != "" {
-					if parsed, err := time.ParseDuration(ttlStr); err == nil && parsed > 0 {
-						ttl = parsed
-					}
-				}
-				selector = coreauth.NewSessionAffinitySelectorWithConfig(coreauth.SessionAffinityConfig{
-					Fallback: selector,
-					TTL:      ttl,
-				})
-			}
-
-			s.coreManager.SetSelector(selector)
-		}
-
-		s.applyRetryConfig(newCfg)
-		s.applyPprofConfig(newCfg)
-		if s.server != nil {
-			s.server.UpdateClients(newCfg)
-		}
-		s.cfgMu.Lock()
-		s.cfg = newCfg
-		s.cfgMu.Unlock()
-		if s.coreManager != nil {
-			s.coreManager.SetConfig(newCfg)
-			s.coreManager.SetOAuthModelAlias(newCfg.OAuthModelAlias)
-		}
-		s.rebindExecutors()
-	}
-
-	// Route management commits through the same reload path as the file
-	// watcher so PUT/PATCH/DELETE responses don't return 200 with the
-	// change only half-applied (Codex Phase C round-3 review BLOCKER #1).
-	// Without this override, mgmt commits would only call
-	// Server.UpdateClients and skip coreManager.SetConfig,
-	// SetOAuthModelAlias, and rebindExecutors — leaving executor layer
-	// stale until the watcher fires.
-	if s.server != nil {
-		s.server.SetManagementCommitter(reloadCallback)
-	}
 
 	watcherWrapper, err = s.watcherFactory(s.configPath, s.cfg.AuthDir, reloadCallback)
 	if err != nil {

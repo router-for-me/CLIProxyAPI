@@ -89,6 +89,7 @@ type WatcherWrapper struct {
 	snapshotAuths         func() []*coreauth.Auth
 	setUpdateQueue        func(queue chan<- watcher.AuthUpdate)
 	dispatchRuntimeUpdate func(update watcher.AuthUpdate) bool
+	refreshAuthState      func(force bool)
 }
 
 // Start proxies to the underlying watcher Start implementation.
@@ -145,4 +146,19 @@ func (w *WatcherWrapper) SetAuthUpdateQueue(queue chan<- watcher.AuthUpdate) {
 		return
 	}
 	w.setUpdateQueue(queue)
+}
+
+// RefreshAuthState re-synthesizes auths from the current config snapshot
+// and dispatches any add/modify/delete updates to subscribers. Used by
+// the management commit hook after a config write so config-defined API
+// key auths reach core auth state without waiting for the file watcher
+// to notice the saved YAML (Codex Phase C round-4 review BLOCKER #1).
+//
+// `force` requests dispatching modify events even when computed auth
+// state is unchanged.
+func (w *WatcherWrapper) RefreshAuthState(force bool) {
+	if w == nil || w.refreshAuthState == nil {
+		return
+	}
+	w.refreshAuthState(force)
 }

@@ -50,11 +50,13 @@ func (h *Handler) patchStringList(c *gin.Context, accessor func(*config.Config) 
 	if body.Index != nil && body.Value != nil {
 		h.applyConfigChange(c, func(cfg *config.Config) {
 			target := accessor(cfg)
-			if *body.Index >= 0 && *body.Index < len(*target) {
-				(*target)[*body.Index] = *body.Value
-				if after != nil {
-					after(cfg)
-				}
+			if *body.Index < 0 || *body.Index >= len(*target) {
+				c.JSON(404, gin.H{"error": "item not found"})
+				return
+			}
+			(*target)[*body.Index] = *body.Value
+			if after != nil {
+				after(cfg)
 			}
 		})
 		return

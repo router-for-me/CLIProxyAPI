@@ -159,8 +159,8 @@ func (h *Handler) PutConfigYAML(c *gin.Context) {
 		return
 	}
 	h.cfgPtr.Store(newCfg)
-	if h.commit != nil {
-		h.commit(newCfg)
+	if commit := h.loadCommit(); commit != nil {
+		commit(newCfg)
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true, "changed": []string{"config"}})
 }

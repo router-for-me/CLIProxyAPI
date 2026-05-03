@@ -96,6 +96,18 @@ func (w *Watcher) refreshAuthState(force bool) {
 	w.dispatchAuthUpdates(updates)
 }
 
+// RefreshAuthState is the exported entry point used by management writes
+// to re-synthesize auths from the current config snapshot and dispatch
+// any add/modify/delete updates to subscribers, without waiting for the
+// filesystem watcher to notice the saved YAML. Codex Phase C round-4
+// review BLOCKER #1.
+func (w *Watcher) RefreshAuthState(force bool) {
+	if w == nil {
+		return
+	}
+	w.refreshAuthState(force)
+}
+
 func (w *Watcher) prepareAuthUpdatesLocked(auths []*coreauth.Auth, force bool) []AuthUpdate {
 	newState := make(map[string]*coreauth.Auth, len(auths))
 	for _, auth := range auths {
