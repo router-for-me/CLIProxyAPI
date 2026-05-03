@@ -1422,10 +1422,10 @@ func getWorkloadFromContext(ctx context.Context) string {
 }
 
 // getCloakConfigFromAuth extracts cloak configuration from auth attributes.
-// Returns (cloakMode, strictMode, sensitiveWords, cacheUserID).
-func getCloakConfigFromAuth(auth *cliproxyauth.Auth) (string, bool, []string, bool) {
+// Returns (cloakMode, strictMode, sensitiveWords, cacheUserID, fixedDeviceID).
+func getCloakConfigFromAuth(auth *cliproxyauth.Auth) (string, bool, []string, bool, string) {
 	if auth == nil || auth.Attributes == nil {
-		return "auto", false, nil, false
+		return "auto", false, nil, false, ""
 	}
 
 	cloakMode := auth.Attributes["cloak_mode"]
@@ -1444,8 +1444,33 @@ func getCloakConfigFromAuth(auth *cliproxyauth.Auth) (string, bool, []string, bo
 	}
 
 	cacheUserID := strings.EqualFold(strings.TrimSpace(auth.Attributes["cloak_cache_user_id"]), "true")
+	fixedDeviceID := strings.TrimSpace(auth.Attributes["cloak_fixed_device_id"])
 
-	return cloakMode, strictMode, sensitiveWords, cacheUserID
+	return cloakMode, strictMode, sensitiveWords, cacheUserID, fixedDeviceID
+}
+
+// applyFixedDeviceID replaces the device_id field in a new-format user_id JSON object.
+// Only acts when user_id is a JSON object ({"device_id":"...","account_uuid":"...","session_id":"..."}).
+// Runs independently of cloaking so system prompts are never touched.
+func applyFixedDeviceID(payload []byte, fixedDeviceID string) []byte {
+	result := gjson.GetBytes(payload, "metadata.user_id")
+	if !result.Exists() {
+		return payload
+	}
+	existingUserID := result.String()
+	// Only act on new-format JSON objects; old-format strings and empty values pass through unchanged.
+	if !gjson.Parse(existingUserID).IsObject() {
+		return payload
+	}
+	modifiedUserID, err := sjson.Set(existingUserID, "device_id", fixedDeviceID)
+	if err != nil {
+		return payload
+	}
+	newPayload, err := sjson.SetBytes(payload, "metadata.user_id", modifiedUserID)
+	if err != nil {
+		return payload
+	}
+	return newPayload
 }
 
 // injectFakeUserID generates and injects a fake user ID into the request metadata.
@@ -1695,13 +1720,14 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 
 	// Get cloak config from ClaudeKey configuration
 	cloakCfg := resolveClaudeKeyCloakConfig(cfg, auth)
-	attrMode, attrStrict, attrWords, attrCache := getCloakConfigFromAuth(auth)
+	attrMode, attrStrict, attrWords, attrCache, attrFixedDeviceID := getCloakConfigFromAuth(auth)
 
 	// Determine cloak settings
 	cloakMode := attrMode
 	strictMode := attrStrict
 	sensitiveWords := attrWords
 	cacheUserID := attrCache
+	fixedDeviceID := attrFixedDeviceID
 
 	if cloakCfg != nil {
 		if mode := strings.TrimSpace(cloakCfg.Mode); mode != "" {
@@ -1716,6 +1742,14 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 		if cloakCfg.CacheUserID != nil {
 			cacheUserID = *cloakCfg.CacheUserID
 		}
+		if v := strings.TrimSpace(cloakCfg.FixedDeviceID); v != "" {
+			fixedDeviceID = v
+		}
+	}
+
+	// Apply fixed device_id independently of cloaking — no system prompt changes.
+	if fixedDeviceID != "" {
+		payload = applyFixedDeviceID(payload, fixedDeviceID)
 	}
 
 	// Determine if cloaking should be applied
