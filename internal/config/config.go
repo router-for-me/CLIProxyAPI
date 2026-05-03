@@ -407,6 +407,10 @@ type ClaudeKey struct {
 	// Claude /v1/messages requests. It is disabled by default so upstream seed
 	// changes do not alter the proxy's legacy behavior.
 	ExperimentalCCHSigning bool `yaml:"experimental-cch-signing,omitempty" json:"experimental-cch-signing,omitempty"`
+
+	// RemoveToolsCacheControl removes cache_control from tools for this provider.
+	// Use this for upstreams that don't support Anthropic prompt caching on tools (e.g., AWS Bedrock proxies).
+	RemoveToolsCacheControl bool `yaml:"remove-tools-cache-control,omitempty" json:"remove-tools-cache-control,omitempty"`
 }
 
 func (k ClaudeKey) GetAPIKey() string  { return k.APIKey }
