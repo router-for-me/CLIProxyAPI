@@ -1,17 +1,15 @@
 # Phase C exit punch list
 
-Codex CLI gpt-5.5 review iterated 5 rounds against the BE diff
-`refactor/upstream-bound vs upstream/dev`. Each round closed all
-BLOCKERs/IMPORTANTs Codex flagged at that round, but the loop didn't
-fully converge — round 5 still surfaced 4 findings, of which 3.5 were
-fixed and 1 was deferred. Phase C exits with the 1 deferred item plus
-2 future-watch items below.
+Codex CLI gpt-5.5 review iterated 6 rounds against the BE diff
+`refactor/upstream-bound vs upstream/dev`. Rounds 1-5 closed BLOCKERs
+and IMPORTANTs as they surfaced, with one mechanical OAuth-flow
+multi-cfg item carried forward. Round 6 surfaced 5 additional findings
+(1 BLOCKER, 2 IMPORTANT, 2 NIT); all 5 are now fixed, leaving only the
+single deferred OAuth-flow item below.
 
-The decision to ship with this punch list rather than continue iterating
-was a deliberate user call after weighing remaining-findings impact vs
-diminishing-returns review cost. The original Phase C goals (atomic AMP
-routing, async logging with priority lane, atomic Server config,
-clone-modify-persist-swap mgmt writes, LRU signature cache, exponential
+The original Phase C goals (atomic AMP routing, async logging with
+priority lane, atomic Server config, clone-modify-persist-swap mgmt
+writes, LRU signature cache + bounded outer group map, exponential
 refresh backoff, ReleaseURLProvider seam) are all delivered, tested
 under `-race`, and meeting their plan-defined bench targets.
 
@@ -63,8 +61,37 @@ flagged here so they're not a surprise on the eventual upstream PR.
 
 ## What's NOT on this list
 
-These findings from rounds 1-5 are fully fixed and verified under
+These findings from rounds 1-6 are fully fixed and verified under
 `-race`:
+
+  - Service-level config snapshot races (round 6 BLOCKER #1) —
+    `Service.configSnapshot()` accessor + `ensureExecutorsForAuthWithMode`,
+    `registerModelsForAuth`, `oauthExcludedModels` snapshot once at
+    function entry; `resolveConfig*Key` helpers converted to
+    package-level functions taking `cfg *config.Config` so the caller's
+    snapshot covers the full resolution. New
+    `TestService_ConfigSnapshot_RaceFree` pins the invariant.
+  - `Server.Stop` async logger flush (round 6 IMPORTANT #2) — type-
+    assert `requestLogger` to `interface{ Close() }` and call after
+    `s.server.Shutdown` so queued normal logs and forced-error logs are
+    drained before return.
+  - Outer signature-cache group map bound (round 6 IMPORTANT #3) —
+    `MaxGroupCount` cap (64) with LRU-by-write-time eviction;
+    `evictLRUGroup()` runs on cold-path inserts under `groupEvictMu`.
+    `TestSignatureCache_OuterMapBoundedByMaxGroupCount` pins the cap.
+    Read path stays sync.Map.Load fast-path (no atomic.Int64 contention
+    on lastAccess; eviction policy degrades to "least recently written"
+    which is fine because production model surfaces stay well under the
+    cap).
+  - Async emitter drop-oldest semantics (round 6 NIT #4) — normal-queue
+    overflow now does receive-then-send under `closeMu` so the OLDEST
+    queued task is evicted, matching plan §Behavior Contract.
+  - Hot-reload race test coverage (round 6 NIT #5) — new
+    `TestServer_MgmtHandlers_HotReloadRace` drives `PutDebug`,
+    `PutAmpUpstreamURL`, `PutAmpModelMappings` directly against the
+    Handler concurrently with `Server.Config()` readers; new service-
+    level `TestService_ConfigSnapshot_RaceFree` covers the helper
+    snapshot pattern.
 
   - Mgmt deadlock (round 1) — `authManager` atomic.Pointer, h.mu
     released before commit (round 1) then re-held safely (round 2).
@@ -103,3 +130,5 @@ These findings from rounds 1-5 are fully fixed and verified under
   - Round 3: 019deafe-8819-7070-9472-52917f86cf05 → 9e079689
   - Round 4: 019deb1a-8561-7aa0-9a12-faf0e11067a7 → 94a9500c
   - Round 5: 019deb2e-ff4b-70a1-a480-643322f1e9b1 → dcaea756
+  - Round 6: 019deb54-496e-7b51-8dfc-8e8691ab80e8 (BLOCKER #1, IMPORTANT
+    #2-3, NIT #4-5 — all closed in this round)

@@ -61,12 +61,12 @@ data race under hot-reload.
 
 ## Codex review status
 
-Five Codex CLI gpt-5.5 review rounds were run against the BE diff. All
-BLOCKERs/IMPORTANTs that were addressed in rounds 1-4 are fully fixed
-and verified under `-race`. Round 5 surfaced 4 findings; 3.5 are fixed,
-1 is deferred. See `PUNCH_LIST.md` for the full deferred-items + future-
-watch list. Phase C exits with that punch list rather than a fully-clean
-review.
+Six Codex CLI gpt-5.5 review rounds were run against the BE diff. Rounds
+1-5 closed the major findings; round 6 surfaced 5 additional findings
+(1 BLOCKER, 2 IMPORTANT, 2 NIT) which were all closed in this round —
+see `PUNCH_LIST.md` for the rolled-up "fully fixed" list. The only
+remaining deferred item is the OAuth-flow goroutine multi-cfg snapshot
+read pattern (low real-world risk, mechanical fix when convenient).
 
 ## Next step
 
