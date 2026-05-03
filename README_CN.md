@@ -226,3 +226,46 @@ QQ 群：188637136（满）、1081218164
 或
 
 Telegram 群：https://t.me/CLIProxyAPI
+
+
+## OpenClaw
+
+This fork includes an OpenClaw-compatible autonomy layer. See `openclaw/INSTALL_OPENCLAW.md`.
+
+
+本 fork 还包含 OpenClaw 接管引导：`openclaw/PROJECT_BOOTSTRAP.md`，以及本机运维模板：`LOCAL_OPERATIONS.md`。
+
+
+## 配套 Management Center
+
+如果你需要浏览器里的管理后台，请使用配套项目：
+
+- https://github.com/luyuehm/Cli-Proxy-API-Management-Center
+
+本 fork 的定位是：**服务主仓 + OpenClaw 自治层**。
+Management Center 的定位是：**人工运维管理界面**。
+
+关系说明见：
+- `openclaw/PROJECT_RELATIONSHIP.md`
+
+
+若需要 OpenClaw 统一导航入口，请看：`openclaw/OPS_INDEX.md`。
+
+
+## 是否两个仓库都要用？
+
+**不一定。**
+
+- 如果你要的是：**服务主仓 + OpenClaw 自治/自愈/bootstrap**，只用这个仓库就够。
+- 如果你还需要：**浏览器里的专用管理后台 UI**，再加上配套仓：
+  - https://github.com/luyuehm/Cli-Proxy-API-Management-Center
+
+推荐默认口径：
+- 必选：`luyuehm/CLIProxyAPI`
+- 可选配套：`luyuehm/Cli-Proxy-API-Management-Center`
+
+
+如果你不知道该先用哪个仓库，请看：`openclaw/REPO_SELECTION.md`。
+
+
+如果你是从现有本地 `CLIProxyAPIPlus` 部署迁移，请先看：`openclaw/MIGRATION_FROM_CLIPROXYAPIPLUS.md`。

@@ -222,3 +222,55 @@ A public CLIProxyAPI-compatible fork and bundled management panel. It keeps upst
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+
+## OpenClaw
+
+This fork includes an OpenClaw-compatible autonomy layer. See `openclaw/INSTALL_OPENCLAW.md`.
+
+
+Fork maintenance: use `bash scripts/sync_upstream.sh` to keep this fork aligned with upstream while preserving the OpenClaw layer.
+
+
+OpenClaw template assets are also included: `scripts/heartbeat_example.sh`, `scripts/self_heal_example.sh`, and `openclaw/CRON_TEMPLATE.md`.
+
+
+OpenClaw bootstrap docs are included in `openclaw/PROJECT_BOOTSTRAP.md`, with local-ops guidance in `LOCAL_OPERATIONS.md`.
+
+
+OpenClaw self-heal policy is documented in `openclaw/SELF_HEAL_RUNBOOK.md`.
+
+
+## Companion Management Center
+
+For a dedicated browser-based management UI, see the companion project:
+
+- https://github.com/luyuehm/Cli-Proxy-API-Management-Center
+
+Use this fork as the **service + OpenClaw autonomy** entrypoint.
+Use the Management Center as the **human operator UI**.
+
+Relationship notes:
+- `openclaw/PROJECT_RELATIONSHIP.md`
+
+
+For a single OpenClaw navigation entrypoint, see `openclaw/OPS_INDEX.md`.
+
+
+## Do I need both repositories?
+
+Not necessarily.
+
+- If you want the **service fork + OpenClaw autonomy/self-heal/bootstrap**, use this repository.
+- If you also want a dedicated browser management UI, add the companion project:
+  - https://github.com/luyuehm/Cli-Proxy-API-Management-Center
+
+Recommended default:
+- required: `luyuehm/CLIProxyAPI`
+- optional companion: `luyuehm/Cli-Proxy-API-Management-Center`
+
+
+Need help choosing repositories? See `openclaw/REPO_SELECTION.md`.
+
+
+Migrating from an existing local `CLIProxyAPIPlus` deployment? See `openclaw/MIGRATION_FROM_CLIPROXYAPIPLUS.md`.
