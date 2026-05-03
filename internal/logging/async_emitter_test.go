@@ -1,12 +1,15 @@
 package logging
 
 import (
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 )
 
 func newTestLoggerForAsync(t *testing.T) *FileRequestLogger {
@@ -32,12 +35,28 @@ func countLogFiles(t *testing.T, dir string) int {
 	return n
 }
 
+// mutableTextError carries a text pointer so a test can mutate the
+// rendered Error() return value after handing the wrapped *ErrorMessage
+// into LogRequest. Used to exercise the BE-R2-1 deep-clone guard.
+type mutableTextError struct {
+	text *string
+}
+
+func (e *mutableTextError) Error() string {
+	if e == nil || e.text == nil {
+		return ""
+	}
+	return *e.text
+}
+
 // TestAsyncEmitter_CallerMutateAfterEnqueue_DoesNotCorruptLog pins the
 // BE-1 ownership-contract invariant from the Codex Stage 1 exit
-// review: when LogRequest hands a []byte/map to the async path, a
-// caller that mutates the slice/map after LogRequest returns must NOT
-// corrupt the eventual log write. The dispatcher clones into the
-// queue defensively so the worker writes the call-time snapshot.
+// review: when LogRequest hands a []byte/map/error/Header to the async
+// path, a caller that mutates them after LogRequest returns must NOT
+// corrupt the eventual log write. The dispatcher clones into the queue
+// defensively so the worker writes the call-time snapshot. The
+// ErrorMessage clone (BE-R2-1) freezes the inner Error to its current
+// text via errors.New and deep-clones the Addon header.
 func TestAsyncEmitter_CallerMutateAfterEnqueue_DoesNotCorruptLog(t *testing.T) {
 	l := newTestLoggerForAsync(t)
 	now := time.Now()
@@ -45,16 +64,31 @@ func TestAsyncEmitter_CallerMutateAfterEnqueue_DoesNotCorruptLog(t *testing.T) {
 	body := []byte(`{"original":1}`)
 	resp := []byte(`{"original-response":2}`)
 	headers := map[string][]string{"X-Trace": {"t-original"}}
+	errText := "original-error-text"
+	errAddon := http.Header{"X-Addon": {"a-original"}}
+	errs := []*interfaces.ErrorMessage{
+		{
+			StatusCode: 502,
+			Error:      &mutableTextError{text: &errText},
+			Addon:      errAddon,
+		},
+	}
 
-	if err := l.LogRequest("/v1/messages", "POST", headers, body, 200, headers, resp, nil, nil, nil, nil, nil, "req-1", now, now); err != nil {
+	if err := l.LogRequestWithOptions(
+		"/v1/messages", "POST", headers, body, 502, headers,
+		resp, nil, nil, nil, nil, errs, true, "req-1", now, now,
+	); err != nil {
 		t.Fatalf("LogRequest: %v", err)
 	}
 
 	// Mutate caller-owned containers AFTER LogRequest returned.
-	body[0] = 'X'                         // overwrite the leading '{' byte
-	resp[len(resp)-1] = 'X'                // overwrite trailing '}' byte
-	headers["X-Trace"][0] = "t-mutated"   // overwrite header value
-	headers["X-Injected"] = []string{"y"} // add a new entry
+	body[0] = 'X'
+	resp[len(resp)-1] = 'X'
+	headers["X-Trace"][0] = "t-mutated"
+	headers["X-Injected"] = []string{"y"}
+	errText = "mutated-error-text"
+	errAddon["X-Addon"][0] = "a-mutated"
+	errAddon["X-Injected-Addon"] = []string{"y"}
 
 	l.Flush()
 
@@ -90,8 +124,15 @@ func TestAsyncEmitter_CallerMutateAfterEnqueue_DoesNotCorruptLog(t *testing.T) {
 	if !strings.Contains(contents, "t-original") {
 		t.Fatalf("expected original X-Trace header in log, got:\n%s", contents)
 	}
-	if strings.Contains(contents, "t-mutated") || strings.Contains(contents, "X-Injected") {
+	if strings.Contains(contents, "t-mutated") || strings.Contains(contents, "X-Injected") ||
+		strings.Contains(contents, "X-Injected-Addon") {
 		t.Fatalf("post-enqueue mutation leaked into log:\n%s", contents)
+	}
+	if !strings.Contains(contents, "original-error-text") {
+		t.Fatalf("expected original error text in log, got:\n%s", contents)
+	}
+	if strings.Contains(contents, "mutated-error-text") {
+		t.Fatalf("post-enqueue inner-error mutation leaked into log:\n%s", contents)
 	}
 }
 

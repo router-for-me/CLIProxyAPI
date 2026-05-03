@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -471,11 +472,17 @@ func (s *Service) buildReloadCallback() func(*config.Config) {
 		previousStrategy := ""
 		var previousSessionAffinity bool
 		var previousSessionAffinityTTL string
+		// Snapshot the previous config too so we can compute the
+		// force-auth-refresh predicate identically to the file-watcher
+		// path (Codex Stage 1 exit round 2 BE-R2-2). Cleared after the
+		// final swap below.
+		var oldCfg *config.Config
 		s.cfgMu.RLock()
 		if s.cfg != nil {
 			previousStrategy = strings.ToLower(strings.TrimSpace(s.cfg.Routing.Strategy))
 			previousSessionAffinity = s.cfg.Routing.ClaudeCodeSessionAffinity || s.cfg.Routing.SessionAffinity
 			previousSessionAffinityTTL = s.cfg.Routing.SessionAffinityTTL
+			oldCfg = s.cfg
 		}
 		s.cfgMu.RUnlock()
 
@@ -552,19 +559,27 @@ func (s *Service) buildReloadCallback() func(*config.Config) {
 		// without that, the watcher would synthesize from its stale
 		// cached config (Codex Phase C round-5 review BLOCKER #1).
 		//
-		// force=false so the watcher's diffing logic only emits add/
-		// modify/delete events for auths whose synthesized state actually
-		// changed. Mgmt writes that touch unrelated fields (PutDebug,
-		// PutRequestLog, etc.) leave the API key arrays untouched, so no
-		// spurious per-auth modify events fire (Codex Stage 1 exit
-		// review IMPORTANT #3). On the file-watcher reload path,
-		// reloadClients runs its own refreshAuthState afterwards and
-		// re-applies any forceAuthRefresh flag computed from the cfg
-		// diff; this redundant call observes currentAuths==newState and
-		// is a no-op.
+		// Compute force using the same predicate as the file-watcher
+		// reload path (internal/watcher/config_reload.go): edits to
+		// ForceModelPrefix / OAuthModelAlias / retry-config affect
+		// model registration but are not part of the synthesized auth
+		// state, so without forcing we'd miss re-registration when the
+		// user PUTs one of these via mgmt API (Codex Stage 1 exit round 2
+		// BE-R2-2). Other mgmt writes (PutDebug, PutRequestLog, single
+		// API key edits) leave force=false and the watcher's diffing
+		// emits add/modify/delete only for auths whose synthesized
+		// state actually changed (Codex Stage 1 exit round 1 BE-3).
+		retryConfigChanged := oldCfg != nil &&
+			(oldCfg.RequestRetry != newCfg.RequestRetry ||
+				oldCfg.MaxRetryInterval != newCfg.MaxRetryInterval ||
+				oldCfg.MaxRetryCredentials != newCfg.MaxRetryCredentials)
+		forceAuthRefresh := oldCfg != nil &&
+			(oldCfg.ForceModelPrefix != newCfg.ForceModelPrefix ||
+				!reflect.DeepEqual(oldCfg.OAuthModelAlias, newCfg.OAuthModelAlias) ||
+				retryConfigChanged)
 		if s.watcher != nil {
 			s.watcher.SetConfig(newCfg)
-			s.watcher.RefreshAuthState(false)
+			s.watcher.RefreshAuthState(forceAuthRefresh)
 		}
 	}
 }

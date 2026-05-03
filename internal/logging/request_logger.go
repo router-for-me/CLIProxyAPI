@@ -8,8 +8,10 @@ import (
 	"bytes"
 	"compress/flate"
 	"compress/gzip"
+	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -386,12 +388,31 @@ func cloneErrorMessages(in []*interfaces.ErrorMessage) []*interfaces.ErrorMessag
 		if e == nil {
 			continue
 		}
-		// Shallow-copy the struct so a later caller mutation to a slot
-		// in the original slice does not corrupt the queued log copy.
-		// Errors held inside the struct are typically already immutable
-		// once produced by the request flow.
-		dup := *e
-		out[i] = &dup
+		// Snapshot: take a fresh value-copy of StatusCode, freeze the
+		// inner Error to its current text via errors.New, and deep-clone
+		// the Addon header map. This protects the queued log copy from
+		// caller mutation of any field after LogRequest returns
+		// (Codex Stage 1 exit round 2 BE-R2-1).
+		dup := &interfaces.ErrorMessage{
+			StatusCode: e.StatusCode,
+		}
+		if e.Error != nil {
+			dup.Error = errors.New(e.Error.Error())
+		}
+		if e.Addon != nil {
+			cloned := make(http.Header, len(e.Addon))
+			for k, v := range e.Addon {
+				if v == nil {
+					cloned[k] = nil
+					continue
+				}
+				vDup := make([]string, len(v))
+				copy(vDup, v)
+				cloned[k] = vDup
+			}
+			dup.Addon = cloned
+		}
+		out[i] = dup
 	}
 	return out
 }
