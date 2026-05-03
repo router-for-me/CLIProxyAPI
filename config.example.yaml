@@ -32,6 +32,13 @@ remote-management:
   # GitHub repository for the management control panel. Accepts a repository URL or releases API URL.
   panel-github-repository: "https://github.com/router-for-me/Cli-Proxy-API-Management-Center"
 
+  # Optional: override the localhost callback port used by the web UI Antigravity OAuth flow on standard instances.
+  # Useful when the provider default callback port conflicts with another listener.
+  antigravity-webui-callback-port: 55121
+
+  # Optional: separate callback port override for premium instances.
+  antigravity-webui-callback-port-premium: 55122
+
 # Authentication directory (supports ~ for home directory)
 auth-dir: "~/.cli-proxy-api"
 
