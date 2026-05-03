@@ -82,7 +82,7 @@ CLIProxyAPI向けの独立した使用量永続化・可視化サービス。CLI
 
 ### [CLIProxyAPI Usage Dashboard](https://github.com/zhanglunet/cliproxyapi-usage-dashboard)
 
-CLIProxyAPI向けのローカル優先の使用量・クォータダッシュボード。Redis互換の使用量キューからリクエストごとのtoken使用量を収集してSQLiteに保存し、アカウント別・モデル別の日次および直近時間枠の使用量と、Codex 5h/7dクォータ残量をローカルWeb UIで表示します。
+CLIProxyAPI向けのローカル優先の使用量・クォータダッシュボード。Redis互換の使用量キューからリクエストごとのToken使用量を収集してSQLiteに保存し、アカウント別・モデル別の日次および直近時間枠の使用量を可視化し、Codex 5h/7dクォータ残量をローカルWeb UIで表示します。
 
 ## Amp CLIサポート
 
