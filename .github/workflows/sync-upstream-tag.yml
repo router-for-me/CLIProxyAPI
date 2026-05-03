@@ -56,7 +56,28 @@ jobs:
           if git merge-base --is-ancestor "${upstream_commit}" HEAD; then
             echo "main already contains upstream ${latest_tag} (${upstream_commit})."
           else
-            git merge --no-edit "${upstream_commit}"
+            if ! git merge --no-edit "${upstream_commit}"; then
+              conflicted_files="$(git diff --name-only --diff-filter=U)"
+              if [ "${conflicted_files}" = "README.md" ]; then
+                git checkout origin/main -- README.md
+                git add README.md
+                git commit --no-edit
+                echo "Resolved README.md conflict by keeping origin/main version."
+              else
+                echo "::error::Upstream merge failed with non-README conflicts:"
+                printf '%s\n' "${conflicted_files}"
+                exit 1
+              fi
+            fi
+
+            if git diff --quiet HEAD origin/main -- README.md; then
+              echo "README.md unchanged by upstream sync."
+            else
+              git checkout origin/main -- README.md
+              git add README.md
+              git commit --amend --no-edit
+              echo "Restored README.md from origin/main after upstream sync."
+            fi
           fi
 
           git push origin HEAD:main
