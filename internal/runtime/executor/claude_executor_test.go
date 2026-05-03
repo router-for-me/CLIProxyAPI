@@ -384,6 +384,19 @@ func TestValidateMiniMaxToolResultAdjacencyAcceptsOpenAIToolCycleAfterTranslatio
 	}
 }
 
+func TestClaudeCompatKindPrefersAuthMetadataForMiniMaxAliases(t *testing.T) {
+	t.Parallel()
+
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{
+			"compat_kind": "MiniMax",
+		},
+	}
+	if got := claudeCompatKind(auth, "https://proxy.example.com/anthropic"); got != "minimax" {
+		t.Fatalf("claudeCompatKind() = %q, want minimax", got)
+	}
+}
+
 func TestRepairMiniMaxToolResultAdjacencySplitsMixedUserContent(t *testing.T) {
 	t.Parallel()
 

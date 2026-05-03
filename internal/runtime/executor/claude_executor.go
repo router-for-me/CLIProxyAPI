@@ -151,6 +151,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if baseURL == "" {
 		baseURL = "https://api.anthropic.com"
 	}
+	compatKind := claudeCompatKind(auth, baseURL)
 
 	reporter := helps.NewUsageReporter(ctx, e.Identifier(), baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
@@ -191,7 +192,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if err != nil {
 		return resp, err
 	}
-	body = downgradeClaudeToolSearchForCompat(baseURL, body)
+	body = downgradeClaudeToolSearchForCompatKind(compatKind, baseURL, body)
 
 	// Auto-inject cache_control if missing (optimization for ClawdBot/clients without caching support)
 	if countCacheControls(body) == 0 {
@@ -206,7 +207,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	// Normalize TTL values to prevent ordering violations under prompt-caching-scope-2026-01-05.
 	// A 1h-TTL block must not appear after a 5m-TTL block in evaluation order (tools→system→messages).
 	body = normalizeCacheControlTTL(body)
-	body, err = repairMiniMaxClaudeToolAdjacency(baseURL, body)
+	body, err = repairMiniMaxClaudeToolAdjacencyForCompat(compatKind, body)
 	if err != nil {
 		return resp, err
 	}
@@ -235,7 +236,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if oauthToken || experimentalCCHSigningEnabled(e.cfg, auth) {
 		bodyForUpstream = signAnthropicMessagesBody(bodyForUpstream)
 	}
-	if errValidate := validateClaudeUpstreamPayload(baseURL, bodyForUpstream); errValidate != nil {
+	if errValidate := validateClaudeUpstreamPayloadForCompat(compatKind, bodyForUpstream); errValidate != nil {
 		return resp, errValidate
 	}
 
@@ -358,6 +359,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	if baseURL == "" {
 		baseURL = "https://api.anthropic.com"
 	}
+	compatKind := claudeCompatKind(auth, baseURL)
 
 	reporter := helps.NewUsageReporter(ctx, e.Identifier(), baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
@@ -396,7 +398,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	if err != nil {
 		return nil, err
 	}
-	body = downgradeClaudeToolSearchForCompat(baseURL, body)
+	body = downgradeClaudeToolSearchForCompatKind(compatKind, baseURL, body)
 
 	// Auto-inject cache_control if missing (optimization for ClawdBot/clients without caching support)
 	if countCacheControls(body) == 0 {
@@ -408,7 +410,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 
 	// Normalize TTL values to prevent ordering violations under prompt-caching-scope-2026-01-05.
 	body = normalizeCacheControlTTL(body)
-	body, err = repairMiniMaxClaudeToolAdjacency(baseURL, body)
+	body, err = repairMiniMaxClaudeToolAdjacencyForCompat(compatKind, body)
 	if err != nil {
 		return nil, err
 	}
@@ -436,7 +438,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	if oauthToken || experimentalCCHSigningEnabled(e.cfg, auth) {
 		bodyForUpstream = signAnthropicMessagesBody(bodyForUpstream)
 	}
-	if errValidate := validateClaudeUpstreamPayload(baseURL, bodyForUpstream); errValidate != nil {
+	if errValidate := validateClaudeUpstreamPayloadForCompat(compatKind, bodyForUpstream); errValidate != nil {
 		return nil, errValidate
 	}
 
@@ -1086,6 +1088,17 @@ func isClaudeOAuthToken(apiKey string) bool {
 	return strings.Contains(apiKey, "sk-ant-oat")
 }
 
+func claudeCompatKind(auth *cliproxyauth.Auth, baseURL string) string {
+	if auth != nil {
+		for _, key := range []string{"compat_kind", "compat-kind"} {
+			if value := config.NormalizeOpenAICompatibilityKind(auth.Attributes[key]); value != "" {
+				return value
+			}
+		}
+	}
+	return config.InferCompatKindFromBaseURL(baseURL)
+}
+
 func downgradeClaudeStructuredOutputForCompat(baseURL string, body []byte) []byte {
 	if isOfficialAnthropicBaseURL(baseURL) || len(body) == 0 || !gjson.ValidBytes(body) {
 		return body
@@ -1109,11 +1122,17 @@ func downgradeClaudeStructuredOutputForCompat(baseURL string, body []byte) []byt
 }
 
 func downgradeClaudeToolSearchForCompat(baseURL string, body []byte) []byte {
+	return downgradeClaudeToolSearchForCompatKind("", baseURL, body)
+}
+
+func downgradeClaudeToolSearchForCompatKind(compatKind, baseURL string, body []byte) []byte {
 	if isOfficialAnthropicBaseURL(baseURL) || len(body) == 0 || !gjson.ValidBytes(body) {
 		return body
 	}
 
-	compatKind := config.InferCompatKindFromBaseURL(baseURL)
+	if compatKind == "" {
+		compatKind = config.InferCompatKindFromBaseURL(baseURL)
+	}
 	var root map[string]any
 	if err := json.Unmarshal(body, &root); err != nil {
 		return body
@@ -1380,7 +1399,11 @@ func appendClaudeSystemText(body []byte, text string) []byte {
 }
 
 func validateClaudeUpstreamPayload(baseURL string, body []byte) error {
-	if config.InferCompatKindFromBaseURL(baseURL) != "minimax" {
+	return validateClaudeUpstreamPayloadForCompat(config.InferCompatKindFromBaseURL(baseURL), body)
+}
+
+func validateClaudeUpstreamPayloadForCompat(compatKind string, body []byte) error {
+	if compatKind != "minimax" {
 		return nil
 	}
 	if err := validateMiniMaxStructuredOutputCompatibility(body); err != nil {
@@ -1393,7 +1416,11 @@ func validateClaudeUpstreamPayload(baseURL string, body []byte) error {
 }
 
 func repairMiniMaxClaudeToolAdjacency(baseURL string, body []byte) ([]byte, error) {
-	if config.InferCompatKindFromBaseURL(baseURL) != "minimax" {
+	return repairMiniMaxClaudeToolAdjacencyForCompat(config.InferCompatKindFromBaseURL(baseURL), body)
+}
+
+func repairMiniMaxClaudeToolAdjacencyForCompat(compatKind string, body []byte) ([]byte, error) {
+	if compatKind != "minimax" {
 		return body, nil
 	}
 	repaired, count, err := repairMiniMaxToolResultAdjacency(body)
