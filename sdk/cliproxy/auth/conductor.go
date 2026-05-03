@@ -127,6 +127,11 @@ type Hook interface {
 	OnResult(ctx context.Context, result Result)
 }
 
+// AuthChangeHook can be implemented by hooks that need the previous auth state.
+type AuthChangeHook interface {
+	OnAuthChanged(ctx context.Context, previous *Auth, current *Auth)
+}
+
 // NoopHook provides optional hook defaults.
 type NoopHook struct{}
 
@@ -200,6 +205,33 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 	manager.apiKeyModelAlias.Store(apiKeyModelAliasTable(nil))
 	manager.scheduler = newAuthScheduler(selector)
 	return manager
+}
+
+// SetHook replaces the lifecycle hook used for subsequent manager events.
+func (m *Manager) SetHook(hook Hook) {
+	if m == nil {
+		return
+	}
+	if hook == nil {
+		hook = NoopHook{}
+	}
+	m.mu.Lock()
+	m.hook = hook
+	m.mu.Unlock()
+}
+
+// Hook returns the currently installed lifecycle hook.
+func (m *Manager) Hook() Hook {
+	if m == nil {
+		return NoopHook{}
+	}
+	m.mu.RLock()
+	hook := m.hook
+	m.mu.RUnlock()
+	if hook == nil {
+		return NoopHook{}
+	}
+	return hook
 }
 
 func isBuiltInSelector(selector Selector) bool {
@@ -1120,8 +1152,10 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	if auth == nil || auth.ID == "" {
 		return nil, nil
 	}
+	var previous *Auth
 	m.mu.Lock()
 	if existing, ok := m.auths[auth.ID]; ok && existing != nil {
+		previous = existing.Clone()
 		if !auth.indexAssigned && auth.Index == "" {
 			auth.Index = existing.Index
 			auth.indexAssigned = existing.indexAssigned
@@ -1145,7 +1179,12 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	}
 	m.queueRefreshReschedule(auth.ID)
 	_ = m.persist(ctx, auth)
-	m.hook.OnAuthUpdated(ctx, auth.Clone())
+	updated := auth.Clone()
+	if changeHook, ok := m.hook.(AuthChangeHook); ok {
+		changeHook.OnAuthChanged(ctx, previous, updated)
+	} else {
+		m.hook.OnAuthUpdated(ctx, updated)
+	}
 	return auth.Clone(), nil
 }
 

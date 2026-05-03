@@ -92,3 +92,9 @@ func assertGPT55ModelInfo(t *testing.T, source string, model *ModelInfo) {
 		}
 	}
 }
+
+func TestCodexFreeStaticModelsExcludeGPT55(t *testing.T) {
+	if model := findModelInfo(GetCodexFreeModels(), "gpt-5.5"); model != nil {
+		t.Fatal("expected codex free tier to exclude gpt-5.5")
+	}
+}

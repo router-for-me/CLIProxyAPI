@@ -256,5 +256,6 @@ func (b *Builder) Build() (*Service, error) {
 		coreManager:    coreManager,
 		serverOptions:  append([]api.ServerOption(nil), b.serverOptions...),
 	}
+	coreManager.SetHook(serviceAuthHook{service: service, next: coreManager.Hook()})
 	return service, nil
 }
