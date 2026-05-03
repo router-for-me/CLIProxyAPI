@@ -1655,13 +1655,22 @@ func matchSequenceElement(original []*yaml.Node, used []bool, target *yaml.Node)
 	case yaml.MappingNode:
 		id := sequenceElementIdentity(target)
 		if id != "" {
+			fallbackIndex := -1
 			for i := range original {
 				if used[i] || original[i] == nil || original[i].Kind != yaml.MappingNode {
 					continue
 				}
 				if sequenceElementIdentity(original[i]) == id {
-					return i
+					if nodesStructurallyEqual(original[i], target) {
+						return i
+					}
+					if fallbackIndex < 0 {
+						fallbackIndex = i
+					}
 				}
+			}
+			if fallbackIndex >= 0 {
+				return fallbackIndex
 			}
 		}
 	case yaml.ScalarNode:
@@ -1693,6 +1702,35 @@ func matchSequenceElement(original []*yaml.Node, used []bool, target *yaml.Node)
 func sequenceElementIdentity(node *yaml.Node) string {
 	if node == nil || node.Kind != yaml.MappingNode {
 		return ""
+	}
+	if apiKey := mappingScalarValue(node, "api-key"); apiKey != "" {
+		return strings.Join([]string{
+			"api-key=" + apiKey,
+			"base-url=" + mappingScalarValue(node, "base-url"),
+			"proxy-url=" + mappingScalarValue(node, "proxy-url"),
+		}, "\x00")
+	}
+	if apiKey := mappingScalarValue(node, "api_key"); apiKey != "" {
+		return strings.Join([]string{
+			"api_key=" + apiKey,
+			"base-url=" + mappingScalarValue(node, "base-url"),
+			"proxy-url=" + mappingScalarValue(node, "proxy-url"),
+		}, "\x00")
+	}
+	if apiKey := mappingScalarValue(node, "apikey"); apiKey != "" {
+		return strings.Join([]string{
+			"apikey=" + apiKey,
+			"base-url=" + mappingScalarValue(node, "base-url"),
+			"proxy-url=" + mappingScalarValue(node, "proxy-url"),
+		}, "\x00")
+	}
+	if name := mappingScalarValue(node, "name"); name != "" {
+		if baseURL := mappingScalarValue(node, "base-url"); baseURL != "" {
+			return "name=" + strings.ToLower(name) + "\x00base-url=" + baseURL
+		}
+		if alias := mappingScalarValue(node, "alias"); alias != "" {
+			return "name=" + name + "\x00alias=" + alias
+		}
 	}
 	identityKeys := []string{"id", "name", "alias", "api-key", "api_key", "apikey", "key", "provider", "model"}
 	for _, k := range identityKeys {

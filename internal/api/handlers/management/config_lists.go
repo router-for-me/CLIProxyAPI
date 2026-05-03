@@ -3,6 +3,7 @@ package management
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -104,6 +105,216 @@ func (h *Handler) deleteFromStringList(c *gin.Context, target *[]string, after f
 	c.JSON(400, gin.H{"error": "missing index or value"})
 }
 
+func configListReplaceRequested(c *gin.Context) bool {
+	if c == nil {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(c.Query("replace"))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+func apiKeyEntryIdentity(apiKey, baseURL, proxyURL string) string {
+	return strings.TrimSpace(apiKey) + "\x00" + strings.TrimSpace(baseURL) + "\x00" + strings.TrimSpace(proxyURL)
+}
+
+func findUnusedIdentityMatch(used []bool, target string, identityAt func(int) string) int {
+	if target == "" {
+		return -1
+	}
+	for i := range used {
+		if used[i] {
+			continue
+		}
+		if identityAt(i) == target {
+			return i
+		}
+	}
+	return -1
+}
+
+func mergeGeminiKeysPreservingMissing(existing, incoming []config.GeminiKey) []config.GeminiKey {
+	out := make([]config.GeminiKey, 0, len(incoming)+len(existing))
+	used := make([]bool, len(existing))
+	identityAt := func(i int) string {
+		return apiKeyEntryIdentity(existing[i].APIKey, existing[i].BaseURL, existing[i].ProxyURL)
+	}
+	for i := range incoming {
+		entry := incoming[i]
+		idx := findUnusedIdentityMatch(used, apiKeyEntryIdentity(entry.APIKey, entry.BaseURL, entry.ProxyURL), identityAt)
+		if idx >= 0 {
+			used[idx] = true
+			if entry.RoutingGroup == "" {
+				entry.RoutingGroup = existing[idx].RoutingGroup
+			}
+			if !entry.Disabled && existing[idx].Disabled {
+				entry.Disabled = true
+			}
+		}
+		out = append(out, entry)
+	}
+	for i := range existing {
+		if used[i] {
+			continue
+		}
+		out = append(out, existing[i])
+	}
+	return out
+}
+
+func mergeClaudeKeysPreservingMissing(existing, incoming []config.ClaudeKey) []config.ClaudeKey {
+	out := make([]config.ClaudeKey, 0, len(incoming)+len(existing))
+	used := make([]bool, len(existing))
+	identityAt := func(i int) string {
+		return apiKeyEntryIdentity(existing[i].APIKey, existing[i].BaseURL, existing[i].ProxyURL)
+	}
+	for i := range incoming {
+		entry := incoming[i]
+		idx := findUnusedIdentityMatch(used, apiKeyEntryIdentity(entry.APIKey, entry.BaseURL, entry.ProxyURL), identityAt)
+		if idx >= 0 {
+			used[idx] = true
+			if entry.RoutingGroup == "" {
+				entry.RoutingGroup = existing[idx].RoutingGroup
+			}
+			if !entry.Disabled && existing[idx].Disabled {
+				entry.Disabled = true
+			}
+		}
+		out = append(out, entry)
+	}
+	for i := range existing {
+		if used[i] {
+			continue
+		}
+		out = append(out, existing[i])
+	}
+	return out
+}
+
+func mergeCodexKeysPreservingMissing(existing, incoming []config.CodexKey) []config.CodexKey {
+	out := make([]config.CodexKey, 0, len(incoming)+len(existing))
+	used := make([]bool, len(existing))
+	identityAt := func(i int) string {
+		return apiKeyEntryIdentity(existing[i].APIKey, existing[i].BaseURL, existing[i].ProxyURL)
+	}
+	for i := range incoming {
+		entry := incoming[i]
+		idx := findUnusedIdentityMatch(used, apiKeyEntryIdentity(entry.APIKey, entry.BaseURL, entry.ProxyURL), identityAt)
+		if idx >= 0 {
+			used[idx] = true
+			if entry.RoutingGroup == "" {
+				entry.RoutingGroup = existing[idx].RoutingGroup
+			}
+			if !entry.Disabled && existing[idx].Disabled {
+				entry.Disabled = true
+			}
+		}
+		out = append(out, entry)
+	}
+	for i := range existing {
+		if used[i] {
+			continue
+		}
+		out = append(out, existing[i])
+	}
+	return out
+}
+
+func mergeVertexCompatKeysPreservingMissing(existing, incoming []config.VertexCompatKey) []config.VertexCompatKey {
+	out := make([]config.VertexCompatKey, 0, len(incoming)+len(existing))
+	used := make([]bool, len(existing))
+	identityAt := func(i int) string {
+		return apiKeyEntryIdentity(existing[i].APIKey, existing[i].BaseURL, existing[i].ProxyURL)
+	}
+	for i := range incoming {
+		entry := incoming[i]
+		idx := findUnusedIdentityMatch(used, apiKeyEntryIdentity(entry.APIKey, entry.BaseURL, entry.ProxyURL), identityAt)
+		if idx >= 0 {
+			used[idx] = true
+			if entry.RoutingGroup == "" {
+				entry.RoutingGroup = existing[idx].RoutingGroup
+			}
+			if !entry.Disabled && existing[idx].Disabled {
+				entry.Disabled = true
+			}
+		}
+		out = append(out, entry)
+	}
+	for i := range existing {
+		if used[i] {
+			continue
+		}
+		out = append(out, existing[i])
+	}
+	return out
+}
+
+func openAICompatProviderIdentity(entry config.OpenAICompatibility) string {
+	return strings.ToLower(strings.TrimSpace(entry.Name)) + "\x00" + strings.TrimSpace(entry.BaseURL)
+}
+
+func mergeOpenAICompatAPIKeysPreservingMissing(existing, incoming []config.OpenAICompatibilityAPIKey) []config.OpenAICompatibilityAPIKey {
+	out := make([]config.OpenAICompatibilityAPIKey, 0, len(incoming)+len(existing))
+	used := make([]bool, len(existing))
+	identityAt := func(i int) string {
+		return apiKeyEntryIdentity(existing[i].APIKey, "", existing[i].ProxyURL)
+	}
+	for i := range incoming {
+		entry := incoming[i]
+		idx := findUnusedIdentityMatch(used, apiKeyEntryIdentity(entry.APIKey, "", entry.ProxyURL), identityAt)
+		if idx >= 0 {
+			used[idx] = true
+			if entry.RoutingGroup == "" {
+				entry.RoutingGroup = existing[idx].RoutingGroup
+			}
+		}
+		out = append(out, entry)
+	}
+	for i := range existing {
+		if used[i] {
+			continue
+		}
+		out = append(out, existing[i])
+	}
+	return out
+}
+
+func mergeOpenAICompatPreservingMissing(existing, incoming []config.OpenAICompatibility) []config.OpenAICompatibility {
+	out := make([]config.OpenAICompatibility, 0, len(incoming)+len(existing))
+	used := make([]bool, len(existing))
+	identityAt := func(i int) string {
+		return openAICompatProviderIdentity(existing[i])
+	}
+	for i := range incoming {
+		entry := incoming[i]
+		idx := findUnusedIdentityMatch(used, openAICompatProviderIdentity(entry), identityAt)
+		if idx >= 0 {
+			used[idx] = true
+			if entry.Kind == "" {
+				entry.Kind = existing[idx].Kind
+			}
+			if entry.RoutingGroup == "" {
+				entry.RoutingGroup = existing[idx].RoutingGroup
+			}
+			if !entry.Disabled && existing[idx].Disabled {
+				entry.Disabled = true
+			}
+			entry.APIKeyEntries = mergeOpenAICompatAPIKeysPreservingMissing(existing[idx].APIKeyEntries, entry.APIKeyEntries)
+		}
+		out = append(out, entry)
+	}
+	for i := range existing {
+		if used[i] {
+			continue
+		}
+		out = append(out, existing[i])
+	}
+	return out
+}
+
 // api-keys
 func (h *Handler) GetAPIKeys(c *gin.Context) {
 	h.setConfigVersionHeaders(c)
@@ -145,6 +356,9 @@ func (h *Handler) PutGeminiKeys(c *gin.Context) {
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if !configListReplaceRequested(c) {
+		arr = mergeGeminiKeysPreservingMissing(h.cfg.GeminiKey, arr)
+	}
 	h.cfg.GeminiKey = append([]config.GeminiKey(nil), arr...)
 	h.cfg.SanitizeGeminiKeys()
 	h.persistLocked(c)
@@ -306,6 +520,9 @@ func (h *Handler) PutClaudeKeys(c *gin.Context) {
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if !configListReplaceRequested(c) {
+		arr = mergeClaudeKeysPreservingMissing(h.cfg.ClaudeKey, arr)
+	}
 	h.cfg.ClaudeKey = arr
 	h.cfg.SanitizeClaudeKeys()
 	h.persistLocked(c)
@@ -462,6 +679,9 @@ func (h *Handler) PutOpenAICompat(c *gin.Context) {
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if !configListReplaceRequested(c) {
+		filtered = mergeOpenAICompatPreservingMissing(h.cfg.OpenAICompatibility, filtered)
+	}
 	h.cfg.OpenAICompatibility = filtered
 	h.cfg.SanitizeOpenAICompatibility()
 	h.persistLocked(c)
@@ -474,13 +694,15 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 		Disabled      *bool                               `json:"disabled"`
 		BaseURL       *string                             `json:"base-url"`
 		APIKeyEntries *[]config.OpenAICompatibilityAPIKey `json:"api-key-entries"`
+		ReplaceKeys   *bool                               `json:"replace-api-key-entries"`
 		Models        *[]config.OpenAICompatibilityModel  `json:"models"`
 		Headers       *map[string]string                  `json:"headers"`
 	}
 	var body struct {
-		Name  *string            `json:"name"`
-		Index *int               `json:"index"`
-		Value *openAICompatPatch `json:"value"`
+		Name    *string            `json:"name"`
+		BaseURL *string            `json:"base-url"`
+		Index   *int               `json:"index"`
+		Value   *openAICompatPatch `json:"value"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil || body.Value == nil {
 		c.JSON(400, gin.H{"error": "invalid body"})
@@ -495,11 +717,26 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 	}
 	if targetIndex == -1 && body.Name != nil {
 		match := strings.TrimSpace(*body.Name)
+		base := ""
+		if body.BaseURL != nil {
+			base = strings.TrimSpace(*body.BaseURL)
+		}
+		matchCount := 0
 		for i := range h.cfg.OpenAICompatibility {
-			if h.cfg.OpenAICompatibility[i].Name == match {
-				targetIndex = i
-				break
+			if h.cfg.OpenAICompatibility[i].Name != match {
+				continue
 			}
+			if base != "" && strings.TrimSpace(h.cfg.OpenAICompatibility[i].BaseURL) != base {
+				continue
+			}
+			matchCount++
+			if targetIndex == -1 {
+				targetIndex = i
+			}
+		}
+		if matchCount > 1 {
+			c.JSON(http.StatusConflict, gin.H{"error": "multiple items match name; index or base-url is required"})
+			return
 		}
 	}
 	if targetIndex == -1 {
@@ -531,7 +768,11 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 		entry.BaseURL = trimmed
 	}
 	if body.Value.APIKeyEntries != nil {
-		entry.APIKeyEntries = append([]config.OpenAICompatibilityAPIKey(nil), (*body.Value.APIKeyEntries)...)
+		apiKeyEntries := append([]config.OpenAICompatibilityAPIKey(nil), (*body.Value.APIKeyEntries)...)
+		if body.Value.ReplaceKeys == nil || !*body.Value.ReplaceKeys {
+			apiKeyEntries = mergeOpenAICompatAPIKeysPreservingMissing(entry.APIKeyEntries, apiKeyEntries)
+		}
+		entry.APIKeyEntries = apiKeyEntries
 	}
 	if body.Value.Models != nil {
 		entry.Models = append([]config.OpenAICompatibilityModel(nil), (*body.Value.Models)...)
@@ -604,6 +845,9 @@ func (h *Handler) PutVertexCompatKeys(c *gin.Context) {
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if !configListReplaceRequested(c) {
+		arr = mergeVertexCompatKeysPreservingMissing(h.cfg.VertexCompatAPIKey, arr)
+	}
 	h.cfg.VertexCompatAPIKey = append([]config.VertexCompatKey(nil), arr...)
 	h.cfg.SanitizeVertexCompatKeys()
 	h.persistLocked(c)
@@ -961,6 +1205,9 @@ func (h *Handler) PutCodexKeys(c *gin.Context) {
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if !configListReplaceRequested(c) {
+		filtered = mergeCodexKeysPreservingMissing(h.cfg.CodexKey, filtered)
+	}
 	h.cfg.CodexKey = filtered
 	h.cfg.SanitizeCodexKeys()
 	h.persistLocked(c)
