@@ -1902,48 +1902,12 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 		}
 	}
 
-	useAntigravitySchema := strings.Contains(modelName, "claude") || strings.Contains(modelName, "gemini-3-pro") || strings.Contains(modelName, "gemini-3.1-pro")
-	var (
-		bodyReader io.Reader
-		payloadLog []byte
-	)
-	if antigravityRequestNeedsSchemaSanitization(payload) {
-		payloadStr := string(payload)
-		paths := make([]string, 0)
-		util.Walk(gjson.Parse(payloadStr), "", "parametersJsonSchema", &paths)
-		for _, p := range paths {
-			payloadStr, _ = util.RenameKey(payloadStr, p, p[:len(p)-len("parametersJsonSchema")]+"parameters")
-		}
-
-		if useAntigravitySchema {
-			payloadStr = util.CleanJSONSchemaForAntigravity(payloadStr)
-		} else {
-			payloadStr = util.CleanJSONSchemaForGemini(payloadStr)
-		}
-
-		if strings.Contains(modelName, "claude") {
-			updated, _ := sjson.SetBytes([]byte(payloadStr), "request.toolConfig.functionCallingConfig.mode", "VALIDATED")
-			payloadStr = string(updated)
-		} else {
-			payloadStr, _ = sjson.Delete(payloadStr, "request.generationConfig.maxOutputTokens")
-		}
-
-		bodyReader = strings.NewReader(payloadStr)
-		if e.cfg != nil && e.cfg.RequestLog {
-			payloadLog = []byte(payloadStr)
-		}
-	} else {
-		if strings.Contains(modelName, "claude") {
-			payload, _ = sjson.SetBytes(payload, "request.toolConfig.functionCallingConfig.mode", "VALIDATED")
-		} else {
-			payload, _ = sjson.DeleteBytes(payload, "request.generationConfig.maxOutputTokens")
-		}
-
-		bodyReader = bytes.NewReader(payload)
-		if e.cfg != nil && e.cfg.RequestLog {
-			payloadLog = append([]byte(nil), payload...)
-		}
+	builder := &antigravityPayloadBuilder{
+		payload:    payload,
+		modelName:  modelName,
+		requestLog: e.cfg != nil && e.cfg.RequestLog,
 	}
+	bodyReader, payloadLog := builder.build()
 
 	// if useAntigravitySchema {
 	// 	systemInstructionPartsResult := gjson.Get(payloadStr, "request.systemInstruction.parts")
@@ -2007,6 +1971,104 @@ func antigravityRequestNeedsSchemaSanitization(payload []byte) bool {
 		return true
 	}
 	return false
+}
+
+// antigravityPayloadBuilder encapsulates the request-body preparation
+// branching that previously lived as 5 nested conditionals inside
+// buildRequest. The build() method picks the sanitized vs plain path,
+// applies the claude-vs-gemini final transform, and returns the body
+// reader plus an optional log copy. Behavior is identical to the prior
+// inline code; the existing tests in
+// antigravity_executor_buildrequest_test.go gate the equivalence.
+type antigravityPayloadBuilder struct {
+	payload    []byte
+	modelName  string
+	requestLog bool
+}
+
+// build returns the http body reader and (when request logging is on)
+// a copy of the bytes that ended up on the wire. The two paths share
+// the claude-vs-gemini final transform via applyModelTransform.
+func (b *antigravityPayloadBuilder) build() (io.Reader, []byte) {
+	if antigravityRequestNeedsSchemaSanitization(b.payload) {
+		return b.buildSanitized()
+	}
+	return b.buildPlain()
+}
+
+// buildSanitized handles payloads that contain tool schemas or response
+// schemas: rename parametersJsonSchema -> parameters, clean the schema
+// using the dialect appropriate for the model, then run the
+// claude-vs-gemini final transform on the string form.
+func (b *antigravityPayloadBuilder) buildSanitized() (io.Reader, []byte) {
+	payloadStr := string(b.payload)
+	paths := make([]string, 0)
+	util.Walk(gjson.Parse(payloadStr), "", "parametersJsonSchema", &paths)
+	for _, p := range paths {
+		payloadStr, _ = util.RenameKey(payloadStr, p, p[:len(p)-len("parametersJsonSchema")]+"parameters")
+	}
+
+	if b.useAntigravitySchema() {
+		payloadStr = util.CleanJSONSchemaForAntigravity(payloadStr)
+	} else {
+		payloadStr = util.CleanJSONSchemaForGemini(payloadStr)
+	}
+
+	payloadStr = b.applyModelTransformString(payloadStr)
+
+	body := strings.NewReader(payloadStr)
+	var logBytes []byte
+	if b.requestLog {
+		logBytes = []byte(payloadStr)
+	}
+	return body, logBytes
+}
+
+// buildPlain handles payloads without tool/response schemas: just run
+// the claude-vs-gemini final transform on the original bytes.
+func (b *antigravityPayloadBuilder) buildPlain() (io.Reader, []byte) {
+	payload := b.applyModelTransformBytes(b.payload)
+
+	body := bytes.NewReader(payload)
+	var logBytes []byte
+	if b.requestLog {
+		logBytes = append([]byte(nil), payload...)
+	}
+	return body, logBytes
+}
+
+// applyModelTransformString applies the claude-vs-gemini final transform
+// to a string-form payload. Claude requires VALIDATED tool-config mode;
+// other models drop generationConfig.maxOutputTokens (the schema-clean
+// path's previous behavior).
+func (b *antigravityPayloadBuilder) applyModelTransformString(payloadStr string) string {
+	if strings.Contains(b.modelName, "claude") {
+		updated, _ := sjson.SetBytes([]byte(payloadStr), "request.toolConfig.functionCallingConfig.mode", "VALIDATED")
+		return string(updated)
+	}
+	out, _ := sjson.Delete(payloadStr, "request.generationConfig.maxOutputTokens")
+	return out
+}
+
+// applyModelTransformBytes is the byte-form sibling of
+// applyModelTransformString — used when the schema-sanitization path is
+// not taken so we can keep working in []byte and avoid an extra copy.
+func (b *antigravityPayloadBuilder) applyModelTransformBytes(payload []byte) []byte {
+	if strings.Contains(b.modelName, "claude") {
+		out, _ := sjson.SetBytes(payload, "request.toolConfig.functionCallingConfig.mode", "VALIDATED")
+		return out
+	}
+	out, _ := sjson.DeleteBytes(payload, "request.generationConfig.maxOutputTokens")
+	return out
+}
+
+// useAntigravitySchema reports whether the model expects the
+// antigravity schema dialect (claude + gemini-3-pro family) rather than
+// plain gemini.
+func (b *antigravityPayloadBuilder) useAntigravitySchema() bool {
+	return strings.Contains(b.modelName, "claude") ||
+		strings.Contains(b.modelName, "gemini-3-pro") ||
+		strings.Contains(b.modelName, "gemini-3.1-pro")
 }
 
 func tokenExpiry(metadata map[string]any) time.Time {
