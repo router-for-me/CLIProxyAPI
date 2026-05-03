@@ -200,6 +200,87 @@ func TestExtractFingerprint_SystemPrefixCustom(t *testing.T) {
 	}
 }
 
+// TestExtractFingerprint_Classifier matches the internal yes/no classifier
+// (Anthropic claude-haiku-4-5 with tool_choice = answer_question, system
+// "You are a classifier that answers yes/no questions...").
+func TestExtractFingerprint_Classifier(t *testing.T) {
+	body := []byte(`{
+		"model":"claude-haiku-4-5-20251001",
+		"system":"You are a classifier that answers yes/no questions. You must use the provided tool to give your answer with reasoning.",
+		"messages":[{"role":"user","content":"Should we compact this thread?"}],
+		"tool_choice":{"type":"tool","name":"answer_question"},
+		"tools":[{"name":"answer_question"}]
+	}`)
+	fp := ExtractFingerprint(body)
+	if got := fp.Feature(); got != "classifier" {
+		t.Fatalf("Feature = %q, want classifier", got)
+	}
+}
+
+// TestExtractFingerprint_GitListHelper matches the amp.review git-list
+// preparation call (claude-haiku-4-5).
+func TestExtractFingerprint_GitListHelper(t *testing.T) {
+	body := []byte(`{
+		"model":"claude-haiku-4-5-20251001",
+		"system":"You generate git commands to list changed files. Output commands wrapped in <command></command> tags.",
+		"messages":[{"role":"user","content":"HEAD~1"}]
+	}`)
+	if got := ExtractFingerprint(body).Feature(); got != "git_list" {
+		t.Fatalf("Feature = %q, want git_list", got)
+	}
+}
+
+// TestExtractFingerprint_GitDiffHelper matches the amp.review git-diff
+// preparation call (claude-haiku-4-5).
+func TestExtractFingerprint_GitDiffHelper(t *testing.T) {
+	body := []byte(`{
+		"model":"claude-haiku-4-5-20251001",
+		"system":"You generate git diff commands that show the actual diff content. Output commands in XML format:\n<command>...</command>",
+		"messages":[{"role":"user","content":"HEAD~1"}]
+	}`)
+	if got := ExtractFingerprint(body).Feature(); got != "git_diff" {
+		t.Fatalf("Feature = %q, want git_diff", got)
+	}
+}
+
+// TestExtractFingerprint_CodereviewCheck matches the per-check review
+// subagent invoked by `amp review --checks-only` when a check is found.
+// User message template: `Run the "${name}" code review check.`
+func TestExtractFingerprint_CodereviewCheck(t *testing.T) {
+	body := []byte(`{
+		"model":"claude-haiku-4-5-20251001",
+		"system":"You are an expert senior engineer with deep knowledge of software engineering best practices, security, performance, and maintainability.\n\n## Files to Review\n...",
+		"messages":[{"role":"user","content":"Run the \"sql-injection-checker\" code review check."}]
+	}`)
+	if got := ExtractFingerprint(body).Feature(); got != "codereview_check" {
+		t.Fatalf("Feature = %q, want codereview_check", got)
+	}
+}
+
+// TestExtractFingerprint_ThreadExtract matches the read_thread tool's
+// internal extraction call.
+func TestExtractFingerprint_ThreadExtract(t *testing.T) {
+	body := []byte(`{
+		"contents":[{"role":"user","parts":[{"text":"thread content..."}]}],
+		"systemInstruction":{"parts":[{"text":"You are helping me extract relevant information from the mentioned thread based on a goal."}]}
+	}`)
+	if got := ExtractFingerprint(body).Feature(); got != "thread_extract" {
+		t.Fatalf("Feature = %q, want thread_extract", got)
+	}
+}
+
+// TestExtractFingerprint_ErrorSummary matches the subagent error-recovery
+// summarizer that fires when a Task subagent hits a fatal error.
+func TestExtractFingerprint_ErrorSummary(t *testing.T) {
+	body := []byte(`{
+		"contents":[{"role":"user","parts":[{"text":"work history..."}]}],
+		"systemInstruction":{"parts":[{"text":"You are helping summarize work done by an AI coding agent (subagent) before it encountered an error."}]}
+	}`)
+	if got := ExtractFingerprint(body).Feature(); got != "error_summary" {
+		t.Fatalf("Feature = %q, want error_summary", got)
+	}
+}
+
 func TestConditionMatches(t *testing.T) {
 	fp := RequestFingerprint{
 		ToolChoice:   "create_handoff_context",

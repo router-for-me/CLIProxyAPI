@@ -16,8 +16,9 @@ import (
 
 // Known Amp tool names used to identify features.
 const (
-	HandoffToolName = "create_handoff_context"
-	TitlingToolName = "set_title"
+	HandoffToolName    = "create_handoff_context"
+	TitlingToolName    = "set_title"
+	ClassifierToolName = "answer_question"
 )
 
 // Hardcoded system-prompt prefixes used by the Amp client binary to invoke
@@ -26,15 +27,25 @@ const (
 // change when Amp itself is upgraded. Keep prefixes long enough to avoid
 // collisions but short enough to tolerate trailing whitespace/newlines.
 const (
-	OraclePromptPrefix     = "you are the oracle - an expert ai advisor"
-	SearchPromptPrefix     = "you are a fast, parallel code search agent"
-	LookAtPromptPrefix     = "you are an ai assistant that analyzes files for a software engineer"
-	ReviewPromptPrefix     = "you are an expert software engineer reviewing code changes"
-	ReviewMainPromptPrefix = "you are an expert senior engineer with deep knowledge of software engineering best practices"
-	TitlingPromptPrefix    = "you are an assistant that generates short, descriptive titles"
-	HandoffPromptPrefix    = "you are an assistant tasked with creating a handoff context"
-	LibrarianPromptPrefix  = "you are the librarian, a specialized codebase understanding agent"
+	OraclePromptPrefix        = "you are the oracle - an expert ai advisor"
+	SearchPromptPrefix        = "you are a fast, parallel code search agent"
+	LookAtPromptPrefix        = "you are an ai assistant that analyzes files for a software engineer"
+	ReviewPromptPrefix        = "you are an expert software engineer reviewing code changes"
+	ReviewMainPromptPrefix    = "you are an expert senior engineer with deep knowledge of software engineering best practices"
+	TitlingPromptPrefix       = "you are an assistant that generates short, descriptive titles"
+	HandoffPromptPrefix       = "you are an assistant tasked with creating a handoff context"
+	LibrarianPromptPrefix     = "you are the librarian, a specialized codebase understanding agent"
+	ClassifierPromptPrefix    = "you are a classifier that answers yes/no questions"
+	GitListPromptPrefix       = "you generate git commands to list changed files"
+	GitDiffPromptPrefix       = "you generate git diff commands that show the actual diff content"
+	ThreadExtractPromptPrefix = "you are helping me extract relevant information from the mentioned thread"
+	ErrorSummaryPromptPrefix  = "you are helping summarize work done by an ai coding agent"
 )
+
+// Suffix of the user-message template emitted by the codereview-check
+// subagent (`Run the "${name}" code review check.`). Combined with the
+// claude-haiku-4-5 model name this is a strong fingerprint.
+const CodereviewCheckUserSuffix = "code review check."
 
 // RequestFingerprint captures the per-request features a mapping condition
 // can match against. All fields are optional; absent fields cannot match.
@@ -67,18 +78,31 @@ type RequestFingerprint struct {
 // Detection order (first match wins):
 //  1. Forced tool name (most reliable; emitted by Amp's tool_choice).
 //  2. responseModalities=IMAGE (painter).
-//  3. System-prompt prefix (hardcoded literals in the Amp binary).
-//  4. User-suffix heuristic (handoff fallback).
+//  3. User-suffix templates that uniquely identify a feature (e.g.
+//     codereview-check `Run the "..." code review check.`). These take
+//     priority over system-prompt prefix because codereview-check shares
+//     its system prompt with the main review subagent.
+//  4. System-prompt prefix (hardcoded literals in the Amp binary).
+//  5. User-suffix heuristic (handoff fallback).
 func (f RequestFingerprint) Feature() string {
 	switch {
 	case strings.EqualFold(f.ToolChoice, HandoffToolName):
 		return "handoff"
 	case strings.EqualFold(f.ToolChoice, TitlingToolName):
 		return "titling"
+	case strings.EqualFold(f.ToolChoice, ClassifierToolName):
+		return "classifier"
 	}
 
 	if f.HasImageOutput {
 		return "painter"
+	}
+
+	lastUser := strings.ToLower(strings.TrimSpace(f.LastUserText))
+	if lastUser != "" {
+		if strings.HasSuffix(lastUser, CodereviewCheckUserSuffix) {
+			return "codereview_check"
+		}
 	}
 
 	sys := strings.ToLower(strings.TrimSpace(f.SystemText))
@@ -100,12 +124,21 @@ func (f RequestFingerprint) Feature() string {
 			return "titling"
 		case strings.HasPrefix(sys, HandoffPromptPrefix):
 			return "handoff"
+		case strings.HasPrefix(sys, ClassifierPromptPrefix):
+			return "classifier"
+		case strings.HasPrefix(sys, GitListPromptPrefix):
+			return "git_list"
+		case strings.HasPrefix(sys, GitDiffPromptPrefix):
+			return "git_diff"
+		case strings.HasPrefix(sys, ThreadExtractPromptPrefix):
+			return "thread_extract"
+		case strings.HasPrefix(sys, ErrorSummaryPromptPrefix):
+			return "error_summary"
 		}
 	}
 
 	// User-suffix based detection (cheap, anchored on Amp's actual prompt).
-	lower := strings.ToLower(f.LastUserText)
-	if strings.HasSuffix(lower, "use the create_handoff_context tool to extract relevant information and files.") {
+	if strings.HasSuffix(lastUser, "use the create_handoff_context tool to extract relevant information and files.") {
 		return "handoff"
 	}
 	return ""

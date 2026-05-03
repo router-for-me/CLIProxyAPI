@@ -284,14 +284,20 @@ type AmpMappingCondition struct {
 	// Feature is a high-level semantic alias for a known Amp feature.
 	// Inferred via forced tool name or hardcoded system-prompt prefixes
 	// observed in the Amp client binary. Currently recognized values:
-	//   - "handoff"   (Amp thread handoff; tool create_handoff_context)
-	//   - "titling"   (Amp thread title generation; tool set_title)
-	//   - "oracle"    (Amp Oracle advisor; gpt-5.4 via Responses API)
-	//   - "search"    (Amp finder/search subagent; gemini-3-flash)
-	//   - "look_at"   (Amp look_at file analyzer; gemini-3-flash)
-	//   - "review"    (Amp code review summary; gemini-3-flash)
-	//   - "painter"   (Amp painter image generation; gemini-3-pro-image)
-	//   - "librarian" (Amp librarian repo-understanding subagent; claude-sonnet-4-6)
+	//   - "handoff"          (Amp thread handoff; tool create_handoff_context)
+	//   - "titling"          (Amp thread title generation; tool set_title)
+	//   - "oracle"           (Amp Oracle advisor; gpt-5.4 via Responses API)
+	//   - "search"           (Amp finder/search subagent; gemini-3-flash)
+	//   - "look_at"          (Amp look_at file analyzer; gemini-3-flash)
+	//   - "review"           (Amp code review main + summary; gemini-3.1-pro / gemini-3-flash)
+	//   - "painter"          (Amp painter image generation; gemini-3-pro-image)
+	//   - "librarian"        (Amp librarian repo-understanding subagent; claude-sonnet-4-6)
+	//   - "classifier"       (Amp internal yes/no classifier; tool answer_question, claude-haiku-4-5)
+	//   - "git_list"         (Amp review git-list helper; claude-haiku-4-5)
+	//   - "git_diff"         (Amp review git-diff helper; claude-haiku-4-5)
+	//   - "codereview_check" (Amp per-check review subagent; claude-haiku-4-5)
+	//   - "thread_extract"   (Amp read_thread internal extraction)
+	//   - "error_summary"    (Amp subagent error-recovery summarizer)
 	// Other Amp features should be matched via ToolChoice / UserSuffix /
 	// SystemPrefix when their fingerprint is known. Case-insensitive.
 	Feature string `yaml:"feature,omitempty" json:"feature,omitempty"`
