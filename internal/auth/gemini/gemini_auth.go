@@ -216,7 +216,7 @@ func (g *GeminiAuth) getTokenFromWeb(ctx context.Context, config *oauth2.Config,
 
 	// Create a new HTTP server with its own multiplexer.
 	mux := http.NewServeMux()
-	server := &http.Server{Addr: fmt.Sprintf(":%d", callbackPort), Handler: mux}
+	server := &http.Server{Addr: fmt.Sprintf("localhost:%d", callbackPort), Handler: mux}
 	config.RedirectURL = callbackURL
 
 	mux.HandleFunc("/oauth2callback", func(w http.ResponseWriter, r *http.Request) {

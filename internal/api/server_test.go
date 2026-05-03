@@ -11,6 +11,7 @@ import (
 	"time"
 
 	gin "github.com/gin-gonic/gin"
+	managementHandlers "github.com/router-for-me/CLIProxyAPI/v6/internal/api/handlers/management"
 	proxyconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	internallogging "github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
@@ -82,6 +83,42 @@ func TestHealthz(t *testing.T) {
 			t.Fatalf("expected empty body for HEAD request, got %q", rr.Body.String())
 		}
 	})
+}
+
+func TestOAuthCallbackRequiresPendingSession(t *testing.T) {
+	server := newTestServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/codex/callback?state=not-pending&code=test-code", nil)
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusConflict, rr.Body.String())
+	}
+	if strings.Contains(rr.Body.String(), "Authentication successful") {
+		t.Fatalf("callback returned success page for non-pending session: %s", rr.Body.String())
+	}
+}
+
+func TestOAuthCallbackPersistsPendingSession(t *testing.T) {
+	server := newTestServer(t)
+	state := "pending-codex-test"
+	managementHandlers.RegisterOAuthSession(state, "codex")
+	t.Cleanup(func() {
+		managementHandlers.CompleteOAuthSession(state)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/codex/callback?state="+state+"&code=test-code", nil)
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	callbackPath := filepath.Join(server.cfg.AuthDir, ".oauth-codex-"+state+".oauth")
+	if _, err := os.Stat(callbackPath); err != nil {
+		t.Fatalf("callback file was not written: %v", err)
+	}
 }
 
 func TestAmpProviderModelRoutes(t *testing.T) {

@@ -229,7 +229,7 @@ func startAntigravityCallbackServer(port int) (*http.Server, int, <-chan callbac
 	if port <= 0 {
 		port = antigravity.CallbackPort
 	}
-	addr := fmt.Sprintf(":%d", port)
+	addr := fmt.Sprintf("localhost:%d", port)
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, 0, nil, err

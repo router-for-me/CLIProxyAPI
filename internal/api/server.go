@@ -398,62 +398,50 @@ func (s *Server) setupRoutes() {
 	// These endpoints receive provider redirects and persist
 	// the short-lived code/state for the waiting goroutine.
 	s.engine.GET("/anthropic/callback", func(c *gin.Context) {
-		code := c.Query("code")
-		state := c.Query("state")
-		errStr := c.Query("error")
-		if errStr == "" {
-			errStr = c.Query("error_description")
-		}
-		if state != "" {
-			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "anthropic", state, code, errStr)
-		}
-		c.Header("Content-Type", "text/html; charset=utf-8")
-		c.String(http.StatusOK, oauthCallbackSuccessHTML)
+		s.handleOAuthCallback(c, "anthropic")
 	})
 
 	s.engine.GET("/codex/callback", func(c *gin.Context) {
-		code := c.Query("code")
-		state := c.Query("state")
-		errStr := c.Query("error")
-		if errStr == "" {
-			errStr = c.Query("error_description")
-		}
-		if state != "" {
-			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "codex", state, code, errStr)
-		}
-		c.Header("Content-Type", "text/html; charset=utf-8")
-		c.String(http.StatusOK, oauthCallbackSuccessHTML)
+		s.handleOAuthCallback(c, "codex")
 	})
 
 	s.engine.GET("/google/callback", func(c *gin.Context) {
-		code := c.Query("code")
-		state := c.Query("state")
-		errStr := c.Query("error")
-		if errStr == "" {
-			errStr = c.Query("error_description")
-		}
-		if state != "" {
-			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "gemini", state, code, errStr)
-		}
-		c.Header("Content-Type", "text/html; charset=utf-8")
-		c.String(http.StatusOK, oauthCallbackSuccessHTML)
+		s.handleOAuthCallback(c, "gemini")
 	})
 
 	s.engine.GET("/antigravity/callback", func(c *gin.Context) {
-		code := c.Query("code")
-		state := c.Query("state")
-		errStr := c.Query("error")
-		if errStr == "" {
-			errStr = c.Query("error_description")
-		}
-		if state != "" {
-			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "antigravity", state, code, errStr)
-		}
-		c.Header("Content-Type", "text/html; charset=utf-8")
-		c.String(http.StatusOK, oauthCallbackSuccessHTML)
+		s.handleOAuthCallback(c, "antigravity")
 	})
 
 	// Management routes are registered lazily by registerManagementRoutes when a secret is configured.
+}
+
+func (s *Server) handleOAuthCallback(c *gin.Context, provider string) {
+	code := c.Query("code")
+	state := c.Query("state")
+	errStr := c.Query("error")
+	if errStr == "" {
+		errStr = c.Query("error_description")
+	}
+	if state == "" {
+		c.String(http.StatusBadRequest, "missing oauth state")
+		return
+	}
+
+	if _, err := managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, provider, state, code, errStr); err != nil {
+		entry := log.WithError(err).WithField("provider", provider)
+		if managementHandlers.IsOAuthSessionNotPending(err) {
+			entry.Warn("oauth callback received for non-pending session")
+			c.String(http.StatusConflict, "oauth session is not pending")
+			return
+		}
+		entry.Error("failed to persist oauth callback")
+		c.String(http.StatusInternalServerError, "failed to persist oauth callback")
+		return
+	}
+
+	c.Header("Content-Type", "text/html; charset=utf-8")
+	c.String(http.StatusOK, oauthCallbackSuccessHTML)
 }
 
 // AttachWebsocketRoute registers a websocket upgrade handler on the primary Gin engine.
