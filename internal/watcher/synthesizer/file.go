@@ -157,6 +157,30 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 			}
 		}
 	}
+	// Extract cloak configuration from auth file metadata into attributes
+	// so that getCloakConfigFromAuth can read them for OAuth credentials.
+	if cloakObj, ok := metadata["cloak"].(map[string]any); ok {
+		if mode, ok := cloakObj["mode"].(string); ok && mode != "" {
+			a.Attributes["cloak_mode"] = mode
+		}
+		if strict, ok := cloakObj["strict-mode"].(bool); ok && strict {
+			a.Attributes["cloak_strict_mode"] = "true"
+		}
+		if words, ok := cloakObj["sensitive-words"].([]any); ok && len(words) > 0 {
+			var parts []string
+			for _, w := range words {
+				if s, ok := w.(string); ok {
+					parts = append(parts, s)
+				}
+			}
+			if len(parts) > 0 {
+				a.Attributes["cloak_sensitive_words"] = strings.Join(parts, ",")
+			}
+		}
+		if cache, ok := cloakObj["cache-user-id"].(bool); ok && cache {
+			a.Attributes["cloak_cache_user_id"] = "true"
+		}
+	}
 	coreauth.ApplyCustomHeadersFromMetadata(a)
 	ApplyAuthExcludedModelsMeta(a, cfg, perAccountExcluded, "oauth")
 	// For codex auth files, extract plan_type from the JWT id_token.
