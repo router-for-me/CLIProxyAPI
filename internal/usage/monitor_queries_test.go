@@ -103,6 +103,43 @@ func TestSQLiteUsageStoreQueryMonitorChannelStats(t *testing.T) {
 	assertStringSliceEqual(t, result.Filters.Sources, []string{"source-a", "source-b"})
 }
 
+func TestSQLiteUsageStoreQueryMonitorChannelStatsDistinguishesAuthIndex(t *testing.T) {
+	ctx := context.Background()
+	store := newTestSQLiteUsageStore(t)
+	defer store.Close()
+
+	base := time.Date(2026, 2, 7, 12, 0, 0, 0, time.UTC)
+	insertUsageRecords(t, store,
+		UsageRecord{APIKey: "api-1", Model: "model-a", Source: "shared-source", AuthIndex: "auth-a", RequestedAt: base.Add(-4 * time.Hour)},
+		UsageRecord{APIKey: "api-1", Model: "model-b", Source: "shared-source", AuthIndex: "auth-a", RequestedAt: base.Add(-3 * time.Hour), Failed: true},
+		UsageRecord{APIKey: "api-1", Model: "model-a", Source: "shared-source", AuthIndex: "auth-b", RequestedAt: base.Add(-2 * time.Hour)},
+	)
+
+	result, err := store.QueryMonitorChannelStats(ctx, MonitorQueryFilter{}, 10, 12)
+	if err != nil {
+		t.Fatalf("QueryMonitorChannelStats failed: %v", err)
+	}
+
+	if len(result.Items) != 2 {
+		t.Fatalf("unexpected item count: got %d want 2", len(result.Items))
+	}
+	if result.Items[0].AuthIndex != "auth-a" {
+		t.Fatalf("expected first aggregate for auth-a, got %+v", result.Items[0])
+	}
+	if result.Items[0].TotalRequests != 2 || result.Items[0].FailedRequests != 1 {
+		t.Fatalf("unexpected auth-a aggregate: %+v", result.Items[0])
+	}
+	if len(result.Items[0].Models) != 2 {
+		t.Fatalf("expected auth-a models to stay separate, got %+v", result.Items[0].Models)
+	}
+	if result.Items[1].AuthIndex != "auth-b" {
+		t.Fatalf("expected second aggregate for auth-b, got %+v", result.Items[1])
+	}
+	if result.Items[1].TotalRequests != 1 || result.Items[1].FailedRequests != 0 {
+		t.Fatalf("unexpected auth-b aggregate: %+v", result.Items[1])
+	}
+}
+
 func TestSQLiteUsageStoreQueryMonitorFailureStats(t *testing.T) {
 	ctx := context.Background()
 	store := newTestSQLiteUsageStore(t)

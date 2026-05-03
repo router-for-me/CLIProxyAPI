@@ -98,6 +98,7 @@ type monitorModelStats struct {
 type monitorChannelStatsItem struct {
 	Source          string                 `json:"source"`
 	SourceRef       monitorSourceRef       `json:"source_ref"`
+	AuthIndex       string                 `json:"auth_index,omitempty"`
 	TotalRequests   int64                  `json:"total_requests"`
 	SuccessRequests int64                  `json:"success_requests"`
 	FailedRequests  int64                  `json:"failed_requests"`
@@ -117,6 +118,7 @@ type monitorFailureStatsItem struct {
 
 type monitorChannelAggregate struct {
 	Source          string
+	AuthIndex       string
 	TotalRequests   int64
 	SuccessRequests int64
 	FailedRequests  int64
@@ -382,7 +384,8 @@ func (h *Handler) GetMonitorChannelStats(c *gin.Context) {
 
 				items = append(items, monitorChannelStatsItem{
 					Source:          channel.Source,
-					SourceRef:       sourceResolver.Resolve(channel.Source, ""),
+					SourceRef:       sourceResolver.Resolve(channel.Source, channel.AuthIndex),
+					AuthIndex:       channel.AuthIndex,
 					TotalRequests:   channel.TotalRequests,
 					SuccessRequests: channel.SuccessRequests,
 					FailedRequests:  channel.FailedRequests,
@@ -420,13 +423,16 @@ func (h *Handler) GetMonitorChannelStats(c *gin.Context) {
 		if source == "" {
 			source = "unknown"
 		}
-		agg, ok := channelMap[source]
+		authIndex := strings.TrimSpace(record.AuthIndex)
+		channelKey := source + "\x00" + authIndex
+		agg, ok := channelMap[channelKey]
 		if !ok {
 			agg = &monitorChannelAggregate{
-				Source: source,
-				Models: make(map[string]*monitorModelAggregate),
+				Source:    source,
+				AuthIndex: authIndex,
+				Models:    make(map[string]*monitorModelAggregate),
 			}
-			channelMap[source] = agg
+			channelMap[channelKey] = agg
 		}
 
 		agg.TotalRequests++
@@ -497,7 +503,8 @@ func (h *Handler) GetMonitorChannelStats(c *gin.Context) {
 
 		items = append(items, monitorChannelStatsItem{
 			Source:          agg.Source,
-			SourceRef:       sourceResolver.Resolve(agg.Source, ""),
+			SourceRef:       sourceResolver.Resolve(agg.Source, agg.AuthIndex),
+			AuthIndex:       agg.AuthIndex,
 			TotalRequests:   agg.TotalRequests,
 			SuccessRequests: agg.SuccessRequests,
 			FailedRequests:  agg.FailedRequests,
@@ -510,6 +517,9 @@ func (h *Handler) GetMonitorChannelStats(c *gin.Context) {
 
 	sort.Slice(items, func(i, j int) bool {
 		if items[i].TotalRequests == items[j].TotalRequests {
+			if items[i].Source == items[j].Source {
+				return items[i].AuthIndex < items[j].AuthIndex
+			}
 			return items[i].Source < items[j].Source
 		}
 		return items[i].TotalRequests > items[j].TotalRequests

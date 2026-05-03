@@ -222,9 +222,6 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 	out := make([]*coreauth.Auth, 0)
 	for i := range cfg.OpenAICompatibility {
 		compat := &cfg.OpenAICompatibility[i]
-		if compat.Disabled {
-			continue
-		}
 		prefix := strings.TrimSpace(compat.Prefix)
 		providerName := strings.ToLower(strings.TrimSpace(compat.Name))
 		if providerName == "" {
@@ -268,7 +265,8 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 			}
 			addConfigHeadersToAttrs(compat.Headers, attrs)
 			status := coreauth.StatusActive
-			if entry.Disabled {
+			disabled := compat.Disabled || entry.Disabled
+			if disabled {
 				status = coreauth.StatusDisabled
 			}
 			a := &coreauth.Auth{
@@ -277,7 +275,7 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 				Label:      compat.Name,
 				Prefix:     prefix,
 				Status:     status,
-				Disabled:   entry.Disabled,
+				Disabled:   disabled,
 				ProxyURL:   proxyURL,
 				Attributes: attrs,
 				CreatedAt:  now,
@@ -310,12 +308,17 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 				attrs["models_hash"] = hash
 			}
 			addConfigHeadersToAttrs(compat.Headers, attrs)
+			status := coreauth.StatusActive
+			if compat.Disabled {
+				status = coreauth.StatusDisabled
+			}
 			a := &coreauth.Auth{
 				ID:         id,
 				Provider:   providerName,
 				Label:      compat.Name,
 				Prefix:     prefix,
-				Status:     coreauth.StatusActive,
+				Status:     status,
+				Disabled:   compat.Disabled,
 				Attributes: attrs,
 				CreatedAt:  now,
 				UpdatedAt:  now,

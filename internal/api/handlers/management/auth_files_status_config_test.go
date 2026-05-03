@@ -272,3 +272,63 @@ func TestPatchAuthFileStatusConfigBackedMatchesOpenAICompatDuplicateByID(t *test
 		t.Fatalf("expected second auth %s to be disabled", secondID)
 	}
 }
+
+func TestPatchAuthFileStatusConfigBackedEnablesDisabledOpenAICompatProvider(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("openai-compatibility:\n  - name: minimax\n    disabled: true\n    base-url: https://api.minimax.example.com/v1\n    api-key-entries:\n      - api-key: sk-provider-disabled\n    models:\n      - name: minimax-m2\n        alias: minimax-m2\n"), 0o600); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+
+	cfg := &config.Config{
+		AuthDir: tmpDir,
+		OpenAICompatibility: []config.OpenAICompatibility{{
+			Name:     "minimax",
+			Disabled: true,
+			BaseURL:  "https://api.minimax.example.com/v1",
+			APIKeyEntries: []config.OpenAICompatibilityAPIKey{{
+				APIKey: "sk-provider-disabled",
+			}},
+			Models: []config.OpenAICompatibilityModel{{
+				Name:  "minimax-m2",
+				Alias: "minimax-m2",
+			}},
+		}},
+	}
+	manager := coreauth.NewManager(nil, nil, nil)
+	h := NewHandler(cfg, configPath, manager)
+	h.mu.Lock()
+	h.syncRuntimeConfigLocked(context.Background())
+	h.mu.Unlock()
+
+	authID, _ := synthesizer.NewStableIDGenerator().Next("openai-compatibility:minimax", "sk-provider-disabled", "https://api.minimax.example.com/v1", "")
+	auth, ok := manager.GetByID(authID)
+	if !ok || auth == nil || !auth.Disabled {
+		t.Fatalf("expected disabled provider auth %s to be present as disabled", authID)
+	}
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	req := httptest.NewRequest(http.MethodPatch, "/v0/management/auth-files/status", strings.NewReader(`{"name":"`+authID+`","disabled":false}`))
+	req.Header.Set("Content-Type", "application/json")
+	ctx.Request = req
+
+	h.PatchAuthFileStatus(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PatchAuthFileStatus status = %d, want %d with body %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if h.cfg.OpenAICompatibility[0].Disabled {
+		t.Fatal("expected enabling provider-disabled auth to clear provider disabled state")
+	}
+	if h.cfg.OpenAICompatibility[0].APIKeyEntries[0].Disabled {
+		t.Fatal("expected target key to remain enabled")
+	}
+	activeAuth, ok := manager.GetByID(authID)
+	if !ok || activeAuth == nil || activeAuth.Disabled || activeAuth.Status == coreauth.StatusDisabled {
+		t.Fatalf("expected auth %s active after enable, got %#v", authID, activeAuth)
+	}
+}

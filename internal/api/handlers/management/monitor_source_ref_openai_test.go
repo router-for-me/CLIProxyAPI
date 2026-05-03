@@ -35,3 +35,29 @@ func TestMonitorSourceResolver_OpenAIKeyDisabledState(t *testing.T) {
 		t.Fatal("expected provider source ref to remain enabled when at least one key is enabled")
 	}
 }
+
+func TestMonitorSourceResolver_OpenAIProviderDisabledState(t *testing.T) {
+	resolver := newMonitorSourceResolver(&config.Config{
+		OpenAICompatibility: []config.OpenAICompatibility{
+			{
+				Name:     "demo",
+				Prefix:   "team",
+				BaseURL:  "https://example.com/v1",
+				Disabled: true,
+				APIKeyEntries: []config.OpenAICompatibilityAPIKey{
+					{APIKey: "sk-enabled"},
+				},
+			},
+		},
+	}, nil)
+
+	providerRef := resolver.Resolve("demo", "")
+	keyRef := resolver.Resolve("sk-enabled", "")
+
+	if !providerRef.Disabled {
+		t.Fatal("expected disabled provider source ref to be disabled")
+	}
+	if !keyRef.Disabled {
+		t.Fatal("expected keys under disabled provider to resolve as disabled")
+	}
+}

@@ -1431,6 +1431,19 @@ func (h *Handler) setConfigBackedAuthDisabledStateLocked(auth *coreauth.Auth, di
 				providerName = "openai-compatibility"
 			}
 			idKind := fmt.Sprintf("openai-compatibility:%s", providerName)
+			if len(h.cfg.OpenAICompatibility[i].APIKeyEntries) == 0 {
+				id, _ := idGen.Next(idKind, h.cfg.OpenAICompatibility[i].BaseURL)
+				fallbackMatch := targetID == "" &&
+					strings.EqualFold(h.cfg.OpenAICompatibility[i].Name, compatName) &&
+					apiKey == ""
+				if matchesTargetID(id) || fallbackMatch {
+					if h.cfg.OpenAICompatibility[i].Disabled != disabled {
+						h.cfg.OpenAICompatibility[i].Disabled = disabled
+						changed = true
+					}
+					break
+				}
+			}
 			for j := range h.cfg.OpenAICompatibility[i].APIKeyEntries {
 				entry := &h.cfg.OpenAICompatibility[i].APIKeyEntries[j]
 				id, _ := idGen.Next(idKind, entry.APIKey, h.cfg.OpenAICompatibility[i].BaseURL, entry.ProxyURL)
@@ -1439,6 +1452,10 @@ func (h *Handler) setConfigBackedAuthDisabledStateLocked(auth *coreauth.Auth, di
 					strings.TrimSpace(entry.APIKey) == apiKey &&
 					strings.TrimSpace(entry.ProxyURL) == proxyURL
 				if matchesTargetID(id) || fallbackMatch {
+					if !disabled && h.cfg.OpenAICompatibility[i].Disabled {
+						h.cfg.OpenAICompatibility[i].Disabled = false
+						changed = true
+					}
 					if entry.Disabled != disabled {
 						entry.Disabled = disabled
 						changed = true

@@ -66,11 +66,13 @@ func newMonitorSourceResolver(cfg *config.Config, authManager *coreauth.Manager)
 
 	if cfg != nil {
 		for index, entry := range cfg.OpenAICompatibility {
-			providerDisabled := len(entry.APIKeyEntries) > 0
-			for _, keyEntry := range entry.APIKeyEntries {
-				if !keyEntry.Disabled {
-					providerDisabled = false
-					break
+			providerDisabled := entry.Disabled || len(entry.APIKeyEntries) > 0
+			if !entry.Disabled {
+				for _, keyEntry := range entry.APIKeyEntries {
+					if !keyEntry.Disabled {
+						providerDisabled = false
+						break
+					}
 				}
 			}
 			providerRef := buildProviderMonitorSourceRef("openai", index, providerDisplayName("openai"), entry.Name, providerDisabled)
@@ -89,7 +91,7 @@ func newMonitorSourceResolver(cfg *config.Config, authManager *coreauth.Manager)
 				if apiKey == "" {
 					continue
 				}
-				ref := buildProviderMonitorSourceRef("openai", index, providerDisplayName("openai"), apiKey, keyEntry.Disabled)
+				ref := buildProviderMonitorSourceRef("openai", index, providerDisplayName("openai"), apiKey, entry.Disabled || keyEntry.Disabled)
 				for _, candidate := range collectProviderSourceCandidates(apiKey, entry.Prefix) {
 					if candidate == "" {
 						continue
