@@ -222,6 +222,7 @@ func TestUnifiedModelsHandlerRoutesClaudeCompatibleClients(t *testing.T) {
 		name         string
 		userAgent    string
 		anthropicVer string
+		apiKeyHeader bool
 		wantClaude   bool
 	}{
 		{
@@ -241,6 +242,12 @@ func TestUnifiedModelsHandlerRoutesClaudeCompatibleClients(t *testing.T) {
 			wantClaude:   true,
 		},
 		{
+			name:         "x api key header",
+			userAgent:    "node",
+			apiKeyHeader: true,
+			wantClaude:   true,
+		},
+		{
 			name:       "openai client",
 			userAgent:  "curl/8.7.1",
 			wantClaude: false,
@@ -253,7 +260,11 @@ func TestUnifiedModelsHandlerRoutesClaudeCompatibleClients(t *testing.T) {
 			server := newTestServer(t)
 
 			req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
-			req.Header.Set("Authorization", "Bearer test-key")
+			if tc.apiKeyHeader {
+				req.Header.Set("X-Api-Key", "test-key")
+			} else {
+				req.Header.Set("Authorization", "Bearer test-key")
+			}
 			req.Header.Set("User-Agent", tc.userAgent)
 			if tc.anthropicVer != "" {
 				req.Header.Set("Anthropic-Version", tc.anthropicVer)

@@ -845,11 +845,7 @@ func isClaudeModelsRequest(c *gin.Context) bool {
 	if c == nil {
 		return false
 	}
-	if misc.IsClaudeCompatibleUserAgent(c.GetHeader("User-Agent")) {
-		return true
-	}
-	return strings.TrimSpace(c.GetHeader("Anthropic-Version")) != "" ||
-		strings.TrimSpace(c.GetHeader("Anthropic-Beta")) != ""
+	return misc.IsClaudeCompatibleHeaders(c.Request.Header)
 }
 
 // Start begins listening for and serving HTTP or HTTPS requests.
