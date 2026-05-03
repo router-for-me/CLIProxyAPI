@@ -19,7 +19,7 @@ func TestAPICallTransportDirectBypassesGlobalProxy(t *testing.T) {
 		},
 	}
 
-	transport := h.apiCallTransport(&coreauth.Auth{ProxyURL: "direct"})
+	transport := h.apiCallTransport(&coreauth.Auth{ProxyURL: "direct"}, "")
 	httpTransport, ok := transport.(*http.Transport)
 	if !ok {
 		t.Fatalf("transport type = %T, want *http.Transport", transport)
@@ -38,7 +38,7 @@ func TestAPICallTransportInvalidAuthFallsBackToGlobalProxy(t *testing.T) {
 		},
 	}
 
-	transport := h.apiCallTransport(&coreauth.Auth{ProxyURL: "bad-value"})
+	transport := h.apiCallTransport(&coreauth.Auth{ProxyURL: "bad-value"}, "")
 	httpTransport, ok := transport.(*http.Transport)
 	if !ok {
 		t.Fatalf("transport type = %T, want *http.Transport", transport)
@@ -135,7 +135,7 @@ func TestAPICallTransportAPIKeyAuthFallsBackToConfigProxyURL(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			transport := h.apiCallTransport(tc.auth)
+			transport := h.apiCallTransport(tc.auth, "")
 			httpTransport, ok := transport.(*http.Transport)
 			if !ok {
 				t.Fatalf("transport type = %T, want *http.Transport", transport)
@@ -208,5 +208,96 @@ func TestAuthByIndexDistinguishesSharedAPIKeysAcrossProviders(t *testing.T) {
 	}
 	if gotCompat.ID != compatAuth.ID {
 		t.Fatalf("authByIndex(compat) returned %q, want %q", gotCompat.ID, compatAuth.ID)
+	}
+}
+
+func TestIsNoProxyHost(t *testing.T) {
+	t.Parallel()
+
+	h := &Handler{cfg: &config.Config{}}
+
+	cases := []struct {
+		name string
+		host string
+		want bool
+	}{
+		{"empty host", "", false},
+		{"ipv4 private /8", "10.0.0.5", true},
+		{"ipv4 private /12", "172.20.23.32", true},
+		{"ipv4 private /16", "192.168.1.50", true},
+		{"ipv4 loopback", "127.0.0.1", true},
+		{"ipv4 link-local", "169.254.1.1", true},
+		{"ipv4 public", "8.8.8.8", false},
+		{"ipv4 with port", "10.0.0.5:8080", true},
+		{"ipv6 loopback bare", "::1", true},
+		{"ipv6 loopback bracketed", "[::1]", true},
+		{"ipv6 loopback with port", "[::1]:443", true},
+		{"ipv6 link-local with zone", "fe80::1%eth0", true},
+		{"ipv6 ula", "fd00::1", true},
+		{"ipv6 public", "2001:4860:4860::8888", false},
+		{"localhost literal", "localhost", true},
+		{"localhost with port", "localhost:1234", true},
+		{"localhost case", "LOCALHOST", true},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := h.isNoProxyHost(tc.host)
+			if got != tc.want {
+				t.Fatalf("isNoProxyHost(%q) = %v, want %v", tc.host, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestAPICallTransportBypassesProxyForPrivateIP(t *testing.T) {
+	t.Parallel()
+
+	h := &Handler{
+		cfg: &config.Config{
+			SDKConfig: sdkconfig.SDKConfig{ProxyURL: "http://global-proxy.example.com:8080"},
+		},
+	}
+
+	// LAN IP (LM Studio on local network) must bypass the global proxy so
+	// the management Pick-Models request can reach it directly.
+	transport := h.apiCallTransport(&coreauth.Auth{}, "172.20.23.32:1234")
+	httpTransport, ok := transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport type = %T, want *http.Transport", transport)
+	}
+	if httpTransport.Proxy != nil {
+		req, _ := http.NewRequest(http.MethodGet, "http://172.20.23.32:1234/", nil)
+		if proxyURL, _ := httpTransport.Proxy(req); proxyURL != nil {
+			t.Fatalf("expected no proxy for LAN IP, got %v", proxyURL)
+		}
+	}
+}
+
+func TestAPICallTransportUsesProxyForPublicIP(t *testing.T) {
+	t.Parallel()
+
+	h := &Handler{
+		cfg: &config.Config{
+			SDKConfig: sdkconfig.SDKConfig{ProxyURL: "http://global-proxy.example.com:8080"},
+		},
+	}
+
+	transport := h.apiCallTransport(&coreauth.Auth{}, "api.openai.com:443")
+	httpTransport, ok := transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport type = %T, want *http.Transport", transport)
+	}
+	req, errRequest := http.NewRequest(http.MethodGet, "https://api.openai.com", nil)
+	if errRequest != nil {
+		t.Fatalf("http.NewRequest returned error: %v", errRequest)
+	}
+	proxyURL, errProxy := httpTransport.Proxy(req)
+	if errProxy != nil {
+		t.Fatalf("httpTransport.Proxy returned error: %v", errProxy)
+	}
+	if proxyURL == nil || proxyURL.String() != "http://global-proxy.example.com:8080" {
+		t.Fatalf("proxy URL = %v, want http://global-proxy.example.com:8080", proxyURL)
 	}
 }
