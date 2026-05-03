@@ -50,7 +50,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
     xx-verify CLIProxyAPI
 
 # 运行阶段
-FROM alpine:3.22.0
+FROM alpine:3.23
 
 RUN apk add --no-cache tzdata ca-certificates
 
