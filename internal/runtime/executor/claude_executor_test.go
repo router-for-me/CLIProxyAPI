@@ -2027,3 +2027,176 @@ func TestRemapOAuthToolNames_Lowercase_ReverseApplied(t *testing.T) {
 		t.Fatalf("content.0.name = %q, want %q", got, "bash")
 	}
 }
+
+func TestNormalizeClaudeToolsForAnthropic_CustomToolDefaultSchema(t *testing.T) {
+	body := []byte(`{"tools":[{"type":"custom","name":"apply.patch","description":"Patch edit","format":{"type":"grammar"},"strict":true},{"type":"web_search_20250305","name":"web_search"}],"tool_choice":{"type":"tool","name":"apply.patch"},"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"toolu_01","name":"apply.patch","input":{}}]}]}`)
+
+	out, restoreMap, err := normalizeClaudeToolsForAnthropicWithRestoreMap(body)
+	if err != nil {
+		t.Fatalf("normalizeClaudeToolsForAnthropicWithRestoreMap() error = %v", err)
+	}
+	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "apply_patch" {
+		t.Fatalf("tools.0.name = %q, want %q", got, "apply_patch")
+	}
+	if gjson.GetBytes(out, "tools.0.type").Exists() {
+		t.Fatalf("tools.0.type should be removed for custom tools")
+	}
+	if gjson.GetBytes(out, "tools.0.format").Exists() {
+		t.Fatalf("tools.0.format should be removed for custom tools")
+	}
+	if gjson.GetBytes(out, "tools.0.strict").Exists() {
+		t.Fatalf("tools.0.strict should be removed for custom tools")
+	}
+	if got := gjson.GetBytes(out, "tools.0.input_schema.type").String(); got != "object" {
+		t.Fatalf("tools.0.input_schema.type = %q, want object", got)
+	}
+	if !gjson.GetBytes(out, "tools.0.input_schema.properties").IsObject() {
+		t.Fatalf("tools.0.input_schema.properties should be an object")
+	}
+	if got := gjson.GetBytes(out, "tools.1.type").String(); got != "web_search_20250305" {
+		t.Fatalf("tools.1.type = %q, want web_search_20250305", got)
+	}
+	if got := gjson.GetBytes(out, "tool_choice.name").String(); got != "apply_patch" {
+		t.Fatalf("tool_choice.name = %q, want apply_patch", got)
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.0.name").String(); got != "apply_patch" {
+		t.Fatalf("message tool name = %q, want apply_patch", got)
+	}
+	if got := restoreMap["apply_patch"]; got != "apply.patch" {
+		t.Fatalf("restoreMap[apply_patch] = %q, want apply.patch", got)
+	}
+}
+
+func TestRestoreClaudeNormalizedToolNames(t *testing.T) {
+	restoreMap := map[string]string{"apply_patch": "apply.patch"}
+	body := []byte(`{"content":[{"type":"tool_use","id":"toolu_01","name":"apply_patch","input":{}},{"type":"tool_reference","tool_name":"apply_patch"},{"type":"tool_result","content":[{"type":"tool_reference","tool_name":"apply_patch"}]}]}`)
+
+	out := restoreClaudeNormalizedToolNamesInResponse(body, restoreMap)
+	if got := gjson.GetBytes(out, "content.0.name").String(); got != "apply.patch" {
+		t.Fatalf("content.0.name = %q, want apply.patch", got)
+	}
+	if got := gjson.GetBytes(out, "content.1.tool_name").String(); got != "apply.patch" {
+		t.Fatalf("content.1.tool_name = %q, want apply.patch", got)
+	}
+	if got := gjson.GetBytes(out, "content.2.content.0.tool_name").String(); got != "apply.patch" {
+		t.Fatalf("nested tool_name = %q, want apply.patch", got)
+	}
+
+	line := []byte(`data: {"type":"content_block_start","content_block":{"type":"tool_use","name":"apply_patch"}}`)
+	restoredLine := restoreClaudeNormalizedToolNamesInStreamLine(line, restoreMap)
+	if got := gjson.GetBytes(helps.JSONPayload(restoredLine), "content_block.name").String(); got != "apply.patch" {
+		t.Fatalf("stream content_block.name = %q, want apply.patch", got)
+	}
+}
+
+func TestRestoreClaudeToolNamesInErrorBody(t *testing.T) {
+	restoreMap := map[string]string{"apply_patch": "apply.patch"}
+	body := []byte(`{"error":{"message":"tools.0.name apply_patch is invalid"},"message":"apply_patch failed"}`)
+
+	out := restoreClaudeToolNamesInErrorBody(body, "", restoreMap)
+	if got := gjson.GetBytes(out, "error.message").String(); got != "tools.0.name apply.patch is invalid" {
+		t.Fatalf("error.message = %q, want original tool name", got)
+	}
+	if got := gjson.GetBytes(out, "message").String(); got != "apply.patch failed" {
+		t.Fatalf("message = %q, want original tool name", got)
+	}
+}
+
+func TestBuildClaudePayloadDiagnosticsCountsImagesAndLargeFields(t *testing.T) {
+	body := []byte(`{"system":"sys","messages":[{"role":"user","content":[{"type":"text","text":"hello"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"abcd"}},{"type":"tool_result","content":[{"type":"text","text":"nested"}]}]}],"tools":[{"name":"apply_patch","input_schema":{"type":"object","properties":{"patch":{"type":"string"}}}}]}`)
+
+	diagnostics := buildClaudePayloadDiagnostics(body)
+	if !diagnostics.JSONValid {
+		t.Fatal("expected payload to be valid JSON")
+	}
+	if diagnostics.Messages != 1 {
+		t.Fatalf("Messages = %d, want 1", diagnostics.Messages)
+	}
+	if diagnostics.TextBlocks != 2 {
+		t.Fatalf("TextBlocks = %d, want 2", diagnostics.TextBlocks)
+	}
+	if diagnostics.TextBytes != len("hello")+len("nested") {
+		t.Fatalf("TextBytes = %d, want %d", diagnostics.TextBytes, len("hello")+len("nested"))
+	}
+	if diagnostics.ImageBlocks != 1 {
+		t.Fatalf("ImageBlocks = %d, want 1", diagnostics.ImageBlocks)
+	}
+	if diagnostics.Base64ImageBlocks != 1 {
+		t.Fatalf("Base64ImageBlocks = %d, want 1", diagnostics.Base64ImageBlocks)
+	}
+	if diagnostics.ImageDataBytes != len("abcd") {
+		t.Fatalf("ImageDataBytes = %d, want %d", diagnostics.ImageDataBytes, len("abcd"))
+	}
+	if diagnostics.Tools != 1 {
+		t.Fatalf("Tools = %d, want 1", diagnostics.Tools)
+	}
+	if diagnostics.ToolSchemaBytes == 0 {
+		t.Fatal("expected tool schema bytes to be counted")
+	}
+	if !diagnostics.ShouldLog() {
+		t.Fatal("expected image payload diagnostics to be logged")
+	}
+}
+
+func TestSanitizeClaudeCountTokensPayloadRemovesUnsupportedFields(t *testing.T) {
+	body := []byte(`{"model":"claude","messages":[],"max_tokens":1000,"maxTokens":2000,"stream":true}`)
+
+	out := sanitizeClaudeCountTokensPayload(body)
+	for _, path := range []string{"max_tokens", "maxTokens", "stream"} {
+		if gjson.GetBytes(out, path).Exists() {
+			t.Fatalf("%s should be removed from count_tokens payload: %s", path, string(out))
+		}
+	}
+	if got := gjson.GetBytes(out, "model").String(); got != "claude" {
+		t.Fatalf("model = %q, want claude", got)
+	}
+}
+
+func TestClaudeExecutor_CountTokensNormalizesCustomToolSchema(t *testing.T) {
+	var seenBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/messages/count_tokens" {
+			t.Fatalf("path = %q, want /v1/messages/count_tokens", r.URL.Path)
+		}
+		body, _ := io.ReadAll(r.Body)
+		seenBody = bytes.Clone(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"input_tokens":7}`))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": server.URL,
+	}}
+	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}],"tools":[{"name":"apply.patch","description":"Patch edit","input_schema":{}}],"tool_choice":{"type":"tool","name":"apply.patch"},"max_tokens":1000,"stream":true}`)
+
+	_, err := executor.CountTokens(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet-20241022",
+		Payload: payload,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+	if err != nil {
+		t.Fatalf("CountTokens() error = %v", err)
+	}
+	if len(seenBody) == 0 {
+		t.Fatal("expected request body to be captured")
+	}
+	if got := gjson.GetBytes(seenBody, "tools.0.name").String(); got != "apply_patch" {
+		t.Fatalf("tools.0.name = %q, want apply_patch", got)
+	}
+	if got := gjson.GetBytes(seenBody, "tools.0.input_schema.type").String(); got != "object" {
+		t.Fatalf("tools.0.input_schema.type = %q, want object", got)
+	}
+	if !gjson.GetBytes(seenBody, "tools.0.input_schema.properties").IsObject() {
+		t.Fatalf("tools.0.input_schema.properties should be an object")
+	}
+	if got := gjson.GetBytes(seenBody, "tool_choice.name").String(); got != "apply_patch" {
+		t.Fatalf("tool_choice.name = %q, want apply_patch", got)
+	}
+	for _, path := range []string{"max_tokens", "stream"} {
+		if gjson.GetBytes(seenBody, path).Exists() {
+			t.Fatalf("%s should be removed from count_tokens request: %s", path, string(seenBody))
+		}
+	}
+}

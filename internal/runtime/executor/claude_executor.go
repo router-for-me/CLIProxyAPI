@@ -8,9 +8,12 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -190,11 +193,17 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	var extraBetas []string
 	extraBetas, body = extractAndRemoveBetas(body)
 	bodyForTranslation := body
-	bodyForUpstream := body
+	bodyForUpstream, originalToolNames, errNormalize := normalizeClaudeToolsForAnthropicWithRestoreMap(bytes.Clone(body))
+	if errNormalize != nil {
+		if errors.Is(errNormalize, errAnthropicToolNameUnsanitizable) || errors.Is(errNormalize, errAnthropicDuplicateToolName) {
+			return resp, statusErr{code: http.StatusBadRequest, msg: errNormalize.Error()}
+		}
+		return resp, fmt.Errorf("normalize claude tools: %w", errNormalize)
+	}
 	oauthToken := isClaudeOAuthToken(apiKey)
 	oauthToolNamesRemapped := false
 	if oauthToken && !auth.ToolPrefixDisabled() {
-		bodyForUpstream = applyClaudeToolPrefix(body, claudeToolPrefix)
+		bodyForUpstream = applyClaudeToolPrefix(bodyForUpstream, claudeToolPrefix)
 	}
 	// Remap third-party tool names to Claude Code equivalents and remove
 	// tools without official counterparts. This prevents Anthropic from
@@ -209,6 +218,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	}
 
 	url := fmt.Sprintf("%s/v1/messages?beta=true", baseURL)
+	logClaudePayloadDiagnostics(ctx, "messages", baseModel, bodyForUpstream)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyForUpstream))
 	if err != nil {
 		return resp, err
@@ -257,6 +267,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 			helps.LogWithRequestID(ctx).Warn(msg)
 			b = []byte(msg)
 		}
+		b = restoreClaudeToolNamesInErrorBody(b, claudeToolPrefix, originalToolNames)
 		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
 		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
@@ -301,13 +312,14 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if isClaudeOAuthToken(apiKey) && oauthToolNamesRemapped {
 		data = reverseRemapOAuthToolNames(data)
 	}
+	data = restoreClaudeNormalizedToolNamesInResponse(data, originalToolNames)
 	var param any
 	out := sdktranslator.TranslateNonStream(
 		ctx,
 		to,
 		from,
 		req.Model,
-		opts.OriginalRequest,
+		claudeOriginalRequestForTranslation(opts.OriginalRequest, req.Payload),
 		bodyForTranslation,
 		data,
 		&param,
@@ -373,11 +385,17 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	var extraBetas []string
 	extraBetas, body = extractAndRemoveBetas(body)
 	bodyForTranslation := body
-	bodyForUpstream := body
+	bodyForUpstream, originalToolNames, errNormalize := normalizeClaudeToolsForAnthropicWithRestoreMap(bytes.Clone(body))
+	if errNormalize != nil {
+		if errors.Is(errNormalize, errAnthropicToolNameUnsanitizable) || errors.Is(errNormalize, errAnthropicDuplicateToolName) {
+			return nil, statusErr{code: http.StatusBadRequest, msg: errNormalize.Error()}
+		}
+		return nil, fmt.Errorf("normalize claude tools: %w", errNormalize)
+	}
 	oauthToken := isClaudeOAuthToken(apiKey)
 	oauthToolNamesRemapped := false
 	if oauthToken && !auth.ToolPrefixDisabled() {
-		bodyForUpstream = applyClaudeToolPrefix(body, claudeToolPrefix)
+		bodyForUpstream = applyClaudeToolPrefix(bodyForUpstream, claudeToolPrefix)
 	}
 	// Remap third-party tool names to Claude Code equivalents and remove
 	// tools without official counterparts. This prevents Anthropic from
@@ -391,6 +409,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	}
 
 	url := fmt.Sprintf("%s/v1/messages?beta=true", baseURL)
+	logClaudePayloadDiagnostics(ctx, "messages_stream", baseModel, bodyForUpstream)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyForUpstream))
 	if err != nil {
 		return nil, err
@@ -439,6 +458,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			helps.LogWithRequestID(ctx).Warn(msg)
 			b = []byte(msg)
 		}
+		b = restoreClaudeToolNamesInErrorBody(b, claudeToolPrefix, originalToolNames)
 		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
 		if errClose := errBody.Close(); errClose != nil {
@@ -480,6 +500,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				if isClaudeOAuthToken(apiKey) && oauthToolNamesRemapped {
 					line = reverseRemapOAuthToolNamesFromStreamLine(line)
 				}
+				line = restoreClaudeNormalizedToolNamesInStreamLine(line, originalToolNames)
 				// Forward the line as-is to preserve SSE format
 				cloned := make([]byte, len(line)+1)
 				copy(cloned, line)
@@ -510,12 +531,13 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			if isClaudeOAuthToken(apiKey) && oauthToolNamesRemapped {
 				line = reverseRemapOAuthToolNamesFromStreamLine(line)
 			}
+			line = restoreClaudeNormalizedToolNamesInStreamLine(line, originalToolNames)
 			chunks := sdktranslator.TranslateStream(
 				ctx,
 				to,
 				from,
 				req.Model,
-				opts.OriginalRequest,
+				claudeOriginalRequestForTranslation(opts.OriginalRequest, req.Payload),
 				bodyForTranslation,
 				bytes.Clone(line),
 				&param,
@@ -548,6 +570,12 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, stream)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 
+	body, errThink := thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
+	if errThink != nil {
+		return cliproxyexecutor.Response{}, errThink
+	}
+	body = disableThinkingIfToolChoiceForced(body)
+
 	if !strings.HasPrefix(baseModel, "claude-3-5-haiku") {
 		body = checkSystemInstructions(body)
 	}
@@ -559,6 +587,13 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	// Extract betas from body and convert to header (for count_tokens too)
 	var extraBetas []string
 	extraBetas, body = extractAndRemoveBetas(body)
+	body, originalToolNames, errNormalize := normalizeClaudeToolsForAnthropicWithRestoreMap(body)
+	if errNormalize != nil {
+		if errors.Is(errNormalize, errAnthropicToolNameUnsanitizable) || errors.Is(errNormalize, errAnthropicDuplicateToolName) {
+			return cliproxyexecutor.Response{}, statusErr{code: http.StatusBadRequest, msg: errNormalize.Error()}
+		}
+		return cliproxyexecutor.Response{}, fmt.Errorf("normalize claude tools: %w", errNormalize)
+	}
 	if isClaudeOAuthToken(apiKey) && !auth.ToolPrefixDisabled() {
 		body = applyClaudeToolPrefix(body, claudeToolPrefix)
 	}
@@ -566,8 +601,10 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	if isClaudeOAuthToken(apiKey) {
 		body, _ = remapOAuthToolNames(body)
 	}
+	body = sanitizeClaudeCountTokensPayload(body)
 
 	url := fmt.Sprintf("%s/v1/messages/count_tokens?beta=true", baseURL)
+	logClaudePayloadDiagnostics(ctx, "count_tokens", baseModel, body)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
@@ -616,6 +653,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 			helps.LogWithRequestID(ctx).Warn(msg)
 			b = []byte(msg)
 		}
+		b = restoreClaudeToolNamesInErrorBody(b, claudeToolPrefix, originalToolNames)
 		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
 		if errClose := errBody.Close(); errClose != nil {
 			log.Errorf("response body close error: %v", errClose)
@@ -1202,6 +1240,765 @@ func reverseRemapOAuthToolNamesFromStreamLine(line []byte) []byte {
 		return append([]byte("data: "), updated...)
 	}
 	return updated
+}
+
+const (
+	claudePayloadDiagnosticsLargeBodyBytes  = 512 * 1024
+	claudePayloadDiagnosticsLargeImageBytes = 128 * 1024
+)
+
+type claudePayloadDiagnostics struct {
+	BodyBytes         int
+	JSONValid         bool
+	Messages          int
+	SystemBytes       int
+	Tools             int
+	ToolBytes         int
+	MaxToolBytes      int
+	ToolSchemaBytes   int
+	MaxToolSchemaSize int
+	TextBlocks        int
+	TextBytes         int
+	MaxTextBytes      int
+	ImageBlocks       int
+	Base64ImageBlocks int
+	ImageDataBytes    int
+	MaxImageDataBytes int
+	DataImageRefs     int
+	Base64Markers     int
+	CacheControlNodes int
+}
+
+func sanitizeClaudeCountTokensPayload(body []byte) []byte {
+	for _, path := range []string{"max_tokens", "maxTokens", "stream"} {
+		var err error
+		body, err = sjson.DeleteBytes(body, path)
+		if err != nil {
+			continue
+		}
+	}
+	return body
+}
+
+func logClaudePayloadDiagnostics(ctx context.Context, endpoint, model string, body []byte) {
+	diagnostics := buildClaudePayloadDiagnostics(body)
+	if !diagnostics.ShouldLog() {
+		return
+	}
+
+	helps.LogWithRequestID(ctx).WithFields(log.Fields{
+		"endpoint":              endpoint,
+		"model":                 model,
+		"body_bytes":            diagnostics.BodyBytes,
+		"json_valid":            diagnostics.JSONValid,
+		"messages":              diagnostics.Messages,
+		"system_bytes":          diagnostics.SystemBytes,
+		"tools":                 diagnostics.Tools,
+		"tool_bytes":            diagnostics.ToolBytes,
+		"max_tool_bytes":        diagnostics.MaxToolBytes,
+		"tool_schema_bytes":     diagnostics.ToolSchemaBytes,
+		"max_tool_schema_bytes": diagnostics.MaxToolSchemaSize,
+		"text_blocks":           diagnostics.TextBlocks,
+		"text_bytes":            diagnostics.TextBytes,
+		"max_text_bytes":        diagnostics.MaxTextBytes,
+		"image_blocks":          diagnostics.ImageBlocks,
+		"base64_image_blocks":   diagnostics.Base64ImageBlocks,
+		"image_data_bytes":      diagnostics.ImageDataBytes,
+		"max_image_data_bytes":  diagnostics.MaxImageDataBytes,
+		"data_image_refs":       diagnostics.DataImageRefs,
+		"base64_markers":        diagnostics.Base64Markers,
+		"cache_control_nodes":   diagnostics.CacheControlNodes,
+	}).Warn("claude payload diagnostics: large or image-containing upstream request")
+}
+
+func (d claudePayloadDiagnostics) ShouldLog() bool {
+	return d.BodyBytes >= claudePayloadDiagnosticsLargeBodyBytes ||
+		d.ImageBlocks > 0 ||
+		d.DataImageRefs > 0 ||
+		d.ImageDataBytes >= claudePayloadDiagnosticsLargeImageBytes ||
+		d.MaxTextBytes >= claudePayloadDiagnosticsLargeBodyBytes ||
+		d.MaxToolBytes >= claudePayloadDiagnosticsLargeBodyBytes
+}
+
+func buildClaudePayloadDiagnostics(body []byte) claudePayloadDiagnostics {
+	diagnostics := claudePayloadDiagnostics{
+		BodyBytes:         len(body),
+		DataImageRefs:     bytes.Count(body, []byte("data:image")),
+		Base64Markers:     bytes.Count(body, []byte("base64")),
+		CacheControlNodes: bytes.Count(body, []byte(`"cache_control"`)),
+	}
+	if !gjson.ValidBytes(body) {
+		return diagnostics
+	}
+
+	diagnostics.JSONValid = true
+	root := gjson.ParseBytes(body)
+	if system := root.Get("system"); system.Exists() {
+		diagnostics.SystemBytes = len(system.Raw)
+	}
+
+	messages := root.Get("messages")
+	if messages.IsArray() {
+		messageItems := messages.Array()
+		diagnostics.Messages = len(messageItems)
+		for _, message := range messageItems {
+			addClaudeContentDiagnostics(message.Get("content"), &diagnostics)
+		}
+	}
+
+	tools := root.Get("tools")
+	if tools.IsArray() {
+		toolItems := tools.Array()
+		diagnostics.Tools = len(toolItems)
+		for _, tool := range toolItems {
+			toolBytes := len(tool.Raw)
+			diagnostics.ToolBytes += toolBytes
+			if toolBytes > diagnostics.MaxToolBytes {
+				diagnostics.MaxToolBytes = toolBytes
+			}
+			addClaudeToolSchemaDiagnostics(tool, &diagnostics)
+		}
+	}
+
+	return diagnostics
+}
+
+func addClaudeToolSchemaDiagnostics(tool gjson.Result, diagnostics *claudePayloadDiagnostics) {
+	for _, path := range []string{
+		"input_schema",
+		"parameters",
+		"parametersJsonSchema",
+		"function.parameters",
+		"function.parametersJsonSchema",
+	} {
+		schema := tool.Get(path)
+		if !schema.Exists() {
+			continue
+		}
+		schemaBytes := len(schema.Raw)
+		diagnostics.ToolSchemaBytes += schemaBytes
+		if schemaBytes > diagnostics.MaxToolSchemaSize {
+			diagnostics.MaxToolSchemaSize = schemaBytes
+		}
+		return
+	}
+}
+
+func addClaudeContentDiagnostics(content gjson.Result, diagnostics *claudePayloadDiagnostics) {
+	if !content.Exists() {
+		return
+	}
+	if content.Type == gjson.String {
+		addClaudeTextDiagnostics(content.String(), diagnostics)
+		return
+	}
+	if content.IsArray() {
+		for _, part := range content.Array() {
+			addClaudeContentPartDiagnostics(part, diagnostics)
+		}
+		return
+	}
+	if content.IsObject() {
+		addClaudeContentPartDiagnostics(content, diagnostics)
+	}
+}
+
+func addClaudeContentPartDiagnostics(part gjson.Result, diagnostics *claudePayloadDiagnostics) {
+	switch strings.TrimSpace(part.Get("type").String()) {
+	case "text":
+		addClaudeTextDiagnostics(part.Get("text").String(), diagnostics)
+	case "image":
+		diagnostics.ImageBlocks++
+		source := part.Get("source")
+		if strings.EqualFold(strings.TrimSpace(source.Get("type").String()), "base64") {
+			diagnostics.Base64ImageBlocks++
+		}
+		imageData := source.Get("data")
+		if imageData.Exists() && imageData.Type == gjson.String {
+			imageBytes := len(imageData.String())
+			diagnostics.ImageDataBytes += imageBytes
+			if imageBytes > diagnostics.MaxImageDataBytes {
+				diagnostics.MaxImageDataBytes = imageBytes
+			}
+		}
+	default:
+		if text := part.Get("text"); text.Exists() && text.Type == gjson.String {
+			addClaudeTextDiagnostics(text.String(), diagnostics)
+		}
+	}
+
+	if nested := part.Get("content"); nested.Exists() {
+		addClaudeContentDiagnostics(nested, diagnostics)
+	}
+	if url := part.Get("image_url.url"); url.Exists() && strings.HasPrefix(url.String(), "data:image") {
+		diagnostics.DataImageRefs++
+	}
+}
+
+func addClaudeTextDiagnostics(text string, diagnostics *claudePayloadDiagnostics) {
+	if text == "" {
+		return
+	}
+	textBytes := len(text)
+	diagnostics.TextBlocks++
+	diagnostics.TextBytes += textBytes
+	if textBytes > diagnostics.MaxTextBytes {
+		diagnostics.MaxTextBytes = textBytes
+	}
+}
+
+func isClaudeBuiltinToolType(toolType string) bool {
+	toolType = strings.TrimSpace(toolType)
+	switch {
+	case strings.HasPrefix(toolType, "web_search"):
+		return true
+	case toolType == "code_execution":
+		return true
+	case strings.HasPrefix(toolType, "text_editor"):
+		return true
+	case strings.HasPrefix(toolType, "computer"):
+		return true
+	default:
+		return false
+	}
+}
+
+func isClaudeBuiltinTool(tool gjson.Result) bool {
+	return isClaudeBuiltinToolType(tool.Get("type").String())
+}
+
+func isClaudeExplicitNonCustomTypedTool(tool gjson.Result) bool {
+	toolType := strings.TrimSpace(tool.Get("type").String())
+	return toolType != "" && toolType != "custom" && toolType != "function" && !isClaudeBuiltinToolType(toolType)
+}
+
+func normalizeAnthropicToolSchema(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || raw == "null" || !gjson.Valid(raw) || !gjson.Parse(raw).IsObject() {
+		return `{"type":"object","properties":{}}`
+	}
+
+	schema := raw
+	parsed := gjson.Parse(raw)
+	schemaType := strings.TrimSpace(parsed.Get("type").String())
+	if schemaType == "" {
+		var err error
+		schema, err = sjson.Set(schema, "type", "object")
+		if err != nil {
+			return `{"type":"object","properties":{}}`
+		}
+	} else if schemaType != "object" {
+		return `{"type":"object","properties":{}}`
+	}
+
+	parsed = gjson.Parse(schema)
+	properties := parsed.Get("properties")
+	if !properties.Exists() || !properties.IsObject() {
+		var err error
+		schema, err = sjson.SetRaw(schema, "properties", `{}`)
+		if err != nil {
+			return `{"type":"object","properties":{}}`
+		}
+	}
+	return schema
+}
+
+func sanitizeAnthropicToolName(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return ""
+	}
+
+	var b strings.Builder
+	b.Grow(len(name))
+	for i := 0; i < len(name); i++ {
+		ch := name[i]
+		if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '_' || ch == '-' {
+			b.WriteByte(ch)
+			continue
+		}
+		b.WriteByte('_')
+	}
+
+	clean := strings.Trim(b.String(), "_-")
+	if clean == "" {
+		return ""
+	}
+	if len(clean) > 64 {
+		clean = clean[:64]
+	}
+	return clean
+}
+
+const maxToolNameCollisionRetries = 1000
+
+func uniqueAnthropicToolName(name string, used map[string]struct{}) string {
+	clean := sanitizeAnthropicToolName(name)
+	if clean == "" {
+		return ""
+	}
+	if _, exists := used[clean]; !exists {
+		used[clean] = struct{}{}
+		return clean
+	}
+	for i := 2; i < maxToolNameCollisionRetries; i++ {
+		suffix := fmt.Sprintf("_%d", i)
+		baseLimit := 64 - len(suffix)
+		if baseLimit < 1 {
+			return ""
+		}
+		base := clean
+		if len(base) > baseLimit {
+			base = base[:baseLimit]
+		}
+		candidate := base + suffix
+		if _, exists := used[candidate]; !exists {
+			used[candidate] = struct{}{}
+			return candidate
+		}
+	}
+	return ""
+}
+
+func reservedClaudeBuiltinToolNames() map[string]struct{} {
+	reserved := make(map[string]struct{})
+	for _, name := range []string{"web_search", "code_execution", "text_editor", "computer"} {
+		reserved[name] = struct{}{}
+	}
+	return reserved
+}
+
+func normalizeClaudeToolsForAnthropic(body []byte) ([]byte, error) {
+	normalizedBody, _, err := normalizeClaudeToolsForAnthropicWithRestoreMap(body)
+	return normalizedBody, err
+}
+
+func normalizeClaudeToolsForAnthropicWithRestoreMap(body []byte) ([]byte, map[string]string, error) {
+	tools := gjson.GetBytes(body, "tools")
+	if !tools.Exists() || !tools.IsArray() {
+		return body, nil, nil
+	}
+
+	normalizedTools := make([]json.RawMessage, 0, len(tools.Array()))
+	renameMap := make(map[string]string)
+	originalNameCounts := make(map[string]int)
+	usedNames := reservedClaudeBuiltinToolNames()
+	for _, tool := range tools.Array() {
+		name := anthroToolOriginalName(tool)
+		if name == "" {
+			continue
+		}
+		originalNameCounts[name]++
+	}
+
+	for toolIndex, tool := range tools.Array() {
+		if anthroToolOriginalName(tool) == "" && !isClaudeBuiltinTool(tool) && !isClaudeExplicitNonCustomTypedTool(tool) {
+			log.Warnf(
+				"claude tool normalization: skipping tool with no name or recognized type (index=%d type=%q has_function_name=%t)",
+				toolIndex,
+				strings.TrimSpace(tool.Get("type").String()),
+				strings.TrimSpace(tool.Get("function.name").String()) != "",
+			)
+			continue
+		}
+
+		if isClaudeBuiltinTool(tool) {
+			normalizedTools = append(normalizedTools, json.RawMessage(tool.Raw))
+			reserveToolNameVariants(usedNames, strings.TrimSpace(tool.Get("name").String()))
+			continue
+		}
+
+		if isClaudeExplicitNonCustomTypedTool(tool) {
+			normalizedTools = append(normalizedTools, json.RawMessage(tool.Raw))
+			reserveToolNameVariants(usedNames, anthroToolOriginalName(tool))
+			continue
+		}
+
+		originalName := anthroToolOriginalName(tool)
+		if originalName != "" && originalNameCounts[originalName] > 1 {
+			return body, nil, fmt.Errorf("%w: custom tool name %q appears multiple times and cannot be remapped safely", errAnthropicDuplicateToolName, originalName)
+		}
+
+		normalizedTool, originalName, newName, errNormalize := normalizeAnthropicToolEntry(tool, usedNames)
+		if errNormalize != nil {
+			return body, nil, errNormalize
+		}
+		normalizedTools = append(normalizedTools, json.RawMessage(normalizedTool))
+		if originalName != "" && originalName != newName {
+			renameMap[originalName] = newName
+		}
+	}
+
+	skippedCount := len(tools.Array()) - len(normalizedTools)
+	if skippedCount > 0 {
+		log.Warnf("claude tool normalization: %d of %d tools skipped (no name or recognized type)", skippedCount, len(tools.Array()))
+	}
+
+	normalizedToolsJSON, errMarshal := json.Marshal(normalizedTools)
+	if errMarshal != nil {
+		return body, nil, fmt.Errorf("marshal normalized tools array: %w", errMarshal)
+	}
+	updatedBody, errSet := sjson.SetRawBytes(body, "tools", normalizedToolsJSON)
+	if errSet != nil {
+		return body, nil, fmt.Errorf("set normalized tools array: %w", errSet)
+	}
+	body = updatedBody
+
+	body, errSet = applyClaudeRenameMap(body, renameMap)
+	if errSet != nil {
+		return body, nil, errSet
+	}
+	return body, invertClaudeToolRenameMap(renameMap), nil
+}
+
+func invertClaudeToolRenameMap(renameMap map[string]string) map[string]string {
+	if len(renameMap) == 0 {
+		return nil
+	}
+	originalByNormalized := make(map[string]string, len(renameMap))
+	for originalName, normalizedName := range renameMap {
+		originalByNormalized[normalizedName] = originalName
+	}
+	return originalByNormalized
+}
+
+func anthroToolOriginalName(tool gjson.Result) string {
+	name := strings.TrimSpace(tool.Get("name").String())
+	if name == "" {
+		name = strings.TrimSpace(tool.Get("function.name").String())
+	}
+	return name
+}
+
+var errAnthropicToolNameUnsanitizable = errors.New("anthropic tool name unsanitizable")
+var errAnthropicDuplicateToolName = errors.New("anthropic duplicate tool name")
+
+func normalizeAnthropicToolEntry(tool gjson.Result, usedNames map[string]struct{}) (normalizedRaw string, originalName string, newName string, err error) {
+	originalName = anthroToolOriginalName(tool)
+	newName = uniqueAnthropicToolName(originalName, usedNames)
+	if newName == "" {
+		return "", originalName, "", fmt.Errorf("%w: custom tool name %q cannot be sanitized into a valid Anthropic tool name", errAnthropicToolNameUnsanitizable, originalName)
+	}
+
+	description := strings.TrimSpace(tool.Get("description").String())
+	if description == "" {
+		description = strings.TrimSpace(tool.Get("function.description").String())
+	}
+	if description == "" {
+		description = "Custom tool"
+	}
+
+	schemaRaw := ""
+	schemaPaths := []string{
+		"input_schema",
+		"parameters",
+		"parametersJsonSchema",
+		"function.parameters",
+		"function.parametersJsonSchema",
+	}
+	for _, path := range schemaPaths {
+		if v := tool.Get(path); v.Exists() {
+			schemaRaw = v.Raw
+			break
+		}
+	}
+	schema := normalizeAnthropicToolSchema(schemaRaw)
+
+	normalized := `{"name":"","description":"","input_schema":{}}`
+	normalized, err = sjson.Set(normalized, "name", newName)
+	if err != nil {
+		return "", originalName, newName, fmt.Errorf("set normalized tool name: %w", err)
+	}
+	normalized, err = sjson.Set(normalized, "description", description)
+	if err != nil {
+		return "", originalName, newName, fmt.Errorf("set normalized tool description: %w", err)
+	}
+	normalized, err = sjson.SetRaw(normalized, "input_schema", schema)
+	if err != nil {
+		return "", originalName, newName, fmt.Errorf("set normalized tool schema: %w", err)
+	}
+	normalized, err = copyAnthropicCustomToolMetadata(normalized, tool)
+	if err != nil {
+		return "", originalName, newName, err
+	}
+	return normalized, originalName, newName, nil
+}
+
+func copyAnthropicCustomToolMetadata(normalized string, original gjson.Result) (string, error) {
+	for _, field := range []string{"cache_control", "input_examples"} {
+		value := original.Get(field)
+		if !value.Exists() {
+			continue
+		}
+		var err error
+		normalized, err = sjson.SetRaw(normalized, field, value.Raw)
+		if err != nil {
+			return normalized, fmt.Errorf("set normalized tool %s: %w", field, err)
+		}
+	}
+	return normalized, nil
+}
+
+func reserveToolNameVariants(used map[string]struct{}, name string) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return
+	}
+	used[name] = struct{}{}
+	if sanitized := sanitizeAnthropicToolName(name); sanitized != "" {
+		used[sanitized] = struct{}{}
+	}
+}
+
+func renamedToolName(name string, renameMap map[string]string) (string, bool) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "", false
+	}
+	mapped, ok := renameMap[name]
+	return mapped, ok
+}
+
+func applyClaudeRenameMap(body []byte, renameMap map[string]string) ([]byte, error) {
+	if len(renameMap) == 0 {
+		return body, nil
+	}
+
+	if gjson.GetBytes(body, "tool_choice.type").String() == "tool" {
+		if mapped, ok := renamedToolName(gjson.GetBytes(body, "tool_choice.name").String(), renameMap); ok {
+			updatedBody, err := sjson.SetBytes(body, "tool_choice.name", mapped)
+			if err != nil {
+				return body, fmt.Errorf("set tool_choice.name: %w", err)
+			}
+			body = updatedBody
+		}
+	}
+
+	messages := gjson.GetBytes(body, "messages")
+	if !messages.Exists() || !messages.IsArray() {
+		return body, nil
+	}
+
+	messagesRaw := messages.Raw
+	messagesChanged := false
+	for msgIndex, msg := range messages.Array() {
+		content := msg.Get("content")
+		if !content.Exists() || !content.IsArray() {
+			continue
+		}
+		for contentIndex, part := range content.Array() {
+			switch part.Get("type").String() {
+			case "tool_use":
+				if mapped, ok := renamedToolName(part.Get("name").String(), renameMap); ok {
+					path := fmt.Sprintf("%d.content.%d.name", msgIndex, contentIndex)
+					updatedMessages, err := sjson.Set(messagesRaw, path, mapped)
+					if err != nil {
+						return body, fmt.Errorf("set %s: %w", path, err)
+					}
+					messagesRaw = updatedMessages
+					messagesChanged = true
+				}
+			case "tool_reference":
+				if mapped, ok := renamedToolName(part.Get("tool_name").String(), renameMap); ok {
+					path := fmt.Sprintf("%d.content.%d.tool_name", msgIndex, contentIndex)
+					updatedMessages, err := sjson.Set(messagesRaw, path, mapped)
+					if err != nil {
+						return body, fmt.Errorf("set %s: %w", path, err)
+					}
+					messagesRaw = updatedMessages
+					messagesChanged = true
+				}
+			case "tool_result":
+				nestedContent := part.Get("content")
+				if !nestedContent.Exists() || !nestedContent.IsArray() {
+					continue
+				}
+				for nestedIndex, nestedPart := range nestedContent.Array() {
+					if nestedPart.Get("type").String() != "tool_reference" {
+						continue
+					}
+					if mapped, ok := renamedToolName(nestedPart.Get("tool_name").String(), renameMap); ok {
+						path := fmt.Sprintf("%d.content.%d.content.%d.tool_name", msgIndex, contentIndex, nestedIndex)
+						updatedMessages, err := sjson.Set(messagesRaw, path, mapped)
+						if err != nil {
+							return body, fmt.Errorf("set %s: %w", path, err)
+						}
+						messagesRaw = updatedMessages
+						messagesChanged = true
+					}
+				}
+			}
+		}
+	}
+	if !messagesChanged {
+		return body, nil
+	}
+	updatedBody, err := sjson.SetRawBytes(body, "messages", []byte(messagesRaw))
+	if err != nil {
+		return body, fmt.Errorf("set messages: %w", err)
+	}
+	return updatedBody, nil
+}
+
+func restoreClaudeNormalizedToolNamesInResponse(body []byte, originalByNormalized map[string]string) []byte {
+	if len(originalByNormalized) == 0 {
+		return body
+	}
+	content := gjson.GetBytes(body, "content")
+	if !content.Exists() || !content.IsArray() {
+		return body
+	}
+	content.ForEach(func(index, part gjson.Result) bool {
+		partType := part.Get("type").String()
+		switch partType {
+		case "tool_use":
+			name := part.Get("name").String()
+			if originalName, ok := renamedToolName(name, originalByNormalized); ok {
+				path := fmt.Sprintf("content.%d.name", index.Int())
+				body = setClaudeRestoredToolName(body, path, originalName)
+			}
+		case "tool_reference":
+			toolName := part.Get("tool_name").String()
+			if originalName, ok := renamedToolName(toolName, originalByNormalized); ok {
+				path := fmt.Sprintf("content.%d.tool_name", index.Int())
+				body = setClaudeRestoredToolName(body, path, originalName)
+			}
+		case "tool_result":
+			nestedContent := part.Get("content")
+			if nestedContent.Exists() && nestedContent.IsArray() {
+				nestedContent.ForEach(func(nestedIndex, nestedPart gjson.Result) bool {
+					if nestedPart.Get("type").String() != "tool_reference" {
+						return true
+					}
+					nestedToolName := nestedPart.Get("tool_name").String()
+					if originalName, ok := renamedToolName(nestedToolName, originalByNormalized); ok {
+						nestedPath := fmt.Sprintf("content.%d.content.%d.tool_name", index.Int(), nestedIndex.Int())
+						body = setClaudeRestoredToolName(body, nestedPath, originalName)
+					}
+					return true
+				})
+			}
+		}
+		return true
+	})
+	return body
+}
+
+func setClaudeRestoredToolName(body []byte, path, originalName string) []byte {
+	updatedBody, err := sjson.SetBytes(body, path, originalName)
+	if err != nil {
+		log.WithError(err).WithField("path", path).Warn("failed to restore Claude tool name")
+		return body
+	}
+	return updatedBody
+}
+
+func restoreClaudeNormalizedToolNamesInStreamLine(line []byte, originalByNormalized map[string]string) []byte {
+	if len(originalByNormalized) == 0 {
+		return line
+	}
+	payload := helps.JSONPayload(line)
+	if len(payload) == 0 || !gjson.ValidBytes(payload) {
+		return line
+	}
+	contentBlock := gjson.GetBytes(payload, "content_block")
+	if !contentBlock.Exists() {
+		return line
+	}
+
+	blockType := contentBlock.Get("type").String()
+	var updated []byte
+	var err error
+	switch blockType {
+	case "tool_use":
+		name := contentBlock.Get("name").String()
+		originalName, ok := renamedToolName(name, originalByNormalized)
+		if !ok {
+			return line
+		}
+		updated, err = sjson.SetBytes(payload, "content_block.name", originalName)
+		if err != nil {
+			return line
+		}
+	case "tool_reference":
+		toolName := contentBlock.Get("tool_name").String()
+		originalName, ok := renamedToolName(toolName, originalByNormalized)
+		if !ok {
+			return line
+		}
+		updated, err = sjson.SetBytes(payload, "content_block.tool_name", originalName)
+		if err != nil {
+			return line
+		}
+	default:
+		return line
+	}
+
+	trimmed := bytes.TrimSpace(line)
+	if bytes.HasPrefix(trimmed, []byte("data:")) {
+		return append([]byte("data: "), updated...)
+	}
+	return updated
+}
+
+func restoreClaudeToolNamesInErrorBody(body []byte, prefix string, originalByNormalized map[string]string) []byte {
+	if len(originalByNormalized) == 0 || !gjson.ValidBytes(body) {
+		return body
+	}
+	for _, path := range []string{"error.message", "message"} {
+		value := gjson.GetBytes(body, path)
+		if !value.Exists() || value.Type != gjson.String {
+			continue
+		}
+		updated := restoreClaudeToolNamesInErrorText(value.String(), prefix, originalByNormalized)
+		if updated != value.String() {
+			updatedBody, err := sjson.SetBytes(body, path, updated)
+			if err != nil {
+				log.WithError(err).WithField("path", path).Warn("failed to restore Claude tool name in error body")
+				continue
+			}
+			body = updatedBody
+		}
+	}
+	return body
+}
+
+func restoreClaudeToolNamesInErrorText(text, prefix string, originalByNormalized map[string]string) string {
+	if text == "" || len(originalByNormalized) == 0 {
+		return text
+	}
+	type replacement struct {
+		from string
+		to   string
+	}
+	replacements := make([]replacement, 0, len(originalByNormalized)*2)
+	for normalized, original := range originalByNormalized {
+		if normalized == "" || original == "" {
+			continue
+		}
+		if prefix != "" {
+			replacements = append(replacements, replacement{from: prefix + normalized, to: original})
+		}
+		replacements = append(replacements, replacement{from: normalized, to: original})
+	}
+	sort.SliceStable(replacements, func(i, j int) bool {
+		return len(replacements[i].from) > len(replacements[j].from)
+	})
+	replacerArgs := make([]string, 0, len(replacements)*2)
+	for _, replacement := range replacements {
+		replacerArgs = append(replacerArgs, replacement.from, replacement.to)
+	}
+	if len(replacerArgs) == 0 {
+		return text
+	}
+	return strings.NewReplacer(replacerArgs...).Replace(text)
+}
+
+func claudeOriginalRequestForTranslation(originalRequest, payload []byte) []byte {
+	if len(originalRequest) > 0 {
+		return originalRequest
+	}
+	return payload
 }
 
 func applyClaudeToolPrefix(body []byte, prefix string) []byte {
