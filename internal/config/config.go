@@ -32,6 +32,9 @@ type Config struct {
 	Host string `yaml:"host" json:"-"`
 	// Port is the network port on which the API server will listen.
 	Port int `yaml:"port" json:"-"`
+	// TrustedProxies configures Gin trusted proxies for resolving client IPs from forwarded headers.
+	// Nil means the option was not configured and Gin defaults are left unchanged.
+	TrustedProxies []string `yaml:"trusted-proxies" json:"trusted-proxies"`
 
 	// TLS config controls HTTPS server settings.
 	TLS TLSConfig `yaml:"tls" json:"tls"`
@@ -668,6 +671,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	if cfg.Pprof.Addr == "" {
 		cfg.Pprof.Addr = DefaultPprofAddr
 	}
+	cfg.SanitizeTrustedProxies()
 
 	if cfg.LogsMaxTotalSizeMB < 0 {
 		cfg.LogsMaxTotalSizeMB = 0
@@ -735,6 +739,22 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	// Return the populated configuration struct.
 	return &cfg, nil
+}
+
+// SanitizeTrustedProxies trims configured Gin trusted proxies and drops empty entries.
+func (cfg *Config) SanitizeTrustedProxies() {
+	if cfg == nil || cfg.TrustedProxies == nil {
+		return
+	}
+	out := make([]string, 0, len(cfg.TrustedProxies))
+	for _, proxy := range cfg.TrustedProxies {
+		trimmed := strings.TrimSpace(proxy)
+		if trimmed == "" {
+			continue
+		}
+		out = append(out, trimmed)
+	}
+	cfg.TrustedProxies = out
 }
 
 // SanitizePayloadRules validates raw JSON payload rule params and drops invalid rules.

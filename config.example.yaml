@@ -5,6 +5,13 @@ host: ""
 # Server port
 port: 8317
 
+# Trusted proxies used to resolve the real client IP from forwarded headers.
+# When omitted, Gin's default trusted proxy behavior is left unchanged.
+# Configure only local loopback proxies by default; add your reverse proxy/container subnet explicitly if needed.
+trusted-proxies:
+  - "127.0.0.0/8"
+  - "::1"
+
 # TLS settings for HTTPS. When enabled, the server listens with the provided certificate and key.
 tls:
   enable: false
