@@ -87,6 +87,9 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		err = statusErr{code: http.StatusUnauthorized, msg: "missing provider baseURL"}
 		return
 	}
+	if isOpenAICompatMiniMaxImageGeneration(opts, profile, baseURL, baseModel) {
+		return e.executeMiniMaxImageGeneration(ctx, auth, req, baseURL, profile, reporter)
+	}
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("openai")

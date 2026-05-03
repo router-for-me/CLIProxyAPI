@@ -214,6 +214,24 @@ func (h *OpenAIAPIHandler) ImagesGenerations(c *gin.Context) {
 		responseFormat = "b64_json"
 	}
 	stream := gjson.GetBytes(rawJSON, "stream").Bool()
+	if isMiniMaxImageModelName(imageModel) {
+		miniMaxReq, _, err := buildMiniMaxImageGenerationRequest(rawJSON, imageModel, prompt, nil)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
+				Error: handlers.ErrorDetail{
+					Message: fmt.Sprintf("Invalid request: %v", err),
+					Type:    "invalid_request_error",
+				},
+			})
+			return
+		}
+		if stream {
+			h.streamMiniMaxImages(c, miniMaxReq, imageModel, "image_generation")
+			return
+		}
+		h.collectMiniMaxImages(c, miniMaxReq, imageModel)
+		return
+	}
 
 	tool := []byte(`{"type":"image_generation","action":"generate"}`)
 	tool, _ = sjson.SetBytes(tool, "model", imageModel)
@@ -349,6 +367,25 @@ func (h *OpenAIAPIHandler) imagesEditsFromMultipart(c *gin.Context) {
 		responseFormat = "b64_json"
 	}
 	stream := parseBoolField(c.PostForm("stream"), false)
+	if isMiniMaxImageModelName(imageModel) {
+		rawForm := buildMiniMaxImageMultipartJSON(c, imageModel, prompt, responseFormat)
+		miniMaxReq, _, err := buildMiniMaxImageGenerationRequest(rawForm, imageModel, prompt, images)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
+				Error: handlers.ErrorDetail{
+					Message: fmt.Sprintf("Invalid request: %v", err),
+					Type:    "invalid_request_error",
+				},
+			})
+			return
+		}
+		if stream {
+			h.streamMiniMaxImages(c, miniMaxReq, imageModel, "image_edit")
+			return
+		}
+		h.collectMiniMaxImages(c, miniMaxReq, imageModel)
+		return
+	}
 
 	tool := []byte(`{"type":"image_generation","action":"edit"}`)
 	tool, _ = sjson.SetBytes(tool, "model", imageModel)
@@ -469,6 +506,24 @@ func (h *OpenAIAPIHandler) imagesEditsFromJSON(c *gin.Context) {
 		responseFormat = "b64_json"
 	}
 	stream := gjson.GetBytes(rawJSON, "stream").Bool()
+	if isMiniMaxImageModelName(imageModel) {
+		miniMaxReq, _, err := buildMiniMaxImageGenerationRequest(rawJSON, imageModel, prompt, images)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
+				Error: handlers.ErrorDetail{
+					Message: fmt.Sprintf("Invalid request: %v", err),
+					Type:    "invalid_request_error",
+				},
+			})
+			return
+		}
+		if stream {
+			h.streamMiniMaxImages(c, miniMaxReq, imageModel, "image_edit")
+			return
+		}
+		h.collectMiniMaxImages(c, miniMaxReq, imageModel)
+		return
+	}
 
 	tool := []byte(`{"type":"image_generation","action":"edit"}`)
 	tool, _ = sjson.SetBytes(tool, "model", imageModel)
