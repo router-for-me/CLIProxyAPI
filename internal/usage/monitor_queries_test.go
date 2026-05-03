@@ -64,6 +64,38 @@ func TestSQLiteUsageStoreQueryMonitorRequestLogs(t *testing.T) {
 	assertStringSliceEqual(t, result.Filters.Sources, []string{"source-a"})
 }
 
+func TestSQLiteUsageStoreQueryMonitorRequestLogsGroupsByAuthIndex(t *testing.T) {
+	ctx := context.Background()
+	store := newTestSQLiteUsageStore(t)
+	defer store.Close()
+
+	base := time.Date(2026, 2, 7, 12, 0, 0, 0, time.UTC)
+	insertUsageRecords(t, store,
+		UsageRecord{APIKey: "api-1", Model: "model-a", Source: "shared-source", AuthIndex: "auth-a", RequestedAt: base.Add(-3 * time.Hour)},
+		UsageRecord{APIKey: "api-1", Model: "model-a", Source: "shared-source", AuthIndex: "auth-b", RequestedAt: base.Add(-2 * time.Hour), Failed: true},
+	)
+
+	result, err := store.QueryMonitorRequestLogs(ctx, MonitorQueryFilter{}, 1, 10, 12)
+	if err != nil {
+		t.Fatalf("QueryMonitorRequestLogs failed: %v", err)
+	}
+
+	statsA, ok := result.GroupStats[MonitorGroupKey("shared-source", "model-a", "auth-a")]
+	if !ok {
+		t.Fatalf("expected group stats for auth-a")
+	}
+	if statsA.Total != 1 || statsA.Success != 1 {
+		t.Fatalf("unexpected auth-a stats: %+v", statsA)
+	}
+	statsB, ok := result.GroupStats[MonitorGroupKey("shared-source", "model-a", "auth-b")]
+	if !ok {
+		t.Fatalf("expected group stats for auth-b")
+	}
+	if statsB.Total != 1 || statsB.Success != 0 {
+		t.Fatalf("unexpected auth-b stats: %+v", statsB)
+	}
+}
+
 func TestSQLiteUsageStoreQueryMonitorChannelStats(t *testing.T) {
 	ctx := context.Background()
 	store := newTestSQLiteUsageStore(t)
@@ -174,6 +206,40 @@ func TestSQLiteUsageStoreQueryMonitorFailureStats(t *testing.T) {
 
 	assertStringSliceEqual(t, result.Filters.Sources, []string{"source-a", "source-b"})
 	assertStringSliceEqual(t, result.Filters.Models, []string{"model-a", "model-b", "model-c"})
+}
+
+func TestSQLiteUsageStoreQueryMonitorFailureStatsDistinguishesAuthIndex(t *testing.T) {
+	ctx := context.Background()
+	store := newTestSQLiteUsageStore(t)
+	defer store.Close()
+
+	base := time.Date(2026, 2, 7, 12, 0, 0, 0, time.UTC)
+	insertUsageRecords(t, store,
+		UsageRecord{APIKey: "api-1", Model: "model-a", Source: "shared-source", AuthIndex: "auth-a", RequestedAt: base.Add(-4 * time.Hour), Failed: true},
+		UsageRecord{APIKey: "api-1", Model: "model-b", Source: "shared-source", AuthIndex: "auth-a", RequestedAt: base.Add(-3 * time.Hour)},
+		UsageRecord{APIKey: "api-1", Model: "model-a", Source: "shared-source", AuthIndex: "auth-b", RequestedAt: base.Add(-2 * time.Hour), Failed: true},
+	)
+
+	result, err := store.QueryMonitorFailureStats(ctx, MonitorQueryFilter{}, 10, 12)
+	if err != nil {
+		t.Fatalf("QueryMonitorFailureStats failed: %v", err)
+	}
+
+	if len(result.Items) != 2 {
+		t.Fatalf("unexpected item count: got %d want 2", len(result.Items))
+	}
+	if result.Items[0].AuthIndex != "auth-a" || result.Items[0].FailedCount != 1 {
+		t.Fatalf("unexpected first failure aggregate: %+v", result.Items[0])
+	}
+	if len(result.Items[0].Models) != 2 {
+		t.Fatalf("expected auth-a to include its success context model, got %+v", result.Items[0].Models)
+	}
+	if result.Items[1].AuthIndex != "auth-b" || result.Items[1].FailedCount != 1 {
+		t.Fatalf("unexpected second failure aggregate: %+v", result.Items[1])
+	}
+	if len(result.Items[1].Models) != 1 {
+		t.Fatalf("expected auth-b models to stay separate, got %+v", result.Items[1].Models)
+	}
 }
 
 func newTestSQLiteUsageStore(t *testing.T) *sqliteUsageStore {

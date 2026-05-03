@@ -111,6 +111,7 @@ type monitorChannelStatsItem struct {
 type monitorFailureStatsItem struct {
 	Source       string              `json:"source"`
 	SourceRef    monitorSourceRef    `json:"source_ref"`
+	AuthIndex    string              `json:"auth_index,omitempty"`
 	FailedCount  int64               `json:"failed_count"`
 	LastFailedAt *time.Time          `json:"last_failed_at,omitempty"`
 	Models       []monitorModelStats `json:"models"`
@@ -212,7 +213,7 @@ func (h *Handler) GetMonitorRequestLogs(c *gin.Context) {
 		if queryErr == nil {
 			items := make([]monitorRequestLogItem, 0, len(queryResult.Items))
 			for _, row := range queryResult.Items {
-				groupStats := queryResult.GroupStats[usage.MonitorGroupKey(row.Source, row.Model)]
+				groupStats := queryResult.GroupStats[usage.MonitorGroupKey(row.Source, row.Model, row.AuthIndex)]
 				items = append(items, monitorRequestLogItem{
 					Timestamp:          row.Timestamp,
 					APIKey:             row.APIKey,
@@ -297,7 +298,7 @@ func (h *Handler) GetMonitorRequestLogs(c *gin.Context) {
 	})
 	requestStats := buildRequestGroupStats(logs)
 	for i := range logs {
-		stats := requestStats[requestGroupKey(logs[i].Source, logs[i].Model)]
+		stats := requestStats[requestGroupKey(logs[i].Source, logs[i].Model, logs[i].AuthIndex)]
 		logs[i].RequestCount = stats.Total
 		logs[i].SuccessRate = calcRate(stats.Success, stats.Total)
 		logs[i].RecentRequests = copyRecentRequests(stats.Recent)
@@ -588,7 +589,8 @@ func (h *Handler) GetMonitorFailureAnalysis(c *gin.Context) {
 
 				items = append(items, monitorFailureStatsItem{
 					Source:       channel.Source,
-					SourceRef:    sourceResolver.Resolve(channel.Source, ""),
+					SourceRef:    sourceResolver.Resolve(channel.Source, channel.AuthIndex),
+					AuthIndex:    channel.AuthIndex,
 					FailedCount:  channel.FailedCount,
 					LastFailedAt: cloneTimePointer(channel.LastFailedAt),
 					Models:       models,
@@ -610,7 +612,7 @@ func (h *Handler) GetMonitorFailureAnalysis(c *gin.Context) {
 	}
 
 	filtered := make([]monitorRecord, 0, 128)
-	failedSources := make(map[string]struct{})
+	failedChannels := make(map[string]struct{})
 	visitSnapshotRecords(h.usageSnapshot(), func(record monitorRecord) {
 		if !filter.matches(record) {
 			return
@@ -620,7 +622,7 @@ func (h *Handler) GetMonitorFailureAnalysis(c *gin.Context) {
 		}
 		filtered = append(filtered, record)
 		if record.Failed {
-			failedSources[record.Source] = struct{}{}
+			failedChannels[monitorSourceAuthKey(record.Source, record.AuthIndex)] = struct{}{}
 		}
 	})
 
@@ -630,16 +632,19 @@ func (h *Handler) GetMonitorFailureAnalysis(c *gin.Context) {
 	sourceSet := make(map[string]struct{})
 
 	for _, record := range filtered {
-		if _, ok := failedSources[record.Source]; !ok {
+		authIndex := strings.TrimSpace(record.AuthIndex)
+		channelKey := monitorSourceAuthKey(record.Source, authIndex)
+		if _, ok := failedChannels[channelKey]; !ok {
 			continue
 		}
-		agg, ok := channelMap[record.Source]
+		agg, ok := channelMap[channelKey]
 		if !ok {
 			agg = &monitorChannelAggregate{
-				Source: record.Source,
-				Models: make(map[string]*monitorModelAggregate),
+				Source:    record.Source,
+				AuthIndex: authIndex,
+				Models:    make(map[string]*monitorModelAggregate),
 			}
-			channelMap[record.Source] = agg
+			channelMap[channelKey] = agg
 		}
 
 		agg.TotalRequests++
@@ -706,7 +711,8 @@ func (h *Handler) GetMonitorFailureAnalysis(c *gin.Context) {
 
 		items = append(items, monitorFailureStatsItem{
 			Source:       agg.Source,
-			SourceRef:    sourceResolver.Resolve(agg.Source, ""),
+			SourceRef:    sourceResolver.Resolve(agg.Source, agg.AuthIndex),
+			AuthIndex:    agg.AuthIndex,
 			FailedCount:  agg.FailedRequests,
 			LastFailedAt: timePointer(agg.LastRequestAt),
 			Models:       models,
@@ -715,6 +721,9 @@ func (h *Handler) GetMonitorFailureAnalysis(c *gin.Context) {
 
 	sort.Slice(items, func(i, j int) bool {
 		if items[i].FailedCount == items[j].FailedCount {
+			if items[i].Source == items[j].Source {
+				return items[i].AuthIndex < items[j].AuthIndex
+			}
 			return items[i].Source < items[j].Source
 		}
 		return items[i].FailedCount > items[j].FailedCount
@@ -811,7 +820,7 @@ func (f monitorRecordFilter) matches(record monitorRecord) bool {
 func buildRequestGroupStats(items []monitorRequestLogItem) map[string]monitorRequestGroupStats {
 	statsMap := make(map[string]*monitorRequestGroupStats)
 	for _, item := range items {
-		key := requestGroupKey(item.Source, item.Model)
+		key := requestGroupKey(item.Source, item.Model, item.AuthIndex)
 		stats, ok := statsMap[key]
 		if !ok {
 			stats = &monitorRequestGroupStats{}
@@ -845,8 +854,15 @@ func copyRecentRequests(items []monitorRecentRequest) []monitorRecentRequest {
 	return cloned
 }
 
-func requestGroupKey(source, model string) string {
-	return source + "|||" + model
+func requestGroupKey(source, model, authIndex string) string {
+	return monitorSourceAuthKey(source, authIndex) + "\x00" + model
+}
+
+func monitorSourceAuthKey(source, authIndex string) string {
+	if strings.TrimSpace(source) == "" {
+		source = "unknown"
+	}
+	return source + "\x00" + strings.TrimSpace(authIndex)
 }
 
 func toUsageMonitorFilter(filter monitorRecordFilter) usage.MonitorQueryFilter {

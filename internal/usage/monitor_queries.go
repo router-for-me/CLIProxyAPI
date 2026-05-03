@@ -89,7 +89,7 @@ type MonitorModelStats struct {
 	Recent        []MonitorRecentRequest
 }
 
-// MonitorChannelStats is the source-level aggregate used by channel stats endpoint.
+// MonitorChannelStats is the channel-level aggregate used by channel stats endpoint.
 type MonitorChannelStats struct {
 	Source          string
 	AuthIndex       string
@@ -107,9 +107,10 @@ type MonitorChannelStatsResult struct {
 	Filters MonitorFilterOptions
 }
 
-// MonitorFailureStats is the source-level aggregate used by failure analysis endpoint.
+// MonitorFailureStats is the channel-level aggregate used by failure analysis endpoint.
 type MonitorFailureStats struct {
 	Source       string
+	AuthIndex    string
 	FailedCount  int64
 	LastFailedAt *time.Time
 	Models       []MonitorModelStats
@@ -216,8 +217,12 @@ type MonitorKeyStatsRow struct {
 }
 
 // MonitorGroupKey returns the stable grouping key used by request log aggregates.
-func MonitorGroupKey(source, model string) string {
-	return normalizeMonitorSource(source) + "|||" + model
+func MonitorGroupKey(source, model string, authIndex ...string) string {
+	index := ""
+	if len(authIndex) > 0 {
+		index = strings.TrimSpace(authIndex[0])
+	}
+	return monitorChannelKey(source, index) + "\x00" + model
 }
 
 // QueryMonitorRequestLogs queries request logs directly from persistence layer.
@@ -433,9 +438,9 @@ func (s *pgUsageStore) QueryMonitorRequestLogs(ctx context.Context, filter Monit
 		item.Source = normalizeMonitorSource(rawSource)
 		items = append(items, item)
 
-		key := MonitorGroupKey(item.Source, item.Model)
+		key := MonitorGroupKey(item.Source, item.Model, item.AuthIndex)
 		if _, exists := groups[key]; !exists {
-			groups[key] = monitorGroupEntry{Source: item.Source, Model: item.Model}
+			groups[key] = monitorGroupEntry{Source: item.Source, AuthIndex: item.AuthIndex, Model: item.Model}
 		}
 	}
 	if err = rows.Err(); err != nil {
@@ -450,11 +455,11 @@ func (s *pgUsageStore) QueryMonitorRequestLogs(ctx context.Context, filter Monit
 		}
 
 		batchCountQuery := fmt.Sprintf(`
-			SELECT COALESCE(NULLIF(source, ''), 'unknown'), model,
+			SELECT COALESCE(NULLIF(source, ''), 'unknown'), COALESCE(auth_index, ''), model,
 				COUNT(*), COALESCE(SUM(CASE WHEN failed=0 THEN 1 ELSE 0 END), 0)
 			FROM %s
 			WHERE %s AND (%s)
-			GROUP BY COALESCE(NULLIF(source, ''), 'unknown'), model
+			GROUP BY COALESCE(NULLIF(source, ''), 'unknown'), COALESCE(auth_index, ''), model
 		`, table, whereClause, groupWhereClause)
 		countArgs := append(copyArgs(args), groupWhereArgs...)
 		countRows, countErr := s.db.QueryContext(ctx, batchCountQuery, countArgs...)
@@ -463,12 +468,12 @@ func (s *pgUsageStore) QueryMonitorRequestLogs(ctx context.Context, filter Monit
 		}
 		defer countRows.Close()
 		for countRows.Next() {
-			var src, mdl string
+			var src, authIndex, mdl string
 			var total2, success int64
-			if countErr = countRows.Scan(&src, &mdl, &total2, &success); countErr != nil {
+			if countErr = countRows.Scan(&src, &authIndex, &mdl, &total2, &success); countErr != nil {
 				return MonitorRequestLogsResult{}, fmt.Errorf("usage store: scan batch group stats: %w", countErr)
 			}
-			key := MonitorGroupKey(normalizeMonitorSource(src), mdl)
+			key := MonitorGroupKey(normalizeMonitorSource(src), mdl, authIndex)
 			if _, exists := groups[key]; exists {
 				groupStats[key] = MonitorRequestGroupStats{Total: total2, Success: success}
 			}
@@ -479,9 +484,11 @@ func (s *pgUsageStore) QueryMonitorRequestLogs(ctx context.Context, filter Monit
 
 		recentArgs := append(copyArgs(args), groupWhereArgs...)
 		batchRecentQuery := fmt.Sprintf(`
-			SELECT source_key, model, failed, requested_at FROM (
-				SELECT COALESCE(NULLIF(source, ''), 'unknown') AS source_key, model, failed, requested_at,
-					ROW_NUMBER() OVER(PARTITION BY COALESCE(NULLIF(source, ''), 'unknown'), model ORDER BY requested_at DESC, id DESC) AS rn
+			SELECT source_key, auth_index_key, model, failed, requested_at FROM (
+				SELECT COALESCE(NULLIF(source, ''), 'unknown') AS source_key,
+					COALESCE(auth_index, '') AS auth_index_key,
+					model, failed, requested_at,
+					ROW_NUMBER() OVER(PARTITION BY COALESCE(NULLIF(source, ''), 'unknown'), COALESCE(auth_index, ''), model ORDER BY requested_at DESC, id DESC) AS rn
 				FROM %s
 				WHERE %s AND (%s)
 			) ranked
@@ -495,13 +502,13 @@ func (s *pgUsageStore) QueryMonitorRequestLogs(ctx context.Context, filter Monit
 		defer recentRows.Close()
 		recentMap := make(map[string][]MonitorRecentRequest, len(groups))
 		for recentRows.Next() {
-			var src, mdl string
+			var src, authIndex, mdl string
 			var failed int
 			var ts time.Time
-			if recentErr = recentRows.Scan(&src, &mdl, &failed, &ts); recentErr != nil {
+			if recentErr = recentRows.Scan(&src, &authIndex, &mdl, &failed, &ts); recentErr != nil {
 				return MonitorRequestLogsResult{}, fmt.Errorf("usage store: scan batch group recent: %w", recentErr)
 			}
-			key := MonitorGroupKey(normalizeMonitorSource(src), mdl)
+			key := MonitorGroupKey(normalizeMonitorSource(src), mdl, authIndex)
 			if _, exists := groups[key]; exists {
 				recentMap[key] = append(recentMap[key], MonitorRecentRequest{
 					Failed:    failed != 0,
@@ -717,20 +724,23 @@ func (s *pgUsageStore) QueryMonitorFailureStats(ctx context.Context, filter Moni
 	baseFilter.Status = ""
 	whereClause, args := buildPostgresMonitorWhere(baseFilter, false)
 
-	failedSources, err := s.queryFailedSources(ctx, whereClause, args)
+	failedChannels, err := s.queryFailedChannels(ctx, whereClause, args)
 	if err != nil {
 		return MonitorFailureStatsResult{}, err
 	}
-	if len(failedSources) == 0 {
+	if len(failedChannels) == 0 {
 		return MonitorFailureStatsResult{
 			Items:   []MonitorFailureStats{},
 			Filters: MonitorFilterOptions{Models: []string{}, Sources: []string{}},
 		}, nil
 	}
 
-	inClause, inArgs := toPostgresInClause(failedSources, len(args)+1)
-	failedWhere := whereClause + " AND COALESCE(NULLIF(source, ''), 'unknown') IN (" + inClause + ")"
-	failedArgs := append(copyArgs(args), inArgs...)
+	channelWhereClause, channelWhereArgs := buildPostgresChannelWhereClause(failedChannels, len(args)+1)
+	if channelWhereClause == "" {
+		return MonitorFailureStatsResult{}, fmt.Errorf("usage store: build failure channel where clause: empty")
+	}
+	failedWhere := whereClause + " AND (" + channelWhereClause + ")"
+	failedArgs := append(copyArgs(args), channelWhereArgs...)
 
 	itemsMap, err := s.queryFailureAggregates(ctx, failedWhere, failedArgs)
 	if err != nil {
@@ -772,6 +782,9 @@ func (s *pgUsageStore) QueryMonitorFailureStats(ctx context.Context, filter Moni
 
 	sort.Slice(items, func(i, j int) bool {
 		if items[i].FailedCount == items[j].FailedCount {
+			if items[i].Source == items[j].Source {
+				return items[i].AuthIndex < items[j].AuthIndex
+			}
 			return items[i].Source < items[j].Source
 		}
 		return items[i].FailedCount > items[j].FailedCount
@@ -782,26 +795,28 @@ func (s *pgUsageStore) QueryMonitorFailureStats(ctx context.Context, filter Moni
 	}
 
 	if len(items) > 0 {
-		selectedSources := make([]string, 0, len(items))
+		selectedChannels := make([]monitorChannelIdentity, 0, len(items))
 		for _, item := range items {
-			selectedSources = append(selectedSources, item.Source)
+			selectedChannels = append(selectedChannels, monitorChannelIdentity{Source: item.Source, AuthIndex: item.AuthIndex})
 		}
-		sourceWhereClause, sourceWhereArgs := buildPostgresSourceWhereClause(selectedSources, len(failedArgs)+1)
-		if sourceWhereClause == "" {
-			return MonitorFailureStatsResult{}, fmt.Errorf("usage store: build failure source where clause: empty")
+		selectedWhereClause, selectedWhereArgs := buildPostgresChannelWhereClause(selectedChannels, len(failedArgs)+1)
+		if selectedWhereClause == "" {
+			return MonitorFailureStatsResult{}, fmt.Errorf("usage store: build failure channel where clause: empty")
 		}
 
 		table := s.fullTableName("usage_records")
-		frArgs := append(copyArgs(failedArgs), sourceWhereArgs...)
+		frArgs := append(copyArgs(failedArgs), selectedWhereArgs...)
 		failureRecentQuery := fmt.Sprintf(`
-			SELECT source_key, model, failed, requested_at FROM (
-				SELECT COALESCE(NULLIF(source, ''), 'unknown') AS source_key, model, failed, requested_at,
-					ROW_NUMBER() OVER(PARTITION BY COALESCE(NULLIF(source, ''), 'unknown'), model ORDER BY requested_at DESC, id DESC) AS rn
+			SELECT source_key, auth_index_key, model, failed, requested_at FROM (
+				SELECT COALESCE(NULLIF(source, ''), 'unknown') AS source_key,
+					COALESCE(auth_index, '') AS auth_index_key,
+					model, failed, requested_at,
+					ROW_NUMBER() OVER(PARTITION BY COALESCE(NULLIF(source, ''), 'unknown'), COALESCE(auth_index, ''), model ORDER BY requested_at DESC, id DESC) AS rn
 				FROM %s
 				WHERE %s AND (%s)
 			) ranked
 			WHERE rn <= %s
-		`, table, failedWhere, sourceWhereClause, pgPlaceholder(len(frArgs)+1))
+		`, table, failedWhere, selectedWhereClause, pgPlaceholder(len(frArgs)+1))
 		frArgs = append(frArgs, recentLimit)
 		frRows, frErr := s.db.QueryContext(ctx, failureRecentQuery, frArgs...)
 		if frErr != nil {
@@ -809,16 +824,16 @@ func (s *pgUsageStore) QueryMonitorFailureStats(ctx context.Context, filter Moni
 		}
 		defer frRows.Close()
 
-		type sourceModelKey struct{ source, model string }
+		type sourceModelKey struct{ source, authIndex, model string }
 		failureRecentMap := make(map[sourceModelKey][]MonitorRecentRequest)
 		for frRows.Next() {
-			var src, mdl string
+			var src, authIndex, mdl string
 			var failed int
 			var ts time.Time
-			if frErr = frRows.Scan(&src, &mdl, &failed, &ts); frErr != nil {
+			if frErr = frRows.Scan(&src, &authIndex, &mdl, &failed, &ts); frErr != nil {
 				return MonitorFailureStatsResult{}, fmt.Errorf("usage store: scan batch failure recent: %w", frErr)
 			}
-			key := sourceModelKey{source: normalizeMonitorSource(src), model: mdl}
+			key := sourceModelKey{source: normalizeMonitorSource(src), authIndex: strings.TrimSpace(authIndex), model: mdl}
 			failureRecentMap[key] = append(failureRecentMap[key], MonitorRecentRequest{Failed: failed != 0, Timestamp: ts})
 		}
 		if frErr = frRows.Err(); frErr != nil {
@@ -830,7 +845,7 @@ func (s *pgUsageStore) QueryMonitorFailureStats(ctx context.Context, filter Moni
 		}
 		for i := range items {
 			for j := range items[i].Models {
-				key := sourceModelKey{source: items[i].Source, model: items[i].Models[j].Model}
+				key := sourceModelKey{source: items[i].Source, authIndex: items[i].AuthIndex, model: items[i].Models[j].Model}
 				if recent, ok := failureRecentMap[key]; ok {
 					items[i].Models[j].Recent = recent
 				}
@@ -1013,44 +1028,45 @@ func (s *pgUsageStore) attachChannelModels(ctx context.Context, whereClause stri
 	return nil
 }
 
-func (s *pgUsageStore) queryFailedSources(ctx context.Context, whereClause string, args []any) ([]string, error) {
+func (s *pgUsageStore) queryFailedChannels(ctx context.Context, whereClause string, args []any) ([]monitorChannelIdentity, error) {
 	table := s.fullTableName("usage_records")
 	query := fmt.Sprintf(`
-		SELECT DISTINCT COALESCE(NULLIF(source, ''), 'unknown')
+		SELECT DISTINCT COALESCE(NULLIF(source, ''), 'unknown'), COALESCE(auth_index, '')
 		FROM %s
 		WHERE %s AND failed = 1
-		ORDER BY 1
+		ORDER BY 1, 2
 	`, table, whereClause)
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("usage store: query failed sources: %w", err)
+		return nil, fmt.Errorf("usage store: query failed channels: %w", err)
 	}
 	defer rows.Close()
 
-	sources := make([]string, 0)
+	channels := make([]monitorChannelIdentity, 0)
 	for rows.Next() {
-		var source string
-		if err = rows.Scan(&source); err != nil {
-			return nil, fmt.Errorf("usage store: scan failed source: %w", err)
+		var source, authIndex string
+		if err = rows.Scan(&source, &authIndex); err != nil {
+			return nil, fmt.Errorf("usage store: scan failed channel: %w", err)
 		}
-		sources = append(sources, normalizeMonitorSource(source))
+		channels = append(channels, monitorChannelIdentity{Source: normalizeMonitorSource(source), AuthIndex: strings.TrimSpace(authIndex)})
 	}
 	if err = rows.Err(); err != nil {
-		return nil, fmt.Errorf("usage store: iterate failed sources: %w", err)
+		return nil, fmt.Errorf("usage store: iterate failed channels: %w", err)
 	}
-	return sources, nil
+	return channels, nil
 }
 
 func (s *pgUsageStore) queryFailureAggregates(ctx context.Context, failedWhere string, args []any) (map[string]*MonitorFailureStats, error) {
 	table := s.fullTableName("usage_records")
 	query := fmt.Sprintf(`
 		SELECT COALESCE(NULLIF(source, ''), 'unknown') AS source_key,
+			COALESCE(auth_index, '') AS auth_index_key,
 			COALESCE(SUM(CASE WHEN failed=1 THEN 1 ELSE 0 END), 0),
 			MAX(CASE WHEN failed=1 THEN requested_at ELSE NULL END)
 		FROM %s
 		WHERE %s
-		GROUP BY source_key
+		GROUP BY source_key, auth_index_key
 	`, table, failedWhere)
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
@@ -1062,17 +1078,19 @@ func (s *pgUsageStore) queryFailureAggregates(ctx context.Context, failedWhere s
 	result := make(map[string]*MonitorFailureStats)
 	for rows.Next() {
 		var (
-			source string
-			item   MonitorFailureStats
-			lastTs sql.NullTime
+			source    string
+			authIndex string
+			item      MonitorFailureStats
+			lastTs    sql.NullTime
 		)
-		if err = rows.Scan(&source, &item.FailedCount, &lastTs); err != nil {
+		if err = rows.Scan(&source, &authIndex, &item.FailedCount, &lastTs); err != nil {
 			return nil, fmt.Errorf("usage store: scan failure aggregate: %w", err)
 		}
 		item.Source = normalizeMonitorSource(source)
+		item.AuthIndex = strings.TrimSpace(authIndex)
 		item.LastFailedAt = nullTimePointer(lastTs)
 		item.Models = []MonitorModelStats{}
-		result[item.Source] = &item
+		result[monitorChannelKey(item.Source, item.AuthIndex)] = &item
 	}
 	if err = rows.Err(); err != nil {
 		return nil, fmt.Errorf("usage store: iterate failure aggregates: %w", err)
@@ -1084,6 +1102,7 @@ func (s *pgUsageStore) attachFailureModels(ctx context.Context, failedWhere stri
 	table := s.fullTableName("usage_records")
 	query := fmt.Sprintf(`
 		SELECT COALESCE(NULLIF(source, ''), 'unknown') AS source_key,
+			COALESCE(auth_index, '') AS auth_index_key,
 			model,
 			COUNT(*),
 			COALESCE(SUM(CASE WHEN failed=0 THEN 1 ELSE 0 END), 0),
@@ -1091,7 +1110,7 @@ func (s *pgUsageStore) attachFailureModels(ctx context.Context, failedWhere stri
 			MAX(requested_at)
 		FROM %s
 		WHERE %s
-		GROUP BY source_key, model
+		GROUP BY source_key, auth_index_key, model
 	`, table, failedWhere)
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
@@ -1102,18 +1121,19 @@ func (s *pgUsageStore) attachFailureModels(ctx context.Context, failedWhere stri
 
 	for rows.Next() {
 		var (
-			source string
-			model  MonitorModelStats
-			lastTs sql.NullTime
+			source    string
+			authIndex string
+			model     MonitorModelStats
+			lastTs    sql.NullTime
 		)
-		if err = rows.Scan(&source, &model.Model, &model.Requests, &model.Success, &model.Failed, &lastTs); err != nil {
+		if err = rows.Scan(&source, &authIndex, &model.Model, &model.Requests, &model.Success, &model.Failed, &lastTs); err != nil {
 			return fmt.Errorf("usage store: scan failure model: %w", err)
 		}
 		model.LastRequestAt = nullTimePointer(lastTs)
 		model.Recent = []MonitorRecentRequest{}
 
 		normalizedSource := normalizeMonitorSource(source)
-		if item, ok := items[normalizedSource]; ok {
+		if item, ok := items[monitorChannelKey(normalizedSource, authIndex)]; ok {
 			item.Models = append(item.Models, model)
 		}
 	}
@@ -1254,9 +1274,9 @@ func (s *sqliteUsageStore) QueryMonitorRequestLogs(ctx context.Context, filter M
 		item.Source = normalizeMonitorSource(rawSource)
 		items = append(items, item)
 
-		key := MonitorGroupKey(item.Source, item.Model)
+		key := MonitorGroupKey(item.Source, item.Model, item.AuthIndex)
 		if _, exists := groups[key]; !exists {
-			groups[key] = monitorGroupEntry{Source: item.Source, Model: item.Model}
+			groups[key] = monitorGroupEntry{Source: item.Source, AuthIndex: item.AuthIndex, Model: item.Model}
 		}
 	}
 	if err = rows.Err(); err != nil {
@@ -1272,11 +1292,11 @@ func (s *sqliteUsageStore) QueryMonitorRequestLogs(ctx context.Context, filter M
 
 		// Batch query: aggregate counts per (source, model) group
 		batchCountQuery := fmt.Sprintf(`
-			SELECT COALESCE(NULLIF(source, ''), 'unknown'), model,
+			SELECT COALESCE(NULLIF(source, ''), 'unknown'), COALESCE(auth_index, ''), model,
 				COUNT(*), COALESCE(SUM(CASE WHEN failed=0 THEN 1 ELSE 0 END), 0)
 			FROM usage_records
 			WHERE %s AND (%s)
-			GROUP BY COALESCE(NULLIF(source, ''), 'unknown'), model
+			GROUP BY COALESCE(NULLIF(source, ''), 'unknown'), COALESCE(auth_index, ''), model
 		`, whereClause, groupWhereClause)
 		countArgs := append(copyArgs(args), groupWhereArgs...)
 		countRows, countErr := s.db.QueryContext(ctx, batchCountQuery, countArgs...)
@@ -1285,12 +1305,12 @@ func (s *sqliteUsageStore) QueryMonitorRequestLogs(ctx context.Context, filter M
 		}
 		defer countRows.Close()
 		for countRows.Next() {
-			var src, mdl string
+			var src, authIndex, mdl string
 			var total2, success int64
-			if countErr = countRows.Scan(&src, &mdl, &total2, &success); countErr != nil {
+			if countErr = countRows.Scan(&src, &authIndex, &mdl, &total2, &success); countErr != nil {
 				return MonitorRequestLogsResult{}, fmt.Errorf("usage store: scan batch group stats: %w", countErr)
 			}
-			key := MonitorGroupKey(normalizeMonitorSource(src), mdl)
+			key := MonitorGroupKey(normalizeMonitorSource(src), mdl, authIndex)
 			if _, exists := groups[key]; exists {
 				groupStats[key] = MonitorRequestGroupStats{Total: total2, Success: success}
 			}
@@ -1301,9 +1321,11 @@ func (s *sqliteUsageStore) QueryMonitorRequestLogs(ctx context.Context, filter M
 
 		// Batch query: recent requests per (source, model) group using ROW_NUMBER
 		batchRecentQuery := fmt.Sprintf(`
-			SELECT source_key, model, failed, requested_at FROM (
-				SELECT COALESCE(NULLIF(source, ''), 'unknown') AS source_key, model, failed, requested_at,
-					ROW_NUMBER() OVER(PARTITION BY COALESCE(NULLIF(source, ''), 'unknown'), model ORDER BY requested_at DESC, id DESC) AS rn
+			SELECT source_key, auth_index_key, model, failed, requested_at FROM (
+				SELECT COALESCE(NULLIF(source, ''), 'unknown') AS source_key,
+					COALESCE(auth_index, '') AS auth_index_key,
+					model, failed, requested_at,
+					ROW_NUMBER() OVER(PARTITION BY COALESCE(NULLIF(source, ''), 'unknown'), COALESCE(auth_index, ''), model ORDER BY requested_at DESC, id DESC) AS rn
 				FROM usage_records
 				WHERE %s AND (%s)
 			) WHERE rn <= ?
@@ -1317,13 +1339,13 @@ func (s *sqliteUsageStore) QueryMonitorRequestLogs(ctx context.Context, filter M
 		defer recentRows.Close()
 		recentMap := make(map[string][]MonitorRecentRequest, len(groups))
 		for recentRows.Next() {
-			var src, mdl string
+			var src, authIndex, mdl string
 			var failed int
 			var ts int64
-			if recentErr = recentRows.Scan(&src, &mdl, &failed, &ts); recentErr != nil {
+			if recentErr = recentRows.Scan(&src, &authIndex, &mdl, &failed, &ts); recentErr != nil {
 				return MonitorRequestLogsResult{}, fmt.Errorf("usage store: scan batch group recent: %w", recentErr)
 			}
-			key := MonitorGroupKey(normalizeMonitorSource(src), mdl)
+			key := MonitorGroupKey(normalizeMonitorSource(src), mdl, authIndex)
 			if _, exists := groups[key]; exists {
 				recentMap[key] = append(recentMap[key], MonitorRecentRequest{
 					Failed: failed != 0, Timestamp: time.Unix(ts, 0),
@@ -1541,20 +1563,23 @@ func (s *sqliteUsageStore) QueryMonitorFailureStats(ctx context.Context, filter 
 	baseFilter.Status = ""
 	whereClause, args := buildSQLiteMonitorWhere(baseFilter, false)
 
-	failedSources, err := s.queryFailedSources(ctx, whereClause, args)
+	failedChannels, err := s.queryFailedChannels(ctx, whereClause, args)
 	if err != nil {
 		return MonitorFailureStatsResult{}, err
 	}
-	if len(failedSources) == 0 {
+	if len(failedChannels) == 0 {
 		return MonitorFailureStatsResult{
 			Items:   []MonitorFailureStats{},
 			Filters: MonitorFilterOptions{Models: []string{}, Sources: []string{}},
 		}, nil
 	}
 
-	inClause, inArgs := toInClause(failedSources)
-	failedWhere := whereClause + " AND COALESCE(NULLIF(source, ''), 'unknown') IN (" + inClause + ")"
-	failedArgs := append(copyArgs(args), inArgs...)
+	channelWhereClause, channelWhereArgs := buildChannelWhereClause(failedChannels)
+	if channelWhereClause == "" {
+		return MonitorFailureStatsResult{}, fmt.Errorf("usage store: build failure channel where clause: empty")
+	}
+	failedWhere := whereClause + " AND (" + channelWhereClause + ")"
+	failedArgs := append(copyArgs(args), channelWhereArgs...)
 
 	itemsMap, err := s.queryFailureAggregates(ctx, failedWhere, failedArgs)
 	if err != nil {
@@ -1596,6 +1621,9 @@ func (s *sqliteUsageStore) QueryMonitorFailureStats(ctx context.Context, filter 
 
 	sort.Slice(items, func(i, j int) bool {
 		if items[i].FailedCount == items[j].FailedCount {
+			if items[i].Source == items[j].Source {
+				return items[i].AuthIndex < items[j].AuthIndex
+			}
 			return items[i].Source < items[j].Source
 		}
 		return items[i].FailedCount > items[j].FailedCount
@@ -1606,24 +1634,26 @@ func (s *sqliteUsageStore) QueryMonitorFailureStats(ctx context.Context, filter 
 	}
 
 	if len(items) > 0 {
-		selectedSources := make([]string, 0, len(items))
+		selectedChannels := make([]monitorChannelIdentity, 0, len(items))
 		for _, item := range items {
-			selectedSources = append(selectedSources, item.Source)
+			selectedChannels = append(selectedChannels, monitorChannelIdentity{Source: item.Source, AuthIndex: item.AuthIndex})
 		}
-		sourceWhereClause, sourceWhereArgs := buildSourceWhereClause(selectedSources)
-		if sourceWhereClause == "" {
-			return MonitorFailureStatsResult{}, fmt.Errorf("usage store: build failure source where clause: empty")
+		selectedWhereClause, selectedWhereArgs := buildChannelWhereClause(selectedChannels)
+		if selectedWhereClause == "" {
+			return MonitorFailureStatsResult{}, fmt.Errorf("usage store: build failure channel where clause: empty")
 		}
 
 		failureRecentQuery := fmt.Sprintf(`
-			SELECT source_key, model, failed, requested_at FROM (
-				SELECT COALESCE(NULLIF(source, ''), 'unknown') AS source_key, model, failed, requested_at,
-					ROW_NUMBER() OVER(PARTITION BY COALESCE(NULLIF(source, ''), 'unknown'), model ORDER BY requested_at DESC, id DESC) AS rn
+			SELECT source_key, auth_index_key, model, failed, requested_at FROM (
+				SELECT COALESCE(NULLIF(source, ''), 'unknown') AS source_key,
+					COALESCE(auth_index, '') AS auth_index_key,
+					model, failed, requested_at,
+					ROW_NUMBER() OVER(PARTITION BY COALESCE(NULLIF(source, ''), 'unknown'), COALESCE(auth_index, ''), model ORDER BY requested_at DESC, id DESC) AS rn
 				FROM usage_records
 				WHERE %s AND (%s)
 			) WHERE rn <= ?
-		`, failedWhere, sourceWhereClause)
-		frArgs := append(copyArgs(failedArgs), sourceWhereArgs...)
+		`, failedWhere, selectedWhereClause)
+		frArgs := append(copyArgs(failedArgs), selectedWhereArgs...)
 		frArgs = append(frArgs, recentLimit)
 		frRows, frErr := s.db.QueryContext(ctx, failureRecentQuery, frArgs...)
 		if frErr != nil {
@@ -1631,16 +1661,16 @@ func (s *sqliteUsageStore) QueryMonitorFailureStats(ctx context.Context, filter 
 		}
 		defer frRows.Close()
 
-		type sourceModelKey struct{ source, model string }
+		type sourceModelKey struct{ source, authIndex, model string }
 		failureRecentMap := make(map[sourceModelKey][]MonitorRecentRequest)
 		for frRows.Next() {
-			var src, mdl string
+			var src, authIndex, mdl string
 			var failed int
 			var ts int64
-			if frErr = frRows.Scan(&src, &mdl, &failed, &ts); frErr != nil {
+			if frErr = frRows.Scan(&src, &authIndex, &mdl, &failed, &ts); frErr != nil {
 				return MonitorFailureStatsResult{}, fmt.Errorf("usage store: scan batch failure recent: %w", frErr)
 			}
-			key := sourceModelKey{source: normalizeMonitorSource(src), model: mdl}
+			key := sourceModelKey{source: normalizeMonitorSource(src), authIndex: strings.TrimSpace(authIndex), model: mdl}
 			failureRecentMap[key] = append(failureRecentMap[key], MonitorRecentRequest{
 				Failed: failed != 0, Timestamp: time.Unix(ts, 0),
 			})
@@ -1654,7 +1684,7 @@ func (s *sqliteUsageStore) QueryMonitorFailureStats(ctx context.Context, filter 
 		}
 		for i := range items {
 			for j := range items[i].Models {
-				key := sourceModelKey{source: items[i].Source, model: items[i].Models[j].Model}
+				key := sourceModelKey{source: items[i].Source, authIndex: items[i].AuthIndex, model: items[i].Models[j].Model}
 				if recent, ok := failureRecentMap[key]; ok {
 					items[i].Models[j].Recent = recent
 				}
@@ -1672,8 +1702,9 @@ func (s *sqliteUsageStore) QueryMonitorFailureStats(ctx context.Context, filter 
 }
 
 type monitorGroupEntry struct {
-	Source string
-	Model  string
+	Source    string
+	AuthIndex string
+	Model     string
 }
 
 type monitorChannelIdentity struct {
@@ -1690,16 +1721,16 @@ func buildGroupWhereClause(groups map[string]monitorGroupEntry) (string, []any) 
 		return "", nil
 	}
 	clauses := make([]string, 0, len(groups))
-	args := make([]any, 0, len(groups)*2)
+	args := make([]any, 0, len(groups)*3)
 	for _, group := range groups {
 		source := normalizeMonitorSource(group.Source)
 		if source == "unknown" {
-			clauses = append(clauses, "((source IS NULL OR source = '') AND model = ?)")
-			args = append(args, group.Model)
+			clauses = append(clauses, "((source IS NULL OR source = '') AND COALESCE(auth_index, '') = ? AND model = ?)")
+			args = append(args, strings.TrimSpace(group.AuthIndex), group.Model)
 			continue
 		}
-		clauses = append(clauses, "(source = ? AND model = ?)")
-		args = append(args, source, group.Model)
+		clauses = append(clauses, "(source = ? AND COALESCE(auth_index, '') = ? AND model = ?)")
+		args = append(args, source, strings.TrimSpace(group.AuthIndex), group.Model)
 	}
 	if len(clauses) == 0 {
 		return "", nil
@@ -1850,42 +1881,43 @@ func (s *sqliteUsageStore) attachChannelModels(ctx context.Context, whereClause 
 	return nil
 }
 
-func (s *sqliteUsageStore) queryFailedSources(ctx context.Context, whereClause string, args []any) ([]string, error) {
+func (s *sqliteUsageStore) queryFailedChannels(ctx context.Context, whereClause string, args []any) ([]monitorChannelIdentity, error) {
 	query := fmt.Sprintf(`
-		SELECT DISTINCT COALESCE(NULLIF(source, ''), 'unknown')
+		SELECT DISTINCT COALESCE(NULLIF(source, ''), 'unknown'), COALESCE(auth_index, '')
 		FROM usage_records
 		WHERE %s AND failed = 1
-		ORDER BY 1
+		ORDER BY 1, 2
 	`, whereClause)
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("usage store: query failed sources: %w", err)
+		return nil, fmt.Errorf("usage store: query failed channels: %w", err)
 	}
 	defer rows.Close()
 
-	sources := make([]string, 0)
+	channels := make([]monitorChannelIdentity, 0)
 	for rows.Next() {
-		var source string
-		if err = rows.Scan(&source); err != nil {
-			return nil, fmt.Errorf("usage store: scan failed source: %w", err)
+		var source, authIndex string
+		if err = rows.Scan(&source, &authIndex); err != nil {
+			return nil, fmt.Errorf("usage store: scan failed channel: %w", err)
 		}
-		sources = append(sources, normalizeMonitorSource(source))
+		channels = append(channels, monitorChannelIdentity{Source: normalizeMonitorSource(source), AuthIndex: strings.TrimSpace(authIndex)})
 	}
 	if err = rows.Err(); err != nil {
-		return nil, fmt.Errorf("usage store: iterate failed sources: %w", err)
+		return nil, fmt.Errorf("usage store: iterate failed channels: %w", err)
 	}
-	return sources, nil
+	return channels, nil
 }
 
 func (s *sqliteUsageStore) queryFailureAggregates(ctx context.Context, failedWhere string, args []any) (map[string]*MonitorFailureStats, error) {
 	query := fmt.Sprintf(`
 		SELECT COALESCE(NULLIF(source, ''), 'unknown') AS source_key,
+			COALESCE(auth_index, '') AS auth_index_key,
 			COALESCE(SUM(CASE WHEN failed=1 THEN 1 ELSE 0 END), 0),
 			MAX(CASE WHEN failed=1 THEN requested_at ELSE NULL END)
 		FROM usage_records
 		WHERE %s
-		GROUP BY source_key
+		GROUP BY source_key, auth_index_key
 	`, failedWhere)
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
@@ -1897,17 +1929,19 @@ func (s *sqliteUsageStore) queryFailureAggregates(ctx context.Context, failedWhe
 	result := make(map[string]*MonitorFailureStats)
 	for rows.Next() {
 		var (
-			source   string
-			item     MonitorFailureStats
-			lastUnix sql.NullInt64
+			source    string
+			authIndex string
+			item      MonitorFailureStats
+			lastUnix  sql.NullInt64
 		)
-		if err = rows.Scan(&source, &item.FailedCount, &lastUnix); err != nil {
+		if err = rows.Scan(&source, &authIndex, &item.FailedCount, &lastUnix); err != nil {
 			return nil, fmt.Errorf("usage store: scan failure aggregate: %w", err)
 		}
 		item.Source = normalizeMonitorSource(source)
+		item.AuthIndex = strings.TrimSpace(authIndex)
 		item.LastFailedAt = nullUnixPointer(lastUnix)
 		item.Models = []MonitorModelStats{}
-		result[item.Source] = &item
+		result[monitorChannelKey(item.Source, item.AuthIndex)] = &item
 	}
 	if err = rows.Err(); err != nil {
 		return nil, fmt.Errorf("usage store: iterate failure aggregates: %w", err)
@@ -1918,6 +1952,7 @@ func (s *sqliteUsageStore) queryFailureAggregates(ctx context.Context, failedWhe
 func (s *sqliteUsageStore) attachFailureModels(ctx context.Context, failedWhere string, args []any, items map[string]*MonitorFailureStats) error {
 	query := fmt.Sprintf(`
 		SELECT COALESCE(NULLIF(source, ''), 'unknown') AS source_key,
+			COALESCE(auth_index, '') AS auth_index_key,
 			model,
 			COUNT(*),
 			COALESCE(SUM(CASE WHEN failed=0 THEN 1 ELSE 0 END), 0),
@@ -1925,7 +1960,7 @@ func (s *sqliteUsageStore) attachFailureModels(ctx context.Context, failedWhere 
 			MAX(requested_at)
 		FROM usage_records
 		WHERE %s
-		GROUP BY source_key, model
+		GROUP BY source_key, auth_index_key, model
 	`, failedWhere)
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
@@ -1936,18 +1971,19 @@ func (s *sqliteUsageStore) attachFailureModels(ctx context.Context, failedWhere 
 
 	for rows.Next() {
 		var (
-			source   string
-			model    MonitorModelStats
-			lastUnix sql.NullInt64
+			source    string
+			authIndex string
+			model     MonitorModelStats
+			lastUnix  sql.NullInt64
 		)
-		if err = rows.Scan(&source, &model.Model, &model.Requests, &model.Success, &model.Failed, &lastUnix); err != nil {
+		if err = rows.Scan(&source, &authIndex, &model.Model, &model.Requests, &model.Success, &model.Failed, &lastUnix); err != nil {
 			return fmt.Errorf("usage store: scan failure model: %w", err)
 		}
 		model.LastRequestAt = nullUnixPointer(lastUnix)
 		model.Recent = []MonitorRecentRequest{}
 
 		normalizedSource := normalizeMonitorSource(source)
-		if item, ok := items[normalizedSource]; ok {
+		if item, ok := items[monitorChannelKey(normalizedSource, authIndex)]; ok {
 			item.Models = append(item.Models, model)
 		}
 	}
@@ -2335,16 +2371,16 @@ func buildPostgresGroupWhereClause(groups map[string]monitorGroupEntry, startInd
 		return "", nil
 	}
 	clauses := make([]string, 0, len(groups))
-	args := make([]any, 0, len(groups)*2)
+	args := make([]any, 0, len(groups)*3)
 	for _, group := range groups {
 		source := normalizeMonitorSource(group.Source)
 		if source == "unknown" {
-			args = append(args, group.Model)
-			clauses = append(clauses, "((source IS NULL OR source = '') AND model = "+pgPlaceholder(startIndex+len(args)-1)+")")
+			args = append(args, strings.TrimSpace(group.AuthIndex), group.Model)
+			clauses = append(clauses, "((source IS NULL OR source = '') AND COALESCE(auth_index, '') = "+pgPlaceholder(startIndex+len(args)-2)+" AND model = "+pgPlaceholder(startIndex+len(args)-1)+")")
 			continue
 		}
-		args = append(args, source, group.Model)
-		clauses = append(clauses, "(source = "+pgPlaceholder(startIndex+len(args)-2)+" AND model = "+pgPlaceholder(startIndex+len(args)-1)+")")
+		args = append(args, source, strings.TrimSpace(group.AuthIndex), group.Model)
+		clauses = append(clauses, "(source = "+pgPlaceholder(startIndex+len(args)-3)+" AND COALESCE(auth_index, '') = "+pgPlaceholder(startIndex+len(args)-2)+" AND model = "+pgPlaceholder(startIndex+len(args)-1)+")")
 	}
 	if len(clauses) == 0 {
 		return "", nil

@@ -96,6 +96,55 @@ func TestGetMonitorRequestLogs_TimeRangeAndPagination(t *testing.T) {
 	assertStringSliceEqual(t, resp.Filters.Sources, []string{"source-1"})
 }
 
+func TestGetMonitorRequestLogsGroupsByAuthIndex(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	base := time.Date(2026, 2, 6, 12, 0, 0, 0, time.Local)
+	recordA := testUsageRecord(base.Add(-2*time.Hour), "api-1", "model-a", "shared-source", false)
+	recordA.AuthIndex = "auth-a"
+	recordB := testUsageRecord(base.Add(-1*time.Hour), "api-1", "model-a", "shared-source", true)
+	recordB.AuthIndex = "auth-b"
+	h := newMonitorTestHandler(recordA, recordB)
+
+	path := "/monitor/request-logs?start_time=" + url.QueryEscape(base.Add(-3*time.Hour).Format(time.RFC3339)) +
+		"&end_time=" + url.QueryEscape(base.Format(time.RFC3339)) + "&page=1&page_size=10"
+	rr := executeMonitorRequest(h.GetMonitorRequestLogs, path)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d, body=%s", rr.Code, rr.Body.String())
+	}
+
+	var resp struct {
+		Items []struct {
+			AuthIndex    string  `json:"auth_index"`
+			RequestCount int64   `json:"request_count"`
+			SuccessRate  float64 `json:"success_rate"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response failed: %v", err)
+	}
+	if len(resp.Items) != 2 {
+		t.Fatalf("unexpected item count: got %d want 2", len(resp.Items))
+	}
+	for _, item := range resp.Items {
+		if item.RequestCount != 1 {
+			t.Fatalf("expected request_count to be scoped by auth_index, got %+v", item)
+		}
+		switch item.AuthIndex {
+		case "auth-a":
+			if item.SuccessRate != 100 {
+				t.Fatalf("unexpected auth-a success rate: %+v", item)
+			}
+		case "auth-b":
+			if item.SuccessRate != 0 {
+				t.Fatalf("unexpected auth-b success rate: %+v", item)
+			}
+		default:
+			t.Fatalf("unexpected auth index: %+v", item)
+		}
+	}
+}
+
 func TestGetMonitorChannelStats_StatusFilterAndAggregate(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -202,6 +251,96 @@ func TestGetMonitorChannelStatsResolvesSharedSourceByAuthIndex(t *testing.T) {
 
 	h := &Handler{usageStats: stats, authManager: manager}
 	rr := executeMonitorRequest(h.GetMonitorChannelStats, "/monitor/channel-stats")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d, body=%s", rr.Code, rr.Body.String())
+	}
+
+	var resp struct {
+		Items []struct {
+			Source    string `json:"source"`
+			AuthIndex string `json:"auth_index"`
+			SourceRef struct {
+				AuthIndex string `json:"auth_index"`
+				Disabled  bool   `json:"disabled"`
+			} `json:"source_ref"`
+		} `json:"items"`
+	}
+	if err = json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response failed: %v", err)
+	}
+	if len(resp.Items) != 2 {
+		t.Fatalf("unexpected item count: got %d want 2; body=%s", len(resp.Items), rr.Body.String())
+	}
+
+	byAuthIndex := make(map[string]bool, len(resp.Items))
+	for _, item := range resp.Items {
+		if item.Source != "shared-key" {
+			t.Fatalf("unexpected source: %+v", item)
+		}
+		if item.AuthIndex == "" || item.SourceRef.AuthIndex != item.AuthIndex {
+			t.Fatalf("expected source_ref to resolve through item auth_index, got %+v", item)
+		}
+		byAuthIndex[item.AuthIndex] = item.SourceRef.Disabled
+	}
+	if byAuthIndex[activeAuth.EnsureIndex()] {
+		t.Fatalf("active auth resolved as disabled: %+v", byAuthIndex)
+	}
+	if !byAuthIndex[disabledAuth.EnsureIndex()] {
+		t.Fatalf("disabled auth was not preserved by auth_index: %+v", byAuthIndex)
+	}
+}
+
+func TestGetMonitorFailureAnalysisResolvesSharedSourceByAuthIndex(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	manager := coreauth.NewManager(nil, &coreauth.RoundRobinSelector{}, nil)
+	activeAuth, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       "auth-active",
+		Provider: "claude",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"api_key": "shared-key",
+			"source":  "config:claude[active]",
+		},
+	})
+	if err != nil {
+		t.Fatalf("register active auth failed: %v", err)
+	}
+	disabledAuth, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       "auth-disabled",
+		Provider: "claude",
+		Disabled: true,
+		Status:   coreauth.StatusDisabled,
+		Attributes: map[string]string{
+			"api_key": "shared-key",
+			"source":  "config:claude[disabled]",
+		},
+	})
+	if err != nil {
+		t.Fatalf("register disabled auth failed: %v", err)
+	}
+
+	stats := usage.NewRequestStatistics()
+	now := time.Now()
+	stats.Record(context.Background(), coreusage.Record{
+		APIKey:      "api-1",
+		Model:       "model-a",
+		Source:      "shared-key",
+		AuthIndex:   activeAuth.EnsureIndex(),
+		RequestedAt: now.Add(-2 * time.Minute),
+		Failed:      true,
+	})
+	stats.Record(context.Background(), coreusage.Record{
+		APIKey:      "api-1",
+		Model:       "model-a",
+		Source:      "shared-key",
+		AuthIndex:   disabledAuth.EnsureIndex(),
+		RequestedAt: now.Add(-1 * time.Minute),
+		Failed:      true,
+	})
+
+	h := &Handler{usageStats: stats, authManager: manager}
+	rr := executeMonitorRequest(h.GetMonitorFailureAnalysis, "/monitor/failure-analysis")
 	if rr.Code != http.StatusOK {
 		t.Fatalf("unexpected status: %d, body=%s", rr.Code, rr.Body.String())
 	}
