@@ -3,7 +3,9 @@ package helps
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -14,6 +16,8 @@ import (
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
+
+var failureStatusPattern = regexp.MustCompile(`(?i)(?:status_code|status code|status|http status)[=:\s]+([1-5][0-9]{2})`)
 
 type UsageReporter struct {
 	provider    string
@@ -71,8 +75,8 @@ func (r *UsageReporter) buildAdditionalModelRecord(model string, detail usage.De
 	return r.buildRecordForModel(model, detail, false), true
 }
 
-func (r *UsageReporter) PublishFailure(ctx context.Context) {
-	r.publishWithOutcome(ctx, usage.Detail{}, true)
+func (r *UsageReporter) PublishFailure(ctx context.Context, errs ...error) {
+	r.publishWithOutcome(ctx, usage.Detail{}, true, errs...)
 }
 
 func (r *UsageReporter) TrackFailure(ctx context.Context, errPtr *error) {
@@ -80,17 +84,21 @@ func (r *UsageReporter) TrackFailure(ctx context.Context, errPtr *error) {
 		return
 	}
 	if *errPtr != nil {
-		r.PublishFailure(ctx)
+		r.PublishFailure(ctx, *errPtr)
 	}
 }
 
-func (r *UsageReporter) publishWithOutcome(ctx context.Context, detail usage.Detail, failed bool) {
+func (r *UsageReporter) publishWithOutcome(ctx context.Context, detail usage.Detail, failed bool, errs ...error) {
 	if r == nil {
 		return
 	}
 	detail = normalizeUsageDetailTotal(detail)
 	r.once.Do(func() {
-		usage.PublishRecord(ctx, r.buildRecord(detail, failed))
+		record := r.buildRecord(detail, failed)
+		if failed {
+			record.ProviderStatusCode, record.ErrorCode = failureMetadataFromErrors(errs...)
+		}
+		usage.PublishRecord(ctx, record)
 	})
 }
 
@@ -160,6 +168,144 @@ func (r *UsageReporter) latency() time.Duration {
 		return 0
 	}
 	return latency
+}
+
+type providerStatusCodeProvider interface {
+	ProviderStatusCode() int
+}
+
+type statusCodeProvider interface {
+	StatusCode() int
+}
+
+type errorCodeProvider interface {
+	ErrorCode() string
+}
+
+func failureMetadataFromErrors(errs ...error) (int, string) {
+	for _, err := range errs {
+		status, code := failureMetadataFromError(err)
+		if status != 0 || code != "" {
+			return status, code
+		}
+	}
+	return 0, ""
+}
+
+func failureMetadataFromError(err error) (int, string) {
+	if err == nil {
+		return 0, ""
+	}
+	status := 0
+	var providerStatus providerStatusCodeProvider
+	if errors.As(err, &providerStatus) {
+		status = normalizeFailureStatus(providerStatus.ProviderStatusCode())
+	}
+	if status == 0 {
+		var statusProvider statusCodeProvider
+		if errors.As(err, &statusProvider) {
+			status = normalizeFailureStatus(statusProvider.StatusCode())
+		}
+	}
+
+	code := ""
+	var codeProvider errorCodeProvider
+	if errors.As(err, &codeProvider) {
+		code = sanitizeFailureErrorCode(codeProvider.ErrorCode())
+	}
+
+	message := strings.TrimSpace(err.Error())
+	if status == 0 {
+		status = parseFailureStatusFromText(message)
+	}
+	if code == "" {
+		code = parseFailureErrorCodeFromText(message)
+	}
+	return status, code
+}
+
+func normalizeFailureStatus(status int) int {
+	if status >= 100 && status <= 599 {
+		return status
+	}
+	return 0
+}
+
+func parseFailureStatusFromText(text string) int {
+	match := failureStatusPattern.FindStringSubmatch(text)
+	if len(match) != 2 {
+		return 0
+	}
+	status := 0
+	for _, ch := range match[1] {
+		status = status*10 + int(ch-'0')
+	}
+	return normalizeFailureStatus(status)
+}
+
+func parseFailureErrorCodeFromText(text string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return ""
+	}
+	if gjson.Valid(text) {
+		if code := firstFailureJSONValue([]byte(text), "error.code", "code", "error.type", "type", "error.err_code"); code != "" {
+			return sanitizeFailureErrorCode(code)
+		}
+	}
+	if idx := strings.Index(text, ":"); idx > 0 {
+		prefix := strings.TrimSpace(text[:idx])
+		if comma := strings.LastIndex(prefix, ","); comma >= 0 {
+			prefix = strings.TrimSpace(prefix[comma+1:])
+		}
+		if code := sanitizeFailureErrorCode(prefix); code != "" {
+			return code
+		}
+	}
+	for _, token := range strings.FieldsFunc(text, func(r rune) bool {
+		return r == ' ' || r == '\t' || r == '\n' || r == '\r' || r == ',' || r == ';'
+	}) {
+		code := sanitizeFailureErrorCode(token)
+		if code == "" {
+			continue
+		}
+		lower := strings.ToLower(code)
+		if strings.Contains(lower, "_") || strings.Contains(lower, "error") || strings.Contains(lower, "quota") || strings.Contains(lower, "limit") || strings.Contains(lower, "unavailable") {
+			return code
+		}
+	}
+	return ""
+}
+
+func firstFailureJSONValue(body []byte, paths ...string) string {
+	for _, path := range paths {
+		value := gjson.GetBytes(body, path)
+		if value.Exists() && value.Type == gjson.String {
+			if s := strings.TrimSpace(value.String()); s != "" {
+				return s
+			}
+		}
+	}
+	return ""
+}
+
+func sanitizeFailureErrorCode(code string) string {
+	code = strings.TrimSpace(code)
+	code = strings.Trim(code, "\"'`[]{}(),;")
+	if code == "" || len(code) > 128 {
+		return ""
+	}
+	lower := strings.ToLower(code)
+	if strings.HasPrefix(lower, "sk-") || strings.Contains(lower, "authorization") || strings.Contains(lower, "bearer") {
+		return ""
+	}
+	for _, ch := range code {
+		if ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z' || ch >= '0' && ch <= '9' || ch == '_' || ch == '-' || ch == '.' {
+			continue
+		}
+		return ""
+	}
+	return code
 }
 
 func APIKeyFromContext(ctx context.Context) string {

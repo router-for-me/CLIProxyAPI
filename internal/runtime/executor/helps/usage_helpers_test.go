@@ -1,11 +1,29 @@
 package helps
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 )
+
+type metadataStatusError struct {
+	status int
+	code   string
+	msg    string
+}
+
+func (e metadataStatusError) Error() string {
+	if e.msg != "" {
+		return e.msg
+	}
+	return fmt.Sprintf("status %d", e.status)
+}
+
+func (e metadataStatusError) ProviderStatusCode() int { return e.status }
+
+func (e metadataStatusError) ErrorCode() string { return e.code }
 
 func TestParseOpenAIUsageChatCompletions(t *testing.T) {
 	data := []byte(`{"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3,"prompt_tokens_details":{"cached_tokens":4},"completion_tokens_details":{"reasoning_tokens":5}}}`)
@@ -78,5 +96,40 @@ func TestUsageReporterBuildAdditionalModelRecordSkipsZeroTokens(t *testing.T) {
 	}
 	if _, ok := reporter.buildAdditionalModelRecord("gpt-image-2", usage.Detail{CachedTokens: 2}); !ok {
 		t.Fatalf("expected non-zero cached token usage to be recorded")
+	}
+}
+
+func TestFailureMetadataFromErrorUsesSafeStructuredFields(t *testing.T) {
+	status, code := failureMetadataFromError(metadataStatusError{
+		status: 402,
+		code:   "insufficient_balance",
+		msg:    `{"error":{"message":"secret body must not be persisted","code":"ignored"}}`,
+	})
+	if status != 402 {
+		t.Fatalf("status = %d, want 402", status)
+	}
+	if code != "insufficient_balance" {
+		t.Fatalf("code = %q, want insufficient_balance", code)
+	}
+}
+
+func TestFailureMetadataFromErrorParsesCommonTextWithoutMessages(t *testing.T) {
+	status, code := failureMetadataFromError(fmt.Errorf("status_code=400, invalid_request_error: messages.1 tool_use mismatch with sk-secret-token"))
+	if status != 400 {
+		t.Fatalf("status = %d, want 400", status)
+	}
+	if code != "invalid_request_error" {
+		t.Fatalf("code = %q, want invalid_request_error", code)
+	}
+}
+
+func TestFailureMetadataFromErrorRejectsUnsafeCodeCandidates(t *testing.T) {
+	_, code := failureMetadataFromError(metadataStatusError{
+		status: 401,
+		code:   "sk-secret-token",
+		msg:    "status_code=401, sk-secret-token: unauthorized",
+	})
+	if code != "" {
+		t.Fatalf("code = %q, want empty unsafe token", code)
 	}
 }

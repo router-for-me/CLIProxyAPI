@@ -22,17 +22,19 @@ const (
 )
 
 type monitorRecord struct {
-	Timestamp       time.Time
-	APIKey          string
-	Model           string
-	Source          string
-	AuthIndex       string
-	Failed          bool
-	InputTokens     int64
-	OutputTokens    int64
-	ReasoningTokens int64
-	CachedTokens    int64
-	TotalTokens     int64
+	Timestamp          time.Time
+	APIKey             string
+	Model              string
+	Source             string
+	AuthIndex          string
+	Failed             bool
+	InputTokens        int64
+	OutputTokens       int64
+	ReasoningTokens    int64
+	CachedTokens       int64
+	TotalTokens        int64
+	ProviderStatusCode int
+	ErrorCode          string
 }
 
 type monitorRecordFilter struct {
@@ -58,21 +60,23 @@ type monitorTimeRange struct {
 }
 
 type monitorRequestLogItem struct {
-	Timestamp       time.Time              `json:"timestamp"`
-	APIKey          string                 `json:"api_key"`
-	Model           string                 `json:"model"`
-	Source          string                 `json:"source"`
-	SourceRef       monitorSourceRef       `json:"source_ref"`
-	AuthIndex       string                 `json:"auth_index"`
-	Failed          bool                   `json:"failed"`
-	InputTokens     int64                  `json:"input_tokens"`
-	OutputTokens    int64                  `json:"output_tokens"`
-	ReasoningTokens int64                  `json:"reasoning_tokens"`
-	CachedTokens    int64                  `json:"cached_tokens"`
-	TotalTokens     int64                  `json:"total_tokens"`
-	RequestCount    int64                  `json:"request_count"`
-	SuccessRate     float64                `json:"success_rate"`
-	RecentRequests  []monitorRecentRequest `json:"recent_requests"`
+	Timestamp          time.Time              `json:"timestamp"`
+	APIKey             string                 `json:"api_key"`
+	Model              string                 `json:"model"`
+	Source             string                 `json:"source"`
+	SourceRef          monitorSourceRef       `json:"source_ref"`
+	AuthIndex          string                 `json:"auth_index"`
+	Failed             bool                   `json:"failed"`
+	InputTokens        int64                  `json:"input_tokens"`
+	OutputTokens       int64                  `json:"output_tokens"`
+	ReasoningTokens    int64                  `json:"reasoning_tokens"`
+	CachedTokens       int64                  `json:"cached_tokens"`
+	TotalTokens        int64                  `json:"total_tokens"`
+	ProviderStatusCode int                    `json:"provider_status_code,omitempty"`
+	ErrorCode          string                 `json:"error_code,omitempty"`
+	RequestCount       int64                  `json:"request_count"`
+	SuccessRate        float64                `json:"success_rate"`
+	RecentRequests     []monitorRecentRequest `json:"recent_requests"`
 }
 
 type monitorFilterOptions struct {
@@ -208,21 +212,23 @@ func (h *Handler) GetMonitorRequestLogs(c *gin.Context) {
 			for _, row := range queryResult.Items {
 				groupStats := queryResult.GroupStats[usage.MonitorGroupKey(row.Source, row.Model)]
 				items = append(items, monitorRequestLogItem{
-					Timestamp:       row.Timestamp,
-					APIKey:          row.APIKey,
-					Model:           row.Model,
-					Source:          row.Source,
-					SourceRef:       sourceResolver.Resolve(row.Source, row.AuthIndex),
-					AuthIndex:       row.AuthIndex,
-					Failed:          row.Failed,
-					InputTokens:     row.InputTokens,
-					OutputTokens:    row.OutputTokens,
-					ReasoningTokens: row.ReasoningTokens,
-					CachedTokens:    row.CachedTokens,
-					TotalTokens:     row.TotalTokens,
-					RequestCount:    groupStats.Total,
-					SuccessRate:     calcRate(groupStats.Success, groupStats.Total),
-					RecentRequests:  fromUsageRecentRequests(groupStats.Recent),
+					Timestamp:          row.Timestamp,
+					APIKey:             row.APIKey,
+					Model:              row.Model,
+					Source:             row.Source,
+					SourceRef:          sourceResolver.Resolve(row.Source, row.AuthIndex),
+					AuthIndex:          row.AuthIndex,
+					Failed:             row.Failed,
+					InputTokens:        row.InputTokens,
+					OutputTokens:       row.OutputTokens,
+					ReasoningTokens:    row.ReasoningTokens,
+					CachedTokens:       row.CachedTokens,
+					TotalTokens:        row.TotalTokens,
+					ProviderStatusCode: row.ProviderStatusCode,
+					ErrorCode:          row.ErrorCode,
+					RequestCount:       groupStats.Total,
+					SuccessRate:        calcRate(groupStats.Success, groupStats.Total),
+					RecentRequests:     fromUsageRecentRequests(groupStats.Recent),
 				})
 			}
 
@@ -267,18 +273,20 @@ func (h *Handler) GetMonitorRequestLogs(c *gin.Context) {
 			sourceSet[record.Source] = struct{}{}
 		}
 		logs = append(logs, monitorRequestLogItem{
-			Timestamp:       record.Timestamp,
-			APIKey:          record.APIKey,
-			Model:           record.Model,
-			Source:          record.Source,
-			SourceRef:       sourceResolver.Resolve(record.Source, record.AuthIndex),
-			AuthIndex:       record.AuthIndex,
-			Failed:          record.Failed,
-			InputTokens:     record.InputTokens,
-			OutputTokens:    record.OutputTokens,
-			ReasoningTokens: record.ReasoningTokens,
-			CachedTokens:    record.CachedTokens,
-			TotalTokens:     record.TotalTokens,
+			Timestamp:          record.Timestamp,
+			APIKey:             record.APIKey,
+			Model:              record.Model,
+			Source:             record.Source,
+			SourceRef:          sourceResolver.Resolve(record.Source, record.AuthIndex),
+			AuthIndex:          record.AuthIndex,
+			Failed:             record.Failed,
+			InputTokens:        record.InputTokens,
+			OutputTokens:       record.OutputTokens,
+			ReasoningTokens:    record.ReasoningTokens,
+			CachedTokens:       record.CachedTokens,
+			TotalTokens:        record.TotalTokens,
+			ProviderStatusCode: record.ProviderStatusCode,
+			ErrorCode:          record.ErrorCode,
 		})
 	})
 
@@ -723,17 +731,19 @@ func visitSnapshotRecords(snapshot usage.StatisticsSnapshot, visit func(record m
 					source = "unknown"
 				}
 				visit(monitorRecord{
-					Timestamp:       detail.Timestamp,
-					APIKey:          apiKey,
-					Model:           model,
-					Source:          source,
-					AuthIndex:       detail.AuthIndex,
-					Failed:          detail.Failed,
-					InputTokens:     detail.Tokens.InputTokens,
-					OutputTokens:    detail.Tokens.OutputTokens,
-					ReasoningTokens: detail.Tokens.ReasoningTokens,
-					CachedTokens:    detail.Tokens.CachedTokens,
-					TotalTokens:     detail.Tokens.TotalTokens,
+					Timestamp:          detail.Timestamp,
+					APIKey:             apiKey,
+					Model:              model,
+					Source:             source,
+					AuthIndex:          detail.AuthIndex,
+					Failed:             detail.Failed,
+					InputTokens:        detail.Tokens.InputTokens,
+					OutputTokens:       detail.Tokens.OutputTokens,
+					ReasoningTokens:    detail.Tokens.ReasoningTokens,
+					CachedTokens:       detail.Tokens.CachedTokens,
+					TotalTokens:        detail.Tokens.TotalTokens,
+					ProviderStatusCode: detail.ProviderStatusCode,
+					ErrorCode:          detail.ErrorCode,
 				})
 			}
 		}
@@ -2067,25 +2077,29 @@ func (h *Handler) GetMonitorRequestDetails(c *gin.Context) {
 	}
 
 	type requestDetailItem struct {
-		Timestamp time.Time `json:"timestamp"`
-		Method    string    `json:"method"`
-		Path      string    `json:"path"`
-		Model     string    `json:"model"`
-		Source    string    `json:"source"`
-		AuthIndex string    `json:"auth_index"`
-		Failed    bool      `json:"failed"`
+		Timestamp          time.Time `json:"timestamp"`
+		Method             string    `json:"method"`
+		Path               string    `json:"path"`
+		Model              string    `json:"model"`
+		Source             string    `json:"source"`
+		AuthIndex          string    `json:"auth_index"`
+		Failed             bool      `json:"failed"`
+		ProviderStatusCode int       `json:"provider_status_code,omitempty"`
+		ErrorCode          string    `json:"error_code,omitempty"`
 	}
 
 	items := make([]requestDetailItem, 0, len(results))
 	for _, r := range results {
 		items = append(items, requestDetailItem{
-			Timestamp: r.Timestamp,
-			Method:    r.Method,
-			Path:      r.Path,
-			Model:     r.Model,
-			Source:    r.Source,
-			AuthIndex: r.AuthIndex,
-			Failed:    r.Failed,
+			Timestamp:          r.Timestamp,
+			Method:             r.Method,
+			Path:               r.Path,
+			Model:              r.Model,
+			Source:             r.Source,
+			AuthIndex:          r.AuthIndex,
+			Failed:             r.Failed,
+			ProviderStatusCode: r.ProviderStatusCode,
+			ErrorCode:          r.ErrorCode,
 		})
 	}
 

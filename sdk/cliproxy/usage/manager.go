@@ -23,7 +23,11 @@ type Record struct {
 	RequestedAt time.Time
 	Latency     time.Duration
 	Failed      bool
-	Detail      Detail
+	// ProviderStatusCode stores the upstream HTTP status for failed requests.
+	ProviderStatusCode int
+	// ErrorCode stores a short provider error code only; raw messages and bodies are never stored here.
+	ErrorCode string
+	Detail    Detail
 }
 
 // Detail holds the token usage breakdown.

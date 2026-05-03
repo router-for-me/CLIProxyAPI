@@ -435,9 +435,11 @@ func (e *OpenAICompatExecutor) overrideModel(payload []byte, model string) []byt
 }
 
 type statusErr struct {
-	code       int
-	msg        string
-	retryAfter *time.Duration
+	code               int
+	providerStatusCode int
+	msg                string
+	errorCode          string
+	retryAfter         *time.Duration
 }
 
 func (e statusErr) Error() string {
@@ -446,5 +448,12 @@ func (e statusErr) Error() string {
 	}
 	return fmt.Sprintf("status %d", e.code)
 }
-func (e statusErr) StatusCode() int            { return e.code }
+func (e statusErr) StatusCode() int { return e.code }
+func (e statusErr) ProviderStatusCode() int {
+	if e.providerStatusCode > 0 {
+		return e.providerStatusCode
+	}
+	return e.code
+}
+func (e statusErr) ErrorCode() string          { return e.errorCode }
 func (e statusErr) RetryAfter() *time.Duration { return e.retryAfter }

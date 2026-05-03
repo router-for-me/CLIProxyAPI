@@ -17,19 +17,21 @@ import (
 
 // UsageRecord represents a single usage record for database persistence.
 type UsageRecord struct {
-	APIKey          string
-	Model           string
-	Source          string
-	AuthIndex       string
-	Failed          bool
-	RequestedAt     time.Time
-	InputTokens     int64
-	OutputTokens    int64
-	ReasoningTokens int64
-	CachedTokens    int64
-	TotalTokens     int64
-	Method          string // HTTP method (GET, POST, etc.)
-	Path            string // Request URL path (/v1/chat/completions, etc.)
+	APIKey             string
+	Model              string
+	Source             string
+	AuthIndex          string
+	Failed             bool
+	RequestedAt        time.Time
+	InputTokens        int64
+	OutputTokens       int64
+	ReasoningTokens    int64
+	CachedTokens       int64
+	TotalTokens        int64
+	Method             string // HTTP method (GET, POST, etc.)
+	Path               string // Request URL path (/v1/chat/completions, etc.)
+	ProviderStatusCode int
+	ErrorCode          string
 }
 
 // APIStats holds aggregated metrics for a single API key from database.
@@ -62,17 +64,19 @@ type AggregatedStats struct {
 
 // DetailRecord represents a single request record from database.
 type DetailRecord struct {
-	APIKey          string
-	Model           string
-	Source          string
-	AuthIndex       string
-	Failed          bool
-	RequestedAt     time.Time
-	InputTokens     int64
-	OutputTokens    int64
-	ReasoningTokens int64
-	CachedTokens    int64
-	TotalTokens     int64
+	APIKey             string
+	Model              string
+	Source             string
+	AuthIndex          string
+	Failed             bool
+	RequestedAt        time.Time
+	InputTokens        int64
+	OutputTokens       int64
+	ReasoningTokens    int64
+	CachedTokens       int64
+	TotalTokens        int64
+	ProviderStatusCode int
+	ErrorCode          string
 }
 
 // UsageStore defines the interface for usage record persistence.
@@ -404,7 +408,9 @@ func (s *pgUsageStore) EnsureSchema(ctx context.Context) error {
 			output_tokens    BIGINT NOT NULL DEFAULT 0,
 			reasoning_tokens BIGINT NOT NULL DEFAULT 0,
 			cached_tokens    BIGINT NOT NULL DEFAULT 0,
-			total_tokens     BIGINT NOT NULL DEFAULT 0
+			total_tokens     BIGINT NOT NULL DEFAULT 0,
+			provider_status_code INTEGER NOT NULL DEFAULT 0,
+			error_code       TEXT NOT NULL DEFAULT ''
 		)
 	`, table)
 	if _, err := s.db.ExecContext(ctx, createTable); err != nil {
@@ -441,6 +447,8 @@ func (s *pgUsageStore) EnsureSchema(ctx context.Context) error {
 	pgMigrations := []string{
 		fmt.Sprintf("ALTER TABLE %s ADD COLUMN IF NOT EXISTS method TEXT NOT NULL DEFAULT ''", table),
 		fmt.Sprintf("ALTER TABLE %s ADD COLUMN IF NOT EXISTS path TEXT NOT NULL DEFAULT ''", table),
+		fmt.Sprintf("ALTER TABLE %s ADD COLUMN IF NOT EXISTS provider_status_code INTEGER NOT NULL DEFAULT 0", table),
+		fmt.Sprintf("ALTER TABLE %s ADD COLUMN IF NOT EXISTS error_code TEXT NOT NULL DEFAULT ''", table),
 	}
 	for _, m := range pgMigrations {
 		if _, err := s.db.ExecContext(ctx, m); err != nil {
@@ -450,6 +458,8 @@ func (s *pgUsageStore) EnsureSchema(ctx context.Context) error {
 	postMigrationIndexes := []string{
 		fmt.Sprintf("CREATE INDEX IF NOT EXISTS idx_usage_method_requested_at ON %s(method, requested_at DESC)", table),
 		fmt.Sprintf("CREATE INDEX IF NOT EXISTS idx_usage_path_requested_at ON %s(path, requested_at DESC)", table),
+		fmt.Sprintf("CREATE INDEX IF NOT EXISTS idx_usage_failed_status_requested ON %s(provider_status_code, requested_at DESC) WHERE failed = 1", table),
+		fmt.Sprintf("CREATE INDEX IF NOT EXISTS idx_usage_failed_error_code_requested ON %s(error_code, requested_at DESC) WHERE failed = 1 AND error_code <> ''", table),
 	}
 	for _, idx := range postMigrationIndexes {
 		if _, err := s.db.ExecContext(ctx, idx); err != nil {
@@ -469,8 +479,8 @@ func (s *pgUsageStore) Insert(ctx context.Context, record UsageRecord) error {
 	query := fmt.Sprintf(`
 		INSERT INTO %s (api_key, model, source, auth_index, failed, requested_at,
 			input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens,
-			method, path)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+			method, path, provider_status_code, error_code)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 	`, table)
 	_, err := s.db.ExecContext(ctx, query,
 		record.APIKey,
@@ -486,6 +496,8 @@ func (s *pgUsageStore) Insert(ctx context.Context, record UsageRecord) error {
 		record.TotalTokens,
 		record.Method,
 		record.Path,
+		record.ProviderStatusCode,
+		record.ErrorCode,
 	)
 	if err != nil {
 		return fmt.Errorf("usage store: insert record: %w", err)
@@ -524,8 +536,8 @@ func (s *pgUsageStore) InsertBatch(ctx context.Context, records []UsageRecord) (
 	query := fmt.Sprintf(`
 		INSERT INTO %s (api_key, model, source, auth_index, failed, requested_at,
 			input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens,
-			method, path)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+			method, path, provider_status_code, error_code)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 	`, table)
 
 	stmt, err := tx.PrepareContext(ctx, query)
@@ -556,6 +568,8 @@ func (s *pgUsageStore) InsertBatch(ctx context.Context, records []UsageRecord) (
 			record.TotalTokens,
 			record.Method,
 			record.Path,
+			record.ProviderStatusCode,
+			record.ErrorCode,
 		)
 		if execErr != nil {
 			skipped++
@@ -591,7 +605,7 @@ func (s *pgUsageStore) ListRecordsAfterID(ctx context.Context, afterID int64, li
 	query := fmt.Sprintf(`
 		SELECT id, api_key, model, source, auth_index, failed, requested_at,
 			input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens,
-			method, path
+			method, path, provider_status_code, error_code
 		FROM %s
 		WHERE id > $1
 		ORDER BY id ASC
@@ -627,6 +641,8 @@ func (s *pgUsageStore) ListRecordsAfterID(ctx context.Context, afterID int64, li
 			&record.TotalTokens,
 			&record.Method,
 			&record.Path,
+			&record.ProviderStatusCode,
+			&record.ErrorCode,
 		); err != nil {
 			return nil, afterID, fmt.Errorf("usage store: scan list records after id: %w", err)
 		}
@@ -767,7 +783,8 @@ func (s *pgUsageStore) GetDetails(ctx context.Context, offset, limit int) ([]Det
 	table := s.fullTableName("usage_records")
 	query := fmt.Sprintf(`
 		SELECT api_key, model, source, auth_index, failed, requested_at,
-			input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens
+			input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens,
+			provider_status_code, error_code
 		FROM %s ORDER BY requested_at DESC
 		LIMIT $1 OFFSET $2
 	`, table)
@@ -787,6 +804,7 @@ func (s *pgUsageStore) GetDetails(ctx context.Context, offset, limit int) ([]Det
 			&failed, &detail.RequestedAt,
 			&detail.InputTokens, &detail.OutputTokens, &detail.ReasoningTokens,
 			&detail.CachedTokens, &detail.TotalTokens,
+			&detail.ProviderStatusCode, &detail.ErrorCode,
 		); err != nil {
 			return nil, fmt.Errorf("usage store: scan detail: %w", err)
 		}
@@ -883,7 +901,9 @@ func (s *sqliteUsageStore) EnsureSchema(ctx context.Context) error {
 			output_tokens    INTEGER NOT NULL DEFAULT 0,
 			reasoning_tokens INTEGER NOT NULL DEFAULT 0,
 			cached_tokens    INTEGER NOT NULL DEFAULT 0,
-			total_tokens     INTEGER NOT NULL DEFAULT 0
+			total_tokens     INTEGER NOT NULL DEFAULT 0,
+			provider_status_code INTEGER NOT NULL DEFAULT 0,
+			error_code       TEXT NOT NULL DEFAULT ''
 		)
 	`
 	if _, err := s.db.ExecContext(ctx, createTable); err != nil {
@@ -920,6 +940,8 @@ func (s *sqliteUsageStore) EnsureSchema(ctx context.Context) error {
 	migrations := []string{
 		"ALTER TABLE usage_records ADD COLUMN method TEXT NOT NULL DEFAULT ''",
 		"ALTER TABLE usage_records ADD COLUMN path TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE usage_records ADD COLUMN provider_status_code INTEGER NOT NULL DEFAULT 0",
+		"ALTER TABLE usage_records ADD COLUMN error_code TEXT NOT NULL DEFAULT ''",
 	}
 	for _, m := range migrations {
 		_, _ = s.db.ExecContext(ctx, m) // ignore "duplicate column" errors
@@ -927,6 +949,8 @@ func (s *sqliteUsageStore) EnsureSchema(ctx context.Context) error {
 	postMigrationIndexes := []string{
 		"CREATE INDEX IF NOT EXISTS idx_usage_method_requested_at ON usage_records(method, requested_at DESC)",
 		"CREATE INDEX IF NOT EXISTS idx_usage_path_requested_at ON usage_records(path, requested_at DESC)",
+		"CREATE INDEX IF NOT EXISTS idx_usage_failed_status_requested ON usage_records(provider_status_code, requested_at DESC) WHERE failed = 1",
+		"CREATE INDEX IF NOT EXISTS idx_usage_failed_error_code_requested ON usage_records(error_code, requested_at DESC) WHERE failed = 1 AND error_code <> ''",
 	}
 	for _, idx := range postMigrationIndexes {
 		if _, err := s.db.ExecContext(ctx, idx); err != nil {
@@ -966,8 +990,8 @@ func (s *sqliteUsageStore) Insert(ctx context.Context, record UsageRecord) error
 	query := `
 		INSERT INTO usage_records (api_key, model, source, auth_index, failed, requested_at,
 			input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens,
-			method, path)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			method, path, provider_status_code, error_code)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 	_, err := s.db.ExecContext(ctx, query,
 		record.APIKey,
@@ -983,6 +1007,8 @@ func (s *sqliteUsageStore) Insert(ctx context.Context, record UsageRecord) error
 		record.TotalTokens,
 		record.Method,
 		record.Path,
+		record.ProviderStatusCode,
+		record.ErrorCode,
 	)
 	if err != nil {
 		return fmt.Errorf("usage store: insert record: %w", err)
@@ -1004,8 +1030,8 @@ func (s *sqliteUsageStore) InsertBatch(ctx context.Context, records []UsageRecor
 	query := `
 		INSERT INTO usage_records (api_key, model, source, auth_index, failed, requested_at,
 			input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens,
-			method, path)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			method, path, provider_status_code, error_code)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 
 	stmt, err := tx.PrepareContext(ctx, query)
@@ -1033,6 +1059,8 @@ func (s *sqliteUsageStore) InsertBatch(ctx context.Context, records []UsageRecor
 			record.TotalTokens,
 			record.Method,
 			record.Path,
+			record.ProviderStatusCode,
+			record.ErrorCode,
 		)
 		if execErr != nil {
 			skipped++
@@ -1171,7 +1199,8 @@ func (s *sqliteUsageStore) GetDetails(ctx context.Context, offset, limit int) ([
 
 	query := `
 		SELECT api_key, model, source, auth_index, failed, requested_at,
-			input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens
+			input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens,
+			provider_status_code, error_code
 		FROM usage_records ORDER BY requested_at DESC
 		LIMIT ? OFFSET ?
 	`
@@ -1192,6 +1221,7 @@ func (s *sqliteUsageStore) GetDetails(ctx context.Context, offset, limit int) ([
 			&failed, &unixTime,
 			&detail.InputTokens, &detail.OutputTokens, &detail.ReasoningTokens,
 			&detail.CachedTokens, &detail.TotalTokens,
+			&detail.ProviderStatusCode, &detail.ErrorCode,
 		); err != nil {
 			return nil, fmt.Errorf("usage store: scan detail: %w", err)
 		}
@@ -1238,7 +1268,7 @@ func (s *sqliteUsageStore) ExportTo(ctx context.Context, dest UsageStore, batchS
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT api_key, model, source, auth_index, failed, requested_at,
 			input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens,
-			method, path
+			method, path, provider_status_code, error_code
 		FROM usage_records
 		ORDER BY id ASC
 	`)
@@ -1287,6 +1317,8 @@ func (s *sqliteUsageStore) ExportTo(ctx context.Context, dest UsageStore, batchS
 			&record.TotalTokens,
 			&record.Method,
 			&record.Path,
+			&record.ProviderStatusCode,
+			&record.ErrorCode,
 		); err != nil {
 			return total, fmt.Errorf("usage store: scan legacy sqlite record: %w", err)
 		}

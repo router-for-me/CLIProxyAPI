@@ -47,17 +47,19 @@ type MonitorFilterOptions struct {
 
 // MonitorRequestLog represents a single request log row.
 type MonitorRequestLog struct {
-	Timestamp       time.Time
-	APIKey          string
-	Model           string
-	Source          string
-	AuthIndex       string
-	Failed          bool
-	InputTokens     int64
-	OutputTokens    int64
-	ReasoningTokens int64
-	CachedTokens    int64
-	TotalTokens     int64
+	Timestamp          time.Time
+	APIKey             string
+	Model              string
+	Source             string
+	AuthIndex          string
+	Failed             bool
+	InputTokens        int64
+	OutputTokens       int64
+	ReasoningTokens    int64
+	CachedTokens       int64
+	TotalTokens        int64
+	ProviderStatusCode int
+	ErrorCode          string
 }
 
 // MonitorRequestGroupStats represents per-channel+model counters for request logs.
@@ -134,13 +136,15 @@ type monitorQueryableStore interface {
 
 // MonitorRequestDetail represents a single request detail row for the request-details endpoint.
 type MonitorRequestDetail struct {
-	Timestamp time.Time
-	Method    string
-	Path      string
-	Model     string
-	Source    string
-	AuthIndex string
-	Failed    bool
+	Timestamp          time.Time
+	Method             string
+	Path               string
+	Model              string
+	Source             string
+	AuthIndex          string
+	Failed             bool
+	ProviderStatusCode int
+	ErrorCode          string
 }
 
 // MonitorKpiResult is the SQL-backed result for KPI endpoint.
@@ -385,7 +389,7 @@ func (s *pgUsageStore) QueryMonitorRequestLogs(ctx context.Context, filter Monit
 	query := fmt.Sprintf(`
 		SELECT api_key, model, COALESCE(NULLIF(source, ''), 'unknown'), auth_index,
 			failed, requested_at, input_tokens, output_tokens, reasoning_tokens,
-			cached_tokens, total_tokens
+			cached_tokens, total_tokens, provider_status_code, error_code
 		FROM %s
 		WHERE %s
 		ORDER BY requested_at DESC, id DESC
@@ -419,6 +423,8 @@ func (s *pgUsageStore) QueryMonitorRequestLogs(ctx context.Context, filter Monit
 			&item.ReasoningTokens,
 			&item.CachedTokens,
 			&item.TotalTokens,
+			&item.ProviderStatusCode,
+			&item.ErrorCode,
 		); err != nil {
 			return MonitorRequestLogsResult{}, fmt.Errorf("usage store: scan monitor request logs: %w", err)
 		}
@@ -1190,7 +1196,7 @@ func (s *sqliteUsageStore) QueryMonitorRequestLogs(ctx context.Context, filter M
 	query := fmt.Sprintf(`
 		SELECT api_key, model, COALESCE(NULLIF(source, ''), 'unknown'), auth_index,
 			failed, requested_at, input_tokens, output_tokens, reasoning_tokens,
-			cached_tokens, total_tokens
+			cached_tokens, total_tokens, provider_status_code, error_code
 		FROM usage_records
 		WHERE %s
 		ORDER BY requested_at DESC, id DESC
@@ -1225,6 +1231,8 @@ func (s *sqliteUsageStore) QueryMonitorRequestLogs(ctx context.Context, filter M
 			&item.ReasoningTokens,
 			&item.CachedTokens,
 			&item.TotalTokens,
+			&item.ProviderStatusCode,
+			&item.ErrorCode,
 		); err != nil {
 			return MonitorRequestLogsResult{}, fmt.Errorf("usage store: scan monitor request logs: %w", err)
 		}
@@ -2357,7 +2365,8 @@ func (s *sqliteUsageStore) QueryMonitorRequestDetails(ctx context.Context, cente
 
 	query := fmt.Sprintf(`
 		SELECT requested_at, method, path, model,
-			COALESCE(NULLIF(source, ''), 'unknown'), auth_index, failed
+			COALESCE(NULLIF(source, ''), 'unknown'), auth_index, failed,
+			provider_status_code, error_code
 		FROM usage_records
 		WHERE %s
 		ORDER BY requested_at DESC
@@ -2378,7 +2387,7 @@ func (s *sqliteUsageStore) QueryMonitorRequestDetails(ctx context.Context, cente
 			unixTime int64
 			failed   int
 		)
-		if err = rows.Scan(&unixTime, &item.Method, &item.Path, &item.Model, &item.Source, &item.AuthIndex, &failed); err != nil {
+		if err = rows.Scan(&unixTime, &item.Method, &item.Path, &item.Model, &item.Source, &item.AuthIndex, &failed, &item.ProviderStatusCode, &item.ErrorCode); err != nil {
 			return nil, fmt.Errorf("usage store: scan monitor request detail: %w", err)
 		}
 		item.Timestamp = time.Unix(unixTime, 0)
@@ -2429,7 +2438,8 @@ func (s *pgUsageStore) QueryMonitorRequestDetails(ctx context.Context, center *t
 	table := s.fullTableName("usage_records")
 	query := fmt.Sprintf(`
 		SELECT requested_at, method, path, model,
-			COALESCE(NULLIF(source, ''), 'unknown'), auth_index, failed
+			COALESCE(NULLIF(source, ''), 'unknown'), auth_index, failed,
+			provider_status_code, error_code
 		FROM %s
 		WHERE %s
 		ORDER BY requested_at DESC, id DESC
@@ -2449,7 +2459,7 @@ func (s *pgUsageStore) QueryMonitorRequestDetails(ctx context.Context, center *t
 			item   MonitorRequestDetail
 			failed int
 		)
-		if err = rows.Scan(&item.Timestamp, &item.Method, &item.Path, &item.Model, &item.Source, &item.AuthIndex, &failed); err != nil {
+		if err = rows.Scan(&item.Timestamp, &item.Method, &item.Path, &item.Model, &item.Source, &item.AuthIndex, &failed, &item.ProviderStatusCode, &item.ErrorCode); err != nil {
 			return nil, fmt.Errorf("usage store: scan monitor request detail: %w", err)
 		}
 		item.Failed = failed != 0

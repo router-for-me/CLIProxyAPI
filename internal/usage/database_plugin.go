@@ -275,19 +275,21 @@ func (p *DatabasePlugin) HandleUsage(ctx context.Context, record coreusage.Recor
 	method, path := ginMethodPath(ctx)
 
 	dbRecord := UsageRecord{
-		APIKey:          record.APIKey,
-		Model:           record.Model,
-		Source:          record.Source,
-		AuthIndex:       record.AuthIndex,
-		Failed:          record.Failed,
-		RequestedAt:     record.RequestedAt,
-		InputTokens:     record.Detail.InputTokens,
-		OutputTokens:    record.Detail.OutputTokens,
-		ReasoningTokens: record.Detail.ReasoningTokens,
-		CachedTokens:    record.Detail.CachedTokens,
-		TotalTokens:     record.Detail.TotalTokens,
-		Method:          method,
-		Path:            path,
+		APIKey:             record.APIKey,
+		Model:              record.Model,
+		Source:             record.Source,
+		AuthIndex:          record.AuthIndex,
+		Failed:             record.Failed,
+		RequestedAt:        record.RequestedAt,
+		InputTokens:        record.Detail.InputTokens,
+		OutputTokens:       record.Detail.OutputTokens,
+		ReasoningTokens:    record.Detail.ReasoningTokens,
+		CachedTokens:       record.Detail.CachedTokens,
+		TotalTokens:        record.Detail.TotalTokens,
+		Method:             method,
+		Path:               path,
+		ProviderStatusCode: record.ProviderStatusCode,
+		ErrorCode:          record.ErrorCode,
 	}
 
 	p.bufferMu.Lock()
@@ -331,17 +333,19 @@ func (p *DatabasePlugin) ImportRecords(snapshot StatisticsSnapshot) (added, skip
 		for model, modelSnapshot := range apiSnapshot.Models {
 			for _, detail := range modelSnapshot.Details {
 				records = append(records, UsageRecord{
-					APIKey:          apiKey,
-					Model:           model,
-					Source:          detail.Source,
-					AuthIndex:       detail.AuthIndex,
-					Failed:          detail.Failed,
-					RequestedAt:     detail.Timestamp,
-					InputTokens:     detail.Tokens.InputTokens,
-					OutputTokens:    detail.Tokens.OutputTokens,
-					ReasoningTokens: detail.Tokens.ReasoningTokens,
-					CachedTokens:    detail.Tokens.CachedTokens,
-					TotalTokens:     detail.Tokens.TotalTokens,
+					APIKey:             apiKey,
+					Model:              model,
+					Source:             detail.Source,
+					AuthIndex:          detail.AuthIndex,
+					Failed:             detail.Failed,
+					RequestedAt:        detail.Timestamp,
+					InputTokens:        detail.Tokens.InputTokens,
+					OutputTokens:       detail.Tokens.OutputTokens,
+					ReasoningTokens:    detail.Tokens.ReasoningTokens,
+					CachedTokens:       detail.Tokens.CachedTokens,
+					TotalTokens:        detail.Tokens.TotalTokens,
+					ProviderStatusCode: detail.ProviderStatusCode,
+					ErrorCode:          detail.ErrorCode,
 				})
 			}
 		}

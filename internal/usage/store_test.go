@@ -3,6 +3,7 @@ package usage
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
@@ -75,6 +76,59 @@ func TestSQLiteUsageStoreReset(t *testing.T) {
 	}
 	if len(details) != 0 {
 		t.Fatalf("unexpected detail count after reset: got %d want 0", len(details))
+	}
+}
+
+func TestSQLiteUsageStorePersistsFailureReason(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "sqlite", "usage.db")
+
+	store, err := newSQLiteUsageStoreAtPath(dbPath)
+	if err != nil {
+		t.Fatalf("newSQLiteUsageStoreAtPath failed: %v", err)
+	}
+	defer store.Close()
+
+	requestedAt := time.Now().Truncate(time.Second)
+	err = store.Insert(ctx, UsageRecord{
+		APIKey:             "api-1",
+		Model:              "MiniMax-M2.7",
+		Source:             "source-1",
+		AuthIndex:          "3",
+		Failed:             true,
+		RequestedAt:        requestedAt,
+		Method:             "POST",
+		Path:               "/v1/messages",
+		ProviderStatusCode: http.StatusBadRequest,
+		ErrorCode:          "invalid_request_error",
+	})
+	if err != nil {
+		t.Fatalf("insert failed: %v", err)
+	}
+
+	details, err := store.GetDetails(ctx, 0, 10)
+	if err != nil {
+		t.Fatalf("GetDetails failed: %v", err)
+	}
+	if len(details) != 1 {
+		t.Fatalf("detail count = %d, want 1", len(details))
+	}
+	if details[0].ProviderStatusCode != http.StatusBadRequest {
+		t.Fatalf("provider status = %d, want %d", details[0].ProviderStatusCode, http.StatusBadRequest)
+	}
+	if details[0].ErrorCode != "invalid_request_error" {
+		t.Fatalf("error code = %q, want invalid_request_error", details[0].ErrorCode)
+	}
+
+	logs, err := store.QueryMonitorRequestLogs(ctx, MonitorQueryFilter{Status: "failed"}, 1, 10, 3)
+	if err != nil {
+		t.Fatalf("QueryMonitorRequestLogs failed: %v", err)
+	}
+	if len(logs.Items) != 1 {
+		t.Fatalf("monitor item count = %d, want 1", len(logs.Items))
+	}
+	if logs.Items[0].ProviderStatusCode != http.StatusBadRequest || logs.Items[0].ErrorCode != "invalid_request_error" {
+		t.Fatalf("monitor failure reason = (%d, %q), want (%d, invalid_request_error)", logs.Items[0].ProviderStatusCode, logs.Items[0].ErrorCode, http.StatusBadRequest)
 	}
 }
 

@@ -1130,9 +1130,11 @@ func newOpenAICompatStatusErr(profile openAICompatProfile, auth *cliproxyauth.Au
 	logOpenAICompatUpstreamError(profile, auth, routeModel, statusCode, retryAfter, contentType, body)
 	message := summarizeOpenAICompatError(body)
 	return statusErr{
-		code:       normalizeOpenAICompatStatus(statusCode, message),
-		msg:        message,
-		retryAfter: retryAfter,
+		code:               normalizeOpenAICompatStatus(statusCode, message),
+		providerStatusCode: statusCode,
+		msg:                message,
+		errorCode:          firstNonEmptyJSONValue(body, "error.code", "code", "error.type", "type", "error.err_code"),
+		retryAfter:         retryAfter,
 	}
 }
 

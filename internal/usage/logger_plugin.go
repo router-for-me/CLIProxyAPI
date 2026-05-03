@@ -94,12 +94,14 @@ type modelStats struct {
 
 // RequestDetail stores the timestamp, latency, and token usage for a single request.
 type RequestDetail struct {
-	Timestamp time.Time  `json:"timestamp"`
-	LatencyMs int64      `json:"latency_ms"`
-	Source    string     `json:"source"`
-	AuthIndex string     `json:"auth_index"`
-	Tokens    TokenStats `json:"tokens"`
-	Failed    bool       `json:"failed"`
+	Timestamp          time.Time  `json:"timestamp"`
+	LatencyMs          int64      `json:"latency_ms"`
+	Source             string     `json:"source"`
+	AuthIndex          string     `json:"auth_index"`
+	Tokens             TokenStats `json:"tokens"`
+	Failed             bool       `json:"failed"`
+	ProviderStatusCode int        `json:"provider_status_code,omitempty"`
+	ErrorCode          string     `json:"error_code,omitempty"`
 }
 
 // TokenStats captures the token usage breakdown for a request.
@@ -203,12 +205,14 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 		s.apis[statsKey] = stats
 	}
 	s.updateAPIStats(stats, modelName, RequestDetail{
-		Timestamp: timestamp,
-		LatencyMs: normaliseLatency(record.Latency),
-		Source:    record.Source,
-		AuthIndex: record.AuthIndex,
-		Tokens:    detail,
-		Failed:    failed,
+		Timestamp:          timestamp,
+		LatencyMs:          normaliseLatency(record.Latency),
+		Source:             record.Source,
+		AuthIndex:          record.AuthIndex,
+		Tokens:             detail,
+		Failed:             failed,
+		ProviderStatusCode: record.ProviderStatusCode,
+		ErrorCode:          record.ErrorCode,
 	})
 
 	s.requestsByDay[dayKey]++
