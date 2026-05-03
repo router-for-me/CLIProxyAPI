@@ -63,6 +63,10 @@ var oauthToolRenameMap = map[string]string{
 	"ls":           "LS",
 	"todoread":     "TodoRead",
 	"notebookedit": "NotebookEdit",
+	"taskcreate":   "TaskCreate",
+	"taskget":      "TaskGet",
+	"taskupdate":   "TaskUpdate",
+	"tasklist":     "TaskList",
 }
 
 // oauthToolRenameReverseMap is the inverse of oauthToolRenameMap for response decoding.
@@ -192,15 +196,23 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	bodyForTranslation := body
 	bodyForUpstream := body
 	oauthToken := isClaudeOAuthToken(apiKey)
+	clientSource := detectOAuthClientSource(getClientUserAgent(ctx))
 	oauthToolNamesRemapped := false
 	if oauthToken && !auth.ToolPrefixDisabled() {
 		bodyForUpstream = applyClaudeToolPrefix(body, claudeToolPrefix)
 	}
-	// Remap third-party tool names to Claude Code equivalents and remove
-	// tools without official counterparts. This prevents Anthropic from
-	// fingerprinting the request as third-party via tool naming patterns.
+	// For non-OpenCode OAuth clients, default effort to "medium" when thinking is
+	// adaptive but no effort is specified. Must run AFTER applyClaudeToolPrefix
+	// which rebuilds from `body` and would overwrite earlier bodyForUpstream mutations.
+	if oauthToken && clientSource != oauthClientOpenCode {
+		bodyForUpstream = ensureDefaultEffort(bodyForUpstream, "medium")
+	}
+	// Remap third-party tool names to Claude Code equivalents and strip unmapped
+	// tools for ALL OAuth clients. Even OpenCode sub-agents (plan agent, etc.) send
+	// 30+ tools (lsp_*, session_*, background_*, context7_*, etc.) that are strong
+	// third-party fingerprints. Only mapped tools survive upstream.
 	if oauthToken {
-		bodyForUpstream, oauthToolNamesRemapped = remapOAuthToolNames(bodyForUpstream)
+		bodyForUpstream, oauthToolNamesRemapped = remapOAuthToolNamesEx(bodyForUpstream, true)
 	}
 	// Enable cch signing by default for OAuth tokens (not just experimental flag).
 	// Claude Code always computes cch; missing or invalid cch is a detectable fingerprint.
@@ -213,7 +225,11 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if err != nil {
 		return resp, err
 	}
-	applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg)
+	if oauthToken {
+		applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg, clientSource)
+	} else {
+		applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg)
+	}
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -379,15 +395,17 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	bodyForTranslation := body
 	bodyForUpstream := body
 	oauthToken := isClaudeOAuthToken(apiKey)
+	clientSourceStream := detectOAuthClientSource(getClientUserAgent(ctx))
 	oauthToolNamesRemapped := false
 	if oauthToken && !auth.ToolPrefixDisabled() {
 		bodyForUpstream = applyClaudeToolPrefix(body, claudeToolPrefix)
 	}
-	// Remap third-party tool names to Claude Code equivalents and remove
-	// tools without official counterparts. This prevents Anthropic from
-	// fingerprinting the request as third-party via tool naming patterns.
+	if oauthToken && clientSourceStream != oauthClientOpenCode {
+		bodyForUpstream = ensureDefaultEffort(bodyForUpstream, "medium")
+	}
+	// Strip unmapped tools for ALL OAuth clients (including OpenCode sub-agents).
 	if oauthToken {
-		bodyForUpstream, oauthToolNamesRemapped = remapOAuthToolNames(bodyForUpstream)
+		bodyForUpstream, oauthToolNamesRemapped = remapOAuthToolNamesEx(bodyForUpstream, true)
 	}
 	// Enable cch signing by default for OAuth tokens (not just experimental flag).
 	if oauthToken || experimentalCCHSigningEnabled(e.cfg, auth) {
@@ -399,7 +417,11 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	if err != nil {
 		return nil, err
 	}
-	applyClaudeHeaders(httpReq, auth, apiKey, true, extraBetas, e.cfg)
+	if oauthToken {
+		applyClaudeHeaders(httpReq, auth, apiKey, true, extraBetas, e.cfg, clientSourceStream)
+	} else {
+		applyClaudeHeaders(httpReq, auth, apiKey, true, extraBetas, e.cfg)
+	}
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -624,9 +646,15 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	if isClaudeOAuthToken(apiKey) && !auth.ToolPrefixDisabled() {
 		body = applyClaudeToolPrefix(body, claudeToolPrefix)
 	}
-	// Remap tool names for OAuth token requests to avoid third-party fingerprinting.
-	if isClaudeOAuthToken(apiKey) {
-		body, _ = remapOAuthToolNames(body)
+	// Apply non-OpenCode OAuth transforms: default effort then tool remap.
+	// Order matches Execute/ExecuteStream: toolPrefix → defaultEffort → remapTools.
+	oauthTokenCT := isClaudeOAuthToken(apiKey)
+	if oauthTokenCT {
+		clientSourceCT := detectOAuthClientSource(getClientUserAgent(ctx))
+		if clientSourceCT != oauthClientOpenCode {
+			body = ensureDefaultEffort(body, "medium")
+		}
+		body, _ = remapOAuthToolNamesEx(body, true)
 	}
 
 	url := fmt.Sprintf("%s/v1/messages/count_tokens?beta=true", baseURL)
@@ -634,7 +662,12 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
-	applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg)
+	if oauthTokenCT {
+		clientSourceCT := detectOAuthClientSource(getClientUserAgent(ctx))
+		applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg, clientSourceCT)
+	} else {
+		applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg)
+	}
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -930,7 +963,7 @@ func decodeResponseBody(body io.ReadCloser, contentEncoding string) (io.ReadClos
 	return body, nil
 }
 
-func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string, stream bool, extraBetas []string, cfg *config.Config) {
+func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string, stream bool, extraBetas []string, cfg *config.Config, oauthClientOpts ...oauthClientSource) {
 	hdrDefault := func(cfgVal, fallback string) string {
 		if cfgVal != "" {
 			return cfgVal
@@ -964,14 +997,24 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	}
 
 	baseBetas := "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05,structured-outputs-2025-12-15,fast-mode-2026-02-01,redact-thinking-2026-02-12,token-efficient-tools-2026-03-28"
-	if val := strings.TrimSpace(ginHeaders.Get("Anthropic-Beta")); val != "" {
-		baseBetas = val
-		if !strings.Contains(val, "oauth") {
-			baseBetas += ",oauth-2025-04-20"
+	// For ALL OAuth clients (OpenCode, OpenClaw, etc.), ignore the client's Anthropic-Beta
+	// header and use the full Claude Code default beta set. Client betas are an incomplete
+	// subset that acts as a strong third-party fingerprint for Anthropic's detection.
+	isOAuthRequest := len(oauthClientOpts) > 0
+	_ = isOAuthRequest && oauthClientOpts[0] != oauthClientOpenCode // reserved for future use
+	if !isOAuthRequest {
+		if val := strings.TrimSpace(ginHeaders.Get("Anthropic-Beta")); val != "" {
+			baseBetas = val
+			if !strings.Contains(val, "oauth") {
+				baseBetas += ",oauth-2025-04-20"
+			}
 		}
 	}
 	if !strings.Contains(baseBetas, "interleaved-thinking") {
 		baseBetas += ",interleaved-thinking-2025-05-14"
+	}
+	if isOAuthRequest && !strings.Contains(baseBetas, "effort") {
+		baseBetas += ",effort-2025-11-24"
 	}
 
 	// Merge extra betas from request body and request flags.
@@ -999,7 +1042,7 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 		misc.EnsureHeader(r.Header, ginHeaders, "Anthropic-Dangerous-Direct-Browser-Access", "true")
 	}
 	misc.EnsureHeader(r.Header, ginHeaders, "X-App", "cli")
-	// Values below match Claude Code 2.1.63 / @anthropic-ai/sdk 0.74.0 (updated 2026-02-28).
+	// Values below match Claude Code 2.1.108 / @anthropic-ai/sdk 0.81.0.
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Retry-Count", "0")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Runtime", "node")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Lang", "js")
@@ -1024,7 +1067,12 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	// Legacy mode keeps OS/Arch runtime-derived; stabilized mode pins OS/Arch
 	// to the configured baseline while still allowing newer official
 	// User-Agent/package/runtime tuples to upgrade the software fingerprint.
-	if stabilizeDeviceProfile {
+	// For ALL OAuth clients, force baseline device profile to prevent client Stainless
+	// headers (e.g. SDK version, Node version) from leaking upstream and being fingerprinted.
+	if stabilizeDeviceProfile || isOAuthRequest {
+		if !stabilizeDeviceProfile {
+			deviceProfile = helps.DefaultClaudeDeviceProfilePublic(cfg)
+		}
 		helps.ApplyClaudeDeviceProfileHeaders(r, deviceProfile)
 	} else {
 		helps.ApplyClaudeLegacyDeviceHeaders(r, ginHeaders, cfg)
@@ -1059,11 +1107,96 @@ func claudeCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
 }
 
 func checkSystemInstructions(payload []byte) []byte {
-	return checkSystemInstructionsWithSigningMode(payload, false, false, false, "2.1.63", "", "")
+	return checkSystemInstructionsWithSigningMode(payload, false, false, false, "2.1.108", "", "")
 }
 
 func isClaudeOAuthToken(apiKey string) bool {
 	return strings.Contains(apiKey, "sk-ant-oat")
+}
+
+// remapOAuthToolNamesEx extends remapOAuthToolNames with an option to strip tools
+// that have no mapping in oauthToolRenameMap.
+//
+// Behavior when stripUnmapped is true (used for ALL OAuth requests today):
+//   - Tools whose lowercase name is in oauthToolRenameMap → kept and renamed to
+//     the TitleCase form (e.g. "bash" → "Bash").
+//   - Anthropic built-in tools (those with a non-empty `type` field, e.g.
+//     web_search_20250305, code_execution_20250825) → kept verbatim.
+//   - Everything else (e.g. lsp_definition, context7_get_docs, session_create,
+//     mcp__*, custom client gateways) → REMOVED from tools[]. References from
+//     tool_choice and message tool_use blocks are reconciled by the base
+//     remapOAuthToolNames pass that runs after stripping.
+//
+// Trade-off: this is intentionally aggressive. Stripping happens uniformly for
+// EVERY OAuth client (including OpenCode, OpenClaw, and unknown user agents) so
+// the upstream Claude session never sees a client-specific tool catalog. That
+// matches the real Claude Code fingerprint and prevents extra-usage metering
+// flagged by Anthropic's downstream classifier, but it also means clients lose
+// the ability to advertise their own custom tools through this proxy. If a
+// client wants a non-Claude-Code tool to survive, the only path today is to add
+// it to oauthToolRenameMap.
+//
+// stripUnmapped=false is reserved for direct API-key (non-OAuth) traffic, where
+// the request shape is not under fingerprint pressure and clients are free to
+// expose arbitrary tools.
+func remapOAuthToolNamesEx(body []byte, stripUnmapped bool) ([]byte, bool) {
+	if !stripUnmapped {
+		return remapOAuthToolNames(body)
+	}
+
+	renamed := false
+	tools := gjson.GetBytes(body, "tools")
+	if tools.Exists() && tools.IsArray() {
+		var toolsJSON strings.Builder
+		toolsJSON.WriteByte('[')
+		toolCount := 0
+		tools.ForEach(func(_, tool gjson.Result) bool {
+			// Keep Anthropic built-in tools (web_search, code_execution, etc.) unchanged.
+			if tool.Get("type").Exists() && tool.Get("type").String() != "" {
+				if toolCount > 0 {
+					toolsJSON.WriteByte(',')
+				}
+				toolsJSON.WriteString(tool.Raw)
+				toolCount++
+				return true
+			}
+
+			name := tool.Get("name").String()
+			if oauthToolsToRemove[name] {
+				return true
+			}
+
+			nameLower := strings.ToLower(name)
+			newName, hasMapped := oauthToolRenameMap[nameLower]
+			if !hasMapped {
+				// Tool has no mapping — strip it for all OAuth clients.
+				return true
+			}
+
+			toolJSON := tool.Raw
+			if newName != name {
+				updatedTool, err := sjson.Set(toolJSON, "name", newName)
+				if err == nil {
+					toolJSON = updatedTool
+					renamed = true
+				}
+			}
+
+			if toolCount > 0 {
+				toolsJSON.WriteByte(',')
+			}
+			toolsJSON.WriteString(toolJSON)
+			toolCount++
+			return true
+		})
+		toolsJSON.WriteByte(']')
+		body, _ = sjson.SetRawBytes(body, "tools", []byte(toolsJSON.String()))
+	}
+
+	// Delegate remaining remap logic (tool_choice, messages tool_use refs) to base function.
+	// Re-run with stripUnmapped=false since tools are already filtered.
+	body, moreRenamed := remapOAuthToolNames(body)
+	return body, renamed || moreRenamed
 }
 
 // remapOAuthToolNames renames third-party tool names to Claude Code equivalents
@@ -1122,17 +1255,27 @@ func remapOAuthToolNames(body []byte) ([]byte, bool) {
 		body, _ = sjson.SetRawBytes(body, "tools", []byte(toolsJSON.String()))
 	}
 
-	// 2. Rename tool_choice if it references a known tool
+	// 2. Rename or drop tool_choice if it references a known/unknown tool.
+	// Preserve Anthropic built-in tools (web_search, code_execution, etc.).
 	toolChoiceType := gjson.GetBytes(body, "tool_choice.type").String()
 	if toolChoiceType == "tool" {
 		tcName := gjson.GetBytes(body, "tool_choice.name").String()
+		tcNameLower := strings.ToLower(tcName)
+		builtinTools := helps.AugmentClaudeBuiltinToolRegistry(body, nil)
 		if oauthToolsToRemove[tcName] {
-			// The chosen tool was removed from the tools array, so drop tool_choice to
-			// keep the payload internally consistent and fall back to normal auto tool use.
+			// Explicitly removed tool — drop tool_choice.
 			body, _ = sjson.DeleteBytes(body, "tool_choice")
-		} else if newName, ok := oauthToolRenameMap[tcName]; ok && newName != tcName {
-			body, _ = sjson.SetBytes(body, "tool_choice.name", newName)
-			renamed = true
+		} else if builtinTools[tcName] {
+			// Anthropic built-in tool — keep as-is.
+		} else if newName, ok := oauthToolRenameMap[tcNameLower]; ok {
+			if newName != tcName {
+				body, _ = sjson.SetBytes(body, "tool_choice.name", newName)
+				renamed = true
+			}
+		} else {
+			// Unmapped non-builtin tool (e.g. lsp_*, session_*) — was stripped
+			// from tools[], so drop tool_choice to keep payload consistent.
+			body, _ = sjson.DeleteBytes(body, "tool_choice")
 		}
 	}
 
@@ -1443,6 +1586,49 @@ func stripClaudeToolPrefixFromStreamLine(line []byte, prefix string) []byte {
 	return updated
 }
 
+// oauthClientSource represents the detected downstream client type for OAuth request handling.
+type oauthClientSource int
+
+const (
+	oauthClientOpenCode oauthClientSource = iota // OpenCode (UA starts with "opencode/")
+	oauthClientOpenClaw                          // OpenClaw (UA starts with "Anthropic/JS")
+	oauthClientOther                             // Unknown third-party client
+)
+
+// detectOAuthClientSource identifies the downstream client from its User-Agent.
+// This is used ONLY on the Claude OAuth path to apply client-specific transformations.
+// ALL OAuth clients get: forced baseline device profile, full default Anthropic-Beta,
+// effort beta appended, and unmapped tools stripped. Client-specific differences:
+// OpenCode: keeps client effort value (no default injection).
+// OpenClaw and Other: also injects default effort="medium" when missing.
+// Unknown clients are treated as strict (same as OpenClaw) as a safety default.
+func detectOAuthClientSource(userAgent string) oauthClientSource {
+	ua := strings.TrimSpace(userAgent)
+	switch {
+	case strings.HasPrefix(ua, "opencode/"):
+		return oauthClientOpenCode
+	case strings.HasPrefix(ua, "Anthropic/JS"):
+		return oauthClientOpenClaw
+	default:
+		return oauthClientOther
+	}
+}
+
+// ensureDefaultEffort injects output_config.effort into the request body when thinking
+// is adaptive but no effort level is specified. This prevents bare adaptive-thinking
+// requests from non-OpenCode clients, which may be unusual compared to real Claude Code.
+func ensureDefaultEffort(body []byte, defaultEffort string) []byte {
+	thinkingType := gjson.GetBytes(body, "thinking.type").String()
+	if thinkingType != "adaptive" {
+		return body
+	}
+	if gjson.GetBytes(body, "output_config.effort").Exists() {
+		return body
+	}
+	body, _ = sjson.SetBytes(body, "output_config.effort", defaultEffort)
+	return body
+}
+
 // getClientUserAgent extracts the client User-Agent from the gin context.
 func getClientUserAgent(ctx context.Context) string {
 	if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
@@ -1578,7 +1764,7 @@ func generateBillingHeader(payload []byte, experimentalCCHSigning bool, version,
 }
 
 func checkSystemInstructionsWithMode(payload []byte, strictMode bool) []byte {
-	return checkSystemInstructionsWithSigningMode(payload, strictMode, false, false, "2.1.63", "", "")
+	return checkSystemInstructionsWithSigningMode(payload, strictMode, false, false, "2.1.108", "", "")
 }
 
 // checkSystemInstructionsWithSigningMode injects Claude Code-style system blocks:
@@ -1617,20 +1803,33 @@ func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, exp
 	billingBlock := buildTextBlock(billingText, nil)
 
 	// Build system blocks matching real Claude Code structure.
-	// Important: Claude Code's internal cacheScope='org' does NOT serialize to
-	// scope='org' in the API request. Only scope='global' is sent explicitly.
-	// The system prompt prefix block is sent without cache_control.
+	// Claude Code sends each section as a SEPARATE system[] entry (not concatenated).
+	// This matches the exact block structure that Claude Code's getSystemPrompt() returns.
 	agentBlock := buildTextBlock("You are Claude Code, Anthropic's official CLI for Claude.", nil)
-	staticPrompt := strings.Join([]string{
-		helps.ClaudeCodeIntro,
-		helps.ClaudeCodeSystem,
-		helps.ClaudeCodeDoingTasks,
-		helps.ClaudeCodeToneAndStyle,
-		helps.ClaudeCodeOutputEfficiency,
-	}, "\n\n")
-	staticBlock := buildTextBlock(staticPrompt, nil)
+	usingToolsSection := helps.BuildUsingToolsSection(helps.ResolveTaskToolName(payload))
 
-	systemResult := "[" + billingBlock + "," + agentBlock + "," + staticBlock + "]"
+	// Each section is a separate text block, matching Claude Code's array structure:
+	// system[0]: billing header (no cache_control)
+	// system[1]: agent identifier (no cache_control)
+	// system[2]: intro (ClaudeCodeIntro)
+	// system[3]: system instructions (ClaudeCodeSystem)
+	// system[4]: doing tasks (ClaudeCodeDoingTasks)
+	// system[5]: actions (ClaudeCodeActions)
+	// system[6]: using tools (dynamic)
+	// system[7]: tone and style (ClaudeCodeToneAndStyle)
+	// system[8]: output efficiency (ClaudeCodeOutputEfficiency)
+	introBlock := buildTextBlock(helps.ClaudeCodeIntro, nil)
+	systemBlock := buildTextBlock(helps.ClaudeCodeSystem, nil)
+	doingTasksBlock := buildTextBlock(helps.ClaudeCodeDoingTasks, nil)
+	actionsBlock := buildTextBlock(helps.ClaudeCodeActions, nil)
+	usingToolsBlock := buildTextBlock(usingToolsSection, nil)
+	toneAndStyleBlock := buildTextBlock(helps.ClaudeCodeToneAndStyle, nil)
+	outputEfficiencyBlock := buildTextBlock(helps.ClaudeCodeOutputEfficiency, nil)
+
+	systemResult := "[" + billingBlock + "," + agentBlock + "," +
+		introBlock + "," + systemBlock + "," + doingTasksBlock + "," +
+		actionsBlock + "," + usingToolsBlock + "," + toneAndStyleBlock + "," +
+		outputEfficiencyBlock + "]"
 	payload, _ = sjson.SetRawBytes(payload, "system", []byte(systemResult))
 
 	// Collect user system instructions and prepend to first user message

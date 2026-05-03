@@ -1,6 +1,11 @@
 # Binaries
 cli-proxy-api
+cliproxyapi
+cliproxyapi-new
 *.exe
+
+# Deployment artifacts
+progress.log
 
 # Configuration
 config.yaml
