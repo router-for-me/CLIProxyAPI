@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 )
 
@@ -28,16 +29,17 @@ func (h *Handler) GetLogs(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler unavailable"})
 		return
 	}
-	if h.cfg() == nil {
+	cfg := h.cfg()
+	if cfg == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "configuration unavailable"})
 		return
 	}
-	if !h.cfg().LoggingToFile {
+	if !cfg.LoggingToFile {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "logging to file disabled"})
 		return
 	}
 
-	logDir := h.logDirectory()
+	logDir := h.logDirectory(cfg)
 	if strings.TrimSpace(logDir) == "" {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "log directory not configured"})
 		return
@@ -90,16 +92,17 @@ func (h *Handler) DeleteLogs(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler unavailable"})
 		return
 	}
-	if h.cfg() == nil {
+	cfg := h.cfg()
+	if cfg == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "configuration unavailable"})
 		return
 	}
-	if !h.cfg().LoggingToFile {
+	if !cfg.LoggingToFile {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "logging to file disabled"})
 		return
 	}
 
-	dir := h.logDirectory()
+	dir := h.logDirectory(cfg)
 	if strings.TrimSpace(dir) == "" {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "log directory not configured"})
 		return
@@ -152,16 +155,17 @@ func (h *Handler) GetRequestErrorLogs(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler unavailable"})
 		return
 	}
-	if h.cfg() == nil {
+	cfg := h.cfg()
+	if cfg == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "configuration unavailable"})
 		return
 	}
-	if h.cfg().RequestLog {
+	if cfg.RequestLog {
 		c.JSON(http.StatusOK, gin.H{"files": []any{}})
 		return
 	}
 
-	dir := h.logDirectory()
+	dir := h.logDirectory(cfg)
 	if strings.TrimSpace(dir) == "" {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "log directory not configured"})
 		return
@@ -216,12 +220,13 @@ func (h *Handler) GetRequestLogByID(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler unavailable"})
 		return
 	}
-	if h.cfg() == nil {
+	cfg := h.cfg()
+	if cfg == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "configuration unavailable"})
 		return
 	}
 
-	dir := h.logDirectory()
+	dir := h.logDirectory(cfg)
 	if strings.TrimSpace(dir) == "" {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "log directory not configured"})
 		return
@@ -303,12 +308,13 @@ func (h *Handler) DownloadRequestErrorLog(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler unavailable"})
 		return
 	}
-	if h.cfg() == nil {
+	cfg := h.cfg()
+	if cfg == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "configuration unavailable"})
 		return
 	}
 
-	dir := h.logDirectory()
+	dir := h.logDirectory(cfg)
 	if strings.TrimSpace(dir) == "" {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "log directory not configured"})
 		return
@@ -353,14 +359,19 @@ func (h *Handler) DownloadRequestErrorLog(c *gin.Context) {
 	c.FileAttachment(fullPath, name)
 }
 
-func (h *Handler) logDirectory() string {
+// logDirectory returns the configured log directory using the supplied
+// snapshot. Callers should snapshot cfg := h.cfg() once at handler entry
+// and pass it through so a hot-reload mid-request can't make this call
+// observe a different config than the surrounding LoggingToFile / RequestLog
+// checks (Codex Phase C round-5 review BLOCKER #2).
+func (h *Handler) logDirectory(cfg *config.Config) string {
 	if h == nil {
 		return ""
 	}
 	if h.logDir != "" {
 		return h.logDir
 	}
-	return logging.ResolveLogDirectory(h.cfg())
+	return logging.ResolveLogDirectory(cfg)
 }
 
 func (h *Handler) collectLogFiles(dir string) ([]string, error) {

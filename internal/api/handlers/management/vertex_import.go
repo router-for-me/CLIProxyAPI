@@ -15,11 +15,18 @@ import (
 
 // ImportVertexCredential handles uploading a Vertex service account JSON and saving it as an auth record.
 func (h *Handler) ImportVertexCredential(c *gin.Context) {
-	if h == nil || h.cfg() == nil {
+	if h == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "config unavailable"})
 		return
 	}
-	if h.cfg().AuthDir == "" {
+	// Snapshot once so the AuthDir check and any later reference observe
+	// the same generation (Codex Phase C round-5 review BLOCKER #2).
+	cfg := h.cfg()
+	if cfg == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "config unavailable"})
+		return
+	}
+	if cfg.AuthDir == "" {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "auth directory not configured"})
 		return
 	}

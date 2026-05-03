@@ -1375,6 +1375,13 @@ func (h *Handler) PatchAmpModelMappings(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "invalid body"})
 		return
 	}
+	if len(body.Value) == 0 {
+		// Empty payload would persist the existing config unchanged and
+		// return 200 — silently misleading. Reject so callers know
+		// nothing was applied. Codex Phase C round-5 review IMPORTANT #2.
+		c.JSON(400, gin.H{"error": "value must contain at least one mapping"})
+		return
+	}
 
 	h.applyConfigChange(c, func(cfg *config.Config) {
 		existing := make(map[string]int)
@@ -1474,6 +1481,19 @@ func (h *Handler) PatchAmpUpstreamAPIKeys(c *gin.Context) {
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(400, gin.H{"error": "invalid body"})
+		return
+	}
+	// Reject empty / all-empty-key payloads up front so the caller
+	// knows nothing was applied. Codex Phase C round-5 review IMPORTANT #2.
+	hasValid := false
+	for _, e := range body.Value {
+		if strings.TrimSpace(e.UpstreamAPIKey) != "" {
+			hasValid = true
+			break
+		}
+	}
+	if !hasValid {
+		c.JSON(400, gin.H{"error": "value must contain at least one entry with a non-empty upstream-api-key"})
 		return
 	}
 

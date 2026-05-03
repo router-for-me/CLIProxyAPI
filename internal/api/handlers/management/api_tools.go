@@ -632,19 +632,26 @@ func (h *Handler) authByIndex(authIndex string) *coreauth.Auth {
 }
 
 func (h *Handler) apiCallTransport(auth *coreauth.Auth) http.RoundTripper {
+	// Snapshot once so the per-key proxy lookup and the global proxy
+	// fallback observe the same hot-reload generation (Codex Phase C
+	// round-5 review BLOCKER #2).
+	var cfg *config.Config
+	if h != nil {
+		cfg = h.cfg()
+	}
 	var proxyCandidates []string
 	if auth != nil {
 		if proxyStr := strings.TrimSpace(auth.ProxyURL); proxyStr != "" {
 			proxyCandidates = append(proxyCandidates, proxyStr)
 		}
-		if h != nil && h.cfg() != nil {
-			if proxyStr := strings.TrimSpace(proxyURLFromAPIKeyConfig(h.cfg(), auth)); proxyStr != "" {
+		if cfg != nil {
+			if proxyStr := strings.TrimSpace(proxyURLFromAPIKeyConfig(cfg, auth)); proxyStr != "" {
 				proxyCandidates = append(proxyCandidates, proxyStr)
 			}
 		}
 	}
-	if h != nil && h.cfg() != nil {
-		if proxyStr := strings.TrimSpace(h.cfg().ProxyURL); proxyStr != "" {
+	if cfg != nil {
+		if proxyStr := strings.TrimSpace(cfg.ProxyURL); proxyStr != "" {
 			proxyCandidates = append(proxyCandidates, proxyStr)
 		}
 	}

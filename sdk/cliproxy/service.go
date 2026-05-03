@@ -533,11 +533,16 @@ func (s *Service) buildReloadCallback() func(*config.Config) {
 		// Trigger watcher auth refresh so config-defined API key auths
 		// are re-synthesized and dispatched to subscribers in lockstep
 		// with the config swap (Codex Phase C round-4 review BLOCKER #1).
-		// On the file-watcher reload path this is redundant — the watcher
-		// already calls refreshAuthState after reloadCallback. On the
-		// management-commit path it's the only mechanism that re-syncs
-		// auth state after a Put/Patch/Delete to API key lists.
+		// SetConfig FIRST so RefreshAuthState reads the new snapshot —
+		// without that, the watcher would synthesize from its stale
+		// cached config (Codex Phase C round-5 review BLOCKER #1).
+		// On the file-watcher reload path SetConfig + refreshAuthState is
+		// already invoked by reloadClients; calling them again here is a
+		// safe redundancy. On the management-commit path it's the only
+		// mechanism that re-syncs auth state after a Put/Patch/Delete to
+		// API key lists.
 		if s.watcher != nil {
+			s.watcher.SetConfig(newCfg)
 			s.watcher.RefreshAuthState(true)
 		}
 	}

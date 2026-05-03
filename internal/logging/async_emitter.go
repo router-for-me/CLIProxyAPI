@@ -169,20 +169,26 @@ func (e *asyncEmitter) enqueue(t asyncTask) (syncFallback bool) {
 		e.dropped.Add(1)
 		return false
 	}
+	// Increment pending BEFORE the send so a worker that observes the
+	// task in the channel cannot enter execute() while pending is still
+	// at its old value. flush() relies on pending strictly bounding the
+	// in-flight task count (Codex Phase C round-5 review IMPORTANT #1).
+	// On full-channel paths we roll the counter back.
+	e.pending.Add(1)
 	if t.force {
 		select {
 		case e.priority <- t:
-			e.pending.Add(1)
 			return false
 		default:
+			e.pending.Add(-1)
 			return true
 		}
 	}
 	select {
 	case e.normal <- t:
-		e.pending.Add(1)
 		return false
 	default:
+		e.pending.Add(-1)
 		e.dropped.Add(1)
 		return false
 	}
