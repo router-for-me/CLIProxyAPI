@@ -949,6 +949,16 @@ func (s *Server) Stop(ctx context.Context) error {
 		return fmt.Errorf("failed to shutdown HTTP server: %v", err)
 	}
 
+	// Drain the async request logger before returning so queued normal
+	// logs write to disk and forced-error logs are flushed (Phase C plan
+	// §"Flush/Close on graceful shutdown"). The interface is closed-set,
+	// so we type-assert against the optional Close hook.
+	if s.requestLogger != nil {
+		if closer, ok := s.requestLogger.(interface{ Close() }); ok {
+			closer.Close()
+		}
+	}
+
 	log.Debug("API server stopped")
 	return nil
 }
