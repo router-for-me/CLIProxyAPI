@@ -182,3 +182,18 @@ func TestGetRequestDetails_ImageModelReturns503(t *testing.T) {
 		t.Fatalf("unexpected error message: %q", msg)
 	}
 }
+
+func TestGetRequestDetails_FallsBackMiniMaxToClaudeProvider(t *testing.T) {
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, coreauth.NewManager(nil, nil, nil))
+
+	providers, model, errMsg := handler.getRequestDetails("MiniMax-M2.7")
+	if errMsg != nil {
+		t.Fatalf("getRequestDetails() unexpected error: %v", errMsg.Error)
+	}
+	if want := []string{"claude"}; !reflect.DeepEqual(providers, want) {
+		t.Fatalf("getRequestDetails() providers = %v, want %v", providers, want)
+	}
+	if model != "MiniMax-M2.7" {
+		t.Fatalf("getRequestDetails() model = %q, want %q", model, "MiniMax-M2.7")
+	}
+}

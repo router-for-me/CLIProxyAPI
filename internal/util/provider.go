@@ -56,7 +56,24 @@ func GetProviderName(modelName string) []string {
 		return providers
 	}
 
-	return providers
+	return fallbackProviderNames(modelName)
+}
+
+func fallbackProviderNames(modelName string) []string {
+	normalized := strings.ToLower(strings.TrimSpace(modelName))
+	if normalized == "" {
+		return nil
+	}
+	if idx := strings.LastIndex(normalized, "/"); idx >= 0 {
+		normalized = strings.TrimSpace(normalized[idx+1:])
+	}
+
+	switch {
+	case strings.HasPrefix(normalized, "minimax-"):
+		return []string{"claude"}
+	}
+
+	return nil
 }
 
 // ResolveAutoModel resolves the "auto" model name to an actual available model.
