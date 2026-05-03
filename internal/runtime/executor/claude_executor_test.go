@@ -1989,19 +1989,16 @@ func TestNormalizeClaudeTemperatureForThinking_AfterForcedToolChoiceKeepsOrigina
 func TestRemapOAuthToolNames_TitleCase_NoReverseNeeded(t *testing.T) {
 	body := []byte(`{"tools":[{"name":"Bash","description":"Run shell commands","input_schema":{"type":"object","properties":{"cmd":{"type":"string"}}}}],"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
 
-	out, renamed := remapOAuthToolNames(body)
-	if renamed {
-		t.Fatalf("renamed = true, want false")
+	out, ctx := remapOAuthToolNames(body)
+	if _, ok := ctx.reverseMap["Bash"]; ok {
+		t.Fatalf("reverseMap should not contain Bash (already TitleCase)")
 	}
 	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "Bash" {
 		t.Fatalf("tools.0.name = %q, want %q", got, "Bash")
 	}
 
 	resp := []byte(`{"content":[{"type":"tool_use","id":"toolu_01","name":"Bash","input":{"cmd":"ls"}}]}`)
-	reversed := resp
-	if renamed {
-		reversed = reverseRemapOAuthToolNames(resp)
-	}
+	reversed := reverseRemapOAuthToolNames(resp, ctx)
 	if got := gjson.GetBytes(reversed, "content.0.name").String(); got != "Bash" {
 		t.Fatalf("content.0.name = %q, want %q", got, "Bash")
 	}
@@ -2010,20 +2007,110 @@ func TestRemapOAuthToolNames_TitleCase_NoReverseNeeded(t *testing.T) {
 func TestRemapOAuthToolNames_Lowercase_ReverseApplied(t *testing.T) {
 	body := []byte(`{"tools":[{"name":"bash","description":"Run shell commands","input_schema":{"type":"object","properties":{"cmd":{"type":"string"}}}}],"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
 
-	out, renamed := remapOAuthToolNames(body)
-	if !renamed {
-		t.Fatalf("renamed = false, want true")
+	out, ctx := remapOAuthToolNames(body)
+	if len(ctx.reverseMap) == 0 {
+		t.Fatalf("reverseMap should not be empty")
 	}
 	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "Bash" {
 		t.Fatalf("tools.0.name = %q, want %q", got, "Bash")
 	}
 
 	resp := []byte(`{"content":[{"type":"tool_use","id":"toolu_01","name":"Bash","input":{"cmd":"ls"}}]}`)
-	reversed := resp
-	if renamed {
-		reversed = reverseRemapOAuthToolNames(resp)
-	}
+	reversed := reverseRemapOAuthToolNames(resp, ctx)
 	if got := gjson.GetBytes(reversed, "content.0.name").String(); got != "bash" {
 		t.Fatalf("content.0.name = %q, want %q", got, "bash")
+	}
+}
+
+func TestRemapOAuthToolNames_MixedCase_NoCollision(t *testing.T) {
+	// Amp sends both "Glob" (TitleCase) and "glob" (lowercase) as separate tools.
+	// The forward remap must not rename "glob" → "Glob" since "Glob" already exists.
+	// The reverse remap must not lowercase "Glob" in the response.
+	body := []byte(`{"tools":[{"name":"Glob","description":"TitleCase glob"},{"name":"glob","description":"lowercase glob"}],"messages":[]}`)
+
+	out, ctx := remapOAuthToolNames(body)
+	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "Glob" {
+		t.Fatalf("tools.0.name = %q, want %q", got, "Glob")
+	}
+	if got := gjson.GetBytes(out, "tools.1.name").String(); got != "glob" {
+		t.Fatalf("tools.1.name = %q, want %q (should not rename due to collision)", got, "glob")
+	}
+
+	resp := []byte(`{"content":[{"type":"tool_use","id":"toolu_01","name":"Glob","input":{}}]}`)
+	reversed := reverseRemapOAuthToolNames(resp, ctx)
+	if got := gjson.GetBytes(reversed, "content.0.name").String(); got != "Glob" {
+		t.Fatalf("content.0.name = %q, want %q (should not reverse TitleCase tool)", got, "Glob")
+	}
+}
+
+func TestRemapOAuthToolNames_Collision_ToolChoiceNotRenamed(t *testing.T) {
+	// When both "Glob" and "glob" exist, tool_choice targeting "glob" must NOT
+	// be rewritten to "Glob" — that would target the wrong tool upstream.
+	body := []byte(`{"tools":[{"name":"Glob","description":"TitleCase"},{"name":"glob","description":"lowercase"}],"tool_choice":{"type":"tool","name":"glob"},"messages":[]}`)
+
+	out, _ := remapOAuthToolNames(body)
+	if got := gjson.GetBytes(out, "tool_choice.name").String(); got != "glob" {
+		t.Fatalf("tool_choice.name = %q, want %q (collision should prevent rename)", got, "glob")
+	}
+}
+
+func TestRemapOAuthToolNames_Collision_MessageRefsNotRenamed(t *testing.T) {
+	// When both "Glob" and "glob" exist, historical tool_use and tool_reference
+	// for "glob" must NOT be rewritten to "Glob".
+	body := []byte(`{"tools":[{"name":"Glob","description":"TitleCase"},{"name":"glob","description":"lowercase"}],"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"tu_1","name":"glob","input":{}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_1","content":[{"type":"tool_reference","tool_name":"glob"}]}]}]}`)
+
+	out, _ := remapOAuthToolNames(body)
+	if got := gjson.GetBytes(out, "messages.0.content.0.name").String(); got != "glob" {
+		t.Fatalf("messages tool_use name = %q, want %q (collision should prevent rename)", got, "glob")
+	}
+	if got := gjson.GetBytes(out, "messages.1.content.0.content.0.tool_name").String(); got != "glob" {
+		t.Fatalf("nested tool_reference tool_name = %q, want %q (collision should prevent rename)", got, "glob")
+	}
+}
+
+func TestRemapOAuthToolNames_Mixed_LowercaseAndTitleCase(t *testing.T) {
+	// Client sends lowercase "bash" and TitleCase "Read" — only "bash" should be
+	// renamed, and only "Bash" should be reverse-mapped in the response.
+	body := []byte(`{"tools":[{"name":"bash","description":"shell"},{"name":"Read","description":"read files"}],"messages":[]}`)
+
+	out, ctx := remapOAuthToolNames(body)
+	if _, ok := ctx.reverseMap["Bash"]; !ok {
+		t.Fatalf("reverseMap should contain Bash")
+	}
+	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "Bash" {
+		t.Fatalf("tools.0.name = %q, want %q", got, "Bash")
+	}
+	if got := gjson.GetBytes(out, "tools.1.name").String(); got != "Read" {
+		t.Fatalf("tools.1.name = %q, want %q (already TitleCase, no rename)", got, "Read")
+	}
+
+	// Response: "Bash" should reverse to "bash", "Read" should stay "Read".
+	resp := []byte(`{"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{}},{"type":"tool_use","id":"t2","name":"Read","input":{}}]}`)
+	reversed := reverseRemapOAuthToolNames(resp, ctx)
+	if got := gjson.GetBytes(reversed, "content.0.name").String(); got != "bash" {
+		t.Fatalf("content.0.name = %q, want %q", got, "bash")
+	}
+	if got := gjson.GetBytes(reversed, "content.1.name").String(); got != "Read" {
+		t.Fatalf("content.1.name = %q, want %q (should not reverse client-native TitleCase)", got, "Read")
+	}
+}
+
+func TestRemapOAuthToolNames_Stream_MixedCase(t *testing.T) {
+	// Stream SSE: verify reverse mapping only applies to actually-renamed tools.
+	body := []byte(`{"tools":[{"name":"bash","description":"shell"},{"name":"Read","description":"read"}],"messages":[]}`)
+	_, ctx := remapOAuthToolNames(body)
+
+	// "Bash" was renamed from "bash" — should reverse.
+	line1 := []byte(`data: {"type":"content_block_start","content_block":{"type":"tool_use","id":"t1","name":"Bash"}}`)
+	reversed1 := reverseRemapOAuthToolNamesFromStreamLine(line1, ctx)
+	if got := gjson.GetBytes(helps.JSONPayload(reversed1), "content_block.name").String(); got != "bash" {
+		t.Fatalf("stream Bash = %q, want %q", got, "bash")
+	}
+
+	// "Read" was not renamed — should stay.
+	line2 := []byte(`data: {"type":"content_block_start","content_block":{"type":"tool_use","id":"t2","name":"Read"}}`)
+	reversed2 := reverseRemapOAuthToolNamesFromStreamLine(line2, ctx)
+	if got := gjson.GetBytes(helps.JSONPayload(reversed2), "content_block.name").String(); got != "Read" {
+		t.Fatalf("stream Read = %q, want %q", got, "Read")
 	}
 }
