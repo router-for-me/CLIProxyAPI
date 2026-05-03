@@ -7,11 +7,14 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"regexp"
 	"strings"
 
 	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
 )
+
+var managementPanelKeyTestBatchPattern = regexp.MustCompile(`\(await Promise\.all\(t\.map\(e=>([A-Za-z_$][A-Za-z0-9_$]*)\(e\)\)\)\)\.filter\(Boolean\)\.length`)
 
 func managementConfigVersionGuardScript(initialVersion string) []byte {
 	initialVersionJSON, err := json.Marshal(strings.TrimSpace(initialVersion))
@@ -277,27 +280,10 @@ func injectManagementConfigVersionGuard(data []byte, initialVersion ...string) [
 }
 
 func patchManagementPanelKeyTestBatch(data []byte) []byte {
-	replacements := []struct {
-		old []byte
-		new []byte
-	}{
-		{
-			old: []byte(`(await Promise.all(t.map(e=>I(e)))).filter(Boolean).length`),
-			new: []byte(`(await window.__cliproxySequentialMap(t,e=>I(e))).filter(Boolean).length`),
-		},
-		{
-			old: []byte(`(await Promise.all(t.map(e=>we(e)))).filter(Boolean).length`),
-			new: []byte(`(await window.__cliproxySequentialMap(t,e=>we(e))).filter(Boolean).length`),
-		},
-		{
-			old: []byte(`(await Promise.all(t.map(e=>P(e)))).filter(Boolean).length`),
-			new: []byte(`(await window.__cliproxySequentialMap(t,e=>P(e))).filter(Boolean).length`),
-		},
-	}
-	for _, replacement := range replacements {
-		data = bytes.ReplaceAll(data, replacement.old, replacement.new)
-	}
-	return data
+	return managementPanelKeyTestBatchPattern.ReplaceAll(
+		data,
+		[]byte(`(await window.__cliproxySequentialMap(t,e=>$1(e))).filter(Boolean).length`),
+	)
 }
 
 func removeManagementConfigVersionGuard(data []byte) []byte {

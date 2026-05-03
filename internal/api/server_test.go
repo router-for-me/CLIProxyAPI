@@ -106,6 +106,8 @@ func TestInjectManagementConfigVersionGuardSerializesKeyTestBatches(t *testing.T
 let a=(await Promise.all(t.map(e=>I(e)))).filter(Boolean).length;
 let b=(await Promise.all(t.map(e=>we(e)))).filter(Boolean).length;
 let c=(await Promise.all(t.map(e=>P(e)))).filter(Boolean).length;
+let d=(await Promise.all(t.map(e=>De(e)))).filter(Boolean).length;
+let f=(await Promise.all(t.map(e=>N(e)))).filter(Boolean).length;
 </script></body></html>`)
 
 	out := injectManagementConfigVersionGuard(html)
@@ -115,6 +117,8 @@ let c=(await Promise.all(t.map(e=>P(e)))).filter(Boolean).length;
 		`Promise.all(t.map(e=>I(e)))`,
 		`Promise.all(t.map(e=>we(e)))`,
 		`Promise.all(t.map(e=>P(e)))`,
+		`Promise.all(t.map(e=>De(e)))`,
+		`Promise.all(t.map(e=>N(e)))`,
 	} {
 		if strings.Contains(body, fragment) {
 			t.Fatalf("expected parallel key test fragment %q to be patched: %s", fragment, body)
@@ -124,6 +128,8 @@ let c=(await Promise.all(t.map(e=>P(e)))).filter(Boolean).length;
 		`window.__cliproxySequentialMap(t,e=>I(e))`,
 		`window.__cliproxySequentialMap(t,e=>we(e))`,
 		`window.__cliproxySequentialMap(t,e=>P(e))`,
+		`window.__cliproxySequentialMap(t,e=>De(e))`,
+		`window.__cliproxySequentialMap(t,e=>N(e))`,
 	} {
 		if !strings.Contains(body, fragment) {
 			t.Fatalf("expected sequential key test fragment %q in patched body: %s", fragment, body)
