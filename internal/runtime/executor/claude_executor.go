@@ -206,6 +206,10 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	// Normalize TTL values to prevent ordering violations under prompt-caching-scope-2026-01-05.
 	// A 1h-TTL block must not appear after a 5m-TTL block in evaluation order (tools→system→messages).
 	body = normalizeCacheControlTTL(body)
+	body, err = repairMiniMaxClaudeToolAdjacency(baseURL, body)
+	if err != nil {
+		return resp, err
+	}
 
 	// Extract betas from body and convert to header
 	var extraBetas []string
@@ -404,6 +408,10 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 
 	// Normalize TTL values to prevent ordering violations under prompt-caching-scope-2026-01-05.
 	body = normalizeCacheControlTTL(body)
+	body, err = repairMiniMaxClaudeToolAdjacency(baseURL, body)
+	if err != nil {
+		return nil, err
+	}
 
 	// Extract betas from body and convert to header
 	var extraBetas []string
@@ -1384,6 +1392,20 @@ func validateClaudeUpstreamPayload(baseURL string, body []byte) error {
 	return validateMiniMaxToolResultAdjacency(body)
 }
 
+func repairMiniMaxClaudeToolAdjacency(baseURL string, body []byte) ([]byte, error) {
+	if config.InferCompatKindFromBaseURL(baseURL) != "minimax" {
+		return body, nil
+	}
+	repaired, count, err := repairMiniMaxToolResultAdjacency(body)
+	if err != nil {
+		return body, err
+	}
+	if count > 0 {
+		log.WithField("repairs", count).Warn("repaired MiniMax Claude tool_result adjacency")
+	}
+	return repaired, nil
+}
+
 func validateMiniMaxStructuredOutputCompatibility(body []byte) error {
 	if len(body) == 0 || !gjson.ValidBytes(body) {
 		return nil
@@ -1431,6 +1453,153 @@ func validateMiniMaxServerToolCompatibility(body []byte) error {
 		code: http.StatusBadRequest,
 		msg:  fmt.Sprintf("request_feature_unsupported: minimax anthropic compatibility does not support server tool type %q", unsupportedType),
 	}
+}
+
+func repairMiniMaxToolResultAdjacency(body []byte) ([]byte, int, error) {
+	if len(body) == 0 || !gjson.ValidBytes(body) {
+		return body, 0, nil
+	}
+	messages := gjson.GetBytes(body, "messages")
+	if !messages.Exists() || !messages.IsArray() {
+		return body, 0, nil
+	}
+
+	outMessages := []byte(`[]`)
+	pending := map[string]bool{}
+	changed := false
+	repairs := 0
+
+	for _, msg := range messages.Array() {
+		role := strings.TrimSpace(msg.Get("role").String())
+		msgRaw := []byte(msg.Raw)
+		if role == "assistant" {
+			var moved bool
+			var err error
+			msgRaw, moved, err = moveClaudeToolUseBlocksToEnd(msg)
+			if err != nil {
+				return body, 0, err
+			}
+			if moved {
+				changed = true
+				repairs++
+			}
+			pending = claudeToolUseIDsInMessage(gjson.ParseBytes(msgRaw))
+			outMessages, _ = sjson.SetRawBytes(outMessages, "-1", msgRaw)
+			continue
+		}
+
+		if role != "user" || len(pending) == 0 {
+			if role != "user" {
+				pending = map[string]bool{}
+			}
+			outMessages, _ = sjson.SetRawBytes(outMessages, "-1", msgRaw)
+			continue
+		}
+
+		toolResultParts, otherParts := splitPendingClaudeToolResultParts(msg, pending)
+		if len(toolResultParts) == 0 || len(otherParts) == 0 {
+			outMessages, _ = sjson.SetRawBytes(outMessages, "-1", msgRaw)
+			pending = map[string]bool{}
+			continue
+		}
+
+		toolResultMsg, err := setClaudeMessageContent(msg, toolResultParts)
+		if err != nil {
+			return body, 0, err
+		}
+		otherMsg, err := setClaudeMessageContent(msg, otherParts)
+		if err != nil {
+			return body, 0, err
+		}
+		outMessages, _ = sjson.SetRawBytes(outMessages, "-1", toolResultMsg)
+		outMessages, _ = sjson.SetRawBytes(outMessages, "-1", otherMsg)
+		pending = map[string]bool{}
+		changed = true
+		repairs++
+	}
+
+	if !changed {
+		return body, 0, nil
+	}
+
+	out, err := sjson.SetRawBytes(body, "messages", outMessages)
+	if err != nil {
+		return body, 0, fmt.Errorf("failed to update MiniMax Claude tool_result adjacency: %w", err)
+	}
+	return out, repairs, nil
+}
+
+func moveClaudeToolUseBlocksToEnd(msg gjson.Result) ([]byte, bool, error) {
+	content := msg.Get("content")
+	if !content.IsArray() {
+		return []byte(msg.Raw), false, nil
+	}
+
+	regularParts := make([]gjson.Result, 0)
+	toolUseParts := make([]gjson.Result, 0)
+	seenToolUse := false
+	moved := false
+	for _, part := range content.Array() {
+		if part.Get("type").String() == "tool_use" {
+			seenToolUse = true
+			toolUseParts = append(toolUseParts, part)
+			continue
+		}
+		if seenToolUse {
+			moved = true
+		}
+		regularParts = append(regularParts, part)
+	}
+	if !moved || len(toolUseParts) == 0 {
+		return []byte(msg.Raw), false, nil
+	}
+
+	newContent := []byte(`[]`)
+	for _, part := range regularParts {
+		newContent, _ = sjson.SetRawBytes(newContent, "-1", []byte(part.Raw))
+	}
+	for _, part := range toolUseParts {
+		newContent, _ = sjson.SetRawBytes(newContent, "-1", []byte(part.Raw))
+	}
+	msgOut, err := sjson.SetRawBytes([]byte(msg.Raw), "content", newContent)
+	if err != nil {
+		return nil, false, fmt.Errorf("failed to move MiniMax Claude tool_use blocks: %w", err)
+	}
+	return msgOut, true, nil
+}
+
+func splitPendingClaudeToolResultParts(msg gjson.Result, pending map[string]bool) ([]gjson.Result, []gjson.Result) {
+	content := msg.Get("content")
+	if !content.IsArray() {
+		return nil, nil
+	}
+
+	toolResultParts := make([]gjson.Result, 0)
+	otherParts := make([]gjson.Result, 0)
+	for _, part := range content.Array() {
+		if part.Get("type").String() == "tool_result" {
+			toolUseID := strings.TrimSpace(part.Get("tool_use_id").String())
+			if toolUseID != "" && pending[toolUseID] {
+				toolResultParts = append(toolResultParts, part)
+				delete(pending, toolUseID)
+				continue
+			}
+		}
+		otherParts = append(otherParts, part)
+	}
+	return toolResultParts, otherParts
+}
+
+func setClaudeMessageContent(msg gjson.Result, parts []gjson.Result) ([]byte, error) {
+	content := []byte(`[]`)
+	for _, part := range parts {
+		content, _ = sjson.SetRawBytes(content, "-1", []byte(part.Raw))
+	}
+	out, err := sjson.SetRawBytes([]byte(msg.Raw), "content", content)
+	if err != nil {
+		return nil, fmt.Errorf("failed to update Claude message content: %w", err)
+	}
+	return out, nil
 }
 
 func validateMiniMaxToolResultAdjacency(body []byte) error {

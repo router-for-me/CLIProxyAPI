@@ -349,6 +349,122 @@ func TestValidateMiniMaxToolResultAdjacencyAcceptsCompletedSequence(t *testing.T
 	}
 }
 
+func TestValidateMiniMaxToolResultAdjacencyAcceptsOpenAIToolCycleAfterTranslation(t *testing.T) {
+	t.Parallel()
+
+	input := []byte(`{
+		"model": "claude-sonnet-4-6",
+		"messages": [
+			{"role":"system","content":"Decide whether to continue."},
+			{
+				"role":"assistant",
+				"content":"Analysis: no reply is needed.",
+				"tool_calls":[{"id":"call_no_reply","type":"function","function":{"name":"no_reply","arguments":"{}"}}]
+			},
+			{"role":"tool","tool_call_id":"call_no_reply","content":"Wait for the next message."},
+			{"role":"user","content":"New message arrived."}
+		],
+		"tools":[
+			{"type":"function","function":{"name":"no_reply","parameters":{"type":"object","properties":{}}}}
+		]
+	}`)
+
+	body := sdktranslator.TranslateRequest(sdktranslator.FromString("openai"), sdktranslator.FromString("claude"), "MiniMax-M2.7-highspeed", input, true)
+	var err error
+	body, err = repairClaudeToolUseHistory(body, "test")
+	if err != nil {
+		t.Fatalf("repairClaudeToolUseHistory() error = %v", err)
+	}
+	body = ensureCacheControl(body)
+	body = enforceCacheControlLimit(body, 4)
+	body = normalizeCacheControlTTL(body)
+
+	if err := validateMiniMaxToolResultAdjacency(body); err != nil {
+		t.Fatalf("expected translated OpenAI tool cycle to pass, got %v\nbody: %s", err, body)
+	}
+}
+
+func TestRepairMiniMaxToolResultAdjacencySplitsMixedUserContent(t *testing.T) {
+	t.Parallel()
+
+	body := []byte(`{
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type":"tool_use","id":"call_1","name":"read","input":{}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type":"text","text":"new user content"},
+					{"type":"tool_result","tool_use_id":"call_1","content":"ok"}
+				]
+			}
+		]
+	}`)
+
+	out, repairs, err := repairMiniMaxToolResultAdjacency(body)
+	if err != nil {
+		t.Fatalf("repairMiniMaxToolResultAdjacency() error = %v", err)
+	}
+	if repairs != 1 {
+		t.Fatalf("repairs = %d, want 1", repairs)
+	}
+	if err := validateMiniMaxToolResultAdjacency(out); err != nil {
+		t.Fatalf("expected repaired sequence to pass, got %v\nbody: %s", err, out)
+	}
+	msgs := gjson.GetBytes(out, "messages").Array()
+	if len(msgs) != 3 {
+		t.Fatalf("messages length = %d, want 3: %s", len(msgs), gjson.GetBytes(out, "messages").Raw)
+	}
+	if got := msgs[1].Get("content.0.type").String(); got != "tool_result" {
+		t.Fatalf("message 1 content type = %q, want tool_result: %s", got, msgs[1].Raw)
+	}
+	if got := msgs[2].Get("content.0.type").String(); got != "text" {
+		t.Fatalf("message 2 content type = %q, want text: %s", got, msgs[2].Raw)
+	}
+}
+
+func TestRepairMiniMaxToolResultAdjacencyMovesAssistantToolUseLast(t *testing.T) {
+	t.Parallel()
+
+	body := []byte(`{
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type":"text","text":"before"},
+					{"type":"tool_use","id":"call_1","name":"read","input":{}},
+					{"type":"text","text":"after"}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type":"tool_result","tool_use_id":"call_1","content":"ok"}
+				]
+			}
+		]
+	}`)
+
+	out, repairs, err := repairMiniMaxToolResultAdjacency(body)
+	if err != nil {
+		t.Fatalf("repairMiniMaxToolResultAdjacency() error = %v", err)
+	}
+	if repairs != 1 {
+		t.Fatalf("repairs = %d, want 1", repairs)
+	}
+	content := gjson.GetBytes(out, "messages.0.content").Array()
+	if got := content[len(content)-1].Get("type").String(); got != "tool_use" {
+		t.Fatalf("last assistant content type = %q, want tool_use: %s", got, gjson.GetBytes(out, "messages.0.content").Raw)
+	}
+	if err := validateMiniMaxToolResultAdjacency(out); err != nil {
+		t.Fatalf("expected repaired sequence to pass, got %v\nbody: %s", err, out)
+	}
+}
+
 func TestApplyClaudeHeaders_LearnsOfficialFingerprintAfterCustomBaselineFallback(t *testing.T) {
 	resetClaudeDeviceProfileCache()
 	stabilize := true
