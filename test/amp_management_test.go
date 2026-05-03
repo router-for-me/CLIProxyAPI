@@ -575,7 +575,9 @@ func TestDeleteAmpModelMappings_VerifyState(t *testing.T) {
 	}
 }
 
-// TestDeleteAmpModelMappings_NonExistent verifies DELETE with non-existent mapping doesn't affect existing ones.
+// TestDeleteAmpModelMappings_NonExistent verifies DELETE with non-existent
+// mapping returns 404 (Phase C round 3-4 contract change: silent no-op
+// 200 → 404 explicit not-found) and does not affect existing mappings.
 func TestDeleteAmpModelMappings_NonExistent(t *testing.T) {
 	h, _ := newAmpTestHandler(t)
 	r := setupAmpRouter(h)
@@ -586,8 +588,8 @@ func TestDeleteAmpModelMappings_NonExistent(t *testing.T) {
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected status %d, got %d", http.StatusOK, w.Code)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected status %d, got %d", http.StatusNotFound, w.Code)
 	}
 
 	req = httptest.NewRequest(http.MethodGet, "/v0/management/ampcode/model-mappings", nil)

@@ -32,6 +32,69 @@ func countLogFiles(t *testing.T, dir string) int {
 	return n
 }
 
+// TestAsyncEmitter_CallerMutateAfterEnqueue_DoesNotCorruptLog pins the
+// BE-1 ownership-contract invariant from the Codex Stage 1 exit
+// review: when LogRequest hands a []byte/map to the async path, a
+// caller that mutates the slice/map after LogRequest returns must NOT
+// corrupt the eventual log write. The dispatcher clones into the
+// queue defensively so the worker writes the call-time snapshot.
+func TestAsyncEmitter_CallerMutateAfterEnqueue_DoesNotCorruptLog(t *testing.T) {
+	l := newTestLoggerForAsync(t)
+	now := time.Now()
+
+	body := []byte(`{"original":1}`)
+	resp := []byte(`{"original-response":2}`)
+	headers := map[string][]string{"X-Trace": {"t-original"}}
+
+	if err := l.LogRequest("/v1/messages", "POST", headers, body, 200, headers, resp, nil, nil, nil, nil, nil, "req-1", now, now); err != nil {
+		t.Fatalf("LogRequest: %v", err)
+	}
+
+	// Mutate caller-owned containers AFTER LogRequest returned.
+	body[0] = 'X'                         // overwrite the leading '{' byte
+	resp[len(resp)-1] = 'X'                // overwrite trailing '}' byte
+	headers["X-Trace"][0] = "t-mutated"   // overwrite header value
+	headers["X-Injected"] = []string{"y"} // add a new entry
+
+	l.Flush()
+
+	files, err := os.ReadDir(l.logsDir)
+	if err != nil {
+		t.Fatalf("read dir: %v", err)
+	}
+	if len(files) == 0 {
+		t.Fatalf("expected one log file after flush")
+	}
+	var contents string
+	for _, f := range files {
+		if f.IsDir() || !strings.HasSuffix(f.Name(), ".log") {
+			continue
+		}
+		raw, errRead := os.ReadFile(filepath.Join(l.logsDir, f.Name()))
+		if errRead != nil {
+			t.Fatalf("read log: %v", errRead)
+		}
+		contents = string(raw)
+		break
+	}
+	if contents == "" {
+		t.Fatalf("no .log file found")
+	}
+	// The original (un-mutated) bytes should appear in the log.
+	if !strings.Contains(contents, `{"original":1}`) {
+		t.Fatalf("expected original body in log, got:\n%s", contents)
+	}
+	if !strings.Contains(contents, `{"original-response":2}`) {
+		t.Fatalf("expected original response in log, got:\n%s", contents)
+	}
+	if !strings.Contains(contents, "t-original") {
+		t.Fatalf("expected original X-Trace header in log, got:\n%s", contents)
+	}
+	if strings.Contains(contents, "t-mutated") || strings.Contains(contents, "X-Injected") {
+		t.Fatalf("post-enqueue mutation leaked into log:\n%s", contents)
+	}
+}
+
 func TestAsyncEmitter_NormalPath_WritesFile(t *testing.T) {
 	l := newTestLoggerForAsync(t)
 	now := time.Now()

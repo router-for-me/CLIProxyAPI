@@ -312,6 +312,14 @@ func (l *FileRequestLogger) LogRequestWithOptions(url, method string, requestHea
 // the synchronous path runs only when (a) the async emitter has been
 // closed or never started, or (b) the priority queue is full for a
 // forced-error log.
+//
+// On the async path the args contain pointers (byte slices, header
+// maps, error pointers) that the caller may reuse or mutate after
+// LogRequest returns. cloneArgsForAsync produces a defensive deep-copy
+// before enqueue so the worker's eventual write sees the call-time
+// snapshot, not whatever the caller mutated mid-flight (Codex Stage 1
+// exit review IMPORTANT BE-1). The sync path consumes args immediately
+// and skips the clone to keep the no-buffer fast path allocation-free.
 func (l *FileRequestLogger) dispatchLogRequest(args asyncLogArgs, force bool) error {
 	if !l.enabled.Load() && !force {
 		return nil
@@ -319,10 +327,73 @@ func (l *FileRequestLogger) dispatchLogRequest(args asyncLogArgs, force bool) er
 	if l.async == nil {
 		return l.writeLogRequest(args, force)
 	}
-	if syncFallback := l.async.enqueue(asyncTask{args: args, force: force}); syncFallback {
+	cloned := cloneArgsForAsync(args)
+	if syncFallback := l.async.enqueue(asyncTask{args: cloned, force: force}); syncFallback {
 		return l.writeLogRequest(args, force)
 	}
 	return nil
+}
+
+// cloneArgsForAsync produces a deep-copy of the caller-owned mutable
+// fields in asyncLogArgs (byte slices, header maps, error pointer
+// slices). Scalar fields and the requestTimestamp/apiResponseTimestamp
+// values are copied by struct assignment.
+func cloneArgsForAsync(args asyncLogArgs) asyncLogArgs {
+	args.requestHeaders = cloneHeader(args.requestHeaders)
+	args.responseHeaders = cloneHeader(args.responseHeaders)
+	args.body = cloneBytes(args.body)
+	args.response = cloneBytes(args.response)
+	args.websocketTimeline = cloneBytes(args.websocketTimeline)
+	args.apiRequest = cloneBytes(args.apiRequest)
+	args.apiResponse = cloneBytes(args.apiResponse)
+	args.apiWebsocketTimeline = cloneBytes(args.apiWebsocketTimeline)
+	args.apiResponseErrors = cloneErrorMessages(args.apiResponseErrors)
+	return args
+}
+
+func cloneBytes(b []byte) []byte {
+	if b == nil {
+		return nil
+	}
+	out := make([]byte, len(b))
+	copy(out, b)
+	return out
+}
+
+func cloneHeader(in map[string][]string) map[string][]string {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string][]string, len(in))
+	for k, v := range in {
+		if v == nil {
+			out[k] = nil
+			continue
+		}
+		dup := make([]string, len(v))
+		copy(dup, v)
+		out[k] = dup
+	}
+	return out
+}
+
+func cloneErrorMessages(in []*interfaces.ErrorMessage) []*interfaces.ErrorMessage {
+	if in == nil {
+		return nil
+	}
+	out := make([]*interfaces.ErrorMessage, len(in))
+	for i, e := range in {
+		if e == nil {
+			continue
+		}
+		// Shallow-copy the struct so a later caller mutation to a slot
+		// in the original slice does not corrupt the queued log copy.
+		// Errors held inside the struct are typically already immutable
+		// once produced by the request flow.
+		dup := *e
+		out[i] = &dup
+	}
+	return out
 }
 
 // writeLogRequest performs the actual file write. Called either from the

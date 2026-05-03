@@ -9,7 +9,7 @@
 goos: linux
 goarch: amd64
 pkg: github.com/router-for-me/CLIProxyAPI/v6/internal/logging
-cpu: AMD Ryzen 9 5950X 16-Core Processor            
+cpu: AMD Ryzen 9 5950X 16-Core Processor
 BenchmarkFileRequestLogger_LogRequest-32    	    4639	    236258 ns/op	   42392 B/op	     103 allocs/op
 BenchmarkFileRequestLogger_Disabled-32      	175478370	         7.027 ns/op	       0 B/op	       0 allocs/op
 PASS
@@ -20,7 +20,7 @@ ok  	github.com/router-for-me/CLIProxyAPI/v6/internal/logging	3.221s
 goos: linux
 goarch: amd64
 pkg: github.com/router-for-me/CLIProxyAPI/v6/internal/cache
-cpu: AMD Ryzen 9 5950X 16-Core Processor            
+cpu: AMD Ryzen 9 5950X 16-Core Processor
 BenchmarkSignatureCache_Get_Hit-32                     	 4718185	       242.5 ns/op	     128 B/op	       2 allocs/op
 BenchmarkSignatureCache_Get_Miss-32                    	69703666	        18.25 ns/op	       0 B/op	       0 allocs/op
 BenchmarkSignatureCache_Get_GeminiSentinelMiss-32      	52189078	        23.73 ns/op	       0 B/op	       0 allocs/op
@@ -35,10 +35,9 @@ ok  	github.com/router-for-me/CLIProxyAPI/v6/internal/cache	8.498s
 goos: linux
 goarch: amd64
 pkg: github.com/router-for-me/CLIProxyAPI/v6/internal/api/modules/amp
-cpu: AMD Ryzen 9 5950X 16-Core Processor            
+cpu: AMD Ryzen 9 5950X 16-Core Processor
 BenchmarkAmpModule_ForceModelMappings_Read-32             	288262724	         3.744 ns/op	       0 B/op	       0 allocs/op
 BenchmarkAmpModule_ForceModelMappings_Read_Parallel-32    	42704558	        27.85 ns/op	       0 B/op	       0 allocs/op
 BenchmarkAmpModule_RestrictRead_Parallel-32               	48467673	        23.72 ns/op	       0 B/op	       0 allocs/op
 PASS
 ok  	github.com/router-for-me/CLIProxyAPI/v6/internal/api/modules/amp	3.939s
-

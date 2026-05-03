@@ -551,14 +551,20 @@ func (s *Service) buildReloadCallback() func(*config.Config) {
 		// SetConfig FIRST so RefreshAuthState reads the new snapshot —
 		// without that, the watcher would synthesize from its stale
 		// cached config (Codex Phase C round-5 review BLOCKER #1).
-		// On the file-watcher reload path SetConfig + refreshAuthState is
-		// already invoked by reloadClients; calling them again here is a
-		// safe redundancy. On the management-commit path it's the only
-		// mechanism that re-syncs auth state after a Put/Patch/Delete to
-		// API key lists.
+		//
+		// force=false so the watcher's diffing logic only emits add/
+		// modify/delete events for auths whose synthesized state actually
+		// changed. Mgmt writes that touch unrelated fields (PutDebug,
+		// PutRequestLog, etc.) leave the API key arrays untouched, so no
+		// spurious per-auth modify events fire (Codex Stage 1 exit
+		// review IMPORTANT #3). On the file-watcher reload path,
+		// reloadClients runs its own refreshAuthState afterwards and
+		// re-applies any forceAuthRefresh flag computed from the cfg
+		// diff; this redundant call observes currentAuths==newState and
+		// is a no-op.
 		if s.watcher != nil {
 			s.watcher.SetConfig(newCfg)
-			s.watcher.RefreshAuthState(true)
+			s.watcher.RefreshAuthState(false)
 		}
 	}
 }

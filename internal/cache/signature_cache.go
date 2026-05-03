@@ -91,17 +91,22 @@ type groupCache struct {
 	lastAccess atomic.Int64
 }
 
-func newGroupCache(capacity int) *groupCache {
+func newGroupCache(capacity int, now time.Time) *groupCache {
 	head := &lruEntry{}
 	tail := &lruEntry{}
 	head.next = tail
 	tail.prev = head
-	return &groupCache{
+	c := &groupCache{
 		entries:  make(map[string]*lruEntry),
 		head:     head,
 		tail:     tail,
 		capacity: capacity,
 	}
+	// Initialise lastAccess to creation time so a freshly inserted group
+	// is not the LRU eviction target before its first set/get fires
+	// (Codex Stage 1 exit review IMPORTANT BE-2).
+	c.lastAccess.Store(now.UnixNano())
+	return c
 }
 
 // link inserts e immediately after head (most-recently-used position).
@@ -197,8 +202,10 @@ func hashText(text string) string {
 }
 
 // getOrCreateGroupCache gets or creates a cache bucket for a model group.
-// On insert, evicts the least-recently-used group if the outer map is at
-// MaxGroupCount so total memory stays bounded.
+// Cold inserts (and any required LRU eviction to honor MaxGroupCount)
+// are serialised under groupEvictMu so the cap holds exactly under
+// concurrent first-time inserts (Codex Stage 1 exit review IMPORTANT
+// BE-2). The fast-path Load remains lock-free.
 func getOrCreateGroupCache(groupKey string) *groupCache {
 	// Start background cleanup on first access
 	cacheCleanupOnce.Do(startCacheCleanup)
@@ -206,28 +213,39 @@ func getOrCreateGroupCache(groupKey string) *groupCache {
 	if val, ok := signatureCache.Load(groupKey); ok {
 		return val.(*groupCache)
 	}
-	if groupCount.Load() >= MaxGroupCount {
-		evictLRUGroup()
-	}
-	sc := newGroupCache(SignatureGroupCapacity)
-	actual, loaded := signatureCache.LoadOrStore(groupKey, sc)
-	if !loaded {
-		groupCount.Add(1)
-	}
-	return actual.(*groupCache)
-}
 
-// evictLRUGroup removes the group with the oldest lastAccess timestamp.
-// Called from getOrCreateGroupCache cold path only; serialised by
-// groupEvictMu so concurrent inserts at the cap evict at most one extra
-// group than necessary.
-func evictLRUGroup() {
 	groupEvictMu.Lock()
 	defer groupEvictMu.Unlock()
-	// Re-check under the lock — another inserter may have already evicted.
-	if groupCount.Load() < MaxGroupCount {
-		return
+
+	// Re-check after taking the lock — another inserter may have just
+	// stored this exact group key.
+	if val, ok := signatureCache.Load(groupKey); ok {
+		return val.(*groupCache)
 	}
+
+	// Evict in a loop while we are at or above the cap. Without the loop,
+	// a burst of concurrent inserts that all observed count<cap before
+	// taking the lock could each insert and push the count past the cap;
+	// the loop ensures only one inserter at a time crosses the boundary.
+	for groupCount.Load() >= MaxGroupCount {
+		if !evictOldestGroupLocked() {
+			break
+		}
+	}
+
+	sc := newGroupCache(SignatureGroupCapacity, clock())
+	if actual, loaded := signatureCache.LoadOrStore(groupKey, sc); loaded {
+		return actual.(*groupCache)
+	}
+	groupCount.Add(1)
+	return sc
+}
+
+// evictOldestGroupLocked removes the group with the oldest lastAccess
+// timestamp. Caller must hold groupEvictMu. Returns true if an eviction
+// occurred. False means the outer map was empty; the caller should
+// stop trying to evict.
+func evictOldestGroupLocked() bool {
 	var oldestKey any
 	oldestAccess := int64(1<<63 - 1)
 	signatureCache.Range(func(key, value any) bool {
@@ -241,8 +259,10 @@ func evictLRUGroup() {
 	if oldestKey != nil {
 		if _, ok := signatureCache.LoadAndDelete(oldestKey); ok {
 			groupCount.Add(-1)
+			return true
 		}
 	}
+	return false
 }
 
 // startCacheCleanup launches a background goroutine that periodically

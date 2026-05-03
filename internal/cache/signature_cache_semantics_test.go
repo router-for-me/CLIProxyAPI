@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"sync"
 	"testing"
 	"time"
 )
@@ -191,6 +192,40 @@ func TestSignatureCache_OuterMapBoundedByMaxGroupCount(t *testing.T) {
 	recentName := "unknown-model-" + intToStr(recentIdx)
 	if got := GetCachedSignature(recentName, "text-"+intToStr(recentIdx)); got != validSemanticsSig {
 		t.Fatalf("expected recent group intact, got %q", got)
+	}
+}
+
+// TestSignatureCache_OuterMapCap_ParallelInserts pins the BE-2 invariant
+// from the Codex Stage 1 exit review: under concurrent cold-miss
+// inserts (more goroutines than MaxGroupCount, each storing a distinct
+// unknown model name), the outer-map cap must hold exactly. Before the
+// fix, the cap-check + evict + LoadOrStore + count.Add were not
+// serialized so concurrent inserts could exceed the cap. Run under
+// `go test -race` to detect ordering races between cap-enforcement
+// goroutines.
+func TestSignatureCache_OuterMapCap_ParallelInserts(t *testing.T) {
+	withClockReset(t)
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	setClock(base)
+
+	const inserts = 256
+	if MaxGroupCount >= inserts {
+		t.Fatalf("test expects more inserts (%d) than MaxGroupCount (%d)", inserts, MaxGroupCount)
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < inserts; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			modelName := "unknown-cap-test-" + intToStr(idx)
+			CacheSignature(modelName, "text-"+intToStr(idx), validSemanticsSig)
+		}(i)
+	}
+	wg.Wait()
+
+	if got := groupCount.Load(); got > int64(MaxGroupCount) {
+		t.Fatalf("expected groupCount <= %d after parallel inserts, got %d", MaxGroupCount, got)
 	}
 }
 
