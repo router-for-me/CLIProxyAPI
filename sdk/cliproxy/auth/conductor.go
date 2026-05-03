@@ -176,6 +176,7 @@ type Manager struct {
 	requestRetry        atomic.Int32
 	maxRetryCredentials atomic.Int32
 	maxRetryInterval    atomic.Int64
+	retryQueueDelay     atomic.Int64
 
 	// oauthModelAlias stores global OAuth model alias mappings (alias -> upstream name) keyed by channel.
 	oauthModelAlias atomic.Value
@@ -1752,6 +1753,17 @@ func (m *Manager) SetRetryConfig(retry int, maxRetryInterval time.Duration, maxR
 	m.maxRetryInterval.Store(maxRetryInterval.Nanoseconds())
 }
 
+// SetRetryQueueDelay updates the delay inserted before fallback credential retries.
+func (m *Manager) SetRetryQueueDelay(delay time.Duration) {
+	if m == nil {
+		return
+	}
+	if delay < 0 {
+		delay = 0
+	}
+	m.retryQueueDelay.Store(delay.Nanoseconds())
+}
+
 // RegisterExecutor registers a provider executor with the manager.
 func (m *Manager) RegisterExecutor(executor ProviderExecutor) {
 	if executor == nil {
@@ -1892,6 +1904,9 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 		if !shouldRetry {
 			break
 		}
+		if wait <= 0 {
+			wait = m.retryQueueWait()
+		}
 		if errWait := waitForCooldown(ctx, wait); errWait != nil {
 			return cliproxyexecutor.Response{}, errWait
 		}
@@ -1927,6 +1942,9 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 		if !shouldRetry {
 			break
 		}
+		if wait <= 0 {
+			wait = m.retryQueueWait()
+		}
 		if errWait := waitForCooldown(ctx, wait); errWait != nil {
 			return cliproxyexecutor.Response{}, errWait
 		}
@@ -1957,6 +1975,9 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		wait, shouldRetry := m.shouldRetryAfterError(errStream, attempt, normalized, req.Model, maxWait)
 		if !shouldRetry {
 			break
+		}
+		if wait <= 0 {
+			wait = m.retryQueueWait()
 		}
 		if errWait := waitForCooldown(ctx, wait); errWait != nil {
 			return nil, errWait
@@ -2071,6 +2092,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				attempted[auth.ID] = struct{}{}
 			}
 			lastErr = authErr
+			if errWait := m.waitForRetryQueue(ctx); errWait != nil {
+				return cliproxyexecutor.Response{}, errWait
+			}
 			continue
 		}
 	}
@@ -2170,6 +2194,9 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				attempted[auth.ID] = struct{}{}
 			}
 			lastErr = authErr
+			if errWait := m.waitForRetryQueue(ctx); errWait != nil {
+				return cliproxyexecutor.Response{}, errWait
+			}
 			continue
 		}
 	}
@@ -2225,6 +2252,9 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 					logEntryWithRequestID(execCtx).Warnf("evict unauthorized auth %s failed: %v", auth.ID, errEvict)
 				}
 				lastErr = errStream
+				if errWait := m.waitForRetryQueue(ctx); errWait != nil {
+					return nil, errWait
+				}
 				continue
 			}
 			if isRequestInvalidError(errStream) {
@@ -2232,6 +2262,9 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			}
 			attempted[auth.ID] = struct{}{}
 			lastErr = errStream
+			if errWait := m.waitForRetryQueue(ctx); errWait != nil {
+				return nil, errWait
+			}
 			continue
 		}
 		return streamResult, nil
@@ -2685,6 +2718,25 @@ func (m *Manager) retrySettings() (int, int, time.Duration) {
 		return 0, 0, 0
 	}
 	return int(m.requestRetry.Load()), int(m.maxRetryCredentials.Load()), time.Duration(m.maxRetryInterval.Load())
+}
+
+func (m *Manager) retryQueueWait() time.Duration {
+	if m == nil {
+		return 0
+	}
+	base := time.Duration(m.retryQueueDelay.Load())
+	if base <= 0 {
+		return 0
+	}
+	jitterLimit := int64(base)
+	if jitterLimit <= 1 {
+		return base
+	}
+	return base + time.Duration(time.Now().UnixNano()%jitterLimit)
+}
+
+func (m *Manager) waitForRetryQueue(ctx context.Context) error {
+	return waitForCooldown(ctx, m.retryQueueWait())
 }
 
 func codexModelLoadKey(provider, model string) string {

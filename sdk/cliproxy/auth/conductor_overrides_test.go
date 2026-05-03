@@ -481,6 +481,62 @@ func TestManager_Execute_SequentialFillMaxRetryCredentialsAllowsThreeFallbacks(t
 	}
 }
 
+func TestManager_Execute_RetryQueueDelayDelaysCredentialFallback(t *testing.T) {
+	model := "retry-queue-delay-model"
+	selector := &SequentialFillSelector{
+		current: map[string]string{
+			"claude:" + model: "bad",
+		},
+	}
+	manager := NewManager(nil, selector, nil)
+	manager.SetRetryConfig(0, 0, 0)
+	queueDelay := 20 * time.Millisecond
+	manager.SetRetryQueueDelay(queueDelay)
+
+	executor := &authFallbackExecutor{
+		id: "claude",
+		executeErrors: map[string]error{
+			"bad": &Error{HTTPStatus: http.StatusInternalServerError, Message: "boom"},
+		},
+	}
+	manager.RegisterExecutor(executor)
+
+	auths := []*Auth{
+		{ID: "bad", Provider: "claude"},
+		{ID: "good", Provider: "claude"},
+	}
+
+	reg := registry.GetGlobalRegistry()
+	for _, auth := range auths {
+		reg.RegisterClient(auth.ID, "claude", []*registry.ModelInfo{{ID: model}})
+		if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+			t.Fatalf("register auth %s: %v", auth.ID, errRegister)
+		}
+	}
+	t.Cleanup(func() {
+		for _, auth := range auths {
+			reg.UnregisterClient(auth.ID)
+		}
+	})
+
+	start := time.Now()
+	resp, errExecute := manager.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	elapsed := time.Since(start)
+	if errExecute != nil {
+		t.Fatalf("execute error = %v, want success after delayed fallback", errExecute)
+	}
+	if string(resp.Payload) != "good" {
+		t.Fatalf("payload = %q, want %q from successful auth fallback", string(resp.Payload), "good")
+	}
+	if elapsed < queueDelay {
+		t.Fatalf("elapsed = %v, want at least retry queue delay %v", elapsed, queueDelay)
+	}
+	calls := executor.ExecuteCalls()
+	if len(calls) != 2 || calls[0] != "bad" || calls[1] != "good" {
+		t.Fatalf("execute calls = %v, want [bad good]", calls)
+	}
+}
+
 type credentialRetryLimitExecutor struct {
 	id string
 

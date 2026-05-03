@@ -94,6 +94,10 @@ max-retry-credentials: 0
 # Maximum wait time in seconds for a cooled-down credential before triggering a retry.
 max-retry-interval: 30
 
+# Base delay in seconds before falling back to another credential after a failure.
+# The runtime adds jitter up to the same duration to avoid retry bursts.
+retry-queue-delay: 0
+
 # When true, disable auth/model cooldown scheduling globally (prevents blackout windows after failure states).
 disable-cooling: false
 
