@@ -26,7 +26,8 @@ type claudeToResponsesState struct {
 	FuncNames   map[int]string // index -> function name
 	FuncCallIDs map[int]string // index -> call id
 	// message text aggregation
-	TextBuf strings.Builder
+	TextBuf        strings.Builder
+	CurrentTextBuf strings.Builder
 	// reasoning state
 	ReasoningActive    bool
 	ReasoningItemID    string
@@ -80,6 +81,7 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 			st.CreatedAt = time.Now().Unix()
 			// Reset per-message aggregation state
 			st.TextBuf.Reset()
+			st.CurrentTextBuf.Reset()
 			st.ReasoningBuf.Reset()
 			st.ReasoningActive = false
 			st.InTextBlock = false
@@ -128,6 +130,7 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 		if typ == "text" {
 			// open message item + content part
 			st.InTextBlock = true
+			st.CurrentTextBuf.Reset()
 			st.CurrentMsgID = fmt.Sprintf("msg_%s_0", st.ResponseID)
 			item := []byte(`{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"id":"","type":"message","status":"in_progress","content":[],"role":"assistant"}}`)
 			item, _ = sjson.SetBytes(item, "sequence_number", nextSeq())
@@ -189,6 +192,7 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 				out = append(out, emitEvent("response.output_text.delta", msg))
 				// aggregate text for response.output
 				st.TextBuf.WriteString(t.String())
+				st.CurrentTextBuf.WriteString(t.String())
 			}
 		} else if dt == "input_json_delta" {
 			idx := int(root.Get("index").Int())
@@ -220,17 +224,21 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 	case "content_block_stop":
 		idx := int(root.Get("index").Int())
 		if st.InTextBlock {
+			fullText := st.CurrentTextBuf.String()
 			done := []byte(`{"type":"response.output_text.done","sequence_number":0,"item_id":"","output_index":0,"content_index":0,"text":"","logprobs":[]}`)
 			done, _ = sjson.SetBytes(done, "sequence_number", nextSeq())
 			done, _ = sjson.SetBytes(done, "item_id", st.CurrentMsgID)
+			done, _ = sjson.SetBytes(done, "text", fullText)
 			out = append(out, emitEvent("response.output_text.done", done))
 			partDone := []byte(`{"type":"response.content_part.done","sequence_number":0,"item_id":"","output_index":0,"content_index":0,"part":{"type":"output_text","annotations":[],"logprobs":[],"text":""}}`)
 			partDone, _ = sjson.SetBytes(partDone, "sequence_number", nextSeq())
 			partDone, _ = sjson.SetBytes(partDone, "item_id", st.CurrentMsgID)
+			partDone, _ = sjson.SetBytes(partDone, "part.text", fullText)
 			out = append(out, emitEvent("response.content_part.done", partDone))
 			final := []byte(`{"type":"response.output_item.done","sequence_number":0,"output_index":0,"item":{"id":"","type":"message","status":"completed","content":[{"type":"output_text","text":""}],"role":"assistant"}}`)
 			final, _ = sjson.SetBytes(final, "sequence_number", nextSeq())
 			final, _ = sjson.SetBytes(final, "item.id", st.CurrentMsgID)
+			final, _ = sjson.SetBytes(final, "item.content.0.text", fullText)
 			out = append(out, emitEvent("response.output_item.done", final))
 			st.InTextBlock = false
 		} else if st.InFuncBlock {
