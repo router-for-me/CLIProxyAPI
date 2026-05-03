@@ -10,7 +10,7 @@ import (
 
 // Default queue capacities. Sized for typical request rates: at ~200 req/s
 // and ~1ms-per-write the queue empties faster than it fills, so the
-// drop-newest-on-pressure path is rare. Forced-error pressure is much
+// drop-oldest-on-pressure path is rare. Forced-error pressure is much
 // lower so the priority lane is shallower.
 const (
 	asyncNormalQueueDepth   = 256
@@ -46,7 +46,9 @@ type asyncTask struct {
 // asyncEmitter offloads request-log file I/O from the request handler. It
 // holds two channels:
 //
-//   - normal: drop-newest on overflow (counted in droppedCount)
+//   - normal: drop-oldest on overflow (counted in droppedCount); see
+//     enqueue() for the receive-then-send pattern that holds closeMu so
+//     no other producer races us between drop and re-send.
 //   - priority: forced-error logs; on overflow we fall back to a synchronous
 //     write to honor "forced error logs never drop"
 //
@@ -184,13 +186,27 @@ func (e *asyncEmitter) enqueue(t asyncTask) (syncFallback bool) {
 			return true
 		}
 	}
-	select {
-	case e.normal <- t:
-		return false
-	default:
-		e.pending.Add(-1)
-		e.dropped.Add(1)
-		return false
+	// Drop-oldest semantics on normal queue overflow (plan §Behavior
+	// Contract: "may drop oldest non-priority entries on queue overflow").
+	// closeMu (held above) excludes other producers, so once we receive
+	// an oldest task to make room, the next non-blocking send is
+	// guaranteed to succeed: workers only consume the channel, never add.
+	// The loop bound is at most two iterations — first send try, then
+	// drop one (or observe worker-drained), retry send.
+	for {
+		select {
+		case e.normal <- t:
+			return false
+		default:
+		}
+		select {
+		case <-e.normal:
+			// Discard this oldest task; it never reached execute().
+			e.pending.Add(-1)
+			e.dropped.Add(1)
+		default:
+			// Worker drained between the two selects; retry send.
+		}
 	}
 }
 
