@@ -1,19 +1,70 @@
-# Phase C exit punch list
+# Phase C / Stage 1 exit punch list
 
-Codex CLI gpt-5.5 review iterated 6 rounds against the BE diff
-`refactor/upstream-bound vs upstream/dev`. Rounds 1-5 closed BLOCKERs
-and IMPORTANTs as they surfaced, with one mechanical OAuth-flow
-multi-cfg item carried forward. Round 6 surfaced 5 additional findings
-(1 BLOCKER, 2 IMPORTANT, 2 NIT); all 5 are now fixed, leaving only the
-single deferred OAuth-flow item below.
+Codex CLI gpt-5.5 review iterated 6 rounds against the BE diff during
+Phase C, plus 3 rounds of full-diff Stage 1 exit review against
+`refactor/upstream-bound vs upstream/dev` (BE + FE). All BLOCKERs and
+all IMPORTANTs identified by Codex have been closed. The 4 NITs flagged
+in Stage 1 round 3 are deliberately deferred — see "Deferred" below.
 
 The original Phase C goals (atomic AMP routing, async logging with
 priority lane, atomic Server config, clone-modify-persist-swap mgmt
 writes, LRU signature cache + bounded outer group map, exponential
 refresh backoff, ReleaseURLProvider seam) are all delivered, tested
-under `-race`, and meeting their plan-defined bench targets.
+under `-race`, and meeting their plan-defined bench targets. Phase D
+(antigravity payload-builder + ProviderEditorShell) is delivered.
+FE-1 (OpenAISection virtualisation) is delivered with documented
+trade-offs.
 
 ## Deferred — to address in a focused follow-up
+
+### Stage 1 exit round 3 NITs (deferred — accepted as long-tail)
+
+User explicitly accepted these as deferred at Stage 1 exit (option 2:
+fix IMPORTANTs, defer NITs). All 4 are quality concerns, not Stage 1
+gating issues per Codex's verdict.
+
+#### BE-R3-2 — `cloneErrorMessages` Addon test gap
+- **File:** `internal/logging/async_emitter_test.go`
+- **Concern:** the round-2 BE-R2-1 deep-clone of `Addon http.Header`
+  is functionally correct but the existing mutate-after-enqueue test
+  doesn't directly assert it (writeLogRequest never reads `Addon`).
+  Codex round 3 NIT: add a unit test on `cloneErrorMessages` that
+  mutates the original header and asserts the clone is independent.
+- **Fix shape:** ~10 LOC unit test on the helper directly.
+- **Effort:** ~10 min.
+
+#### FE-R3-2 — virtualised path loses inter-card gap
+- **File:** `src/components/providers/OpenAISection/OpenAISection.tsx`
+- **Concern:** below threshold, `AiProvidersPage.module.scss`'s grid
+  `gap` applies; above threshold, absolute-positioned virtualised rows
+  have no margin/padding so cards appear flush together.
+- **Fix shape:** add a `paddingBottom` (e.g. `$spacing-md`) to each
+  virtualised row's wrapper, or include the gap in `estimateSize()`
+  and `measureElement` calculations.
+- **Effort:** ~10 min.
+- **Real-world impact:** only visible at 50+ providers (the bench
+  fixture, not typical use).
+
+#### FE-R3-3 — `isAbortError` home in `usePoll.ts` is awkward
+- **File:** `src/hooks/usePoll.ts` (currently exports `isAbortError`)
+- **Concern:** non-poller callers (`useAuthFilesData`, `LogsPage`) now
+  import the helper from a hook file. Cleaner to move to
+  `src/utils/errors.ts` (or similar neutral location).
+- **Fix shape:** move + update 3 import sites.
+- **Effort:** ~5 min.
+
+#### FE-R3-4 — virtualisation threshold of 50 is unverified
+- **File:** `src/components/providers/OpenAISection/OpenAISection.tsx`
+- **Concern:** the cutoff (`OPENAI_VIRTUALIZATION_THRESHOLD = 50`) is
+  picked without a browser FPS measurement to validate that 50 is the
+  right boundary. A 50-card grid may render fine without
+  virtualisation, in which case the threshold could be raised (avoiding
+  the inter-card-gap regression for more cases).
+- **Fix shape:** browser FPS measurement on a fixture-seeded page,
+  then tune the constant. Same fixture work blocks the Playwright
+  keyboard-nav test.
+- **Effort:** ~2-4 hours including the fixture seam.
+- **Real-world impact:** unknown without measurement.
 
 ### Multi-cfg snapshot reads in OAuth-flow goroutines
 - **Files:** `internal/api/handlers/management/oauth_callback.go`,

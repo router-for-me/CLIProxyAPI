@@ -37,6 +37,14 @@ type Service struct {
 	// cfgMu protects concurrent access to the configuration.
 	cfgMu sync.RWMutex
 
+	// reloadMu serialises the full buildReloadCallback body so a
+	// file-watcher reload that overlaps a management commit cannot
+	// interleave their fan-out steps (oldCfg capture, server update,
+	// s.cfg swap, coreManager updates, executor rebind, watcher
+	// SetConfig + RefreshAuthState). Codex Stage 1 exit round 3
+	// IMPORTANT BE-R3-1.
+	reloadMu sync.Mutex
+
 	// configPath is the path to the configuration file.
 	configPath string
 
@@ -469,6 +477,15 @@ func (s *Service) registerResolvedModelsForAuth(a *coreauth.Auth, providerKey st
 // identically.
 func (s *Service) buildReloadCallback() func(*config.Config) {
 	return func(newCfg *config.Config) {
+		// reloadMu serialises the full callback body. Without it, a
+		// file-watcher reload could overlap a mgmt commit and either
+		// (a) compute a stale forceAuthRefresh predicate against an
+		// already-overwritten oldCfg, or (b) let an older callback
+		// overwrite s.cfg after a newer callback finished. Codex Stage
+		// 1 exit round 3 IMPORTANT BE-R3-1.
+		s.reloadMu.Lock()
+		defer s.reloadMu.Unlock()
+
 		previousStrategy := ""
 		var previousSessionAffinity bool
 		var previousSessionAffinityTTL string
