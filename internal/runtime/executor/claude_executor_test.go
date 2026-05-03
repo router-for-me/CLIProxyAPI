@@ -936,6 +936,113 @@ func TestClaudeExecutor_GeneratesNewUserIDByDefault(t *testing.T) {
 	}
 }
 
+func TestClaudeExecutor_ExecuteOpenAINonStreamRejectsEmptyClaudeStream(t *testing.T) {
+	_, err := executeOpenAIChatCompletionThroughClaude(t, "")
+	if err == nil {
+		t.Fatal("Execute error = nil, want empty stream error")
+	}
+	assertStatusErr(t, err, http.StatusBadGateway)
+	if !strings.Contains(err.Error(), "empty stream response") {
+		t.Fatalf("Execute error = %q, want empty stream response", err.Error())
+	}
+}
+
+func TestClaudeExecutor_ExecuteOpenAINonStreamRejectsClaudeErrorEvent(t *testing.T) {
+	body := `data: {"type":"error","error":{"type":"overloaded_error","message":"upstream overloaded"}}` + "\n"
+	_, err := executeOpenAIChatCompletionThroughClaude(t, body)
+	if err == nil {
+		t.Fatal("Execute error = nil, want upstream error event")
+	}
+	assertStatusErr(t, err, http.StatusBadGateway)
+	if !strings.Contains(err.Error(), "upstream overloaded") {
+		t.Fatalf("Execute error = %q, want upstream overloaded", err.Error())
+	}
+}
+
+func TestClaudeExecutor_ExecuteOpenAINonStreamRejectsIncompleteClaudeStream(t *testing.T) {
+	body := strings.Join([]string{
+		`data: {"type":"message_start","message":{"id":"msg_123","model":"claude-3-5-sonnet-20241022"}}`,
+		`data: {"type":"message_stop"}`,
+		``,
+	}, "\n")
+
+	_, err := executeOpenAIChatCompletionThroughClaude(t, body)
+	if err == nil {
+		t.Fatal("Execute error = nil, want incomplete stream error")
+	}
+	assertStatusErr(t, err, http.StatusBadGateway)
+	if !strings.Contains(err.Error(), "ended before message completion") {
+		t.Fatalf("Execute error = %q, want incomplete stream error", err.Error())
+	}
+}
+
+func TestClaudeExecutor_ExecuteOpenAINonStreamConvertsValidClaudeStream(t *testing.T) {
+	body := strings.Join([]string{
+		`event: message_start`,
+		`data: {"type":"message_start","message":{"id":"msg_123","model":"claude-3-5-sonnet-20241022"}}`,
+		`event: content_block_delta`,
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}`,
+		`event: message_delta`,
+		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":2,"output_tokens":1}}`,
+		`event: message_stop`,
+		`data: {"type":"message_stop"}`,
+		``,
+	}, "\n")
+
+	resp, err := executeOpenAIChatCompletionThroughClaude(t, body)
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if got := gjson.GetBytes(resp.Payload, "id").String(); got != "msg_123" {
+		t.Fatalf("response id = %q, want msg_123; payload=%s", got, string(resp.Payload))
+	}
+	if got := gjson.GetBytes(resp.Payload, "model").String(); got != "claude-3-5-sonnet-20241022" {
+		t.Fatalf("response model = %q, want claude-3-5-sonnet-20241022", got)
+	}
+	if got := gjson.GetBytes(resp.Payload, "choices.0.message.content").String(); got != "ok" {
+		t.Fatalf("response content = %q, want ok", got)
+	}
+	if got := gjson.GetBytes(resp.Payload, "usage.total_tokens").Int(); got != 3 {
+		t.Fatalf("usage.total_tokens = %d, want 3", got)
+	}
+}
+
+func executeOpenAIChatCompletionThroughClaude(t *testing.T, upstreamBody string) (cliproxyexecutor.Response, error) {
+	t.Helper()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(upstreamBody))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": server.URL,
+	}}
+	payload := []byte(`{"model":"claude-3-5-sonnet-20241022","messages":[{"role":"user","content":"hi"}]}`)
+
+	return executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet-20241022",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+	})
+}
+
+func assertStatusErr(t *testing.T, err error, want int) {
+	t.Helper()
+
+	status, ok := err.(interface{ StatusCode() int })
+	if !ok {
+		t.Fatalf("error %T does not expose StatusCode", err)
+	}
+	if got := status.StatusCode(); got != want {
+		t.Fatalf("StatusCode() = %d, want %d", got, want)
+	}
+}
+
 func TestStripClaudeToolPrefixFromResponse_NestedToolReference(t *testing.T) {
 	input := []byte(`{"content":[{"type":"tool_result","tool_use_id":"toolu_123","content":[{"type":"tool_reference","tool_name":"proxy_mcp__nia__manage_resource"}]}]}`)
 	out := stripClaudeToolPrefixFromResponse(input, "proxy_")
