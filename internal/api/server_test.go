@@ -100,14 +100,22 @@ func TestManagementUsageRequiresManagementAuthAndPopsArray(t *testing.T) {
 	redisqueue.Enqueue([]byte(`{"id":1}`))
 	redisqueue.Enqueue([]byte(`{"id":2}`))
 
-	missingKeyReq := httptest.NewRequest(http.MethodGet, "/v0/management/usage?count=2", nil)
+	missingKeyReq := httptest.NewRequest(http.MethodGet, "/v0/management/usage-queue?count=2", nil)
 	missingKeyRR := httptest.NewRecorder()
 	server.engine.ServeHTTP(missingKeyRR, missingKeyReq)
 	if missingKeyRR.Code != http.StatusUnauthorized {
 		t.Fatalf("missing key status = %d, want %d body=%s", missingKeyRR.Code, http.StatusUnauthorized, missingKeyRR.Body.String())
 	}
 
-	authReq := httptest.NewRequest(http.MethodGet, "/v0/management/usage?count=2", nil)
+	legacyReq := httptest.NewRequest(http.MethodGet, "/v0/management/usage?count=2", nil)
+	legacyReq.Header.Set("Authorization", "Bearer test-management-key")
+	legacyRR := httptest.NewRecorder()
+	server.engine.ServeHTTP(legacyRR, legacyReq)
+	if legacyRR.Code != http.StatusNotFound {
+		t.Fatalf("legacy usage status = %d, want %d body=%s", legacyRR.Code, http.StatusNotFound, legacyRR.Body.String())
+	}
+
+	authReq := httptest.NewRequest(http.MethodGet, "/v0/management/usage-queue?count=2", nil)
 	authReq.Header.Set("Authorization", "Bearer test-management-key")
 	authRR := httptest.NewRecorder()
 	server.engine.ServeHTTP(authRR, authReq)

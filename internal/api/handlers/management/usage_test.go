@@ -10,7 +10,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/redisqueue"
 )
 
-func TestGetUsagePopsRequestedRecords(t *testing.T) {
+func TestGetUsageQueuePopsRequestedRecords(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	withManagementUsageQueue(t, func() {
 		redisqueue.Enqueue([]byte(`{"id":1}`))
@@ -19,10 +19,10 @@ func TestGetUsagePopsRequestedRecords(t *testing.T) {
 
 		rec := httptest.NewRecorder()
 		ginCtx, _ := gin.CreateTestContext(rec)
-		ginCtx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/usage?count=2", nil)
+		ginCtx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/usage-queue?count=2", nil)
 
 		h := &Handler{}
-		h.GetUsage(ginCtx)
+		h.GetUsageQueue(ginCtx)
 
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
@@ -45,17 +45,17 @@ func TestGetUsagePopsRequestedRecords(t *testing.T) {
 	})
 }
 
-func TestGetUsageInvalidCountDoesNotPop(t *testing.T) {
+func TestGetUsageQueueInvalidCountDoesNotPop(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	withManagementUsageQueue(t, func() {
 		redisqueue.Enqueue([]byte(`{"id":1}`))
 
 		rec := httptest.NewRecorder()
 		ginCtx, _ := gin.CreateTestContext(rec)
-		ginCtx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/usage?count=0", nil)
+		ginCtx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/usage-queue?count=0", nil)
 
 		h := &Handler{}
-		h.GetUsage(ginCtx)
+		h.GetUsageQueue(ginCtx)
 
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())

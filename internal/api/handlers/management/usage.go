@@ -20,8 +20,8 @@ func (r usageQueueRecord) MarshalJSON() ([]byte, error) {
 	return json.Marshal(string(r))
 }
 
-// GetUsage pops queued usage records from the Redis-compatible usage queue.
-func (h *Handler) GetUsage(c *gin.Context) {
+// GetUsageQueue pops queued usage records from the usage queue.
+func (h *Handler) GetUsageQueue(c *gin.Context) {
 	if h == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler unavailable"})
 		return
