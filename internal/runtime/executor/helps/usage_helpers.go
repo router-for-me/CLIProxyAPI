@@ -150,6 +150,16 @@ func (r *UsageReporter) buildRecord(ctx context.Context, detail usage.Detail, fa
 	return r.buildRecordForModel(ctx, r.model, detail, failed)
 }
 
+func (r *UsageReporter) resolveThinkingEffort(ctx context.Context, model string) string {
+	if effort, ok := capturedUsageThinkingEffort(ctx, model); ok && effort != "" {
+		return effort
+	}
+	if r.thinkingEffort != "" {
+		return r.thinkingEffort
+	}
+	return thinking.ExtractEffort(nil, model, "", "")
+}
+
 func (r *UsageReporter) buildRecordForModel(ctx context.Context, model string, detail usage.Detail, failed bool) usage.Record {
 	if r == nil {
 		return usage.Record{Model: model, Detail: detail, Failed: failed}
@@ -166,7 +176,7 @@ func (r *UsageReporter) buildRecordForModel(ctx context.Context, model string, d
 		RequestedAt:      r.requestedAt,
 		Latency:          r.latency(),
 		FirstByteLatency: r.firstByteLatency(ctx),
-		ThinkingEffort:   r.thinkingEffort,
+		ThinkingEffort:   r.resolveThinkingEffort(ctx, model),
 		Failed:           failed,
 		Detail:           detail,
 	}
