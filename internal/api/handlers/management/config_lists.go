@@ -1368,7 +1368,8 @@ func ampMappingKey(m config.AmpModelMapping) string {
 	if m.When != nil {
 		when = strings.TrimSpace(m.When.Feature) + "\x1f" +
 			strings.TrimSpace(m.When.ToolChoice) + "\x1f" +
-			strings.TrimSpace(m.When.UserSuffix)
+			strings.TrimSpace(m.When.UserSuffix) + "\x1f" +
+			strings.TrimSpace(m.When.SystemPrefix)
 	}
 	return strings.TrimSpace(m.From) + "\x1e" + strconv.FormatBool(m.Regex) + "\x1e" + when
 }

@@ -1,0 +1,61 @@
+package management
+
+import (
+	"testing"
+
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+)
+
+// TestAmpMappingKey_DistinguishesSystemPrefix ensures that two mappings
+// differing only by When.SystemPrefix produce distinct identity keys, so
+// PATCH updates routed through the management API do not collide.
+func TestAmpMappingKey_DistinguishesSystemPrefix(t *testing.T) {
+	a := config.AmpModelMapping{
+		From: "claude-opus-4-6",
+		To:   "target-a",
+		When: &config.AmpMappingCondition{SystemPrefix: "you are agg man"},
+	}
+	b := config.AmpModelMapping{
+		From: "claude-opus-4-6",
+		To:   "target-b",
+		When: &config.AmpMappingCondition{SystemPrefix: "you are amp"},
+	}
+	if ampMappingKey(a) == ampMappingKey(b) {
+		t.Fatalf("keys collide for distinct SystemPrefix:\n a=%q\n b=%q",
+			ampMappingKey(a), ampMappingKey(b))
+	}
+}
+
+// TestAmpMappingKey_DistinguishesAllWhenFields verifies each When field
+// participates in the identity key.
+func TestAmpMappingKey_DistinguishesAllWhenFields(t *testing.T) {
+	base := config.AmpModelMapping{From: "m", To: "t"}
+	cases := []struct {
+		name string
+		mod  func(m *config.AmpModelMapping)
+	}{
+		{"feature", func(m *config.AmpModelMapping) {
+			m.When = &config.AmpMappingCondition{Feature: "handoff"}
+		}},
+		{"tool_choice", func(m *config.AmpModelMapping) {
+			m.When = &config.AmpMappingCondition{ToolChoice: "create_handoff_context"}
+		}},
+		{"user_suffix", func(m *config.AmpModelMapping) {
+			m.When = &config.AmpMappingCondition{UserSuffix: "x"}
+		}},
+		{"system_prefix", func(m *config.AmpModelMapping) {
+			m.When = &config.AmpMappingCondition{SystemPrefix: "y"}
+		}},
+	}
+	seen := map[string]string{}
+	seen[ampMappingKey(base)] = "base"
+	for _, c := range cases {
+		m := base
+		c.mod(&m)
+		k := ampMappingKey(m)
+		if prev, ok := seen[k]; ok {
+			t.Errorf("%s collides with %s: key=%q", c.name, prev, k)
+		}
+		seen[k] = c.name
+	}
+}
