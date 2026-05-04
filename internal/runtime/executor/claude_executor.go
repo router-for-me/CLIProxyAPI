@@ -737,7 +737,7 @@ func (e *ClaudeExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (
 		return auth, nil
 	}
 	svc := claudeauth.NewClaudeAuthWithProxyURL(e.cfg, auth.ProxyURL)
-	td, err := svc.RefreshTokens(ctx, refreshToken)
+	td, err := svc.RefreshTokensWithRetry(ctx, refreshToken, 3)
 	if err != nil {
 		return nil, err
 	}
