@@ -1533,7 +1533,7 @@ func buildCodexConfigModels(entry *config.CodexKey) []*ModelInfo {
 	if entry == nil {
 		return nil
 	}
-	return registry.WithCodexBuiltins(buildConfigModels(entry.Models, "openai", "codex"))
+	return buildConfigModels(entry.Models, "openai", "codex")
 }
 
 func rewriteModelInfoName(name, oldID, newID string) string {

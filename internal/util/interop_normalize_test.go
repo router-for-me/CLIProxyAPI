@@ -77,6 +77,39 @@ func TestNormalizeOpenAIChatRequestJSON_ConvertsClaudeBlocks(t *testing.T) {
 	}
 }
 
+func TestNormalizeOpenAIChatRequestJSON_NormalizesImageVariants(t *testing.T) {
+	input := []byte(`{
+		"messages":[
+			{
+				"role":"user",
+				"content":[
+					{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAA"}},
+					{"type":"input_image","image_url":"data:image/jpeg;base64,BBBB","detail":"high"},
+					{"type":"image_url","image_url":"data:image/gif;base64,CCCC"}
+				]
+			}
+		]
+	}`)
+
+	out := NormalizeOpenAIChatRequestJSON(input)
+	content := gjson.GetBytes(out, "messages.0.content")
+	if got := content.Get("0.type").String(); got != "image_url" {
+		t.Fatalf("expected Claude image to become image_url, got %q: %s", got, content.Raw)
+	}
+	if got := content.Get("0.image_url.url").String(); got != "data:image/png;base64,AAAA" {
+		t.Fatalf("unexpected first image URL %q", got)
+	}
+	if got := content.Get("1.image_url.url").String(); got != "data:image/jpeg;base64,BBBB" {
+		t.Fatalf("unexpected second image URL %q", got)
+	}
+	if got := content.Get("1.image_url.detail").String(); got != "high" {
+		t.Fatalf("expected detail=high, got %q", got)
+	}
+	if got := content.Get("2.image_url.url").String(); got != "data:image/gif;base64,CCCC" {
+		t.Fatalf("unexpected string image_url normalization %q", got)
+	}
+}
+
 func TestNormalizeOpenAIChatRequestJSON_PlacesToolResultBeforeUserText(t *testing.T) {
 	input := []byte(`{
 		"messages":[
@@ -112,5 +145,38 @@ func TestNormalizeOpenAIChatRequestJSON_PlacesToolResultBeforeUserText(t *testin
 	}
 	if got := msgs[2].Get("content.0.text").String(); got != "continue" {
 		t.Fatalf("expected user text to remain after tool result, got %q", got)
+	}
+}
+
+func TestNormalizeOpenAIResponsesRequestJSON_NormalizesImageVariants(t *testing.T) {
+	input := []byte(`{
+		"input":[
+			{
+				"role":"user",
+				"content":[
+					{"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA","detail":"low"}},
+					{"type":"image","source":{"type":"base64","media_type":"image/jpeg","data":"BBBB"}},
+					{"type":"input_image","url":"https://example.com/cat.png"}
+				]
+			}
+		]
+	}`)
+
+	out := NormalizeOpenAIResponsesRequestJSON(input)
+	content := gjson.GetBytes(out, "input.0.content")
+	if got := content.Get("0.type").String(); got != "input_image" {
+		t.Fatalf("expected image_url to become input_image, got %q: %s", got, content.Raw)
+	}
+	if got := content.Get("0.image_url").String(); got != "data:image/png;base64,AAAA" {
+		t.Fatalf("unexpected first image URL %q", got)
+	}
+	if got := content.Get("0.detail").String(); got != "low" {
+		t.Fatalf("expected detail=low, got %q", got)
+	}
+	if got := content.Get("1.image_url").String(); got != "data:image/jpeg;base64,BBBB" {
+		t.Fatalf("unexpected Claude image URL %q", got)
+	}
+	if got := content.Get("2.image_url").String(); got != "https://example.com/cat.png" {
+		t.Fatalf("unexpected url alias normalization %q", got)
 	}
 }

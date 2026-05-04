@@ -1485,7 +1485,9 @@ func (h *Handler) disableAuth(ctx context.Context, id string) {
 		auth.Status = coreauth.StatusDisabled
 		auth.StatusMessage = "removed via management API"
 		auth.UpdatedAt = time.Now()
-		_, _ = h.authManager.Update(ctx, auth)
+		if _, errUpdate := h.authManager.Update(ctx, auth); errUpdate != nil {
+			log.WithError(errUpdate).WithField("auth_id", auth.ID).Warn("failed to persist removed auth state")
+		}
 		return
 	}
 	authID := h.authIDForPath(id)
@@ -1497,7 +1499,9 @@ func (h *Handler) disableAuth(ctx context.Context, id string) {
 		auth.Status = coreauth.StatusDisabled
 		auth.StatusMessage = "removed via management API"
 		auth.UpdatedAt = time.Now()
-		_, _ = h.authManager.Update(ctx, auth)
+		if _, errUpdate := h.authManager.Update(ctx, auth); errUpdate != nil {
+			log.WithError(errUpdate).WithField("auth_id", auth.ID).Warn("failed to persist removed auth state")
+		}
 	}
 }
 

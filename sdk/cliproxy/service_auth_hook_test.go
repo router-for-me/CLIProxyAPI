@@ -71,8 +71,6 @@ func TestServiceAuthHookSyncsModelRegistryOnAuthUpdate(t *testing.T) {
 }
 
 func TestServiceSyncLoadedAuthModelsRegistersPersistedAuths(t *testing.T) {
-	t.Parallel()
-
 	authDir := t.TempDir()
 	raw := []byte(`{"type":"codex","disabled":false,"id_token":"header.payload.sig"}`)
 	if err := os.WriteFile(authDir+"/codex-startup-plus.json", raw, 0o600); err != nil {
@@ -85,6 +83,9 @@ func TestServiceSyncLoadedAuthModelsRegistersPersistedAuths(t *testing.T) {
 		t.Fatal("token store does not support SetBaseDir")
 	}
 	dirSetter.SetBaseDir(authDir)
+	t.Cleanup(func() {
+		dirSetter.SetBaseDir("")
+	})
 
 	svc := &Service{
 		cfg: &config.Config{

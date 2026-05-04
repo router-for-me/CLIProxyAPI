@@ -563,7 +563,7 @@ type OpenAICompatibility struct {
 	// Name is the identifier for this OpenAI compatibility configuration.
 	Name string `yaml:"name" json:"name"`
 
-	// Kind selects a built-in compatibility profile (for example: kimi, minimax, zhipu, xfyun, maas, langengyun, newapi).
+	// Kind selects a built-in compatibility profile (for example: kimi, minimax, xiaomi, zhipu, xfyun, maas, langengyun, newapi).
 	// Empty keeps the generic compatibility behavior.
 	Kind string `yaml:"kind,omitempty" json:"kind,omitempty"`
 
@@ -654,8 +654,8 @@ func InferCompatKindFromBaseURL(rawBaseURL string) string {
 		if path == "/coding" || strings.HasPrefix(path, "/coding/") {
 			return "kimi"
 		}
-	case "open.bigmodel.cn", "maas-api.lanyun.net":
-		if path == "/api/anthropic" || path == "/anthropic" || strings.HasPrefix(path, "/api/anthropic/") || strings.HasPrefix(path, "/anthropic/") {
+	case "open.bigmodel.cn", "maas-api.lanyun.net", "api.z.ai":
+		if isZhipuCompatPath(path) {
 			return "zhipu"
 		}
 	case "maas-coding-api.cn-huabei-1.xf-yun.com":
@@ -663,7 +663,11 @@ func InferCompatKindFromBaseURL(rawBaseURL string) string {
 			return "xfyun"
 		}
 	case "token-plan-cn.xiaomimimo.com":
-		if path == "/anthropic" || strings.HasPrefix(path, "/anthropic/") {
+		if path == "/anthropic" || strings.HasPrefix(path, "/anthropic/") || path == "/v1" || strings.HasPrefix(path, "/v1/") {
+			return "xiaomi"
+		}
+	case "api.xiaomimimo.com":
+		if path == "/v1" || strings.HasPrefix(path, "/v1/") || path == "/anthropic" || strings.HasPrefix(path, "/anthropic/") {
 			return "xiaomi"
 		}
 	case "coding.dashscope.aliyuncs.com":
@@ -675,7 +679,27 @@ func InferCompatKindFromBaseURL(rawBaseURL string) string {
 			return "doubao"
 		}
 	}
+	if IsXiaomiTokenPlanBaseURLHost(host) && (path == "/anthropic" || strings.HasPrefix(path, "/anthropic/") || path == "/v1" || strings.HasPrefix(path, "/v1/")) {
+		return "xiaomi"
+	}
 	return ""
+}
+
+func isZhipuCompatPath(path string) bool {
+	return path == "/api/anthropic" ||
+		path == "/anthropic" ||
+		path == "/api/coding/paas/v4" ||
+		path == "/api/paas/v4" ||
+		strings.HasPrefix(path, "/api/anthropic/") ||
+		strings.HasPrefix(path, "/anthropic/") ||
+		strings.HasPrefix(path, "/api/coding/paas/v4/") ||
+		strings.HasPrefix(path, "/api/paas/v4/")
+}
+
+// IsXiaomiTokenPlanBaseURLHost reports whether host is an official MiMo Token
+// Plan cluster host.
+func IsXiaomiTokenPlanBaseURLHost(host string) bool {
+	return strings.HasSuffix(host, ".xiaomimimo.com") && (host == "token-plan.xiaomimimo.com" || strings.HasPrefix(host, "token-plan-"))
 }
 
 // LoadConfig reads a YAML configuration file from the given path,

@@ -80,6 +80,33 @@ func TestConvertOpenAIRequestToClaude_ToolResultTextAndBase64Image(t *testing.T)
 	}
 }
 
+func TestConvertOpenAIRequestToClaude_NormalizesImageURLString(t *testing.T) {
+	inputJSON := `{
+		"model":"gpt-4o",
+		"messages":[
+			{
+				"role":"user",
+				"content":[
+					{"type":"text","text":"look"},
+					{"type":"image_url","image_url":"data:image/png;base64,AAAA"}
+				]
+			}
+		]
+	}`
+
+	result := ConvertOpenAIRequestToClaude("claude-sonnet-4-5", []byte(inputJSON), false)
+	image := gjson.GetBytes(result, "messages.0.content.1")
+	if got := image.Get("type").String(); got != "image" {
+		t.Fatalf("expected image part, got %q: %s", got, string(result))
+	}
+	if got := image.Get("source.media_type").String(); got != "image/png" {
+		t.Fatalf("expected image/png, got %q: %s", got, string(result))
+	}
+	if got := image.Get("source.data").String(); got != "AAAA" {
+		t.Fatalf("expected data AAAA, got %q: %s", got, string(result))
+	}
+}
+
 func TestConvertOpenAIRequestToClaude_ToolResultURLImageOnly(t *testing.T) {
 	inputJSON := `{
 		"model": "gpt-4.1",

@@ -61,6 +61,15 @@ var openAICompatProfiles = map[string]openAICompatProfile{
 		SupportsMetadata:         false,
 		SupportsStore:            false,
 	},
+	"xiaomi": {
+		Kind:                     "xiaomi",
+		SupportsResponses:        false,
+		SupportsStreamUsage:      false,
+		SupportsParallelToolCall: false,
+		SupportsReasoning:        false,
+		SupportsMetadata:         false,
+		SupportsStore:            false,
+	},
 	"zhipu": {
 		Kind:                     "zhipu",
 		SupportsResponses:        false,
@@ -156,7 +165,7 @@ func inferOpenAICompatKindFromBaseURL(rawBaseURL string) string {
 	}
 	host := strings.ToLower(strings.TrimSpace(parsed.Hostname()))
 	switch host {
-	case "api.moonshot.ai", "api.kimi.com":
+	case "api.moonshot.ai", "api.moonshot.cn", "api.kimi.com":
 		return "kimi"
 	case "api.minimax.io", "api.minimaxi.io", "api.minimaxi.com":
 		return "minimax"
@@ -164,7 +173,12 @@ func inferOpenAICompatKindFromBaseURL(rawBaseURL string) string {
 		return "zhipu"
 	case "api.deepseek.com":
 		return "deepseek"
+	case "api.xiaomimimo.com":
+		return "xiaomi"
 	default:
+		if config.IsXiaomiTokenPlanBaseURLHost(host) {
+			return "xiaomi"
+		}
 		return ""
 	}
 }
@@ -224,10 +238,75 @@ func scrubOpenAICompatPayloadForModel(payload []byte, profile openAICompatProfil
 	payload = repairOpenAICompatToolCallHistory(payload)
 	payload = scrubOpenAICompatProviderToolPayload(payload, profile)
 	payload = scrubOpenAICompatToolChoice(payload, profile)
+	if config.NormalizeOpenAICompatibilityKind(profile.Kind) == "zhipu" {
+		payload = scrubZhipuImageURLDataURLs(payload)
+	}
 	if requiresDeepSeekToolSchemaCompatibility(model) {
 		payload = scrubDeepSeekToolPayload(payload, baseURL)
 	}
 	return payload
+}
+
+func scrubZhipuImageURLDataURLs(payload []byte) []byte {
+	if len(payload) == 0 || !gjson.GetBytes(payload, "messages").IsArray() {
+		return payload
+	}
+
+	var root map[string]any
+	if err := json.Unmarshal(payload, &root); err != nil {
+		return payload
+	}
+	messages, ok := root["messages"].([]any)
+	if !ok {
+		return payload
+	}
+
+	changed := false
+	for _, rawMessage := range messages {
+		message, ok := rawMessage.(map[string]any)
+		if !ok {
+			continue
+		}
+		parts, ok := message["content"].([]any)
+		if !ok {
+			continue
+		}
+		for _, rawPart := range parts {
+			part, ok := rawPart.(map[string]any)
+			if !ok {
+				continue
+			}
+			if !strings.EqualFold(strings.TrimSpace(compatStringValue(part["type"])), "image_url") {
+				continue
+			}
+			imageURL, ok := part["image_url"].(map[string]any)
+			if !ok {
+				if urlValue := strings.TrimSpace(compatStringValue(part["image_url"])); urlValue != "" {
+					if _, data, okData := util.ParseDataURL(urlValue); okData {
+						part["image_url"] = map[string]any{"url": data}
+						changed = true
+					}
+				}
+				continue
+			}
+			urlValue := strings.TrimSpace(compatStringValue(imageURL["url"]))
+			if urlValue == "" {
+				continue
+			}
+			if _, data, okData := util.ParseDataURL(urlValue); okData {
+				imageURL["url"] = data
+				changed = true
+			}
+		}
+	}
+	if !changed {
+		return payload
+	}
+	out, err := json.Marshal(root)
+	if err != nil || !gjson.ValidBytes(out) {
+		return payload
+	}
+	return out
 }
 
 func scrubOpenAICompatProviderToolPayload(payload []byte, profile openAICompatProfile) []byte {

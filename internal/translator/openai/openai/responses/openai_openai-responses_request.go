@@ -28,7 +28,7 @@ import (
 // Returns:
 //   - []byte: The transformed request data in OpenAI chat completions format
 func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inputRawJSON []byte, stream bool) []byte {
-	rawJSON := inputRawJSON
+	rawJSON := util.NormalizeOpenAIResponsesRequestJSON(inputRawJSON)
 	// Base OpenAI chat completions template with default values
 	out := []byte(`{"model":"","messages":[],"stream":false}`)
 
@@ -91,9 +91,12 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 							contentPart, _ = sjson.SetBytes(contentPart, "text", text)
 							message, _ = sjson.SetRawBytes(message, "content.-1", contentPart)
 						case "input_image":
-							imageURL := contentItem.Get("image_url").String()
+							imageURL := util.OpenAIImageURLFromPart(contentItem)
 							contentPart := []byte(`{"type":"image_url","image_url":{"url":""}}`)
 							contentPart, _ = sjson.SetBytes(contentPart, "image_url.url", imageURL)
+							if detail := contentItem.Get("detail").String(); detail != "" {
+								contentPart, _ = sjson.SetBytes(contentPart, "image_url.detail", detail)
+							}
 							message, _ = sjson.SetRawBytes(message, "content.-1", contentPart)
 						}
 						return true

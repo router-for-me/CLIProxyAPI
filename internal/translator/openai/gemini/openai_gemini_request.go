@@ -137,11 +137,8 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 				}
 
 				// Handle inline data (e.g., images)
-				if inlineData := part.Get("inlineData"); inlineData.Exists() {
-					mimeType := inlineData.Get("mimeType").String()
-					if mimeType == "" {
-						mimeType = "application/octet-stream"
-					}
+				if inlineData := util.GeminiInlineDataFromPart(part); inlineData.Exists() {
+					mimeType := util.GeminiInlineDataMimeType(inlineData)
 					data := inlineData.Get("data").String()
 					imageURL := fmt.Sprintf("data:%s;base64,%s", mimeType, data)
 
@@ -192,13 +189,10 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 					}
 
 					// Handle inline data (e.g., images)
-					if inlineData := part.Get("inlineData"); inlineData.Exists() {
+					if inlineData := util.GeminiInlineDataFromPart(part); inlineData.Exists() {
 						onlyTextContent = false
 
-						mimeType := inlineData.Get("mimeType").String()
-						if mimeType == "" {
-							mimeType = "application/octet-stream"
-						}
+						mimeType := util.GeminiInlineDataMimeType(inlineData)
 						data := inlineData.Get("data").String()
 						imageURL := fmt.Sprintf("data:%s;base64,%s", mimeType, data)
 

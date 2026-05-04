@@ -206,36 +206,10 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 								partJSON, _ = sjson.SetBytes(partJSON, "text", text.String())
 							}
 						case "input_image":
-							imageURL := contentItem.Get("image_url").String()
-							if imageURL == "" {
-								imageURL = contentItem.Get("url").String()
-							}
-							if imageURL != "" {
-								mimeType := "application/octet-stream"
-								data := ""
-								if strings.HasPrefix(imageURL, "data:") {
-									trimmed := strings.TrimPrefix(imageURL, "data:")
-									mediaAndData := strings.SplitN(trimmed, ";base64,", 2)
-									if len(mediaAndData) == 2 {
-										if mediaAndData[0] != "" {
-											mimeType = mediaAndData[0]
-										}
-										data = mediaAndData[1]
-									} else {
-										mediaAndData = strings.SplitN(trimmed, ",", 2)
-										if len(mediaAndData) == 2 {
-											if mediaAndData[0] != "" {
-												mimeType = mediaAndData[0]
-											}
-											data = mediaAndData[1]
-										}
-									}
-								}
-								if data != "" {
-									partJSON = []byte(`{"inline_data":{"mime_type":"","data":""}}`)
-									partJSON, _ = sjson.SetBytes(partJSON, "inline_data.mime_type", mimeType)
-									partJSON, _ = sjson.SetBytes(partJSON, "inline_data.data", data)
-								}
+							if mimeType, data, ok := util.ParseDataURL(util.OpenAIImageURLFromPart(contentItem)); ok {
+								partJSON = []byte(`{"inline_data":{"mime_type":"","data":""}}`)
+								partJSON, _ = sjson.SetBytes(partJSON, "inline_data.mime_type", mimeType)
+								partJSON, _ = sjson.SetBytes(partJSON, "inline_data.data", data)
 							}
 						case "input_audio":
 							audioData := contentItem.Get("data").String()

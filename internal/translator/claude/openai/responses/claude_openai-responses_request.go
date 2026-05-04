@@ -156,28 +156,13 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 							role = "assistant"
 						}
 					case "input_image":
-						url := part.Get("image_url").String()
-						if url == "" {
-							url = part.Get("url").String()
-						}
+						url := util.OpenAIImageURLFromPart(part)
 						if url != "" {
 							var contentPart []byte
-							if strings.HasPrefix(url, "data:") {
-								trimmed := strings.TrimPrefix(url, "data:")
-								mediaAndData := strings.SplitN(trimmed, ";base64,", 2)
-								mediaType := "application/octet-stream"
-								data := ""
-								if len(mediaAndData) == 2 {
-									if mediaAndData[0] != "" {
-										mediaType = mediaAndData[0]
-									}
-									data = mediaAndData[1]
-								}
-								if data != "" {
-									contentPart = []byte(`{"type":"image","source":{"type":"base64","media_type":"","data":""}}`)
-									contentPart, _ = sjson.SetBytes(contentPart, "source.media_type", mediaType)
-									contentPart, _ = sjson.SetBytes(contentPart, "source.data", data)
-								}
+							if mediaType, data, ok := util.ParseDataURL(url); ok {
+								contentPart = []byte(`{"type":"image","source":{"type":"base64","media_type":"","data":""}}`)
+								contentPart, _ = sjson.SetBytes(contentPart, "source.media_type", mediaType)
+								contentPart, _ = sjson.SetBytes(contentPart, "source.data", data)
 							} else {
 								contentPart = []byte(`{"type":"image","source":{"type":"url","url":""}}`)
 								contentPart, _ = sjson.SetBytes(contentPart, "source.url", url)

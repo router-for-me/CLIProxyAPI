@@ -147,6 +147,8 @@ func WithPostAuthHook(hook auth.PostAuthHook) ServerOption {
 // Server represents the main API server.
 // It encapsulates the Gin engine, HTTP server, handlers, and configuration.
 type Server struct {
+	stateMu sync.RWMutex
+
 	// engine is the Gin web framework engine instance.
 	engine *gin.Engine
 
@@ -427,7 +429,9 @@ func (s *Server) setupRoutes() {
 			errStr = c.Query("error_description")
 		}
 		if state != "" {
-			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "anthropic", state, code, errStr)
+			if authDir := s.authDirSnapshot(); authDir != "" {
+				_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(authDir, "anthropic", state, code, errStr)
+			}
 		}
 		c.Header("Content-Type", "text/html; charset=utf-8")
 		c.String(http.StatusOK, oauthCallbackSuccessHTML)
@@ -441,7 +445,9 @@ func (s *Server) setupRoutes() {
 			errStr = c.Query("error_description")
 		}
 		if state != "" {
-			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "codex", state, code, errStr)
+			if authDir := s.authDirSnapshot(); authDir != "" {
+				_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(authDir, "codex", state, code, errStr)
+			}
 		}
 		c.Header("Content-Type", "text/html; charset=utf-8")
 		c.String(http.StatusOK, oauthCallbackSuccessHTML)
@@ -455,7 +461,9 @@ func (s *Server) setupRoutes() {
 			errStr = c.Query("error_description")
 		}
 		if state != "" {
-			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "gemini", state, code, errStr)
+			if authDir := s.authDirSnapshot(); authDir != "" {
+				_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(authDir, "gemini", state, code, errStr)
+			}
 		}
 		c.Header("Content-Type", "text/html; charset=utf-8")
 		c.String(http.StatusOK, oauthCallbackSuccessHTML)
@@ -469,7 +477,9 @@ func (s *Server) setupRoutes() {
 			errStr = c.Query("error_description")
 		}
 		if state != "" {
-			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "antigravity", state, code, errStr)
+			if authDir := s.authDirSnapshot(); authDir != "" {
+				_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(authDir, "antigravity", state, code, errStr)
+			}
 		}
 		c.Header("Content-Type", "text/html; charset=utf-8")
 		c.String(http.StatusOK, oauthCallbackSuccessHTML)
@@ -721,8 +731,8 @@ func (s *Server) managementAvailabilityMiddleware() gin.HandlerFunc {
 }
 
 func (s *Server) serveManagementControlPanel(c *gin.Context) {
-	cfg := s.cfg
-	if cfg == nil || cfg.RemoteManagement.DisableControlPanel {
+	controlPanelDisabled, proxyURL, panelRepository := s.controlPanelConfigSnapshot()
+	if controlPanelDisabled {
 		c.AbortWithStatus(http.StatusNotFound)
 		return
 	}
@@ -736,7 +746,7 @@ func (s *Server) serveManagementControlPanel(c *gin.Context) {
 		if os.IsNotExist(err) {
 			// Synchronously ensure management.html is available with a detached context.
 			// Control panel bootstrap should not be canceled by client disconnects.
-			if !managementasset.EnsureLatestManagementHTML(context.Background(), managementasset.StaticDir(s.configFilePath), cfg.ProxyURL, cfg.RemoteManagement.PanelGitHubRepository) {
+			if !managementasset.EnsureLatestManagementHTML(context.Background(), managementasset.StaticDir(s.configFilePath), proxyURL, panelRepository) {
 				c.AbortWithStatus(http.StatusNotFound)
 				return
 			}
@@ -854,24 +864,34 @@ func isClaudeModelsRequest(c *gin.Context) bool {
 // Returns:
 //   - error: An error if the server fails to start
 func (s *Server) Start() error {
-	if s == nil || s.server == nil {
+	if s == nil {
 		return fmt.Errorf("failed to start HTTP server: server not initialized")
 	}
 
-	addr := s.server.Addr
+	s.stateMu.Lock()
+	httpServer := s.server
+	cfg := s.cfg
+	if httpServer == nil {
+		s.stateMu.Unlock()
+		return fmt.Errorf("failed to start HTTP server: server not initialized")
+	}
+
+	addr := httpServer.Addr
 	listener, errListen := net.Listen("tcp", addr)
 	if errListen != nil {
+		s.stateMu.Unlock()
 		return fmt.Errorf("failed to start HTTP server: %v", errListen)
 	}
 
-	useTLS := s.cfg != nil && s.cfg.TLS.Enable
+	useTLS := cfg != nil && cfg.TLS.Enable
 	if useTLS {
-		certPath := strings.TrimSpace(s.cfg.TLS.Cert)
-		keyPath := strings.TrimSpace(s.cfg.TLS.Key)
+		certPath := strings.TrimSpace(cfg.TLS.Cert)
+		keyPath := strings.TrimSpace(cfg.TLS.Key)
 		if certPath == "" || keyPath == "" {
 			if errClose := listener.Close(); errClose != nil {
 				log.Errorf("failed to close listener after TLS validation failure: %v", errClose)
 			}
+			s.stateMu.Unlock()
 			return fmt.Errorf("failed to start HTTPS server: tls.cert or tls.key is empty")
 		}
 		certPair, errLoad := tls.LoadX509KeyPair(certPath, keyPath)
@@ -879,6 +899,7 @@ func (s *Server) Start() error {
 			if errClose := listener.Close(); errClose != nil {
 				log.Errorf("failed to close listener after TLS key pair load failure: %v", errClose)
 			}
+			s.stateMu.Unlock()
 			return fmt.Errorf("failed to start HTTPS server: %v", errLoad)
 		}
 
@@ -886,8 +907,8 @@ func (s *Server) Start() error {
 			Certificates: []tls.Certificate{certPair},
 			NextProtos:   []string{"h2", "http/1.1"},
 		}
-		s.server.TLSConfig = tlsConfig
-		if errHTTP2 := http2.ConfigureServer(s.server, &http2.Server{}); errHTTP2 != nil {
+		httpServer.TLSConfig = tlsConfig
+		if errHTTP2 := http2.ConfigureServer(httpServer, &http2.Server{}); errHTTP2 != nil {
 			log.Warnf("failed to configure HTTP/2: %v", errHTTP2)
 		}
 		listener = tls.NewListener(listener, tlsConfig)
@@ -899,12 +920,13 @@ func (s *Server) Start() error {
 	httpListener := newMuxListener(listener.Addr(), 1024)
 	s.muxBaseListener = listener
 	s.muxHTTPListener = httpListener
+	s.stateMu.Unlock()
 
 	httpErrCh := make(chan error, 1)
 	acceptErrCh := make(chan error, 1)
 
 	go func() {
-		httpErrCh <- s.server.Serve(httpListener)
+		httpErrCh <- httpServer.Serve(httpListener)
 	}()
 	go func() {
 		acceptErrCh <- s.acceptMuxConnections(listener, httpListener)
@@ -912,14 +934,11 @@ func (s *Server) Start() error {
 
 	select {
 	case errServe := <-httpErrCh:
-		if s.muxBaseListener != nil {
-			if errClose := s.muxBaseListener.Close(); errClose != nil && !errors.Is(errClose, net.ErrClosed) {
-				log.Debugf("failed to close shared listener after HTTP serve exit: %v", errClose)
-			}
+		if errClose := listener.Close(); errClose != nil && !errors.Is(errClose, net.ErrClosed) {
+			log.Debugf("failed to close shared listener after HTTP serve exit: %v", errClose)
 		}
-		if s.muxHTTPListener != nil {
-			_ = s.muxHTTPListener.Close()
-		}
+		_ = httpListener.Close()
+		s.clearMuxListeners(listener, httpListener)
 		errAccept := <-acceptErrCh
 		errServe = normalizeHTTPServeError(errServe)
 		errAccept = normalizeListenerError(errAccept)
@@ -931,14 +950,11 @@ func (s *Server) Start() error {
 		}
 		return nil
 	case errAccept := <-acceptErrCh:
-		if s.muxHTTPListener != nil {
-			_ = s.muxHTTPListener.Close()
+		_ = httpListener.Close()
+		if errClose := listener.Close(); errClose != nil && !errors.Is(errClose, net.ErrClosed) {
+			log.Debugf("failed to close shared listener after accept loop exit: %v", errClose)
 		}
-		if s.muxBaseListener != nil {
-			if errClose := s.muxBaseListener.Close(); errClose != nil && !errors.Is(errClose, net.ErrClosed) {
-				log.Debugf("failed to close shared listener after accept loop exit: %v", errClose)
-			}
-		}
+		s.clearMuxListeners(listener, httpListener)
 		errServe := <-httpErrCh
 		errServe = normalizeHTTPServeError(errServe)
 		errAccept = normalizeListenerError(errAccept)
@@ -970,17 +986,27 @@ func (s *Server) Stop(ctx context.Context) error {
 		}
 	}
 
-	if s.muxHTTPListener != nil {
-		_ = s.muxHTTPListener.Close()
+	s.stateMu.RLock()
+	httpListener := s.muxHTTPListener
+	baseListener := s.muxBaseListener
+	httpServer := s.server
+	s.stateMu.RUnlock()
+
+	if httpListener != nil {
+		_ = httpListener.Close()
 	}
-	if s.muxBaseListener != nil {
-		if errClose := s.muxBaseListener.Close(); errClose != nil && !errors.Is(errClose, net.ErrClosed) {
+	if baseListener != nil {
+		if errClose := baseListener.Close(); errClose != nil && !errors.Is(errClose, net.ErrClosed) {
 			log.Debugf("failed to close shared listener: %v", errClose)
 		}
 	}
+	s.clearMuxListeners(baseListener, httpListener)
 
 	// Shutdown the HTTP server.
-	if err := s.server.Shutdown(ctx); err != nil {
+	if httpServer == nil {
+		return nil
+	}
+	if err := httpServer.Shutdown(ctx); err != nil {
 		return fmt.Errorf("failed to shutdown HTTP server: %v", err)
 	}
 
@@ -1008,6 +1034,44 @@ func corsMiddleware() gin.HandlerFunc {
 	}
 }
 
+func (s *Server) authDirSnapshot() string {
+	if s == nil {
+		return ""
+	}
+	s.stateMu.RLock()
+	defer s.stateMu.RUnlock()
+	if s.cfg == nil {
+		return ""
+	}
+	return s.cfg.AuthDir
+}
+
+func (s *Server) controlPanelConfigSnapshot() (bool, string, string) {
+	if s == nil {
+		return true, "", ""
+	}
+	s.stateMu.RLock()
+	defer s.stateMu.RUnlock()
+	if s.cfg == nil {
+		return true, "", ""
+	}
+	return s.cfg.RemoteManagement.DisableControlPanel, s.cfg.ProxyURL, s.cfg.RemoteManagement.PanelGitHubRepository
+}
+
+func (s *Server) clearMuxListeners(baseListener net.Listener, httpListener *muxListener) {
+	if s == nil {
+		return
+	}
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	if s.muxHTTPListener == httpListener {
+		s.muxHTTPListener = nil
+	}
+	if s.muxBaseListener == baseListener {
+		s.muxBaseListener = nil
+	}
+}
+
 func (s *Server) applyAccessConfig(oldCfg, newCfg *config.Config) {
 	if s == nil || s.accessManager == nil || newCfg == nil {
 		return
@@ -1024,10 +1088,17 @@ func (s *Server) applyAccessConfig(oldCfg, newCfg *config.Config) {
 //   - clients: The new slice of AI service clients
 //   - cfg: The new application configuration
 func (s *Server) UpdateClients(cfg *config.Config) {
+	if s == nil || cfg == nil {
+		return
+	}
+	s.stateMu.RLock()
+	oldConfigYaml := append([]byte(nil), s.oldConfigYaml...)
+	s.stateMu.RUnlock()
+
 	// Reconstruct old config from YAML snapshot to avoid reference sharing issues
 	var oldCfg *config.Config
-	if len(s.oldConfigYaml) > 0 {
-		_ = yaml.Unmarshal(s.oldConfigYaml, &oldCfg)
+	if len(oldConfigYaml) > 0 {
+		_ = yaml.Unmarshal(oldConfigYaml, &oldCfg)
 	}
 
 	// Update request logger enabled state if it has changed
@@ -1134,14 +1205,16 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 	redisqueue.SetEnabled(s.managementRoutesEnabled.Load())
 
 	s.applyAccessConfig(oldCfg, cfg)
+	nextConfigYaml, _ := yaml.Marshal(cfg)
+	s.stateMu.Lock()
 	s.cfg = cfg
+	s.oldConfigYaml = nextConfigYaml
+	s.stateMu.Unlock()
 	s.wsAuthEnabled.Store(cfg.WebsocketAuth)
 	if oldCfg != nil && s.wsAuthChanged != nil && oldCfg.WebsocketAuth != cfg.WebsocketAuth {
 		s.wsAuthChanged(oldCfg.WebsocketAuth, cfg.WebsocketAuth)
 	}
 	managementasset.SetCurrentConfig(cfg)
-	// Save YAML snapshot for next comparison
-	s.oldConfigYaml, _ = yaml.Marshal(cfg)
 
 	s.handlers.UpdateClients(&cfg.SDKConfig)
 

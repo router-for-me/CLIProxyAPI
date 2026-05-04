@@ -118,6 +118,13 @@ func normalizeResponsesMessageItem(item gjson.Result) (string, []string) {
 			partType := strings.TrimSpace(part.Get("type").String())
 			switch partType {
 			case "input_text", "output_text", "input_image", "input_audio", "input_file":
+				if partType == "input_image" {
+					if imagePart := buildResponsesInputImagePart(OpenAIImageURLFromPart(part), openAIImageDetailFromPart(part)); imagePart != nil {
+						msg, _ = sjson.SetRawBytes(msg, "content.-1", imagePart)
+						contentAdded = true
+					}
+					break
+				}
 				msg, _ = sjson.SetRawBytes(msg, "content.-1", []byte(part.Raw))
 				contentAdded = true
 			case "text":
@@ -132,9 +139,11 @@ func normalizeResponsesMessageItem(item gjson.Result) (string, []string) {
 				contentAdded = true
 			case "image":
 				if dataURL := claudeImageSourceToDataURL(part.Get("source")); dataURL != "" {
-					imagePart := []byte(`{}`)
-					imagePart, _ = sjson.SetBytes(imagePart, "type", "input_image")
-					imagePart, _ = sjson.SetBytes(imagePart, "image_url", dataURL)
+					msg, _ = sjson.SetRawBytes(msg, "content.-1", buildResponsesInputImagePart(dataURL, ""))
+					contentAdded = true
+				}
+			case "image_url":
+				if imagePart := buildResponsesInputImagePart(OpenAIImageURLFromPart(part), openAIImageDetailFromPart(part)); imagePart != nil {
 					msg, _ = sjson.SetRawBytes(msg, "content.-1", imagePart)
 					contentAdded = true
 				}
@@ -234,6 +243,16 @@ func normalizeChatMessage(message gjson.Result) ([]string, string, []string) {
 		partType := strings.TrimSpace(part.Get("type").String())
 		switch partType {
 		case "text", "image_url", "file":
+			if partType == "image_url" {
+				if imagePart := buildChatImageURLPart(OpenAIImageURLFromPart(part), openAIImageDetailFromPart(part)); imagePart != nil {
+					normalizedContent, _ = sjson.SetRawBytes(normalizedContent, "-1", imagePart)
+					if string(imagePart) != part.Raw {
+						contentChanged = true
+					}
+					hasContentParts = true
+				}
+				break
+			}
 			normalizedContent, _ = sjson.SetRawBytes(normalizedContent, "-1", []byte(part.Raw))
 			hasContentParts = true
 		case "input_text", "output_text":
@@ -242,6 +261,18 @@ func normalizeChatMessage(message gjson.Result) ([]string, string, []string) {
 			normalizedContent, _ = sjson.SetRawBytes(normalizedContent, "-1", textPart)
 			contentChanged = true
 			hasContentParts = true
+		case "input_image":
+			if imagePart := buildChatImageURLPart(OpenAIImageURLFromPart(part), openAIImageDetailFromPart(part)); imagePart != nil {
+				normalizedContent, _ = sjson.SetRawBytes(normalizedContent, "-1", imagePart)
+				contentChanged = true
+				hasContentParts = true
+			}
+		case "image":
+			if imagePart := buildChatImageURLPart(claudeImageSourceToDataURL(part.Get("source")), ""); imagePart != nil {
+				normalizedContent, _ = sjson.SetRawBytes(normalizedContent, "-1", imagePart)
+				contentChanged = true
+				hasContentParts = true
+			}
 		case "tool_use":
 			call := []byte(`{"id":"","type":"function","function":{"name":"","arguments":""}}`)
 			call, _ = sjson.SetBytes(call, "id", part.Get("id").String())
@@ -354,6 +385,102 @@ func toolResultValue(content gjson.Result) string {
 		}
 	}
 	return content.Raw
+}
+
+// OpenAIImageURLFromPart extracts the image URL/data URL from common OpenAI
+// Chat, OpenAI Responses, and Claude-style image content parts.
+func OpenAIImageURLFromPart(part gjson.Result) string {
+	for _, path := range []string{"image_url.url", "image_url", "url"} {
+		value := part.Get(path)
+		if value.Exists() && value.Type == gjson.String {
+			if imageURL := strings.TrimSpace(value.String()); imageURL != "" {
+				return imageURL
+			}
+		}
+	}
+	if source := part.Get("source"); source.Exists() {
+		return claudeImageSourceToDataURL(source)
+	}
+	return ""
+}
+
+// ParseDataURL splits a data URL into MIME type and data payload.
+func ParseDataURL(dataURL string) (string, string, bool) {
+	trimmed := strings.TrimSpace(dataURL)
+	if len(trimmed) < len("data:,") || !strings.HasPrefix(strings.ToLower(trimmed), "data:") {
+		return "", "", false
+	}
+
+	mediaAndData := strings.SplitN(trimmed[len("data:"):], ",", 2)
+	if len(mediaAndData) != 2 {
+		return "", "", false
+	}
+
+	mimeType := strings.TrimSpace(strings.SplitN(mediaAndData[0], ";", 2)[0])
+	if mimeType == "" {
+		mimeType = "application/octet-stream"
+	}
+	data := strings.TrimSpace(mediaAndData[1])
+	if data == "" {
+		return "", "", false
+	}
+	return mimeType, data, true
+}
+
+// GeminiInlineDataFromPart returns either camelCase or snake_case Gemini inline
+// data from a part.
+func GeminiInlineDataFromPart(part gjson.Result) gjson.Result {
+	inlineData := part.Get("inlineData")
+	if inlineData.Exists() {
+		return inlineData
+	}
+	return part.Get("inline_data")
+}
+
+// GeminiInlineDataMimeType extracts the MIME type from either Gemini JSON
+// spelling.
+func GeminiInlineDataMimeType(inlineData gjson.Result) string {
+	mimeType := strings.TrimSpace(inlineData.Get("mimeType").String())
+	if mimeType == "" {
+		mimeType = strings.TrimSpace(inlineData.Get("mime_type").String())
+	}
+	if mimeType == "" {
+		mimeType = "application/octet-stream"
+	}
+	return mimeType
+}
+
+func buildResponsesInputImagePart(imageURL, detail string) []byte {
+	imageURL = strings.TrimSpace(imageURL)
+	if imageURL == "" {
+		return nil
+	}
+	imagePart := []byte(`{"type":"input_image","image_url":""}`)
+	imagePart, _ = sjson.SetBytes(imagePart, "image_url", imageURL)
+	if detail = strings.TrimSpace(detail); detail != "" {
+		imagePart, _ = sjson.SetBytes(imagePart, "detail", detail)
+	}
+	return imagePart
+}
+
+func buildChatImageURLPart(imageURL, detail string) []byte {
+	imageURL = strings.TrimSpace(imageURL)
+	if imageURL == "" {
+		return nil
+	}
+	imagePart := []byte(`{"type":"image_url","image_url":{"url":""}}`)
+	imagePart, _ = sjson.SetBytes(imagePart, "image_url.url", imageURL)
+	if detail = strings.TrimSpace(detail); detail != "" {
+		imagePart, _ = sjson.SetBytes(imagePart, "image_url.detail", detail)
+	}
+	return imagePart
+}
+
+func openAIImageDetailFromPart(part gjson.Result) string {
+	if detail := strings.TrimSpace(part.Get("detail").String()); detail != "" {
+		return detail
+	}
+	return strings.TrimSpace(part.Get("image_url.detail").String())
 }
 
 func claudeImageSourceToDataURL(source gjson.Result) string {

@@ -175,8 +175,11 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 							if role == "user" {
 								part := []byte(`{}`)
 								part, _ = sjson.SetBytes(part, "type", "input_image")
-								if u := it.Get("image_url.url"); u.Exists() {
-									part, _ = sjson.SetBytes(part, "image_url", u.String())
+								if u := util.OpenAIImageURLFromPart(it); u != "" {
+									part, _ = sjson.SetBytes(part, "image_url", u)
+								}
+								if detail := it.Get("image_url.detail").String(); detail != "" {
+									part, _ = sjson.SetBytes(part, "detail", detail)
 								}
 								msg, _ = sjson.SetRawBytes(msg, "content.-1", part)
 							}

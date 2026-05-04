@@ -627,7 +627,9 @@ func (h *Handler) refreshAntigravityOAuthAccessToken(ctx context.Context, auth *
 	if h != nil && h.authManager != nil {
 		auth.LastRefreshedAt = now
 		auth.UpdatedAt = now
-		_, _ = h.authManager.Update(ctx, auth)
+		if _, errUpdate := h.authManager.Update(ctx, auth); errUpdate != nil {
+			log.WithError(errUpdate).WithField("auth_id", auth.ID).Warn("failed to persist refreshed antigravity auth")
+		}
 	}
 
 	return strings.TrimSpace(tokenResp.AccessToken), nil

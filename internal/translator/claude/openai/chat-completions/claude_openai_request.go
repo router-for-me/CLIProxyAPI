@@ -357,7 +357,7 @@ func convertOpenAIContentPartToClaudePart(part gjson.Result) string {
 		return string(textPart)
 
 	case "image_url":
-		return convertOpenAIImageURLToClaudePart(part.Get("image_url.url").String())
+		return convertOpenAIImageURLToClaudePart(util.OpenAIImageURLFromPart(part))
 
 	case "file":
 		fileData := part.Get("file.file_data").String()
@@ -383,21 +383,15 @@ func convertOpenAIImageURLToClaudePart(imageURL string) string {
 		return ""
 	}
 
-	if strings.HasPrefix(imageURL, "data:") {
-		parts := strings.SplitN(imageURL, ",", 2)
-		if len(parts) != 2 {
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(imageURL)), "data:") {
+		mediaType, data, ok := util.ParseDataURL(imageURL)
+		if !ok {
 			return ""
-		}
-
-		mediaTypePart := strings.SplitN(parts[0], ";", 2)[0]
-		mediaType := strings.TrimPrefix(mediaTypePart, "data:")
-		if mediaType == "" {
-			mediaType = "application/octet-stream"
 		}
 
 		imagePart := []byte(`{"type":"image","source":{"type":"base64","media_type":"","data":""}}`)
 		imagePart, _ = sjson.SetBytes(imagePart, "source.media_type", mediaType)
-		imagePart, _ = sjson.SetBytes(imagePart, "source.data", parts[1])
+		imagePart, _ = sjson.SetBytes(imagePart, "source.data", data)
 		return string(imagePart)
 	}
 

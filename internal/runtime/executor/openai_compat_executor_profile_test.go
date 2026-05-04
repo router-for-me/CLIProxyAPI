@@ -327,11 +327,16 @@ func TestInferOpenAICompatKindFromBaseURL(t *testing.T) {
 		want    string
 	}{
 		{name: "kimi moonshot", baseURL: "https://api.moonshot.ai/v1", want: "kimi"},
+		{name: "kimi moonshot cn", baseURL: "https://api.moonshot.cn/v1", want: "kimi"},
 		{name: "kimi coding", baseURL: "https://api.kimi.com/coding/v1", want: "kimi"},
 		{name: "minimax openai", baseURL: "https://api.minimax.io/v1", want: "minimax"},
 		{name: "zhipu coding", baseURL: "https://open.bigmodel.cn/api/coding/paas/v4", want: "zhipu"},
 		{name: "zai", baseURL: "https://api.z.ai/api/paas/v4", want: "zhipu"},
 		{name: "deepseek", baseURL: "https://api.deepseek.com/v1", want: "deepseek"},
+		{name: "xiaomi openai", baseURL: "https://api.xiaomimimo.com/v1", want: "xiaomi"},
+		{name: "xiaomi token plan", baseURL: "https://token-plan-cn.xiaomimimo.com/v1", want: "xiaomi"},
+		{name: "xiaomi token plan singapore", baseURL: "https://token-plan-sgp.xiaomimimo.com/v1", want: "xiaomi"},
+		{name: "xiaomi token plan europe anthropic", baseURL: "https://token-plan-ams.xiaomimimo.com/anthropic", want: "xiaomi"},
 		{name: "unknown", baseURL: "https://example.com/v1", want: ""},
 	}
 
@@ -438,6 +443,71 @@ func TestOpenAICompatPayloadZhipuForcesAutoToolChoice(t *testing.T) {
 
 	if got := gjson.GetBytes(out, "tool_choice").String(); got != "auto" {
 		t.Fatalf("tool_choice = %q, want auto: %s", got, string(out))
+	}
+}
+
+func TestOpenAICompatPayloadZhipuConvertsDataURLImagesToRawBase64(t *testing.T) {
+	payload := []byte(`{
+		"model":"glm-4.5v",
+		"messages":[{"role":"user","content":[
+			{"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA","detail":"high"}},
+			{"type":"text","text":"describe"}
+		]}]
+	}`)
+
+	out := scrubOpenAICompatPayloadForModel(payload, openAICompatProfileForKind("zhipu"), "glm-4.5v", "https://open.bigmodel.cn/api/paas/v4")
+
+	if got := gjson.GetBytes(out, "messages.0.content.0.image_url.url").String(); got != "AAAA" {
+		t.Fatalf("image_url.url = %q, want raw base64: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.0.image_url.detail").String(); got != "high" {
+		t.Fatalf("image detail = %q, want high: %s", got, string(out))
+	}
+}
+
+func TestOpenAICompatPayloadKimiPreservesDataURLImages(t *testing.T) {
+	payload := []byte(`{
+		"model":"kimi-latest",
+		"messages":[{"role":"user","content":[
+			{"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA"}}
+		]}]
+	}`)
+
+	out := scrubOpenAICompatPayloadForModel(payload, openAICompatProfileForKind("kimi"), "kimi-latest", "https://api.moonshot.ai/v1")
+
+	if got := gjson.GetBytes(out, "messages.0.content.0.image_url.url").String(); got != "data:image/png;base64,AAAA" {
+		t.Fatalf("image_url.url = %q, want data URL preserved: %s", got, string(out))
+	}
+}
+
+func TestOpenAICompatPayloadXiaomiScrubsUnsupportedOpenAIExtras(t *testing.T) {
+	payload := []byte(`{
+		"model":"mimo-v2.5",
+		"messages":[{"role":"assistant","content":"thinking","reasoning_content":"hidden"}],
+		"stream_options":{"include_usage":true},
+		"parallel_tool_calls":true,
+		"reasoning_effort":"high",
+		"metadata":{"tenant":"demo"},
+		"store":true,
+		"thinking":{"type":"enabled"}
+	}`)
+
+	out := scrubOpenAICompatPayloadForModel(payload, openAICompatProfileForKind("xiaomi"), "mimo-v2.5", "https://api.xiaomimimo.com/v1")
+
+	for _, path := range []string{
+		"stream_options",
+		"parallel_tool_calls",
+		"reasoning_effort",
+		"metadata",
+		"store",
+		"messages.0.reasoning_content",
+	} {
+		if gjson.GetBytes(out, path).Exists() {
+			t.Fatalf("unexpected field %s in payload: %s", path, string(out))
+		}
+	}
+	if !gjson.GetBytes(out, "thinking").Exists() {
+		t.Fatalf("native thinking field should be preserved: %s", string(out))
 	}
 }
 

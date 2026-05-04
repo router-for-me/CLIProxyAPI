@@ -44,6 +44,16 @@ func TestInferCompatKindFromBaseURL(t *testing.T) {
 			want:    "zhipu",
 		},
 		{
+			name:    "zhipu coding plan openai",
+			baseURL: "https://open.bigmodel.cn/api/coding/paas/v4",
+			want:    "zhipu",
+		},
+		{
+			name:    "zai coding openai",
+			baseURL: "https://api.z.ai/api/paas/v4",
+			want:    "zhipu",
+		},
+		{
 			name:    "lanyun anthropic",
 			baseURL: "https://maas-api.lanyun.net/anthropic",
 			want:    "zhipu",
@@ -56,6 +66,31 @@ func TestInferCompatKindFromBaseURL(t *testing.T) {
 		{
 			name:    "xiaomi anthropic",
 			baseURL: "https://token-plan-cn.xiaomimimo.com/anthropic",
+			want:    "xiaomi",
+		},
+		{
+			name:    "xiaomi token plan openai",
+			baseURL: "https://token-plan-cn.xiaomimimo.com/v1",
+			want:    "xiaomi",
+		},
+		{
+			name:    "xiaomi token plan singapore openai",
+			baseURL: "https://token-plan-sgp.xiaomimimo.com/v1",
+			want:    "xiaomi",
+		},
+		{
+			name:    "xiaomi token plan europe anthropic",
+			baseURL: "https://token-plan-ams.xiaomimimo.com/anthropic",
+			want:    "xiaomi",
+		},
+		{
+			name:    "xiaomi api openai",
+			baseURL: "https://api.xiaomimimo.com/v1",
+			want:    "xiaomi",
+		},
+		{
+			name:    "xiaomi api anthropic",
+			baseURL: "https://api.xiaomimimo.com/anthropic",
 			want:    "xiaomi",
 		},
 		{

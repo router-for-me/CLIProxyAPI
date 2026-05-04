@@ -200,36 +200,6 @@ func (s *FileTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth,
 	if provider == "" {
 		provider = "unknown"
 	}
-	if provider == "antigravity" || provider == "gemini" {
-		projectID := ""
-		if pid, ok := metadata["project_id"].(string); ok {
-			projectID = strings.TrimSpace(pid)
-		}
-		if projectID == "" {
-			accessToken := extractAccessToken(metadata)
-			// For gemini type, the stored access_token is likely expired (~1h lifetime).
-			// Refresh it using the long-lived refresh_token before querying.
-			if provider == "gemini" {
-				if tokenMap, ok := metadata["token"].(map[string]any); ok {
-					if refreshed, errRefresh := refreshGeminiAccessToken(tokenMap, http.DefaultClient); errRefresh == nil {
-						accessToken = refreshed
-					}
-				}
-			}
-			if accessToken != "" {
-				fetchedProjectID, errFetch := FetchAntigravityProjectID(context.Background(), accessToken, http.DefaultClient)
-				if errFetch == nil && strings.TrimSpace(fetchedProjectID) != "" {
-					metadata["project_id"] = strings.TrimSpace(fetchedProjectID)
-					if raw, errMarshal := json.Marshal(metadata); errMarshal == nil {
-						if file, errOpen := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0o600); errOpen == nil {
-							_, _ = file.Write(raw)
-							_ = file.Close()
-						}
-					}
-				}
-			}
-		}
-	}
 	info, err := os.Stat(path)
 	if err != nil {
 		return nil, fmt.Errorf("stat file: %w", err)

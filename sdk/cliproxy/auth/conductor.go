@@ -1808,6 +1808,9 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 		auth.ID = uuid.NewString()
 	}
 	auth.EnsureIndex()
+	if err := m.persist(ctx, auth); err != nil {
+		return nil, err
+	}
 	authClone := auth.Clone()
 	m.mu.Lock()
 	m.auths[auth.ID] = authClone
@@ -1817,7 +1820,6 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 		m.scheduler.upsertAuth(authClone)
 	}
 	m.queueRefreshReschedule(auth.ID)
-	_ = m.persist(ctx, auth)
 	m.hook.OnAuthRegistered(ctx, auth.Clone())
 	return auth.Clone(), nil
 }
@@ -1840,7 +1842,12 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 		}
 	}
 	auth.EnsureIndex()
+	m.mu.Unlock()
+	if err := m.persist(ctx, auth); err != nil {
+		return nil, err
+	}
 	authClone := auth.Clone()
+	m.mu.Lock()
 	m.auths[auth.ID] = authClone
 	m.mu.Unlock()
 	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
@@ -1848,7 +1855,6 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 		m.scheduler.upsertAuth(authClone)
 	}
 	m.queueRefreshReschedule(auth.ID)
-	_ = m.persist(ctx, auth)
 	m.hook.OnAuthUpdated(ctx, auth.Clone())
 	return auth.Clone(), nil
 }
@@ -3185,7 +3191,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			}
 		}
 
-		_ = m.persist(ctx, auth)
+		if errPersist := m.persist(ctx, auth); errPersist != nil {
+			logEntryWithRequestID(ctx).WithField("auth_id", auth.ID).Warnf("failed to persist auth result state: %v", errPersist)
+		}
 		authSnapshot = auth.Clone()
 	}
 	m.mu.Unlock()
@@ -5257,7 +5265,9 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 	if m.shouldRefresh(updated, now) {
 		updated.NextRefreshAfter = now.Add(refreshIneffectiveBackoff)
 	}
-	_, _ = m.Update(ctx, updated)
+	if _, errUpdate := m.Update(ctx, updated); errUpdate != nil {
+		log.Warnf("failed to persist refreshed auth %s, %s: %v", auth.Provider, auth.ID, errUpdate)
+	}
 }
 
 func (m *Manager) executorFor(provider string) ProviderExecutor {
