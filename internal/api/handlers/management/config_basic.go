@@ -24,11 +24,12 @@ const (
 )
 
 func (h *Handler) GetConfig(c *gin.Context) {
-	if h == nil || h.cfg() == nil {
+	cfg := h.cfg()
+	if h == nil || cfg == nil {
 		c.JSON(200, gin.H{})
 		return
 	}
-	c.JSON(200, new(*h.cfg()))
+	c.JSON(200, cfg)
 }
 
 type releaseInfo struct {
