@@ -329,6 +329,56 @@ func TestConditionMatches(t *testing.T) {
 	}
 }
 
+// TestModelMapper_ConditionalUnavailableFallsThroughToFallback verifies
+// that when a conditional rule's `to` model has no local providers, the
+// mapper continues scanning and returns the same-From unconditional
+// fallback, rather than silently giving up and returning "".
+func TestModelMapper_ConditionalUnavailableFallsThroughToFallback(t *testing.T) {
+	reg := registry.GetGlobalRegistry()
+	// Register only the fallback target. The conditional target is
+	// intentionally NOT registered so it has no providers.
+	reg.RegisterClient("test-cond-unavail", "openai", []*registry.ModelInfo{
+		{ID: "gpt-fallback", OwnedBy: "openai", Type: "openai"},
+	})
+	defer reg.UnregisterClient("test-cond-unavail")
+
+	mapper := NewModelMapper([]config.AmpModelMapping{
+		{From: "gemini-3-flash-preview", To: "gpt-handoff-missing",
+			When: &config.AmpMappingCondition{Feature: "handoff"}},
+		{From: "gemini-3-flash-preview", To: "gpt-fallback"},
+	})
+
+	got := mapper.MapModelCtx("gemini-3-flash-preview",
+		RequestFingerprint{ToolChoice: "create_handoff_context"})
+	if got != "gpt-fallback" {
+		t.Errorf("got %q, want gpt-fallback (conditional target unavailable must fall through)", got)
+	}
+}
+
+// TestModelMapper_RegexConditionalUnavailableFallsThroughToOverlapping
+// verifies the same fall-through behavior across overlapping regex
+// patterns: when an earlier conditional regex's target is unavailable,
+// the next matching regex (or unconditional fallback) is used instead.
+func TestModelMapper_RegexConditionalUnavailableFallsThroughToOverlapping(t *testing.T) {
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient("test-regex-unavail", "anthropic", []*registry.ModelInfo{
+		{ID: "late-fallback", OwnedBy: "anthropic", Type: "claude"},
+	})
+	defer reg.UnregisterClient("test-regex-unavail")
+
+	mapper := NewModelMapper([]config.AmpModelMapping{
+		{From: "^gemini-3-.*$", To: "missing-conditional", Regex: true,
+			When: &config.AmpMappingCondition{Feature: "handoff"}},
+		{From: "^.*-flash-.*$", To: "late-fallback", Regex: true},
+	})
+
+	got := mapper.MapModelCtx("gemini-3-flash-preview",
+		RequestFingerprint{ToolChoice: "create_handoff_context"})
+	if got != "late-fallback" {
+		t.Errorf("got %q, want late-fallback (unavailable conditional must not block later overlapping rule)", got)
+	}
+}
+
 // TestModelMapper_RegexOrderRespectedAcrossOverlappingPatterns verifies
 // that when two regex rules with different From patterns both match the
 // same model, the earlier rule's unconditional target wins over the

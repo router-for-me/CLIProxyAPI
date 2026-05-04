@@ -88,9 +88,9 @@ func (m *DefaultModelMapper) MapModelCtx(requestedModel string, fp RequestFinger
 	normalizedBase := strings.ToLower(strings.TrimSpace(baseModel))
 
 	m.mu.RLock()
-	targetModel := selectTarget(m.exacts, baseModel, normalizedBase, fp, false)
+	targetModel := selectTarget(m.exacts, baseModel, normalizedBase, fp, false, hasProviders)
 	if targetModel == "" {
-		targetModel = selectTarget(m.regexs, baseModel, normalizedBase, fp, true)
+		targetModel = selectTarget(m.regexs, baseModel, normalizedBase, fp, true, hasProviders)
 	}
 	m.mu.RUnlock()
 
@@ -98,15 +98,9 @@ func (m *DefaultModelMapper) MapModelCtx(requestedModel string, fp RequestFinger
 		return ""
 	}
 
-	// Check if target model already has a thinking suffix (config priority)
+	// Target was already validated by selectTarget; ParseSuffix again
+	// only to decide on suffix-merge behavior below.
 	targetResult := thinking.ParseSuffix(targetModel)
-
-	// Verify target model has available providers (use base model for lookup)
-	providers := util.GetProviderName(targetResult.ModelName)
-	if len(providers) == 0 {
-		log.Debugf("amp model mapping: target model %s has no available providers, skipping mapping", targetModel)
-		return ""
-	}
 
 	// Suffix handling: config suffix takes priority, otherwise preserve user suffix
 	if targetResult.HasSuffix {
@@ -118,6 +112,18 @@ func (m *DefaultModelMapper) MapModelCtx(requestedModel string, fp RequestFinger
 	return targetModel
 }
 
+// hasProviders reports whether a target model (possibly with a thinking
+// suffix) has any registered local providers. Used by selectTarget to
+// skip rules whose target is unavailable so that fallback rules can
+// still apply.
+func hasProviders(targetModel string) bool {
+	if targetModel == "" {
+		return false
+	}
+	res := thinking.ParseSuffix(targetModel)
+	return len(util.GetProviderName(res.ModelName)) > 0
+}
+
 // selectTarget scans rules of one class (exact or regex) and returns the
 // best target model name. Within a contiguous group of rules sharing the
 // same From pattern, conditional rules win and the first unconditional is
@@ -126,7 +132,12 @@ func (m *DefaultModelMapper) MapModelCtx(requestedModel string, fp RequestFinger
 // later conditional from the same group matched), it wins over any
 // later group's matches. This avoids letting a later regex rule with a
 // different From pattern silently override an earlier matching rule.
-func selectTarget(rules []mappingRule, baseModel, normalizedBase string, fp RequestFingerprint, isRegex bool) string {
+//
+// `available` is called for every candidate target. If a matching rule's
+// target is unavailable locally, the scan continues so that an
+// alternative rule (typically the same-From unconditional fallback, or a
+// later overlapping pattern) can still produce a valid target.
+func selectTarget(rules []mappingRule, baseModel, normalizedBase string, fp RequestFingerprint, isRegex bool, available func(string) bool) string {
 	var (
 		groupKey      string
 		groupHas      bool
@@ -156,12 +167,12 @@ func selectTarget(rules []mappingRule, baseModel, normalizedBase string, fp Requ
 		groupKey = key
 		groupHas = true
 		if r.when == nil {
-			if groupFallback == "" {
+			if groupFallback == "" && available(r.to) {
 				groupFallback = r.to
 			}
 			continue
 		}
-		if ConditionMatches(r.when, fp) {
+		if ConditionMatches(r.when, fp) && available(r.to) {
 			return r.to
 		}
 	}
