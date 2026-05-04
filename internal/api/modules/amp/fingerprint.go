@@ -254,10 +254,13 @@ func extractLastUserText(body []byte) string {
 }
 
 // extractSystemText returns the textual system / systemInstruction /
-// instructions content of the request, concatenating multiple parts in
-// order. Anthropic and OpenAI accept either a string or an array of typed
-// parts; Gemini wraps it in systemInstruction.parts[].text. OpenAI
-// Responses additionally allows a system-role entry inside input[].
+// instructions content of the request. Sources are tried in order
+// (top-level system, top-level instructions, input[] system/developer
+// entries, systemInstruction); the first non-empty source wins and its
+// text parts are concatenated in declaration order. Anthropic and
+// OpenAI accept either a string or an array of typed parts; Gemini
+// wraps it in systemInstruction.parts[].text. OpenAI Responses
+// additionally allows a system/developer-role entry inside input[].
 func extractSystemText(body []byte) string {
 	// Anthropic / OpenAI Chat: top-level "system" (string or array).
 	if v := gjson.GetBytes(body, "system"); v.Exists() {

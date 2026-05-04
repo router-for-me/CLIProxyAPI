@@ -447,9 +447,9 @@ func TestModelMapper_RegexOrderRespectedAcrossOverlappingPatterns(t *testing.T) 
 
 	// Two distinct regex patterns that both match "gemini-3-flash-preview".
 	// Earlier rule is unconditional; later rule has a handoff condition.
-	// Since the earlier group's fallback is committed at the group
-	// transition, the later conditional rule must NOT steal a handoff
-	// request that already had a perfectly good earlier match.
+	// Groups are evaluated in declaration order, so the earlier group's
+	// unconditional fallback is returned before the later group's
+	// conditional rule is considered.
 	mapper := NewModelMapper([]config.AmpModelMapping{
 		{From: "^gemini-3-.*$", To: "early-target", Regex: true},
 		{From: "^.*-flash-.*$", To: "late-handoff-target", Regex: true,
