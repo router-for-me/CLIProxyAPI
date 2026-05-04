@@ -10,20 +10,23 @@ import (
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 )
 
 type aliasRoutingExecutor struct {
 	id string
 
-	mu            sync.Mutex
-	executeModels []string
+	mu             sync.Mutex
+	executeModels  []string
+	executeAliases []string
 }
 
 func (e *aliasRoutingExecutor) Identifier() string { return e.id }
 
-func (e *aliasRoutingExecutor) Execute(_ context.Context, _ *Auth, req cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+func (e *aliasRoutingExecutor) Execute(ctx context.Context, _ *Auth, req cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	e.mu.Lock()
 	e.executeModels = append(e.executeModels, req.Model)
+	e.executeAliases = append(e.executeAliases, coreusage.RequestedModelAliasFromContext(ctx))
 	e.mu.Unlock()
 	return cliproxyexecutor.Response{Payload: []byte(req.Model)}, nil
 }
@@ -49,6 +52,14 @@ func (e *aliasRoutingExecutor) ExecuteModels() []string {
 	defer e.mu.Unlock()
 	out := make([]string, len(e.executeModels))
 	copy(out, e.executeModels)
+	return out
+}
+
+func (e *aliasRoutingExecutor) ExecuteAliases() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	out := make([]string, len(e.executeAliases))
+	copy(out, e.executeAliases)
 	return out
 }
 
@@ -107,5 +118,13 @@ func TestManagerExecute_OAuthAliasBypassesBlockedRouteModel(t *testing.T) {
 	}
 	if gotModels[0] != targetModel {
 		t.Fatalf("execute model = %q, want %q", gotModels[0], targetModel)
+	}
+
+	gotAliases := executor.ExecuteAliases()
+	if len(gotAliases) != 1 {
+		t.Fatalf("execute aliases len = %d, want 1", len(gotAliases))
+	}
+	if gotAliases[0] != routeModel {
+		t.Fatalf("execute alias = %q, want %q", gotAliases[0], routeModel)
 	}
 }

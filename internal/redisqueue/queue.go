@@ -6,7 +6,10 @@ import (
 	"time"
 )
 
-const retentionWindow = time.Minute
+const (
+	defaultRetentionSeconds int64 = 60
+	maxRetentionSeconds     int64 = 3600
+)
 
 type queueItem struct {
 	enqueuedAt time.Time
@@ -20,9 +23,14 @@ type queue struct {
 }
 
 var (
-	enabled atomic.Bool
-	global  queue
+	enabled          atomic.Bool
+	retentionSeconds atomic.Int64
+	global           queue
 )
+
+func init() {
+	retentionSeconds.Store(defaultRetentionSeconds)
+}
 
 func SetEnabled(value bool) {
 	enabled.Store(value)
@@ -33,6 +41,16 @@ func SetEnabled(value bool) {
 
 func Enabled() bool {
 	return enabled.Load()
+}
+
+func SetRetentionSeconds(value int) {
+	normalized := int64(value)
+	if normalized <= 0 {
+		normalized = defaultRetentionSeconds
+	} else if normalized > maxRetentionSeconds {
+		normalized = maxRetentionSeconds
+	}
+	retentionSeconds.Store(normalized)
 }
 
 func Enqueue(payload []byte) {
@@ -110,7 +128,11 @@ func (q *queue) pruneLocked(now time.Time) {
 		return
 	}
 
-	cutoff := now.Add(-retentionWindow)
+	windowSeconds := retentionSeconds.Load()
+	if windowSeconds <= 0 {
+		windowSeconds = defaultRetentionSeconds
+	}
+	cutoff := now.Add(-time.Duration(windowSeconds) * time.Second)
 	for q.head < len(q.items) && q.items[q.head].enqueuedAt.Before(cutoff) {
 		q.head++
 	}
