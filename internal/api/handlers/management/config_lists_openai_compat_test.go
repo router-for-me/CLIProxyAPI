@@ -40,7 +40,7 @@ func TestPutOpenAICompat_NormalizesKind(t *testing.T) {
 	}
 }
 
-func TestPutClaudeKeys_PartialListPreservesExistingByDefault(t *testing.T) {
+func TestPutClaudeKeys_RemovesOmittedKeysByDefault(t *testing.T) {
 	t.Parallel()
 	gin.SetMode(gin.TestMode)
 
@@ -66,14 +66,14 @@ func TestPutClaudeKeys_PartialListPreservesExistingByDefault(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
 	}
-	if got := len(h.cfg.ClaudeKey); got != 2 {
-		t.Fatalf("claude-api-key len = %d, want 2", got)
+	if got := len(h.cfg.ClaudeKey); got != 1 {
+		t.Fatalf("claude-api-key len = %d, want 1", got)
 	}
 	if !h.cfg.ClaudeKey[0].Disabled {
 		t.Fatal("incoming key update should be applied")
 	}
-	if got := h.cfg.ClaudeKey[1].APIKey; got != "sk-b" {
-		t.Fatalf("omitted key = %q, want sk-b", got)
+	if got := h.cfg.ClaudeKey[0].APIKey; got != "sk-a" {
+		t.Fatalf("remaining key = %q, want sk-a", got)
 	}
 }
 

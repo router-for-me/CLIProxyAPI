@@ -165,6 +165,29 @@ func mergeGeminiKeysPreservingMissing(existing, incoming []config.GeminiKey) []c
 	return out
 }
 
+func mergeGeminiKeyFields(existing, incoming []config.GeminiKey) []config.GeminiKey {
+	out := make([]config.GeminiKey, 0, len(incoming))
+	used := make([]bool, len(existing))
+	identityAt := func(i int) string {
+		return apiKeyEntryIdentity(existing[i].APIKey, existing[i].BaseURL, existing[i].ProxyURL)
+	}
+	for i := range incoming {
+		entry := incoming[i]
+		idx := findUnusedIdentityMatch(used, apiKeyEntryIdentity(entry.APIKey, entry.BaseURL, entry.ProxyURL), identityAt)
+		if idx >= 0 {
+			used[idx] = true
+			if entry.RoutingGroup == "" {
+				entry.RoutingGroup = existing[idx].RoutingGroup
+			}
+			if !entry.Disabled && existing[idx].Disabled {
+				entry.Disabled = true
+			}
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
 func mergeClaudeKeysPreservingMissing(existing, incoming []config.ClaudeKey) []config.ClaudeKey {
 	out := make([]config.ClaudeKey, 0, len(incoming)+len(existing))
 	used := make([]bool, len(existing))
@@ -190,6 +213,29 @@ func mergeClaudeKeysPreservingMissing(existing, incoming []config.ClaudeKey) []c
 			continue
 		}
 		out = append(out, existing[i])
+	}
+	return out
+}
+
+func mergeClaudeKeyFields(existing, incoming []config.ClaudeKey) []config.ClaudeKey {
+	out := make([]config.ClaudeKey, 0, len(incoming))
+	used := make([]bool, len(existing))
+	identityAt := func(i int) string {
+		return apiKeyEntryIdentity(existing[i].APIKey, existing[i].BaseURL, existing[i].ProxyURL)
+	}
+	for i := range incoming {
+		entry := incoming[i]
+		idx := findUnusedIdentityMatch(used, apiKeyEntryIdentity(entry.APIKey, entry.BaseURL, entry.ProxyURL), identityAt)
+		if idx >= 0 {
+			used[idx] = true
+			if entry.RoutingGroup == "" {
+				entry.RoutingGroup = existing[idx].RoutingGroup
+			}
+			if !entry.Disabled && existing[idx].Disabled {
+				entry.Disabled = true
+			}
+		}
+		out = append(out, entry)
 	}
 	return out
 }
@@ -223,6 +269,29 @@ func mergeCodexKeysPreservingMissing(existing, incoming []config.CodexKey) []con
 	return out
 }
 
+func mergeCodexKeyFields(existing, incoming []config.CodexKey) []config.CodexKey {
+	out := make([]config.CodexKey, 0, len(incoming))
+	used := make([]bool, len(existing))
+	identityAt := func(i int) string {
+		return apiKeyEntryIdentity(existing[i].APIKey, existing[i].BaseURL, existing[i].ProxyURL)
+	}
+	for i := range incoming {
+		entry := incoming[i]
+		idx := findUnusedIdentityMatch(used, apiKeyEntryIdentity(entry.APIKey, entry.BaseURL, entry.ProxyURL), identityAt)
+		if idx >= 0 {
+			used[idx] = true
+			if entry.RoutingGroup == "" {
+				entry.RoutingGroup = existing[idx].RoutingGroup
+			}
+			if !entry.Disabled && existing[idx].Disabled {
+				entry.Disabled = true
+			}
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
 func mergeVertexCompatKeysPreservingMissing(existing, incoming []config.VertexCompatKey) []config.VertexCompatKey {
 	out := make([]config.VertexCompatKey, 0, len(incoming)+len(existing))
 	used := make([]bool, len(existing))
@@ -248,6 +317,29 @@ func mergeVertexCompatKeysPreservingMissing(existing, incoming []config.VertexCo
 			continue
 		}
 		out = append(out, existing[i])
+	}
+	return out
+}
+
+func mergeVertexCompatKeyFields(existing, incoming []config.VertexCompatKey) []config.VertexCompatKey {
+	out := make([]config.VertexCompatKey, 0, len(incoming))
+	used := make([]bool, len(existing))
+	identityAt := func(i int) string {
+		return apiKeyEntryIdentity(existing[i].APIKey, existing[i].BaseURL, existing[i].ProxyURL)
+	}
+	for i := range incoming {
+		entry := incoming[i]
+		idx := findUnusedIdentityMatch(used, apiKeyEntryIdentity(entry.APIKey, entry.BaseURL, entry.ProxyURL), identityAt)
+		if idx >= 0 {
+			used[idx] = true
+			if entry.RoutingGroup == "" {
+				entry.RoutingGroup = existing[idx].RoutingGroup
+			}
+			if !entry.Disabled && existing[idx].Disabled {
+				entry.Disabled = true
+			}
+		}
+		out = append(out, entry)
 	}
 	return out
 }
@@ -377,7 +469,7 @@ func (h *Handler) PutGeminiKeys(c *gin.Context) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if !configListReplaceRequested(c) {
-		arr = mergeGeminiKeysPreservingMissing(h.cfg.GeminiKey, arr)
+		arr = mergeGeminiKeyFields(h.cfg.GeminiKey, arr)
 	}
 	h.cfg.GeminiKey = append([]config.GeminiKey(nil), arr...)
 	h.cfg.SanitizeGeminiKeys()
@@ -553,7 +645,7 @@ func (h *Handler) PutClaudeKeys(c *gin.Context) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if !configListReplaceRequested(c) {
-		arr = mergeClaudeKeysPreservingMissing(h.cfg.ClaudeKey, arr)
+		arr = mergeClaudeKeyFields(h.cfg.ClaudeKey, arr)
 	}
 	h.cfg.ClaudeKey = arr
 	h.cfg.SanitizeClaudeKeys()
@@ -911,7 +1003,7 @@ func (h *Handler) PutVertexCompatKeys(c *gin.Context) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if !configListReplaceRequested(c) {
-		arr = mergeVertexCompatKeysPreservingMissing(h.cfg.VertexCompatAPIKey, arr)
+		arr = mergeVertexCompatKeyFields(h.cfg.VertexCompatAPIKey, arr)
 	}
 	h.cfg.VertexCompatAPIKey = append([]config.VertexCompatKey(nil), arr...)
 	h.cfg.SanitizeVertexCompatKeys()
@@ -1283,7 +1375,7 @@ func (h *Handler) PutCodexKeys(c *gin.Context) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if !configListReplaceRequested(c) {
-		filtered = mergeCodexKeysPreservingMissing(h.cfg.CodexKey, filtered)
+		filtered = mergeCodexKeyFields(h.cfg.CodexKey, filtered)
 	}
 	h.cfg.CodexKey = filtered
 	h.cfg.SanitizeCodexKeys()
