@@ -290,6 +290,84 @@ func TestGetMonitorChannelStatsResolvesSharedSourceByAuthIndex(t *testing.T) {
 	}
 }
 
+func TestGetMonitorChannelStatsMergesStaleAuthIndexByResolvedSource(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	manager := coreauth.NewManager(nil, &coreauth.RoundRobinSelector{}, nil)
+	activeAuth, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       "auth-active",
+		Provider: "minimax",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"api_key": "shared-key",
+			"source":  "config:minimax[current]",
+		},
+	})
+	if err != nil {
+		t.Fatalf("register active auth failed: %v", err)
+	}
+	currentIndex := activeAuth.EnsureIndex()
+
+	stats := usage.NewRequestStatistics()
+	now := time.Now()
+	stats.Record(context.Background(), coreusage.Record{
+		APIKey:      "api-1",
+		Model:       "model-a",
+		Source:      "shared-key",
+		AuthIndex:   currentIndex,
+		RequestedAt: now.Add(-2 * time.Minute),
+	})
+	stats.Record(context.Background(), coreusage.Record{
+		APIKey:      "api-1",
+		Model:       "model-a",
+		Source:      "shared-key",
+		AuthIndex:   "stale-auth-index",
+		RequestedAt: now.Add(-1 * time.Minute),
+		Failed:      true,
+	})
+
+	h := &Handler{usageStats: stats, authManager: manager}
+	rr := executeMonitorRequest(h.GetMonitorChannelStats, "/monitor/channel-stats")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d, body=%s", rr.Code, rr.Body.String())
+	}
+
+	var resp struct {
+		Items []struct {
+			AuthIndex       string  `json:"auth_index"`
+			TotalRequests   int64   `json:"total_requests"`
+			SuccessRequests int64   `json:"success_requests"`
+			FailedRequests  int64   `json:"failed_requests"`
+			SuccessRate     float64 `json:"success_rate"`
+			SourceRef       struct {
+				AuthIndex string `json:"auth_index"`
+			} `json:"source_ref"`
+			Models []struct {
+				Model    string `json:"model"`
+				Requests int64  `json:"requests"`
+				Success  int64  `json:"success"`
+				Failed   int64  `json:"failed"`
+			} `json:"models"`
+		} `json:"items"`
+	}
+	if err = json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response failed: %v", err)
+	}
+	if len(resp.Items) != 1 {
+		t.Fatalf("unexpected item count: got %d want 1; body=%s", len(resp.Items), rr.Body.String())
+	}
+	item := resp.Items[0]
+	if item.AuthIndex != currentIndex || item.SourceRef.AuthIndex != currentIndex {
+		t.Fatalf("expected stale bucket to merge into current auth index %s, got %+v", currentIndex, item)
+	}
+	if item.TotalRequests != 2 || item.SuccessRequests != 1 || item.FailedRequests != 1 || item.SuccessRate != 50 {
+		t.Fatalf("unexpected merged stats: %+v", item)
+	}
+	if len(item.Models) != 1 || item.Models[0].Model != "model-a" || item.Models[0].Requests != 2 || item.Models[0].Success != 1 || item.Models[0].Failed != 1 {
+		t.Fatalf("unexpected merged model stats: %+v", item.Models)
+	}
+}
+
 func TestGetMonitorFailureAnalysisResolvesSharedSourceByAuthIndex(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

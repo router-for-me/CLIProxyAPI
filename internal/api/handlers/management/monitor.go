@@ -366,7 +366,7 @@ func (h *Handler) GetMonitorChannelStats(c *gin.Context) {
 		usageFilter.Model = strings.TrimSpace(modelFilter)
 		usageFilter.Status = strings.TrimSpace(status)
 
-		queryResult, queryErr := dbPlugin.QueryMonitorChannelStats(c.Request.Context(), usageFilter, limit, monitorRecentLimit)
+		queryResult, queryErr := dbPlugin.QueryMonitorChannelStats(c.Request.Context(), usageFilter, monitorMaxTopLimit, monitorRecentLimit)
 		if queryErr == nil {
 			items := make([]monitorChannelStatsItem, 0, len(queryResult.Items))
 			for _, channel := range queryResult.Items {
@@ -396,6 +396,7 @@ func (h *Handler) GetMonitorChannelStats(c *gin.Context) {
 					Models:          models,
 				})
 			}
+			items = mergeMonitorChannelStatsItems(items, limit)
 
 			c.JSON(http.StatusOK, gin.H{
 				"items":   items,
@@ -525,9 +526,7 @@ func (h *Handler) GetMonitorChannelStats(c *gin.Context) {
 		}
 		return items[i].TotalRequests > items[j].TotalRequests
 	})
-	if len(items) > limit {
-		items = items[:limit]
-	}
+	items = mergeMonitorChannelStatsItems(items, limit)
 
 	c.JSON(http.StatusOK, gin.H{
 		"items":      items,
@@ -535,6 +534,124 @@ func (h *Handler) GetMonitorChannelStats(c *gin.Context) {
 		"limit":      limit,
 		"filters":    monitorFilterOptions{Models: setToSortedSlice(modelSet), Sources: setToSortedSlice(sourceSet)},
 		"time_range": monitorTimeRange{Start: start, End: end},
+	})
+}
+
+func mergeMonitorChannelStatsItems(items []monitorChannelStatsItem, limit int) []monitorChannelStatsItem {
+	if len(items) == 0 {
+		return []monitorChannelStatsItem{}
+	}
+
+	mergedByKey := make(map[string]*monitorChannelStatsItem, len(items))
+	for i := range items {
+		item := items[i]
+		key, canonicalAuthIndex := monitorChannelCanonicalKey(item)
+		if canonicalAuthIndex != "" {
+			item.AuthIndex = canonicalAuthIndex
+		}
+		item.SuccessRate = calcRate(item.SuccessRequests, item.TotalRequests)
+		item.Recent = normalizeRecentRequests(item.Recent)
+		for j := range item.Models {
+			item.Models[j].SuccessRate = calcRate(item.Models[j].Success, item.Models[j].Requests)
+			item.Models[j].Recent = normalizeRecentRequests(item.Models[j].Recent)
+		}
+		sortMonitorModelStats(item.Models)
+
+		if existing := mergedByKey[key]; existing != nil {
+			mergeMonitorChannelStatsItem(existing, item)
+			continue
+		}
+		itemCopy := item
+		mergedByKey[key] = &itemCopy
+	}
+
+	out := make([]monitorChannelStatsItem, 0, len(mergedByKey))
+	for _, item := range mergedByKey {
+		out = append(out, *item)
+	}
+	sortMonitorChannelStatsItems(out)
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out
+}
+
+func monitorChannelCanonicalKey(item monitorChannelStatsItem) (string, string) {
+	if authIndex := strings.TrimSpace(item.SourceRef.AuthIndex); authIndex != "" {
+		return "auth:" + authIndex, authIndex
+	}
+	if entityID := strings.TrimSpace(item.SourceRef.EntityID); entityID != "" && item.SourceRef.EntityKind != "unknown" {
+		return "entity:" + strings.TrimSpace(item.SourceRef.EntityKind) + ":" + entityID, ""
+	}
+	return "raw:" + strings.TrimSpace(item.Source) + "\x00" + strings.TrimSpace(item.AuthIndex), strings.TrimSpace(item.AuthIndex)
+}
+
+func mergeMonitorChannelStatsItem(dst *monitorChannelStatsItem, src monitorChannelStatsItem) {
+	dst.TotalRequests += src.TotalRequests
+	dst.SuccessRequests += src.SuccessRequests
+	dst.FailedRequests += src.FailedRequests
+	dst.SuccessRate = calcRate(dst.SuccessRequests, dst.TotalRequests)
+	dst.LastRequestAt = laterTimePointer(dst.LastRequestAt, src.LastRequestAt)
+	dst.Recent = normalizeRecentRequests(append(dst.Recent, src.Recent...))
+
+	models := make(map[string]*monitorModelStats, len(dst.Models)+len(src.Models))
+	for i := range dst.Models {
+		model := dst.Models[i]
+		models[model.Model] = &model
+	}
+	for i := range src.Models {
+		srcModel := src.Models[i]
+		if dstModel := models[srcModel.Model]; dstModel != nil {
+			dstModel.Requests += srcModel.Requests
+			dstModel.Success += srcModel.Success
+			dstModel.Failed += srcModel.Failed
+			dstModel.SuccessRate = calcRate(dstModel.Success, dstModel.Requests)
+			dstModel.LastRequestAt = laterTimePointer(dstModel.LastRequestAt, srcModel.LastRequestAt)
+			dstModel.Recent = normalizeRecentRequests(append(dstModel.Recent, srcModel.Recent...))
+			continue
+		}
+		modelCopy := srcModel
+		models[modelCopy.Model] = &modelCopy
+	}
+
+	dst.Models = make([]monitorModelStats, 0, len(models))
+	for _, model := range models {
+		dst.Models = append(dst.Models, *model)
+	}
+	sortMonitorModelStats(dst.Models)
+}
+
+func laterTimePointer(a, b *time.Time) *time.Time {
+	if a == nil {
+		return cloneTimePointer(b)
+	}
+	if b == nil {
+		return cloneTimePointer(a)
+	}
+	if b.After(*a) {
+		return cloneTimePointer(b)
+	}
+	return cloneTimePointer(a)
+}
+
+func sortMonitorChannelStatsItems(items []monitorChannelStatsItem) {
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].TotalRequests == items[j].TotalRequests {
+			if items[i].Source == items[j].Source {
+				return items[i].AuthIndex < items[j].AuthIndex
+			}
+			return items[i].Source < items[j].Source
+		}
+		return items[i].TotalRequests > items[j].TotalRequests
+	})
+}
+
+func sortMonitorModelStats(models []monitorModelStats) {
+	sort.Slice(models, func(i, j int) bool {
+		if models[i].Requests == models[j].Requests {
+			return models[i].Model < models[j].Model
+		}
+		return models[i].Requests > models[j].Requests
 	})
 }
 
