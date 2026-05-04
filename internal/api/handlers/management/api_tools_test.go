@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -62,6 +63,105 @@ func TestAPICallTransportInvalidAuthFallsBackToGlobalProxy(t *testing.T) {
 	}
 	if proxyURL == nil || proxyURL.String() != "http://global-proxy.example.com:8080" {
 		t.Fatalf("proxy URL = %v, want http://global-proxy.example.com:8080", proxyURL)
+	}
+}
+
+func TestInferAPICallAuthUsesHeaderKeyAndRequestURL(t *testing.T) {
+	t.Parallel()
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	wrongBaseAuth := &coreauth.Auth{
+		ID:       "claude-wrong-base",
+		Provider: "claude",
+		Attributes: map[string]string{
+			"api_key":  "shared-key",
+			"base_url": "https://a.example.com/anthropic",
+		},
+	}
+	matchingAuth := &coreauth.Auth{
+		ID:       "claude-matching-base",
+		Provider: "claude",
+		Attributes: map[string]string{
+			"api_key":  "shared-key",
+			"base_url": "https://b.example.com/anthropic",
+		},
+	}
+	if _, errRegister := manager.Register(context.Background(), wrongBaseAuth); errRegister != nil {
+		t.Fatalf("register wrong base auth: %v", errRegister)
+	}
+	if _, errRegister := manager.Register(context.Background(), matchingAuth); errRegister != nil {
+		t.Fatalf("register matching auth: %v", errRegister)
+	}
+
+	parsedURL, errParse := url.Parse("https://b.example.com/anthropic/v1/messages")
+	if errParse != nil {
+		t.Fatalf("parse URL: %v", errParse)
+	}
+	h := &Handler{authManager: manager}
+	got := h.inferAPICallAuth(parsedURL, map[string]string{"x-api-key": "shared-key"})
+	if got == nil {
+		t.Fatal("expected inferred auth")
+	}
+	if got.ID != matchingAuth.ID {
+		t.Fatalf("inferred auth ID = %q, want %q", got.ID, matchingAuth.ID)
+	}
+}
+
+func TestInferAPICallAuthSupportsAuthorizationBearerFallback(t *testing.T) {
+	t.Parallel()
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	auth := &coreauth.Auth{
+		ID:       "openai-compat-auth",
+		Provider: "compat",
+		Attributes: map[string]string{
+			"api_key": "compat-key",
+		},
+	}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	parsedURL, errParse := url.Parse("https://compat.example.com/v1/chat/completions")
+	if errParse != nil {
+		t.Fatalf("parse URL: %v", errParse)
+	}
+	h := &Handler{authManager: manager}
+	got := h.inferAPICallAuth(parsedURL, map[string]string{"Authorization": "Bearer compat-key"})
+	if got == nil {
+		t.Fatal("expected inferred auth")
+	}
+	if got.ID != auth.ID {
+		t.Fatalf("inferred auth ID = %q, want %q", got.ID, auth.ID)
+	}
+}
+
+func TestAcquireAPICallHostSlotHonorsContextCancellation(t *testing.T) {
+	t.Parallel()
+
+	parsedURL, errParse := url.Parse("https://limiter-test.example.com/v1/messages")
+	if errParse != nil {
+		t.Fatalf("parse URL: %v", errParse)
+	}
+	releases := make([]func(), 0, maxAPICallConcurrentPerHost)
+	for i := 0; i < maxAPICallConcurrentPerHost; i++ {
+		release, ok := acquireAPICallHostSlot(context.Background(), parsedURL)
+		if !ok {
+			t.Fatalf("slot %d was not acquired", i)
+		}
+		releases = append(releases, release)
+	}
+	defer func() {
+		for _, release := range releases {
+			release()
+		}
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if release, ok := acquireAPICallHostSlot(ctx, parsedURL); ok {
+		release()
+		t.Fatal("expected canceled context to prevent slot acquisition")
 	}
 }
 

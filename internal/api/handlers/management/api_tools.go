@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -24,9 +25,12 @@ import (
 )
 
 const (
-	defaultAPICallTimeout      = 60 * time.Second
-	maxAPICallStreamErrorBytes = 64 << 10
+	defaultAPICallTimeout       = 60 * time.Second
+	maxAPICallStreamErrorBytes  = 64 << 10
+	maxAPICallConcurrentPerHost = 8
 )
+
+var apiCallHostLimiters sync.Map
 
 const (
 	geminiOAuthClientID     = "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com"
@@ -180,6 +184,9 @@ func (h *Handler) APICall(c *gin.Context) {
 		}
 		reqHeaders[key] = strings.ReplaceAll(value, "$TOKEN$", token)
 	}
+	if auth == nil {
+		auth = h.inferAPICallAuth(parsedURL, reqHeaders)
+	}
 
 	var requestBody io.Reader
 	if body.Data != "" {
@@ -207,6 +214,13 @@ func (h *Handler) APICall(c *gin.Context) {
 		Timeout: defaultAPICallTimeout,
 	}
 	httpClient.Transport = h.apiCallTransportWithOverride(auth, body.Proxy)
+
+	releaseLimiter, acquiredLimiter := acquireAPICallHostSlot(c.Request.Context(), parsedURL)
+	if !acquiredLimiter {
+		c.JSON(http.StatusRequestTimeout, gin.H{"error": "request canceled"})
+		return
+	}
+	defer releaseLimiter()
 
 	resp, errDo := httpClient.Do(req)
 	if errDo != nil {
@@ -829,6 +843,136 @@ func (h *Handler) authByIndex(authIndex string) *coreauth.Auth {
 		}
 	}
 	return nil
+}
+
+func (h *Handler) inferAPICallAuth(parsedURL *url.URL, headers map[string]string) *coreauth.Auth {
+	if h == nil || h.authManager == nil || parsedURL == nil {
+		return nil
+	}
+	tokens := apiCallCredentialCandidates(headers)
+	if len(tokens) == 0 {
+		return nil
+	}
+
+	var fallback *coreauth.Auth
+	for _, auth := range h.authManager.List() {
+		if auth == nil || auth.Attributes == nil {
+			continue
+		}
+		apiKey := strings.TrimSpace(auth.Attributes["api_key"])
+		if apiKey == "" {
+			continue
+		}
+		if _, ok := tokens[apiKey]; !ok {
+			continue
+		}
+		if apiCallURLMatchesAuth(parsedURL, auth) {
+			return auth
+		}
+		if fallback == nil {
+			fallback = auth
+		}
+	}
+	return fallback
+}
+
+func apiCallCredentialCandidates(headers map[string]string) map[string]struct{} {
+	if len(headers) == 0 {
+		return nil
+	}
+	out := make(map[string]struct{})
+	for name, value := range headers {
+		headerName := strings.ToLower(strings.TrimSpace(name))
+		headerValue := strings.TrimSpace(value)
+		if headerValue == "" || strings.Contains(headerValue, "$TOKEN$") {
+			continue
+		}
+		switch headerName {
+		case "authorization":
+			if token := bearerTokenValue(headerValue); token != "" {
+				out[token] = struct{}{}
+			}
+		case "x-api-key", "x-goog-api-key", "api-key":
+			out[headerValue] = struct{}{}
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func bearerTokenValue(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	parts := strings.SplitN(value, " ", 2)
+	if len(parts) != 2 || !strings.EqualFold(parts[0], "bearer") {
+		return ""
+	}
+	return strings.TrimSpace(parts[1])
+}
+
+func apiCallURLMatchesAuth(parsedURL *url.URL, auth *coreauth.Auth) bool {
+	if parsedURL == nil || auth == nil || auth.Attributes == nil {
+		return false
+	}
+	baseURL := strings.TrimSpace(auth.Attributes["base_url"])
+	if baseURL == "" {
+		return false
+	}
+	baseParsed, errParse := url.Parse(baseURL)
+	if errParse != nil || baseParsed.Scheme == "" || baseParsed.Host == "" {
+		return false
+	}
+	if !strings.EqualFold(parsedURL.Scheme, baseParsed.Scheme) || !strings.EqualFold(parsedURL.Host, baseParsed.Host) {
+		return false
+	}
+	basePath := strings.TrimRight(baseParsed.EscapedPath(), "/")
+	requestPath := strings.TrimRight(parsedURL.EscapedPath(), "/")
+	if basePath == "" {
+		return true
+	}
+	return requestPath == basePath || strings.HasPrefix(requestPath, basePath+"/")
+}
+
+func acquireAPICallHostSlot(ctx context.Context, parsedURL *url.URL) (func(), bool) {
+	key := apiCallHostLimiterKey(parsedURL)
+	if key == "" {
+		return func() {}, true
+	}
+	rawLimiter, _ := apiCallHostLimiters.LoadOrStore(key, make(chan struct{}, maxAPICallConcurrentPerHost))
+	limiter, ok := rawLimiter.(chan struct{})
+	if !ok || limiter == nil {
+		return func() {}, true
+	}
+	select {
+	case limiter <- struct{}{}:
+		return func() {
+			select {
+			case <-limiter:
+			default:
+			}
+		}, true
+	case <-ctx.Done():
+		return func() {}, false
+	}
+}
+
+func apiCallHostLimiterKey(parsedURL *url.URL) string {
+	if parsedURL == nil {
+		return ""
+	}
+	host := strings.ToLower(strings.TrimSpace(parsedURL.Host))
+	if host == "" {
+		return ""
+	}
+	scheme := strings.ToLower(strings.TrimSpace(parsedURL.Scheme))
+	if scheme == "" {
+		scheme = "https"
+	}
+	return scheme + "://" + host
 }
 
 func (h *Handler) apiCallTransport(auth *coreauth.Auth) http.RoundTripper {
