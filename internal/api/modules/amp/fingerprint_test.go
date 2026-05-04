@@ -270,41 +270,32 @@ func TestExtractFingerprint_CodereviewCheck_DoesNotCollideWithReview(t *testing.
 	}
 }
 
-// TestExtractFingerprint_ThreadExtractManualMatch verifies that the
-// read_thread internal-extraction prompt — not yet captured through the
-// proxy and therefore intentionally not encoded as a canonical
-// Feature() — can still be routed via SystemPrefix.
-func TestExtractFingerprint_ThreadExtractManualMatch(t *testing.T) {
+// TestExtractFingerprint_ThreadExtract matches the read_thread tool's
+// internal extraction call. Source-confirmed via `await KW(kb, ...)`
+// in the binary, which is the same Gemini wrapper used by error_summary
+// and review-summary (both observed flowing through /api/provider/google).
+func TestExtractFingerprint_ThreadExtract(t *testing.T) {
 	body := []byte(`{
 		"contents":[{"role":"user","parts":[{"text":"thread content..."}]}],
 		"systemInstruction":{"parts":[{"text":"You are helping me extract relevant information from the mentioned thread based on a goal."}]}
 	}`)
-	fp := ExtractFingerprint(body)
-	if got := fp.Feature(); got != "" {
-		t.Fatalf("Feature = %q, want empty (thread_extract is not canonical)", got)
-	}
-	cond := &config.AmpMappingCondition{SystemPrefix: "you are helping me extract relevant information from the mentioned thread"}
-	if !ConditionMatches(cond, fp) {
-		t.Fatalf("expected SystemPrefix to match")
+	if got := ExtractFingerprint(body).Feature(); got != "thread_extract" {
+		t.Fatalf("Feature = %q, want thread_extract", got)
 	}
 }
 
-// TestExtractFingerprint_ErrorSummaryManualMatch mirrors the
-// thread_extract case: the subagent error-recovery summarizer prompt
-// is recognized only via the manual SystemPrefix matcher until a real
-// /api/provider/* capture confirms it.
-func TestExtractFingerprint_ErrorSummaryManualMatch(t *testing.T) {
+// TestExtractFingerprint_ErrorSummary matches the subagent error-recovery
+// summarizer that fires when a Task subagent hits a fatal error. Source-
+// confirmed: same KW(kb, ...) Gemini wrapper as thread_extract, with the
+// binary's debug log explicitly saying "Failed to summarize subagent
+// work with Gemini".
+func TestExtractFingerprint_ErrorSummary(t *testing.T) {
 	body := []byte(`{
 		"contents":[{"role":"user","parts":[{"text":"work history..."}]}],
 		"systemInstruction":{"parts":[{"text":"You are helping summarize work done by an AI coding agent (subagent) before it encountered an error."}]}
 	}`)
-	fp := ExtractFingerprint(body)
-	if got := fp.Feature(); got != "" {
-		t.Fatalf("Feature = %q, want empty (error_summary is not canonical)", got)
-	}
-	cond := &config.AmpMappingCondition{SystemPrefix: "you are helping summarize work done by an ai coding agent"}
-	if !ConditionMatches(cond, fp) {
-		t.Fatalf("expected SystemPrefix to match")
+	if got := ExtractFingerprint(body).Feature(); got != "error_summary" {
+		t.Fatalf("Feature = %q, want error_summary", got)
 	}
 }
 

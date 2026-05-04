@@ -38,8 +38,10 @@ const (
 	ClassifierPromptPrefix = "you are a classifier that answers yes/no questions"
 	// Git helper prefixes use the full first sentence to avoid collision
 	// with any future "you generate git ..." prompt variants.
-	GitListPromptPrefix = "you generate git commands to list changed files. output commands wrapped in <command></command> tags."
-	GitDiffPromptPrefix = "you generate git diff commands that show the actual diff content. output commands in xml format:"
+	GitListPromptPrefix       = "you generate git commands to list changed files. output commands wrapped in <command></command> tags."
+	GitDiffPromptPrefix       = "you generate git diff commands that show the actual diff content. output commands in xml format:"
+	ThreadExtractPromptPrefix = "you are helping me extract relevant information from the mentioned thread"
+	ErrorSummaryPromptPrefix  = "you are helping summarize work done by an ai coding agent"
 )
 
 // codereview-check user-message template anchors. The full template is
@@ -147,6 +149,10 @@ func (f RequestFingerprint) Feature() string {
 			return "git_list"
 		case strings.HasPrefix(sys, GitDiffPromptPrefix):
 			return "git_diff"
+		case strings.HasPrefix(sys, ThreadExtractPromptPrefix):
+			return "thread_extract"
+		case strings.HasPrefix(sys, ErrorSummaryPromptPrefix):
+			return "error_summary"
 		}
 	}
 
