@@ -329,6 +329,63 @@ func TestConditionMatches(t *testing.T) {
 	}
 }
 
+// TestModelMapper_RegexOrderRespectedAcrossOverlappingPatterns verifies
+// that when two regex rules with different From patterns both match the
+// same model, the earlier rule's unconditional target wins over the
+// later rule, regardless of conditional rules attached to the later
+// pattern. Cross-group declaration order must be preserved.
+func TestModelMapper_RegexOrderRespectedAcrossOverlappingPatterns(t *testing.T) {
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient("test-regex-order", "anthropic", []*registry.ModelInfo{
+		{ID: "early-target", OwnedBy: "anthropic", Type: "claude"},
+		{ID: "late-handoff-target", OwnedBy: "anthropic", Type: "claude"},
+	})
+	defer reg.UnregisterClient("test-regex-order")
+
+	// Two distinct regex patterns that both match "gemini-3-flash-preview".
+	// Earlier rule is unconditional; later rule has a handoff condition.
+	// Since the earlier group's fallback is committed at the group
+	// transition, the later conditional rule must NOT steal a handoff
+	// request that already had a perfectly good earlier match.
+	mapper := NewModelMapper([]config.AmpModelMapping{
+		{From: "^gemini-3-.*$", To: "early-target", Regex: true},
+		{From: "^.*-flash-.*$", To: "late-handoff-target", Regex: true,
+			When: &config.AmpMappingCondition{Feature: "handoff"}},
+	})
+
+	got := mapper.MapModelCtx("gemini-3-flash-preview",
+		RequestFingerprint{ToolChoice: "create_handoff_context"})
+	if got != "early-target" {
+		t.Errorf("got %q, want early-target (declaration order must win across overlapping patterns)", got)
+	}
+}
+
+// TestModelMapper_RegexConditionalWinsWithinSameGroup verifies that a
+// conditional rule still wins over an unconditional rule sharing the
+// same regex pattern (within-group conditional-wins semantics).
+func TestModelMapper_RegexConditionalWinsWithinSameGroup(t *testing.T) {
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient("test-regex-group", "anthropic", []*registry.ModelInfo{
+		{ID: "conditional-target", OwnedBy: "anthropic", Type: "claude"},
+		{ID: "fallback-target", OwnedBy: "anthropic", Type: "claude"},
+	})
+	defer reg.UnregisterClient("test-regex-group")
+
+	mapper := NewModelMapper([]config.AmpModelMapping{
+		{From: "^gemini-3-.*$", To: "fallback-target", Regex: true},
+		{From: "^gemini-3-.*$", To: "conditional-target", Regex: true,
+			When: &config.AmpMappingCondition{Feature: "handoff"}},
+	})
+
+	if got := mapper.MapModelCtx("gemini-3-flash-preview",
+		RequestFingerprint{ToolChoice: "create_handoff_context"}); got != "conditional-target" {
+		t.Errorf("got %q, want conditional-target (same-pattern conditional must win)", got)
+	}
+	if got := mapper.MapModelCtx("gemini-3-flash-preview", RequestFingerprint{}); got != "fallback-target" {
+		t.Errorf("got %q, want fallback-target (no condition match)", got)
+	}
+}
+
 func TestModelMapper_MapModelCtx_ConditionalThenFallback(t *testing.T) {
 	reg := registry.GetGlobalRegistry()
 	reg.RegisterClient("test-cond", "openai", []*registry.ModelInfo{

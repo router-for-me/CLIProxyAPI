@@ -119,24 +119,45 @@ func (m *DefaultModelMapper) MapModelCtx(requestedModel string, fp RequestFinger
 }
 
 // selectTarget scans rules of one class (exact or regex) and returns the
-// best target model name. Conditional rules win; the first matching
-// unconditional rule is remembered as a fallback. Returns "" if nothing
-// matches.
+// best target model name. Within a contiguous group of rules sharing the
+// same From pattern, conditional rules win and the first unconditional is
+// remembered as that group's fallback. Cross-group declaration order is
+// respected: as soon as one group's fallback is locked in (because no
+// later conditional from the same group matched), it wins over any
+// later group's matches. This avoids letting a later regex rule with a
+// different From pattern silently override an earlier matching rule.
 func selectTarget(rules []mappingRule, baseModel, normalizedBase string, fp RequestFingerprint, isRegex bool) string {
-	fallback := ""
+	var (
+		groupKey      string
+		groupHas      bool
+		groupFallback string
+	)
 	for _, r := range rules {
+		var key string
 		if isRegex {
 			if r.re == nil || !r.re.MatchString(baseModel) {
 				continue
 			}
+			key = r.re.String()
 		} else {
 			if r.exactFrom == "" || r.exactFrom != normalizedBase {
 				continue
 			}
+			key = r.exactFrom
 		}
+		// Group transition: commit the previous group's fallback if any.
+		if groupHas && key != groupKey {
+			if groupFallback != "" {
+				return groupFallback
+			}
+			groupHas = false
+			groupFallback = ""
+		}
+		groupKey = key
+		groupHas = true
 		if r.when == nil {
-			if fallback == "" {
-				fallback = r.to
+			if groupFallback == "" {
+				groupFallback = r.to
 			}
 			continue
 		}
@@ -144,7 +165,7 @@ func selectTarget(rules []mappingRule, baseModel, normalizedBase string, fp Requ
 			return r.to
 		}
 	}
-	return fallback
+	return groupFallback
 }
 
 // UpdateMappings refreshes the mapping configuration from config.
