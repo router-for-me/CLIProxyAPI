@@ -150,28 +150,55 @@ func TestUsageReporterUsesRecordedFinalRequestBodyWhenRequestLogDisabled(t *test
 
 func TestUsageReporterInfersOpenAIResponsesThinkingFormatFromRequestURL(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
-	ginCtx.Request = httptest.NewRequest(http.MethodPost, "http://example.com/v1/responses/compact", nil)
-	ctx := context.WithValue(context.Background(), "gin", ginCtx)
 
-	reporter := NewUsageReporter(ctx, "openai-compatibility", "gpt-5.4(high)", nil)
-	RecordAPIRequest(ctx, &config.Config{SDKConfig: config.SDKConfig{RequestLog: false}}, UpstreamRequestLog{
-		URL:      "https://example.com/v1/responses/compact",
-		Method:   http.MethodPost,
-		Body:     []byte(`{"reasoning":{"effort":"medium"}}`),
-		Provider: "openai-compatibility",
-	})
+	tests := []struct {
+		name string
+		url  string
+		want string
+	}{
+		{
+			name: "responses",
+			url:  "https://example.com/v1/responses",
+			want: "medium",
+		},
+		{
+			name: "responses compact",
+			url:  "https://example.com/v1/responses/compact",
+			want: "medium",
+		},
+	}
 
-	record := reporter.buildRecord(ctx, usage.Detail{TotalTokens: 3}, false)
-	if record.ThinkingEffort != "medium" {
-		t.Fatalf("thinking effort = %q, want medium", record.ThinkingEffort)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			ginCtx.Request = httptest.NewRequest(http.MethodPost, tt.url, nil)
+			ctx := context.WithValue(context.Background(), "gin", ginCtx)
+
+			reporter := NewUsageReporter(ctx, "openai-compatibility", "gpt-5.4(high)", nil)
+			RecordAPIRequest(ctx, &config.Config{SDKConfig: config.SDKConfig{RequestLog: false}}, UpstreamRequestLog{
+				URL:      tt.url,
+				Method:   http.MethodPost,
+				Body:     []byte(`{"reasoning":{"effort":"medium"}}`),
+				Provider: "openai-compatibility",
+			})
+
+			record := reporter.buildRecord(ctx, usage.Detail{TotalTokens: 3}, false)
+			if record.ThinkingEffort != tt.want {
+				t.Fatalf("thinking effort = %q, want %q", record.ThinkingEffort, tt.want)
+			}
+		})
 	}
 }
 
 func TestUsageReporterFallsBackToModelSuffixWithoutRecordedBody(t *testing.T) {
-	reporter := NewUsageReporter(context.Background(), "openai-compatibility", "gpt-5.4(high)", nil)
+	gin.SetMode(gin.TestMode)
+	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ginCtx.Request = httptest.NewRequest(http.MethodPost, "http://example.com/v1/chat/completions", nil)
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
 
-	record := reporter.buildRecord(context.Background(), usage.Detail{TotalTokens: 3}, false)
+	reporter := NewUsageReporter(ctx, "openai-compatibility", "gpt-5.4(high)", nil)
+
+	record := reporter.buildRecord(ctx, usage.Detail{TotalTokens: 3}, false)
 	if record.ThinkingEffort != "high" {
 		t.Fatalf("thinking effort = %q, want high", record.ThinkingEffort)
 	}
