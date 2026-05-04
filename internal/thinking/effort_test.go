@@ -11,6 +11,13 @@ func TestExtractEffortFromSuffix(t *testing.T) {
 	}
 }
 
+func TestExtractEffortPrefersBodyOverSuffix(t *testing.T) {
+	body := []byte(`{"reasoning_effort":"low"}`)
+	if got := ExtractEffort(body, "gpt-5.4(high)", "openai", "openai"); got != "low" {
+		t.Fatalf("ExtractEffort() = %q, want low", got)
+	}
+}
+
 func TestExtractEffortFromBodies(t *testing.T) {
 	tests := []struct {
 		name       string

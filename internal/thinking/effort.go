@@ -18,18 +18,20 @@ func ExtractEffort(body []byte, model, fromFormat, toFormat string) string {
 		provider = "openai"
 	}
 
+	if effort := formatEffort(extractThinkingConfig(body, provider)); effort != "" {
+		return effort
+	}
+	if fromProvider != "" && fromProvider != provider {
+		if effort := formatEffort(extractThinkingConfig(body, fromProvider)); effort != "" {
+			return effort
+		}
+	}
+
 	suffix := ParseSuffix(model)
 	if suffix.HasSuffix {
 		if effort := formatEffort(parseSuffixToConfig(suffix.RawSuffix, provider, model)); effort != "" {
 			return effort
 		}
-	}
-
-	if effort := formatEffort(extractThinkingConfig(body, provider)); effort != "" {
-		return effort
-	}
-	if fromProvider != "" && fromProvider != provider {
-		return formatEffort(extractThinkingConfig(body, fromProvider))
 	}
 	return ""
 }
