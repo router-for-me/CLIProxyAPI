@@ -110,6 +110,19 @@ func TestUsageReporterBuildRecordIncludesLatency(t *testing.T) {
 	}
 }
 
+func TestUsageReporterBuildRecordIncludesRequestedModelAlias(t *testing.T) {
+	ctx := usage.WithRequestedModelAlias(context.Background(), "client-gpt")
+	reporter := NewUsageReporter(ctx, "openai", "gpt-5.4", nil)
+
+	record := reporter.buildRecord(ctx, usage.Detail{TotalTokens: 3}, false)
+	if record.Model != "gpt-5.4" {
+		t.Fatalf("model = %q, want %q", record.Model, "gpt-5.4")
+	}
+	if record.Alias != "client-gpt" {
+		t.Fatalf("alias = %q, want %q", record.Alias, "client-gpt")
+	}
+}
+
 func TestUsageReporterBuildAdditionalModelRecordSkipsZeroTokens(t *testing.T) {
 	reporter := &UsageReporter{
 		provider:    "codex",
