@@ -218,6 +218,46 @@ func TestAuthByIndexDistinguishesSharedAPIKeysAcrossProviders(t *testing.T) {
 	}
 }
 
+func TestAPICallAcceptsKebabAuthIndexForTokenSubstitution(t *testing.T) {
+	t.Parallel()
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer sk-live" {
+			t.Fatalf("Authorization = %q, want Bearer sk-live", got)
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	auth := &coreauth.Auth{
+		ID:       "claude:apikey:test",
+		Provider: "claude",
+		Attributes: map[string]string{
+			"api_key": "sk-live",
+		},
+	}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+	authIndex := auth.EnsureIndex()
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	body := []byte(`{"auth-index":"` + authIndex + `","method":"GET","url":"` + upstream.URL + `","header":{"Authorization":"Bearer $TOKEN$"}}`)
+	req := httptest.NewRequest(http.MethodPost, "/v0/management/api-call", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	ctx.Request = req
+
+	h := &Handler{authManager: manager}
+	h.APICall(ctx)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+}
+
 func TestAPICallReturnsJSONResponseWhenStreamDisabled(t *testing.T) {
 	t.Parallel()
 

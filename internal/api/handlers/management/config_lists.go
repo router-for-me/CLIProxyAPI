@@ -366,7 +366,10 @@ func (h *Handler) PutGeminiKeys(c *gin.Context) {
 func (h *Handler) PatchGeminiKey(c *gin.Context) {
 	type geminiKeyPatch struct {
 		APIKey         *string            `json:"api-key"`
+		Priority       *int               `json:"priority"`
 		Prefix         *string            `json:"prefix"`
+		RoutingGroup   *string            `json:"routing-group"`
+		Disabled       *bool              `json:"disabled"`
 		BaseURL        *string            `json:"base-url"`
 		ProxyURL       *string            `json:"proxy-url"`
 		Headers        *map[string]string `json:"headers"`
@@ -417,6 +420,15 @@ func (h *Handler) PatchGeminiKey(c *gin.Context) {
 	}
 	if body.Value.Prefix != nil {
 		entry.Prefix = strings.TrimSpace(*body.Value.Prefix)
+	}
+	if body.Value.Priority != nil {
+		entry.Priority = *body.Value.Priority
+	}
+	if body.Value.RoutingGroup != nil {
+		entry.RoutingGroup = strings.TrimSpace(*body.Value.RoutingGroup)
+	}
+	if body.Value.Disabled != nil {
+		entry.Disabled = *body.Value.Disabled
 	}
 	if body.Value.BaseURL != nil {
 		entry.BaseURL = strings.TrimSpace(*body.Value.BaseURL)
@@ -530,7 +542,10 @@ func (h *Handler) PutClaudeKeys(c *gin.Context) {
 func (h *Handler) PatchClaudeKey(c *gin.Context) {
 	type claudeKeyPatch struct {
 		APIKey         *string               `json:"api-key"`
+		Priority       *int                  `json:"priority"`
 		Prefix         *string               `json:"prefix"`
+		RoutingGroup   *string               `json:"routing-group"`
+		Disabled       *bool                 `json:"disabled"`
 		BaseURL        *string               `json:"base-url"`
 		ProxyURL       *string               `json:"proxy-url"`
 		Models         *[]config.ClaudeModel `json:"models"`
@@ -569,10 +584,26 @@ func (h *Handler) PatchClaudeKey(c *gin.Context) {
 
 	entry := h.cfg.ClaudeKey[targetIndex]
 	if body.Value.APIKey != nil {
-		entry.APIKey = strings.TrimSpace(*body.Value.APIKey)
+		trimmed := strings.TrimSpace(*body.Value.APIKey)
+		if trimmed == "" {
+			h.cfg.ClaudeKey = append(h.cfg.ClaudeKey[:targetIndex], h.cfg.ClaudeKey[targetIndex+1:]...)
+			h.cfg.SanitizeClaudeKeys()
+			h.persistLocked(c)
+			return
+		}
+		entry.APIKey = trimmed
 	}
 	if body.Value.Prefix != nil {
 		entry.Prefix = strings.TrimSpace(*body.Value.Prefix)
+	}
+	if body.Value.Priority != nil {
+		entry.Priority = *body.Value.Priority
+	}
+	if body.Value.RoutingGroup != nil {
+		entry.RoutingGroup = strings.TrimSpace(*body.Value.RoutingGroup)
+	}
+	if body.Value.Disabled != nil {
+		entry.Disabled = *body.Value.Disabled
 	}
 	if body.Value.BaseURL != nil {
 		entry.BaseURL = strings.TrimSpace(*body.Value.BaseURL)
@@ -690,7 +721,9 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 	type openAICompatPatch struct {
 		Name          *string                             `json:"name"`
 		Kind          *string                             `json:"kind"`
+		Priority      *int                                `json:"priority"`
 		Prefix        *string                             `json:"prefix"`
+		RoutingGroup  *string                             `json:"routing-group"`
 		Disabled      *bool                               `json:"disabled"`
 		BaseURL       *string                             `json:"base-url"`
 		APIKeyEntries *[]config.OpenAICompatibilityAPIKey `json:"api-key-entries"`
@@ -753,6 +786,12 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 	}
 	if body.Value.Prefix != nil {
 		entry.Prefix = strings.TrimSpace(*body.Value.Prefix)
+	}
+	if body.Value.Priority != nil {
+		entry.Priority = *body.Value.Priority
+	}
+	if body.Value.RoutingGroup != nil {
+		entry.RoutingGroup = strings.TrimSpace(*body.Value.RoutingGroup)
 	}
 	if body.Value.Disabled != nil {
 		entry.Disabled = *body.Value.Disabled
@@ -855,7 +894,10 @@ func (h *Handler) PutVertexCompatKeys(c *gin.Context) {
 func (h *Handler) PatchVertexCompatKey(c *gin.Context) {
 	type vertexCompatPatch struct {
 		APIKey         *string                     `json:"api-key"`
+		Priority       *int                        `json:"priority"`
 		Prefix         *string                     `json:"prefix"`
+		RoutingGroup   *string                     `json:"routing-group"`
+		Disabled       *bool                       `json:"disabled"`
 		BaseURL        *string                     `json:"base-url"`
 		ProxyURL       *string                     `json:"proxy-url"`
 		Headers        *map[string]string          `json:"headers"`
@@ -907,6 +949,15 @@ func (h *Handler) PatchVertexCompatKey(c *gin.Context) {
 	}
 	if body.Value.Prefix != nil {
 		entry.Prefix = strings.TrimSpace(*body.Value.Prefix)
+	}
+	if body.Value.Priority != nil {
+		entry.Priority = *body.Value.Priority
+	}
+	if body.Value.RoutingGroup != nil {
+		entry.RoutingGroup = strings.TrimSpace(*body.Value.RoutingGroup)
+	}
+	if body.Value.Disabled != nil {
+		entry.Disabled = *body.Value.Disabled
 	}
 	if body.Value.BaseURL != nil {
 		trimmed := strings.TrimSpace(*body.Value.BaseURL)
@@ -1215,7 +1266,10 @@ func (h *Handler) PutCodexKeys(c *gin.Context) {
 func (h *Handler) PatchCodexKey(c *gin.Context) {
 	type codexKeyPatch struct {
 		APIKey         *string              `json:"api-key"`
+		Priority       *int                 `json:"priority"`
 		Prefix         *string              `json:"prefix"`
+		RoutingGroup   *string              `json:"routing-group"`
+		Disabled       *bool                `json:"disabled"`
 		BaseURL        *string              `json:"base-url"`
 		ProxyURL       *string              `json:"proxy-url"`
 		Models         *[]config.CodexModel `json:"models"`
@@ -1258,6 +1312,15 @@ func (h *Handler) PatchCodexKey(c *gin.Context) {
 	}
 	if body.Value.Prefix != nil {
 		entry.Prefix = strings.TrimSpace(*body.Value.Prefix)
+	}
+	if body.Value.Priority != nil {
+		entry.Priority = *body.Value.Priority
+	}
+	if body.Value.RoutingGroup != nil {
+		entry.RoutingGroup = strings.TrimSpace(*body.Value.RoutingGroup)
+	}
+	if body.Value.Disabled != nil {
+		entry.Disabled = *body.Value.Disabled
 	}
 	if body.Value.BaseURL != nil {
 		trimmed := strings.TrimSpace(*body.Value.BaseURL)

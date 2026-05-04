@@ -50,6 +50,7 @@ type apiCallRequest struct {
 	AuthIndexSnake  *string           `json:"auth_index"`
 	AuthIndexCamel  *string           `json:"authIndex"`
 	AuthIndexPascal *string           `json:"AuthIndex"`
+	AuthIndexKebab  *string           `json:"auth-index"`
 	Method          string            `json:"method"`
 	URL             string            `json:"url"`
 	Header          map[string]string `json:"header"`
@@ -87,7 +88,7 @@ type apiCallStreamEvent struct {
 //	- X-Management-Key: <key>
 //
 // Request JSON:
-//   - auth_index / authIndex / AuthIndex (optional):
+//   - auth-index / auth_index / authIndex / AuthIndex (optional):
 //     The credential "auth_index" from GET /v0/management/auth-files (or other endpoints returning it).
 //     If omitted or not found, credential-specific proxy/token substitution is skipped.
 //   - method (required): HTTP method, e.g. GET, POST, PUT, PATCH, DELETE.
@@ -146,7 +147,7 @@ func (h *Handler) APICall(c *gin.Context) {
 		return
 	}
 
-	authIndex := firstNonEmptyString(body.AuthIndexSnake, body.AuthIndexCamel, body.AuthIndexPascal)
+	authIndex := firstNonEmptyString(body.AuthIndexKebab, body.AuthIndexSnake, body.AuthIndexCamel, body.AuthIndexPascal)
 	auth := h.authByIndex(authIndex)
 
 	reqHeaders := body.Header

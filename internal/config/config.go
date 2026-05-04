@@ -1024,18 +1024,27 @@ func (cfg *Config) SanitizeCodexKeys() {
 	cfg.CodexKey = out
 }
 
-// SanitizeClaudeKeys normalizes headers for Claude credentials.
+// SanitizeClaudeKeys normalizes Claude credentials and drops empty API-key entries.
 func (cfg *Config) SanitizeClaudeKeys() {
 	if cfg == nil || len(cfg.ClaudeKey) == 0 {
 		return
 	}
+	out := cfg.ClaudeKey[:0]
 	for i := range cfg.ClaudeKey {
-		entry := &cfg.ClaudeKey[i]
+		entry := cfg.ClaudeKey[i]
+		entry.APIKey = strings.TrimSpace(entry.APIKey)
+		if entry.APIKey == "" {
+			continue
+		}
 		entry.Prefix = normalizeModelPrefix(entry.Prefix)
 		entry.RoutingGroup = normalizeRoutingGroup(entry.RoutingGroup)
+		entry.BaseURL = strings.TrimSpace(entry.BaseURL)
+		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
 		entry.Headers = NormalizeHeaders(entry.Headers)
 		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
+		out = append(out, entry)
 	}
+	cfg.ClaudeKey = out
 }
 
 // SanitizeGeminiKeys deduplicates and normalizes Gemini credentials.

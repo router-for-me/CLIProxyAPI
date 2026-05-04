@@ -44,3 +44,33 @@ func TestSaveConfigPreserveCommentsMatchesSequenceEntriesByCompositeIdentity(t *
 		t.Fatalf("expected b comment to stay with b entry after reorder; want block:\n%s\n\ngot:\n%s", want, text)
 	}
 }
+
+func TestSanitizeClaudeKeysDropsEmptyAPIKeys(t *testing.T) {
+	t.Parallel()
+
+	cfg := &Config{
+		ClaudeKey: []ClaudeKey{
+			{APIKey: "   ", RoutingGroup: "orphan"},
+			{APIKey: " sk-live ", BaseURL: " https://claude.example.com ", ProxyURL: " http://proxy.example.com ", RoutingGroup: " team-a "},
+		},
+	}
+
+	cfg.SanitizeClaudeKeys()
+
+	if got := len(cfg.ClaudeKey); got != 1 {
+		t.Fatalf("claude-api-key len = %d, want 1", got)
+	}
+	entry := cfg.ClaudeKey[0]
+	if entry.APIKey != "sk-live" {
+		t.Fatalf("api-key = %q, want sk-live", entry.APIKey)
+	}
+	if entry.BaseURL != "https://claude.example.com" {
+		t.Fatalf("base-url = %q, want https://claude.example.com", entry.BaseURL)
+	}
+	if entry.ProxyURL != "http://proxy.example.com" {
+		t.Fatalf("proxy-url = %q, want http://proxy.example.com", entry.ProxyURL)
+	}
+	if entry.RoutingGroup != "team-a" {
+		t.Fatalf("routing-group = %q, want team-a", entry.RoutingGroup)
+	}
+}

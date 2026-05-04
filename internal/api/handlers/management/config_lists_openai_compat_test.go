@@ -174,6 +174,81 @@ func TestPutClaudeKeys_ReplaceQueryAllowsRemoval(t *testing.T) {
 	}
 }
 
+func TestPatchClaudeKey_EmptyAPIKeyDeletesEntry(t *testing.T) {
+	t.Parallel()
+	gin.SetMode(gin.TestMode)
+
+	h := &Handler{
+		cfg: &config.Config{
+			ClaudeKey: []config.ClaudeKey{
+				{APIKey: "sk-a", BaseURL: "https://a.example.com", RoutingGroup: "rg-a"},
+				{APIKey: "sk-b", BaseURL: "https://b.example.com", RoutingGroup: "rg-b"},
+			},
+		},
+		configFilePath: writeTestConfigFile(t),
+	}
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPatch, "/v0/management/claude-api-key", strings.NewReader(`{
+		"index":0,
+		"value":{"api-key":""}
+	}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	h.PatchClaudeKey(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if got := len(h.cfg.ClaudeKey); got != 1 {
+		t.Fatalf("claude-api-key len = %d, want 1", got)
+	}
+	if got := h.cfg.ClaudeKey[0].APIKey; got != "sk-b" {
+		t.Fatalf("remaining key = %q, want sk-b", got)
+	}
+}
+
+func TestPatchClaudeKey_UpdatesRoutingFields(t *testing.T) {
+	t.Parallel()
+	gin.SetMode(gin.TestMode)
+
+	h := &Handler{
+		cfg: &config.Config{
+			ClaudeKey: []config.ClaudeKey{{
+				APIKey:       "sk-a",
+				BaseURL:      "https://a.example.com",
+				RoutingGroup: "old",
+			}},
+		},
+		configFilePath: writeTestConfigFile(t),
+	}
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPatch, "/v0/management/claude-api-key", strings.NewReader(`{
+		"index":0,
+		"value":{"routing-group":" new-group ","priority":7,"disabled":true}
+	}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	h.PatchClaudeKey(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	entry := h.cfg.ClaudeKey[0]
+	if entry.RoutingGroup != "new-group" {
+		t.Fatalf("routing-group = %q, want new-group", entry.RoutingGroup)
+	}
+	if entry.Priority != 7 {
+		t.Fatalf("priority = %d, want 7", entry.Priority)
+	}
+	if !entry.Disabled {
+		t.Fatal("disabled = false, want true")
+	}
+}
+
 func TestPutOpenAICompat_PreservesProviderFieldsByDefault(t *testing.T) {
 	t.Parallel()
 	gin.SetMode(gin.TestMode)
