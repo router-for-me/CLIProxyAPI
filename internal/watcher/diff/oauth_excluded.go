@@ -114,7 +114,8 @@ func SummarizeAmpModelMappings(mappings []config.AmpModelMapping) AmpModelMappin
 		if mapping.When != nil {
 			when = strings.TrimSpace(mapping.When.Feature) + "\x1f" +
 				strings.TrimSpace(mapping.When.ToolChoice) + "\x1f" +
-				strings.TrimSpace(mapping.When.UserSuffix)
+				strings.TrimSpace(mapping.When.UserSuffix) + "\x1f" +
+				strings.TrimSpace(mapping.When.SystemPrefix)
 		}
 		entries = append(entries, from+"\x1e"+to+"\x1e"+regex+"\x1e"+when)
 	}

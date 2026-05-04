@@ -96,6 +96,21 @@ func TestSummarizeAmpModelMappings_WhenContributesToHash(t *testing.T) {
 	}
 }
 
+// TestSummarizeAmpModelMappings_SystemPrefixContributesToHash verifies that
+// two mappings differing only by When.SystemPrefix produce different hashes,
+// so the config-diff logger does not silently drop SystemPrefix-only edits.
+func TestSummarizeAmpModelMappings_SystemPrefixContributesToHash(t *testing.T) {
+	a := SummarizeAmpModelMappings([]config.AmpModelMapping{
+		{From: "x", To: "X", When: &config.AmpMappingCondition{SystemPrefix: "you are agg man"}},
+	})
+	b := SummarizeAmpModelMappings([]config.AmpModelMapping{
+		{From: "x", To: "X", When: &config.AmpMappingCondition{SystemPrefix: "you are amp"}},
+	})
+	if a.hash == b.hash {
+		t.Fatal("expected different hashes for distinct SystemPrefix")
+	}
+}
+
 // TestSummarizeAmpModelMappings_RegexContributesToHash verifies the regex
 // flag is part of the hash.
 func TestSummarizeAmpModelMappings_RegexContributesToHash(t *testing.T) {
