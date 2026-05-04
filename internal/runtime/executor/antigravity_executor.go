@@ -1943,9 +1943,7 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 		}
 
 		bodyReader = strings.NewReader(payloadStr)
-		if e.cfg != nil && e.cfg.RequestLog {
-			payloadLog = []byte(payloadStr)
-		}
+		payloadLog = []byte(payloadStr)
 	} else {
 		if strings.Contains(modelName, "claude") {
 			payload, _ = sjson.SetBytes(payload, "request.toolConfig.functionCallingConfig.mode", "VALIDATED")
@@ -1954,9 +1952,7 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 		}
 
 		bodyReader = bytes.NewReader(payload)
-		if e.cfg != nil && e.cfg.RequestLog {
-			payloadLog = append([]byte(nil), payload...)
-		}
+		payloadLog = append([]byte(nil), payload...)
 	}
 
 	// if useAntigravitySchema {

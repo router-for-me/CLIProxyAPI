@@ -4,9 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"testing"
+	"time"
 
+	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 )
 
 func TestAntigravityBuildRequest_SanitizesGeminiToolSchema(t *testing.T) {
@@ -88,6 +95,49 @@ func TestAntigravityBuildRequest_SkipsSchemaSanitizationWithEmptyToolsArray(t *t
 	}`))
 
 	assertNonSchemaRequestPreserved(t, body)
+}
+
+func TestAntigravityBuildRequest_CapturesUsageThinkingEffortWhenRequestLogDisabled(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ginCtx.Request = httptest.NewRequest(http.MethodPost, "http://proxy.example/v1/chat/completions", nil)
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+
+	modelName := "gemini-2.5-pro"
+	records := make(chan usage.Record, 4)
+	usage.RegisterPlugin(antigravityUsageCapturePlugin{model: modelName, records: records})
+
+	executor := NewAntigravityExecutor(&config.Config{SDKConfig: config.SDKConfig{RequestLog: false}})
+	payload := []byte(`{
+		"request": {
+			"contents": [
+				{
+					"role": "user",
+					"parts": [{"text": "hello"}]
+				}
+			],
+			"generationConfig": {
+				"thinkingConfig": {
+					"thinkingBudget": 1234
+				}
+			}
+		}
+	}`)
+	_, err := executor.buildRequest(ctx, &cliproxyauth.Auth{ID: "antigravity-auth"}, "token", modelName, payload, false, "", "https://example.com")
+	if err != nil {
+		t.Fatalf("buildRequest error: %v", err)
+	}
+	if _, exists := ginCtx.Get("API_REQUEST"); exists {
+		t.Fatalf("request log was written even though RequestLog is disabled")
+	}
+
+	reporter := helps.NewUsageReporter(ctx, executor.Identifier(), modelName, nil)
+	reporter.Publish(ctx, usage.Detail{TotalTokens: 3})
+
+	record := awaitAntigravityUsageRecord(t, records)
+	if record.ThinkingEffort != "budget:1234" {
+		t.Fatalf("thinking effort = %q, want budget:1234", record.ThinkingEffort)
+	}
 }
 
 func assertNonSchemaRequestPreserved(t *testing.T, body map[string]any) {
@@ -189,6 +239,35 @@ func buildRequestBodyFromRawPayload(t *testing.T, modelName string, payload []by
 		t.Fatalf("unmarshal request body error: %v, body=%s", err, string(raw))
 	}
 	return body
+}
+
+type antigravityUsageCapturePlugin struct {
+	model   string
+	records chan<- usage.Record
+}
+
+func (p antigravityUsageCapturePlugin) HandleUsage(ctx context.Context, record usage.Record) {
+	if record.Provider != antigravityAuthType || record.Model != p.model {
+		return
+	}
+	select {
+	case p.records <- record:
+	default:
+	}
+}
+
+func awaitAntigravityUsageRecord(t *testing.T, records <-chan usage.Record) usage.Record {
+	t.Helper()
+	timer := time.NewTimer(time.Second)
+	defer timer.Stop()
+	for {
+		select {
+		case record := <-records:
+			return record
+		case <-timer.C:
+			t.Fatalf("timed out waiting for antigravity usage record")
+		}
+	}
 }
 
 func extractFirstFunctionDeclaration(t *testing.T, body map[string]any) map[string]any {
