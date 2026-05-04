@@ -329,6 +329,43 @@ func TestConditionMatches(t *testing.T) {
 	}
 }
 
+// TestModelMapper_NonContiguousSameFromConditionalIsReachable
+// regression-tests the case where a same-From conditional rule appears
+// after a different overlapping rule. The conditional rule must still
+// be evaluated and win for matching requests; the earlier overlapping
+// rule's fallback must not be returned prematurely.
+func TestModelMapper_NonContiguousSameFromConditionalIsReachable(t *testing.T) {
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient("test-non-contiguous", "anthropic", []*registry.ModelInfo{
+		{ID: "early-fallback", OwnedBy: "anthropic", Type: "claude"},
+		{ID: "interleaved", OwnedBy: "anthropic", Type: "claude"},
+		{ID: "late-conditional", OwnedBy: "anthropic", Type: "claude"},
+	})
+	defer reg.UnregisterClient("test-non-contiguous")
+
+	mapper := NewModelMapper([]config.AmpModelMapping{
+		// Group A: matches gemini-3-flash-preview, unconditional.
+		{From: "^gemini-3-.*$", To: "early-fallback", Regex: true},
+		// Group B: also matches gemini-3-flash-preview, unconditional.
+		{From: "^.*-flash-.*$", To: "interleaved", Regex: true},
+		// Group A again, conditional. Appended later (e.g. via PATCH).
+		{From: "^gemini-3-.*$", To: "late-conditional", Regex: true,
+			When: &config.AmpMappingCondition{Feature: "handoff"}},
+	})
+
+	// Handoff request must reach the late conditional rule despite the
+	// interleaved unrelated unconditional in between.
+	got := mapper.MapModelCtx("gemini-3-flash-preview",
+		RequestFingerprint{ToolChoice: "create_handoff_context"})
+	if got != "late-conditional" {
+		t.Errorf("got %q, want late-conditional (non-contiguous same-From conditional must be reachable)", got)
+	}
+	// Non-handoff still falls back to the earliest declared group.
+	if got := mapper.MapModelCtx("gemini-3-flash-preview", RequestFingerprint{}); got != "early-fallback" {
+		t.Errorf("got %q, want early-fallback (earliest declared group's fallback)", got)
+	}
+}
+
 // TestModelMapper_ConditionalUnavailableFallsThroughToFallback verifies
 // that when a conditional rule's `to` model has no local providers, the
 // mapper continues scanning and returns the same-From unconditional

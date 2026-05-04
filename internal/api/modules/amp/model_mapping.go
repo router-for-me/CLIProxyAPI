@@ -125,24 +125,31 @@ func hasProviders(targetModel string) bool {
 }
 
 // selectTarget scans rules of one class (exact or regex) and returns the
-// best target model name. Within a contiguous group of rules sharing the
-// same From pattern, conditional rules win and the first unconditional is
-// remembered as that group's fallback. Cross-group declaration order is
-// respected: as soon as one group's fallback is locked in (because no
-// later conditional from the same group matched), it wins over any
-// later group's matches. This avoids letting a later regex rule with a
-// different From pattern silently override an earlier matching rule.
+// best target model name with the following semantics:
 //
-// `available` is called for every candidate target. If a matching rule's
-// target is unavailable locally, the scan continues so that an
-// alternative rule (typically the same-From unconditional fallback, or a
-// later overlapping pattern) can still produce a valid target.
+//   - Rules are grouped by their normalized From key. A group's
+//     "declaration order" is the position of its first matching rule
+//     in the input slice.
+//   - Within one group, conditional rules win over the unconditional
+//     fallback regardless of where each is declared (so a same-key
+//     conditional appended later, e.g. via PATCH, is still reachable
+//     even if rules from another From appear in between).
+//   - Across groups, the earliest-declared group is tried first: if
+//     its conditional matches, use that; otherwise if it has an
+//     unconditional fallback, use that; otherwise move on to the next
+//     group in declaration order.
+//   - A rule whose `to` model has no local providers (per `available`)
+//     is skipped.
+//
+// Returns "" if no rule produces an available target.
 func selectTarget(rules []mappingRule, baseModel, normalizedBase string, fp RequestFingerprint, isRegex bool, available func(string) bool) string {
-	var (
-		groupKey      string
-		groupHas      bool
-		groupFallback string
-	)
+	type group struct {
+		key         string
+		conditional []mappingRule // ordered as declared, only matching this baseModel
+		fallback    string        // first available unconditional `to`
+	}
+	groups := make([]*group, 0)
+	groupIdx := make(map[string]int)
 	for _, r := range rules {
 		var key string
 		if isRegex {
@@ -156,27 +163,32 @@ func selectTarget(rules []mappingRule, baseModel, normalizedBase string, fp Requ
 			}
 			key = r.exactFrom
 		}
-		// Group transition: commit the previous group's fallback if any.
-		if groupHas && key != groupKey {
-			if groupFallback != "" {
-				return groupFallback
-			}
-			groupHas = false
-			groupFallback = ""
+		idx, ok := groupIdx[key]
+		if !ok {
+			groups = append(groups, &group{key: key})
+			idx = len(groups) - 1
+			groupIdx[key] = idx
 		}
-		groupKey = key
-		groupHas = true
+		g := groups[idx]
 		if r.when == nil {
-			if groupFallback == "" && available(r.to) {
-				groupFallback = r.to
+			if g.fallback == "" && available(r.to) {
+				g.fallback = r.to
 			}
 			continue
 		}
-		if ConditionMatches(r.when, fp) && available(r.to) {
-			return r.to
+		g.conditional = append(g.conditional, r)
+	}
+	for _, g := range groups {
+		for _, r := range g.conditional {
+			if ConditionMatches(r.when, fp) && available(r.to) {
+				return r.to
+			}
+		}
+		if g.fallback != "" {
+			return g.fallback
 		}
 	}
-	return groupFallback
+	return ""
 }
 
 // UpdateMappings refreshes the mapping configuration from config.
