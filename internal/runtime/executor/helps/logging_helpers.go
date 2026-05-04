@@ -333,6 +333,9 @@ func RecordAPIWebsocketError(ctx context.Context, cfg *config.Config, stage stri
 }
 
 func ginContextFrom(ctx context.Context) *gin.Context {
+	if ctx == nil {
+		return nil
+	}
 	ginCtx, _ := ctx.Value("gin").(*gin.Context)
 	return ginCtx
 }

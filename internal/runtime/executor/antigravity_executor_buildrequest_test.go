@@ -6,14 +6,12 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
-	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 )
 
 func TestAntigravityBuildRequest_SanitizesGeminiToolSchema(t *testing.T) {
@@ -97,16 +95,13 @@ func TestAntigravityBuildRequest_SkipsSchemaSanitizationWithEmptyToolsArray(t *t
 	assertNonSchemaRequestPreserved(t, body)
 }
 
-func TestAntigravityBuildRequest_CapturesUsageThinkingEffortWhenRequestLogDisabled(t *testing.T) {
+func TestAntigravityBuildRequest_CapturesFinalBodyWhenRequestLogDisabled(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
 	ginCtx.Request = httptest.NewRequest(http.MethodPost, "http://proxy.example/v1/chat/completions", nil)
 	ctx := context.WithValue(context.Background(), "gin", ginCtx)
 
 	modelName := "gemini-2.5-pro"
-	records := make(chan usage.Record, 4)
-	usage.RegisterPlugin(antigravityUsageCapturePlugin{model: modelName, records: records})
-
 	executor := NewAntigravityExecutor(&config.Config{SDKConfig: config.SDKConfig{RequestLog: false}})
 	payload := []byte(`{
 		"request": {
@@ -123,7 +118,7 @@ func TestAntigravityBuildRequest_CapturesUsageThinkingEffortWhenRequestLogDisabl
 			}
 		}
 	}`)
-	_, err := executor.buildRequest(ctx, &cliproxyauth.Auth{ID: "antigravity-auth"}, "token", modelName, payload, false, "", "https://example.com")
+	req, err := executor.buildRequest(ctx, &cliproxyauth.Auth{ID: "antigravity-auth"}, "token", modelName, payload, false, "", "https://example.com")
 	if err != nil {
 		t.Fatalf("buildRequest error: %v", err)
 	}
@@ -131,12 +126,37 @@ func TestAntigravityBuildRequest_CapturesUsageThinkingEffortWhenRequestLogDisabl
 		t.Fatalf("request log was written even though RequestLog is disabled")
 	}
 
-	reporter := helps.NewUsageReporter(ctx, executor.Identifier(), modelName, nil)
-	reporter.Publish(ctx, usage.Detail{TotalTokens: 3})
+	raw, err := io.ReadAll(req.Body)
+	if err != nil {
+		t.Fatalf("read request body error: %v", err)
+	}
+	capturedRaw, exists := ginCtx.Get("__cliproxy_usage_request_capture__")
+	if !exists {
+		t.Fatalf("usage request capture was not recorded")
+	}
+	capturedBody := reflect.ValueOf(capturedRaw).FieldByName("body").Bytes()
+	if string(capturedBody) != string(raw) {
+		t.Fatalf("captured body = %s, want final request body %s", string(capturedBody), string(raw))
+	}
 
-	record := awaitAntigravityUsageRecord(t, records)
-	if record.ThinkingEffort != "budget:1234" {
-		t.Fatalf("thinking effort = %q, want budget:1234", record.ThinkingEffort)
+	var body map[string]any
+	if err := json.Unmarshal(raw, &body); err != nil {
+		t.Fatalf("unmarshal request body error: %v, body=%s", err, string(raw))
+	}
+	request, ok := body["request"].(map[string]any)
+	if !ok {
+		t.Fatalf("request missing or invalid type")
+	}
+	generationConfig, ok := request["generationConfig"].(map[string]any)
+	if !ok {
+		t.Fatalf("generationConfig missing or invalid type")
+	}
+	thinkingConfig, ok := generationConfig["thinkingConfig"].(map[string]any)
+	if !ok {
+		t.Fatalf("thinkingConfig missing or invalid type")
+	}
+	if got, ok := thinkingConfig["thinkingBudget"].(float64); !ok || got != 1234 {
+		t.Fatalf("thinkingBudget = %v, want 1234", thinkingConfig["thinkingBudget"])
 	}
 }
 
@@ -239,35 +259,6 @@ func buildRequestBodyFromRawPayload(t *testing.T, modelName string, payload []by
 		t.Fatalf("unmarshal request body error: %v, body=%s", err, string(raw))
 	}
 	return body
-}
-
-type antigravityUsageCapturePlugin struct {
-	model   string
-	records chan<- usage.Record
-}
-
-func (p antigravityUsageCapturePlugin) HandleUsage(ctx context.Context, record usage.Record) {
-	if record.Provider != antigravityAuthType || record.Model != p.model {
-		return
-	}
-	select {
-	case p.records <- record:
-	default:
-	}
-}
-
-func awaitAntigravityUsageRecord(t *testing.T, records <-chan usage.Record) usage.Record {
-	t.Helper()
-	timer := time.NewTimer(time.Second)
-	defer timer.Stop()
-	for {
-		select {
-		case record := <-records:
-			return record
-		case <-timer.C:
-			t.Fatalf("timed out waiting for antigravity usage record")
-		}
-	}
 }
 
 func extractFirstFunctionDeclaration(t *testing.T, body map[string]any) map[string]any {

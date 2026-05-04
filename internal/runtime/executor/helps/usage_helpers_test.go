@@ -169,6 +169,57 @@ func TestUsageReporterFallsBackToExplicitCaptureWhenRecordedBodyHasNoEffort(t *t
 	}
 }
 
+func TestUsageReporterCapturesAntigravityThinkingEffortFromRecordedFinalBodyWhenRequestLogDisabled(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ginCtx.Request = httptest.NewRequest(http.MethodPost, "http://example.com/v1beta/models/gemini-2.5-pro:generateContent", nil)
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+
+	reporter := NewUsageReporter(ctx, "antigravity", "gemini-2.5-pro", nil)
+	RecordAPIRequest(ctx, &config.Config{SDKConfig: config.SDKConfig{RequestLog: false}}, UpstreamRequestLog{
+		URL:      "https://example.com/v1beta/models/gemini-2.5-pro:generateContent",
+		Method:   http.MethodPost,
+		Body:     []byte(`{"request":{"generationConfig":{"thinkingConfig":{"thinkingBudget":1234}}}}`),
+		Provider: "antigravity",
+	})
+
+	record := reporter.buildRecord(ctx, usage.Detail{TotalTokens: 3}, false)
+	if record.ThinkingEffort != "budget:1234" {
+		t.Fatalf("thinking effort = %q, want budget:1234", record.ThinkingEffort)
+	}
+	if _, exists := ginCtx.Get(apiRequestKey); exists {
+		t.Fatalf("request log was written even though RequestLog is disabled")
+	}
+}
+
+func TestRecordAPIRequestNilContextWithRequestLogDisabledDoesNotPanic(t *testing.T) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			t.Fatalf("RecordAPIRequest panicked with nil context: %v", recovered)
+		}
+	}()
+
+	RecordAPIRequest(nil, &config.Config{SDKConfig: config.SDKConfig{RequestLog: false}}, UpstreamRequestLog{
+		Body: []byte(`{"reasoning_effort":"low"}`),
+	})
+}
+
+func TestUsageReporterBuildRecordNilContextFallsBackToModelSuffix(t *testing.T) {
+	reporter := NewUsageReporter(context.Background(), "openai", "gpt-5.4(high)", nil)
+
+	var record usage.Record
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			t.Fatalf("buildRecord panicked with nil context: %v", recovered)
+		}
+	}()
+
+	record = reporter.buildRecord(nil, usage.Detail{TotalTokens: 1}, false)
+	if record.ThinkingEffort != "high" {
+		t.Fatalf("thinking effort = %q, want high", record.ThinkingEffort)
+	}
+}
+
 func TestUsageReporterBuildAdditionalModelRecordSkipsZeroTokens(t *testing.T) {
 	reporter := &UsageReporter{
 		provider:    "codex",
