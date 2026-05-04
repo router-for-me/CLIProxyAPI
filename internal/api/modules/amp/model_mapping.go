@@ -156,7 +156,13 @@ func selectTarget(rules []mappingRule, baseModel, normalizedBase string, fp Requ
 			if r.re == nil || !r.re.MatchString(baseModel) {
 				continue
 			}
-			key = r.re.String()
+			// Regex patterns are compiled case-insensitively (UpdateMappings
+			// prefixes "(?i)"), so two rules differing only by letter case
+			// match the same inputs and must share a group. Lower-case the
+			// pattern string when grouping so case-variant From values do
+			// not split into separate groups and hide a same-From
+			// conditional behind an earlier fallback.
+			key = strings.ToLower(r.re.String())
 		} else {
 			if r.exactFrom == "" || r.exactFrom != normalizedBase {
 				continue

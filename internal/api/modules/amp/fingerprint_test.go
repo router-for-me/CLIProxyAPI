@@ -489,6 +489,34 @@ func TestModelMapper_RegexConditionalWinsWithinSameGroup(t *testing.T) {
 	}
 }
 
+// TestModelMapper_RegexCaseVariantSharesGroup verifies that two regex
+// rules whose From patterns differ only by letter case share the same
+// group (since UpdateMappings compiles them case-insensitively). A
+// later same-pattern conditional must remain reachable behind an
+// earlier case-variant fallback.
+func TestModelMapper_RegexCaseVariantSharesGroup(t *testing.T) {
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient("test-regex-case", "anthropic", []*registry.ModelInfo{
+		{ID: "case-conditional-target", OwnedBy: "anthropic", Type: "claude"},
+		{ID: "case-fallback-target", OwnedBy: "anthropic", Type: "claude"},
+	})
+	defer reg.UnregisterClient("test-regex-case")
+
+	mapper := NewModelMapper([]config.AmpModelMapping{
+		{From: "^GEMINI-3-.*$", To: "case-fallback-target", Regex: true},
+		{From: "^gemini-3-.*$", To: "case-conditional-target", Regex: true,
+			When: &config.AmpMappingCondition{Feature: "handoff"}},
+	})
+
+	if got := mapper.MapModelCtx("gemini-3-flash-preview",
+		RequestFingerprint{ToolChoice: "create_handoff_context"}); got != "case-conditional-target" {
+		t.Errorf("got %q, want case-conditional-target (case-variant regex must share group)", got)
+	}
+	if got := mapper.MapModelCtx("gemini-3-flash-preview", RequestFingerprint{}); got != "case-fallback-target" {
+		t.Errorf("got %q, want case-fallback-target", got)
+	}
+}
+
 func TestModelMapper_MapModelCtx_ConditionalThenFallback(t *testing.T) {
 	reg := registry.GetGlobalRegistry()
 	reg.RegisterClient("test-cond", "openai", []*registry.ModelInfo{
