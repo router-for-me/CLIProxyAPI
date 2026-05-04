@@ -148,6 +148,27 @@ func TestUsageReporterUsesRecordedFinalRequestBodyWhenRequestLogDisabled(t *test
 	}
 }
 
+func TestUsageReporterFallsBackToExplicitCaptureWhenRecordedBodyHasNoEffort(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ginCtx.Request = httptest.NewRequest(http.MethodPost, "http://example.com/v1/chat/completions", nil)
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+
+	reporter := NewUsageReporter(ctx, "openai-compatibility", "gpt-5.4(high)", nil)
+	reporter.CaptureThinkingEffort([]byte(`{"reasoning_effort":"low"}`), "gpt-5.4", "openai", "openai")
+	RecordAPIRequest(ctx, &config.Config{SDKConfig: config.SDKConfig{RequestLog: false}}, UpstreamRequestLog{
+		URL:      "https://example.com/v1/chat/completions",
+		Method:   http.MethodPost,
+		Body:     []byte(`{}`),
+		Provider: "openai-compatibility",
+	})
+
+	record := reporter.buildRecord(ctx, usage.Detail{TotalTokens: 3}, false)
+	if record.ThinkingEffort != "low" {
+		t.Fatalf("thinking effort = %q, want low", record.ThinkingEffort)
+	}
+}
+
 func TestUsageReporterBuildAdditionalModelRecordSkipsZeroTokens(t *testing.T) {
 	reporter := &UsageReporter{
 		provider:    "codex",

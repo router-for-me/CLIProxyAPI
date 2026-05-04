@@ -40,7 +40,7 @@ func capturedUsageThinkingEffort(ctx context.Context, model string) (string, boo
 	if !ok {
 		return "", false
 	}
-	return thinking.ExtractEffort(capture.body, model, "", capture.format), true
+	return thinking.ExtractEffort(capture.body, "", "", capture.format), true
 }
 
 func inferUsageThinkingFormat(info UpstreamRequestLog) string {
