@@ -49,6 +49,61 @@ func setupConfigBackedClaudeStatusTest(t *testing.T) (*Handler, *coreauth.Manage
 	return h, manager, configPath, authID
 }
 
+func TestSyncRuntimeConfigRemovesDeletedConfigBackedOpenAICompatKey(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	cfg := &config.Config{
+		AuthDir: tmpDir,
+		OpenAICompatibility: []config.OpenAICompatibility{{
+			Name:    "minimax",
+			BaseURL: "https://api.minimax.example.com/v1",
+			APIKeyEntries: []config.OpenAICompatibilityAPIKey{
+				{APIKey: "sk-active"},
+				{APIKey: "sk-deleted"},
+			},
+			Models: []config.OpenAICompatibilityModel{{
+				Name:  "minimax-m2",
+				Alias: "minimax-m2",
+			}},
+		}},
+	}
+	manager := coreauth.NewManager(nil, nil, nil)
+	h := NewHandler(cfg, configPath, manager)
+
+	h.mu.Lock()
+	h.syncRuntimeConfigLocked(context.Background())
+	h.mu.Unlock()
+
+	idGen := synthesizer.NewStableIDGenerator()
+	activeID, _ := idGen.Next("openai-compatibility:minimax", "sk-active", "https://api.minimax.example.com/v1", "")
+	deletedID, _ := idGen.Next("openai-compatibility:minimax", "sk-deleted", "https://api.minimax.example.com/v1", "")
+	deletedAuth, ok := manager.GetByID(deletedID)
+	if !ok || deletedAuth == nil {
+		t.Fatalf("expected deleted candidate auth %s before config removal", deletedID)
+	}
+	deletedIndex := deletedAuth.EnsureIndex()
+
+	cfg.OpenAICompatibility[0].APIKeyEntries = cfg.OpenAICompatibility[0].APIKeyEntries[:1]
+	h.mu.Lock()
+	h.syncRuntimeConfigLocked(context.Background())
+	h.mu.Unlock()
+
+	if _, ok := manager.GetByID(activeID); !ok {
+		t.Fatalf("expected remaining config-backed auth %s to stay registered", activeID)
+	}
+	if auth, ok := manager.GetByID(deletedID); ok {
+		t.Fatalf("expected deleted config-backed auth %s to be removed, got disabled=%v status=%s", deletedID, auth.Disabled, auth.Status)
+	}
+
+	resolver := newMonitorSourceResolver(cfg, manager)
+	if ref := resolver.Resolve("", deletedIndex); ref.EntityKind != "unknown" {
+		t.Fatalf("deleted auth index resolved to %+v, want unknown", ref)
+	}
+}
+
 func TestPatchAuthFileStatusConfigBackedReturnsConfigVersionForNextSave(t *testing.T) {
 	h, manager, configPath, authID := setupConfigBackedClaudeStatusTest(t)
 

@@ -282,6 +282,26 @@ func mergeOpenAICompatAPIKeysPreservingMissing(existing, incoming []config.OpenA
 	return out
 }
 
+func mergeOpenAICompatAPIKeyFields(existing, incoming []config.OpenAICompatibilityAPIKey) []config.OpenAICompatibilityAPIKey {
+	out := make([]config.OpenAICompatibilityAPIKey, 0, len(incoming))
+	used := make([]bool, len(existing))
+	identityAt := func(i int) string {
+		return apiKeyEntryIdentity(existing[i].APIKey, "", existing[i].ProxyURL)
+	}
+	for i := range incoming {
+		entry := incoming[i]
+		idx := findUnusedIdentityMatch(used, apiKeyEntryIdentity(entry.APIKey, "", entry.ProxyURL), identityAt)
+		if idx >= 0 {
+			used[idx] = true
+			if entry.RoutingGroup == "" {
+				entry.RoutingGroup = existing[idx].RoutingGroup
+			}
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
 func mergeOpenAICompatPreservingMissing(existing, incoming []config.OpenAICompatibility) []config.OpenAICompatibility {
 	out := make([]config.OpenAICompatibility, 0, len(incoming)+len(existing))
 	used := make([]bool, len(existing))
@@ -302,7 +322,7 @@ func mergeOpenAICompatPreservingMissing(existing, incoming []config.OpenAICompat
 			if !entry.Disabled && existing[idx].Disabled {
 				entry.Disabled = true
 			}
-			entry.APIKeyEntries = mergeOpenAICompatAPIKeysPreservingMissing(existing[idx].APIKeyEntries, entry.APIKeyEntries)
+			entry.APIKeyEntries = mergeOpenAICompatAPIKeyFields(existing[idx].APIKeyEntries, entry.APIKeyEntries)
 		}
 		out = append(out, entry)
 	}
@@ -808,7 +828,13 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 	}
 	if body.Value.APIKeyEntries != nil {
 		apiKeyEntries := append([]config.OpenAICompatibilityAPIKey(nil), (*body.Value.APIKeyEntries)...)
-		if body.Value.ReplaceKeys == nil || !*body.Value.ReplaceKeys {
+		if body.Value.ReplaceKeys == nil {
+			if len(apiKeyEntries) == 1 {
+				apiKeyEntries = mergeOpenAICompatAPIKeysPreservingMissing(entry.APIKeyEntries, apiKeyEntries)
+			} else {
+				apiKeyEntries = mergeOpenAICompatAPIKeyFields(entry.APIKeyEntries, apiKeyEntries)
+			}
+		} else if !*body.Value.ReplaceKeys {
 			apiKeyEntries = mergeOpenAICompatAPIKeysPreservingMissing(entry.APIKeyEntries, apiKeyEntries)
 		}
 		entry.APIKeyEntries = apiKeyEntries

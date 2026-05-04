@@ -300,6 +300,48 @@ func TestPutOpenAICompat_PreservesProviderFieldsByDefault(t *testing.T) {
 	}
 }
 
+func TestPutOpenAICompat_RemovesOmittedAPIKeyEntriesByDefault(t *testing.T) {
+	t.Parallel()
+	gin.SetMode(gin.TestMode)
+
+	h := &Handler{
+		cfg: &config.Config{
+			OpenAICompatibility: []config.OpenAICompatibility{{
+				Name:    "demo",
+				BaseURL: "https://compat.example.com",
+				APIKeyEntries: []config.OpenAICompatibilityAPIKey{
+					{APIKey: "sk-a", RoutingGroup: "key-rg"},
+					{APIKey: "sk-b"},
+				},
+			}},
+		},
+		configFilePath: writeTestConfigFile(t),
+	}
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPut, "/v0/management/openai-compatibility", strings.NewReader(`[
+		{"name":"demo","base-url":"https://compat.example.com","api-key-entries":[{"api-key":"sk-a"}]}
+	]`))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	h.PutOpenAICompat(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	keys := h.cfg.OpenAICompatibility[0].APIKeyEntries
+	if got := len(keys); got != 1 {
+		t.Fatalf("api-key-entries len = %d, want 1", got)
+	}
+	if got := keys[0].APIKey; got != "sk-a" {
+		t.Fatalf("remaining key = %q, want sk-a", got)
+	}
+	if got := keys[0].RoutingGroup; got != "key-rg" {
+		t.Fatalf("key routing-group = %q, want key-rg", got)
+	}
+}
+
 func TestPatchOpenAICompat_MergesAPIKeyEntriesByDefault(t *testing.T) {
 	t.Parallel()
 	gin.SetMode(gin.TestMode)
@@ -340,6 +382,53 @@ func TestPatchOpenAICompat_MergesAPIKeyEntriesByDefault(t *testing.T) {
 	}
 	if got := keys[1].APIKey; got != "sk-b" {
 		t.Fatalf("omitted key = %q, want sk-b", got)
+	}
+}
+
+func TestPatchOpenAICompat_ReplacesMultipleAPIKeyEntriesByDefault(t *testing.T) {
+	t.Parallel()
+	gin.SetMode(gin.TestMode)
+
+	h := &Handler{
+		cfg: &config.Config{
+			OpenAICompatibility: []config.OpenAICompatibility{{
+				Name:    "demo",
+				BaseURL: "https://compat.example.com",
+				APIKeyEntries: []config.OpenAICompatibilityAPIKey{
+					{APIKey: "sk-a", RoutingGroup: "key-rg"},
+					{APIKey: "sk-b"},
+					{APIKey: "sk-c"},
+				},
+			}},
+		},
+		configFilePath: writeTestConfigFile(t),
+	}
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPatch, "/v0/management/openai-compatibility", strings.NewReader(`{
+		"name":"demo",
+		"value":{"api-key-entries":[{"api-key":"sk-a"},{"api-key":"sk-c"}]}
+	}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	h.PatchOpenAICompat(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	keys := h.cfg.OpenAICompatibility[0].APIKeyEntries
+	if got := len(keys); got != 2 {
+		t.Fatalf("api-key-entries len = %d, want 2", got)
+	}
+	if got := keys[0].APIKey; got != "sk-a" {
+		t.Fatalf("first key = %q, want sk-a", got)
+	}
+	if got := keys[0].RoutingGroup; got != "key-rg" {
+		t.Fatalf("key routing-group = %q, want key-rg", got)
+	}
+	if got := keys[1].APIKey; got != "sk-c" {
+		t.Fatalf("second key = %q, want sk-c", got)
 	}
 }
 

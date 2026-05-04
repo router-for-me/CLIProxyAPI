@@ -1859,6 +1859,11 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	return auth.Clone(), nil
 }
 
+// Delete removes an auth entry from runtime state and persistent storage when applicable.
+func (m *Manager) Delete(ctx context.Context, authID string) error {
+	return m.evictAuth(ctx, authID)
+}
+
 // Load resets manager state from the backing store.
 func (m *Manager) Load(ctx context.Context) error {
 	m.mu.Lock()
@@ -4167,6 +4172,9 @@ func (m *Manager) evictAuth(ctx context.Context, authID string) error {
 	registry.GetGlobalRegistry().UnregisterClient(authID)
 
 	if m.store == nil {
+		return nil
+	}
+	if shouldSkipPersist(ctx) {
 		return nil
 	}
 	if authSnapshot.Attributes != nil {

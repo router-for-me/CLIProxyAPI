@@ -391,7 +391,6 @@ func (h *Handler) syncRuntimeConfigLocked(ctx context.Context) {
 		}
 	}
 
-	now := sctx.Now
 	for _, existing := range h.authManager.List() {
 		if !isConfigBackedAuth(existing) {
 			continue
@@ -399,12 +398,8 @@ func (h *Handler) syncRuntimeConfigLocked(ctx context.Context) {
 		if _, ok := desired[existing.ID]; ok {
 			continue
 		}
-		existing.Disabled = true
-		existing.Status = coreauth.StatusDisabled
-		existing.StatusMessage = "removed via management API"
-		existing.UpdatedAt = now
-		if _, errUpdate := h.authManager.Update(syncCtx, existing); errUpdate != nil {
-			log.WithError(errUpdate).Warnf("failed to disable removed config-backed auth %s", existing.ID)
+		if errDelete := h.authManager.Delete(syncCtx, existing.ID); errDelete != nil {
+			log.WithError(errDelete).Warnf("failed to remove deleted config-backed auth %s", existing.ID)
 		}
 	}
 }
