@@ -894,19 +894,12 @@ attemptLoop:
 						reporter.Publish(ctx, detail)
 					}
 
-					select {
-					case out <- cliproxyexecutor.StreamChunk{Payload: payload}:
-					case <-ctx.Done():
-						return
-					}
+					out <- cliproxyexecutor.StreamChunk{Payload: payload}
 				}
 				if errScan := scanner.Err(); errScan != nil {
 					helps.RecordAPIResponseError(ctx, e.cfg, errScan)
 					reporter.PublishFailure(ctx)
-					select {
-					case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
-					case <-ctx.Done():
-					}
+					out <- cliproxyexecutor.StreamChunk{Err: errScan}
 				} else {
 					reporter.EnsurePublished(ctx)
 				}
