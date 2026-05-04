@@ -51,7 +51,7 @@ GLM CODING PLANを10%割引で取得：https://z.ai/subscribe?ic=8JVLJQFSKB
 - OAuthログインによるOpenAI Codexサポート（GPTモデル）
 - OAuthログインによるClaude Codeサポート
 - プロバイダールーティングによるAmp CLIおよびIDE拡張機能のサポート
-- ストリーミングおよび非ストリーミングレスポンス
+- ストリーミング、非ストリーミング、および対応環境でのWebSocketレスポンス
 - 関数呼び出し/ツールのサポート
 - マルチモーダル入力サポート（テキストと画像）
 - ラウンドロビン負荷分散による複数アカウント対応（Gemini、OpenAI、Claude）
