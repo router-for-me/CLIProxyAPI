@@ -16,6 +16,11 @@ import (
 
 var managementPanelKeyTestBatchPattern = regexp.MustCompile(`\(await Promise\.all\(t\.map\(e=>([A-Za-z_$][A-Za-z0-9_$]*)\(e\)\)\)\)\.filter\(Boolean\)\.length`)
 
+var (
+	managementPanelDisabledKeyGroupingNeedle      = []byte(`excludedModels:kg(t.excludedModels)`)
+	managementPanelDisabledKeyGroupingReplacement = []byte(`excludedModels:kg(Lp(t.excludedModels))`)
+)
+
 func managementConfigVersionGuardScript(initialVersion string) []byte {
 	initialVersionJSON, err := json.Marshal(strings.TrimSpace(initialVersion))
 	if err != nil {
@@ -265,6 +270,7 @@ func injectManagementConfigVersionGuard(data []byte, initialVersion ...string) [
 	guardScript := managementConfigVersionGuardScript(version)
 	data = removeManagementConfigVersionGuard(data)
 	data = patchManagementPanelKeyTestBatch(data)
+	data = patchManagementPanelDisabledKeyGrouping(data)
 	lower := bytes.ToLower(data)
 	if idx := bytes.LastIndex(lower, []byte("</body>")); idx >= 0 {
 		out := make([]byte, 0, len(data)+len(guardScript))
@@ -283,6 +289,14 @@ func patchManagementPanelKeyTestBatch(data []byte) []byte {
 	return managementPanelKeyTestBatchPattern.ReplaceAll(
 		data,
 		[]byte(`(await window.__cliproxySequentialMap(t,e=>$1(e))).filter(Boolean).length`),
+	)
+}
+
+func patchManagementPanelDisabledKeyGrouping(data []byte) []byte {
+	return bytes.ReplaceAll(
+		data,
+		managementPanelDisabledKeyGroupingNeedle,
+		managementPanelDisabledKeyGroupingReplacement,
 	)
 }
 

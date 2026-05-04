@@ -137,6 +137,27 @@ let f=(await Promise.all(t.map(e=>N(e)))).filter(Boolean).length;
 	}
 }
 
+func TestInjectManagementConfigVersionGuardKeepsDisabledKeysInSameGroup(t *testing.T) {
+	html := []byte(`<html><body><script type="module">
+const jg=(e,t)=>JSON.stringify({provider:e,baseUrl:Tg(e,t.baseUrl),excludedModels:kg(t.excludedModels),cloak:e==="claude"?Ag(t.cloak):null});
+</script></body></html>`)
+
+	out := injectManagementConfigVersionGuard(html)
+	body := string(out)
+
+	if strings.Contains(body, `excludedModels:kg(t.excludedModels)`) {
+		t.Fatalf("expected disabled-key grouping signature to be patched: %s", body)
+	}
+	if !strings.Contains(body, `excludedModels:kg(Lp(t.excludedModels))`) {
+		t.Fatalf("expected grouping signature to ignore disable-all sentinel: %s", body)
+	}
+
+	again := injectManagementConfigVersionGuard(out)
+	if strings.Count(string(again), `excludedModels:kg(Lp(t.excludedModels))`) != 1 {
+		t.Fatalf("expected grouping patch to be idempotent: %s", string(again))
+	}
+}
+
 func TestUsagePersistenceEnabledHotReload(t *testing.T) {
 	t.Setenv("PGSTORE_DSN", "")
 	t.Setenv("pgstore_dsn", "")
