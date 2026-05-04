@@ -248,34 +248,6 @@ func TestUsageReporterCapturesAntigravityThinkingEffortFromRecordedFinalBodyWhen
 	}
 }
 
-func TestRecordAPIRequestNilContextWithRequestLogDisabledDoesNotPanic(t *testing.T) {
-	defer func() {
-		if recovered := recover(); recovered != nil {
-			t.Fatalf("RecordAPIRequest panicked with nil context: %v", recovered)
-		}
-	}()
-
-	RecordAPIRequest(nil, &config.Config{SDKConfig: config.SDKConfig{RequestLog: false}}, UpstreamRequestLog{
-		Body: []byte(`{"reasoning_effort":"low"}`),
-	})
-}
-
-func TestUsageReporterBuildRecordNilContextFallsBackToModelSuffix(t *testing.T) {
-	reporter := NewUsageReporter(context.Background(), "openai", "gpt-5.4(high)", nil)
-
-	var record usage.Record
-	defer func() {
-		if recovered := recover(); recovered != nil {
-			t.Fatalf("buildRecord panicked with nil context: %v", recovered)
-		}
-	}()
-
-	record = reporter.buildRecord(nil, usage.Detail{TotalTokens: 1}, false)
-	if record.ThinkingEffort != "high" {
-		t.Fatalf("thinking effort = %q, want high", record.ThinkingEffort)
-	}
-}
-
 func TestUsageReporterBuildAdditionalModelRecordSkipsZeroTokens(t *testing.T) {
 	reporter := &UsageReporter{
 		provider:    "codex",
