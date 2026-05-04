@@ -22,8 +22,12 @@ type ModelMapper interface {
 	// Equivalent to MapModelCtx with an empty fingerprint.
 	MapModel(requestedModel string) string
 
-	// MapModelCtx is the feature-aware variant. Conditional mappings (When)
-	// are evaluated against fp; the first matching rule wins.
+	// MapModelCtx is the feature-aware variant. Selection follows the
+	// grouped semantics documented on selectTarget: exact groups before
+	// regex groups; within a group, the first conditional rule (in
+	// declaration order) whose When matches and whose target is
+	// available wins, otherwise the first available unconditional
+	// fallback in the same group is used.
 	MapModelCtx(requestedModel string, fp RequestFingerprint) string
 
 	// UpdateMappings refreshes the mapping configuration (for hot-reload).
@@ -32,15 +36,18 @@ type ModelMapper interface {
 
 // DefaultModelMapper implements ModelMapper with thread-safe mapping storage.
 //
-// Lookup order:
-//  1. exact rules (in declaration order)
-//  2. regex rules (in declaration order)
+// Selection order (see selectTarget for the full algorithm):
+//  1. exact rules
+//  2. regex rules
 //
-// Within each pass, conditional rules ("When") are evaluated first; the
-// first matching unconditional rule for the same From is remembered and
-// used as a fallback when no conditional rule matches. This guarantees the
-// conditional-wins semantics regardless of the order users write them in
-// configuration.
+// Within each pass, matching rules are bucketed by their normalized
+// From key into groups (in declaration order of each group's first
+// matching rule). Groups are then evaluated in order: a group's first
+// conditional rule whose When matches and whose target has registered
+// providers wins; otherwise the first available unconditional rule in
+// that group is used as fallback. Across groups, an earlier group's
+// available fallback is returned before any later group's conditional
+// rule is considered.
 type DefaultModelMapper struct {
 	mu     sync.RWMutex
 	exacts []mappingRule
@@ -63,7 +70,9 @@ func NewModelMapper(mappings []config.AmpModelMapping) *DefaultModelMapper {
 }
 
 // MapModel is a convenience wrapper for callers that have no fingerprint.
-// Conditional rules are skipped.
+// Equivalent to MapModelCtx with an empty fingerprint, so conditions
+// requiring a non-empty Feature/ToolChoice/UserSuffix/SystemPrefix
+// will not match (rules with a nil When still apply normally).
 func (m *DefaultModelMapper) MapModel(requestedModel string) string {
 	return m.MapModelCtx(requestedModel, RequestFingerprint{})
 }
@@ -130,16 +139,22 @@ func hasProviders(targetModel string) bool {
 //   - Rules are grouped by their normalized From key. A group's
 //     "declaration order" is the position of its first matching rule
 //     in the input slice.
-//   - Within one group, conditional rules win over the unconditional
-//     fallback regardless of where each is declared (so a same-key
-//     conditional appended later, e.g. via PATCH, is still reachable
-//     even if rules from another From appear in between).
+//   - Within one group, the first conditional rule (in declaration
+//     order) whose When matches the fingerprint and whose target is
+//     reported available wins. This holds regardless of where the
+//     conditional and unconditional rules are interleaved (so a
+//     same-key conditional appended later, e.g. via PATCH, is still
+//     reachable even if rules from another From appear in between).
+//   - If no conditional rule wins, the group's fallback is the first
+//     unconditional rule in declaration order whose target is
+//     available.
 //   - Across groups, the earliest-declared group is tried first: if
 //     its conditional matches, use that; otherwise if it has an
-//     unconditional fallback, use that; otherwise move on to the next
-//     group in declaration order.
+//     available unconditional fallback, use that; otherwise move on
+//     to the next group in declaration order.
 //   - A rule whose `to` model has no local providers (per `available`)
-//     is skipped.
+//     is skipped during both conditional matching and fallback
+//     selection.
 //
 // Returns "" if no rule produces an available target.
 func selectTarget(rules []mappingRule, baseModel, normalizedBase string, fp RequestFingerprint, isRegex bool, available func(string) bool) string {

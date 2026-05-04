@@ -81,10 +81,11 @@ type RequestFingerprint struct {
 	// used by AmpMappingCondition.UserSuffix.
 	LastUserText string
 
-	// SystemText is the concatenated text of the request's system /
-	// systemInstruction / instructions field. Used by SystemPrefix matching
-	// and by Feature() to recognize features whose system prompts are
-	// hardcoded in the Amp client binary.
+	// SystemText is the first non-empty system-like text extracted from
+	// system / instructions / input[] system|developer / systemInstruction
+	// (in that order). Used by SystemPrefix matching and by Feature() to
+	// recognize features whose system prompts are hardcoded in the Amp
+	// client binary.
 	SystemText string
 
 	// HasImageOutput indicates the request asks the upstream model to emit
@@ -256,11 +257,12 @@ func extractLastUserText(body []byte) string {
 // extractSystemText returns the textual system / systemInstruction /
 // instructions content of the request. Sources are tried in order
 // (top-level system, top-level instructions, input[] system/developer
-// entries, systemInstruction); the first non-empty source wins and its
-// text parts are concatenated in declaration order. Anthropic and
-// OpenAI accept either a string or an array of typed parts; Gemini
-// wraps it in systemInstruction.parts[].text. OpenAI Responses
-// additionally allows a system/developer-role entry inside input[].
+// entries, systemInstruction); the first non-empty source wins. For
+// input[] specifically, the first non-empty system/developer entry in
+// declaration order wins; later entries are not considered. Within the
+// chosen source/entry, text parts are concatenated in declaration
+// order. Anthropic and OpenAI accept either a string or an array of
+// typed parts; Gemini wraps it in systemInstruction.parts[].text.
 func extractSystemText(body []byte) string {
 	// Anthropic / OpenAI Chat: top-level "system" (string or array).
 	if v := gjson.GetBytes(body, "system"); v.Exists() {
