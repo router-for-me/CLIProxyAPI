@@ -296,8 +296,15 @@ func TestApplyCodexWebsocketHeadersUsesCanonicalAccountHeader(t *testing.T) {
 
 	headers := applyCodexWebsocketHeaders(context.Background(), http.Header{}, auth, "", nil)
 
-	if got := headers.Get("ChatGPT-Account-ID"); got != "acct-1" {
+	if got := headerValueCaseInsensitive(headers, "ChatGPT-Account-ID"); got != "acct-1" {
 		t.Fatalf("ChatGPT-Account-ID = %s, want acct-1", got)
+	}
+	values, ok := headers["ChatGPT-Account-ID"]
+	if !ok {
+		t.Fatalf("expected exact ChatGPT-Account-ID key, got %#v", headers)
+	}
+	if len(values) != 1 || values[0] != "acct-1" {
+		t.Fatalf("ChatGPT-Account-ID values = %#v, want [acct-1]", values)
 	}
 }
 
@@ -326,9 +333,27 @@ func TestParseCodexWebsocketErrorMarksConnectionLimitRetryable(t *testing.T) {
 	if !ok || retryable.RetryAfter() == nil {
 		t.Fatalf("expected retryable websocket connection limit error")
 	}
+	if got := *retryable.RetryAfter(); got != 0 {
+		t.Fatalf("retryAfter = %v, want connection-limit fallback 0", got)
+	}
 	withHeaders, ok := err.(interface{ Headers() http.Header })
 	if !ok || withHeaders.Headers().Get("retry-after") != "1" {
 		t.Fatalf("headers = %#v, want retry-after", err)
+	}
+}
+
+func TestParseCodexWebsocketErrorUsesUsageLimitRetryMetadata(t *testing.T) {
+	err, ok := parseCodexWebsocketError([]byte(`{"type":"error","status":429,"body":{"error":{"type":"usage_limit_reached","message":"usage limit reached","resets_in_seconds":7}}}`))
+	if !ok {
+		t.Fatalf("expected websocket error")
+	}
+
+	retryable, ok := err.(interface{ RetryAfter() *time.Duration })
+	if !ok || retryable.RetryAfter() == nil {
+		t.Fatalf("expected retryable usage limit websocket error")
+	}
+	if got := *retryable.RetryAfter(); got != 7*time.Second {
+		t.Fatalf("retryAfter = %v, want 7s", got)
 	}
 }
 
