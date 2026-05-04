@@ -296,8 +296,6 @@ type AmpMappingCondition struct {
 	//   - "git_list"         (Amp review git-list helper; claude-haiku-4-5)
 	//   - "git_diff"         (Amp review git-diff helper; claude-haiku-4-5)
 	//   - "codereview_check" (Amp per-check review subagent; claude-haiku-4-5)
-	//   - "thread_extract"   (Amp read_thread internal extraction)
-	//   - "error_summary"    (Amp subagent error-recovery summarizer)
 	// Other Amp features should be matched via ToolChoice / UserSuffix /
 	// SystemPrefix when their fingerprint is known. Case-insensitive.
 	Feature string `yaml:"feature,omitempty" json:"feature,omitempty"`

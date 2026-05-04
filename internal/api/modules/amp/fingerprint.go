@@ -27,25 +27,44 @@ const (
 // change when Amp itself is upgraded. Keep prefixes long enough to avoid
 // collisions but short enough to tolerate trailing whitespace/newlines.
 const (
-	OraclePromptPrefix        = "you are the oracle - an expert ai advisor"
-	SearchPromptPrefix        = "you are a fast, parallel code search agent"
-	LookAtPromptPrefix        = "you are an ai assistant that analyzes files for a software engineer"
-	ReviewPromptPrefix        = "you are an expert software engineer reviewing code changes"
-	ReviewMainPromptPrefix    = "you are an expert senior engineer with deep knowledge of software engineering best practices"
-	TitlingPromptPrefix       = "you are an assistant that generates short, descriptive titles"
-	HandoffPromptPrefix       = "you are an assistant tasked with creating a handoff context"
-	LibrarianPromptPrefix     = "you are the librarian, a specialized codebase understanding agent"
-	ClassifierPromptPrefix    = "you are a classifier that answers yes/no questions"
-	GitListPromptPrefix       = "you generate git commands to list changed files"
-	GitDiffPromptPrefix       = "you generate git diff commands that show the actual diff content"
-	ThreadExtractPromptPrefix = "you are helping me extract relevant information from the mentioned thread"
-	ErrorSummaryPromptPrefix  = "you are helping summarize work done by an ai coding agent"
+	OraclePromptPrefix     = "you are the oracle - an expert ai advisor"
+	SearchPromptPrefix     = "you are a fast, parallel code search agent"
+	LookAtPromptPrefix     = "you are an ai assistant that analyzes files for a software engineer"
+	ReviewPromptPrefix     = "you are an expert software engineer reviewing code changes"
+	ReviewMainPromptPrefix = "you are an expert senior engineer with deep knowledge of software engineering best practices"
+	TitlingPromptPrefix    = "you are an assistant that generates short, descriptive titles"
+	HandoffPromptPrefix    = "you are an assistant tasked with creating a handoff context"
+	LibrarianPromptPrefix  = "you are the librarian, a specialized codebase understanding agent"
+	ClassifierPromptPrefix = "you are a classifier that answers yes/no questions"
+	// Git helper prefixes use the full first sentence to avoid collision
+	// with any future "you generate git ..." prompt variants.
+	GitListPromptPrefix = "you generate git commands to list changed files. output commands wrapped in <command></command> tags."
+	GitDiffPromptPrefix = "you generate git diff commands that show the actual diff content. output commands in xml format:"
 )
 
-// Suffix of the user-message template emitted by the codereview-check
-// subagent (`Run the "${name}" code review check.`). Combined with the
-// claude-haiku-4-5 model name this is a strong fingerprint.
-const CodereviewCheckUserSuffix = "code review check."
+// codereview-check user-message template anchors. The full template is
+// `Run the "${name}" code review check.`. Match both the prefix and
+// suffix so that loose phrases like "please run a code review check"
+// in normal review traffic do not collide.
+const (
+	codereviewCheckUserPrefix = `run the "`
+	codereviewCheckUserSuffix = `" code review check.`
+)
+
+// isCodereviewCheckUserText reports whether the given user message
+// matches the codereview-check template exactly, after lowering and
+// trimming whitespace.
+func isCodereviewCheckUserText(s string) bool {
+	s = strings.ToLower(strings.TrimSpace(s))
+	if !strings.HasPrefix(s, codereviewCheckUserPrefix) {
+		return false
+	}
+	if !strings.HasSuffix(s, codereviewCheckUserSuffix) {
+		return false
+	}
+	// Need at least one byte for the check name between the anchors.
+	return len(s) > len(codereviewCheckUserPrefix)+len(codereviewCheckUserSuffix)
+}
 
 // RequestFingerprint captures the per-request features a mapping condition
 // can match against. All fields are optional; absent fields cannot match.
@@ -99,10 +118,8 @@ func (f RequestFingerprint) Feature() string {
 	}
 
 	lastUser := strings.ToLower(strings.TrimSpace(f.LastUserText))
-	if lastUser != "" {
-		if strings.HasSuffix(lastUser, CodereviewCheckUserSuffix) {
-			return "codereview_check"
-		}
+	if isCodereviewCheckUserText(f.LastUserText) {
+		return "codereview_check"
 	}
 
 	sys := strings.ToLower(strings.TrimSpace(f.SystemText))
@@ -130,10 +147,6 @@ func (f RequestFingerprint) Feature() string {
 			return "git_list"
 		case strings.HasPrefix(sys, GitDiffPromptPrefix):
 			return "git_diff"
-		case strings.HasPrefix(sys, ThreadExtractPromptPrefix):
-			return "thread_extract"
-		case strings.HasPrefix(sys, ErrorSummaryPromptPrefix):
-			return "error_summary"
 		}
 	}
 
