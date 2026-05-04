@@ -50,11 +50,13 @@ _bmad-output/*
 # macOS
 .DS_Store
 ._*
+
+# Fork-specific: usage database files
 usage.*
 
-# Opencode
-.beads/
-.opencode/
+# Fork-specific: tooling/cache
 .cli-proxy-api/
 .venv/
-AGENTS.md
+
+# Build/test caches
+.gocache/
