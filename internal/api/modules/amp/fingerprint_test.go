@@ -71,6 +71,22 @@ func TestExtractFingerprint_Empty(t *testing.T) {
 	}
 }
 
+// TestExtractFingerprint_OracleArrayInstructions verifies that an Oracle
+// request using array-form `instructions` (instead of a plain string)
+// still has its system text extracted and feature detection works.
+// OpenAI Responses accepts both shapes.
+func TestExtractFingerprint_OracleArrayInstructions(t *testing.T) {
+	body := []byte(`{
+		"model":"gpt-5.4",
+		"instructions":[{"type":"text","text":"You are the Oracle - an expert AI advisor with advanced reasoning capabilities."}],
+		"input":[{"role":"user","content":[{"type":"input_text","text":"Task: review fingerprint.go"}]}]
+	}`)
+	fp := ExtractFingerprint(body)
+	if got := fp.Feature(); got != "oracle" {
+		t.Fatalf("Feature = %q, want oracle (array-form instructions must be parsed)", got)
+	}
+}
+
 // TestExtractFingerprint_Oracle uses a real OpenAI Responses payload
 // captured from `amp -x "use the oracle tool ..."`. Oracle has no
 // tool_choice; it is identified by its hardcoded system prompt.

@@ -1362,16 +1362,18 @@ func (h *Handler) DeleteAmpModelMappings(c *gin.Context) {
 
 // ampMappingKey returns a stable identity for a mapping entry, accounting
 // for the regex flag and the optional When clause so that PATCH can
-// distinguish multiple rules sharing the same From.
+// distinguish multiple rules sharing the same From. When fields are
+// lower-cased to match ConditionMatches' case-insensitive semantics, so
+// a PATCH that differs only by case is recognized as the same rule.
 func ampMappingKey(m config.AmpModelMapping) string {
 	when := ""
 	if m.When != nil {
-		when = strings.TrimSpace(m.When.Feature) + "\x1f" +
-			strings.TrimSpace(m.When.ToolChoice) + "\x1f" +
-			strings.TrimSpace(m.When.UserSuffix) + "\x1f" +
-			strings.TrimSpace(m.When.SystemPrefix)
+		when = strings.ToLower(strings.TrimSpace(m.When.Feature)) + "\x1f" +
+			strings.ToLower(strings.TrimSpace(m.When.ToolChoice)) + "\x1f" +
+			strings.ToLower(strings.TrimSpace(m.When.UserSuffix)) + "\x1f" +
+			strings.ToLower(strings.TrimSpace(m.When.SystemPrefix))
 	}
-	return strings.TrimSpace(m.From) + "\x1e" + strconv.FormatBool(m.Regex) + "\x1e" + when
+	return strings.ToLower(strings.TrimSpace(m.From)) + "\x1e" + strconv.FormatBool(m.Regex) + "\x1e" + when
 }
 
 // GetAmpForceModelMappings returns whether model mappings are forced.

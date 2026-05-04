@@ -26,6 +26,28 @@ func TestAmpMappingKey_DistinguishesSystemPrefix(t *testing.T) {
 	}
 }
 
+// TestAmpMappingKey_CaseInsensitiveAlignsWithConditionMatches verifies
+// that the identity key normalizes case the same way ConditionMatches
+// does, so a PATCH that differs only by case (e.g. "HANDOFF" vs
+// "handoff") updates the existing rule instead of appending a stale
+// duplicate that is semantically equivalent.
+func TestAmpMappingKey_CaseInsensitiveAlignsWithConditionMatches(t *testing.T) {
+	a := config.AmpModelMapping{
+		From: "Gemini-3-Flash-Preview",
+		To:   "x",
+		When: &config.AmpMappingCondition{Feature: "HANDOFF", ToolChoice: "Create_Handoff_Context"},
+	}
+	b := config.AmpModelMapping{
+		From: "gemini-3-flash-preview",
+		To:   "x",
+		When: &config.AmpMappingCondition{Feature: "handoff", ToolChoice: "create_handoff_context"},
+	}
+	if ampMappingKey(a) != ampMappingKey(b) {
+		t.Fatalf("keys differ for case-equivalent mappings:\n a=%q\n b=%q",
+			ampMappingKey(a), ampMappingKey(b))
+	}
+}
+
 // TestAmpMappingKey_DistinguishesAllWhenFields verifies each When field
 // participates in the identity key.
 func TestAmpMappingKey_DistinguishesAllWhenFields(t *testing.T) {

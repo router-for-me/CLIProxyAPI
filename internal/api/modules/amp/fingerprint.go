@@ -265,9 +265,9 @@ func extractSystemText(body []byte) string {
 			return s
 		}
 	}
-	// OpenAI Responses: top-level "instructions" (string).
-	if v := gjson.GetBytes(body, "instructions"); v.Exists() && v.Type == gjson.String {
-		if s := strings.TrimSpace(v.String()); s != "" {
+	// OpenAI Responses: top-level "instructions" (string or array of typed parts).
+	if v := gjson.GetBytes(body, "instructions"); v.Exists() {
+		if s := strings.TrimSpace(messageContentText(v)); s != "" {
 			return s
 		}
 	}
