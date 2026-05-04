@@ -191,7 +191,7 @@ func selectTarget(rules []mappingRule, baseModel, normalizedBase string, fp Requ
 			groupIdx[key] = idx
 		}
 		g := groups[idx]
-		if r.when == nil {
+		if IsConditionEffectivelyEmpty(r.when) {
 			if g.fallback == "" && available(r.to) {
 				g.fallback = r.to
 			}

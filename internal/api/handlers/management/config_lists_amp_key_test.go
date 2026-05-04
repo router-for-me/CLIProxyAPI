@@ -48,6 +48,25 @@ func TestAmpMappingKey_CaseInsensitiveAlignsWithConditionMatches(t *testing.T) {
 	}
 }
 
+// TestAmpMappingKey_NilAndEmptyWhenAreEquivalent verifies that
+// `When: nil` and `When: &AmpMappingCondition{}` collapse to the same
+// PATCH identity. Both forms match unconditionally at runtime
+// (selectTarget routes them through the fallback bucket), so PATCH
+// must treat them as the same rule and update in place rather than
+// appending a duplicate that would never win at runtime.
+func TestAmpMappingKey_NilAndEmptyWhenAreEquivalent(t *testing.T) {
+	a := config.AmpModelMapping{From: "gemini-3-flash-preview", To: "x"}
+	b := config.AmpModelMapping{
+		From: "gemini-3-flash-preview",
+		To:   "x",
+		When: &config.AmpMappingCondition{},
+	}
+	if ampMappingKey(a) != ampMappingKey(b) {
+		t.Fatalf("nil When and empty When must share a key:\n a=%q\n b=%q",
+			ampMappingKey(a), ampMappingKey(b))
+	}
+}
+
 // TestAmpMappingKey_DistinguishesAllWhenFields verifies each When field
 // participates in the identity key.
 func TestAmpMappingKey_DistinguishesAllWhenFields(t *testing.T) {

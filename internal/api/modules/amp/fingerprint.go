@@ -339,6 +339,23 @@ func messageContentText(content gjson.Result) string {
 	return b.String()
 }
 
+// IsConditionEffectivelyEmpty reports whether a mapping condition has no
+// active predicates. A nil condition or one whose every field trims to
+// the empty string carries no routing information and is treated as
+// unconditional. This avoids the surprising case where `when: {}` from
+// YAML or an API client appears to be a "conditional" rule (because the
+// pointer is non-nil) yet always matches and therefore silently shadows
+// other unconditional rules sharing the same From.
+func IsConditionEffectivelyEmpty(cond *config.AmpMappingCondition) bool {
+	if cond == nil {
+		return true
+	}
+	return strings.TrimSpace(cond.Feature) == "" &&
+		strings.TrimSpace(cond.ToolChoice) == "" &&
+		strings.TrimSpace(cond.UserSuffix) == "" &&
+		strings.TrimSpace(cond.SystemPrefix) == ""
+}
+
 // ConditionMatches reports whether the given mapping condition is satisfied
 // by the fingerprint. A nil condition always matches (unconditional mapping).
 func ConditionMatches(cond *config.AmpMappingCondition, fp RequestFingerprint) bool {

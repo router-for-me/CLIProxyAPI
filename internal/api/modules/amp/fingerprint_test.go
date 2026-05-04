@@ -517,6 +517,37 @@ func TestModelMapper_RegexCaseVariantSharesGroup(t *testing.T) {
 	}
 }
 
+// TestModelMapper_EmptyWhenTreatedAsUnconditional verifies that a
+// mapping with `When: &AmpMappingCondition{}` (all fields empty) is
+// classified as unconditional, mirroring `When: nil`. Otherwise it
+// would be evaluated in the conditional bucket and silently shadow
+// other unconditional rules sharing the same From, since
+// ConditionMatches always returns true for an all-empty condition.
+func TestModelMapper_EmptyWhenTreatedAsUnconditional(t *testing.T) {
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient("test-empty-when", "openai", []*registry.ModelInfo{
+		{ID: "gpt-first", OwnedBy: "openai", Type: "openai"},
+		{ID: "gpt-second", OwnedBy: "openai", Type: "openai"},
+	})
+	defer reg.UnregisterClient("test-empty-when")
+
+	mapper := NewModelMapper([]config.AmpModelMapping{
+		{From: "gemini-3-flash-preview", To: "gpt-first"},
+		{From: "gemini-3-flash-preview", To: "gpt-second", When: &config.AmpMappingCondition{}},
+	})
+
+	// Both calls must hit the first declared rule because the second
+	// rule is effectively unconditional too. Without this guard, the
+	// second rule would jump into the conditional bucket, beat the
+	// first rule's fallback, and reroute every request.
+	if got := mapper.MapModelCtx("gemini-3-flash-preview", RequestFingerprint{}); got != "gpt-first" {
+		t.Errorf("got %q, want gpt-first (no fingerprint)", got)
+	}
+	if got := mapper.MapModelCtx("gemini-3-flash-preview", RequestFingerprint{ToolChoice: "create_handoff_context"}); got != "gpt-first" {
+		t.Errorf("got %q, want gpt-first (with fingerprint)", got)
+	}
+}
+
 func TestModelMapper_MapModelCtx_ConditionalThenFallback(t *testing.T) {
 	reg := registry.GetGlobalRegistry()
 	reg.RegisterClient("test-cond", "openai", []*registry.ModelInfo{

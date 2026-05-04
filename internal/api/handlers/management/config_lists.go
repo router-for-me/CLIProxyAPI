@@ -1365,13 +1365,21 @@ func (h *Handler) DeleteAmpModelMappings(c *gin.Context) {
 // distinguish multiple rules sharing the same From. When fields are
 // lower-cased to match ConditionMatches' case-insensitive semantics, so
 // a PATCH that differs only by case is recognized as the same rule.
+// A condition whose every field trims to empty (e.g. `when: {}`) is
+// treated identically to a nil When, mirroring selectTarget's
+// "effectively empty" classification so that PATCH does not create a
+// duplicate entry for what is, semantically, the same unconditional
+// rule.
 func ampMappingKey(m config.AmpModelMapping) string {
 	when := ""
 	if m.When != nil {
-		when = strings.ToLower(strings.TrimSpace(m.When.Feature)) + "\x1f" +
-			strings.ToLower(strings.TrimSpace(m.When.ToolChoice)) + "\x1f" +
-			strings.ToLower(strings.TrimSpace(m.When.UserSuffix)) + "\x1f" +
-			strings.ToLower(strings.TrimSpace(m.When.SystemPrefix))
+		feat := strings.ToLower(strings.TrimSpace(m.When.Feature))
+		tool := strings.ToLower(strings.TrimSpace(m.When.ToolChoice))
+		usuf := strings.ToLower(strings.TrimSpace(m.When.UserSuffix))
+		spre := strings.ToLower(strings.TrimSpace(m.When.SystemPrefix))
+		if feat != "" || tool != "" || usuf != "" || spre != "" {
+			when = feat + "\x1f" + tool + "\x1f" + usuf + "\x1f" + spre
+		}
 	}
 	return strings.ToLower(strings.TrimSpace(m.From)) + "\x1e" + strconv.FormatBool(m.Regex) + "\x1e" + when
 }
