@@ -53,7 +53,7 @@ VisionCoder 还为我们的用户提供 <a href="https://coder.visioncoder.cn" t
 - 为 CLI 模型提供 OpenAI/Gemini/Claude/Codex 兼容的 API 端点
 - 新增 OpenAI Codex（GPT 系列）支持（OAuth 登录）
 - 新增 Claude Code 支持（OAuth 登录）
-- 支持流式与非流式响应
+- 支持流式、非流式响应，以及受支持场景下的 WebSocket 响应
 - 函数调用/工具支持
 - 多模态输入（文本、图片）
 - 多账户支持与轮询负载均衡（Gemini、OpenAI、Claude）
