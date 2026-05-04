@@ -1159,7 +1159,8 @@ func remapOAuthToolNames(body []byte) ([]byte, map[string]string) {
 		toolCount := 0
 		tools.ForEach(func(_, tool gjson.Result) bool {
 			// Keep Anthropic built-in tools (web_search, code_execution, etc.) unchanged.
-			if tool.Get("type").Exists() && tool.Get("type").String() != "" {
+			toolType := tool.Get("type").String()
+			if helps.IsClaudeBuiltinToolType(toolType) {
 				if toolCount > 0 {
 					toolsJSON.WriteByte(',')
 				}
@@ -1174,6 +1175,12 @@ func remapOAuthToolNames(body []byte) ([]byte, map[string]string) {
 			}
 
 			toolJSON := tool.Raw
+			if toolType != "" {
+				updatedTool, err := sjson.Delete(toolJSON, "type")
+				if err == nil {
+					toolJSON = updatedTool
+				}
+			}
 			if newName, ok := oauthToolRenameMap[name]; ok && newName != name {
 				updatedTool, err := sjson.Set(toolJSON, "name", newName)
 				if err == nil {
@@ -1357,7 +1364,7 @@ func applyClaudeToolPrefix(body []byte, prefix string) []byte {
 		tools.ForEach(func(index, tool gjson.Result) bool {
 			// Skip built-in tools (web_search, code_execution, etc.) which have
 			// a "type" field and require their name to remain unchanged.
-			if tool.Get("type").Exists() && tool.Get("type").String() != "" {
+			if helps.IsClaudeBuiltinToolType(tool.Get("type").String()) {
 				if n := tool.Get("name").String(); n != "" {
 					builtinTools[n] = true
 				}
