@@ -356,16 +356,8 @@ func main() {
 		}
 		if _, statErr := os.Stat(configFilePath); errors.Is(statErr, fs.ErrNotExist) {
 			examplePath := filepath.Join(wd, "config.example.yaml")
-			if _, errExample := os.Stat(examplePath); errExample != nil {
-				log.Errorf("failed to find template config file: %v", errExample)
-				return
-			}
-			if errCopy := misc.CopyConfigTemplate(examplePath, configFilePath); errCopy != nil {
-				log.Errorf("failed to bootstrap git-backed config: %v", errCopy)
-				return
-			}
-			if errCommit := gitStoreInst.PersistConfig(context.Background()); errCommit != nil {
-				log.Errorf("failed to commit initial git-backed config: %v", errCommit)
+			if errBootstrap := bootstrapGitBackedConfig(context.Background(), examplePath, configFilePath, gitStoreInst); errBootstrap != nil {
+				log.Errorf("failed to bootstrap git-backed config: %v", errBootstrap)
 				return
 			}
 			log.Infof("git-backed config initialized from template: %s", configFilePath)
