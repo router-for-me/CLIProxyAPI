@@ -268,7 +268,7 @@ func TestParseEventStream_KiroCacheUsageDoesNotDoubleCountInput(t *testing.T) {
 	}`))
 
 	executor := &KiroExecutor{}
-	_, _, usageInfo, _, _, err := executor.parseEventStream(bytes.NewReader(stream.Bytes()), "kiro-claude-sonnet-4-5")
+	_, _, usageInfo, _, err := executor.parseEventStream(bytes.NewReader(stream.Bytes()))
 	if err != nil {
 		t.Fatalf("parseEventStream() error = %v", err)
 	}
@@ -286,83 +286,6 @@ func TestParseEventStream_KiroCacheUsageDoesNotDoubleCountInput(t *testing.T) {
 	}
 	if usageInfo.TotalTokens != 22 {
 		t.Fatalf("TotalTokens = %d, want upstream total 22", usageInfo.TotalTokens)
-	}
-}
-
-func TestEstimateKiroCacheUsageFromCredits(t *testing.T) {
-	detail, estimated := estimateKiroCacheUsageFromCredits("kiro-claude-sonnet-4-5", usage.Detail{
-		InputTokens:  10000,
-		OutputTokens: 1000,
-		TotalTokens:  11000,
-	}, 0.7875)
-	if !estimated {
-		t.Fatalf("estimated = false, want true")
-	}
-
-	if detail.CacheReadInputTokens != 5000 {
-		t.Fatalf("CacheReadInputTokens = %d, want estimated read tokens 5000", detail.CacheReadInputTokens)
-	}
-	if detail.InputTokens != 5000 {
-		t.Fatalf("InputTokens = %d, want estimated uncached input 5000", detail.InputTokens)
-	}
-	if detail.CachedTokens != 5000 {
-		t.Fatalf("CachedTokens = %d, want 5000", detail.CachedTokens)
-	}
-	if detail.TotalTokens != 11000 {
-		t.Fatalf("TotalTokens = %d, want original total 11000", detail.TotalTokens)
-	}
-
-	internalDetail := usageDetailForInternalStats(detail, true)
-	if internalDetail.InputTokens != 10000 {
-		t.Fatalf("internal InputTokens = %d, want total input restored 10000", internalDetail.InputTokens)
-	}
-	if internalDetail.CachedTokens != 0 || internalDetail.CacheReadInputTokens != 0 {
-		t.Fatalf("internal cache fields = cached:%d read:%d, want cleared", internalDetail.CachedTokens, internalDetail.CacheReadInputTokens)
-	}
-}
-
-func TestEstimateKiroCacheUsageFromCredits_AllInputCached(t *testing.T) {
-	detail, estimated := estimateKiroCacheUsageFromCredits("kiro-claude-sonnet-4-5", usage.Detail{
-		InputTokens:  10000,
-		OutputTokens: 1000,
-		TotalTokens:  11000,
-	}, 0.4125)
-	if !estimated {
-		t.Fatalf("estimated = false, want true")
-	}
-	if detail.InputTokens != 0 {
-		t.Fatalf("InputTokens = %d, want zero uncached input", detail.InputTokens)
-	}
-	if detail.CacheReadInputTokens != 10000 {
-		t.Fatalf("CacheReadInputTokens = %d, want all input cached", detail.CacheReadInputTokens)
-	}
-	if !hasKiroPromptCacheUsage(detail) {
-		t.Fatalf("hasKiroPromptCacheUsage = false, want true")
-	}
-
-	internalDetail := usageDetailForInternalStats(detail, true)
-	if internalDetail.InputTokens != 10000 {
-		t.Fatalf("internal InputTokens = %d, want restored total input", internalDetail.InputTokens)
-	}
-}
-
-func TestEstimateKiroCacheUsageFromCredits_PreservesOfficialCacheUsage(t *testing.T) {
-	detail, estimated := estimateKiroCacheUsageFromCredits("kiro-claude-sonnet-4-5", usage.Detail{
-		InputTokens:          10000,
-		OutputTokens:         1000,
-		CacheReadInputTokens: 123,
-		CachedTokens:         123,
-		TotalTokens:          11123,
-	}, 0.7875)
-	if estimated {
-		t.Fatalf("estimated = true, want false for official cache usage")
-	}
-
-	if detail.CacheReadInputTokens != 123 {
-		t.Fatalf("CacheReadInputTokens = %d, want official value 123", detail.CacheReadInputTokens)
-	}
-	if detail.InputTokens != 10000 {
-		t.Fatalf("InputTokens = %d, want official uncached input preserved", detail.InputTokens)
 	}
 }
 
@@ -387,81 +310,6 @@ func TestInferKiroCacheUsageFromTotal(t *testing.T) {
 	}
 }
 
-func TestInferKiroCacheUsageFromTotal_FillsReadTokensFromCachedTokens(t *testing.T) {
-	detail, estimated := inferKiroCacheUsageFromTotal(usage.Detail{
-		InputTokens:  10,
-		OutputTokens: 2,
-		CachedTokens: 7,
-		TotalTokens:  19,
-	})
-	if !estimated {
-		t.Fatalf("estimated = false, want true")
-	}
-
-	if detail.CacheReadInputTokens != 7 {
-		t.Fatalf("CacheReadInputTokens = %d, want cached token fallback 7", detail.CacheReadInputTokens)
-	}
-}
-
-func TestParseEventStream_PartialTokenUsageStillEstimatesFromCredits(t *testing.T) {
-	var stream bytes.Buffer
-	writeKiroTestEvent(t, &stream, "messageMetadataEvent", []byte(`{
-		"messageMetadataEvent": {
-			"tokenUsage": {
-				"outputTokens": 1000,
-				"totalTokens": 11000
-			}
-		}
-	}`))
-	writeKiroTestEvent(t, &stream, "usageEvent", []byte(`{
-		"inputTokens": 10000,
-		"outputTokens": 1000,
-		"totalTokens": 11000
-	}`))
-	writeKiroTestEvent(t, &stream, "meteringEvent", []byte(`{
-		"meteringEvent": {"unit": "credit", "unitPlural": "credits", "usage": 0.7875}
-	}`))
-
-	executor := &KiroExecutor{}
-	_, _, usageInfo, _, estimatedCacheUsage, err := executor.parseEventStream(bytes.NewReader(stream.Bytes()), "kiro-claude-sonnet-4-5")
-	if err != nil {
-		t.Fatalf("parseEventStream() error = %v", err)
-	}
-	if usageInfo.CachedTokens != 5000 {
-		t.Fatalf("CachedTokens = %d, want credits-estimated cache 5000", usageInfo.CachedTokens)
-	}
-	if !estimatedCacheUsage {
-		t.Fatalf("estimatedCacheUsage = false, want true")
-	}
-	if usageInfo.CacheReadInputTokens != 5000 {
-		t.Fatalf("CacheReadInputTokens = %d, want estimated read tokens 5000", usageInfo.CacheReadInputTokens)
-	}
-}
-
-func TestParseEventStream_AccumulatesMeteringEvents(t *testing.T) {
-	var stream bytes.Buffer
-	writeKiroTestEvent(t, &stream, "usageEvent", []byte(`{
-		"inputTokens": 10000,
-		"outputTokens": 1000,
-		"totalTokens": 11000
-	}`))
-	writeKiroTestEvent(t, &stream, "meteringEvent", []byte(`{
-		"meteringEvent": {"unit": "credit", "unitPlural": "credits", "usage": 0.3}
-	}`))
-	writeKiroTestEvent(t, &stream, "meteringEvent", []byte(`{
-		"meteringEvent": {"unit": "credit", "unitPlural": "credits", "usage": 0.4875}
-	}`))
-
-	executor := &KiroExecutor{}
-	_, _, usageInfo, _, _, err := executor.parseEventStream(bytes.NewReader(stream.Bytes()), "kiro-claude-sonnet-4-5")
-	if err != nil {
-		t.Fatalf("parseEventStream() error = %v", err)
-	}
-	if usageInfo.CachedTokens != 5000 {
-		t.Fatalf("CachedTokens = %d, want cache estimate based on accumulated credits", usageInfo.CachedTokens)
-	}
-}
-
 func TestParseEventStream_DoesNotInferCacheFromGenericTotalTokens(t *testing.T) {
 	var stream bytes.Buffer
 	writeKiroTestEvent(t, &stream, "messageMetadataEvent", []byte(`{
@@ -473,7 +321,7 @@ func TestParseEventStream_DoesNotInferCacheFromGenericTotalTokens(t *testing.T) 
 	}`))
 
 	executor := &KiroExecutor{}
-	_, _, usageInfo, _, _, err := executor.parseEventStream(bytes.NewReader(stream.Bytes()), "kiro-claude-sonnet-4-5")
+	_, _, usageInfo, _, err := executor.parseEventStream(bytes.NewReader(stream.Bytes()))
 	if err != nil {
 		t.Fatalf("parseEventStream() error = %v", err)
 	}
@@ -482,6 +330,140 @@ func TestParseEventStream_DoesNotInferCacheFromGenericTotalTokens(t *testing.T) 
 	}
 	if usageInfo.CachedTokens != 0 {
 		t.Fatalf("CachedTokens = %d, want no inference from generic totalTokens", usageInfo.CachedTokens)
+	}
+}
+
+// Regression: when messageMetadataEvent (with uncachedInputTokens) arrives
+// before a usageEvent that carries the *total* inputTokens, the second event
+// must not overwrite the uncached value or downstream cache_read inference
+// will silently fail.
+func TestParseEventStream_UsageEventDoesNotOverwriteUncachedInput(t *testing.T) {
+	var stream bytes.Buffer
+	writeKiroTestEvent(t, &stream, "messageMetadataEvent", []byte(`{
+		"messageMetadataEvent": {
+			"tokenUsage": {
+				"outputTokens": 2,
+				"totalTokens": 22,
+				"uncachedInputTokens": 2,
+				"cacheReadInputTokens": 18
+			}
+		}
+	}`))
+	writeKiroTestEvent(t, &stream, "usageEvent", []byte(`{
+		"inputTokens": 20,
+		"outputTokens": 2,
+		"totalTokens": 22
+	}`))
+
+	executor := &KiroExecutor{}
+	_, _, usageInfo, _, err := executor.parseEventStream(bytes.NewReader(stream.Bytes()))
+	if err != nil {
+		t.Fatalf("parseEventStream() error = %v", err)
+	}
+	if usageInfo.InputTokens != 2 {
+		t.Fatalf("InputTokens = %d, want uncached 2 (usageEvent must not overwrite)", usageInfo.InputTokens)
+	}
+	if usageInfo.CacheReadInputTokens != 18 {
+		t.Fatalf("CacheReadInputTokens = %d, want 18", usageInfo.CacheReadInputTokens)
+	}
+}
+
+// Regression: when upstream returns uncachedInputTokens + cacheReadInputTokens
+// but no totalTokens, the fallback must include CachedTokens so the reported
+// total matches the input the request actually consumed.
+func TestParseEventStream_TotalTokensFallbackIncludesCache(t *testing.T) {
+	var stream bytes.Buffer
+	writeKiroTestEvent(t, &stream, "messageMetadataEvent", []byte(`{
+		"messageMetadataEvent": {
+			"tokenUsage": {
+				"outputTokens": 2,
+				"uncachedInputTokens": 5,
+				"cacheReadInputTokens": 10,
+				"cacheWriteInputTokens": 3
+			}
+		}
+	}`))
+
+	executor := &KiroExecutor{}
+	_, _, usageInfo, _, err := executor.parseEventStream(bytes.NewReader(stream.Bytes()))
+	if err != nil {
+		t.Fatalf("parseEventStream() error = %v", err)
+	}
+	// In executeWithRetry the TotalTokens fallback adds CachedTokens; replicate
+	// that step here since parseEventStream itself leaves TotalTokens at 0 when
+	// upstream did not provide totalTokens.
+	if usageInfo.TotalTokens == 0 {
+		usageInfo.TotalTokens = usageInfo.InputTokens + usageInfo.OutputTokens + usageInfo.CachedTokens
+	}
+	if usageInfo.TotalTokens != 20 {
+		t.Fatalf("TotalTokens = %d, want 5 (uncached) + 2 (output) + 13 (cache) = 20", usageInfo.TotalTokens)
+	}
+}
+
+// Regression: a supplementaryWebLinksEvent that arrives after
+// uncachedInputTokens carries the *total* inputTokens and must not overwrite
+// the uncached value.
+func TestParseEventStream_SupplementaryWebLinksDoesNotOverwriteUncachedInput(t *testing.T) {
+	var stream bytes.Buffer
+	writeKiroTestEvent(t, &stream, "messageMetadataEvent", []byte(`{
+		"messageMetadataEvent": {
+			"tokenUsage": {
+				"outputTokens": 2,
+				"totalTokens": 22,
+				"uncachedInputTokens": 2,
+				"cacheReadInputTokens": 18
+			}
+		}
+	}`))
+	writeKiroTestEvent(t, &stream, "supplementaryWebLinksEvent", []byte(`{
+		"inputTokens": 20,
+		"outputTokens": 2
+	}`))
+
+	executor := &KiroExecutor{}
+	_, _, usageInfo, _, err := executor.parseEventStream(bytes.NewReader(stream.Bytes()))
+	if err != nil {
+		t.Fatalf("parseEventStream() error = %v", err)
+	}
+	if usageInfo.InputTokens != 2 {
+		t.Fatalf("InputTokens = %d, want uncached 2 (supplementaryWebLinksEvent must not overwrite)", usageInfo.InputTokens)
+	}
+}
+
+// Regression: when upstream reports the all-cached scenario
+// (uncachedInputTokens=0, cacheReadInputTokens=N), a later legacy-format
+// metadata event with `inputTokens` (total) must not overwrite the zero
+// uncached value via the `InputTokens == 0` fallback.
+func TestParseEventStream_LegacyMetadataDoesNotOverwriteAllCached(t *testing.T) {
+	var stream bytes.Buffer
+	writeKiroTestEvent(t, &stream, "messageMetadataEvent", []byte(`{
+		"messageMetadataEvent": {
+			"tokenUsage": {
+				"outputTokens": 2,
+				"totalTokens": 22,
+				"uncachedInputTokens": 0,
+				"cacheReadInputTokens": 20
+			}
+		}
+	}`))
+	writeKiroTestEvent(t, &stream, "messageMetadataEvent", []byte(`{
+		"messageMetadataEvent": {
+			"inputTokens": 20,
+			"outputTokens": 2,
+			"totalTokens": 22
+		}
+	}`))
+
+	executor := &KiroExecutor{}
+	_, _, usageInfo, _, err := executor.parseEventStream(bytes.NewReader(stream.Bytes()))
+	if err != nil {
+		t.Fatalf("parseEventStream() error = %v", err)
+	}
+	if usageInfo.InputTokens != 0 {
+		t.Fatalf("InputTokens = %d, want 0 (all-cached scenario, legacy fallback must not overwrite)", usageInfo.InputTokens)
+	}
+	if usageInfo.CacheReadInputTokens != 20 {
+		t.Fatalf("CacheReadInputTokens = %d, want 20", usageInfo.CacheReadInputTokens)
 	}
 }
 

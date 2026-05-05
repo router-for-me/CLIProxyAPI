@@ -65,9 +65,8 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 		tokens.CachedTokens = tokens.CacheReadInputTokens + tokens.CacheCreationInputTokens
 	}
 	if tokens.TotalTokens == 0 {
-		tokens.TotalTokens = tokens.InputTokens + tokens.OutputTokens + tokens.ReasoningTokens
-	}
-	if tokens.TotalTokens == 0 {
+		// Include CachedTokens — InputTokens is the uncached portion when upstream
+		// reports a cache breakdown.
 		tokens.TotalTokens = tokens.InputTokens + tokens.OutputTokens + tokens.ReasoningTokens + tokens.CachedTokens
 	}
 

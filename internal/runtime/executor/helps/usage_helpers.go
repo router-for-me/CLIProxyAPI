@@ -99,7 +99,9 @@ func normalizeUsageDetailTotal(detail usage.Detail) usage.Detail {
 		detail.CachedTokens = detail.CacheReadInputTokens + detail.CacheCreationInputTokens
 	}
 	if detail.TotalTokens == 0 {
-		total := detail.InputTokens + detail.OutputTokens + detail.ReasoningTokens
+		// Include CachedTokens — InputTokens is the uncached portion when upstream
+		// reports a cache breakdown, so leaving cache out understates the total.
+		total := detail.InputTokens + detail.OutputTokens + detail.ReasoningTokens + detail.CachedTokens
 		if total > 0 {
 			detail.TotalTokens = total
 		}

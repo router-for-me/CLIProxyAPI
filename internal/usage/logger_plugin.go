@@ -457,10 +457,9 @@ func normaliseDetail(detail coreusage.Detail) TokenStats {
 		tokens.CachedTokens = tokens.CacheReadInputTokens + tokens.CacheCreationInputTokens
 	}
 	if tokens.TotalTokens == 0 {
-		tokens.TotalTokens = detail.InputTokens + detail.OutputTokens + detail.ReasoningTokens
-	}
-	if tokens.TotalTokens == 0 {
-		tokens.TotalTokens = detail.InputTokens + detail.OutputTokens + detail.ReasoningTokens + detail.CachedTokens
+		// Include CachedTokens — InputTokens is the uncached portion when upstream
+		// reports a cache breakdown.
+		tokens.TotalTokens = detail.InputTokens + detail.OutputTokens + detail.ReasoningTokens + tokens.CachedTokens
 	}
 	return tokens
 }
@@ -468,9 +467,6 @@ func normaliseDetail(detail coreusage.Detail) TokenStats {
 func normaliseTokenStats(tokens TokenStats) TokenStats {
 	if tokens.CachedTokens == 0 {
 		tokens.CachedTokens = tokens.CacheReadInputTokens + tokens.CacheCreationInputTokens
-	}
-	if tokens.TotalTokens == 0 {
-		tokens.TotalTokens = tokens.InputTokens + tokens.OutputTokens + tokens.ReasoningTokens
 	}
 	if tokens.TotalTokens == 0 {
 		tokens.TotalTokens = tokens.InputTokens + tokens.OutputTokens + tokens.ReasoningTokens + tokens.CachedTokens
