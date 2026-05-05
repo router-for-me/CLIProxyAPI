@@ -712,6 +712,44 @@ func TestApplyClaudeToolPrefix_CustomTypedToolsArePrefixed(t *testing.T) {
 	}
 }
 
+func TestApplyClaudeToolPrefix_UnknownTypedToolsStayUntouched(t *testing.T) {
+	body := []byte(`{
+		"tools": [
+			{"type": "custom_builtin_20250401", "name": "bash"}
+		],
+		"tool_choice": {"type": "tool", "name": "bash"},
+		"messages": [
+			{"role": "user", "content": [
+				{"type": "tool_use", "name": "bash", "id": "b1", "input": {}},
+				{"type": "tool_reference", "tool_name": "bash"},
+				{"type": "tool_result", "tool_use_id": "b1", "content": [
+					{"type": "tool_reference", "tool_name": "bash"}
+				]}
+			]}
+		]
+	}`)
+	out := applyClaudeToolPrefix(body, "proxy_")
+
+	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "bash" {
+		t.Fatalf("tools.0.name = %q, want %q", got, "bash")
+	}
+	if got := gjson.GetBytes(out, "tools.0.type").String(); got != "custom_builtin_20250401" {
+		t.Fatalf("tools.0.type = %q, want %q", got, "custom_builtin_20250401")
+	}
+	if got := gjson.GetBytes(out, "tool_choice.name").String(); got != "bash" {
+		t.Fatalf("tool_choice.name = %q, want %q", got, "bash")
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.0.name").String(); got != "bash" {
+		t.Fatalf("messages.0.content.0.name = %q, want %q", got, "bash")
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.1.tool_name").String(); got != "bash" {
+		t.Fatalf("messages.0.content.1.tool_name = %q, want %q", got, "bash")
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.2.content.0.tool_name").String(); got != "bash" {
+		t.Fatalf("messages.0.content.2.content.0.tool_name = %q, want %q", got, "bash")
+	}
+}
+
 func TestApplyClaudeToolPrefix_UntypedBashStaysCustom(t *testing.T) {
 	body := []byte(`{
 		"tools": [
@@ -2374,6 +2412,45 @@ func TestRemapOAuthToolNames_CustomTypedToolsAreRenamedAndUntyped(t *testing.T) 
 	reversed := reverseRemapOAuthToolNames(resp, reverseMap)
 	if got := gjson.GetBytes(reversed, "content.0.name").String(); got != "bash" {
 		t.Fatalf("content.0.name = %q, want %q", got, "bash")
+	}
+}
+
+func TestRemapOAuthToolNames_UnknownTypedToolsStayUntouched(t *testing.T) {
+	body := []byte(`{
+		"tools": [
+			{"type":"custom_builtin_20250401","name":"bash","description":"Run shell commands","input_schema":{"type":"object","properties":{"cmd":{"type":"string"}}}}
+		],
+		"tool_choice": {"type":"tool","name":"bash"},
+		"messages": [
+			{"role":"assistant","content":[
+				{"type":"tool_use","id":"toolu_01","name":"bash","input":{"cmd":"ls"}},
+				{"type":"tool_reference","tool_name":"bash"},
+				{"type":"tool_result","tool_use_id":"toolu_01","content":[{"type":"tool_reference","tool_name":"bash"}]}
+			]}
+		]
+	}`)
+
+	out, reverseMap := remapOAuthToolNames(body)
+	if len(reverseMap) != 0 {
+		t.Fatalf("reverseMap = %v, want empty map", reverseMap)
+	}
+	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "bash" {
+		t.Fatalf("tools.0.name = %q, want %q", got, "bash")
+	}
+	if got := gjson.GetBytes(out, "tools.0.type").String(); got != "custom_builtin_20250401" {
+		t.Fatalf("tools.0.type = %q, want %q", got, "custom_builtin_20250401")
+	}
+	if got := gjson.GetBytes(out, "tool_choice.name").String(); got != "bash" {
+		t.Fatalf("tool_choice.name = %q, want %q", got, "bash")
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.0.name").String(); got != "bash" {
+		t.Fatalf("messages.0.content.0.name = %q, want %q", got, "bash")
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.1.tool_name").String(); got != "bash" {
+		t.Fatalf("messages.0.content.1.tool_name = %q, want %q", got, "bash")
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.2.content.0.tool_name").String(); got != "bash" {
+		t.Fatalf("messages.0.content.2.content.0.tool_name = %q, want %q", got, "bash")
 	}
 }
 
