@@ -1315,7 +1315,10 @@ func (h *Handler) PatchAmpModelMappings(c *gin.Context) {
 
 	existing := make(map[string]int)
 	for i, m := range h.cfg.AmpCode.ModelMappings {
-		existing[ampMappingKey(m)] = i
+		key := ampMappingKey(m)
+		if _, ok := existing[key]; !ok {
+			existing[key] = i
+		}
 	}
 
 	for _, newMapping := range body.Value {
