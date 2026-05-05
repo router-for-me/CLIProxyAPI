@@ -18,6 +18,8 @@ import (
 
 const (
 	defaultLogFileName      = "main.log"
+	defaultLogLimit         = 200
+	maxLogLimit             = 5000
 	logScannerInitialBuffer = 64 * 1024
 	logScannerMaxBuffer     = 8 * 1024 * 1024
 )
@@ -65,8 +67,25 @@ func (h *Handler) GetLogs(c *gin.Context) {
 	}
 
 	cutoff := parseCutoff(c.Query("after"))
+	if cutoff == 0 {
+		lines, total, latest, errRecent := readRecentLogLines(files, limit)
+		if errRecent != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to read log files: %v", errRecent)})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"lines":            lines,
+			"line-count":       total,
+			"latest-timestamp": latest,
+		})
+		return
+	}
+
 	acc := newLogAccumulator(cutoff, limit)
 	for i := range files {
+		if !logFileMayContainAfter(files[i], cutoff) {
+			continue
+		}
 		if errProcess := acc.consumeFile(files[i]); errProcess != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to read log file %s: %v", files[i], errProcess)})
 			return
@@ -419,6 +438,12 @@ func newLogAccumulator(cutoff int64, limit int) *logAccumulator {
 }
 
 func (acc *logAccumulator) consumeFile(path string) error {
+	return scanLogFile(path, func(line string) {
+		acc.addLine(line)
+	})
+}
+
+func scanLogFile(path string, visit func(string)) error {
 	file, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -434,12 +459,62 @@ func (acc *logAccumulator) consumeFile(path string) error {
 	buf := make([]byte, 0, logScannerInitialBuffer)
 	scanner.Buffer(buf, logScannerMaxBuffer)
 	for scanner.Scan() {
-		acc.addLine(scanner.Text())
+		visit(strings.TrimRight(scanner.Text(), "\r"))
 	}
 	if errScan := scanner.Err(); errScan != nil {
 		return errScan
 	}
 	return nil
+}
+
+func readRecentLogLines(files []string, limit int) ([]string, int, int64, error) {
+	if limit <= 0 {
+		limit = defaultLogLimit
+	}
+	lines := make([]string, 0, limit)
+	for i := len(files) - 1; i >= 0 && len(lines) < limit; i-- {
+		fileLines := make([]string, 0, defaultLogLimit)
+		if err := scanLogFile(files[i], func(line string) {
+			fileLines = append(fileLines, line)
+		}); err != nil {
+			return nil, 0, 0, err
+		}
+		if len(fileLines) == 0 {
+			continue
+		}
+		remaining := limit - len(lines)
+		start := len(fileLines) - remaining
+		if start < 0 {
+			start = 0
+		}
+		selected := fileLines[start:]
+		combined := make([]string, 0, len(selected)+len(lines))
+		combined = append(combined, selected...)
+		combined = append(combined, lines...)
+		lines = combined
+	}
+
+	latest := int64(0)
+	for _, line := range lines {
+		if ts := parseTimestamp(line); ts > latest {
+			latest = ts
+		}
+	}
+	if lines == nil {
+		lines = []string{}
+	}
+	return lines, len(lines), latest, nil
+}
+
+func logFileMayContainAfter(path string, cutoff int64) bool {
+	if cutoff <= 0 {
+		return true
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return true
+	}
+	return info.ModTime().Unix() >= cutoff
 }
 
 func (acc *logAccumulator) addLine(raw string) {
@@ -490,7 +565,7 @@ func parseCutoff(raw string) int64 {
 func parseLimit(raw string) (int, error) {
 	value := strings.TrimSpace(raw)
 	if value == "" {
-		return 0, nil
+		return defaultLogLimit, nil
 	}
 	limit, err := strconv.Atoi(value)
 	if err != nil {
@@ -498,6 +573,9 @@ func parseLimit(raw string) (int, error) {
 	}
 	if limit <= 0 {
 		return 0, fmt.Errorf("must be greater than zero")
+	}
+	if limit > maxLogLimit {
+		return maxLogLimit, nil
 	}
 	return limit, nil
 }
