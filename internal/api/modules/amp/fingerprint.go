@@ -222,15 +222,21 @@ func extractLastUserText(body []byte) string {
 			return strings.TrimSpace(messageContentText(m.Get("content")))
 		}
 	}
-	// OpenAI Responses: input[] with role+content[].text/input_text.
-	if inp := gjson.GetBytes(body, "input"); inp.IsArray() {
-		arr := inp.Array()
-		for i := len(arr) - 1; i >= 0; i-- {
-			m := arr[i]
-			if !strings.EqualFold(m.Get("role").String(), "user") {
-				continue
+	// OpenAI Responses: input[] with role+content[].text/input_text,
+	// or a plain string (treated as the user message).
+	if inp := gjson.GetBytes(body, "input"); inp.Exists() {
+		if inp.Type == gjson.String {
+			return strings.TrimSpace(inp.String())
+		}
+		if inp.IsArray() {
+			arr := inp.Array()
+			for i := len(arr) - 1; i >= 0; i-- {
+				m := arr[i]
+				if !strings.EqualFold(m.Get("role").String(), "user") {
+					continue
+				}
+				return strings.TrimSpace(messageContentText(m.Get("content")))
 			}
-			return strings.TrimSpace(messageContentText(m.Get("content")))
 		}
 	}
 	// Gemini: contents[] with role+parts[].text
