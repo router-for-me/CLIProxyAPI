@@ -13,7 +13,9 @@ Dockerfile
 docs/*
 README.md
 README_CN.md
+README_JA.md
 LICENSE
+AGENTS.md
 
 # Runtime data folders (should be mounted as volumes)
 auths/*
@@ -35,3 +37,22 @@ bin/*
 .bmad/*
 _bmad/*
 _bmad-output/*
+
+# Runtime-downloaded assets
+static/*
+
+# Test and development files not needed in image
+test/*
+examples/*
+assets/*
+server/*
+.env
+.env.example
+build.sh
+docker-build.sh
+docker-build.ps1
+test_cursor.sh
+gitlab-duo-codex-parity-plan.md
+
+# Compiled binary (built inside container)
+cli-proxy-api

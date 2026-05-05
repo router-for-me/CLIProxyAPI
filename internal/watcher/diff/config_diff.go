@@ -280,6 +280,32 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			changes = append(changes, "remote-management.secret-key: updated")
 		}
 	}
+	oldOAuthCallbackRedirect := strings.TrimSpace(oldCfg.RemoteManagement.OAuthCallbackRedirect)
+	newOAuthCallbackRedirect := strings.TrimSpace(newCfg.RemoteManagement.OAuthCallbackRedirect)
+	if oldOAuthCallbackRedirect != newOAuthCallbackRedirect {
+		changes = append(changes, fmt.Sprintf("remote-management.oauth-callback-redirect: %s -> %s", oldOAuthCallbackRedirect, newOAuthCallbackRedirect))
+	}
+
+	// Custom OAuth providers
+	if len(oldCfg.CustomOAuth) != len(newCfg.CustomOAuth) {
+		changes = append(changes, fmt.Sprintf("custom-oauth count: %d -> %d", len(oldCfg.CustomOAuth), len(newCfg.CustomOAuth)))
+	}
+	for i := range newCfg.CustomOAuth {
+		if i < len(oldCfg.CustomOAuth) {
+			old := oldCfg.CustomOAuth[i]
+			new := newCfg.CustomOAuth[i]
+			if strings.TrimSpace(old.Name) != strings.TrimSpace(new.Name) ||
+				strings.TrimSpace(old.AuthURL) != strings.TrimSpace(new.AuthURL) ||
+				strings.TrimSpace(old.TokenURL) != strings.TrimSpace(new.TokenURL) {
+				changes = append(changes, fmt.Sprintf("custom-oauth[%d]: updated", i))
+			}
+		} else {
+			changes = append(changes, fmt.Sprintf("custom-oauth[%d]: added (name=%s)", i, strings.TrimSpace(newCfg.CustomOAuth[i].Name)))
+		}
+	}
+	for i := len(newCfg.CustomOAuth); i < len(oldCfg.CustomOAuth); i++ {
+		changes = append(changes, fmt.Sprintf("custom-oauth[%d]: removed (name=%s)", i, strings.TrimSpace(oldCfg.CustomOAuth[i].Name)))
+	}
 
 	// OpenAI compatibility providers (summarized)
 	if compat := DiffOpenAICompatibility(oldCfg.OpenAICompatibility, newCfg.OpenAICompatibility); len(compat) > 0 {

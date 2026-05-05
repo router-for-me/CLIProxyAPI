@@ -28,7 +28,12 @@ COPY go.mod go.sum ./
 
 RUN go mod download
 
-COPY . .
+# Copy only the main package first — changes less frequently than the rest
+COPY cmd/server/ ./cmd/server/
+
+# Copy internal packages (change together, but separate from cmd)
+COPY internal/ ./internal/
+COPY sdk/ ./sdk/
 
 ARG VERSION=dev
 ARG COMMIT=none

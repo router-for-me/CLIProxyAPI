@@ -241,6 +241,11 @@ func NormalizeOAuthProvider(provider string) (string, error) {
 	case "github":
 		return "github", nil
 	default:
+		// Allow custom OAuth providers by accepting unknown names as-is.
+		trimmed := strings.ToLower(strings.TrimSpace(provider))
+		if trimmed != "" {
+			return trimmed, nil
+		}
 		return "", errUnsupportedOAuthFlow
 	}
 }

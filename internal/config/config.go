@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 	"syscall"
@@ -157,6 +158,8 @@ type Config struct {
 	// This is useful when you want to login with a different account without logging out
 	// from your current session. Default: false.
 	IncognitoBrowser bool `yaml:"incognito-browser" json:"incognito-browser"`
+	// CustomOAuth defines user-configurable OAuth2 providers for custom login flows.
+	CustomOAuth []CustomOAuthProvider `yaml:"custom-oauth,omitempty" json:"custom-oauth,omitempty"`
 
 	legacyMigrationPending bool `yaml:"-" json:"-"`
 }
@@ -208,6 +211,28 @@ type CodexOAuthConfig struct {
 }
 
 // TLSConfig holds HTTPS server settings.
+// CustomOAuthProvider defines a user-configurable OAuth2 Authorization Code flow provider.
+type CustomOAuthProvider struct {
+	// Name is a unique identifier for this custom provider (used in auth file names and routes).
+	Name string `yaml:"name" json:"name"`
+	// AuthURL is the OAuth2 authorization endpoint URL.
+	AuthURL string `yaml:"auth-url" json:"auth-url"`
+	// TokenURL is the OAuth2 token exchange endpoint URL.
+	TokenURL string `yaml:"token-url" json:"token-url"`
+	// ClientID is the OAuth2 client identifier.
+	ClientID string `yaml:"client-id" json:"client-id"`
+	// ClientSecret is the OAuth2 client secret (optional for PKCE flows).
+	ClientSecret string `yaml:"client-secret,omitempty" json:"client-secret,omitempty"`
+	// Scopes is a space-separated list of OAuth2 scopes to request.
+	Scopes string `yaml:"scopes,omitempty" json:"scopes,omitempty"`
+	// CallbackPath is the server-local path for the OAuth callback (defaults to /custom/{name}/callback).
+	CallbackPath string `yaml:"callback-path,omitempty" json:"callback-path,omitempty"`
+	// RedirectURL overrides the redirect_uri sent to the provider (useful behind reverse proxies).
+	RedirectURL string `yaml:"redirect-url,omitempty" json:"redirect-url,omitempty"`
+	// PKCE enables S256 PKCE for the authorization code flow (default: false).
+	PKCE bool `yaml:"pkce,omitempty" json:"pkce,omitempty"`
+}
+
 type TLSConfig struct {
 	// Enable toggles HTTPS server mode.
 	Enable bool `yaml:"enable" json:"enable"`
@@ -239,6 +264,11 @@ type RemoteManagement struct {
 	// PanelGitHubRepository overrides the GitHub repository used to fetch the management panel asset.
 	// Accepts either a repository URL (https://github.com/org/repo) or an API releases endpoint.
 	PanelGitHubRepository string `yaml:"panel-github-repository"`
+	// OAuthCallbackRedirect overrides the response behavior for OAuth callback endpoints.
+	// When set to a valid URL, OAuth callbacks redirect the browser to this URL with
+	// provider, code, state, and error appended as query parameters, instead of
+	// returning the default success HTML page.
+	OAuthCallbackRedirect string `yaml:"oauth-callback-redirect,omitempty"`
 }
 
 // QuotaExceeded defines the behavior when API quota limits are exceeded.
@@ -749,6 +779,13 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		cfg.RemoteManagement.PanelGitHubRepository = DefaultPanelGitHubRepository
 	}
 
+	// Normalize OAuth callback redirect URL.
+	cfg.RemoteManagement.OAuthCallbackRedirect = strings.TrimSpace(cfg.RemoteManagement.OAuthCallbackRedirect)
+	if cfg.RemoteManagement.OAuthCallbackRedirect != "" {
+		if u, err := url.Parse(cfg.RemoteManagement.OAuthCallbackRedirect); err != nil || u.Scheme == "" || u.Host == "" {
+			return nil, fmt.Errorf("invalid oauth-callback-redirect URL: %q", cfg.RemoteManagement.OAuthCallbackRedirect)
+		}
+	}
 	cfg.Pprof.Addr = strings.TrimSpace(cfg.Pprof.Addr)
 	if cfg.Pprof.Addr == "" {
 		cfg.Pprof.Addr = DefaultPprofAddr

@@ -11,7 +11,7 @@ x-proxy-vars: &proxy-vars
 services:
   cli-proxy-api:
     image: ${CLI_PROXY_IMAGE:-eceasy/cli-proxy-api:latest}
-    pull_policy: always
+    pull_policy: never
     build:
       context: .
       dockerfile: Dockerfile
@@ -40,4 +40,5 @@ services:
       - ${CLI_PROXY_CONFIG_PATH:-./config.yaml}:/CLIProxyAPI/config.yaml
       - ${CLI_PROXY_AUTH_PATH:-./auths}:/root/.cli-proxy-api
       - ${CLI_PROXY_LOG_PATH:-./logs}:/CLIProxyAPI/logs
+      - ${CLI_PROXY_STATIC_PATH:-./static}:/CLIProxyAPI/static
     restart: unless-stopped

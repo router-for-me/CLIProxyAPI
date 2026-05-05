@@ -40,10 +40,14 @@ go build -o test-output ./cmd/server && rm test-output # Verify compile (REQUIRE
 - `sdk/cliproxy/` — Embeddable SDK entry (service/builder/watchers/pipeline)
 - `test/` — Cross-module integration tests
 
+## Agent Constraints
+- Do NOT use parallel tasks or sub-agent mode. All work must be done sequentially by a single agent.
+- Do NOT spawn sub-agents or delegate to parallel workers.
+
 ## Code Conventions
 - Keep changes small and simple (KISS)
 - Comments in English only
-- If editing code that already contains non-English comments, translate them to English (don’t add new non-English comments)
+- If editing code that already contains non-English comments, translate them to English (don't add new non-English comments)
 - For user-visible strings, keep the existing language used in that file/area
 - New Markdown docs should be in English unless the file is explicitly language-specific (e.g. `README_CN.md`)
 - As a rule, do not make standalone changes to `internal/translator/`. You may modify it only as part of broader changes elsewhere.

@@ -31,6 +31,10 @@ remote-management:
 
   # GitHub repository for the management control panel. Accepts a repository URL or releases API URL.
   panel-github-repository: 'https://github.com/router-for-me/Cli-Proxy-API-Management-Center'
+  # Custom redirect URL for OAuth callback endpoints. When set, OAuth callback pages will
+  # redirect the browser to this URL (with provider, code, state, and error as query parameters)
+  # instead of returning the default success HTML page. Useful for custom management UIs.
+  # oauth-callback-redirect: 'http://localhost:3000/oauth/callback'
 
 # Authentication directory (supports ~ for home directory)
 auth-dir: '~/.cli-proxy-api'
@@ -56,6 +60,26 @@ commercial-mode: false
 # Useful when you want to login with a different account without logging out from your current session.
 # Default: false (but Kiro auth defaults to true for multi-account support)
 incognito-browser: true
+# Custom OAuth providers. Define your own OAuth2 Authorization Code flow providers.
+# Each provider needs a name, auth-url, token-url, and client-id.
+# The server will register a callback route at /custom/{name}/callback by default.
+# Example:
+# custom-oauth:
+#   - name: my-provider
+#     auth-url: https://auth.example.com/oauth/authorize
+#     token-url: https://auth.example.com/oauth/token
+#     client-id: my-client-id
+#     client-secret: my-client-secret
+#     scopes: "openid profile email"
+#     pkce: true
+# Ollama balance: When the custom-oauth provider name is "ollama", the management API
+# will automatically fetch and display cloud usage/balance from https://ollama.com/settings.
+# To enable this, add the ollama session cookies to the auth file metadata:
+#   - "ollama_cookies": "aid=...; __Secure-session=..."
+# Or set individual cookie fields:
+#   - "aid": "cea766ee-..."
+#   - "__Secure-session": "YWdlLW..."
+# The balance info is cached for 10 minutes and shown in the auth entry's "balance" field.
 
 # When true, write application logs to rotating files instead of stdout
 logging-to-file: false
@@ -303,6 +327,20 @@ codex-oauth:
 #         alias: "claude-opus-4.66"
 #       - name: "kimi-k2.5"
 #         alias: "claude-opus-4.66"
+# Ollama cloud (OpenAI-compatible) example with balance display:
+# When the provider name is "ollama", the management API will automatically
+# fetch and display cloud usage/balance from https://ollama.com/settings.
+# To enable balance display, add ollama session cookies as custom headers:
+# openai-compatibility:
+#   - name: "ollama"
+#     base-url: "https://ollama.com/v1"
+#     headers:
+#       Cookie: "aid=...; __Secure-session=..."
+#     api-key-entries:
+#       - api-key: ""  # ollama cloud uses cookie auth, API key may be empty
+#     models:
+#       - name: "gemma3:4b"
+#         alias: "ollama-gemma3"
 
 # Vertex API keys (Vertex-compatible endpoints, base-url is optional)
 # vertex-api-key:

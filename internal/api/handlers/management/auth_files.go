@@ -39,6 +39,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -593,7 +594,145 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 			}
 		}
 	}
+	// For ollama providers, fetch and display cloud usage/balance from ollama.com/settings.
+	if strings.EqualFold(strings.TrimSpace(auth.Provider), "ollama") {
+		if cookies := ollamaCookiesFromAuth(auth); cookies != "" {
+			if balance := helps.GetOllamaBalance(cookies); balance != nil {
+				b := gin.H{}
+				b["session_usage_pct"] = balance.SessionUsagePct
+				b["weekly_usage_pct"] = balance.WeeklyUsagePct
+				if !balance.SessionResetsAt.IsZero() {
+					b["session_resets_at"] = balance.SessionResetsAt
+				}
+				if !balance.WeeklyResetsAt.IsZero() {
+					b["weekly_resets_at"] = balance.WeeklyResetsAt
+				}
+				if balance.Plan != "" {
+					b["plan"] = balance.Plan
+				}
+				b["fetched_at"] = balance.FetchedAt
+				entry["balance"] = b
+			}
+		}
+	}
 	return entry
+}
+
+// ollamaCookiesFromAuth extracts ollama session cookies from auth metadata and attributes.
+// It checks in order:
+//  1. Attributes["ollama_cookies"] or Attributes["header:Cookie"] (openai-compatibility entries)
+//  2. Metadata["ollama_cookies"] (OAuth/custom entries)
+//  3. Individual cookie fields in Metadata: "aid" + "__Secure-session"
+func ollamaCookiesFromAuth(auth *coreauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	// Check Attributes first (used by openai-compatibility synthesized entries)
+	if auth.Attributes != nil {
+		if cookies := strings.TrimSpace(auth.Attributes["ollama_cookies"]); cookies != "" {
+			return cookies
+		}
+		// Check if a Cookie header is set via custom headers (header:Cookie)
+		if cookies := strings.TrimSpace(auth.Attributes["header:Cookie"]); cookies != "" {
+			return cookies
+		}
+	}
+	// Check Metadata (used by OAuth and custom-oauth entries)
+	if auth.Metadata != nil {
+		// Prefer the explicit ollama_cookies field (full Cookie header value)
+		if cookies, ok := auth.Metadata["ollama_cookies"].(string); ok {
+			if trimmed := strings.TrimSpace(cookies); trimmed != "" {
+				return trimmed
+			}
+		}
+		// Fall back to combining individual cookie fields from metadata
+		var parts []string
+		if aid, ok := auth.Metadata["aid"].(string); ok {
+			if trimmed := strings.TrimSpace(aid); trimmed != "" {
+				parts = append(parts, "aid="+trimmed)
+			}
+		}
+		if session, ok := auth.Metadata["__Secure-session"].(string); ok {
+			if trimmed := strings.TrimSpace(session); trimmed != "" {
+				parts = append(parts, "__Secure-session="+trimmed)
+			}
+		}
+		if len(parts) > 0 {
+			return strings.Join(parts, "; ")
+		}
+	}
+	return ""
+}
+
+// RefreshOllamaBalance handles a POST request to refresh the ollama balance for a specific auth entry.
+// It invalidates the cache and fetches fresh data from ollama.com/settings.
+func (h *Handler) RefreshOllamaBalance(c *gin.Context) {
+	if h.authManager == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
+		return
+	}
+
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "name is required"})
+		return
+	}
+
+	// Find auth by name or ID
+	var targetAuth *coreauth.Auth
+	if auth, ok := h.authManager.GetByID(name); ok {
+		targetAuth = auth
+	} else {
+		auths := h.authManager.List()
+		for _, auth := range auths {
+			if auth.FileName == name {
+				targetAuth = auth
+				break
+			}
+		}
+	}
+
+	if targetAuth == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "auth file not found"})
+		return
+	}
+
+	// Only allow refresh for ollama providers
+	if !strings.EqualFold(strings.TrimSpace(targetAuth.Provider), "ollama") {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "balance refresh is only supported for ollama providers"})
+		return
+	}
+
+	cookies := ollamaCookiesFromAuth(targetAuth)
+	if cookies == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "no ollama session cookies found; add 'ollama_cookies' or 'aid' + '__Secure-session' to auth metadata"})
+		return
+	}
+
+	balance, err := helps.RefreshOllamaBalance(cookies)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": fmt.Sprintf("failed to fetch ollama balance: %v", err)})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"balance": gin.H{
+			"session_usage_pct": balance.SessionUsagePct,
+			"weekly_usage_pct":  balance.WeeklyUsagePct,
+			"session_resets_at": balance.SessionResetsAt,
+			"weekly_resets_at":  balance.WeeklyResetsAt,
+			"plan":              balance.Plan,
+			"fetched_at":        balance.FetchedAt,
+		},
+	})
 }
 
 func extractCodexIDTokenClaims(auth *coreauth.Auth) gin.H {
@@ -3052,6 +3191,7 @@ func (h *Handler) RequestIFlowCookieToken(c *gin.Context) {
 	})
 
 }
+
 type projectSelectionRequiredError struct{}
 
 func (e *projectSelectionRequiredError) Error() string {

@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -47,6 +48,46 @@ import (
 )
 
 const oauthCallbackSuccessHTML = `<html><head><meta charset="utf-8"><title>Authentication successful</title><script>setTimeout(function(){window.close();},5000);</script></head><body><h1>Authentication successful!</h1><p>You can close this window.</p><p>This window will close automatically in 5 seconds.</p></body></html>`
+
+// serveOAuthCallback handles the response for OAuth callback endpoints.
+// If OAuthCallbackRedirect is configured, it redirects the browser with
+// provider, code, state, and error as query parameters.
+// Otherwise, it returns the default success HTML page.
+func (s *Server) serveOAuthCallback(c *gin.Context, provider string) {
+	code := c.Query("code")
+	state := c.Query("state")
+	errStr := c.Query("error")
+	if errStr == "" {
+		errStr = c.Query("error_description")
+	}
+	if state != "" {
+		managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, provider, state, code, errStr)
+	}
+
+	cfg := s.cfg
+	if cfg != nil && cfg.RemoteManagement.OAuthCallbackRedirect != "" {
+		redirectURL, err := url.Parse(cfg.RemoteManagement.OAuthCallbackRedirect)
+		if err == nil {
+			q := redirectURL.Query()
+			q.Set("provider", provider)
+			if code != "" {
+				q.Set("code", code)
+			}
+			if state != "" {
+				q.Set("state", state)
+			}
+			if errStr != "" {
+				q.Set("error", errStr)
+			}
+			redirectURL.RawQuery = q.Encode()
+			c.Redirect(http.StatusFound, redirectURL.String())
+			return
+		}
+	}
+
+	c.Header("Content-Type", "text/html; charset=utf-8")
+	c.String(http.StatusOK, oauthCallbackSuccessHTML)
+}
 
 type serverOptionConfig struct {
 	extraMiddleware      []gin.HandlerFunc
@@ -390,14 +431,7 @@ func (s *Server) setupRoutes() {
 
 	// Root endpoint
 	s.engine.GET("/", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{
-			"message": "CLI Proxy API Server",
-			"endpoints": []string{
-				"POST /v1/chat/completions",
-				"POST /v1/completions",
-				"GET /v1/models",
-			},
-		})
+		c.Redirect(http.StatusFound, "/management.html")
 	})
 
 	// Event logging endpoint - handles Claude Code telemetry requests
@@ -410,89 +444,15 @@ func (s *Server) setupRoutes() {
 	// OAuth callback endpoints (reuse main server port)
 	// These endpoints receive provider redirects and persist
 	// the short-lived code/state for the waiting goroutine.
-	s.engine.GET("/anthropic/callback", func(c *gin.Context) {
-		code := c.Query("code")
-		state := c.Query("state")
-		errStr := c.Query("error")
-		if errStr == "" {
-			errStr = c.Query("error_description")
-		}
-		if state != "" {
-			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "anthropic", state, code, errStr)
-		}
-		c.Header("Content-Type", "text/html; charset=utf-8")
-		c.String(http.StatusOK, oauthCallbackSuccessHTML)
-	})
+	s.engine.GET("/anthropic/callback", func(c *gin.Context) { s.serveOAuthCallback(c, "anthropic") })
+	s.engine.GET("/codex/callback", func(c *gin.Context) { s.serveOAuthCallback(c, "codex") })
+	s.engine.GET("/gitlab/callback", func(c *gin.Context) { s.serveOAuthCallback(c, "gitlab") })
+	s.engine.GET("/google/callback", func(c *gin.Context) { s.serveOAuthCallback(c, "gemini") })
+	s.engine.GET("/antigravity/callback", func(c *gin.Context) { s.serveOAuthCallback(c, "antigravity") })
+	s.engine.GET("/kiro/callback", func(c *gin.Context) { s.serveOAuthCallback(c, "kiro") })
 
-	s.engine.GET("/codex/callback", func(c *gin.Context) {
-		code := c.Query("code")
-		state := c.Query("state")
-		errStr := c.Query("error")
-		if errStr == "" {
-			errStr = c.Query("error_description")
-		}
-		if state != "" {
-			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "codex", state, code, errStr)
-		}
-		c.Header("Content-Type", "text/html; charset=utf-8")
-		c.String(http.StatusOK, oauthCallbackSuccessHTML)
-	})
-
-	s.engine.GET("/gitlab/callback", func(c *gin.Context) {
-		code := c.Query("code")
-		state := c.Query("state")
-		errStr := c.Query("error")
-		if errStr == "" {
-			errStr = c.Query("error_description")
-		}
-		if state != "" {
-			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "gitlab", state, code, errStr)
-		}
-		c.Header("Content-Type", "text/html; charset=utf-8")
-		c.String(http.StatusOK, oauthCallbackSuccessHTML)
-	})
-
-	s.engine.GET("/google/callback", func(c *gin.Context) {
-		code := c.Query("code")
-		state := c.Query("state")
-		errStr := c.Query("error")
-		if errStr == "" {
-			errStr = c.Query("error_description")
-		}
-		if state != "" {
-			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "gemini", state, code, errStr)
-		}
-		c.Header("Content-Type", "text/html; charset=utf-8")
-		c.String(http.StatusOK, oauthCallbackSuccessHTML)
-	})
-
-	s.engine.GET("/antigravity/callback", func(c *gin.Context) {
-		code := c.Query("code")
-		state := c.Query("state")
-		errStr := c.Query("error")
-		if errStr == "" {
-			errStr = c.Query("error_description")
-		}
-		if state != "" {
-			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "antigravity", state, code, errStr)
-		}
-		c.Header("Content-Type", "text/html; charset=utf-8")
-		c.String(http.StatusOK, oauthCallbackSuccessHTML)
-	})
-
-	s.engine.GET("/kiro/callback", func(c *gin.Context) {
-		code := c.Query("code")
-		state := c.Query("state")
-		errStr := c.Query("error")
-		if errStr == "" {
-			errStr = c.Query("error_description")
-		}
-		if state != "" {
-			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "kiro", state, code, errStr)
-		}
-		c.Header("Content-Type", "text/html; charset=utf-8")
-		c.String(http.StatusOK, oauthCallbackSuccessHTML)
-	})
+	// Register dynamic callback routes for custom OAuth providers.
+	s.registerCustomOAuthRoutes(s.cfg)
 
 	// Management routes are registered lazily by registerManagementRoutes when a secret is configured.
 }
@@ -689,6 +649,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.DELETE("/auth-files", s.mgmt.DeleteAuthFile)
 		mgmt.PATCH("/auth-files/status", s.mgmt.PatchAuthFileStatus)
 		mgmt.PATCH("/auth-files/fields", s.mgmt.PatchAuthFileFields)
+		mgmt.POST("/auth-files/ollama-balance/refresh", s.mgmt.RefreshOllamaBalance)
 		mgmt.POST("/vertex/import", s.mgmt.ImportVertexCredential)
 
 		mgmt.GET("/anthropic-auth-url", s.mgmt.RequestAnthropicToken)
@@ -704,6 +665,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/kiro-auth-url", s.mgmt.RequestKiroToken)
 		mgmt.GET("/cursor-auth-url", s.mgmt.RequestCursorToken)
 		mgmt.GET("/github-auth-url", s.mgmt.RequestGitHubToken)
+		mgmt.GET("/custom-oauth-auth-url/:name", s.mgmt.RequestCustomOAuthToken)
 		mgmt.POST("/oauth-callback", s.mgmt.PostOAuthCallback)
 		mgmt.GET("/get-auth-status", s.mgmt.GetAuthStatus)
 	}
@@ -747,6 +709,30 @@ func (s *Server) serveManagementControlPanel(c *gin.Context) {
 	}
 
 	c.File(filePath)
+}
+
+// registerCustomOAuthRoutes dynamically registers callback routes for custom OAuth providers.
+func (s *Server) registerCustomOAuthRoutes(cfg *config.Config) {
+	if cfg == nil || len(cfg.CustomOAuth) == 0 {
+		return
+	}
+	for i := range cfg.CustomOAuth {
+		p := cfg.CustomOAuth[i]
+		name := strings.TrimSpace(p.Name)
+		if name == "" {
+			continue
+		}
+		callbackPath := strings.TrimSpace(p.CallbackPath)
+		if callbackPath == "" {
+			callbackPath = "/custom/" + name + "/callback"
+		}
+		if !strings.HasPrefix(callbackPath, "/") {
+			callbackPath = "/" + callbackPath
+		}
+		provider := name
+		s.engine.GET(callbackPath, func(c *gin.Context) { s.serveOAuthCallback(c, provider) })
+		log.Infof("custom OAuth callback registered: %s -> %s (auth-url: %s)", callbackPath, provider, p.AuthURL)
+	}
 }
 
 func (s *Server) enableKeepAlive(timeout time.Duration, onTimeout func()) {
