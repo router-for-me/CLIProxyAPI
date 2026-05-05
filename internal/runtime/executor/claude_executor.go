@@ -1138,7 +1138,7 @@ func restoreClaudeOAuthToolNamesFromStreamLine(line []byte, prefix string, prefi
 // regardless of what the client originally sent.
 func remapOAuthToolNames(body []byte) ([]byte, map[string]string) {
 	reverseMap := make(map[string]string, len(oauthToolRenameMap))
-	builtinTools := helps.AugmentClaudeBuiltinToolRegistry(body, map[string]bool{})
+	preservedTools := helps.AugmentClaudePreservedToolRegistry(body, map[string]bool{})
 	recordRename := func(original, renamed string) {
 		// Preserve the first-seen original name if the same upstream name is
 		// produced from multiple call sites; they all map back identically.
@@ -1161,7 +1161,7 @@ func remapOAuthToolNames(body []byte) ([]byte, map[string]string) {
 		tools.ForEach(func(_, tool gjson.Result) bool {
 			// Keep Anthropic built-in tools (web_search, code_execution, etc.) unchanged.
 			toolType := tool.Get("type").String()
-			if helps.IsClaudeBuiltinToolType(toolType) {
+			if helps.IsClaudePreservedTypedToolType(toolType) {
 				if toolCount > 0 {
 					toolsJSON.WriteByte(',')
 				}
@@ -1176,7 +1176,7 @@ func remapOAuthToolNames(body []byte) ([]byte, map[string]string) {
 			}
 
 			toolJSON := tool.Raw
-			if toolType != "" {
+			if helps.IsClaudeCustomToolType(toolType) {
 				updatedTool, err := sjson.Delete(toolJSON, "type")
 				if err == nil {
 					toolJSON = updatedTool
@@ -1209,7 +1209,7 @@ func remapOAuthToolNames(body []byte) ([]byte, map[string]string) {
 			// The chosen tool was removed from the tools array, so drop tool_choice to
 			// keep the payload internally consistent and fall back to normal auto tool use.
 			body, _ = sjson.DeleteBytes(body, "tool_choice")
-		} else if !builtinTools[tcName] {
+		} else if !preservedTools[tcName] {
 			if newName, ok := oauthToolRenameMap[tcName]; ok && newName != tcName {
 				body, _ = sjson.SetBytes(body, "tool_choice.name", newName)
 				recordRename(tcName, newName)
@@ -1230,7 +1230,7 @@ func remapOAuthToolNames(body []byte) ([]byte, map[string]string) {
 				switch partType {
 				case "tool_use":
 					name := part.Get("name").String()
-					if !builtinTools[name] {
+					if !preservedTools[name] {
 						if newName, ok := oauthToolRenameMap[name]; ok && newName != name {
 							path := fmt.Sprintf("messages.%d.content.%d.name", msgIndex.Int(), contentIndex.Int())
 							body, _ = sjson.SetBytes(body, path, newName)
@@ -1239,7 +1239,7 @@ func remapOAuthToolNames(body []byte) ([]byte, map[string]string) {
 					}
 				case "tool_reference":
 					toolName := part.Get("tool_name").String()
-					if !builtinTools[toolName] {
+					if !preservedTools[toolName] {
 						if newName, ok := oauthToolRenameMap[toolName]; ok && newName != toolName {
 							path := fmt.Sprintf("messages.%d.content.%d.tool_name", msgIndex.Int(), contentIndex.Int())
 							body, _ = sjson.SetBytes(body, path, newName)
@@ -1255,7 +1255,7 @@ func remapOAuthToolNames(body []byte) ([]byte, map[string]string) {
 						nestedContent.ForEach(func(nestedIndex, nestedPart gjson.Result) bool {
 							if nestedPart.Get("type").String() == "tool_reference" {
 								nestedToolName := nestedPart.Get("tool_name").String()
-								if !builtinTools[nestedToolName] {
+								if !preservedTools[nestedToolName] {
 									if newName, ok := oauthToolRenameMap[nestedToolName]; ok && newName != nestedToolName {
 										nestedPath := fmt.Sprintf("messages.%d.content.%d.content.%d.tool_name", msgIndex.Int(), contentIndex.Int(), nestedIndex.Int())
 										body, _ = sjson.SetBytes(body, nestedPath, newName)
@@ -1365,18 +1365,17 @@ func applyClaudeToolPrefix(body []byte, prefix string) []byte {
 		return body
 	}
 
-	// Collect built-in tool names from the authoritative fallback seed list and
-	// augment it with any typed built-ins present in the current request body.
-	builtinTools := helps.AugmentClaudeBuiltinToolRegistry(body, nil)
+	// Collect tool names that must stay untouched: fallback built-in names plus
+	// any typed tool definitions in the current request except synthetic
+	// type:"custom" wrappers.
+	preservedTools := helps.AugmentClaudeBuiltinToolRegistry(body, nil)
+	preservedTools = helps.AugmentClaudePreservedToolRegistry(body, preservedTools)
 
 	if tools := gjson.GetBytes(body, "tools"); tools.Exists() && tools.IsArray() {
 		tools.ForEach(func(index, tool gjson.Result) bool {
-			// Skip built-in tools (web_search, code_execution, etc.) which have
-			// a "type" field and require their name to remain unchanged.
-			if helps.IsClaudeBuiltinToolType(tool.Get("type").String()) {
-				if n := tool.Get("name").String(); n != "" {
-					builtinTools[n] = true
-				}
+			// Skip builtin and other opaque typed tools, but still allow synthetic
+			// type:"custom" wrappers to flow through the custom-tool prefix logic.
+			if helps.IsClaudePreservedTypedToolType(tool.Get("type").String()) {
 				return true
 			}
 			name := tool.Get("name").String()
@@ -1391,7 +1390,7 @@ func applyClaudeToolPrefix(body []byte, prefix string) []byte {
 
 	if gjson.GetBytes(body, "tool_choice.type").String() == "tool" {
 		name := gjson.GetBytes(body, "tool_choice.name").String()
-		if name != "" && !strings.HasPrefix(name, prefix) && !builtinTools[name] {
+		if name != "" && !strings.HasPrefix(name, prefix) && !preservedTools[name] {
 			body, _ = sjson.SetBytes(body, "tool_choice.name", prefix+name)
 		}
 	}
@@ -1407,14 +1406,14 @@ func applyClaudeToolPrefix(body []byte, prefix string) []byte {
 				switch partType {
 				case "tool_use":
 					name := part.Get("name").String()
-					if name == "" || strings.HasPrefix(name, prefix) || builtinTools[name] {
+					if name == "" || strings.HasPrefix(name, prefix) || preservedTools[name] {
 						return true
 					}
 					path := fmt.Sprintf("messages.%d.content.%d.name", msgIndex.Int(), contentIndex.Int())
 					body, _ = sjson.SetBytes(body, path, prefix+name)
 				case "tool_reference":
 					toolName := part.Get("tool_name").String()
-					if toolName == "" || strings.HasPrefix(toolName, prefix) || builtinTools[toolName] {
+					if toolName == "" || strings.HasPrefix(toolName, prefix) || preservedTools[toolName] {
 						return true
 					}
 					path := fmt.Sprintf("messages.%d.content.%d.tool_name", msgIndex.Int(), contentIndex.Int())
@@ -1426,7 +1425,7 @@ func applyClaudeToolPrefix(body []byte, prefix string) []byte {
 						nestedContent.ForEach(func(nestedIndex, nestedPart gjson.Result) bool {
 							if nestedPart.Get("type").String() == "tool_reference" {
 								nestedToolName := nestedPart.Get("tool_name").String()
-								if nestedToolName != "" && !strings.HasPrefix(nestedToolName, prefix) && !builtinTools[nestedToolName] {
+								if nestedToolName != "" && !strings.HasPrefix(nestedToolName, prefix) && !preservedTools[nestedToolName] {
 									nestedPath := fmt.Sprintf("messages.%d.content.%d.content.%d.tool_name", msgIndex.Int(), contentIndex.Int(), nestedIndex.Int())
 									body, _ = sjson.SetBytes(body, nestedPath, prefix+nestedToolName)
 								}

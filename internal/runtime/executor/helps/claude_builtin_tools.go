@@ -55,6 +55,15 @@ func IsClaudeBuiltinToolType(toolType string) bool {
 	return false
 }
 
+func IsClaudeCustomToolType(toolType string) bool {
+	return strings.TrimSpace(toolType) == "custom"
+}
+
+func IsClaudePreservedTypedToolType(toolType string) bool {
+	toolType = strings.TrimSpace(toolType)
+	return toolType != "" && toolType != "custom"
+}
+
 func AugmentClaudeBuiltinToolRegistry(body []byte, registry map[string]bool) map[string]bool {
 	if registry == nil {
 		registry = newClaudeBuiltinToolRegistry()
@@ -65,6 +74,26 @@ func AugmentClaudeBuiltinToolRegistry(body []byte, registry map[string]bool) map
 	}
 	tools.ForEach(func(_, tool gjson.Result) bool {
 		if !IsClaudeBuiltinToolType(tool.Get("type").String()) {
+			return true
+		}
+		if name := tool.Get("name").String(); name != "" {
+			registry[name] = true
+		}
+		return true
+	})
+	return registry
+}
+
+func AugmentClaudePreservedToolRegistry(body []byte, registry map[string]bool) map[string]bool {
+	if registry == nil {
+		registry = make(map[string]bool)
+	}
+	tools := gjson.GetBytes(body, "tools")
+	if !tools.Exists() || !tools.IsArray() {
+		return registry
+	}
+	tools.ForEach(func(_, tool gjson.Result) bool {
+		if !IsClaudePreservedTypedToolType(tool.Get("type").String()) {
 			return true
 		}
 		if name := tool.Get("name").String(); name != "" {
