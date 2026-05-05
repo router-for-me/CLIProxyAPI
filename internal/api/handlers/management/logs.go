@@ -60,7 +60,7 @@ func (h *Handler) GetLogs(c *gin.Context) {
 		return
 	}
 
-	limit, errLimit := parseLimit(c.Query("limit"))
+	limit, limitProvided, errLimit := parseLimit(c.Query("limit"))
 	if errLimit != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("invalid limit: %v", errLimit)})
 		return
@@ -81,7 +81,11 @@ func (h *Handler) GetLogs(c *gin.Context) {
 		return
 	}
 
-	acc := newLogAccumulator(cutoff, limit)
+	incrementalLimit := limit
+	if !limitProvided {
+		incrementalLimit = 0
+	}
+	acc := newLogAccumulator(cutoff, incrementalLimit)
 	for i := range files {
 		if !logFileMayContainAfter(files[i], cutoff) {
 			continue
@@ -473,23 +477,22 @@ func readRecentLogLines(files []string, limit int) ([]string, int, int64, error)
 	}
 	lines := make([]string, 0, limit)
 	for i := len(files) - 1; i >= 0 && len(lines) < limit; i-- {
-		fileLines := make([]string, 0, defaultLogLimit)
+		remaining := limit - len(lines)
+		fileLines := make([]string, 0, remaining)
 		if err := scanLogFile(files[i], func(line string) {
 			fileLines = append(fileLines, line)
+			if len(fileLines) > remaining {
+				copy(fileLines, fileLines[1:])
+				fileLines = fileLines[:remaining]
+			}
 		}); err != nil {
 			return nil, 0, 0, err
 		}
 		if len(fileLines) == 0 {
 			continue
 		}
-		remaining := limit - len(lines)
-		start := len(fileLines) - remaining
-		if start < 0 {
-			start = 0
-		}
-		selected := fileLines[start:]
-		combined := make([]string, 0, len(selected)+len(lines))
-		combined = append(combined, selected...)
+		combined := make([]string, 0, len(fileLines)+len(lines))
+		combined = append(combined, fileLines...)
 		combined = append(combined, lines...)
 		lines = combined
 	}
@@ -562,22 +565,22 @@ func parseCutoff(raw string) int64 {
 	return ts
 }
 
-func parseLimit(raw string) (int, error) {
+func parseLimit(raw string) (int, bool, error) {
 	value := strings.TrimSpace(raw)
 	if value == "" {
-		return defaultLogLimit, nil
+		return defaultLogLimit, false, nil
 	}
 	limit, err := strconv.Atoi(value)
 	if err != nil {
-		return 0, fmt.Errorf("must be a positive integer")
+		return 0, true, fmt.Errorf("must be a positive integer")
 	}
 	if limit <= 0 {
-		return 0, fmt.Errorf("must be greater than zero")
+		return 0, true, fmt.Errorf("must be greater than zero")
 	}
 	if limit > maxLogLimit {
-		return maxLogLimit, nil
+		return maxLogLimit, true, nil
 	}
-	return limit, nil
+	return limit, true, nil
 }
 
 func parseTimestamp(line string) int64 {

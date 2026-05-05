@@ -100,6 +100,56 @@ func TestGetLogsSkipsOldFilesForIncrementalReads(t *testing.T) {
 	}
 }
 
+func TestGetLogsKeepsFullIncrementalDeltaWhenLimitOmitted(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	dir := t.TempDir()
+
+	base := time.Date(2026, 1, 2, 0, 0, 0, 0, time.Local)
+	logPath := filepath.Join(dir, defaultLogFileName)
+	writeLogFile(t, logPath, makeLogLines(base, defaultLogLimit+25, "new"))
+	modTime := base.Add(time.Hour)
+	if err := os.Chtimes(logPath, modTime, modTime); err != nil {
+		t.Fatalf("failed to set active log mtime: %v", err)
+	}
+
+	resp := performGetLogs(t, dir, fmt.Sprintf("/v0/management/logs?after=%d", base.Add(-time.Second).Unix()))
+
+	if len(resp.Lines) != defaultLogLimit+25 {
+		t.Fatalf("expected full incremental delta of %d lines, got %d", defaultLogLimit+25, len(resp.Lines))
+	}
+	if !strings.Contains(resp.Lines[0], "new-001") {
+		t.Fatalf("expected first returned line to be new-001, got %q", resp.Lines[0])
+	}
+	if !strings.Contains(resp.Lines[len(resp.Lines)-1], "new-225") {
+		t.Fatalf("expected last returned line to be new-225, got %q", resp.Lines[len(resp.Lines)-1])
+	}
+}
+
+func TestGetLogsHonorsExplicitIncrementalLimit(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	dir := t.TempDir()
+
+	base := time.Date(2026, 1, 2, 0, 0, 0, 0, time.Local)
+	logPath := filepath.Join(dir, defaultLogFileName)
+	writeLogFile(t, logPath, makeLogLines(base, 10, "new"))
+	modTime := base.Add(time.Hour)
+	if err := os.Chtimes(logPath, modTime, modTime); err != nil {
+		t.Fatalf("failed to set active log mtime: %v", err)
+	}
+
+	resp := performGetLogs(t, dir, fmt.Sprintf("/v0/management/logs?after=%d&limit=3", base.Add(-time.Second).Unix()))
+
+	if len(resp.Lines) != 3 {
+		t.Fatalf("expected 3 lines, got %d", len(resp.Lines))
+	}
+	if !strings.Contains(resp.Lines[0], "new-008") {
+		t.Fatalf("expected first returned line to be new-008, got %q", resp.Lines[0])
+	}
+	if !strings.Contains(resp.Lines[len(resp.Lines)-1], "new-010") {
+		t.Fatalf("expected last returned line to be new-010, got %q", resp.Lines[len(resp.Lines)-1])
+	}
+}
+
 func TestGetLogsRejectsInvalidLimit(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	dir := t.TempDir()
