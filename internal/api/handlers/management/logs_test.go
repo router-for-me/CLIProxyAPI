@@ -50,6 +50,30 @@ func TestGetLogsDefaultsToRecentLines(t *testing.T) {
 	}
 }
 
+func TestGetLogsPreservesLatestTimestampWhenTailHasContinuations(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	dir := t.TempDir()
+
+	base := time.Date(2026, 1, 2, 0, 0, 0, 0, time.Local)
+	lines := []string{fmt.Sprintf("[%s] [error] request failed", base.Format("2006-01-02 15:04:05"))}
+	for i := 0; i < defaultLogLimit+25; i++ {
+		lines = append(lines, fmt.Sprintf("continuation-%03d", i+1))
+	}
+	writeLogFile(t, filepath.Join(dir, defaultLogFileName), lines)
+
+	resp := performGetLogs(t, dir, "/v0/management/logs")
+
+	if len(resp.Lines) != defaultLogLimit {
+		t.Fatalf("expected %d lines, got %d", defaultLogLimit, len(resp.Lines))
+	}
+	if !strings.Contains(resp.Lines[0], "continuation-026") {
+		t.Fatalf("expected first returned line to be continuation-026, got %q", resp.Lines[0])
+	}
+	if resp.LatestTimestamp != base.Unix() {
+		t.Fatalf("expected latest timestamp %d, got %d", base.Unix(), resp.LatestTimestamp)
+	}
+}
+
 func TestGetLogsClampsLargeLimit(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	dir := t.TempDir()

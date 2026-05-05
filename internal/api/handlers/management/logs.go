@@ -476,10 +476,14 @@ func readRecentLogLines(files []string, limit int) ([]string, int, int64, error)
 		limit = defaultLogLimit
 	}
 	lines := make([]string, 0, limit)
+	latest := int64(0)
 	for i := len(files) - 1; i >= 0 && len(lines) < limit; i-- {
 		remaining := limit - len(lines)
 		fileLines := make([]string, 0, remaining)
 		if err := scanLogFile(files[i], func(line string) {
+			if ts := parseTimestamp(line); ts > latest {
+				latest = ts
+			}
 			fileLines = append(fileLines, line)
 			if len(fileLines) > remaining {
 				copy(fileLines, fileLines[1:])
@@ -497,12 +501,6 @@ func readRecentLogLines(files []string, limit int) ([]string, int, int64, error)
 		lines = combined
 	}
 
-	latest := int64(0)
-	for _, line := range lines {
-		if ts := parseTimestamp(line); ts > latest {
-			latest = ts
-		}
-	}
 	if lines == nil {
 		lines = []string{}
 	}
