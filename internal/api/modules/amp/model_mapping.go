@@ -22,12 +22,9 @@ type ModelMapper interface {
 	// Equivalent to MapModelCtx with an empty fingerprint.
 	MapModel(requestedModel string) string
 
-	// MapModelCtx is the feature-aware variant. Selection follows the
-	// grouped semantics documented on selectTarget: exact groups before
-	// regex groups; within a group, the first conditional rule (in
-	// declaration order) whose When matches and whose target is
-	// available wins, otherwise the first available unconditional
-	// fallback in the same group is used.
+	// MapModelCtx is the feature-aware variant. Rules are scanned in
+	// declaration order (exact before regex); the first matching rule
+	// whose condition is satisfied and whose target is available wins.
 	MapModelCtx(requestedModel string, fp RequestFingerprint) string
 
 	// UpdateMappings refreshes the mapping configuration (for hot-reload).
@@ -37,17 +34,13 @@ type ModelMapper interface {
 // DefaultModelMapper implements ModelMapper with thread-safe mapping storage.
 //
 // Selection order (see selectTarget for the full algorithm):
-//  1. exact rules
-//  2. regex rules
+//  1. exact rules (in declaration order)
+//  2. regex rules (in declaration order)
 //
-// Within each pass, matching rules are bucketed by their normalized
-// From key into groups (in declaration order of each group's first
-// matching rule). Groups are then evaluated in order: a group's first
-// conditional rule whose When matches and whose target has registered
-// providers wins; otherwise the first available unconditional rule in
-// that group is used as fallback. Across groups, an earlier group's
-// available fallback is returned before any later group's conditional
-// rule is considered.
+// Within each pass, rules are scanned top-to-bottom. The first rule
+// whose From matches, whose When condition is satisfied, and whose
+// target has available providers wins. Users must place conditional
+// rules before their unconditional fallback.
 type DefaultModelMapper struct {
 	mu     sync.RWMutex
 	exacts []mappingRule
@@ -133,85 +126,29 @@ func hasProviders(targetModel string) bool {
 	return len(util.GetProviderName(res.ModelName)) > 0
 }
 
-// selectTarget scans rules of one class (exact or regex) and returns the
-// best target model name with the following semantics:
-//
-//   - Rules are grouped by their normalized From key. A group's
-//     "declaration order" is the position of its first matching rule
-//     in the input slice.
-//   - Within one group, the first conditional rule (in declaration
-//     order) whose When matches the fingerprint and whose target is
-//     reported available wins. This holds regardless of where the
-//     conditional and unconditional rules are interleaved (so a
-//     same-key conditional appended later, e.g. via PATCH, is still
-//     reachable even if rules from another From appear in between).
-//   - If no conditional rule wins, the group's fallback is the first
-//     unconditional rule in declaration order whose target is
-//     available.
-//   - Across groups, the earliest-declared group is tried first: if
-//     its conditional matches, use that; otherwise if it has an
-//     available unconditional fallback, use that; otherwise move on
-//     to the next group in declaration order.
-//   - A rule whose `to` model has no local providers (per `available`)
-//     is skipped during both conditional matching and fallback
-//     selection.
+// selectTarget scans rules of one class (exact or regex) in declaration
+// order and returns the first matching target. A rule matches when:
+//  1. Its From matches the requested model (exact or regex).
+//  2. Its When condition is satisfied by the fingerprint (or is nil/empty).
+//  3. Its target model has available local providers.
 //
 // Returns "" if no rule produces an available target.
 func selectTarget(rules []mappingRule, baseModel, normalizedBase string, fp RequestFingerprint, isRegex bool, available func(string) bool) string {
-	type group struct {
-		key         string
-		conditional []mappingRule // ordered as declared, only matching this baseModel
-		fallback    string        // first available unconditional `to`
-	}
-	groups := make([]*group, 0)
-	groupIdx := make(map[string]int)
 	for _, r := range rules {
-		var key string
 		if isRegex {
 			if r.re == nil || !r.re.MatchString(baseModel) {
 				continue
 			}
-			// Regex patterns are compiled case-insensitively (UpdateMappings
-			// prefixes "(?i)"), so two rules differing only by letter case
-			// match the same inputs and must share a group. Lower-case the
-			// pattern string when grouping so case-variant From values do
-			// not split into separate groups and hide a same-From
-			// conditional behind an earlier fallback.
-			key = strings.ToLower(r.re.String())
 		} else {
 			if r.exactFrom == "" || r.exactFrom != normalizedBase {
 				continue
 			}
-			key = r.exactFrom
 		}
-		idx, ok := groupIdx[key]
-		if !ok {
-			groups = append(groups, &group{key: key})
-			idx = len(groups) - 1
-			groupIdx[key] = idx
-		}
-		g := groups[idx]
-		if IsConditionEffectivelyEmpty(r.when) {
-			// Last-declared duplicate fallback wins, matching the
-			// pre-existing map[from]to semantics where the last
-			// duplicate exact mapping replaced earlier ones. The
-			// group's order in `groups` is still its first appearance,
-			// so cross-group declaration order is unchanged.
-			if available(r.to) {
-				g.fallback = r.to
-			}
+		if !IsConditionEffectivelyEmpty(r.when) && !ConditionMatches(r.when, fp) {
 			continue
 		}
-		g.conditional = append(g.conditional, r)
-	}
-	for _, g := range groups {
-		for _, r := range g.conditional {
-			if ConditionMatches(r.when, fp) && available(r.to) {
-				return r.to
-			}
-		}
-		if g.fallback != "" {
-			return g.fallback
+		if available(r.to) {
+			return r.to
 		}
 	}
 	return ""

@@ -362,35 +362,32 @@ func TestConditionMatches(t *testing.T) {
 	}
 }
 
-// TestModelMapper_DuplicateExactFallbackLastWins regression-tests the
-// pre-existing semantic where a later duplicate unconditional exact
-// mapping overrides an earlier one. The original implementation used
-// map[from]to (last write wins); preserving that on the grouped path
-// avoids silently re-routing requests after upgrade.
-func TestModelMapper_DuplicateExactFallbackLastWins(t *testing.T) {
+// TestModelMapper_DuplicateExactFallbackFirstWins verifies that when
+// multiple unconditional rules share the same From, the first one wins
+// (top-to-bottom declaration order).
+func TestModelMapper_DuplicateExactFallbackFirstWins(t *testing.T) {
 	reg := registry.GetGlobalRegistry()
-	reg.RegisterClient("test-dup-last", "openai", []*registry.ModelInfo{
+	reg.RegisterClient("test-dup-first", "openai", []*registry.ModelInfo{
 		{ID: "first-target", OwnedBy: "openai", Type: "openai"},
 		{ID: "second-target", OwnedBy: "openai", Type: "openai"},
 	})
-	defer reg.UnregisterClient("test-dup-last")
+	defer reg.UnregisterClient("test-dup-first")
 
 	mapper := NewModelMapper([]config.AmpModelMapping{
 		{From: "gemini-3-flash-preview", To: "first-target"},
 		{From: "gemini-3-flash-preview", To: "second-target"},
 	})
 
-	if got := mapper.MapModel("gemini-3-flash-preview"); got != "second-target" {
-		t.Errorf("got %q, want second-target (last-declared duplicate fallback must win)", got)
+	if got := mapper.MapModel("gemini-3-flash-preview"); got != "first-target" {
+		t.Errorf("got %q, want first-target (first-declared rule must win)", got)
 	}
 }
 
-// TestModelMapper_NonContiguousSameFromConditionalIsReachable
-// regression-tests the case where a same-From conditional rule appears
-// after a different overlapping rule. The conditional rule must still
-// be evaluated and win for matching requests; the earlier overlapping
-// rule's fallback must not be returned prematurely.
-func TestModelMapper_NonContiguousSameFromConditionalIsReachable(t *testing.T) {
+// TestModelMapper_NonContiguousSameFromFallbackWins verifies that with
+// top-to-bottom semantics, an earlier unconditional rule wins over a
+// later conditional rule even if they share the same From pattern.
+// Users must place conditional rules before the fallback.
+func TestModelMapper_NonContiguousSameFromFallbackWins(t *testing.T) {
 	reg := registry.GetGlobalRegistry()
 	reg.RegisterClient("test-non-contiguous", "anthropic", []*registry.ModelInfo{
 		{ID: "early-fallback", OwnedBy: "anthropic", Type: "claude"},
@@ -400,25 +397,23 @@ func TestModelMapper_NonContiguousSameFromConditionalIsReachable(t *testing.T) {
 	defer reg.UnregisterClient("test-non-contiguous")
 
 	mapper := NewModelMapper([]config.AmpModelMapping{
-		// Group A: matches gemini-3-flash-preview, unconditional.
+		// Unconditional fallback declared first — wins for all requests.
 		{From: "^gemini-3-.*$", To: "early-fallback", Regex: true},
-		// Group B: also matches gemini-3-flash-preview, unconditional.
+		// Unrelated pattern in between.
 		{From: "^.*-flash-.*$", To: "interleaved", Regex: true},
-		// Group A again, conditional. Appended later (e.g. via PATCH).
+		// Same From, conditional, but declared after fallback — unreachable.
 		{From: "^gemini-3-.*$", To: "late-conditional", Regex: true,
 			When: &config.AmpMappingCondition{Feature: "handoff"}},
 	})
 
-	// Handoff request must reach the late conditional rule despite the
-	// interleaved unrelated unconditional in between.
+	// Even handoff goes to early-fallback because it is declared first.
 	got := mapper.MapModelCtx("gemini-3-flash-preview",
 		RequestFingerprint{ToolChoice: "create_handoff_context"})
-	if got != "late-conditional" {
-		t.Errorf("got %q, want late-conditional (non-contiguous same-From conditional must be reachable)", got)
+	if got != "early-fallback" {
+		t.Errorf("got %q, want early-fallback (first matching rule wins top-to-bottom)", got)
 	}
-	// Non-handoff still falls back to the earliest declared group.
 	if got := mapper.MapModelCtx("gemini-3-flash-preview", RequestFingerprint{}); got != "early-fallback" {
-		t.Errorf("got %q, want early-fallback (earliest declared group's fallback)", got)
+		t.Errorf("got %q, want early-fallback", got)
 	}
 }
 
@@ -503,10 +498,10 @@ func TestModelMapper_RegexOrderRespectedAcrossOverlappingPatterns(t *testing.T) 
 	}
 }
 
-// TestModelMapper_RegexConditionalWinsWithinSameGroup verifies that a
-// conditional rule still wins over an unconditional rule sharing the
-// same regex pattern (within-group conditional-wins semantics).
-func TestModelMapper_RegexConditionalWinsWithinSameGroup(t *testing.T) {
+// TestModelMapper_RegexConditionalAfterFallbackIsUnreachable verifies
+// that with top-to-bottom semantics, a regex conditional rule declared
+// after an unconditional rule sharing the same pattern is unreachable.
+func TestModelMapper_RegexConditionalAfterFallbackIsUnreachable(t *testing.T) {
 	reg := registry.GetGlobalRegistry()
 	reg.RegisterClient("test-regex-group", "anthropic", []*registry.ModelInfo{
 		{ID: "conditional-target", OwnedBy: "anthropic", Type: "claude"},
@@ -520,21 +515,20 @@ func TestModelMapper_RegexConditionalWinsWithinSameGroup(t *testing.T) {
 			When: &config.AmpMappingCondition{Feature: "handoff"}},
 	})
 
+	// Fallback is first, so it wins even for handoff requests.
 	if got := mapper.MapModelCtx("gemini-3-flash-preview",
-		RequestFingerprint{ToolChoice: "create_handoff_context"}); got != "conditional-target" {
-		t.Errorf("got %q, want conditional-target (same-pattern conditional must win)", got)
+		RequestFingerprint{ToolChoice: "create_handoff_context"}); got != "fallback-target" {
+		t.Errorf("got %q, want fallback-target (first rule wins)", got)
 	}
 	if got := mapper.MapModelCtx("gemini-3-flash-preview", RequestFingerprint{}); got != "fallback-target" {
-		t.Errorf("got %q, want fallback-target (no condition match)", got)
+		t.Errorf("got %q, want fallback-target", got)
 	}
 }
 
-// TestModelMapper_RegexCaseVariantSharesGroup verifies that two regex
-// rules whose From patterns differ only by letter case share the same
-// group (since UpdateMappings compiles them case-insensitively). A
-// later same-pattern conditional must remain reachable behind an
-// earlier case-variant fallback.
-func TestModelMapper_RegexCaseVariantSharesGroup(t *testing.T) {
+// TestModelMapper_RegexCaseVariantLinearOrder verifies that two regex
+// rules whose From patterns differ only by letter case are both valid
+// rules. With top-to-bottom semantics, the first matching rule wins.
+func TestModelMapper_RegexCaseVariantLinearOrder(t *testing.T) {
 	reg := registry.GetGlobalRegistry()
 	reg.RegisterClient("test-regex-case", "anthropic", []*registry.ModelInfo{
 		{ID: "case-conditional-target", OwnedBy: "anthropic", Type: "claude"},
@@ -548,9 +542,10 @@ func TestModelMapper_RegexCaseVariantSharesGroup(t *testing.T) {
 			When: &config.AmpMappingCondition{Feature: "handoff"}},
 	})
 
+	// First rule (unconditional) wins for all requests since it is declared first.
 	if got := mapper.MapModelCtx("gemini-3-flash-preview",
-		RequestFingerprint{ToolChoice: "create_handoff_context"}); got != "case-conditional-target" {
-		t.Errorf("got %q, want case-conditional-target (case-variant regex must share group)", got)
+		RequestFingerprint{ToolChoice: "create_handoff_context"}); got != "case-fallback-target" {
+		t.Errorf("got %q, want case-fallback-target (first rule wins)", got)
 	}
 	if got := mapper.MapModelCtx("gemini-3-flash-preview", RequestFingerprint{}); got != "case-fallback-target" {
 		t.Errorf("got %q, want case-fallback-target", got)
@@ -559,13 +554,8 @@ func TestModelMapper_RegexCaseVariantSharesGroup(t *testing.T) {
 
 // TestModelMapper_EmptyWhenTreatedAsUnconditional verifies that a
 // mapping with `When: &AmpMappingCondition{}` (all fields empty) is
-// classified as unconditional, mirroring `When: nil`. Otherwise it
-// would be evaluated in the conditional bucket and silently shadow
-// other unconditional rules sharing the same From, since
-// ConditionMatches always returns true for an all-empty condition.
-//
-// Among unconditional duplicates the last declaration wins, matching
-// the pre-existing map[from]to semantics.
+// treated as unconditional, same as `When: nil`. With top-to-bottom
+// semantics, the first declared rule wins.
 func TestModelMapper_EmptyWhenTreatedAsUnconditional(t *testing.T) {
 	reg := registry.GetGlobalRegistry()
 	reg.RegisterClient("test-empty-when", "openai", []*registry.ModelInfo{
@@ -579,17 +569,12 @@ func TestModelMapper_EmptyWhenTreatedAsUnconditional(t *testing.T) {
 		{From: "gemini-3-flash-preview", To: "gpt-second", When: &config.AmpMappingCondition{}},
 	})
 
-	// Both calls must hit the second rule because the empty-When rule
-	// is treated as unconditional and last-declared duplicate wins.
-	// Without the empty-When guard, the second rule would land in the
-	// conditional bucket and would also beat the first rule (because
-	// ConditionMatches returns true for an empty condition), so this
-	// test still detects regressions of the empty-When classification.
-	if got := mapper.MapModelCtx("gemini-3-flash-preview", RequestFingerprint{}); got != "gpt-second" {
-		t.Errorf("got %q, want gpt-second (last duplicate fallback wins, no fingerprint)", got)
+	// First rule wins for both calls.
+	if got := mapper.MapModelCtx("gemini-3-flash-preview", RequestFingerprint{}); got != "gpt-first" {
+		t.Errorf("got %q, want gpt-first (first rule wins, no fingerprint)", got)
 	}
-	if got := mapper.MapModelCtx("gemini-3-flash-preview", RequestFingerprint{ToolChoice: "create_handoff_context"}); got != "gpt-second" {
-		t.Errorf("got %q, want gpt-second (last duplicate fallback wins, with fingerprint)", got)
+	if got := mapper.MapModelCtx("gemini-3-flash-preview", RequestFingerprint{ToolChoice: "create_handoff_context"}); got != "gpt-first" {
+		t.Errorf("got %q, want gpt-first (first rule wins, with fingerprint)", got)
 	}
 }
 
@@ -639,10 +624,10 @@ func TestModelMapper_MapModelCtx_ConditionalOnlyNoFallback(t *testing.T) {
 	}
 }
 
-// TestModelMapper_MapModelCtx_ConditionalWinsRegardlessOfOrder verifies the
-// documented "conditional wins" semantics hold even when the unconditional
-// fallback appears before the conditional rule in config.
-func TestModelMapper_MapModelCtx_ConditionalWinsRegardlessOfOrder(t *testing.T) {
+// TestModelMapper_MapModelCtx_ConditionalMustBeDeclaredFirst verifies that
+// with top-to-bottom semantics, a conditional rule must be declared before
+// the fallback to take effect. When fallback is first, it always wins.
+func TestModelMapper_MapModelCtx_ConditionalMustBeDeclaredFirst(t *testing.T) {
 	reg := registry.GetGlobalRegistry()
 	reg.RegisterClient("test-cond3", "openai", []*registry.ModelInfo{
 		{ID: "gpt-handoff", OwnedBy: "openai", Type: "openai"},
@@ -650,14 +635,14 @@ func TestModelMapper_MapModelCtx_ConditionalWinsRegardlessOfOrder(t *testing.T) 
 	})
 	defer reg.UnregisterClient("test-cond3")
 
-	// Fallback FIRST, conditional SECOND
+	// Fallback FIRST, conditional SECOND — fallback always wins.
 	mapper := NewModelMapper([]config.AmpModelMapping{
 		{From: "gemini-3-flash-preview", To: "gpt-default"},
 		{From: "gemini-3-flash-preview", To: "gpt-handoff", When: &config.AmpMappingCondition{Feature: "handoff"}},
 	})
 
-	if got := mapper.MapModelCtx("gemini-3-flash-preview", RequestFingerprint{ToolChoice: "create_handoff_context"}); got != "gpt-handoff" {
-		t.Errorf("handoff (fallback-before-conditional): got %q want gpt-handoff", got)
+	if got := mapper.MapModelCtx("gemini-3-flash-preview", RequestFingerprint{ToolChoice: "create_handoff_context"}); got != "gpt-default" {
+		t.Errorf("handoff (fallback-before-conditional): got %q want gpt-default (first rule wins)", got)
 	}
 	if got := mapper.MapModelCtx("gemini-3-flash-preview", RequestFingerprint{}); got != "gpt-default" {
 		t.Errorf("default: got %q want gpt-default", got)
