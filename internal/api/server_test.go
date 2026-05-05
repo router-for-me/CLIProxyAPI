@@ -147,6 +147,24 @@ func TestManagementUsageRequiresManagementAuthAndPopsArray(t *testing.T) {
 	}
 }
 
+func TestServerRegistersResponsesCompactRoute(t *testing.T) {
+	server := newTestServer(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses/compact", strings.NewReader(`{"model":"test-model","stream":true}`))
+	req.Header.Set("Authorization", "Bearer test-key")
+	req.Header.Set("Content-Type", "application/json")
+
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("unexpected status code: got %d want %d; body=%s", rr.Code, http.StatusBadRequest, rr.Body.String())
+	}
+	if body := rr.Body.String(); !strings.Contains(body, "Streaming not supported for compact responses") {
+		t.Fatalf("response body missing compact stream rejection: %s", body)
+	}
+}
+
 func TestAmpProviderModelRoutes(t *testing.T) {
 	testCases := []struct {
 		name         string
