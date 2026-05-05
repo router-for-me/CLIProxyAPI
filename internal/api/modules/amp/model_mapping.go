@@ -192,7 +192,12 @@ func selectTarget(rules []mappingRule, baseModel, normalizedBase string, fp Requ
 		}
 		g := groups[idx]
 		if IsConditionEffectivelyEmpty(r.when) {
-			if g.fallback == "" && available(r.to) {
+			// Last-declared duplicate fallback wins, matching the
+			// pre-existing map[from]to semantics where the last
+			// duplicate exact mapping replaced earlier ones. The
+			// group's order in `groups` is still its first appearance,
+			// so cross-group declaration order is unchanged.
+			if available(r.to) {
 				g.fallback = r.to
 			}
 			continue

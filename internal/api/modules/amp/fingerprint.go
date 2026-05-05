@@ -288,6 +288,18 @@ func extractSystemText(body []byte) string {
 			}
 		}
 	}
+	// OpenAI Chat / compat providers: messages[] entries with role=system/developer.
+	if msgs := gjson.GetBytes(body, "messages"); msgs.IsArray() {
+		for _, m := range msgs.Array() {
+			role := strings.ToLower(m.Get("role").String())
+			if role != "system" && role != "developer" {
+				continue
+			}
+			if s := strings.TrimSpace(messageContentText(m.Get("content"))); s != "" {
+				return s
+			}
+		}
+	}
 	// Gemini: systemInstruction.parts[].text
 	if si := gjson.GetBytes(body, "systemInstruction"); si.Exists() {
 		var b strings.Builder

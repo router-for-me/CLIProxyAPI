@@ -71,6 +71,23 @@ func TestExtractFingerprint_Empty(t *testing.T) {
 	}
 }
 
+// TestExtractFingerprint_ChatMessagesSystemRole verifies that
+// extractSystemText reads the system/developer entry from messages[]
+// for OpenAI-Chat-style payloads (groq, kimi, openrouter, fireworks
+// compat providers, etc.) when no top-level `system` field is set.
+func TestExtractFingerprint_ChatMessagesSystemRole(t *testing.T) {
+	body := []byte(`{
+		"model":"gpt-5.4",
+		"messages":[
+			{"role":"system","content":"You are the Oracle - an expert AI advisor with advanced reasoning capabilities."},
+			{"role":"user","content":"hello"}
+		]
+	}`)
+	if got := ExtractFingerprint(body).Feature(); got != "oracle" {
+		t.Fatalf("Feature = %q, want oracle (chat messages[] system entry must be parsed)", got)
+	}
+}
+
 // TestExtractFingerprint_OracleArrayInstructions verifies that an Oracle
 // request using array-form `instructions` (instead of a plain string)
 // still has its system text extracted and feature detection works.
@@ -345,6 +362,29 @@ func TestConditionMatches(t *testing.T) {
 	}
 }
 
+// TestModelMapper_DuplicateExactFallbackLastWins regression-tests the
+// pre-existing semantic where a later duplicate unconditional exact
+// mapping overrides an earlier one. The original implementation used
+// map[from]to (last write wins); preserving that on the grouped path
+// avoids silently re-routing requests after upgrade.
+func TestModelMapper_DuplicateExactFallbackLastWins(t *testing.T) {
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient("test-dup-last", "openai", []*registry.ModelInfo{
+		{ID: "first-target", OwnedBy: "openai", Type: "openai"},
+		{ID: "second-target", OwnedBy: "openai", Type: "openai"},
+	})
+	defer reg.UnregisterClient("test-dup-last")
+
+	mapper := NewModelMapper([]config.AmpModelMapping{
+		{From: "gemini-3-flash-preview", To: "first-target"},
+		{From: "gemini-3-flash-preview", To: "second-target"},
+	})
+
+	if got := mapper.MapModel("gemini-3-flash-preview"); got != "second-target" {
+		t.Errorf("got %q, want second-target (last-declared duplicate fallback must win)", got)
+	}
+}
+
 // TestModelMapper_NonContiguousSameFromConditionalIsReachable
 // regression-tests the case where a same-From conditional rule appears
 // after a different overlapping rule. The conditional rule must still
@@ -523,6 +563,9 @@ func TestModelMapper_RegexCaseVariantSharesGroup(t *testing.T) {
 // would be evaluated in the conditional bucket and silently shadow
 // other unconditional rules sharing the same From, since
 // ConditionMatches always returns true for an all-empty condition.
+//
+// Among unconditional duplicates the last declaration wins, matching
+// the pre-existing map[from]to semantics.
 func TestModelMapper_EmptyWhenTreatedAsUnconditional(t *testing.T) {
 	reg := registry.GetGlobalRegistry()
 	reg.RegisterClient("test-empty-when", "openai", []*registry.ModelInfo{
@@ -536,15 +579,17 @@ func TestModelMapper_EmptyWhenTreatedAsUnconditional(t *testing.T) {
 		{From: "gemini-3-flash-preview", To: "gpt-second", When: &config.AmpMappingCondition{}},
 	})
 
-	// Both calls must hit the first declared rule because the second
-	// rule is effectively unconditional too. Without this guard, the
-	// second rule would jump into the conditional bucket, beat the
-	// first rule's fallback, and reroute every request.
-	if got := mapper.MapModelCtx("gemini-3-flash-preview", RequestFingerprint{}); got != "gpt-first" {
-		t.Errorf("got %q, want gpt-first (no fingerprint)", got)
+	// Both calls must hit the second rule because the empty-When rule
+	// is treated as unconditional and last-declared duplicate wins.
+	// Without the empty-When guard, the second rule would land in the
+	// conditional bucket and would also beat the first rule (because
+	// ConditionMatches returns true for an empty condition), so this
+	// test still detects regressions of the empty-When classification.
+	if got := mapper.MapModelCtx("gemini-3-flash-preview", RequestFingerprint{}); got != "gpt-second" {
+		t.Errorf("got %q, want gpt-second (last duplicate fallback wins, no fingerprint)", got)
 	}
-	if got := mapper.MapModelCtx("gemini-3-flash-preview", RequestFingerprint{ToolChoice: "create_handoff_context"}); got != "gpt-first" {
-		t.Errorf("got %q, want gpt-first (with fingerprint)", got)
+	if got := mapper.MapModelCtx("gemini-3-flash-preview", RequestFingerprint{ToolChoice: "create_handoff_context"}); got != "gpt-second" {
+		t.Errorf("got %q, want gpt-second (last duplicate fallback wins, with fingerprint)", got)
 	}
 }
 
