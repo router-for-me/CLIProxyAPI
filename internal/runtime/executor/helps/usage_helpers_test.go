@@ -48,6 +48,44 @@ func TestParseOpenAIUsageResponses(t *testing.T) {
 	}
 }
 
+func TestParseOpenAIUsageIgnoresNullUsage(t *testing.T) {
+	data := []byte(`{"usage":null}`)
+	detail := ParseOpenAIUsage(data)
+	if detail != (usage.Detail{}) {
+		t.Fatalf("detail = %+v, want zero detail", detail)
+	}
+}
+
+func TestParseOpenAIStreamUsageIgnoresNullUsage(t *testing.T) {
+	line := []byte(`data: {"id":"chunk_1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}],"usage":null}`)
+	if detail, ok := ParseOpenAIStreamUsage(line); ok {
+		t.Fatalf("ParseOpenAIStreamUsage() = (%+v, true), want false for null usage", detail)
+	}
+}
+
+func TestParseOpenAIStreamUsageResponsesFields(t *testing.T) {
+	line := []byte(`data: {"id":"chunk_1","object":"chat.completion.chunk","choices":[],"usage":{"input_tokens":8,"output_tokens":5,"total_tokens":13,"input_tokens_details":{"cached_tokens":3},"output_tokens_details":{"reasoning_tokens":2}}}`)
+	detail, ok := ParseOpenAIStreamUsage(line)
+	if !ok {
+		t.Fatal("ParseOpenAIStreamUsage() ok = false, want true")
+	}
+	if detail.InputTokens != 8 {
+		t.Fatalf("input tokens = %d, want %d", detail.InputTokens, 8)
+	}
+	if detail.OutputTokens != 5 {
+		t.Fatalf("output tokens = %d, want %d", detail.OutputTokens, 5)
+	}
+	if detail.TotalTokens != 13 {
+		t.Fatalf("total tokens = %d, want %d", detail.TotalTokens, 13)
+	}
+	if detail.CachedTokens != 3 {
+		t.Fatalf("cached tokens = %d, want %d", detail.CachedTokens, 3)
+	}
+	if detail.ReasoningTokens != 2 {
+		t.Fatalf("reasoning tokens = %d, want %d", detail.ReasoningTokens, 2)
+	}
+}
+
 func TestParseGeminiCLIUsage_TopLevelUsageMetadata(t *testing.T) {
 	data := []byte(`{"usageMetadata":{"promptTokenCount":11,"candidatesTokenCount":7,"thoughtsTokenCount":3,"totalTokenCount":21,"cachedContentTokenCount":5}}`)
 	detail := ParseGeminiCLIUsage(data)

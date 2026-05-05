@@ -248,7 +248,7 @@ func resolveUsageAuthType(auth *cliproxyauth.Auth) string {
 
 func ParseCodexUsage(data []byte) (usage.Detail, bool) {
 	usageNode := gjson.ParseBytes(data).Get("response.usage")
-	if !usageNode.Exists() {
+	if !hasOpenAIStyleUsageTokenFields(usageNode) {
 		return usage.Detail{}, false
 	}
 	return parseOpenAIStyleUsageNode(usageNode), true
@@ -256,7 +256,7 @@ func ParseCodexUsage(data []byte) (usage.Detail, bool) {
 
 func ParseCodexImageToolUsage(data []byte) (usage.Detail, bool) {
 	usageNode := gjson.ParseBytes(data).Get("response.tool_usage.image_gen")
-	if !usageNode.Exists() || !usageNode.IsObject() {
+	if !hasOpenAIStyleUsageTokenFields(usageNode) {
 		return usage.Detail{}, false
 	}
 	return parseOpenAIStyleUsageNode(usageNode), true
@@ -264,10 +264,25 @@ func ParseCodexImageToolUsage(data []byte) (usage.Detail, bool) {
 
 func ParseOpenAIUsage(data []byte) usage.Detail {
 	usageNode := gjson.ParseBytes(data).Get("usage")
-	if !usageNode.Exists() {
+	if !hasOpenAIStyleUsageTokenFields(usageNode) {
 		return usage.Detail{}
 	}
 	return parseOpenAIStyleUsageNode(usageNode)
+}
+
+func hasOpenAIStyleUsageTokenFields(usageNode gjson.Result) bool {
+	if !usageNode.Exists() || !usageNode.IsObject() {
+		return false
+	}
+	return usageNode.Get("prompt_tokens").Exists() ||
+		usageNode.Get("input_tokens").Exists() ||
+		usageNode.Get("completion_tokens").Exists() ||
+		usageNode.Get("output_tokens").Exists() ||
+		usageNode.Get("total_tokens").Exists() ||
+		usageNode.Get("prompt_tokens_details.cached_tokens").Exists() ||
+		usageNode.Get("input_tokens_details.cached_tokens").Exists() ||
+		usageNode.Get("completion_tokens_details.reasoning_tokens").Exists() ||
+		usageNode.Get("output_tokens_details.reasoning_tokens").Exists()
 }
 
 func parseOpenAIStyleUsageNode(usageNode gjson.Result) usage.Detail {
@@ -307,21 +322,10 @@ func ParseOpenAIStreamUsage(line []byte) (usage.Detail, bool) {
 		return usage.Detail{}, false
 	}
 	usageNode := gjson.GetBytes(payload, "usage")
-	if !usageNode.Exists() {
+	if !hasOpenAIStyleUsageTokenFields(usageNode) {
 		return usage.Detail{}, false
 	}
-	detail := usage.Detail{
-		InputTokens:  usageNode.Get("prompt_tokens").Int(),
-		OutputTokens: usageNode.Get("completion_tokens").Int(),
-		TotalTokens:  usageNode.Get("total_tokens").Int(),
-	}
-	if cached := usageNode.Get("prompt_tokens_details.cached_tokens"); cached.Exists() {
-		detail.CachedTokens = cached.Int()
-	}
-	if reasoning := usageNode.Get("completion_tokens_details.reasoning_tokens"); reasoning.Exists() {
-		detail.ReasoningTokens = reasoning.Int()
-	}
-	return detail, true
+	return parseOpenAIStyleUsageNode(usageNode), true
 }
 
 func ParseClaudeUsage(data []byte) usage.Detail {
