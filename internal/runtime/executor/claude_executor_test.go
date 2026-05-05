@@ -712,6 +712,41 @@ func TestApplyClaudeToolPrefix_CustomTypedToolsArePrefixed(t *testing.T) {
 	}
 }
 
+func TestApplyClaudeToolPrefix_UntypedBashStaysCustom(t *testing.T) {
+	body := []byte(`{
+		"tools": [
+			{"name": "bash"}
+		],
+		"tool_choice": {"type": "tool", "name": "bash"},
+		"messages": [
+			{"role": "user", "content": [
+				{"type": "tool_use", "name": "bash", "id": "b1", "input": {}},
+				{"type": "tool_reference", "tool_name": "bash"},
+				{"type": "tool_result", "tool_use_id": "b1", "content": [
+					{"type": "tool_reference", "tool_name": "bash"}
+				]}
+			]}
+		]
+	}`)
+	out := applyClaudeToolPrefix(body, "proxy_")
+
+	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "proxy_bash" {
+		t.Fatalf("tools.0.name = %q, want %q", got, "proxy_bash")
+	}
+	if got := gjson.GetBytes(out, "tool_choice.name").String(); got != "proxy_bash" {
+		t.Fatalf("tool_choice.name = %q, want %q", got, "proxy_bash")
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.0.name").String(); got != "proxy_bash" {
+		t.Fatalf("messages.0.content.0.name = %q, want %q", got, "proxy_bash")
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.1.tool_name").String(); got != "proxy_bash" {
+		t.Fatalf("messages.0.content.1.tool_name = %q, want %q", got, "proxy_bash")
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.2.content.0.tool_name").String(); got != "proxy_bash" {
+		t.Fatalf("messages.0.content.2.content.0.tool_name = %q, want %q", got, "proxy_bash")
+	}
+}
+
 func TestApplyClaudeToolPrefix_KnownBuiltinInHistoryOnly(t *testing.T) {
 	body := []byte(`{
 		"tools": [
@@ -2366,5 +2401,50 @@ func TestRemapOAuthToolNames_BuiltinTypedToolsStayUntouched(t *testing.T) {
 	}
 	if got := gjson.GetBytes(out, "messages.0.content.2.content.0.tool_name").String(); got != "web_search" {
 		t.Fatalf("messages.0.content.2.content.0.tool_name = %q, want %q", got, "web_search")
+	}
+}
+
+func TestRemapOAuthToolNames_NewBuiltinTypedToolsStayUntouched(t *testing.T) {
+	tests := []struct {
+		name     string
+		toolType string
+		toolName string
+	}{
+		{name: "bash", toolType: "bash_20250124", toolName: "bash"},
+		{name: "memory", toolType: "memory_20250818", toolName: "memory"},
+		{name: "web fetch", toolType: "web_fetch_20260209", toolName: "web_fetch"},
+		{name: "tool search", toolType: "tool_search_tool_regex_20251119", toolName: "tool_search_tool_regex"},
+		{name: "advisor", toolType: "advisor_20260301", toolName: "advisor"},
+		{name: "mcp toolset", toolType: "mcp_toolset", toolName: "mcp_toolset"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := []byte(fmt.Sprintf(`{"tools":[{"type":%q,"name":%q}],"tool_choice":{"type":"tool","name":%q},"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"toolu_01","name":%q,"input":{}},{"type":"tool_reference","tool_name":%q},{"type":"tool_result","tool_use_id":"toolu_01","content":[{"type":"tool_reference","tool_name":%q}]}]}]}`,
+				tt.toolType, tt.toolName, tt.toolName, tt.toolName, tt.toolName, tt.toolName))
+
+			out, reverseMap := remapOAuthToolNames(body)
+			if len(reverseMap) != 0 {
+				t.Fatalf("reverseMap = %v, want empty map", reverseMap)
+			}
+			if got := gjson.GetBytes(out, "tools.0.name").String(); got != tt.toolName {
+				t.Fatalf("tools.0.name = %q, want %q", got, tt.toolName)
+			}
+			if got := gjson.GetBytes(out, "tools.0.type").String(); got != tt.toolType {
+				t.Fatalf("tools.0.type = %q, want %q", got, tt.toolType)
+			}
+			if got := gjson.GetBytes(out, "tool_choice.name").String(); got != tt.toolName {
+				t.Fatalf("tool_choice.name = %q, want %q", got, tt.toolName)
+			}
+			if got := gjson.GetBytes(out, "messages.0.content.0.name").String(); got != tt.toolName {
+				t.Fatalf("messages.0.content.0.name = %q, want %q", got, tt.toolName)
+			}
+			if got := gjson.GetBytes(out, "messages.0.content.1.tool_name").String(); got != tt.toolName {
+				t.Fatalf("messages.0.content.1.tool_name = %q, want %q", got, tt.toolName)
+			}
+			if got := gjson.GetBytes(out, "messages.0.content.2.content.0.tool_name").String(); got != tt.toolName {
+				t.Fatalf("messages.0.content.2.content.0.tool_name = %q, want %q", got, tt.toolName)
+			}
+		})
 	}
 }

@@ -13,6 +13,24 @@ var defaultClaudeBuiltinToolNames = []string{
 	"computer",
 }
 
+type claudeBuiltinToolTypeFamily struct {
+	exact     string
+	exactOnly bool
+}
+
+var defaultClaudeBuiltinToolTypeFamilies = []claudeBuiltinToolTypeFamily{
+	{exact: "web_search"},
+	{exact: "code_execution"},
+	{exact: "text_editor"},
+	{exact: "computer"},
+	{exact: "bash"},
+	{exact: "memory"},
+	{exact: "web_fetch"},
+	{exact: "tool_search_tool_regex"},
+	{exact: "advisor"},
+	{exact: "mcp_toolset", exactOnly: true},
+}
+
 func newClaudeBuiltinToolRegistry() map[string]bool {
 	registry := make(map[string]bool, len(defaultClaudeBuiltinToolNames))
 	for _, name := range defaultClaudeBuiltinToolNames {
@@ -26,8 +44,11 @@ func IsClaudeBuiltinToolType(toolType string) bool {
 	if toolType == "" {
 		return false
 	}
-	for _, builtinName := range defaultClaudeBuiltinToolNames {
-		if toolType == builtinName || strings.HasPrefix(toolType, builtinName+"_") {
+	for _, family := range defaultClaudeBuiltinToolTypeFamilies {
+		if toolType == family.exact {
+			return true
+		}
+		if !family.exactOnly && strings.HasPrefix(toolType, family.exact+"_") {
 			return true
 		}
 	}

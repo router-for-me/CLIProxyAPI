@@ -1098,6 +1098,7 @@ func restoreClaudeOAuthToolNamesFromStreamLine(line []byte, prefix string, prefi
 // regardless of what the client originally sent.
 func remapOAuthToolNames(body []byte) ([]byte, map[string]string) {
 	reverseMap := make(map[string]string, len(oauthToolRenameMap))
+	builtinTools := helps.AugmentClaudeBuiltinToolRegistry(body, map[string]bool{})
 	recordRename := func(original, renamed string) {
 		// Preserve the first-seen original name if the same upstream name is
 		// produced from multiple call sites; they all map back identically.
@@ -1168,9 +1169,11 @@ func remapOAuthToolNames(body []byte) ([]byte, map[string]string) {
 			// The chosen tool was removed from the tools array, so drop tool_choice to
 			// keep the payload internally consistent and fall back to normal auto tool use.
 			body, _ = sjson.DeleteBytes(body, "tool_choice")
-		} else if newName, ok := oauthToolRenameMap[tcName]; ok && newName != tcName {
-			body, _ = sjson.SetBytes(body, "tool_choice.name", newName)
-			recordRename(tcName, newName)
+		} else if !builtinTools[tcName] {
+			if newName, ok := oauthToolRenameMap[tcName]; ok && newName != tcName {
+				body, _ = sjson.SetBytes(body, "tool_choice.name", newName)
+				recordRename(tcName, newName)
+			}
 		}
 	}
 
@@ -1187,17 +1190,21 @@ func remapOAuthToolNames(body []byte) ([]byte, map[string]string) {
 				switch partType {
 				case "tool_use":
 					name := part.Get("name").String()
-					if newName, ok := oauthToolRenameMap[name]; ok && newName != name {
-						path := fmt.Sprintf("messages.%d.content.%d.name", msgIndex.Int(), contentIndex.Int())
-						body, _ = sjson.SetBytes(body, path, newName)
-						recordRename(name, newName)
+					if !builtinTools[name] {
+						if newName, ok := oauthToolRenameMap[name]; ok && newName != name {
+							path := fmt.Sprintf("messages.%d.content.%d.name", msgIndex.Int(), contentIndex.Int())
+							body, _ = sjson.SetBytes(body, path, newName)
+							recordRename(name, newName)
+						}
 					}
 				case "tool_reference":
 					toolName := part.Get("tool_name").String()
-					if newName, ok := oauthToolRenameMap[toolName]; ok && newName != toolName {
-						path := fmt.Sprintf("messages.%d.content.%d.tool_name", msgIndex.Int(), contentIndex.Int())
-						body, _ = sjson.SetBytes(body, path, newName)
-						recordRename(toolName, newName)
+					if !builtinTools[toolName] {
+						if newName, ok := oauthToolRenameMap[toolName]; ok && newName != toolName {
+							path := fmt.Sprintf("messages.%d.content.%d.tool_name", msgIndex.Int(), contentIndex.Int())
+							body, _ = sjson.SetBytes(body, path, newName)
+							recordRename(toolName, newName)
+						}
 					}
 				case "tool_result":
 					// Handle nested tool_reference blocks inside tool_result.content[]
@@ -1208,10 +1215,12 @@ func remapOAuthToolNames(body []byte) ([]byte, map[string]string) {
 						nestedContent.ForEach(func(nestedIndex, nestedPart gjson.Result) bool {
 							if nestedPart.Get("type").String() == "tool_reference" {
 								nestedToolName := nestedPart.Get("tool_name").String()
-								if newName, ok := oauthToolRenameMap[nestedToolName]; ok && newName != nestedToolName {
-									nestedPath := fmt.Sprintf("messages.%d.content.%d.content.%d.tool_name", msgIndex.Int(), contentIndex.Int(), nestedIndex.Int())
-									body, _ = sjson.SetBytes(body, nestedPath, newName)
-									recordRename(nestedToolName, newName)
+								if !builtinTools[nestedToolName] {
+									if newName, ok := oauthToolRenameMap[nestedToolName]; ok && newName != nestedToolName {
+										nestedPath := fmt.Sprintf("messages.%d.content.%d.content.%d.tool_name", msgIndex.Int(), contentIndex.Int(), nestedIndex.Int())
+										body, _ = sjson.SetBytes(body, nestedPath, newName)
+										recordRename(nestedToolName, newName)
+									}
 								}
 							}
 							return true
