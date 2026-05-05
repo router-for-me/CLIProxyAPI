@@ -2,6 +2,7 @@ package openai
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	"github.com/tidwall/gjson"
@@ -57,6 +59,71 @@ func TestImagesModelValidationAllowsGPTImage2WithOptionalPrefix(t *testing.T) {
 	}
 	if isSupportedImagesModel("gpt-5.4-mini") {
 		t.Fatal("expected gpt-5.4-mini to be rejected")
+	}
+}
+
+func TestCollectImagesFromResponsesStreamUsesCompletedOutputItemOnDisconnect(t *testing.T) {
+	data := make(chan []byte, 1)
+	errs := make(chan *interfaces.ErrorMessage)
+	close(errs)
+	data <- []byte(`data: {"type":"response.output_item.done","item":{"type":"image_generation_call","result":"aGVsbG8=","revised_prompt":"A concise prompt","output_format":"png","size":"1024x1024","background":"auto","quality":"high"}}` + "\n\n")
+	close(data)
+
+	out, errMsg := collectImagesFromResponsesStream(context.Background(), data, errs, "b64_json")
+	if errMsg != nil {
+		t.Fatalf("errMsg = %v, want nil", errMsg.Error)
+	}
+
+	if got := gjson.GetBytes(out, "data.0.b64_json").String(); got != "aGVsbG8=" {
+		t.Fatalf("b64_json = %q, want image result", got)
+	}
+	if got := gjson.GetBytes(out, "data.0.revised_prompt").String(); got != "A concise prompt" {
+		t.Fatalf("revised_prompt = %q, want recovered prompt", got)
+	}
+	if got := gjson.GetBytes(out, "output_format").String(); got != "png" {
+		t.Fatalf("output_format = %q, want png", got)
+	}
+	if got := gjson.GetBytes(out, "size").String(); got != "1024x1024" {
+		t.Fatalf("size = %q, want 1024x1024", got)
+	}
+	if got := gjson.GetBytes(out, "quality").String(); got != "high" {
+		t.Fatalf("quality = %q, want high", got)
+	}
+}
+
+func TestCollectImagesFromResponsesWithRetryRetriesDisconnectedStream(t *testing.T) {
+	attempts := 0
+
+	out, upstreamHeaders, errMsg := collectImagesFromResponsesWithRetry(context.Background(), 2, "b64_json", func() (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage) {
+		attempts++
+		data := make(chan []byte, 1)
+		errs := make(chan *interfaces.ErrorMessage)
+		close(errs)
+		headers := http.Header{}
+
+		if attempts == 1 {
+			headers.Set("X-Attempt", "first")
+			close(data)
+			return data, headers, errs
+		}
+
+		headers.Set("X-Attempt", "second")
+		data <- []byte(`data: {"type":"response.completed","response":{"created_at":123,"output":[{"type":"image_generation_call","result":"Zm9v","output_format":"png"}]}}` + "\n\n")
+		close(data)
+		return data, headers, errs
+	})
+
+	if errMsg != nil {
+		t.Fatalf("errMsg = %v, want nil", errMsg.Error)
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want 2", attempts)
+	}
+	if got := upstreamHeaders.Get("X-Attempt"); got != "second" {
+		t.Fatalf("upstream header = %q, want second attempt header", got)
+	}
+	if got := gjson.GetBytes(out, "data.0.b64_json").String(); got != "Zm9v" {
+		t.Fatalf("b64_json = %q, want retry result", got)
 	}
 }
 
