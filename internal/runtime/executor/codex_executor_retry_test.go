@@ -1,11 +1,13 @@
 package executor
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -104,6 +106,14 @@ func TestCodexStreamStatusErrTreatsCapacityAsRetryableRateLimit(t *testing.T) {
 	}
 }
 
+func TestCodexStreamStatusErrIgnoresCapacityTextInOutput(t *testing.T) {
+	event := []byte(`{"type":"response.output_text.delta","delta":"Selected model is at capacity. Please try a different model."}`)
+
+	if err, ok := codexStreamStatusErr(event); ok {
+		t.Fatalf("expected normal output text to pass through, got %v", err)
+	}
+}
+
 func TestCodexExecutorExecuteStream_ReturnsErrorForStreamCapacityEvent(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -147,6 +157,176 @@ func TestCodexExecutorExecuteStream_ReturnsErrorForStreamCapacityEvent(t *testin
 	}
 	if statusErr.RetryAfter() == nil {
 		t.Fatalf("expected retryAfter")
+	}
+}
+
+func TestCodexExecutorExecuteStream_BuffersBootstrapBeforeCapacityEvent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("event: response.created\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_123\",\"created_at\":1700000000,\"model\":\"gpt-5.5\"}}\n\n"))
+		_, _ = w.Write([]byte("event: response.failed\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"Selected model is at capacity. Please try a different model.\"}}}\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL,
+		"api_key":  "test",
+	}}
+
+	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.5",
+		Payload: []byte(`{"model":"gpt-5.5","input":"Say ok"}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+		Stream:       true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+
+	chunk, ok := <-result.Chunks
+	if !ok {
+		t.Fatalf("expected error chunk")
+	}
+	if len(chunk.Payload) > 0 {
+		t.Fatalf("expected bootstrap payload to be buffered, got %q", string(chunk.Payload))
+	}
+	if chunk.Err == nil {
+		t.Fatalf("expected capacity error chunk")
+	}
+	statusErr, ok := chunk.Err.(interface {
+		StatusCode() int
+		RetryAfter() *time.Duration
+	})
+	if !ok {
+		t.Fatalf("stream error does not expose status/retryAfter: %T", chunk.Err)
+	}
+	if got := statusErr.StatusCode(); got != http.StatusTooManyRequests {
+		t.Fatalf("status code = %d, want %d", got, http.StatusTooManyRequests)
+	}
+	if statusErr.RetryAfter() == nil {
+		t.Fatalf("expected retryAfter")
+	}
+}
+
+func TestCodexExecutorExecuteStream_DoesNotBufferContentEventLine(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("event: response.output_text.delta\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL,
+		"api_key":  "test",
+	}}
+
+	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.5",
+		Payload: []byte(`{"model":"gpt-5.5","input":"Say ok"}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+		Stream:       true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+
+	chunk, ok := <-result.Chunks
+	if !ok {
+		t.Fatalf("expected content event chunk")
+	}
+	if chunk.Err != nil {
+		t.Fatalf("expected payload chunk, got error %v", chunk.Err)
+	}
+	if len(chunk.Payload) == 0 {
+		t.Fatalf("expected non-empty payload")
+	}
+}
+
+func TestCodexExecutorExecuteStream_PreservesBufferedBootstrapDelimiter(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("event: response.created\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_123\",\"created_at\":1700000000,\"model\":\"gpt-5.5\"}}\n\n"))
+		_, _ = w.Write([]byte("event: response.output_text.delta\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL,
+		"api_key":  "test",
+	}}
+
+	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.5",
+		Payload: []byte(`{"model":"gpt-5.5","input":"Say ok"}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+		Stream:       true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+
+	var payloads [][]byte
+	for i := 0; i < 4; i++ {
+		chunk, ok := <-result.Chunks
+		if !ok {
+			t.Fatalf("expected at least 4 chunks, got %d", len(payloads))
+		}
+		if chunk.Err != nil {
+			t.Fatalf("expected payload chunk, got error %v", chunk.Err)
+		}
+		payloads = append(payloads, chunk.Payload)
+	}
+	joined := string(bytes.Join(payloads, nil))
+	if !strings.Contains(joined, "gpt-5.5\"}}\n\nevent: response.output_text.delta") {
+		t.Fatalf("buffered bootstrap delimiter missing from payloads: %q", joined)
+	}
+}
+
+func TestCodexExecutorExecuteStream_DoesNotDropNonCapacityFailureData(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("event: response.failed\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"upstream failed\"}}}\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL,
+		"api_key":  "test",
+	}}
+
+	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.5",
+		Payload: []byte(`{"model":"gpt-5.5","input":"Say ok"}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+		Stream:       true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+
+	chunk, ok := <-result.Chunks
+	if !ok {
+		t.Fatalf("expected failure payload chunk")
+	}
+	if chunk.Err != nil {
+		t.Fatalf("expected payload chunk, got error %v", chunk.Err)
+	}
+	if len(chunk.Payload) == 0 {
+		t.Fatalf("expected non-empty payload")
 	}
 }
 
