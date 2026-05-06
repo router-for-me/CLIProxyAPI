@@ -85,3 +85,40 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_SplitFunctionCalls
 		t.Fatalf("messages.2.tool_calls.0.id = %q, want %q", got, "call_b")
 	}
 }
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_DefersMessageUntilToolOutput(t *testing.T) {
+	raw := []byte(`{
+		"input": [
+			{"type":"function_call","call_id":"call_x","name":"exec_command","arguments":"{\"cmd\":\"echo hi\"}"},
+			{"type":"message","role":"user","content":"Approved command prefix saved"},
+			{"type":"function_call_output","call_id":"call_x","output":"ok"},
+			{"type":"message","role":"user","content":"next"}
+		]
+	}`)
+	t.Logf("input json:\n%s", prettyJSONForTest(raw))
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("kimi-k2.6", raw, true)
+	t.Logf("output json:\n%s", prettyJSONForTest(out))
+
+	if got := len(gjson.GetBytes(out, "messages").Array()); got != 4 {
+		t.Fatalf("messages count = %d, want %d", got, 4)
+	}
+	if got := gjson.GetBytes(out, "messages.0.role").String(); got != "assistant" {
+		t.Fatalf("messages.0.role = %q, want %q", got, "assistant")
+	}
+	if got := gjson.GetBytes(out, "messages.1.role").String(); got != "tool" {
+		t.Fatalf("messages.1.role = %q, want %q", got, "tool")
+	}
+	if got := gjson.GetBytes(out, "messages.1.tool_call_id").String(); got != "call_x" {
+		t.Fatalf("messages.1.tool_call_id = %q, want %q", got, "call_x")
+	}
+	if got := gjson.GetBytes(out, "messages.2.role").String(); got != "user" {
+		t.Fatalf("messages.2.role = %q, want %q", got, "user")
+	}
+	if got := gjson.GetBytes(out, "messages.2.content").String(); got != "Approved command prefix saved" {
+		t.Fatalf("messages.2.content = %q, want %q", got, "Approved command prefix saved")
+	}
+	if got := gjson.GetBytes(out, "messages.3.content").String(); got != "next" {
+		t.Fatalf("messages.3.content = %q, want %q", got, "next")
+	}
+}
