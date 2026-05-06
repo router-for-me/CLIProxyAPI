@@ -315,6 +315,13 @@ func resolveReleaseURL(repo string) string {
 	parsed.Path = strings.TrimSuffix(parsed.Path, "/")
 
 	if host == "api.github.com" {
+		if isGitHubReleaseAPIURLPath(parsed.Path) {
+			return parsed.String()
+		}
+		if isGitHubReleasesAPIURLPath(parsed.Path) {
+			parsed.Path = parsed.Path + "/latest"
+			return parsed.String()
+		}
 		if !strings.HasSuffix(strings.ToLower(parsed.Path), "/releases/latest") {
 			parsed.Path = parsed.Path + "/releases/latest"
 		}
@@ -330,6 +337,30 @@ func resolveReleaseURL(repo string) string {
 	}
 
 	return defaultManagementReleaseURL
+}
+
+func isGitHubReleasesAPIURLPath(path string) bool {
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	return len(parts) == 4 &&
+		strings.EqualFold(parts[0], "repos") &&
+		parts[1] != "" &&
+		parts[2] != "" &&
+		strings.EqualFold(parts[3], "releases")
+}
+
+func isGitHubReleaseAPIURLPath(path string) bool {
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) < 5 ||
+		!strings.EqualFold(parts[0], "repos") ||
+		parts[1] == "" ||
+		parts[2] == "" ||
+		!strings.EqualFold(parts[3], "releases") {
+		return false
+	}
+	if len(parts) == 5 {
+		return parts[4] != ""
+	}
+	return len(parts) == 6 && strings.EqualFold(parts[4], "tags") && parts[5] != ""
 }
 
 func fetchLatestAsset(ctx context.Context, client *http.Client, releaseURL string) (*releaseAsset, string, error) {
