@@ -1,11 +1,19 @@
 package executor
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"testing"
 	"time"
+
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/translator"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 )
 
 func TestParseCodexRetryAfter(t *testing.T) {
@@ -69,8 +77,76 @@ func TestNewCodexStatusErrTreatsCapacityAsRetryableRateLimit(t *testing.T) {
 	if got := err.StatusCode(); got != http.StatusTooManyRequests {
 		t.Fatalf("status code = %d, want %d", got, http.StatusTooManyRequests)
 	}
-	if err.RetryAfter() != nil {
-		t.Fatalf("expected nil explicit retryAfter for capacity fallback, got %v", *err.RetryAfter())
+	if err.RetryAfter() == nil {
+		t.Fatalf("expected retryAfter for capacity fallback")
+	}
+	if got := *err.RetryAfter(); got != codexModelCapacityRetryAfter {
+		t.Fatalf("retryAfter = %v, want %v", got, codexModelCapacityRetryAfter)
+	}
+}
+
+func TestCodexStreamStatusErrTreatsCapacityAsRetryableRateLimit(t *testing.T) {
+	event := []byte(`{"type":"response.failed","response":{"error":{"message":"Selected model is at capacity. Please try a different model."}}}`)
+
+	err, ok := codexStreamStatusErr(event)
+
+	if !ok {
+		t.Fatalf("expected stream capacity error")
+	}
+	if got := err.StatusCode(); got != http.StatusTooManyRequests {
+		t.Fatalf("status code = %d, want %d", got, http.StatusTooManyRequests)
+	}
+	if err.RetryAfter() == nil {
+		t.Fatalf("expected retryAfter for capacity fallback")
+	}
+	if got := *err.RetryAfter(); got != codexModelCapacityRetryAfter {
+		t.Fatalf("retryAfter = %v, want %v", got, codexModelCapacityRetryAfter)
+	}
+}
+
+func TestCodexExecutorExecuteStream_ReturnsErrorForStreamCapacityEvent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"Selected model is at capacity. Please try a different model.\"}}}\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL,
+		"api_key":  "test",
+	}}
+
+	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.5",
+		Payload: []byte(`{"model":"gpt-5.5","input":"Say ok"}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+		Stream:       true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+
+	chunk, ok := <-result.Chunks
+	if !ok {
+		t.Fatalf("expected error chunk")
+	}
+	if chunk.Err == nil {
+		t.Fatalf("expected error chunk, got payload %q", string(chunk.Payload))
+	}
+	statusErr, ok := chunk.Err.(interface {
+		StatusCode() int
+		RetryAfter() *time.Duration
+	})
+	if !ok {
+		t.Fatalf("stream error does not expose status/retryAfter: %T", chunk.Err)
+	}
+	if got := statusErr.StatusCode(); got != http.StatusTooManyRequests {
+		t.Fatalf("status code = %d, want %d", got, http.StatusTooManyRequests)
+	}
+	if statusErr.RetryAfter() == nil {
+		t.Fatalf("expected retryAfter")
 	}
 }
 

@@ -37,6 +37,8 @@ const (
 
 var dataTag = []byte("data:")
 
+const codexModelCapacityRetryAfter = time.Second
+
 // Streamed Codex responses may emit response.output_item.done events while leaving
 // response.completed.response.output empty. Keep the stream path aligned with the
 // already-patched non-stream path by reconstructing response.output from those items.
@@ -500,6 +502,15 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 
 			if bytes.HasPrefix(line, dataTag) {
 				data := bytes.TrimSpace(line[5:])
+				if errStream, ok := codexStreamStatusErr(data); ok {
+					helps.RecordAPIResponseError(ctx, e.cfg, errStream)
+					reporter.PublishFailure(ctx)
+					select {
+					case out <- cliproxyexecutor.StreamChunk{Err: errStream}:
+					case <-ctx.Done():
+					}
+					return
+				}
 				switch gjson.GetBytes(data, "type").String() {
 				case "response.output_item.done":
 					collectCodexOutputItemDone(data, outputItemsByIndex, &outputItemsFallback)
@@ -825,11 +836,17 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 
 func newCodexStatusErr(statusCode int, body []byte) statusErr {
 	errCode := statusCode
-	if isCodexModelCapacityError(body) {
+	isCapacityError := isCodexModelCapacityError(body)
+	if isCapacityError {
 		errCode = http.StatusTooManyRequests
 	}
 	body = classifyCodexStatusError(errCode, body)
 	err := statusErr{code: errCode, msg: string(body)}
+	if isCapacityError {
+		retryAfter := codexModelCapacityRetryAfter
+		err.retryAfter = &retryAfter
+		return err
+	}
 	if retryAfter := parseCodexRetryAfter(errCode, body, time.Now()); retryAfter != nil {
 		err.retryAfter = retryAfter
 	}
@@ -970,6 +987,51 @@ func isCodexModelCapacityError(errorBody []byte) bool {
 		}
 	}
 	return false
+}
+
+func codexStreamStatusErr(eventData []byte) (statusErr, bool) {
+	if !isCodexModelCapacityError(eventData) {
+		return statusErr{}, false
+	}
+	return newCodexStatusErr(http.StatusBadRequest, codexStreamErrorBody(eventData)), true
+}
+
+func codexStreamErrorBody(eventData []byte) []byte {
+	candidates := []string{
+		"error",
+		"response.error",
+	}
+	for _, path := range candidates {
+		result := gjson.GetBytes(eventData, path)
+		if !result.Exists() {
+			continue
+		}
+		if result.Type == gjson.JSON {
+			body := []byte(`{"error":` + result.Raw + `}`)
+			if gjson.GetBytes(body, "error.message").String() != "" {
+				return body
+			}
+			continue
+		}
+		if msg := strings.TrimSpace(result.String()); msg != "" {
+			body := []byte(`{"error":{}}`)
+			body, _ = sjson.SetBytes(body, "error.message", msg)
+			return body
+		}
+	}
+	messagePaths := []string{
+		"error.message",
+		"response.error.message",
+		"message",
+	}
+	for _, path := range messagePaths {
+		if msg := strings.TrimSpace(gjson.GetBytes(eventData, path).String()); msg != "" {
+			body := []byte(`{"error":{}}`)
+			body, _ = sjson.SetBytes(body, "error.message", msg)
+			return body
+		}
+	}
+	return eventData
 }
 
 func parseCodexRetryAfter(statusCode int, errorBody []byte, now time.Time) *time.Duration {
