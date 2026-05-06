@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	"github.com/tidwall/gjson"
 )
 
@@ -85,6 +86,81 @@ func TestConvertClaudeRequestToCodex_SystemMessageScenarios(t *testing.T) {
 				if gotText := content[i].Get("text").String(); gotText != wantText {
 					t.Fatalf("content[%d] text = %q, want %q", i, gotText, wantText)
 				}
+			}
+		})
+	}
+}
+
+func TestConvertClaudeRequestToCodex_GPT5AnthropicAgentInstructions(t *testing.T) {
+	expected := strings.TrimSpace(misc.GPT5AnthropicAgentInstructions)
+	if expected == "" {
+		t.Fatal("expected embedded GPT-5 Anthropic agent instructions")
+	}
+
+	tests := []struct {
+		name       string
+		modelName  string
+		systemJSON string
+		want       bool
+	}{
+		{
+			name:      "Claude Code identity on GPT-5.5",
+			modelName: "gpt-5.5",
+			systemJSON: `[
+				{"type":"text","text":"You are Claude Code, Anthropic's official CLI for Claude."}
+			]`,
+			want: true,
+		},
+		{
+			name:      "Claude Agent SDK identity on GPT-5.5",
+			modelName: "gpt-5.5",
+			systemJSON: `[
+				{"type":"text","text":"You are a Claude agent, built on Anthropic's Claude Agent SDK."}
+			]`,
+			want: true,
+		},
+		{
+			name:      "Claude billing header on GPT-5 Codex",
+			modelName: "gpt-5-codex",
+			systemJSON: `[
+				{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.129.737; cc_entrypoint=sdk-py; cch=42991;"}
+			]`,
+			want: true,
+		},
+		{
+			name:      "Claude Code identity on non GPT-5 model",
+			modelName: "gpt-4o",
+			systemJSON: `[
+				{"type":"text","text":"You are Claude Code, Anthropic's official CLI for Claude."}
+			]`,
+			want: false,
+		},
+		{
+			name:       "Plain Claude request on GPT-5.5",
+			modelName:  "gpt-5.5",
+			systemJSON: `"Be helpful"`,
+			want:       false,
+		},
+		{
+			name:      "Unknown billing entrypoint on GPT-5.5",
+			modelName: "gpt-5.5",
+			systemJSON: `[
+				{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.129.737; cc_entrypoint=api; cch=42991;"}
+			]`,
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			inputJSON := `{"model":"claude-opus-4-6","system":` + tt.systemJSON + `,"messages":[{"role":"user","content":"hello"}]}`
+			result := ConvertClaudeRequestToCodex(tt.modelName, []byte(inputJSON), false)
+			got := gjson.GetBytes(result, "instructions").String()
+			if tt.want && got != expected {
+				t.Fatalf("instructions = %q, want embedded instructions %q. Output: %s", got, expected, string(result))
+			}
+			if !tt.want && got != "" {
+				t.Fatalf("instructions = %q, want empty. Output: %s", got, string(result))
 			}
 		})
 	}
