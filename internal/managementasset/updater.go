@@ -315,18 +315,43 @@ func resolveReleaseURL(repo string) string {
 	parsed.Path = strings.TrimSuffix(parsed.Path, "/")
 
 	if host == "api.github.com" {
-		if isGitHubReleaseAPIURLPath(parsed.Path) {
-			return parsed.String()
+		parts := strings.Split(strings.Trim(parsed.Path, "/"), "/")
+		if len(parts) < 3 ||
+			!strings.EqualFold(parts[0], "repos") ||
+			parts[1] == "" ||
+			parts[2] == "" {
+			return defaultManagementReleaseURL
 		}
-		if isGitHubReleasesAPIURLPath(parsed.Path) {
-			parsed.Path = parsed.Path + "/latest"
-			return parsed.String()
-		}
-		if repoPath, ok := gitHubAPIRepoPath(parsed.Path); ok {
+
+		repoPath := fmt.Sprintf("/repos/%s/%s", parts[1], parts[2])
+		if len(parts) == 4 && strings.EqualFold(parts[3], "releases") {
 			parsed.Path = repoPath + "/releases/latest"
 			return parsed.String()
 		}
-		return defaultManagementReleaseURL
+		if len(parts) == 5 && strings.EqualFold(parts[3], "releases") {
+			isReleaseID := parts[4] != ""
+			for _, char := range parts[4] {
+				if char < '0' || char > '9' {
+					isReleaseID = false
+					break
+				}
+			}
+			if strings.EqualFold(parts[4], "latest") || isReleaseID {
+				return parsed.String()
+			}
+
+			parsed.Path = repoPath + "/releases/latest"
+			return parsed.String()
+		}
+		if len(parts) == 6 &&
+			strings.EqualFold(parts[3], "releases") &&
+			strings.EqualFold(parts[4], "tags") &&
+			parts[5] != "" {
+			return parsed.String()
+		}
+
+		parsed.Path = repoPath + "/releases/latest"
+		return parsed.String()
 	}
 
 	if host == "github.com" {
@@ -338,53 +363,6 @@ func resolveReleaseURL(repo string) string {
 	}
 
 	return defaultManagementReleaseURL
-}
-
-func isGitHubReleasesAPIURLPath(path string) bool {
-	parts := strings.Split(strings.Trim(path, "/"), "/")
-	return len(parts) == 4 &&
-		strings.EqualFold(parts[0], "repos") &&
-		parts[1] != "" &&
-		parts[2] != "" &&
-		strings.EqualFold(parts[3], "releases")
-}
-
-func isGitHubReleaseAPIURLPath(path string) bool {
-	parts := strings.Split(strings.Trim(path, "/"), "/")
-	if len(parts) < 5 ||
-		!strings.EqualFold(parts[0], "repos") ||
-		parts[1] == "" ||
-		parts[2] == "" ||
-		!strings.EqualFold(parts[3], "releases") {
-		return false
-	}
-	if len(parts) == 5 {
-		return strings.EqualFold(parts[4], "latest") || isGitHubReleaseIDPathSegment(parts[4])
-	}
-	return len(parts) == 6 && strings.EqualFold(parts[4], "tags") && parts[5] != ""
-}
-
-func gitHubAPIRepoPath(path string) (string, bool) {
-	parts := strings.Split(strings.Trim(path, "/"), "/")
-	if len(parts) < 3 ||
-		!strings.EqualFold(parts[0], "repos") ||
-		parts[1] == "" ||
-		parts[2] == "" {
-		return "", false
-	}
-	return fmt.Sprintf("/repos/%s/%s", parts[1], parts[2]), true
-}
-
-func isGitHubReleaseIDPathSegment(segment string) bool {
-	if segment == "" {
-		return false
-	}
-	for _, char := range segment {
-		if char < '0' || char > '9' {
-			return false
-		}
-	}
-	return true
 }
 
 func fetchLatestAsset(ctx context.Context, client *http.Client, releaseURL string) (*releaseAsset, string, error) {
