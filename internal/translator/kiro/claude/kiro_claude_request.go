@@ -194,6 +194,7 @@ func BuildKiroPayload(claudeBody []byte, modelID, profileArn, origin string, isA
 	// Check for thinking mode using the comprehensive IsThinkingEnabledWithHeaders function
 	// This supports Claude API format, OpenAI reasoning_effort, AMP/Cursor format, and Anthropic-Beta header
 	thinkingEnabled := IsThinkingEnabledWithHeaders(claudeBody, headers)
+	_, clientBudget, hasClientBudget := checkThinkingMode(claudeBody)
 
 	// Strip Claude-specific fields not supported by Kiro API.
 	// Must be done AFTER thinking detection above (IsThinkingEnabledWithHeaders reads "thinking").
@@ -244,8 +245,12 @@ func BuildKiroPayload(claudeBody []byte, modelID, profileArn, origin string, isA
 	// rather than inline <thinking> tags in assistantResponseEvent.
 	// We cap max_thinking_length to reserve space for tool outputs and prevent truncation.
 	if thinkingEnabled {
-		thinkingHint := `<thinking_mode>enabled</thinking_mode>
-<max_thinking_length>16000</max_thinking_length>`
+		budget := 16000
+		if hasClientBudget && clientBudget > 0 {
+			budget = int(clientBudget)
+		}
+		thinkingHint := fmt.Sprintf(`<thinking_mode>enabled</thinking_mode>
+<max_thinking_length>%d</max_thinking_length>`, budget)
 		if systemPrompt != "" {
 			systemPrompt = thinkingHint + "\n\n" + systemPrompt
 		} else {
@@ -389,10 +394,11 @@ func extractSystemPrompt(claudeBody []byte) string {
 	return systemField.String()
 }
 
-// checkThinkingMode checks if thinking mode is enabled in the Claude request
-func checkThinkingMode(claudeBody []byte) (bool, int64) {
+// checkThinkingMode checks if thinking mode is enabled in the Claude request.
+func checkThinkingMode(claudeBody []byte) (bool, int64, bool) {
 	thinkingEnabled := false
 	var budgetTokens int64 = 24000
+	hasBudgetTokens := false
 
 	thinkingField := gjson.GetBytes(claudeBody, "thinking")
 	if thinkingField.Exists() {
@@ -401,6 +407,7 @@ func checkThinkingMode(claudeBody []byte) (bool, int64) {
 		case "enabled":
 			thinkingEnabled = true
 			if bt := thinkingField.Get("budget_tokens"); bt.Exists() {
+				hasBudgetTokens = true
 				budgetTokens = bt.Int()
 				if budgetTokens <= 0 {
 					thinkingEnabled = false
@@ -424,7 +431,7 @@ func checkThinkingMode(claudeBody []byte) (bool, int64) {
 		}
 	}
 
-	return thinkingEnabled, budgetTokens
+	return thinkingEnabled, budgetTokens, hasBudgetTokens
 }
 
 // hasThinkingTagInBody checks if the request body already contains thinking configuration tags.
@@ -478,7 +485,7 @@ func IsThinkingEnabledWithHeaders(body []byte, headers http.Header) bool {
 	}
 
 	// Check Claude API format first (thinking.type = "enabled")
-	enabled, _ := checkThinkingMode(body)
+	enabled, _, _ := checkThinkingMode(body)
 	if enabled {
 		log.Debugf("kiro: IsThinkingEnabled returning true (Claude API format)")
 		return true
