@@ -49,6 +49,11 @@ func TestResolveReleaseURL(t *testing.T) {
 			want: "https://api.github.com/repos/example/panel/releases/tags/v1.8.0",
 		},
 		{
+			name: "api incomplete release tag URL resolves to latest release API",
+			repo: "https://api.github.com/repos/example/panel/releases/tags",
+			want: "https://api.github.com/repos/example/panel/releases/latest",
+		},
+		{
 			name: "invalid URL uses default",
 			repo: "not a url",
 			want: defaultManagementReleaseURL,
