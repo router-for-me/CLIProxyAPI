@@ -160,11 +160,9 @@ func TestCodexExecutorExecuteStream_ReturnsErrorForStreamCapacityEvent(t *testin
 	}
 }
 
-func TestCodexExecutorExecuteStream_BuffersBootstrapBeforeCapacityEvent(t *testing.T) {
+func TestCodexExecutorExecuteStream_BuffersTerminalEventBeforeCapacityError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte("event: response.created\n"))
-		_, _ = w.Write([]byte("data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_123\",\"created_at\":1700000000,\"model\":\"gpt-5.5\"}}\n\n"))
 		_, _ = w.Write([]byte("event: response.failed\n"))
 		_, _ = w.Write([]byte("data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"Selected model is at capacity. Please try a different model.\"}}}\n\n"))
 	}))
@@ -189,10 +187,10 @@ func TestCodexExecutorExecuteStream_BuffersBootstrapBeforeCapacityEvent(t *testi
 
 	chunk, ok := <-result.Chunks
 	if !ok {
-		t.Fatalf("expected error chunk")
+		t.Fatalf("expected capacity error chunk")
 	}
 	if len(chunk.Payload) > 0 {
-		t.Fatalf("expected bootstrap payload to be buffered, got %q", string(chunk.Payload))
+		t.Fatalf("expected no payload before capacity error, got %q", string(chunk.Payload))
 	}
 	if chunk.Err == nil {
 		t.Fatalf("expected capacity error chunk")
@@ -256,6 +254,8 @@ func TestCodexExecutorExecuteStream_PreservesBufferedBootstrapDelimiter(t *testi
 		_, _ = w.Write([]byte("data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_123\",\"created_at\":1700000000,\"model\":\"gpt-5.5\"}}\n\n"))
 		_, _ = w.Write([]byte("event: response.output_text.delta\n"))
 		_, _ = w.Write([]byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n"))
+		_, _ = w.Write([]byte("event: response.completed\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_123\",\"output\":[]}}\n\n"))
 	}))
 	defer server.Close()
 
@@ -277,11 +277,7 @@ func TestCodexExecutorExecuteStream_PreservesBufferedBootstrapDelimiter(t *testi
 	}
 
 	var payloads [][]byte
-	for i := 0; i < 4; i++ {
-		chunk, ok := <-result.Chunks
-		if !ok {
-			t.Fatalf("expected at least 4 chunks, got %d", len(payloads))
-		}
+	for chunk := range result.Chunks {
 		if chunk.Err != nil {
 			t.Fatalf("expected payload chunk, got error %v", chunk.Err)
 		}
@@ -293,7 +289,7 @@ func TestCodexExecutorExecuteStream_PreservesBufferedBootstrapDelimiter(t *testi
 	}
 }
 
-func TestCodexExecutorExecuteStream_DoesNotDropNonCapacityFailureData(t *testing.T) {
+func TestCodexExecutorExecuteStream_ReturnsErrorForNonCapacityFailureEvent(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte("event: response.failed\n"))
@@ -320,13 +316,263 @@ func TestCodexExecutorExecuteStream_DoesNotDropNonCapacityFailureData(t *testing
 
 	chunk, ok := <-result.Chunks
 	if !ok {
-		t.Fatalf("expected failure payload chunk")
+		t.Fatalf("expected failure error chunk")
 	}
-	if chunk.Err != nil {
-		t.Fatalf("expected payload chunk, got error %v", chunk.Err)
+	if len(chunk.Payload) > 0 {
+		t.Fatalf("expected no payload before failure error, got %q", string(chunk.Payload))
 	}
-	if len(chunk.Payload) == 0 {
-		t.Fatalf("expected non-empty payload")
+	if chunk.Err == nil {
+		t.Fatalf("expected failure error chunk")
+	}
+	if got := statusCodeFromCodexTestError(chunk.Err); got != http.StatusRequestTimeout {
+		t.Fatalf("status code = %d, want %d", got, http.StatusRequestTimeout)
+	}
+}
+
+func TestCodexExecutorExecuteStream_PreservesInvalidRequestFailureStatus(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("event: response.failed\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"context length exceeded\",\"type\":\"invalid_request_error\",\"code\":\"context_length_exceeded\"}}}\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL,
+		"api_key":  "test",
+	}}
+
+	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.5",
+		Payload: []byte(`{"model":"gpt-5.5","input":"Say ok"}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+		Stream:       true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+
+	chunk, ok := <-result.Chunks
+	if !ok {
+		t.Fatalf("expected failure error chunk")
+	}
+	if len(chunk.Payload) > 0 {
+		t.Fatalf("expected no payload before failure error, got %q", string(chunk.Payload))
+	}
+	if chunk.Err == nil {
+		t.Fatalf("expected failure error chunk")
+	}
+	if got := statusCodeFromCodexTestError(chunk.Err); got != http.StatusBadRequest {
+		t.Fatalf("status code = %d, want %d", got, http.StatusBadRequest)
+	}
+	if !strings.Contains(chunk.Err.Error(), "context_too_large") {
+		t.Fatalf("expected classified context error, got %v", chunk.Err)
+	}
+}
+
+func TestCodexExecutorExecuteStream_ReturnsMissingCompletedOnBootstrapOnlyEOF(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("event: response.created\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_123\",\"created_at\":1700000000,\"model\":\"gpt-5.5\"}}\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL,
+		"api_key":  "test",
+	}}
+
+	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.5",
+		Payload: []byte(`{"model":"gpt-5.5","input":"Say ok"}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+		Stream:       true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+
+	var gotPayload bool
+	var gotErr error
+	for chunk := range result.Chunks {
+		if len(chunk.Payload) > 0 {
+			gotPayload = true
+		}
+		if chunk.Err != nil {
+			gotErr = chunk.Err
+		}
+	}
+	if gotPayload {
+		t.Fatalf("expected bootstrap payload to be buffered and dropped before missing-completed error")
+	}
+	if gotErr == nil {
+		t.Fatalf("expected missing completed error")
+	}
+	if got := statusCodeFromCodexTestError(gotErr); got != http.StatusRequestTimeout {
+		t.Fatalf("status code = %d, want %d", got, http.StatusRequestTimeout)
+	}
+}
+
+func TestCodexExecutorExecuteStream_DropsBootstrapEventLineOnEOF(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("event: response.created\n"))
+	}))
+	defer server.Close()
+
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL,
+		"api_key":  "test",
+	}}
+
+	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.5",
+		Payload: []byte(`{"model":"gpt-5.5","input":"Say ok"}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+		Stream:       true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+
+	var gotPayload []byte
+	var gotErr error
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			gotErr = chunk.Err
+			continue
+		}
+		gotPayload = append(gotPayload, chunk.Payload...)
+	}
+	if len(gotPayload) > 0 {
+		t.Fatalf("expected no payload before missing-completed error, got %q", string(gotPayload))
+	}
+	if gotErr == nil {
+		t.Fatalf("expected missing completed error")
+	}
+	if got := statusCodeFromCodexTestError(gotErr); got != http.StatusRequestTimeout {
+		t.Fatalf("status code = %d, want %d", got, http.StatusRequestTimeout)
+	}
+}
+
+func TestCodexExecutorExecuteStream_DoesNotAppendMissingCompletedAfterIncomplete(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("event: response.incomplete\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.incomplete\",\"response\":{\"id\":\"resp_123\",\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"}}}\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL,
+		"api_key":  "test",
+	}}
+
+	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.5",
+		Payload: []byte(`{"model":"gpt-5.5","input":"Say ok"}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+		Stream:       true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+
+	var gotPayload bool
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("unexpected stream error: %v", chunk.Err)
+		}
+		if len(chunk.Payload) > 0 {
+			gotPayload = true
+		}
+	}
+	if !gotPayload {
+		t.Fatalf("expected incomplete payload to be forwarded")
+	}
+}
+
+func TestCodexExecutorExecute_TreatsResponseFailedCapacityAsRetryableRateLimit(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("event: response.created\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_123\",\"created_at\":1700000000,\"model\":\"gpt-5.5\"}}\n\n"))
+		_, _ = w.Write([]byte("event: response.failed\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"Selected model is at capacity. Please try a different model.\"}}}\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL,
+		"api_key":  "test",
+	}}
+
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.5",
+		Payload: []byte(`{"model":"gpt-5.5","input":"Say ok"}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+	})
+	if err == nil {
+		t.Fatal("expected execute error")
+	}
+
+	statusErr, ok := err.(interface {
+		StatusCode() int
+		RetryAfter() *time.Duration
+	})
+	if !ok {
+		t.Fatalf("execute error does not expose status/retryAfter: %T", err)
+	}
+	if got := statusErr.StatusCode(); got != http.StatusTooManyRequests {
+		t.Fatalf("status code = %d, want %d", got, http.StatusTooManyRequests)
+	}
+	if statusErr.RetryAfter() == nil {
+		t.Fatalf("expected retryAfter")
+	}
+	if got := *statusErr.RetryAfter(); got != codexModelCapacityRetryAfter {
+		t.Fatalf("retryAfter = %v, want %v", got, codexModelCapacityRetryAfter)
+	}
+}
+
+func TestCodexExecutorExecute_DoesNotClassifyGenericResponseFailedAsBadRequest(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("event: response.failed\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"upstream failed\"}}}\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL,
+		"api_key":  "test",
+	}}
+
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.5",
+		Payload: []byte(`{"model":"gpt-5.5","input":"Say ok"}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+	})
+	if err == nil {
+		t.Fatal("expected execute error")
+	}
+	if got := statusCodeFromCodexTestError(err); got == http.StatusBadRequest {
+		t.Fatalf("generic streamed failure status = %d, must not be forced to bad request; err=%v", got, err)
+	}
+	if got := statusCodeFromCodexTestError(err); got != http.StatusRequestTimeout {
+		t.Fatalf("generic streamed failure status = %d, want %d", got, http.StatusRequestTimeout)
 	}
 }
 
@@ -398,6 +644,16 @@ func TestNewCodexStatusErrPreservesUnclassifiedErrors(t *testing.T) {
 	}
 }
 
+func TestNewCodexMissingCompletedErr(t *testing.T) {
+	err := newCodexMissingCompletedErr()
+	if got := err.StatusCode(); got != http.StatusRequestTimeout {
+		t.Fatalf("status code = %d, want %d", got, http.StatusRequestTimeout)
+	}
+	if got := err.Error(); got != codexMissingCompletedMessage {
+		t.Fatalf("error = %s, want %s", got, codexMissingCompletedMessage)
+	}
+}
+
 func assertCodexErrorCode(t *testing.T, raw string, wantType string, wantCode string) {
 	t.Helper()
 
@@ -420,4 +676,14 @@ func assertCodexErrorCode(t *testing.T, raw string, wantType string, wantCode st
 
 func itoa(v int64) string {
 	return strconv.FormatInt(v, 10)
+}
+
+func statusCodeFromCodexTestError(err error) int {
+	type statusCoder interface {
+		StatusCode() int
+	}
+	if se, ok := err.(statusCoder); ok && se != nil {
+		return se.StatusCode()
+	}
+	return 0
 }

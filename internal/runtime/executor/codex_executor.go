@@ -37,7 +37,10 @@ const (
 
 var dataTag = []byte("data:")
 
-const codexModelCapacityRetryAfter = time.Second
+const (
+	codexModelCapacityRetryAfter = time.Second
+	codexMissingCompletedMessage = "stream error: stream disconnected before completion: stream closed before response.completed"
+)
 
 // Streamed Codex responses may emit response.output_item.done events while leaving
 // response.completed.response.output empty. Keep the stream path aligned with the
@@ -248,6 +251,11 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		eventData := bytes.TrimSpace(line[5:])
 		eventType := gjson.GetBytes(eventData, "type").String()
 
+		if errStream, ok := codexStreamStatusErr(eventData); ok {
+			err = errStream
+			return resp, err
+		}
+
 		if eventType == "response.output_item.done" {
 			itemResult := gjson.GetBytes(eventData, "item")
 			if !itemResult.Exists() || itemResult.Type != gjson.JSON {
@@ -299,7 +307,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
 		return resp, nil
 	}
-	err = statusErr{code: 408, msg: "stream error: stream disconnected before completion: stream closed before response.completed"}
+	err = newCodexMissingCompletedErr()
 	return resp, err
 }
 
@@ -495,14 +503,16 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		var param any
 		outputItemsByIndex := make(map[int64][]byte)
 		var outputItemsFallback [][]byte
-		var bootstrapChunks [][]byte
-		bufferBootstrap := true
+		sawCompleted := false
+		sawTerminalEvent := false
+		var pendingEventChunks [][]byte
+		pendingBootstrapData := false
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			translatedLine := bytes.Clone(line)
 			eventType := ""
-			isEventLine := false
+			emitTranslatedLine := true
 
 			switch {
 			case bytes.HasPrefix(line, dataTag):
@@ -521,43 +531,51 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				case "response.output_item.done":
 					collectCodexOutputItemDone(data, outputItemsByIndex, &outputItemsFallback)
 				case "response.completed":
+					sawCompleted = true
+					sawTerminalEvent = true
 					if detail, ok := helps.ParseCodexUsage(data); ok {
 						reporter.Publish(ctx, detail)
 					}
 					publishCodexImageToolUsage(ctx, reporter, body, data)
 					data = patchCodexCompletedOutput(data, outputItemsByIndex, outputItemsFallback)
 					translatedLine = append([]byte("data: "), data...)
+				case "response.created", "response.in_progress", "response.queued":
+					emitTranslatedLine = false
+					pendingBootstrapData = true
+				case "response.incomplete", "response.failed", "response.error", "error":
+					sawTerminalEvent = true
 				}
 			case bytes.HasPrefix(line, []byte("event:")):
 				eventType = strings.TrimSpace(string(line[len("event:"):]))
-				isEventLine = true
+				if codexStreamBufferedEvent(eventType) {
+					emitTranslatedLine = false
+					if codexStreamBootstrapEvent(eventType) {
+						pendingBootstrapData = true
+					}
+				}
 			}
 
 			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, originalPayload, body, translatedLine, &param)
-			if bufferBootstrap && len(bytes.TrimSpace(line)) == 0 {
-				if len(bootstrapChunks) > 0 {
-					bootstrapChunks = append(bootstrapChunks, []byte("\n\n"))
+			if len(bytes.TrimSpace(line)) == 0 {
+				if len(pendingEventChunks) > 0 {
+					pendingEventChunks = append(pendingEventChunks, []byte("\n\n"))
 				}
 				continue
 			}
-			if bufferBootstrap && isEventLine && codexStreamBufferedEvent(eventType) {
-				bootstrapChunks = append(bootstrapChunks, chunks...)
+			if !emitTranslatedLine {
+				pendingEventChunks = append(pendingEventChunks, chunks...)
 				continue
 			}
-			if bufferBootstrap && !isEventLine && codexStreamBootstrapEvent(eventType) {
-				bootstrapChunks = append(bootstrapChunks, chunks...)
-				continue
-			}
-			if bufferBootstrap {
-				bufferBootstrap = false
-				for i := range bootstrapChunks {
+			if len(pendingEventChunks) > 0 {
+				for i := range pendingEventChunks {
 					select {
-					case out <- cliproxyexecutor.StreamChunk{Payload: bootstrapChunks[i]}:
+					case out <- cliproxyexecutor.StreamChunk{Payload: pendingEventChunks[i]}:
 					case <-ctx.Done():
 						return
 					}
 				}
-				bootstrapChunks = nil
+				pendingEventChunks = nil
+				pendingBootstrapData = false
 			}
 			for i := range chunks {
 				select {
@@ -572,6 +590,29 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			reporter.PublishFailure(ctx)
 			select {
 			case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
+			case <-ctx.Done():
+			}
+			return
+		}
+		if len(pendingEventChunks) > 0 {
+			if !pendingBootstrapData {
+				for i := range pendingEventChunks {
+					select {
+					case out <- cliproxyexecutor.StreamChunk{Payload: pendingEventChunks[i]}:
+					case <-ctx.Done():
+						return
+					}
+				}
+			}
+			pendingEventChunks = nil
+			pendingBootstrapData = false
+		}
+		if !sawCompleted && !sawTerminalEvent {
+			missingCompletedErr := newCodexMissingCompletedErr()
+			helps.RecordAPIResponseError(ctx, e.cfg, missingCompletedErr)
+			reporter.PublishFailure(ctx)
+			select {
+			case out <- cliproxyexecutor.StreamChunk{Err: missingCompletedErr}:
 			case <-ctx.Done():
 			}
 		}
@@ -933,6 +974,10 @@ func codexStatusErrorClassification(statusCode int, body []byte) (code string, e
 	}
 }
 
+func newCodexMissingCompletedErr() statusErr {
+	return statusErr{code: http.StatusRequestTimeout, msg: codexMissingCompletedMessage}
+}
+
 func normalizeCodexInstructions(body []byte) []byte {
 	instructions := gjson.GetBytes(body, "instructions")
 	if !instructions.Exists() || instructions.Type == gjson.Null {
@@ -1046,10 +1091,16 @@ func codexStreamBufferedEvent(eventType string) bool {
 
 func codexStreamStatusErr(eventData []byte) (statusErr, bool) {
 	errorBody, ok := codexStreamErrorBody(eventData)
-	if !ok || !isCodexModelCapacityError(errorBody) {
+	if !ok {
 		return statusErr{}, false
 	}
-	return newCodexStatusErr(http.StatusBadRequest, errorBody), true
+	if isCodexModelCapacityError(errorBody) {
+		return newCodexStatusErr(http.StatusBadRequest, errorBody), true
+	}
+	if _, _, okClassified := codexStatusErrorClassification(http.StatusBadRequest, errorBody); okClassified {
+		return newCodexStatusErr(http.StatusBadRequest, errorBody), true
+	}
+	return newCodexStatusErr(http.StatusRequestTimeout, errorBody), true
 }
 
 func codexStreamErrorBody(eventData []byte) ([]byte, bool) {
