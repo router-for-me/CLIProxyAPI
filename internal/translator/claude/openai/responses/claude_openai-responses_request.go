@@ -347,31 +347,21 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 		out, _ = sjson.SetRawBytes(out, "messages.-1", msg)
 	}
 
+	includedToolNames := map[string]struct{}{}
+	toolNameMap := map[string]string{}
+
 	// tools mapping: parameters -> input_schema
 	if tools := root.Get("tools"); tools.Exists() && tools.IsArray() {
 		toolsJSON := []byte("[]")
 		tools.ForEach(func(_, tool gjson.Result) bool {
-			name, ok := util.NormalizeRequestToolName(tool.Get("name").String(), nil)
-			if !ok {
-				return true
+			convertedTools := convertResponsesToolToClaudeTools(tool, toolNameMap)
+			for _, tJSON := range convertedTools {
+				toolName := gjson.GetBytes(tJSON, "name").String()
+				if toolName != "" {
+					includedToolNames[toolName] = struct{}{}
+				}
+				toolsJSON, _ = sjson.SetRawBytes(toolsJSON, "-1", tJSON)
 			}
-			tJSON := []byte(`{"name":"","description":"","input_schema":{}}`)
-			tJSON, _ = sjson.SetBytes(tJSON, "name", name)
-			if d := tool.Get("description"); d.Exists() {
-				tJSON, _ = sjson.SetBytes(tJSON, "description", d.String())
-			}
-
-			if params := tool.Get("parameters"); params.Exists() {
-				cleaned := util.CleanJSONSchemaForStrictUpstream(params.Raw)
-				tJSON, _ = sjson.SetRawBytes(tJSON, "input_schema", []byte(cleaned))
-			} else if params = tool.Get("parametersJsonSchema"); params.Exists() {
-				cleaned := util.CleanJSONSchemaForStrictUpstream(params.Raw)
-				tJSON, _ = sjson.SetRawBytes(tJSON, "input_schema", []byte(cleaned))
-			} else {
-				tJSON, _ = sjson.SetRawBytes(tJSON, "input_schema", []byte(util.CleanJSONSchemaForStrictUpstream("")))
-			}
-
-			toolsJSON, _ = sjson.SetRawBytes(toolsJSON, "-1", tJSON)
 			return true
 		})
 		if parsedTools := gjson.ParseBytes(toolsJSON); parsedTools.IsArray() && len(parsedTools.Array()) > 0 {
@@ -389,17 +379,27 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 			case "none":
 				// Leave unset; implies no tools
 			case "required":
-				out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(`{"type":"any"}`))
+				if len(includedToolNames) > 0 {
+					out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(`{"type":"any"}`))
+				}
 			}
 		case gjson.JSON:
 			if toolChoice.Get("type").String() == "function" {
-				fn, ok := util.NormalizeRequestToolName(toolChoice.Get("function.name").String(), nil)
-				if !ok {
-					break
+				fn := toolChoice.Get("function.name").String()
+				if fn == "" {
+					fn = toolChoice.Get("name").String()
 				}
-				toolChoiceJSON := []byte(`{"name":"","type":"tool"}`)
-				toolChoiceJSON, _ = sjson.SetBytes(toolChoiceJSON, "name", fn)
-				out, _ = sjson.SetRawBytes(out, "tool_choice", toolChoiceJSON)
+				if normalized, ok := util.NormalizeRequestToolName(fn, nil); ok {
+					fn = normalized
+				}
+				if mappedName := toolNameMap[fn]; mappedName != "" {
+					fn = mappedName
+				}
+				if _, ok := includedToolNames[fn]; ok {
+					toolChoiceJSON := []byte(`{"name":"","type":"tool"}`)
+					toolChoiceJSON, _ = sjson.SetBytes(toolChoiceJSON, "name", fn)
+					out, _ = sjson.SetRawBytes(out, "tool_choice", toolChoiceJSON)
+				}
 			}
 		default:
 
@@ -407,4 +407,168 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 	}
 
 	return out
+}
+
+func convertResponsesToolToClaudeTools(tool gjson.Result, toolNameMap map[string]string) [][]byte {
+	toolType := strings.TrimSpace(tool.Get("type").String())
+	switch toolType {
+	case "", "function":
+		if tJSON, ok := convertResponsesFunctionToolToClaude(tool, ""); ok {
+			return [][]byte{tJSON}
+		}
+	case "namespace":
+		return convertResponsesNamespaceToolToClaude(tool, toolNameMap)
+	case "web_search":
+		if tJSON, ok := convertResponsesWebSearchToolToClaude(tool); ok {
+			if name := gjson.GetBytes(tJSON, "name").String(); name != "" {
+				toolNameMap[name] = name
+			}
+			return [][]byte{tJSON}
+		}
+	default:
+		if isUnsupportedOpenAIBuiltinToolType(toolType) {
+			return nil
+		}
+		if tool.Get("name").String() != "" {
+			return [][]byte{[]byte(tool.Raw)}
+		}
+	}
+	return nil
+}
+
+func convertResponsesNamespaceToolToClaude(tool gjson.Result, toolNameMap map[string]string) [][]byte {
+	namespaceName := strings.TrimSpace(tool.Get("name").String())
+	children := tool.Get("tools")
+	if !children.Exists() || !children.IsArray() {
+		return nil
+	}
+
+	var out [][]byte
+	children.ForEach(func(_, child gjson.Result) bool {
+		childName := responsesToolName(child)
+		qualifiedName := qualifyResponsesNamespaceToolName(namespaceName, childName)
+		if tJSON, ok := convertResponsesFunctionToolToClaude(child, qualifiedName); ok {
+			out = append(out, tJSON)
+			toolNameMap[qualifiedName] = qualifiedName
+			if childName != "" {
+				toolNameMap[childName] = qualifiedName
+			}
+		}
+		return true
+	})
+	return out
+}
+
+func convertResponsesFunctionToolToClaude(tool gjson.Result, overrideName string) ([]byte, bool) {
+	name := strings.TrimSpace(overrideName)
+	if name == "" {
+		name = responsesToolName(tool)
+	}
+	if name == "" {
+		return nil, false
+	}
+
+	tJSON := []byte(`{"name":"","description":"","input_schema":{}}`)
+	tJSON, _ = sjson.SetBytes(tJSON, "name", name)
+	if d := responsesToolDescription(tool); d != "" {
+		tJSON, _ = sjson.SetBytes(tJSON, "description", d)
+	}
+	tJSON, _ = sjson.SetRawBytes(tJSON, "input_schema", normalizeClaudeToolInputSchema(responsesToolParameters(tool)))
+	return tJSON, true
+}
+
+func convertResponsesWebSearchToolToClaude(tool gjson.Result) ([]byte, bool) {
+	if externalWebAccess := tool.Get("external_web_access"); externalWebAccess.Exists() && !externalWebAccess.Bool() {
+		return nil, false
+	}
+
+	name := strings.TrimSpace(tool.Get("name").String())
+	if name == "" {
+		name = "web_search"
+	}
+	tJSON := []byte(`{"type":"web_search_20250305","name":""}`)
+	tJSON, _ = sjson.SetBytes(tJSON, "name", name)
+	if maxUses := tool.Get("max_uses"); maxUses.Exists() {
+		tJSON, _ = sjson.SetBytes(tJSON, "max_uses", maxUses.Int())
+	}
+	if allowedDomains := tool.Get("filters.allowed_domains"); allowedDomains.Exists() && allowedDomains.IsArray() {
+		tJSON, _ = sjson.SetRawBytes(tJSON, "allowed_domains", []byte(allowedDomains.Raw))
+	}
+	if userLocation := tool.Get("user_location"); userLocation.Exists() && userLocation.IsObject() {
+		tJSON, _ = sjson.SetRawBytes(tJSON, "user_location", []byte(userLocation.Raw))
+	}
+	return tJSON, true
+}
+
+func responsesToolName(tool gjson.Result) string {
+	if name := strings.TrimSpace(tool.Get("name").String()); name != "" {
+		return name
+	}
+	return strings.TrimSpace(tool.Get("function.name").String())
+}
+
+func responsesToolDescription(tool gjson.Result) string {
+	if description := tool.Get("description").String(); description != "" {
+		return description
+	}
+	return tool.Get("function.description").String()
+}
+
+func responsesToolParameters(tool gjson.Result) gjson.Result {
+	for _, path := range []string{
+		"parameters",
+		"parametersJsonSchema",
+		"input_schema",
+		"function.parameters",
+		"function.parametersJsonSchema",
+	} {
+		if parameters := tool.Get(path); parameters.Exists() {
+			return parameters
+		}
+	}
+	return gjson.Result{}
+}
+
+func normalizeClaudeToolInputSchema(parameters gjson.Result) []byte {
+	raw := strings.TrimSpace(parameters.Raw)
+	if raw == "" || raw == "null" || !gjson.Valid(raw) {
+		return []byte(util.CleanJSONSchemaForStrictUpstream(""))
+	}
+	result := gjson.Parse(raw)
+	if !result.IsObject() {
+		return []byte(util.CleanJSONSchemaForStrictUpstream(""))
+	}
+	schema := []byte(raw)
+	schemaType := result.Get("type").String()
+	if schemaType == "" {
+		schema, _ = sjson.SetBytes(schema, "type", "object")
+		schemaType = "object"
+	}
+	if schemaType == "object" && !result.Get("properties").Exists() {
+		schema, _ = sjson.SetRawBytes(schema, "properties", []byte(`{}`))
+	}
+	return []byte(util.CleanJSONSchemaForStrictUpstream(string(schema)))
+}
+
+func qualifyResponsesNamespaceToolName(namespaceName, childName string) string {
+	childName = strings.TrimSpace(childName)
+	if childName == "" || namespaceName == "" || strings.HasPrefix(childName, "mcp__") {
+		return childName
+	}
+	if strings.HasPrefix(childName, namespaceName) {
+		return childName
+	}
+	if strings.HasSuffix(namespaceName, "__") {
+		return namespaceName + childName
+	}
+	return namespaceName + "__" + childName
+}
+
+func isUnsupportedOpenAIBuiltinToolType(toolType string) bool {
+	switch toolType {
+	case "image_generation", "file_search", "code_interpreter", "computer_use_preview":
+		return true
+	default:
+		return false
+	}
 }

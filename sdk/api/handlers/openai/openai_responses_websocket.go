@@ -56,6 +56,31 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 	retainResponsesWebsocketToolCaches(downstreamSessionKey)
 	clientIP := websocketClientAddress(c)
 	log.Infof("responses websocket: client connected id=%s remote=%s", passthroughSessionID, clientIP)
+
+	wsDone := make(chan struct{})
+	defer close(wsDone)
+
+	if h != nil && h.AuthManager != nil {
+		if exec, ok := h.AuthManager.Executor("codex"); ok && exec != nil {
+			type upstreamDisconnectSubscriber interface {
+				UpstreamDisconnectChan(sessionID string) <-chan error
+			}
+			if subscriber, ok := exec.(upstreamDisconnectSubscriber); ok && subscriber != nil {
+				disconnectCh := subscriber.UpstreamDisconnectChan(passthroughSessionID)
+				if disconnectCh != nil {
+					go func() {
+						select {
+						case <-wsDone:
+							return
+						case <-disconnectCh:
+							_ = conn.Close()
+						}
+					}()
+				}
+			}
+		}
+	}
+
 	var wsTerminateErr error
 	var wsTimelineLog strings.Builder
 	defer func() {
@@ -79,6 +104,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 	var lastRequest []byte
 	lastResponseOutput := []byte("[]")
 	pinnedAuthID := ""
+	forceTranscriptReplayNextRequest := false
 
 	for {
 		msgType, payload, errReadMessage := conn.ReadMessage()
@@ -115,6 +141,22 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			}
 			allowIncrementalInputWithPreviousResponseID = h.websocketUpstreamSupportsIncrementalInputForModel(requestModelName)
 		}
+		if forceTranscriptReplayNextRequest {
+			allowIncrementalInputWithPreviousResponseID = false
+		}
+
+		allowCompactionReplayBypass := false
+		if pinnedAuthID != "" && h != nil && h.AuthManager != nil {
+			if pinnedAuth, ok := h.AuthManager.GetByID(pinnedAuthID); ok && pinnedAuth != nil {
+				allowCompactionReplayBypass = responsesWebsocketAuthSupportsCompactionReplay(pinnedAuth)
+			}
+		} else {
+			requestModelName := strings.TrimSpace(gjson.GetBytes(payload, "model").String())
+			if requestModelName == "" {
+				requestModelName = strings.TrimSpace(gjson.GetBytes(lastRequest, "model").String())
+			}
+			allowCompactionReplayBypass = h.websocketUpstreamSupportsCompactionReplayForModel(requestModelName)
+		}
 
 		var requestJSON []byte
 		var updatedLastRequest []byte
@@ -124,6 +166,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			lastRequest,
 			lastResponseOutput,
 			allowIncrementalInputWithPreviousResponseID,
+			allowCompactionReplayBypass,
 		)
 		if errMsg != nil {
 			h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), errMsg)
@@ -165,7 +208,13 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 
 		requestJSON = repairResponsesWebsocketToolCalls(downstreamSessionKey, requestJSON)
 		updatedLastRequest = bytes.Clone(requestJSON)
+		previousLastRequest := bytes.Clone(lastRequest)
+		previousLastResponseOutput := bytes.Clone(lastResponseOutput)
+		forcedTranscriptReplay := forceTranscriptReplayNextRequest
 		lastRequest = updatedLastRequest
+		if forcedTranscriptReplay {
+			forceTranscriptReplayNextRequest = false
+		}
 
 		modelName := gjson.GetBytes(requestJSON, "model").String()
 		cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
@@ -190,11 +239,18 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		}
 		dataChan, _, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, requestJSON, "")
 
-		completedOutput, errForward := h.forwardResponsesWebsocket(c, conn, cliCancel, dataChan, errChan, &wsTimelineLog, passthroughSessionID)
+		completedOutput, forwardErrMsg, errForward := h.forwardResponsesWebsocket(c, conn, cliCancel, dataChan, errChan, &wsTimelineLog, passthroughSessionID)
 		if errForward != nil {
 			wsTerminateErr = errForward
 			log.Warnf("responses websocket: forward failed id=%s error=%v", passthroughSessionID, errForward)
 			return
+		}
+		if shouldReleaseResponsesWebsocketPinnedAuth(forwardErrMsg) {
+			pinnedAuthID = ""
+			forceTranscriptReplayNextRequest = true
+			lastRequest = previousLastRequest
+			lastResponseOutput = previousLastResponseOutput
+			continue
 		}
 		lastResponseOutput = completedOutput
 	}
@@ -222,10 +278,10 @@ func websocketUpgradeHeaders(req *http.Request) http.Header {
 }
 
 func normalizeResponsesWebsocketRequest(rawJSON []byte, lastRequest []byte, lastResponseOutput []byte) ([]byte, []byte, *interfaces.ErrorMessage) {
-	return normalizeResponsesWebsocketRequestWithMode(rawJSON, lastRequest, lastResponseOutput, true)
+	return normalizeResponsesWebsocketRequestWithMode(rawJSON, lastRequest, lastResponseOutput, true, true)
 }
 
-func normalizeResponsesWebsocketRequestWithMode(rawJSON []byte, lastRequest []byte, lastResponseOutput []byte, allowIncrementalInputWithPreviousResponseID bool) ([]byte, []byte, *interfaces.ErrorMessage) {
+func normalizeResponsesWebsocketRequestWithMode(rawJSON []byte, lastRequest []byte, lastResponseOutput []byte, allowIncrementalInputWithPreviousResponseID bool, allowCompactionReplayBypass bool) ([]byte, []byte, *interfaces.ErrorMessage) {
 	requestType := strings.TrimSpace(gjson.GetBytes(rawJSON, "type").String())
 	switch requestType {
 	case wsRequestTypeCreate:
@@ -233,10 +289,10 @@ func normalizeResponsesWebsocketRequestWithMode(rawJSON []byte, lastRequest []by
 		if len(lastRequest) == 0 {
 			return normalizeResponseCreateRequest(rawJSON)
 		}
-		return normalizeResponseSubsequentRequest(rawJSON, lastRequest, lastResponseOutput, allowIncrementalInputWithPreviousResponseID)
+		return normalizeResponseSubsequentRequest(rawJSON, lastRequest, lastResponseOutput, allowIncrementalInputWithPreviousResponseID, allowCompactionReplayBypass)
 	case wsRequestTypeAppend:
 		// log.Infof("responses websocket: response.append request")
-		return normalizeResponseSubsequentRequest(rawJSON, lastRequest, lastResponseOutput, allowIncrementalInputWithPreviousResponseID)
+		return normalizeResponseSubsequentRequest(rawJSON, lastRequest, lastResponseOutput, allowIncrementalInputWithPreviousResponseID, allowCompactionReplayBypass)
 	default:
 		return nil, lastRequest, &interfaces.ErrorMessage{
 			StatusCode: http.StatusBadRequest,
@@ -265,7 +321,7 @@ func normalizeResponseCreateRequest(rawJSON []byte) ([]byte, []byte, *interfaces
 	return normalized, bytes.Clone(normalized), nil
 }
 
-func normalizeResponseSubsequentRequest(rawJSON []byte, lastRequest []byte, lastResponseOutput []byte, allowIncrementalInputWithPreviousResponseID bool) ([]byte, []byte, *interfaces.ErrorMessage) {
+func normalizeResponseSubsequentRequest(rawJSON []byte, lastRequest []byte, lastResponseOutput []byte, allowIncrementalInputWithPreviousResponseID bool, allowCompactionReplayBypass bool) ([]byte, []byte, *interfaces.ErrorMessage) {
 	if len(lastRequest) == 0 {
 		return nil, lastRequest, &interfaces.ErrorMessage{
 			StatusCode: http.StatusBadRequest,
@@ -315,20 +371,37 @@ func normalizeResponseSubsequentRequest(rawJSON []byte, lastRequest []byte, last
 		}
 	}
 
-	existingInput := gjson.GetBytes(lastRequest, "input")
-	mergedInput, errMerge := mergeJSONArrayRaw(existingInput.Raw, normalizeJSONArrayRaw(lastResponseOutput))
-	if errMerge != nil {
-		return nil, lastRequest, &interfaces.ErrorMessage{
-			StatusCode: http.StatusBadRequest,
-			Error:      fmt.Errorf("invalid previous response output: %w", errMerge),
+	// When the client sends a compact replay for a downstream that can consume it
+	// directly, the input already carries the canonical history. In that case,
+	// skip merging with stale lastRequest/lastResponseOutput to avoid breaking
+	// function_call / function_call_output pairings.
+	// See: https://github.com/router-for-me/CLIProxyAPI/issues/2207
+	var mergedInput string
+	if allowCompactionReplayBypass && inputContainsFullTranscript(nextInput) {
+		log.Infof("responses websocket: full transcript detected, skipping stale merge (input items=%d)", len(nextInput.Array()))
+		mergedInput = nextInput.Raw
+	} else {
+		appendInputRaw := nextInput.Raw
+		if inputContainsFullTranscript(nextInput) {
+			appendInputRaw = inputWithoutCompactionItems(nextInput)
 		}
-	}
 
-	mergedInput, errMerge = mergeJSONArrayRaw(mergedInput, nextInput.Raw)
-	if errMerge != nil {
-		return nil, lastRequest, &interfaces.ErrorMessage{
-			StatusCode: http.StatusBadRequest,
-			Error:      fmt.Errorf("invalid request input: %w", errMerge),
+		existingInput := gjson.GetBytes(lastRequest, "input")
+		var errMerge error
+		mergedInput, errMerge = mergeJSONArrayRaw(existingInput.Raw, normalizeJSONArrayRaw(lastResponseOutput))
+		if errMerge != nil {
+			return nil, lastRequest, &interfaces.ErrorMessage{
+				StatusCode: http.StatusBadRequest,
+				Error:      fmt.Errorf("invalid previous response output: %w", errMerge),
+			}
+		}
+
+		mergedInput, errMerge = mergeJSONArrayRaw(mergedInput, appendInputRaw)
+		if errMerge != nil {
+			return nil, lastRequest, &interfaces.ErrorMessage{
+				StatusCode: http.StatusBadRequest,
+				Error:      fmt.Errorf("invalid request input: %w", errMerge),
+			}
 		}
 	}
 	dedupedInput, errDedupeFunctionCalls := dedupeFunctionCallsByCallID(mergedInput)
@@ -480,72 +553,104 @@ func websocketUpstreamSupportsIncrementalInput(attributes map[string]string, met
 }
 
 func (h *OpenAIResponsesAPIHandler) websocketUpstreamSupportsIncrementalInputForModel(modelName string) bool {
-	if h == nil || h.AuthManager == nil {
+	auths, _ := h.responsesWebsocketAvailableAuthsForModel(modelName)
+	for _, auth := range auths {
+		if websocketUpstreamSupportsIncrementalInput(auth.Attributes, auth.Metadata) {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *OpenAIResponsesAPIHandler) websocketUpstreamSupportsCompactionReplayForModel(modelName string) bool {
+	auths, _ := h.responsesWebsocketAvailableAuthsForModel(modelName)
+	if len(auths) == 0 {
 		return false
 	}
+	for _, auth := range auths {
+		if !responsesWebsocketAuthSupportsCompactionReplay(auth) {
+			return false
+		}
+	}
+	return true
+}
 
-	resolvedModelName := modelName
+func (h *OpenAIResponsesAPIHandler) responsesWebsocketAvailableAuthsForModel(modelName string) ([]*coreauth.Auth, string) {
+	if h == nil || h.AuthManager == nil {
+		return nil, ""
+	}
+	resolvedModelName := responsesWebsocketResolvedModelName(modelName)
+	providerSet, modelKey := responsesWebsocketProviderSetForModel(resolvedModelName)
+	if len(providerSet) == 0 {
+		return nil, modelKey
+	}
+
+	registryRef := registry.GetGlobalRegistry()
+	now := time.Now()
+	auths := h.AuthManager.List()
+	available := make([]*coreauth.Auth, 0, len(auths))
+	for _, auth := range auths {
+		if !responsesWebsocketAuthMatchesModel(auth, providerSet, modelKey, registryRef, now) {
+			continue
+		}
+		available = append(available, auth)
+	}
+	return available, modelKey
+}
+
+func responsesWebsocketResolvedModelName(modelName string) string {
 	initialSuffix := thinking.ParseSuffix(modelName)
 	if initialSuffix.ModelName == "auto" {
 		resolvedBase := util.ResolveAutoModel(initialSuffix.ModelName)
 		if initialSuffix.HasSuffix {
-			resolvedModelName = fmt.Sprintf("%s(%s)", resolvedBase, initialSuffix.RawSuffix)
-		} else {
-			resolvedModelName = resolvedBase
+			return fmt.Sprintf("%s(%s)", resolvedBase, initialSuffix.RawSuffix)
 		}
-	} else {
-		resolvedModelName = util.ResolveAutoModel(modelName)
+		return resolvedBase
 	}
+	return util.ResolveAutoModel(modelName)
+}
 
+func responsesWebsocketProviderSetForModel(resolvedModelName string) (map[string]struct{}, string) {
 	parsed := thinking.ParseSuffix(resolvedModelName)
 	baseModel := strings.TrimSpace(parsed.ModelName)
 	providers := util.GetProviderName(baseModel)
 	if len(providers) == 0 && baseModel != resolvedModelName {
 		providers = util.GetProviderName(resolvedModelName)
 	}
-	if len(providers) == 0 {
-		return false
-	}
-
 	providerSet := make(map[string]struct{}, len(providers))
-	for i := 0; i < len(providers); i++ {
-		providerKey := strings.TrimSpace(strings.ToLower(providers[i]))
+	for _, provider := range providers {
+		providerKey := strings.TrimSpace(strings.ToLower(provider))
 		if providerKey == "" {
 			continue
 		}
 		providerSet[providerKey] = struct{}{}
 	}
-	if len(providerSet) == 0 {
-		return false
-	}
-
 	modelKey := baseModel
 	if modelKey == "" {
 		modelKey = strings.TrimSpace(resolvedModelName)
 	}
-	registryRef := registry.GetGlobalRegistry()
-	now := time.Now()
-	auths := h.AuthManager.List()
-	for i := 0; i < len(auths); i++ {
-		auth := auths[i]
-		if auth == nil {
-			continue
-		}
-		providerKey := strings.TrimSpace(strings.ToLower(auth.Provider))
-		if _, ok := providerSet[providerKey]; !ok {
-			continue
-		}
-		if modelKey != "" && registryRef != nil && !registryRef.ClientSupportsModel(auth.ID, modelKey) {
-			continue
-		}
-		if !responsesWebsocketAuthAvailableForModel(auth, modelKey, now) {
-			continue
-		}
-		if websocketUpstreamSupportsIncrementalInput(auth.Attributes, auth.Metadata) {
-			return true
-		}
+	return providerSet, modelKey
+}
+
+func responsesWebsocketAuthMatchesModel(auth *coreauth.Auth, providerSet map[string]struct{}, modelKey string, registryRef *registry.ModelRegistry, now time.Time) bool {
+	if auth == nil {
+		return false
 	}
-	return false
+	providerKey := strings.TrimSpace(strings.ToLower(auth.Provider))
+	if _, ok := providerSet[providerKey]; !ok {
+		return false
+	}
+	if modelKey != "" && registryRef != nil && !registryRef.ClientSupportsModel(auth.ID, modelKey) {
+		return false
+	}
+	return responsesWebsocketAuthAvailableForModel(auth, modelKey, now)
+}
+
+func responsesWebsocketAuthSupportsCompactionReplay(auth *coreauth.Auth) bool {
+	if auth == nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(auth.Provider), "codex")
 }
 
 func responsesWebsocketAuthAvailableForModel(auth *coreauth.Auth, modelName string, now time.Time) bool {
@@ -691,6 +796,42 @@ func mergeJSONArrayRaw(existingRaw, appendRaw string) (string, error) {
 	return string(out), nil
 }
 
+// inputContainsFullTranscript returns true when the input array carries compact
+// replay markers that indicate the client already sent the full conversation
+// transcript. Merging that input with stale lastRequest/lastResponseOutput
+// would duplicate or break function_call/function_call_output pairings, so the
+// caller should use the input as-is.
+//
+// Assistant messages alone are not enough to classify the payload as a replay:
+// incremental websocket requests may legitimately append assistant items.
+func inputContainsFullTranscript(input gjson.Result) bool {
+	if !input.IsArray() {
+		return false
+	}
+	for _, item := range input.Array() {
+		t := item.Get("type").String()
+		if t == "compaction" || t == "compaction_summary" {
+			return true
+		}
+	}
+	return false
+}
+
+func inputWithoutCompactionItems(input gjson.Result) string {
+	if !input.IsArray() {
+		return normalizeJSONArrayRaw([]byte(input.Raw))
+	}
+	filtered := make([]string, 0, len(input.Array()))
+	for _, item := range input.Array() {
+		t := item.Get("type").String()
+		if t == "compaction" || t == "compaction_summary" {
+			continue
+		}
+		filtered = append(filtered, item.Raw)
+	}
+	return "[" + strings.Join(filtered, ",") + "]"
+}
+
 func normalizeJSONArrayRaw(raw []byte) string {
 	trimmed := strings.TrimSpace(string(raw))
 	if trimmed == "" {
@@ -711,7 +852,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 	errs <-chan *interfaces.ErrorMessage,
 	wsTimelineLog *strings.Builder,
 	sessionID string,
-) ([]byte, error) {
+) ([]byte, *interfaces.ErrorMessage, error) {
 	completed := false
 	completedOutput := []byte("[]")
 	downstreamSessionKey := ""
@@ -723,7 +864,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 		select {
 		case <-c.Request.Context().Done():
 			cancel(c.Request.Context().Err())
-			return completedOutput, c.Request.Context().Err()
+			return completedOutput, nil, c.Request.Context().Err()
 		case errMsg, ok := <-errs:
 			if !ok {
 				errs = nil
@@ -748,7 +889,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 					// 	errWrite,
 					// )
 					cancel(errMsg.Error)
-					return completedOutput, errWrite
+					return completedOutput, errMsg, errWrite
 				}
 			}
 			if errMsg != nil {
@@ -756,7 +897,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 			} else {
 				cancel(nil)
 			}
-			return completedOutput, nil
+			return completedOutput, errMsg, nil
 		case chunk, ok := <-data:
 			if !ok {
 				if !completed {
@@ -782,13 +923,13 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 							errWrite,
 						)
 						cancel(errMsg.Error)
-						return completedOutput, errWrite
+						return completedOutput, errMsg, errWrite
 					}
 					cancel(errMsg.Error)
-					return completedOutput, nil
+					return completedOutput, errMsg, nil
 				}
 				cancel(nil)
-				return completedOutput, nil
+				return completedOutput, nil, nil
 			}
 
 			payloads := websocketJSONPayloadsFromChunk(chunk)
@@ -815,10 +956,28 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 						errWrite,
 					)
 					cancel(errWrite)
-					return completedOutput, errWrite
+					return completedOutput, nil, errWrite
 				}
 			}
 		}
+	}
+}
+
+func shouldReleaseResponsesWebsocketPinnedAuth(errMsg *interfaces.ErrorMessage) bool {
+	if errMsg == nil {
+		return false
+	}
+	status := errMsg.StatusCode
+	if status <= 0 && errMsg.Error != nil {
+		if se, ok := errMsg.Error.(interface{ StatusCode() int }); ok && se != nil {
+			status = se.StatusCode()
+		}
+	}
+	switch status {
+	case http.StatusUnauthorized, http.StatusPaymentRequired, http.StatusForbidden, http.StatusTooManyRequests:
+		return true
+	default:
+		return false
 	}
 }
 

@@ -1,6 +1,7 @@
 package helps
 
 import (
+	"context"
 	"fmt"
 	"testing"
 	"time"
@@ -65,6 +66,50 @@ func TestParseOpenAIUsageResponses(t *testing.T) {
 	}
 }
 
+func TestParseGeminiCLIUsage_TopLevelUsageMetadata(t *testing.T) {
+	data := []byte(`{"usageMetadata":{"promptTokenCount":11,"candidatesTokenCount":7,"thoughtsTokenCount":3,"totalTokenCount":21,"cachedContentTokenCount":5}}`)
+	detail := ParseGeminiCLIUsage(data)
+	if detail.InputTokens != 11 {
+		t.Fatalf("input tokens = %d, want %d", detail.InputTokens, 11)
+	}
+	if detail.OutputTokens != 7 {
+		t.Fatalf("output tokens = %d, want %d", detail.OutputTokens, 7)
+	}
+	if detail.ReasoningTokens != 3 {
+		t.Fatalf("reasoning tokens = %d, want %d", detail.ReasoningTokens, 3)
+	}
+	if detail.TotalTokens != 21 {
+		t.Fatalf("total tokens = %d, want %d", detail.TotalTokens, 21)
+	}
+	if detail.CachedTokens != 5 {
+		t.Fatalf("cached tokens = %d, want %d", detail.CachedTokens, 5)
+	}
+}
+
+func TestParseGeminiCLIStreamUsage_ResponseSnakeCaseUsageMetadata(t *testing.T) {
+	line := []byte(`data: {"response":{"usage_metadata":{"promptTokenCount":13,"candidatesTokenCount":2,"totalTokenCount":15}}}`)
+	detail, ok := ParseGeminiCLIStreamUsage(line)
+	if !ok {
+		t.Fatal("ParseGeminiCLIStreamUsage() ok = false, want true")
+	}
+	if detail.InputTokens != 13 {
+		t.Fatalf("input tokens = %d, want %d", detail.InputTokens, 13)
+	}
+	if detail.OutputTokens != 2 {
+		t.Fatalf("output tokens = %d, want %d", detail.OutputTokens, 2)
+	}
+	if detail.TotalTokens != 15 {
+		t.Fatalf("total tokens = %d, want %d", detail.TotalTokens, 15)
+	}
+}
+
+func TestParseGeminiCLIStreamUsage_IgnoresTrafficTypeOnlyUsageMetadata(t *testing.T) {
+	line := []byte(`data: {"response":{"usageMetadata":{"trafficType":"ON_DEMAND"}}}`)
+	if detail, ok := ParseGeminiCLIStreamUsage(line); ok {
+		t.Fatalf("ParseGeminiCLIStreamUsage() = (%+v, true), want false for traffic-only usage metadata", detail)
+	}
+}
+
 func TestUsageReporterBuildRecordIncludesLatency(t *testing.T) {
 	reporter := &UsageReporter{
 		provider:    "openai",
@@ -78,6 +123,19 @@ func TestUsageReporterBuildRecordIncludesLatency(t *testing.T) {
 	}
 	if record.Latency > 3*time.Second {
 		t.Fatalf("latency = %v, want <= 3s", record.Latency)
+	}
+}
+
+func TestUsageReporterBuildRecordIncludesRequestedModelAlias(t *testing.T) {
+	ctx := usage.WithRequestedModelAlias(context.Background(), "client-gpt")
+	reporter := NewUsageReporter(ctx, "openai", "gpt-5.4", nil)
+
+	record := reporter.buildRecord(usage.Detail{TotalTokens: 3}, false)
+	if record.Model != "gpt-5.4" {
+		t.Fatalf("model = %q, want %q", record.Model, "gpt-5.4")
+	}
+	if record.Alias != "client-gpt" {
+		t.Fatalf("alias = %q, want %q", record.Alias, "client-gpt")
 	}
 }
 

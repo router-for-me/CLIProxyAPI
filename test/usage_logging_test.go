@@ -2,6 +2,7 @@ package test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -9,14 +10,14 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/redisqueue"
 	runtimeexecutor "github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
-	internalusage "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 )
 
-func TestGeminiExecutorRecordsSuccessfulZeroUsageInStatistics(t *testing.T) {
+func TestGeminiExecutorRecordsSuccessfulZeroUsageInQueue(t *testing.T) {
 	model := fmt.Sprintf("gemini-2.5-flash-zero-usage-%d", time.Now().UnixNano())
 	source := fmt.Sprintf("zero-usage-%d@example.com", time.Now().UnixNano())
 
@@ -42,10 +43,15 @@ func TestGeminiExecutorRecordsSuccessfulZeroUsageInStatistics(t *testing.T) {
 		},
 	}
 
-	prevStatsEnabled := internalusage.StatisticsEnabled()
-	internalusage.SetStatisticsEnabled(true)
+	prevQueueEnabled := redisqueue.Enabled()
+	prevUsageEnabled := redisqueue.UsageStatisticsEnabled()
+	redisqueue.SetEnabled(false)
+	redisqueue.SetEnabled(true)
+	redisqueue.SetUsageStatisticsEnabled(true)
 	t.Cleanup(func() {
-		internalusage.SetStatisticsEnabled(prevStatsEnabled)
+		redisqueue.SetEnabled(false)
+		redisqueue.SetEnabled(prevQueueEnabled)
+		redisqueue.SetUsageStatisticsEnabled(prevUsageEnabled)
 	})
 
 	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
@@ -59,39 +65,58 @@ func TestGeminiExecutorRecordsSuccessfulZeroUsageInStatistics(t *testing.T) {
 		t.Fatalf("Execute error: %v", err)
 	}
 
-	detail := waitForStatisticsDetail(t, "gemini", model, source)
-	if detail.Failed {
-		t.Fatalf("detail failed = true, want false")
-	}
-	if detail.Tokens.TotalTokens != 0 {
-		t.Fatalf("total tokens = %d, want 0", detail.Tokens.TotalTokens)
-	}
+	waitForQueuedUsageModelTotalTokens(t, "gemini", model, 0)
 }
 
-func waitForStatisticsDetail(t *testing.T, apiName, model, source string) internalusage.RequestDetail {
+func waitForQueuedUsageModelTotalTokens(t *testing.T, wantProvider, wantModel string, wantTokens int64) {
 	t.Helper()
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		snapshot := internalusage.GetRequestStatistics().Snapshot()
-		apiSnapshot, ok := snapshot.APIs[apiName]
-		if !ok {
-			time.Sleep(10 * time.Millisecond)
-			continue
-		}
-		modelSnapshot, ok := apiSnapshot.Models[model]
-		if !ok {
-			time.Sleep(10 * time.Millisecond)
-			continue
-		}
-		for _, detail := range modelSnapshot.Details {
-			if detail.Source == source {
-				return detail
+		items := redisqueue.PopOldest(10)
+		for _, item := range items {
+			got, ok := parseQueuedUsagePayload(t, item)
+			if !ok {
+				continue
 			}
+			if got.Provider != wantProvider || got.Model != wantModel {
+				continue
+			}
+			if got.Failed {
+				t.Fatalf("payload failed = true, want false")
+			}
+			if got.Tokens.TotalTokens != wantTokens {
+				t.Fatalf("payload total tokens = %d, want %d", got.Tokens.TotalTokens, wantTokens)
+			}
+			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	t.Fatalf("timed out waiting for statistics detail for api=%q model=%q source=%q", apiName, model, source)
-	return internalusage.RequestDetail{}
+	t.Fatalf("timed out waiting for queued usage payload for provider=%q model=%q", wantProvider, wantModel)
+}
+
+type queuedUsagePayload struct {
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
+	Failed   bool   `json:"failed"`
+	Tokens   struct {
+		TotalTokens int64 `json:"total_tokens"`
+	} `json:"tokens"`
+}
+
+func parseQueuedUsagePayload(t *testing.T, payload []byte) (queuedUsagePayload, bool) {
+	t.Helper()
+
+	var parsed queuedUsagePayload
+	if len(payload) == 0 {
+		return parsed, false
+	}
+	if err := json.Unmarshal(payload, &parsed); err != nil {
+		return parsed, false
+	}
+	if parsed.Provider == "" || parsed.Model == "" {
+		return parsed, false
+	}
+	return parsed, true
 }

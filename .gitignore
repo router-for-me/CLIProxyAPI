@@ -50,11 +50,17 @@ _bmad-output/*
 # macOS
 .DS_Store
 ._*
+
+# Fork-specific: usage database files
 usage.*
 /.gocache
 /.gomodcache
 /.gotmp
 /.gopath
+
+# Fork-specific: tooling/cache
 .cli-proxy-api/
 .venv/
-AGENTS.md
+
+# Build/test caches
+.gocache/

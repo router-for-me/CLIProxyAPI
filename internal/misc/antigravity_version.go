@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -18,6 +19,8 @@ const (
 	antigravityFallbackVersion = "1.21.9"
 	antigravityVersionCacheTTL = 6 * time.Hour
 	antigravityFetchTimeout    = 10 * time.Second
+	AntigravityNodeAPIClientUA = "google-api-nodejs-client/10.3.0"
+	AntigravityGoogAPIClientUA = "gl-node/22.21.1"
 )
 
 type antigravityRelease struct {
@@ -105,6 +108,65 @@ func AntigravityLatestVersion() string {
 // using the latest version fetched from the releases API.
 func AntigravityUserAgent() string {
 	return fmt.Sprintf("antigravity/%s darwin/arm64", AntigravityLatestVersion())
+}
+
+func antigravityBaseUserAgent(userAgent string) string {
+	userAgent = strings.TrimSpace(userAgent)
+	if userAgent == "" {
+		return AntigravityUserAgent()
+	}
+	lower := strings.ToLower(userAgent)
+	if strings.HasPrefix(lower, "antigravity/") {
+		if idx := strings.Index(lower, " google-api-nodejs-client/"); idx >= 0 {
+			trimmed := strings.TrimSpace(userAgent[:idx])
+			if trimmed != "" {
+				return trimmed
+			}
+		}
+	}
+	return userAgent
+}
+
+// AntigravityRequestUserAgent returns the short Antigravity runtime UA used by
+// generate/stream/model-list requests.
+func AntigravityRequestUserAgent(userAgent string) string {
+	return antigravityBaseUserAgent(userAgent)
+}
+
+// AntigravityLoadCodeAssistUserAgent returns the long Antigravity control-plane
+// UA used by loadCodeAssist requests.
+func AntigravityLoadCodeAssistUserAgent(userAgent string) string {
+	userAgent = strings.TrimSpace(userAgent)
+	if userAgent == "" {
+		return AntigravityUserAgent() + " " + AntigravityNodeAPIClientUA
+	}
+	lower := strings.ToLower(userAgent)
+	if !strings.HasPrefix(lower, "antigravity/") {
+		return userAgent
+	}
+	if strings.Contains(lower, "google-api-nodejs-client/") {
+		return userAgent
+	}
+	return antigravityBaseUserAgent(userAgent) + " " + AntigravityNodeAPIClientUA
+}
+
+// AntigravityVersionFromUserAgent extracts the Antigravity version prefix from
+// either the short or long Antigravity UA forms.
+func AntigravityVersionFromUserAgent(userAgent string) string {
+	base := antigravityBaseUserAgent(userAgent)
+	lower := strings.ToLower(base)
+	if !strings.HasPrefix(lower, "antigravity/") {
+		return AntigravityLatestVersion()
+	}
+	rest := base[len("antigravity/"):]
+	if idx := strings.IndexAny(rest, " \t"); idx >= 0 {
+		rest = rest[:idx]
+	}
+	rest = strings.TrimSpace(rest)
+	if rest == "" {
+		return AntigravityLatestVersion()
+	}
+	return rest
 }
 
 func fetchAntigravityLatestVersion(ctx context.Context) (string, error) {

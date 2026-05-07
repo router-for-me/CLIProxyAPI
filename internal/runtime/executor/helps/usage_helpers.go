@@ -22,6 +22,7 @@ var failureStatusPattern = regexp.MustCompile(`(?i)(?:status_code|status code|st
 type UsageReporter struct {
 	provider    string
 	model       string
+	alias       string
 	authID      string
 	authIndex   string
 	authType    string
@@ -33,9 +34,14 @@ type UsageReporter struct {
 
 func NewUsageReporter(ctx context.Context, provider, model string, auth *cliproxyauth.Auth) *UsageReporter {
 	apiKey := APIKeyFromContext(ctx)
+	alias := usage.RequestedModelAliasFromContext(ctx)
+	if alias == "" {
+		alias = model
+	}
 	reporter := &UsageReporter{
 		provider:    provider,
 		model:       model,
+		alias:       strings.TrimSpace(alias),
 		requestedAt: time.Now(),
 		apiKey:      apiKey,
 		source:      resolveUsageSource(auth, apiKey),
@@ -147,6 +153,7 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 	return usage.Record{
 		Provider:    r.provider,
 		Model:       model,
+		Alias:       r.alias,
 		Source:      r.source,
 		APIKey:      r.apiKey,
 		AuthID:      r.authID,
@@ -516,12 +523,22 @@ func parseGeminiFamilyUsageDetail(node gjson.Result) usage.Detail {
 	return detail
 }
 
+func hasGeminiFamilyUsageTokenFields(node gjson.Result) bool {
+	return node.Get("promptTokenCount").Exists() ||
+		node.Get("candidatesTokenCount").Exists() ||
+		node.Get("thoughtsTokenCount").Exists() ||
+		node.Get("totalTokenCount").Exists() ||
+		node.Get("cachedContentTokenCount").Exists()
+}
+
 func ParseGeminiCLIUsage(data []byte) usage.Detail {
 	usageNode := gjson.ParseBytes(data)
-	node := usageNode.Get("response.usageMetadata")
-	if !node.Exists() {
-		node = usageNode.Get("response.usage_metadata")
-	}
+	node := firstExistingUsageNode(usageNode,
+		"response.usageMetadata",
+		"response.usage_metadata",
+		"usageMetadata",
+		"usage_metadata",
+	)
 	if !node.Exists() {
 		return usage.Detail{}
 	}
@@ -560,14 +577,30 @@ func ParseGeminiCLIStreamUsage(line []byte) (usage.Detail, bool) {
 	if len(payload) == 0 || !gjson.ValidBytes(payload) {
 		return usage.Detail{}, false
 	}
-	node := gjson.GetBytes(payload, "response.usageMetadata")
-	if !node.Exists() {
-		node = gjson.GetBytes(payload, "usage_metadata")
-	}
+	root := gjson.ParseBytes(payload)
+	node := firstExistingUsageNode(root,
+		"response.usageMetadata",
+		"response.usage_metadata",
+		"usageMetadata",
+		"usage_metadata",
+	)
 	if !node.Exists() {
 		return usage.Detail{}, false
 	}
+	if !hasGeminiFamilyUsageTokenFields(node) {
+		return usage.Detail{}, false
+	}
 	return parseGeminiFamilyUsageDetail(node), true
+}
+
+func firstExistingUsageNode(root gjson.Result, paths ...string) gjson.Result {
+	for _, path := range paths {
+		node := root.Get(path)
+		if node.Exists() {
+			return node
+		}
+	}
+	return gjson.Result{}
 }
 
 func ParseAntigravityUsage(data []byte) usage.Detail {
