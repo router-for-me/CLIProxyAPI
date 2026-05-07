@@ -1460,6 +1460,9 @@ func (e *CodexWebsocketsExecutor) closeAllExecutionSessions(reason string) {
 }
 
 func (e *CodexWebsocketsExecutor) closeExecutionSession(sess *codexWebsocketSession, reason string) {
+	if sess != nil {
+		sess.notifyUpstreamDisconnect(fmt.Errorf("codex websocket session closed: %s", strings.TrimSpace(reason)))
+	}
 	closeCodexWebsocketSession(sess, reason)
 }
 

@@ -190,6 +190,32 @@ func TestCodexWebsocketsUpstreamDisconnectChanSignalsAndResets(t *testing.T) {
 	}
 }
 
+func TestCodexWebsocketsCloseExecutionSessionSignalsDisconnect(t *testing.T) {
+	exec := NewCodexWebsocketsExecutor(&config.Config{})
+	sessionID := "sess-close"
+	disconnectCh := exec.UpstreamDisconnectChan(sessionID)
+	if disconnectCh == nil {
+		t.Fatal("expected disconnect channel")
+	}
+
+	exec.CloseExecutionSession(sessionID)
+
+	select {
+	case errRead, ok := <-disconnectCh:
+		if !ok {
+			t.Fatal("expected disconnect channel to deliver error before closing")
+		}
+		if errRead == nil || !strings.Contains(errRead.Error(), "session_closed") {
+			t.Fatalf("disconnect error = %v, want session_closed", errRead)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for disconnect signal")
+	}
+	if _, ok := <-disconnectCh; ok {
+		t.Fatal("expected disconnect channel to close")
+	}
+}
+
 func TestApplyCodexWebsocketHeadersDefaultsToCurrentResponsesBeta(t *testing.T) {
 	headers := applyCodexWebsocketHeaders(context.Background(), http.Header{}, nil, "", nil)
 
