@@ -76,6 +76,9 @@ type codexWebsocketSession struct {
 	activeCancel context.CancelFunc
 
 	readerConn *websocket.Conn
+
+	upstreamDisconnectOnce sync.Once
+	upstreamDisconnectCh   chan error
 }
 
 func NewCodexWebsocketsExecutor(cfg *config.Config) *CodexWebsocketsExecutor {
@@ -148,6 +151,22 @@ func (s *codexWebsocketSession) configureConn(conn *websocket.Conn) {
 		defer s.writeMu.Unlock()
 		// Reply pongs from the same write lock to avoid concurrent writes.
 		return conn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(10*time.Second))
+	})
+}
+
+func (s *codexWebsocketSession) notifyUpstreamDisconnect(err error) {
+	if s == nil {
+		return
+	}
+	s.upstreamDisconnectOnce.Do(func() {
+		if s.upstreamDisconnectCh == nil {
+			return
+		}
+		select {
+		case s.upstreamDisconnectCh <- err:
+		default:
+		}
+		close(s.upstreamDisconnectCh)
 	})
 }
 
@@ -1223,9 +1242,20 @@ func (e *CodexWebsocketsExecutor) getOrCreateSession(sessionID string) *codexWeb
 	if sess, ok := store.sessions[sessionID]; ok && sess != nil {
 		return sess
 	}
-	sess := &codexWebsocketSession{sessionID: sessionID}
+	sess := &codexWebsocketSession{
+		sessionID:            sessionID,
+		upstreamDisconnectCh: make(chan error, 1),
+	}
 	store.sessions[sessionID] = sess
 	return sess
+}
+
+func (e *CodexWebsocketsExecutor) UpstreamDisconnectChan(sessionID string) <-chan error {
+	sess := e.getOrCreateSession(sessionID)
+	if sess == nil {
+		return nil
+	}
+	return sess.upstreamDisconnectCh
 }
 
 func (e *CodexWebsocketsExecutor) ensureUpstreamConn(ctx context.Context, auth *cliproxyauth.Auth, sess *codexWebsocketSession, authID string, wsURL string, headers http.Header) (*websocket.Conn, *http.Response, error) {
@@ -1356,6 +1386,7 @@ func (e *CodexWebsocketsExecutor) invalidateUpstreamConn(sess *codexWebsocketSes
 	sess.connMu.Unlock()
 
 	logCodexWebsocketDisconnected(sessionID, authID, wsURL, reason, err)
+	sess.notifyUpstreamDisconnect(err)
 	if errClose := conn.Close(); errClose != nil {
 		log.Errorf("codex websockets executor: close websocket error: %v", errClose)
 	}
@@ -1592,6 +1623,13 @@ func (e *CodexAutoExecutor) CloseExecutionSession(sessionID string) {
 		return
 	}
 	e.wsExec.CloseExecutionSession(sessionID)
+}
+
+func (e *CodexAutoExecutor) UpstreamDisconnectChan(sessionID string) <-chan error {
+	if e == nil || e.wsExec == nil {
+		return nil
+	}
+	return e.wsExec.UpstreamDisconnectChan(sessionID)
 }
 
 func codexWebsocketsEnabled(auth *cliproxyauth.Auth) bool {
