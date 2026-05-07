@@ -351,7 +351,7 @@ func (o *AntigravityAuth) OnboardUser(ctx context.Context, accessToken, tierID s
 				}
 
 				if projectID != "" {
-					log.Infof("Successfully fetched project_id: %s", projectID)
+					log.Infof("Successfully fetched project_id: %s", util.HideAPIKey(projectID))
 					return projectID, nil
 				}
 
