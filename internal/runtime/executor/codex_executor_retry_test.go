@@ -210,6 +210,49 @@ func TestCodexExecutorExecuteStream_BuffersTerminalEventBeforeCapacityError(t *t
 	}
 }
 
+func TestCodexExecutorExecuteStream_BuffersControlLinesBeforeCapacityError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(": keep-alive\n"))
+		_, _ = w.Write([]byte("id: resp_123\n"))
+		_, _ = w.Write([]byte("retry: 1000\n\n"))
+		_, _ = w.Write([]byte("event: response.failed\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"Selected model is at capacity. Please try a different model.\"}}}\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL,
+		"api_key":  "test",
+	}}
+
+	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.5",
+		Payload: []byte(`{"model":"gpt-5.5","input":"Say ok"}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+		Stream:       true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+
+	chunk, ok := <-result.Chunks
+	if !ok {
+		t.Fatalf("expected capacity error chunk")
+	}
+	if len(chunk.Payload) > 0 {
+		t.Fatalf("expected no control-line payload before capacity error, got %q", string(chunk.Payload))
+	}
+	if chunk.Err == nil {
+		t.Fatalf("expected capacity error chunk")
+	}
+	if got := statusCodeFromCodexTestError(chunk.Err); got != http.StatusTooManyRequests {
+		t.Fatalf("status code = %d, want %d", got, http.StatusTooManyRequests)
+	}
+}
+
 func TestCodexExecutorExecuteStream_DoesNotBufferContentEventLine(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")

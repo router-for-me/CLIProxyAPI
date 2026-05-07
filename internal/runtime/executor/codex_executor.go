@@ -553,6 +553,9 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 						pendingBootstrapData = true
 					}
 				}
+			case codexStreamControlLine(line):
+				emitTranslatedLine = false
+				pendingBootstrapData = true
 			}
 
 			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, originalPayload, body, translatedLine, &param)
@@ -1087,6 +1090,13 @@ func codexStreamBufferedEvent(eventType string) bool {
 	default:
 		return false
 	}
+}
+
+func codexStreamControlLine(line []byte) bool {
+	line = bytes.TrimSpace(line)
+	return bytes.HasPrefix(line, []byte(":")) ||
+		bytes.HasPrefix(line, []byte("id:")) ||
+		bytes.HasPrefix(line, []byte("retry:"))
 }
 
 func codexStreamStatusErr(eventData []byte) (statusErr, bool) {
