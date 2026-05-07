@@ -431,6 +431,18 @@ func (h *OpenAIResponsesAPIHandler) Compact(c *gin.Context) {
 		cliCancel(errMsg.Error)
 		return
 	}
+	resp, diagnostic, errCompactEvidence := compactResponseWithSameTurnEvidence(rawJSON, resp)
+	logCompactEvidenceDiagnostic(diagnostic)
+	if errCompactEvidence != nil {
+		c.JSON(http.StatusConflict, handlers.ErrorResponse{
+			Error: handlers.ErrorDetail{
+				Message: "Invalid compact same-turn evidence",
+				Type:    "invalid_request_error",
+			},
+		})
+		cliCancel(errCompactEvidence)
+		return
+	}
 	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 	_, _ = c.Writer.Write(resp)
 	cliCancel()

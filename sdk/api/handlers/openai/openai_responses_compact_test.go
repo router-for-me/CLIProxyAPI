@@ -14,12 +14,14 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	"github.com/tidwall/gjson"
 )
 
 type compactCaptureExecutor struct {
 	alt          string
 	sourceFormat string
 	calls        int
+	payload      []byte
 }
 
 func (e *compactCaptureExecutor) Identifier() string { return "test-provider" }
@@ -28,7 +30,11 @@ func (e *compactCaptureExecutor) Execute(ctx context.Context, auth *coreauth.Aut
 	e.calls++
 	e.alt = opts.Alt
 	e.sourceFormat = opts.SourceFormat.String()
-	return coreexecutor.Response{Payload: []byte(`{"ok":true}`)}, nil
+	payload := e.payload
+	if len(payload) == 0 {
+		payload = []byte(`{"ok":true}`)
+	}
+	return coreexecutor.Response{Payload: payload}, nil
 }
 
 func (e *compactCaptureExecutor) ExecuteStream(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (*coreexecutor.StreamResult, error) {
@@ -116,5 +122,100 @@ func TestOpenAIResponsesCompactExecute(t *testing.T) {
 	}
 	if strings.TrimSpace(resp.Body.String()) != `{"ok":true}` {
 		t.Fatalf("body = %s", resp.Body.String())
+	}
+}
+
+func TestOpenAIResponsesCompactAugmentsHiddenOnlyOutputWithSameTurnEvidence(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	executor := &compactCaptureExecutor{
+		payload: []byte(`{"id":"resp-compact","output":[{"type":"compaction_summary","summary":"hidden"}]}`),
+	}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+
+	auth := &coreauth.Auth{ID: "auth-compact-evidence", Provider: executor.Identifier(), Status: coreauth.StatusActive}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "test-model"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	h := NewOpenAIResponsesAPIHandler(base)
+	router := gin.New()
+	router.POST("/v1/responses/compact", h.Compact)
+
+	body := `{
+		"model":"test-model",
+		"input":[
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"please inspect"}]},
+			{"type":"message","role":"assistant","content":[{"type":"output_text","text":"I will inspect the logs."}]},
+			{"type":"function_call","call_id":"call-1","name":"shell","arguments":"{}"},
+			{"type":"function_call_output","call_id":"call-1","output":"ok"}
+		]
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses/compact", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", resp.Code, http.StatusOK, resp.Body.String())
+	}
+	output := gjson.GetBytes(resp.Body.Bytes(), "output")
+	if got, want := len(output.Array()), 4; got != want {
+		t.Fatalf("output item count = %d, want %d; body=%s", got, want, resp.Body.String())
+	}
+	if got := output.Array()[1].Get("role").String(); got != "assistant" {
+		t.Fatalf("merged assistant role = %q, want assistant", got)
+	}
+	if got := output.Array()[2].Get("type").String(); got != "function_call" {
+		t.Fatalf("merged tool call type = %q, want function_call", got)
+	}
+	if got := output.Array()[3].Get("type").String(); got != "function_call_output" {
+		t.Fatalf("merged tool output type = %q, want function_call_output", got)
+	}
+}
+
+func TestOpenAIResponsesCompactRejectsOrphanToolOutputEvidence(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	executor := &compactCaptureExecutor{
+		payload: []byte(`{"id":"resp-compact","output":[{"type":"compaction_summary","summary":"hidden"}]}`),
+	}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+
+	auth := &coreauth.Auth{ID: "auth-compact-orphan", Provider: executor.Identifier(), Status: coreauth.StatusActive}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "test-model"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	h := NewOpenAIResponsesAPIHandler(base)
+	router := gin.New()
+	router.POST("/v1/responses/compact", h.Compact)
+
+	body := `{
+		"model":"test-model",
+		"input":[
+			{"type":"function_call_output","call_id":"missing-call","output":"orphan"}
+		]
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses/compact", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d; body=%s", resp.Code, http.StatusConflict, resp.Body.String())
+	}
+	if !strings.Contains(resp.Body.String(), "Invalid compact same-turn evidence") {
+		t.Fatalf("body = %s, want compact evidence error", resp.Body.String())
 	}
 }
