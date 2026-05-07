@@ -138,3 +138,21 @@ func TestUsageReporterBuildAdditionalModelRecordSkipsZeroTokens(t *testing.T) {
 		t.Fatalf("expected non-zero cached token usage to be recorded")
 	}
 }
+
+// TestParseOpenAIStreamUsageNullUsageField 验证当流式 chunk 中 usage 字段为 null 时
+// ParseOpenAIStreamUsage 是否错误地返回 (Detail{全零}, true)。
+// 如果测试失败（即函数返回了 true），说明 sync.Once 会被提前触发，
+// 导致后续真实 token 数据被丢弃。
+func TestParseOpenAIStreamUsageNullUsageField(t *testing.T) {
+	// 这是 DeepSeek / 大多数 OpenAI 兼容 provider 在中间 chunk 里的典型格式
+	intermediateChunk := []byte(`data: {"id":"abc","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"你好"},"finish_reason":null}],"usage":null}`)
+
+	detail, ok := ParseOpenAIStreamUsage(intermediateChunk)
+
+	// 期望：usage 为 null，应该返回 false，表示"本行没有有效 usage 数据"
+	// 如果 ok == true，说明存在 bug：gjson 对 null 值的 Exists() 返回 true，
+	// 导致函数把全零 Detail 当作有效数据返回
+	if ok {
+		t.Errorf("ok=%t，detail=%#v, want ok=%t", ok, detail, false)
+	}
+}
