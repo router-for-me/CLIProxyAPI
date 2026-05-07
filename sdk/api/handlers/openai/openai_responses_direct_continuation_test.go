@@ -5,9 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -21,6 +23,8 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
+	log "github.com/sirupsen/logrus"
+	logtest "github.com/sirupsen/logrus/hooks/test"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -180,6 +184,8 @@ func TestCodexDirectPostContinuationRejectsOrphanToolOutputBeforeUpstream(t *tes
 
 func TestCodexDirectCompactContinuationPreservesAssistantAndToolEvidence(t *testing.T) {
 	resetCodexDirectContinuationsForTest(t)
+	hook := logtest.NewGlobal()
+	defer hook.Reset()
 
 	model := "gpt-5.4"
 	compactResponseID := "resp-compact-evidence"
@@ -228,10 +234,26 @@ func TestCodexDirectCompactContinuationPreservesAssistantAndToolEvidence(t *test
 		"function_call_output":    1,
 		"custom_tool_call_output": 1,
 	}, 6)
+	entry := assertDirectContinuationLogEntry(t, hook, "codex direct http continuation diagnostic", map[string]any{
+		"route_kind":                 "responses",
+		"compact_request":            false,
+		"has_previous_response_id":   true,
+		"scope_present":              false,
+		"binding_result":             "hit",
+		"repair_result":              "repaired",
+		"input_item_count":           6,
+		"assistant_message_count":    1,
+		"function_call_count":        2,
+		"function_call_output_count": 2,
+		"fail_reason":                "none",
+	})
+	assertDirectContinuationLogEntryRedacted(t, entry, compactResponseID, "summary", "*** Begin Patch", "ok")
 }
 
 func TestCodexDirectHiddenOnlyCompactAugmentsRecentAssistantAndToolEvidence(t *testing.T) {
 	resetCodexDirectContinuationsForTest(t)
+	hook := logtest.NewGlobal()
+	defer hook.Reset()
 
 	model := "gpt-5.4"
 	promptCacheKey := "hidden-compact-scope"
@@ -291,6 +313,27 @@ func TestCodexDirectHiddenOnlyCompactAugmentsRecentAssistantAndToolEvidence(t *t
 		"function_call_output":    1,
 		"custom_tool_call_output": 1,
 	}, 6)
+	entry := assertDirectContinuationLogEntry(t, hook, "codex direct http compact evidence diagnostic", map[string]any{
+		"route_kind":                     "compact",
+		"compact_request":                true,
+		"has_previous_response_id":       false,
+		"scope_present":                  true,
+		"binding_result":                 "none",
+		"repair_result":                  "none",
+		"input_item_count":               1,
+		"assistant_message_count":        0,
+		"function_call_count":            0,
+		"function_call_output_count":     0,
+		"compact_output_has_evidence":    false,
+		"recent_evidence_hit":            true,
+		"compact_evidence_augmented":     true,
+		"bound_output_item_count":        3,
+		"bound_output_assistant_count":   1,
+		"bound_output_tool_call_count":   2,
+		"bound_output_tool_output_count": 0,
+		"fail_reason":                    "none",
+	})
+	assertDirectContinuationLogEntryRedacted(t, entry, promptCacheKey, beforeCompactResponseID, compactResponseID, "ready", "*** Begin Patch")
 }
 
 func TestCodexDirectPostContinuationRepairsFromStreamOutputItemDoneWhenCompletedOutputEmpty(t *testing.T) {
@@ -645,6 +688,49 @@ func assertDirectContinuationErrorCode(t *testing.T, body []byte, expected strin
 	if got := gjson.GetBytes(body, "error.code").String(); got != expected {
 		t.Fatalf("error.code = %q, want %q; body=%s", got, expected, string(body))
 	}
+}
+
+func assertDirectContinuationLogEntry(t *testing.T, hook *logtest.Hook, message string, expected map[string]any) *log.Entry {
+	t.Helper()
+
+	for _, entry := range hook.AllEntries() {
+		if entry.Message != message {
+			continue
+		}
+		matched := true
+		for key, want := range expected {
+			if got := entry.Data[key]; got != want {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return entry
+		}
+	}
+	t.Fatalf("missing log entry %q with fields %v; got %v", message, expected, directContinuationLogFields(hook.AllEntries()))
+	return nil
+}
+
+func assertDirectContinuationLogEntryRedacted(t *testing.T, entry *log.Entry, forbidden ...string) {
+	t.Helper()
+
+	for key, value := range entry.Data {
+		text := fmt.Sprint(value)
+		for _, needle := range forbidden {
+			if needle != "" && strings.Contains(text, needle) {
+				t.Fatalf("log field %q leaked forbidden value %q in %q", key, needle, text)
+			}
+		}
+	}
+}
+
+func directContinuationLogFields(entries []*log.Entry) []log.Fields {
+	fields := make([]log.Fields, 0, len(entries))
+	for _, entry := range entries {
+		fields = append(fields, entry.Data)
+	}
+	return fields
 }
 
 func resetCodexDirectContinuationsForTest(t *testing.T) {

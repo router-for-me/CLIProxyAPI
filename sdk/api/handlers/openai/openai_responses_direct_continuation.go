@@ -13,6 +13,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
+	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -58,6 +59,7 @@ var codexDirectContinuations = &codexDirectContinuationStore{
 type codexDirectContinuationTracker struct {
 	modelName      string
 	requestJSON    []byte
+	routeKind      string
 	scopeKey       string
 	compactRequest bool
 
@@ -72,6 +74,13 @@ type codexDirectContinuationSnapshot struct {
 	responseOutputJSON []byte
 }
 
+type codexDirectEvidenceCounts struct {
+	itemCount               int
+	assistantMessageCount   int
+	functionCallCount       int
+	functionCallOutputCount int
+}
+
 func (h *OpenAIResponsesAPIHandler) prepareCodexDirectContinuationContext(c *gin.Context, rawJSON []byte, modelName string, ctx context.Context) (context.Context, []byte, *codexDirectContinuationTracker, bool) {
 	if !isCodexDirectContinuationRequest(c) {
 		return ctx, rawJSON, nil, true
@@ -82,6 +91,7 @@ func (h *OpenAIResponsesAPIHandler) prepareCodexDirectContinuationContext(c *gin
 	tracker := &codexDirectContinuationTracker{
 		modelName:      modelName,
 		requestJSON:    bytes.Clone(requestJSON),
+		routeKind:      codexDirectRouteKind(c),
 		scopeKey:       codexDirectContinuationScopeKey(c, requestJSON),
 		compactRequest: isCodexDirectCompactRequest(c),
 	}
@@ -90,21 +100,33 @@ func (h *OpenAIResponsesAPIHandler) prepareCodexDirectContinuationContext(c *gin
 		previousResponseID := strings.TrimSpace(gjson.GetBytes(rawJSON, "previous_response_id").String())
 		if previousResponseID != "" {
 			binding, ok := codexDirectContinuations.lookup(previousResponseID, modelName)
-			if !ok || !h.codexDirectContinuationBindingAuthUsable(binding, modelName) {
+			if !ok {
+				tracker.logDecision(rawJSON, "miss", "none", "missing_binding")
+				writeCodexDirectContinuationError(c)
+				return ctx, nil, nil, false
+			}
+			if !h.codexDirectContinuationBindingAuthUsable(binding, modelName) {
+				tracker.logDecision(rawJSON, "unusable", "none", "unusable_auth")
 				writeCodexDirectContinuationError(c)
 				return ctx, nil, nil, false
 			}
 
 			repairedJSON, errRepair := repairCodexDirectContinuationRequest(rawJSON, binding)
 			if errRepair != nil {
+				tracker.logDecision(rawJSON, "hit", "failed", codexDirectContinuationRepairFailReason(errRepair))
 				writeCodexDirectContinuationRepairError(c)
 				return ctx, nil, nil, false
 			}
 			requestJSON = repairedJSON
 			tracker.requestJSON = bytes.Clone(requestJSON)
 			tracker.setAuthID(binding.authID)
+			tracker.logDecision(requestJSON, "hit", "repaired", "none")
 			ctx = handlers.WithPinnedAuthID(ctx, binding.authID)
 		}
+	}
+
+	if tracker.compactRequest {
+		tracker.logDecision(requestJSON, "none", "none", "none")
 	}
 
 	ctx = handlers.WithSelectedAuthIDCallback(ctx, tracker.setAuthID)
@@ -151,7 +173,16 @@ func (t *codexDirectContinuationTracker) bindResponseIDs(payload []byte) {
 		return
 	}
 	for _, snapshot := range t.snapshotsFromPayload(payload) {
-		codexDirectContinuations.bind(snapshot.responseID, authID, t.modelName, t.scopeKey, t.requestJSON, snapshot.responseOutputJSON, t.compactRequest)
+		codexDirectContinuations.bind(
+			snapshot.responseID,
+			authID,
+			t.modelName,
+			t.scopeKey,
+			t.requestJSON,
+			snapshot.responseOutputJSON,
+			t.routeKind,
+			t.compactRequest,
+		)
 	}
 }
 
@@ -278,7 +309,28 @@ func (t *codexDirectContinuationTracker) getAuthID() string {
 	return t.authID
 }
 
-func (s *codexDirectContinuationStore) bind(responseID, authID, modelName, scopeKey string, requestJSON []byte, responseOutputJSON []byte, allowRecentEvidenceAugmentation bool) {
+func (t *codexDirectContinuationTracker) logDecision(requestJSON []byte, bindingResult, repairResult, failReason string) {
+	if t == nil {
+		return
+	}
+	fields := codexDirectBaseDiagnosticFields(
+		t.routeKind,
+		t.compactRequest,
+		strings.TrimSpace(gjson.GetBytes(requestJSON, "previous_response_id").String()) != "" || bindingResult == "hit" || bindingResult == "miss" || bindingResult == "unusable",
+		t.scopeKey != "",
+		bindingResult,
+		repairResult,
+		failReason,
+		codexDirectInputEvidenceCounts(requestJSON),
+	)
+	if repairResult == "failed" {
+		log.WithFields(fields).Warn("codex direct http continuation diagnostic")
+		return
+	}
+	log.WithFields(fields).Info("codex direct http continuation diagnostic")
+}
+
+func (s *codexDirectContinuationStore) bind(responseID, authID, modelName, scopeKey string, requestJSON []byte, responseOutputJSON []byte, routeKind string, allowRecentEvidenceAugmentation bool) {
 	responseID = strings.TrimSpace(responseID)
 	authID = strings.TrimSpace(authID)
 	modelName = strings.TrimSpace(modelName)
@@ -288,14 +340,18 @@ func (s *codexDirectContinuationStore) bind(responseID, authID, modelName, scope
 	}
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.ensureLocked()
 	now := time.Now()
 	s.pruneExpiredLocked(now)
 	outputJSON := normalizeCodexDirectResponseOutputJSON(responseOutputJSON)
-	if allowRecentEvidenceAugmentation && !codexDirectOutputHasAssistantOrToolEvidence(outputJSON) {
+	compactOutputHasEvidence := codexDirectOutputHasAssistantOrToolEvidence(outputJSON)
+	recentEvidenceHit := false
+	compactEvidenceAugmented := false
+	if allowRecentEvidenceAugmentation && !compactOutputHasEvidence {
 		if recent, ok := s.recentEvidenceLocked(authID, modelName, scopeKey, now); ok {
 			outputJSON = recent.responseOutputJSON
+			recentEvidenceHit = true
+			compactEvidenceAugmented = true
 		}
 	}
 	if codexDirectOutputHasAssistantOrToolEvidence(outputJSON) {
@@ -309,6 +365,128 @@ func (s *codexDirectContinuationStore) bind(responseID, authID, modelName, scope
 		expiresAt:          now.Add(codexDirectContinuationTTL),
 	}
 	s.trimLocked(codexDirectContinuationMaxBindingCapacity)
+	s.mu.Unlock()
+
+	if allowRecentEvidenceAugmentation {
+		codexDirectLogCompactEvidenceDiagnostic(
+			routeKind,
+			scopeKey != "",
+			requestJSON,
+			outputJSON,
+			compactOutputHasEvidence,
+			recentEvidenceHit,
+			compactEvidenceAugmented,
+		)
+	}
+}
+
+func codexDirectBaseDiagnosticFields(routeKind string, compactRequest, hasPreviousResponseID, scopePresent bool, bindingResult, repairResult, failReason string, counts codexDirectEvidenceCounts) log.Fields {
+	routeKind = strings.TrimSpace(routeKind)
+	if routeKind == "" {
+		routeKind = "unknown"
+	}
+	bindingResult = strings.TrimSpace(bindingResult)
+	if bindingResult == "" {
+		bindingResult = "none"
+	}
+	repairResult = strings.TrimSpace(repairResult)
+	if repairResult == "" {
+		repairResult = "none"
+	}
+	failReason = strings.TrimSpace(failReason)
+	if failReason == "" {
+		failReason = "none"
+	}
+	return log.Fields{
+		"route_kind":                     routeKind,
+		"compact_request":                compactRequest,
+		"has_previous_response_id":       hasPreviousResponseID,
+		"scope_present":                  scopePresent,
+		"binding_result":                 bindingResult,
+		"repair_result":                  repairResult,
+		"input_item_count":               counts.itemCount,
+		"assistant_message_count":        counts.assistantMessageCount,
+		"function_call_count":            counts.functionCallCount,
+		"function_call_output_count":     counts.functionCallOutputCount,
+		"compact_output_has_evidence":    false,
+		"recent_evidence_hit":            false,
+		"compact_evidence_augmented":     false,
+		"fail_reason":                    failReason,
+		"bound_output_item_count":        0,
+		"bound_output_assistant_count":   0,
+		"bound_output_tool_call_count":   0,
+		"bound_output_tool_output_count": 0,
+	}
+}
+
+func codexDirectLogCompactEvidenceDiagnostic(routeKind string, scopePresent bool, requestJSON, boundOutputJSON []byte, compactOutputHasEvidence, recentEvidenceHit, compactEvidenceAugmented bool) {
+	fields := codexDirectBaseDiagnosticFields(
+		routeKind,
+		true,
+		strings.TrimSpace(gjson.GetBytes(requestJSON, "previous_response_id").String()) != "",
+		scopePresent,
+		"none",
+		"none",
+		"none",
+		codexDirectInputEvidenceCounts(requestJSON),
+	)
+	boundCounts := codexDirectOutputEvidenceCounts(boundOutputJSON)
+	fields["compact_output_has_evidence"] = compactOutputHasEvidence
+	fields["recent_evidence_hit"] = recentEvidenceHit
+	fields["compact_evidence_augmented"] = compactEvidenceAugmented
+	fields["bound_output_item_count"] = boundCounts.itemCount
+	fields["bound_output_assistant_count"] = boundCounts.assistantMessageCount
+	fields["bound_output_tool_call_count"] = boundCounts.functionCallCount
+	fields["bound_output_tool_output_count"] = boundCounts.functionCallOutputCount
+	log.WithFields(fields).Info("codex direct http compact evidence diagnostic")
+}
+
+func codexDirectInputEvidenceCounts(rawJSON []byte) codexDirectEvidenceCounts {
+	return codexDirectEvidenceCountsFromArray(gjson.GetBytes(rawJSON, "input"))
+}
+
+func codexDirectOutputEvidenceCounts(rawJSON []byte) codexDirectEvidenceCounts {
+	return codexDirectEvidenceCountsFromArray(gjson.ParseBytes(normalizeCodexDirectResponseOutputJSON(rawJSON)))
+}
+
+func codexDirectEvidenceCountsFromArray(input gjson.Result) codexDirectEvidenceCounts {
+	if !input.IsArray() {
+		return codexDirectEvidenceCounts{}
+	}
+	items := input.Array()
+	counts := codexDirectEvidenceCounts{itemCount: len(items)}
+	for _, item := range items {
+		itemType := strings.TrimSpace(item.Get("type").String())
+		if itemType == "message" && strings.TrimSpace(item.Get("role").String()) == "assistant" {
+			counts.assistantMessageCount++
+		}
+		if isResponsesToolCallType(itemType) {
+			counts.functionCallCount++
+		}
+		if isResponsesToolCallOutputType(itemType) {
+			counts.functionCallOutputCount++
+		}
+	}
+	return counts
+}
+
+func codexDirectContinuationRepairFailReason(err error) string {
+	if err == nil {
+		return "none"
+	}
+	message := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(message, "tool output missing matching call"):
+		return "orphan_tool_output"
+	case strings.Contains(message, "missing array input"),
+		strings.Contains(message, "missing array"),
+		strings.Contains(message, "invalid request input"),
+		strings.Contains(message, "invalid previous response output"),
+		strings.Contains(message, "set repaired input"):
+		return "invalid_input"
+	default:
+		return "invalid_input"
+	}
 }
 
 func (s *codexDirectContinuationStore) lookup(responseID, modelName string) (codexDirectContinuationBinding, bool) {
@@ -605,6 +783,17 @@ func codexDirectContinuationScopeKey(c *gin.Context, rawJSON []byte) string {
 
 func isCodexDirectContinuationRequest(c *gin.Context) bool {
 	return isCodexDirectResponsesRequest(c) || isCodexDirectCompactRequest(c)
+}
+
+func codexDirectRouteKind(c *gin.Context) string {
+	switch {
+	case isCodexDirectCompactRequest(c):
+		return "compact"
+	case isCodexDirectResponsesRequest(c):
+		return "responses"
+	default:
+		return "unknown"
+	}
 }
 
 func isCodexDirectResponsesRequest(c *gin.Context) bool {
