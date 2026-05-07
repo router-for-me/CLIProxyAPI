@@ -415,6 +415,49 @@ func TestCodexExecutorExecuteStream_PreservesInvalidRequestFailureStatus(t *test
 	}
 }
 
+func TestCodexExecutorExecuteStream_PreservesAuthenticationFailureStatus(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("event: response.failed\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"invalid or expired token\",\"type\":\"authentication_error\",\"code\":\"invalid_api_key\"}}}\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL,
+		"api_key":  "test",
+	}}
+
+	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.5",
+		Payload: []byte(`{"model":"gpt-5.5","input":"Say ok"}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+		Stream:       true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+
+	chunk, ok := <-result.Chunks
+	if !ok {
+		t.Fatalf("expected auth error chunk")
+	}
+	if len(chunk.Payload) > 0 {
+		t.Fatalf("expected no payload before auth error, got %q", string(chunk.Payload))
+	}
+	if chunk.Err == nil {
+		t.Fatalf("expected auth error chunk")
+	}
+	if got := statusCodeFromCodexTestError(chunk.Err); got != http.StatusUnauthorized {
+		t.Fatalf("status code = %d, want %d", got, http.StatusUnauthorized)
+	}
+	if !strings.Contains(chunk.Err.Error(), "auth_unavailable") {
+		t.Fatalf("expected classified auth error, got %v", chunk.Err)
+	}
+}
+
 func TestCodexExecutorExecuteStream_ReturnsMissingCompletedOnBootstrapOnlyEOF(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")

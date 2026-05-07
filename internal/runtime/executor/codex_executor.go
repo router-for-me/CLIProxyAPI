@@ -1107,10 +1107,21 @@ func codexStreamStatusErr(eventData []byte) (statusErr, bool) {
 	if isCodexModelCapacityError(errorBody) {
 		return newCodexStatusErr(http.StatusBadRequest, errorBody), true
 	}
-	if _, _, okClassified := codexStatusErrorClassification(http.StatusBadRequest, errorBody); okClassified {
-		return newCodexStatusErr(http.StatusBadRequest, errorBody), true
+	if statusCode, okClassified := codexStreamClassifiedStatus(errorBody); okClassified {
+		return newCodexStatusErr(statusCode, errorBody), true
 	}
 	return newCodexStatusErr(http.StatusRequestTimeout, errorBody), true
+}
+
+func codexStreamClassifiedStatus(errorBody []byte) (int, bool) {
+	code, errType, ok := codexStatusErrorClassification(http.StatusBadRequest, errorBody)
+	if !ok {
+		return 0, false
+	}
+	if errType == "authentication_error" || code == "auth_unavailable" {
+		return http.StatusUnauthorized, true
+	}
+	return http.StatusBadRequest, true
 }
 
 func codexStreamErrorBody(eventData []byte) ([]byte, bool) {
