@@ -139,20 +139,20 @@ func TestUsageReporterBuildAdditionalModelRecordSkipsZeroTokens(t *testing.T) {
 	}
 }
 
-// TestParseOpenAIStreamUsageNullUsageField 验证当流式 chunk 中 usage 字段为 null 时
-// ParseOpenAIStreamUsage 是否错误地返回 (Detail{全零}, true)。
-// 如果测试失败（即函数返回了 true），说明 sync.Once 会被提前触发，
-// 导致后续真实 token 数据被丢弃。
+// TestParseOpenAIStreamUsageNullUsageField verifies that when the usage field in a streaming chunk is null,
+// ParseOpenAIStreamUsage does not incorrectly return (Detail{}, true).
+// If the test fails (returns true), it means the sync.Once guard would be triggered prematurely,
+// causing subsequent valid token data to be discarded.
 func TestParseOpenAIStreamUsageNullUsageField(t *testing.T) {
-	// 这是 DeepSeek / 大多数 OpenAI 兼容 provider 在中间 chunk 里的典型格式
+	// This is a typical format for intermediate chunks in DeepSeek / most OpenAI-compatible providers.
 	intermediateChunk := []byte(`data: {"id":"abc","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"你好"},"finish_reason":null}],"usage":null}`)
 
 	detail, ok := ParseOpenAIStreamUsage(intermediateChunk)
 
-	// 期望：usage 为 null，应该返回 false，表示"本行没有有效 usage 数据"
-	// 如果 ok == true，说明存在 bug：gjson 对 null 值的 Exists() 返回 true，
-	// 导致函数把全零 Detail 当作有效数据返回
+	// Expectation: if usage is null, it should return false, indicating "no valid usage data in this line".
+	// If ok == true, it indicates a bug where gjson's Exists() returns true for null values,
+	// causing the function to return a zeroed Detail as valid data.
 	if ok {
-		t.Errorf("ok=%t，detail=%#v, want ok=%t", ok, detail, false)
+		t.Fatalf("ok=%t, detail=%#v, want ok=%t", ok, detail, false)
 	}
 }

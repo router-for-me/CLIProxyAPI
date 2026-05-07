@@ -307,7 +307,7 @@ func ParseOpenAIStreamUsage(line []byte) (usage.Detail, bool) {
 		return usage.Detail{}, false
 	}
 	usageNode := gjson.GetBytes(payload, "usage")
-	if !usageNode.Exists() || usageNode.Type == gjson.Null {
+	if !usageNode.IsObject() {
 		return usage.Detail{}, false
 	}
 	detail := usage.Detail{
