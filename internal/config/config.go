@@ -14,9 +14,10 @@ import (
 	"syscall"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
-	log "github.com/sirupsen/logrus"
-	"golang.org/x/crypto/bcrypt"
-	"gopkg.in/yaml.v3"
+	temporal "github.com/router-for-me/CLIProxyAPI/v6/internal/temporal"
+ 	log "github.com/sirupsen/logrus"
+ 	"golang.org/x/crypto/bcrypt"
+ 	"gopkg.in/yaml.v3"
 )
 
 const (
@@ -141,6 +142,10 @@ type Config struct {
 
 	// Payload defines default and override rules for provider payload parameters.
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
+
+	// Temporal controls temporal anti-drift injection into LLM request payloads.
+	// nil means use defaults (enabled, every request).
+	Temporal *temporal.Config `yaml:"temporal" json:"temporal"`
 
 	legacyMigrationPending bool `yaml:"-" json:"-"`
 }
