@@ -310,6 +310,10 @@ func ParseOpenAIStreamUsage(line []byte) (usage.Detail, bool) {
 	if !usageNode.Exists() {
 		return usage.Detail{}, false
 	}
+	// Skip placeholder usage injected by stream_options.include_usage (all-zero tokens in non-terminal chunks).
+	if usageNode.Get("total_tokens").Int() == 0 && usageNode.Get("prompt_tokens").Int() == 0 {
+		return usage.Detail{}, false
+	}
 	detail := usage.Detail{
 		InputTokens:  usageNode.Get("prompt_tokens").Int(),
 		OutputTokens: usageNode.Get("completion_tokens").Int(),
