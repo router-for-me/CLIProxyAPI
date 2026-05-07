@@ -40,6 +40,10 @@ var dataTag = []byte("data:")
 const (
 	codexModelCapacityRetryAfter = time.Second
 	codexMissingCompletedMessage = "stream error: stream disconnected before completion: stream closed before response.completed"
+
+	// Keep the retry-sensitive startup window small so long queued streams still
+	// flush headers and lifecycle keep-alives to downstream clients.
+	codexStreamBootstrapBufferLineLimit = 12
 )
 
 // Streamed Codex responses may emit response.output_item.done events while leaving
@@ -507,12 +511,28 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		sawTerminalEvent := false
 		var pendingEventChunks [][]byte
 		pendingBootstrapData := false
+		pendingBufferedLines := 0
+		bootstrapBuffering := true
+		flushPendingEvents := func() bool {
+			for i := range pendingEventChunks {
+				select {
+				case out <- cliproxyexecutor.StreamChunk{Payload: pendingEventChunks[i]}:
+				case <-ctx.Done():
+					return false
+				}
+			}
+			pendingEventChunks = nil
+			pendingBootstrapData = false
+			pendingBufferedLines = 0
+			return true
+		}
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			translatedLine := bytes.Clone(line)
 			eventType := ""
 			emitTranslatedLine := true
+			countAsBootstrapBuffer := false
 
 			switch {
 			case bytes.HasPrefix(line, dataTag):
@@ -540,45 +560,67 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 					data = patchCodexCompletedOutput(data, outputItemsByIndex, outputItemsFallback)
 					translatedLine = append([]byte("data: "), data...)
 				case "response.created", "response.in_progress", "response.queued":
-					emitTranslatedLine = false
-					pendingBootstrapData = true
+					if bootstrapBuffering {
+						emitTranslatedLine = false
+						pendingBootstrapData = true
+						countAsBootstrapBuffer = true
+					}
 				case "response.incomplete", "response.failed", "response.error", "error":
 					sawTerminalEvent = true
 				}
 			case bytes.HasPrefix(line, []byte("event:")):
 				eventType = strings.TrimSpace(string(line[len("event:"):]))
 				if codexStreamBufferedEvent(eventType) {
-					emitTranslatedLine = false
-					if codexStreamBootstrapEvent(eventType) {
+					isBootstrapEvent := codexStreamBootstrapEvent(eventType)
+					if bootstrapBuffering || !isBootstrapEvent {
+						emitTranslatedLine = false
+					}
+					if bootstrapBuffering && isBootstrapEvent {
 						pendingBootstrapData = true
+						countAsBootstrapBuffer = true
 					}
 				}
 			case codexStreamControlLine(line):
-				emitTranslatedLine = false
-				pendingBootstrapData = true
+				if bootstrapBuffering {
+					emitTranslatedLine = false
+					pendingBootstrapData = true
+					countAsBootstrapBuffer = true
+				}
 			}
 
 			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, originalPayload, body, translatedLine, &param)
 			if len(bytes.TrimSpace(line)) == 0 {
 				if len(pendingEventChunks) > 0 {
 					pendingEventChunks = append(pendingEventChunks, []byte("\n\n"))
+					if bootstrapBuffering && pendingBootstrapData {
+						pendingBufferedLines++
+						if pendingBufferedLines >= codexStreamBootstrapBufferLineLimit {
+							if !flushPendingEvents() {
+								return
+							}
+							bootstrapBuffering = false
+						}
+					}
 				}
 				continue
 			}
 			if !emitTranslatedLine {
 				pendingEventChunks = append(pendingEventChunks, chunks...)
+				if countAsBootstrapBuffer {
+					pendingBufferedLines++
+					if pendingBufferedLines >= codexStreamBootstrapBufferLineLimit {
+						if !flushPendingEvents() {
+							return
+						}
+						bootstrapBuffering = false
+					}
+				}
 				continue
 			}
 			if len(pendingEventChunks) > 0 {
-				for i := range pendingEventChunks {
-					select {
-					case out <- cliproxyexecutor.StreamChunk{Payload: pendingEventChunks[i]}:
-					case <-ctx.Done():
-						return
-					}
+				if !flushPendingEvents() {
+					return
 				}
-				pendingEventChunks = nil
-				pendingBootstrapData = false
 			}
 			for i := range chunks {
 				select {

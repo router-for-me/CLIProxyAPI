@@ -253,6 +253,59 @@ func TestCodexExecutorExecuteStream_BuffersControlLinesBeforeCapacityError(t *te
 	}
 }
 
+func TestCodexExecutorExecuteStream_FlushesLongBootstrapBufferBeforeContent(t *testing.T) {
+	bootstrapFlushed := make(chan struct{})
+	allowContent := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		for i := 0; i < 4; i++ {
+			_, _ = w.Write([]byte("event: response.in_progress\n"))
+			_, _ = w.Write([]byte("data: {\"type\":\"response.in_progress\"}\n\n"))
+		}
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		close(bootstrapFlushed)
+		<-allowContent
+		_, _ = w.Write([]byte("event: response.output_text.delta\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n"))
+		_, _ = w.Write([]byte("event: response.completed\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_123\",\"output\":[]}}\n\n"))
+	}))
+	defer server.Close()
+	defer close(allowContent)
+
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL,
+		"api_key":  "test",
+	}}
+
+	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.5",
+		Payload: []byte(`{"model":"gpt-5.5","input":"Say ok"}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+		Stream:       true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+
+	<-bootstrapFlushed
+	select {
+	case chunk := <-result.Chunks:
+		if chunk.Err != nil {
+			t.Fatalf("expected buffered bootstrap payload, got error %v", chunk.Err)
+		}
+		if !bytes.Contains(chunk.Payload, []byte("response.in_progress")) {
+			t.Fatalf("expected bootstrap payload before content, got %q", string(chunk.Payload))
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for bounded bootstrap buffer to flush")
+	}
+}
+
 func TestCodexExecutorExecuteStream_DoesNotBufferContentEventLine(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
