@@ -180,7 +180,7 @@ waitForCallback:
 			log.Warnf("antigravity: failed to fetch project ID: %v", errProject)
 		} else {
 			projectID = fetchedProjectID
-			log.Infof("antigravity: obtained project ID %s", projectID)
+			log.Infof("antigravity: obtained project ID %s", util.HideAPIKey(projectID))
 		}
 	}
 
@@ -208,7 +208,7 @@ waitForCallback:
 
 	fmt.Println("Antigravity authentication successful")
 	if projectID != "" {
-		fmt.Printf("Using GCP project: %s\n", projectID)
+		fmt.Printf("Using GCP project: %s\n", util.HideAPIKey(projectID))
 	}
 	return &coreauth.Auth{
 		ID:       fileName,
