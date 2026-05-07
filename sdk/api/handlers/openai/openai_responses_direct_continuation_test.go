@@ -230,6 +230,69 @@ func TestCodexDirectCompactContinuationPreservesAssistantAndToolEvidence(t *test
 	}, 6)
 }
 
+func TestCodexDirectHiddenOnlyCompactAugmentsRecentAssistantAndToolEvidence(t *testing.T) {
+	resetCodexDirectContinuationsForTest(t)
+
+	model := "gpt-5.4"
+	promptCacheKey := "hidden-compact-scope"
+	beforeCompactResponseID := "resp-before-hidden-compact"
+	compactResponseID := "resp-hidden-compact"
+	beforeCompactOutput := `[` +
+		`{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ready"}]},` +
+		`{"type":"function_call","call_id":"call_fn","name":"shell","arguments":"{}"},` +
+		`{"type":"custom_tool_call","call_id":"call_custom","name":"apply_patch","input":"*** Begin Patch"}` +
+		`]`
+	hiddenOnlyCompactOutput := `[{"type":"compaction_summary","summary":[{"type":"summary_text","text":"hidden compact state"}]}]`
+	capture := &directContinuationUpstreamCapture{}
+	upstream := newDirectContinuationUpstream(t, capture,
+		directContinuationUpstreamResponse{
+			path: directCodexUpstreamResponsesPath,
+			body: directContinuationSSECompleted(beforeCompactResponseID, beforeCompactOutput),
+		},
+		directContinuationUpstreamResponse{
+			path: directCodexUpstreamCompactPath,
+			body: []byte(`{"id":"` + compactResponseID + `","object":"response","status":"completed","output":` + hiddenOnlyCompactOutput + `}`),
+		},
+		directContinuationUpstreamResponse{
+			path: directCodexUpstreamResponsesPath,
+			body: directContinuationSSECompleted("resp-after-hidden-compact", `[{"type":"message","role":"assistant","content":[]}]`),
+		},
+	)
+	defer upstream.Close()
+
+	h := newDirectContinuationHandler(t, nil, directContinuationAuthSpec{
+		id:       "direct-hidden-compact-auth",
+		models:   []string{model},
+		baseURL:  upstream.URL,
+		provider: "codex",
+		apiKey:   "test",
+	})
+
+	firstRecorder := performDirectContinuationRequest(t, h, directCodexResponsesPath, directContinuationWithPromptCacheKey(directContinuationUserMessageBody(model, true), promptCacheKey))
+	if firstRecorder.Code != http.StatusOK {
+		t.Fatalf("first request status = %d, want %d", firstRecorder.Code, http.StatusOK)
+	}
+	compactRecorder := performDirectContinuationRequest(t, h, directCodexCompactPath, directContinuationWithPromptCacheKey(directContinuationCompactBody(model), promptCacheKey))
+	if compactRecorder.Code != http.StatusOK {
+		t.Fatalf("compact request status = %d, want %d", compactRecorder.Code, http.StatusOK)
+	}
+
+	nextRecorder := performDirectContinuationRequest(t, h, directCodexResponsesPath, directContinuationWithPromptCacheKey(directContinuationToolOutputsBody(model, true, compactResponseID), promptCacheKey))
+	if nextRecorder.Code != http.StatusOK {
+		t.Fatalf("next request status = %d, want %d", nextRecorder.Code, http.StatusOK)
+	}
+	if capture.calls.Load() != 3 {
+		t.Fatalf("upstream calls = %d, want 3", capture.calls.Load())
+	}
+	assertDirectContinuationUpstreamInputCounts(t, capture.lastBody(), map[string]int{
+		"message":                 2,
+		"function_call":           1,
+		"custom_tool_call":        1,
+		"function_call_output":    1,
+		"custom_tool_call_output": 1,
+	}, 6)
+}
+
 func TestCodexDirectPostContinuationRepairsFromStreamOutputItemDoneWhenCompletedOutputEmpty(t *testing.T) {
 	resetCodexDirectContinuationsForTest(t)
 
@@ -475,6 +538,14 @@ func directContinuationToolOutputsBody(model string, stream bool, previousRespon
 	return raw
 }
 
+func directContinuationWithPromptCacheKey(raw []byte, promptCacheKey string) []byte {
+	updated, err := sjson.SetBytes(raw, "prompt_cache_key", promptCacheKey)
+	if err != nil {
+		panic(err)
+	}
+	return updated
+}
+
 type directContinuationUpstreamResponse struct {
 	path        string
 	body        []byte
@@ -582,6 +653,7 @@ func resetCodexDirectContinuationsForTest(t *testing.T) {
 	reset := func() {
 		codexDirectContinuations.mu.Lock()
 		codexDirectContinuations.bindings = make(map[string]codexDirectContinuationBinding)
+		codexDirectContinuations.recentEvidence = make(map[string]codexDirectRecentEvidence)
 		codexDirectContinuations.mu.Unlock()
 	}
 	reset()

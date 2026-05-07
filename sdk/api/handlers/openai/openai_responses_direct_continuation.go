@@ -22,7 +22,8 @@ const (
 	codexDirectCompactPath   = "/backend-api/codex/responses/compact"
 
 	// Direct HTTP continuation state is process-local by design. A restart drops
-	// bindings and forces unknown continuations to fail closed before upstream.
+	// bindings/recent evidence and forces unknown continuations to fail closed
+	// before upstream.
 	codexDirectContinuationTTL                = 30 * time.Minute
 	codexDirectContinuationMaxBindingCapacity = 1024
 )
@@ -35,18 +36,30 @@ type codexDirectContinuationBinding struct {
 	expiresAt          time.Time
 }
 
+type codexDirectRecentEvidence struct {
+	authID             string
+	modelName          string
+	scopeKey           string
+	responseOutputJSON []byte
+	expiresAt          time.Time
+}
+
 type codexDirectContinuationStore struct {
-	mu       sync.Mutex
-	bindings map[string]codexDirectContinuationBinding
+	mu             sync.Mutex
+	bindings       map[string]codexDirectContinuationBinding
+	recentEvidence map[string]codexDirectRecentEvidence
 }
 
 var codexDirectContinuations = &codexDirectContinuationStore{
-	bindings: make(map[string]codexDirectContinuationBinding),
+	bindings:       make(map[string]codexDirectContinuationBinding),
+	recentEvidence: make(map[string]codexDirectRecentEvidence),
 }
 
 type codexDirectContinuationTracker struct {
-	modelName   string
-	requestJSON []byte
+	modelName      string
+	requestJSON    []byte
+	scopeKey       string
+	compactRequest bool
 
 	mu                  sync.Mutex
 	authID              string
@@ -67,8 +80,10 @@ func (h *OpenAIResponsesAPIHandler) prepareCodexDirectContinuationContext(c *gin
 	modelName = strings.TrimSpace(modelName)
 	requestJSON := bytes.Clone(rawJSON)
 	tracker := &codexDirectContinuationTracker{
-		modelName:   modelName,
-		requestJSON: bytes.Clone(requestJSON),
+		modelName:      modelName,
+		requestJSON:    bytes.Clone(requestJSON),
+		scopeKey:       codexDirectContinuationScopeKey(c, requestJSON),
+		compactRequest: isCodexDirectCompactRequest(c),
 	}
 
 	if isCodexDirectResponsesRequest(c) {
@@ -136,7 +151,7 @@ func (t *codexDirectContinuationTracker) bindResponseIDs(payload []byte) {
 		return
 	}
 	for _, snapshot := range t.snapshotsFromPayload(payload) {
-		codexDirectContinuations.bind(snapshot.responseID, authID, t.modelName, t.requestJSON, snapshot.responseOutputJSON)
+		codexDirectContinuations.bind(snapshot.responseID, authID, t.modelName, t.scopeKey, t.requestJSON, snapshot.responseOutputJSON, t.compactRequest)
 	}
 }
 
@@ -263,10 +278,11 @@ func (t *codexDirectContinuationTracker) getAuthID() string {
 	return t.authID
 }
 
-func (s *codexDirectContinuationStore) bind(responseID, authID, modelName string, requestJSON []byte, responseOutputJSON []byte) {
+func (s *codexDirectContinuationStore) bind(responseID, authID, modelName, scopeKey string, requestJSON []byte, responseOutputJSON []byte, allowRecentEvidenceAugmentation bool) {
 	responseID = strings.TrimSpace(responseID)
 	authID = strings.TrimSpace(authID)
 	modelName = strings.TrimSpace(modelName)
+	scopeKey = strings.TrimSpace(scopeKey)
 	if responseID == "" || authID == "" {
 		return
 	}
@@ -276,11 +292,20 @@ func (s *codexDirectContinuationStore) bind(responseID, authID, modelName string
 	s.ensureLocked()
 	now := time.Now()
 	s.pruneExpiredLocked(now)
+	outputJSON := normalizeCodexDirectResponseOutputJSON(responseOutputJSON)
+	if allowRecentEvidenceAugmentation && !codexDirectOutputHasAssistantOrToolEvidence(outputJSON) {
+		if recent, ok := s.recentEvidenceLocked(authID, modelName, scopeKey, now); ok {
+			outputJSON = recent.responseOutputJSON
+		}
+	}
+	if codexDirectOutputHasAssistantOrToolEvidence(outputJSON) {
+		s.rememberRecentEvidenceLocked(authID, modelName, scopeKey, outputJSON, now)
+	}
 	s.bindings[responseID] = codexDirectContinuationBinding{
 		authID:             authID,
 		modelName:          modelName,
 		requestJSON:        bytes.Clone(requestJSON),
-		responseOutputJSON: normalizeCodexDirectResponseOutputJSON(responseOutputJSON),
+		responseOutputJSON: outputJSON,
 		expiresAt:          now.Add(codexDirectContinuationTTL),
 	}
 	s.trimLocked(codexDirectContinuationMaxBindingCapacity)
@@ -317,6 +342,9 @@ func (s *codexDirectContinuationStore) ensureLocked() {
 	if s.bindings == nil {
 		s.bindings = make(map[string]codexDirectContinuationBinding)
 	}
+	if s.recentEvidence == nil {
+		s.recentEvidence = make(map[string]codexDirectRecentEvidence)
+	}
 }
 
 func (s *codexDirectContinuationStore) pruneExpiredLocked(now time.Time) {
@@ -328,12 +356,20 @@ func (s *codexDirectContinuationStore) pruneExpiredLocked(now time.Time) {
 			delete(s.bindings, responseID)
 		}
 	}
+	for key, recent := range s.recentEvidence {
+		if !recent.expiresAt.IsZero() && !now.Before(recent.expiresAt) {
+			delete(s.recentEvidence, key)
+		}
+	}
 }
 
 func (s *codexDirectContinuationStore) trimLocked(maxBindings int) {
 	if maxBindings <= 0 {
 		for responseID := range s.bindings {
 			delete(s.bindings, responseID)
+		}
+		for key := range s.recentEvidence {
+			delete(s.recentEvidence, key)
 		}
 		return
 	}
@@ -351,6 +387,64 @@ func (s *codexDirectContinuationStore) trimLocked(maxBindings int) {
 		}
 		delete(s.bindings, oldestResponseID)
 	}
+	for len(s.recentEvidence) > maxBindings {
+		oldestKey := ""
+		var oldestExpiresAt time.Time
+		for key, recent := range s.recentEvidence {
+			if oldestKey == "" || recent.expiresAt.Before(oldestExpiresAt) {
+				oldestKey = key
+				oldestExpiresAt = recent.expiresAt
+			}
+		}
+		if oldestKey == "" {
+			return
+		}
+		delete(s.recentEvidence, oldestKey)
+	}
+}
+
+func (s *codexDirectContinuationStore) rememberRecentEvidenceLocked(authID, modelName, scopeKey string, responseOutputJSON []byte, now time.Time) {
+	key := codexDirectRecentEvidenceKey(authID, modelName, scopeKey)
+	if key == "" {
+		return
+	}
+	s.recentEvidence[key] = codexDirectRecentEvidence{
+		authID:             authID,
+		modelName:          modelName,
+		scopeKey:           scopeKey,
+		responseOutputJSON: bytes.Clone(responseOutputJSON),
+		expiresAt:          now.Add(codexDirectContinuationTTL),
+	}
+}
+
+func (s *codexDirectContinuationStore) recentEvidenceLocked(authID, modelName, scopeKey string, now time.Time) (codexDirectRecentEvidence, bool) {
+	key := codexDirectRecentEvidenceKey(authID, modelName, scopeKey)
+	if key == "" {
+		return codexDirectRecentEvidence{}, false
+	}
+	recent, ok := s.recentEvidence[key]
+	if !ok {
+		return codexDirectRecentEvidence{}, false
+	}
+	if !recent.expiresAt.IsZero() && !now.Before(recent.expiresAt) {
+		delete(s.recentEvidence, key)
+		return codexDirectRecentEvidence{}, false
+	}
+	if recent.authID != strings.TrimSpace(authID) || recent.modelName != strings.TrimSpace(modelName) || recent.scopeKey != strings.TrimSpace(scopeKey) {
+		return codexDirectRecentEvidence{}, false
+	}
+	recent.responseOutputJSON = bytes.Clone(recent.responseOutputJSON)
+	return recent, true
+}
+
+func codexDirectRecentEvidenceKey(authID, modelName, scopeKey string) string {
+	authID = strings.TrimSpace(authID)
+	modelName = strings.TrimSpace(modelName)
+	scopeKey = strings.TrimSpace(scopeKey)
+	if authID == "" || modelName == "" || scopeKey == "" {
+		return ""
+	}
+	return authID + "\x00" + modelName + "\x00" + scopeKey
 }
 
 func repairCodexDirectContinuationRequest(rawJSON []byte, binding codexDirectContinuationBinding) ([]byte, error) {
@@ -475,6 +569,38 @@ func normalizeCodexDirectResponseOutputJSON(raw []byte) []byte {
 func codexDirectOutputJSONIsEmpty(raw []byte) bool {
 	result := gjson.ParseBytes(normalizeCodexDirectResponseOutputJSON(raw))
 	return !result.IsArray() || len(result.Array()) == 0
+}
+
+func codexDirectOutputHasAssistantOrToolEvidence(raw []byte) bool {
+	result := gjson.ParseBytes(normalizeCodexDirectResponseOutputJSON(raw))
+	if !result.IsArray() {
+		return false
+	}
+	for _, item := range result.Array() {
+		itemType := strings.TrimSpace(item.Get("type").String())
+		if isResponsesToolCallType(itemType) && strings.TrimSpace(item.Get("call_id").String()) != "" {
+			return true
+		}
+		if itemType == "message" && strings.TrimSpace(item.Get("role").String()) == "assistant" {
+			return true
+		}
+	}
+	return false
+}
+
+func codexDirectContinuationScopeKey(c *gin.Context, rawJSON []byte) string {
+	if promptCacheKey := strings.TrimSpace(gjson.GetBytes(rawJSON, "prompt_cache_key").String()); promptCacheKey != "" {
+		return "prompt_cache_key:" + promptCacheKey
+	}
+	if c == nil || c.Request == nil {
+		return ""
+	}
+	for _, headerName := range []string{"Session_id", "X-Codex-Turn-Metadata"} {
+		if headerValue := strings.TrimSpace(c.Request.Header.Get(headerName)); headerValue != "" {
+			return headerName + ":" + headerValue
+		}
+	}
+	return ""
 }
 
 func isCodexDirectContinuationRequest(c *gin.Context) bool {
