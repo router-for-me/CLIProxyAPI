@@ -2,7 +2,6 @@ package openai
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -39,8 +38,8 @@ func compactResponseWithSameTurnEvidence(requestJSON, responseJSON []byte) ([]by
 	}
 
 	outputJSON, outputPath := compactResponseOutputJSON(gjson.ParseBytes(responseJSON))
-	diagnostic.compactOutputHasEvidence = compactOutputHasAssistantOrToolEvidence(outputJSON)
-	diagnostic.outputCounts = compactEvidenceOutputCounts(outputJSON)
+	outputResult := gjson.ParseBytes(normalizeCompactOutputJSON(outputJSON))
+	diagnostic.outputCounts, diagnostic.compactOutputHasEvidence = compactEvidenceCountsAndHasEvidence(outputResult)
 	if diagnostic.compactOutputHasEvidence {
 		return responseJSON, diagnostic, nil
 	}
@@ -99,72 +98,81 @@ func compactSameTurnEvidenceJSON(rawJSON []byte) (string, bool, error) {
 		return "[]", false, nil
 	}
 
-	items := make([]string, 0, len(input.Array()))
-	for _, item := range input.Array() {
+	tail := compactLatestTailWindow(input)
+	if len(tail) == 0 {
+		return "[]", false, nil
+	}
+
+	callIDs := make(map[string]struct{}, len(tail))
+	for _, item := range tail {
+		itemType := strings.TrimSpace(item.Get("type").String())
+		if !isResponsesToolCallType(itemType) {
+			continue
+		}
+		callID := strings.TrimSpace(item.Get("call_id").String())
+		if callID != "" {
+			callIDs[callID] = struct{}{}
+		}
+	}
+
+	items := make([]string, 0, len(tail))
+	for _, item := range tail {
 		itemType := strings.TrimSpace(item.Get("type").String())
 		if itemType == "message" && strings.TrimSpace(item.Get("role").String()) == "assistant" {
 			items = append(items, item.Raw)
 			continue
 		}
-		if isResponsesToolCallType(itemType) || isResponsesToolCallOutputType(itemType) {
+		if isResponsesToolCallType(itemType) {
+			if strings.TrimSpace(item.Get("call_id").String()) == "" {
+				continue
+			}
 			items = append(items, item.Raw)
+			continue
+		}
+		if isResponsesToolCallOutputType(itemType) {
+			callID := strings.TrimSpace(item.Get("call_id").String())
+			if _, ok := callIDs[callID]; ok {
+				items = append(items, item.Raw)
+			}
 		}
 	}
 	if len(items) == 0 {
 		return "[]", false, nil
 	}
 
-	evidenceJSON := "[" + strings.Join(items, ",") + "]"
-	if errValidate := validateCompactToolOutputs(evidenceJSON); errValidate != nil {
-		return "", false, errValidate
-	}
-	return evidenceJSON, true, nil
+	return "[" + strings.Join(items, ",") + "]", true, nil
 }
 
-func validateCompactToolOutputs(rawArray string) error {
-	rawArray = strings.TrimSpace(rawArray)
-	if rawArray == "" {
+func compactLatestTailWindow(input gjson.Result) []gjson.Result {
+	if !input.IsArray() {
 		return nil
 	}
-
-	var items []json.RawMessage
-	if errUnmarshal := json.Unmarshal([]byte(rawArray), &items); errUnmarshal != nil {
-		return errUnmarshal
-	}
-
-	callIDs := make(map[string]struct{}, len(items))
-	for _, item := range items {
-		itemType := strings.TrimSpace(gjson.GetBytes(item, "type").String())
-		if !isResponsesToolCallType(itemType) {
-			continue
-		}
-		callID := strings.TrimSpace(gjson.GetBytes(item, "call_id").String())
-		if callID != "" {
-			callIDs[callID] = struct{}{}
+	array := input.Array()
+	tailStart := -1
+	for i, item := range array {
+		if isCompactTailMarker(item) {
+			tailStart = i + 1
 		}
 	}
-
-	for _, item := range items {
-		itemType := strings.TrimSpace(gjson.GetBytes(item, "type").String())
-		if !isResponsesToolCallOutputType(itemType) {
-			continue
-		}
-		callID := strings.TrimSpace(gjson.GetBytes(item, "call_id").String())
-		if callID == "" {
-			return fmt.Errorf("tool output missing matching call")
-		}
-		if _, ok := callIDs[callID]; !ok {
-			return fmt.Errorf("tool output missing matching call")
-		}
+	if tailStart < 0 || tailStart >= len(array) {
+		return nil
 	}
-	return nil
+	return array[tailStart:]
+}
+
+func isCompactTailMarker(item gjson.Result) bool {
+	itemType := strings.TrimSpace(item.Get("type").String())
+	if itemType == "compaction" || itemType == "compaction_summary" {
+		return true
+	}
+	return (itemType == "" || itemType == "message") && strings.TrimSpace(item.Get("role").String()) == "user"
 }
 
 func compactResponseOutputJSON(root gjson.Result) ([]byte, string) {
 	for _, path := range []string{"output", "response.output"} {
 		output := root.Get(path)
 		if output.Exists() && output.IsArray() {
-			return bytes.Clone([]byte(output.Raw)), path
+			return []byte(output.Raw), path
 		}
 	}
 	return []byte("[]"), "output"
@@ -179,20 +187,8 @@ func compactSetResponseOutputJSON(payload []byte, outputPath string, outputJSON 
 }
 
 func compactOutputHasAssistantOrToolEvidence(raw []byte) bool {
-	result := gjson.ParseBytes(normalizeCompactOutputJSON(raw))
-	if !result.IsArray() {
-		return false
-	}
-	for _, item := range result.Array() {
-		itemType := strings.TrimSpace(item.Get("type").String())
-		if isResponsesToolCallType(itemType) && strings.TrimSpace(item.Get("call_id").String()) != "" {
-			return true
-		}
-		if itemType == "message" && strings.TrimSpace(item.Get("role").String()) == "assistant" {
-			return true
-		}
-	}
-	return false
+	_, hasEvidence := compactEvidenceCountsAndHasEvidence(gjson.ParseBytes(normalizeCompactOutputJSON(raw)))
+	return hasEvidence
 }
 
 func compactEvidenceInputCounts(rawJSON []byte) compactEvidenceCounts {
@@ -204,23 +200,37 @@ func compactEvidenceOutputCounts(rawJSON []byte) compactEvidenceCounts {
 }
 
 func compactEvidenceCountsFromArray(input gjson.Result) compactEvidenceCounts {
+	counts, _ := compactEvidenceCountsAndHasEvidence(input)
+	return counts
+}
+
+func compactEvidenceCountsAndHasEvidence(input gjson.Result) (compactEvidenceCounts, bool) {
 	if !input.IsArray() {
-		return compactEvidenceCounts{}
+		return compactEvidenceCounts{}, false
 	}
-	counts := compactEvidenceCounts{itemCount: len(input.Array())}
-	for _, item := range input.Array() {
+	array := input.Array()
+	counts := compactEvidenceCounts{itemCount: len(array)}
+	hasEvidence := false
+	for _, item := range array {
 		itemType := strings.TrimSpace(item.Get("type").String())
 		if itemType == "message" && strings.TrimSpace(item.Get("role").String()) == "assistant" {
 			counts.assistantMessageCount++
+			hasEvidence = true
 		}
 		if isResponsesToolCallType(itemType) {
 			counts.toolCallCount++
+			if strings.TrimSpace(item.Get("call_id").String()) != "" {
+				hasEvidence = true
+			}
 		}
 		if isResponsesToolCallOutputType(itemType) {
 			counts.toolCallOutputCount++
+			if strings.TrimSpace(item.Get("call_id").String()) != "" {
+				hasEvidence = true
+			}
 		}
 	}
-	return counts
+	return counts, hasEvidence
 }
 
 func normalizeCompactOutputJSON(raw []byte) []byte {
@@ -230,7 +240,7 @@ func normalizeCompactOutputJSON(raw []byte) []byte {
 	}
 	result := gjson.ParseBytes(trimmed)
 	if result.Type == gjson.JSON && result.IsArray() {
-		return bytes.Clone(trimmed)
+		return trimmed
 	}
 	return []byte("[]")
 }
