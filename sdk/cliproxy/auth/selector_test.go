@@ -700,6 +700,110 @@ func TestSessionAffinitySelector_FailoverWhenAuthUnavailable(t *testing.T) {
 	}
 }
 
+func TestSessionAffinitySelector_CodexWebsocketStrictAffinity_NoFailoverWhenBoundAuthUnavailable(t *testing.T) {
+	t.Parallel()
+
+	fallback := &RoundRobinSelector{}
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback:                     fallback,
+		TTL:                          time.Minute,
+		CodexWebsocketStrictAffinity: true,
+	})
+	defer selector.Stop()
+
+	now := time.Now()
+	auths := []*Auth{
+		{ID: "auth-a", Metadata: map[string]any{"websockets": true}},
+		{ID: "auth-b", Metadata: map[string]any{"websockets": true}},
+	}
+
+	payload := []byte(`{"metadata":{"user_id":"user_xxx_account__session_codex-ws-strict-test"}}`)
+	opts := cliproxyexecutor.Options{OriginalRequest: payload}
+	ctx := cliproxyexecutor.WithDownstreamWebsocket(context.Background())
+
+	first, err := selector.Pick(ctx, "codex", "gpt-5.4", opts, auths)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if first == nil {
+		t.Fatal("Pick() returned nil auth")
+	}
+
+	first.ModelStates = map[string]*ModelState{
+		"gpt-5.4": {
+			Unavailable:    true,
+			NextRetryAfter: now.Add(30 * time.Minute),
+			Quota: QuotaState{
+				Exceeded:      true,
+				NextRecoverAt: now.Add(30 * time.Minute),
+			},
+		},
+	}
+
+	second, err := selector.Pick(ctx, "codex", "gpt-5.4", opts, auths)
+	if err == nil {
+		t.Fatalf("Pick() after bound auth becomes unavailable = %v, want error", second)
+	}
+	if second != nil {
+		t.Fatalf("Pick() after bound auth becomes unavailable returned auth %q, want nil", second.ID)
+	}
+	var cooldownErr *modelCooldownError
+	if !errors.As(err, &cooldownErr) {
+		t.Fatalf("Pick() error = %T %v, want *modelCooldownError", err, err)
+	}
+}
+
+func TestSessionAffinitySelector_CodexWebsocketStrictAffinity_HTTPStillFailsOver(t *testing.T) {
+	t.Parallel()
+
+	fallback := &RoundRobinSelector{}
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback:                     fallback,
+		TTL:                          time.Minute,
+		CodexWebsocketStrictAffinity: true,
+	})
+	defer selector.Stop()
+
+	now := time.Now()
+	auths := []*Auth{
+		{ID: "auth-a", Metadata: map[string]any{"websockets": true}},
+		{ID: "auth-b", Metadata: map[string]any{"websockets": true}},
+	}
+
+	payload := []byte(`{"metadata":{"user_id":"user_xxx_account__session_codex-http-failover-test"}}`)
+	opts := cliproxyexecutor.Options{OriginalRequest: payload}
+
+	first, err := selector.Pick(context.Background(), "codex", "gpt-5.4", opts, auths)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if first == nil {
+		t.Fatal("Pick() returned nil auth")
+	}
+
+	first.ModelStates = map[string]*ModelState{
+		"gpt-5.4": {
+			Unavailable:    true,
+			NextRetryAfter: now.Add(30 * time.Minute),
+			Quota: QuotaState{
+				Exceeded:      true,
+				NextRecoverAt: now.Add(30 * time.Minute),
+			},
+		},
+	}
+
+	second, err := selector.Pick(context.Background(), "codex", "gpt-5.4", opts, auths)
+	if err != nil {
+		t.Fatalf("Pick() after failover error = %v", err)
+	}
+	if second == nil {
+		t.Fatal("Pick() after failover returned nil auth")
+	}
+	if second.ID == first.ID {
+		t.Fatalf("Pick() after failover returned same auth %q, expected different", first.ID)
+	}
+}
+
 func TestRoundRobinSelectorPick_MixedVirtualAndNonVirtualFallsBackToFlat(t *testing.T) {
 	t.Parallel()
 

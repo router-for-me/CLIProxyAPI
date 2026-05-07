@@ -120,6 +120,10 @@ routing:
   session-affinity: false # default: false
   # How long session-to-auth bindings are retained. Default: 1h
   session-affinity-ttl: "1h"
+  # When true, Codex downstream websocket sessions stay pinned to the currently
+  # bound auth. If that auth becomes unavailable, the request fails instead of
+  # switching to a different auth and continuing with the old previous_response_id.
+  codex-websocket-strict-affinity: false
 
 # When true, enable authentication for the WebSocket API (/v1/ws).
 ws-auth: false
