@@ -63,10 +63,11 @@ type codexDirectContinuationTracker struct {
 	scopeKey       string
 	compactRequest bool
 
-	mu                  sync.Mutex
-	authID              string
-	outputItemsByIndex  map[int64][]byte
-	outputItemsFallback [][]byte
+	mu                        sync.Mutex
+	authID                    string
+	compactEvidenceDiagnostic codexDirectCompactEvidenceDiagnostic
+	outputItemsByIndex        map[int64][]byte
+	outputItemsFallback       [][]byte
 }
 
 type codexDirectContinuationSnapshot struct {
@@ -79,6 +80,13 @@ type codexDirectEvidenceCounts struct {
 	assistantMessageCount   int
 	functionCallCount       int
 	functionCallOutputCount int
+}
+
+type codexDirectCompactEvidenceDiagnostic struct {
+	enabled                          bool
+	compactOutputHasEvidence         bool
+	sameTurnEvidenceHit              bool
+	compactResponseEvidenceAugmented bool
 }
 
 func (h *OpenAIResponsesAPIHandler) prepareCodexDirectContinuationContext(c *gin.Context, rawJSON []byte, modelName string, ctx context.Context) (context.Context, []byte, *codexDirectContinuationTracker, bool) {
@@ -126,6 +134,11 @@ func (h *OpenAIResponsesAPIHandler) prepareCodexDirectContinuationContext(c *gin
 	}
 
 	if tracker.compactRequest {
+		if _, _, errEvidence := codexDirectSameTurnEvidenceJSON(requestJSON); errEvidence != nil {
+			tracker.logDecision(requestJSON, "none", "failed", codexDirectContinuationRepairFailReason(errEvidence))
+			writeCodexDirectCompactEvidenceError(c)
+			return ctx, nil, nil, false
+		}
 		tracker.logDecision(requestJSON, "none", "none", "none")
 	}
 
@@ -182,6 +195,7 @@ func (t *codexDirectContinuationTracker) bindResponseIDs(payload []byte) {
 			snapshot.responseOutputJSON,
 			t.routeKind,
 			t.compactRequest,
+			t.getCompactEvidenceDiagnostic(),
 		)
 	}
 }
@@ -309,6 +323,63 @@ func (t *codexDirectContinuationTracker) getAuthID() string {
 	return t.authID
 }
 
+func (t *codexDirectContinuationTracker) compactResponseWithSameTurnEvidence(payload []byte) ([]byte, error) {
+	if t == nil || !t.compactRequest {
+		return payload, nil
+	}
+
+	outputJSON := codexDirectResponseOutputJSON(gjson.ParseBytes(payload))
+	compactOutputHasEvidence := codexDirectOutputHasAssistantOrToolEvidence(outputJSON)
+	evidenceJSON, sameTurnEvidenceHit, errEvidence := codexDirectSameTurnEvidenceJSON(t.requestJSON)
+	if errEvidence != nil {
+		t.setCompactEvidenceDiagnostic(codexDirectCompactEvidenceDiagnostic{
+			enabled:                  true,
+			compactOutputHasEvidence: compactOutputHasEvidence,
+		})
+		return nil, errEvidence
+	}
+
+	diagnostic := codexDirectCompactEvidenceDiagnostic{
+		enabled:                  true,
+		compactOutputHasEvidence: compactOutputHasEvidence,
+		sameTurnEvidenceHit:      sameTurnEvidenceHit,
+	}
+	if !compactOutputHasEvidence && sameTurnEvidenceHit {
+		mergedOutput, errMerge := mergeJSONArrayRaw(string(outputJSON), evidenceJSON)
+		if errMerge != nil {
+			t.setCompactEvidenceDiagnostic(diagnostic)
+			return nil, fmt.Errorf("merge compact same-turn evidence: %w", errMerge)
+		}
+		updated, errSet := codexDirectSetResponseOutputJSON(payload, []byte(mergedOutput))
+		if errSet != nil {
+			t.setCompactEvidenceDiagnostic(diagnostic)
+			return nil, fmt.Errorf("set compact response output: %w", errSet)
+		}
+		payload = updated
+		diagnostic.compactResponseEvidenceAugmented = true
+	}
+	t.setCompactEvidenceDiagnostic(diagnostic)
+	return payload, nil
+}
+
+func (t *codexDirectContinuationTracker) setCompactEvidenceDiagnostic(diagnostic codexDirectCompactEvidenceDiagnostic) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	t.compactEvidenceDiagnostic = diagnostic
+	t.mu.Unlock()
+}
+
+func (t *codexDirectContinuationTracker) getCompactEvidenceDiagnostic() codexDirectCompactEvidenceDiagnostic {
+	if t == nil {
+		return codexDirectCompactEvidenceDiagnostic{}
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.compactEvidenceDiagnostic
+}
+
 func (t *codexDirectContinuationTracker) logDecision(requestJSON []byte, bindingResult, repairResult, failReason string) {
 	if t == nil {
 		return
@@ -330,7 +401,7 @@ func (t *codexDirectContinuationTracker) logDecision(requestJSON []byte, binding
 	log.WithFields(fields).Info("codex direct http continuation diagnostic")
 }
 
-func (s *codexDirectContinuationStore) bind(responseID, authID, modelName, scopeKey string, requestJSON []byte, responseOutputJSON []byte, routeKind string, allowRecentEvidenceAugmentation bool) {
+func (s *codexDirectContinuationStore) bind(responseID, authID, modelName, scopeKey string, requestJSON []byte, responseOutputJSON []byte, routeKind string, allowRecentEvidenceAugmentation bool, diagnostic codexDirectCompactEvidenceDiagnostic) {
 	responseID = strings.TrimSpace(responseID)
 	authID = strings.TrimSpace(authID)
 	modelName = strings.TrimSpace(modelName)
@@ -344,10 +415,14 @@ func (s *codexDirectContinuationStore) bind(responseID, authID, modelName, scope
 	now := time.Now()
 	s.pruneExpiredLocked(now)
 	outputJSON := normalizeCodexDirectResponseOutputJSON(responseOutputJSON)
-	compactOutputHasEvidence := codexDirectOutputHasAssistantOrToolEvidence(outputJSON)
+	outputHasEvidence := codexDirectOutputHasAssistantOrToolEvidence(outputJSON)
+	compactOutputHasEvidence := outputHasEvidence
+	if diagnostic.enabled {
+		compactOutputHasEvidence = diagnostic.compactOutputHasEvidence
+	}
 	recentEvidenceHit := false
-	compactEvidenceAugmented := false
-	if allowRecentEvidenceAugmentation && !compactOutputHasEvidence {
+	compactEvidenceAugmented := diagnostic.compactResponseEvidenceAugmented
+	if allowRecentEvidenceAugmentation && !outputHasEvidence {
 		if recent, ok := s.recentEvidenceLocked(authID, modelName, scopeKey, now); ok {
 			outputJSON = recent.responseOutputJSON
 			recentEvidenceHit = true
@@ -374,6 +449,8 @@ func (s *codexDirectContinuationStore) bind(responseID, authID, modelName, scope
 			requestJSON,
 			outputJSON,
 			compactOutputHasEvidence,
+			diagnostic.sameTurnEvidenceHit,
+			diagnostic.compactResponseEvidenceAugmented,
 			recentEvidenceHit,
 			compactEvidenceAugmented,
 		)
@@ -398,28 +475,30 @@ func codexDirectBaseDiagnosticFields(routeKind string, compactRequest, hasPrevio
 		failReason = "none"
 	}
 	return log.Fields{
-		"route_kind":                     routeKind,
-		"compact_request":                compactRequest,
-		"has_previous_response_id":       hasPreviousResponseID,
-		"scope_present":                  scopePresent,
-		"binding_result":                 bindingResult,
-		"repair_result":                  repairResult,
-		"input_item_count":               counts.itemCount,
-		"assistant_message_count":        counts.assistantMessageCount,
-		"function_call_count":            counts.functionCallCount,
-		"function_call_output_count":     counts.functionCallOutputCount,
-		"compact_output_has_evidence":    false,
-		"recent_evidence_hit":            false,
-		"compact_evidence_augmented":     false,
-		"fail_reason":                    failReason,
-		"bound_output_item_count":        0,
-		"bound_output_assistant_count":   0,
-		"bound_output_tool_call_count":   0,
-		"bound_output_tool_output_count": 0,
+		"route_kind":                          routeKind,
+		"compact_request":                     compactRequest,
+		"has_previous_response_id":            hasPreviousResponseID,
+		"scope_present":                       scopePresent,
+		"binding_result":                      bindingResult,
+		"repair_result":                       repairResult,
+		"input_item_count":                    counts.itemCount,
+		"assistant_message_count":             counts.assistantMessageCount,
+		"function_call_count":                 counts.functionCallCount,
+		"function_call_output_count":          counts.functionCallOutputCount,
+		"compact_output_has_evidence":         false,
+		"same_turn_evidence_hit":              false,
+		"compact_response_evidence_augmented": false,
+		"recent_evidence_hit":                 false,
+		"compact_evidence_augmented":          false,
+		"fail_reason":                         failReason,
+		"bound_output_item_count":             0,
+		"bound_output_assistant_count":        0,
+		"bound_output_tool_call_count":        0,
+		"bound_output_tool_output_count":      0,
 	}
 }
 
-func codexDirectLogCompactEvidenceDiagnostic(routeKind string, scopePresent bool, requestJSON, boundOutputJSON []byte, compactOutputHasEvidence, recentEvidenceHit, compactEvidenceAugmented bool) {
+func codexDirectLogCompactEvidenceDiagnostic(routeKind string, scopePresent bool, requestJSON, boundOutputJSON []byte, compactOutputHasEvidence, sameTurnEvidenceHit, compactResponseEvidenceAugmented, recentEvidenceHit, compactEvidenceAugmented bool) {
 	fields := codexDirectBaseDiagnosticFields(
 		routeKind,
 		true,
@@ -432,6 +511,8 @@ func codexDirectLogCompactEvidenceDiagnostic(routeKind string, scopePresent bool
 	)
 	boundCounts := codexDirectOutputEvidenceCounts(boundOutputJSON)
 	fields["compact_output_has_evidence"] = compactOutputHasEvidence
+	fields["same_turn_evidence_hit"] = sameTurnEvidenceHit
+	fields["compact_response_evidence_augmented"] = compactResponseEvidenceAugmented
 	fields["recent_evidence_hit"] = recentEvidenceHit
 	fields["compact_evidence_augmented"] = compactEvidenceAugmented
 	fields["bound_output_item_count"] = boundCounts.itemCount
@@ -447,6 +528,34 @@ func codexDirectInputEvidenceCounts(rawJSON []byte) codexDirectEvidenceCounts {
 
 func codexDirectOutputEvidenceCounts(rawJSON []byte) codexDirectEvidenceCounts {
 	return codexDirectEvidenceCountsFromArray(gjson.ParseBytes(normalizeCodexDirectResponseOutputJSON(rawJSON)))
+}
+
+func codexDirectSameTurnEvidenceJSON(rawJSON []byte) (string, bool, error) {
+	input := gjson.GetBytes(rawJSON, "input")
+	if !input.IsArray() {
+		return "[]", false, nil
+	}
+
+	items := make([]string, 0, len(input.Array()))
+	for _, item := range input.Array() {
+		itemType := strings.TrimSpace(item.Get("type").String())
+		if itemType == "message" && strings.TrimSpace(item.Get("role").String()) == "assistant" {
+			items = append(items, item.Raw)
+			continue
+		}
+		if isResponsesToolCallType(itemType) || isResponsesToolCallOutputType(itemType) {
+			items = append(items, item.Raw)
+		}
+	}
+	if len(items) == 0 {
+		return "[]", false, nil
+	}
+
+	evidenceJSON := "[" + strings.Join(items, ",") + "]"
+	if errValidate := validateCodexDirectContinuationToolOutputs(evidenceJSON); errValidate != nil {
+		return "", false, fmt.Errorf("invalid compact same-turn evidence: %w", errValidate)
+	}
+	return evidenceJSON, true, nil
 }
 
 func codexDirectEvidenceCountsFromArray(input gjson.Result) codexDirectEvidenceCounts {
@@ -468,6 +577,14 @@ func codexDirectEvidenceCountsFromArray(input gjson.Result) codexDirectEvidenceC
 		}
 	}
 	return counts
+}
+
+func codexDirectSetResponseOutputJSON(payload, outputJSON []byte) ([]byte, error) {
+	root := gjson.ParseBytes(payload)
+	if root.Get("response.output").Exists() {
+		return sjson.SetRawBytes(payload, "response.output", outputJSON)
+	}
+	return sjson.SetRawBytes(payload, "output", outputJSON)
 }
 
 func codexDirectContinuationRepairFailReason(err error) string {
@@ -826,6 +943,19 @@ func writeCodexDirectContinuationRepairError(c *gin.Context) {
 			Message: "Codex continuation cannot be safely reconstructed locally; retry with a full input transcript",
 			Type:    "invalid_request_error",
 			Code:    "codex_continuation_repair_failed",
+		},
+	})
+}
+
+func writeCodexDirectCompactEvidenceError(c *gin.Context) {
+	if c == nil {
+		return
+	}
+	c.JSON(http.StatusConflict, handlers.ErrorResponse{
+		Error: handlers.ErrorDetail{
+			Message: "Codex compact evidence cannot be safely preserved; retry with a full valid input transcript",
+			Type:    "invalid_request_error",
+			Code:    "codex_compact_evidence_unsafe",
 		},
 	})
 }

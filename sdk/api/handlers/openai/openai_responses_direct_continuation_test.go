@@ -336,6 +336,127 @@ func TestCodexDirectHiddenOnlyCompactAugmentsRecentAssistantAndToolEvidence(t *t
 	assertDirectContinuationLogEntryRedacted(t, entry, promptCacheKey, beforeCompactResponseID, compactResponseID, "ready", "*** Begin Patch")
 }
 
+func TestCodexDirectHiddenOnlyCompactResponsePreservesSameTurnEvidence(t *testing.T) {
+	resetCodexDirectContinuationsForTest(t)
+	hook := logtest.NewGlobal()
+	defer hook.Reset()
+
+	model := "gpt-5.4"
+	sessionID := "compact-session-same-turn"
+	compactResponseID := "resp-hidden-same-turn"
+	hiddenOnlyCompactOutput := `[{"type":"compaction_summary","summary":[{"type":"summary_text","text":"hidden compact state"}]}]`
+	capture := &directContinuationUpstreamCapture{}
+	upstream := newDirectContinuationUpstream(t, capture, directContinuationUpstreamResponse{
+		path: directCodexUpstreamCompactPath,
+		body: []byte(`{"id":"` + compactResponseID + `","object":"response","status":"completed","output":` + hiddenOnlyCompactOutput + `}`),
+	})
+	defer upstream.Close()
+
+	h := newDirectContinuationHandler(t, nil, directContinuationAuthSpec{
+		id:       "direct-hidden-same-turn-auth",
+		models:   []string{model},
+		baseURL:  upstream.URL,
+		provider: "codex",
+		apiKey:   "test",
+	})
+
+	compactRecorder := performDirectContinuationRequestWithHeaders(t, h, directCodexCompactPath, directContinuationCompactBodyWithSameTurnEvidence(model), map[string]string{
+		"Session_id": sessionID,
+	})
+	if compactRecorder.Code != http.StatusOK {
+		t.Fatalf("compact request status = %d, want %d; body=%s", compactRecorder.Code, http.StatusOK, compactRecorder.Body.String())
+	}
+	if capture.calls.Load() != 1 {
+		t.Fatalf("upstream calls = %d, want 1", capture.calls.Load())
+	}
+	assertDirectContinuationUpstreamInputCounts(t, capture.lastBody(), map[string]int{
+		"message":                 2,
+		"function_call":           1,
+		"custom_tool_call":        1,
+		"function_call_output":    1,
+		"custom_tool_call_output": 1,
+	}, 6)
+	assertDirectContinuationOutputEvidenceCounts(t, compactRecorder.Body.Bytes(), map[string]int{
+		"compaction_summary":      1,
+		"assistant_message":       1,
+		"function_call":           1,
+		"custom_tool_call":        1,
+		"function_call_output":    1,
+		"custom_tool_call_output": 1,
+	}, 6)
+	entry := assertDirectContinuationLogEntry(t, hook, "codex direct http compact evidence diagnostic", map[string]any{
+		"route_kind":                          "compact",
+		"compact_request":                     true,
+		"has_previous_response_id":            false,
+		"scope_present":                       true,
+		"binding_result":                      "none",
+		"repair_result":                       "none",
+		"input_item_count":                    6,
+		"assistant_message_count":             1,
+		"function_call_count":                 2,
+		"function_call_output_count":          2,
+		"compact_output_has_evidence":         false,
+		"same_turn_evidence_hit":              true,
+		"compact_response_evidence_augmented": true,
+		"recent_evidence_hit":                 false,
+		"compact_evidence_augmented":          true,
+		"bound_output_item_count":             6,
+		"bound_output_assistant_count":        1,
+		"bound_output_tool_call_count":        2,
+		"bound_output_tool_output_count":      2,
+		"fail_reason":                         "none",
+	})
+	assertDirectContinuationLogEntryRedacted(t, entry, sessionID, compactResponseID, "assistant evidence", "*** Begin Patch", "ok")
+}
+
+func TestCodexDirectCompactRejectsOrphanSameTurnToolOutputBeforeUpstream(t *testing.T) {
+	resetCodexDirectContinuationsForTest(t)
+	hook := logtest.NewGlobal()
+	defer hook.Reset()
+
+	model := "gpt-5.4"
+	sessionID := "compact-session-orphan"
+	capture := &directContinuationUpstreamCapture{}
+	upstream := newDirectContinuationUpstream(t, capture, directContinuationUpstreamResponse{
+		path: directCodexUpstreamCompactPath,
+		body: []byte(`{"id":"resp-unused","object":"response","status":"completed","output":[]}`),
+	})
+	defer upstream.Close()
+
+	h := newDirectContinuationHandler(t, nil, directContinuationAuthSpec{
+		id:       "direct-compact-orphan-auth",
+		models:   []string{model},
+		baseURL:  upstream.URL,
+		provider: "codex",
+		apiKey:   "test",
+	})
+
+	compactRecorder := performDirectContinuationRequestWithHeaders(t, h, directCodexCompactPath, directContinuationCompactBodyWithOrphanToolOutput(model), map[string]string{
+		"Session_id": sessionID,
+	})
+	if compactRecorder.Code != http.StatusConflict {
+		t.Fatalf("compact request status = %d, want %d; body=%s", compactRecorder.Code, http.StatusConflict, compactRecorder.Body.String())
+	}
+	assertDirectContinuationErrorCode(t, compactRecorder.Body.Bytes(), "codex_compact_evidence_unsafe")
+	if capture.calls.Load() != 0 {
+		t.Fatalf("upstream calls = %d, want 0", capture.calls.Load())
+	}
+	entry := assertDirectContinuationLogEntry(t, hook, "codex direct http continuation diagnostic", map[string]any{
+		"route_kind":                 "compact",
+		"compact_request":            true,
+		"has_previous_response_id":   false,
+		"scope_present":              true,
+		"binding_result":             "none",
+		"repair_result":              "failed",
+		"input_item_count":           2,
+		"assistant_message_count":    0,
+		"function_call_count":        0,
+		"function_call_output_count": 1,
+		"fail_reason":                "orphan_tool_output",
+	})
+	assertDirectContinuationLogEntryRedacted(t, entry, sessionID, "orphan result")
+}
+
 func TestCodexDirectPostContinuationRepairsFromStreamOutputItemDoneWhenCompletedOutputEmpty(t *testing.T) {
 	resetCodexDirectContinuationsForTest(t)
 
@@ -468,11 +589,19 @@ func (s *directContinuationSequenceSelector) Pick(_ context.Context, _, _ string
 
 func performDirectContinuationRequest(t *testing.T, h *OpenAIResponsesAPIHandler, path string, body []byte) *httptest.ResponseRecorder {
 	t.Helper()
+	return performDirectContinuationRequestWithHeaders(t, h, path, body, nil)
+}
+
+func performDirectContinuationRequestWithHeaders(t *testing.T, h *OpenAIResponsesAPIHandler, path string, body []byte, headers map[string]string) *httptest.ResponseRecorder {
+	t.Helper()
 
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
 	c.Request = httptest.NewRequest(http.MethodPost, path, bytes.NewReader(body))
+	for name, value := range headers {
+		c.Request.Header.Set(name, value)
+	}
 	switch path {
 	case directCodexCompactPath:
 		h.Compact(c)
@@ -525,6 +654,78 @@ func directContinuationCompactBody(model string) []byte {
 				"content": []any{
 					map[string]any{"type": "input_text", "text": "compact source"},
 				},
+			},
+		},
+	})
+	if err != nil {
+		panic(err)
+	}
+	return raw
+}
+
+func directContinuationCompactBodyWithSameTurnEvidence(model string) []byte {
+	raw, err := json.Marshal(map[string]any{
+		"model": model,
+		"input": []any{
+			map[string]any{
+				"type": "message",
+				"role": "user",
+				"content": []any{
+					map[string]any{"type": "input_text", "text": "compact source"},
+				},
+			},
+			map[string]any{
+				"type": "message",
+				"role": "assistant",
+				"content": []any{
+					map[string]any{"type": "output_text", "text": "assistant evidence"},
+				},
+			},
+			map[string]any{
+				"type":      "function_call",
+				"call_id":   "call_fn",
+				"name":      "shell",
+				"arguments": "{}",
+			},
+			map[string]any{
+				"type":    "function_call_output",
+				"call_id": "call_fn",
+				"output":  "ok",
+			},
+			map[string]any{
+				"type":    "custom_tool_call",
+				"call_id": "call_custom",
+				"name":    "apply_patch",
+				"input":   "*** Begin Patch",
+			},
+			map[string]any{
+				"type":    "custom_tool_call_output",
+				"call_id": "call_custom",
+				"output":  "ok",
+			},
+		},
+	})
+	if err != nil {
+		panic(err)
+	}
+	return raw
+}
+
+func directContinuationCompactBodyWithOrphanToolOutput(model string) []byte {
+	raw, err := json.Marshal(map[string]any{
+		"model": model,
+		"input": []any{
+			map[string]any{
+				"type": "message",
+				"role": "user",
+				"content": []any{
+					map[string]any{"type": "input_text", "text": "compact source"},
+				},
+			},
+			map[string]any{
+				"type":    "function_call_output",
+				"call_id": "missing_call",
+				"output":  "orphan result",
 			},
 		},
 	})
@@ -678,6 +879,37 @@ func assertDirectContinuationUpstreamInputCounts(t *testing.T, body []byte, expe
 	for itemType, want := range expected {
 		if counts[itemType] != want {
 			t.Fatalf("upstream %s item count = %d, want %d; input=%s", itemType, counts[itemType], want, input.Raw)
+		}
+	}
+}
+
+func assertDirectContinuationOutputEvidenceCounts(t *testing.T, body []byte, expected map[string]int, expectedLen int) {
+	t.Helper()
+
+	output := gjson.GetBytes(body, "output")
+	if !output.IsArray() {
+		t.Fatalf("response output is not an array: %s", output.Raw)
+	}
+	items := output.Array()
+	if len(items) != expectedLen {
+		t.Fatalf("response output item count = %d, want %d; output=%s", len(items), expectedLen, output.Raw)
+	}
+
+	counts := map[string]int{}
+	for _, item := range items {
+		itemType := item.Get("type").String()
+		if itemType == "message" && item.Get("role").String() == "assistant" {
+			counts["assistant_message"]++
+		} else {
+			counts[itemType]++
+		}
+		if itemType == "message" && item.Get("role").String() == "user" {
+			t.Fatalf("response output must not echo user messages: %s", item.Raw)
+		}
+	}
+	for itemType, want := range expected {
+		if counts[itemType] != want {
+			t.Fatalf("response output %s item count = %d, want %d; output=%s", itemType, counts[itemType], want, output.Raw)
 		}
 	}
 }

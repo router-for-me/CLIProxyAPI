@@ -437,6 +437,14 @@ func (h *OpenAIResponsesAPIHandler) Compact(c *gin.Context) {
 		return
 	}
 	if continuation != nil {
+		var errCompactEvidence error
+		resp, errCompactEvidence = continuation.compactResponseWithSameTurnEvidence(resp)
+		if errCompactEvidence != nil {
+			continuation.logDecision(requestJSON, "none", "failed", codexDirectContinuationRepairFailReason(errCompactEvidence))
+			writeCodexDirectCompactEvidenceError(c)
+			cliCancel(errCompactEvidence)
+			return
+		}
 		continuation.bindResponseIDs(resp)
 	}
 	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
