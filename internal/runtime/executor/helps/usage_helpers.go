@@ -96,7 +96,7 @@ func (r *UsageReporter) publishWithOutcome(ctx context.Context, detail usage.Det
 	}
 	detail = normalizeUsageDetailTotal(detail)
 	r.once.Do(func() {
-		usage.PublishRecord(ctx, r.buildRecord(detail, failed))
+		usage.PublishRecordOrDefer(ctx, r.buildRecord(detail, failed))
 	})
 }
 

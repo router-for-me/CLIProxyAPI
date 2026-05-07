@@ -20,6 +20,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	"golang.org/x/net/context"
@@ -544,6 +545,7 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 	if len(payload) == 0 {
 		payload = nil
 	}
+	ctx, finishUsageFailures := coreusage.WithDeferredFailures(ctx)
 	req := coreexecutor.Request{
 		Model:   normalizedModel,
 		Payload: payload,
@@ -558,6 +560,7 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 	opts.Metadata = reqMeta
 	resp, err := h.AuthManager.Execute(ctx, providers, req, opts)
 	if err != nil {
+		finishUsageFailures(true)
 		err = enrichAuthSelectionError(err, providers, normalizedModel)
 		status := http.StatusInternalServerError
 		if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
@@ -573,6 +576,7 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 		}
 		return nil, nil, &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
 	}
+	finishUsageFailures(false)
 	if !PassthroughHeadersEnabled(h.Cfg) {
 		return resp.Payload, nil, nil
 	}
@@ -592,6 +596,7 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 	if len(payload) == 0 {
 		payload = nil
 	}
+	ctx, finishUsageFailures := coreusage.WithDeferredFailures(ctx)
 	req := coreexecutor.Request{
 		Model:   normalizedModel,
 		Payload: payload,
@@ -606,6 +611,7 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 	opts.Metadata = reqMeta
 	resp, err := h.AuthManager.ExecuteCount(ctx, providers, req, opts)
 	if err != nil {
+		finishUsageFailures(true)
 		err = enrichAuthSelectionError(err, providers, normalizedModel)
 		status := http.StatusInternalServerError
 		if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
@@ -621,6 +627,7 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 		}
 		return nil, nil, &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
 	}
+	finishUsageFailures(false)
 	if !PassthroughHeadersEnabled(h.Cfg) {
 		return resp.Payload, nil, nil
 	}
@@ -644,6 +651,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 	if len(payload) == 0 {
 		payload = nil
 	}
+	ctx, finishUsageFailures := coreusage.WithDeferredFailures(ctx)
 	req := coreexecutor.Request{
 		Model:   normalizedModel,
 		Payload: payload,
@@ -658,6 +666,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 	opts.Metadata = reqMeta
 	streamResult, err := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
 	if err != nil {
+		finishUsageFailures(true)
 		err = enrichAuthSelectionError(err, providers, normalizedModel)
 		errChan := make(chan *interfaces.ErrorMessage, 1)
 		status := http.StatusInternalServerError
@@ -690,6 +699,8 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 	dataChan := make(chan []byte)
 	errChan := make(chan *interfaces.ErrorMessage, 1)
 	go func() {
+		usageFailed := false
+		defer func() { finishUsageFailures(usageFailed) }()
 		defer close(dataChan)
 		defer close(errChan)
 		sentPayload := false
@@ -784,12 +795,14 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 							addon = hdr.Clone()
 						}
 					}
+					usageFailed = true
 					_ = sendErr(&interfaces.ErrorMessage{StatusCode: status, Error: streamErr, Addon: addon})
 					return
 				}
 				if len(chunk.Payload) > 0 {
 					if handlerType == "openai-response" {
 						if err := validateSSEDataJSON(chunk.Payload); err != nil {
+							usageFailed = true
 							_ = sendErr(&interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: err})
 							return
 						}
