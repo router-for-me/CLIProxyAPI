@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -28,6 +29,16 @@ import (
 //   - []byte: The transformed request data in OpenAI Responses API format
 func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream bool) []byte {
 	rawJSON := inputRawJSON
+
+	// DEBUG: 打印原始请求
+	log.Debugf("codex chat-completions: raw input JSON (first 2000 chars): %s", func() string {
+		s := string(rawJSON)
+		if len(s) > 2000 {
+			return s[:2000] + "..."
+		}
+		return s
+	}())
+
 	// Start with empty JSON object
 	out := []byte(`{"instructions":""}`)
 
@@ -197,6 +208,19 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 					}
 				}
 
+				// Handle reasoning_content for assistant messages (DeepSeek requires passing back in multi-turn)
+				// Convert reasoning_content string to reasoning type with summary
+				if role == "assistant" {
+					rc := m.Get("reasoning_content")
+					if rc.Exists() && rc.Type == gjson.String && rc.String() != "" {
+						reasoningPart := []byte(`{}`)
+						reasoningPart, _ = sjson.SetBytes(reasoningPart, "type", "reasoning")
+						reasoningPart, _ = sjson.SetRawBytes(reasoningPart, "summary", []byte(`[{"type":"summary_text","text":""}]`))
+						reasoningPart, _ = sjson.SetBytes(reasoningPart, "summary.0.text", rc.String())
+						msg, _ = sjson.SetRawBytes(msg, "content.-1", reasoningPart)
+					}
+				}
+
 				// Don't emit empty assistant messages when only tool_calls
 				// are present — Responses API needs function_call items
 				// directly, otherwise call_id matching fails (#2132).
@@ -356,6 +380,16 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 	}
 
 	out, _ = sjson.SetBytes(out, "store", false)
+
+	// DEBUG: 打印翻译后的请求
+	log.Debugf("codex chat-completions: translated output JSON (first 2000 chars): %s", func() string {
+		s := string(out)
+		if len(s) > 2000 {
+			return s[:2000] + "..."
+		}
+		return s
+	}())
+
 	return out
 }
 

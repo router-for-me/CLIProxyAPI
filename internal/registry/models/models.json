@@ -1873,6 +1873,41 @@
       }
     }
   ],
+  "deepseek": [
+    {
+      "id": "deepseek-v4-pro",
+      "object": "model",
+      "created": 1778150400,
+      "owned_by": "deepseek",
+      "type": "deepseek",
+      "display_name": "DeepSeek V4 Pro",
+      "description": "DeepSeek V4 Pro - Advanced reasoning model with extended thinking capabilities",
+      "context_length": 128000,
+      "max_completion_tokens": 8192,
+      "thinking": {
+        "min": 1024,
+        "max": 32000,
+        "zero_allowed": true,
+        "dynamic_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    },
+    {
+      "id": "deepseek-v4-flash",
+      "object": "model",
+      "created": 1778150400,
+      "owned_by": "deepseek",
+      "type": "deepseek",
+      "display_name": "DeepSeek V4 Flash",
+      "description": "DeepSeek V4 Flash - Fast and efficient model for general tasks",
+      "context_length": 128000,
+      "max_completion_tokens": 8192
+    }
+  ],
   "antigravity": [
     {
       "id": "claude-opus-4-6-thinking",

@@ -372,6 +372,15 @@ func (s *Server) setupRoutes() {
 		codexDirect.POST("/responses/compact", openaiResponsesHandlers.Compact)
 	}
 
+	// Codex CLI wire_api="responses" 根路径路由
+	// 当 Codex config.toml 配置 wire_api = "responses" 时，请求直接发到 /responses
+	s.engine.GET("/responses", AuthMiddleware(s.accessManager), openaiResponsesHandlers.ResponsesWebsocket)
+	s.engine.POST("/responses", AuthMiddleware(s.accessManager), openaiResponsesHandlers.Responses)
+	s.engine.POST("/responses/compact", AuthMiddleware(s.accessManager), openaiResponsesHandlers.Compact)
+
+	// Codex CLI 兼容路由：/models（不带 /v1 前缀）
+	s.engine.GET("/models", AuthMiddleware(s.accessManager), s.unifiedModelsHandler(openaiHandlers, claudeCodeHandlers))
+
 	// Gemini compatible API routes
 	v1beta := s.engine.Group("/v1beta")
 	v1beta.Use(AuthMiddleware(s.accessManager))

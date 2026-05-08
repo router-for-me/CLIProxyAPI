@@ -90,6 +90,7 @@ func ApplyThinking(body []byte, model string, fromFormat string, toFormat string
 	if providerKey == "" {
 		providerKey = providerFormat
 	}
+
 	fromFormat = strings.ToLower(strings.TrimSpace(fromFormat))
 	if fromFormat == "" {
 		fromFormat = providerFormat

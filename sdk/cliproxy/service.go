@@ -983,8 +983,13 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 							modelID = m.Name
 						}
 						thinking := m.Thinking
+
+						// DEBUG: 打印 config 中的 thinking 值
+						log.Debugf("registerModelsForAuth: model=%s, config thinking=%v, type=%T", modelID, thinking, thinking)
+
 						if thinking == nil {
 							thinking = &registry.ThinkingSupport{Levels: []string{"low", "medium", "high"}}
+							log.Debugf("registerModelsForAuth: model=%s, using default thinking", modelID)
 						}
 						ms = append(ms, &ModelInfo{
 							ID:          modelID,
