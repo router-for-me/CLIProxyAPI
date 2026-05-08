@@ -32,11 +32,31 @@ func setRefreshLeadFactory(t *testing.T, provider string, factory func() *time.D
 	})
 }
 
-func TestNextRefreshCheckAt_DisabledUnschedule(t *testing.T) {
+func TestNextRefreshCheckAt_DisabledOAuthSchedules(t *testing.T) {
 	now := time.Date(2026, 4, 12, 0, 0, 0, 0, time.UTC)
-	auth := &Auth{ID: "a1", Provider: "test", Disabled: true}
-	if _, ok := nextRefreshCheckAt(now, auth, 15*time.Minute); ok {
-		t.Fatalf("nextRefreshCheckAt() ok = true, want false")
+	expiry := now.Add(time.Hour)
+	lead := 10 * time.Minute
+	setRefreshLeadFactory(t, "disabled-oauth", func() *time.Duration {
+		d := lead
+		return &d
+	})
+
+	auth := &Auth{
+		ID:       "a1",
+		Provider: "disabled-oauth",
+		Disabled: true,
+		Metadata: map[string]any{
+			"email":      "x@example.com",
+			"expires_at": expiry.Format(time.RFC3339),
+		},
+	}
+	got, ok := nextRefreshCheckAt(now, auth, 15*time.Minute)
+	if !ok {
+		t.Fatalf("nextRefreshCheckAt() ok = false, want true")
+	}
+	want := expiry.Add(-lead)
+	if !got.Equal(want) {
+		t.Fatalf("nextRefreshCheckAt() = %s, want %s", got, want)
 	}
 }
 
@@ -114,6 +134,28 @@ func TestNextRefreshCheckAt_ProviderLead_Expiry(t *testing.T) {
 	want := expiry.Add(-lead)
 	if !got.Equal(want) {
 		t.Fatalf("nextRefreshCheckAt() = %s, want %s", got, want)
+	}
+}
+
+func TestShouldRefresh_DisabledOAuthStillRefreshes(t *testing.T) {
+	now := time.Now().UTC()
+	lead := 10 * time.Minute
+	setRefreshLeadFactory(t, "disabled-refresh", func() *time.Duration {
+		d := lead
+		return &d
+	})
+
+	auth := &Auth{
+		ID:       "a1",
+		Provider: "disabled-refresh",
+		Disabled: true,
+		Metadata: map[string]any{
+			"email":      "x@example.com",
+			"expires_at": now.Add(5 * time.Minute).Format(time.RFC3339),
+		},
+	}
+	if !((&Manager{}).shouldRefresh(auth, now)) {
+		t.Fatalf("shouldRefresh() = false, want true")
 	}
 }
 
