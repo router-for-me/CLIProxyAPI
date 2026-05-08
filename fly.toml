@@ -1,0 +1,23 @@
+# fly.toml app configuration file generated for cliproxyapi-2mdseg on 2026-05-08T02:05:42Z
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'cliproxyapi-2mdseg'
+primary_region = 'sin'
+
+[build]
+
+[http_service]
+  internal_port = 8079
+  force_https = true
+  auto_stop_machines = 'stop'
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ['app']
+
+[[vm]]
+  memory = '1gb'
+  cpu_kind = 'shared'
+  cpus = 1
+  memory_mb = 256
