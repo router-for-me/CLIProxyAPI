@@ -48,6 +48,50 @@ func TestParseOpenAIUsageResponses(t *testing.T) {
 	}
 }
 
+func TestParseOpenAIStreamUsageIgnoresNullUsage(t *testing.T) {
+	line := []byte(`data: {"id":"chatcmpl_1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}],"usage":null}`)
+	if detail, ok := ParseOpenAIStreamUsage(line); ok {
+		t.Fatalf("ParseOpenAIStreamUsage() = (%+v, true), want false for null usage", detail)
+	}
+}
+
+func TestParseOpenAIStreamUsageIgnoresUsageWithoutTokenFields(t *testing.T) {
+	lines := map[string][]byte{
+		"empty object":  []byte(`data: {"id":"chatcmpl_1","object":"chat.completion.chunk","choices":[],"usage":{}}`),
+		"metadata only": []byte(`data: {"id":"chatcmpl_1","object":"chat.completion.chunk","choices":[],"usage":{"status":"pending"}}`),
+	}
+	for name, line := range lines {
+		t.Run(name, func(t *testing.T) {
+			if detail, ok := ParseOpenAIStreamUsage(line); ok {
+				t.Fatalf("ParseOpenAIStreamUsage() = (%+v, true), want false for usage without token fields", detail)
+			}
+		})
+	}
+}
+
+func TestParseOpenAIStreamUsageResponsesFields(t *testing.T) {
+	line := []byte(`data: {"id":"chatcmpl_1","object":"chat.completion.chunk","choices":[],"usage":{"input_tokens":10,"output_tokens":20,"total_tokens":30,"input_tokens_details":{"cached_tokens":7},"output_tokens_details":{"reasoning_tokens":9}}}`)
+	detail, ok := ParseOpenAIStreamUsage(line)
+	if !ok {
+		t.Fatal("ParseOpenAIStreamUsage() ok = false, want true")
+	}
+	if detail.InputTokens != 10 {
+		t.Fatalf("input tokens = %d, want %d", detail.InputTokens, 10)
+	}
+	if detail.OutputTokens != 20 {
+		t.Fatalf("output tokens = %d, want %d", detail.OutputTokens, 20)
+	}
+	if detail.TotalTokens != 30 {
+		t.Fatalf("total tokens = %d, want %d", detail.TotalTokens, 30)
+	}
+	if detail.CachedTokens != 7 {
+		t.Fatalf("cached tokens = %d, want %d", detail.CachedTokens, 7)
+	}
+	if detail.ReasoningTokens != 9 {
+		t.Fatalf("reasoning tokens = %d, want %d", detail.ReasoningTokens, 9)
+	}
+}
+
 func TestParseGeminiCLIUsage_TopLevelUsageMetadata(t *testing.T) {
 	data := []byte(`{"usageMetadata":{"promptTokenCount":11,"candidatesTokenCount":7,"thoughtsTokenCount":3,"totalTokenCount":21,"cachedContentTokenCount":5}}`)
 	detail := ParseGeminiCLIUsage(data)

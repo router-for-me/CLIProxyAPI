@@ -2,13 +2,16 @@ package executor
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/redisqueue"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
@@ -178,4 +181,98 @@ func TestOpenAICompatExecutorStreamSkipsKeepAliveUntilDataLine(t *testing.T) {
 	if gjson.Get(got.String(), "choices.0.delta.content").String() != "hello" {
 		t.Fatalf("stream payload = %s", got.String())
 	}
+}
+
+func TestOpenAICompatExecutorStreamPublishesFinalUsageAfterNullUsageChunks(t *testing.T) {
+	withOpenAICompatUsageQueue(t, func() {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte(`data: {"id":"chatcmpl_1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"hello"},"finish_reason":null}],"usage":null}` + "\n"))
+			_, _ = w.Write([]byte(`data: {"id":"chatcmpl_1","object":"chat.completion.chunk","choices":[],"usage":{"prompt_tokens":11,"completion_tokens":7,"total_tokens":18}}` + "\n"))
+			_, _ = w.Write([]byte("data: [DONE]\n"))
+		}))
+		defer server.Close()
+
+		executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{})
+		auth := &cliproxyauth.Auth{Attributes: map[string]string{
+			"base_url": server.URL + "/v1",
+			"api_key":  "test",
+		}}
+		result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+			Model:   "deepseek-chat",
+			Payload: []byte(`{"model":"deepseek-chat","messages":[{"role":"user","content":"hi"}],"stream":true}`),
+		}, cliproxyexecutor.Options{
+			SourceFormat: sdktranslator.FromString("openai"),
+			Stream:       true,
+		})
+		if err != nil {
+			t.Fatalf("ExecuteStream error: %v", err)
+		}
+
+		for chunk := range result.Chunks {
+			if chunk.Err != nil {
+				t.Fatalf("unexpected stream error: %v", chunk.Err)
+			}
+		}
+
+		payload := waitForOpenAICompatUsagePayload(t)
+		if payload.Model != "deepseek-chat" {
+			t.Fatalf("queued model = %q, want %q", payload.Model, "deepseek-chat")
+		}
+		if payload.Tokens.InputTokens != 11 || payload.Tokens.OutputTokens != 7 || payload.Tokens.TotalTokens != 18 {
+			t.Fatalf("queued tokens = %+v, want input=11 output=7 total=18", payload.Tokens)
+		}
+	})
+}
+
+type openAICompatQueuedUsagePayload struct {
+	Model  string `json:"model"`
+	Tokens struct {
+		InputTokens  int64 `json:"input_tokens"`
+		OutputTokens int64 `json:"output_tokens"`
+		TotalTokens  int64 `json:"total_tokens"`
+	} `json:"tokens"`
+}
+
+func withOpenAICompatUsageQueue(t *testing.T, fn func()) {
+	t.Helper()
+
+	prevQueueEnabled := redisqueue.Enabled()
+	prevUsageEnabled := redisqueue.UsageStatisticsEnabled()
+
+	redisqueue.SetEnabled(false)
+	redisqueue.SetEnabled(true)
+	redisqueue.SetUsageStatisticsEnabled(true)
+
+	defer func() {
+		redisqueue.SetEnabled(false)
+		redisqueue.SetEnabled(prevQueueEnabled)
+		redisqueue.SetUsageStatisticsEnabled(prevUsageEnabled)
+	}()
+
+	fn()
+}
+
+func waitForOpenAICompatUsagePayload(t *testing.T) openAICompatQueuedUsagePayload {
+	t.Helper()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		items := redisqueue.PopOldest(10)
+		if len(items) == 0 {
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+		if len(items) != 1 {
+			t.Fatalf("queued usage item count = %d, want 1", len(items))
+		}
+		var payload openAICompatQueuedUsagePayload
+		if err := json.Unmarshal(items[0], &payload); err != nil {
+			t.Fatalf("unmarshal queued usage payload: %v", err)
+		}
+		return payload
+	}
+
+	t.Fatalf("timed out waiting for queued usage payload")
+	return openAICompatQueuedUsagePayload{}
 }
